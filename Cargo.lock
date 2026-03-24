@@ -3,7 +3,7 @@
 version = 4
 
 [[package]]
-name = "My"
+name = "Pulse"
 version = "0.1.0"
 dependencies = [
  "axconfig",
@@ -13,8 +13,8 @@ dependencies = [
  "axplat-loongarch64-qemu-virt",
  "axplat-riscv64-qemu-virt",
  "axruntime",
- "mycore",
- "mysyscalls",
+ "pulse_core",
+ "pulse_syscalls",
  "syscalls",
 ]
 
@@ -983,43 +983,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "mycore"
-version = "0.1.0"
-dependencies = [
- "axalloc",
- "axconfig",
- "axerrno 0.2.2",
- "axfs",
- "axhal",
- "axlog",
- "axmm",
- "axtask",
- "kernel-elf-parser",
- "linkme",
- "log",
- "memory_addr",
- "spin 0.9.8",
- "xmas-elf",
-]
-
-[[package]]
-name = "mysyscalls"
-version = "0.1.0"
-dependencies = [
- "axerrno 0.2.2",
- "axfs",
- "axhal",
- "axio",
- "axlog",
- "axtask",
- "linkme",
- "memory_addr",
- "mycore",
- "spin 0.9.8",
- "syscalls",
-]
-
-[[package]]
 name = "ns16550a"
 version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1110,6 +1073,43 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8fd00f0bb2e90d81d1044c2b32617f68fcb9fa3bb7640c23e9c748e53fb30934"
 dependencies = [
  "unicode-ident",
+]
+
+[[package]]
+name = "pulse_core"
+version = "0.1.0"
+dependencies = [
+ "axalloc",
+ "axconfig",
+ "axerrno 0.2.2",
+ "axfs",
+ "axhal",
+ "axlog",
+ "axmm",
+ "axtask",
+ "kernel-elf-parser",
+ "linkme",
+ "log",
+ "memory_addr",
+ "spin 0.9.8",
+ "xmas-elf",
+]
+
+[[package]]
+name = "pulse_syscalls"
+version = "0.1.0"
+dependencies = [
+ "axerrno 0.2.2",
+ "axfs",
+ "axhal",
+ "axio",
+ "axlog",
+ "axtask",
+ "linkme",
+ "memory_addr",
+ "pulse_core",
+ "spin 0.9.8",
+ "syscalls",
 ]
 
 [[package]]

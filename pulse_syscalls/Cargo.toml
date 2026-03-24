@@ -1,5 +1,5 @@
 [package]
-name = "mysyscalls"
+name = "pulse_syscalls"
 version.workspace = true
 edition.workspace = true
 authors.workspace = true
@@ -19,4 +19,4 @@ memory_addr = { version = "0.4" }
 spin = "0.9"
 
 syscalls.workspace = true
-mycore = { path = "../mycore" }
+pulse_core = { path = "../pulse_core" }

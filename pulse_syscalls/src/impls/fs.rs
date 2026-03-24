@@ -1,9 +1,12 @@
 use crate::LinuxError;
 use alloc::string::String;
 use alloc::sync::Arc;
+use alloc::vec;
 use axfs::api::{File, OpenOptions};
+use axhal::paging::MappingFlags;
 use axio::{Read, Write};
-use mycore::fs::FileDesc;
+use memory_addr::va;
+use pulse_core::fs::FileDesc;
 use spin::Mutex;
 
 const O_RDONLY: usize = 0o0;
@@ -39,18 +42,37 @@ fn read_user_string(addr: usize) -> Option<String> {
     Some(s)
 }
 
+fn validate_user_writable_buffer(proc: &Arc<pulse_core::task::Process>, buf: usize, count: usize) -> Result<(), LinuxError> {
+    if buf == 0 {
+        return Err(LinuxError::EFAULT);
+    }
+    let aspace = proc.aspace.lock();
+    let ok = aspace.can_access_range(
+        va!(buf),
+        count,
+        MappingFlags::USER | MappingFlags::WRITE,
+    );
+    if ok {
+        Ok(())
+    } else {
+        Err(LinuxError::EFAULT)
+    }
+}
+
+fn copy_to_user(proc: &Arc<pulse_core::task::Process>, dst: usize, src: &[u8]) -> Result<(), LinuxError> {
+    if src.is_empty() {
+        return Ok(());
+    }
+    let aspace = proc.aspace.lock();
+    aspace
+        .write(va!(dst), src)
+        .map_err(LinuxError::from)
+}
+
 pub fn sys_read(fd: usize, buf: usize, count: usize) -> isize {
     axlog::debug!("sys_read: fd={}, buf={:#x}, count={}", fd, buf, count);
 
-    if count == 0 {
-        return 0;
-    }
-
-    if buf == 0 {
-        return -LinuxError::EFAULT.code() as isize;
-    }
-
-    let proc = match mycore::task::current_process() {
+    let proc = match pulse_core::task::current_process() {
         Some(p) => p,
         None => {
             axlog::error!("sys_read: no current process");
@@ -83,9 +105,16 @@ pub fn sys_read(fd: usize, buf: usize, count: usize) -> isize {
         }
     };
 
+    if count == 0 {
+        return 0;
+    }
+
+    if let Err(e) = validate_user_writable_buffer(&proc, buf, count) {
+        return -e.code() as isize;
+    }
+
     match read_target {
         ReadTarget::Stdin => {
-            let slice = unsafe { core::slice::from_raw_parts_mut(buf as *mut u8, count) };
             let mut i = 0;
             while i < count {
                 let mut c = [0u8; 1];
@@ -97,26 +126,37 @@ pub fn sys_read(fd: usize, buf: usize, count: usize) -> isize {
                     axtask::yield_now();
                     continue;
                 }
-                slice[i] = c[0];
-                i += 1;
-                if c[0] == b'\n' || c[0] == b'\r' {
-                    break;
+
+                if let Err(e) = copy_to_user(&proc, buf + i, &c[..1]) {
+                    return if i > 0 { i as isize } else { -e.code() as isize };
                 }
+
+                i += 1;
             }
             i as isize
         }
         ReadTarget::File(file) => {
-            let slice = unsafe { core::slice::from_raw_parts_mut(buf as *mut u8, count) };
             let mut file = file.lock();
 
-            match file.read(slice) {
+            if let Ok(meta) = file.metadata() {
+                if meta.is_dir() {
+                    return -LinuxError::EISDIR.code() as isize;
+                }
+            }
+
+            let mut kbuf = vec![0u8; count];
+
+            match file.read(&mut kbuf) {
                 Ok(n) => {
+                    if let Err(e) = copy_to_user(&proc, buf, &kbuf[..n]) {
+                        return if n > 0 { n as isize } else { -e.code() as isize };
+                    }
                     axlog::debug!("sys_read: read {} bytes from fd {}", n, fd);
                     n as isize
                 }
                 Err(e) => {
                     axlog::error!("sys_read: failed to read from fd {}: {:?}", fd, e);
-                    -LinuxError::EIO.code() as isize
+                    -LinuxError::from(e).code() as isize
                 }
             }
         }
@@ -134,7 +174,7 @@ pub fn sys_write(fd: usize, buf: usize, count: usize) -> isize {
         return -LinuxError::EFAULT.code() as isize;
     }
 
-    let proc = match mycore::task::current_process() {
+    let proc = match pulse_core::task::current_process() {
         Some(p) => p,
         None => return -LinuxError::ESRCH.code() as isize,
     };
@@ -238,7 +278,7 @@ pub fn sys_openat(dirfd: i32, pathname: usize, flags: usize, mode: usize) -> isi
         }
     };
 
-    let proc = match mycore::task::current_process() {
+    let proc = match pulse_core::task::current_process() {
         Some(p) => p,
         None => {
             axlog::error!("sys_openat: no current process");
@@ -262,7 +302,7 @@ pub fn sys_openat(dirfd: i32, pathname: usize, flags: usize, mode: usize) -> isi
 pub fn sys_close(fd: usize) -> isize {
     axlog::debug!("sys_close: fd={}", fd);
 
-    let proc = match mycore::task::current_process() {
+    let proc = match pulse_core::task::current_process() {
         Some(p) => p,
         None => return -LinuxError::ESRCH.code() as isize,
     };
@@ -284,7 +324,7 @@ pub fn sys_fstat(fd: usize, statbuf: usize) -> isize {
         return -LinuxError::EFAULT.code() as isize;
     }
 
-    let proc = match mycore::task::current_process() {
+    let proc = match pulse_core::task::current_process() {
         Some(p) => p,
         None => return -LinuxError::ESRCH.code() as isize,
     };

@@ -1,7 +1,7 @@
 [workspace]
 
 exclude = ["arceos"]
-members = ["mycore", "mysyscalls"]
+members = ["pulse_core", "pulse_syscalls"]
 
 [workspace.package]
 version = "0.1.0"
@@ -34,7 +34,7 @@ axplat-loongarch64-qemu-virt = "0.3.0"
 syscalls = { git = "https://github.com/muou000/syscalls.git", rev = "efac241", default-features = false }
 
 [package]
-name = "My"
+name = "Pulse"
 version.workspace = true
 edition.workspace = true
 authors.workspace = true
@@ -53,8 +53,8 @@ axconfig.workspace = true
 axruntime.workspace = true
 axfeat.workspace = true
 syscalls.workspace = true
-mysyscalls = { path = "mysyscalls" }
-mycore = { path = "mycore", features = ["alloc", "fs"] }
+pulse_syscalls = { path = "pulse_syscalls" }
+pulse_core = { path = "pulse_core", features = ["alloc", "fs"] }
 
 [target.'cfg(target_arch = "riscv64")'.dependencies]
 axplat-riscv64-qemu-virt.workspace = true

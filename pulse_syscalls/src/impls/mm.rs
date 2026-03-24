@@ -11,7 +11,7 @@ const PAGE_SIZE: usize = 0x1000;
 pub fn sys_brk(addr: usize) -> isize {
     axlog::debug!("sys_brk: addr={:#x}", addr);
 
-    let proc = match mycore::task::current_process() {
+    let proc = match pulse_core::task::current_process() {
         Some(p) => p,
         None => return -LinuxError::ESRCH.code() as isize,
     };
@@ -22,8 +22,8 @@ pub fn sys_brk(addr: usize) -> isize {
         return *heap_top as isize;
     }
 
-    if addr < mycore::config::USER_HEAP_BASE
-        || addr > mycore::config::USER_HEAP_BASE + mycore::config::USER_HEAP_SIZE_MAX
+    if addr < pulse_core::config::USER_HEAP_BASE
+        || addr > pulse_core::config::USER_HEAP_BASE + pulse_core::config::USER_HEAP_SIZE_MAX
     {
         axlog::warn!("sys_brk: invalid addr {:#x}", addr);
         return *heap_top as isize;
@@ -82,7 +82,7 @@ pub fn sys_mmap(
         offset
     );
 
-    let proc = match mycore::task::current_process() {
+    let proc = match pulse_core::task::current_process() {
         Some(p) => p,
         None => return -LinuxError::ESRCH.code() as isize,
     };
@@ -148,7 +148,7 @@ pub fn sys_mmap(
 pub fn sys_munmap(addr: usize, length: usize) -> isize {
     axlog::debug!("sys_munmap: addr={:#x}, length={:#x}", addr, length);
 
-    let proc = match mycore::task::current_process() {
+    let proc = match pulse_core::task::current_process() {
         Some(p) => p,
         None => return -LinuxError::ESRCH.code() as isize,
     };

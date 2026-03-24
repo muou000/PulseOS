@@ -5,30 +5,28 @@
 extern crate axlog;
 extern crate alloc;
 extern crate axruntime;
-extern crate mycore;
-extern crate mysyscalls;
+extern crate pulse_core;
+extern crate pulse_syscalls;
 
 #[unsafe(no_mangle)]
 fn main() {
-    info!("========================================");
-    info!("    Welcome to MyOS!");
-    info!("========================================");
 
-    // 创建第一个用户进程（示例）
+    // 创建第一个用户进程
     use alloc::sync::Arc;
-    match mycore::task::Process::new_user() {
+    match pulse_core::task::Process::new_user() {
         Ok(proc) => {
             info!("Created initial user process");
 
             // 设置为当前进程
             let proc = Arc::new(proc);
-            mycore::task::set_current_process(proc.clone());
+            pulse_core::task::set_current_process(proc.clone());
 
             // 激活其地址空间
             proc.activate();
             info!("User process address space activated");
 
             // 加载 /bin/busybox sh 启动 shell
+            // TODO：检查软链接支持情况并修改为加载/bin/sh
             match proc.load_elf("/bin/busybox", &["sh"]) {
                 Ok(_) => {
                     info!("Successfully loaded /bin/busybox");

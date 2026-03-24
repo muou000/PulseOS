@@ -1,5 +1,5 @@
 [package]
-name = "mycore"
+name = "pulse_core"
 version.workspace = true
 edition.workspace = true
 authors.workspace = true
