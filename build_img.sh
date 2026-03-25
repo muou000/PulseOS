@@ -43,14 +43,13 @@ parse_yaml() {
     fi
 
     # Parse YAML using python (most reliable)
-    local json_data=$(python3 <<EOF 2>/dev/null
+    local json_data=$(echo "${yaml_content}" | python3 -c "
 import sys, yaml, json
-data = yaml.safe_load('''${yaml_content}''')
+data = yaml.safe_load(sys.stdin)
 minirootfs = [x for x in data if x.get('flavor') == 'alpine-minirootfs']
 if minirootfs:
-    print(json.dumps(minirootfs[0]))
-EOF
-)
+    print(json.dumps(minirootfs[0], default=str))
+" 2>/dev/null)
 
     if [[ -z "${json_data}" ]]; then
         echo "Error: Failed to parse YAML data. Install: sudo apt install python3-yaml"
