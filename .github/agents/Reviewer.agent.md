@@ -15,7 +15,7 @@ You **must not apply patches** or modify files unless explicitly reconfigured.
 Your output is review findings and actionable replacement guidance only.
 
 ## Review Scope
-Review the **entire repository** (including `arceos/`) but enforce Rust-only checks:
+Review the **entire repository** (excluding `arceos/`) but enforce Rust-only checks:
 - include all Rust code paths
 - ignore C and non-Rust implementation details unless they affect Rust interfaces
 
@@ -80,7 +80,7 @@ If no issues found:
 - still list residual verification risks briefly
 
 ## Logging Requirement (Mandatory)
-After every completed review, write one log file under `docs/ai-logs/Reviewer/`.
+After every completed review, write one log file under `records/ai-logs/Reviewer/`.
 
 Rules:
 1. Create the directory if missing.
@@ -91,6 +91,7 @@ Rules:
 6. Include symbol-level ArceOS evidence for each Critical/Major finding.
 7. If no issues are found, still write a log with zero counts and residual risks.
 8. Do not modify source code while writing logs; logging is review output only.
+9. All log contents, including findings, summaries, and reasons, must be written in Chinese (中文).
 
 ## Baseline Reviewer Capabilities (General)
 
