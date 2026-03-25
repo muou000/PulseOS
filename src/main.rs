@@ -10,7 +10,6 @@ extern crate pulse_syscalls;
 
 #[unsafe(no_mangle)]
 fn main() {
-
     // 创建第一个用户进程
     use alloc::sync::Arc;
     match pulse_core::task::Process::new_user() {

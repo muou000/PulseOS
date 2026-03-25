@@ -42,31 +42,29 @@ fn read_user_string(addr: usize) -> Option<String> {
     Some(s)
 }
 
-fn validate_user_writable_buffer(proc: &Arc<pulse_core::task::Process>, buf: usize, count: usize) -> Result<(), LinuxError> {
+fn validate_user_writable_buffer(
+    proc: &Arc<pulse_core::task::Process>,
+    buf: usize,
+    count: usize,
+) -> Result<(), LinuxError> {
     if buf == 0 {
         return Err(LinuxError::EFAULT);
     }
     let aspace = proc.aspace.lock();
-    let ok = aspace.can_access_range(
-        va!(buf),
-        count,
-        MappingFlags::USER | MappingFlags::WRITE,
-    );
-    if ok {
-        Ok(())
-    } else {
-        Err(LinuxError::EFAULT)
-    }
+    let ok = aspace.can_access_range(va!(buf), count, MappingFlags::USER | MappingFlags::WRITE);
+    if ok { Ok(()) } else { Err(LinuxError::EFAULT) }
 }
 
-fn copy_to_user(proc: &Arc<pulse_core::task::Process>, dst: usize, src: &[u8]) -> Result<(), LinuxError> {
+fn copy_to_user(
+    proc: &Arc<pulse_core::task::Process>,
+    dst: usize,
+    src: &[u8],
+) -> Result<(), LinuxError> {
     if src.is_empty() {
         return Ok(());
     }
     let aspace = proc.aspace.lock();
-    aspace
-        .write(va!(dst), src)
-        .map_err(LinuxError::from)
+    aspace.write(va!(dst), src).map_err(LinuxError::from)
 }
 
 pub fn sys_read(fd: usize, buf: usize, count: usize) -> isize {
@@ -128,7 +126,11 @@ pub fn sys_read(fd: usize, buf: usize, count: usize) -> isize {
                 }
 
                 if let Err(e) = copy_to_user(&proc, buf + i, &c[..1]) {
-                    return if i > 0 { i as isize } else { -e.code() as isize };
+                    return if i > 0 {
+                        i as isize
+                    } else {
+                        -e.code() as isize
+                    };
                 }
 
                 i += 1;
@@ -149,7 +151,11 @@ pub fn sys_read(fd: usize, buf: usize, count: usize) -> isize {
             match file.read(&mut kbuf) {
                 Ok(n) => {
                     if let Err(e) = copy_to_user(&proc, buf, &kbuf[..n]) {
-                        return if n > 0 { n as isize } else { -e.code() as isize };
+                        return if n > 0 {
+                            n as isize
+                        } else {
+                            -e.code() as isize
+                        };
                     }
                     axlog::debug!("sys_read: read {} bytes from fd {}", n, fd);
                     n as isize
