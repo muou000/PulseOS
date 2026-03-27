@@ -29,3 +29,5 @@ memory_addr = { version = "0.4" }
 
 log = "=0.4.21"
 spin = "0.9"
+arceos_posix_api = { path = "../arceos/api/arceos_posix_api" }
+axns = { path = "../arceos/modules/axns" }

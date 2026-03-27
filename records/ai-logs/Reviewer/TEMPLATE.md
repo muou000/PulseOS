@@ -1,6 +1,6 @@
 ---
 reviewer: Reviewer
-timestamp: YYYY-MM-DD HH:MM UTC+8
+timestamp: YYYY-MM-DD
 branch: <branch-name>
 commit_range: <start-commit>..<end-commit>
 pr_or_task: <PR# or task id>

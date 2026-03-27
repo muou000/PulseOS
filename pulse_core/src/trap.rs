@@ -20,15 +20,9 @@ fn handle_page_fault(vaddr: VirtAddr, access_flags: MappingFlags, is_user: bool)
         return false;
     }
 
-    // 获取当前进程
-    let proc = match crate::task::current_process() {
-        Some(p) => p,
-        None => {
-            axlog::error!("Page fault in user space but no current process!");
-            axlog::error!("  vaddr={:#x}", vaddr);
-            return false;
-        }
-    };
+    use axtask::TaskExtRef;
+    let binding = axtask::current();
+    let proc: &crate::task::Process = binding.task_ext();
 
     // 委托给进程的地址空间处理
     // 注意：axmm 的 handle_page_fault 使用 PageFaultFlags，需要转换

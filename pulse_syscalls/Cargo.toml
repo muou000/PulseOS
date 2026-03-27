@@ -20,3 +20,5 @@ spin = "0.9"
 
 syscalls.workspace = true
 pulse_core = { path = "../pulse_core" }
+arceos_posix_api = { path = "../arceos/api/arceos_posix_api", features = ["fd", "fs"] }
+axns = { path = "../arceos/modules/axns" }

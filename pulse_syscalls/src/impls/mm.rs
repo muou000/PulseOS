@@ -11,10 +11,9 @@ const PAGE_SIZE: usize = 0x1000;
 pub fn sys_brk(addr: usize) -> isize {
     axlog::debug!("sys_brk: addr={:#x}", addr);
 
-    let proc = match pulse_core::task::current_process() {
-        Some(p) => p,
-        None => return -LinuxError::ESRCH.code() as isize,
-    };
+    use axtask::TaskExtRef;
+    let binding = axtask::current();
+    let proc: &pulse_core::task::Process = binding.task_ext();
 
     let mut heap_top = proc.heap_top.lock();
 
@@ -82,10 +81,9 @@ pub fn sys_mmap(
         offset
     );
 
-    let proc = match pulse_core::task::current_process() {
-        Some(p) => p,
-        None => return -LinuxError::ESRCH.code() as isize,
-    };
+    use axtask::TaskExtRef;
+    let binding = axtask::current();
+    let proc: &pulse_core::task::Process = binding.task_ext();
 
     if length == 0 {
         return -LinuxError::EINVAL.code() as isize;
@@ -148,10 +146,9 @@ pub fn sys_mmap(
 pub fn sys_munmap(addr: usize, length: usize) -> isize {
     axlog::debug!("sys_munmap: addr={:#x}, length={:#x}", addr, length);
 
-    let proc = match pulse_core::task::current_process() {
-        Some(p) => p,
-        None => return -LinuxError::ESRCH.code() as isize,
-    };
+    use axtask::TaskExtRef;
+    let binding = axtask::current();
+    let proc: &pulse_core::task::Process = binding.task_ext();
 
     if length == 0 {
         return -LinuxError::EINVAL.code() as isize;
