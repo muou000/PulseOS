@@ -1,11 +1,11 @@
+use crate::config::*;
 use alloc::sync::Arc;
-use spin::Mutex;
-use axtask::{def_task_ext, TaskExtRef, TaskInner};
-use axmm::AddrSpace;
 use axerrno::AxResult;
 use axhal::paging::MappingFlags;
+use axmm::AddrSpace;
+use axtask::{TaskExtRef, TaskInner, def_task_ext};
 use memory_addr::{VirtAddr, va};
-use crate::config::*;
+use spin::Mutex;
 pub struct Process {
     pub aspace: Arc<Mutex<AddrSpace>>,
     pub heap_top: Arc<Mutex<usize>>,
@@ -18,8 +18,18 @@ impl Process {
     pub fn new_uspace() -> AxResult<Self> {
         let mut aspace = axmm::new_user_aspace(va!(USER_SPACE_BASE), USER_SPACE_SIZE)?;
         let stack_bottom = USER_STACK_TOP - USER_STACK_SIZE;
-        aspace.map_alloc(va!(stack_bottom), USER_STACK_SIZE, MappingFlags::READ | MappingFlags::WRITE | MappingFlags::USER, true)?;
-        aspace.map_alloc(va!(USER_HEAP_BASE), USER_HEAP_SIZE, MappingFlags::READ | MappingFlags::WRITE | MappingFlags::USER, false)?;
+        aspace.map_alloc(
+            va!(stack_bottom),
+            USER_STACK_SIZE,
+            MappingFlags::READ | MappingFlags::WRITE | MappingFlags::USER,
+            true,
+        )?;
+        aspace.map_alloc(
+            va!(USER_HEAP_BASE),
+            USER_HEAP_SIZE,
+            MappingFlags::READ | MappingFlags::WRITE | MappingFlags::USER,
+            false,
+        )?;
         Ok(Self {
             aspace: Arc::new(Mutex::new(aspace)),
             heap_top: Arc::new(Mutex::new(USER_HEAP_BASE + USER_HEAP_SIZE)),
@@ -35,7 +45,9 @@ impl Process {
         let aspace = self.aspace.lock();
         let _pt_root = aspace.page_table_root();
         #[cfg(target_arch = "riscv64")]
-        unsafe { core::arch::asm!("csrw satp, {0}", "sfence.vma", in(reg) (8usize << 60) | (_pt_root.as_usize() >> 12)); }
+        unsafe {
+            core::arch::asm!("csrw satp, {0}", "sfence.vma", in(reg) (8usize << 60) | (_pt_root.as_usize() >> 12));
+        }
     }
     pub fn load_elf(&self, path: &str, args: &[&str]) -> AxResult<()> {
         let mut aspace = self.aspace.lock();
@@ -52,15 +64,27 @@ impl Process {
             .kernel_stack_top()
             .expect("current task has no kernel stack")
             .as_usize();
-        unsafe { uctx.enter_uspace(va!(kstack_top)); }
+        unsafe {
+            uctx.enter_uspace(va!(kstack_top));
+        }
     }
 
     pub fn exec(&self, path: &str, args: &[&str]) -> AxResult<()> {
         let mut new_aspace = axmm::new_user_aspace(va!(USER_SPACE_BASE), USER_SPACE_SIZE)?;
         let stack_bottom = USER_STACK_TOP - USER_STACK_SIZE;
-        new_aspace.map_alloc(va!(stack_bottom), USER_STACK_SIZE, MappingFlags::READ | MappingFlags::WRITE | MappingFlags::USER, true)?;
-        new_aspace.map_alloc(va!(USER_HEAP_BASE), USER_HEAP_SIZE, MappingFlags::READ | MappingFlags::WRITE | MappingFlags::USER, false)?;
-        
+        new_aspace.map_alloc(
+            va!(stack_bottom),
+            USER_STACK_SIZE,
+            MappingFlags::READ | MappingFlags::WRITE | MappingFlags::USER,
+            true,
+        )?;
+        new_aspace.map_alloc(
+            va!(USER_HEAP_BASE),
+            USER_HEAP_SIZE,
+            MappingFlags::READ | MappingFlags::WRITE | MappingFlags::USER,
+            false,
+        )?;
+
         let load_info = crate::mm::load_user_app(&mut new_aspace, path, args)?;
         *self.aspace.lock() = new_aspace;
         self.activate();

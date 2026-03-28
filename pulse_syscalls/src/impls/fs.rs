@@ -28,6 +28,10 @@ pub fn sys_fstat(fd: usize, statbuf: usize) -> isize {
 
 pub fn sys_writev(fd: usize, iov: usize, iovcnt: usize) -> isize {
     unsafe {
-        ax_sys_writev(fd as i32, iov as *const arceos_posix_api::ctypes::iovec, iovcnt as i32) as isize
+        ax_sys_writev(
+            fd as i32,
+            iov as *const arceos_posix_api::ctypes::iovec,
+            iovcnt as i32,
+        ) as isize
     }
 }

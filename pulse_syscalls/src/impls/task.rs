@@ -1,8 +1,8 @@
 use crate::LinuxError;
+use alloc::string::String;
+use alloc::vec::Vec;
 use axtask::TaskExtRef;
 use core::ffi::c_char;
-use alloc::vec::Vec;
-use alloc::string::String;
 
 pub fn sys_getpid() -> isize {
     axtask::current().id().as_u64() as isize
@@ -33,11 +33,13 @@ pub fn sys_execve(pathname: usize, argv: usize, envp: usize) -> isize {
     if pathname == 0 {
         return -LinuxError::EFAULT.code() as isize;
     }
-    
+
     // Copy the pathname into a String to ensure it survives the exec switch
-    let path_str = String::from(unsafe { core::ffi::CStr::from_ptr(pathname as *const c_char) }
-        .to_str()
-        .unwrap_or(""));
+    let path_str = String::from(
+        unsafe { core::ffi::CStr::from_ptr(pathname as *const c_char) }
+            .to_str()
+            .unwrap_or(""),
+    );
 
     if path_str.is_empty() {
         return -LinuxError::ENOENT.code() as isize;
@@ -58,7 +60,7 @@ pub fn sys_execve(pathname: usize, argv: usize, envp: usize) -> isize {
     } else {
         args.push(path_str.clone());
     }
-    
+
     // Convert to Vec<&str>
     let mut args_strs: Vec<&str> = Vec::new();
     for s in &args {
