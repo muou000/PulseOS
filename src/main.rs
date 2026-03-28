@@ -12,7 +12,7 @@ extern crate pulse_syscalls;
 fn main() {
     use axtask::TaskInner;
     
-    match pulse_core::task::Process::new_user() {
+    match pulse_core::task::Process::new_uspace() {
         Ok(proc) => {
             info!("Created initial user process");
             let mut inner = TaskInner::new(|| {

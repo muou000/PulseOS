@@ -182,7 +182,11 @@ fn syscall_dispatcher(syscall_id: usize, args: [usize; 6]) -> isize {
             );
             0
         }
-
+        Sysno::execve => {
+            axlog::debug!("sys_execve: pathname={:#x}, argv={:#x}, envp={:#x}", args[0], args[1], args[2]);
+            impls::sys_execve(args[0], args[1], args[2])
+        }
+        
         _ => {
             axlog::warn!("Unimplemented syscall: {:?} ({})", sysno, syscall_id);
             -LinuxError::ENOSYS.code() as isize

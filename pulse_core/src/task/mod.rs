@@ -15,7 +15,7 @@ pub struct Process {
 }
 def_task_ext!(Process);
 impl Process {
-    pub fn new_user() -> AxResult<Self> {
+    pub fn new_uspace() -> AxResult<Self> {
         let mut aspace = axmm::new_user_aspace(va!(USER_SPACE_BASE), USER_SPACE_SIZE)?;
         let stack_bottom = USER_STACK_TOP - USER_STACK_SIZE;
         aspace.map_alloc(va!(stack_bottom), USER_STACK_SIZE, MappingFlags::READ | MappingFlags::WRITE | MappingFlags::USER, true)?;
@@ -48,9 +48,26 @@ impl Process {
         let entry = *self.entry.lock();
         let stack_top = *self.stack_top.lock();
         let uctx = axhal::context::UspaceContext::new(entry, va!(stack_top), 0);
-        let kstack_top: usize;
-        #[cfg(target_arch = "riscv64")]
-        unsafe { core::arch::asm!("mv {}, sp", out(reg) kstack_top); }
+        let kstack_top = axtask::current()
+            .kernel_stack_top()
+            .expect("current task has no kernel stack")
+            .as_usize();
         unsafe { uctx.enter_uspace(va!(kstack_top)); }
+    }
+
+    pub fn exec(&self, path: &str, args: &[&str]) -> AxResult<()> {
+        let mut new_aspace = axmm::new_user_aspace(va!(USER_SPACE_BASE), USER_SPACE_SIZE)?;
+        let stack_bottom = USER_STACK_TOP - USER_STACK_SIZE;
+        new_aspace.map_alloc(va!(stack_bottom), USER_STACK_SIZE, MappingFlags::READ | MappingFlags::WRITE | MappingFlags::USER, true)?;
+        new_aspace.map_alloc(va!(USER_HEAP_BASE), USER_HEAP_SIZE, MappingFlags::READ | MappingFlags::WRITE | MappingFlags::USER, false)?;
+        
+        let load_info = crate::mm::load_user_app(&mut new_aspace, path, args)?;
+        *self.aspace.lock() = new_aspace;
+        self.activate();
+        *self.heap_top.lock() = USER_HEAP_BASE + USER_HEAP_SIZE;
+        *self.mmap_base.lock() = MMAP_BASE;
+        *self.stack_top.lock() = load_info.user_sp;
+        *self.entry.lock() = load_info.entry;
+        Ok(())
     }
 }
