@@ -114,10 +114,17 @@ pub fn sys_mmap(
 
     // 如果 addr 为 0，由内核选择地址
     let map_addr = if addr == 0 {
-        let mut mmap_base = proc.mmap_base.lock();
-        let start = (*mmap_base + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
-        *mmap_base = start + aligned_length;
-        start
+        let limit = memory_addr::VirtAddrRange::from_start_size(
+            VirtAddr::from(pulse_core::config::USER_SPACE_BASE),
+            pulse_core::config::USER_SPACE_SIZE,
+        );
+        match aspace.find_free_area(addr.align_down(PAGE_SIZE), aligned_length, limit) {
+            Some(vaddr) => vaddr.as_usize(),
+            None => {
+                axlog::error!("sys_mmap: no free area found");
+                return -crate::LinuxError::ENOMEM.code() as isize;
+            }
+        }
     } else {
         // 使用指定地址（需要对齐）
         addr & !(PAGE_SIZE - 1)

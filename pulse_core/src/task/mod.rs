@@ -4,12 +4,12 @@ use axerrno::AxResult;
 use axhal::paging::MappingFlags;
 use axmm::AddrSpace;
 use axtask::{TaskExtRef, TaskInner, def_task_ext};
+use log::info;
 use memory_addr::{VirtAddr, va};
 use spin::Mutex;
 pub struct Process {
     pub aspace: Arc<Mutex<AddrSpace>>,
     pub heap_top: Arc<Mutex<usize>>,
-    pub mmap_base: Arc<Mutex<usize>>,
     pub stack_top: Mutex<usize>,
     pub entry: Mutex<usize>,
 }
@@ -33,7 +33,6 @@ impl Process {
         Ok(Self {
             aspace: Arc::new(Mutex::new(aspace)),
             heap_top: Arc::new(Mutex::new(USER_HEAP_BASE + USER_HEAP_SIZE)),
-            mmap_base: Arc::new(Mutex::new(MMAP_BASE)),
             stack_top: Mutex::new(USER_STACK_TOP),
             entry: Mutex::new(0),
         })
@@ -43,10 +42,16 @@ impl Process {
     }
     pub fn activate(&self) {
         let aspace = self.aspace.lock();
-        let _pt_root = aspace.page_table_root();
+        let pt_root = aspace.page_table_root();
         #[cfg(target_arch = "riscv64")]
         unsafe {
-            core::arch::asm!("csrw satp, {0}", "sfence.vma", in(reg) (8usize << 60) | (_pt_root.as_usize() >> 12));
+            core::arch::asm!("csrw satp, {0}", "sfence.vma", in(reg) (8usize << 60) | (pt_root.as_usize() >> 12));
+        }
+        #[cfg(target_arch = "loongarch64")]
+        unsafe {
+            // LoongArch64 user space page table root must be written to PGDL.
+            axhal::asm::write_user_page_table(pt_root);
+            axhal::asm::flush_tlb(None);
         }
     }
     pub fn load_elf(&self, path: &str, args: &[&str]) -> AxResult<()> {
@@ -89,7 +94,6 @@ impl Process {
         *self.aspace.lock() = new_aspace;
         self.activate();
         *self.heap_top.lock() = USER_HEAP_BASE + USER_HEAP_SIZE;
-        *self.mmap_base.lock() = MMAP_BASE;
         *self.stack_top.lock() = load_info.user_sp;
         *self.entry.lock() = load_info.entry;
         Ok(())

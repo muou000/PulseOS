@@ -21,8 +21,5 @@ pub const USER_HEAP_SIZE_MAX: usize = 0x2000_0000;
 /// The base address for user interpreter.
 pub const USER_INTERP_BASE: usize = 0x400_0000;
 
-/// The base address for anonymous mmap allocations.
-pub const MMAP_BASE: usize = 0x8000_0000;
-
 /// The address of signal trampoline (placed at top of user heap).
 pub const SIGNAL_TRAMPOLINE: usize = 0x6000_1000;

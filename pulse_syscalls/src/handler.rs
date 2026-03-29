@@ -106,7 +106,9 @@ fn syscall_dispatcher(syscall_id: usize, args: [usize; 6]) -> isize {
             0 // 信号相关，暂时忽略
         }
 
-        Sysno::getuid | Sysno::geteuid => 0, // root
+        Sysno::getuid | Sysno::geteuid => 0,
+        Sysno::getpgid => 1,
+        Sysno::kill => 0,
         Sysno::getgid | Sysno::getegid => 0, // root
         Sysno::setuid | Sysno::setgid | Sysno::setreuid | Sysno::setregid => 0,
 
