@@ -15,7 +15,7 @@ clean defconfig:
 
 img:
 	./build_img.sh all
-	mv rootfs-$(ARCH).img arceos/disk.img
+	cp rootfs-$(ARCH).img arceos/disk.img
 
 la:
 	@ARCH=loongarch64 make defconfig

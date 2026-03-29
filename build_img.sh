@@ -69,13 +69,23 @@ if minirootfs:
 parse_yaml
 
 function download() {
-    echo "Downloading ${file}..."
-    curl -# -L -O ${URL}/${file} || { echo "Error: Failed to download"; exit 1; }
+    if [[ -f "${file}" ]]; then
+        echo "${file} already exists. Skipping download."
+    else
+        echo "Downloading ${file}..."
+        curl -# -L -O ${URL}/${file} || { echo "Error: Failed to download"; exit 1; }
+    fi
+
     echo "Verifying SHA256..."
     echo "${sha256}  ${file}" | sha256sum -c - || { echo "Error: SHA256 verification failed"; exit 1; }
 }
 
 function mkfs() {
+    if [[ -f "${IMG}" ]]; then
+        echo "${IMG} already exists. Skipping filesystem creation."
+        return 0
+    fi
+
     echo "Creating ${IMG_SIZE} ext4 image: ${IMG}..."
     fallocate -l ${IMG_SIZE} ${IMG} || { echo "Error: Failed to allocate space"; exit 1; }
     ${SUDO} mkfs.ext4 -F -q ${IMG} || { echo "Error: Failed to create filesystem"; exit 1; }
@@ -108,6 +118,4 @@ echo "=== BuildingAlpine Linux Image for ${ARCH} ==="
 download
 mkfs
 extract
-echo "Cleaning up intermediate files..."
-rm -f ${file}
 echo "Image created successfully: ${IMG}"
