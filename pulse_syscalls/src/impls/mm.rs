@@ -1,6 +1,6 @@
 use crate::LinuxError;
 use axhal::paging::MappingFlags;
-use memory_addr::VirtAddr;
+use memory_addr::{MemoryAddr, VirtAddr};
 
 const PROT_READ: usize = 0x1;
 const PROT_WRITE: usize = 0x2;
@@ -118,7 +118,7 @@ pub fn sys_mmap(
             VirtAddr::from(pulse_core::config::USER_SPACE_BASE),
             pulse_core::config::USER_SPACE_SIZE,
         );
-        match aspace.find_free_area(addr.align_down(PAGE_SIZE), aligned_length, limit) {
+        match aspace.find_free_area(VirtAddr::from(addr.align_down(PAGE_SIZE)), aligned_length, limit) {
             Some(vaddr) => vaddr.as_usize(),
             None => {
                 axlog::error!("sys_mmap: no free area found");

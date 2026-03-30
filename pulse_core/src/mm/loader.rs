@@ -203,7 +203,7 @@ pub fn load_user_app(
     path: &str,
     args: &[&str],
 ) -> AxResult<UserAppLoadInfo> {
-    let main_data = axfs::api::read(path).map_err(|_| AxError::NotFound)?;
+    let main_data = axfs::FS_CONTEXT.lock().read(path).map_err(|_| AxError::NotFound)?;
     let main_elf = ElfFile::new(&main_data).map_err(|_| AxError::InvalidExecutable)?;
     validate_machine(&main_elf, path)?;
 
@@ -227,7 +227,10 @@ pub fn load_user_app(
     let mut dispatch_entry = main_entry;
 
     if let Some(interp_path) = interp_path {
-        let interp_data = axfs::api::read(&interp_path).map_err(|_| AxError::NotFound)?;
+        let interp_data = axfs::FS_CONTEXT
+            .lock()
+            .read(&interp_path)
+            .map_err(|_| AxError::NotFound)?;
         let interp_elf = ElfFile::new(&interp_data).map_err(|_| AxError::InvalidExecutable)?;
         validate_machine(&interp_elf, &interp_path)?;
 
