@@ -4,3 +4,4 @@
 *.img
 .axconfig.old.toml
 .axconfig.toml
+kernel-*
