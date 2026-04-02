@@ -24,16 +24,9 @@ fn handle_page_fault(vaddr: VirtAddr, access_flags: MappingFlags, is_user: bool)
     let binding = axtask::current();
     let proc: &crate::task::Process = binding.task_ext();
 
-    // 委托给进程的地址空间处理
-    // 注意：axmm 的 handle_page_fault 使用 PageFaultFlags，需要转换
-    use axhal::trap::PageFaultFlags;
-    let pf_flags = if access_flags.contains(MappingFlags::WRITE) {
-        PageFaultFlags::WRITE
-    } else {
-        PageFaultFlags::empty()
-    };
-
-    if proc.handle_page_fault(vaddr, pf_flags) {
+    // 委托给进程地址空间处理。这里必须保留完整访问标志（READ/WRITE/EXECUTE/USER），
+    // 否则会让合法缺页（例如用户态写时缺页）被误判为非法访问。
+    if proc.handle_page_fault(vaddr, access_flags) {
         axlog::debug!("Page fault handled successfully");
         true
     } else {
