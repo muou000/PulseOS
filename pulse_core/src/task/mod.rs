@@ -1,6 +1,9 @@
 use crate::config::*;
 use alloc::sync::Arc;
+use alloc::vec::Vec;
+use axconfig::TASK_STACK_SIZE;
 use axerrno::AxResult;
+use axhal::context::{TrapFrame, UspaceContext};
 use axhal::paging::MappingFlags;
 use axmm::AddrSpace;
 use axtask::{TaskExtRef, TaskInner, def_task_ext};
@@ -12,6 +15,7 @@ pub struct Process {
     pub heap_top: Arc<Mutex<usize>>,
     pub stack_top: Mutex<usize>,
     pub entry: Mutex<usize>,
+    pub children: Mutex<Vec<axtask::AxTaskRef>>,
 }
 def_task_ext!(Process);
 impl Process {
@@ -35,6 +39,7 @@ impl Process {
             heap_top: Arc::new(Mutex::new(USER_HEAP_BASE + USER_HEAP_SIZE)),
             stack_top: Mutex::new(USER_STACK_TOP),
             entry: Mutex::new(0),
+            children: Mutex::new(Vec::new()),
         })
     }
     pub fn handle_page_fault(&self, vaddr: VirtAddr, flags: axhal::trap::PageFaultFlags) -> bool {
@@ -54,9 +59,9 @@ impl Process {
             axhal::asm::flush_tlb(None);
         }
     }
-    pub fn load_elf(&self, path: &str, args: &[&str]) -> AxResult<()> {
+    pub fn load_elf(&self, path: &str, args: &[&str], envs: &[&str]) -> AxResult<()> {
         let mut aspace = self.aspace.lock();
-        let load_info = crate::mm::load_user_app(&mut aspace, path, args)?;
+        let load_info = crate::mm::load_user_app(&mut aspace, path, args, envs)?;
         *self.entry.lock() = load_info.entry;
         *self.stack_top.lock() = load_info.user_sp;
         Ok(())
@@ -74,7 +79,7 @@ impl Process {
         }
     }
 
-    pub fn exec(&self, path: &str, args: &[&str]) -> AxResult<()> {
+    pub fn exec(&self, path: &str, args: &[&str], envs: &[&str]) -> AxResult<()> {
         let mut new_aspace = axmm::new_user_aspace(va!(USER_SPACE_BASE), USER_SPACE_SIZE)?;
         let stack_bottom = USER_STACK_TOP - USER_STACK_SIZE;
         new_aspace.map_alloc(
@@ -90,12 +95,155 @@ impl Process {
             false,
         )?;
 
-        let load_info = crate::mm::load_user_app(&mut new_aspace, path, args)?;
+        let load_info = crate::mm::load_user_app(&mut new_aspace, path, args, envs)?;
         *self.aspace.lock() = new_aspace;
         self.activate();
         *self.heap_top.lock() = USER_HEAP_BASE + USER_HEAP_SIZE;
         *self.stack_top.lock() = load_info.user_sp;
         *self.entry.lock() = load_info.entry;
         Ok(())
+    }
+
+    pub fn clone_for_thread(&self) -> Self {
+        Self {
+            aspace: self.aspace.clone(),
+            heap_top: self.heap_top.clone(),
+            stack_top: Mutex::new(*self.stack_top.lock()),
+            entry: Mutex::new(*self.entry.lock()),
+            children: Mutex::new(Vec::new()),
+        }
+    }
+
+    /// Implement fork with COW: parent and child initially share read-only user pages,
+    /// and writable pages are copied on the first write page fault.
+    pub fn spawn_fork_from_trap_frame(
+        &self,
+        tf: &TrapFrame,
+        child_stack: Option<usize>,
+    ) -> AxResult<u64> {
+        let mut child_uctx = UspaceContext::from(tf);
+        child_uctx.set_retval(0);
+        if let Some(sp) = child_stack {
+            child_uctx.set_sp(sp);
+        }
+
+        // 1. Create a new Address Space
+        let mut new_aspace = axmm::new_user_aspace(va!(USER_SPACE_BASE), USER_SPACE_SIZE)?;
+
+        let mut parent_aspace = self.aspace.lock();
+        let heap_top = *self.heap_top.lock();
+        let heap_copy_end = heap_top.clamp(USER_HEAP_BASE, USER_HEAP_BASE + USER_HEAP_SIZE_MAX);
+
+        // 2. Share current user mappings into child and mark writable pages as read-only.
+        // We scan bounded ranges to avoid iterating the full user VA space.
+        let ranges_to_copy = [
+            (va!(USER_SPACE_BASE), va!(USER_HEAP_BASE)), // ELFs, libs and anonymous mmaps below heap
+            (
+                VirtAddr::from_usize(USER_HEAP_BASE),
+                VirtAddr::from_usize(heap_copy_end),
+            ), // Heap (current brk only)
+            (va!(USER_STACK_TOP - USER_STACK_SIZE), va!(USER_STACK_TOP)), // Stack range
+        ];
+
+        for (start, end) in ranges_to_copy {
+            for vaddr in memory_addr::PageIter4K::new(start, end).unwrap() {
+                if let Ok((paddr, flags, _page_size)) = parent_aspace.page_table().query(vaddr) {
+                    let user_flags = flags
+                        & (MappingFlags::READ
+                            | MappingFlags::WRITE
+                            | MappingFlags::EXECUTE
+                            | MappingFlags::USER);
+                    if !user_flags.contains(MappingFlags::USER) {
+                        continue;
+                    }
+
+                    let mut child_pte_flags = user_flags;
+                    if user_flags.contains(MappingFlags::WRITE) {
+                        child_pte_flags.remove(MappingFlags::WRITE);
+                        parent_aspace.protect(vaddr, memory_addr::PAGE_SIZE_4K, child_pte_flags)?;
+                    }
+                    axmm::cow_inc_frame_ref(paddr);
+
+                    // Keep area permissions (including WRITE for COW candidates) in child metadata,
+                    // but install a read-only shared PTE for writable pages.
+                    new_aspace.map_alloc(vaddr, memory_addr::PAGE_SIZE_4K, user_flags, false)?;
+                    new_aspace.remap_page(vaddr, paddr, child_pte_flags)?;
+                }
+            }
+        }
+
+        // 3. Create the child Process wrapper
+        let child_proc = Self {
+            aspace: Arc::new(Mutex::new(new_aspace)),
+            heap_top: Arc::new(Mutex::new(*self.heap_top.lock())),
+            stack_top: Mutex::new(*self.stack_top.lock()),
+            entry: Mutex::new(*self.entry.lock()),
+            children: Mutex::new(Vec::new()),
+        };
+
+        let mut inner = TaskInner::new(
+            move || {
+                let kstack_top = axtask::current()
+                    .kernel_stack_top()
+                    .expect("child task has no kernel stack")
+                    .as_usize();
+                unsafe {
+                    child_uctx.enter_uspace(va!(kstack_top));
+                }
+            },
+            "fork_child".into(),
+            TASK_STACK_SIZE,
+        );
+
+        let new_pt_root = child_proc.aspace.lock().page_table_root();
+        inner.ctx_mut().set_page_table_root(new_pt_root);
+        inner.init_task_ext(child_proc);
+
+        let task = axtask::spawn_task(inner);
+        let child_tid = task.id().as_u64();
+
+        if let Some(mut children) = self.children.try_lock() {
+            children.push(task);
+        } else {
+            self.children.lock().push(task);
+        }
+
+        Ok(child_tid)
+    }
+
+    pub fn spawn_from_trap_frame(&self, tf: &TrapFrame, child_stack: Option<usize>) -> u64 {
+        let mut child_uctx = UspaceContext::from(tf);
+        child_uctx.set_retval(0);
+        if let Some(sp) = child_stack {
+            child_uctx.set_sp(sp);
+        }
+
+        let child_proc = self.clone_for_thread();
+        let mut inner = TaskInner::new(
+            move || {
+                let kstack_top = axtask::current()
+                    .kernel_stack_top()
+                    .expect("child task has no kernel stack")
+                    .as_usize();
+                unsafe {
+                    child_uctx.enter_uspace(va!(kstack_top));
+                }
+            },
+            "clone_child".into(),
+            TASK_STACK_SIZE,
+        );
+
+        let pt_root = self.aspace.lock().page_table_root();
+        inner.ctx_mut().set_page_table_root(pt_root);
+        inner.init_task_ext(child_proc);
+
+        let task = axtask::spawn_task(inner);
+        let child_tid = task.id().as_u64();
+        if let Some(mut children) = self.children.try_lock() {
+            children.push(task);
+        } else {
+            self.children.lock().push(task);
+        }
+        child_tid
     }
 }
