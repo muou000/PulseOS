@@ -45,6 +45,7 @@ repository.workspace = true
 [features]
 default = []
 qemu = []
+auto-testcode = []
 
 [dependencies]
 axhal.workspace = true
@@ -53,6 +54,7 @@ axconfig.workspace = true
 axruntime.workspace = true
 axfeat.workspace = true
 axtask.workspace = true
+arceos_api = { path = "arceos/api/arceos_api", features = ["multitask"] }
 syscalls.workspace = true
 pulse_syscalls = { path = "pulse_syscalls" }
 pulse_core = { path = "pulse_core", features = ["alloc", "fs"] }

@@ -6,6 +6,7 @@ version = 4
 name = "Pulse"
 version = "0.1.0"
 dependencies = [
+ "arceos_api",
  "axconfig",
  "axfeat",
  "axhal",
@@ -102,6 +103,21 @@ dependencies = [
  "anstyle",
  "once_cell_polyfill",
  "windows-sys",
+]
+
+[[package]]
+name = "arceos_api"
+version = "0.2.0"
+dependencies = [
+ "axconfig",
+ "axerrno 0.1.2",
+ "axfeat",
+ "axhal",
+ "axio 0.1.2",
+ "axlog",
+ "axruntime",
+ "axsync",
+ "axtask",
 ]
 
 [[package]]
@@ -1368,6 +1384,7 @@ dependencies = [
  "axlog",
  "axns",
  "axtask",
+ "bitflags 2.11.0",
  "linkme",
  "memory_addr",
  "pulse_core",
