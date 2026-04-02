@@ -1,3 +1,5 @@
+use arceos_posix_api::ctypes;
+
 use crate::LinuxError;
 
 pub fn sys_nanosleep(req: usize, rem: usize) -> isize {
@@ -13,4 +15,29 @@ pub fn sys_clock_gettime(clockid: i32, tp: usize) -> isize {
 
     // TODO
     -LinuxError::ENOSYS.code() as isize
+}
+
+/// sys_gettimeofday - 获取墙上时间
+pub fn sys_gettimeofday(tv: usize, tz: usize) -> isize {
+    axlog::debug!("sys_gettimeofday: tv={:#x}, tz={:#x}", tv, tz);
+
+    if tz != 0 {
+        axlog::debug!("sys_gettimeofday: timezone argument is ignored");
+    }
+
+    if tv == 0 {
+        return 0;
+    }
+
+    let now = axhal::time::wall_time();
+    let timeval = ctypes::timeval {
+        tv_sec: now.as_secs() as _,
+        tv_usec: now.subsec_micros() as _,
+    };
+
+    unsafe {
+        *(tv as *mut ctypes::timeval) = timeval;
+    }
+
+    0
 }
