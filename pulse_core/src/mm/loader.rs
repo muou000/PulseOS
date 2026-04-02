@@ -202,8 +202,12 @@ pub fn load_user_app(
     aspace: &mut AddrSpace,
     path: &str,
     args: &[&str],
+    envs: &[&str],
 ) -> AxResult<UserAppLoadInfo> {
-    let main_data = axfs::FS_CONTEXT.lock().read(path).map_err(|_| AxError::NotFound)?;
+    let main_data = axfs::FS_CONTEXT
+        .lock()
+        .read(path)
+        .map_err(|_| AxError::NotFound)?;
     let main_elf = ElfFile::new(&main_data).map_err(|_| AxError::InvalidExecutable)?;
     validate_machine(&main_elf, path)?;
 
@@ -254,12 +258,20 @@ pub fn load_user_app(
 
     let auxv = build_auxv(&main_data, main_bias, interp_base)?;
     let mut argv: Vec<String> = Vec::new();
-    argv.push(path.to_string());
-    for a in args {
-        argv.push(a.to_string());
+    if args.is_empty() {
+        argv.push(path.to_string());
+    } else {
+        for a in args {
+            argv.push(a.to_string());
+        }
     }
-    let envs: [String; 0] = [];
-    let stack_region = app_stack_region(&argv, &envs, &auxv, USER_STACK_TOP);
+
+    let mut envs_vec: Vec<String> = Vec::new();
+    for e in envs {
+        envs_vec.push(e.to_string());
+    }
+
+    let stack_region = app_stack_region(&argv, &envs_vec, &auxv, USER_STACK_TOP);
     let user_sp = USER_STACK_TOP
         .checked_sub(stack_region.len())
         .ok_or(AxError::OutOfRange)?;
