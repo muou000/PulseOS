@@ -215,7 +215,8 @@ pub fn sys_execve(pathname: usize, argv: usize, envp: usize) -> isize {
 
     if let Err(e) = process.exec(&path_str, &args_strs, &envs_strs) {
         axlog::error!("sys_execve failed: {:?}", e);
-        return -LinuxError::ENOENT.code() as isize;
+        let errno: LinuxError = e.into();
+        return -errno.code() as isize;
     }
 
     process.enter_user_mode();
