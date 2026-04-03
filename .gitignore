@@ -5,3 +5,5 @@
 .axconfig.old.toml
 .axconfig.toml
 kernel-*
+vendor/
+config.toml

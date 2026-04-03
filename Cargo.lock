@@ -342,11 +342,11 @@ dependencies = [
  "bitflags 2.11.0",
  "cfg-if",
  "chrono",
+ "ext4_rs",
  "intrusive-collections",
  "kspin",
  "log",
  "lru",
- "lwext4_rust",
  "scope-local",
  "slab",
  "spin 0.10.0",
@@ -919,6 +919,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "877a4ace8713b0bcf2a4e7eec82529c029f1d0619886d18145fea96c3ffe5c0f"
 
 [[package]]
+name = "ext4_rs"
+version = "1.3.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b729281bfff4477a533f7193f1fc772793fb03e555b48a6de0d2b68891e4a5da"
+dependencies = [
+ "bitflags 2.11.0",
+ "log",
+]
+
+[[package]]
 name = "flatten_objects"
 version = "0.2.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1181,15 +1191,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a1dc47f592c06f33f8e3aea9591776ec7c9f9e4124778ff8a3c3b87159f7e593"
 dependencies = [
  "hashbrown",
-]
-
-[[package]]
-name = "lwext4_rust"
-version = "0.2.0"
-source = "git+https://github.com/Starry-OS/lwext4_rust.git?rev=033fa2c#033fa2cc848c7495651b00af6695dc07de06d596"
-dependencies = [
- "bindgen",
- "log",
 ]
 
 [[package]]
