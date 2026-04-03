@@ -80,26 +80,30 @@ impl Process {
     }
 
     pub fn exec(&self, path: &str, args: &[&str], envs: &[&str]) -> AxResult<()> {
-        let mut aspace = self.aspace.lock();
-        aspace.clear();
-
+        // Build the new image in an isolated address space first.
+        // If loading fails, the current process image remains intact.
+        let mut new_aspace = axmm::new_user_aspace(va!(USER_SPACE_BASE), USER_SPACE_SIZE)?;
         let stack_bottom = USER_STACK_TOP - USER_STACK_SIZE;
-        aspace.map_alloc(
+        new_aspace.map_alloc(
             va!(stack_bottom),
             USER_STACK_SIZE,
             MappingFlags::READ | MappingFlags::WRITE | MappingFlags::USER,
             true,
         )?;
-        aspace.map_alloc(
+        new_aspace.map_alloc(
             va!(USER_HEAP_BASE),
             USER_HEAP_SIZE,
             MappingFlags::READ | MappingFlags::WRITE | MappingFlags::USER,
             false,
         )?;
 
-        let load_info = crate::mm::load_user_app(&mut aspace, path, args, envs)?;
-        let new_pt_root = aspace.page_table_root();
-        drop(aspace);
+        let load_info = crate::mm::load_user_app(&mut new_aspace, path, args, envs)?;
+        let new_pt_root = new_aspace.page_table_root();
+
+        {
+            let mut aspace = self.aspace.lock();
+            *aspace = new_aspace;
+        }
 
         axtask::set_current_page_table_root(new_pt_root);
         self.activate();
