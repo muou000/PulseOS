@@ -7,7 +7,6 @@ use axhal::context::{TrapFrame, UspaceContext};
 use axhal::paging::MappingFlags;
 use axmm::AddrSpace;
 use axtask::{TaskExtRef, TaskInner, def_task_ext};
-use log::info;
 use memory_addr::{VirtAddr, va};
 use spin::Mutex;
 pub struct Process {

@@ -137,7 +137,6 @@ fn load_segments(
                 &elf_data[p_offset..p_offset + p_filesz],
             )?;
         }
-
     }
     Ok(())
 }

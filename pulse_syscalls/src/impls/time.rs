@@ -4,7 +4,9 @@ use arceos_posix_api::sys_nanosleep as ax_sys_nanosleep;
 
 pub fn sys_nanosleep(req: usize, rem: usize) -> isize {
     axlog::debug!("sys_nanosleep: req={:#x}, rem={:#x}", req, rem);
-    unsafe { ax_sys_nanosleep(req as *const ctypes::timespec, rem as *mut ctypes::timespec) as isize }
+    unsafe {
+        ax_sys_nanosleep(req as *const ctypes::timespec, rem as *mut ctypes::timespec) as isize
+    }
 }
 
 /// sys_clock_gettime - 获取时钟时间
