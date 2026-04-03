@@ -8,6 +8,7 @@ use arceos_posix_api::sys_getcwd as ax_sys_getcwd;
 use arceos_posix_api::sys_chdir as ax_sys_chdir;
 use arceos_posix_api::sys_lseek as ax_sys_lseek;
 use arceos_posix_api::sys_open as ax_sys_open;
+use arceos_posix_api::sys_pipe as ax_sys_pipe;
 use arceos_posix_api::sys_read as ax_sys_read;
 use arceos_posix_api::sys_stat as ax_sys_stat;
 use arceos_posix_api::sys_write as ax_sys_write;
@@ -170,6 +171,7 @@ pub fn sys_writev(fd: usize, iov: usize, iovcnt: usize) -> isize {
     }
 }
 
+const O_NONBLOCK: usize = 0x800;
 const O_CLOEXEC: usize = 0x80000;
 
 pub fn sys_fcntl(fd: usize, cmd: usize, arg: usize) -> isize {
@@ -188,6 +190,23 @@ pub fn sys_dup3(oldfd: usize, newfd: usize, flags: usize) -> isize {
         return -LinuxError::EINVAL.code() as isize;
     }
     ax_sys_dup2(oldfd as i32, newfd as i32) as isize
+}
+
+pub fn sys_pipe2(fds: usize, flags: usize) -> isize {
+    if fds == 0 {
+        return -LinuxError::EFAULT.code() as isize;
+    }
+
+    // Reuse arceos_posix_api::sys_pipe and accept commonly used flags.
+    // CLOEXEC/NONBLOCK are currently ignored at file creation time.
+    let allowed = O_NONBLOCK | O_CLOEXEC;
+    if (flags & !allowed) != 0 {
+        return -LinuxError::EINVAL.code() as isize;
+    }
+
+    let fds_ptr = fds as *mut i32;
+    let fds_slice = unsafe { core::slice::from_raw_parts_mut(fds_ptr, 2) };
+    ax_sys_pipe(fds_slice) as isize
 }
 
 pub fn sys_lseek(fd: usize, offset: usize, whence: usize) -> isize {

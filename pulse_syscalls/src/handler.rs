@@ -94,10 +94,7 @@ fn syscall_dispatcher(tf: &TrapFrame, syscall_id: usize, args: [usize; 6]) -> is
         Sysno::fcntl => impls::sys_fcntl(args[0], args[1], args[2]),
         Sysno::dup => impls::sys_dup(args[0]),
         Sysno::dup3 => impls::sys_dup3(args[0], args[1], args[2]),
-        Sysno::pipe2 => {
-            axlog::debug!("sys_pipe2 (stub)");
-            -LinuxError::ENOSYS.code() as isize
-        }
+        Sysno::pipe2 => impls::sys_pipe2(args[0], args[1]),
         Sysno::ppoll => {
             // ppoll(fds, nfds, timeout, sigmask)
             // 简化实现：如果有 fd=0 (stdin)，等通过 yield 让出直到有输入
