@@ -1,4 +1,5 @@
 use alloc::string::{String, ToString};
+use alloc::sync::Arc;
 use alloc::vec::Vec;
 
 use axerrno::{AxError, AxResult};
@@ -15,6 +16,9 @@ use crate::config::{USER_INTERP_BASE, USER_STACK_TOP};
 const PAGE_SIZE_4K: usize = 0x1000;
 const USER_DYN_BASE: usize = 0x20_0000;
 const ELF_MACHINE_LOONGARCH: u16 = 0x102;
+const ELF_CACHE_MAX_ENTRIES: usize = 16;
+
+static ELF_FILE_CACHE: spin::Mutex<Vec<(String, Arc<Vec<u8>>)>> = spin::Mutex::new(Vec::new());
 
 pub struct UserAppLoadInfo {
     pub entry: usize,
@@ -134,18 +138,6 @@ fn load_segments(
             )?;
         }
 
-        let bss_size = p_memsz - p_filesz;
-        if bss_size > 0 {
-            let zero = [0u8; PAGE_SIZE_4K];
-            let mut left = bss_size;
-            let mut cur = p_vaddr.checked_add(p_filesz).ok_or(AxError::OutOfRange)?;
-            while left > 0 {
-                let n = left.min(zero.len());
-                aspace.write(VirtAddr::from_usize(cur), &zero[..n])?;
-                cur = cur.checked_add(n).ok_or(AxError::OutOfRange)?;
-                left -= n;
-            }
-        }
     }
     Ok(())
 }
@@ -198,16 +190,49 @@ fn build_auxv(
     Ok(auxv)
 }
 
+fn get_from_cache(path: &str) -> Option<Arc<Vec<u8>>> {
+    ELF_FILE_CACHE
+        .lock()
+        .iter()
+        .find(|(p, _)| p == path)
+        .map(|(_, d)| d.clone())
+}
+
+fn put_into_cache(path: &str, data: Arc<Vec<u8>>) {
+    let mut cache = ELF_FILE_CACHE.lock();
+    if let Some((_, entry)) = cache.iter_mut().find(|(p, _)| p == path) {
+        *entry = data;
+        return;
+    }
+    if cache.len() >= ELF_CACHE_MAX_ENTRIES {
+        cache.remove(0);
+    }
+    cache.push((path.to_string(), data));
+}
+
+fn read_elf_file(path: &str) -> AxResult<Arc<Vec<u8>>> {
+    if let Some(data) = get_from_cache(path) {
+        return Ok(data);
+    }
+
+    let data = Arc::new(
+        axfs::FS_CONTEXT
+            .lock()
+            .read(path)
+            .map_err(|_| AxError::NotFound)?,
+    );
+
+    put_into_cache(path, data.clone());
+    Ok(data)
+}
+
 pub fn load_user_app(
     aspace: &mut AddrSpace,
     path: &str,
     args: &[&str],
     envs: &[&str],
 ) -> AxResult<UserAppLoadInfo> {
-    let main_data = axfs::FS_CONTEXT
-        .lock()
-        .read(path)
-        .map_err(|_| AxError::NotFound)?;
+    let main_data = read_elf_file(path)?;
     let main_elf = ElfFile::new(&main_data).map_err(|_| AxError::InvalidExecutable)?;
     validate_machine(&main_elf, path)?;
 
@@ -231,10 +256,7 @@ pub fn load_user_app(
     let mut dispatch_entry = main_entry;
 
     if let Some(interp_path) = interp_path {
-        let interp_data = axfs::FS_CONTEXT
-            .lock()
-            .read(&interp_path)
-            .map_err(|_| AxError::NotFound)?;
+        let interp_data = read_elf_file(&interp_path)?;
         let interp_elf = ElfFile::new(&interp_data).map_err(|_| AxError::InvalidExecutable)?;
         validate_machine(&interp_elf, &interp_path)?;
 
@@ -257,19 +279,12 @@ pub fn load_user_app(
     }
 
     let auxv = build_auxv(&main_data, main_bias, interp_base)?;
-    let mut argv: Vec<String> = Vec::new();
-    if args.is_empty() {
-        argv.push(path.to_string());
+    let argv: Vec<String> = if args.is_empty() {
+        alloc::vec![path.to_string()]
     } else {
-        for a in args {
-            argv.push(a.to_string());
-        }
-    }
-
-    let mut envs_vec: Vec<String> = Vec::new();
-    for e in envs {
-        envs_vec.push(e.to_string());
-    }
+        args.iter().map(|a| (*a).to_string()).collect()
+    };
+    let envs_vec: Vec<String> = envs.iter().map(|e| (*e).to_string()).collect();
 
     let stack_region = app_stack_region(&argv, &envs_vec, &auxv, USER_STACK_TOP);
     let user_sp = USER_STACK_TOP

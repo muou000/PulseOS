@@ -80,23 +80,28 @@ impl Process {
     }
 
     pub fn exec(&self, path: &str, args: &[&str], envs: &[&str]) -> AxResult<()> {
-        let mut new_aspace = axmm::new_user_aspace(va!(USER_SPACE_BASE), USER_SPACE_SIZE)?;
+        let mut aspace = self.aspace.lock();
+        aspace.clear();
+
         let stack_bottom = USER_STACK_TOP - USER_STACK_SIZE;
-        new_aspace.map_alloc(
+        aspace.map_alloc(
             va!(stack_bottom),
             USER_STACK_SIZE,
             MappingFlags::READ | MappingFlags::WRITE | MappingFlags::USER,
             true,
         )?;
-        new_aspace.map_alloc(
+        aspace.map_alloc(
             va!(USER_HEAP_BASE),
             USER_HEAP_SIZE,
             MappingFlags::READ | MappingFlags::WRITE | MappingFlags::USER,
             false,
         )?;
 
-        let load_info = crate::mm::load_user_app(&mut new_aspace, path, args, envs)?;
-        *self.aspace.lock() = new_aspace;
+        let load_info = crate::mm::load_user_app(&mut aspace, path, args, envs)?;
+        let new_pt_root = aspace.page_table_root();
+        drop(aspace);
+
+        axtask::set_current_page_table_root(new_pt_root);
         self.activate();
         *self.heap_top.lock() = USER_HEAP_BASE + USER_HEAP_SIZE;
         *self.stack_top.lock() = load_info.user_sp;
@@ -131,21 +136,21 @@ impl Process {
         let mut new_aspace = axmm::new_user_aspace(va!(USER_SPACE_BASE), USER_SPACE_SIZE)?;
 
         let mut parent_aspace = self.aspace.lock();
-        let heap_top = *self.heap_top.lock();
-        let heap_copy_end = heap_top.clamp(USER_HEAP_BASE, USER_HEAP_BASE + USER_HEAP_SIZE_MAX);
+        // 2. Share only existing user mappings into child and mark writable pages as read-only.
+        // Walking the entire lower user VA range (e.g. 0x1000..0x4000_0000) is too expensive.
+        let mut mapped_user_ranges: Vec<(VirtAddr, VirtAddr)> = Vec::new();
+        parent_aspace.for_each_area(|start, end, flags| {
+            if !flags.contains(MappingFlags::USER) {
+                return;
+            }
+            let clipped_start = start.max(va!(USER_SPACE_BASE));
+            let clipped_end = end.min(va!(USER_STACK_TOP));
+            if clipped_start < clipped_end {
+                mapped_user_ranges.push((clipped_start, clipped_end));
+            }
+        });
 
-        // 2. Share current user mappings into child and mark writable pages as read-only.
-        // We scan bounded ranges to avoid iterating the full user VA space.
-        let ranges_to_copy = [
-            (va!(USER_SPACE_BASE), va!(USER_HEAP_BASE)), // ELFs, libs and anonymous mmaps below heap
-            (
-                VirtAddr::from_usize(USER_HEAP_BASE),
-                VirtAddr::from_usize(heap_copy_end),
-            ), // Heap (current brk only)
-            (va!(USER_STACK_TOP - USER_STACK_SIZE), va!(USER_STACK_TOP)), // Stack range
-        ];
-
-        for (start, end) in ranges_to_copy {
+        for (start, end) in mapped_user_ranges {
             for vaddr in memory_addr::PageIter4K::new(start, end).unwrap() {
                 if let Ok((paddr, flags, _page_size)) = parent_aspace.page_table().query(vaddr) {
                     let user_flags = flags
