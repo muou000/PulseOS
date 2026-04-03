@@ -32,7 +32,6 @@ pub fn sys_brk(addr: usize) -> isize {
     let new_heap_top = addr;
 
     if new_heap_top > old_heap_top {
-        let expand_size = new_heap_top - old_heap_top;
         let start = (old_heap_top + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
         let end = (new_heap_top + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
 
@@ -45,7 +44,6 @@ pub fn sys_brk(addr: usize) -> isize {
             }
         }
     } else if new_heap_top < old_heap_top {
-        let shrink_size = old_heap_top - new_heap_top;
         let start = (new_heap_top + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
         let end = (old_heap_top + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
 

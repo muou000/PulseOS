@@ -1,6 +1,4 @@
 use crate::*;
-use axerrno::AxError;
-use axfs;
 use axhal::context::TrapFrame;
 use axhal::trap::{SYSCALL, register_trap_handler};
 
@@ -74,69 +72,28 @@ fn syscall_dispatcher(tf: &TrapFrame, syscall_id: usize, args: [usize; 6]) -> is
         Sysno::clock_gettime => impls::sys_clock_gettime(args[0] as i32, args[1]),
         Sysno::gettimeofday => impls::sys_gettimeofday(args[0], args[1]),
 
-        Sysno::set_tid_address => {
-            axlog::debug!("sys_set_tid_address: tidptr={:#x}", args[0]);
-            1 // 返回一个假的 TID
-        }
-        Sysno::gettid => 1, // 返回当前线程 ID
+        Sysno::set_tid_address => impls::sys_set_tid_address(args[0]),
+        Sysno::gettid => impls::sys_gettid(),
 
         Sysno::uname => impls::sys_uname(args[0]),
-        Sysno::getrandom => {
-            axlog::debug!("sys_getrandom: buf={:#x}, len={}", args[0], args[1]);
-            // 简单实现：填充零
-            if args[0] != 0 && args[1] > 0 {
-                let slice = unsafe { core::slice::from_raw_parts_mut(args[0] as *mut u8, args[1]) };
-                slice.fill(0x42); // 填充一个固定值
-                args[1] as isize
-            } else {
-                0
-            }
-        }
-        Sysno::prlimit64 => {
-            axlog::debug!("sys_prlimit64 (stub)");
-            0 // 暂时返回成功
-        }
-        Sysno::rt_sigprocmask => {
-            axlog::debug!("sys_rt_sigprocmask (stub)");
-            0 // 信号相关，暂时忽略
-        }
+        Sysno::getrandom => impls::sys_getrandom(args[0], args[1], args[2]),
+        Sysno::prlimit64 => impls::sys_prlimit64(args[0], args[1], args[2], args[3]),
+        Sysno::rt_sigprocmask => impls::sys_rt_sigprocmask(args[0], args[1], args[2], args[3]),
 
         Sysno::getuid | Sysno::geteuid | Sysno::getppid => 0,
         Sysno::getpgid => 1,
-        Sysno::setpgid => {
-            axlog::debug!(
-                "sys_setpgid (stub): pid={}, pgid={}",
-                args[0] as isize,
-                args[1] as isize
-            );
-            0
-        }
+        Sysno::setpgid => impls::sys_setpgid(args[0] as isize, args[1] as isize),
         Sysno::kill => 0,
         Sysno::getgid | Sysno::getegid => 0, // root
         Sysno::setuid | Sysno::setgid | Sysno::setreuid | Sysno::setregid => 0,
 
-        Sysno::rt_sigaction => {
-            axlog::debug!("sys_rt_sigaction (stub)");
-            0
-        }
-        Sysno::rt_sigreturn => {
-            axlog::debug!("sys_rt_sigreturn (stub)");
-            0
-        }
+        Sysno::rt_sigaction => impls::sys_rt_sigaction(args[0], args[1], args[2], args[3]),
+        Sysno::rt_sigreturn => impls::sys_rt_sigreturn(),
 
         Sysno::ioctl => impls::sys_ioctl(args[0], args[1], args[2]),
-        Sysno::fcntl => {
-            axlog::debug!("sys_fcntl: fd={}, cmd={} (stub)", args[0], args[1]);
-            0
-        }
-        Sysno::dup => {
-            axlog::debug!("sys_dup: fd={} (stub)", args[0]);
-            args[0] as isize // 简单返回同一个 fd
-        }
-        Sysno::dup3 => {
-            axlog::debug!("sys_dup3: oldfd={}, newfd={} (stub)", args[0], args[1]);
-            args[1] as isize
-        }
+        Sysno::fcntl => impls::sys_fcntl(args[0], args[1], args[2]),
+        Sysno::dup => impls::sys_dup(args[0]),
+        Sysno::dup3 => impls::sys_dup3(args[0], args[1], args[2]),
         Sysno::pipe2 => {
             axlog::debug!("sys_pipe2 (stub)");
             -LinuxError::ENOSYS.code() as isize
@@ -148,59 +105,8 @@ fn syscall_dispatcher(tf: &TrapFrame, syscall_id: usize, args: [usize; 6]) -> is
             // 返回 1 表示有 1 个 fd 就绪（简化处理）
             1
         }
-        Sysno::getcwd => {
-            axlog::debug!("sys_getcwd: buf={:#x}, size={}", args[0], args[1]);
-            if args[0] == 0 {
-                return -LinuxError::EFAULT.code() as isize;
-            }
-            let cwd = match axfs::FS_CONTEXT.lock().current_dir().absolute_path() {
-                Ok(path) => path,
-                Err(err) => return -LinuxError::from(err).code() as isize,
-            };
-            let cwd_bytes = cwd.as_bytes();
-            if cwd_bytes.len() + 1 > args[1] {
-                return -LinuxError::ERANGE.code() as isize;
-            }
-
-            let buf = unsafe { core::slice::from_raw_parts_mut(args[0] as *mut u8, args[1]) };
-            buf[..cwd_bytes.len()].copy_from_slice(cwd_bytes);
-            buf[cwd_bytes.len()] = 0;
-            args[0] as isize
-        }
-        Sysno::chdir => {
-            axlog::debug!("sys_chdir: path={:#x}", args[0]);
-            if args[0] == 0 {
-                return -LinuxError::EFAULT.code() as isize;
-            }
-            let path = unsafe { core::ffi::CStr::from_ptr(args[0] as *const core::ffi::c_char) };
-            let path = match path.to_str() {
-                Ok(path) => path,
-                Err(_) => return -LinuxError::EINVAL.code() as isize,
-            };
-            let mut fs = axfs::FS_CONTEXT.lock();
-            let dir = match fs.resolve(path) {
-                Ok(dir) => dir,
-                Err(err) => {
-                    let errno = match err {
-                        AxError::ReadOnlyFilesystem | AxError::NotFound => LinuxError::ENOENT,
-                        AxError::NotADirectory => LinuxError::ENOTDIR,
-                        AxError::InvalidInput => LinuxError::EINVAL,
-                        _ => LinuxError::from(err),
-                    };
-                    return -errno.code() as isize;
-                }
-            };
-            if let Err(err) = fs.set_current_dir(dir) {
-                let errno = match err {
-                    AxError::ReadOnlyFilesystem | AxError::NotFound => LinuxError::ENOENT,
-                    AxError::NotADirectory => LinuxError::ENOTDIR,
-                    AxError::InvalidInput => LinuxError::EINVAL,
-                    _ => LinuxError::from(err),
-                };
-                return -errno.code() as isize;
-            }
-            0
-        }
+        Sysno::getcwd => impls::sys_getcwd(args[0], args[1]),
+        Sysno::chdir => impls::sys_chdir(args[0]),
         Sysno::set_robust_list => {
             axlog::debug!("sys_set_robust_list (stub)");
             0
@@ -213,15 +119,7 @@ fn syscall_dispatcher(tf: &TrapFrame, syscall_id: usize, args: [usize; 6]) -> is
             axlog::debug!("sys_faccessat (stub)");
             -LinuxError::ENOENT.code() as isize
         }
-        Sysno::lseek => {
-            axlog::debug!(
-                "sys_lseek: fd={}, offset={}, whence={} (stub)",
-                args[0],
-                args[1] as isize,
-                args[2]
-            );
-            0
-        }
+        Sysno::lseek => impls::sys_lseek(args[0], args[1], args[2]),
         Sysno::execve => {
             axlog::debug!(
                 "sys_execve: pathname={:#x}, argv={:#x}, envp={:#x}",

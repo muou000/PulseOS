@@ -1,6 +1,12 @@
 use arceos_posix_api::sys_close as ax_sys_close;
+use arceos_posix_api::sys_dup as ax_sys_dup;
+use arceos_posix_api::sys_dup2 as ax_sys_dup2;
+use arceos_posix_api::sys_fcntl as ax_sys_fcntl;
 use arceos_posix_api::sys_fstat as ax_sys_fstat;
 use arceos_posix_api::sys_getdents64 as ax_sys_getdents64;
+use arceos_posix_api::sys_getcwd as ax_sys_getcwd;
+use arceos_posix_api::sys_chdir as ax_sys_chdir;
+use arceos_posix_api::sys_lseek as ax_sys_lseek;
 use arceos_posix_api::sys_open as ax_sys_open;
 use arceos_posix_api::sys_read as ax_sys_read;
 use arceos_posix_api::sys_stat as ax_sys_stat;
@@ -47,17 +53,6 @@ pub fn sys_fstatat(dirfd: i32, pathname: usize, statbuf: usize, flags: usize) ->
     }
 }
 
-const STATX_TYPE: u32 = 0x0000_0001;
-const STATX_MODE: u32 = 0x0000_0002;
-const STATX_NLINK: u32 = 0x0000_0004;
-const STATX_UID: u32 = 0x0000_0008;
-const STATX_GID: u32 = 0x0000_0010;
-const STATX_ATIME: u32 = 0x0000_0020;
-const STATX_MTIME: u32 = 0x0000_0040;
-const STATX_CTIME: u32 = 0x0000_0080;
-const STATX_INO: u32 = 0x0000_0100;
-const STATX_SIZE: u32 = 0x0000_0200;
-const STATX_BLOCKS: u32 = 0x0000_0400;
 const STATX_BASIC_STATS: u32 = 0x0000_07ff;
 const STATX_MNT_ID: u32 = 0x0000_1000;
 const AT_EMPTY_PATH: usize = 0x1000;
@@ -173,6 +168,45 @@ pub fn sys_writev(fd: usize, iov: usize, iovcnt: usize) -> isize {
             iovcnt as i32,
         ) as isize
     }
+}
+
+const O_CLOEXEC: usize = 0x80000;
+
+pub fn sys_fcntl(fd: usize, cmd: usize, arg: usize) -> isize {
+    ax_sys_fcntl(fd as i32, cmd as i32, arg) as isize
+}
+
+pub fn sys_dup(fd: usize) -> isize {
+    ax_sys_dup(fd as i32) as isize
+}
+
+pub fn sys_dup3(oldfd: usize, newfd: usize, flags: usize) -> isize {
+    if oldfd == newfd {
+        return -LinuxError::EINVAL.code() as isize;
+    }
+    if (flags & !O_CLOEXEC) != 0 {
+        return -LinuxError::EINVAL.code() as isize;
+    }
+    ax_sys_dup2(oldfd as i32, newfd as i32) as isize
+}
+
+pub fn sys_lseek(fd: usize, offset: usize, whence: usize) -> isize {
+    ax_sys_lseek(fd as i32, offset as i64, whence as i32) as isize
+}
+
+pub fn sys_getcwd(buf: usize, size: usize) -> isize {
+    if buf == 0 {
+        return -LinuxError::EFAULT.code() as isize;
+    }
+    if size == 0 {
+        return -LinuxError::ERANGE.code() as isize;
+    }
+    let ret = ax_sys_getcwd(buf as *mut c_char, size) as isize;
+    if ret < 0 { ret } else { buf as isize }
+}
+
+pub fn sys_chdir(path: usize) -> isize {
+    ax_sys_chdir(path as *const c_char) as isize
 }
 
 const TCGETS: usize = 0x5401;
