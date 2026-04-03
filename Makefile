@@ -8,11 +8,20 @@ export ARCH ?= riscv64
 export LOG := info
 
 all: 
-	@ARCH=riscv64 APP_FEATURES=qemu,auto-testcode LOG=info $(MAKE) defconfig
-	@ARCH=riscv64 APP_FEATURES=qemu,auto-testcode LOG=info BUS=mmio $(MAKE) -C arceos build
+	@ARCH=riscv64 APP_FEATURES=qemu,auto-testcode LOG=off $(MAKE) defconfig
+	@ARCH=riscv64 APP_FEATURES=qemu,auto-testcode LOG=off BUS=mmio $(MAKE) -C arceos build
 	@cp PulseOS_riscv64-qemu-virt.bin kernel-rv
 	@ARCH=loongarch64 APP_FEATURES=qemu,auto-testcode LOG=off $(MAKE) defconfig
 	@ARCH=loongarch64 APP_FEATURES=qemu,auto-testcode LOG=off BUS=mmio $(MAKE) -C arceos build
+	@cp PulseOS_loongarch64-qemu-virt.elf kernel-la
+	@$(MAKE) img_all
+
+test:
+	@ARCH=riscv64 APP_FEATURES=qemu,auto-testcode LOG=info $(MAKE) defconfig
+	@ARCH=riscv64 APP_FEATURES=qemu,auto-testcode LOG=info BUS=mmio $(MAKE) -C arceos build
+	@cp PulseOS_riscv64-qemu-virt.bin kernel-rv
+	@ARCH=loongarch64 APP_FEATURES=qemu,auto-testcode LOG=info $(MAKE) defconfig
+	@ARCH=loongarch64 APP_FEATURES=qemu,auto-testcode LOG=info BUS=mmio $(MAKE) -C arceos build
 	@cp PulseOS_loongarch64-qemu-virt.elf kernel-la
 	@$(MAKE) img_all
 
