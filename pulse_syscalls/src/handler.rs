@@ -58,15 +58,7 @@ fn syscall_dispatcher(tf: &TrapFrame, syscall_id: usize, args: [usize; 6]) -> is
         Sysno::brk => impls::sys_brk(args[0]),
         Sysno::mmap => impls::sys_mmap(args[0], args[1], args[2], args[3], args[4] as i32, args[5]),
         Sysno::munmap => impls::sys_munmap(args[0], args[1]),
-        Sysno::mprotect => {
-            axlog::debug!(
-                "sys_mprotect: addr={:#x}, len={:#x}, prot={:#x}",
-                args[0],
-                args[1],
-                args[2]
-            );
-            0 // 暂时忽略保护属性变更
-        }
+        Sysno::mprotect => impls::sys_mprotect(args[0], args[1], args[2]),
 
         Sysno::nanosleep => impls::sys_nanosleep(args[0], args[1]),
         Sysno::clock_gettime => impls::sys_clock_gettime(args[0] as i32, args[1]),
