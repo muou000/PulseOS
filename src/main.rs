@@ -13,8 +13,8 @@ fn main() {
     use axtask::TaskInner;
     const SHELL_ELF_PATH: &str = "/bin/sh";
     #[cfg(feature = "auto-testcode")]
-    const AUTO_TESTCODE_CMD: &str = "for t in /fs/*_testcode.sh; do if [ -f \"$t\" ]; then echo \"[auto-testcode] running $t\"; sh \"$t\"; fi; done";
-
+    // const AUTO_TESTCODE_CMD: &str = "find /fs -type f -name '*_testcode.sh' 2>/dev/null | while read -r t; do d=$(dirname \"$t\"); f=$(basename \"$t\"); (cd \"$d\" && sh \"$f\"); done";
+    const AUTO_TESTCODE_CMD: &str = "cd /fs/musl && ./basic_testcode.sh && cd /fs/glibc && ./basic_testcode.sh";
     match pulse_core::task::Process::new_uspace() {
         Ok(proc) => {
             info!("Created initial user process");
@@ -53,7 +53,7 @@ fn main() {
             let init_task = axtask::spawn_task(inner);
 
             loop {
-                if let Some(exit_code) = init_task.try_join() {
+                if let Some(_exit_code) = init_task.try_join() {
                     arceos_api::sys::ax_terminate();
                 }
                 axtask::yield_now();
