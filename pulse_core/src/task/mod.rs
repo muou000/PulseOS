@@ -6,7 +6,7 @@ use axerrno::AxResult;
 use axhal::context::{TrapFrame, UspaceContext};
 use axhal::paging::MappingFlags;
 use axmm::AddrSpace;
-use axtask::{TaskExtRef, TaskInner, def_task_ext};
+use axtask::{TaskInner, def_task_ext};
 use memory_addr::{VirtAddr, va};
 use spin::Mutex;
 pub struct Process {
@@ -141,7 +141,7 @@ impl Process {
         let mut parent_aspace = self.aspace.lock();
         // 2. Share only existing user mappings into child and mark writable pages as read-only.
         // Walking the entire lower user VA range (e.g. 0x1000..0x4000_0000) is too expensive.
-        let mut mapped_user_ranges: Vec<(VirtAddr, VirtAddr)> = Vec::new();
+        let mut mapped_user_ranges: Vec<(VirtAddr, VirtAddr, MappingFlags)> = Vec::new();
         parent_aspace.for_each_area(|start, end, flags| {
             if !flags.contains(MappingFlags::USER) {
                 return;
@@ -149,33 +149,62 @@ impl Process {
             let clipped_start = start.max(va!(USER_SPACE_BASE));
             let clipped_end = end.min(va!(USER_STACK_TOP));
             if clipped_start < clipped_end {
-                mapped_user_ranges.push((clipped_start, clipped_end));
+                mapped_user_ranges.push((clipped_start, clipped_end, flags));
             }
         });
 
-        for (start, end) in mapped_user_ranges {
+        for (start, end, area_flags) in mapped_user_ranges {
             for vaddr in memory_addr::PageIter4K::new(start, end).unwrap() {
                 if let Ok((paddr, flags, _page_size)) = parent_aspace.page_table().query(vaddr) {
-                    let user_flags = flags
+                    let pte_user_flags = flags
                         & (MappingFlags::READ
                             | MappingFlags::WRITE
                             | MappingFlags::EXECUTE
                             | MappingFlags::USER);
-                    if !user_flags.contains(MappingFlags::USER) {
+                    let area_user_flags = area_flags
+                        & (MappingFlags::READ
+                            | MappingFlags::WRITE
+                            | MappingFlags::EXECUTE
+                            | MappingFlags::USER);
+                    if !area_user_flags.contains(MappingFlags::USER) {
                         continue;
                     }
 
-                    let mut child_pte_flags = user_flags;
-                    if user_flags.contains(MappingFlags::WRITE) {
-                        child_pte_flags.remove(MappingFlags::WRITE);
-                        parent_aspace.protect(vaddr, memory_addr::PAGE_SIZE_4K, child_pte_flags)?;
+                    // Keep child VMA permissions from area metadata (the
+                    // authoritative desired rights), not from transient PTE
+                    // states that may already be read-only due to prior COW.
+                    let mut child_pte_flags = pte_user_flags;
+                    // Parent and child share this mapped frame initially.
+                    // Track refs for all shared user pages (including RX RO
+                    // pages), otherwise child exit may free frames still used
+                    // by parent.
+                    if paddr.as_usize() != 0 {
+                        axmm::cow_inc_frame_ref(paddr);
                     }
-                    axmm::cow_inc_frame_ref(paddr);
+                    if area_user_flags.contains(MappingFlags::WRITE) {
+                        child_pte_flags.remove(MappingFlags::WRITE);
+                        // Keep parent VMA permissions unchanged (still writable)
+                        // so later write faults can be recognized as COW.
+                        if pte_user_flags.contains(MappingFlags::WRITE) {
+                            parent_aspace.protect_pte_only(
+                                vaddr,
+                                memory_addr::PAGE_SIZE_4K,
+                                child_pte_flags,
+                            )?;
+                        }
+                    }
 
                     // Keep area permissions (including WRITE for COW candidates) in child metadata,
                     // but install a read-only shared PTE for writable pages.
-                    new_aspace.map_alloc(vaddr, memory_addr::PAGE_SIZE_4K, user_flags, false)?;
-                    new_aspace.remap_page(vaddr, paddr, child_pte_flags)?;
+                    new_aspace.map_alloc(
+                        vaddr,
+                        memory_addr::PAGE_SIZE_4K,
+                        area_user_flags,
+                        false,
+                    )?;
+                    if paddr.as_usize() != 0 {
+                        new_aspace.remap_page(vaddr, paddr, child_pte_flags)?;
+                    }
                 }
             }
         }
