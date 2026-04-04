@@ -11,14 +11,11 @@ repository.workspace = true
 axhal.workspace = true
 axlog.workspace = true
 axerrno.workspace = true
-axtask = { workspace = true }
-axfs = { path = "../arceos/modules/axfs" }
+axtask = { workspace = true, features = ["multitask"] }
 axio = { version = "0.1", features = ["alloc"] }
 linkme = "0.3"
 memory_addr = { version = "0.4" }
-spin = "0.9"
 bitflags = "2.11"
 syscalls.workspace = true
 pulse_core = { path = "../pulse_core" }
 arceos_posix_api = { path = "../arceos/api/arceos_posix_api", features = ["fd", "fs", "pipe"] }
-axns = { path = "../arceos/modules/axns" }

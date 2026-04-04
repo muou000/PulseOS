@@ -7,27 +7,18 @@ license.workspace = true
 homepage.workspace = true
 repository.workspace = true
 
-[features]
-default = ["alloc", "fs"]
-alloc = ["dep:axalloc"]
-fs = ["dep:axfs"]
-
 [dependencies]
 axhal = { workspace = true, features = ["paging"] }
 axlog = { workspace = true }
 axconfig = { workspace = true }
 axerrno = "0.2"
 linkme = "0.3"
-kernel-elf-parser = "0.3"
-xmas-elf = "0.9"
+kernel-elf-parser = { version = "0.3" }
+xmas-elf = { version = "0.9" }
 
-axtask = { workspace = true }
-axalloc = { path = "../arceos/modules/axalloc", optional = true }
-axfs = { path = "../arceos/modules/axfs", optional = true }
+axtask = { workspace = true, features = ["multitask"] }
+axfs = { path = "../arceos/modules/axfs" }
 axmm = { path = "../arceos/modules/axmm" }
 memory_addr = { version = "0.4" }
 
-log = "=0.4.21"
 spin = "0.9"
-arceos_posix_api = { path = "../arceos/api/arceos_posix_api" }
-axns = { path = "../arceos/modules/axns" }

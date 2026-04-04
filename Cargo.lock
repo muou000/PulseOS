@@ -7,9 +7,7 @@ name = "Pulse"
 version = "0.1.0"
 dependencies = [
  "arceos_api",
- "axconfig",
  "axfeat",
- "axhal",
  "axlog",
  "axplat-loongarch64-qemu-virt",
  "axplat-riscv64-qemu-virt",
@@ -17,7 +15,6 @@ dependencies = [
  "axtask",
  "pulse_core",
  "pulse_syscalls",
- "syscalls",
 ]
 
 [[package]]
@@ -1355,19 +1352,15 @@ dependencies = [
 name = "pulse_core"
 version = "0.1.0"
 dependencies = [
- "arceos_posix_api",
- "axalloc",
  "axconfig",
  "axerrno 0.2.2",
  "axfs",
  "axhal",
  "axlog",
  "axmm",
- "axns",
  "axtask",
  "kernel-elf-parser",
  "linkme",
- "log",
  "memory_addr",
  "spin 0.9.8",
  "xmas-elf",
@@ -1379,17 +1372,14 @@ version = "0.1.0"
 dependencies = [
  "arceos_posix_api",
  "axerrno 0.2.2",
- "axfs",
  "axhal",
  "axio 0.1.2",
  "axlog",
- "axns",
  "axtask",
  "bitflags 2.11.0",
  "linkme",
  "memory_addr",
  "pulse_core",
- "spin 0.9.8",
  "syscalls",
 ]
 
