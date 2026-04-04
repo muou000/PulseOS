@@ -5,6 +5,7 @@ use axhal::context::TrapFrame;
 use axtask::TaskExtRef;
 use bitflags::bitflags;
 use core::ffi::c_char;
+use memory_addr::VirtAddr;
 
 bitflags! {
     /// Flags for sys_clone
@@ -40,6 +41,24 @@ bitflags! {
 
 pub fn sys_getpid() -> isize {
     axtask::current().id().as_u64() as isize
+}
+
+fn write_user_i32(process: &pulse_core::task::Process, user_addr: usize, value: i32) -> isize {
+    let bytes = value.to_ne_bytes();
+    process
+        .aspace
+        .lock()
+        .write(VirtAddr::from(user_addr), &bytes)
+        .map(|_| 0)
+        .unwrap_or_else(|e| {
+            axlog::warn!(
+                "user write failed: addr={:#x}, value={}, err={:?}",
+                user_addr,
+                value,
+                e
+            );
+            -LinuxError::EFAULT.code() as isize
+        })
 }
 
 pub fn sys_exit(exit_code: i32) -> ! {
@@ -256,14 +275,15 @@ pub fn sys_wait4(pid: isize, status: usize, options: i32, rusage: usize) -> isiz
         }
 
         if let Some(idx) = exited_idx {
-            children.remove(idx);
+            let exited_child = children.remove(idx);
             if status != 0 {
-                unsafe {
-                    // write the exit code logic:
-                    // in Linux, WIFEXITED is true and WEXITSTATUS is `exit_code & 0xff`
-                    // status is (exit_code & 0xff) << 8
-                    let status_ptr = status as *mut i32;
-                    *status_ptr = (exit_code & 0xff) << 8;
+                // In Linux, WIFEXITED is true and WEXITSTATUS is `exit_code & 0xff`,
+                // so the status word is `(exit_code & 0xff) << 8`.
+                let wait_status = (exit_code & 0xff) << 8;
+                let write_result = write_user_i32(process, status, wait_status);
+                if write_result < 0 {
+                    children.insert(idx, exited_child);
+                    return write_result;
                 }
             }
             if rusage != 0 {
