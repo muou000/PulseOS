@@ -1,0 +1,1 @@
+/home/muou/PulseOS/vendor/axconfig-gen/target/release/libaxconfig_gen.rlib: /home/muou/PulseOS/vendor/axconfig-gen/README.md /home/muou/PulseOS/vendor/axconfig-gen/src/config.rs /home/muou/PulseOS/vendor/axconfig-gen/src/lib.rs /home/muou/PulseOS/vendor/axconfig-gen/src/output.rs /home/muou/PulseOS/vendor/axconfig-gen/src/ty.rs /home/muou/PulseOS/vendor/axconfig-gen/src/value.rs

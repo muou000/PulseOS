@@ -1,6 +1,6 @@
 [workspace]
 
-exclude = ["arceos"]
+exclude = ["arceos", "vendor/axconfig-gen"]
 members = ["pulse_core", "pulse_syscalls"]
 
 [workspace.package]

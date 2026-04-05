@@ -1,0 +1,52 @@
+[package]
+name = "axfs"
+version.workspace = true
+edition.workspace = true
+authors = ["Mivik <mivikq@gmail.com>"]
+description = "ArceOS filesystem module"
+license.workspace = true
+homepage.workspace = true
+
+[features]
+default = ["ext4"]
+use-ramdisk = []           # TODO: init ramdisk
+fat = ["dep:fatfs"]
+ext4 = ["dep:ext4_rs"]
+times = []
+std = []
+
+[dependencies]
+axalloc = { workspace = true }
+axdriver = { workspace = true, features = ["block"] }
+axerrno = "0.1"
+axfs-ng-vfs = "0.1"
+axhal = { workspace = true }
+axio = { workspace = true, features = ["alloc"] }
+axpoll = { workspace = true }
+axsync = { workspace = true }
+bitflags = "2.10"
+cfg-if = { workspace = true }
+chrono = { workspace = true }
+intrusive-collections = "0.9.7"
+kspin = { workspace = true }
+log = { workspace = true }
+lru = "0.16.0"
+scope-local = { workspace = true }
+slab = { version = "0.4.9", default-features = false }
+spin = { workspace = true }
+
+[dependencies.ext4_rs]
+version = "1.3.3"
+default-features = false
+optional = true
+
+[dependencies.fatfs]
+git = "https://github.com/Starry-OS/rust-fatfs.git"
+rev = "2685439"
+default-features = false
+optional = true
+features = ["alloc", "lfn", "log_level_trace", "unicode"]
+
+[dev-dependencies]
+axdriver = { workspace = true, features = ["block", "ramdisk"] }
+env_logger = "0.11.8"

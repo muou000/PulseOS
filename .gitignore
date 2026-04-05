@@ -1,9 +1,9 @@
 /target
+.cargo/
+.tools/
+.tools-test/
 *.elf
 *.bin
 *.img
 .axconfig.old.toml
 .axconfig.toml
-kernel-*
-vendor/
-config.toml
