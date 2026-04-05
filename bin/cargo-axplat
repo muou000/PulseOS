@@ -1,0 +1,49 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+REPO_ROOT=$(dirname "$SCRIPT_DIR")
+
+if [[ "${1:-}" == "--version" ]]; then
+    echo "cargo-axplat 0.2.4-offline"
+    exit 0
+fi
+
+if [[ "${1:-}" == "axplat" ]]; then
+    shift
+fi
+
+if [[ "${1:-}" != "info" ]]; then
+    echo "offline cargo-axplat wrapper only supports: cargo axplat info -c <package>" >&2
+    exit 2
+fi
+shift
+
+package=""
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        -c|--crate|--package)
+            package="${2:-}"
+            shift 2
+            ;;
+        -C|--manifest-path|--directory)
+            shift 2
+            ;;
+        *)
+            shift
+            ;;
+    esac
+done
+
+if [[ -z "$package" ]]; then
+    echo "missing platform package name" >&2
+    exit 2
+fi
+
+config_path="$REPO_ROOT/vendor/$package/axconfig.toml"
+if [[ ! -f "$config_path" ]]; then
+    echo "offline cargo-axplat could not find $config_path" >&2
+    exit 1
+fi
+
+printf '%s\n' "$config_path"

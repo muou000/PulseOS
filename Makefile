@@ -1,4 +1,7 @@
 export A := $(PWD)
+export NAME := $(notdir $(A))
+export TOOLS_BIN := $(A)/.tools/bin
+export PATH := $(TOOLS_BIN):$(A)/bin:$(PATH)
 export NO_AXSTD := y
 export AX_LIB := axfeat
 export APP_FEATURES := qemu
@@ -7,16 +10,31 @@ export BLK := y
 export ARCH ?= riscv64
 export LOG ?= info
 
-all: 
+prepare-cargo-config:
+	@if [ -d cargo ] && [ ! -d .cargo ]; then mv cargo .cargo; fi
+
+$(TOOLS_BIN)/axconfig-gen:
+	@if [ -d cargo ] && [ ! -d .cargo ]; then mv cargo .cargo; fi
+	@mkdir -p $(TOOLS_BIN)
+	@cargo install --path vendor/axconfig-gen --root $(A)/.tools --locked --offline >/dev/null
+
+prepare-tools: $(TOOLS_BIN)/axconfig-gen
+	@echo "[tools] Offline toolchain ready at $(TOOLS_BIN)"
+
+all: prepare-tools
+	@$(MAKE) prepare-cargo-config >/dev/null
+	@command -v axconfig-gen >/dev/null || (echo "Error: missing axconfig-gen in PATH"; exit 1)
+	@command -v cargo-axplat >/dev/null || (echo "Error: missing cargo-axplat in PATH"; exit 1)
+	@command -v rust-objcopy >/dev/null || (echo "Error: missing rust-objcopy in PATH"; exit 1)
 	@ARCH=riscv64 APP_FEATURES=qemu,auto-testcode LOG=off $(MAKE) defconfig
 	@ARCH=riscv64 APP_FEATURES=qemu,auto-testcode LOG=off BUS=mmio $(MAKE) -C arceos build
-	@cp PulseOS_riscv64-qemu-virt.bin kernel-rv
+	@cp $(NAME)_riscv64-qemu-virt.bin kernel-rv
 	@ARCH=loongarch64 APP_FEATURES=qemu,auto-testcode LOG=off $(MAKE) defconfig
 	@ARCH=loongarch64 APP_FEATURES=qemu,auto-testcode LOG=off BUS=pci $(MAKE) -C arceos build
-	@cp PulseOS_loongarch64-qemu-virt.elf kernel-la
+	@cp $(NAME)_loongarch64-qemu-virt.elf kernel-la
 	@$(MAKE) img_all
 
-test:
+test: prepare-tools
 	@ARCH=riscv64 APP_FEATURES=qemu,auto-testcode LOG=$(LOG) $(MAKE) defconfig
 	@ARCH=riscv64 APP_FEATURES=qemu,auto-testcode LOG=$(LOG) BUS=mmio $(MAKE) -C arceos build
 	@cp PulseOS_riscv64-qemu-virt.bin kernel-rv
@@ -25,14 +43,17 @@ test:
 	@cp PulseOS_loongarch64-qemu-virt.elf kernel-la
 	@$(MAKE) img_all
 
-build run justrun: defconfig
-	@make -C arceos $@
+build run justrun: prepare-tools defconfig
+	@$(MAKE) -C arceos A=$(A) ARCH=$(ARCH) $@
 
-clean defconfig:
-	@make -C arceos $@
+clean:
+	@$(MAKE) -C arceos A=$(A) $@
+
+defconfig: prepare-tools
+	@$(MAKE) -C arceos A=$(A) ARCH=$(ARCH) $@
 
 img:
-	@./build_img.sh all
+	@./build_img.sh $(ARCH)
 	@cp rootfs-$(ARCH).img arceos/disk.img
 
 img_all:
@@ -42,8 +63,10 @@ img_all:
 	@cp disk.img arceos/disk.img
 	@cp disk-la.img arceos/disk-la.img
 
-la:
-	@ARCH=loongarch64 make defconfig
-	@ARCH=loongarch64 make -C arceos run
+la: prepare-tools
+	@$(MAKE) ARCH=loongarch64 defconfig
+	@$(MAKE) -C arceos A=$(A) ARCH=loongarch64 run
 
-.PHONY: all oscomp build run justrun clean defconfig img img_all la
+package: img_all
+
+.PHONY: all oscomp build run justrun clean defconfig img img_all la package prepare-tools prepare-cargo-config

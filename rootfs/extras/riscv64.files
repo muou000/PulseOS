@@ -1,0 +1,6 @@
+# Relative paths in exported rootfs for riscv64 extras.
+# Keep this list minimal (only files you added manually).
+
+lib/ld-linux-riscv64-lp64d.so.1
+lib/libc.so.6
+lib/libm.so.6
