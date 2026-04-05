@@ -1,7 +1,6 @@
 export A := $(PWD)
 export NAME := $(notdir $(A))
-export TOOLS_BIN := $(A)/.tools/bin
-export PATH := $(TOOLS_BIN):$(A)/bin:$(PATH)
+export PATH := $(A)/bin:$(PATH)
 export NO_AXSTD := y
 export AX_LIB := axfeat
 export APP_FEATURES := qemu
@@ -13,13 +12,12 @@ export LOG ?= info
 prepare-cargo-config:
 	@if [ -d cargo ] && [ ! -d .cargo ]; then mv cargo .cargo; fi
 
-$(TOOLS_BIN)/axconfig-gen:
-	@if [ -d cargo ] && [ ! -d .cargo ]; then mv cargo .cargo; fi
-	@mkdir -p $(TOOLS_BIN)
-	@cargo install --path vendor/axconfig-gen --root $(A)/.tools --locked --offline >/dev/null
-
-prepare-tools: $(TOOLS_BIN)/axconfig-gen
-	@echo "[tools] Offline toolchain ready at $(TOOLS_BIN)"
+prepare-tools:
+	@command -v axconfig-gen >/dev/null || (echo "Error: missing axconfig-gen in PATH (expected in $(A)/bin)"; exit 1)
+	@command -v cargo-axplat >/dev/null || (echo "Error: missing cargo-axplat in PATH (expected in $(A)/bin)"; exit 1)
+	@command -v rust-objcopy >/dev/null || (echo "Error: missing rust-objcopy in PATH (expected in $(A)/bin)"; exit 1)
+	@command -v rust-objdump >/dev/null || (echo "Error: missing rust-objdump in PATH (expected in $(A)/bin)"; exit 1)
+	@echo "[tools] Using prebuilt tools from $(A)/bin"
 
 all: prepare-tools
 	@$(MAKE) prepare-cargo-config >/dev/null
