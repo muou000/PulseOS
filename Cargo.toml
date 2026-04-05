@@ -33,6 +33,9 @@ axplat-loongarch64-qemu-virt = "0.3.0"
 
 syscalls = { git = "https://github.com/muou000/syscalls.git", rev = "efac241", default-features = false }
 
+[patch.crates-io]
+axplat-loongarch64-qemu-virt = { path = "vendor/axplat-loongarch64-qemu-virt" }
+
 [package]
 name = "Pulse"
 version.workspace = true

@@ -17,6 +17,8 @@ unsafe fn init_boot_page_table() {
         let l1_va = va!(&raw const BOOT_PT_L1 as usize);
         // 0x0000_0000_0000 ~ 0x0080_0000_0000, table
         BOOT_PT_L0[0] = LA64PTE::new_table(axplat::mem::virt_to_phys(l1_va));
+        // Higher-half mapping for canonical addresses (bit47 = 1).
+        BOOT_PT_L0[0x100] = LA64PTE::new_table(axplat::mem::virt_to_phys(l1_va));
         // 0x0000_0000..0x4000_0000, VPWXGD, 1G block
         BOOT_PT_L1[0] = LA64PTE::new_page(
             pa!(0),
@@ -33,12 +35,10 @@ unsafe fn init_boot_page_table() {
 }
 
 fn enable_fp_simd() {
-    // FP/SIMD needs to be enabled early, as the compiler may generate SIMD
-    // instructions in the bootstrapping code to speed up the operations
-    // like `memset` and `memcpy`.
+    // Enable FP to avoid FloatingPointUnavailable traps.
+    axcpu::asm::enable_fp();
     #[cfg(feature = "fp-simd")]
     {
-        axcpu::asm::enable_fp();
         axcpu::asm::enable_lsx();
     }
 }
