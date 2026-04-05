@@ -24,6 +24,10 @@ fn gen_linker_script(arch: &str, platform: &str) -> Result<()> {
         "%KERNEL_BASE%",
         &format!("{:#x}", axconfig::plat::KERNEL_BASE_VADDR),
     );
+    let ld_content = ld_content.replace(
+        "%PHYS_VIRT_OFFSET%",
+        &format!("{:#x}", axconfig::plat::PHYS_VIRT_OFFSET),
+    );
     let ld_content = ld_content.replace("%CPU_NUM%", &format!("{}", axconfig::plat::MAX_CPU_NUM));
 
     // target/<target_triple>/<mode>/build/axhal-xxxx/out
