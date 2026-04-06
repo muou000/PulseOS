@@ -1,4 +1,5 @@
 use crate::config::*;
+use alloc::string::{String, ToString};
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use axconfig::TASK_STACK_SIZE;
@@ -12,6 +13,8 @@ use spin::Mutex;
 pub struct Process {
     pub aspace: Arc<Mutex<AddrSpace>>,
     pub heap_top: Arc<Mutex<usize>>,
+    pub cwd: Arc<Mutex<String>>,
+    pub parent_pid: Arc<Mutex<u64>>,
     pub stack_top: Mutex<usize>,
     pub entry: Mutex<usize>,
     pub children: Mutex<Vec<axtask::AxTaskRef>>,
@@ -33,9 +36,16 @@ impl Process {
             MappingFlags::READ | MappingFlags::WRITE | MappingFlags::USER,
             false,
         )?;
+        let cwd = match axfs::FS_CONTEXT.lock().current_dir().absolute_path() {
+            Ok(path) => path.to_string(),
+            Err(_) => String::from("/"),
+        };
+
         Ok(Self {
             aspace: Arc::new(Mutex::new(aspace)),
             heap_top: Arc::new(Mutex::new(USER_HEAP_BASE + USER_HEAP_SIZE)),
+            cwd: Arc::new(Mutex::new(cwd)),
+            parent_pid: Arc::new(Mutex::new(0)),
             stack_top: Mutex::new(USER_STACK_TOP),
             entry: Mutex::new(0),
             children: Mutex::new(Vec::new()),
@@ -112,10 +122,26 @@ impl Process {
         Ok(())
     }
 
+    pub fn sync_fs_context(&self) {
+        let cwd = self.cwd.lock().clone();
+        let mut fs = axfs::FS_CONTEXT.lock();
+        if let Ok(dir) = fs.resolve(cwd.as_str()) {
+            let _ = fs.set_current_dir(dir);
+        }
+    }
+
+    pub fn refresh_cwd_from_fs(&self) {
+        if let Ok(path) = axfs::FS_CONTEXT.lock().current_dir().absolute_path() {
+            *self.cwd.lock() = path.to_string();
+        }
+    }
+
     pub fn clone_for_thread(&self) -> Self {
         Self {
             aspace: self.aspace.clone(),
             heap_top: self.heap_top.clone(),
+            cwd: self.cwd.clone(),
+            parent_pid: self.parent_pid.clone(),
             stack_top: Mutex::new(*self.stack_top.lock()),
             entry: Mutex::new(*self.entry.lock()),
             children: Mutex::new(Vec::new()),
@@ -213,6 +239,8 @@ impl Process {
         let child_proc = Self {
             aspace: Arc::new(Mutex::new(new_aspace)),
             heap_top: Arc::new(Mutex::new(*self.heap_top.lock())),
+            cwd: Arc::new(Mutex::new(self.cwd.lock().clone())),
+            parent_pid: Arc::new(Mutex::new(axtask::current().id().as_u64())),
             stack_top: Mutex::new(*self.stack_top.lock()),
             entry: Mutex::new(*self.entry.lock()),
             children: Mutex::new(Vec::new()),
