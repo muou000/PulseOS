@@ -387,6 +387,17 @@ pub fn sys_chdir(path: *const c_char) -> c_int {
     })
 }
 
+/// Create a directory.
+pub fn sys_mkdir(path: *const c_char, _mode: ctypes::mode_t) -> c_int {
+    let path = char_ptr_to_str(path);
+    debug!("sys_mkdir <= {:?}", path);
+    syscall_body!(sys_mkdir, {
+        let path = path?;
+        axfs::FS_CONTEXT.lock().create_dir(path, Default::default())?;
+        Ok(0)
+    })
+}
+
 /// Rename `old` to `new`
 /// If new exists, it is first removed.
 ///
