@@ -52,12 +52,8 @@ fn main() {
             inner.init_task_ext(proc);
             let init_task = axtask::spawn_task(inner);
 
-            loop {
-                if let Some(_exit_code) = init_task.try_join() {
-                    arceos_api::sys::ax_terminate();
-                }
-                axtask::yield_now();
-            }
+            let _exit_code = init_task.join();
+            arceos_api::sys::ax_terminate();
         }
         Err(e) => {
             error!("Failed to create user process: {:?}", e);
