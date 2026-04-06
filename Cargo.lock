@@ -1378,6 +1378,7 @@ dependencies = [
  "linkme",
  "memory_addr",
  "pulse_core",
+ "spin 0.10.0",
  "syscalls",
 ]
 
