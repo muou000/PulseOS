@@ -43,6 +43,12 @@ pub fn sys_getpid() -> isize {
     axtask::current().id().as_u64() as isize
 }
 
+pub fn sys_getppid() -> isize {
+    let curr = axtask::current();
+    let process: &pulse_core::task::Process = curr.task_ext();
+    *process.parent_pid.lock() as isize
+}
+
 fn write_user_i32(process: &pulse_core::task::Process, user_addr: usize, value: i32) -> isize {
     let bytes = value.to_ne_bytes();
     process

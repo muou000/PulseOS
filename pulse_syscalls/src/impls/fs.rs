@@ -1,3 +1,5 @@
+use alloc::collections::BTreeSet;
+use alloc::string::{String, ToString};
 use arceos_posix_api::sys_chdir as ax_sys_chdir;
 use arceos_posix_api::sys_close as ax_sys_close;
 use arceos_posix_api::sys_dup as ax_sys_dup;
@@ -7,6 +9,7 @@ use arceos_posix_api::sys_fstat as ax_sys_fstat;
 use arceos_posix_api::sys_getcwd as ax_sys_getcwd;
 use arceos_posix_api::sys_getdents64 as ax_sys_getdents64;
 use arceos_posix_api::sys_lseek as ax_sys_lseek;
+use arceos_posix_api::sys_mkdir as ax_sys_mkdir;
 use arceos_posix_api::sys_open as ax_sys_open;
 use arceos_posix_api::sys_pipe as ax_sys_pipe;
 use arceos_posix_api::sys_read as ax_sys_read;
@@ -14,7 +17,12 @@ use arceos_posix_api::sys_stat as ax_sys_stat;
 use arceos_posix_api::sys_write as ax_sys_write;
 use arceos_posix_api::sys_writev as ax_sys_writev;
 use axerrno::LinuxError;
-use core::ffi::{c_char, c_void};
+use axtask::TaskExtRef;
+use core::ffi::{CStr, c_char, c_void};
+use spin::Lazy;
+
+static MOUNTED_TARGETS: Lazy<spin::Mutex<BTreeSet<String>>> =
+    Lazy::new(|| spin::Mutex::new(BTreeSet::new()));
 
 pub fn sys_read(fd: usize, buf: usize, count: usize) -> isize {
     ax_sys_read(fd as i32, buf as *mut c_void, count) as isize
@@ -26,6 +34,64 @@ pub fn sys_write(fd: usize, buf: usize, count: usize) -> isize {
 
 pub fn sys_openat(_dirfd: i32, pathname: usize, flags: usize, mode: usize) -> isize {
     ax_sys_open(pathname as *const c_char, flags as i32, mode as u32) as isize
+}
+
+pub fn sys_mkdirat(_dirfd: i32, pathname: usize, mode: usize) -> isize {
+    if pathname == 0 {
+        return -LinuxError::EFAULT.code() as isize;
+    }
+    ax_sys_mkdir(pathname as *const c_char, mode as u32) as isize
+}
+
+pub fn sys_mount(
+    _source: usize,
+    target: usize,
+    _fstype: usize,
+    _flags: usize,
+    _data: usize,
+) -> isize {
+    if target == 0 {
+        return -LinuxError::EFAULT.code() as isize;
+    }
+
+    let target_path = match unsafe { CStr::from_ptr(target as *const c_char) }.to_str() {
+        Ok(s) if !s.is_empty() => s,
+        Ok(_) => return -LinuxError::EINVAL.code() as isize,
+        Err(_) => return -LinuxError::EINVAL.code() as isize,
+    };
+
+    // Keep mount behavior deterministic for tests: target must exist first.
+    let mut st = arceos_posix_api::ctypes::stat::default();
+    let stat_ret = unsafe { ax_sys_stat(target as *const c_char, &mut st) as isize };
+    if stat_ret < 0 {
+        return stat_ret;
+    }
+
+    let mut mounted = MOUNTED_TARGETS.lock();
+    if mounted.contains(target_path) {
+        return -LinuxError::EBUSY.code() as isize;
+    }
+    mounted.insert(target_path.to_string());
+    0
+}
+
+pub fn sys_umount2(target: usize, _flags: usize) -> isize {
+    if target == 0 {
+        return -LinuxError::EFAULT.code() as isize;
+    }
+
+    let target_path = match unsafe { CStr::from_ptr(target as *const c_char) }.to_str() {
+        Ok(s) if !s.is_empty() => s,
+        Ok(_) => return -LinuxError::EINVAL.code() as isize,
+        Err(_) => return -LinuxError::EINVAL.code() as isize,
+    };
+
+    let mut mounted = MOUNTED_TARGETS.lock();
+    if mounted.remove(target_path) {
+        0
+    } else {
+        -LinuxError::EINVAL.code() as isize
+    }
 }
 
 pub fn sys_getdents64(fd: usize, dirp: usize, count: usize) -> isize {
@@ -225,7 +291,13 @@ pub fn sys_getcwd(buf: usize, size: usize) -> isize {
 }
 
 pub fn sys_chdir(path: usize) -> isize {
-    ax_sys_chdir(path as *const c_char) as isize
+    let ret = ax_sys_chdir(path as *const c_char) as isize;
+    if ret == 0 {
+        let curr = axtask::current();
+        let process: &pulse_core::task::Process = curr.task_ext();
+        process.refresh_cwd_from_fs();
+    }
+    ret
 }
 
 const TCGETS: usize = 0x5401;

@@ -1,6 +1,7 @@
 use crate::*;
 use axhal::context::TrapFrame;
 use axhal::trap::{SYSCALL, register_trap_handler};
+use axtask::TaskExtRef;
 
 #[register_trap_handler(SYSCALL)]
 pub fn syscall_handler(tf: &TrapFrame, syscall_num: usize) -> isize {
@@ -27,6 +28,10 @@ pub fn syscall_handler(tf: &TrapFrame, syscall_num: usize) -> isize {
 }
 
 fn syscall_dispatcher(tf: &TrapFrame, syscall_id: usize, args: [usize; 6]) -> isize {
+    let curr = axtask::current();
+    let process: &pulse_core::task::Process = curr.task_ext();
+    process.sync_fs_context();
+
     let sysno = match Sysno::new(syscall_id) {
         Some(sysno) => sysno,
         None => {
@@ -48,6 +53,9 @@ fn syscall_dispatcher(tf: &TrapFrame, syscall_id: usize, args: [usize; 6]) -> is
         Sysno::write => impls::sys_write(args[0], args[1], args[2]),
         Sysno::writev => impls::sys_writev(args[0], args[1], args[2]),
         Sysno::openat => impls::sys_openat(args[0] as i32, args[1], args[2], args[3]),
+        Sysno::mkdirat => impls::sys_mkdirat(args[0] as i32, args[1], args[2]),
+        Sysno::mount => impls::sys_mount(args[0], args[1], args[2], args[3], args[4]),
+        Sysno::umount2 => impls::sys_umount2(args[0], args[1]),
         Sysno::getdents64 => impls::sys_getdents64(args[0], args[1], args[2]),
         Sysno::close => impls::sys_close(args[0]),
         Sysno::fstat => impls::sys_fstat(args[0], args[1]),
@@ -72,7 +80,8 @@ fn syscall_dispatcher(tf: &TrapFrame, syscall_id: usize, args: [usize; 6]) -> is
         Sysno::prlimit64 => impls::sys_prlimit64(args[0], args[1], args[2], args[3]),
         Sysno::rt_sigprocmask => impls::sys_rt_sigprocmask(args[0], args[1], args[2], args[3]),
 
-        Sysno::getuid | Sysno::geteuid | Sysno::getppid => 0,
+        Sysno::getuid | Sysno::geteuid => 0,
+        Sysno::getppid => impls::sys_getppid(),
         Sysno::getpgid => 1,
         Sysno::setpgid => impls::sys_setpgid(args[0] as isize, args[1] as isize),
         Sysno::kill => 0,
