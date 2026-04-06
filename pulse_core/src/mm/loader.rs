@@ -214,12 +214,12 @@ fn read_elf_file(path: &str) -> AxResult<Arc<Vec<u8>>> {
         return Ok(data);
     }
 
-    let data = Arc::new(
-        axfs::FS_CONTEXT
-            .lock()
-            .read(path)
-            .map_err(|_| AxError::NotFound)?,
-    );
+    let fs_ctx = {
+        let guard = axfs::FS_CONTEXT.lock();
+        guard.clone()
+    };
+
+    let data = Arc::new(fs_ctx.read(path).map_err(|_| AxError::NotFound)?);
 
     put_into_cache(path, data.clone());
     Ok(data)
