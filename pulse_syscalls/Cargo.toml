@@ -13,6 +13,7 @@ axlog.workspace = true
 axerrno.workspace = true
 axtask = { workspace = true, features = ["multitask"] }
 axio = { version = "0.1", features = ["alloc"] }
+axfs.workspace = true
 linkme = "0.3"
 memory_addr = { version = "0.4" }
 bitflags = "2.11"

@@ -19,6 +19,7 @@ use arceos_posix_api::sys_read as ax_sys_read;
 use arceos_posix_api::sys_stat as ax_sys_stat;
 use arceos_posix_api::sys_write as ax_sys_write;
 use arceos_posix_api::sys_writev as ax_sys_writev;
+use axfs::FS_CONTEXT;
 
 use axerrno::LinuxError;
 use axtask::TaskExtRef;
@@ -30,6 +31,8 @@ use pulse_core::task::Process;
 
 const O_NONBLOCK: usize = ctypes::O_NONBLOCK as usize;
 const O_CLOEXEC: usize = ctypes::O_CLOEXEC as usize;
+const AT_FDCWD: i32 = -100;
+const AT_REMOVEDIR: usize = 0x200;
 
 static MOUNTED_TARGETS: Lazy<spin::Mutex<BTreeSet<String>>> =
     Lazy::new(|| spin::Mutex::new(BTreeSet::new()));
@@ -530,6 +533,61 @@ pub fn sys_chdir(path: usize) -> isize {
         });
     }
     ret
+}
+
+pub fn sys_unlinkat(dirfd: i32, pathname: usize, flags: usize) -> isize {
+    axlog::debug!(
+        "sys_unlinkat: dirfd={}, pathname={:#x}, flags={:#x}",
+        dirfd,
+        pathname,
+        flags
+    );
+
+    if pathname == 0 {
+        return -LinuxError::EFAULT.code() as isize;
+    }
+    if (flags & !AT_REMOVEDIR) != 0 {
+        return -LinuxError::EINVAL.code() as isize;
+    }
+
+    let path = match unsafe { CStr::from_ptr(pathname as *const c_char) }.to_str() {
+        Ok(s) if !s.is_empty() => s,
+        Ok(_) => return -LinuxError::EINVAL.code() as isize,
+        Err(_) => return -LinuxError::EINVAL.code() as isize,
+    };
+
+    // If path is absolute, dirfd is ignored.
+    if dirfd != AT_FDCWD && !path.starts_with('/') {
+        return -LinuxError::EBADF.code() as isize;
+    }
+
+    if (flags & AT_REMOVEDIR) != 0 {
+        return match FS_CONTEXT.lock().remove_dir(path) {
+            Ok(()) => 0,
+            Err(e) => {
+                let errno: LinuxError = e.into();
+                -errno.code() as isize
+            }
+        };
+    }
+
+    if pathname == 0 {
+        return -LinuxError::EFAULT.code() as isize;
+    }
+
+    let path = match unsafe { CStr::from_ptr(pathname as *const c_char) }.to_str() {
+        Ok(s) if !s.is_empty() => s,
+        Ok(_) => return -LinuxError::EINVAL.code() as isize,
+        Err(_) => return -LinuxError::EINVAL.code() as isize,
+    };
+
+    match FS_CONTEXT.lock().remove_file(path) {
+        Ok(()) => 0,
+        Err(e) => {
+            let errno: LinuxError = e.into();
+            -errno.code() as isize
+        }
+    }
 }
 
 const TCGETS: usize = 0x5401;
