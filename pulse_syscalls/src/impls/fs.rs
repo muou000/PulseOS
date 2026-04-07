@@ -1,5 +1,8 @@
 use alloc::collections::BTreeSet;
 use alloc::string::{String, ToString};
+use alloc::sync::Arc;
+
+use arceos_posix_api::ctypes;
 use arceos_posix_api::sys_chdir as ax_sys_chdir;
 use arceos_posix_api::sys_close as ax_sys_close;
 use arceos_posix_api::sys_dup as ax_sys_dup;
@@ -16,27 +19,104 @@ use arceos_posix_api::sys_read as ax_sys_read;
 use arceos_posix_api::sys_stat as ax_sys_stat;
 use arceos_posix_api::sys_write as ax_sys_write;
 use arceos_posix_api::sys_writev as ax_sys_writev;
+
 use axerrno::LinuxError;
 use axtask::TaskExtRef;
 use core::ffi::{CStr, c_char, c_void};
 use spin::Lazy;
 
+use pulse_core::fd_table::{FdEntry, FdFlags, RawFdObject};
+use pulse_core::task::Process;
+
+const O_NONBLOCK: usize = ctypes::O_NONBLOCK as usize;
+const O_CLOEXEC: usize = ctypes::O_CLOEXEC as usize;
+
 static MOUNTED_TARGETS: Lazy<spin::Mutex<BTreeSet<String>>> =
     Lazy::new(|| spin::Mutex::new(BTreeSet::new()));
 
+fn with_process<R>(f: impl FnOnce(&Process) -> R) -> R {
+    let curr = axtask::current();
+    let proc: &Process = curr.task_ext();
+    f(proc)
+}
+
+fn ensure_entry(fd: usize) {
+    with_process(|process| {
+        process.fd_table.lock().ensure_raw_fd(fd, fd as i32);
+    });
+}
+
+fn map_fd(fd: usize) -> Result<i32, LinuxError> {
+    with_process(|process| {
+        let mut table = process.fd_table.lock();
+        if table.get(fd).is_none() {
+            table.ensure_raw_fd(fd, fd as i32);
+        }
+        let entry = table.get(fd).ok_or(LinuxError::EBADF)?;
+        let raw = entry
+            .object
+            .as_any()
+            .downcast_ref::<RawFdObject>()
+            .map(|o| o.raw_fd)
+            .ok_or(LinuxError::EBADF)?;
+        Ok(raw)
+    })
+}
+
+fn track_fd(fd: usize, raw_fd: i32, flags: FdFlags) {
+    with_process(|process| {
+        let _ = process.fd_table.lock().insert_at(
+            fd,
+            FdEntry {
+                object: Arc::new(RawFdObject { raw_fd }),
+                flags,
+            },
+        );
+    });
+}
+
 pub fn sys_read(fd: usize, buf: usize, count: usize) -> isize {
-    ax_sys_read(fd as i32, buf as *mut c_void, count) as isize
+    axlog::debug!("sys_read: fd={}, buf={:#x}, count={}", fd, buf, count);
+    let raw = match map_fd(fd) {
+        Ok(v) => v,
+        Err(e) => return -e.code() as isize,
+    };
+    ax_sys_read(raw, buf as *mut c_void, count) as isize
 }
 
 pub fn sys_write(fd: usize, buf: usize, count: usize) -> isize {
-    ax_sys_write(fd as i32, buf as *const c_void, count) as isize
+    axlog::debug!("sys_write: fd={}, buf={:#x}, count={}", fd, buf, count);
+    let raw = match map_fd(fd) {
+        Ok(v) => v,
+        Err(e) => return -e.code() as isize,
+    };
+    ax_sys_write(raw, buf as *const c_void, count) as isize
 }
 
 pub fn sys_openat(_dirfd: i32, pathname: usize, flags: usize, mode: usize) -> isize {
-    ax_sys_open(pathname as *const c_char, flags as i32, mode as u32) as isize
+    axlog::debug!(
+        "sys_openat: pathname={:#x}, flags={:#x}, mode={:#x}",
+        pathname,
+        flags,
+        mode
+    );
+    let ret = ax_sys_open(pathname as *const c_char, flags as i32, mode as u32) as isize;
+    if ret >= 0 {
+        let fd = ret as usize;
+        let mut fd_flags = FdFlags::empty();
+        if (flags & O_CLOEXEC) != 0 {
+            fd_flags.insert(FdFlags::CLOEXEC);
+        }
+        if (flags & O_NONBLOCK) != 0 {
+            fd_flags.insert(FdFlags::NONBLOCK);
+        }
+        track_fd(fd, fd as i32, fd_flags);
+    }
+    ret
 }
 
 pub fn sys_mkdirat(_dirfd: i32, pathname: usize, mode: usize) -> isize {
+    axlog::debug!("sys_mkdirat: pathname={:#x}, mode={:#x}", pathname, mode);
     if pathname == 0 {
         return -LinuxError::EFAULT.code() as isize;
     }
@@ -50,6 +130,7 @@ pub fn sys_mount(
     _flags: usize,
     _data: usize,
 ) -> isize {
+    axlog::debug!("sys_mount: target={:#x}, flags={:#x}", target, _flags);
     if target == 0 {
         return -LinuxError::EFAULT.code() as isize;
     }
@@ -76,6 +157,7 @@ pub fn sys_mount(
 }
 
 pub fn sys_umount2(target: usize, _flags: usize) -> isize {
+    axlog::debug!("sys_umount2: target={:#x}, flags={:#x}", target, _flags);
     if target == 0 {
         return -LinuxError::EFAULT.code() as isize;
     }
@@ -95,18 +177,54 @@ pub fn sys_umount2(target: usize, _flags: usize) -> isize {
 }
 
 pub fn sys_getdents64(fd: usize, dirp: usize, count: usize) -> isize {
-    unsafe { ax_sys_getdents64(fd as i32, dirp as *mut u8, count) as isize }
+    axlog::debug!(
+        "sys_getdents64: fd={}, dirp={:#x}, count={}",
+        fd,
+        dirp,
+        count
+    );
+    let raw = match map_fd(fd) {
+        Ok(v) => v,
+        Err(e) => return -e.code() as isize,
+    };
+    unsafe { ax_sys_getdents64(raw, dirp as *mut u8, count) as isize }
 }
 
 pub fn sys_close(fd: usize) -> isize {
-    ax_sys_close(fd as i32) as isize
+    axlog::debug!("sys_close: fd={}", fd);
+    if fd <= 2 {
+        return 0;
+    }
+    let raw = match map_fd(fd) {
+        Ok(v) => v,
+        Err(e) => return -e.code() as isize,
+    };
+    let ret = ax_sys_close(raw) as isize;
+    if ret == 0 {
+        with_process(|process| {
+            process.fd_table.lock().remove(fd);
+        });
+    }
+    ret
 }
 
 pub fn sys_fstat(fd: usize, statbuf: usize) -> isize {
-    unsafe { ax_sys_fstat(fd as i32, statbuf as *mut arceos_posix_api::ctypes::stat) as isize }
+    axlog::debug!("sys_fstat: fd={}, statbuf={:#x}", fd, statbuf);
+    let raw = match map_fd(fd) {
+        Ok(v) => v,
+        Err(e) => return -e.code() as isize,
+    };
+    unsafe { ax_sys_fstat(raw, statbuf as *mut ctypes::stat) as isize }
 }
 
 pub fn sys_fstatat(dirfd: i32, pathname: usize, statbuf: usize, flags: usize) -> isize {
+    axlog::debug!(
+        "sys_fstatat: dirfd={}, pathname={:#x}, statbuf={:#x}, flags={:#x}",
+        dirfd,
+        pathname,
+        statbuf,
+        flags
+    );
     let path_ptr = pathname as *const c_char;
     let at_empty_path = 0x1000;
 
@@ -176,6 +294,13 @@ pub fn sys_statx(
     _mask: usize,
     statxbuf: usize,
 ) -> isize {
+    axlog::debug!(
+        "sys_statx: dirfd={}, pathname={:#x}, flags={:#x}, statxbuf={:#x}",
+        dirfd,
+        pathname,
+        flags,
+        statxbuf
+    );
     if statxbuf == 0 {
         return -LinuxError::EFAULT.code() as isize;
     }
@@ -228,58 +353,164 @@ pub fn sys_statx(
 }
 
 pub fn sys_writev(fd: usize, iov: usize, iovcnt: usize) -> isize {
-    unsafe {
-        ax_sys_writev(
-            fd as i32,
-            iov as *const arceos_posix_api::ctypes::iovec,
-            iovcnt as i32,
-        ) as isize
+    axlog::debug!("sys_writev: fd={}, iov={:#x}, iovcnt={}", fd, iov, iovcnt);
+    let raw = match map_fd(fd) {
+        Ok(v) => v,
+        Err(e) => return -e.code() as isize,
+    };
+    unsafe { ax_sys_writev(raw, iov as *const ctypes::iovec, iovcnt as i32) as isize }
+}
+
+pub fn sys_fcntl(fd: usize, cmd: usize, arg: usize) -> isize {
+    axlog::debug!("sys_fcntl: fd={}, cmd={:#x}, arg={:#x}", fd, cmd, arg);
+    ensure_entry(fd);
+    match cmd as u32 {
+        ctypes::F_GETFD => with_process(|process| {
+            let table = process.fd_table.lock();
+            let Some(entry) = table.get(fd) else {
+                return -LinuxError::EBADF.code() as isize;
+            };
+            if entry.flags.contains(FdFlags::CLOEXEC) {
+                ctypes::FD_CLOEXEC as isize
+            } else {
+                0
+            }
+        }),
+        ctypes::F_SETFD => with_process(|process| {
+            let mut table = process.fd_table.lock();
+            let Some(entry) = table.get_mut(fd) else {
+                return -LinuxError::EBADF.code() as isize;
+            };
+            entry
+                .flags
+                .set(FdFlags::CLOEXEC, (arg & (ctypes::FD_CLOEXEC as usize)) != 0);
+            0
+        }),
+        ctypes::F_SETFL => {
+            with_process(|process| {
+                if let Some(entry) = process.fd_table.lock().get_mut(fd) {
+                    entry.flags.set(
+                        FdFlags::NONBLOCK,
+                        (arg & (ctypes::O_NONBLOCK as usize)) != 0,
+                    );
+                }
+            });
+            let raw = match map_fd(fd) {
+                Ok(v) => v,
+                Err(e) => return -e.code() as isize,
+            };
+            ax_sys_fcntl(raw, cmd as i32, arg) as isize
+        }
+        ctypes::F_DUPFD | ctypes::F_DUPFD_CLOEXEC => {
+            let raw = match map_fd(fd) {
+                Ok(v) => v,
+                Err(e) => return -e.code() as isize,
+            };
+            let ret = ax_sys_fcntl(raw, cmd as i32, arg) as isize;
+            if ret >= 0 {
+                let new_fd = ret as usize;
+                let mut flags = FdFlags::empty();
+                if cmd as u32 == ctypes::F_DUPFD_CLOEXEC {
+                    flags.insert(FdFlags::CLOEXEC);
+                }
+                track_fd(new_fd, new_fd as i32, flags);
+            }
+            ret
+        }
+        _ => {
+            let raw = match map_fd(fd) {
+                Ok(v) => v,
+                Err(e) => return -e.code() as isize,
+            };
+            ax_sys_fcntl(raw, cmd as i32, arg) as isize
+        }
     }
 }
 
-const O_NONBLOCK: usize = 0x800;
-const O_CLOEXEC: usize = 0x80000;
-
-pub fn sys_fcntl(fd: usize, cmd: usize, arg: usize) -> isize {
-    ax_sys_fcntl(fd as i32, cmd as i32, arg) as isize
-}
-
 pub fn sys_dup(fd: usize) -> isize {
-    ax_sys_dup(fd as i32) as isize
+    axlog::debug!("sys_dup: fd={}", fd);
+    let raw = match map_fd(fd) {
+        Ok(v) => v,
+        Err(e) => return -e.code() as isize,
+    };
+    let ret = ax_sys_dup(raw) as isize;
+    if ret >= 0 {
+        let new_fd = ret as usize;
+        track_fd(new_fd, new_fd as i32, FdFlags::empty());
+    }
+    ret
 }
 
 pub fn sys_dup3(oldfd: usize, newfd: usize, flags: usize) -> isize {
+    axlog::debug!(
+        "sys_dup3: oldfd={}, newfd={}, flags={:#x}",
+        oldfd,
+        newfd,
+        flags
+    );
     if oldfd == newfd {
         return -LinuxError::EINVAL.code() as isize;
     }
     if (flags & !O_CLOEXEC) != 0 {
         return -LinuxError::EINVAL.code() as isize;
     }
-    ax_sys_dup2(oldfd as i32, newfd as i32) as isize
+    let old_raw = match map_fd(oldfd) {
+        Ok(v) => v,
+        Err(e) => return -e.code() as isize,
+    };
+    let ret = ax_sys_dup2(old_raw, newfd as i32) as isize;
+    if ret >= 0 {
+        let mut fd_flags = FdFlags::empty();
+        if (flags & O_CLOEXEC) != 0 {
+            fd_flags.insert(FdFlags::CLOEXEC);
+        }
+        track_fd(newfd, newfd as i32, fd_flags);
+    }
+    ret
 }
 
 pub fn sys_pipe2(fds: usize, flags: usize) -> isize {
+    axlog::debug!("sys_pipe2: fds={:#x}, flags={:#x}", fds, flags);
     if fds == 0 {
         return -LinuxError::EFAULT.code() as isize;
     }
-
-    // Reuse arceos_posix_api::sys_pipe and accept commonly used flags.
-    // CLOEXEC/NONBLOCK are currently ignored at file creation time.
     let allowed = O_NONBLOCK | O_CLOEXEC;
     if (flags & !allowed) != 0 {
         return -LinuxError::EINVAL.code() as isize;
     }
-
     let fds_ptr = fds as *mut i32;
     let fds_slice = unsafe { core::slice::from_raw_parts_mut(fds_ptr, 2) };
-    ax_sys_pipe(fds_slice) as isize
+    let ret = ax_sys_pipe(fds_slice) as isize;
+    if ret == 0 {
+        let mut fd_flags = FdFlags::empty();
+        if (flags & O_CLOEXEC) != 0 {
+            fd_flags.insert(FdFlags::CLOEXEC);
+        }
+        if (flags & O_NONBLOCK) != 0 {
+            fd_flags.insert(FdFlags::NONBLOCK);
+        }
+        track_fd(fds_slice[0] as usize, fds_slice[0], fd_flags);
+        track_fd(fds_slice[1] as usize, fds_slice[1], fd_flags);
+    }
+    ret
 }
 
 pub fn sys_lseek(fd: usize, offset: usize, whence: usize) -> isize {
-    ax_sys_lseek(fd as i32, offset as i64, whence as i32) as isize
+    axlog::debug!(
+        "sys_lseek: fd={}, offset={:#x}, whence={}",
+        fd,
+        offset,
+        whence
+    );
+    let raw = match map_fd(fd) {
+        Ok(v) => v,
+        Err(e) => return -e.code() as isize,
+    };
+    ax_sys_lseek(raw, offset as i64, whence as i32) as isize
 }
 
 pub fn sys_getcwd(buf: usize, size: usize) -> isize {
+    axlog::debug!("sys_getcwd: buf={:#x}, size={}", buf, size);
     if buf == 0 {
         return -LinuxError::EFAULT.code() as isize;
     }
@@ -291,11 +522,12 @@ pub fn sys_getcwd(buf: usize, size: usize) -> isize {
 }
 
 pub fn sys_chdir(path: usize) -> isize {
+    axlog::debug!("sys_chdir: path={:#x}", path);
     let ret = ax_sys_chdir(path as *const c_char) as isize;
     if ret == 0 {
-        let curr = axtask::current();
-        let process: &pulse_core::task::Process = curr.task_ext();
-        process.refresh_cwd_from_fs();
+        with_process(|process| {
+            process.refresh_cwd_from_fs();
+        });
     }
     ret
 }
