@@ -15,7 +15,7 @@ enum RingBufferStatus {
     Normal,
 }
 
-const RING_BUFFER_SIZE: usize = 256;
+const RING_BUFFER_SIZE: usize = 65536;
 
 pub struct PipeRingBuffer {
     arr: [u8; RING_BUFFER_SIZE],
@@ -104,6 +104,10 @@ impl Pipe {
     pub fn write_end_close(&self) -> bool {
         Arc::strong_count(&self.buffer) == 1
     }
+
+    pub fn read_end_close(&self) -> bool {
+        Arc::strong_count(&self.buffer) == 1
+    }
 }
 
 impl FileLike for Pipe {
@@ -142,6 +146,10 @@ impl FileLike for Pipe {
         let mut write_size = 0usize;
         let max_len = buf.len();
         loop {
+            // No reader exists: follow POSIX semantics and report broken pipe.
+            if self.read_end_close() {
+                return Err(LinuxError::EPIPE);
+            }
             let mut ring_buffer = self.buffer.lock();
             let loop_write = ring_buffer.available_write();
             if loop_write == 0 {

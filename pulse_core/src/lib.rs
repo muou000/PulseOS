@@ -3,6 +3,7 @@
 extern crate alloc;
 
 pub mod config;
+pub mod fd_table;
 pub mod mm;
 pub mod task;
 pub mod trap;

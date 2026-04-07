@@ -1,4 +1,5 @@
 use crate::config::*;
+use crate::fd_table::{FdEntry, FdFlags, FdTable, RawFdObject, SharedFdTable};
 use alloc::string::{String, ToString};
 use alloc::sync::Arc;
 use alloc::vec::Vec;
@@ -14,6 +15,7 @@ pub struct Process {
     pub aspace: Arc<Mutex<AddrSpace>>,
     pub heap_top: Arc<Mutex<usize>>,
     pub cwd: Arc<Mutex<String>>,
+    pub fd_table: SharedFdTable,
     pub parent_pid: Arc<Mutex<u64>>,
     pub stack_top: Mutex<usize>,
     pub entry: Mutex<usize>,
@@ -41,10 +43,34 @@ impl Process {
             Err(_) => String::from("/"),
         };
 
+        let mut fd_table = FdTable::new();
+        let _ = fd_table.insert_at(
+            0,
+            FdEntry {
+                object: Arc::new(RawFdObject { raw_fd: 0 }),
+                flags: FdFlags::empty(),
+            },
+        );
+        let _ = fd_table.insert_at(
+            1,
+            FdEntry {
+                object: Arc::new(RawFdObject { raw_fd: 1 }),
+                flags: FdFlags::empty(),
+            },
+        );
+        let _ = fd_table.insert_at(
+            2,
+            FdEntry {
+                object: Arc::new(RawFdObject { raw_fd: 2 }),
+                flags: FdFlags::empty(),
+            },
+        );
+
         Ok(Self {
             aspace: Arc::new(Mutex::new(aspace)),
             heap_top: Arc::new(Mutex::new(USER_HEAP_BASE + USER_HEAP_SIZE)),
             cwd: Arc::new(Mutex::new(cwd)),
+            fd_table: Arc::new(Mutex::new(fd_table)),
             parent_pid: Arc::new(Mutex::new(0)),
             stack_top: Mutex::new(USER_STACK_TOP),
             entry: Mutex::new(0),
@@ -116,6 +142,7 @@ impl Process {
 
         axtask::set_current_page_table_root(new_pt_root);
         self.activate();
+        self.fd_table.lock().close_cloexec_on_exec();
         *self.heap_top.lock() = USER_HEAP_BASE + USER_HEAP_SIZE;
         *self.stack_top.lock() = load_info.user_sp;
         *self.entry.lock() = load_info.entry;
@@ -141,6 +168,7 @@ impl Process {
             aspace: self.aspace.clone(),
             heap_top: self.heap_top.clone(),
             cwd: self.cwd.clone(),
+            fd_table: self.fd_table.clone(),
             parent_pid: self.parent_pid.clone(),
             stack_top: Mutex::new(*self.stack_top.lock()),
             entry: Mutex::new(*self.entry.lock()),
@@ -240,6 +268,7 @@ impl Process {
             aspace: Arc::new(Mutex::new(new_aspace)),
             heap_top: Arc::new(Mutex::new(*self.heap_top.lock())),
             cwd: Arc::new(Mutex::new(self.cwd.lock().clone())),
+            fd_table: Arc::new(Mutex::new(self.fd_table.lock().clone_for_fork())),
             parent_pid: Arc::new(Mutex::new(axtask::current().id().as_u64())),
             stack_top: Mutex::new(*self.stack_top.lock()),
             entry: Mutex::new(*self.entry.lock()),
