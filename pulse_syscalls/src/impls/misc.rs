@@ -56,6 +56,7 @@ pub fn sys_set_tid_address(tidptr: usize) -> isize {
 }
 
 pub fn sys_gettid() -> isize {
+    axlog::debug!("sys_gettid");
     axtask::current().id().as_u64() as isize
 }
 

@@ -80,13 +80,36 @@ fn syscall_dispatcher(tf: &TrapFrame, syscall_id: usize, args: [usize; 6]) -> is
         Sysno::prlimit64 => impls::sys_prlimit64(args[0], args[1], args[2], args[3]),
         Sysno::rt_sigprocmask => impls::sys_rt_sigprocmask(args[0], args[1], args[2], args[3]),
 
-        Sysno::getuid | Sysno::geteuid => 0,
+        Sysno::getuid | Sysno::geteuid => {
+            axlog::debug!("sys_getuid/geteuid (stub): return 0");
+            0
+        }
         Sysno::getppid => impls::sys_getppid(),
-        Sysno::getpgid => 1,
+        Sysno::getpgid => {
+            axlog::debug!("sys_getpgid (stub): return 1");
+            1
+        }
         Sysno::setpgid => impls::sys_setpgid(args[0] as isize, args[1] as isize),
-        Sysno::kill => 0,
-        Sysno::getgid | Sysno::getegid => 0, // root
-        Sysno::setuid | Sysno::setgid | Sysno::setreuid | Sysno::setregid => 0,
+        Sysno::kill => {
+            axlog::debug!(
+                "sys_kill (stub): pid={}, sig={}, return 0",
+                args[0],
+                args[1]
+            );
+            0
+        }
+        Sysno::getgid | Sysno::getegid => {
+            axlog::debug!("sys_getgid/getegid (stub): return 0");
+            0 // root
+        }
+        Sysno::setuid | Sysno::setgid | Sysno::setreuid | Sysno::setregid => {
+            axlog::debug!(
+                "sys_setuid/setgid/setreuid/setregid (stub): arg0={}, arg1={}, return 0",
+                args[0],
+                args[1]
+            );
+            0
+        }
 
         Sysno::rt_sigaction => impls::sys_rt_sigaction(args[0], args[1], args[2], args[3]),
         Sysno::rt_sigreturn => impls::sys_rt_sigreturn(),

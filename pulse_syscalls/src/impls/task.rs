@@ -40,6 +40,7 @@ bitflags! {
 }
 
 pub fn sys_getpid() -> isize {
+    axlog::debug!("sys_getpid");
     axtask::current().id().as_u64() as isize
 }
 
@@ -68,6 +69,7 @@ fn write_user_i32(process: &pulse_core::task::Process, user_addr: usize, value: 
 }
 
 pub fn sys_exit(exit_code: i32) -> ! {
+    axlog::debug!("sys_exit: exit_code={}", exit_code);
     axlog::info!("Task exit with code: {}", exit_code);
     axtask::exit(exit_code);
 }
@@ -179,6 +181,12 @@ pub fn sys_clone(tf: &TrapFrame, args: [usize; 6]) -> isize {
 }
 
 pub fn sys_execve(pathname: usize, argv: usize, envp: usize) -> isize {
+    axlog::debug!(
+        "sys_execve: pathname={:#x}, argv={:#x}, envp={:#x}",
+        pathname,
+        argv,
+        envp
+    );
     if pathname == 0 {
         return -LinuxError::EFAULT.code() as isize;
     }
