@@ -128,6 +128,7 @@ fn syscall_dispatcher(tf: &TrapFrame, syscall_id: usize, args: [usize; 6]) -> is
         }
         Sysno::getcwd => impls::sys_getcwd(args[0], args[1]),
         Sysno::chdir => impls::sys_chdir(args[0]),
+        Sysno::unlinkat => impls::sys_unlinkat(args[0] as i32, args[1], args[2]),
         Sysno::set_robust_list => {
             axlog::debug!("sys_set_robust_list (stub)");
             0
