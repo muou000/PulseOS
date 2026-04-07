@@ -1357,6 +1357,7 @@ dependencies = [
  "axlog",
  "axmm",
  "axtask",
+ "bitflags 2.11.0",
  "kernel-elf-parser",
  "linkme",
  "memory_addr",

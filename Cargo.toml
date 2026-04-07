@@ -17,7 +17,8 @@ axfeat = { path = "arceos/api/axfeat", features = [
     "multitask",
     "sched-rr",
     "fs",
-    "paging"
+    "paging",
+    "irq"
     ] }
 
 axconfig = { path = "arceos/modules/axconfig" }
