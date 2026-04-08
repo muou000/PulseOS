@@ -5,6 +5,11 @@ use axtask::TaskExtRef;
 
 #[register_trap_handler(SYSCALL)]
 pub fn syscall_handler(tf: &TrapFrame, syscall_num: usize) -> isize {
+    let syscall_enter_ns = axhal::time::monotonic_time_nanos() as u64;
+    let curr = axtask::current();
+    let process: &pulse_core::task::Process = curr.task_ext();
+    process.on_kernel_entry_from_user(syscall_enter_ns);
+
     let args = [
         tf.arg0(),
         tf.arg1(),
@@ -24,7 +29,14 @@ pub fn syscall_handler(tf: &TrapFrame, syscall_num: usize) -> isize {
         args[4],
         args[5]
     );
-    syscall_dispatcher(tf, syscall_num, args)
+    let ret = syscall_dispatcher(tf, syscall_num, args);
+
+    let syscall_leave_ns = axhal::time::monotonic_time_nanos() as u64;
+    let delta_ns = syscall_leave_ns.saturating_sub(syscall_enter_ns);
+    process.add_sys_time_ns(delta_ns);
+    process.mark_user_resume();
+
+    ret
 }
 
 fn syscall_dispatcher(tf: &TrapFrame, syscall_id: usize, args: [usize; 6]) -> isize {
@@ -71,6 +83,7 @@ fn syscall_dispatcher(tf: &TrapFrame, syscall_id: usize, args: [usize; 6]) -> is
         Sysno::nanosleep => impls::sys_nanosleep(args[0], args[1]),
         Sysno::clock_gettime => impls::sys_clock_gettime(args[0] as i32, args[1]),
         Sysno::gettimeofday => impls::sys_gettimeofday(args[0], args[1]),
+        Sysno::times => impls::sys_times(args[0]),
 
         Sysno::set_tid_address => impls::sys_set_tid_address(args[0]),
         Sysno::gettid => impls::sys_gettid(),

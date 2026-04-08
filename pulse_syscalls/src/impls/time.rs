@@ -1,8 +1,24 @@
 use crate::LinuxError;
 use arceos_posix_api::ctypes;
+use core::ffi::c_long;
 use core::mem::{MaybeUninit, size_of};
 use core::time::Duration;
 use memory_addr::VirtAddr;
+
+const CLK_TCK: u64 = 100;
+
+fn ns_to_clk_ticks(ns: u64) -> u64 {
+    ns.saturating_mul(CLK_TCK) / 1_000_000_000
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+struct Tms {
+    tms_utime: c_long,
+    tms_stime: c_long,
+    tms_cutime: c_long,
+    tms_cstime: c_long,
+}
 
 fn read_user_timespec(
     process: &pulse_core::task::Process,
@@ -151,4 +167,40 @@ pub fn sys_gettimeofday(tv: usize, tz: usize) -> isize {
             axlog::warn!("sys_gettimeofday: user write failed at {:#x}: {:?}", tv, e);
             -LinuxError::EFAULT.code() as isize
         })
+}
+
+pub fn sys_times(tbuf: usize) -> isize {
+    axlog::debug!("sys_times: tbuf={:#x}", tbuf);
+
+    use axtask::TaskExtRef;
+    let curr = axtask::current();
+    let process: &pulse_core::task::Process = curr.task_ext();
+
+    let now_ns = axhal::time::monotonic_time_nanos() as u64;
+    let (utime_ns, stime_ns) = process.snapshot_cpu_time_ns(now_ns);
+    let (cutime_ns, cstime_ns) = process.snapshot_children_cpu_time_ns();
+
+    let ticks = ns_to_clk_ticks(now_ns);
+
+    if tbuf != 0 {
+        let tms = Tms {
+            tms_utime: ns_to_clk_ticks(utime_ns) as c_long,
+            tms_stime: ns_to_clk_ticks(stime_ns) as c_long,
+            tms_cutime: ns_to_clk_ticks(cutime_ns) as c_long,
+            tms_cstime: ns_to_clk_ticks(cstime_ns) as c_long,
+        };
+        let bytes = unsafe {
+            core::slice::from_raw_parts(
+                (&tms as *const Tms).cast::<u8>(),
+                core::mem::size_of::<Tms>(),
+            )
+        };
+
+        if let Err(e) = process.aspace.lock().write(VirtAddr::from(tbuf), bytes) {
+            axlog::warn!("sys_times: user write failed at {:#x}: {:?}", tbuf, e);
+            return -LinuxError::EFAULT.code() as isize;
+        }
+    }
+
+    ticks as isize
 }

@@ -326,6 +326,11 @@ pub fn sys_wait4(pid: isize, status: usize, options: i32, rusage: usize) -> isiz
         if let Some(idx) = exited_idx {
             let exited_child = children.remove(idx);
 
+            let child_proc: &pulse_core::task::Process = exited_child.task_ext();
+            let now_ns = axhal::time::monotonic_time_nanos() as u64;
+            let (child_utime_ns, child_stime_ns) = child_proc.snapshot_cpu_time_ns(now_ns);
+            process.add_child_time_ns(child_utime_ns, child_stime_ns);
+
             if status != 0 {
                 // In Linux, WIFEXITED is true and WEXITSTATUS is `exit_code & 0xff`,
                 // so the status word is `(exit_code & 0xff) << 8`.
