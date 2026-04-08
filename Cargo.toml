@@ -27,6 +27,7 @@ axlog = { path = "arceos/modules/axlog" }
 axruntime = { path = "arceos/modules/axruntime" }
 
 axtask = { path = "arceos/modules/axtask" }
+axfs = { path = "arceos/modules/axfs" }
 axerrno = "0.2"
 
 axplat-riscv64-qemu-virt = "0.3.0"

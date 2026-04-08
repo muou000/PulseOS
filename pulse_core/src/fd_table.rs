@@ -1,5 +1,8 @@
 use alloc::collections::BTreeMap;
+use alloc::vec::Vec;
 use alloc::sync::Arc;
+use arceos_posix_api::sys_dup as ax_sys_dup;
+use axerrno::{AxResult, LinuxError};
 use core::any::Any;
 use spin::Mutex;
 
@@ -46,15 +49,48 @@ impl FdTable {
         }
     }
 
-    pub fn clone_for_fork(&self) -> Self {
-        Self {
-            entries: self.entries.clone(),
+    pub fn clone_for_fork(&self) -> AxResult<Self> {
+        let mut entries = BTreeMap::new();
+        for (&fd, entry) in &self.entries {
+            let cloned_entry = if let Some(raw) = entry.object.as_any().downcast_ref::<RawFdObject>() {
+                let new_raw = ax_sys_dup(raw.raw_fd);
+                if new_raw < 0 {
+                    let err =
+                        LinuxError::try_from(-new_raw).unwrap_or(LinuxError::EMFILE);
+                    return Err(err.into());
+                }
+                FdEntry {
+                    object: Arc::new(RawFdObject { raw_fd: new_raw }),
+                    flags: entry.flags,
+                }
+            } else {
+                entry.clone()
+            };
+            entries.insert(fd, cloned_entry);
         }
+        Ok(Self { entries })
     }
 
-    pub fn close_cloexec_on_exec(&mut self) {
+    pub fn close_cloexec_on_exec(&mut self) -> Vec<i32> {
+        let mut raws = Vec::new();
+        self.entries.retain(|_, entry| {
+            let should_close = entry.flags.contains(FdFlags::CLOEXEC);
+            if should_close
+                && let Some(raw) = entry.object.as_any().downcast_ref::<RawFdObject>()
+            {
+                raws.push(raw.raw_fd);
+            }
+            !should_close
+        });
+        raws
+    }
+
+    pub fn drain_all_raw_fds(&mut self) -> Vec<i32> {
         self.entries
-            .retain(|_, entry| !entry.flags.contains(FdFlags::CLOEXEC));
+            .values()
+            .filter_map(|entry| entry.object.as_any().downcast_ref::<RawFdObject>())
+            .map(|raw| raw.raw_fd)
+            .collect()
     }
 
     pub fn get(&self, fd: usize) -> Option<&FdEntry> {

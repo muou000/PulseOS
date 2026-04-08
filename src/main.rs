@@ -49,6 +49,8 @@ fn main() {
             let pt_root = proc.aspace.lock().page_table_root();
             inner.ctx_mut().set_page_table_root(pt_root);
 
+            proc.sync_fs_context();
+
             inner.init_task_ext(proc);
             let init_task = axtask::spawn_task(inner);
 

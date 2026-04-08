@@ -529,7 +529,7 @@ pub fn sys_chdir(path: usize) -> isize {
     let ret = ax_sys_chdir(path as *const c_char) as isize;
     if ret == 0 {
         with_process(|process| {
-            process.refresh_cwd_from_fs();
+            process.save_fs_context();
         });
     }
     ret

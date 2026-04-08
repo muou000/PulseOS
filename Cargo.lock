@@ -132,6 +132,7 @@ dependencies = [
  "axns",
  "axruntime",
  "axsync",
+ "axtask",
  "bindgen",
  "ctor_bare",
  "flatten_objects",
@@ -1350,6 +1351,7 @@ dependencies = [
 name = "pulse_core"
 version = "0.1.0"
 dependencies = [
+ "arceos_posix_api",
  "axconfig",
  "axerrno 0.2.2",
  "axfs",
@@ -1371,6 +1373,7 @@ version = "0.1.0"
 dependencies = [
  "arceos_posix_api",
  "axerrno 0.2.2",
+ "axfs",
  "axhal",
  "axio 0.1.2",
  "axlog",

@@ -1,10 +1,11 @@
 use crate::config::*;
 use crate::fd_table::{FdEntry, FdFlags, FdTable, RawFdObject, SharedFdTable};
-use alloc::string::{String, ToString};
 use alloc::sync::Arc;
 use alloc::vec::Vec;
+use arceos_posix_api::sys_close as ax_sys_close;
 use axconfig::TASK_STACK_SIZE;
 use axerrno::AxResult;
+use axfs::FsContext;
 use axhal::context::{TrapFrame, UspaceContext};
 use axhal::paging::MappingFlags;
 use axmm::AddrSpace;
@@ -14,7 +15,7 @@ use spin::Mutex;
 pub struct Process {
     pub aspace: Arc<Mutex<AddrSpace>>,
     pub heap_top: Arc<Mutex<usize>>,
-    pub cwd: Arc<Mutex<String>>,
+    pub fs_context: Arc<Mutex<FsContext>>,
     pub fd_table: SharedFdTable,
     pub parent_pid: Arc<Mutex<u64>>,
     pub stack_top: Mutex<usize>,
@@ -38,10 +39,7 @@ impl Process {
             MappingFlags::READ | MappingFlags::WRITE | MappingFlags::USER,
             false,
         )?;
-        let cwd = match axfs::FS_CONTEXT.lock().current_dir().absolute_path() {
-            Ok(path) => path.to_string(),
-            Err(_) => String::from("/"),
-        };
+        let fs_context = axfs::FS_CONTEXT.lock().clone();
 
         let mut fd_table = FdTable::new();
         let _ = fd_table.insert_at(
@@ -69,7 +67,7 @@ impl Process {
         Ok(Self {
             aspace: Arc::new(Mutex::new(aspace)),
             heap_top: Arc::new(Mutex::new(USER_HEAP_BASE + USER_HEAP_SIZE)),
-            cwd: Arc::new(Mutex::new(cwd)),
+            fs_context: Arc::new(Mutex::new(fs_context)),
             fd_table: Arc::new(Mutex::new(fd_table)),
             parent_pid: Arc::new(Mutex::new(0)),
             stack_top: Mutex::new(USER_STACK_TOP),
@@ -142,32 +140,36 @@ impl Process {
 
         axtask::set_current_page_table_root(new_pt_root);
         self.activate();
-        self.fd_table.lock().close_cloexec_on_exec();
+        let cloexec_raw_fds = self.fd_table.lock().close_cloexec_on_exec();
+        for raw_fd in cloexec_raw_fds {
+            let _ = ax_sys_close(raw_fd);
+        }
         *self.heap_top.lock() = USER_HEAP_BASE + USER_HEAP_SIZE;
         *self.stack_top.lock() = load_info.user_sp;
         *self.entry.lock() = load_info.entry;
         Ok(())
     }
 
-    pub fn sync_fs_context(&self) {
-        let cwd = self.cwd.lock().clone();
-        let mut fs = axfs::FS_CONTEXT.lock();
-        if let Ok(dir) = fs.resolve(cwd.as_str()) {
-            let _ = fs.set_current_dir(dir);
+    pub fn close_all_files(&self) {
+        let raw_fds = self.fd_table.lock().drain_all_raw_fds();
+        for raw_fd in raw_fds {
+            let _ = ax_sys_close(raw_fd);
         }
     }
 
-    pub fn refresh_cwd_from_fs(&self) {
-        if let Ok(path) = axfs::FS_CONTEXT.lock().current_dir().absolute_path() {
-            *self.cwd.lock() = path.to_string();
-        }
+    pub fn sync_fs_context(&self) {
+        *axfs::FS_CONTEXT.lock() = self.fs_context.lock().clone();
+    }
+
+    pub fn save_fs_context(&self) {
+        *self.fs_context.lock() = axfs::FS_CONTEXT.lock().clone();
     }
 
     pub fn clone_for_thread(&self) -> Self {
         Self {
             aspace: self.aspace.clone(),
             heap_top: self.heap_top.clone(),
-            cwd: self.cwd.clone(),
+            fs_context: self.fs_context.clone(),
             fd_table: self.fd_table.clone(),
             parent_pid: self.parent_pid.clone(),
             stack_top: Mutex::new(*self.stack_top.lock()),
@@ -176,12 +178,36 @@ impl Process {
         }
     }
 
+    fn new_clone_process(
+        &self,
+        is_thread_clone: bool,
+        share_fs: bool,
+        share_files: bool,
+    ) -> AxResult<Self> {
+        let mut child_proc = self.clone_for_thread();
+        if !is_thread_clone {
+            child_proc.heap_top = Arc::new(Mutex::new(*self.heap_top.lock()));
+            child_proc.parent_pid = Arc::new(Mutex::new(axtask::current().id().as_u64()));
+            child_proc.children = Mutex::new(Vec::new());
+        }
+        if !share_fs {
+            child_proc.fs_context = Arc::new(Mutex::new(self.fs_context.lock().clone()));
+        }
+        if !share_files {
+            child_proc.fd_table =
+                Arc::new(Mutex::new(self.fd_table.lock().clone_for_fork()?));
+        }
+        Ok(child_proc)
+    }
+
     /// Implement fork with COW: parent and child initially share read-only user pages,
     /// and writable pages are copied on the first write page fault.
     pub fn spawn_fork_from_trap_frame(
         &self,
         tf: &TrapFrame,
         child_stack: Option<usize>,
+        share_fs: bool,
+        share_files: bool,
     ) -> AxResult<u64> {
         let mut child_uctx = UspaceContext::from(tf);
         child_uctx.set_retval(0);
@@ -264,16 +290,8 @@ impl Process {
         }
 
         // 3. Create the child Process wrapper
-        let child_proc = Self {
-            aspace: Arc::new(Mutex::new(new_aspace)),
-            heap_top: Arc::new(Mutex::new(*self.heap_top.lock())),
-            cwd: Arc::new(Mutex::new(self.cwd.lock().clone())),
-            fd_table: Arc::new(Mutex::new(self.fd_table.lock().clone_for_fork())),
-            parent_pid: Arc::new(Mutex::new(axtask::current().id().as_u64())),
-            stack_top: Mutex::new(*self.stack_top.lock()),
-            entry: Mutex::new(*self.entry.lock()),
-            children: Mutex::new(Vec::new()),
-        };
+        let mut child_proc = self.new_clone_process(false, share_fs, share_files)?;
+        child_proc.aspace = Arc::new(Mutex::new(new_aspace));
 
         let mut inner = TaskInner::new(
             move || {
@@ -305,14 +323,21 @@ impl Process {
         Ok(child_tid)
     }
 
-    pub fn spawn_from_trap_frame(&self, tf: &TrapFrame, child_stack: Option<usize>) -> u64 {
+    pub fn spawn_from_trap_frame(
+        &self,
+        tf: &TrapFrame,
+        child_stack: Option<usize>,
+        is_thread_clone: bool,
+        share_fs: bool,
+        share_files: bool,
+    ) -> AxResult<u64> {
         let mut child_uctx = UspaceContext::from(tf);
         child_uctx.set_retval(0);
         if let Some(sp) = child_stack {
             child_uctx.set_sp(sp);
         }
 
-        let child_proc = self.clone_for_thread();
+        let child_proc = self.new_clone_process(is_thread_clone, share_fs, share_files)?;
         let mut inner = TaskInner::new(
             move || {
                 let kstack_top = axtask::current()
@@ -338,6 +363,6 @@ impl Process {
         } else {
             self.children.lock().push(task);
         }
-        child_tid
+        Ok(child_tid)
     }
 }
