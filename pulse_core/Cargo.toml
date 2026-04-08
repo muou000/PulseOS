@@ -12,6 +12,7 @@ axhal = { workspace = true, features = ["paging"] }
 axlog = { workspace = true }
 axconfig = { workspace = true }
 axerrno = "0.2"
+arceos_posix_api = { path = "../arceos/api/arceos_posix_api", features = ["fd"] }
 linkme = "0.3"
 kernel-elf-parser = { version = "0.3" }
 xmas-elf = { version = "0.9" }

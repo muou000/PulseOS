@@ -71,6 +71,9 @@ fn write_user_i32(process: &pulse_core::task::Process, user_addr: usize, value: 
 pub fn sys_exit(exit_code: i32) -> ! {
     axlog::debug!("sys_exit: exit_code={}", exit_code);
     axlog::info!("Task exit with code: {}", exit_code);
+    let curr = axtask::current();
+    let process: &pulse_core::task::Process = curr.task_ext();
+    process.close_all_files();
     axtask::exit(exit_code);
 }
 
@@ -82,6 +85,7 @@ pub fn sys_yield() -> isize {
 pub fn sys_clone(tf: &TrapFrame, args: [usize; 6]) -> isize {
     let raw_flags = args[0];
     let flags = CloneFlags::from_bits_truncate(raw_flags);
+    let exit_signal = raw_flags & CloneFlags::CSIGNAL.bits();
     let child_stack = args[1];
     let parent_tid = args[2];
     let tls = args[3];
@@ -100,6 +104,20 @@ pub fn sys_clone(tf: &TrapFrame, args: [usize; 6]) -> isize {
         return -LinuxError::EINVAL.code() as isize;
     }
 
+    if flags.contains(CloneFlags::CLONE_THREAD)
+        && (!flags.contains(CloneFlags::CLONE_VM) || !flags.contains(CloneFlags::CLONE_SIGHAND))
+    {
+        return -LinuxError::EINVAL.code() as isize;
+    }
+
+    if flags.contains(CloneFlags::CLONE_SIGHAND) && !flags.contains(CloneFlags::CLONE_VM) {
+        return -LinuxError::EINVAL.code() as isize;
+    }
+
+    if exit_signal != 0 && flags.contains(CloneFlags::CLONE_THREAD) {
+        return -LinuxError::EINVAL.code() as isize;
+    }
+
     // CLONE_VM: Process fork vs Thread clone
     if !flags.contains(CloneFlags::CLONE_VM) {
         axlog::debug!(
@@ -107,11 +125,8 @@ pub fn sys_clone(tf: &TrapFrame, args: [usize; 6]) -> isize {
         );
     }
 
-    // CLONE_FILES & CLONE_FS
     if !flags.contains(CloneFlags::CLONE_FILES) || !flags.contains(CloneFlags::CLONE_FS) {
-        axlog::debug!(
-            "sys_clone: Independent file descriptor tables or FS info are not fully supported yet in ArceOS."
-        );
+        axlog::debug!("sys_clone: child will use private FS and/or FD tables");
     }
 
     // CLONE_SIGHAND
@@ -141,10 +156,19 @@ pub fn sys_clone(tf: &TrapFrame, args: [usize; 6]) -> isize {
         // We'd do something like `new_tf.regs.tp = tls;` if TrapFrame architecture details were exposed properly.
     }
 
+    let share_fs = flags.contains(CloneFlags::CLONE_FS);
+    let share_files = flags.contains(CloneFlags::CLONE_FILES);
+    let is_thread_clone = flags.contains(CloneFlags::CLONE_THREAD);
+
     let child_tid_value = if !flags.contains(CloneFlags::CLONE_VM) {
         // Create an entirely new process memory space (Fork / Deep Copy)
         match parent_proc
-            .spawn_fork_from_trap_frame(&new_tf, (child_stack != 0).then_some(child_stack))
+            .spawn_fork_from_trap_frame(
+                &new_tf,
+                (child_stack != 0).then_some(child_stack),
+                share_fs,
+                share_files,
+            )
         {
             Ok(tid) => tid as usize,
             Err(e) => {
@@ -153,9 +177,20 @@ pub fn sys_clone(tf: &TrapFrame, args: [usize; 6]) -> isize {
             }
         }
     } else {
-        // Create a new thread in the same memory space (Thread Clone)
-        parent_proc.spawn_from_trap_frame(&new_tf, (child_stack != 0).then_some(child_stack))
-            as usize
+        // Create a new task in the same memory space.
+        match parent_proc.spawn_from_trap_frame(
+            &new_tf,
+            (child_stack != 0).then_some(child_stack),
+            is_thread_clone,
+            share_fs,
+            share_files,
+        ) {
+            Ok(tid) => tid as usize,
+            Err(e) => {
+                axlog::error!("clone error: {:?}", e);
+                return -LinuxError::ENOMEM.code() as isize;
+            }
+        }
     };
 
     if flags.contains(CloneFlags::CLONE_PARENT_SETTID) && parent_tid != 0 {
@@ -290,6 +325,7 @@ pub fn sys_wait4(pid: isize, status: usize, options: i32, rusage: usize) -> isiz
 
         if let Some(idx) = exited_idx {
             let exited_child = children.remove(idx);
+
             if status != 0 {
                 // In Linux, WIFEXITED is true and WEXITSTATUS is `exit_code & 0xff`,
                 // so the status word is `(exit_code & 0xff) << 8`.

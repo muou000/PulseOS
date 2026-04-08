@@ -20,4 +20,4 @@ bitflags = "2.11"
 spin = "0.10"
 syscalls.workspace = true
 pulse_core = { path = "../pulse_core" }
-arceos_posix_api = { path = "../arceos/api/arceos_posix_api", features = ["fs", "pipe"] }
+arceos_posix_api = { path = "../arceos/api/arceos_posix_api", features = ["fs", "pipe", "multitask"] }
