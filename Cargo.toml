@@ -8,8 +8,8 @@ version = "0.1.0"
 edition = "2024"
 authors = ["muou000 <muou000@outlook.com>"]
 license = "Apache-2.0"
-homepage = "https://github.com/muou000/MyOS"
-repository = "https://github.com/muou000/MyOS"
+homepage = "https://github.com/muou000/PulseOS"
+repository = "https://github.com/muou000/PulseOS"
 
 [workspace.dependencies]
 axfeat = { path = "arceos/api/axfeat", features = [
