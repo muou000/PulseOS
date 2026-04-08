@@ -44,8 +44,6 @@ pub fn sys_uname(buf: usize) -> isize {
     write_cstr_field(&mut uts.machine, "riscv64");
     #[cfg(target_arch = "loongarch64")]
     write_cstr_field(&mut uts.machine, "loongarch64");
-    #[cfg(not(any(target_arch = "riscv64", target_arch = "loongarch64")))]
-    write_cstr_field(&mut uts.machine, "unknown");
     write_cstr_field(&mut uts.domainname, "(none)");
     0
 }
