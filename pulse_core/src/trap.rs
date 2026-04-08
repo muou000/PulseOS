@@ -23,13 +23,20 @@ fn handle_page_fault(vaddr: VirtAddr, access_flags: MappingFlags, is_user: bool)
     use axtask::TaskExtRef;
     let binding = axtask::current();
     let proc: &crate::task::Process = binding.task_ext();
+    let enter_ns = axhal::time::monotonic_time_nanos() as u64;
+    proc.on_kernel_entry_from_user(enter_ns);
 
     // 委托给进程地址空间处理。这里必须保留完整访问标志（READ/WRITE/EXECUTE/USER），
     // 否则会让合法缺页（例如用户态写时缺页）被误判为非法访问。
     if proc.handle_page_fault(vaddr, access_flags) {
+        let leave_ns = axhal::time::monotonic_time_nanos() as u64;
+        proc.add_sys_time_ns(leave_ns.saturating_sub(enter_ns));
+        proc.mark_user_resume();
         axlog::debug!("Page fault handled successfully");
         true
     } else {
+        let leave_ns = axhal::time::monotonic_time_nanos() as u64;
+        proc.add_sys_time_ns(leave_ns.saturating_sub(enter_ns));
         axlog::error!("Failed to handle page fault!");
         axlog::error!("  vaddr={:#x}, flags={:?}", vaddr, access_flags);
         axlog::error!("  This usually means invalid memory access");

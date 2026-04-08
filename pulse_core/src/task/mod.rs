@@ -10,6 +10,7 @@ use axhal::context::{TrapFrame, UspaceContext};
 use axhal::paging::MappingFlags;
 use axmm::AddrSpace;
 use axtask::{TaskInner, def_task_ext};
+use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use memory_addr::{VirtAddr, va};
 use spin::Mutex;
 pub struct Process {
@@ -18,6 +19,13 @@ pub struct Process {
     pub fs_context: Arc<Mutex<FsContext>>,
     pub fd_table: SharedFdTable,
     pub parent_pid: Arc<Mutex<u64>>,
+    pub start_mono_ns: u64,
+    pub user_time_ns: Arc<AtomicU64>,
+    pub sys_time_ns: Arc<AtomicU64>,
+    pub child_user_time_ns: Arc<AtomicU64>,
+    pub child_sys_time_ns: Arc<AtomicU64>,
+    pub last_user_enter_ns: Arc<AtomicU64>,
+    pub in_user_mode: Arc<AtomicBool>,
     pub stack_top: Mutex<usize>,
     pub entry: Mutex<usize>,
     pub children: Mutex<Vec<axtask::AxTaskRef>>,
@@ -65,11 +73,18 @@ impl Process {
         );
 
         Ok(Self {
+            start_mono_ns: axhal::time::monotonic_time_nanos() as u64,
             aspace: Arc::new(Mutex::new(aspace)),
             heap_top: Arc::new(Mutex::new(USER_HEAP_BASE + USER_HEAP_SIZE)),
             fs_context: Arc::new(Mutex::new(fs_context)),
             fd_table: Arc::new(Mutex::new(fd_table)),
             parent_pid: Arc::new(Mutex::new(0)),
+            user_time_ns: Arc::new(AtomicU64::new(0)),
+            sys_time_ns: Arc::new(AtomicU64::new(0)),
+            child_user_time_ns: Arc::new(AtomicU64::new(0)),
+            child_sys_time_ns: Arc::new(AtomicU64::new(0)),
+            last_user_enter_ns: Arc::new(AtomicU64::new(0)),
+            in_user_mode: Arc::new(AtomicBool::new(false)),
             stack_top: Mutex::new(USER_STACK_TOP),
             entry: Mutex::new(0),
             children: Mutex::new(Vec::new()),
@@ -103,6 +118,7 @@ impl Process {
         let entry = *self.entry.lock();
         let stack_top = *self.stack_top.lock();
         let uctx = axhal::context::UspaceContext::new(entry, va!(stack_top), 0);
+        self.mark_user_resume();
         let kstack_top = axtask::current()
             .kernel_stack_top()
             .expect("current task has no kernel stack")
@@ -172,6 +188,13 @@ impl Process {
             fs_context: self.fs_context.clone(),
             fd_table: self.fd_table.clone(),
             parent_pid: self.parent_pid.clone(),
+            start_mono_ns: self.start_mono_ns,
+            user_time_ns: self.user_time_ns.clone(),
+            sys_time_ns: self.sys_time_ns.clone(),
+            child_user_time_ns: self.child_user_time_ns.clone(),
+            child_sys_time_ns: self.child_sys_time_ns.clone(),
+            last_user_enter_ns: self.last_user_enter_ns.clone(),
+            in_user_mode: self.in_user_mode.clone(),
             stack_top: Mutex::new(*self.stack_top.lock()),
             entry: Mutex::new(*self.entry.lock()),
             children: Mutex::new(Vec::new()),
@@ -186,8 +209,15 @@ impl Process {
     ) -> AxResult<Self> {
         let mut child_proc = self.clone_for_thread();
         if !is_thread_clone {
+            child_proc.start_mono_ns = axhal::time::monotonic_time_nanos() as u64;
             child_proc.heap_top = Arc::new(Mutex::new(*self.heap_top.lock()));
             child_proc.parent_pid = Arc::new(Mutex::new(axtask::current().id().as_u64()));
+            child_proc.user_time_ns = Arc::new(AtomicU64::new(0));
+            child_proc.sys_time_ns = Arc::new(AtomicU64::new(0));
+            child_proc.child_user_time_ns = Arc::new(AtomicU64::new(0));
+            child_proc.child_sys_time_ns = Arc::new(AtomicU64::new(0));
+            child_proc.last_user_enter_ns = Arc::new(AtomicU64::new(0));
+            child_proc.in_user_mode = Arc::new(AtomicBool::new(false));
             child_proc.children = Mutex::new(Vec::new());
         }
         if !share_fs {
@@ -198,6 +228,52 @@ impl Process {
                 Arc::new(Mutex::new(self.fd_table.lock().clone_for_fork()?));
         }
         Ok(child_proc)
+    }
+
+    pub fn mark_user_resume(&self) {
+        let now_ns = axhal::time::monotonic_time_nanos() as u64;
+        self.last_user_enter_ns.store(now_ns, Ordering::Relaxed);
+        self.in_user_mode.store(true, Ordering::Release);
+    }
+
+    pub fn on_kernel_entry_from_user(&self, now_ns: u64) {
+        if self.in_user_mode.swap(false, Ordering::AcqRel) {
+            let last = self.last_user_enter_ns.load(Ordering::Relaxed);
+            let delta = now_ns.saturating_sub(last);
+            self.user_time_ns.fetch_add(delta, Ordering::Relaxed);
+        }
+    }
+
+    pub fn add_sys_time_ns(&self, delta_ns: u64) {
+        self.sys_time_ns.fetch_add(delta_ns, Ordering::Relaxed);
+    }
+
+    pub fn add_child_time_ns(&self, child_user_ns: u64, child_sys_ns: u64) {
+        self.child_user_time_ns
+            .fetch_add(child_user_ns, Ordering::Relaxed);
+        self.child_sys_time_ns
+            .fetch_add(child_sys_ns, Ordering::Relaxed);
+    }
+
+    pub fn snapshot_cpu_time_ns(&self, now_ns: u64) -> (u64, u64) {
+        let mut user = self.user_time_ns.load(Ordering::Relaxed);
+        let sys = self.sys_time_ns.load(Ordering::Relaxed);
+        if self.in_user_mode.load(Ordering::Acquire) {
+            let last = self.last_user_enter_ns.load(Ordering::Relaxed);
+            user = user.saturating_add(now_ns.saturating_sub(last));
+        }
+        (user, sys)
+    }
+
+    pub fn snapshot_children_cpu_time_ns(&self) -> (u64, u64) {
+        (
+            self.child_user_time_ns.load(Ordering::Relaxed),
+            self.child_sys_time_ns.load(Ordering::Relaxed),
+        )
+    }
+
+    pub fn read_sys_time_ns(&self) -> u64 {
+        self.sys_time_ns.load(Ordering::Relaxed)
     }
 
     /// Implement fork with COW: parent and child initially share read-only user pages,
