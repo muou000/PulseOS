@@ -12,47 +12,48 @@ extern crate pulse_syscalls;
 fn main() {
     use axtask::TaskInner;
     const SHELL_ELF_PATH: &str = "/bin/sh";
-    #[cfg(feature = "auto-testcode")]
-    // const AUTO_TESTCODE_CMD: &str = "find /fs -type f -name '*_testcode.sh' 2>/dev/null | while read -r t; do d=$(dirname \"$t\"); f=$(basename \"$t\"); (cd \"$d\" && sh \"$f\"); done";
-    const AUTO_TESTCODE_CMD: &str = "cd /fs/musl && ./basic_testcode.sh && cd /fs/glibc && ./basic_testcode.sh";
-    match pulse_core::task::Process::new_uspace() {
+    let mut inner = TaskInner::new(
+        || {
+            let thread =
+                pulse_core::task::current_thread().expect("init task entered without Thread");
+            let proc = thread.process();
+            proc.activate();
+            info!("User process address space activated");
+
+            #[cfg(feature = "auto-testcode")]
+            let shell_args: &[&str] = &["sh", "-c", include_str!("auto_testcode_cmd.sh").trim()];
+            #[cfg(not(feature = "auto-testcode"))]
+            let shell_args: &[&str] = &["sh"];
+
+            match proc.load_elf(SHELL_ELF_PATH, shell_args, &[]) {
+                Ok(_) => {
+                    info!("Successfully loaded {}", SHELL_ELF_PATH);
+                    info!("Jumping to user mode...");
+                    proc.enter_user_mode();
+                }
+                Err(e) => {
+                    error!("Failed to load {}: {:?}", SHELL_ELF_PATH, e);
+                }
+            }
+        },
+        "pulse_init".into(),
+        0x8000,
+    );
+    let init_tid = inner.id().as_u64();
+    match pulse_core::task::Process::new_uspace(init_tid) {
         Ok(proc) => {
+            let init_thread = pulse_core::task::Thread::new(init_tid, proc);
             info!("Created initial user process");
-            let mut inner = TaskInner::new(
-                || {
-                    use axtask::TaskExtRef;
-                    let binding = axtask::current();
-                    let proc: &pulse_core::task::Process = binding.task_ext();
-                    proc.activate();
-                    info!("User process address space activated");
 
-                    #[cfg(feature = "auto-testcode")]
-                    let shell_args: &[&str] = &["sh", "-c", AUTO_TESTCODE_CMD];
-                    #[cfg(not(feature = "auto-testcode"))]
-                    let shell_args: &[&str] = &["sh"];
-
-                    match proc.load_elf(SHELL_ELF_PATH, shell_args, &[]) {
-                        Ok(_) => {
-                            info!("Successfully loaded {}", SHELL_ELF_PATH);
-                            info!("Jumping to user mode...");
-                            proc.enter_user_mode();
-                        }
-                        Err(e) => {
-                            error!("Failed to load {}: {:?}", SHELL_ELF_PATH, e);
-                        }
-                    }
-                },
-                "pulse_init".into(),
-                0x8000,
-            );
-
-            let pt_root = proc.aspace.lock().page_table_root();
+            let pt_root = init_thread.process().page_table_root();
             inner.ctx_mut().set_page_table_root(pt_root);
 
-            proc.sync_fs_context();
+            init_thread.process().sync_fs_context();
 
-            inner.init_task_ext(proc);
+            pulse_core::task::register_thread_task(init_tid, init_thread.clone());
+            inner.init_task_ext(pulse_core::task::ThreadHandle::new(init_thread.clone()));
             let init_task = axtask::spawn_task(inner);
+            init_thread.process().register_task_ref(init_task.clone());
 
             let _exit_code = init_task.join();
             arceos_api::sys::ax_terminate();

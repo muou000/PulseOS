@@ -1,6 +1,8 @@
 //! 其他杂项系统调用
 
 use crate::LinuxError;
+use alloc::vec;
+use axalloc::global_allocator;
 
 #[repr(C)]
 struct UtsName {
@@ -12,11 +14,56 @@ struct UtsName {
     domainname: [u8; 65],
 }
 
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+struct Sysinfo {
+    uptime: i64,
+    loads: [u64; 3],
+    totalram: u64,
+    freeram: u64,
+    sharedram: u64,
+    bufferram: u64,
+    totalswap: u64,
+    freeswap: u64,
+    procs: u16,
+    pad: u16,
+    totalhigh: u64,
+    freehigh: u64,
+    mem_unit: u32,
+    _f: [i8; 0],
+}
+
+const SYSLOG_ACTION_CLOSE: usize = 0;
+const SYSLOG_ACTION_OPEN: usize = 1;
+const SYSLOG_ACTION_READ: usize = 2;
+const SYSLOG_ACTION_READ_ALL: usize = 3;
+const SYSLOG_ACTION_READ_CLEAR: usize = 4;
+const SYSLOG_ACTION_CLEAR: usize = 5;
+const SYSLOG_ACTION_CONSOLE_OFF: usize = 6;
+const SYSLOG_ACTION_CONSOLE_ON: usize = 7;
+const SYSLOG_ACTION_CONSOLE_LEVEL: usize = 8;
+const SYSLOG_ACTION_SIZE_UNREAD: usize = 9;
+const SYSLOG_ACTION_SIZE_BUFFER: usize = 10;
+const KMSG_PLACEHOLDER: &[u8] = b"PulseOS kernel log buffer is not persisted yet.\n";
+
 fn write_cstr_field(dst: &mut [u8], s: &str) {
     let bytes = s.as_bytes();
     let len = bytes.len().min(dst.len().saturating_sub(1));
     dst[..len].copy_from_slice(&bytes[..len]);
     dst[len] = 0;
+}
+
+fn with_current_process<R>(f: impl FnOnce(&pulse_core::task::Process) -> R) -> R {
+    pulse_core::task::with_current_process(f).expect("syscall without current process")
+}
+
+fn write_current_process_bytes(user_addr: usize, bytes: &[u8]) -> isize {
+    with_current_process(|process| {
+        process
+            .write_user_bytes(user_addr, bytes)
+            .map(|_| 0)
+            .unwrap_or_else(|_| -LinuxError::EFAULT.code() as isize)
+    })
 }
 
 /// sys_uname - 获取系统信息
@@ -26,9 +73,8 @@ pub fn sys_uname(buf: usize) -> isize {
         return -LinuxError::EFAULT.code() as isize;
     }
 
-    let uts = unsafe { &mut *(buf as *mut UtsName) };
     // Keep values simple and stable for userspace probing.
-    *uts = UtsName {
+    let mut uts = UtsName {
         sysname: [0; 65],
         nodename: [0; 65],
         release: [0; 65],
@@ -45,17 +91,61 @@ pub fn sys_uname(buf: usize) -> isize {
     #[cfg(target_arch = "loongarch64")]
     write_cstr_field(&mut uts.machine, "loongarch64");
     write_cstr_field(&mut uts.domainname, "(none)");
-    0
+
+    let bytes = unsafe {
+        core::slice::from_raw_parts(
+            (&uts as *const UtsName).cast::<u8>(),
+            core::mem::size_of::<UtsName>(),
+        )
+    };
+    write_current_process_bytes(buf, bytes)
 }
 
 pub fn sys_set_tid_address(tidptr: usize) -> isize {
     axlog::debug!("sys_set_tid_address: tidptr={:#x}", tidptr);
-    sys_gettid()
+    let thread = pulse_core::task::current_thread().expect("set_tid_address without Thread");
+    thread.set_clear_child_tid(tidptr);
+    thread.tid() as isize
 }
 
 pub fn sys_gettid() -> isize {
     axlog::debug!("sys_gettid");
-    axtask::current().id().as_u64() as isize
+    let thread = pulse_core::task::current_thread().expect("gettid without Thread");
+    thread.tid() as isize
+}
+
+pub fn sys_set_robust_list(head: usize, len: usize) -> isize {
+    axlog::debug!("sys_set_robust_list: head={:#x}, len={}", head, len);
+    if len != core::mem::size_of::<usize>() * 3 {
+        return -LinuxError::EINVAL.code() as isize;
+    }
+    let thread = pulse_core::task::current_thread().expect("set_robust_list without Thread");
+    thread.set_robust_list_head(head);
+    0
+}
+
+pub fn sys_get_robust_list(pid: usize, head_ptr: usize, len_ptr: usize) -> isize {
+    axlog::debug!(
+        "sys_get_robust_list: pid={}, head_ptr={:#x}, len_ptr={:#x}",
+        pid,
+        head_ptr,
+        len_ptr
+    );
+    if head_ptr == 0 || len_ptr == 0 {
+        return -LinuxError::EFAULT.code() as isize;
+    }
+
+    let thread = pulse_core::task::current_thread().expect("get_robust_list without Thread");
+    if pid != 0 && pid != thread.tid() as usize {
+        return -LinuxError::ESRCH.code() as isize;
+    }
+
+    let process = thread.process();
+    process
+        .write_user_usize(head_ptr, thread.robust_list_head())
+        .and_then(|_| process.write_user_usize(len_ptr, core::mem::size_of::<usize>() * 3))
+        .map(|_| 0)
+        .unwrap_or_else(|_| -LinuxError::EFAULT.code() as isize)
 }
 
 pub fn sys_getrandom(buf: usize, len: usize, _flags: usize) -> isize {
@@ -69,7 +159,7 @@ pub fn sys_getrandom(buf: usize, len: usize, _flags: usize) -> isize {
 
     // Minimal non-cryptographic fallback for libc probes.
     let seed = axhal::time::monotonic_time_nanos() as u64;
-    let out = unsafe { core::slice::from_raw_parts_mut(buf as *mut u8, len) };
+    let mut out = alloc::vec![0u8; len];
     let mut x = seed ^ 0x9e37_79b9_7f4a_7c15;
     for b in out.iter_mut() {
         x ^= x >> 12;
@@ -78,7 +168,12 @@ pub fn sys_getrandom(buf: usize, len: usize, _flags: usize) -> isize {
         x = x.wrapping_mul(0x2545_f491_4f6c_dd1d);
         *b = (x & 0xff) as u8;
     }
-    len as isize
+    let thread = pulse_core::task::current_thread().expect("getrandom without Thread");
+    thread
+        .process()
+        .write_user_bytes(buf, &out)
+        .map(|_| len as isize)
+        .unwrap_or_else(|_| -LinuxError::EFAULT.code() as isize)
 }
 
 pub fn sys_prlimit64(_pid: usize, _resource: usize, _new_limit: usize, _old_limit: usize) -> isize {
@@ -104,4 +199,73 @@ pub fn sys_rt_sigreturn() -> isize {
 pub fn sys_setpgid(pid: isize, pgid: isize) -> isize {
     axlog::debug!("sys_setpgid (stub): pid={}, pgid={}", pid, pgid);
     0
+}
+
+pub fn sys_sysinfo(info: usize) -> isize {
+    axlog::debug!("sys_sysinfo: info={:#x}", info);
+    if info == 0 {
+        return -LinuxError::EFAULT.code() as isize;
+    }
+
+    let allocator = global_allocator();
+    let page_size = 4096u64;
+    let total_pages = allocator
+        .used_pages()
+        .saturating_add(allocator.available_pages()) as u64;
+    let free_pages = allocator.available_pages() as u64;
+    let sysinfo = Sysinfo {
+        uptime: axhal::time::monotonic_time().as_secs() as i64,
+        loads: [0; 3],
+        totalram: total_pages.saturating_mul(page_size),
+        freeram: free_pages.saturating_mul(page_size),
+        sharedram: 0,
+        bufferram: 0,
+        totalswap: 0,
+        freeswap: 0,
+        procs: 1,
+        pad: 0,
+        totalhigh: 0,
+        freehigh: 0,
+        mem_unit: 1,
+        _f: [],
+    };
+    let bytes = unsafe {
+        core::slice::from_raw_parts(
+            (&sysinfo as *const Sysinfo).cast::<u8>(),
+            core::mem::size_of::<Sysinfo>(),
+        )
+    };
+    write_current_process_bytes(info, bytes)
+}
+
+pub fn sys_syslog(action: usize, bufp: usize, len: usize) -> isize {
+    axlog::debug!(
+        "sys_syslog: action={}, bufp={:#x}, len={}",
+        action,
+        bufp,
+        len
+    );
+    match action {
+        SYSLOG_ACTION_CLOSE
+        | SYSLOG_ACTION_OPEN
+        | SYSLOG_ACTION_CLEAR
+        | SYSLOG_ACTION_CONSOLE_OFF
+        | SYSLOG_ACTION_CONSOLE_ON
+        | SYSLOG_ACTION_CONSOLE_LEVEL => 0,
+        SYSLOG_ACTION_SIZE_UNREAD | SYSLOG_ACTION_SIZE_BUFFER => KMSG_PLACEHOLDER.len() as isize,
+        SYSLOG_ACTION_READ | SYSLOG_ACTION_READ_ALL | SYSLOG_ACTION_READ_CLEAR => {
+            if bufp == 0 && len != 0 {
+                return -LinuxError::EFAULT.code() as isize;
+            }
+            let read_len = core::cmp::min(len, KMSG_PLACEHOLDER.len());
+            if read_len == 0 {
+                return 0;
+            }
+            let mut out = vec![0u8; read_len];
+            out.copy_from_slice(&KMSG_PLACEHOLDER[..read_len]);
+            let ret = write_current_process_bytes(bufp, &out);
+            if ret < 0 { ret } else { read_len as isize }
+        }
+        _ => -LinuxError::EINVAL.code() as isize,
+    }
 }

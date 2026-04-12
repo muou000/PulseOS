@@ -1,14 +1,30 @@
 use crate::*;
 use axhal::context::TrapFrame;
 use axhal::trap::{SYSCALL, register_trap_handler};
-use axtask::TaskExtRef;
 
 #[register_trap_handler(SYSCALL)]
 pub fn syscall_handler(tf: &TrapFrame, syscall_num: usize) -> isize {
     let syscall_enter_ns = axhal::time::monotonic_time_nanos() as u64;
-    let curr = axtask::current();
-    let process: &pulse_core::task::Process = curr.task_ext();
+    let thread = match pulse_core::task::current_thread() {
+        Ok(thread) => thread,
+        Err(_) => {
+            let task = axtask::current();
+            let task_ext_ptr = unsafe { task.task_ext_ptr() };
+            axlog::error!(
+                "syscall without Thread context: syscall={}, task={} {:?}, task_ext_ptr={:p}",
+                syscall_num,
+                task.id().as_u64(),
+                task.name(),
+                task_ext_ptr
+            );
+            return -LinuxError::ENOSYS.code() as isize;
+        }
+    };
+    let process = thread.process_arc();
     process.on_kernel_entry_from_user(syscall_enter_ns);
+    if process.group_exiting() {
+        thread.exit_current(process.group_exit_code());
+    }
 
     let args = [
         tf.arg0(),
@@ -29,19 +45,25 @@ pub fn syscall_handler(tf: &TrapFrame, syscall_num: usize) -> isize {
         args[4],
         args[5]
     );
-    let ret = syscall_dispatcher(tf, syscall_num, args);
+    let ret = syscall_dispatcher(tf, syscall_num, args, process.as_ref());
 
     let syscall_leave_ns = axhal::time::monotonic_time_nanos() as u64;
     let delta_ns = syscall_leave_ns.saturating_sub(syscall_enter_ns);
     process.add_sys_time_ns(delta_ns);
+    if process.group_exiting() {
+        thread.exit_current(process.group_exit_code());
+    }
     process.mark_user_resume();
 
     ret
 }
 
-fn syscall_dispatcher(tf: &TrapFrame, syscall_id: usize, args: [usize; 6]) -> isize {
-    let curr = axtask::current();
-    let process: &pulse_core::task::Process = curr.task_ext();
+fn syscall_dispatcher(
+    tf: &TrapFrame,
+    syscall_id: usize,
+    args: [usize; 6],
+    process: &pulse_core::task::Process,
+) -> isize {
     process.sync_fs_context();
 
     let sysno = match Sysno::new(syscall_id) {
@@ -54,16 +76,21 @@ fn syscall_dispatcher(tf: &TrapFrame, syscall_id: usize, args: [usize; 6]) -> is
 
     match sysno {
         Sysno::getpid => impls::sys_getpid(),
-        Sysno::exit | Sysno::exit_group => {
+        Sysno::exit => {
             impls::sys_exit(args[0] as i32);
+        }
+        Sysno::exit_group => {
+            impls::sys_exit_group(args[0] as i32);
         }
         Sysno::clone => impls::sys_clone(tf, args),
         Sysno::wait4 => impls::sys_wait4(args[0] as isize, args[1], args[2] as i32, args[3]),
         Sysno::sched_yield => impls::sys_yield(),
 
         Sysno::read => impls::sys_read(args[0], args[1], args[2]),
+        Sysno::readv => impls::sys_readv(args[0], args[1], args[2]),
         Sysno::write => impls::sys_write(args[0], args[1], args[2]),
         Sysno::writev => impls::sys_writev(args[0], args[1], args[2]),
+        Sysno::sendfile => impls::sys_sendfile(args[0], args[1], args[2], args[3]),
         Sysno::openat => impls::sys_openat(args[0] as i32, args[1], args[2], args[3]),
         Sysno::mkdirat => impls::sys_mkdirat(args[0] as i32, args[1], args[2]),
         Sysno::mount => impls::sys_mount(args[0], args[1], args[2], args[3], args[4]),
@@ -71,8 +98,8 @@ fn syscall_dispatcher(tf: &TrapFrame, syscall_id: usize, args: [usize; 6]) -> is
         Sysno::getdents64 => impls::sys_getdents64(args[0], args[1], args[2]),
         Sysno::close => impls::sys_close(args[0]),
         Sysno::fstat => impls::sys_fstat(args[0], args[1]),
+        #[cfg(any(target_arch = "riscv64", target_arch = "loongarch64"))]
         Sysno::fstatat => impls::sys_fstatat(args[0] as i32, args[1], args[2], args[3]),
-        #[cfg(target_arch = "loongarch64")]
         Sysno::statx => impls::sys_statx(args[0] as i32, args[1], args[2], args[3], args[4]),
 
         Sysno::brk => impls::sys_brk(args[0]),
@@ -87,9 +114,14 @@ fn syscall_dispatcher(tf: &TrapFrame, syscall_id: usize, args: [usize; 6]) -> is
 
         Sysno::set_tid_address => impls::sys_set_tid_address(args[0]),
         Sysno::gettid => impls::sys_gettid(),
+        Sysno::futex => {
+            impls::sys_futex(args[0], args[1] as i32, args[2], args[3], args[4], args[5])
+        }
 
         Sysno::uname => impls::sys_uname(args[0]),
         Sysno::getrandom => impls::sys_getrandom(args[0], args[1], args[2]),
+        Sysno::sysinfo => impls::sys_sysinfo(args[0]),
+        Sysno::syslog => impls::sys_syslog(args[0], args[1], args[2]),
         Sysno::prlimit64 => impls::sys_prlimit64(args[0], args[1], args[2], args[3]),
         Sysno::rt_sigprocmask => impls::sys_rt_sigprocmask(args[0], args[1], args[2], args[3]),
 
@@ -142,10 +174,9 @@ fn syscall_dispatcher(tf: &TrapFrame, syscall_id: usize, args: [usize; 6]) -> is
         Sysno::getcwd => impls::sys_getcwd(args[0], args[1]),
         Sysno::chdir => impls::sys_chdir(args[0]),
         Sysno::unlinkat => impls::sys_unlinkat(args[0] as i32, args[1], args[2]),
-        Sysno::set_robust_list => {
-            axlog::debug!("sys_set_robust_list (stub)");
-            0
-        }
+        Sysno::utimensat => impls::sys_utimensat(args[0] as i32, args[1], args[2], args[3]),
+        Sysno::set_robust_list => impls::sys_set_robust_list(args[0], args[1]),
+        Sysno::get_robust_list => impls::sys_get_robust_list(args[0], args[1], args[2]),
         Sysno::readlinkat => {
             axlog::debug!("sys_readlinkat (stub)");
             -LinuxError::EINVAL.code() as isize
@@ -162,7 +193,7 @@ fn syscall_dispatcher(tf: &TrapFrame, syscall_id: usize, args: [usize; 6]) -> is
                 args[1],
                 args[2]
             );
-            impls::sys_execve(args[0], args[1], args[2])
+            impls::sys_execve(tf, args[0], args[1], args[2])
         }
 
         _ => {

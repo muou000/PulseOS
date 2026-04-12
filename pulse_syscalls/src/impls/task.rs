@@ -1,11 +1,9 @@
 use crate::LinuxError;
 use alloc::string::String;
 use alloc::vec::Vec;
+use axerrno::{AxError, AxErrorKind};
 use axhal::context::TrapFrame;
-use axtask::TaskExtRef;
 use bitflags::bitflags;
-use core::ffi::c_char;
-use memory_addr::VirtAddr;
 
 bitflags! {
     /// Flags for sys_clone
@@ -41,21 +39,80 @@ bitflags! {
 
 pub fn sys_getpid() -> isize {
     axlog::debug!("sys_getpid");
-    axtask::current().id().as_u64() as isize
+    pulse_core::task::current_process()
+        .expect("getpid without current process")
+        .pid() as isize
 }
 
 pub fn sys_getppid() -> isize {
-    let curr = axtask::current();
-    let process: &pulse_core::task::Process = curr.task_ext();
-    *process.parent_pid.lock() as isize
+    pulse_core::task::current_process()
+        .expect("getppid without current process")
+        .parent_pid() as isize
+}
+
+fn ax_error_to_linux_ret(e: AxError) -> isize {
+    let errno: LinuxError = e.into();
+    -errno.code() as isize
+}
+
+fn read_user_bytes(
+    process: &pulse_core::task::Process,
+    user_addr: usize,
+    bytes: &mut [u8],
+) -> Result<(), isize> {
+    process
+        .read_user_bytes(user_addr, bytes)
+        .map_err(|_| -LinuxError::EFAULT.code() as isize)
+}
+
+fn read_user_usize(process: &pulse_core::task::Process, user_addr: usize) -> Result<usize, isize> {
+    let mut bytes = [0u8; core::mem::size_of::<usize>()];
+    read_user_bytes(process, user_addr, &mut bytes)?;
+    Ok(usize::from_ne_bytes(bytes))
+}
+
+fn read_user_cstring(
+    process: &pulse_core::task::Process,
+    user_addr: usize,
+) -> Result<String, isize> {
+    if user_addr == 0 {
+        return Err(-LinuxError::EFAULT.code() as isize);
+    }
+    const STR_MAX: usize = 4096;
+    let mut bytes = Vec::new();
+    for i in 0..STR_MAX {
+        let mut byte = [0u8; 1];
+        read_user_bytes(process, user_addr + i, &mut byte)?;
+        if byte[0] == 0 {
+            return String::from_utf8(bytes).map_err(|_| -LinuxError::EINVAL.code() as isize);
+        }
+        bytes.push(byte[0]);
+    }
+    Err(-LinuxError::ENAMETOOLONG.code() as isize)
+}
+
+fn read_user_string_array(
+    process: &pulse_core::task::Process,
+    array_addr: usize,
+) -> Result<Vec<String>, isize> {
+    const ARG_MAX_COUNT: usize = 256;
+    let mut out = Vec::new();
+    if array_addr == 0 {
+        return Ok(out);
+    }
+    for i in 0..ARG_MAX_COUNT {
+        let ptr = read_user_usize(process, array_addr + i * core::mem::size_of::<usize>())?;
+        if ptr == 0 {
+            return Ok(out);
+        }
+        out.push(read_user_cstring(process, ptr)?);
+    }
+    Err(-LinuxError::E2BIG.code() as isize)
 }
 
 fn write_user_i32(process: &pulse_core::task::Process, user_addr: usize, value: i32) -> isize {
-    let bytes = value.to_ne_bytes();
     process
-        .aspace
-        .lock()
-        .write(VirtAddr::from(user_addr), &bytes)
+        .write_user_i32(user_addr, value)
         .map(|_| 0)
         .unwrap_or_else(|e| {
             axlog::warn!(
@@ -71,10 +128,16 @@ fn write_user_i32(process: &pulse_core::task::Process, user_addr: usize, value: 
 pub fn sys_exit(exit_code: i32) -> ! {
     axlog::debug!("sys_exit: exit_code={}", exit_code);
     axlog::info!("Task exit with code: {}", exit_code);
-    let curr = axtask::current();
-    let process: &pulse_core::task::Process = curr.task_ext();
-    process.close_all_files();
-    axtask::exit(exit_code);
+    let thread = pulse_core::task::current_thread().expect("exit without Thread");
+    thread.exit_current(exit_code);
+}
+
+pub fn sys_exit_group(exit_code: i32) -> ! {
+    axlog::debug!("sys_exit_group: exit_code={}", exit_code);
+    axlog::info!("Task group exit with code: {}", exit_code);
+    let thread = pulse_core::task::current_thread().expect("exit_group without Thread");
+    thread.process().begin_group_exit(exit_code);
+    thread.exit_current(exit_code);
 }
 
 pub fn sys_yield() -> isize {
@@ -88,8 +151,10 @@ pub fn sys_clone(tf: &TrapFrame, args: [usize; 6]) -> isize {
     let exit_signal = raw_flags & CloneFlags::CSIGNAL.bits();
     let child_stack = args[1];
     let parent_tid = args[2];
-    let tls = args[3];
-    let child_tid = args[4];
+    #[cfg(target_arch = "loongarch64")]
+    let (child_tid, tls) = (args[3], args[4]);
+    #[cfg(not(target_arch = "loongarch64"))]
+    let (tls, child_tid) = (args[3], args[4]);
 
     axlog::debug!(
         "sys_clone: flags={:?}, child_stack={:#x}, parent_tid={:#x}, child_tid={:#x}, tls={:#x}",
@@ -111,6 +176,12 @@ pub fn sys_clone(tf: &TrapFrame, args: [usize; 6]) -> isize {
     }
 
     if flags.contains(CloneFlags::CLONE_SIGHAND) && !flags.contains(CloneFlags::CLONE_VM) {
+        return -LinuxError::EINVAL.code() as isize;
+    }
+
+    if flags.contains(CloneFlags::CLONE_VFORK)
+        && (!flags.contains(CloneFlags::CLONE_VM) || flags.contains(CloneFlags::CLONE_THREAD))
+    {
         return -LinuxError::EINVAL.code() as isize;
     }
 
@@ -136,8 +207,18 @@ pub fn sys_clone(tf: &TrapFrame, args: [usize; 6]) -> isize {
         );
     }
 
-    let parent = axtask::current();
-    let parent_proc: &pulse_core::task::Process = parent.task_ext();
+    let parent_proc = match pulse_core::task::current_process() {
+        Ok(process) => process,
+        Err(_) => return -LinuxError::ESRCH.code() as isize,
+    };
+    let current_tid = pulse_core::task::current_thread()
+        .map(|t| t.tid())
+        .unwrap_or_default();
+    axlog::warn!(
+        "sys_clone context: parent_pid={}, parent_tid={}",
+        parent_proc.pid(),
+        current_tid
+    );
 
     let mut new_tf = *tf;
     // Child resumes right after the syscall instruction.
@@ -150,30 +231,49 @@ pub fn sys_clone(tf: &TrapFrame, args: [usize; 6]) -> isize {
         new_tf.era = new_tf.era.wrapping_add(4);
     }
     if flags.contains(CloneFlags::CLONE_SETTLS) {
-        axlog::warn!(
-            "sys_clone: CLONE_SETTLS is requested. Modifying TLS register (e.g. tp on RISC-V) in TrapFrame is missing from infrastructure."
-        );
-        // We'd do something like `new_tf.regs.tp = tls;` if TrapFrame architecture details were exposed properly.
+        #[cfg(target_arch = "riscv64")]
+        {
+            new_tf.regs.tp = tls;
+        }
+        #[cfg(target_arch = "loongarch64")]
+        {
+            new_tf.regs.tp = tls;
+        }
     }
 
     let share_fs = flags.contains(CloneFlags::CLONE_FS);
     let share_files = flags.contains(CloneFlags::CLONE_FILES);
     let is_thread_clone = flags.contains(CloneFlags::CLONE_THREAD);
+    let is_vfork = flags.contains(CloneFlags::CLONE_VFORK);
+    let child_set_tid = flags
+        .contains(CloneFlags::CLONE_CHILD_SETTID)
+        .then_some(child_tid)
+        .filter(|addr| *addr != 0);
+    let child_clear_tid = flags
+        .contains(CloneFlags::CLONE_CHILD_CLEARTID)
+        .then_some(child_tid)
+        .filter(|addr| *addr != 0);
+    let parent_set_tid = flags
+        .contains(CloneFlags::CLONE_PARENT_SETTID)
+        .then_some(parent_tid)
+        .filter(|addr| *addr != 0);
 
-    let child_tid_value = if !flags.contains(CloneFlags::CLONE_VM) {
+    let (child_tid_value, child_proc_for_vfork) = if !flags.contains(CloneFlags::CLONE_VM) {
         // Create an entirely new process memory space (Fork / Deep Copy)
-        match parent_proc
-            .spawn_fork_from_trap_frame(
-                &new_tf,
-                (child_stack != 0).then_some(child_stack),
-                share_fs,
-                share_files,
-            )
-        {
-            Ok(tid) => tid as usize,
+        match parent_proc.spawn_fork_from_trap_frame(
+            &new_tf,
+            (child_stack != 0).then_some(child_stack),
+            false,
+            share_fs,
+            share_files,
+            parent_set_tid,
+            child_set_tid,
+            child_clear_tid,
+        ) {
+            Ok(child_proc) => (child_proc.pid() as usize, None),
             Err(e) => {
                 axlog::error!("fork error: {:?}", e);
-                return -LinuxError::ENOMEM.code() as isize;
+                return ax_error_to_linux_ret(e);
             }
         }
     } else {
@@ -182,40 +282,32 @@ pub fn sys_clone(tf: &TrapFrame, args: [usize; 6]) -> isize {
             &new_tf,
             (child_stack != 0).then_some(child_stack),
             is_thread_clone,
+            is_vfork,
             share_fs,
             share_files,
+            parent_set_tid,
+            child_set_tid,
+            child_clear_tid,
         ) {
-            Ok(tid) => tid as usize,
+            Ok((tid, child_proc)) => (tid as usize, child_proc),
             Err(e) => {
                 axlog::error!("clone error: {:?}", e);
-                return -LinuxError::ENOMEM.code() as isize;
+                return ax_error_to_linux_ret(e);
             }
         }
     };
 
-    if flags.contains(CloneFlags::CLONE_PARENT_SETTID) && parent_tid != 0 {
-        unsafe {
-            *(parent_tid as *mut u32) = child_tid_value as u32;
-        }
-    }
-
-    if flags.contains(CloneFlags::CLONE_CHILD_SETTID) && child_tid != 0 {
-        unsafe {
-            *(child_tid as *mut u32) = child_tid_value as u32;
-        }
-    }
-
-    if flags.contains(CloneFlags::CLONE_CHILD_CLEARTID) && child_tid != 0 {
-        axlog::warn!(
-            "sys_clone: CLONE_CHILD_CLEARTID accepted but axtask lacks the clear_child_tid thread-exit mechanism to wake futex."
-        );
-        // Needs a field in Task structure: clear_child_tid_addr = child_tid;
+    if is_vfork {
+        let Some(child_proc) = child_proc_for_vfork else {
+            return -LinuxError::EINVAL.code() as isize;
+        };
+        child_proc.wait_for_vfork_completion();
     }
 
     child_tid_value as isize
 }
 
-pub fn sys_execve(pathname: usize, argv: usize, envp: usize) -> isize {
+pub fn sys_execve(_tf: &TrapFrame, pathname: usize, argv: usize, envp: usize) -> isize {
     axlog::debug!(
         "sys_execve: pathname={:#x}, argv={:#x}, envp={:#x}",
         pathname,
@@ -226,30 +318,32 @@ pub fn sys_execve(pathname: usize, argv: usize, envp: usize) -> isize {
         return -LinuxError::EFAULT.code() as isize;
     }
 
-    // Copy the pathname into a String to ensure it survives the exec switch
-    let path_str = String::from(
-        unsafe { core::ffi::CStr::from_ptr(pathname as *const c_char) }
-            .to_str()
-            .unwrap_or(""),
-    );
+    let thread = pulse_core::task::current_thread().expect("execve without Thread");
+    let process = thread.process();
+
+    if process.thread_count() > 1 {
+        axlog::warn!("sys_execve: multi-thread exec is not supported yet");
+        return -LinuxError::EAGAIN.code() as isize;
+    }
+
+    let path_str = match read_user_cstring(process, pathname) {
+        Ok(path) => path,
+        Err(e) => return e,
+    };
+    axlog::debug!("sys_execve path: {}", path_str);
+    if let Ok(cwd) = process.fs_context.lock().current_dir().absolute_path() {
+        axlog::debug!("sys_execve cwd: {}", cwd);
+    }
 
     if path_str.is_empty() {
         return -LinuxError::ENOENT.code() as isize;
     }
 
-    // Parse argv
-    let mut args: Vec<String> = Vec::new();
-    if argv != 0 {
-        let mut ptr = argv as *const *const c_char;
-        unsafe {
-            while !(*ptr).is_null() {
-                if let Ok(s) = core::ffi::CStr::from_ptr(*ptr).to_str() {
-                    args.push(String::from(s));
-                }
-                ptr = ptr.add(1);
-            }
-        }
-    } else {
+    let mut args = match read_user_string_array(process, argv) {
+        Ok(args) => args,
+        Err(e) => return e,
+    };
+    if args.is_empty() {
         args.push(path_str.clone());
     }
 
@@ -259,34 +353,44 @@ pub fn sys_execve(pathname: usize, argv: usize, envp: usize) -> isize {
         args_strs.push(s.as_str());
     }
 
-    // Parse envp
-    let mut envs: Vec<String> = Vec::new();
-    if envp != 0 {
-        let mut ptr = envp as *const *const c_char;
-        unsafe {
-            while !(*ptr).is_null() {
-                if let Ok(s) = core::ffi::CStr::from_ptr(*ptr).to_str() {
-                    envs.push(String::from(s));
-                }
-                ptr = ptr.add(1);
-            }
-        }
-    }
+    let envs = match read_user_string_array(process, envp) {
+        Ok(envs) => envs,
+        Err(e) => return e,
+    };
 
     let mut envs_strs: Vec<&str> = Vec::new();
     for s in &envs {
         envs_strs.push(s.as_str());
     }
 
-    let curr = axtask::current();
-    let process = curr.task_ext();
-
     if let Err(e) = process.exec(&path_str, &args_strs, &envs_strs) {
-        axlog::error!("sys_execve failed: {:?}", e);
-        let errno: LinuxError = e.into();
-        return -errno.code() as isize;
+        if matches!(
+            AxErrorKind::try_from(e.canonicalize()),
+            Ok(AxErrorKind::InvalidExecutable)
+        ) {
+            // Compatibility fallback: execute text scripts via /bin/sh when
+            // direct image loading fails with ENOEXEC-equivalent.
+            let mut sh_args_owned = Vec::with_capacity(args.len() + 1);
+            sh_args_owned.push(String::from("/bin/sh"));
+            sh_args_owned.push(path_str.clone());
+            sh_args_owned.extend(args.into_iter().skip(1));
+            let sh_args: Vec<&str> = sh_args_owned.iter().map(|s| s.as_str()).collect();
+            if let Err(sh_e) = process.exec("/bin/sh", &sh_args, &envs_strs) {
+                axlog::error!(
+                    "sys_execve failed: {:?}, shell-fallback failed: {:?}",
+                    e,
+                    sh_e
+                );
+                let errno: LinuxError = sh_e.into();
+                return -errno.code() as isize;
+            }
+        } else {
+            axlog::error!("sys_execve failed: {:?}", e);
+            let errno: LinuxError = e.into();
+            return -errno.code() as isize;
+        }
     }
-
+    thread.clear_thread_tid_state();
     process.enter_user_mode();
 }
 
@@ -298,35 +402,17 @@ pub fn sys_wait4(pid: isize, status: usize, options: i32, rusage: usize) -> isiz
         options,
         rusage
     );
-    let curr = axtask::current();
-    let process: &pulse_core::task::Process = curr.task_ext();
+    let thread = pulse_core::task::current_thread().expect("wait4 without Thread");
+    let process = thread.process();
 
     loop {
-        let mut children = process.children.lock();
-        if children.is_empty() {
+        if !process.has_matching_child(pid) {
             return -LinuxError::ECHILD.code() as isize;
         }
 
-        let mut exited_idx = None;
-        let mut exited_pid = 0;
-        let mut exit_code = 0;
-
-        for (i, child) in children.iter().enumerate() {
-            let child_id = child.id().as_u64() as isize;
-            if pid == -1 || child_id == pid || pid == 0 || (pid < -1 && child_id == -pid) {
-                if let Some(code) = child.try_join() {
-                    exited_idx = Some(i);
-                    exited_pid = child_id;
-                    exit_code = code;
-                    break;
-                }
-            }
-        }
-
-        if let Some(idx) = exited_idx {
-            let exited_child = children.remove(idx);
-
-            let child_proc: &pulse_core::task::Process = exited_child.task_ext();
+        if let Some(child_proc) = process.reap_zombie_child(pid) {
+            let exited_pid = child_proc.pid() as isize;
+            let exit_code = child_proc.exit_code();
             let now_ns = axhal::time::monotonic_time_nanos() as u64;
             let (child_utime_ns, child_stime_ns) = child_proc.snapshot_cpu_time_ns(now_ns);
             process.add_child_time_ns(child_utime_ns, child_stime_ns);
@@ -337,13 +423,22 @@ pub fn sys_wait4(pid: isize, status: usize, options: i32, rusage: usize) -> isiz
                 let wait_status = (exit_code & 0xff) << 8;
                 let write_result = write_user_i32(process, status, wait_status);
                 if write_result < 0 {
-                    children.insert(idx, exited_child);
+                    process.add_child(child_proc);
                     return write_result;
                 }
             }
             if rusage != 0 {
                 // Not supported yet: simply ignore or zero out
             }
+            child_proc.wait_task_refs_exited();
+            child_proc.release_task_refs();
+            // Keep a bounded cache of reaped child process objects, but release
+            // heavy user resources first to prevent fork/exec workloads from
+            // exhausting memory.
+            if let Err(e) = child_proc.shrink_reaped_resources() {
+                axlog::warn!("failed to shrink reaped child resources: {:?}", e);
+            }
+            process.stash_reaped_child(child_proc);
             return exited_pid;
         }
 
@@ -353,8 +448,6 @@ pub fn sys_wait4(pid: isize, status: usize, options: i32, rusage: usize) -> isiz
             return 0; // WNOHANG
         }
 
-        // drop lock before yielding
-        drop(children);
-        axtask::yield_now();
+        process.wait_for_child_exit(pid);
     }
 }

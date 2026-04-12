@@ -1,24 +1,45 @@
 use crate::LinuxError;
-use arceos_posix_api::sys_lseek as ax_sys_lseek;
-use arceos_posix_api::sys_read as ax_sys_read;
+use alloc::sync::Arc;
 use axhal::paging::MappingFlags;
-use core::ffi::c_void;
 use memory_addr::{MemoryAddr, VirtAddr};
+use pulse_core::fd_table::FdObject;
 
 const PROT_READ: usize = 0x1;
 const PROT_WRITE: usize = 0x2;
 const PROT_EXEC: usize = 0x4;
 const MAP_ANONYMOUS: usize = 0x20;
 const PAGE_SIZE: usize = 0x1000;
-const SEEK_SET: i32 = 0;
-const SEEK_CUR: i32 = 1;
+
+fn user_space_end() -> Option<usize> {
+    pulse_core::config::USER_SPACE_BASE.checked_add(pulse_core::config::USER_SPACE_SIZE)
+}
+
+fn is_user_range(addr: usize, len: usize) -> bool {
+    if len == 0 {
+        return true;
+    }
+    let Some(end) = addr.checked_add(len) else {
+        return false;
+    };
+    let Some(user_end) = user_space_end() else {
+        return false;
+    };
+    addr >= pulse_core::config::USER_SPACE_BASE && end <= user_end
+}
+
+fn get_fd_object(fd: usize) -> Result<Arc<dyn FdObject>, LinuxError> {
+    let proc = pulse_core::task::current_process()?;
+    proc.fd_table
+        .lock()
+        .get(fd)
+        .map(|entry| entry.object.clone())
+        .ok_or(LinuxError::EBADF)
+}
 
 pub fn sys_brk(addr: usize) -> isize {
     axlog::debug!("sys_brk: addr={:#x}", addr);
 
-    use axtask::TaskExtRef;
-    let binding = axtask::current();
-    let proc: &pulse_core::task::Process = binding.task_ext();
+    let proc = pulse_core::task::current_process().expect("brk without current process");
 
     let mut heap_top = proc.heap_top.lock();
 
@@ -41,7 +62,8 @@ pub fn sys_brk(addr: usize) -> isize {
         let end = (new_heap_top + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
 
         if end > start {
-            let mut aspace = proc.aspace.lock();
+            let aspace_handle = proc.aspace_handle();
+            let mut aspace = aspace_handle.lock();
             let flags = MappingFlags::READ | MappingFlags::WRITE | MappingFlags::USER;
             if let Err(e) = aspace.map_alloc(VirtAddr::from(start), end - start, flags, false) {
                 axlog::error!("sys_brk: failed to expand heap: {:?}", e);
@@ -53,7 +75,8 @@ pub fn sys_brk(addr: usize) -> isize {
         let end = (old_heap_top + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
 
         if end > start {
-            let mut aspace = proc.aspace.lock();
+            let aspace_handle = proc.aspace_handle();
+            let mut aspace = aspace_handle.lock();
             if let Err(e) = aspace.unmap(VirtAddr::from(start), end - start) {
                 axlog::error!("sys_brk: failed to shrink heap: {:?}", e);
                 return old_heap_top as isize;
@@ -84,9 +107,7 @@ pub fn sys_mmap(
         offset
     );
 
-    use axtask::TaskExtRef;
-    let binding = axtask::current();
-    let proc: &pulse_core::task::Process = binding.task_ext();
+    let proc = pulse_core::task::current_process().expect("mmap without current process");
 
     if length == 0 {
         return -LinuxError::EINVAL.code() as isize;
@@ -96,6 +117,14 @@ pub fn sys_mmap(
     if file_backed && fd < 0 {
         return -LinuxError::EBADF.code() as isize;
     }
+    let file = if file_backed {
+        match get_fd_object(fd as usize) {
+            Ok(file) => Some(file),
+            Err(e) => return -e.code() as isize,
+        }
+    } else {
+        None
+    };
 
     let mut map_flags = MappingFlags::USER;
     if (prot & PROT_READ) != 0 {
@@ -110,7 +139,8 @@ pub fn sys_mmap(
 
     let aligned_length = (length + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
 
-    let mut aspace = proc.aspace.lock();
+    let aspace_handle = proc.aspace_handle();
+    let mut aspace = aspace_handle.lock();
 
     const MAP_FIXED: usize = 0x10;
 
@@ -136,6 +166,15 @@ pub fn sys_mmap(
         addr & !(PAGE_SIZE - 1)
     };
 
+    if !is_user_range(map_addr, aligned_length) {
+        axlog::warn!(
+            "sys_mmap: range out of user space, addr={:#x}, len={:#x}",
+            map_addr,
+            aligned_length
+        );
+        return -LinuxError::EINVAL.code() as isize;
+    }
+
     if (flags & MAP_FIXED) != 0 {
         let _ = aspace.unmap(VirtAddr::from(map_addr), aligned_length);
     }
@@ -150,61 +189,47 @@ pub fn sys_mmap(
         Ok(_) => {
             drop(aspace);
 
-            if file_backed {
-                let file_off = match i64::try_from(offset) {
+            if let Some(file) = file {
+                let file_off = match u64::try_from(offset) {
                     Ok(v) => v,
                     Err(_) => {
-                        let mut aspace = proc.aspace.lock();
+                        let aspace_handle = proc.aspace_handle();
+                        let mut aspace = aspace_handle.lock();
                         let _ = aspace.unmap(VirtAddr::from(map_addr), aligned_length);
                         return -LinuxError::EINVAL.code() as isize;
                     }
                 };
-
-                let old_off = ax_sys_lseek(fd, 0, SEEK_CUR);
-                if old_off < 0 {
-                    let mut aspace = proc.aspace.lock();
-                    let _ = aspace.unmap(VirtAddr::from(map_addr), aligned_length);
-                    return old_off as isize;
-                }
-
-                let seek_ret = ax_sys_lseek(fd, file_off, SEEK_SET);
-                if seek_ret < 0 {
-                    let mut aspace = proc.aspace.lock();
-                    let _ = aspace.unmap(VirtAddr::from(map_addr), aligned_length);
-                    return seek_ret as isize;
-                }
 
                 let mut copied = 0usize;
                 let mut remain = length;
                 let mut buf = [0u8; PAGE_SIZE];
                 while remain > 0 {
                     let want = remain.min(PAGE_SIZE);
-                    let n = ax_sys_read(fd, buf.as_mut_ptr() as *mut c_void, want);
-                    if n < 0 {
-                        let _ = ax_sys_lseek(fd, old_off, SEEK_SET);
-                        let mut aspace = proc.aspace.lock();
-                        let _ = aspace.unmap(VirtAddr::from(map_addr), aligned_length);
-                        return n as isize;
-                    }
+                    let n = match file.read_at(&mut buf[..want], file_off + copied as u64) {
+                        Ok(n) => n,
+                        Err(e) => {
+                            let aspace_handle = proc.aspace_handle();
+                            let mut aspace = aspace_handle.lock();
+                            let _ = aspace.unmap(VirtAddr::from(map_addr), aligned_length);
+                            return -e.code() as isize;
+                        }
+                    };
                     if n == 0 {
                         break;
                     }
-                    let n = n as usize;
                     let write_res = proc
-                        .aspace
+                        .aspace_handle()
                         .lock()
                         .write(VirtAddr::from(map_addr + copied), &buf[..n]);
                     if write_res.is_err() {
-                        let _ = ax_sys_lseek(fd, old_off, SEEK_SET);
-                        let mut aspace = proc.aspace.lock();
+                        let aspace_handle = proc.aspace_handle();
+                        let mut aspace = aspace_handle.lock();
                         let _ = aspace.unmap(VirtAddr::from(map_addr), aligned_length);
                         return -LinuxError::EFAULT.code() as isize;
                     }
                     copied += n;
                     remain -= n;
                 }
-
-                let _ = ax_sys_lseek(fd, old_off, SEEK_SET);
             }
 
             axlog::debug!(
@@ -224,9 +249,7 @@ pub fn sys_mmap(
 pub fn sys_munmap(addr: usize, length: usize) -> isize {
     axlog::debug!("sys_munmap: addr={:#x}, length={:#x}", addr, length);
 
-    use axtask::TaskExtRef;
-    let binding = axtask::current();
-    let proc: &pulse_core::task::Process = binding.task_ext();
+    let proc = pulse_core::task::current_process().expect("munmap without current process");
 
     if length == 0 {
         return -LinuxError::EINVAL.code() as isize;
@@ -235,7 +258,12 @@ pub fn sys_munmap(addr: usize, length: usize) -> isize {
     let aligned_addr = addr & !(PAGE_SIZE - 1);
     let aligned_length = (length + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
 
-    let mut aspace = proc.aspace.lock();
+    if !is_user_range(aligned_addr, aligned_length) {
+        return -LinuxError::EINVAL.code() as isize;
+    }
+
+    let aspace_handle = proc.aspace_handle();
+    let mut aspace = aspace_handle.lock();
     match aspace.unmap(VirtAddr::from(aligned_addr), aligned_length) {
         Ok(_) => {
             axlog::debug!(
@@ -274,9 +302,11 @@ pub fn sys_mprotect(addr: usize, length: usize, prot: usize) -> isize {
 
     let aligned_length = (length + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
 
-    use axtask::TaskExtRef;
-    let binding = axtask::current();
-    let proc: &pulse_core::task::Process = binding.task_ext();
+    if !is_user_range(addr, aligned_length) {
+        return -LinuxError::ENOMEM.code() as isize;
+    }
+
+    let proc = pulse_core::task::current_process().expect("mprotect without current process");
 
     let mut map_flags = MappingFlags::USER;
     if (prot & PROT_READ) != 0 {
@@ -289,7 +319,8 @@ pub fn sys_mprotect(addr: usize, length: usize, prot: usize) -> isize {
         map_flags |= MappingFlags::EXECUTE;
     }
 
-    let mut aspace = proc.aspace.lock();
+    let aspace_handle = proc.aspace_handle();
+    let mut aspace = aspace_handle.lock();
     let start = VirtAddr::from(addr);
     if !aspace.can_access_range(start, aligned_length, MappingFlags::empty()) {
         return -LinuxError::ENOMEM.code() as isize;
