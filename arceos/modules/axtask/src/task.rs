@@ -71,7 +71,7 @@ pub struct TaskInner {
     exit_code: AtomicI32,
     wait_for_exit: WaitQueue,
 
-    kstack: Option<TaskStack>,
+    kstack: SpinNoIrq<Option<TaskStack>>,
     ctx: UnsafeCell<TaskContext>,
     task_ext: AxTaskExt,
 
@@ -99,7 +99,7 @@ impl From<u8> for TaskState {
             2 => Self::Ready,
             3 => Self::Blocked,
             4 => Self::Exited,
-            _ => unreachable!(),
+            _ => panic!("invalid task state byte: {}", state),
         }
     }
 }
@@ -124,7 +124,7 @@ impl TaskInner {
 
         t.entry = Some(Box::into_raw(Box::new(entry)));
         t.ctx_mut().init(task_entry as *const () as usize, kstack.top(), tls);
-        t.kstack = Some(kstack);
+        *t.kstack.lock() = Some(kstack);
         if t.name == "idle" {
             t.is_idle = true;
         }
@@ -196,11 +196,19 @@ impl TaskInner {
 
     /// Returns the top address of the kernel stack.
     #[inline]
-    pub const fn kernel_stack_top(&self) -> Option<VirtAddr> {
-        match &self.kstack {
-            Some(s) => Some(s.top()),
-            None => None,
+    pub fn kernel_stack_top(&self) -> Option<VirtAddr> {
+        self.kstack.lock().as_ref().map(TaskStack::top)
+    }
+
+    /// Reclaim the kernel stack of an exited task while keeping the task object.
+    ///
+    /// This is used by the GC path to avoid retaining large per-task stacks
+    /// even when full task dropping is deferred.
+    pub(crate) fn reclaim_kernel_stack(&self) {
+        if self.state() != TaskState::Exited {
+            return;
         }
+        let _ = self.kstack.lock().take();
     }
 
     /// Returns the CPU ID where the task is running or will run.
@@ -255,7 +263,7 @@ impl TaskInner {
             preempt_disable_count: AtomicUsize::new(0),
             exit_code: AtomicI32::new(0),
             wait_for_exit: WaitQueue::new(),
-            kstack: None,
+            kstack: SpinNoIrq::new(None),
             ctx: UnsafeCell::new(TaskContext::new()),
             task_ext: AxTaskExt::empty(),
             #[cfg(feature = "tls")]
@@ -417,6 +425,16 @@ impl TaskInner {
     #[inline]
     pub(crate) const unsafe fn ctx_mut_ptr(&self) -> *mut TaskContext {
         self.ctx.get()
+    }
+
+    #[inline]
+    pub(crate) fn enter_task_ext(&self) {
+        self.task_ext.on_enter();
+    }
+
+    #[inline]
+    pub(crate) fn leave_task_ext(&self) {
+        self.task_ext.on_leave();
     }
 
     /// Set the CPU ID where the task is running or will run.

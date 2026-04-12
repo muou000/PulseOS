@@ -15,6 +15,14 @@ static __AX_TASK_EXT_ALIGN: usize = 0;
 #[linkage = "weak"]
 fn __ax_task_ext_drop(_data: *mut u8) {}
 
+#[unsafe(no_mangle)]
+#[linkage = "weak"]
+fn __ax_task_ext_on_enter(_data: *const u8) {}
+
+#[unsafe(no_mangle)]
+#[linkage = "weak"]
+fn __ax_task_ext_on_leave(_data: *const u8) {}
+
 /// A wrapper of pointer to the task extended data.
 pub(crate) struct AxTaskExt {
     ptr: *mut u8,
@@ -67,6 +75,26 @@ impl AxTaskExt {
     /// Gets the raw pointer to the task extended data.
     pub const fn as_ptr(&self) -> *mut u8 {
         self.ptr
+    }
+
+    /// Invoke the task-enter hook for the extended data.
+    pub fn on_enter(&self) {
+        if !self.ptr.is_null() {
+            unsafe extern "C" {
+                fn __ax_task_ext_on_enter(data: *const u8);
+            }
+            unsafe { __ax_task_ext_on_enter(self.ptr.cast_const()) };
+        }
+    }
+
+    /// Invoke the task-leave hook for the extended data.
+    pub fn on_leave(&self) {
+        if !self.ptr.is_null() {
+            unsafe extern "C" {
+                fn __ax_task_ext_on_leave(data: *const u8);
+            }
+            unsafe { __ax_task_ext_on_leave(self.ptr.cast_const()) };
+        }
     }
 
     /// Write the given object to the task extended data.
@@ -135,6 +163,15 @@ pub trait TaskExtMut<T: Sized> {
     fn task_ext_mut(&mut self) -> &mut T;
 }
 
+/// Optional lifecycle hooks for task-extended data.
+pub trait TaskExtSwitch {
+    /// Called when the task is switched in on a CPU.
+    fn on_enter(&self) {}
+
+    /// Called when the task is switched out from a CPU.
+    fn on_leave(&self) {}
+}
+
 /// Define the task extended data.
 ///
 /// It automatically implements [`TaskExtRef`] and [`TaskExtMut`] for
@@ -176,6 +213,24 @@ macro_rules! def_task_ext {
         #[unsafe(no_mangle)]
         fn __ax_task_ext_drop(data: *mut u8) {
             unsafe { core::ptr::drop_in_place(data as *mut $task_ext_struct) };
+        }
+
+        #[unsafe(no_mangle)]
+        fn __ax_task_ext_on_enter(data: *const u8) {
+            unsafe {
+                <$task_ext_struct as $crate::TaskExtSwitch>::on_enter(
+                    &*(data as *const $task_ext_struct),
+                )
+            };
+        }
+
+        #[unsafe(no_mangle)]
+        fn __ax_task_ext_on_leave(data: *const u8) {
+            unsafe {
+                <$task_ext_struct as $crate::TaskExtSwitch>::on_leave(
+                    &*(data as *const $task_ext_struct),
+                )
+            };
         }
 
         impl $crate::TaskExtRef<$task_ext_struct> for $crate::TaskInner {
