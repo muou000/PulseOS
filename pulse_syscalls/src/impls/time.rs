@@ -3,7 +3,6 @@ use arceos_posix_api::ctypes;
 use core::ffi::c_long;
 use core::mem::{MaybeUninit, size_of};
 use core::time::Duration;
-use memory_addr::VirtAddr;
 
 const CLK_TCK: u64 = 100;
 
@@ -28,18 +27,14 @@ fn read_user_timespec(
     let bytes = unsafe {
         core::slice::from_raw_parts_mut(ts.as_mut_ptr().cast::<u8>(), size_of::<ctypes::timespec>())
     };
-    process
-        .aspace
-        .lock()
-        .read(VirtAddr::from(user_addr), bytes)
-        .map_err(|e| {
-            axlog::warn!(
-                "read user timespec failed: addr={:#x}, err={:?}",
-                user_addr,
-                e
-            );
-            -LinuxError::EFAULT.code() as isize
-        })?;
+    process.read_user_bytes(user_addr, bytes).map_err(|e| {
+        axlog::warn!(
+            "read user timespec failed: addr={:#x}, err={:?}",
+            user_addr,
+            e
+        );
+        -LinuxError::EFAULT.code() as isize
+    })?;
     Ok(unsafe { ts.assume_init() })
 }
 
@@ -55,9 +50,7 @@ fn write_user_timespec(
         )
     };
     process
-        .aspace
-        .lock()
-        .write(VirtAddr::from(user_addr), bytes)
+        .write_user_bytes(user_addr, bytes)
         .map(|_| 0)
         .unwrap_or_else(|e| {
             axlog::warn!(
@@ -76,9 +69,8 @@ pub fn sys_nanosleep(req: usize, rem: usize) -> isize {
         return -LinuxError::EFAULT.code() as isize;
     }
 
-    use axtask::TaskExtRef;
-    let curr = axtask::current();
-    let process: &pulse_core::task::Process = curr.task_ext();
+    let thread = pulse_core::task::current_thread().expect("nanosleep without Thread");
+    let process = thread.process();
 
     let req_ts = match read_user_timespec(process, req) {
         Ok(ts) => ts,
@@ -124,9 +116,8 @@ pub fn sys_clock_gettime(clockid: i32, tp: usize) -> isize {
         _ => return -LinuxError::EINVAL.code() as isize,
     };
 
-    use axtask::TaskExtRef;
-    let curr = axtask::current();
-    let process: &pulse_core::task::Process = curr.task_ext();
+    let thread = pulse_core::task::current_thread().expect("clock_gettime without Thread");
+    let process = thread.process();
     write_user_timespec(process, tp, &now)
 }
 
@@ -148,9 +139,8 @@ pub fn sys_gettimeofday(tv: usize, tz: usize) -> isize {
         tv_usec: now.subsec_micros() as _,
     };
 
-    use axtask::TaskExtRef;
-    let curr = axtask::current();
-    let process: &pulse_core::task::Process = curr.task_ext();
+    let thread = pulse_core::task::current_thread().expect("gettimeofday without Thread");
+    let process = thread.process();
     let bytes = unsafe {
         core::slice::from_raw_parts(
             (&timeval as *const ctypes::timeval).cast::<u8>(),
@@ -159,9 +149,7 @@ pub fn sys_gettimeofday(tv: usize, tz: usize) -> isize {
     };
 
     process
-        .aspace
-        .lock()
-        .write(VirtAddr::from(tv), bytes)
+        .write_user_bytes(tv, bytes)
         .map(|_| 0)
         .unwrap_or_else(|e| {
             axlog::warn!("sys_gettimeofday: user write failed at {:#x}: {:?}", tv, e);
@@ -172,9 +160,8 @@ pub fn sys_gettimeofday(tv: usize, tz: usize) -> isize {
 pub fn sys_times(tbuf: usize) -> isize {
     axlog::debug!("sys_times: tbuf={:#x}", tbuf);
 
-    use axtask::TaskExtRef;
-    let curr = axtask::current();
-    let process: &pulse_core::task::Process = curr.task_ext();
+    let thread = pulse_core::task::current_thread().expect("times without Thread");
+    let process = thread.process();
 
     let now_ns = axhal::time::monotonic_time_nanos() as u64;
     let (utime_ns, stime_ns) = process.snapshot_cpu_time_ns(now_ns);
@@ -196,7 +183,7 @@ pub fn sys_times(tbuf: usize) -> isize {
             )
         };
 
-        if let Err(e) = process.aspace.lock().write(VirtAddr::from(tbuf), bytes) {
+        if let Err(e) = process.write_user_bytes(tbuf, bytes) {
             axlog::warn!("sys_times: user write failed at {:#x}: {:?}", tbuf, e);
             return -LinuxError::EFAULT.code() as isize;
         }

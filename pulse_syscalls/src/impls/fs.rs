@@ -1,129 +1,448 @@
 use alloc::collections::BTreeSet;
+use alloc::ffi::CString;
 use alloc::string::{String, ToString};
 use alloc::sync::Arc;
+use alloc::vec;
+use alloc::vec::Vec;
 
 use arceos_posix_api::ctypes;
-use arceos_posix_api::sys_chdir as ax_sys_chdir;
-use arceos_posix_api::sys_close as ax_sys_close;
-use arceos_posix_api::sys_dup as ax_sys_dup;
-use arceos_posix_api::sys_dup2 as ax_sys_dup2;
-use arceos_posix_api::sys_fcntl as ax_sys_fcntl;
-use arceos_posix_api::sys_fstat as ax_sys_fstat;
-use arceos_posix_api::sys_getcwd as ax_sys_getcwd;
-use arceos_posix_api::sys_getdents64 as ax_sys_getdents64;
-use arceos_posix_api::sys_lseek as ax_sys_lseek;
-use arceos_posix_api::sys_mkdir as ax_sys_mkdir;
-use arceos_posix_api::sys_open as ax_sys_open;
-use arceos_posix_api::sys_pipe as ax_sys_pipe;
-use arceos_posix_api::sys_read as ax_sys_read;
-use arceos_posix_api::sys_stat as ax_sys_stat;
-use arceos_posix_api::sys_write as ax_sys_write;
-use arceos_posix_api::sys_writev as ax_sys_writev;
-use axfs::FS_CONTEXT;
+use axfs::{FsContext, OpenOptions};
+use axfs_ng_vfs::{Location, MetadataUpdate, NodePermission};
 
 use axerrno::LinuxError;
-use axtask::TaskExtRef;
-use core::ffi::{CStr, c_char, c_void};
+use axio::SeekFrom;
+use core::time::Duration;
 use spin::Lazy;
 
-use pulse_core::fd_table::{FdEntry, FdFlags, RawFdObject};
-use pulse_core::task::Process;
-
+use pulse_core::fd_table::{
+    FdEntry, FdFlags, FdObject, location_to_stat, open_result_to_entry, pipe_entries,
+};
 const O_NONBLOCK: usize = ctypes::O_NONBLOCK as usize;
 const O_CLOEXEC: usize = ctypes::O_CLOEXEC as usize;
+const O_NOFOLLOW: usize = ctypes::O_NOFOLLOW as usize;
+const O_DIRECTORY: usize = ctypes::O_DIRECTORY as usize;
+const O_DIRECT: usize = ctypes::O_DIRECT as usize;
+const O_PATH: usize = ctypes::O_PATH as usize;
+const O_APPEND: usize = ctypes::O_APPEND as usize;
+const O_TRUNC: usize = ctypes::O_TRUNC as usize;
+const O_CREAT: usize = ctypes::O_CREAT as usize;
+const O_EXCL: usize = ctypes::O_EXCL as usize;
+const O_ACCMODE: usize = ctypes::O_ACCMODE as usize;
 const AT_FDCWD: i32 = -100;
+const AT_SYMLINK_NOFOLLOW: usize = 0x100;
 const AT_REMOVEDIR: usize = 0x200;
+const UTIME_NOW: i64 = 0x3fff_ffff;
+const UTIME_OMIT: i64 = 0x3fff_fffe;
 
 static MOUNTED_TARGETS: Lazy<spin::Mutex<BTreeSet<String>>> =
     Lazy::new(|| spin::Mutex::new(BTreeSet::new()));
 
-fn with_process<R>(f: impl FnOnce(&Process) -> R) -> R {
-    let curr = axtask::current();
-    let proc: &Process = curr.task_ext();
-    f(proc)
+fn write_user_bytes(user_addr: usize, bytes: &[u8]) -> Result<(), LinuxError> {
+    with_process(|process| process.write_user_bytes(user_addr, bytes))
+        .map_err(|e| e)?
+        .map_err(|e| LinuxError::from(e.canonicalize()))
 }
 
-fn ensure_entry(fd: usize) {
-    with_process(|process| {
-        process.fd_table.lock().ensure_raw_fd(fd, fd as i32);
-    });
+fn read_user_bytes(user_addr: usize, bytes: &mut [u8]) -> Result<(), LinuxError> {
+    with_process(|process| process.read_user_bytes(user_addr, bytes))
+        .map_err(|e| e)?
+        .map_err(|e| LinuxError::from(e.canonicalize()))
 }
 
-fn map_fd(fd: usize) -> Result<i32, LinuxError> {
+fn read_user_cstring(user_addr: usize) -> Result<CString, LinuxError> {
+    if user_addr == 0 {
+        return Err(LinuxError::EFAULT);
+    }
+    const PATH_MAX: usize = 4096;
+    const CHUNK_SIZE: usize = 128;
+    const PAGE_SIZE: usize = 4096;
     with_process(|process| {
-        let mut table = process.fd_table.lock();
-        if table.get(fd).is_none() {
-            table.ensure_raw_fd(fd, fd as i32);
+        let mut bytes = Vec::new();
+        let mut offset = 0usize;
+        let mut chunk = [0u8; CHUNK_SIZE];
+
+        while offset < PATH_MAX {
+            let addr = user_addr.checked_add(offset).ok_or(LinuxError::EFAULT)?;
+            let page_left = PAGE_SIZE - (addr & (PAGE_SIZE - 1));
+            let to_read = core::cmp::min(CHUNK_SIZE, core::cmp::min(PATH_MAX - offset, page_left));
+            process
+                .read_user_bytes(addr, &mut chunk[..to_read])
+                .map_err(|e| LinuxError::from(e.canonicalize()))?;
+
+            if let Some(pos) = chunk[..to_read].iter().position(|&b| b == 0) {
+                bytes.extend_from_slice(&chunk[..pos]);
+                return CString::new(bytes).map_err(|_| LinuxError::EINVAL);
+            }
+
+            bytes.extend_from_slice(&chunk[..to_read]);
+            offset += to_read;
         }
-        let entry = table.get(fd).ok_or(LinuxError::EBADF)?;
-        let raw = entry
-            .object
-            .as_any()
-            .downcast_ref::<RawFdObject>()
-            .map(|o| o.raw_fd)
-            .ok_or(LinuxError::EBADF)?;
-        Ok(raw)
-    })
+
+        Err(LinuxError::ENAMETOOLONG)
+    })?
 }
 
-fn track_fd(fd: usize, raw_fd: i32, flags: FdFlags) {
-    with_process(|process| {
-        let _ = process.fd_table.lock().insert_at(
-            fd,
-            FdEntry {
-                object: Arc::new(RawFdObject { raw_fd }),
-                flags,
-            },
-        );
+fn read_user_iovec_array(
+    user_addr: usize,
+    iovcnt: usize,
+) -> Result<Vec<ctypes::iovec>, LinuxError> {
+    let mut iovecs = Vec::with_capacity(iovcnt);
+    for i in 0..iovcnt {
+        let mut iov = core::mem::MaybeUninit::<ctypes::iovec>::uninit();
+        let bytes = unsafe {
+            core::slice::from_raw_parts_mut(
+                iov.as_mut_ptr().cast::<u8>(),
+                core::mem::size_of::<ctypes::iovec>(),
+            )
+        };
+        read_user_bytes(user_addr + i * core::mem::size_of::<ctypes::iovec>(), bytes)?;
+        iovecs.push(unsafe { iov.assume_init() });
+    }
+    Ok(iovecs)
+}
+
+fn with_process<R>(f: impl FnOnce(&pulse_core::task::Process) -> R) -> Result<R, LinuxError> {
+    let process = pulse_core::task::current_process()?;
+    Ok(f(process.as_ref()))
+}
+
+fn ensure_kernel_mappings_for_fs() {
+    let _ = with_process(|process| {
+        process.ensure_kernel_mappings();
     });
+}
+
+fn get_fd_entry(fd: usize) -> Result<FdEntry, LinuxError> {
+    with_process(|process| {
+        process
+            .fd_table
+            .lock()
+            .get(fd)
+            .cloned()
+            .ok_or(LinuxError::EBADF)
+    })?
+}
+
+fn get_fd_object(fd: usize) -> Result<Arc<dyn FdObject>, LinuxError> {
+    Ok(get_fd_entry(fd)?.object)
+}
+
+fn get_fd_location(fd: usize) -> Result<Location, LinuxError> {
+    get_fd_object(fd)?.location().ok_or(LinuxError::EBADF)
+}
+
+fn insert_fd_entry(entry: FdEntry) -> Result<usize, LinuxError> {
+    with_process(|process| {
+        process
+            .fd_table
+            .lock()
+            .insert_next(entry)
+            .map_err(|_| LinuxError::EMFILE)
+    })?
+}
+
+fn insert_fd_entry_from(min_fd: usize, entry: FdEntry) -> Result<usize, LinuxError> {
+    with_process(|process| {
+        process
+            .fd_table
+            .lock()
+            .insert_from(min_fd, entry)
+            .map_err(|_| LinuxError::EMFILE)
+    })?
+}
+
+fn set_fd_entry(fd: usize, entry: FdEntry) -> Result<(), LinuxError> {
+    with_process(|process| {
+        process
+            .fd_table
+            .lock()
+            .insert_at(fd, entry)
+            .map_err(|_| LinuxError::EBADF)
+    })?
+}
+
+fn remove_fd_entry(fd: usize) -> Result<FdEntry, LinuxError> {
+    with_process(|process| process.fd_table.lock().remove(fd).ok_or(LinuxError::EBADF))?
+}
+
+fn open_fd_flags(flags: usize) -> FdFlags {
+    let mut fd_flags = FdFlags::empty();
+    if (flags & O_CLOEXEC) != 0 {
+        fd_flags.insert(FdFlags::CLOEXEC);
+    }
+    if (flags & O_NONBLOCK) != 0 {
+        fd_flags.insert(FdFlags::NONBLOCK);
+    }
+    fd_flags
+}
+
+fn flags_to_options(flags: usize, mode: usize) -> OpenOptions {
+    let mut options = OpenOptions::new();
+    match flags & O_ACCMODE {
+        x if x == ctypes::O_RDONLY as usize => {
+            options.read(true);
+        }
+        x if x == ctypes::O_WRONLY as usize => {
+            options.write(true);
+        }
+        _ => {
+            options.read(true);
+            options.write(true);
+        }
+    }
+    if (flags & O_APPEND) != 0 {
+        options.append(true);
+    }
+    if (flags & O_TRUNC) != 0 {
+        options.truncate(true);
+    }
+    if (flags & O_CREAT) != 0 {
+        options.create(true);
+    }
+    if (flags & O_EXCL) != 0 {
+        options.create_new(true);
+    }
+    if (flags & O_DIRECTORY) != 0 {
+        options.directory(true);
+    }
+    if (flags & O_NOFOLLOW) != 0 {
+        options.no_follow(true);
+    }
+    if (flags & O_DIRECT) != 0 {
+        options.direct(true);
+    }
+    if (flags & O_PATH) != 0 {
+        options.path(true);
+    }
+    options.mode(mode as u32);
+    options
+}
+
+fn context_for_dirfd(dirfd: i32) -> Result<FsContext, LinuxError> {
+    let base = with_process(|process| process.fs_context.lock().clone())?;
+    if dirfd == AT_FDCWD {
+        return Ok(base);
+    }
+    if dirfd < 0 {
+        return Err(LinuxError::EBADF);
+    }
+    let location = get_fd_location(dirfd as usize)?;
+    if !location.is_dir() {
+        return Err(LinuxError::ENOTDIR);
+    }
+    base.with_current_dir(location)
+        .map_err(|e| LinuxError::from(e.canonicalize()))
+}
+
+fn resolve_location_at_ptr(
+    dirfd: i32,
+    pathname: usize,
+    flags: usize,
+) -> Result<Location, LinuxError> {
+    if (flags & AT_EMPTY_PATH) != 0 {
+        if pathname == 0 {
+            if dirfd < 0 {
+                return Err(LinuxError::EBADF);
+            }
+            return get_fd_location(dirfd as usize);
+        }
+        let path = read_user_cstring(pathname)?;
+        if path.as_bytes().is_empty() {
+            if dirfd < 0 {
+                return Err(LinuxError::EBADF);
+            }
+            return get_fd_location(dirfd as usize);
+        }
+    }
+
+    if pathname == 0 {
+        return Err(LinuxError::EFAULT);
+    }
+    let path = read_user_cstring(pathname)?;
+    let path = path.to_str().map_err(|_| LinuxError::EINVAL)?;
+    if let Some(result) = try_resolve_location_fast(dirfd, path, flags) {
+        return result;
+    }
+    let ctx = context_for_dirfd(dirfd)?;
+    if (flags & AT_SYMLINK_NOFOLLOW) != 0 {
+        ctx.resolve_no_follow(path)
+            .map_err(|e| LinuxError::from(e.canonicalize()))
+    } else {
+        ctx.resolve(path)
+            .map_err(|e| LinuxError::from(e.canonicalize()))
+    }
+}
+
+fn try_resolve_location_fast(
+    dirfd: i32,
+    path: &str,
+    flags: usize,
+) -> Option<Result<Location, LinuxError>> {
+    // Fast path for directory traversal workloads (`du`): common pattern
+    // is `fstatat(dirfd, "name", ..., AT_SYMLINK_NOFOLLOW)`.
+    if dirfd == AT_FDCWD {
+        return None;
+    }
+    if dirfd < 0 {
+        return Some(Err(LinuxError::EBADF));
+    }
+    if flags != AT_SYMLINK_NOFOLLOW {
+        return None;
+    }
+    if path.is_empty() || path.starts_with('/') || path.contains('/') {
+        return None;
+    }
+    let base = match get_fd_location(dirfd as usize) {
+        Ok(loc) => loc,
+        Err(e) => return Some(Err(e)),
+    };
+    if !base.is_dir() {
+        return Some(Err(LinuxError::ENOTDIR));
+    }
+    Some(
+        base.lookup_no_follow(path)
+            .map_err(|e| LinuxError::from(e.canonicalize())),
+    )
+}
+
+fn stat_from_location(location: &Location) -> Result<ctypes::stat, LinuxError> {
+    location_to_stat(location)
+}
+
+fn read_user_timespec(user_addr: usize) -> Result<ctypes::timespec, LinuxError> {
+    let mut ts = core::mem::MaybeUninit::<ctypes::timespec>::uninit();
+    let bytes = unsafe {
+        core::slice::from_raw_parts_mut(
+            ts.as_mut_ptr().cast::<u8>(),
+            core::mem::size_of::<ctypes::timespec>(),
+        )
+    };
+    read_user_bytes(user_addr, bytes)?;
+    Ok(unsafe { ts.assume_init() })
+}
+
+fn read_user_i64(user_addr: usize) -> Result<i64, LinuxError> {
+    let mut bytes = [0u8; core::mem::size_of::<i64>()];
+    read_user_bytes(user_addr, &mut bytes)?;
+    Ok(i64::from_ne_bytes(bytes))
+}
+
+fn write_user_i64(user_addr: usize, value: i64) -> Result<(), LinuxError> {
+    write_user_bytes(user_addr, &value.to_ne_bytes())
+}
+
+fn timespec_to_update_time(
+    ts: ctypes::timespec,
+    now: Duration,
+) -> Result<Option<Duration>, LinuxError> {
+    match ts.tv_nsec {
+        UTIME_OMIT => Ok(None),
+        UTIME_NOW => Ok(Some(now)),
+        nsec if !(0..1_000_000_000).contains(&nsec) => Err(LinuxError::EINVAL),
+        _ if ts.tv_sec < 0 => Err(LinuxError::EINVAL),
+        _ => Ok(Some(Duration::new(ts.tv_sec as u64, ts.tv_nsec as u32))),
+    }
 }
 
 pub fn sys_read(fd: usize, buf: usize, count: usize) -> isize {
+    ensure_kernel_mappings_for_fs();
     axlog::debug!("sys_read: fd={}, buf={:#x}, count={}", fd, buf, count);
-    let raw = match map_fd(fd) {
-        Ok(v) => v,
+    if buf == 0 && count != 0 {
+        return -LinuxError::EFAULT.code() as isize;
+    }
+    let object = match get_fd_object(fd) {
+        Ok(object) => object,
         Err(e) => return -e.code() as isize,
     };
-    ax_sys_read(raw, buf as *mut c_void, count) as isize
+    let mut tmp = vec![0u8; count];
+    let ret = match object.read(&mut tmp) {
+        Ok(ret) => ret as isize,
+        Err(e) => return -e.code() as isize,
+    };
+    if ret <= 0 {
+        return ret;
+    }
+    match write_user_bytes(buf, &tmp[..ret as usize]) {
+        Ok(()) => ret,
+        Err(e) => -e.code() as isize,
+    }
 }
 
 pub fn sys_write(fd: usize, buf: usize, count: usize) -> isize {
+    ensure_kernel_mappings_for_fs();
     axlog::debug!("sys_write: fd={}, buf={:#x}, count={}", fd, buf, count);
-    let raw = match map_fd(fd) {
-        Ok(v) => v,
+    if buf == 0 && count != 0 {
+        return -LinuxError::EFAULT.code() as isize;
+    }
+    let object = match get_fd_object(fd) {
+        Ok(object) => object,
         Err(e) => return -e.code() as isize,
     };
-    ax_sys_write(raw, buf as *const c_void, count) as isize
-}
-
-pub fn sys_openat(_dirfd: i32, pathname: usize, flags: usize, mode: usize) -> isize {
-    axlog::debug!(
-        "sys_openat: pathname={:#x}, flags={:#x}, mode={:#x}",
-        pathname,
-        flags,
-        mode
-    );
-    let ret = ax_sys_open(pathname as *const c_char, flags as i32, mode as u32) as isize;
-    if ret >= 0 {
-        let fd = ret as usize;
-        let mut fd_flags = FdFlags::empty();
-        if (flags & O_CLOEXEC) != 0 {
-            fd_flags.insert(FdFlags::CLOEXEC);
-        }
-        if (flags & O_NONBLOCK) != 0 {
-            fd_flags.insert(FdFlags::NONBLOCK);
-        }
-        track_fd(fd, fd as i32, fd_flags);
+    let mut tmp = vec![0u8; count];
+    if let Err(e) = read_user_bytes(buf, &mut tmp) {
+        return -e.code() as isize;
     }
-    ret
+    match object.write(&tmp) {
+        Ok(ret) => ret as isize,
+        Err(e) => -e.code() as isize,
+    }
 }
 
-pub fn sys_mkdirat(_dirfd: i32, pathname: usize, mode: usize) -> isize {
-    axlog::debug!("sys_mkdirat: pathname={:#x}, mode={:#x}", pathname, mode);
+pub fn sys_openat(dirfd: i32, pathname: usize, flags: usize, mode: usize) -> isize {
+    ensure_kernel_mappings_for_fs();
     if pathname == 0 {
         return -LinuxError::EFAULT.code() as isize;
     }
-    ax_sys_mkdir(pathname as *const c_char, mode as u32) as isize
+    let ctx = match context_for_dirfd(dirfd) {
+        Ok(ctx) => ctx,
+        Err(e) => return -e.code() as isize,
+    };
+
+    let path = match read_user_cstring(pathname) {
+        Ok(path) => path,
+        Err(e) => return -e.code() as isize,
+    };
+
+    let path = match path.to_str() {
+        Ok(path) => path,
+        Err(_) => return -LinuxError::EINVAL.code() as isize,
+    };
+
+    let options = flags_to_options(flags, mode);
+    let opened = match options.open(&ctx, path) {
+        Ok(opened) => opened,
+        Err(e) => {
+            let err = LinuxError::from(e.canonicalize());
+            return -err.code() as isize;
+        }
+    };
+    let entry = open_result_to_entry(opened, open_fd_flags(flags));
+    match insert_fd_entry(entry) {
+        Ok(fd) => fd as isize,
+        Err(e) => -e.code() as isize,
+    }
+}
+
+pub fn sys_mkdirat(dirfd: i32, pathname: usize, mode: usize) -> isize {
+    if pathname == 0 {
+        return -LinuxError::EFAULT.code() as isize;
+    }
+    let ctx = match context_for_dirfd(dirfd) {
+        Ok(ctx) => ctx,
+        Err(e) => return -e.code() as isize,
+    };
+    let path = match read_user_cstring(pathname) {
+        Ok(path) => path,
+        Err(e) => return -e.code() as isize,
+    };
+    let path = match path.to_str() {
+        Ok(path) => path,
+        Err(_) => return -LinuxError::EINVAL.code() as isize,
+    };
+    match ctx.create_dir(path, NodePermission::from_bits_truncate(mode as _)) {
+        Ok(_) => 0,
+        Err(e) => -LinuxError::from(e.canonicalize()).code() as isize,
+    }
 }
 
 pub fn sys_mount(
@@ -138,17 +457,22 @@ pub fn sys_mount(
         return -LinuxError::EFAULT.code() as isize;
     }
 
-    let target_path = match unsafe { CStr::from_ptr(target as *const c_char) }.to_str() {
+    let target = match read_user_cstring(target) {
+        Ok(target) => target,
+        Err(e) => return -e.code() as isize,
+    };
+    let target_path = match target.to_str() {
         Ok(s) if !s.is_empty() => s,
         Ok(_) => return -LinuxError::EINVAL.code() as isize,
         Err(_) => return -LinuxError::EINVAL.code() as isize,
     };
 
-    // Keep mount behavior deterministic for tests: target must exist first.
-    let mut st = arceos_posix_api::ctypes::stat::default();
-    let stat_ret = unsafe { ax_sys_stat(target as *const c_char, &mut st) as isize };
-    if stat_ret < 0 {
-        return stat_ret;
+    if let Err(e) = context_for_dirfd(AT_FDCWD).and_then(|ctx| {
+        ctx.resolve(target_path)
+            .map(|_| ())
+            .map_err(|err| LinuxError::from(err.canonicalize()))
+    }) {
+        return -e.code() as isize;
     }
 
     let mut mounted = MOUNTED_TARGETS.lock();
@@ -165,7 +489,11 @@ pub fn sys_umount2(target: usize, _flags: usize) -> isize {
         return -LinuxError::EFAULT.code() as isize;
     }
 
-    let target_path = match unsafe { CStr::from_ptr(target as *const c_char) }.to_str() {
+    let target = match read_user_cstring(target) {
+        Ok(target) => target,
+        Err(e) => return -e.code() as isize,
+    };
+    let target_path = match target.to_str() {
         Ok(s) if !s.is_empty() => s,
         Ok(_) => return -LinuxError::EINVAL.code() as isize,
         Err(_) => return -LinuxError::EINVAL.code() as isize,
@@ -180,64 +508,82 @@ pub fn sys_umount2(target: usize, _flags: usize) -> isize {
 }
 
 pub fn sys_getdents64(fd: usize, dirp: usize, count: usize) -> isize {
-    axlog::debug!(
-        "sys_getdents64: fd={}, dirp={:#x}, count={}",
-        fd,
-        dirp,
-        count
-    );
-    let raw = match map_fd(fd) {
-        Ok(v) => v,
+    ensure_kernel_mappings_for_fs();
+    let object = match get_fd_object(fd) {
+        Ok(object) => object,
         Err(e) => return -e.code() as isize,
     };
-    unsafe { ax_sys_getdents64(raw, dirp as *mut u8, count) as isize }
+
+    if count == 0 {
+        return 0;
+    }
+    // Allow larger user-provided buffers to reduce syscall count during
+    // directory-heavy workloads (e.g. `du`).
+    let mut tmp = vec![0u8; count.min(64 * 1024)];
+    let ret = match object.read_dirents64(&mut tmp) {
+        Ok(ret) => ret as isize,
+        Err(e) => return -e.code() as isize,
+    };
+    if ret <= 0 {
+        return ret;
+    }
+    match write_user_bytes(dirp, &tmp[..ret as usize]) {
+        Ok(()) => ret,
+        Err(e) => -e.code() as isize,
+    }
 }
 
 pub fn sys_close(fd: usize) -> isize {
     axlog::debug!("sys_close: fd={}", fd);
-    if fd <= 2 {
-        return 0;
+    match remove_fd_entry(fd) {
+        Ok(_) => 0,
+        Err(e) => -e.code() as isize,
     }
-    let raw = match map_fd(fd) {
-        Ok(v) => v,
-        Err(e) => return -e.code() as isize,
-    };
-    let ret = ax_sys_close(raw) as isize;
-    if ret == 0 {
-        with_process(|process| {
-            process.fd_table.lock().remove(fd);
-        });
-    }
-    ret
 }
 
 pub fn sys_fstat(fd: usize, statbuf: usize) -> isize {
     axlog::debug!("sys_fstat: fd={}, statbuf={:#x}", fd, statbuf);
-    let raw = match map_fd(fd) {
-        Ok(v) => v,
+    if statbuf == 0 {
+        return -LinuxError::EFAULT.code() as isize;
+    }
+    let stat = match get_fd_object(fd).and_then(|object| object.stat()) {
+        Ok(stat) => stat,
         Err(e) => return -e.code() as isize,
     };
-    unsafe { ax_sys_fstat(raw, statbuf as *mut ctypes::stat) as isize }
+    let bytes = unsafe {
+        core::slice::from_raw_parts(
+            (&stat as *const ctypes::stat).cast::<u8>(),
+            core::mem::size_of::<ctypes::stat>(),
+        )
+    };
+    match write_user_bytes(statbuf, bytes) {
+        Ok(()) => 0,
+        Err(e) => -e.code() as isize,
+    }
 }
 
 pub fn sys_fstatat(dirfd: i32, pathname: usize, statbuf: usize, flags: usize) -> isize {
-    axlog::debug!(
-        "sys_fstatat: dirfd={}, pathname={:#x}, statbuf={:#x}, flags={:#x}",
-        dirfd,
-        pathname,
-        statbuf,
-        flags
-    );
-    let path_ptr = pathname as *const c_char;
-    let at_empty_path = 0x1000;
-
-    // Check if pathname is empty and AT_EMPTY_PATH is set
-    unsafe {
-        if (flags & at_empty_path) != 0 && *path_ptr == 0 {
-            return ax_sys_fstat(dirfd as i32, statbuf as *mut arceos_posix_api::ctypes::stat)
-                as isize;
-        }
-        ax_sys_stat(path_ptr, statbuf as *mut arceos_posix_api::ctypes::stat) as isize
+    ensure_kernel_mappings_for_fs();
+    if statbuf == 0 {
+        return -LinuxError::EFAULT.code() as isize;
+    }
+    let location = match resolve_location_at_ptr(dirfd, pathname, flags) {
+        Ok(loc) => loc,
+        Err(e) => return -e.code() as isize,
+    };
+    let stat = match stat_from_location(&location) {
+        Ok(stat) => stat,
+        Err(e) => return -e.code() as isize,
+    };
+    let bytes = unsafe {
+        core::slice::from_raw_parts(
+            (&stat as *const ctypes::stat).cast::<u8>(),
+            core::mem::size_of::<ctypes::stat>(),
+        )
+    };
+    match write_user_bytes(statbuf, bytes) {
+        Ok(()) => 0,
+        Err(e) => -e.code() as isize,
     }
 }
 
@@ -297,30 +643,18 @@ pub fn sys_statx(
     _mask: usize,
     statxbuf: usize,
 ) -> isize {
-    axlog::debug!(
-        "sys_statx: dirfd={}, pathname={:#x}, flags={:#x}, statxbuf={:#x}",
-        dirfd,
-        pathname,
-        flags,
-        statxbuf
-    );
+    ensure_kernel_mappings_for_fs();
     if statxbuf == 0 {
         return -LinuxError::EFAULT.code() as isize;
     }
-
-    let path_ptr = pathname as *const c_char;
-    let mut stat = arceos_posix_api::ctypes::stat::default();
-
-    let ret = unsafe {
-        if (flags & AT_EMPTY_PATH) != 0 && pathname != 0 && *path_ptr == 0 {
-            ax_sys_fstat(dirfd, &mut stat)
-        } else {
-            ax_sys_stat(path_ptr, &mut stat)
-        }
+    let location = match resolve_location_at_ptr(dirfd, pathname, flags) {
+        Ok(loc) => loc,
+        Err(e) => return -e.code() as isize,
     };
-    if ret < 0 {
-        return ret as isize;
-    }
+    let stat = match stat_from_location(&location) {
+        Ok(stat) => stat,
+        Err(e) => return -e.code() as isize,
+    };
 
     let statx = Statx {
         stx_mask: STATX_BASIC_STATS | STATX_MNT_ID,
@@ -349,99 +683,267 @@ pub fn sys_statx(
         __spare3: [0; 12],
     };
 
-    unsafe {
-        *(statxbuf as *mut Statx) = statx;
+    let bytes = unsafe {
+        core::slice::from_raw_parts(
+            (&statx as *const Statx).cast::<u8>(),
+            core::mem::size_of::<Statx>(),
+        )
+    };
+    match write_user_bytes(statxbuf, bytes) {
+        Ok(()) => 0,
+        Err(e) => -e.code() as isize,
     }
-    0
 }
 
 pub fn sys_writev(fd: usize, iov: usize, iovcnt: usize) -> isize {
-    axlog::debug!("sys_writev: fd={}, iov={:#x}, iovcnt={}", fd, iov, iovcnt);
-    let raw = match map_fd(fd) {
-        Ok(v) => v,
+    let object = match get_fd_object(fd) {
+        Ok(object) => object,
         Err(e) => return -e.code() as isize,
     };
-    unsafe { ax_sys_writev(raw, iov as *const ctypes::iovec, iovcnt as i32) as isize }
+    let iovecs = match read_user_iovec_array(iov, iovcnt) {
+        Ok(iovecs) => iovecs,
+        Err(e) => return -e.code() as isize,
+    };
+    let mut total = 0isize;
+    for iov in iovecs {
+        if iov.iov_len == 0 {
+            continue;
+        }
+        let mut buf = vec![0u8; iov.iov_len];
+        if let Err(e) = read_user_bytes(iov.iov_base as usize, &mut buf) {
+            return -e.code() as isize;
+        }
+        let ret = match object.write(&buf) {
+            Ok(ret) => ret as isize,
+            Err(e) => return if total > 0 { total } else { -e.code() as isize },
+        };
+        if ret < 0 {
+            return if total > 0 { total } else { ret };
+        }
+        total += ret;
+        if ret as usize != buf.len() {
+            break;
+        }
+    }
+    total
+}
+
+pub fn sys_readv(fd: usize, iov: usize, iovcnt: usize) -> isize {
+    let object = match get_fd_object(fd) {
+        Ok(object) => object,
+        Err(e) => return -e.code() as isize,
+    };
+    let iovecs = match read_user_iovec_array(iov, iovcnt) {
+        Ok(iovecs) => iovecs,
+        Err(e) => return -e.code() as isize,
+    };
+    let mut total = 0isize;
+    for iov in iovecs {
+        if iov.iov_len == 0 {
+            continue;
+        }
+        let mut buf = vec![0u8; iov.iov_len];
+        let ret = match object.read(&mut buf) {
+            Ok(ret) => ret as isize,
+            Err(e) => return if total > 0 { total } else { -e.code() as isize },
+        };
+        if ret <= 0 {
+            return total + ret;
+        }
+        if let Err(e) = write_user_bytes(iov.iov_base as usize, &buf[..ret as usize]) {
+            return if total > 0 { total } else { -e.code() as isize };
+        }
+        total += ret;
+        if ret as usize != iov.iov_len {
+            break;
+        }
+    }
+    total
+}
+
+pub fn sys_sendfile(out_fd: usize, in_fd: usize, offset: usize, count: usize) -> isize {
+    axlog::debug!(
+        "sys_sendfile: out_fd={}, in_fd={}, offset={:#x}, count={}",
+        out_fd,
+        in_fd,
+        offset,
+        count
+    );
+    if count == 0 {
+        return 0;
+    }
+
+    let out = match get_fd_object(out_fd) {
+        Ok(object) => object,
+        Err(e) => return -e.code() as isize,
+    };
+    let input = match get_fd_object(in_fd) {
+        Ok(object) => object,
+        Err(e) => return -e.code() as isize,
+    };
+
+    let use_explicit_offset = offset != 0;
+    let mut file_offset = if use_explicit_offset {
+        let off = match read_user_i64(offset) {
+            Ok(off) => off,
+            Err(e) => return -e.code() as isize,
+        };
+        if off < 0 {
+            return -LinuxError::EINVAL.code() as isize;
+        }
+        off as u64
+    } else {
+        0
+    };
+
+    let mut total = 0usize;
+    let mut buf = vec![0u8; count.min(64 * 1024).max(1)];
+    while total < count {
+        let chunk_len = core::cmp::min(buf.len(), count - total);
+        let read_len = if use_explicit_offset {
+            match input.read_at(&mut buf[..chunk_len], file_offset) {
+                Ok(len) => len,
+                Err(e) => {
+                    return if total > 0 {
+                        total as isize
+                    } else {
+                        -e.code() as isize
+                    };
+                }
+            }
+        } else {
+            match input.read(&mut buf[..chunk_len]) {
+                Ok(len) => len,
+                Err(e) => {
+                    return if total > 0 {
+                        total as isize
+                    } else {
+                        -e.code() as isize
+                    };
+                }
+            }
+        };
+        if read_len == 0 {
+            break;
+        }
+        if use_explicit_offset {
+            file_offset = file_offset.saturating_add(read_len as u64);
+        }
+
+        let mut written = 0usize;
+        while written < read_len {
+            match out.write(&buf[written..read_len]) {
+                Ok(0) => break,
+                Ok(len) => written += len,
+                Err(e) => {
+                    let transferred = total + written;
+                    return if transferred > 0 {
+                        transferred as isize
+                    } else {
+                        -e.code() as isize
+                    };
+                }
+            }
+        }
+        total += written;
+        if written < read_len {
+            break;
+        }
+    }
+
+    if use_explicit_offset && let Err(e) = write_user_i64(offset, file_offset as i64) {
+        return if total > 0 {
+            total as isize
+        } else {
+            -e.code() as isize
+        };
+    }
+
+    total as isize
 }
 
 pub fn sys_fcntl(fd: usize, cmd: usize, arg: usize) -> isize {
     axlog::debug!("sys_fcntl: fd={}, cmd={:#x}, arg={:#x}", fd, cmd, arg);
-    ensure_entry(fd);
     match cmd as u32 {
-        ctypes::F_GETFD => with_process(|process| {
-            let table = process.fd_table.lock();
-            let Some(entry) = table.get(fd) else {
-                return -LinuxError::EBADF.code() as isize;
-            };
-            if entry.flags.contains(FdFlags::CLOEXEC) {
-                ctypes::FD_CLOEXEC as isize
-            } else {
-                0
+        ctypes::F_GETFD => match get_fd_entry(fd) {
+            Ok(entry) => {
+                if entry.flags.contains(FdFlags::CLOEXEC) {
+                    ctypes::FD_CLOEXEC as isize
+                } else {
+                    0
+                }
             }
-        }),
-        ctypes::F_SETFD => with_process(|process| {
+            Err(e) => -e.code() as isize,
+        },
+        ctypes::F_GETFL => match get_fd_entry(fd) {
+            Ok(entry) => {
+                let mut status = 0usize;
+                if entry.flags.contains(FdFlags::NONBLOCK) {
+                    status |= O_NONBLOCK;
+                }
+                status as isize
+            }
+            Err(e) => -e.code() as isize,
+        },
+        ctypes::F_SETFD => match with_process(|process| -> Result<isize, LinuxError> {
             let mut table = process.fd_table.lock();
             let Some(entry) = table.get_mut(fd) else {
-                return -LinuxError::EBADF.code() as isize;
+                return Err(LinuxError::EBADF);
             };
             entry
                 .flags
                 .set(FdFlags::CLOEXEC, (arg & (ctypes::FD_CLOEXEC as usize)) != 0);
-            0
-        }),
-        ctypes::F_SETFL => {
-            with_process(|process| {
-                if let Some(entry) = process.fd_table.lock().get_mut(fd) {
-                    entry.flags.set(
-                        FdFlags::NONBLOCK,
-                        (arg & (ctypes::O_NONBLOCK as usize)) != 0,
-                    );
-                }
-            });
-            let raw = match map_fd(fd) {
-                Ok(v) => v,
-                Err(e) => return -e.code() as isize,
+            Ok(0)
+        }) {
+            Ok(Ok(v)) => v,
+            Ok(Err(e)) | Err(e) => -e.code() as isize,
+        },
+        ctypes::F_SETFL => match with_process(|process| -> Result<isize, LinuxError> {
+            let mut table = process.fd_table.lock();
+            let Some(entry) = table.get_mut(fd) else {
+                return Err(LinuxError::EBADF);
             };
-            ax_sys_fcntl(raw, cmd as i32, arg) as isize
-        }
+            let nonblocking = (arg & O_NONBLOCK) != 0;
+            entry.flags.set(FdFlags::NONBLOCK, nonblocking);
+            entry.object.set_nonblocking(nonblocking)?;
+            Ok(0)
+        }) {
+            Ok(Ok(v)) => v,
+            Ok(Err(e)) | Err(e) => -e.code() as isize,
+        },
         ctypes::F_DUPFD | ctypes::F_DUPFD_CLOEXEC => {
-            let raw = match map_fd(fd) {
-                Ok(v) => v,
+            let entry = match get_fd_entry(fd) {
+                Ok(entry) => entry,
                 Err(e) => return -e.code() as isize,
             };
-            let ret = ax_sys_fcntl(raw, cmd as i32, arg) as isize;
-            if ret >= 0 {
-                let new_fd = ret as usize;
-                let mut flags = FdFlags::empty();
-                if cmd as u32 == ctypes::F_DUPFD_CLOEXEC {
-                    flags.insert(FdFlags::CLOEXEC);
-                }
-                track_fd(new_fd, new_fd as i32, flags);
+            let mut flags = entry.flags;
+            flags.remove(FdFlags::CLOEXEC);
+            if cmd as u32 == ctypes::F_DUPFD_CLOEXEC {
+                flags.insert(FdFlags::CLOEXEC);
             }
-            ret
+            match insert_fd_entry_from(arg, FdEntry::new(entry.object, flags)) {
+                Ok(new_fd) => new_fd as isize,
+                Err(e) => -e.code() as isize,
+            }
         }
         _ => {
-            let raw = match map_fd(fd) {
-                Ok(v) => v,
-                Err(e) => return -e.code() as isize,
-            };
-            ax_sys_fcntl(raw, cmd as i32, arg) as isize
+            axlog::warn!("unsupported fcntl parameters: cmd {}", cmd);
+            0
         }
     }
 }
 
 pub fn sys_dup(fd: usize) -> isize {
-    axlog::debug!("sys_dup: fd={}", fd);
-    let raw = match map_fd(fd) {
-        Ok(v) => v,
+    let entry = match get_fd_entry(fd) {
+        Ok(entry) => entry,
         Err(e) => return -e.code() as isize,
     };
-    let ret = ax_sys_dup(raw) as isize;
-    if ret >= 0 {
-        let new_fd = ret as usize;
-        track_fd(new_fd, new_fd as i32, FdFlags::empty());
+    let mut flags = entry.flags;
+    flags.remove(FdFlags::CLOEXEC);
+    match insert_fd_entry(FdEntry::new(entry.object, flags)) {
+        Ok(new_fd) => new_fd as isize,
+        Err(e) => -e.code() as isize,
     }
-    ret
 }
 
 pub fn sys_dup3(oldfd: usize, newfd: usize, flags: usize) -> isize {
@@ -457,19 +959,19 @@ pub fn sys_dup3(oldfd: usize, newfd: usize, flags: usize) -> isize {
     if (flags & !O_CLOEXEC) != 0 {
         return -LinuxError::EINVAL.code() as isize;
     }
-    let old_raw = match map_fd(oldfd) {
-        Ok(v) => v,
+    let entry = match get_fd_entry(oldfd) {
+        Ok(entry) => entry,
         Err(e) => return -e.code() as isize,
     };
-    let ret = ax_sys_dup2(old_raw, newfd as i32) as isize;
-    if ret >= 0 {
-        let mut fd_flags = FdFlags::empty();
-        if (flags & O_CLOEXEC) != 0 {
-            fd_flags.insert(FdFlags::CLOEXEC);
-        }
-        track_fd(newfd, newfd as i32, fd_flags);
+    let mut fd_flags = entry.flags;
+    fd_flags.remove(FdFlags::CLOEXEC);
+    if (flags & O_CLOEXEC) != 0 {
+        fd_flags.insert(FdFlags::CLOEXEC);
     }
-    ret
+    match set_fd_entry(newfd, FdEntry::new(entry.object, fd_flags)) {
+        Ok(()) => newfd as isize,
+        Err(e) => -e.code() as isize,
+    }
 }
 
 pub fn sys_pipe2(fds: usize, flags: usize) -> isize {
@@ -481,21 +983,36 @@ pub fn sys_pipe2(fds: usize, flags: usize) -> isize {
     if (flags & !allowed) != 0 {
         return -LinuxError::EINVAL.code() as isize;
     }
-    let fds_ptr = fds as *mut i32;
-    let fds_slice = unsafe { core::slice::from_raw_parts_mut(fds_ptr, 2) };
-    let ret = ax_sys_pipe(fds_slice) as isize;
-    if ret == 0 {
-        let mut fd_flags = FdFlags::empty();
-        if (flags & O_CLOEXEC) != 0 {
-            fd_flags.insert(FdFlags::CLOEXEC);
-        }
-        if (flags & O_NONBLOCK) != 0 {
-            fd_flags.insert(FdFlags::NONBLOCK);
-        }
-        track_fd(fds_slice[0] as usize, fds_slice[0], fd_flags);
-        track_fd(fds_slice[1] as usize, fds_slice[1], fd_flags);
+    let (read_entry, write_entry) = pipe_entries(open_fd_flags(flags));
+    let new_fds = match with_process(|process| -> Result<[i32; 2], LinuxError> {
+        let mut table = process.fd_table.lock();
+        let read_fd = table
+            .insert_next(read_entry)
+            .map_err(|_| LinuxError::EMFILE)?;
+        let write_fd = match table.insert_next(write_entry) {
+            Ok(fd) => fd,
+            Err(_) => {
+                let _ = table.remove(read_fd);
+                return Err(LinuxError::EMFILE);
+            }
+        };
+        Ok([read_fd as i32, write_fd as i32])
+    }) {
+        Ok(Ok(new_fds)) => new_fds,
+        Ok(Err(e)) | Err(e) => return -e.code() as isize,
+    };
+    let bytes = unsafe {
+        core::slice::from_raw_parts(
+            new_fds.as_ptr().cast::<u8>(),
+            core::mem::size_of_val(&new_fds),
+        )
+    };
+    if let Err(e) = write_user_bytes(fds, bytes) {
+        let _ = remove_fd_entry(new_fds[0] as usize);
+        let _ = remove_fd_entry(new_fds[1] as usize);
+        return -e.code() as isize;
     }
-    ret
+    0
 }
 
 pub fn sys_lseek(fd: usize, offset: usize, whence: usize) -> isize {
@@ -505,11 +1022,26 @@ pub fn sys_lseek(fd: usize, offset: usize, whence: usize) -> isize {
         offset,
         whence
     );
-    let raw = match map_fd(fd) {
-        Ok(v) => v,
+    let object = match get_fd_object(fd) {
+        Ok(object) => object,
         Err(e) => return -e.code() as isize,
     };
-    ax_sys_lseek(raw, offset as i64, whence as i32) as isize
+    let offset = offset as isize as i64;
+    let pos = match whence {
+        0 => {
+            if offset < 0 {
+                return -LinuxError::EINVAL.code() as isize;
+            }
+            SeekFrom::Start(offset as u64)
+        }
+        1 => SeekFrom::Current(offset),
+        2 => SeekFrom::End(offset),
+        _ => return -LinuxError::EINVAL.code() as isize,
+    };
+    match object.seek(pos) {
+        Ok(pos) => pos as isize,
+        Err(e) => -e.code() as isize,
+    }
 }
 
 pub fn sys_getcwd(buf: usize, size: usize) -> isize {
@@ -520,19 +1052,51 @@ pub fn sys_getcwd(buf: usize, size: usize) -> isize {
     if size == 0 {
         return -LinuxError::ERANGE.code() as isize;
     }
-    let ret = ax_sys_getcwd(buf as *mut c_char, size) as isize;
-    if ret < 0 { ret } else { buf as isize }
+    let cwd = match with_process(|process| process.fs_context.lock().current_dir().absolute_path())
+    {
+        Ok(Ok(path)) => path,
+        Ok(Err(e)) => return -LinuxError::from(e.canonicalize()).code() as isize,
+        Err(e) => return -e.code() as isize,
+    };
+    let cwd = cwd.as_bytes();
+    if cwd.len() + 1 > size {
+        return -LinuxError::ERANGE.code() as isize;
+    }
+    let mut tmp = alloc::vec![0u8; cwd.len() + 1];
+    tmp[..cwd.len()].copy_from_slice(cwd);
+    match write_user_bytes(buf, &tmp) {
+        Ok(()) => buf as isize,
+        Err(e) => -e.code() as isize,
+    }
 }
 
 pub fn sys_chdir(path: usize) -> isize {
     axlog::debug!("sys_chdir: path={:#x}", path);
-    let ret = ax_sys_chdir(path as *const c_char) as isize;
-    if ret == 0 {
-        with_process(|process| {
-            process.save_fs_context();
-        });
+    let path = match read_user_cstring(path) {
+        Ok(path) => path,
+        Err(e) => return -e.code() as isize,
+    };
+    let path = match path.to_str() {
+        Ok(path) => path,
+        Err(_) => return -LinuxError::EINVAL.code() as isize,
+    };
+    match with_process(|process| -> Result<(), LinuxError> {
+        let dir = {
+            let fs = process.fs_context.lock().clone();
+            fs.resolve(path)
+                .map_err(|e| LinuxError::from(e.canonicalize()))?
+        };
+        process
+            .fs_context
+            .lock()
+            .set_current_dir(dir)
+            .map_err(|e| LinuxError::from(e.canonicalize()))?;
+        process.sync_fs_context();
+        Ok(())
+    }) {
+        Ok(Ok(())) => 0,
+        Ok(Err(e)) | Err(e) => -e.code() as isize,
     }
-    ret
 }
 
 pub fn sys_unlinkat(dirfd: i32, pathname: usize, flags: usize) -> isize {
@@ -550,43 +1114,85 @@ pub fn sys_unlinkat(dirfd: i32, pathname: usize, flags: usize) -> isize {
         return -LinuxError::EINVAL.code() as isize;
     }
 
-    let path = match unsafe { CStr::from_ptr(pathname as *const c_char) }.to_str() {
+    let path = match read_user_cstring(pathname) {
+        Ok(path) => path,
+        Err(e) => return -e.code() as isize,
+    };
+    let path = match path.to_str() {
         Ok(s) if !s.is_empty() => s,
         Ok(_) => return -LinuxError::EINVAL.code() as isize,
         Err(_) => return -LinuxError::EINVAL.code() as isize,
     };
-
-    // If path is absolute, dirfd is ignored.
-    if dirfd != AT_FDCWD && !path.starts_with('/') {
-        return -LinuxError::EBADF.code() as isize;
-    }
+    let ctx = match context_for_dirfd(dirfd) {
+        Ok(ctx) => ctx,
+        Err(e) => return -e.code() as isize,
+    };
 
     if (flags & AT_REMOVEDIR) != 0 {
-        return match FS_CONTEXT.lock().remove_dir(path) {
+        return match ctx.remove_dir(path) {
             Ok(()) => 0,
             Err(e) => {
-                let errno: LinuxError = e.into();
+                let errno = LinuxError::from(e.canonicalize());
                 -errno.code() as isize
             }
         };
     }
 
-    if pathname == 0 {
-        return -LinuxError::EFAULT.code() as isize;
-    }
-
-    let path = match unsafe { CStr::from_ptr(pathname as *const c_char) }.to_str() {
-        Ok(s) if !s.is_empty() => s,
-        Ok(_) => return -LinuxError::EINVAL.code() as isize,
-        Err(_) => return -LinuxError::EINVAL.code() as isize,
-    };
-
-    match FS_CONTEXT.lock().remove_file(path) {
+    match ctx.remove_file(path) {
         Ok(()) => 0,
         Err(e) => {
-            let errno: LinuxError = e.into();
+            let errno = LinuxError::from(e.canonicalize());
             -errno.code() as isize
         }
+    }
+}
+
+pub fn sys_utimensat(dirfd: i32, pathname: usize, times: usize, flags: usize) -> isize {
+    axlog::debug!(
+        "sys_utimensat: dirfd={}, pathname={:#x}, times={:#x}, flags={:#x}",
+        dirfd,
+        pathname,
+        times,
+        flags
+    );
+    let supported_flags = AT_SYMLINK_NOFOLLOW | AT_EMPTY_PATH;
+    if (flags & !supported_flags) != 0 {
+        return -LinuxError::EINVAL.code() as isize;
+    }
+
+    let location = match resolve_location_at_ptr(dirfd, pathname, flags) {
+        Ok(location) => location,
+        Err(e) => return -e.code() as isize,
+    };
+
+    let now = axhal::time::wall_time();
+    let (atime, mtime) = if times == 0 {
+        (Some(now), Some(now))
+    } else {
+        let atime = match read_user_timespec(times).and_then(|ts| timespec_to_update_time(ts, now))
+        {
+            Ok(atime) => atime,
+            Err(e) => return -e.code() as isize,
+        };
+        let mtime_addr = times + core::mem::size_of::<ctypes::timespec>();
+        let mtime =
+            match read_user_timespec(mtime_addr).and_then(|ts| timespec_to_update_time(ts, now)) {
+                Ok(mtime) => mtime,
+                Err(e) => return -e.code() as isize,
+            };
+        (atime, mtime)
+    };
+
+    if atime.is_none() && mtime.is_none() {
+        return 0;
+    }
+
+    let mut update = MetadataUpdate::default();
+    update.atime = atime;
+    update.mtime = mtime;
+    match location.update_metadata(update) {
+        Ok(()) => 0,
+        Err(e) => -LinuxError::from(e.canonicalize()).code() as isize,
     }
 }
 
@@ -612,8 +1218,9 @@ pub fn sys_ioctl(fd: usize, cmd: usize, arg: usize) -> isize {
         }
         TIOCGPGRP => {
             if arg != 0 {
-                unsafe {
-                    *(arg as *mut i32) = 1; // Return a dummy process group ID
+                let value = 1i32.to_ne_bytes();
+                if let Err(e) = write_user_bytes(arg, &value) {
+                    return -e.code() as isize;
                 }
             }
             0
@@ -621,12 +1228,20 @@ pub fn sys_ioctl(fd: usize, cmd: usize, arg: usize) -> isize {
         TIOCSPGRP => 0,
         TIOCGWINSZ => {
             if arg != 0 {
-                let ws = arg as *mut WinSize;
-                unsafe {
-                    (*ws).ws_row = 24;
-                    (*ws).ws_col = 80;
-                    (*ws).ws_xpixel = 0;
-                    (*ws).ws_ypixel = 0;
+                let ws = WinSize {
+                    ws_row: 24,
+                    ws_col: 80,
+                    ws_xpixel: 0,
+                    ws_ypixel: 0,
+                };
+                let bytes = unsafe {
+                    core::slice::from_raw_parts(
+                        (&ws as *const WinSize).cast::<u8>(),
+                        core::mem::size_of::<WinSize>(),
+                    )
+                };
+                if let Err(e) = write_user_bytes(arg, bytes) {
+                    return -e.code() as isize;
                 }
             }
             0
