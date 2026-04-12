@@ -549,6 +549,9 @@ impl AxRunQueue {
         #[cfg(feature = "smp")]
         next_task.set_on_cpu(true);
 
+        prev_task.leave_task_ext();
+        next_task.enter_task_ext();
+
         unsafe {
             let prev_ctx_ptr = prev_task.ctx_mut_ptr();
             let next_ctx_ptr = next_task.ctx_mut_ptr();
@@ -584,14 +587,11 @@ fn gc_entry() {
             // Do not do the slow drops in the critical section.
             let task = EXITED_TASKS.with_current(|exited_tasks| exited_tasks.pop_front());
             if let Some(task) = task {
-                if Arc::strong_count(&task) == 1 {
-                    // If I'm the last holder of the task, drop it immediately.
-                    drop(task);
-                } else {
-                    // Otherwise (e.g, `switch_to` is not compeleted, held by the
-                    // joiner, etc), push it back and wait for them to drop first.
-                    EXITED_TASKS.with_current(|exited_tasks| exited_tasks.push_back(task));
-                }
+                // Reclaim the large per-task kernel stack first to avoid OOM,
+                // then keep deferring full task drop to avoid known instability
+                // in the exited-task full-drop path.
+                task.reclaim_kernel_stack();
+                core::mem::forget(task);
             }
         }
         // Note: we cannot block current task with preemption disabled,
