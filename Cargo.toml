@@ -37,6 +37,7 @@ syscalls = { git = "https://github.com/muou000/syscalls.git", rev = "efac241", d
 
 [patch.crates-io]
 axplat-loongarch64-qemu-virt = { path = "vendor/axplat-loongarch64-qemu-virt" }
+axfs-ng-vfs = { path = "vendor/axfs-ng-vfs" }
 
 [package]
 name = "Pulse"
