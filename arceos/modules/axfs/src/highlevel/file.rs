@@ -659,6 +659,14 @@ impl CachedFile {
 
 impl Drop for CachedFile {
     fn drop(&mut self) {
+        // Defensive guard: a corrupted CachedFile instance may carry a null
+        // `shared` pointer. Avoid dereferencing it in release path.
+        let shared_ptr = unsafe { *(core::ptr::addr_of!(self.shared) as *const *const ()) };
+        if shared_ptr.is_null() {
+            warn!("skip dropping malformed CachedFile: null shared pointer");
+            return;
+        }
+
         if Arc::strong_count(&self.shared) > 1 {
             // If there are other references to this cached file, we don't
             // need to drop it.
