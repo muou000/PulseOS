@@ -353,8 +353,6 @@ dependencies = [
 [[package]]
 name = "axfs-ng-vfs"
 version = "0.1.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "75b3fc5c71051e9ae0b29700aa6eb676b7dadb91be3415d2b374cc8d2a2d37c6"
 dependencies = [
  "axerrno 0.2.2",
  "axpoll",
@@ -431,6 +429,7 @@ dependencies = [
  "axalloc",
  "axconfig",
  "axerrno 0.1.2",
+ "axfs",
  "axhal",
  "kspin",
  "lazyinit",
@@ -1355,14 +1354,18 @@ dependencies = [
  "axconfig",
  "axerrno 0.2.2",
  "axfs",
+ "axfs-ng-vfs",
  "axhal",
+ "axio 0.3.0-pre.1",
  "axlog",
  "axmm",
  "axtask",
  "bitflags 2.11.0",
  "kernel-elf-parser",
+ "kernel_guard",
  "linkme",
  "memory_addr",
+ "percpu",
  "spin 0.9.8",
  "xmas-elf",
 ]
@@ -1372,15 +1375,18 @@ name = "pulse_syscalls"
 version = "0.1.0"
 dependencies = [
  "arceos_posix_api",
+ "axalloc",
  "axerrno 0.2.2",
  "axfs",
+ "axfs-ng-vfs",
  "axhal",
- "axio 0.1.2",
+ "axio 0.3.0-pre.1",
  "axlog",
  "axtask",
  "bitflags 2.11.0",
  "linkme",
  "memory_addr",
+ "percpu",
  "pulse_core",
  "spin 0.10.0",
  "syscalls",
