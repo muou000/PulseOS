@@ -204,6 +204,20 @@ impl Location {
             DOT => self.clone(),
             DOTDOT => self.parent().unwrap_or_else(|| self.clone()),
             _ => {
+                if let Some(child_mount) = self
+                    .mountpoint
+                    .children
+                    .lock()
+                    .values()
+                    .find_map(|child| {
+                        let child = child.upgrade()?;
+                        let child_loc = child.location()?;
+                        let child_parent = child_loc.parent()?;
+                        (child_loc.name() == name && child_parent.ptr_eq(self)).then_some(child)
+                    })
+                {
+                    return Ok(child_mount.root_location());
+                }
                 let loc = Self::new(self.mountpoint.clone(), self.entry.as_dir()?.lookup(name)?);
                 loc.resolve_mountpoint()
             }
