@@ -3,6 +3,7 @@ use alloc::{
     collections::vec_deque::VecDeque,
     string::String,
     sync::Arc,
+    vec,
     vec::Vec,
 };
 
@@ -200,6 +201,15 @@ impl FsContext {
         let mut buf = Vec::new();
         let file = File::open(self, path.as_ref())?;
         (&file).read_to_end(&mut buf)?;
+        Ok(buf)
+    }
+
+    /// Reads up to `limit` bytes from the start of a file.
+    pub fn read_prefix(&self, path: impl AsRef<Path>, limit: usize) -> VfsResult<Vec<u8>> {
+        let file = File::open(self, path.as_ref())?;
+        let mut buf = vec![0u8; limit];
+        let read = file.read_at(&mut buf[..], 0)?;
+        buf.truncate(read);
         Ok(buf)
     }
 
