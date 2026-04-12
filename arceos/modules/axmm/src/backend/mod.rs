@@ -5,6 +5,7 @@ use memory_addr::VirtAddr;
 use memory_set::MappingBackend;
 
 mod alloc;
+mod file;
 mod linear;
 
 pub(crate) use alloc::cow_inc_frame_ref;
@@ -38,6 +39,8 @@ pub enum Backend {
         /// Whether to populate the physical frames when creating the mapping.
         populate: bool,
     },
+    /// File-backed demand mapping backend.
+    File(file::FileMapping),
 }
 
 impl MappingBackend for Backend {
@@ -48,6 +51,7 @@ impl MappingBackend for Backend {
         match *self {
             Self::Linear { pa_va_offset } => self.map_linear(start, size, flags, pt, pa_va_offset),
             Self::Alloc { populate } => self.map_alloc(start, size, flags, pt, populate),
+            Self::File(ref mapping) => self.map_file(start, size, flags, pt, mapping),
         }
     }
 
@@ -55,6 +59,7 @@ impl MappingBackend for Backend {
         match *self {
             Self::Linear { pa_va_offset } => self.unmap_linear(start, size, pt, pa_va_offset),
             Self::Alloc { populate } => self.unmap_alloc(start, size, pt, populate),
+            Self::File(_) => self.unmap_file(start, size, pt),
         }
     }
 
@@ -65,10 +70,13 @@ impl MappingBackend for Backend {
         new_flags: Self::Flags,
         page_table: &mut Self::PageTable,
     ) -> bool {
-        page_table
-            .protect_region(start, size, new_flags, true)
-            .map(|tlb| tlb.ignore())
-            .is_ok()
+        match *self {
+            Self::File(ref mapping) if !mapping.permits(new_flags) => false,
+            _ => page_table
+                .protect_region(start, size, new_flags, true)
+                .map(|tlb| tlb.ignore())
+                .is_ok(),
+        }
     }
 }
 
@@ -83,6 +91,9 @@ impl Backend {
             Self::Linear { .. } => false, // Linear mappings should not trigger page faults.
             Self::Alloc { populate } => {
                 self.handle_page_fault_alloc(vaddr, orig_flags, page_table, populate)
+            }
+            Self::File(ref mapping) => {
+                self.handle_page_fault_file(vaddr, orig_flags, page_table, mapping)
             }
         }
     }

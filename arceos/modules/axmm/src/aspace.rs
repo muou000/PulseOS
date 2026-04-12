@@ -1,6 +1,7 @@
 use core::fmt;
 
 use axerrno::{AxError, AxResult, ax_err};
+use axfs::{CachedFile, FileFlags};
 use axhal::mem::phys_to_virt;
 use axhal::paging::{MappingFlags, PageTable};
 use axhal::trap::PageFaultFlags;
@@ -142,6 +143,58 @@ impl AddrSpace {
         }
 
         let area = MemoryArea::new(start, size, flags, Backend::new_alloc(populate));
+        self.areas
+            .map(area, &mut self.pt, false)
+            .map_err(mapping_err_to_ax_err)?;
+        Ok(())
+    }
+
+    /// Add a new file-backed on-demand mapping.
+    pub fn map_file(
+        &mut self,
+        start: VirtAddr,
+        size: usize,
+        flags: MappingFlags,
+        file: CachedFile,
+        file_flags: FileFlags,
+        file_offset: usize,
+        file_bytes: usize,
+    ) -> AxResult {
+        if !self.contains_range(start, size) {
+            return ax_err!(InvalidInput, "address out of range");
+        }
+        if !start.is_aligned_4k() || !is_aligned_4k(size) {
+            return ax_err!(InvalidInput, "address not aligned");
+        }
+
+        let area = MemoryArea::new(
+            start,
+            size,
+            flags,
+            Backend::new_file(start, file, file_flags, file_offset, file_bytes),
+        );
+        self.areas
+            .map(area, &mut self.pt, false)
+            .map_err(mapping_err_to_ax_err)?;
+        Ok(())
+    }
+
+    /// Add a new mapping with an existing backend.
+    pub fn map_with_backend(
+        &mut self,
+        start: VirtAddr,
+        size: usize,
+        flags: MappingFlags,
+        backend: Backend,
+    ) -> AxResult {
+        if !self.contains_range(start, size) {
+            return ax_err!(InvalidInput, "address out of range");
+        }
+        if !start.is_aligned_4k() || !is_aligned_4k(size) {
+            return ax_err!(InvalidInput, "address not aligned");
+        }
+
+        let area = MemoryArea::new(start, size, flags, backend);
         self.areas
             .map(area, &mut self.pt, false)
             .map_err(mapping_err_to_ax_err)?;
@@ -342,6 +395,16 @@ impl AddrSpace {
     {
         for area in self.areas.iter() {
             f(area.start(), area.end(), area.flags());
+        }
+    }
+
+    /// Visits all mapped virtual memory areas together with their backends.
+    pub fn for_each_area_with_backend<F>(&self, mut f: F)
+    where
+        F: FnMut(VirtAddr, VirtAddr, MappingFlags, &Backend),
+    {
+        for area in self.areas.iter() {
+            f(area.start(), area.end(), area.flags(), area.backend());
         }
     }
 

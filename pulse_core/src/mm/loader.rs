@@ -1,8 +1,10 @@
 use alloc::string::{String, ToString};
 use alloc::sync::Arc;
+use alloc::vec;
 use alloc::vec::Vec;
 
 use axerrno::{AxError, AxResult};
+use axfs::{CachedFile, File, FileFlags};
 use axhal::paging::MappingFlags;
 use axmm::AddrSpace;
 use kernel_elf_parser::{AuxEntry, AuxType, ELFHeadersBuilder, ELFParser, app_stack_region};
@@ -18,7 +20,19 @@ const USER_DYN_BASE: usize = 0x20_0000;
 const ELF_MACHINE_LOONGARCH: u16 = 0x102;
 const ELF_CACHE_MAX_ENTRIES: usize = 16;
 
-static ELF_FILE_CACHE: spin::Mutex<Vec<(String, Arc<Vec<u8>>)>> = spin::Mutex::new(Vec::new());
+struct CachedElfImage {
+    prefix: Vec<u8>,
+    file: CachedFile,
+}
+
+impl CachedElfImage {
+    fn bytes(&self) -> &[u8] {
+        self.prefix.as_slice()
+    }
+}
+
+static ELF_FILE_CACHE: spin::Mutex<Vec<(String, Arc<CachedElfImage>)>> =
+    spin::Mutex::new(Vec::new());
 
 pub struct UserAppLoadInfo {
     pub entry: usize,
@@ -90,7 +104,8 @@ fn segment_flags(ph: &xmas_elf::program::ProgramHeader<'_>) -> MappingFlags {
 fn load_segments(
     aspace: &mut AddrSpace,
     elf: &ElfFile<'_>,
-    elf_data: &[u8],
+    elf_file: &CachedFile,
+    path: &str,
     bias: usize,
 ) -> AxResult {
     for ph in elf.program_iter() {
@@ -111,34 +126,67 @@ fn load_segments(
         if p_filesz > p_memsz {
             return Err(AxError::InvalidExecutable);
         }
-
-        let seg_end = p_offset
-            .checked_add(p_filesz)
-            .ok_or(AxError::InvalidExecutable)?;
-        if seg_end > elf_data.len() {
+        if (p_offset & 0xfff) != (p_vaddr & 0xfff) {
             return Err(AxError::InvalidExecutable);
         }
 
         let seg_start_page = align_down_4k(p_vaddr);
+        let file_start_page = align_down_4k(p_offset);
         let seg_end = p_vaddr.checked_add(p_memsz).ok_or(AxError::OutOfRange)?;
+        let file_backed_end = p_vaddr.checked_add(p_filesz).ok_or(AxError::OutOfRange)?;
+        let file_backed_end_page = align_up_4k(file_backed_end)?;
         let seg_end_page = align_up_4k(seg_end)?;
-        let map_size = seg_end_page - seg_start_page;
+        let flags = segment_flags(&ph);
 
-        aspace.map_alloc(
-            VirtAddr::from_usize(seg_start_page),
-            map_size,
-            segment_flags(&ph),
-            true,
-        )?;
-
-        if p_filesz > 0 {
-            aspace.write(
-                VirtAddr::from_usize(p_vaddr),
-                &elf_data[p_offset..p_offset + p_filesz],
+        if ph.flags().is_write() {
+            aspace.map_alloc(
+                VirtAddr::from_usize(seg_start_page),
+                seg_end_page - seg_start_page,
+                flags,
+                true,
             )?;
+            if p_filesz > 0 {
+                let file_buf = read_elf_range(path, p_offset as u64, p_filesz)?;
+                aspace.write(VirtAddr::from_usize(p_vaddr), &file_buf)?;
+            }
+        } else {
+            if p_filesz > 0 {
+                let file_bytes = (p_vaddr - seg_start_page)
+                    .checked_add(p_filesz)
+                    .ok_or(AxError::OutOfRange)?;
+                aspace.map_file(
+                    VirtAddr::from_usize(seg_start_page),
+                    file_backed_end_page - seg_start_page,
+                    flags,
+                    elf_file.clone(),
+                    file_flags_for_segment(&ph),
+                    file_start_page,
+                    file_bytes,
+                )?;
+            }
+
+            if seg_end_page > file_backed_end_page {
+                aspace.map_alloc(
+                    VirtAddr::from_usize(file_backed_end_page),
+                    seg_end_page - file_backed_end_page,
+                    flags,
+                    false,
+                )?;
+            }
         }
     }
     Ok(())
+}
+
+fn file_flags_for_segment(ph: &xmas_elf::program::ProgramHeader<'_>) -> FileFlags {
+    let mut flags = FileFlags::READ;
+    if ph.flags().is_write() {
+        flags |= FileFlags::WRITE;
+    }
+    if ph.flags().is_execute() {
+        flags |= FileFlags::EXECUTE;
+    }
+    flags
 }
 
 fn read_interp_path<'a>(elf: &ElfFile<'a>, elf_data: &'a [u8]) -> AxResult<Option<String>> {
@@ -189,7 +237,7 @@ fn build_auxv(
     Ok(auxv)
 }
 
-fn get_from_cache(path: &str) -> Option<Arc<Vec<u8>>> {
+fn get_from_cache(path: &str) -> Option<Arc<CachedElfImage>> {
     ELF_FILE_CACHE
         .lock()
         .iter()
@@ -197,7 +245,45 @@ fn get_from_cache(path: &str) -> Option<Arc<Vec<u8>>> {
         .map(|(_, d)| d.clone())
 }
 
-fn put_into_cache(path: &str, data: Arc<Vec<u8>>) {
+fn invalidate_cache(path: &str) {
+    let mut cache = ELF_FILE_CACHE.lock();
+    if let Some(pos) = cache.iter().position(|(p, _)| p == path) {
+        cache.remove(pos);
+    }
+}
+
+fn compute_needed_prefix_len(prefix: &[u8]) -> AxResult<usize> {
+    let hdr_builder = ELFHeadersBuilder::new(prefix).map_err(|_| AxError::InvalidExecutable)?;
+    let ph_range = hdr_builder.ph_range();
+    let mut needed = usize::try_from(ph_range.end).map_err(|_| AxError::InvalidExecutable)?;
+    if needed > prefix.len() {
+        return Ok(needed);
+    }
+
+    let elf = ElfFile::new(prefix).map_err(|_| AxError::InvalidExecutable)?;
+    for ph in elf.program_iter() {
+        if ph.get_type() != Ok(Type::Interp) {
+            continue;
+        }
+        let interp_end = (ph.offset() as usize)
+            .checked_add(ph.file_size() as usize)
+            .ok_or(AxError::InvalidExecutable)?;
+        needed = needed.max(interp_end);
+    }
+    Ok(needed)
+}
+
+fn validate_cached_image(path: &str, image: &CachedElfImage) -> bool {
+    match compute_needed_prefix_len(image.bytes()) {
+        Ok(needed) if needed <= image.bytes().len() => true,
+        _ => {
+            axlog::warn!("invalidating ELF cache entry: {}", path);
+            false
+        }
+    }
+}
+
+fn put_into_cache(path: &str, data: Arc<CachedElfImage>) {
     let mut cache = ELF_FILE_CACHE.lock();
     if let Some((_, entry)) = cache.iter_mut().find(|(p, _)| p == path) {
         *entry = data;
@@ -209,9 +295,12 @@ fn put_into_cache(path: &str, data: Arc<Vec<u8>>) {
     cache.push((path.to_string(), data));
 }
 
-fn read_elf_file(path: &str) -> AxResult<Arc<Vec<u8>>> {
-    if let Some(data) = get_from_cache(path) {
-        return Ok(data);
+fn read_elf_file(path: &str) -> AxResult<Arc<CachedElfImage>> {
+    if let Some(image) = get_from_cache(path) {
+        if validate_cached_image(path, &image) {
+            return Ok(image);
+        }
+        invalidate_cache(path);
     }
 
     let fs_ctx = {
@@ -219,10 +308,63 @@ fn read_elf_file(path: &str) -> AxResult<Arc<Vec<u8>>> {
         guard.clone()
     };
 
-    let data = Arc::new(fs_ctx.read(path).map_err(|_| AxError::NotFound)?);
+    let location = fs_ctx.resolve(path).map_err(|_| AxError::NotFound)?;
+    let mut prefix = fs_ctx
+        .read_prefix(path, 4096)
+        .map_err(|_| AxError::NotFound)?;
+    let mut needed = compute_needed_prefix_len(&prefix)?;
+    if needed > prefix.len() {
+        prefix = fs_ctx
+            .read_prefix(path, needed)
+            .map_err(|_| AxError::NotFound)?;
+        needed = compute_needed_prefix_len(&prefix)?;
+    }
+    if needed > prefix.len() {
+        return Err(AxError::InvalidExecutable);
+    }
 
-    put_into_cache(path, data.clone());
-    Ok(data)
+    let image = Arc::new(CachedElfImage {
+        prefix,
+        file: CachedFile::get_or_create(location),
+    });
+
+    if !validate_cached_image(path, &image) {
+        return Err(AxError::InvalidExecutable);
+    }
+
+    put_into_cache(path, image.clone());
+    Ok(image)
+}
+
+fn read_elf_range(path: &str, offset: u64, len: usize) -> AxResult<Vec<u8>> {
+    let fs_ctx = {
+        let guard = axfs::FS_CONTEXT.lock();
+        guard.clone()
+    };
+    let file = File::open(&fs_ctx, path).map_err(|_| AxError::NotFound)?;
+    let mut buf = vec![0u8; len];
+    let read = file
+        .read_at(&mut buf[..], offset)
+        .map_err(|_| AxError::InvalidExecutable)?;
+    if read == len {
+        return Ok(buf);
+    }
+
+    let whole = fs_ctx.read(path).map_err(|_| AxError::NotFound)?;
+    let start = usize::try_from(offset).map_err(|_| AxError::InvalidExecutable)?;
+    let end = start.checked_add(len).ok_or(AxError::InvalidExecutable)?;
+    if end > whole.len() {
+        axlog::error!(
+            "short read while loading {}: offset={:#x} size={:#x} read={:#x} whole_len={:#x}",
+            path,
+            offset,
+            len,
+            read,
+            whole.len()
+        );
+        return Err(AxError::InvalidExecutable);
+    }
+    Ok(whole[start..end].to_vec())
 }
 
 pub fn load_user_app(
@@ -231,8 +373,12 @@ pub fn load_user_app(
     args: &[&str],
     envs: &[&str],
 ) -> AxResult<UserAppLoadInfo> {
-    let main_data = read_elf_file(path)?;
-    let main_elf = ElfFile::new(&main_data).map_err(|_| AxError::InvalidExecutable)?;
+    let main_image = read_elf_file(path)?;
+    let main_data = main_image.bytes();
+    if main_data.is_empty() {
+        return Err(AxError::InvalidExecutable);
+    }
+    let main_elf = ElfFile::new(main_data).map_err(|_| AxError::InvalidExecutable)?;
     validate_machine(&main_elf, path)?;
 
     let main_bias = match main_elf.header.pt2.type_().as_type() {
@@ -240,12 +386,12 @@ pub fn load_user_app(
         ElfType::SharedObject => compute_load_bias(&main_elf, USER_DYN_BASE)?,
         _ => return Err(AxError::InvalidExecutable),
     };
-    load_segments(aspace, &main_elf, &main_data, main_bias)?;
+    load_segments(aspace, &main_elf, &main_image.file, path, main_bias)?;
     let main_entry = (main_elf.header.pt2.entry_point() as usize)
         .checked_add(main_bias)
         .ok_or(AxError::OutOfRange)?;
 
-    let interp_path = read_interp_path(&main_elf, &main_data)?;
+    let interp_path = read_interp_path(&main_elf, main_data)?;
     if main_elf.header.pt2.type_().as_type() == ElfType::SharedObject && interp_path.is_none() {
         axlog::error!("ET_DYN executable {} has no PT_INTERP", path);
         return Err(AxError::Unsupported);
@@ -255,8 +401,12 @@ pub fn load_user_app(
     let mut dispatch_entry = main_entry;
 
     if let Some(interp_path) = interp_path {
-        let interp_data = read_elf_file(&interp_path)?;
-        let interp_elf = ElfFile::new(&interp_data).map_err(|_| AxError::InvalidExecutable)?;
+        let interp_image = read_elf_file(&interp_path)?;
+        let interp_data = interp_image.bytes();
+        if interp_data.is_empty() {
+            return Err(AxError::InvalidExecutable);
+        }
+        let interp_elf = ElfFile::new(interp_data).map_err(|_| AxError::InvalidExecutable)?;
         validate_machine(&interp_elf, &interp_path)?;
 
         let bias = match interp_elf.header.pt2.type_().as_type() {
@@ -264,7 +414,7 @@ pub fn load_user_app(
             ElfType::SharedObject => compute_load_bias(&interp_elf, USER_INTERP_BASE)?,
             _ => return Err(AxError::InvalidExecutable),
         };
-        load_segments(aspace, &interp_elf, &interp_data, bias)?;
+        load_segments(aspace, &interp_elf, &interp_image.file, &interp_path, bias)?;
         interp_base = Some(bias);
         dispatch_entry = (interp_elf.header.pt2.entry_point() as usize)
             .checked_add(bias)
@@ -277,7 +427,7 @@ pub fn load_user_app(
         );
     }
 
-    let auxv = build_auxv(&main_data, main_bias, interp_base)?;
+    let auxv = build_auxv(main_data, main_bias, interp_base)?;
     let argv: Vec<String> = if args.is_empty() {
         alloc::vec![path.to_string()]
     } else {
@@ -290,7 +440,6 @@ pub fn load_user_app(
         .checked_sub(stack_region.len())
         .ok_or(AxError::OutOfRange)?;
     aspace.write(VirtAddr::from_usize(user_sp), &stack_region)?;
-
     Ok(UserAppLoadInfo {
         entry: dispatch_entry,
         user_sp,

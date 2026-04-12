@@ -31,7 +31,7 @@ fn drop_frame_mapping_ref(frame: PhysAddr) -> bool {
     }
 }
 
-fn alloc_frame(zeroed: bool) -> Option<PhysAddr> {
+pub(super) fn alloc_frame(zeroed: bool) -> Option<PhysAddr> {
     let vaddr = VirtAddr::from(global_allocator().alloc_pages(1, PAGE_SIZE_4K).ok()?);
     if zeroed {
         unsafe { core::ptr::write_bytes(vaddr.as_mut_ptr(), 0, PAGE_SIZE_4K) };
@@ -40,7 +40,7 @@ fn alloc_frame(zeroed: bool) -> Option<PhysAddr> {
     Some(paddr)
 }
 
-fn dealloc_frame(frame: PhysAddr) {
+pub(super) fn dealloc_frame(frame: PhysAddr) {
     if !drop_frame_mapping_ref(frame) {
         return;
     }
