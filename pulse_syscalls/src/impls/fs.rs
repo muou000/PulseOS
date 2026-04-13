@@ -38,14 +38,12 @@ static MOUNTED_TARGETS: Lazy<spin::Mutex<BTreeSet<String>>> =
     Lazy::new(|| spin::Mutex::new(BTreeSet::new()));
 
 fn write_user_bytes(user_addr: usize, bytes: &[u8]) -> Result<(), LinuxError> {
-    with_process(|process| process.write_user_bytes(user_addr, bytes))
-        .map_err(|e| e)?
+    with_process(|process| process.write_user_bytes(user_addr, bytes))?
         .map_err(|e| LinuxError::from(e.canonicalize()))
 }
 
 fn read_user_bytes(user_addr: usize, bytes: &mut [u8]) -> Result<(), LinuxError> {
-    with_process(|process| process.read_user_bytes(user_addr, bytes))
-        .map_err(|e| e)?
+    with_process(|process| process.read_user_bytes(user_addr, bytes))?
         .map_err(|e| LinuxError::from(e.canonicalize()))
 }
 
@@ -132,33 +130,15 @@ fn get_fd_location(fd: usize) -> Result<Location, LinuxError> {
 }
 
 fn insert_fd_entry(entry: FdEntry) -> Result<usize, LinuxError> {
-    with_process(|process| {
-        process
-            .fd_table
-            .lock()
-            .insert_next(entry)
-            .map_err(|_| LinuxError::EMFILE)
-    })?
+    with_process(|process| process.fd_table.lock().insert_next(entry))?
 }
 
 fn insert_fd_entry_from(min_fd: usize, entry: FdEntry) -> Result<usize, LinuxError> {
-    with_process(|process| {
-        process
-            .fd_table
-            .lock()
-            .insert_from(min_fd, entry)
-            .map_err(|_| LinuxError::EMFILE)
-    })?
+    with_process(|process| process.fd_table.lock().insert_from(min_fd, entry))?
 }
 
 fn set_fd_entry(fd: usize, entry: FdEntry) -> Result<(), LinuxError> {
-    with_process(|process| {
-        process
-            .fd_table
-            .lock()
-            .insert_at(fd, entry)
-            .map_err(|_| LinuxError::EBADF)
-    })?
+    with_process(|process| process.fd_table.lock().insert_at(fd, entry))?
 }
 
 fn remove_fd_entry(fd: usize) -> Result<FdEntry, LinuxError> {
@@ -562,6 +542,7 @@ pub fn sys_fstat(fd: usize, statbuf: usize) -> isize {
     }
 }
 
+#[cfg_attr(not(any(target_arch = "riscv64", target_arch = "loongarch64")), allow(dead_code))]
 pub fn sys_fstatat(dirfd: i32, pathname: usize, statbuf: usize, flags: usize) -> isize {
     ensure_kernel_mappings_for_fs();
     if statbuf == 0 {
@@ -660,7 +641,7 @@ pub fn sys_statx(
         stx_mask: STATX_BASIC_STATS | STATX_MNT_ID,
         stx_blksize: stat.st_blksize as u32,
         stx_attributes: 0,
-        stx_nlink: stat.st_nlink as u32,
+        stx_nlink: stat.st_nlink,
         stx_uid: stat.st_uid,
         stx_gid: stat.st_gid,
         stx_mode: stat.st_mode as u16,
@@ -797,7 +778,7 @@ pub fn sys_sendfile(out_fd: usize, in_fd: usize, offset: usize, count: usize) ->
     };
 
     let mut total = 0usize;
-    let mut buf = vec![0u8; count.min(64 * 1024).max(1)];
+    let mut buf = vec![0u8; count.clamp(1, 64 * 1024)];
     while total < count {
         let chunk_len = core::cmp::min(buf.len(), count - total);
         let read_len = if use_explicit_offset {
@@ -986,14 +967,12 @@ pub fn sys_pipe2(fds: usize, flags: usize) -> isize {
     let (read_entry, write_entry) = pipe_entries(open_fd_flags(flags));
     let new_fds = match with_process(|process| -> Result<[i32; 2], LinuxError> {
         let mut table = process.fd_table.lock();
-        let read_fd = table
-            .insert_next(read_entry)
-            .map_err(|_| LinuxError::EMFILE)?;
+        let read_fd = table.insert_next(read_entry)?;
         let write_fd = match table.insert_next(write_entry) {
             Ok(fd) => fd,
-            Err(_) => {
+            Err(e) => {
                 let _ = table.remove(read_fd);
-                return Err(LinuxError::EMFILE);
+                return Err(e);
             }
         };
         Ok([read_fd as i32, write_fd as i32])
@@ -1187,9 +1166,11 @@ pub fn sys_utimensat(dirfd: i32, pathname: usize, times: usize, flags: usize) ->
         return 0;
     }
 
-    let mut update = MetadataUpdate::default();
-    update.atime = atime;
-    update.mtime = mtime;
+    let update = MetadataUpdate {
+        atime,
+        mtime,
+        ..Default::default()
+    };
     match location.update_metadata(update) {
         Ok(()) => 0,
         Err(e) => -LinuxError::from(e.canonicalize()).code() as isize,
@@ -1248,7 +1229,7 @@ pub fn sys_ioctl(fd: usize, cmd: usize, arg: usize) -> isize {
         }
         _ => {
             // ENOTTY
-            -25
+            -LinuxError::ENOTTY.code() as isize
         }
     }
 }

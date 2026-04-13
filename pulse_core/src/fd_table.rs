@@ -1,4 +1,4 @@
-use alloc::collections::BTreeMap;
+use alloc::collections::{BTreeMap, btree_map::Entry};
 use alloc::sync::Arc;
 use arceos_posix_api::ctypes;
 use axerrno::{LinuxError, LinuxResult};
@@ -668,25 +668,28 @@ impl FdTable {
         self.entries.get_mut(&fd)
     }
 
-    pub fn insert_at(&mut self, fd: usize, entry: FdEntry) -> Result<(), ()> {
+    pub fn insert_at(&mut self, fd: usize, entry: FdEntry) -> LinuxResult {
         if fd >= FD_LIMIT {
-            return Err(());
+            return Err(LinuxError::EBADF);
         }
         self.entries.insert(fd, entry);
         Ok(())
     }
 
-    pub fn insert_from(&mut self, min_fd: usize, entry: FdEntry) -> Result<usize, ()> {
+    pub fn insert_from(&mut self, min_fd: usize, entry: FdEntry) -> LinuxResult<usize> {
+        let mut pending = Some(entry);
         for fd in min_fd..FD_LIMIT {
-            if !self.entries.contains_key(&fd) {
-                self.entries.insert(fd, entry);
+            if let Entry::Vacant(slot) = self.entries.entry(fd) {
+                if let Some(entry) = pending.take() {
+                    slot.insert(entry);
+                }
                 return Ok(fd);
             }
         }
-        Err(())
+        Err(LinuxError::EMFILE)
     }
 
-    pub fn insert_next(&mut self, entry: FdEntry) -> Result<usize, ()> {
+    pub fn insert_next(&mut self, entry: FdEntry) -> LinuxResult<usize> {
         self.insert_from(0, entry)
     }
 
@@ -696,6 +699,10 @@ impl FdTable {
 
     pub fn len(&self) -> usize {
         self.entries.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
     }
 }
 
