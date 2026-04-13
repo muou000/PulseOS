@@ -53,17 +53,16 @@ fn write_cstr_field(dst: &mut [u8], s: &str) {
     dst[len] = 0;
 }
 
-fn with_current_process<R>(f: impl FnOnce(&pulse_core::task::Process) -> R) -> R {
-    pulse_core::task::with_current_process(f).expect("syscall without current process")
+fn with_current_process<R>(f: impl FnOnce(&pulse_core::task::Process) -> R) -> Result<R, LinuxError> {
+    pulse_core::task::with_current_process(f)
 }
 
 fn write_current_process_bytes(user_addr: usize, bytes: &[u8]) -> isize {
-    with_current_process(|process| {
-        process
-            .write_user_bytes(user_addr, bytes)
-            .map(|_| 0)
-            .unwrap_or_else(|_| -LinuxError::EFAULT.code() as isize)
-    })
+    match with_current_process(|process| process.write_user_bytes(user_addr, bytes)) {
+        Ok(Ok(())) => 0,
+        Ok(Err(_)) => -LinuxError::EFAULT.code() as isize,
+        Err(e) => -e.code() as isize,
+    }
 }
 
 /// sys_uname - 获取系统信息
@@ -103,15 +102,21 @@ pub fn sys_uname(buf: usize) -> isize {
 
 pub fn sys_set_tid_address(tidptr: usize) -> isize {
     axlog::debug!("sys_set_tid_address: tidptr={:#x}", tidptr);
-    let thread = pulse_core::task::current_thread().expect("set_tid_address without Thread");
-    thread.set_clear_child_tid(tidptr);
-    thread.tid() as isize
+    match pulse_core::task::current_thread() {
+        Ok(thread) => {
+            thread.set_clear_child_tid(tidptr);
+            thread.tid() as isize
+        }
+        Err(e) => -e.code() as isize,
+    }
 }
 
 pub fn sys_gettid() -> isize {
     axlog::debug!("sys_gettid");
-    let thread = pulse_core::task::current_thread().expect("gettid without Thread");
-    thread.tid() as isize
+    match pulse_core::task::current_thread() {
+        Ok(thread) => thread.tid() as isize,
+        Err(e) => -e.code() as isize,
+    }
 }
 
 pub fn sys_set_robust_list(head: usize, len: usize) -> isize {
@@ -119,9 +124,13 @@ pub fn sys_set_robust_list(head: usize, len: usize) -> isize {
     if len != core::mem::size_of::<usize>() * 3 {
         return -LinuxError::EINVAL.code() as isize;
     }
-    let thread = pulse_core::task::current_thread().expect("set_robust_list without Thread");
-    thread.set_robust_list_head(head);
-    0
+    match pulse_core::task::current_thread() {
+        Ok(thread) => {
+            thread.set_robust_list_head(head);
+            0
+        }
+        Err(e) => -e.code() as isize,
+    }
 }
 
 pub fn sys_get_robust_list(pid: usize, head_ptr: usize, len_ptr: usize) -> isize {
@@ -135,7 +144,10 @@ pub fn sys_get_robust_list(pid: usize, head_ptr: usize, len_ptr: usize) -> isize
         return -LinuxError::EFAULT.code() as isize;
     }
 
-    let thread = pulse_core::task::current_thread().expect("get_robust_list without Thread");
+    let thread = match pulse_core::task::current_thread() {
+        Ok(thread) => thread,
+        Err(e) => return -e.code() as isize,
+    };
     if pid != 0 && pid != thread.tid() as usize {
         return -LinuxError::ESRCH.code() as isize;
     }
@@ -168,12 +180,14 @@ pub fn sys_getrandom(buf: usize, len: usize, _flags: usize) -> isize {
         x = x.wrapping_mul(0x2545_f491_4f6c_dd1d);
         *b = (x & 0xff) as u8;
     }
-    let thread = pulse_core::task::current_thread().expect("getrandom without Thread");
-    thread
-        .process()
-        .write_user_bytes(buf, &out)
-        .map(|_| len as isize)
-        .unwrap_or_else(|_| -LinuxError::EFAULT.code() as isize)
+    match pulse_core::task::current_thread() {
+        Ok(thread) => thread
+            .process()
+            .write_user_bytes(buf, &out)
+            .map(|_| len as isize)
+            .unwrap_or_else(|_| -LinuxError::EFAULT.code() as isize),
+        Err(e) => -e.code() as isize,
+    }
 }
 
 pub fn sys_prlimit64(_pid: usize, _resource: usize, _new_limit: usize, _old_limit: usize) -> isize {

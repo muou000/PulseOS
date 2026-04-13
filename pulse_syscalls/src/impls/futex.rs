@@ -61,7 +61,10 @@ pub fn sys_futex(
         return -LinuxError::EFAULT.code() as isize;
     }
 
-    let process = pulse_core::task::current_process().expect("futex without current process");
+    let process = match pulse_core::task::current_process() {
+        Ok(process) => process,
+        Err(e) => return -e.code() as isize,
+    };
     let cmd = op & FUTEX_CMD_MASK;
 
     match cmd {

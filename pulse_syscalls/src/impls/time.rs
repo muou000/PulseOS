@@ -69,7 +69,10 @@ pub fn sys_nanosleep(req: usize, rem: usize) -> isize {
         return -LinuxError::EFAULT.code() as isize;
     }
 
-    let thread = pulse_core::task::current_thread().expect("nanosleep without Thread");
+    let thread = match pulse_core::task::current_thread() {
+        Ok(thread) => thread,
+        Err(e) => return -e.code() as isize,
+    };
     let process = thread.process();
 
     let req_ts = match read_user_timespec(process, req) {
@@ -116,7 +119,10 @@ pub fn sys_clock_gettime(clockid: i32, tp: usize) -> isize {
         _ => return -LinuxError::EINVAL.code() as isize,
     };
 
-    let thread = pulse_core::task::current_thread().expect("clock_gettime without Thread");
+    let thread = match pulse_core::task::current_thread() {
+        Ok(thread) => thread,
+        Err(e) => return -e.code() as isize,
+    };
     let process = thread.process();
     write_user_timespec(process, tp, &now)
 }
@@ -139,7 +145,10 @@ pub fn sys_gettimeofday(tv: usize, tz: usize) -> isize {
         tv_usec: now.subsec_micros() as _,
     };
 
-    let thread = pulse_core::task::current_thread().expect("gettimeofday without Thread");
+    let thread = match pulse_core::task::current_thread() {
+        Ok(thread) => thread,
+        Err(e) => return -e.code() as isize,
+    };
     let process = thread.process();
     let bytes = unsafe {
         core::slice::from_raw_parts(
@@ -160,7 +169,10 @@ pub fn sys_gettimeofday(tv: usize, tz: usize) -> isize {
 pub fn sys_times(tbuf: usize) -> isize {
     axlog::debug!("sys_times: tbuf={:#x}", tbuf);
 
-    let thread = pulse_core::task::current_thread().expect("times without Thread");
+    let thread = match pulse_core::task::current_thread() {
+        Ok(thread) => thread,
+        Err(e) => return -e.code() as isize,
+    };
     let process = thread.process();
 
     let now_ns = axhal::time::monotonic_time_nanos() as u64;
