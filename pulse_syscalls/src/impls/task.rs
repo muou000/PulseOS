@@ -262,13 +262,15 @@ pub fn sys_clone(tf: &TrapFrame, args: [usize; 6]) -> isize {
         // Create an entirely new process memory space (Fork / Deep Copy)
         match parent_proc.spawn_fork_from_trap_frame(
             &new_tf,
-            (child_stack != 0).then_some(child_stack),
-            false,
-            share_fs,
-            share_files,
-            parent_set_tid,
-            child_set_tid,
-            child_clear_tid,
+            pulse_core::task::ForkParams {
+                child_stack: (child_stack != 0).then_some(child_stack),
+                is_vfork: false,
+                share_fs,
+                share_files,
+                parent_set_tid,
+                child_set_tid,
+                child_clear_tid,
+            },
         ) {
             Ok(child_proc) => (child_proc.pid() as usize, None),
             Err(e) => {
@@ -280,14 +282,16 @@ pub fn sys_clone(tf: &TrapFrame, args: [usize; 6]) -> isize {
         // Create a new task in the same memory space.
         match parent_proc.spawn_from_trap_frame(
             &new_tf,
-            (child_stack != 0).then_some(child_stack),
-            is_thread_clone,
-            is_vfork,
-            share_fs,
-            share_files,
-            parent_set_tid,
-            child_set_tid,
-            child_clear_tid,
+            pulse_core::task::CloneParams {
+                child_stack: (child_stack != 0).then_some(child_stack),
+                is_thread_clone,
+                is_vfork,
+                share_fs,
+                share_files,
+                parent_set_tid,
+                child_set_tid,
+                child_clear_tid,
+            },
         ) {
             Ok((tid, child_proc)) => (tid as usize, child_proc),
             Err(e) => {

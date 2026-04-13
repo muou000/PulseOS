@@ -204,6 +204,29 @@ pub struct Process {
     vfork_event: WaitQueue,
 }
 
+#[derive(Clone, Copy, Debug, Default)]
+pub struct ForkParams {
+    pub child_stack: Option<usize>,
+    pub is_vfork: bool,
+    pub share_fs: bool,
+    pub share_files: bool,
+    pub parent_set_tid: Option<usize>,
+    pub child_set_tid: Option<usize>,
+    pub child_clear_tid: Option<usize>,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+pub struct CloneParams {
+    pub child_stack: Option<usize>,
+    pub is_thread_clone: bool,
+    pub is_vfork: bool,
+    pub share_fs: bool,
+    pub share_files: bool,
+    pub parent_set_tid: Option<usize>,
+    pub child_set_tid: Option<usize>,
+    pub child_clear_tid: Option<usize>,
+}
+
 impl Process {
     fn validate_user_range(&self, user_addr: usize, len: usize) -> AxResult<()> {
         if len == 0 {
@@ -673,8 +696,10 @@ impl Process {
         if let Some(timeout_ns) = timeout_ns {
             let deadline = (axhal::time::monotonic_time_nanos() as u64).saturating_add(timeout_ns);
             while !self.group_exiting() {
-                if self.read_user_u32(addr).unwrap_or(expected) != expected {
-                    return Ok(());
+                match self.read_user_u32(addr) {
+                    Ok(current) if current != expected => return Ok(()),
+                    Ok(_) => {}
+                    Err(e) => return Err(e),
                 }
                 if axhal::time::monotonic_time_nanos() as u64 >= deadline {
                     return Err(AxError::TimedOut);
@@ -685,14 +710,23 @@ impl Process {
         }
 
         let queue = self.futex_table.queue(addr);
-        queue.wait_until(|| {
-            self.group_exiting()
-                || self
-                    .read_user_u32(addr)
-                    .map(|current| current != expected)
-                    .unwrap_or(true)
-        });
-        Ok(())
+        loop {
+            if self.group_exiting() {
+                return Ok(());
+            }
+            match self.read_user_u32(addr) {
+                Ok(current) if current != expected => return Ok(()),
+                Ok(_) => {}
+                Err(e) => return Err(e),
+            }
+            queue.wait_until(|| {
+                self.group_exiting()
+                    || self
+                        .read_user_u32(addr)
+                        .map(|current| current != expected)
+                        .unwrap_or(true)
+            });
+        }
     }
 
     pub fn futex_wake(&self, addr: usize, count: usize) -> usize {
@@ -752,18 +786,12 @@ impl Process {
     pub fn spawn_fork_from_trap_frame(
         self: &Arc<Self>,
         tf: &TrapFrame,
-        child_stack: Option<usize>,
-        is_vfork: bool,
-        share_fs: bool,
-        share_files: bool,
-        parent_set_tid: Option<usize>,
-        child_set_tid: Option<usize>,
-        child_clear_tid: Option<usize>,
+        params: ForkParams,
     ) -> AxResult<Arc<Process>> {
         let _guard = NoPreemptIrqSave::new();
         let mut child_uctx = UspaceContext::from(tf);
         child_uctx.set_retval(0);
-        if let Some(sp) = child_stack {
+        if let Some(sp) = params.child_stack {
             child_uctx.set_sp(sp);
         }
 
@@ -813,19 +841,19 @@ impl Process {
             self,
             Arc::new(Mutex::new(new_aspace)),
             false,
-            is_vfork,
-            share_fs,
-            share_files,
+            params.is_vfork,
+            params.share_fs,
+            params.share_files,
         )?;
         let child_thread = Thread::new(child_tid, child_proc.clone());
-        if let Some(addr) = child_set_tid {
+        if let Some(addr) = params.child_set_tid {
             child_thread.set_child_tid_addr(addr);
         }
-        if let Some(addr) = child_clear_tid {
+        if let Some(addr) = params.child_clear_tid {
             child_thread.set_clear_child_tid(addr);
         }
 
-        if let Some(parent_tid_addr) = parent_set_tid {
+        if let Some(parent_tid_addr) = params.parent_set_tid {
             self.write_user_u32(parent_tid_addr, child_tid as u32)?;
         }
 
@@ -843,18 +871,11 @@ impl Process {
     pub fn spawn_from_trap_frame(
         self: &Arc<Self>,
         tf: &TrapFrame,
-        child_stack: Option<usize>,
-        is_thread_clone: bool,
-        is_vfork: bool,
-        share_fs: bool,
-        share_files: bool,
-        parent_set_tid: Option<usize>,
-        child_set_tid: Option<usize>,
-        child_clear_tid: Option<usize>,
+        params: CloneParams,
     ) -> AxResult<(u64, Option<Arc<Process>>)> {
         let mut child_uctx = UspaceContext::from(tf);
         child_uctx.set_retval(0);
-        if let Some(sp) = child_stack {
+        if let Some(sp) = params.child_stack {
             child_uctx.set_sp(sp);
         }
 
@@ -877,7 +898,7 @@ impl Process {
         );
 
         let child_tid = inner.id().as_u64();
-        let child_proc = if is_thread_clone {
+        let child_proc = if params.is_thread_clone {
             self.register_thread(child_tid);
             self.clone()
         } else {
@@ -886,26 +907,26 @@ impl Process {
                 self,
                 self.aspace_handle(),
                 true,
-                is_vfork,
-                share_fs,
-                share_files,
+                params.is_vfork,
+                params.share_fs,
+                params.share_files,
             )?
         };
 
-        if let Some(parent_tid_addr) = parent_set_tid
+        if let Some(parent_tid_addr) = params.parent_set_tid
             && let Err(e) = self.write_user_u32(parent_tid_addr, child_tid as u32)
         {
-            if is_thread_clone {
+            if params.is_thread_clone {
                 self.unregister_thread(child_tid);
             }
             return Err(e);
         }
 
         let child_thread = Thread::new(child_tid, child_proc.clone());
-        if let Some(addr) = child_set_tid {
+        if let Some(addr) = params.child_set_tid {
             child_thread.set_child_tid_addr(addr);
         }
-        if let Some(addr) = child_clear_tid {
+        if let Some(addr) = params.child_clear_tid {
             child_thread.set_clear_child_tid(addr);
         }
 
@@ -916,9 +937,9 @@ impl Process {
 
         let task = axtask::spawn_task(inner);
         child_proc.register_task_ref(task.clone());
-        if !is_thread_clone {
+        if !params.is_thread_clone {
             self.add_child(child_proc.clone());
         }
-        Ok((child_tid, (!is_thread_clone).then_some(child_proc)))
+        Ok((child_tid, (!params.is_thread_clone).then_some(child_proc)))
     }
 }

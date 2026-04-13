@@ -7,7 +7,7 @@ use alloc::sync::Arc;
 use axerrno::{LinuxError, LinuxResult};
 use spin::{Lazy, Mutex};
 
-pub use process::Process;
+pub use process::{CloneParams, ForkParams, Process};
 pub use thread::{Thread, ThreadHandle};
 
 static THREAD_REGISTRY: Lazy<Mutex<BTreeMap<u64, Arc<Thread>>>> =
