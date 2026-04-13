@@ -8,7 +8,7 @@ homepage.workspace = true
 repository.workspace = true
 
 [dependencies]
-axalloc = { path = "../arceos/modules/axalloc" }
+axalloc.workspace = true
 axhal.workspace = true
 axlog.workspace = true
 axerrno.workspace = true
@@ -20,7 +20,6 @@ linkme = "0.3"
 memory_addr = { version = "0.4" }
 bitflags = "2.11"
 spin = "0.10"
-percpu = "0.2"
 syscalls.workspace = true
 pulse_core = { path = "../pulse_core" }
-arceos_posix_api = { path = "../arceos/api/arceos_posix_api", features = ["fs", "pipe", "multitask"] }
+arceos_posix_api = { path = "../arceos/api/arceos_posix_api" }
