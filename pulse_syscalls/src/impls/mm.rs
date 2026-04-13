@@ -39,7 +39,10 @@ fn get_fd_object(fd: usize) -> Result<Arc<dyn FdObject>, LinuxError> {
 pub fn sys_brk(addr: usize) -> isize {
     axlog::debug!("sys_brk: addr={:#x}", addr);
 
-    let proc = pulse_core::task::current_process().expect("brk without current process");
+    let proc = match pulse_core::task::current_process() {
+        Ok(proc) => proc,
+        Err(e) => return -e.code() as isize,
+    };
 
     let mut heap_top = proc.heap_top.lock();
 
@@ -47,8 +50,9 @@ pub fn sys_brk(addr: usize) -> isize {
         return *heap_top as isize;
     }
 
-    if addr < pulse_core::config::USER_HEAP_BASE
-        || addr > pulse_core::config::USER_HEAP_BASE + pulse_core::config::USER_HEAP_SIZE_MAX
+    if !(pulse_core::config::USER_HEAP_BASE
+        ..=pulse_core::config::USER_HEAP_BASE + pulse_core::config::USER_HEAP_SIZE_MAX)
+        .contains(&addr)
     {
         axlog::warn!("sys_brk: invalid addr {:#x}", addr);
         return *heap_top as isize;
@@ -107,7 +111,10 @@ pub fn sys_mmap(
         offset
     );
 
-    let proc = pulse_core::task::current_process().expect("mmap without current process");
+    let proc = match pulse_core::task::current_process() {
+        Ok(proc) => proc,
+        Err(e) => return -e.code() as isize,
+    };
 
     if length == 0 {
         return -LinuxError::EINVAL.code() as isize;
@@ -241,7 +248,7 @@ pub fn sys_mmap(
         }
         Err(e) => {
             axlog::error!("sys_mmap: failed to map at {:#x}: {:?}", map_addr, e);
-            -LinuxError::ENOMEM.code() as isize
+            -LinuxError::from(e).code() as isize
         }
     }
 }
@@ -249,7 +256,10 @@ pub fn sys_mmap(
 pub fn sys_munmap(addr: usize, length: usize) -> isize {
     axlog::debug!("sys_munmap: addr={:#x}, length={:#x}", addr, length);
 
-    let proc = pulse_core::task::current_process().expect("munmap without current process");
+    let proc = match pulse_core::task::current_process() {
+        Ok(proc) => proc,
+        Err(e) => return -e.code() as isize,
+    };
 
     if length == 0 {
         return -LinuxError::EINVAL.code() as isize;
@@ -275,7 +285,7 @@ pub fn sys_munmap(addr: usize, length: usize) -> isize {
         }
         Err(e) => {
             axlog::error!("sys_munmap: failed: {:?}", e);
-            -LinuxError::EINVAL.code() as isize
+            -LinuxError::from(e).code() as isize
         }
     }
 }
@@ -306,7 +316,10 @@ pub fn sys_mprotect(addr: usize, length: usize, prot: usize) -> isize {
         return -LinuxError::ENOMEM.code() as isize;
     }
 
-    let proc = pulse_core::task::current_process().expect("mprotect without current process");
+    let proc = match pulse_core::task::current_process() {
+        Ok(proc) => proc,
+        Err(e) => return -e.code() as isize,
+    };
 
     let mut map_flags = MappingFlags::USER;
     if (prot & PROT_READ) != 0 {
