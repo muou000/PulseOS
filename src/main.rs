@@ -20,9 +20,9 @@ fn main() {
             proc.activate();
             info!("User process address space activated");
 
-            #[cfg(feature = "auto-testcode")]
-            let shell_args: &[&str] = &["sh", "-c", include_str!("auto_testcode_cmd.sh").trim()];
-            #[cfg(not(feature = "auto-testcode"))]
+            #[cfg(feature = "testcode")]
+            let shell_args: &[&str] = &["sh", "-c", include_str!("testcode_cmd.sh").trim()];
+            #[cfg(not(feature = "testcode"))]
             let shell_args: &[&str] = &["sh"];
 
             match proc.load_elf(SHELL_ELF_PATH, shell_args, &[]) {
