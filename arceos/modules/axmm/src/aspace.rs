@@ -21,6 +21,14 @@ pub struct AddrSpace {
 }
 
 impl AddrSpace {
+    fn backend_kind(backend: &Backend) -> &'static str {
+        match backend {
+            Backend::Linear { .. } => "linear",
+            Backend::Alloc { .. } => "alloc",
+            Backend::File(_) => "file",
+        }
+    }
+
     /// Returns the address space base.
     pub const fn base(&self) -> VirtAddr {
         self.va_range.start
@@ -415,34 +423,69 @@ impl AddrSpace {
     /// Returns `true` if the page fault is handled successfully (not a real
     /// fault).
     pub fn handle_page_fault(&mut self, vaddr: VirtAddr, access_flags: PageFaultFlags) -> bool {
+        let page = vaddr.align_down_4k();
+        let pte_before = self.pt.query(page).ok().map(|(frame, flags, _)| (frame, flags));
         if !self.va_range.contains(vaddr) {
-            debug!(
-                "handle_page_fault: vaddr={:#x} out of aspace range {:?}",
-                vaddr, self.va_range
+            error!(
+                "handle_page_fault: reject=out_of_range vaddr={:#x} page={:#x} access={:?} aspace_range={:?} pte_before={:?}",
+                vaddr,
+                page,
+                access_flags,
+                self.va_range,
+                pte_before
             );
             return false;
         }
         if let Some(area) = self.areas.find(vaddr) {
             let orig_flags = area.flags();
+            let backend_kind = Self::backend_kind(area.backend());
             debug!(
-                "handle_page_fault: vaddr={:#x} in area [{:#x}, {:#x}) flags={:?}, access={:?}",
+                "handle_page_fault: vaddr={:#x} page={:#x} access={:?} area=[{:#x}, {:#x}) area_flags={:?} backend={} pte_before={:?}",
                 vaddr,
+                page,
+                access_flags,
                 area.start(),
                 area.end(),
                 orig_flags,
-                access_flags
+                backend_kind,
+                pte_before
             );
             if orig_flags.contains(access_flags) {
-                return area
+                let handled = area
                     .backend()
                     .handle_page_fault(vaddr, orig_flags, &mut self.pt);
+                if !handled {
+                    let pte_after = self.pt.query(page).ok().map(|(frame, flags, _)| (frame, flags));
+                    error!(
+                        "handle_page_fault: reject=backend_not_handled vaddr={:#x} page={:#x} access={:?} area_flags={:?} backend={} pte_before={:?} pte_after={:?}",
+                        vaddr,
+                        page,
+                        access_flags,
+                        orig_flags,
+                        backend_kind,
+                        pte_before,
+                        pte_after
+                    );
+                }
+                return handled;
             }
-            debug!(
-                "handle_page_fault: reject by permissions, area flags={:?}, access={:?}",
-                orig_flags, access_flags
+            error!(
+                "handle_page_fault: reject=area_permission vaddr={:#x} page={:#x} access={:?} area_flags={:?} backend={} pte_before={:?}",
+                vaddr,
+                page,
+                access_flags,
+                orig_flags,
+                backend_kind,
+                pte_before
             );
         } else {
-            debug!("handle_page_fault: no area found for vaddr={:#x}", vaddr);
+            error!(
+                "handle_page_fault: reject=no_area vaddr={:#x} page={:#x} access={:?} pte_before={:?}",
+                vaddr,
+                page,
+                access_flags,
+                pte_before
+            );
         }
         false
     }
