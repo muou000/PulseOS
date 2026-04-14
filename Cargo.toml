@@ -53,7 +53,7 @@ repository.workspace = true
 [features]
 default = []
 qemu = []
-auto-testcode = []
+testcode = []
 
 [dependencies]
 axlog.workspace = true
