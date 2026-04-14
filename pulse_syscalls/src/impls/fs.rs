@@ -7,7 +7,7 @@ use alloc::vec::Vec;
 
 use arceos_posix_api::ctypes;
 use axfs::{FsContext, OpenOptions};
-use axfs_ng_vfs::{Location, MetadataUpdate, NodePermission};
+use axfs_ng_vfs::{Location, MetadataUpdate, NodePermission, NodeType};
 
 use axerrno::LinuxError;
 use axio::SeekFrom;
@@ -30,7 +30,12 @@ const O_EXCL: usize = ctypes::O_EXCL as usize;
 const O_ACCMODE: usize = ctypes::O_ACCMODE as usize;
 const AT_FDCWD: i32 = -100;
 const AT_SYMLINK_NOFOLLOW: usize = 0x100;
+const AT_EACCESS: usize = 0x200;
 const AT_REMOVEDIR: usize = 0x200;
+const FACCESS_R_OK: usize = 4;
+const FACCESS_W_OK: usize = 2;
+const FACCESS_X_OK: usize = 1;
+const FACCESS_MODE_MASK: usize = FACCESS_R_OK | FACCESS_W_OK | FACCESS_X_OK;
 const UTIME_NOW: i64 = 0x3fff_ffff;
 const UTIME_OMIT: i64 = 0x3fff_fffe;
 
@@ -102,12 +107,6 @@ fn read_user_iovec_array(
 fn with_process<R>(f: impl FnOnce(&pulse_core::task::Process) -> R) -> Result<R, LinuxError> {
     let process = pulse_core::task::current_process()?;
     Ok(f(process.as_ref()))
-}
-
-fn ensure_kernel_mappings_for_fs() {
-    let _ = with_process(|process| {
-        process.ensure_kernel_mappings();
-    });
 }
 
 fn get_fd_entry(fd: usize) -> Result<FdEntry, LinuxError> {
@@ -239,16 +238,17 @@ fn resolve_location_at_ptr(
         return Err(LinuxError::EFAULT);
     }
     let path = read_user_cstring(pathname)?;
-    let path = path.to_str().map_err(|_| LinuxError::EINVAL)?;
-    if let Some(result) = try_resolve_location_fast(dirfd, path, flags) {
+    // Linux paths are byte sequences; avoid rejecting non-UTF-8 paths here.
+    let path = path.as_c_str().to_string_lossy();
+    if let Some(result) = try_resolve_location_fast(dirfd, path.as_ref(), flags) {
         return result;
     }
     let ctx = context_for_dirfd(dirfd)?;
     if (flags & AT_SYMLINK_NOFOLLOW) != 0 {
-        ctx.resolve_no_follow(path)
+        ctx.resolve_no_follow(path.as_ref())
             .map_err(|e| LinuxError::from(e.canonicalize()))
     } else {
-        ctx.resolve(path)
+        ctx.resolve(path.as_ref())
             .map_err(|e| LinuxError::from(e.canonicalize()))
     }
 }
@@ -289,6 +289,82 @@ fn stat_from_location(location: &Location) -> Result<ctypes::stat, LinuxError> {
     location_to_stat(location)
 }
 
+fn permission_mask_from_bits(
+    mode: NodePermission,
+    read: NodePermission,
+    write: NodePermission,
+    exec: NodePermission,
+) -> usize {
+    let mut mask = 0usize;
+    if mode.contains(read) {
+        mask |= FACCESS_R_OK;
+    }
+    if mode.contains(write) {
+        mask |= FACCESS_W_OK;
+    }
+    if mode.contains(exec) {
+        mask |= FACCESS_X_OK;
+    }
+    mask
+}
+
+fn allowed_access_mask(mode: NodePermission, uid: u32, gid: u32, owner_uid: u32, owner_gid: u32) -> usize {
+    if uid == owner_uid {
+        permission_mask_from_bits(
+            mode,
+            NodePermission::OWNER_READ,
+            NodePermission::OWNER_WRITE,
+            NodePermission::OWNER_EXEC,
+        )
+    } else if gid == owner_gid {
+        permission_mask_from_bits(
+            mode,
+            NodePermission::GROUP_READ,
+            NodePermission::GROUP_WRITE,
+            NodePermission::GROUP_EXEC,
+        )
+    } else {
+        permission_mask_from_bits(
+            mode,
+            NodePermission::OTHER_READ,
+            NodePermission::OTHER_WRITE,
+            NodePermission::OTHER_EXEC,
+        )
+    }
+}
+
+fn check_faccess_permission(location: &Location, mode: usize, uid: u32, gid: u32) -> Result<(), LinuxError> {
+    if mode == 0 {
+        return Ok(());
+    }
+
+    let meta = location
+        .metadata()
+        .map_err(|e| LinuxError::from(e.canonicalize()))?;
+
+    // Linux-like behavior: privileged user bypasses read/write permission checks.
+    // For X_OK, regular files still require at least one execute bit.
+    if uid == 0 {
+        if (mode & FACCESS_X_OK) == 0 {
+            return Ok(());
+        }
+        if meta.node_type != NodeType::RegularFile {
+            return Ok(());
+        }
+        let any_exec = meta.mode.intersects(
+            NodePermission::OWNER_EXEC | NodePermission::GROUP_EXEC | NodePermission::OTHER_EXEC,
+        );
+        return if any_exec { Ok(()) } else { Err(LinuxError::EACCES) };
+    }
+
+    let allowed = allowed_access_mask(meta.mode, uid, gid, meta.uid, meta.gid);
+    if (mode & !allowed) == 0 {
+        Ok(())
+    } else {
+        Err(LinuxError::EACCES)
+    }
+}
+
 fn read_user_timespec(user_addr: usize) -> Result<ctypes::timespec, LinuxError> {
     let mut ts = core::mem::MaybeUninit::<ctypes::timespec>::uninit();
     let bytes = unsafe {
@@ -325,7 +401,6 @@ fn timespec_to_update_time(
 }
 
 pub fn sys_read(fd: usize, buf: usize, count: usize) -> isize {
-    ensure_kernel_mappings_for_fs();
     axlog::debug!("sys_read: fd={}, buf={:#x}, count={}", fd, buf, count);
     if buf == 0 && count != 0 {
         return -LinuxError::EFAULT.code() as isize;
@@ -349,7 +424,6 @@ pub fn sys_read(fd: usize, buf: usize, count: usize) -> isize {
 }
 
 pub fn sys_write(fd: usize, buf: usize, count: usize) -> isize {
-    ensure_kernel_mappings_for_fs();
     axlog::debug!("sys_write: fd={}, buf={:#x}, count={}", fd, buf, count);
     if buf == 0 && count != 0 {
         return -LinuxError::EFAULT.code() as isize;
@@ -369,7 +443,6 @@ pub fn sys_write(fd: usize, buf: usize, count: usize) -> isize {
 }
 
 pub fn sys_openat(dirfd: i32, pathname: usize, flags: usize, mode: usize) -> isize {
-    ensure_kernel_mappings_for_fs();
     if pathname == 0 {
         return -LinuxError::EFAULT.code() as isize;
     }
@@ -488,7 +561,6 @@ pub fn sys_umount2(target: usize, _flags: usize) -> isize {
 }
 
 pub fn sys_getdents64(fd: usize, dirp: usize, count: usize) -> isize {
-    ensure_kernel_mappings_for_fs();
     let object = match get_fd_object(fd) {
         Ok(object) => object,
         Err(e) => return -e.code() as isize,
@@ -542,9 +614,11 @@ pub fn sys_fstat(fd: usize, statbuf: usize) -> isize {
     }
 }
 
-#[cfg_attr(not(any(target_arch = "riscv64", target_arch = "loongarch64")), allow(dead_code))]
+#[cfg_attr(
+    not(any(target_arch = "riscv64", target_arch = "loongarch64")),
+    allow(dead_code)
+)]
 pub fn sys_fstatat(dirfd: i32, pathname: usize, statbuf: usize, flags: usize) -> isize {
-    ensure_kernel_mappings_for_fs();
     if statbuf == 0 {
         return -LinuxError::EFAULT.code() as isize;
     }
@@ -624,7 +698,6 @@ pub fn sys_statx(
     _mask: usize,
     statxbuf: usize,
 ) -> isize {
-    ensure_kernel_mappings_for_fs();
     if statxbuf == 0 {
         return -LinuxError::EFAULT.code() as isize;
     }
@@ -971,7 +1044,12 @@ pub fn sys_pipe2(fds: usize, flags: usize) -> isize {
         let write_fd = match table.insert_next(write_entry) {
             Ok(fd) => fd,
             Err(e) => {
-                let _ = table.remove(read_fd);
+                if table.remove(read_fd).is_none() {
+                    axlog::warn!(
+                        "sys_pipe2: rollback failed to remove read fd {} after write insert error",
+                        read_fd
+                    );
+                }
                 return Err(e);
             }
         };
@@ -987,8 +1065,20 @@ pub fn sys_pipe2(fds: usize, flags: usize) -> isize {
         )
     };
     if let Err(e) = write_user_bytes(fds, bytes) {
-        let _ = remove_fd_entry(new_fds[0] as usize);
-        let _ = remove_fd_entry(new_fds[1] as usize);
+        if let Err(remove_e) = remove_fd_entry(new_fds[0] as usize) {
+            axlog::warn!(
+                "sys_pipe2: rollback failed to remove read fd {}: {:?}",
+                new_fds[0],
+                remove_e
+            );
+        }
+        if let Err(remove_e) = remove_fd_entry(new_fds[1] as usize) {
+            axlog::warn!(
+                "sys_pipe2: rollback failed to remove write fd {}: {:?}",
+                new_fds[1],
+                remove_e
+            );
+        }
         return -e.code() as isize;
     }
     0
@@ -1231,5 +1321,45 @@ pub fn sys_ioctl(fd: usize, cmd: usize, arg: usize) -> isize {
             // ENOTTY
             -LinuxError::ENOTTY.code() as isize
         }
+    }
+}
+
+pub fn sys_faccessat(dirfd: i32, pathname: usize, mode: usize, flags: usize) -> isize {
+    axlog::debug!(
+        "sys_faccessat: dirfd={}, pathname={:#x}, mode={:#o}, flags={:#x}",
+        dirfd,
+        pathname,
+        mode,
+        flags
+    );
+
+    if (mode & !FACCESS_MODE_MASK) != 0 {
+        return -LinuxError::EINVAL.code() as isize;
+    }
+
+    let supported_flags = AT_SYMLINK_NOFOLLOW | AT_EACCESS | AT_EMPTY_PATH;
+    if (flags & !supported_flags) != 0 {
+        return -LinuxError::EINVAL.code() as isize;
+    }
+
+    let location = match resolve_location_at_ptr(dirfd, pathname, flags) {
+        Ok(location) => location,
+        Err(e) => return -e.code() as isize,
+    };
+
+    let (uid, gid) = match with_process(|process| {
+        if (flags & AT_EACCESS) != 0 {
+            (process.euid(), process.egid())
+        } else {
+            (process.ruid(), process.rgid())
+        }
+    }) {
+        Ok(ids) => ids,
+        Err(e) => return -e.code() as isize,
+    };
+
+    match check_faccess_permission(&location, mode, uid, gid) {
+        Ok(()) => 0,
+        Err(e) => -e.code() as isize,
     }
 }

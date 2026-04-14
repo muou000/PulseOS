@@ -1,7 +1,7 @@
 use crate::LinuxError;
 use alloc::string::String;
 use alloc::vec::Vec;
-use axerrno::{AxError, AxErrorKind};
+use axerrno::AxError;
 use axhal::context::TrapFrame;
 use bitflags::bitflags;
 
@@ -48,6 +48,197 @@ pub fn sys_getppid() -> isize {
     pulse_core::task::current_process()
         .expect("getppid without current process")
         .parent_pid() as isize
+}
+
+fn parse_id_arg(raw: usize) -> u32 {
+    raw as u32
+}
+
+fn parse_optional_id_arg(raw: usize) -> Option<u32> {
+    let id = parse_id_arg(raw);
+    if id == u32::MAX { None } else { Some(id) }
+}
+
+pub fn sys_getuid() -> isize {
+    let process = pulse_core::task::current_process().expect("getuid without current process");
+    let uid = process.ruid() as isize;
+    axlog::debug!("sys_getuid: {}", uid);
+    uid
+}
+
+pub fn sys_geteuid() -> isize {
+    let process = pulse_core::task::current_process().expect("geteuid without current process");
+    let euid = process.euid() as isize;
+    axlog::debug!("sys_geteuid: {}", euid);
+    euid
+}
+
+pub fn sys_getgid() -> isize {
+    let process = pulse_core::task::current_process().expect("getgid without current process");
+    let gid = process.rgid() as isize;
+    axlog::debug!("sys_getgid: {}", gid);
+    gid
+}
+
+pub fn sys_getegid() -> isize {
+    let process = pulse_core::task::current_process().expect("getegid without current process");
+    let egid = process.egid() as isize;
+    axlog::debug!("sys_getegid: {}", egid);
+    egid
+}
+
+pub fn sys_setuid(raw_uid: usize) -> isize {
+    let uid = parse_id_arg(raw_uid);
+    if uid == u32::MAX {
+        return -LinuxError::EINVAL.code() as isize;
+    }
+    let process = match pulse_core::task::current_process() {
+        Ok(process) => process,
+        Err(e) => return -e.code() as isize,
+    };
+    let (old_ruid, old_euid, old_suid) = process.uid_snapshot();
+    if old_euid == 0 {
+        process.set_uids(uid, uid, uid);
+    } else if uid == old_ruid || uid == old_suid {
+        process.set_uids(old_ruid, uid, old_suid);
+    } else {
+        return -LinuxError::EPERM.code() as isize;
+    }
+    let (new_ruid, new_euid, new_suid) = process.uid_snapshot();
+    axlog::debug!(
+        "sys_setuid: uid={}, old=({},{},{}), new=({},{},{})",
+        uid,
+        old_ruid,
+        old_euid,
+        old_suid,
+        new_ruid,
+        new_euid,
+        new_suid
+    );
+    0
+}
+
+pub fn sys_setgid(raw_gid: usize) -> isize {
+    let gid = parse_id_arg(raw_gid);
+    if gid == u32::MAX {
+        return -LinuxError::EINVAL.code() as isize;
+    }
+    let process = match pulse_core::task::current_process() {
+        Ok(process) => process,
+        Err(e) => return -e.code() as isize,
+    };
+    let (old_rgid, old_egid, old_sgid) = process.gid_snapshot();
+    if old_egid == 0 {
+        process.set_gids(gid, gid, gid);
+    } else if gid == old_rgid || gid == old_sgid {
+        process.set_gids(old_rgid, gid, old_sgid);
+    } else {
+        return -LinuxError::EPERM.code() as isize;
+    }
+    let (new_rgid, new_egid, new_sgid) = process.gid_snapshot();
+    axlog::debug!(
+        "sys_setgid: gid={}, old=({},{},{}), new=({},{},{})",
+        gid,
+        old_rgid,
+        old_egid,
+        old_sgid,
+        new_rgid,
+        new_egid,
+        new_sgid
+    );
+    0
+}
+
+pub fn sys_setreuid(raw_ruid: usize, raw_euid: usize) -> isize {
+    let new_ruid = parse_optional_id_arg(raw_ruid);
+    let new_euid = parse_optional_id_arg(raw_euid);
+    let process = match pulse_core::task::current_process() {
+        Ok(process) => process,
+        Err(e) => return -e.code() as isize,
+    };
+    let (old_ruid, old_euid, old_suid) = process.uid_snapshot();
+    if old_euid != 0 {
+        if let Some(ruid) = new_ruid
+            && ruid != old_ruid
+            && ruid != old_euid
+        {
+            return -LinuxError::EPERM.code() as isize;
+        }
+        if let Some(euid) = new_euid
+            && euid != old_ruid
+            && euid != old_euid
+            && euid != old_suid
+        {
+            return -LinuxError::EPERM.code() as isize;
+        }
+    }
+    let final_ruid = new_ruid.unwrap_or(old_ruid);
+    let final_euid = new_euid.unwrap_or(old_euid);
+    let should_update_suid = new_ruid.is_some() || new_euid.is_some_and(|euid| euid != old_ruid);
+    let final_suid = if should_update_suid {
+        final_euid
+    } else {
+        old_suid
+    };
+    process.set_uids(final_ruid, final_euid, final_suid);
+    axlog::debug!(
+        "sys_setreuid: ruid={:?}, euid={:?}, old=({},{},{}), new=({},{},{})",
+        new_ruid,
+        new_euid,
+        old_ruid,
+        old_euid,
+        old_suid,
+        final_ruid,
+        final_euid,
+        final_suid
+    );
+    0
+}
+
+pub fn sys_setregid(raw_rgid: usize, raw_egid: usize) -> isize {
+    let new_rgid = parse_optional_id_arg(raw_rgid);
+    let new_egid = parse_optional_id_arg(raw_egid);
+    let process = match pulse_core::task::current_process() {
+        Ok(process) => process,
+        Err(e) => return -e.code() as isize,
+    };
+    let (old_rgid, old_egid, old_sgid) = process.gid_snapshot();
+    if old_egid != 0 {
+        if let Some(rgid) = new_rgid
+            && rgid != old_rgid
+            && rgid != old_egid
+        {
+            return -LinuxError::EPERM.code() as isize;
+        }
+        if let Some(egid) = new_egid
+            && egid != old_rgid
+            && egid != old_egid
+            && egid != old_sgid
+        {
+            return -LinuxError::EPERM.code() as isize;
+        }
+    }
+    let final_rgid = new_rgid.unwrap_or(old_rgid);
+    let final_egid = new_egid.unwrap_or(old_egid);
+    let should_update_sgid = new_rgid.is_some() || new_egid.is_some_and(|egid| egid != old_rgid);
+    let final_sgid = if should_update_sgid {
+        final_egid
+    } else {
+        old_sgid
+    };
+    process.set_gids(final_rgid, final_egid, final_sgid);
+    axlog::debug!(
+        "sys_setregid: rgid={:?}, egid={:?}, old=({},{},{}), new=({},{},{})",
+        new_rgid,
+        new_egid,
+        old_rgid,
+        old_egid,
+        old_sgid,
+        final_rgid,
+        final_egid,
+        final_sgid
+    );
+    0
 }
 
 fn ax_error_to_linux_ret(e: AxError) -> isize {
@@ -214,7 +405,7 @@ pub fn sys_clone(tf: &TrapFrame, args: [usize; 6]) -> isize {
     let current_tid = pulse_core::task::current_thread()
         .map(|t| t.tid())
         .unwrap_or_default();
-    axlog::warn!(
+    axlog::debug!(
         "sys_clone context: parent_pid={}, parent_tid={}",
         parent_proc.pid(),
         current_tid
@@ -368,31 +559,9 @@ pub fn sys_execve(_tf: &TrapFrame, pathname: usize, argv: usize, envp: usize) ->
     }
 
     if let Err(e) = process.exec(&path_str, &args_strs, &envs_strs) {
-        if matches!(
-            AxErrorKind::try_from(e.canonicalize()),
-            Ok(AxErrorKind::InvalidExecutable)
-        ) {
-            // Compatibility fallback: execute text scripts via /bin/sh when
-            // direct image loading fails with ENOEXEC-equivalent.
-            let mut sh_args_owned = Vec::with_capacity(args.len() + 1);
-            sh_args_owned.push(String::from("/bin/sh"));
-            sh_args_owned.push(path_str.clone());
-            sh_args_owned.extend(args.into_iter().skip(1));
-            let sh_args: Vec<&str> = sh_args_owned.iter().map(|s| s.as_str()).collect();
-            if let Err(sh_e) = process.exec("/bin/sh", &sh_args, &envs_strs) {
-                axlog::error!(
-                    "sys_execve failed: {:?}, shell-fallback failed: {:?}",
-                    e,
-                    sh_e
-                );
-                let errno: LinuxError = sh_e.into();
-                return -errno.code() as isize;
-            }
-        } else {
-            axlog::error!("sys_execve failed: {:?}", e);
-            let errno: LinuxError = e.into();
-            return -errno.code() as isize;
-        }
+        axlog::error!("sys_execve failed: {:?}", e);
+        let errno: LinuxError = e.into();
+        return -errno.code() as isize;
     }
     thread.clear_thread_tid_state();
     process.enter_user_mode();

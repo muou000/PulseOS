@@ -98,7 +98,6 @@ fn syscall_dispatcher(
         Sysno::getdents64 => impls::sys_getdents64(args[0], args[1], args[2]),
         Sysno::close => impls::sys_close(args[0]),
         Sysno::fstat => impls::sys_fstat(args[0], args[1]),
-        #[cfg(any(target_arch = "riscv64", target_arch = "loongarch64"))]
         Sysno::fstatat => impls::sys_fstatat(args[0] as i32, args[1], args[2], args[3]),
         Sysno::statx => impls::sys_statx(args[0] as i32, args[1], args[2], args[3], args[4]),
 
@@ -125,10 +124,8 @@ fn syscall_dispatcher(
         Sysno::prlimit64 => impls::sys_prlimit64(args[0], args[1], args[2], args[3]),
         Sysno::rt_sigprocmask => impls::sys_rt_sigprocmask(args[0], args[1], args[2], args[3]),
 
-        Sysno::getuid | Sysno::geteuid => {
-            axlog::debug!("sys_getuid/geteuid (stub): return 0");
-            0
-        }
+        Sysno::getuid => impls::sys_getuid(),
+        Sysno::geteuid => impls::sys_geteuid(),
         Sysno::getppid => impls::sys_getppid(),
         Sysno::getpgid => {
             axlog::debug!("sys_getpgid (stub): return 1");
@@ -143,18 +140,12 @@ fn syscall_dispatcher(
             );
             0
         }
-        Sysno::getgid | Sysno::getegid => {
-            axlog::debug!("sys_getgid/getegid (stub): return 0");
-            0 // root
-        }
-        Sysno::setuid | Sysno::setgid | Sysno::setreuid | Sysno::setregid => {
-            axlog::debug!(
-                "sys_setuid/setgid/setreuid/setregid (stub): arg0={}, arg1={}, return 0",
-                args[0],
-                args[1]
-            );
-            0
-        }
+        Sysno::getgid => impls::sys_getgid(),
+        Sysno::getegid => impls::sys_getegid(),
+        Sysno::setuid => impls::sys_setuid(args[0]),
+        Sysno::setgid => impls::sys_setgid(args[0]),
+        Sysno::setreuid => impls::sys_setreuid(args[0], args[1]),
+        Sysno::setregid => impls::sys_setregid(args[0], args[1]),
 
         Sysno::rt_sigaction => impls::sys_rt_sigaction(args[0], args[1], args[2], args[3]),
         Sysno::rt_sigreturn => impls::sys_rt_sigreturn(),
@@ -177,14 +168,8 @@ fn syscall_dispatcher(
         Sysno::utimensat => impls::sys_utimensat(args[0] as i32, args[1], args[2], args[3]),
         Sysno::set_robust_list => impls::sys_set_robust_list(args[0], args[1]),
         Sysno::get_robust_list => impls::sys_get_robust_list(args[0], args[1], args[2]),
-        Sysno::readlinkat => {
-            axlog::debug!("sys_readlinkat (stub)");
-            -LinuxError::EINVAL.code() as isize
-        }
-        Sysno::faccessat => {
-            axlog::debug!("sys_faccessat (stub)");
-            -LinuxError::ENOENT.code() as isize
-        }
+        Sysno::faccessat => impls::sys_faccessat(args[0] as i32, args[1], args[2], 0),
+        Sysno::faccessat2 => impls::sys_faccessat(args[0] as i32, args[1], args[2], args[3]),
         Sysno::lseek => impls::sys_lseek(args[0], args[1], args[2]),
         Sysno::execve => {
             axlog::debug!(
