@@ -11,7 +11,7 @@ use axhal::context::{TrapFrame, UspaceContext};
 use axhal::paging::MappingFlags;
 use axmm::{AddrSpace, Backend};
 use axtask::{AxTaskRef, TaskInner, WaitQueue};
-use core::sync::atomic::{AtomicBool, AtomicI32, AtomicU64, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, AtomicU64, Ordering};
 use kernel_guard::NoPreemptIrqSave;
 use memory_addr::{MemoryAddr, PAGE_SIZE_4K, PhysAddr, VirtAddr, va};
 use spin::Mutex;
@@ -202,6 +202,12 @@ pub struct Process {
     vfork_wait_enabled: AtomicBool,
     vfork_done: AtomicBool,
     vfork_event: WaitQueue,
+    ruid: AtomicU32,
+    euid: AtomicU32,
+    suid: AtomicU32,
+    rgid: AtomicU32,
+    egid: AtomicU32,
+    sgid: AtomicU32,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -259,19 +265,109 @@ impl Process {
         self.threads.lock().len()
     }
 
+    pub fn ruid(&self) -> u32 {
+        self.ruid.load(Ordering::Acquire)
+    }
+
+    pub fn euid(&self) -> u32 {
+        self.euid.load(Ordering::Acquire)
+    }
+
+    pub fn suid(&self) -> u32 {
+        self.suid.load(Ordering::Acquire)
+    }
+
+    pub fn rgid(&self) -> u32 {
+        self.rgid.load(Ordering::Acquire)
+    }
+
+    pub fn egid(&self) -> u32 {
+        self.egid.load(Ordering::Acquire)
+    }
+
+    pub fn sgid(&self) -> u32 {
+        self.sgid.load(Ordering::Acquire)
+    }
+
+    pub fn uid_snapshot(&self) -> (u32, u32, u32) {
+        (self.ruid(), self.euid(), self.suid())
+    }
+
+    pub fn gid_snapshot(&self) -> (u32, u32, u32) {
+        (self.rgid(), self.egid(), self.sgid())
+    }
+
+    pub fn set_uids(&self, ruid: u32, euid: u32, suid: u32) {
+        self.ruid.store(ruid, Ordering::Release);
+        self.euid.store(euid, Ordering::Release);
+        self.suid.store(suid, Ordering::Release);
+    }
+
+    pub fn set_gids(&self, rgid: u32, egid: u32, sgid: u32) {
+        self.rgid.store(rgid, Ordering::Release);
+        self.egid.store(egid, Ordering::Release);
+        self.sgid.store(sgid, Ordering::Release);
+    }
+
+    fn try_fault_in_user_range(
+        &self,
+        user_addr: usize,
+        len: usize,
+        access: MappingFlags,
+    ) -> AxResult<()> {
+        if len == 0 {
+            return Ok(());
+        }
+        let end = user_addr.checked_add(len).ok_or(AxError::BadAddress)?;
+        let start_page = VirtAddr::from(user_addr).align_down_4k();
+        let end_page = VirtAddr::from(end).align_up_4k();
+        let access = access | MappingFlags::USER;
+
+        let aspace_handle = self.aspace_handle();
+        let mut aspace = aspace_handle.lock();
+        let pages =
+            memory_addr::PageIter4K::new(start_page, end_page).ok_or(AxError::BadAddress)?;
+        for page in pages {
+            if !aspace.handle_page_fault(page, access) {
+                return Err(AxError::BadAddress);
+            }
+        }
+        Ok(())
+    }
+
     pub fn read_user_bytes(&self, user_addr: usize, bytes: &mut [u8]) -> AxResult<()> {
         self.validate_user_range(user_addr, bytes.len())?;
-        self.aspace_handle()
+        let start = VirtAddr::from(user_addr);
+        let aspace_handle = self.aspace_handle();
+
+        // Try fast path first without faulting
+        if let Ok(()) = aspace_handle.lock().read(start, bytes) {
+            return Ok(());
+        }
+
+        // If it fails, fault-in the pages and retry once
+        self.try_fault_in_user_range(user_addr, bytes.len(), MappingFlags::READ)?;
+        aspace_handle
             .lock()
-            .read(VirtAddr::from(user_addr), bytes)
+            .read(start, bytes)
             .map_err(AxError::from)
     }
 
     pub fn write_user_bytes(&self, user_addr: usize, bytes: &[u8]) -> AxResult<()> {
         self.validate_user_range(user_addr, bytes.len())?;
-        self.aspace_handle()
+        let start = VirtAddr::from(user_addr);
+        let aspace_handle = self.aspace_handle();
+
+        // Try fast path first without faulting
+        if let Ok(()) = aspace_handle.lock().write(start, bytes) {
+            return Ok(());
+        }
+
+        // If it fails, fault-in the pages and retry once
+        self.try_fault_in_user_range(user_addr, bytes.len(), MappingFlags::WRITE)?;
+        aspace_handle
             .lock()
-            .write(VirtAddr::from(user_addr), bytes)
+            .write(start, bytes)
             .map_err(AxError::from)
     }
 
@@ -376,6 +472,12 @@ impl Process {
             vfork_wait_enabled: AtomicBool::new(false),
             vfork_done: AtomicBool::new(false),
             vfork_event: WaitQueue::new(),
+            ruid: AtomicU32::new(0),
+            euid: AtomicU32::new(0),
+            suid: AtomicU32::new(0),
+            rgid: AtomicU32::new(0),
+            egid: AtomicU32::new(0),
+            sgid: AtomicU32::new(0),
         }))
     }
 
@@ -403,6 +505,8 @@ impl Process {
         } else {
             Arc::new(Mutex::new(parent.fd_table.lock().clone_for_fork()?))
         };
+        let (ruid, euid, suid) = parent.uid_snapshot();
+        let (rgid, egid, sgid) = parent.gid_snapshot();
 
         Ok(Arc::new(Self {
             pid,
@@ -434,6 +538,12 @@ impl Process {
             vfork_wait_enabled: AtomicBool::new(is_vfork),
             vfork_done: AtomicBool::new(false),
             vfork_event: WaitQueue::new(),
+            ruid: AtomicU32::new(ruid),
+            euid: AtomicU32::new(euid),
+            suid: AtomicU32::new(suid),
+            rgid: AtomicU32::new(rgid),
+            egid: AtomicU32::new(egid),
+            sgid: AtomicU32::new(sgid),
         }))
     }
 
@@ -456,28 +566,6 @@ impl Process {
         unsafe {
             axhal::asm::write_user_page_table(pt_root);
             axhal::asm::flush_tlb(None);
-        }
-    }
-
-    pub fn ensure_kernel_mappings(&self) {
-        #[cfg(target_arch = "riscv64")]
-        {
-            let probe = va!(0xffffffc010001000usize);
-            let aspace_handle = self.aspace_handle();
-            let mut aspace = aspace_handle.lock();
-            let mapped = aspace
-                .page_table()
-                .query(probe)
-                .ok()
-                .map(|(pa, flags, _)| (pa.as_usize(), flags));
-            if mapped.is_none()
-                && let Ok(kernel_shadow) = axmm::new_kernel_aspace()
-            {
-                if let Err(e) = aspace.copy_mappings_from(&kernel_shadow) {
-                    axlog::warn!("failed to repair kernel mappings: {:?}", e);
-                }
-                core::mem::forget(kernel_shadow);
-            }
         }
     }
 
@@ -802,11 +890,18 @@ impl Process {
             collect_user_areas(&parent_aspace, va!(USER_SPACE_BASE), va!(USER_STACK_TOP));
         let mut cow_ranges = Vec::new();
         for (start, end, area_user_flags, backend) in mapped_user_areas {
+            let child_backend = match &backend {
+                // Root-cause fix: do not eagerly allocate child frames during
+                // fork. Child memory should be established by COW remap for
+                // present pages, and lazy allocation for non-present pages.
+                Backend::Alloc { .. } => Backend::new_alloc(false),
+                _ => backend.clone(),
+            };
             new_aspace.map_with_backend(
                 start,
                 end.as_usize() - start.as_usize(),
                 area_user_flags,
-                backend.clone(),
+                child_backend,
             )?;
             if matches!(backend, Backend::Alloc { .. }) {
                 cow_ranges.push((start, end));
