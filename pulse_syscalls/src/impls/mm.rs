@@ -183,7 +183,14 @@ pub fn sys_mmap(
     }
 
     if (flags & MAP_FIXED) != 0 {
-        let _ = aspace.unmap(VirtAddr::from(map_addr), aligned_length);
+        if let Err(e) = aspace.unmap(VirtAddr::from(map_addr), aligned_length) {
+            axlog::warn!(
+                "sys_mmap: MAP_FIXED pre-unmap failed at {:#x}, len={:#x}, err={:?}",
+                map_addr,
+                aligned_length,
+                e
+            );
+        }
     }
 
     let populate = file_backed;
@@ -202,7 +209,15 @@ pub fn sys_mmap(
                     Err(_) => {
                         let aspace_handle = proc.aspace_handle();
                         let mut aspace = aspace_handle.lock();
-                        let _ = aspace.unmap(VirtAddr::from(map_addr), aligned_length);
+                        if let Err(unmap_e) = aspace.unmap(VirtAddr::from(map_addr), aligned_length)
+                        {
+                            axlog::warn!(
+                                "sys_mmap: rollback unmap failed at {:#x}, len={:#x}, err={:?}",
+                                map_addr,
+                                aligned_length,
+                                unmap_e
+                            );
+                        }
                         return -LinuxError::EINVAL.code() as isize;
                     }
                 };
@@ -217,7 +232,16 @@ pub fn sys_mmap(
                         Err(e) => {
                             let aspace_handle = proc.aspace_handle();
                             let mut aspace = aspace_handle.lock();
-                            let _ = aspace.unmap(VirtAddr::from(map_addr), aligned_length);
+                            if let Err(unmap_e) =
+                                aspace.unmap(VirtAddr::from(map_addr), aligned_length)
+                            {
+                                axlog::warn!(
+                                    "sys_mmap: rollback unmap failed at {:#x}, len={:#x}, err={:?}",
+                                    map_addr,
+                                    aligned_length,
+                                    unmap_e
+                                );
+                            }
                             return -e.code() as isize;
                         }
                     };
@@ -231,7 +255,15 @@ pub fn sys_mmap(
                     if write_res.is_err() {
                         let aspace_handle = proc.aspace_handle();
                         let mut aspace = aspace_handle.lock();
-                        let _ = aspace.unmap(VirtAddr::from(map_addr), aligned_length);
+                        if let Err(unmap_e) = aspace.unmap(VirtAddr::from(map_addr), aligned_length)
+                        {
+                            axlog::warn!(
+                                "sys_mmap: rollback unmap failed at {:#x}, len={:#x}, err={:?}",
+                                map_addr,
+                                aligned_length,
+                                unmap_e
+                            );
+                        }
                         return -LinuxError::EFAULT.code() as isize;
                     }
                     copied += n;

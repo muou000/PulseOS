@@ -121,7 +121,8 @@ impl Backend {
         pt: &mut PageTable,
         populate: bool,
     ) -> bool {
-        if let Ok((old_frame, old_flags, _)) = pt.query(vaddr.align_down_4k()) {
+        let page = vaddr.align_down_4k();
+        if let Ok((old_frame, old_flags, _)) = pt.query(page) {
             // Lazy anonymous mappings install an empty placeholder PTE first.
             // Their first access should allocate a fresh zeroed frame rather
             // than taking the COW path.
@@ -131,14 +132,45 @@ impl Backend {
             // backing frame is still absent (old_frame == 0).
             if old_flags.is_empty() || old_frame.as_usize() == 0 {
                 if populate {
+                    debug!(
+                        "handle_page_fault_alloc: reject=placeholder_in_populated_mapping vaddr={:#x} page={:#x} fault_flags={:?} pte_flags={:?} frame={:#x} backend_populate={}",
+                        vaddr,
+                        page,
+                        orig_flags,
+                        old_flags,
+                        old_frame,
+                        populate
+                    );
                     return false;
                 }
                 if let Some(frame) = alloc_frame(true) {
-                    return pt
+                    let ok = pt
                         .remap(vaddr, frame, orig_flags)
                         .map(|(_, tlb)| tlb.flush())
                         .is_ok();
+                    if !ok {
+                        debug!(
+                            "handle_page_fault_alloc: reject=placeholder_remap_failed vaddr={:#x} page={:#x} fault_flags={:?} pte_flags={:?} old_frame={:#x} new_frame={:#x} backend_populate={}",
+                            vaddr,
+                            page,
+                            orig_flags,
+                            old_flags,
+                            old_frame,
+                            frame,
+                            populate
+                        );
+                    }
+                    return ok;
                 }
+                error!(
+                    "handle_page_fault_alloc: reject=placeholder_alloc_failed vaddr={:#x} page={:#x} fault_flags={:?} pte_flags={:?} frame={:#x} backend_populate={}",
+                    vaddr,
+                    page,
+                    orig_flags,
+                    old_flags,
+                    old_frame,
+                    populate
+                );
                 return false;
             }
 
@@ -158,25 +190,79 @@ impl Backend {
                         dealloc_frame(old_frame);
                         true
                     } else {
+                        error!(
+                            "handle_page_fault_alloc: reject=cow_remap_failed vaddr={:#x} page={:#x} fault_flags={:?} pte_flags={:?} old_frame={:#x} new_frame={:#x} backend_populate={}",
+                            vaddr,
+                            page,
+                            orig_flags,
+                            old_flags,
+                            old_frame,
+                            new_frame,
+                            populate
+                        );
                         dealloc_frame(new_frame);
                         false
                     }
                 } else {
+                    error!(
+                        "handle_page_fault_alloc: reject=cow_alloc_failed vaddr={:#x} page={:#x} fault_flags={:?} pte_flags={:?} frame={:#x} backend_populate={}",
+                        vaddr,
+                        page,
+                        orig_flags,
+                        old_flags,
+                        old_frame,
+                        populate
+                    );
                     false
                 }
             } else {
+                error!(
+                    "handle_page_fault_alloc: reject=no_alloc_path_matched vaddr={:#x} page={:#x} fault_flags={:?} pte_flags={:?} frame={:#x} backend_populate={}",
+                    vaddr,
+                    page,
+                    orig_flags,
+                    old_flags,
+                    old_frame,
+                    populate
+                );
                 false
             }
         } else if populate {
+            error!(
+                "handle_page_fault_alloc: reject=query_miss_in_populated_mapping vaddr={:#x} page={:#x} fault_flags={:?} backend_populate={}",
+                vaddr,
+                page,
+                orig_flags,
+                populate
+            );
             false
         } else if let Some(frame) = alloc_frame(true) {
             // Allocate a physical frame lazily and map it to the fault address.
             // `vaddr` does not need to be aligned. It will be automatically
             // aligned during `pt.remap` regardless of the page size.
-            pt.remap(vaddr, frame, orig_flags)
+            let ok = pt
+                .remap(vaddr, frame, orig_flags)
                 .map(|(_, tlb)| tlb.flush())
-                .is_ok()
+                .is_ok();
+            if !ok {
+                error!(
+                    "handle_page_fault_alloc: reject=query_miss_remap_failed vaddr={:#x} page={:#x} fault_flags={:?} new_frame={:#x} backend_populate={}",
+                    vaddr,
+                    page,
+                    orig_flags,
+                    frame,
+                    populate
+                );
+            }
+            ok
         } else {
+            error!(
+                "handle_page_fault_alloc: reject=query_miss_alloc_failed vaddr={:#x} page={:#x} fault_flags={:?} backend_populate={}",
+                vaddr,
+                page,
+                orig_flags,
+                populate
+            );
             false
         }
     }
