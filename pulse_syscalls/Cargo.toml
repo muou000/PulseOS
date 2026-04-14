@@ -23,3 +23,4 @@ spin = "0.10"
 syscalls.workspace = true
 pulse_core = { path = "../pulse_core" }
 arceos_posix_api = { path = "../arceos/api/arceos_posix_api" }
+rand = { version = "0.9.2", default-features = false, features = ["small_rng"] }

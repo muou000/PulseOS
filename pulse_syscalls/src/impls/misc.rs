@@ -3,6 +3,7 @@
 use crate::LinuxError;
 use alloc::vec;
 use axalloc::global_allocator;
+use rand::{RngCore, SeedableRng, rngs::SmallRng};
 
 #[repr(C)]
 struct UtsName {
@@ -53,7 +54,9 @@ fn write_cstr_field(dst: &mut [u8], s: &str) {
     dst[len] = 0;
 }
 
-fn with_current_process<R>(f: impl FnOnce(&pulse_core::task::Process) -> R) -> Result<R, LinuxError> {
+fn with_current_process<R>(
+    f: impl FnOnce(&pulse_core::task::Process) -> R,
+) -> Result<R, LinuxError> {
     pulse_core::task::with_current_process(f)
 }
 
@@ -169,24 +172,23 @@ pub fn sys_getrandom(buf: usize, len: usize, _flags: usize) -> isize {
         return -LinuxError::EFAULT.code() as isize;
     }
 
-    // Minimal non-cryptographic fallback for libc probes.
-    let seed = axhal::time::monotonic_time_nanos() as u64;
+    let thread = match pulse_core::task::current_thread() {
+        Ok(thread) => thread,
+        Err(e) => return -e.code() as isize,
+    };
+    let process = thread.process();
+
+    let time_seed = axhal::time::monotonic_time_nanos() as u64;
+    let pid_seed = process.pid();
+    let tid_seed = thread.tid();
+    let mut rng =
+        SmallRng::seed_from_u64(time_seed ^ pid_seed.rotate_left(13) ^ tid_seed.rotate_left(29));
+
     let mut out = alloc::vec![0u8; len];
-    let mut x = seed ^ 0x9e37_79b9_7f4a_7c15;
-    for b in out.iter_mut() {
-        x ^= x >> 12;
-        x ^= x << 25;
-        x ^= x >> 27;
-        x = x.wrapping_mul(0x2545_f491_4f6c_dd1d);
-        *b = (x & 0xff) as u8;
-    }
-    match pulse_core::task::current_thread() {
-        Ok(thread) => thread
-            .process()
-            .write_user_bytes(buf, &out)
-            .map(|_| len as isize)
-            .unwrap_or_else(|_| -LinuxError::EFAULT.code() as isize),
-        Err(e) => -e.code() as isize,
+    rng.fill_bytes(&mut out);
+    match process.write_user_bytes(buf, &out) {
+        Ok(()) => len as isize,
+        Err(_) => -LinuxError::EFAULT.code() as isize,
     }
 }
 
