@@ -1,8 +1,8 @@
-use axerrno::LinuxError;
 use alloc::vec::Vec;
+use axerrno::LinuxError;
 use axhal::context::TrapFrame;
 
-use crate::common::{read_user_cstring, read_user_string_array};
+use super::common::{read_user_cstring, read_user_string_array};
 
 use pulse_core::task::current_thread;
 
