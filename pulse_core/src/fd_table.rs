@@ -664,6 +664,18 @@ impl FdTable {
         self.entries.get(&fd)
     }
 
+    pub fn get_entry_cloned(&self, fd: usize) -> LinuxResult<FdEntry> {
+        self.get(fd).cloned().ok_or(LinuxError::EBADF)
+    }
+
+    pub fn get_object(&self, fd: usize) -> LinuxResult<Arc<dyn FdObject>> {
+        Ok(self.get_entry_cloned(fd)?.object)
+    }
+
+    pub fn get_location(&self, fd: usize) -> LinuxResult<Location> {
+        self.get_object(fd)?.location().ok_or(LinuxError::EBADF)
+    }
+
     pub fn get_mut(&mut self, fd: usize) -> Option<&mut FdEntry> {
         self.entries.get_mut(&fd)
     }
@@ -695,6 +707,10 @@ impl FdTable {
 
     pub fn remove(&mut self, fd: usize) -> Option<FdEntry> {
         self.entries.remove(&fd)
+    }
+
+    pub fn remove_or_err(&mut self, fd: usize) -> LinuxResult<FdEntry> {
+        self.remove(fd).ok_or(LinuxError::EBADF)
     }
 
     pub fn len(&self) -> usize {

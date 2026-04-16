@@ -1,6 +1,6 @@
 use crate::LinuxError;
-use arceos_posix_api::ctypes;
 use axerrno::AxError;
+use crate::impls::utils::read_user_timespec;
 
 const FUTEX_WAIT: i32 = 0;
 const FUTEX_WAKE: i32 = 1;
@@ -12,25 +12,12 @@ fn ax_error_to_linux(e: AxError) -> LinuxError {
     e.into()
 }
 
-fn read_timeout_ns(
-    process: &pulse_core::task::Process,
-    timeout: usize,
-) -> Result<Option<u64>, LinuxError> {
+fn read_timeout_ns(timeout: usize) -> Result<Option<u64>, LinuxError> {
     if timeout == 0 {
         return Ok(None);
     }
 
-    let mut ts = core::mem::MaybeUninit::<ctypes::timespec>::uninit();
-    let bytes = unsafe {
-        core::slice::from_raw_parts_mut(
-            ts.as_mut_ptr().cast::<u8>(),
-            core::mem::size_of::<ctypes::timespec>(),
-        )
-    };
-    process
-        .read_user_bytes(timeout, bytes)
-        .map_err(|_| LinuxError::EFAULT)?;
-    let ts = unsafe { ts.assume_init() };
+    let ts = read_user_timespec(timeout)?;
     if ts.tv_sec < 0 || ts.tv_nsec < 0 || ts.tv_nsec >= 1_000_000_000 {
         return Err(LinuxError::EINVAL);
     }
@@ -69,7 +56,7 @@ pub fn sys_futex(
 
     match cmd {
         FUTEX_WAIT => {
-            let timeout_ns = match read_timeout_ns(process.as_ref(), timeout_or_val2) {
+            let timeout_ns = match read_timeout_ns(timeout_or_val2) {
                 Ok(timeout) => timeout,
                 Err(e) => return -e.code() as isize,
             };

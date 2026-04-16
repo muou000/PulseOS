@@ -3,38 +3,22 @@ use alloc::vec::Vec;
 use axerrno::LinuxError;
 
 use pulse_core::task::Process;
+use pulse_core::task::uaccess;
 
-pub(super) fn read_user_bytes(
-    process: &Process,
-    user_addr: usize,
-    bytes: &mut [u8],
-) -> Result<(), isize> {
+pub(super) fn read_user_usize(process: &Process, user_addr: usize) -> Result<usize, isize> {
     process
-        .read_user_bytes(user_addr, bytes)
+        .read_user_usize(user_addr)
         .map_err(|_| -LinuxError::EFAULT.code() as isize)
 }
 
-pub(super) fn read_user_usize(process: &Process, user_addr: usize) -> Result<usize, isize> {
-    let mut bytes = [0u8; core::mem::size_of::<usize>()];
-    read_user_bytes(process, user_addr, &mut bytes)?;
-    Ok(usize::from_ne_bytes(bytes))
-}
-
 pub(super) fn read_user_cstring(process: &Process, user_addr: usize) -> Result<String, isize> {
-    if user_addr == 0 {
-        return Err(-LinuxError::EFAULT.code() as isize);
+    let (bytes, terminated) =
+        uaccess::read_user_cstring_bytes(process, user_addr, uaccess::DEFAULT_USER_CSTRING_MAX)
+            .map_err(|_| -LinuxError::EFAULT.code() as isize)?;
+    if !terminated {
+        return Err(-LinuxError::ENAMETOOLONG.code() as isize);
     }
-    const STR_MAX: usize = 4096;
-    let mut bytes = Vec::new();
-    for i in 0..STR_MAX {
-        let mut byte = [0u8; 1];
-        read_user_bytes(process, user_addr + i, &mut byte)?;
-        if byte[0] == 0 {
-            return String::from_utf8(bytes).map_err(|_| -LinuxError::EINVAL.code() as isize);
-        }
-        bytes.push(byte[0]);
-    }
-    Err(-LinuxError::ENAMETOOLONG.code() as isize)
+    String::from_utf8(bytes).map_err(|_| -LinuxError::EINVAL.code() as isize)
 }
 
 pub(super) fn read_user_string_array(

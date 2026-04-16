@@ -1,6 +1,7 @@
 mod exec;
 mod process;
 mod thread;
+pub mod uaccess;
 
 use alloc::collections::BTreeMap;
 use alloc::sync::Arc;

@@ -1,8 +1,8 @@
 use crate::LinuxError;
 use arceos_posix_api::ctypes;
 use core::ffi::c_long;
-use core::mem::{MaybeUninit, size_of};
 use core::time::Duration;
+use crate::impls::utils::{read_user_timespec, write_user_bytes};
 
 const CLK_TCK: u64 = 100;
 
@@ -19,49 +19,6 @@ struct Tms {
     tms_cstime: c_long,
 }
 
-fn read_user_timespec(
-    process: &pulse_core::task::Process,
-    user_addr: usize,
-) -> Result<ctypes::timespec, isize> {
-    let mut ts = MaybeUninit::<ctypes::timespec>::uninit();
-    let bytes = unsafe {
-        core::slice::from_raw_parts_mut(ts.as_mut_ptr().cast::<u8>(), size_of::<ctypes::timespec>())
-    };
-    process.read_user_bytes(user_addr, bytes).map_err(|e| {
-        axlog::warn!(
-            "read user timespec failed: addr={:#x}, err={:?}",
-            user_addr,
-            e
-        );
-        -LinuxError::EFAULT.code() as isize
-    })?;
-    Ok(unsafe { ts.assume_init() })
-}
-
-fn write_user_timespec(
-    process: &pulse_core::task::Process,
-    user_addr: usize,
-    ts: &ctypes::timespec,
-) -> isize {
-    let bytes = unsafe {
-        core::slice::from_raw_parts(
-            (ts as *const ctypes::timespec).cast::<u8>(),
-            size_of::<ctypes::timespec>(),
-        )
-    };
-    process
-        .write_user_bytes(user_addr, bytes)
-        .map(|_| 0)
-        .unwrap_or_else(|e| {
-            axlog::warn!(
-                "write user timespec failed: addr={:#x}, err={:?}",
-                user_addr,
-                e
-            );
-            -LinuxError::EFAULT.code() as isize
-        })
-}
-
 pub fn sys_nanosleep(req: usize, rem: usize) -> isize {
     axlog::debug!("sys_nanosleep: req={:#x}, rem={:#x}", req, rem);
 
@@ -69,15 +26,12 @@ pub fn sys_nanosleep(req: usize, rem: usize) -> isize {
         return -LinuxError::EFAULT.code() as isize;
     }
 
-    let thread = match pulse_core::task::current_thread() {
-        Ok(thread) => thread,
-        Err(e) => return -e.code() as isize,
-    };
-    let process = thread.process();
-
-    let req_ts = match read_user_timespec(process, req) {
+    let req_ts = match read_user_timespec(req) {
         Ok(ts) => ts,
-        Err(e) => return e,
+        Err(e) => {
+            axlog::warn!("read user timespec failed: addr={:#x}, err={:?}", req, e);
+            return -LinuxError::EFAULT.code() as isize;
+        }
     };
 
     if req_ts.tv_nsec < 0 || req_ts.tv_nsec > 999_999_999 {
@@ -95,9 +49,15 @@ pub fn sys_nanosleep(req: usize, rem: usize) -> isize {
     if let Some(diff) = dur.checked_sub(actual) {
         if rem != 0 {
             let remain: ctypes::timespec = diff.into();
-            let ret = write_user_timespec(process, rem, &remain);
-            if ret != 0 {
-                return ret;
+            let bytes = unsafe {
+                core::slice::from_raw_parts(
+                    (&remain as *const ctypes::timespec).cast::<u8>(),
+                    core::mem::size_of::<ctypes::timespec>(),
+                )
+            };
+            if let Err(e) = write_user_bytes(rem, bytes) {
+                axlog::warn!("write user timespec failed: addr={:#x}, err={:?}", rem, e);
+                return -LinuxError::EFAULT.code() as isize;
             }
         }
         return -LinuxError::EINTR.code() as isize;
@@ -119,12 +79,19 @@ pub fn sys_clock_gettime(clockid: i32, tp: usize) -> isize {
         _ => return -LinuxError::EINVAL.code() as isize,
     };
 
-    let thread = match pulse_core::task::current_thread() {
-        Ok(thread) => thread,
-        Err(e) => return -e.code() as isize,
+    let bytes = unsafe {
+        core::slice::from_raw_parts(
+            (&now as *const ctypes::timespec).cast::<u8>(),
+            core::mem::size_of::<ctypes::timespec>(),
+        )
     };
-    let process = thread.process();
-    write_user_timespec(process, tp, &now)
+    match write_user_bytes(tp, bytes) {
+        Ok(()) => 0,
+        Err(e) => {
+            axlog::warn!("write user timespec failed: addr={:#x}, err={:?}", tp, e);
+            -LinuxError::EFAULT.code() as isize
+        }
+    }
 }
 
 /// sys_gettimeofday - 获取墙上时间
@@ -144,12 +111,6 @@ pub fn sys_gettimeofday(tv: usize, tz: usize) -> isize {
         tv_sec: now.as_secs() as _,
         tv_usec: now.subsec_micros() as _,
     };
-
-    let thread = match pulse_core::task::current_thread() {
-        Ok(thread) => thread,
-        Err(e) => return -e.code() as isize,
-    };
-    let process = thread.process();
     let bytes = unsafe {
         core::slice::from_raw_parts(
             (&timeval as *const ctypes::timeval).cast::<u8>(),
@@ -157,8 +118,7 @@ pub fn sys_gettimeofday(tv: usize, tz: usize) -> isize {
         )
     };
 
-    process
-        .write_user_bytes(tv, bytes)
+    write_user_bytes(tv, bytes)
         .map(|_| 0)
         .unwrap_or_else(|e| {
             axlog::warn!("sys_gettimeofday: user write failed at {:#x}: {:?}", tv, e);
@@ -195,7 +155,7 @@ pub fn sys_times(tbuf: usize) -> isize {
             )
         };
 
-        if let Err(e) = process.write_user_bytes(tbuf, bytes) {
+        if let Err(e) = write_user_bytes(tbuf, bytes) {
             axlog::warn!("sys_times: user write failed at {:#x}: {:?}", tbuf, e);
             return -LinuxError::EFAULT.code() as isize;
         }
