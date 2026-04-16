@@ -3,10 +3,10 @@ use axerrno::AxError;
 use axhal::context::TrapFrame;
 use bitflags::bitflags;
 
+use pulse_core::task::CloneParams;
+use pulse_core::task::ForkParams;
 use pulse_core::task::current_process;
 use pulse_core::task::current_thread;
-use pulse_core::task::ForkParams;
-use pulse_core::task::CloneParams;
 
 bitflags! {
     /// Flags for sys_clone
@@ -111,9 +111,7 @@ pub fn sys_clone(tf: &TrapFrame, args: [usize; 6]) -> isize {
         Ok(process) => process,
         Err(_) => return -LinuxError::ESRCH.code() as isize,
     };
-    let current_tid = current_thread()
-        .map(|t| t.tid())
-        .unwrap_or_default();
+    let current_tid = current_thread().map(|t| t.tid()).unwrap_or_default();
     axlog::debug!(
         "sys_clone context: parent_pid={}, parent_tid={}",
         parent_proc.pid(),

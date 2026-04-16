@@ -2,7 +2,7 @@ use axerrno::LinuxError;
 
 use pulse_core::task::current_thread;
 
-use crate::common::write_user_i32;
+use super::common::write_user_i32;
 
 pub fn sys_wait4(pid: isize, status: usize, options: i32, rusage: usize) -> isize {
     axlog::debug!(

@@ -2,7 +2,6 @@ use axerrno::LinuxError;
 
 use pulse_core::task::current_process;
 
-
 fn parse_id_arg(raw: usize) -> u32 {
     raw as u32
 }

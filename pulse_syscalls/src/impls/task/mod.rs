@@ -1,15 +1,15 @@
 /// Task related syscalls.
-mod common;
 mod clone;
+mod common;
 mod exec;
-mod process;
 mod exit;
-mod wait;
+mod process;
 mod user;
+mod wait;
 
 pub use clone::*;
-pub use user::*;
 pub use exec::*;
-pub use process::*;
 pub use exit::*;
+pub use process::*;
+pub use user::*;
 pub use wait::*;
