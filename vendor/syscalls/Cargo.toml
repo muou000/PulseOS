@@ -12,7 +12,7 @@
 [package]
 edition = "2021"
 name = "syscalls"
-version = "0.7.0"
+version = "0.8.1"
 authors = [
     "Jason White <rust@jasonwhite.io>",
     "Baojun Wang <wangbj@gmail.com>",
@@ -112,9 +112,8 @@ default-features = false
 version = "0.1"
 optional = true
 
-[dev-dependencies]
-libc = "0.2"
-serde_json = "1"
+[dev-dependencies.libc]
+version = "0.2"
 
-[workspace]
-members = ["syscalls-gen"]
+[dev-dependencies.serde_json]
+version = "1"
