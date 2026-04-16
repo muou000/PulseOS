@@ -3,9 +3,11 @@
 use crate::LinuxError;
 use alloc::vec;
 use axalloc::global_allocator;
+use pulse_core::task::uaccess;
 use rand::{RngCore, SeedableRng, rngs::SmallRng};
 
 #[repr(C)]
+#[derive(Clone, Copy)]
 struct UtsName {
     sysname: [u8; 65],
     nodename: [u8; 65],
@@ -54,20 +56,6 @@ fn write_cstr_field(dst: &mut [u8], s: &str) {
     dst[len] = 0;
 }
 
-fn with_current_process<R>(
-    f: impl FnOnce(&pulse_core::task::Process) -> R,
-) -> Result<R, LinuxError> {
-    pulse_core::task::with_current_process(f)
-}
-
-fn write_current_process_bytes(user_addr: usize, bytes: &[u8]) -> isize {
-    match with_current_process(|process| process.write_user_bytes(user_addr, bytes)) {
-        Ok(Ok(())) => 0,
-        Ok(Err(_)) => -LinuxError::EFAULT.code() as isize,
-        Err(e) => -e.code() as isize,
-    }
-}
-
 /// sys_uname - 获取系统信息
 pub fn sys_uname(buf: usize) -> isize {
     axlog::debug!("sys_uname: buf={:#x}", buf);
@@ -94,13 +82,13 @@ pub fn sys_uname(buf: usize) -> isize {
     write_cstr_field(&mut uts.machine, "loongarch64");
     write_cstr_field(&mut uts.domainname, "(none)");
 
-    let bytes = unsafe {
-        core::slice::from_raw_parts(
-            (&uts as *const UtsName).cast::<u8>(),
-            core::mem::size_of::<UtsName>(),
-        )
-    };
-    write_current_process_bytes(buf, bytes)
+    match pulse_core::task::with_current_process(|process| {
+        uaccess::write_user_plain(process, buf, &uts)
+    }) {
+        Ok(Ok(())) => 0,
+        Ok(Err(_)) => -LinuxError::EFAULT.code() as isize,
+        Err(e) => -e.code() as isize,
+    }
 }
 
 pub fn sys_set_tid_address(tidptr: usize) -> isize {
@@ -186,7 +174,7 @@ pub fn sys_getrandom(buf: usize, len: usize, _flags: usize) -> isize {
 
     let mut out = alloc::vec![0u8; len];
     rng.fill_bytes(&mut out);
-    match process.write_user_bytes(buf, &out) {
+    match uaccess::write_user_bytes(process, buf, &out) {
         Ok(()) => len as isize,
         Err(_) => -LinuxError::EFAULT.code() as isize,
     }
@@ -245,13 +233,13 @@ pub fn sys_sysinfo(info: usize) -> isize {
         mem_unit: 1,
         _f: [],
     };
-    let bytes = unsafe {
-        core::slice::from_raw_parts(
-            (&sysinfo as *const Sysinfo).cast::<u8>(),
-            core::mem::size_of::<Sysinfo>(),
-        )
-    };
-    write_current_process_bytes(info, bytes)
+    match pulse_core::task::with_current_process(|process| {
+        uaccess::write_user_plain(process, info, &sysinfo)
+    }) {
+        Ok(Ok(())) => 0,
+        Ok(Err(_)) => -LinuxError::EFAULT.code() as isize,
+        Err(e) => -e.code() as isize,
+    }
 }
 
 pub fn sys_syslog(action: usize, bufp: usize, len: usize) -> isize {
@@ -279,8 +267,13 @@ pub fn sys_syslog(action: usize, bufp: usize, len: usize) -> isize {
             }
             let mut out = vec![0u8; read_len];
             out.copy_from_slice(&KMSG_PLACEHOLDER[..read_len]);
-            let ret = write_current_process_bytes(bufp, &out);
-            if ret < 0 { ret } else { read_len as isize }
+            match pulse_core::task::with_current_process(|process| {
+                uaccess::write_user_bytes(process, bufp, &out)
+            }) {
+                Ok(Ok(())) => read_len as isize,
+                Ok(Err(_)) => -LinuxError::EFAULT.code() as isize,
+                Err(e) => -e.code() as isize,
+            }
         }
         _ => -LinuxError::EINVAL.code() as isize,
     }

@@ -65,6 +65,4 @@ la: prepare-tools
 	@$(MAKE) ARCH=loongarch64 defconfig
 	@$(MAKE) -C arceos A=$(A) ARCH=loongarch64 run
 
-package: img_all
-
-.PHONY: all oscomp build run justrun clean defconfig img img_all la package prepare-tools prepare-cargo-config
+.PHONY: all oscomp build run justrun clean defconfig img img_all la prepare-tools prepare-cargo-config
