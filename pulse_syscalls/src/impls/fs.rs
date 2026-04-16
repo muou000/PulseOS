@@ -308,7 +308,13 @@ fn permission_mask_from_bits(
     mask
 }
 
-fn allowed_access_mask(mode: NodePermission, uid: u32, gid: u32, owner_uid: u32, owner_gid: u32) -> usize {
+fn allowed_access_mask(
+    mode: NodePermission,
+    uid: u32,
+    gid: u32,
+    owner_uid: u32,
+    owner_gid: u32,
+) -> usize {
     if uid == owner_uid {
         permission_mask_from_bits(
             mode,
@@ -333,7 +339,12 @@ fn allowed_access_mask(mode: NodePermission, uid: u32, gid: u32, owner_uid: u32,
     }
 }
 
-fn check_faccess_permission(location: &Location, mode: usize, uid: u32, gid: u32) -> Result<(), LinuxError> {
+fn check_faccess_permission(
+    location: &Location,
+    mode: usize,
+    uid: u32,
+    gid: u32,
+) -> Result<(), LinuxError> {
     if mode == 0 {
         return Ok(());
     }
@@ -354,7 +365,11 @@ fn check_faccess_permission(location: &Location, mode: usize, uid: u32, gid: u32
         let any_exec = meta.mode.intersects(
             NodePermission::OWNER_EXEC | NodePermission::GROUP_EXEC | NodePermission::OTHER_EXEC,
         );
-        return if any_exec { Ok(()) } else { Err(LinuxError::EACCES) };
+        return if any_exec {
+            Ok(())
+        } else {
+            Err(LinuxError::EACCES)
+        };
     }
 
     let allowed = allowed_access_mask(meta.mode, uid, gid, meta.uid, meta.gid);
