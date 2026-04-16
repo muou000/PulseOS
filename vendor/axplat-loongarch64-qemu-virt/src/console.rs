@@ -7,7 +7,6 @@ use ns16550a::{
 
 const UART_BASE: PhysAddr = pa!(crate::config::devices::UART_PADDR);
 const UART_COUNT: usize = 1;
-const UART_STRIDE: usize = 0x100;
 
 const UART_BASES: [usize; UART_COUNT] = [crate::config::devices::UART_PADDR];
 
