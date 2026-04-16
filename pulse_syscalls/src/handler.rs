@@ -128,12 +128,12 @@ fn syscall_dispatcher(
         Sysno::geteuid => impls::sys_geteuid(),
         Sysno::getppid => impls::sys_getppid(),
         Sysno::getpgid => {
-            axlog::debug!("sys_getpgid (stub): return 1");
+            axlog::warn!("sys_getpgid (stub): return 1");
             1
         }
         Sysno::setpgid => impls::sys_setpgid(args[0] as isize, args[1] as isize),
         Sysno::kill => {
-            axlog::debug!(
+            axlog::warn!(
                 "sys_kill (stub): pid={}, sig={}, return 0",
                 args[0],
                 args[1]
@@ -158,7 +158,7 @@ fn syscall_dispatcher(
         Sysno::ppoll => {
             // ppoll(fds, nfds, timeout, sigmask)
             // 简化实现：如果有 fd=0 (stdin)，等通过 yield 让出直到有输入
-            axlog::debug!("sys_ppoll: nfds={}, timeout={:#x}", args[1], args[2]);
+            axlog::warn!("sys_ppoll: nfds={}, timeout={:#x}", args[1], args[2]);
             // 返回 1 表示有 1 个 fd 就绪（简化处理）
             1
         }
