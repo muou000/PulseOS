@@ -98,7 +98,10 @@ fn syscall_dispatcher(
         Sysno::getdents64 => impls::sys_getdents64(args[0], args[1], args[2]),
         Sysno::close => impls::sys_close(args[0]),
         Sysno::fstat => impls::sys_fstat(args[0], args[1]),
+        #[cfg(target_arch = "loongarch64")]
         Sysno::fstatat => impls::sys_fstatat(args[0] as i32, args[1], args[2], args[3]),
+        #[cfg(target_arch = "riscv64")]
+        Sysno::newfstatat => impls::sys_fstatat(args[0] as i32, args[1], args[2], args[3]),
         Sysno::statx => impls::sys_statx(args[0] as i32, args[1], args[2], args[3], args[4]),
 
         Sysno::brk => impls::sys_brk(args[0]),
