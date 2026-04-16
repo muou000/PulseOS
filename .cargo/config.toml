@@ -16,10 +16,5 @@ git = "https://github.com/arceos-org/slab_allocator.git"
 tag = "v0.3.1"
 replace-with = "vendored-sources"
 
-[source."git+https://github.com/muou000/syscalls.git?rev=efac241"]
-git = "https://github.com/muou000/syscalls.git"
-rev = "efac241"
-replace-with = "vendored-sources"
-
 [source.vendored-sources]
 directory = "vendor"

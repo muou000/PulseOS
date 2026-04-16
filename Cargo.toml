@@ -35,7 +35,7 @@ axerrno = "0.2"
 axplat-riscv64-qemu-virt = "0.3.0"
 axplat-loongarch64-qemu-virt = "0.3.0"
 
-syscalls = { git = "https://github.com/muou000/syscalls.git", rev = "efac241", default-features = false }
+syscalls = "0.8"
 
 [patch.crates-io]
 axplat-loongarch64-qemu-virt = { path = "vendor/axplat-loongarch64-qemu-virt" }
