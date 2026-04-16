@@ -194,10 +194,12 @@ build_one_arch() {
 
     mkdir -p "${OUTPUT_DIR}"
     local out_img="${OUTPUT_DIR}/rootfs-${arch}.img"
+    local fs_label="${FS_LABEL_PREFIX}-${arch}"
+    fs_label="${fs_label:0:15}"
 
     echo "[${arch}] Building ext4 image (${img_mib} MiB): ${out_img}"
     truncate -s "${img_mib}M" "${tmp_img}"
-    mkfs.ext4 -q -F -L "${FS_LABEL_PREFIX}-${arch}" -d "${stage_dir}" "${tmp_img}"
+    mkfs.ext4 -q -F -L "${fs_label}" -d "${stage_dir}" "${tmp_img}"
     mv -f "${tmp_img}" "${out_img}"
 
     local logical_size disk_usage
