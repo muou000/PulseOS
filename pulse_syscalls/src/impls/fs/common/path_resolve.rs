@@ -1,13 +1,13 @@
 use axerrno::LinuxError;
 use axfs::FsContext;
 use axfs_ng_vfs::Location;
+use linux_raw_sys::general::*;
 
 use crate::impls::utils::{read_user_cstring, with_process};
-use super::{AT_EMPTY_PATH, AT_FDCWD, AT_SYMLINK_NOFOLLOW};
 
 pub(crate) fn context_for_dirfd(dirfd: i32) -> Result<FsContext, LinuxError> {
     let base = with_process(|process| process.fs_context.lock().clone())?;
-    if dirfd == AT_FDCWD {
+    if dirfd == AT_FDCWD as i32 {
         return Ok(base);
     }
     if dirfd < 0 {
@@ -26,7 +26,7 @@ pub(crate) fn resolve_location_at_ptr(
     pathname: usize,
     flags: usize,
 ) -> Result<Location, LinuxError> {
-    if (flags & AT_EMPTY_PATH) != 0 {
+    if (flags & AT_EMPTY_PATH as usize) != 0 {
         if pathname == 0 {
             if dirfd < 0 {
                 return Err(LinuxError::EBADF);
@@ -51,7 +51,7 @@ pub(crate) fn resolve_location_at_ptr(
         return result;
     }
     let ctx = context_for_dirfd(dirfd)?;
-    if (flags & AT_SYMLINK_NOFOLLOW) != 0 {
+    if (flags & AT_SYMLINK_NOFOLLOW as usize) != 0 {
         ctx.resolve_no_follow(path.as_ref())
             .map_err(|e| LinuxError::from(e.canonicalize()))
     } else {
@@ -65,13 +65,13 @@ fn try_resolve_location_fast(
     path: &str,
     flags: usize,
 ) -> Option<Result<Location, LinuxError>> {
-    if dirfd == AT_FDCWD {
+    if dirfd == AT_FDCWD as i32 {
         return None;
     }
     if dirfd < 0 {
         return Some(Err(LinuxError::EBADF));
     }
-    if flags != AT_SYMLINK_NOFOLLOW {
+    if flags != AT_SYMLINK_NOFOLLOW as usize {
         return None;
     }
     if path.is_empty() || path.starts_with('/') || path.contains('/') {

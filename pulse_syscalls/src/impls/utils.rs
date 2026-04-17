@@ -1,8 +1,8 @@
 use alloc::ffi::CString;
 use alloc::vec::Vec;
-use arceos_posix_api::ctypes;
 use axerrno::LinuxError;
 use core::time::Duration;
+use linux_raw_sys::general::{UTIME_NOW, UTIME_OMIT, iovec, timespec};
 
 use pulse_core::task::uaccess;
 
@@ -37,14 +37,12 @@ pub(crate) fn read_user_cstring(user_addr: usize) -> Result<CString, LinuxError>
 pub(crate) fn read_user_iovec_array(
     user_addr: usize,
     iovcnt: usize,
-) -> Result<Vec<ctypes::iovec>, LinuxError> {
-    with_process(|process| {
-        uaccess::read_user_plain_array::<ctypes::iovec>(process, user_addr, iovcnt)
-    })?
-    .map_err(|e| LinuxError::from(e.canonicalize()))
+) -> Result<Vec<iovec>, LinuxError> {
+    with_process(|process| uaccess::read_user_plain_array::<iovec>(process, user_addr, iovcnt))?
+        .map_err(|e| LinuxError::from(e.canonicalize()))
 }
 
-pub(crate) fn read_user_timespec(user_addr: usize) -> Result<ctypes::timespec, LinuxError> {
+pub(crate) fn read_user_timespec(user_addr: usize) -> Result<timespec, LinuxError> {
     with_process(|process| uaccess::read_user_plain(process, user_addr))?
         .map_err(|e| LinuxError::from(e.canonicalize()))
 }
@@ -60,17 +58,22 @@ pub(crate) fn write_user_i64(user_addr: usize, value: i64) -> Result<(), LinuxEr
 }
 
 pub(crate) fn timespec_to_update_time(
-    ts: ctypes::timespec,
+    ts: timespec,
     now: Duration,
 ) -> Result<Option<Duration>, LinuxError> {
-    const UTIME_NOW: i64 = 0x3fff_ffff;
-    const UTIME_OMIT: i64 = 0x3fff_fffe;
+    let nsec = ts.tv_nsec as i64;
+    let utime_now = UTIME_NOW as i64;
+    let utime_omit = UTIME_OMIT as i64;
 
-    match ts.tv_nsec {
-        UTIME_OMIT => Ok(None),
-        UTIME_NOW => Ok(Some(now)),
-        nsec if !(0..1_000_000_000).contains(&nsec) => Err(LinuxError::EINVAL),
-        _ if ts.tv_sec < 0 => Err(LinuxError::EINVAL),
-        _ => Ok(Some(Duration::new(ts.tv_sec as u64, ts.tv_nsec as u32))),
+    if nsec == utime_omit {
+        return Ok(None);
     }
+    if nsec == utime_now {
+        return Ok(Some(now));
+    }
+    if !(0..1_000_000_000).contains(&nsec) || ts.tv_sec < 0 {
+        return Err(LinuxError::EINVAL);
+    }
+
+    Ok(Some(Duration::new(ts.tv_sec as u64, nsec as u32)))
 }

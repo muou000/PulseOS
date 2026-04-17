@@ -4,9 +4,9 @@ mod fs;
 mod futex;
 mod misc;
 mod mm;
-mod utils;
 mod task;
 mod time;
+mod utils;
 
 pub(crate) use fs::*;
 pub(crate) use futex::*;

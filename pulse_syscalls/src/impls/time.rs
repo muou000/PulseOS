@@ -1,10 +1,21 @@
 use crate::LinuxError;
-use arceos_posix_api::ctypes;
+use crate::impls::utils::{read_user_timespec, write_user_bytes};
 use core::ffi::c_long;
 use core::time::Duration;
-use crate::impls::utils::{read_user_timespec, write_user_bytes};
+use linux_raw_sys::general::{CLOCK_MONOTONIC, CLOCK_REALTIME, timespec, timeval};
 
 const CLK_TCK: u64 = 100;
+
+fn timespec_to_duration(ts: timespec) -> Duration {
+    Duration::new(ts.tv_sec as u64, ts.tv_nsec as u32)
+}
+
+fn duration_to_timespec(dur: Duration) -> timespec {
+    timespec {
+        tv_sec: dur.as_secs() as _,
+        tv_nsec: dur.subsec_nanos() as _,
+    }
+}
 
 fn ns_to_clk_ticks(ns: u64) -> u64 {
     ns.saturating_mul(CLK_TCK) / 1_000_000_000
@@ -38,7 +49,7 @@ pub fn sys_nanosleep(req: usize, rem: usize) -> isize {
         return -LinuxError::EINVAL.code() as isize;
     }
 
-    let dur = Duration::from(req_ts);
+    let dur = timespec_to_duration(req_ts);
     let now = axhal::time::monotonic_time();
 
     axhal::time::busy_wait(dur);
@@ -48,11 +59,11 @@ pub fn sys_nanosleep(req: usize, rem: usize) -> isize {
 
     if let Some(diff) = dur.checked_sub(actual) {
         if rem != 0 {
-            let remain: ctypes::timespec = diff.into();
+            let remain = duration_to_timespec(diff);
             let bytes = unsafe {
                 core::slice::from_raw_parts(
-                    (&remain as *const ctypes::timespec).cast::<u8>(),
-                    core::mem::size_of::<ctypes::timespec>(),
+                    (&remain as *const timespec).cast::<u8>(),
+                    core::mem::size_of::<timespec>(),
                 )
             };
             if let Err(e) = write_user_bytes(rem, bytes) {
@@ -73,16 +84,16 @@ pub fn sys_clock_gettime(clockid: i32, tp: usize) -> isize {
         return -LinuxError::EFAULT.code() as isize;
     }
 
-    let now: ctypes::timespec = match clockid as u32 {
-        ctypes::CLOCK_REALTIME => axhal::time::wall_time().into(),
-        ctypes::CLOCK_MONOTONIC => axhal::time::monotonic_time().into(),
+    let now = match clockid as u32 {
+        CLOCK_REALTIME => duration_to_timespec(axhal::time::wall_time()),
+        CLOCK_MONOTONIC => duration_to_timespec(axhal::time::monotonic_time()),
         _ => return -LinuxError::EINVAL.code() as isize,
     };
 
     let bytes = unsafe {
         core::slice::from_raw_parts(
-            (&now as *const ctypes::timespec).cast::<u8>(),
-            core::mem::size_of::<ctypes::timespec>(),
+            (&now as *const timespec).cast::<u8>(),
+            core::mem::size_of::<timespec>(),
         )
     };
     match write_user_bytes(tp, bytes) {
@@ -107,23 +118,21 @@ pub fn sys_gettimeofday(tv: usize, tz: usize) -> isize {
     }
 
     let now = axhal::time::wall_time();
-    let timeval = ctypes::timeval {
+    let timeval = timeval {
         tv_sec: now.as_secs() as _,
         tv_usec: now.subsec_micros() as _,
     };
     let bytes = unsafe {
         core::slice::from_raw_parts(
-            (&timeval as *const ctypes::timeval).cast::<u8>(),
-            core::mem::size_of::<ctypes::timeval>(),
+            (&timeval as *const timeval).cast::<u8>(),
+            core::mem::size_of::<timeval>(),
         )
     };
 
-    write_user_bytes(tv, bytes)
-        .map(|_| 0)
-        .unwrap_or_else(|e| {
-            axlog::warn!("sys_gettimeofday: user write failed at {:#x}: {:?}", tv, e);
-            -LinuxError::EFAULT.code() as isize
-        })
+    write_user_bytes(tv, bytes).map(|_| 0).unwrap_or_else(|e| {
+        axlog::warn!("sys_gettimeofday: user write failed at {:#x}: {:?}", tv, e);
+        -LinuxError::EFAULT.code() as isize
+    })
 }
 
 pub fn sys_times(tbuf: usize) -> isize {

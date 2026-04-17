@@ -1,18 +1,22 @@
 use alloc::vec;
 
 use crate::impls::fs::common::{
-    get_fd_entry, insert_fd_entry, insert_fd_entry_from, open_fd_flags,
-    remove_fd_entry, set_fd_entry, O_CLOEXEC, O_NONBLOCK,
+    get_fd_entry, insert_fd_entry, insert_fd_entry_from, open_fd_flags, remove_fd_entry,
+    set_fd_entry,
 };
 use crate::impls::utils::{
-    read_user_bytes, read_user_i64, read_user_iovec_array, with_process,
-    write_user_bytes, write_user_i64,
+    read_user_bytes, read_user_i64, read_user_iovec_array, with_process, write_user_bytes,
+    write_user_i64,
 };
+use linux_raw_sys::general::*;
 
-use arceos_posix_api::ctypes;
 use axerrno::LinuxError;
 use axio::SeekFrom;
 use pulse_core::fd_table::{FdEntry, FdFlags, pipe_entries};
+
+fn iov_len_to_usize(iov_len: u64) -> Result<usize, LinuxError> {
+    usize::try_from(iov_len).map_err(|_| LinuxError::EINVAL)
+}
 
 pub fn sys_read(fd: usize, buf: usize, count: usize) -> isize {
     axlog::debug!("sys_read: fd={}, buf={:#x}, count={}", fd, buf, count);
@@ -99,12 +103,16 @@ pub fn sys_writev(fd: usize, iov: usize, iovcnt: usize) -> isize {
         Err(e) => return -e.code() as isize,
     };
     let mut total = 0isize;
-    for iov in iovecs {
-        if iov.iov_len == 0 {
+    for io_vec in iovecs {
+        let len = match iov_len_to_usize(io_vec.iov_len) {
+            Ok(len) => len,
+            Err(e) => return -e.code() as isize,
+        };
+        if len == 0 {
             continue;
         }
-        let mut buf = vec![0u8; iov.iov_len];
-        if let Err(e) = read_user_bytes(iov.iov_base as usize, &mut buf) {
+        let mut buf = vec![0u8; len];
+        if let Err(e) = read_user_bytes(io_vec.iov_base as usize, &mut buf) {
             return -e.code() as isize;
         }
         let ret = match object.write(&buf) {
@@ -132,11 +140,15 @@ pub fn sys_readv(fd: usize, iov: usize, iovcnt: usize) -> isize {
         Err(e) => return -e.code() as isize,
     };
     let mut total = 0isize;
-    for iov in iovecs {
-        if iov.iov_len == 0 {
+    for io_vec in iovecs {
+        let len = match iov_len_to_usize(io_vec.iov_len) {
+            Ok(len) => len,
+            Err(e) => return -e.code() as isize,
+        };
+        if len == 0 {
             continue;
         }
-        let mut buf = vec![0u8; iov.iov_len];
+        let mut buf = vec![0u8; len];
         let ret = match object.read(&mut buf) {
             Ok(ret) => ret as isize,
             Err(e) => return if total > 0 { total } else { -e.code() as isize },
@@ -144,11 +156,11 @@ pub fn sys_readv(fd: usize, iov: usize, iovcnt: usize) -> isize {
         if ret <= 0 {
             return total + ret;
         }
-        if let Err(e) = write_user_bytes(iov.iov_base as usize, &buf[..ret as usize]) {
+        if let Err(e) = write_user_bytes(io_vec.iov_base as usize, &buf[..ret as usize]) {
             return if total > 0 { total } else { -e.code() as isize };
         }
         total += ret;
-        if ret as usize != iov.iov_len {
+        if ret as usize != len {
             break;
         }
     }
@@ -259,45 +271,45 @@ pub fn sys_sendfile(out_fd: usize, in_fd: usize, offset: usize, count: usize) ->
 pub fn sys_fcntl(fd: usize, cmd: usize, arg: usize) -> isize {
     axlog::debug!("sys_fcntl: fd={}, cmd={:#x}, arg={:#x}", fd, cmd, arg);
     match cmd as u32 {
-        ctypes::F_GETFD => match get_fd_entry(fd) {
+        F_GETFD => match get_fd_entry(fd) {
             Ok(entry) => {
                 if entry.flags.contains(FdFlags::CLOEXEC) {
-                    ctypes::FD_CLOEXEC as isize
+                    FD_CLOEXEC as isize
                 } else {
                     0
                 }
             }
             Err(e) => -e.code() as isize,
         },
-        ctypes::F_GETFL => match get_fd_entry(fd) {
+        F_GETFL => match get_fd_entry(fd) {
             Ok(entry) => {
                 let mut status = 0usize;
                 if entry.flags.contains(FdFlags::NONBLOCK) {
-                    status |= O_NONBLOCK;
+                    status |= O_NONBLOCK as usize;
                 }
                 status as isize
             }
             Err(e) => -e.code() as isize,
         },
-        ctypes::F_SETFD => match with_process(|process| -> Result<isize, LinuxError> {
+        F_SETFD => match with_process(|process| -> Result<isize, LinuxError> {
             let mut table = process.fd_table.lock();
             let Some(entry) = table.get_mut(fd) else {
                 return Err(LinuxError::EBADF);
             };
             entry
                 .flags
-                .set(FdFlags::CLOEXEC, (arg & (ctypes::FD_CLOEXEC as usize)) != 0);
+                .set(FdFlags::CLOEXEC, (arg & (FD_CLOEXEC as usize)) != 0);
             Ok(0)
         }) {
             Ok(Ok(v)) => v,
             Ok(Err(e)) | Err(e) => -e.code() as isize,
         },
-        ctypes::F_SETFL => match with_process(|process| -> Result<isize, LinuxError> {
+        F_SETFL => match with_process(|process| -> Result<isize, LinuxError> {
             let mut table = process.fd_table.lock();
             let Some(entry) = table.get_mut(fd) else {
                 return Err(LinuxError::EBADF);
             };
-            let nonblocking = (arg & O_NONBLOCK) != 0;
+            let nonblocking = (arg & O_NONBLOCK as usize) != 0;
             entry.flags.set(FdFlags::NONBLOCK, nonblocking);
             entry.object.set_nonblocking(nonblocking)?;
             Ok(0)
@@ -305,14 +317,14 @@ pub fn sys_fcntl(fd: usize, cmd: usize, arg: usize) -> isize {
             Ok(Ok(v)) => v,
             Ok(Err(e)) | Err(e) => -e.code() as isize,
         },
-        ctypes::F_DUPFD | ctypes::F_DUPFD_CLOEXEC => {
+        F_DUPFD | F_DUPFD_CLOEXEC => {
             let entry = match get_fd_entry(fd) {
                 Ok(entry) => entry,
                 Err(e) => return -e.code() as isize,
             };
             let mut flags = entry.flags;
             flags.remove(FdFlags::CLOEXEC);
-            if cmd as u32 == ctypes::F_DUPFD_CLOEXEC {
+            if cmd as u32 == F_DUPFD_CLOEXEC {
                 flags.insert(FdFlags::CLOEXEC);
             }
             match insert_fd_entry_from(arg, FdEntry::new(entry.object, flags)) {
@@ -350,7 +362,7 @@ pub fn sys_dup3(oldfd: usize, newfd: usize, flags: usize) -> isize {
     if oldfd == newfd {
         return -LinuxError::EINVAL.code() as isize;
     }
-    if (flags & !O_CLOEXEC) != 0 {
+    if (flags & !(O_CLOEXEC as usize)) != 0 {
         return -LinuxError::EINVAL.code() as isize;
     }
     let entry = match get_fd_entry(oldfd) {
@@ -359,7 +371,7 @@ pub fn sys_dup3(oldfd: usize, newfd: usize, flags: usize) -> isize {
     };
     let mut fd_flags = entry.flags;
     fd_flags.remove(FdFlags::CLOEXEC);
-    if (flags & O_CLOEXEC) != 0 {
+    if (flags & O_CLOEXEC as usize) != 0 {
         fd_flags.insert(FdFlags::CLOEXEC);
     }
     match set_fd_entry(newfd, FdEntry::new(entry.object, fd_flags)) {
@@ -373,7 +385,7 @@ pub fn sys_pipe2(fds: usize, flags: usize) -> isize {
     if fds == 0 {
         return -LinuxError::EFAULT.code() as isize;
     }
-    let allowed = O_NONBLOCK | O_CLOEXEC;
+    let allowed = O_NONBLOCK as usize | O_CLOEXEC as usize;
     if (flags & !allowed) != 0 {
         return -LinuxError::EINVAL.code() as isize;
     }
