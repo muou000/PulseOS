@@ -11,20 +11,19 @@ repository.workspace = true
 axhal = { workspace = true, features = ["paging"] }
 axlog = { workspace = true }
 axconfig = { workspace = true }
-axerrno.workspace = true
-arceos_posix_api = { path = "../arceos/api/arceos_posix_api" }
-axio = { version = "0.3.0-pre.1", features = ["alloc"] }
-linkme = "0.3"
-kernel-elf-parser = { version = "0.3" }
-xmas-elf = { version = "0.9" }
-
 axtask = { workspace = true, features = ["multitask"] }
 axfs.workspace = true
-axfs-ng-vfs = "0.1.1"
+axfs-ng-vfs.workspace = true
 axmm.workspace = true
-memory_addr = { version = "0.4" }
-kernel_guard = "0.1"
+axerrno.workspace = true
+axio.workspace = true
 
-spin = "0.9"
-bitflags = "2.11"
-percpu = "0.2"
+linux-raw-sys.workspace = true
+linkme.workspace = true
+kernel-elf-parser.workspace = true
+xmas-elf.workspace = true
+memory_addr.workspace = true
+kernel_guard.workspace = true
+spin.workspace = true
+bitflags.workspace = true
+percpu.workspace = true

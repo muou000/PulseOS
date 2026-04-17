@@ -1,12 +1,12 @@
 use alloc::collections::{BTreeMap, btree_map::Entry};
 use alloc::sync::Arc;
-use arceos_posix_api::ctypes;
 use axerrno::{LinuxError, LinuxResult};
 use axfs::{File, FileFlags as AxFileFlags, OpenResult};
 use axfs_ng_vfs::{Location, Metadata, NodeType};
 use axio::{BufReader, PollState, Read, Seek, SeekFrom, Write};
 use core::any::Any;
 use core::sync::atomic::{AtomicBool, Ordering};
+use linux_raw_sys::general::*;
 use spin::{Lazy, Mutex};
 
 pub const FD_RESERVED: usize = 3;
@@ -31,7 +31,7 @@ pub trait FdObject: Send + Sync {
         Err(LinuxError::EBADF)
     }
 
-    fn stat(&self) -> LinuxResult<ctypes::stat>;
+    fn stat(&self) -> LinuxResult<stat>;
 
     fn poll(&self) -> LinuxResult<PollState>;
 
@@ -68,36 +68,55 @@ impl FdEntry {
     }
 }
 
-fn metadata_to_stat(metadata: &Metadata) -> ctypes::stat {
-    let ty = metadata.node_type as u8;
-    let perm = metadata.mode.bits() as u32;
-    let st_mode = ((ty as u32) << 12) | perm;
-    ctypes::stat {
-        st_ino: metadata.inode,
-        st_nlink: metadata.nlink as u32,
-        st_mode,
-        st_uid: metadata.uid,
-        st_gid: metadata.gid,
-        st_size: metadata.size as _,
-        st_blocks: metadata.blocks as _,
-        st_blksize: metadata.block_size as _,
-        st_atime: ctypes::timespec {
-            tv_sec: metadata.atime.as_secs() as i64,
-            tv_nsec: metadata.atime.subsec_nanos() as i64,
-        },
-        st_mtime: ctypes::timespec {
-            tv_sec: metadata.mtime.as_secs() as i64,
-            tv_nsec: metadata.mtime.subsec_nanos() as i64,
-        },
-        st_ctime: ctypes::timespec {
-            tv_sec: metadata.ctime.as_secs() as i64,
-            tv_nsec: metadata.ctime.subsec_nanos() as i64,
-        },
-        ..Default::default()
+fn empty_stat() -> stat {
+    stat {
+        st_dev: 0,
+        st_ino: 0,
+        st_mode: 0,
+        st_nlink: 0,
+        st_uid: 0,
+        st_gid: 0,
+        st_rdev: 0,
+        __pad1: 0,
+        st_size: 0,
+        st_blksize: 0,
+        __pad2: 0,
+        st_blocks: 0,
+        st_atime: 0,
+        st_atime_nsec: 0,
+        st_mtime: 0,
+        st_mtime_nsec: 0,
+        st_ctime: 0,
+        st_ctime_nsec: 0,
+        __unused4: 0,
+        __unused5: 0,
     }
 }
 
-pub fn location_to_stat(location: &Location) -> LinuxResult<ctypes::stat> {
+fn metadata_to_stat(metadata: &Metadata) -> stat {
+    let ty = metadata.node_type as u8;
+    let perm = metadata.mode.bits() as u32;
+    let st_mode = ((ty as u32) << 12) | perm;
+    stat {
+        st_ino: metadata.inode as _,
+        st_nlink: metadata.nlink as _,
+        st_mode,
+        st_uid: metadata.uid as _,
+        st_gid: metadata.gid as _,
+        st_size: metadata.size as _,
+        st_blocks: metadata.blocks as _,
+        st_blksize: metadata.block_size as _,
+        st_atime: metadata.atime.as_secs() as _,
+        st_atime_nsec: metadata.atime.subsec_nanos() as _,
+        st_mtime: metadata.mtime.as_secs() as _,
+        st_mtime_nsec: metadata.mtime.subsec_nanos() as _,
+        st_ctime: metadata.ctime.as_secs() as _,
+        st_ctime_nsec: metadata.ctime.subsec_nanos() as _,
+        ..empty_stat()
+    }
+}
+
+pub fn location_to_stat(location: &Location) -> LinuxResult<stat> {
     Ok(metadata_to_stat(&location.metadata()?))
 }
 
@@ -172,12 +191,12 @@ impl FdObject for StdinObject {
         Err(LinuxError::EPERM)
     }
 
-    fn stat(&self) -> LinuxResult<ctypes::stat> {
-        Ok(ctypes::stat {
+    fn stat(&self) -> LinuxResult<stat> {
+        Ok(stat {
             st_ino: 1,
             st_nlink: 1,
             st_mode: 0o20000 | 0o440u32,
-            ..Default::default()
+            ..empty_stat()
         })
     }
 
@@ -204,12 +223,12 @@ impl FdObject for StdoutObject {
         Ok(STDOUT_WRITER.lock().write(buf)?)
     }
 
-    fn stat(&self) -> LinuxResult<ctypes::stat> {
-        Ok(ctypes::stat {
+    fn stat(&self) -> LinuxResult<stat> {
+        Ok(stat {
             st_ino: 1,
             st_nlink: 1,
             st_mode: 0o20000 | 0o220u32,
-            ..Default::default()
+            ..empty_stat()
         })
     }
 
@@ -250,7 +269,7 @@ impl FdObject for FileObject {
         Ok(file.write(buf)?)
     }
 
-    fn stat(&self) -> LinuxResult<ctypes::stat> {
+    fn stat(&self) -> LinuxResult<stat> {
         location_to_stat(self.inner.location())
     }
 
@@ -318,7 +337,7 @@ impl FdObject for DirObject {
         Err(LinuxError::EBADF)
     }
 
-    fn stat(&self) -> LinuxResult<ctypes::stat> {
+    fn stat(&self) -> LinuxResult<stat> {
         location_to_stat(&self.inner)
     }
 
@@ -563,15 +582,15 @@ impl FdObject for PipeObject {
         Ok(write_size)
     }
 
-    fn stat(&self) -> LinuxResult<ctypes::stat> {
-        Ok(ctypes::stat {
+    fn stat(&self) -> LinuxResult<stat> {
+        Ok(stat {
             st_ino: 1,
             st_nlink: 1,
             st_mode: 0o10000 | 0o600u32,
             st_uid: 1000,
             st_gid: 1000,
             st_blksize: 4096,
-            ..Default::default()
+            ..empty_stat()
         })
     }
 

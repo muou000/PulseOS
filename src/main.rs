@@ -4,6 +4,7 @@
 #[macro_use]
 extern crate axlog;
 extern crate alloc;
+extern crate axhal;
 extern crate axruntime;
 extern crate pulse_core;
 extern crate pulse_syscalls;
@@ -33,6 +34,7 @@ fn main() {
                 }
                 Err(e) => {
                     error!("Failed to load {}: {:?}", SHELL_ELF_PATH, e);
+                    thread.exit_current(1);
                 }
             }
         },
@@ -55,11 +57,17 @@ fn main() {
             let init_task = axtask::spawn_task(inner);
             init_thread.process().register_task_ref(init_task.clone());
 
-            let _exit_code = init_task.join();
-            arceos_api::sys::ax_terminate();
+            match init_task.join() {
+                Some(0) => info!("Init task exited normally"),
+                Some(exit_code) => error!("Init task exited with failure code {}", exit_code),
+                None => error!("Init task join returned no exit code"),
+            }
+
+            axhal::power::system_off();
         }
         Err(e) => {
             error!("Failed to create user process: {:?}", e);
+            axhal::power::system_off();
         }
     }
 }

@@ -1,18 +1,15 @@
-use crate::impls::fs::common::{
-    AT_EACCESS, AT_SYMLINK_NOFOLLOW, FACCESS_MODE_MASK, check_faccess_permission,
-    get_fd_entry, resolve_location_at_ptr,
+use crate::impls::fs::common::{check_faccess_permission, get_fd_entry, resolve_location_at_ptr};
+use crate::impls::utils::{
+    read_user_timespec, timespec_to_update_time, with_process, write_user_bytes,
 };
-use crate::impls::utils::{read_user_timespec, timespec_to_update_time, with_process, write_user_bytes};
 
-use arceos_posix_api::ctypes;
 use axerrno::LinuxError;
 use axfs_ng_vfs::MetadataUpdate;
+use linux_raw_sys::general::*;
 use pulse_core::fd_table::location_to_stat;
 
 const STATX_BASIC_STATS: u32 = 0x0000_07ff;
 const STATX_MNT_ID: u32 = 0x0000_1000;
-const AT_EMPTY_PATH: usize = 0x1000;
-
 #[repr(C)]
 #[derive(Clone, Copy, Default)]
 struct StatxTimestamp {
@@ -50,10 +47,10 @@ struct Statx {
     __spare3: [u64; 12],
 }
 
-fn to_statx_timestamp(ts: arceos_posix_api::ctypes::timespec) -> StatxTimestamp {
+fn to_statx_timestamp(tv_sec: i64, tv_nsec: i64) -> StatxTimestamp {
     StatxTimestamp {
-        tv_sec: ts.tv_sec,
-        tv_nsec: ts.tv_nsec as u32,
+        tv_sec,
+        tv_nsec: tv_nsec as u32,
         __reserved: 0,
     }
 }
@@ -69,8 +66,8 @@ pub fn sys_fstat(fd: usize, statbuf: usize) -> isize {
     };
     let bytes = unsafe {
         core::slice::from_raw_parts(
-            (&stat as *const ctypes::stat).cast::<u8>(),
-            core::mem::size_of::<ctypes::stat>(),
+            core::ptr::from_ref(&stat).cast::<u8>(),
+            core::mem::size_of_val(&stat),
         )
     };
     match write_user_bytes(statbuf, bytes) {
@@ -93,8 +90,8 @@ pub fn sys_fstatat(dirfd: i32, pathname: usize, statbuf: usize, flags: usize) ->
     };
     let bytes = unsafe {
         core::slice::from_raw_parts(
-            (&stat as *const ctypes::stat).cast::<u8>(),
-            core::mem::size_of::<ctypes::stat>(),
+            core::ptr::from_ref(&stat).cast::<u8>(),
+            core::mem::size_of_val(&stat),
         )
     };
     match write_user_bytes(statbuf, bytes) {
@@ -135,10 +132,10 @@ pub fn sys_statx(
         stx_size: stat.st_size as u64,
         stx_blocks: stat.st_blocks as u64,
         stx_attributes_mask: 0,
-        stx_atime: to_statx_timestamp(stat.st_atime),
+        stx_atime: to_statx_timestamp(stat.st_atime as i64, stat.st_atime_nsec as i64),
         stx_btime: StatxTimestamp::default(),
-        stx_ctime: to_statx_timestamp(stat.st_ctime),
-        stx_mtime: to_statx_timestamp(stat.st_mtime),
+        stx_ctime: to_statx_timestamp(stat.st_ctime as i64, stat.st_ctime_nsec as i64),
+        stx_mtime: to_statx_timestamp(stat.st_mtime as i64, stat.st_mtime_nsec as i64),
         stx_rdev_major: 0,
         stx_rdev_minor: 0,
         stx_dev_major: 0,
@@ -169,7 +166,7 @@ pub fn sys_utimensat(dirfd: i32, pathname: usize, times: usize, flags: usize) ->
         times,
         flags
     );
-    let supported_flags = AT_SYMLINK_NOFOLLOW | AT_EMPTY_PATH;
+    let supported_flags = AT_SYMLINK_NOFOLLOW as usize | AT_EMPTY_PATH as usize;
     if (flags & !supported_flags) != 0 {
         return -LinuxError::EINVAL.code() as isize;
     }
@@ -188,7 +185,7 @@ pub fn sys_utimensat(dirfd: i32, pathname: usize, times: usize, flags: usize) ->
             Ok(atime) => atime,
             Err(e) => return -e.code() as isize,
         };
-        let mtime_addr = times + core::mem::size_of::<ctypes::timespec>();
+        let mtime_addr = times + core::mem::size_of::<timespec>();
         let mtime =
             match read_user_timespec(mtime_addr).and_then(|ts| timespec_to_update_time(ts, now)) {
                 Ok(mtime) => mtime,
@@ -221,11 +218,12 @@ pub fn sys_faccessat(dirfd: i32, pathname: usize, mode: usize, flags: usize) -> 
         flags
     );
 
-    if (mode & !FACCESS_MODE_MASK) != 0 {
+    if (mode & !(R_OK as usize | W_OK as usize | X_OK as usize)) != 0 {
         return -LinuxError::EINVAL.code() as isize;
     }
 
-    let supported_flags = AT_SYMLINK_NOFOLLOW | AT_EACCESS | AT_EMPTY_PATH;
+    let supported_flags =
+        AT_SYMLINK_NOFOLLOW as usize | AT_EACCESS as usize | AT_EMPTY_PATH as usize;
     if (flags & !supported_flags) != 0 {
         return -LinuxError::EINVAL.code() as isize;
     }
@@ -236,7 +234,7 @@ pub fn sys_faccessat(dirfd: i32, pathname: usize, mode: usize, flags: usize) -> 
     };
 
     let (uid, gid) = match with_process(|process| {
-        if (flags & AT_EACCESS) != 0 {
+        if (flags & AT_EACCESS as usize) != 0 {
             (process.euid(), process.egid())
         } else {
             (process.ruid(), process.rgid())

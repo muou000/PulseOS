@@ -1,7 +1,6 @@
 use axerrno::LinuxError;
 use axfs_ng_vfs::{Location, NodePermission, NodeType};
-
-use super::{FACCESS_R_OK, FACCESS_W_OK, FACCESS_X_OK};
+use linux_raw_sys::general::*;
 
 pub(crate) fn permission_mask_from_bits(
     mode: NodePermission,
@@ -11,13 +10,13 @@ pub(crate) fn permission_mask_from_bits(
 ) -> usize {
     let mut mask = 0usize;
     if mode.contains(read) {
-        mask |= FACCESS_R_OK;
+        mask |= R_OK as usize;
     }
     if mode.contains(write) {
-        mask |= FACCESS_W_OK;
+        mask |= W_OK as usize;
     }
     if mode.contains(exec) {
-        mask |= FACCESS_X_OK;
+        mask |= X_OK as usize;
     }
     mask
 }
@@ -68,7 +67,7 @@ pub(crate) fn check_faccess_permission(
         .map_err(|e| LinuxError::from(e.canonicalize()))?;
 
     if uid == 0 {
-        if (mode & FACCESS_X_OK) == 0 {
+        if (mode & X_OK as usize) == 0 {
             return Ok(());
         }
         if meta.node_type != NodeType::RegularFile {
