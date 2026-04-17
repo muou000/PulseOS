@@ -4,11 +4,11 @@ use crate::impls::fs::common::{
 use crate::impls::utils::read_user_cstring;
 use linux_raw_sys::general::*;
 
-use alloc::string::ToString;
+use alloc::string::{String, ToString};
 
 use axerrno::LinuxError;
 use axfs::OpenOptions;
-use axfs_ng_vfs::NodePermission;
+use axfs_ng_vfs::{NodePermission, path::Path};
 use pulse_core::fd_table::open_result_to_entry;
 
 fn flags_to_options(flags: usize, mode: usize) -> OpenOptions {
@@ -51,6 +51,34 @@ fn flags_to_options(flags: usize, mode: usize) -> OpenOptions {
     }
     options.mode(mode as u32);
     options
+}
+
+fn read_user_nonempty_path(pathname: usize) -> Result<String, LinuxError> {
+    if pathname == 0 {
+        return Err(LinuxError::EFAULT);
+    }
+    let path = read_user_cstring(pathname)?;
+    let path = path.to_str().map_err(|_| LinuxError::EINVAL)?;
+    if path.is_empty() {
+        return Err(LinuxError::EINVAL);
+    }
+    Ok(path.to_string())
+}
+
+fn rename_at(olddirfd: i32, oldpath: &str, newdirfd: i32, newpath: &str) -> Result<(), LinuxError> {
+    let old_ctx = context_for_dirfd(olddirfd)?;
+    let new_ctx = context_for_dirfd(newdirfd)?;
+
+    let (src_dir, src_name) = old_ctx
+        .resolve_parent(Path::new(oldpath))
+        .map_err(|e| LinuxError::from(e.canonicalize()))?;
+    let (dst_dir, dst_name) = new_ctx
+        .resolve_parent(Path::new(newpath))
+        .map_err(|e| LinuxError::from(e.canonicalize()))?;
+
+    src_dir
+        .rename(src_name.as_ref(), &dst_dir, dst_name.as_ref())
+        .map_err(|e| LinuxError::from(e.canonicalize()))
 }
 
 pub fn sys_openat(dirfd: i32, pathname: usize, flags: usize, mode: usize) -> isize {
@@ -216,5 +244,59 @@ pub fn sys_unlinkat(dirfd: i32, pathname: usize, flags: usize) -> isize {
             let errno = LinuxError::from(e.canonicalize());
             -errno.code() as isize
         }
+    }
+}
+
+pub fn sys_renameat2(
+    olddirfd: i32,
+    oldpath: usize,
+    newdirfd: i32,
+    newpath: usize,
+    flags: usize,
+) -> isize {
+    const SUPPORTED_FLAGS: usize =
+        RENAME_NOREPLACE as usize | RENAME_EXCHANGE as usize | RENAME_WHITEOUT as usize;
+
+    if (flags & !SUPPORTED_FLAGS) != 0 {
+        return -LinuxError::EINVAL.code() as isize;
+    }
+    if (flags & RENAME_NOREPLACE as usize) != 0 && (flags & RENAME_EXCHANGE as usize) != 0 {
+        return -LinuxError::EINVAL.code() as isize;
+    }
+    if (flags & RENAME_WHITEOUT as usize) != 0 && (flags & RENAME_EXCHANGE as usize) != 0 {
+        return -LinuxError::EINVAL.code() as isize;
+    }
+    if (flags & (RENAME_EXCHANGE as usize | RENAME_WHITEOUT as usize)) != 0 {
+        return -LinuxError::EINVAL.code() as isize;
+    }
+
+    let oldpath = match read_user_nonempty_path(oldpath) {
+        Ok(path) => path,
+        Err(e) => return -e.code() as isize,
+    };
+    let newpath = match read_user_nonempty_path(newpath) {
+        Ok(path) => path,
+        Err(e) => return -e.code() as isize,
+    };
+
+    if (flags & RENAME_NOREPLACE as usize) != 0 {
+        let new_ctx = match context_for_dirfd(newdirfd) {
+            Ok(ctx) => ctx,
+            Err(e) => return -e.code() as isize,
+        };
+        match new_ctx.resolve_no_follow(newpath.as_str()) {
+            Ok(_) => return -LinuxError::EEXIST.code() as isize,
+            Err(e) => {
+                let errno = LinuxError::from(e.canonicalize());
+                if errno != LinuxError::ENOENT {
+                    return -errno.code() as isize;
+                }
+            }
+        }
+    }
+
+    match rename_at(olddirfd, oldpath.as_str(), newdirfd, newpath.as_str()) {
+        Ok(()) => 0,
+        Err(e) => -e.code() as isize,
     }
 }
