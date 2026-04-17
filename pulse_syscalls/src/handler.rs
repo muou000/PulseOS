@@ -168,6 +168,11 @@ fn syscall_dispatcher(
         Sysno::getcwd => impls::sys_getcwd(args[0], args[1]),
         Sysno::chdir => impls::sys_chdir(args[0]),
         Sysno::unlinkat => impls::sys_unlinkat(args[0] as i32, args[1], args[2]),
+        #[cfg(target_arch = "loongarch64")]
+        Sysno::renameat => impls::sys_renameat2(args[0] as i32, args[1], args[2] as i32, args[3], 0),
+        Sysno::renameat2 => {
+            impls::sys_renameat2(args[0] as i32, args[1], args[2] as i32, args[3], args[4])
+        }
         Sysno::utimensat => impls::sys_utimensat(args[0] as i32, args[1], args[2], args[3]),
         Sysno::set_robust_list => impls::sys_set_robust_list(args[0], args[1]),
         Sysno::get_robust_list => impls::sys_get_robust_list(args[0], args[1], args[2]),
