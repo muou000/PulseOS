@@ -7,8 +7,9 @@ OVERLAY_DIR="${OVERLAY_DIR:-${ROOTFS_DIR}/overlay}"
 EXTRAS_DIR="${EXTRAS_DIR:-${ROOTFS_DIR}/extras}"
 OUTPUT_DIR="${OUTPUT_DIR:-.}"
 
-MIN_IMG_MIB="${MIN_IMG_MIB:-96}"
-EXTRA_MARGIN_MIB="${EXTRA_MARGIN_MIB:-16}"
+MIN_IMG_MIB="${MIN_IMG_MIB:-512}"
+EXTRA_MARGIN_MIB="${EXTRA_MARGIN_MIB:-128}"
+SIZE_FACTOR_PERCENT="${SIZE_FACTOR_PERCENT:-180}"
 IMG_SIZE="${IMG_SIZE:-}"
 FS_LABEL_PREFIX="${FS_LABEL_PREFIX:-pulse}"
 
@@ -30,8 +31,10 @@ Env:
   OVERLAY_DIR       overlay dir (default: rootfs/overlay)
   EXTRAS_DIR        extras archive dir (default: rootfs/extras)
   OUTPUT_DIR        output image dir (default: .)
-  MIN_IMG_MIB       minimum image size in MiB when auto-sized (default: 96)
-  EXTRA_MARGIN_MIB  free-space margin in MiB when auto-sized (default: 16)
+  MIN_IMG_MIB       minimum image size in MiB when auto-sized (default: 512)
+  EXTRA_MARGIN_MIB  free-space margin in MiB when auto-sized (default: 128)
+  SIZE_FACTOR_PERCENT
+                    auto-size multiplier in percent (default: 180)
   IMG_SIZE          fixed image size (e.g. 128M, 1G). If set, overrides auto-size
 USAGE
 }
@@ -176,19 +179,15 @@ build_one_arch() {
         tar --no-same-owner -xaf "${extra}" -C "${stage_dir}"
     done
 
-    # Pre-create /fs mountpoint to avoid runtime mkdir failure on rootfs.
-    if [[ -e "${stage_dir}/fs" && ! -d "${stage_dir}/fs" ]]; then
-        die "[${arch}] ${stage_dir}/fs exists but is not a directory"
-    fi
-    mkdir -p "${stage_dir}/fs"
-
     local img_mib
     if [[ -n "${IMG_SIZE}" ]]; then
         img_mib="$(parse_size_to_mib "${IMG_SIZE}")"
     else
         local used_kib
         used_kib="$(du -sk "${stage_dir}" | awk '{print $1}')"
-        img_mib=$(((used_kib + 1023) / 1024 + EXTRA_MARGIN_MIB))
+        local used_mib
+        used_mib=$(((used_kib + 1023) / 1024))
+        img_mib=$(((used_mib * SIZE_FACTOR_PERCENT + 99) / 100 + EXTRA_MARGIN_MIB))
         (( img_mib < MIN_IMG_MIB )) && img_mib="${MIN_IMG_MIB}"
     fi
 

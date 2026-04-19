@@ -8,6 +8,7 @@ impl InitIf for InitIfImpl {
     /// and performed earliest platform configuration and initialization (e.g.,
     /// early console, clocking).
     fn init_early(_cpu_id: usize, _mbi: usize) {
+        crate::console::init();
         axcpu::init::init_trap();
         crate::time::init_early();
     }

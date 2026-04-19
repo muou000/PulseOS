@@ -10,9 +10,14 @@ endif
 
 build_args-release := --release
 
+build_locked_arg := --locked
+ifeq ($(CARGO_BUILD_ALLOW_LOCK_UPDATE),1)
+  build_locked_arg :=
+endif
+
 build_args := \
   -Z unstable-options \
-  --locked \
+  $(build_locked_arg) \
   --offline \
   --target $(TARGET) \
   --target-dir $(TARGET_DIR) \
@@ -28,7 +33,7 @@ ifeq ($(MAKECMDGOALS), doc_check_missing)
 endif
 
 define cargo_build
-  $(call run_cmd,cargo -C $(1) build,$(build_args) --features "$(strip $(2))")
+  $(call run_cmd,cargo -C $(1) build,$(build_args) $(CARGO_BUILD_EXTRA_ARGS) --features "$(strip $(2))")
 endef
 
 clippy_args := -A clippy::new_without_default -A unsafe_op_in_unsafe_fn
