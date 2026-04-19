@@ -1,3 +1,4 @@
+mount -t ext4 device0 /fs &&
 cd /fs/musl && sh ./basic_testcode.sh &&
 /fs/musl/busybox sh -c 'cd /fs/musl && sh /fs/musl/busybox_testcode.sh' &&
 # sh ./cyclictest_testcode.sh &&

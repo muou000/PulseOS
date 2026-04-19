@@ -1,6 +1,10 @@
 use alloc::{collections::BTreeMap, string::String, sync::Arc, vec, vec::Vec};
 use core::{any::Any, task::Context, time::Duration};
 
+use super::{
+    Ext4Filesystem,
+    util::{duration_to_ext4_time, into_ext4_type, into_vfs_err, into_vfs_type, now_as_ext4_time},
+};
 use axfs_ng_vfs::{
     DirEntry, DirEntrySink, DirNode, DirNodeOps, FileNode, FileNodeOps, FilesystemOps, Metadata,
     MetadataUpdate, NodeFlags, NodeOps, NodePermission, NodeType, Reference, VfsError, VfsResult,
@@ -9,10 +13,6 @@ use axfs_ng_vfs::{
 use axpoll::{IoEvents, Pollable};
 use ext4_rs::Ext4;
 use spin::Lazy;
-use super::{
-    Ext4Filesystem,
-    util::{duration_to_ext4_time, into_ext4_type, into_vfs_err, into_vfs_type, now_as_ext4_time},
-};
 
 pub struct Inode {
     fs: Arc<Ext4Filesystem>,
@@ -78,6 +78,11 @@ impl Inode {
     fn build_dir_snapshot_uncached(&self, fs: &Ext4, dir_ino: u32) -> Arc<DirSnapshot> {
         let mut entries = Vec::new();
         let total_inodes = fs.super_block.total_inodes();
+        log::info!(
+            "ext4 snapshot: dir_ino={}, total_inodes={}",
+            dir_ino,
+            total_inodes
+        );
         for entry in fs.dir_get_entries(dir_ino) {
             if entry.inode == 0 || entry.inode > total_inodes {
                 log::warn!(
@@ -98,6 +103,11 @@ impl Inode {
                 is_dir,
             });
         }
+        log::info!(
+            "ext4 snapshot built: dir_ino={}, entries={}",
+            dir_ino,
+            entries.len()
+        );
         Arc::new(DirSnapshot { entries })
     }
 
@@ -107,9 +117,7 @@ impl Inode {
             return snapshot;
         }
         let snapshot = self.build_dir_snapshot_uncached(fs, dir_ino);
-        DIR_SNAPSHOT_CACHE
-            .lock()
-            .insert(key, snapshot.clone());
+        DIR_SNAPSHOT_CACHE.lock().insert(key, snapshot.clone());
         snapshot
     }
 
@@ -127,7 +135,11 @@ impl Inode {
         Ok(())
     }
 
-    fn cached_entry<'a>(&self, snapshot: &'a DirSnapshot, name: &str) -> Option<&'a CachedDirEntry> {
+    fn cached_entry<'a>(
+        &self,
+        snapshot: &'a DirSnapshot,
+        name: &str,
+    ) -> Option<&'a CachedDirEntry> {
         snapshot.entries.iter().find(|entry| entry.name == name)
     }
 
@@ -236,13 +248,15 @@ impl FileNodeOps for Inode {
             buf[..len].copy_from_slice(&raw[offset..offset + len]);
             return Ok(len);
         }
-        fs.read_at(self.ino, offset as usize, buf).map_err(into_vfs_err)
+        fs.read_at(self.ino, offset as usize, buf)
+            .map_err(into_vfs_err)
     }
 
     fn write_at(&self, buf: &[u8], offset: u64) -> VfsResult<usize> {
         let fs = self.fs.lock();
         self.validate_inode_num(&fs, self.ino)?;
-        fs.write_at(self.ino, offset as usize, buf).map_err(into_vfs_err)
+        fs.write_at(self.ino, offset as usize, buf)
+            .map_err(into_vfs_err)
     }
 
     fn append(&self, buf: &[u8]) -> VfsResult<(usize, u64)> {
@@ -325,7 +339,19 @@ impl DirNodeOps for Inode {
     fn read_dir(&self, offset: u64, sink: &mut dyn DirEntrySink) -> VfsResult<usize> {
         let fs = self.fs.lock();
         self.validate_inode_num(&fs, self.ino)?;
+        let inode_ref = fs.get_inode_ref(self.ino);
+        log::info!(
+            "ext4 read_dir: ino={}, size={}, offset={}",
+            self.ino,
+            inode_ref.inode.size(),
+            offset
+        );
         let snapshot = self.build_dir_snapshot(&fs, self.ino);
+        log::info!(
+            "ext4 read_dir snapshot: ino={}, entries={}",
+            self.ino,
+            snapshot.entries.len()
+        );
         let mut count = 0usize;
         for (index, entry) in snapshot.entries.iter().enumerate().skip(offset as usize) {
             if !sink.accept(
@@ -348,12 +374,7 @@ impl DirNodeOps for Inode {
         let Some(entry) = self.cached_entry(&snapshot, name) else {
             return Err(VfsError::NotFound);
         };
-        Ok(self.create_entry(
-            entry.inode_num,
-            entry.node_type,
-            entry.is_dir,
-            &entry.name,
-        ))
+        Ok(self.create_entry(entry.inode_num, entry.node_type, entry.is_dir, &entry.name))
     }
 
     fn create(

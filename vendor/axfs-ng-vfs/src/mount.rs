@@ -199,27 +199,32 @@ impl Location {
         Self::new(mountpoint, entry)
     }
 
+    fn resolve_mounted_child(&self, entry: &DirEntry) -> Option<Self> {
+        let mountpoint = self
+            .mountpoint
+            .children
+            .lock()
+            .get(&entry.key())
+            .and_then(Weak::upgrade)?;
+        let mountpoint = mountpoint.effective_mountpoint();
+        let entry = mountpoint.root.clone();
+        Some(Self::new(mountpoint, entry))
+    }
+
+    fn resolve_mounted_location(self) -> Self {
+        if let Some(mount) = self.resolve_mounted_child(&self.entry) {
+            return mount;
+        }
+        self.resolve_mountpoint()
+    }
+
     pub fn lookup_no_follow(&self, name: &str) -> VfsResult<Self> {
         Ok(match name {
             DOT => self.clone(),
             DOTDOT => self.parent().unwrap_or_else(|| self.clone()),
             _ => {
-                if let Some(child_mount) = self
-                    .mountpoint
-                    .children
-                    .lock()
-                    .values()
-                    .find_map(|child| {
-                        let child = child.upgrade()?;
-                        let child_loc = child.location()?;
-                        let child_parent = child_loc.parent()?;
-                        (child_loc.name() == name && child_parent.ptr_eq(self)).then_some(child)
-                    })
-                {
-                    return Ok(child_mount.root_location());
-                }
                 let loc = Self::new(self.mountpoint.clone(), self.entry.as_dir()?.lookup(name)?);
-                loc.resolve_mountpoint()
+                loc.resolve_mounted_location()
             }
         })
     }
@@ -266,11 +271,12 @@ impl Location {
         self.entry
             .as_dir()?
             .open_file(name, options)
-            .map(|entry| self.wrap(entry).resolve_mountpoint())
+            .map(|entry| self.wrap(entry).resolve_mounted_location())
     }
 
     pub fn read_dir(&self, offset: u64, sink: &mut dyn DirEntrySink) -> VfsResult<usize> {
-        self.entry.as_dir()?.read_dir(offset, sink)
+        let loc = self.clone().resolve_mounted_location();
+        loc.entry.as_dir()?.read_dir(offset, sink)
     }
 
     pub fn mount(&self, fs: &Filesystem) -> VfsResult<Arc<Mountpoint>> {

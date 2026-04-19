@@ -7,8 +7,8 @@ use linux_raw_sys::general::*;
 use alloc::string::{String, ToString};
 
 use axerrno::LinuxError;
-use axfs::OpenOptions;
-use axfs_ng_vfs::{NodePermission, path::Path};
+use axfs::{FsContext, OpenOptions};
+use axfs_ng_vfs::{NodePermission, VfsError, path::Path};
 use pulse_core::fd_table::open_result_to_entry;
 
 fn flags_to_options(flags: usize, mode: usize) -> OpenOptions {
@@ -65,6 +65,50 @@ fn read_user_nonempty_path(pathname: usize) -> Result<String, LinuxError> {
     Ok(path.to_string())
 }
 
+fn read_user_optional_path(pathname: usize) -> Result<Option<String>, LinuxError> {
+    if pathname == 0 {
+        return Ok(None);
+    }
+    let path = read_user_cstring(pathname)?;
+    let path = path.to_str().map_err(|_| LinuxError::EINVAL)?;
+    if path.is_empty() {
+        Ok(None)
+    } else {
+        Ok(Some(path.to_string()))
+    }
+}
+
+fn ensure_dir_recursive(
+    ctx: &FsContext,
+    path: &str,
+    mode: NodePermission,
+) -> axfs_ng_vfs::VfsResult<axfs_ng_vfs::Location> {
+    let path = Path::new(path);
+    match ctx.resolve(path) {
+        Ok(loc) => {
+            loc.check_is_dir()?;
+            Ok(loc)
+        }
+        Err(VfsError::NotFound) => {
+            if let Some(parent) = path.parent() {
+                ensure_dir_recursive(ctx, parent.as_str(), NodePermission::default())?;
+            }
+            ctx.create_dir(path, mode)
+        }
+        Err(err) => Err(err),
+    }
+}
+
+fn resolve_mount_target_path(target_path: &str) -> Result<String, LinuxError> {
+    let ctx = context_for_dirfd(AT_FDCWD as i32)?;
+    let target = ensure_dir_recursive(&ctx, target_path, NodePermission::default())
+        .map_err(|e| LinuxError::from(e.canonicalize()))?;
+    Ok(target
+        .absolute_path()
+        .map_err(|e| LinuxError::from(e.canonicalize()))?
+        .to_string())
+}
+
 fn rename_at(olddirfd: i32, oldpath: &str, newdirfd: i32, newpath: &str) -> Result<(), LinuxError> {
     let old_ctx = context_for_dirfd(olddirfd)?;
     let new_ctx = context_for_dirfd(newdirfd)?;
@@ -99,7 +143,6 @@ pub fn sys_openat(dirfd: i32, pathname: usize, flags: usize, mode: usize) -> isi
         Ok(path) => path,
         Err(_) => return -LinuxError::EINVAL.code() as isize,
     };
-
     let options = flags_to_options(flags, mode);
     let opened = match options.open(&ctx, path) {
         Ok(opened) => opened,
@@ -138,9 +181,9 @@ pub fn sys_mkdirat(dirfd: i32, pathname: usize, mode: usize) -> isize {
 }
 
 pub fn sys_mount(
-    _source: usize,
+    source: usize,
     target: usize,
-    _fstype: usize,
+    fstype: usize,
     _flags: usize,
     _data: usize,
 ) -> isize {
@@ -159,20 +202,51 @@ pub fn sys_mount(
         Err(_) => return -LinuxError::EINVAL.code() as isize,
     };
 
-    if let Err(e) = context_for_dirfd(AT_FDCWD as i32).and_then(|ctx| {
-        ctx.resolve(target_path)
-            .map(|_| ())
-            .map_err(|err| LinuxError::from(err.canonicalize()))
-    }) {
-        return -e.code() as isize;
-    }
+    let target_path = match resolve_mount_target_path(target_path) {
+        Ok(path) => path,
+        Err(e) => return -e.code() as isize,
+    };
 
-    let mut mounted = MOUNTED_TARGETS.lock();
-    if mounted.contains(target_path) {
+    if axfs::is_mount_registered(&target_path) {
         return -LinuxError::EBUSY.code() as isize;
     }
-    mounted.insert(target_path.to_string());
-    0
+
+    if MOUNTED_TARGETS.lock().contains(&target_path) {
+        return -LinuxError::EBUSY.code() as isize;
+    }
+
+    let source = match read_user_optional_path(source) {
+        Ok(Some(path)) => path,
+        Ok(None) => return -LinuxError::EINVAL.code() as isize,
+        Err(e) => return -e.code() as isize,
+    };
+    let fstype = match read_user_optional_path(fstype) {
+        Ok(Some(path)) => path,
+        Ok(None) => "none".to_string(),
+        Err(e) => return -e.code() as isize,
+    };
+
+    let fs = match axfs::lookup_mountable_filesystem(&source) {
+        Some(fs) => fs,
+        None => return -LinuxError::ENOENT.code() as isize,
+    };
+    let ctx = match context_for_dirfd(AT_FDCWD as i32) {
+        Ok(ctx) => ctx,
+        Err(e) => return -e.code() as isize,
+    };
+    let mount_dir = match ctx.resolve(&target_path) {
+        Ok(loc) => loc,
+        Err(e) => return -LinuxError::from(e.canonicalize()).code() as isize,
+    };
+
+    match mount_dir.mount(&fs) {
+        Ok(_) => {
+            MOUNTED_TARGETS.lock().insert(target_path.clone());
+            axfs::register_mount(&source, &target_path, &fstype, "rw,relatime");
+            0
+        }
+        Err(e) => -LinuxError::from(e.canonicalize()).code() as isize,
+    }
 }
 
 pub fn sys_umount2(target: usize, _flags: usize) -> isize {
@@ -191,11 +265,38 @@ pub fn sys_umount2(target: usize, _flags: usize) -> isize {
         Err(_) => return -LinuxError::EINVAL.code() as isize,
     };
 
-    let mut mounted = MOUNTED_TARGETS.lock();
-    if mounted.remove(target_path) {
-        0
-    } else {
-        -LinuxError::EINVAL.code() as isize
+    let ctx = match context_for_dirfd(AT_FDCWD as i32) {
+        Ok(ctx) => ctx,
+        Err(e) => return -e.code() as isize,
+    };
+    let target_path = match ctx.resolve(target_path) {
+        Ok(loc) => match loc.absolute_path() {
+            Ok(path) => path.to_string(),
+            Err(e) => return -LinuxError::from(e.canonicalize()).code() as isize,
+        },
+        Err(e) => return -LinuxError::from(e.canonicalize()).code() as isize,
+    };
+    if target_path == "/" {
+        return -LinuxError::EBUSY.code() as isize;
+    }
+    let target_loc = match ctx.resolve_no_follow(&target_path) {
+        Ok(loc) => loc,
+        Err(e) => return -LinuxError::from(e.canonicalize()).code() as isize,
+    };
+    if !target_loc.is_root_of_mount() {
+        return -LinuxError::EINVAL.code() as isize;
+    }
+
+    if !MOUNTED_TARGETS.lock().contains(&target_path) {
+        return -LinuxError::EINVAL.code() as isize;
+    }
+    match target_loc.unmount() {
+        Ok(()) => {
+            MOUNTED_TARGETS.lock().remove(&target_path);
+            let _ = axfs::unregister_mount(&target_path);
+            0
+        }
+        Err(e) => -LinuxError::from(e.canonicalize()).code() as isize,
     }
 }
 
@@ -229,7 +330,7 @@ pub fn sys_unlinkat(dirfd: i32, pathname: usize, flags: usize) -> isize {
     };
 
     if (flags & AT_REMOVEDIR as usize) != 0 {
-        return match ctx.remove_dir(path) {
+        return match ctx.remove_dir(Path::new(path)) {
             Ok(()) => 0,
             Err(e) => {
                 let errno = LinuxError::from(e.canonicalize());
@@ -238,7 +339,7 @@ pub fn sys_unlinkat(dirfd: i32, pathname: usize, flags: usize) -> isize {
         };
     }
 
-    match ctx.remove_file(path) {
+    match ctx.remove_file(Path::new(path)) {
         Ok(()) => 0,
         Err(e) => {
             let errno = LinuxError::from(e.canonicalize());
