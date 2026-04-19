@@ -17,6 +17,7 @@ axfeat = { path = "arceos/api/axfeat", features = [
     "multitask",
     "sched-rr",
     "fs",
+    "rtc",
     "paging",
     "irq"
     ] }
@@ -36,7 +37,7 @@ axplat-riscv64-qemu-virt = "0.3.0"
 axplat-loongarch64-qemu-virt = "0.3.0"
 
 syscalls = { version = "0.8", default-features = false }
-linux-raw-sys = { version = "0.12", default-features = false, features = ["no_std", "general"] }
+linux-raw-sys = { version = "0.12", default-features = false, features = ["no_std", "general", "mempolicy"] }
 axio = { version = "0.3.0-pre.1", default-features = false, features = ["alloc"] }
 axfs-ng-vfs = "0.1.1"
 linkme = "0.3"
@@ -50,7 +51,6 @@ kernel_guard = "0.1"
 rand = { version = "0.9.2", default-features = false, features = ["small_rng"] }
 
 [patch.crates-io]
-axplat-loongarch64-qemu-virt = { path = "vendor/axplat-loongarch64-qemu-virt" }
 axfs-ng-vfs = { path = "vendor/axfs-ng-vfs" }
 
 [package]
