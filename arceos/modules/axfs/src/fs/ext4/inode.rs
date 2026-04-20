@@ -78,11 +78,7 @@ impl Inode {
     fn build_dir_snapshot_uncached(&self, fs: &Ext4, dir_ino: u32) -> Arc<DirSnapshot> {
         let mut entries = Vec::new();
         let total_inodes = fs.super_block.total_inodes();
-        log::info!(
-            "ext4 snapshot: dir_ino={}, total_inodes={}",
-            dir_ino,
-            total_inodes
-        );
+
         for entry in fs.dir_get_entries(dir_ino) {
             if entry.inode == 0 || entry.inode > total_inodes {
                 log::warn!(
@@ -103,11 +99,7 @@ impl Inode {
                 is_dir,
             });
         }
-        log::info!(
-            "ext4 snapshot built: dir_ino={}, entries={}",
-            dir_ino,
-            entries.len()
-        );
+
         Arc::new(DirSnapshot { entries })
     }
 
