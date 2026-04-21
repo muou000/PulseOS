@@ -1,6 +1,9 @@
+use axhal::{
+    context::TrapFrame,
+    trap::{SYSCALL, register_trap_handler},
+};
+
 use crate::*;
-use axhal::context::TrapFrame;
-use axhal::trap::{SYSCALL, register_trap_handler};
 
 #[register_trap_handler(SYSCALL)]
 pub fn syscall_handler(tf: &TrapFrame, syscall_num: usize) -> isize {
@@ -26,14 +29,7 @@ pub fn syscall_handler(tf: &TrapFrame, syscall_num: usize) -> isize {
         thread.exit_current(process.group_exit_code());
     }
 
-    let args = [
-        tf.arg0(),
-        tf.arg1(),
-        tf.arg2(),
-        tf.arg3(),
-        tf.arg4(),
-        tf.arg5(),
-    ];
+    let args = [tf.arg0(), tf.arg1(), tf.arg2(), tf.arg3(), tf.arg4(), tf.arg5()];
 
     axlog::debug!(
         "Syscall: id={}, args=[{:#x}, {:#x}, {:#x}, {:#x}, {:#x}, {:#x}]",
@@ -85,6 +81,11 @@ fn syscall_dispatcher(
         Sysno::clone => impls::sys_clone(tf, args),
         Sysno::wait4 => impls::sys_wait4(args[0] as isize, args[1], args[2] as i32, args[3]),
         Sysno::sched_yield => impls::sys_yield(),
+        Sysno::sched_getaffinity => impls::sys_sched_getaffinity(args[0], args[1], args[2]),
+        Sysno::sched_setaffinity => impls::sys_sched_setaffinity(args[0], args[1], args[2]),
+        Sysno::sched_getscheduler => impls::sys_sched_getscheduler(args[0]),
+        Sysno::sched_setscheduler => impls::sys_sched_setscheduler(args[0], args[1], args[2]),
+        Sysno::sched_getparam => impls::sys_sched_getparam(args[0], args[1]),
 
         Sysno::read => impls::sys_read(args[0], args[1], args[2]),
         Sysno::readv => impls::sys_readv(args[0], args[1], args[2]),
@@ -98,6 +99,8 @@ fn syscall_dispatcher(
         Sysno::getdents64 => impls::sys_getdents64(args[0], args[1], args[2]),
         Sysno::close => impls::sys_close(args[0]),
         Sysno::fstat => impls::sys_fstat(args[0], args[1]),
+        Sysno::statfs => impls::sys_statfs(args[0], args[1]),
+        Sysno::fstatfs => impls::sys_fstatfs(args[0], args[1]),
         #[cfg(target_arch = "loongarch64")]
         Sysno::fstatat => impls::sys_fstatat(args[0] as i32, args[1], args[2], args[3]),
         #[cfg(target_arch = "riscv64")]
@@ -108,8 +111,16 @@ fn syscall_dispatcher(
         Sysno::mmap => impls::sys_mmap(args[0], args[1], args[2], args[3], args[4] as i32, args[5]),
         Sysno::munmap => impls::sys_munmap(args[0], args[1]),
         Sysno::mprotect => impls::sys_mprotect(args[0], args[1], args[2]),
+        Sysno::mlock => impls::sys_mlock(args[0], args[1]),
+        Sysno::munlock => impls::sys_munlock(args[0], args[1]),
+        Sysno::mlockall => impls::sys_mlockall(args[0]),
+        Sysno::munlockall => impls::sys_munlockall(),
 
         Sysno::nanosleep => impls::sys_nanosleep(args[0], args[1]),
+        Sysno::clock_nanosleep => {
+            impls::sys_clock_nanosleep(args[0] as i32, args[1], args[2], args[3])
+        }
+        Sysno::clock_getres => impls::sys_clock_getres(args[0] as i32, args[1]),
         Sysno::clock_gettime => impls::sys_clock_gettime(args[0] as i32, args[1]),
         Sysno::gettimeofday => impls::sys_gettimeofday(args[0], args[1]),
         Sysno::times => impls::sys_times(args[0]),
@@ -121,11 +132,10 @@ fn syscall_dispatcher(
         }
 
         Sysno::uname => impls::sys_uname(args[0]),
-        Sysno::getrandom => impls::sys_getrandom(args[0], args[1], args[2]),
         Sysno::sysinfo => impls::sys_sysinfo(args[0]),
         Sysno::syslog => impls::sys_syslog(args[0], args[1], args[2]),
-        Sysno::prlimit64 => impls::sys_prlimit64(args[0], args[1], args[2], args[3]),
         Sysno::rt_sigprocmask => impls::sys_rt_sigprocmask(args[0], args[1], args[2], args[3]),
+        Sysno::get_mempolicy => 0,
 
         Sysno::getuid => impls::sys_getuid(),
         Sysno::geteuid => impls::sys_geteuid(),
@@ -135,14 +145,7 @@ fn syscall_dispatcher(
             1
         }
         Sysno::setpgid => impls::sys_setpgid(args[0] as isize, args[1] as isize),
-        Sysno::kill => {
-            axlog::warn!(
-                "sys_kill (stub): pid={}, sig={}, return 0",
-                args[0],
-                args[1]
-            );
-            0
-        }
+        Sysno::kill => impls::sys_kill(args[0] as isize, args[1] as isize),
         Sysno::getgid => impls::sys_getgid(),
         Sysno::getegid => impls::sys_getegid(),
         Sysno::setuid => impls::sys_setuid(args[0]),
@@ -158,27 +161,28 @@ fn syscall_dispatcher(
         Sysno::dup => impls::sys_dup(args[0]),
         Sysno::dup3 => impls::sys_dup3(args[0], args[1], args[2]),
         Sysno::pipe2 => impls::sys_pipe2(args[0], args[1]),
-        Sysno::ppoll => {
-            // ppoll(fds, nfds, timeout, sigmask)
-            // 简化实现：如果有 fd=0 (stdin)，等通过 yield 让出直到有输入
-            axlog::warn!("sys_ppoll: nfds={}, timeout={:#x}", args[1], args[2]);
-            // 返回 1 表示有 1 个 fd 就绪（简化处理）
-            1
+        Sysno::socketpair => {
+            impls::sys_socketpair(args[0] as u32, args[1] as u32, args[2] as u32, args[3])
         }
+        Sysno::ppoll => impls::sys_ppoll(args[0], args[1], args[2], args[3], args[4]),
         Sysno::getcwd => impls::sys_getcwd(args[0], args[1]),
         Sysno::chdir => impls::sys_chdir(args[0]),
         Sysno::unlinkat => impls::sys_unlinkat(args[0] as i32, args[1], args[2]),
         #[cfg(target_arch = "loongarch64")]
-        Sysno::renameat => impls::sys_renameat2(args[0] as i32, args[1], args[2] as i32, args[3], 0),
+        Sysno::renameat => {
+            impls::sys_renameat2(args[0] as i32, args[1], args[2] as i32, args[3], 0)
+        }
         Sysno::renameat2 => {
             impls::sys_renameat2(args[0] as i32, args[1], args[2] as i32, args[3], args[4])
         }
         Sysno::utimensat => impls::sys_utimensat(args[0] as i32, args[1], args[2], args[3]),
+        Sysno::readlinkat => impls::sys_readlinkat(args[0] as i32, args[1], args[2], args[3]),
         Sysno::set_robust_list => impls::sys_set_robust_list(args[0], args[1]),
         Sysno::get_robust_list => impls::sys_get_robust_list(args[0], args[1], args[2]),
         Sysno::faccessat => impls::sys_faccessat(args[0] as i32, args[1], args[2], 0),
         Sysno::faccessat2 => impls::sys_faccessat(args[0] as i32, args[1], args[2], args[3]),
         Sysno::lseek => impls::sys_lseek(args[0], args[1], args[2]),
+        Sysno::ftruncate => impls::sys_ftruncate(args[0], args[1]),
         Sysno::execve => {
             axlog::debug!(
                 "sys_execve: pathname={:#x}, argv={:#x}, envp={:#x}",

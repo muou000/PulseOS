@@ -5,6 +5,8 @@ use axerrno::LinuxError;
 use linux_raw_sys::general::{UTIME_NOW, UTIME_OMIT, iovec, timespec};
 use pulse_core::task::uaccess;
 
+const MAX_USER_IOVCNT: usize = 1024;
+
 pub(crate) fn with_process<R>(
     f: impl FnOnce(&pulse_core::task::Process) -> R,
 ) -> Result<R, LinuxError> {
@@ -37,8 +39,20 @@ pub(crate) fn read_user_iovec_array(
     user_addr: usize,
     iovcnt: usize,
 ) -> Result<Vec<iovec>, LinuxError> {
+    if iovcnt > MAX_USER_IOVCNT {
+        return Err(LinuxError::EINVAL);
+    }
     with_process(|process| uaccess::read_user_plain_array::<iovec>(process, user_addr, iovcnt))?
         .map_err(|e| LinuxError::from(e.canonicalize()))
+}
+
+pub(crate) fn alloc_zeroed_bytes(len: usize, _site: &'static str) -> Result<Vec<u8>, LinuxError> {
+    let mut out = Vec::new();
+    if out.try_reserve_exact(len).is_err() {
+        return Err(LinuxError::ENOMEM);
+    }
+    out.resize(len, 0);
+    Ok(out)
 }
 
 pub(crate) fn read_user_timespec(user_addr: usize) -> Result<timespec, LinuxError> {

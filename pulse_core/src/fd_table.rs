@@ -1,13 +1,21 @@
-use alloc::collections::{BTreeMap, btree_map::Entry};
-use alloc::sync::Arc;
+use alloc::{
+    collections::{BTreeMap, btree_map::Entry},
+    sync::Arc,
+};
+use core::{
+    any::Any,
+    sync::atomic::{AtomicBool, AtomicUsize, Ordering},
+    time::Duration,
+};
+
 use axerrno::{LinuxError, LinuxResult};
 use axfs::{File, FileFlags as AxFileFlags, OpenResult};
 use axfs_ng_vfs::{Location, Metadata, NodeType};
 use axio::{BufReader, PollState, Read, Seek, SeekFrom, Write};
-use core::any::Any;
-use core::sync::atomic::{AtomicBool, Ordering};
 use linux_raw_sys::general::*;
 use spin::{Lazy, Mutex};
+
+use crate::cpu_dma_latency::{CpuDmaLatencyRequest, effective_latency_us};
 
 pub const FD_RESERVED: usize = 3;
 pub const FD_LIMIT: usize = 1024;
@@ -35,6 +43,16 @@ pub trait FdObject: Send + Sync {
 
     fn poll(&self) -> LinuxResult<PollState>;
 
+    /// Waits until this object is likely ready for `events`.
+    ///
+    /// Returns:
+    /// - `Ok(true)`: awakened for readiness (or equivalent wake event).
+    /// - `Ok(false)`: timed out before readiness.
+    /// - `Err(EOPNOTSUPP)`: object does not support blocking-ready wait.
+    fn wait_ready(&self, _events: i16, _deadline: Option<Duration>) -> LinuxResult<bool> {
+        Err(LinuxError::EOPNOTSUPP)
+    }
+
     fn set_nonblocking(&self, _nonblocking: bool) -> LinuxResult {
         Ok(())
     }
@@ -53,6 +71,10 @@ pub trait FdObject: Send + Sync {
 
     fn read_dirents64(&self, _buf: &mut [u8]) -> LinuxResult<usize> {
         Err(LinuxError::ENOTDIR)
+    }
+
+    fn truncate(&self, _len: u64) -> LinuxResult {
+        Err(LinuxError::EINVAL)
     }
 }
 
@@ -192,19 +214,11 @@ impl FdObject for StdinObject {
     }
 
     fn stat(&self) -> LinuxResult<stat> {
-        Ok(stat {
-            st_ino: 1,
-            st_nlink: 1,
-            st_mode: 0o20000 | 0o440u32,
-            ..empty_stat()
-        })
+        Ok(stat { st_ino: 1, st_nlink: 1, st_mode: 0o20000 | 0o440u32, ..empty_stat() })
     }
 
     fn poll(&self) -> LinuxResult<PollState> {
-        Ok(PollState {
-            readable: true,
-            writable: true,
-        })
+        Ok(PollState { readable: true, writable: true })
     }
 }
 
@@ -224,19 +238,11 @@ impl FdObject for StdoutObject {
     }
 
     fn stat(&self) -> LinuxResult<stat> {
-        Ok(stat {
-            st_ino: 1,
-            st_nlink: 1,
-            st_mode: 0o20000 | 0o220u32,
-            ..empty_stat()
-        })
+        Ok(stat { st_ino: 1, st_nlink: 1, st_mode: 0o20000 | 0o220u32, ..empty_stat() })
     }
 
     fn poll(&self) -> LinuxResult<PollState> {
-        Ok(PollState {
-            readable: true,
-            writable: true,
-        })
+        Ok(PollState { readable: true, writable: true })
     }
 }
 
@@ -247,10 +253,7 @@ pub struct FileObject {
 
 impl FileObject {
     pub fn new(inner: File) -> Self {
-        Self {
-            inner,
-            nonblocking: AtomicBool::new(false),
-        }
+        Self { inner, nonblocking: AtomicBool::new(false) }
     }
 }
 
@@ -291,12 +294,89 @@ impl FdObject for FileObject {
     }
 
     fn seek(&self, pos: SeekFrom) -> LinuxResult<u64> {
+        if self.inner.location().flags().contains(axfs_ng_vfs::NodeFlags::STREAM) {
+            return Err(LinuxError::ESPIPE);
+        }
         let mut file = &self.inner;
         Ok(file.seek(pos)?)
     }
 
     fn read_at(&self, buf: &mut [u8], offset: u64) -> LinuxResult<usize> {
         Ok(self.inner.read_at(buf, offset)?)
+    }
+
+    fn truncate(&self, len: u64) -> LinuxResult {
+        self.inner.access(AxFileFlags::WRITE)?.set_len(len)?;
+        Ok(())
+    }
+}
+
+fn parse_cpu_dma_latency_value(buf: &[u8]) -> LinuxResult<i32> {
+    if buf.len() != 4 {
+        return Err(LinuxError::EINVAL);
+    }
+    let mut bytes = [0u8; 4];
+    bytes.copy_from_slice(buf);
+    Ok(i32::from_ne_bytes(bytes))
+}
+
+fn is_cpu_dma_latency_device(location: &Location) -> bool {
+    let Ok(metadata) = location.metadata() else {
+        return false;
+    };
+    metadata.node_type == NodeType::CharacterDevice
+        && metadata.rdev.major() == 10
+        && metadata.rdev.minor() == 63
+}
+
+pub struct CpuDmaLatencyObject {
+    location: Location,
+    request: Arc<CpuDmaLatencyRequest>,
+    nonblocking: AtomicBool,
+}
+
+impl CpuDmaLatencyObject {
+    pub fn new(location: Location) -> Self {
+        Self { location, request: CpuDmaLatencyRequest::new(), nonblocking: AtomicBool::new(false) }
+    }
+}
+
+impl FdObject for CpuDmaLatencyObject {
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn read(&self, buf: &mut [u8]) -> LinuxResult<usize> {
+        if buf.is_empty() {
+            return Ok(0);
+        }
+        let bytes = effective_latency_us().to_ne_bytes();
+        let n = core::cmp::min(buf.len(), bytes.len());
+        buf[..n].copy_from_slice(&bytes[..n]);
+        Ok(n)
+    }
+
+    fn write(&self, buf: &[u8]) -> LinuxResult<usize> {
+        let value = parse_cpu_dma_latency_value(buf)?;
+        self.request.set_target_us(value);
+        Ok(buf.len())
+    }
+
+    fn stat(&self) -> LinuxResult<stat> {
+        location_to_stat(&self.location)
+    }
+
+    fn poll(&self) -> LinuxResult<PollState> {
+        Ok(PollState { readable: true, writable: true })
+    }
+
+    fn set_nonblocking(&self, nonblocking: bool) -> LinuxResult {
+        self.nonblocking.store(nonblocking, Ordering::Release);
+        Ok(())
+    }
+
+    fn location(&self) -> Option<Location> {
+        Some(self.location.clone())
     }
 }
 
@@ -316,11 +396,7 @@ pub struct DirObject {
 
 impl DirObject {
     pub fn new(inner: Location) -> Self {
-        Self {
-            inner,
-            offset: Mutex::new(0),
-            nonblocking: AtomicBool::new(false),
-        }
+        Self { inner, offset: Mutex::new(0), nonblocking: AtomicBool::new(false) }
     }
 }
 
@@ -342,10 +418,7 @@ impl FdObject for DirObject {
     }
 
     fn poll(&self) -> LinuxResult<PollState> {
-        Ok(PollState {
-            readable: true,
-            writable: false,
-        })
+        Ok(PollState { readable: true, writable: false })
     }
 
     fn set_nonblocking(&self, nonblocking: bool) -> LinuxResult {
@@ -361,6 +434,9 @@ impl FdObject for DirObject {
         let mut offset = self.offset.lock();
         let mut written = 0usize;
         let mut break_out = false;
+        if let Ok(path) = self.inner.absolute_path() {
+            axlog::info!("read_dirents64: path={}, offset={}, buf={}", path, *offset, dirp.len());
+        }
         let res = self.inner.read_dir(*offset, &mut |name: &str,
                                                      ino: u64,
                                                      node_type: NodeType,
@@ -383,6 +459,14 @@ impl FdObject for DirObject {
                 d_reclen: reclen as u16,
                 d_type: node_type as u8,
             };
+            axlog::debug!(
+                "read_dirents64: emit name={}, ino={}, type={:?}, next_off={}, reclen={}",
+                name,
+                ino,
+                node_type,
+                next_off,
+                reclen
+            );
             unsafe {
                 let dst = dirp.as_mut_ptr().add(written);
                 core::ptr::write_unaligned(dst.cast::<LinuxDirent64>(), dirent);
@@ -412,7 +496,9 @@ enum RingBufferStatus {
     Normal,
 }
 
-const RING_BUFFER_SIZE: usize = 65536;
+// Keep per-pipe memory bounded so socketpair-heavy workloads (e.g. hackbench)
+// don't exhaust kernel heap just by creating many endpoints.
+const RING_BUFFER_SIZE: usize = 4096;
 
 struct PipeRingBuffer {
     arr: [u8; RING_BUFFER_SIZE],
@@ -423,12 +509,7 @@ struct PipeRingBuffer {
 
 impl PipeRingBuffer {
     const fn new() -> Self {
-        Self {
-            arr: [0; RING_BUFFER_SIZE],
-            head: 0,
-            tail: 0,
-            status: RingBufferStatus::Empty,
-        }
+        Self { arr: [0; RING_BUFFER_SIZE], head: 0, tail: 0, status: RingBufferStatus::Empty }
     }
 
     fn write_byte(&mut self, byte: u8) {
@@ -469,26 +550,36 @@ impl PipeRingBuffer {
     }
 }
 
+struct PipeShared {
+    buffer: Mutex<PipeRingBuffer>,
+    wait: axtask::WaitQueue,
+    reader_count: AtomicUsize,
+    writer_count: AtomicUsize,
+}
+
+impl PipeShared {
+    fn new() -> Self {
+        Self {
+            buffer: Mutex::new(PipeRingBuffer::new()),
+            wait: axtask::WaitQueue::new(),
+            reader_count: AtomicUsize::new(1),
+            writer_count: AtomicUsize::new(1),
+        }
+    }
+}
+
 pub struct PipeObject {
     readable: bool,
-    buffer: Arc<Mutex<PipeRingBuffer>>,
+    shared: Arc<PipeShared>,
     nonblocking: AtomicBool,
 }
 
 impl PipeObject {
     pub fn new_pair() -> (Self, Self) {
-        let buffer = Arc::new(Mutex::new(PipeRingBuffer::new()));
+        let shared = Arc::new(PipeShared::new());
         (
-            Self {
-                readable: true,
-                buffer: buffer.clone(),
-                nonblocking: AtomicBool::new(false),
-            },
-            Self {
-                readable: false,
-                buffer,
-                nonblocking: AtomicBool::new(false),
-            },
+            Self { readable: true, shared: shared.clone(), nonblocking: AtomicBool::new(false) },
+            Self { readable: false, shared, nonblocking: AtomicBool::new(false) },
         )
     }
 
@@ -497,11 +588,17 @@ impl PipeObject {
     }
 
     fn write_end_closed(&self) -> bool {
-        Arc::strong_count(&self.buffer) == 1
+        self.shared.writer_count.load(Ordering::Acquire) == 0
     }
 
     fn read_end_closed(&self) -> bool {
-        Arc::strong_count(&self.buffer) == 1
+        self.shared.reader_count.load(Ordering::Acquire) == 0
+    }
+
+    fn ready_for(&self, wait_for_read: bool, wait_for_write: bool) -> bool {
+        let buffer = self.shared.buffer.lock();
+        (wait_for_read && (buffer.available_read() > 0 || self.write_end_closed()))
+            || (wait_for_write && (buffer.available_write() > 0 || self.read_end_closed()))
     }
 }
 
@@ -516,30 +613,29 @@ impl FdObject for PipeObject {
         }
         let mut read_size = 0usize;
         while read_size < buf.len() {
-            let mut ring_buffer = self.buffer.lock();
+            let mut ring_buffer = self.shared.buffer.lock();
             let available = ring_buffer.available_read();
             if available == 0 {
                 if self.write_end_closed() {
                     return Ok(read_size);
                 }
                 if self.nonblocking.load(Ordering::Acquire) {
-                    return if read_size > 0 {
-                        Ok(read_size)
-                    } else {
-                        Err(LinuxError::EAGAIN)
-                    };
+                    return if read_size > 0 { Ok(read_size) } else { Err(LinuxError::EAGAIN) };
                 }
                 drop(ring_buffer);
-                axtask::yield_now();
+                self.shared.wait.wait();
                 continue;
             }
             for _ in 0..available {
                 if read_size == buf.len() {
+                    self.shared.wait.notify_one(true);
                     return Ok(read_size);
                 }
                 buf[read_size] = ring_buffer.read_byte();
                 read_size += 1;
             }
+            drop(ring_buffer);
+            self.shared.wait.notify_all(true);
         }
         Ok(read_size)
     }
@@ -551,33 +647,28 @@ impl FdObject for PipeObject {
         let mut write_size = 0usize;
         while write_size < buf.len() {
             if self.read_end_closed() {
-                return if write_size > 0 {
-                    Ok(write_size)
-                } else {
-                    Err(LinuxError::EPIPE)
-                };
+                return if write_size > 0 { Ok(write_size) } else { Err(LinuxError::EPIPE) };
             }
-            let mut ring_buffer = self.buffer.lock();
+            let mut ring_buffer = self.shared.buffer.lock();
             let available = ring_buffer.available_write();
             if available == 0 {
                 if self.nonblocking.load(Ordering::Acquire) {
-                    return if write_size > 0 {
-                        Ok(write_size)
-                    } else {
-                        Err(LinuxError::EAGAIN)
-                    };
+                    return if write_size > 0 { Ok(write_size) } else { Err(LinuxError::EAGAIN) };
                 }
                 drop(ring_buffer);
-                axtask::yield_now();
+                self.shared.wait.wait();
                 continue;
             }
             for _ in 0..available {
                 if write_size == buf.len() {
+                    self.shared.wait.notify_one(true);
                     return Ok(write_size);
                 }
                 ring_buffer.write_byte(buf[write_size]);
                 write_size += 1;
             }
+            drop(ring_buffer);
+            self.shared.wait.notify_all(true);
         }
         Ok(write_size)
     }
@@ -595,16 +686,66 @@ impl FdObject for PipeObject {
     }
 
     fn poll(&self) -> LinuxResult<PollState> {
-        let buffer = self.buffer.lock();
+        let buffer = self.shared.buffer.lock();
         Ok(PollState {
-            readable: self.readable && buffer.available_read() > 0,
-            writable: self.writable() && buffer.available_write() > 0,
+            readable: self.readable && (buffer.available_read() > 0 || self.write_end_closed()),
+            writable: self.writable() && (buffer.available_write() > 0 || self.read_end_closed()),
         })
     }
 
     fn set_nonblocking(&self, nonblocking: bool) -> LinuxResult {
         self.nonblocking.store(nonblocking, Ordering::Release);
         Ok(())
+    }
+
+    fn wait_ready(&self, events: i16, deadline: Option<Duration>) -> LinuxResult<bool> {
+        let wait_for_read = self.readable && (events & (POLLIN as i16)) != 0;
+        let wait_for_write = self.writable() && (events & (POLLOUT as i16)) != 0;
+        if !wait_for_read && !wait_for_write {
+            return Err(LinuxError::EOPNOTSUPP);
+        }
+
+        if self.ready_for(wait_for_read, wait_for_write) {
+            return Ok(true);
+        }
+
+        match deadline {
+            Some(deadline) => {
+                const POLL_WAIT_QUANTUM: Duration = Duration::from_micros(100);
+                loop {
+                    if self.ready_for(wait_for_read, wait_for_write) {
+                        return Ok(true);
+                    }
+                    let now = axhal::time::monotonic_time();
+                    if now >= deadline {
+                        return Ok(false);
+                    }
+                    let remain = deadline - now;
+                    let sleep_dur = core::cmp::min(remain, POLL_WAIT_QUANTUM);
+                    if sleep_dur > Duration::ZERO {
+                        axtask::sleep(sleep_dur);
+                    } else {
+                        axtask::yield_now();
+                    }
+                }
+            }
+            None => {
+                self.shared.wait.wait_until(|| self.ready_for(wait_for_read, wait_for_write));
+                Ok(true)
+            }
+        }
+    }
+}
+
+impl Drop for PipeObject {
+    fn drop(&mut self) {
+        if self.readable {
+            self.shared.reader_count.fetch_sub(1, Ordering::AcqRel);
+            self.shared.wait.notify_all(true);
+        } else {
+            self.shared.writer_count.fetch_sub(1, Ordering::AcqRel);
+            self.shared.wait.notify_all(true);
+        }
     }
 }
 
@@ -618,7 +759,13 @@ pub fn stdio_entries() -> [FdEntry; 3] {
 
 pub fn open_result_to_entry(result: OpenResult, flags: FdFlags) -> FdEntry {
     let object: Arc<dyn FdObject> = match result {
-        OpenResult::File(file) => Arc::new(FileObject::new(file)),
+        OpenResult::File(file) => {
+            if is_cpu_dma_latency_device(file.location()) {
+                Arc::new(CpuDmaLatencyObject::new(file.location().clone()))
+            } else {
+                Arc::new(FileObject::new(file))
+            }
+        }
         OpenResult::Dir(dir) => Arc::new(DirObject::new(dir)),
     };
     if flags.contains(FdFlags::NONBLOCK) {
@@ -635,10 +782,7 @@ pub fn pipe_entries(flags: FdFlags) -> (FdEntry, FdEntry) {
         let _ = read_object.set_nonblocking(true);
         let _ = write_object.set_nonblocking(true);
     }
-    (
-        FdEntry::new(read_object, flags),
-        FdEntry::new(write_object, flags),
-    )
+    (FdEntry::new(read_object, flags), FdEntry::new(write_object, flags))
 }
 
 #[derive(Default)]
@@ -648,15 +792,11 @@ pub struct FdTable {
 
 impl FdTable {
     pub fn new() -> Self {
-        Self {
-            entries: BTreeMap::new(),
-        }
+        Self { entries: BTreeMap::new() }
     }
 
     pub fn clone_for_fork(&self) -> LinuxResult<Self> {
-        Ok(Self {
-            entries: self.entries.clone(),
-        })
+        Ok(Self { entries: self.entries.clone() })
     }
 
     pub fn take_cloexec_on_exec(&mut self) -> alloc::vec::Vec<FdEntry> {
@@ -673,10 +813,7 @@ impl FdTable {
     }
 
     pub fn drain_all(&mut self) -> alloc::vec::Vec<FdEntry> {
-        self.entries
-            .split_off(&0)
-            .into_values()
-            .collect::<alloc::vec::Vec<_>>()
+        self.entries.split_off(&0).into_values().collect::<alloc::vec::Vec<_>>()
     }
 
     pub fn get(&self, fd: usize) -> Option<&FdEntry> {

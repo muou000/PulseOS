@@ -1,6 +1,6 @@
 use axerrno::LinuxError;
 
-use crate::impls::utils::{read_user_cstring, with_process, write_user_bytes};
+use crate::impls::utils::{alloc_zeroed_bytes, read_user_cstring, with_process, write_user_bytes};
 
 pub fn sys_getcwd(buf: usize, size: usize) -> isize {
     axlog::debug!("sys_getcwd: buf={:#x}, size={}", buf, size);
@@ -20,7 +20,10 @@ pub fn sys_getcwd(buf: usize, size: usize) -> isize {
     if cwd.len() + 1 > size {
         return -LinuxError::ERANGE.code() as isize;
     }
-    let mut tmp = alloc::vec![0u8; cwd.len() + 1];
+    let mut tmp = match alloc_zeroed_bytes(cwd.len() + 1, "sys_getcwd.tmp") {
+        Ok(v) => v,
+        Err(e) => return -e.code() as isize,
+    };
     tmp[..cwd.len()].copy_from_slice(cwd);
     match write_user_bytes(buf, &tmp) {
         Ok(()) => buf as isize,

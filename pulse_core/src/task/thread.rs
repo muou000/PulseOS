@@ -1,9 +1,13 @@
-use super::Process;
 use alloc::sync::Arc;
+use core::{
+    ops::Deref,
+    sync::atomic::{AtomicUsize, Ordering},
+};
+
 use axerrno::AxResult;
 use axtask::{TaskExtSwitch, def_task_ext};
-use core::ops::Deref;
-use core::sync::atomic::{AtomicUsize, Ordering};
+
+use super::Process;
 
 pub struct Thread {
     tid: u64,
@@ -62,8 +66,7 @@ impl Thread {
     }
 
     pub fn set_clear_child_tid(&self, clear_child_tid: usize) {
-        self.clear_child_tid
-            .store(clear_child_tid, Ordering::Relaxed);
+        self.clear_child_tid.store(clear_child_tid, Ordering::Relaxed);
     }
 
     pub fn set_child_tid_addr(&self, set_child_tid: usize) {
@@ -75,8 +78,7 @@ impl Thread {
     }
 
     pub fn set_robust_list_head(&self, robust_list_head: usize) {
-        self.robust_list_head
-            .store(robust_list_head, Ordering::Relaxed);
+        self.robust_list_head.store(robust_list_head, Ordering::Relaxed);
     }
 
     pub fn clear_thread_tid_state(&self) {
@@ -127,11 +129,8 @@ impl Thread {
 
     pub fn exit_current(&self, exit_code: i32) -> ! {
         self.run_exit_hooks();
-        let final_code = if self.process.group_exiting() {
-            self.process.group_exit_code()
-        } else {
-            exit_code
-        };
+        let final_code =
+            if self.process.group_exiting() { self.process.group_exit_code() } else { exit_code };
         self.process.finish_thread_exit(self.tid, final_code);
         super::unregister_thread_task(self.tid);
         super::clear_current_thread();

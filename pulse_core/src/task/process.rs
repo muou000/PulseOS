@@ -1,23 +1,30 @@
-use super::Thread;
-use crate::config::*;
-use crate::fd_table::{FdTable, SharedFdTable, stdio_entries};
-use alloc::collections::BTreeMap;
-use alloc::sync::{Arc, Weak};
-use alloc::vec::Vec;
+use alloc::{
+    collections::BTreeMap,
+    sync::{Arc, Weak},
+    vec::Vec,
+};
+use core::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, AtomicU64, Ordering};
+
 use axconfig::TASK_STACK_SIZE;
 use axerrno::{AxError, AxResult};
 use axfs::FsContext;
-use axhal::context::{TrapFrame, UspaceContext};
-use axhal::paging::MappingFlags;
+use axhal::{
+    context::{TrapFrame, UspaceContext},
+    paging::MappingFlags,
+};
 use axmm::{AddrSpace, Backend};
 use axtask::{AxTaskRef, TaskInner, WaitQueue};
-use core::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, AtomicU64, Ordering};
 use kernel_guard::NoPreemptIrqSave;
 use memory_addr::{MemoryAddr, PAGE_SIZE_4K, PhysAddr, VirtAddr, va};
 use spin::Mutex;
+use super::Thread;
+use crate::{
+    config::*,
+    fd_table::{FdTable, SharedFdTable, stdio_entries},
+};
 
 const ROBUST_LIST_LIMIT: usize = 2048;
-const REAPED_CHILD_CACHE_LIMIT: usize = 1024;
+const DEFAULT_MEMLOCK_LIMIT_BYTES: u64 = u64::MAX;
 
 fn align_up_4k(value: usize) -> usize {
     (value + 0xfff) & !0xfff
@@ -27,8 +34,28 @@ fn collect_user_areas(
     aspace: &AddrSpace,
     start: VirtAddr,
     end: VirtAddr,
-) -> Vec<(VirtAddr, VirtAddr, MappingFlags, Backend)> {
+) -> AxResult<Vec<(VirtAddr, VirtAddr, MappingFlags, Backend)>> {
+    let mut count = 0usize;
+    aspace.for_each_area_with_backend(|area_start, area_end, flags, _backend| {
+        let user_flags = flags
+            & (MappingFlags::READ
+                | MappingFlags::WRITE
+                | MappingFlags::EXECUTE
+                | MappingFlags::USER);
+        if !user_flags.contains(MappingFlags::USER) {
+            return;
+        }
+        let clipped_start = core::cmp::max(area_start.as_usize(), start.as_usize());
+        let clipped_end = core::cmp::min(area_end.as_usize(), end.as_usize());
+        if clipped_start < clipped_end {
+            count = count.saturating_add(1);
+        }
+    });
+
     let mut areas = Vec::new();
+    if areas.try_reserve_exact(count).is_err() {
+        return Err(AxError::NoMemory);
+    }
     aspace.for_each_area_with_backend(|area_start, area_end, flags, backend| {
         let user_flags = flags
             & (MappingFlags::READ
@@ -51,7 +78,7 @@ fn collect_user_areas(
         ));
     });
 
-    areas
+    Ok(areas)
 }
 
 fn share_user_page(
@@ -101,19 +128,47 @@ struct FutexTable {
     queues: Mutex<BTreeMap<usize, Arc<WaitQueue>>>,
 }
 
-impl FutexTable {
+#[derive(Clone, Copy, Debug)]
+struct MemlockRange {
+    start: usize,
+    end: usize,
+}
+
+impl MemlockRange {
+    const fn new(start: usize, end: usize) -> Self {
+        Self { start, end }
+    }
+}
+
+#[derive(Debug)]
+struct MemlockState {
+    ranges: Vec<MemlockRange>,
+    locked_bytes: usize,
+    soft_limit: u64,
+    hard_limit: u64,
+    mlock_future: bool,
+}
+
+impl MemlockState {
     fn new() -> Self {
         Self {
-            queues: Mutex::new(BTreeMap::new()),
+            ranges: Vec::new(),
+            locked_bytes: 0,
+            soft_limit: DEFAULT_MEMLOCK_LIMIT_BYTES,
+            hard_limit: DEFAULT_MEMLOCK_LIMIT_BYTES,
+            mlock_future: false,
         }
+    }
+}
+
+impl FutexTable {
+    fn new() -> Self {
+        Self { queues: Mutex::new(BTreeMap::new()) }
     }
 
     fn queue(&self, addr: usize) -> Arc<WaitQueue> {
         let mut queues = self.queues.lock();
-        queues
-            .entry(addr)
-            .or_insert_with(|| Arc::new(WaitQueue::new()))
-            .clone()
+        queues.entry(addr).or_insert_with(|| Arc::new(WaitQueue::new())).clone()
     }
 
     fn wake(&self, addr: usize, count: usize) -> usize {
@@ -192,7 +247,6 @@ pub struct Process {
     threads: Mutex<Vec<u64>>,
     task_refs: Mutex<Vec<AxTaskRef>>,
     children: Mutex<Vec<Arc<Process>>>,
-    reaped_children: Mutex<Vec<Arc<Process>>>,
     child_exit_event: WaitQueue,
     zombie: AtomicBool,
     exit_code: AtomicI32,
@@ -208,6 +262,7 @@ pub struct Process {
     rgid: AtomicU32,
     egid: AtomicU32,
     sgid: AtomicU32,
+    memlock_state: Mutex<MemlockState>,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -234,15 +289,99 @@ pub struct CloneParams {
 }
 
 impl Process {
+    fn memlock_additional_bytes(ranges: &[MemlockRange], start: usize, end: usize) -> usize {
+        if start >= end {
+            return 0;
+        }
+        let mut covered = 0usize;
+        for range in ranges {
+            if range.end <= start {
+                continue;
+            }
+            if range.start >= end {
+                break;
+            }
+            let overlap_start = core::cmp::max(range.start, start);
+            let overlap_end = core::cmp::min(range.end, end);
+            if overlap_start < overlap_end {
+                covered = covered.saturating_add(overlap_end - overlap_start);
+            }
+        }
+        (end - start).saturating_sub(covered)
+    }
+
+    fn memlock_insert_range(ranges: &mut Vec<MemlockRange>, start: usize, end: usize) -> AxResult {
+        if start >= end {
+            return Ok(());
+        }
+        let mut merged_start = start;
+        let mut merged_end = end;
+        let mut merged = Vec::new();
+        if merged.try_reserve_exact(ranges.len().saturating_add(1)).is_err() {
+            return Err(AxError::NoMemory);
+        }
+        let mut inserted = false;
+        for range in ranges.iter().copied() {
+            if range.end < merged_start {
+                merged.push(range);
+                continue;
+            }
+            if merged_end < range.start {
+                if !inserted {
+                    merged.push(MemlockRange::new(merged_start, merged_end));
+                    inserted = true;
+                }
+                merged.push(range);
+                continue;
+            }
+            merged_start = core::cmp::min(merged_start, range.start);
+            merged_end = core::cmp::max(merged_end, range.end);
+        }
+        if !inserted {
+            merged.push(MemlockRange::new(merged_start, merged_end));
+        }
+        *ranges = merged;
+        Ok(())
+    }
+
+    fn memlock_remove_range(ranges: &mut Vec<MemlockRange>, start: usize, end: usize) -> AxResult<usize> {
+        if start >= end {
+            return Ok(0);
+        }
+        let mut removed = 0usize;
+        let mut next = Vec::new();
+        if next.try_reserve_exact(ranges.len()).is_err() {
+            return Err(AxError::NoMemory);
+        }
+        for range in ranges.iter().copied() {
+            if range.end <= start || range.start >= end {
+                next.push(range);
+                continue;
+            }
+            let overlap_start = core::cmp::max(range.start, start);
+            let overlap_end = core::cmp::min(range.end, end);
+            if overlap_start < overlap_end {
+                removed = removed.saturating_add(overlap_end - overlap_start);
+            }
+            if range.start < overlap_start {
+                next.push(MemlockRange::new(range.start, overlap_start));
+            }
+            if overlap_end < range.end {
+                next.push(MemlockRange::new(overlap_end, range.end));
+            }
+        }
+        *ranges = next;
+        Ok(removed)
+    }
+
     fn validate_user_range(&self, user_addr: usize, len: usize) -> AxResult<()> {
         if len == 0 {
             return Ok(());
         }
 
         let user_end = user_addr.checked_add(len).ok_or(AxError::BadAddress)?;
-        let user_space_end = USER_SPACE_BASE
-            .checked_add(USER_SPACE_SIZE)
-            .ok_or(AxError::BadAddress)?;
+        let user_space_end =
+            USER_SPACE_BASE.checked_add(USER_SPACE_SIZE).ok_or(AxError::BadAddress)?;
         if user_addr < USER_SPACE_BASE || user_end > user_space_end {
             return Err(AxError::BadAddress);
         }
@@ -309,6 +448,77 @@ impl Process {
         self.sgid.store(sgid, Ordering::Release);
     }
 
+    pub fn is_root_user(&self) -> bool {
+        self.euid() == 0
+    }
+
+    pub fn memlock_limit_snapshot(&self) -> (u64, u64) {
+        let state = self.memlock_state.lock();
+        (state.soft_limit, state.hard_limit)
+    }
+
+    pub fn memlock_set_limit(&self, soft: u64, hard: u64) {
+        let mut state = self.memlock_state.lock();
+        state.soft_limit = soft;
+        state.hard_limit = hard;
+    }
+
+    pub fn memlock_locked_bytes(&self) -> usize {
+        self.memlock_state.lock().locked_bytes
+    }
+
+    pub fn memlock_future_enabled(&self) -> bool {
+        self.memlock_state.lock().mlock_future
+    }
+
+    pub fn memlock_set_future(&self, enabled: bool) {
+        self.memlock_state.lock().mlock_future = enabled;
+    }
+
+    pub fn memlock_try_lock_range(
+        &self,
+        start: usize,
+        len: usize,
+        privileged: bool,
+    ) -> AxResult<()> {
+        if len == 0 {
+            return Ok(());
+        }
+        let end = start.checked_add(len).ok_or(AxError::BadAddress)?;
+        let mut state = self.memlock_state.lock();
+        let additional = Self::memlock_additional_bytes(&state.ranges, start, end);
+        if additional == 0 {
+            return Ok(());
+        }
+        if !privileged && state.soft_limit != u64::MAX {
+            let new_total = (state.locked_bytes as u128).saturating_add(additional as u128);
+            if new_total > state.soft_limit as u128 {
+                return Err(AxError::NoMemory);
+            }
+        }
+        Self::memlock_insert_range(&mut state.ranges, start, end)?;
+        state.locked_bytes = state.locked_bytes.saturating_add(additional);
+        Ok(())
+    }
+
+    pub fn memlock_unlock_range(&self, start: usize, len: usize) -> AxResult<()> {
+        if len == 0 {
+            return Ok(());
+        }
+        let end = start.checked_add(len).ok_or(AxError::BadAddress)?;
+        let mut state = self.memlock_state.lock();
+        let removed = Self::memlock_remove_range(&mut state.ranges, start, end)?;
+        state.locked_bytes = state.locked_bytes.saturating_sub(removed);
+        Ok(())
+    }
+
+    pub fn memlock_unlock_all(&self) {
+        let mut state = self.memlock_state.lock();
+        state.ranges.clear();
+        state.locked_bytes = 0;
+        state.mlock_future = false;
+    }
+
     fn try_fault_in_user_range(
         &self,
         user_addr: usize,
@@ -347,10 +557,7 @@ impl Process {
 
         // If it fails, fault-in the pages and retry once
         self.try_fault_in_user_range(user_addr, bytes.len(), MappingFlags::READ)?;
-        aspace_handle
-            .lock()
-            .read(start, bytes)
-            .map_err(AxError::from)
+        aspace_handle.lock().read(start, bytes).map_err(AxError::from)
     }
 
     pub fn write_user_bytes(&self, user_addr: usize, bytes: &[u8]) -> AxResult<()> {
@@ -365,10 +572,7 @@ impl Process {
 
         // If it fails, fault-in the pages and retry once
         self.try_fault_in_user_range(user_addr, bytes.len(), MappingFlags::WRITE)?;
-        aspace_handle
-            .lock()
-            .write(start, bytes)
-            .map_err(AxError::from)
+        aspace_handle.lock().write(start, bytes).map_err(AxError::from)
     }
 
     pub fn aspace_handle(&self) -> Arc<Mutex<AddrSpace>> {
@@ -432,10 +636,8 @@ impl Process {
             MappingFlags::READ | MappingFlags::WRITE | MappingFlags::USER,
             false,
         )?;
-        let fs_context = axfs::ROOT_FS_CONTEXT
-            .get()
-            .expect("root fs context not initialized")
-            .clone();
+        let fs_context =
+            axfs::ROOT_FS_CONTEXT.get().expect("root fs context not initialized").clone();
 
         let mut fd_table = FdTable::new();
         for (fd, entry) in stdio_entries().into_iter().enumerate() {
@@ -462,7 +664,6 @@ impl Process {
             threads: Mutex::new(alloc::vec![pid]),
             task_refs: Mutex::new(Vec::new()),
             children: Mutex::new(Vec::new()),
-            reaped_children: Mutex::new(Vec::new()),
             child_exit_event: WaitQueue::new(),
             zombie: AtomicBool::new(false),
             exit_code: AtomicI32::new(0),
@@ -478,6 +679,7 @@ impl Process {
             rgid: AtomicU32::new(0),
             egid: AtomicU32::new(0),
             sgid: AtomicU32::new(0),
+            memlock_state: Mutex::new(MemlockState::new()),
         }))
     }
 
@@ -528,7 +730,6 @@ impl Process {
             threads: Mutex::new(alloc::vec![pid]),
             task_refs: Mutex::new(Vec::new()),
             children: Mutex::new(Vec::new()),
-            reaped_children: Mutex::new(Vec::new()),
             child_exit_event: WaitQueue::new(),
             zombie: AtomicBool::new(false),
             exit_code: AtomicI32::new(0),
@@ -544,6 +745,7 @@ impl Process {
             rgid: AtomicU32::new(rgid),
             egid: AtomicU32::new(egid),
             sgid: AtomicU32::new(sgid),
+            memlock_state: Mutex::new(MemlockState::new()),
         }))
     }
 
@@ -608,6 +810,10 @@ impl Process {
         self.task_refs.lock().push(task);
     }
 
+    pub fn task_ref_by_tid(&self, tid: u64) -> Option<AxTaskRef> {
+        self.task_refs.lock().iter().find(|task| task.id().as_u64() == tid).cloned()
+    }
+
     pub fn wait_task_refs_exited(&self) {
         let task_refs = self.task_refs.lock().clone();
         for task in task_refs {
@@ -652,21 +858,14 @@ impl Process {
             return;
         }
 
-        let final_code = if self.group_exiting() {
-            self.group_exit_code()
-        } else {
-            exit_code
-        };
+        let final_code = if self.group_exiting() { self.group_exit_code() } else { exit_code };
         self.exit_code.store(final_code, Ordering::Release);
         self.zombie.store(true, Ordering::Release);
         self.complete_vfork();
         self.close_all_files();
+        self.release_task_refs();
 
-        let parent = self
-            .parent
-            .lock()
-            .as_ref()
-            .and_then(|parent| parent.upgrade());
+        let parent = self.parent.lock().as_ref().and_then(|parent| parent.upgrade());
         if let Some(parent) = parent {
             parent.child_exit_event.notify_all(true);
         }
@@ -676,24 +875,13 @@ impl Process {
         self.children.lock().push(child);
     }
 
-    pub fn stash_reaped_child(&self, child: Arc<Process>) {
-        let mut reaped = self.reaped_children.lock();
-        reaped.push(child);
-        if reaped.len() > REAPED_CHILD_CACHE_LIMIT {
-            reaped.remove(0);
-        }
-    }
-
     fn child_matches(child: &Process, pid: isize) -> bool {
         let child_pid = child.pid() as isize;
         pid == -1 || child_pid == pid || pid == 0 || (pid < -1 && child_pid == -pid)
     }
 
     pub fn has_matching_child(&self, pid: isize) -> bool {
-        self.children
-            .lock()
-            .iter()
-            .any(|child| Self::child_matches(child, pid))
+        self.children.lock().iter().any(|child| Self::child_matches(child, pid))
     }
 
     pub fn reap_zombie_child(&self, pid: isize) -> Option<Arc<Process>> {
@@ -732,10 +920,8 @@ impl Process {
     }
 
     pub fn add_child_time_ns(&self, child_user_ns: u64, child_sys_ns: u64) {
-        self.child_user_time_ns
-            .fetch_add(child_user_ns, Ordering::Relaxed);
-        self.child_sys_time_ns
-            .fetch_add(child_sys_ns, Ordering::Relaxed);
+        self.child_user_time_ns.fetch_add(child_user_ns, Ordering::Relaxed);
+        self.child_sys_time_ns.fetch_add(child_sys_ns, Ordering::Relaxed);
     }
 
     pub fn snapshot_cpu_time_ns(&self, now_ns: u64) -> (u64, u64) {
@@ -772,8 +958,7 @@ impl Process {
         if !self.vfork_wait_enabled.load(Ordering::Acquire) {
             return;
         }
-        self.vfork_event
-            .wait_until(|| self.vfork_done.load(Ordering::Acquire));
+        self.vfork_event.wait_until(|| self.vfork_done.load(Ordering::Acquire));
     }
 
     pub fn futex_wait(&self, addr: usize, expected: u32, timeout_ns: Option<u64>) -> AxResult<()> {
@@ -809,10 +994,7 @@ impl Process {
             }
             queue.wait_until(|| {
                 self.group_exiting()
-                    || self
-                        .read_user_u32(addr)
-                        .map(|current| current != expected)
-                        .unwrap_or(true)
+                    || self.read_user_u32(addr).map(|current| current != expected).unwrap_or(true)
             });
         }
     }
@@ -828,8 +1010,7 @@ impl Process {
         target: usize,
         requeue_count: usize,
     ) -> usize {
-        self.futex_table
-            .requeue(addr, wake_count, target, requeue_count)
+        self.futex_table.requeue(addr, wake_count, target, requeue_count)
     }
 
     pub fn exit_robust_list(&self, head_addr: usize) -> AxResult<()> {
@@ -887,8 +1068,11 @@ impl Process {
         let parent_aspace_handle = self.aspace_handle();
         let mut parent_aspace = parent_aspace_handle.lock();
         let mapped_user_areas =
-            collect_user_areas(&parent_aspace, va!(USER_SPACE_BASE), va!(USER_STACK_TOP));
+            collect_user_areas(&parent_aspace, va!(USER_SPACE_BASE), va!(USER_STACK_TOP))?;
         let mut cow_ranges = Vec::new();
+        if cow_ranges.try_reserve_exact(mapped_user_areas.len()).is_err() {
+            return Err(AxError::NoMemory);
+        }
         for (start, end, area_user_flags, backend) in mapped_user_areas {
             let child_backend = match &backend {
                 // Root-cause fix: do not eagerly allocate child frames during
