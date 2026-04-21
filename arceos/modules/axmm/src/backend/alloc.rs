@@ -31,6 +31,69 @@ fn drop_frame_mapping_ref(frame: PhysAddr) -> bool {
     }
 }
 
+pub(crate) trait ProtectPageTable {
+    fn query_page(&self, page: VirtAddr) -> Option<(PhysAddr, MappingFlags)>;
+    fn protect_page(&mut self, page: VirtAddr, new_flags: MappingFlags) -> bool;
+}
+
+impl ProtectPageTable for PageTable {
+    fn query_page(&self, page: VirtAddr) -> Option<(PhysAddr, MappingFlags)> {
+        self.query(page).ok().map(|(frame, old_flags, _)| (frame, old_flags))
+    }
+
+    fn protect_page(&mut self, page: VirtAddr, new_flags: MappingFlags) -> bool {
+        self.protect(page, new_flags)
+            .map(|(_, tlb)| tlb.ignore())
+            .is_ok()
+    }
+}
+
+pub(crate) fn protect_pages<P>(
+    start: VirtAddr,
+    size: usize,
+    new_flags: MappingFlags,
+    allow_missing: bool,
+    allow_placeholder: bool,
+    pt: &mut P,
+) -> bool
+where
+    P: ProtectPageTable,
+{
+    for page in PageIter4K::new(start, start + size).unwrap() {
+        let Some((frame, _old_flags)) = pt.query_page(page) else {
+            if allow_missing {
+                continue;
+            }
+            error!(
+                "protect_pages: missing page in populated mapping: {:#x}, {:?}",
+                page, new_flags
+            );
+            return false;
+        };
+
+        if frame.as_usize() == 0 {
+            if allow_placeholder {
+                continue;
+            }
+            error!(
+                "protect_pages: placeholder page in populated mapping: {:#x}, {:?}",
+                page, new_flags
+            );
+            return false;
+        }
+
+        if !pt.protect_page(page, new_flags) {
+            error!(
+                "protect_pages: failed to protect page: {:#x}, {:?}",
+                page, new_flags
+            );
+            return false;
+        }
+    }
+
+    true
+}
+
 pub(super) fn alloc_frame(zeroed: bool) -> Option<PhysAddr> {
     let vaddr = VirtAddr::from(global_allocator().alloc_pages(1, PAGE_SIZE_4K).ok()?);
     if zeroed {
@@ -265,5 +328,23 @@ impl Backend {
             );
             false
         }
+    }
+
+    pub(crate) fn protect_alloc(
+        &self,
+        start: VirtAddr,
+        size: usize,
+        new_flags: MappingFlags,
+        pt: &mut PageTable,
+        populate: bool,
+    ) -> bool {
+        debug!(
+            "protect_alloc: [{:#x}, {:#x}) {:?} (populate={})",
+            start,
+            start + size,
+            new_flags,
+            populate
+        );
+        protect_pages(start, size, new_flags, !populate, !populate, pt)
     }
 }

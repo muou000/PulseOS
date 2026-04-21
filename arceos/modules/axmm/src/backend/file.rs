@@ -1,11 +1,11 @@
 use axfs::{CachedFile, FileFlags};
 use axhal::mem::phys_to_virt;
 use axhal::paging::{MappingFlags, PageSize, PageTable};
-use memory_addr::{MemoryAddr, PAGE_SIZE_4K, PageIter4K, VirtAddr};
+use memory_addr::{MemoryAddr, PageIter4K, VirtAddr, PAGE_SIZE_4K};
 
 use super::{
+    alloc::{alloc_frame, dealloc_frame, protect_pages},
     Backend,
-    alloc::{alloc_frame, dealloc_frame},
 };
 
 fn sync_executable_mapping(flags: MappingFlags) {
@@ -93,9 +93,16 @@ impl Backend {
         if !mapping.permits(flags) {
             return false;
         }
-        pt.map_region(start, |_| 0.into(), size, MappingFlags::empty(), false, false)
-            .map(|tlb| tlb.ignore())
-            .is_ok()
+        pt.map_region(
+            start,
+            |_| 0.into(),
+            size,
+            MappingFlags::empty(),
+            false,
+            false,
+        )
+        .map(|tlb| tlb.ignore())
+        .is_ok()
     }
 
     pub(crate) fn unmap_file(&self, start: VirtAddr, size: usize, pt: &mut PageTable) -> bool {
@@ -128,7 +135,8 @@ impl Backend {
         let page_addr = vaddr.align_down_4k();
         if let Ok((old_frame, old_flags, _)) = pt.query(page_addr) {
             if old_frame.as_usize() != 0 {
-                if orig_flags.contains(MappingFlags::WRITE) && !old_flags.contains(MappingFlags::WRITE)
+                if orig_flags.contains(MappingFlags::WRITE)
+                    && !old_flags.contains(MappingFlags::WRITE)
                 {
                     return pt
                         .remap(page_addr, old_frame, orig_flags)
@@ -143,10 +151,7 @@ impl Backend {
             return false;
         };
         let dst = unsafe {
-            core::slice::from_raw_parts_mut(
-                phys_to_virt(frame).as_mut_ptr(),
-                PAGE_SIZE_4K,
-            )
+            core::slice::from_raw_parts_mut(phys_to_virt(frame).as_mut_ptr(), PAGE_SIZE_4K)
         };
         if let Some((file_offset, read_len)) = mapping.page_read_window(page_addr) {
             match mapping.file.read_at(&mut dst[..read_len], file_offset) {
@@ -172,5 +177,28 @@ impl Backend {
             dealloc_frame(frame);
             false
         }
+    }
+
+    pub(crate) fn protect_file(
+        &self,
+        start: VirtAddr,
+        size: usize,
+        new_flags: MappingFlags,
+        pt: &mut PageTable,
+        mapping: &FileMapping,
+    ) -> bool {
+        debug!(
+            "protect_file: [{:#x}, {:#x}) {:?} offset={:#x} bytes={:#x}",
+            start,
+            start + size,
+            new_flags,
+            mapping.file_offset,
+            mapping.file_bytes
+        );
+
+        if !mapping.permits(new_flags) {
+            return false;
+        }
+        protect_pages(start, size, new_flags, true, true, pt)
     }
 }
