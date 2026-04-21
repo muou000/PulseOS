@@ -1,8 +1,12 @@
-use crate::LinuxError;
-use alloc::sync::Arc;
+use alloc::{sync::Arc, vec::Vec};
+
+use axerrno::AxError;
 use axhal::paging::MappingFlags;
-use memory_addr::{MemoryAddr, VirtAddr};
+use linux_raw_sys::general::{MCL_CURRENT, MCL_FUTURE, MCL_ONFAULT};
+use memory_addr::{MemoryAddr, PageIter4K, VirtAddr};
 use pulse_core::fd_table::FdObject;
+
+use crate::LinuxError;
 
 const PROT_READ: usize = 0x1;
 const PROT_WRITE: usize = 0x2;
@@ -29,11 +33,133 @@ fn is_user_range(addr: usize, len: usize) -> bool {
 
 fn get_fd_object(fd: usize) -> Result<Arc<dyn FdObject>, LinuxError> {
     let proc = pulse_core::task::current_process()?;
-    proc.fd_table
-        .lock()
-        .get(fd)
-        .map(|entry| entry.object.clone())
-        .ok_or(LinuxError::EBADF)
+    proc.fd_table.lock().get(fd).map(|entry| entry.object.clone()).ok_or(LinuxError::EBADF)
+}
+
+fn align_user_range(addr: usize, len: usize) -> Result<(usize, usize), LinuxError> {
+    if len == 0 {
+        return Ok((addr & !(PAGE_SIZE - 1), 0));
+    }
+    let aligned_addr = addr & !(PAGE_SIZE - 1);
+    let end = addr.checked_add(len).ok_or(LinuxError::EINVAL)?;
+    let aligned_end = end.checked_add(PAGE_SIZE - 1).ok_or(LinuxError::EINVAL)? & !(PAGE_SIZE - 1);
+    if aligned_end < aligned_addr {
+        return Err(LinuxError::EINVAL);
+    }
+    let aligned_len = aligned_end - aligned_addr;
+    if !is_user_range(aligned_addr, aligned_len) {
+        return Err(LinuxError::EINVAL);
+    }
+    Ok((aligned_addr, aligned_len))
+}
+
+fn prefault_user_range(
+    proc: &pulse_core::task::Process,
+    addr: usize,
+    len: usize,
+) -> Result<(), LinuxError> {
+    if len == 0 {
+        return Ok(());
+    }
+    let aspace_handle = proc.aspace_handle();
+    let mut aspace = aspace_handle.lock();
+    let start = VirtAddr::from(addr);
+    if !aspace.can_access_range(start, len, MappingFlags::empty()) {
+        return Err(LinuxError::ENOMEM);
+    }
+    let end = addr.checked_add(len).ok_or(LinuxError::EINVAL)?;
+    let pages =
+        PageIter4K::new(VirtAddr::from(addr), VirtAddr::from(end)).ok_or(LinuxError::EINVAL)?;
+    for page in pages {
+        // Linux mlock semantics: pages already resident should be accepted as-is.
+        // Only non-resident pages need to be faulted in.
+        let already_resident = aspace
+            .page_table()
+            .query(page)
+            .map(|(frame, flags, _)| frame.as_usize() != 0 && !flags.is_empty())
+            .unwrap_or(false);
+        if already_resident {
+            continue;
+        }
+        if !aspace.handle_page_fault(page, MappingFlags::USER) {
+            return Err(LinuxError::ENOMEM);
+        }
+    }
+    Ok(())
+}
+
+fn is_mapped_range(proc: &pulse_core::task::Process, addr: usize, len: usize) -> bool {
+    if len == 0 {
+        return true;
+    }
+    let aspace_handle = proc.aspace_handle();
+    let aspace = aspace_handle.lock();
+    aspace.can_access_range(VirtAddr::from(addr), len, MappingFlags::empty())
+}
+
+fn lock_mapped_range(
+    proc: &pulse_core::task::Process,
+    addr: usize,
+    len: usize,
+) -> Result<(), LinuxError> {
+    if len == 0 {
+        return Ok(());
+    }
+    prefault_user_range(proc, addr, len)?;
+    let privileged = proc.is_root_user();
+    proc.memlock_try_lock_range(addr, len, privileged).map_err(|e| match e {
+        AxError::NoMemory => LinuxError::ENOMEM,
+        _ => LinuxError::EINVAL,
+    })?;
+    Ok(())
+}
+
+fn lock_all_current_mappings(proc: &pulse_core::task::Process) -> Result<(), LinuxError> {
+    let user_area_count = {
+        let mut count = 0usize;
+        let aspace_handle = proc.aspace_handle();
+        let aspace = aspace_handle.lock();
+        aspace.for_each_area(|_, _, flags| {
+            if flags.contains(MappingFlags::USER) {
+                count = count.saturating_add(1);
+            }
+        });
+        count
+    };
+
+    let mut ranges: Vec<(usize, usize)> = Vec::new();
+    if ranges.try_reserve_exact(user_area_count).is_err() {
+        return Err(LinuxError::ENOMEM);
+    }
+    {
+        let aspace_handle = proc.aspace_handle();
+        let aspace = aspace_handle.lock();
+        aspace.for_each_area(|start, end, flags| {
+            if !flags.contains(MappingFlags::USER) {
+                return;
+            }
+            let s = start.align_down_4k().as_usize();
+            let e = end.align_up_4k().as_usize();
+            if e > s {
+                ranges.push((s, e - s));
+            }
+        });
+    }
+    for (start, len) in ranges {
+        lock_mapped_range(proc, start, len)?;
+    }
+    Ok(())
+}
+
+fn maybe_lock_future_range(
+    proc: &pulse_core::task::Process,
+    addr: usize,
+    len: usize,
+) -> Result<(), LinuxError> {
+    if len == 0 || !proc.memlock_future_enabled() {
+        return Ok(());
+    }
+    lock_mapped_range(proc, addr, len)
 }
 
 pub fn sys_brk(addr: usize) -> isize {
@@ -73,6 +199,20 @@ pub fn sys_brk(addr: usize) -> isize {
                 axlog::error!("sys_brk: failed to expand heap: {:?}", e);
                 return old_heap_top as isize;
             }
+            drop(aspace);
+            if let Err(e) = maybe_lock_future_range(proc.as_ref(), start, end - start) {
+                let aspace_handle = proc.aspace_handle();
+                let mut aspace = aspace_handle.lock();
+                if let Err(unmap_e) = aspace.unmap(VirtAddr::from(start), end - start) {
+                    axlog::warn!(
+                        "sys_brk: rollback unmap failed at {:#x}, len={:#x}, err={:?}",
+                        start,
+                        end - start,
+                        unmap_e
+                    );
+                }
+                return -e.code() as isize;
+            }
         }
     } else if new_heap_top < old_heap_top {
         let start = (new_heap_top + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
@@ -85,6 +225,7 @@ pub fn sys_brk(addr: usize) -> isize {
                 axlog::error!("sys_brk: failed to shrink heap: {:?}", e);
                 return old_heap_top as isize;
             }
+            let _ = proc.memlock_unlock_range(start, end - start);
         }
     }
 
@@ -190,16 +331,13 @@ pub fn sys_mmap(
                 aligned_length,
                 e
             );
+        } else {
+            let _ = proc.memlock_unlock_range(map_addr, aligned_length);
         }
     }
 
     let populate = file_backed;
-    match aspace.map_alloc(
-        VirtAddr::from(map_addr),
-        aligned_length,
-        map_flags,
-        populate,
-    ) {
+    match aspace.map_alloc(VirtAddr::from(map_addr), aligned_length, map_flags, populate) {
         Ok(_) => {
             drop(aspace);
 
@@ -271,11 +409,21 @@ pub fn sys_mmap(
                 }
             }
 
-            axlog::debug!(
-                "sys_mmap: mapped at {:#x}, length={:#x}",
-                map_addr,
-                aligned_length
-            );
+            if let Err(e) = maybe_lock_future_range(proc.as_ref(), map_addr, aligned_length) {
+                let aspace_handle = proc.aspace_handle();
+                let mut aspace = aspace_handle.lock();
+                if let Err(unmap_e) = aspace.unmap(VirtAddr::from(map_addr), aligned_length) {
+                    axlog::warn!(
+                        "sys_mmap: rollback unmap failed at {:#x}, len={:#x}, err={:?}",
+                        map_addr,
+                        aligned_length,
+                        unmap_e
+                    );
+                }
+                return -e.code() as isize;
+            }
+
+            axlog::debug!("sys_mmap: mapped at {:#x}, length={:#x}", map_addr, aligned_length);
             map_addr as isize
         }
         Err(e) => {
@@ -308,11 +456,8 @@ pub fn sys_munmap(addr: usize, length: usize) -> isize {
     let mut aspace = aspace_handle.lock();
     match aspace.unmap(VirtAddr::from(aligned_addr), aligned_length) {
         Ok(_) => {
-            axlog::debug!(
-                "sys_munmap: unmapped {:#x} length {:#x}",
-                aligned_addr,
-                aligned_length
-            );
+            let _ = proc.memlock_unlock_range(aligned_addr, aligned_length);
+            axlog::debug!("sys_munmap: unmapped {:#x} length {:#x}", aligned_addr, aligned_length);
             0
         }
         Err(e) => {
@@ -322,13 +467,47 @@ pub fn sys_munmap(addr: usize, length: usize) -> isize {
     }
 }
 
+pub fn sys_mlock(addr: usize, len: usize) -> isize {
+    let proc = match pulse_core::task::current_process() {
+        Ok(proc) => proc,
+        Err(e) => return -e.code() as isize,
+    };
+    let (aligned_addr, aligned_len) = match align_user_range(addr, len) {
+        Ok(v) => v,
+        Err(e) => return -e.code() as isize,
+    };
+    if aligned_len == 0 {
+        return 0;
+    }
+    match lock_mapped_range(proc.as_ref(), aligned_addr, aligned_len) {
+        Ok(()) => 0,
+        Err(e) => -e.code() as isize,
+    }
+}
+
+pub fn sys_munlock(addr: usize, len: usize) -> isize {
+    let proc = match pulse_core::task::current_process() {
+        Ok(proc) => proc,
+        Err(e) => return -e.code() as isize,
+    };
+    let (aligned_addr, aligned_len) = match align_user_range(addr, len) {
+        Ok(v) => v,
+        Err(e) => return -e.code() as isize,
+    };
+    if aligned_len == 0 {
+        return 0;
+    }
+    if !is_mapped_range(proc.as_ref(), aligned_addr, aligned_len) {
+        return -LinuxError::ENOMEM.code() as isize;
+    }
+    match proc.memlock_unlock_range(aligned_addr, aligned_len) {
+        Ok(()) => 0,
+        Err(_) => -LinuxError::EINVAL.code() as isize,
+    }
+}
+
 pub fn sys_mprotect(addr: usize, length: usize, prot: usize) -> isize {
-    axlog::debug!(
-        "sys_mprotect: addr={:#x}, length={:#x}, prot={:#x}",
-        addr,
-        length,
-        prot
-    );
+    axlog::debug!("sys_mprotect: addr={:#x}, length={:#x}, prot={:#x}", addr, length, prot);
 
     if length == 0 {
         return 0;
@@ -383,4 +562,39 @@ pub fn sys_mprotect(addr: usize, length: usize, prot: usize) -> isize {
             -LinuxError::ENOMEM.code() as isize
         }
     }
+}
+
+pub fn sys_mlockall(flags: usize) -> isize {
+    let allowed = MCL_CURRENT as usize | MCL_FUTURE as usize | MCL_ONFAULT as usize;
+    if (flags & !allowed) != 0 {
+        return -LinuxError::EINVAL.code() as isize;
+    }
+    if flags == 0 {
+        return -LinuxError::EINVAL.code() as isize;
+    }
+    if (flags & MCL_ONFAULT as usize) != 0 {
+        return -LinuxError::EINVAL.code() as isize;
+    }
+    let proc = match pulse_core::task::current_process() {
+        Ok(proc) => proc,
+        Err(e) => return -e.code() as isize,
+    };
+    if (flags & MCL_CURRENT as usize) != 0 {
+        if let Err(e) = lock_all_current_mappings(proc.as_ref()) {
+            return -e.code() as isize;
+        }
+    }
+    if (flags & MCL_FUTURE as usize) != 0 {
+        proc.memlock_set_future(true);
+    }
+    0
+}
+
+pub fn sys_munlockall() -> isize {
+    let proc = match pulse_core::task::current_process() {
+        Ok(proc) => proc,
+        Err(e) => return -e.code() as isize,
+    };
+    proc.memlock_unlock_all();
+    0
 }

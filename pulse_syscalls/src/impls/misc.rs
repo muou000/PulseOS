@@ -1,10 +1,10 @@
 //! 其他杂项系统调用
 
-use crate::LinuxError;
-use alloc::vec;
 use axalloc::global_allocator;
 use pulse_core::task::uaccess;
-use rand::{RngCore, SeedableRng, rngs::SmallRng};
+
+use crate::LinuxError;
+use crate::impls::utils::alloc_zeroed_bytes;
 
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -151,40 +151,6 @@ pub fn sys_get_robust_list(pid: usize, head_ptr: usize, len_ptr: usize) -> isize
         .unwrap_or_else(|_| -LinuxError::EFAULT.code() as isize)
 }
 
-pub fn sys_getrandom(buf: usize, len: usize, _flags: usize) -> isize {
-    axlog::debug!("sys_getrandom: buf={:#x}, len={}", buf, len);
-    if len == 0 {
-        return 0;
-    }
-    if buf == 0 {
-        return -LinuxError::EFAULT.code() as isize;
-    }
-
-    let thread = match pulse_core::task::current_thread() {
-        Ok(thread) => thread,
-        Err(e) => return -e.code() as isize,
-    };
-    let process = thread.process();
-
-    let time_seed = axhal::time::monotonic_time_nanos() as u64;
-    let pid_seed = process.pid();
-    let tid_seed = thread.tid();
-    let mut rng =
-        SmallRng::seed_from_u64(time_seed ^ pid_seed.rotate_left(13) ^ tid_seed.rotate_left(29));
-
-    let mut out = alloc::vec![0u8; len];
-    rng.fill_bytes(&mut out);
-    match uaccess::write_user_bytes(process, buf, &out) {
-        Ok(()) => len as isize,
-        Err(_) => -LinuxError::EFAULT.code() as isize,
-    }
-}
-
-pub fn sys_prlimit64(_pid: usize, _resource: usize, _new_limit: usize, _old_limit: usize) -> isize {
-    axlog::debug!("sys_prlimit64 (stub)");
-    0
-}
-
 pub fn sys_rt_sigprocmask(_how: usize, _set: usize, _oldset: usize, _sigsetsize: usize) -> isize {
     axlog::debug!("sys_rt_sigprocmask (stub)");
     0
@@ -213,9 +179,7 @@ pub fn sys_sysinfo(info: usize) -> isize {
 
     let allocator = global_allocator();
     let page_size = 4096u64;
-    let total_pages = allocator
-        .used_pages()
-        .saturating_add(allocator.available_pages()) as u64;
+    let total_pages = allocator.used_pages().saturating_add(allocator.available_pages()) as u64;
     let free_pages = allocator.available_pages() as u64;
     let sysinfo = Sysinfo {
         uptime: axhal::time::monotonic_time().as_secs() as i64,
@@ -243,12 +207,7 @@ pub fn sys_sysinfo(info: usize) -> isize {
 }
 
 pub fn sys_syslog(action: usize, bufp: usize, len: usize) -> isize {
-    axlog::debug!(
-        "sys_syslog: action={}, bufp={:#x}, len={}",
-        action,
-        bufp,
-        len
-    );
+    axlog::debug!("sys_syslog: action={}, bufp={:#x}, len={}", action, bufp, len);
     match action {
         SYSLOG_ACTION_CLOSE
         | SYSLOG_ACTION_OPEN
@@ -265,7 +224,10 @@ pub fn sys_syslog(action: usize, bufp: usize, len: usize) -> isize {
             if read_len == 0 {
                 return 0;
             }
-            let mut out = vec![0u8; read_len];
+            let mut out = match alloc_zeroed_bytes(read_len, "sys_syslog.out") {
+                Ok(v) => v,
+                Err(e) => return -e.code() as isize,
+            };
             out.copy_from_slice(&KMSG_PLACEHOLDER[..read_len]);
             match pulse_core::task::with_current_process(|process| {
                 uaccess::write_user_bytes(process, bufp, &out)

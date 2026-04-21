@@ -42,15 +42,11 @@ pub fn sys_wait4(pid: isize, status: usize, options: i32, rusage: usize) -> isiz
             if rusage != 0 {
                 // Not supported yet: simply ignore or zero out
             }
-            child_proc.wait_task_refs_exited();
-            child_proc.release_task_refs();
-            // Keep a bounded cache of reaped child process objects, but release
-            // heavy user resources first to prevent fork/exec workloads from
-            // exhausting memory.
+            // Release heavy user resources before the final Arc drops so the
+            // zombie no longer pins a large address space or fd table.
             if let Err(e) = child_proc.shrink_reaped_resources() {
                 axlog::warn!("failed to shrink reaped child resources: {:?}", e);
             }
-            process.stash_reaped_child(child_proc);
             return exited_pid;
         }
 

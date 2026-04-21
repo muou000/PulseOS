@@ -1,6 +1,6 @@
 use alloc::vec::Vec;
 
-use axerrno::AxResult;
+use axerrno::{AxError, AxResult};
 
 use super::Process;
 
@@ -12,6 +12,9 @@ pub fn read_user_cstring_bytes(
     max_len: usize,
 ) -> AxResult<(Vec<u8>, bool)> {
     let mut bytes = Vec::new();
+    if bytes.try_reserve_exact(max_len).is_err() {
+        return Err(AxError::NoMemory);
+    }
     for i in 0..max_len {
         let mut byte = [0u8; 1];
         process.read_user_bytes(user_addr + i, &mut byte)?;
@@ -48,10 +51,14 @@ pub fn read_user_plain_array<T: Copy>(
     user_addr: usize,
     count: usize,
 ) -> AxResult<Vec<T>> {
-    let mut out = Vec::with_capacity(count);
+    let mut out = Vec::new();
+    if out.try_reserve_exact(count).is_err() {
+        return Err(AxError::NoMemory);
+    }
     let elem_size = core::mem::size_of::<T>();
     for i in 0..count {
-        let addr = user_addr + i * elem_size;
+        let byte_off = i.checked_mul(elem_size).ok_or(AxError::InvalidInput)?;
+        let addr = user_addr.checked_add(byte_off).ok_or(AxError::InvalidInput)?;
         out.push(read_user_plain(process, addr)?);
     }
     Ok(out)

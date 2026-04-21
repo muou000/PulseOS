@@ -1,4 +1,5 @@
 /// Task related syscalls.
+mod schedule;
 mod clone;
 mod common;
 mod exec;
@@ -7,6 +8,7 @@ mod process;
 mod user;
 mod wait;
 
+pub use schedule::*;
 pub use clone::*;
 pub use exec::*;
 pub use exit::*;
