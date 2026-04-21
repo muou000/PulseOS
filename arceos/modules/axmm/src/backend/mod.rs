@@ -71,11 +71,16 @@ impl MappingBackend for Backend {
         page_table: &mut Self::PageTable,
     ) -> bool {
         match *self {
-            Self::File(ref mapping) if !mapping.permits(new_flags) => false,
-            _ => page_table
+            Self::Linear { .. } => page_table
                 .protect_region(start, size, new_flags, true)
                 .map(|tlb| tlb.ignore())
                 .is_ok(),
+            Self::Alloc { populate } => {
+                self.protect_alloc(start, size, new_flags, page_table, populate)
+            }
+            Self::File(ref mapping) => {
+                self.protect_file(start, size, new_flags, page_table, mapping)
+            }
         }
     }
 }
