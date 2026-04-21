@@ -1,5 +1,4 @@
 use axerrno::LinuxError;
-
 use pulse_core::task::current_process;
 
 fn parse_id_arg(raw: usize) -> u32 {
@@ -99,11 +98,7 @@ pub fn sys_setreuid(raw_ruid: usize, raw_euid: usize) -> isize {
     let final_ruid = new_ruid.unwrap_or(old_ruid);
     let final_euid = new_euid.unwrap_or(old_euid);
     let should_update_suid = new_ruid.is_some() || new_euid.is_some_and(|euid| euid != old_ruid);
-    let final_suid = if should_update_suid {
-        final_euid
-    } else {
-        old_suid
-    };
+    let final_suid = if should_update_suid { final_euid } else { old_suid };
     process.set_uids(final_ruid, final_euid, final_suid);
     axlog::debug!(
         "sys_setreuid: ruid={:?}, euid={:?}, old=({},{},{}), new=({},{},{})",
@@ -145,11 +140,7 @@ pub fn sys_setregid(raw_rgid: usize, raw_egid: usize) -> isize {
     let final_rgid = new_rgid.unwrap_or(old_rgid);
     let final_egid = new_egid.unwrap_or(old_egid);
     let should_update_sgid = new_rgid.is_some() || new_egid.is_some_and(|egid| egid != old_rgid);
-    let final_sgid = if should_update_sgid {
-        final_egid
-    } else {
-        old_sgid
-    };
+    let final_sgid = if should_update_sgid { final_egid } else { old_sgid };
     process.set_gids(final_rgid, final_egid, final_sgid);
     axlog::debug!(
         "sys_setregid: rgid={:?}, egid={:?}, old=({},{},{}), new=({},{},{})",

@@ -1,7 +1,9 @@
 use axerrno::LinuxError;
 use linux_raw_sys::general::*;
-use pulse_core::fd_table::{FdEntry, FdFlags};
-use pulse_core::task::with_current_process;
+use pulse_core::{
+    fd_table::{FdEntry, FdFlags},
+    task::with_current_process,
+};
 
 pub(crate) fn get_fd_entry(fd: usize) -> Result<FdEntry, LinuxError> {
     with_current_process(|process| process.fd_table.lock().get_entry_cloned(fd))?

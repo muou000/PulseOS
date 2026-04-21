@@ -1,5 +1,5 @@
-use alloc::collections::BTreeSet;
-use alloc::string::String;
+use alloc::{collections::BTreeSet, string::String};
+
 use spin::Lazy;
 
 mod fd;

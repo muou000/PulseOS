@@ -1,12 +1,13 @@
-use crate::LinuxError;
+use core::sync::atomic::{AtomicBool, Ordering};
+
 use axerrno::AxError;
 use axhal::context::TrapFrame;
 use bitflags::bitflags;
+use pulse_core::task::{CloneParams, ForkParams, current_process, current_thread};
 
-use pulse_core::task::CloneParams;
-use pulse_core::task::ForkParams;
-use pulse_core::task::current_process;
-use pulse_core::task::current_thread;
+use crate::LinuxError;
+
+static CLONE_SIGHAND_WARNED: AtomicBool = AtomicBool::new(false);
 
 bitflags! {
     /// Flags for sys_clone
@@ -92,7 +93,8 @@ pub fn sys_clone(tf: &TrapFrame, args: [usize; 6]) -> isize {
     // CLONE_VM: Process fork vs Thread clone
     if !flags.contains(CloneFlags::CLONE_VM) {
         axlog::debug!(
-            "sys_clone: CLONE_VM=0 requested. Using Deep Copy fork instead of safe COW due to missing physical frame reference tracking."
+            "sys_clone: CLONE_VM=0 requested. Using Deep Copy fork instead of safe COW due to \
+             missing physical frame reference tracking."
         );
     }
 
@@ -101,9 +103,12 @@ pub fn sys_clone(tf: &TrapFrame, args: [usize; 6]) -> isize {
     }
 
     // CLONE_SIGHAND
-    if flags.contains(CloneFlags::CLONE_SIGHAND) {
-        axlog::warn!(
-            "sys_clone: CLONE_SIGHAND requested but signal handler infrastructure is totally missing."
+    if flags.contains(CloneFlags::CLONE_SIGHAND)
+        && !CLONE_SIGHAND_WARNED.swap(true, Ordering::AcqRel)
+    {
+        axlog::debug!(
+            "sys_clone: CLONE_SIGHAND requested; shared signal handlers are not fully implemented \
+             yet."
         );
     }
 

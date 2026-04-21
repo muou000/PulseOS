@@ -1,9 +1,8 @@
-use alloc::ffi::CString;
-use alloc::vec::Vec;
-use axerrno::LinuxError;
+use alloc::{ffi::CString, vec::Vec};
 use core::time::Duration;
-use linux_raw_sys::general::{UTIME_NOW, UTIME_OMIT, iovec, timespec};
 
+use axerrno::LinuxError;
+use linux_raw_sys::general::{UTIME_NOW, UTIME_OMIT, iovec, timespec};
 use pulse_core::task::uaccess;
 
 pub(crate) fn with_process<R>(

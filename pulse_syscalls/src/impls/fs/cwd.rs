@@ -1,6 +1,6 @@
-use crate::impls::utils::{read_user_cstring, with_process, write_user_bytes};
-
 use axerrno::LinuxError;
+
+use crate::impls::utils::{read_user_cstring, with_process, write_user_bytes};
 
 pub fn sys_getcwd(buf: usize, size: usize) -> isize {
     axlog::debug!("sys_getcwd: buf={:#x}, size={}", buf, size);
@@ -41,8 +41,7 @@ pub fn sys_chdir(path: usize) -> isize {
     match with_process(|process| -> Result<(), LinuxError> {
         let dir = {
             let fs = process.fs_context.lock().clone();
-            fs.resolve(path)
-                .map_err(|e| LinuxError::from(e.canonicalize()))?
+            fs.resolve(path).map_err(|e| LinuxError::from(e.canonicalize()))?
         };
         process
             .fs_context
