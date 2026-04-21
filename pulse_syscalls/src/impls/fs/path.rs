@@ -1,15 +1,15 @@
-use crate::impls::fs::common::{
-    MOUNTED_TARGETS, context_for_dirfd, insert_fd_entry, open_fd_flags,
-};
-use crate::impls::utils::read_user_cstring;
-use linux_raw_sys::general::*;
-
 use alloc::string::{String, ToString};
 
 use axerrno::LinuxError;
 use axfs::{FsContext, OpenOptions};
 use axfs_ng_vfs::{NodePermission, VfsError, path::Path};
+use linux_raw_sys::general::*;
 use pulse_core::fd_table::open_result_to_entry;
+
+use crate::impls::{
+    fs::common::{MOUNTED_TARGETS, context_for_dirfd, insert_fd_entry, open_fd_flags},
+    utils::read_user_cstring,
+};
 
 fn flags_to_options(flags: usize, mode: usize) -> OpenOptions {
     let mut options = OpenOptions::new();
@@ -71,11 +71,7 @@ fn read_user_optional_path(pathname: usize) -> Result<Option<String>, LinuxError
     }
     let path = read_user_cstring(pathname)?;
     let path = path.to_str().map_err(|_| LinuxError::EINVAL)?;
-    if path.is_empty() {
-        Ok(None)
-    } else {
-        Ok(Some(path.to_string()))
-    }
+    if path.is_empty() { Ok(None) } else { Ok(Some(path.to_string())) }
 }
 
 fn ensure_dir_recursive(
@@ -103,10 +99,7 @@ fn resolve_mount_target_path(target_path: &str) -> Result<String, LinuxError> {
     let ctx = context_for_dirfd(AT_FDCWD as i32)?;
     let target = ensure_dir_recursive(&ctx, target_path, NodePermission::default())
         .map_err(|e| LinuxError::from(e.canonicalize()))?;
-    Ok(target
-        .absolute_path()
-        .map_err(|e| LinuxError::from(e.canonicalize()))?
-        .to_string())
+    Ok(target.absolute_path().map_err(|e| LinuxError::from(e.canonicalize()))?.to_string())
 }
 
 fn rename_at(olddirfd: i32, oldpath: &str, newdirfd: i32, newpath: &str) -> Result<(), LinuxError> {
@@ -301,12 +294,7 @@ pub fn sys_umount2(target: usize, _flags: usize) -> isize {
 }
 
 pub fn sys_unlinkat(dirfd: i32, pathname: usize, flags: usize) -> isize {
-    axlog::debug!(
-        "sys_unlinkat: dirfd={}, pathname={:#x}, flags={:#x}",
-        dirfd,
-        pathname,
-        flags
-    );
+    axlog::debug!("sys_unlinkat: dirfd={}, pathname={:#x}, flags={:#x}", dirfd, pathname, flags);
 
     if pathname == 0 {
         return -LinuxError::EFAULT.code() as isize;

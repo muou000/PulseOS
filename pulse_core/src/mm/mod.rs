@@ -1,9 +1,8 @@
 mod loader;
 
-pub use loader::load_user_app;
-
 use axerrno::AxResult;
 use axmm::AddrSpace;
+pub use loader::load_user_app;
 
 /// If the target architecture requires it, the kernel portion of the address
 /// space will be copied to the user address space.

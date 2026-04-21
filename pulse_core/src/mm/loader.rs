@@ -1,7 +1,9 @@
-use alloc::string::{String, ToString};
-use alloc::sync::Arc;
-use alloc::vec;
-use alloc::vec::Vec;
+use alloc::{
+    string::{String, ToString},
+    sync::Arc,
+    vec,
+    vec::Vec,
+};
 
 use axerrno::{AxError, AxResult};
 use axfs::{CachedFile, File, FileFlags};
@@ -9,9 +11,11 @@ use axhal::paging::MappingFlags;
 use axmm::AddrSpace;
 use kernel_elf_parser::{AuxEntry, AuxType, ELFHeadersBuilder, ELFParser, app_stack_region};
 use memory_addr::VirtAddr;
-use xmas_elf::ElfFile;
-use xmas_elf::header::{Machine, Type as ElfType};
-use xmas_elf::program::Type;
+use xmas_elf::{
+    ElfFile,
+    header::{Machine, Type as ElfType},
+    program::Type,
+};
 
 use crate::config::{USER_INTERP_BASE, USER_STACK_TOP};
 
@@ -44,9 +48,7 @@ fn align_down_4k(v: usize) -> usize {
 }
 
 fn align_up_4k(v: usize) -> AxResult<usize> {
-    v.checked_add(0xfff)
-        .ok_or(AxError::OutOfRange)
-        .map(|x| x & !0xfff)
+    v.checked_add(0xfff).ok_or(AxError::OutOfRange).map(|x| x & !0xfff)
 }
 
 fn validate_machine(elf: &ElfFile<'_>, path: &str) -> AxResult {
@@ -59,11 +61,7 @@ fn validate_machine(elf: &ElfFile<'_>, path: &str) -> AxResult {
     if ok {
         Ok(())
     } else {
-        axlog::error!(
-            "ELF machine {:?} of {} does not match current arch",
-            machine,
-            path
-        );
+        axlog::error!("ELF machine {:?} of {} does not match current arch", machine, path);
         Err(AxError::InvalidExecutable)
     }
 }
@@ -82,9 +80,7 @@ fn compute_load_bias(elf: &ElfFile<'_>, desired_base: usize) -> AxResult<usize> 
     }
     let min_vaddr = min_vaddr.ok_or(AxError::InvalidExecutable)?;
     let min_page = align_down_4k(min_vaddr);
-    desired_base
-        .checked_sub(min_page)
-        .ok_or(AxError::InvalidExecutable)
+    desired_base.checked_sub(min_page).ok_or(AxError::InvalidExecutable)
 }
 
 fn segment_flags(ph: &xmas_elf::program::ProgramHeader<'_>) -> MappingFlags {
@@ -114,9 +110,7 @@ fn load_segments(
         }
 
         let p_offset = ph.offset() as usize;
-        let p_vaddr = (ph.virtual_addr() as usize)
-            .checked_add(bias)
-            .ok_or(AxError::OutOfRange)?;
+        let p_vaddr = (ph.virtual_addr() as usize).checked_add(bias).ok_or(AxError::OutOfRange)?;
         let p_filesz = ph.file_size() as usize;
         let p_memsz = ph.mem_size() as usize;
 
@@ -151,9 +145,8 @@ fn load_segments(
             }
         } else {
             if p_filesz > 0 {
-                let file_bytes = (p_vaddr - seg_start_page)
-                    .checked_add(p_filesz)
-                    .ok_or(AxError::OutOfRange)?;
+                let file_bytes =
+                    (p_vaddr - seg_start_page).checked_add(p_filesz).ok_or(AxError::OutOfRange)?;
                 aspace.map_file(
                     VirtAddr::from_usize(seg_start_page),
                     file_backed_end_page - seg_start_page,
@@ -227,9 +220,8 @@ fn build_auxv(
     if end > main_elf_data.len() || start > end {
         return Err(AxError::InvalidExecutable);
     }
-    let headers = hdr_builder
-        .build(&main_elf_data[start..end])
-        .map_err(|_| AxError::InvalidExecutable)?;
+    let headers =
+        hdr_builder.build(&main_elf_data[start..end]).map_err(|_| AxError::InvalidExecutable)?;
     let parser = ELFParser::new(&headers, main_bias).map_err(|_| AxError::InvalidExecutable)?;
 
     let mut auxv: Vec<AuxEntry> = parser.aux_vector(PAGE_SIZE_4K, interp_base).collect();
@@ -238,11 +230,7 @@ fn build_auxv(
 }
 
 fn get_from_cache(path: &str) -> Option<Arc<CachedElfImage>> {
-    ELF_FILE_CACHE
-        .lock()
-        .iter()
-        .find(|(p, _)| p == path)
-        .map(|(_, d)| d.clone())
+    ELF_FILE_CACHE.lock().iter().find(|(p, _)| p == path).map(|(_, d)| d.clone())
 }
 
 fn invalidate_cache(path: &str) {
@@ -309,24 +297,17 @@ fn read_elf_file(path: &str) -> AxResult<Arc<CachedElfImage>> {
     };
 
     let location = fs_ctx.resolve(path).map_err(|_| AxError::NotFound)?;
-    let mut prefix = fs_ctx
-        .read_prefix(path, 4096)
-        .map_err(|_| AxError::NotFound)?;
+    let mut prefix = fs_ctx.read_prefix(path, 4096).map_err(|_| AxError::NotFound)?;
     let mut needed = compute_needed_prefix_len(&prefix)?;
     if needed > prefix.len() {
-        prefix = fs_ctx
-            .read_prefix(path, needed)
-            .map_err(|_| AxError::NotFound)?;
+        prefix = fs_ctx.read_prefix(path, needed).map_err(|_| AxError::NotFound)?;
         needed = compute_needed_prefix_len(&prefix)?;
     }
     if needed > prefix.len() {
         return Err(AxError::InvalidExecutable);
     }
 
-    let image = Arc::new(CachedElfImage {
-        prefix,
-        file: CachedFile::get_or_create(location),
-    });
+    let image = Arc::new(CachedElfImage { prefix, file: CachedFile::get_or_create(location) });
 
     if !validate_cached_image(path, &image) {
         return Err(AxError::InvalidExecutable);
@@ -343,9 +324,7 @@ fn read_elf_range(path: &str, offset: u64, len: usize) -> AxResult<Vec<u8>> {
     };
     let file = File::open(&fs_ctx, path).map_err(|_| AxError::NotFound)?;
     let mut buf = vec![0u8; len];
-    let read = file
-        .read_at(&mut buf[..], offset)
-        .map_err(|_| AxError::InvalidExecutable)?;
+    let read = file.read_at(&mut buf[..], offset).map_err(|_| AxError::InvalidExecutable)?;
     if read == len {
         return Ok(buf);
     }
@@ -436,12 +415,7 @@ pub fn load_user_app(
     let envs_vec: Vec<String> = envs.iter().map(|e| (*e).to_string()).collect();
 
     let stack_region = app_stack_region(&argv, &envs_vec, &auxv, USER_STACK_TOP);
-    let user_sp = USER_STACK_TOP
-        .checked_sub(stack_region.len())
-        .ok_or(AxError::OutOfRange)?;
+    let user_sp = USER_STACK_TOP.checked_sub(stack_region.len()).ok_or(AxError::OutOfRange)?;
     aspace.write(VirtAddr::from_usize(user_sp), &stack_region)?;
-    Ok(UserAppLoadInfo {
-        entry: dispatch_entry,
-        user_sp,
-    })
+    Ok(UserAppLoadInfo { entry: dispatch_entry, user_sp })
 }

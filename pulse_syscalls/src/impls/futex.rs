@@ -1,6 +1,6 @@
-use crate::LinuxError;
-use crate::impls::utils::read_user_timespec;
 use axerrno::AxError;
+
+use crate::{LinuxError, impls::utils::read_user_timespec};
 
 const FUTEX_WAIT: i32 = 0;
 const FUTEX_WAKE: i32 = 1;

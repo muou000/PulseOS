@@ -1,18 +1,15 @@
 //! Trap 处理模块 - 处理 page fault 和其他异常
 
-use axhal::paging::MappingFlags;
-use axhal::trap::{PAGE_FAULT, register_trap_handler};
+use axhal::{
+    paging::MappingFlags,
+    trap::{PAGE_FAULT, register_trap_handler},
+};
 use memory_addr::VirtAddr;
 
 /// Page fault处理程序
 #[register_trap_handler(PAGE_FAULT)]
 fn handle_page_fault(vaddr: VirtAddr, access_flags: MappingFlags, is_user: bool) -> bool {
-    axlog::debug!(
-        "Page fault @ VA:{:#x}, flags:{:?}, user={}",
-        vaddr,
-        access_flags,
-        is_user
-    );
+    axlog::debug!("Page fault @ VA:{:#x}, flags:{:?}, user={}", vaddr, access_flags, is_user);
 
     // 如果不是用户空间，不处理
     if !is_user {
