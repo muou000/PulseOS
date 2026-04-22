@@ -1,7 +1,7 @@
 use alloc::sync::Arc;
 use core::marker::PhantomPinned;
 
-use axdriver::AxBlockDevice;
+use axdriver::prelude::BlockDriverOps;
 use axfs_ng_vfs::{
     DirEntry, Filesystem, FilesystemOps, Reference, StatFs, VfsResult, path::MAX_NAME_LEN,
 };
@@ -33,7 +33,7 @@ pub struct FatFilesystem {
 }
 
 impl FatFilesystem {
-    pub fn new(dev: AxBlockDevice) -> Filesystem {
+    pub fn new<D: BlockDriverOps + 'static>(dev: D) -> Filesystem {
         let mut inner = FatFilesystemInner {
             inner: ff::FileSystem::new(SeekableDisk::new(dev), fatfs::FsOptions::new())
                 .expect("failed to initialize FAT filesystem"),
@@ -41,19 +41,11 @@ impl FatFilesystem {
             _pinned: PhantomPinned,
         };
         let root_inode = inner.alloc_inode();
-        let result = Arc::new(Self {
-            inner: Mutex::new(inner),
-            root_dir: Mutex::default(),
-        });
+        let result = Arc::new(Self { inner: Mutex::new(inner), root_dir: Mutex::default() });
 
         let root_dir = DirEntry::new_dir(
             |this| {
-                FatDirNode::new(
-                    result.clone(),
-                    result.lock().inner.root_dir(),
-                    root_inode,
-                    this,
-                )
+                FatDirNode::new(result.clone(), result.lock().inner.root_dir(), root_inode, this)
             },
             Reference::root(),
         );

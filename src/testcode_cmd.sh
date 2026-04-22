@@ -1,3 +1,4 @@
+mkdir -p /fs &&
 mount -t ext4 device0 /fs &&
 cd /fs/musl &&
 sh ./basic_testcode.sh &&

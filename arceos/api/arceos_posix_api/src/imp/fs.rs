@@ -3,6 +3,7 @@ use core::ffi::{c_char, c_int};
 
 use axerrno::{LinuxError, LinuxResult};
 use axfs::OpenOptions;
+use axfs_ng_vfs::{NodePermission, VfsError};
 use axio::PollState;
 use axsync::Mutex;
 
@@ -16,10 +17,7 @@ pub struct File {
 
 impl File {
     fn new(inner: axfs::File) -> Self {
-        Self {
-            inner: Mutex::new(inner),
-            offset: Mutex::new(0),
-        }
+        Self { inner: Mutex::new(inner), offset: Mutex::new(0) }
     }
 
     fn add_to_fd_table(self) -> LinuxResult<c_int> {
@@ -28,9 +26,7 @@ impl File {
 
     fn from_fd(fd: c_int) -> LinuxResult<Arc<Self>> {
         let f = super::fd_ops::get_file_like(fd)?;
-        f.into_any()
-            .downcast::<Self>()
-            .map_err(|_| LinuxError::EINVAL)
+        f.into_any().downcast::<Self>().map_err(|_| LinuxError::EINVAL)
     }
 }
 
@@ -81,10 +77,7 @@ impl FileLike for File {
     }
 
     fn poll(&self) -> LinuxResult<PollState> {
-        Ok(PollState {
-            readable: true,
-            writable: true,
-        })
+        Ok(PollState { readable: true, writable: true })
     }
 
     fn set_nonblocking(&self, _nonblocking: bool) -> LinuxResult {
@@ -99,16 +92,11 @@ pub struct DirFile {
 
 impl DirFile {
     fn new(dir: axfs::OpenResult) -> Self {
-        Self {
-            inner: Mutex::new(dir),
-            offset: Mutex::new(0),
-        }
+        Self { inner: Mutex::new(dir), offset: Mutex::new(0) }
     }
     fn from_fd(fd: c_int) -> LinuxResult<Arc<Self>> {
         let f = super::fd_ops::get_file_like(fd)?;
-        f.into_any()
-            .downcast::<Self>()
-            .map_err(|_| LinuxError::EBADF)
+        f.into_any().downcast::<Self>().map_err(|_| LinuxError::EBADF)
     }
 }
 
@@ -393,7 +381,18 @@ pub fn sys_mkdir(path: *const c_char, _mode: ctypes::mode_t) -> c_int {
     debug!("sys_mkdir <= {:?}", path);
     syscall_body!(sys_mkdir, {
         let path = path?;
-        axfs::FS_CONTEXT.lock().create_dir(path, Default::default())?;
+        let fs = axfs::FS_CONTEXT.lock();
+        if fs.resolve(path).is_ok() {
+            return Err(LinuxError::EEXIST);
+        }
+        let umask =
+            pulse_core::task::current_process().map(|process| process.umask()).unwrap_or(0o022);
+        let mode = (((_mode as u32) & !umask) & 0o777) as _;
+        match fs.create_dir(path, NodePermission::from_bits_truncate(mode)) {
+            Ok(_) => {}
+            Err(VfsError::NotFound) => return Err(LinuxError::ENOENT),
+            Err(err) => return Err(LinuxError::from(err.canonicalize())),
+        }
         Ok(0)
     })
 }

@@ -139,6 +139,7 @@ fn syscall_dispatcher(
 
         Sysno::getuid => impls::sys_getuid(),
         Sysno::geteuid => impls::sys_geteuid(),
+        Sysno::umask => impls::sys_umask(args[0]),
         Sysno::getppid => impls::sys_getppid(),
         Sysno::getpgid => {
             axlog::warn!("sys_getpgid (stub): return 1");

@@ -434,9 +434,6 @@ impl FdObject for DirObject {
         let mut offset = self.offset.lock();
         let mut written = 0usize;
         let mut break_out = false;
-        if let Ok(path) = self.inner.absolute_path() {
-            axlog::info!("read_dirents64: path={}, offset={}, buf={}", path, *offset, dirp.len());
-        }
         let res = self.inner.read_dir(*offset, &mut |name: &str,
                                                      ino: u64,
                                                      node_type: NodeType,

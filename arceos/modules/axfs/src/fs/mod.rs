@@ -1,3 +1,5 @@
+use alloc::vec::Vec;
+
 #[cfg(feature = "fat")]
 mod fat;
 
@@ -8,11 +10,12 @@ mod devfs;
 mod procfs;
 mod tmpfs;
 
-use axdriver::AxBlockDevice;
+use axdriver::prelude::BlockDriverOps;
 use axfs_ng_vfs::{Filesystem, VfsResult};
 use cfg_if::cfg_if;
+pub(crate) use devfs::BlockDeviceSpec;
 
-pub fn new_default(dev: AxBlockDevice) -> VfsResult<Filesystem> {
+pub fn new_default<D: BlockDriverOps + 'static>(dev: D) -> VfsResult<Filesystem> {
     cfg_if! {
         if #[cfg(feature = "ext4")] {
             ext4::Ext4Filesystem::new(dev)
@@ -24,8 +27,8 @@ pub fn new_default(dev: AxBlockDevice) -> VfsResult<Filesystem> {
     }
 }
 
-pub fn new_devfs() -> Filesystem {
-    devfs::DevFilesystem::new()
+pub fn new_devfs(block_devices: Vec<BlockDeviceSpec>) -> Filesystem {
+    devfs::DevFilesystem::new(block_devices)
 }
 
 pub fn new_procfs() -> Filesystem {

@@ -1,7 +1,13 @@
-use alloc::{boxed::Box, vec};
+use alloc::{
+    boxed::Box,
+    string::{String, ToString},
+    sync::Arc,
+    vec,
+};
 use core::mem;
 
-use axdriver::prelude::*;
+use axdriver::{AxBlockDevice, prelude::*};
+use spin::Mutex;
 
 fn take<'a>(buf: &mut &'a [u8], cnt: usize) -> &'a [u8] {
     let (first, rem) = buf.split_at(cnt);
@@ -16,9 +22,73 @@ fn take_mut<'a>(buf: &mut &'a mut [u8], cnt: usize) -> &'a mut [u8] {
     first
 }
 
+/// A block device wrapper that can be cloned and shared across subsystems.
+#[derive(Clone)]
+pub struct SharedBlockDevice {
+    name: String,
+    dev: Arc<Mutex<AxBlockDevice>>,
+}
+
+impl SharedBlockDevice {
+    /// Wraps a block device so the same underlying driver can be reused.
+    pub fn new(dev: AxBlockDevice) -> Self {
+        let name = dev.device_name().to_string();
+        Self { name, dev: Arc::new(Mutex::new(dev)) }
+    }
+
+    /// Returns the total size of the device in bytes.
+    pub fn size(&self) -> u64 {
+        let dev = self.dev.lock();
+        dev.num_blocks().saturating_mul(dev.block_size() as u64)
+    }
+
+    /// Returns the device block size.
+    pub fn block_size(&self) -> usize {
+        let dev = self.dev.lock();
+        dev.block_size()
+    }
+}
+
+impl BaseDriverOps for SharedBlockDevice {
+    fn device_name(&self) -> &str {
+        &self.name
+    }
+
+    fn device_type(&self) -> DeviceType {
+        DeviceType::Block
+    }
+}
+
+impl BlockDriverOps for SharedBlockDevice {
+    fn num_blocks(&self) -> u64 {
+        let dev = self.dev.lock();
+        dev.num_blocks()
+    }
+
+    fn block_size(&self) -> usize {
+        let dev = self.dev.lock();
+        dev.block_size()
+    }
+
+    fn read_block(&mut self, block_id: u64, buf: &mut [u8]) -> DevResult {
+        let mut dev = self.dev.lock();
+        dev.read_block(block_id, buf)
+    }
+
+    fn write_block(&mut self, block_id: u64, buf: &[u8]) -> DevResult {
+        let mut dev = self.dev.lock();
+        dev.write_block(block_id, buf)
+    }
+
+    fn flush(&mut self) -> DevResult {
+        let mut dev = self.dev.lock();
+        dev.flush()
+    }
+}
+
 /// A disk device with a cursor.
-pub struct SeekableDisk {
-    dev: AxBlockDevice,
+pub struct SeekableDisk<D: BlockDriverOps> {
+    dev: D,
 
     block_id: u64,
     offset: usize,
@@ -32,9 +102,9 @@ pub struct SeekableDisk {
     write_buffer_dirty: bool,
 }
 
-impl SeekableDisk {
+impl<D: BlockDriverOps> SeekableDisk<D> {
     /// Create a new disk.
-    pub fn new(dev: AxBlockDevice) -> Self {
+    pub fn new(dev: D) -> Self {
         assert!(dev.block_size().is_power_of_two());
         let block_size_log2 = dev.block_size().trailing_zeros() as u8;
         let read_buffer = vec![0u8; dev.block_size()].into_boxed_slice();
@@ -58,11 +128,6 @@ impl SeekableDisk {
     /// Get the block size.
     pub fn block_size(&self) -> usize {
         1 << self.block_size_log2
-    }
-
-    /// Get the position of the cursor.
-    pub fn position(&self) -> u64 {
-        (self.block_id << self.block_size_log2) + self.offset as u64
     }
 
     /// Set the position of the cursor.
@@ -108,8 +173,7 @@ impl SeekableDisk {
         if buf.len() >= self.block_size() {
             let blocks = buf.len() >> self.block_size_log2;
             let length = blocks << self.block_size_log2;
-            self.dev
-                .read_block(self.block_id, take_mut(&mut buf, length))?;
+            self.dev.read_block(self.block_id, take_mut(&mut buf, length))?;
             read += length;
 
             self.block_id += blocks as u64;
@@ -150,8 +214,7 @@ impl SeekableDisk {
         if buf.len() >= self.block_size() {
             let blocks = buf.len() >> self.block_size_log2;
             let length = blocks << self.block_size_log2;
-            self.dev
-                .write_block(self.block_id, take(&mut buf, length))?;
+            self.dev.write_block(self.block_id, take(&mut buf, length))?;
             written += length;
 
             self.block_id += blocks as u64;

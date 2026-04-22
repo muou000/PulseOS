@@ -21,7 +21,6 @@ use axfs_ng_vfs::NodePermission;
 pub use axfs_ng_vfs::NodeType;
 use spin::{Lazy, Mutex};
 
-#[cfg(feature = "fat")]
 mod disk;
 mod fs;
 
@@ -38,6 +37,8 @@ pub struct MountRecord {
 
 static MOUNT_RECORDS: Lazy<Mutex<Vec<MountRecord>>> = Lazy::new(|| Mutex::new(Vec::new()));
 static MOUNTABLE_FILESYSTEMS: Lazy<Mutex<BTreeMap<String, axfs_ng_vfs::Filesystem>>> =
+    Lazy::new(|| Mutex::new(BTreeMap::new()));
+static MOUNTED_MOUNTPOINTS: Lazy<Mutex<BTreeMap<String, Arc<axfs_ng_vfs::Mountpoint>>>> =
     Lazy::new(|| Mutex::new(BTreeMap::new()));
 static PINNED_MOUNTPOINTS: Lazy<Mutex<Vec<Arc<axfs_ng_vfs::Mountpoint>>>> =
     Lazy::new(|| Mutex::new(Vec::new()));
@@ -58,6 +59,10 @@ fn reset_mount_records() {
 
 fn reset_mountable_filesystems() {
     MOUNTABLE_FILESYSTEMS.lock().clear();
+}
+
+fn reset_mounted_mountpoints() {
+    MOUNTED_MOUNTPOINTS.lock().clear();
 }
 
 fn reset_pinned_mountpoints() {
@@ -110,13 +115,41 @@ pub fn list_mounts() -> Vec<MountRecord> {
 }
 
 pub fn register_mountable_filesystem(source: &str, fs: &axfs_ng_vfs::Filesystem) {
-    MOUNTABLE_FILESYSTEMS
-        .lock()
-        .insert(source.to_string(), fs.clone());
+    MOUNTABLE_FILESYSTEMS.lock().insert(source.to_string(), fs.clone());
 }
 
 pub fn lookup_mountable_filesystem(source: &str) -> Option<axfs_ng_vfs::Filesystem> {
     MOUNTABLE_FILESYSTEMS.lock().get(source).cloned()
+}
+
+pub fn register_mounted_mountpoint(target: &str, mountpoint: Arc<axfs_ng_vfs::Mountpoint>) {
+    MOUNTED_MOUNTPOINTS.lock().insert(normalize_target(target), mountpoint);
+}
+
+pub fn lookup_mounted_mountpoint(target: &str) -> Option<Arc<axfs_ng_vfs::Mountpoint>> {
+    MOUNTED_MOUNTPOINTS.lock().get(&normalize_target(target)).cloned()
+}
+
+pub fn unregister_mounted_mountpoint(target: &str) -> bool {
+    MOUNTED_MOUNTPOINTS.lock().remove(&normalize_target(target)).is_some()
+}
+
+fn disk_node_name(index: usize) -> String {
+    let mut n = index;
+    let mut suffix = String::new();
+    loop {
+        suffix.insert(0, (b'a' + (n % 26) as u8) as char);
+        if n < 26 {
+            break;
+        }
+        n = n / 26 - 1;
+    }
+    format!("vd{}", suffix)
+}
+
+fn register_mountable_device(source: &str, disk_name: &str, fs: &axfs_ng_vfs::Filesystem) {
+    register_mountable_filesystem(source, fs);
+    register_mountable_filesystem(&format!("/dev/{}", disk_name), fs);
 }
 
 fn ensure_mount_dir(cx: &FsContext, path: &str) -> axfs_ng_vfs::VfsResult<axfs_ng_vfs::Location> {
@@ -147,6 +180,7 @@ fn mount_builtin_fs(
     match mount_dir.mount(fs) {
         Ok(mountpoint) => {
             pin_mountpoint(mountpoint.clone());
+            register_mounted_mountpoint(path, mountpoint.clone());
             register_mount(source, path, fs.name(), options);
             info!("  mounted {} at {}", fs.name(), path);
             Some(mountpoint)
@@ -162,12 +196,14 @@ pub fn init_filesystems(mut block_devs: AxDeviceContainer<AxBlockDevice>) {
     info!("Initialize filesystem subsystem...");
     reset_mount_records();
     reset_mountable_filesystems();
+    reset_mounted_mountpoints();
     reset_pinned_mountpoints();
 
     struct FsCandidate {
         disk_idx: usize,
         disk_size: u64,
         dev_name: String,
+        shared_dev: disk::SharedBlockDevice,
         fs: axfs_ng_vfs::Filesystem,
     }
 
@@ -175,11 +211,12 @@ pub fn init_filesystems(mut block_devs: AxDeviceContainer<AxBlockDevice>) {
     let mut disk_idx = 0usize;
 
     while let Some(dev) = block_devs.take_one() {
-        let disk_size = dev.num_blocks().saturating_mul(dev.block_size() as u64);
-        let dev_name = dev.device_name().to_string();
+        let shared_dev = disk::SharedBlockDevice::new(dev);
+        let disk_size = shared_dev.size();
+        let dev_name = shared_dev.device_name().to_string();
         info!("  probing block device {}: {}", disk_idx, dev_name);
 
-        let fs = match fs::new_default(dev) {
+        let fs = match fs::new_default(shared_dev.clone()) {
             Ok(fs) => fs,
             Err(e) => {
                 warn!(
@@ -191,19 +228,9 @@ pub fn init_filesystems(mut block_devs: AxDeviceContainer<AxBlockDevice>) {
             }
         };
 
-        info!(
-            "  filesystem on device {}: {} (size={} KiB)",
-            disk_idx,
-            fs.name(),
-            disk_size / 1024,
-        );
+        info!("  filesystem on device {}: {} (size={} KiB)", disk_idx, fs.name(), disk_size / 1024,);
 
-        candidates.push(FsCandidate {
-            disk_idx,
-            disk_size,
-            dev_name,
-            fs,
-        });
+        candidates.push(FsCandidate { disk_idx, disk_size, dev_name, shared_dev, fs });
         disk_idx += 1;
     }
 
@@ -222,42 +249,43 @@ pub fn init_filesystems(mut block_devs: AxDeviceContainer<AxBlockDevice>) {
 
     let root_mp = axfs_ng_vfs::Mountpoint::new_root(&root.fs);
     let cx = FsContext::new(root_mp.root_location());
-    register_mount(
+    register_mount(&format!("device{}", root.disk_idx), "/", root.fs.name(), "rw,relatime");
+    register_mountable_device(
         &format!("device{}", root.disk_idx),
-        "/",
-        root.fs.name(),
-        "rw,relatime",
+        &disk_node_name(root.disk_idx),
+        &root.fs,
     );
-    register_mountable_filesystem(&format!("device{}", root.disk_idx), &root.fs);
+
+    let mut dev_nodes = Vec::with_capacity(candidates.len() + 1);
+    dev_nodes.push(fs::BlockDeviceSpec {
+        name: disk_node_name(root.disk_idx),
+        device: root.shared_dev.clone(),
+        major: 254,
+        minor: root.disk_idx as u32,
+    });
 
     for cand in candidates {
         let source = format!("device{}", cand.disk_idx);
-        register_mountable_filesystem(&source, &cand.fs);
+        register_mountable_device(&source, &disk_node_name(cand.disk_idx), &cand.fs);
         info!(
             "  registered block device {} ({}) as {} for user-initiated mount",
             cand.disk_idx, cand.dev_name, source
         );
+        dev_nodes.push(fs::BlockDeviceSpec {
+            name: disk_node_name(cand.disk_idx),
+            device: cand.shared_dev,
+            major: 254,
+            minor: cand.disk_idx as u32,
+        });
     }
 
     let proc_fs = fs::new_procfs();
-    mount_builtin_fs(
-        &cx,
-        "/proc",
-        &proc_fs,
-        "proc",
-        "rw,nosuid,nodev,noexec,relatime",
-    );
-    let dev_fs = fs::new_devfs();
+    mount_builtin_fs(&cx, "/proc", &proc_fs, "proc", "rw,nosuid,nodev,noexec,relatime");
+    let dev_fs = fs::new_devfs(dev_nodes);
     mount_builtin_fs(&cx, "/dev", &dev_fs, "devtmpfs", "rw,nosuid,relatime");
 
     let shm_fs = fs::new_tmpfs();
-    mount_builtin_fs(
-        &cx,
-        "/dev/shm",
-        &shm_fs,
-        "tmpfs",
-        "rw,nosuid,nodev,noexec,relatime",
-    );
+    mount_builtin_fs(&cx, "/dev/shm", &shm_fs, "tmpfs", "rw,nosuid,nodev,noexec,relatime");
 
     ROOT_FS_CONTEXT.call_once(|| cx.clone());
     *FS_CONTEXT.lock() = cx;
