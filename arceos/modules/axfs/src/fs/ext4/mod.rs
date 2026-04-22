@@ -2,29 +2,23 @@ mod fs;
 mod inode;
 mod util;
 
-use alloc::sync::Arc;
-use alloc::vec;
-use alloc::vec::Vec;
+use alloc::{sync::Arc, vec, vec::Vec};
 
-#[allow(unused_imports)]
-use axdriver::{AxBlockDevice, prelude::BlockDriverOps};
+use axdriver::prelude::BlockDriverOps;
 use ext4_rs::{BLOCK_SIZE, BlockDevice};
 pub use fs::*;
 pub use inode::*;
 use kspin::SpinNoPreempt as Mutex;
 
-pub(crate) struct Ext4Disk {
-    dev: Mutex<AxBlockDevice>,
+pub(crate) struct Ext4Disk<D: BlockDriverOps> {
+    dev: Mutex<D>,
     sector_size: usize,
 }
 
-impl Ext4Disk {
-    pub(crate) fn new(dev: AxBlockDevice) -> Arc<Self> {
+impl<D: BlockDriverOps> Ext4Disk<D> {
+    pub(crate) fn new(dev: D) -> Arc<Self> {
         let sector_size = dev.block_size();
-        Arc::new(Self {
-            dev: Mutex::new(dev),
-            sector_size,
-        })
+        Arc::new(Self { dev: Mutex::new(dev), sector_size })
     }
 
     fn byte_range(&self, offset: usize, len: usize) -> (u64, usize, usize) {
@@ -36,7 +30,7 @@ impl Ext4Disk {
     }
 }
 
-impl BlockDevice for Ext4Disk {
+impl<D: BlockDriverOps + 'static> BlockDevice for Ext4Disk<D> {
     fn read_offset(&self, offset: usize) -> Vec<u8> {
         let (first_block, inner_offset, blocks) = self.byte_range(offset, BLOCK_SIZE);
         let mut raw = vec![0; blocks * self.sector_size];

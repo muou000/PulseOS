@@ -1,7 +1,7 @@
 use alloc::string::{String, ToString};
 
 use axerrno::LinuxError;
-use axfs::{FsContext, OpenOptions};
+use axfs::OpenOptions;
 use axfs_ng_vfs::{NodePermission, VfsError, path::Path};
 use linux_raw_sys::general::*;
 use pulse_core::fd_table::open_result_to_entry;
@@ -74,32 +74,51 @@ fn read_user_optional_path(pathname: usize) -> Result<Option<String>, LinuxError
     if path.is_empty() { Ok(None) } else { Ok(Some(path.to_string())) }
 }
 
-fn ensure_dir_recursive(
-    ctx: &FsContext,
-    path: &str,
-    mode: NodePermission,
-) -> axfs_ng_vfs::VfsResult<axfs_ng_vfs::Location> {
-    let path = Path::new(path);
-    match ctx.resolve(path) {
+fn mkdir_mode(mode: usize) -> NodePermission {
+    let umask = pulse_core::task::current_process().map(|process| process.umask()).unwrap_or(0o022);
+    let mode = ((mode as u32) & !umask) & 0o777;
+    NodePermission::from_bits_truncate(mode as _)
+}
+
+fn resolve_existing_mount_path(path: &str) -> Result<String, LinuxError> {
+    let ctx = context_for_dirfd(AT_FDCWD as i32)?;
+    let loc = ctx.resolve(Path::new(path)).map_err(|e| LinuxError::from(e.canonicalize()))?;
+    loc.check_is_dir().map_err(|e| LinuxError::from(e.canonicalize()))?;
+    Ok(loc.absolute_path().map_err(|e| LinuxError::from(e.canonicalize()))?.to_string())
+}
+
+fn resolve_source_path(source: &str) -> Result<String, LinuxError> {
+    let ctx = context_for_dirfd(AT_FDCWD as i32)?;
+    match ctx.resolve(Path::new(source)) {
         Ok(loc) => {
-            loc.check_is_dir()?;
-            Ok(loc)
+            Ok(loc.absolute_path().map_err(|e| LinuxError::from(e.canonicalize()))?.to_string())
         }
-        Err(VfsError::NotFound) => {
-            if let Some(parent) = path.parent() {
-                ensure_dir_recursive(ctx, parent.as_str(), NodePermission::default())?;
-            }
-            ctx.create_dir(path, mode)
-        }
-        Err(err) => Err(err),
+        Err(_) => Ok(source.to_string()),
     }
 }
 
-fn resolve_mount_target_path(target_path: &str) -> Result<String, LinuxError> {
-    let ctx = context_for_dirfd(AT_FDCWD as i32)?;
-    let target = ensure_dir_recursive(&ctx, target_path, NodePermission::default())
-        .map_err(|e| LinuxError::from(e.canonicalize()))?;
-    Ok(target.absolute_path().map_err(|e| LinuxError::from(e.canonicalize()))?.to_string())
+fn mount_source_candidates(source: &str) -> Result<alloc::vec::Vec<String>, LinuxError> {
+    let mut candidates = alloc::vec::Vec::new();
+    let source_path = resolve_source_path(source)?;
+    candidates.push(source_path.clone());
+    if source_path != source {
+        candidates.push(source.to_string());
+    }
+    let mut stripped = source_path.as_str();
+    while let Some(ch) = stripped.chars().last() {
+        if ch.is_ascii_digit() {
+            stripped = &stripped[..stripped.len() - ch.len_utf8()];
+        } else {
+            break;
+        }
+    }
+    let stripped = stripped.to_string();
+    if stripped != source_path && !stripped.is_empty() {
+        candidates.push(stripped);
+    }
+    candidates.sort();
+    candidates.dedup();
+    Ok(candidates)
 }
 
 fn rename_at(olddirfd: i32, oldpath: &str, newdirfd: i32, newpath: &str) -> Result<(), LinuxError> {
@@ -167,7 +186,12 @@ pub fn sys_mkdirat(dirfd: i32, pathname: usize, mode: usize) -> isize {
         Ok(path) => path,
         Err(_) => return -LinuxError::EINVAL.code() as isize,
     };
-    match ctx.create_dir(path, NodePermission::from_bits_truncate(mode as _)) {
+    match ctx.resolve_no_follow(path) {
+        Ok(_) => return -LinuxError::EEXIST.code() as isize,
+        Err(VfsError::NotFound) => {}
+        Err(e) => return -LinuxError::from(e.canonicalize()).code() as isize,
+    }
+    match ctx.create_dir(path, mkdir_mode(mode)) {
         Ok(_) => 0,
         Err(e) => -LinuxError::from(e.canonicalize()).code() as isize,
     }
@@ -195,16 +219,12 @@ pub fn sys_mount(
         Err(_) => return -LinuxError::EINVAL.code() as isize,
     };
 
-    let target_path = match resolve_mount_target_path(target_path) {
+    let target_path = match resolve_existing_mount_path(target_path) {
         Ok(path) => path,
         Err(e) => return -e.code() as isize,
     };
 
-    if axfs::is_mount_registered(&target_path) {
-        return -LinuxError::EBUSY.code() as isize;
-    }
-
-    if MOUNTED_TARGETS.lock().contains(&target_path) {
+    if axfs::lookup_mounted_mountpoint(&target_path).is_some() {
         return -LinuxError::EBUSY.code() as isize;
     }
 
@@ -219,7 +239,14 @@ pub fn sys_mount(
         Err(e) => return -e.code() as isize,
     };
 
-    let fs = match axfs::lookup_mountable_filesystem(&source) {
+    let fs = match mount_source_candidates(&source) {
+        Ok(candidates) => candidates
+            .into_iter()
+            .find_map(|candidate| axfs::lookup_mountable_filesystem(&candidate))
+            .or_else(|| axfs::lookup_mountable_filesystem(&source)),
+        Err(e) => return -e.code() as isize,
+    };
+    let fs = match fs {
         Some(fs) => fs,
         None => return -LinuxError::ENOENT.code() as isize,
     };
@@ -233,9 +260,11 @@ pub fn sys_mount(
     };
 
     match mount_dir.mount(&fs) {
-        Ok(_) => {
+        Ok(mountpoint) => {
             MOUNTED_TARGETS.lock().insert(target_path.clone());
+            axfs::register_mounted_mountpoint(&target_path, mountpoint);
             axfs::register_mount(&source, &target_path, &fstype, "rw,relatime");
+            let _ = pulse_core::task::current_process().map(|process| process.save_fs_context());
             0
         }
         Err(e) => -LinuxError::from(e.canonicalize()).code() as isize,
@@ -272,21 +301,16 @@ pub fn sys_umount2(target: usize, _flags: usize) -> isize {
     if target_path == "/" {
         return -LinuxError::EBUSY.code() as isize;
     }
-    let target_loc = match ctx.resolve_no_follow(&target_path) {
-        Ok(loc) => loc,
-        Err(e) => return -LinuxError::from(e.canonicalize()).code() as isize,
+    let mountpoint = match axfs::lookup_mounted_mountpoint(&target_path) {
+        Some(mountpoint) => mountpoint,
+        None => return -LinuxError::EINVAL.code() as isize,
     };
-    if !target_loc.is_root_of_mount() {
-        return -LinuxError::EINVAL.code() as isize;
-    }
-
-    if !MOUNTED_TARGETS.lock().contains(&target_path) {
-        return -LinuxError::EINVAL.code() as isize;
-    }
-    match target_loc.unmount() {
+    match mountpoint.root_location().unmount() {
         Ok(()) => {
             MOUNTED_TARGETS.lock().remove(&target_path);
             let _ = axfs::unregister_mount(&target_path);
+            let _ = axfs::unregister_mounted_mountpoint(&target_path);
+            let _ = pulse_core::task::current_process().map(|process| process.save_fs_context());
             0
         }
         Err(e) => -LinuxError::from(e.canonicalize()).code() as isize,
