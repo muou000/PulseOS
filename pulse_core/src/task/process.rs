@@ -17,6 +17,7 @@ use axtask::{AxTaskRef, TaskInner, WaitQueue};
 use kernel_guard::NoPreemptIrqSave;
 use memory_addr::{MemoryAddr, PAGE_SIZE_4K, PhysAddr, VirtAddr, va};
 use spin::Mutex;
+
 use super::Thread;
 use crate::{
     config::*,
@@ -262,6 +263,7 @@ pub struct Process {
     rgid: AtomicU32,
     egid: AtomicU32,
     sgid: AtomicU32,
+    umask: AtomicU32,
     memlock_state: Mutex<MemlockState>,
 }
 
@@ -344,7 +346,11 @@ impl Process {
         Ok(())
     }
 
-    fn memlock_remove_range(ranges: &mut Vec<MemlockRange>, start: usize, end: usize) -> AxResult<usize> {
+    fn memlock_remove_range(
+        ranges: &mut Vec<MemlockRange>,
+        start: usize,
+        end: usize,
+    ) -> AxResult<usize> {
         if start >= end {
             return Ok(0);
         }
@@ -426,6 +432,14 @@ impl Process {
 
     pub fn sgid(&self) -> u32 {
         self.sgid.load(Ordering::Acquire)
+    }
+
+    pub fn umask(&self) -> u32 {
+        self.umask.load(Ordering::Acquire)
+    }
+
+    pub fn set_umask(&self, umask: u32) -> u32 {
+        self.umask.swap(umask, Ordering::AcqRel)
     }
 
     pub fn uid_snapshot(&self) -> (u32, u32, u32) {
@@ -679,6 +693,7 @@ impl Process {
             rgid: AtomicU32::new(0),
             egid: AtomicU32::new(0),
             sgid: AtomicU32::new(0),
+            umask: AtomicU32::new(0o022),
             memlock_state: Mutex::new(MemlockState::new()),
         }))
     }
@@ -745,6 +760,7 @@ impl Process {
             rgid: AtomicU32::new(rgid),
             egid: AtomicU32::new(egid),
             sgid: AtomicU32::new(sgid),
+            umask: AtomicU32::new(parent.umask()),
             memlock_state: Mutex::new(MemlockState::new()),
         }))
     }

@@ -3,8 +3,7 @@
 use axalloc::global_allocator;
 use pulse_core::task::uaccess;
 
-use crate::LinuxError;
-use crate::impls::utils::alloc_zeroed_bytes;
+use crate::{LinuxError, impls::utils::alloc_zeroed_bytes};
 
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -87,6 +86,14 @@ pub fn sys_uname(buf: usize) -> isize {
     }) {
         Ok(Ok(())) => 0,
         Ok(Err(_)) => -LinuxError::EFAULT.code() as isize,
+        Err(e) => -e.code() as isize,
+    }
+}
+
+pub fn sys_umask(mask: usize) -> isize {
+    axlog::debug!("sys_umask: mask={:#o}", mask);
+    match pulse_core::task::current_process() {
+        Ok(process) => process.set_umask((mask as u32) & 0o777) as isize,
         Err(e) => -e.code() as isize,
     }
 }

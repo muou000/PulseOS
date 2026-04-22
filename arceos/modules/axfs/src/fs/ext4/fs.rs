@@ -1,7 +1,7 @@
 use alloc::sync::Arc;
 use core::cell::OnceCell;
 
-use axdriver::AxBlockDevice;
+use axdriver::prelude::BlockDriverOps;
 use axfs_ng_vfs::{
     DirEntry, DirNode, Filesystem, FilesystemOps, Reference, StatFs, VfsResult, path::MAX_NAME_LEN,
 };
@@ -18,13 +18,10 @@ pub struct Ext4Filesystem {
 }
 
 impl Ext4Filesystem {
-    pub fn new(dev: AxBlockDevice) -> VfsResult<Filesystem> {
+    pub fn new<D: BlockDriverOps + 'static>(dev: D) -> VfsResult<Filesystem> {
         let disk = Ext4Disk::new(dev);
         let ext4 = Ext4::open(disk);
-        let fs = Arc::new(Self {
-            inner: Mutex::new(ext4),
-            root_dir: OnceCell::new(),
-        });
+        let fs = Arc::new(Self { inner: Mutex::new(ext4), root_dir: OnceCell::new() });
         let _ = fs.root_dir.set(DirEntry::new_dir(
             |this| DirNode::new(Inode::new(fs.clone(), ROOT_INODE, Some(this))),
             Reference::root(),
