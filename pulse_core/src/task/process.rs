@@ -15,7 +15,7 @@ use axhal::{
 use axmm::{AddrSpace, Backend};
 use axtask::{AxTaskRef, TaskInner, WaitQueue};
 use kernel_guard::NoPreemptIrqSave;
-use memory_addr::{MemoryAddr, PAGE_SIZE_4K, PhysAddr, VirtAddr, va};
+use memory_addr::{MemoryAddr, PhysAddr, VirtAddr, va};
 use spin::Mutex;
 
 use super::Thread;
@@ -96,7 +96,7 @@ fn share_user_page(
     };
 
     if pte_flags.contains(MappingFlags::WRITE) {
-        parent_aspace.protect_pte_only(vaddr, PAGE_SIZE_4K, child_flags)?;
+        parent_aspace.remap_page(vaddr, frame, child_flags)?;
     }
 
     axmm::cow_inc_frame_ref(frame);
@@ -164,12 +164,17 @@ impl MemlockState {
 
 impl FutexTable {
     fn new() -> Self {
-        Self { queues: Mutex::new(BTreeMap::new()) }
+        Self {
+            queues: Mutex::new(BTreeMap::new()),
+        }
     }
 
     fn queue(&self, addr: usize) -> Arc<WaitQueue> {
         let mut queues = self.queues.lock();
-        queues.entry(addr).or_insert_with(|| Arc::new(WaitQueue::new())).clone()
+        queues
+            .entry(addr)
+            .or_insert_with(|| Arc::new(WaitQueue::new()))
+            .clone()
     }
 
     fn wake(&self, addr: usize, count: usize) -> usize {
@@ -319,7 +324,10 @@ impl Process {
         let mut merged_start = start;
         let mut merged_end = end;
         let mut merged = Vec::new();
-        if merged.try_reserve_exact(ranges.len().saturating_add(1)).is_err() {
+        if merged
+            .try_reserve_exact(ranges.len().saturating_add(1))
+            .is_err()
+        {
             return Err(AxError::NoMemory);
         }
         let mut inserted = false;
@@ -386,8 +394,9 @@ impl Process {
         }
 
         let user_end = user_addr.checked_add(len).ok_or(AxError::BadAddress)?;
-        let user_space_end =
-            USER_SPACE_BASE.checked_add(USER_SPACE_SIZE).ok_or(AxError::BadAddress)?;
+        let user_space_end = USER_SPACE_BASE
+            .checked_add(USER_SPACE_SIZE)
+            .ok_or(AxError::BadAddress)?;
         if user_addr < USER_SPACE_BASE || user_end > user_space_end {
             return Err(AxError::BadAddress);
         }
@@ -571,7 +580,10 @@ impl Process {
 
         // If it fails, fault-in the pages and retry once
         self.try_fault_in_user_range(user_addr, bytes.len(), MappingFlags::READ)?;
-        aspace_handle.lock().read(start, bytes).map_err(AxError::from)
+        aspace_handle
+            .lock()
+            .read(start, bytes)
+            .map_err(AxError::from)
     }
 
     pub fn write_user_bytes(&self, user_addr: usize, bytes: &[u8]) -> AxResult<()> {
@@ -586,7 +598,10 @@ impl Process {
 
         // If it fails, fault-in the pages and retry once
         self.try_fault_in_user_range(user_addr, bytes.len(), MappingFlags::WRITE)?;
-        aspace_handle.lock().write(start, bytes).map_err(AxError::from)
+        aspace_handle
+            .lock()
+            .write(start, bytes)
+            .map_err(AxError::from)
     }
 
     pub fn aspace_handle(&self) -> Arc<Mutex<AddrSpace>> {
@@ -650,8 +665,10 @@ impl Process {
             MappingFlags::READ | MappingFlags::WRITE | MappingFlags::USER,
             false,
         )?;
-        let fs_context =
-            axfs::ROOT_FS_CONTEXT.get().expect("root fs context not initialized").clone();
+        let fs_context = axfs::ROOT_FS_CONTEXT
+            .get()
+            .expect("root fs context not initialized")
+            .clone();
 
         let mut fd_table = FdTable::new();
         for (fd, entry) in stdio_entries().into_iter().enumerate() {
@@ -827,7 +844,11 @@ impl Process {
     }
 
     pub fn task_ref_by_tid(&self, tid: u64) -> Option<AxTaskRef> {
-        self.task_refs.lock().iter().find(|task| task.id().as_u64() == tid).cloned()
+        self.task_refs
+            .lock()
+            .iter()
+            .find(|task| task.id().as_u64() == tid)
+            .cloned()
     }
 
     pub fn wait_task_refs_exited(&self) {
@@ -874,14 +895,22 @@ impl Process {
             return;
         }
 
-        let final_code = if self.group_exiting() { self.group_exit_code() } else { exit_code };
+        let final_code = if self.group_exiting() {
+            self.group_exit_code()
+        } else {
+            exit_code
+        };
         self.exit_code.store(final_code, Ordering::Release);
         self.zombie.store(true, Ordering::Release);
         self.complete_vfork();
         self.close_all_files();
         self.release_task_refs();
 
-        let parent = self.parent.lock().as_ref().and_then(|parent| parent.upgrade());
+        let parent = self
+            .parent
+            .lock()
+            .as_ref()
+            .and_then(|parent| parent.upgrade());
         if let Some(parent) = parent {
             parent.child_exit_event.notify_all(true);
         }
@@ -897,7 +926,10 @@ impl Process {
     }
 
     pub fn has_matching_child(&self, pid: isize) -> bool {
-        self.children.lock().iter().any(|child| Self::child_matches(child, pid))
+        self.children
+            .lock()
+            .iter()
+            .any(|child| Self::child_matches(child, pid))
     }
 
     pub fn reap_zombie_child(&self, pid: isize) -> Option<Arc<Process>> {
@@ -936,8 +968,10 @@ impl Process {
     }
 
     pub fn add_child_time_ns(&self, child_user_ns: u64, child_sys_ns: u64) {
-        self.child_user_time_ns.fetch_add(child_user_ns, Ordering::Relaxed);
-        self.child_sys_time_ns.fetch_add(child_sys_ns, Ordering::Relaxed);
+        self.child_user_time_ns
+            .fetch_add(child_user_ns, Ordering::Relaxed);
+        self.child_sys_time_ns
+            .fetch_add(child_sys_ns, Ordering::Relaxed);
     }
 
     pub fn snapshot_cpu_time_ns(&self, now_ns: u64) -> (u64, u64) {
@@ -974,7 +1008,8 @@ impl Process {
         if !self.vfork_wait_enabled.load(Ordering::Acquire) {
             return;
         }
-        self.vfork_event.wait_until(|| self.vfork_done.load(Ordering::Acquire));
+        self.vfork_event
+            .wait_until(|| self.vfork_done.load(Ordering::Acquire));
     }
 
     pub fn futex_wait(&self, addr: usize, expected: u32, timeout_ns: Option<u64>) -> AxResult<()> {
@@ -1010,7 +1045,10 @@ impl Process {
             }
             queue.wait_until(|| {
                 self.group_exiting()
-                    || self.read_user_u32(addr).map(|current| current != expected).unwrap_or(true)
+                    || self
+                        .read_user_u32(addr)
+                        .map(|current| current != expected)
+                        .unwrap_or(true)
             });
         }
     }
@@ -1026,7 +1064,8 @@ impl Process {
         target: usize,
         requeue_count: usize,
     ) -> usize {
-        self.futex_table.requeue(addr, wake_count, target, requeue_count)
+        self.futex_table
+            .requeue(addr, wake_count, target, requeue_count)
     }
 
     pub fn exit_robust_list(&self, head_addr: usize) -> AxResult<()> {
@@ -1086,7 +1125,10 @@ impl Process {
         let mapped_user_areas =
             collect_user_areas(&parent_aspace, va!(USER_SPACE_BASE), va!(USER_STACK_TOP))?;
         let mut cow_ranges = Vec::new();
-        if cow_ranges.try_reserve_exact(mapped_user_areas.len()).is_err() {
+        if cow_ranges
+            .try_reserve_exact(mapped_user_areas.len())
+            .is_err()
+        {
             return Err(AxError::NoMemory);
         }
         for (start, end, area_user_flags, backend) in mapped_user_areas {

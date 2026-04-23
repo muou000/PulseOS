@@ -58,7 +58,9 @@ pub fn read_user_plain_array<T: Copy>(
     let elem_size = core::mem::size_of::<T>();
     for i in 0..count {
         let byte_off = i.checked_mul(elem_size).ok_or(AxError::InvalidInput)?;
-        let addr = user_addr.checked_add(byte_off).ok_or(AxError::InvalidInput)?;
+        let addr = user_addr
+            .checked_add(byte_off)
+            .ok_or(AxError::InvalidInput)?;
         out.push(read_user_plain(process, addr)?);
     }
     Ok(out)

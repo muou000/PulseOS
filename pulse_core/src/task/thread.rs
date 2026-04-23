@@ -129,8 +129,11 @@ impl Thread {
 
     pub fn exit_current(&self, exit_code: i32) -> ! {
         self.run_exit_hooks();
-        let final_code =
-            if self.process.group_exiting() { self.process.group_exit_code() } else { exit_code };
+        let final_code = if self.process.group_exiting() {
+            self.process.group_exit_code()
+        } else {
+            exit_code
+        };
         self.process.finish_thread_exit(self.tid, final_code);
         super::unregister_thread_task(self.tid);
         super::clear_current_thread();
