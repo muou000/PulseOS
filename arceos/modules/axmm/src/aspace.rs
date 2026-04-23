@@ -2,16 +2,17 @@ use core::fmt;
 
 use axerrno::{AxError, AxResult, ax_err};
 use axfs::{CachedFile, FileFlags};
-use axhal::mem::phys_to_virt;
-use axhal::paging::{MappingFlags, PageTable};
-use axhal::trap::PageFaultFlags;
+use axhal::{
+    mem::phys_to_virt,
+    paging::{MappingFlags, PageTable},
+    trap::PageFaultFlags,
+};
 use memory_addr::{
     MemoryAddr, PAGE_SIZE_4K, PageIter4K, PhysAddr, VirtAddr, VirtAddrRange, is_aligned_4k,
 };
 use memory_set::{MemoryArea, MemorySet};
 
-use crate::backend::Backend;
-use crate::mapping_err_to_ax_err;
+use crate::{backend::Backend, mapping_err_to_ax_err};
 
 /// The virtual memory address space.
 pub struct AddrSpace {
@@ -86,7 +87,8 @@ impl AddrSpace {
 
     /// Finds a free area that can accommodate the given size.
     ///
-    /// The search starts from the given hint address, and the area should be within the given limit range.
+    /// The search starts from the given hint address, and the area should be within the given limit
+    /// range.
     ///
     /// Returns the start address of the free area. Returns None if no such area is found.
     pub fn find_free_area(
@@ -243,7 +245,13 @@ impl AddrSpace {
         for vaddr in PageIter4K::new(start.align_down_4k(), end_align_up)
             .expect("Failed to create page iterator")
         {
-            let (mut paddr, _, _) = self.pt.query(vaddr).map_err(|_| AxError::BadAddress)?;
+            let (mut paddr, ..) = self.pt.query(vaddr).map_err(|_| AxError::BadAddress)?;
+            if paddr.as_usize() == 0 {
+                // Placeholder PTEs are used for lazy mappings. They are not
+                // readable/writable yet, so force the caller onto the page-fault
+                // path instead of copying from the null physical frame.
+                return Err(AxError::BadAddress);
+            }
 
             let mut copy_size = (size - cnt).min(PAGE_SIZE_4K);
 
@@ -342,7 +350,12 @@ impl AddrSpace {
     }
 
     /// Remap a single 4K page to a specified physical frame.
-    pub fn remap_page(&mut self, vaddr: VirtAddr, paddr: PhysAddr, flags: MappingFlags) -> AxResult {
+    pub fn remap_page(
+        &mut self,
+        vaddr: VirtAddr,
+        paddr: PhysAddr,
+        flags: MappingFlags,
+    ) -> AxResult {
         if !self.contains_range(vaddr, PAGE_SIZE_4K) {
             return ax_err!(InvalidInput, "address out of range");
         }
@@ -424,15 +437,16 @@ impl AddrSpace {
     /// fault).
     pub fn handle_page_fault(&mut self, vaddr: VirtAddr, access_flags: PageFaultFlags) -> bool {
         let page = vaddr.align_down_4k();
-        let pte_before = self.pt.query(page).ok().map(|(frame, flags, _)| (frame, flags));
+        let pte_before = self
+            .pt
+            .query(page)
+            .ok()
+            .map(|(frame, flags, _)| (frame, flags));
         if !self.va_range.contains(vaddr) {
             error!(
-                "handle_page_fault: reject=out_of_range vaddr={:#x} page={:#x} access={:?} aspace_range={:?} pte_before={:?}",
-                vaddr,
-                page,
-                access_flags,
-                self.va_range,
-                pte_before
+                "handle_page_fault: reject=out_of_range vaddr={:#x} page={:#x} access={:?} \
+                 aspace_range={:?} pte_before={:?}",
+                vaddr, page, access_flags, self.va_range, pte_before
             );
             return false;
         }
@@ -440,7 +454,8 @@ impl AddrSpace {
             let orig_flags = area.flags();
             let backend_kind = Self::backend_kind(area.backend());
             debug!(
-                "handle_page_fault: vaddr={:#x} page={:#x} access={:?} area=[{:#x}, {:#x}) area_flags={:?} backend={} pte_before={:?}",
+                "handle_page_fault: vaddr={:#x} page={:#x} access={:?} area=[{:#x}, {:#x}) \
+                 area_flags={:?} backend={} pte_before={:?}",
                 vaddr,
                 page,
                 access_flags,
@@ -455,36 +470,29 @@ impl AddrSpace {
                     .backend()
                     .handle_page_fault(vaddr, orig_flags, &mut self.pt);
                 if !handled {
-                    let pte_after = self.pt.query(page).ok().map(|(frame, flags, _)| (frame, flags));
+                    let pte_after = self
+                        .pt
+                        .query(page)
+                        .ok()
+                        .map(|(frame, flags, _)| (frame, flags));
                     error!(
-                        "handle_page_fault: reject=backend_not_handled vaddr={:#x} page={:#x} access={:?} area_flags={:?} backend={} pte_before={:?} pte_after={:?}",
-                        vaddr,
-                        page,
-                        access_flags,
-                        orig_flags,
-                        backend_kind,
-                        pte_before,
-                        pte_after
+                        "handle_page_fault: reject=backend_not_handled vaddr={:#x} page={:#x} \
+                         access={:?} area_flags={:?} backend={} pte_before={:?} pte_after={:?}",
+                        vaddr, page, access_flags, orig_flags, backend_kind, pte_before, pte_after
                     );
                 }
                 return handled;
             }
             error!(
-                "handle_page_fault: reject=area_permission vaddr={:#x} page={:#x} access={:?} area_flags={:?} backend={} pte_before={:?}",
-                vaddr,
-                page,
-                access_flags,
-                orig_flags,
-                backend_kind,
-                pte_before
+                "handle_page_fault: reject=area_permission vaddr={:#x} page={:#x} access={:?} \
+                 area_flags={:?} backend={} pte_before={:?}",
+                vaddr, page, access_flags, orig_flags, backend_kind, pte_before
             );
         } else {
             error!(
-                "handle_page_fault: reject=no_area vaddr={:#x} page={:#x} access={:?} pte_before={:?}",
-                vaddr,
-                page,
-                access_flags,
-                pte_before
+                "handle_page_fault: reject=no_area vaddr={:#x} page={:#x} access={:?} \
+                 pte_before={:?}",
+                vaddr, page, access_flags, pte_before
             );
         }
         false

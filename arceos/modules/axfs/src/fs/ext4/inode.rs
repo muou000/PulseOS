@@ -1,4 +1,4 @@
-use alloc::{collections::BTreeMap, string::String, sync::Arc, vec, vec::Vec};
+use alloc::{string::String, sync::Arc, vec, vec::Vec};
 use core::{any::Any, task::Context, time::Duration};
 
 use axfs_ng_vfs::{
@@ -8,17 +8,17 @@ use axfs_ng_vfs::{
 };
 use axpoll::{IoEvents, Pollable};
 use ext4_rs::Ext4;
-use spin::Lazy;
+use spin::Mutex;
 
 use super::{
     Ext4Filesystem,
     util::{duration_to_ext4_time, into_ext4_type, into_vfs_err, into_vfs_type, now_as_ext4_time},
 };
-
 pub struct Inode {
     fs: Arc<Ext4Filesystem>,
     ino: u32,
     this: Option<WeakDirEntry>,
+    dir_cache: Mutex<Option<Arc<DirSnapshot>>>,
 }
 
 #[derive(Clone)]
@@ -33,14 +33,14 @@ struct DirSnapshot {
     entries: Vec<CachedDirEntry>,
 }
 
-type SnapshotCacheKey = (usize, u32);
-
-static DIR_SNAPSHOT_CACHE: Lazy<spin::Mutex<BTreeMap<SnapshotCacheKey, Arc<DirSnapshot>>>> =
-    Lazy::new(|| spin::Mutex::new(BTreeMap::new()));
-
 impl Inode {
     pub(crate) fn new(fs: Arc<Ext4Filesystem>, ino: u32, this: Option<WeakDirEntry>) -> Arc<Self> {
-        Arc::new(Self { fs, ino, this })
+        Arc::new(Self {
+            fs,
+            ino,
+            this,
+            dir_cache: Mutex::new(None),
+        })
     }
 
     fn create_entry(
@@ -50,8 +50,10 @@ impl Inode {
         is_dir: bool,
         name: impl Into<String>,
     ) -> DirEntry {
-        let reference =
-            Reference::new(self.this.as_ref().and_then(WeakDirEntry::upgrade), name.into());
+        let reference = Reference::new(
+            self.this.as_ref().and_then(WeakDirEntry::upgrade),
+            name.into(),
+        );
         if is_dir {
             DirEntry::new_dir(
                 |child_this| DirNode::new(Inode::new(self.fs.clone(), inode_num, Some(child_this))),
@@ -66,12 +68,10 @@ impl Inode {
         }
     }
 
-    fn cache_key(&self, dir_ino: u32) -> SnapshotCacheKey {
-        (Arc::as_ptr(&self.fs) as usize, dir_ino)
-    }
-
     fn invalidate_snapshot(&self, dir_ino: u32) {
-        DIR_SNAPSHOT_CACHE.lock().remove(&self.cache_key(dir_ino));
+        if dir_ino == self.ino {
+            *self.dir_cache.lock() = None;
+        }
     }
 
     fn build_dir_snapshot_uncached(&self, fs: &Ext4, dir_ino: u32) -> Arc<DirSnapshot> {
@@ -91,20 +91,32 @@ impl Inode {
             let inode_ref = fs.get_inode_ref(entry.inode);
             let node_type = into_vfs_type(inode_ref.inode.file_type());
             let is_dir = inode_ref.inode.is_dir();
-            entries.push(CachedDirEntry { name, inode_num: entry.inode, node_type, is_dir });
+            entries.push(CachedDirEntry {
+                name,
+                inode_num: entry.inode,
+                node_type,
+                is_dir,
+            });
         }
 
         Arc::new(DirSnapshot { entries })
     }
 
-    fn build_dir_snapshot(&self, fs: &Ext4, dir_ino: u32) -> Arc<DirSnapshot> {
-        let key = self.cache_key(dir_ino);
-        if let Some(snapshot) = DIR_SNAPSHOT_CACHE.lock().get(&key).cloned() {
-            return snapshot;
+    fn dir_snapshot(&self, fs: &Ext4) -> Arc<DirSnapshot> {
+        if let Some(snapshot) = self.dir_cache.lock().as_ref() {
+            return snapshot.clone();
         }
-        let snapshot = self.build_dir_snapshot_uncached(fs, dir_ino);
-        DIR_SNAPSHOT_CACHE.lock().insert(key, snapshot.clone());
+        let snapshot = self.build_dir_snapshot_uncached(fs, self.ino);
+        *self.dir_cache.lock() = Some(snapshot.clone());
         snapshot
+    }
+
+    fn build_dir_snapshot(&self, fs: &Ext4, dir_ino: u32) -> Arc<DirSnapshot> {
+        if dir_ino == self.ino {
+            self.dir_snapshot(fs)
+        } else {
+            self.build_dir_snapshot_uncached(fs, dir_ino)
+        }
     }
 
     fn validate_inode_num(&self, fs: &Ext4, inode_num: u32) -> VfsResult<()> {
@@ -131,7 +143,10 @@ impl Inode {
 
     fn dir_has_children(&self, fs: &Ext4, dir_ino: u32) -> bool {
         let snapshot = self.build_dir_snapshot(fs, dir_ino);
-        snapshot.entries.iter().any(|entry| entry.name != "." && entry.name != "..")
+        snapshot
+            .entries
+            .iter()
+            .any(|entry| entry.name != "." && entry.name != "..")
     }
 }
 
@@ -231,13 +246,15 @@ impl FileNodeOps for Inode {
             buf[..len].copy_from_slice(&raw[offset..offset + len]);
             return Ok(len);
         }
-        fs.read_at(self.ino, offset as usize, buf).map_err(into_vfs_err)
+        fs.read_at(self.ino, offset as usize, buf)
+            .map_err(into_vfs_err)
     }
 
     fn write_at(&self, buf: &[u8], offset: u64) -> VfsResult<usize> {
         let fs = self.fs.lock();
         self.validate_inode_num(&fs, self.ino)?;
-        fs.write_at(self.ino, offset as usize, buf).map_err(into_vfs_err)
+        fs.write_at(self.ino, offset as usize, buf)
+            .map_err(into_vfs_err)
     }
 
     fn append(&self, buf: &[u8]) -> VfsResult<(usize, u64)> {
@@ -255,7 +272,8 @@ impl FileNodeOps for Inode {
             return Ok(());
         }
         if len < old_len {
-            fs.truncate_inode(&mut inode_ref, len).map_err(into_vfs_err)?;
+            fs.truncate_inode(&mut inode_ref, len)
+                .map_err(into_vfs_err)?;
             return Ok(());
         }
 
@@ -264,7 +282,8 @@ impl FileNodeOps for Inode {
         let zeros = vec![0; ext4_rs::BLOCK_SIZE];
         while remaining > 0 {
             let chunk = remaining.min(zeros.len() as u64) as usize;
-            fs.write_at(self.ino, offset, &zeros[..chunk]).map_err(into_vfs_err)?;
+            fs.write_at(self.ino, offset, &zeros[..chunk])
+                .map_err(into_vfs_err)?;
             offset += chunk;
             remaining -= chunk as u64;
         }
@@ -294,7 +313,11 @@ impl FileNodeOps for Inode {
         drop(inode_ref);
         drop(fs);
         self.set_len(0)?;
-        self.fs.lock().write_at(self.ino, 0, target.as_bytes()).map(|_| ()).map_err(into_vfs_err)
+        self.fs
+            .lock()
+            .write_at(self.ino, 0, target.as_bytes())
+            .map(|_| ())
+            .map_err(into_vfs_err)
     }
 }
 
@@ -308,13 +331,13 @@ impl Pollable for Inode {
 
 impl DirNodeOps for Inode {
     fn is_cacheable(&self) -> bool {
-        false
+        true
     }
 
     fn read_dir(&self, offset: u64, sink: &mut dyn DirEntrySink) -> VfsResult<usize> {
         let fs = self.fs.lock();
         self.validate_inode_num(&fs, self.ino)?;
-        let snapshot = self.build_dir_snapshot(&fs, self.ino);
+        let snapshot = self.dir_snapshot(&fs);
         let mut count = 0usize;
         for (index, entry) in snapshot.entries.iter().enumerate().skip(offset as usize) {
             if !sink.accept(
@@ -333,7 +356,7 @@ impl DirNodeOps for Inode {
     fn lookup(&self, name: &str) -> VfsResult<DirEntry> {
         let fs = self.fs.lock();
         self.validate_inode_num(&fs, self.ino)?;
-        let snapshot = self.build_dir_snapshot(&fs, self.ino);
+        let snapshot = self.dir_snapshot(&fs);
         let Some(entry) = self.cached_entry(&snapshot, name) else {
             return Err(VfsError::NotFound);
         };
@@ -349,7 +372,7 @@ impl DirNodeOps for Inode {
         let inode_type = into_ext4_type(node_type)?;
         let fs = self.fs.lock();
         self.validate_inode_num(&fs, self.ino)?;
-        let snapshot = self.build_dir_snapshot(&fs, self.ino);
+        let snapshot = self.dir_snapshot(&fs);
         if self.cached_entry(&snapshot, name).is_some() {
             return Err(VfsError::AlreadyExists);
         }
@@ -370,7 +393,8 @@ impl DirNodeOps for Inode {
         self.validate_inode_num(&fs, self.ino)?;
         let mut parent = fs.get_inode_ref(self.ino);
         let mut child = fs.get_inode_ref(node.inode() as u32);
-        fs.link(&mut parent, &mut child, name).map_err(into_vfs_err)?;
+        fs.link(&mut parent, &mut child, name)
+            .map_err(into_vfs_err)?;
         fs.write_back_inode(&mut parent);
         fs.write_back_inode(&mut child);
         self.invalidate_snapshot(self.ino);
@@ -386,7 +410,7 @@ impl DirNodeOps for Inode {
     fn unlink(&self, name: &str) -> VfsResult<()> {
         let fs = self.fs.lock();
         self.validate_inode_num(&fs, self.ino)?;
-        let snapshot = self.build_dir_snapshot(&fs, self.ino);
+        let snapshot = self.dir_snapshot(&fs);
         let inode_num = self
             .cached_entry(&snapshot, name)
             .map(|entry| entry.inode_num)
@@ -399,7 +423,8 @@ impl DirNodeOps for Inode {
         if child.inode.links_count() == 1 && child.inode.size() > 0 {
             fs.truncate_inode(&mut child, 0).map_err(into_vfs_err)?;
         }
-        fs.unlink(&mut parent, &mut child, name).map_err(into_vfs_err)?;
+        fs.unlink(&mut parent, &mut child, name)
+            .map_err(into_vfs_err)?;
         self.invalidate_snapshot(self.ino);
         if child.inode.is_dir() {
             self.invalidate_snapshot(child.inode_num);
@@ -427,11 +452,12 @@ impl DirNodeOps for Inode {
         let dst_snapshot = if dst_dir.ino == self.ino {
             src_snapshot.clone()
         } else {
-            dst_dir.build_dir_snapshot(&fs, dst_dir.ino)
+            dst_dir.dir_snapshot(&fs)
         };
 
-        if let Some(dst_inode_num) =
-            dst_dir.cached_entry(&dst_snapshot, dst_name).map(|entry| entry.inode_num)
+        if let Some(dst_inode_num) = dst_dir
+            .cached_entry(&dst_snapshot, dst_name)
+            .map(|entry| entry.inode_num)
         {
             if dst_inode_num == src_inode.inode_num {
                 return Ok(());
@@ -445,7 +471,8 @@ impl DirNodeOps for Inode {
             if dst_inode.inode.links_count() == 1 && dst_inode.inode.size() > 0 {
                 fs.truncate_inode(&mut dst_inode, 0).map_err(into_vfs_err)?;
             }
-            fs.unlink(&mut dst_parent, &mut dst_inode, dst_name).map_err(into_vfs_err)?;
+            fs.unlink(&mut dst_parent, &mut dst_inode, dst_name)
+                .map_err(into_vfs_err)?;
             dst_dir.invalidate_snapshot(dst_dir.ino);
             if dst_inode.inode.is_dir() {
                 dst_dir.invalidate_snapshot(dst_inode.inode_num);
@@ -453,12 +480,14 @@ impl DirNodeOps for Inode {
         }
 
         let mut dst_parent = fs.get_inode_ref(dst_dir.ino);
-        fs.dir_add_entry(&mut dst_parent, &src_inode, dst_name).map_err(into_vfs_err)?;
+        fs.dir_add_entry(&mut dst_parent, &src_inode, dst_name)
+            .map_err(into_vfs_err)?;
 
         fs.write_back_inode(&mut dst_parent);
 
         let mut src_parent = fs.get_inode_ref(self.ino);
-        fs.dir_remove_entry(&mut src_parent, src_name).map_err(into_vfs_err)?;
+        fs.dir_remove_entry(&mut src_parent, src_name)
+            .map_err(into_vfs_err)?;
         self.invalidate_snapshot(self.ino);
         if dst_dir.ino != self.ino {
             dst_dir.invalidate_snapshot(dst_dir.ino);

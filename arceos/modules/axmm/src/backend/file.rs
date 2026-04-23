@@ -1,11 +1,13 @@
 use axfs::{CachedFile, FileFlags};
-use axhal::mem::phys_to_virt;
-use axhal::paging::{MappingFlags, PageSize, PageTable};
-use memory_addr::{MemoryAddr, PageIter4K, VirtAddr, PAGE_SIZE_4K};
+use axhal::{
+    mem::phys_to_virt,
+    paging::{MappingFlags, PageSize, PageTable},
+};
+use memory_addr::{MemoryAddr, PAGE_SIZE_4K, PageIter4K, VirtAddr};
 
 use super::{
-    alloc::{alloc_frame, dealloc_frame, protect_pages},
     Backend,
+    alloc::{alloc_frame, dealloc_frame, protect_pages},
 };
 
 fn sync_executable_mapping(flags: MappingFlags) {
@@ -135,15 +137,14 @@ impl Backend {
         let page_addr = vaddr.align_down_4k();
         if let Ok((old_frame, old_flags, _)) = pt.query(page_addr) {
             if old_frame.as_usize() != 0 {
-                if orig_flags.contains(MappingFlags::WRITE)
-                    && !old_flags.contains(MappingFlags::WRITE)
-                {
-                    return pt
-                        .remap(page_addr, old_frame, orig_flags)
-                        .map(|(_, tlb)| tlb.flush())
-                        .is_ok();
+                let new_flags = old_flags | orig_flags;
+                if old_flags.contains(new_flags) {
+                    return true;
                 }
-                return old_flags.contains(orig_flags);
+                return pt
+                    .remap(page_addr, old_frame, new_flags)
+                    .map(|(_, tlb)| tlb.flush())
+                    .is_ok();
             }
         }
 
