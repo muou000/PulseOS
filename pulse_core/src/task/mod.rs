@@ -21,7 +21,9 @@ static THREAD_REGISTRY: Lazy<Mutex<BTreeMap<u64, Weak<Thread>>>> =
 static CURRENT_THREAD: Option<Arc<Thread>> = None;
 
 pub fn register_thread_task(task_id: u64, thread: Arc<Thread>) {
-    THREAD_REGISTRY.lock().insert(task_id, Arc::downgrade(&thread));
+    THREAD_REGISTRY
+        .lock()
+        .insert(task_id, Arc::downgrade(&thread));
 }
 
 fn prune_dead_threads(registry: &mut BTreeMap<u64, Weak<Thread>>) {
@@ -29,7 +31,10 @@ fn prune_dead_threads(registry: &mut BTreeMap<u64, Weak<Thread>>) {
 }
 
 pub fn unregister_thread_task(task_id: u64) -> Option<Arc<Thread>> {
-    THREAD_REGISTRY.lock().remove(&task_id).and_then(|thread| thread.upgrade())
+    THREAD_REGISTRY
+        .lock()
+        .remove(&task_id)
+        .and_then(|thread| thread.upgrade())
 }
 
 pub fn install_current_thread(thread: Arc<Thread>) {
@@ -63,7 +68,10 @@ pub fn current_thread() -> LinuxResult<Arc<Thread>> {
         return Ok(thread);
     }
 
-    unsafe { CURRENT_THREAD.current_ref_raw() }.as_ref().cloned().ok_or(LinuxError::ESRCH)
+    unsafe { CURRENT_THREAD.current_ref_raw() }
+        .as_ref()
+        .cloned()
+        .ok_or(LinuxError::ESRCH)
 }
 
 pub fn thread_by_tid(tid: u64) -> Option<Arc<Thread>> {

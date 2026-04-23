@@ -214,11 +214,19 @@ impl FdObject for StdinObject {
     }
 
     fn stat(&self) -> LinuxResult<stat> {
-        Ok(stat { st_ino: 1, st_nlink: 1, st_mode: 0o20000 | 0o440u32, ..empty_stat() })
+        Ok(stat {
+            st_ino: 1,
+            st_nlink: 1,
+            st_mode: 0o20000 | 0o440u32,
+            ..empty_stat()
+        })
     }
 
     fn poll(&self) -> LinuxResult<PollState> {
-        Ok(PollState { readable: true, writable: true })
+        Ok(PollState {
+            readable: true,
+            writable: true,
+        })
     }
 }
 
@@ -238,11 +246,19 @@ impl FdObject for StdoutObject {
     }
 
     fn stat(&self) -> LinuxResult<stat> {
-        Ok(stat { st_ino: 1, st_nlink: 1, st_mode: 0o20000 | 0o220u32, ..empty_stat() })
+        Ok(stat {
+            st_ino: 1,
+            st_nlink: 1,
+            st_mode: 0o20000 | 0o220u32,
+            ..empty_stat()
+        })
     }
 
     fn poll(&self) -> LinuxResult<PollState> {
-        Ok(PollState { readable: true, writable: true })
+        Ok(PollState {
+            readable: true,
+            writable: true,
+        })
     }
 }
 
@@ -253,7 +269,10 @@ pub struct FileObject {
 
 impl FileObject {
     pub fn new(inner: File) -> Self {
-        Self { inner, nonblocking: AtomicBool::new(false) }
+        Self {
+            inner,
+            nonblocking: AtomicBool::new(false),
+        }
     }
 }
 
@@ -294,7 +313,12 @@ impl FdObject for FileObject {
     }
 
     fn seek(&self, pos: SeekFrom) -> LinuxResult<u64> {
-        if self.inner.location().flags().contains(axfs_ng_vfs::NodeFlags::STREAM) {
+        if self
+            .inner
+            .location()
+            .flags()
+            .contains(axfs_ng_vfs::NodeFlags::STREAM)
+        {
             return Err(LinuxError::ESPIPE);
         }
         let mut file = &self.inner;
@@ -337,7 +361,11 @@ pub struct CpuDmaLatencyObject {
 
 impl CpuDmaLatencyObject {
     pub fn new(location: Location) -> Self {
-        Self { location, request: CpuDmaLatencyRequest::new(), nonblocking: AtomicBool::new(false) }
+        Self {
+            location,
+            request: CpuDmaLatencyRequest::new(),
+            nonblocking: AtomicBool::new(false),
+        }
     }
 }
 
@@ -367,7 +395,10 @@ impl FdObject for CpuDmaLatencyObject {
     }
 
     fn poll(&self) -> LinuxResult<PollState> {
-        Ok(PollState { readable: true, writable: true })
+        Ok(PollState {
+            readable: true,
+            writable: true,
+        })
     }
 
     fn set_nonblocking(&self, nonblocking: bool) -> LinuxResult {
@@ -396,7 +427,11 @@ pub struct DirObject {
 
 impl DirObject {
     pub fn new(inner: Location) -> Self {
-        Self { inner, offset: Mutex::new(0), nonblocking: AtomicBool::new(false) }
+        Self {
+            inner,
+            offset: Mutex::new(0),
+            nonblocking: AtomicBool::new(false),
+        }
     }
 }
 
@@ -418,7 +453,10 @@ impl FdObject for DirObject {
     }
 
     fn poll(&self) -> LinuxResult<PollState> {
-        Ok(PollState { readable: true, writable: false })
+        Ok(PollState {
+            readable: true,
+            writable: false,
+        })
     }
 
     fn set_nonblocking(&self, nonblocking: bool) -> LinuxResult {
@@ -506,7 +544,12 @@ struct PipeRingBuffer {
 
 impl PipeRingBuffer {
     const fn new() -> Self {
-        Self { arr: [0; RING_BUFFER_SIZE], head: 0, tail: 0, status: RingBufferStatus::Empty }
+        Self {
+            arr: [0; RING_BUFFER_SIZE],
+            head: 0,
+            tail: 0,
+            status: RingBufferStatus::Empty,
+        }
     }
 
     fn write_byte(&mut self, byte: u8) {
@@ -575,8 +618,16 @@ impl PipeObject {
     pub fn new_pair() -> (Self, Self) {
         let shared = Arc::new(PipeShared::new());
         (
-            Self { readable: true, shared: shared.clone(), nonblocking: AtomicBool::new(false) },
-            Self { readable: false, shared, nonblocking: AtomicBool::new(false) },
+            Self {
+                readable: true,
+                shared: shared.clone(),
+                nonblocking: AtomicBool::new(false),
+            },
+            Self {
+                readable: false,
+                shared,
+                nonblocking: AtomicBool::new(false),
+            },
         )
     }
 
@@ -617,7 +668,11 @@ impl FdObject for PipeObject {
                     return Ok(read_size);
                 }
                 if self.nonblocking.load(Ordering::Acquire) {
-                    return if read_size > 0 { Ok(read_size) } else { Err(LinuxError::EAGAIN) };
+                    return if read_size > 0 {
+                        Ok(read_size)
+                    } else {
+                        Err(LinuxError::EAGAIN)
+                    };
                 }
                 drop(ring_buffer);
                 self.shared.wait.wait();
@@ -644,13 +699,21 @@ impl FdObject for PipeObject {
         let mut write_size = 0usize;
         while write_size < buf.len() {
             if self.read_end_closed() {
-                return if write_size > 0 { Ok(write_size) } else { Err(LinuxError::EPIPE) };
+                return if write_size > 0 {
+                    Ok(write_size)
+                } else {
+                    Err(LinuxError::EPIPE)
+                };
             }
             let mut ring_buffer = self.shared.buffer.lock();
             let available = ring_buffer.available_write();
             if available == 0 {
                 if self.nonblocking.load(Ordering::Acquire) {
-                    return if write_size > 0 { Ok(write_size) } else { Err(LinuxError::EAGAIN) };
+                    return if write_size > 0 {
+                        Ok(write_size)
+                    } else {
+                        Err(LinuxError::EAGAIN)
+                    };
                 }
                 drop(ring_buffer);
                 self.shared.wait.wait();
@@ -727,7 +790,9 @@ impl FdObject for PipeObject {
                 }
             }
             None => {
-                self.shared.wait.wait_until(|| self.ready_for(wait_for_read, wait_for_write));
+                self.shared
+                    .wait
+                    .wait_until(|| self.ready_for(wait_for_read, wait_for_write));
                 Ok(true)
             }
         }
@@ -779,7 +844,10 @@ pub fn pipe_entries(flags: FdFlags) -> (FdEntry, FdEntry) {
         let _ = read_object.set_nonblocking(true);
         let _ = write_object.set_nonblocking(true);
     }
-    (FdEntry::new(read_object, flags), FdEntry::new(write_object, flags))
+    (
+        FdEntry::new(read_object, flags),
+        FdEntry::new(write_object, flags),
+    )
 }
 
 #[derive(Default)]
@@ -789,11 +857,15 @@ pub struct FdTable {
 
 impl FdTable {
     pub fn new() -> Self {
-        Self { entries: BTreeMap::new() }
+        Self {
+            entries: BTreeMap::new(),
+        }
     }
 
     pub fn clone_for_fork(&self) -> LinuxResult<Self> {
-        Ok(Self { entries: self.entries.clone() })
+        Ok(Self {
+            entries: self.entries.clone(),
+        })
     }
 
     pub fn take_cloexec_on_exec(&mut self) -> alloc::vec::Vec<FdEntry> {
@@ -810,7 +882,10 @@ impl FdTable {
     }
 
     pub fn drain_all(&mut self) -> alloc::vec::Vec<FdEntry> {
-        self.entries.split_off(&0).into_values().collect::<alloc::vec::Vec<_>>()
+        self.entries
+            .split_off(&0)
+            .into_values()
+            .collect::<alloc::vec::Vec<_>>()
     }
 
     pub fn get(&self, fd: usize) -> Option<&FdEntry> {

@@ -21,7 +21,10 @@ fn parse_shebang_line(file_data: &[u8]) -> AxResult<Option<(String, Option<Strin
         return Ok(None);
     }
 
-    let line_end = file_data.iter().position(|&b| b == b'\n').unwrap_or(file_data.len());
+    let line_end = file_data
+        .iter()
+        .position(|&b| b == b'\n')
+        .unwrap_or(file_data.len());
     let line = core::str::from_utf8(&file_data[2..line_end]).map_err(|_| AxError::InvalidData)?;
     let line = line.trim_end_matches('\r').trim();
     if line.is_empty() {
@@ -34,7 +37,11 @@ fn parse_shebang_line(file_data: &[u8]) -> AxResult<Option<(String, Option<Strin
         return Err(AxError::InvalidExecutable);
     }
 
-    let interp_arg = parts.next().map(str::trim).filter(|s| !s.is_empty()).map(String::from);
+    let interp_arg = parts
+        .next()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(String::from);
 
     Ok(Some((String::from(interp), interp_arg)))
 }
@@ -62,8 +69,9 @@ fn resolve_exec_path_and_args(
     for _ in 0..SHEBANG_MAX_DEPTH {
         current_path = normalize_path(&current_path)?;
         axlog::debug!("resolve_exec_path_and_args: probing {}", current_path);
-        let file_data =
-            fs.read_prefix(&current_path, SHEBANG_PROBE_LEN).map_err(|_| AxError::NotFound)?;
+        let file_data = fs
+            .read_prefix(&current_path, SHEBANG_PROBE_LEN)
+            .map_err(|_| AxError::NotFound)?;
         let Some((interp, interp_arg)) = parse_shebang_line(&file_data)? else {
             axlog::debug!("resolve_exec_path_and_args: final {}", current_path);
             return Ok((current_path, current_args));

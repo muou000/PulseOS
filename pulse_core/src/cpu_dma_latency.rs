@@ -13,7 +13,11 @@ struct CpuDmaLatencyState {
 
 impl CpuDmaLatencyState {
     fn effective_value(&self) -> i32 {
-        self.requests.values().copied().min().unwrap_or(UNCONSTRAINED_LATENCY_US)
+        self.requests
+            .values()
+            .copied()
+            .min()
+            .unwrap_or(UNCONSTRAINED_LATENCY_US)
     }
 }
 
