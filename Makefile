@@ -29,7 +29,8 @@ all: prepare-tools
 	@ARCH=riscv64 APP_FEATURES=qemu,testcode LOG=off BUS=mmio $(MAKE) -C arceos build
 	@cp $(NAME)_riscv64-qemu-virt.bin kernel-rv
 	@ARCH=loongarch64 APP_FEATURES=qemu,testcode LOG=off FEATURES=bus-pci $(MAKE) defconfig
-	@ARCH=loongarch64 APP_FEATURES=qemu,testcode LOG=off BUS=pci FEATURES=bus-pci CARGO_BUILD_ALLOW_LOCK_UPDATE=1 CARGO_BUILD_EXTRA_ARGS='--config patch.crates-io.axplat-loongarch64-qemu-virt.path=\"plat/axplat-loongarch64-qemu-virt\"' $(MAKE) -C arceos build
+	@ARCH=loongarch64 APP_FEATURES=qemu,testcode LOG=off BUS=pci FEATURES=bus-pci $(MAKE) -C arceos build
+# 	@ARCH=loongarch64 APP_FEATURES=qemu,testcode LOG=off BUS=pci FEATURES=bus-pci CARGO_BUILD_ALLOW_LOCK_UPDATE=1 CARGO_BUILD_EXTRA_ARGS='--config patch.crates-io.axplat-loongarch64-qemu-virt.path=\"plat/axplat-loongarch64-qemu-virt\"' $(MAKE) -C arceos build
 	@cp $(NAME)_loongarch64-qemu-virt.elf kernel-la
 	@$(MAKE) img_all
 
