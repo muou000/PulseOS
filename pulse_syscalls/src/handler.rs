@@ -124,6 +124,8 @@ fn syscall_dispatcher(
         Sysno::clock_gettime => impls::sys_clock_gettime(args[0] as i32, args[1]),
         Sysno::gettimeofday => impls::sys_gettimeofday(args[0], args[1]),
         Sysno::times => impls::sys_times(args[0]),
+        Sysno::prlimit64 => impls::sys_prlimit64(args[0] as i32, args[1], args[2], args[3]),
+        Sysno::getrandom => impls::sys_getrandom(args[0], args[1], args[2]),
 
         Sysno::set_tid_address => impls::sys_set_tid_address(args[0]),
         Sysno::gettid => impls::sys_gettid(),

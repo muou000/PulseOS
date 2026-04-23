@@ -33,7 +33,12 @@ pub fn sys_dup(fd: usize) -> isize {
 }
 
 pub fn sys_dup3(oldfd: usize, newfd: usize, flags: usize) -> isize {
-    axlog::debug!("sys_dup3: oldfd={}, newfd={}, flags={:#x}", oldfd, newfd, flags);
+    axlog::debug!(
+        "sys_dup3: oldfd={}, newfd={}, flags={:#x}",
+        oldfd,
+        newfd,
+        flags
+    );
     if oldfd == newfd {
         return -LinuxError::EINVAL.code() as isize;
     }
@@ -84,7 +89,9 @@ pub fn sys_fcntl(fd: usize, cmd: usize, arg: usize) -> isize {
                     let Some(entry) = table.get_mut(fd) else {
                         return Err(LinuxError::EBADF);
                     };
-                    entry.flags.set(FdFlags::CLOEXEC, (arg & (FD_CLOEXEC as usize)) != 0);
+                    entry
+                        .flags
+                        .set(FdFlags::CLOEXEC, (arg & (FD_CLOEXEC as usize)) != 0);
                     Ok(0)
                 });
             match result {

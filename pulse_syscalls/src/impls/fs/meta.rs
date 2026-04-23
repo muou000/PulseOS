@@ -19,7 +19,10 @@ fn to_statx_timestamp(tv_sec: i64, tv_nsec: i64) -> statx_timestamp {
 }
 
 fn vfs_statfs_to_linux(location: &Location) -> Result<statfs, LinuxError> {
-    let fs_stat = location.filesystem().stat().map_err(|e| LinuxError::from(e.canonicalize()))?;
+    let fs_stat = location
+        .filesystem()
+        .stat()
+        .map_err(|e| LinuxError::from(e.canonicalize()))?;
     let mut out: statfs = unsafe { core::mem::zeroed() };
     out.f_type = fs_stat.fs_type as _;
     out.f_bsize = fs_stat.block_size as _;
@@ -256,7 +259,11 @@ pub fn sys_utimensat(dirfd: i32, pathname: usize, times: usize, flags: usize) ->
         return 0;
     }
 
-    let update = MetadataUpdate { atime, mtime, ..Default::default() };
+    let update = MetadataUpdate {
+        atime,
+        mtime,
+        ..Default::default()
+    };
     match location.update_metadata(update) {
         Ok(()) => 0,
         Err(e) => -LinuxError::from(e.canonicalize()).code() as isize,

@@ -116,7 +116,12 @@ pub fn sys_ioctl(fd: usize, cmd: usize, arg: usize) -> isize {
         TIOCGWINSZ => {
             warn_tty_ioctl_stub_once(fd, cmd32);
             if arg != 0 {
-                let ws = WinSize { ws_row: 24, ws_col: 80, ws_xpixel: 0, ws_ypixel: 0 };
+                let ws = WinSize {
+                    ws_row: 24,
+                    ws_col: 80,
+                    ws_xpixel: 0,
+                    ws_ypixel: 0,
+                };
                 let bytes = unsafe {
                     core::slice::from_raw_parts(
                         (&ws as *const WinSize).cast::<u8>(),

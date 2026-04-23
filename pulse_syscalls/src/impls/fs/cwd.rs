@@ -44,7 +44,8 @@ pub fn sys_chdir(path: usize) -> isize {
     match with_process(|process| -> Result<(), LinuxError> {
         let dir = {
             let fs = process.fs_context.lock().clone();
-            fs.resolve(path).map_err(|e| LinuxError::from(e.canonicalize()))?
+            fs.resolve(path)
+                .map_err(|e| LinuxError::from(e.canonicalize()))?
         };
         process
             .fs_context

@@ -1,9 +1,18 @@
 //! 其他杂项系统调用
 
 use axalloc::global_allocator;
+use linux_raw_sys::general::{
+    RLIMIT_AS, RLIMIT_CORE, RLIMIT_CPU, RLIMIT_DATA, RLIMIT_FSIZE, RLIMIT_MEMLOCK, RLIMIT_MSGQUEUE,
+    RLIMIT_NICE, RLIMIT_NOFILE, RLIMIT_NPROC, RLIMIT_RSS, RLIMIT_RTPRIO, RLIMIT_RTTIME,
+    RLIMIT_SIGPENDING, RLIMIT_STACK, rlimit64,
+};
 use pulse_core::task::uaccess;
+use rand::{RngCore, SeedableRng, rngs::SmallRng};
+use spin::Mutex;
 
 use crate::{LinuxError, impls::utils::alloc_zeroed_bytes};
+
+static RANDOM_RNG: Mutex<Option<SmallRng>> = Mutex::new(None);
 
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -53,6 +62,44 @@ fn write_cstr_field(dst: &mut [u8], s: &str) {
     let len = bytes.len().min(dst.len().saturating_sub(1));
     dst[..len].copy_from_slice(&bytes[..len]);
     dst[len] = 0;
+}
+
+fn random_seed() -> u64 {
+    use core::sync::atomic::{AtomicU64, Ordering};
+
+    static SEED_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+    axhal::time::monotonic_time_nanos() as u64
+        ^ SEED_COUNTER.fetch_add(1, Ordering::Relaxed).rotate_left(17)
+        ^ 0x9e37_79b9_7f4a_7c15
+}
+
+fn with_random_rng<R>(f: impl FnOnce(&mut SmallRng) -> R) -> R {
+    let mut rng = RANDOM_RNG.lock();
+    let rng = rng.get_or_insert_with(|| SmallRng::seed_from_u64(random_seed()));
+    f(rng)
+}
+
+fn rlimit_for(resource: usize) -> Option<rlimit64> {
+    const INF: u64 = u64::MAX;
+    let rlim = match resource as u32 {
+        RLIMIT_CPU | RLIMIT_FSIZE | RLIMIT_DATA | RLIMIT_CORE | RLIMIT_RSS | RLIMIT_NPROC
+        | RLIMIT_MEMLOCK | RLIMIT_AS | RLIMIT_MSGQUEUE | RLIMIT_RTPRIO | RLIMIT_RTTIME
+        | RLIMIT_SIGPENDING | RLIMIT_NICE => rlimit64 {
+            rlim_cur: INF,
+            rlim_max: INF,
+        },
+        RLIMIT_STACK => rlimit64 {
+            rlim_cur: pulse_core::config::USER_STACK_SIZE as u64,
+            rlim_max: pulse_core::config::USER_STACK_SIZE as u64,
+        },
+        RLIMIT_NOFILE => rlimit64 {
+            rlim_cur: pulse_core::fd_table::FD_LIMIT as u64,
+            rlim_max: pulse_core::fd_table::FD_LIMIT as u64,
+        },
+        _ => return None,
+    };
+    Some(rlim)
 }
 
 /// sys_uname - 获取系统信息
@@ -113,6 +160,53 @@ pub fn sys_gettid() -> isize {
     axlog::debug!("sys_gettid");
     match pulse_core::task::current_thread() {
         Ok(thread) => thread.tid() as isize,
+        Err(e) => -e.code() as isize,
+    }
+}
+
+pub fn sys_prlimit64(pid: i32, resource: usize, new_limit: usize, old_limit: usize) -> isize {
+    let process = match pulse_core::task::current_process() {
+        Ok(process) => process,
+        Err(e) => return -e.code() as isize,
+    };
+    if pid != 0 && pid != process.pid() as i32 {
+        return -LinuxError::ESRCH.code() as isize;
+    }
+    if new_limit != 0 {
+        return -LinuxError::EINVAL.code() as isize;
+    }
+    if old_limit == 0 {
+        return 0;
+    }
+
+    let Some(rlim) = rlimit_for(resource) else {
+        return -LinuxError::EINVAL.code() as isize;
+    };
+    match uaccess::write_user_plain(process.as_ref(), old_limit, &rlim) {
+        Ok(()) => 0,
+        Err(_) => -LinuxError::EFAULT.code() as isize,
+    }
+}
+
+pub fn sys_getrandom(buf: usize, buflen: usize, flags: usize) -> isize {
+    if flags != 0 {
+        return -LinuxError::EINVAL.code() as isize;
+    }
+    if buflen == 0 {
+        return 0;
+    }
+    if buf == 0 {
+        return -LinuxError::EFAULT.code() as isize;
+    }
+
+    let mut tmp = match alloc_zeroed_bytes(buflen, "sys_getrandom.tmp") {
+        Ok(buf) => buf,
+        Err(e) => return -e.code() as isize,
+    };
+    with_random_rng(|rng| rng.fill_bytes(&mut tmp));
+    match pulse_core::task::with_current_process(|process| process.write_user_bytes(buf, &tmp)) {
+        Ok(Ok(())) => buflen as isize,
+        Ok(Err(_)) => -LinuxError::EFAULT.code() as isize,
         Err(e) => -e.code() as isize,
     }
 }
@@ -186,7 +280,9 @@ pub fn sys_sysinfo(info: usize) -> isize {
 
     let allocator = global_allocator();
     let page_size = 4096u64;
-    let total_pages = allocator.used_pages().saturating_add(allocator.available_pages()) as u64;
+    let total_pages = allocator
+        .used_pages()
+        .saturating_add(allocator.available_pages()) as u64;
     let free_pages = allocator.available_pages() as u64;
     let sysinfo = Sysinfo {
         uptime: axhal::time::monotonic_time().as_secs() as i64,
@@ -214,7 +310,12 @@ pub fn sys_sysinfo(info: usize) -> isize {
 }
 
 pub fn sys_syslog(action: usize, bufp: usize, len: usize) -> isize {
-    axlog::debug!("sys_syslog: action={}, bufp={:#x}, len={}", action, bufp, len);
+    axlog::debug!(
+        "sys_syslog: action={}, bufp={:#x}, len={}",
+        action,
+        bufp,
+        len
+    );
     match action {
         SYSLOG_ACTION_CLOSE
         | SYSLOG_ACTION_OPEN
