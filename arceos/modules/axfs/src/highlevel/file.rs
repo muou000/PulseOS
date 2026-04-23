@@ -246,7 +246,9 @@ impl OpenOptions {
                     },
                 )?;
                 if !self.no_follow {
-                    loc = context.with_current_dir(parent)?.try_resolve_symlink(loc, &mut 0)?;
+                    loc = context
+                        .with_current_dir(parent)?
+                        .try_resolve_symlink(loc, &mut 0)?;
                 }
                 loc
             }
@@ -267,7 +269,11 @@ impl OpenOptions {
             (false, _, true) => FileFlags::WRITE | FileFlags::APPEND,
             (true, _, true) => FileFlags::READ | FileFlags::WRITE | FileFlags::APPEND,
             (false, false, false) => return Err(VfsError::InvalidInput),
-        } | if self.path { FileFlags::PATH } else { FileFlags::empty() })
+        } | if self.path {
+            FileFlags::PATH
+        } else {
+            FileFlags::empty()
+        })
     }
 
     pub(crate) fn is_valid(&self) -> bool {
@@ -313,7 +319,10 @@ impl PageCache {
                 warn!("Failed to allocate page cache: {:?}", err);
             })
             .map_err(|_| VfsError::StorageFull)?;
-        Ok(Self { addr: addr.into(), dirty: false })
+        Ok(Self {
+            addr: addr.into(),
+            dirty: false,
+        })
     }
 
     pub fn paddr(&self) -> PhysAddr {
@@ -421,7 +430,12 @@ impl CachedFile {
         };
         drop(guard);
 
-        Self { inner: location, shared, in_memory, append_lock: RwLock::new(()) }
+        Self {
+            inner: location,
+            shared,
+            in_memory,
+            append_lock: RwLock::new(()),
+        }
     }
 
     pub fn ptr_eq(&self, other: &Self) -> bool {
@@ -586,7 +600,8 @@ impl CachedFile {
         let _guard = self.append_lock.write();
         let file = self.inner.entry().as_file()?;
         let len = file.len()?;
-        self.write_at_locked(buf, len).map(|written| (written, len + written as u64))
+        self.write_at_locked(buf, len)
+            .map(|written| (written, len + written as u64))
     }
 
     pub fn set_len(&self, len: u64) -> VfsResult<()> {
@@ -609,8 +624,11 @@ impl CachedFile {
             // new length
             // TODO(mivik): can this be more efficient?
             let mut guard = self.shared.page_cache.lock();
-            let keys =
-                guard.iter().map(|(k, _)| *k).filter(|it| *it > new_last_page).collect::<Vec<_>>();
+            let keys = guard
+                .iter()
+                .map(|(k, _)| *k)
+                .filter(|it| *it > new_last_page)
+                .collect::<Vec<_>>();
             for pn in keys {
                 if let Some(mut page) = guard.pop(&pn)
                     && !self.in_memory
@@ -694,9 +712,12 @@ impl FileBackend {
         match self {
             Self::Cached(cached) => cached.write_at(src, offset),
             Self::Direct(loc) => src.write_to(&mut axio::write_fn(|buf| {
-                loc.entry().as_file()?.write_at(buf, offset).inspect(|written| {
-                    offset += *written as u64;
-                })
+                loc.entry()
+                    .as_file()?
+                    .write_at(buf, offset)
+                    .inspect(|written| {
+                        offset += *written as u64;
+                    })
             })),
         }
     }
@@ -769,7 +790,10 @@ impl File {
     }
 
     pub fn open(context: &FsContext, path: impl AsRef<Path>) -> VfsResult<Self> {
-        OpenOptions::new().read(true).open(context, path.as_ref()).and_then(OpenResult::into_file)
+        OpenOptions::new()
+            .read(true)
+            .open(context, path.as_ref())
+            .and_then(OpenResult::into_file)
     }
 
     pub fn create(context: &FsContext, path: impl AsRef<Path>) -> VfsResult<Self> {
@@ -896,9 +920,9 @@ impl Seek for &File {
                     let size = self.access(FileFlags::empty())?.location().len()?;
                     size.checked_add_signed(off).ok_or(VfsError::InvalidInput)?
                 }
-                SeekFrom::Current(off) => {
-                    guard.checked_add_signed(off).ok_or(VfsError::InvalidInput)?
-                }
+                SeekFrom::Current(off) => guard
+                    .checked_add_signed(off)
+                    .ok_or(VfsError::InvalidInput)?,
             };
             *guard = new_pos;
             Ok(new_pos)

@@ -1,6 +1,4 @@
-use alloc::collections::VecDeque;
-use alloc::sync::Arc;
-use alloc::vec::Vec;
+use alloc::{collections::VecDeque, sync::Arc, vec::Vec};
 
 use kernel_guard::{NoOp, NoPreemptIrqSave};
 use kspin::{SpinNoIrq, SpinNoIrqGuard};
@@ -77,8 +75,9 @@ impl WaitQueue {
     /// Blocks the current task and put it into the wait queue, until other task
     /// notifies it.
     pub fn wait(&self) {
+        let curr = crate::current();
         current_run_queue::<NoPreemptIrqSave>().blocked_resched(self.queue.lock());
-        self.cancel_events(crate::current(), false);
+        self.cancel_events(curr, false);
     }
 
     /// Blocks the current task and put it into the wait queue, until the given

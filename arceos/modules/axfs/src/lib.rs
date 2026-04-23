@@ -238,10 +238,13 @@ pub fn init_filesystems(mut block_devs: AxDeviceContainer<AxBlockDevice>) {
 
     // Use block device 1 as the root filesystem. The remaining devices are
     // registered for user-initiated mount.
-    let root_pos = if candidates.len() > 1 { 1 } else { 0 };
+    let root_pos = candidates
+        .iter()
+        .position(|cand| cand.disk_idx == 1)
+        .expect("block device1 is required for the root filesystem");
     let root = candidates.swap_remove(root_pos);
     info!(
-        "  select block device {} ({}, {} KiB) as root filesystem (fixed device1)",
+        "  select block device {} ({}, {} KiB) as root filesystem",
         root.disk_idx,
         root.dev_name,
         root.disk_size / 1024
