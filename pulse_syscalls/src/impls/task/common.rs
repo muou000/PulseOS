@@ -4,7 +4,9 @@ use axerrno::LinuxError;
 use pulse_core::task::{Process, uaccess};
 
 pub(super) fn read_user_usize(process: &Process, user_addr: usize) -> Result<usize, isize> {
-    process.read_user_usize(user_addr).map_err(|_| -LinuxError::EFAULT.code() as isize)
+    process
+        .read_user_usize(user_addr)
+        .map_err(|_| -LinuxError::EFAULT.code() as isize)
 }
 
 pub(super) fn read_user_cstring(process: &Process, user_addr: usize) -> Result<String, isize> {
@@ -37,8 +39,16 @@ pub(super) fn read_user_string_array(
 }
 
 pub(super) fn write_user_i32(process: &Process, user_addr: usize, value: i32) -> isize {
-    process.write_user_i32(user_addr, value).map(|_| 0).unwrap_or_else(|e| {
-        axlog::warn!("user write failed: addr={:#x}, value={}, err={:?}", user_addr, value, e);
-        -LinuxError::EFAULT.code() as isize
-    })
+    process
+        .write_user_i32(user_addr, value)
+        .map(|_| 0)
+        .unwrap_or_else(|e| {
+            axlog::warn!(
+                "user write failed: addr={:#x}, value={}, err={:?}",
+                user_addr,
+                value,
+                e
+            );
+            -LinuxError::EFAULT.code() as isize
+        })
 }

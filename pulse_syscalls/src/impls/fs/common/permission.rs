@@ -62,7 +62,9 @@ pub(crate) fn check_faccess_permission(
         return Ok(());
     }
 
-    let meta = location.metadata().map_err(|e| LinuxError::from(e.canonicalize()))?;
+    let meta = location
+        .metadata()
+        .map_err(|e| LinuxError::from(e.canonicalize()))?;
 
     if uid == 0 {
         if (mode & X_OK as usize) == 0 {
@@ -74,9 +76,17 @@ pub(crate) fn check_faccess_permission(
         let any_exec = meta.mode.intersects(
             NodePermission::OWNER_EXEC | NodePermission::GROUP_EXEC | NodePermission::OTHER_EXEC,
         );
-        return if any_exec { Ok(()) } else { Err(LinuxError::EACCES) };
+        return if any_exec {
+            Ok(())
+        } else {
+            Err(LinuxError::EACCES)
+        };
     }
 
     let allowed = allowed_access_mask(meta.mode, uid, gid, meta.uid, meta.gid);
-    if (mode & !allowed) == 0 { Ok(()) } else { Err(LinuxError::EACCES) }
+    if (mode & !allowed) == 0 {
+        Ok(())
+    } else {
+        Err(LinuxError::EACCES)
+    }
 }

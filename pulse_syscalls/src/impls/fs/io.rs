@@ -1,5 +1,7 @@
-use core::time::Duration;
-use core::sync::atomic::{AtomicBool, Ordering};
+use core::{
+    sync::atomic::{AtomicBool, Ordering},
+    time::Duration,
+};
 
 use axerrno::{AxError, LinuxError};
 use axio::SeekFrom;
@@ -16,8 +18,7 @@ use crate::impls::{
     fs::common::{get_fd_entry, open_fd_flags, remove_fd_entry},
     utils::{
         alloc_zeroed_bytes, read_user_bytes, read_user_i64, read_user_iovec_array,
-        read_user_timespec, with_process,
-        write_user_bytes, write_user_i64,
+        read_user_timespec, with_process, write_user_bytes, write_user_i64,
     },
 };
 
@@ -72,7 +73,13 @@ pub fn sys_read(fd: usize, buf: usize, count: usize) -> isize {
         let chunk = core::cmp::min(tmp.len(), count - total);
         let ret = match object.read(&mut tmp[..chunk]) {
             Ok(ret) => ret,
-            Err(e) => return if total > 0 { total as isize } else { -e.code() as isize },
+            Err(e) => {
+                return if total > 0 {
+                    total as isize
+                } else {
+                    -e.code() as isize
+                };
+            }
         };
         if ret == 0 {
             break;
@@ -82,7 +89,11 @@ pub fn sys_read(fd: usize, buf: usize, count: usize) -> isize {
             None => return -LinuxError::EINVAL.code() as isize,
         };
         if let Err(e) = write_user_bytes(user_buf, &tmp[..ret]) {
-            return if total > 0 { total as isize } else { -e.code() as isize };
+            return if total > 0 {
+                total as isize
+            } else {
+                -e.code() as isize
+            };
         }
         total += ret;
         if ret < chunk {
@@ -112,12 +123,20 @@ pub fn sys_write(fd: usize, buf: usize, count: usize) -> isize {
     while total < count {
         let chunk = core::cmp::min(tmp.len(), count - total);
         if let Err(e) = read_user_bytes(buf + total, &mut tmp[..chunk]) {
-            return if total > 0 { total as isize } else { -e.code() as isize };
+            return if total > 0 {
+                total as isize
+            } else {
+                -e.code() as isize
+            };
         }
         let ret = match object.write(&tmp[..chunk]) {
             Ok(ret) => ret,
             Err(e) => {
-                return if total > 0 { total as isize } else { -e.code() as isize };
+                return if total > 0 {
+                    total as isize
+                } else {
+                    -e.code() as isize
+                };
             }
         };
         if ret == 0 {
@@ -478,14 +497,22 @@ pub fn sys_sendfile(out_fd: usize, in_fd: usize, offset: usize, count: usize) ->
             match input.read_at(&mut buf[..chunk_len], file_offset) {
                 Ok(len) => len,
                 Err(e) => {
-                    return if total > 0 { total as isize } else { -e.code() as isize };
+                    return if total > 0 {
+                        total as isize
+                    } else {
+                        -e.code() as isize
+                    };
                 }
             }
         } else {
             match input.read(&mut buf[..chunk_len]) {
                 Ok(len) => len,
                 Err(e) => {
-                    return if total > 0 { total as isize } else { -e.code() as isize };
+                    return if total > 0 {
+                        total as isize
+                    } else {
+                        -e.code() as isize
+                    };
                 }
             }
         };
@@ -503,7 +530,11 @@ pub fn sys_sendfile(out_fd: usize, in_fd: usize, offset: usize, count: usize) ->
                 Ok(len) => written += len,
                 Err(e) => {
                     let transferred = total + written;
-                    return if transferred > 0 { transferred as isize } else { -e.code() as isize };
+                    return if transferred > 0 {
+                        transferred as isize
+                    } else {
+                        -e.code() as isize
+                    };
                 }
             }
         }
@@ -514,7 +545,11 @@ pub fn sys_sendfile(out_fd: usize, in_fd: usize, offset: usize, count: usize) ->
     }
 
     if use_explicit_offset && let Err(e) = write_user_i64(offset, file_offset as i64) {
-        return if total > 0 { total as isize } else { -e.code() as isize };
+        return if total > 0 {
+            total as isize
+        } else {
+            -e.code() as isize
+        };
     }
 
     total as isize
@@ -551,7 +586,10 @@ pub fn sys_pipe2(fds: usize, flags: usize) -> isize {
         Ok(Err(e)) | Err(e) => return -e.code() as isize,
     };
     let bytes = unsafe {
-        core::slice::from_raw_parts(new_fds.as_ptr().cast::<u8>(), core::mem::size_of_val(&new_fds))
+        core::slice::from_raw_parts(
+            new_fds.as_ptr().cast::<u8>(),
+            core::mem::size_of_val(&new_fds),
+        )
     };
     if let Err(e) = write_user_bytes(fds, bytes) {
         if let Err(remove_e) = remove_fd_entry(new_fds[0] as usize) {
@@ -607,7 +645,12 @@ pub fn sys_socketpair(domain: u32, sock_type: u32, protocol: u32, sv: usize) -> 
 }
 
 pub fn sys_lseek(fd: usize, offset: usize, whence: usize) -> isize {
-    axlog::debug!("sys_lseek: fd={}, offset={:#x}, whence={}", fd, offset, whence);
+    axlog::debug!(
+        "sys_lseek: fd={}, offset={:#x}, whence={}",
+        fd,
+        offset,
+        whence
+    );
     let object = match get_fd_entry(fd) {
         Ok(entry) => entry.object,
         Err(e) => return -e.code() as isize,

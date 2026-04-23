@@ -17,7 +17,8 @@ pub(crate) fn context_for_dirfd(dirfd: i32) -> Result<FsContext, LinuxError> {
     if !location.is_dir() {
         return Err(LinuxError::ENOTDIR);
     }
-    base.with_current_dir(location).map_err(|e| LinuxError::from(e.canonicalize()))
+    base.with_current_dir(location)
+        .map_err(|e| LinuxError::from(e.canonicalize()))
 }
 
 pub(crate) fn resolve_location_at_ptr(
@@ -51,9 +52,11 @@ pub(crate) fn resolve_location_at_ptr(
     }
     let ctx = context_for_dirfd(dirfd)?;
     if (flags & AT_SYMLINK_NOFOLLOW as usize) != 0 {
-        ctx.resolve_no_follow(path.as_ref()).map_err(|e| LinuxError::from(e.canonicalize()))
+        ctx.resolve_no_follow(path.as_ref())
+            .map_err(|e| LinuxError::from(e.canonicalize()))
     } else {
-        ctx.resolve(path.as_ref()).map_err(|e| LinuxError::from(e.canonicalize()))
+        ctx.resolve(path.as_ref())
+            .map_err(|e| LinuxError::from(e.canonicalize()))
     }
 }
 
@@ -81,5 +84,8 @@ fn try_resolve_location_fast(
     if !base.is_dir() {
         return Some(Err(LinuxError::ENOTDIR));
     }
-    Some(base.lookup_no_follow(path).map_err(|e| LinuxError::from(e.canonicalize())))
+    Some(
+        base.lookup_no_follow(path)
+            .map_err(|e| LinuxError::from(e.canonicalize())),
+    )
 }
