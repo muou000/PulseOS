@@ -1417,7 +1417,10 @@ impl Process {
 
         let pt_root = child_proc.page_table_root();
         inner.ctx_mut().set_page_table_root(pt_root);
-        super::register_process(child_proc.pid(), child_proc.clone());
+        if !params.is_thread_clone {
+            // Thread clones reuse the existing PROCESS_REGISTRY entry for this pid.
+            super::register_process(child_proc.pid(), child_proc.clone());
+        }
         inner.init_task_ext(super::ThreadHandle::new(child_thread));
 
         let task = axtask::spawn_task(inner);
