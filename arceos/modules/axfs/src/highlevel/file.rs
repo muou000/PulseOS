@@ -1078,10 +1078,33 @@ impl File {
     pub fn flush(&self) -> axio::Result {
         self.sync(false)
     }
+
+    #[cfg(feature = "times")]
+    fn update_timestamps_on_drop(&self) {
+        let flags = self.access_flags.load(Ordering::Acquire);
+        if flags == 0 {
+            return;
+        }
+
+        let now = axhal::time::wall_time();
+        let mut update = axfs_ng_vfs::MetadataUpdate::default();
+        if flags & 1 != 0 {
+            update.atime = Some(now);
+        }
+        if flags & 2 != 0 {
+            update.mtime = Some(now);
+        }
+
+        if let Err(err) = self.inner.location().update_metadata(update) {
+            warn!("Failed to update file times on drop: {err:?}");
+        }
+    }
 }
 
 impl Drop for File {
     fn drop(&mut self) {
+        #[cfg(feature = "times")]
+        self.update_timestamps_on_drop();
         let _ = self.sync(false);
     }
 }
