@@ -16,7 +16,6 @@ use axhal::mem::{PhysAddr, VirtAddr, virt_to_phys};
 use axio::{SeekFrom, prelude::*};
 use axpoll::{IoEvents, Pollable};
 use axsync::Mutex;
-use intrusive_collections::{LinkedList, LinkedListAtomicLink, intrusive_adapter};
 use lru::LruCache;
 use spin::{Lazy, Mutex as SpinMutex, RwLock};
 
@@ -374,14 +373,11 @@ impl Drop for PageCache {
 
 struct EvictListener {
     listener: Box<dyn Fn(u32, &PageCache) + Send + Sync>,
-    link: LinkedListAtomicLink,
 }
-
-intrusive_adapter!(EvictListenerAdapter = Box<EvictListener>: EvictListener { link: LinkedListAtomicLink });
 
 struct CachedFileShared {
     page_cache: Mutex<LruCache<u32, PageCache>>,
-    evict_listeners: Mutex<LinkedList<EvictListenerAdapter>>,
+    evict_listeners: Mutex<Vec<Arc<EvictListener>>>,
     io_lock: RwLock<()>,
 }
 
@@ -393,13 +389,18 @@ impl CachedFileShared {
             } else {
                 Mutex::new(LruCache::new(NonZeroUsize::new(64).unwrap()))
             },
-            evict_listeners: Mutex::new(LinkedList::default()),
+            evict_listeners: Mutex::new(Vec::new()),
             io_lock: RwLock::new(()),
         }
     }
 
+    fn evict_listeners_snapshot(&self) -> Vec<Arc<EvictListener>> {
+        self.evict_listeners.lock().clone()
+    }
+
     fn evict_cache(&self, file: &FileNode, pn: u32, page: &mut PageCache) -> VfsResult<()> {
-        for listener in self.evict_listeners.lock().iter() {
+        let listeners = self.evict_listeners_snapshot();
+        for listener in listeners.iter() {
             (listener.listener)(pn, page);
         }
         if page.dirty {
@@ -448,7 +449,8 @@ impl CachedFileShared {
                     return Err(err);
                 }
             } else {
-                for listener in self.evict_listeners.lock().iter() {
+                let listeners = self.evict_listeners_snapshot();
+                for listener in listeners.iter() {
                     (listener.listener)(pn, &page);
                 }
                 page.dirty = false;
@@ -466,7 +468,8 @@ impl CachedFileShared {
                     return Err(err);
                 }
             } else {
-                for listener in self.evict_listeners.lock().iter() {
+                let listeners = self.evict_listeners_snapshot();
+                for listener in listeners.iter() {
                     (listener.listener)(pn, &page);
                 }
                 page.dirty = false;
@@ -479,7 +482,7 @@ impl CachedFileShared {
 impl Drop for CachedFileShared {
     fn drop(&mut self) {
         let mut guard = self.page_cache.lock();
-        while let Some((_pn, mut page)) = guard.pop_lru() {
+        while let Some((_pn, page)) = guard.pop_lru() {
             if page.dirty {
                 warn!("dirty page dropped without flushing");
             }
@@ -563,23 +566,27 @@ impl CachedFile {
     where
         F: Fn(u32, &PageCache) + Send + Sync + 'static,
     {
-        let pointer = Box::new(EvictListener {
+        let pointer = Arc::new(EvictListener {
             listener: Box::new(listener),
-            link: LinkedListAtomicLink::new(),
         });
-        let handle = pointer.as_ref() as *const EvictListener as usize;
-        self.shared.evict_listeners.lock().push_back(pointer);
+        let handle = Arc::as_ptr(&pointer) as usize;
+        self.shared.evict_listeners.lock().push(pointer);
         handle
     }
 
     pub unsafe fn remove_evict_listener(&self, handle: usize) {
         let mut guard = self.shared.evict_listeners.lock();
-        let mut cursor = unsafe { guard.cursor_mut_from_ptr(handle as *const EvictListener) };
-        cursor.remove();
+        if let Some(pos) = guard
+            .iter()
+            .position(|listener| Arc::as_ptr(listener) as usize == handle)
+        {
+            guard.remove(pos);
+        }
     }
 
     fn evict_cache(&self, file: &FileNode, pn: u32, page: &mut PageCache) -> VfsResult<()> {
-        for listener in self.shared.evict_listeners.lock().iter() {
+        let listeners = self.shared.evict_listeners_snapshot();
+        for listener in listeners.iter() {
             (listener.listener)(pn, page);
         }
         if page.dirty {
@@ -627,7 +634,8 @@ impl CachedFile {
                     return Err(err);
                 }
             } else {
-                for listener in self.shared.evict_listeners.lock().iter() {
+                let listeners = self.shared.evict_listeners_snapshot();
+                for listener in listeners.iter() {
                     (listener.listener)(pn, &page);
                 }
                 page.dirty = false;
