@@ -1323,6 +1323,7 @@ impl Process {
             }
         };
         if let Some(addr) = params.parent_set_tid {
+            let child_tid = child_tid as u32;
             if let Err(err) =
                 self.write_user_bytes_in_aspace(&mut parent_aspace, addr, &child_tid.to_ne_bytes())
             {
