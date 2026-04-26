@@ -1,6 +1,6 @@
 //! Helper functions to initialize the CPU states on systems bootstrapping.
 
-use loongArch64::register::{crmd, stlbps, tlbidx, tlbrehi, tlbrentry};
+use loongArch64::register::{MemoryAccessType, crmd, stlbps, tlbidx, tlbrehi, tlbrentry};
 use memory_addr::PhysAddr;
 use page_table_multiarch::loongarch64::LA64MetaData;
 
@@ -18,7 +18,12 @@ pub fn init_mmu(root_paddr: PhysAddr, phys_virt_offset: usize) {
 
     // Configure TLB
     const PS_4K: usize = 0x0c; // Page Size 4KB
-    let tlbrentry_paddr = pa!(handle_tlb_refill as usize - phys_virt_offset);
+    let tlbrentry_addr = handle_tlb_refill as usize;
+    let tlbrentry_paddr = if tlbrentry_addr >= phys_virt_offset {
+        pa!(tlbrentry_addr - phys_virt_offset)
+    } else {
+        pa!(tlbrentry_addr & 0x0fff_ffff_ffff_ffff)
+    };
     tlbidx::set_ps(PS_4K);
     stlbps::set_ps(PS_4K);
     tlbrehi::set_ps(PS_4K);
@@ -33,6 +38,9 @@ pub fn init_mmu(root_paddr: PhysAddr, phys_virt_offset: usize) {
     crate::asm::flush_tlb(None);
 
     // Enable mapped address translation mode
+    crmd::set_datf(MemoryAccessType::CoherentCached);
+    crmd::set_datm(MemoryAccessType::CoherentCached);
+    crmd::set_da(false);
     crmd::set_pg(true);
 }
 

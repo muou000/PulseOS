@@ -1,7 +1,10 @@
-use axplat::mem::{Aligned4K, pa, va};
+use axplat::mem::{Aligned4K, PhysAddr, pa};
 use page_table_entry::{GenericPTE, MappingFlags, loongarch64::LA64PTE};
 
 use crate::config::plat::{BOOT_STACK_SIZE, PHYS_VIRT_OFFSET};
+
+const DMW_VIRT_MASK: usize = 0x0fff_ffff_ffff_ffff;
+const DMW_CACHED_BASE: usize = 0x9000_0000_0000_0000;
 
 #[unsafe(link_section = ".bss.stack")]
 static mut BOOT_STACK: [u8; BOOT_STACK_SIZE] = [0; BOOT_STACK_SIZE];
@@ -14,9 +17,11 @@ static mut BOOT_PT_L1: Aligned4K<[LA64PTE; 512]> = Aligned4K::new([LA64PTE::empt
 
 unsafe fn init_boot_page_table() {
     unsafe {
-        let l1_va = va!(&raw const BOOT_PT_L1 as usize);
+        let l1_paddr = boot_paddr(&raw const BOOT_PT_L1);
         // 0x0000_0000_0000 ~ 0x0080_0000_0000, table
-        BOOT_PT_L0[0] = LA64PTE::new_table(axplat::mem::virt_to_phys(l1_va));
+        BOOT_PT_L0[0] = LA64PTE::new_table(l1_paddr);
+        // Higher-half mapping for canonical addresses (bit 47 = 1).
+        BOOT_PT_L0[0x100] = LA64PTE::new_table(l1_paddr);
         // 0x0000_0000..0x4000_0000, VPWXGD, 1G block
         BOOT_PT_L1[0] = LA64PTE::new_page(
             pa!(0),
@@ -32,20 +37,23 @@ unsafe fn init_boot_page_table() {
     }
 }
 
+fn boot_paddr<T>(ptr: *const T) -> PhysAddr {
+    pa!((ptr as usize) & DMW_VIRT_MASK)
+}
+
 fn enable_fp_simd() {
-    // FP/SIMD needs to be enabled early, as the compiler may generate SIMD
-    // instructions in the bootstrapping code to speed up the operations
-    // like `memset` and `memcpy`.
+    // Enable FP unconditionally to avoid FloatingPointUnavailable traps before
+    // the regular exception path is ready.
+    axcpu::asm::enable_fp();
     #[cfg(feature = "fp-simd")]
     {
-        axcpu::asm::enable_fp();
         axcpu::asm::enable_lsx();
     }
 }
 
 fn init_mmu() {
     axcpu::init::init_mmu(
-        axplat::mem::virt_to_phys(va!(&raw const BOOT_PT_L0 as usize)),
+        boot_paddr(&raw const BOOT_PT_L0),
         PHYS_VIRT_OFFSET,
     );
 }
@@ -64,6 +72,12 @@ unsafe extern "C" fn _start() -> ! {
         ori         $t0, $zero, 0x11    # CSR_DMW1_MAT | CSR_DMW1_PLV0
         lu52i.d     $t0, $t0, -1792     # CA, PLV0, 0x9000 xxxx xxxx xxxx
         csrwr       $t0, 0x181          # LOONGARCH_CSR_DMWIN1
+        la.global   $t0, 2f
+        li.d        $t1, {dmw_cached_base}
+        or          $t0, $t0, $t1
+        jirl        $zero, $t0, 0
+
+    2:
 
         # Setup Stack
         la.global   $sp, {boot_stack}
@@ -74,11 +88,18 @@ unsafe extern "C" fn _start() -> ! {
         bl          {enable_fp_simd}    # enable FP/SIMD instructions
         bl          {init_boot_page_table}
         bl          {init_mmu}          # setup boot page table and enable MMU
+        li.d        $t0, {dmw_virt_mask}
+        and         $sp, $sp, $t0
+        li.d        $t0, {phys_virt_offset}
+        add.d       $sp, $sp, $t0       # switch boot stack to higher-half VA
 
         csrrd       $a0, 0x20           # cpuid
         li.d        $a1, 0              # TODO: parse dtb
-        la.global   $t0, {entry}
+        la.abs      $t0, {entry}
         jirl        $zero, $t0, 0",
+        dmw_virt_mask = const DMW_VIRT_MASK,
+        dmw_cached_base = const DMW_CACHED_BASE,
+        phys_virt_offset = const PHYS_VIRT_OFFSET,
         boot_stack_size = const BOOT_STACK_SIZE,
         boot_stack = sym BOOT_STACK,
         enable_fp_simd = sym enable_fp_simd,
@@ -100,16 +121,29 @@ unsafe extern "C" fn _start_secondary() -> ! {
         ori          $t0, $zero, 0x11    # CSR_DMW1_MAT | CSR_DMW1_PLV0
         lu52i.d      $t0, $t0, -1792     # CA, PLV0, 0x9000 xxxx xxxx xxxx
         csrwr        $t0, 0x181          # LOONGARCH_CSR_DMWIN1
+        la.global    $t0, 2f
+        li.d         $t1, {dmw_cached_base}
+        or           $t0, $t0, $t1
+        jirl         $zero, $t0, 0
+
+    2:
         la.abs       $t0, {sm_boot_stack_top}
         ld.d         $sp, $t0,0          # read boot stack top
 
         # Init MMU
         bl           {enable_fp_simd}    # enable FP/SIMD instructions
         bl           {init_mmu}          # setup boot page table and enable MMU
+        li.d         $t0, {dmw_virt_mask}
+        and          $sp, $sp, $t0
+        li.d         $t0, {phys_virt_offset}
+        add.d        $sp, $sp, $t0       # switch boot stack to higher-half VA
 
         csrrd        $a0, 0x20                  # cpuid
-        la.global    $t0, {entry}
+        la.abs       $t0, {entry}
         jirl         $zero, $t0, 0",
+        dmw_virt_mask = const DMW_VIRT_MASK,
+        dmw_cached_base = const DMW_CACHED_BASE,
+        phys_virt_offset = const PHYS_VIRT_OFFSET,
         sm_boot_stack_top = sym super::mp::SMP_BOOT_STACK_TOP,
         enable_fp_simd = sym enable_fp_simd,
         init_mmu = sym init_mmu,
