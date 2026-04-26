@@ -175,7 +175,9 @@ fn rollback_cow_shared_pages(
                 );
             }
         }
-        axmm::cow_dec_frame_ref(page.frame);
+        // Keep the COW refcount balanced by the child address space teardown.
+        // `new_aspace` is dropped after rollback, and its unmap path will
+        // release the shared frame reference exactly once.
     }
 }
 
