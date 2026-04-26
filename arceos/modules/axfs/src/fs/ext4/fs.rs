@@ -3,29 +3,34 @@ use core::cell::OnceCell;
 
 use axdriver::prelude::BlockDriverOps;
 use axfs_ng_vfs::{
-    DirEntry, DirNode, Filesystem, FilesystemOps, Reference, StatFs, VfsResult, path::MAX_NAME_LEN,
+    DirEntry, DirNode, Filesystem, FilesystemOps, Reference, StatFs, VfsResult, WeakDirEntry,
+    path::MAX_NAME_LEN,
 };
 use ext4_rs::Ext4;
 use kspin::{SpinNoPreempt as Mutex, SpinNoPreemptGuard as MutexGuard};
 
-use super::{Ext4Disk, Inode};
+use super::{Ext4Disk, Inode, cleanup_dir_cache_registry};
 
 const ROOT_INODE: u32 = 2;
 
 pub struct Ext4Filesystem {
     inner: Mutex<Ext4>,
-    root_dir: OnceCell<DirEntry>,
+    root_dir: OnceCell<WeakDirEntry>,
 }
 
 impl Ext4Filesystem {
     pub fn new<D: BlockDriverOps + 'static>(dev: D) -> VfsResult<Filesystem> {
         let disk = Ext4Disk::new(dev);
         let ext4 = Ext4::open(disk);
-        let fs = Arc::new(Self { inner: Mutex::new(ext4), root_dir: OnceCell::new() });
-        let _ = fs.root_dir.set(DirEntry::new_dir(
+        let fs = Arc::new(Self {
+            inner: Mutex::new(ext4),
+            root_dir: OnceCell::new(),
+        });
+        let root_dir = DirEntry::new_dir(
             |this| DirNode::new(Inode::new(fs.clone(), ROOT_INODE, Some(this))),
             Reference::root(),
-        ));
+        );
+        let _ = fs.root_dir.set(root_dir.downgrade());
         Ok(Filesystem::new(fs))
     }
 
@@ -38,13 +43,24 @@ unsafe impl Send for Ext4Filesystem {}
 
 unsafe impl Sync for Ext4Filesystem {}
 
+impl Drop for Ext4Filesystem {
+    fn drop(&mut self) {
+        // Use the same pointer-based id as ext4_fs_id so the registry cleanup
+        // targets exactly this filesystem's cached directory states.
+        cleanup_dir_cache_registry(self as *const Self as usize);
+    }
+}
+
 impl FilesystemOps for Ext4Filesystem {
     fn name(&self) -> &str {
         "ext4"
     }
 
     fn root_dir(&self) -> DirEntry {
-        self.root_dir.get().unwrap().clone()
+        self.root_dir
+            .get()
+            .and_then(WeakDirEntry::upgrade)
+            .expect("ext4 root directory should be alive while filesystem is mounted")
     }
 
     fn stat(&self) -> VfsResult<StatFs> {

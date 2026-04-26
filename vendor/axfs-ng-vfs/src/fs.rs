@@ -1,7 +1,5 @@
 use alloc::sync::Arc;
 
-use inherit_methods_macro::inherit_methods;
-
 use crate::{DirEntry, VfsResult};
 
 pub struct StatFs {
@@ -39,19 +37,26 @@ pub trait FilesystemOps: Send + Sync {
 #[derive(Clone)]
 pub struct Filesystem {
     ops: Arc<dyn FilesystemOps>,
+    root_dir: DirEntry,
 }
 
-#[inherit_methods(from = "self.ops")]
 impl Filesystem {
-    pub fn name(&self) -> &str;
+    pub fn name(&self) -> &str {
+        self.ops.name()
+    }
 
-    pub fn root_dir(&self) -> DirEntry;
+    pub fn root_dir(&self) -> DirEntry {
+        self.root_dir.clone()
+    }
 
-    pub fn stat(&self) -> VfsResult<StatFs>;
+    pub fn stat(&self) -> VfsResult<StatFs> {
+        self.ops.stat()
+    }
 }
 
 impl Filesystem {
     pub fn new(ops: Arc<dyn FilesystemOps>) -> Self {
-        Self { ops }
+        let root_dir = ops.root_dir();
+        Self { ops, root_dir }
     }
 }

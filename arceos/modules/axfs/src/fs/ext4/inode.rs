@@ -1,4 +1,10 @@
-use alloc::{string::String, sync::Arc, vec, vec::Vec};
+use alloc::{
+    collections::BTreeMap,
+    string::String,
+    sync::{Arc, Weak},
+    vec,
+    vec::Vec,
+};
 use core::{any::Any, task::Context, time::Duration};
 
 use axfs_ng_vfs::{
@@ -8,7 +14,7 @@ use axfs_ng_vfs::{
 };
 use axpoll::{IoEvents, Pollable};
 use ext4_rs::Ext4;
-use spin::Mutex;
+use spin::{Lazy, Mutex};
 
 use super::{
     Ext4Filesystem,
@@ -18,7 +24,7 @@ pub struct Inode {
     fs: Arc<Ext4Filesystem>,
     ino: u32,
     this: Option<WeakDirEntry>,
-    dir_cache: Mutex<Option<Arc<DirSnapshot>>>,
+    dir_cache: Arc<DirCacheState>,
 }
 
 #[derive(Clone)]
@@ -33,13 +39,83 @@ struct DirSnapshot {
     entries: Vec<CachedDirEntry>,
 }
 
+struct DirCacheState {
+    snapshot: Mutex<Option<Arc<DirSnapshot>>>,
+}
+
+impl DirCacheState {
+    fn new() -> Self {
+        Self {
+            snapshot: Mutex::new(None),
+        }
+    }
+
+    fn get(&self) -> Option<Arc<DirSnapshot>> {
+        self.snapshot.lock().clone()
+    }
+
+    fn set(&self, snapshot: Arc<DirSnapshot>) {
+        *self.snapshot.lock() = Some(snapshot);
+    }
+
+    fn invalidate(&self) {
+        *self.snapshot.lock() = None;
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+struct DirCacheKey {
+    fs_id: usize,
+    ino: u32,
+}
+
+static DIR_CACHE_REGISTRY: Lazy<Mutex<BTreeMap<DirCacheKey, Weak<DirCacheState>>>> =
+    Lazy::new(|| Mutex::new(BTreeMap::new()));
+
+pub(crate) fn ext4_fs_id(fs: &Arc<Ext4Filesystem>) -> usize {
+    Arc::as_ptr(fs) as usize
+}
+
+fn dir_cache_key(fs: &Arc<Ext4Filesystem>, ino: u32) -> DirCacheKey {
+    DirCacheKey {
+        fs_id: ext4_fs_id(fs),
+        ino,
+    }
+}
+
+fn dir_cache_state(fs: &Arc<Ext4Filesystem>, ino: u32) -> Arc<DirCacheState> {
+    let key = dir_cache_key(fs, ino);
+    let mut registry = DIR_CACHE_REGISTRY.lock();
+    registry.retain(|_, state| state.strong_count() > 0);
+    if let Some(state) = registry.get(&key).and_then(Weak::upgrade) {
+        return state;
+    }
+
+    let state = Arc::new(DirCacheState::new());
+    registry.insert(key, Arc::downgrade(&state));
+    state
+}
+
+pub(crate) fn cleanup_dir_cache_registry(fs_id: usize) {
+    let mut registry = DIR_CACHE_REGISTRY.lock();
+    registry.retain(|key, state| key.fs_id != fs_id && state.strong_count() > 0);
+}
+
+fn invalidate_dir_cache(fs: &Arc<Ext4Filesystem>, ino: u32) {
+    let key = dir_cache_key(fs, ino);
+    if let Some(state) = DIR_CACHE_REGISTRY.lock().get(&key).and_then(Weak::upgrade) {
+        state.invalidate();
+    }
+}
+
 impl Inode {
     pub(crate) fn new(fs: Arc<Ext4Filesystem>, ino: u32, this: Option<WeakDirEntry>) -> Arc<Self> {
+        let dir_cache = dir_cache_state(&fs, ino);
         Arc::new(Self {
             fs,
             ino,
             this,
-            dir_cache: Mutex::new(None),
+            dir_cache,
         })
     }
 
@@ -70,7 +146,9 @@ impl Inode {
 
     fn invalidate_snapshot(&self, dir_ino: u32) {
         if dir_ino == self.ino {
-            *self.dir_cache.lock() = None;
+            self.dir_cache.invalidate();
+        } else {
+            invalidate_dir_cache(&self.fs, dir_ino);
         }
     }
 
@@ -89,7 +167,28 @@ impl Inode {
             }
             let name = entry.get_name();
             let inode_ref = fs.get_inode_ref(entry.inode);
+            // Validate that the inode is actually allocated and valid.
+            // Unallocated inodes have mode==0, deleted inodes have dtime!=0.
+            if inode_ref.inode.mode() == 0 || inode_ref.inode.dtime() != 0 {
+                log::warn!(
+                    "ext4: skip unallocated/deleted inode {} (mode={}, dtime={}) in dir ino={}",
+                    entry.inode,
+                    inode_ref.inode.mode(),
+                    inode_ref.inode.dtime(),
+                    dir_ino,
+                );
+                continue;
+            }
             let node_type = into_vfs_type(inode_ref.inode.file_type());
+            // Skip entries with Unknown node type (likely corruption).
+            if node_type == NodeType::Unknown {
+                log::warn!(
+                    "ext4: skip unknown node type for inode {} in dir ino={}",
+                    entry.inode,
+                    dir_ino,
+                );
+                continue;
+            }
             let is_dir = inode_ref.inode.is_dir();
             entries.push(CachedDirEntry {
                 name,
@@ -103,11 +202,11 @@ impl Inode {
     }
 
     fn dir_snapshot(&self, fs: &Ext4) -> Arc<DirSnapshot> {
-        if let Some(snapshot) = self.dir_cache.lock().as_ref() {
+        if let Some(snapshot) = self.dir_cache.get() {
             return snapshot.clone();
         }
         let snapshot = self.build_dir_snapshot_uncached(fs, self.ino);
-        *self.dir_cache.lock() = Some(snapshot.clone());
+        self.dir_cache.set(snapshot.clone());
         snapshot
     }
 

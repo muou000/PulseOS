@@ -144,6 +144,7 @@ impl<'a> DoubleEndedIterator for Components<'a> {
 ///
 /// Different from [`std::path::Path`], this type is always
 /// UTF-8 encoded.
+#[repr(transparent)]
 #[derive(Debug, Hash, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Path {
     inner: str,

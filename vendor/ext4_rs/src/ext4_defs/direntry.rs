@@ -4,7 +4,7 @@ use crate::utils::*;
 use super::*;
 
 bitflags! {
-    #[derive(PartialEq, Eq)]
+    #[derive(PartialEq, Eq, Clone, Copy)]
     pub struct DirEntryType: u8 {
         const EXT4_DE_UNKNOWN = 0;
         const EXT4_DE_REG_FILE = 1;
@@ -128,7 +128,9 @@ impl Ext4DirEntry {
 
     /// Check name
     pub fn compare_name(&self, name: &str) -> bool {
-        if self.name_len as usize == name.len(){
+        let raw_len = self.name_len as usize;
+        // Only compare if the reported name length matches and fits in the name array.
+        if raw_len == name.len() && raw_len <= self.name.len() {
             return &self.name[..name.len()] == name.as_bytes()
         }
         false
@@ -146,9 +148,13 @@ impl Ext4DirEntry {
 
     /// Get name to string
     pub fn get_name(&self) -> String {
-        let name_len = self.name_len as usize;
+        let raw_len = self.name_len as usize;
+        // Clamp name_len to the maximum array size (255) to prevent out-of-bounds slice.
+        // A corrupted directory entry (e.g. from reading beyond block boundary) may report
+        // a name_len larger than the actual name[] capacity.
+        let name_len = raw_len.min(self.name.len());
         let name = &self.name[..name_len];
-        let name = core::str::from_utf8(name).unwrap();
+        let name = core::str::from_utf8(name).unwrap_or("");
         name.to_string()
     }
 
