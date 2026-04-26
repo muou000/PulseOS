@@ -109,7 +109,13 @@ impl Backend {
 
     pub(crate) fn unmap_file(&self, start: VirtAddr, size: usize, pt: &mut PageTable) -> bool {
         debug!("unmap_file: [{:#x}, {:#x})", start, start + size);
-        for addr in PageIter4K::new(start, start + size).unwrap() {
+        if size == 0 {
+            return true;
+        }
+        let Some(pages) = PageIter4K::new(start, start + size) else {
+            return false;
+        };
+        for addr in pages {
             if let Ok((frame, page_size, tlb)) = pt.unmap(addr) {
                 if page_size != PageSize::Size4K {
                     return false;
