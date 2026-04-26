@@ -15,6 +15,10 @@ pub(crate) fn cow_inc_frame_ref(frame: PhysAddr) {
     refs.entry(key).and_modify(|c| *c += 1).or_insert(2);
 }
 
+pub(crate) fn cow_dec_frame_ref(frame: PhysAddr) -> bool {
+    drop_frame_mapping_ref(frame)
+}
+
 fn drop_frame_mapping_ref(frame: PhysAddr) -> bool {
     let key = frame.as_usize();
     let mut refs = FRAME_REFS.lock();
@@ -100,6 +104,7 @@ pub(super) fn alloc_frame(zeroed: bool) -> Option<PhysAddr> {
         unsafe { core::ptr::write_bytes(vaddr.as_mut_ptr(), 0, PAGE_SIZE_4K) };
     }
     let paddr = virt_to_phys(vaddr);
+    FRAME_REFS.lock().insert(paddr.as_usize(), 1);
     Some(paddr)
 }
 
@@ -139,6 +144,7 @@ impl Backend {
                     if let Ok(tlb) = pt.map(addr, frame, PageSize::Size4K, flags) {
                         tlb.ignore(); // TLB flush on map is unnecessary, as there are no outdated mappings.
                     } else {
+                        dealloc_frame(frame);
                         return false;
                     }
                 }
@@ -169,7 +175,9 @@ impl Backend {
                     return false;
                 }
                 tlb.flush();
-                dealloc_frame(frame);
+                if frame.as_usize() != 0 {
+                    dealloc_frame(frame);
+                }
             } else {
                 // Deallocation is needn't if the page is not mapped.
             }
@@ -222,6 +230,7 @@ impl Backend {
                             frame,
                             populate
                         );
+                        dealloc_frame(frame);
                     }
                     return ok;
                 }
@@ -279,6 +288,20 @@ impl Backend {
                     false
                 }
             } else {
+                // PTE already has the requested R/W/X permissions or the
+                // access doesn't require a write upgrade. Check if any other
+                // flags need upgrading (e.g., USER flag for PagePrivilegeIllegal
+                // handling on loongarch64).
+                let new_flags = old_flags | orig_flags;
+                if new_flags != old_flags {
+                    if pt
+                        .remap(vaddr, old_frame, new_flags)
+                        .map(|(_, tlb)| tlb.flush())
+                        .is_ok()
+                    {
+                        return true;
+                    }
+                }
                 error!(
                     "handle_page_fault_alloc: reject=no_alloc_path_matched vaddr={:#x} page={:#x} fault_flags={:?} pte_flags={:?} frame={:#x} backend_populate={}",
                     vaddr,
@@ -316,6 +339,7 @@ impl Backend {
                     frame,
                     populate
                 );
+                dealloc_frame(frame);
             }
             ok
         } else {
@@ -346,5 +370,31 @@ impl Backend {
             populate
         );
         protect_pages(start, size, new_flags, !populate, !populate, pt)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cow_refcount_roundtrip() {
+        let frame = PhysAddr::from(0x1234_5000usize);
+        FRAME_REFS.lock().clear();
+
+        cow_inc_frame_ref(frame);
+        {
+            let refs = FRAME_REFS.lock();
+            assert_eq!(refs.get(&frame.as_usize()).copied(), Some(2));
+        }
+
+        assert!(!cow_dec_frame_ref(frame));
+        {
+            let refs = FRAME_REFS.lock();
+            assert_eq!(refs.get(&frame.as_usize()).copied(), Some(1));
+        }
+
+        assert!(cow_dec_frame_ref(frame));
+        assert!(!FRAME_REFS.lock().contains_key(&frame.as_usize()));
     }
 }

@@ -8,7 +8,7 @@ mod alloc;
 mod file;
 mod linear;
 
-pub(crate) use alloc::cow_inc_frame_ref;
+pub(crate) use alloc::{cow_dec_frame_ref, cow_inc_frame_ref};
 
 /// A unified enum type for different memory mapping backends.
 ///

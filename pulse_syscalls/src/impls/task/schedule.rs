@@ -13,7 +13,7 @@ pub fn sys_sched_getaffinity(pid: usize, cpusetsize: usize, mask: usize) -> isiz
     }
 
     let current_tid = match current_thread() {
-        Ok(thread) => thread.tid() as usize,
+        Ok(_) => axtask::current().id().as_u64() as usize,
         Err(e) => return -e.code() as isize,
     };
 
@@ -32,7 +32,7 @@ pub fn sys_sched_getaffinity(pid: usize, cpusetsize: usize, mask: usize) -> isiz
 
 pub fn sys_sched_setaffinity(pid: usize, cpusetsize: usize, mask: usize) -> isize {
     let current_tid = match current_thread() {
-        Ok(thread) => thread.tid() as usize,
+        Ok(_) => axtask::current().id().as_u64() as usize,
         Err(e) => return -e.code() as isize,
     };
 

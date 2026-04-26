@@ -56,6 +56,9 @@ fn loongarch64_trap_handler(tf: &mut TrapFrame, from_user: bool) {
         | Trap::Exception(Exception::PageNonExecutableFault) => {
             handle_page_fault(tf, PageFaultFlags::EXECUTE, from_user);
         }
+        Trap::Exception(Exception::PagePrivilegeIllegal) if from_user => {
+            handle_page_fault(tf, PageFaultFlags::USER, from_user);
+        }
         Trap::Exception(Exception::Breakpoint) => handle_breakpoint(&mut tf.era),
         Trap::Interrupt(_) => {
             let irq_num: usize = estat.is().trailing_zeros() as usize;

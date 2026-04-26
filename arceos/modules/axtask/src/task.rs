@@ -1,20 +1,22 @@
 use alloc::{boxed::Box, string::String, sync::Arc};
-use core::ops::Deref;
-use core::sync::atomic::{AtomicBool, AtomicI32, AtomicU8, AtomicU32, AtomicU64, Ordering};
-use core::{alloc::Layout, cell::UnsafeCell, fmt, ptr::NonNull};
-
 #[cfg(feature = "preempt")]
 use core::sync::atomic::AtomicUsize;
-
-use kspin::SpinNoIrq;
-use memory_addr::{VirtAddr, align_up_4k};
+use core::{
+    alloc::Layout,
+    cell::UnsafeCell,
+    fmt,
+    ops::Deref,
+    ptr::NonNull,
+    sync::atomic::{AtomicBool, AtomicI32, AtomicU8, AtomicU32, AtomicU64, Ordering},
+};
 
 use axhal::context::TaskContext;
 #[cfg(feature = "tls")]
 use axhal::tls::TlsArea;
+use kspin::SpinNoIrq;
+use memory_addr::{VirtAddr, align_up_4k};
 
-use crate::task_ext::AxTaskExt;
-use crate::{AxCpuMask, AxTask, AxTaskRef, WaitQueue};
+use crate::{AxCpuMask, AxTask, AxTaskRef, WaitQueue, task_ext::AxTaskExt};
 
 /// A unique identifier for a thread.
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
@@ -27,12 +29,12 @@ pub(crate) enum TaskState {
     /// Task is running on some CPU.
     Running = 1,
     /// Task is ready to run on some scheduler's ready queue.
-    Ready = 2,
+    Ready   = 2,
     /// Task is blocked (in the wait queue or timer list),
     /// and it has finished its scheduling process, it can be wake up by `notify()` on any run queue safely.
     Blocked = 3,
     /// Task is exited and waiting for being dropped.
-    Exited = 4,
+    Exited  = 4,
 }
 
 /// The inner task structure.
@@ -42,7 +44,7 @@ pub struct TaskInner {
     is_idle: bool,
     is_init: bool,
 
-    entry: Option<*mut dyn FnOnce()>,
+    entry: SpinNoIrq<Option<Box<dyn FnOnce() + Send>>>,
     state: AtomicU8,
 
     /// CPU affinity mask.
@@ -122,8 +124,9 @@ impl TaskInner {
         #[cfg(not(feature = "tls"))]
         let tls = VirtAddr::from(0);
 
-        t.entry = Some(Box::into_raw(Box::new(entry)));
-        t.ctx_mut().init(task_entry as *const () as usize, kstack.top(), tls);
+        *t.entry.lock() = Some(Box::new(entry));
+        t.ctx_mut()
+            .init(task_entry as *const () as usize, kstack.top(), tls);
         *t.kstack.lock() = Some(kstack);
         if t.name == "idle" {
             t.is_idle = true;
@@ -247,7 +250,7 @@ impl TaskInner {
             name,
             is_idle: false,
             is_init: false,
-            entry: None,
+            entry: SpinNoIrq::new(None),
             state: AtomicU8::new(TaskState::Ready as u8),
             // By default, the task is allowed to run on all CPUs.
             cpumask: SpinNoIrq::new(cpumask),
@@ -576,8 +579,12 @@ extern "C" fn task_entry() -> ! {
     #[cfg(feature = "irq")]
     axhal::asm::enable_irqs();
     let task = crate::current();
-    if let Some(entry) = task.entry {
-        unsafe { Box::from_raw(entry)() };
+    let entry = {
+        let mut entry_guard = task.entry.lock();
+        entry_guard.take()
+    };
+    if let Some(entry) = entry {
+        entry();
     }
     crate::exit(0);
 }

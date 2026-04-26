@@ -76,6 +76,10 @@ pub trait FdObject: Send + Sync {
     fn truncate(&self, _len: u64) -> LinuxResult {
         Err(LinuxError::EINVAL)
     }
+
+    fn flush(&self) -> LinuxResult {
+        Ok(())
+    }
 }
 
 #[derive(Clone)]
@@ -332,6 +336,10 @@ impl FdObject for FileObject {
     fn truncate(&self, len: u64) -> LinuxResult {
         self.inner.access(AxFileFlags::WRITE)?.set_len(len)?;
         Ok(())
+    }
+
+    fn flush(&self) -> LinuxResult {
+        self.inner.sync(false).map_err(|_| LinuxError::EIO)
     }
 }
 
@@ -803,10 +811,13 @@ impl Drop for PipeObject {
     fn drop(&mut self) {
         if self.readable {
             self.shared.reader_count.fetch_sub(1, Ordering::AcqRel);
-            self.shared.wait.notify_all(true);
+            // Closing a pipe during process teardown should only wake waiters.
+            // Let the scheduler decide when to reschedule instead of doing it
+            // from inside `drop()`.
+            self.shared.wait.notify_all(false);
         } else {
             self.shared.writer_count.fetch_sub(1, Ordering::AcqRel);
-            self.shared.wait.notify_all(true);
+            self.shared.wait.notify_all(false);
         }
     }
 }
@@ -863,9 +874,11 @@ impl FdTable {
     }
 
     pub fn clone_for_fork(&self) -> LinuxResult<Self> {
-        Ok(Self {
-            entries: self.entries.clone(),
-        })
+        let mut entries = BTreeMap::new();
+        for (fd, entry) in &self.entries {
+            entries.insert(*fd, entry.clone());
+        }
+        Ok(Self { entries })
     }
 
     pub fn take_cloexec_on_exec(&mut self) -> alloc::vec::Vec<FdEntry> {

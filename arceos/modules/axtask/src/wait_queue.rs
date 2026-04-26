@@ -50,12 +50,19 @@ impl WaitQueue {
 
     /// Cancel events by removing the task from the wait queue.
     /// If `from_timer_list` is true, try to remove the task from the timer list.
-    fn cancel_events(&self, curr: CurrentTask, _from_timer_list: bool) {
+    fn cancel_events(&self, curr: &CurrentTask, _from_timer_list: bool) {
         // A task can be wake up only one events (timer or `notify()`), remove
-        // the event from another queue.
-        if curr.in_wait_queue() {
-            // wake up by timer (timeout).
-            self.queue.lock().retain(|t| !curr.ptr_eq(t));
+        // the event from another queue. Use the queue membership as the source
+        // of truth instead of the task-local flag to avoid stale state.
+        let still_queued = {
+            let mut wq = self.queue.lock();
+            let still_queued = wq.iter().any(|t| Arc::ptr_eq(curr.as_task_ref(), t));
+            if still_queued {
+                wq.retain(|t| !Arc::ptr_eq(curr.as_task_ref(), t));
+            }
+            still_queued
+        };
+        if still_queued {
             curr.set_in_wait_queue(false);
         }
 
@@ -76,8 +83,9 @@ impl WaitQueue {
     /// notifies it.
     pub fn wait(&self) {
         let curr = crate::current();
-        current_run_queue::<NoPreemptIrqSave>().blocked_resched(self.queue.lock());
-        self.cancel_events(curr, false);
+        let mut rq = current_run_queue::<NoPreemptIrqSave>();
+        rq.blocked_resched(self.queue.lock());
+        self.cancel_events(&curr, false);
     }
 
     /// Blocks the current task and put it into the wait queue, until the given
@@ -99,7 +107,7 @@ impl WaitQueue {
             rq.blocked_resched(wq);
             // Preemption may occur here.
         }
-        self.cancel_events(curr, false);
+        self.cancel_events(&curr, false);
     }
 
     /// Blocks the current task and put it into the wait queue, until other tasks
@@ -118,10 +126,14 @@ impl WaitQueue {
 
         rq.blocked_resched(self.queue.lock());
 
-        let timeout = curr.in_wait_queue(); // still in the wait queue, must have timed out
+        let timeout = self
+            .queue
+            .lock()
+            .iter()
+            .any(|t| Arc::ptr_eq(t, curr.as_task_ref())); // still in the wait queue, must have timed out
 
         // Always try to remove the task from the timer list.
-        self.cancel_events(curr, true);
+        self.cancel_events(&curr, true);
         timeout
     }
 
@@ -160,7 +172,7 @@ impl WaitQueue {
             // Preemption may occur here.
         }
         // Always try to remove the task from the timer list.
-        self.cancel_events(curr, true);
+        self.cancel_events(&curr, true);
         timeout
     }
 

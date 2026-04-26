@@ -1,20 +1,19 @@
-use alloc::collections::VecDeque;
-use alloc::sync::Arc;
-use core::mem::MaybeUninit;
-
 #[cfg(feature = "smp")]
 use alloc::sync::Weak;
+use alloc::{collections::VecDeque, sync::Arc};
+use core::mem::MaybeUninit;
 
+use axhal::percpu::this_cpu_id;
 use axsched::BaseScheduler;
 use kernel_guard::BaseGuard;
 use kspin::SpinRaw;
 use lazyinit::LazyInit;
 
-use axhal::percpu::this_cpu_id;
-
-use crate::task::{CurrentTask, TaskState};
-use crate::wait_queue::WaitQueueGuard;
-use crate::{AxCpuMask, AxTaskRef, Scheduler, TaskInner, WaitQueue};
+use crate::{
+    AxCpuMask, AxTaskRef, Scheduler, TaskInner, WaitQueue,
+    task::{CurrentTask, TaskState},
+    wait_queue::WaitQueueGuard,
+};
 
 macro_rules! percpu_static {
     ($(
@@ -92,7 +91,6 @@ pub(crate) fn current_run_queue<G: BaseGuard>() -> CurrentRunQueueRef<'static, G
 /// ## Panics
 ///
 /// This function will panic if `cpu_mask` is empty, indicating that there are no available CPUs for task execution.
-///
 #[cfg(feature = "smp")]
 // The modulo operation is safe here because `axhal::cpu_num()` is expected to be greater than 1 in SMP mode.
 // If not, index selection logic would not be meaningful.
@@ -130,7 +128,6 @@ fn select_run_queue_index(cpumask: AxCpuMask) -> usize {
 /// ## Panics
 ///
 /// This function will panic if the index is out of bounds.
-///
 #[cfg(feature = "smp")]
 #[inline]
 fn get_run_queue(index: usize) -> &'static mut AxRunQueue {
@@ -154,7 +151,6 @@ fn get_run_queue(index: usize) -> &'static mut AxRunQueue {
 ///
 /// 1. Implement better load balancing across CPUs for more efficient task distribution.
 /// 2. Use a more generic load balancing algorithm that can be customized or replaced.
-///
 #[inline]
 pub(crate) fn select_run_queue<G: BaseGuard>(task: &AxTaskRef) -> AxRunQueueRef<'static, G> {
     let irq_state = G::acquire();
@@ -356,7 +352,6 @@ impl<G: BaseGuard> CurrentRunQueueRef<'_, G> {
     /// This function will never return.
     pub fn exit_current(&mut self, exit_code: i32) -> ! {
         let curr = &self.current_task;
-        debug!("task exit: {}, exit_code={}", curr.id_name(), exit_code);
         assert!(curr.is_running(), "task is not running: {:?}", curr.state());
         assert!(!curr.is_idle());
         if curr.is_init() {
@@ -532,11 +527,6 @@ impl AxRunQueue {
             !axhal::asm::irqs_enabled(),
             "IRQs must be disabled during scheduling"
         );
-        trace!(
-            "context switch: {} -> {}",
-            prev_task.id_name(),
-            next_task.id_name()
-        );
         #[cfg(feature = "preempt")]
         next_task.set_preempt_pending(false);
         next_task.set_state(TaskState::Running);
@@ -590,8 +580,8 @@ fn gc_entry() {
                 // Reclaim the large per-task kernel stack first to avoid OOM,
                 // then keep deferring full task drop to avoid known instability
                 // in the exited-task full-drop path.
-                task.reclaim_kernel_stack();
-                core::mem::forget(task);
+                // task.reclaim_kernel_stack();
+                // core::mem::forget(task);
             }
         }
         // Note: we cannot block current task with preemption disabled,
