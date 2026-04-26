@@ -72,7 +72,7 @@ struct DirCacheKey {
 static DIR_CACHE_REGISTRY: Lazy<Mutex<BTreeMap<DirCacheKey, Weak<DirCacheState>>>> =
     Lazy::new(|| Mutex::new(BTreeMap::new()));
 
-fn ext4_fs_id(fs: &Arc<Ext4Filesystem>) -> usize {
+pub(crate) fn ext4_fs_id(fs: &Arc<Ext4Filesystem>) -> usize {
     Arc::as_ptr(fs) as usize
 }
 
@@ -86,6 +86,7 @@ fn dir_cache_key(fs: &Arc<Ext4Filesystem>, ino: u32) -> DirCacheKey {
 fn dir_cache_state(fs: &Arc<Ext4Filesystem>, ino: u32) -> Arc<DirCacheState> {
     let key = dir_cache_key(fs, ino);
     let mut registry = DIR_CACHE_REGISTRY.lock();
+    registry.retain(|_, state| state.strong_count() > 0);
     if let Some(state) = registry.get(&key).and_then(Weak::upgrade) {
         return state;
     }
@@ -95,13 +96,14 @@ fn dir_cache_state(fs: &Arc<Ext4Filesystem>, ino: u32) -> Arc<DirCacheState> {
     state
 }
 
+pub(crate) fn cleanup_dir_cache_registry(fs_id: usize) {
+    let mut registry = DIR_CACHE_REGISTRY.lock();
+    registry.retain(|key, state| key.fs_id != fs_id && state.strong_count() > 0);
+}
+
 fn invalidate_dir_cache(fs: &Arc<Ext4Filesystem>, ino: u32) {
     let key = dir_cache_key(fs, ino);
-    if let Some(state) = DIR_CACHE_REGISTRY
-        .lock()
-        .get(&key)
-        .and_then(Weak::upgrade)
-    {
+    if let Some(state) = DIR_CACHE_REGISTRY.lock().get(&key).and_then(Weak::upgrade) {
         state.invalidate();
     }
 }

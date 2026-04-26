@@ -8,7 +8,7 @@ use axfs_ng_vfs::{
 use ext4_rs::Ext4;
 use kspin::{SpinNoPreempt as Mutex, SpinNoPreemptGuard as MutexGuard};
 
-use super::{Ext4Disk, Inode};
+use super::{Ext4Disk, Inode, cleanup_dir_cache_registry};
 
 const ROOT_INODE: u32 = 2;
 
@@ -21,7 +21,10 @@ impl Ext4Filesystem {
     pub fn new<D: BlockDriverOps + 'static>(dev: D) -> VfsResult<Filesystem> {
         let disk = Ext4Disk::new(dev);
         let ext4 = Ext4::open(disk);
-        let fs = Arc::new(Self { inner: Mutex::new(ext4), root_dir: OnceCell::new() });
+        let fs = Arc::new(Self {
+            inner: Mutex::new(ext4),
+            root_dir: OnceCell::new(),
+        });
         let _ = fs.root_dir.set(DirEntry::new_dir(
             |this| DirNode::new(Inode::new(fs.clone(), ROOT_INODE, Some(this))),
             Reference::root(),
@@ -37,6 +40,14 @@ impl Ext4Filesystem {
 unsafe impl Send for Ext4Filesystem {}
 
 unsafe impl Sync for Ext4Filesystem {}
+
+impl Drop for Ext4Filesystem {
+    fn drop(&mut self) {
+        // Use the same pointer-based id as ext4_fs_id so the registry cleanup
+        // targets exactly this filesystem's cached directory states.
+        cleanup_dir_cache_registry(self as *const Self as usize);
+    }
+}
 
 impl FilesystemOps for Ext4Filesystem {
     fn name(&self) -> &str {

@@ -50,6 +50,10 @@ fn file_cache_key(loc: &Location) -> FileCacheKey {
     }
 }
 
+fn prune_file_shared_states(registry: &mut BTreeMap<FileCacheKey, Weak<CachedFileShared>>) {
+    registry.retain(|_, state| state.strong_count() > 0);
+}
+
 static FILE_SHARED_STATES: Lazy<SpinMutex<BTreeMap<FileCacheKey, Weak<CachedFileShared>>>> =
     Lazy::new(|| SpinMutex::new(BTreeMap::new()));
 
@@ -489,6 +493,7 @@ fn shared_file_state(location: &Location) -> Arc<CachedFileShared> {
     let in_memory = location.filesystem().name() == "tmpfs";
 
     let mut registry = FILE_SHARED_STATES.lock();
+    prune_file_shared_states(&mut registry);
     if let Some(state) = registry.get(&key).and_then(Weak::upgrade) {
         return state;
     }
