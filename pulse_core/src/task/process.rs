@@ -88,20 +88,29 @@ fn share_user_page(
     vaddr: VirtAddr,
     frame: PhysAddr,
     pte_flags: MappingFlags,
-) -> AxResult<()> {
-    let child_flags = if pte_flags.contains(MappingFlags::WRITE) {
+) -> AxResult<CowSharedPage> {
+    let downgraded = pte_flags.contains(MappingFlags::WRITE);
+    let child_flags = if downgraded {
         pte_flags - MappingFlags::WRITE
     } else {
         pte_flags
     };
 
-    if pte_flags.contains(MappingFlags::WRITE) {
-        parent_aspace.remap_page(vaddr, frame, child_flags)?;
+    new_aspace.remap_page(vaddr, frame, child_flags)?;
+    if downgraded {
+        if let Err(err) = parent_aspace.remap_page(vaddr, frame, child_flags) {
+            let _ = new_aspace.remap_page(vaddr, frame, pte_flags);
+            return Err(err.into());
+        }
     }
 
     axmm::cow_inc_frame_ref(frame);
-    new_aspace.remap_page(vaddr, frame, child_flags)?;
-    Ok(())
+    Ok(CowSharedPage {
+        vaddr,
+        frame,
+        orig_flags: pte_flags,
+        downgraded,
+    })
 }
 
 fn share_present_pages_cow(
@@ -109,6 +118,7 @@ fn share_present_pages_cow(
     new_aspace: &mut AddrSpace,
     start: VirtAddr,
     end: VirtAddr,
+    shared_pages: &mut Vec<CowSharedPage>,
 ) -> AxResult<()> {
     for vaddr in memory_addr::PageIter4K::new(start, end).unwrap() {
         let Ok((frame, pte_flags, _)) = parent_aspace.page_table().query(vaddr) else {
@@ -120,9 +130,55 @@ fn share_present_pages_cow(
         if !pte_flags.contains(MappingFlags::USER) {
             continue;
         }
-        share_user_page(parent_aspace, new_aspace, vaddr, frame, pte_flags)?;
+        shared_pages.push(share_user_page(
+            parent_aspace,
+            new_aspace,
+            vaddr,
+            frame,
+            pte_flags,
+        )?);
     }
     Ok(())
+}
+
+#[derive(Clone, Copy, Debug)]
+struct CowSharedPage {
+    vaddr: VirtAddr,
+    frame: PhysAddr,
+    orig_flags: MappingFlags,
+    downgraded: bool,
+}
+
+fn rollback_cow_shared_pages(
+    parent_aspace: &mut AddrSpace,
+    new_aspace: &mut AddrSpace,
+    shared_pages: &[CowSharedPage],
+) {
+    for page in shared_pages.iter().rev() {
+        if page.downgraded {
+            if let Err(err) = new_aspace.remap_page(page.vaddr, page.frame, page.orig_flags) {
+                axlog::error!(
+                    "rollback_cow_shared_pages: child restore failed vaddr={:#x} frame={:#x} \
+                     err={:?}",
+                    page.vaddr,
+                    page.frame,
+                    err
+                );
+            }
+            if let Err(err) = parent_aspace.remap_page(page.vaddr, page.frame, page.orig_flags) {
+                axlog::error!(
+                    "rollback_cow_shared_pages: parent restore failed vaddr={:#x} frame={:#x} \
+                     err={:?}",
+                    page.vaddr,
+                    page.frame,
+                    err
+                );
+            }
+        }
+        // Keep the COW refcount balanced by the child address space teardown.
+        // `new_aspace` is dropped after rollback, and its unmap path will
+        // release the shared frame reference exactly once.
+    }
 }
 
 struct FutexTable {
@@ -193,6 +249,22 @@ impl FutexTable {
         woken
     }
 
+    fn wake_no_resched(&self, addr: usize, count: usize) -> usize {
+        let queue = {
+            let queues = self.queues.lock();
+            queues.get(&addr).cloned()
+        };
+        let Some(queue) = queue else {
+            return 0;
+        };
+
+        let mut woken = 0;
+        while woken < count && queue.notify_one(false) {
+            woken += 1;
+        }
+        woken
+    }
+
     fn requeue(
         &self,
         addr: usize,
@@ -228,7 +300,7 @@ impl FutexTable {
             queues.values().cloned().collect::<Vec<_>>()
         };
         for queue in queues {
-            queue.notify_all(true);
+            queue.notify_all(false);
         }
     }
 }
@@ -403,7 +475,7 @@ impl Process {
         Ok(())
     }
 
-    fn clone_private_fs_context(parent: &Arc<Process>) -> AxResult<Arc<Mutex<FsContext>>> {
+    fn clone_private_fs_context(parent: &Process) -> AxResult<Arc<Mutex<FsContext>>> {
         Ok(Arc::new(Mutex::new(parent.fs_context.lock().clone())))
     }
 
@@ -568,6 +640,36 @@ impl Process {
         Ok(())
     }
 
+    fn write_user_bytes_in_aspace(
+        &self,
+        aspace: &mut AddrSpace,
+        user_addr: usize,
+        bytes: &[u8],
+    ) -> AxResult<()> {
+        self.validate_user_range(user_addr, bytes.len())?;
+        let start = VirtAddr::from(user_addr);
+
+        // Try fast path first without faulting.
+        if let Ok(()) = aspace.write(start, bytes) {
+            return Ok(());
+        }
+
+        // If it fails, fault-in the pages and retry once.
+        let end = user_addr
+            .checked_add(bytes.len())
+            .ok_or(AxError::BadAddress)?;
+        let start_page = VirtAddr::from(user_addr).align_down_4k();
+        let end_page = VirtAddr::from(end).align_up_4k();
+        let pages =
+            memory_addr::PageIter4K::new(start_page, end_page).ok_or(AxError::BadAddress)?;
+        for page in pages {
+            if !aspace.handle_page_fault(page, MappingFlags::WRITE | MappingFlags::USER) {
+                return Err(AxError::BadAddress);
+            }
+        }
+        aspace.write(start, bytes).map_err(AxError::from)
+    }
+
     pub fn read_user_bytes(&self, user_addr: usize, bytes: &mut [u8]) -> AxResult<()> {
         self.validate_user_range(user_addr, bytes.len())?;
         let start = VirtAddr::from(user_addr);
@@ -587,21 +689,9 @@ impl Process {
     }
 
     pub fn write_user_bytes(&self, user_addr: usize, bytes: &[u8]) -> AxResult<()> {
-        self.validate_user_range(user_addr, bytes.len())?;
-        let start = VirtAddr::from(user_addr);
         let aspace_handle = self.aspace_handle();
-
-        // Try fast path first without faulting
-        if let Ok(()) = aspace_handle.lock().write(start, bytes) {
-            return Ok(());
-        }
-
-        // If it fails, fault-in the pages and retry once
-        self.try_fault_in_user_range(user_addr, bytes.len(), MappingFlags::WRITE)?;
-        aspace_handle
-            .lock()
-            .write(start, bytes)
-            .map_err(AxError::from)
+        let mut aspace = aspace_handle.lock();
+        self.write_user_bytes_in_aspace(&mut aspace, user_addr, bytes)
     }
 
     pub fn aspace_handle(&self) -> Arc<Mutex<AddrSpace>> {
@@ -717,13 +807,15 @@ impl Process {
 
     fn new_child_process(
         pid: u64,
-        parent: &Arc<Process>,
+        parent: Arc<Process>,
         aspace: Arc<Mutex<AddrSpace>>,
         share_vm: bool,
         is_vfork: bool,
         share_fs: bool,
         share_files: bool,
     ) -> AxResult<Arc<Self>> {
+        let parent_arc = parent;
+        let parent = parent_arc.as_ref();
         let heap_top = if share_vm {
             parent.heap_top.clone()
         } else {
@@ -745,7 +837,7 @@ impl Process {
         Ok(Arc::new(Self {
             pid,
             parent_pid: parent.pid(),
-            parent: Mutex::new(Some(Arc::downgrade(parent))),
+            parent: Mutex::new(Some(Arc::downgrade(&parent_arc))),
             aspace: Mutex::new(aspace),
             heap_top,
             fs_context,
@@ -787,17 +879,7 @@ impl Process {
     }
 
     pub fn activate(&self) {
-        #[cfg(any(target_arch = "riscv64", target_arch = "loongarch64"))]
-        let pt_root = {
-            let aspace_handle = self.aspace_handle();
-            let aspace = aspace_handle.lock();
-            aspace.page_table_root()
-        };
-        #[cfg(target_arch = "riscv64")]
-        unsafe {
-            core::arch::asm!("csrw satp, {0}", "sfence.vma", in(reg) (8usize << 60) | (pt_root.as_usize() >> 12));
-        }
-        #[cfg(target_arch = "loongarch64")]
+        let pt_root = self.page_table_root();
         unsafe {
             axhal::asm::write_user_page_table(pt_root);
             axhal::asm::flush_tlb(None);
@@ -805,11 +887,10 @@ impl Process {
     }
 
     pub fn close_all_files(&self) {
-        let entries = {
+        let _entries = {
             let mut table = self.fd_table.lock();
             table.drain_all()
         };
-        drop(entries);
     }
 
     pub fn shrink_reaped_resources(&self) -> AxResult<()> {
@@ -840,7 +921,12 @@ impl Process {
     }
 
     pub fn register_task_ref(&self, task: AxTaskRef) {
-        self.task_refs.lock().push(task);
+        let mut task_refs = self.task_refs.lock();
+        let tid = task.id().as_u64();
+        if task_refs.iter().any(|task_ref| task_ref.id().as_u64() == tid) {
+            return;
+        }
+        task_refs.push(task);
     }
 
     pub fn task_ref_by_tid(&self, tid: u64) -> Option<AxTaskRef> {
@@ -849,6 +935,14 @@ impl Process {
             .iter()
             .find(|task| task.id().as_u64() == tid)
             .cloned()
+    }
+
+    pub fn take_task_ref_by_tid(&self, tid: u64) -> Option<AxTaskRef> {
+        let mut task_refs = self.task_refs.lock();
+        let idx = task_refs
+            .iter()
+            .position(|task| task.id().as_u64() == tid)?;
+        Some(task_refs.remove(idx))
     }
 
     pub fn wait_task_refs_exited(&self) {
@@ -891,7 +985,18 @@ impl Process {
     }
 
     pub fn finish_thread_exit(&self, tid: u64, exit_code: i32) {
-        if self.unregister_thread(tid) != 0 {
+        if tid != self.pid() {
+            let _ = self.take_task_ref_by_tid(tid);
+        }
+        let remaining = self.unregister_thread(tid);
+        axlog::debug!(
+            "finish_thread_exit: pid={}, tid={}, remaining_threads={}, group_exiting={}",
+            self.pid(),
+            tid,
+            remaining,
+            self.group_exiting()
+        );
+        if remaining != 0 {
             return;
         }
 
@@ -900,11 +1005,15 @@ impl Process {
         } else {
             exit_code
         };
+        if tid == self.pid() {
+            self.task_refs
+                .lock()
+                .retain(|task| task.id().as_u64() == tid);
+        }
         self.exit_code.store(final_code, Ordering::Release);
         self.zombie.store(true, Ordering::Release);
         self.complete_vfork();
         self.close_all_files();
-        self.release_task_refs();
 
         let parent = self
             .parent
@@ -912,7 +1021,10 @@ impl Process {
             .as_ref()
             .and_then(|parent| parent.upgrade());
         if let Some(parent) = parent {
-            parent.child_exit_event.notify_all(true);
+            // The exiting task is still on its own kernel stack here.
+            // Wake waiters without forcing an immediate reschedule from inside
+            // the teardown path.
+            parent.child_exit_event.notify_all(false);
         }
     }
 
@@ -1000,7 +1112,9 @@ impl Process {
             return;
         }
         if !self.vfork_done.swap(true, Ordering::AcqRel) {
-            self.vfork_event.notify_all(true);
+            // Keep vfork completion notification side-effect free with respect
+            // to scheduling while the child is still unwinding its exit path.
+            self.vfork_event.notify_all(false);
         }
     }
 
@@ -1053,8 +1167,20 @@ impl Process {
         }
     }
 
+    fn futex_wake_impl(&self, addr: usize, count: usize, resched: bool) -> usize {
+        if resched {
+            self.futex_table.wake(addr, count)
+        } else {
+            self.futex_table.wake_no_resched(addr, count)
+        }
+    }
+
     pub fn futex_wake(&self, addr: usize, count: usize) -> usize {
-        self.futex_table.wake(addr, count)
+        self.futex_wake_impl(addr, count, true)
+    }
+
+    pub fn futex_wake_no_resched(&self, addr: usize, count: usize) -> usize {
+        self.futex_wake_impl(addr, count, false)
     }
 
     pub fn futex_requeue(
@@ -1089,7 +1215,6 @@ impl Process {
             if limit == 0 {
                 return Err(AxError::InvalidData);
             }
-            axtask::yield_now();
         }
 
         if pending != 0 {
@@ -1104,7 +1229,7 @@ impl Process {
         } else {
             entry.wrapping_sub(futex_offset.unsigned_abs())
         };
-        let _ = self.futex_wake(futex_addr, 1);
+        let _ = self.futex_wake_no_resched(futex_addr, 1);
     }
 
     pub fn spawn_fork_from_trap_frame(
@@ -1124,6 +1249,7 @@ impl Process {
         let mut parent_aspace = parent_aspace_handle.lock();
         let mapped_user_areas =
             collect_user_areas(&parent_aspace, va!(USER_SPACE_BASE), va!(USER_STACK_TOP))?;
+        let mut shared_pages = Vec::new();
         let mut cow_ranges = Vec::new();
         if cow_ranges
             .try_reserve_exact(mapped_user_areas.len())
@@ -1151,9 +1277,17 @@ impl Process {
         }
 
         for (start, end) in cow_ranges {
-            share_present_pages_cow(&mut parent_aspace, &mut new_aspace, start, end)?;
+            if let Err(err) = share_present_pages_cow(
+                &mut parent_aspace,
+                &mut new_aspace,
+                start,
+                end,
+                &mut shared_pages,
+            ) {
+                rollback_cow_shared_pages(&mut parent_aspace, &mut new_aspace, &shared_pages);
+                return Err(err);
+            }
         }
-        drop(parent_aspace);
         let mut inner = TaskInner::new(
             move || {
                 let thread = super::current_thread().expect("fork child without Thread context");
@@ -1173,16 +1307,34 @@ impl Process {
         );
 
         let child_tid = inner.id().as_u64();
-        let child_proc = Self::new_child_process(
+        let new_aspace = Arc::new(Mutex::new(new_aspace));
+        let child_proc = match Self::new_child_process(
             child_tid,
-            self,
-            Arc::new(Mutex::new(new_aspace)),
+            self.clone(),
+            new_aspace.clone(),
             false,
             params.is_vfork,
             params.share_fs,
             params.share_files,
-        )?;
-        let child_thread = Thread::new(child_tid, child_proc.clone());
+        ) {
+            Ok(child_proc) => child_proc,
+            Err(err) => {
+                let mut child_aspace = new_aspace.lock();
+                rollback_cow_shared_pages(&mut parent_aspace, &mut child_aspace, &shared_pages);
+                return Err(err);
+            }
+        };
+        if let Some(addr) = params.parent_set_tid {
+            let child_tid = child_tid as u32;
+            if let Err(err) =
+                self.write_user_bytes_in_aspace(&mut parent_aspace, addr, &child_tid.to_ne_bytes())
+            {
+                let mut child_aspace = new_aspace.lock();
+                rollback_cow_shared_pages(&mut parent_aspace, &mut child_aspace, &shared_pages);
+                return Err(err);
+            }
+        }
+        let child_thread = Thread::new(child_proc.clone());
         if let Some(addr) = params.child_set_tid {
             child_thread.set_child_tid_addr(addr);
         }
@@ -1190,13 +1342,9 @@ impl Process {
             child_thread.set_clear_child_tid(addr);
         }
 
-        if let Some(parent_tid_addr) = params.parent_set_tid {
-            self.write_user_u32(parent_tid_addr, child_tid as u32)?;
-        }
-
         let new_pt_root = child_proc.page_table_root();
         inner.ctx_mut().set_page_table_root(new_pt_root);
-        super::register_thread_task(child_tid, child_thread.clone());
+        super::register_process(child_proc.pid(), child_proc.clone());
         inner.init_task_ext(super::ThreadHandle::new(child_thread));
 
         let task = axtask::spawn_task(inner);
@@ -1241,7 +1389,7 @@ impl Process {
         } else {
             Self::new_child_process(
                 child_tid,
-                self,
+                self.clone(),
                 self.aspace_handle(),
                 true,
                 params.is_vfork,
@@ -1250,16 +1398,16 @@ impl Process {
             )?
         };
 
-        if let Some(parent_tid_addr) = params.parent_set_tid
-            && let Err(e) = self.write_user_u32(parent_tid_addr, child_tid as u32)
-        {
-            if params.is_thread_clone {
-                self.unregister_thread(child_tid);
+        if let Some(parent_tid_addr) = params.parent_set_tid {
+            if let Err(e) = self.write_user_u32(parent_tid_addr, child_tid as u32) {
+                if params.is_thread_clone {
+                    self.unregister_thread(child_tid);
+                }
+                return Err(e);
             }
-            return Err(e);
         }
 
-        let child_thread = Thread::new(child_tid, child_proc.clone());
+        let child_thread = Thread::new(child_proc.clone());
         if let Some(addr) = params.child_set_tid {
             child_thread.set_child_tid_addr(addr);
         }
@@ -1269,7 +1417,10 @@ impl Process {
 
         let pt_root = child_proc.page_table_root();
         inner.ctx_mut().set_page_table_root(pt_root);
-        super::register_thread_task(child_tid, child_thread.clone());
+        if !params.is_thread_clone {
+            // Thread clones reuse the existing PROCESS_REGISTRY entry for this pid.
+            super::register_process(child_proc.pid(), child_proc.clone());
+        }
         inner.init_task_ext(super::ThreadHandle::new(child_thread));
 
         let task = axtask::spawn_task(inner);

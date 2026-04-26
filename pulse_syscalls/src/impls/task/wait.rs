@@ -28,6 +28,7 @@ pub fn sys_wait4(pid: isize, status: usize, options: i32, rusage: usize) -> isiz
             let now_ns = axhal::time::monotonic_time_nanos() as u64;
             let (child_utime_ns, child_stime_ns) = child_proc.snapshot_cpu_time_ns(now_ns);
             process.add_child_time_ns(child_utime_ns, child_stime_ns);
+            child_proc.wait_task_refs_exited();
 
             if status != 0 {
                 // In Linux, WIFEXITED is true and WEXITSTATUS is `exit_code & 0xff`,
@@ -42,11 +43,13 @@ pub fn sys_wait4(pid: isize, status: usize, options: i32, rusage: usize) -> isiz
             if rusage != 0 {
                 // Not supported yet: simply ignore or zero out
             }
+            let _ = child_proc.take_task_ref_by_tid(exited_pid as u64);
             // Release heavy user resources before the final Arc drops so the
             // zombie no longer pins a large address space or fd table.
             if let Err(e) = child_proc.shrink_reaped_resources() {
                 axlog::warn!("failed to shrink reaped child resources: {:?}", e);
             }
+            child_proc.release_task_refs();
             return exited_pid;
         }
 

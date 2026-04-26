@@ -29,7 +29,6 @@ fn main() {
             match proc.load_elf(SHELL_ELF_PATH, shell_args, &[]) {
                 Ok(_) => {
                     info!("Successfully loaded {}", SHELL_ELF_PATH);
-                    info!("Jumping to user mode...");
                     proc.enter_user_mode();
                 }
                 Err(e) => {
@@ -44,7 +43,7 @@ fn main() {
     let init_tid = inner.id().as_u64();
     match pulse_core::task::Process::new_uspace(init_tid) {
         Ok(proc) => {
-            let init_thread = pulse_core::task::Thread::new(init_tid, proc);
+            let init_thread = pulse_core::task::Thread::new(proc);
             info!("Created initial user process");
 
             let pt_root = init_thread.process().page_table_root();
@@ -52,7 +51,8 @@ fn main() {
 
             init_thread.process().sync_fs_context();
 
-            pulse_core::task::register_thread_task(init_tid, init_thread.clone());
+            let init_proc = init_thread.process_arc();
+            pulse_core::task::register_process(init_proc.pid(), init_proc.clone());
             inner.init_task_ext(pulse_core::task::ThreadHandle::new(init_thread.clone()));
             let init_task = axtask::spawn_task(inner);
             init_thread.process().register_task_ref(init_task.clone());
@@ -62,6 +62,8 @@ fn main() {
                 Some(exit_code) => error!("Init task exited with failure code {}", exit_code),
                 None => error!("Init task join returned no exit code"),
             }
+            let _ = init_thread.process().take_task_ref_by_tid(init_tid);
+            init_thread.process().release_task_refs();
 
             axhal::power::system_off();
         }

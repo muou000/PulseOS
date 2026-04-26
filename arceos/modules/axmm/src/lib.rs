@@ -101,6 +101,11 @@ pub fn cow_inc_frame_ref(frame: PhysAddr) {
     backend::cow_inc_frame_ref(frame);
 }
 
+/// Decrease mapping refcount for a shared frame used by fork COW.
+pub fn cow_dec_frame_ref(frame: PhysAddr) {
+    backend::cow_dec_frame_ref(frame);
+}
+
 /// Initializes virtual memory management.
 ///
 /// It mainly sets up the kernel virtual memory address space and recreate a

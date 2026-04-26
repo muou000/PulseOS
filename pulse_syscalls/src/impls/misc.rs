@@ -150,7 +150,7 @@ pub fn sys_set_tid_address(tidptr: usize) -> isize {
     match pulse_core::task::current_thread() {
         Ok(thread) => {
             thread.set_clear_child_tid(tidptr);
-            thread.tid() as isize
+            axtask::current().id().as_u64() as isize
         }
         Err(e) => -e.code() as isize,
     }
@@ -159,7 +159,7 @@ pub fn sys_set_tid_address(tidptr: usize) -> isize {
 pub fn sys_gettid() -> isize {
     axlog::debug!("sys_gettid");
     match pulse_core::task::current_thread() {
-        Ok(thread) => thread.tid() as isize,
+        Ok(_) => axtask::current().id().as_u64() as isize,
         Err(e) => -e.code() as isize,
     }
 }
@@ -240,7 +240,7 @@ pub fn sys_get_robust_list(pid: usize, head_ptr: usize, len_ptr: usize) -> isize
         Ok(thread) => thread,
         Err(e) => return -e.code() as isize,
     };
-    if pid != 0 && pid != thread.tid() as usize {
+    if pid != 0 && pid != axtask::current().id().as_u64() as usize {
         return -LinuxError::ESRCH.code() as isize;
     }
 
