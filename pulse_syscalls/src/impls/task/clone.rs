@@ -116,7 +116,7 @@ pub fn sys_clone(tf: &TrapFrame, args: [usize; 6]) -> isize {
         Ok(process) => process,
         Err(_) => return -LinuxError::ESRCH.code() as isize,
     };
-    let current_tid = current_thread().map(|t| t.tid()).unwrap_or_default();
+    let current_tid = current_thread().map(|_| axtask::current().id().as_u64()).unwrap_or_default();
     axlog::debug!(
         "sys_clone context: parent_pid={}, parent_tid={}",
         parent_proc.pid(),

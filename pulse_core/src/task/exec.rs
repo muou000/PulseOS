@@ -148,7 +148,10 @@ impl Process {
         let _old_aspace = self.replace_aspace_handle(new_aspace_handle);
 
         axtask::set_current_page_table_root(new_pt_root);
-        self.activate();
+        unsafe {
+            axhal::asm::write_user_page_table(new_pt_root);
+            axhal::asm::flush_tlb(None);
+        }
         self.complete_vfork();
         let cloexec_entries = {
             let mut fd_table = self.fd_table.lock();

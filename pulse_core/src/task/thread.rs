@@ -10,7 +10,6 @@ use axtask::{TaskExtSwitch, def_task_ext};
 use super::Process;
 
 pub struct Thread {
-    tid: u64,
     process: Arc<Process>,
     clear_child_tid: AtomicUsize,
     set_child_tid: AtomicUsize,
@@ -39,9 +38,8 @@ impl Deref for ThreadHandle {
 }
 
 impl Thread {
-    pub fn new(tid: u64, process: Arc<Process>) -> Arc<Self> {
+    pub fn new(process: Arc<Process>) -> Arc<Self> {
         Arc::new(Self {
-            tid,
             process,
             clear_child_tid: AtomicUsize::new(0),
             set_child_tid: AtomicUsize::new(0),
@@ -50,7 +48,7 @@ impl Thread {
     }
 
     pub fn tid(&self) -> u64 {
-        self.tid
+        axtask::current().id().as_u64()
     }
 
     pub fn process(&self) -> &Process {
@@ -92,10 +90,16 @@ impl Thread {
         if set_child_tid == 0 {
             return Ok(());
         }
-        self.process.write_user_u32(set_child_tid, self.tid as u32)
+        let tid = axtask::current().id().as_u64();
+        self.process.write_user_u32(set_child_tid, tid as u32)
     }
 
     pub fn prepare_for_user_entry(&self) -> AxResult<()> {
+        axlog::debug!(
+            "prepare_for_user_entry: tid={}, group_exiting={}",
+            axtask::current().id().as_u64(),
+            self.process.group_exiting()
+        );
         if self.process.group_exiting() {
             self.exit_current(self.process.group_exit_code());
         }
@@ -111,7 +115,7 @@ impl Thread {
             return Ok(());
         }
         self.process.write_user_u32(clear_child_tid, 0)?;
-        self.process.futex_wake(clear_child_tid, 1);
+        self.process.futex_wake_no_resched(clear_child_tid, 1);
         Ok(())
     }
 
@@ -128,15 +132,20 @@ impl Thread {
     }
 
     pub fn exit_current(&self, exit_code: i32) -> ! {
+        axlog::debug!(
+            "exit_current: tid={}, group_exiting={}, exit_code={}",
+            axtask::current().id().as_u64(),
+            self.process.group_exiting(),
+            exit_code
+        );
         self.run_exit_hooks();
         let final_code = if self.process.group_exiting() {
             self.process.group_exit_code()
         } else {
             exit_code
         };
-        self.process.finish_thread_exit(self.tid, final_code);
-        super::unregister_thread_task(self.tid);
-        super::clear_current_thread();
+        let tid = axtask::current().id().as_u64();
+        self.process.finish_thread_exit(tid, final_code);
         axtask::exit(final_code);
     }
 
