@@ -117,7 +117,7 @@ pub fn sys_clone(tf: &TrapFrame, args: [usize; 6]) -> isize {
         Err(_) => return -LinuxError::ESRCH.code() as isize,
     };
     let current_tid = match current_thread() {
-        Ok(thread) => thread.id().as_u64(),
+        Ok(thread) => thread.tid(),
         Err(_) => 0,
     };
     axlog::debug!(
