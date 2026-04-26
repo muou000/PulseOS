@@ -3,7 +3,8 @@ use core::cell::OnceCell;
 
 use axdriver::prelude::BlockDriverOps;
 use axfs_ng_vfs::{
-    DirEntry, DirNode, Filesystem, FilesystemOps, Reference, StatFs, VfsResult, path::MAX_NAME_LEN,
+    DirEntry, DirNode, Filesystem, FilesystemOps, Reference, StatFs, VfsResult, WeakDirEntry,
+    path::MAX_NAME_LEN,
 };
 use ext4_rs::Ext4;
 use kspin::{SpinNoPreempt as Mutex, SpinNoPreemptGuard as MutexGuard};
@@ -14,7 +15,7 @@ const ROOT_INODE: u32 = 2;
 
 pub struct Ext4Filesystem {
     inner: Mutex<Ext4>,
-    root_dir: OnceCell<DirEntry>,
+    root_dir: OnceCell<WeakDirEntry>,
 }
 
 impl Ext4Filesystem {
@@ -25,10 +26,11 @@ impl Ext4Filesystem {
             inner: Mutex::new(ext4),
             root_dir: OnceCell::new(),
         });
-        let _ = fs.root_dir.set(DirEntry::new_dir(
+        let root_dir = DirEntry::new_dir(
             |this| DirNode::new(Inode::new(fs.clone(), ROOT_INODE, Some(this))),
             Reference::root(),
-        ));
+        );
+        let _ = fs.root_dir.set(root_dir.downgrade());
         Ok(Filesystem::new(fs))
     }
 
@@ -55,7 +57,10 @@ impl FilesystemOps for Ext4Filesystem {
     }
 
     fn root_dir(&self) -> DirEntry {
-        self.root_dir.get().unwrap().clone()
+        self.root_dir
+            .get()
+            .and_then(WeakDirEntry::upgrade)
+            .expect("ext4 root directory should be alive while filesystem is mounted")
     }
 
     fn stat(&self) -> VfsResult<StatFs> {
