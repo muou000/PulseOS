@@ -28,6 +28,12 @@ fn gen_linker_script(arch: &str, platform: &str) -> Result<()> {
         "%PHYS_VIRT_OFFSET%",
         &format!("{:#x}", axconfig::plat::PHYS_VIRT_OFFSET),
     );
+    let kernel_entry = if arch == "loongarch64" {
+        "_start - PHYS_VIRT_OFFSET"
+    } else {
+        "_start"
+    };
+    let ld_content = ld_content.replace("%KERNEL_ENTRY%", kernel_entry);
     let ld_content = ld_content.replace("%CPU_NUM%", &format!("{}", axconfig::plat::MAX_CPU_NUM));
 
     // target/<target_triple>/<mode>/build/axhal-xxxx/out
