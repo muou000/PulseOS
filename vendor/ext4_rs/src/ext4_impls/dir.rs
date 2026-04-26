@@ -4,6 +4,19 @@ use crate::return_errno_with_message;
 use crate::ext4_defs::*;
 
 impl Ext4 {
+    fn dir_entry_type_from_inode(inode: &Ext4Inode) -> DirEntryType {
+        match inode.file_type() {
+            InodeFileType::S_IFREG => DirEntryType::EXT4_DE_REG_FILE,
+            InodeFileType::S_IFDIR => DirEntryType::EXT4_DE_DIR,
+            InodeFileType::S_IFLNK => DirEntryType::EXT4_DE_SYMLINK,
+            InodeFileType::S_IFCHR => DirEntryType::EXT4_DE_CHRDEV,
+            InodeFileType::S_IFBLK => DirEntryType::EXT4_DE_BLKDEV,
+            InodeFileType::S_IFIFO => DirEntryType::EXT4_DE_FIFO,
+            InodeFileType::S_IFSOCK => DirEntryType::EXT4_DE_SOCK,
+            _ => DirEntryType::EXT4_DE_UNKNOWN,
+        }
+    }
+
     /// Find a directory entry in a directory
     ///
     /// Params:
@@ -139,10 +152,22 @@ impl Ext4 {
                 // iterate all entries in a block
                 while offset < BLOCK_SIZE - core::mem::size_of::<Ext4DirEntryTail>() {
                     let de: Ext4DirEntry = ext4block.read_offset_as(offset);
+                    let entry_len = de.entry_len() as usize;
+                    // Guard against zero entry_len to prevent infinite loop.
+                    // A valid ext4 directory entry must have a non-zero rec_len.
+                    if entry_len == 0 {
+                        log::warn!(
+                            "ext4: zero entry_len at offset {} in block {} of dir ino {}",
+                            offset,
+                            fblock,
+                            inode,
+                        );
+                        break;
+                    }
                     if !de.unused() {
                         entries.push(de);
                     }
-                    offset += de.entry_len() as usize;
+                    offset += entry_len;
                 }
             }
 
@@ -178,6 +203,8 @@ impl Ext4 {
         child: &Ext4InodeRef,
         name: &str,
     ) -> Result<usize> {
+        let de_type = Self::dir_entry_type_from_inode(&child.inode);
+
         // calculate total blocks
         let inode_size: u64 = parent.inode.size();
         let block_size = self.super_block.block_size();
@@ -193,7 +220,12 @@ impl Ext4 {
             let mut ext4block =
                 Block::load(&self.block_device, pblock as usize * BLOCK_SIZE);
 
-            let result = self.try_insert_to_existing_block(&mut ext4block, name, child.inode_num);
+            let result = self.try_insert_to_existing_block(
+                &mut ext4block,
+                name,
+                child.inode_num,
+                de_type,
+            );
 
             if result.is_ok() {
                 // set checksum
@@ -216,7 +248,7 @@ impl Ext4 {
 
         // write new entry to the new block
         // must succeed, as we just allocated the block
-        let de_type = DirEntryType::EXT4_DE_DIR;
+        let de_type = Self::dir_entry_type_from_inode(&child.inode);
         self.insert_to_new_block(&mut new_ext4block, child.inode_num, name, de_type);
 
         // set checksum
@@ -240,6 +272,7 @@ impl Ext4 {
         block: &mut Block,
         name: &str,
         child_inode: u32,
+        de_type: DirEntryType,
     ) -> Result<usize> {
         // required length aligned to 4 bytes
         let required_len = {
@@ -279,7 +312,6 @@ impl Ext4 {
                 // Update existing entry length and copy both entries back to block data
                 de.entry_len = sz as u16;
 
-                let de_type = DirEntryType::EXT4_DE_DIR;
                 new_entry.write_entry(free_space as u16, child_inode, name, de_type);
 
                 // update parent_de and new_de to blk_data

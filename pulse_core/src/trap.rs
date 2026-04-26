@@ -48,6 +48,5 @@ fn handle_page_fault(vaddr: VirtAddr, access_flags: MappingFlags, is_user: bool)
         axlog::error!("Failed to handle page fault!");
         axlog::error!("  vaddr={:#x}, flags={:?}", vaddr, access_flags);
         thread.exit_current(139);
-        false
     }
 }

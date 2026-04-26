@@ -10,7 +10,7 @@ use axfs::{CachedFile, File, FileFlags};
 use axhal::paging::MappingFlags;
 use axmm::AddrSpace;
 use kernel_elf_parser::{AuxEntry, AuxType, ELFHeadersBuilder, ELFParser, app_stack_region};
-use memory_addr::VirtAddr;
+use memory_addr::{MemoryAddr, PAGE_SIZE_4K, VirtAddr};
 use xmas_elf::{
     ElfFile,
     header::{Machine, Type as ElfType},
@@ -19,7 +19,6 @@ use xmas_elf::{
 
 use crate::config::{USER_INTERP_BASE, USER_STACK_TOP};
 
-const PAGE_SIZE_4K: usize = 0x1000;
 const USER_DYN_BASE: usize = 0x20_0000;
 const ELF_MACHINE_LOONGARCH: u16 = 0x102;
 const ELF_CACHE_MAX_ENTRIES: usize = 16;
@@ -43,16 +42,6 @@ pub struct UserAppLoadInfo {
     pub user_sp: usize,
 }
 
-fn align_down_4k(v: usize) -> usize {
-    v & !0xfff
-}
-
-fn align_up_4k(v: usize) -> AxResult<usize> {
-    v.checked_add(0xfff)
-        .ok_or(AxError::OutOfRange)
-        .map(|x| x & !0xfff)
-}
-
 fn validate_machine(elf: &ElfFile<'_>, path: &str) -> AxResult {
     let machine = elf.header.pt2.machine().as_machine();
     let ok = match machine {
@@ -73,19 +62,13 @@ fn validate_machine(elf: &ElfFile<'_>, path: &str) -> AxResult {
 }
 
 fn compute_load_bias(elf: &ElfFile<'_>, desired_base: usize) -> AxResult<usize> {
-    let mut min_vaddr: Option<usize> = None;
-    for ph in elf.program_iter() {
-        if ph.get_type() != Ok(Type::Load) || ph.mem_size() == 0 {
-            continue;
-        }
-        let vaddr = ph.virtual_addr() as usize;
-        min_vaddr = Some(match min_vaddr {
-            Some(old) => old.min(vaddr),
-            None => vaddr,
-        });
-    }
-    let min_vaddr = min_vaddr.ok_or(AxError::InvalidExecutable)?;
-    let min_page = align_down_4k(min_vaddr);
+    let min_page = elf
+        .program_iter()
+        .filter(|ph| ph.get_type() == Ok(Type::Load) && ph.mem_size() != 0)
+        .map(|ph| VirtAddr::from(ph.virtual_addr() as usize).align_down_4k())
+        .min()
+        .ok_or(AxError::InvalidExecutable)?
+        .as_usize();
     desired_base
         .checked_sub(min_page)
         .ok_or(AxError::InvalidExecutable)
@@ -118,9 +101,6 @@ fn load_segments(
         }
 
         let p_offset = ph.offset() as usize;
-        let p_vaddr = (ph.virtual_addr() as usize)
-            .checked_add(bias)
-            .ok_or(AxError::OutOfRange)?;
         let p_filesz = ph.file_size() as usize;
         let p_memsz = ph.mem_size() as usize;
 
@@ -130,36 +110,32 @@ fn load_segments(
         if p_filesz > p_memsz {
             return Err(AxError::InvalidExecutable);
         }
-        if (p_offset & 0xfff) != (p_vaddr & 0xfff) {
+        let p_vaddr = VirtAddr::from(ph.virtual_addr() as usize)
+            .checked_add(bias)
+            .ok_or(AxError::OutOfRange)?;
+        if p_offset.align_offset_4k() != p_vaddr.align_offset_4k() {
             return Err(AxError::InvalidExecutable);
         }
 
-        let seg_start_page = align_down_4k(p_vaddr);
-        let file_start_page = align_down_4k(p_offset);
+        let seg_start_page = p_vaddr.align_down_4k();
+        let file_start_page = p_offset.align_down_4k();
         let seg_end = p_vaddr.checked_add(p_memsz).ok_or(AxError::OutOfRange)?;
         let file_backed_end = p_vaddr.checked_add(p_filesz).ok_or(AxError::OutOfRange)?;
-        let file_backed_end_page = align_up_4k(file_backed_end)?;
-        let seg_end_page = align_up_4k(seg_end)?;
+        let file_backed_end_page = file_backed_end.align_up_4k();
+        let seg_end_page = seg_end.align_up_4k();
         let flags = segment_flags(&ph);
 
         if ph.flags().is_write() {
-            aspace.map_alloc(
-                VirtAddr::from_usize(seg_start_page),
-                seg_end_page - seg_start_page,
-                flags,
-                true,
-            )?;
+            aspace.map_alloc(seg_start_page, seg_end_page - seg_start_page, flags, true)?;
             if p_filesz > 0 {
                 let file_buf = read_elf_range(path, p_offset as u64, p_filesz)?;
-                aspace.write(VirtAddr::from_usize(p_vaddr), &file_buf)?;
+                aspace.write(p_vaddr, &file_buf)?;
             }
         } else {
             if p_filesz > 0 {
-                let file_bytes = (p_vaddr - seg_start_page)
-                    .checked_add(p_filesz)
-                    .ok_or(AxError::OutOfRange)?;
+                let file_bytes = file_backed_end.sub_addr(seg_start_page);
                 aspace.map_file(
-                    VirtAddr::from_usize(seg_start_page),
+                    seg_start_page,
                     file_backed_end_page - seg_start_page,
                     flags,
                     elf_file.clone(),
@@ -171,7 +147,7 @@ fn load_segments(
 
             if seg_end_page > file_backed_end_page {
                 aspace.map_alloc(
-                    VirtAddr::from_usize(file_backed_end_page),
+                    file_backed_end_page,
                     seg_end_page - file_backed_end_page,
                     flags,
                     false,
@@ -314,7 +290,7 @@ fn read_elf_file(path: &str) -> AxResult<Arc<CachedElfImage>> {
 
     let location = fs_ctx.resolve(path).map_err(|_| AxError::NotFound)?;
     let mut prefix = fs_ctx
-        .read_prefix(path, 4096)
+        .read_prefix(path, PAGE_SIZE_4K)
         .map_err(|_| AxError::NotFound)?;
     let mut needed = compute_needed_prefix_len(&prefix)?;
     if needed > prefix.len() {
@@ -391,7 +367,7 @@ pub fn load_user_app(
         _ => return Err(AxError::InvalidExecutable),
     };
     load_segments(aspace, &main_elf, &main_image.file, path, main_bias)?;
-    let main_entry = (main_elf.header.pt2.entry_point() as usize)
+    let main_entry = VirtAddr::from(main_elf.header.pt2.entry_point() as usize)
         .checked_add(main_bias)
         .ok_or(AxError::OutOfRange)?;
 
@@ -420,14 +396,14 @@ pub fn load_user_app(
         };
         load_segments(aspace, &interp_elf, &interp_image.file, &interp_path, bias)?;
         interp_base = Some(bias);
-        dispatch_entry = (interp_elf.header.pt2.entry_point() as usize)
+        dispatch_entry = VirtAddr::from(interp_elf.header.pt2.entry_point() as usize)
             .checked_add(bias)
             .ok_or(AxError::OutOfRange)?;
         axlog::info!(
             "Loaded interpreter {} at bias={:#x}, entry={:#x}",
             interp_path,
             bias,
-            dispatch_entry
+            dispatch_entry.as_usize()
         );
     }
 
@@ -440,12 +416,12 @@ pub fn load_user_app(
     let envs_vec: Vec<String> = envs.iter().map(|e| (*e).to_string()).collect();
 
     let stack_region = app_stack_region(&argv, &envs_vec, &auxv, USER_STACK_TOP);
-    let user_sp = USER_STACK_TOP
+    let user_sp = VirtAddr::from(USER_STACK_TOP)
         .checked_sub(stack_region.len())
         .ok_or(AxError::OutOfRange)?;
-    aspace.write(VirtAddr::from_usize(user_sp), &stack_region)?;
+    aspace.write(user_sp, &stack_region)?;
     Ok(UserAppLoadInfo {
-        entry: dispatch_entry,
-        user_sp,
+        entry: dispatch_entry.as_usize(),
+        user_sp: user_sp.as_usize(),
     })
 }
