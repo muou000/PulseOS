@@ -4,6 +4,7 @@ use core::time::Duration;
 
 use axhal::context::TrapFrame;
 use axalloc::global_allocator;
+use axfs::FS_CONTEXT;
 use linux_raw_sys::general::{
     RLIMIT_AS, RLIMIT_CORE, RLIMIT_CPU, RLIMIT_DATA, RLIMIT_FSIZE, RLIMIT_MEMLOCK, RLIMIT_MSGQUEUE,
     RLIMIT_NICE, RLIMIT_NOFILE, RLIMIT_NPROC, RLIMIT_RSS, RLIMIT_RTPRIO, RLIMIT_RTTIME,
@@ -18,8 +19,6 @@ use crate::{
     LinuxError,
     impls::utils::{alloc_zeroed_bytes, read_user_timespec},
 };
-
-static RANDOM_RNG: Mutex<Option<SmallRng>> = Mutex::new(None);
 
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -69,22 +68,6 @@ fn write_cstr_field(dst: &mut [u8], s: &str) {
     let len = bytes.len().min(dst.len().saturating_sub(1));
     dst[..len].copy_from_slice(&bytes[..len]);
     dst[len] = 0;
-}
-
-fn random_seed() -> u64 {
-    use core::sync::atomic::{AtomicU64, Ordering};
-
-    static SEED_COUNTER: AtomicU64 = AtomicU64::new(0);
-
-    axhal::time::monotonic_time_nanos() as u64
-        ^ SEED_COUNTER.fetch_add(1, Ordering::Relaxed).rotate_left(17)
-        ^ 0x9e37_79b9_7f4a_7c15
-}
-
-fn with_random_rng<R>(f: impl FnOnce(&mut SmallRng) -> R) -> R {
-    let mut rng = RANDOM_RNG.lock();
-    let rng = rng.get_or_insert_with(|| SmallRng::seed_from_u64(random_seed()));
-    f(rng)
 }
 
 fn rlimit_for(resource: usize) -> Option<rlimit64> {
@@ -219,7 +202,8 @@ pub fn sys_prlimit64(pid: i32, resource: usize, new_limit: usize, old_limit: usi
 }
 
 pub fn sys_getrandom(buf: usize, buflen: usize, flags: usize) -> isize {
-    if flags != 0 {
+    let flags = flags as u32;
+    if flags & !(GRND_RANDOM | GRND_NONBLOCK | GRND_INSECURE) != 0 {
         return -LinuxError::EINVAL.code() as isize;
     }
     if buflen == 0 {
@@ -229,11 +213,15 @@ pub fn sys_getrandom(buf: usize, buflen: usize, flags: usize) -> isize {
         return -LinuxError::EFAULT.code() as isize;
     }
 
-    let mut tmp = match alloc_zeroed_bytes(buflen, "sys_getrandom.tmp") {
+    let path = if flags & GRND_RANDOM != 0 {
+        "/dev/random"
+    } else {
+        "/dev/urandom"
+    };
+    let tmp = match FS_CONTEXT.lock().read_prefix(path, buflen) {
         Ok(buf) => buf,
         Err(e) => return -e.code() as isize,
     };
-    with_random_rng(|rng| rng.fill_bytes(&mut tmp));
     match pulse_core::task::with_current_process(|process| process.write_user_bytes(buf, &tmp)) {
         Ok(Ok(())) => buflen as isize,
         Ok(Err(_)) => -LinuxError::EFAULT.code() as isize,
