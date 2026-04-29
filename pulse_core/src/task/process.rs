@@ -1,5 +1,6 @@
 use alloc::{
     collections::BTreeMap,
+    string::String,
     sync::{Arc, Weak},
     vec::Vec,
 };
@@ -15,17 +16,22 @@ use axhal::{
 use axmm::{AddrSpace, Backend};
 use axtask::{AxTaskRef, TaskInner, WaitQueue};
 use kernel_guard::NoPreemptIrqSave;
+use linux_raw_sys::general::{RLIMIT_MEMLOCK, RLIMIT_NOFILE, RLIMIT_STACK, rlimit64};
 use memory_addr::{MemoryAddr, PhysAddr, VirtAddr, va};
 use spin::Mutex;
 
-use super::Thread;
+use super::{SignalShared, Thread, current_thread};
 use crate::{
     config::*,
-    fd_table::{FdTable, SharedFdTable, stdio_entries},
+    fd_table::{FD_LIMIT, FdTable, SharedFdTable, stdio_entries},
 };
 
 const ROBUST_LIST_LIMIT: usize = 2048;
 const DEFAULT_MEMLOCK_LIMIT_BYTES: u64 = u64::MAX;
+const DEFAULT_STACK_LIMIT_BYTES: u64 = USER_STACK_SIZE as u64;
+const MAX_STACK_LIMIT_BYTES: u64 = USER_STACK_SIZE as u64;
+const DEFAULT_NOFILE_LIMIT: u64 = FD_LIMIT as u64;
+const MAX_NOFILE_LIMIT: u64 = FD_LIMIT as u64;
 
 fn align_up_4k(value: usize) -> usize {
     (value + 0xfff) & !0xfff
@@ -216,6 +222,35 @@ impl MemlockState {
             mlock_future: false,
         }
     }
+
+    fn new_with_limits(soft_limit: u64, hard_limit: u64) -> Self {
+        Self {
+            ranges: Vec::new(),
+            locked_bytes: 0,
+            soft_limit,
+            hard_limit,
+            mlock_future: false,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+struct RlimitState {
+    stack_soft: u64,
+    stack_hard: u64,
+    nofile_soft: u64,
+    nofile_hard: u64,
+}
+
+impl Default for RlimitState {
+    fn default() -> Self {
+        Self {
+            stack_soft: DEFAULT_STACK_LIMIT_BYTES,
+            stack_hard: DEFAULT_STACK_LIMIT_BYTES,
+            nofile_soft: DEFAULT_NOFILE_LIMIT,
+            nofile_hard: DEFAULT_NOFILE_LIMIT,
+        }
+    }
 }
 
 impl FutexTable {
@@ -341,7 +376,11 @@ pub struct Process {
     egid: AtomicU32,
     sgid: AtomicU32,
     umask: AtomicU32,
+    rlimit_state: Mutex<RlimitState>,
     memlock_state: Mutex<MemlockState>,
+    signal_shared: Arc<SignalShared>,
+    exec_path: Mutex<Option<String>>,
+    signal_trampoline: Mutex<usize>,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -353,6 +392,7 @@ pub struct ForkParams {
     pub parent_set_tid: Option<usize>,
     pub child_set_tid: Option<usize>,
     pub child_clear_tid: Option<usize>,
+    pub share_sighand: bool,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -365,6 +405,7 @@ pub struct CloneParams {
     pub parent_set_tid: Option<usize>,
     pub child_set_tid: Option<usize>,
     pub child_clear_tid: Option<usize>,
+    pub share_sighand: bool,
 }
 
 impl Process {
@@ -483,12 +524,32 @@ impl Process {
         self.pid
     }
 
+    pub fn exec_path(&self) -> Option<String> {
+        self.exec_path.lock().clone()
+    }
+
+    pub fn set_exec_path(&self, path: String) {
+        *self.exec_path.lock() = Some(path);
+    }
+
+    pub fn signal_trampoline(&self) -> usize {
+        *self.signal_trampoline.lock()
+    }
+
+    pub fn set_signal_trampoline(&self, trampoline: usize) {
+        *self.signal_trampoline.lock() = trampoline;
+    }
+
     pub fn parent_pid(&self) -> u64 {
         self.parent_pid
     }
 
     pub fn thread_count(&self) -> usize {
         self.threads.lock().len()
+    }
+
+    pub fn thread_ids_snapshot(&self) -> Vec<u64> {
+        self.threads.lock().clone()
     }
 
     pub fn ruid(&self) -> u32 {
@@ -556,6 +617,66 @@ impl Process {
         let mut state = self.memlock_state.lock();
         state.soft_limit = soft;
         state.hard_limit = hard;
+    }
+
+    pub fn get_rlimit(&self, resource: u32) -> Option<rlimit64> {
+        match resource {
+            RLIMIT_STACK => {
+                let state = self.rlimit_state.lock();
+                Some(rlimit64 {
+                    rlim_cur: state.stack_soft,
+                    rlim_max: state.stack_hard,
+                })
+            }
+            RLIMIT_NOFILE => {
+                let state = self.rlimit_state.lock();
+                Some(rlimit64 {
+                    rlim_cur: state.nofile_soft,
+                    rlim_max: state.nofile_hard,
+                })
+            }
+            RLIMIT_MEMLOCK => {
+                let state = self.memlock_state.lock();
+                Some(rlimit64 {
+                    rlim_cur: state.soft_limit,
+                    rlim_max: state.hard_limit,
+                })
+            }
+            _ => None,
+        }
+    }
+
+    pub fn set_rlimit(&self, resource: u32, limit: rlimit64) -> AxResult<()> {
+        if limit.rlim_cur > limit.rlim_max {
+            return Err(AxError::InvalidInput);
+        }
+        match resource {
+            RLIMIT_STACK => {
+                if limit.rlim_max > MAX_STACK_LIMIT_BYTES {
+                    return Err(AxError::InvalidInput);
+                }
+                let mut state = self.rlimit_state.lock();
+                state.stack_soft = limit.rlim_cur;
+                state.stack_hard = limit.rlim_max;
+                Ok(())
+            }
+            RLIMIT_NOFILE => {
+                if limit.rlim_max > MAX_NOFILE_LIMIT {
+                    return Err(AxError::InvalidInput);
+                }
+                let mut state = self.rlimit_state.lock();
+                state.nofile_soft = limit.rlim_cur;
+                state.nofile_hard = limit.rlim_max;
+                Ok(())
+            }
+            RLIMIT_MEMLOCK => {
+                let mut state = self.memlock_state.lock();
+                state.soft_limit = limit.rlim_cur;
+                state.hard_limit = limit.rlim_max;
+                Ok(())
+            }
+            _ => Err(AxError::InvalidInput),
+        }
     }
 
     pub fn memlock_locked_bytes(&self) -> usize {
@@ -801,7 +922,11 @@ impl Process {
             egid: AtomicU32::new(0),
             sgid: AtomicU32::new(0),
             umask: AtomicU32::new(0o022),
+            rlimit_state: Mutex::new(RlimitState::default()),
             memlock_state: Mutex::new(MemlockState::new()),
+            signal_shared: SignalShared::new(),
+            exec_path: Mutex::new(None),
+            signal_trampoline: Mutex::new(0),
         }))
     }
 
@@ -813,6 +938,7 @@ impl Process {
         is_vfork: bool,
         share_fs: bool,
         share_files: bool,
+        share_sighand: bool,
     ) -> AxResult<Arc<Self>> {
         let parent_arc = parent;
         let parent = parent_arc.as_ref();
@@ -833,6 +959,14 @@ impl Process {
         };
         let (ruid, euid, suid) = parent.uid_snapshot();
         let (rgid, egid, sgid) = parent.gid_snapshot();
+        let rlimit_state = *parent.rlimit_state.lock();
+        let (memlock_soft_limit, memlock_hard_limit) = parent.memlock_limit_snapshot();
+        let signal_shared = if share_sighand {
+            parent.signal_shared.clone()
+        } else {
+            SignalShared::clone_actions_only(&parent.signal_shared)
+        };
+        let signal_trampoline = *parent.signal_trampoline.lock();
 
         Ok(Arc::new(Self {
             pid,
@@ -870,8 +1004,19 @@ impl Process {
             egid: AtomicU32::new(egid),
             sgid: AtomicU32::new(sgid),
             umask: AtomicU32::new(parent.umask()),
-            memlock_state: Mutex::new(MemlockState::new()),
+            rlimit_state: Mutex::new(rlimit_state),
+            memlock_state: Mutex::new(MemlockState::new_with_limits(
+                memlock_soft_limit,
+                memlock_hard_limit,
+            )),
+            signal_shared,
+            exec_path: Mutex::new(None),
+            signal_trampoline: Mutex::new(signal_trampoline),
         }))
+    }
+
+    pub fn signal_shared(&self) -> Arc<SignalShared> {
+        self.signal_shared.clone()
     }
 
     pub fn handle_page_fault(&self, vaddr: VirtAddr, flags: axhal::trap::PageFaultFlags) -> bool {
@@ -923,7 +1068,10 @@ impl Process {
     pub fn register_task_ref(&self, task: AxTaskRef) {
         let mut task_refs = self.task_refs.lock();
         let tid = task.id().as_u64();
-        if task_refs.iter().any(|task_ref| task_ref.id().as_u64() == tid) {
+        if task_refs
+            .iter()
+            .any(|task_ref| task_ref.id().as_u64() == tid)
+        {
             return;
         }
         task_refs.push(task);
@@ -1316,6 +1464,7 @@ impl Process {
             params.is_vfork,
             params.share_fs,
             params.share_files,
+            params.share_sighand,
         ) {
             Ok(child_proc) => child_proc,
             Err(err) => {
@@ -1335,6 +1484,9 @@ impl Process {
             }
         }
         let child_thread = Thread::new(child_proc.clone());
+        if let Ok(parent_thread) = current_thread() {
+            child_thread.set_signal_blocked_mask(parent_thread.signal_blocked_mask());
+        }
         if let Some(addr) = params.child_set_tid {
             child_thread.set_child_tid_addr(addr);
         }
@@ -1395,6 +1547,7 @@ impl Process {
                 params.is_vfork,
                 params.share_fs,
                 params.share_files,
+                params.share_sighand,
             )?
         };
 
@@ -1408,6 +1561,9 @@ impl Process {
         }
 
         let child_thread = Thread::new(child_proc.clone());
+        if let Ok(parent_thread) = current_thread() {
+            child_thread.set_signal_blocked_mask(parent_thread.signal_blocked_mask());
+        }
         if let Some(addr) = params.child_set_tid {
             child_thread.set_child_tid_addr(addr);
         }

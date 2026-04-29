@@ -42,7 +42,7 @@ fn loongarch64_trap_handler(tf: &mut TrapFrame, from_user: bool) {
         #[cfg(feature = "uspace")]
         Trap::Exception(Exception::Syscall) => {
             tf.regs.a0 = crate::trap::handle_syscall(tf, tf.regs.a7) as usize;
-            tf.era += 4;
+            // tf.era += 4;
         }
         Trap::Exception(Exception::LoadPageFault)
         | Trap::Exception(Exception::PageNonReadableFault) => {

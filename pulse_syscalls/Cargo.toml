@@ -20,9 +20,10 @@ linkme.workspace = true
 memory_addr.workspace = true
 bitflags.workspace = true
 spin.workspace = true
-linux-raw-sys.workspace = true
+linux-raw-sys = { workspace = true, features = ["system"] }
 pulse_core = { path = "../pulse_core" }
-rand.workspace = true
+rand_core.workspace = true
+rand_pcg.workspace = true
 chrono.workspace = true
 
 [target.'cfg(target_arch = "riscv64")'.dependencies]

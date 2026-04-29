@@ -27,6 +27,8 @@ mod lang_items;
 #[cfg(feature = "smp")]
 mod mp;
 
+pub mod vdso;
+
 #[cfg(feature = "smp")]
 pub use self::mp::rust_main_secondary;
 
@@ -259,6 +261,7 @@ fn init_interrupt() {
 
     axhal::irq::register(axconfig::devices::TIMER_IRQ, || {
         update_timer();
+        crate::vdso::update_vdso_data();
         #[cfg(feature = "multitask")]
         axtask::on_timer_tick();
     });

@@ -4,13 +4,15 @@ use core::{
     sync::atomic::{AtomicUsize, Ordering},
 };
 
-use axerrno::AxResult;
+use axerrno::{AxError, AxResult};
+use axhal::context::TrapFrame;
 use axtask::{TaskExtSwitch, def_task_ext};
 
-use super::Process;
+use super::{Process, SignalAltStack, ThreadSignal};
 
 pub struct Thread {
     process: Arc<Process>,
+    signal: Arc<ThreadSignal>,
     clear_child_tid: AtomicUsize,
     set_child_tid: AtomicUsize,
     robust_list_head: AtomicUsize,
@@ -40,6 +42,7 @@ impl Deref for ThreadHandle {
 impl Thread {
     pub fn new(process: Arc<Process>) -> Arc<Self> {
         Arc::new(Self {
+            signal: ThreadSignal::new(process.signal_shared()),
             process,
             clear_child_tid: AtomicUsize::new(0),
             set_child_tid: AtomicUsize::new(0),
@@ -59,12 +62,55 @@ impl Thread {
         self.process.clone()
     }
 
+    pub fn signal(&self) -> &ThreadSignal {
+        self.signal.as_ref()
+    }
+
+    pub fn signal_blocked_mask(&self) -> u64 {
+        self.signal.blocked_mask()
+    }
+
+    pub fn set_signal_blocked_mask(&self, mask: u64) {
+        self.signal.set_blocked_mask(mask);
+    }
+
+    pub fn set_signal_altstack(&self, ss: SignalAltStack) {
+        self.signal.set_altstack(ss);
+    }
+
+    pub fn signal_altstack(&self) -> SignalAltStack {
+        self.signal.altstack()
+    }
+
+    pub fn begin_sigsuspend(&self, new_mask: u64) {
+        self.signal.begin_sigsuspend(new_mask);
+    }
+
+    pub fn has_pending_signal(&self) -> bool {
+        self.signal.has_pending_unblocked()
+    }
+
+    pub fn has_pending_unblocked_signal_not_in_set(&self, set: u64) -> bool {
+        self.signal.has_pending_unblocked_not_in_set(set)
+    }
+
+    pub fn dequeue_waitset_signal(&self, waitset: u64) -> Option<usize> {
+        self.signal.dequeue_waitset(waitset)
+    }
+
+    pub fn restore_from_sigreturn(&self, tf: &mut TrapFrame) -> AxResult<usize> {
+        self.signal
+            .restore_from_sigreturn(tf)
+            .map_err(|_| AxError::InvalidInput)
+    }
+
     pub fn clear_child_tid(&self) -> usize {
         self.clear_child_tid.load(Ordering::Relaxed)
     }
 
     pub fn set_clear_child_tid(&self, clear_child_tid: usize) {
-        self.clear_child_tid.store(clear_child_tid, Ordering::Relaxed);
+        self.clear_child_tid
+            .store(clear_child_tid, Ordering::Relaxed);
     }
 
     pub fn set_child_tid_addr(&self, set_child_tid: usize) {
@@ -76,13 +122,15 @@ impl Thread {
     }
 
     pub fn set_robust_list_head(&self, robust_list_head: usize) {
-        self.robust_list_head.store(robust_list_head, Ordering::Relaxed);
+        self.robust_list_head
+            .store(robust_list_head, Ordering::Relaxed);
     }
 
     pub fn clear_thread_tid_state(&self) {
         self.clear_child_tid.store(0, Ordering::Relaxed);
         self.set_child_tid.store(0, Ordering::Relaxed);
         self.robust_list_head.store(0, Ordering::Relaxed);
+        self.signal.reset_on_exec();
     }
 
     pub fn write_set_child_tid_on_start(&self) -> AxResult<()> {
