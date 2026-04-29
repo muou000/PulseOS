@@ -8,9 +8,14 @@ extern crate axhal;
 extern crate axruntime;
 extern crate pulse_core;
 extern crate pulse_syscalls;
+extern crate starry_vdso;
 
 #[unsafe(no_mangle)]
 fn main() {
+    starry_vdso::vdso::init_vdso_data();
+    axruntime::vdso::set_update_hook(starry_vdso::vdso::update_vdso_data);
+    info!("vDSO data initialized");
+
     use axtask::TaskInner;
     const SHELL_ELF_PATH: &str = "/bin/sh";
     let mut inner = TaskInner::new(

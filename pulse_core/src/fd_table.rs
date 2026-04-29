@@ -95,28 +95,7 @@ impl FdEntry {
 }
 
 fn empty_stat() -> stat {
-    stat {
-        st_dev: 0,
-        st_ino: 0,
-        st_mode: 0,
-        st_nlink: 0,
-        st_uid: 0,
-        st_gid: 0,
-        st_rdev: 0,
-        __pad1: 0,
-        st_size: 0,
-        st_blksize: 0,
-        __pad2: 0,
-        st_blocks: 0,
-        st_atime: 0,
-        st_atime_nsec: 0,
-        st_mtime: 0,
-        st_mtime_nsec: 0,
-        st_ctime: 0,
-        st_ctime_nsec: 0,
-        __unused4: 0,
-        __unused5: 0,
-    }
+    unsafe { core::mem::zeroed() }
 }
 
 fn metadata_to_stat(metadata: &Metadata) -> stat {
@@ -672,16 +651,26 @@ impl FdObject for PipeObject {
             let mut ring_buffer = self.shared.buffer.lock();
             let available = ring_buffer.available_read();
             if available == 0 {
+                if read_size > 0 {
+                    self.shared.wait.notify_one(true);
+                    return Ok(read_size);
+                }
                 if self.write_end_closed() {
                     return Ok(read_size);
                 }
                 if self.nonblocking.load(Ordering::Acquire) {
-                    return if read_size > 0 {
-                        Ok(read_size)
-                    } else {
-                        Err(LinuxError::EAGAIN)
-                    };
+                    return Err(LinuxError::EAGAIN);
                 }
+                axlog::debug!(
+                    "pipe read wait: tid={} shared={:p} write_closed={} nonblocking={} \
+                     read_size={} want={}",
+                    axtask::current().id().as_u64(),
+                    Arc::as_ptr(&self.shared),
+                    self.write_end_closed(),
+                    self.nonblocking.load(Ordering::Acquire),
+                    read_size,
+                    buf.len()
+                );
                 drop(ring_buffer);
                 self.shared.wait.wait();
                 continue;
@@ -723,6 +712,16 @@ impl FdObject for PipeObject {
                         Err(LinuxError::EAGAIN)
                     };
                 }
+                axlog::info!(
+                    "pipe write wait: tid={} shared={:p} read_closed={} nonblocking={} \
+                     write_size={} want={}",
+                    axtask::current().id().as_u64(),
+                    Arc::as_ptr(&self.shared),
+                    self.read_end_closed(),
+                    self.nonblocking.load(Ordering::Acquire),
+                    write_size,
+                    buf.len()
+                );
                 drop(ring_buffer);
                 self.shared.wait.wait();
                 continue;

@@ -9,6 +9,7 @@ use axerrno::{AxError, AxResult};
 use axfs::{CachedFile, File, FileFlags};
 use axhal::paging::MappingFlags;
 use axmm::AddrSpace;
+use axplat::mem::MemRegionFlags;
 use kernel_elf_parser::{AuxEntry, AuxType, ELFHeadersBuilder, ELFParser, app_stack_region};
 use memory_addr::{MemoryAddr, PAGE_SIZE_4K, VirtAddr};
 use xmas_elf::{
@@ -40,6 +41,7 @@ static ELF_FILE_CACHE: spin::Mutex<Vec<(String, Arc<CachedElfImage>)>> =
 pub struct UserAppLoadInfo {
     pub entry: usize,
     pub user_sp: usize,
+    pub signal_trampoline: usize,
 }
 
 fn validate_machine(elf: &ElfFile<'_>, path: &str) -> AxResult {
@@ -83,6 +85,20 @@ fn segment_flags(ph: &xmas_elf::program::ProgramHeader<'_>) -> MappingFlags {
         map_flags |= MappingFlags::WRITE;
     }
     if ph.flags().is_execute() {
+        map_flags |= MappingFlags::EXECUTE;
+    }
+    map_flags
+}
+
+fn vdso_segment_flags(flags: MemRegionFlags) -> MappingFlags {
+    let mut map_flags = MappingFlags::USER;
+    if flags.contains(MemRegionFlags::READ) {
+        map_flags |= MappingFlags::READ;
+    }
+    if flags.contains(MemRegionFlags::WRITE) {
+        map_flags |= MappingFlags::WRITE;
+    }
+    if flags.contains(MemRegionFlags::EXECUTE) {
         map_flags |= MappingFlags::EXECUTE;
     }
     map_flags
@@ -212,8 +228,7 @@ fn build_auxv(
         .map_err(|_| AxError::InvalidExecutable)?;
     let parser = ELFParser::new(&headers, main_bias).map_err(|_| AxError::InvalidExecutable)?;
 
-    let mut auxv: Vec<AuxEntry> = parser.aux_vector(PAGE_SIZE_4K, interp_base).collect();
-    auxv.push(AuxEntry::new(AuxType::NULL, 0));
+    let auxv: Vec<AuxEntry> = parser.aux_vector(PAGE_SIZE_4K, interp_base).collect();
     Ok(auxv)
 }
 
@@ -407,7 +422,20 @@ pub fn load_user_app(
         );
     }
 
-    let auxv = build_auxv(main_data, main_bias, interp_base)?;
+    let mut auxv = build_auxv(main_data, main_bias, interp_base)?;
+    let mut vdso_data = starry_vdso::vdso::load_vdso_data(&mut auxv)?;
+    for mapping in &vdso_data.mappings {
+        aspace.map_linear(
+            VirtAddr::from(mapping.user_start),
+            mapping.paddr,
+            mapping.size,
+            vdso_segment_flags(mapping.flags),
+        )?;
+    }
+    vdso_data.disarm();
+    let vdso_trampoline =
+        starry_vdso::vdso::get_trampoline_addr(&auxv).ok_or(AxError::InvalidExecutable)?;
+    auxv.push(AuxEntry::new(AuxType::NULL, 0));
     let argv: Vec<String> = if args.is_empty() {
         alloc::vec![path.to_string()]
     } else {
@@ -423,5 +451,6 @@ pub fn load_user_app(
     Ok(UserAppLoadInfo {
         entry: dispatch_entry.as_usize(),
         user_sp: user_sp.as_usize(),
+        signal_trampoline: vdso_trampoline,
     })
 }

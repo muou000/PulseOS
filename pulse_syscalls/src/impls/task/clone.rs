@@ -127,24 +127,11 @@ pub fn sys_clone(tf: &TrapFrame, args: [usize; 6]) -> isize {
     );
 
     let mut new_tf = *tf;
-    // Child resumes right after the syscall instruction.
-    #[cfg(target_arch = "riscv64")]
-    {
-        new_tf.sepc = new_tf.sepc.wrapping_add(4);
-    }
-    #[cfg(target_arch = "loongarch64")]
-    {
-        new_tf.era = new_tf.era.wrapping_add(4);
-    }
+    // The syscall trap handler already advanced the user PC before dispatching
+    // this syscall, so the copied trap frame is already positioned at the
+    // correct post-syscall instruction for the child.
     if flags.contains(CloneFlags::CLONE_SETTLS) {
-        #[cfg(target_arch = "riscv64")]
-        {
-            new_tf.regs.tp = tls;
-        }
-        #[cfg(target_arch = "loongarch64")]
-        {
-            new_tf.regs.tp = tls;
-        }
+        new_tf.regs.tp = tls;
     }
 
     let share_fs = flags.contains(CloneFlags::CLONE_FS);
@@ -176,6 +163,7 @@ pub fn sys_clone(tf: &TrapFrame, args: [usize; 6]) -> isize {
                 parent_set_tid,
                 child_set_tid,
                 child_clear_tid,
+                share_sighand: flags.contains(CloneFlags::CLONE_SIGHAND),
             },
         ) {
             Ok(child_proc) => (child_proc.pid() as usize, None),
@@ -197,6 +185,7 @@ pub fn sys_clone(tf: &TrapFrame, args: [usize; 6]) -> isize {
                 parent_set_tid,
                 child_set_tid,
                 child_clear_tid,
+                share_sighand: flags.contains(CloneFlags::CLONE_SIGHAND),
             },
         ) {
             Ok((tid, child_proc)) => (tid as usize, child_proc),

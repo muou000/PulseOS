@@ -6,7 +6,15 @@ use axhal::{
 use crate::*;
 
 #[register_trap_handler(SYSCALL)]
-pub fn syscall_handler(tf: &TrapFrame, syscall_num: usize) -> isize {
+pub fn syscall_handler(tf: &mut TrapFrame, syscall_num: usize) -> isize {
+    #[cfg(target_arch = "riscv64")]
+    {
+        tf.sepc += 4;
+    }
+    #[cfg(target_arch = "loongarch64")]
+    {
+        tf.era += 4;
+    }
     let syscall_enter_ns = axhal::time::monotonic_time_nanos() as u64;
     let thread = match pulse_core::task::current_thread() {
         Ok(thread) => thread,
@@ -29,10 +37,21 @@ pub fn syscall_handler(tf: &TrapFrame, syscall_num: usize) -> isize {
         thread.exit_current(process.group_exit_code());
     }
 
-    let args = [tf.arg0(), tf.arg1(), tf.arg2(), tf.arg3(), tf.arg4(), tf.arg5()];
+    let args = [
+        tf.arg0(),
+        tf.arg1(),
+        tf.arg2(),
+        tf.arg3(),
+        tf.arg4(),
+        tf.arg5(),
+    ];
 
+    let exe = process.exec_path().unwrap_or_default();
     axlog::debug!(
-        "Syscall: id={}, args=[{:#x}, {:#x}, {:#x}, {:#x}, {:#x}, {:#x}]",
+        "Syscall: pid={} exe={} tid={} id={} args=[{:#x}, {:#x}, {:#x}, {:#x}, {:#x}, {:#x}]",
+        process.pid(),
+        exe,
+        axtask::current().id().as_u64(),
         syscall_num,
         args[0],
         args[1],
@@ -42,6 +61,28 @@ pub fn syscall_handler(tf: &TrapFrame, syscall_num: usize) -> isize {
         args[5]
     );
     let ret = syscall_dispatcher(tf, syscall_num, args, process.as_ref());
+    axlog::debug!(
+        "Syscall ret: pid={} exe={} tid={} id={} ret={}",
+        process.pid(),
+        exe,
+        axtask::current().id().as_u64(),
+        syscall_num,
+        ret
+    );
+
+    if let Some(delivery) = pulse_core::task::check_signals_and_deliver(thread.as_ref(), tf) {
+        use pulse_core::task::{DefaultSignalAction, SignalAction};
+        match delivery.action {
+            SignalAction::Default(DefaultSignalAction::Terminate) => {
+                process.begin_group_exit(128 + delivery.sig as i32);
+            }
+            SignalAction::Default(DefaultSignalAction::Stop)
+            | SignalAction::Default(DefaultSignalAction::Continue)
+            | SignalAction::Default(DefaultSignalAction::Ignore)
+            | SignalAction::Ignore
+            | SignalAction::Handler(_) => {}
+        }
+    }
 
     let syscall_leave_ns = axhal::time::monotonic_time_nanos() as u64;
     let delta_ns = syscall_leave_ns.saturating_sub(syscall_enter_ns);
@@ -55,7 +96,7 @@ pub fn syscall_handler(tf: &TrapFrame, syscall_num: usize) -> isize {
 }
 
 fn syscall_dispatcher(
-    tf: &TrapFrame,
+    tf: &mut TrapFrame,
     syscall_id: usize,
     args: [usize; 6],
     process: &pulse_core::task::Process,
@@ -149,6 +190,8 @@ fn syscall_dispatcher(
         }
         Sysno::setpgid => impls::sys_setpgid(args[0] as isize, args[1] as isize),
         Sysno::kill => impls::sys_kill(args[0] as isize, args[1] as isize),
+        Sysno::tkill => impls::sys_tkill(args[0] as isize, args[1] as isize),
+        Sysno::tgkill => impls::sys_tgkill(args[0] as isize, args[1] as isize, args[2] as isize),
         Sysno::getgid => impls::sys_getgid(),
         Sysno::getegid => impls::sys_getegid(),
         Sysno::setuid => impls::sys_setuid(args[0]),
@@ -157,7 +200,9 @@ fn syscall_dispatcher(
         Sysno::setregid => impls::sys_setregid(args[0], args[1]),
 
         Sysno::rt_sigaction => impls::sys_rt_sigaction(args[0], args[1], args[2], args[3]),
-        Sysno::rt_sigreturn => impls::sys_rt_sigreturn(),
+        Sysno::rt_sigreturn => impls::sys_rt_sigreturn(tf),
+        Sysno::rt_sigsuspend => impls::sys_rt_sigsuspend(args[0], args[1]),
+        Sysno::rt_sigtimedwait => impls::sys_rt_sigtimedwait(args[0], args[1], args[2], args[3]),
 
         Sysno::ioctl => impls::sys_ioctl(args[0], args[1], args[2]),
         Sysno::fcntl => impls::sys_fcntl(args[0], args[1], args[2]),
@@ -187,8 +232,9 @@ fn syscall_dispatcher(
         Sysno::lseek => impls::sys_lseek(args[0], args[1], args[2]),
         Sysno::ftruncate => impls::sys_ftruncate(args[0], args[1]),
         Sysno::execve => {
-            axlog::debug!(
-                "sys_execve: pathname={:#x}, argv={:#x}, envp={:#x}",
+            axlog::info!(
+                "sys_execve: tid={} pathname={:#x}, argv={:#x}, envp={:#x}",
+                axtask::current().id().as_u64(),
                 args[0],
                 args[1],
                 args[2]

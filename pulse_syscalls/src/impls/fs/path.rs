@@ -71,28 +71,41 @@ fn read_user_optional_path(pathname: usize) -> Result<Option<String>, LinuxError
     }
     let path = read_user_cstring(pathname)?;
     let path = path.to_str().map_err(|_| LinuxError::EINVAL)?;
-    if path.is_empty() { Ok(None) } else { Ok(Some(path.to_string())) }
+    if path.is_empty() {
+        Ok(None)
+    } else {
+        Ok(Some(path.to_string()))
+    }
 }
 
 fn mkdir_mode(mode: usize) -> NodePermission {
-    let umask = pulse_core::task::current_process().map(|process| process.umask()).unwrap_or(0o022);
+    let umask = pulse_core::task::current_process()
+        .map(|process| process.umask())
+        .unwrap_or(0o022);
     let mode = ((mode as u32) & !umask) & 0o777;
     NodePermission::from_bits_truncate(mode as _)
 }
 
 fn resolve_existing_mount_path(path: &str) -> Result<String, LinuxError> {
     let ctx = context_for_dirfd(AT_FDCWD as i32)?;
-    let loc = ctx.resolve(Path::new(path)).map_err(|e| LinuxError::from(e.canonicalize()))?;
-    loc.check_is_dir().map_err(|e| LinuxError::from(e.canonicalize()))?;
-    Ok(loc.absolute_path().map_err(|e| LinuxError::from(e.canonicalize()))?.to_string())
+    let loc = ctx
+        .resolve(Path::new(path))
+        .map_err(|e| LinuxError::from(e.canonicalize()))?;
+    loc.check_is_dir()
+        .map_err(|e| LinuxError::from(e.canonicalize()))?;
+    Ok(loc
+        .absolute_path()
+        .map_err(|e| LinuxError::from(e.canonicalize()))?
+        .to_string())
 }
 
 fn resolve_source_path(source: &str) -> Result<String, LinuxError> {
     let ctx = context_for_dirfd(AT_FDCWD as i32)?;
     match ctx.resolve(Path::new(source)) {
-        Ok(loc) => {
-            Ok(loc.absolute_path().map_err(|e| LinuxError::from(e.canonicalize()))?.to_string())
-        }
+        Ok(loc) => Ok(loc
+            .absolute_path()
+            .map_err(|e| LinuxError::from(e.canonicalize()))?
+            .to_string()),
         Err(_) => Ok(source.to_string()),
     }
 }
@@ -318,7 +331,12 @@ pub fn sys_umount2(target: usize, _flags: usize) -> isize {
 }
 
 pub fn sys_unlinkat(dirfd: i32, pathname: usize, flags: usize) -> isize {
-    axlog::debug!("sys_unlinkat: dirfd={}, pathname={:#x}, flags={:#x}", dirfd, pathname, flags);
+    axlog::debug!(
+        "sys_unlinkat: dirfd={}, pathname={:#x}, flags={:#x}",
+        dirfd,
+        pathname,
+        flags
+    );
 
     if pathname == 0 {
         return -LinuxError::EFAULT.code() as isize;

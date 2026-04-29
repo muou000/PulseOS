@@ -1,5 +1,6 @@
 mod exec;
 mod process;
+mod signal;
 mod thread;
 pub mod uaccess;
 
@@ -11,6 +12,12 @@ use alloc::{
 
 use axerrno::{LinuxError, LinuxResult};
 pub use process::{CloneParams, ForkParams, Process};
+pub use signal::{
+    DefaultSignalAction, NSIG, SIG_DFL, SIG_IGN, SigAction, SignalAction, SignalAltStack,
+    SignalDelivery, SignalShared, ThreadSignal, blocked_mask as thread_blocked_mask, can_signal,
+    check_signals_and_deliver, pending_mask as thread_pending_mask, queue_signal_to_process,
+    queue_signal_to_thread,
+};
 use spin::{Lazy, Mutex};
 pub use thread::{Thread, ThreadHandle};
 
@@ -31,11 +38,25 @@ fn prune_dead_processes(registry: &mut BTreeMap<u64, Weak<Process>>) {
 // resolved via the `task_ext` pointer on the current task. Processes
 // are tracked in `PROCESS_REGISTRY` for pid-based queries.
 
+/// Returns the thread handle stored in a task's extension slot.
+///
+/// # Safety
+///
+/// The caller must ensure that `task.task_ext_ptr()` either returns null or
+/// points to a valid `ThreadHandle` written by the task extension system, and
+/// that the pointed-to handle remains alive for the duration of the borrow.
+fn thread_handle_from_task(task: &axtask::TaskInner) -> Option<&ThreadHandle> {
+    let task_ext_ptr = unsafe { task.task_ext_ptr() };
+    if task_ext_ptr.is_null() {
+        return None;
+    }
+
+    Some(unsafe { &*(task_ext_ptr as *const ThreadHandle) })
+}
+
 pub fn current_thread() -> LinuxResult<Arc<Thread>> {
     let task = axtask::current();
-    let task_ext_ptr = unsafe { task.task_ext_ptr() };
-    if !task_ext_ptr.is_null() {
-        let handle = unsafe { &*(task_ext_ptr as *const ThreadHandle) };
+    if let Some(handle) = thread_handle_from_task(&task) {
         let thread = handle.thread_arc();
         return Ok(thread);
     }
@@ -70,4 +91,9 @@ pub fn with_current_thread<R>(f: impl FnOnce(&Thread) -> R) -> LinuxResult<R> {
 
 pub fn with_current_process<R>(f: impl FnOnce(&Process) -> R) -> LinuxResult<R> {
     current_process().map(|process| f(process.as_ref()))
+}
+
+pub fn thread_by_tid(process: &Process, tid: u64) -> Option<Arc<Thread>> {
+    let task = process.task_ref_by_tid(tid)?;
+    thread_handle_from_task(task).map(|handle| handle.thread_arc())
 }

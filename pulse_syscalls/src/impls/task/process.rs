@@ -1,26 +1,13 @@
 use axerrno::LinuxError;
-use linux_raw_sys::general::SIGCONT;
-use pulse_core::task::{current_process, current_thread, process_by_pid, processes_snapshot};
+use pulse_core::task::{
+    can_signal, current_process, process_by_pid, processes_snapshot, queue_signal_to_process,
+    queue_signal_to_thread, thread_by_tid,
+};
 
 const NSIG: isize = 64;
 
-fn can_signal(caller: &pulse_core::task::Process, target: &pulse_core::task::Process) -> bool {
-    let caller_euid = caller.euid();
-    caller_euid == 0 || caller_euid == target.ruid() || caller_euid == target.euid()
-}
-
 fn is_valid_signal(sig: isize) -> bool {
     sig == 0 || (1..=NSIG).contains(&sig)
-}
-
-fn should_exit_for_signal(sig: isize) -> bool {
-    if sig == 0 {
-        return false;
-    }
-
-    // We do not have a full signal-dispatch path yet.
-    // Treat real signals as a termination request, except SIGCONT which is a no-op here.
-    !matches!(sig as u32, SIGCONT)
 }
 
 pub fn sys_getpid() -> isize {
@@ -95,16 +82,13 @@ pub fn sys_kill(pid: isize, sig: isize) -> isize {
     };
 
     let mut targets = alloc::vec::Vec::new();
-    let mut hit_self = false;
     match pid {
         p if p > 0 => {
             if let Some(target) = process_by_pid(p as u64) {
-                hit_self = target.pid() == caller.pid();
                 targets.push(target);
             }
         }
         0 => {
-            hit_self = true;
             targets.push(caller.clone());
         }
         -1 => {
@@ -113,9 +97,17 @@ pub fn sys_kill(pid: isize, sig: isize) -> isize {
                     continue;
                 }
                 if proc.pid() == caller.pid() {
-                    hit_self = true;
+                    continue;
                 }
                 targets.push(proc);
+            }
+        }
+        p if p < -1 => {
+            let pgid = (-p) as u64;
+            for proc in processes_snapshot() {
+                if proc.pid() == pgid {
+                    targets.push(proc);
+                }
             }
         }
         _ => return -LinuxError::EINVAL.code() as isize,
@@ -133,24 +125,65 @@ pub fn sys_kill(pid: isize, sig: isize) -> isize {
         return 0;
     }
 
-    if !should_exit_for_signal(sig) {
-        return 0;
-    }
-
-    let exit_code = 128 + sig as i32;
     for target in targets {
         if !can_signal(&caller, &target) {
             continue;
         }
-        target.begin_group_exit(exit_code);
+        let _ = queue_signal_to_process(target.as_ref(), sig as usize);
     }
+    0
+}
 
-    if hit_self {
-        match current_thread() {
-            Ok(thread) => thread.exit_current(exit_code),
-            Err(e) => return -e.code() as isize,
-        }
+pub fn sys_tkill(tid: isize, sig: isize) -> isize {
+    if tid <= 0 || !is_valid_signal(sig) {
+        return -LinuxError::EINVAL.code() as isize;
     }
+    let caller = match current_process() {
+        Ok(process) => process,
+        Err(e) => return -e.code() as isize,
+    };
+    let target_proc = processes_snapshot()
+        .into_iter()
+        .find(|proc| proc.thread_ids_snapshot().contains(&(tid as u64)));
+    let Some(target_proc) = target_proc else {
+        return -LinuxError::ESRCH.code() as isize;
+    };
+    if !can_signal(&caller, target_proc.as_ref()) {
+        return -LinuxError::EPERM.code() as isize;
+    }
+    if sig == 0 {
+        return 0;
+    }
+    let Some(target_thread) = thread_by_tid(target_proc.as_ref(), tid as u64) else {
+        return -LinuxError::ESRCH.code() as isize;
+    };
+    let _ = queue_signal_to_thread(target_thread.as_ref(), sig as usize);
+    0
+}
 
+pub fn sys_tgkill(tgid: isize, tid: isize, sig: isize) -> isize {
+    if tgid <= 0 || tid <= 0 || !is_valid_signal(sig) {
+        return -LinuxError::EINVAL.code() as isize;
+    }
+    let caller = match current_process() {
+        Ok(process) => process,
+        Err(e) => return -e.code() as isize,
+    };
+    let Some(target_proc) = process_by_pid(tgid as u64) else {
+        return -LinuxError::ESRCH.code() as isize;
+    };
+    if !can_signal(&caller, target_proc.as_ref()) {
+        return -LinuxError::EPERM.code() as isize;
+    }
+    if !target_proc.thread_ids_snapshot().contains(&(tid as u64)) {
+        return -LinuxError::ESRCH.code() as isize;
+    }
+    if sig == 0 {
+        return 0;
+    }
+    let Some(target_thread) = thread_by_tid(target_proc.as_ref(), tid as u64) else {
+        return -LinuxError::ESRCH.code() as isize;
+    };
+    let _ = queue_signal_to_thread(target_thread.as_ref(), sig as usize);
     0
 }

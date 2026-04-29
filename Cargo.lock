@@ -15,6 +15,7 @@ dependencies = [
  "axtask",
  "pulse_core",
  "pulse_syscalls",
+ "starry-vdso",
 ]
 
 [[package]]
@@ -295,6 +296,8 @@ dependencies = [
  "kspin",
  "log",
  "lru",
+ "rand_core",
+ "rand_pcg",
  "scope-local",
  "slab",
  "spin 0.10.0",
@@ -1185,6 +1188,7 @@ dependencies = [
  "memory_addr",
  "percpu",
  "spin 0.10.0",
+ "starry-vdso",
  "xmas-elf",
 ]
 
@@ -1206,7 +1210,8 @@ dependencies = [
  "linux-raw-sys",
  "memory_addr",
  "pulse_core",
- "rand",
+ "rand_core",
+ "rand_pcg",
  "spin 0.10.0",
  "syscalls",
 ]
@@ -1221,19 +1226,19 @@ dependencies = [
 ]
 
 [[package]]
-name = "rand"
-version = "0.9.3"
+name = "rand_core"
+version = "0.10.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7ec095654a25171c2124e9e3393a930bddbffdc939556c914957a4c3e0a87166"
+checksum = "63b8176103e19a2643978565ca18b50549f6101881c443590420e4dc998a3c69"
+
+[[package]]
+name = "rand_pcg"
+version = "0.10.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "caa0f4137e1c0a72f4c651489402276c8e8e1cf081f3b0ba156d2cbeef09e86a"
 dependencies = [
  "rand_core",
 ]
-
-[[package]]
-name = "rand_core"
-version = "0.9.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "76afc826de14238e6e8c374ddcc1fa19e374fd8dd986b0d2af0d02377261d83c"
 
 [[package]]
 name = "raw-cpuid"
@@ -1382,6 +1387,21 @@ name = "stable_deref_trait"
 version = "1.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6ce2be8dc25455e1f91df71bfa12ad37d7af1092ae736f3a6cd0e37bc7810596"
+
+[[package]]
+name = "starry-vdso"
+version = "0.1.1"
+dependencies = [
+ "axerrno 0.2.2",
+ "axplat",
+ "cfg-if",
+ "kernel-elf-parser",
+ "log",
+ "memory_addr",
+ "rand_core",
+ "rand_pcg",
+ "xmas-elf",
+]
 
 [[package]]
 name = "static_assertions"
