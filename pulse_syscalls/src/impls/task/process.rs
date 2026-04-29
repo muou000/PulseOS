@@ -142,14 +142,9 @@ pub fn sys_tkill(tid: isize, sig: isize) -> isize {
         Ok(process) => process,
         Err(e) => return -e.code() as isize,
     };
-    let target_proc = process_by_pid(tid as u64).or_else(|| {
-        for proc in processes_snapshot() {
-            if proc.thread_ids_snapshot().contains(&(tid as u64)) {
-                return Some(proc);
-            }
-        }
-        None
-    });
+    let target_proc = processes_snapshot()
+        .into_iter()
+        .find(|proc| proc.thread_ids_snapshot().contains(&(tid as u64)));
     let Some(target_proc) = target_proc else {
         return -LinuxError::ESRCH.code() as isize;
     };

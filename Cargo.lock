@@ -296,6 +296,8 @@ dependencies = [
  "kspin",
  "log",
  "lru",
+ "rand_core",
+ "rand_pcg",
  "scope-local",
  "slab",
  "spin 0.10.0",
