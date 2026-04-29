@@ -517,7 +517,6 @@ pub fn check_signals_and_deliver(thread: &Thread, tf: &mut TrapFrame) -> Option<
 
             // Keep resume IP in the saved frame. We only adjust return address here.
             let _ = resume_ip;
-            sig_state.maybe_restore_sigsuspend_mask();
             Some(SignalDelivery { sig, action })
         }
     }
