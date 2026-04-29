@@ -9,6 +9,7 @@ use axerrno::{AxError, AxResult};
 use axfs::{CachedFile, File, FileFlags};
 use axhal::paging::MappingFlags;
 use axmm::AddrSpace;
+use axplat::mem::MemRegionFlags;
 use kernel_elf_parser::{AuxEntry, AuxType, ELFHeadersBuilder, ELFParser, app_stack_region};
 use memory_addr::{MemoryAddr, PAGE_SIZE_4K, VirtAddr};
 use xmas_elf::{
@@ -89,15 +90,15 @@ fn segment_flags(ph: &xmas_elf::program::ProgramHeader<'_>) -> MappingFlags {
     map_flags
 }
 
-fn vdso_segment_flags(ph: &xmas_elf::program::ProgramHeader64) -> MappingFlags {
+fn vdso_segment_flags(flags: MemRegionFlags) -> MappingFlags {
     let mut map_flags = MappingFlags::USER;
-    if ph.flags.is_read() {
+    if flags.contains(MemRegionFlags::READ) {
         map_flags |= MappingFlags::READ;
     }
-    if ph.flags.is_write() {
+    if flags.contains(MemRegionFlags::WRITE) {
         map_flags |= MappingFlags::WRITE;
     }
-    if ph.flags.is_execute() {
+    if flags.contains(MemRegionFlags::EXECUTE) {
         map_flags |= MappingFlags::EXECUTE;
     }
     map_flags
@@ -421,45 +422,19 @@ pub fn load_user_app(
         );
     }
 
-    let auxv = build_auxv(main_data, main_bias, interp_base)?;
-    let mut auxv = auxv;
-    let aspace_ptr = aspace as *mut AddrSpace;
-    let vdso_trampoline = starry_vdso::vdso::load_vdso_data(
-        &mut auxv,
-        |user_start, paddr, size| {
-            Ok(unsafe {
-                (&mut *aspace_ptr).map_linear(
-                    VirtAddr::from(user_start),
-                    paddr,
-                    size,
-                    MappingFlags::READ | MappingFlags::EXECUTE | MappingFlags::USER,
-                )?
-            })
-        },
-        |user_start, paddr| {
-            Ok(unsafe {
-                (&mut *aspace_ptr).map_linear(
-                    VirtAddr::from(user_start),
-                    paddr.into(),
-                    starry_vdso::config::VVAR_PAGES * PAGE_SIZE_4K,
-                    MappingFlags::READ | MappingFlags::USER,
-                )?
-            })
-        },
-        |user_start, paddr, size, ph| {
-            Ok(unsafe {
-                (&mut *aspace_ptr).map_linear(
-                    VirtAddr::from(user_start),
-                    paddr,
-                    size,
-                    vdso_segment_flags(ph),
-                )?
-            })
-        },
-    )
-    .and_then(|()| {
-        starry_vdso::vdso::get_trampoline_addr(&auxv).ok_or(AxError::InvalidExecutable)
-    })?;
+    let mut auxv = build_auxv(main_data, main_bias, interp_base)?;
+    let mut vdso_data = starry_vdso::vdso::load_vdso_data(&mut auxv)?;
+    for mapping in &vdso_data.mappings {
+        aspace.map_linear(
+            VirtAddr::from(mapping.user_start),
+            mapping.paddr,
+            mapping.size,
+            vdso_segment_flags(mapping.flags),
+        )?;
+    }
+    vdso_data.disarm();
+    let vdso_trampoline =
+        starry_vdso::vdso::get_trampoline_addr(&auxv).ok_or(AxError::InvalidExecutable)?;
     auxv.push(AuxEntry::new(AuxType::NULL, 0));
     let argv: Vec<String> = if args.is_empty() {
         alloc::vec![path.to_string()]

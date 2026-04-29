@@ -5,7 +5,7 @@ use alloc::{alloc::alloc_zeroed, vec::Vec};
 use core::alloc::Layout;
 
 use axerrno::{AxError, AxResult};
-use axplat::{mem::virt_to_phys, time::monotonic_time_nanos};
+use axplat::mem::{MemRegionFlags, virt_to_phys};
 use kernel_elf_parser::{AuxEntry, AuxType};
 use log::{debug, info, warn};
 use memory_addr::{MemoryAddr, PAGE_SIZE_4K};
@@ -45,6 +45,28 @@ pub type VdsoPageInfo = (
     usize,
     Option<(usize, usize)>,
 );
+
+/// A single mapping request produced while loading vDSO data.
+#[derive(Clone, Copy, Debug)]
+pub struct VdsoMapping {
+    pub user_start: usize,
+    pub paddr: axplat::mem::PhysAddr,
+    pub size: usize,
+    pub flags: MemRegionFlags,
+}
+
+/// Load result that keeps the temporary vDSO allocation alive until mappings
+/// are applied.
+pub struct VdsoLoadData {
+    pub mappings: Vec<VdsoMapping>,
+    alloc_guard: crate::guard::VdsoAllocGuard,
+}
+
+impl VdsoLoadData {
+    pub fn disarm(&mut self) {
+        self.alloc_guard.disarm();
+    }
+}
 
 /// Load vDSO into the given user address space and update auxv accordingly.
 pub fn prepare_vdso_pages(vdso_kstart: usize, vdso_kend: usize) -> AxResult<VdsoPageInfo> {
@@ -100,7 +122,7 @@ pub fn calculate_vdso_aslr_addr(
     const VDSO_USER_ADDR_BASE: usize = 0x7f00_0000;
     const VDSO_ASLR_PAGES: usize = 256;
 
-    let seed: u128 = (monotonic_time_nanos() as u128)
+    let seed: u128 = (axplat::time::monotonic_time_nanos() as u128)
         ^ ((vdso_kstart as u128).rotate_left(13))
         ^ ((vdso_kend as u128).rotate_left(37));
     let mut rng = Pcg64Mcg::new(seed);
@@ -115,18 +137,22 @@ pub fn calculate_vdso_aslr_addr(
     (base_addr, vdso_addr)
 }
 
-/// Load vDSO into the given user address space and update auxv accordingly.
-pub fn load_vdso_data<F1, F2, F3>(auxv: &mut Vec<AuxEntry>, f1: F1, f2: F2, f3: F3) -> AxResult<()>
-where
-    F1: FnOnce(usize, axplat::mem::PhysAddr, usize) -> AxResult<()>,
-    F2: FnOnce(usize, usize) -> AxResult<()>,
-    F3: FnMut(
-        usize,
-        axplat::mem::PhysAddr,
-        usize,
-        &xmas_elf::program::ProgramHeader64,
-    ) -> AxResult<()>,
-{
+fn segment_flags(ph: &xmas_elf::program::ProgramHeader64) -> MemRegionFlags {
+    let mut map_flags = MemRegionFlags::empty();
+    if ph.flags.is_read() {
+        map_flags |= MemRegionFlags::READ;
+    }
+    if ph.flags.is_write() {
+        map_flags |= MemRegionFlags::WRITE;
+    }
+    if ph.flags.is_execute() {
+        map_flags |= MemRegionFlags::EXECUTE;
+    }
+    map_flags
+}
+
+/// Load vDSO metadata and mapping requests for the given user address space.
+pub fn load_vdso_data(auxv: &mut Vec<AuxEntry>) -> AxResult<VdsoLoadData> {
     unsafe extern "C" {
         static vdso_start: u8;
         static vdso_end: u8;
@@ -147,7 +173,8 @@ where
     let (vdso_paddr_page, vdso_bytes, vdso_size, vdso_page_offset, alloc_info) =
         prepare_vdso_pages(vdso_kstart, vdso_kend).map_err(|_| AxError::InvalidExecutable)?;
 
-    let mut alloc_guard = crate::guard::VdsoAllocGuard::new(alloc_info);
+    let alloc_guard = crate::guard::VdsoAllocGuard::new(alloc_info);
+    let mut mappings = Vec::new();
 
     let (_base_addr, vdso_user_addr) =
         calculate_vdso_aslr_addr(vdso_kstart, vdso_kend, vdso_page_offset);
@@ -157,14 +184,12 @@ where
         b.build(&vdso_bytes[range.start as usize..range.end as usize])
     }) {
         Ok(headers) => {
-            map_vdso_segments(
+            mappings.extend(map_vdso_segments(
                 headers,
                 vdso_user_addr,
                 vdso_paddr_page,
                 vdso_page_offset,
-                f3,
-            )?;
-            alloc_guard.disarm();
+            )?);
         }
         Err(_) => {
             info!("vDSO ELF parsing failed, using fallback mapping");
@@ -173,25 +198,38 @@ where
             } else {
                 vdso_user_addr - vdso_page_offset
             };
-            f1(map_user_start, vdso_paddr_page, vdso_size)?;
-            alloc_guard.disarm();
+            mappings.push(VdsoMapping {
+                user_start: map_user_start,
+                paddr: vdso_paddr_page,
+                size: vdso_size,
+                flags: MemRegionFlags::READ | MemRegionFlags::EXECUTE,
+            });
         }
     }
 
-    map_vvar_and_push_aux(auxv, vdso_user_addr, f2)?;
+    map_vvar_and_push_aux(auxv, vdso_user_addr, &mut mappings)?;
 
-    Ok(())
+    Ok(VdsoLoadData {
+        mappings,
+        alloc_guard,
+    })
 }
 
-fn map_vvar_and_push_aux<F>(auxv: &mut Vec<AuxEntry>, vdso_user_addr: usize, f: F) -> AxResult<()>
-where
-    F: FnOnce(usize, usize) -> AxResult<()>,
-{
+fn map_vvar_and_push_aux(
+    auxv: &mut Vec<AuxEntry>,
+    vdso_user_addr: usize,
+    mappings: &mut Vec<VdsoMapping>,
+) -> AxResult<()> {
     use crate::config::VVAR_PAGES;
     let vvar_user_addr = vdso_user_addr - VVAR_PAGES * PAGE_SIZE_4K;
     let vvar_paddr = vdso_data_paddr();
 
-    f(vvar_user_addr, vvar_paddr)?;
+    mappings.push(VdsoMapping {
+        user_start: vvar_user_addr,
+        paddr: vvar_paddr.into(),
+        size: VVAR_PAGES * PAGE_SIZE_4K,
+        flags: MemRegionFlags::READ,
+    });
 
     debug!(
         "Mapped vvar pages at user {:#x}..{:#x} -> paddr {:#x}",
@@ -206,22 +244,14 @@ where
     Ok(())
 }
 
-fn map_vdso_segments<F>(
+fn map_vdso_segments(
     headers: kernel_elf_parser::ELFHeaders,
     vdso_user_addr: usize,
     vdso_paddr_page: axplat::mem::PhysAddr,
     vdso_page_offset: usize,
-    mut f: F,
-) -> AxResult<()>
-where
-    F: FnMut(
-        usize,
-        axplat::mem::PhysAddr,
-        usize,
-        &xmas_elf::program::ProgramHeader64,
-    ) -> AxResult<()>,
-{
+) -> AxResult<Vec<VdsoMapping>> {
     debug!("vDSO ELF parsed successfully, mapping segments");
+    let mut mappings = Vec::new();
     for ph in headers
         .ph
         .iter()
@@ -236,9 +266,14 @@ where
         let seg_user_start = map_base_user + vaddr.align_down_4k();
         let seg_paddr = vdso_paddr_page + vaddr.align_down_4k();
 
-        f(seg_user_start, seg_paddr, seg_align_size, ph)?;
+        mappings.push(VdsoMapping {
+            user_start: seg_user_start,
+            paddr: seg_paddr,
+            size: seg_align_size,
+            flags: segment_flags(ph),
+        });
     }
-    Ok(())
+    Ok(mappings)
 }
 
 #[cfg(not(target_arch = "x86_64"))]
