@@ -661,7 +661,7 @@ impl FdObject for PipeObject {
                 if self.nonblocking.load(Ordering::Acquire) {
                     return Err(LinuxError::EAGAIN);
                 }
-                axlog::info!(
+                axlog::debug!(
                     "pipe read wait: tid={} shared={:p} write_closed={} nonblocking={} \
                      read_size={} want={}",
                     axtask::current().id().as_u64(),
