@@ -14,6 +14,8 @@ use axfs_ng_vfs::{
     Reference, StatFs, VfsError, VfsResult, WeakDirEntry, path::MAX_NAME_LEN,
 };
 use axpoll::{IoEvents, Pollable};
+use rand_core::{Rng, SeedableRng};
+use rand_pcg::Pcg64Mcg;
 use spin::Mutex;
 
 use super::super::disk::{SeekableDisk, SharedBlockDevice};
@@ -22,10 +24,14 @@ const ROOT_INO: u64 = 1;
 const MISC_INO: u64 = 2;
 const NULL_INO: u64 = 3;
 const RTC_INO: u64 = 4;
-const CPU_DMA_LATENCY_INO: u64 = 5;
-const SHM_INO: u64 = 6;
+const RANDOM_INO: u64 = 5;
+const URANDOM_INO: u64 = 6;
+const CPU_DMA_LATENCY_INO: u64 = 7;
+const SHM_INO: u64 = 8;
 
 const NEXT_DYNAMIC_INO: u64 = SHM_INO + 1;
+
+const RANDOM_SEED: u64 = 0x0123_4567_89ab_cdef;
 
 pub(crate) struct BlockDeviceSpec {
     pub name: String,
@@ -34,11 +40,23 @@ pub(crate) struct BlockDeviceSpec {
     pub minor: u32,
 }
 
-#[derive(Clone, Copy)]
 enum DevDeviceKind {
     Null,
     Rtc,
+    Random(RandomDevice),
     CpuDmaLatency,
+}
+
+struct RandomDevice {
+    rng: Mutex<Pcg64Mcg>,
+}
+
+impl RandomDevice {
+    fn new() -> Self {
+        Self {
+            rng: Mutex::new(Pcg64Mcg::seed_from_u64(RANDOM_SEED)),
+        }
+    }
 }
 
 struct BlockDeviceKind {
@@ -287,6 +305,20 @@ impl DevFilesystem {
 
         let null = Inode::new_character_device(NULL_INO, DevDeviceKind::Null, 0o666, 1, 3);
         let rtc = Inode::new_character_device(RTC_INO, DevDeviceKind::Rtc, 0o666, 254, 0);
+        let random = Inode::new_character_device(
+            RANDOM_INO,
+            DevDeviceKind::Random(RandomDevice::new()),
+            0o666,
+            1,
+            8,
+        );
+        let urandom = Inode::new_character_device(
+            URANDOM_INO,
+            DevDeviceKind::Random(RandomDevice::new()),
+            0o666,
+            1,
+            9,
+        );
         let cpu_dma = Inode::new_character_device(
             CPU_DMA_LATENCY_INO,
             DevDeviceKind::CpuDmaLatency,
@@ -303,6 +335,8 @@ impl DevFilesystem {
         self.insert_entry_locked(&root, "shm", SHM_INO, &inodes);
         self.insert_entry_locked(&root, "null", NULL_INO, &inodes);
         self.insert_entry_locked(&root, "rtc", RTC_INO, &inodes);
+        self.insert_entry_locked(&root, "random", RANDOM_INO, &inodes);
+        self.insert_entry_locked(&root, "urandom", URANDOM_INO, &inodes);
         self.insert_entry_locked(&root, "cpu_dma_latency", CPU_DMA_LATENCY_INO, &inodes);
         self.insert_entry_locked(&misc, "rtc", RTC_INO, &inodes);
 
@@ -318,6 +352,8 @@ impl DevFilesystem {
         inodes.insert(SHM_INO, shm);
         inodes.insert(NULL_INO, null);
         inodes.insert(RTC_INO, rtc);
+        inodes.insert(RANDOM_INO, random);
+        inodes.insert(URANDOM_INO, urandom);
         inodes.insert(CPU_DMA_LATENCY_INO, cpu_dma);
     }
 
@@ -705,6 +741,10 @@ impl FileNodeOps for DevNode {
         match &inode.content {
             NodeContent::CharacterDevice(DevDeviceKind::Null) => Ok(0),
             NodeContent::CharacterDevice(DevDeviceKind::Rtc) => Ok(0),
+            NodeContent::CharacterDevice(DevDeviceKind::Random(random)) => {
+                random.rng.lock().fill_bytes(buf);
+                Ok(buf.len())
+            }
             NodeContent::CharacterDevice(DevDeviceKind::CpuDmaLatency) => {
                 let bytes = i32::MAX.to_ne_bytes();
                 let start = offset as usize;
@@ -746,6 +786,7 @@ impl FileNodeOps for DevNode {
             NodeContent::CharacterDevice(DevDeviceKind::Rtc) => {
                 Err(VfsError::OperationNotPermitted)
             }
+            NodeContent::CharacterDevice(DevDeviceKind::Random(_)) => Ok(buf.len()),
             NodeContent::CharacterDevice(DevDeviceKind::CpuDmaLatency) => match buf.len() {
                 4 | 10 => Ok(buf.len()),
                 _ => Err(VfsError::InvalidInput),
@@ -779,6 +820,7 @@ impl FileNodeOps for DevNode {
             NodeContent::CharacterDevice(DevDeviceKind::Rtc) => {
                 Err(VfsError::OperationNotPermitted)
             }
+            NodeContent::CharacterDevice(DevDeviceKind::Random(_)) => Ok((buf.len(), 0)),
             NodeContent::CharacterDevice(DevDeviceKind::CpuDmaLatency) => {
                 self.write_at(buf, 0).map(|n| (n, 0))
             }
