@@ -31,6 +31,8 @@ intrusive-collections = "0.9.7"
 kspin = { workspace = true }
 log = { workspace = true }
 lru = "0.16.0"
+rand_core = { workspace = true }
+rand_pcg = { workspace = true }
 scope-local = { workspace = true }
 slab = { version = "0.4.9", default-features = false }
 spin = { workspace = true }
