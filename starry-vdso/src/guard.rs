@@ -24,9 +24,15 @@ impl Drop for VdsoAllocGuard {
     fn drop(&mut self) {
         if let Some((vaddr, pages)) = self.alloc {
             // free memory allocated with `alloc_zeroed` above
-            let size = pages * PAGE_SIZE_4K;
-            if let Ok(layout) = Layout::from_size_align(size, PAGE_SIZE_4K) {
-                unsafe { dealloc(vaddr as *mut u8, layout) };
+            if let Some(size) = pages.checked_mul(PAGE_SIZE_4K) {
+                if let Ok(layout) = Layout::from_size_align(size, PAGE_SIZE_4K) {
+                    unsafe { dealloc(vaddr as *mut u8, layout) };
+                }
+            } else {
+                log::warn!(
+                    "skip vDSO deallocation because size overflowed: pages={pages}, \
+                     page_size={PAGE_SIZE_4K}"
+                );
             }
         }
     }
