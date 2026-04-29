@@ -238,7 +238,6 @@ impl ThreadSignal {
 
     pub fn reset_on_exec(&self) {
         self.thread_pending.store(0, Ordering::Release);
-        self.blocked.store(0, Ordering::Release);
         self.in_handler.store(false, Ordering::Release);
         self.skip_once.store(false, Ordering::Release);
         *self.saved_ctx.lock() = None;
@@ -358,6 +357,24 @@ fn sanitize_mask(mask: u64) -> u64 {
         mask &= !bit;
     }
     mask
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn reset_on_exec_preserves_blocked_mask() {
+        let shared = SignalShared::new();
+        let signal = ThreadSignal::new(shared);
+
+        signal.set_blocked_mask(0b1010);
+        signal.queue_thread_signal(1);
+        signal.reset_on_exec();
+
+        assert_eq!(signal.blocked_mask(), 0b1010);
+        assert_eq!(signal.thread_pending.load(Ordering::Acquire), 0);
+    }
 }
 
 fn default_action(sig: usize) -> DefaultSignalAction {
