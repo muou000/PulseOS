@@ -53,6 +53,8 @@ rand_core = { version = "0.10.1", default-features = false }
 rand_pcg = { version = "0.10.2", default-features = false }
 chrono = { version = "0.4", default-features = false }
 
+starry-vdso = { path = "./starry-vdso" }
+
 [patch.crates-io]
 axfs-ng-vfs = { path = "vendor/axfs-ng-vfs" }
 ext4_rs = { path = "vendor/ext4_rs" }
@@ -81,6 +83,7 @@ axfeat.workspace = true
 axtask.workspace = true
 pulse_syscalls = { path = "pulse_syscalls" }
 pulse_core = { path = "pulse_core" }
+starry-vdso.workspace = true
 
 [target.'cfg(target_arch = "riscv64")'.dependencies]
 axplat-riscv64-qemu-virt.workspace = true

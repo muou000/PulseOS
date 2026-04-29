@@ -15,6 +15,7 @@ dependencies = [
  "axtask",
  "pulse_core",
  "pulse_syscalls",
+ "starry-vdso",
 ]
 
 [[package]]
@@ -1185,6 +1186,7 @@ dependencies = [
  "memory_addr",
  "percpu",
  "spin 0.10.0",
+ "starry-vdso",
  "xmas-elf",
 ]
 
@@ -1383,6 +1385,21 @@ name = "stable_deref_trait"
 version = "1.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6ce2be8dc25455e1f91df71bfa12ad37d7af1092ae736f3a6cd0e37bc7810596"
+
+[[package]]
+name = "starry-vdso"
+version = "0.1.1"
+dependencies = [
+ "axerrno 0.2.2",
+ "axplat",
+ "cfg-if",
+ "kernel-elf-parser",
+ "log",
+ "memory_addr",
+ "rand_core",
+ "rand_pcg",
+ "xmas-elf",
+]
 
 [[package]]
 name = "static_assertions"
