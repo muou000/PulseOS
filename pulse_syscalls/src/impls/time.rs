@@ -23,7 +23,10 @@ fn timespec_to_duration(ts: timespec) -> Result<Duration, LinuxError> {
 }
 
 fn duration_to_timespec(dur: Duration) -> timespec {
-    timespec { tv_sec: dur.as_secs() as _, tv_nsec: dur.subsec_nanos() as _ }
+    timespec {
+        tv_sec: dur.as_secs() as _,
+        tv_nsec: dur.subsec_nanos() as _,
+    }
 }
 
 fn ns_to_clk_ticks(ns: u64) -> u64 {
@@ -41,7 +44,13 @@ fn write_user_timespec(user_addr: usize, value: timespec) -> Result<(), LinuxErr
 }
 
 fn write_zero_timespec(user_addr: usize) -> Result<(), LinuxError> {
-    write_user_timespec(user_addr, timespec { tv_sec: 0, tv_nsec: 0 })
+    write_user_timespec(
+        user_addr,
+        timespec {
+            tv_sec: 0,
+            tv_nsec: 0,
+        },
+    )
 }
 
 fn is_supported_clock(clockid: i32) -> bool {
@@ -59,7 +68,10 @@ fn clock_now(clockid: i32) -> Result<Duration, LinuxError> {
 fn clock_resolution() -> timespec {
     // cyclictest treats exactly 1ns as "high resolution" and warns otherwise.
     // Return the finest resolution we can expose to keep it on the high-res path.
-    timespec { tv_sec: 0, tv_nsec: 1 }
+    timespec {
+        tv_sec: 0,
+        tv_nsec: 1,
+    }
 }
 
 fn sleep_for_duration(dur: Duration) {
@@ -125,9 +137,7 @@ pub fn sys_nanosleep(req: usize, rem: usize) -> isize {
 
 pub fn sys_clock_nanosleep(clockid: i32, flags: usize, req: usize, rem: usize) -> isize {
     if !CLOCK_NANOSLEEP_COMPAT_WARNED.swap(true, Ordering::AcqRel) {
-        axlog::info!(
-            "sys_clock_nanosleep: using task sleep with simplified EINTR/rem semantics"
-        );
+        axlog::info!("sys_clock_nanosleep: using task sleep with simplified EINTR/rem semantics");
     }
 
     if req == 0 {
@@ -215,7 +225,10 @@ pub fn sys_gettimeofday(tv: usize, tz: usize) -> isize {
     }
 
     let now = axhal::time::wall_time();
-    let timeval = timeval { tv_sec: now.as_secs() as _, tv_usec: now.subsec_micros() as _ };
+    let timeval = timeval {
+        tv_sec: now.as_secs() as _,
+        tv_usec: now.subsec_micros() as _,
+    };
     let bytes = unsafe {
         core::slice::from_raw_parts(
             (&timeval as *const timeval).cast::<u8>(),

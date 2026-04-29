@@ -1,5 +1,6 @@
 mod exec;
 mod process;
+mod signal;
 mod thread;
 pub mod uaccess;
 
@@ -11,6 +12,12 @@ use alloc::{
 
 use axerrno::{LinuxError, LinuxResult};
 pub use process::{CloneParams, ForkParams, Process};
+pub use signal::{
+    DefaultSignalAction, NSIG, SIG_DFL, SIG_IGN, SigAction, SignalAction, SignalAltStack,
+    SignalDelivery, SignalShared, ThreadSignal, blocked_mask as thread_blocked_mask, can_signal,
+    check_signals_and_deliver, pending_mask as thread_pending_mask, queue_signal_to_process,
+    queue_signal_to_thread,
+};
 use spin::{Lazy, Mutex};
 pub use thread::{Thread, ThreadHandle};
 
@@ -70,4 +77,14 @@ pub fn with_current_thread<R>(f: impl FnOnce(&Thread) -> R) -> LinuxResult<R> {
 
 pub fn with_current_process<R>(f: impl FnOnce(&Process) -> R) -> LinuxResult<R> {
     current_process().map(|process| f(process.as_ref()))
+}
+
+pub fn thread_by_tid(process: &Process, tid: u64) -> Option<Arc<Thread>> {
+    let task = process.task_ref_by_tid(tid)?;
+    let task_ext_ptr = unsafe { task.task_ext_ptr() };
+    if task_ext_ptr.is_null() {
+        return None;
+    }
+    let handle = unsafe { &*(task_ext_ptr as *const ThreadHandle) };
+    Some(handle.thread_arc())
 }

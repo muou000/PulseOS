@@ -33,7 +33,11 @@ fn is_user_range(addr: usize, len: usize) -> bool {
 
 fn get_fd_object(fd: usize) -> Result<Arc<dyn FdObject>, LinuxError> {
     let proc = pulse_core::task::current_process()?;
-    proc.fd_table.lock().get(fd).map(|entry| entry.object.clone()).ok_or(LinuxError::EBADF)
+    proc.fd_table
+        .lock()
+        .get(fd)
+        .map(|entry| entry.object.clone())
+        .ok_or(LinuxError::EBADF)
 }
 
 fn align_user_range(addr: usize, len: usize) -> Result<(usize, usize), LinuxError> {
@@ -107,10 +111,11 @@ fn lock_mapped_range(
     }
     prefault_user_range(proc, addr, len)?;
     let privileged = proc.is_root_user();
-    proc.memlock_try_lock_range(addr, len, privileged).map_err(|e| match e {
-        AxError::NoMemory => LinuxError::ENOMEM,
-        _ => LinuxError::EINVAL,
-    })?;
+    proc.memlock_try_lock_range(addr, len, privileged)
+        .map_err(|e| match e {
+            AxError::NoMemory => LinuxError::ENOMEM,
+            _ => LinuxError::EINVAL,
+        })?;
     Ok(())
 }
 
@@ -337,7 +342,12 @@ pub fn sys_mmap(
     }
 
     let populate = file_backed;
-    match aspace.map_alloc(VirtAddr::from(map_addr), aligned_length, map_flags, populate) {
+    match aspace.map_alloc(
+        VirtAddr::from(map_addr),
+        aligned_length,
+        map_flags,
+        populate,
+    ) {
         Ok(_) => {
             drop(aspace);
 
@@ -423,7 +433,11 @@ pub fn sys_mmap(
                 return -e.code() as isize;
             }
 
-            axlog::debug!("sys_mmap: mapped at {:#x}, length={:#x}", map_addr, aligned_length);
+            axlog::debug!(
+                "sys_mmap: mapped at {:#x}, length={:#x}",
+                map_addr,
+                aligned_length
+            );
             map_addr as isize
         }
         Err(e) => {
@@ -457,7 +471,11 @@ pub fn sys_munmap(addr: usize, length: usize) -> isize {
     match aspace.unmap(VirtAddr::from(aligned_addr), aligned_length) {
         Ok(_) => {
             let _ = proc.memlock_unlock_range(aligned_addr, aligned_length);
-            axlog::debug!("sys_munmap: unmapped {:#x} length {:#x}", aligned_addr, aligned_length);
+            axlog::debug!(
+                "sys_munmap: unmapped {:#x} length {:#x}",
+                aligned_addr,
+                aligned_length
+            );
             0
         }
         Err(e) => {
@@ -507,7 +525,12 @@ pub fn sys_munlock(addr: usize, len: usize) -> isize {
 }
 
 pub fn sys_mprotect(addr: usize, length: usize, prot: usize) -> isize {
-    axlog::debug!("sys_mprotect: addr={:#x}, length={:#x}, prot={:#x}", addr, length, prot);
+    axlog::debug!(
+        "sys_mprotect: addr={:#x}, length={:#x}, prot={:#x}",
+        addr,
+        length,
+        prot
+    );
 
     if length == 0 {
         return 0;
