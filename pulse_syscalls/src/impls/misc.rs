@@ -6,14 +6,12 @@ use axhal::context::TrapFrame;
 use axalloc::global_allocator;
 use axfs::FS_CONTEXT;
 use linux_raw_sys::general::{
-    RLIMIT_AS, RLIMIT_CORE, RLIMIT_CPU, RLIMIT_DATA, RLIMIT_FSIZE, RLIMIT_MEMLOCK, RLIMIT_MSGQUEUE,
-    RLIMIT_NICE, RLIMIT_NOFILE, RLIMIT_NPROC, RLIMIT_RSS, RLIMIT_RTPRIO, RLIMIT_RTTIME,
-    RLIMIT_SIGPENDING, RLIMIT_STACK, SIG_BLOCK, SIG_SETMASK, SIG_UNBLOCK, SIGKILL, SIGSTOP,
-    rlimit64, sigaction, siginfo, timespec,
+    GRND_INSECURE, GRND_NONBLOCK, GRND_RANDOM, RLIMIT_AS, RLIMIT_CORE, RLIMIT_CPU, RLIMIT_DATA,
+    RLIMIT_FSIZE, RLIMIT_MEMLOCK, RLIMIT_MSGQUEUE, RLIMIT_NICE, RLIMIT_NOFILE, RLIMIT_NPROC,
+    RLIMIT_RSS, RLIMIT_RTPRIO, RLIMIT_RTTIME, RLIMIT_SIGPENDING, RLIMIT_STACK, SIG_BLOCK,
+    SIG_SETMASK, SIG_UNBLOCK, SIGKILL, SIGSTOP, rlimit64, sigaction, siginfo, timespec,
 };
 use pulse_core::task::{NSIG, SIG_IGN, SigAction, uaccess};
-use rand::{rngs::SmallRng, RngCore, SeedableRng};
-use spin::Mutex;
 
 use crate::{
     LinuxError,

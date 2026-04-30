@@ -882,14 +882,22 @@ impl FdTable {
 
     pub fn take_cloexec_on_exec(&mut self) -> alloc::vec::Vec<FdEntry> {
         let mut removed = alloc::vec::Vec::new();
-        self.entries.retain(|_, entry| {
-            if entry.flags.contains(FdFlags::CLOEXEC) {
-                removed.push(entry.clone());
-                false
-            } else {
-                true
+        let cloexec_fds: alloc::vec::Vec<usize> = self
+            .entries
+            .iter()
+            .filter_map(|(&fd, entry)| entry.flags.contains(FdFlags::CLOEXEC).then_some(fd))
+            .collect();
+        for fd in cloexec_fds {
+            if let Some(entry) = self.entries.remove(&fd) {
+                axlog::info!(
+                    "take_cloexec_on_exec: removing cloexec fd entry fd={}, flags={:?}, object={:p}",
+                    fd,
+                    entry.flags,
+                    Arc::as_ptr(&entry.object)
+                );
+                removed.push(entry);
             }
-        });
+        }
         removed
     }
 

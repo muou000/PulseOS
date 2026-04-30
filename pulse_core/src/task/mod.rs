@@ -95,5 +95,5 @@ pub fn with_current_process<R>(f: impl FnOnce(&Process) -> R) -> LinuxResult<R> 
 
 pub fn thread_by_tid(process: &Process, tid: u64) -> Option<Arc<Thread>> {
     let task = process.task_ref_by_tid(tid)?;
-    thread_handle_from_task(task).map(|handle| handle.thread_arc())
+    thread_handle_from_task(&task).map(|handle| handle.thread_arc())
 }
