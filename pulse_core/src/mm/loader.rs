@@ -7,9 +7,11 @@ use alloc::{
 
 use axerrno::{AxError, AxResult};
 use axfs::{CachedFile, File, FileFlags};
-use axhal::paging::MappingFlags;
+use axhal::{
+    mem::MemRegionFlags,
+    paging::MappingFlags,
+};
 use axmm::AddrSpace;
-use axplat::mem::MemRegionFlags;
 use kernel_elf_parser::{AuxEntry, AuxType, ELFHeadersBuilder, ELFParser, app_stack_region};
 use memory_addr::{MemoryAddr, PAGE_SIZE_4K, VirtAddr};
 use xmas_elf::{

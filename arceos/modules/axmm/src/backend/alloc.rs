@@ -216,7 +216,7 @@ impl Backend {
                 }
                 if let Some(frame) = alloc_frame(true) {
                     let ok = pt
-                        .remap(vaddr, frame, orig_flags)
+                        .remap(page, frame, orig_flags)
                         .map(|(_, tlb)| tlb.flush())
                         .is_ok();
                     if !ok {
@@ -255,7 +255,7 @@ impl Backend {
                     }
 
                     if pt
-                        .remap(vaddr, new_frame, orig_flags)
+                        .remap(page, new_frame, orig_flags)
                         .map(|(_, tlb)| tlb.flush())
                         .is_ok()
                     {
@@ -293,21 +293,20 @@ impl Backend {
                 // flags need upgrading (e.g., USER flag for PagePrivilegeIllegal
                 // handling on loongarch64).
                 let new_flags = old_flags | orig_flags;
-                if new_flags != old_flags {
-                    if pt
-                        .remap(vaddr, old_frame, new_flags)
-                        .map(|(_, tlb)| tlb.flush())
-                        .is_ok()
-                    {
-                        return true;
-                    }
+                if pt
+                    .remap(page, old_frame, new_flags)
+                    .map(|(_, tlb)| tlb.flush())
+                    .is_ok()
+                {
+                    return true;
                 }
                 error!(
-                    "handle_page_fault_alloc: reject=no_alloc_path_matched vaddr={:#x} page={:#x} fault_flags={:?} pte_flags={:?} frame={:#x} backend_populate={}",
+                    "handle_page_fault_alloc: reject=flag_upgrade_remap_failed vaddr={:#x} page={:#x} fault_flags={:?} pte_flags={:?} new_flags={:?} frame={:#x} backend_populate={}",
                     vaddr,
                     page,
                     orig_flags,
                     old_flags,
+                    new_flags,
                     old_frame,
                     populate
                 );
@@ -327,7 +326,7 @@ impl Backend {
             // `vaddr` does not need to be aligned. It will be automatically
             // aligned during `pt.remap` regardless of the page size.
             let ok = pt
-                .remap(vaddr, frame, orig_flags)
+                .remap(page, frame, orig_flags)
                 .map(|(_, tlb)| tlb.flush())
                 .is_ok();
             if !ok {
