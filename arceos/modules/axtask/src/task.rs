@@ -207,7 +207,6 @@ impl TaskInner {
     ///
     /// This is used by the GC path to avoid retaining large per-task stacks
     /// even when full task dropping is deferred.
-    #[allow(dead_code)]
     pub(crate) fn reclaim_kernel_stack(&self) {
         if self.state() != TaskState::Exited {
             return;

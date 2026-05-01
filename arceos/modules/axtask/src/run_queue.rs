@@ -576,12 +576,12 @@ fn gc_entry() {
         for _ in 0..n {
             // Do not do the slow drops in the critical section.
             let task = EXITED_TASKS.with_current(|exited_tasks| exited_tasks.pop_front());
-            if let Some(_task) = task {
+            if let Some(task) = task {
                 // Reclaim the large per-task kernel stack first to avoid OOM,
                 // then keep deferring full task drop to avoid known instability
                 // in the exited-task full-drop path.
-                // task.reclaim_kernel_stack();
-                // core::mem::forget(task);
+                task.reclaim_kernel_stack();
+                core::mem::forget(task);
             }
         }
         // Note: we cannot block current task with preemption disabled,
