@@ -635,6 +635,12 @@ impl PipeObject {
         (wait_for_read && (buffer.available_read() > 0 || self.write_end_closed()))
             || (wait_for_write && (buffer.available_write() > 0 || self.read_end_closed()))
     }
+
+    fn current_has_pending_signal() -> bool {
+        crate::task::current_thread()
+            .map(|thread| thread.has_pending_signal())
+            .unwrap_or(false)
+    }
 }
 
 impl FdObject for PipeObject {
@@ -673,6 +679,9 @@ impl FdObject for PipeObject {
                 );
                 drop(ring_buffer);
                 self.shared.wait.wait();
+                if Self::current_has_pending_signal() {
+                    return Err(LinuxError::EINTR);
+                }
                 continue;
             }
             for _ in 0..available {
@@ -724,6 +733,13 @@ impl FdObject for PipeObject {
                 );
                 drop(ring_buffer);
                 self.shared.wait.wait();
+                if Self::current_has_pending_signal() {
+                    return if write_size > 0 {
+                        Ok(write_size)
+                    } else {
+                        Err(LinuxError::EINTR)
+                    };
+                }
                 continue;
             }
             for _ in 0..available {
@@ -797,9 +813,12 @@ impl FdObject for PipeObject {
                 }
             }
             None => {
-                self.shared
-                    .wait
-                    .wait_until(|| self.ready_for(wait_for_read, wait_for_write));
+                self.shared.wait.wait_until(|| {
+                    self.ready_for(wait_for_read, wait_for_write) || Self::current_has_pending_signal()
+                });
+                if Self::current_has_pending_signal() {
+                    return Err(LinuxError::EINTR);
+                }
                 Ok(true)
             }
         }

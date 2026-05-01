@@ -21,6 +21,12 @@ pub static PAGE_FAULT: [fn(VirtAddr, PageFaultFlags, bool) -> bool];
 #[def_trap_handler]
 pub static SYSCALL: [fn(&mut TrapFrame, usize) -> isize];
 
+/// A slice of handlers called before returning from a user trap.
+#[cfg(feature = "uspace")]
+#[cfg_attr(docsrs, doc(cfg(feature = "uspace")))]
+#[def_trap_handler]
+pub static USER_RETURN: [fn(&mut TrapFrame)];
+
 #[allow(unused_macros)]
 macro_rules! handle_trap {
     ($trap:ident, $($args:tt)*) => {{
@@ -41,4 +47,16 @@ macro_rules! handle_trap {
 #[cfg(feature = "uspace")]
 pub(crate) fn handle_syscall(tf: &mut TrapFrame, syscall_num: usize) -> isize {
     SYSCALL[0](tf, syscall_num)
+}
+
+/// Call the optional user-return handler.
+#[cfg(feature = "uspace")]
+pub(crate) fn handle_user_return(tf: &mut TrapFrame) {
+    let mut iter = USER_RETURN.iter();
+    if let Some(func) = iter.next() {
+        if iter.next().is_some() {
+            warn!("Multiple handlers for trap USER_RETURN are not currently supported");
+        }
+        func(tf);
+    }
 }

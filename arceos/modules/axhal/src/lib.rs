@@ -88,6 +88,8 @@ pub mod power {
 pub mod trap {
     #[cfg(feature = "uspace")]
     pub use axcpu::trap::SYSCALL;
+    #[cfg(feature = "uspace")]
+    pub use axcpu::trap::USER_RETURN;
     pub use axcpu::trap::{IRQ, PAGE_FAULT};
     pub use axcpu::trap::{PageFaultFlags, register_trap_handler};
 }

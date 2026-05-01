@@ -73,4 +73,9 @@ fn loongarch64_trap_handler(tf: &mut TrapFrame, from_user: bool) {
             );
         }
     }
+
+    #[cfg(feature = "uspace")]
+    if from_user {
+        crate::trap::handle_user_return(tf);
+    }
 }
