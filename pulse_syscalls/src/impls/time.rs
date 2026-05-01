@@ -74,28 +74,48 @@ fn clock_resolution() -> timespec {
     }
 }
 
-fn sleep_for_duration(dur: Duration) {
-    axtask::sleep(dur);
+fn current_has_pending_signal() -> bool {
+    pulse_core::task::current_thread()
+        .map(|thread| thread.has_pending_signal())
+        .unwrap_or(false)
 }
 
-fn sleep_until_clock(clockid: i32, target: Duration) -> Result<(), LinuxError> {
+fn sleep_for_duration_interruptible(dur: Duration) -> Result<Duration, LinuxError> {
+    if current_has_pending_signal() {
+        return Ok(dur);
+    }
+    let start = axhal::time::monotonic_time();
+    let deadline = start.saturating_add(dur);
+    loop {
+        let now = axhal::time::monotonic_time();
+        if now >= deadline {
+            return Ok(Duration::ZERO);
+        }
+        if current_has_pending_signal() {
+            return Ok(deadline.saturating_sub(now));
+        }
+        axtask::sleep(deadline.saturating_sub(now));
+    }
+}
+
+fn sleep_until_clock_interruptible(clockid: i32, target: Duration) -> Result<Duration, LinuxError> {
     match clockid as u32 {
-        CLOCK_REALTIME => {
-            let now = axhal::time::wall_time();
-            if target > now {
-                axtask::sleep_until(target);
-            }
-        }
-        CLOCK_MONOTONIC => {
-            let now = axhal::time::monotonic_time();
-            let sleep_dur = target.saturating_sub(now);
-            if sleep_dur > Duration::ZERO {
-                sleep_for_duration(sleep_dur);
-            }
-        }
+        CLOCK_REALTIME | CLOCK_MONOTONIC => {}
         _ => return Err(LinuxError::EINVAL),
     }
-    Ok(())
+    loop {
+        let now = clock_now(clockid)?;
+        if now >= target {
+            return Ok(Duration::ZERO);
+        }
+        if current_has_pending_signal() {
+            return Ok(target.saturating_sub(now));
+        }
+        let sleep_dur = target.saturating_sub(now);
+        if sleep_dur > Duration::ZERO {
+            axtask::sleep(sleep_dur);
+        }
+    }
 }
 
 #[repr(C)]
@@ -123,7 +143,19 @@ pub fn sys_nanosleep(req: usize, rem: usize) -> isize {
     };
 
     if req_ts > Duration::ZERO {
-        sleep_for_duration(req_ts);
+        match sleep_for_duration_interruptible(req_ts) {
+            Ok(remaining) if remaining > Duration::ZERO => {
+                if rem != 0 {
+                    if let Err(e) = write_user_timespec(rem, duration_to_timespec(remaining)) {
+                        axlog::warn!("write user timespec failed: addr={:#x}, err={:?}", rem, e);
+                        return -e.code() as isize;
+                    }
+                }
+                return -LinuxError::EINTR.code() as isize;
+            }
+            Ok(_) => {}
+            Err(e) => return -e.code() as isize,
+        }
     }
 
     if rem != 0 {
@@ -157,14 +189,22 @@ pub fn sys_clock_nanosleep(clockid: i32, flags: usize, req: usize, rem: usize) -
     }
 
     let result = if flags == TIMER_ABSTIME as usize {
-        sleep_until_clock(clockid, req_ts)
+        sleep_until_clock_interruptible(clockid, req_ts)
     } else {
-        sleep_for_duration(req_ts);
-        Ok(())
+        sleep_for_duration_interruptible(req_ts)
     };
 
-    if let Err(e) = result {
-        return -e.code() as isize;
+    match result {
+        Ok(remaining) if remaining > Duration::ZERO => {
+            if rem != 0 {
+                if let Err(e) = write_user_timespec(rem, duration_to_timespec(remaining)) {
+                    return -e.code() as isize;
+                }
+            }
+            return -LinuxError::EINTR.code() as isize;
+        }
+        Ok(_) => {}
+        Err(e) => return -e.code() as isize,
     }
 
     if rem != 0 {

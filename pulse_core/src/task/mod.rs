@@ -45,7 +45,7 @@ fn prune_dead_processes(registry: &mut BTreeMap<u64, Weak<Process>>) {
 /// The caller must ensure that `task.task_ext_ptr()` either returns null or
 /// points to a valid `ThreadHandle` written by the task extension system, and
 /// that the pointed-to handle remains alive for the duration of the borrow.
-fn thread_handle_from_task(task: &axtask::TaskInner) -> Option<&ThreadHandle> {
+pub(super) fn thread_handle_from_task(task: &axtask::TaskInner) -> Option<&ThreadHandle> {
     let task_ext_ptr = unsafe { task.task_ext_ptr() };
     if task_ext_ptr.is_null() {
         return None;

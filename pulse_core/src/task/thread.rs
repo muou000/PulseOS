@@ -6,7 +6,8 @@ use core::{
 
 use axerrno::{AxError, AxResult};
 use axhal::context::TrapFrame;
-use axtask::{TaskExtSwitch, def_task_ext};
+use axtask::{AxTaskRef, TaskExtSwitch, def_task_ext};
+use spin::Mutex;
 
 use super::{Process, SignalAltStack, ThreadSignal};
 
@@ -16,6 +17,7 @@ pub struct Thread {
     clear_child_tid: AtomicUsize,
     set_child_tid: AtomicUsize,
     robust_list_head: AtomicUsize,
+    task_ref: Mutex<Option<AxTaskRef>>,
 }
 
 pub struct ThreadHandle(Arc<Thread>);
@@ -47,6 +49,7 @@ impl Thread {
             clear_child_tid: AtomicUsize::new(0),
             set_child_tid: AtomicUsize::new(0),
             robust_list_head: AtomicUsize::new(0),
+            task_ref: Mutex::new(None),
         })
     }
 
@@ -60,6 +63,16 @@ impl Thread {
 
     pub fn process_arc(&self) -> Arc<Process> {
         self.process.clone()
+    }
+
+    pub fn attach_task_ref(&self, task: AxTaskRef) {
+        *self.task_ref.lock() = Some(task);
+    }
+
+    pub fn notify_signal_pending(&self) {
+        if let Some(task) = self.task_ref.lock().clone() {
+            axtask::wake_task(task, true);
+        }
     }
 
     pub fn signal(&self) -> &ThreadSignal {
@@ -100,7 +113,7 @@ impl Thread {
 
     pub fn restore_from_sigreturn(&self, tf: &mut TrapFrame) -> AxResult<usize> {
         self.signal
-            .restore_from_sigreturn(tf)
+            .restore_from_sigreturn(self.process(), tf)
             .map_err(|_| AxError::InvalidInput)
     }
 

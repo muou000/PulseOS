@@ -1066,6 +1066,9 @@ impl Process {
     }
 
     pub fn register_task_ref(&self, task: AxTaskRef) {
+        if let Some(handle) = super::thread_handle_from_task(&task) {
+            handle.attach_task_ref(task.clone());
+        }
         let mut task_refs = self.task_refs.lock();
         let tid = task.id().as_u64();
         if task_refs
@@ -1278,10 +1281,23 @@ impl Process {
         if self.read_user_u32(addr)? != expected {
             return Err(AxError::WouldBlock);
         }
+        let current_thread = super::current_thread().ok();
+        let signal_pending = || {
+            current_thread
+                .as_ref()
+                .map(|thread| thread.has_pending_signal())
+                .unwrap_or(false)
+        };
+        if signal_pending() {
+            return Err(AxError::Interrupted);
+        }
 
         if let Some(timeout_ns) = timeout_ns {
             let deadline = (axhal::time::monotonic_time_nanos() as u64).saturating_add(timeout_ns);
             while !self.group_exiting() {
+                if signal_pending() {
+                    return Err(AxError::Interrupted);
+                }
                 match self.read_user_u32(addr) {
                     Ok(current) if current != expected => return Ok(()),
                     Ok(_) => {}
@@ -1300,6 +1316,9 @@ impl Process {
             if self.group_exiting() {
                 return Ok(());
             }
+            if signal_pending() {
+                return Err(AxError::Interrupted);
+            }
             match self.read_user_u32(addr) {
                 Ok(current) if current != expected => return Ok(()),
                 Ok(_) => {}
@@ -1307,6 +1326,7 @@ impl Process {
             }
             queue.wait_until(|| {
                 self.group_exiting()
+                    || signal_pending()
                     || self
                         .read_user_u32(addr)
                         .map(|current| current != expected)

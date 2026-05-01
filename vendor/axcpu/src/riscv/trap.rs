@@ -71,6 +71,11 @@ fn riscv_trap_handler(tf: &mut TrapFrame, from_user: bool) {
         );
     }
 
+    #[cfg(feature = "uspace")]
+    if from_user {
+        crate::trap::handle_user_return(tf);
+    }
+
     // Update tf.sstatus to preserve current hardware FS state
     // This replaces the assembly-level FS handling workaround
     #[cfg(feature = "fp-simd")]

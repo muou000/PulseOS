@@ -80,6 +80,7 @@ pub struct SignalAltStack {
 struct SavedSignalContext {
     tf: TrapFrame,
     old_mask: u64,
+    user_ucontext: Option<usize>,
 }
 
 pub struct SignalShared {
@@ -307,12 +308,22 @@ impl ThreadSignal {
         self.skip_once.swap(false, Ordering::AcqRel)
     }
 
-    pub fn restore_from_sigreturn(&self, tf: &mut TrapFrame) -> AxResult<usize> {
+    pub fn restore_from_sigreturn(&self, process: &Process, tf: &mut TrapFrame) -> AxResult<usize> {
         let Some(saved) = self.saved_ctx.lock().take() else {
             return Err(AxError::InvalidInput);
         };
         *tf = saved.tf;
-        self.blocked.store(saved.old_mask, Ordering::Release);
+        let mut restored_mask = saved.old_mask;
+        if let Some(user_ucontext) = saved.user_ucontext {
+            if let Ok(pc) = read_user_signal_pc(process, user_ucontext) {
+                set_ip(tf, pc);
+            }
+            if let Ok(mask) = read_user_signal_mask(process, user_ucontext) {
+                restored_mask = mask;
+            }
+        }
+        self.blocked
+            .store(sanitize_mask(restored_mask), Ordering::Release);
         self.in_handler.store(false, Ordering::Release);
         self.skip_once.store(true, Ordering::Release);
         Ok(signal_return_value(tf))
@@ -343,8 +354,12 @@ impl ThreadSignal {
         self.shared.dequeue_process_unblocked(blocked)
     }
 
-    fn save_context(&self, tf: &TrapFrame, old_mask: u64) {
-        *self.saved_ctx.lock() = Some(SavedSignalContext { tf: *tf, old_mask });
+    fn save_context(&self, tf: &TrapFrame, old_mask: u64, user_ucontext: Option<usize>) {
+        *self.saved_ctx.lock() = Some(SavedSignalContext {
+            tf: *tf,
+            old_mask,
+            user_ucontext,
+        });
     }
 }
 
@@ -417,9 +432,25 @@ fn set_ra(tf: &mut TrapFrame, ra: usize) {
 fn set_arg0(tf: &mut TrapFrame, arg: usize) {
     tf.regs.a0 = arg;
 }
+#[cfg(target_arch = "riscv64")]
+fn set_arg1(tf: &mut TrapFrame, arg: usize) {
+    tf.regs.a1 = arg;
+}
+#[cfg(target_arch = "riscv64")]
+fn set_arg2(tf: &mut TrapFrame, arg: usize) {
+    tf.regs.a2 = arg;
+}
 #[cfg(target_arch = "loongarch64")]
 fn set_arg0(tf: &mut TrapFrame, arg: usize) {
     tf.regs.a0 = arg;
+}
+#[cfg(target_arch = "loongarch64")]
+fn set_arg1(tf: &mut TrapFrame, arg: usize) {
+    tf.regs.a1 = arg;
+}
+#[cfg(target_arch = "loongarch64")]
+fn set_arg2(tf: &mut TrapFrame, arg: usize) {
+    tf.regs.a2 = arg;
 }
 
 #[cfg(target_arch = "riscv64")]
@@ -429,6 +460,22 @@ fn current_ip(tf: &TrapFrame) -> usize {
 #[cfg(target_arch = "loongarch64")]
 fn current_ip(tf: &TrapFrame) -> usize {
     tf.era
+}
+#[cfg(target_arch = "riscv64")]
+fn current_sp(tf: &TrapFrame) -> usize {
+    tf.regs.sp
+}
+#[cfg(target_arch = "loongarch64")]
+fn current_sp(tf: &TrapFrame) -> usize {
+    tf.regs.sp
+}
+#[cfg(target_arch = "riscv64")]
+fn set_sp(tf: &mut TrapFrame, sp: usize) {
+    tf.regs.sp = sp;
+}
+#[cfg(target_arch = "loongarch64")]
+fn set_sp(tf: &mut TrapFrame, sp: usize) {
+    tf.regs.sp = sp;
 }
 
 #[cfg(target_arch = "riscv64")]
@@ -455,8 +502,59 @@ fn set_arg0(tf: &mut TrapFrame, arg: usize) {
     tf.rdi = arg as u64;
 }
 #[cfg(not(any(target_arch = "riscv64", target_arch = "loongarch64")))]
+fn set_arg1(tf: &mut TrapFrame, arg: usize) {
+    tf.rsi = arg as u64;
+}
+#[cfg(not(any(target_arch = "riscv64", target_arch = "loongarch64")))]
+fn set_arg2(tf: &mut TrapFrame, arg: usize) {
+    tf.rdx = arg as u64;
+}
+#[cfg(not(any(target_arch = "riscv64", target_arch = "loongarch64")))]
 fn current_ip(tf: &TrapFrame) -> usize {
     tf.rip as usize
+}
+#[cfg(not(any(target_arch = "riscv64", target_arch = "loongarch64")))]
+fn current_sp(tf: &TrapFrame) -> usize {
+    tf.rsp as usize
+}
+#[cfg(not(any(target_arch = "riscv64", target_arch = "loongarch64")))]
+fn set_sp(tf: &mut TrapFrame, sp: usize) {
+    tf.rsp = sp as u64;
+}
+
+const SIGINFO_FRAME_SIZE: usize = 128;
+const UCONTEXT_FRAME_SIZE: usize = 1024;
+const UCONTEXT_SIGMASK_OFFSET: usize = 40;
+const UCONTEXT_PC_OFFSET: usize = 168;
+
+fn write_user_signal_frame(
+    thread: &Thread,
+    tf: &TrapFrame,
+    old_mask: u64,
+) -> AxResult<(usize, usize)> {
+    let frame_size = SIGINFO_FRAME_SIZE + UCONTEXT_FRAME_SIZE;
+    let frame_base = current_sp(tf).saturating_sub(frame_size) & !15;
+    let siginfo_addr = frame_base;
+    let ucontext_addr = frame_base + SIGINFO_FRAME_SIZE;
+    let zeroes = [0u8; SIGINFO_FRAME_SIZE + UCONTEXT_FRAME_SIZE];
+    thread.process().write_user_bytes(frame_base, &zeroes)?;
+    thread
+        .process()
+        .write_user_usize(ucontext_addr + UCONTEXT_SIGMASK_OFFSET, old_mask as usize)?;
+    thread
+        .process()
+        .write_user_usize(ucontext_addr + UCONTEXT_PC_OFFSET, current_ip(tf))?;
+    Ok((siginfo_addr, ucontext_addr))
+}
+
+fn read_user_signal_pc(process: &Process, user_ucontext: usize) -> AxResult<usize> {
+    process.read_user_usize(user_ucontext + UCONTEXT_PC_OFFSET)
+}
+
+fn read_user_signal_mask(process: &Process, user_ucontext: usize) -> AxResult<u64> {
+    process
+        .read_user_usize(user_ucontext + UCONTEXT_SIGMASK_OFFSET)
+        .map(|mask| mask as u64)
 }
 
 pub fn can_signal(caller: &Process, target: &Process) -> bool {
@@ -469,7 +567,11 @@ pub fn queue_signal_to_process(process: &Process, sig: usize) -> bool {
 }
 
 pub fn queue_signal_to_thread(thread: &Thread, sig: usize) -> bool {
-    thread.signal().queue_thread_signal(sig)
+    let queued = thread.signal().queue_thread_signal(sig);
+    if queued {
+        thread.notify_signal_pending();
+    }
+    queued
 }
 
 pub fn check_signals_and_deliver(thread: &Thread, tf: &mut TrapFrame) -> Option<SignalDelivery> {
@@ -502,7 +604,18 @@ pub fn check_signals_and_deliver(thread: &Thread, tf: &mut TrapFrame) -> Option<
                 new_mask |= bit;
             }
             new_mask = sanitize_mask(new_mask);
-            sig_state.save_context(tf, old_mask);
+            match write_user_signal_frame(thread, tf, old_mask) {
+                Ok((siginfo_addr, ucontext_addr)) => {
+                    sig_state.save_context(tf, old_mask, Some(ucontext_addr));
+                    set_arg1(tf, siginfo_addr);
+                    set_arg2(tf, ucontext_addr);
+                    set_sp(tf, siginfo_addr);
+                }
+                Err(e) => {
+                    axlog::warn!("failed to build signal frame for sig {}: {:?}", sig, e);
+                    sig_state.save_context(tf, old_mask, None);
+                }
+            }
             sig_state.set_blocked_mask(new_mask);
             sig_state.in_handler.store(true, Ordering::Release);
 
