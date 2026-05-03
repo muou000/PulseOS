@@ -69,6 +69,10 @@ pub trait FdObject: Send + Sync {
         Err(LinuxError::EINVAL)
     }
 
+    fn mmap_file_flags(&self) -> Option<AxFileFlags> {
+        None
+    }
+
     fn read_dirents64(&self, _buf: &mut [u8]) -> LinuxResult<usize> {
         Err(LinuxError::ENOTDIR)
     }
@@ -310,6 +314,10 @@ impl FdObject for FileObject {
 
     fn read_at(&self, buf: &mut [u8], offset: u64) -> LinuxResult<usize> {
         Ok(self.inner.read_at(buf, offset)?)
+    }
+
+    fn mmap_file_flags(&self) -> Option<AxFileFlags> {
+        Some(self.inner.flags())
     }
 
     fn truncate(&self, len: u64) -> LinuxResult {
@@ -814,7 +822,8 @@ impl FdObject for PipeObject {
             }
             None => {
                 self.shared.wait.wait_until(|| {
-                    self.ready_for(wait_for_read, wait_for_write) || Self::current_has_pending_signal()
+                    self.ready_for(wait_for_read, wait_for_write)
+                        || Self::current_has_pending_signal()
                 });
                 if Self::current_has_pending_signal() {
                     return Err(LinuxError::EINTR);
@@ -909,7 +918,8 @@ impl FdTable {
         for fd in cloexec_fds {
             if let Some(entry) = self.entries.remove(&fd) {
                 axlog::info!(
-                    "take_cloexec_on_exec: removing cloexec fd entry fd={}, flags={:?}, object={:p}",
+                    "take_cloexec_on_exec: removing cloexec fd entry fd={}, flags={:?}, \
+                     object={:p}",
                     fd,
                     entry.flags,
                     Arc::as_ptr(&entry.object)

@@ -7,10 +7,7 @@ use alloc::{
 
 use axerrno::{AxError, AxResult};
 use axfs::{CachedFile, File, FileFlags};
-use axhal::{
-    mem::MemRegionFlags,
-    paging::MappingFlags,
-};
+use axhal::{mem::MemRegionFlags, paging::MappingFlags};
 use axmm::AddrSpace;
 use kernel_elf_parser::{AuxEntry, AuxType, ELFHeadersBuilder, ELFParser, app_stack_region};
 use memory_addr::{MemoryAddr, PAGE_SIZE_4K, VirtAddr};
@@ -144,10 +141,10 @@ fn load_segments(
         let flags = segment_flags(&ph);
 
         if ph.flags().is_write() {
-            aspace.map_alloc(seg_start_page, seg_end_page - seg_start_page, flags, true)?;
+            aspace.map_alloc(seg_start_page, seg_end_page - seg_start_page, flags, false)?;
             if p_filesz > 0 {
                 let file_buf = read_elf_range(path, p_offset as u64, p_filesz)?;
-                aspace.write(p_vaddr, &file_buf)?;
+                write_user_region(aspace, p_vaddr, &file_buf)?;
             }
         } else {
             if p_filesz > 0 {
@@ -174,6 +171,25 @@ fn load_segments(
         }
     }
     Ok(())
+}
+
+fn write_user_region(aspace: &mut AddrSpace, start: VirtAddr, bytes: &[u8]) -> AxResult<()> {
+    if let Ok(()) = aspace.write(start, bytes) {
+        return Ok(());
+    }
+
+    let end = start.checked_add(bytes.len()).ok_or(AxError::OutOfRange)?;
+    let pages = memory_addr::PageIter4K::new(start.align_down_4k(), end.align_up_4k())
+        .ok_or(AxError::BadAddress)?;
+    for page in pages {
+        if !aspace.handle_page_fault(
+            page,
+            axhal::trap::PageFaultFlags::WRITE | axhal::trap::PageFaultFlags::USER,
+        ) {
+            return Err(AxError::BadAddress);
+        }
+    }
+    aspace.write(start, bytes).map_err(AxError::from)
 }
 
 fn file_flags_for_segment(ph: &xmas_elf::program::ProgramHeader<'_>) -> FileFlags {
@@ -449,7 +465,7 @@ pub fn load_user_app(
     let user_sp = VirtAddr::from(USER_STACK_TOP)
         .checked_sub(stack_region.len())
         .ok_or(AxError::OutOfRange)?;
-    aspace.write(user_sp, &stack_region)?;
+    write_user_region(aspace, user_sp, &stack_region)?;
     Ok(UserAppLoadInfo {
         entry: dispatch_entry.as_usize(),
         user_sp: user_sp.as_usize(),

@@ -2,6 +2,7 @@ use alloc::{sync::Arc, vec::Vec};
 use core::sync::atomic::{AtomicBool, Ordering};
 
 use axerrno::AxError;
+use axfs::{CachedFile, FileFlags};
 use axhal::paging::MappingFlags;
 use linux_raw_sys::general::{MCL_CURRENT, MCL_FUTURE, MCL_ONFAULT};
 use memory_addr::{MemoryAddr, PageIter4K, VirtAddr};
@@ -40,6 +41,20 @@ fn get_fd_object(fd: usize) -> Result<Arc<dyn FdObject>, LinuxError> {
         .get(fd)
         .map(|entry| entry.object.clone())
         .ok_or(LinuxError::EBADF)
+}
+
+fn file_flags_for_mapping(map_flags: MappingFlags) -> FileFlags {
+    let mut flags = FileFlags::empty();
+    if map_flags.contains(MappingFlags::READ) {
+        flags |= FileFlags::READ;
+    }
+    if map_flags.contains(MappingFlags::WRITE) {
+        flags |= FileFlags::WRITE;
+    }
+    if map_flags.contains(MappingFlags::EXECUTE) {
+        flags |= FileFlags::EXECUTE;
+    }
+    flags
 }
 
 fn align_user_range(addr: usize, len: usize) -> Result<(usize, usize), LinuxError> {
@@ -274,8 +289,7 @@ pub fn sys_mmap(
     }
     if file_backed && !FILE_MMAP_SIMPLIFIED_WARNED.swap(true, Ordering::AcqRel) {
         axlog::warn!(
-            "sys_mmap: file-backed mappings are populated by copying file data; \
-             shared/writeback/lazy semantics are incomplete"
+            "sys_mmap: file-backed mappings use lazy fault-in; shared/writeback semantics are incomplete"
         );
     }
     let file = if file_backed {
@@ -349,83 +363,30 @@ pub fn sys_mmap(
         }
     }
 
-    let populate = file_backed;
-    match aspace.map_alloc(
-        VirtAddr::from(map_addr),
-        aligned_length,
-        map_flags,
-        populate,
-    ) {
+    let map_result = if let Some(file) = file.as_ref() {
+        let Some(location) = file.location() else {
+            return -LinuxError::ENODEV.code() as isize;
+        };
+        let file_flags = file
+            .mmap_file_flags()
+            .unwrap_or_else(|| file_flags_for_mapping(map_flags));
+        let cached = CachedFile::get_or_create(location);
+        aspace.map_file(
+            VirtAddr::from(map_addr),
+            aligned_length,
+            map_flags,
+            cached,
+            file_flags,
+            offset,
+            length,
+        )
+    } else {
+        aspace.map_alloc(VirtAddr::from(map_addr), aligned_length, map_flags, false)
+    };
+
+    match map_result {
         Ok(_) => {
             drop(aspace);
-
-            if let Some(file) = file {
-                let file_off = match u64::try_from(offset) {
-                    Ok(v) => v,
-                    Err(_) => {
-                        let aspace_handle = proc.aspace_handle();
-                        let mut aspace = aspace_handle.lock();
-                        if let Err(unmap_e) = aspace.unmap(VirtAddr::from(map_addr), aligned_length)
-                        {
-                            axlog::warn!(
-                                "sys_mmap: rollback unmap failed at {:#x}, len={:#x}, err={:?}",
-                                map_addr,
-                                aligned_length,
-                                unmap_e
-                            );
-                        }
-                        return -LinuxError::EINVAL.code() as isize;
-                    }
-                };
-
-                let mut copied = 0usize;
-                let mut remain = length;
-                let mut buf = [0u8; PAGE_SIZE];
-                while remain > 0 {
-                    let want = remain.min(PAGE_SIZE);
-                    let n = match file.read_at(&mut buf[..want], file_off + copied as u64) {
-                        Ok(n) => n,
-                        Err(e) => {
-                            let aspace_handle = proc.aspace_handle();
-                            let mut aspace = aspace_handle.lock();
-                            if let Err(unmap_e) =
-                                aspace.unmap(VirtAddr::from(map_addr), aligned_length)
-                            {
-                                axlog::warn!(
-                                    "sys_mmap: rollback unmap failed at {:#x}, len={:#x}, err={:?}",
-                                    map_addr,
-                                    aligned_length,
-                                    unmap_e
-                                );
-                            }
-                            return -e.code() as isize;
-                        }
-                    };
-                    if n == 0 {
-                        break;
-                    }
-                    let write_res = proc
-                        .aspace_handle()
-                        .lock()
-                        .write(VirtAddr::from(map_addr + copied), &buf[..n]);
-                    if write_res.is_err() {
-                        let aspace_handle = proc.aspace_handle();
-                        let mut aspace = aspace_handle.lock();
-                        if let Err(unmap_e) = aspace.unmap(VirtAddr::from(map_addr), aligned_length)
-                        {
-                            axlog::warn!(
-                                "sys_mmap: rollback unmap failed at {:#x}, len={:#x}, err={:?}",
-                                map_addr,
-                                aligned_length,
-                                unmap_e
-                            );
-                        }
-                        return -LinuxError::EFAULT.code() as isize;
-                    }
-                    copied += n;
-                    remain -= n;
-                }
-            }
 
             if let Err(e) = maybe_lock_future_range(proc.as_ref(), map_addr, aligned_length) {
                 let aspace_handle = proc.aspace_handle();

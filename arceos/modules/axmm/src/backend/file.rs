@@ -95,16 +95,8 @@ impl Backend {
         if !mapping.permits(flags) {
             return false;
         }
-        pt.map_region(
-            start,
-            |_| 0.into(),
-            size,
-            MappingFlags::empty(),
-            false,
-            false,
-        )
-        .map(|tlb| tlb.ignore())
-        .is_ok()
+        let _ = (start, size, pt);
+        true
     }
 
     pub(crate) fn unmap_file(&self, start: VirtAddr, size: usize, pt: &mut PageTable) -> bool {
@@ -172,8 +164,8 @@ impl Backend {
         }
 
         if pt
-            .remap(page_addr, frame, orig_flags)
-            .map(|(_, tlb)| {
+            .map(page_addr, frame, PageSize::Size4K, orig_flags)
+            .map(|tlb| {
                 tlb.flush();
                 sync_executable_mapping(orig_flags);
             })

@@ -2,21 +2,22 @@ use alloc::{boxed::Box, string::String, sync::Arc};
 #[cfg(feature = "preempt")]
 use core::sync::atomic::AtomicUsize;
 use core::{
-    alloc::Layout,
     cell::UnsafeCell,
     fmt,
     ops::Deref,
-    ptr::NonNull,
     sync::atomic::{AtomicBool, AtomicI32, AtomicU8, AtomicU32, AtomicU64, Ordering},
 };
 
+use axalloc::global_allocator;
+use axerrno::{AxError, AxResult};
 use axhal::context::TaskContext;
 #[cfg(feature = "tls")]
 use axhal::tls::TlsArea;
 use kspin::SpinNoIrq;
-use memory_addr::{VirtAddr, align_up_4k};
+use memory_addr::{MemoryAddr, PAGE_SIZE_4K, VirtAddr, align_up_4k};
 
 use crate::{AxCpuMask, AxTask, AxTaskRef, WaitQueue, task_ext::AxTaskExt};
+
 
 /// A unique identifier for a thread.
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
@@ -115,9 +116,20 @@ impl TaskInner {
     where
         F: FnOnce() + Send + 'static,
     {
-        let mut t = Self::new_common(TaskId::new(), name);
-        debug!("new task: {}", t.id_name());
-        let kstack = TaskStack::alloc(align_up_4k(stack_size));
+        Self::try_new(entry, name, stack_size).unwrap_or_else(|_| {
+            alloc::alloc::handle_alloc_error(
+                core::alloc::Layout::from_size_align(align_up_4k(stack_size), PAGE_SIZE_4K)
+                    .unwrap(),
+            )
+        })
+    }
+
+    /// Try to create a new task with the given entry function and stack size.
+    pub fn try_new<F>(entry: F, name: String, stack_size: usize) -> AxResult<Self>
+    where
+        F: FnOnce() + Send + 'static,
+    {
+        let mut t = Self::new_common(TaskId::new(), name);        debug!("new task: {}", t.id_name());        let kstack = TaskStack::try_alloc(align_up_4k(stack_size))?;
 
         #[cfg(feature = "tls")]
         let tls = VirtAddr::from(t.tls.tls_ptr() as usize);
@@ -131,7 +143,7 @@ impl TaskInner {
         if t.name == "idle" {
             t.is_idle = true;
         }
-        t
+        Ok(t)
     }
 
     /// Gets the ID of the task.
@@ -485,27 +497,50 @@ impl Drop for TaskInner {
 }
 
 struct TaskStack {
-    ptr: NonNull<u8>,
-    layout: Layout,
+    start: VirtAddr,
+    size: usize,
+    num_pages: usize,
 }
 
 impl TaskStack {
     pub fn alloc(size: usize) -> Self {
-        let layout = Layout::from_size_align(size, 16).unwrap();
-        Self {
-            ptr: NonNull::new(unsafe { alloc::alloc::alloc(layout) }).unwrap(),
-            layout,
-        }
+        Self::try_alloc(size).unwrap_or_else(|_| {
+            alloc::alloc::handle_alloc_error(
+                core::alloc::Layout::from_size_align(size, PAGE_SIZE_4K).unwrap(),
+            )
+        })
     }
 
-    pub const fn top(&self) -> VirtAddr {
-        unsafe { core::mem::transmute(self.ptr.as_ptr().add(self.layout.size())) }
+    pub fn try_alloc(size: usize) -> AxResult<Self> {
+        debug!(
+            "TaskStack::alloc: size={:#x}, used_pages={}, available_pages={}",
+            size,
+            global_allocator().used_pages(),
+            global_allocator().available_pages()
+        );
+        debug_assert_eq!(size % PAGE_SIZE_4K, 0);
+        let num_pages = size / PAGE_SIZE_4K;
+        let start = match global_allocator().alloc_pages(num_pages, PAGE_SIZE_4K) {
+            Ok(start) => start,
+            Err(_) => {
+                return Err(AxError::NoMemory);
+            }
+        };
+        Ok(Self {
+            start: start.into(),
+            size,
+            num_pages,
+        })
+    }
+
+    pub fn top(&self) -> VirtAddr {
+        self.start.add(self.size)
     }
 }
 
 impl Drop for TaskStack {
     fn drop(&mut self) {
-        unsafe { alloc::alloc::dealloc(self.ptr.as_ptr(), self.layout) }
+        global_allocator().dealloc_pages(self.start.as_usize(), self.num_pages);
     }
 }
 
