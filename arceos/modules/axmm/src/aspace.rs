@@ -4,7 +4,7 @@ use axerrno::{AxError, AxResult, ax_err};
 use axfs::{CachedFile, FileFlags};
 use axhal::{
     mem::phys_to_virt,
-    paging::{MappingFlags, PageTable},
+    paging::{MappingFlags, PageSize, PageTable},
     trap::PageFaultFlags,
 };
 use memory_addr::{
@@ -363,11 +363,21 @@ impl AddrSpace {
             return ax_err!(InvalidInput, "address not aligned");
         }
 
-        self.pt
-            .remap(vaddr, paddr, flags)
-            .map_err(|_| AxError::BadState)?
-            .1
-            .flush();
+        if self.pt.query(vaddr).is_ok() {
+            self.pt
+                .remap(vaddr, paddr, flags)
+                .map_err(|_| AxError::BadState)?
+                .1
+                .flush();
+        } else {
+            // True lazy mappings may not have allocated any intermediate page
+            // tables yet, so COW install/remap must be able to materialize the
+            // first concrete PTE on demand.
+            self.pt
+                .map(vaddr, paddr, PageSize::Size4K, flags)
+                .map_err(|_| AxError::BadState)?
+                .flush();
+        }
         Ok(())
     }
 

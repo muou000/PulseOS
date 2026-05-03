@@ -1,7 +1,7 @@
-#[cfg(feature = "smp")]
 use alloc::sync::Weak;
 use alloc::{collections::VecDeque, sync::Arc};
 use core::mem::MaybeUninit;
+use core::sync::atomic::{AtomicU64, Ordering};
 
 use axhal::percpu::this_cpu_id;
 use axsched::BaseScheduler;
@@ -32,6 +32,7 @@ percpu_static! {
     RUN_QUEUE: LazyInit<AxRunQueue> = LazyInit::new(),
     EXITED_TASKS: VecDeque<AxTaskRef> = VecDeque::new(),
     WAIT_FOR_EXIT: WaitQueue = WaitQueue::new(),
+    GC_TASK: LazyInit<AxTaskRef> = LazyInit::new(),
     IDLE_TASK: LazyInit<AxTaskRef> = LazyInit::new(),
     /// Stores the weak reference to the previous task that is running on this CPU.
     #[cfg(feature = "smp")]
@@ -376,8 +377,17 @@ impl<G: BaseGuard> CurrentRunQueueRef<'_, G> {
                 WAIT_FOR_EXIT.current_ref_mut_raw().notify_one(false);
             }
 
-            // Schedule to next task.
-            self.inner.resched();
+            // Let the per-CPU GC task run immediately so exited tasks do not
+            // accumulate a large backlog of unreclaimed kernel stacks.
+            let next = GC_TASK.with_current(|gc_task| {
+                let gc_task = gc_task.get().expect("GC task is uninitialized");
+                self.inner
+                    .scheduler
+                    .lock()
+                    .remove_task(gc_task)
+                    .unwrap_or_else(|| gc_task.clone())
+            });
+            self.inner.switch_to(crate::current(), next);
         }
         unreachable!("task exited!");
     }
@@ -446,6 +456,9 @@ impl AxRunQueue {
         let gc_task = TaskInner::new(gc_entry, "gc".into(), axconfig::TASK_STACK_SIZE).into_arc();
         // gc task should be pinned to the current CPU.
         gc_task.set_cpumask(AxCpuMask::one_shot(cpu_id));
+        GC_TASK.with_current(|g| {
+            g.init_once(gc_task.clone());
+        });
 
         let mut scheduler = Scheduler::new();
         scheduler.add_task(gc_task);
@@ -581,7 +594,7 @@ fn gc_entry() {
                 // then keep deferring full task drop to avoid known instability
                 // in the exited-task full-drop path.
                 task.reclaim_kernel_stack();
-                core::mem::forget(task);
+                // core::mem::forget(task);
             }
         }
         // Note: we cannot block current task with preemption disabled,

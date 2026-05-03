@@ -138,24 +138,33 @@ impl Backend {
             populate
         );
         if populate {
-            // allocate all possible physical frames for populated mapping.
+            let mut mapped_pages = 0usize;
             for addr in PageIter4K::new(start, start + size).unwrap() {
-                if let Some(frame) = alloc_frame(true) {
-                    if let Ok(tlb) = pt.map(addr, frame, PageSize::Size4K, flags) {
-                        tlb.ignore(); // TLB flush on map is unnecessary, as there are no outdated mappings.
-                    } else {
-                        dealloc_frame(frame);
-                        return false;
+                let Some(frame) = alloc_frame(true) else {
+                    if mapped_pages != 0 {
+                        let _ = self.unmap_alloc(start, mapped_pages * PAGE_SIZE_4K, pt, true);
                     }
+                    return false;
+                };
+                if let Ok(tlb) = pt.map(addr, frame, PageSize::Size4K, flags) {
+                    tlb.ignore(); // TLB flush on map is unnecessary, as there are no outdated mappings.
+                    mapped_pages += 1;
+                } else {
+                    dealloc_frame(frame);
+                    if mapped_pages != 0 {
+                        let _ = self.unmap_alloc(start, mapped_pages * PAGE_SIZE_4K, pt, true);
+                    }
+                    return false;
                 }
             }
             true
         } else {
-            // Map to a empty entry for on-demand mapping.
-            let flags = MappingFlags::empty();
-            pt.map_region(start, |_| 0.into(), size, flags, false, false)
-                .map(|tlb| tlb.ignore())
-                .is_ok()
+            // Keep only the virtual area metadata. Physical frames and the
+            // backing page-table entries will both be instantiated on demand
+            // in the page-fault path, which avoids consuming page-table pages
+            // for large untouched mappings such as pthread stacks.
+            let _ = (start, size, pt);
+            true
         }
     }
 
@@ -323,15 +332,15 @@ impl Backend {
             false
         } else if let Some(frame) = alloc_frame(true) {
             // Allocate a physical frame lazily and map it to the fault address.
-            // `vaddr` does not need to be aligned. It will be automatically
-            // aligned during `pt.remap` regardless of the page size.
+            // `vaddr` does not need to be aligned. `pt.map()` will create the
+            // intermediate page-table levels on demand for true lazy mappings.
             let ok = pt
-                .remap(page, frame, orig_flags)
-                .map(|(_, tlb)| tlb.flush())
+                .map(page, frame, PageSize::Size4K, orig_flags)
+                .map(|tlb| tlb.flush())
                 .is_ok();
             if !ok {
                 error!(
-                    "handle_page_fault_alloc: reject=query_miss_remap_failed vaddr={:#x} page={:#x} fault_flags={:?} new_frame={:#x} backend_populate={}",
+                    "handle_page_fault_alloc: reject=query_miss_map_failed vaddr={:#x} page={:#x} fault_flags={:?} new_frame={:#x} backend_populate={}",
                     vaddr,
                     page,
                     orig_flags,

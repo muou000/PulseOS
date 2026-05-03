@@ -134,7 +134,7 @@ impl Process {
             va!(stack_bottom),
             USER_STACK_SIZE,
             MappingFlags::READ | MappingFlags::WRITE | MappingFlags::USER,
-            true,
+            false,
         )?;
         new_aspace.map_alloc(
             va!(USER_HEAP_BASE),

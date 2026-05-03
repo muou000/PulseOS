@@ -18,7 +18,7 @@ use axtask::{AxTaskRef, TaskInner, WaitQueue};
 use kernel_guard::NoPreemptIrqSave;
 use linux_raw_sys::general::{RLIMIT_MEMLOCK, RLIMIT_NOFILE, RLIMIT_STACK, SIGCHLD, rlimit64};
 use memory_addr::{MemoryAddr, PhysAddr, VirtAddr, va};
-use spin::Mutex;
+use spin::{Lazy, Mutex};
 
 use super::{SignalShared, Thread, current_thread, queue_signal_to_process};
 use crate::{
@@ -32,6 +32,13 @@ const DEFAULT_STACK_LIMIT_BYTES: u64 = USER_STACK_SIZE as u64;
 const MAX_STACK_LIMIT_BYTES: u64 = USER_STACK_SIZE as u64;
 const DEFAULT_NOFILE_LIMIT: u64 = FD_LIMIT as u64;
 const MAX_NOFILE_LIMIT: u64 = FD_LIMIT as u64;
+
+static ZOMBIE_ASPACE_HANDLE: Lazy<Arc<Mutex<AddrSpace>>> = Lazy::new(|| {
+    Arc::new(Mutex::new(
+        axmm::new_user_aspace(va!(USER_SPACE_BASE), USER_SPACE_SIZE)
+            .expect("failed to create shared zombie addrspace"),
+    ))
+});
 
 fn align_up_4k(value: usize) -> usize {
     (value + 0xfff) & !0xfff
@@ -338,6 +345,11 @@ impl FutexTable {
             queue.notify_all(false);
         }
     }
+
+    fn clear(&self) {
+        self.wake_all();
+        self.queues.lock().clear();
+    }
 }
 
 pub struct Process {
@@ -362,6 +374,7 @@ pub struct Process {
     children: Mutex<Vec<Arc<Process>>>,
     child_exit_event: WaitQueue,
     zombie: AtomicBool,
+    user_resources_released: AtomicBool,
     exit_code: AtomicI32,
     group_exiting: AtomicBool,
     group_exit_code: AtomicI32,
@@ -868,7 +881,7 @@ impl Process {
             va!(stack_bottom),
             USER_STACK_SIZE,
             MappingFlags::READ | MappingFlags::WRITE | MappingFlags::USER,
-            true,
+            false,
         )?;
         aspace.map_alloc(
             va!(USER_HEAP_BASE),
@@ -908,6 +921,7 @@ impl Process {
             children: Mutex::new(Vec::new()),
             child_exit_event: WaitQueue::new(),
             zombie: AtomicBool::new(false),
+            user_resources_released: AtomicBool::new(false),
             exit_code: AtomicI32::new(0),
             group_exiting: AtomicBool::new(false),
             group_exit_code: AtomicI32::new(0),
@@ -990,6 +1004,7 @@ impl Process {
             children: Mutex::new(Vec::new()),
             child_exit_event: WaitQueue::new(),
             zombie: AtomicBool::new(false),
+            user_resources_released: AtomicBool::new(false),
             exit_code: AtomicI32::new(0),
             group_exiting: AtomicBool::new(false),
             group_exit_code: AtomicI32::new(0),
@@ -1038,16 +1053,31 @@ impl Process {
         };
     }
 
-    pub fn shrink_reaped_resources(&self) -> AxResult<()> {
-        let empty_aspace = axmm::new_user_aspace(va!(USER_SPACE_BASE), USER_SPACE_SIZE)?;
-        {
-            let new_handle = Arc::new(Mutex::new(empty_aspace));
-            let _old = self.replace_aspace_handle(new_handle);
+    fn release_zombie_resources(&self, switch_current_aspace: bool) -> AxResult<()> {
+        if self.user_resources_released.swap(true, Ordering::AcqRel) {
+            return Ok(());
         }
+
+        let new_handle = ZOMBIE_ASPACE_HANDLE.clone();
+        let new_pt_root = new_handle.lock().page_table_root();
+        let old_handle = self.replace_aspace_handle(new_handle);
+        if switch_current_aspace {
+            axtask::set_current_page_table_root(new_pt_root);
+            self.activate();
+        }
+        drop(old_handle);
         *self.heap_top.lock() = USER_HEAP_BASE;
         *self.stack_top.lock() = USER_STACK_TOP;
         *self.entry.lock() = 0;
+        self.close_all_files();
+        self.futex_table.clear();
+        self.memlock_unlock_all();
+        axlog::info!("release_zombie_resources: pid={}", self.pid());
         Ok(())
+    }
+
+    pub fn shrink_reaped_resources(&self) -> AxResult<()> {
+        self.release_zombie_resources(false)
     }
 
     pub fn sync_fs_context(&self) {
@@ -1156,15 +1186,17 @@ impl Process {
         } else {
             exit_code
         };
-        if tid == self.pid() {
-            self.task_refs
-                .lock()
-                .retain(|task| task.id().as_u64() == tid);
-        }
+        self.task_refs.lock().clear();
         self.exit_code.store(final_code, Ordering::Release);
         self.zombie.store(true, Ordering::Release);
         self.complete_vfork();
-        self.close_all_files();
+        if let Err(e) = self.release_zombie_resources(true) {
+            axlog::warn!(
+                "finish_thread_exit: failed to release zombie resources for pid={}: {:?}",
+                self.pid(),
+                e
+            );
+        }
 
         let parent = self
             .parent
@@ -1457,7 +1489,7 @@ impl Process {
                 return Err(err);
             }
         }
-        let mut inner = TaskInner::new(
+        let mut inner = TaskInner::try_new(
             move || {
                 let thread = super::current_thread().expect("fork child without Thread context");
                 if let Err(e) = thread.prepare_for_user_entry() {
@@ -1473,7 +1505,7 @@ impl Process {
             },
             "fork_child".into(),
             TASK_STACK_SIZE,
-        );
+        )?;
 
         let child_tid = inner.id().as_u64();
         let new_aspace = Arc::new(Mutex::new(new_aspace));
@@ -1537,7 +1569,7 @@ impl Process {
             child_uctx.set_sp(sp);
         }
 
-        let mut inner = TaskInner::new(
+        let mut inner = TaskInner::try_new(
             move || {
                 let thread = super::current_thread().expect("clone child without Thread context");
                 if let Err(e) = thread.prepare_for_user_entry() {
@@ -1553,7 +1585,7 @@ impl Process {
             },
             "clone_child".into(),
             TASK_STACK_SIZE,
-        );
+        )?;
 
         let child_tid = inner.id().as_u64();
         let child_proc = if params.is_thread_clone {

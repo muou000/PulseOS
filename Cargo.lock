@@ -549,7 +549,9 @@ dependencies = [
 name = "axtask"
 version = "0.2.0"
 dependencies = [
+ "axalloc",
  "axconfig",
+ "axerrno 0.2.2",
  "axhal",
  "axsched",
  "cfg-if",
