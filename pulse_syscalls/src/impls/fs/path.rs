@@ -1,4 +1,5 @@
 use alloc::string::{String, ToString};
+use core::sync::atomic::{AtomicBool, Ordering};
 
 use axerrno::LinuxError;
 use axfs::OpenOptions;
@@ -10,6 +11,9 @@ use crate::impls::{
     fs::common::{MOUNTED_TARGETS, context_for_dirfd, insert_fd_entry, open_fd_flags},
     utils::read_user_cstring,
 };
+
+static MOUNT_FLAGS_WARNED: AtomicBool = AtomicBool::new(false);
+static UMOUNT_FLAGS_WARNED: AtomicBool = AtomicBool::new(false);
 
 fn flags_to_options(flags: usize, mode: usize) -> OpenOptions {
     let mut options = OpenOptions::new();
@@ -218,6 +222,14 @@ pub fn sys_mount(
     _data: usize,
 ) -> isize {
     axlog::debug!("sys_mount: target={:#x}, flags={:#x}", target, _flags);
+    if (_flags != 0 || _data != 0) && !MOUNT_FLAGS_WARNED.swap(true, Ordering::AcqRel) {
+        axlog::warn!(
+            "sys_mount: mount flags/data are ignored (flags={:#x}, data={:#x}); semantics are \
+             simplified",
+            _flags,
+            _data
+        );
+    }
     if target == 0 {
         return -LinuxError::EFAULT.code() as isize;
     }
@@ -284,8 +296,14 @@ pub fn sys_mount(
     }
 }
 
-pub fn sys_umount2(target: usize, _flags: usize) -> isize {
-    axlog::debug!("sys_umount2: target={:#x}, flags={:#x}", target, _flags);
+pub fn sys_umount2(target: usize, flags: usize) -> isize {
+    axlog::debug!("sys_umount2: target={:#x}, flags={:#x}", target, flags);
+    if flags != 0 && !UMOUNT_FLAGS_WARNED.swap(true, Ordering::AcqRel) {
+        axlog::warn!(
+            "sys_umount2: unmount flags are ignored (flags={:#x}); semantics are simplified",
+            flags
+        );
+    }
     if target == 0 {
         return -LinuxError::EFAULT.code() as isize;
     }

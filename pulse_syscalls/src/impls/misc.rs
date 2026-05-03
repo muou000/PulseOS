@@ -1,10 +1,13 @@
 //! 其他杂项系统调用
 
-use core::time::Duration;
+use core::{
+    sync::atomic::{AtomicBool, Ordering},
+    time::Duration,
+};
 
-use axhal::context::TrapFrame;
 use axalloc::global_allocator;
 use axfs::FS_CONTEXT;
+use axhal::context::TrapFrame;
 use linux_raw_sys::general::{
     GRND_INSECURE, GRND_NONBLOCK, GRND_RANDOM, RLIMIT_AS, RLIMIT_CORE, RLIMIT_CPU, RLIMIT_DATA,
     RLIMIT_FSIZE, RLIMIT_MEMLOCK, RLIMIT_MSGQUEUE, RLIMIT_NICE, RLIMIT_NOFILE, RLIMIT_NPROC,
@@ -60,6 +63,7 @@ const SYSLOG_ACTION_CONSOLE_LEVEL: usize = 8;
 const SYSLOG_ACTION_SIZE_UNREAD: usize = 9;
 const SYSLOG_ACTION_SIZE_BUFFER: usize = 10;
 const KMSG_PLACEHOLDER: &[u8] = b"PulseOS kernel log buffer is not persisted yet.\n";
+static SYSLOG_PLACEHOLDER_WARNED: AtomicBool = AtomicBool::new(false);
 
 fn write_cstr_field(dst: &mut [u8], s: &str) {
     let bytes = s.as_bytes();
@@ -477,7 +481,11 @@ pub fn sys_rt_sigtimedwait(set: usize, info: usize, timeout: usize, sigsetsize: 
 }
 
 pub fn sys_setpgid(pid: isize, pgid: isize) -> isize {
-    axlog::debug!("sys_setpgid (stub): pid={}, pgid={}", pid, pgid);
+    axlog::warn!(
+        "sys_setpgid (stub): pid={}, pgid={}; process-group state is not updated",
+        pid,
+        pgid
+    );
     0
 }
 
@@ -531,6 +539,11 @@ pub fn sys_syslog(action: usize, bufp: usize, len: usize) -> isize {
         bufp,
         len
     );
+    if !SYSLOG_PLACEHOLDER_WARNED.swap(true, Ordering::AcqRel) {
+        axlog::warn!(
+            "sys_syslog: compatibility placeholder active; kernel log buffer is not persisted"
+        );
+    }
     match action {
         SYSLOG_ACTION_CLOSE
         | SYSLOG_ACTION_OPEN
