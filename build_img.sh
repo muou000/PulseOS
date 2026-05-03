@@ -143,6 +143,24 @@ apply_overlay_dir() {
     fi
 }
 
+patch_loongarch64_musl_sched_stubs() {
+    local stage_dir="$1"
+    local ld_musl="${stage_dir}/lib64/ld-musl-loongarch-lp64d.so.1"
+
+    [[ -f "${ld_musl}" ]] || return 0
+
+    # Alpine's current loongarch64 musl keeps a few scheduler entry points as
+    # ENOSYS stubs.  rt-tests/cyclictest calls these libc symbols directly, so
+    # the kernel never sees sched_getparam/sched_getscheduler unless the loader
+    # forwards them to the Linux syscalls.
+    perl -0pi -e '
+        s/\x63\xc0\xff\x02\x04\x68\xbf\x02\x61\x20\xc0\x29\xff\x83\xbf\x54/\x0b\xe4\x81\x02\x00\x00\x2b\x00\x84\x80\x40\x00\x20\x00\x00\x4c/g;
+        s/\x63\xc0\xff\x02\x04\x68\xbf\x02\x61\x20\xc0\x29\xff\x63\xbf\x54/\x0b\xe0\x81\x02\x00\x00\x2b\x00\x84\x80\x40\x00\x20\x00\x00\x4c/g;
+        s/\x63\xc0\xff\x02\x04\x68\xbf\x02\x61\x20\xc0\x29\xff\x1f\xbf\x54/\x0b\xd8\x81\x02\x00\x00\x2b\x00\x84\x80\x40\x00\x20\x00\x00\x4c/g;
+        s/\x63\xc0\xff\x02\x04\x68\xbf\x02\x61\x20\xc0\x29\xff\xff\xbe\x54/\x0b\xdc\x81\x02\x00\x00\x2b\x00\x84\x80\x40\x00\x20\x00\x00\x4c/g;
+    ' "${ld_musl}"
+}
+
 build_one_arch() {
     local arch="$1"
     local base_tar
@@ -179,6 +197,10 @@ build_one_arch() {
         tar --no-same-owner -xaf "${extra}" -C "${stage_dir}"
     done
 
+    if [[ "${arch}" == "loongarch64" ]]; then
+        patch_loongarch64_musl_sched_stubs "${stage_dir}"
+    fi
+
     local img_mib
     if [[ -n "${IMG_SIZE}" ]]; then
         img_mib="$(parse_size_to_mib "${IMG_SIZE}")"
@@ -208,7 +230,7 @@ build_one_arch() {
     echo "[${arch}] Done. logical=${logical_size}, disk=${disk_usage}"
 }
 
-for cmd in tar mkfs.ext4 du awk truncate ls mv cp sort tail mktemp; do
+for cmd in tar mkfs.ext4 du awk truncate ls mv cp sort tail mktemp perl; do
     have_cmd "${cmd}" || die "Missing command: ${cmd}"
 done
 
