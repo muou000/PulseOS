@@ -1,4 +1,5 @@
 use alloc::{sync::Arc, vec::Vec};
+use core::sync::atomic::{AtomicBool, Ordering};
 
 use axerrno::AxError;
 use axhal::paging::MappingFlags;
@@ -13,6 +14,7 @@ const PROT_WRITE: usize = 0x2;
 const PROT_EXEC: usize = 0x4;
 const MAP_ANONYMOUS: usize = 0x20;
 const PAGE_SIZE: usize = 0x1000;
+static FILE_MMAP_SIMPLIFIED_WARNED: AtomicBool = AtomicBool::new(false);
 
 fn user_space_end() -> Option<usize> {
     pulse_core::config::USER_SPACE_BASE.checked_add(pulse_core::config::USER_SPACE_SIZE)
@@ -269,6 +271,12 @@ pub fn sys_mmap(
     let file_backed = (flags & MAP_ANONYMOUS) == 0;
     if file_backed && fd < 0 {
         return -LinuxError::EBADF.code() as isize;
+    }
+    if file_backed && !FILE_MMAP_SIMPLIFIED_WARNED.swap(true, Ordering::AcqRel) {
+        axlog::warn!(
+            "sys_mmap: file-backed mappings are populated by copying file data; \
+             shared/writeback/lazy semantics are incomplete"
+        );
     }
     let file = if file_backed {
         match get_fd_object(fd as usize) {

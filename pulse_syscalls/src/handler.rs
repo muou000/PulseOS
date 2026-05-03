@@ -225,7 +225,12 @@ fn syscall_dispatcher(
         Sysno::sysinfo => impls::sys_sysinfo(args[0]),
         Sysno::syslog => impls::sys_syslog(args[0], args[1], args[2]),
         Sysno::rt_sigprocmask => impls::sys_rt_sigprocmask(args[0], args[1], args[2], args[3]),
-        Sysno::get_mempolicy => 0,
+        Sysno::get_mempolicy => {
+            axlog::warn!(
+                "sys_get_mempolicy (stub): returning success without NUMA policy semantics"
+            );
+            0
+        }
 
         Sysno::getuid => impls::sys_getuid(),
         Sysno::geteuid => impls::sys_geteuid(),
