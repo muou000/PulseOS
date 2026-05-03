@@ -384,12 +384,9 @@ pub fn sys_rt_sigsuspend(mask: usize, sigsetsize: usize) -> isize {
         Err(_) => return -LinuxError::EFAULT.code() as isize,
     };
     thread.begin_sigsuspend(new_mask);
-    loop {
-        if thread.has_pending_signal() {
-            return -LinuxError::EINTR.code() as isize;
-        }
-        axtask::yield_now();
-    }
+    let signal_wait = thread.signal_wait_queue();
+    signal_wait.wait_until(|| thread.has_pending_signal());
+    -LinuxError::EINTR.code() as isize
 }
 
 pub fn sys_rt_sigtimedwait(set: usize, info: usize, timeout: usize, sigsetsize: usize) -> isize {
@@ -410,6 +407,7 @@ pub fn sys_rt_sigtimedwait(set: usize, info: usize, timeout: usize, sigsetsize: 
         Ok(v) => v as u64,
         Err(_) => return -LinuxError::EFAULT.code() as isize,
     };
+    let signal_wait = thread.signal_wait_queue();
 
     let deadline_ns = if timeout == 0 {
         None
@@ -440,13 +438,41 @@ pub fn sys_rt_sigtimedwait(set: usize, info: usize, timeout: usize, sigsetsize: 
             return -LinuxError::EINTR.code() as isize;
         }
 
-        if let Some(deadline_ns) = deadline_ns
-            && (axhal::time::monotonic_time_nanos() as u64) >= deadline_ns
-        {
-            return -LinuxError::EAGAIN.code() as isize;
+        match deadline_ns {
+            Some(deadline_ns) => {
+                #[cfg(feature = "irq")]
+                {
+                    let now_ns = axhal::time::monotonic_time_nanos() as u64;
+                    if now_ns >= deadline_ns {
+                        return -LinuxError::EAGAIN.code() as isize;
+                    }
+                    let remain = Duration::from_nanos(deadline_ns - now_ns);
+                    let timed_out = signal_wait.wait_timeout_until(remain, || {
+                        thread.has_waitset_signal(waitset)
+                            || thread.has_pending_unblocked_signal_not_in_set(waitset)
+                    });
+                    if timed_out
+                        && !thread.has_waitset_signal(waitset)
+                        && !thread.has_pending_unblocked_signal_not_in_set(waitset)
+                    {
+                        return -LinuxError::EAGAIN.code() as isize;
+                    }
+                }
+                #[cfg(not(feature = "irq"))]
+                {
+                    if (axhal::time::monotonic_time_nanos() as u64) >= deadline_ns {
+                        return -LinuxError::EAGAIN.code() as isize;
+                    }
+                    axtask::yield_now();
+                }
+            }
+            None => {
+                signal_wait.wait_until(|| {
+                    thread.has_waitset_signal(waitset)
+                        || thread.has_pending_unblocked_signal_not_in_set(waitset)
+                });
+            }
         }
-
-        axtask::yield_now();
     }
 }
 

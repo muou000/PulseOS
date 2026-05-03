@@ -3,6 +3,7 @@ use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use axerrno::{AxError, AxResult};
 use axhal::context::TrapFrame;
+use axtask::WaitQueue;
 use linux_raw_sys::general::{
     SA_NODEFER, SA_RESETHAND, SIGCHLD, SIGCONT, SIGKILL, SIGSTOP, SIGURG, SIGWINCH,
 };
@@ -189,6 +190,7 @@ pub struct ThreadSignal {
     blocked: AtomicU64,
     in_handler: AtomicBool,
     skip_once: AtomicBool,
+    signal_wait: WaitQueue,
     saved_ctx: Mutex<Option<SavedSignalContext>>,
     altstack: Mutex<SignalAltStack>,
     sigsuspend_restore: Mutex<Option<u64>>,
@@ -202,6 +204,7 @@ impl ThreadSignal {
             blocked: AtomicU64::new(0),
             in_handler: AtomicBool::new(false),
             skip_once: AtomicBool::new(false),
+            signal_wait: WaitQueue::new(),
             saved_ctx: Mutex::new(None),
             altstack: Mutex::new(SignalAltStack {
                 sp: 0,
@@ -235,6 +238,14 @@ impl ThreadSignal {
 
     pub fn queue_process_signal(&self, sig: usize) -> bool {
         self.shared.queue_process_signal(sig)
+    }
+
+    pub fn wait_queue(&self) -> &WaitQueue {
+        &self.signal_wait
+    }
+
+    pub fn notify_waiters(&self) {
+        self.signal_wait.notify_all(true);
     }
 
     pub fn reset_on_exec(&self) {
@@ -272,11 +283,27 @@ impl ThreadSignal {
     }
 
     pub fn has_pending_unblocked_not_in_set(&self, set: u64) -> bool {
+        let set = sanitize_mask(set);
         let blocked = self.blocked_mask();
+        let thread_pending = self.thread_pending.load(Ordering::Acquire) & !blocked;
+        let proc_pending = self.shared.process_pending.load(Ordering::Acquire) & !blocked;
+        self.pending_mask_has_unblocked_match(thread_pending, set)
+            || self.pending_mask_has_unblocked_match(proc_pending, set)
+    }
+
+    pub fn has_waitset_signal(&self, waitset: u64) -> bool {
+        let waitset = sanitize_mask(waitset);
         let thread_pending = self.thread_pending.load(Ordering::Acquire);
         let proc_pending = self.shared.process_pending.load(Ordering::Acquire);
-        let unblocked = (thread_pending | proc_pending) & !blocked;
-        (unblocked & !set) != 0
+        ((thread_pending | proc_pending) & waitset) != 0
+    }
+
+    pub fn has_deliverable_pending_signal(&self) -> bool {
+        let blocked = self.blocked_mask();
+        let thread_pending = self.thread_pending.load(Ordering::Acquire) & !blocked;
+        let proc_pending = self.shared.process_pending.load(Ordering::Acquire) & !blocked;
+        self.pending_mask_has_deliverable_match(thread_pending)
+            || self.pending_mask_has_deliverable_match(proc_pending)
     }
 
     pub fn dequeue_waitset(&self, waitset: u64) -> Option<usize> {
@@ -306,6 +333,34 @@ impl ThreadSignal {
 
     pub fn clear_skip_once(&self) -> bool {
         self.skip_once.swap(false, Ordering::AcqRel)
+    }
+
+    fn pending_mask_has_unblocked_match(&self, pending: u64, set: u64) -> bool {
+        self.pending_mask_has_match(pending, |sig, action| {
+            (sig_bit(sig).unwrap_or(0) & !set) != 0 && !is_ignored_action(action)
+        })
+    }
+
+    fn pending_mask_has_deliverable_match(&self, pending: u64) -> bool {
+        self.pending_mask_has_match(pending, |_, action| !is_ignored_action(action))
+    }
+
+    fn pending_mask_has_match(
+        &self,
+        mut pending: u64,
+        mut pred: impl FnMut(usize, SignalAction) -> bool,
+    ) -> bool {
+        let shared = self.shared();
+        while pending != 0 {
+            let idx = pending.trailing_zeros() as usize;
+            pending &= pending - 1;
+            let sig = idx + 1;
+            let action = resolve_action(&shared, sig);
+            if pred(sig, action) {
+                return true;
+            }
+        }
+        false
     }
 
     pub fn restore_from_sigreturn(&self, process: &Process, tf: &mut TrapFrame) -> AxResult<usize> {
@@ -408,6 +463,13 @@ fn resolve_action(shared: &SignalShared, sig: usize) -> SignalAction {
         SIG_DFL => SignalAction::Default(default_action(sig)),
         _ => SignalAction::Handler(act),
     }
+}
+
+fn is_ignored_action(action: SignalAction) -> bool {
+    matches!(
+        action,
+        SignalAction::Ignore | SignalAction::Default(DefaultSignalAction::Ignore)
+    )
 }
 
 #[cfg(target_arch = "riscv64")]
@@ -563,7 +625,19 @@ pub fn can_signal(caller: &Process, target: &Process) -> bool {
 }
 
 pub fn queue_signal_to_process(process: &Process, sig: usize) -> bool {
-    process.signal_shared().queue_process_signal(sig)
+    let queued = process.signal_shared().queue_process_signal(sig);
+    if queued {
+        for thread in list_threads_for_signal(process) {
+            thread.signal_wait_queue().notify_all(true);
+        }
+        if sig != SIGCHLD as usize
+            && let Some(tid) = pick_thread_for_process_signal(process)
+            && let Some(thread) = super::thread_by_tid(process, tid)
+        {
+            thread.notify_signal_pending();
+        }
+    }
+    queued
 }
 
 pub fn queue_signal_to_thread(thread: &Thread, sig: usize) -> bool {

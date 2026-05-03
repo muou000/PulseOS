@@ -6,7 +6,7 @@ use core::{
 
 use axerrno::{AxError, AxResult};
 use axhal::context::TrapFrame;
-use axtask::{AxTaskRef, TaskExtSwitch, def_task_ext};
+use axtask::{AxTaskRef, TaskExtSwitch, WaitQueue, def_task_ext};
 use spin::Mutex;
 
 use super::{Process, SignalAltStack, ThreadSignal};
@@ -70,6 +70,7 @@ impl Thread {
     }
 
     pub fn notify_signal_pending(&self) {
+        self.signal.notify_waiters();
         if let Some(task) = self.task_ref.lock().clone() {
             axtask::wake_task(task, true);
         }
@@ -100,15 +101,23 @@ impl Thread {
     }
 
     pub fn has_pending_signal(&self) -> bool {
-        self.signal.has_pending_unblocked()
+        self.signal.has_deliverable_pending_signal()
     }
 
     pub fn has_pending_unblocked_signal_not_in_set(&self, set: u64) -> bool {
         self.signal.has_pending_unblocked_not_in_set(set)
     }
 
+    pub fn has_waitset_signal(&self, waitset: u64) -> bool {
+        self.signal.has_waitset_signal(waitset)
+    }
+
     pub fn dequeue_waitset_signal(&self, waitset: u64) -> Option<usize> {
         self.signal.dequeue_waitset(waitset)
+    }
+
+    pub fn signal_wait_queue(&self) -> &WaitQueue {
+        self.signal.wait_queue()
     }
 
     pub fn restore_from_sigreturn(&self, tf: &mut TrapFrame) -> AxResult<usize> {

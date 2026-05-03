@@ -7,6 +7,10 @@ license.workspace = true
 homepage.workspace = true
 repository.workspace = true
 
+[features]
+default = ["irq"]
+irq = ["axtask/irq"]
+
 [dependencies]
 axalloc.workspace = true
 axhal.workspace = true
