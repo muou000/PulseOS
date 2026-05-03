@@ -70,6 +70,7 @@ pub fn syscall_handler(tf: &mut TrapFrame, syscall_num: usize) -> isize {
         ret
     );
 
+    set_syscall_ret(tf, ret);
     if let Some(delivery) = pulse_core::task::check_signals_and_deliver(thread.as_ref(), tf) {
         use pulse_core::task::{DefaultSignalAction, SignalAction};
         match delivery.action {
@@ -92,7 +93,47 @@ pub fn syscall_handler(tf: &mut TrapFrame, syscall_num: usize) -> isize {
     }
     process.mark_user_resume();
 
-    ret
+    syscall_ret(tf)
+}
+
+#[cfg(target_arch = "riscv64")]
+fn set_syscall_ret(tf: &mut TrapFrame, ret: isize) {
+    tf.regs.a0 = ret as usize;
+}
+
+#[cfg(target_arch = "riscv64")]
+fn syscall_ret(tf: &TrapFrame) -> isize {
+    tf.regs.a0 as isize
+}
+
+#[cfg(target_arch = "loongarch64")]
+fn set_syscall_ret(tf: &mut TrapFrame, ret: isize) {
+    tf.regs.a0 = ret as usize;
+}
+
+#[cfg(target_arch = "loongarch64")]
+fn syscall_ret(tf: &TrapFrame) -> isize {
+    tf.regs.a0 as isize
+}
+
+#[cfg(target_arch = "aarch64")]
+fn set_syscall_ret(tf: &mut TrapFrame, ret: isize) {
+    tf.r[0] = ret as u64;
+}
+
+#[cfg(target_arch = "aarch64")]
+fn syscall_ret(tf: &TrapFrame) -> isize {
+    tf.r[0] as isize
+}
+
+#[cfg(target_arch = "x86_64")]
+fn set_syscall_ret(tf: &mut TrapFrame, ret: isize) {
+    tf.rax = ret as u64;
+}
+
+#[cfg(target_arch = "x86_64")]
+fn syscall_ret(tf: &TrapFrame) -> isize {
+    tf.rax as isize
 }
 
 fn syscall_dispatcher(

@@ -16,11 +16,11 @@ use axhal::{
 use axmm::{AddrSpace, Backend};
 use axtask::{AxTaskRef, TaskInner, WaitQueue};
 use kernel_guard::NoPreemptIrqSave;
-use linux_raw_sys::general::{RLIMIT_MEMLOCK, RLIMIT_NOFILE, RLIMIT_STACK, rlimit64};
+use linux_raw_sys::general::{RLIMIT_MEMLOCK, RLIMIT_NOFILE, RLIMIT_STACK, SIGCHLD, rlimit64};
 use memory_addr::{MemoryAddr, PhysAddr, VirtAddr, va};
 use spin::Mutex;
 
-use super::{SignalShared, Thread, current_thread};
+use super::{SignalShared, Thread, current_thread, queue_signal_to_process};
 use crate::{
     config::*,
     fd_table::{FD_LIMIT, FdTable, SharedFdTable, stdio_entries},
@@ -1172,6 +1172,7 @@ impl Process {
             .as_ref()
             .and_then(|parent| parent.upgrade());
         if let Some(parent) = parent {
+            let _ = queue_signal_to_process(parent.as_ref(), SIGCHLD as usize);
             // The exiting task is still on its own kernel stack here.
             // Wake waiters without forcing an immediate reschedule from inside
             // the teardown path.
