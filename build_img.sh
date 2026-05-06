@@ -161,6 +161,17 @@ patch_loongarch64_musl_sched_stubs() {
     ' "${ld_musl}"
 }
 
+ensure_loongarch64_gnu_libdir_compat() {
+    local stage_dir="$1"
+    local usr_lib64="${stage_dir}/usr/lib64"
+
+    # Some LoongArch64 glibc binaries resolve their default search path via
+    # /usr/lib64, while this image stages the GNU libc payload in /lib64.
+    # Keep both locations available by pointing /usr/lib64 back at /lib64.
+    mkdir -p "${stage_dir}/usr"
+    ln -sfn ../lib64 "${usr_lib64}"
+}
+
 build_one_arch() {
     local arch="$1"
     local base_tar
@@ -199,6 +210,7 @@ build_one_arch() {
 
     if [[ "${arch}" == "loongarch64" ]]; then
         patch_loongarch64_musl_sched_stubs "${stage_dir}"
+        ensure_loongarch64_gnu_libdir_compat "${stage_dir}"
     fi
 
     local img_mib
