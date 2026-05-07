@@ -289,6 +289,8 @@ pub fn init_filesystems(mut block_devs: AxDeviceContainer<AxBlockDevice>) {
 
     let shm_fs = fs::new_tmpfs();
     mount_builtin_fs(&cx, "/dev/shm", &shm_fs, "tmpfs", "rw,nosuid,nodev,noexec,relatime");
+    let tmp_fs = fs::new_tmpfs();
+    mount_builtin_fs(&cx, "/tmp", &tmp_fs, "tmpfs", "rw,nosuid,nodev,relatime");
 
     ROOT_FS_CONTEXT.call_once(|| cx.clone());
     *FS_CONTEXT.lock() = cx;
