@@ -60,6 +60,7 @@ axfs-ng-vfs = { path = "vendor/axfs-ng-vfs" }
 ext4_rs = { path = "vendor/ext4_rs" }
 axcpu = { path = "vendor/axcpu"}
 axplat-loongarch64-qemu-virt = { path = "vendor/axplat-loongarch64-qemu-virt" }
+axio = { path = "vendor/axio" }
 
 [package]
 name = "Pulse"
