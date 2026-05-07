@@ -246,7 +246,11 @@ fn build_auxv(
         .map_err(|_| AxError::InvalidExecutable)?;
     let parser = ELFParser::new(&headers, main_bias).map_err(|_| AxError::InvalidExecutable)?;
 
-    let auxv: Vec<AuxEntry> = parser.aux_vector(PAGE_SIZE_4K, interp_base).collect();
+    let mut auxv: Vec<AuxEntry> = parser.aux_vector(PAGE_SIZE_4K, interp_base).collect();
+    #[cfg(target_arch = "loongarch64")]
+    auxv.push(AuxEntry::new(AuxType::HWCAP, (1 << 0) | (1 << 1) | (1 << 2) | (1 << 3)));
+    #[cfg(target_arch = "riscv64")]
+    auxv.push(AuxEntry::new(AuxType::HWCAP, (1 << 0) | (1 << 2) | (1 << 3) | (1 << 4) | (1 << 5) | (1 << 6)));
     Ok(auxv)
 }
 

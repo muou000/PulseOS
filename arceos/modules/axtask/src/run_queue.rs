@@ -1,7 +1,7 @@
-use alloc::sync::Weak;
 use alloc::{collections::VecDeque, sync::Arc};
 use core::mem::MaybeUninit;
-use core::sync::atomic::{AtomicU64, Ordering};
+#[cfg(feature = "smp")]
+use alloc::sync::Weak;
 
 use axhal::percpu::this_cpu_id;
 use axsched::BaseScheduler;
