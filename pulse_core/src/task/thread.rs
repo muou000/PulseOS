@@ -208,6 +208,7 @@ impl Thread {
             self.process.group_exiting(),
             exit_code
         );
+        self.task_ref.lock().take();
         self.run_exit_hooks();
         let final_code = if self.process.group_exiting() {
             self.process.group_exit_code()
