@@ -18,7 +18,10 @@ pub(crate) struct Ext4Disk<D: BlockDriverOps> {
 impl<D: BlockDriverOps> Ext4Disk<D> {
     pub(crate) fn new(dev: D) -> Arc<Self> {
         let sector_size = dev.block_size();
-        Arc::new(Self { dev: Mutex::new(dev), sector_size })
+        Arc::new(Self {
+            dev: Mutex::new(dev),
+            sector_size,
+        })
     }
 
     fn byte_range(&self, offset: usize, len: usize) -> (u64, usize, usize) {
@@ -35,11 +38,26 @@ impl<D: BlockDriverOps + 'static> BlockDevice for Ext4Disk<D> {
         let (first_block, inner_offset, blocks) = self.byte_range(offset, BLOCK_SIZE);
         let mut raw = vec![0; blocks * self.sector_size];
         let mut dev = self.dev.lock();
+        let total_blocks = dev.num_blocks();
         for i in 0..blocks {
             let start = i * self.sector_size;
             let end = start + self.sector_size;
-            dev.read_block(first_block + i as u64, &mut raw[start..end])
-                .expect("failed to read block for ext4_rs");
+            let block_id = first_block + i as u64;
+            if let Err(err) = dev.read_block(block_id, &mut raw[start..end]) {
+                log::error!(
+                    "ext4 read_offset failed: offset={}, first_block={}, block_id={}, blocks={}, \
+                     sector_size={}, num_blocks={}, buf_len={}, err={:?}",
+                    offset,
+                    first_block,
+                    block_id,
+                    blocks,
+                    self.sector_size,
+                    total_blocks,
+                    raw[start..end].len(),
+                    err
+                );
+                panic!("failed to read block for ext4_rs");
+            }
         }
         raw[inner_offset..inner_offset + BLOCK_SIZE].to_vec()
     }
@@ -48,18 +66,47 @@ impl<D: BlockDriverOps + 'static> BlockDevice for Ext4Disk<D> {
         let (first_block, inner_offset, blocks) = self.byte_range(offset, data.len());
         let mut raw = vec![0; blocks * self.sector_size];
         let mut dev = self.dev.lock();
+        let total_blocks = dev.num_blocks();
         for i in 0..blocks {
             let start = i * self.sector_size;
             let end = start + self.sector_size;
-            dev.read_block(first_block + i as u64, &mut raw[start..end])
-                .expect("failed to read block before writing ext4_rs data");
+            let block_id = first_block + i as u64;
+            if let Err(err) = dev.read_block(block_id, &mut raw[start..end]) {
+                log::error!(
+                    "ext4 write_offset pre-read failed: offset={}, first_block={}, block_id={}, \
+                     blocks={}, sector_size={}, num_blocks={}, buf_len={}, err={:?}",
+                    offset,
+                    first_block,
+                    block_id,
+                    blocks,
+                    self.sector_size,
+                    total_blocks,
+                    raw[start..end].len(),
+                    err
+                );
+                panic!("failed to read block before writing ext4_rs data");
+            }
         }
         raw[inner_offset..inner_offset + data.len()].copy_from_slice(data);
         for i in 0..blocks {
             let start = i * self.sector_size;
             let end = start + self.sector_size;
-            dev.write_block(first_block + i as u64, &raw[start..end])
-                .expect("failed to write block for ext4_rs");
+            let block_id = first_block + i as u64;
+            if let Err(err) = dev.write_block(block_id, &raw[start..end]) {
+                log::error!(
+                    "ext4 write_offset failed: offset={}, first_block={}, block_id={}, blocks={}, \
+                     sector_size={}, num_blocks={}, buf_len={}, err={:?}",
+                    offset,
+                    first_block,
+                    block_id,
+                    blocks,
+                    self.sector_size,
+                    total_blocks,
+                    raw[start..end].len(),
+                    err
+                );
+                panic!("failed to write block for ext4_rs");
+            }
         }
     }
 }

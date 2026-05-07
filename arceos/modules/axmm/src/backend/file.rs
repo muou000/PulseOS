@@ -18,6 +18,25 @@ fn sync_executable_mapping(flags: MappingFlags) {
     unsafe {
         core::arch::asm!("fence.i", options(nostack, preserves_flags));
     }
+    #[cfg(target_arch = "loongarch64")]
+    unsafe {
+        core::arch::asm!("dbar 0; ibar 0", options(nostack, preserves_flags));
+    }
+}
+
+fn read_file_page(mapping: &FileMapping, dst: &mut [u8], file_offset: u64, read_len: usize) -> bool {
+    let mut filled = 0;
+    while filled < read_len {
+        match mapping
+            .file
+            .read_at(&mut dst[filled..read_len], file_offset + filled as u64)
+        {
+            Ok(0) => return false,
+            Ok(bytes) => filled += bytes,
+            Err(_) => return false,
+        }
+    }
+    true
 }
 
 #[derive(Clone)]
@@ -153,13 +172,9 @@ impl Backend {
             core::slice::from_raw_parts_mut(phys_to_virt(frame).as_mut_ptr(), PAGE_SIZE_4K)
         };
         if let Some((file_offset, read_len)) = mapping.page_read_window(page_addr) {
-            match mapping.file.read_at(&mut dst[..read_len], file_offset) {
-                Ok(bytes) if bytes == read_len => {}
-                Ok(bytes) => dst[bytes..read_len].fill(0),
-                Err(_) => {
-                    dealloc_frame(frame);
-                    return false;
-                }
+            if !read_file_page(mapping, dst, file_offset, read_len) {
+                dealloc_frame(frame);
+                return false;
             }
         }
 
