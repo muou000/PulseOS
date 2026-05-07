@@ -26,8 +26,10 @@ fn main() {
             proc.activate();
             info!("User process address space activated");
 
-            #[cfg(feature = "testcode")]
+            #[cfg(all(feature = "testcode", target_arch = "riscv64"))]
             let shell_args: &[&str] = &["sh", "-c", include_str!("testcode_cmd.sh").trim()];
+            #[cfg(all(feature = "testcode", target_arch = "loongarch64"))]
+            let shell_args: &[&str] = &["sh", "-c", include_str!("testcode_cmd_la.sh").trim()];
             #[cfg(not(feature = "testcode"))]
             let shell_args: &[&str] = &["sh"];
 
