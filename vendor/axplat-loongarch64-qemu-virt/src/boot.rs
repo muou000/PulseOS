@@ -72,7 +72,7 @@ unsafe extern "C" fn _start() -> ! {
         ori         $t0, $zero, 0x11    # CSR_DMW1_MAT | CSR_DMW1_PLV0
         lu52i.d     $t0, $t0, -1792     # CA, PLV0, 0x9000 xxxx xxxx xxxx
         csrwr       $t0, 0x181          # LOONGARCH_CSR_DMWIN1
-        la.global   $t0, 2f
+        la.pcrel    $t0, 2f
         li.d        $t1, {dmw_cached_base}
         or          $t0, $t0, $t1
         jirl        $zero, $t0, 0
@@ -80,7 +80,7 @@ unsafe extern "C" fn _start() -> ! {
     2:
 
         # Setup Stack
-        la.global   $sp, {boot_stack}
+        la.pcrel    $sp, {boot_stack}
         li.d        $t0, {boot_stack_size}
         add.d       $sp, $sp, $t0       # setup boot stack
 
@@ -93,9 +93,20 @@ unsafe extern "C" fn _start() -> ! {
         li.d        $t0, {phys_virt_offset}
         add.d       $sp, $sp, $t0       # switch boot stack to higher-half VA
 
+        # Switch PC to higher-half VA so that subsequent PC-relative symbol
+        # accesses resolve to the linked addresses (0xffff_8000_...) instead
+        # of DMW1 addresses (0x9000_...).
+        la.pcrel    $t0, 3f
+        li.d        $t1, {dmw_virt_mask}
+        and         $t0, $t0, $t1
+        li.d        $t1, {phys_virt_offset}
+        add.d       $t0, $t0, $t1
+        jirl        $zero, $t0, 0
+
+    3:
         csrrd       $a0, 0x20           # cpuid
         li.d        $a1, 0              # TODO: parse dtb
-        la.abs      $t0, {entry}
+        la.pcrel    $t0, {entry}
         jirl        $zero, $t0, 0",
         dmw_virt_mask = const DMW_VIRT_MASK,
         dmw_cached_base = const DMW_CACHED_BASE,
@@ -121,13 +132,13 @@ unsafe extern "C" fn _start_secondary() -> ! {
         ori          $t0, $zero, 0x11    # CSR_DMW1_MAT | CSR_DMW1_PLV0
         lu52i.d      $t0, $t0, -1792     # CA, PLV0, 0x9000 xxxx xxxx xxxx
         csrwr        $t0, 0x181          # LOONGARCH_CSR_DMWIN1
-        la.global    $t0, 2f
+        la.pcrel     $t0, 2f
         li.d         $t1, {dmw_cached_base}
         or           $t0, $t0, $t1
         jirl         $zero, $t0, 0
 
     2:
-        la.abs       $t0, {sm_boot_stack_top}
+        la.pcrel     $t0, {sm_boot_stack_top}
         ld.d         $sp, $t0,0          # read boot stack top
 
         # Init MMU
@@ -138,8 +149,17 @@ unsafe extern "C" fn _start_secondary() -> ! {
         li.d         $t0, {phys_virt_offset}
         add.d        $sp, $sp, $t0       # switch boot stack to higher-half VA
 
+        # Switch PC to higher-half VA
+        la.pcrel     $t0, 3f
+        li.d         $t1, {dmw_virt_mask}
+        and          $t0, $t0, $t1
+        li.d         $t1, {phys_virt_offset}
+        add.d        $t0, $t0, $t1
+        jirl         $zero, $t0, 0
+
+    3:
         csrrd        $a0, 0x20                  # cpuid
-        la.abs       $t0, {entry}
+        la.pcrel     $t0, {entry}
         jirl         $zero, $t0, 0",
         dmw_virt_mask = const DMW_VIRT_MASK,
         dmw_cached_base = const DMW_CACHED_BASE,
