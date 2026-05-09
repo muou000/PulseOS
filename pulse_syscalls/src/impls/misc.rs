@@ -172,7 +172,7 @@ pub fn sys_prlimit64(pid: i32, resource: usize, new_limit: usize, old_limit: usi
         return -LinuxError::ESRCH.code() as isize;
     }
     let resource = resource as u32;
-    if resource != RLIMIT_STACK && resource != RLIMIT_NOFILE && resource != RLIMIT_MEMLOCK {
+    if resource != RLIMIT_STACK && resource != RLIMIT_NOFILE && resource != RLIMIT_MEMLOCK && resource != RLIMIT_CORE {
         return -LinuxError::EINVAL.code() as isize;
     }
 

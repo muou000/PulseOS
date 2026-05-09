@@ -16,6 +16,9 @@ fn main() {
     axruntime::vdso::set_update_hook(starry_vdso::vdso::update_vdso_data);
     info!("vDSO data initialized");
 
+    pulse_core::task::init_itimer_hook();
+    info!("itimer hook registered");
+
     use axtask::TaskInner;
     const SHELL_ELF_PATH: &str = "/bin/sh";
     let mut inner = TaskInner::new(

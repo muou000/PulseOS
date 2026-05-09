@@ -3,7 +3,7 @@ use axhal::{
     mem::phys_to_virt,
     paging::{MappingFlags, PageSize, PageTable},
 };
-use memory_addr::{MemoryAddr, PAGE_SIZE_4K, PageIter4K, VirtAddr};
+use memory_addr::{MemoryAddr, PAGE_SIZE_4K, PageIter4K, PhysAddr, VirtAddr};
 
 use super::{
     Backend,
@@ -39,6 +39,23 @@ fn read_file_page(mapping: &FileMapping, dst: &mut [u8], file_offset: u64, read_
     true
 }
 
+/// Write a page's content (from physical frame) back to the CachedFile.
+fn writeback_phys_page(mapping: &FileMapping, page_addr: VirtAddr, frame_paddr: PhysAddr) -> bool {
+    let Some((file_offset, write_len)) = mapping.page_read_window(page_addr) else {
+        return true;
+    };
+    if write_len == 0 {
+        return true;
+    }
+    let src = unsafe {
+        core::slice::from_raw_parts(phys_to_virt(frame_paddr).as_ptr(), write_len)
+    };
+    match mapping.file.write_at(src, file_offset) {
+        Ok(written) => written == write_len,
+        Err(_) => false,
+    }
+}
+
 #[derive(Clone)]
 pub struct FileMapping {
     start: VirtAddr,
@@ -46,6 +63,7 @@ pub struct FileMapping {
     file_flags: FileFlags,
     file_offset: usize,
     file_bytes: usize,
+    shared: bool,
 }
 
 impl FileMapping {
@@ -67,6 +85,10 @@ impl FileMapping {
         self.file_flags.contains(Self::required_flags(flags))
     }
 
+    pub(crate) fn is_shared(&self) -> bool {
+        self.shared
+    }
+
     fn page_read_window(&self, page_addr: VirtAddr) -> Option<(u64, usize)> {
         let relative = page_addr.as_usize().checked_sub(self.start.as_usize())?;
         if relative >= self.file_bytes {
@@ -85,6 +107,7 @@ impl Backend {
         file_flags: FileFlags,
         file_offset: usize,
         file_bytes: usize,
+        shared: bool,
     ) -> Self {
         Self::File(FileMapping {
             start,
@@ -92,6 +115,7 @@ impl Backend {
             file_flags,
             file_offset,
             file_bytes,
+            shared,
         })
     }
 
@@ -104,12 +128,13 @@ impl Backend {
         mapping: &FileMapping,
     ) -> bool {
         debug!(
-            "map_file: [{:#x}, {:#x}) {:?} offset={:#x} bytes={:#x}",
+            "map_file: [{:#x}, {:#x}) {:?} offset={:#x} bytes={:#x} shared={}",
             start,
             start + size,
             flags,
             mapping.file_offset,
-            mapping.file_bytes
+            mapping.file_bytes,
+            mapping.shared,
         );
         if !mapping.permits(flags) {
             return false;
@@ -126,6 +151,11 @@ impl Backend {
         let Some(pages) = PageIter4K::new(start, start + size) else {
             return false;
         };
+        // If this is a shared mapping, writeback dirty pages before unmapping.
+        let mapping = match self {
+            Backend::File(m) => m,
+            _ => return false,
+        };
         for addr in pages {
             if let Ok((frame, page_size, tlb)) = pt.unmap(addr) {
                 if page_size != PageSize::Size4K {
@@ -133,7 +163,52 @@ impl Backend {
                 }
                 tlb.flush();
                 if frame.as_usize() != 0 {
-                    dealloc_frame(frame);
+                    if mapping.shared {
+                        let Some((file_offset, _)) = mapping.page_read_window(addr) else {
+                            continue;
+                        };
+                        let pn = (file_offset / PAGE_SIZE_4K as u64) as u32;
+                        let _ = mapping.file.mark_page_dirty(pn);
+                    } else {
+                        dealloc_frame(frame);
+                    }
+                }
+            }
+        }
+        true
+    }
+
+    /// Write back all resident pages in the given range to the underlying file.
+    /// Only meaningful for shared file mappings.
+    pub(crate) fn writeback_file_range_impl(
+        &self,
+        start: VirtAddr,
+        size: usize,
+        pt: &PageTable,
+    ) -> bool {
+        let mapping = match self {
+            Backend::File(m) => m,
+            _ => return false,
+        };
+        if !mapping.shared {
+            return true; // Nothing to do for private mappings.
+        }
+        if size == 0 {
+            return true;
+        }
+        let Some(pages) = PageIter4K::new(start, start + size) else {
+            return false;
+        };
+        for addr in pages {
+            if let Ok((frame, _flags, _)) = pt.query(addr) {
+                if frame.as_usize() != 0 {
+                    let Some((file_offset, _)) = mapping.page_read_window(addr) else {
+                        continue;
+                    };
+                    let pn = (file_offset / PAGE_SIZE_4K as u64) as u32;
+                    if mapping.file.mark_page_dirty(pn).is_err() {
+                        return false;
+                    }
                 }
             }
         }
@@ -163,6 +238,25 @@ impl Backend {
                     .map(|(_, tlb)| tlb.flush())
                     .is_ok();
             }
+        }
+
+        if mapping.shared {
+            let Some((file_offset, _)) = mapping.page_read_window(page_addr) else {
+                return false;
+            };
+            let pn = (file_offset / PAGE_SIZE_4K as u64) as u32;
+            let frame = match mapping.file.get_shared_page_paddr(pn) {
+                Ok(paddr) => paddr,
+                Err(_) => return false,
+            };
+
+            return pt
+                .map(page_addr, frame, PageSize::Size4K, orig_flags)
+                .map(|tlb| {
+                    tlb.flush();
+                    sync_executable_mapping(orig_flags);
+                })
+                .is_ok();
         }
 
         let Some(frame) = alloc_frame(true) else {

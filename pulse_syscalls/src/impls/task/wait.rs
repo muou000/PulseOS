@@ -24,16 +24,18 @@ pub fn sys_wait4(pid: isize, status: usize, options: i32, rusage: usize) -> isiz
 
         if let Some(child_proc) = process.reap_zombie_child(pid) {
             let exited_pid = child_proc.pid() as isize;
-            let exit_code = child_proc.exit_code();
+            let _exit_code = child_proc.exit_code();
             let now_ns = axhal::time::monotonic_time_nanos() as u64;
             let (child_utime_ns, child_stime_ns) = child_proc.snapshot_cpu_time_ns(now_ns);
             process.add_child_time_ns(child_utime_ns, child_stime_ns);
             child_proc.wait_task_refs_exited();
 
             if status != 0 {
-                // In Linux, WIFEXITED is true and WEXITSTATUS is `exit_code & 0xff`,
-                // so the status word is `(exit_code & 0xff) << 8`.
-                let wait_status = (exit_code & 0xff) << 8;
+                // 使用 Process 统一计算 wait status word，正确区分：
+                //   正常退出: (exit_code & 0xff) << 8  → WIFEXITED 为真
+                //   信号终止: signo & 0x7f             → WIFSIGNALED 为真
+                //   信号终止+core dump: signo | 0x80   → WCOREDUMP 也为真
+                let wait_status = child_proc.wait_status_word();
                 let write_result = write_user_i32(process, status, wait_status);
                 if write_result < 0 {
                     process.add_child(child_proc);

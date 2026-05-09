@@ -97,3 +97,22 @@ pub fn thread_by_tid(process: &Process, tid: u64) -> Option<Arc<Thread>> {
     let task = process.task_ref_by_tid(tid)?;
     thread_handle_from_task(&task).map(|handle| handle.thread_arc())
 }
+
+/// Timer tick hook for checking itimers across all processes.
+/// Called from `axtask::on_timer_tick()` in interrupt context.
+/// Must not take any blocking locks.
+fn itimer_tick_hook() {
+    let procs = processes_snapshot();
+    for proc in procs {
+        if proc.is_zombie() {
+            continue;
+        }
+        proc.check_itimer_real_tick();
+    }
+}
+
+/// Register the itimer tick hook with axtask. Should be called once during
+/// pulse_core initialization.
+pub fn init_itimer_hook() {
+    axtask::register_timer_hook(itimer_tick_hook);
+}

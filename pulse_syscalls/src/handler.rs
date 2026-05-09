@@ -75,7 +75,12 @@ pub fn syscall_handler(tf: &mut TrapFrame, syscall_num: usize) -> isize {
         use pulse_core::task::{DefaultSignalAction, SignalAction};
         match delivery.action {
             SignalAction::Default(DefaultSignalAction::Terminate) => {
-                process.begin_group_exit(128 + delivery.sig as i32);
+                process.set_exit_signal(delivery.sig as i32, false);
+                process.begin_group_exit(delivery.sig as i32);
+            }
+            SignalAction::Default(DefaultSignalAction::CoreDump) => {
+                process.set_exit_signal(delivery.sig as i32, true);
+                process.begin_group_exit(delivery.sig as i32);
             }
             SignalAction::Default(DefaultSignalAction::Stop)
             | SignalAction::Default(DefaultSignalAction::Continue)
@@ -203,7 +208,10 @@ fn syscall_dispatcher(
         Sysno::munlock => impls::sys_munlock(args[0], args[1]),
         Sysno::mlockall => impls::sys_mlockall(args[0]),
         Sysno::munlockall => impls::sys_munlockall(),
+        Sysno::msync => impls::sys_msync(args[0], args[1], args[2]),
 
+        Sysno::setitimer => impls::sys_setitimer(args[0], args[1], args[2]),
+        Sysno::getitimer => impls::sys_getitimer(args[0], args[1]),
         Sysno::nanosleep => impls::sys_nanosleep(args[0], args[1]),
         Sysno::clock_nanosleep => {
             impls::sys_clock_nanosleep(args[0] as i32, args[1], args[2], args[3])
@@ -213,6 +221,7 @@ fn syscall_dispatcher(
         Sysno::gettimeofday => impls::sys_gettimeofday(args[0], args[1]),
         Sysno::times => impls::sys_times(args[0]),
         Sysno::prlimit64 => impls::sys_prlimit64(args[0] as i32, args[1], args[2], args[3]),
+        Sysno::getrlimit => impls::sys_prlimit64(0, args[0], 0, args[1]),
         Sysno::getrandom => impls::sys_getrandom(args[0], args[1], args[2]),
 
         Sysno::set_tid_address => impls::sys_set_tid_address(args[0]),
@@ -281,6 +290,8 @@ fn syscall_dispatcher(
         Sysno::get_robust_list => impls::sys_get_robust_list(args[0], args[1], args[2]),
         Sysno::faccessat => impls::sys_faccessat(args[0] as i32, args[1], args[2], 0),
         Sysno::faccessat2 => impls::sys_faccessat(args[0] as i32, args[1], args[2], args[3]),
+        Sysno::fchmodat => impls::sys_fchmodat(args[0] as i32, args[1], args[2], 0),
+        Sysno::fchownat => impls::sys_fchownat(args[0] as i32, args[1], args[2], args[3], args[4]),
         Sysno::lseek => impls::sys_lseek(args[0], args[1], args[2]),
         Sysno::ftruncate => impls::sys_ftruncate(args[0], args[1]),
         Sysno::execve => {

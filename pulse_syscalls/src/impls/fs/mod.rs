@@ -14,8 +14,8 @@ pub(crate) use io::{
     sys_socketpair, sys_write, sys_writev,
 };
 pub(crate) use meta::{
-    sys_faccessat, sys_fstat, sys_fstatat, sys_fstatfs, sys_readlinkat, sys_statfs, sys_statx,
-    sys_utimensat,
+    sys_faccessat, sys_fchmodat, sys_fchownat, sys_fstat, sys_fstatat, sys_fstatfs,
+    sys_readlinkat, sys_statfs, sys_statx, sys_utimensat,
 };
 pub(crate) use path::{
     sys_mkdirat, sys_mount, sys_openat, sys_renameat2, sys_umount2, sys_unlinkat,

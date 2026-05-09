@@ -1,5 +1,4 @@
 use alloc::{sync::Arc, vec::Vec};
-use core::sync::atomic::{AtomicBool, Ordering};
 
 use axerrno::AxError;
 use axfs::{CachedFile, FileFlags};
@@ -13,9 +12,13 @@ use crate::LinuxError;
 const PROT_READ: usize = 0x1;
 const PROT_WRITE: usize = 0x2;
 const PROT_EXEC: usize = 0x4;
+const MAP_SHARED: usize = 0x01;
+const MAP_PRIVATE: usize = 0x02;
 const MAP_ANONYMOUS: usize = 0x20;
 const PAGE_SIZE: usize = 0x1000;
-static FILE_MMAP_SIMPLIFIED_WARNED: AtomicBool = AtomicBool::new(false);
+const MS_ASYNC: usize = 1;
+const MS_SYNC: usize = 2;
+const MS_INVALIDATE: usize = 4;
 
 fn user_space_end() -> Option<usize> {
     pulse_core::config::USER_SPACE_BASE.checked_add(pulse_core::config::USER_SPACE_SIZE)
@@ -284,13 +287,17 @@ pub fn sys_mmap(
     }
 
     let file_backed = (flags & MAP_ANONYMOUS) == 0;
+
+    // Determine shared/private semantics.
+    let is_shared = (flags & MAP_SHARED) != 0;
+    let is_private = (flags & MAP_PRIVATE) != 0;
+    // MAP_SHARED and MAP_PRIVATE are mutually exclusive; exactly one must be set.
+    if is_shared == is_private {
+        return -LinuxError::EINVAL.code() as isize;
+    }
+
     if file_backed && fd < 0 {
         return -LinuxError::EBADF.code() as isize;
-    }
-    if file_backed && !FILE_MMAP_SIMPLIFIED_WARNED.swap(true, Ordering::AcqRel) {
-        axlog::warn!(
-            "sys_mmap: file-backed mappings use lazy fault-in; shared/writeback semantics are incomplete"
-        );
     }
     let file = if file_backed {
         match get_fd_object(fd as usize) {
@@ -379,6 +386,7 @@ pub fn sys_mmap(
             file_flags,
             offset,
             length,
+            is_shared,
         )
     } else {
         aspace.map_alloc(VirtAddr::from(map_addr), aligned_length, map_flags, false)
@@ -589,4 +597,54 @@ pub fn sys_munlockall() -> isize {
     };
     proc.memlock_unlock_all();
     0
+}
+
+pub fn sys_msync(addr: usize, length: usize, flags: usize) -> isize {
+    axlog::debug!(
+        "sys_msync: addr={:#x}, length={:#x}, flags={:#x}",
+        addr,
+        length,
+        flags
+    );
+
+    // Validate flags: MS_ASYNC and MS_SYNC are mutually exclusive.
+    let has_async = (flags & MS_ASYNC) != 0;
+    let has_sync = (flags & MS_SYNC) != 0;
+    if has_async && has_sync {
+        return -LinuxError::EINVAL.code() as isize;
+    }
+    if !has_async && !has_sync && (flags & MS_INVALIDATE) == 0 {
+        return -LinuxError::EINVAL.code() as isize;
+    }
+    // Reject unknown bits.
+    if (flags & !(MS_ASYNC | MS_SYNC | MS_INVALIDATE)) != 0 {
+        return -LinuxError::EINVAL.code() as isize;
+    }
+
+    // addr must be page-aligned.
+    if addr & (PAGE_SIZE - 1) != 0 {
+        return -LinuxError::EINVAL.code() as isize;
+    }
+
+    if length == 0 {
+        return 0;
+    }
+
+    if !is_user_range(addr, length) {
+        return -LinuxError::ENOMEM.code() as isize;
+    }
+
+    let proc = match pulse_core::task::current_process() {
+        Ok(proc) => proc,
+        Err(e) => return -e.code() as isize,
+    };
+
+    let aligned_length = (length + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
+    let aspace_handle = proc.aspace_handle();
+    let aspace = aspace_handle.lock();
+
+    match aspace.writeback_file_range(VirtAddr::from(addr), aligned_length) {
+        Ok(()) => 0,
+        Err(e) => -LinuxError::from(e).code() as isize,
+    }
 }

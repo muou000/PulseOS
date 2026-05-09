@@ -157,6 +157,7 @@ fn load_segments(
                     file_flags_for_segment(&ph),
                     file_start_page,
                     file_bytes,
+                    false, // ELF segments are private mappings
                 )?;
             }
 

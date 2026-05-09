@@ -53,6 +53,8 @@ impl SigAction {
 pub enum DefaultSignalAction {
     Ignore,
     Terminate,
+    /// 终止进程并设置 core dump 标志位（不需要实际写文件）
+    CoreDump,
     Stop,
     Continue,
 }
@@ -452,6 +454,10 @@ fn default_action(sig: usize) -> DefaultSignalAction {
         SIGCHLD | SIGURG | SIGWINCH => DefaultSignalAction::Ignore,
         SIGCONT => DefaultSignalAction::Continue,
         SIGSTOP => DefaultSignalAction::Stop,
+        // POSIX 定义：以下信号的默认动作是终止并产生 core dump
+        // SIGQUIT=3, SIGILL=4, SIGTRAP=5, SIGABRT=6, SIGBUS=7,
+        // SIGFPE=8, SIGSEGV=11, SIGXCPU=24, SIGXFSZ=25, SIGSYS=31
+        3 | 4 | 5 | 6 | 7 | 8 | 11 | 24 | 25 | 31 => DefaultSignalAction::CoreDump,
         _ => DefaultSignalAction::Terminate,
     }
 }
@@ -663,6 +669,7 @@ pub fn check_signals_and_deliver(thread: &Thread, tf: &mut TrapFrame) -> Option<
             Some(SignalDelivery { sig, action })
         }
         SignalAction::Default(DefaultSignalAction::Terminate)
+        | SignalAction::Default(DefaultSignalAction::CoreDump)
         | SignalAction::Default(DefaultSignalAction::Stop)
         | SignalAction::Default(DefaultSignalAction::Continue)
         | SignalAction::Default(DefaultSignalAction::Ignore) => {

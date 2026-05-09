@@ -16,7 +16,7 @@ use axhal::{
 use axmm::{AddrSpace, Backend};
 use axtask::{AxTaskRef, TaskInner, WaitQueue};
 use kernel_guard::NoPreemptIrqSave;
-use linux_raw_sys::general::{RLIMIT_MEMLOCK, RLIMIT_NOFILE, RLIMIT_STACK, SIGCHLD, rlimit64};
+use linux_raw_sys::general::{RLIMIT_CORE, RLIMIT_MEMLOCK, RLIMIT_NOFILE, RLIMIT_STACK, SIGCHLD, rlimit64};
 use memory_addr::{MemoryAddr, PhysAddr, VirtAddr, va};
 use spin::{Lazy, Mutex};
 
@@ -247,6 +247,8 @@ struct RlimitState {
     stack_hard: u64,
     nofile_soft: u64,
     nofile_hard: u64,
+    core_soft: u64,
+    core_hard: u64,
 }
 
 impl Default for RlimitState {
@@ -256,6 +258,8 @@ impl Default for RlimitState {
             stack_hard: DEFAULT_STACK_LIMIT_BYTES,
             nofile_soft: DEFAULT_NOFILE_LIMIT,
             nofile_hard: DEFAULT_NOFILE_LIMIT,
+            core_soft: 0,
+            core_hard: u64::MAX,
         }
     }
 }
@@ -376,6 +380,9 @@ pub struct Process {
     zombie: AtomicBool,
     user_resources_released: AtomicBool,
     exit_code: AtomicI32,
+    /// 信号退出信息。
+    /// 0 = 正常退出，>0 且低 7 位为信号号，bit8 (0x100) 为 core dump 标志
+    exit_signal: AtomicI32,
     group_exiting: AtomicBool,
     group_exit_code: AtomicI32,
     futex_table: FutexTable,
@@ -394,6 +401,10 @@ pub struct Process {
     signal_shared: Arc<SignalShared>,
     exec_path: Mutex<Option<String>>,
     signal_trampoline: Mutex<usize>,
+    /// ITIMER_REAL state: (deadline_ns, interval_ns).
+    /// 0 means the timer is disarmed. Uses atomics for interrupt-context safety.
+    itimer_real_deadline_ns: AtomicU64,
+    itimer_real_interval_ns: AtomicU64,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -648,6 +659,13 @@ impl Process {
                     rlim_max: state.nofile_hard,
                 })
             }
+            RLIMIT_CORE => {
+                let state = self.rlimit_state.lock();
+                Some(rlimit64 {
+                    rlim_cur: state.core_soft,
+                    rlim_max: state.core_hard,
+                })
+            }
             RLIMIT_MEMLOCK => {
                 let state = self.memlock_state.lock();
                 Some(rlimit64 {
@@ -680,6 +698,12 @@ impl Process {
                 let mut state = self.rlimit_state.lock();
                 state.nofile_soft = limit.rlim_cur;
                 state.nofile_hard = limit.rlim_max;
+                Ok(())
+            }
+            RLIMIT_CORE => {
+                let mut state = self.rlimit_state.lock();
+                state.core_soft = limit.rlim_cur;
+                state.core_hard = limit.rlim_max;
                 Ok(())
             }
             RLIMIT_MEMLOCK => {
@@ -923,6 +947,7 @@ impl Process {
             zombie: AtomicBool::new(false),
             user_resources_released: AtomicBool::new(false),
             exit_code: AtomicI32::new(0),
+            exit_signal: AtomicI32::new(0),
             group_exiting: AtomicBool::new(false),
             group_exit_code: AtomicI32::new(0),
             futex_table: FutexTable::new(),
@@ -941,6 +966,8 @@ impl Process {
             signal_shared: SignalShared::new(),
             exec_path: Mutex::new(None),
             signal_trampoline: Mutex::new(0),
+            itimer_real_deadline_ns: AtomicU64::new(0),
+            itimer_real_interval_ns: AtomicU64::new(0),
         }))
     }
 
@@ -1006,6 +1033,7 @@ impl Process {
             zombie: AtomicBool::new(false),
             user_resources_released: AtomicBool::new(false),
             exit_code: AtomicI32::new(0),
+            exit_signal: AtomicI32::new(0),
             group_exiting: AtomicBool::new(false),
             group_exit_code: AtomicI32::new(0),
             futex_table: FutexTable::new(),
@@ -1027,6 +1055,8 @@ impl Process {
             signal_shared,
             exec_path: Mutex::new(None),
             signal_trampoline: Mutex::new(signal_trampoline),
+            itimer_real_deadline_ns: AtomicU64::new(0),
+            itimer_real_interval_ns: AtomicU64::new(0),
         }))
     }
 
@@ -1165,6 +1195,30 @@ impl Process {
         self.exit_code.load(Ordering::Acquire)
     }
 
+    /// 设置信号终止信息。
+    /// - `signo`：终止进程的信号号（SIGABRT=6, SIGSEGV=11 等）
+    /// - `coredump`：是否设置 core dump 标志位（不需要实际写文件）
+    pub fn set_exit_signal(&self, signo: i32, coredump: bool) {
+        let val = if coredump { signo | 0x100 } else { signo };
+        self.exit_signal.store(val, Ordering::Release);
+    }
+
+    /// 计算 Linux `wait4` 的 status word。
+    /// - 正常退出：`(exit_code & 0xff) << 8`（WIFEXITED 为真）
+    /// - 信号终止：`signo & 0x7f`（WIFSIGNALED 为真）
+    /// - 信号终止且 core dump：`(signo & 0x7f) | 0x80`（WCOREDUMP 也为真）
+    pub fn wait_status_word(&self) -> i32 {
+        let sig_val = self.exit_signal.load(Ordering::Acquire);
+        if sig_val == 0 {
+            // 正常退出：(exit_code & 0xff) << 8
+            (self.exit_code.load(Ordering::Acquire) & 0xff) << 8
+        } else {
+            let signo = sig_val & 0x7f;
+            let coredump = if (sig_val & 0x100) != 0 { 0x80i32 } else { 0 };
+            signo | coredump
+        }
+    }
+
     pub fn finish_thread_exit(&self, tid: u64, exit_code: i32) {
         if tid != self.pid() {
             let _ = self.take_task_ref_by_tid(tid);
@@ -1289,6 +1343,73 @@ impl Process {
 
     pub fn read_sys_time_ns(&self) -> u64 {
         self.sys_time_ns.load(Ordering::Relaxed)
+    }
+
+    /// Set ITIMER_REAL. Returns the previous (remaining_ns, interval_ns).
+    /// `value_ns` is the initial timeout in nanoseconds (0 = disarm).
+    /// `interval_ns` is the repeat interval (0 = one-shot).
+    pub fn set_itimer_real(&self, value_ns: u64, interval_ns: u64) -> (u64, u64) {
+        let now_ns = axhal::time::monotonic_time_nanos() as u64;
+        let old_deadline = self.itimer_real_deadline_ns.load(Ordering::Acquire);
+        let old_interval = self.itimer_real_interval_ns.load(Ordering::Acquire);
+        let old_remaining = if old_deadline == 0 {
+            0
+        } else if now_ns >= old_deadline {
+            0
+        } else {
+            old_deadline - now_ns
+        };
+
+        if value_ns == 0 {
+            // Disarm
+            self.itimer_real_deadline_ns.store(0, Ordering::Release);
+            self.itimer_real_interval_ns.store(0, Ordering::Release);
+        } else {
+            let deadline = now_ns.saturating_add(value_ns);
+            self.itimer_real_deadline_ns.store(deadline, Ordering::Release);
+            self.itimer_real_interval_ns.store(interval_ns, Ordering::Release);
+        }
+        (old_remaining, old_interval)
+    }
+
+    /// Get ITIMER_REAL. Returns (remaining_ns, interval_ns).
+    pub fn get_itimer_real(&self) -> (u64, u64) {
+        let now_ns = axhal::time::monotonic_time_nanos() as u64;
+        let deadline = self.itimer_real_deadline_ns.load(Ordering::Acquire);
+        let interval = self.itimer_real_interval_ns.load(Ordering::Acquire);
+        let remaining = if deadline == 0 {
+            0
+        } else if now_ns >= deadline {
+            0
+        } else {
+            deadline - now_ns
+        };
+        (remaining, interval)
+    }
+
+    /// Called from timer tick hook (interrupt context). Checks if ITIMER_REAL
+    /// has expired and sends SIGALRM if so. Returns true if the timer fired.
+    pub fn check_itimer_real_tick(&self) -> bool {
+        let deadline = self.itimer_real_deadline_ns.load(Ordering::Acquire);
+        if deadline == 0 {
+            return false;
+        }
+        let now_ns = axhal::time::monotonic_time_nanos() as u64;
+        if now_ns < deadline {
+            return false;
+        }
+        // Timer expired. Send SIGALRM (signal 14).
+        let _ = queue_signal_to_process(self, 14 /* SIGALRM */);
+        let interval = self.itimer_real_interval_ns.load(Ordering::Acquire);
+        if interval == 0 {
+            // One-shot: disarm
+            self.itimer_real_deadline_ns.store(0, Ordering::Release);
+        } else {
+            // Repeating: advance deadline
+            let new_deadline = deadline.saturating_add(interval);
+            self.itimer_real_deadline_ns.store(new_deadline, Ordering::Release);
+        }
+        true
     }
 
     pub fn complete_vfork(&self) {
