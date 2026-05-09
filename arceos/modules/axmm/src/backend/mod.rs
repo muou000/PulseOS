@@ -102,4 +102,18 @@ impl Backend {
             }
         }
     }
+
+    /// Write back all resident dirty pages in the given range to the
+    /// underlying file. Only meaningful for shared file mappings.
+    pub(crate) fn writeback_file_range(
+        &self,
+        start: VirtAddr,
+        size: usize,
+        pt: &PageTable,
+    ) -> bool {
+        match *self {
+            Self::File(_) => self.writeback_file_range_impl(start, size, pt),
+            _ => true, // Non-file backends have nothing to write back.
+        }
+    }
 }

@@ -825,6 +825,25 @@ impl CachedFile {
     pub fn location(&self) -> &Location {
         &self.inner
     }
+
+    /// Returns the physical address of the page at the given page index.
+    ///
+    /// If the page is not in the cache, it will be read from the file.
+    pub fn get_shared_page_paddr(&self, pn: u32) -> VfsResult<PhysAddr> {
+        self.with_page_or_insert(pn, |page, _| Ok(page.paddr()))
+    }
+
+    /// Marks the page at the given page index as dirty.
+    pub fn mark_page_dirty(&self, pn: u32) -> VfsResult<()> {
+        self.with_page(pn, |page| {
+            if let Some(page) = page {
+                if !self.in_memory {
+                    page.mark_dirty();
+                }
+            }
+        });
+        Ok(())
+    }
 }
 
 /// Low-level interface for file operations.

@@ -19,7 +19,13 @@ fn deliver_pending_signal(tf: &mut TrapFrame) {
         use crate::task::{DefaultSignalAction, SignalAction};
         match delivery.action {
             SignalAction::Default(DefaultSignalAction::Terminate) => {
-                process.begin_group_exit(128 + delivery.sig as i32);
+                process.set_exit_signal(delivery.sig as i32, false);
+                process.begin_group_exit(delivery.sig as i32);
+                thread.exit_current(process.group_exit_code());
+            }
+            SignalAction::Default(DefaultSignalAction::CoreDump) => {
+                process.set_exit_signal(delivery.sig as i32, true);
+                process.begin_group_exit(delivery.sig as i32);
                 thread.exit_current(process.group_exit_code());
             }
             SignalAction::Default(DefaultSignalAction::Stop)

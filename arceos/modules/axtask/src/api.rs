@@ -1,8 +1,22 @@
 //! Task APIs for multi-task configuration.
 
 use alloc::{string::String, sync::Arc};
+use core::sync::atomic::{AtomicPtr, Ordering};
 
 use kernel_guard::NoPreemptIrqSave;
+
+/// Global timer hook function pointer. Set by pulse_core to check itimers
+/// on each timer tick. Must be safe to call from interrupt context.
+static TIMER_HOOK: AtomicPtr<()> = AtomicPtr::new(core::ptr::null_mut());
+
+/// Register a callback that will be invoked on every timer tick.
+///
+/// # Safety
+///
+/// The callback must be safe to call from interrupt context (no blocking locks).
+pub fn register_timer_hook(hook: fn()) {
+    TIMER_HOOK.store(hook as *mut (), Ordering::Release);
+}
 
 pub(crate) use crate::run_queue::{current_run_queue, select_run_queue};
 
@@ -119,6 +133,12 @@ pub fn init_scheduler_secondary() {
 pub fn on_timer_tick() {
     use kernel_guard::NoOp;
     crate::timers::check_events();
+    // Invoke the registered timer hook (e.g. itimer check).
+    let ptr = TIMER_HOOK.load(Ordering::Acquire);
+    if !ptr.is_null() {
+        let hook: fn() = unsafe { core::mem::transmute(ptr) };
+        hook();
+    }
     // Since irq and preemption are both disabled here,
     // we can get current run queue with the default `kernel_guard::NoOp`.
     current_run_queue::<NoOp>().scheduler_timer_tick();

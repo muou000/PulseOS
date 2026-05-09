@@ -47,17 +47,32 @@ pub(crate) fn resolve_location_at_ptr(
     }
     let path = read_user_cstring(pathname)?;
     let path = path.as_c_str().to_string_lossy();
+    axlog::info!(
+        "resolve_location_at_ptr: dirfd={}, path=\"{}\", flags={:#x}",
+        dirfd,
+        path,
+        flags
+    );
     if let Some(result) = try_resolve_location_fast(dirfd, path.as_ref(), flags) {
+        match &result {
+            Ok(loc) => axlog::info!("resolve_location_at_ptr: fast path resolved OK for \"{}\"", path),
+            Err(e) => axlog::info!("resolve_location_at_ptr: fast path failed for \"{}\": {:?}", path, e),
+        }
         return result;
     }
     let ctx = context_for_dirfd(dirfd)?;
-    if (flags & AT_SYMLINK_NOFOLLOW as usize) != 0 {
+    let result = if (flags & AT_SYMLINK_NOFOLLOW as usize) != 0 {
         ctx.resolve_no_follow(path.as_ref())
             .map_err(|e| LinuxError::from(e.canonicalize()))
     } else {
         ctx.resolve(path.as_ref())
             .map_err(|e| LinuxError::from(e.canonicalize()))
+    };
+    match &result {
+        Ok(loc) => axlog::info!("resolve_location_at_ptr: resolved OK for \"{}\"", path),
+        Err(e) => axlog::info!("resolve_location_at_ptr: resolve failed for \"{}\": {:?}", path, e),
     }
+    result
 }
 
 fn try_resolve_location_fast(

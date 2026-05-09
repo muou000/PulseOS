@@ -5,6 +5,7 @@ use core::{
 };
 
 use linux_raw_sys::general::{CLOCK_MONOTONIC, CLOCK_REALTIME, TIMER_ABSTIME, timespec, timeval};
+use pulse_core::task::uaccess;
 
 use crate::{
     LinuxError,
@@ -321,4 +322,171 @@ pub fn sys_times(tbuf: usize) -> isize {
     }
 
     ticks as isize
+}
+
+const ITIMER_REAL: usize = 0;
+const ITIMER_VIRTUAL: usize = 1;
+const ITIMER_PROF: usize = 2;
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct Itimerval {
+    it_interval: timeval,
+    it_value: timeval,
+}
+
+impl Default for Itimerval {
+    fn default() -> Self {
+        Self {
+            it_interval: timeval { tv_sec: 0, tv_usec: 0 },
+            it_value: timeval { tv_sec: 0, tv_usec: 0 },
+        }
+    }
+}
+
+fn timeval_to_ns(tv: &timeval) -> Option<u64> {
+    if tv.tv_sec < 0 || tv.tv_usec < 0 || tv.tv_usec >= 1_000_000 {
+        return None;
+    }
+    let sec_ns = (tv.tv_sec as u64).checked_mul(1_000_000_000)?;
+    let usec_ns = (tv.tv_usec as u64).checked_mul(1_000)?;
+    sec_ns.checked_add(usec_ns)
+}
+
+fn ns_to_timeval(ns: u64) -> timeval {
+    timeval {
+        tv_sec: (ns / 1_000_000_000) as _,
+        tv_usec: ((ns % 1_000_000_000) / 1_000) as _,
+    }
+}
+
+fn read_user_itimerval(addr: usize) -> Result<Itimerval, LinuxError> {
+    if addr == 0 {
+        return Err(LinuxError::EFAULT);
+    }
+    let proc = pulse_core::task::current_process()?;
+    let val: Itimerval = uaccess::read_user_plain(proc.as_ref(), addr)
+        .map_err(|_| LinuxError::EFAULT)?;
+    Ok(val)
+}
+
+fn write_user_itimerval(addr: usize, val: &Itimerval) -> Result<(), LinuxError> {
+    if addr == 0 {
+        return Ok(());
+    }
+    let proc = pulse_core::task::current_process()?;
+    uaccess::write_user_plain(proc.as_ref(), addr, val)
+        .map_err(|_| LinuxError::EFAULT)
+}
+
+pub fn sys_setitimer(which: usize, new_value: usize, old_value: usize) -> isize {
+    axlog::debug!(
+        "sys_setitimer: which={}, new_value={:#x}, old_value={:#x}",
+        which,
+        new_value,
+        old_value
+    );
+
+    if which > ITIMER_PROF {
+        return -LinuxError::EINVAL.code() as isize;
+    }
+
+    // Only ITIMER_REAL is truly implemented.
+    // ITIMER_VIRTUAL and ITIMER_PROF are accepted but not actually timed.
+
+    let proc = match pulse_core::task::current_process() {
+        Ok(proc) => proc,
+        Err(e) => return -e.code() as isize,
+    };
+
+    // Read new value
+    let new_itv = if new_value != 0 {
+        match read_user_itimerval(new_value) {
+            Ok(v) => v,
+            Err(e) => return -e.code() as isize,
+        }
+    } else {
+        // null new_value means "don't change, just query old"
+        Itimerval::default()
+    };
+
+    let new_value_ns = if new_value != 0 {
+        match timeval_to_ns(&new_itv.it_value) {
+            Some(ns) => ns,
+            None => return -LinuxError::EINVAL.code() as isize,
+        }
+    } else {
+        u64::MAX // sentinel: don't change
+    };
+    let new_interval_ns = if new_value != 0 {
+        match timeval_to_ns(&new_itv.it_interval) {
+            Some(ns) => ns,
+            None => return -LinuxError::EINVAL.code() as isize,
+        }
+    } else {
+        u64::MAX // sentinel: don't change
+    };
+
+    match which {
+        ITIMER_REAL => {
+            let (old_remaining, old_interval) = if new_value != 0 {
+                proc.set_itimer_real(new_value_ns, new_interval_ns)
+            } else {
+                proc.get_itimer_real()
+            };
+
+            if old_value != 0 {
+                let old_itv = Itimerval {
+                    it_interval: ns_to_timeval(old_interval),
+                    it_value: ns_to_timeval(old_remaining),
+                };
+                if let Err(e) = write_user_itimerval(old_value, &old_itv) {
+                    return -e.code() as isize;
+                }
+            }
+            0
+        }
+        ITIMER_VIRTUAL | ITIMER_PROF => {
+            // Stub: return success with zero old value
+            if old_value != 0 {
+                let old_itv = Itimerval::default();
+                if let Err(e) = write_user_itimerval(old_value, &old_itv) {
+                    return -e.code() as isize;
+                }
+            }
+            0
+        }
+        _ => -LinuxError::EINVAL.code() as isize,
+    }
+}
+
+pub fn sys_getitimer(which: usize, curr_value: usize) -> isize {
+    axlog::debug!("sys_getitimer: which={}, curr_value={:#x}", which, curr_value);
+
+    if which > ITIMER_PROF {
+        return -LinuxError::EINVAL.code() as isize;
+    }
+    if curr_value == 0 {
+        return -LinuxError::EFAULT.code() as isize;
+    }
+
+    let proc = match pulse_core::task::current_process() {
+        Ok(proc) => proc,
+        Err(e) => return -e.code() as isize,
+    };
+
+    let (remaining, interval) = match which {
+        ITIMER_REAL => proc.get_itimer_real(),
+        ITIMER_VIRTUAL | ITIMER_PROF => (0, 0), // stub
+        _ => return -LinuxError::EINVAL.code() as isize,
+    };
+
+    let itv = Itimerval {
+        it_interval: ns_to_timeval(interval),
+        it_value: ns_to_timeval(remaining),
+    };
+    match write_user_itimerval(curr_value, &itv) {
+        Ok(()) => 0,
+        Err(e) => -e.code() as isize,
+    }
 }

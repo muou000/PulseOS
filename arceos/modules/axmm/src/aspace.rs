@@ -169,6 +169,7 @@ impl AddrSpace {
         file_flags: FileFlags,
         file_offset: usize,
         file_bytes: usize,
+        shared: bool,
     ) -> AxResult {
         if !self.contains_range(start, size) {
             return ax_err!(InvalidInput, "address out of range");
@@ -181,11 +182,43 @@ impl AddrSpace {
             start,
             size,
             flags,
-            Backend::new_file(start, file, file_flags, file_offset, file_bytes),
+            Backend::new_file(start, file, file_flags, file_offset, file_bytes, shared),
         );
         self.areas
             .map(area, &mut self.pt, false)
             .map_err(mapping_err_to_ax_err)?;
+        Ok(())
+    }
+
+    /// Write back all resident dirty pages in the given range to their
+    /// underlying files. Only shared file-backed mappings are affected.
+    pub fn writeback_file_range(&self, start: VirtAddr, size: usize) -> AxResult {
+        if size == 0 {
+            return Ok(());
+        }
+        if !self.contains_range(start, size) {
+            return ax_err!(InvalidInput, "address out of range");
+        }
+        if !start.is_aligned_4k() || !is_aligned_4k(size) {
+            return ax_err!(InvalidInput, "address not aligned");
+        }
+
+        let end = start + size;
+        for area in self.areas.iter() {
+            if area.end() <= start {
+                continue;
+            }
+            if area.start() >= end {
+                break;
+            }
+            let overlap_start = if area.start() > start { area.start() } else { start };
+            let overlap_end = if area.end() < end { area.end() } else { end };
+            if overlap_start < overlap_end {
+                if !area.backend().writeback_file_range(overlap_start, overlap_end - overlap_start, &self.pt) {
+                    return ax_err!(Io, "writeback failed");
+                }
+            }
+        }
         Ok(())
     }
 
