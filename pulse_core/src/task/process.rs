@@ -1099,6 +1099,7 @@ impl Process {
         *self.heap_top.lock() = USER_HEAP_BASE;
         *self.stack_top.lock() = USER_STACK_TOP;
         *self.entry.lock() = 0;
+        crate::ipc::clear_proc_shm(self.pid());
         self.close_all_files();
         self.futex_table.clear();
         self.memlock_unlock_all();

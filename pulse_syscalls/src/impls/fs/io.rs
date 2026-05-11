@@ -672,3 +672,20 @@ pub fn sys_lseek(fd: usize, offset: usize, whence: usize) -> isize {
         Err(e) => -e.code() as isize,
     }
 }
+
+pub fn sys_fsync(fd: usize) -> isize {
+    axlog::debug!("sys_fsync: fd={}", fd);
+    let object = match get_fd_entry(fd) {
+        Ok(entry) => entry.object,
+        Err(e) => return -e.code() as isize,
+    };
+    match object.flush() {
+        Ok(()) => 0,
+        Err(e) => -e.code() as isize,
+    }
+}
+
+pub fn sys_sync() -> isize {
+    axlog::debug!("sys_sync (stub)");
+    0
+}

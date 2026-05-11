@@ -39,6 +39,15 @@ impl<D: BlockDriverOps + 'static> BlockDevice for Ext4Disk<D> {
         let mut raw = vec![0; blocks * self.sector_size];
         let mut dev = self.dev.lock();
         let total_blocks = dev.num_blocks();
+        // Boundary check: reject obviously invalid block addresses
+        if first_block + blocks as u64 > total_blocks {
+            log::error!(
+                "ext4 read_offset OOB: offset={:#x}, first_block={}, blocks={}, num_blocks={}",
+                offset, first_block, blocks, total_blocks
+            );
+            // Return zeroed buffer instead of panicking
+            return raw[inner_offset..inner_offset + BLOCK_SIZE].to_vec();
+        }
         for i in 0..blocks {
             let start = i * self.sector_size;
             let end = start + self.sector_size;
@@ -56,7 +65,8 @@ impl<D: BlockDriverOps + 'static> BlockDevice for Ext4Disk<D> {
                     raw[start..end].len(),
                     err
                 );
-                panic!("failed to read block for ext4_rs");
+                // Return zeroed buffer instead of panicking
+                return raw[inner_offset..inner_offset + BLOCK_SIZE].to_vec();
             }
         }
         raw[inner_offset..inner_offset + BLOCK_SIZE].to_vec()
@@ -67,6 +77,14 @@ impl<D: BlockDriverOps + 'static> BlockDevice for Ext4Disk<D> {
         let mut raw = vec![0; blocks * self.sector_size];
         let mut dev = self.dev.lock();
         let total_blocks = dev.num_blocks();
+        // Boundary check: reject obviously invalid block addresses
+        if first_block + blocks as u64 > total_blocks {
+            log::error!(
+                "ext4 write_offset OOB: offset={:#x}, first_block={}, blocks={}, num_blocks={}",
+                offset, first_block, blocks, total_blocks
+            );
+            return; // Silently drop the write instead of panicking
+        }
         for i in 0..blocks {
             let start = i * self.sector_size;
             let end = start + self.sector_size;
@@ -84,7 +102,7 @@ impl<D: BlockDriverOps + 'static> BlockDevice for Ext4Disk<D> {
                     raw[start..end].len(),
                     err
                 );
-                panic!("failed to read block before writing ext4_rs data");
+                return;
             }
         }
         raw[inner_offset..inner_offset + data.len()].copy_from_slice(data);
@@ -105,7 +123,7 @@ impl<D: BlockDriverOps + 'static> BlockDevice for Ext4Disk<D> {
                     raw[start..end].len(),
                     err
                 );
-                panic!("failed to write block for ext4_rs");
+                return;
             }
         }
     }
