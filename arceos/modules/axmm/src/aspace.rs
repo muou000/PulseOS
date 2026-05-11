@@ -244,6 +244,50 @@ impl AddrSpace {
         Ok(())
     }
 
+
+    /// Maps the given physical pages into the address space at the specified
+    /// virtual address range.  This is used for shared memory (shmget/shmat)
+    /// where multiple processes must map the same physical frames.
+    ///
+    /// The caller must ensure:
+    /// - `phys_pages.len() * PAGE_SIZE_4K == size`
+    /// - `start` and `size` are 4K-aligned
+    /// - The virtual range is free (not already mapped)
+    pub fn map_phys_pages(
+        &mut self,
+        start: VirtAddr,
+        size: usize,
+        flags: MappingFlags,
+        phys_pages: &[PhysAddr],
+    ) -> AxResult {
+        if !self.contains_range(start, size) {
+            return ax_err!(InvalidInput, "address out of range");
+        }
+        if !start.is_aligned_4k() || !is_aligned_4k(size) {
+            return ax_err!(InvalidInput, "address not aligned");
+        }
+        let expected = size / PAGE_SIZE_4K;
+        if phys_pages.len() != expected {
+            return ax_err!(InvalidInput, "phys_pages length mismatch");
+        }
+
+        // Register the area with Alloc(populate=false) so unmap works
+        // without trying to dealloc shared frames.
+        let area = MemoryArea::new(start, size, flags, Backend::new_alloc(false));
+        self.areas
+            .map(area, &mut self.pt, false)
+            .map_err(mapping_err_to_ax_err)?;
+
+        // Now manually map each physical page into the page table.
+        let pages = PageIter4K::new(start, start + size).unwrap();
+        for (vaddr, &frame) in pages.zip(phys_pages.iter()) {
+            if let Ok(tlb) = self.pt.map(vaddr, frame, PageSize::Size4K, flags) {
+                tlb.ignore();
+            }
+        }
+        Ok(())
+    }
+
     /// Removes mappings within the specified virtual address range.
     ///
     /// Returns an error if the address range is out of the address space or not

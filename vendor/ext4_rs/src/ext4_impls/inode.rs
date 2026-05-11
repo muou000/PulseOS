@@ -81,6 +81,15 @@ impl Ext4 {
             // get physical block id
             let fblock = path.pblock;
 
+            // Validate that the extent was actually found (not a placeholder for empty node)
+            if path.extent.is_none() {
+                log::error!(
+                    "get_pblock_idx: extent not found for lblock={}, inode={}",
+                    lblock, inode_ref.inode_num
+                );
+                return_errno_with_message!(Errno::EIO, "extent not found for logical block");
+            }
+
             return Ok(fblock);
         }
 
@@ -423,11 +432,24 @@ impl Ext4 {
             return return_errno_with_message!(Errno::ENOENT, "No extents found");
         }
 
-        let mut current_header = root_header;
-        let mut current_block = inode_ref.inode.root_extent_block();
-        let mut depth = root_header.depth;
+        let depth = root_header.depth;
 
-        while depth > 0 {
+        if depth == 0 {
+            // Leaf node: extents are directly in the inode's block field.
+            // Read the last extent from the inode in-memory data.
+            // We must use raw pointer arithmetic because the accessor methods
+            // require &mut self, but we only have &self here.
+            let pos = (root_header.entries_count - 1) as usize;
+            let header_ptr = inode_ref.inode.block.as_ptr() as *const Ext4ExtentHeader;
+            let extent = unsafe { *(header_ptr.add(1) as *const Ext4Extent).add(pos) };
+            return Ok(extent);
+        }
+
+        // depth > 0: traverse index nodes to find the leaf block
+        let mut current_block = inode_ref.inode.root_extent_block();
+        let mut remaining_depth = depth;
+
+        while remaining_depth > 0 {
             let index_block = Block::load(&self.block_device, current_block as usize * BLOCK_SIZE);
             let index_header = Ext4ExtentHeader::load_from_u8(&index_block.data[..]);
             if index_header.entries_count == 0 {
@@ -440,23 +462,25 @@ impl Ext4 {
                     + (index_header.entries_count - 1) as usize * EXT4_EXTENT_INDEX_SIZE..],
             );
             current_block = last_idx.leaf_lo as u64 | ((last_idx.leaf_hi as u64) << 32);
-            current_header = index_header;
-            depth -= 1;
+
+            remaining_depth -= 1;
+
+            if remaining_depth == 0 {
+                // We've reached the leaf level
+                let extent_block = Block::load(&self.block_device, current_block as usize * BLOCK_SIZE);
+                let extent_header = Ext4ExtentHeader::load_from_u8(&extent_block.data[..]);
+                if extent_header.entries_count == 0 {
+                    return return_errno_with_message!(Errno::ENOENT, "No extent entries found");
+                }
+                let last_extent = Ext4Extent::load_from_u8(
+                    &extent_block.data[EXT4_EXTENT_HEADER_SIZE
+                        + (extent_header.entries_count - 1) as usize * EXT4_EXTENT_SIZE..],
+                );
+                return Ok(last_extent);
+            }
         }
 
-        // Get the last extent entry
-        let extent_block = Block::load(&self.block_device, current_block as usize * BLOCK_SIZE);
-        let extent_header = Ext4ExtentHeader::load_from_u8(&extent_block.data[..]);
-        if extent_header.entries_count == 0 {
-            return return_errno_with_message!(Errno::ENOENT, "No extent entries found");
-        }
-
-        let last_extent = Ext4Extent::load_from_u8(
-            &extent_block.data[EXT4_EXTENT_HEADER_SIZE
-                + (extent_header.entries_count - 1) as usize * EXT4_EXTENT_SIZE..],
-        );
-
-        Ok(last_extent)
+        return_errno_with_message!(Errno::ENOENT, "Extent tree traversal failed")
     }
 
     /// Validate an extent

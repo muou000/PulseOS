@@ -11,6 +11,7 @@ repository.workspace = true
 axhal = { workspace = true, features = ["paging"] }
 axlog = { workspace = true }
 axconfig = { workspace = true }
+axalloc.workspace = true
 axtask = { workspace = true, features = ["multitask"] }
 axfs.workspace = true
 axfs-ng-vfs.workspace = true

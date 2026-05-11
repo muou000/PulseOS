@@ -294,6 +294,8 @@ fn syscall_dispatcher(
         Sysno::fchownat => impls::sys_fchownat(args[0] as i32, args[1], args[2], args[3], args[4]),
         Sysno::lseek => impls::sys_lseek(args[0], args[1], args[2]),
         Sysno::ftruncate => impls::sys_ftruncate(args[0], args[1]),
+        Sysno::fsync => impls::sys_fsync(args[0]),
+        Sysno::sync => impls::sys_sync(),
         Sysno::execve => {
             axlog::info!(
                 "sys_execve: tid={} pathname={:#x}, argv={:#x}, envp={:#x}",
@@ -305,6 +307,11 @@ fn syscall_dispatcher(
             impls::sys_execve(tf, args[0], args[1], args[2])
         }
 
+        // System V shared memory
+        Sysno::shmget => impls::sys_shmget(args[0] as i32, args[1], args[2] as i32),
+        Sysno::shmat => impls::sys_shmat(args[0] as i32, args[1], args[2] as i32),
+        Sysno::shmdt => impls::sys_shmdt(args[0]),
+        Sysno::shmctl => impls::sys_shmctl(args[0] as i32, args[1] as i32, args[2]),
         _ => {
             axlog::warn!("Unimplemented syscall: {:?} ({})", sysno, syscall_id);
             -LinuxError::ENOSYS.code() as isize

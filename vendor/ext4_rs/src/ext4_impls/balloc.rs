@@ -523,11 +523,26 @@ impl Ext4 {
         if count == 0 {
             return Ok(Vec::new());
         }
-        
+
         log::debug!("[Block Alloc] Requesting {} blocks starting from bgid {}", count, *start_bgid);
-        
+
         let super_block = &self.super_block;
         let block_group_count = super_block.block_group_count();
+
+        // Cap count to a sane maximum to prevent capacity overflow from
+        // upstream integer arithmetic bugs (e.g. unsigned underflow in
+        // blocks_to_allocate calculation).
+        let max_allocatable = (block_group_count as u64)
+            .saturating_mul(super_block.blocks_per_group() as u64);
+        let count = if (count as u64) > max_allocatable {
+            log::error!(
+                "[Block Alloc] count {} exceeds total blocks {}, capping",
+                count, max_allocatable
+            );
+            return_errno_with_message!(Errno::ENOSPC, "Block allocation count exceeds disk size");
+        } else {
+            count
+        };
         
         // Validate inputs
         if block_group_count == 0 {
