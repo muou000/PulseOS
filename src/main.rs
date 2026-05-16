@@ -29,12 +29,13 @@ fn main() {
             proc.activate();
             info!("User process address space activated");
 
-            #[cfg(all(feature = "testcode", target_arch = "riscv64"))]
-            let shell_args: &[&str] = &["sh", "-c", include_str!("testcode_cmd.sh").trim()];
-            #[cfg(all(feature = "testcode", target_arch = "loongarch64"))]
-            let shell_args: &[&str] = &["sh", "-c", include_str!("testcode_cmd_la.sh").trim()];
-            #[cfg(not(feature = "testcode"))]
-            let shell_args: &[&str] = &["sh"];
+            let shell_args: &[&str] = if cfg!(feature = "testcode") {
+                &["sh", "/testcode.sh"]
+            } else {
+                &["sh"]
+            };
+
+            // let shell_args: &[&str] = &["sh"];
 
             match proc.load_elf(SHELL_ELF_PATH, shell_args, &[]) {
                 Ok(_) => {
