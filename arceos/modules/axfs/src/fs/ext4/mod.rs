@@ -73,6 +73,9 @@ impl<D: BlockDriverOps + 'static> BlockDevice for Ext4Disk<D> {
     }
 
     fn write_offset(&self, offset: usize, data: &[u8]) {
+        if data.is_empty() {
+            return;
+        }
         let (first_block, inner_offset, blocks) = self.byte_range(offset, data.len());
         let mut dev = self.dev.lock();
         let total_blocks = dev.num_blocks();
