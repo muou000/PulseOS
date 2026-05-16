@@ -98,7 +98,10 @@ pub fn sys_shmat(shmid: i32, shmaddr: usize, shmflg: i32) -> isize {
         // SHM_RND: round down to SHMLBA (use PAGE_SIZE_4K for now)
         shmaddr & !(PAGE_SIZE_4K - 1)
     } else if shmaddr != 0 {
-        shmaddr & !(PAGE_SIZE_4K - 1)
+        if shmaddr & (PAGE_SIZE_4K - 1) != 0 {
+            return -LinuxError::EINVAL.code() as isize;
+        }
+        shmaddr
     } else {
         // Let the kernel choose an address.
         let limit = memory_addr::VirtAddrRange::from_start_size(

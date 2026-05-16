@@ -1531,11 +1531,15 @@ impl Process {
             self.register_thread(child_tid);
             self.clone()
         } else {
+            let parent_aspace_handle = self.aspace_handle();
+            let mut parent_aspace = parent_aspace_handle.lock();
+            let new_aspace = parent_aspace.try_clone()?;
+            let new_aspace_arc = Arc::new(Mutex::new(new_aspace));
             Self::new_child_process(
                 child_tid,
                 self.clone(),
-                self.aspace_handle(),
-                true,
+                new_aspace_arc,
+                false,
                 params.is_vfork,
                 params.share_fs,
                 params.share_files,

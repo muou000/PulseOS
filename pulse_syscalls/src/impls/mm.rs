@@ -388,6 +388,13 @@ pub fn sys_mmap(
             length,
             is_shared,
         )
+    } else if is_shared {
+        use axhal::paging::PageSize;
+        if let Some(backend) = axmm::Backend::new_shared(aligned_length, true, PageSize::Size4K) {
+            aspace.map_with_backend(VirtAddr::from(map_addr), aligned_length, map_flags, backend)
+        } else {
+            Err(axerrno::AxError::NoMemory)
+        }
     } else {
         aspace.map_alloc(VirtAddr::from(map_addr), aligned_length, map_flags, false)
     };
