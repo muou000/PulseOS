@@ -46,7 +46,9 @@ impl<D: BlockDriverOps + 'static> BlockDevice for Ext4Disk<D> {
                 offset, first_block, blocks, total_blocks
             );
             // Return zeroed buffer instead of panicking
-            return raw[inner_offset..inner_offset + BLOCK_SIZE].to_vec();
+            raw.drain(0..inner_offset);
+            raw.truncate(BLOCK_SIZE);
+            return raw;
         }
         for i in 0..blocks {
             let start = i * self.sector_size;
@@ -66,10 +68,14 @@ impl<D: BlockDriverOps + 'static> BlockDevice for Ext4Disk<D> {
                     err
                 );
                 // Return zeroed buffer instead of panicking
-                return raw[inner_offset..inner_offset + BLOCK_SIZE].to_vec();
+                raw.drain(0..inner_offset);
+                raw.truncate(BLOCK_SIZE);
+                return raw;
             }
         }
-        raw[inner_offset..inner_offset + BLOCK_SIZE].to_vec()
+        raw.drain(0..inner_offset);
+        raw.truncate(BLOCK_SIZE);
+        raw
     }
 
     fn write_offset(&self, offset: usize, data: &[u8]) {
