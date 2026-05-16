@@ -79,8 +79,10 @@ impl<D: BlockDriverOps + 'static> BlockDevice for Ext4Disk<D> {
     }
 
     fn write_offset(&self, offset: usize, data: &[u8]) {
+        if data.is_empty() {
+            return;
+        }
         let (first_block, inner_offset, blocks) = self.byte_range(offset, data.len());
-        let mut raw = vec![0; blocks * self.sector_size];
         let mut dev = self.dev.lock();
         let total_blocks = dev.num_blocks();
         // Boundary check: reject obviously invalid block addresses
@@ -91,46 +93,90 @@ impl<D: BlockDriverOps + 'static> BlockDevice for Ext4Disk<D> {
             );
             return; // Silently drop the write instead of panicking
         }
-        for i in 0..blocks {
-            let start = i * self.sector_size;
-            let end = start + self.sector_size;
-            let block_id = first_block + i as u64;
-            if let Err(err) = dev.read_block(block_id, &mut raw[start..end]) {
+
+        // To avoid torn writes, we first pre-read any partial blocks. Since partial
+        // blocks can only occur at the beginning (i=0) and the end (i=blocks-1) of
+        // the write, we need at most two buffers.
+        let mut first_block_buf = None;
+        let mut last_block_buf = None;
+
+        let first_block_inner_offset = inner_offset;
+        let first_block_write_len = core::cmp::min(self.sector_size - first_block_inner_offset, data.len());
+
+        if first_block_write_len < self.sector_size {
+            let mut buf = Vec::with_capacity(self.sector_size);
+            unsafe { buf.set_len(self.sector_size) };
+            if let Err(err) = dev.read_block(first_block, &mut buf) {
                 log::error!(
                     "ext4 write_offset pre-read failed: offset={}, first_block={}, block_id={}, \
-                     blocks={}, sector_size={}, num_blocks={}, buf_len={}, err={:?}",
-                    offset,
-                    first_block,
-                    block_id,
-                    blocks,
-                    self.sector_size,
-                    total_blocks,
-                    raw[start..end].len(),
-                    err
+                     blocks={}, sector_size={}, num_blocks={}, err={:?}",
+                    offset, first_block, first_block, blocks, self.sector_size, total_blocks, err
                 );
                 return;
+            }
+            first_block_buf = Some(buf);
+        }
+
+        if blocks > 1 {
+            let last_data_written = data.len() - ((blocks - 1) * self.sector_size - first_block_inner_offset);
+            let last_block_write_len = core::cmp::min(self.sector_size, last_data_written);
+
+            if last_block_write_len < self.sector_size {
+                let mut buf = Vec::with_capacity(self.sector_size);
+                unsafe { buf.set_len(self.sector_size) };
+                let block_id = first_block + (blocks - 1) as u64;
+                if let Err(err) = dev.read_block(block_id, &mut buf) {
+                    log::error!(
+                        "ext4 write_offset pre-read failed: offset={}, first_block={}, block_id={}, \
+                         blocks={}, sector_size={}, num_blocks={}, err={:?}",
+                        offset, first_block, block_id, blocks, self.sector_size, total_blocks, err
+                    );
+                    return;
+                }
+                last_block_buf = Some(buf);
             }
         }
-        raw[inner_offset..inner_offset + data.len()].copy_from_slice(data);
+
+        let mut block_buf = Vec::with_capacity(self.sector_size);
+        // SAFETY: The buffer will be completely filled before we write it to disk.
+        unsafe { block_buf.set_len(self.sector_size) };
+        let mut data_written = 0;
+
         for i in 0..blocks {
-            let start = i * self.sector_size;
-            let end = start + self.sector_size;
             let block_id = first_block + i as u64;
-            if let Err(err) = dev.write_block(block_id, &raw[start..end]) {
+            let is_first = i == 0;
+            let is_last = i == blocks - 1;
+
+            let block_inner_offset = if is_first { inner_offset } else { 0 };
+            let write_len = core::cmp::min(self.sector_size - block_inner_offset, data.len() - data_written);
+
+            if write_len < self.sector_size {
+                if is_first {
+                    block_buf.copy_from_slice(first_block_buf.as_ref().unwrap());
+                } else if is_last {
+                    block_buf.copy_from_slice(last_block_buf.as_ref().unwrap());
+                }
+            }
+
+            block_buf[block_inner_offset..block_inner_offset + write_len]
+                .copy_from_slice(&data[data_written..data_written + write_len]);
+
+            if let Err(err) = dev.write_block(block_id, &block_buf) {
                 log::error!(
                     "ext4 write_offset failed: offset={}, first_block={}, block_id={}, blocks={}, \
-                     sector_size={}, num_blocks={}, buf_len={}, err={:?}",
+                     sector_size={}, num_blocks={}, err={:?}",
                     offset,
                     first_block,
                     block_id,
                     blocks,
                     self.sector_size,
                     total_blocks,
-                    raw[start..end].len(),
                     err
                 );
                 return;
             }
+
+            data_written += write_len;
         }
     }
 }
