@@ -152,6 +152,15 @@ impl Process {
         axtask::set_current_page_table_root(new_pt_root);
         self.activate();
         self.complete_vfork();
+
+        {
+            let mut shm = self.shared_memory.lock();
+            for inner_arc in shm.values() {
+                inner_arc.lock().detach_process(self.pid());
+            }
+            shm.clear();
+        }
+
         let cloexec_entries = {
             let mut fd_table = self.fd_table.lock();
             fd_table.take_cloexec_on_exec()

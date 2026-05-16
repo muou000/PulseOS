@@ -13,6 +13,7 @@ irq = ["axtask/irq"]
 
 [dependencies]
 axalloc.workspace = true
+axmm.workspace = true
 axhal.workspace = true
 axlog.workspace = true
 axerrno.workspace = true

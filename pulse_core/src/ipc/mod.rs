@@ -2,4 +2,4 @@
 
 pub mod shm;
 
-pub use shm::{clear_proc_shm, ShmManager, SHM_MANAGER};
+pub use shm::{ShmManager, SHM_MANAGER};
