@@ -369,7 +369,7 @@ version = "0.2.0"
 dependencies = [
  "axalloc",
  "axconfig",
- "axerrno 0.1.2",
+ "axerrno 0.2.2",
  "axfs",
  "axhal",
  "kspin",
@@ -1171,6 +1171,7 @@ dependencies = [
 name = "pulse_core"
 version = "0.1.0"
 dependencies = [
+ "axalloc",
  "axconfig",
  "axerrno 0.2.2",
  "axfs",

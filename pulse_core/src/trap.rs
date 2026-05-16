@@ -52,9 +52,18 @@ fn handle_page_fault(vaddr: VirtAddr, access_flags: MappingFlags, is_user: bool)
         is_user
     );
 
-    // 如果不是用户空间，不处理
+    // 如果不是用户空间，尝试将其视为致命错误并终止当前进程，
+    // 以避免在内核态继续访问损坏的地址导致更大范围的崩溃。
     if !is_user {
         axlog::error!("Page fault in kernel space: vaddr={:#x}", vaddr);
+        if let Ok(thread) = crate::task::current_thread() {
+            let proc = thread.process();
+            const SIGSEGV: i32 = 11;
+            proc.set_exit_signal(SIGSEGV, true);
+            proc.begin_group_exit(SIGSEGV);
+            thread.exit_current(proc.group_exit_code());
+            return true;
+        }
         return false;
     }
 
@@ -81,7 +90,11 @@ fn handle_page_fault(vaddr: VirtAddr, access_flags: MappingFlags, is_user: bool)
     } else {
         let leave_ns = axhal::time::monotonic_time_nanos() as u64;
         proc.add_sys_time_ns(leave_ns.saturating_sub(enter_ns));
-        axlog::error!("Failed to handle page fault!");
+        axlog::error!(
+            "Failed to handle page fault! pid={} exe={:?}",
+            proc.pid(),
+            proc.exec_path()
+        );
         axlog::error!("  vaddr={:#x}, flags={:?}", vaddr, access_flags);
         thread.exit_current(139);
     }

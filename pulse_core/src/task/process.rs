@@ -40,160 +40,6 @@ static ZOMBIE_ASPACE_HANDLE: Lazy<Arc<Mutex<AddrSpace>>> = Lazy::new(|| {
     ))
 });
 
-fn align_up_4k(value: usize) -> usize {
-    (value + 0xfff) & !0xfff
-}
-
-fn collect_user_areas(
-    aspace: &AddrSpace,
-    start: VirtAddr,
-    end: VirtAddr,
-) -> AxResult<Vec<(VirtAddr, VirtAddr, MappingFlags, Backend)>> {
-    let mut count = 0usize;
-    aspace.for_each_area_with_backend(|area_start, area_end, flags, _backend| {
-        let user_flags = flags
-            & (MappingFlags::READ
-                | MappingFlags::WRITE
-                | MappingFlags::EXECUTE
-                | MappingFlags::USER);
-        if !user_flags.contains(MappingFlags::USER) {
-            return;
-        }
-        let clipped_start = core::cmp::max(area_start.as_usize(), start.as_usize());
-        let clipped_end = core::cmp::min(area_end.as_usize(), end.as_usize());
-        if clipped_start < clipped_end {
-            count = count.saturating_add(1);
-        }
-    });
-
-    let mut areas = Vec::new();
-    if areas.try_reserve_exact(count).is_err() {
-        return Err(AxError::NoMemory);
-    }
-    aspace.for_each_area_with_backend(|area_start, area_end, flags, backend| {
-        let user_flags = flags
-            & (MappingFlags::READ
-                | MappingFlags::WRITE
-                | MappingFlags::EXECUTE
-                | MappingFlags::USER);
-        if !user_flags.contains(MappingFlags::USER) {
-            return;
-        }
-        let clipped_start = core::cmp::max(area_start.as_usize(), start.as_usize());
-        let clipped_end = core::cmp::min(area_end.as_usize(), end.as_usize());
-        if clipped_start >= clipped_end {
-            return;
-        }
-        areas.push((
-            va!(clipped_start).align_down_4k(),
-            va!(align_up_4k(clipped_end)),
-            user_flags,
-            backend.clone(),
-        ));
-    });
-
-    Ok(areas)
-}
-
-fn share_user_page(
-    parent_aspace: &mut AddrSpace,
-    new_aspace: &mut AddrSpace,
-    vaddr: VirtAddr,
-    frame: PhysAddr,
-    pte_flags: MappingFlags,
-) -> AxResult<CowSharedPage> {
-    let downgraded = pte_flags.contains(MappingFlags::WRITE);
-    let child_flags = if downgraded {
-        pte_flags - MappingFlags::WRITE
-    } else {
-        pte_flags
-    };
-
-    new_aspace.remap_page(vaddr, frame, child_flags)?;
-    if downgraded {
-        if let Err(err) = parent_aspace.remap_page(vaddr, frame, child_flags) {
-            let _ = new_aspace.remap_page(vaddr, frame, pte_flags);
-            return Err(err.into());
-        }
-    }
-
-    axmm::cow_inc_frame_ref(frame);
-    Ok(CowSharedPage {
-        vaddr,
-        frame,
-        orig_flags: pte_flags,
-        downgraded,
-    })
-}
-
-fn share_present_pages_cow(
-    parent_aspace: &mut AddrSpace,
-    new_aspace: &mut AddrSpace,
-    start: VirtAddr,
-    end: VirtAddr,
-    shared_pages: &mut Vec<CowSharedPage>,
-) -> AxResult<()> {
-    for vaddr in memory_addr::PageIter4K::new(start, end).unwrap() {
-        let Ok((frame, pte_flags, _)) = parent_aspace.page_table().query(vaddr) else {
-            continue;
-        };
-        if frame.as_usize() == 0 || !frame.is_aligned_4k() {
-            continue;
-        }
-        if !pte_flags.contains(MappingFlags::USER) {
-            continue;
-        }
-        shared_pages.push(share_user_page(
-            parent_aspace,
-            new_aspace,
-            vaddr,
-            frame,
-            pte_flags,
-        )?);
-    }
-    Ok(())
-}
-
-#[derive(Clone, Copy, Debug)]
-struct CowSharedPage {
-    vaddr: VirtAddr,
-    frame: PhysAddr,
-    orig_flags: MappingFlags,
-    downgraded: bool,
-}
-
-fn rollback_cow_shared_pages(
-    parent_aspace: &mut AddrSpace,
-    new_aspace: &mut AddrSpace,
-    shared_pages: &[CowSharedPage],
-) {
-    for page in shared_pages.iter().rev() {
-        if page.downgraded {
-            if let Err(err) = new_aspace.remap_page(page.vaddr, page.frame, page.orig_flags) {
-                axlog::error!(
-                    "rollback_cow_shared_pages: child restore failed vaddr={:#x} frame={:#x} \
-                     err={:?}",
-                    page.vaddr,
-                    page.frame,
-                    err
-                );
-            }
-            if let Err(err) = parent_aspace.remap_page(page.vaddr, page.frame, page.orig_flags) {
-                axlog::error!(
-                    "rollback_cow_shared_pages: parent restore failed vaddr={:#x} frame={:#x} \
-                     err={:?}",
-                    page.vaddr,
-                    page.frame,
-                    err
-                );
-            }
-        }
-        // Keep the COW refcount balanced by the child address space teardown.
-        // `new_aspace` is dropped after rollback, and its unmap path will
-        // release the shared frame reference exactly once.
-    }
-}
-
 struct FutexTable {
     queues: Mutex<BTreeMap<usize, Arc<WaitQueue>>>,
 }
@@ -401,6 +247,7 @@ pub struct Process {
     signal_shared: Arc<SignalShared>,
     exec_path: Mutex<Option<String>>,
     signal_trampoline: Mutex<usize>,
+    pub shared_memory: Arc<Mutex<BTreeMap<VirtAddr, Arc<Mutex<crate::ipc::shm::ShmInner>>>>>,
     /// ITIMER_REAL state: (deadline_ns, interval_ns).
     /// 0 means the timer is disarmed. Uses atomics for interrupt-context safety.
     itimer_real_deadline_ns: AtomicU64,
@@ -913,6 +760,7 @@ impl Process {
             MappingFlags::READ | MappingFlags::WRITE | MappingFlags::USER,
             false,
         )?;
+
         let fs_context = axfs::ROOT_FS_CONTEXT
             .get()
             .expect("root fs context not initialized")
@@ -929,7 +777,6 @@ impl Process {
             parent: Mutex::new(None),
             start_mono_ns: axhal::time::monotonic_time_nanos() as u64,
             aspace: Mutex::new(Arc::new(Mutex::new(aspace))),
-            heap_top: Arc::new(Mutex::new(USER_HEAP_BASE + USER_HEAP_SIZE)),
             fs_context: Arc::new(Mutex::new(fs_context)),
             fd_table: Arc::new(Mutex::new(fd_table)),
             user_time_ns: Arc::new(AtomicU64::new(0)),
@@ -958,6 +805,7 @@ impl Process {
             euid: AtomicU32::new(0),
             suid: AtomicU32::new(0),
             rgid: AtomicU32::new(0),
+            heap_top: Arc::new(Mutex::new(USER_HEAP_BASE + USER_HEAP_SIZE)),
             egid: AtomicU32::new(0),
             sgid: AtomicU32::new(0),
             umask: AtomicU32::new(0o022),
@@ -966,6 +814,7 @@ impl Process {
             signal_shared: SignalShared::new(),
             exec_path: Mutex::new(None),
             signal_trampoline: Mutex::new(0),
+            shared_memory: Arc::new(Mutex::new(BTreeMap::new())),
             itimer_real_deadline_ns: AtomicU64::new(0),
             itimer_real_interval_ns: AtomicU64::new(0),
         }))
@@ -987,6 +836,17 @@ impl Process {
             parent.heap_top.clone()
         } else {
             Arc::new(Mutex::new(*parent.heap_top.lock()))
+        };
+        let shared_memory = if share_vm {
+            parent.shared_memory.clone()
+        } else {
+            let mut new_shm = BTreeMap::new();
+            let parent_shm = parent.shared_memory.lock();
+            for (vaddr, inner_arc) in parent_shm.iter() {
+                inner_arc.lock().attach_process(pid);
+                new_shm.insert(*vaddr, inner_arc.clone());
+            }
+            Arc::new(Mutex::new(new_shm))
         };
         let fs_context = if share_fs {
             parent.fs_context.clone()
@@ -1055,6 +915,7 @@ impl Process {
             signal_shared,
             exec_path: Mutex::new(None),
             signal_trampoline: Mutex::new(signal_trampoline),
+            shared_memory,
             itimer_real_deadline_ns: AtomicU64::new(0),
             itimer_real_interval_ns: AtomicU64::new(0),
         }))
@@ -1099,7 +960,15 @@ impl Process {
         *self.heap_top.lock() = USER_HEAP_BASE;
         *self.stack_top.lock() = USER_STACK_TOP;
         *self.entry.lock() = 0;
-        crate::ipc::clear_proc_shm(self.pid());
+        
+        {
+            let mut shm = self.shared_memory.lock();
+            for inner_arc in shm.values() {
+                inner_arc.lock().detach_process(self.pid());
+            }
+            shm.clear();
+        }
+
         self.close_all_files();
         self.futex_table.clear();
         self.memlock_unlock_all();
@@ -1567,50 +1436,10 @@ impl Process {
             child_uctx.set_sp(sp);
         }
 
-        let mut new_aspace = axmm::new_user_aspace(va!(USER_SPACE_BASE), USER_SPACE_SIZE)?;
         let parent_aspace_handle = self.aspace_handle();
         let mut parent_aspace = parent_aspace_handle.lock();
-        let mapped_user_areas =
-            collect_user_areas(&parent_aspace, va!(USER_SPACE_BASE), va!(USER_STACK_TOP))?;
-        let mut shared_pages = Vec::new();
-        let mut cow_ranges = Vec::new();
-        if cow_ranges
-            .try_reserve_exact(mapped_user_areas.len())
-            .is_err()
-        {
-            return Err(AxError::NoMemory);
-        }
-        for (start, end, area_user_flags, backend) in mapped_user_areas {
-            let child_backend = match &backend {
-                // Root-cause fix: do not eagerly allocate child frames during
-                // fork. Child memory should be established by COW remap for
-                // present pages, and lazy allocation for non-present pages.
-                Backend::Alloc { .. } => Backend::new_alloc(false),
-                _ => backend.clone(),
-            };
-            new_aspace.map_with_backend(
-                start,
-                end.as_usize() - start.as_usize(),
-                area_user_flags,
-                child_backend,
-            )?;
-            if matches!(backend, Backend::Alloc { .. }) {
-                cow_ranges.push((start, end));
-            }
-        }
+        let new_aspace = parent_aspace.try_clone()?;
 
-        for (start, end) in cow_ranges {
-            if let Err(err) = share_present_pages_cow(
-                &mut parent_aspace,
-                &mut new_aspace,
-                start,
-                end,
-                &mut shared_pages,
-            ) {
-                rollback_cow_shared_pages(&mut parent_aspace, &mut new_aspace, &shared_pages);
-                return Err(err);
-            }
-        }
         let mut inner = TaskInner::try_new(
             move || {
                 let thread = super::current_thread().expect("fork child without Thread context");
@@ -1630,33 +1459,21 @@ impl Process {
         )?;
 
         let child_tid = inner.id().as_u64();
-        let new_aspace = Arc::new(Mutex::new(new_aspace));
-        let child_proc = match Self::new_child_process(
+        let new_aspace_arc = Arc::new(Mutex::new(new_aspace));
+        let child_proc = Self::new_child_process(
             child_tid,
             self.clone(),
-            new_aspace.clone(),
+            new_aspace_arc,
             false,
             params.is_vfork,
             params.share_fs,
             params.share_files,
             params.share_sighand,
-        ) {
-            Ok(child_proc) => child_proc,
-            Err(err) => {
-                let mut child_aspace = new_aspace.lock();
-                rollback_cow_shared_pages(&mut parent_aspace, &mut child_aspace, &shared_pages);
-                return Err(err);
-            }
-        };
+        )?;
+
         if let Some(addr) = params.parent_set_tid {
             let child_tid = child_tid as u32;
-            if let Err(err) =
-                self.write_user_bytes_in_aspace(&mut parent_aspace, addr, &child_tid.to_ne_bytes())
-            {
-                let mut child_aspace = new_aspace.lock();
-                rollback_cow_shared_pages(&mut parent_aspace, &mut child_aspace, &shared_pages);
-                return Err(err);
-            }
+            self.write_user_bytes_in_aspace(&mut parent_aspace, addr, &child_tid.to_ne_bytes())?;
         }
         let child_thread = Thread::new(child_proc.clone());
         if let Ok(parent_thread) = current_thread() {
@@ -1669,14 +1486,14 @@ impl Process {
             child_thread.set_clear_child_tid(addr);
         }
 
-        let new_pt_root = child_proc.page_table_root();
-        inner.ctx_mut().set_page_table_root(new_pt_root);
+        let pt_root = child_proc.page_table_root();
+        inner.ctx_mut().set_page_table_root(pt_root);
         super::register_process(child_proc.pid(), child_proc.clone());
         inner.init_task_ext(super::ThreadHandle::new(child_thread));
 
+        self.add_child(child_proc.clone());
         let task = axtask::spawn_task(inner);
         child_proc.register_task_ref(task.clone());
-        self.add_child(child_proc.clone());
         Ok(child_proc)
     }
 
@@ -1754,11 +1571,11 @@ impl Process {
         }
         inner.init_task_ext(super::ThreadHandle::new(child_thread));
 
-        let task = axtask::spawn_task(inner);
-        child_proc.register_task_ref(task.clone());
         if !params.is_thread_clone {
             self.add_child(child_proc.clone());
         }
+        let task = axtask::spawn_task(inner);
+        child_proc.register_task_ref(task.clone());
         Ok((child_tid, (!params.is_thread_clone).then_some(child_proc)))
     }
 }

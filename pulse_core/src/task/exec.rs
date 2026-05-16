@@ -129,6 +129,7 @@ impl Process {
         // Build the new image in an isolated address space first.
         // If loading fails, the current process image remains intact.
         let mut new_aspace = axmm::new_user_aspace(va!(USER_SPACE_BASE), USER_SPACE_SIZE)?;
+
         let stack_bottom = USER_STACK_TOP - USER_STACK_SIZE;
         new_aspace.map_alloc(
             va!(stack_bottom),
@@ -152,6 +153,15 @@ impl Process {
         axtask::set_current_page_table_root(new_pt_root);
         self.activate();
         self.complete_vfork();
+
+        {
+            let mut shm = self.shared_memory.lock();
+            for inner_arc in shm.values() {
+                inner_arc.lock().detach_process(self.pid());
+            }
+            shm.clear();
+        }
+
         let cloexec_entries = {
             let mut fd_table = self.fd_table.lock();
             fd_table.take_cloexec_on_exec()

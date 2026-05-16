@@ -24,6 +24,7 @@ pub struct AddrSpace {
 impl AddrSpace {
     fn backend_kind(backend: &Backend) -> &'static str {
         match backend {
+            Backend::Shared { .. } => "shared",
             Backend::Linear { .. } => "linear",
             Backend::Alloc { .. } => "alloc",
             Backend::File(_) => "file",
@@ -583,6 +584,91 @@ impl AddrSpace {
             );
         }
         false
+    }
+
+    /// Attempts to clone the current address space into a new one.
+    pub fn try_clone(&mut self) -> AxResult<Self> {
+        let mut new_aspace = Self::new_empty(self.va_range.start, self.va_range.size())?;
+
+        if !cfg!(target_arch = "aarch64") && !cfg!(target_arch = "loongarch64") {
+            new_aspace.copy_mappings_from(&*crate::kernel_aspace().lock())?;
+        }
+
+        for area in self.areas.iter() {
+            // For Alloc backends, the child uses lazy allocation (populate=false)
+            // so that fork doesn't eagerly duplicate all physical frames.
+            let backend = match area.backend() {
+                Backend::Alloc { .. } => Backend::new_alloc(false),
+                other => other.clone(),
+            };
+            let new_area = MemoryArea::new(area.start(), area.size(), area.flags(), backend);
+            new_aspace
+                .areas
+                .map(new_area, &mut new_aspace.pt, false)
+                .map_err(mapping_err_to_ax_err)?;
+
+            // Only iterate over pages that are actually mapped in the parent.
+            for vaddr in PageIter4K::new(area.start(), area.end()).unwrap() {
+                if let Ok((paddr, flags, _)) = self.pt.query(vaddr) {
+                    if paddr.as_usize() == 0 {
+                        // Skip unmaterialized lazy pages.
+                        continue;
+                    }
+
+                    match area.backend() {
+                        Backend::Alloc { .. } => {
+                            // Eager copy for Alloc mappings.
+                            let child_backend = Backend::new_alloc(false);
+                            if !child_backend.handle_page_fault(vaddr, flags, &mut new_aspace.pt) {
+                                return Err(AxError::NoMemory);
+                            }
+                            let (new_paddr, _, _) = new_aspace
+                                .pt
+                                .query(vaddr)
+                                .map_err(|_| AxError::BadAddress)?;
+                            unsafe {
+                                core::ptr::copy_nonoverlapping(
+                                    phys_to_virt(paddr).as_ptr(),
+                                    phys_to_virt(new_paddr).as_mut_ptr(),
+                                    PAGE_SIZE_4K,
+                                );
+                            }
+                        }
+                        Backend::File(mapping) if !mapping.is_shared() => {
+                            // Eager copy for private File mappings.
+                            let child_backend = Backend::new_alloc(false);
+                            if !child_backend.handle_page_fault(vaddr, flags, &mut new_aspace.pt) {
+                                return Err(AxError::NoMemory);
+                            }
+                            let (new_paddr, _, _) = new_aspace
+                                .pt
+                                .query(vaddr)
+                                .map_err(|_| AxError::BadAddress)?;
+                            unsafe {
+                                core::ptr::copy_nonoverlapping(
+                                    phys_to_virt(paddr).as_ptr(),
+                                    phys_to_virt(new_paddr).as_mut_ptr(),
+                                    PAGE_SIZE_4K,
+                                );
+                            }
+                        }
+                        Backend::File(_) => {
+                            // Shared file mapping: map the same physical frame.
+                            new_aspace
+                                .pt
+                                .map(vaddr, paddr, PageSize::Size4K, flags)
+                                .map(|tlb| tlb.ignore())
+                                .map_err(|_| AxError::NoMemory)?;
+                        }
+                        Backend::Linear { .. } | Backend::Shared { .. } => {
+                            // Already handled by areas.map() via pt.map_region.
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok(new_aspace)
     }
 }
 

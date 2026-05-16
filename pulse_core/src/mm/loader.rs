@@ -141,7 +141,7 @@ fn load_segments(
         let flags = segment_flags(&ph);
 
         if ph.flags().is_write() {
-            aspace.map_alloc(seg_start_page, seg_end_page - seg_start_page, flags, false)?;
+            aspace.map_alloc(seg_start_page, seg_end_page - seg_start_page, flags, true)?;
             if p_filesz > 0 {
                 let file_buf = read_elf_range(path, p_offset as u64, p_filesz)?;
                 write_user_region(aspace, p_vaddr, &file_buf)?;
@@ -190,7 +190,7 @@ fn write_user_region(aspace: &mut AddrSpace, start: VirtAddr, bytes: &[u8]) -> A
             return Err(AxError::BadAddress);
         }
     }
-    aspace.write(start, bytes).map_err(AxError::from)
+    aspace.write(start, bytes).map_err(|e| AxError::from(e))
 }
 
 fn file_flags_for_segment(ph: &xmas_elf::program::ProgramHeader<'_>) -> FileFlags {
