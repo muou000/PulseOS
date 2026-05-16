@@ -16,7 +16,7 @@ sh ./libcbench_testcode.sh
 
 cd /fs/glibc
 sh ./basic_testcode.sh
-/fs/glibc/busybox sh /fs/glibc/busybox_testcode.sh
+sh ./busybox_testcode.sh
 sh ./lua_testcode.sh
 sh ./cyclictest_testcode.sh
 sh ./libcbench_testcode.sh
