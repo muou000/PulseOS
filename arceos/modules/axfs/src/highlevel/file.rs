@@ -343,6 +343,7 @@ impl PageCache {
                 warn!("Failed to allocate page cache: {:?}", err);
             })
             .map_err(|_| VfsError::StorageFull)?;
+        unsafe { core::ptr::write_bytes(addr as *mut u8, 0, PAGE_SIZE) };
         Ok(Self {
             addr: addr.into(),
             dirty: false,
