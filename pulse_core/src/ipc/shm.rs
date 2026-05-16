@@ -4,13 +4,12 @@ extern crate alloc;
 
 use alloc::collections::BTreeMap;
 use alloc::sync::Arc;
-use alloc::vec::Vec;
 use core::sync::atomic::{AtomicI32, Ordering};
 
 use axalloc::global_allocator;
 use axerrno::{AxError, AxResult, ax_err};
 use axhal::paging::MappingFlags;
-use memory_addr::{PAGE_SIZE_4K, PhysAddr, VirtAddr};
+use memory_addr::PAGE_SIZE_4K;
 use spin::Mutex;
 use spin::Lazy;
 
@@ -112,16 +111,14 @@ pub struct ShmInner {
     pub shmid: i32,
     /// Number of pages in the segment.
     pub page_num: usize,
-    /// Physical page addresses (shared across all attachers).
-    pub phys_pages: Vec<PhysAddr>,
+    /// Virtual kernel address of the shared memory segment.
+    pub addr: usize,
     /// Whether to remove on last detach (set by IPC_RMID).
     pub rmid: bool,
     /// Mapping flags for this segment.
     pub mapping_flags: MappingFlags,
     /// C-compatible metadata.
     pub shmid_ds: ShmidDs,
-    /// Per-process attach info: pid -> (vaddr, size)
-    pub va_range: BTreeMap<u64, (VirtAddr, usize)>,
 }
 
 impl ShmInner {
@@ -129,35 +126,26 @@ impl ShmInner {
         Self {
             shmid,
             page_num: align_up_4k(size) / PAGE_SIZE_4K,
-            phys_pages: Vec::new(),
+            addr: 0,
             rmid: false,
             mapping_flags,
             shmid_ds: ShmidDs::new(key, size, mapping_flags.bits() as u16, pid),
-            va_range: BTreeMap::new(),
         }
     }
 
     /// Allocate physical pages for this segment (first attach).
     pub fn alloc_pages(&mut self) -> AxResult<()> {
-        if !self.phys_pages.is_empty() {
+        if self.addr != 0 {
             return Ok(());
         }
-        let mut pages = Vec::new();
-        if pages.try_reserve_exact(self.page_num).is_err() {
-            return ax_err!(NoMemory, "shm: cannot allocate page vec");
+        let vaddr = global_allocator()
+            .alloc_pages(self.page_num, PAGE_SIZE_4K)
+            .map_err(|_| AxError::NoMemory)?;
+        // Zero the pages
+        unsafe {
+            core::ptr::write_bytes(vaddr as *mut u8, 0, self.page_num * PAGE_SIZE_4K);
         }
-        for _ in 0..self.page_num {
-            let vaddr = global_allocator()
-                .alloc_pages(1, PAGE_SIZE_4K)
-                .map_err(|_| AxError::NoMemory)?;
-            // Zero the page
-            unsafe {
-                core::ptr::write_bytes(vaddr as *mut u8, 0, PAGE_SIZE_4K);
-            }
-            let paddr = axhal::mem::virt_to_phys(VirtAddr::from(vaddr));
-            pages.push(paddr);
-        }
-        self.phys_pages = pages;
+        self.addr = vaddr;
         Ok(())
     }
 
@@ -174,22 +162,15 @@ impl ShmInner {
     }
 
     /// Attach a process to this segment.
-    pub fn attach_process(&mut self, pid: u64, vaddr: VirtAddr, size: usize) {
-        self.va_range.insert(pid, (vaddr, size));
+    pub fn attach_process(&mut self, pid: u64) {
         self.shmid_ds.shm_nattch += 1;
         self.shmid_ds.shm_lpid = pid as i32;
     }
 
     /// Detach a process from this segment.
     pub fn detach_process(&mut self, pid: u64) {
-        self.va_range.remove(&pid);
         self.shmid_ds.shm_nattch = self.shmid_ds.shm_nattch.saturating_sub(1);
         self.shmid_ds.shm_lpid = pid as i32;
-    }
-
-    /// Get the virtual address range for a process.
-    pub fn get_addr_range(&self, pid: u64) -> Option<(VirtAddr, usize)> {
-        self.va_range.get(&pid).copied()
     }
 
     /// Current attach count.
@@ -198,7 +179,19 @@ impl ShmInner {
     }
 }
 
-// ShmInner is not Send+Sync because of Vec<PhysAddr>, but we wrap it in Arc<Mutex<>>
+impl Drop for ShmInner {
+    fn drop(&mut self) {
+        if self.addr != 0 {
+            global_allocator().dealloc_pages(self.addr, self.page_num);
+            axlog::info!(
+                "[SharedMemory] dealloc pages: addr: {:#x}, page_count: {}, shmid: {}",
+                self.addr, self.page_num, self.shmid
+            );
+        }
+    }
+}
+
+// ShmInner is not Send+Sync because of kernel virtual address, but we wrap it in Arc<Mutex<>>
 unsafe impl Send for ShmInner {}
 unsafe impl Sync for ShmInner {}
 
@@ -243,8 +236,6 @@ pub struct ShmManager {
     key_shmid: BiBTreeMap<i32, i32>,
     /// shm_id -> shm_inner
     shmid_inner: BTreeMap<i32, Arc<Mutex<ShmInner>>>,
-    /// pid -> (shm_id -> (vaddr, size))
-    pid_shmid_vaddr: BTreeMap<u64, BTreeMap<i32, (VirtAddr, usize)>>,
     /// Next shared memory ID.
     next_shmid: AtomicI32,
 }
@@ -254,7 +245,6 @@ impl ShmManager {
         Self {
             key_shmid: BiBTreeMap::new(),
             shmid_inner: BTreeMap::new(),
-            pid_shmid_vaddr: BTreeMap::new(),
             next_shmid: AtomicI32::new(1),
         }
     }
@@ -273,15 +263,6 @@ impl ShmManager {
         self.shmid_inner.get(&shmid).cloned()
     }
 
-    /// Get shmid by vaddr for a given process.
-    pub fn get_shmid_by_vaddr(&self, pid: u64, vaddr: VirtAddr) -> Option<i32> {
-        self.pid_shmid_vaddr
-            .get(&pid)?
-            .iter()
-            .find(|(_, v)| v.0 == vaddr)
-            .map(|(shmid, _)| *shmid)
-    }
-
     /// Insert key -> shmid mapping.
     pub fn insert_key_shmid(&mut self, key: i32, shmid: i32) {
         self.key_shmid.insert(key, shmid);
@@ -292,51 +273,10 @@ impl ShmManager {
         self.shmid_inner.insert(shmid, shm_inner);
     }
 
-    /// Record a process's attach to a shmid at a given vaddr.
-    pub fn insert_shmid_vaddr(&mut self, pid: u64, shmid: i32, vaddr: VirtAddr, size: usize) {
-        self.pid_shmid_vaddr
-            .entry(pid)
-            .or_default()
-            .insert(shmid, (vaddr, size));
-    }
-
-    /// Remove a process's attach by vaddr.
-    pub fn remove_shmaddr(&mut self, pid: u64, vaddr: VirtAddr) -> Option<(i32, usize)> {
-        let map = self.pid_shmid_vaddr.get_mut(&pid)?;
-        let shmid = map
-            .iter()
-            .find(|(_, v)| v.0 == vaddr)
-            .map(|(shmid, _)| *shmid)?;
-        let (_, size) = map.remove(&shmid)?;
-        if map.is_empty() {
-            self.pid_shmid_vaddr.remove(&pid);
-        }
-        Some((shmid, size))
-    }
-
     /// Remove a shmid from the manager.
     pub fn remove_shmid(&mut self, shmid: i32) {
         self.key_shmid.remove_by_value(&shmid);
         self.shmid_inner.remove(&shmid);
-    }
-
-    /// Clear all shared memory segments related to a process.
-    /// Called on process exit.
-    pub fn clear_proc_shm(&mut self, pid: u64) {
-        let shmid_vaddr = match self.pid_shmid_vaddr.remove(&pid) {
-            Some(m) => m,
-            None => return,
-        };
-        for (shmid, _vaddr_size) in shmid_vaddr {
-            if let Some(inner) = self.shmid_inner.get(&shmid) {
-                let mut inner = inner.lock();
-                inner.detach_process(pid);
-                if inner.rmid && inner.attach_count() == 0 {
-                    drop(inner);
-                    self.remove_shmid(shmid);
-                }
-            }
-        }
     }
 
     /// Create a new shared memory segment.
@@ -377,12 +317,6 @@ impl ShmManager {
 
 /// Global shared memory manager instance.
 pub static SHM_MANAGER: Lazy<Mutex<ShmManager>> = Lazy::new(|| Mutex::new(ShmManager::new()));
-
-/// Clear all shared memory segments related to a process.
-/// Must be called during process exit.
-pub fn clear_proc_shm(pid: u64) {
-    SHM_MANAGER.lock().clear_proc_shm(pid);
-}
 
 fn align_up_4k(size: usize) -> usize {
     (size + PAGE_SIZE_4K - 1) & !(PAGE_SIZE_4K - 1)

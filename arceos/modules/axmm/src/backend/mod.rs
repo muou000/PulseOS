@@ -1,13 +1,16 @@
 //! Memory mapping backends.
 
-use axhal::paging::{MappingFlags, PageTable};
+use axhal::paging::{MappingFlags, PageSize, PageTable};
 use memory_addr::VirtAddr;
 use memory_set::MappingBackend;
+use ::alloc::sync::Arc;
 
 mod alloc;
 mod file;
 mod linear;
+mod shared;
 
+pub use self::shared::SharedFrame;
 pub(crate) use alloc::{cow_dec_frame_ref, cow_inc_frame_ref};
 
 /// A unified enum type for different memory mapping backends.
@@ -20,6 +23,11 @@ pub(crate) use alloc::{cow_dec_frame_ref, cow_inc_frame_ref};
 ///   frames are obtained from the global allocator.
 #[derive(Clone)]
 pub enum Backend {
+    /// Shared memory mapping backend.
+    Shared {
+        shared_frame: Arc<SharedFrame>,
+        align: PageSize,
+    },
     /// Linear mapping backend.
     ///
     /// The offset between the virtual address and the physical address is
@@ -48,15 +56,19 @@ impl MappingBackend for Backend {
     type Flags = MappingFlags;
     type PageTable = PageTable;
     fn map(&self, start: VirtAddr, size: usize, flags: MappingFlags, pt: &mut PageTable) -> bool {
-        match *self {
-            Self::Linear { pa_va_offset } => self.map_linear(start, size, flags, pt, pa_va_offset),
-            Self::Alloc { populate } => self.map_alloc(start, size, flags, pt, populate),
-            Self::File(ref mapping) => self.map_file(start, size, flags, pt, mapping),
+        match self {
+            Self::Shared { shared_frame, .. } => {
+                Self::map_shared(start, size, flags, pt, VirtAddr::from(shared_frame.vaddr))
+            }
+            Self::Linear { pa_va_offset } => self.map_linear(start, size, flags, pt, *pa_va_offset),
+            Self::Alloc { populate } => self.map_alloc(start, size, flags, pt, *populate),
+            Self::File(mapping) => self.map_file(start, size, flags, pt, mapping),
         }
     }
 
     fn unmap(&self, start: VirtAddr, size: usize, pt: &mut PageTable) -> bool {
         match *self {
+            Self::Shared { .. } => Self::unmap_shared(start, size, pt),
             Self::Linear { pa_va_offset } => self.unmap_linear(start, size, pt, pa_va_offset),
             Self::Alloc { populate } => self.unmap_alloc(start, size, pt, populate),
             Self::File(_) => self.unmap_file(start, size, pt),
@@ -71,7 +83,7 @@ impl MappingBackend for Backend {
         page_table: &mut Self::PageTable,
     ) -> bool {
         match *self {
-            Self::Linear { .. } => page_table
+            Self::Shared { .. } | Self::Linear { .. } => page_table
                 .protect_region(start, size, new_flags, true)
                 .map(|tlb| tlb.ignore())
                 .is_ok(),
@@ -93,6 +105,7 @@ impl Backend {
         page_table: &mut PageTable,
     ) -> bool {
         match *self {
+            Self::Shared { .. } => false,
             Self::Linear { .. } => false, // Linear mappings should not trigger page faults.
             Self::Alloc { populate } => {
                 self.handle_page_fault_alloc(vaddr, orig_flags, page_table, populate)

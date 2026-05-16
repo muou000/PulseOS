@@ -1,6 +1,7 @@
 //! System V shared memory syscall implementations.
 
 use axerrno::LinuxError;
+use axhal::mem::virt_to_phys;
 use memory_addr::{PAGE_SIZE_4K, VirtAddr};
 use pulse_core::ipc::shm::{
     IPC_INFO, IPC_PRIVATE, IPC_RMID, IPC_SET, IPC_STAT, SHM_INFO, SHM_RDONLY, SHM_REMAP,
@@ -97,7 +98,10 @@ pub fn sys_shmat(shmid: i32, shmaddr: usize, shmflg: i32) -> isize {
         // SHM_RND: round down to SHMLBA (use PAGE_SIZE_4K for now)
         shmaddr & !(PAGE_SIZE_4K - 1)
     } else if shmaddr != 0 {
-        shmaddr & !(PAGE_SIZE_4K - 1)
+        if shmaddr & (PAGE_SIZE_4K - 1) != 0 {
+            return -LinuxError::EINVAL.code() as isize;
+        }
+        shmaddr
     } else {
         // Let the kernel choose an address.
         let limit = memory_addr::VirtAddrRange::from_start_size(
@@ -123,23 +127,23 @@ pub fn sys_shmat(shmid: i32, shmaddr: usize, shmflg: i32) -> isize {
     }
 
     // Map the shared physical pages into this process's address space.
-    if let Err(e) = aspace.map_phys_pages(
+    let paddr = virt_to_phys(VirtAddr::from(inner.addr));
+    if let Err(e) = aspace.map_linear(
         VirtAddr::from(map_addr),
+        paddr,
         length,
         mapping_flags,
-        &inner.phys_pages,
     ) {
-        axlog::error!("sys_shmat: map_phys_pages failed: {:?}", e);
+        axlog::error!("sys_shmat: map_linear failed: {:?}", e);
         return -LinuxError::from(e).code() as isize;
     }
 
     drop(aspace);
 
     // Record the attachment.
-    inner.attach_process(pid, VirtAddr::from(map_addr), length);
-
-    let mut manager = SHM_MANAGER.lock();
-    manager.insert_shmid_vaddr(pid, shmid, VirtAddr::from(map_addr), length);
+    inner.attach_process(pid);
+    drop(inner);
+    proc.shared_memory.lock().insert(VirtAddr::from(map_addr), shm_inner.clone());
 
     axlog::debug!("sys_shmat: mapped at {:#x}, size={}", map_addr, length);
     map_addr as isize
@@ -157,35 +161,32 @@ pub fn sys_shmdt(shmaddr: usize) -> isize {
     };
     let pid = proc.pid();
 
-    // Find the shmid and size for this address.
-    let (shmid, size) = {
-        let mut manager = SHM_MANAGER.lock();
-        match manager.remove_shmaddr(pid, VirtAddr::from(shmaddr)) {
-            Some((shmid, size)) => (shmid, size),
+    // Find the ShmInner for this address in the process's registry.
+    let shm_inner_arc = {
+        let mut shm_registry = proc.shared_memory.lock();
+        match shm_registry.remove(&VirtAddr::from(shmaddr)) {
+            Some(inner) => inner,
             None => return -LinuxError::EINVAL.code() as isize,
         }
     };
 
+    let mut inner = shm_inner_arc.lock();
+    let length = inner.page_num * PAGE_SIZE_4K;
+    let shmid = inner.shmid;
+
     // Unmap the virtual address range.
     let aspace_handle = proc.aspace_handle();
     let mut aspace = aspace_handle.lock();
-    if let Err(e) = aspace.unmap(VirtAddr::from(shmaddr), size) {
+    if let Err(e) = aspace.unmap(VirtAddr::from(shmaddr), length) {
         axlog::warn!("sys_shmdt: unmap failed: {:?}", e);
     }
     drop(aspace);
 
     // Detach the process from the ShmInner.
-    let inner = {
-        let manager = SHM_MANAGER.lock();
-        match manager.get_inner_by_shmid(shmid) {
-            Some(inner) => inner,
-            None => return 0,
-        }
-    };
-    let mut inner = inner.lock();
     inner.detach_process(pid);
 
-    // If IPC_RMID was set and no more attachers, remove the segment.
+    // If IPC_RMID was set and no more attachers, remove from global manager.
+    // Note: The memory will be freed when the last Arc is dropped.
     if inner.rmid && inner.attach_count() == 0 {
         drop(inner);
         let mut manager = SHM_MANAGER.lock();
@@ -208,14 +209,14 @@ pub fn sys_shmctl(shmid: i32, cmd: i32, buf: usize) -> isize {
         Err(e) => return -e.code() as isize,
     };
 
-    let inner = {
+    let inner_arc = {
         let manager = SHM_MANAGER.lock();
         match manager.get_inner_by_shmid(shmid) {
             Some(inner) => inner,
             None => return -LinuxError::EINVAL.code() as isize,
         }
     };
-    let mut inner = inner.lock();
+    let mut inner = inner_arc.lock();
 
     match cmd {
         IPC_STAT => {

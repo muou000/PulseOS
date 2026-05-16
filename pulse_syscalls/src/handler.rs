@@ -7,14 +7,6 @@ use crate::*;
 
 #[register_trap_handler(SYSCALL)]
 pub fn syscall_handler(tf: &mut TrapFrame, syscall_num: usize) -> isize {
-    #[cfg(target_arch = "riscv64")]
-    {
-        tf.sepc += 4;
-    }
-    #[cfg(target_arch = "loongarch64")]
-    {
-        tf.era += 4;
-    }
     let syscall_enter_ns = axhal::time::monotonic_time_nanos() as u64;
     let thread = match pulse_core::task::current_thread() {
         Ok(thread) => thread,
@@ -296,16 +288,7 @@ fn syscall_dispatcher(
         Sysno::ftruncate => impls::sys_ftruncate(args[0], args[1]),
         Sysno::fsync => impls::sys_fsync(args[0]),
         Sysno::sync => impls::sys_sync(),
-        Sysno::execve => {
-            axlog::info!(
-                "sys_execve: tid={} pathname={:#x}, argv={:#x}, envp={:#x}",
-                axtask::current().id().as_u64(),
-                args[0],
-                args[1],
-                args[2]
-            );
-            impls::sys_execve(tf, args[0], args[1], args[2])
-        }
+        Sysno::execve => impls::sys_execve(tf, args[0], args[1], args[2]),
 
         // System V shared memory
         Sysno::shmget => impls::sys_shmget(args[0] as i32, args[1], args[2] as i32),

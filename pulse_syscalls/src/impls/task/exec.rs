@@ -7,7 +7,7 @@ use pulse_core::task::current_thread;
 use super::common::{read_user_cstring, read_user_string_array};
 
 pub fn sys_execve(_tf: &TrapFrame, pathname: usize, argv: usize, envp: usize) -> isize {
-    axlog::info!(
+    axlog::debug!(
         "sys_execve: pathname={:#x}, argv={:#x}, envp={:#x}",
         pathname,
         argv,
