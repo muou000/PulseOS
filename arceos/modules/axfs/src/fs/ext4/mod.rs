@@ -88,7 +88,11 @@ impl<D: BlockDriverOps + 'static> BlockDevice for Ext4Disk<D> {
             return; // Silently drop the write instead of panicking
         }
 
-        let mut block_buf = vec![0; self.sector_size];
+        let mut block_buf = Vec::with_capacity(self.sector_size);
+        // SAFETY: The buffer will be completely filled before we write it to disk.
+        // In the case of a partial write, it is populated by `dev.read_block`.
+        // In the case of a full write, it is populated by `copy_from_slice`.
+        unsafe { block_buf.set_len(self.sector_size) };
         let mut data_written = 0;
 
         for i in 0..blocks {
