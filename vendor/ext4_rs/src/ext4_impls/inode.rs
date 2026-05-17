@@ -278,7 +278,7 @@ impl Ext4 {
 
         // Check the current state of the extent tree
         let root_header = inode_ref.inode.root_extent_header();
-        log::info!(
+        log::debug!(
             "[Batch Append] Current extent tree state: magic={:x}, entries={}, max={}, depth={}",
             root_header.magic,
             root_header.entries_count,
@@ -342,7 +342,7 @@ impl Ext4 {
             contiguous_segments.push(current_segment);
         }
 
-        log::info!(
+        log::debug!(
             "[Batch Append] Split {} allocated blocks into {} contiguous segments",
             allocated_blocks.len(),
             contiguous_segments.len()
@@ -371,7 +371,7 @@ impl Ext4 {
                 newex.store_pblock(first_physical_block);
                 newex.block_count = sub_segment_length as u16;
 
-                log::info!("[Batch Append] Inserting extent: first_block={}, block_count={}, physical_block={}", 
+                log::debug!("[Batch Append] Inserting extent: first_block={}, block_count={}, physical_block={}", 
                     current_iblk, sub_segment_length, first_physical_block);
 
                 // Validate extent validity
@@ -407,7 +407,7 @@ impl Ext4 {
 
             // Validate extent tree state
             let root_header = inode_ref.inode.root_extent_header();
-            log::info!("[Batch Append] Updated extent tree state: magic={:x}, entries={}, max={}, depth={}", 
+            log::debug!("[Batch Append] Updated extent tree state: magic={:x}, entries={}, max={}, depth={}", 
                 root_header.magic,
                 root_header.entries_count,
                 root_header.max_entries_count,
