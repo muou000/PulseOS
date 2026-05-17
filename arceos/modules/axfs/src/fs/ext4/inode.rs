@@ -339,6 +339,10 @@ impl FileNodeOps for Inode {
             let available = size - offset;
             let len = available.min(buf.len());
             let mut raw = [0u8; 15 * core::mem::size_of::<u32>()];
+            let len = len.min(raw.len().saturating_sub(offset));
+            if len == 0 {
+                return Ok(0);
+            }
             for (chunk, word) in raw.chunks_exact_mut(4).zip(inode_ref.inode.block().iter()) {
                 chunk.copy_from_slice(&word.to_le_bytes());
             }
