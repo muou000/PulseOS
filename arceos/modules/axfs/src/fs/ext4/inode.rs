@@ -339,8 +339,12 @@ impl FileNodeOps for Inode {
             let available = size - offset;
             let len = available.min(buf.len());
             let mut raw = [0u8; 15 * core::mem::size_of::<u32>()];
-            for (index, word) in inode_ref.inode.block().into_iter().enumerate() {
-                raw[index * 4..(index + 1) * 4].copy_from_slice(&word.to_le_bytes());
+            let len = len.min(raw.len().saturating_sub(offset));
+            if len == 0 {
+                return Ok(0);
+            }
+            for (chunk, word) in raw.chunks_exact_mut(4).zip(inode_ref.inode.block().iter()) {
+                chunk.copy_from_slice(&word.to_le_bytes());
             }
             buf[..len].copy_from_slice(&raw[offset..offset + len]);
             return Ok(len);
@@ -396,10 +400,10 @@ impl FileNodeOps for Inode {
         let bytes = target.as_bytes();
         if bytes.len() <= 15 * core::mem::size_of::<u32>() {
             let mut words = [0u32; 15];
-            for (index, chunk) in bytes.chunks(4).enumerate() {
+            for (word, chunk) in words.iter_mut().zip(bytes.chunks(4)) {
                 let mut raw = [0u8; 4];
                 raw[..chunk.len()].copy_from_slice(chunk);
-                words[index] = u32::from_le_bytes(raw);
+                *word = u32::from_le_bytes(raw);
             }
 
             inode_ref.inode.set_block(words);
