@@ -734,7 +734,7 @@ impl Ext4 {
         let has_super = self.ext4_bg_has_super(bgid);
         let gdt_blocks = self.ext4_bg_num_gdb(bgid);
         let meta_blocks = if has_super { 1 + gdt_blocks } else { 0 };
-        // log::info!(
+        // log::debug!(
         //     "[num_base_meta_blocks] group={} has_super={} gdt_blocks={} meta_blocks={}",
         //     bgid, has_super, gdt_blocks, meta_blocks
         // );
