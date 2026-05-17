@@ -135,6 +135,13 @@ impl<const PAGE_SIZE: usize> PageAllocator for BitmapPageAllocator<PAGE_SIZE> {
             crate::is_aligned(pos, Self::PAGE_SIZE),
             "pos must be aligned to PAGE_SIZE"
         );
+        if pos < self.base || pos >= self.base + self.total_pages * Self::PAGE_SIZE {
+            log::warn!(
+                "dealloc_pages: invalid pos {:#x}, base {:#x}, total_pages {}",
+                pos, self.base, self.total_pages
+            );
+            return;
+        }
         if match num_pages.cmp(&1) {
             core::cmp::Ordering::Equal => self.inner.dealloc((pos - self.base) / PAGE_SIZE),
             core::cmp::Ordering::Greater => self
