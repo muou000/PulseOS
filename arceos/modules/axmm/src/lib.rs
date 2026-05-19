@@ -8,7 +8,9 @@ extern crate alloc;
 
 mod aspace;
 mod backend;
+mod frameinfo;
 
+use crate::frameinfo::frame_table;
 use axerrno::{AxError, AxResult};
 use axhal::{
     mem::{MemRegionFlags, phys_to_virt},
@@ -97,13 +99,18 @@ pub fn kernel_page_table_root() -> PhysAddr {
 }
 
 /// Increase mapping refcount for a shared frame used by fork COW.
+/// Increase mapping refcount for a shared frame used by fork COW.
 pub fn cow_inc_frame_ref(frame: PhysAddr) {
-    backend::cow_inc_frame_ref(frame);
+    if frame_table().contains(frame) {
+        backend::cow_inc_frame_ref(frame);
+    }
 }
 
 /// Decrease mapping refcount for a shared frame used by fork COW.
 pub fn cow_dec_frame_ref(frame: PhysAddr) {
-    backend::cow_dec_frame_ref(frame);
+    if frame_table().contains(frame) {
+        backend::cow_dec_frame_ref(frame);
+    }
 }
 
 /// Initializes virtual memory management.
@@ -112,6 +119,45 @@ pub fn cow_dec_frame_ref(frame: PhysAddr) {
 /// fine-grained kernel page table.
 pub fn init_memory_management() {
     info!("Initialize virtual memory management...");
+
+    let mut max_paddr = PhysAddr::from(0);
+    let mut min_paddr = PhysAddr::from(usize::MAX);
+    
+    // Only include regions that are part of the main RAM.
+    // We use PHYS_MEMORY_BASE and SIZE as a guide to filter out MMIO.
+    let ram_start = PhysAddr::from(axconfig::plat::PHYS_MEMORY_BASE);
+    let ram_end = ram_start + axconfig::plat::PHYS_MEMORY_SIZE;
+
+    for r in axhal::mem::memory_regions() {
+        let start = r.paddr;
+        let end = r.paddr + r.size;
+        
+        // Filter: only include regions that overlap with RAM.
+        if end <= ram_start || start >= ram_end {
+            continue;
+        }
+        
+        let intersect_start = if start < ram_start { ram_start } else { start };
+        let intersect_end = if end > ram_end { ram_end } else { end };
+
+        if intersect_start < min_paddr {
+            min_paddr = intersect_start;
+        }
+        if intersect_end > max_paddr {
+            max_paddr = intersect_end;
+        }
+    }
+    
+    if max_paddr <= min_paddr {
+        // Fallback if no regions found
+        min_paddr = ram_start;
+        max_paddr = ram_end;
+    }
+    
+    let total_memory_size = max_paddr.as_usize() - min_paddr.as_usize();
+    info!("FrameTable: range [{:#x}, {:#x}), size {:#x}", min_paddr, max_paddr, total_memory_size);
+
+    self::frameinfo::init_frame_table(min_paddr, total_memory_size);
 
     let kernel_aspace = new_kernel_aspace().expect("failed to initialize kernel address space");
     debug!("kernel address space init OK: {:#x?}", kernel_aspace);
