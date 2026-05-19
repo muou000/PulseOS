@@ -90,14 +90,6 @@ pub fn sys_clone(tf: &TrapFrame, args: [usize; 6]) -> isize {
         return -LinuxError::EINVAL.code() as isize;
     }
 
-    // CLONE_VM: Process fork vs Thread clone
-    if !flags.contains(CloneFlags::CLONE_VM) {
-        axlog::debug!(
-            "sys_clone: CLONE_VM=0 requested. Using Deep Copy fork instead of safe COW due to \
-             missing physical frame reference tracking."
-        );
-    }
-
     if !flags.contains(CloneFlags::CLONE_FILES) || !flags.contains(CloneFlags::CLONE_FS) {
         axlog::debug!("sys_clone: child will use private FS and/or FD tables");
     }
