@@ -387,6 +387,23 @@ impl ThreadSignal {
         Ok(signal_return_value(tf))
     }
 
+    pub fn peek_unblocked(&self) -> Option<usize> {
+        let blocked = self.blocked_mask();
+
+        let pending = self.thread_pending.load(Ordering::Acquire);
+        let ready = pending & !blocked;
+        if ready != 0 {
+            return Some(ready.trailing_zeros() as usize + 1);
+        }
+
+        let proc_pending = self.shared.process_pending.load(Ordering::Acquire);
+        let proc_ready = proc_pending & !blocked;
+        if proc_ready != 0 {
+            return Some(proc_ready.trailing_zeros() as usize + 1);
+        }
+        None
+    }
+
     fn dequeue_unblocked(&self) -> Option<usize> {
         let blocked = self.blocked_mask();
 
@@ -463,7 +480,7 @@ fn default_action(sig: usize) -> DefaultSignalAction {
     }
 }
 
-fn resolve_action(shared: &SignalShared, sig: usize) -> SignalAction {
+pub fn resolve_action(shared: &SignalShared, sig: usize) -> SignalAction {
     let act = shared.action(sig);
     match act.handler {
         SIG_IGN => SignalAction::Ignore,

@@ -62,7 +62,7 @@ pub fn sys_wait4(pid: isize, status: usize, options: i32, rusage: usize) -> isiz
         }
 
         if let Err(e) = process.wait_for_child_exit_interruptible(pid) {
-            return -e.code() as isize;
+            return -(e as isize);
         }
     }
 }

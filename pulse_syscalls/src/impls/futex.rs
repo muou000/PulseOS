@@ -62,10 +62,7 @@ pub fn sys_futex(
             };
             match process.futex_wait(uaddr, val as u32, timeout_ns) {
                 Ok(()) => 0,
-                Err(e) => {
-                    let errno = ax_error_to_linux(e);
-                    -errno.code() as isize
-                }
+                Err(e) => -(e as isize),
             }
         }
         FUTEX_WAKE => process.futex_wake(uaddr, val) as isize,

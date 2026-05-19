@@ -62,7 +62,29 @@ pub fn syscall_handler(tf: &mut TrapFrame, syscall_num: usize) -> isize {
         ret
     );
 
-    set_syscall_ret(tf, ret);
+    if ret == -(pulse_core::task::ERESTARTSYS as isize) {
+        let sig_state = thread.signal();
+        let mut should_restart = true;
+        
+        // Peek to see if the next signal handler has SA_RESTART set.
+        if let Some(sig) = sig_state.peek_unblocked() {
+            let action = pulse_core::task::resolve_action(&sig_state.shared(), sig);
+            if let pulse_core::task::SignalAction::Handler(act) = action {
+                if (act.flags & (linux_raw_sys::general::SA_RESTART as usize)) == 0 {
+                    should_restart = false;
+                }
+            }
+        }
+
+        if should_restart {
+            restart_syscall(tf);
+        } else {
+            set_syscall_ret(tf, -LinuxError::EINTR.code() as isize);
+        }
+    } else {
+        set_syscall_ret(tf, ret);
+    }
+
     if let Some(delivery) = pulse_core::task::check_signals_and_deliver(thread.as_ref(), tf) {
         use pulse_core::task::{DefaultSignalAction, SignalAction};
         match delivery.action {
@@ -74,11 +96,7 @@ pub fn syscall_handler(tf: &mut TrapFrame, syscall_num: usize) -> isize {
                 process.set_exit_signal(delivery.sig as i32, true);
                 process.begin_group_exit(delivery.sig as i32);
             }
-            SignalAction::Default(DefaultSignalAction::Stop)
-            | SignalAction::Default(DefaultSignalAction::Continue)
-            | SignalAction::Default(DefaultSignalAction::Ignore)
-            | SignalAction::Ignore
-            | SignalAction::Handler(_) => {}
+            _ => {}
         }
     }
 
@@ -103,6 +121,11 @@ fn syscall_ret(tf: &TrapFrame) -> isize {
     tf.regs.a0 as isize
 }
 
+#[cfg(target_arch = "riscv64")]
+fn restart_syscall(tf: &mut TrapFrame) {
+    tf.sepc -= 4;
+}
+
 #[cfg(target_arch = "loongarch64")]
 fn set_syscall_ret(tf: &mut TrapFrame, ret: isize) {
     tf.regs.a0 = ret as usize;
@@ -111,6 +134,11 @@ fn set_syscall_ret(tf: &mut TrapFrame, ret: isize) {
 #[cfg(target_arch = "loongarch64")]
 fn syscall_ret(tf: &TrapFrame) -> isize {
     tf.regs.a0 as isize
+}
+
+#[cfg(target_arch = "loongarch64")]
+fn restart_syscall(tf: &mut TrapFrame) {
+    tf.era -= 4;
 }
 
 #[cfg(target_arch = "aarch64")]
@@ -123,6 +151,11 @@ fn syscall_ret(tf: &TrapFrame) -> isize {
     tf.r[0] as isize
 }
 
+#[cfg(target_arch = "aarch64")]
+fn restart_syscall(tf: &mut TrapFrame) {
+    tf.elr_el1 -= 4;
+}
+
 #[cfg(target_arch = "x86_64")]
 fn set_syscall_ret(tf: &mut TrapFrame, ret: isize) {
     tf.rax = ret as u64;
@@ -131,6 +164,11 @@ fn set_syscall_ret(tf: &mut TrapFrame, ret: isize) {
 #[cfg(target_arch = "x86_64")]
 fn syscall_ret(tf: &TrapFrame) -> isize {
     tf.rax as isize
+}
+
+#[cfg(target_arch = "x86_64")]
+fn restart_syscall(tf: &mut TrapFrame) {
+    tf.rip -= 2; // syscall instruction is 0f 05
 }
 
 fn syscall_dispatcher(

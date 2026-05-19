@@ -60,7 +60,6 @@ fn handle_page_fault(vaddr: VirtAddr, access_flags: MappingFlags, is_user: bool)
             proc.set_exit_signal(SIGSEGV, true);
             proc.begin_group_exit(SIGSEGV);
             thread.exit_current(proc.group_exit_code());
-            return true;
         }
         return false;
     }
