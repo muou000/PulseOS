@@ -29,3 +29,4 @@ spin.workspace = true
 bitflags.workspace = true
 percpu.workspace = true
 starry-vdso.workspace = true
+kspin = { version = "0.1" }

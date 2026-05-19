@@ -147,8 +147,13 @@ pub fn on_timer_tick() {
 /// Adds the given task to the run queue, returns the task reference.
 pub fn spawn_task(task: TaskInner) -> AxTaskRef {
     let task_ref = task.into_arc();
-    select_run_queue::<NoPreemptIrqSave>(&task_ref).add_task(task_ref.clone());
+    spawn_task_ref(task_ref.clone());
     task_ref
+}
+
+/// Adds the given task reference to the run queue.
+pub fn spawn_task_ref(task_ref: AxTaskRef) {
+    select_run_queue::<NoPreemptIrqSave>(&task_ref).add_task(task_ref);
 }
 
 /// Spawns a new task with the given parameters.

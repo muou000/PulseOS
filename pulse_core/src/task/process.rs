@@ -7,14 +7,15 @@ use alloc::{
 use core::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, AtomicU64, Ordering};
 
 use axconfig::TASK_STACK_SIZE;
-use axerrno::{AxError, AxResult};
+use axerrno::{AxError, AxResult, LinuxError};
 use axfs::FsContext;
 use axhal::{
     context::{TrapFrame, UspaceContext},
     paging::MappingFlags,
 };
-use axmm::{AddrSpace, Backend};
+use axmm::AddrSpace;
 use axtask::{AxTaskRef, TaskInner, WaitQueue};
+use kspin::SpinNoIrq;
 use kernel_guard::NoPreemptIrqSave;
 use linux_raw_sys::general::{RLIMIT_CORE, RLIMIT_MEMLOCK, RLIMIT_NOFILE, RLIMIT_STACK, SIGCHLD, rlimit64};
 use memory_addr::{MemoryAddr, PhysAddr, VirtAddr, va};
@@ -219,9 +220,9 @@ pub struct Process {
     pub in_user_mode: Arc<AtomicBool>,
     pub stack_top: Mutex<usize>,
     pub entry: Mutex<usize>,
-    threads: Mutex<Vec<u64>>,
-    task_refs: Mutex<Vec<AxTaskRef>>,
-    children: Mutex<Vec<Arc<Process>>>,
+    threads: SpinNoIrq<Vec<u64>>,
+    task_refs: SpinNoIrq<Vec<AxTaskRef>>,
+    children: SpinNoIrq<Vec<Arc<Process>>>,
     child_exit_event: WaitQueue,
     zombie: AtomicBool,
     user_resources_released: AtomicBool,
@@ -786,9 +787,9 @@ impl Process {
             in_user_mode: Arc::new(AtomicBool::new(false)),
             stack_top: Mutex::new(USER_STACK_TOP),
             entry: Mutex::new(0),
-            threads: Mutex::new(alloc::vec![pid]),
-            task_refs: Mutex::new(Vec::new()),
-            children: Mutex::new(Vec::new()),
+            threads: SpinNoIrq::new(alloc::vec![pid]),
+            task_refs: SpinNoIrq::new(Vec::new()),
+            children: SpinNoIrq::new(Vec::new()),
             child_exit_event: WaitQueue::new(),
             zombie: AtomicBool::new(false),
             user_resources_released: AtomicBool::new(false),
@@ -867,6 +868,7 @@ impl Process {
             SignalShared::clone_actions_only(&parent.signal_shared)
         };
         let signal_trampoline = *parent.signal_trampoline.lock();
+        let exec_path = parent.exec_path();
 
         Ok(Arc::new(Self {
             pid,
@@ -885,9 +887,9 @@ impl Process {
             in_user_mode: Arc::new(AtomicBool::new(false)),
             stack_top: Mutex::new(*parent.stack_top.lock()),
             entry: Mutex::new(*parent.entry.lock()),
-            threads: Mutex::new(alloc::vec![pid]),
-            task_refs: Mutex::new(Vec::new()),
-            children: Mutex::new(Vec::new()),
+            threads: SpinNoIrq::new(alloc::vec![pid]),
+            task_refs: SpinNoIrq::new(Vec::new()),
+            children: SpinNoIrq::new(Vec::new()),
             child_exit_event: WaitQueue::new(),
             zombie: AtomicBool::new(false),
             user_resources_released: AtomicBool::new(false),
@@ -912,7 +914,7 @@ impl Process {
                 memlock_hard_limit,
             )),
             signal_shared,
-            exec_path: Mutex::new(None),
+            exec_path: Mutex::new(exec_path),
             signal_trampoline: Mutex::new(signal_trampoline),
             shared_memory,
             itimer_real_deadline_ns: AtomicU64::new(0),
@@ -1168,6 +1170,23 @@ impl Process {
         });
     }
 
+    pub fn wait_for_child_exit_interruptible(&self, pid: isize) -> Result<(), LinuxError> {
+        let thread = current_thread()?;
+        // wait_until 会在持有 WaitQueue 锁的同时执行闭包
+        self.child_exit_event.wait_until(|| {
+            self.children
+                .lock()
+                .iter()
+                .any(|child| Self::child_matches(child, pid) && child.is_zombie())
+                || thread.has_pending_signal()
+        });
+
+        if thread.has_pending_signal() {
+            return Err(LinuxError::EINTR);
+        }
+        Ok(())
+    }
+
     pub fn mark_user_resume(&self) {
         let now_ns = axhal::time::monotonic_time_nanos() as u64;
         self.last_user_enter_ns.store(now_ns, Ordering::Relaxed);
@@ -1268,6 +1287,7 @@ impl Process {
             return false;
         }
         // Timer expired. Send SIGALRM (signal 14).
+        axlog::info!("itimer expired for pid={} now={} deadline={}", self.pid(), now_ns, deadline);
         let _ = queue_signal_to_process(self, 14 /* SIGALRM */);
         let interval = self.itimer_real_interval_ns.load(Ordering::Acquire);
         if interval == 0 {
@@ -1434,6 +1454,7 @@ impl Process {
         if let Some(sp) = params.child_stack {
             child_uctx.set_sp(sp);
         }
+        let entry_pc = child_uctx.get_ip();
 
         let parent_aspace_handle = self.aspace_handle();
         let mut parent_aspace = parent_aspace_handle.lock();
@@ -1459,6 +1480,7 @@ impl Process {
 
         let child_tid = inner.id().as_u64();
         let new_aspace_arc = Arc::new(Mutex::new(new_aspace));
+        axlog::info!("spawn_fork: child pid={}, entry_pc={:#x}", child_tid, entry_pc);
         let child_proc = Self::new_child_process(
             child_tid,
             self.clone(),
@@ -1491,8 +1513,9 @@ impl Process {
         inner.init_task_ext(super::ThreadHandle::new(child_thread));
 
         self.add_child(child_proc.clone());
-        let task = axtask::spawn_task(inner);
-        child_proc.register_task_ref(task.clone());
+        let task_ref = inner.into_arc();
+        child_proc.register_task_ref(task_ref.clone());
+        axtask::spawn_task_ref(task_ref);
         Ok(child_proc)
     }
 
@@ -1506,6 +1529,7 @@ impl Process {
         if let Some(sp) = params.child_stack {
             child_uctx.set_sp(sp);
         }
+        let entry_pc = child_uctx.get_ip();
 
         let mut inner = TaskInner::try_new(
             move || {
@@ -1580,5 +1604,8 @@ impl Process {
         let task = axtask::spawn_task(inner);
         child_proc.register_task_ref(task.clone());
         Ok((child_tid, (!params.is_thread_clone).then_some(child_proc)))
+    }
+}
+read_clone).then_some(child_proc)))
     }
 }
