@@ -6,12 +6,14 @@ use memory_set::MappingBackend;
 use ::alloc::sync::Arc;
 
 mod alloc;
+mod cow;
 mod file;
 mod linear;
 mod shared;
 
 pub use self::shared::SharedFrame;
 pub(crate) use alloc::{cow_dec_frame_ref, cow_inc_frame_ref};
+pub use self::cow::CowMapping;
 
 /// A unified enum type for different memory mapping backends.
 ///
@@ -49,6 +51,8 @@ pub enum Backend {
     },
     /// File-backed demand mapping backend.
     File(file::FileMapping),
+    /// Copy-on-write mapping backend.
+    Cow(CowMapping),
 }
 
 impl MappingBackend for Backend {
@@ -63,15 +67,24 @@ impl MappingBackend for Backend {
             Self::Linear { pa_va_offset } => self.map_linear(start, size, flags, pt, *pa_va_offset),
             Self::Alloc { populate } => self.map_alloc(start, size, flags, pt, *populate),
             Self::File(mapping) => self.map_file(start, size, flags, pt, mapping),
+            Self::Cow(_cow) => {
+                // COW mappings are generally lazy. However, we should still delegate to the
+                // inner backend if it's NOT an Alloc/File backend (though currently all
+                // COW-able backends are Alloc/File).
+                // For now, we keep it simple: initial map is lazy.
+                // We must ensure the area is properly registered.
+                true
+            }
         }
     }
 
     fn unmap(&self, start: VirtAddr, size: usize, pt: &mut PageTable) -> bool {
-        match *self {
+        match self {
             Self::Shared { .. } => Self::unmap_shared(start, size, pt),
-            Self::Linear { pa_va_offset } => self.unmap_linear(start, size, pt, pa_va_offset),
-            Self::Alloc { populate } => self.unmap_alloc(start, size, pt, populate),
+            Self::Linear { pa_va_offset } => self.unmap_linear(start, size, pt, *pa_va_offset),
+            Self::Alloc { populate } => self.unmap_alloc(start, size, pt, *populate),
             Self::File(_) => self.unmap_file(start, size, pt),
+            Self::Cow(cow) => cow.inner.unmap(start, size, pt),
         }
     }
 
@@ -82,17 +95,18 @@ impl MappingBackend for Backend {
         new_flags: Self::Flags,
         page_table: &mut Self::PageTable,
     ) -> bool {
-        match *self {
+        match self {
             Self::Shared { .. } | Self::Linear { .. } => page_table
                 .protect_region(start, size, new_flags, true)
                 .map(|tlb| tlb.ignore())
                 .is_ok(),
             Self::Alloc { populate } => {
-                self.protect_alloc(start, size, new_flags, page_table, populate)
+                self.protect_alloc(start, size, new_flags, page_table, *populate)
             }
-            Self::File(ref mapping) => {
+            Self::File(mapping) => {
                 self.protect_file(start, size, new_flags, page_table, mapping)
             }
+            Self::Cow(cow) => cow.inner.protect(start, size, new_flags, page_table),
         }
     }
 }
@@ -104,15 +118,16 @@ impl Backend {
         orig_flags: MappingFlags,
         page_table: &mut PageTable,
     ) -> bool {
-        match *self {
+        match self {
             Self::Shared { .. } => false,
             Self::Linear { .. } => false, // Linear mappings should not trigger page faults.
             Self::Alloc { populate } => {
-                self.handle_page_fault_alloc(vaddr, orig_flags, page_table, populate)
+                self.handle_page_fault_alloc(vaddr, orig_flags, page_table, *populate)
             }
-            Self::File(ref mapping) => {
+            Self::File(mapping) => {
                 self.handle_page_fault_file(vaddr, orig_flags, page_table, mapping)
             }
+            Self::Cow(cow) => cow.handle_page_fault(vaddr, orig_flags, page_table),
         }
     }
 
@@ -124,8 +139,9 @@ impl Backend {
         size: usize,
         pt: &PageTable,
     ) -> bool {
-        match *self {
+        match self {
             Self::File(_) => self.writeback_file_range_impl(start, size, pt),
+            Self::Cow(cow) => cow.inner.writeback_file_range(start, size, pt),
             _ => true, // Non-file backends have nothing to write back.
         }
     }

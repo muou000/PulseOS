@@ -58,6 +58,11 @@ impl<B: MappingBackend> MemoryArea<B> {
     pub const fn backend(&self) -> &B {
         &self.backend
     }
+
+    /// Changes the mapping backend.
+    pub fn set_backend(&mut self, backend: B) {
+        self.backend = backend;
+    }
 }
 
 impl<B: MappingBackend> MemoryArea<B> {

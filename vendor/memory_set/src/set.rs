@@ -56,6 +56,11 @@ impl<B: MappingBackend> MemorySet<B> {
         candidate.filter(|a| a.va_range().contains(addr))
     }
 
+    /// Returns a mutable reference to the memory area starting at the given address.
+    pub fn get_area_mut(&mut self, start: B::Addr) -> Option<&mut MemoryArea<B>> {
+        self.areas.get_mut(&start)
+    }
+
     /// Finds a free area that can accommodate the given size.
     ///
     /// The search starts from the given `hint` address, and the area should be

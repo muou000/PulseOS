@@ -3,12 +3,12 @@ use core::fmt;
 use axerrno::{AxError, AxResult, ax_err};
 use axfs::{CachedFile, FileFlags};
 use axhal::{
-    mem::phys_to_virt,
+    mem::{phys_to_virt, PhysAddr},
     paging::{MappingFlags, PageSize, PageTable},
     trap::PageFaultFlags,
 };
 use memory_addr::{
-    MemoryAddr, PAGE_SIZE_4K, PageIter4K, PhysAddr, VirtAddr, VirtAddrRange, is_aligned_4k,
+    MemoryAddr, PAGE_SIZE_4K, PageIter4K, VirtAddr, VirtAddrRange, is_aligned_4k,
 };
 use memory_set::{MemoryArea, MemorySet};
 
@@ -28,6 +28,7 @@ impl AddrSpace {
             Backend::Linear { .. } => "linear",
             Backend::Alloc { .. } => "alloc",
             Backend::File(_) => "file",
+            Backend::Cow(_) => "cow",
         }
     }
 
@@ -594,77 +595,123 @@ impl AddrSpace {
             new_aspace.copy_mappings_from(&*crate::kernel_aspace().lock())?;
         }
 
+        let mut areas_to_convert = alloc::vec::Vec::new();
+
         for area in self.areas.iter() {
-            // For Alloc backends, the child uses lazy allocation (populate=false)
-            // so that fork doesn't eagerly duplicate all physical frames.
+            // Filter: only clone areas within the user address range.
+            // On LoongArch64 and RISC-V 4-level paging, user space is < 0x8000_0000_0000.
+            if area.start().as_usize() >= 0x8000_0000_0000usize {
+                continue;
+            }
+
+            debug!("try_clone: cloning area [{:#x}, {:#x}) flags={:?} backend={}", 
+                area.start(), area.end(), area.flags(), match area.backend() {
+                    Backend::Alloc { .. } => "alloc",
+                    Backend::File(_) => "file",
+                    Backend::Cow(_) => "cow",
+                    Backend::Linear { .. } => "linear",
+                    Backend::Shared { .. } => "shared",
+                }
+            );
+
+            let mut is_cow = false;
             let backend = match area.backend() {
-                Backend::Alloc { .. } => Backend::new_alloc(false),
+                Backend::Cow(_) => {
+                    is_cow = true;
+                    area.backend().clone()
+                }
+                Backend::Alloc { .. } => {
+                    is_cow = true;
+                    let mut inner = area.backend().clone();
+                    if let Backend::Alloc { ref mut populate } = inner {
+                        *populate = false;
+                    }
+                    Backend::Cow(crate::backend::CowMapping::new(alloc::boxed::Box::new(inner)))
+                }
+                Backend::File(mapping) if !mapping.is_shared() => {
+                    is_cow = true;
+                    Backend::Cow(crate::backend::CowMapping::new(alloc::boxed::Box::new(area.backend().clone())))
+                }
                 other => other.clone(),
             };
-            let new_area = MemoryArea::new(area.start(), area.size(), area.flags(), backend);
-            new_aspace
-                .areas
-                .map(new_area, &mut new_aspace.pt, false)
-                .map_err(mapping_err_to_ax_err)?;
 
-            // Only iterate over pages that are actually mapped in the parent.
-            for vaddr in PageIter4K::new(area.start(), area.end()).unwrap() {
-                if let Ok((paddr, flags, _)) = self.pt.query(vaddr) {
-                    if paddr.as_usize() == 0 {
-                        // Skip unmaterialized lazy pages.
-                        continue;
+            let new_area = MemoryArea::new(area.start(), area.size(), area.flags(), backend.clone());
+            if let Err(e) = new_aspace.areas.map(new_area, &mut new_aspace.pt, false) {
+                new_aspace.clear();
+                return Err(mapping_err_to_ax_err(e));
+            }
+
+            if is_cow {
+                if !matches!(area.backend(), Backend::Cow(_)) {
+                    areas_to_convert.push((area.start(), backend));
+                }
+            }
+
+            // Only iterate over pages for lazy backends.
+            // Linear and Shared (non-File) backends are already fully mapped by areas.map().
+            let is_lazy = match area.backend() {
+                Backend::Alloc { .. } | Backend::File(_) | Backend::Cow(_) => true,
+                _ => false,
+            };
+            if !is_lazy {
+                continue;
+            }
+
+            // Efficiently iterate only over actually mapped pages in this area.
+            let mut vaddr = area.start();
+            let area_end = area.end();
+            while vaddr < area_end {
+                match self.pt.query(vaddr) {
+                    Ok((paddr, flags, page_size)) => {
+                        if paddr.as_usize() != 0 {
+                            if is_cow {
+                                crate::cow_inc_frame_ref(paddr);
+                                let cow_flags = flags & !MappingFlags::WRITE;
+
+                                // Demote parent if writable
+                                if flags.contains(MappingFlags::WRITE) {
+                                    if let Err(e) = self.pt.protect(vaddr, cow_flags) {
+                                        error!("try_clone: failed to protect parent page {:#x}: {:?}", vaddr, e);
+                                    }
+                                }
+
+                                // Map child
+                                if let Err(e) = new_aspace.pt.map(vaddr, paddr, page_size, cow_flags).map(|tlb| tlb.ignore()) {
+                                    error!("try_clone: failed to map child page {:#x}: {:?}", vaddr, e);
+                                    if crate::backend::cow_dec_frame_ref(paddr) {
+                                        axalloc::global_allocator().dealloc_pages(phys_to_virt(paddr).as_usize(), page_size as usize / PAGE_SIZE_4K);
+                                    }
+                                    new_aspace.clear();
+                                    return Err(AxError::NoMemory);
+                                }
+                            } else if let Backend::File(mapping) = area.backend() {
+                                if mapping.is_shared() {
+                                    if let Err(e) = new_aspace.pt.map(vaddr, paddr, page_size, flags).map(|tlb| tlb.ignore()) {
+                                        error!("try_clone: failed to map shared file page {:#x}: {:?}", vaddr, e);
+                                        new_aspace.clear();
+                                        return Err(AxError::NoMemory);
+                                    }
+                                }
+                            }
+                        }
+                        // Advance to the next page of the same size, correctly aligned.
+                        let next_vaddr = (vaddr.as_usize() & !(page_size as usize - 1)) + page_size as usize;
+                        vaddr = VirtAddr::from(next_vaddr);
                     }
-
-                    match area.backend() {
-                        Backend::Alloc { .. } => {
-                            // Eager copy for Alloc mappings.
-                            let child_backend = Backend::new_alloc(false);
-                            if !child_backend.handle_page_fault(vaddr, flags, &mut new_aspace.pt) {
-                                return Err(AxError::NoMemory);
-                            }
-                            let (new_paddr, _, _) = new_aspace
-                                .pt
-                                .query(vaddr)
-                                .map_err(|_| AxError::BadAddress)?;
-                            unsafe {
-                                core::ptr::copy_nonoverlapping(
-                                    phys_to_virt(paddr).as_ptr(),
-                                    phys_to_virt(new_paddr).as_mut_ptr(),
-                                    PAGE_SIZE_4K,
-                                );
-                            }
-                        }
-                        Backend::File(mapping) if !mapping.is_shared() => {
-                            // Eager copy for private File mappings.
-                            let child_backend = Backend::new_alloc(false);
-                            if !child_backend.handle_page_fault(vaddr, flags, &mut new_aspace.pt) {
-                                return Err(AxError::NoMemory);
-                            }
-                            let (new_paddr, _, _) = new_aspace
-                                .pt
-                                .query(vaddr)
-                                .map_err(|_| AxError::BadAddress)?;
-                            unsafe {
-                                core::ptr::copy_nonoverlapping(
-                                    phys_to_virt(paddr).as_ptr(),
-                                    phys_to_virt(new_paddr).as_mut_ptr(),
-                                    PAGE_SIZE_4K,
-                                );
-                            }
-                        }
-                        Backend::File(_) => {
-                            // Shared file mapping: map the same physical frame.
-                            new_aspace
-                                .pt
-                                .map(vaddr, paddr, PageSize::Size4K, flags)
-                                .map(|tlb| tlb.ignore())
-                                .map_err(|_| AxError::NoMemory)?;
-                        }
-                        Backend::Linear { .. } | Backend::Shared { .. } => {
-                            // Already handled by areas.map() via pt.map_region.
-                        }
+                    Err(_) => {
+                        // Page not mapped, skip to next 4K
+                        vaddr += PAGE_SIZE_4K;
                     }
                 }
+            }
+        }
+
+        // Mandatory full TLB flush for parent after permission demotion.
+        axhal::asm::flush_tlb(None);
+
+        for (start, backend) in areas_to_convert {
+            if let Some(area) = self.areas.get_area_mut(start) {
+                area.set_backend(backend);
             }
         }
 
