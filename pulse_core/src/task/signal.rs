@@ -7,6 +7,7 @@ use axtask::WaitQueue;
 use linux_raw_sys::general::{
     SA_NODEFER, SA_RESETHAND, SIGCHLD, SIGCONT, SIGKILL, SIGSTOP, SIGURG, SIGWINCH,
 };
+use kspin::SpinNoIrq;
 use spin::Mutex;
 
 use super::{Process, Thread};
@@ -87,14 +88,14 @@ struct SavedSignalContext {
 }
 
 pub struct SignalShared {
-    actions: Mutex<[SigAction; NSIG + 1]>,
+    actions: SpinNoIrq<[SigAction; NSIG + 1]>,
     process_pending: AtomicU64,
 }
 
 impl SignalShared {
     pub fn new() -> Arc<Self> {
         Arc::new(Self {
-            actions: Mutex::new([SigAction::dfl(); NSIG + 1]),
+            actions: SpinNoIrq::new([SigAction::dfl(); NSIG + 1]),
             process_pending: AtomicU64::new(0),
         })
     }
@@ -102,7 +103,7 @@ impl SignalShared {
     pub fn clone_actions_only(from: &Arc<Self>) -> Arc<Self> {
         let actions = *from.actions.lock();
         Arc::new(Self {
-            actions: Mutex::new(actions),
+            actions: SpinNoIrq::new(actions),
             process_pending: AtomicU64::new(0),
         })
     }
@@ -632,25 +633,18 @@ pub fn can_signal(caller: &Process, target: &Process) -> bool {
 
 pub fn queue_signal_to_process(process: &Process, sig: usize) -> bool {
     let queued = process.signal_shared().queue_process_signal(sig);
-    if queued {
-        for thread in list_threads_for_signal(process) {
-            thread.signal_wait_queue().notify_all(true);
-        }
-        if sig != SIGCHLD as usize
-            && let Some(tid) = pick_thread_for_process_signal(process)
-            && let Some(thread) = super::thread_by_tid(process, tid)
-        {
-            thread.notify_signal_pending();
-        }
+    // Always notify even if already queued, to ensure blocked tasks re-check signals
+    for thread in list_threads_for_signal(process) {
+        thread.signal_wait_queue().notify_all(true);
+        thread.notify_signal_pending();
     }
     queued
 }
 
 pub fn queue_signal_to_thread(thread: &Thread, sig: usize) -> bool {
     let queued = thread.signal().queue_thread_signal(sig);
-    if queued {
-        thread.notify_signal_pending();
-    }
+    // Always notify even if already queued
+    thread.notify_signal_pending();
     queued
 }
 

@@ -18,11 +18,12 @@ pub use signal::{
     check_signals_and_deliver, pending_mask as thread_pending_mask, queue_signal_to_process,
     queue_signal_to_thread,
 };
-use spin::{Lazy, Mutex};
+use kspin::SpinNoIrq;
+use spin::Lazy;
 pub use thread::{Thread, ThreadHandle};
 
-static PROCESS_REGISTRY: Lazy<Mutex<BTreeMap<u64, Weak<Process>>>> =
-    Lazy::new(|| Mutex::new(BTreeMap::new()));
+static PROCESS_REGISTRY: Lazy<SpinNoIrq<BTreeMap<u64, Weak<Process>>>> =
+    Lazy::new(|| SpinNoIrq::new(BTreeMap::new()));
 
 pub fn register_process(pid: u64, process: Arc<Process>) {
     PROCESS_REGISTRY
