@@ -30,7 +30,6 @@ dependencies = [
 [[package]]
 name = "allocator"
 version = "0.1.1"
-source = "git+https://github.com/arceos-org/allocator.git?tag=v0.1.1#1d5b7a1b4fd8db4c9c9cea4e6012d15d42e2bf40"
 dependencies = [
  "bitmap-allocator",
  "cfg-if",
@@ -458,8 +457,6 @@ dependencies = [
 [[package]]
 name = "axplat-riscv64-qemu-virt"
 version = "0.3.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fb75b0b52fd2289ec461a3ea3aba978cb943fb07fb023d5edc2c8efe079eb724"
 dependencies = [
  "axconfig-macros",
  "axcpu",
@@ -1053,14 +1050,10 @@ dependencies = [
 [[package]]
 name = "memory_addr"
 version = "0.4.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b1f0625c50adb5f6aaf47f05cae3c4dbc13a74c659241b06c4576f3d7e1da940"
 
 [[package]]
 name = "memory_set"
 version = "0.4.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "50a49ecd4114cf87f7e442ec5dd03bd590e7094541f987057310dbb32a6341ad"
 dependencies = [
  "memory_addr",
 ]
@@ -1184,6 +1177,7 @@ dependencies = [
  "bitflags 2.11.0",
  "kernel-elf-parser",
  "kernel_guard",
+ "kspin",
  "linkme",
  "linux-raw-sys",
  "memory_addr",

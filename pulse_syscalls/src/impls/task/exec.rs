@@ -32,19 +32,11 @@ pub fn sys_execve(_tf: &TrapFrame, pathname: usize, argv: usize, envp: usize) ->
         Ok(path) => path,
         Err(e) => return e,
     };
-    axlog::debug!("sys_execve path: {}", path_str);
-    if let Ok(cwd) = process.fs_context.lock().current_dir().absolute_path() {
-        axlog::debug!("sys_execve cwd: {}", cwd);
-    }
-
-    if path_str.is_empty() {
-        return -LinuxError::ENOENT.code() as isize;
-    }
-
     let mut args = match read_user_string_array(process, argv) {
         Ok(args) => args,
         Err(e) => return e,
     };
+
     if args.is_empty() {
         args.push(path_str.clone());
     }

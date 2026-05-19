@@ -172,6 +172,7 @@ pub fn sys_openat(dirfd: i32, pathname: usize, flags: usize, mode: usize) -> isi
         Ok(path) => path,
         Err(_) => return -LinuxError::EINVAL.code() as isize,
     };
+
     let options = flags_to_options(flags, mode);
     let opened = match options.open(&ctx, path) {
         Ok(opened) => opened,

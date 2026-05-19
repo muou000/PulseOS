@@ -1,38 +1,25 @@
-use alloc::collections::BTreeMap;
 use axalloc::global_allocator;
 use axhal::mem::{phys_to_virt, virt_to_phys};
 use axhal::paging::{MappingFlags, PageSize, PageTable};
-use kspin::SpinNoIrq;
 use memory_addr::{MemoryAddr, PAGE_SIZE_4K, PageIter4K, PhysAddr, VirtAddr};
 
 use super::Backend;
-
-static FRAME_REFS: SpinNoIrq<BTreeMap<usize, usize>> = SpinNoIrq::new(BTreeMap::new());
+use crate::frameinfo::frame_table;
 
 pub(crate) fn cow_inc_frame_ref(frame: PhysAddr) {
-    let key = frame.as_usize();
-    let mut refs = FRAME_REFS.lock();
-    refs.entry(key).and_modify(|c| *c += 1).or_insert(2);
+    frame_table().inc_ref(frame);
 }
 
 pub(crate) fn cow_dec_frame_ref(frame: PhysAddr) -> bool {
     drop_frame_mapping_ref(frame)
 }
 
+pub(crate) fn cow_mark_frame_used(frame: PhysAddr) {
+    frame_table().mark_used(frame);
+}
+
 fn drop_frame_mapping_ref(frame: PhysAddr) -> bool {
-    let key = frame.as_usize();
-    let mut refs = FRAME_REFS.lock();
-    match refs.get_mut(&key) {
-        Some(cnt) if *cnt > 1 => {
-            *cnt -= 1;
-            false
-        }
-        Some(_) => {
-            refs.remove(&key);
-            true
-        }
-        None => true,
-    }
+    frame_table().dec_ref(frame) == 0
 }
 
 pub(crate) trait ProtectPageTable {
@@ -97,23 +84,21 @@ where
 
     true
 }
-
 pub(super) fn alloc_frame(zeroed: bool) -> Option<PhysAddr> {
     let vaddr = VirtAddr::from(global_allocator().alloc_pages(1, PAGE_SIZE_4K).ok()?);
     if zeroed {
         unsafe { core::ptr::write_bytes(vaddr.as_mut_ptr(), 0, PAGE_SIZE_4K) };
     }
     let paddr = virt_to_phys(vaddr);
-    FRAME_REFS.lock().insert(paddr.as_usize(), 1);
+    frame_table().mark_used(paddr);
     Some(paddr)
 }
 
 pub(super) fn dealloc_frame(frame: PhysAddr) {
-    if !drop_frame_mapping_ref(frame) {
+    if !cow_dec_frame_ref(frame) {
         return;
     }
-    let vaddr = phys_to_virt(frame);
-    global_allocator().dealloc_pages(vaddr.as_usize(), 1);
+    global_allocator().dealloc_pages(phys_to_virt(frame).as_usize(), 1);
 }
 
 impl Backend {
@@ -387,22 +372,19 @@ mod tests {
 
     #[test]
     fn cow_refcount_roundtrip() {
-        let frame = PhysAddr::from(0x1234_5000usize);
-        FRAME_REFS.lock().clear();
+        let frame = PhysAddr::from(axconfig::plat::PHYS_MEMORY_BASE);
+        // Note: FRAME_TABLE should be initialized before running this test.
+        // In a real test environment, this might need more setup.
+        
+        frame_table().get_ref(frame); // ensure it doesn't panic if initialized
 
-        cow_inc_frame_ref(frame);
-        {
-            let refs = FRAME_REFS.lock();
-            assert_eq!(refs.get(&frame.as_usize()).copied(), Some(2));
-        }
+        cow_inc_frame_ref(frame); // 0 -> 1 -> 2
+        assert_eq!(frame_table().get_ref(frame), 2);
 
-        assert!(!cow_dec_frame_ref(frame));
-        {
-            let refs = FRAME_REFS.lock();
-            assert_eq!(refs.get(&frame.as_usize()).copied(), Some(1));
-        }
+        assert!(!cow_dec_frame_ref(frame)); // 2 -> 1
+        assert_eq!(frame_table().get_ref(frame), 1);
 
-        assert!(cow_dec_frame_ref(frame));
-        assert!(!FRAME_REFS.lock().contains_key(&frame.as_usize()));
+        assert!(cow_dec_frame_ref(frame)); // 1 -> 0
+        assert_eq!(frame_table().get_ref(frame), 0);
     }
 }

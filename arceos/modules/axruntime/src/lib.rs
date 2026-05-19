@@ -228,7 +228,6 @@ fn init_allocator() {
     for r in memory_regions() {
         if r.flags.contains(MemRegionFlags::FREE) && r.paddr == max_region_paddr {
             axalloc::global_init(phys_to_virt(r.paddr).as_usize(), r.size);
-            break;
         }
     }
     for r in memory_regions() {
@@ -255,7 +254,7 @@ fn init_interrupt() {
         if now_ns >= deadline {
             deadline = now_ns + PERIODIC_INTERVAL_NANOS;
         }
-        unsafe { NEXT_DEADLINE.write_current_raw(deadline + PERIODIC_INTERVAL_NANOS) };
+        unsafe { NEXT_DEADLINE.write_current_raw(deadline) };
         axhal::time::set_oneshot_timer(deadline);
     }
 
