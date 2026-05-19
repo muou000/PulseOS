@@ -7,7 +7,7 @@ use alloc::{
 use core::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, AtomicU64, Ordering};
 
 use axconfig::TASK_STACK_SIZE;
-use axerrno::{AxError, AxResult, LinuxError};
+use axerrno::{AxError, AxErrorKind, AxResult};
 use axfs::FsContext;
 use axhal::{
     context::{TrapFrame, UspaceContext},
@@ -1170,8 +1170,11 @@ impl Process {
         });
     }
 
-    pub fn wait_for_child_exit_interruptible(&self, pid: isize) -> Result<(), LinuxError> {
-        let thread = current_thread()?;
+    pub fn wait_for_child_exit_interruptible(&self, pid: isize) -> Result<(), i32> {
+        let thread = match current_thread() {
+            Ok(t) => t,
+            Err(e) => return Err(e.code()),
+        };
         // wait_until 会在持有 WaitQueue 锁的同时执行闭包
         self.child_exit_event.wait_until(|| {
             self.children
@@ -1181,8 +1184,19 @@ impl Process {
                 || thread.has_pending_signal()
         });
 
+        // 优先检查是否有子进程已经退出，如果有，即使有挂起信号也返回 Ok(())
+        // 这样 sys_wait4 的 loop 会在下一次调用 reap_zombie_child 时成功。
+        if self
+            .children
+            .lock()
+            .iter()
+            .any(|child| Self::child_matches(child, pid) && child.is_zombie())
+        {
+            return Ok(());
+        }
+
         if thread.has_pending_signal() {
-            return Err(LinuxError::EINTR);
+            return Err(super::ERESTARTSYS);
         }
         Ok(())
     }
@@ -1320,9 +1334,12 @@ impl Process {
             .wait_until(|| self.vfork_done.load(Ordering::Acquire));
     }
 
-    pub fn futex_wait(&self, addr: usize, expected: u32, timeout_ns: Option<u64>) -> AxResult<()> {
-        if self.read_user_u32(addr)? != expected {
-            return Err(AxError::WouldBlock);
+    pub fn futex_wait(&self, addr: usize, expected: u32, timeout_ns: Option<u64>) -> Result<(), i32> {
+        if match self.read_user_u32(addr) {
+            Ok(v) => v != expected,
+            Err(e) => return Err(e.code().abs()),
+        } {
+            return Err(AxErrorKind::WouldBlock.code());
         }
         let current_thread = super::current_thread().ok();
         let signal_pending = || {
@@ -1332,22 +1349,22 @@ impl Process {
                 .unwrap_or(false)
         };
         if signal_pending() {
-            return Err(AxError::Interrupted);
+            return Err(super::ERESTARTSYS);
         }
 
         if let Some(timeout_ns) = timeout_ns {
             let deadline = (axhal::time::monotonic_time_nanos() as u64).saturating_add(timeout_ns);
             while !self.group_exiting() {
                 if signal_pending() {
-                    return Err(AxError::Interrupted);
+                    return Err(super::ERESTARTSYS);
                 }
                 match self.read_user_u32(addr) {
                     Ok(current) if current != expected => return Ok(()),
                     Ok(_) => {}
-                    Err(e) => return Err(e),
+                    Err(e) => return Err(e.code().abs()),
                 }
                 if axhal::time::monotonic_time_nanos() as u64 >= deadline {
-                    return Err(AxError::TimedOut);
+                    return Err(AxErrorKind::TimedOut.code());
                 }
                 axtask::yield_now();
             }
@@ -1360,12 +1377,12 @@ impl Process {
                 return Ok(());
             }
             if signal_pending() {
-                return Err(AxError::Interrupted);
+                return Err(super::ERESTARTSYS);
             }
             match self.read_user_u32(addr) {
                 Ok(current) if current != expected => return Ok(()),
                 Ok(_) => {}
-                Err(e) => return Err(e),
+                Err(e) => return Err(e.code().abs()),
             }
             queue.wait_until(|| {
                 self.group_exiting()
@@ -1454,7 +1471,6 @@ impl Process {
         if let Some(sp) = params.child_stack {
             child_uctx.set_sp(sp);
         }
-        let entry_pc = child_uctx.get_ip();
 
         let parent_aspace_handle = self.aspace_handle();
         let mut parent_aspace = parent_aspace_handle.lock();
@@ -1480,7 +1496,6 @@ impl Process {
 
         let child_tid = inner.id().as_u64();
         let new_aspace_arc = Arc::new(Mutex::new(new_aspace));
-        axlog::info!("spawn_fork: child pid={}, entry_pc={:#x}", child_tid, entry_pc);
         let child_proc = Self::new_child_process(
             child_tid,
             self.clone(),
@@ -1529,7 +1544,6 @@ impl Process {
         if let Some(sp) = params.child_stack {
             child_uctx.set_sp(sp);
         }
-        let entry_pc = child_uctx.get_ip();
 
         let mut inner = TaskInner::try_new(
             move || {
@@ -1604,8 +1618,5 @@ impl Process {
         let task = axtask::spawn_task(inner);
         child_proc.register_task_ref(task.clone());
         Ok((child_tid, (!params.is_thread_clone).then_some(child_proc)))
-    }
-}
-read_clone).then_some(child_proc)))
     }
 }
