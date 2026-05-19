@@ -424,6 +424,12 @@ pub fn sys_ppoll(
             return write_back(&pollfds, ready as isize);
         }
 
+        if let Ok(thread) = pulse_core::task::current_thread() {
+            if thread.has_pending_signal() {
+                return -LinuxError::EINTR.code() as isize;
+            }
+        }
+
         if let Some(deadline) = deadline {
             let now = axhal::time::monotonic_time();
             if now >= deadline {

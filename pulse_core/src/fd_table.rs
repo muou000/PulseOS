@@ -192,6 +192,11 @@ impl FdObject for StdinObject {
             if read_len > 0 {
                 return Ok(read_len);
             }
+            if let Ok(thread) = crate::task::current_thread() {
+                if thread.has_pending_signal() {
+                    return Err(LinuxError::EINTR);
+                }
+            }
             axtask::yield_now();
         }
     }
@@ -686,7 +691,12 @@ impl FdObject for PipeObject {
                     buf.len()
                 );
                 drop(ring_buffer);
-                self.shared.wait.wait();
+                self.shared.wait.wait_until(|| {
+                    let buffer = self.shared.buffer.lock();
+                    buffer.available_read() > 0
+                        || self.write_end_closed()
+                        || Self::current_has_pending_signal()
+                });
                 if Self::current_has_pending_signal() {
                     return Err(LinuxError::EINTR);
                 }
@@ -740,7 +750,12 @@ impl FdObject for PipeObject {
                     buf.len()
                 );
                 drop(ring_buffer);
-                self.shared.wait.wait();
+                self.shared.wait.wait_until(|| {
+                    let buffer = self.shared.buffer.lock();
+                    buffer.available_write() > 0
+                        || self.read_end_closed()
+                        || Self::current_has_pending_signal()
+                });
                 if Self::current_has_pending_signal() {
                     return if write_size > 0 {
                         Ok(write_size)
