@@ -1606,6 +1606,3 @@ impl Process {
         Ok((child_tid, (!params.is_thread_clone).then_some(child_proc)))
     }
 }
-read_clone).then_some(child_proc)))
-    }
-}

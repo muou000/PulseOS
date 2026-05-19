@@ -53,21 +53,11 @@ fn handle_page_fault(vaddr: VirtAddr, access_flags: MappingFlags, is_user: bool)
     );
 
     if !is_user {
-        axlog::error!("Page fault in kernel space: vaddr={:#x}", vaddr);
-        if let Ok(thread) = crate::task::current_thread() {
-            let proc = thread.process();
-            const SIGSEGV: i32 = 11;
-            proc.set_exit_signal(SIGSEGV, true);
-            proc.begin_group_exit(SIGSEGV);
-            thread.exit_current(proc.group_exit_code());
-            return true;
-        }
-        return false;
+        panic!("Page fault in kernel space: vaddr={:#x}", vaddr);
     }
 
     let Ok(thread) = crate::task::current_thread() else {
-        axlog::error!("user page fault without Thread context: vaddr={:#x}", vaddr);
-        return false;
+        panic!("user page fault without Thread context: vaddr={:#x}", vaddr);
     };
     let proc = thread.process();
     let enter_ns = axhal::time::monotonic_time_nanos() as u64;

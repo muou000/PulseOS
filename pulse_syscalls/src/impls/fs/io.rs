@@ -53,7 +53,7 @@ fn read_ppoll_timeout(timeout: usize) -> Result<Option<Duration>, LinuxError> {
 }
 
 pub fn sys_read(fd: usize, buf: usize, count: usize) -> isize {
-    axlog::debug!("sys_read: fd={}, buf={:#x}, count={}", fd, buf, count);
+    axlog::trace!("sys_read: fd={}, buf={:#x}, count={}", fd, buf, count);
     if buf == 0 && count != 0 {
         return -LinuxError::EFAULT.code() as isize;
     }
@@ -104,7 +104,7 @@ pub fn sys_read(fd: usize, buf: usize, count: usize) -> isize {
 }
 
 pub fn sys_write(fd: usize, buf: usize, count: usize) -> isize {
-    axlog::debug!("sys_write: fd={}, buf={:#x}, count={}", fd, buf, count);
+    axlog::trace!("sys_write: fd={}, buf={:#x}, count={}", fd, buf, count);
     if buf == 0 && count != 0 {
         return -LinuxError::EFAULT.code() as isize;
     }
@@ -692,6 +692,6 @@ pub fn sys_fsync(fd: usize) -> isize {
 }
 
 pub fn sys_sync() -> isize {
-    axlog::debug!("sys_sync (stub)");
+    axlog::warn!("sys_sync (stub)");
     0
 }
