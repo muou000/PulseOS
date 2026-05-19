@@ -10,7 +10,7 @@ repository = "https://github.com/arceos-org/arceos/tree/main/modules/axalloc"
 documentation = "https://arceos-org.github.io/arceos/axalloc/index.html"
 
 [features]
-default = ["tlsf", "allocator/page-alloc-256m"]
+default = ["tlsf", "allocator/page-alloc-4g"]
 tlsf = ["allocator/tlsf"]
 slab = ["allocator/slab"]
 buddy = ["allocator/buddy"]
@@ -23,4 +23,4 @@ cfg-if = "1.0"
 kspin = "0.1"
 memory_addr = "0.4"
 axerrno = "0.1"
-allocator = { git = "https://github.com/arceos-org/allocator.git", tag ="v0.1.1", features = ["bitmap"] }
+allocator = { git = "https://github.com/arceos-org/allocator.git", tag ="v0.1.1", features = ["bitmap", "page-alloc-4g"] }

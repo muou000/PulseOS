@@ -14,6 +14,7 @@ repository = "https://github.com/muou000/PulseOS"
 [workspace.dependencies]
 axfeat = { path = "arceos/api/axfeat", features = [
     "alloc-slab",
+    "page-alloc-4g",
     "multitask",
     "sched-rr",
     "fs",
@@ -56,11 +57,17 @@ chrono = { version = "0.4", default-features = false }
 starry-vdso = { path = "./starry-vdso" }
 
 [patch.crates-io]
+memory_set = { path = "vendor/memory_set" }
+memory_addr = { path = "vendor/memory_addr" }
 axfs-ng-vfs = { path = "vendor/axfs-ng-vfs" }
 ext4_rs = { path = "vendor/ext4_rs" }
 axcpu = { path = "vendor/axcpu"}
 axplat-loongarch64-qemu-virt = { path = "vendor/axplat-loongarch64-qemu-virt" }
+axplat-riscv64-qemu-virt = { path = "vendor/axplat-riscv64-qemu-virt" }
 axio = { path = "vendor/axio" }
+
+[patch."https://github.com/arceos-org/allocator.git"]
+allocator = { path = "vendor/allocator" }
 
 [package]
 name = "Pulse"

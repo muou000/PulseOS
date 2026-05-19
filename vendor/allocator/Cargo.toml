@@ -31,7 +31,7 @@ repository = "https://github.com/arceos-org/allocator"
 allocator_api = []
 bitmap = ["dep:bitmap-allocator"]
 buddy = ["dep:buddy_system_allocator"]
-default = ["page-alloc-256m"]
+default = ["page-alloc-4g"]
 full = [
     "bitmap",
     "tlsf",

@@ -67,11 +67,8 @@ impl UspaceContext {
     ///
     /// This function is unsafe because it changes processor mode and the stack.
     pub unsafe fn enter_uspace(&self, kstack_top: VirtAddr) -> ! {
-        use loongArch64::register::era;
-
         crate::asm::disable_irqs();
         crate::asm::write_kernel_sp(kstack_top.as_usize());
-        era::set_pc(self.get_ip());
 
         unsafe {
             core::arch::asm!(
@@ -80,8 +77,12 @@ impl UspaceContext {
                 move      $sp, {tf}
                 csrwr     $tp,  KSAVE_TP
                 csrwr     $r21, KSAVE_R21
-                LDD       $tp,  $sp, 32
-                csrwr     $tp,  LA_CSR_PRMD
+                
+                LDD       $t0,  $sp, 32     // Load prmd
+                csrwr     $t0,  LA_CSR_PRMD
+                
+                LDD       $t0,  $sp, 33     // Load era
+                csrwr     $t0,  LA_CSR_ERA
 
                 POP_GENERAL_REGS
 
