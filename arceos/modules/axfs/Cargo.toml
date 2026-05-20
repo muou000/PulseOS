@@ -18,7 +18,7 @@ std = []
 [dependencies]
 axalloc = { workspace = true }
 axdriver = { workspace = true, features = ["block"] }
-axerrno = "0.1"
+axerrno = "0.2"
 axfs-ng-vfs = "0.1"
 axhal = { workspace = true }
 axio = { workspace = true, features = ["alloc"] }

@@ -1,13 +1,13 @@
 [package]
 name = "linkme-impl"
-version = "0.3.35"
+version = "0.3.36"
 authors = ["David Tolnay <dtolnay@gmail.com>"]
 description = "Implementation detail of the linkme crate"
 documentation = "https://docs.rs/linkme"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/dtolnay/linkme"
-rust-version = "1.66"
+rust-version = "1.71"
 
 [lib]
 proc-macro = true
