@@ -26,6 +26,6 @@ sh ./libcbench_testcode.sh
 # sh ./netperf_testcode.sh
 
 cd /fs/musl
-sh ./ltp_testcode.sh
+timeout 1800 sh ./ltp_testcode.sh
 
 exit 0
