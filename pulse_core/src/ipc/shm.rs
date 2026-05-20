@@ -2,16 +2,14 @@
 
 extern crate alloc;
 
-use alloc::collections::BTreeMap;
-use alloc::sync::Arc;
+use alloc::{collections::BTreeMap, sync::Arc};
 use core::sync::atomic::{AtomicI32, Ordering};
 
 use axalloc::global_allocator;
 use axerrno::{AxError, AxResult, ax_err};
 use axhal::paging::MappingFlags;
 use memory_addr::PAGE_SIZE_4K;
-use spin::Mutex;
-use spin::Lazy;
+use spin::{Lazy, Mutex};
 
 // IPC constants (from linux-raw-sys / Linux ABI)
 pub const IPC_PRIVATE: i32 = 0;
@@ -150,7 +148,12 @@ impl ShmInner {
     }
 
     /// Try to update the segment if a matching key exists.
-    pub fn try_update(&mut self, size: usize, mapping_flags: MappingFlags, pid: i32) -> AxResult<i32> {
+    pub fn try_update(
+        &mut self,
+        size: usize,
+        mapping_flags: MappingFlags,
+        pid: i32,
+    ) -> AxResult<i32> {
         if align_up_4k(size) / PAGE_SIZE_4K != self.page_num {
             return ax_err!(InvalidInput, "shm: size mismatch for existing key");
         }
@@ -185,7 +188,9 @@ impl Drop for ShmInner {
             global_allocator().dealloc_pages(self.addr, self.page_num);
             axlog::info!(
                 "[SharedMemory] dealloc pages: addr: {:#x}, page_count: {}, shmid: {}",
-                self.addr, self.page_num, self.shmid
+                self.addr,
+                self.page_num,
+                self.shmid
             );
         }
     }
@@ -280,13 +285,7 @@ impl ShmManager {
     }
 
     /// Create a new shared memory segment.
-    pub fn create_shm(
-        &mut self,
-        key: i32,
-        size: usize,
-        shmflg: i32,
-        pid: i32,
-    ) -> AxResult<i32> {
+    pub fn create_shm(&mut self, key: i32, size: usize, shmflg: i32, pid: i32) -> AxResult<i32> {
         let page_num = align_up_4k(size) / PAGE_SIZE_4K;
         if page_num == 0 {
             return ax_err!(InvalidInput, "shm: size must be > 0");
@@ -300,7 +299,9 @@ impl ShmManager {
 
         if key != IPC_PRIVATE {
             if let Some(shmid) = self.get_shmid_by_key(key) {
-                let inner = self.get_inner_by_shmid(shmid).ok_or(AxError::InvalidInput)?;
+                let inner = self
+                    .get_inner_by_shmid(shmid)
+                    .ok_or(AxError::InvalidInput)?;
                 let mut inner = inner.lock();
                 return inner.try_update(size, mapping_flags, pid);
             }

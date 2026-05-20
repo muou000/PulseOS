@@ -64,7 +64,7 @@ pub fn syscall_handler(tf: &mut TrapFrame, syscall_num: usize) -> isize {
     if ret == -(pulse_core::task::ERESTARTSYS as isize) {
         let sig_state = thread.signal();
         let mut should_restart = true;
-        
+
         // Peek to see if the next signal handler has SA_RESTART set.
         if let Some(sig) = sig_state.peek_unblocked() {
             let action = pulse_core::task::resolve_action(&sig_state.shared(), sig);

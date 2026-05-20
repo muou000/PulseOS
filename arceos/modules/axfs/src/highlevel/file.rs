@@ -432,6 +432,7 @@ impl CachedFileShared {
         Ok(())
     }
 
+    #[allow(dead_code)]
     fn discard_pages(
         &self,
         file: &FileNode,

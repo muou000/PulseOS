@@ -338,8 +338,14 @@ struct Itimerval {
 impl Default for Itimerval {
     fn default() -> Self {
         Self {
-            it_interval: timeval { tv_sec: 0, tv_usec: 0 },
-            it_value: timeval { tv_sec: 0, tv_usec: 0 },
+            it_interval: timeval {
+                tv_sec: 0,
+                tv_usec: 0,
+            },
+            it_value: timeval {
+                tv_sec: 0,
+                tv_usec: 0,
+            },
         }
     }
 }
@@ -365,8 +371,8 @@ fn read_user_itimerval(addr: usize) -> Result<Itimerval, LinuxError> {
         return Err(LinuxError::EFAULT);
     }
     let proc = pulse_core::task::current_process()?;
-    let val: Itimerval = uaccess::read_user_plain(proc.as_ref(), addr)
-        .map_err(|_| LinuxError::EFAULT)?;
+    let val: Itimerval =
+        uaccess::read_user_plain(proc.as_ref(), addr).map_err(|_| LinuxError::EFAULT)?;
     Ok(val)
 }
 
@@ -375,8 +381,7 @@ fn write_user_itimerval(addr: usize, val: &Itimerval) -> Result<(), LinuxError> 
         return Ok(());
     }
     let proc = pulse_core::task::current_process()?;
-    uaccess::write_user_plain(proc.as_ref(), addr, val)
-        .map_err(|_| LinuxError::EFAULT)
+    uaccess::write_user_plain(proc.as_ref(), addr, val).map_err(|_| LinuxError::EFAULT)
 }
 
 pub fn sys_setitimer(which: usize, new_value: usize, old_value: usize) -> isize {
@@ -461,7 +466,11 @@ pub fn sys_setitimer(which: usize, new_value: usize, old_value: usize) -> isize 
 }
 
 pub fn sys_getitimer(which: usize, curr_value: usize) -> isize {
-    axlog::debug!("sys_getitimer: which={}, curr_value={:#x}", which, curr_value);
+    axlog::debug!(
+        "sys_getitimer: which={}, curr_value={:#x}",
+        which,
+        curr_value
+    );
 
     if which > ITIMER_PROF {
         return -LinuxError::EINVAL.code() as isize;

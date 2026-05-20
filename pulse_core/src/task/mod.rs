@@ -11,6 +11,7 @@ use alloc::{
 };
 
 use axerrno::{LinuxError, LinuxResult};
+use kspin::SpinNoIrq;
 pub use process::{CloneParams, ForkParams, Process};
 pub use signal::{
     DefaultSignalAction, NSIG, SIG_DFL, SIG_IGN, SigAction, SignalAction, SignalAltStack,
@@ -18,7 +19,6 @@ pub use signal::{
     check_signals_and_deliver, pending_mask as thread_pending_mask, queue_signal_to_process,
     queue_signal_to_thread, resolve_action,
 };
-use kspin::SpinNoIrq;
 use spin::Lazy;
 pub use thread::{Thread, ThreadHandle};
 

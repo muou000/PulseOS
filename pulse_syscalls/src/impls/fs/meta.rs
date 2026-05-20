@@ -336,14 +336,20 @@ pub fn sys_fchmodat(dirfd: i32, pathname: usize, mode: usize, flags: usize) -> i
     // AT_SYMLINK_NOFOLLOW 和 AT_EMPTY_PATH 是允许的 flags
     let supported_flags = AT_SYMLINK_NOFOLLOW as usize | AT_EMPTY_PATH as usize;
     if (flags & !supported_flags) != 0 {
-        axlog::info!("sys_fchmodat: unsupported flags={:#x}, returning EINVAL", flags);
+        axlog::info!(
+            "sys_fchmodat: unsupported flags={:#x}, returning EINVAL",
+            flags
+        );
         return -LinuxError::EINVAL.code() as isize;
     }
 
     // 仅校验路径可达性（文件存在）；PulseOS 不强制权限，直接返回 0。
     match resolve_location_at_ptr(dirfd, pathname, flags) {
         Ok(_) => {
-            axlog::info!("sys_fchmodat: path \"{}\" resolved OK, returning 0", path_str);
+            axlog::info!(
+                "sys_fchmodat: path \"{}\" resolved OK, returning 0",
+                path_str
+            );
             0
         }
         Err(e) => {
@@ -362,13 +368,7 @@ pub fn sys_fchmodat(dirfd: i32, pathname: usize, mode: usize, flags: usize) -> i
 /// `fchownat(dirfd, pathname, uid, gid, flags)` — 设置文件所有者。
 ///
 /// PulseOS 不强制执行文件所有权，此 stub 仅验证路径存在性后返回成功。
-pub fn sys_fchownat(
-    dirfd: i32,
-    pathname: usize,
-    uid: usize,
-    gid: usize,
-    flags: usize,
-) -> isize {
+pub fn sys_fchownat(dirfd: i32, pathname: usize, uid: usize, gid: usize, flags: usize) -> isize {
     let path_str = if pathname != 0 {
         crate::impls::utils::read_user_cstring(pathname)
             .map(|c| alloc::string::String::from_utf8_lossy(c.as_bytes()).into_owned())

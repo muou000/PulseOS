@@ -40,6 +40,7 @@ fn read_file_page(mapping: &FileMapping, dst: &mut [u8], file_offset: u64, read_
 }
 
 /// Write a page's content (from physical frame) back to the CachedFile.
+#[allow(dead_code)]
 fn writeback_phys_page(mapping: &FileMapping, page_addr: VirtAddr, frame_paddr: PhysAddr) -> bool {
     let Some((file_offset, write_len)) = mapping.page_read_window(page_addr) else {
         return true;

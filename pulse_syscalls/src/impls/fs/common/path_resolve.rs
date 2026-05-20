@@ -55,8 +55,15 @@ pub(crate) fn resolve_location_at_ptr(
     );
     if let Some(result) = try_resolve_location_fast(dirfd, path.as_ref(), flags) {
         match &result {
-            Ok(loc) => axlog::debug!("resolve_location_at_ptr: fast path resolved OK for \"{}\"", path),
-            Err(e) => axlog::debug!("resolve_location_at_ptr: fast path failed for \"{}\": {:?}", path, e),
+            Ok(_loc) => axlog::debug!(
+                "resolve_location_at_ptr: fast path resolved OK for \"{}\"",
+                path
+            ),
+            Err(e) => axlog::debug!(
+                "resolve_location_at_ptr: fast path failed for \"{}\": {:?}",
+                path,
+                e
+            ),
         }
         return result;
     }
@@ -69,8 +76,12 @@ pub(crate) fn resolve_location_at_ptr(
             .map_err(|e| LinuxError::from(e.canonicalize()))
     };
     match &result {
-        Ok(loc) => axlog::debug!("resolve_location_at_ptr: resolved OK for \"{}\"", path),
-        Err(e) => axlog::debug!("resolve_location_at_ptr: resolve failed for \"{}\": {:?}", path, e),
+        Ok(_loc) => axlog::debug!("resolve_location_at_ptr: resolved OK for \"{}\"", path),
+        Err(e) => axlog::debug!(
+            "resolve_location_at_ptr: resolve failed for \"{}\": {:?}",
+            path,
+            e
+        ),
     }
     result
 }
