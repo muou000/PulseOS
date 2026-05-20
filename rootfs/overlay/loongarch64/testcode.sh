@@ -25,7 +25,7 @@ sh ./libcbench_testcode.sh
 # sh ./ltp_testcode.sh
 # sh ./netperf_testcode.sh
 
-cd fs/musl
-timeout 1800 sh ./ltp_testcode.sh
+cd /
+sh ./ltp_musl_testcode.sh
 
 exit 0
