@@ -75,6 +75,7 @@ impl FrameTable {
         self.info(paddr).ref_count.load(Ordering::SeqCst)
     }
 
+    #[allow(dead_code)]
     pub fn total_refs(&self) -> usize {
         self.total_refs.load(Ordering::SeqCst)
     }

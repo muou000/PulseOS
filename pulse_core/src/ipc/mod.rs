@@ -2,4 +2,4 @@
 
 pub mod shm;
 
-pub use shm::{ShmManager, SHM_MANAGER};
+pub use shm::{SHM_MANAGER, ShmManager};

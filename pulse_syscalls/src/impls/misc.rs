@@ -34,6 +34,7 @@ struct UtsName {
 
 #[repr(C)]
 #[derive(Clone, Copy, Default)]
+#[allow(dead_code)]
 struct Sysinfo {
     uptime: i64,
     loads: [u64; 3],
@@ -72,6 +73,7 @@ fn write_cstr_field(dst: &mut [u8], s: &str) {
     dst[len] = 0;
 }
 
+#[allow(dead_code)]
 fn rlimit_for(resource: usize) -> Option<rlimit64> {
     const INF: u64 = u64::MAX;
     let rlim = match resource as u32 {
@@ -172,7 +174,11 @@ pub fn sys_prlimit64(pid: i32, resource: usize, new_limit: usize, old_limit: usi
         return -LinuxError::ESRCH.code() as isize;
     }
     let resource = resource as u32;
-    if resource != RLIMIT_STACK && resource != RLIMIT_NOFILE && resource != RLIMIT_MEMLOCK && resource != RLIMIT_CORE {
+    if resource != RLIMIT_STACK
+        && resource != RLIMIT_NOFILE
+        && resource != RLIMIT_MEMLOCK
+        && resource != RLIMIT_CORE
+    {
         return -LinuxError::EINVAL.code() as isize;
     }
 

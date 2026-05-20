@@ -4,10 +4,10 @@ use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use axerrno::{AxError, AxResult};
 use axhal::context::TrapFrame;
 use axtask::WaitQueue;
+use kspin::SpinNoIrq;
 use linux_raw_sys::general::{
     SA_NODEFER, SA_RESETHAND, SIGCHLD, SIGCONT, SIGKILL, SIGSTOP, SIGURG, SIGWINCH,
 };
-use kspin::SpinNoIrq;
 use spin::Mutex;
 
 use super::{Process, Thread};

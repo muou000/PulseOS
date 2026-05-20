@@ -15,9 +15,11 @@ use axhal::{
 };
 use axmm::AddrSpace;
 use axtask::{AxTaskRef, TaskInner, WaitQueue};
-use kspin::SpinNoIrq;
 use kernel_guard::NoPreemptIrqSave;
-use linux_raw_sys::general::{RLIMIT_CORE, RLIMIT_MEMLOCK, RLIMIT_NOFILE, RLIMIT_STACK, SIGCHLD, rlimit64};
+use kspin::SpinNoIrq;
+use linux_raw_sys::general::{
+    RLIMIT_CORE, RLIMIT_MEMLOCK, RLIMIT_NOFILE, RLIMIT_STACK, SIGCHLD, rlimit64,
+};
 use memory_addr::{MemoryAddr, PhysAddr, VirtAddr, va};
 use spin::{Lazy, Mutex};
 
@@ -961,7 +963,7 @@ impl Process {
         *self.heap_top.lock() = USER_HEAP_BASE;
         *self.stack_top.lock() = USER_STACK_TOP;
         *self.entry.lock() = 0;
-        
+
         {
             let mut shm = self.shared_memory.lock();
             for inner_arc in shm.values() {
@@ -1268,8 +1270,10 @@ impl Process {
             self.itimer_real_interval_ns.store(0, Ordering::Release);
         } else {
             let deadline = now_ns.saturating_add(value_ns);
-            self.itimer_real_deadline_ns.store(deadline, Ordering::Release);
-            self.itimer_real_interval_ns.store(interval_ns, Ordering::Release);
+            self.itimer_real_deadline_ns
+                .store(deadline, Ordering::Release);
+            self.itimer_real_interval_ns
+                .store(interval_ns, Ordering::Release);
         }
         (old_remaining, old_interval)
     }
@@ -1301,7 +1305,12 @@ impl Process {
             return false;
         }
         // Timer expired. Send SIGALRM (signal 14).
-        axlog::info!("itimer expired for pid={} now={} deadline={}", self.pid(), now_ns, deadline);
+        axlog::info!(
+            "itimer expired for pid={} now={} deadline={}",
+            self.pid(),
+            now_ns,
+            deadline
+        );
         let _ = queue_signal_to_process(self, 14 /* SIGALRM */);
         let interval = self.itimer_real_interval_ns.load(Ordering::Acquire);
         if interval == 0 {
@@ -1310,7 +1319,8 @@ impl Process {
         } else {
             // Repeating: advance deadline
             let new_deadline = deadline.saturating_add(interval);
-            self.itimer_real_deadline_ns.store(new_deadline, Ordering::Release);
+            self.itimer_real_deadline_ns
+                .store(new_deadline, Ordering::Release);
         }
         true
     }
@@ -1334,7 +1344,12 @@ impl Process {
             .wait_until(|| self.vfork_done.load(Ordering::Acquire));
     }
 
-    pub fn futex_wait(&self, addr: usize, expected: u32, timeout_ns: Option<u64>) -> Result<(), i32> {
+    pub fn futex_wait(
+        &self,
+        addr: usize,
+        expected: u32,
+        timeout_ns: Option<u64>,
+    ) -> Result<(), i32> {
         if match self.read_user_u32(addr) {
             Ok(v) => v != expected,
             Err(e) => return Err(e.code().abs()),

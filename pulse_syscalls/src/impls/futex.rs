@@ -1,5 +1,3 @@
-use axerrno::AxError;
-
 use crate::{LinuxError, impls::utils::read_user_timespec};
 
 const FUTEX_WAIT: i32 = 0;
@@ -7,10 +5,6 @@ const FUTEX_WAKE: i32 = 1;
 const FUTEX_REQUEUE: i32 = 3;
 const FUTEX_CMP_REQUEUE: i32 = 4;
 const FUTEX_CMD_MASK: i32 = 0x7f;
-
-fn ax_error_to_linux(e: AxError) -> LinuxError {
-    e.into()
-}
 
 fn read_timeout_ns(timeout: usize) -> Result<Option<u64>, LinuxError> {
     if timeout == 0 {

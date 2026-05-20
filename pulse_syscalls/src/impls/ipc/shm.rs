@@ -4,8 +4,8 @@ use axerrno::LinuxError;
 use axhal::mem::virt_to_phys;
 use memory_addr::{PAGE_SIZE_4K, VirtAddr};
 use pulse_core::ipc::shm::{
-    IPC_INFO, IPC_PRIVATE, IPC_RMID, IPC_SET, IPC_STAT, SHM_INFO, SHM_RDONLY, SHM_REMAP,
-    SHM_RND, SHM_STAT, ShmidDs, SHM_MANAGER,
+    IPC_INFO, IPC_PRIVATE, IPC_RMID, IPC_SET, IPC_STAT, SHM_INFO, SHM_MANAGER, SHM_RDONLY,
+    SHM_REMAP, SHM_RND, SHM_STAT, ShmidDs,
 };
 
 /// shmget: create or get a shared memory segment.
@@ -128,12 +128,7 @@ pub fn sys_shmat(shmid: i32, shmaddr: usize, shmflg: i32) -> isize {
 
     // Map the shared physical pages into this process's address space.
     let paddr = virt_to_phys(VirtAddr::from(inner.addr));
-    if let Err(e) = aspace.map_linear(
-        VirtAddr::from(map_addr),
-        paddr,
-        length,
-        mapping_flags,
-    ) {
+    if let Err(e) = aspace.map_linear(VirtAddr::from(map_addr), paddr, length, mapping_flags) {
         axlog::error!("sys_shmat: map_linear failed: {:?}", e);
         return -LinuxError::from(e).code() as isize;
     }
@@ -143,7 +138,9 @@ pub fn sys_shmat(shmid: i32, shmaddr: usize, shmflg: i32) -> isize {
     // Record the attachment.
     inner.attach_process(pid);
     drop(inner);
-    proc.shared_memory.lock().insert(VirtAddr::from(map_addr), shm_inner.clone());
+    proc.shared_memory
+        .lock()
+        .insert(VirtAddr::from(map_addr), shm_inner.clone());
 
     axlog::debug!("sys_shmat: mapped at {:#x}, size={}", map_addr, length);
     map_addr as isize

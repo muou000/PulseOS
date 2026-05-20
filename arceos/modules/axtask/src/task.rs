@@ -503,6 +503,7 @@ struct TaskStack {
 }
 
 impl TaskStack {
+    #[allow(dead_code)]
     pub fn alloc(size: usize) -> Self {
         Self::try_alloc(size).unwrap_or_else(|_| {
             alloc::alloc::handle_alloc_error(
