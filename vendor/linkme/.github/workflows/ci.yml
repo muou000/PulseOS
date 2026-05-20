@@ -24,7 +24,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        rust: [nightly, beta, stable, 1.82.0, 1.76.0]
+        rust: [nightly, beta, stable, 1.85.0]
         os: [ubuntu]
         linker: ['']
         include:
@@ -43,7 +43,7 @@ jobs:
             rust: nightly-x86_64-pc-windows-msvc
     timeout-minutes: 45
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: ${{matrix.rust}}
@@ -75,7 +75,7 @@ jobs:
       - run: cargo test -p linkme -p linkme-impl --release --features used_linker
         if: startsWith(matrix.rust, 'nightly')
         continue-on-error: ${{matrix.rust == 'nightly-x86_64-pc-windows-gnu'}}
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v6
         if: matrix.os == 'ubuntu' && matrix.rust == 'nightly' && matrix.linker == '' && always()
         with:
           name: Cargo.lock
@@ -89,7 +89,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@nightly
         with:
           target: thumbv7m-none-eabi
@@ -110,14 +110,14 @@ jobs:
         working-directory: tests/cortex
 
   msrv:
-    name: Rust 1.66.0
+    name: Rust 1.71.0
     needs: pre_ci
     if: needs.pre_ci.outputs.continue
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
-      - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@1.66.0
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@1.71.0
       - run: cargo check
 
   minimal:
@@ -127,7 +127,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@nightly
       - run: cargo generate-lockfile -Z minimal-versions
       - run: cargo check --locked
@@ -141,7 +141,7 @@ jobs:
     env:
       RUSTDOCFLAGS: -Dwarnings
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@nightly
       - uses: dtolnay/install@cargo-docs-rs
       - run: cargo docs-rs
@@ -152,7 +152,7 @@ jobs:
     if: github.event_name != 'pull_request'
     timeout-minutes: 45
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@clippy
       - run: cargo clippy --tests -- -Dclippy::all -Dclippy::pedantic
 
@@ -162,7 +162,7 @@ jobs:
     if: github.event_name != 'pull_request'
     timeout-minutes: 45
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
       - uses: dtolnay/install@cargo-outdated
       - run: cargo outdated --workspace --exit-code 1
