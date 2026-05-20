@@ -16,7 +16,7 @@ pub use signal::{
     DefaultSignalAction, NSIG, SIG_DFL, SIG_IGN, SigAction, SignalAction, SignalAltStack,
     SignalDelivery, SignalShared, ThreadSignal, blocked_mask as thread_blocked_mask, can_signal,
     check_signals_and_deliver, pending_mask as thread_pending_mask, queue_signal_to_process,
-    queue_signal_to_thread,
+    queue_signal_to_thread, resolve_action,
 };
 use kspin::SpinNoIrq;
 use spin::Lazy;
@@ -64,6 +64,10 @@ pub fn current_thread() -> LinuxResult<Arc<Thread>> {
 
     Err(LinuxError::ESRCH)
 }
+
+/// Internal Linux error code for system call restarts.
+pub const ERESTARTSYS: i32 = 512;
+
 pub fn process_by_pid(pid: u64) -> Option<Arc<Process>> {
     let mut registry = PROCESS_REGISTRY.lock();
     prune_dead_processes(&mut registry);

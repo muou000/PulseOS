@@ -90,7 +90,7 @@ pub(super) fn alloc_frame(zeroed: bool) -> Option<PhysAddr> {
         unsafe { core::ptr::write_bytes(vaddr.as_mut_ptr(), 0, PAGE_SIZE_4K) };
     }
     let paddr = virt_to_phys(vaddr);
-    frame_table().mark_used(paddr);
+    cow_mark_frame_used(paddr);
     Some(paddr)
 }
 
