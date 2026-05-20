@@ -50,7 +50,7 @@ pub unsafe fn sys_clock_gettime(clk: ctypes::clockid_t, ts: *mut ctypes::timespe
             }
         };
         unsafe { *ts = now };
-        debug!("sys_clock_gettime: {}.{:09}s", now.tv_sec, now.tv_nsec);
+        trace!("sys_clock_gettime: {}.{:09}s", now.tv_sec, now.tv_nsec);
         Ok(0)
     })
 }
@@ -67,7 +67,7 @@ pub unsafe fn sys_nanosleep(req: *const ctypes::timespec, rem: *mut ctypes::time
         }
 
         let dur = unsafe {
-            debug!("sys_nanosleep <= {}.{:09}s", (*req).tv_sec, (*req).tv_nsec);
+            trace!("sys_nanosleep <= {}.{:09}s", (*req).tv_sec, (*req).tv_nsec);
             Duration::from(*req)
         };
 

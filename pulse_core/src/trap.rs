@@ -52,22 +52,27 @@ fn handle_page_fault(vaddr: VirtAddr, access_flags: MappingFlags, is_user: bool)
         is_user
     );
 
-    if !is_user {
-        axlog::error!("Page fault in kernel space: vaddr={:#x}", vaddr);
-        if let Ok(thread) = crate::task::current_thread() {
-            let proc = thread.process();
-            const SIGSEGV: i32 = 11;
-            proc.set_exit_signal(SIGSEGV, true);
-            proc.begin_group_exit(SIGSEGV);
-            thread.exit_current(proc.group_exit_code());
+    let thread_result = crate::task::current_thread();
+    let is_kernel_address = vaddr.as_usize() >= axconfig::plat::KERNEL_ASPACE_BASE;
+
+    if thread_result.is_err() || (!is_user && is_kernel_address) {
+        if !is_user {
+            panic!("Page fault in kernel space: vaddr={:#x}", vaddr);
+        } else {
+            panic!("user page fault without Thread context: vaddr={:#x}", vaddr);
         }
-        return false;
     }
 
-    let Ok(thread) = crate::task::current_thread() else {
-        axlog::error!("user page fault without Thread context: vaddr={:#x}", vaddr);
-        return false;
-    };
+    let thread = thread_result.unwrap();
+
+    if !is_user {
+        let proc = thread.process();
+        const SIGSEGV: i32 = 11;
+        proc.set_exit_signal(SIGSEGV, true);
+        proc.begin_group_exit(SIGSEGV);
+        thread.exit_current(proc.group_exit_code());
+        return true;
+    }
     let proc = thread.process();
     let enter_ns = axhal::time::monotonic_time_nanos() as u64;
     proc.on_kernel_entry_from_user(enter_ns);
