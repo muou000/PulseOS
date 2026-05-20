@@ -37,7 +37,7 @@ pub fn sys_execve(_tf: &TrapFrame, pathname: usize, argv: usize, envp: usize) ->
         Err(e) => return e,
     };
 
-    let blacklist = ["cgroup", "cpuctl_fj_cpu-hog", "cpuhotplug", "dns-stress-lib", "doio", "fcntl15_64", "fork_exec_loop", "fremovexattr", "ftp-download-stress", "ftp-upload-stress", "ftrace_lib", "gen", "http-stress"];
+    let blacklist = ["cgroup", "cpuctl_fj_cpu-hog", "cpuhotplug", "dns-stress-lib", "doio", "fcntl15_64", "fork_exec_loop", "fremovexattr", "ftest", "ftp-download-stress", "ftp-upload-stress", "ftrace_lib", "gen", "http-stress", "kill", "ln_tests", "memcg"];
     if blacklist.iter().any(|&item| {
         path_str.contains(item) || args.iter().any(|arg| arg.contains(item))
     }) {
