@@ -13,14 +13,13 @@ pub fn syscall_handler(tf: &mut TrapFrame, syscall_num: usize) -> isize {
         Err(_) => {
             let task = axtask::current();
             let task_ext_ptr = unsafe { task.task_ext_ptr() };
-            axlog::error!(
+            panic!(
                 "syscall without Thread context: syscall={}, task={} {:?}, task_ext_ptr={:p}",
                 syscall_num,
                 task.id().as_u64(),
                 task.name(),
                 task_ext_ptr
             );
-            return -LinuxError::ENOSYS.code() as isize;
         }
     };
     let process = thread.process_arc();

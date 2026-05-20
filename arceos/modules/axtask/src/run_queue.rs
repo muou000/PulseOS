@@ -230,7 +230,7 @@ impl<G: BaseGuard> AxRunQueueRef<'_, G> {
     ///
     /// This function is used to add a new task to the scheduler.
     pub fn add_task(&mut self, task: AxTaskRef) {
-        debug!(
+        trace!(
             "task add: {} on run_queue {}",
             task.id_name(),
             self.inner.cpu_id
@@ -256,7 +256,7 @@ impl<G: BaseGuard> AxRunQueueRef<'_, G> {
         {
             // Since now, the task to be unblocked is in the `Ready` state.
             let cpu_id = self.inner.cpu_id;
-            debug!("task unblock: {} on run_queue {}", task_id_name, cpu_id);
+            trace!("task unblock: {} on run_queue {}", task_id_name, cpu_id);
             // Note: when the task is unblocked on another CPU's run queue,
             // we just ingiore the `resched` flag.
             if resched && cpu_id == this_cpu_id() {
@@ -335,7 +335,7 @@ impl<G: BaseGuard> CurrentRunQueueRef<'_, G> {
         // the preemption permission.
         let can_preempt = curr.can_preempt(1);
 
-        debug!(
+        trace!(
             "current task is to be preempted: {}, allow={}",
             curr.id_name(),
             can_preempt
@@ -422,14 +422,14 @@ impl<G: BaseGuard> CurrentRunQueueRef<'_, G> {
         // Note that the state may have been set as `Ready` in `unblock_task()`,
         // see `unblock_task()` for details.
 
-        debug!("task block: {}", curr.id_name());
+        trace!("task block: {}", curr.id_name());
         self.inner.resched();
     }
 
     #[cfg(feature = "irq")]
     pub fn sleep_until(&mut self, deadline: axhal::time::TimeValue) {
         let curr = &self.current_task;
-        debug!("task sleep: {}, deadline={:?}", curr.id_name(), deadline);
+        trace!("task sleep: {}, deadline={:?}", curr.id_name(), deadline);
         assert!(curr.is_running());
         assert!(!curr.is_idle());
 

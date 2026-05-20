@@ -130,7 +130,7 @@ struct Tms {
 }
 
 pub fn sys_nanosleep(req: usize, rem: usize) -> isize {
-    axlog::debug!("sys_nanosleep: req={:#x}, rem={:#x}", req, rem);
+    axlog::trace!("sys_nanosleep: req={:#x}, rem={:#x}", req, rem);
 
     if req == 0 {
         return -LinuxError::EFAULT.code() as isize;
@@ -238,7 +238,7 @@ pub fn sys_clock_getres(clockid: i32, res: usize) -> isize {
 
 /// sys_clock_gettime - 获取时钟时间
 pub fn sys_clock_gettime(clockid: i32, tp: usize) -> isize {
-    axlog::debug!("sys_clock_gettime: clockid={}, tp={:#x}", clockid, tp);
+    axlog::trace!("sys_clock_gettime: clockid={}, tp={:#x}", clockid, tp);
     if tp == 0 {
         return -LinuxError::EFAULT.code() as isize;
     }
@@ -256,7 +256,7 @@ pub fn sys_clock_gettime(clockid: i32, tp: usize) -> isize {
 
 /// sys_gettimeofday - 获取墙上时间
 pub fn sys_gettimeofday(tv: usize, tz: usize) -> isize {
-    axlog::debug!("sys_gettimeofday: tv={:#x}, tz={:#x}", tv, tz);
+    axlog::trace!("sys_gettimeofday: tv={:#x}, tz={:#x}", tv, tz);
 
     if tz != 0 {
         if !GETTIMEOFDAY_TZ_WARNED.swap(true, Ordering::AcqRel) {

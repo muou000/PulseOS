@@ -11,7 +11,7 @@ use axio::prelude::*;
 ///
 /// Return the read size if success.
 pub fn sys_read(fd: c_int, buf: *mut c_void, count: usize) -> ctypes::ssize_t {
-    debug!("sys_read <= {} {:#x} {}", fd, buf as usize, count);
+    trace!("sys_read <= {} {:#x} {}", fd, buf as usize, count);
     syscall_body!(sys_read, {
         if buf.is_null() {
             return Err(LinuxError::EFAULT);
@@ -51,13 +51,13 @@ fn write_impl(fd: c_int, buf: *const c_void, count: usize) -> LinuxResult<ctypes
 ///
 /// Return the written size if success.
 pub fn sys_write(fd: c_int, buf: *const c_void, count: usize) -> ctypes::ssize_t {
-    debug!("sys_write <= {} {:#x} {}", fd, buf as usize, count);
+    trace!("sys_write <= {} {:#x} {}", fd, buf as usize, count);
     syscall_body!(sys_write, write_impl(fd, buf, count))
 }
 
 /// Write a vector.
 pub unsafe fn sys_writev(fd: c_int, iov: *const ctypes::iovec, iocnt: c_int) -> ctypes::ssize_t {
-    debug!("sys_writev <= fd: {}", fd);
+    trace!("sys_writev <= fd: {}", fd);
     syscall_body!(sys_writev, {
         if !(0..=1024).contains(&iocnt) {
             return Err(LinuxError::EINVAL);
