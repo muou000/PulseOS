@@ -122,7 +122,9 @@ impl TimeIf for TimeIfImpl {
 
         let ticks_now = Self::current_ticks();
         let ticks_deadline = Self::nanos_to_ticks(deadline_ns);
-        let init_value = ticks_deadline - ticks_now;
+        // Saturate to prevent u64 underflow when the deadline has already passed.
+        // Use max(4) because TCFG init_val must be a nonzero multiple of 4.
+        let init_value = ticks_deadline.saturating_sub(ticks_now).max(4);
         tcfg::set_init_val(init_value as _);
         tcfg::set_en(true);
     }
