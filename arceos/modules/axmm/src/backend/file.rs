@@ -68,22 +68,26 @@ pub struct FileMapping {
 }
 
 impl FileMapping {
-    fn required_flags(flags: MappingFlags) -> FileFlags {
-        let mut required = FileFlags::empty();
-        if flags.contains(MappingFlags::READ) {
-            required |= FileFlags::READ;
-        }
-        if flags.contains(MappingFlags::WRITE) {
-            required |= FileFlags::WRITE;
-        }
-        if flags.contains(MappingFlags::EXECUTE) {
-            required |= FileFlags::EXECUTE;
-        }
-        required
-    }
 
     pub(crate) fn permits(&self, flags: MappingFlags) -> bool {
-        self.file_flags.contains(Self::required_flags(flags))
+        if flags.contains(MappingFlags::READ) && !self.file_flags.contains(FileFlags::READ) {
+            return false;
+        }
+        if flags.contains(MappingFlags::WRITE) {
+            if self.shared {
+                if !self.file_flags.contains(FileFlags::WRITE) {
+                    return false;
+                }
+            } else {
+                if !self.file_flags.contains(FileFlags::READ) {
+                    return false;
+                }
+            }
+        }
+        if flags.contains(MappingFlags::EXECUTE) && !self.file_flags.contains(FileFlags::READ) {
+            return false;
+        }
+        true
     }
 
     pub(crate) fn is_shared(&self) -> bool {
