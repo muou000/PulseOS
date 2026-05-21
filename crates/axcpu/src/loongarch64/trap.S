@@ -10,6 +10,8 @@
     csrrd   $r21, KSAVE_R21
 .else
     addi.d  $sp,  $sp, -{trapframe_size}
+    STD     $tp,  $sp, 2
+    STD     $r21, $sp, 21
 .endif
 
     STD     $t0,  $sp, 3
@@ -25,6 +27,9 @@
 .if \from_user == 1
     csrwr   $tp,  KSAVE_TP
     csrwr   $r21, KSAVE_R21
+    LDD     $tp,  $sp, 2
+    LDD     $r21, $sp, 21
+.else
     LDD     $tp,  $sp, 2
     LDD     $r21, $sp, 21
 .endif

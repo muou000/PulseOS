@@ -36,34 +36,38 @@ macro_rules! include_asm_macros {
         .endm
 
         .macro PUSH_POP_GENERAL_REGS, op
-            \op    $ra, $sp, 1
-            \op    $a0, $sp, 4
-            \op    $a1, $sp, 5
-            \op    $a2, $sp, 6
-            \op    $a3, $sp, 7
-            \op    $a4, $sp, 8
-            \op    $a5, $sp, 9
-            \op    $a6, $sp, 10
-            \op    $a7, $sp, 11
-            \op    $t0, $sp, 12
-            \op    $t1, $sp, 13
-            \op    $t2, $sp, 14
-            \op    $t3, $sp, 15
-            \op    $t4, $sp, 16
-            \op    $t5, $sp, 17
-            \op    $t6, $sp, 18
-            \op    $t7, $sp, 19
-            \op    $t8, $sp, 20
-            \op    $fp, $sp, 22
-            \op    $s0, $sp, 23
-            \op    $s1, $sp, 24
-            \op    $s2, $sp, 25
-            \op    $s3, $sp, 26
-            \op    $s4, $sp, 27
-            \op    $s5, $sp, 28
-            \op    $s6, $sp, 29
-            \op    $s7, $sp, 30
-            \op    $s8, $sp, 31
+            \op    $r0,  $sp, 0
+            \op    $ra,  $sp, 1
+            // 2: tp handled manually
+            // 3: sp handled manually
+            \op    $a0,  $sp, 4
+            \op    $a1,  $sp, 5
+            \op    $a2,  $sp, 6
+            \op    $a3,  $sp, 7
+            \op    $a4,  $sp, 8
+            \op    $a5,  $sp, 9
+            \op    $a6,  $sp, 10
+            \op    $a7,  $sp, 11
+            \op    $t0,  $sp, 12
+            \op    $t1,  $sp, 13
+            \op    $t2,  $sp, 14
+            \op    $t3,  $sp, 15
+            \op    $t4,  $sp, 16
+            \op    $t5,  $sp, 17
+            \op    $t6,  $sp, 18
+            \op    $t7,  $sp, 19
+            \op    $t8,  $sp, 20
+            // 21: r21 handled manually
+            \op    $fp,  $sp, 22
+            \op    $s0,  $sp, 23
+            \op    $s1,  $sp, 24
+            \op    $s2,  $sp, 25
+            \op    $s3,  $sp, 26
+            \op    $s4,  $sp, 27
+            \op    $s5,  $sp, 28
+            \op    $s6,  $sp, 29
+            \op    $s7,  $sp, 30
+            \op    $s8,  $sp, 31
         .endm
 
         .macro PUSH_GENERAL_REGS

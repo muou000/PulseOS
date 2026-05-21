@@ -48,6 +48,25 @@ fn loongarch64_trap_handler(tf: &mut TrapFrame, from_user: bool) {
         | Trap::Exception(Exception::PageNonReadableFault) => {
             handle_page_fault(tf, PageFaultFlags::READ, from_user)
         }
+        Trap::Exception(Exception::InstructionNotExist)
+        | Trap::Exception(Exception::InstructionPrivilegeIllegal) => {
+            let handled = if from_user {
+                handle_trap!(ILLEGAL_INSTRUCTION, tf, tf.era, from_user)
+            } else { false };
+            if !handled {
+                panic!("Instruction fault in kernel at {:#x}:\n{:#x?}", tf.era, tf);
+            }
+        }
+        Trap::Exception(Exception::FetchInstructionAddressError)
+        | Trap::Exception(Exception::MemoryAccessAddressError)
+        | Trap::Exception(Exception::AddressNotAligned) => {
+            let handled = if from_user {
+                handle_trap!(ADDRESS_ERROR, tf, tf.era, from_user)
+            } else { false };
+            if !handled {
+                panic!("Address error in kernel at {:#x}:\n{:#x?}", tf.era, tf);
+            }
+        }
         Trap::Exception(Exception::StorePageFault)
         | Trap::Exception(Exception::PageModifyFault) => {
             handle_page_fault(tf, PageFaultFlags::WRITE, from_user)
