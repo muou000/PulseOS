@@ -104,6 +104,10 @@ SECTIONS {
     linkm2_SYSCALL : { *(linkm2_SYSCALL) }
     linkme_USER_RETURN : { *(linkme_USER_RETURN) }
     linkm2_USER_RETURN : { *(linkm2_USER_RETURN) }
+    linkme_ILLEGAL_INSTRUCTION : { *(linkme_ILLEGAL_INSTRUCTION) }
+    linkm2_ILLEGAL_INSTRUCTION : { *(linkm2_ILLEGAL_INSTRUCTION) }
+    linkme_ADDRESS_ERROR : { *(linkme_ADDRESS_ERROR) }
+    linkm2_ADDRESS_ERROR : { *(linkm2_ADDRESS_ERROR) }
     axns_resource : { *(axns_resource) }
 }
 INSERT AFTER .tbss;

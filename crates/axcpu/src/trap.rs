@@ -15,6 +15,16 @@ pub static IRQ: [fn(usize) -> bool];
 #[def_trap_handler]
 pub static PAGE_FAULT: [fn(VirtAddr, PageFaultFlags, bool) -> bool];
 
+/// A slice of illegal instruction handler functions.
+#[cfg(feature = "uspace")]
+#[def_trap_handler]
+pub static ILLEGAL_INSTRUCTION: [fn(&mut TrapFrame, usize, bool) -> bool];
+
+/// A slice of address error handler functions.
+#[cfg(feature = "uspace")]
+#[def_trap_handler]
+pub static ADDRESS_ERROR: [fn(&mut TrapFrame, usize, bool) -> bool];
+
 /// A slice of syscall handler functions.
 #[cfg(feature = "uspace")]
 #[cfg_attr(docsrs, doc(cfg(feature = "uspace")))]

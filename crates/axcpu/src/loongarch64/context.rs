@@ -79,6 +79,8 @@ pub struct TrapFrame {
     pub prmd: usize,
     /// Exception Return Address
     pub era: usize,
+    /// Padding to ensure 16-byte alignment (Total size: 288 bytes)
+    pub _pad: [usize; 2],
 }
 
 impl TrapFrame {
@@ -137,6 +139,9 @@ pub struct TaskContext {
     /// Thread Pointer
     pub tp: usize,
     #[cfg(feature = "uspace")]
+    /// kernel stack base
+    pub kernel_sp: usize,
+    #[cfg(feature = "uspace")]
     /// user page table root
     pub pgdl: usize,
     #[cfg(feature = "fp-simd")]
@@ -156,6 +161,10 @@ impl TaskContext {
         self.sp = kstack_top.as_usize();
         self.ra = entry;
         self.tp = tls_area.as_usize();
+        #[cfg(feature = "uspace")]
+        {
+            self.kernel_sp = kstack_top.as_usize();
+        }
     }
 
     /// Changes the page table root in this context.
@@ -179,7 +188,7 @@ impl TaskContext {
         }
         #[cfg(feature = "uspace")]
         {
-            crate::asm::write_kernel_sp(next_ctx.sp);
+            crate::asm::write_kernel_sp(next_ctx.kernel_sp);
             if self.pgdl != next_ctx.pgdl {
                 unsafe { crate::asm::write_user_page_table(pa!(next_ctx.pgdl)) };
                 crate::asm::flush_tlb(None); // currently flush the entire TLB
