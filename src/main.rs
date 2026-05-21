@@ -19,6 +19,8 @@ fn main() {
     pulse_core::task::init_itimer_hook();
     info!("itimer hook registered");
 
+    pulse_core::trap::init();
+
     use axtask::TaskInner;
     const SHELL_ELF_PATH: &str = "/bin/sh";
     let mut inner = TaskInner::new(
