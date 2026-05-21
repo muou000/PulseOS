@@ -373,8 +373,53 @@ impl ThreadSignal {
         *tf = saved.tf;
         let mut restored_mask = saved.old_mask;
         if let Some(user_ucontext) = saved.user_ucontext {
+            #[cfg(target_arch = "loongarch64")]
+            {
+                let gregs_addr = user_ucontext + 184;
+                let mut gregs = [0u64; 32];
+                if process.read_user_bytes(gregs_addr, unsafe {
+                    core::slice::from_raw_parts_mut(gregs.as_mut_ptr() as *mut u8, 256)
+                }).is_ok() {
+                    tf.regs.ra = gregs[1] as usize;
+                    tf.regs.tp = gregs[2] as usize;
+                    tf.regs.sp = gregs[3] as usize;
+                    tf.regs.a0 = gregs[4] as usize;
+                    tf.regs.a1 = gregs[5] as usize;
+                    tf.regs.a2 = gregs[6] as usize;
+                    tf.regs.a3 = gregs[7] as usize;
+                    tf.regs.a4 = gregs[8] as usize;
+                    tf.regs.a5 = gregs[9] as usize;
+                    tf.regs.a6 = gregs[10] as usize;
+                    tf.regs.a7 = gregs[11] as usize;
+                    tf.regs.t0 = gregs[12] as usize;
+                    tf.regs.t1 = gregs[13] as usize;
+                    tf.regs.t2 = gregs[14] as usize;
+                    tf.regs.t3 = gregs[15] as usize;
+                    tf.regs.t4 = gregs[16] as usize;
+                    tf.regs.t5 = gregs[17] as usize;
+                    tf.regs.t6 = gregs[18] as usize;
+                    tf.regs.t7 = gregs[19] as usize;
+                    tf.regs.t8 = gregs[20] as usize;
+                    tf.regs.u0 = gregs[21] as usize;
+                    tf.regs.fp = gregs[22] as usize;
+                    tf.regs.s0 = gregs[23] as usize;
+                    tf.regs.s1 = gregs[24] as usize;
+                    tf.regs.s2 = gregs[25] as usize;
+                    tf.regs.s3 = gregs[26] as usize;
+                    tf.regs.s4 = gregs[27] as usize;
+                    tf.regs.s5 = gregs[28] as usize;
+                    tf.regs.s6 = gregs[29] as usize;
+                    tf.regs.s7 = gregs[30] as usize;
+                    tf.regs.s8 = gregs[31] as usize;
+                }
+            }
             if let Ok(pc) = read_user_signal_pc(process, user_ucontext) {
-                set_ip(tf, pc);
+                // Safety: Do not allow restoring a kernel address as the return PC.
+                if pc < axconfig::plat::KERNEL_ASPACE_BASE {
+                    set_ip(tf, pc);
+                } else {
+                    axlog::warn!("rt_sigreturn: blocked attempt to restore kernel PC {:#x}", pc);
+                }
             }
             if let Ok(mask) = read_user_signal_mask(process, user_ucontext) {
                 restored_mask = mask;
@@ -611,6 +656,9 @@ fn set_sp(tf: &mut TrapFrame, sp: usize) {
 const SIGINFO_FRAME_SIZE: usize = 128;
 const UCONTEXT_FRAME_SIZE: usize = 1024;
 const UCONTEXT_SIGMASK_OFFSET: usize = 40;
+#[cfg(target_arch = "loongarch64")]
+const UCONTEXT_PC_OFFSET: usize = 176;
+#[cfg(not(target_arch = "loongarch64"))]
 const UCONTEXT_PC_OFFSET: usize = 168;
 
 fn write_user_signal_frame(
@@ -630,6 +678,17 @@ fn write_user_signal_frame(
     thread
         .process()
         .write_user_usize(ucontext_addr + UCONTEXT_PC_OFFSET, current_ip(tf))?;
+    
+    #[cfg(target_arch = "loongarch64")]
+    {
+        // On loongarch64, sc_regs starts at offset 184 in ucontext_t.
+        let gregs_addr = ucontext_addr + 184;
+        let gregs_bytes = unsafe {
+            core::slice::from_raw_parts(&tf.regs as *const _ as *const u8, 32 * 8)
+        };
+        let _ = thread.process().write_user_bytes(gregs_addr, gregs_bytes);
+    }
+    
     Ok((siginfo_addr, ucontext_addr))
 }
 
