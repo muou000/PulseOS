@@ -25,7 +25,7 @@ sh ./libcbench_testcode.sh
 # sh ./netperf_testcode.sh
 
 cd /
-# sh ./ltp_musl_testcode.sh
+sh ./ltp_musl_testcode.sh
 sh ./ltp_glibc_testcode.sh
 
 exit 0
