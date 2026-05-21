@@ -7,6 +7,31 @@ use axhal::{
 };
 use memory_addr::VirtAddr;
 
+use axhal::trap::{ADDRESS_ERROR, ILLEGAL_INSTRUCTION};
+
+#[register_trap_handler(ILLEGAL_INSTRUCTION)]
+fn handle_illegal_instruction(_tf: &mut TrapFrame, _vaddr: usize, is_user: bool) -> bool {
+    if is_user {
+        if let Ok(thread) = crate::task::current_thread() {
+            crate::task::queue_signal_to_thread(thread.as_ref(), 4); // SIGILL
+            return true;
+        }
+    }
+    false
+}
+
+#[register_trap_handler(ADDRESS_ERROR)]
+fn handle_address_error(_tf: &mut TrapFrame, _vaddr: usize, is_user: bool) -> bool {
+    if is_user {
+        if let Ok(thread) = crate::task::current_thread() {
+            // Usually SIGSEGV, sometimes SIGBUS. We use SIGSEGV as default.
+            crate::task::queue_signal_to_thread(thread.as_ref(), 11); // SIGSEGV
+            return true;
+        }
+    }
+    false
+}
+
 fn deliver_pending_signal(tf: &mut TrapFrame) {
     let Ok(thread) = crate::task::current_thread() else {
         return;
@@ -100,3 +125,6 @@ fn handle_page_fault(vaddr: VirtAddr, access_flags: MappingFlags, is_user: bool)
         thread.exit_current(139);
     }
 }
+
+/// Ensure the module is linked.
+pub fn init() {}
