@@ -343,14 +343,31 @@ pub fn sys_fchmodat(dirfd: i32, pathname: usize, mode: usize, flags: usize) -> i
         return -LinuxError::EINVAL.code() as isize;
     }
 
-    // 仅校验路径可达性（文件存在）；PulseOS 不强制权限，直接返回 0。
     match resolve_location_at_ptr(dirfd, pathname, flags) {
-        Ok(_) => {
-            axlog::info!(
-                "sys_fchmodat: path \"{}\" resolved OK, returning 0",
-                path_str
-            );
-            0
+        Ok(location) => {
+            let perm = axfs_ng_vfs::NodePermission::from_bits_truncate(mode as u16);
+            match location.update_metadata(axfs_ng_vfs::MetadataUpdate {
+                mode: Some(perm),
+                ..Default::default()
+            }) {
+                Ok(()) => {
+                    axlog::debug!(
+                        "sys_fchmodat: path \"{}\" resolved and metadata updated OK, returning 0",
+                        path_str
+                    );
+                    0
+                }
+                Err(e) => {
+                    let err = LinuxError::from(e.canonicalize());
+                    axlog::debug!(
+                        "sys_fchmodat: path \"{}\" update_metadata failed: {:?}, returning {}",
+                        path_str,
+                        err,
+                        -err.code()
+                    );
+                    -err.code() as isize
+                }
+            }
         }
         Err(e) => {
             axlog::info!(
@@ -385,9 +402,22 @@ pub fn sys_fchownat(dirfd: i32, pathname: usize, uid: usize, gid: usize, flags: 
         flags
     );
 
-    // PulseOS 不强制文件所有权，仅验证路径可达性
     match resolve_location_at_ptr(dirfd, pathname, flags) {
-        Ok(_) => 0,
+        Ok(location) => {
+            let current_meta = match location.metadata() {
+                Ok(meta) => meta,
+                Err(e) => return -LinuxError::from(e.canonicalize()).code() as isize,
+            };
+            let new_uid = if (uid as u32) != u32::MAX { uid as u32 } else { current_meta.uid };
+            let new_gid = if (gid as u32) != u32::MAX { gid as u32 } else { current_meta.gid };
+            match location.update_metadata(axfs_ng_vfs::MetadataUpdate {
+                owner: Some((new_uid, new_gid)),
+                ..Default::default()
+            }) {
+                Ok(()) => 0,
+                Err(e) => -LinuxError::from(e.canonicalize()).code() as isize,
+            }
+        }
         Err(e) => -e.code() as isize,
     }
 }

@@ -8,7 +8,7 @@ use alloc::{
 };
 
 use axfs_ng_vfs::{
-    Location, Metadata, NodePermission, NodeType, VfsError, VfsResult,
+    Location, Metadata, NodePermission, NodeType, VfsError, VfsResult, MetadataUpdate,
     path::{Component, Components, Path, PathBuf},
 };
 use axio::{Read, Write};
@@ -43,6 +43,7 @@ pub struct ReadDirEntry {
 pub struct FsContext {
     root_dir: Location,
     current_dir: Location,
+    pub credentials: Option<(u32, u32)>,
 }
 
 impl FsContext {
@@ -50,6 +51,7 @@ impl FsContext {
         Self {
             root_dir: root_dir.clone(),
             current_dir: root_dir,
+            credentials: None,
         }
     }
 
@@ -72,7 +74,38 @@ impl FsContext {
         Ok(Self {
             root_dir: self.root_dir.clone(),
             current_dir,
+            credentials: self.credentials,
         })
+    }
+
+    pub fn check_traverse_permission(&self, dir: &Location) -> VfsResult<()> {
+        if let Some((uid, gid)) = self.credentials {
+            if uid == 0 {
+                return Ok(());
+            }
+            let meta = dir.metadata()?;
+            log::debug!(
+                "check_traverse_permission: credentials={:?}, dir={:?}, meta.uid={}, meta.gid={}, meta.mode={:#o}",
+                self.credentials,
+                dir,
+                meta.uid,
+                meta.gid,
+                meta.mode.bits()
+            );
+            let is_owner = uid == meta.uid;
+            let is_group = gid == meta.gid;
+            let has_x = if is_owner {
+                meta.mode.contains(NodePermission::OWNER_EXEC)
+            } else if is_group {
+                meta.mode.contains(NodePermission::GROUP_EXEC)
+            } else {
+                meta.mode.contains(NodePermission::OTHER_EXEC)
+            };
+            if !has_x {
+                return Err(VfsError::PermissionDenied);
+            }
+        }
+        Ok(())
     }
 
     /// Attempts to resolve a possible symlink, at the current location (this
@@ -112,12 +145,14 @@ impl FsContext {
             match comp {
                 Component::CurDir => {}
                 Component::ParentDir => {
+                    self.check_traverse_permission(&dir)?;
                     dir = dir.parent().unwrap_or_else(|| self.root_dir.clone());
                 }
                 Component::RootDir => {
                     dir = self.root_dir.clone();
                 }
                 Component::Normal(name) => {
+                    self.check_traverse_permission(&dir)?;
                     dir = self.lookup(&dir, name, follow_count)?;
                 }
             }
@@ -145,7 +180,10 @@ impl FsContext {
         let mut follow_count = 0;
         let (dir, name) = self.resolve_inner(path.as_ref(), &mut follow_count)?;
         match name {
-            Some(name) => self.lookup(&dir, name, &mut follow_count),
+            Some(name) => {
+                self.check_traverse_permission(&dir)?;
+                self.lookup(&dir, name, &mut follow_count)
+            }
             None => Ok(dir),
         }
     }
@@ -154,7 +192,10 @@ impl FsContext {
     pub fn resolve_no_follow(&self, path: impl AsRef<Path>) -> VfsResult<Location> {
         let (dir, name) = self.resolve_inner(path.as_ref(), &mut 0)?;
         match name {
-            Some(name) => dir.lookup_no_follow(name),
+            Some(name) => {
+                self.check_traverse_permission(&dir)?;
+                dir.lookup_no_follow(name)
+            }
             None => Ok(dir),
         }
     }
@@ -166,6 +207,7 @@ impl FsContext {
     /// the entry.
     pub fn resolve_parent<'a>(&self, path: &'a Path) -> VfsResult<(Location, Cow<'a, str>)> {
         let (dir, name) = self.resolve_inner(path, &mut 0)?;
+        self.check_traverse_permission(&dir)?;
         if let Some(name) = name {
             Ok((dir, Cow::Borrowed(name)))
         } else if let Some(parent) = dir.parent() {
@@ -184,6 +226,7 @@ impl FsContext {
     /// not present in the path.
     pub fn resolve_nonexistent<'a>(&self, path: &'a Path) -> VfsResult<(Location, &'a str)> {
         let (dir, name) = self.resolve_inner(path, &mut 0)?;
+        self.check_traverse_permission(&dir)?;
         if let Some(name) = name {
             Ok((dir, name))
         } else {
@@ -268,7 +311,14 @@ impl FsContext {
     /// Creates a new, empty directory at the provided path.
     pub fn create_dir(&self, path: impl AsRef<Path>, mode: NodePermission) -> VfsResult<Location> {
         let (dir, name) = self.resolve_nonexistent(path.as_ref())?;
-        dir.create(name, NodeType::Directory, mode)
+        let loc = dir.create(name, NodeType::Directory, mode)?;
+        if let Some((uid, gid)) = self.credentials {
+            let _ = loc.update_metadata(MetadataUpdate {
+                owner: Some((uid, gid)),
+                ..Default::default()
+            });
+        }
+        Ok(loc)
     }
 
     /// Creates a new hard link on the filesystem.
@@ -294,6 +344,12 @@ impl FsContext {
         }
         let symlink = dir.create(name, NodeType::Symlink, NodePermission::default())?;
         symlink.entry().as_file()?.set_symlink(target.as_ref())?;
+        if let Some((uid, gid)) = self.credentials {
+            let _ = symlink.update_metadata(MetadataUpdate {
+                owner: Some((uid, gid)),
+                ..Default::default()
+            });
+        }
         Ok(symlink)
     }
 

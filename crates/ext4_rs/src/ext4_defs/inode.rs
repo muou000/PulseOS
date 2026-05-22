@@ -67,6 +67,16 @@ bitflags! {
         const S_IEXEC = 0x0040;
         const S_ISUID = 0x0800;
         const S_ISGID = 0x0400;
+
+        const S_ISVTX = 0x0200; // Sticky bit
+
+        const S_IRGRP = 0x0020; // Group read
+        const S_IWGRP = 0x0010; // Group write
+        const S_IXGRP = 0x0008; // Group exec
+
+        const S_IROTH = 0x0004; // Other read
+        const S_IWOTH = 0x0002; // Other write
+        const S_IXOTH = 0x0001; // Other exec
     }
 }
 

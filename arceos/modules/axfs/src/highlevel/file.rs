@@ -266,7 +266,7 @@ impl OpenOptions {
                         create_new: self.create_new,
                         node_type: self.node_type,
                         permission: NodePermission::from_bits_truncate(self.mode as _),
-                        user: self.user,
+                        user: self.user.or(context.credentials),
                     },
                 )?;
                 if !self.no_follow {
