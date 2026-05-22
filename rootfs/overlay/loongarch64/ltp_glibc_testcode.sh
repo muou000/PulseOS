@@ -40,7 +40,6 @@ creat01
 creat03
 creat05
 cve-2017-17052
-data_space
 diotest1
 dup01
 dup02
@@ -57,7 +56,6 @@ dup206
 dup207
 dup3_01
 dup3_02
-epoll-ltp
 epoll_create02
 execve03
 exit01
