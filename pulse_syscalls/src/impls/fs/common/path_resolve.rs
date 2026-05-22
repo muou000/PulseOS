@@ -6,7 +6,11 @@ use linux_raw_sys::general::*;
 use crate::impls::utils::{read_user_cstring, with_process};
 
 pub(crate) fn context_for_dirfd(dirfd: i32) -> Result<FsContext, LinuxError> {
-    let base = with_process(|process| process.fs_context.lock().clone())?;
+    let base = with_process(|process| {
+        let mut fs = process.fs_context.lock().clone();
+        fs.credentials = Some((process.euid(), process.egid()));
+        fs
+    })?;
     if dirfd == AT_FDCWD as i32 {
         return Ok(base);
     }

@@ -984,7 +984,9 @@ impl Process {
     }
 
     pub fn sync_fs_context(&self) {
-        *axfs::FS_CONTEXT.lock() = self.fs_context.lock().clone();
+        let mut fs = self.fs_context.lock().clone();
+        fs.credentials = Some((self.euid(), self.egid()));
+        *axfs::FS_CONTEXT.lock() = fs;
     }
 
     pub fn save_fs_context(&self) {

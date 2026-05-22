@@ -53,7 +53,11 @@ fn flags_to_options(flags: usize, mode: usize) -> OpenOptions {
     if (flags & O_PATH as usize) != 0 {
         options.path(true);
     }
-    options.mode(mode as u32);
+    let umask = pulse_core::task::current_process()
+        .map(|process| process.umask())
+        .unwrap_or(0o022);
+    let mode = ((mode as u32) & !umask) & 0o777;
+    options.mode(mode);
     options
 }
 

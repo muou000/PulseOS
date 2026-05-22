@@ -66,6 +66,17 @@ pub(crate) fn check_faccess_permission(
         .metadata()
         .map_err(|e| LinuxError::from(e.canonicalize()))?;
 
+    axlog::debug!(
+        "check_faccess_permission: location={:?}, mode={:#o}, uid={}, gid={}, meta.mode={:#o}, meta.uid={}, meta.gid={}",
+        location,
+        mode,
+        uid,
+        gid,
+        meta.mode.bits(),
+        meta.uid,
+        meta.gid
+    );
+
     if uid == 0 {
         if (mode & X_OK as usize) == 0 {
             return Ok(());
