@@ -82,7 +82,11 @@ pub trait FdObject: Send + Sync {
     }
 
     fn flush(&self) -> LinuxResult {
-        Ok(())
+        Err(LinuxError::EINVAL)
+    }
+
+    fn sync_data(&self) -> LinuxResult {
+        Err(LinuxError::EINVAL)
     }
 }
 
@@ -331,7 +335,11 @@ impl FdObject for FileObject {
     }
 
     fn flush(&self) -> LinuxResult {
-        self.inner.sync(false).map_err(|_| LinuxError::EIO)
+        self.inner.sync(false).map_err(Into::into)
+    }
+
+    fn sync_data(&self) -> LinuxResult {
+        self.inner.sync(true).map_err(Into::into)
     }
 }
 
@@ -466,6 +474,14 @@ impl FdObject for DirObject {
 
     fn location(&self) -> Option<Location> {
         Some(self.inner.clone())
+    }
+
+    fn flush(&self) -> LinuxResult {
+        self.inner.sync(false).map_err(Into::into)
+    }
+
+    fn sync_data(&self) -> LinuxResult {
+        self.inner.sync(true).map_err(Into::into)
     }
 
     fn read_dirents64(&self, dirp: &mut [u8]) -> LinuxResult<usize> {
@@ -950,6 +966,10 @@ impl FdTable {
             .split_off(&0)
             .into_values()
             .collect::<alloc::vec::Vec<_>>()
+    }
+
+    pub fn clone_all_entries(&self) -> alloc::vec::Vec<FdEntry> {
+        self.entries.values().cloned().collect()
     }
 
     pub fn get(&self, fd: usize) -> Option<&FdEntry> {
