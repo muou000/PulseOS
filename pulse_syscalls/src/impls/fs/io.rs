@@ -178,6 +178,18 @@ pub fn sys_getdents64(fd: usize, dirp: usize, count: usize) -> isize {
     }
 }
 
+pub fn sys_fdatasync(fd: usize) -> isize {
+    axlog::debug!("sys_fdatasync: fd={}", fd);
+    let object = match get_fd_entry(fd) {
+        Ok(entry) => entry.object,
+        Err(e) => return -e.code() as isize,
+    };
+    match object.sync_data() {
+        Ok(()) => 0,
+        Err(e) => -e.code() as isize,
+    }
+}
+
 pub fn sys_writev(fd: usize, iov: usize, iovcnt: usize) -> isize {
     let object = match get_fd_entry(fd) {
         Ok(entry) => entry.object,
@@ -692,6 +704,19 @@ pub fn sys_fsync(fd: usize) -> isize {
 }
 
 pub fn sys_sync() -> isize {
-    axlog::warn!("sys_sync (stub)");
+    axlog::debug!("sys_sync");
+    let proc = match pulse_core::task::current_process() {
+        Ok(proc) => proc,
+        Err(_) => return 0,
+    };
+
+    let entries = {
+        let table = proc.fd_table.lock();
+        table.clone_all_entries()
+    };
+
+    for entry in entries {
+        let _ = entry.object.flush();
+    }
     0
 }

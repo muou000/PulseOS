@@ -84,6 +84,10 @@ pub trait FdObject: Send + Sync {
     fn flush(&self) -> LinuxResult {
         Ok(())
     }
+
+    fn sync_data(&self) -> LinuxResult {
+        Ok(())
+    }
 }
 
 #[derive(Clone)]
@@ -332,6 +336,10 @@ impl FdObject for FileObject {
 
     fn flush(&self) -> LinuxResult {
         self.inner.sync(false).map_err(|_| LinuxError::EIO)
+    }
+
+    fn sync_data(&self) -> LinuxResult {
+        self.inner.sync(true).map_err(|_| LinuxError::EIO)
     }
 }
 
@@ -950,6 +958,10 @@ impl FdTable {
             .split_off(&0)
             .into_values()
             .collect::<alloc::vec::Vec<_>>()
+    }
+
+    pub fn clone_all_entries(&self) -> alloc::vec::Vec<FdEntry> {
+        self.entries.values().cloned().collect()
     }
 
     pub fn get(&self, fd: usize) -> Option<&FdEntry> {
