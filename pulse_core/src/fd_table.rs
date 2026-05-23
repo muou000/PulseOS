@@ -335,11 +335,11 @@ impl FdObject for FileObject {
     }
 
     fn flush(&self) -> LinuxResult {
-        self.inner.sync(false).map_err(|_| LinuxError::EIO)
+        self.inner.sync(false).map_err(Into::into)
     }
 
     fn sync_data(&self) -> LinuxResult {
-        self.inner.sync(true).map_err(|_| LinuxError::EIO)
+        self.inner.sync(true).map_err(Into::into)
     }
 }
 
