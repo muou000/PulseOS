@@ -84,12 +84,20 @@ fn loongarch64_trap_handler(tf: &mut TrapFrame, from_user: bool) {
             handle_trap!(IRQ, irq_num);
         }
         _ => {
-            panic!(
-                "Unhandled trap {:?} @ {:#x}:\n{:#x?}",
-                estat.cause(),
-                tf.era,
-                tf
-            );
+            let handled = if from_user {
+                handle_trap!(ILLEGAL_INSTRUCTION, tf, tf.era, from_user)
+            } else {
+                false
+            };
+            if !handled {
+                panic!(
+                    "Unhandled trap {:?} (raw ESTAT: {:#x}) @ {:#x}:\n{:#x?}",
+                    estat.cause(),
+                    estat.raw(),
+                    tf.era,
+                    tf
+                );
+            }
         }
     }
 
