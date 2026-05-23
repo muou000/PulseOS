@@ -7,7 +7,7 @@ OVERLAY_DIR="${OVERLAY_DIR:-${ROOTFS_DIR}/overlay}"
 EXTRAS_DIR="${EXTRAS_DIR:-${ROOTFS_DIR}/extras}"
 OUTPUT_DIR="${OUTPUT_DIR:-.}"
 
-MIN_IMG_MIB="${MIN_IMG_MIB:-512}"
+MIN_IMG_MIB="${MIN_IMG_MIB:-128}"
 EXTRA_MARGIN_MIB="${EXTRA_MARGIN_MIB:-128}"
 SIZE_FACTOR_PERCENT="${SIZE_FACTOR_PERCENT:-180}"
 IMG_SIZE="${IMG_SIZE:-}"
@@ -31,7 +31,7 @@ Env:
   OVERLAY_DIR       overlay dir (default: rootfs/overlay)
   EXTRAS_DIR        extras archive dir (default: rootfs/extras)
   OUTPUT_DIR        output image dir (default: .)
-  MIN_IMG_MIB       minimum image size in MiB when auto-sized (default: 512)
+  MIN_IMG_MIB       minimum image size in MiB when auto-sized (default: 128)
   EXTRA_MARGIN_MIB  free-space margin in MiB when auto-sized (default: 128)
   SIZE_FACTOR_PERCENT
                     auto-size multiplier in percent (default: 180)
