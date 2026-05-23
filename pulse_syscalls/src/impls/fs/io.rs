@@ -704,19 +704,18 @@ pub fn sys_fsync(fd: usize) -> isize {
 }
 
 pub fn sys_sync() -> isize {
-    axlog::debug!("sys_sync");
-    let proc = match pulse_core::task::current_process() {
-        Ok(proc) => proc,
-        Err(_) => return 0,
-    };
+    axlog::debug!("sys_sync: global flush");
+    let procs = pulse_core::task::processes_snapshot();
 
-    let entries = {
-        let table = proc.fd_table.lock();
-        table.clone_all_entries()
-    };
+    for proc in procs {
+        let entries = {
+            let table = proc.fd_table.lock();
+            table.clone_all_entries()
+        };
 
-    for entry in entries {
-        let _ = entry.object.flush();
+        for entry in entries {
+            let _ = entry.object.flush();
+        }
     }
     0
 }
