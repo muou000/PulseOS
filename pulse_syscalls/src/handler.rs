@@ -324,6 +324,7 @@ fn syscall_dispatcher(
         Sysno::lseek => impls::sys_lseek(args[0], args[1], args[2]),
         Sysno::ftruncate => impls::sys_ftruncate(args[0], args[1]),
         Sysno::fsync => impls::sys_fsync(args[0]),
+        Sysno::fdatasync => impls::sys_fdatasync(args[0]),
         Sysno::sync => impls::sys_sync(),
         Sysno::execve => impls::sys_execve(tf, args[0], args[1], args[2]),
 
