@@ -707,6 +707,8 @@ pub fn sys_sync() -> isize {
     axlog::debug!("sys_sync: global flush");
     let procs = pulse_core::task::processes_snapshot();
 
+    let mut unique_objects = alloc::collections::BTreeMap::new();
+
     for proc in procs {
         let entries = {
             let table = proc.fd_table.lock();
@@ -714,8 +716,13 @@ pub fn sys_sync() -> isize {
         };
 
         for entry in entries {
-            let _ = entry.object.flush();
+            let ptr = alloc::sync::Arc::as_ptr(&entry.object) as *const () as usize;
+            unique_objects.insert(ptr, entry.object.clone());
         }
+    }
+
+    for object in unique_objects.into_values() {
+        let _ = object.flush();
     }
     0
 }
