@@ -9,7 +9,7 @@ sh ./cyclictest_testcode.sh
 sh ./libctest_testcode.sh
 sh ./libcbench_testcode.sh
 # sh ./iozone_testcode.sh
-# sh ./iperf_testcode.sh
+sh ./iperf_testcode.sh
 # sh ./lmbench_testcode.sh
 # sh ./netperf_testcode.sh
 
@@ -20,7 +20,7 @@ sh ./lua_testcode.sh
 sh ./cyclictest_testcode.sh
 sh ./libcbench_testcode.sh
 # sh ./iozone_testcode.sh
-# sh ./iperf_testcode.sh
+sh ./iperf_testcode.sh
 # sh ./lmbench_testcode.sh
 # sh ./ltp_testcode.sh
 # sh ./netperf_testcode.sh

@@ -90,6 +90,14 @@ pub fn current_process() -> LinuxResult<Arc<Process>> {
     current_thread().map(|thread| thread.process_arc())
 }
 
+pub fn current_have_signals() -> bool {
+    if let Ok(thread) = current_thread() {
+        thread.signal().has_deliverable_pending_signal()
+    } else {
+        false
+    }
+}
+
 pub fn with_current_thread<R>(f: impl FnOnce(&Thread) -> R) -> LinuxResult<R> {
     current_thread().map(|thread| f(thread.as_ref()))
 }

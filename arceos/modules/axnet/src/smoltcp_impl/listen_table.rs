@@ -1,13 +1,13 @@
 use alloc::{boxed::Box, collections::VecDeque};
 use core::ops::{Deref, DerefMut};
 
-use axerrno::{AxError, AxResult, ax_err};
+use axerrno::{ax_err, AxError, AxResult};
 use axsync::Mutex;
 use smoltcp::iface::{SocketHandle, SocketSet};
 use smoltcp::socket::tcp::{self, State};
 use smoltcp::wire::{IpAddress, IpEndpoint, IpListenEndpoint};
 
-use super::{LISTEN_QUEUE_SIZE, SOCKET_SET, SocketSetWrapper};
+use super::{SocketSetWrapper, LISTEN_QUEUE_SIZE, SOCKET_SET};
 
 const PORT_NUM: usize = 65536;
 
@@ -80,21 +80,26 @@ impl ListenTable {
 
     pub fn can_accept(&self, port: u16) -> AxResult<bool> {
         if let Some(entry) = self.tcp[port as usize].lock().deref() {
-            Ok(entry.syn_queue.iter().any(|&handle| is_connected(handle)))
+            let res = entry.syn_queue.iter().any(|&handle| is_connected(handle));
+            log::debug!("LISTEN_TABLE::can_accept: port={}, res={}", port, res);
+            Ok(res)
         } else {
             ax_err!(InvalidInput, "socket accept() failed: not listen")
         }
     }
 
     pub fn accept(&self, port: u16) -> AxResult<(SocketHandle, (IpEndpoint, IpEndpoint))> {
+        log::debug!("LISTEN_TABLE::accept: port={}", port);
         if let Some(entry) = self.tcp[port as usize].lock().deref_mut() {
-            let syn_queue = &mut entry.syn_queue;
-            let (idx, addr_tuple) = syn_queue
+            let syn_queue: &mut VecDeque<SocketHandle> = &mut entry.syn_queue;
+            log::debug!("LISTEN_TABLE::accept: syn_queue length={}", syn_queue.len());
+            for &h in syn_queue.iter() {
+                log::debug!("LISTEN_TABLE::accept: handle {} connected={}", h, is_connected(h));
+            }
+            let idx = syn_queue
                 .iter()
                 .enumerate()
-                .find_map(|(idx, &handle)| {
-                    is_connected(handle).then(|| (idx, get_addr_tuple(handle)))
-                })
+                .find_map(|(idx, &handle)| is_connected(handle).then(|| idx))
                 .ok_or(AxError::WouldBlock)?; // wait for connection
             if idx > 0 {
                 warn!(
@@ -104,7 +109,14 @@ impl ListenTable {
                 );
             }
             let handle = syn_queue.swap_remove_front(idx).unwrap();
-            Ok((handle, addr_tuple))
+            // If the connection is reset, return ConnectionReset error
+            // Otherwise, return the handle and the address tuple
+            if is_closed(handle) {
+                ax_err!(ConnectionReset, "socket accept() failed: connection reset")
+            } else {
+                log::debug!("LISTEN_TABLE::accept: successfully returning handle {}", handle);
+                Ok((handle, get_addr_tuple(handle)))
+            }
         } else {
             ax_err!(InvalidInput, "socket accept() failed: not listen")
         }
@@ -116,13 +128,14 @@ impl ListenTable {
         dst: IpEndpoint,
         sockets: &mut SocketSet<'_>,
     ) {
+        log::debug!("incoming_tcp_packet: src={}, dst={}", src, dst);
         if let Some(entry) = self.tcp[dst.port as usize].lock().deref_mut() {
+            log::debug!("incoming_tcp_packet: found entry for port {}", dst.port);
             if !entry.can_accept(dst.addr) {
-                // not listening on this address
+                log::warn!("incoming_tcp_packet: cannot accept address {}", dst.addr);
                 return;
             }
             if entry.syn_queue.len() >= LISTEN_QUEUE_SIZE {
-                // SYN queue is full, drop the packet
                 warn!("SYN queue overflow!");
                 return;
             }
@@ -134,7 +147,12 @@ impl ListenTable {
                     handle, src, entry.listen_endpoint
                 );
                 entry.syn_queue.push_back(handle);
+                log::debug!("incoming_tcp_packet: added new socket handle {} to syn_queue", handle);
+            } else {
+                log::error!("incoming_tcp_packet: failed to listen on new socket");
             }
+        } else {
+            log::warn!("incoming_tcp_packet: no listening socket on port {}", dst.port);
         }
     }
 }
@@ -143,6 +161,11 @@ fn is_connected(handle: SocketHandle) -> bool {
     SOCKET_SET.with_socket::<tcp::Socket, _, _>(handle, |socket| {
         !matches!(socket.state(), State::Listen | State::SynReceived)
     })
+}
+
+fn is_closed(handle: SocketHandle) -> bool {
+    SOCKET_SET
+        .with_socket::<tcp::Socket, _, _>(handle, |socket| matches!(socket.state(), State::Closed))
 }
 
 fn get_addr_tuple(handle: SocketHandle) -> (IpEndpoint, IpEndpoint) {

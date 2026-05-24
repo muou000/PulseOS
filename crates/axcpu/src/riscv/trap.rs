@@ -54,6 +54,20 @@ fn riscv_trap_handler(tf: &mut TrapFrame, from_user: bool) {
             Trap::Exception(E::InstructionPageFault) => {
                 handle_page_fault(tf, PageFaultFlags::EXECUTE, from_user)
             }
+            #[cfg(feature = "uspace")]
+            Trap::Exception(E::IllegalInstruction) => {
+                if !handle_trap!(ILLEGAL_INSTRUCTION, tf, stval::read(), from_user) {
+                    panic!("Unhandled Illegal Instruction @ {:#x}", tf.sepc);
+                }
+            }
+            #[cfg(feature = "uspace")]
+            Trap::Exception(E::InstructionMisaligned)
+            | Trap::Exception(E::LoadMisaligned)
+            | Trap::Exception(E::StoreMisaligned) => {
+                if !handle_trap!(ADDRESS_ERROR, tf, stval::read(), from_user) {
+                    panic!("Unhandled Address Error @ {:#x}", tf.sepc);
+                }
+            }
             Trap::Exception(E::Breakpoint) => handle_breakpoint(&mut tf.sepc),
             Trap::Interrupt(_) => {
                 handle_trap!(IRQ, scause.bits());

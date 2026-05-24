@@ -9,7 +9,7 @@ homepage.workspace = true
 
 [features]
 default = ["ext4"]
-use-ramdisk = []           # TODO: init ramdisk
+use-ramdisk = []       # TODO: init ramdisk
 fat = ["dep:fatfs"]
 ext4 = ["dep:ext4_rs"]
 times = []

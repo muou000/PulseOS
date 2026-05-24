@@ -3,16 +3,25 @@
 use axhal::{
     context::TrapFrame,
     paging::MappingFlags,
-    trap::{PAGE_FAULT, USER_RETURN, register_trap_handler},
+    trap::{ADDRESS_ERROR, ILLEGAL_INSTRUCTION, PAGE_FAULT, USER_RETURN, register_trap_handler},
 };
 use memory_addr::VirtAddr;
 
-use axhal::trap::{ADDRESS_ERROR, ILLEGAL_INSTRUCTION};
-
 #[register_trap_handler(ILLEGAL_INSTRUCTION)]
-fn handle_illegal_instruction(_tf: &mut TrapFrame, _vaddr: usize, is_user: bool) -> bool {
+fn handle_illegal_instruction(tf: &mut TrapFrame, _vaddr: usize, is_user: bool) -> bool {
     if is_user {
         if let Ok(thread) = crate::task::current_thread() {
+            #[cfg(target_arch = "riscv64")]
+            let pc = tf.sepc;
+            #[cfg(target_arch = "loongarch64")]
+            let pc = tf.era;
+
+            axlog::error!(
+                "Illegal instruction! pid={} exe={:?} ip={:#x}",
+                thread.process().pid(),
+                thread.process().exec_path(),
+                pc
+            );
             crate::task::queue_signal_to_thread(thread.as_ref(), 4); // SIGILL
             return true;
         }
@@ -21,9 +30,21 @@ fn handle_illegal_instruction(_tf: &mut TrapFrame, _vaddr: usize, is_user: bool)
 }
 
 #[register_trap_handler(ADDRESS_ERROR)]
-fn handle_address_error(_tf: &mut TrapFrame, _vaddr: usize, is_user: bool) -> bool {
+fn handle_address_error(tf: &mut TrapFrame, vaddr: usize, is_user: bool) -> bool {
     if is_user {
         if let Ok(thread) = crate::task::current_thread() {
+            #[cfg(target_arch = "riscv64")]
+            let pc = tf.sepc;
+            #[cfg(target_arch = "loongarch64")]
+            let pc = tf.era;
+
+            axlog::error!(
+                "Address error! pid={} exe={:?} ip={:#x} vaddr={:#x}",
+                thread.process().pid(),
+                thread.process().exec_path(),
+                pc,
+                vaddr
+            );
             // Usually SIGSEGV, sometimes SIGBUS. We use SIGSEGV as default.
             crate::task::queue_signal_to_thread(thread.as_ref(), 11); // SIGSEGV
             return true;
@@ -38,10 +59,21 @@ fn deliver_pending_signal(tf: &mut TrapFrame) {
     };
     let process = thread.process();
     if process.group_exiting() {
+        axlog::debug!(
+            "Process group exiting: pid={} exit_code={}",
+            process.pid(),
+            process.group_exit_code()
+        );
         thread.exit_current(process.group_exit_code());
     }
     if let Some(delivery) = crate::task::check_signals_and_deliver(thread.as_ref(), tf) {
         use crate::task::{DefaultSignalAction, SignalAction};
+        axlog::debug!(
+            "Delivering signal: pid={} sig={} action={:?}",
+            process.pid(),
+            delivery.sig,
+            delivery.action
+        );
         match delivery.action {
             SignalAction::Default(DefaultSignalAction::Terminate) => {
                 process.set_exit_signal(delivery.sig as i32, false);

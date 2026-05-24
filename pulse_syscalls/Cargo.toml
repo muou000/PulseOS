@@ -18,6 +18,8 @@ axhal.workspace = true
 axlog.workspace = true
 axerrno.workspace = true
 axtask = { workspace = true, features = ["multitask"] }
+axconfig.workspace = true
+axnet.workspace = true
 axio.workspace = true
 axfs.workspace = true
 axfs-ng-vfs.workspace = true
@@ -27,9 +29,11 @@ bitflags.workspace = true
 spin.workspace = true
 linux-raw-sys = { workspace = true, features = ["system"] }
 pulse_core = { path = "../pulse_core" }
+scope-local = "0.1"
 rand_core.workspace = true
 rand_pcg.workspace = true
 chrono.workspace = true
+
 
 [target.'cfg(target_arch = "riscv64")'.dependencies]
 syscalls = { workspace = true, features = ["riscv64"] }

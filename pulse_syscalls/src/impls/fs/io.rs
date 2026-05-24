@@ -6,7 +6,7 @@ use core::{
 use axerrno::{AxError, LinuxError};
 use axio::SeekFrom;
 use linux_raw_sys::{
-    general::{O_CLOEXEC, O_NONBLOCK, POLLERR, POLLIN, POLLNVAL, POLLOUT, pollfd},
+    general::{O_CLOEXEC, O_NONBLOCK, POLLERR, POLLHUP, POLLIN, POLLNVAL, POLLOUT, pollfd},
     net::{AF_UNIX, SOCK_STREAM},
 };
 use pulse_core::{
@@ -413,9 +413,7 @@ pub fn sys_ppoll(
             let entry = match get_fd_entry(fd) {
                 Ok(entry) => entry,
                 Err(_) => {
-                    pfd.revents = POLLNVAL as i16;
-                    ready += 1;
-                    continue;
+                    return -LinuxError::EBADF.code() as isize;
                 }
             };
             match entry.object.poll() {
@@ -629,39 +627,6 @@ pub fn sys_pipe2(fds: usize, flags: usize) -> isize {
     0
 }
 
-pub fn sys_socketpair(domain: u32, sock_type: u32, protocol: u32, sv: usize) -> isize {
-    if sv == 0 {
-        return -LinuxError::EFAULT.code() as isize;
-    }
-
-    if domain != AF_UNIX {
-        return -LinuxError::EAFNOSUPPORT.code() as isize;
-    }
-    if protocol != 0 {
-        return -LinuxError::EPROTONOSUPPORT.code() as isize;
-    }
-
-    let ty = sock_type & 0xf;
-    if ty != SOCK_STREAM {
-        return -LinuxError::EPROTOTYPE.code() as isize;
-    }
-
-    let allowed_flags = O_NONBLOCK | O_CLOEXEC;
-    let extra_flags = sock_type & !0xf;
-    if (extra_flags & !allowed_flags) != 0 {
-        return -LinuxError::EINVAL.code() as isize;
-    }
-
-    if !SOCKETPAIR_COMPAT_WARNED.swap(true, Ordering::AcqRel) {
-        axlog::warn!(
-            "sys_socketpair: temporary compatibility stub only; returning EOPNOTSUPP for \
-             AF_UNIX/SOCK_STREAM while the full bidirectional semantics are missing"
-        );
-    }
-
-    -LinuxError::EOPNOTSUPP.code() as isize
-}
-
 pub fn sys_lseek(fd: usize, offset: usize, whence: usize) -> isize {
     axlog::debug!(
         "sys_lseek: fd={}, offset={:#x}, whence={}",
@@ -725,4 +690,287 @@ pub fn sys_sync() -> isize {
         let _ = object.flush();
     }
     0
+}
+
+// Complete pselect6 implementation.
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct FdSet {
+    fds_bits: [u64; 16],
+}
+
+impl FdSet {
+    fn is_set(&self, fd: usize) -> bool {
+        if fd >= 1024 {
+            return false;
+        }
+        let idx = fd / 64;
+        let bit = fd % 64;
+        (self.fds_bits[idx] & (1 << bit)) != 0
+    }
+
+    fn set(&mut self, fd: usize) {
+        if fd >= 1024 {
+            return;
+        }
+        let idx = fd / 64;
+        let bit = fd % 64;
+        self.fds_bits[idx] |= 1 << bit;
+    }
+
+    fn zero() -> Self {
+        Self { fds_bits: [0; 16] }
+    }
+}
+
+pub fn sys_pselect6(
+    nfds: usize,
+    readfds: usize,
+    writefds: usize,
+    exceptfds: usize,
+    timeout: usize,
+    _sigmask: usize,
+) -> isize {
+    axlog::debug!(
+        "sys_pselect6 <= nfds: {nfds}, readfds: {readfds:#x}, writefds: {writefds:#x}, exceptfds: \
+         {exceptfds:#x}, timeout: {timeout:#x}"
+    );
+
+    let process = match pulse_core::task::current_process() {
+        Ok(p) => p,
+        Err(e) => return -e.code() as isize,
+    };
+
+    let mut in_read = FdSet::zero();
+    let mut in_write = FdSet::zero();
+    let mut in_except = FdSet::zero();
+
+    let has_read = readfds != 0;
+    let has_write = writefds != 0;
+    let has_except = exceptfds != 0;
+
+    if has_read {
+        match uaccess::read_user_plain::<FdSet>(process.as_ref(), readfds) {
+            Ok(fds) => in_read = fds,
+            Err(_) => return -LinuxError::EFAULT.code() as isize,
+        }
+    }
+    if has_write {
+        match uaccess::read_user_plain::<FdSet>(process.as_ref(), writefds) {
+            Ok(fds) => in_write = fds,
+            Err(_) => return -LinuxError::EFAULT.code() as isize,
+        }
+    }
+    if has_except {
+        match uaccess::read_user_plain::<FdSet>(process.as_ref(), exceptfds) {
+            Ok(fds) => in_except = fds,
+            Err(_) => return -LinuxError::EFAULT.code() as isize,
+        }
+    }
+
+    let mut read_fds = alloc::vec::Vec::new();
+    let mut write_fds = alloc::vec::Vec::new();
+    let mut except_fds = alloc::vec::Vec::new();
+    for fd in 0..nfds.min(1024) {
+        if has_read && in_read.is_set(fd) {
+            read_fds.push(fd);
+        }
+        if has_write && in_write.is_set(fd) {
+            write_fds.push(fd);
+        }
+        if has_except && in_except.is_set(fd) {
+            except_fds.push(fd);
+        }
+    }
+    axlog::debug!(
+        "sys_pselect6 => read_fds: {:?}, write_fds: {:?}, except_fds: {:?}",
+        read_fds,
+        write_fds,
+        except_fds
+    );
+
+    let timeout_dur = if timeout != 0 {
+        let ts = match read_user_timespec(timeout) {
+            Ok(ts) => ts,
+            Err(e) => return -e.code() as isize,
+        };
+        if ts.tv_sec < 0 || !(0..1_000_000_000).contains(&ts.tv_nsec) {
+            return -LinuxError::EINVAL.code() as isize;
+        }
+        Some(Duration::new(ts.tv_sec as u64, ts.tv_nsec as u32))
+    } else {
+        None
+    };
+
+    let mut pollfds = alloc::vec::Vec::new();
+    for fd in 0..nfds.min(1024) {
+        let mut events = 0i16;
+        if has_read && in_read.is_set(fd) {
+            events |= POLLIN as i16;
+        }
+        if has_write && in_write.is_set(fd) {
+            events |= POLLOUT as i16;
+        }
+        if has_except && in_except.is_set(fd) {
+            events |= linux_raw_sys::general::POLLPRI as i16;
+        }
+        if events != 0 {
+            pollfds.push(pollfd {
+                fd: fd as i32,
+                events,
+                revents: 0,
+            });
+        }
+    }
+
+    axlog::debug!(
+        "sys_pselect6 => pollfds collected: {:?}",
+        pollfds
+            .iter()
+            .map(|p| (p.fd, p.events))
+            .collect::<alloc::vec::Vec<_>>()
+    );
+
+    if pollfds.is_empty() {
+        if let Some(timeout_dur) = timeout_dur {
+            if timeout_dur > Duration::ZERO {
+                axtask::sleep(timeout_dur);
+            }
+        }
+        axlog::debug!("sys_pselect6 => empty pollfds, returning 0");
+        return 0;
+    }
+
+    let deadline = timeout_dur.map(|timeout_dur| axhal::time::monotonic_time() + timeout_dur);
+
+    const POLL_ACTIVE_YIELD_ROUNDS: usize = 64;
+    const POLL_SLEEP_QUANTUM: Duration = Duration::from_micros(100);
+    let mut idle_rounds: usize = 0;
+
+    let mut ready = 0usize;
+    loop {
+        ready = 0;
+        for pfd in pollfds.iter_mut() {
+            pfd.revents = 0;
+            if pfd.fd < 0 {
+                continue;
+            }
+            let fd = pfd.fd as usize;
+            let entry = match get_fd_entry(fd) {
+                Ok(entry) => entry,
+                Err(_) => {
+                    return -LinuxError::EBADF.code() as isize;
+                }
+            };
+            match entry.object.poll() {
+                Ok(state) => {
+                    pfd.revents = requested_poll_revents(pfd.events, state);
+                    if pfd.revents != 0 {
+                        ready += 1;
+                    }
+                }
+                Err(_) => {
+                    pfd.revents = POLLERR as i16;
+                    ready += 1;
+                }
+            }
+        }
+
+        if ready > 0 {
+            axlog::debug!(
+                "sys_pselect6 => ready fds detected: {:?}",
+                pollfds
+                    .iter()
+                    .filter(|p| p.revents != 0)
+                    .map(|p| (p.fd, p.revents))
+                    .collect::<alloc::vec::Vec<_>>()
+            );
+            break;
+        }
+
+        if let Ok(thread) = pulse_core::task::current_thread() {
+            if thread.has_pending_signal() {
+                axlog::debug!("sys_pselect6 => interrupted by signal");
+                return -LinuxError::EINTR.code() as isize;
+            }
+        }
+
+        if let Some(deadline) = deadline {
+            let now = axhal::time::monotonic_time();
+            if now >= deadline {
+                axlog::debug!("sys_pselect6 => deadline reached");
+                break;
+            }
+            idle_rounds = idle_rounds.saturating_add(1);
+            if idle_rounds <= POLL_ACTIVE_YIELD_ROUNDS {
+                axtask::yield_now();
+            } else {
+                let sleep_dur = core::cmp::min(deadline - now, POLL_SLEEP_QUANTUM);
+                if sleep_dur > Duration::ZERO {
+                    axtask::sleep(sleep_dur);
+                } else {
+                    axtask::yield_now();
+                }
+            }
+        } else {
+            idle_rounds = idle_rounds.saturating_add(1);
+            if idle_rounds <= POLL_ACTIVE_YIELD_ROUNDS {
+                axtask::yield_now();
+            } else {
+                axtask::sleep(POLL_SLEEP_QUANTUM);
+            }
+        }
+    }
+
+    let mut ready_count = 0isize;
+    let mut out_read = FdSet::zero();
+    let mut out_write = FdSet::zero();
+    let mut out_except = FdSet::zero();
+
+    for pfd in &pollfds {
+        let fd = pfd.fd as usize;
+        let revents = pfd.revents;
+        if (revents & (POLLIN as i16 | POLLERR as i16 | POLLHUP as i16 | POLLNVAL as i16) != 0)
+            && in_read.is_set(fd)
+        {
+            out_read.set(fd);
+            ready_count += 1;
+        }
+        if (revents & (POLLOUT as i16 | POLLERR as i16 | POLLHUP as i16 | POLLNVAL as i16) != 0)
+            && in_write.is_set(fd)
+        {
+            out_write.set(fd);
+            ready_count += 1;
+        }
+        if (revents
+            & (linux_raw_sys::general::POLLPRI as i16
+                | POLLERR as i16
+                | POLLHUP as i16
+                | POLLNVAL as i16)
+            != 0)
+            && in_except.is_set(fd)
+        {
+            out_except.set(fd);
+            ready_count += 1;
+        }
+    }
+
+    if has_read {
+        if let Err(_) = uaccess::write_user_plain(process.as_ref(), readfds, &out_read) {
+            return -LinuxError::EFAULT.code() as isize;
+        }
+    }
+    if has_write {
+        if let Err(_) = uaccess::write_user_plain(process.as_ref(), writefds, &out_write) {
+            return -LinuxError::EFAULT.code() as isize;
+        }
+    }
+    if has_except {
+        if let Err(_) = uaccess::write_user_plain(process.as_ref(), exceptfds, &out_except) {
+            return -LinuxError::EFAULT.code() as isize;
+        }
+    }
+
+    axlog::debug!("sys_pselect6 => returning ready: {ready_count}");
+    ready_count
 }

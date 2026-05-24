@@ -256,7 +256,7 @@ fn build_auxv(
     #[cfg(target_arch = "riscv64")]
     auxv.push(AuxEntry::new(
         AuxType::HWCAP,
-        (1 << 0) | (1 << 2) | (1 << 3) | (1 << 4) | (1 << 5) | (1 << 6),
+        (1 << 0) | (1 << 2) | (1 << 3) | (1 << 5) | (1 << 6) | (1 << 8) | (1 << 12),
     ));
     Ok(auxv)
 }

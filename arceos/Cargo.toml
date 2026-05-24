@@ -10,7 +10,6 @@ members = [
     "modules/axhal",
     "modules/axlog",
     "modules/axmm",
-    "modules/axdma",
     "modules/axnet",
     "modules/axns",
     "modules/axruntime",
@@ -80,3 +79,16 @@ rand_pcg = { version = "0.10.2", default-features = false }
 
 [profile.release]
 lto = true
+
+[patch.crates-io]
+memory_set = { path = "../crates/memory_set" }
+memory_addr = { path = "../crates/memory_addr" }
+axfs-ng-vfs = { path = "../crates/axfs-ng-vfs" }
+ext4_rs = { path = "../crates/ext4_rs" }
+axcpu = { path = "../crates/axcpu" }
+axplat-loongarch64-qemu-virt = { path = "../crates/axplat-loongarch64-qemu-virt" }
+axplat-riscv64-qemu-virt = { path = "../crates/axplat-riscv64-qemu-virt" }
+axio = { path = "../crates/axio" }
+
+[patch."https://github.com/arceos-org/allocator.git"]
+allocator = { path = "../crates/allocator" }

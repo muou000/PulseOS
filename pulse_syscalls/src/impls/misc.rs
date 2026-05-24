@@ -165,6 +165,77 @@ pub fn sys_gettid() -> isize {
     }
 }
 
+#[repr(C)]
+#[derive(Default, Copy, Clone)]
+struct Timeval {
+    tv_sec: i64,
+    tv_usec: i64,
+}
+
+#[repr(C)]
+#[derive(Default, Copy, Clone)]
+struct Rusage {
+    ru_utime: Timeval,
+    ru_stime: Timeval,
+    ru_maxrss: i64,
+    ru_ixrss: i64,
+    ru_idrss: i64,
+    ru_isrss: i64,
+    ru_minflt: i64,
+    ru_majflt: i64,
+    ru_nswap: i64,
+    ru_inblock: i64,
+    ru_oublock: i64,
+    ru_msgsnd: i64,
+    ru_msgrcv: i64,
+    ru_nsignals: i64,
+    ru_nvcsw: i64,
+    ru_nivcsw: i64,
+}
+
+const RUSAGE_SELF: i32 = 0;
+const RUSAGE_CHILDREN: i32 = -1;
+const RUSAGE_THREAD: i32 = 1;
+
+pub fn sys_getrusage(who: i32, addr: usize) -> isize {
+    axlog::debug!("sys_getrusage: who={}, addr={:#x}", who, addr);
+    if who != RUSAGE_SELF && who != RUSAGE_CHILDREN && who != RUSAGE_THREAD {
+        return -LinuxError::EINVAL.code() as isize;
+    }
+
+    let process = match pulse_core::task::current_process() {
+        Ok(process) => process,
+        Err(e) => return -e.code() as isize,
+    };
+
+    let (utime_ns, stime_ns) = match who {
+        RUSAGE_SELF | RUSAGE_THREAD => {
+            let now_ns = axhal::time::monotonic_time_nanos() as u64;
+            process.snapshot_cpu_time_ns(now_ns)
+        }
+        RUSAGE_CHILDREN => {
+            process.snapshot_children_cpu_time_ns()
+        }
+        _ => unreachable!(),
+    };
+
+    let ns_to_timeval = |ns: u64| -> Timeval {
+        Timeval {
+            tv_sec: (ns / 1_000_000_000) as i64,
+            tv_usec: ((ns % 1_000_000_000) / 1000) as i64,
+        }
+    };
+
+    let mut rusage = Rusage::default();
+    rusage.ru_utime = ns_to_timeval(utime_ns);
+    rusage.ru_stime = ns_to_timeval(stime_ns);
+
+    match uaccess::write_user_plain(process.as_ref(), addr, &rusage) {
+        Ok(()) => 0,
+        Err(_) => -LinuxError::EFAULT.code() as isize,
+    }
+}
+
 pub fn sys_prlimit64(pid: i32, resource: usize, new_limit: usize, old_limit: usize) -> isize {
     let process = match pulse_core::task::current_process() {
         Ok(process) => process,

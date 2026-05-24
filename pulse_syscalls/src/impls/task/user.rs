@@ -163,3 +163,8 @@ pub fn sys_setregid(raw_rgid: usize, raw_egid: usize) -> isize {
     );
     0
 }
+
+pub fn sys_setsid() -> isize {
+    axlog::warn!("sys_setsid (stub): returning success");
+    1
+}
