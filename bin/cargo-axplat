@@ -40,7 +40,10 @@ if [[ -z "$package" ]]; then
     exit 2
 fi
 
-config_path="$REPO_ROOT/vendor/$package/axconfig.toml"
+config_path="$REPO_ROOT/crates/$package/axconfig.toml"
+if [[ ! -f "$config_path" ]]; then
+    config_path="$REPO_ROOT/vendor/$package/axconfig.toml"
+fi
 if [[ ! -f "$config_path" ]]; then
     echo "offline cargo-axplat could not find $config_path" >&2
     exit 1

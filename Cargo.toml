@@ -20,17 +20,18 @@ axfeat = { path = "arceos/api/axfeat", features = [
     "fs",
     "rtc",
     "paging",
-    "irq"
-    ] }
+    "irq",
+    "net",
+] }
 
 axconfig = { path = "arceos/modules/axconfig" }
 axhal = { path = "arceos/modules/axhal", features = ["uspace", "fp-simd"] }
 axlog = { path = "arceos/modules/axlog" }
 axruntime = { path = "arceos/modules/axruntime" }
-
+axnet = { path = "arceos/modules/axnet", features = ["monolithic"] }
 axalloc = { path = "arceos/modules/axalloc" }
 axtask = { path = "arceos/modules/axtask" }
-axfs = { path = "arceos/modules/axfs", features = ["times"]}
+axfs = { path = "arceos/modules/axfs", features = ["times"] }
 axmm = { path = "arceos/modules/axmm" }
 axerrno = "0.2"
 
@@ -38,8 +39,14 @@ axplat-riscv64-qemu-virt = "0.3.0"
 axplat-loongarch64-qemu-virt = "0.3.0"
 
 syscalls = { version = "0.8", default-features = false }
-linux-raw-sys = { version = "0.12", default-features = false, features = ["no_std", "general", "net"] }
-axio = { version = "0.3.0-pre.1", default-features = false, features = ["alloc"] }
+linux-raw-sys = { version = "0.12", default-features = false, features = [
+    "no_std",
+    "general",
+    "net",
+] }
+axio = { version = "0.3.0-pre.1", default-features = false, features = [
+    "alloc",
+] }
 axfs-ng-vfs = "0.1.1"
 linkme = "0.3"
 memory_addr = "0.4"
@@ -61,7 +68,7 @@ memory_set = { path = "crates/memory_set" }
 memory_addr = { path = "crates/memory_addr" }
 axfs-ng-vfs = { path = "crates/axfs-ng-vfs" }
 ext4_rs = { path = "crates/ext4_rs" }
-axcpu = { path = "crates/axcpu"}
+axcpu = { path = "crates/axcpu" }
 axplat-loongarch64-qemu-virt = { path = "crates/axplat-loongarch64-qemu-virt" }
 axplat-riscv64-qemu-virt = { path = "crates/axplat-riscv64-qemu-virt" }
 axio = { path = "crates/axio" }

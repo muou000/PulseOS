@@ -299,10 +299,32 @@ fn syscall_dispatcher(
         Sysno::dup => impls::sys_dup(args[0]),
         Sysno::dup3 => impls::sys_dup3(args[0], args[1], args[2]),
         Sysno::pipe2 => impls::sys_pipe2(args[0], args[1]),
-        Sysno::socketpair => {
-            impls::sys_socketpair(args[0] as u32, args[1] as u32, args[2] as u32, args[3])
-        }
+        Sysno::socket => impls::sys_socket(args[0], args[1], args[2]),
+        Sysno::socketpair => impls::sys_socketpair(args[0], args[1], args[2], args[3]),
+        Sysno::bind => impls::sys_bind(args[0], args[1], args[2]),
+        Sysno::connect => impls::sys_connect(args[0], args[1], args[2]),
+        Sysno::listen => impls::sys_listen(args[0], args[1]),
+        Sysno::accept => impls::sys_accept(args[0], args[1], args[2]),
+        Sysno::accept4 => impls::sys_accept4(args[0], args[1], args[2], args[3]),
+        Sysno::shutdown => impls::sys_shutdown(args[0], args[1]),
+        Sysno::sendto => impls::sys_sendto(args[0], args[1], args[2], args[3], args[4], args[5]),
+        Sysno::recvfrom => impls::sys_recvfrom(args[0], args[1], args[2], args[3], args[4], args[5]),
+        Sysno::sendmsg => impls::sys_sendmsg(args[0], args[1], args[2]),
+        Sysno::recvmsg => impls::sys_recvmsg(args[0], args[1], args[2]),
+        Sysno::getsockname => impls::sys_getsockname(args[0], args[1], args[2]),
+        Sysno::getpeername => impls::sys_getpeername(args[0], args[1], args[2]),
+        Sysno::setsockopt => impls::sys_setsockopt(args[0], args[1], args[2], args[3], args[4]),
+        Sysno::getsockopt => impls::sys_getsockopt(args[0], args[1], args[2], args[3], args[4]),
         Sysno::ppoll => impls::sys_ppoll(args[0], args[1], args[2], args[3], args[4]),
+        Sysno::getrusage => impls::sys_getrusage(args[0] as i32, args[1]),
+        Sysno::pselect6 => impls::sys_pselect6(
+            args[0],
+            args[1],
+            args[2],
+            args[3],
+            args[4],
+            args[5],
+        ),
         Sysno::getcwd => impls::sys_getcwd(args[0], args[1]),
         Sysno::chdir => impls::sys_chdir(args[0]),
         Sysno::unlinkat => impls::sys_unlinkat(args[0] as i32, args[1], args[2]),
@@ -327,6 +349,7 @@ fn syscall_dispatcher(
         Sysno::fdatasync => impls::sys_fdatasync(args[0]),
         Sysno::sync => impls::sys_sync(),
         Sysno::execve => impls::sys_execve(tf, args[0], args[1], args[2]),
+        Sysno::setsid => impls::sys_setsid(),
 
         // System V shared memory
         Sysno::shmget => impls::sys_shmget(args[0] as i32, args[1], args[2] as i32),
