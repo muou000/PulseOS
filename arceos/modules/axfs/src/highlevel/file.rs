@@ -216,7 +216,7 @@ impl OpenOptions {
             }
             loc.check_is_dir()?;
         }
-        if self.truncate {
+        if self.truncate && loc.metadata()?.node_type == NodeType::RegularFile {
             loc.entry().as_file()?.set_len(0)?;
         }
 
