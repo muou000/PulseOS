@@ -20,12 +20,59 @@ use spin::Mutex;
 const ROOT_INO: u64 = 1;
 const MEMINFO_INO: u64 = 2;
 const MOUNTS_INO: u64 = 3;
-const NEXT_DYNAMIC_INO: u64 = MOUNTS_INO + 1;
+const SELF_INO: u64 = 4;
+const NEXT_DYNAMIC_INO: u64 = SELF_INO + 1;
+
+const PID_INODE_START: u64 = 0x10_0000_0000;
+const PID_INODE_SHIFT: u32 = 16;
+
+const SUB_INO_DIR: u64 = 0;
+const SUB_INO_CMDLINE: u64 = 1;
+const SUB_INO_STATUS: u64 = 2;
+const SUB_INO_EXE: u64 = 3;
+const SUB_INO_COMM: u64 = 4;
+const SUB_INO_FD_DIR: u64 = 5;
+const SUB_INO_FD_BASE: u64 = 0x40;
+
+pub trait ProcfsProcessProvider: Send + Sync {
+    fn current_pid(&self) -> Option<u64>;
+    fn process_exists(&self, pid: u64) -> bool;
+    fn process_pids(&self) -> Vec<u64>;
+    fn cmdline(&self, pid: u64) -> Option<String>;
+    fn comm(&self, pid: u64) -> Option<String>;
+    fn status(&self, pid: u64) -> Option<String>;
+    fn exe(&self, pid: u64) -> Option<String>;
+    fn process_fds(&self, pid: u64) -> Option<Vec<u32>>;
+    fn fd_path(&self, pid: u64, fd: u32) -> Option<String>;
+}
+
+static PROCESS_PROVIDER: spin::Once<Arc<dyn ProcfsProcessProvider>> = spin::Once::new();
+
+pub fn register_process_provider(provider: Arc<dyn ProcfsProcessProvider>) {
+    PROCESS_PROVIDER.call_once(|| provider);
+}
+
+fn decode_pid_inode(ino: u64) -> Option<(u64, u64)> {
+    if ino >= PID_INODE_START {
+        let offset = ino - PID_INODE_START;
+        let pid = offset >> PID_INODE_SHIFT;
+        let sub = offset & ((1 << PID_INODE_SHIFT) - 1);
+        Some((pid, sub))
+    } else {
+        None
+    }
+}
 
 #[derive(Clone, Copy)]
 enum ProcLiveFileKind {
     Meminfo,
     Mounts,
+    SelfSymlink,
+    PidCmdline(u64),
+    PidStatus(u64),
+    PidExe(u64),
+    PidComm(u64),
+    PidFdSymlink(u64, u32),
 }
 
 #[derive(PartialEq, Eq, Hash, Clone)]
@@ -119,6 +166,12 @@ impl Inode {
     }
 
     fn new_live_file(ino: u64, kind: ProcLiveFileKind, permission: NodePermission) -> Arc<Self> {
+        let node_type = match kind {
+            ProcLiveFileKind::SelfSymlink | ProcLiveFileKind::PidExe(_) | ProcLiveFileKind::PidFdSymlink(_, _) => {
+                NodeType::Symlink
+            }
+            _ => NodeType::RegularFile,
+        };
         Arc::new(Self {
             ino,
             metadata: Mutex::new(Metadata {
@@ -126,7 +179,7 @@ impl Inode {
                 inode: ino,
                 nlink: 0,
                 mode: permission,
-                node_type: NodeType::RegularFile,
+                node_type,
                 uid: 0,
                 gid: 0,
                 size: 0,
@@ -239,6 +292,11 @@ impl ProcFilesystem {
             ProcLiveFileKind::Mounts,
             NodePermission::from_bits_truncate(0o444),
         );
+        let self_sym = Inode::new_live_file(
+            SELF_INO,
+            ProcLiveFileKind::SelfSymlink,
+            NodePermission::from_bits_truncate(0o777),
+        );
 
         root.metadata.lock().nlink = 2;
 
@@ -247,11 +305,13 @@ impl ProcFilesystem {
             inodes.insert(ROOT_INO, root.clone());
             inodes.insert(MEMINFO_INO, meminfo);
             inodes.insert(MOUNTS_INO, mounts);
+            inodes.insert(SELF_INO, self_sym);
         }
 
         let mut entries = root.as_dir().expect("proc root is dir").entries.lock();
         entries.insert("meminfo".into(), InodeRef::new(MEMINFO_INO));
         entries.insert("mounts".into(), InodeRef::new(MOUNTS_INO));
+        entries.insert("self".into(), InodeRef::new(SELF_INO));
     }
 
     fn allocate_ino(&self) -> u64 {
@@ -262,11 +322,86 @@ impl ProcFilesystem {
     }
 
     fn get_inode(&self, ino: u64) -> VfsResult<Arc<Inode>> {
-        self.inodes
-            .lock()
-            .get(&ino)
-            .cloned()
-            .ok_or(VfsError::NotFound)
+        if let Some(inode) = self.inodes.lock().get(&ino).cloned() {
+            return Ok(inode);
+        }
+
+        if ino == SELF_INO {
+            let inode = Inode::new_live_file(
+                SELF_INO,
+                ProcLiveFileKind::SelfSymlink,
+                NodePermission::from_bits_truncate(0o777),
+            );
+            return Ok(inode);
+        }
+
+        if let Some((pid, sub)) = decode_pid_inode(ino) {
+            let provider = PROCESS_PROVIDER.get().ok_or(VfsError::NotFound)?;
+            if !provider.process_exists(pid) {
+                return Err(VfsError::NotFound);
+            }
+
+            if sub == SUB_INO_DIR {
+                let dir = Inode::new_directory(ino, ROOT_INO, NodePermission::from_bits_truncate(0o555));
+                {
+                    let mut entries = dir.as_dir()?.entries.lock();
+                    entries.insert(".".into(), InodeRef::new(PID_INODE_START + (pid << PID_INODE_SHIFT) + SUB_INO_DIR));
+                    entries.insert("..".into(), InodeRef::new(ROOT_INO));
+                    entries.insert("cmdline".into(), InodeRef::new(PID_INODE_START + (pid << PID_INODE_SHIFT) + SUB_INO_CMDLINE));
+                    entries.insert("status".into(), InodeRef::new(PID_INODE_START + (pid << PID_INODE_SHIFT) + SUB_INO_STATUS));
+                    entries.insert("exe".into(), InodeRef::new(PID_INODE_START + (pid << PID_INODE_SHIFT) + SUB_INO_EXE));
+                    entries.insert("comm".into(), InodeRef::new(PID_INODE_START + (pid << PID_INODE_SHIFT) + SUB_INO_COMM));
+                    entries.insert("fd".into(), InodeRef::new(PID_INODE_START + (pid << PID_INODE_SHIFT) + SUB_INO_FD_DIR));
+                }
+                return Ok(dir);
+            }
+
+            if sub == SUB_INO_FD_DIR {
+                let dir = Inode::new_directory(ino, PID_INODE_START + (pid << PID_INODE_SHIFT) + SUB_INO_DIR, NodePermission::from_bits_truncate(0o555));
+                {
+                    let mut entries = dir.as_dir()?.entries.lock();
+                    entries.insert(".".into(), InodeRef::new(PID_INODE_START + (pid << PID_INODE_SHIFT) + SUB_INO_FD_DIR));
+                    entries.insert("..".into(), InodeRef::new(PID_INODE_START + (pid << PID_INODE_SHIFT) + SUB_INO_DIR));
+                    
+                    if let Some(fds) = provider.process_fds(pid) {
+                        for fd in fds {
+                            let name = format!("{}", fd);
+                            let child_ino = PID_INODE_START + (pid << PID_INODE_SHIFT) + SUB_INO_FD_BASE + fd as u64;
+                            entries.insert(name.into(), InodeRef::new(child_ino));
+                        }
+                    }
+                }
+                return Ok(dir);
+            }
+
+            if sub >= SUB_INO_FD_BASE {
+                let fd = (sub - SUB_INO_FD_BASE) as u32;
+                let file = Inode::new_live_file(
+                    ino,
+                    ProcLiveFileKind::PidFdSymlink(pid, fd),
+                    NodePermission::from_bits_truncate(0o777),
+                );
+                return Ok(file);
+            }
+
+            let kind = match sub {
+                SUB_INO_CMDLINE => ProcLiveFileKind::PidCmdline(pid),
+                SUB_INO_STATUS => ProcLiveFileKind::PidStatus(pid),
+                SUB_INO_EXE => ProcLiveFileKind::PidExe(pid),
+                SUB_INO_COMM => ProcLiveFileKind::PidComm(pid),
+                _ => return Err(VfsError::NotFound),
+            };
+
+            let perm = if sub == SUB_INO_EXE { 0o777 } else { 0o444 };
+            let file = Inode::new_live_file(
+                ino,
+                kind,
+                NodePermission::from_bits_truncate(perm),
+            );
+            return Ok(file);
+        }
+
+        Err(VfsError::NotFound)
     }
 
     fn create_inode(
@@ -377,6 +512,29 @@ fn render_proc_file(kind: ProcLiveFileKind) -> String {
     match kind {
         ProcLiveFileKind::Meminfo => render_meminfo(),
         ProcLiveFileKind::Mounts => render_mounts(),
+        ProcLiveFileKind::SelfSymlink => {
+            if let Some(provider) = PROCESS_PROVIDER.get() {
+                if let Some(pid) = provider.current_pid() {
+                    return format!("{}", pid);
+                }
+            }
+            "1".to_owned()
+        }
+        ProcLiveFileKind::PidCmdline(pid) => {
+            PROCESS_PROVIDER.get().and_then(|p| p.cmdline(pid)).unwrap_or_default()
+        }
+        ProcLiveFileKind::PidStatus(pid) => {
+            PROCESS_PROVIDER.get().and_then(|p| p.status(pid)).unwrap_or_default()
+        }
+        ProcLiveFileKind::PidExe(pid) => {
+            PROCESS_PROVIDER.get().and_then(|p| p.exe(pid)).unwrap_or_default()
+        }
+        ProcLiveFileKind::PidComm(pid) => {
+            PROCESS_PROVIDER.get().and_then(|p| p.comm(pid)).unwrap_or_default()
+        }
+        ProcLiveFileKind::PidFdSymlink(pid, fd) => {
+            PROCESS_PROVIDER.get().and_then(|p| p.fd_path(pid, fd)).unwrap_or_default()
+        }
     }
 }
 
@@ -491,7 +649,7 @@ impl NodeOps for ProcNode {
 
     fn update_metadata(&self, update: MetadataUpdate) -> VfsResult<()> {
         let inode = self.inode_ref()?;
-        if inode.live_kind().is_some() {
+        if inode.live_kind().is_some() || self.ino >= PID_INODE_START {
             return Err(VfsError::ReadOnlyFilesystem);
         }
 
@@ -525,7 +683,9 @@ impl NodeOps for ProcNode {
     }
 
     fn flags(&self) -> NodeFlags {
-        if self
+        if self.ino >= PID_INODE_START {
+            NodeFlags::NON_CACHEABLE
+        } else if self
             .inode_ref()
             .ok()
             .and_then(|inode| inode.live_kind())
@@ -541,11 +701,68 @@ impl NodeOps for ProcNode {
 impl DirNodeOps for ProcNode {
     fn read_dir(&self, offset: u64, sink: &mut dyn DirEntrySink) -> VfsResult<usize> {
         let inode = self.inode_ref()?;
-        let entries = inode.as_dir()?.entries.lock();
+        let mut all_entries = Vec::new();
+        
+        if self.ino >= PID_INODE_START {
+            if let Some((pid, sub)) = decode_pid_inode(self.ino) {
+                let provider = PROCESS_PROVIDER.get().ok_or(VfsError::NotFound)?;
+                if !provider.process_exists(pid) {
+                    return Err(VfsError::NotFound);
+                }
+
+                if sub == SUB_INO_DIR {
+                    all_entries.push((".".to_owned(), self.ino));
+                    all_entries.push(("..".to_owned(), ROOT_INO));
+                    all_entries.push(("cmdline".to_owned(), PID_INODE_START + (pid << PID_INODE_SHIFT) + SUB_INO_CMDLINE));
+                    all_entries.push(("status".to_owned(), PID_INODE_START + (pid << PID_INODE_SHIFT) + SUB_INO_STATUS));
+                    all_entries.push(("exe".to_owned(), PID_INODE_START + (pid << PID_INODE_SHIFT) + SUB_INO_EXE));
+                    all_entries.push(("comm".to_owned(), PID_INODE_START + (pid << PID_INODE_SHIFT) + SUB_INO_COMM));
+                    all_entries.push(("fd".to_owned(), PID_INODE_START + (pid << PID_INODE_SHIFT) + SUB_INO_FD_DIR));
+                } else if sub == SUB_INO_FD_DIR {
+                    all_entries.push((".".to_owned(), self.ino));
+                    all_entries.push(("..".to_owned(), PID_INODE_START + (pid << PID_INODE_SHIFT) + SUB_INO_DIR));
+                    
+                    if let Some(fds) = provider.process_fds(pid) {
+                        for fd in fds {
+                            let name = format!("{}", fd);
+                            let child_ino = PID_INODE_START + (pid << PID_INODE_SHIFT) + SUB_INO_FD_BASE + fd as u64;
+                            all_entries.push((name, child_ino));
+                        }
+                    }
+                }
+            }
+        } else {
+            let entries = inode.as_dir()?.entries.lock();
+            for (name, entry) in entries.iter() {
+                all_entries.push((name.0.clone(), entry.ino));
+            }
+            
+            if self.ino == ROOT_INO {
+                if let Some(provider) = PROCESS_PROVIDER.get() {
+                    for pid in provider.process_pids() {
+                        let name = format!("{}", pid);
+                        let child_ino = PID_INODE_START + (pid << PID_INODE_SHIFT) + SUB_INO_DIR;
+                        all_entries.push((name, child_ino));
+                    }
+                }
+            }
+        }
+
+        all_entries.sort_by(|a, b| {
+            fn index(s: &str) -> u8 {
+                match s {
+                    "." => 0,
+                    ".." => 1,
+                    _ => 2,
+                }
+            }
+            (index(&a.0), &a.0).cmp(&(index(&b.0), &b.0))
+        });
+
         let mut count = 0;
-        for (idx, (name, entry)) in entries.iter().enumerate().skip(offset as usize) {
-            let node_type = self.fs.node_type_of(entry.ino)?;
-            if !sink.accept(&name.0, entry.ino, node_type, (idx + 1) as u64) {
+        for (idx, (name, ino)) in all_entries.iter().enumerate().skip(offset as usize) {
+            let node_type = self.fs.node_type_of(*ino)?;
+            if !sink.accept(name, *ino, node_type, (idx + 1) as u64) {
                 break;
             }
             count += 1;
@@ -555,9 +772,65 @@ impl DirNodeOps for ProcNode {
 
     fn lookup(&self, name: &str) -> VfsResult<DirEntry> {
         let inode = self.inode_ref()?;
-        let entries = inode.as_dir()?.entries.lock();
-        let entry = entries.get(name).ok_or(VfsError::NotFound)?;
-        self.build_entry(name, entry.ino)
+        
+        if self.ino >= PID_INODE_START {
+            if let Some((pid, sub)) = decode_pid_inode(self.ino) {
+                let provider = PROCESS_PROVIDER.get().ok_or(VfsError::NotFound)?;
+                if !provider.process_exists(pid) {
+                    return Err(VfsError::NotFound);
+                }
+
+                if sub == SUB_INO_DIR {
+                    let target_sub = match name {
+                        "." => Some(SUB_INO_DIR),
+                        ".." => return self.build_entry(name, ROOT_INO),
+                        "cmdline" => Some(SUB_INO_CMDLINE),
+                        "status" => Some(SUB_INO_STATUS),
+                        "exe" => Some(SUB_INO_EXE),
+                        "comm" => Some(SUB_INO_COMM),
+                        "fd" => Some(SUB_INO_FD_DIR),
+                        _ => None,
+                    };
+                    if let Some(ts) = target_sub {
+                        let ino = PID_INODE_START + (pid << PID_INODE_SHIFT) + ts;
+                        return self.build_entry(name, ino);
+                    }
+                } else if sub == SUB_INO_FD_DIR {
+                    if name == "." {
+                        return self.build_entry(name, self.ino);
+                    } else if name == ".." {
+                        let parent_ino = PID_INODE_START + (pid << PID_INODE_SHIFT) + SUB_INO_DIR;
+                        return self.build_entry(name, parent_ino);
+                    }
+                    if let Ok(fd) = name.parse::<u32>() {
+                        if let Some(fds) = provider.process_fds(pid) {
+                            if fds.contains(&fd) {
+                                let ino = PID_INODE_START + (pid << PID_INODE_SHIFT) + SUB_INO_FD_BASE + fd as u64;
+                                return self.build_entry(name, ino);
+                            }
+                        }
+                    }
+                }
+            }
+        } else {
+            let entries = inode.as_dir()?.entries.lock();
+            if let Some(entry) = entries.get(name) {
+                return self.build_entry(name, entry.ino);
+            }
+            
+            if self.ino == ROOT_INO {
+                if let Ok(pid) = name.parse::<u64>() {
+                    if let Some(provider) = PROCESS_PROVIDER.get() {
+                        if provider.process_exists(pid) {
+                            let ino = PID_INODE_START + (pid << PID_INODE_SHIFT) + SUB_INO_DIR;
+                            return self.build_entry(name, ino);
+                        }
+                    }
+                }
+            }
+        }
+        
+        Err(VfsError::NotFound)
     }
 
     fn is_cacheable(&self) -> bool {
@@ -570,6 +843,9 @@ impl DirNodeOps for ProcNode {
         node_type: NodeType,
         permission: NodePermission,
     ) -> VfsResult<DirEntry> {
+        if self.ino >= PID_INODE_START {
+            return Err(VfsError::ReadOnlyFilesystem);
+        }
         if name == "." || name == ".." {
             return Err(VfsError::InvalidInput);
         }
@@ -594,6 +870,9 @@ impl DirNodeOps for ProcNode {
     }
 
     fn link(&self, name: &str, target: &DirEntry) -> VfsResult<DirEntry> {
+        if self.ino >= PID_INODE_START {
+            return Err(VfsError::ReadOnlyFilesystem);
+        }
         if name == "." || name == ".." {
             return Err(VfsError::InvalidInput);
         }
@@ -618,15 +897,24 @@ impl DirNodeOps for ProcNode {
     }
 
     fn unlink(&self, name: &str) -> VfsResult<()> {
+        if self.ino >= PID_INODE_START {
+            return Err(VfsError::ReadOnlyFilesystem);
+        }
         self.remove_entry(name)
     }
 
     fn rename(&self, src_name: &str, dst_dir: &DirNode, dst_name: &str) -> VfsResult<()> {
+        if self.ino >= PID_INODE_START {
+            return Err(VfsError::ReadOnlyFilesystem);
+        }
         if src_name == "." || src_name == ".." || dst_name == "." || dst_name == ".." {
             return Err(VfsError::InvalidInput);
         }
 
         let dst_node = dst_dir.downcast::<Self>()?;
+        if dst_node.ino >= PID_INODE_START {
+            return Err(VfsError::ReadOnlyFilesystem);
+        }
         if self.ino == dst_node.ino && src_name == dst_name {
             return Ok(());
         }

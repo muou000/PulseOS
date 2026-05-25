@@ -6,6 +6,7 @@ pub mod uaccess;
 
 use alloc::{
     collections::BTreeMap,
+    string::{String, ToString},
     sync::{Arc, Weak},
     vec::Vec,
 };
@@ -128,4 +129,127 @@ fn itimer_tick_hook() {
 /// pulse_core initialization.
 pub fn init_itimer_hook() {
     axtask::register_timer_hook(itimer_tick_hook);
+}
+
+struct PulseProcessProvider;
+
+impl axfs::ProcfsProcessProvider for PulseProcessProvider {
+    fn current_pid(&self) -> Option<u64> {
+        current_process().ok().map(|p| p.pid())
+    }
+
+    fn process_exists(&self, pid: u64) -> bool {
+        process_by_pid(pid).is_some()
+    }
+
+    fn process_pids(&self) -> Vec<u64> {
+        processes_snapshot().iter().map(|p| p.pid()).collect()
+    }
+
+    fn cmdline(&self, pid: u64) -> Option<String> {
+        let proc = process_by_pid(pid)?;
+        let args = proc.args.lock();
+        if args.is_empty() {
+            let path = proc.exec_path().unwrap_or_else(|| "pulse_init".to_string());
+            Some(alloc::format!("{}\0", path))
+        } else {
+            let mut res = String::new();
+            for arg in args.iter() {
+                res.push_str(arg);
+                res.push('\0');
+            }
+            Some(res)
+        }
+    }
+
+    fn comm(&self, pid: u64) -> Option<String> {
+        let proc = process_by_pid(pid)?;
+        let name = proc.exec_path()
+            .as_ref()
+            .and_then(|p| p.split('/').last())
+            .unwrap_or("pulse_init")
+            .to_string();
+        Some(alloc::format!("{}\n", name))
+    }
+
+    fn status(&self, pid: u64) -> Option<String> {
+        let proc = process_by_pid(pid)?;
+        let name = proc.exec_path()
+            .as_ref()
+            .and_then(|p| p.split('/').last())
+            .unwrap_or("pulse_init")
+            .to_string();
+
+        let is_current = current_process().ok().map(|p| p.pid() == pid).unwrap_or(false);
+        let state = if proc.is_zombie() {
+            "Z (zombie)"
+        } else if is_current {
+            "R (running)"
+        } else {
+            "S (sleeping)"
+        };
+
+        let umask = proc.umask();
+        let ppid = proc.parent_pid();
+        let (ruid, euid, suid) = proc.uid_snapshot();
+        let (rgid, egid, sgid) = proc.gid_snapshot();
+        let threads = proc.thread_count();
+
+        let mut vm_size = 0;
+        proc.aspace_handle().lock().for_each_area(|start, end, _| {
+            if start.as_usize() < 0x8000_0000_0000 {
+                vm_size += end.as_usize() - start.as_usize();
+            }
+        });
+        let vm_size_kb = vm_size / 1024;
+        let vm_rss_kb = vm_size_kb;
+
+        Some(alloc::format!(
+            "Name:\t{}\nUmask:\t{:04o}\nState:\t{}\nTgid:\t{}\nPid:\t{}\nPPid:\t{}\nUid:\t{} {} {} {}\nGid:\t{} {} {} {}\nThreads:\t{}\nVmSize:\t{} kB\nVmRSS:\t{} kB\n",
+            name, umask, state, pid, pid, ppid, ruid, euid, suid, euid, rgid, egid, sgid, egid, threads, vm_size_kb, vm_rss_kb
+        ))
+    }
+
+    fn exe(&self, pid: u64) -> Option<String> {
+        let proc = process_by_pid(pid)?;
+        Some(proc.exec_path().unwrap_or_else(|| "pulse_init".to_string()))
+    }
+
+    fn process_fds(&self, pid: u64) -> Option<Vec<u32>> {
+        let proc = process_by_pid(pid)?;
+        let fd_table = proc.fd_table.lock();
+        let mut fds = Vec::new();
+        for fd in 0..1024 {
+            if fd_table.get(fd).is_some() {
+                fds.push(fd as u32);
+            }
+        }
+        Some(fds)
+    }
+
+    fn fd_path(&self, pid: u64, fd: u32) -> Option<String> {
+        let proc = process_by_pid(pid)?;
+        let fd_table = proc.fd_table.lock();
+        let entry = fd_table.get(fd as usize)?;
+        if let Some(loc) = entry.object.location() {
+            Some(loc.absolute_path().ok()?.as_str().to_string())
+        } else if let Ok(st) = entry.object.stat() {
+            let mode = st.st_mode;
+            if (mode & 0o170000) == 0o140000 {
+                // S_IFSOCK
+                Some(alloc::format!("socket:[{}]", st.st_ino))
+            } else if (mode & 0o170000) == 0o010000 {
+                // S_IFIFO
+                Some(alloc::format!("pipe:[{}]", st.st_ino))
+            } else {
+                Some("/dev/null".to_string())
+            }
+        } else {
+            Some("/dev/null".to_string())
+        }
+    }
+}
+
+pub fn init_procfs_provider() {
+    axfs::register_process_provider(Arc::new(PulseProcessProvider));
 }

@@ -19,6 +19,9 @@ fn main() {
     pulse_core::task::init_itimer_hook();
     info!("itimer hook registered");
 
+    pulse_core::task::init_procfs_provider();
+    info!("procfs provider registered");
+
     pulse_core::trap::init();
 
     use axtask::TaskInner;

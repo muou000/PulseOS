@@ -35,6 +35,8 @@ pub fn new_procfs() -> Filesystem {
     procfs::ProcFilesystem::new()
 }
 
+pub use procfs::{ProcfsProcessProvider, register_process_provider};
+
 pub fn new_tmpfs() -> Filesystem {
     tmpfs::TmpFilesystem::new()
 }
