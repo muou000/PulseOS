@@ -295,3 +295,5 @@ pub fn init_filesystems(mut block_devs: AxDeviceContainer<AxBlockDevice>) {
     ROOT_FS_CONTEXT.call_once(|| cx.clone());
     *FS_CONTEXT.lock() = cx;
 }
+
+pub use fs::{ProcfsProcessProvider, register_process_provider};

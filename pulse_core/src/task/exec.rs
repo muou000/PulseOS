@@ -104,6 +104,7 @@ impl Process {
         *self.stack_top.lock() = load_info.user_sp;
         self.set_signal_trampoline(load_info.signal_trampoline);
         self.set_exec_path(path.clone());
+        *self.args.lock() = argv;
         Ok(())
     }
 
@@ -172,6 +173,7 @@ impl Process {
         self.set_signal_trampoline(load_info.signal_trampoline);
         self.signal_shared().reset_on_exec();
         self.set_exec_path(path.clone());
+        *self.args.lock() = argv;
         if let Ok(thread) = super::current_thread() {
             if thread.process().pid() == self.pid() {
                 thread.signal().reset_on_exec();

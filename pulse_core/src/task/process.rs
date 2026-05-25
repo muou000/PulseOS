@@ -249,6 +249,7 @@ pub struct Process {
     memlock_state: Mutex<MemlockState>,
     signal_shared: Arc<SignalShared>,
     exec_path: Mutex<Option<String>>,
+    pub args: Mutex<Vec<String>>,
     signal_trampoline: Mutex<usize>,
     pub shared_memory: Arc<Mutex<BTreeMap<VirtAddr, Arc<Mutex<crate::ipc::shm::ShmInner>>>>>,
     /// ITIMER_REAL state: (deadline_ns, interval_ns).
@@ -815,6 +816,7 @@ impl Process {
             memlock_state: Mutex::new(MemlockState::new()),
             signal_shared: SignalShared::new(),
             exec_path: Mutex::new(None),
+            args: Mutex::new(alloc::vec![String::from("pulse_init")]),
             signal_trampoline: Mutex::new(0),
             shared_memory: Arc::new(Mutex::new(BTreeMap::new())),
             itimer_real_deadline_ns: AtomicU64::new(0),
@@ -917,6 +919,7 @@ impl Process {
             )),
             signal_shared,
             exec_path: Mutex::new(exec_path),
+            args: Mutex::new(parent.args.lock().clone()),
             signal_trampoline: Mutex::new(signal_trampoline),
             shared_memory,
             itimer_real_deadline_ns: AtomicU64::new(0),
