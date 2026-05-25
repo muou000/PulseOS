@@ -40,8 +40,6 @@ fn main() {
                 &["sh"]
             };
 
-            // let shell_args: &[&str] = &["sh"];
-
             match proc.load_elf(SHELL_ELF_PATH, shell_args, &[]) {
                 Ok(_) => {
                     info!("Successfully loaded {}", SHELL_ELF_PATH);
