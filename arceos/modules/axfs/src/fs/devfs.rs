@@ -551,10 +551,6 @@ impl NodeOps for DevNode {
 
     fn update_metadata(&self, update: MetadataUpdate) -> VfsResult<()> {
         let inode = self.inode_ref()?;
-        if matches!(&inode.content, NodeContent::CharacterDevice(_) | NodeContent::BlockDevice(_)) {
-            return Err(VfsError::ReadOnlyFilesystem);
-        }
-
         let mut metadata = inode.metadata.lock();
         if let Some(mode) = update.mode {
             metadata.mode = mode;

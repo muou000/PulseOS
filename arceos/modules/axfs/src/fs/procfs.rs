@@ -657,15 +657,17 @@ impl NodeOps for ProcNode {
 
     fn update_metadata(&self, update: MetadataUpdate) -> VfsResult<()> {
         let inode = self.inode_ref()?;
-        if inode.live_kind().is_some() || self.ino >= PID_INODE_START {
-            return Err(VfsError::ReadOnlyFilesystem);
-        }
-
         let mut metadata = inode.metadata.lock();
         if let Some(mode) = update.mode {
+            if inode.live_kind().is_some() || self.ino >= PID_INODE_START {
+                return Err(VfsError::ReadOnlyFilesystem);
+            }
             metadata.mode = mode;
         }
         if let Some((uid, gid)) = update.owner {
+            if inode.live_kind().is_some() || self.ino >= PID_INODE_START {
+                return Err(VfsError::ReadOnlyFilesystem);
+            }
             metadata.uid = uid;
             metadata.gid = gid;
         }
