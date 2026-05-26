@@ -205,6 +205,45 @@ impl axfs::ProcfsProcessProvider for PulseProcessProvider {
         Some(proc.exec_path().unwrap_or_else(|| "pulse_init".to_string()))
     }
 
+    fn stat(&self, pid: u64) -> Option<String> {
+        let proc = process_by_pid(pid)?;
+        let comm = proc.exec_path()
+            .as_ref()
+            .and_then(|p| p.split('/').last())
+            .unwrap_or("pulse_init")
+            .to_string();
+
+        let is_current = current_process().ok().map(|p| p.pid() == pid).unwrap_or(false);
+        let state_char = if proc.is_zombie() {
+            'Z'
+        } else if is_current {
+            'R'
+        } else {
+            'S'
+        };
+
+        let ppid = proc.parent_pid();
+        let utime = proc.user_time_ns.load(core::sync::atomic::Ordering::Relaxed) / 10_000_000;
+        let stime = proc.sys_time_ns.load(core::sync::atomic::Ordering::Relaxed) / 10_000_000;
+        let cutime = proc.child_user_time_ns.load(core::sync::atomic::Ordering::Relaxed) / 10_000_000;
+        let cstime = proc.child_sys_time_ns.load(core::sync::atomic::Ordering::Relaxed) / 10_000_000;
+        let threads = proc.thread_count();
+        let starttime = proc.start_mono_ns / 10_000_000;
+
+        let mut vm_size = 0;
+        proc.aspace_handle().lock().for_each_area(|start, end, _| {
+            if start.as_usize() < 0x8000_0000_0000 {
+                vm_size += end.as_usize() - start.as_usize();
+            }
+        });
+        let rss_pages = vm_size / 4096;
+
+        Some(alloc::format!(
+            "{} ({}) {} {} 0 0 0 -1 0 0 0 0 0 {} {} {} {} 20 0 {} 0 {} {} {} {} 0 0 0 0 0 0 0 0 0 0 0 0 17 0 0 0 0 0 0 0 0 0 0 0 0 0 0\n",
+            pid, comm, state_char, ppid, utime, stime, cutime, cstime, threads, starttime, vm_size, rss_pages, u64::MAX
+        ))
+    }
+
     fn process_fds(&self, pid: u64) -> Option<Vec<u32>> {
         let proc = process_by_pid(pid)?;
         let fd_table = proc.fd_table.lock();
