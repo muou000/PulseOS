@@ -1,5 +1,5 @@
 use alloc::{
-    collections::{BTreeMap, btree_map::Entry},
+    collections::{BTreeMap, btree_map::Entry, VecDeque},
     sync::Arc,
 };
 use core::{
@@ -12,6 +12,7 @@ use axerrno::{LinuxError, LinuxResult};
 use axfs::{File, FileFlags as AxFileFlags, OpenResult};
 use axfs_ng_vfs::{Location, Metadata, NodeType};
 use axio::{BufReader, PollState, Read, Seek, SeekFrom, Write};
+use kspin::SpinNoIrq;
 use linux_raw_sys::general::*;
 use spin::{Lazy, Mutex};
 
@@ -151,17 +152,30 @@ fn console_write_bytes(buf: &[u8]) -> axio::Result<usize> {
     Ok(buf.len())
 }
 
+static STDIN_BUFFER: Lazy<SpinNoIrq<VecDeque<u8>>> = Lazy::new(|| SpinNoIrq::new(VecDeque::new()));
+pub static STDIN_WAIT_QUEUE: axtask::WaitQueue = axtask::WaitQueue::new();
+
 impl Read for StdinRaw {
     fn read(&mut self, buf: &mut [u8]) -> axio::Result<usize> {
-        let mut read_len = 0;
-        while read_len < buf.len() {
-            let len = console_read_bytes(&mut buf[read_len..])?;
-            if len == 0 {
-                break;
-            }
-            read_len += len;
+        let mut stdin_buf = STDIN_BUFFER.lock();
+        let len = core::cmp::min(buf.len(), stdin_buf.len());
+        for i in 0..len {
+            buf[i] = stdin_buf.pop_front().unwrap();
         }
-        Ok(read_len)
+        Ok(len)
+    }
+}
+
+pub fn poll_stdin() {
+    let mut temp_buf = [0u8; 64];
+    if let Ok(len) = console_read_bytes(&mut temp_buf) {
+        if len > 0 {
+            let mut stdin_buf = STDIN_BUFFER.lock();
+            for &c in &temp_buf[..len] {
+                stdin_buf.push_back(c);
+            }
+            STDIN_WAIT_QUEUE.notify_all(true);
+        }
     }
 }
 
@@ -180,6 +194,14 @@ static STDIN_READER: Lazy<Mutex<BufReader<StdinRaw>>> =
 static STDOUT_WRITER: Lazy<Mutex<StdoutRaw>> = Lazy::new(|| Mutex::new(StdoutRaw));
 
 pub struct StdinObject;
+
+impl StdinObject {
+    fn current_has_pending_signal() -> bool {
+        crate::task::current_thread()
+            .map(|thread| thread.has_pending_signal())
+            .unwrap_or(false)
+    }
+}
 
 impl FdObject for StdinObject {
     fn as_any(&self) -> &dyn Any {
@@ -201,7 +223,13 @@ impl FdObject for StdinObject {
                     return Err(LinuxError::EINTR);
                 }
             }
-            axtask::yield_now();
+            STDIN_WAIT_QUEUE.wait_until(|| {
+                !STDIN_BUFFER.lock().is_empty()
+                    || Self::current_has_pending_signal()
+            });
+            if Self::current_has_pending_signal() {
+                return Err(LinuxError::EINTR);
+            }
         }
     }
 
@@ -219,8 +247,9 @@ impl FdObject for StdinObject {
     }
 
     fn poll(&self) -> LinuxResult<PollState> {
+        let has_data = !STDIN_BUFFER.lock().is_empty();
         Ok(PollState {
-            readable: true,
+            readable: has_data,
             writable: true,
         })
     }
@@ -608,7 +637,8 @@ impl PipeRingBuffer {
 
 struct PipeShared {
     buffer: Mutex<PipeRingBuffer>,
-    wait: axtask::WaitQueue,
+    read_wait_queue: axtask::WaitQueue,
+    write_wait_queue: axtask::WaitQueue,
     reader_count: AtomicUsize,
     writer_count: AtomicUsize,
 }
@@ -617,7 +647,8 @@ impl PipeShared {
     fn new() -> Self {
         Self {
             buffer: Mutex::new(PipeRingBuffer::new()),
-            wait: axtask::WaitQueue::new(),
+            read_wait_queue: axtask::WaitQueue::new(),
+            write_wait_queue: axtask::WaitQueue::new(),
             reader_count: AtomicUsize::new(1),
             writer_count: AtomicUsize::new(1),
         }
@@ -687,7 +718,7 @@ impl FdObject for PipeObject {
             let available = ring_buffer.available_read();
             if available == 0 {
                 if read_size > 0 {
-                    self.shared.wait.notify_one(true);
+                    self.shared.write_wait_queue.notify_all(true);
                     return Ok(read_size);
                 }
                 if self.write_end_closed() {
@@ -707,7 +738,7 @@ impl FdObject for PipeObject {
                     buf.len()
                 );
                 drop(ring_buffer);
-                self.shared.wait.wait_until(|| {
+                self.shared.read_wait_queue.wait_until(|| {
                     let buffer = self.shared.buffer.lock();
                     buffer.available_read() > 0
                         || self.write_end_closed()
@@ -720,14 +751,14 @@ impl FdObject for PipeObject {
             }
             for _ in 0..available {
                 if read_size == buf.len() {
-                    self.shared.wait.notify_one(true);
+                    self.shared.write_wait_queue.notify_all(true);
                     return Ok(read_size);
                 }
                 buf[read_size] = ring_buffer.read_byte();
                 read_size += 1;
             }
             drop(ring_buffer);
-            self.shared.wait.notify_all(true);
+            self.shared.write_wait_queue.notify_all(true);
         }
         Ok(read_size)
     }
@@ -766,7 +797,7 @@ impl FdObject for PipeObject {
                     buf.len()
                 );
                 drop(ring_buffer);
-                self.shared.wait.wait_until(|| {
+                self.shared.write_wait_queue.wait_until(|| {
                     let buffer = self.shared.buffer.lock();
                     buffer.available_write() > 0
                         || self.read_end_closed()
@@ -783,14 +814,14 @@ impl FdObject for PipeObject {
             }
             for _ in 0..available {
                 if write_size == buf.len() {
-                    self.shared.wait.notify_one(true);
+                    self.shared.read_wait_queue.notify_all(true);
                     return Ok(write_size);
                 }
                 ring_buffer.write_byte(buf[write_size]);
                 write_size += 1;
             }
             drop(ring_buffer);
-            self.shared.wait.notify_all(true);
+            self.shared.read_wait_queue.notify_all(true);
         }
         Ok(write_size)
     }
@@ -831,28 +862,30 @@ impl FdObject for PipeObject {
             return Ok(true);
         }
 
+        let wq = if wait_for_read {
+            &self.shared.read_wait_queue
+        } else {
+            &self.shared.write_wait_queue
+        };
+
         match deadline {
             Some(deadline) => {
-                const POLL_WAIT_QUANTUM: Duration = Duration::from_micros(100);
-                loop {
-                    if self.ready_for(wait_for_read, wait_for_write) {
-                        return Ok(true);
-                    }
-                    let now = axhal::time::monotonic_time();
-                    if now >= deadline {
-                        return Ok(false);
-                    }
-                    let remain = deadline - now;
-                    let sleep_dur = core::cmp::min(remain, POLL_WAIT_QUANTUM);
-                    if sleep_dur > Duration::ZERO {
-                        axtask::sleep(sleep_dur);
-                    } else {
-                        axtask::yield_now();
-                    }
+                let now = axhal::time::monotonic_time();
+                if now >= deadline {
+                    return Ok(self.ready_for(wait_for_read, wait_for_write));
                 }
+                let remain = deadline - now;
+                wq.wait_timeout_until(remain, || {
+                    self.ready_for(wait_for_read, wait_for_write)
+                        || Self::current_has_pending_signal()
+                });
+                if Self::current_has_pending_signal() {
+                    return Err(LinuxError::EINTR);
+                }
+                Ok(self.ready_for(wait_for_read, wait_for_write))
             }
             None => {
-                self.shared.wait.wait_until(|| {
+                wq.wait_until(|| {
                     self.ready_for(wait_for_read, wait_for_write)
                         || Self::current_has_pending_signal()
                 });
@@ -872,10 +905,10 @@ impl Drop for PipeObject {
             // Closing a pipe during process teardown should only wake waiters.
             // Let the scheduler decide when to reschedule instead of doing it
             // from inside `drop()`.
-            self.shared.wait.notify_all(false);
+            self.shared.write_wait_queue.notify_all(false);
         } else {
             self.shared.writer_count.fetch_sub(1, Ordering::AcqRel);
-            self.shared.wait.notify_all(false);
+            self.shared.read_wait_queue.notify_all(false);
         }
     }
 }
