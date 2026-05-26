@@ -116,6 +116,7 @@ pub fn thread_by_tid(process: &Process, tid: u64) -> Option<Arc<Thread>> {
 /// Called from `axtask::on_timer_tick()` in interrupt context.
 /// Must not take any blocking locks.
 fn itimer_tick_hook() {
+    crate::fd_table::poll_stdin();
     let procs = processes_snapshot();
     for proc in procs {
         if proc.is_zombie() {
