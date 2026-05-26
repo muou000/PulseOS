@@ -8,4 +8,5 @@
 .axconfig.toml
 kernel-*
 *.txt
+!vendor/**/*.txt
 .antigravitycli/
