@@ -267,7 +267,7 @@ impl UdpSocket {
 
     fn send_impl(&self, buf: &[u8], remote_endpoint: IpEndpoint) -> AxResult<usize> {
         if self.local_addr.read().is_none() {
-            return ax_err!(NotConnected, "socket send() failed");
+            self.bind(into_core_sockaddr(UNSPECIFIED_ENDPOINT))?;
         }
         // info!("send to addr: {:?}", remote_endpoint);
         self.block_on(|| {
@@ -298,7 +298,7 @@ impl UdpSocket {
         F: FnMut(&mut udp::Socket) -> AxResult<T>,
     {
         if self.local_addr.read().is_none() {
-            return ax_err!(NotConnected, "socket recv() failed");
+            self.bind(into_core_sockaddr(UNSPECIFIED_ENDPOINT))?;
         }
         self.block_on(|| {
             SOCKET_SET.with_socket_mut::<udp::Socket, _, _>(self.handle, |socket| {

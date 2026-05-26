@@ -10,6 +10,14 @@ use axlog::*;
 use super::get_socket;
 use crate::net::Socket;
 
+#[derive(Copy, Clone, Default, Debug)]
+#[repr(C)]
+struct TimeVal {
+    tv_sec: i64,
+    tv_usec: i64,
+}
+
+
 fn read_user_plain<T: Copy>(user_addr: usize) -> Result<T, LinuxError> {
     crate::impls::utils::with_process(|process| {
         pulse_core::task::uaccess::read_user_plain(process, user_addr)
@@ -134,6 +142,25 @@ pub fn sys_getsockopt(
                 };
                 if len >= 4 {
                     len = 4;
+                    if let Err(e) = write_user_plain(optlen, &len) {
+                        return -(e.code() as isize);
+                    }
+                }
+                return 0;
+            }
+            20 | 21 => {
+                // SO_RCVTIMEO, SO_SNDTIMEO
+                let val = TimeVal { tv_sec: 0, tv_usec: 0 };
+                if let Err(e) = write_user_plain(optval, &val) {
+                    return -(e.code() as isize);
+                }
+                let mut len: u32 = match read_user_plain(optlen) {
+                    Ok(l) => l,
+                    Err(e) => return -(e.code() as isize),
+                };
+                let expected_len = core::mem::size_of::<TimeVal>() as u32;
+                if len >= expected_len {
+                    len = expected_len;
                     if let Err(e) = write_user_plain(optlen, &len) {
                         return -(e.code() as isize);
                     }
@@ -284,6 +311,12 @@ pub fn sys_setsockopt(
             7 | 8 | 9 | 6 => {
                 // SO_SNDBUF, SO_RCVBUF, SO_KEEPALIVE, SO_BROADCAST
                 // Stub: return success to avoid failures in applications tuning buffers/keepalives
+                return 0;
+            }
+            20 | 21 => {
+                // SO_RCVTIMEO, SO_SNDTIMEO
+                // Stub: return success to avoid failures in applications setting timeouts
+                info!("sys_setsockopt: stub success returning 0 for optname={optname}");
                 return 0;
             }
             _ => {}

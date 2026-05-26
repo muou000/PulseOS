@@ -2,15 +2,23 @@ use alloc::vec::Vec;
 
 use axerrno::LinuxError;
 use axlog::*;
+use linux_raw_sys::general::iovec;
 
 use super::{addr::NetSocketAddr, get_socket};
 use crate::net::Socket;
 
-/// iovec structure (POSIX).
-#[repr(C)]
-struct IoVec {
-    iov_base: *mut u8,
-    iov_len: usize,
+fn read_user_plain<T: Copy>(user_addr: usize) -> Result<T, LinuxError> {
+    crate::impls::utils::with_process(|process| {
+        pulse_core::task::uaccess::read_user_plain(process, user_addr)
+    })?
+    .map_err(|e| LinuxError::from(e.canonicalize()))
+}
+
+fn write_user_plain<T: Copy>(user_addr: usize, value: &T) -> Result<(), LinuxError> {
+    crate::impls::utils::with_process(|process| {
+        pulse_core::task::uaccess::write_user_plain(process, user_addr, value)
+    })?
+    .map_err(|e| LinuxError::from(e.canonicalize()))
 }
 
 pub fn sys_sendto(
@@ -26,7 +34,15 @@ pub fn sys_sendto(
         return -(LinuxError::EFAULT.code() as isize);
     }
 
-    let slice = unsafe { core::slice::from_raw_parts(buf as *const u8, len) };
+    let mut tmp = match crate::impls::utils::alloc_zeroed_bytes(len, "sys_sendto") {
+        Ok(b) => b,
+        Err(e) => return -(e.code() as isize),
+    };
+    if len > 0 {
+        if let Err(e) = crate::impls::utils::read_user_bytes(buf, &mut tmp) {
+            return -(e.code() as isize);
+        }
+    }
 
     let socket = match get_socket(fd) {
         Ok(s) => s,
@@ -35,17 +51,17 @@ pub fn sys_sendto(
 
     let result = match &*socket {
         Socket::Tcp(s) => s
-            .send(slice)
+            .send(&tmp)
             .map_err(|e| LinuxError::from(e.canonicalize())),
         Socket::Udp(s) => {
             if addr == 0 || addrlen == 0 {
-                s.send(slice)
+                s.send(&tmp)
                     .map_err(|e| LinuxError::from(e.canonicalize()))
             } else {
                 match NetSocketAddr::read_from_raw(addr, addrlen as u32) {
                     Ok(net_addr) => {
                         let std_addr = core::net::SocketAddr::from(net_addr);
-                        s.send_to(slice, std_addr)
+                        s.send_to(&tmp, std_addr)
                             .map_err(|e| LinuxError::from(e.canonicalize()))
                     }
                     Err(e) => Err(e),
@@ -73,7 +89,10 @@ pub fn sys_recvfrom(
         return -(LinuxError::EFAULT.code() as isize);
     }
 
-    let buf_slice = unsafe { core::slice::from_raw_parts_mut(buf as *mut u8, len) };
+    let mut tmp = match crate::impls::utils::alloc_zeroed_bytes(len, "sys_recvfrom") {
+        Ok(b) => b,
+        Err(e) => return -(e.code() as isize),
+    };
 
     let socket = match get_socket(fd) {
         Ok(s) => s,
@@ -82,25 +101,31 @@ pub fn sys_recvfrom(
 
     let result = match &*socket {
         Socket::Tcp(s) => s
-            .recv(buf_slice)
+            .recv(&mut tmp)
             .map(|n| (n, None))
             .map_err(|e| LinuxError::from(e.canonicalize())),
         Socket::Udp(s) => s
-            .recv_from(buf_slice)
+            .recv_from(&mut tmp)
             .map(|(n, src)| (n, Some(src)))
             .map_err(|e| LinuxError::from(e.canonicalize())),
     };
 
     match result {
         Ok((n, maybe_src)) => {
+            if n > 0 {
+                if let Err(e) = crate::impls::utils::write_user_bytes(buf, &tmp[..n]) {
+                    return -(e.code() as isize);
+                }
+            }
             if let Some(src_addr) = maybe_src {
                 if addr != 0 {
                     let net_addr = NetSocketAddr::from(src_addr);
-                    let addrlen_ptr = addrlen as *mut u32;
-                    if !addrlen_ptr.is_null() {
-                        let mut alen = unsafe { addrlen_ptr.read() };
-                        if net_addr.write_to_raw(addr, &mut alen).is_ok() {
-                            unsafe { addrlen_ptr.write(alen) };
+                    if addrlen != 0 {
+                        if let Ok(current_len) = read_user_plain::<u32>(addrlen) {
+                            let mut alen = current_len;
+                            if net_addr.write_to_raw(addr, &mut alen).is_ok() {
+                                let _ = write_user_plain(addrlen, &alen);
+                            }
                         }
                     }
                 }
@@ -112,11 +137,12 @@ pub fn sys_recvfrom(
 }
 
 /// msghdr structure (simplified, for sendmsg/recvmsg).
+#[derive(Copy, Clone)]
 #[repr(C)]
 struct MsgHdr {
     msg_name: *mut u8,
     msg_namelen: u32,
-    msg_iov: *mut IoVec,
+    msg_iov: *mut iovec,
     msg_iovlen: usize,
     msg_control: *mut u8,
     msg_controllen: usize,
@@ -127,26 +153,42 @@ pub fn sys_sendmsg(fd: usize, msg: usize, _flags: usize) -> isize {
     if msg == 0 {
         return -(LinuxError::EFAULT.code() as isize);
     }
-    let msg = unsafe { &*(msg as *const MsgHdr) };
+    let msg_hdr: MsgHdr = match read_user_plain(msg) {
+        Ok(m) => m,
+        Err(e) => return -(e.code() as isize),
+    };
 
-    if !msg.msg_control.is_null() {
+    if !msg_hdr.msg_control.is_null() {
         warn!("sys_sendmsg: ancillary data (cmsg) is not supported, ignoring");
     }
 
+    let iovecs = match crate::impls::utils::read_user_iovec_array(msg_hdr.msg_iov as usize, msg_hdr.msg_iovlen) {
+        Ok(v) => v,
+        Err(e) => return -(e.code() as isize),
+    };
+
     // Flatten iov segments.
     let mut flat: Vec<u8> = Vec::new();
-    let iov_count = msg.msg_iovlen;
-    for i in 0..iov_count {
-        let iov = unsafe { &*msg.msg_iov.add(i) };
-        if iov.iov_len == 0 {
+    for iov in iovecs {
+        let iov_len = match usize::try_from(iov.iov_len) {
+            Ok(l) => l,
+            Err(_) => return -(LinuxError::EINVAL.code() as isize),
+        };
+        if iov_len == 0 {
             continue;
         }
-        let seg = unsafe { core::slice::from_raw_parts(iov.iov_base as *const u8, iov.iov_len) };
-        flat.extend_from_slice(seg);
+        let mut seg = match crate::impls::utils::alloc_zeroed_bytes(iov_len, "sys_sendmsg.seg") {
+            Ok(buf) => buf,
+            Err(e) => return -(e.code() as isize),
+        };
+        if let Err(e) = crate::impls::utils::read_user_bytes(iov.iov_base as usize, &mut seg) {
+            return -(e.code() as isize);
+        }
+        flat.extend_from_slice(&seg);
     }
 
-    let dest_addr = msg.msg_name as usize;
-    let dest_addrlen = msg.msg_namelen;
+    let dest_addr = msg_hdr.msg_name as usize;
+    let dest_addrlen = msg_hdr.msg_namelen;
 
     let socket = match get_socket(fd) {
         Ok(s) => s,
@@ -184,20 +226,38 @@ pub fn sys_recvmsg(fd: usize, msg: usize, _flags: usize) -> isize {
     if msg == 0 {
         return -(LinuxError::EFAULT.code() as isize);
     }
-    let msg = unsafe { &mut *(msg as *mut MsgHdr) };
+    let mut msg_hdr: MsgHdr = match read_user_plain(msg) {
+        Ok(m) => m,
+        Err(e) => return -(e.code() as isize),
+    };
 
-    if !msg.msg_control.is_null() {
+    if !msg_hdr.msg_control.is_null() {
         warn!("sys_recvmsg: ancillary data output is not supported");
-        msg.msg_controllen = 0;
+        msg_hdr.msg_controllen = 0;
     }
 
-    // Compute total capacity.
-    let iov_count = msg.msg_iovlen;
-    let total_len: usize = (0..iov_count)
-        .map(|i| unsafe { (*msg.msg_iov.add(i)).iov_len })
-        .sum();
+    let iovecs = match crate::impls::utils::read_user_iovec_array(msg_hdr.msg_iov as usize, msg_hdr.msg_iovlen) {
+        Ok(v) => v,
+        Err(e) => return -(e.code() as isize),
+    };
 
-    let mut flat = alloc::vec![0u8; total_len];
+    // Compute total capacity.
+    let mut total_len: usize = 0;
+    for iov in &iovecs {
+        let iov_len = match usize::try_from(iov.iov_len) {
+            Ok(l) => l,
+            Err(_) => return -(LinuxError::EINVAL.code() as isize),
+        };
+        total_len = match total_len.checked_add(iov_len) {
+            Some(sum) => sum,
+            None => return -(LinuxError::EINVAL.code() as isize),
+        };
+    }
+
+    let mut flat = match crate::impls::utils::alloc_zeroed_bytes(total_len, "sys_recvmsg.flat") {
+        Ok(buf) => buf,
+        Err(e) => return -(e.code() as isize),
+    };
 
     let socket = match get_socket(fd) {
         Ok(s) => s,
@@ -218,32 +278,41 @@ pub fn sys_recvmsg(fd: usize, msg: usize, _flags: usize) -> isize {
     match result {
         Ok((recv, maybe_src)) => {
             if let Some(src_addr) = maybe_src {
-                let name_ptr = msg.msg_name as usize;
+                let name_ptr = msg_hdr.msg_name as usize;
                 if name_ptr != 0 {
                     let net_addr = NetSocketAddr::from(src_addr);
-                    let mut alen = msg.msg_namelen;
+                    let mut alen = msg_hdr.msg_namelen;
                     if net_addr.write_to_raw(name_ptr, &mut alen).is_ok() {
-                        msg.msg_namelen = alen;
+                        msg_hdr.msg_namelen = alen;
                     }
                 }
             }
 
             // Scatter received data back into iov buffers.
             let mut written = 0;
-            for i in 0..iov_count {
+            for iov in &iovecs {
                 if written >= recv {
                     break;
                 }
-                let iov = unsafe { &*msg.msg_iov.add(i) };
-                let seg_len = iov.iov_len.min(recv - written);
-                unsafe {
-                    core::ptr::copy_nonoverlapping(
-                        flat.as_ptr().add(written),
-                        iov.iov_base,
-                        seg_len,
-                    );
+                let iov_len = match usize::try_from(iov.iov_len) {
+                    Ok(l) => l,
+                    Err(_) => return -(LinuxError::EINVAL.code() as isize),
+                };
+                let seg_len = iov_len.min(recv - written);
+                if seg_len > 0 {
+                    if let Err(e) = crate::impls::utils::write_user_bytes(
+                        iov.iov_base as usize,
+                        &flat[written..written + seg_len],
+                    ) {
+                        return -(e.code() as isize);
+                    }
+                    written += seg_len;
                 }
-                written += seg_len;
+            }
+
+            // Write updated msg_hdr back to user space.
+            if let Err(e) = write_user_plain(msg, &msg_hdr) {
+                return -(e.code() as isize);
             }
 
             recv as isize
