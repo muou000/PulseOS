@@ -18,6 +18,20 @@ fn insert_socket(socket: Socket, flags: FdFlags) -> Result<usize, LinuxError> {
     insert_fd_entry(entry)
 }
 
+fn read_user_plain<T: Copy>(user_addr: usize) -> Result<T, LinuxError> {
+    crate::impls::utils::with_process(|process| {
+        pulse_core::task::uaccess::read_user_plain(process, user_addr)
+    })?
+    .map_err(|e| LinuxError::from(e.canonicalize()))
+}
+
+fn write_user_plain<T: Copy>(user_addr: usize, value: &T) -> Result<(), LinuxError> {
+    crate::impls::utils::with_process(|process| {
+        pulse_core::task::uaccess::write_user_plain(process, user_addr, value)
+    })?
+    .map_err(|e| LinuxError::from(e.canonicalize()))
+}
+
 pub fn sys_socket(domain: usize, raw_ty: usize, proto: usize) -> isize {
     let domain = domain as u32;
     let raw_ty = raw_ty as u32;
@@ -184,13 +198,12 @@ pub fn sys_accept4(fd: usize, addr: usize, addrlen: usize, flags: usize) -> isiz
     if addr != 0 {
         if let Some(remote) = remote_addr {
             let net_addr = NetSocketAddr::from(remote);
-            // Read addrlen from user pointer.
-            let addrlen_ptr = addrlen as *mut u32;
-            if !addrlen_ptr.is_null() {
-                let current_len = unsafe { addrlen_ptr.read() };
-                let mut len = current_len;
-                if net_addr.write_to_raw(addr, &mut len).is_ok() {
-                    unsafe { addrlen_ptr.write(len) };
+            if addrlen != 0 {
+                if let Ok(current_len) = read_user_plain::<u32>(addrlen) {
+                    let mut len = current_len;
+                    if net_addr.write_to_raw(addr, &mut len).is_ok() {
+                        let _ = write_user_plain(addrlen, &len);
+                    }
                 }
             }
         }

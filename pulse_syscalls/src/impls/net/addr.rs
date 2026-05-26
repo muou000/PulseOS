@@ -11,6 +11,13 @@ use core::{
 use axerrno::LinuxError;
 use linux_raw_sys::net::*;
 
+fn read_user_plain<T: Copy>(user_addr: usize) -> Result<T, LinuxError> {
+    crate::impls::utils::with_process(|process| {
+        pulse_core::task::uaccess::read_user_plain(process, user_addr)
+    })?
+    .map_err(|e| LinuxError::from(e.canonicalize()))
+}
+
 fn read_family(addr: usize, addrlen: u32) -> Result<u16, LinuxError> {
     if size_of::<__kernel_sa_family_t>() > addrlen as usize {
         return Err(LinuxError::EINVAL);
@@ -18,7 +25,7 @@ fn read_family(addr: usize, addrlen: u32) -> Result<u16, LinuxError> {
     if addr == 0 {
         return Err(LinuxError::EFAULT);
     }
-    let family = unsafe { *(addr as *const __kernel_sa_family_t) };
+    let family = read_user_plain::<__kernel_sa_family_t>(addr)?;
     Ok(family)
 }
 
@@ -29,7 +36,7 @@ fn read_v4(addr: usize, addrlen: u32) -> Result<SocketAddrV4, LinuxError> {
     if addr == 0 {
         return Err(LinuxError::EFAULT);
     }
-    let addr_in = unsafe { &*(addr as *const sockaddr_in) };
+    let addr_in = read_user_plain::<sockaddr_in>(addr)?;
     if addr_in.sin_family as u32 != AF_INET {
         return Err(LinuxError::EAFNOSUPPORT);
     }
@@ -46,7 +53,7 @@ fn read_v6(addr: usize, addrlen: u32) -> Result<SocketAddrV6, LinuxError> {
     if addr == 0 {
         return Err(LinuxError::EFAULT);
     }
-    let addr_in6 = unsafe { &*(addr as *const sockaddr_in6) };
+    let addr_in6 = read_user_plain::<sockaddr_in6>(addr)?;
     if addr_in6.sin6_family as u32 != AF_INET6 {
         return Err(LinuxError::EAFNOSUPPORT);
     }
@@ -72,13 +79,10 @@ fn write_v4(v4: &SocketAddrV4, dst: usize, addrlen: &mut u32) -> Result<(), Linu
     if dst == 0 {
         return Err(LinuxError::EFAULT);
     }
-    unsafe {
-        core::ptr::copy_nonoverlapping(
-            &src as *const sockaddr_in as *const u8,
-            dst as *mut u8,
-            copy_len,
-        );
-    }
+    let src_bytes = unsafe {
+        core::slice::from_raw_parts(&src as *const sockaddr_in as *const u8, copy_len)
+    };
+    crate::impls::utils::write_user_bytes(dst, src_bytes)?;
     *addrlen = src_len as u32;
     Ok(())
 }
@@ -100,13 +104,10 @@ fn write_v6(v6: &SocketAddrV6, dst: usize, addrlen: &mut u32) -> Result<(), Linu
     if dst == 0 {
         return Err(LinuxError::EFAULT);
     }
-    unsafe {
-        core::ptr::copy_nonoverlapping(
-            &src as *const sockaddr_in6 as *const u8,
-            dst as *mut u8,
-            copy_len,
-        );
-    }
+    let src_bytes = unsafe {
+        core::slice::from_raw_parts(&src as *const sockaddr_in6 as *const u8, copy_len)
+    };
+    crate::impls::utils::write_user_bytes(dst, src_bytes)?;
     *addrlen = src_len as u32;
     Ok(())
 }
