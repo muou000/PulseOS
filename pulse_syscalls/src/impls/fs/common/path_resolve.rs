@@ -17,7 +17,7 @@ pub(crate) fn context_for_dirfd(dirfd: i32) -> Result<FsContext, LinuxError> {
     if dirfd < 0 {
         return Err(LinuxError::EBADF);
     }
-    let location = with_process(|process| process.fd_table.lock().get_location(dirfd as usize))??;
+    let location = with_process(|process| process.get_fd_location(dirfd as usize))??;
     if !location.is_dir() {
         return Err(LinuxError::ENOTDIR);
     }
@@ -35,14 +35,14 @@ pub(crate) fn resolve_location_at_ptr(
             if dirfd < 0 {
                 return Err(LinuxError::EBADF);
             }
-            return with_process(|process| process.fd_table.lock().get_location(dirfd as usize))?;
+            return with_process(|process| process.get_fd_location(dirfd as usize))?;
         }
         let path = read_user_cstring(pathname)?;
         if path.as_bytes().is_empty() {
             if dirfd < 0 {
                 return Err(LinuxError::EBADF);
             }
-            return with_process(|process| process.fd_table.lock().get_location(dirfd as usize))?;
+            return with_process(|process| process.get_fd_location(dirfd as usize))?;
         }
     }
 
@@ -107,7 +107,7 @@ fn try_resolve_location_fast(
     if path.is_empty() || path.starts_with('/') || path.contains('/') {
         return None;
     }
-    let base = match with_process(|process| process.fd_table.lock().get_location(dirfd as usize)) {
+    let base = match with_process(|process| process.get_fd_location(dirfd as usize)) {
         Ok(Ok(loc)) => loc,
         Ok(Err(e)) | Err(e) => return Some(Err(e)),
     };

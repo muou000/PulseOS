@@ -6,23 +6,23 @@ use pulse_core::{
 };
 
 pub(crate) fn get_fd_entry(fd: usize) -> Result<FdEntry, LinuxError> {
-    with_current_process(|process| process.fd_table.lock().get_entry_cloned(fd))?
+    with_current_process(|process| process.get_fd_entry(fd))?
 }
 
 pub(crate) fn insert_fd_entry(entry: FdEntry) -> Result<usize, LinuxError> {
-    with_current_process(|process| process.fd_table.lock().insert_next(entry))?
+    with_current_process(|process| process.insert_fd_entry(entry))?
 }
 
 pub(crate) fn insert_fd_entry_from(min_fd: usize, entry: FdEntry) -> Result<usize, LinuxError> {
-    with_current_process(|process| process.fd_table.lock().insert_from(min_fd, entry))?
+    with_current_process(|process| process.insert_fd_entry_from(min_fd, entry))?
 }
 
 pub(crate) fn set_fd_entry(fd: usize, entry: FdEntry) -> Result<(), LinuxError> {
-    with_current_process(|process| process.fd_table.lock().insert_at(fd, entry))?
+    with_current_process(|process| process.set_fd_entry(fd, entry))?
 }
 
 pub(crate) fn remove_fd_entry(fd: usize) -> Result<FdEntry, LinuxError> {
-    with_current_process(|process| process.fd_table.lock().remove_or_err(fd))?
+    with_current_process(|process| process.remove_fd_entry(fd))?
 }
 
 pub(crate) fn open_fd_flags(flags: usize) -> FdFlags {
