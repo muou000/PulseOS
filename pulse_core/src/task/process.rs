@@ -33,7 +33,7 @@ const ROBUST_LIST_LIMIT: usize = 2048;
 const DEFAULT_MEMLOCK_LIMIT_BYTES: u64 = u64::MAX;
 const DEFAULT_STACK_LIMIT_BYTES: u64 = USER_STACK_SIZE as u64;
 const MAX_STACK_LIMIT_BYTES: u64 = USER_STACK_SIZE as u64;
-const DEFAULT_NOFILE_LIMIT: u64 = FD_LIMIT as u64;
+const DEFAULT_NOFILE_LIMIT: u64 = 1024;
 const MAX_NOFILE_LIMIT: u64 = FD_LIMIT as u64;
 
 static ZOMBIE_ASPACE_HANDLE: Lazy<Arc<Mutex<AddrSpace>>> = Lazy::new(|| {
@@ -754,14 +754,32 @@ impl Process {
     }
 
     pub fn insert_fd_entry(&self, entry: crate::fd_table::FdEntry) -> Result<usize, axerrno::LinuxError> {
-        self.fd_table.lock().insert_next(entry)
+        let limit = self.rlimit_state.lock().nofile_soft as usize;
+        let mut table = self.fd_table.lock();
+        let fd = table.insert_next(entry)?;
+        if fd >= limit {
+            table.remove(fd);
+            return Err(axerrno::LinuxError::EMFILE);
+        }
+        Ok(fd)
     }
 
     pub fn insert_fd_entry_from(&self, min_fd: usize, entry: crate::fd_table::FdEntry) -> Result<usize, axerrno::LinuxError> {
-        self.fd_table.lock().insert_from(min_fd, entry)
+        let limit = self.rlimit_state.lock().nofile_soft as usize;
+        let mut table = self.fd_table.lock();
+        let fd = table.insert_from(min_fd, entry)?;
+        if fd >= limit {
+            table.remove(fd);
+            return Err(axerrno::LinuxError::EMFILE);
+        }
+        Ok(fd)
     }
 
     pub fn set_fd_entry(&self, fd: usize, entry: crate::fd_table::FdEntry) -> Result<(), axerrno::LinuxError> {
+        let limit = self.rlimit_state.lock().nofile_soft as usize;
+        if fd >= limit {
+            return Err(axerrno::LinuxError::EBADF);
+        }
         self.fd_table.lock().insert_at(fd, entry)
     }
 
