@@ -733,6 +733,10 @@ pub fn sys_pselect6(
          {exceptfds:#x}, timeout: {timeout:#x}"
     );
 
+    if nfds > 1024 {
+        return -LinuxError::EINVAL.code() as isize;
+    }
+
     let process = match pulse_core::task::current_process() {
         Ok(p) => p,
         Err(e) => return -e.code() as isize,

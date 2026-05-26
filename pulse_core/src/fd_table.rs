@@ -1,5 +1,5 @@
 use alloc::{
-    collections::{BTreeMap, btree_map::Entry, VecDeque},
+    collections::VecDeque,
     sync::Arc,
 };
 use core::{
@@ -19,7 +19,7 @@ use spin::{Lazy, Mutex};
 use crate::cpu_dma_latency::{CpuDmaLatencyRequest, effective_latency_us};
 
 pub const FD_RESERVED: usize = 3;
-pub const FD_LIMIT: usize = 1024;
+pub const FD_LIMIT: usize = 1048576;
 
 bitflags::bitflags! {
     #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -954,59 +954,64 @@ pub fn pipe_entries(flags: FdFlags) -> (FdEntry, FdEntry) {
 
 #[derive(Default)]
 pub struct FdTable {
-    entries: BTreeMap<usize, FdEntry>,
+    entries: alloc::vec::Vec<Option<FdEntry>>,
+    count: usize,
 }
 
 impl FdTable {
     pub fn new() -> Self {
         Self {
-            entries: BTreeMap::new(),
+            entries: alloc::vec::Vec::new(),
+            count: 0,
         }
     }
 
     pub fn clone_for_fork(&self) -> LinuxResult<Self> {
-        let mut entries = BTreeMap::new();
-        for (fd, entry) in &self.entries {
-            entries.insert(*fd, entry.clone());
-        }
-        Ok(Self { entries })
+        Ok(Self {
+            entries: self.entries.clone(),
+            count: self.count,
+        })
     }
 
     pub fn take_cloexec_on_exec(&mut self) -> alloc::vec::Vec<FdEntry> {
         let mut removed = alloc::vec::Vec::new();
-        let cloexec_fds: alloc::vec::Vec<usize> = self
-            .entries
-            .iter()
-            .filter_map(|(&fd, entry)| entry.flags.contains(FdFlags::CLOEXEC).then_some(fd))
-            .collect();
-        for fd in cloexec_fds {
-            if let Some(entry) = self.entries.remove(&fd) {
-                axlog::info!(
-                    "take_cloexec_on_exec: removing cloexec fd entry fd={}, flags={:?}, \
-                     object={:p}",
-                    fd,
-                    entry.flags,
-                    Arc::as_ptr(&entry.object)
-                );
-                removed.push(entry);
+        for (fd, slot) in self.entries.iter_mut().enumerate() {
+            if let Some(entry) = slot {
+                if entry.flags.contains(FdFlags::CLOEXEC) {
+                    axlog::info!(
+                        "take_cloexec_on_exec: removing cloexec fd entry fd={}, flags={:?}, \
+                         object={:p}",
+                        fd,
+                        entry.flags,
+                        Arc::as_ptr(&entry.object)
+                    );
+                    if let Some(taken) = slot.take() {
+                        removed.push(taken);
+                        self.count = self.count.saturating_sub(1);
+                    }
+                }
             }
         }
         removed
     }
 
     pub fn drain_all(&mut self) -> alloc::vec::Vec<FdEntry> {
-        self.entries
-            .split_off(&0)
-            .into_values()
-            .collect::<alloc::vec::Vec<_>>()
+        let mut removed = alloc::vec::Vec::new();
+        for slot in self.entries.iter_mut() {
+            if let Some(entry) = slot.take() {
+                removed.push(entry);
+            }
+        }
+        self.count = 0;
+        removed
     }
 
     pub fn clone_all_entries(&self) -> alloc::vec::Vec<FdEntry> {
-        self.entries.values().cloned().collect()
+        self.entries.iter().filter_map(|slot| slot.clone()).collect()
     }
 
     pub fn get(&self, fd: usize) -> Option<&FdEntry> {
-        self.entries.get(&fd)
+        self.entries.get(fd).and_then(|slot| slot.as_ref())
     }
 
     pub fn get_entry_cloned(&self, fd: usize) -> LinuxResult<FdEntry> {
@@ -1022,28 +1027,70 @@ impl FdTable {
     }
 
     pub fn get_mut(&mut self, fd: usize) -> Option<&mut FdEntry> {
-        self.entries.get_mut(&fd)
+        self.entries.get_mut(fd).and_then(|slot| slot.as_mut())
     }
 
     pub fn insert_at(&mut self, fd: usize, entry: FdEntry) -> LinuxResult {
         if fd >= FD_LIMIT {
             return Err(LinuxError::EBADF);
         }
-        self.entries.insert(fd, entry);
+        if fd >= self.entries.len() {
+            let mut new_len = core::cmp::max(16, self.entries.len());
+            while new_len <= fd {
+                new_len = new_len.saturating_mul(2);
+            }
+            new_len = core::cmp::min(new_len, FD_LIMIT);
+            if fd >= new_len {
+                return Err(LinuxError::EMFILE);
+            }
+            self.entries.resize_with(new_len, || None);
+        }
+        if self.entries[fd].is_none() {
+            self.count = self.count.saturating_add(1);
+        }
+        self.entries[fd] = Some(entry);
         Ok(())
     }
 
     pub fn insert_from(&mut self, min_fd: usize, entry: FdEntry) -> LinuxResult<usize> {
-        let mut pending = Some(entry);
-        for fd in min_fd..FD_LIMIT {
-            if let Entry::Vacant(slot) = self.entries.entry(fd) {
-                if let Some(entry) = pending.take() {
-                    slot.insert(entry);
+        let mut found_fd = None;
+        if min_fd < self.entries.len() {
+            for (fd, slot) in self.entries.iter().enumerate().skip(min_fd) {
+                if slot.is_none() {
+                    found_fd = Some(fd);
+                    break;
                 }
-                return Ok(fd);
             }
         }
-        Err(LinuxError::EMFILE)
+
+        let fd = match found_fd {
+            Some(fd) => fd,
+            None => {
+                let next_fd = core::cmp::max(min_fd, self.entries.len());
+                if next_fd >= FD_LIMIT {
+                    return Err(LinuxError::EMFILE);
+                }
+                next_fd
+            }
+        };
+
+        if fd >= self.entries.len() {
+            let mut new_len = core::cmp::max(16, self.entries.len());
+            while new_len <= fd {
+                new_len = new_len.saturating_mul(2);
+            }
+            new_len = core::cmp::min(new_len, FD_LIMIT);
+            if fd >= new_len {
+                return Err(LinuxError::EMFILE);
+            }
+            self.entries.resize_with(new_len, || None);
+        }
+
+        if self.entries[fd].is_none() {
+            self.count = self.count.saturating_add(1);
+        }
+        self.entries[fd] = Some(entry);
+        Ok(fd)
     }
 
     pub fn insert_next(&mut self, entry: FdEntry) -> LinuxResult<usize> {
@@ -1051,7 +1098,15 @@ impl FdTable {
     }
 
     pub fn remove(&mut self, fd: usize) -> Option<FdEntry> {
-        self.entries.remove(&fd)
+        if fd < self.entries.len() {
+            let res = self.entries[fd].take();
+            if res.is_some() {
+                self.count = self.count.saturating_sub(1);
+            }
+            res
+        } else {
+            None
+        }
     }
 
     pub fn remove_or_err(&mut self, fd: usize) -> LinuxResult<FdEntry> {
@@ -1059,11 +1114,11 @@ impl FdTable {
     }
 
     pub fn len(&self) -> usize {
-        self.entries.len()
+        self.count
     }
 
     pub fn is_empty(&self) -> bool {
-        self.entries.is_empty()
+        self.count == 0
     }
 }
 
