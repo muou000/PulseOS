@@ -1,14 +1,7 @@
 use axerrno::LinuxError;
 use axlog::*;
-use pulse_core::task::with_current_process;
 
-use super::addr::NetSocketAddr;
-use crate::net::Socket;
-
-fn get_socket(fd: usize) -> Result<alloc::sync::Arc<Socket>, LinuxError> {
-    let entry = with_current_process(|p| p.get_fd_entry(fd))??;
-    Socket::from_fd_entry(&entry.object)
-}
+use super::{addr::NetSocketAddr, get_socket};
 
 pub fn sys_getsockname(fd: usize, addr: usize, addrlen: usize) -> isize {
     let socket = match get_socket(fd) {

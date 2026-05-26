@@ -2,16 +2,9 @@ use alloc::vec::Vec;
 
 use axerrno::LinuxError;
 use axlog::*;
-use pulse_core::task::with_current_process;
 
-use super::addr::NetSocketAddr;
+use super::{addr::NetSocketAddr, get_socket};
 use crate::net::Socket;
-
-/// Helper: get a socket from fd.
-fn get_socket(fd: usize) -> Result<alloc::sync::Arc<Socket>, LinuxError> {
-    let entry = with_current_process(|p| p.get_fd_entry(fd))??;
-    Socket::from_fd_entry(&entry.object)
-}
 
 /// iovec structure (POSIX).
 #[repr(C)]

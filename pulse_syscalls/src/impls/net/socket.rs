@@ -7,24 +7,15 @@ use linux_raw_sys::{
     general::{O_CLOEXEC, O_NONBLOCK},
     net::{AF_INET, AF_INET6, IPPROTO_TCP, IPPROTO_UDP, SHUT_RD, SHUT_RDWR, SHUT_WR},
 };
-use pulse_core::{
-    fd_table::{FdEntry, FdFlags},
-    task::with_current_process,
-};
+use pulse_core::fd_table::{FdEntry, FdFlags};
 
-use super::addr::NetSocketAddr;
-use crate::net::Socket;
-
-/// Helper: get a socket from fd, return ENOTSOCK if not a socket.
-fn get_socket(fd: usize) -> Result<Arc<Socket>, LinuxError> {
-    let entry = with_current_process(|p| p.get_fd_entry(fd))??;
-    Socket::from_fd_entry(&entry.object)
-}
+use super::{addr::NetSocketAddr, get_socket};
+use crate::{impls::fs::common::insert_fd_entry, net::Socket};
 
 /// Helper: insert a socket into the fd table.
 fn insert_socket(socket: Socket, flags: FdFlags) -> Result<usize, LinuxError> {
     let entry = FdEntry::new(Arc::new(socket), flags);
-    with_current_process(|p| p.insert_fd_entry(entry))?
+    insert_fd_entry(entry)
 }
 
 pub fn sys_socket(domain: usize, raw_ty: usize, proto: usize) -> isize {
