@@ -7,14 +7,8 @@ use alloc::sync::Arc;
 
 use axerrno::LinuxError;
 use axlog::*;
-use pulse_core::task::with_current_process;
-
+use super::get_socket;
 use crate::net::Socket;
-
-fn get_socket(fd: usize) -> Result<Arc<Socket>, LinuxError> {
-    let entry = with_current_process(|p| p.get_fd_entry(fd))??;
-    Socket::from_fd_entry(&entry.object)
-}
 
 fn read_user_plain<T: Copy>(user_addr: usize) -> Result<T, LinuxError> {
     crate::impls::utils::with_process(|process| {
