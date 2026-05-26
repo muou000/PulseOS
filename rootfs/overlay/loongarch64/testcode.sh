@@ -27,6 +27,6 @@ sh ./iperf_testcode.sh
 
 cd /
 sh ./ltp_musl_testcode.sh
-# sh ./ltp_glibc_testcode.sh
+sh ./ltp_glibc_testcode.sh
 
 exit 0
