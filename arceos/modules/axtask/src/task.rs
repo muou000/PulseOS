@@ -196,6 +196,14 @@ impl TaskInner {
     /// Returns a reference to the task extended data if it has not been
     /// initialized yet (empty), otherwise returns [`None`].
     pub fn init_task_ext<T: Sized>(&mut self, data: T) -> Option<&T> {
+        let ext_name = AxTaskExt::ext_name();
+        let req_name = core::any::type_name::<T>();
+        if ext_name != req_name {
+            panic!(
+                "task extension type mismatch! Compiled extension: {}, but trying to initialize with: {}",
+                ext_name, req_name
+            );
+        }
         if self.task_ext.is_empty() {
             self.task_ext.write(data).map(|data| &*data)
         } else {

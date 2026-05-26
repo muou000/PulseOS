@@ -40,20 +40,9 @@ fn prune_dead_processes(registry: &mut BTreeMap<u64, Weak<Process>>) {
 // resolved via the `task_ext` pointer on the current task. Processes
 // are tracked in `PROCESS_REGISTRY` for pid-based queries.
 
-/// Returns the thread handle stored in a task's extension slot.
-///
-/// # Safety
-///
-/// The caller must ensure that `task.task_ext_ptr()` either returns null or
-/// points to a valid `ThreadHandle` written by the task extension system, and
-/// that the pointed-to handle remains alive for the duration of the borrow.
 pub(super) fn thread_handle_from_task(task: &axtask::TaskInner) -> Option<&ThreadHandle> {
-    let task_ext_ptr = unsafe { task.task_ext_ptr() };
-    if task_ext_ptr.is_null() {
-        return None;
-    }
-
-    Some(unsafe { &*(task_ext_ptr as *const ThreadHandle) })
+    use axtask::TaskExtRef;
+    task.task_ext_opt()
 }
 
 pub fn current_thread() -> LinuxResult<Arc<Thread>> {
