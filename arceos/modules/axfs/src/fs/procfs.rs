@@ -31,7 +31,8 @@ const SUB_INO_CMDLINE: u64 = 1;
 const SUB_INO_STATUS: u64 = 2;
 const SUB_INO_EXE: u64 = 3;
 const SUB_INO_COMM: u64 = 4;
-const SUB_INO_FD_DIR: u64 = 5;
+const SUB_INO_STAT: u64 = 5;
+const SUB_INO_FD_DIR: u64 = 6;
 const SUB_INO_FD_BASE: u64 = 0x40;
 
 pub trait ProcfsProcessProvider: Send + Sync {
@@ -42,6 +43,7 @@ pub trait ProcfsProcessProvider: Send + Sync {
     fn comm(&self, pid: u64) -> Option<String>;
     fn status(&self, pid: u64) -> Option<String>;
     fn exe(&self, pid: u64) -> Option<String>;
+    fn stat(&self, pid: u64) -> Option<String>;
     fn process_fds(&self, pid: u64) -> Option<Vec<u32>>;
     fn fd_path(&self, pid: u64, fd: u32) -> Option<String>;
 }
@@ -72,6 +74,7 @@ enum ProcLiveFileKind {
     PidStatus(u64),
     PidExe(u64),
     PidComm(u64),
+    PidStat(u64),
     PidFdSymlink(u64, u32),
 }
 
@@ -351,6 +354,7 @@ impl ProcFilesystem {
                     entries.insert("status".into(), InodeRef::new(PID_INODE_START + (pid << PID_INODE_SHIFT) + SUB_INO_STATUS));
                     entries.insert("exe".into(), InodeRef::new(PID_INODE_START + (pid << PID_INODE_SHIFT) + SUB_INO_EXE));
                     entries.insert("comm".into(), InodeRef::new(PID_INODE_START + (pid << PID_INODE_SHIFT) + SUB_INO_COMM));
+                    entries.insert("stat".into(), InodeRef::new(PID_INODE_START + (pid << PID_INODE_SHIFT) + SUB_INO_STAT));
                     entries.insert("fd".into(), InodeRef::new(PID_INODE_START + (pid << PID_INODE_SHIFT) + SUB_INO_FD_DIR));
                 }
                 return Ok(dir);
@@ -389,6 +393,7 @@ impl ProcFilesystem {
                 SUB_INO_STATUS => ProcLiveFileKind::PidStatus(pid),
                 SUB_INO_EXE => ProcLiveFileKind::PidExe(pid),
                 SUB_INO_COMM => ProcLiveFileKind::PidComm(pid),
+                SUB_INO_STAT => ProcLiveFileKind::PidStat(pid),
                 _ => return Err(VfsError::NotFound),
             };
 
@@ -531,6 +536,9 @@ fn render_proc_file(kind: ProcLiveFileKind) -> String {
         }
         ProcLiveFileKind::PidComm(pid) => {
             PROCESS_PROVIDER.get().and_then(|p| p.comm(pid)).unwrap_or_default()
+        }
+        ProcLiveFileKind::PidStat(pid) => {
+            PROCESS_PROVIDER.get().and_then(|p| p.stat(pid)).unwrap_or_default()
         }
         ProcLiveFileKind::PidFdSymlink(pid, fd) => {
             PROCESS_PROVIDER.get().and_then(|p| p.fd_path(pid, fd)).unwrap_or_default()
@@ -717,6 +725,7 @@ impl DirNodeOps for ProcNode {
                     all_entries.push(("status".to_owned(), PID_INODE_START + (pid << PID_INODE_SHIFT) + SUB_INO_STATUS));
                     all_entries.push(("exe".to_owned(), PID_INODE_START + (pid << PID_INODE_SHIFT) + SUB_INO_EXE));
                     all_entries.push(("comm".to_owned(), PID_INODE_START + (pid << PID_INODE_SHIFT) + SUB_INO_COMM));
+                    all_entries.push(("stat".to_owned(), PID_INODE_START + (pid << PID_INODE_SHIFT) + SUB_INO_STAT));
                     all_entries.push(("fd".to_owned(), PID_INODE_START + (pid << PID_INODE_SHIFT) + SUB_INO_FD_DIR));
                 } else if sub == SUB_INO_FD_DIR {
                     all_entries.push((".".to_owned(), self.ino));
@@ -788,6 +797,7 @@ impl DirNodeOps for ProcNode {
                         "status" => Some(SUB_INO_STATUS),
                         "exe" => Some(SUB_INO_EXE),
                         "comm" => Some(SUB_INO_COMM),
+                        "stat" => Some(SUB_INO_STAT),
                         "fd" => Some(SUB_INO_FD_DIR),
                         _ => None,
                     };
