@@ -17,14 +17,14 @@ use crate::net::Socket;
 
 /// Helper: get a socket from fd, return ENOTSOCK if not a socket.
 fn get_socket(fd: usize) -> Result<Arc<Socket>, LinuxError> {
-    let entry = with_current_process(|p| p.fd_table.lock().get_entry_cloned(fd))??;
+    let entry = with_current_process(|p| p.get_fd_entry(fd))??;
     Socket::from_fd_entry(&entry.object)
 }
 
 /// Helper: insert a socket into the fd table.
 fn insert_socket(socket: Socket, flags: FdFlags) -> Result<usize, LinuxError> {
     let entry = FdEntry::new(Arc::new(socket), flags);
-    with_current_process(|p| p.fd_table.lock().insert_next(entry))?
+    with_current_process(|p| p.insert_fd_entry(entry))?
 }
 
 pub fn sys_socket(domain: usize, raw_ty: usize, proto: usize) -> isize {

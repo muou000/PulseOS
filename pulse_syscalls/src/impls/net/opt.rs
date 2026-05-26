@@ -12,7 +12,7 @@ use pulse_core::task::with_current_process;
 use crate::net::Socket;
 
 fn get_socket(fd: usize) -> Result<Arc<Socket>, LinuxError> {
-    let entry = with_current_process(|p| p.fd_table.lock().get_entry_cloned(fd))??;
+    let entry = with_current_process(|p| p.get_fd_entry(fd))??;
     Socket::from_fd_entry(&entry.object)
 }
 

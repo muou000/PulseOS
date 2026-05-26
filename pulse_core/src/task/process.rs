@@ -376,7 +376,7 @@ impl Process {
         Ok(removed)
     }
 
-    fn validate_user_range(&self, user_addr: usize, len: usize) -> AxResult<()> {
+    pub fn validate_user_range(&self, user_addr: usize, len: usize) -> AxResult<()> {
         if len == 0 {
             return Ok(());
         }
@@ -747,6 +747,166 @@ impl Process {
 
     pub fn write_user_usize(&self, user_addr: usize, value: usize) -> AxResult<()> {
         self.write_user_bytes(user_addr, &value.to_ne_bytes())
+    }
+
+    pub fn get_fd_entry(&self, fd: usize) -> Result<crate::fd_table::FdEntry, axerrno::LinuxError> {
+        self.fd_table.lock().get_entry_cloned(fd)
+    }
+
+    pub fn insert_fd_entry(&self, entry: crate::fd_table::FdEntry) -> Result<usize, axerrno::LinuxError> {
+        self.fd_table.lock().insert_next(entry)
+    }
+
+    pub fn insert_fd_entry_from(&self, min_fd: usize, entry: crate::fd_table::FdEntry) -> Result<usize, axerrno::LinuxError> {
+        self.fd_table.lock().insert_from(min_fd, entry)
+    }
+
+    pub fn set_fd_entry(&self, fd: usize, entry: crate::fd_table::FdEntry) -> Result<(), axerrno::LinuxError> {
+        self.fd_table.lock().insert_at(fd, entry)
+    }
+
+    pub fn remove_fd_entry(&self, fd: usize) -> Result<crate::fd_table::FdEntry, axerrno::LinuxError> {
+        self.fd_table.lock().remove_or_err(fd)
+    }
+
+    pub fn set_fd_cloexec(&self, fd: usize, cloexec: bool) -> Result<(), axerrno::LinuxError> {
+        let mut table = self.fd_table.lock();
+        let entry = table.get_mut(fd).ok_or(axerrno::LinuxError::EBADF)?;
+        entry.flags.set(crate::fd_table::FdFlags::CLOEXEC, cloexec);
+        Ok(())
+    }
+
+    pub fn set_fd_nonblocking(&self, fd: usize, nonblocking: bool) -> Result<(), axerrno::LinuxError> {
+        let mut table = self.fd_table.lock();
+        let entry = table.get_mut(fd).ok_or(axerrno::LinuxError::EBADF)?;
+        entry.flags.set(crate::fd_table::FdFlags::NONBLOCK, nonblocking);
+        entry.object.set_nonblocking(nonblocking)?;
+        Ok(())
+    }
+
+    pub fn get_fd_location(&self, fd: usize) -> Result<axfs_ng_vfs::Location, axerrno::LinuxError> {
+        self.fd_table.lock().get_location(fd)
+    }
+
+    pub fn clone_all_fd_entries(&self) -> Vec<crate::fd_table::FdEntry> {
+        self.fd_table.lock().clone_all_entries()
+    }
+
+    pub fn is_user_range(&self, addr: usize, len: usize) -> bool {
+        self.validate_user_range(addr, len).is_ok()
+    }
+
+    pub fn align_user_range(&self, addr: usize, len: usize) -> Result<(usize, usize), axerrno::LinuxError> {
+        if len == 0 {
+            return Ok((addr & !(4096 - 1), 0));
+        }
+        let aligned_addr = addr & !(4096 - 1);
+        let end = addr.checked_add(len).ok_or(axerrno::LinuxError::EINVAL)?;
+        let aligned_end = (end.checked_add(4096 - 1).ok_or(axerrno::LinuxError::EINVAL)?) & ! (4096 - 1);
+        if aligned_end < aligned_addr {
+            return Err(axerrno::LinuxError::EINVAL);
+        }
+        let aligned_len = aligned_end - aligned_addr;
+        if !self.is_user_range(aligned_addr, aligned_len) {
+            return Err(axerrno::LinuxError::EINVAL);
+        }
+        Ok((aligned_addr, aligned_len))
+    }
+
+    pub fn is_mapped_range(&self, addr: usize, len: usize) -> bool {
+        if len == 0 {
+            return true;
+        }
+        let aspace_handle = self.aspace_handle();
+        let aspace = aspace_handle.lock();
+        aspace.can_access_range(VirtAddr::from(addr), len, MappingFlags::empty())
+    }
+
+    pub fn prefault_user_range(&self, addr: usize, len: usize) -> Result<(), axerrno::LinuxError> {
+        if len == 0 {
+            return Ok(());
+        }
+        let aspace_handle = self.aspace_handle();
+        let mut aspace = aspace_handle.lock();
+        let start = VirtAddr::from(addr);
+        if !aspace.can_access_range(start, len, MappingFlags::empty()) {
+            return Err(axerrno::LinuxError::ENOMEM);
+        }
+        let end = addr.checked_add(len).ok_or(axerrno::LinuxError::EINVAL)?;
+        let pages =
+            memory_addr::PageIter4K::new(VirtAddr::from(addr), VirtAddr::from(end)).ok_or(axerrno::LinuxError::EINVAL)?;
+        for page in pages {
+            let already_resident = aspace
+                .page_table()
+                .query(page)
+                .map(|(frame, flags, _)| frame.as_usize() != 0 && !flags.is_empty())
+                .unwrap_or(false);
+            if already_resident {
+                continue;
+            }
+            if !aspace.handle_page_fault(page, MappingFlags::USER) {
+                return Err(axerrno::LinuxError::ENOMEM);
+            }
+        }
+        Ok(())
+    }
+
+    pub fn lock_mapped_range(&self, addr: usize, len: usize) -> Result<(), axerrno::LinuxError> {
+        if len == 0 {
+            return Ok(());
+        }
+        self.prefault_user_range(addr, len)?;
+        let privileged = self.is_root_user();
+        self.memlock_try_lock_range(addr, len, privileged)
+            .map_err(|e| match e {
+                AxError::NoMemory => axerrno::LinuxError::ENOMEM,
+                _ => axerrno::LinuxError::EINVAL,
+            })?;
+        Ok(())
+    }
+
+    pub fn lock_all_current_mappings(&self) -> Result<(), axerrno::LinuxError> {
+        let user_area_count = {
+            let mut count = 0usize;
+            let aspace_handle = self.aspace_handle();
+            let aspace = aspace_handle.lock();
+            aspace.for_each_area(|_, _, flags| {
+                if flags.contains(MappingFlags::USER) {
+                    count = count.saturating_add(1);
+                }
+            });
+            count
+        };
+
+        let mut ranges: Vec<(usize, usize)> = Vec::new();
+        if ranges.try_reserve_exact(user_area_count).is_err() {
+            return Err(axerrno::LinuxError::ENOMEM);
+        }
+        {
+            let aspace_handle = self.aspace_handle();
+            let aspace = aspace_handle.lock();
+            aspace.for_each_area(|start, end, flags| {
+                if !flags.contains(MappingFlags::USER) {
+                    return;
+                }
+                let s = start.align_down_4k().as_usize();
+                let e = end.align_up_4k().as_usize();
+                if e > s {
+                    ranges.push((s, e - s));
+                }
+            });
+        }
+        for (start, len) in ranges {
+            self.lock_mapped_range(start, len)?;
+        }
+        Ok(())
+    }
+
+    pub fn maybe_lock_future_range(&self, addr: usize, len: usize) -> Result<(), axerrno::LinuxError> {
+        if len == 0 || !self.memlock_future_enabled() {
+            return Ok(());
+        }
+        self.lock_mapped_range(addr, len)
     }
 
     pub fn new_uspace(pid: u64) -> AxResult<Arc<Self>> {

@@ -82,42 +82,16 @@ pub fn sys_fcntl(fd: usize, cmd: usize, arg: usize) -> isize {
             }
             Err(e) => -e.code() as isize,
         },
-        F_SETFD => {
-            let result: Result<Result<isize, LinuxError>, LinuxError> =
-                with_process(|process| -> Result<isize, LinuxError> {
-                    let mut table = process.fd_table.lock();
-                    let Some(entry) = table.get_mut(fd) else {
-                        return Err(LinuxError::EBADF);
-                    };
-                    entry
-                        .flags
-                        .set(FdFlags::CLOEXEC, (arg & (FD_CLOEXEC as usize)) != 0);
-                    Ok(0)
-                });
-            match result {
-                Ok(Ok(v)) => v,
-                Ok(Err(e)) => -e.code() as isize,
-                Err(e) => -e.code() as isize,
-            }
-        }
-        F_SETFL => {
-            let result: Result<Result<isize, LinuxError>, LinuxError> =
-                with_process(|process| -> Result<isize, LinuxError> {
-                    let mut table = process.fd_table.lock();
-                    let Some(entry) = table.get_mut(fd) else {
-                        return Err(LinuxError::EBADF);
-                    };
-                    let nonblocking = (arg & O_NONBLOCK as usize) != 0;
-                    entry.flags.set(FdFlags::NONBLOCK, nonblocking);
-                    entry.object.set_nonblocking(nonblocking)?;
-                    Ok(0)
-                });
-            match result {
-                Ok(Ok(v)) => v,
-                Ok(Err(e)) => -e.code() as isize,
-                Err(e) => -e.code() as isize,
-            }
-        }
+        F_SETFD => match with_process(|process| process.set_fd_cloexec(fd, (arg & (FD_CLOEXEC as usize)) != 0)) {
+            Ok(Ok(())) => 0,
+            Ok(Err(e)) => -e.code() as isize,
+            Err(e) => -e.code() as isize,
+        },
+        F_SETFL => match with_process(|process| process.set_fd_nonblocking(fd, (arg & O_NONBLOCK as usize) != 0)) {
+            Ok(Ok(())) => 0,
+            Ok(Err(e)) => -e.code() as isize,
+            Err(e) => -e.code() as isize,
+        },
         F_DUPFD | F_DUPFD_CLOEXEC => {
             let entry = match get_fd_entry(fd) {
                 Ok(entry) => entry,

@@ -582,15 +582,15 @@ pub fn sys_pipe2(fds: usize, flags: usize) -> isize {
     }
     let (read_entry, write_entry) = pipe_entries(open_fd_flags(flags));
     let new_fds = match with_process(|process| -> Result<[i32; 2], LinuxError> {
-        let mut table = process.fd_table.lock();
-        let read_fd = table.insert_next(read_entry)?;
-        let write_fd = match table.insert_next(write_entry) {
+        let read_fd = process.insert_fd_entry(read_entry)?;
+        let write_fd = match process.insert_fd_entry(write_entry) {
             Ok(fd) => fd,
             Err(e) => {
-                if table.remove(read_fd).is_none() {
+                if let Err(remove_e) = process.remove_fd_entry(read_fd) {
                     axlog::warn!(
-                        "sys_pipe2: rollback failed to remove read fd {} after write insert error",
-                        read_fd
+                        "sys_pipe2: rollback failed to remove read fd {} after write insert error: {:?}",
+                        read_fd,
+                        remove_e
                     );
                 }
                 return Err(e);
@@ -675,10 +675,7 @@ pub fn sys_sync() -> isize {
     let mut unique_objects = alloc::collections::BTreeMap::new();
 
     for proc in procs {
-        let entries = {
-            let table = proc.fd_table.lock();
-            table.clone_all_entries()
-        };
+        let entries = proc.clone_all_fd_entries();
 
         for entry in entries {
             let ptr = alloc::sync::Arc::as_ptr(&entry.object) as *const () as usize;
