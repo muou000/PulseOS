@@ -410,8 +410,22 @@ pub fn sys_fchownat(dirfd: i32, pathname: usize, uid: usize, gid: usize, flags: 
             };
             let new_uid = if (uid as u32) != u32::MAX { uid as u32 } else { current_meta.uid };
             let new_gid = if (gid as u32) != u32::MAX { gid as u32 } else { current_meta.gid };
+
+            let mut new_mode = current_meta.mode;
+            if (uid as u32) != u32::MAX || (gid as u32) != u32::MAX {
+                if new_mode.contains(axfs_ng_vfs::NodePermission::SET_UID) {
+                    new_mode.remove(axfs_ng_vfs::NodePermission::SET_UID);
+                }
+                if new_mode.contains(axfs_ng_vfs::NodePermission::SET_GID)
+                    && new_mode.contains(axfs_ng_vfs::NodePermission::GROUP_EXEC)
+                {
+                    new_mode.remove(axfs_ng_vfs::NodePermission::SET_GID);
+                }
+            }
+
             match location.update_metadata(axfs_ng_vfs::MetadataUpdate {
                 owner: Some((new_uid, new_gid)),
+                mode: Some(new_mode),
                 ..Default::default()
             }) {
                 Ok(()) => 0,
