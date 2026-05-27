@@ -42,6 +42,15 @@ test: prepare-tools
 	@cp PulseOS_loongarch64-qemu-virt.elf kernel-la
 	@$(MAKE) img_all
 
+debug: prepare-tools
+	@ARCH=riscv64 APP_FEATURES=qemu LOG=$(LOG) $(MAKE) defconfig
+	@ARCH=riscv64 APP_FEATURES=qemu LOG=$(LOG) BUS=mmio $(MAKE) -C arceos build
+	@cp PulseOS_riscv64-qemu-virt.bin kernel-rv
+	@ARCH=loongarch64 APP_FEATURES=qemu LOG=$(LOG) FEATURES=bus-pci $(MAKE) defconfig
+	@ARCH=loongarch64 APP_FEATURES=qemu LOG=$(LOG) BUS=pci FEATURES=bus-pci $(MAKE) -C arceos build
+	@cp PulseOS_loongarch64-qemu-virt.elf kernel-la
+	@$(MAKE) img_all
+
 build run justrun: prepare-tools defconfig
 	@$(MAKE) -C arceos A=$(A) ARCH=$(ARCH) $@
 
