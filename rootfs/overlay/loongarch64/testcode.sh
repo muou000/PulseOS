@@ -1,6 +1,10 @@
 mkdir -p /fs
 mount -t ext4 device0 /fs
 
+chmod +x /fs/musl/basic/run-all.sh
+chmod +x /fs/glibc/basic/run-all.sh
+
+
 cd /fs/musl
 sh ./basic_testcode.sh
 sh ./busybox_testcode.sh

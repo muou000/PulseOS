@@ -388,7 +388,7 @@ impl CachedFileShared {
             page_cache: if in_memory {
                 Mutex::new(LruCache::unbounded())
             } else {
-                Mutex::new(LruCache::new(NonZeroUsize::new(64).unwrap()))
+                Mutex::new(LruCache::new(NonZeroUsize::new(16384).unwrap()))
             },
             evict_listeners: Mutex::new(Vec::new()),
             io_lock: RwLock::new(()),
