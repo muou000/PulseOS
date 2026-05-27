@@ -4,7 +4,11 @@ use core::{
     time::Duration,
 };
 
-use linux_raw_sys::general::{CLOCK_MONOTONIC, CLOCK_REALTIME, TIMER_ABSTIME, timespec, timeval};
+use linux_raw_sys::general::{
+    CLOCK_BOOTTIME, CLOCK_MONOTONIC, CLOCK_MONOTONIC_COARSE, CLOCK_MONOTONIC_RAW,
+    CLOCK_PROCESS_CPUTIME_ID, CLOCK_REALTIME, CLOCK_REALTIME_COARSE, CLOCK_THREAD_CPUTIME_ID,
+    TIMER_ABSTIME, timespec, timeval,
+};
 use pulse_core::task::uaccess;
 
 use crate::{
@@ -56,13 +60,31 @@ fn write_zero_timespec(user_addr: usize) -> Result<(), LinuxError> {
 }
 
 fn is_supported_clock(clockid: i32) -> bool {
-    matches!(clockid as u32, CLOCK_MONOTONIC | CLOCK_REALTIME)
+    matches!(
+        clockid as u32,
+        CLOCK_MONOTONIC
+            | CLOCK_REALTIME
+            | CLOCK_MONOTONIC_RAW
+            | CLOCK_REALTIME_COARSE
+            | CLOCK_MONOTONIC_COARSE
+            | CLOCK_BOOTTIME
+            | CLOCK_PROCESS_CPUTIME_ID
+    )
 }
 
 fn clock_now(clockid: i32) -> Result<Duration, LinuxError> {
     match clockid as u32 {
-        CLOCK_REALTIME => Ok(axhal::time::wall_time()),
-        CLOCK_MONOTONIC => Ok(axhal::time::monotonic_time()),
+        CLOCK_REALTIME | CLOCK_REALTIME_COARSE => Ok(axhal::time::wall_time()),
+        CLOCK_MONOTONIC | CLOCK_MONOTONIC_RAW | CLOCK_MONOTONIC_COARSE | CLOCK_BOOTTIME => {
+            Ok(axhal::time::monotonic_time())
+        }
+        CLOCK_PROCESS_CPUTIME_ID => {
+            let thread = pulse_core::task::current_thread().map_err(|e| LinuxError::from(e))?;
+            let process = thread.process();
+            let now_ns = axhal::time::monotonic_time_nanos() as u64;
+            let (utime_ns, stime_ns) = process.snapshot_cpu_time_ns(now_ns);
+            Ok(Duration::from_nanos(utime_ns.saturating_add(stime_ns)))
+        }
         _ => Err(LinuxError::EINVAL),
     }
 }
@@ -102,7 +124,7 @@ fn sleep_for_duration_interruptible(dur: Duration) -> Result<Duration, LinuxErro
 
 fn sleep_until_clock_interruptible(clockid: i32, target: Duration) -> Result<Duration, LinuxError> {
     match clockid as u32 {
-        CLOCK_REALTIME | CLOCK_MONOTONIC => {}
+        CLOCK_REALTIME | CLOCK_MONOTONIC | CLOCK_BOOTTIME => {}
         _ => return Err(LinuxError::EINVAL),
     }
     loop {
@@ -183,7 +205,19 @@ pub fn sys_clock_nanosleep(clockid: i32, flags: usize, req: usize, rem: usize) -
         Err(e) => return -e.code() as isize,
     };
 
+    // CPU-time clocks (CLOCK_PROCESS_CPUTIME_ID and CLOCK_THREAD_CPUTIME_ID)
+    // are valid clock IDs but do not support sleeping, returning EOPNOTSUPP.
+    if matches!(
+        clockid as u32,
+        CLOCK_PROCESS_CPUTIME_ID | CLOCK_THREAD_CPUTIME_ID
+    ) {
+        return -LinuxError::EOPNOTSUPP.code() as isize;
+    }
+
     if !is_supported_clock(clockid) {
+        return -LinuxError::EINVAL.code() as isize;
+    }
+    if !matches!(clockid as u32, CLOCK_REALTIME | CLOCK_MONOTONIC | CLOCK_BOOTTIME) {
         return -LinuxError::EINVAL.code() as isize;
     }
     if flags != 0 && flags != TIMER_ABSTIME as usize {
