@@ -656,6 +656,9 @@ impl Ext4 {
         let depth = search_path.depth as usize;
 
         /* If we do remove_space inside the range of an extent */
+        if search_path.path[depth].extent.is_none() {
+            return Ok(EOK);
+        }
         let mut ex = search_path.path[depth].extent.unwrap();
         if ex.get_first_block() < from
             && to < (ex.get_first_block() + ex.get_actual_len() as u32 - 1)
