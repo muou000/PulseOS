@@ -6,6 +6,7 @@ use alloc::{
 
 use axerrno::{AxError, AxResult};
 use axfs::FsContext;
+use axfs_ng_vfs::{NodePermission, NodeType};
 use axhal::paging::MappingFlags;
 use memory_addr::va;
 use spin::Mutex;
@@ -52,11 +53,42 @@ fn resolve_exec_path_and_args(
     args: &[&str],
 ) -> AxResult<(String, Vec<String>)> {
     let normalize_path = |candidate: &str| -> AxResult<String> {
-        fs.resolve(candidate)
-            .map_err(|_| AxError::NotFound)?
-            .absolute_path()
-            .map(|p| p.to_string())
-            .map_err(|_| AxError::NotFound)
+        let loc = fs.resolve(candidate)?;
+        let path = loc.absolute_path()?;
+
+        // Check if the file is a regular file
+        let meta = loc.metadata()?;
+        if meta.node_type != NodeType::RegularFile {
+            return Err(AxError::PermissionDenied);
+        }
+
+        // Check execute permission based on credentials (uid/gid)
+        if let Some((uid, gid)) = fs.credentials {
+            if uid == 0 {
+                // For root, can execute if any of the execute bits are set
+                let any_x = meta.mode.contains(NodePermission::OWNER_EXEC)
+                    || meta.mode.contains(NodePermission::GROUP_EXEC)
+                    || meta.mode.contains(NodePermission::OTHER_EXEC);
+                if !any_x {
+                    return Err(AxError::PermissionDenied);
+                }
+            } else {
+                let is_owner = uid == meta.uid;
+                let is_group = gid == meta.gid;
+                let has_x = if is_owner {
+                    meta.mode.contains(NodePermission::OWNER_EXEC)
+                } else if is_group {
+                    meta.mode.contains(NodePermission::GROUP_EXEC)
+                } else {
+                    meta.mode.contains(NodePermission::OTHER_EXEC)
+                };
+                if !has_x {
+                    return Err(AxError::PermissionDenied);
+                }
+            }
+        }
+
+        Ok(path.to_string())
     };
 
     let mut current_path = normalize_path(path)?;
@@ -94,7 +126,8 @@ fn resolve_exec_path_and_args(
 
 impl Process {
     pub fn load_elf(&self, path: &str, args: &[&str], envs: &[&str]) -> AxResult<()> {
-        let fs_ctx = self.fs_context.lock().clone();
+        let mut fs_ctx = self.fs_context.lock().clone();
+        fs_ctx.credentials = Some((self.euid(), self.egid()));
         let (path, argv) = resolve_exec_path_and_args(&fs_ctx, path, args)?;
         let argv_refs: Vec<&str> = argv.iter().map(|s| s.as_str()).collect();
         let aspace_handle = self.aspace_handle();
@@ -123,7 +156,8 @@ impl Process {
     }
 
     pub fn exec(&self, path: &str, args: &[&str], envs: &[&str]) -> AxResult<()> {
-        let fs_ctx = self.fs_context.lock().clone();
+        let mut fs_ctx = self.fs_context.lock().clone();
+        fs_ctx.credentials = Some((self.euid(), self.egid()));
         let (path, argv) = resolve_exec_path_and_args(&fs_ctx, path, args)?;
         let argv_refs: Vec<&str> = argv.iter().map(|s| s.as_str()).collect();
 
