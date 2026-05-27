@@ -140,36 +140,6 @@ fn restart_syscall(tf: &mut TrapFrame) {
     tf.era -= 4;
 }
 
-#[cfg(target_arch = "aarch64")]
-fn set_syscall_ret(tf: &mut TrapFrame, ret: isize) {
-    tf.r[0] = ret as u64;
-}
-
-#[cfg(target_arch = "aarch64")]
-fn syscall_ret(tf: &TrapFrame) -> isize {
-    tf.r[0] as isize
-}
-
-#[cfg(target_arch = "aarch64")]
-fn restart_syscall(tf: &mut TrapFrame) {
-    tf.elr_el1 -= 4;
-}
-
-#[cfg(target_arch = "x86_64")]
-fn set_syscall_ret(tf: &mut TrapFrame, ret: isize) {
-    tf.rax = ret as u64;
-}
-
-#[cfg(target_arch = "x86_64")]
-fn syscall_ret(tf: &TrapFrame) -> isize {
-    tf.rax as isize
-}
-
-#[cfg(target_arch = "x86_64")]
-fn restart_syscall(tf: &mut TrapFrame) {
-    tf.rip -= 2; // syscall instruction is 0f 05
-}
-
 fn syscall_dispatcher(
     tf: &mut TrapFrame,
     syscall_id: usize,
@@ -308,7 +278,9 @@ fn syscall_dispatcher(
         Sysno::accept4 => impls::sys_accept4(args[0], args[1], args[2], args[3]),
         Sysno::shutdown => impls::sys_shutdown(args[0], args[1]),
         Sysno::sendto => impls::sys_sendto(args[0], args[1], args[2], args[3], args[4], args[5]),
-        Sysno::recvfrom => impls::sys_recvfrom(args[0], args[1], args[2], args[3], args[4], args[5]),
+        Sysno::recvfrom => {
+            impls::sys_recvfrom(args[0], args[1], args[2], args[3], args[4], args[5])
+        }
         Sysno::sendmsg => impls::sys_sendmsg(args[0], args[1], args[2]),
         Sysno::recvmsg => impls::sys_recvmsg(args[0], args[1], args[2]),
         Sysno::getsockname => impls::sys_getsockname(args[0], args[1], args[2]),
@@ -317,14 +289,9 @@ fn syscall_dispatcher(
         Sysno::getsockopt => impls::sys_getsockopt(args[0], args[1], args[2], args[3], args[4]),
         Sysno::ppoll => impls::sys_ppoll(args[0], args[1], args[2], args[3], args[4]),
         Sysno::getrusage => impls::sys_getrusage(args[0] as i32, args[1]),
-        Sysno::pselect6 => impls::sys_pselect6(
-            args[0],
-            args[1],
-            args[2],
-            args[3],
-            args[4],
-            args[5],
-        ),
+        Sysno::pselect6 => {
+            impls::sys_pselect6(args[0], args[1], args[2], args[3], args[4], args[5])
+        }
         Sysno::getcwd => impls::sys_getcwd(args[0], args[1]),
         Sysno::chdir => impls::sys_chdir(args[0]),
         Sysno::unlinkat => impls::sys_unlinkat(args[0] as i32, args[1], args[2]),
