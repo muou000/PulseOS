@@ -138,6 +138,9 @@ impl axfs::ProcfsProcessProvider for PulseProcessProvider {
 
     fn cmdline(&self, pid: u64) -> Option<String> {
         let proc = process_by_pid(pid)?;
+        if proc.is_zombie() {
+            return Some(String::new());
+        }
         let args = proc.args.lock();
         if args.is_empty() {
             let path = proc.exec_path().unwrap_or_else(|| "pulse_init".to_string());
