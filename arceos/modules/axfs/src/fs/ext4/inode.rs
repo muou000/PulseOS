@@ -380,16 +380,8 @@ impl FileNodeOps for Inode {
             return Ok(());
         }
 
-        let mut remaining = len - old_len;
-        let mut offset = old_len as usize;
-        let zeros = vec![0; ext4_rs::BLOCK_SIZE];
-        while remaining > 0 {
-            let chunk = remaining.min(zeros.len() as u64) as usize;
-            fs.write_at(self.ino, offset, &zeros[..chunk])
-                .map_err(into_vfs_err)?;
-            offset += chunk;
-            remaining -= chunk as u64;
-        }
+        inode_ref.inode.set_size(len);
+        fs.write_back_inode(&mut inode_ref);
         Ok(())
     }
 

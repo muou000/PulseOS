@@ -83,11 +83,11 @@ impl Ext4 {
 
             // Validate that the extent was actually found (not a placeholder for empty node)
             if path.extent.is_none() {
-                log::error!(
+                log::trace!(
                     "get_pblock_idx: extent not found for lblock={}, inode={}",
                     lblock, inode_ref.inode_num
                 );
-                return_errno_with_message!(Errno::EIO, "extent not found for logical block");
+                return_errno_with_message!(Errno::ENOENT, "extent not found for logical block");
             }
 
             return Ok(fblock);

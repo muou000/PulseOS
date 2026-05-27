@@ -206,21 +206,25 @@ impl Ext4 {
 
             // get iblock physical block id
             let pblock_idx = match self.get_pblock_idx(&inode_ref, iblock as u32) {
-                Ok(idx) => {
-                    idx
-                },
+                Ok(idx) => Some(idx),
+                Err(e) if e.error() == Errno::ENOENT => None,
                 Err(e) => {
                     return_errno_with_message!(Errno::EIO, "Failed to get physical block for logical block");
                 }
             };
 
-            // read data
-            let data = self.block_device.read_offset(pblock_idx as usize * BLOCK_SIZE);
+            if let Some(pblock_idx) = pblock_idx {
+                // read data
+                let data = self.block_device.read_offset(pblock_idx as usize * BLOCK_SIZE);
 
-            // copy data to read buffer
-            read_buf[cursor..cursor + adjust_read_size].copy_from_slice(
-                &data[unaligned_start_offset..unaligned_start_offset + adjust_read_size],
-            );
+                // copy data to read buffer
+                read_buf[cursor..cursor + adjust_read_size].copy_from_slice(
+                    &data[unaligned_start_offset..unaligned_start_offset + adjust_read_size],
+                );
+            } else {
+                // hole: fill with zeros
+                read_buf[cursor..cursor + adjust_read_size].fill(0);
+            }
 
             // update cursor and total bytes read
             cursor += adjust_read_size;
@@ -245,20 +249,23 @@ impl Ext4 {
 
             // get iblock physical block id
             let pblock_idx = match self.get_pblock_idx(&inode_ref, iblock as u32) {
-                Ok(idx) => {
-                    idx
-                },
+                Ok(idx) => Some(idx),
+                Err(e) if e.error() == Errno::ENOENT => None,
                 Err(e) => {
                     return_errno_with_message!(Errno::EIO, "Failed to get physical block for logical block");
                 }
             };
 
-            // read data
-            let data = self.block_device.read_offset(pblock_idx as usize * BLOCK_SIZE);
-            // log::trace!("[Read] Read block data - physical_block: {}, data_len: {}", pblock_idx, data.len());
+            if let Some(pblock_idx) = pblock_idx {
+                // read data
+                let data = self.block_device.read_offset(pblock_idx as usize * BLOCK_SIZE);
+                // log::trace!("[Read] Read block data - physical_block: {}, data_len: {}", pblock_idx, data.len());
 
-            // copy data to read buffer
-            read_buf[cursor..cursor + read_length].copy_from_slice(&data[..read_length]);
+                // copy data to read buffer
+                read_buf[cursor..cursor + read_length].copy_from_slice(&data[..read_length]);
+            } else {
+                read_buf[cursor..cursor + read_length].fill(0);
+            }
 
             // update cursor and total bytes read
             cursor += read_length;
@@ -386,9 +393,21 @@ impl Ext4 {
             let len = min(write_buf_len, BLOCK_SIZE - unaligned);
             log::trace!("[Unaligned Write] Writing {} bytes", len);
             
+            let mut is_new_block = false;
             // Get the physical block id
             let pblock_idx = match self.get_pblock_idx(&inode_ref, iblk_idx as u32) {
                 Ok(idx) => idx,
+                Err(e) if e.error() == Errno::ENOENT => {
+                    // Allocate a new block
+                    let new_block = self.balloc_alloc_block(&mut inode_ref, None)?;
+                    let mut newex = Ext4Extent::default();
+                    newex.first_block = iblk_idx as u32;
+                    newex.store_pblock(new_block);
+                    newex.block_count = 1;
+                    self.insert_extent(&mut inode_ref, &mut newex)?;
+                    is_new_block = true;
+                    new_block
+                }
                 Err(e) => {
                     log::error!("[Write] Failed to get physical block for logical block {}: {:?}", iblk_idx, e);
                     return Err(e);
@@ -400,8 +419,12 @@ impl Ext4 {
             
             // Read existing data if needed
             if unaligned > 0 || len < BLOCK_SIZE {
-                let existing_data = self.block_device.read_offset(pblock_idx as usize * BLOCK_SIZE);
-                block.data.copy_from_slice(&existing_data);
+                if is_new_block {
+                    block.data.fill(0);
+                } else {
+                    let existing_data = self.block_device.read_offset(pblock_idx as usize * BLOCK_SIZE);
+                    block.data.copy_from_slice(&existing_data);
+                }
             }
             
             block.write_offset(unaligned, &write_buf[..len], len);
@@ -427,9 +450,21 @@ impl Ext4 {
         while written < write_buf_len {
             aligned_blocks += 1;
             
+            let mut is_new_block = false;
             // Get the physical block id
             let pblock_idx = match self.get_pblock_idx(&inode_ref, iblk_idx as u32) {
                 Ok(idx) => idx,
+                Err(e) if e.error() == Errno::ENOENT => {
+                    // Allocate a new block
+                    let new_block = self.balloc_alloc_block(&mut inode_ref, None)?;
+                    let mut newex = Ext4Extent::default();
+                    newex.first_block = iblk_idx as u32;
+                    newex.store_pblock(new_block);
+                    newex.block_count = 1;
+                    self.insert_extent(&mut inode_ref, &mut newex)?;
+                    is_new_block = true;
+                    new_block
+                }
                 Err(e) => {
                     log::error!("[Write] Failed to get physical block for logical block {}: {:?}", iblk_idx, e);
                     return Err(e);
@@ -443,8 +478,12 @@ impl Ext4 {
             
             // For partial block writes, read existing data first
             if write_size < BLOCK_SIZE {
-                let existing_data = self.block_device.read_offset(block_offset);
-                block.data.copy_from_slice(&existing_data);
+                if is_new_block {
+                    block.data.fill(0);
+                } else {
+                    let existing_data = self.block_device.read_offset(block_offset);
+                    block.data.copy_from_slice(&existing_data);
+                }
             }
             
             block.write_offset(0, &write_buf[written..written + write_size], write_size);
