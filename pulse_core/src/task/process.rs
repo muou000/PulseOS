@@ -23,7 +23,7 @@ use linux_raw_sys::general::{
 use memory_addr::{MemoryAddr, PhysAddr, VirtAddr, va};
 use spin::{Lazy, Mutex};
 
-use super::{SignalShared, Thread, current_thread, queue_signal_to_process};
+use super::{SignalShared, Thread, current_thread, queue_signal_to_process, thread_handle_from_task};
 use crate::{
     config::*,
     fd_table::{FD_LIMIT, FdTable, SharedFdTable, stdio_entries},
@@ -1233,6 +1233,13 @@ impl Process {
         self.group_exit_code.store(exit_code, Ordering::Release);
         self.group_exiting.store(true, Ordering::Release);
         self.futex_table.wake_all();
+
+        let tasks = self.task_refs.lock().clone();
+        for task in tasks {
+            if let Some(handle) = thread_handle_from_task(&task) {
+                handle.signal_wait_queue().notify_all(false);
+            }
+        }
     }
 
     pub fn group_exiting(&self) -> bool {

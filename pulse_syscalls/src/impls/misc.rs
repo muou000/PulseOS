@@ -466,7 +466,7 @@ pub fn sys_rt_sigsuspend(mask: usize, sigsetsize: usize) -> isize {
     };
     thread.begin_sigsuspend(new_mask);
     let signal_wait = thread.signal_wait_queue();
-    signal_wait.wait_until(|| thread.has_pending_signal());
+    signal_wait.wait_until(|| thread.has_pending_signal() || thread.process().group_exiting());
     -LinuxError::EINTR.code() as isize
 }
 
@@ -501,6 +501,10 @@ pub fn sys_rt_sigtimedwait(set: usize, info: usize, timeout: usize, sigsetsize: 
     };
 
     loop {
+        if thread.process().group_exiting() {
+            return -LinuxError::EINTR.code() as isize;
+        }
+
         if let Some(sig) = thread.dequeue_waitset_signal(waitset) {
             if info != 0 {
                 let mut raw: siginfo = unsafe { core::mem::zeroed() };
@@ -531,10 +535,12 @@ pub fn sys_rt_sigtimedwait(set: usize, info: usize, timeout: usize, sigsetsize: 
                     let timed_out = signal_wait.wait_timeout_until(remain, || {
                         thread.has_waitset_signal(waitset)
                             || thread.has_pending_unblocked_signal_not_in_set(waitset)
+                            || thread.process().group_exiting()
                     });
                     if timed_out
                         && !thread.has_waitset_signal(waitset)
                         && !thread.has_pending_unblocked_signal_not_in_set(waitset)
+                        && !thread.process().group_exiting()
                     {
                         return -LinuxError::EAGAIN.code() as isize;
                     }
@@ -551,6 +557,7 @@ pub fn sys_rt_sigtimedwait(set: usize, info: usize, timeout: usize, sigsetsize: 
                 signal_wait.wait_until(|| {
                     thread.has_waitset_signal(waitset)
                         || thread.has_pending_unblocked_signal_not_in_set(waitset)
+                        || thread.process().group_exiting()
                 });
             }
         }
