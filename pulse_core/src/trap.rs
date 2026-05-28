@@ -154,7 +154,30 @@ fn handle_page_fault(vaddr: VirtAddr, access_flags: MappingFlags, is_user: bool)
             proc.exec_path()
         );
         axlog::error!("  vaddr={:#x}, flags={:?}", vaddr, access_flags);
-        thread.exit_current(139);
+        
+        let mut signo = 11; // Default to SIGSEGV
+        let aspace_handle = proc.aspace_handle();
+        let aspace = aspace_handle.lock();
+        aspace.for_each_area_with_backend(|start, end, _flags, backend| {
+            if vaddr >= start && vaddr < end {
+                let mut curr_backend = backend;
+                while let axmm::Backend::Cow(cow) = curr_backend {
+                    curr_backend = cow.inner();
+                }
+                if let axmm::Backend::File(mapping) = curr_backend {
+                    let current_file_bytes = mapping.file_bytes();
+                    let relative = vaddr.as_usize().saturating_sub(start.as_usize());
+                    if relative >= current_file_bytes {
+                        signo = 7; // SIGBUS for out-of-bounds file mapping
+                    }
+                }
+            }
+        });
+        drop(aspace);
+
+        crate::task::queue_signal_to_thread(thread.as_ref(), signo as usize);
+        proc.mark_user_resume();
+        true
     }
 }
 

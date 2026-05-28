@@ -498,6 +498,21 @@ impl AddrSpace {
         false
     }
 
+    /// Checks if a virtual address range overlaps with any registered area.
+    pub fn has_overlap(&self, start: VirtAddr, size: usize) -> bool {
+        let range = VirtAddrRange::from_start_size(start, size);
+        for area in self.areas.iter() {
+            if area.end() <= range.start {
+                continue;
+            }
+            if area.start() >= range.end {
+                break;
+            }
+            return true;
+        }
+        false
+    }
+
     /// Visits all mapped virtual memory areas tracked by this address space.
     pub fn for_each_area<F>(&self, mut f: F)
     where
@@ -578,6 +593,46 @@ impl AddrSpace {
                 vaddr, page, access_flags, orig_flags, backend_kind, pte_before
             );
         } else {
+            // Check for stack grows down auto-extension.
+            // Find an area that starts immediately at page + PAGE_SIZE_4K and has GROWSDOWN.
+            let next_page = page + PAGE_SIZE_4K;
+            let mut growsdown_area_info = None;
+            for area in self.areas.iter() {
+                if area.start() == next_page {
+                    if area.backend().is_grows_down() {
+                        growsdown_area_info = Some(area.flags());
+                    }
+                    break;
+                }
+            }
+
+            if let Some(flags) = growsdown_area_info {
+                debug!(
+                    "handle_page_fault: growing stack downward at {:#x} for next area start {:#x}",
+                    page, next_page
+                );
+                // Linux stack_guard_gap check: do not allow stack to grow closer than 256 pages to an existing mapping.
+                let guard_gap_size = 256 * PAGE_SIZE_4K;
+                let guard_start = if page.as_usize() > guard_gap_size {
+                    VirtAddr::from(page.as_usize() - guard_gap_size)
+                } else {
+                    VirtAddr::from(0)
+                };
+                let guard_size = page.as_usize() - guard_start.as_usize();
+                if self.has_overlap(guard_start, guard_size) {
+                    warn!(
+                        "handle_page_fault: stack growth rejected at {:#x} due to overlap in guard gap [{:#x}, {:#x})",
+                        page, guard_start, page
+                    );
+                    return false;
+                }
+
+                let backend = Backend::new_alloc_grows_down(false, true);
+                if self.map_with_backend(page, PAGE_SIZE_4K, flags, backend).is_ok() {
+                    return self.handle_page_fault(vaddr, access_flags);
+                }
+            }
+
             error!(
                 "handle_page_fault: reject=no_area vaddr={:#x} page={:#x} access={:?} \
                  pte_before={:?}",
@@ -623,7 +678,7 @@ impl AddrSpace {
                 Backend::Alloc { .. } => {
                     is_cow = true;
                     let mut inner = area.backend().clone();
-                    if let Backend::Alloc { ref mut populate } = inner {
+                    if let Backend::Alloc { ref mut populate, .. } = inner {
                         *populate = false;
                     }
                     Backend::Cow(crate::backend::CowMapping::new(alloc::boxed::Box::new(inner)))

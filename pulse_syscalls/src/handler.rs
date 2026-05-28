@@ -311,6 +311,7 @@ fn syscall_dispatcher(
         Sysno::faccessat => impls::sys_faccessat(args[0] as i32, args[1], args[2], 0),
         Sysno::faccessat2 => impls::sys_faccessat(args[0] as i32, args[1], args[2], args[3]),
         Sysno::fchmodat => impls::sys_fchmodat(args[0] as i32, args[1], args[2], 0),
+        Sysno::fchmod => impls::sys_fchmod(args[0], args[1]),
         Sysno::fchownat => impls::sys_fchownat(args[0] as i32, args[1], args[2], args[3], args[4]),
         Sysno::lseek => impls::sys_lseek(args[0], args[1], args[2]),
         Sysno::ftruncate => impls::sys_ftruncate(args[0], args[1]),

@@ -104,7 +104,12 @@ pub(super) fn dealloc_frame(frame: PhysAddr) {
 impl Backend {
     /// Creates a new allocation mapping backend.
     pub const fn new_alloc(populate: bool) -> Self {
-        Self::Alloc { populate }
+        Self::Alloc { populate, grows_down: false }
+    }
+
+    /// Creates a new allocation mapping backend that grows down.
+    pub const fn new_alloc_grows_down(populate: bool, grows_down: bool) -> Self {
+        Self::Alloc { populate, grows_down }
     }
 
     pub(crate) fn map_alloc(

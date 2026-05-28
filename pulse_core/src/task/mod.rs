@@ -282,6 +282,131 @@ impl axfs::ProcfsProcessProvider for PulseProcessProvider {
             Some("/dev/null".to_string())
         }
     }
+
+    fn maps(&self, pid: u64) -> Option<String> {
+        let proc = process_by_pid(pid)?;
+        if proc.is_zombie() {
+            return Some(String::new());
+        }
+        let aspace_handle = proc.aspace_handle();
+        let aspace = aspace_handle.lock();
+        let mut out = String::new();
+
+        aspace.for_each_area_with_backend(|start, end, flags, backend| {
+            if start.as_usize() >= 0x8000_0000_0000 {
+                return;
+            }
+
+            let r = if flags.contains(axhal::paging::MappingFlags::READ) { "r" } else { "-" };
+            let w = if flags.contains(axhal::paging::MappingFlags::WRITE) { "w" } else { "-" };
+            let x = if flags.contains(axhal::paging::MappingFlags::EXECUTE) { "x" } else { "-" };
+
+            let mut is_shared = false;
+            let mut offset = 0;
+            let mut path_str = String::new();
+            let mut inode = 0;
+            let mut dev_str = "00:00".to_string();
+
+            let mut curr_backend = backend;
+            while let axmm::Backend::Cow(cow) = curr_backend {
+                curr_backend = cow.inner();
+            }
+
+            match curr_backend {
+                axmm::Backend::Shared { .. } => {
+                    is_shared = true;
+                }
+                axmm::Backend::File(mapping) => {
+                    is_shared = mapping.is_shared();
+                    offset = mapping.file_offset();
+                    let cached_file = mapping.file();
+                    let loc = cached_file.location();
+                    if let Ok(meta) = loc.metadata() {
+                        inode = meta.inode;
+                        let major = meta.device >> 8;
+                        let minor = meta.device & 0xff;
+                        dev_str = alloc::format!("{:02x}:{:02x}", major, minor);
+                    }
+                    if let Ok(path) = loc.absolute_path() {
+                        path_str = path.as_str().to_string();
+                    }
+                }
+                _ => {}
+            }
+
+            let p_char = if is_shared { "s" } else { "p" };
+            if path_str.is_empty() {
+                out.push_str(&alloc::format!(
+                    "{:x}-{:x} {}{}{}{} {:08x} {} {}\n",
+                    start.as_usize(),
+                    end.as_usize(),
+                    r, w, x, p_char,
+                    offset,
+                    dev_str,
+                    inode
+                ));
+            } else {
+                out.push_str(&alloc::format!(
+                    "{:x}-{:x} {}{}{}{} {:08x} {} {:<7} {}\n",
+                    start.as_usize(),
+                    end.as_usize(),
+                    r, w, x, p_char,
+                    offset,
+                    dev_str,
+                    inode,
+                    path_str
+                ));
+            }
+        });
+
+        Some(out)
+    }
+
+    fn pagemap(&self, pid: u64, offset: u64, buf: &mut [u8]) -> Option<usize> {
+        let proc = process_by_pid(pid)?;
+        if proc.is_zombie() {
+            return Some(0);
+        }
+        let aspace_handle = proc.aspace_handle();
+        let aspace = aspace_handle.lock();
+
+        let bytes_to_read = buf.len();
+        if bytes_to_read == 0 {
+            return Some(0);
+        }
+
+        let mut bytes_written = 0;
+        let mut curr_offset = offset;
+
+        while bytes_written < bytes_to_read {
+            let entry_index = curr_offset / 8;
+            let vaddr = memory_addr::VirtAddr::from(entry_index as usize * 4096);
+
+            if vaddr.as_usize() >= 0x8000_0000_0000 {
+                break;
+            }
+
+            let mut pagemap_entry: u64 = 0;
+            if let Ok((paddr, flags, _page_size)) = aspace.page_table().query(vaddr) {
+                if paddr.as_usize() != 0 && !flags.is_empty() {
+                    let pfn = (paddr.as_usize() / 4096) as u64;
+                    pagemap_entry = (1u64 << 63) | (pfn & 0x007f_ffff_ffff_ffff);
+                }
+            }
+
+            let entry_bytes = pagemap_entry.to_ne_bytes();
+            let byte_in_entry = (curr_offset % 8) as usize;
+            let chunk_size = core::cmp::min(8 - byte_in_entry, bytes_to_read - bytes_written);
+
+            buf[bytes_written..bytes_written + chunk_size]
+                .copy_from_slice(&entry_bytes[byte_in_entry..byte_in_entry + chunk_size]);
+
+            bytes_written += chunk_size;
+            curr_offset += chunk_size as u64;
+        }
+
+        Some(bytes_written)
+    }
 }
 
 pub fn init_procfs_provider() {

@@ -3,7 +3,7 @@ use alloc::sync::Arc;
 use axfs::{CachedFile, FileFlags};
 use axhal::paging::MappingFlags;
 use linux_raw_sys::general::{MCL_CURRENT, MCL_FUTURE, MCL_ONFAULT};
-use memory_addr::{MemoryAddr, VirtAddr};
+use memory_addr::VirtAddr;
 use pulse_core::fd_table::FdObject;
 
 use crate::LinuxError;
@@ -11,8 +11,6 @@ use crate::LinuxError;
 const PROT_READ: usize = 0x1;
 const PROT_WRITE: usize = 0x2;
 const PROT_EXEC: usize = 0x4;
-const MAP_SHARED: usize = 0x01;
-const MAP_PRIVATE: usize = 0x02;
 const MAP_ANONYMOUS: usize = 0x20;
 const PAGE_SIZE: usize = 0x1000;
 const MS_ASYNC: usize = 1;
@@ -21,7 +19,9 @@ const MS_INVALIDATE: usize = 4;
 
 fn get_fd_object(fd: usize) -> Result<Arc<dyn FdObject>, LinuxError> {
     let proc = pulse_core::task::current_process()?;
-    proc.get_fd_entry(fd).map(|entry| entry.object.clone()).map_err(|_| LinuxError::EBADF)
+    proc.get_fd_entry(fd)
+        .map(|entry| entry.object.clone())
+        .map_err(|_| LinuxError::EBADF)
 }
 
 fn file_flags_for_mapping(map_flags: MappingFlags) -> FileFlags {
@@ -133,19 +133,39 @@ pub fn sys_mmap(
         Err(e) => return -e.code() as isize,
     };
 
-    if length == 0 {
-        return -LinuxError::EINVAL.code() as isize;
-    }
-
     let file_backed = (flags & MAP_ANONYMOUS) == 0;
 
-    // Determine shared/private semantics.
-    let is_shared = (flags & MAP_SHARED) != 0;
-    let is_private = (flags & MAP_PRIVATE) != 0;
-    // MAP_SHARED and MAP_PRIVATE are mutually exclusive; exactly one must be set.
-    if is_shared == is_private {
+    let map_type = flags & 0x0f;
+    const MAP_SHARED: usize = 0x01;
+    const MAP_PRIVATE: usize = 0x02;
+    const MAP_SHARED_VALIDATE: usize = 0x03;
+
+    if map_type != MAP_SHARED && map_type != MAP_PRIVATE && map_type != MAP_SHARED_VALIDATE {
         return -LinuxError::EINVAL.code() as isize;
     }
+
+    const MAP_FIXED: usize = 0x10;
+    const MAP_GROWSDOWN: usize = 0x0100;
+    const MAP_DENYWRITE: usize = 0x0800;
+    const MAP_EXECUTABLE: usize = 0x1000;
+    const MAP_LOCKED: usize = 0x2000;
+    const MAP_NORESERVE: usize = 0x4000;
+    const MAP_POPULATE: usize = 0x8000;
+    const MAP_NONBLOCK: usize = 0x10000;
+    const MAP_STACK: usize = 0x20000;
+    const MAP_HUGETLB: usize = 0x40000;
+    const MAP_SYNC: usize = 0x80000;
+    const MAP_FIXED_NOREPLACE: usize = 0x100000;
+
+    let supported_mask = MAP_SHARED | MAP_PRIVATE | MAP_SHARED_VALIDATE | MAP_FIXED | MAP_ANONYMOUS |
+                         MAP_DENYWRITE | MAP_EXECUTABLE | MAP_LOCKED | MAP_NORESERVE | MAP_POPULATE |
+                         MAP_NONBLOCK | MAP_STACK | MAP_HUGETLB | MAP_SYNC | MAP_FIXED_NOREPLACE | MAP_GROWSDOWN;
+
+    if map_type == MAP_SHARED_VALIDATE && (flags & !supported_mask) != 0 {
+        return -LinuxError::EOPNOTSUPP.code() as isize;
+    }
+
+    let is_shared = map_type == MAP_SHARED || map_type == MAP_SHARED_VALIDATE;
 
     if file_backed && fd < 0 {
         return -LinuxError::EBADF.code() as isize;
@@ -170,33 +190,71 @@ pub fn sys_mmap(
         map_flags |= MappingFlags::EXECUTE;
     }
 
+    if let Some(file) = file.as_ref() {
+        if let Some(file_flags) = file.mmap_file_flags() {
+            if map_flags.contains(MappingFlags::READ) && !file_flags.contains(FileFlags::READ) {
+                return -LinuxError::EACCES.code() as isize;
+            }
+            if map_flags.contains(MappingFlags::WRITE) {
+                if is_shared {
+                    if !file_flags.contains(FileFlags::WRITE) {
+                        return -LinuxError::EACCES.code() as isize;
+                    }
+                } else {
+                    if !file_flags.contains(FileFlags::READ) {
+                        return -LinuxError::EACCES.code() as isize;
+                    }
+                }
+            }
+            if map_flags.contains(MappingFlags::EXECUTE) && !file_flags.contains(FileFlags::READ) {
+                return -LinuxError::EACCES.code() as isize;
+            }
+        }
+    }
+
+    if length == 0 {
+        return -LinuxError::EINVAL.code() as isize;
+    }
+
     let aligned_length = (length + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
 
     let aspace_handle = proc.aspace_handle();
     let mut aspace = aspace_handle.lock();
 
-    const MAP_FIXED: usize = 0x10;
-
-    // 如果 addr 为 0，由内核选择地址
-    let map_addr = if addr == 0 {
+    let aligned_addr = addr & !(PAGE_SIZE - 1);
+    let map_addr = if (flags & MAP_FIXED) != 0 {
+        aligned_addr
+    } else {
         let limit = memory_addr::VirtAddrRange::from_start_size(
             VirtAddr::from(pulse_core::config::USER_SPACE_BASE),
             pulse_core::config::USER_SPACE_SIZE,
         );
-        match aspace.find_free_area(
-            VirtAddr::from(addr.align_down(PAGE_SIZE)),
-            aligned_length,
-            limit,
-        ) {
+        let hint = if aligned_addr == 0 {
+            VirtAddr::from(pulse_core::config::USER_SPACE_BASE)
+        } else {
+            VirtAddr::from(aligned_addr)
+        };
+        match aspace.find_free_area(hint, aligned_length, limit) {
             Some(vaddr) => vaddr.as_usize(),
             None => {
-                axlog::error!("sys_mmap: no free area found");
-                return -crate::LinuxError::ENOMEM.code() as isize;
+                if aligned_addr != 0 {
+                    match aspace.find_free_area(
+                        VirtAddr::from(pulse_core::config::USER_SPACE_BASE),
+                        aligned_length,
+                        limit,
+                    ) {
+                        Some(vaddr) => vaddr.as_usize(),
+                        None => {
+                            axlog::error!("sys_mmap: no free area found");
+                            return -crate::LinuxError::ENOMEM.code() as isize;
+                        }
+                    }
+                } else {
+                    axlog::error!("sys_mmap: no free area found");
+                    return -crate::LinuxError::ENOMEM.code() as isize;
+                }
             }
         }
-    } else {
-        // 使用指定地址（需要对齐）
-        addr & !(PAGE_SIZE - 1)
     };
 
     if !proc.is_user_range(map_addr, aligned_length) {
@@ -206,6 +264,15 @@ pub fn sys_mmap(
             aligned_length
         );
         return -LinuxError::EINVAL.code() as isize;
+    }
+
+    if (flags & MAP_FIXED_NOREPLACE) != 0 {
+        if addr == 0 || (addr & (PAGE_SIZE - 1)) != 0 {
+            return -LinuxError::EINVAL.code() as isize;
+        }
+        if aspace.has_overlap(VirtAddr::from(map_addr), aligned_length) {
+            return -LinuxError::EEXIST.code() as isize;
+        }
     }
 
     if (flags & MAP_FIXED) != 0 {
@@ -221,7 +288,29 @@ pub fn sys_mmap(
         }
     }
 
-    let map_result = if let Some(file) = file.as_ref() {
+    let mut is_zero_device = false;
+    if let Some(file) = file.as_ref() {
+        if let Some(loc) = file.location() {
+            if let Ok(path) = loc.absolute_path() {
+                if path.as_str() == "/dev/zero" {
+                    is_zero_device = true;
+                }
+            }
+        }
+    }
+
+    let map_result = if is_zero_device {
+        if is_shared {
+            use axhal::paging::PageSize;
+            if let Some(backend) = axmm::Backend::new_shared(aligned_length, true, PageSize::Size4K) {
+                aspace.map_with_backend(VirtAddr::from(map_addr), aligned_length, map_flags, backend)
+            } else {
+                Err(axerrno::AxError::NoMemory)
+            }
+        } else {
+            aspace.map_alloc(VirtAddr::from(map_addr), aligned_length, map_flags, false)
+        }
+    } else if let Some(file) = file.as_ref() {
         let Some(location) = file.location() else {
             return -LinuxError::ENODEV.code() as isize;
         };
@@ -246,6 +335,9 @@ pub fn sys_mmap(
         } else {
             Err(axerrno::AxError::NoMemory)
         }
+    } else if (flags & MAP_GROWSDOWN) != 0 {
+        let backend = axmm::Backend::new_alloc_grows_down(false, true);
+        aspace.map_with_backend(VirtAddr::from(map_addr), aligned_length, map_flags, backend)
     } else {
         aspace.map_alloc(VirtAddr::from(map_addr), aligned_length, map_flags, false)
     };
@@ -266,6 +358,17 @@ pub fn sys_mmap(
                     );
                 }
                 return -e.code() as isize;
+            }
+
+            if (flags & MAP_POPULATE) != 0 {
+                if let Err(e) = proc.prefault_user_range(map_addr, aligned_length) {
+                    axlog::warn!(
+                        "sys_mmap: MAP_POPULATE prefault failed at {:#x}, len={:#x}, err={:?}",
+                        map_addr,
+                        aligned_length,
+                        e
+                    );
+                }
             }
 
             axlog::debug!(

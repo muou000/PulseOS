@@ -48,6 +48,8 @@ pub enum Backend {
     Alloc {
         /// Whether to populate the physical frames when creating the mapping.
         populate: bool,
+        /// Whether the memory grows down (stack).
+        grows_down: bool,
     },
     /// File-backed demand mapping backend.
     File(file::FileMapping),
@@ -65,7 +67,7 @@ impl MappingBackend for Backend {
                 Self::map_shared(start, size, flags, pt, VirtAddr::from(shared_frame.vaddr))
             }
             Self::Linear { pa_va_offset } => self.map_linear(start, size, flags, pt, *pa_va_offset),
-            Self::Alloc { populate } => self.map_alloc(start, size, flags, pt, *populate),
+            Self::Alloc { populate, .. } => self.map_alloc(start, size, flags, pt, *populate),
             Self::File(mapping) => self.map_file(start, size, flags, pt, mapping),
             Self::Cow(_cow) => {
                 // COW mappings are generally lazy. However, we should still delegate to the
@@ -82,7 +84,7 @@ impl MappingBackend for Backend {
         match self {
             Self::Shared { .. } => Self::unmap_shared(start, size, pt),
             Self::Linear { pa_va_offset } => self.unmap_linear(start, size, pt, *pa_va_offset),
-            Self::Alloc { populate } => self.unmap_alloc(start, size, pt, *populate),
+            Self::Alloc { populate, .. } => self.unmap_alloc(start, size, pt, *populate),
             Self::File(_) => self.unmap_file(start, size, pt),
             Self::Cow(cow) => cow.inner.unmap(start, size, pt),
         }
@@ -100,7 +102,7 @@ impl MappingBackend for Backend {
                 .protect_region(start, size, new_flags, true)
                 .map(|tlb| tlb.ignore())
                 .is_ok(),
-            Self::Alloc { populate } => {
+            Self::Alloc { populate, .. } => {
                 self.protect_alloc(start, size, new_flags, page_table, *populate)
             }
             Self::File(mapping) => {
@@ -112,6 +114,14 @@ impl MappingBackend for Backend {
 }
 
 impl Backend {
+    pub fn is_grows_down(&self) -> bool {
+        match self {
+            Self::Alloc { grows_down, .. } => *grows_down,
+            Self::Cow(cow) => cow.inner.is_grows_down(),
+            _ => false,
+        }
+    }
+
     pub(crate) fn handle_page_fault(
         &self,
         vaddr: VirtAddr,
@@ -121,7 +131,7 @@ impl Backend {
         match self {
             Self::Shared { .. } => false,
             Self::Linear { .. } => false, // Linear mappings should not trigger page faults.
-            Self::Alloc { populate } => {
+            Self::Alloc { populate, .. } => {
                 self.handle_page_fault_alloc(vaddr, orig_flags, page_table, *populate)
             }
             Self::File(mapping) => {

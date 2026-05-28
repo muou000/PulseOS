@@ -33,6 +33,8 @@ const SUB_INO_EXE: u64 = 3;
 const SUB_INO_COMM: u64 = 4;
 const SUB_INO_STAT: u64 = 5;
 const SUB_INO_FD_DIR: u64 = 6;
+const SUB_INO_MAPS: u64 = 7;
+const SUB_INO_PAGEMAP: u64 = 8;
 const SUB_INO_FD_BASE: u64 = 0x40;
 
 pub trait ProcfsProcessProvider: Send + Sync {
@@ -46,6 +48,10 @@ pub trait ProcfsProcessProvider: Send + Sync {
     fn stat(&self, pid: u64) -> Option<String>;
     fn process_fds(&self, pid: u64) -> Option<Vec<u32>>;
     fn fd_path(&self, pid: u64, fd: u32) -> Option<String>;
+    fn maps(&self, pid: u64) -> Option<String>;
+    fn pagemap(&self, _pid: u64, _offset: u64, _buf: &mut [u8]) -> Option<usize> {
+        None
+    }
 }
 
 static PROCESS_PROVIDER: spin::Once<Arc<dyn ProcfsProcessProvider>> = spin::Once::new();
@@ -76,6 +82,8 @@ enum ProcLiveFileKind {
     PidComm(u64),
     PidStat(u64),
     PidFdSymlink(u64, u32),
+    PidMaps(u64),
+    PidPagemap(u64),
 }
 
 #[derive(PartialEq, Eq, Hash, Clone)]
@@ -356,6 +364,8 @@ impl ProcFilesystem {
                     entries.insert("comm".into(), InodeRef::new(PID_INODE_START + (pid << PID_INODE_SHIFT) + SUB_INO_COMM));
                     entries.insert("stat".into(), InodeRef::new(PID_INODE_START + (pid << PID_INODE_SHIFT) + SUB_INO_STAT));
                     entries.insert("fd".into(), InodeRef::new(PID_INODE_START + (pid << PID_INODE_SHIFT) + SUB_INO_FD_DIR));
+                    entries.insert("maps".into(), InodeRef::new(PID_INODE_START + (pid << PID_INODE_SHIFT) + SUB_INO_MAPS));
+                    entries.insert("pagemap".into(), InodeRef::new(PID_INODE_START + (pid << PID_INODE_SHIFT) + SUB_INO_PAGEMAP));
                 }
                 return Ok(dir);
             }
@@ -394,6 +404,8 @@ impl ProcFilesystem {
                 SUB_INO_EXE => ProcLiveFileKind::PidExe(pid),
                 SUB_INO_COMM => ProcLiveFileKind::PidComm(pid),
                 SUB_INO_STAT => ProcLiveFileKind::PidStat(pid),
+                SUB_INO_MAPS => ProcLiveFileKind::PidMaps(pid),
+                SUB_INO_PAGEMAP => ProcLiveFileKind::PidPagemap(pid),
                 _ => return Err(VfsError::NotFound),
             };
 
@@ -543,6 +555,12 @@ fn render_proc_file(kind: ProcLiveFileKind) -> String {
         ProcLiveFileKind::PidFdSymlink(pid, fd) => {
             PROCESS_PROVIDER.get().and_then(|p| p.fd_path(pid, fd)).unwrap_or_default()
         }
+        ProcLiveFileKind::PidMaps(pid) => {
+            PROCESS_PROVIDER.get().and_then(|p| p.maps(pid)).unwrap_or_default()
+        }
+        ProcLiveFileKind::PidPagemap(_pid) => {
+            String::new()
+        }
     }
 }
 
@@ -643,8 +661,13 @@ impl NodeOps for ProcNode {
                 metadata.size = dir.entries.lock().len() as u64;
             }
             NodeContent::Live(kind) => {
-                metadata.size = render_proc_file(*kind).len() as u64;
-                metadata.blocks = metadata.size.div_ceil(512);
+                if let ProcLiveFileKind::PidPagemap(_) = kind {
+                    metadata.size = 0x8000_0000_0000;
+                    metadata.blocks = metadata.size.div_ceil(512);
+                } else {
+                    metadata.size = render_proc_file(*kind).len() as u64;
+                    metadata.blocks = metadata.size.div_ceil(512);
+                }
             }
             NodeContent::File(file) => {
                 metadata.size = file.data.lock().len() as u64;
@@ -729,6 +752,8 @@ impl DirNodeOps for ProcNode {
                     all_entries.push(("comm".to_owned(), PID_INODE_START + (pid << PID_INODE_SHIFT) + SUB_INO_COMM));
                     all_entries.push(("stat".to_owned(), PID_INODE_START + (pid << PID_INODE_SHIFT) + SUB_INO_STAT));
                     all_entries.push(("fd".to_owned(), PID_INODE_START + (pid << PID_INODE_SHIFT) + SUB_INO_FD_DIR));
+                    all_entries.push(("maps".to_owned(), PID_INODE_START + (pid << PID_INODE_SHIFT) + SUB_INO_MAPS));
+                    all_entries.push(("pagemap".to_owned(), PID_INODE_START + (pid << PID_INODE_SHIFT) + SUB_INO_PAGEMAP));
                 } else if sub == SUB_INO_FD_DIR {
                     all_entries.push((".".to_owned(), self.ino));
                     all_entries.push(("..".to_owned(), PID_INODE_START + (pid << PID_INODE_SHIFT) + SUB_INO_DIR));
@@ -801,6 +826,8 @@ impl DirNodeOps for ProcNode {
                         "comm" => Some(SUB_INO_COMM),
                         "stat" => Some(SUB_INO_STAT),
                         "fd" => Some(SUB_INO_FD_DIR),
+                        "maps" => Some(SUB_INO_MAPS),
+                        "pagemap" => Some(SUB_INO_PAGEMAP),
                         _ => None,
                     };
                     if let Some(ts) = target_sub {
@@ -987,6 +1014,15 @@ impl FileNodeOps for ProcNode {
         let inode = self.inode_ref()?;
 
         if let Some(kind) = inode.live_kind() {
+            if let ProcLiveFileKind::PidPagemap(pid) = kind {
+                if let Some(provider) = PROCESS_PROVIDER.get() {
+                    if let Some(bytes_read) = provider.pagemap(pid, offset, buf) {
+                        return Ok(bytes_read);
+                    }
+                }
+                return Err(VfsError::NotFound);
+            }
+
             let content = render_proc_file(kind);
             let bytes = content.as_bytes();
             let start = offset as usize;

@@ -28,8 +28,9 @@ const RANDOM_INO: u64 = 5;
 const URANDOM_INO: u64 = 6;
 const CPU_DMA_LATENCY_INO: u64 = 7;
 const SHM_INO: u64 = 8;
+const ZERO_INO: u64 = 9;
 
-const NEXT_DYNAMIC_INO: u64 = SHM_INO + 1;
+const NEXT_DYNAMIC_INO: u64 = ZERO_INO + 1;
 
 const RANDOM_SEED: u64 = 0x0123_4567_89ab_cdef;
 
@@ -42,6 +43,7 @@ pub(crate) struct BlockDeviceSpec {
 
 enum DevDeviceKind {
     Null,
+    Zero,
     Rtc,
     Random(RandomDevice),
     CpuDmaLatency,
@@ -304,6 +306,7 @@ impl DevFilesystem {
             Inode::new_directory(SHM_INO, ROOT_INO, NodePermission::from_bits_truncate(0o777));
 
         let null = Inode::new_character_device(NULL_INO, DevDeviceKind::Null, 0o666, 1, 3);
+        let zero = Inode::new_character_device(ZERO_INO, DevDeviceKind::Zero, 0o666, 1, 5);
         let rtc = Inode::new_character_device(RTC_INO, DevDeviceKind::Rtc, 0o666, 254, 0);
         let random = Inode::new_character_device(
             RANDOM_INO,
@@ -334,6 +337,7 @@ impl DevFilesystem {
         self.insert_entry_locked(&root, "misc", MISC_INO, &inodes);
         self.insert_entry_locked(&root, "shm", SHM_INO, &inodes);
         self.insert_entry_locked(&root, "null", NULL_INO, &inodes);
+        self.insert_entry_locked(&root, "zero", ZERO_INO, &inodes);
         self.insert_entry_locked(&root, "rtc", RTC_INO, &inodes);
         self.insert_entry_locked(&root, "random", RANDOM_INO, &inodes);
         self.insert_entry_locked(&root, "urandom", URANDOM_INO, &inodes);
@@ -351,6 +355,7 @@ impl DevFilesystem {
         inodes.insert(MISC_INO, misc);
         inodes.insert(SHM_INO, shm);
         inodes.insert(NULL_INO, null);
+        inodes.insert(ZERO_INO, zero);
         inodes.insert(RTC_INO, rtc);
         inodes.insert(RANDOM_INO, random);
         inodes.insert(URANDOM_INO, urandom);
@@ -736,6 +741,10 @@ impl FileNodeOps for DevNode {
         let inode = self.inode_ref()?;
         match &inode.content {
             NodeContent::CharacterDevice(DevDeviceKind::Null) => Ok(0),
+            NodeContent::CharacterDevice(DevDeviceKind::Zero) => {
+                buf.fill(0);
+                Ok(buf.len())
+            }
             NodeContent::CharacterDevice(DevDeviceKind::Rtc) => Ok(0),
             NodeContent::CharacterDevice(DevDeviceKind::Random(random)) => {
                 random.rng.lock().fill_bytes(buf);
@@ -779,6 +788,7 @@ impl FileNodeOps for DevNode {
         let inode = self.inode_ref()?;
         match &inode.content {
             NodeContent::CharacterDevice(DevDeviceKind::Null) => Ok(buf.len()),
+            NodeContent::CharacterDevice(DevDeviceKind::Zero) => Ok(buf.len()),
             NodeContent::CharacterDevice(DevDeviceKind::Rtc) => {
                 Err(VfsError::OperationNotPermitted)
             }
@@ -813,6 +823,7 @@ impl FileNodeOps for DevNode {
         let inode = self.inode_ref()?;
         match &inode.content {
             NodeContent::CharacterDevice(DevDeviceKind::Null) => Ok((buf.len(), 0)),
+            NodeContent::CharacterDevice(DevDeviceKind::Zero) => Ok((buf.len(), 0)),
             NodeContent::CharacterDevice(DevDeviceKind::Rtc) => {
                 Err(VfsError::OperationNotPermitted)
             }
