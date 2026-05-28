@@ -12,8 +12,9 @@ export LOG ?= info
 
 prepare-cargo-config:
 	@if [ -d cargo ] && [ ! -d .cargo ]; then mv cargo .cargo; fi
+	@find vendor -name "cargo-checksum.json" 2>/dev/null | while read f; do cp -f "$$f" "$$(dirname "$$f")/.cargo-checksum.json"; done || true
 
-prepare-tools:
+prepare-tools: prepare-cargo-config
 	@command -v axconfig-gen >/dev/null || (echo "Error: missing axconfig-gen in PATH (expected in $(A)/bin)"; exit 1)
 	@command -v cargo-axplat >/dev/null || (echo "Error: missing cargo-axplat in PATH (expected in $(A)/bin)"; exit 1)
 	@command -v rust-objcopy >/dev/null || (echo "Error: missing rust-objcopy in PATH (expected in $(A)/bin)"; exit 1)
