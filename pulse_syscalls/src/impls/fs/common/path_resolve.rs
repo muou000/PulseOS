@@ -51,6 +51,8 @@ pub(crate) fn resolve_location_at_ptr(
     }
     let path = read_user_cstring(pathname)?;
     let path = path.as_c_str().to_string_lossy();
+    let is_absolute = path.starts_with('/');
+    let dirfd = if is_absolute { AT_FDCWD as i32 } else { dirfd };
     axlog::debug!(
         "resolve_location_at_ptr: dirfd={}, path=\"{}\", flags={:#x}",
         dirfd,

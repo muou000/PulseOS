@@ -47,6 +47,28 @@ fn parse_shebang_line(file_data: &[u8]) -> AxResult<Option<(String, Option<Strin
     Ok(Some((String::from(interp), interp_arg)))
 }
 
+fn check_txt_busy(path: &str) -> AxResult<()> {
+    let procs = super::processes_snapshot();
+    for proc in procs {
+        let fd_table = proc.fd_table.lock();
+        let entries = fd_table.clone_all_entries();
+        for entry in entries {
+            if let Some(file_obj) = entry.object.as_any().downcast_ref::<crate::fd_table::FileObject>() {
+                if file_obj.is_write_open() {
+                    if let Some(loc) = entry.object.location() {
+                        if let Ok(abs_path) = loc.absolute_path() {
+                            if abs_path.as_str() == path {
+                                return Err(axerrno::LinuxError::ETXTBSY.into());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 fn resolve_exec_path_and_args(
     fs: &FsContext,
     path: &str,
@@ -61,6 +83,9 @@ fn resolve_exec_path_and_args(
         if meta.node_type != NodeType::RegularFile {
             return Err(AxError::PermissionDenied);
         }
+
+        // Check if the file is currently open for writing by any process
+        check_txt_busy(path.as_str())?;
 
         // Check execute permission based on credentials (uid/gid)
         if let Some((uid, gid)) = fs.credentials {
