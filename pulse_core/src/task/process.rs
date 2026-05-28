@@ -23,7 +23,9 @@ use linux_raw_sys::general::{
 use memory_addr::{MemoryAddr, PhysAddr, VirtAddr, va};
 use spin::{Lazy, Mutex};
 
-use super::{SignalShared, Thread, current_thread, queue_signal_to_process, thread_handle_from_task};
+use super::{
+    SignalShared, Thread, current_thread, queue_signal_to_process, thread_handle_from_task,
+};
 use crate::{
     config::*,
     fd_table::{FD_LIMIT, FdTable, SharedFdTable, stdio_entries},
@@ -203,7 +205,18 @@ impl FutexTable {
         self.wake_all();
         self.queues.lock().clear();
     }
+
+    fn remove_if_empty(&self, addr: usize) {
+        let mut queues = self.queues.lock();
+        if let Some(queue) = queues.get(&addr) {
+            if queue.is_empty() {
+                queues.remove(&addr);
+            }
+        }
+    }
 }
+
+static GLOBAL_FUTEX_TABLE: Lazy<FutexTable> = Lazy::new(|| FutexTable::new());
 
 pub struct Process {
     pid: u64,
@@ -751,7 +764,10 @@ impl Process {
         self.fd_table.lock().get_entry_cloned(fd)
     }
 
-    pub fn insert_fd_entry(&self, entry: crate::fd_table::FdEntry) -> Result<usize, axerrno::LinuxError> {
+    pub fn insert_fd_entry(
+        &self,
+        entry: crate::fd_table::FdEntry,
+    ) -> Result<usize, axerrno::LinuxError> {
         let limit = self.rlimit_state.lock().nofile_soft as usize;
         let mut table = self.fd_table.lock();
         let fd = table.insert_next(entry)?;
@@ -762,7 +778,11 @@ impl Process {
         Ok(fd)
     }
 
-    pub fn insert_fd_entry_from(&self, min_fd: usize, entry: crate::fd_table::FdEntry) -> Result<usize, axerrno::LinuxError> {
+    pub fn insert_fd_entry_from(
+        &self,
+        min_fd: usize,
+        entry: crate::fd_table::FdEntry,
+    ) -> Result<usize, axerrno::LinuxError> {
         let limit = self.rlimit_state.lock().nofile_soft as usize;
         let mut table = self.fd_table.lock();
         let fd = table.insert_from(min_fd, entry)?;
@@ -773,7 +793,11 @@ impl Process {
         Ok(fd)
     }
 
-    pub fn set_fd_entry(&self, fd: usize, entry: crate::fd_table::FdEntry) -> Result<(), axerrno::LinuxError> {
+    pub fn set_fd_entry(
+        &self,
+        fd: usize,
+        entry: crate::fd_table::FdEntry,
+    ) -> Result<(), axerrno::LinuxError> {
         let limit = self.rlimit_state.lock().nofile_soft as usize;
         if fd >= limit {
             return Err(axerrno::LinuxError::EBADF);
@@ -781,7 +805,10 @@ impl Process {
         self.fd_table.lock().insert_at(fd, entry)
     }
 
-    pub fn remove_fd_entry(&self, fd: usize) -> Result<crate::fd_table::FdEntry, axerrno::LinuxError> {
+    pub fn remove_fd_entry(
+        &self,
+        fd: usize,
+    ) -> Result<crate::fd_table::FdEntry, axerrno::LinuxError> {
         self.fd_table.lock().remove_or_err(fd)
     }
 
@@ -792,10 +819,16 @@ impl Process {
         Ok(())
     }
 
-    pub fn set_fd_nonblocking(&self, fd: usize, nonblocking: bool) -> Result<(), axerrno::LinuxError> {
+    pub fn set_fd_nonblocking(
+        &self,
+        fd: usize,
+        nonblocking: bool,
+    ) -> Result<(), axerrno::LinuxError> {
         let mut table = self.fd_table.lock();
         let entry = table.get_mut(fd).ok_or(axerrno::LinuxError::EBADF)?;
-        entry.flags.set(crate::fd_table::FdFlags::NONBLOCK, nonblocking);
+        entry
+            .flags
+            .set(crate::fd_table::FdFlags::NONBLOCK, nonblocking);
         entry.object.set_nonblocking(nonblocking)?;
         Ok(())
     }
@@ -812,13 +845,20 @@ impl Process {
         self.validate_user_range(addr, len).is_ok()
     }
 
-    pub fn align_user_range(&self, addr: usize, len: usize) -> Result<(usize, usize), axerrno::LinuxError> {
+    pub fn align_user_range(
+        &self,
+        addr: usize,
+        len: usize,
+    ) -> Result<(usize, usize), axerrno::LinuxError> {
         if len == 0 {
             return Ok((addr & !(4096 - 1), 0));
         }
         let aligned_addr = addr & !(4096 - 1);
         let end = addr.checked_add(len).ok_or(axerrno::LinuxError::EINVAL)?;
-        let aligned_end = (end.checked_add(4096 - 1).ok_or(axerrno::LinuxError::EINVAL)?) & ! (4096 - 1);
+        let aligned_end = (end
+            .checked_add(4096 - 1)
+            .ok_or(axerrno::LinuxError::EINVAL)?)
+            & !(4096 - 1);
         if aligned_end < aligned_addr {
             return Err(axerrno::LinuxError::EINVAL);
         }
@@ -849,8 +889,8 @@ impl Process {
             return Err(axerrno::LinuxError::ENOMEM);
         }
         let end = addr.checked_add(len).ok_or(axerrno::LinuxError::EINVAL)?;
-        let pages =
-            memory_addr::PageIter4K::new(VirtAddr::from(addr), VirtAddr::from(end)).ok_or(axerrno::LinuxError::EINVAL)?;
+        let pages = memory_addr::PageIter4K::new(VirtAddr::from(addr), VirtAddr::from(end))
+            .ok_or(axerrno::LinuxError::EINVAL)?;
         for page in pages {
             let already_resident = aspace
                 .page_table()
@@ -918,7 +958,11 @@ impl Process {
         Ok(())
     }
 
-    pub fn maybe_lock_future_range(&self, addr: usize, len: usize) -> Result<(), axerrno::LinuxError> {
+    pub fn maybe_lock_future_range(
+        &self,
+        addr: usize,
+        len: usize,
+    ) -> Result<(), axerrno::LinuxError> {
         if len == 0 || !self.memlock_future_enabled() {
             return Ok(());
         }
@@ -1542,17 +1586,48 @@ impl Process {
             .wait_until(|| self.vfork_done.load(Ordering::Acquire));
     }
 
+    fn futex_key(&self, addr: usize, is_private: bool) -> (usize, bool) {
+        if is_private {
+            (addr, true)
+        } else {
+            let aspace_handle = self.aspace_handle();
+            let mut aspace = aspace_handle.lock();
+            let vaddr = VirtAddr::from(addr);
+            let query_res = aspace.page_table().query(vaddr);
+            let paddr = match query_res {
+                Ok((paddr, ..)) => paddr.as_usize(),
+                Err(_) => {
+                    // Try to handle page fault on-demand (simulate a read fault from user space to populate it)
+                    if aspace.handle_page_fault(
+                        vaddr,
+                        axhal::trap::PageFaultFlags::READ | axhal::trap::PageFaultFlags::USER,
+                    ) {
+                        aspace
+                            .page_table()
+                            .query(vaddr)
+                            .map(|(paddr, ..)| paddr.as_usize())
+                            .unwrap_or(addr)
+                    } else {
+                        addr
+                    }
+                }
+            };
+            (paddr, false)
+        }
+    }
+
     pub fn futex_wait(
         &self,
         addr: usize,
         expected: u32,
         timeout_ns: Option<u64>,
-    ) -> Result<(), i32> {
+        is_private: bool,
+    ) -> AxResult<()> {
         if match self.read_user_u32(addr) {
             Ok(v) => v != expected,
-            Err(e) => return Err(e.code().abs()),
+            Err(e) => return Err(e),
         } {
-            return Err(AxErrorKind::WouldBlock.code());
+            return Err(AxError::from(AxErrorKind::WouldBlock));
         }
         let current_thread = super::current_thread().ok();
         let signal_pending = || {
@@ -1562,66 +1637,77 @@ impl Process {
                 .unwrap_or(false)
         };
         if signal_pending() {
-            return Err(super::ERESTARTSYS);
+            return Err(unsafe { core::mem::transmute(-512) });
         }
 
-        if let Some(timeout_ns) = timeout_ns {
-            let deadline = (axhal::time::monotonic_time_nanos() as u64).saturating_add(timeout_ns);
-            while !self.group_exiting() {
-                if signal_pending() {
-                    return Err(super::ERESTARTSYS);
-                }
-                match self.read_user_u32(addr) {
-                    Ok(current) if current != expected => return Ok(()),
-                    Ok(_) => {}
-                    Err(e) => return Err(e.code().abs()),
-                }
-                if axhal::time::monotonic_time_nanos() as u64 >= deadline {
-                    return Err(AxErrorKind::TimedOut.code());
-                }
-                axtask::yield_now();
+        let (key, is_priv) = self.futex_key(addr, is_private);
+
+        let queue = if is_priv {
+            self.futex_table.queue(key)
+        } else {
+            GLOBAL_FUTEX_TABLE.queue(key)
+        };
+
+        if self.group_exiting() {
+            if !is_priv {
+                GLOBAL_FUTEX_TABLE.remove_if_empty(key);
             }
             return Ok(());
         }
 
-        let queue = self.futex_table.queue(addr);
-        loop {
-            if self.group_exiting() {
-                return Ok(());
-            }
-            if signal_pending() {
-                return Err(super::ERESTARTSYS);
-            }
-            match self.read_user_u32(addr) {
-                Ok(current) if current != expected => return Ok(()),
-                Ok(_) => {}
-                Err(e) => return Err(e.code().abs()),
-            }
-            queue.wait_until(|| {
-                self.group_exiting()
-                    || signal_pending()
-                    || self
-                        .read_user_u32(addr)
-                        .map(|current| current != expected)
-                        .unwrap_or(true)
-            });
-        }
-    }
-
-    fn futex_wake_impl(&self, addr: usize, count: usize, resched: bool) -> usize {
-        if resched {
-            self.futex_table.wake(addr, count)
+        let timed_out = if let Some(timeout_ns) = timeout_ns {
+            let dur = core::time::Duration::from_nanos(timeout_ns);
+            queue.wait_timeout(dur)
         } else {
-            self.futex_table.wake_no_resched(addr, count)
+            queue.wait();
+            false
+        };
+
+        if !is_priv {
+            GLOBAL_FUTEX_TABLE.remove_if_empty(key);
         }
+
+        if self.group_exiting() {
+            return Ok(());
+        }
+        if signal_pending() {
+            return Err(unsafe { core::mem::transmute(-512) });
+        }
+        if timed_out {
+            return Err(AxError::from(AxErrorKind::TimedOut));
+        }
+
+        Ok(())
     }
 
-    pub fn futex_wake(&self, addr: usize, count: usize) -> usize {
-        self.futex_wake_impl(addr, count, true)
+    fn futex_wake_impl(&self, addr: usize, count: usize, resched: bool, is_private: bool) -> usize {
+        let (key, is_priv) = self.futex_key(addr, is_private);
+        let woken = if is_priv {
+            if resched {
+                self.futex_table.wake(key, count)
+            } else {
+                self.futex_table.wake_no_resched(key, count)
+            }
+        } else {
+            if resched {
+                GLOBAL_FUTEX_TABLE.wake(key, count)
+            } else {
+                GLOBAL_FUTEX_TABLE.wake_no_resched(key, count)
+            }
+        };
+
+        if !is_priv {
+            GLOBAL_FUTEX_TABLE.remove_if_empty(key);
+        }
+        woken
     }
 
-    pub fn futex_wake_no_resched(&self, addr: usize, count: usize) -> usize {
-        self.futex_wake_impl(addr, count, false)
+    pub fn futex_wake(&self, addr: usize, count: usize, is_private: bool) -> usize {
+        self.futex_wake_impl(addr, count, true, is_private)
+    }
+
+    pub fn futex_wake_no_resched(&self, addr: usize, count: usize, is_private: bool) -> usize {
+        self.futex_wake_impl(addr, count, false, is_private)
     }
 
     pub fn futex_requeue(
@@ -1630,9 +1716,22 @@ impl Process {
         wake_count: usize,
         target: usize,
         requeue_count: usize,
+        is_private: bool,
     ) -> usize {
-        self.futex_table
-            .requeue(addr, wake_count, target, requeue_count)
+        let (key, is_priv) = self.futex_key(addr, is_private);
+        let (target_key, _) = self.futex_key(target, is_private);
+        let woken_requeued = if is_priv {
+            self.futex_table
+                .requeue(key, wake_count, target_key, requeue_count)
+        } else {
+            GLOBAL_FUTEX_TABLE.requeue(key, wake_count, target_key, requeue_count)
+        };
+
+        if !is_priv {
+            GLOBAL_FUTEX_TABLE.remove_if_empty(key);
+            GLOBAL_FUTEX_TABLE.remove_if_empty(target_key);
+        }
+        woken_requeued
     }
 
     pub fn exit_robust_list(&self, head_addr: usize) -> AxResult<()> {
@@ -1670,7 +1769,7 @@ impl Process {
         } else {
             entry.wrapping_sub(futex_offset.unsigned_abs())
         };
-        let _ = self.futex_wake_no_resched(futex_addr, 1);
+        let _ = self.futex_wake_no_resched(futex_addr, 1, true);
     }
 
     pub fn spawn_fork_from_trap_frame(

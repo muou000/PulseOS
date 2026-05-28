@@ -1,7 +1,7 @@
 use alloc::sync::Arc;
 use core::{
     ops::Deref,
-    sync::atomic::{AtomicUsize, AtomicU64, AtomicBool, Ordering},
+    sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
 };
 
 use axerrno::{AxError, AxResult};
@@ -222,7 +222,7 @@ impl Thread {
             return Ok(());
         }
         self.process.write_user_u32(clear_child_tid, 0)?;
-        self.process.futex_wake_no_resched(clear_child_tid, 1);
+        self.process.futex_wake_no_resched(clear_child_tid, 1, true);
         Ok(())
     }
 

@@ -47,6 +47,7 @@ pub fn sys_futex(
         Err(e) => return -e.code() as isize,
     };
     let cmd = op & FUTEX_CMD_MASK;
+    let is_private = (op & 0x80) != 0;
 
     match cmd {
         FUTEX_WAIT => {
@@ -54,17 +55,20 @@ pub fn sys_futex(
                 Ok(timeout) => timeout,
                 Err(e) => return -e.code() as isize,
             };
-            match process.futex_wait(uaddr, val as u32, timeout_ns) {
+            match process.futex_wait(uaddr, val as u32, timeout_ns, is_private) {
                 Ok(()) => 0,
-                Err(e) => -(e as isize),
+                Err(e) => {
+                    let errno: LinuxError = e.into();
+                    -errno.code() as isize
+                }
             }
         }
-        FUTEX_WAKE => process.futex_wake(uaddr, val) as isize,
+        FUTEX_WAKE => process.futex_wake(uaddr, val, is_private) as isize,
         FUTEX_REQUEUE => {
             if uaddr2 == 0 {
                 return -LinuxError::EFAULT.code() as isize;
             }
-            process.futex_requeue(uaddr, val, uaddr2, timeout_or_val2) as isize
+            process.futex_requeue(uaddr, val, uaddr2, timeout_or_val2, is_private) as isize
         }
         FUTEX_CMP_REQUEUE => {
             if uaddr2 == 0 {
@@ -72,7 +76,7 @@ pub fn sys_futex(
             }
             match process.read_user_u32(uaddr) {
                 Ok(current) if current == val3 as u32 => {
-                    process.futex_requeue(uaddr, val, uaddr2, timeout_or_val2) as isize
+                    process.futex_requeue(uaddr, val, uaddr2, timeout_or_val2, is_private) as isize
                 }
                 Ok(_) => -LinuxError::EAGAIN.code() as isize,
                 Err(_) => -LinuxError::EFAULT.code() as isize,
