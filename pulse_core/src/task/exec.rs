@@ -146,6 +146,9 @@ impl Process {
         let stack_top = *self.stack_top.lock();
         let uctx = axhal::context::UspaceContext::new(entry, va!(stack_top), 0);
         self.mark_user_resume();
+        if let Ok(thread) = super::current_thread() {
+            thread.mark_user_resume();
+        }
         let kstack_top = axtask::current()
             .kernel_stack_top()
             .expect("current task has no kernel stack")

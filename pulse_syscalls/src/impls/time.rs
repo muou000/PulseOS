@@ -13,7 +13,7 @@ use pulse_core::task::uaccess;
 
 use crate::{
     LinuxError,
-    impls::utils::{read_user_timespec, write_user_bytes},
+    impls::utils::{read_user_timespec, read_user_timeval, write_user_bytes},
 };
 
 const CLK_TCK: u64 = 100;
@@ -69,6 +69,7 @@ fn is_supported_clock(clockid: i32) -> bool {
             | CLOCK_MONOTONIC_COARSE
             | CLOCK_BOOTTIME
             | CLOCK_PROCESS_CPUTIME_ID
+            | CLOCK_THREAD_CPUTIME_ID
     )
 }
 
@@ -83,6 +84,12 @@ fn clock_now(clockid: i32) -> Result<Duration, LinuxError> {
             let process = thread.process();
             let now_ns = axhal::time::monotonic_time_nanos() as u64;
             let (utime_ns, stime_ns) = process.snapshot_cpu_time_ns(now_ns);
+            Ok(Duration::from_nanos(utime_ns.saturating_add(stime_ns)))
+        }
+        CLOCK_THREAD_CPUTIME_ID => {
+            let thread = pulse_core::task::current_thread().map_err(|e| LinuxError::from(e))?;
+            let now_ns = axhal::time::monotonic_time_nanos() as u64;
+            let (utime_ns, stime_ns) = thread.snapshot_cpu_time_ns(now_ns);
             Ok(Duration::from_nanos(utime_ns.saturating_add(stime_ns)))
         }
         _ => Err(LinuxError::EINVAL),
@@ -288,6 +295,48 @@ pub fn sys_clock_gettime(clockid: i32, tp: usize) -> isize {
     })
 }
 
+/// sys_clock_settime - 设置时钟时间
+pub fn sys_clock_settime(clockid: i32, tp: usize) -> isize {
+    axlog::trace!("sys_clock_settime: clockid={}, tp={:#x}", clockid, tp);
+
+    let process = match pulse_core::task::current_process() {
+        Ok(proc) => proc,
+        Err(e) => return -e.code() as isize,
+    };
+    let (_, euid, _) = process.uid_snapshot();
+    if euid != 0 {
+        return -LinuxError::EPERM.code() as isize;
+    }
+
+    if tp == 0 {
+        return -LinuxError::EFAULT.code() as isize;
+    }
+
+    if clockid != CLOCK_REALTIME as i32 {
+        return -LinuxError::EINVAL.code() as isize;
+    }
+
+    let req_ts = match read_user_timespec(tp).and_then(timespec_to_duration) {
+        Ok(ts) => ts,
+        Err(e) => {
+            axlog::warn!("read user timespec failed: addr={:#x}, err={:?}", tp, e);
+            return -e.code() as isize;
+        }
+    };
+
+    let now_mono_ns = axhal::time::monotonic_time_nanos();
+    let new_wall_ns = req_ts.as_nanos() as u64;
+    let new_offset = new_wall_ns.wrapping_sub(now_mono_ns);
+
+    axhal::time::set_epochoffset_nanos(new_offset);
+
+    // Synchronize vDSO wall time instantly
+    starry_vdso::vdso::set_vdso_epoch_offset(new_offset);
+    starry_vdso::vdso::update_vdso_data();
+
+    0
+}
+
 /// sys_gettimeofday - 获取墙上时间
 pub fn sys_gettimeofday(tv: usize, tz: usize) -> isize {
     axlog::trace!("sys_gettimeofday: tv={:#x}, tz={:#x}", tv, tz);
@@ -318,6 +367,61 @@ pub fn sys_gettimeofday(tv: usize, tz: usize) -> isize {
         axlog::warn!("sys_gettimeofday: user write failed at {:#x}: {:?}", tv, e);
         -LinuxError::EFAULT.code() as isize
     })
+}
+
+/// sys_settimeofday - 设置墙上时间
+pub fn sys_settimeofday(tv: usize, tz: usize) -> isize {
+    axlog::trace!("sys_settimeofday: tv={:#x}, tz={:#x}", tv, tz);
+
+    let process = match pulse_core::task::current_process() {
+        Ok(proc) => proc,
+        Err(e) => return -e.code() as isize,
+    };
+    let (_, euid, _) = process.uid_snapshot();
+    if euid != 0 {
+        return -LinuxError::EPERM.code() as isize;
+    }
+
+    if tz != 0 {
+        if !GETTIMEOFDAY_TZ_WARNED.swap(true, Ordering::AcqRel) {
+            axlog::warn!("sys_settimeofday: timezone argument is ignored");
+        }
+    }
+
+    if tv == 0 {
+        return 0;
+    }
+
+    let req_tv = match read_user_timeval(tv) {
+        Ok(t) => t,
+        Err(e) => {
+            axlog::warn!("sys_settimeofday: read user timeval failed: addr={:#x}, err={:?}", tv, e);
+            return -e.code() as isize;
+        }
+    };
+
+    if req_tv.tv_usec < 0 || req_tv.tv_usec >= 1_000_000 {
+        return -LinuxError::EINVAL.code() as isize;
+    }
+
+    let new_wall_ns = match (req_tv.tv_sec as u64)
+        .checked_mul(1_000_000_000)
+        .and_then(|sec_ns| sec_ns.checked_add((req_tv.tv_usec as u64) * 1_000))
+    {
+        Some(ns) => ns,
+        None => return -LinuxError::EINVAL.code() as isize,
+    };
+
+    let now_mono_ns = axhal::time::monotonic_time_nanos();
+    let new_offset = new_wall_ns.wrapping_sub(now_mono_ns);
+
+    axhal::time::set_epochoffset_nanos(new_offset);
+
+    // Synchronize vDSO wall time instantly
+    starry_vdso::vdso::set_vdso_epoch_offset(new_offset);
+    starry_vdso::vdso::update_vdso_data();
+
+    0
 }
 
 pub fn sys_times(tbuf: usize) -> isize {

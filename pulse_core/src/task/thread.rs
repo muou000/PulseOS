@@ -1,7 +1,7 @@
 use alloc::sync::Arc;
 use core::{
     ops::Deref,
-    sync::atomic::{AtomicUsize, Ordering},
+    sync::atomic::{AtomicUsize, AtomicU64, AtomicBool, Ordering},
 };
 
 use axerrno::{AxError, AxResult};
@@ -18,6 +18,10 @@ pub struct Thread {
     set_child_tid: AtomicUsize,
     robust_list_head: AtomicUsize,
     task_ref: Mutex<Option<AxTaskRef>>,
+    pub user_time_ns: AtomicU64,
+    pub sys_time_ns: AtomicU64,
+    pub last_user_enter_ns: AtomicU64,
+    pub in_user_mode: AtomicBool,
 }
 
 pub struct ThreadHandle(Arc<Thread>);
@@ -50,6 +54,10 @@ impl Thread {
             set_child_tid: AtomicUsize::new(0),
             robust_list_head: AtomicUsize::new(0),
             task_ref: Mutex::new(None),
+            user_time_ns: AtomicU64::new(0),
+            sys_time_ns: AtomicU64::new(0),
+            last_user_enter_ns: AtomicU64::new(0),
+            in_user_mode: AtomicBool::new(false),
         })
     }
 
@@ -176,7 +184,36 @@ impl Thread {
         self.process.sync_fs_context();
         self.write_set_child_tid_on_start()?;
         self.process.mark_user_resume();
+        self.mark_user_resume();
         Ok(())
+    }
+
+    pub fn mark_user_resume(&self) {
+        let now_ns = axhal::time::monotonic_time_nanos() as u64;
+        self.last_user_enter_ns.store(now_ns, Ordering::Relaxed);
+        self.in_user_mode.store(true, Ordering::Release);
+    }
+
+    pub fn on_kernel_entry_from_user(&self, now_ns: u64) {
+        if self.in_user_mode.swap(false, Ordering::AcqRel) {
+            let last = self.last_user_enter_ns.load(Ordering::Relaxed);
+            let delta = now_ns.saturating_sub(last);
+            self.user_time_ns.fetch_add(delta, Ordering::Relaxed);
+        }
+    }
+
+    pub fn add_sys_time_ns(&self, delta_ns: u64) {
+        self.sys_time_ns.fetch_add(delta_ns, Ordering::Relaxed);
+    }
+
+    pub fn snapshot_cpu_time_ns(&self, now_ns: u64) -> (u64, u64) {
+        let mut user = self.user_time_ns.load(Ordering::Relaxed);
+        let sys = self.sys_time_ns.load(Ordering::Relaxed);
+        if self.in_user_mode.load(Ordering::Acquire) {
+            let last = self.last_user_enter_ns.load(Ordering::Relaxed);
+            user = user.saturating_add(now_ns.saturating_sub(last));
+        }
+        (user, sys)
     }
 
     pub fn clear_child_tid_on_exit(&self) -> AxResult<()> {

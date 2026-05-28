@@ -226,8 +226,10 @@ impl axfs::ProcfsProcessProvider for PulseProcessProvider {
         };
 
         let ppid = proc.parent_pid();
-        let utime = proc.user_time_ns.load(core::sync::atomic::Ordering::Relaxed) / 10_000_000;
-        let stime = proc.sys_time_ns.load(core::sync::atomic::Ordering::Relaxed) / 10_000_000;
+        let now_ns = axhal::time::monotonic_time_nanos() as u64;
+        let (utime_ns, stime_ns) = proc.snapshot_cpu_time_ns(now_ns);
+        let utime = utime_ns / 10_000_000;
+        let stime = stime_ns / 10_000_000;
         let cutime = proc.child_user_time_ns.load(core::sync::atomic::Ordering::Relaxed) / 10_000_000;
         let cstime = proc.child_sys_time_ns.load(core::sync::atomic::Ordering::Relaxed) / 10_000_000;
         let threads = proc.thread_count();

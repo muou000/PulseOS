@@ -29,6 +29,7 @@ bitflags.workspace = true
 spin.workspace = true
 linux-raw-sys = { workspace = true, features = ["system"] }
 pulse_core = { path = "../pulse_core" }
+starry-vdso = { workspace = true }
 scope-local = "0.1"
 rand_core.workspace = true
 rand_pcg.workspace = true
