@@ -2,7 +2,6 @@ use alloc::{
     collections::BTreeMap,
     string::String,
     sync::{Arc, Weak},
-    vec,
     vec::Vec,
 };
 use core::{any::Any, task::Context, time::Duration};

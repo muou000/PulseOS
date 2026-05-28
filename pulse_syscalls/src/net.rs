@@ -17,15 +17,23 @@ pub enum Socket {
 impl Socket {
     pub fn local_addr(&self) -> Result<SocketAddr, LinuxError> {
         match self {
-            Socket::Tcp(s) => s.local_addr().map_err(|e| LinuxError::from(e.canonicalize())),
-            Socket::Udp(s) => s.local_addr().map_err(|e| LinuxError::from(e.canonicalize())),
+            Socket::Tcp(s) => s
+                .local_addr()
+                .map_err(|e| LinuxError::from(e.canonicalize())),
+            Socket::Udp(s) => s
+                .local_addr()
+                .map_err(|e| LinuxError::from(e.canonicalize())),
         }
     }
 
     pub fn peer_addr(&self) -> Result<SocketAddr, LinuxError> {
         match self {
-            Socket::Tcp(s) => s.peer_addr().map_err(|e| LinuxError::from(e.canonicalize())),
-            Socket::Udp(s) => s.peer_addr().map_err(|e| LinuxError::from(e.canonicalize())),
+            Socket::Tcp(s) => s
+                .peer_addr()
+                .map_err(|e| LinuxError::from(e.canonicalize())),
+            Socket::Udp(s) => s
+                .peer_addr()
+                .map_err(|e| LinuxError::from(e.canonicalize())),
         }
     }
 
@@ -44,9 +52,7 @@ impl Socket {
     }
 
     /// Downcast an `Arc<dyn FdObject>` to `Arc<Socket>`.
-    pub fn from_fd_entry(
-        object: &Arc<dyn FdObject>,
-    ) -> Result<Arc<Socket>, LinuxError> {
+    pub fn from_fd_entry(object: &Arc<dyn FdObject>) -> Result<Arc<Socket>, LinuxError> {
         object
             .as_any()
             .downcast_ref::<Socket>()
