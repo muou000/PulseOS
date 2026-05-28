@@ -89,6 +89,8 @@ axcpu = { path = "../crates/axcpu" }
 axplat-loongarch64-qemu-virt = { path = "../crates/axplat-loongarch64-qemu-virt" }
 axplat-riscv64-qemu-virt = { path = "../crates/axplat-riscv64-qemu-virt" }
 axio = { path = "../crates/axio" }
+page_table_entry = { path = "../vendor/page_table_entry" }
+page_table_multiarch = { path = "../vendor/page_table_multiarch" }
 
 [patch."https://github.com/arceos-org/allocator.git"]
 allocator = { path = "../crates/allocator" }

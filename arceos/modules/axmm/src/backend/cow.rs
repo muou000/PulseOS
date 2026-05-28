@@ -16,6 +16,10 @@ impl CowMapping {
         Self { inner }
     }
 
+    pub fn inner(&self) -> &Backend {
+        &self.inner
+    }
+
     pub(crate) fn handle_page_fault(
         &self,
         vaddr: VirtAddr,

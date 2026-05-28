@@ -14,7 +14,7 @@ pub(crate) use io::{
     sys_sendfile, sys_sync, sys_write, sys_writev, sys_pselect6,
 };
 pub(crate) use meta::{
-    sys_faccessat, sys_fchmodat, sys_fchownat, sys_fstat, sys_fstatat, sys_fstatfs, sys_readlinkat,
+    sys_faccessat, sys_fchmod, sys_fchmodat, sys_fchownat, sys_fstat, sys_fstatat, sys_fstatfs, sys_readlinkat,
     sys_statfs, sys_statx, sys_utimensat,
 };
 pub(crate) use path::{

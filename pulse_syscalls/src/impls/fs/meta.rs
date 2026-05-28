@@ -382,6 +382,43 @@ pub fn sys_fchmodat(dirfd: i32, pathname: usize, mode: usize, flags: usize) -> i
     }
 }
 
+/// `fchmod(fd, mode)` — 设置打开文件的权限位。
+pub fn sys_fchmod(fd: usize, mode: usize) -> isize {
+    axlog::info!("sys_fchmod: fd={}, mode={:#o}", fd, mode);
+
+    let location = match get_fd_entry(fd) {
+        Ok(entry) => match entry.object.location() {
+            Some(loc) => loc,
+            None => return -LinuxError::EBADF.code() as isize,
+        },
+        Err(e) => return -e.code() as isize,
+    };
+
+    let perm = axfs_ng_vfs::NodePermission::from_bits_truncate(mode as u16);
+    match location.update_metadata(axfs_ng_vfs::MetadataUpdate {
+        mode: Some(perm),
+        ..Default::default()
+    }) {
+        Ok(()) => {
+            axlog::debug!(
+                "sys_fchmod: fd={} resolved and metadata updated OK, returning 0",
+                fd
+            );
+            0
+        }
+        Err(e) => {
+            let err = LinuxError::from(e.canonicalize());
+            axlog::debug!(
+                "sys_fchmod: fd={} update_metadata failed: {:?}, returning {}",
+                fd,
+                err,
+                -err.code()
+            );
+            -err.code() as isize
+        }
+    }
+}
+
 /// `fchownat(dirfd, pathname, uid, gid, flags)` — 设置文件所有者。
 ///
 /// PulseOS 不强制执行文件所有权，此 stub 仅验证路径存在性后返回成功。

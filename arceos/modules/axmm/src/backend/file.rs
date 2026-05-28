@@ -90,16 +90,29 @@ impl FileMapping {
         true
     }
 
-    pub(crate) fn is_shared(&self) -> bool {
+    pub fn is_shared(&self) -> bool {
         self.shared
+    }
+
+    pub fn file_offset(&self) -> usize {
+        self.file_offset
+    }
+
+    pub fn file(&self) -> &CachedFile {
+        &self.file
+    }
+
+    pub fn file_bytes(&self) -> usize {
+        self.file.location().len().map(|len| len as usize).unwrap_or(self.file_bytes)
     }
 
     fn page_read_window(&self, page_addr: VirtAddr) -> Option<(u64, usize)> {
         let relative = page_addr.as_usize().checked_sub(self.start.as_usize())?;
-        if relative >= self.file_bytes {
+        let current_file_bytes = self.file_bytes();
+        if relative >= current_file_bytes {
             return None;
         }
-        let read_len = (self.file_bytes - relative).min(PAGE_SIZE_4K);
+        let read_len = (current_file_bytes - relative).min(PAGE_SIZE_4K);
         let file_offset = self.file_offset.checked_add(relative)?;
         Some((file_offset as u64, read_len))
     }
@@ -232,6 +245,12 @@ impl Backend {
         }
 
         let page_addr = vaddr.align_down_4k();
+        let current_file_bytes = mapping.file_bytes();
+        let relative = page_addr.as_usize().saturating_sub(mapping.start.as_usize());
+        if relative >= (current_file_bytes + PAGE_SIZE_4K - 1) & !(PAGE_SIZE_4K - 1) {
+            return false;
+        }
+
         if let Ok((old_frame, old_flags, _)) = pt.query(page_addr) {
             if old_frame.as_usize() != 0 {
                 let new_flags = old_flags | orig_flags;
