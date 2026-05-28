@@ -218,8 +218,6 @@ pub struct Process {
     pub sys_time_ns: Arc<AtomicU64>,
     pub child_user_time_ns: Arc<AtomicU64>,
     pub child_sys_time_ns: Arc<AtomicU64>,
-    pub last_user_enter_ns: Arc<AtomicU64>,
-    pub in_user_mode: Arc<AtomicBool>,
     pub stack_top: Mutex<usize>,
     pub entry: Mutex<usize>,
     threads: SpinNoIrq<Vec<u64>>,
@@ -964,8 +962,6 @@ impl Process {
             sys_time_ns: Arc::new(AtomicU64::new(0)),
             child_user_time_ns: Arc::new(AtomicU64::new(0)),
             child_sys_time_ns: Arc::new(AtomicU64::new(0)),
-            last_user_enter_ns: Arc::new(AtomicU64::new(0)),
-            in_user_mode: Arc::new(AtomicBool::new(false)),
             stack_top: Mutex::new(USER_STACK_TOP),
             entry: Mutex::new(0),
             threads: SpinNoIrq::new(alloc::vec![pid]),
@@ -1065,8 +1061,6 @@ impl Process {
             sys_time_ns: Arc::new(AtomicU64::new(0)),
             child_user_time_ns: Arc::new(AtomicU64::new(0)),
             child_sys_time_ns: Arc::new(AtomicU64::new(0)),
-            last_user_enter_ns: Arc::new(AtomicU64::new(0)),
-            in_user_mode: Arc::new(AtomicBool::new(false)),
             stack_top: Mutex::new(*parent.stack_top.lock()),
             entry: Mutex::new(*parent.entry.lock()),
             threads: SpinNoIrq::new(alloc::vec![pid]),
@@ -1283,6 +1277,15 @@ impl Process {
     }
 
     pub fn finish_thread_exit(&self, tid: u64, exit_code: i32) {
+        if let Some(task) = self.task_ref_by_tid(tid) {
+            if let Some(handle) = super::thread_handle_from_task(&task) {
+                let now_ns = axhal::time::monotonic_time_nanos() as u64;
+                let (u, s) = handle.snapshot_cpu_time_ns(now_ns);
+                self.user_time_ns.fetch_add(u, Ordering::Relaxed);
+                self.sys_time_ns.fetch_add(s, Ordering::Relaxed);
+            }
+        }
+
         if tid != self.pid() {
             let _ = self.take_task_ref_by_tid(tid);
         }
@@ -1394,21 +1397,21 @@ impl Process {
     }
 
     pub fn mark_user_resume(&self) {
-        let now_ns = axhal::time::monotonic_time_nanos() as u64;
-        self.last_user_enter_ns.store(now_ns, Ordering::Relaxed);
-        self.in_user_mode.store(true, Ordering::Release);
+        if let Ok(thread) = super::current_thread() {
+            thread.mark_user_resume();
+        }
     }
 
     pub fn on_kernel_entry_from_user(&self, now_ns: u64) {
-        if self.in_user_mode.swap(false, Ordering::AcqRel) {
-            let last = self.last_user_enter_ns.load(Ordering::Relaxed);
-            let delta = now_ns.saturating_sub(last);
-            self.user_time_ns.fetch_add(delta, Ordering::Relaxed);
+        if let Ok(thread) = super::current_thread() {
+            thread.on_kernel_entry_from_user(now_ns);
         }
     }
 
     pub fn add_sys_time_ns(&self, delta_ns: u64) {
-        self.sys_time_ns.fetch_add(delta_ns, Ordering::Relaxed);
+        if let Ok(thread) = super::current_thread() {
+            thread.add_sys_time_ns(delta_ns);
+        }
     }
 
     pub fn add_child_time_ns(&self, child_user_ns: u64, child_sys_ns: u64) {
@@ -1419,13 +1422,17 @@ impl Process {
     }
 
     pub fn snapshot_cpu_time_ns(&self, now_ns: u64) -> (u64, u64) {
-        let mut user = self.user_time_ns.load(Ordering::Relaxed);
-        let sys = self.sys_time_ns.load(Ordering::Relaxed);
-        if self.in_user_mode.load(Ordering::Acquire) {
-            let last = self.last_user_enter_ns.load(Ordering::Relaxed);
-            user = user.saturating_add(now_ns.saturating_sub(last));
+        let mut total_user = self.user_time_ns.load(Ordering::Relaxed);
+        let mut total_sys = self.sys_time_ns.load(Ordering::Relaxed);
+        let task_refs = self.task_refs.lock();
+        for task in task_refs.iter() {
+            if let Some(handle) = super::thread_handle_from_task(task) {
+                let (u, s) = handle.snapshot_cpu_time_ns(now_ns);
+                total_user = total_user.saturating_add(u);
+                total_sys = total_sys.saturating_add(s);
+            }
         }
-        (user, sys)
+        (total_user, total_sys)
     }
 
     pub fn snapshot_children_cpu_time_ns(&self) -> (u64, u64) {
@@ -1436,7 +1443,8 @@ impl Process {
     }
 
     pub fn read_sys_time_ns(&self) -> u64 {
-        self.sys_time_ns.load(Ordering::Relaxed)
+        let now_ns = axhal::time::monotonic_time_nanos() as u64;
+        self.snapshot_cpu_time_ns(now_ns).1
     }
 
     /// Set ITIMER_REAL. Returns the previous (remaining_ns, interval_ns).

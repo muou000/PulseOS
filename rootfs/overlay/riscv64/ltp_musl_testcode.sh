@@ -21,9 +21,15 @@ chown01
 chown02
 chown05
 clock_getres01
+clock_gettime01
 clock_gettime02
+clock_gettime03
+clock_gettime04
 clock_nanosleep01
 clock_nanosleep04
+clock_settime01
+clock_settime02
+clock_settime03
 clone01
 clone03
 clone04
@@ -231,6 +237,7 @@ setrlimit02
 setrlimit03
 setrlimit04
 setrlimit05
+settimeofday01
 setuid01
 setuid03
 shmat02
@@ -254,6 +261,8 @@ stat01_64
 stat02
 stat02_64
 statx03
+stime01
+stime02
 syscall01
 syslog12
 time01

@@ -23,12 +23,30 @@ pub fn init_vdso_data() {
     }
 }
 
+use core::sync::atomic::{AtomicBool, Ordering};
+
+static VDSO_UPDATE_LOCK: AtomicBool = AtomicBool::new(false);
+
+/// Set the vDSO epoch offset.
+pub fn set_vdso_epoch_offset(offset: u64) {
+    crate::vdso_time_data::set_vdso_epoch_offset(offset);
+}
+
 /// Update vDSO data
 pub fn update_vdso_data() {
+    while VDSO_UPDATE_LOCK
+        .compare_exchange_weak(false, true, Ordering::Acquire, Ordering::Relaxed)
+        .is_err()
+    {
+        core::hint::spin_loop();
+    }
+
     unsafe {
         let data_ptr = core::ptr::addr_of_mut!(VDSO_DATA);
         (*data_ptr).time_update();
     }
+
+    VDSO_UPDATE_LOCK.store(false, Ordering::Release);
 }
 
 /// Get the physical address of vDSO data for mapping to userspace

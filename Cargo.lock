@@ -1310,6 +1310,7 @@ dependencies = [
  "rand_pcg",
  "scope-local",
  "spin 0.10.0",
+ "starry-vdso",
  "syscalls",
 ]
 

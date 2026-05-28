@@ -1,8 +1,14 @@
 use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
 use axplat::time::{
-    NANOS_PER_SEC, current_ticks, monotonic_time_nanos, nanos_to_ticks, wall_time_nanos,
+    NANOS_PER_SEC, current_ticks, monotonic_time_nanos, nanos_to_ticks,
 };
+
+static VDSO_EPOCH_OFFSET: AtomicU64 = AtomicU64::new(u64::MAX);
+
+pub fn set_vdso_epoch_offset(offset: u64) {
+    VDSO_EPOCH_OFFSET.store(offset, Ordering::Release);
+}
 
 const VDSO_BASES: usize = 12;
 
@@ -106,7 +112,12 @@ impl VdsoTimeData {
 
     pub fn update(&mut self) {
         let cycle_now = current_ticks();
-        let wall_ns = wall_time_nanos();
+        let mut offset = VDSO_EPOCH_OFFSET.load(Ordering::Acquire);
+        if offset == u64::MAX {
+            offset = axplat::time::epochoffset_nanos();
+            VDSO_EPOCH_OFFSET.store(offset, Ordering::Release);
+        }
+        let wall_ns = monotonic_time_nanos() + offset;
         let mono_ns = monotonic_time_nanos();
         let ticks_per_sec = nanos_to_ticks(NANOS_PER_SEC);
         let mult_shift = clocks_calc_mult_shift(ticks_per_sec, NANOS_PER_SEC, 10);

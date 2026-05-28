@@ -2,7 +2,7 @@ use alloc::{ffi::CString, vec::Vec};
 use core::time::Duration;
 
 use axerrno::LinuxError;
-use linux_raw_sys::general::{UTIME_NOW, UTIME_OMIT, iovec, timespec};
+use linux_raw_sys::general::{UTIME_NOW, UTIME_OMIT, iovec, timespec, timeval};
 use pulse_core::task::uaccess;
 
 const MAX_USER_IOVCNT: usize = 1024;
@@ -56,6 +56,11 @@ pub(crate) fn alloc_zeroed_bytes(len: usize, _site: &'static str) -> Result<Vec<
 }
 
 pub(crate) fn read_user_timespec(user_addr: usize) -> Result<timespec, LinuxError> {
+    with_process(|process| uaccess::read_user_plain(process, user_addr))?
+        .map_err(|e| LinuxError::from(e.canonicalize()))
+}
+
+pub(crate) fn read_user_timeval(user_addr: usize) -> Result<timeval, LinuxError> {
     with_process(|process| uaccess::read_user_plain(process, user_addr))?
         .map_err(|e| LinuxError::from(e.canonicalize()))
 }

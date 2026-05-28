@@ -217,7 +217,9 @@ fn syscall_dispatcher(
         }
         Sysno::clock_getres => impls::sys_clock_getres(args[0] as i32, args[1]),
         Sysno::clock_gettime => impls::sys_clock_gettime(args[0] as i32, args[1]),
+        Sysno::clock_settime => impls::sys_clock_settime(args[0] as i32, args[1]),
         Sysno::gettimeofday => impls::sys_gettimeofday(args[0], args[1]),
+        Sysno::settimeofday => impls::sys_settimeofday(args[0], args[1]),
         Sysno::times => impls::sys_times(args[0]),
         Sysno::prlimit64 => impls::sys_prlimit64(args[0] as i32, args[1], args[2], args[3]),
         Sysno::getrlimit => impls::sys_prlimit64(0, args[0], 0, args[1]),
