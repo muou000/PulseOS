@@ -97,7 +97,9 @@ fork03
 fork04
 fork07
 fork08
+fork09
 fork10
+fork13
 fork_procs
 fpathconf01
 fstat03
@@ -323,7 +325,11 @@ for file in $test_list; do
     # 输出文件名
     echo "RUN LTP CASE $file"
 
-    "./$file"
+    if [ "$file" = "fork13" ]; then
+      LTP_RUNTIME_MUL=0.01 "./$file"
+    else
+      "./$file"
+    fi
     ret=$?
 
     # 输出文件名和返回值

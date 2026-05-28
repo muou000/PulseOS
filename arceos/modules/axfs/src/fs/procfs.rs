@@ -17,11 +17,16 @@ use axfs_ng_vfs::{
 use axpoll::{IoEvents, Pollable};
 use spin::Mutex;
 
+static PID_MAX: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(32768);
+
 const ROOT_INO: u64 = 1;
 const MEMINFO_INO: u64 = 2;
 const MOUNTS_INO: u64 = 3;
 const SELF_INO: u64 = 4;
-const NEXT_DYNAMIC_INO: u64 = SELF_INO + 1;
+const SYS_INO: u64 = 5;
+const KERNEL_INO: u64 = 6;
+const PID_MAX_INO: u64 = 7;
+const NEXT_DYNAMIC_INO: u64 = PID_MAX_INO + 1;
 
 const PID_INODE_START: u64 = 0x10_0000_0000;
 const PID_INODE_SHIFT: u32 = 16;
@@ -84,6 +89,7 @@ enum ProcLiveFileKind {
     PidFdSymlink(u64, u32),
     PidMaps(u64),
     PidPagemap(u64),
+    PidMax,
 }
 
 #[derive(PartialEq, Eq, Hash, Clone)]
@@ -308,8 +314,25 @@ impl ProcFilesystem {
             ProcLiveFileKind::SelfSymlink,
             NodePermission::from_bits_truncate(0o777),
         );
+        let sys_dir = Inode::new_directory(
+            SYS_INO,
+            ROOT_INO,
+            NodePermission::from_bits_truncate(0o555),
+        );
+        let kernel_dir = Inode::new_directory(
+            KERNEL_INO,
+            SYS_INO,
+            NodePermission::from_bits_truncate(0o555),
+        );
+        let pid_max = Inode::new_live_file(
+            PID_MAX_INO,
+            ProcLiveFileKind::PidMax,
+            NodePermission::from_bits_truncate(0o644),
+        );
 
-        root.metadata.lock().nlink = 2;
+        root.metadata.lock().nlink = 3;
+        sys_dir.metadata.lock().nlink = 3;
+        kernel_dir.metadata.lock().nlink = 2;
 
         {
             let mut inodes = self.inodes.lock();
@@ -317,12 +340,28 @@ impl ProcFilesystem {
             inodes.insert(MEMINFO_INO, meminfo);
             inodes.insert(MOUNTS_INO, mounts);
             inodes.insert(SELF_INO, self_sym);
+            inodes.insert(SYS_INO, sys_dir.clone());
+            inodes.insert(KERNEL_INO, kernel_dir.clone());
+            inodes.insert(PID_MAX_INO, pid_max);
         }
 
-        let mut entries = root.as_dir().expect("proc root is dir").entries.lock();
-        entries.insert("meminfo".into(), InodeRef::new(MEMINFO_INO));
-        entries.insert("mounts".into(), InodeRef::new(MOUNTS_INO));
-        entries.insert("self".into(), InodeRef::new(SELF_INO));
+        {
+            let mut entries = root.as_dir().expect("proc root is dir").entries.lock();
+            entries.insert("meminfo".into(), InodeRef::new(MEMINFO_INO));
+            entries.insert("mounts".into(), InodeRef::new(MOUNTS_INO));
+            entries.insert("self".into(), InodeRef::new(SELF_INO));
+            entries.insert("sys".into(), InodeRef::new(SYS_INO));
+        }
+
+        {
+            let mut entries = sys_dir.as_dir().expect("proc sys is dir").entries.lock();
+            entries.insert("kernel".into(), InodeRef::new(KERNEL_INO));
+        }
+
+        {
+            let mut entries = kernel_dir.as_dir().expect("proc sys kernel is dir").entries.lock();
+            entries.insert("pid_max".into(), InodeRef::new(PID_MAX_INO));
+        }
     }
 
     fn allocate_ino(&self) -> u64 {
@@ -560,6 +599,9 @@ fn render_proc_file(kind: ProcLiveFileKind) -> String {
         }
         ProcLiveFileKind::PidPagemap(_pid) => {
             String::new()
+        }
+        ProcLiveFileKind::PidMax => {
+            format!("{}\n", PID_MAX.load(core::sync::atomic::Ordering::Acquire))
         }
     }
 }
@@ -1047,7 +1089,16 @@ impl FileNodeOps for ProcNode {
 
     fn write_at(&self, buf: &[u8], offset: u64) -> VfsResult<usize> {
         let inode = self.inode_ref()?;
-        if inode.live_kind().is_some() {
+        if let Some(kind) = inode.live_kind() {
+            if let ProcLiveFileKind::PidMax = kind {
+                if let Ok(s) = core::str::from_utf8(buf) {
+                    if let Ok(val) = s.trim().parse::<u32>() {
+                        PID_MAX.store(val, core::sync::atomic::Ordering::Release);
+                        return Ok(buf.len());
+                    }
+                }
+                return Err(VfsError::InvalidInput);
+            }
             return Err(VfsError::ReadOnlyFilesystem);
         }
 
@@ -1077,7 +1128,10 @@ impl FileNodeOps for ProcNode {
 
     fn set_len(&self, len: u64) -> VfsResult<()> {
         let inode = self.inode_ref()?;
-        if inode.live_kind().is_some() {
+        if let Some(kind) = inode.live_kind() {
+            if let ProcLiveFileKind::PidMax = kind {
+                return Ok(());
+            }
             return Err(VfsError::ReadOnlyFilesystem);
         }
 
