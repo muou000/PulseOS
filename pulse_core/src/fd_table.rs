@@ -299,6 +299,10 @@ impl FileObject {
             nonblocking: AtomicBool::new(false),
         }
     }
+
+    pub fn is_write_open(&self) -> bool {
+        self.inner.flags().intersects(AxFileFlags::WRITE | AxFileFlags::APPEND)
+    }
 }
 
 impl FdObject for FileObject {

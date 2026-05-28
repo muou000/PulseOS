@@ -260,6 +260,9 @@ fn syscall_dispatcher(
         Sysno::setgid => impls::sys_setgid(args[0]),
         Sysno::setreuid => impls::sys_setreuid(args[0], args[1]),
         Sysno::setregid => impls::sys_setregid(args[0], args[1]),
+        Sysno::setresuid => impls::sys_setresuid(args[0], args[1], args[2]),
+        Sysno::setresgid => impls::sys_setresgid(args[0], args[1], args[2]),
+
 
         Sysno::rt_sigaction => impls::sys_rt_sigaction(args[0], args[1], args[2], args[3]),
         Sysno::rt_sigreturn => impls::sys_rt_sigreturn(tf),
@@ -319,6 +322,16 @@ fn syscall_dispatcher(
         Sysno::fdatasync => impls::sys_fdatasync(args[0]),
         Sysno::sync => impls::sys_sync(),
         Sysno::execve => impls::sys_execve(tf, args[0], args[1], args[2]),
+        Sysno::execveat => {
+            impls::sys_execveat(
+                tf,
+                args[0] as i32,
+                args[1],
+                args[2],
+                args[3],
+                args[4] as i32,
+            )
+        }
         Sysno::setsid => impls::sys_setsid(),
 
         // System V shared memory

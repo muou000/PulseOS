@@ -143,6 +143,8 @@ fn mount_source_candidates(source: &str) -> Result<alloc::vec::Vec<String>, Linu
 }
 
 fn rename_at(olddirfd: i32, oldpath: &str, newdirfd: i32, newpath: &str) -> Result<(), LinuxError> {
+    let olddirfd = if oldpath.starts_with('/') { AT_FDCWD as i32 } else { olddirfd };
+    let newdirfd = if newpath.starts_with('/') { AT_FDCWD as i32 } else { newdirfd };
     let old_ctx = context_for_dirfd(olddirfd)?;
     let new_ctx = context_for_dirfd(newdirfd)?;
 
@@ -162,19 +164,24 @@ pub fn sys_openat(dirfd: i32, pathname: usize, flags: usize, mode: usize) -> isi
     if pathname == 0 {
         return -LinuxError::EFAULT.code() as isize;
     }
-    let ctx = match context_for_dirfd(dirfd) {
-        Ok(ctx) => ctx,
-        Err(e) => return -e.code() as isize,
-    };
-
-    let path = match read_user_cstring(pathname) {
+    let path_c = match read_user_cstring(pathname) {
         Ok(path) => path,
         Err(e) => return -e.code() as isize,
     };
 
-    let path = match path.to_str() {
+    let path = match path_c.to_str() {
         Ok(path) => path,
         Err(_) => return -LinuxError::EINVAL.code() as isize,
+    };
+
+    let resolved_dirfd = if path.starts_with('/') {
+        AT_FDCWD as i32
+    } else {
+        dirfd
+    };
+    let ctx = match context_for_dirfd(resolved_dirfd) {
+        Ok(ctx) => ctx,
+        Err(e) => return -e.code() as isize,
     };
 
     let options = flags_to_options(flags, mode);
@@ -185,6 +192,24 @@ pub fn sys_openat(dirfd: i32, pathname: usize, flags: usize, mode: usize) -> isi
             return -err.code() as isize;
         }
     };
+
+    let write_requested = (flags & (O_ACCMODE as usize) == O_WRONLY as usize)
+        || (flags & (O_ACCMODE as usize) == O_RDWR as usize);
+    if write_requested {
+        if let axfs::OpenResult::File(ref file) = opened {
+            if let Ok(abs_path) = file.location().absolute_path() {
+                let procs = pulse_core::task::processes_snapshot();
+                for proc in procs {
+                    if let Some(exec_path) = proc.exec_path() {
+                        if exec_path == abs_path.as_str() {
+                            return -LinuxError::ETXTBSY.code() as isize;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     let entry = open_result_to_entry(opened, open_fd_flags(flags));
     match insert_fd_entry(entry) {
         Ok(fd) => fd as isize,
@@ -196,17 +221,22 @@ pub fn sys_mkdirat(dirfd: i32, pathname: usize, mode: usize) -> isize {
     if pathname == 0 {
         return -LinuxError::EFAULT.code() as isize;
     }
-    let ctx = match context_for_dirfd(dirfd) {
-        Ok(ctx) => ctx,
-        Err(e) => return -e.code() as isize,
-    };
-    let path = match read_user_cstring(pathname) {
+    let path_c = match read_user_cstring(pathname) {
         Ok(path) => path,
         Err(e) => return -e.code() as isize,
     };
-    let path = match path.to_str() {
+    let path = match path_c.to_str() {
         Ok(path) => path,
         Err(_) => return -LinuxError::EINVAL.code() as isize,
+    };
+    let resolved_dirfd = if path.starts_with('/') {
+        AT_FDCWD as i32
+    } else {
+        dirfd
+    };
+    let ctx = match context_for_dirfd(resolved_dirfd) {
+        Ok(ctx) => ctx,
+        Err(e) => return -e.code() as isize,
     };
     match ctx.resolve_no_follow(path) {
         Ok(_) => return -LinuxError::EEXIST.code() as isize,
@@ -377,7 +407,12 @@ pub fn sys_unlinkat(dirfd: i32, pathname: usize, flags: usize) -> isize {
         Ok(_) => return -LinuxError::EINVAL.code() as isize,
         Err(_) => return -LinuxError::EINVAL.code() as isize,
     };
-    let ctx = match context_for_dirfd(dirfd) {
+    let resolved_dirfd = if path.starts_with('/') {
+        AT_FDCWD as i32
+    } else {
+        dirfd
+    };
+    let ctx = match context_for_dirfd(resolved_dirfd) {
         Ok(ctx) => ctx,
         Err(e) => return -e.code() as isize,
     };
@@ -434,7 +469,12 @@ pub fn sys_renameat2(
     };
 
     if (flags & RENAME_NOREPLACE as usize) != 0 {
-        let new_ctx = match context_for_dirfd(newdirfd) {
+        let resolved_newdirfd = if newpath.starts_with('/') {
+            AT_FDCWD as i32
+        } else {
+            newdirfd
+        };
+        let new_ctx = match context_for_dirfd(resolved_newdirfd) {
             Ok(ctx) => ctx,
             Err(e) => return -e.code() as isize,
         };

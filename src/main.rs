@@ -40,7 +40,8 @@ fn main() {
                 &["sh"]
             };
 
-            match proc.load_elf(SHELL_ELF_PATH, shell_args, &[]) {
+            let shell_envs: &[&str] = &["PATH=/usr/sbin:/usr/bin:/sbin:/bin"];
+            match proc.load_elf(SHELL_ELF_PATH, shell_args, shell_envs) {
                 Ok(_) => {
                     info!("Successfully loaded {}", SHELL_ELF_PATH);
                     proc.enter_user_mode();

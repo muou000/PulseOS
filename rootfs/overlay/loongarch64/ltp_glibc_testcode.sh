@@ -64,8 +64,12 @@ execle01
 execlp01
 execv01
 execve01
+execve02
 execve03
+execve04
+execve05
 execve06
+execveat01
 execvp01
 exit02
 exit_group01
@@ -243,7 +247,11 @@ setpgrp02
 setregid01
 setregid02
 setregid04
+setresgid03
+setresgid04
+setresuid03
 setresuid04
+setresuid05
 setreuid01
 setreuid03
 setreuid04
