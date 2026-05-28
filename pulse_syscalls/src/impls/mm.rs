@@ -1,4 +1,4 @@
-use alloc::{sync::Arc, vec::Vec};
+use alloc::sync::Arc;
 
 use axfs::{CachedFile, FileFlags};
 use axhal::paging::MappingFlags;

@@ -1,13 +1,9 @@
-use core::{
-    sync::atomic::{AtomicBool, Ordering},
-    time::Duration,
-};
+use core::time::Duration;
 
 use axerrno::{AxError, LinuxError};
 use axio::SeekFrom;
-use linux_raw_sys::{
-    general::{O_CLOEXEC, O_NONBLOCK, POLLERR, POLLHUP, POLLIN, POLLNVAL, POLLOUT, pollfd},
-    net::{AF_UNIX, SOCK_STREAM},
+use linux_raw_sys::general::{
+    O_CLOEXEC, O_NONBLOCK, POLLERR, POLLHUP, POLLIN, POLLNVAL, POLLOUT, pollfd,
 };
 use pulse_core::{
     fd_table::{FD_LIMIT, pipe_entries},
@@ -27,7 +23,6 @@ fn iov_len_to_usize(iov_len: u64) -> Result<usize, LinuxError> {
 }
 
 const MAX_IO_CHUNK: usize = 64 * 1024;
-static SOCKETPAIR_COMPAT_WARNED: AtomicBool = AtomicBool::new(false);
 
 #[inline]
 fn requested_poll_revents(events: i16, state: axio::PollState) -> i16 {
@@ -848,9 +843,8 @@ pub fn sys_pselect6(
     const POLL_SLEEP_QUANTUM: Duration = Duration::from_micros(100);
     let mut idle_rounds: usize = 0;
 
-    let mut ready = 0usize;
     loop {
-        ready = 0;
+        let mut ready = 0usize;
         for pfd in pollfds.iter_mut() {
             pfd.revents = 0;
             if pfd.fd < 0 {

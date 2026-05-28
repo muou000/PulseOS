@@ -3,8 +3,6 @@
 //! Exposes getsockopt/setsockopt support for SO_REUSEADDR, TCP_NODELAY,
 //! and stub success returns for other standard socket configuration options.
 
-use alloc::sync::Arc;
-
 use axerrno::LinuxError;
 use axlog::*;
 use super::get_socket;
