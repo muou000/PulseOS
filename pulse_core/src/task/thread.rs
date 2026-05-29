@@ -223,6 +223,7 @@ impl Thread {
         }
         self.process.write_user_u32(clear_child_tid, 0)?;
         self.process.futex_wake_no_resched(clear_child_tid, 1, true);
+        self.process.futex_wake_no_resched(clear_child_tid, 1, false);
         Ok(())
     }
 

@@ -209,6 +209,7 @@ impl FutexTable {
     fn remove_if_empty(&self, addr: usize) {
         let mut queues = self.queues.lock();
         if let Some(queue) = queues.get(&addr) {
+            queue.prune_exited();
             if queue.is_empty() {
                 queues.remove(&addr);
             }
@@ -1770,6 +1771,7 @@ impl Process {
             entry.wrapping_sub(futex_offset.unsigned_abs())
         };
         let _ = self.futex_wake_no_resched(futex_addr, 1, true);
+        let _ = self.futex_wake_no_resched(futex_addr, 1, false);
     }
 
     pub fn spawn_fork_from_trap_frame(
