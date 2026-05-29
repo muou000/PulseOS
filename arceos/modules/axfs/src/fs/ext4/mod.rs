@@ -100,6 +100,7 @@ impl<D: BlockDriverOps + 'static> BlockDevice for Ext4Disk<D> {
         }
         {
             let mut cache = self.block_cache.lock();
+            cache.pop(&offset);
             let start_block = (offset / BLOCK_SIZE) * BLOCK_SIZE;
             let end_block = ((offset + data.len() - 1) / BLOCK_SIZE) * BLOCK_SIZE;
             let mut current = start_block;
