@@ -237,7 +237,7 @@ pub struct Process {
     threads: SpinNoIrq<Vec<u64>>,
     task_refs: SpinNoIrq<Vec<AxTaskRef>>,
     children: SpinNoIrq<Vec<Arc<Process>>>,
-    child_exit_event: WaitQueue,
+    pub child_exit_event: WaitQueue,
     zombie: AtomicBool,
     user_resources_released: AtomicBool,
     exit_code: AtomicI32,
@@ -268,6 +268,9 @@ pub struct Process {
     /// 0 means the timer is disarmed. Uses atomics for interrupt-context safety.
     itimer_real_deadline_ns: AtomicU64,
     itimer_real_interval_ns: AtomicU64,
+    pub stopped_signal_pending: AtomicI32,
+    pub continued_signal_pending: AtomicBool,
+    pgid: AtomicU64,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -293,6 +296,13 @@ pub struct CloneParams {
     pub child_set_tid: Option<usize>,
     pub child_clear_tid: Option<usize>,
     pub share_sighand: bool,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub enum WaitidStatusType {
+    Exited { exit_code: i32, exit_signal: i32 },
+    Stopped { signo: i32 },
+    Continued,
 }
 
 impl Process {
@@ -1040,6 +1050,9 @@ impl Process {
             shared_memory: Arc::new(Mutex::new(BTreeMap::new())),
             itimer_real_deadline_ns: AtomicU64::new(0),
             itimer_real_interval_ns: AtomicU64::new(0),
+            stopped_signal_pending: AtomicI32::new(0),
+            continued_signal_pending: AtomicBool::new(false),
+            pgid: AtomicU64::new(pid),
         }))
     }
 
@@ -1141,7 +1154,18 @@ impl Process {
             shared_memory,
             itimer_real_deadline_ns: AtomicU64::new(0),
             itimer_real_interval_ns: AtomicU64::new(0),
+            stopped_signal_pending: AtomicI32::new(0),
+            continued_signal_pending: AtomicBool::new(false),
+            pgid: AtomicU64::new(parent.pgid()),
         }))
+    }
+
+    pub fn pgid(&self) -> u64 {
+        self.pgid.load(Ordering::Acquire)
+    }
+
+    pub fn set_pgid(&self, pgid: u64) {
+        self.pgid.store(pgid, Ordering::Release);
     }
 
     pub fn signal_shared(&self) -> Arc<SignalShared> {
@@ -1381,23 +1405,186 @@ impl Process {
         self.children.lock().push(child);
     }
 
-    fn child_matches(child: &Process, pid: isize) -> bool {
-        let child_pid = child.pid() as isize;
-        pid == -1 || child_pid == pid || pid == 0 || (pid < -1 && child_pid == -pid)
+    pub fn parent_process(&self) -> Option<Arc<Process>> {
+        self.parent.lock().as_ref().and_then(|p| p.upgrade())
+    }
+
+    pub fn waitid_find_and_reap(
+        &self,
+        idtype: usize,
+        id: usize,
+        options: i32,
+    ) -> Result<Option<(Arc<Process>, WaitidStatusType)>, isize> {
+        let is_match = |child: &Process| -> bool {
+            match idtype {
+                0 => true, // P_ALL
+                1 => child.pid() == id as u64, // P_PID
+                2 => {
+                    // P_PGID
+                    let target_pgid = if id == 0 {
+                        self.pgid()
+                    } else {
+                        id as u64
+                    };
+                    child.pgid() == target_pgid
+                }
+                _ => false,
+            }
+        };
+
+        let mut children = self.children.lock();
+        let mut has_matching_child = false;
+        let mut found_idx = None;
+        let mut found_status = None;
+
+        for (idx, child) in children.iter().enumerate() {
+            if is_match(child) {
+                has_matching_child = true;
+
+                // 1. Check STOPPED
+                if (options & 2) != 0 { // WSTOPPED
+                    let stop_sig = child.stopped_signal_pending.load(Ordering::Acquire);
+                    if stop_sig != 0 {
+                        found_idx = Some((idx, false));
+                        found_status = Some(WaitidStatusType::Stopped { signo: stop_sig });
+                        break;
+                    }
+                }
+                // 2. Check CONTINUED
+                if (options & 8) != 0 { // WCONTINUED
+                    if child.continued_signal_pending.load(Ordering::Acquire) {
+                        found_idx = Some((idx, false));
+                        found_status = Some(WaitidStatusType::Continued);
+                        break;
+                    }
+                }
+                // 3. Check EXITED (Zombie)
+                if (options & 4) != 0 { // WEXITED
+                    if child.is_zombie() {
+                        let wnowait = (options & 0x01000000) != 0;
+                        found_idx = Some((idx, !wnowait));
+                        let exit_code = child.exit_code.load(Ordering::Acquire);
+                        let exit_signal = child.exit_signal.load(Ordering::Acquire);
+                        found_status = Some(WaitidStatusType::Exited { exit_code, exit_signal });
+                        break;
+                    }
+                }
+            }
+        }
+
+        if !has_matching_child {
+            return Err(-axerrno::LinuxError::ECHILD.code() as isize);
+        }
+
+        if let Some((idx, remove)) = found_idx {
+            let child = if remove {
+                children.remove(idx)
+            } else {
+                children[idx].clone()
+            };
+
+            let wnowait = (options & 0x01000000) != 0;
+            if !wnowait {
+                match found_status.as_ref().unwrap() {
+                    WaitidStatusType::Stopped { .. } => {
+                        child.stopped_signal_pending.store(0, Ordering::Release);
+                    }
+                    WaitidStatusType::Continued => {
+                        child.continued_signal_pending.store(false, Ordering::Release);
+                    }
+                    _ => {}
+                }
+            }
+
+            Ok(Some((child, found_status.unwrap())))
+        } else {
+            Ok(None)
+        }
+    }
+
+    pub fn wait_for_child_state_change_interruptible(
+        &self,
+        idtype: usize,
+        id: usize,
+        options: i32,
+    ) -> Result<(), i32> {
+        let thread = match current_thread() {
+            Ok(t) => t,
+            Err(e) => return Err(e.code()),
+        };
+
+        let is_match = |child: &Process| -> bool {
+            match idtype {
+                0 => true,
+                1 => child.pid() == id as u64,
+                2 => {
+                    let target_pgid = if id == 0 {
+                        self.pgid()
+                    } else {
+                        id as u64
+                    };
+                    child.pgid() == target_pgid
+                }
+                _ => false,
+            }
+        };
+
+        let check_state = || -> bool {
+            let children = self.children.lock();
+            for child in children.iter() {
+                if is_match(child) {
+                    if (options & 2) != 0 && child.stopped_signal_pending.load(Ordering::Acquire) != 0 {
+                        return true;
+                    }
+                    if (options & 8) != 0 && child.continued_signal_pending.load(Ordering::Acquire) {
+                        return true;
+                    }
+                    if (options & 4) != 0 && child.is_zombie() {
+                        return true;
+                    }
+                }
+            }
+            false
+        };
+
+        self.child_exit_event.wait_until(|| {
+            check_state() || thread.has_pending_signal() || self.group_exiting()
+        });
+
+        if check_state() {
+            return Ok(());
+        }
+
+        if thread.has_pending_signal() {
+            return Err(super::ERESTARTSYS);
+        }
+        Ok(())
+    }
+
+    fn child_matches(&self, child: &Process, pid: isize) -> bool {
+        if pid == -1 {
+            true
+        } else if pid > 0 {
+            child.pid() as isize == pid
+        } else if pid == 0 {
+            child.pgid() == self.pgid()
+        } else {
+            child.pgid() as isize == -pid
+        }
     }
 
     pub fn has_matching_child(&self, pid: isize) -> bool {
         self.children
             .lock()
             .iter()
-            .any(|child| Self::child_matches(child, pid))
+            .any(|child| self.child_matches(child, pid))
     }
 
     pub fn reap_zombie_child(&self, pid: isize) -> Option<Arc<Process>> {
         let mut children = self.children.lock();
         let idx = children
             .iter()
-            .position(|child| Self::child_matches(child, pid) && child.is_zombie())?;
+            .position(|child| self.child_matches(child, pid) && child.is_zombie())?;
         Some(children.remove(idx))
     }
 
@@ -1406,7 +1593,7 @@ impl Process {
             self.children
                 .lock()
                 .iter()
-                .any(|child| Self::child_matches(child, pid) && child.is_zombie())
+                .any(|child| self.child_matches(child, pid) && child.is_zombie())
         });
     }
 
@@ -1420,7 +1607,7 @@ impl Process {
             self.children
                 .lock()
                 .iter()
-                .any(|child| Self::child_matches(child, pid) && child.is_zombie())
+                .any(|child| self.child_matches(child, pid) && child.is_zombie())
                 || thread.has_pending_signal()
         });
 
@@ -1430,7 +1617,7 @@ impl Process {
             .children
             .lock()
             .iter()
-            .any(|child| Self::child_matches(child, pid) && child.is_zombie())
+            .any(|child| self.child_matches(child, pid) && child.is_zombie())
         {
             return Ok(());
         }

@@ -565,12 +565,59 @@ pub fn sys_rt_sigtimedwait(set: usize, info: usize, timeout: usize, sigsetsize: 
 }
 
 pub fn sys_setpgid(pid: isize, pgid: isize) -> isize {
-    axlog::warn!(
-        "sys_setpgid (stub): pid={}, pgid={}; process-group state is not updated",
-        pid,
-        pgid
-    );
+    axlog::debug!("sys_setpgid: pid={}, pgid={}", pid, pgid);
+    if pid < 0 || pgid < 0 {
+        return -LinuxError::EINVAL.code() as isize;
+    }
+    let caller = match pulse_core::task::current_process() {
+        Ok(p) => p,
+        Err(e) => return -e.code() as isize,
+    };
+
+    let target_proc = if pid == 0 {
+        caller.clone()
+    } else {
+        match pulse_core::task::process_by_pid(pid as u64) {
+            Some(p) => {
+                if p.pid() != caller.pid() && p.parent_pid() != caller.pid() {
+                    return -LinuxError::ESRCH.code() as isize;
+                }
+                p
+            }
+            None => return -LinuxError::ESRCH.code() as isize,
+        }
+    };
+
+    let target_pgid = if pgid == 0 {
+        target_proc.pid()
+    } else {
+        pgid as u64
+    };
+
+    target_proc.set_pgid(target_pgid);
     0
+}
+
+pub fn sys_getpgid(pid: isize) -> isize {
+    axlog::debug!("sys_getpgid: pid={}", pid);
+    if pid < 0 {
+        return -LinuxError::EINVAL.code() as isize;
+    }
+    let caller = match pulse_core::task::current_process() {
+        Ok(p) => p,
+        Err(e) => return -e.code() as isize,
+    };
+
+    let target_proc = if pid == 0 {
+        caller
+    } else {
+        match pulse_core::task::process_by_pid(pid as u64) {
+            Some(p) => p,
+            None => return -LinuxError::ESRCH.code() as isize,
+        }
+    };
+
+    target_proc.pgid() as isize
 }
 
 pub fn sys_sysinfo(info: usize) -> isize {
