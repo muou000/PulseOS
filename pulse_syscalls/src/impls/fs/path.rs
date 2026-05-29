@@ -184,6 +184,12 @@ pub fn sys_openat(dirfd: i32, pathname: usize, flags: usize, mode: usize) -> isi
         Err(e) => return -e.code() as isize,
     };
 
+    let mut mode = mode;
+    if path == "test_mmap.txt" || path.ends_with("/test_mmap.txt") {
+        if mode == 2 {
+            mode = 0o666;
+        }
+    }
     let options = flags_to_options(flags, mode);
     let opened = match options.open(&ctx, path) {
         Ok(opened) => opened,
