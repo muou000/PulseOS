@@ -221,7 +221,7 @@ static GLOBAL_FUTEX_TABLE: Lazy<FutexTable> = Lazy::new(|| FutexTable::new());
 
 pub struct Process {
     pid: u64,
-    parent_pid: u64,
+    parent_pid: AtomicU64,
     parent: Mutex<Option<Weak<Process>>>,
     aspace: Mutex<Arc<Mutex<AddrSpace>>>,
     pub heap_top: Arc<Mutex<usize>>,
@@ -438,7 +438,7 @@ impl Process {
     }
 
     pub fn parent_pid(&self) -> u64 {
-        self.parent_pid
+        self.parent_pid.load(Ordering::Acquire)
     }
 
     pub fn thread_count(&self) -> usize {
@@ -1007,7 +1007,7 @@ impl Process {
 
         Ok(Arc::new(Self {
             pid,
-            parent_pid: 0,
+            parent_pid: AtomicU64::new(0),
             parent: Mutex::new(None),
             start_mono_ns: axhal::time::monotonic_time_nanos() as u64,
             aspace: Mutex::new(Arc::new(Mutex::new(aspace))),
@@ -1108,7 +1108,7 @@ impl Process {
 
         Ok(Arc::new(Self {
             pid,
-            parent_pid: parent.pid(),
+            parent_pid: AtomicU64::new(parent.pid()),
             parent: Mutex::new(Some(Arc::downgrade(&parent_arc))),
             aspace: Mutex::new(aspace),
             heap_top,
@@ -1386,6 +1386,27 @@ impl Process {
                 self.pid(),
                 e
             );
+        }
+
+        // Re-parent all children of this process to the init process (PID 1)
+        if self.pid() != 1 {
+            if let Some(init) = super::process_by_pid(1) {
+                let children_to_reparent = {
+                    let mut my_children = self.children.lock();
+                    let list = my_children.clone();
+                    my_children.clear();
+                    list
+                };
+                for child in children_to_reparent {
+                    child.parent_pid.store(1, Ordering::Release);
+                    *child.parent.lock() = Some(Arc::downgrade(&init));
+                    init.add_child(child.clone());
+                    if child.is_zombie() {
+                        let _ = queue_signal_to_process(init.as_ref(), SIGCHLD as usize);
+                        init.child_exit_event.notify_all(false);
+                    }
+                }
+            }
         }
 
         let parent = self
