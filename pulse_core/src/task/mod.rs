@@ -26,11 +26,29 @@ pub use thread::{Thread, ThreadHandle};
 static PROCESS_REGISTRY: Lazy<SpinNoIrq<BTreeMap<u64, Weak<Process>>>> =
     Lazy::new(|| SpinNoIrq::new(BTreeMap::new()));
 
+static THREAD_REGISTRY: Lazy<SpinNoIrq<BTreeMap<u64, Weak<Thread>>>> =
+    Lazy::new(|| SpinNoIrq::new(BTreeMap::new()));
+
 pub fn register_process(pid: u64, process: Arc<Process>) {
     PROCESS_REGISTRY
         .lock()
         .insert(pid, Arc::downgrade(&process));
 }
+
+pub fn register_thread_global(tid: u64, thread: Arc<Thread>) {
+    THREAD_REGISTRY
+        .lock()
+        .insert(tid, Arc::downgrade(&thread));
+}
+
+pub fn unregister_thread_global(tid: u64) {
+    THREAD_REGISTRY.lock().remove(&tid);
+}
+
+pub fn thread_by_tid_global(tid: u64) -> Option<Arc<Thread>> {
+    THREAD_REGISTRY.lock().get(&tid).and_then(|t| t.upgrade())
+}
+
 
 fn prune_dead_processes(registry: &mut BTreeMap<u64, Weak<Process>>) {
     registry.retain(|_, process| process.strong_count() > 0);
@@ -101,19 +119,19 @@ pub fn thread_by_tid(process: &Process, tid: u64) -> Option<Arc<Thread>> {
     thread_handle_from_task(&task).map(|handle| handle.thread_arc())
 }
 
-/// Timer tick hook for checking itimers across all processes.
-/// Called from `axtask::on_timer_tick()` in interrupt context.
-/// Must not take any blocking locks.
 fn itimer_tick_hook() {
     crate::fd_table::poll_stdin();
-    let procs = processes_snapshot();
-    for proc in procs {
-        if proc.is_zombie() {
-            continue;
+    let mut registry = PROCESS_REGISTRY.lock();
+    prune_dead_processes(&mut registry);
+    for proc_w in registry.values() {
+        if let Some(proc) = proc_w.upgrade() {
+            if !proc.is_zombie() {
+                proc.check_itimer_real_tick();
+            }
         }
-        proc.check_itimer_real_tick();
     }
 }
+
 
 /// Register the itimer tick hook with axtask. Should be called once during
 /// pulse_core initialization.

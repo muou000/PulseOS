@@ -59,6 +59,7 @@ fn main() {
     match pulse_core::task::Process::new_uspace(init_tid) {
         Ok(proc) => {
             let init_thread = pulse_core::task::Thread::new(proc);
+            pulse_core::task::register_thread_global(init_tid, init_thread.clone());
             info!("Created initial user process");
 
             let pt_root = init_thread.process().page_table_root();
@@ -77,6 +78,7 @@ fn main() {
                 Some(exit_code) => error!("Init task exited with failure code {}", exit_code),
                 None => error!("Init task join returned no exit code"),
             }
+            pulse_core::task::unregister_thread_global(init_tid);
             let _ = init_thread.process().take_task_ref_by_tid(init_tid);
             init_thread.process().release_task_refs();
 

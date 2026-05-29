@@ -1,7 +1,7 @@
 use axerrno::LinuxError;
 use pulse_core::task::{
     can_signal, current_process, process_by_pid, processes_snapshot, queue_signal_to_process,
-    queue_signal_to_thread, thread_by_tid,
+    queue_signal_to_thread,
 };
 
 const NSIG: isize = 64;
@@ -147,21 +147,16 @@ pub fn sys_tkill(tid: isize, sig: isize) -> isize {
         Ok(process) => process,
         Err(e) => return -e.code() as isize,
     };
-    let target_proc = processes_snapshot()
-        .into_iter()
-        .find(|proc| proc.thread_ids_snapshot().contains(&(tid as u64)));
-    let Some(target_proc) = target_proc else {
+    let Some(target_thread) = pulse_core::task::thread_by_tid_global(tid as u64) else {
         return -LinuxError::ESRCH.code() as isize;
     };
+    let target_proc = target_thread.process_arc();
     if !can_signal(&caller, target_proc.as_ref()) {
         return -LinuxError::EPERM.code() as isize;
     }
     if sig == 0 {
         return 0;
     }
-    let Some(target_thread) = thread_by_tid(target_proc.as_ref(), tid as u64) else {
-        return -LinuxError::ESRCH.code() as isize;
-    };
     let _ = queue_signal_to_thread(target_thread.as_ref(), sig as usize);
     0
 }
@@ -174,21 +169,19 @@ pub fn sys_tgkill(tgid: isize, tid: isize, sig: isize) -> isize {
         Ok(process) => process,
         Err(e) => return -e.code() as isize,
     };
-    let Some(target_proc) = process_by_pid(tgid as u64) else {
+    let Some(target_thread) = pulse_core::task::thread_by_tid_global(tid as u64) else {
         return -LinuxError::ESRCH.code() as isize;
     };
+    let target_proc = target_thread.process_arc();
+    if target_proc.pid() != tgid as u64 {
+        return -LinuxError::ESRCH.code() as isize;
+    }
     if !can_signal(&caller, target_proc.as_ref()) {
         return -LinuxError::EPERM.code() as isize;
-    }
-    if !target_proc.thread_ids_snapshot().contains(&(tid as u64)) {
-        return -LinuxError::ESRCH.code() as isize;
     }
     if sig == 0 {
         return 0;
     }
-    let Some(target_thread) = thread_by_tid(target_proc.as_ref(), tid as u64) else {
-        return -LinuxError::ESRCH.code() as isize;
-    };
     let _ = queue_signal_to_thread(target_thread.as_ref(), sig as usize);
     0
 }
