@@ -405,9 +405,6 @@ impl ProcFilesystem {
 
         if let Some((pid, sub)) = decode_pid_inode(ino) {
             let provider = PROCESS_PROVIDER.get().ok_or(VfsError::NotFound)?;
-            if !provider.process_exists(pid) {
-                return Err(VfsError::NotFound);
-            }
 
             if sub == SUB_INO_DIR {
                 let dir = Inode::new_directory(ino, ROOT_INO, NodePermission::from_bits_truncate(0o555));
