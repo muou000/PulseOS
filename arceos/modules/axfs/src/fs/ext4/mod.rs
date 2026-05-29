@@ -3,6 +3,8 @@ mod inode;
 mod util;
 
 use alloc::{sync::Arc, vec, vec::Vec};
+use core::num::NonZeroUsize;
+use lru::LruCache;
 
 use axdriver::prelude::BlockDriverOps;
 use ext4_rs::{BLOCK_SIZE, BlockDevice};
@@ -13,6 +15,7 @@ use kspin::SpinNoPreempt as Mutex;
 pub(crate) struct Ext4Disk<D: BlockDriverOps> {
     dev: Mutex<D>,
     sector_size: usize,
+    block_cache: Mutex<LruCache<usize, Vec<u8>>>,
 }
 
 impl<D: BlockDriverOps> Ext4Disk<D> {
@@ -21,6 +24,7 @@ impl<D: BlockDriverOps> Ext4Disk<D> {
         Arc::new(Self {
             dev: Mutex::new(dev),
             sector_size,
+            block_cache: Mutex::new(LruCache::new(NonZeroUsize::new(512).unwrap())),
         })
     }
 
@@ -35,6 +39,13 @@ impl<D: BlockDriverOps> Ext4Disk<D> {
 
 impl<D: BlockDriverOps + 'static> BlockDevice for Ext4Disk<D> {
     fn read_offset(&self, offset: usize) -> Vec<u8> {
+        {
+            let mut cache = self.block_cache.lock();
+            if let Some(data) = cache.get(&offset) {
+                return data.clone();
+            }
+        }
+
         let (first_block, inner_offset, blocks) = self.byte_range(offset, BLOCK_SIZE);
         let mut raw = vec![0; blocks * self.sector_size];
         let mut dev = self.dev.lock();
@@ -75,12 +86,27 @@ impl<D: BlockDriverOps + 'static> BlockDevice for Ext4Disk<D> {
         }
         raw.drain(0..inner_offset);
         raw.truncate(BLOCK_SIZE);
+
+        {
+            let mut cache = self.block_cache.lock();
+            cache.put(offset, raw.clone());
+        }
         raw
     }
 
     fn write_offset(&self, offset: usize, data: &[u8]) {
         if data.is_empty() {
             return;
+        }
+        {
+            let mut cache = self.block_cache.lock();
+            let start_block = (offset / BLOCK_SIZE) * BLOCK_SIZE;
+            let end_block = ((offset + data.len() - 1) / BLOCK_SIZE) * BLOCK_SIZE;
+            let mut current = start_block;
+            while current <= end_block {
+                cache.pop(&current);
+                current += BLOCK_SIZE;
+            }
         }
         let (first_block, inner_offset, blocks) = self.byte_range(offset, data.len());
         let mut dev = self.dev.lock();

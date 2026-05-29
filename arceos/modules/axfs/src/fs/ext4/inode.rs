@@ -165,30 +165,48 @@ impl Inode {
                 continue;
             }
             let name = entry.get_name();
-            let inode_ref = fs.get_inode_ref(entry.inode);
-            // Validate that the inode is actually allocated and valid.
-            // Unallocated inodes have mode==0, deleted inodes have dtime!=0.
-            if inode_ref.inode.mode() == 0 || inode_ref.inode.dtime() != 0 {
-                log::warn!(
-                    "ext4: skip unallocated/deleted inode {} (mode={}, dtime={}) in dir ino={}",
-                    entry.inode,
-                    inode_ref.inode.mode(),
-                    inode_ref.inode.dtime(),
-                    dir_ino,
-                );
-                continue;
-            }
-            let node_type = into_vfs_type(inode_ref.inode.file_type());
-            // Skip entries with Unknown node type (likely corruption).
+            
+            let de_type = entry.get_de_type();
+            let (mut node_type, mut is_dir) = match de_type {
+                1 => (NodeType::RegularFile, false),
+                2 => (NodeType::Directory, true),
+                3 => (NodeType::CharacterDevice, false),
+                4 => (NodeType::BlockDevice, false),
+                5 => (NodeType::Fifo, false),
+                6 => (NodeType::Socket, false),
+                7 => (NodeType::Symlink, false),
+                _ => (NodeType::Unknown, false),
+            };
+
+            // If the type is unknown (e.g. older ext4 without file_type feature),
+            // fall back to reading the inode directly from the block device.
             if node_type == NodeType::Unknown {
-                log::warn!(
-                    "ext4: skip unknown node type for inode {} in dir ino={}",
-                    entry.inode,
-                    dir_ino,
-                );
-                continue;
+                let inode_ref = fs.get_inode_ref(entry.inode);
+                // Validate that the inode is actually allocated and valid.
+                // Unallocated inodes have mode==0, deleted inodes have dtime!=0.
+                if inode_ref.inode.mode() == 0 || inode_ref.inode.dtime() != 0 {
+                    log::warn!(
+                        "ext4: skip unallocated/deleted inode {} (mode={}, dtime={}) in dir ino={}",
+                        entry.inode,
+                        inode_ref.inode.mode(),
+                        inode_ref.inode.dtime(),
+                        dir_ino,
+                    );
+                    continue;
+                }
+                node_type = into_vfs_type(inode_ref.inode.file_type());
+                // Skip entries with Unknown node type (likely corruption).
+                if node_type == NodeType::Unknown {
+                    log::warn!(
+                        "ext4: skip unknown node type for inode {} in dir ino={}",
+                        entry.inode,
+                        dir_ino,
+                    );
+                    continue;
+                }
+                is_dir = inode_ref.inode.is_dir();
             }
-            let is_dir = inode_ref.inode.is_dir();
+
             entries.push(CachedDirEntry {
                 name,
                 inode_num: entry.inode,
