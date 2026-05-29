@@ -182,12 +182,14 @@ impl WaitQueue {
     /// preemption is enabled.
     pub fn notify_one(&self, resched: bool) -> bool {
         let mut wq = self.queue.lock();
-        if let Some(task) = wq.pop_front() {
+        while let Some(task) = wq.pop_front() {
+            if task.state() != crate::task::TaskState::Blocked {
+                continue;
+            }
             unblock_one_task(task, resched);
-            true
-        } else {
-            false
+            return true;
         }
+        false
     }
 
     /// Wakes all tasks in the wait queue.
@@ -245,6 +247,11 @@ impl WaitQueue {
     /// Returns true if the wait queue is empty.
     pub fn is_empty(&self) -> bool {
         self.queue.lock().is_empty()
+    }
+
+    /// Remove all exited tasks from the wait queue.
+    pub fn prune_exited(&self) {
+        self.queue.lock().retain(|t| t.state() != crate::task::TaskState::Exited);
     }
 }
 
