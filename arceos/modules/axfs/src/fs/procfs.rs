@@ -26,7 +26,8 @@ const SELF_INO: u64 = 4;
 const SYS_INO: u64 = 5;
 const KERNEL_INO: u64 = 6;
 const PID_MAX_INO: u64 = 7;
-const NEXT_DYNAMIC_INO: u64 = PID_MAX_INO + 1;
+const TAINTED_INO: u64 = 8;
+const NEXT_DYNAMIC_INO: u64 = TAINTED_INO + 1;
 
 const PID_INODE_START: u64 = 0x10_0000_0000;
 const PID_INODE_SHIFT: u32 = 16;
@@ -90,6 +91,7 @@ enum ProcLiveFileKind {
     PidMaps(u64),
     PidPagemap(u64),
     PidMax,
+    Tainted,
 }
 
 #[derive(PartialEq, Eq, Hash, Clone)]
@@ -329,6 +331,11 @@ impl ProcFilesystem {
             ProcLiveFileKind::PidMax,
             NodePermission::from_bits_truncate(0o644),
         );
+        let tainted = Inode::new_live_file(
+            TAINTED_INO,
+            ProcLiveFileKind::Tainted,
+            NodePermission::from_bits_truncate(0o444),
+        );
 
         root.metadata.lock().nlink = 3;
         sys_dir.metadata.lock().nlink = 3;
@@ -343,6 +350,7 @@ impl ProcFilesystem {
             inodes.insert(SYS_INO, sys_dir.clone());
             inodes.insert(KERNEL_INO, kernel_dir.clone());
             inodes.insert(PID_MAX_INO, pid_max);
+            inodes.insert(TAINTED_INO, tainted);
         }
 
         {
@@ -361,6 +369,7 @@ impl ProcFilesystem {
         {
             let mut entries = kernel_dir.as_dir().expect("proc sys kernel is dir").entries.lock();
             entries.insert("pid_max".into(), InodeRef::new(PID_MAX_INO));
+            entries.insert("tainted".into(), InodeRef::new(TAINTED_INO));
         }
     }
 
@@ -602,6 +611,9 @@ fn render_proc_file(kind: ProcLiveFileKind) -> String {
         }
         ProcLiveFileKind::PidMax => {
             format!("{}\n", PID_MAX.load(core::sync::atomic::Ordering::Acquire))
+        }
+        ProcLiveFileKind::Tainted => {
+            "0\n".to_owned()
         }
     }
 }
