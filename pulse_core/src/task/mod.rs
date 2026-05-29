@@ -13,7 +13,7 @@ use alloc::{
 
 use axerrno::{LinuxError, LinuxResult};
 use kspin::SpinNoIrq;
-pub use process::{CloneParams, ForkParams, Process};
+pub use process::{CloneParams, ForkParams, Process, WaitidStatusType};
 pub use signal::{
     DefaultSignalAction, NSIG, SIG_DFL, SIG_IGN, SigAction, SignalAction, SignalAltStack,
     SignalDelivery, SignalShared, ThreadSignal, blocked_mask as thread_blocked_mask, can_signal,

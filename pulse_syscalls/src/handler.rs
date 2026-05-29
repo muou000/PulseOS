@@ -166,6 +166,7 @@ fn syscall_dispatcher(
         }
         Sysno::clone => impls::sys_clone(tf, args),
         Sysno::wait4 => impls::sys_wait4(args[0] as isize, args[1], args[2] as i32, args[3]),
+        Sysno::waitid => impls::sys_waitid(args[0], args[1], args[2], args[3] as i32),
         Sysno::sched_yield => impls::sys_yield(),
         Sysno::sched_getaffinity => impls::sys_sched_getaffinity(args[0], args[1], args[2]),
         Sysno::sched_setaffinity => impls::sys_sched_setaffinity(args[0], args[1], args[2]),
@@ -246,10 +247,7 @@ fn syscall_dispatcher(
         Sysno::geteuid => impls::sys_geteuid(),
         Sysno::umask => impls::sys_umask(args[0]),
         Sysno::getppid => impls::sys_getppid(),
-        Sysno::getpgid => {
-            axlog::warn!("sys_getpgid (stub): return 1");
-            1
-        }
+        Sysno::getpgid => impls::sys_getpgid(args[0] as isize),
         Sysno::setpgid => impls::sys_setpgid(args[0] as isize, args[1] as isize),
         Sysno::kill => impls::sys_kill(args[0] as isize, args[1] as isize),
         Sysno::tkill => impls::sys_tkill(args[0] as isize, args[1] as isize),

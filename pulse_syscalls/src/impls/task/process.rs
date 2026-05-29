@@ -89,7 +89,12 @@ pub fn sys_kill(pid: isize, sig: isize) -> isize {
             }
         }
         0 => {
-            targets.push(caller.clone());
+            let pgid = caller.pgid();
+            for proc in processes_snapshot() {
+                if proc.pgid() == pgid {
+                    targets.push(proc);
+                }
+            }
         }
         -1 => {
             for proc in processes_snapshot() {
@@ -105,7 +110,7 @@ pub fn sys_kill(pid: isize, sig: isize) -> isize {
         p if p < -1 => {
             let pgid = (-p) as u64;
             for proc in processes_snapshot() {
-                if proc.pid() == pgid {
+                if proc.pgid() == pgid {
                     targets.push(proc);
                 }
             }

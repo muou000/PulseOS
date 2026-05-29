@@ -27,7 +27,8 @@ const SYS_INO: u64 = 5;
 const KERNEL_INO: u64 = 6;
 const PID_MAX_INO: u64 = 7;
 const TAINTED_INO: u64 = 8;
-const NEXT_DYNAMIC_INO: u64 = TAINTED_INO + 1;
+const CORE_PATTERN_INO: u64 = 9;
+const NEXT_DYNAMIC_INO: u64 = CORE_PATTERN_INO + 1;
 
 const PID_INODE_START: u64 = 0x10_0000_0000;
 const PID_INODE_SHIFT: u32 = 16;
@@ -92,6 +93,7 @@ enum ProcLiveFileKind {
     PidPagemap(u64),
     PidMax,
     Tainted,
+    CorePattern,
 }
 
 #[derive(PartialEq, Eq, Hash, Clone)]
@@ -336,6 +338,11 @@ impl ProcFilesystem {
             ProcLiveFileKind::Tainted,
             NodePermission::from_bits_truncate(0o444),
         );
+        let core_pattern = Inode::new_live_file(
+            CORE_PATTERN_INO,
+            ProcLiveFileKind::CorePattern,
+            NodePermission::from_bits_truncate(0o444),
+        );
 
         root.metadata.lock().nlink = 3;
         sys_dir.metadata.lock().nlink = 3;
@@ -351,6 +358,7 @@ impl ProcFilesystem {
             inodes.insert(KERNEL_INO, kernel_dir.clone());
             inodes.insert(PID_MAX_INO, pid_max);
             inodes.insert(TAINTED_INO, tainted);
+            inodes.insert(CORE_PATTERN_INO, core_pattern);
         }
 
         {
@@ -370,6 +378,7 @@ impl ProcFilesystem {
             let mut entries = kernel_dir.as_dir().expect("proc sys kernel is dir").entries.lock();
             entries.insert("pid_max".into(), InodeRef::new(PID_MAX_INO));
             entries.insert("tainted".into(), InodeRef::new(TAINTED_INO));
+            entries.insert("core_pattern".into(), InodeRef::new(CORE_PATTERN_INO));
         }
     }
 
@@ -614,6 +623,9 @@ fn render_proc_file(kind: ProcLiveFileKind) -> String {
         }
         ProcLiveFileKind::Tainted => {
             "0\n".to_owned()
+        }
+        ProcLiveFileKind::CorePattern => {
+            "core\n".to_owned()
         }
     }
 }

@@ -708,6 +708,20 @@ pub fn can_signal(caller: &Process, target: &Process) -> bool {
 }
 
 pub fn queue_signal_to_process(process: &Process, sig: usize) -> bool {
+    if sig == SIGSTOP as usize {
+        process.stopped_signal_pending.store(sig as i32, Ordering::Release);
+        process.continued_signal_pending.store(false, Ordering::Release);
+        if let Some(parent) = process.parent_process() {
+            parent.child_exit_event.notify_all(false);
+        }
+    } else if sig == SIGCONT as usize {
+        process.continued_signal_pending.store(true, Ordering::Release);
+        process.stopped_signal_pending.store(0, Ordering::Release);
+        if let Some(parent) = process.parent_process() {
+            parent.child_exit_event.notify_all(false);
+        }
+    }
+
     let queued = process.signal_shared().queue_process_signal(sig);
     // Always notify even if already queued, to ensure blocked tasks re-check signals
     for thread in list_threads_for_signal(process) {
@@ -718,6 +732,21 @@ pub fn queue_signal_to_process(process: &Process, sig: usize) -> bool {
 }
 
 pub fn queue_signal_to_thread(thread: &Thread, sig: usize) -> bool {
+    let process = thread.process();
+    if sig == SIGSTOP as usize {
+        process.stopped_signal_pending.store(sig as i32, Ordering::Release);
+        process.continued_signal_pending.store(false, Ordering::Release);
+        if let Some(parent) = process.parent_process() {
+            parent.child_exit_event.notify_all(false);
+        }
+    } else if sig == SIGCONT as usize {
+        process.continued_signal_pending.store(true, Ordering::Release);
+        process.stopped_signal_pending.store(0, Ordering::Release);
+        if let Some(parent) = process.parent_process() {
+            parent.child_exit_event.notify_all(false);
+        }
+    }
+
     let queued = thread.signal().queue_thread_signal(sig);
     // Always notify even if already queued
     thread.notify_signal_pending();
