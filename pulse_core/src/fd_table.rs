@@ -93,6 +93,10 @@ pub trait FdObject: Send + Sync {
     fn allocate(&self, _mode: u32, _offset: u64, _len: u64) -> LinuxResult {
         Err(LinuxError::ENODEV)
     }
+
+    fn is_write_open(&self) -> bool {
+        false
+    }
 }
 
 #[derive(Clone)]
@@ -422,6 +426,10 @@ impl FdObject for FileObject {
         }
 
         Ok(())
+    }
+
+    fn is_write_open(&self) -> bool {
+        self.is_write_open()
     }
 }
 
@@ -1065,6 +1073,23 @@ impl FdTable {
 
     pub fn clone_all_entries(&self) -> alloc::vec::Vec<FdEntry> {
         self.entries.iter().filter_map(|slot| slot.clone()).collect()
+    }
+
+    pub fn is_file_write_open(&self, path: &str) -> bool {
+        for slot in &self.entries {
+            if let Some(entry) = slot {
+                if entry.object.is_write_open() {
+                    if let Some(loc) = entry.object.location() {
+                        if let Ok(abs_path) = loc.absolute_path() {
+                            if abs_path.as_str() == path {
+                                return true;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        false
     }
 
     pub fn get(&self, fd: usize) -> Option<&FdEntry> {

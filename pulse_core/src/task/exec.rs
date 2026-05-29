@@ -50,20 +50,8 @@ fn parse_shebang_line(file_data: &[u8]) -> AxResult<Option<(String, Option<Strin
 fn check_txt_busy(path: &str) -> AxResult<()> {
     let procs = super::processes_snapshot();
     for proc in procs {
-        let fd_table = proc.fd_table.lock();
-        let entries = fd_table.clone_all_entries();
-        for entry in entries {
-            if let Some(file_obj) = entry.object.as_any().downcast_ref::<crate::fd_table::FileObject>() {
-                if file_obj.is_write_open() {
-                    if let Some(loc) = entry.object.location() {
-                        if let Ok(abs_path) = loc.absolute_path() {
-                            if abs_path.as_str() == path {
-                                return Err(axerrno::LinuxError::ETXTBSY.into());
-                            }
-                        }
-                    }
-                }
-            }
+        if proc.fd_table.lock().is_file_write_open(path) {
+            return Err(axerrno::LinuxError::ETXTBSY.into());
         }
     }
     Ok(())
