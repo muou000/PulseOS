@@ -51,7 +51,7 @@ pub fn sys_setgid(raw_gid: usize) -> isize {
         Err(e) => return -e.code() as isize,
     };
     let (old_rgid, old_egid, old_sgid) = process.gid_snapshot();
-    if old_egid == 0 {
+    if process.euid() == 0 {
         process.set_gids(gid, gid, gid);
     } else if gid == old_rgid || gid == old_sgid {
         process.set_gids(old_rgid, gid, old_sgid);
@@ -126,7 +126,7 @@ pub fn sys_setregid(raw_rgid: usize, raw_egid: usize) -> isize {
         Err(e) => return -e.code() as isize,
     };
     let (old_rgid, old_egid, old_sgid) = process.gid_snapshot();
-    if old_egid != 0 {
+    if process.euid() != 0 {
         if let Some(rgid) = new_rgid
             && rgid != old_rgid
             && rgid != old_egid
@@ -224,7 +224,7 @@ pub fn sys_setresgid(raw_rgid: usize, raw_egid: usize, raw_sgid: usize) -> isize
         Err(e) => return -e.code() as isize,
     };
     let (old_rgid, old_egid, old_sgid) = process.gid_snapshot();
-    if old_egid != 0 {
+    if process.euid() != 0 {
         if let Some(rgid) = new_rgid
             && rgid != old_rgid
             && rgid != old_egid

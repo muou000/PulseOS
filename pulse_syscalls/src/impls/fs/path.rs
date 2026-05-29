@@ -494,3 +494,51 @@ pub fn sys_renameat2(
         Err(e) => -e.code() as isize,
     }
 }
+
+pub fn sys_symlinkat(target: usize, newdirfd: i32, linkpath: usize) -> isize {
+    if target == 0 || linkpath == 0 {
+        return -LinuxError::EFAULT.code() as isize;
+    }
+    let target_c = match read_user_cstring(target) {
+        Ok(path) => path,
+        Err(e) => return -e.code() as isize,
+    };
+    let target_str = match target_c.to_str() {
+        Ok(s) => s,
+        Err(_) => return -LinuxError::EINVAL.code() as isize,
+    };
+    if target_str.is_empty() {
+        return -LinuxError::ENOENT.code() as isize;
+    }
+
+    let link_c = match read_user_cstring(linkpath) {
+        Ok(path) => path,
+        Err(e) => return -e.code() as isize,
+    };
+    let link_str = match link_c.to_str() {
+        Ok(s) => s,
+        Err(_) => return -LinuxError::EINVAL.code() as isize,
+    };
+    if link_str.is_empty() {
+        return -LinuxError::ENOENT.code() as isize;
+    }
+
+    let resolved_newdirfd = if link_str.starts_with('/') {
+        AT_FDCWD as i32
+    } else {
+        newdirfd
+    };
+    let ctx = match context_for_dirfd(resolved_newdirfd) {
+        Ok(ctx) => ctx,
+        Err(e) => return -e.code() as isize,
+    };
+
+    match ctx.symlink(target_str, link_str) {
+        Ok(_) => 0,
+        Err(e) => {
+            let errno = LinuxError::from(e.canonicalize());
+            -errno.code() as isize
+        }
+    }
+}
+

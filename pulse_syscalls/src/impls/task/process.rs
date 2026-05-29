@@ -187,3 +187,58 @@ pub fn sys_tgkill(tgid: isize, tid: isize, sig: isize) -> isize {
     let _ = queue_signal_to_thread(target_thread.as_ref(), sig as usize);
     0
 }
+
+pub fn sys_getresuid(ruid_ptr: usize, euid_ptr: usize, suid_ptr: usize) -> isize {
+    let process = match current_process() {
+        Ok(p) => p,
+        Err(e) => return -e.code() as isize,
+    };
+    let (ruid, euid, suid) = process.uid_snapshot();
+    if ruid_ptr != 0 {
+        if let Err(e) = process.write_user_u32(ruid_ptr, ruid) {
+            let errno: LinuxError = e.into();
+            return -errno.code() as isize;
+        }
+    }
+    if euid_ptr != 0 {
+        if let Err(e) = process.write_user_u32(euid_ptr, euid) {
+            let errno: LinuxError = e.into();
+            return -errno.code() as isize;
+        }
+    }
+    if suid_ptr != 0 {
+        if let Err(e) = process.write_user_u32(suid_ptr, suid) {
+            let errno: LinuxError = e.into();
+            return -errno.code() as isize;
+        }
+    }
+    0
+}
+
+pub fn sys_getresgid(rgid_ptr: usize, egid_ptr: usize, sgid_ptr: usize) -> isize {
+    let process = match current_process() {
+        Ok(p) => p,
+        Err(e) => return -e.code() as isize,
+    };
+    let (rgid, egid, sgid) = process.gid_snapshot();
+    if rgid_ptr != 0 {
+        if let Err(e) = process.write_user_u32(rgid_ptr, rgid) {
+            let errno: LinuxError = e.into();
+            return -errno.code() as isize;
+        }
+    }
+    if egid_ptr != 0 {
+        if let Err(e) = process.write_user_u32(egid_ptr, egid) {
+            let errno: LinuxError = e.into();
+            return -errno.code() as isize;
+        }
+    }
+    if sgid_ptr != 0 {
+        if let Err(e) = process.write_user_u32(sgid_ptr, sgid) {
+            let errno: LinuxError = e.into();
+            return -errno.code() as isize;
+        }
+    }
+    0
+}
+
