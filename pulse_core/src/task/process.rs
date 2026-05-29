@@ -1346,6 +1346,7 @@ impl Process {
     }
 
     pub fn finish_thread_exit(&self, tid: u64, exit_code: i32) {
+        super::unregister_thread_global(tid);
         if let Some(task) = self.task_ref_by_tid(tid) {
             if let Some(handle) = super::thread_handle_from_task(&task) {
                 let now_ns = axhal::time::monotonic_time_nanos() as u64;
@@ -2013,6 +2014,7 @@ impl Process {
             self.write_user_bytes_in_aspace(&mut parent_aspace, addr, &child_tid.to_ne_bytes())?;
         }
         let child_thread = Thread::new(child_proc.clone());
+        super::register_thread_global(child_tid, child_thread.clone());
         if let Ok(parent_thread) = current_thread() {
             child_thread.set_signal_blocked_mask(parent_thread.signal_blocked_mask());
         }
@@ -2095,6 +2097,7 @@ impl Process {
         }
 
         let child_thread = Thread::new(child_proc.clone());
+        super::register_thread_global(child_tid, child_thread.clone());
         if let Ok(parent_thread) = current_thread() {
             child_thread.set_signal_blocked_mask(parent_thread.signal_blocked_mask());
         }
