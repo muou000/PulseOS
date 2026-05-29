@@ -11,6 +11,9 @@ pub fn sys_wait4(pid: isize, status: usize, options: i32, rusage: usize) -> isiz
         options,
         rusage
     );
+    if pid as i32 == i32::MIN {
+        return -LinuxError::ESRCH.code() as isize;
+    }
     let thread = match current_thread() {
         Ok(thread) => thread,
         Err(e) => return -e.code() as isize,
