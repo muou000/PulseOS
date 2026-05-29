@@ -83,6 +83,12 @@ pub fn sys_execveat(
         flags
     );
 
+    let supported_flags = linux_raw_sys::general::AT_EMPTY_PATH as i32
+        | linux_raw_sys::general::AT_SYMLINK_NOFOLLOW as i32;
+    if (flags & !supported_flags) != 0 {
+        return -LinuxError::EINVAL.code() as isize;
+    }
+
     let thread = match current_thread() {
         Ok(thread) => thread,
         Err(e) => return -e.code() as isize,

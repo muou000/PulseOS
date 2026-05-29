@@ -129,3 +129,31 @@ pub fn sys_ftruncate(fd: usize, length: usize) -> isize {
         Err(e) => -e.code() as isize,
     }
 }
+
+pub fn sys_fallocate(fd: usize, mode: usize, offset: usize, len: usize) -> isize {
+    let mode = mode as u32;
+    let offset = offset as isize as i64;
+    let len = len as isize as i64;
+
+    axlog::debug!(
+        "sys_fallocate: fd={}, mode={:#x}, offset={}, len={}",
+        fd,
+        mode,
+        offset,
+        len
+    );
+
+    if offset < 0 || len <= 0 {
+        return -LinuxError::EINVAL.code() as isize;
+    }
+
+    let object = match get_fd_entry(fd) {
+        Ok(entry) => entry.object,
+        Err(e) => return -e.code() as isize,
+    };
+
+    match object.allocate(mode, offset as u64, len as u64) {
+        Ok(()) => 0,
+        Err(e) => -e.code() as isize,
+    }
+}

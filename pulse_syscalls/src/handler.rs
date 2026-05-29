@@ -262,6 +262,8 @@ fn syscall_dispatcher(
         Sysno::setregid => impls::sys_setregid(args[0], args[1]),
         Sysno::setresuid => impls::sys_setresuid(args[0], args[1], args[2]),
         Sysno::setresgid => impls::sys_setresgid(args[0], args[1], args[2]),
+        Sysno::getresuid => impls::sys_getresuid(args[0], args[1], args[2]),
+        Sysno::getresgid => impls::sys_getresgid(args[0], args[1], args[2]),
 
 
         Sysno::rt_sigaction => impls::sys_rt_sigaction(args[0], args[1], args[2], args[3]),
@@ -309,7 +311,11 @@ fn syscall_dispatcher(
         }
         Sysno::utimensat => impls::sys_utimensat(args[0] as i32, args[1], args[2], args[3]),
         Sysno::readlinkat => impls::sys_readlinkat(args[0] as i32, args[1], args[2], args[3]),
+        Sysno::symlinkat => {
+            impls::sys_symlinkat(args[0], args[1] as i32, args[2])
+        }
         Sysno::set_robust_list => impls::sys_set_robust_list(args[0], args[1]),
+
         Sysno::get_robust_list => impls::sys_get_robust_list(args[0], args[1], args[2]),
         Sysno::faccessat => impls::sys_faccessat(args[0] as i32, args[1], args[2], 0),
         Sysno::faccessat2 => impls::sys_faccessat(args[0] as i32, args[1], args[2], args[3]),
@@ -318,6 +324,9 @@ fn syscall_dispatcher(
         Sysno::fchownat => impls::sys_fchownat(args[0] as i32, args[1], args[2], args[3], args[4]),
         Sysno::lseek => impls::sys_lseek(args[0], args[1], args[2]),
         Sysno::ftruncate => impls::sys_ftruncate(args[0], args[1]),
+        Sysno::fallocate => {
+            impls::sys_fallocate(args[0], args[1], args[2], args[3])
+        }
         Sysno::fsync => impls::sys_fsync(args[0]),
         Sysno::fdatasync => impls::sys_fdatasync(args[0]),
         Sysno::sync => impls::sys_sync(),

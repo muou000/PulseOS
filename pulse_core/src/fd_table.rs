@@ -89,6 +89,10 @@ pub trait FdObject: Send + Sync {
     fn sync_data(&self) -> LinuxResult {
         Err(LinuxError::EINVAL)
     }
+
+    fn allocate(&self, _mode: u32, _offset: u64, _len: u64) -> LinuxResult {
+        Err(LinuxError::ENODEV)
+    }
 }
 
 #[derive(Clone)]
@@ -373,6 +377,51 @@ impl FdObject for FileObject {
 
     fn sync_data(&self) -> LinuxResult {
         self.inner.sync(true).map_err(Into::into)
+    }
+
+    fn allocate(&self, mode: u32, offset: u64, len: u64) -> LinuxResult {
+        if !self.is_write_open() {
+            return Err(LinuxError::EBADF);
+        }
+        if len == 0 {
+            return Err(LinuxError::EINVAL);
+        }
+        let end = offset.checked_add(len).ok_or(LinuxError::EFBIG)?;
+
+        let metadata = self.inner.location().metadata()?;
+        if metadata.node_type != NodeType::RegularFile {
+            if metadata.node_type == NodeType::Directory {
+                return Err(LinuxError::EISDIR);
+            } else {
+                return Err(LinuxError::ENODEV);
+            }
+        }
+
+        if (mode & !(FALLOC_FL_KEEP_SIZE as u32)) != 0 {
+            axlog::warn!("sys_fallocate: unsupported mode flags (mode={:#x})", mode);
+            return Err(LinuxError::EOPNOTSUPP);
+        }
+
+        if (mode & (FALLOC_FL_KEEP_SIZE as u32)) != 0 {
+            axlog::warn!(
+                "sys_fallocate: FALLOC_FL_KEEP_SIZE is stubbed (mode={:#x}, offset={}, len={}) \
+                 due to lack of native preallocation support in filesystem stack",
+                mode,
+                offset,
+                len
+            );
+        } else {
+            let cur_size = metadata.size;
+            if end > cur_size {
+                axlog::warn!(
+                    "sys_fallocate: physical space preallocation is not supported, falling back to set_len (new_len={})",
+                    end
+                );
+                self.inner.access(AxFileFlags::WRITE)?.set_len(end)?;
+            }
+        }
+
+        Ok(())
     }
 }
 
@@ -899,6 +948,10 @@ impl FdObject for PipeObject {
                 Ok(true)
             }
         }
+    }
+
+    fn allocate(&self, _mode: u32, _offset: u64, _len: u64) -> LinuxResult {
+        Err(LinuxError::ESPIPE)
     }
 }
 
