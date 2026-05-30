@@ -197,3 +197,35 @@ pub fn sys_clone(tf: &TrapFrame, args: [usize; 6]) -> isize {
 
     child_tid_value as isize
 }
+
+pub fn sys_unshare(flags: usize) -> isize {
+    let clone_flags = CloneFlags::from_bits_truncate(flags);
+    axlog::debug!("sys_unshare: raw_flags={:#x}, flags={:?}", flags, clone_flags);
+
+    // If there are any unrecognized bits in flags, return EINVAL
+    if flags & !CloneFlags::all().bits() != 0 {
+        return -LinuxError::EINVAL.code() as isize;
+    }
+
+    let process = match current_process() {
+        Ok(proc) => proc,
+        Err(e) => return -e.code() as isize,
+    };
+
+    if clone_flags.contains(CloneFlags::CLONE_FILES) {
+        if let Err(e) = process.unshare_files() {
+            return -e.code() as isize;
+        }
+    }
+
+    if clone_flags.contains(CloneFlags::CLONE_FS) {
+        if let Err(e) = process.unshare_fs() {
+            return -e.code() as isize;
+        }
+    }
+
+    // Other namespace flags (CLONE_NEWUSER, CLONE_NEWNET, CLONE_NEWNS, CLONE_NEWIPC, CLONE_NEWUTS, CLONE_NEWCGROUP, CLONE_NEWPID)
+    // are supported as stubs (returning success) to satisfy compatibility for user-space programs.
+
+    0
+}

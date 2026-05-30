@@ -9,6 +9,7 @@ mod user;
 mod wait;
 
 pub use clone::*;
+pub use clone::sys_unshare;
 pub use exec::*;
 pub use exit::*;
 pub use process::*;
