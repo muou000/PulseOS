@@ -33,5 +33,8 @@ pub(crate) fn open_fd_flags(flags: usize) -> FdFlags {
     if (flags & O_NONBLOCK as usize) != 0 {
         fd_flags.insert(FdFlags::NONBLOCK);
     }
+    if (flags & O_PATH as usize) != 0 {
+        fd_flags.insert(FdFlags::PATH);
+    }
     fd_flags
 }

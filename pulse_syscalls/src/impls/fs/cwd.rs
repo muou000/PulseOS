@@ -10,7 +10,7 @@ pub fn sys_getcwd(buf: usize, size: usize) -> isize {
     if size == 0 {
         return -LinuxError::ERANGE.code() as isize;
     }
-    let cwd = match with_process(|process| process.fs_context.lock().current_dir().absolute_path())
+    let cwd = match with_process(|process| process.fs_context_handle().lock().current_dir().absolute_path())
     {
         Ok(Ok(path)) => path,
         Ok(Err(e)) => return -LinuxError::from(e.canonicalize()).code() as isize,
@@ -43,12 +43,12 @@ pub fn sys_chdir(path: usize) -> isize {
     };
     match with_process(|process| -> Result<(), LinuxError> {
         let dir = {
-            let fs = process.fs_context.lock().clone();
+            let fs = process.fs_context_handle().lock().clone();
             fs.resolve(path)
                 .map_err(|e| LinuxError::from(e.canonicalize()))?
         };
         process
-            .fs_context
+            .fs_context_handle()
             .lock()
             .set_current_dir(dir)
             .map_err(|e| LinuxError::from(e.canonicalize()))?;

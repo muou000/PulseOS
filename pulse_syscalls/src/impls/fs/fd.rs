@@ -116,10 +116,14 @@ pub fn sys_fcntl(fd: usize, cmd: usize, arg: usize) -> isize {
 
 pub fn sys_ftruncate(fd: usize, length: usize) -> isize {
     axlog::debug!("sys_ftruncate: fd={}, length={:#x}", fd, length);
-    let object = match get_fd_entry(fd) {
-        Ok(entry) => entry.object,
+    let entry = match get_fd_entry(fd) {
+        Ok(entry) => entry,
         Err(e) => return -e.code() as isize,
     };
+    if entry.flags.contains(FdFlags::PATH) {
+        return -LinuxError::EBADF.code() as isize;
+    }
+    let object = entry.object;
     let length = length as isize as i64;
     if length < 0 {
         return -LinuxError::EINVAL.code() as isize;
@@ -147,10 +151,14 @@ pub fn sys_fallocate(fd: usize, mode: usize, offset: usize, len: usize) -> isize
         return -LinuxError::EINVAL.code() as isize;
     }
 
-    let object = match get_fd_entry(fd) {
-        Ok(entry) => entry.object,
+    let entry = match get_fd_entry(fd) {
+        Ok(entry) => entry,
         Err(e) => return -e.code() as isize,
     };
+    if entry.flags.contains(FdFlags::PATH) {
+        return -LinuxError::EBADF.code() as isize;
+    }
+    let object = entry.object;
 
     match object.allocate(mode, offset as u64, len as u64) {
         Ok(()) => 0,

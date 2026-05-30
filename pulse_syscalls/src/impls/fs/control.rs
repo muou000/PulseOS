@@ -134,6 +134,27 @@ pub fn sys_ioctl(fd: usize, cmd: usize, arg: usize) -> isize {
             }
             0
         }
+        0x8933 => {
+            // SIOCGIFINDEX
+            if arg != 0 {
+                let mut name_buf = [0u8; 16];
+                if let Ok(()) = crate::impls::utils::read_user_bytes(arg, &mut name_buf) {
+                    let name_str = core::str::from_utf8(&name_buf)
+                        .unwrap_or("")
+                        .trim_end_matches('\0');
+                    let ifindex = if name_str == "lo" { 1i32 } else { 2i32 };
+                    let bytes = ifindex.to_ne_bytes();
+                    if let Err(e) = crate::impls::utils::write_user_bytes(arg + 16, &bytes) {
+                        return -e.code() as isize;
+                    }
+                }
+            }
+            0
+        }
+        0x8914 => {
+            // SIOCSIFFLAGS
+            0
+        }
         _ => {
             // ENOTTY
             -LinuxError::ENOTTY.code() as isize

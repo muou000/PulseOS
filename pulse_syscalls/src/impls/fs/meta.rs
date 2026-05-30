@@ -65,12 +65,16 @@ pub fn sys_fstatfs(fd: usize, buf: usize) -> isize {
     if buf == 0 {
         return -LinuxError::EFAULT.code() as isize;
     }
-    let location = match get_fd_entry(fd) {
-        Ok(entry) => match entry.object.location() {
-            Some(loc) => loc,
-            None => return -LinuxError::EBADF.code() as isize,
-        },
+    let entry = match get_fd_entry(fd) {
+        Ok(entry) => entry,
         Err(e) => return -e.code() as isize,
+    };
+    if entry.flags.contains(pulse_core::fd_table::FdFlags::PATH) {
+        return -LinuxError::EBADF.code() as isize;
+    }
+    let location = match entry.object.location() {
+        Some(loc) => loc,
+        None => return -LinuxError::EBADF.code() as isize,
     };
     let fs_stat = match vfs_statfs_to_linux(&location) {
         Ok(stat) => stat,
@@ -386,12 +390,16 @@ pub fn sys_fchmodat(dirfd: i32, pathname: usize, mode: usize, flags: usize) -> i
 pub fn sys_fchmod(fd: usize, mode: usize) -> isize {
     axlog::info!("sys_fchmod: fd={}, mode={:#o}", fd, mode);
 
-    let location = match get_fd_entry(fd) {
-        Ok(entry) => match entry.object.location() {
-            Some(loc) => loc,
-            None => return -LinuxError::EBADF.code() as isize,
-        },
+    let entry = match get_fd_entry(fd) {
+        Ok(entry) => entry,
         Err(e) => return -e.code() as isize,
+    };
+    if entry.flags.contains(pulse_core::fd_table::FdFlags::PATH) {
+        return -LinuxError::EBADF.code() as isize;
+    }
+    let location = match entry.object.location() {
+        Some(loc) => loc,
+        None => return -LinuxError::EBADF.code() as isize,
     };
 
     let perm = axfs_ng_vfs::NodePermission::from_bits_truncate(mode as u16);
