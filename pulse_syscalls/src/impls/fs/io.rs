@@ -55,10 +55,14 @@ pub fn sys_read(fd: usize, buf: usize, count: usize) -> isize {
     if count == 0 {
         return 0;
     }
-    let object = match get_fd_entry(fd) {
-        Ok(entry) => entry.object,
+    let entry = match get_fd_entry(fd) {
+        Ok(entry) => entry,
         Err(e) => return -e.code() as isize,
     };
+    if entry.flags.contains(pulse_core::fd_table::FdFlags::PATH) {
+        return -LinuxError::EBADF.code() as isize;
+    }
+    let object = entry.object;
     let mut tmp = match alloc_zeroed_bytes(count.min(MAX_IO_CHUNK), "sys_read.tmp") {
         Ok(buf) => buf,
         Err(e) => return -e.code() as isize,
@@ -106,10 +110,14 @@ pub fn sys_write(fd: usize, buf: usize, count: usize) -> isize {
     if count == 0 {
         return 0;
     }
-    let object = match get_fd_entry(fd) {
-        Ok(entry) => entry.object,
+    let entry = match get_fd_entry(fd) {
+        Ok(entry) => entry,
         Err(e) => return -e.code() as isize,
     };
+    if entry.flags.contains(pulse_core::fd_table::FdFlags::PATH) {
+        return -LinuxError::EBADF.code() as isize;
+    }
+    let object = entry.object;
     let mut total = 0usize;
     let mut tmp = match alloc_zeroed_bytes(count.min(MAX_IO_CHUNK), "sys_write.tmp") {
         Ok(buf) => buf,
@@ -146,10 +154,14 @@ pub fn sys_write(fd: usize, buf: usize, count: usize) -> isize {
 }
 
 pub fn sys_getdents64(fd: usize, dirp: usize, count: usize) -> isize {
-    let object = match get_fd_entry(fd) {
-        Ok(entry) => entry.object,
+    let entry = match get_fd_entry(fd) {
+        Ok(entry) => entry,
         Err(e) => return -e.code() as isize,
     };
+    if entry.flags.contains(pulse_core::fd_table::FdFlags::PATH) {
+        return -LinuxError::EBADF.code() as isize;
+    }
+    let object = entry.object;
 
     if count == 0 {
         return 0;
@@ -175,10 +187,14 @@ pub fn sys_getdents64(fd: usize, dirp: usize, count: usize) -> isize {
 
 pub fn sys_fdatasync(fd: usize) -> isize {
     axlog::debug!("sys_fdatasync: fd={}", fd);
-    let object = match get_fd_entry(fd) {
-        Ok(entry) => entry.object,
+    let entry = match get_fd_entry(fd) {
+        Ok(entry) => entry,
         Err(e) => return -e.code() as isize,
     };
+    if entry.flags.contains(pulse_core::fd_table::FdFlags::PATH) {
+        return -LinuxError::EBADF.code() as isize;
+    }
+    let object = entry.object;
     match object.sync_data() {
         Ok(()) => 0,
         Err(e) => -e.code() as isize,
@@ -186,10 +202,14 @@ pub fn sys_fdatasync(fd: usize) -> isize {
 }
 
 pub fn sys_writev(fd: usize, iov: usize, iovcnt: usize) -> isize {
-    let object = match get_fd_entry(fd) {
-        Ok(entry) => entry.object,
+    let entry = match get_fd_entry(fd) {
+        Ok(entry) => entry,
         Err(e) => return -e.code() as isize,
     };
+    if entry.flags.contains(pulse_core::fd_table::FdFlags::PATH) {
+        return -LinuxError::EBADF.code() as isize;
+    }
+    let object = entry.object;
     let iovecs = match read_user_iovec_array(iov, iovcnt) {
         Ok(iovecs) => iovecs,
         Err(e) => return -e.code() as isize,
@@ -231,10 +251,14 @@ pub fn sys_writev(fd: usize, iov: usize, iovcnt: usize) -> isize {
 }
 
 pub fn sys_readv(fd: usize, iov: usize, iovcnt: usize) -> isize {
-    let object = match get_fd_entry(fd) {
-        Ok(entry) => entry.object,
+    let entry = match get_fd_entry(fd) {
+        Ok(entry) => entry,
         Err(e) => return -e.code() as isize,
     };
+    if entry.flags.contains(pulse_core::fd_table::FdFlags::PATH) {
+        return -LinuxError::EBADF.code() as isize;
+    }
+    let object = entry.object;
     let iovecs = match read_user_iovec_array(iov, iovcnt) {
         Ok(iovecs) => iovecs,
         Err(e) => return -e.code() as isize,
@@ -474,14 +498,23 @@ pub fn sys_sendfile(out_fd: usize, in_fd: usize, offset: usize, count: usize) ->
         return 0;
     }
 
-    let out = match get_fd_entry(out_fd) {
-        Ok(entry) => entry.object,
+    let out_entry = match get_fd_entry(out_fd) {
+        Ok(entry) => entry,
         Err(e) => return -e.code() as isize,
     };
-    let input = match get_fd_entry(in_fd) {
-        Ok(entry) => entry.object,
+    if out_entry.flags.contains(pulse_core::fd_table::FdFlags::PATH) {
+        return -LinuxError::EBADF.code() as isize;
+    }
+    let out = out_entry.object;
+
+    let in_entry = match get_fd_entry(in_fd) {
+        Ok(entry) => entry,
         Err(e) => return -e.code() as isize,
     };
+    if in_entry.flags.contains(pulse_core::fd_table::FdFlags::PATH) {
+        return -LinuxError::EBADF.code() as isize;
+    }
+    let input = in_entry.object;
 
     let use_explicit_offset = offset != 0;
     let mut file_offset = if use_explicit_offset {
@@ -629,10 +662,14 @@ pub fn sys_lseek(fd: usize, offset: usize, whence: usize) -> isize {
         offset,
         whence
     );
-    let object = match get_fd_entry(fd) {
-        Ok(entry) => entry.object,
+    let entry = match get_fd_entry(fd) {
+        Ok(entry) => entry,
         Err(e) => return -e.code() as isize,
     };
+    if entry.flags.contains(pulse_core::fd_table::FdFlags::PATH) {
+        return -LinuxError::EBADF.code() as isize;
+    }
+    let object = entry.object;
     let offset = offset as isize as i64;
     let pos = match whence {
         0 => {
@@ -653,10 +690,14 @@ pub fn sys_lseek(fd: usize, offset: usize, whence: usize) -> isize {
 
 pub fn sys_fsync(fd: usize) -> isize {
     axlog::debug!("sys_fsync: fd={}", fd);
-    let object = match get_fd_entry(fd) {
-        Ok(entry) => entry.object,
+    let entry = match get_fd_entry(fd) {
+        Ok(entry) => entry,
         Err(e) => return -e.code() as isize,
     };
+    if entry.flags.contains(pulse_core::fd_table::FdFlags::PATH) {
+        return -LinuxError::EBADF.code() as isize;
+    }
+    let object = entry.object;
     match object.flush() {
         Ok(()) => 0,
         Err(e) => -e.code() as isize,

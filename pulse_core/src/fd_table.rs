@@ -26,6 +26,7 @@ bitflags::bitflags! {
     pub struct FdFlags: u32 {
         const CLOEXEC = 1 << 0;
         const NONBLOCK = 1 << 1;
+        const PATH = 1 << 2;
     }
 }
 

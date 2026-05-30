@@ -23,10 +23,13 @@
 - 统一使用 `make test` 作为编译入口,除非必要情况下，不要关闭日志。
 - 不要自行替换成其他构建命令，除非任务明确要求。
 - 若需要清理构建产物，优先使用 `make clean`。
+- 可以使用 `cargo check` 快速进行语法和借用检查（需在根目录下执行并指定目标架构和平台 Feature）：
+  - **RISC-V 64**: `cargo check --target riscv64gc-unknown-none-elf --features axfeat/defplat`
+  - **LoongArch64**: `cargo check --target loongarch64-unknown-none-softfloat --features axfeat/defplat`
 
 ## 运行测试方式
 
-统一使用以下命令进行测试，而不是`make run`或`make la`
+统一使用以下命令进行镜像构建，而不是`make run`或`make la`
 
 ### RISC-V 64
 

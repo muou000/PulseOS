@@ -100,13 +100,18 @@ impl<D: BlockDriverOps + 'static> BlockDevice for Ext4Disk<D> {
         }
         {
             let mut cache = self.block_cache.lock();
-            cache.pop(&offset);
-            let start_block = (offset / BLOCK_SIZE) * BLOCK_SIZE;
-            let end_block = ((offset + data.len() - 1) / BLOCK_SIZE) * BLOCK_SIZE;
-            let mut current = start_block;
-            while current <= end_block {
-                cache.pop(&current);
-                current += BLOCK_SIZE;
+            let mut keys_to_remove = Vec::new();
+            for (key, _) in cache.iter() {
+                let cached_start = *key;
+                let cached_end = cached_start + BLOCK_SIZE;
+                let write_start = offset;
+                let write_end = offset + data.len();
+                if cached_start < write_end && write_start < cached_end {
+                    keys_to_remove.push(*key);
+                }
+            }
+            for key in keys_to_remove {
+                cache.pop(&key);
             }
         }
         let (first_block, inner_offset, blocks) = self.byte_range(offset, data.len());

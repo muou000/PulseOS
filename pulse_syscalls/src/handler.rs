@@ -346,6 +346,7 @@ fn syscall_dispatcher(
         Sysno::shmat => impls::sys_shmat(args[0] as i32, args[1], args[2] as i32),
         Sysno::shmdt => impls::sys_shmdt(args[0]),
         Sysno::shmctl => impls::sys_shmctl(args[0] as i32, args[1] as i32, args[2]),
+        Sysno::unshare => impls::sys_unshare(args[0]),
         _ => {
             axlog::warn!("Unimplemented syscall: {:?} ({})", sysno, syscall_id);
             -LinuxError::ENOSYS.code() as isize

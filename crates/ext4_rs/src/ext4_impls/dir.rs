@@ -106,7 +106,12 @@ impl Ext4 {
 
             prev_de_offset = offset;
             // go to next entry
-            offset += de.entry_len() as usize;
+            let entry_len = de.entry_len() as usize;
+            if entry_len == 0 {
+                log::warn!("ext4: zero entry_len at offset {} in dir_find_in_block", offset);
+                break;
+            }
+            offset += entry_len;
         }
         return_errno_with_message!(Errno::ENOENT, "dir find in block failed");
     }
@@ -289,7 +294,20 @@ impl Ext4 {
         while offset < BLOCK_SIZE - size_of::<Ext4DirEntryTail>() {
             let mut de = Ext4DirEntry::try_from(&block.data[offset..]).unwrap();
 
+            let rec_len = de.entry_len as usize;
             if de.unused() {
+                if rec_len == 0 {
+                    log::warn!("ext4: zero entry_len for unused entry at offset {}", offset);
+                    break;
+                }
+                if rec_len >= required_len {
+                    let mut new_entry = Ext4DirEntry::default();
+                    new_entry.write_entry(rec_len as u16, child_inode, name, de_type);
+                    new_entry.copy_to_slice(&mut block.data, offset);
+                    block.sync_blk_to_disk(&self.block_device);
+                    return Ok(EOK);
+                }
+                offset += rec_len;
                 continue;
             }
 
@@ -434,7 +452,12 @@ impl Ext4 {
                 let mut offset = 0;
                 while offset < BLOCK_SIZE - core::mem::size_of::<Ext4DirEntryTail>() {
                     let de: Ext4DirEntry = ext4block.read_offset_as(offset);
-                    offset += de.entry_len as usize;
+                    let entry_len = de.entry_len as usize;
+                    if entry_len == 0 {
+                        log::warn!("ext4: zero entry_len at offset {} in dir_has_entry", offset);
+                        break;
+                    }
+                    offset += entry_len;
                     if de.inode == 0 {
                         continue;
                     }
