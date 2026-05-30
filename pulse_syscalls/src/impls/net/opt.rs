@@ -3,10 +3,11 @@
 //! Exposes getsockopt/setsockopt support for SO_REUSEADDR, TCP_NODELAY,
 //! and stub success returns for other standard socket configuration options.
 
+use core::sync::atomic::Ordering;
 use axerrno::LinuxError;
 use axlog::*;
 use super::get_socket;
-use crate::net::Socket;
+use crate::net::SocketInner;
 
 #[derive(Copy, Clone, Default, Debug)]
 #[repr(C)]
@@ -72,9 +73,11 @@ pub fn sys_getsockopt(
         match optname {
             2 => {
                 // SO_REUSEADDR
-                let reuse = match &*socket {
-                    Socket::Tcp(s) => s.is_reuse_addr(),
-                    Socket::Udp(s) => s.is_reuse_addr(),
+                let reuse = match &socket.inner {
+                    SocketInner::Tcp(s) => s.is_reuse_addr(),
+                    SocketInner::Udp(s) => s.is_reuse_addr(),
+                    SocketInner::Local(_) => false,
+                    SocketInner::Packet => false,
                 };
                 let val: i32 = if reuse { 1 } else { 0 };
                 if let Err(e) = write_user_plain(optval, &val) {
@@ -172,15 +175,15 @@ pub fn sys_getsockopt(
         match optname {
             1 => {
                 // TCP_NODELAY
-                let val: i32 = match &*socket {
-                    Socket::Tcp(s) => {
+                let val: i32 = match &socket.inner {
+                    SocketInner::Tcp(s) => {
                         if !s.nagle_enabled() {
                             1
                         } else {
                             0
                         }
                     }
-                    Socket::Udp(_) => return -(LinuxError::EOPNOTSUPP.code() as isize),
+                    SocketInner::Udp(_) | SocketInner::Local(_) | SocketInner::Packet => return -(LinuxError::EOPNOTSUPP.code() as isize),
                 };
                 if let Err(e) = write_user_plain(optval, &val) {
                     return -(e.code() as isize);
@@ -300,9 +303,11 @@ pub fn sys_setsockopt(
                     Err(e) => return -(e.code() as isize),
                 };
                 let reuse = val != 0;
-                match &*socket {
-                    Socket::Tcp(s) => s.set_reuse_addr(reuse),
-                    Socket::Udp(s) => s.set_reuse_addr(reuse),
+                match &socket.inner {
+                    SocketInner::Tcp(s) => s.set_reuse_addr(reuse),
+                    SocketInner::Udp(s) => s.set_reuse_addr(reuse),
+                    SocketInner::Local(_) => {}
+                    SocketInner::Packet => {}
                 }
                 return 0;
             }
@@ -332,21 +337,89 @@ pub fn sys_setsockopt(
                     Err(e) => return -(e.code() as isize),
                 };
                 let nodelay = val != 0;
-                match &*socket {
-                    Socket::Tcp(s) => {
+                match &socket.inner {
+                    SocketInner::Tcp(s) => {
                         if let Err(e) = s.set_nagle_enabled(!nodelay) {
                             return -(LinuxError::from(e.canonicalize()).code() as isize);
                         }
                     }
-                    Socket::Udp(_) => return -(LinuxError::EOPNOTSUPP.code() as isize),
+                    SocketInner::Udp(_) | SocketInner::Local(_) | SocketInner::Packet => return -(LinuxError::EOPNOTSUPP.code() as isize),
                 }
                 return 0;
+            }
+            _ => {}
+        }
+    } else if level == 0 {
+        // IPPROTO_IP
+        match optname {
+            42 | 45 => {
+                // MCAST_JOIN_GROUP (42), MCAST_LEAVE_GROUP (45)
+                if optlen < 4 {
+                    return -(LinuxError::EINVAL.code() as isize);
+                }
+                let mut gr_buf = alloc::vec![0u8; optlen];
+                if let Err(e) = crate::impls::utils::read_user_bytes(optval, &mut gr_buf) {
+                    return -(e.code() as isize);
+                }
+
+                match &socket.inner {
+                    SocketInner::Tcp(s) => {
+                        let mut groups = s.multicast_groups.lock();
+                        if optname == 42 {
+                            if !groups.contains(&gr_buf) {
+                                groups.push(gr_buf);
+                            }
+                            return 0;
+                        } else {
+                            if let Some(pos) = groups.iter().position(|x| x == &gr_buf) {
+                                groups.remove(pos);
+                                return 0;
+                            } else {
+                                return -(LinuxError::EADDRNOTAVAIL.code() as isize);
+                            }
+                        }
+                    }
+                    SocketInner::Udp(s) => {
+                        let mut groups = s.multicast_groups.lock();
+                        if optname == 42 {
+                            if !groups.contains(&gr_buf) {
+                                groups.push(gr_buf);
+                            }
+                            return 0;
+                        } else {
+                            if let Some(pos) = groups.iter().position(|x| x == &gr_buf) {
+                                groups.remove(pos);
+                                return 0;
+                            } else {
+                                return -(LinuxError::EADDRNOTAVAIL.code() as isize);
+                            }
+                        }
+                    }
+                    SocketInner::Local(_) | SocketInner::Packet => return -(LinuxError::EOPNOTSUPP.code() as isize),
+                }
             }
             _ => {}
         }
     } else if level == 41 {
         // IPPROTO_IPV6
         match optname {
+            1 => {
+                // IPV6_ADDRFORM: convert IPv6 socket to IPv4
+                if optlen < 4 {
+                    return -(LinuxError::EINVAL.code() as isize);
+                }
+                let val: i32 = match read_user_plain(optval) {
+                    Ok(v) => v,
+                    Err(e) => return -(e.code() as isize),
+                };
+                if val != 2 /* AF_INET */ {
+                    return -(LinuxError::EINVAL.code() as isize);
+                }
+                // Update socket domain to AF_INET
+                socket.domain.store(2, Ordering::Release);
+                debug!("setsockopt: IPV6_ADDRFORM -> AF_INET");
+                return 0;
+            }
             26 => {
                 // IPV6_V6ONLY
                 if optlen < 4 {

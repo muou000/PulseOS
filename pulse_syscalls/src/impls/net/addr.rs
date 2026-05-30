@@ -18,6 +18,13 @@ fn read_user_plain<T: Copy>(user_addr: usize) -> Result<T, LinuxError> {
     .map_err(|e| LinuxError::from(e.canonicalize()))
 }
 
+fn write_user_plain<T: Copy>(user_addr: usize, value: &T) -> Result<(), LinuxError> {
+    crate::impls::utils::with_process(|process| {
+        pulse_core::task::uaccess::write_user_plain(process, user_addr, value)
+    })?
+    .map_err(|e| LinuxError::from(e.canonicalize()))
+}
+
 fn read_family(addr: usize, addrlen: u32) -> Result<u16, LinuxError> {
     if size_of::<__kernel_sa_family_t>() > addrlen as usize {
         return Err(LinuxError::EINVAL);
@@ -156,4 +163,36 @@ impl From<NetSocketAddr> for SocketAddr {
             NetSocketAddr::V6(v6) => Self::V6(v6),
         }
     }
+}
+
+pub fn write_unix_addr(path_opt: Option<alloc::string::String>, dst: usize, addrlen: usize) -> Result<(), LinuxError> {
+    if addrlen == 0 {
+        return Err(LinuxError::EFAULT);
+    }
+    let alen = read_user_plain::<u32>(addrlen)?;
+    
+    let family = AF_UNIX as u16;
+    let mut bytes = alloc::vec![0u8; 2];
+    bytes[0..2].copy_from_slice(&family.to_ne_bytes());
+    
+    if let Some(path) = path_opt {
+        if path.starts_with('\0') {
+            // Abstract socket
+            bytes.extend_from_slice(path.as_bytes());
+        } else {
+            // Pathname socket
+            bytes.extend_from_slice(path.as_bytes());
+            bytes.push(0); // Null terminator
+        }
+    }
+    
+    let copy_len = (alen as usize).min(bytes.len());
+    if dst == 0 {
+        return Err(LinuxError::EFAULT);
+    }
+    crate::impls::utils::write_user_bytes(dst, &bytes[..copy_len])?;
+    
+    let out_len = bytes.len() as u32;
+    write_user_plain(addrlen, &out_len)?;
+    Ok(())
 }
