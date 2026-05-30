@@ -5,38 +5,30 @@ use core::mem::{align_of, size_of};
 
 #[unsafe(no_mangle)]
 #[linkage = "weak"]
-fn __ax_task_ext_name() -> *const u8 {
-    core::ptr::null()
-}
+static __AX_TASK_EXT_SIZE: usize = 0;
 
 #[unsafe(no_mangle)]
 #[linkage = "weak"]
-fn __ax_task_ext_name_len() -> usize {
-    0
-}
+static __AX_TASK_EXT_ALIGN: usize = 0;
+
+#[unsafe(no_mangle)]
+#[linkage = "weak"]
+fn __ax_task_ext_drop(_data: *mut u8) {}
+
+#[unsafe(no_mangle)]
+#[linkage = "weak"]
+fn __ax_task_ext_on_enter(_data: *const u8) {}
+
+#[unsafe(no_mangle)]
+#[linkage = "weak"]
+fn __ax_task_ext_on_leave(_data: *const u8) {}
 
 /// A wrapper of pointer to the task extended data.
-pub struct AxTaskExt {
+pub(crate) struct AxTaskExt {
     ptr: *mut u8,
 }
 
 impl AxTaskExt {
-    /// Returns the expected type name of the task extended structure.
-    pub fn ext_name() -> &'static str {
-        unsafe extern "C" {
-            fn __ax_task_ext_name() -> *const u8;
-            fn __ax_task_ext_name_len() -> usize;
-        }
-        let ptr = unsafe { __ax_task_ext_name() };
-        if ptr.is_null() {
-            ""
-        } else {
-            let len = unsafe { __ax_task_ext_name_len() };
-            let slice = unsafe { core::slice::from_raw_parts(ptr, len) };
-            core::str::from_utf8(slice).unwrap_or("")
-        }
-    }
-
     /// Returns the expected size of the task extended structure.
     pub fn size() -> usize {
         unsafe extern "C" {
@@ -255,18 +247,14 @@ macro_rules! def_task_ext {
 
         impl $crate::TaskExtRef<$task_ext_struct> for $crate::TaskInner {
             fn task_ext(&self) -> &$task_ext_struct {
-                self.task_ext_opt().expect("task extension not initialized")
+                unsafe {
+                    let ptr = self.task_ext_ptr() as *const $task_ext_struct;
+                    assert!(!ptr.is_null());
+                    &*ptr
+                }
             }
 
             fn task_ext_opt(&self) -> Option<&$task_ext_struct> {
-                let ext_name = $crate::AxTaskExt::ext_name();
-                let req_name = ::core::any::type_name::<$task_ext_struct>();
-                if ext_name != req_name {
-                    panic!(
-                        "task extension type mismatch! Compiled extension: {}, but trying to access as: {}",
-                        ext_name, req_name
-                    );
-                }
                 unsafe {
                     let ptr = self.task_ext_ptr() as *const $task_ext_struct;
                     if ptr.is_null() {
@@ -280,18 +268,14 @@ macro_rules! def_task_ext {
 
         impl $crate::TaskExtMut<$task_ext_struct> for $crate::TaskInner {
             fn task_ext_mut(&mut self) -> &mut $task_ext_struct {
-                self.task_ext_mut_opt().expect("task extension not initialized")
+                unsafe {
+                    let ptr = self.task_ext_ptr() as *mut $task_ext_struct;
+                    assert!(!ptr.is_null());
+                    &mut *ptr
+                }
             }
 
             fn task_ext_mut_opt(&mut self) -> Option<&mut $task_ext_struct> {
-                let ext_name = $crate::AxTaskExt::ext_name();
-                let req_name = ::core::any::type_name::<$task_ext_struct>();
-                if ext_name != req_name {
-                    panic!(
-                        "task extension type mismatch! Compiled extension: {}, but trying to access as: {}",
-                        ext_name, req_name
-                    );
-                }
                 unsafe {
                     let ptr = self.task_ext_ptr() as *mut $task_ext_struct;
                     if ptr.is_null() {
