@@ -21,6 +21,7 @@ pub struct UdpSocket {
     peer_addr: RwLock<Option<IpEndpoint>>,
     nonblock: AtomicBool,
     reuse_addr: AtomicBool,
+    pub multicast_groups: Mutex<alloc::vec::Vec<alloc::vec::Vec<u8>>>,
 }
 
 impl UdpSocket {
@@ -35,6 +36,7 @@ impl UdpSocket {
             peer_addr: RwLock::new(None),
             nonblock: AtomicBool::new(false),
             reuse_addr: AtomicBool::new(false),
+            multicast_groups: Mutex::new(alloc::vec::Vec::new()),
         }
     }
 
@@ -119,7 +121,7 @@ impl UdpSocket {
 
         if !self.is_reuse_addr() {
             // Check if the address is already in use
-            SOCKET_SET.bind_check(local_endpoint.addr, local_endpoint.port)?;
+            SOCKET_SET.bind_check(local_endpoint.addr, local_endpoint.port, Some(self.handle))?;
         }
 
         SOCKET_SET.with_socket_mut::<udp::Socket, _, _>(self.handle, |socket| {

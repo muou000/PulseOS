@@ -44,6 +44,7 @@ pub struct TcpSocket {
     peer_addr: UnsafeCell<IpEndpoint>,
     nonblock: AtomicBool,
     reuse_addr: AtomicBool,
+    pub multicast_groups: Mutex<alloc::vec::Vec<alloc::vec::Vec<u8>>>,
 }
 
 unsafe impl Sync for TcpSocket {}
@@ -58,6 +59,7 @@ impl TcpSocket {
             peer_addr: UnsafeCell::new(UNSPECIFIED_ENDPOINT),
             nonblock: AtomicBool::new(false),
             reuse_addr: AtomicBool::new(false),
+            multicast_groups: Mutex::new(alloc::vec::Vec::new()),
         }
     }
 
@@ -74,6 +76,7 @@ impl TcpSocket {
             peer_addr: UnsafeCell::new(peer_addr),
             nonblock: AtomicBool::new(false),
             reuse_addr: AtomicBool::new(false),
+            multicast_groups: Mutex::new(alloc::vec::Vec::new()),
         }
     }
 
@@ -169,7 +172,13 @@ impl TcpSocket {
         self.update_state(STATE_CLOSED, STATE_CONNECTING, || {
             // SAFETY: no other threads can read or write these fields.
             let handle = unsafe { self.handle.get().read() }
-                .unwrap_or_else(|| SOCKET_SET.add(SocketSetWrapper::new_tcp_socket()));
+                .unwrap_or_else(|| {
+                    let h = SOCKET_SET.add(SocketSetWrapper::new_tcp_socket());
+                    unsafe {
+                        self.handle.get().write(Some(h));
+                    }
+                    h
+                });
 
             // // TODO: check remote addr unreachable
             // let (bound_endpoint, remote_endpoint) = self.get_endpoint_pair(remote_addr)?;
@@ -260,18 +269,37 @@ impl TcpSocket {
                 if old != UNSPECIFIED_ENDPOINT {
                     return ax_err!(InvalidInput, "socket bind() failed: already bound");
                 }
-                self.local_addr.get().write(from_core_sockaddr(local_addr));
             }
             let local_endpoint = from_core_sockaddr(local_addr);
-            let bound_endpoint = self.bound_endpoint()?;
+            let port = if local_endpoint.port != 0 {
+                local_endpoint.port
+            } else {
+                get_ephemeral_port()?
+            };
+            assert_ne!(port, 0);
+            let addr = if !is_unspecified(local_endpoint.addr) {
+                Some(local_endpoint.addr)
+            } else {
+                None
+            };
+            let bound_endpoint = IpListenEndpoint { addr, port };
+
             let handle = unsafe { self.handle.get().read() }
-                .unwrap_or_else(|| SOCKET_SET.add(SocketSetWrapper::new_tcp_socket()));
+                .unwrap_or_else(|| {
+                    let h = SOCKET_SET.add(SocketSetWrapper::new_tcp_socket());
+                    unsafe { self.handle.get().write(Some(h)); }
+                    h
+                });
             SOCKET_SET.with_socket_mut::<tcp::Socket, _, _>(handle, |socket| {
                 socket.set_bound_endpoint(bound_endpoint);
             });
 
             if !self.is_reuse_addr() {
-                SOCKET_SET.bind_check(local_endpoint.addr, local_endpoint.port)?;
+                SOCKET_SET.bind_check(local_endpoint.addr, local_endpoint.port, Some(handle))?;
+            }
+
+            unsafe {
+                self.local_addr.get().write(from_core_sockaddr(local_addr));
             }
             Ok(())
         })
@@ -627,7 +655,13 @@ impl TcpSocket {
         let writable =
             SOCKET_SET.with_socket::<tcp::Socket, _, _>(handle, |socket| match socket.state() {
                 State::SynSent => false, // wait for connection
-                State::Established => {
+                State::Established
+                | State::FinWait1
+                | State::FinWait2
+                | State::TimeWait
+                | State::CloseWait
+                | State::LastAck
+                | State::Closing => {
                     self.set_state(STATE_CONNECTED); // connected
                     debug!(
                         "TCP socket {}: connected to {}",

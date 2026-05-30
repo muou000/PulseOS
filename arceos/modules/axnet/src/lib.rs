@@ -34,6 +34,7 @@ pub use self::net_impl::TcpSocket;
 pub use self::net_impl::UdpSocket;
 pub use self::net_impl::{
     add_membership, dns_query, from_core_sockaddr, into_core_sockaddr, poll_interfaces,
+    is_local_ip,
 };
 pub use self::net_impl::{bench_receive, bench_transmit};
 pub use smoltcp::time::Duration;

@@ -5,7 +5,7 @@ use axlog::*;
 use linux_raw_sys::general::iovec;
 
 use super::{addr::NetSocketAddr, get_socket};
-use crate::net::Socket;
+use crate::net::SocketInner;
 
 fn read_user_plain<T: Copy>(user_addr: usize) -> Result<T, LinuxError> {
     crate::impls::utils::with_process(|process| {
@@ -19,6 +19,56 @@ fn write_user_plain<T: Copy>(user_addr: usize, value: &T) -> Result<(), LinuxErr
         pulse_core::task::uaccess::write_user_plain(process, user_addr, value)
     })?
     .map_err(|e| LinuxError::from(e.canonicalize()))
+}
+fn read_family(addr: usize, addrlen: u32) -> Result<u16, LinuxError> {
+    if addrlen < 2 {
+        return Err(LinuxError::EINVAL);
+    }
+    if addr == 0 {
+        return Err(LinuxError::EFAULT);
+    }
+    let family = read_user_plain::<u16>(addr)?;
+    Ok(family)
+}
+
+fn resolve_unix_addr(addr: usize, addrlen: usize) -> Result<core::net::SocketAddr, LinuxError> {
+    let family = read_family(addr, addrlen as u32)?;
+    if family != linux_raw_sys::net::AF_UNIX as u16 {
+        return Err(LinuxError::EINVAL);
+    }
+    let path = if addrlen <= 2 {
+        alloc::string::String::new()
+    } else {
+        let first_byte = read_user_plain::<u8>(addr + 2)?;
+        if first_byte == 0 {
+            let len = (addrlen as usize).saturating_sub(3);
+            let mut buf = alloc::vec![0u8; len];
+            crate::impls::utils::read_user_bytes(addr + 3, &mut buf)?;
+            let name = alloc::string::String::from_utf8_lossy(&buf).into_owned();
+            alloc::format!("\0{}", name)
+        } else {
+            let path_c = crate::impls::utils::read_user_cstring(addr + 2)?;
+            path_c.to_str().map(alloc::string::String::from).unwrap_or_else(|_| alloc::string::String::new())
+        }
+    };
+    if path.is_empty() {
+        return Err(LinuxError::EINVAL);
+    }
+    let mut registry = super::socket::UNIX_REGISTRY.lock();
+    let target_addr = match registry.get(&path) {
+        Some(&(a, ref weak_sock)) => {
+            if weak_sock.upgrade().is_some() {
+                a
+            } else {
+                registry.remove(&path);
+                return Err(LinuxError::ECONNREFUSED);
+            }
+        }
+        None => {
+            return Err(LinuxError::ECONNREFUSED);
+        }
+    };
+    Ok(target_addr)
 }
 
 pub fn sys_sendto(
@@ -49,25 +99,39 @@ pub fn sys_sendto(
         Err(e) => return -(e.code() as isize),
     };
 
-    let result = match &*socket {
-        Socket::Tcp(s) => s
+    let result = match &socket.inner {
+        SocketInner::Tcp(s) => s
             .send(&tmp)
             .map_err(|e| LinuxError::from(e.canonicalize())),
-        Socket::Udp(s) => {
+        SocketInner::Udp(s) => {
             if addr == 0 || addrlen == 0 {
                 s.send(&tmp)
                     .map_err(|e| LinuxError::from(e.canonicalize()))
             } else {
-                match NetSocketAddr::read_from_raw(addr, addrlen as u32) {
-                    Ok(net_addr) => {
-                        let std_addr = core::net::SocketAddr::from(net_addr);
-                        s.send_to(&tmp, std_addr)
-                            .map_err(|e| LinuxError::from(e.canonicalize()))
+                let family = match read_family(addr, addrlen as u32) {
+                    Ok(f) => f as u32,
+                    Err(e) => return -(e.code() as isize),
+                };
+                if family == linux_raw_sys::net::AF_UNIX as u32 {
+                    match resolve_unix_addr(addr, addrlen) {
+                        Ok(target_addr) => s.send_to(&tmp, target_addr)
+                            .map_err(|e| LinuxError::from(e.canonicalize())),
+                        Err(e) => Err(e),
                     }
-                    Err(e) => Err(e),
+                } else {
+                    match NetSocketAddr::read_from_raw(addr, addrlen as u32) {
+                        Ok(net_addr) => {
+                            let std_addr = core::net::SocketAddr::from(net_addr);
+                            s.send_to(&tmp, std_addr)
+                                .map_err(|e| LinuxError::from(e.canonicalize()))
+                        }
+                        Err(e) => Err(e),
+                    }
                 }
             }
         }
+        SocketInner::Local(s) => s.write(&tmp),
+        SocketInner::Packet => Ok(tmp.len()),
     };
 
     match result {
@@ -99,15 +163,17 @@ pub fn sys_recvfrom(
         Err(e) => return -(e.code() as isize),
     };
 
-    let result = match &*socket {
-        Socket::Tcp(s) => s
+    let result = match &socket.inner {
+        SocketInner::Tcp(s) => s
             .recv(&mut tmp)
             .map(|n| (n, None))
             .map_err(|e| LinuxError::from(e.canonicalize())),
-        Socket::Udp(s) => s
+        SocketInner::Udp(s) => s
             .recv_from(&mut tmp)
             .map(|(n, src)| (n, Some(src)))
             .map_err(|e| LinuxError::from(e.canonicalize())),
+        SocketInner::Local(s) => s.read(&mut tmp).map(|n| (n, None)),
+        SocketInner::Packet => Ok((0, None)),
     };
 
     match result {
@@ -195,25 +261,39 @@ pub fn sys_sendmsg(fd: usize, msg: usize, _flags: usize) -> isize {
         Err(e) => return -(e.code() as isize),
     };
 
-    let result = match &*socket {
-        Socket::Tcp(s) => s
+    let result = match &socket.inner {
+        SocketInner::Tcp(s) => s
             .send(&flat)
             .map_err(|e| LinuxError::from(e.canonicalize())),
-        Socket::Udp(s) => {
+        SocketInner::Udp(s) => {
             if dest_addr == 0 || dest_addrlen == 0 {
                 s.send(&flat)
                     .map_err(|e| LinuxError::from(e.canonicalize()))
             } else {
-                match NetSocketAddr::read_from_raw(dest_addr, dest_addrlen) {
-                    Ok(net_addr) => {
-                        let std_addr = core::net::SocketAddr::from(net_addr);
-                        s.send_to(&flat, std_addr)
-                            .map_err(|e| LinuxError::from(e.canonicalize()))
+                let family = match read_family(dest_addr, dest_addrlen) {
+                    Ok(f) => f as u32,
+                    Err(e) => return -(e.code() as isize),
+                };
+                if family == linux_raw_sys::net::AF_UNIX as u32 {
+                    match resolve_unix_addr(dest_addr, dest_addrlen as usize) {
+                        Ok(target_addr) => s.send_to(&flat, target_addr)
+                            .map_err(|e| LinuxError::from(e.canonicalize())),
+                        Err(e) => Err(e),
                     }
-                    Err(e) => Err(e),
+                } else {
+                    match NetSocketAddr::read_from_raw(dest_addr, dest_addrlen) {
+                        Ok(net_addr) => {
+                            let std_addr = core::net::SocketAddr::from(net_addr);
+                            s.send_to(&flat, std_addr)
+                                .map_err(|e| LinuxError::from(e.canonicalize()))
+                        }
+                        Err(e) => Err(e),
+                    }
                 }
             }
         }
+        SocketInner::Local(s) => s.write(&flat),
+        SocketInner::Packet => Ok(flat.len()),
     };
 
     match result {
@@ -264,15 +344,17 @@ pub fn sys_recvmsg(fd: usize, msg: usize, _flags: usize) -> isize {
         Err(e) => return -(e.code() as isize),
     };
 
-    let result = match &*socket {
-        Socket::Tcp(s) => s
+    let result = match &socket.inner {
+        SocketInner::Tcp(s) => s
             .recv(&mut flat)
             .map(|n| (n, None))
             .map_err(|e| LinuxError::from(e.canonicalize())),
-        Socket::Udp(s) => s
+        SocketInner::Udp(s) => s
             .recv_from(&mut flat)
             .map(|(n, src)| (n, Some(src)))
             .map_err(|e| LinuxError::from(e.canonicalize())),
+        SocketInner::Local(s) => s.read(&mut flat).map(|n| (n, None)),
+        SocketInner::Packet => Ok((0, None)),
     };
 
     match result {

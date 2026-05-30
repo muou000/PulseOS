@@ -1,7 +1,9 @@
+use core::sync::atomic::Ordering;
 use axerrno::LinuxError;
 use axlog::*;
 
-use super::{addr::NetSocketAddr, get_socket};
+use super::{addr::{NetSocketAddr, write_unix_addr}, get_socket};
+use crate::net::SocketInner;
 
 fn read_user_plain<T: Copy>(user_addr: usize) -> Result<T, LinuxError> {
     crate::impls::utils::with_process(|process| {
@@ -22,6 +24,31 @@ pub fn sys_getsockname(fd: usize, addr: usize, addrlen: usize) -> isize {
         Ok(s) => s,
         Err(e) => return -(e.code() as isize),
     };
+    
+    if socket.domain.load(Ordering::Acquire) == linux_raw_sys::net::AF_UNIX {
+        if let SocketInner::Local(_) = &socket.inner {
+            match write_unix_addr(None, addr, addrlen) {
+                Ok(()) => return 0,
+                Err(e) => return -(e.code() as isize),
+            }
+        }
+        let path = {
+            let registry = crate::impls::net::UNIX_REGISTRY.lock();
+            registry.iter().find_map(|(k, v)| {
+                if let Some(s) = v.1.upgrade() {
+                    if alloc::sync::Arc::ptr_eq(&s, &socket) {
+                        return Some(k.clone());
+                    }
+                }
+                None
+            })
+        };
+        match write_unix_addr(path, addr, addrlen) {
+            Ok(()) => return 0,
+            Err(e) => return -(e.code() as isize),
+        }
+    }
+
     let local_addr = match socket.local_addr() {
         Ok(a) => a,
         Err(e) => return -(e.code() as isize),
@@ -53,6 +80,34 @@ pub fn sys_getpeername(fd: usize, addr: usize, addrlen: usize) -> isize {
         Ok(s) => s,
         Err(e) => return -(e.code() as isize),
     };
+    
+    if socket.domain.load(Ordering::Acquire) == linux_raw_sys::net::AF_UNIX {
+        if let SocketInner::Local(_) = &socket.inner {
+            match write_unix_addr(None, addr, addrlen) {
+                Ok(()) => return 0,
+                Err(e) => return -(e.code() as isize),
+            }
+        }
+        let peer_addr = match socket.peer_addr() {
+            Ok(a) => a,
+            Err(e) => return -(e.code() as isize),
+        };
+        let path = {
+            let registry = crate::impls::net::UNIX_REGISTRY.lock();
+            registry.iter().find_map(|(k, v)| {
+                if v.0 == peer_addr {
+                    Some(k.clone())
+                } else {
+                    None
+                }
+            })
+        };
+        match write_unix_addr(path, addr, addrlen) {
+            Ok(()) => return 0,
+            Err(e) => return -(e.code() as isize),
+        }
+    }
+
     let peer_addr = match socket.peer_addr() {
         Ok(a) => a,
         Err(e) => return -(e.code() as isize),

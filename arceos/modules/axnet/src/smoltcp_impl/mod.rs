@@ -126,18 +126,28 @@ impl<'a> SocketSetWrapper<'a> {
         f(socket)
     }
 
-    pub fn bind_check(&self, addr: IpAddress, _port: u16) -> AxResult {
+    pub fn bind_check(&self, addr: IpAddress, port: u16, self_handle: Option<SocketHandle>) -> AxResult {
         let mut sockets = self.0.lock();
         for item in sockets.iter_mut() {
+            if Some(item.0) == self_handle {
+                continue;
+            }
             match item.1 {
                 Socket::Tcp(s) => {
                     let local_addr = s.get_bound_endpoint();
-                    if local_addr.addr == Some(addr) {
+                    let addr_conflict = local_addr.addr.is_none()
+                        || addr::is_unspecified(addr)
+                        || local_addr.addr == Some(addr);
+                    if addr_conflict && local_addr.port == port {
                         return Err(AxError::AddrInUse);
                     }
                 }
                 Socket::Udp(s) => {
-                    if s.endpoint().addr == Some(addr) {
+                    let endpoint = s.endpoint();
+                    let addr_conflict = endpoint.addr.is_none()
+                        || addr::is_unspecified(addr)
+                        || endpoint.addr == Some(addr);
+                    if addr_conflict && endpoint.port == port {
                         return Err(AxError::AddrInUse);
                     }
                 }
@@ -392,4 +402,31 @@ pub(crate) fn init(_net_dev: AxNetDevice) {
 
     SOCKET_SET.init_once(SocketSetWrapper::new());
     LISTEN_TABLE.init_once(ListenTable::new());
+}
+
+/// Check if an IP address is a local interface IP (loopback, unspecified, or dynamic ETH0 IP).
+pub fn is_local_ip(ip: &core::net::IpAddr) -> bool {
+    if ip.is_unspecified() || ip.is_loopback() {
+        return true;
+    }
+    if ETH0.is_inited() {
+        let iface = ETH0.iface.lock();
+        for cidr in iface.ip_addrs() {
+            let addr = cidr.address();
+            match (ip, addr) {
+                (core::net::IpAddr::V4(v4), smoltcp::wire::IpAddress::Ipv4(smol_v4)) => {
+                    if v4.octets() == smol_v4.0 {
+                        return true;
+                    }
+                }
+                (core::net::IpAddr::V6(v6), smoltcp::wire::IpAddress::Ipv6(smol_v6)) => {
+                    if v6.octets() == smol_v6.0 {
+                        return true;
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    false
 }
