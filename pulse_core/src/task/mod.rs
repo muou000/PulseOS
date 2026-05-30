@@ -104,7 +104,7 @@ pub fn current_process() -> LinuxResult<Arc<Process>> {
 
 pub fn current_have_signals() -> bool {
     if let Ok(thread) = current_thread() {
-        thread.signal().has_deliverable_pending_signal()
+        thread.signal().has_deliverable_pending_signal() || thread.process().group_exiting()
     } else {
         false
     }
@@ -273,7 +273,8 @@ impl axfs::ProcfsProcessProvider for PulseProcessProvider {
 
     fn process_fds(&self, pid: u64) -> Option<Vec<u32>> {
         let proc = process_by_pid(pid)?;
-        let fd_table = proc.fd_table.lock();
+        let binding = proc.fd_table();
+        let fd_table = binding.lock();
         let mut fds = Vec::new();
         for fd in 0..1024 {
             if fd_table.get(fd).is_some() {
@@ -285,7 +286,8 @@ impl axfs::ProcfsProcessProvider for PulseProcessProvider {
 
     fn fd_path(&self, pid: u64, fd: u32) -> Option<String> {
         let proc = process_by_pid(pid)?;
-        let fd_table = proc.fd_table.lock();
+        let binding = proc.fd_table();
+        let fd_table = binding.lock();
         let entry = fd_table.get(fd as usize)?;
         if let Some(loc) = entry.object.location() {
             Some(loc.absolute_path().ok()?.as_str().to_string())

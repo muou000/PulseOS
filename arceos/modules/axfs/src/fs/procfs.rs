@@ -42,6 +42,9 @@ const SUB_INO_STAT: u64 = 5;
 const SUB_INO_FD_DIR: u64 = 6;
 const SUB_INO_MAPS: u64 = 7;
 const SUB_INO_PAGEMAP: u64 = 8;
+const SUB_INO_SETGROUPS: u64 = 9;
+const SUB_INO_UID_MAP: u64 = 10;
+const SUB_INO_GID_MAP: u64 = 11;
 const SUB_INO_FD_BASE: u64 = 0x40;
 
 pub trait ProcfsProcessProvider: Send + Sync {
@@ -91,6 +94,9 @@ enum ProcLiveFileKind {
     PidFdSymlink(u64, u32),
     PidMaps(u64),
     PidPagemap(u64),
+    PidSetgroups(u64),
+    PidUidMap(u64),
+    PidGidMap(u64),
     PidMax,
     Tainted,
     CorePattern,
@@ -276,6 +282,9 @@ pub struct ProcFilesystem {
     root_dir: Mutex<Option<DirEntry>>,
     inodes: Mutex<BTreeMap<u64, Arc<Inode>>>,
     next_ino: Mutex<u64>,
+    setgroups_map: Mutex<BTreeMap<u64, String>>,
+    uid_map_map: Mutex<BTreeMap<u64, String>>,
+    gid_map_map: Mutex<BTreeMap<u64, String>>,
 }
 
 impl ProcFilesystem {
@@ -284,6 +293,9 @@ impl ProcFilesystem {
             root_dir: Mutex::new(None),
             inodes: Mutex::new(BTreeMap::new()),
             next_ino: Mutex::new(NEXT_DYNAMIC_INO),
+            setgroups_map: Mutex::new(BTreeMap::new()),
+            uid_map_map: Mutex::new(BTreeMap::new()),
+            gid_map_map: Mutex::new(BTreeMap::new()),
         });
 
         fs.bootstrap();
@@ -420,6 +432,9 @@ impl ProcFilesystem {
                     entries.insert("fd".into(), InodeRef::new(PID_INODE_START + (pid << PID_INODE_SHIFT) + SUB_INO_FD_DIR));
                     entries.insert("maps".into(), InodeRef::new(PID_INODE_START + (pid << PID_INODE_SHIFT) + SUB_INO_MAPS));
                     entries.insert("pagemap".into(), InodeRef::new(PID_INODE_START + (pid << PID_INODE_SHIFT) + SUB_INO_PAGEMAP));
+                    entries.insert("setgroups".into(), InodeRef::new(PID_INODE_START + (pid << PID_INODE_SHIFT) + SUB_INO_SETGROUPS));
+                    entries.insert("uid_map".into(), InodeRef::new(PID_INODE_START + (pid << PID_INODE_SHIFT) + SUB_INO_UID_MAP));
+                    entries.insert("gid_map".into(), InodeRef::new(PID_INODE_START + (pid << PID_INODE_SHIFT) + SUB_INO_GID_MAP));
                 }
                 return Ok(dir);
             }
@@ -460,10 +475,19 @@ impl ProcFilesystem {
                 SUB_INO_STAT => ProcLiveFileKind::PidStat(pid),
                 SUB_INO_MAPS => ProcLiveFileKind::PidMaps(pid),
                 SUB_INO_PAGEMAP => ProcLiveFileKind::PidPagemap(pid),
+                SUB_INO_SETGROUPS => ProcLiveFileKind::PidSetgroups(pid),
+                SUB_INO_UID_MAP => ProcLiveFileKind::PidUidMap(pid),
+                SUB_INO_GID_MAP => ProcLiveFileKind::PidGidMap(pid),
                 _ => return Err(VfsError::NotFound),
             };
 
-            let perm = if sub == SUB_INO_EXE { 0o777 } else { 0o444 };
+            let perm = if sub == SUB_INO_EXE { 
+                0o777 
+            } else if sub == SUB_INO_SETGROUPS || sub == SUB_INO_UID_MAP || sub == SUB_INO_GID_MAP {
+                0o644
+            } else { 
+                0o444 
+            };
             let file = Inode::new_live_file(
                 ino,
                 kind,
@@ -579,7 +603,7 @@ fn render_mounts() -> String {
     out
 }
 
-fn render_proc_file(kind: ProcLiveFileKind) -> String {
+fn render_proc_file(fs: &ProcFilesystem, kind: ProcLiveFileKind) -> String {
     match kind {
         ProcLiveFileKind::Meminfo => render_meminfo(),
         ProcLiveFileKind::Mounts => render_mounts(),
@@ -614,6 +638,15 @@ fn render_proc_file(kind: ProcLiveFileKind) -> String {
         }
         ProcLiveFileKind::PidPagemap(_pid) => {
             String::new()
+        }
+        ProcLiveFileKind::PidSetgroups(pid) => {
+            fs.setgroups_map.lock().get(&pid).cloned().unwrap_or_else(|| "allow\n".to_owned())
+        }
+        ProcLiveFileKind::PidUidMap(pid) => {
+            fs.uid_map_map.lock().get(&pid).cloned().unwrap_or_default()
+        }
+        ProcLiveFileKind::PidGidMap(pid) => {
+            fs.gid_map_map.lock().get(&pid).cloned().unwrap_or_default()
         }
         ProcLiveFileKind::PidMax => {
             format!("{}\n", PID_MAX.load(core::sync::atomic::Ordering::Acquire))
@@ -728,7 +761,7 @@ impl NodeOps for ProcNode {
                     metadata.size = 0x8000_0000_0000;
                     metadata.blocks = metadata.size.div_ceil(512);
                 } else {
-                    metadata.size = render_proc_file(*kind).len() as u64;
+                    metadata.size = render_proc_file(&self.fs, *kind).len() as u64;
                     metadata.blocks = metadata.size.div_ceil(512);
                 }
             }
@@ -817,6 +850,9 @@ impl DirNodeOps for ProcNode {
                     all_entries.push(("fd".to_owned(), PID_INODE_START + (pid << PID_INODE_SHIFT) + SUB_INO_FD_DIR));
                     all_entries.push(("maps".to_owned(), PID_INODE_START + (pid << PID_INODE_SHIFT) + SUB_INO_MAPS));
                     all_entries.push(("pagemap".to_owned(), PID_INODE_START + (pid << PID_INODE_SHIFT) + SUB_INO_PAGEMAP));
+                    all_entries.push(("setgroups".to_owned(), PID_INODE_START + (pid << PID_INODE_SHIFT) + SUB_INO_SETGROUPS));
+                    all_entries.push(("uid_map".to_owned(), PID_INODE_START + (pid << PID_INODE_SHIFT) + SUB_INO_UID_MAP));
+                    all_entries.push(("gid_map".to_owned(), PID_INODE_START + (pid << PID_INODE_SHIFT) + SUB_INO_GID_MAP));
                 } else if sub == SUB_INO_FD_DIR {
                     all_entries.push((".".to_owned(), self.ino));
                     all_entries.push(("..".to_owned(), PID_INODE_START + (pid << PID_INODE_SHIFT) + SUB_INO_DIR));
@@ -891,6 +927,9 @@ impl DirNodeOps for ProcNode {
                         "fd" => Some(SUB_INO_FD_DIR),
                         "maps" => Some(SUB_INO_MAPS),
                         "pagemap" => Some(SUB_INO_PAGEMAP),
+                        "setgroups" => Some(SUB_INO_SETGROUPS),
+                        "uid_map" => Some(SUB_INO_UID_MAP),
+                        "gid_map" => Some(SUB_INO_GID_MAP),
                         _ => None,
                     };
                     if let Some(ts) = target_sub {
@@ -1086,7 +1125,7 @@ impl FileNodeOps for ProcNode {
                 return Err(VfsError::NotFound);
             }
 
-            let content = render_proc_file(kind);
+            let content = render_proc_file(&self.fs, kind);
             let bytes = content.as_bytes();
             let start = offset as usize;
             if start >= bytes.len() {
@@ -1111,16 +1150,39 @@ impl FileNodeOps for ProcNode {
     fn write_at(&self, buf: &[u8], offset: u64) -> VfsResult<usize> {
         let inode = self.inode_ref()?;
         if let Some(kind) = inode.live_kind() {
-            if let ProcLiveFileKind::PidMax = kind {
-                if let Ok(s) = core::str::from_utf8(buf) {
-                    if let Ok(val) = s.trim().parse::<u32>() {
-                        PID_MAX.store(val, core::sync::atomic::Ordering::Release);
+            match kind {
+                ProcLiveFileKind::PidMax => {
+                    if let Ok(s) = core::str::from_utf8(buf) {
+                        if let Ok(val) = s.trim().parse::<u32>() {
+                            PID_MAX.store(val, core::sync::atomic::Ordering::Release);
+                            return Ok(buf.len());
+                        }
+                    }
+                    return Err(VfsError::InvalidInput);
+                }
+                ProcLiveFileKind::PidSetgroups(pid) => {
+                    if let Ok(s) = core::str::from_utf8(buf) {
+                        self.fs.setgroups_map.lock().insert(pid, s.to_owned());
                         return Ok(buf.len());
                     }
+                    return Err(VfsError::InvalidInput);
                 }
-                return Err(VfsError::InvalidInput);
+                ProcLiveFileKind::PidUidMap(pid) => {
+                    if let Ok(s) = core::str::from_utf8(buf) {
+                        self.fs.uid_map_map.lock().insert(pid, s.to_owned());
+                        return Ok(buf.len());
+                    }
+                    return Err(VfsError::InvalidInput);
+                }
+                ProcLiveFileKind::PidGidMap(pid) => {
+                    if let Ok(s) = core::str::from_utf8(buf) {
+                        self.fs.gid_map_map.lock().insert(pid, s.to_owned());
+                        return Ok(buf.len());
+                    }
+                    return Err(VfsError::InvalidInput);
+                }
+                _ => return Err(VfsError::ReadOnlyFilesystem),
             }
-            return Err(VfsError::ReadOnlyFilesystem);
         }
 
         let file = inode.as_file()?;
@@ -1136,8 +1198,31 @@ impl FileNodeOps for ProcNode {
 
     fn append(&self, buf: &[u8]) -> VfsResult<(usize, u64)> {
         let inode = self.inode_ref()?;
-        if inode.live_kind().is_some() {
-            return Err(VfsError::ReadOnlyFilesystem);
+        if let Some(kind) = inode.live_kind() {
+            match kind {
+                ProcLiveFileKind::PidSetgroups(pid) => {
+                    if let Ok(s) = core::str::from_utf8(buf) {
+                        self.fs.setgroups_map.lock().insert(pid, s.to_owned());
+                        return Ok((buf.len(), 0));
+                    }
+                    return Err(VfsError::InvalidInput);
+                }
+                ProcLiveFileKind::PidUidMap(pid) => {
+                    if let Ok(s) = core::str::from_utf8(buf) {
+                        self.fs.uid_map_map.lock().insert(pid, s.to_owned());
+                        return Ok((buf.len(), 0));
+                    }
+                    return Err(VfsError::InvalidInput);
+                }
+                ProcLiveFileKind::PidGidMap(pid) => {
+                    if let Ok(s) = core::str::from_utf8(buf) {
+                        self.fs.gid_map_map.lock().insert(pid, s.to_owned());
+                        return Ok((buf.len(), 0));
+                    }
+                    return Err(VfsError::InvalidInput);
+                }
+                _ => return Err(VfsError::ReadOnlyFilesystem),
+            }
         }
 
         let file = inode.as_file()?;
@@ -1150,10 +1235,13 @@ impl FileNodeOps for ProcNode {
     fn set_len(&self, len: u64) -> VfsResult<()> {
         let inode = self.inode_ref()?;
         if let Some(kind) = inode.live_kind() {
-            if let ProcLiveFileKind::PidMax = kind {
-                return Ok(());
+            match kind {
+                ProcLiveFileKind::PidMax
+                | ProcLiveFileKind::PidSetgroups(_)
+                | ProcLiveFileKind::PidUidMap(_)
+                | ProcLiveFileKind::PidGidMap(_) => return Ok(()),
+                _ => return Err(VfsError::ReadOnlyFilesystem),
             }
-            return Err(VfsError::ReadOnlyFilesystem);
         }
 
         let file = inode.as_file()?;

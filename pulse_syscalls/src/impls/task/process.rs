@@ -240,3 +240,6 @@ pub fn sys_getresgid(rgid_ptr: usize, egid_ptr: usize, sgid_ptr: usize) -> isize
     0
 }
 
+
+
+

@@ -225,8 +225,8 @@ pub struct Process {
     parent: Mutex<Option<Weak<Process>>>,
     aspace: Mutex<Arc<Mutex<AddrSpace>>>,
     pub heap_top: Arc<Mutex<usize>>,
-    pub fs_context: Arc<Mutex<FsContext>>,
-    pub fd_table: SharedFdTable,
+    fs_context: Mutex<Arc<Mutex<FsContext>>>,
+    fd_table: Mutex<SharedFdTable>,
     pub start_mono_ns: u64,
     pub user_time_ns: Arc<AtomicU64>,
     pub sys_time_ns: Arc<AtomicU64>,
@@ -413,8 +413,38 @@ impl Process {
         Ok(())
     }
 
+    pub fn fs_context_handle(&self) -> Arc<Mutex<FsContext>> {
+        self.fs_context.lock().clone()
+    }
+
+    pub fn fd_table(&self) -> SharedFdTable {
+        self.fd_table.lock().clone()
+    }
+
+    pub fn unshare_fs(&self) -> AxResult<()> {
+        let new_fs = {
+            let binding = self.fs_context_handle();
+            let fs = binding.lock();
+            fs.clone()
+        };
+        let mut slot = self.fs_context.lock();
+        *slot = Arc::new(Mutex::new(new_fs));
+        Ok(())
+    }
+
+    pub fn unshare_files(&self) -> Result<(), axerrno::LinuxError> {
+        let new_fd_table = {
+            let binding = self.fd_table();
+            let table = binding.lock();
+            table.clone_for_fork()?
+        };
+        let mut slot = self.fd_table.lock();
+        *slot = Arc::new(Mutex::new(new_fd_table));
+        Ok(())
+    }
+
     fn clone_private_fs_context(parent: &Process) -> AxResult<Arc<Mutex<FsContext>>> {
-        Ok(Arc::new(Mutex::new(parent.fs_context.lock().clone())))
+        Ok(Arc::new(Mutex::new(parent.fs_context_handle().lock().clone())))
     }
 
     pub fn pid(&self) -> u64 {
@@ -772,7 +802,7 @@ impl Process {
     }
 
     pub fn get_fd_entry(&self, fd: usize) -> Result<crate::fd_table::FdEntry, axerrno::LinuxError> {
-        self.fd_table.lock().get_entry_cloned(fd)
+        self.fd_table().lock().get_entry_cloned(fd)
     }
 
     pub fn insert_fd_entry(
@@ -780,7 +810,8 @@ impl Process {
         entry: crate::fd_table::FdEntry,
     ) -> Result<usize, axerrno::LinuxError> {
         let limit = self.rlimit_state.lock().nofile_soft as usize;
-        let mut table = self.fd_table.lock();
+        let binding = self.fd_table();
+        let mut table = binding.lock();
         let fd = table.insert_next(entry)?;
         if fd >= limit {
             table.remove(fd);
@@ -795,7 +826,8 @@ impl Process {
         entry: crate::fd_table::FdEntry,
     ) -> Result<usize, axerrno::LinuxError> {
         let limit = self.rlimit_state.lock().nofile_soft as usize;
-        let mut table = self.fd_table.lock();
+        let binding = self.fd_table();
+        let mut table = binding.lock();
         let fd = table.insert_from(min_fd, entry)?;
         if fd >= limit {
             table.remove(fd);
@@ -813,18 +845,19 @@ impl Process {
         if fd >= limit {
             return Err(axerrno::LinuxError::EBADF);
         }
-        self.fd_table.lock().insert_at(fd, entry)
+        self.fd_table().lock().insert_at(fd, entry)
     }
 
     pub fn remove_fd_entry(
         &self,
         fd: usize,
     ) -> Result<crate::fd_table::FdEntry, axerrno::LinuxError> {
-        self.fd_table.lock().remove_or_err(fd)
+        self.fd_table().lock().remove_or_err(fd)
     }
 
     pub fn set_fd_cloexec(&self, fd: usize, cloexec: bool) -> Result<(), axerrno::LinuxError> {
-        let mut table = self.fd_table.lock();
+        let binding = self.fd_table();
+        let mut table = binding.lock();
         let entry = table.get_mut(fd).ok_or(axerrno::LinuxError::EBADF)?;
         entry.flags.set(crate::fd_table::FdFlags::CLOEXEC, cloexec);
         Ok(())
@@ -835,7 +868,8 @@ impl Process {
         fd: usize,
         nonblocking: bool,
     ) -> Result<(), axerrno::LinuxError> {
-        let mut table = self.fd_table.lock();
+        let binding = self.fd_table();
+        let mut table = binding.lock();
         let entry = table.get_mut(fd).ok_or(axerrno::LinuxError::EBADF)?;
         entry
             .flags
@@ -845,11 +879,11 @@ impl Process {
     }
 
     pub fn get_fd_location(&self, fd: usize) -> Result<axfs_ng_vfs::Location, axerrno::LinuxError> {
-        self.fd_table.lock().get_location(fd)
+        self.fd_table().lock().get_location(fd)
     }
 
     pub fn clone_all_fd_entries(&self) -> Vec<crate::fd_table::FdEntry> {
-        self.fd_table.lock().clone_all_entries()
+        self.fd_table().lock().clone_all_entries()
     }
 
     pub fn is_user_range(&self, addr: usize, len: usize) -> bool {
@@ -1011,8 +1045,8 @@ impl Process {
             parent: Mutex::new(None),
             start_mono_ns: axhal::time::monotonic_time_nanos() as u64,
             aspace: Mutex::new(Arc::new(Mutex::new(aspace))),
-            fs_context: Arc::new(Mutex::new(fs_context)),
-            fd_table: Arc::new(Mutex::new(fd_table)),
+            fs_context: Mutex::new(Arc::new(Mutex::new(fs_context))),
+            fd_table: Mutex::new(Arc::new(Mutex::new(fd_table))),
             user_time_ns: Arc::new(AtomicU64::new(0)),
             sys_time_ns: Arc::new(AtomicU64::new(0)),
             child_user_time_ns: Arc::new(AtomicU64::new(0)),
@@ -1085,14 +1119,14 @@ impl Process {
             Arc::new(Mutex::new(new_shm))
         };
         let fs_context = if share_fs {
-            parent.fs_context.clone()
+            Mutex::new(parent.fs_context_handle())
         } else {
-            Self::clone_private_fs_context(parent)?
+            Mutex::new(Self::clone_private_fs_context(parent)?)
         };
         let fd_table = if share_files {
-            parent.fd_table.clone()
+            Mutex::new(parent.fd_table())
         } else {
-            Arc::new(Mutex::new(parent.fd_table.lock().clone_for_fork()?))
+            Mutex::new(Arc::new(Mutex::new(parent.fd_table().lock().clone_for_fork()?)))
         };
         let (ruid, euid, suid) = parent.uid_snapshot();
         let (rgid, egid, sgid) = parent.gid_snapshot();
@@ -1186,7 +1220,8 @@ impl Process {
 
     pub fn close_all_files(&self) {
         let _entries = {
-            let mut table = self.fd_table.lock();
+            let binding = self.fd_table();
+            let mut table = binding.lock();
             table.drain_all()
         };
     }
@@ -1228,13 +1263,13 @@ impl Process {
     }
 
     pub fn sync_fs_context(&self) {
-        let mut fs = self.fs_context.lock().clone();
+        let mut fs = self.fs_context_handle().lock().clone();
         fs.credentials = Some((self.euid(), self.egid()));
         *axfs::FS_CONTEXT.lock() = fs;
     }
 
     pub fn save_fs_context(&self) {
-        *self.fs_context.lock() = axfs::FS_CONTEXT.lock().clone();
+        *self.fs_context_handle().lock() = axfs::FS_CONTEXT.lock().clone();
     }
 
     pub fn register_thread(&self, tid: u64) {

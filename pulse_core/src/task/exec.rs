@@ -50,7 +50,7 @@ fn parse_shebang_line(file_data: &[u8]) -> AxResult<Option<(String, Option<Strin
 fn check_txt_busy(path: &str) -> AxResult<()> {
     let procs = super::processes_snapshot();
     for proc in procs {
-        if proc.fd_table.lock().is_file_write_open(path) {
+        if proc.fd_table().lock().is_file_write_open(path) {
             return Err(axerrno::LinuxError::ETXTBSY.into());
         }
     }
@@ -139,7 +139,7 @@ fn resolve_exec_path_and_args(
 
 impl Process {
     pub fn load_elf(&self, path: &str, args: &[&str], envs: &[&str]) -> AxResult<()> {
-        let mut fs_ctx = self.fs_context.lock().clone();
+        let mut fs_ctx = self.fs_context_handle().lock().clone();
         fs_ctx.credentials = Some((self.euid(), self.egid()));
         let (path, argv) = resolve_exec_path_and_args(&fs_ctx, path, args)?;
         let argv_refs: Vec<&str> = argv.iter().map(|s| s.as_str()).collect();
@@ -172,7 +172,7 @@ impl Process {
     }
 
     pub fn exec(&self, path: &str, args: &[&str], envs: &[&str]) -> AxResult<()> {
-        let mut fs_ctx = self.fs_context.lock().clone();
+        let mut fs_ctx = self.fs_context_handle().lock().clone();
         fs_ctx.credentials = Some((self.euid(), self.egid()));
         let (path, argv) = resolve_exec_path_and_args(&fs_ctx, path, args)?;
         let argv_refs: Vec<&str> = argv.iter().map(|s| s.as_str()).collect();
@@ -213,7 +213,8 @@ impl Process {
         }
 
         let cloexec_entries = {
-            let mut fd_table = self.fd_table.lock();
+            let binding = self.fd_table();
+            let mut fd_table = binding.lock();
             fd_table.take_cloexec_on_exec()
         };
         drop(cloexec_entries);
