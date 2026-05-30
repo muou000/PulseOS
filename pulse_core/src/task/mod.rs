@@ -59,8 +59,12 @@ fn prune_dead_processes(registry: &mut BTreeMap<u64, Weak<Process>>) {
 // are tracked in `PROCESS_REGISTRY` for pid-based queries.
 
 pub(super) fn thread_handle_from_task(task: &axtask::TaskInner) -> Option<&ThreadHandle> {
-    use axtask::TaskExtRef;
-    task.task_ext_opt()
+    let task_ext_ptr = unsafe { task.task_ext_ptr() };
+    if task_ext_ptr.is_null() {
+        return None;
+    }
+
+    Some(unsafe { &*(task_ext_ptr as *const ThreadHandle) })
 }
 
 pub fn current_thread() -> LinuxResult<Arc<Thread>> {
