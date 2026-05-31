@@ -316,12 +316,14 @@ impl axfs::ProcfsProcessProvider for PulseProcessProvider {
             let mut offset = 0;
             let mut path_str = String::new();
             let mut inode = 0;
-            let mut dev_str = "00:00".to_string();
 
             let mut curr_backend = backend;
             while let axmm::Backend::Cow(cow) = curr_backend {
                 curr_backend = cow.inner();
             }
+
+            let mut dev_major = 0;
+            let mut dev_minor = 0;
 
             match curr_backend {
                 axmm::Backend::Shared { .. } => {
@@ -334,9 +336,8 @@ impl axfs::ProcfsProcessProvider for PulseProcessProvider {
                     let loc = cached_file.location();
                     if let Ok(meta) = loc.metadata() {
                         inode = meta.inode;
-                        let major = meta.device >> 8;
-                        let minor = meta.device & 0xff;
-                        dev_str = alloc::format!("{:02x}:{:02x}", major, minor);
+                        dev_major = meta.device >> 8;
+                        dev_minor = meta.device & 0xff;
                     }
                     if let Ok(path) = loc.absolute_path() {
                         path_str = path.as_str().to_string();
@@ -346,27 +347,96 @@ impl axfs::ProcfsProcessProvider for PulseProcessProvider {
             }
 
             let p_char = if is_shared { "s" } else { "p" };
-            if path_str.is_empty() {
-                out.push_str(&alloc::format!(
-                    "{:x}-{:x} {}{}{}{} {:08x} {} {}\n",
-                    start.as_usize(),
-                    end.as_usize(),
-                    r, w, x, p_char,
-                    offset,
-                    dev_str,
-                    inode
-                ));
+
+            let mut line_buf = [0u8; 256];
+            let mut cursor = 0;
+
+            let append_bytes = |line_buf: &mut [u8], cursor: &mut usize, bytes: &[u8]| {
+                let len = bytes.len();
+                if *cursor + len <= line_buf.len() {
+                    line_buf[*cursor..*cursor + len].copy_from_slice(bytes);
+                    *cursor += len;
+                }
+            };
+
+            let append_hex = |line_buf: &mut [u8], cursor: &mut usize, mut val: usize, pad: usize| {
+                let mut tmp = [0u8; 16];
+                let mut i = 16;
+                const HEX: &[u8] = b"0123456789abcdef";
+                if val == 0 {
+                    i -= 1;
+                    tmp[i] = b'0';
+                } else {
+                    while val > 0 {
+                        i -= 1;
+                        tmp[i] = HEX[(val & 0xf) as usize];
+                        val >>= 4;
+                    }
+                }
+                while 16 - i < pad {
+                    i -= 1;
+                    tmp[i] = b'0';
+                }
+                let len = 16 - i;
+                if *cursor + len <= line_buf.len() {
+                    line_buf[*cursor..*cursor + len].copy_from_slice(&tmp[i..]);
+                    *cursor += len;
+                }
+            };
+
+            let append_dec = |line_buf: &mut [u8], cursor: &mut usize, mut val: u64| {
+                let mut tmp = [0u8; 20];
+                let mut i = 20;
+                if val == 0 {
+                    i -= 1;
+                    tmp[i] = b'0';
+                } else {
+                    while val > 0 {
+                        i -= 1;
+                        tmp[i] = b'0' + (val % 10) as u8;
+                        val /= 10;
+                    }
+                }
+                let len = 20 - i;
+                if *cursor + len <= line_buf.len() {
+                    line_buf[*cursor..*cursor + len].copy_from_slice(&tmp[i..]);
+                    *cursor += len;
+                }
+                len
+            };
+
+            append_hex(&mut line_buf, &mut cursor, start.as_usize(), 1);
+            append_bytes(&mut line_buf, &mut cursor, b"-");
+            append_hex(&mut line_buf, &mut cursor, end.as_usize(), 1);
+            append_bytes(&mut line_buf, &mut cursor, b" ");
+
+            append_bytes(&mut line_buf, &mut cursor, &[r.as_bytes()[0], w.as_bytes()[0], x.as_bytes()[0], p_char.as_bytes()[0], b' ']);
+
+            append_hex(&mut line_buf, &mut cursor, offset, 8);
+            append_bytes(&mut line_buf, &mut cursor, b" ");
+
+            if dev_major != 0 || dev_minor != 0 {
+                append_hex(&mut line_buf, &mut cursor, dev_major as usize, 2);
+                append_bytes(&mut line_buf, &mut cursor, b":");
+                append_hex(&mut line_buf, &mut cursor, dev_minor as usize, 2);
             } else {
-                out.push_str(&alloc::format!(
-                    "{:x}-{:x} {}{}{}{} {:08x} {} {:<7} {}\n",
-                    start.as_usize(),
-                    end.as_usize(),
-                    r, w, x, p_char,
-                    offset,
-                    dev_str,
-                    inode,
-                    path_str
-                ));
+                append_bytes(&mut line_buf, &mut cursor, b"00:00");
+            }
+            append_bytes(&mut line_buf, &mut cursor, b" ");
+
+            let inode_len = append_dec(&mut line_buf, &mut cursor, inode);
+
+            if path_str.is_empty() {
+                append_bytes(&mut line_buf, &mut cursor, b"\n");
+                out.push_str(unsafe { core::str::from_utf8_unchecked(&line_buf[..cursor]) });
+            } else {
+                let spaces = if inode_len < 7 { 7 - inode_len } else { 1 };
+                for _ in 0..spaces {
+                    append_bytes(&mut line_buf, &mut cursor, b" ");
+                }
+                out.push_str(unsafe { core::str::from_utf8_unchecked(&line_buf[..cursor]) });
+                out.push_str(&path_str);
+                out.push('\n');
             }
         });
 
