@@ -330,11 +330,11 @@ impl Ext4Inode {
     }
 
     pub fn set_file_type(&mut self, kind: InodeFileType) {
-        self.mode |= kind.bits();
+        self.mode = (self.mode & !EXT4_INODE_MODE_TYPE_MASK) | kind.bits();
     }
 
     pub fn set_file_perm(&mut self, perm: InodePerm) {
-        self.mode |= perm.bits();
+        self.mode = (self.mode & !EXT4_INODE_MODE_PERM_MASK) | perm.bits();
     }
 }
 

@@ -14,7 +14,7 @@ sh ./libctest_testcode.sh
 sh ./libcbench_testcode.sh
 sh ./iozone_testcode.sh
 # sh ./iperf_testcode.sh
-# sh ./lmbench_testcode.sh
+ENOUGH=50000 sh ./lmbench_testcode.sh
 # sh ./netperf_testcode.sh
 
 cd /fs/glibc
@@ -25,7 +25,7 @@ sh ./cyclictest_testcode.sh
 sh ./libcbench_testcode.sh
 sh ./iozone_testcode.sh
 # sh ./iperf_testcode.sh
-# sh ./lmbench_testcode.sh
+ENOUGH=50000 sh ./lmbench_testcode.sh
 # sh ./ltp_testcode.sh
 # sh ./netperf_testcode.sh
 

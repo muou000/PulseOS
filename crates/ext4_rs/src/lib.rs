@@ -10,7 +10,7 @@ pub use utils::*;
 pub use prelude::*;
 
 
-mod ext4_defs;
+pub mod ext4_defs;
 mod ext4_impls;
 
 

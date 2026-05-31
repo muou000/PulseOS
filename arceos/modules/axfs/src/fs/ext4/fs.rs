@@ -7,8 +7,7 @@ use axfs_ng_vfs::{
     path::MAX_NAME_LEN,
 };
 use ext4_rs::Ext4;
-use kspin::{SpinNoPreempt as Mutex, SpinNoPreemptGuard as MutexGuard};
-
+use axsync::{Mutex, MutexGuard};
 use super::{Ext4Disk, Inode, cleanup_dir_cache_registry};
 
 const ROOT_INODE: u32 = 2;
