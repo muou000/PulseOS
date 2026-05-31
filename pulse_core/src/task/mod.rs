@@ -165,7 +165,7 @@ impl axfs::ProcfsProcessProvider for PulseProcessProvider {
         }
         let args = proc.args.lock();
         if args.is_empty() {
-            let path = proc.exec_path().unwrap_or_else(|| "pulse_init".to_string());
+            let path = proc.exec_path_or_default();
             Some(alloc::format!("{}\0", path))
         } else {
             let mut res = String::new();
@@ -179,21 +179,12 @@ impl axfs::ProcfsProcessProvider for PulseProcessProvider {
 
     fn comm(&self, pid: u64) -> Option<String> {
         let proc = process_by_pid(pid)?;
-        let name = proc.exec_path()
-            .as_ref()
-            .and_then(|p| p.split('/').last())
-            .unwrap_or("pulse_init")
-            .to_string();
-        Some(alloc::format!("{}\n", name))
+        Some(alloc::format!("{}\n", proc.name()))
     }
 
     fn status(&self, pid: u64) -> Option<String> {
         let proc = process_by_pid(pid)?;
-        let name = proc.exec_path()
-            .as_ref()
-            .and_then(|p| p.split('/').last())
-            .unwrap_or("pulse_init")
-            .to_string();
+        let name = proc.name();
 
         let is_current = current_process().ok().map(|p| p.pid() == pid).unwrap_or(false);
         let state = if proc.is_zombie() {
@@ -227,16 +218,12 @@ impl axfs::ProcfsProcessProvider for PulseProcessProvider {
 
     fn exe(&self, pid: u64) -> Option<String> {
         let proc = process_by_pid(pid)?;
-        Some(proc.exec_path().unwrap_or_else(|| "pulse_init".to_string()))
+        Some(proc.exec_path_or_default())
     }
 
     fn stat(&self, pid: u64) -> Option<String> {
         let proc = process_by_pid(pid)?;
-        let comm = proc.exec_path()
-            .as_ref()
-            .and_then(|p| p.split('/').last())
-            .unwrap_or("pulse_init")
-            .to_string();
+        let comm = proc.name();
 
         let is_current = current_process().ok().map(|p| p.pid() == pid).unwrap_or(false);
         let state_char = if proc.is_zombie() {

@@ -1,6 +1,6 @@
 use alloc::{
     collections::BTreeMap,
-    string::String,
+    string::{String, ToString},
     sync::{Arc, Weak},
     vec::Vec,
 };
@@ -451,8 +451,20 @@ impl Process {
         self.pid
     }
 
+    pub fn name(&self) -> String {
+        self.exec_path()
+            .as_ref()
+            .and_then(|p| p.split('/').last())
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| "pulse_init".to_string())
+    }
+
     pub fn exec_path(&self) -> Option<String> {
         self.exec_path.lock().clone()
+    }
+
+    pub fn exec_path_or_default(&self) -> String {
+        self.exec_path().unwrap_or_else(|| "pulse_init".to_string())
     }
 
     pub fn set_exec_path(&self, path: String) {
@@ -2048,7 +2060,7 @@ impl Process {
                     child_uctx.enter_uspace(va!(kstack_top));
                 }
             },
-            "fork_child".into(),
+            axtask::current().name(),
             TASK_STACK_SIZE,
         )?;
 
@@ -2118,7 +2130,7 @@ impl Process {
                     child_uctx.enter_uspace(va!(kstack_top));
                 }
             },
-            "clone_child".into(),
+            axtask::current().name(),
             TASK_STACK_SIZE,
         )?;
 

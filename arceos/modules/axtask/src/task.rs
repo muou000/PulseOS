@@ -41,7 +41,7 @@ pub(crate) enum TaskState {
 /// The inner task structure.
 pub struct TaskInner {
     id: TaskId,
-    name: String,
+    name: SpinNoIrq<String>,
     is_idle: bool,
     is_init: bool,
 
@@ -140,7 +140,7 @@ impl TaskInner {
         t.ctx_mut()
             .init(task_entry as *const () as usize, kstack.top(), tls);
         *t.kstack.lock() = Some(kstack);
-        if t.name == "idle" {
+        if *t.name.lock() == "idle" {
             t.is_idle = true;
         }
         Ok(t)
@@ -152,13 +152,20 @@ impl TaskInner {
     }
 
     /// Gets the name of the task.
-    pub fn name(&self) -> &str {
-        self.name.as_str()
+    ///
+    /// Note: This returns a copy of the name because it is protected by a lock.
+    pub fn name(&self) -> String {
+        self.name.lock().clone()
+    }
+
+    /// Sets the name of the task.
+    pub fn set_name(&self, name: &str) {
+        *self.name.lock() = String::from(name);
     }
 
     /// Get a combined string of the task ID and name.
     pub fn id_name(&self) -> alloc::string::String {
-        alloc::format!("Task({}, {:?})", self.id.as_u64(), self.name)
+        alloc::format!("Task({}, {:?})", self.id.as_u64(), *self.name.lock())
     }
 
     /// Wait for the task to exit, and return the exit code.
@@ -259,7 +266,7 @@ impl TaskInner {
 
         Self {
             id,
-            name,
+            name: SpinNoIrq::new(name),
             is_idle: false,
             is_init: false,
             entry: SpinNoIrq::new(None),
@@ -299,7 +306,7 @@ impl TaskInner {
         t.is_init = true;
         #[cfg(feature = "smp")]
         t.set_on_cpu(true);
-        if t.name == "idle" {
+        if *t.name.lock() == "idle" {
             t.is_idle = true;
         }
         t

@@ -8,8 +8,9 @@ homepage.workspace = true
 repository.workspace = true
 
 [features]
-default = ["irq"]
+default = ["irq", "ext4"]
 irq = ["axtask/irq"]
+ext4 = ["axfs/ext4"]
 
 [dependencies]
 axalloc.workspace = true
