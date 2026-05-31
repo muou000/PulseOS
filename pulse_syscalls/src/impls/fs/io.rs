@@ -301,6 +301,128 @@ pub fn sys_readv(fd: usize, iov: usize, iovcnt: usize) -> isize {
     total
 }
 
+pub fn sys_pread64(fd: usize, buf: usize, count: usize, offset: usize) -> isize {
+    axlog::trace!("sys_pread64: fd={}, buf={:#x}, count={}, offset={}", fd, buf, count, offset);
+    let offset = offset as isize;
+    if offset < 0 {
+        return -LinuxError::EINVAL.code() as isize;
+    }
+    if buf == 0 && count != 0 {
+        return -LinuxError::EFAULT.code() as isize;
+    }
+    if count == 0 {
+        return 0;
+    }
+    let entry = match get_fd_entry(fd) {
+        Ok(entry) => entry,
+        Err(e) => return -e.code() as isize,
+    };
+    if entry.flags.contains(pulse_core::fd_table::FdFlags::PATH) {
+        return -LinuxError::EBADF.code() as isize;
+    }
+    let object = entry.object;
+    let mut tmp = match alloc_zeroed_bytes(count.min(MAX_IO_CHUNK), "sys_pread64.tmp") {
+        Ok(buf) => buf,
+        Err(e) => return -e.code() as isize,
+    };
+    let mut total = 0usize;
+    while total < count {
+        let chunk = core::cmp::min(tmp.len(), count - total);
+        let current_offset = match (offset as u64).checked_add(total as u64) {
+            Some(off) => off,
+            None => return -LinuxError::EINVAL.code() as isize,
+        };
+        let ret = match object.read_at(&mut tmp[..chunk], current_offset) {
+            Ok(ret) => ret,
+            Err(e) => {
+                return if total > 0 {
+                    total as isize
+                } else {
+                    -e.code() as isize
+                };
+            }
+        };
+        if ret == 0 {
+            break;
+        }
+        let user_buf = match buf.checked_add(total) {
+            Some(addr) => addr,
+            None => return -LinuxError::EINVAL.code() as isize,
+        };
+        if let Err(e) = write_user_bytes(user_buf, &tmp[..ret]) {
+            return if total > 0 {
+                total as isize
+            } else {
+                -e.code() as isize
+            };
+        }
+        total += ret;
+        if ret < chunk {
+            break;
+        }
+    }
+    total as isize
+}
+
+pub fn sys_pwrite64(fd: usize, buf: usize, count: usize, offset: usize) -> isize {
+    axlog::trace!("sys_pwrite64: fd={}, buf={:#x}, count={}, offset={}", fd, buf, count, offset);
+    let offset = offset as isize;
+    if offset < 0 {
+        return -LinuxError::EINVAL.code() as isize;
+    }
+    if buf == 0 && count != 0 {
+        return -LinuxError::EFAULT.code() as isize;
+    }
+    if count == 0 {
+        return 0;
+    }
+    let entry = match get_fd_entry(fd) {
+        Ok(entry) => entry,
+        Err(e) => return -e.code() as isize,
+    };
+    if entry.flags.contains(pulse_core::fd_table::FdFlags::PATH) {
+        return -LinuxError::EBADF.code() as isize;
+    }
+    let object = entry.object;
+    let mut total = 0usize;
+    let mut tmp = match alloc_zeroed_bytes(count.min(MAX_IO_CHUNK), "sys_pwrite64.tmp") {
+        Ok(buf) => buf,
+        Err(e) => return -e.code() as isize,
+    };
+    while total < count {
+        let chunk = core::cmp::min(tmp.len(), count - total);
+        if let Err(e) = read_user_bytes(buf + total, &mut tmp[..chunk]) {
+            return if total > 0 {
+                total as isize
+            } else {
+                -e.code() as isize
+            };
+        }
+        let current_offset = match (offset as u64).checked_add(total as u64) {
+            Some(off) => off,
+            None => return -LinuxError::EINVAL.code() as isize,
+        };
+        let ret = match object.write_at(&tmp[..chunk], current_offset) {
+            Ok(ret) => ret,
+            Err(e) => {
+                return if total > 0 {
+                    total as isize
+                } else {
+                    -e.code() as isize
+                };
+            }
+        };
+        if ret == 0 {
+            break;
+        }
+        total += ret;
+        if ret < chunk {
+            break;
+        }
+    }
+    total as isize
+}
+
 pub fn sys_ppoll(
     fds: usize,
     nfds: usize,

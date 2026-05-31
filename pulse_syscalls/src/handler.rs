@@ -181,8 +181,10 @@ fn syscall_dispatcher(
         Sysno::sched_getattr => impls::sys_sched_getattr(args[0], args[1], args[2], args[3]),
 
         Sysno::read => impls::sys_read(args[0], args[1], args[2]),
+        Sysno::pread64 => impls::sys_pread64(args[0], args[1], args[2], args[3]),
         Sysno::readv => impls::sys_readv(args[0], args[1], args[2]),
         Sysno::write => impls::sys_write(args[0], args[1], args[2]),
+        Sysno::pwrite64 => impls::sys_pwrite64(args[0], args[1], args[2], args[3]),
         Sysno::writev => impls::sys_writev(args[0], args[1], args[2]),
         Sysno::sendfile => impls::sys_sendfile(args[0], args[1], args[2], args[3]),
         Sysno::openat => impls::sys_openat(args[0] as i32, args[1], args[2], args[3]),
