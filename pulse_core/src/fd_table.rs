@@ -68,7 +68,11 @@ pub trait FdObject: Send + Sync {
     }
 
     fn read_at(&self, _buf: &mut [u8], _offset: u64) -> LinuxResult<usize> {
-        Err(LinuxError::EINVAL)
+        Err(LinuxError::ESPIPE)
+    }
+
+    fn write_at(&self, _buf: &[u8], _offset: u64) -> LinuxResult<usize> {
+        Err(LinuxError::ESPIPE)
     }
 
     fn mmap_file_flags(&self) -> Option<AxFileFlags> {
@@ -370,6 +374,11 @@ impl FdObject for FileObject {
 
     fn read_at(&self, buf: &mut [u8], offset: u64) -> LinuxResult<usize> {
         Ok(self.inner.read_at(buf, offset)?)
+    }
+
+    fn write_at(&self, buf: &[u8], offset: u64) -> LinuxResult<usize> {
+        let file = &self.inner;
+        Ok(file.write_at(buf, offset)?)
     }
 
     fn mmap_file_flags(&self) -> Option<AxFileFlags> {
