@@ -588,9 +588,11 @@ impl Ext4 {
     pub fn truncate_inode(&self, inode_ref: &mut Ext4InodeRef, new_size: u64) -> Result<usize> {
         let old_size = inode_ref.inode.size();
 
-        assert!(old_size > new_size);
-
-        if old_size == new_size {
+        if old_size <= new_size {
+            if old_size < new_size {
+                inode_ref.inode.set_size(new_size);
+                self.write_back_inode(inode_ref);
+            }
             return Ok(EOK);
         }
 

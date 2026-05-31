@@ -468,11 +468,29 @@ impl DirNodeOps for Inode {
     fn lookup(&self, name: &str) -> VfsResult<DirEntry> {
         let fs = self.fs.lock();
         self.validate_inode_num(&fs, self.ino)?;
-        let snapshot = self.dir_snapshot(&fs);
-        let Some(entry) = self.cached_entry(&snapshot, name) else {
-            return Err(VfsError::NotFound);
-        };
-        Ok(self.create_entry(entry.inode_num, entry.node_type, entry.is_dir, &entry.name))
+        
+        // Try cached snapshot first
+        if let Some(snapshot) = self.dir_cache.get() {
+            let Some(entry) = self.cached_entry(&snapshot, name) else {
+                return Err(VfsError::NotFound);
+            };
+            return Ok(self.create_entry(entry.inode_num, entry.node_type, entry.is_dir, &entry.name));
+        }
+
+        // Direct search on disk to avoid O(N) snapshot build if not needed
+        let mut result = ext4_rs::ext4_defs::Ext4DirSearchResult::new(ext4_rs::ext4_defs::Ext4DirEntry::default());
+        match fs.dir_find_entry(self.ino, name, &mut result) {
+            Ok(_) => {
+                let linked = fs.get_inode_ref(result.dentry.inode);
+                Ok(self.create_entry(
+                    linked.inode_num,
+                    into_vfs_type(linked.inode.file_type()),
+                    linked.inode.is_dir(),
+                    name,
+                ))
+            }
+            Err(_) => Err(VfsError::NotFound),
+        }
     }
 
     fn create(
@@ -484,8 +502,15 @@ impl DirNodeOps for Inode {
         let inode_type = into_ext4_type(node_type)?;
         let fs = self.fs.lock();
         self.validate_inode_num(&fs, self.ino)?;
-        let snapshot = self.dir_snapshot(&fs);
-        if self.cached_entry(&snapshot, name).is_some() {
+        
+        let exists = if let Some(snapshot) = self.dir_cache.get() {
+            self.cached_entry(&snapshot, name).is_some()
+        } else {
+            let mut result = ext4_rs::ext4_defs::Ext4DirSearchResult::new(ext4_rs::ext4_defs::Ext4DirEntry::default());
+            fs.dir_find_entry(self.ino, name, &mut result).is_ok()
+        };
+
+        if exists {
             return Err(VfsError::AlreadyExists);
         }
         let inode_ref = fs
@@ -522,11 +547,18 @@ impl DirNodeOps for Inode {
     fn unlink(&self, name: &str) -> VfsResult<()> {
         let fs = self.fs.lock();
         self.validate_inode_num(&fs, self.ino)?;
-        let snapshot = self.dir_snapshot(&fs);
-        let inode_num = self
-            .cached_entry(&snapshot, name)
-            .map(|entry| entry.inode_num)
-            .ok_or(VfsError::NotFound)?;
+        
+        let inode_num = if let Some(snapshot) = self.dir_cache.get() {
+            self.cached_entry(&snapshot, name)
+                .map(|entry| entry.inode_num)
+                .ok_or(VfsError::NotFound)?
+        } else {
+            let mut result = ext4_rs::ext4_defs::Ext4DirSearchResult::new(ext4_rs::ext4_defs::Ext4DirEntry::default());
+            fs.dir_find_entry(self.ino, name, &mut result)
+                .map_err(|_| VfsError::NotFound)?;
+            result.dentry.inode
+        };
+
         let mut parent = fs.get_inode_ref(self.ino);
         let mut child = fs.get_inode_ref(inode_num);
         if child.inode.is_dir() && self.dir_has_children(&fs, child.inode_num) {

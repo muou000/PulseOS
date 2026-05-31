@@ -529,6 +529,16 @@ pub struct CachedFile {
     in_memory: bool,
 }
 
+impl Drop for CachedFile {
+    fn drop(&mut self) {
+        if Arc::strong_count(&self.shared) == 1 {
+            if let Ok(file) = self.inner.entry().as_file() {
+                let _ = self.flush_dirty_pages(file);
+            }
+        }
+    }
+}
+
 impl CachedFile {
     pub fn get_or_create(location: Location) -> Self {
         let in_memory = location.filesystem().name() == "tmpfs";

@@ -10,7 +10,7 @@ use axdriver::prelude::BlockDriverOps;
 use ext4_rs::{BLOCK_SIZE, BlockDevice};
 pub use fs::*;
 pub use inode::*;
-use kspin::SpinNoPreempt as Mutex;
+use axsync::Mutex;
 
 pub(crate) struct Ext4Disk<D: BlockDriverOps> {
     dev: Mutex<D>,
@@ -61,28 +61,21 @@ impl<D: BlockDriverOps + 'static> BlockDevice for Ext4Disk<D> {
             raw.truncate(BLOCK_SIZE);
             return raw;
         }
-        for i in 0..blocks {
-            let start = i * self.sector_size;
-            let end = start + self.sector_size;
-            let block_id = first_block + i as u64;
-            if let Err(err) = dev.read_block(block_id, &mut raw[start..end]) {
-                log::error!(
-                    "ext4 read_offset failed: offset={}, first_block={}, block_id={}, blocks={}, \
-                     sector_size={}, num_blocks={}, buf_len={}, err={:?}",
-                    offset,
-                    first_block,
-                    block_id,
-                    blocks,
-                    self.sector_size,
-                    total_blocks,
-                    raw[start..end].len(),
-                    err
-                );
-                // Return zeroed buffer instead of panicking
-                raw.drain(0..inner_offset);
-                raw.truncate(BLOCK_SIZE);
-                return raw;
-            }
+        if let Err(err) = dev.read_block(first_block, &mut raw) {
+            log::error!(
+                "ext4 read_offset failed: offset={}, first_block={}, blocks={}, \
+                 sector_size={}, num_blocks={}, err={:?}",
+                offset,
+                first_block,
+                blocks,
+                self.sector_size,
+                total_blocks,
+                err
+            );
+            // Return zeroed buffer instead of panicking
+            raw.drain(0..inner_offset);
+            raw.truncate(BLOCK_SIZE);
+            return raw;
         }
         raw.drain(0..inner_offset);
         raw.truncate(BLOCK_SIZE);
@@ -169,46 +162,28 @@ impl<D: BlockDriverOps + 'static> BlockDevice for Ext4Disk<D> {
             }
         }
 
-        let mut block_buf = Vec::with_capacity(self.sector_size);
-        // SAFETY: The buffer will be completely filled before we write it to disk.
-        unsafe { block_buf.set_len(self.sector_size) };
-        let mut data_written = 0;
+        let mut write_buf = vec![0; blocks * self.sector_size];
+        if let Some(ref first_buf) = first_block_buf {
+            write_buf[..self.sector_size].copy_from_slice(first_buf);
+        }
+        if let Some(ref last_buf) = last_block_buf {
+            let last_start = (blocks - 1) * self.sector_size;
+            write_buf[last_start..].copy_from_slice(last_buf);
+        }
 
-        for i in 0..blocks {
-            let block_id = first_block + i as u64;
-            let is_first = i == 0;
-            let is_last = i == blocks - 1;
+        write_buf[inner_offset..inner_offset + data.len()].copy_from_slice(data);
 
-            let block_inner_offset = if is_first { inner_offset } else { 0 };
-            let write_len = core::cmp::min(self.sector_size - block_inner_offset, data.len() - data_written);
-
-            if write_len < self.sector_size {
-                if is_first {
-                    block_buf.copy_from_slice(first_block_buf.as_ref().unwrap());
-                } else if is_last {
-                    block_buf.copy_from_slice(last_block_buf.as_ref().unwrap());
-                }
-            }
-
-            block_buf[block_inner_offset..block_inner_offset + write_len]
-                .copy_from_slice(&data[data_written..data_written + write_len]);
-
-            if let Err(err) = dev.write_block(block_id, &block_buf) {
-                log::error!(
-                    "ext4 write_offset failed: offset={}, first_block={}, block_id={}, blocks={}, \
-                     sector_size={}, num_blocks={}, err={:?}",
-                    offset,
-                    first_block,
-                    block_id,
-                    blocks,
-                    self.sector_size,
-                    total_blocks,
-                    err
-                );
-                return;
-            }
-
-            data_written += write_len;
+        if let Err(err) = dev.write_block(first_block, &write_buf) {
+            log::error!(
+                "ext4 write_offset failed: offset={}, first_block={}, blocks={}, \
+                 sector_size={}, num_blocks={}, err={:?}",
+                offset,
+                first_block,
+                blocks,
+                self.sector_size,
+                total_blocks,
+                err
+            );
         }
     }
 }

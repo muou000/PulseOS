@@ -34,7 +34,9 @@ impl Ext4 {
     ) -> Result<usize> {
         // load parent inode
         let parent = self.get_inode_ref(parent_inode);
-        assert!(parent.inode.is_dir());
+        if !parent.inode.is_dir() {
+            return_errno_with_message!(Errno::ENOTDIR, "dir_find_entry: not a directory");
+        }
 
         // start from the first logical block
         let mut iblock = 0;
@@ -55,6 +57,11 @@ impl Ext4 {
 
                 // get physical block id
                 fblock = path.pblock;
+
+                if fblock == 0 {
+                    iblock += 1;
+                    continue;
+                }
 
                 // load physical block
                 let mut ext4block =
@@ -128,7 +135,9 @@ impl Ext4 {
 
         // load inode
         let inode_ref = self.get_inode_ref(inode);
-        assert!(inode_ref.inode.is_dir());
+        if !inode_ref.inode.is_dir() {
+            return entries;
+        }
 
         // calculate total blocks
         let inode_size = inode_ref.inode.size();
@@ -148,6 +157,11 @@ impl Ext4 {
 
                 // get physical block id
                 let fblock = path.pblock;
+
+                if fblock == 0 {
+                    iblock += 1;
+                    continue;
+                }
 
                 // load physical block
                 let ext4block =
@@ -368,8 +382,6 @@ impl Ext4 {
         new_entry.write_entry(el as u16, inode, name, de_type);
         new_entry.copy_to_slice(&mut block.data, 0);
 
-        copy_dir_entry_to_array(&new_entry, &mut block.data, 0);
-
         // init tail for new block
         let tail = Ext4DirEntryTail::new();
         tail.copy_to_slice(&mut block.data);
@@ -405,7 +417,10 @@ impl Ext4 {
                 de_len = tmp_de.entry_len();
             }
             
-            assert!(de_len as usize + offset == pos, "Invalid predecessor calculation");
+            if de_len as usize + offset != pos {
+                log::warn!("ext4: Invalid predecessor calculation in dir_remove_entry: de_len={} offset={} pos={}", de_len, offset, pos);
+                return_errno_with_message!(Errno::EIO, "Invalid predecessor calculation");
+            }
 
             // Add removed entry length to predecessor's length
             let del_len = result.dentry.entry_len();
@@ -422,7 +437,9 @@ impl Ext4 {
     pub fn dir_has_entry(&self, dir_inode: u32) -> bool {
         // load parent inode
         let parent = self.get_inode_ref(dir_inode);
-        assert!(parent.inode.is_dir());
+        if !parent.inode.is_dir() {
+            return false;
+        }
 
         // start from the first logical block
         let mut iblock = 0;
@@ -443,6 +460,11 @@ impl Ext4 {
 
                 // get physical block id
                 fblock = path.pblock;
+
+                if fblock == 0 {
+                    iblock += 1;
+                    continue;
+                }
 
                 // load physical block
                 let ext4block =
@@ -499,14 +521,5 @@ impl Ext4 {
         // ext4_fs_free_inode(&child)
 
         Ok(EOK)
-    }
-}
-
-pub fn copy_dir_entry_to_array(header: &Ext4DirEntry, array: &mut [u8], offset: usize) {
-    unsafe {
-        let de_ptr = header as *const Ext4DirEntry as *const u8;
-        let array_ptr = array as *mut [u8] as *mut u8;
-        let count = core::mem::size_of::<Ext4DirEntry>() / core::mem::size_of::<u8>();
-        core::ptr::copy_nonoverlapping(de_ptr, array_ptr.add(offset), count);
     }
 }
