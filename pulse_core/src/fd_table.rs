@@ -1206,3 +1206,90 @@ impl FdTable {
 }
 
 pub type SharedFdTable = Arc<Mutex<FdTable>>;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use alloc::sync::Arc;
+    use core::any::Any;
+
+    struct DummyObject;
+
+    impl FdObject for DummyObject {
+        fn as_any(&self) -> &dyn Any {
+            self
+        }
+    }
+
+    #[test]
+    fn test_fd_table_is_empty_and_state() {
+        let mut table = FdTable::new();
+        assert!(table.is_empty());
+        assert_eq!(table.len(), 0);
+
+        let entry1 = FdEntry::new(Arc::new(DummyObject), FdFlags::empty());
+        let fd1 = table.insert_next(entry1.clone()).expect("Failed to insert");
+        assert!(!table.is_empty());
+        assert_eq!(table.len(), 1);
+
+        let entry2 = FdEntry::new(Arc::new(DummyObject), FdFlags::empty());
+        let fd2 = table.insert_next(entry2).expect("Failed to insert");
+        assert!(!table.is_empty());
+        assert_eq!(table.len(), 2);
+
+        table.remove(fd1);
+        assert!(!table.is_empty());
+        assert_eq!(table.len(), 1);
+
+        table.remove(fd2);
+        assert!(table.is_empty());
+        assert_eq!(table.len(), 0);
+    }
+
+    #[test]
+    fn test_fd_table_out_of_bounds_insert_and_failed_removals() {
+        let mut table = FdTable::new();
+        assert!(table.is_empty());
+
+        let entry = FdEntry::new(Arc::new(DummyObject), FdFlags::empty());
+        table.insert_at(10, entry).expect("Failed to insert at 10");
+        assert!(!table.is_empty());
+        assert_eq!(table.len(), 1);
+
+        assert!(table.remove(99).is_none());
+        assert!(!table.is_empty());
+        assert_eq!(table.len(), 1);
+
+        assert!(table.remove(10).is_some());
+        assert!(table.is_empty());
+        assert_eq!(table.len(), 0);
+
+        assert!(table.remove(10).is_none());
+        assert!(table.is_empty());
+        assert_eq!(table.len(), 0);
+    }
+
+    #[test]
+    fn test_fd_table_drain_all_and_take_cloexec() {
+        let mut table = FdTable::new();
+
+        let entry1 = FdEntry::new(Arc::new(DummyObject), FdFlags::CLOEXEC);
+        table.insert_next(entry1).expect("Failed to insert");
+
+        let entry2 = FdEntry::new(Arc::new(DummyObject), FdFlags::empty());
+        table.insert_next(entry2).expect("Failed to insert");
+
+        assert!(!table.is_empty());
+        assert_eq!(table.len(), 2);
+
+        let removed = table.take_cloexec_on_exec();
+        assert_eq!(removed.len(), 1);
+        assert!(!table.is_empty());
+        assert_eq!(table.len(), 1);
+
+        let drained = table.drain_all();
+        assert_eq!(drained.len(), 1);
+        assert!(table.is_empty());
+        assert_eq!(table.len(), 0);
+    }
+}
