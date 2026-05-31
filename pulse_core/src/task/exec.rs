@@ -151,6 +151,7 @@ impl Process {
         self.set_signal_trampoline(load_info.signal_trampoline);
         self.set_exec_path(path.clone());
         *self.args.lock() = argv;
+        axtask::current().set_name(&self.name());
         Ok(())
     }
 
@@ -225,6 +226,7 @@ impl Process {
         self.signal_shared().reset_on_exec();
         self.set_exec_path(path.clone());
         *self.args.lock() = argv;
+        axtask::current().set_name(&self.name());
         if let Ok(thread) = super::current_thread() {
             if thread.process().pid() == self.pid() {
                 thread.signal().reset_on_exec();
