@@ -135,6 +135,7 @@ fn metadata_to_stat(metadata: &Metadata) -> stat {
         st_mtime_nsec: metadata.mtime.subsec_nanos() as _,
         st_ctime: metadata.ctime.as_secs() as _,
         st_ctime_nsec: metadata.ctime.subsec_nanos() as _,
+        st_rdev: metadata.rdev.0 as _,
         ..empty_stat()
     }
 }
@@ -311,6 +312,10 @@ impl FileObject {
 
     pub fn is_write_open(&self) -> bool {
         self.inner.flags().intersects(AxFileFlags::WRITE | AxFileFlags::APPEND)
+    }
+
+    pub fn inner(&self) -> &File {
+        &self.inner
     }
 }
 

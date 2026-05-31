@@ -1,17 +1,107 @@
 use core::sync::atomic::{AtomicBool, Ordering};
+extern crate alloc;
+use alloc::format;
 
 use axerrno::LinuxError;
 use chrono::{Datelike, Timelike, Utc};
 
 use crate::impls::utils::write_user_bytes;
 
-const TCGETS: u32 = 0x5401;
-const TIOCGPGRP: u32 = 0x540f;
-const TIOCSPGRP: u32 = 0x5410;
-const TIOCGWINSZ: u32 = 0x5413;
-const RTC_RD_TIME: u32 = 0x8024_7009;
+use linux_raw_sys::ioctl::{
+    BLKGETSIZE64, BLKSSZGET, RTC_RD_TIME, SIOCGIFINDEX, SIOCSIFFLAGS, TCGETS, TIOCGPGRP,
+    TIOCGWINSZ, TIOCSPGRP,
+};
+use linux_raw_sys::loop_device::{
+    LOOP_CLR_FD, LOOP_CTL_GET_FREE, LOOP_GET_STATUS, LOOP_GET_STATUS64, LOOP_SET_FD,
+    LOOP_SET_STATUS, LOOP_SET_STATUS64,
+};
 
 static TTY_IOCTL_STUB_WARNED: AtomicBool = AtomicBool::new(false);
+
+fn do_handle_loop_ioctl(fd: usize, cmd: u32, arg: usize) -> Result<isize, LinuxError> {
+    let process = pulse_core::task::current_process()?;
+    let fd_table = process.fd_table();
+    let entry = fd_table.lock().get_entry_cloned(fd)?;
+
+    let metadata = entry.object.stat()?;
+
+    let major =
+        ((metadata.st_rdev >> 8) & 0xfff) as u32 | ((metadata.st_rdev >> 32) & !0xfff) as u32;
+    let minor = (metadata.st_rdev & 0xff) as u32 | ((metadata.st_rdev >> 12) & !0xff) as u32;
+
+    if major == 10 && minor == 237 {
+        // /dev/loop-control
+        if cmd == LOOP_CTL_GET_FREE {
+            if let Some(id) = axfs::find_free_loop_device() {
+                return Ok(id as isize);
+            } else {
+                return Err(LinuxError::ENOSPC);
+            }
+        }
+    } else if major == 7 {
+        // /dev/loopN
+        let loop_id = minor as usize;
+        match cmd {
+            LOOP_SET_FD => {
+                let backing_fd = arg;
+                let backing_entry = fd_table.lock().get_entry_cloned(backing_fd)?;
+                if let Some(file_obj) = backing_entry
+                    .object
+                    .as_any()
+                    .downcast_ref::<pulse_core::fd_table::FileObject>()
+                {
+                    let file = file_obj.inner();
+                    let backend = file.backend().map_err(LinuxError::from)?.clone();
+                    axfs::set_loop_backing(loop_id, axfs::File::new(backend, file.flags()))
+                        .map_err(LinuxError::from)?;
+                    return Ok(0);
+                } else {
+                    return Err(LinuxError::EBADF);
+                }
+            }
+            LOOP_CLR_FD => {
+                if !axfs::is_loop_bound(loop_id) {
+                    return Err(LinuxError::ENXIO);
+                }
+                axfs::clear_loop_backing(loop_id).map_err(LinuxError::from)?;
+                return Ok(0);
+            }
+            LOOP_SET_STATUS | LOOP_SET_STATUS64 | LOOP_GET_STATUS | LOOP_GET_STATUS64 => {
+                if axfs::is_loop_bound(loop_id) {
+                    return Ok(0);
+                } else {
+                    return Err(LinuxError::ENXIO);
+                }
+            }
+            BLKGETSIZE64 => {
+                let size = match axfs::lookup_location(&format!("/dev/loop{}", loop_id)) {
+                    Ok(loc) => match loc.metadata() {
+                        Ok(m) => m.size,
+                        Err(_) => 0,
+                    },
+                    Err(_) => 0,
+                };
+                write_user_bytes(arg, &size.to_ne_bytes())?;
+                return Ok(0);
+            }
+            BLKSSZGET => {
+                let ssz = 512i32;
+                write_user_bytes(arg, &ssz.to_ne_bytes())?;
+                return Ok(0);
+            }
+            _ => {}
+        }
+    }
+
+    Err(LinuxError::ENOTTY)
+}
+
+fn handle_loop_ioctl(fd: usize, cmd: u32, arg: usize) -> isize {
+    match do_handle_loop_ioctl(fd, cmd, arg) {
+        Ok(res) => res,
+        Err(e) => -e.code() as isize,
+    }
+}
 
 fn warn_tty_ioctl_stub_once(fd: usize, cmd: u32) {
     if !TTY_IOCTL_STUB_WARNED.swap(true, Ordering::AcqRel) {
@@ -84,7 +174,13 @@ fn write_rtc_time(arg: usize) -> Result<(), LinuxError> {
 
 pub fn sys_ioctl(fd: usize, cmd: usize, arg: usize) -> isize {
     axlog::debug!("sys_ioctl: fd={}, cmd={:#x}, arg={:#x}", fd, cmd, arg);
+
     let cmd32 = cmd as u32;
+
+    let res = handle_loop_ioctl(fd, cmd32, arg);
+    if res != -axerrno::LinuxError::ENOTTY.code() as isize {
+        return res;
+    }
 
     if cmd32 == RTC_RD_TIME {
         return match write_rtc_time(arg) {
@@ -134,8 +230,7 @@ pub fn sys_ioctl(fd: usize, cmd: usize, arg: usize) -> isize {
             }
             0
         }
-        0x8933 => {
-            // SIOCGIFINDEX
+        SIOCGIFINDEX => {
             if arg != 0 {
                 let mut name_buf = [0u8; 16];
                 if let Ok(()) = crate::impls::utils::read_user_bytes(arg, &mut name_buf) {
@@ -151,10 +246,7 @@ pub fn sys_ioctl(fd: usize, cmd: usize, arg: usize) -> isize {
             }
             0
         }
-        0x8914 => {
-            // SIOCSIFFLAGS
-            0
-        }
+        SIOCSIFFLAGS => 0,
         _ => {
             // ENOTTY
             -LinuxError::ENOTTY.code() as isize

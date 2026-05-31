@@ -142,9 +142,78 @@ fn mount_source_candidates(source: &str) -> Result<alloc::vec::Vec<String>, Linu
     Ok(candidates)
 }
 
+fn lookup_or_probe_fs(source: &str, fstype: &str) -> Result<axfs_ng_vfs::Filesystem, LinuxError> {
+    if let Some(fs) = axfs::lookup_mountable_filesystem(source) {
+        return Ok(fs);
+    }
+
+    // Pseudo filesystems
+    if fstype == "tmpfs" {
+        return Ok(axfs::new_tmpfs());
+    }
+    if fstype == "proc" || fstype == "procfs" {
+        return Ok(axfs::new_procfs());
+    }
+
+    if source.starts_with("/dev/") {
+        let loc = match axfs::lookup_location(source) {
+            Ok(loc) => loc,
+            Err(e) => {
+                // If the device node itself isn't found, it's ENOENT
+                return Err(LinuxError::from(e.canonicalize()));
+            }
+        };
+        let entry = loc.entry();
+
+        let is_block = entry.node_type() == axfs_ng_vfs::NodeType::BlockDevice;
+
+        match fstype {
+            "ext2" | "ext3" | "ext4" => {
+                #[cfg(feature = "ext4")]
+                {
+                    if !is_block {
+                        return Err(LinuxError::ENOTBLK);
+                    }
+                    let node = entry
+                        .downcast::<axfs::DevNode>()
+                        .map_err(|_| LinuxError::ENOTBLK)?;
+                    let disk = node
+                        .get_block_device()
+                        .map_err(|e| LinuxError::from(e.canonicalize()))?;
+                    return axfs::ext4::Ext4Filesystem::new(disk)
+                        .map_err(|e| LinuxError::from(e.canonicalize()));
+                }
+                #[cfg(not(feature = "ext4"))]
+                {
+                    return Err(LinuxError::ENODEV);
+                }
+            }
+            "none" | "" => {
+                if !is_block {
+                    return Err(LinuxError::ENOTBLK);
+                }
+                // Auto-probe
+                return axfs::probe_block_device(source)
+                    .map_err(|e| LinuxError::from(e.canonicalize()));
+            }
+            _ => return Err(LinuxError::ENODEV),
+        }
+    }
+
+    Err(LinuxError::ENOENT)
+}
+
 fn rename_at(olddirfd: i32, oldpath: &str, newdirfd: i32, newpath: &str) -> Result<(), LinuxError> {
-    let olddirfd = if oldpath.starts_with('/') { AT_FDCWD as i32 } else { olddirfd };
-    let newdirfd = if newpath.starts_with('/') { AT_FDCWD as i32 } else { newdirfd };
+    let olddirfd = if oldpath.starts_with('/') {
+        AT_FDCWD as i32
+    } else {
+        olddirfd
+    };
+    let newdirfd = if newpath.starts_with('/') {
+        AT_FDCWD as i32
+    } else {
+        newdirfd
+    };
     let old_ctx = context_for_dirfd(olddirfd)?;
     let new_ctx = context_for_dirfd(newdirfd)?;
 
@@ -279,42 +348,73 @@ pub fn sys_mount(
         Ok(target) => target,
         Err(e) => return -e.code() as isize,
     };
-    let target_path = match target.to_str() {
+    let target_path_str = match target.to_str() {
         Ok(s) if !s.is_empty() => s,
         Ok(_) => return -LinuxError::EINVAL.code() as isize,
         Err(_) => return -LinuxError::EINVAL.code() as isize,
     };
 
-    let target_path = match resolve_existing_mount_path(target_path) {
+    let target_path = match resolve_existing_mount_path(target_path_str) {
         Ok(path) => path,
-        Err(e) => return -e.code() as isize,
+        Err(e) => {
+            axlog::error!(
+                "sys_mount: failed to resolve target path '{}': {:?}",
+                target_path_str,
+                e
+            );
+            return -e.code() as isize;
+        }
     };
 
     if axfs::lookup_mounted_mountpoint(&target_path).is_some() {
         return -LinuxError::EBUSY.code() as isize;
     }
 
-    let source = match read_user_optional_path(source) {
+    let source_path = match read_user_optional_path(source) {
         Ok(Some(path)) => path,
-        Ok(None) => return -LinuxError::EINVAL.code() as isize,
+        Ok(None) => "none".to_string(),
         Err(e) => return -e.code() as isize,
     };
-    let fstype = match read_user_optional_path(fstype) {
+    let fstype_name = match read_user_optional_path(fstype) {
         Ok(Some(path)) => path,
         Ok(None) => "none".to_string(),
         Err(e) => return -e.code() as isize,
     };
 
-    let fs = match mount_source_candidates(&source) {
-        Ok(candidates) => candidates
-            .into_iter()
-            .find_map(|candidate| axfs::lookup_mountable_filesystem(&candidate))
-            .or_else(|| axfs::lookup_mountable_filesystem(&source)),
+    let fs_res = match mount_source_candidates(&source_path) {
+        Ok(candidates) => {
+            let mut res = Err(LinuxError::ENOENT);
+            for cand in candidates {
+                match lookup_or_probe_fs(&cand, &fstype_name) {
+                    Ok(fs) => {
+                        res = Ok(fs);
+                        break;
+                    }
+                    Err(e) => res = Err(e),
+                }
+            }
+            if res.is_err() {
+                match lookup_or_probe_fs(&source_path, &fstype_name) {
+                    Ok(fs) => res = Ok(fs),
+                    Err(e) => res = Err(e),
+                }
+            }
+            res
+        }
         Err(e) => return -e.code() as isize,
     };
-    let fs = match fs {
-        Some(fs) => fs,
-        None => return -LinuxError::ENOENT.code() as isize,
+
+    let fs = match fs_res {
+        Ok(fs) => fs,
+        Err(e) => {
+            axlog::error!(
+                "sys_mount: failed to find filesystem for source '{}', fstype '{}': {:?}",
+                source_path,
+                fstype_name,
+                e
+            );
+            return -e.code() as isize;
+        }
     };
     let ctx = match context_for_dirfd(AT_FDCWD as i32) {
         Ok(ctx) => ctx,
@@ -322,14 +422,21 @@ pub fn sys_mount(
     };
     let mount_dir = match ctx.resolve(&target_path) {
         Ok(loc) => loc,
-        Err(e) => return -LinuxError::from(e.canonicalize()).code() as isize,
+        Err(e) => {
+            axlog::error!(
+                "sys_mount: failed to resolve target_path '{}' for mount: {:?}",
+                target_path,
+                e
+            );
+            return -LinuxError::from(e.canonicalize()).code() as isize;
+        }
     };
 
     match mount_dir.mount(&fs) {
         Ok(mountpoint) => {
             MOUNTED_TARGETS.lock().insert(target_path.clone());
             axfs::register_mounted_mountpoint(&target_path, mountpoint);
-            axfs::register_mount(&source, &target_path, &fstype, "rw,relatime");
+            axfs::register_mount(&source_path, &target_path, &fstype_name, "rw,relatime");
             let _ = pulse_core::task::current_process().map(|process| process.save_fs_context());
             0
         }
@@ -547,4 +654,3 @@ pub fn sys_symlinkat(target: usize, newdirfd: i32, linkpath: usize) -> isize {
         }
     }
 }
-

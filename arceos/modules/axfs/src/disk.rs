@@ -147,6 +147,10 @@ impl<D: BlockDriverOps> SeekableDisk<D> {
         Ok(())
     }
 
+    pub fn device(&self) -> &D {
+        &self.dev
+    }
+
     fn read_partial(&mut self, buf: &mut &mut [u8]) -> DevResult<usize> {
         self.flush()?;
         self.dev.read_block(self.block_id, &mut self.read_buffer)?;

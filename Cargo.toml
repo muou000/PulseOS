@@ -43,6 +43,8 @@ linux-raw-sys = { version = "0.12", default-features = false, features = [
     "no_std",
     "general",
     "net",
+    "ioctl",
+    "loop_device",
 ] }
 axio = { version = "0.3.0-pre.1", default-features = false, features = [
     "alloc",
