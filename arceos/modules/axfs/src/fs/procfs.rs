@@ -19,6 +19,34 @@ use spin::Mutex;
 
 static PID_MAX: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(32768);
 
+fn u64_to_string(mut n: u64) -> String {
+    if n == 0 {
+        return "0".into();
+    }
+    let mut buf = [0u8; 20];
+    let mut i = buf.len();
+    while n > 0 {
+        i -= 1;
+        buf[i] = (n % 10) as u8 + b'0';
+        n /= 10;
+    }
+    unsafe { core::str::from_utf8_unchecked(&buf[i..]) }.into()
+}
+
+fn u32_to_string(mut n: u32) -> String {
+    if n == 0 {
+        return "0".into();
+    }
+    let mut buf = [0u8; 10];
+    let mut i = buf.len();
+    while n > 0 {
+        i -= 1;
+        buf[i] = (n % 10) as u8 + b'0';
+        n /= 10;
+    }
+    unsafe { core::str::from_utf8_unchecked(&buf[i..]) }.into()
+}
+
 const ROOT_INO: u64 = 1;
 const MEMINFO_INO: u64 = 2;
 const MOUNTS_INO: u64 = 3;
@@ -448,7 +476,7 @@ impl ProcFilesystem {
                     
                     if let Some(fds) = provider.process_fds(pid) {
                         for fd in fds {
-                            let name = format!("{}", fd);
+                            let name = u32_to_string(fd);
                             let child_ino = PID_INODE_START + (pid << PID_INODE_SHIFT) + SUB_INO_FD_BASE + fd as u64;
                             entries.insert(name.into(), InodeRef::new(child_ino));
                         }
@@ -610,7 +638,7 @@ fn render_proc_file(fs: &ProcFilesystem, kind: ProcLiveFileKind) -> String {
         ProcLiveFileKind::SelfSymlink => {
             if let Some(provider) = PROCESS_PROVIDER.get() {
                 if let Some(pid) = provider.current_pid() {
-                    return format!("{}", pid);
+                    return u64_to_string(pid);
                 }
             }
             "1".to_owned()
@@ -649,7 +677,9 @@ fn render_proc_file(fs: &ProcFilesystem, kind: ProcLiveFileKind) -> String {
             fs.gid_map_map.lock().get(&pid).cloned().unwrap_or_default()
         }
         ProcLiveFileKind::PidMax => {
-            format!("{}\n", PID_MAX.load(core::sync::atomic::Ordering::Acquire))
+            let mut s = u32_to_string(PID_MAX.load(core::sync::atomic::Ordering::Acquire));
+            s.push('\n');
+            s
         }
         ProcLiveFileKind::Tainted => {
             "0\n".to_owned()
@@ -859,7 +889,7 @@ impl DirNodeOps for ProcNode {
                     
                     if let Some(fds) = provider.process_fds(pid) {
                         for fd in fds {
-                            let name = format!("{}", fd);
+                            let name = u32_to_string(fd);
                             let child_ino = PID_INODE_START + (pid << PID_INODE_SHIFT) + SUB_INO_FD_BASE + fd as u64;
                             all_entries.push((name, child_ino));
                         }
@@ -875,7 +905,7 @@ impl DirNodeOps for ProcNode {
             if self.ino == ROOT_INO {
                 if let Some(provider) = PROCESS_PROVIDER.get() {
                     for pid in provider.process_pids() {
-                        let name = format!("{}", pid);
+                        let name = u64_to_string(pid);
                         let child_ino = PID_INODE_START + (pid << PID_INODE_SHIFT) + SUB_INO_DIR;
                         all_entries.push((name, child_ino));
                     }
