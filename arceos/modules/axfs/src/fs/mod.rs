@@ -4,11 +4,12 @@ use alloc::vec::Vec;
 mod fat;
 
 #[cfg(feature = "ext4")]
-mod ext4;
+pub mod ext4;
 
-mod devfs;
+pub(crate) mod devfs;
 mod procfs;
 mod tmpfs;
+pub mod loop_dev;
 
 use axdriver::prelude::BlockDriverOps;
 use axfs_ng_vfs::{Filesystem, VfsResult};

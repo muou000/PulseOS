@@ -83,6 +83,8 @@ exit_group01
 faccessat01
 faccessat02
 faccessat202
+fallocate03
+fallocate04
 fchmod01
 fchmod02
 fchmod04
@@ -325,7 +327,14 @@ unlink05
 unlink07
 unlink08
 unlinkat01
+utime01
+utime02
+utime03
+utime04
+utime05
+utime07
 utsname01
+utsname04
 wait01
 wait02
 wait401

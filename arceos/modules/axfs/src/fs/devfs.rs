@@ -29,8 +29,9 @@ const URANDOM_INO: u64 = 6;
 const CPU_DMA_LATENCY_INO: u64 = 7;
 const SHM_INO: u64 = 8;
 const ZERO_INO: u64 = 9;
+const LOOP_CTRL_INO: u64 = 10;
 
-const NEXT_DYNAMIC_INO: u64 = ZERO_INO + 1;
+const NEXT_DYNAMIC_INO: u64 = LOOP_CTRL_INO + 1;
 
 const RANDOM_SEED: u64 = 0x0123_4567_89ab_cdef;
 
@@ -47,6 +48,7 @@ enum DevDeviceKind {
     Rtc,
     Random(RandomDevice),
     CpuDmaLatency,
+    LoopControl,
 }
 
 struct RandomDevice {
@@ -329,6 +331,13 @@ impl DevFilesystem {
             10,
             63,
         );
+        let loop_ctrl = Inode::new_character_device(
+            LOOP_CTRL_INO,
+            DevDeviceKind::LoopControl,
+            0o600,
+            10,
+            237,
+        );
 
         root.metadata.lock().nlink = 2;
         misc.metadata.lock().nlink = 2;
@@ -342,6 +351,7 @@ impl DevFilesystem {
         self.insert_entry_locked(&root, "random", RANDOM_INO, &inodes);
         self.insert_entry_locked(&root, "urandom", URANDOM_INO, &inodes);
         self.insert_entry_locked(&root, "cpu_dma_latency", CPU_DMA_LATENCY_INO, &inodes);
+        self.insert_entry_locked(&root, "loop-control", LOOP_CTRL_INO, &inodes);
         self.insert_entry_locked(&misc, "rtc", RTC_INO, &inodes);
 
         for spec in block_devices {
@@ -360,6 +370,7 @@ impl DevFilesystem {
         inodes.insert(RANDOM_INO, random);
         inodes.insert(URANDOM_INO, urandom);
         inodes.insert(CPU_DMA_LATENCY_INO, cpu_dma);
+        inodes.insert(LOOP_CTRL_INO, loop_ctrl);
     }
 
     fn insert_entry_locked(
@@ -469,7 +480,7 @@ fn map_dev_err(err: axdriver::prelude::DevError) -> VfsError {
     }
 }
 
-struct DevNode {
+pub struct DevNode {
     fs: Arc<DevFilesystem>,
     ino: u64,
     this: Option<WeakDirEntry>,
@@ -486,6 +497,15 @@ impl DevNode {
 
     fn inode_ref(&self) -> VfsResult<Arc<Inode>> {
         self.fs.get_inode(self.ino)
+    }
+
+    pub fn get_block_device(&self) -> VfsResult<SharedBlockDevice> {
+        let inode = self.inode_ref()?;
+        if let NodeContent::BlockDevice(block) = &inode.content {
+            Ok(block.disk.lock().device().clone())
+        } else {
+            Err(VfsError::InvalidInput)
+        }
     }
 
     fn build_entry(&self, name: &str, target_ino: u64) -> VfsResult<DirEntry> {
@@ -746,6 +766,7 @@ impl FileNodeOps for DevNode {
                 Ok(buf.len())
             }
             NodeContent::CharacterDevice(DevDeviceKind::Rtc) => Ok(0),
+            NodeContent::CharacterDevice(DevDeviceKind::LoopControl) => Ok(0),
             NodeContent::CharacterDevice(DevDeviceKind::Random(random)) => {
                 random.rng.lock().fill_bytes(buf);
                 Ok(buf.len())
@@ -792,6 +813,7 @@ impl FileNodeOps for DevNode {
             NodeContent::CharacterDevice(DevDeviceKind::Rtc) => {
                 Err(VfsError::OperationNotPermitted)
             }
+            NodeContent::CharacterDevice(DevDeviceKind::LoopControl) => Ok(buf.len()),
             NodeContent::CharacterDevice(DevDeviceKind::Random(_)) => Ok(buf.len()),
             NodeContent::CharacterDevice(DevDeviceKind::CpuDmaLatency) => match buf.len() {
                 4 | 10 => Ok(buf.len()),
@@ -827,6 +849,7 @@ impl FileNodeOps for DevNode {
             NodeContent::CharacterDevice(DevDeviceKind::Rtc) => {
                 Err(VfsError::OperationNotPermitted)
             }
+            NodeContent::CharacterDevice(DevDeviceKind::LoopControl) => Ok((buf.len(), 0)),
             NodeContent::CharacterDevice(DevDeviceKind::Random(_)) => Ok((buf.len(), 0)),
             NodeContent::CharacterDevice(DevDeviceKind::CpuDmaLatency) => {
                 self.write_at(buf, 0).map(|n| (n, 0))

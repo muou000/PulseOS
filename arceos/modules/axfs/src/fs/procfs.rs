@@ -22,12 +22,13 @@ static PID_MAX: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::n
 const ROOT_INO: u64 = 1;
 const MEMINFO_INO: u64 = 2;
 const MOUNTS_INO: u64 = 3;
-const SELF_INO: u64 = 4;
-const SYS_INO: u64 = 5;
-const KERNEL_INO: u64 = 6;
-const PID_MAX_INO: u64 = 7;
-const TAINTED_INO: u64 = 8;
-const CORE_PATTERN_INO: u64 = 9;
+const FILESYSTEMS_INO: u64 = 4;
+const SELF_INO: u64 = 5;
+const SYS_INO: u64 = 6;
+const KERNEL_INO: u64 = 7;
+const PID_MAX_INO: u64 = 8;
+const TAINTED_INO: u64 = 9;
+const CORE_PATTERN_INO: u64 = 10;
 const NEXT_DYNAMIC_INO: u64 = CORE_PATTERN_INO + 1;
 
 const PID_INODE_START: u64 = 0x10_0000_0000;
@@ -98,6 +99,7 @@ enum ProcLiveFileKind {
     PidUidMap(u64),
     PidGidMap(u64),
     PidMax,
+    Filesystems,
     Tainted,
     CorePattern,
 }
@@ -325,6 +327,11 @@ impl ProcFilesystem {
             ProcLiveFileKind::Mounts,
             NodePermission::from_bits_truncate(0o444),
         );
+        let filesystems = Inode::new_live_file(
+            FILESYSTEMS_INO,
+            ProcLiveFileKind::Filesystems,
+            NodePermission::from_bits_truncate(0o444),
+        );
         let self_sym = Inode::new_live_file(
             SELF_INO,
             ProcLiveFileKind::SelfSymlink,
@@ -365,6 +372,7 @@ impl ProcFilesystem {
             inodes.insert(ROOT_INO, root.clone());
             inodes.insert(MEMINFO_INO, meminfo);
             inodes.insert(MOUNTS_INO, mounts);
+            inodes.insert(FILESYSTEMS_INO, filesystems);
             inodes.insert(SELF_INO, self_sym);
             inodes.insert(SYS_INO, sys_dir.clone());
             inodes.insert(KERNEL_INO, kernel_dir.clone());
@@ -377,6 +385,7 @@ impl ProcFilesystem {
             let mut entries = root.as_dir().expect("proc root is dir").entries.lock();
             entries.insert("meminfo".into(), InodeRef::new(MEMINFO_INO));
             entries.insert("mounts".into(), InodeRef::new(MOUNTS_INO));
+            entries.insert("filesystems".into(), InodeRef::new(FILESYSTEMS_INO));
             entries.insert("self".into(), InodeRef::new(SELF_INO));
             entries.insert("sys".into(), InodeRef::new(SYS_INO));
         }
@@ -603,6 +612,16 @@ fn render_mounts() -> String {
     out
 }
 
+fn render_filesystems() -> String {
+    let mut out = String::new();
+    out.push_str("nodev\tproc\n");
+    out.push_str("nodev\tdevtmpfs\n");
+    out.push_str("nodev\ttmpfs\n");
+    #[cfg(feature = "ext4")]
+    out.push_str("\text2\n\text3\n\text4\n");
+    out
+}
+
 fn render_proc_file(fs: &ProcFilesystem, kind: ProcLiveFileKind) -> String {
     match kind {
         ProcLiveFileKind::Meminfo => render_meminfo(),
@@ -651,6 +670,7 @@ fn render_proc_file(fs: &ProcFilesystem, kind: ProcLiveFileKind) -> String {
         ProcLiveFileKind::PidMax => {
             format!("{}\n", PID_MAX.load(core::sync::atomic::Ordering::Acquire))
         }
+        ProcLiveFileKind::Filesystems => render_filesystems(),
         ProcLiveFileKind::Tainted => {
             "0\n".to_owned()
         }

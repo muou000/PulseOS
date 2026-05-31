@@ -24,6 +24,10 @@ use spin::{Lazy, Mutex};
 mod disk;
 mod fs;
 
+pub use fs::{new_tmpfs, new_procfs, new_default, devfs::DevNode};
+#[cfg(feature = "ext4")]
+pub use fs::ext4;
+
 mod highlevel;
 pub use highlevel::*;
 
@@ -128,6 +132,82 @@ pub fn register_mounted_mountpoint(target: &str, mountpoint: Arc<axfs_ng_vfs::Mo
 
 pub fn lookup_mounted_mountpoint(target: &str) -> Option<Arc<axfs_ng_vfs::Mountpoint>> {
     MOUNTED_MOUNTPOINTS.lock().get(&normalize_target(target)).cloned()
+}
+
+pub fn find_free_loop_device() -> Option<usize> {
+    for i in 0..8 {
+        if fs::loop_dev::LOOP_DEVICES[i].backing.lock().is_none() {
+            return Some(i);
+        }
+    }
+    None
+}
+
+pub fn is_loop_bound(id: usize) -> bool {
+    if id >= 8 {
+        return false;
+    }
+    fs::loop_dev::LOOP_DEVICES[id].backing.lock().is_some()
+}
+
+pub fn set_loop_backing(id: usize, file: File) -> axfs_ng_vfs::VfsResult<()> {
+    if id >= 8 {
+        return Err(axfs_ng_vfs::VfsError::InvalidInput);
+    }
+    let metadata = file.location().metadata()?;
+    *fs::loop_dev::LOOP_DEVICES[id].backing.lock() = Some(file);
+    fs::loop_dev::LOOP_DEVICES[id]
+        .size
+        .store(metadata.size, core::sync::atomic::Ordering::Release);
+    Ok(())
+}
+
+pub fn clear_loop_backing(id: usize) -> axfs_ng_vfs::VfsResult<()> {
+    if id >= 8 {
+        return Err(axfs_ng_vfs::VfsError::InvalidInput);
+    }
+    *fs::loop_dev::LOOP_DEVICES[id].backing.lock() = None;
+    fs::loop_dev::LOOP_DEVICES[id]
+        .size
+        .store(0, core::sync::atomic::Ordering::Release);
+    fs::loop_dev::LOOP_DEVICES[id]
+        .flags
+        .store(0, core::sync::atomic::Ordering::Release);
+    Ok(())
+}
+
+pub fn get_loop_flags(id: usize) -> Option<u32> {
+    if id >= 8 {
+        return None;
+    }
+    Some(fs::loop_dev::LOOP_DEVICES[id].flags.load(core::sync::atomic::Ordering::Acquire))
+}
+
+pub fn set_loop_flags(id: usize, flags: u32) -> axfs_ng_vfs::VfsResult<()> {
+    if id >= 8 {
+        return Err(axfs_ng_vfs::VfsError::InvalidInput);
+    }
+    fs::loop_dev::LOOP_DEVICES[id].flags.store(flags, core::sync::atomic::Ordering::Release);
+    Ok(())
+}
+
+pub fn lookup_location(path: &str) -> axfs_ng_vfs::VfsResult<axfs_ng_vfs::Location> {
+    FS_CONTEXT.lock().resolve(path)
+}
+
+pub fn probe_block_device(
+    path: &str,
+) -> axfs_ng_vfs::VfsResult<axfs_ng_vfs::Filesystem> {
+    let loc = lookup_location(path)?;
+    let entry = loc.entry();
+    let node = entry
+        .downcast::<fs::devfs::DevNode>()
+        .map_err(|_| axfs_ng_vfs::VfsError::InvalidInput)?;
+    let disk = node.get_block_device()?;
+
+    let fs = fs::new_default(disk.clone())?;
+    register_mountable_device(path, path, &fs);
+    Ok(fs)
 }
 
 pub fn unregister_mounted_mountpoint(target: &str) -> bool {
@@ -259,7 +339,7 @@ pub fn init_filesystems(mut block_devs: AxDeviceContainer<AxBlockDevice>) {
         &root.fs,
     );
 
-    let mut dev_nodes = Vec::with_capacity(candidates.len() + 1);
+    let mut dev_nodes = Vec::with_capacity(candidates.len() + 9);
     dev_nodes.push(fs::BlockDeviceSpec {
         name: disk_node_name(root.disk_idx),
         device: root.shared_dev.clone(),
@@ -279,6 +359,16 @@ pub fn init_filesystems(mut block_devs: AxDeviceContainer<AxBlockDevice>) {
             device: cand.shared_dev,
             major: 254,
             minor: cand.disk_idx as u32,
+        });
+    }
+
+    for i in 0..8 {
+        let loop_dev = fs::loop_dev::LoopBlockDevice::new(i);
+        dev_nodes.push(fs::BlockDeviceSpec {
+            name: format!("loop{}", i),
+            device: disk::SharedBlockDevice::new(alloc::boxed::Box::new(loop_dev)),
+            major: 7,
+            minor: i as u32,
         });
     }
 
