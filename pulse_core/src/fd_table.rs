@@ -125,6 +125,7 @@ fn metadata_to_stat(metadata: &Metadata) -> stat {
     let perm = metadata.mode.bits() as u32;
     let st_mode = ((ty as u32) << 12) | perm;
     stat {
+        st_dev: metadata.device as _,
         st_ino: metadata.inode as _,
         st_nlink: metadata.nlink as _,
         st_mode,
