@@ -189,6 +189,7 @@ fn syscall_dispatcher(
         Sysno::sendfile => impls::sys_sendfile(args[0], args[1], args[2], args[3]),
         Sysno::openat => impls::sys_openat(args[0] as i32, args[1], args[2], args[3]),
         Sysno::mkdirat => impls::sys_mkdirat(args[0] as i32, args[1], args[2]),
+        Sysno::mknodat => impls::sys_mknodat(args[0] as i32, args[1], args[2], args[3]),
         Sysno::mount => impls::sys_mount(args[0], args[1], args[2], args[3], args[4]),
         Sysno::umount2 => impls::sys_umount2(args[0], args[1]),
         Sysno::getdents64 => impls::sys_getdents64(args[0], args[1], args[2]),
@@ -265,7 +266,6 @@ fn syscall_dispatcher(
         Sysno::getresuid => impls::sys_getresuid(args[0], args[1], args[2]),
         Sysno::getresgid => impls::sys_getresgid(args[0], args[1], args[2]),
 
-
         Sysno::rt_sigaction => impls::sys_rt_sigaction(args[0], args[1], args[2], args[3]),
         Sysno::rt_sigreturn => impls::sys_rt_sigreturn(tf),
         Sysno::rt_sigsuspend => impls::sys_rt_sigsuspend(args[0], args[1]),
@@ -302,6 +302,13 @@ fn syscall_dispatcher(
         Sysno::getcwd => impls::sys_getcwd(args[0], args[1]),
         Sysno::chdir => impls::sys_chdir(args[0]),
         Sysno::unlinkat => impls::sys_unlinkat(args[0] as i32, args[1], args[2]),
+        Sysno::linkat => impls::sys_linkat(
+            args[0] as i32,
+            args[1],
+            args[2] as i32,
+            args[3],
+            args[4],
+        ),
         #[cfg(target_arch = "loongarch64")]
         Sysno::renameat => {
             impls::sys_renameat2(args[0] as i32, args[1], args[2] as i32, args[3], 0)
@@ -311,9 +318,7 @@ fn syscall_dispatcher(
         }
         Sysno::utimensat => impls::sys_utimensat(args[0] as i32, args[1], args[2], args[3]),
         Sysno::readlinkat => impls::sys_readlinkat(args[0] as i32, args[1], args[2], args[3]),
-        Sysno::symlinkat => {
-            impls::sys_symlinkat(args[0], args[1] as i32, args[2])
-        }
+        Sysno::symlinkat => impls::sys_symlinkat(args[0], args[1] as i32, args[2]),
         Sysno::set_robust_list => impls::sys_set_robust_list(args[0], args[1]),
 
         Sysno::get_robust_list => impls::sys_get_robust_list(args[0], args[1], args[2]),
@@ -324,23 +329,19 @@ fn syscall_dispatcher(
         Sysno::fchownat => impls::sys_fchownat(args[0] as i32, args[1], args[2], args[3], args[4]),
         Sysno::lseek => impls::sys_lseek(args[0], args[1], args[2]),
         Sysno::ftruncate => impls::sys_ftruncate(args[0], args[1]),
-        Sysno::fallocate => {
-            impls::sys_fallocate(args[0], args[1], args[2], args[3])
-        }
+        Sysno::fallocate => impls::sys_fallocate(args[0], args[1], args[2], args[3]),
         Sysno::fsync => impls::sys_fsync(args[0]),
         Sysno::fdatasync => impls::sys_fdatasync(args[0]),
         Sysno::sync => impls::sys_sync(),
         Sysno::execve => impls::sys_execve(tf, args[0], args[1], args[2]),
-        Sysno::execveat => {
-            impls::sys_execveat(
-                tf,
-                args[0] as i32,
-                args[1],
-                args[2],
-                args[3],
-                args[4] as i32,
-            )
-        }
+        Sysno::execveat => impls::sys_execveat(
+            tf,
+            args[0] as i32,
+            args[1],
+            args[2],
+            args[3],
+            args[4] as i32,
+        ),
         Sysno::setsid => impls::sys_setsid(),
 
         // System V shared memory
