@@ -1,6 +1,7 @@
 use axerrno::LinuxError;
 use linux_raw_sys::general::{
-    F_DUPFD, F_DUPFD_CLOEXEC, F_GETFD, F_GETFL, F_SETFD, F_SETFL, FD_CLOEXEC, O_CLOEXEC, O_NONBLOCK,
+    F_DUPFD, F_DUPFD_CLOEXEC, F_GETFD, F_GETFL, F_GETPIPE_SZ, F_SETFD, F_SETFL, F_SETPIPE_SZ,
+    FD_CLOEXEC, O_CLOEXEC, O_NONBLOCK,
 };
 use pulse_core::fd_table::{FdEntry, FdFlags};
 
@@ -107,6 +108,20 @@ pub fn sys_fcntl(fd: usize, cmd: usize, arg: usize) -> isize {
                 Err(e) => -e.code() as isize,
             }
         }
+        F_SETPIPE_SZ => match get_fd_entry(fd) {
+            Ok(entry) => match entry.object.set_pipe_size(arg) {
+                Ok(new_size) => new_size as isize,
+                Err(e) => -e.code() as isize,
+            },
+            Err(e) => -e.code() as isize,
+        },
+        F_GETPIPE_SZ => match get_fd_entry(fd) {
+            Ok(entry) => match entry.object.get_pipe_size() {
+                Ok(size) => size as isize,
+                Err(e) => -e.code() as isize,
+            },
+            Err(e) => -e.code() as isize,
+        },
         _ => {
             axlog::warn!("unsupported fcntl parameters: cmd {}", cmd);
             0
