@@ -21,7 +21,7 @@ static TTY_IOCTL_STUB_WARNED: AtomicBool = AtomicBool::new(false);
 fn do_handle_loop_ioctl(fd: usize, cmd: u32, arg: usize) -> Result<isize, LinuxError> {
     let process = pulse_core::task::current_process()?;
     let fd_table = process.fd_table();
-    let entry = fd_table.lock().get_entry_cloned(fd)?;
+    let entry = fd_table.read().get_entry_cloned(fd)?;
 
     let metadata = entry.object.stat()?;
 
@@ -44,7 +44,7 @@ fn do_handle_loop_ioctl(fd: usize, cmd: u32, arg: usize) -> Result<isize, LinuxE
         match cmd {
             LOOP_SET_FD => {
                 let backing_fd = arg;
-                let backing_entry = fd_table.lock().get_entry_cloned(backing_fd)?;
+                let backing_entry = fd_table.read().get_entry_cloned(backing_fd)?;
                 if let Some(file_obj) = backing_entry
                     .object
                     .as_any()

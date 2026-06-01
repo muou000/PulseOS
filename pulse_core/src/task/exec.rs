@@ -47,10 +47,13 @@ fn parse_shebang_line(file_data: &[u8]) -> AxResult<Option<(String, Option<Strin
     Ok(Some((String::from(interp), interp_arg)))
 }
 
-fn check_txt_busy(path: &str) -> AxResult<()> {
+fn check_txt_busy(loc: &axfs_ng_vfs::Location) -> AxResult<()> {
+    let meta = loc.metadata().map_err(|_| AxError::InvalidData)?;
+    let device = meta.device;
+    let inode = meta.inode;
     let procs = super::processes_snapshot();
     for proc in procs {
-        if proc.fd_table().lock().is_file_write_open(path) {
+        if proc.fd_table().read().is_file_write_open_by_meta(device, inode) {
             return Err(axerrno::LinuxError::ETXTBSY.into());
         }
     }
@@ -73,7 +76,7 @@ fn resolve_exec_path_and_args(
         }
 
         // Check if the file is currently open for writing by any process
-        check_txt_busy(path.as_str())?;
+        check_txt_busy(&loc)?;
 
         // Check execute permission based on credentials (uid/gid)
         if let Some((uid, gid)) = fs.credentials {
@@ -215,7 +218,7 @@ impl Process {
 
         let cloexec_entries = {
             let binding = self.fd_table();
-            let mut fd_table = binding.lock();
+            let mut fd_table = binding.write();
             fd_table.take_cloexec_on_exec()
         };
         drop(cloexec_entries);

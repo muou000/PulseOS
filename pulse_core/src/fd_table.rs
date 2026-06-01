@@ -14,7 +14,7 @@ use axfs_ng_vfs::{Location, Metadata, NodeType};
 use axio::{BufReader, PollState, Read, Seek, SeekFrom, Write};
 use kspin::SpinNoIrq;
 use linux_raw_sys::general::*;
-use spin::{Lazy, Mutex};
+use spin::{Lazy, Mutex, RwLock};
 
 use crate::cpu_dma_latency::{CpuDmaLatencyRequest, effective_latency_us};
 
@@ -32,6 +32,14 @@ bitflags::bitflags! {
 
 pub trait FdObject: Send + Sync {
     fn as_any(&self) -> &dyn Any;
+
+    fn set_pipe_size(&self, _size: usize) -> LinuxResult<usize> {
+        Err(LinuxError::EINVAL)
+    }
+
+    fn get_pipe_size(&self) -> LinuxResult<usize> {
+        Err(LinuxError::EINVAL)
+    }
 
     fn read(&self, _buf: &mut [u8]) -> LinuxResult<usize> {
         Err(LinuxError::EBADF)
@@ -652,62 +660,98 @@ enum RingBufferStatus {
     Normal,
 }
 
-// Keep per-pipe memory bounded so socketpair-heavy workloads (e.g. hackbench)
-// don't exhaust kernel heap just by creating many endpoints.
-const RING_BUFFER_SIZE: usize = 4096;
-
 struct PipeRingBuffer {
-    arr: [u8; RING_BUFFER_SIZE],
+    arr: alloc::vec::Vec<u8>,
     head: usize,
     tail: usize,
     status: RingBufferStatus,
 }
 
 impl PipeRingBuffer {
-    const fn new() -> Self {
+    fn new(capacity: usize) -> Self {
         Self {
-            arr: [0; RING_BUFFER_SIZE],
+            arr: alloc::vec![0u8; capacity],
             head: 0,
             tail: 0,
             status: RingBufferStatus::Empty,
         }
     }
 
+    fn capacity(&self) -> usize {
+        self.arr.len()
+    }
+
+    fn available_read(&self) -> usize {
+        if matches!(self.status, RingBufferStatus::Empty) {
+            0
+        } else if self.tail > self.head {
+            self.tail - self.head
+        } else {
+            self.tail + self.capacity() - self.head
+        }
+    }
+
+    fn available_write(&self) -> usize {
+        if matches!(self.status, RingBufferStatus::Full) {
+            0
+        } else {
+            self.capacity() - self.available_read()
+        }
+    }
+
+    #[allow(dead_code)]
     fn write_byte(&mut self, byte: u8) {
+        let cap = self.capacity();
         self.status = RingBufferStatus::Normal;
         self.arr[self.tail] = byte;
-        self.tail = (self.tail + 1) % RING_BUFFER_SIZE;
+        self.tail = (self.tail + 1) % cap;
         if self.tail == self.head {
             self.status = RingBufferStatus::Full;
         }
     }
 
     fn read_byte(&mut self) -> u8 {
+        let cap = self.capacity();
         self.status = RingBufferStatus::Normal;
         let byte = self.arr[self.head];
-        self.head = (self.head + 1) % RING_BUFFER_SIZE;
+        self.head = (self.head + 1) % cap;
         if self.head == self.tail {
             self.status = RingBufferStatus::Empty;
         }
         byte
     }
 
-    const fn available_read(&self) -> usize {
-        if matches!(self.status, RingBufferStatus::Empty) {
-            0
-        } else if self.tail > self.head {
-            self.tail - self.head
-        } else {
-            self.tail + RING_BUFFER_SIZE - self.head
+    fn resize(&mut self, new_capacity: usize) -> LinuxResult {
+        let current_unread = self.available_read();
+        if new_capacity < current_unread {
+            return Err(LinuxError::EBUSY);
         }
-    }
 
-    const fn available_write(&self) -> usize {
-        if matches!(self.status, RingBufferStatus::Full) {
-            0
-        } else {
-            RING_BUFFER_SIZE - self.available_read()
+        let mut new_arr = alloc::vec![0u8; new_capacity];
+        let cap = self.capacity();
+
+        if current_unread > 0 {
+            if self.tail > self.head {
+                new_arr[..current_unread].copy_from_slice(&self.arr[self.head..self.tail]);
+            } else {
+                let first_part = cap - self.head;
+                new_arr[..first_part].copy_from_slice(&self.arr[self.head..]);
+                new_arr[first_part..current_unread].copy_from_slice(&self.arr[..self.tail]);
+            }
         }
+
+        self.arr = new_arr;
+        self.head = 0;
+        self.tail = if current_unread == new_capacity { 0 } else { current_unread };
+        self.status = if current_unread == 0 {
+            RingBufferStatus::Empty
+        } else if current_unread == new_capacity {
+            RingBufferStatus::Full
+        } else {
+            RingBufferStatus::Normal
+        };
+
+        Ok(())
     }
 }
 
@@ -722,7 +766,7 @@ struct PipeShared {
 impl PipeShared {
     fn new() -> Self {
         Self {
-            buffer: Mutex::new(PipeRingBuffer::new()),
+            buffer: Mutex::new(PipeRingBuffer::new(4096)),
             read_wait_queue: axtask::WaitQueue::new(),
             write_wait_queue: axtask::WaitQueue::new(),
             reader_count: AtomicUsize::new(1),
@@ -784,6 +828,33 @@ impl FdObject for PipeObject {
         self
     }
 
+    fn set_pipe_size(&self, size: usize) -> LinuxResult<usize> {
+        if size > (1 << 30) {
+            return Err(LinuxError::EINVAL);
+        }
+        if size > 1048576 {
+            return Err(LinuxError::EPERM);
+        }
+        let mut new_capacity = size;
+        if new_capacity == 0 {
+            new_capacity = 4096;
+        }
+        new_capacity = (new_capacity + 4095) & !4095;
+
+        let mut buffer = self.shared.buffer.lock();
+        buffer.resize(new_capacity)?;
+
+        // Waking up any waiting writers since buffer expanded, and readers as well
+        self.shared.write_wait_queue.notify_all(true);
+        self.shared.read_wait_queue.notify_all(true);
+
+        Ok(buffer.capacity())
+    }
+
+    fn get_pipe_size(&self) -> LinuxResult<usize> {
+        Ok(self.shared.buffer.lock().capacity())
+    }
+
     fn read(&self, buf: &mut [u8]) -> LinuxResult<usize> {
         if !self.readable {
             return Err(LinuxError::EPERM);
@@ -825,14 +896,28 @@ impl FdObject for PipeObject {
                 }
                 continue;
             }
-            for _ in 0..available {
-                if read_size == buf.len() {
-                    self.shared.write_wait_queue.notify_all(true);
-                    return Ok(read_size);
-                }
-                buf[read_size] = ring_buffer.read_byte();
-                read_size += 1;
+
+            let chunk_limit = core::cmp::min(available, buf.len() - read_size);
+            let cap = ring_buffer.capacity();
+            let head = ring_buffer.head;
+            let first_part = core::cmp::min(chunk_limit, cap - head);
+            buf[read_size..read_size + first_part].copy_from_slice(&ring_buffer.arr[head..head + first_part]);
+            ring_buffer.head = (head + first_part) % cap;
+
+            let second_part = chunk_limit - first_part;
+            if second_part > 0 {
+                buf[read_size + first_part..read_size + chunk_limit].copy_from_slice(&ring_buffer.arr[..second_part]);
+                ring_buffer.head = second_part;
             }
+
+            read_size += chunk_limit;
+
+            if ring_buffer.head == ring_buffer.tail {
+                ring_buffer.status = RingBufferStatus::Empty;
+            } else {
+                ring_buffer.status = RingBufferStatus::Normal;
+            }
+
             drop(ring_buffer);
             self.shared.write_wait_queue.notify_all(true);
         }
@@ -888,14 +973,28 @@ impl FdObject for PipeObject {
                 }
                 continue;
             }
-            for _ in 0..available {
-                if write_size == buf.len() {
-                    self.shared.read_wait_queue.notify_all(true);
-                    return Ok(write_size);
-                }
-                ring_buffer.write_byte(buf[write_size]);
-                write_size += 1;
+
+            let chunk_limit = core::cmp::min(available, buf.len() - write_size);
+            let cap = ring_buffer.capacity();
+            let tail = ring_buffer.tail;
+            let first_part = core::cmp::min(chunk_limit, cap - tail);
+            ring_buffer.arr[tail..tail + first_part].copy_from_slice(&buf[write_size..write_size + first_part]);
+            ring_buffer.tail = (tail + first_part) % cap;
+
+            let second_part = chunk_limit - first_part;
+            if second_part > 0 {
+                ring_buffer.arr[..second_part].copy_from_slice(&buf[write_size + first_part..write_size + chunk_limit]);
+                ring_buffer.tail = second_part;
             }
+
+            write_size += chunk_limit;
+
+            if ring_buffer.tail == ring_buffer.head {
+                ring_buffer.status = RingBufferStatus::Full;
+            } else {
+                ring_buffer.status = RingBufferStatus::Normal;
+            }
+
             drop(ring_buffer);
             self.shared.read_wait_queue.notify_all(true);
         }
@@ -1032,9 +1131,9 @@ pub fn pipe_entries(flags: FdFlags) -> (FdEntry, FdEntry) {
     )
 }
 
-#[derive(Default)]
 pub struct FdTable {
     entries: alloc::vec::Vec<Option<FdEntry>>,
+    open_fds: alloc::vec::Vec<u64>,
     count: usize,
 }
 
@@ -1042,6 +1141,7 @@ impl FdTable {
     pub fn new() -> Self {
         Self {
             entries: alloc::vec::Vec::new(),
+            open_fds: alloc::vec::Vec::new(),
             count: 0,
         }
     }
@@ -1049,6 +1149,7 @@ impl FdTable {
     pub fn clone_for_fork(&self) -> LinuxResult<Self> {
         Ok(Self {
             entries: self.entries.clone(),
+            open_fds: self.open_fds.clone(),
             count: self.count,
         })
     }
@@ -1068,6 +1169,12 @@ impl FdTable {
                     if let Some(taken) = slot.take() {
                         removed.push(taken);
                         self.count = self.count.saturating_sub(1);
+                        
+                        let word_idx = fd / 64;
+                        let bit_idx = fd % 64;
+                        if word_idx < self.open_fds.len() {
+                            self.open_fds[word_idx] &= !(1 << bit_idx);
+                        }
                     }
                 }
             }
@@ -1082,6 +1189,7 @@ impl FdTable {
                 removed.push(entry);
             }
         }
+        self.open_fds.fill(0);
         self.count = 0;
         removed
     }
@@ -1090,13 +1198,13 @@ impl FdTable {
         self.entries.iter().filter_map(|slot| slot.clone()).collect()
     }
 
-    pub fn is_file_write_open(&self, path: &str) -> bool {
+    pub fn is_file_write_open_by_meta(&self, device: u64, inode: u64) -> bool {
         for slot in &self.entries {
             if let Some(entry) = slot {
                 if entry.object.is_write_open() {
                     if let Some(loc) = entry.object.location() {
-                        if let Ok(abs_path) = loc.absolute_path() {
-                            if abs_path.as_str() == path {
+                        if let Ok(meta) = loc.metadata() {
+                            if meta.device == device && meta.inode == inode {
                                 return true;
                             }
                         }
@@ -1141,9 +1249,15 @@ impl FdTable {
                 return Err(LinuxError::EMFILE);
             }
             self.entries.resize_with(new_len, || None);
+            
+            let new_bitmap_words = (new_len + 63) / 64;
+            self.open_fds.resize(new_bitmap_words, 0);
         }
         if self.entries[fd].is_none() {
             self.count = self.count.saturating_add(1);
+            let word_idx = fd / 64;
+            let bit_idx = fd % 64;
+            self.open_fds[word_idx] |= 1 << bit_idx;
         }
         self.entries[fd] = Some(entry);
         Ok(())
@@ -1151,10 +1265,24 @@ impl FdTable {
 
     pub fn insert_from(&mut self, min_fd: usize, entry: FdEntry) -> LinuxResult<usize> {
         let mut found_fd = None;
-        if min_fd < self.entries.len() {
-            for (fd, slot) in self.entries.iter().enumerate().skip(min_fd) {
-                if slot.is_none() {
-                    found_fd = Some(fd);
+        let min_word = min_fd / 64;
+        
+        if min_word < self.open_fds.len() {
+            for word_idx in min_word..self.open_fds.len() {
+                let mut word = self.open_fds[word_idx];
+                
+                if word_idx == min_word {
+                    let min_bit = min_fd % 64;
+                    let mask = (1u64 << min_bit) - 1;
+                    word |= mask;
+                }
+                
+                if word != u64::MAX {
+                    let bit_idx = (!word).trailing_zeros() as usize;
+                    let fd = word_idx * 64 + bit_idx;
+                    if fd < FD_LIMIT {
+                        found_fd = Some(fd);
+                    }
                     break;
                 }
             }
@@ -1181,10 +1309,16 @@ impl FdTable {
                 return Err(LinuxError::EMFILE);
             }
             self.entries.resize_with(new_len, || None);
+            
+            let new_bitmap_words = (new_len + 63) / 64;
+            self.open_fds.resize(new_bitmap_words, 0);
         }
 
         if self.entries[fd].is_none() {
             self.count = self.count.saturating_add(1);
+            let word_idx = fd / 64;
+            let bit_idx = fd % 64;
+            self.open_fds[word_idx] |= 1 << bit_idx;
         }
         self.entries[fd] = Some(entry);
         Ok(fd)
@@ -1199,6 +1333,11 @@ impl FdTable {
             let res = self.entries[fd].take();
             if res.is_some() {
                 self.count = self.count.saturating_sub(1);
+                let word_idx = fd / 64;
+                let bit_idx = fd % 64;
+                if word_idx < self.open_fds.len() {
+                    self.open_fds[word_idx] &= !(1 << bit_idx);
+                }
             }
             res
         } else {
@@ -1219,4 +1358,4 @@ impl FdTable {
     }
 }
 
-pub type SharedFdTable = Arc<Mutex<FdTable>>;
+pub type SharedFdTable = Arc<RwLock<FdTable>>;
