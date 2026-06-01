@@ -581,28 +581,20 @@ impl DirNodeOps for Inode {
         let fs = self.fs.lock();
         self.validate_inode_num(&fs, self.ino)?;
         self.validate_inode_num(&fs, dst_dir.ino)?;
-        let src_snapshot = self.build_dir_snapshot(&fs, self.ino);
-
-        let src_inode_num = self
-            .cached_entry(&src_snapshot, src_name)
-            .map(|entry| entry.inode_num)
-            .ok_or(VfsError::NotFound)?;
+        let mut src_result = ext4_rs::ext4_defs::Ext4DirSearchResult::new(ext4_rs::ext4_defs::Ext4DirEntry::default());
+        let src_inode_num = match fs.dir_find_entry(self.ino, src_name, &mut src_result) {
+            Ok(_) => src_result.dentry.inode,
+            Err(_) => return Err(VfsError::NotFound),
+        };
         let src_inode = fs.get_inode_ref(src_inode_num);
 
         if src_inode.inode.is_dir() && self.ino != dst_dir.ino {
             return Err(VfsError::OperationNotSupported);
         }
 
-        let dst_snapshot = if dst_dir.ino == self.ino {
-            src_snapshot.clone()
-        } else {
-            dst_dir.dir_snapshot(&fs)
-        };
-
-        if let Some(dst_inode_num) = dst_dir
-            .cached_entry(&dst_snapshot, dst_name)
-            .map(|entry| entry.inode_num)
-        {
+        let mut dst_result = ext4_rs::ext4_defs::Ext4DirSearchResult::new(ext4_rs::ext4_defs::Ext4DirEntry::default());
+        if let Ok(_) = fs.dir_find_entry(dst_dir.ino, dst_name, &mut dst_result) {
+            let dst_inode_num = dst_result.dentry.inode;
             if dst_inode_num == src_inode.inode_num {
                 return Ok(());
             }
