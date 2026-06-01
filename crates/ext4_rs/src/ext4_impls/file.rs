@@ -429,15 +429,7 @@ impl Ext4 {
             
             block.write_offset(unaligned, &write_buf[..len], len);
 
-            // Verify write
             block.sync_blk_to_disk(&self.block_device);
-            let verify_block = Block::load(&self.block_device, pblock_idx as usize * BLOCK_SIZE);
-            if verify_block.data[unaligned..unaligned + len] != write_buf[..len] {
-                log::error!("[Write] Verification failed for unaligned write at block {}", pblock_idx);
-                return return_errno_with_message!(Errno::EIO, "Write verification failed");
-            }
-            drop(block);
-            drop(verify_block);
 
             written += len;
             iblk_idx += 1;
@@ -488,15 +480,7 @@ impl Ext4 {
             
             block.write_offset(0, &write_buf[written..written + write_size], write_size);
 
-            // Verify write
             block.sync_blk_to_disk(&self.block_device);
-            let verify_block = Block::load(&self.block_device, block_offset);
-            if verify_block.data[..write_size] != write_buf[written..written + write_size] {
-                log::error!("[Write] Verification failed for aligned write at block {}", pblock_idx);
-                return return_errno_with_message!(Errno::EIO, "Write verification failed");
-            }
-            drop(block);
-            drop(verify_block);
             
             written += write_size;
             iblk_idx += 1;
@@ -519,14 +503,6 @@ impl Ext4 {
             
             inode_ref.inode.set_size(new_size as u64);
             self.write_back_inode(&mut inode_ref);
-            
-            // Verify file size update
-            let verify_inode = self.get_inode_ref(inode);
-            if verify_inode.inode.size() != new_size as u64 {
-                log::error!("[Write] File size update verification failed: expected {}, got {}", 
-                    new_size, verify_inode.inode.size());
-                return return_errno_with_message!(Errno::EIO, "File size update verification failed");
-            }
         }
 
         log::debug!("=== Write Performance Summary ===");

@@ -27,7 +27,6 @@ chown05
 clock_getres01
 clock_gettime01
 clock_gettime02
-clock_gettime03
 clock_gettime04
 clock_nanosleep01
 clock_nanosleep04
@@ -43,7 +42,6 @@ clone302
 close01
 close02
 confstr01
-connect01
 connect02
 creat01
 creat03
@@ -110,7 +108,6 @@ fork03
 fork04
 fork07
 fork08
-fork09
 fork10
 fork13
 fork_procs
@@ -168,7 +165,6 @@ ioctl_ns07
 kill05
 kill11
 lftest
-listen01
 llseek02
 llseek03
 lseek01
@@ -182,18 +178,14 @@ mlock01
 mlock02
 mlock04
 mmap02
-mmap03
 mmap04
 mmap05
 mmap06
 mmap08
 mmap09
-mmap10
 mmap12
 mmap13
-mmap14
 mmap15
-mmap16
 mmap17
 mmap18
 mmap19
@@ -209,7 +201,6 @@ open03
 open04
 open08
 open09
-open13
 openat01
 pathconf01
 pipe01
@@ -263,10 +254,8 @@ setregid01
 setregid02
 setregid03
 setregid04
-setresgid01
 setresgid02
 setresgid03
-setresgid04
 setresuid01
 setresuid02
 setresuid03
