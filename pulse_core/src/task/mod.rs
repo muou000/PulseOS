@@ -416,13 +416,9 @@ impl axfs::ProcfsProcessProvider for PulseProcessProvider {
             append_hex(&mut line_buf, &mut cursor, offset, 8);
             append_bytes(&mut line_buf, &mut cursor, b" ");
 
-            if dev_major != 0 || dev_minor != 0 {
-                append_hex(&mut line_buf, &mut cursor, dev_major as usize, 2);
-                append_bytes(&mut line_buf, &mut cursor, b":");
-                append_hex(&mut line_buf, &mut cursor, dev_minor as usize, 2);
-            } else {
-                append_bytes(&mut line_buf, &mut cursor, b"00:00");
-            }
+            append_hex(&mut line_buf, &mut cursor, dev_major as usize, 2);
+            append_bytes(&mut line_buf, &mut cursor, b":");
+            append_hex(&mut line_buf, &mut cursor, dev_minor as usize, 2);
             append_bytes(&mut line_buf, &mut cursor, b" ");
 
             let inode_len = append_dec(&mut line_buf, &mut cursor, inode);
