@@ -21,9 +21,7 @@ impl Ext4 {
         let inode_size = super_block.inode_size as u64;
         let group = (inode_num - 1) / inodes_per_group;
         let index = (inode_num - 1) % inodes_per_group;
-        let block_group =
-            Ext4BlockGroup::load_new(&self.block_device, &super_block, group as usize);
-        let inode_table_blk_num = block_group.get_inode_table_blk_num();
+        let inode_table_blk_num = self.inode_table_cache[group as usize];
 
         inode_table_blk_num as usize * BLOCK_SIZE + index as usize * inode_size as usize
     }
@@ -31,10 +29,12 @@ impl Ext4 {
     /// Load the inode reference from the disk.
     pub fn get_inode_ref(&self, inode_num: u32) -> Ext4InodeRef {
         let offset = self.inode_disk_pos(inode_num);
+        let block_offset = (offset / BLOCK_SIZE) * BLOCK_SIZE;
+        let inner_offset = offset % BLOCK_SIZE;
 
-        let mut ext4block = Block::load(&self.block_device, offset);
+        let mut ext4block = Block::load(&self.block_device, block_offset);
 
-        let inode: &mut Ext4Inode = ext4block.read_as_mut();
+        let inode: &mut Ext4Inode = ext4block.read_offset_as_mut(inner_offset);
 
         Ext4InodeRef {
             inode_num,
@@ -45,23 +45,38 @@ impl Ext4 {
     /// write back inode with checksum
     pub fn write_back_inode(&self, inode_ref: &mut Ext4InodeRef) {
         let inode_pos = self.inode_disk_pos(inode_ref.inode_num);
+        let block_offset = (inode_pos / BLOCK_SIZE) * BLOCK_SIZE;
+        let inner_offset = inode_pos % BLOCK_SIZE;
 
         // make sure self.super_block is up-to-date
         inode_ref
             .inode
             .set_inode_checksum(&self.super_block, inode_ref.inode_num);
-        inode_ref
-            .inode
-            .sync_inode_to_disk(&self.block_device, inode_pos);
+
+        let mut block = Block::load(&self.block_device, block_offset);
+        let inode_size = self.super_block.inode_size() as usize;
+        let write_size = core::cmp::min(inode_size, core::mem::size_of::<Ext4Inode>());
+        let inode_data = unsafe {
+            core::slice::from_raw_parts(&inode_ref.inode as *const Ext4Inode as *const u8, write_size)
+        };
+        block.data[inner_offset..inner_offset + write_size].copy_from_slice(inode_data);
+        block.sync_blk_to_disk(&self.block_device);
     }
 
     /// write back inode with checksum
     pub fn write_back_inode_without_csum(&self, inode_ref: &Ext4InodeRef) {
         let inode_pos = self.inode_disk_pos(inode_ref.inode_num);
+        let block_offset = (inode_pos / BLOCK_SIZE) * BLOCK_SIZE;
+        let inner_offset = inode_pos % BLOCK_SIZE;
 
-        inode_ref
-            .inode
-            .sync_inode_to_disk(&self.block_device, inode_pos);
+        let mut block = Block::load(&self.block_device, block_offset);
+        let inode_size = self.super_block.inode_size() as usize;
+        let write_size = core::cmp::min(inode_size, core::mem::size_of::<Ext4Inode>());
+        let inode_data = unsafe {
+            core::slice::from_raw_parts(&inode_ref.inode as *const Ext4Inode as *const u8, write_size)
+        };
+        block.data[inner_offset..inner_offset + write_size].copy_from_slice(inode_data);
+        block.sync_blk_to_disk(&self.block_device);
     }
 
     /// Get physical block id of a logical block.

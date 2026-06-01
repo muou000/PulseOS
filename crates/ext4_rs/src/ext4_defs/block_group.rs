@@ -94,9 +94,9 @@ impl Ext4BlockGroup {
 
     /// Set the count of used directories in this block group.
     pub fn set_used_dirs_count(&mut self, s: &Ext4Superblock, cnt: u32) {
-        self.itable_unused_lo = (cnt & 0xffff) as u16; 
+        self.used_dirs_count_lo = (cnt & 0xffff) as u16; 
         if s.desc_size() > EXT4_MIN_BLOCK_GROUP_DESCRIPTOR_SIZE {
-            self.itable_unused_hi = (cnt >> 16) as u16;
+            self.used_dirs_count_hi = (cnt >> 16) as u16;
         }
     }
 
@@ -154,7 +154,7 @@ impl Ext4BlockGroup {
 
         // cast self to &[u8]
         let self_bytes =
-            unsafe { core::slice::from_raw_parts(self as *const _ as *const u8, 0x40) };
+            unsafe { core::slice::from_raw_parts(self as *const _ as *const u8, desc_size as usize) };
 
         // bg checksum
         checksum = ext4_crc32c(checksum, self_bytes, desc_size as u32);
@@ -177,8 +177,9 @@ impl Ext4BlockGroup {
         let block_id = first_data_block as usize + dsc_id + 1;
         let offset = (bgid % dsc_cnt) * super_block.desc_size as usize;
 
+        let desc_size = super_block.desc_size() as usize;
         let data = unsafe {
-            core::slice::from_raw_parts(self as *const _ as *const u8, size_of::<Ext4BlockGroup>())
+            core::slice::from_raw_parts(self as *const _ as *const u8, desc_size)
         };
         block_device.write_offset(block_id * BLOCK_SIZE + offset, data);
     }

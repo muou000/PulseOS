@@ -96,8 +96,8 @@ pub fn ext4_bmap_bit_find_clr(bmap: &[u8], sbit: u32, ebit: u32, bit_id: &mut u3
 /// Parameter bmap: Mutable reference to the bitmap array
 /// Parameter start_bit: The start index of the bit range to clear
 /// Parameter end_bit: The end index of the bit range to clear
-pub fn ext4_bmap_bits_free(bmap: &mut [u8], start_bit: u32, end_bit: u32) {
-    for bit in start_bit..=end_bit {
+pub fn ext4_bmap_bits_free(bmap: &mut [u8], start_bit: u32, count: u32) {
+    for bit in start_bit..(start_bit + count) {
         ext4_bmap_bit_clr(bmap, bit);
     }
 }
