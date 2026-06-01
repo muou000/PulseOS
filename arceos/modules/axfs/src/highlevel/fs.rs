@@ -311,8 +311,18 @@ impl FsContext {
     /// Creates a new, empty directory at the provided path.
     pub fn create_dir(&self, path: impl AsRef<Path>, mode: NodePermission) -> VfsResult<Location> {
         let (dir, name) = self.resolve_nonexistent(path.as_ref())?;
-        let loc = dir.create(name, NodeType::Directory, mode)?;
-        if let Some((uid, gid)) = self.credentials {
+        let mut final_mode = mode;
+        let mut final_credentials = self.credentials;
+        if let Ok(parent_meta) = dir.metadata() {
+            if parent_meta.mode.contains(NodePermission::SET_GID) {
+                final_mode |= NodePermission::SET_GID;
+                if let Some((uid, _)) = final_credentials {
+                    final_credentials = Some((uid, parent_meta.gid));
+                }
+            }
+        }
+        let loc = dir.create(name, NodeType::Directory, final_mode)?;
+        if let Some((uid, gid)) = final_credentials {
             let _ = loc.update_metadata(MetadataUpdate {
                 owner: Some((uid, gid)),
                 ..Default::default()
@@ -342,9 +352,17 @@ impl FsContext {
         if dir.lookup_no_follow(name).is_ok() {
             return Err(VfsError::AlreadyExists);
         }
+        let mut final_credentials = self.credentials;
+        if let Ok(parent_meta) = dir.metadata() {
+            if parent_meta.mode.contains(NodePermission::SET_GID) {
+                if let Some((uid, _)) = final_credentials {
+                    final_credentials = Some((uid, parent_meta.gid));
+                }
+            }
+        }
         let symlink = dir.create(name, NodeType::Symlink, NodePermission::default())?;
         symlink.entry().as_file()?.set_symlink(target.as_ref())?;
-        if let Some((uid, gid)) = self.credentials {
+        if let Some((uid, gid)) = final_credentials {
             let _ = symlink.update_metadata(MetadataUpdate {
                 owner: Some((uid, gid)),
                 ..Default::default()

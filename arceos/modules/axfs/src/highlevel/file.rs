@@ -210,6 +210,10 @@ impl OpenOptions {
     fn _open(&self, loc: Location) -> VfsResult<OpenResult> {
         let flags = self.to_flags()?;
 
+        if loc.is_dir() && (self.create || self.create_new || flags.contains(FileFlags::WRITE)) {
+            return Err(VfsError::IsADirectory);
+        }
+
         if self.directory {
             if flags.contains(FileFlags::WRITE) {
                 return Err(VfsError::IsADirectory);
@@ -307,7 +311,7 @@ impl OpenOptions {
         match (self.write, self.append) {
             (true, false) => {}
             (false, false) => {
-                if self.truncate || self.create || self.create_new {
+                if self.truncate {
                     return false;
                 }
             }

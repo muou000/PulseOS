@@ -345,11 +345,23 @@ impl DirNode {
             Err(err) if err.canonicalize() == VfsError::NotFound && options.create => {}
             Err(err) => return Err(err),
         }
+        let mut permission = options.permission;
+        let mut user = options.user;
+        if let Ok(parent_meta) = self.metadata() {
+            if parent_meta.mode.contains(NodePermission::SET_GID) {
+                if options.node_type == NodeType::Directory {
+                    permission |= NodePermission::SET_GID;
+                }
+                if let Some((uid, _)) = user {
+                    user = Some((uid, parent_meta.gid));
+                }
+            }
+        }
         let entry =
-            self.create_locked(name, options.node_type, options.permission, &mut children)?;
-        if options.user.is_some() {
+            self.create_locked(name, options.node_type, permission, &mut children)?;
+        if user.is_some() {
             entry.update_metadata(MetadataUpdate {
-                owner: options.user,
+                owner: user,
                 ..Default::default()
             })?;
         }

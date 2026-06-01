@@ -3,12 +3,12 @@ use core::sync::atomic::{AtomicBool, Ordering};
 
 use axerrno::LinuxError;
 use axfs::OpenOptions;
-use axfs_ng_vfs::{NodePermission, VfsError, path::Path};
+use axfs_ng_vfs::{NodePermission, VfsError, NodeType, MetadataUpdate, path::Path};
 use linux_raw_sys::general::*;
 use pulse_core::fd_table::open_result_to_entry;
 
 use crate::impls::{
-    fs::common::{MOUNTED_TARGETS, context_for_dirfd, insert_fd_entry, open_fd_flags},
+    fs::common::{MOUNTED_TARGETS, context_for_dirfd, insert_fd_entry, open_fd_flags, resolve_location_at_ptr},
     utils::read_user_cstring,
 };
 
@@ -56,7 +56,7 @@ fn flags_to_options(flags: usize, mode: usize) -> OpenOptions {
     let umask = pulse_core::task::current_process()
         .map(|process| process.umask())
         .unwrap_or(0o022);
-    let mode = ((mode as u32) & !umask) & 0o777;
+    let mode = ((mode as u32) & !umask) & 0o7777;
     options.mode(mode);
     options
 }
@@ -90,7 +90,7 @@ fn mkdir_mode(mode: usize) -> NodePermission {
     let umask = pulse_core::task::current_process()
         .map(|process| process.umask())
         .unwrap_or(0o022);
-    let mode = ((mode as u32) & !umask) & 0o777;
+    let mode = ((mode as u32) & !umask) & 0o7777;
     NodePermission::from_bits_truncate(mode as _)
 }
 
@@ -267,6 +267,59 @@ pub fn sys_openat(dirfd: i32, pathname: usize, flags: usize, mode: usize) -> isi
             return -err.code() as isize;
         }
     };
+
+    let metadata = match &opened {
+        axfs::OpenResult::File(file) => file.location().metadata(),
+        axfs::OpenResult::Dir(dir) => dir.metadata(),
+    };
+    if let Ok(meta) = metadata {
+        // O_NOATIME permission check
+        if (flags & (O_NOATIME as usize)) != 0 {
+            let current_uid = pulse_core::task::current_process()
+                .map(|process| process.euid())
+                .unwrap_or(0);
+            if current_uid != 0 && current_uid != meta.uid {
+                return -LinuxError::EPERM.code() as isize;
+            }
+        }
+        // FIFO O_NONBLOCK | O_WRONLY check
+        if meta.node_type == NodeType::Fifo {
+            if (flags & (O_NONBLOCK as usize)) != 0 && (flags & (O_ACCMODE as usize)) == O_WRONLY as usize {
+                return -LinuxError::ENXIO.code() as isize;
+            }
+        }
+        // O_NOFOLLOW symlink check
+        if (flags & (O_NOFOLLOW as usize)) != 0 && meta.node_type == NodeType::Symlink {
+            return -LinuxError::ELOOP.code() as isize;
+        }
+    }
+
+    if (flags & O_PATH as usize) == 0 {
+        let access_mode = flags & (O_ACCMODE as usize);
+        let mut required_mode = 0usize;
+        if access_mode == O_RDONLY as usize || access_mode == O_RDWR as usize {
+            required_mode |= R_OK as usize;
+        }
+        if access_mode == O_WRONLY as usize || access_mode == O_RDWR as usize {
+            required_mode |= W_OK as usize;
+        }
+        if (flags & O_TRUNC as usize) != 0 {
+            required_mode |= W_OK as usize;
+        }
+
+        let location = match &opened {
+            axfs::OpenResult::File(file) => file.location(),
+            axfs::OpenResult::Dir(dir) => dir,
+        };
+
+        let (uid, gid) = pulse_core::task::current_process()
+            .map(|process| (process.euid(), process.egid()))
+            .unwrap_or((0, 0));
+
+        if let Err(err) = crate::impls::fs::common::check_faccess_permission(location, required_mode, uid, gid) {
+            return -err.code() as isize;
+        }
+    }
 
     let write_requested = (flags & (O_ACCMODE as usize) == O_WRONLY as usize)
         || (flags & (O_ACCMODE as usize) == O_RDWR as usize);
@@ -654,3 +707,181 @@ pub fn sys_symlinkat(target: usize, newdirfd: i32, linkpath: usize) -> isize {
         }
     }
 }
+
+pub fn sys_mknodat(dirfd: i32, pathname: usize, mode: usize, _dev: usize) -> isize {
+    if pathname == 0 {
+        return -LinuxError::EFAULT.code() as isize;
+    }
+    let path_c = match read_user_cstring(pathname) {
+        Ok(path) => path,
+        Err(e) => return -e.code() as isize,
+    };
+    let path = match path_c.to_str() {
+        Ok(path) => path,
+        Err(_) => return -LinuxError::EINVAL.code() as isize,
+    };
+    let resolved_dirfd = if path.starts_with('/') {
+        AT_FDCWD as i32
+    } else {
+        dirfd
+    };
+    let ctx = match context_for_dirfd(resolved_dirfd) {
+        Ok(ctx) => ctx,
+        Err(e) => return -e.code() as isize,
+    };
+    match ctx.resolve_no_follow(path) {
+        Ok(_) => return -LinuxError::EEXIST.code() as isize,
+        Err(VfsError::NotFound) => {}
+        Err(e) => return -LinuxError::from(e.canonicalize()).code() as isize,
+    }
+
+    let file_type = mode & (S_IFMT as usize);
+    let node_type = if file_type == S_IFREG as usize || file_type == 0 {
+        NodeType::RegularFile
+    } else if file_type == S_IFCHR as usize {
+        NodeType::CharacterDevice
+    } else if file_type == S_IFBLK as usize {
+        NodeType::BlockDevice
+    } else if file_type == S_IFIFO as usize {
+        NodeType::Fifo
+    } else if file_type == S_IFSOCK as usize {
+        NodeType::Socket
+    } else {
+        return -LinuxError::EINVAL.code() as isize;
+    };
+
+    let umask = pulse_core::task::current_process()
+        .map(|process| process.umask())
+        .unwrap_or(0o022);
+    let perm = ((mode as u32) & !umask) & 0o7777;
+    let node_permission = NodePermission::from_bits_truncate(perm as _);
+
+    let (dir, name) = match ctx.resolve_nonexistent(Path::new(path)) {
+        Ok(res) => res,
+        Err(e) => return -LinuxError::from(e.canonicalize()).code() as isize,
+    };
+
+    let mut final_perm = node_permission;
+    let mut final_credentials = ctx.credentials;
+    if let Ok(parent_meta) = dir.metadata() {
+        if parent_meta.mode.contains(NodePermission::SET_GID) {
+            if node_type == NodeType::Directory {
+                final_perm |= NodePermission::SET_GID;
+            }
+            if let Some((uid, _)) = final_credentials {
+                final_credentials = Some((uid, parent_meta.gid));
+            }
+        }
+    }
+
+    let loc = match dir.create(name, node_type, final_perm) {
+        Ok(loc) => loc,
+        Err(e) => return -LinuxError::from(e.canonicalize()).code() as isize,
+    };
+
+    if let Some((uid, gid)) = final_credentials {
+        let _ = loc.update_metadata(MetadataUpdate {
+            owner: Some((uid, gid)),
+            ..Default::default()
+        });
+    }
+
+    0
+}
+
+pub fn sys_linkat(
+    olddirfd: i32,
+    oldpath: usize,
+    newdirfd: i32,
+    newpath: usize,
+    flags: usize,
+) -> isize {
+    axlog::debug!(
+        "sys_linkat: olddirfd={}, oldpath={:#x}, newdirfd={}, newpath={:#x}, flags={:#x}",
+        olddirfd,
+        oldpath,
+        newdirfd,
+        newpath,
+        flags
+    );
+
+    if oldpath == 0 || newpath == 0 {
+        return -LinuxError::EFAULT.code() as isize;
+    }
+
+    let supported_flags = AT_SYMLINK_FOLLOW as usize | AT_EMPTY_PATH as usize;
+    if (flags & !supported_flags) != 0 {
+        return -LinuxError::EINVAL.code() as isize;
+    }
+
+    let oldpath_c = match read_user_cstring(oldpath) {
+        Ok(path) => path,
+        Err(e) => return -e.code() as isize,
+    };
+    let oldpath_str = match oldpath_c.to_str() {
+        Ok(s) => s,
+        Err(_) => return -LinuxError::EINVAL.code() as isize,
+    };
+
+    let newpath_c = match read_user_cstring(newpath) {
+        Ok(path) => path,
+        Err(e) => return -e.code() as isize,
+    };
+    let newpath_str = match newpath_c.to_str() {
+        Ok(s) => s,
+        Err(_) => return -LinuxError::EINVAL.code() as isize,
+    };
+
+    if newpath_str.is_empty() {
+        return -LinuxError::ENOENT.code() as isize;
+    }
+
+    if oldpath_str.is_empty() && (flags & AT_EMPTY_PATH as usize) == 0 {
+        return -LinuxError::ENOENT.code() as isize;
+    }
+
+    let mut resolve_flags = 0usize;
+    if (flags & AT_SYMLINK_FOLLOW as usize) == 0 {
+        resolve_flags |= AT_SYMLINK_NOFOLLOW as usize;
+    }
+    if (flags & AT_EMPTY_PATH as usize) != 0 {
+        resolve_flags |= AT_EMPTY_PATH as usize;
+    }
+
+    let old_loc = match resolve_location_at_ptr(olddirfd, oldpath, resolve_flags) {
+        Ok(loc) => loc,
+        Err(e) => return -e.code() as isize,
+    };
+
+    if old_loc.is_dir() {
+        return -LinuxError::EPERM.code() as isize;
+    }
+
+    let resolved_newdirfd = if newpath_str.starts_with('/') {
+        AT_FDCWD as i32
+    } else {
+        newdirfd
+    };
+    let new_ctx = match context_for_dirfd(resolved_newdirfd) {
+        Ok(ctx) => ctx,
+        Err(e) => return -e.code() as isize,
+    };
+
+    let (new_dir, new_name) = match new_ctx.resolve_parent(Path::new(newpath_str)) {
+        Ok(res) => res,
+        Err(e) => return -LinuxError::from(e.canonicalize()).code() as isize,
+    };
+
+    if new_dir.lookup_no_follow(&new_name).is_ok() {
+        return -LinuxError::EEXIST.code() as isize;
+    }
+
+    match new_dir.link(&new_name, &old_loc) {
+        Ok(_) => 0,
+        Err(e) => {
+            let errno = LinuxError::from(e.canonicalize());
+            -errno.code() as isize
+        }
+    }
+}
+
