@@ -36,11 +36,12 @@ impl Mountpoint {
         static DEVICE_COUNTER: AtomicU64 = AtomicU64::new(1);
 
         let root = fs.root_dir();
+        let minor = DEVICE_COUNTER.fetch_add(1, Ordering::Relaxed) as u32;
         Arc::new(Self {
             root,
             location: location_in_parent,
             children: Mutex::default(),
-            device: DEVICE_COUNTER.fetch_add(1, Ordering::Relaxed),
+            device: crate::DeviceId::new(0, minor).0,
         })
     }
 

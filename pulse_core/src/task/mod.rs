@@ -336,8 +336,9 @@ impl axfs::ProcfsProcessProvider for PulseProcessProvider {
                     let loc = cached_file.location();
                     if let Ok(meta) = loc.metadata() {
                         inode = meta.inode;
-                        dev_major = meta.device >> 8;
-                        dev_minor = meta.device & 0xff;
+                        let device_id = axfs_ng_vfs::DeviceId(meta.device);
+                        dev_major = device_id.major();
+                        dev_minor = device_id.minor();
                     }
                     if let Ok(path) = loc.absolute_path() {
                         path_str = path.as_str().to_string();
