@@ -52,16 +52,22 @@ impl Ext4 {
     }
     /// Opens and loads an Ext4 from the `block_device`.
     pub fn open(block_device: Arc<dyn BlockDevice>) -> Self {
-        // Load the superblock
-        let block = Block::load(&block_device, SUPERBLOCK_OFFSET);
-        let super_block: Ext4Superblock = block.read_as();
+        // Load the superblock (aligned to block 0)
+        let block = Block::load(&block_device, 0);
+        let super_block: Ext4Superblock = block.read_offset_as(SUPERBLOCK_OFFSET);
 
-        // drop(block);
+        let group_count = super_block.block_group_count() as usize;
+        let mut inode_table_cache = Vec::with_capacity(group_count);
+        for bgid in 0..group_count {
+            let block_group = Ext4BlockGroup::load_new(&block_device, &super_block, bgid);
+            inode_table_cache.push(block_group.get_inode_table_blk_num());
+        }
         
         let ext4_tmp = Ext4 {
             block_device,
             super_block,
             system_zone_cache: None,
+            inode_table_cache,
         };
         let zones = ext4_tmp.get_system_zone();
 

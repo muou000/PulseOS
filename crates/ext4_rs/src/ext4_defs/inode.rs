@@ -473,9 +473,10 @@ impl Ext4Inode {
         }
     }
 
-    pub fn sync_inode_to_disk(&self, block_device: &Arc<dyn BlockDevice>, inode_pos: usize) {
+    pub fn sync_inode_to_disk(&self, block_device: &Arc<dyn BlockDevice>, inode_pos: usize, super_block: &Ext4Superblock) {
+        let write_size = core::cmp::min(super_block.inode_size() as usize, size_of::<Ext4Inode>());
         let data = unsafe {
-            core::slice::from_raw_parts(self as *const _ as *const u8, size_of::<Ext4Inode>())
+            core::slice::from_raw_parts(self as *const _ as *const u8, write_size)
         };
         block_device.write_offset(inode_pos, data);
     }

@@ -37,42 +37,39 @@ impl<D: BlockDriverOps> Ext4Disk<D> {
     }
 }
 
-impl<D: BlockDriverOps + 'static> BlockDevice for Ext4Disk<D> {
-    fn read_offset(&self, offset: usize) -> Vec<u8> {
+impl<D: BlockDriverOps + 'static> Ext4Disk<D> {
+    fn read_block_aligned(&self, block_offset: usize) -> Vec<u8> {
         {
             let mut cache = self.block_cache.lock();
-            if let Some(data) = cache.get(&offset) {
+            if let Some(data) = cache.get(&block_offset) {
                 return data.clone();
             }
         }
 
-        let (first_block, inner_offset, blocks) = self.byte_range(offset, BLOCK_SIZE);
+        let (first_block, inner_offset, blocks) = self.byte_range(block_offset, BLOCK_SIZE);
         let mut raw = vec![0; blocks * self.sector_size];
         let mut dev = self.dev.lock();
         let total_blocks = dev.num_blocks();
-        // Boundary check: reject obviously invalid block addresses
         if first_block + blocks as u64 > total_blocks {
             log::error!(
-                "ext4 read_offset OOB: offset={:#x}, first_block={}, blocks={}, num_blocks={}",
-                offset, first_block, blocks, total_blocks
+                "ext4 read_block_aligned OOB: block_offset={:#x}, first_block={}, blocks={}, num_blocks={}",
+                block_offset, first_block, blocks, total_blocks
             );
-            // Return zeroed buffer instead of panicking
             raw.drain(0..inner_offset);
             raw.truncate(BLOCK_SIZE);
             return raw;
         }
         if let Err(err) = dev.read_block(first_block, &mut raw) {
             log::error!(
-                "ext4 read_offset failed: offset={}, first_block={}, blocks={}, \
+                "ext4 read_block_aligned failed: block_offset={}, first_block={}, blocks={}, \
                  sector_size={}, num_blocks={}, err={:?}",
-                offset,
+                block_offset,
                 first_block,
                 blocks,
                 self.sector_size,
                 total_blocks,
                 err
             );
-            // Return zeroed buffer instead of panicking
             raw.drain(0..inner_offset);
             raw.truncate(BLOCK_SIZE);
             return raw;
@@ -82,9 +79,30 @@ impl<D: BlockDriverOps + 'static> BlockDevice for Ext4Disk<D> {
 
         {
             let mut cache = self.block_cache.lock();
-            cache.put(offset, raw.clone());
+            cache.put(block_offset, raw.clone());
         }
         raw
+    }
+}
+
+impl<D: BlockDriverOps + 'static> BlockDevice for Ext4Disk<D> {
+    fn read_offset(&self, offset: usize) -> Vec<u8> {
+        let inner_offset = offset % BLOCK_SIZE;
+        if inner_offset == 0 {
+            self.read_block_aligned(offset)
+        } else {
+            let block1_offset = (offset / BLOCK_SIZE) * BLOCK_SIZE;
+            let block2_offset = block1_offset + BLOCK_SIZE;
+
+            let b1 = self.read_block_aligned(block1_offset);
+            let b2 = self.read_block_aligned(block2_offset);
+
+            let mut res = vec![0u8; BLOCK_SIZE];
+            let part1_len = BLOCK_SIZE - inner_offset;
+            res[..part1_len].copy_from_slice(&b1[inner_offset..]);
+            res[part1_len..].copy_from_slice(&b2[..inner_offset]);
+            res
+        }
     }
 
     fn write_offset(&self, offset: usize, data: &[u8]) {
@@ -92,19 +110,13 @@ impl<D: BlockDriverOps + 'static> BlockDevice for Ext4Disk<D> {
             return;
         }
         {
+            let start_align = (offset / BLOCK_SIZE) * BLOCK_SIZE;
+            let end_align = ((offset + data.len() - 1) / BLOCK_SIZE) * BLOCK_SIZE;
             let mut cache = self.block_cache.lock();
-            let mut keys_to_remove = Vec::new();
-            for (key, _) in cache.iter() {
-                let cached_start = *key;
-                let cached_end = cached_start + BLOCK_SIZE;
-                let write_start = offset;
-                let write_end = offset + data.len();
-                if cached_start < write_end && write_start < cached_end {
-                    keys_to_remove.push(*key);
-                }
-            }
-            for key in keys_to_remove {
-                cache.pop(&key);
+            let mut current = start_align;
+            while current <= end_align {
+                cache.pop(&current);
+                current += BLOCK_SIZE;
             }
         }
         let (first_block, inner_offset, blocks) = self.byte_range(offset, data.len());

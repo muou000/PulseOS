@@ -2,73 +2,6 @@ use crate::ext4_defs::*;
 use crate::prelude::*;
 use crate::return_errno_with_message;
 use crate::utils::bitmap::*;
-use core::array;
-
-// Cache for block group information
-#[derive(Clone, Copy)]
-struct BlockGroupCache {
-    bitmap: [u8; BLOCK_SIZE],
-    free_blocks: u64,
-    last_used_idx: u32,
-}
-
-impl BlockGroupCache {
-    fn new(bitmap: &[u8], free_blocks: u64) -> Self {
-        let mut new_bitmap = [0u8; BLOCK_SIZE];
-        new_bitmap.copy_from_slice(bitmap);
-        Self {
-            bitmap: new_bitmap,
-            free_blocks,
-            last_used_idx: 0,
-        }
-    }
-}
-
-// Simple fixed-size cache for block groups
-struct BlockGroupCacheManager {
-    caches: [(u32, BlockGroupCache); 8], // Cache for up to 8 block groups
-    len: usize,
-}
-
-impl BlockGroupCacheManager {
-    fn new() -> Self {
-        let empty_cache = BlockGroupCache {
-            bitmap: [0; BLOCK_SIZE],
-            free_blocks: 0,
-            last_used_idx: 0,
-        };
-        Self {
-            caches: array::from_fn(|_| (0, empty_cache)),
-            len: 0,
-        }
-    }
-
-    fn get(&mut self, bgid: u32) -> Option<&mut BlockGroupCache> {
-        for i in 0..self.len {
-            if self.caches[i].0 == bgid {
-                return Some(&mut self.caches[i].1);
-            }
-        }
-        None
-    }
-
-    fn insert(&mut self, bgid: u32, cache: BlockGroupCache) {
-        if self.len < 8 {
-            self.caches[self.len] = (bgid, cache);
-            self.len += 1;
-        } else {
-            // Simple LRU: remove the first entry and shift others
-            for i in 0..self.len-1 {
-                self.caches[i] = self.caches[i+1];
-            }
-            self.caches[self.len-1] = (bgid, cache);
-        }
-    }
-
-    fn iter_caches(&self) -> impl Iterator<Item = &(u32, BlockGroupCache)> {
-        self.caches[..self.len].iter()
-    }
-}
 
 impl Ext4 {
     /// Compute number of block group from block address.
@@ -406,6 +339,11 @@ impl Ext4 {
         super_block.set_free_blocks_count(super_blk_free_blocks);
         super_block.sync_to_disk_with_csum(&self.block_device);
 
+        unsafe {
+            let self_mut = self as *const Self as *mut Self;
+            (*self_mut).super_block = super_block;
+        }
+
         // Update inode blocks (different block size!) count
         let mut inode_blocks = inode_ref.inode.blocks_count();
         inode_blocks += block_size / EXT4_INODE_BLOCK_SIZE as u64;
@@ -470,6 +408,11 @@ impl Ext4 {
             super_blk_free_blocks += free_cnt as u64;
             super_block.set_free_blocks_count(super_blk_free_blocks);
             super_block.sync_to_disk_with_csum(&self.block_device);
+
+            unsafe {
+                let self_mut = self as *const Self as *mut Self;
+                (*self_mut).super_block = super_block;
+            }
 
             /* Update inode blocks (different block size!) count */
             let mut inode_blocks = inode_ref.inode.blocks_count();
@@ -676,20 +619,26 @@ impl Ext4 {
             
             // If we found any blocks, update metadata
             if found_blocks > 0 {
+                let mut sb_copy = *super_block;
+
                 // Update bitmap on disk
-                block_group.set_block_group_balloc_bitmap_csum(super_block, &bitmap_data);
+                block_group.set_block_group_balloc_bitmap_csum(&sb_copy, &bitmap_data);
                 self.block_device.write_offset(bmp_blk_adr as usize * BLOCK_SIZE, &bitmap_data);
                 
                 // Update block group free blocks count
                 let new_free_count = free_blocks - found_blocks as u64;
                 block_group.set_free_blocks_count(new_free_count as u32);
-                block_group.sync_to_disk_with_csum(&self.block_device, bgid as usize, super_block);
+                block_group.sync_to_disk_with_csum(&self.block_device, bgid as usize, &sb_copy);
                 
                 // Update superblock free blocks count
-                let mut sb_copy = *super_block;
                 let sb_free_blocks = sb_copy.free_blocks_count();
                 sb_copy.set_free_blocks_count(sb_free_blocks - found_blocks as u64);
                 sb_copy.sync_to_disk_with_csum(&self.block_device);
+
+                unsafe {
+                    let self_mut = self as *const Self as *mut Self;
+                    (*self_mut).super_block = sb_copy;
+                }
                 
                 // Update inode blocks count
                 let blocks_per_fs_block = BLOCK_SIZE as u64 / EXT4_INODE_BLOCK_SIZE as u64;
