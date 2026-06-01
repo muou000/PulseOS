@@ -430,10 +430,8 @@ impl axfs::ProcfsProcessProvider for PulseProcessProvider {
                 append_bytes(&mut line_buf, &mut cursor, b"\n");
                 out.push_str(unsafe { core::str::from_utf8_unchecked(&line_buf[..cursor]) });
             } else {
-                let spaces = if inode_len < 7 { 7 - inode_len } else { 1 };
-                for _ in 0..spaces {
-                    append_bytes(&mut line_buf, &mut cursor, b" ");
-                }
+                let spaces = if inode_len < 7 { 8 - inode_len } else { 1 };
+                append_bytes(&mut line_buf, &mut cursor, &b"        "[..spaces]);
                 out.push_str(unsafe { core::str::from_utf8_unchecked(&line_buf[..cursor]) });
                 out.push_str(&path_str);
                 out.push('\n');
