@@ -51,6 +51,10 @@ impl WaitQueue {
     /// Cancel events by removing the task from the wait queue.
     /// If `from_timer_list` is true, try to remove the task from the timer list.
     fn cancel_events(&self, curr: &CurrentTask, _from_timer_list: bool) {
+        if !curr.in_wait_queue() {
+            return;
+        }
+
         // A task can be wake up only one events (timer or `notify()`), remove
         // the event from another queue. Use the queue membership as the source
         // of truth instead of the task-local flag to avoid stale state.
@@ -181,15 +185,27 @@ impl WaitQueue {
     /// If `resched` is true, the current task will be preempted when the
     /// preemption is enabled.
     pub fn notify_one(&self, resched: bool) -> bool {
-        let mut wq = self.queue.lock();
-        while let Some(task) = wq.pop_front() {
-            if task.state() != crate::task::TaskState::Blocked {
-                continue;
+        let task = {
+            let mut wq = self.queue.lock();
+            let mut target = None;
+            while let Some(task) = wq.pop_front() {
+                if task.state() == crate::task::TaskState::Blocked {
+                    target = Some(task);
+                    break;
+                }
+                // The task is no longer blocked (e.g., timed out), but still in the wait queue.
+                // We should mark it as not in the wait queue.
+                task.set_in_wait_queue(false);
             }
+            target
+        };
+
+        if let Some(task) = task {
             unblock_one_task(task, resched);
-            return true;
+            true
+        } else {
+            false
         }
-        false
     }
 
     /// Wakes all tasks in the wait queue.
@@ -197,8 +213,20 @@ impl WaitQueue {
     /// If `resched` is true, the current task will be preempted when the
     /// preemption is enabled.
     pub fn notify_all(&self, resched: bool) {
-        while self.notify_one(resched) {
-            // loop until the wait queue is empty
+        let tasks = {
+            let mut wq = self.queue.lock();
+            core::mem::take(&mut *wq)
+        };
+
+        if !tasks.is_empty() {
+            let _guard = NoPreemptIrqSave::new();
+            for task in tasks {
+                if task.state() == crate::task::TaskState::Blocked {
+                    unblock_one_task_locked(task, resched);
+                } else {
+                    task.set_in_wait_queue(false);
+                }
+            }
         }
     }
 
@@ -207,9 +235,17 @@ impl WaitQueue {
     /// If `resched` is true, the current task will be preempted when the
     /// preemption is enabled.
     pub fn notify_task(&mut self, resched: bool, task: &AxTaskRef) -> bool {
-        let mut wq = self.queue.lock();
-        if let Some(index) = wq.iter().position(|t| Arc::ptr_eq(t, task)) {
-            unblock_one_task(wq.remove(index).unwrap(), resched);
+        let task = {
+            let mut wq = self.queue.lock();
+            if let Some(index) = wq.iter().position(|t| Arc::ptr_eq(t, task)) {
+                wq.remove(index)
+            } else {
+                None
+            }
+        };
+
+        if let Some(task) = task {
+            unblock_one_task(task, resched);
             true
         } else {
             false
@@ -256,10 +292,15 @@ impl WaitQueue {
 }
 
 fn unblock_one_task(task: AxTaskRef, resched: bool) {
+    let _guard = NoPreemptIrqSave::new();
+    unblock_one_task_locked(task, resched);
+}
+
+fn unblock_one_task_locked(task: AxTaskRef, resched: bool) {
     // Mark task as not in wait queue.
     task.set_in_wait_queue(false);
     // Select run queue by the CPU set of the task.
     // Use `NoOp` kernel guard here because the function is called with holding the
-    // lock of wait queue, where the irq and preemption are disabled.
+    // lock of wait queue, or an explicit `NoPreemptIrqSave` guard.
     select_run_queue::<NoOp>(&task).unblock_task(task, resched)
 }
