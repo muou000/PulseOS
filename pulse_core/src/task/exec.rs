@@ -216,6 +216,8 @@ impl Process {
             shm.clear();
         }
 
+        self.sem_undos.lock().clear();
+
         let cloexec_entries = {
             let binding = self.fd_table();
             let mut fd_table = binding.write();

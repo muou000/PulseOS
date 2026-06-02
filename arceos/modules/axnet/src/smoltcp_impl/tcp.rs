@@ -1,6 +1,6 @@
 use core::cell::UnsafeCell;
 use core::net::SocketAddr;
-use core::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
 
 use axerrno::{ax_err, ax_err_type, AxError, AxResult};
 use axhal::time::current_ticks;
@@ -44,6 +44,8 @@ pub struct TcpSocket {
     peer_addr: UnsafeCell<IpEndpoint>,
     nonblock: AtomicBool,
     reuse_addr: AtomicBool,
+    rcv_timeout: AtomicU64,
+    snd_timeout: AtomicU64,
     pub multicast_groups: Mutex<alloc::vec::Vec<alloc::vec::Vec<u8>>>,
 }
 
@@ -51,14 +53,17 @@ unsafe impl Sync for TcpSocket {}
 
 impl TcpSocket {
     /// Creates a new TCP socket.
-    pub const fn new() -> Self {
+    pub fn new() -> Self {
+        let handle = SOCKET_SET.add(SocketSetWrapper::new_tcp_socket());
         Self {
             state: AtomicU8::new(STATE_CLOSED),
-            handle: UnsafeCell::new(None),
+            handle: UnsafeCell::new(Some(handle)),
             local_addr: UnsafeCell::new(UNSPECIFIED_ENDPOINT),
             peer_addr: UnsafeCell::new(UNSPECIFIED_ENDPOINT),
             nonblock: AtomicBool::new(false),
             reuse_addr: AtomicBool::new(false),
+            rcv_timeout: AtomicU64::new(0),
+            snd_timeout: AtomicU64::new(0),
             multicast_groups: Mutex::new(alloc::vec::Vec::new()),
         }
     }
@@ -76,6 +81,8 @@ impl TcpSocket {
             peer_addr: UnsafeCell::new(peer_addr),
             nonblock: AtomicBool::new(false),
             reuse_addr: AtomicBool::new(false),
+            rcv_timeout: AtomicU64::new(0),
+            snd_timeout: AtomicU64::new(0),
             multicast_groups: Mutex::new(alloc::vec::Vec::new()),
         }
     }
@@ -140,6 +147,30 @@ impl TcpSocket {
         self.reuse_addr.store(reuse_addr, Ordering::Release);
     }
 
+    /// Returns the send timeout of this TCP socket.
+    #[inline]
+    pub fn snd_timeout(&self) -> u64 {
+        self.snd_timeout.load(Ordering::Acquire)
+    }
+
+    /// Sets the send timeout of this TCP socket.
+    #[inline]
+    pub fn set_snd_timeout(&self, timeout: u64) {
+        self.snd_timeout.store(timeout, Ordering::Release);
+    }
+
+    /// Returns the receive timeout of this TCP socket.
+    #[inline]
+    pub fn rcv_timeout(&self) -> u64 {
+        self.rcv_timeout.load(Ordering::Acquire)
+    }
+
+    /// Sets the receive timeout of this TCP socket.
+    #[inline]
+    pub fn set_rcv_timeout(&self, timeout: u64) {
+        self.rcv_timeout.store(timeout, Ordering::Release);
+    }
+
     /// To get the address pair of the socket.
     ///
     /// Returns the local and remote endpoint pair.
@@ -171,14 +202,7 @@ impl TcpSocket {
     pub fn connect(&self, remote_addr: SocketAddr) -> AxResult {
         self.update_state(STATE_CLOSED, STATE_CONNECTING, || {
             // SAFETY: no other threads can read or write these fields.
-            let handle = unsafe { self.handle.get().read() }
-                .unwrap_or_else(|| {
-                    let h = SOCKET_SET.add(SocketSetWrapper::new_tcp_socket());
-                    unsafe {
-                        self.handle.get().write(Some(h));
-                    }
-                    h
-                });
+            let handle = unsafe { self.handle.get().read().unwrap() };
 
             // // TODO: check remote addr unreachable
             // let (bound_endpoint, remote_endpoint) = self.get_endpoint_pair(remote_addr)?;
@@ -202,10 +226,11 @@ impl TcpSocket {
             info!("remote endpoint: {:?}", remote_endpoint);
             warn!("Temporarily net bridge used");
 
+            let mut iface_lock = iface.lock();
             let (local_endpoint, remote_endpoint) = SOCKET_SET
                 .with_socket_mut::<tcp::Socket, _, _>(handle, |socket| {
                     socket
-                        .connect(iface.lock().context(), remote_endpoint, bound_endpoint)
+                        .connect(iface_lock.context(), remote_endpoint, bound_endpoint)
                         .or_else(|e| match e {
                             ConnectError::InvalidState => {
                                 ax_err!(BadState, "socket connect() failed")
@@ -219,29 +244,45 @@ impl TcpSocket {
                         socket.remote_endpoint().unwrap(),
                     ))
                 })?;
+            drop(iface_lock);
             unsafe {
                 // SAFETY: no other threads can read or write these fields as we
                 // have changed the state to `BUSY`.
                 self.local_addr.get().write(local_endpoint);
                 self.peer_addr.get().write(remote_endpoint);
-                self.handle.get().write(Some(handle));
             }
             Ok(())
         })
         .unwrap_or_else(|_| ax_err!(AlreadyExists, "socket connect() failed: already connected"))?; // EISCONN
 
         // HACK: yield() to let server to listen
-        yield_now();
+        axtask::yield_now();
 
         // Here our state must be `CONNECTING`, and only one thread can run here.
         if self.is_nonblocking() {
             Err(AxError::WouldBlock)
         } else {
+            let timeout = self.snd_timeout();
+            let expire_at = if timeout > 0 {
+                Some(current_ticks() + timeout)
+            } else {
+                None
+            };
+
             self.block_on(|| {
+                debug!("TcpSocket::connect: polling connect state={:?}", self.get_state());
                 let PollState { writable, .. } = self.poll_connect()?;
                 if !writable {
+                    if let Some(expire_at) = expire_at {
+                        if current_ticks() > expire_at {
+                            debug!("TcpSocket::connect: timed out");
+                            self.set_state(STATE_CLOSED);
+                            return Err(AxError::TimedOut);
+                        }
+                    }
                     Err(AxError::WouldBlock)
                 } else if self.get_state() == STATE_CONNECTED {
+                    debug!("TcpSocket::connect: established");
                     Ok(())
                 } else {
                     ax_err!(ConnectionRefused, "socket connect() failed")
@@ -284,12 +325,7 @@ impl TcpSocket {
             };
             let bound_endpoint = IpListenEndpoint { addr, port };
 
-            let handle = unsafe { self.handle.get().read() }
-                .unwrap_or_else(|| {
-                    let h = SOCKET_SET.add(SocketSetWrapper::new_tcp_socket());
-                    unsafe { self.handle.get().write(Some(h)); }
-                    h
-                });
+            let handle = unsafe { self.handle.get().read().unwrap() };
             SOCKET_SET.with_socket_mut::<tcp::Socket, _, _>(handle, |socket| {
                 socket.set_bound_endpoint(bound_endpoint);
             });
@@ -334,12 +370,33 @@ impl TcpSocket {
             return ax_err!(InvalidInput, "socket accept() failed: not listen");
         }
 
+        let timeout = self.rcv_timeout();
+        let expire_at = if timeout > 0 {
+            Some(current_ticks() + timeout)
+        } else {
+            None
+        };
+
         // SAFETY: `self.local_addr` should be initialized after `bind()`.
         let local_port = unsafe { self.local_addr.get().read().port };
+        debug!("TcpSocket::accept: port={}", local_port);
         self.block_on(|| {
-            let (handle, (local_addr, peer_addr)) = LISTEN_TABLE.accept(local_port)?;
-            debug!("TCP socket accepted a new connection {}", peer_addr);
-            Ok(TcpSocket::new_connected(handle, local_addr, peer_addr))
+            match LISTEN_TABLE.accept(local_port) {
+                Ok((handle, (local_addr, peer_addr))) => {
+                    debug!("TCP socket accepted a new connection {}", peer_addr);
+                    Ok(TcpSocket::new_connected(handle, local_addr, peer_addr))
+                }
+                Err(AxError::WouldBlock) => {
+                    if let Some(expire_at) = expire_at {
+                        if current_ticks() > expire_at {
+                            debug!("TcpSocket::accept: timed out");
+                            return Err(AxError::TimedOut);
+                        }
+                    }
+                    Err(AxError::WouldBlock)
+                }
+                Err(e) => Err(e),
+            }
         })
     }
 
@@ -400,6 +457,13 @@ impl TcpSocket {
             return ax_err!(NotConnected, "socket recv() failed");
         }
 
+        let timeout = self.rcv_timeout();
+        let expire_at = if timeout > 0 {
+            Some(current_ticks() + timeout)
+        } else {
+            None
+        };
+
         // SAFETY: `self.handle` should be initialized in a connected socket.
         let handle = unsafe { self.handle.get().read().unwrap() };
         self.block_on(|| {
@@ -419,6 +483,11 @@ impl TcpSocket {
                     Ok(0)
                 } else {
                     // no more data
+                    if let Some(expire_at) = expire_at {
+                        if current_ticks() > expire_at {
+                            return Err(AxError::TimedOut);
+                        }
+                    }
                     Err(AxError::WouldBlock)
                 }
             })
@@ -470,16 +539,23 @@ impl TcpSocket {
         if self.is_connecting() {
             return Err(AxError::WouldBlock);
         } else if !self.is_connected() {
-            return ax_err!(NotConnected, "socket send() failed");
+            return ax_err!(BrokenPipe, "socket send() failed");
         }
+
+        let timeout = self.snd_timeout();
+        let expire_at = if timeout > 0 {
+            Some(current_ticks() + timeout)
+        } else {
+            None
+        };
 
         // SAFETY: `self.handle` should be initialized in a connected socket.
         let handle = unsafe { self.handle.get().read().unwrap() };
         self.block_on(|| {
             SOCKET_SET.with_socket_mut::<tcp::Socket, _, _>(handle, |socket| {
                 if !socket.is_active() || !socket.may_send() {
-                    // closed by remote
-                    ax_err!(ConnectionReset, "socket send() failed")
+                    // closed by remote or shutdown locally
+                    ax_err!(BrokenPipe, "socket send() failed")
                 } else if socket.can_send() {
                     // connected, and the tx buffer is not full
                     // TODO: use socket.send(|buf| {...})
@@ -489,6 +565,11 @@ impl TcpSocket {
                     Ok(len)
                 } else {
                     // tx buffer is full
+                    if let Some(expire_at) = expire_at {
+                        if current_ticks() > expire_at {
+                            return Err(AxError::TimedOut);
+                        }
+                    }
                     Err(AxError::WouldBlock)
                 }
             })

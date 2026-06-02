@@ -289,7 +289,13 @@ fn syscall_dispatcher(
             impls::sys_recvfrom(args[0], args[1], args[2], args[3], args[4], args[5])
         }
         Sysno::sendmsg => impls::sys_sendmsg(args[0], args[1], args[2]),
+        Sysno::sendmmsg => {
+            impls::sys_sendmmsg(args[0], args[1], args[2], args[3])
+        }
         Sysno::recvmsg => impls::sys_recvmsg(args[0], args[1], args[2]),
+        Sysno::recvmmsg => {
+            impls::sys_recvmmsg(args[0], args[1], args[2], args[3], args[4])
+        }
         Sysno::getsockname => impls::sys_getsockname(args[0], args[1], args[2]),
         Sysno::getpeername => impls::sys_getpeername(args[0], args[1], args[2]),
         Sysno::setsockopt => impls::sys_setsockopt(args[0], args[1], args[2], args[3], args[4]),
@@ -349,6 +355,13 @@ fn syscall_dispatcher(
         Sysno::shmat => impls::sys_shmat(args[0] as i32, args[1], args[2] as i32),
         Sysno::shmdt => impls::sys_shmdt(args[0]),
         Sysno::shmctl => impls::sys_shmctl(args[0] as i32, args[1] as i32, args[2]),
+
+        // System V semaphores
+        Sysno::semget => impls::sys_semget(args[0] as i32, args[1] as i32, args[2] as i32),
+        Sysno::semctl => impls::sys_semctl(args[0] as i32, args[1] as i32, args[2] as i32, args[3]),
+        Sysno::semtimedop => impls::sys_semtimedop(args[0] as i32, args[1], args[2], args[3]),
+        Sysno::semop => impls::sys_semop(args[0] as i32, args[1], args[2]),
+
         Sysno::unshare => impls::sys_unshare(args[0]),
         _ => {
             axlog::warn!("Unimplemented syscall: {:?} ({})", sysno, syscall_id);

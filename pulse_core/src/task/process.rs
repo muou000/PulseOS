@@ -264,6 +264,7 @@ pub struct Process {
     pub args: Mutex<Vec<String>>,
     signal_trampoline: Mutex<usize>,
     pub shared_memory: Arc<Mutex<BTreeMap<VirtAddr, Arc<Mutex<crate::ipc::shm::ShmInner>>>>>,
+    pub sem_undos: Mutex<Vec<crate::ipc::sem::SemUndoEntry>>,
     /// ITIMER_REAL state: (deadline_ns, interval_ns).
     /// 0 means the timer is disarmed. Uses atomics for interrupt-context safety.
     itimer_real_deadline_ns: AtomicU64,
@@ -1096,6 +1097,7 @@ impl Process {
             args: Mutex::new(alloc::vec![String::from("pulse_init")]),
             signal_trampoline: Mutex::new(0),
             shared_memory: Arc::new(Mutex::new(BTreeMap::new())),
+            sem_undos: Mutex::new(Vec::new()),
             itimer_real_deadline_ns: AtomicU64::new(0),
             itimer_real_interval_ns: AtomicU64::new(0),
             stopped_signal_pending: AtomicI32::new(0),
@@ -1202,6 +1204,7 @@ impl Process {
             args: Mutex::new(parent.args.lock().clone()),
             signal_trampoline: Mutex::new(signal_trampoline),
             shared_memory,
+            sem_undos: Mutex::new(Vec::new()),
             itimer_real_deadline_ns: AtomicU64::new(0),
             itimer_real_interval_ns: AtomicU64::new(0),
             stopped_signal_pending: AtomicI32::new(0),
@@ -1265,6 +1268,14 @@ impl Process {
                 inner_arc.lock().detach_process(self.pid());
             }
             shm.clear();
+        }
+
+        {
+            let undos = {
+                let mut guard = self.sem_undos.lock();
+                core::mem::take(&mut *guard)
+            };
+            crate::ipc::sem::exit_sem_undos(self.pid() as i32, undos);
         }
 
         self.close_all_files();
