@@ -289,7 +289,10 @@ pub fn sys_openat(dirfd: i32, pathname: usize, flags: usize, mode: usize) -> isi
             }
         }
         // O_NOFOLLOW symlink check
-        if (flags & (O_NOFOLLOW as usize)) != 0 && meta.node_type == NodeType::Symlink {
+        if (flags & (O_NOFOLLOW as usize)) != 0
+            && (flags & (O_PATH as usize)) == 0
+            && meta.node_type == NodeType::Symlink
+        {
             return -LinuxError::ELOOP.code() as isize;
         }
     }
@@ -582,6 +585,58 @@ pub fn sys_unlinkat(dirfd: i32, pathname: usize, flags: usize) -> isize {
         Ok(ctx) => ctx,
         Err(e) => return -e.code() as isize,
     };
+
+    // 1. Resolve parent directory and child entry name
+    let (parent_loc, entry_name) = match ctx.resolve_parent(Path::new(path)) {
+        Ok(res) => res,
+        Err(e) => return -LinuxError::from(e.canonicalize()).code() as isize,
+    };
+
+    // Get process credentials
+    let (uid, gid) = pulse_core::task::current_process()
+        .map(|process| (process.euid(), process.egid()))
+        .unwrap_or((0, 0));
+
+    // 2. Enforce execute/search permission check on parent directory
+    if let Err(err) = crate::impls::fs::common::check_faccess_permission(
+        &parent_loc,
+        X_OK as usize,
+        uid,
+        gid,
+    ) {
+        return -err.code() as isize;
+    }
+
+    // 3. Lookup the child entry to ensure it exists (ENOENT if not found)
+    let child_loc = match parent_loc.lookup_no_follow(entry_name.as_ref()) {
+        Ok(loc) => loc,
+        Err(e) => return -LinuxError::from(e.canonicalize()).code() as isize,
+    };
+
+    // 4. Enforce write permission check on parent directory
+    if let Err(err) = crate::impls::fs::common::check_faccess_permission(
+        &parent_loc,
+        W_OK as usize,
+        uid,
+        gid,
+    ) {
+        return -err.code() as isize;
+    }
+
+    // 5. Enforce sticky bit rules if parent has STICKY bit set
+    let parent_meta = match parent_loc.metadata() {
+        Ok(meta) => meta,
+        Err(e) => return -LinuxError::from(e.canonicalize()).code() as isize,
+    };
+    if parent_meta.mode.contains(NodePermission::STICKY) {
+        let child_meta = match child_loc.metadata() {
+            Ok(meta) => meta,
+            Err(e) => return -LinuxError::from(e.canonicalize()).code() as isize,
+        };
+        if uid != 0 && uid != parent_meta.uid && uid != child_meta.uid {
+            return -LinuxError::EACCES.code() as isize;
+        }
+    }
 
     if (flags & AT_REMOVEDIR as usize) != 0 {
         return match ctx.remove_dir(Path::new(path)) {
