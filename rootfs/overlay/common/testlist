@@ -46,6 +46,7 @@ close01
 close02
 confstr01
 connect02
+cp_tests.sh
 creat01
 creat03
 creat05
@@ -168,8 +169,10 @@ ioctl_ns07
 kill05
 kill11
 lftest
+linktest.sh
 llseek02
 llseek03
+ln_tests.sh
 lseek01
 lseek07
 memcmp01
@@ -336,6 +339,7 @@ stime01
 stime02
 syscall01
 syslog12
+test.sh
 time01
 times01
 times03
@@ -348,6 +352,7 @@ unlink05
 unlink07
 unlink08
 unlinkat01
+unshare01.sh
 utime01
 utime02
 utime03
@@ -383,6 +388,8 @@ waitpid10
 waitpid11
 waitpid12
 waitpid13
+wc01.sh
+which01.sh
 write01
 write02
 write03
