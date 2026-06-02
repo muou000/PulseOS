@@ -239,13 +239,43 @@ impl Drop for LocalSocket {
 pub struct Socket {
     pub domain: AtomicU32,
     pub inner: SocketInner,
+    pub pending_send: Mutex<alloc::vec::Vec<u8>>,
+    pub pending_addr: Mutex<Option<core::net::SocketAddr>>,
+}
+
+impl Socket {
+    pub fn new(domain: u32, inner: SocketInner) -> Self {
+        Self {
+            domain: AtomicU32::new(domain),
+            inner,
+            pending_send: Mutex::new(alloc::vec::Vec::new()),
+            pending_addr: Mutex::new(None),
+        }
+    }
+}
+
+#[derive(Debug)]
+pub struct PacketSocket {
+    pub version: AtomicU32,
+    pub reserve: AtomicU32,
+    pub has_vnet_hdr: AtomicBool,
+}
+
+impl PacketSocket {
+    pub fn new() -> Self {
+        Self {
+            version: AtomicU32::new(0),
+            reserve: AtomicU32::new(0),
+            has_vnet_hdr: AtomicBool::new(false),
+        }
+    }
 }
 
 pub enum SocketInner {
     Tcp(TcpSocket),
     Udp(UdpSocket),
     Local(LocalSocket),
-    Packet,
+    Packet(PacketSocket),
 }
 
 impl Socket {
@@ -258,7 +288,7 @@ impl Socket {
                 .local_addr()
                 .map_err(|e| LinuxError::from(e.canonicalize())),
             SocketInner::Local(_) => Err(LinuxError::EOPNOTSUPP),
-            SocketInner::Packet => Err(LinuxError::EOPNOTSUPP),
+            SocketInner::Packet(_) => Err(LinuxError::EOPNOTSUPP),
         }
     }
 
@@ -271,7 +301,7 @@ impl Socket {
                 .peer_addr()
                 .map_err(|e| LinuxError::from(e.canonicalize())),
             SocketInner::Local(_) => Err(LinuxError::EOPNOTSUPP),
-            SocketInner::Packet => Err(LinuxError::EOPNOTSUPP),
+            SocketInner::Packet(_) => Err(LinuxError::EOPNOTSUPP),
         }
     }
 
@@ -281,7 +311,7 @@ impl Socket {
             SocketInner::Tcp(s) => s.is_nonblocking(),
             SocketInner::Udp(s) => s.is_nonblocking(),
             SocketInner::Local(s) => s.nonblocking.load(Ordering::Acquire),
-            SocketInner::Packet => false,
+            SocketInner::Packet(_) => false,
         }
     }
 
@@ -290,7 +320,7 @@ impl Socket {
             SocketInner::Tcp(s) => s.set_nonblocking(nonblocking),
             SocketInner::Udp(s) => s.set_nonblocking(nonblocking),
             SocketInner::Local(s) => s.nonblocking.store(nonblocking, Ordering::Release),
-            SocketInner::Packet => {}
+            SocketInner::Packet(_) => {}
         }
     }
 
@@ -324,7 +354,7 @@ impl FdObject for Socket {
                 .map(|(n, _)| n)
                 .map_err(|e| LinuxError::from(e.canonicalize())),
             SocketInner::Local(s) => s.read(buf),
-            SocketInner::Packet => Ok(0),
+            SocketInner::Packet(_) => Ok(0),
         }
     }
 
@@ -333,7 +363,7 @@ impl FdObject for Socket {
             SocketInner::Tcp(s) => s.send(buf).map_err(|e| LinuxError::from(e.canonicalize())),
             SocketInner::Udp(s) => s.send(buf).map_err(|e| LinuxError::from(e.canonicalize())),
             SocketInner::Local(s) => s.write(buf),
-            SocketInner::Packet => Ok(buf.len()),
+            SocketInner::Packet(_) => Ok(buf.len()),
         }
     }
 
@@ -359,7 +389,7 @@ impl FdObject for Socket {
                     writable: tx_ring.available_write() > 0 || s.peer_closed.load(Ordering::Acquire),
                 })
             }
-            SocketInner::Packet => Ok(PollState { readable: false, writable: true }),
+            SocketInner::Packet(_) => Ok(PollState { readable: false, writable: true }),
         }
     }
 

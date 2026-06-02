@@ -75,50 +75,66 @@ impl ListenTable {
 
     pub fn unlisten(&self, port: u16) {
         debug!("TCP socket unlisten on {}", port);
-        *self.tcp[port as usize].lock() = None;
+        let entry = {
+            let mut guard = self.tcp[port as usize].lock();
+            guard.take()
+        };
+        drop(entry);
     }
 
     pub fn can_accept(&self, port: u16) -> AxResult<bool> {
-        if let Some(entry) = self.tcp[port as usize].lock().deref() {
-            let res = entry.syn_queue.iter().any(|&handle| is_connected(handle));
-            log::debug!("LISTEN_TABLE::can_accept: port={}, res={}", port, res);
-            Ok(res)
-        } else {
-            ax_err!(InvalidInput, "socket accept() failed: not listen")
-        }
+        let handles: alloc::vec::Vec<SocketHandle> = {
+            if let Some(entry) = self.tcp[port as usize].lock().deref() {
+                entry.syn_queue.iter().copied().collect()
+            } else {
+                return ax_err!(InvalidInput, "socket accept() failed: not listen");
+            }
+        };
+        let res = handles.into_iter().any(|handle| is_connected(handle));
+        log::debug!("LISTEN_TABLE::can_accept: port={}, res={}", port, res);
+        Ok(res)
     }
 
     pub fn accept(&self, port: u16) -> AxResult<(SocketHandle, (IpEndpoint, IpEndpoint))> {
         log::debug!("LISTEN_TABLE::accept: port={}", port);
-        if let Some(entry) = self.tcp[port as usize].lock().deref_mut() {
-            let syn_queue: &mut VecDeque<SocketHandle> = &mut entry.syn_queue;
-            log::debug!("LISTEN_TABLE::accept: syn_queue length={}", syn_queue.len());
-            for &h in syn_queue.iter() {
-                log::debug!("LISTEN_TABLE::accept: handle {} connected={}", h, is_connected(h));
-            }
-            let idx = syn_queue
+        loop {
+            let handles: alloc::vec::Vec<SocketHandle> = {
+                if let Some(entry) = self.tcp[port as usize].lock().deref() {
+                    entry.syn_queue.iter().copied().collect()
+                } else {
+                    return ax_err!(InvalidInput, "socket accept() failed: not listen");
+                }
+            };
+
+            let connected_idx = handles
                 .iter()
-                .enumerate()
-                .find_map(|(idx, &handle)| is_connected(handle).then(|| idx))
-                .ok_or(AxError::WouldBlock)?; // wait for connection
-            if idx > 0 {
-                warn!(
-                    "slow SYN queue enumeration: index = {}, len = {}!",
-                    idx,
-                    syn_queue.len()
-                );
-            }
-            let handle = syn_queue.swap_remove_front(idx).unwrap();
-            // If the connection is reset, return ConnectionReset error
-            // Otherwise, return the handle and the address tuple
-            if is_closed(handle) {
-                ax_err!(ConnectionReset, "socket accept() failed: connection reset")
+                .position(|&handle| is_connected(handle));
+
+            let idx = match connected_idx {
+                Some(idx) => idx,
+                None => return Err(AxError::WouldBlock),
+            };
+
+            let handle_to_remove = handles[idx];
+
+            let mut entry_guard = self.tcp[port as usize].lock();
+            if let Some(entry) = entry_guard.deref_mut() {
+                let syn_queue = &mut entry.syn_queue;
+                if let Some(actual_idx) = syn_queue.iter().position(|&h| h == handle_to_remove) {
+                    let handle = syn_queue.swap_remove_front(actual_idx).unwrap();
+                    drop(entry_guard);
+                    if is_closed(handle) {
+                        SOCKET_SET.remove(handle);
+                        return ax_err!(ConnectionReset, "socket accept() failed: connection reset");
+                    } else {
+                        log::debug!("LISTEN_TABLE::accept: successfully returning handle {}", handle);
+                        return Ok((handle, get_addr_tuple(handle)));
+                    }
+                }
+                // If the handle was accepted/removed by another thread/call, loop back and try again.
             } else {
-                log::debug!("LISTEN_TABLE::accept: successfully returning handle {}", handle);
-                Ok((handle, get_addr_tuple(handle)))
+                return ax_err!(InvalidInput, "socket accept() failed: not listen");
             }
-        } else {
-            ax_err!(InvalidInput, "socket accept() failed: not listen")
         }
     }
 

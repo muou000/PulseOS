@@ -26,6 +26,9 @@ fn write_user_plain<T: Copy>(user_addr: usize, value: &T) -> Result<(), LinuxErr
 }
 
 fn read_family(addr: usize, addrlen: u32) -> Result<u16, LinuxError> {
+    if addrlen > 128 {
+        return Err(LinuxError::EINVAL);
+    }
     if size_of::<__kernel_sa_family_t>() > addrlen as usize {
         return Err(LinuxError::EINVAL);
     }

@@ -20,6 +20,9 @@ use spin::Mutex as SpinMutex;
 pub(crate) static UNIX_REGISTRY: SpinMutex<BTreeMap<String, (core::net::SocketAddr, Weak<Socket>)>> = SpinMutex::new(BTreeMap::new());
 
 fn read_family(addr: usize, addrlen: u32) -> Result<u16, LinuxError> {
+    if addrlen > 128 {
+        return Err(LinuxError::EINVAL);
+    }
     if addrlen < 2 {
         return Err(LinuxError::EINVAL);
     }
@@ -72,25 +75,25 @@ pub fn sys_socket(domain: usize, raw_ty: usize, proto: usize) -> isize {
             if proto != 0 && proto != IPPROTO_TCP as u32 && proto != 132 {
                 return -(LinuxError::EPROTONOSUPPORT.code() as isize);
             }
-            Socket { domain: AtomicU32::new(domain), inner: SocketInner::Tcp(TcpSocket::new()) }
+            Socket::new(domain, SocketInner::Tcp(TcpSocket::new()))
         }
         (AF_INET | AF_INET6, d) if d == linux_raw_sys::net::SOCK_DGRAM => {
             if proto != 0 && proto != IPPROTO_UDP as u32 && proto != 136 {
                 return -(LinuxError::EPROTONOSUPPORT.code() as isize);
             }
-            Socket { domain: AtomicU32::new(domain), inner: SocketInner::Udp(UdpSocket::new()) }
+            Socket::new(domain, SocketInner::Udp(UdpSocket::new()))
         }
         (AF_INET | AF_INET6, d) if d == SOCK_RAW => {
             return -(LinuxError::EPROTONOSUPPORT.code() as isize);
         }
         (AF_UNIX, d) if d == linux_raw_sys::net::SOCK_STREAM || d == linux_raw_sys::net::SOCK_SEQPACKET => {
-            Socket { domain: AtomicU32::new(domain), inner: SocketInner::Tcp(TcpSocket::new()) }
+            Socket::new(domain, SocketInner::Tcp(TcpSocket::new()))
         }
         (AF_UNIX, d) if d == linux_raw_sys::net::SOCK_DGRAM => {
-            Socket { domain: AtomicU32::new(domain), inner: SocketInner::Udp(UdpSocket::new()) }
+            Socket::new(domain, SocketInner::Udp(UdpSocket::new()))
         }
         (17, d) if d == linux_raw_sys::net::SOCK_DGRAM || d == SOCK_RAW => {
-            Socket { domain: AtomicU32::new(domain), inner: SocketInner::Packet }
+            Socket::new(domain, SocketInner::Packet(crate::net::PacketSocket::new()))
         }
         (AF_INET | AF_INET6 | AF_UNIX | 17, _) => {
             warn!("Unsupported socket type: domain={domain}, ty={ty}");
@@ -132,8 +135,11 @@ pub fn sys_bind(fd: usize, addr: usize, addrlen: usize) -> isize {
         Err(e) => return -(e.code() as isize),
     };
 
-    if socket.domain.load(Ordering::Acquire) != family {
-        return -(LinuxError::EAFNOSUPPORT.code() as isize);
+    let socket_domain = socket.domain.load(Ordering::Acquire);
+    if socket_domain != family {
+        if !(socket_domain == AF_INET6 as u32 && family == AF_INET as u32) {
+            return -(LinuxError::EAFNOSUPPORT.code() as isize);
+        }
     }
 
     if family == 17 { // AF_PACKET
@@ -221,7 +227,7 @@ pub fn sys_bind(fd: usize, addr: usize, addrlen: usize) -> isize {
             SocketInner::Tcp(s) => s.bind(bind_addr).map_err(|e| LinuxError::from(e.canonicalize())),
             SocketInner::Udp(s) => s.bind(bind_addr).map_err(|e| LinuxError::from(e.canonicalize())),
             SocketInner::Local(_) => Err(LinuxError::EINVAL),
-            SocketInner::Packet => Err(LinuxError::EINVAL),
+            SocketInner::Packet(_) => Err(LinuxError::EINVAL),
         };
 
         if let Err(e) = res {
@@ -293,7 +299,7 @@ pub fn sys_bind(fd: usize, addr: usize, addrlen: usize) -> isize {
             .bind(std_addr)
             .map_err(|e| LinuxError::from(e.canonicalize())),
         (SocketInner::Local(_), _) => Err(LinuxError::EINVAL),
-        (SocketInner::Packet, _) => Err(LinuxError::EINVAL),
+        (SocketInner::Packet(_), _) => Err(LinuxError::EINVAL),
     };
     match result {
         Ok(()) => 0,
@@ -326,8 +332,11 @@ pub fn sys_connect(fd: usize, addr: usize, addrlen: usize) -> isize {
         return 0;
     }
 
-    if socket.domain.load(Ordering::Acquire) != family {
-        return -(LinuxError::EAFNOSUPPORT.code() as isize);
+    let socket_domain = socket.domain.load(Ordering::Acquire);
+    if socket_domain != family {
+        if !(socket_domain == AF_INET6 as u32 && family == AF_INET as u32) {
+            return -(LinuxError::EAFNOSUPPORT.code() as isize);
+        }
     }
 
     if family == AF_UNIX as u32 {
@@ -406,7 +415,7 @@ pub fn sys_connect(fd: usize, addr: usize, addrlen: usize) -> isize {
             }),
             SocketInner::Udp(s) => s.connect(target_addr).map_err(|e| LinuxError::from(e.canonicalize())),
             SocketInner::Local(_) => Err(LinuxError::EISCONN),
-            SocketInner::Packet => Err(LinuxError::EOPNOTSUPP),
+            SocketInner::Packet(_) => Err(LinuxError::EOPNOTSUPP),
         };
 
         return match res {
@@ -450,7 +459,7 @@ pub fn sys_connect(fd: usize, addr: usize, addrlen: usize) -> isize {
             .connect(std_addr)
             .map_err(|e| LinuxError::from(e.canonicalize())),
         SocketInner::Local(_) => Err(LinuxError::EISCONN),
-        SocketInner::Packet => Err(LinuxError::EOPNOTSUPP),
+        SocketInner::Packet(_) => Err(LinuxError::EOPNOTSUPP),
     };
     match result {
         Ok(()) => 0,
@@ -471,7 +480,7 @@ pub fn sys_listen(fd: usize, _backlog: usize) -> isize {
         },
         SocketInner::Udp(_) => -(LinuxError::EOPNOTSUPP.code() as isize),
         SocketInner::Local(_) => -(LinuxError::EINVAL.code() as isize),
-        SocketInner::Packet => -(LinuxError::EOPNOTSUPP.code() as isize),
+        SocketInner::Packet(_) => -(LinuxError::EOPNOTSUPP.code() as isize),
     }
 }
 
@@ -495,12 +504,12 @@ pub fn sys_accept4(fd: usize, addr: usize, addrlen: usize, flags: usize) -> isiz
         },
         SocketInner::Udp(_) => return -(LinuxError::EOPNOTSUPP.code() as isize),
         SocketInner::Local(_) => return -(LinuxError::EINVAL.code() as isize),
-        SocketInner::Packet => return -(LinuxError::EOPNOTSUPP.code() as isize),
+        SocketInner::Packet(_) => return -(LinuxError::EOPNOTSUPP.code() as isize),
     };
 
     let remote_addr = new_tcp.peer_addr().ok();
 
-    let new_socket = Socket { domain: AtomicU32::new(socket.domain.load(Ordering::Acquire)), inner: SocketInner::Tcp(new_tcp) };
+    let new_socket = Socket::new(socket.domain.load(Ordering::Acquire), SocketInner::Tcp(new_tcp));
     if flags & O_NONBLOCK != 0 {
         new_socket.set_nonblocking_inner(true);
     }
@@ -583,7 +592,7 @@ pub fn sys_shutdown(fd: usize, how: usize) -> isize {
             }
             _ => Err(LinuxError::EINVAL),
         },
-        SocketInner::Packet => Ok(()),
+        SocketInner::Packet(_) => Ok(()),
     };
     match result {
         Ok(()) => 0,
@@ -657,8 +666,8 @@ pub fn sys_socketpair(domain: usize, raw_ty: usize, proto: usize, fds: usize) ->
         flags.insert(FdFlags::NONBLOCK);
     }
 
-    let socket1 = Socket { domain: AtomicU32::new(domain), inner: SocketInner::Local(s1) };
-    let socket2 = Socket { domain: AtomicU32::new(domain), inner: SocketInner::Local(s2) };
+    let socket1 = Socket::new(domain, SocketInner::Local(s1));
+    let socket2 = Socket::new(domain, SocketInner::Local(s2));
 
     // 5. Insert sockets into the current process's FD table
     let new_fds = match crate::impls::utils::with_process(|process| -> Result<[i32; 2], LinuxError> {

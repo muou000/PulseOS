@@ -77,7 +77,7 @@ pub fn sys_getsockopt(
                     SocketInner::Tcp(s) => s.is_reuse_addr(),
                     SocketInner::Udp(s) => s.is_reuse_addr(),
                     SocketInner::Local(_) => false,
-                    SocketInner::Packet => false,
+                    SocketInner::Packet(_) => false,
                 };
                 let val: i32 = if reuse { 1 } else { 0 };
                 if let Err(e) = write_user_plain(optval, &val) {
@@ -183,7 +183,7 @@ pub fn sys_getsockopt(
                             0
                         }
                     }
-                    SocketInner::Udp(_) | SocketInner::Local(_) | SocketInner::Packet => return -(LinuxError::EOPNOTSUPP.code() as isize),
+                    SocketInner::Udp(_) | SocketInner::Local(_) | SocketInner::Packet(_) => return -(LinuxError::EOPNOTSUPP.code() as isize),
                 };
                 if let Err(e) = write_user_plain(optval, &val) {
                     return -(e.code() as isize);
@@ -246,6 +246,46 @@ pub fn sys_getsockopt(
                 }
                 return 0;
             }
+            20 | 21 => {
+                // SO_RCVTIMEO, SO_SNDTIMEO
+                let ticks = match &socket.inner {
+                    SocketInner::Tcp(s) => {
+                        if optname == 20 {
+                            s.rcv_timeout()
+                        } else {
+                            s.snd_timeout()
+                        }
+                    }
+                    SocketInner::Udp(s) => {
+                        if optname == 20 {
+                            s.rcv_timeout()
+                        } else {
+                            s.snd_timeout()
+                        }
+                    }
+                    _ => 0,
+                };
+                let nanos = axhal::time::ticks_to_nanos(ticks);
+                let tv = TimeVal {
+                    tv_sec: (nanos / 1_000_000_000) as i64,
+                    tv_usec: ((nanos % 1_000_000_000) / 1_000) as i64,
+                };
+                if let Err(e) = write_user_plain(optval, &tv) {
+                    return -(e.code() as isize);
+                }
+                let mut len: u32 = match read_user_plain(optlen) {
+                    Ok(l) => l,
+                    Err(e) => return -(e.code() as isize),
+                };
+                let required_len = core::mem::size_of::<TimeVal>() as u32;
+                if len >= required_len {
+                    len = required_len;
+                    if let Err(e) = write_user_plain(optlen, &len) {
+                        return -(e.code() as isize);
+                    }
+                }
+                return 0;
+            }
             _ => {}
         }
     } else if level == 41 {
@@ -254,6 +294,74 @@ pub fn sys_getsockopt(
             26 => {
                 // IPV6_V6ONLY
                 let val: i32 = 1; // Default to dual-stack off (IPv6 only)
+                if let Err(e) = write_user_plain(optval, &val) {
+                    return -(e.code() as isize);
+                }
+                let mut len: u32 = match read_user_plain(optlen) {
+                    Ok(l) => l,
+                    Err(e) => return -(e.code() as isize),
+                };
+                if len >= 4 {
+                    len = 4;
+                    if let Err(e) = write_user_plain(optlen, &len) {
+                        return -(e.code() as isize);
+                    }
+                }
+                return 0;
+            }
+            _ => {}
+        }
+    } else if level == 263 {
+        // SOL_PACKET
+        match optname {
+            10 => {
+                // PACKET_VERSION
+                let val = match &socket.inner {
+                    SocketInner::Packet(p) => p.version.load(Ordering::Acquire) as i32,
+                    _ => return -(LinuxError::EOPNOTSUPP.code() as isize),
+                };
+                if let Err(e) = write_user_plain(optval, &val) {
+                    return -(e.code() as isize);
+                }
+                let mut len: u32 = match read_user_plain(optlen) {
+                    Ok(l) => l,
+                    Err(e) => return -(e.code() as isize),
+                };
+                if len >= 4 {
+                    len = 4;
+                    if let Err(e) = write_user_plain(optlen, &len) {
+                        return -(e.code() as isize);
+                    }
+                }
+                return 0;
+            }
+            12 => {
+                // PACKET_RESERVE
+                let val = match &socket.inner {
+                    SocketInner::Packet(p) => p.reserve.load(Ordering::Acquire) as i32,
+                    _ => return -(LinuxError::EOPNOTSUPP.code() as isize),
+                };
+                if let Err(e) = write_user_plain(optval, &val) {
+                    return -(e.code() as isize);
+                }
+                let mut len: u32 = match read_user_plain(optlen) {
+                    Ok(l) => l,
+                    Err(e) => return -(e.code() as isize),
+                };
+                if len >= 4 {
+                    len = 4;
+                    if let Err(e) = write_user_plain(optlen, &len) {
+                        return -(e.code() as isize);
+                    }
+                }
+                return 0;
+            }
+            15 => {
+                // PACKET_VNET_HDR
+                let val = match &socket.inner {
+                    SocketInner::Packet(p) => if p.has_vnet_hdr.load(Ordering::Acquire) { 1i32 } else { 0i32 },
+                    _ => return -(LinuxError::EOPNOTSUPP.code() as isize),
+                };
                 if let Err(e) = write_user_plain(optval, &val) {
                     return -(e.code() as isize);
                 }
@@ -307,7 +415,7 @@ pub fn sys_setsockopt(
                     SocketInner::Tcp(s) => s.set_reuse_addr(reuse),
                     SocketInner::Udp(s) => s.set_reuse_addr(reuse),
                     SocketInner::Local(_) => {}
-                    SocketInner::Packet => {}
+                    SocketInner::Packet(_) => {}
                 }
                 return 0;
             }
@@ -318,8 +426,32 @@ pub fn sys_setsockopt(
             }
             20 | 21 => {
                 // SO_RCVTIMEO, SO_SNDTIMEO
-                // Stub: return success to avoid failures in applications setting timeouts
-                info!("sys_setsockopt: stub success returning 0 for optname={optname}");
+                if optlen < core::mem::size_of::<TimeVal>() {
+                    return -(LinuxError::EINVAL.code() as isize);
+                }
+                let tv: TimeVal = match read_user_plain(optval) {
+                    Ok(v) => v,
+                    Err(e) => return -(e.code() as isize),
+                };
+                let nanos = tv.tv_sec as u64 * 1_000_000_000 + tv.tv_usec as u64 * 1_000;
+                let ticks = axhal::time::nanos_to_ticks(nanos);
+                match &socket.inner {
+                    SocketInner::Tcp(s) => {
+                        if optname == 20 {
+                            s.set_rcv_timeout(ticks);
+                        } else {
+                            s.set_snd_timeout(ticks);
+                        }
+                    }
+                    SocketInner::Udp(s) => {
+                        if optname == 20 {
+                            s.set_rcv_timeout(ticks);
+                        } else {
+                            s.set_snd_timeout(ticks);
+                        }
+                    }
+                    SocketInner::Local(_) | SocketInner::Packet(_) => {}
+                }
                 return 0;
             }
             _ => {}
@@ -343,7 +475,7 @@ pub fn sys_setsockopt(
                             return -(LinuxError::from(e.canonicalize()).code() as isize);
                         }
                     }
-                    SocketInner::Udp(_) | SocketInner::Local(_) | SocketInner::Packet => return -(LinuxError::EOPNOTSUPP.code() as isize),
+                    SocketInner::Udp(_) | SocketInner::Local(_) | SocketInner::Packet(_) => return -(LinuxError::EOPNOTSUPP.code() as isize),
                 }
                 return 0;
             }
@@ -395,7 +527,7 @@ pub fn sys_setsockopt(
                             }
                         }
                     }
-                    SocketInner::Local(_) | SocketInner::Packet => return -(LinuxError::EOPNOTSUPP.code() as isize),
+                    SocketInner::Local(_) | SocketInner::Packet(_) => return -(LinuxError::EOPNOTSUPP.code() as isize),
                 }
             }
             _ => {}
@@ -431,6 +563,82 @@ pub fn sys_setsockopt(
                 };
                 debug!("setsockopt: IPV6_V6ONLY set to {val}");
                 return 0;
+            }
+            _ => {}
+        }
+    } else if level == 263 {
+        // SOL_PACKET
+        match optname {
+            10 => {
+                // PACKET_VERSION
+                if optlen < 4 {
+                    return -(LinuxError::EINVAL.code() as isize);
+                }
+                let val: i32 = match read_user_plain(optval) {
+                    Ok(v) => v,
+                    Err(e) => return -(e.code() as isize),
+                };
+                if val != 0 && val != 1 && val != 2 {
+                    return -(LinuxError::EINVAL.code() as isize);
+                }
+                match &socket.inner {
+                    SocketInner::Packet(p) => {
+                        p.version.store(val as u32, Ordering::Release);
+                    }
+                    _ => return -(LinuxError::EOPNOTSUPP.code() as isize),
+                }
+                return 0;
+            }
+            12 => {
+                // PACKET_RESERVE
+                if optlen < 4 {
+                    return -(LinuxError::EINVAL.code() as isize);
+                }
+                let val: u32 = match read_user_plain(optval) {
+                    Ok(v) => v,
+                    Err(e) => return -(e.code() as isize),
+                };
+                if val > i32::MAX as u32 {
+                    return -(LinuxError::EINVAL.code() as isize);
+                }
+                match &socket.inner {
+                    SocketInner::Packet(p) => {
+                        p.reserve.store(val, Ordering::Release);
+                    }
+                    _ => return -(LinuxError::EOPNOTSUPP.code() as isize),
+                }
+                return 0;
+            }
+            15 => {
+                // PACKET_VNET_HDR
+                if optlen < 4 {
+                    return -(LinuxError::EINVAL.code() as isize);
+                }
+                let val: i32 = match read_user_plain(optval) {
+                    Ok(v) => v,
+                    Err(e) => return -(e.code() as isize),
+                };
+                match &socket.inner {
+                    SocketInner::Packet(p) => {
+                        p.has_vnet_hdr.store(val != 0, Ordering::Release);
+                    }
+                    _ => return -(LinuxError::EOPNOTSUPP.code() as isize),
+                }
+                return 0;
+            }
+            5 => {
+                // PACKET_RX_RING
+                match &socket.inner {
+                    SocketInner::Packet(p) => {
+                        let has_vnet_hdr = p.has_vnet_hdr.load(Ordering::Acquire);
+                        let version = p.version.load(Ordering::Acquire);
+                        if has_vnet_hdr && version < 2 {
+                            return -(LinuxError::EINVAL.code() as isize);
+                        }
+                        return 0;
+                    }
+                    _ => return -(LinuxError::EOPNOTSUPP.code() as isize),
+                }
             }
             _ => {}
         }

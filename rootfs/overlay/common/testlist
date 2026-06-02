@@ -239,6 +239,11 @@ readlinkat01
 readlinkat02
 readv01
 readv02
+recv01
+recvfrom01
+recvmmsg01
+recvmsg01
+recvmsg02
 rmdir01
 rmdir03
 rt_sigsuspend01
@@ -252,6 +257,7 @@ sched_getaffinity01
 sched_getscheduler01
 sched_rr_get_interval01
 sched_setparam01
+send01
 sendfile02
 sendfile02_64
 sendfile04
@@ -262,6 +268,13 @@ sendfile06
 sendfile06_64
 sendfile08
 sendfile08_64
+sendmmsg01
+sendmmsg02
+sendmsg01
+sendmsg02
+sendto01
+sendto02
+sendto03
 setegid01
 setgid01
 setgid02

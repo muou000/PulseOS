@@ -65,3 +65,20 @@ pub fn read_user_plain_array<T: Copy>(
     }
     Ok(out)
 }
+
+pub fn write_user_plain_array<T: Copy>(
+    process: &Process,
+    user_addr: usize,
+    values: &[T],
+) -> AxResult<()> {
+    let elem_size = core::mem::size_of::<T>();
+    for (i, val) in values.iter().enumerate() {
+        let byte_off = i.checked_mul(elem_size).ok_or(AxError::InvalidInput)?;
+        let addr = user_addr
+            .checked_add(byte_off)
+            .ok_or(AxError::InvalidInput)?;
+        write_user_plain(process, addr, val)?;
+    }
+    Ok(())
+}
+
