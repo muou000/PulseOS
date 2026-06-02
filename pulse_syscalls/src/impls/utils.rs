@@ -55,6 +55,17 @@ pub(crate) fn alloc_zeroed_bytes(len: usize, _site: &'static str) -> Result<Vec<
     Ok(out)
 }
 
+pub(crate) fn alloc_uninit_bytes(len: usize, _site: &'static str) -> Result<Vec<u8>, LinuxError> {
+    let mut out = Vec::new();
+    if out.try_reserve_exact(len).is_err() {
+        return Err(LinuxError::ENOMEM);
+    }
+    unsafe {
+        out.set_len(len);
+    }
+    Ok(out)
+}
+
 pub(crate) fn read_user_timespec(user_addr: usize) -> Result<timespec, LinuxError> {
     with_process(|process| uaccess::read_user_plain(process, user_addr))?
         .map_err(|e| LinuxError::from(e.canonicalize()))

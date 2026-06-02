@@ -46,9 +46,9 @@ impl Ext4 {
                 });
 
                 let next_block = search_path.path.last().unwrap().index.unwrap().leaf_lo;
-                let mut next_data = self
-                    .block_device
-                    .read_offset(next_block as usize * BLOCK_SIZE);
+                let mut next_data = vec![0u8; BLOCK_SIZE];
+                self.block_device
+                    .read_offset(next_block as usize * BLOCK_SIZE, &mut next_data);
                 node = ExtentNode::load_from_data_mut(&mut next_data, false)?;
                 depth -= 1;
                 search_path.depth += 1;
@@ -198,9 +198,9 @@ impl Ext4 {
 
     /// Get extent from the node at the given position.
     fn get_extent_from_node(&self, node: &ExtentPathNode, pos: usize) -> Result<Ext4Extent> {
-        let data = self
-            .block_device
-            .read_offset(node.pblock as usize * BLOCK_SIZE);
+        let mut data = vec![0u8; BLOCK_SIZE];
+        self.block_device
+            .read_offset(node.pblock as usize * BLOCK_SIZE, &mut data);
         let extent_node = ExtentNode::load_from_data(&data, false).unwrap();
 
         match extent_node.get_extent(pos) {
@@ -211,9 +211,9 @@ impl Ext4 {
 
     /// Get index from the node at the given position.
     fn get_index_from_node(&self, node: &ExtentPathNode, pos: usize) -> Result<Ext4ExtentIndex> {
-        let data = self
-            .block_device
-            .read_offset(node.pblock as usize * BLOCK_SIZE);
+        let mut data = vec![0u8; BLOCK_SIZE];
+        self.block_device
+            .read_offset(node.pblock as usize * BLOCK_SIZE, &mut data);
         let extent_node = ExtentNode::load_from_data(&data, false).unwrap();
 
         extent_node.get_index(pos)

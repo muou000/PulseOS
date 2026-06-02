@@ -665,6 +665,7 @@ impl CachedFile {
         file: &FileNode,
         cache: &'a mut LruCache<u32, PageCache>,
         pn: u32,
+        skip_read: bool,
     ) -> VfsResult<(&'a mut PageCache, Option<(u32, PageCache)>)> {
         // TODO: Matching the result of `get_mut` confuses compiler. See
         // https://users.rust-lang.org/t/return-do-not-release-mutable-borrow/55757.
@@ -687,7 +688,7 @@ impl CachedFile {
         let mut page = PageCache::new()?;
         if self.in_memory {
             page.data().fill(0);
-        } else {
+        } else if !skip_read {
             file.read_at(page.data(), pn as u64 * PAGE_SIZE as u64)?;
         }
         cache.put(pn, page);
@@ -706,13 +707,14 @@ impl CachedFile {
     ) -> VfsResult<R> {
         let _guard = self.shared.io_lock.write();
         let mut guard = self.shared.page_cache.lock();
-        let (page, evicted) = self.page_or_insert(self.inner.entry().as_file()?, &mut guard, pn)?;
+        let (page, evicted) = self.page_or_insert(self.inner.entry().as_file()?, &mut guard, pn, false)?;
         f(page, evicted)
     }
 
     fn with_pages<T>(
         &self,
         range: Range<u64>,
+        is_write: bool,
         page_initial: impl FnOnce(&FileNode) -> VfsResult<T>,
         mut page_each: impl FnMut(T, &mut PageCache, Range<usize>) -> VfsResult<T>,
     ) -> VfsResult<T> {
@@ -723,14 +725,17 @@ impl CachedFile {
         let mut page_offset = (range.start % PAGE_SIZE as u64) as usize;
         for pn in start_page..end_page {
             let page_start = pn as u64 * PAGE_SIZE as u64;
+            let page_end = (range.end - page_start).min(PAGE_SIZE as u64) as usize;
+
+            let skip_read = is_write && (page_offset == 0) && (page_end == PAGE_SIZE);
 
             let mut guard = self.shared.page_cache.lock();
-            let page = self.page_or_insert(file, &mut guard, pn)?.0;
+            let page = self.page_or_insert(file, &mut guard, pn, skip_read)?.0;
 
             initial = page_each(
                 initial,
                 page,
-                page_offset..(range.end - page_start).min(PAGE_SIZE as u64) as usize,
+                page_offset..page_end,
             )?;
             page_offset = 0;
         }
@@ -747,6 +752,7 @@ impl CachedFile {
         }
         self.with_pages(
             offset..end,
+            false,
             |_| Ok(0),
             |read, page, range| {
                 let len = range.end - range.start;
@@ -760,6 +766,7 @@ impl CachedFile {
         let end = offset + buf.remaining() as u64;
         self.with_pages(
             offset..end,
+            true,
             |file| {
                 if end > file.len()? {
                     file.set_len(end)?;

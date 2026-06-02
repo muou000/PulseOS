@@ -444,7 +444,9 @@ impl Process {
     }
 
     fn clone_private_fs_context(parent: &Process) -> AxResult<Arc<Mutex<FsContext>>> {
-        Ok(Arc::new(Mutex::new(parent.fs_context_handle().lock().clone())))
+        Ok(Arc::new(Mutex::new(
+            parent.fs_context_handle().lock().clone(),
+        )))
     }
 
     pub fn pid(&self) -> u64 {
@@ -1138,7 +1140,9 @@ impl Process {
         let fd_table = if share_files {
             RwLock::new(parent.fd_table())
         } else {
-            RwLock::new(Arc::new(RwLock::new(parent.fd_table().read().clone_for_fork()?)))
+            RwLock::new(Arc::new(RwLock::new(
+                parent.fd_table().read().clone_for_fork()?,
+            )))
         };
         let (ruid, euid, suid) = parent.uid_snapshot();
         let (rgid, egid, sgid) = parent.gid_snapshot();
@@ -1266,7 +1270,7 @@ impl Process {
         self.close_all_files();
         self.futex_table.clear();
         self.memlock_unlock_all();
-        axlog::info!("release_zombie_resources: pid={}", self.pid());
+        axlog::debug!("release_zombie_resources: pid={}", self.pid());
         Ok(())
     }
 
@@ -1486,15 +1490,11 @@ impl Process {
     ) -> Result<Option<(Arc<Process>, WaitidStatusType)>, isize> {
         let is_match = |child: &Process| -> bool {
             match idtype {
-                0 => true, // P_ALL
+                0 => true,                     // P_ALL
                 1 => child.pid() == id as u64, // P_PID
                 2 => {
                     // P_PGID
-                    let target_pgid = if id == 0 {
-                        self.pgid()
-                    } else {
-                        id as u64
-                    };
+                    let target_pgid = if id == 0 { self.pgid() } else { id as u64 };
                     child.pgid() == target_pgid
                 }
                 _ => false,
@@ -1511,7 +1511,8 @@ impl Process {
                 has_matching_child = true;
 
                 // 1. Check STOPPED
-                if (options & 2) != 0 { // WSTOPPED
+                if (options & 2) != 0 {
+                    // WSTOPPED
                     let stop_sig = child.stopped_signal_pending.load(Ordering::Acquire);
                     if stop_sig != 0 {
                         found_idx = Some((idx, false));
@@ -1520,7 +1521,8 @@ impl Process {
                     }
                 }
                 // 2. Check CONTINUED
-                if (options & 8) != 0 { // WCONTINUED
+                if (options & 8) != 0 {
+                    // WCONTINUED
                     if child.continued_signal_pending.load(Ordering::Acquire) {
                         found_idx = Some((idx, false));
                         found_status = Some(WaitidStatusType::Continued);
@@ -1528,13 +1530,17 @@ impl Process {
                     }
                 }
                 // 3. Check EXITED (Zombie)
-                if (options & 4) != 0 { // WEXITED
+                if (options & 4) != 0 {
+                    // WEXITED
                     if child.is_zombie() {
                         let wnowait = (options & 0x01000000) != 0;
                         found_idx = Some((idx, !wnowait));
                         let exit_code = child.exit_code.load(Ordering::Acquire);
                         let exit_signal = child.exit_signal.load(Ordering::Acquire);
-                        found_status = Some(WaitidStatusType::Exited { exit_code, exit_signal });
+                        found_status = Some(WaitidStatusType::Exited {
+                            exit_code,
+                            exit_signal,
+                        });
                         break;
                     }
                 }
@@ -1559,7 +1565,9 @@ impl Process {
                         child.stopped_signal_pending.store(0, Ordering::Release);
                     }
                     WaitidStatusType::Continued => {
-                        child.continued_signal_pending.store(false, Ordering::Release);
+                        child
+                            .continued_signal_pending
+                            .store(false, Ordering::Release);
                     }
                     _ => {}
                 }
@@ -1587,11 +1595,7 @@ impl Process {
                 0 => true,
                 1 => child.pid() == id as u64,
                 2 => {
-                    let target_pgid = if id == 0 {
-                        self.pgid()
-                    } else {
-                        id as u64
-                    };
+                    let target_pgid = if id == 0 { self.pgid() } else { id as u64 };
                     child.pgid() == target_pgid
                 }
                 _ => false,
@@ -1602,10 +1606,13 @@ impl Process {
             let children = self.children.lock();
             for child in children.iter() {
                 if is_match(child) {
-                    if (options & 2) != 0 && child.stopped_signal_pending.load(Ordering::Acquire) != 0 {
+                    if (options & 2) != 0
+                        && child.stopped_signal_pending.load(Ordering::Acquire) != 0
+                    {
                         return true;
                     }
-                    if (options & 8) != 0 && child.continued_signal_pending.load(Ordering::Acquire) {
+                    if (options & 8) != 0 && child.continued_signal_pending.load(Ordering::Acquire)
+                    {
                         return true;
                     }
                     if (options & 4) != 0 && child.is_zombie() {
@@ -1616,9 +1623,8 @@ impl Process {
             false
         };
 
-        self.child_exit_event.wait_until(|| {
-            check_state() || thread.has_pending_signal() || self.group_exiting()
-        });
+        self.child_exit_event
+            .wait_until(|| check_state() || thread.has_pending_signal() || self.group_exiting());
 
         if check_state() {
             return Ok(());

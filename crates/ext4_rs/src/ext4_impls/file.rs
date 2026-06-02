@@ -215,7 +215,8 @@ impl Ext4 {
 
             if let Some(pblock_idx) = pblock_idx {
                 // read data
-                let data = self.block_device.read_offset(pblock_idx as usize * BLOCK_SIZE);
+                let mut data = vec![0u8; BLOCK_SIZE];
+                self.block_device.read_offset(pblock_idx as usize * BLOCK_SIZE, &mut data);
 
                 // copy data to read buffer
                 read_buf[cursor..cursor + adjust_read_size].copy_from_slice(
@@ -258,7 +259,8 @@ impl Ext4 {
 
             if let Some(pblock_idx) = pblock_idx {
                 // read data
-                let data = self.block_device.read_offset(pblock_idx as usize * BLOCK_SIZE);
+                let mut data = vec![0u8; BLOCK_SIZE];
+                self.block_device.read_offset(pblock_idx as usize * BLOCK_SIZE, &mut data);
                 // log::trace!("[Read] Read block data - physical_block: {}, data_len: {}", pblock_idx, data.len());
 
                 // copy data to read buffer
@@ -417,14 +419,10 @@ impl Ext4 {
 
             let mut block = Block::load(&self.block_device, pblock_idx as usize * BLOCK_SIZE);
             
-            // Read existing data if needed
-            if unaligned > 0 || len < BLOCK_SIZE {
-                if is_new_block {
-                    block.data.fill(0);
-                } else {
-                    let existing_data = self.block_device.read_offset(pblock_idx as usize * BLOCK_SIZE);
-                    block.data.copy_from_slice(&existing_data);
-                }
+            // If it's a newly allocated block, fill with zeros. Otherwise,
+            // existing data is already loaded in block.data by Block::load.
+            if is_new_block {
+                block.data.fill(0);
             }
             
             block.write_offset(unaligned, &write_buf[..len], len);
@@ -468,14 +466,10 @@ impl Ext4 {
             let mut block = Block::load(&self.block_device, block_offset);
             let write_size = min(BLOCK_SIZE, write_buf_len - written);
             
-            // For partial block writes, read existing data first
-            if write_size < BLOCK_SIZE {
-                if is_new_block {
-                    block.data.fill(0);
-                } else {
-                    let existing_data = self.block_device.read_offset(block_offset);
-                    block.data.copy_from_slice(&existing_data);
-                }
+            // If it's a newly allocated block, fill with zeros. Otherwise,
+            // existing data is already loaded in block.data by Block::load.
+            if is_new_block {
+                block.data.fill(0);
             }
             
             block.write_offset(0, &write_buf[written..written + write_size], write_size);

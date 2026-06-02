@@ -710,6 +710,7 @@ impl PipeRingBuffer {
         }
     }
 
+    #[allow(dead_code)]
     fn read_byte(&mut self) -> u8 {
         let cap = self.capacity();
         self.status = RingBufferStatus::Normal;

@@ -381,9 +381,9 @@ impl Ext4 {
                 Ext4BlockGroup::load_new(&self.block_device, &super_block, bgid as usize);
 
             let block_bitmap_block = bg.get_block_bitmap_block(&super_block);
-            let mut raw_data = self
-                .block_device
-                .read_offset(block_bitmap_block as usize * BLOCK_SIZE);
+            let mut raw_data = vec![0u8; BLOCK_SIZE];
+            self.block_device
+                .read_offset(block_bitmap_block as usize * BLOCK_SIZE, &mut raw_data);
             let mut data: &mut Vec<u8> = &mut raw_data;
 
             let mut free_cnt = BLOCK_SIZE * 8 - idx_in_bg as usize;
@@ -521,8 +521,8 @@ impl Ext4 {
             
             // Get block bitmap for this group
             let bmp_blk_adr = block_group.get_block_bitmap_block(super_block);
-            let mut bitmap_data = 
-                self.block_device.read_offset(bmp_blk_adr as usize * BLOCK_SIZE);
+            let mut bitmap_data = vec![0u8; BLOCK_SIZE];
+            self.block_device.read_offset(bmp_blk_adr as usize * BLOCK_SIZE, &mut bitmap_data);
             
             // Compute indexes and limits
             let first_in_bg = self.get_block_of_bgid(bgid);
