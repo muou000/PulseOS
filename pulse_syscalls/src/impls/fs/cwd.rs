@@ -1,6 +1,10 @@
 use axerrno::LinuxError;
+use linux_raw_sys::general::X_OK;
 
-use crate::impls::utils::{alloc_zeroed_bytes, read_user_cstring, with_process, write_user_bytes};
+use crate::impls::{
+    fs::common::check_faccess_permission,
+    utils::{alloc_zeroed_bytes, read_user_cstring, with_process, write_user_bytes},
+};
 
 pub fn sys_getcwd(buf: usize, size: usize) -> isize {
     axlog::debug!("sys_getcwd: buf={:#x}, size={}", buf, size);
@@ -47,6 +51,11 @@ pub fn sys_chdir(path: usize) -> isize {
             fs.resolve(path)
                 .map_err(|e| LinuxError::from(e.canonicalize()))?
         };
+        dir.check_is_dir()
+            .map_err(|e| LinuxError::from(e.canonicalize()))?;
+        let uid = process.euid();
+        let gid = process.egid();
+        check_faccess_permission(&dir, X_OK as usize, uid, gid)?;
         process
             .fs_context_handle()
             .lock()

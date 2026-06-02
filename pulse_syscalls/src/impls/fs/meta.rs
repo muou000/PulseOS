@@ -141,7 +141,7 @@ pub fn sys_readlinkat(dirfd: i32, pathname: usize, buf: usize, bufsiz: usize) ->
     if buf == 0 && bufsiz != 0 {
         return -LinuxError::EFAULT.code() as isize;
     }
-    if bufsiz == 0 {
+    if bufsiz <= 1 {
         return -LinuxError::EINVAL.code() as isize;
     }
 
@@ -457,7 +457,9 @@ pub fn sys_fchownat(dirfd: i32, pathname: usize, uid: usize, gid: usize, flags: 
             let new_gid = if (gid as u32) != u32::MAX { gid as u32 } else { current_meta.gid };
 
             let mut new_mode = current_meta.mode;
-            if (uid as u32) != u32::MAX || (gid as u32) != u32::MAX {
+            if current_meta.node_type == axfs_ng_vfs::NodeType::RegularFile
+                && ((uid as u32) != u32::MAX || (gid as u32) != u32::MAX)
+            {
                 if new_mode.contains(axfs_ng_vfs::NodePermission::SET_UID) {
                     new_mode.remove(axfs_ng_vfs::NodePermission::SET_UID);
                 }

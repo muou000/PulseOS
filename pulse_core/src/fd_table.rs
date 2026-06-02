@@ -569,6 +569,14 @@ impl FdObject for DirObject {
         Err(LinuxError::EBADF)
     }
 
+    fn read_at(&self, _buf: &mut [u8], _offset: u64) -> LinuxResult<usize> {
+        Err(LinuxError::EISDIR)
+    }
+
+    fn write_at(&self, _buf: &[u8], _offset: u64) -> LinuxResult<usize> {
+        Err(LinuxError::EISDIR)
+    }
+
     fn stat(&self) -> LinuxResult<stat> {
         location_to_stat(&self.inner)
     }

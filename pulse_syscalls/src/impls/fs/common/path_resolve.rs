@@ -51,6 +51,15 @@ pub(crate) fn resolve_location_at_ptr(
     }
     let path = read_user_cstring(pathname)?;
     let path = path.as_c_str().to_string_lossy();
+    if path.is_empty() {
+        if dirfd == AT_FDCWD as i32 {
+            return Err(LinuxError::ENOENT);
+        }
+        if dirfd < 0 {
+            return Err(LinuxError::EBADF);
+        }
+        return with_process(|process| process.get_fd_location(dirfd as usize))?;
+    }
     let is_absolute = path.starts_with('/');
     let dirfd = if is_absolute { AT_FDCWD as i32 } else { dirfd };
     axlog::debug!(
