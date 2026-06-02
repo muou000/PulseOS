@@ -13,7 +13,7 @@ use pulse_core::{
 use crate::impls::{
     fs::common::{get_fd_entry, open_fd_flags, remove_fd_entry},
     utils::{
-        alloc_zeroed_bytes, read_user_bytes, read_user_i64, read_user_iovec_array,
+        alloc_uninit_bytes, read_user_bytes, read_user_i64, read_user_iovec_array,
         read_user_timespec, with_process, write_user_bytes, write_user_i64,
     },
 };
@@ -63,7 +63,7 @@ pub fn sys_read(fd: usize, buf: usize, count: usize) -> isize {
         return -LinuxError::EBADF.code() as isize;
     }
     let object = entry.object;
-    let mut tmp = match alloc_zeroed_bytes(count.min(MAX_IO_CHUNK), "sys_read.tmp") {
+    let mut tmp = match alloc_uninit_bytes(count.min(MAX_IO_CHUNK), "sys_read.tmp") {
         Ok(buf) => buf,
         Err(e) => return -e.code() as isize,
     };
@@ -119,7 +119,7 @@ pub fn sys_write(fd: usize, buf: usize, count: usize) -> isize {
     }
     let object = entry.object;
     let mut total = 0usize;
-    let mut tmp = match alloc_zeroed_bytes(count.min(MAX_IO_CHUNK), "sys_write.tmp") {
+    let mut tmp = match alloc_uninit_bytes(count.min(MAX_IO_CHUNK), "sys_write.tmp") {
         Ok(buf) => buf,
         Err(e) => return -e.code() as isize,
     };
@@ -168,7 +168,7 @@ pub fn sys_getdents64(fd: usize, dirp: usize, count: usize) -> isize {
     }
     // Allow larger user-provided buffers to reduce syscall count during
     // directory-heavy workloads (e.g. `du`).
-    let mut tmp = match alloc_zeroed_bytes(count.min(64 * 1024), "sys_getdents64.tmp") {
+    let mut tmp = match alloc_uninit_bytes(count.min(64 * 1024), "sys_getdents64.tmp") {
         Ok(buf) => buf,
         Err(e) => return -e.code() as isize,
     };
@@ -215,7 +215,7 @@ pub fn sys_writev(fd: usize, iov: usize, iovcnt: usize) -> isize {
         Err(e) => return -e.code() as isize,
     };
     let mut total = 0isize;
-    let mut buf = match alloc_zeroed_bytes(MAX_IO_CHUNK, "sys_writev.tmp") {
+    let mut buf = match alloc_uninit_bytes(MAX_IO_CHUNK, "sys_writev.tmp") {
         Ok(buf) => buf,
         Err(e) => return -e.code() as isize,
     };
@@ -264,7 +264,7 @@ pub fn sys_readv(fd: usize, iov: usize, iovcnt: usize) -> isize {
         Err(e) => return -e.code() as isize,
     };
     let mut total = 0isize;
-    let mut buf = match alloc_zeroed_bytes(MAX_IO_CHUNK, "sys_readv.tmp") {
+    let mut buf = match alloc_uninit_bytes(MAX_IO_CHUNK, "sys_readv.tmp") {
         Ok(buf) => buf,
         Err(e) => return -e.code() as isize,
     };
@@ -321,7 +321,7 @@ pub fn sys_pread64(fd: usize, buf: usize, count: usize, offset: usize) -> isize 
         return -LinuxError::EBADF.code() as isize;
     }
     let object = entry.object;
-    let mut tmp = match alloc_zeroed_bytes(count.min(MAX_IO_CHUNK), "sys_pread64.tmp") {
+    let mut tmp = match alloc_uninit_bytes(count.min(MAX_IO_CHUNK), "sys_pread64.tmp") {
         Ok(buf) => buf,
         Err(e) => return -e.code() as isize,
     };
@@ -385,7 +385,7 @@ pub fn sys_pwrite64(fd: usize, buf: usize, count: usize, offset: usize) -> isize
     }
     let object = entry.object;
     let mut total = 0usize;
-    let mut tmp = match alloc_zeroed_bytes(count.min(MAX_IO_CHUNK), "sys_pwrite64.tmp") {
+    let mut tmp = match alloc_uninit_bytes(count.min(MAX_IO_CHUNK), "sys_pwrite64.tmp") {
         Ok(buf) => buf,
         Err(e) => return -e.code() as isize,
     };
@@ -653,7 +653,7 @@ pub fn sys_sendfile(out_fd: usize, in_fd: usize, offset: usize, count: usize) ->
     };
 
     let mut total = 0usize;
-    let mut buf = match alloc_zeroed_bytes(count.clamp(1, 64 * 1024), "sys_sendfile.tmp") {
+    let mut buf = match alloc_uninit_bytes(count.clamp(1, 64 * 1024), "sys_sendfile.tmp") {
         Ok(buf) => buf,
         Err(e) => return -e.code() as isize,
     };

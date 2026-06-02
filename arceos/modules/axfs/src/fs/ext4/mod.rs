@@ -38,11 +38,12 @@ impl<D: BlockDriverOps> Ext4Disk<D> {
 }
 
 impl<D: BlockDriverOps + 'static> Ext4Disk<D> {
-    fn read_block_aligned(&self, block_offset: usize) -> Vec<u8> {
+    fn read_block_aligned(&self, block_offset: usize, buf: &mut [u8]) {
         {
             let mut cache = self.block_cache.lock();
             if let Some(data) = cache.get(&block_offset) {
-                return data.clone();
+                buf.copy_from_slice(data);
+                return;
             }
         }
 
@@ -57,7 +58,8 @@ impl<D: BlockDriverOps + 'static> Ext4Disk<D> {
             );
             raw.drain(0..inner_offset);
             raw.truncate(BLOCK_SIZE);
-            return raw;
+            buf.copy_from_slice(&raw);
+            return;
         }
         if let Err(err) = dev.read_block(first_block, &mut raw) {
             log::error!(
@@ -72,7 +74,8 @@ impl<D: BlockDriverOps + 'static> Ext4Disk<D> {
             );
             raw.drain(0..inner_offset);
             raw.truncate(BLOCK_SIZE);
-            return raw;
+            buf.copy_from_slice(&raw);
+            return;
         }
         raw.drain(0..inner_offset);
         raw.truncate(BLOCK_SIZE);
@@ -81,27 +84,27 @@ impl<D: BlockDriverOps + 'static> Ext4Disk<D> {
             let mut cache = self.block_cache.lock();
             cache.put(block_offset, raw.clone());
         }
-        raw
+        buf.copy_from_slice(&raw);
     }
 }
 
 impl<D: BlockDriverOps + 'static> BlockDevice for Ext4Disk<D> {
-    fn read_offset(&self, offset: usize) -> Vec<u8> {
+    fn read_offset(&self, offset: usize, buf: &mut [u8]) {
         let inner_offset = offset % BLOCK_SIZE;
         if inner_offset == 0 {
-            self.read_block_aligned(offset)
+            self.read_block_aligned(offset, buf)
         } else {
             let block1_offset = (offset / BLOCK_SIZE) * BLOCK_SIZE;
             let block2_offset = block1_offset + BLOCK_SIZE;
 
-            let b1 = self.read_block_aligned(block1_offset);
-            let b2 = self.read_block_aligned(block2_offset);
+            let mut b1 = [0u8; BLOCK_SIZE];
+            let mut b2 = [0u8; BLOCK_SIZE];
+            self.read_block_aligned(block1_offset, &mut b1);
+            self.read_block_aligned(block2_offset, &mut b2);
 
-            let mut res = vec![0u8; BLOCK_SIZE];
             let part1_len = BLOCK_SIZE - inner_offset;
-            res[..part1_len].copy_from_slice(&b1[inner_offset..]);
-            res[part1_len..].copy_from_slice(&b2[..inner_offset]);
-            res
+            buf[..part1_len].copy_from_slice(&b1[inner_offset..]);
+            buf[part1_len..].copy_from_slice(&b2[..inner_offset]);
         }
     }
 
@@ -115,7 +118,21 @@ impl<D: BlockDriverOps + 'static> BlockDevice for Ext4Disk<D> {
             let mut cache = self.block_cache.lock();
             let mut current = start_align;
             while current <= end_align {
-                cache.pop(&current);
+                let start = core::cmp::max(offset, current);
+                let end = core::cmp::min(offset + data.len(), current + BLOCK_SIZE);
+                if start < end {
+                    let overlap_start = start - current;
+                    let overlap_end = end - current;
+                    let data_start = start - offset;
+                    let data_len = end - start;
+
+                    if let Some(cached_data) = cache.get_mut(&current) {
+                        cached_data[overlap_start..overlap_end]
+                            .copy_from_slice(&data[data_start..data_start + data_len]);
+                    } else if overlap_start == 0 && overlap_end == BLOCK_SIZE {
+                        cache.put(current, data[data_start..data_start + data_len].to_vec());
+                    }
+                }
                 current += BLOCK_SIZE;
             }
         }
