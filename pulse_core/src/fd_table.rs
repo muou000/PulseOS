@@ -958,7 +958,7 @@ struct PipeShared {
 impl PipeShared {
     fn new() -> Self {
         Self {
-            buffer: Mutex::new(PipeRingBuffer::new(4096)),
+            buffer: Mutex::new(PipeRingBuffer::new(65536)),
             read_wait_queue: axtask::WaitQueue::new(),
             write_wait_queue: axtask::WaitQueue::new(),
             reader_count: AtomicUsize::new(1),
@@ -1121,8 +1121,9 @@ impl FdObject for PipeObject {
             }
 
             drop(ring_buffer);
-            self.shared.write_wait_queue.notify_all(true);
+            self.shared.write_wait_queue.notify_all(false);
         }
+        self.shared.write_wait_queue.notify_all(true);
         Ok(read_size)
     }
 
@@ -1198,8 +1199,9 @@ impl FdObject for PipeObject {
             }
 
             drop(ring_buffer);
-            self.shared.read_wait_queue.notify_all(true);
+            self.shared.read_wait_queue.notify_all(false);
         }
+        self.shared.read_wait_queue.notify_all(true);
         Ok(write_size)
     }
 

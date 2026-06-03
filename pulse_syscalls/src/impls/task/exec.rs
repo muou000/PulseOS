@@ -1,5 +1,4 @@
-use alloc::vec::Vec;
-use alloc::string::ToString;
+use alloc::{string::ToString, vec::Vec};
 
 use axerrno::LinuxError;
 use axhal::context::TrapFrame;
@@ -30,7 +29,10 @@ pub fn sys_execve(_tf: &TrapFrame, pathname: usize, argv: usize, envp: usize) ->
     }
 
     let path_str = match read_user_cstring(&process, pathname) {
-        Ok(path) => path,
+        Ok(path) => {
+            axlog::info!("sys_execve: path={:?}", path);
+            path
+        }
         Err(e) => return e,
     };
     let mut args = match read_user_string_array(&process, argv) {
@@ -58,7 +60,7 @@ pub fn sys_execve(_tf: &TrapFrame, pathname: usize, argv: usize, envp: usize) ->
     }
 
     if let Err(e) = process.exec(&path_str, &args_strs, &envs_strs) {
-        axlog::error!("sys_execve failed: {:?}", e);
+        axlog::error!("sys_execve failed: {:?} (path={:?})", e, path_str);
         let errno: LinuxError = e.into();
         return -errno.code() as isize;
     }
@@ -107,10 +109,11 @@ pub fn sys_execveat(
         return -LinuxError::EAGAIN.code() as isize;
     }
 
-    let loc = match crate::impls::fs::common::resolve_location_at_ptr(dirfd, pathname, flags as usize) {
-        Ok(loc) => loc,
-        Err(e) => return -e.code() as isize,
-    };
+    let loc =
+        match crate::impls::fs::common::resolve_location_at_ptr(dirfd, pathname, flags as usize) {
+            Ok(loc) => loc,
+            Err(e) => return -e.code() as isize,
+        };
 
     let metadata = match loc.metadata() {
         Ok(m) => m,
