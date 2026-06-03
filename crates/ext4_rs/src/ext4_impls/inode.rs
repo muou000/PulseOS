@@ -93,11 +93,18 @@ impl Ext4 {
             // get the last path
             let path = path.path.last().unwrap();
 
-            // get physical block id
-            let fblock = path.pblock;
-
             // Validate that the extent was actually found (not a placeholder for empty node)
-            if path.extent.is_none() {
+            if let Some(extent) = path.extent {
+                let start_blk = extent.first_block;
+                let end_blk = start_blk + extent.get_actual_len() as u32;
+                if lblock < start_blk || lblock >= end_blk {
+                    log::trace!(
+                        "get_pblock_idx: lblock {} is outside extent [{}, {}), returning ENOENT for inode {}",
+                        lblock, start_blk, end_blk, inode_ref.inode_num
+                    );
+                    return_errno_with_message!(Errno::ENOENT, "extent not found for logical block");
+                }
+            } else {
                 log::trace!(
                     "get_pblock_idx: extent not found for lblock={}, inode={}",
                     lblock, inode_ref.inode_num
@@ -105,6 +112,8 @@ impl Ext4 {
                 return_errno_with_message!(Errno::ENOENT, "extent not found for logical block");
             }
 
+            // get physical block id
+            let fblock = path.pblock;
             return Ok(fblock);
         }
 
