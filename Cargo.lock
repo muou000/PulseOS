@@ -132,6 +132,37 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c08606f8c3cbf4ce6ec8e28fb0014a2c086708fe954eaa885384a6165172e7e8"
 
 [[package]]
+name = "ax-crate-interface"
+version = "0.5.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bf15768c43061f501f803de42ac83af3abe9c2b04f56360060e591997be1d964"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.117",
+]
+
+[[package]]
+name = "ax-kernel-guard"
+version = "0.3.10"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "60ddafa7d7ee6414cfcd1eb249d535bf829561bd9473ff9592084909c479606b"
+dependencies = [
+ "ax-crate-interface",
+ "cfg-if",
+]
+
+[[package]]
+name = "ax-kspin"
+version = "0.3.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f73cd84f70a0f0bb35d3d661d25c93fcf0f02ecbdbc860a025f10d863adb187e"
+dependencies = [
+ "ax-kernel-guard",
+ "cfg-if",
+]
+
+[[package]]
 name = "axalloc"
 version = "0.2.0"
 dependencies = [
@@ -516,10 +547,11 @@ dependencies = [
 
 [[package]]
 name = "axpoll"
-version = "0.1.2"
+version = "0.3.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "36b92f85c6903350f5146216ccb7d7a7e7b4dbd6f5927a1279db03ba52a53ae7"
+checksum = "ac49f8a312eafa1a2c53e540883f3f5056ff92aa1dd8199dbdd3124836c04dee"
 dependencies = [
+ "ax-kspin",
  "bitflags 2.11.1",
  "linux-raw-sys",
  "spin 0.10.0",
@@ -1271,6 +1303,7 @@ dependencies = [
  "axio",
  "axlog",
  "axmm",
+ "axpoll",
  "axtask",
  "bitflags 2.11.1",
  "kernel-elf-parser",

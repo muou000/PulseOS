@@ -175,6 +175,25 @@ impl Process {
         }
     }
 
+    pub fn enter_user_mode_and_drop(self: Arc<Self>, thread: Arc<super::Thread>) -> ! {
+        let entry = *self.entry.lock();
+        let stack_top = *self.stack_top.lock();
+        self.mark_user_resume();
+        thread.mark_user_resume();
+
+        drop(thread);
+        drop(self);
+
+        let uctx = axhal::context::UspaceContext::new(entry, va!(stack_top), 0);
+        let kstack_top = axtask::current()
+            .kernel_stack_top()
+            .expect("current task has no kernel stack")
+            .as_usize();
+        unsafe {
+            uctx.enter_uspace(va!(kstack_top));
+        }
+    }
+
     pub fn exec(&self, path: &str, args: &[&str], envs: &[&str]) -> AxResult<()> {
         let mut fs_ctx = self.fs_context_handle().lock().clone();
         fs_ctx.credentials = Some((self.euid(), self.egid()));

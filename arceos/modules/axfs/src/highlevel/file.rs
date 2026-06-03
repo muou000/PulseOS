@@ -1121,6 +1121,11 @@ impl File {
         self.sync(false)
     }
 
+    pub fn position(&self) -> Option<u64> {
+        self.position.as_ref().map(|pos| *pos.lock())
+    }
+
+
     #[cfg(feature = "times")]
     fn update_timestamps_on_drop(&self) {
         let flags = self.access_flags.load(Ordering::Acquire);

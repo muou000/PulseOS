@@ -4,7 +4,7 @@ use alloc::{
 };
 use core::{
     any::Any,
-    sync::atomic::{AtomicBool, AtomicUsize, Ordering},
+    sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
     time::Duration,
 };
 
@@ -32,6 +32,10 @@ bitflags::bitflags! {
 
 pub trait FdObject: Send + Sync {
     fn as_any(&self) -> &dyn Any;
+
+    fn ioctl(&self, _cmd: u32, _arg: usize) -> LinuxResult<isize> {
+        Err(LinuxError::ENOTTY)
+    }
 
     fn set_pipe_size(&self, _size: usize) -> LinuxResult<usize> {
         Err(LinuxError::EINVAL)
@@ -177,6 +181,40 @@ fn console_write_bytes(buf: &[u8]) -> axio::Result<usize> {
 static STDIN_BUFFER: Lazy<SpinNoIrq<VecDeque<u8>>> = Lazy::new(|| SpinNoIrq::new(VecDeque::new()));
 pub static STDIN_WAIT_QUEUE: axtask::WaitQueue = axtask::WaitQueue::new();
 
+static FOREGROUND_PGID: AtomicU64 = AtomicU64::new(0);
+
+pub fn get_foreground_pgid() -> u64 {
+    FOREGROUND_PGID.load(Ordering::Acquire)
+}
+
+pub fn set_foreground_pgid(pgid: u64) {
+    FOREGROUND_PGID.store(pgid, Ordering::Release);
+}
+
+fn deliver_ctrl_c_signal() {
+    let pgid = get_foreground_pgid();
+    let target_pgid = if pgid > 0 {
+        Some(pgid)
+    } else {
+        // Find the newest non-init process (highest PID > 1)
+        let procs = crate::task::processes_snapshot();
+        procs.iter()
+            .filter(|p| p.pid() > 1 && !p.is_zombie())
+            .max_by_key(|p| p.pid())
+            .map(|p| p.pgid())
+    };
+
+    if let Some(t_pgid) = target_pgid {
+        let procs = crate::task::processes_snapshot();
+        for p in procs {
+            if p.pgid() == t_pgid && p.pid() > 1 && !p.is_zombie() {
+                axlog::info!("Ctrl+C: Sending SIGINT to process {} (pgid {})", p.pid(), p.pgid());
+                crate::task::queue_signal_to_process(&p, SIGINT as usize);
+            }
+        }
+    }
+}
+
 impl Read for StdinRaw {
     fn read(&mut self, buf: &mut [u8]) -> axio::Result<usize> {
         let mut stdin_buf = STDIN_BUFFER.lock();
@@ -193,10 +231,18 @@ pub fn poll_stdin() {
     if let Ok(len) = console_read_bytes(&mut temp_buf) {
         if len > 0 {
             let mut stdin_buf = STDIN_BUFFER.lock();
+            let mut has_normal_bytes = false;
             for &c in &temp_buf[..len] {
-                stdin_buf.push_back(c);
+                if c == 3 {
+                    deliver_ctrl_c_signal();
+                } else {
+                    stdin_buf.push_back(c);
+                    has_normal_bytes = true;
+                }
             }
-            STDIN_WAIT_QUEUE.notify_all(true);
+            if has_normal_bytes {
+                STDIN_WAIT_QUEUE.notify_all(true);
+            }
         }
     }
 }
@@ -215,6 +261,20 @@ static STDIN_READER: Lazy<Mutex<BufReader<StdinRaw>>> =
     Lazy::new(|| Mutex::new(BufReader::new(StdinRaw)));
 static STDOUT_WRITER: Lazy<Mutex<StdoutRaw>> = Lazy::new(|| Mutex::new(StdoutRaw));
 
+const FIONREAD: u32 = 0x541B;
+const TCGETS: u32 = 0x5401;
+const TIOCGPGRP: u32 = 0x540F;
+const TIOCSPGRP: u32 = 0x5410;
+const TIOCGWINSZ: u32 = 0x5413;
+
+#[repr(C)]
+struct WinSize {
+    ws_row: u16,
+    ws_col: u16,
+    ws_xpixel: u16,
+    ws_ypixel: u16,
+}
+
 pub struct StdinObject;
 
 impl StdinObject {
@@ -228,6 +288,54 @@ impl StdinObject {
 impl FdObject for StdinObject {
     fn as_any(&self) -> &dyn Any {
         self
+    }
+
+    fn ioctl(&self, cmd: u32, arg: usize) -> LinuxResult<isize> {
+        match cmd {
+            TCGETS => Ok(0),
+            TIOCGPGRP => {
+                if arg != 0 {
+                    let mut pgid = get_foreground_pgid();
+                    if pgid == 0 {
+                        pgid = 1;
+                    }
+                    let value = (pgid as i32).to_ne_bytes();
+                    crate::task::current_process()?.write_user_bytes(arg, &value)?;
+                }
+                Ok(0)
+            }
+            TIOCSPGRP => {
+                if arg != 0 {
+                    let pgid = crate::task::current_process()?.read_user_u32(arg)? as u64;
+                    set_foreground_pgid(pgid);
+                }
+                Ok(0)
+            }
+            TIOCGWINSZ => {
+                if arg != 0 {
+                    let ws = WinSize {
+                        ws_row: 24,
+                        ws_col: 80,
+                        ws_xpixel: 0,
+                        ws_ypixel: 0,
+                    };
+                    let bytes = unsafe {
+                        core::slice::from_raw_parts(
+                            (&ws as *const WinSize).cast::<u8>(),
+                            core::mem::size_of::<WinSize>(),
+                        )
+                    };
+                    crate::task::current_process()?.write_user_bytes(arg, bytes)?;
+                }
+                Ok(0)
+            }
+            FIONREAD => {
+                let n = STDIN_BUFFER.lock().len() as i32;
+                crate::task::current_process()?.write_user_bytes(arg, &n.to_ne_bytes())?;
+                Ok(0)
+            }
+            _ => Err(LinuxError::ENOTTY),
+        }
     }
 
     fn read(&self, buf: &mut [u8]) -> LinuxResult<usize> {
@@ -284,6 +392,54 @@ impl FdObject for StdoutObject {
         self
     }
 
+    fn ioctl(&self, cmd: u32, arg: usize) -> LinuxResult<isize> {
+        match cmd {
+            TCGETS => Ok(0),
+            TIOCGPGRP => {
+                if arg != 0 {
+                    let mut pgid = get_foreground_pgid();
+                    if pgid == 0 {
+                        pgid = 1;
+                    }
+                    let value = (pgid as i32).to_ne_bytes();
+                    crate::task::current_process()?.write_user_bytes(arg, &value)?;
+                }
+                Ok(0)
+            }
+            TIOCSPGRP => {
+                if arg != 0 {
+                    let pgid = crate::task::current_process()?.read_user_u32(arg)? as u64;
+                    set_foreground_pgid(pgid);
+                }
+                Ok(0)
+            }
+            TIOCGWINSZ => {
+                if arg != 0 {
+                    let ws = WinSize {
+                        ws_row: 24,
+                        ws_col: 80,
+                        ws_xpixel: 0,
+                        ws_ypixel: 0,
+                    };
+                    let bytes = unsafe {
+                        core::slice::from_raw_parts(
+                            (&ws as *const WinSize).cast::<u8>(),
+                            core::mem::size_of::<WinSize>(),
+                        )
+                    };
+                    crate::task::current_process()?.write_user_bytes(arg, bytes)?;
+                }
+                Ok(0)
+            }
+            FIONREAD => {
+                let n = 0i32;
+                crate::task::current_process()?.write_user_bytes(arg, &n.to_ne_bytes())?;
+                Ok(0)
+            }
+            _ => Err(LinuxError::ENOTTY),
+        }
+    }
+
     fn read(&self, _buf: &mut [u8]) -> LinuxResult<usize> {
         Err(LinuxError::EPERM)
     }
@@ -334,6 +490,19 @@ impl FileObject {
 impl FdObject for FileObject {
     fn as_any(&self) -> &dyn Any {
         self
+    }
+
+    fn ioctl(&self, cmd: u32, arg: usize) -> LinuxResult<isize> {
+        if cmd == FIONREAD {
+            let metadata = location_to_stat(self.inner.location())?;
+            let pos = self.inner.position().unwrap_or(0);
+            let size = metadata.st_size as u64;
+            let n = size.saturating_sub(pos) as i32;
+            let process = crate::task::current_process()?;
+            process.write_user_bytes(arg, &n.to_ne_bytes())?;
+            return Ok(0);
+        }
+        Err(LinuxError::ENOTTY)
     }
 
     fn read(&self, buf: &mut [u8]) -> LinuxResult<usize> {
@@ -835,6 +1004,16 @@ impl PipeObject {
 impl FdObject for PipeObject {
     fn as_any(&self) -> &dyn Any {
         self
+    }
+
+    fn ioctl(&self, cmd: u32, arg: usize) -> LinuxResult<isize> {
+        if cmd == FIONREAD {
+            let n = self.shared.buffer.lock().available_read() as i32;
+            let process = crate::task::current_process()?;
+            process.write_user_bytes(arg, &n.to_ne_bytes())?;
+            return Ok(0);
+        }
+        Err(LinuxError::ENOTTY)
     }
 
     fn set_pipe_size(&self, size: usize) -> LinuxResult<usize> {
@@ -1368,3 +1547,46 @@ impl FdTable {
 }
 
 pub type SharedFdTable = Arc<RwLock<FdTable>>;
+
+pub fn init_tty_callbacks() {
+    struct TtyCallbacksImpl;
+    impl axfs::TtyCallbacks for TtyCallbacksImpl {
+        fn read(&self, buf: &mut [u8]) -> axfs_ng_vfs::VfsResult<usize> {
+            let read_len = STDIN_READER.lock().read(buf).map_err(|_| axfs_ng_vfs::VfsError::Io)?;
+            if buf.is_empty() || read_len > 0 {
+                return Ok(read_len);
+            }
+            loop {
+                let read_len = STDIN_READER.lock().read(buf).map_err(|_| axfs_ng_vfs::VfsError::Io)?;
+                if read_len > 0 {
+                    return Ok(read_len);
+                }
+                if StdinObject::current_has_pending_signal() {
+                    return Err(axfs_ng_vfs::VfsError::Interrupted);
+                }
+                STDIN_WAIT_QUEUE.wait_until(|| {
+                    !STDIN_BUFFER.lock().is_empty()
+                        || StdinObject::current_has_pending_signal()
+                });
+                if StdinObject::current_has_pending_signal() {
+                    return Err(axfs_ng_vfs::VfsError::Interrupted);
+                }
+            }
+        }
+
+        fn write(&self, buf: &[u8]) -> axfs_ng_vfs::VfsResult<usize> {
+            STDOUT_WRITER.lock().write(buf).map_err(|_| axfs_ng_vfs::VfsError::Io)
+        }
+
+        fn poll(&self) -> axpoll::IoEvents {
+            let has_data = !STDIN_BUFFER.lock().is_empty();
+            let mut events = axpoll::IoEvents::OUT;
+            if has_data {
+                events |= axpoll::IoEvents::IN;
+            }
+            events
+        }
+    }
+    axfs::register_tty_callbacks(Arc::new(TtyCallbacksImpl));
+}
+

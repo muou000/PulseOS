@@ -22,6 +22,9 @@ fn main() {
     pulse_core::task::init_procfs_provider();
     info!("procfs provider registered");
 
+    pulse_core::fd_table::init_tty_callbacks();
+    info!("TTY callbacks registered");
+
     pulse_core::trap::init();
 
     use axtask::TaskInner;

@@ -15,6 +15,7 @@ use axdriver::prelude::BlockDriverOps;
 use axfs_ng_vfs::{Filesystem, VfsResult};
 use cfg_if::cfg_if;
 pub(crate) use devfs::BlockDeviceSpec;
+pub use devfs::{TtyCallbacks, register_tty_callbacks};
 
 pub fn new_default<D: BlockDriverOps + 'static>(dev: D) -> VfsResult<Filesystem> {
     cfg_if! {

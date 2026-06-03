@@ -324,6 +324,15 @@ impl Socket {
         }
     }
 
+    pub fn recv_queue(&self) -> usize {
+        match &self.inner {
+            SocketInner::Tcp(s) => s.recv_queue(),
+            SocketInner::Udp(s) => s.recv_queue(),
+            SocketInner::Local(s) => s.rx.buffer.lock().available_read(),
+            SocketInner::Packet(_) => 0,
+        }
+    }
+
     /// Downcast an `Arc<dyn FdObject>` to `Arc<Socket>`.
     pub fn from_fd_entry(object: &Arc<dyn FdObject>) -> Result<Arc<Socket>, LinuxError> {
         object
@@ -344,6 +353,16 @@ impl Socket {
 impl FdObject for Socket {
     fn as_any(&self) -> &dyn Any {
         self
+    }
+
+    fn ioctl(&self, cmd: u32, arg: usize) -> Result<isize, LinuxError> {
+        if cmd == 0x541B { // FIONREAD
+            let n = self.recv_queue() as i32;
+            let process = pulse_core::task::current_process()?;
+            process.write_user_bytes(arg, &n.to_ne_bytes())?;
+            return Ok(0);
+        }
+        Err(LinuxError::ENOTTY)
     }
 
     fn read(&self, buf: &mut [u8]) -> Result<usize, LinuxError> {
