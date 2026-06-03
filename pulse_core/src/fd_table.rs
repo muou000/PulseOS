@@ -625,6 +625,13 @@ impl FdObject for FileObject {
     }
 }
 
+impl Drop for FileObject {
+    fn drop(&mut self) {
+        let owner = self as *const FileObject as *const () as usize;
+        crate::flock::flock_release_owner(owner);
+    }
+}
+
 fn parse_cpu_dma_latency_value(buf: &[u8]) -> LinuxResult<i32> {
     if buf.len() != 4 {
         return Err(LinuxError::EINVAL);
@@ -827,6 +834,13 @@ impl FdObject for DirObject {
             res?;
         }
         Ok(written)
+    }
+}
+
+impl Drop for DirObject {
+    fn drop(&mut self) {
+        let owner = self as *const DirObject as *const () as usize;
+        crate::flock::flock_release_owner(owner);
     }
 }
 
@@ -1267,6 +1281,8 @@ impl FdObject for PipeObject {
 
 impl Drop for PipeObject {
     fn drop(&mut self) {
+        let owner = self as *const PipeObject as *const () as usize;
+        crate::flock::flock_release_owner(owner);
         if self.readable {
             self.shared.reader_count.fetch_sub(1, Ordering::AcqRel);
             // Closing a pipe during process teardown should only wake waiters.
