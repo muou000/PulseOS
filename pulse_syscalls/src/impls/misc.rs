@@ -707,3 +707,124 @@ pub fn sys_syslog(action: usize, bufp: usize, len: usize) -> isize {
         _ => -LinuxError::EINVAL.code() as isize,
     }
 }
+
+#[cfg(target_arch = "riscv64")]
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+struct RiscvHwprobe {
+    key: i64,
+    value: u64,
+}
+
+#[cfg(target_arch = "riscv64")]
+pub fn sys_riscv_hwprobe(
+    pairs_addr: usize,
+    pair_count: usize,
+    cpusetsize: usize,
+    cpus_addr: usize,
+    flags: usize,
+) -> isize {
+    axlog::debug!(
+        "sys_riscv_hwprobe: pairs_addr={:#x}, pair_count={}, cpusetsize={}, cpus_addr={:#x}, flags={:#x}",
+        pairs_addr,
+        pair_count,
+        cpusetsize,
+        cpus_addr,
+        flags
+    );
+
+    if flags != 0 {
+        return -LinuxError::EINVAL.code() as isize;
+    }
+
+    if pairs_addr == 0 && pair_count != 0 {
+        return -LinuxError::EFAULT.code() as isize;
+    }
+
+    let res = pulse_core::task::with_current_process(|process| {
+        let mut cpu_0_included = true;
+        if cpus_addr != 0 && cpusetsize != 0 {
+            let mut first_byte = 0u8;
+            if process.read_user_bytes(cpus_addr, core::slice::from_mut(&mut first_byte)).is_err() {
+                return Err(axerrno::AxError::BadAddress);
+            }
+            cpu_0_included = (first_byte & 1) != 0;
+        }
+
+        let mut pairs = match uaccess::read_user_plain_array::<RiscvHwprobe>(process, pairs_addr, pair_count) {
+            Ok(p) => p,
+            Err(e) => return Err(e),
+        };
+
+        const RISCV_HWPROBE_KEY_MVENDORID: i64 = 0;
+        const RISCV_HWPROBE_KEY_MARCHID: i64 = 1;
+        const RISCV_HWPROBE_KEY_MIMPID: i64 = 2;
+        const RISCV_HWPROBE_KEY_BASE_BEHAVIOR: i64 = 3;
+        const RISCV_HWPROBE_KEY_IMA_EXT_0: i64 = 4;
+        const RISCV_HWPROBE_KEY_CPUPERF_0: i64 = 5;
+        const RISCV_HWPROBE_KEY_ZICBOZ_BLOCK_SIZE: i64 = 6;
+
+        const RISCV_HWPROBE_BASE_BEHAVIOR_IMA: u64 = 1 << 0;
+
+        const RISCV_HWPROBE_IMA_FD: u64 = 1 << 0;
+        const RISCV_HWPROBE_IMA_C: u64 = 1 << 1;
+
+        let mvendorid = sbi_rt::get_mvendorid() as u64;
+        let marchid = sbi_rt::get_marchid() as u64;
+        let mimpid = sbi_rt::get_mimpid() as u64;
+
+        for pair in pairs.iter_mut() {
+            if !cpu_0_included {
+                match pair.key {
+                    RISCV_HWPROBE_KEY_MVENDORID | RISCV_HWPROBE_KEY_MARCHID | RISCV_HWPROBE_KEY_MIMPID => {
+                        pair.value = u64::MAX;
+                    }
+                    RISCV_HWPROBE_KEY_BASE_BEHAVIOR | RISCV_HWPROBE_KEY_IMA_EXT_0 | RISCV_HWPROBE_KEY_CPUPERF_0 | RISCV_HWPROBE_KEY_ZICBOZ_BLOCK_SIZE => {
+                        pair.value = 0;
+                    }
+                    _ => {
+                        pair.key = -1;
+                        pair.value = 0;
+                    }
+                }
+                continue;
+            }
+
+            match pair.key {
+                RISCV_HWPROBE_KEY_MVENDORID => {
+                    pair.value = mvendorid;
+                }
+                RISCV_HWPROBE_KEY_MARCHID => {
+                    pair.value = marchid;
+                }
+                RISCV_HWPROBE_KEY_MIMPID => {
+                    pair.value = mimpid;
+                }
+                RISCV_HWPROBE_KEY_BASE_BEHAVIOR => {
+                    pair.value = RISCV_HWPROBE_BASE_BEHAVIOR_IMA;
+                }
+                RISCV_HWPROBE_KEY_IMA_EXT_0 => {
+                    pair.value = RISCV_HWPROBE_IMA_FD | RISCV_HWPROBE_IMA_C;
+                }
+                RISCV_HWPROBE_KEY_CPUPERF_0 => {
+                    pair.value = 0;
+                }
+                RISCV_HWPROBE_KEY_ZICBOZ_BLOCK_SIZE => {
+                    pair.value = 64;
+                }
+                _ => {
+                    pair.key = -1;
+                    pair.value = 0;
+                }
+            }
+        }
+
+        uaccess::write_user_plain_array(process, pairs_addr, &pairs)
+    });
+
+    match res {
+        Ok(Ok(())) => 0,
+        Ok(Err(_)) => -LinuxError::EFAULT.code() as isize,
+        Err(e) => -e.code() as isize,
+    }
+}

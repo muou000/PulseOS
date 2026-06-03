@@ -180,3 +180,19 @@ pub fn sys_fallocate(fd: usize, mode: usize, offset: usize, len: usize) -> isize
         Err(e) => -e.code() as isize,
     }
 }
+
+pub fn sys_flock(fd: usize, operation: usize) -> isize {
+    let entry = match get_fd_entry(fd) {
+        Ok(entry) => entry,
+        Err(e) => return -e.code() as isize,
+    };
+    if entry.flags.contains(FdFlags::PATH) {
+        return -LinuxError::EBADF.code() as isize;
+    }
+    let owner = alloc::sync::Arc::as_ptr(&entry.object) as *const () as usize;
+    let target = pulse_core::flock::get_lock_target(&entry.object);
+    match pulse_core::flock::do_flock(owner, target, operation as i32) {
+        Ok(_) => 0,
+        Err(e) => -e.code() as isize,
+    }
+}
