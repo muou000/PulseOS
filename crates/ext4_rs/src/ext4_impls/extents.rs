@@ -60,12 +60,17 @@ impl Ext4 {
 
         // Handle the case where depth is 0
         if let Some((extent, pos)) = node.binsearch_extent(lblock) {
+            let pblock = if lblock >= extent.get_first_block() {
+                lblock as u64 - extent.get_first_block() as u64 + extent.get_pblock()
+            } else {
+                0
+            };
             search_path.path.push(ExtentPathNode {
                 header: node.header,
                 index: None,
                 extent: Some(extent),
                 position: pos,
-                pblock: lblock as u64 - extent.get_first_block() as u64 + extent.get_pblock(),
+                pblock,
                 pblock_of_node,
             });
             search_path.maxdepth = node.header.depth;

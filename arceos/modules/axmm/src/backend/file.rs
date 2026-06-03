@@ -108,12 +108,15 @@ impl FileMapping {
 
     fn page_read_window(&self, page_addr: VirtAddr) -> Option<(u64, usize)> {
         let relative = page_addr.as_usize().checked_sub(self.start.as_usize())?;
-        let current_file_bytes = self.file_bytes();
-        if relative >= current_file_bytes {
+        let file_size_on_disk = self.file_bytes();
+        let limit_offset = (self.file_offset + self.file_bytes).min(file_size_on_disk);
+        let file_offset = self.file_offset.checked_add(relative)?;
+
+        if file_offset >= limit_offset {
             return None;
         }
-        let read_len = (current_file_bytes - relative).min(PAGE_SIZE_4K);
-        let file_offset = self.file_offset.checked_add(relative)?;
+
+        let read_len = (limit_offset - file_offset).min(PAGE_SIZE_4K);
         Some((file_offset as u64, read_len))
     }
 }
