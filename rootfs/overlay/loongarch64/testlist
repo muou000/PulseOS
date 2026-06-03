@@ -271,7 +271,6 @@ sendmmsg01
 sendmmsg02
 sendmsg01
 sendmsg02
-sendto01
 sendto02
 sendto03
 setegid01
@@ -385,7 +384,6 @@ waitpid11
 waitpid12
 waitpid13
 wc01.sh
-which01.sh
 write01
 write02
 write03
