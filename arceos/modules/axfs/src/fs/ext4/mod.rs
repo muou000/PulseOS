@@ -158,8 +158,7 @@ impl<D: BlockDriverOps + 'static> BlockDevice for Ext4Disk<D> {
         let first_block_write_len = core::cmp::min(self.sector_size - first_block_inner_offset, data.len());
 
         if first_block_write_len < self.sector_size {
-            let mut buf = Vec::with_capacity(self.sector_size);
-            unsafe { buf.set_len(self.sector_size) };
+            let mut buf = vec![0u8; self.sector_size];
             if let Err(err) = dev.read_block(first_block, &mut buf) {
                 log::error!(
                     "ext4 write_offset pre-read failed: offset={}, first_block={}, block_id={}, \
@@ -176,8 +175,7 @@ impl<D: BlockDriverOps + 'static> BlockDevice for Ext4Disk<D> {
             let last_block_write_len = core::cmp::min(self.sector_size, last_data_written);
 
             if last_block_write_len < self.sector_size {
-                let mut buf = Vec::with_capacity(self.sector_size);
-                unsafe { buf.set_len(self.sector_size) };
+                let mut buf = vec![0u8; self.sector_size];
                 let block_id = first_block + (blocks - 1) as u64;
                 if let Err(err) = dev.read_block(block_id, &mut buf) {
                     log::error!(

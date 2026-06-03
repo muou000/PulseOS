@@ -569,6 +569,8 @@ impl DirNodeOps for Inode {
         }
         fs.unlink(&mut parent, &mut child, name)
             .map_err(into_vfs_err)?;
+        fs.write_back_inode(&mut parent);
+        fs.write_back_inode(&mut child);
         self.invalidate_snapshot(self.ino);
         if child.inode.is_dir() {
             self.invalidate_snapshot(child.inode_num);
@@ -609,6 +611,7 @@ impl DirNodeOps for Inode {
             }
             fs.unlink(&mut dst_parent, &mut dst_inode, dst_name)
                 .map_err(into_vfs_err)?;
+            fs.write_back_inode(&mut dst_inode);
             dst_dir.invalidate_snapshot(dst_dir.ino);
             if dst_inode.inode.is_dir() {
                 dst_dir.invalidate_snapshot(dst_inode.inode_num);
@@ -624,6 +627,7 @@ impl DirNodeOps for Inode {
         let mut src_parent = fs.get_inode_ref(self.ino);
         fs.dir_remove_entry(&mut src_parent, src_name)
             .map_err(into_vfs_err)?;
+        fs.write_back_inode(&mut src_parent);
         self.invalidate_snapshot(self.ino);
         if dst_dir.ino != self.ino {
             dst_dir.invalidate_snapshot(dst_dir.ino);
