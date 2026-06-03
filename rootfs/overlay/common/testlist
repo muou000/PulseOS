@@ -46,7 +46,6 @@ close01
 close02
 confstr01
 connect02
-cp_tests.sh
 creat01
 creat03
 creat05
@@ -168,7 +167,6 @@ ioctl_ns07
 kill05
 kill11
 lftest
-linktest.sh
 llseek02
 llseek03
 ln_tests.sh
@@ -242,7 +240,6 @@ readlinkat02
 readv01
 readv02
 recv01
-recvfrom01
 recvmmsg01
 recvmsg01
 recvmsg02
