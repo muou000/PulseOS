@@ -1341,6 +1341,7 @@ dependencies = [
  "pulse_core",
  "rand_core",
  "rand_pcg",
+ "sbi-rt",
  "scope-local",
  "spin 0.10.0",
  "starry-vdso",

@@ -363,6 +363,15 @@ fn syscall_dispatcher(
         Sysno::semop => impls::sys_semop(args[0] as i32, args[1], args[2]),
 
         Sysno::unshare => impls::sys_unshare(args[0]),
+        #[cfg(target_arch = "riscv64")]
+        Sysno::riscv_hwprobe => impls::sys_riscv_hwprobe(
+            args[0],
+            args[1],
+            args[2],
+            args[3],
+            args[4],
+        ),
+        Sysno::flock => impls::sys_flock(args[0], args[1]),
         _ => {
             axlog::warn!("Unimplemented syscall: {:?} ({})", sysno, syscall_id);
             -LinuxError::ENOSYS.code() as isize
