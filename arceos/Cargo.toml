@@ -67,7 +67,7 @@ axdma = { path = "modules/axdma" }
 axipi = { path = "modules/axipi" }
 
 axio = { version = "0.3.0-pre.1" }
-axpoll = "0.1"
+axpoll = "0.3"
 cfg-if = "1.0"
 chrono = { version = "0.4", default-features = false }
 kspin = "0.1"

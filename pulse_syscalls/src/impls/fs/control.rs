@@ -5,7 +5,7 @@ use alloc::format;
 use axerrno::LinuxError;
 use chrono::{Datelike, Timelike, Utc};
 
-use crate::impls::utils::write_user_bytes;
+use crate::impls::utils::{read_user_bytes, write_user_bytes};
 
 use linux_raw_sys::ioctl::{
     BLKGETSIZE64, BLKSSZGET, RTC_RD_TIME, SIOCGIFFLAGS, SIOCGIFINDEX, SIOCSIFFLAGS, TCGETS, TIOCGPGRP,
@@ -177,6 +177,16 @@ pub fn sys_ioctl(fd: usize, cmd: usize, arg: usize) -> isize {
 
     let cmd32 = cmd as u32;
 
+    if let Ok(process) = pulse_core::task::current_process() {
+        if let Ok(entry) = process.fd_table().read().get_entry_cloned(fd) {
+            match entry.object.ioctl(cmd32, arg) {
+                Ok(res) => return res,
+                Err(LinuxError::ENOTTY) => {}
+                Err(e) => return -e.code() as isize,
+            }
+        }
+    }
+
     let res = handle_loop_ioctl(fd, cmd32, arg);
     if res != -axerrno::LinuxError::ENOTTY.code() as isize {
         return res;
@@ -198,7 +208,11 @@ pub fn sys_ioctl(fd: usize, cmd: usize, arg: usize) -> isize {
         TIOCGPGRP => {
             warn_tty_ioctl_stub_once(fd, cmd32);
             if arg != 0 {
-                let value = 1i32.to_ne_bytes();
+                let mut pgid = pulse_core::fd_table::get_foreground_pgid();
+                if pgid == 0 {
+                    pgid = 1;
+                }
+                let value = (pgid as i32).to_ne_bytes();
                 if let Err(e) = write_user_bytes(arg, &value) {
                     return -e.code() as isize;
                 }
@@ -207,6 +221,14 @@ pub fn sys_ioctl(fd: usize, cmd: usize, arg: usize) -> isize {
         }
         TIOCSPGRP => {
             warn_tty_ioctl_stub_once(fd, cmd32);
+            if arg != 0 {
+                let mut bytes = [0u8; 4];
+                if let Err(e) = read_user_bytes(arg, &mut bytes) {
+                    return -e.code() as isize;
+                }
+                let pgid = i32::from_ne_bytes(bytes) as u64;
+                pulse_core::fd_table::set_foreground_pgid(pgid);
+            }
             0
         }
         TIOCGWINSZ => {

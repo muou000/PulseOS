@@ -15,6 +15,7 @@ axalloc.workspace = true
 axtask = { workspace = true, features = ["multitask"] }
 axfs.workspace = true
 axfs-ng-vfs.workspace = true
+axpoll.workspace = true
 axmm.workspace = true
 axerrno.workspace = true
 axio.workspace = true

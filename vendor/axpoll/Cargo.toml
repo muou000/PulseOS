@@ -12,7 +12,7 @@
 [package]
 edition = "2024"
 name = "axpoll"
-version = "0.1.2"
+version = "0.3.9"
 authors = [
     "Mivik <mivikq@gmail.com>",
     "朝倉水希 <asakuramizu111@gmail.com>",
@@ -25,8 +25,8 @@ autotests = false
 autobenches = false
 description = "A library for polling I/O events and waking up tasks."
 documentation = "https://docs.rs/axpoll"
-readme = false
-license = "GPL-3.0-or-later OR Apache-2.0 OR MulanPSL-2.0"
+readme = "README.md"
+license = "Apache-2.0"
 repository = "https://github.com/Starry-OS/axpoll"
 
 [features]
@@ -44,6 +44,9 @@ path = "tests/async.rs"
 [[test]]
 name = "tests"
 path = "tests/tests.rs"
+
+[dependencies.ax-kspin]
+version = "0.3.8"
 
 [dependencies.bitflags]
 version = "2.10"

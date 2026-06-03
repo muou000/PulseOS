@@ -648,6 +648,12 @@ impl TcpSocket {
             None => f(None),
         }
     }
+
+    pub fn recv_queue(&self) -> usize {
+        self.with_socket(|socket| {
+            socket.map(|s| s.recv_queue()).unwrap_or(0)
+        })
+    }
 }
 
 /// Private methods

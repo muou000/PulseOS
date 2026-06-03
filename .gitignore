@@ -10,4 +10,3 @@ kernel-*
 *.txt
 !vendor/**/*.txt
 .antigravitycli/
-.cargo-checksum.json

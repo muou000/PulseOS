@@ -30,8 +30,11 @@ const CPU_DMA_LATENCY_INO: u64 = 7;
 const SHM_INO: u64 = 8;
 const ZERO_INO: u64 = 9;
 const LOOP_CTRL_INO: u64 = 10;
+const TTY_INO: u64 = 11;
+const CONSOLE_INO: u64 = 12;
+const TTYS0_INO: u64 = 13;
 
-const NEXT_DYNAMIC_INO: u64 = LOOP_CTRL_INO + 1;
+const NEXT_DYNAMIC_INO: u64 = TTYS0_INO + 1;
 
 const RANDOM_SEED: u64 = 0x0123_4567_89ab_cdef;
 
@@ -42,6 +45,18 @@ pub(crate) struct BlockDeviceSpec {
     pub minor: u32,
 }
 
+pub trait TtyCallbacks: Send + Sync {
+    fn read(&self, buf: &mut [u8]) -> VfsResult<usize>;
+    fn write(&self, buf: &[u8]) -> VfsResult<usize>;
+    fn poll(&self) -> IoEvents;
+}
+
+static TTY_CALLBACKS: spin::Once<Arc<dyn TtyCallbacks>> = spin::Once::new();
+
+pub fn register_tty_callbacks(callbacks: Arc<dyn TtyCallbacks>) {
+    TTY_CALLBACKS.call_once(|| callbacks);
+}
+
 enum DevDeviceKind {
     Null,
     Zero,
@@ -49,6 +64,9 @@ enum DevDeviceKind {
     Random(RandomDevice),
     CpuDmaLatency,
     LoopControl,
+    Tty,
+    Console,
+    TtyS0,
 }
 
 struct RandomDevice {
@@ -338,6 +356,9 @@ impl DevFilesystem {
             10,
             237,
         );
+        let tty = Inode::new_character_device(TTY_INO, DevDeviceKind::Tty, 0o666, 5, 0);
+        let console = Inode::new_character_device(CONSOLE_INO, DevDeviceKind::Console, 0o666, 5, 1);
+        let tty_s0 = Inode::new_character_device(TTYS0_INO, DevDeviceKind::TtyS0, 0o660, 4, 64);
 
         root.metadata.lock().nlink = 2;
         misc.metadata.lock().nlink = 2;
@@ -352,6 +373,9 @@ impl DevFilesystem {
         self.insert_entry_locked(&root, "urandom", URANDOM_INO, &inodes);
         self.insert_entry_locked(&root, "cpu_dma_latency", CPU_DMA_LATENCY_INO, &inodes);
         self.insert_entry_locked(&root, "loop-control", LOOP_CTRL_INO, &inodes);
+        self.insert_entry_locked(&root, "tty", TTY_INO, &inodes);
+        self.insert_entry_locked(&root, "console", CONSOLE_INO, &inodes);
+        self.insert_entry_locked(&root, "ttyS0", TTYS0_INO, &inodes);
         self.insert_entry_locked(&misc, "rtc", RTC_INO, &inodes);
 
         for spec in block_devices {
@@ -371,6 +395,9 @@ impl DevFilesystem {
         inodes.insert(URANDOM_INO, urandom);
         inodes.insert(CPU_DMA_LATENCY_INO, cpu_dma);
         inodes.insert(LOOP_CTRL_INO, loop_ctrl);
+        inodes.insert(TTY_INO, tty);
+        inodes.insert(CONSOLE_INO, console);
+        inodes.insert(TTYS0_INO, tty_s0);
     }
 
     fn insert_entry_locked(
@@ -801,6 +828,16 @@ impl FileNodeOps for DevNode {
                 buf[..n].fill(0);
                 Ok(n)
             }
+            NodeContent::CharacterDevice(DevDeviceKind::Tty)
+            | NodeContent::CharacterDevice(DevDeviceKind::Console)
+            | NodeContent::CharacterDevice(DevDeviceKind::TtyS0) => {
+                if let Some(callbacks) = TTY_CALLBACKS.get() {
+                    callbacks.read(buf)
+                } else {
+                    let len = axhal::console::read_bytes(buf);
+                    Ok(len)
+                }
+            }
             NodeContent::Directory(_) => Err(VfsError::IsADirectory),
         }
     }
@@ -837,6 +874,16 @@ impl FileNodeOps for DevNode {
                 }
                 Ok(buf.len())
             }
+            NodeContent::CharacterDevice(DevDeviceKind::Tty)
+            | NodeContent::CharacterDevice(DevDeviceKind::Console)
+            | NodeContent::CharacterDevice(DevDeviceKind::TtyS0) => {
+                if let Some(callbacks) = TTY_CALLBACKS.get() {
+                    callbacks.write(buf)
+                } else {
+                    axhal::console::write_bytes(buf);
+                    Ok(buf.len())
+                }
+            }
             NodeContent::Directory(_) => Err(VfsError::IsADirectory),
         }
     }
@@ -860,6 +907,11 @@ impl FileNodeOps for DevNode {
                 let off = *length;
                 *length = length.saturating_add(buf.len() as u64);
                 Ok((buf.len(), off))
+            }
+            NodeContent::CharacterDevice(DevDeviceKind::Tty)
+            | NodeContent::CharacterDevice(DevDeviceKind::Console)
+            | NodeContent::CharacterDevice(DevDeviceKind::TtyS0) => {
+                self.write_at(buf, 0).map(|n| (n, 0))
             }
             NodeContent::Directory(_) => Err(VfsError::IsADirectory),
         }
@@ -888,6 +940,13 @@ impl Pollable for DevNode {
                     NodeContent::CharacterDevice(_) | NodeContent::BlockDevice(_)
                 ) =>
             {
+                if let NodeContent::CharacterDevice(kind) = &inode.content {
+                    if matches!(kind, DevDeviceKind::Tty | DevDeviceKind::Console | DevDeviceKind::TtyS0) {
+                        if let Some(callbacks) = TTY_CALLBACKS.get() {
+                            return callbacks.poll();
+                        }
+                    }
+                }
                 IoEvents::IN | IoEvents::OUT
             }
             Some(_) | None => IoEvents::IN | IoEvents::OUT,

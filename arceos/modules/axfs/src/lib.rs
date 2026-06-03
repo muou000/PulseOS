@@ -24,7 +24,7 @@ use spin::{Lazy, Mutex};
 mod disk;
 mod fs;
 
-pub use fs::{new_tmpfs, new_procfs, new_default, devfs::DevNode};
+pub use fs::{new_tmpfs, new_procfs, new_default, devfs::DevNode, TtyCallbacks, register_tty_callbacks};
 #[cfg(feature = "ext4")]
 pub use fs::ext4;
 

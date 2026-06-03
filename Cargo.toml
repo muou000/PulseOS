@@ -34,6 +34,7 @@ axtask = { path = "arceos/modules/axtask" }
 axfs = { path = "arceos/modules/axfs", features = ["times"] }
 axmm = { path = "arceos/modules/axmm" }
 axerrno = "0.2"
+axpoll = "0.3"
 
 axplat-riscv64-qemu-virt = "0.3.0"
 axplat-loongarch64-qemu-virt = "0.3.0"

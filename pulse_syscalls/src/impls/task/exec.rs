@@ -22,18 +22,18 @@ pub fn sys_execve(_tf: &TrapFrame, pathname: usize, argv: usize, envp: usize) ->
         Ok(thread) => thread,
         Err(e) => return -e.code() as isize,
     };
-    let process = thread.process();
+    let process = thread.process_arc();
 
     if process.thread_count() > 1 {
         axlog::warn!("sys_execve: multi-thread exec is not supported yet");
         return -LinuxError::EAGAIN.code() as isize;
     }
 
-    let path_str = match read_user_cstring(process, pathname) {
+    let path_str = match read_user_cstring(&process, pathname) {
         Ok(path) => path,
         Err(e) => return e,
     };
-    let mut args = match read_user_string_array(process, argv) {
+    let mut args = match read_user_string_array(&process, argv) {
         Ok(args) => args,
         Err(e) => return e,
     };
@@ -47,7 +47,7 @@ pub fn sys_execve(_tf: &TrapFrame, pathname: usize, argv: usize, envp: usize) ->
         args_strs.push(s.as_str());
     }
 
-    let envs = match read_user_string_array(process, envp) {
+    let envs = match read_user_string_array(&process, envp) {
         Ok(envs) => envs,
         Err(e) => return e,
     };
@@ -63,7 +63,14 @@ pub fn sys_execve(_tf: &TrapFrame, pathname: usize, argv: usize, envp: usize) ->
         return -errno.code() as isize;
     }
     thread.clear_thread_tid_state();
-    process.enter_user_mode();
+
+    drop(args_strs);
+    drop(args);
+    drop(envs_strs);
+    drop(envs);
+    drop(path_str);
+
+    process.enter_user_mode_and_drop(thread)
 }
 
 pub fn sys_execveat(
@@ -93,7 +100,7 @@ pub fn sys_execveat(
         Ok(thread) => thread,
         Err(e) => return -e.code() as isize,
     };
-    let process = thread.process();
+    let process = thread.process_arc();
 
     if process.thread_count() > 1 {
         axlog::warn!("sys_execveat: multi-thread exec is not supported yet");
@@ -127,7 +134,7 @@ pub fn sys_execveat(
         }
     };
 
-    let mut args = match read_user_string_array(process, argv) {
+    let mut args = match read_user_string_array(&process, argv) {
         Ok(args) => args,
         Err(e) => return e,
     };
@@ -141,7 +148,7 @@ pub fn sys_execveat(
         args_strs.push(s.as_str());
     }
 
-    let envs = match read_user_string_array(process, envp) {
+    let envs = match read_user_string_array(&process, envp) {
         Ok(envs) => envs,
         Err(e) => return e,
     };
@@ -157,5 +164,14 @@ pub fn sys_execveat(
         return -errno.code() as isize;
     }
     thread.clear_thread_tid_state();
-    process.enter_user_mode();
+
+    drop(args_strs);
+    drop(args);
+    drop(envs_strs);
+    drop(envs);
+    drop(path_str);
+    drop(loc);
+    drop(metadata);
+
+    process.enter_user_mode_and_drop(thread)
 }

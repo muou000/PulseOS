@@ -13,10 +13,7 @@
 edition = "2024"
 name = "axfs-ng-vfs"
 version = "0.1.1"
-authors = [
-    "Mivik <mivikq@gmail.com>",
-    "朝倉水希 <asakuramizu111@gmail.com>",
-]
+authors = ["Mivik <mivikq@gmail.com>", "朝倉水希 <asakuramizu111@gmail.com>"]
 build = false
 autolib = false
 autobins = false
@@ -25,12 +22,7 @@ autotests = false
 autobenches = false
 description = "Virtual filesystem layer for ArceOS"
 readme = false
-keywords = [
-    "vfs",
-    "filesystem",
-    "axfs-ng",
-    "arceos",
-]
+keywords = ["vfs", "filesystem", "axfs-ng", "arceos"]
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/Starry-OS/axfs-ng-vfs"
 
@@ -42,7 +34,7 @@ path = "src/lib.rs"
 version = "0.2"
 
 [dependencies.axpoll]
-version = "0.1"
+version = "0.3"
 
 [dependencies.bitflags]
 version = "2.10"

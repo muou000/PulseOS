@@ -416,6 +416,15 @@ impl UdpSocket {
     pub fn with_socket<R>(&self, f: impl FnOnce(&udp::Socket) -> R) -> R {
         SOCKET_SET.with_socket(self.handle, |s| f(s))
     }
+
+    pub fn recv_queue(&self) -> usize {
+        SOCKET_SET.with_socket_mut::<udp::Socket, _, _>(self.handle, |socket| {
+            match socket.peek() {
+                Ok((packet, _)) => packet.len(),
+                Err(_) => 0,
+            }
+        })
+    }
 }
 
 impl Read for UdpSocket {
