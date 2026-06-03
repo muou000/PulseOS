@@ -256,7 +256,6 @@ sched_getaffinity01
 sched_getscheduler01
 sched_rr_get_interval01
 sched_setparam01
-send01
 sendfile02
 sendfile02_64
 sendfile04

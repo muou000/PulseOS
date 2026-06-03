@@ -90,21 +90,18 @@ impl<D: BlockDriverOps + 'static> Ext4Disk<D> {
 
 impl<D: BlockDriverOps + 'static> BlockDevice for Ext4Disk<D> {
     fn read_offset(&self, offset: usize, buf: &mut [u8]) {
-        let inner_offset = offset % BLOCK_SIZE;
-        if inner_offset == 0 {
-            self.read_block_aligned(offset, buf)
-        } else {
-            let block1_offset = (offset / BLOCK_SIZE) * BLOCK_SIZE;
-            let block2_offset = block1_offset + BLOCK_SIZE;
+        let mut bytes_read = 0;
+        while bytes_read < buf.len() {
+            let current_offset = offset + bytes_read;
+            let block_offset = (current_offset / BLOCK_SIZE) * BLOCK_SIZE;
+            let inner_offset = current_offset % BLOCK_SIZE;
+            let current_len = core::cmp::min(BLOCK_SIZE - inner_offset, buf.len() - bytes_read);
 
-            let mut b1 = [0u8; BLOCK_SIZE];
-            let mut b2 = [0u8; BLOCK_SIZE];
-            self.read_block_aligned(block1_offset, &mut b1);
-            self.read_block_aligned(block2_offset, &mut b2);
-
-            let part1_len = BLOCK_SIZE - inner_offset;
-            buf[..part1_len].copy_from_slice(&b1[inner_offset..]);
-            buf[part1_len..].copy_from_slice(&b2[..inner_offset]);
+            let mut block_data = [0u8; BLOCK_SIZE];
+            self.read_block_aligned(block_offset, &mut block_data);
+            buf[bytes_read..bytes_read + current_len]
+                .copy_from_slice(&block_data[inner_offset..inner_offset + current_len]);
+            bytes_read += current_len;
         }
     }
 

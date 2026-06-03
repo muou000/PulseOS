@@ -120,6 +120,39 @@ impl Ext4 {
         return_errno_with_message!(Errno::EIO, "search extent fail");
     }
 
+    /// Get physical block id and contiguous length of a logical block.
+    ///
+    /// Params:
+    /// inode_ref: &Ext4InodeRef - inode reference
+    /// lblock: Ext4Lblk - logical block id
+    ///
+    /// Returns:
+    /// `Result<(Ext4Fsblk, u32)>` - (physical block id, contiguous length)
+    pub fn get_pblock_and_len(
+        &self,
+        inode_ref: &Ext4InodeRef,
+        lblock: Ext4Lblk,
+    ) -> Result<(Ext4Fsblk, u32)> {
+        let search_path = self.find_extent(inode_ref, lblock);
+        if let Ok(path) = search_path {
+            // get the last path
+            let path_node = path.path.last().unwrap();
+
+            // Validate that the extent was actually found
+            if let Some(extent) = path_node.extent {
+                let start_blk = extent.first_block;
+                let end_blk = start_blk + extent.get_actual_len() as u32;
+                if lblock >= start_blk && lblock < end_blk {
+                    let fblock = path_node.pblock;
+                    return Ok((fblock, end_blk - lblock));
+                }
+            }
+            return_errno_with_message!(Errno::ENOENT, "extent not found for logical block");
+        }
+
+        return_errno_with_message!(Errno::EIO, "search extent fail");
+    }
+
     /// Allocate a new block
     pub fn allocate_new_block(&self, inode_ref: &mut Ext4InodeRef) -> Result<Ext4Fsblk> {
         let mut super_block = self.super_block;

@@ -235,36 +235,33 @@ impl Ext4 {
 
         // Continue with full block reads
         while total_bytes_read < read_buf_len && iblock < iblock_last {
-            let mut read_length = min(BLOCK_SIZE, read_buf_len - total_bytes_read);
-            
-            // Check if this is the last block of the file
-            if iblock as u64 >= total_blocks - 1 {
-                let remaining_bytes = file_size as usize - (iblock * BLOCK_SIZE);
-                let actual_read_length = min(read_length, remaining_bytes);
+            // Find contiguous blocks
+            let mut pblock_idx = None;
+            let mut contig_blocks = 1;
 
-                if actual_read_length < read_length {
-                    read_length = actual_read_length;
+            match self.get_pblock_and_len(&inode_ref, iblock as u32) {
+                Ok((idx, len)) => {
+                    pblock_idx = Some(idx);
+                    contig_blocks = len;
                 }
-            }
-            
-
-            // get iblock physical block id
-            let pblock_idx = match self.get_pblock_idx(&inode_ref, iblock as u32) {
-                Ok(idx) => Some(idx),
-                Err(e) if e.error() == Errno::ENOENT => None,
+                Err(e) if e.error() == Errno::ENOENT => {
+                    pblock_idx = None;
+                    contig_blocks = 1;
+                }
                 Err(e) => {
                     return_errno_with_message!(Errno::EIO, "Failed to get physical block for logical block");
                 }
-            };
+            }
 
-            if let Some(pblock_idx) = pblock_idx {
-                // read data
-                let mut data = vec![0u8; BLOCK_SIZE];
-                self.block_device.read_offset(pblock_idx as usize * BLOCK_SIZE, &mut data);
-                // log::trace!("[Read] Read block data - physical_block: {}, data_len: {}", pblock_idx, data.len());
+            let max_read_for_extent = (contig_blocks as usize) * BLOCK_SIZE;
+            let mut read_length = min(max_read_for_extent, read_buf_len - total_bytes_read);
 
-                // copy data to read buffer
-                read_buf[cursor..cursor + read_length].copy_from_slice(&data[..read_length]);
+            // Limit by file size
+            let remaining_file_bytes = file_size as usize - (iblock * BLOCK_SIZE);
+            read_length = min(read_length, remaining_file_bytes);
+
+            if let Some(pblk) = pblock_idx {
+                self.block_device.read_offset(pblk as usize * BLOCK_SIZE, &mut read_buf[cursor..cursor + read_length]);
             } else {
                 read_buf[cursor..cursor + read_length].fill(0);
             }
@@ -272,7 +269,7 @@ impl Ext4 {
             // update cursor and total bytes read
             cursor += read_length;
             total_bytes_read += read_length;
-            iblock += 1;
+            iblock += (read_length + BLOCK_SIZE - 1) / BLOCK_SIZE;
         }
 
         Ok(total_bytes_read)
@@ -417,14 +414,16 @@ impl Ext4 {
             };
             total_blocks += 1;
 
-            let mut block = Block::load(&self.block_device, pblock_idx as usize * BLOCK_SIZE);
-            
-            // If it's a newly allocated block, fill with zeros. Otherwise,
-            // existing data is already loaded in block.data by Block::load.
-            if is_new_block {
-                block.data.fill(0);
-            }
-            
+            let block_offset = pblock_idx as usize * BLOCK_SIZE;
+            let mut block = if is_new_block {
+                Block {
+                    disk_offset: block_offset,
+                    data: vec![0u8; BLOCK_SIZE],
+                }
+            } else {
+                Block::load(&self.block_device, block_offset)
+            };
+
             block.write_offset(unaligned, &write_buf[..len], len);
 
             block.sync_blk_to_disk(&self.block_device);
@@ -435,15 +434,21 @@ impl Ext4 {
 
         // Aligned write
         let mut aligned_blocks = 0;
+        let mut iterations = 0;
         log::debug!("[Aligned Write] Starting aligned writes for {} blocks", (write_buf_len - written + BLOCK_SIZE - 1) / BLOCK_SIZE);
         
         while written < write_buf_len {
-            aligned_blocks += 1;
+            iterations += 1;
             
             let mut is_new_block = false;
-            // Get the physical block id
-            let pblock_idx = match self.get_pblock_idx(&inode_ref, iblk_idx as u32) {
-                Ok(idx) => idx,
+            let mut contig_blocks = 1;
+
+            // Get the physical block id and contiguous length
+            let pblock_idx = match self.get_pblock_and_len(&inode_ref, iblk_idx as u32) {
+                Ok((idx, len)) => {
+                    contig_blocks = len;
+                    idx
+                },
                 Err(e) if e.error() == Errno::ENOENT => {
                     // Allocate a new block
                     let new_block = self.balloc_alloc_block(&mut inode_ref, None)?;
@@ -460,27 +465,43 @@ impl Ext4 {
                     return Err(e);
                 }
             };
-            total_blocks += 1;
 
             let block_offset = pblock_idx as usize * BLOCK_SIZE;
-            let mut block = Block::load(&self.block_device, block_offset);
-            let write_size = min(BLOCK_SIZE, write_buf_len - written);
             
-            // If it's a newly allocated block, fill with zeros. Otherwise,
-            // existing data is already loaded in block.data by Block::load.
-            if is_new_block {
-                block.data.fill(0);
+            // Calculate how much we can write in this batch
+            let max_write_for_extent = (contig_blocks as usize) * BLOCK_SIZE;
+            let write_size = min(max_write_for_extent, write_buf_len - written);
+
+            // Separate full blocks from the partial tail block
+            let full_blocks_size = (write_size / BLOCK_SIZE) * BLOCK_SIZE;
+            
+            if full_blocks_size > 0 {
+                // Write all full blocks in one device call - Bypassing intermediate Block abstraction
+                self.block_device.write_offset(block_offset, &write_buf[written..written + full_blocks_size]);
+                written += full_blocks_size;
+                iblk_idx += (full_blocks_size / BLOCK_SIZE) as usize;
+                total_blocks += (full_blocks_size / BLOCK_SIZE) as usize;
+                aligned_blocks += (full_blocks_size / BLOCK_SIZE) as usize;
+            } else {
+                // write_size < BLOCK_SIZE, meaning we have a partial write on a single block
+                // This happens at the end of the buffer.
+                let mut block = if is_new_block {
+                    Block { disk_offset: block_offset, data: vec![0u8; BLOCK_SIZE] }
+                } else {
+                    Block::load(&self.block_device, block_offset)
+                };
+                
+                block.write_offset(0, &write_buf[written..written + write_size], write_size);
+                block.sync_blk_to_disk(&self.block_device);
+                
+                written += write_size;
+                iblk_idx += 1;
+                total_blocks += 1;
+                aligned_blocks += 1;
             }
-            
-            block.write_offset(0, &write_buf[written..written + write_size], write_size);
 
-            block.sync_blk_to_disk(&self.block_device);
-            
-            written += write_size;
-            iblk_idx += 1;
-
-            if aligned_blocks % 1000 == 0 {
-                log::trace!("[Progress] Written {} blocks, {} bytes", aligned_blocks, written);
+            if iterations % 100 == 0 {
+                log::trace!("[Progress] Processed {} iterations, {} bytes", iterations, written);
             }
         }
         
