@@ -39,7 +39,7 @@ pub fn sys_wait4(pid: isize, status: usize, options: i32, rusage: usize) -> isiz
                 //   信号终止: signo & 0x7f             → WIFSIGNALED 为真
                 //   信号终止+core dump: signo | 0x80   → WCOREDUMP 也为真
                 let wait_status = child_proc.wait_status_word();
-                let write_result = write_user_i32(process, status, wait_status);
+                let write_result = write_user_i32(&process, status, wait_status);
                 if write_result < 0 {
                     process.add_child(child_proc);
                     return write_result;
@@ -55,6 +55,7 @@ pub fn sys_wait4(pid: isize, status: usize, options: i32, rusage: usize) -> isiz
                 axlog::warn!("failed to shrink reaped child resources: {:?}", e);
             }
             child_proc.release_task_refs();
+            pulse_core::task::unregister_process(exited_pid as u64);
             return exited_pid;
         }
 
@@ -109,6 +110,7 @@ pub fn sys_waitid(idtype: usize, id: usize, infop: usize, options: i32) -> isize
                         axlog::warn!("failed to shrink reaped child resources: {:?}", e);
                     }
                     child.release_task_refs();
+                    pulse_core::task::unregister_process(exited_pid as u64);
                 }
 
                 let mut raw: linux_raw_sys::general::siginfo = unsafe { core::mem::zeroed() };
@@ -142,7 +144,7 @@ pub fn sys_waitid(idtype: usize, id: usize, infop: usize, options: i32) -> isize
                     anon1._sifields._sigchld._uid = child.ruid();
                 }
 
-                if let Err(_) = pulse_core::task::uaccess::write_user_plain(process, infop, &raw) {
+                if let Err(_) = pulse_core::task::uaccess::write_user_plain(&process, infop, &raw) {
                     if was_zombie_and_reaped {
                         process.add_child(child);
                     }
@@ -154,7 +156,7 @@ pub fn sys_waitid(idtype: usize, id: usize, infop: usize, options: i32) -> isize
             Ok(None) => {
                 if (options & 1) != 0 {
                     let raw: linux_raw_sys::general::siginfo = unsafe { core::mem::zeroed() };
-                    if let Err(_) = pulse_core::task::uaccess::write_user_plain(process, infop, &raw) {
+                    if let Err(_) = pulse_core::task::uaccess::write_user_plain(&process, infop, &raw) {
                         return -LinuxError::EFAULT.code() as isize;
                     }
                     return 0;

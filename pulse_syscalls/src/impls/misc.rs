@@ -425,7 +425,7 @@ pub fn sys_rt_sigaction(_signum: usize, _act: usize, _oldact: usize, _sigsetsize
         }
     }
     if act != 0 {
-        let new_act: sigaction = match uaccess::read_user_plain(process, act) {
+        let new_act: sigaction = match uaccess::read_user_plain(&process, act) {
             Ok(v) => v,
             Err(_) => return -LinuxError::EFAULT.code() as isize,
         };
@@ -512,7 +512,7 @@ pub fn sys_rt_sigtimedwait(set: usize, info: usize, timeout: usize, sigsetsize: 
                     sig as linux_raw_sys::ctypes::c_int;
                 raw.__bindgen_anon_1.__bindgen_anon_1.si_errno = 0;
                 raw.__bindgen_anon_1.__bindgen_anon_1.si_code = 0;
-                if uaccess::write_user_plain(process, info, &raw).is_err() {
+                if uaccess::write_user_plain(&process, info, &raw).is_err() {
                     return -LinuxError::EFAULT.code() as isize;
                 }
             }

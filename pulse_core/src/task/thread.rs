@@ -1,4 +1,4 @@
-use alloc::sync::Arc;
+use alloc::sync::{Arc, Weak};
 use core::{
     ops::Deref,
     sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
@@ -12,7 +12,7 @@ use spin::Mutex;
 use super::{Process, SignalAltStack, ThreadSignal};
 
 pub struct Thread {
-    process: Arc<Process>,
+    process_weak: Weak<Process>,
     signal: Arc<ThreadSignal>,
     clear_child_tid: AtomicUsize,
     set_child_tid: AtomicUsize,
@@ -49,7 +49,7 @@ impl Thread {
     pub fn new(process: Arc<Process>) -> Arc<Self> {
         Arc::new(Self {
             signal: ThreadSignal::new(process.signal_shared()),
-            process,
+            process_weak: Arc::downgrade(&process),
             clear_child_tid: AtomicUsize::new(0),
             set_child_tid: AtomicUsize::new(0),
             robust_list_head: AtomicUsize::new(0),
@@ -65,12 +65,16 @@ impl Thread {
         axtask::current().id().as_u64()
     }
 
-    pub fn process(&self) -> &Process {
-        self.process.as_ref()
+    pub fn process(&self) -> Arc<Process> {
+        self.process_weak
+            .upgrade()
+            .expect("Thread::process: process has been dropped")
     }
 
     pub fn process_arc(&self) -> Arc<Process> {
-        self.process.clone()
+        self.process_weak
+            .upgrade()
+            .expect("Thread::process_arc: process has been dropped")
     }
 
     pub fn attach_task_ref(&self, task: AxTaskRef) {
@@ -130,7 +134,7 @@ impl Thread {
 
     pub fn restore_from_sigreturn(&self, tf: &mut TrapFrame) -> AxResult<usize> {
         self.signal
-            .restore_from_sigreturn(self.process(), tf)
+            .restore_from_sigreturn(&self.process(), tf)
             .map_err(|_| AxError::InvalidInput)
     }
 
@@ -169,21 +173,21 @@ impl Thread {
             return Ok(());
         }
         let tid = axtask::current().id().as_u64();
-        self.process.write_user_u32(set_child_tid, tid as u32)
+        self.process().write_user_u32(set_child_tid, tid as u32)
     }
 
     pub fn prepare_for_user_entry(&self) -> AxResult<()> {
         axlog::debug!(
             "prepare_for_user_entry: tid={}, group_exiting={}",
             axtask::current().id().as_u64(),
-            self.process.group_exiting()
+            self.process().group_exiting()
         );
-        if self.process.group_exiting() {
-            self.exit_current(self.process.group_exit_code());
+        if self.process().group_exiting() {
+            self.exit_current(self.process().group_exit_code());
         }
-        self.process.sync_fs_context();
+        self.process().sync_fs_context();
         self.write_set_child_tid_on_start()?;
-        self.process.mark_user_resume();
+        self.process().mark_user_resume();
         self.mark_user_resume();
         Ok(())
     }
@@ -221,16 +225,18 @@ impl Thread {
         if clear_child_tid == 0 {
             return Ok(());
         }
-        self.process.write_user_u32(clear_child_tid, 0)?;
-        self.process.futex_wake_no_resched(clear_child_tid, 1, true);
-        self.process.futex_wake_no_resched(clear_child_tid, 1, false);
+        self.process().write_user_u32(clear_child_tid, 0)?;
+        self.process()
+            .futex_wake_no_resched(clear_child_tid, 1, true);
+        self.process()
+            .futex_wake_no_resched(clear_child_tid, 1, false);
         Ok(())
     }
 
     pub fn run_exit_hooks(&self) {
         let robust_list_head = self.robust_list_head.swap(0, Ordering::Relaxed);
         if robust_list_head != 0
-            && let Err(e) = self.process.exit_robust_list(robust_list_head)
+            && let Err(e) = self.process().exit_robust_list(robust_list_head)
         {
             axlog::warn!("failed to exit robust list: {:?}", e);
         }
@@ -243,18 +249,18 @@ impl Thread {
         axlog::debug!(
             "exit_current: tid={}, group_exiting={}, exit_code={}",
             axtask::current().id().as_u64(),
-            self.process.group_exiting(),
+            self.process().group_exiting(),
             exit_code
         );
         self.task_ref.lock().take();
         self.run_exit_hooks();
-        let final_code = if self.process.group_exiting() {
-            self.process.group_exit_code()
+        let final_code = if self.process().group_exiting() {
+            self.process().group_exit_code()
         } else {
             exit_code
         };
         let tid = axtask::current().id().as_u64();
-        self.process.finish_thread_exit(tid, final_code);
+        self.process().finish_thread_exit(tid, final_code);
         axtask::exit(final_code);
     }
 

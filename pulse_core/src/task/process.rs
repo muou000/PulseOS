@@ -497,6 +497,18 @@ impl Process {
         self.threads.lock().clone()
     }
 
+    pub fn children_pids_snapshot(&self) -> Vec<u64> {
+        self.children.lock().iter().map(|c| c.pid()).collect()
+    }
+
+    pub fn task_tids_snapshot(&self) -> Vec<u64> {
+        self.task_refs
+            .lock()
+            .iter()
+            .map(|t| t.id().as_u64())
+            .collect()
+    }
+
     pub fn ruid(&self) -> u32 {
         self.ruid.load(Ordering::Acquire)
     }
@@ -1490,14 +1502,18 @@ impl Process {
                     children.remove(idx);
                 }
             }
+            // Ensure all underlying tasks are joined before releasing resources
+            self.wait_task_refs_exited();
             if let Err(e) = self.shrink_reaped_resources() {
                 axlog::warn!(
-                    "finish_thread_exit (reparented): failed to release zombie resources for pid={}: {:?}",
+                    "finish_thread_exit (reparented): failed to release zombie resources for \
+                     pid={}: {:?}",
                     self.pid(),
                     e
                 );
             }
             self.release_task_refs();
+            super::unregister_process(self.pid());
         } else {
             // Re-parent all children of this process to the init process
             if let Some(init) = super::init_process() {
@@ -1512,11 +1528,13 @@ impl Process {
                         if child.is_zombie() {
                             // Reap zombie child immediately instead of reparenting it
                             let exited_pid = child.pid();
+                            child.wait_task_refs_exited();
                             let _ = child.take_task_ref_by_tid(exited_pid);
                             if let Err(e) = child.shrink_reaped_resources() {
                                 axlog::warn!("failed to shrink reaped child resources: {:?}", e);
                             }
                             child.release_task_refs();
+                            super::unregister_process(exited_pid);
                         } else {
                             child.parent_pid.store(init.pid(), Ordering::Release);
                             child.reparented.store(true, Ordering::Release);
@@ -1525,7 +1543,8 @@ impl Process {
 
                             let pdeath_sig = child.pdeath_sig();
                             if pdeath_sig != 0 {
-                                let _ = queue_signal_to_process(child.as_ref(), pdeath_sig as usize);
+                                let _ =
+                                    queue_signal_to_process(child.as_ref(), pdeath_sig as usize);
                             }
 
                             if child.is_zombie() {
