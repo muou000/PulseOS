@@ -7,7 +7,6 @@ use axhal::time::current_ticks;
 use axio::{PollState, Read, Write};
 use axsync::Mutex;
 
-use axtask::yield_now;
 use smoltcp::iface::SocketHandle;
 use smoltcp::socket::tcp::{self, ConnectError, State};
 use smoltcp::wire::{IpEndpoint, IpListenEndpoint};

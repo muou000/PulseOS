@@ -802,7 +802,6 @@ pub fn sys_recvmmsg(
                     }
                 }
 
-                #[cfg(feature = "monolithic")]
                 if pulse_core::task::current_have_signals() {
                     if received_count > 0 {
                         break;
