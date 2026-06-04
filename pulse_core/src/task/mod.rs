@@ -23,7 +23,7 @@ pub use signal::{
 use spin::Lazy;
 pub use thread::{Thread, ThreadHandle};
 
-static PROCESS_REGISTRY: Lazy<SpinNoIrq<BTreeMap<u64, Weak<Process>>>> =
+static PROCESS_REGISTRY: Lazy<SpinNoIrq<BTreeMap<u64, Arc<Process>>>> =
     Lazy::new(|| SpinNoIrq::new(BTreeMap::new()));
 
 static THREAD_REGISTRY: Lazy<SpinNoIrq<BTreeMap<u64, Weak<Thread>>>> =
@@ -35,9 +35,11 @@ pub fn register_process(pid: u64, process: Arc<Process>) {
     if INIT_PID.load(core::sync::atomic::Ordering::Relaxed) == 0 {
         INIT_PID.store(pid, core::sync::atomic::Ordering::Relaxed);
     }
-    PROCESS_REGISTRY
-        .lock()
-        .insert(pid, Arc::downgrade(&process));
+    PROCESS_REGISTRY.lock().insert(pid, process);
+}
+
+pub fn unregister_process(pid: u64) {
+    PROCESS_REGISTRY.lock().remove(&pid);
 }
 
 pub fn init_process() -> Option<Arc<Process>> {
@@ -63,9 +65,25 @@ pub fn thread_by_tid_global(tid: u64) -> Option<Arc<Thread>> {
     THREAD_REGISTRY.lock().get(&tid).and_then(|t| t.upgrade())
 }
 
-
-fn prune_dead_processes(registry: &mut BTreeMap<u64, Weak<Process>>) {
-    registry.retain(|_, process| process.strong_count() > 0);
+fn prune_dead_processes(registry: &mut BTreeMap<u64, Arc<Process>>, verbose: bool) {
+    if verbose {
+        for (pid, proc) in registry.iter() {
+            let sc = Arc::strong_count(proc);
+            let children_pids = proc.children_pids_snapshot();
+            let task_tids = proc.task_tids_snapshot();
+            axlog::info!(
+                "PROCESS DIAGNOSTIC: PID={}, Name={}, strong_count={}, parent_pid={}, zombie={}, reparented={}, children_pids={:?}, task_tids={:?}",
+                pid,
+                proc.name(),
+                sc,
+                proc.parent_pid(),
+                proc.is_zombie(),
+                proc.reparented.load(core::sync::atomic::Ordering::Relaxed),
+                children_pids,
+                task_tids
+            );
+        }
+    }
 }
 
 // Per-CPU `CURRENT_THREAD` and thread registry removed. Threads are
@@ -96,18 +114,16 @@ pub const ERESTARTSYS: i32 = 512;
 
 pub fn process_by_pid(pid: u64) -> Option<Arc<Process>> {
     let mut registry = PROCESS_REGISTRY.lock();
-    prune_dead_processes(&mut registry);
-    registry.get(&pid).and_then(|p| p.upgrade())
+    prune_dead_processes(&mut registry, false);
+    registry.get(&pid).cloned()
 }
 
 pub fn processes_snapshot() -> Vec<Arc<Process>> {
     let mut unique = BTreeMap::new();
     let mut registry = PROCESS_REGISTRY.lock();
-    prune_dead_processes(&mut registry);
-    for proc_w in registry.values() {
-        if let Some(proc) = proc_w.upgrade() {
-            unique.entry(proc.pid()).or_insert(proc);
-        }
+    prune_dead_processes(&mut registry, true);
+    for proc in registry.values() {
+        unique.entry(proc.pid()).or_insert(proc.clone());
     }
     unique.into_values().collect()
 }
@@ -140,12 +156,10 @@ pub fn thread_by_tid(process: &Process, tid: u64) -> Option<Arc<Thread>> {
 fn itimer_tick_hook() {
     crate::fd_table::poll_stdin();
     let mut registry = PROCESS_REGISTRY.lock();
-    prune_dead_processes(&mut registry);
-    for proc_w in registry.values() {
-        if let Some(proc) = proc_w.upgrade() {
-            if !proc.is_zombie() {
-                proc.check_itimer_real_tick();
-            }
+    prune_dead_processes(&mut registry, false);
+    for proc in registry.values() {
+        if !proc.is_zombie() {
+            proc.check_itimer_real_tick();
         }
     }
 }
