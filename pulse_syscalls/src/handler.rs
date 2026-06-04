@@ -183,9 +183,13 @@ fn syscall_dispatcher(
         Sysno::read => impls::sys_read(args[0], args[1], args[2]),
         Sysno::pread64 => impls::sys_pread64(args[0], args[1], args[2], args[3]),
         Sysno::readv => impls::sys_readv(args[0], args[1], args[2]),
+        Sysno::preadv => impls::sys_preadv(args[0], args[1], args[2], args[3], args[4]),
+        Sysno::preadv2 => impls::sys_preadv2(args[0], args[1], args[2], args[3], args[4], args[5]),
         Sysno::write => impls::sys_write(args[0], args[1], args[2]),
         Sysno::pwrite64 => impls::sys_pwrite64(args[0], args[1], args[2], args[3]),
         Sysno::writev => impls::sys_writev(args[0], args[1], args[2]),
+        Sysno::pwritev => impls::sys_pwritev(args[0], args[1], args[2], args[3], args[4]),
+        Sysno::pwritev2 => impls::sys_pwritev2(args[0], args[1], args[2], args[3], args[4], args[5]),
         Sysno::sendfile => impls::sys_sendfile(args[0], args[1], args[2], args[3]),
         Sysno::openat => impls::sys_openat(args[0] as i32, args[1], args[2], args[3]),
         Sysno::mkdirat => impls::sys_mkdirat(args[0] as i32, args[1], args[2]),
@@ -226,6 +230,7 @@ fn syscall_dispatcher(
         Sysno::settimeofday => impls::sys_settimeofday(args[0], args[1]),
         Sysno::times => impls::sys_times(args[0]),
         Sysno::prlimit64 => impls::sys_prlimit64(args[0] as i32, args[1], args[2], args[3]),
+        Sysno::prctl => impls::sys_prctl(args[0] as i32, args[1], args[2], args[3], args[4]),
         Sysno::getrlimit => impls::sys_prlimit64(0, args[0], 0, args[1]),
         Sysno::getrandom => impls::sys_getrandom(args[0], args[1], args[2]),
 
@@ -372,6 +377,7 @@ fn syscall_dispatcher(
             args[4],
         ),
         Sysno::flock => impls::sys_flock(args[0], args[1]),
+        Sysno::fadvise64 => 0,
         _ => {
             axlog::warn!("Unimplemented syscall: {:?} ({})", sysno, syscall_id);
             -LinuxError::ENOSYS.code() as isize

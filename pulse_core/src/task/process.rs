@@ -272,6 +272,9 @@ pub struct Process {
     pub stopped_signal_pending: AtomicI32,
     pub continued_signal_pending: AtomicBool,
     pgid: AtomicU64,
+    pub pdeath_sig: AtomicI32,
+    pub dumpable: AtomicI32,
+    pub reparented: AtomicBool,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -1103,6 +1106,9 @@ impl Process {
             stopped_signal_pending: AtomicI32::new(0),
             continued_signal_pending: AtomicBool::new(false),
             pgid: AtomicU64::new(pid),
+            pdeath_sig: AtomicI32::new(0),
+            dumpable: AtomicI32::new(1),
+            reparented: AtomicBool::new(false),
         }))
     }
 
@@ -1210,6 +1216,9 @@ impl Process {
             stopped_signal_pending: AtomicI32::new(0),
             continued_signal_pending: AtomicBool::new(false),
             pgid: AtomicU64::new(parent.pgid()),
+            pdeath_sig: AtomicI32::new(0),
+            dumpable: AtomicI32::new(parent.dumpable()),
+            reparented: AtomicBool::new(false),
         }))
     }
 
@@ -1219,6 +1228,22 @@ impl Process {
 
     pub fn set_pgid(&self, pgid: u64) {
         self.pgid.store(pgid, Ordering::Release);
+    }
+
+    pub fn pdeath_sig(&self) -> i32 {
+        self.pdeath_sig.load(Ordering::Acquire)
+    }
+
+    pub fn set_pdeath_sig(&self, sig: i32) {
+        self.pdeath_sig.store(sig, Ordering::Release);
+    }
+
+    pub fn dumpable(&self) -> i32 {
+        self.dumpable.load(Ordering::Acquire)
+    }
+
+    pub fn set_dumpable(&self, dumpable: i32) {
+        self.dumpable.store(dumpable, Ordering::Release);
     }
 
     pub fn signal_shared(&self) -> Arc<SignalShared> {
@@ -1450,38 +1475,79 @@ impl Process {
             );
         }
 
-        // Re-parent all children of this process to the init process (PID 1)
-        if self.pid() != 1 {
-            if let Some(init) = super::process_by_pid(1) {
-                let children_to_reparent = {
-                    let mut my_children = self.children.lock();
-                    let list = my_children.clone();
-                    my_children.clear();
-                    list
-                };
-                for child in children_to_reparent {
-                    child.parent_pid.store(1, Ordering::Release);
-                    *child.parent.lock() = Some(Arc::downgrade(&init));
-                    init.add_child(child.clone());
-                    if child.is_zombie() {
-                        let _ = queue_signal_to_process(init.as_ref(), SIGCHLD as usize);
-                        init.child_exit_event.notify_all(false);
-                    }
-                }
-            }
-        }
-
+        let is_reparented = self.reparented.load(Ordering::Acquire);
         let parent = self
             .parent
             .lock()
             .as_ref()
             .and_then(|parent| parent.upgrade());
-        if let Some(parent) = parent {
-            let _ = queue_signal_to_process(parent.as_ref(), SIGCHLD as usize);
-            // The exiting task is still on its own kernel stack here.
-            // Wake waiters without forcing an immediate reschedule from inside
-            // the teardown path.
-            parent.child_exit_event.notify_all(false);
+
+        if is_reparented {
+            // Reap it immediately from the parent (which is init)!
+            if let Some(parent) = parent {
+                let mut children = parent.children.lock();
+                if let Some(idx) = children.iter().position(|c| c.pid() == self.pid()) {
+                    children.remove(idx);
+                }
+            }
+            if let Err(e) = self.shrink_reaped_resources() {
+                axlog::warn!(
+                    "finish_thread_exit (reparented): failed to release zombie resources for pid={}: {:?}",
+                    self.pid(),
+                    e
+                );
+            }
+            self.release_task_refs();
+        } else {
+            // Re-parent all children of this process to the init process
+            if let Some(init) = super::init_process() {
+                if self.pid() != init.pid() {
+                    let children_to_reparent = {
+                        let mut my_children = self.children.lock();
+                        let list = my_children.clone();
+                        my_children.clear();
+                        list
+                    };
+                    for child in children_to_reparent {
+                        if child.is_zombie() {
+                            // Reap zombie child immediately instead of reparenting it
+                            let exited_pid = child.pid();
+                            let _ = child.take_task_ref_by_tid(exited_pid);
+                            if let Err(e) = child.shrink_reaped_resources() {
+                                axlog::warn!("failed to shrink reaped child resources: {:?}", e);
+                            }
+                            child.release_task_refs();
+                        } else {
+                            child.parent_pid.store(init.pid(), Ordering::Release);
+                            child.reparented.store(true, Ordering::Release);
+                            *child.parent.lock() = Some(Arc::downgrade(&init));
+                            init.add_child(child.clone());
+
+                            let pdeath_sig = child.pdeath_sig();
+                            if pdeath_sig != 0 {
+                                let _ = queue_signal_to_process(child.as_ref(), pdeath_sig as usize);
+                            }
+
+                            if child.is_zombie() {
+                                let _ = queue_signal_to_process(init.as_ref(), SIGCHLD as usize);
+                                init.child_exit_event.notify_all(false);
+                            }
+                        }
+                    }
+                } else {
+                    self.children.lock().clear();
+                }
+            } else {
+                self.children.lock().clear();
+            }
+
+            if let Some(parent) = parent {
+                let _ = queue_signal_to_process(parent.as_ref(), SIGCHLD as usize);
+                // The exiting task is still on its own kernel stack here.
+                // Wake waiters without forcing an immediate reschedule from inside
+                // the teardown path.
+                parent.child_exit_event.notify_all(false);
+            }
         }
     }
 

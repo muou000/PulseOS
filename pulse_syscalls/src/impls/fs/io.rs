@@ -19,7 +19,11 @@ use crate::impls::{
 };
 
 fn iov_len_to_usize(iov_len: u64) -> Result<usize, LinuxError> {
-    usize::try_from(iov_len).map_err(|_| LinuxError::EINVAL)
+    let len = usize::try_from(iov_len).map_err(|_| LinuxError::EINVAL)?;
+    if len > isize::MAX as usize {
+        return Err(LinuxError::EINVAL);
+    }
+    Ok(len)
 }
 
 const MAX_IO_CHUNK: usize = 64 * 1024;
@@ -301,6 +305,128 @@ pub fn sys_readv(fd: usize, iov: usize, iovcnt: usize) -> isize {
     total
 }
 
+pub fn sys_preadv(
+    fd: usize,
+    iov: usize,
+    iovcnt: usize,
+    pos_l: usize,
+    pos_h: usize,
+) -> isize {
+    axlog::trace!(
+        "sys_preadv: fd={}, iov={:#x}, iovcnt={}, pos_l={}, pos_h={}",
+        fd,
+        iov,
+        iovcnt,
+        pos_l,
+        pos_h
+    );
+
+    let offset = pos_l as isize;
+    if offset < 0 {
+        return -LinuxError::EINVAL.code() as isize;
+    }
+
+    let entry = match get_fd_entry(fd) {
+        Ok(entry) => entry,
+        Err(e) => return -e.code() as isize,
+    };
+    if entry.flags.contains(pulse_core::fd_table::FdFlags::PATH) {
+        return -LinuxError::EBADF.code() as isize;
+    }
+    let object = entry.object;
+    let iovecs = match read_user_iovec_array(iov, iovcnt) {
+        Ok(iovecs) => iovecs,
+        Err(e) => return -e.code() as isize,
+    };
+
+    let mut total_len = 0usize;
+    for io_vec in &iovecs {
+        let len = match iov_len_to_usize(io_vec.iov_len) {
+            Ok(len) => len,
+            Err(e) => return -e.code() as isize,
+        };
+        total_len = match total_len.checked_add(len) {
+            Some(sum) => sum,
+            None => return -LinuxError::EINVAL.code() as isize,
+        };
+        if total_len > isize::MAX as usize {
+            return -LinuxError::EINVAL.code() as isize;
+        }
+    }
+
+    let mut total = 0isize;
+    let mut buf = match alloc_uninit_bytes(MAX_IO_CHUNK, "sys_preadv.tmp") {
+        Ok(buf) => buf,
+        Err(e) => return -e.code() as isize,
+    };
+
+    for io_vec in iovecs {
+        let len = match iov_len_to_usize(io_vec.iov_len) {
+            Ok(len) => len,
+            Err(e) => return -e.code() as isize,
+        };
+        if len == 0 {
+            continue;
+        }
+        let mut offset_in_vec = 0usize;
+        while offset_in_vec < len {
+            let chunk = core::cmp::min(buf.len(), len - offset_in_vec);
+            let file_offset = match (offset as u64).checked_add(total as u64) {
+                Some(off) => off,
+                None => return if total > 0 { total } else { -LinuxError::EINVAL.code() as isize },
+            };
+            let ret = match object.read_at(&mut buf[..chunk], file_offset) {
+                Ok(ret) => ret as isize,
+                Err(e) => return if total > 0 { total } else { -e.code() as isize },
+            };
+            if ret <= 0 {
+                return total + ret;
+            }
+            if let Err(e) =
+                write_user_bytes(io_vec.iov_base as usize + offset_in_vec, &buf[..ret as usize])
+            {
+                return if total > 0 { total } else { -e.code() as isize };
+            }
+            total += ret;
+            offset_in_vec += ret as usize;
+            if ret as usize != chunk {
+                return total;
+            }
+        }
+    }
+    total
+}
+
+pub fn sys_preadv2(
+    fd: usize,
+    iov: usize,
+    iovcnt: usize,
+    pos_l: usize,
+    pos_h: usize,
+    flags: usize,
+) -> isize {
+    axlog::trace!(
+        "sys_preadv2: fd={}, iov={:#x}, iovcnt={}, pos_l={}, pos_h={}, flags={:#x}",
+        fd,
+        iov,
+        iovcnt,
+        pos_l,
+        pos_h,
+        flags
+    );
+
+    if flags != 0 {
+        return -LinuxError::EOPNOTSUPP.code() as isize;
+    }
+
+    let offset = pos_l as isize;
+    if offset == -1 {
+        sys_readv(fd, iov, iovcnt)
+    } else {
+        sys_preadv(fd, iov, iovcnt, pos_l, pos_h)
+    }
+}
+
 pub fn sys_pread64(fd: usize, buf: usize, count: usize, offset: usize) -> isize {
     axlog::trace!("sys_pread64: fd={}, buf={:#x}, count={}, offset={}", fd, buf, count, offset);
     let offset = offset as isize;
@@ -421,6 +547,126 @@ pub fn sys_pwrite64(fd: usize, buf: usize, count: usize, offset: usize) -> isize
         }
     }
     total as isize
+}
+
+pub fn sys_pwritev(
+    fd: usize,
+    iov: usize,
+    iovcnt: usize,
+    pos_l: usize,
+    pos_h: usize,
+) -> isize {
+    axlog::trace!(
+        "sys_pwritev: fd={}, iov={:#x}, iovcnt={}, pos_l={}, pos_h={}",
+        fd,
+        iov,
+        iovcnt,
+        pos_l,
+        pos_h
+    );
+
+    let offset = pos_l as isize;
+    if offset < 0 {
+        return -LinuxError::EINVAL.code() as isize;
+    }
+
+    let entry = match get_fd_entry(fd) {
+        Ok(entry) => entry,
+        Err(e) => return -e.code() as isize,
+    };
+    if entry.flags.contains(pulse_core::fd_table::FdFlags::PATH) {
+        return -LinuxError::EBADF.code() as isize;
+    }
+    let object = entry.object;
+    let iovecs = match read_user_iovec_array(iov, iovcnt) {
+        Ok(iovecs) => iovecs,
+        Err(e) => return -e.code() as isize,
+    };
+
+    let mut total_len = 0usize;
+    for io_vec in &iovecs {
+        let len = match iov_len_to_usize(io_vec.iov_len) {
+            Ok(len) => len,
+            Err(e) => return -e.code() as isize,
+        };
+        total_len = match total_len.checked_add(len) {
+            Some(sum) => sum,
+            None => return -LinuxError::EINVAL.code() as isize,
+        };
+        if total_len > isize::MAX as usize {
+            return -LinuxError::EINVAL.code() as isize;
+        }
+    }
+
+    let mut total = 0isize;
+    let mut buf = match alloc_uninit_bytes(MAX_IO_CHUNK, "sys_pwritev.tmp") {
+        Ok(buf) => buf,
+        Err(e) => return -e.code() as isize,
+    };
+
+    for io_vec in iovecs {
+        let len = match iov_len_to_usize(io_vec.iov_len) {
+            Ok(len) => len,
+            Err(e) => return -e.code() as isize,
+        };
+        if len == 0 {
+            continue;
+        }
+        let mut offset_in_vec = 0usize;
+        while offset_in_vec < len {
+            let chunk = core::cmp::min(buf.len(), len - offset_in_vec);
+            if let Err(e) = read_user_bytes(io_vec.iov_base as usize + offset_in_vec, &mut buf[..chunk]) {
+                return if total > 0 { total } else { -e.code() as isize };
+            }
+            let file_offset = match (offset as u64).checked_add(total as u64) {
+                Some(off) => off,
+                None => return if total > 0 { total } else { -LinuxError::EINVAL.code() as isize },
+            };
+            let ret = match object.write_at(&buf[..chunk], file_offset) {
+                Ok(ret) => ret as isize,
+                Err(e) => return if total > 0 { total } else { -e.code() as isize },
+            };
+            if ret <= 0 {
+                return total + ret;
+            }
+            total += ret;
+            offset_in_vec += ret as usize;
+            if ret as usize != chunk {
+                return total;
+            }
+        }
+    }
+    total
+}
+
+pub fn sys_pwritev2(
+    fd: usize,
+    iov: usize,
+    iovcnt: usize,
+    pos_l: usize,
+    pos_h: usize,
+    flags: usize,
+) -> isize {
+    axlog::trace!(
+        "sys_pwritev2: fd={}, iov={:#x}, iovcnt={}, pos_l={}, pos_h={}, flags={:#x}",
+        fd,
+        iov,
+        iovcnt,
+        pos_l,
+        pos_h,
+        flags
+    );
+
+    if flags != 0 {
+        return -LinuxError::EOPNOTSUPP.code() as isize;
+    }
+
+    let offset = pos_l as isize;
+    if offset == -1 {
+        sys_writev(fd, iov, iovcnt)
+    } else {
+        sys_pwritev(fd, iov, iovcnt, pos_l, pos_h)
+    }
 }
 
 pub fn sys_ppoll(
