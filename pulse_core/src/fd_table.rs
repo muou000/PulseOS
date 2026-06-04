@@ -1,6 +1,6 @@
 use alloc::{
-    collections::VecDeque,
-    sync::Arc,
+    collections::{BTreeMap, VecDeque},
+    sync::{Arc, Weak},
 };
 use core::{
     any::Any,
@@ -75,6 +75,10 @@ pub trait FdObject: Send + Sync {
         None
     }
 
+    fn fifo_device_inode(&self) -> Option<(u64, u64)> {
+        None
+    }
+
     fn seek(&self, _pos: SeekFrom) -> LinuxResult<u64> {
         Err(LinuxError::ESPIPE)
     }
@@ -112,6 +116,10 @@ pub trait FdObject: Send + Sync {
     }
 
     fn is_write_open(&self) -> bool {
+        false
+    }
+
+    fn is_read_open(&self) -> bool {
         false
     }
 }
@@ -482,6 +490,10 @@ impl FileObject {
         self.inner.flags().intersects(AxFileFlags::WRITE | AxFileFlags::APPEND)
     }
 
+    pub fn is_read_open(&self) -> bool {
+        self.inner.flags().contains(AxFileFlags::READ)
+    }
+
     pub fn inner(&self) -> &File {
         &self.inner
     }
@@ -555,7 +567,13 @@ impl FdObject for FileObject {
 
     fn write_at(&self, buf: &[u8], offset: u64) -> LinuxResult<usize> {
         let file = &self.inner;
-        Ok(file.write_at(buf, offset)?)
+        if file.flags().contains(AxFileFlags::APPEND) {
+            let backend = file.backend()?;
+            let (written, _) = backend.append(buf)?;
+            Ok(written)
+        } else {
+            Ok(file.write_at(buf, offset)?)
+        }
     }
 
     fn mmap_file_flags(&self) -> Option<AxFileFlags> {
@@ -622,6 +640,10 @@ impl FdObject for FileObject {
 
     fn is_write_open(&self) -> bool {
         self.is_write_open()
+    }
+
+    fn is_read_open(&self) -> bool {
+        self.is_read_open()
     }
 }
 
@@ -947,7 +969,7 @@ impl PipeRingBuffer {
     }
 }
 
-struct PipeShared {
+pub struct PipeShared {
     buffer: Mutex<PipeRingBuffer>,
     read_wait_queue: axtask::WaitQueue,
     write_wait_queue: axtask::WaitQueue,
@@ -965,12 +987,24 @@ impl PipeShared {
             writer_count: AtomicUsize::new(1),
         }
     }
+
+    fn new_fifo() -> Self {
+        Self {
+            buffer: Mutex::new(PipeRingBuffer::new(65536)),
+            read_wait_queue: axtask::WaitQueue::new(),
+            write_wait_queue: axtask::WaitQueue::new(),
+            reader_count: AtomicUsize::new(0),
+            writer_count: AtomicUsize::new(0),
+        }
+    }
 }
 
 pub struct PipeObject {
     readable: bool,
+    writable: bool,
     shared: Arc<PipeShared>,
     nonblocking: AtomicBool,
+    device_inode: Option<(u64, u64)>,
 }
 
 impl PipeObject {
@@ -979,19 +1013,33 @@ impl PipeObject {
         (
             Self {
                 readable: true,
+                writable: false,
                 shared: shared.clone(),
                 nonblocking: AtomicBool::new(false),
+                device_inode: None,
             },
             Self {
                 readable: false,
+                writable: true,
                 shared,
                 nonblocking: AtomicBool::new(false),
+                device_inode: None,
             },
         )
     }
 
+    pub fn new_fifo(shared: Arc<PipeShared>, readable: bool, writable: bool, device_inode: Option<(u64, u64)>) -> Self {
+        Self {
+            readable,
+            writable,
+            shared,
+            nonblocking: AtomicBool::new(false),
+            device_inode,
+        }
+    }
+
     const fn writable(&self) -> bool {
-        !self.readable
+        self.writable
     }
 
     fn write_end_closed(&self) -> bool {
@@ -1018,6 +1066,18 @@ impl PipeObject {
 impl FdObject for PipeObject {
     fn as_any(&self) -> &dyn Any {
         self
+    }
+
+    fn is_read_open(&self) -> bool {
+        self.readable
+    }
+
+    fn is_write_open(&self) -> bool {
+        self.writable
+    }
+
+    fn fifo_device_inode(&self) -> Option<(u64, u64)> {
+        self.device_inode
     }
 
     fn ioctl(&self, cmd: u32, arg: usize) -> LinuxResult<isize> {
@@ -1287,11 +1347,9 @@ impl Drop for PipeObject {
         crate::flock::flock_release_owner(owner);
         if self.readable {
             self.shared.reader_count.fetch_sub(1, Ordering::AcqRel);
-            // Closing a pipe during process teardown should only wake waiters.
-            // Let the scheduler decide when to reschedule instead of doing it
-            // from inside `drop()`.
             self.shared.write_wait_queue.notify_all(false);
-        } else {
+        }
+        if self.writable {
             self.shared.writer_count.fetch_sub(1, Ordering::AcqRel);
             self.shared.read_wait_queue.notify_all(false);
         }
@@ -1335,6 +1393,70 @@ pub fn pipe_entries(flags: FdFlags) -> (FdEntry, FdEntry) {
         FdEntry::new(read_object, flags),
         FdEntry::new(write_object, flags),
     )
+}
+
+static FIFO_REGISTRY: Lazy<Mutex<BTreeMap<(u64, u64), Weak<PipeShared>>>> =
+    Lazy::new(|| Mutex::new(BTreeMap::new()));
+
+pub fn get_or_create_fifo_shared(device: u64, inode: u64) -> Arc<PipeShared> {
+    let mut registry = FIFO_REGISTRY.lock();
+    registry.retain(|_, w| w.strong_count() > 0);
+    let key = (device, inode);
+    if let Some(shared) = registry.get(&key).and_then(|w| w.upgrade()) {
+        shared
+    } else {
+        let shared = Arc::new(PipeShared::new_fifo());
+        registry.insert(key, Arc::downgrade(&shared));
+        shared
+    }
+}
+
+pub fn create_fifo_entry(
+    device: u64,
+    inode: u64,
+    readable: bool,
+    writable: bool,
+    flags: FdFlags,
+) -> LinuxResult<FdEntry> {
+    let shared = get_or_create_fifo_shared(device, inode);
+    let nonblock = flags.contains(FdFlags::NONBLOCK);
+
+    if readable {
+        shared.reader_count.fetch_add(1, Ordering::AcqRel);
+        // Wake up any waiting writers
+        shared.write_wait_queue.notify_all(true);
+    }
+    if writable {
+        shared.writer_count.fetch_add(1, Ordering::AcqRel);
+        // Wake up any waiting readers
+        shared.read_wait_queue.notify_all(true);
+    }
+
+    if readable && !nonblock && shared.writer_count.load(Ordering::Acquire) == 0 {
+        shared.read_wait_queue.wait_until(|| {
+            shared.writer_count.load(Ordering::Acquire) > 0 || crate::task::current_have_signals()
+        });
+        if crate::task::current_have_signals() {
+            shared.reader_count.fetch_sub(1, Ordering::AcqRel);
+            return Err(LinuxError::EINTR);
+        }
+    }
+
+    if writable && !nonblock && shared.reader_count.load(Ordering::Acquire) == 0 {
+        shared.write_wait_queue.wait_until(|| {
+            shared.reader_count.load(Ordering::Acquire) > 0 || crate::task::current_have_signals()
+        });
+        if crate::task::current_have_signals() {
+            shared.writer_count.fetch_sub(1, Ordering::AcqRel);
+            return Err(LinuxError::EINTR);
+        }
+    }
+
+    let object = Arc::new(PipeObject::new_fifo(shared, readable, writable, Some((device, inode))));
+    if flags.contains(FdFlags::NONBLOCK) {
+        let _ = object.set_nonblocking(true);
+    }
+    Ok(FdEntry::new(object, flags))
 }
 
 pub struct FdTable {
@@ -1408,7 +1530,32 @@ impl FdTable {
         for slot in &self.entries {
             if let Some(entry) = slot {
                 if entry.object.is_write_open() {
-                    if let Some(loc) = entry.object.location() {
+                    if let Some((d, i)) = entry.object.fifo_device_inode() {
+                        if d == device && i == inode {
+                            return true;
+                        }
+                    } else if let Some(loc) = entry.object.location() {
+                        if let Ok(meta) = loc.metadata() {
+                            if meta.device == device && meta.inode == inode {
+                                return true;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        false
+    }
+
+    pub fn is_file_read_open_by_meta(&self, device: u64, inode: u64) -> bool {
+        for slot in &self.entries {
+            if let Some(entry) = slot {
+                if entry.object.is_read_open() {
+                    if let Some((d, i)) = entry.object.fifo_device_inode() {
+                        if d == device && i == inode {
+                            return true;
+                        }
+                    } else if let Some(loc) = entry.object.location() {
                         if let Ok(meta) = loc.metadata() {
                             if meta.device == device && meta.inode == inode {
                                 return true;

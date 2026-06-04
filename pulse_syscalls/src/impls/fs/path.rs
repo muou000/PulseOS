@@ -37,9 +37,9 @@ fn flags_to_options(flags: usize, mode: usize) -> OpenOptions {
     }
     if (flags & O_CREAT as usize) != 0 {
         options.create(true);
-    }
-    if (flags & O_EXCL as usize) != 0 {
-        options.create_new(true);
+        if (flags & O_EXCL as usize) != 0 {
+            options.create_new(true);
+        }
     }
     if (flags & O_DIRECTORY as usize) != 0 {
         options.directory(true);
@@ -272,7 +272,7 @@ pub fn sys_openat(dirfd: i32, pathname: usize, flags: usize, mode: usize) -> isi
         axfs::OpenResult::File(file) => file.location().metadata(),
         axfs::OpenResult::Dir(dir) => dir.metadata(),
     };
-    if let Ok(meta) = metadata {
+    if let Ok(ref meta) = metadata {
         // O_NOATIME permission check
         if (flags & (O_NOATIME as usize)) != 0 {
             let current_uid = pulse_core::task::current_process()
@@ -285,7 +285,19 @@ pub fn sys_openat(dirfd: i32, pathname: usize, flags: usize, mode: usize) -> isi
         // FIFO O_NONBLOCK | O_WRONLY check
         if meta.node_type == NodeType::Fifo {
             if (flags & (O_NONBLOCK as usize)) != 0 && (flags & (O_ACCMODE as usize)) == O_WRONLY as usize {
-                return -LinuxError::ENXIO.code() as isize;
+                let mut has_reader = false;
+                let procs = pulse_core::task::processes_snapshot();
+                for proc in procs {
+                    let fd_table = proc.fd_table();
+                    let fd_table_guard = fd_table.read();
+                    if fd_table_guard.is_file_read_open_by_meta(meta.device, meta.inode) {
+                        has_reader = true;
+                        break;
+                    }
+                }
+                if !has_reader {
+                    return -LinuxError::ENXIO.code() as isize;
+                }
             }
         }
         // O_NOFOLLOW symlink check
@@ -341,7 +353,31 @@ pub fn sys_openat(dirfd: i32, pathname: usize, flags: usize, mode: usize) -> isi
         }
     }
 
-    let entry = open_result_to_entry(opened, open_fd_flags(flags));
+    let is_fifo = if let Ok(ref meta) = metadata {
+        meta.node_type == NodeType::Fifo
+    } else {
+        false
+    };
+
+    let entry = if is_fifo {
+        let meta = metadata.unwrap();
+        let access_mode = flags & (O_ACCMODE as usize);
+        let readable = access_mode == O_RDONLY as usize || access_mode == O_RDWR as usize;
+        let writable = access_mode == O_WRONLY as usize || access_mode == O_RDWR as usize;
+        match pulse_core::fd_table::create_fifo_entry(
+            meta.device,
+            meta.inode,
+            readable,
+            writable,
+            open_fd_flags(flags),
+        ) {
+            Ok(entry) => entry,
+            Err(e) => return -e.code() as isize,
+        }
+    } else {
+        open_result_to_entry(opened, open_fd_flags(flags))
+    };
+
     match insert_fd_entry(entry) {
         Ok(fd) => fd as isize,
         Err(e) => -e.code() as isize,
@@ -360,6 +396,9 @@ pub fn sys_mkdirat(dirfd: i32, pathname: usize, mode: usize) -> isize {
         Ok(path) => path,
         Err(_) => return -LinuxError::EINVAL.code() as isize,
     };
+
+    axlog::info!("sys_mkdirat: dirfd={}, path='{}', mode={:#o}", dirfd, path, mode);
+
     let resolved_dirfd = if path.starts_with('/') {
         AT_FDCWD as i32
     } else {
@@ -370,13 +409,23 @@ pub fn sys_mkdirat(dirfd: i32, pathname: usize, mode: usize) -> isize {
         Err(e) => return -e.code() as isize,
     };
     match ctx.resolve_no_follow(path) {
-        Ok(_) => return -LinuxError::EEXIST.code() as isize,
+        Ok(_) => {
+            axlog::debug!("sys_mkdirat: path '{}' already exists", path);
+            return -LinuxError::EEXIST.code() as isize;
+        }
         Err(VfsError::NotFound) => {}
         Err(e) => return -LinuxError::from(e.canonicalize()).code() as isize,
     }
+    axlog::info!("sys_mkdirat: creating directory '{}'", path);
     match ctx.create_dir(path, mkdir_mode(mode)) {
-        Ok(_) => 0,
-        Err(e) => -LinuxError::from(e.canonicalize()).code() as isize,
+        Ok(_) => {
+            axlog::info!("sys_mkdirat: directory '{}' created successfully", path);
+            0
+        }
+        Err(e) => {
+            axlog::error!("sys_mkdirat: failed to create directory '{}': {:?}", path, e);
+            -LinuxError::from(e.canonicalize()).code() as isize
+        }
     }
 }
 
@@ -437,19 +486,26 @@ pub fn sys_mount(
         Err(e) => return -e.code() as isize,
     };
 
+    axlog::info!("sys_mount: source={}, target={}, fstype={}", source_path, target_path, fstype_name);
+
     let fs_res = match mount_source_candidates(&source_path) {
         Ok(candidates) => {
             let mut res = Err(LinuxError::ENOENT);
             for cand in candidates {
+                axlog::info!("sys_mount: probing candidate '{}' with fstype '{}'", cand, fstype_name);
                 match lookup_or_probe_fs(&cand, &fstype_name) {
                     Ok(fs) => {
                         res = Ok(fs);
                         break;
                     }
-                    Err(e) => res = Err(e),
+                    Err(e) => {
+                        axlog::debug!("sys_mount: probing candidate '{}' failed: {:?}", cand, e);
+                        res = Err(e);
+                    }
                 }
             }
             if res.is_err() {
+                axlog::info!("sys_mount: falling back to source '{}' with fstype '{}'", source_path, fstype_name);
                 match lookup_or_probe_fs(&source_path, &fstype_name) {
                     Ok(fs) => res = Ok(fs),
                     Err(e) => res = Err(e),
@@ -472,6 +528,7 @@ pub fn sys_mount(
             return -e.code() as isize;
         }
     };
+    axlog::info!("sys_mount: found filesystem, proceeding to mount on '{}'", target_path);
     let ctx = match context_for_dirfd(AT_FDCWD as i32) {
         Ok(ctx) => ctx,
         Err(e) => return -e.code() as isize,
@@ -488,15 +545,20 @@ pub fn sys_mount(
         }
     };
 
+    axlog::info!("sys_mount: target directory resolved, performing mount operation");
     match mount_dir.mount(&fs) {
         Ok(mountpoint) => {
+            axlog::info!("sys_mount: mount successful on '{}'", target_path);
             MOUNTED_TARGETS.lock().insert(target_path.clone());
             axfs::register_mounted_mountpoint(&target_path, mountpoint);
             axfs::register_mount(&source_path, &target_path, &fstype_name, "rw,relatime");
             let _ = pulse_core::task::current_process().map(|process| process.save_fs_context());
             0
         }
-        Err(e) => -LinuxError::from(e.canonicalize()).code() as isize,
+        Err(e) => {
+            axlog::error!("sys_mount: mount operation failed: {:?}", e);
+            -LinuxError::from(e.canonicalize()).code() as isize
+        }
     }
 }
 
