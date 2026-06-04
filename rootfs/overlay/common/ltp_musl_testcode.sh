@@ -2,6 +2,7 @@
 
 cd /fs/musl/ltp/testcases/bin
 PATH="$PWD:$PATH"
+export LTPROOT=/fs/musl/ltp
 test_list=$(cat /testlist)
 
 echo "#### OS COMP TEST GROUP START ltp-musl ####"

@@ -50,6 +50,7 @@ creat01
 creat03
 creat05
 creat08
+du01.sh
 dup01
 dup02
 dup03
@@ -104,6 +105,7 @@ fcntl34
 fcntl34_64
 fcntl36
 fcntl36_64
+file01.sh
 flock06
 fork01
 fork03
@@ -360,7 +362,7 @@ stime01
 stime02
 syscall01
 syslog12
-test.sh
+tar_tests.sh
 time01
 times01
 times03
@@ -374,6 +376,7 @@ unlink07
 unlink08
 unlinkat01
 unshare01.sh
+unzip01.sh
 utime01
 utime02
 utime03
