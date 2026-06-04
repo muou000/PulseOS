@@ -29,7 +29,8 @@ const KERNEL_INO: u64 = 7;
 const PID_MAX_INO: u64 = 8;
 const TAINTED_INO: u64 = 9;
 const CORE_PATTERN_INO: u64 = 10;
-const NEXT_DYNAMIC_INO: u64 = CORE_PATTERN_INO + 1;
+const INIT_SYM_INO: u64 = 11;
+const NEXT_DYNAMIC_INO: u64 = INIT_SYM_INO + 1;
 
 const PID_INODE_START: u64 = 0x10_0000_0000;
 const PID_INODE_SHIFT: u32 = 16;
@@ -87,6 +88,7 @@ enum ProcLiveFileKind {
     Meminfo,
     Mounts,
     SelfSymlink,
+    InitSymlink,
     PidCmdline(u64),
     PidStatus(u64),
     PidExe(u64),
@@ -196,7 +198,7 @@ impl Inode {
 
     fn new_live_file(ino: u64, kind: ProcLiveFileKind, permission: NodePermission) -> Arc<Self> {
         let node_type = match kind {
-            ProcLiveFileKind::SelfSymlink | ProcLiveFileKind::PidExe(_) | ProcLiveFileKind::PidFdSymlink(_, _) => {
+            ProcLiveFileKind::SelfSymlink | ProcLiveFileKind::InitSymlink | ProcLiveFileKind::PidExe(_) | ProcLiveFileKind::PidFdSymlink(_, _) => {
                 NodeType::Symlink
             }
             _ => NodeType::RegularFile,
@@ -337,6 +339,11 @@ impl ProcFilesystem {
             ProcLiveFileKind::SelfSymlink,
             NodePermission::from_bits_truncate(0o777),
         );
+        let init_sym = Inode::new_live_file(
+            INIT_SYM_INO,
+            ProcLiveFileKind::InitSymlink,
+            NodePermission::from_bits_truncate(0o777),
+        );
         let sys_dir = Inode::new_directory(
             SYS_INO,
             ROOT_INO,
@@ -374,6 +381,7 @@ impl ProcFilesystem {
             inodes.insert(MOUNTS_INO, mounts);
             inodes.insert(FILESYSTEMS_INO, filesystems);
             inodes.insert(SELF_INO, self_sym);
+            inodes.insert(INIT_SYM_INO, init_sym);
             inodes.insert(SYS_INO, sys_dir.clone());
             inodes.insert(KERNEL_INO, kernel_dir.clone());
             inodes.insert(PID_MAX_INO, pid_max);
@@ -387,6 +395,7 @@ impl ProcFilesystem {
             entries.insert("mounts".into(), InodeRef::new(MOUNTS_INO));
             entries.insert("filesystems".into(), InodeRef::new(FILESYSTEMS_INO));
             entries.insert("self".into(), InodeRef::new(SELF_INO));
+            entries.insert("1".into(), InodeRef::new(INIT_SYM_INO));
             entries.insert("sys".into(), InodeRef::new(SYS_INO));
         }
 
@@ -419,6 +428,15 @@ impl ProcFilesystem {
             let inode = Inode::new_live_file(
                 SELF_INO,
                 ProcLiveFileKind::SelfSymlink,
+                NodePermission::from_bits_truncate(0o777),
+            );
+            return Ok(inode);
+        }
+
+        if ino == INIT_SYM_INO {
+            let inode = Inode::new_live_file(
+                INIT_SYM_INO,
+                ProcLiveFileKind::InitSymlink,
                 NodePermission::from_bits_truncate(0o777),
             );
             return Ok(inode);
@@ -630,6 +648,15 @@ fn render_proc_file(fs: &ProcFilesystem, kind: ProcLiveFileKind) -> String {
             if let Some(provider) = PROCESS_PROVIDER.get() {
                 if let Some(pid) = provider.current_pid() {
                     return format!("{}", pid);
+                }
+            }
+            "1".to_owned()
+        }
+        ProcLiveFileKind::InitSymlink => {
+            if let Some(provider) = PROCESS_PROVIDER.get() {
+                let pids = provider.process_pids();
+                if let Some(&min_pid) = pids.iter().min() {
+                    return format!("{}", min_pid);
                 }
             }
             "1".to_owned()

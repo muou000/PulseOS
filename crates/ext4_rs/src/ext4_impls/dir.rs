@@ -222,6 +222,7 @@ impl Ext4 {
         child: &Ext4InodeRef,
         name: &str,
     ) -> Result<usize> {
+        log::info!("dir_add_entry: parent={}, child={}, name='{}'", parent.inode_num, child.inode_num, name);
         let de_type = Self::dir_entry_type_from_inode(&child.inode);
 
         // calculate total blocks

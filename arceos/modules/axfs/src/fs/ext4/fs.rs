@@ -19,8 +19,10 @@ pub struct Ext4Filesystem {
 
 impl Ext4Filesystem {
     pub fn new<D: BlockDriverOps + 'static>(dev: D) -> VfsResult<Filesystem> {
+        log::info!("Ext4Filesystem::new: opening block device");
         let disk = Ext4Disk::new(dev);
         let ext4 = Ext4::open(disk);
+        log::info!("Ext4Filesystem::new: block device opened successfully");
         let fs = Arc::new(Self {
             inner: Mutex::new(ext4),
             root_dir: OnceCell::new(),

@@ -12,7 +12,11 @@ impl Ext4 {
         let inodes_per_group = self.super_block.inodes_per_group();
         let inode_size = self.super_block.inode_size() as u64;
         let block_size = self.super_block.block_size() as u64;
+        log::info!("get_system_zone: group_count={}", group_count);
         for bgid in 0..group_count {
+            if bgid % 1024 == 0 && bgid > 0 {
+                log::info!("get_system_zone: processed {}/{} groups", bgid, group_count);
+            }
             // meta blocks
             let meta_blks = self.num_base_meta_blocks(bgid);
             if meta_blks != 0 {
@@ -48,6 +52,7 @@ impl Ext4 {
                 end_blk: ino_tbl + itb_per_group - 1,
             });
         }
+        log::info!("get_system_zone: finished, total zones={}", zones.len());
         zones
     }
     /// Opens and loads an Ext4 from the `block_device`.
@@ -57,8 +62,12 @@ impl Ext4 {
         let super_block: Ext4Superblock = block.read_offset_as(SUPERBLOCK_OFFSET);
 
         let group_count = super_block.block_group_count() as usize;
+        log::info!("Ext4::open: group_count={}", group_count);
         let mut inode_table_cache = Vec::with_capacity(group_count);
         for bgid in 0..group_count {
+            if bgid % 1024 == 0 && bgid > 0 {
+                log::info!("Ext4::open: caching inode tables {}/{}", bgid, group_count);
+            }
             let block_group = Ext4BlockGroup::load_new(&block_device, &super_block, bgid);
             inode_table_cache.push(block_group.get_inode_table_blk_num());
         }
@@ -69,8 +78,10 @@ impl Ext4 {
             system_zone_cache: None,
             inode_table_cache,
         };
+        log::info!("Ext4::open: initializing system zone cache");
         let zones = ext4_tmp.get_system_zone();
 
+        log::info!("Ext4::open: complete");
         Ext4 {
             system_zone_cache: Some(zones),
             ..ext4_tmp
