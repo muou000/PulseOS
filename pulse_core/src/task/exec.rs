@@ -154,6 +154,7 @@ impl Process {
         self.set_signal_trampoline(load_info.signal_trampoline);
         self.set_exec_path(path.clone());
         *self.args.lock() = argv;
+        self.set_dumpable(1);
         axtask::current().set_name(&self.name());
         Ok(())
     }

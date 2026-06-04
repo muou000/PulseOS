@@ -240,6 +240,71 @@ pub fn sys_getresgid(rgid_ptr: usize, egid_ptr: usize, sgid_ptr: usize) -> isize
     0
 }
 
+pub fn sys_prctl(option: i32, arg2: usize, _arg3: usize, _arg4: usize, _arg5: usize) -> isize {
+    const PR_SET_PDEATHSIG: i32 = 1;
+    const PR_GET_PDEATHSIG: i32 = 2;
+    const PR_GET_DUMPABLE: i32 = 3;
+    const PR_SET_DUMPABLE: i32 = 4;
+    const PR_SET_NAME: i32 = 15;
+    const PR_GET_NAME: i32 = 16;
+
+    let process = match current_process() {
+        Ok(p) => p,
+        Err(e) => return -e.code() as isize,
+    };
+
+    match option {
+        PR_SET_NAME => match super::common::read_user_cstring(&process, arg2) {
+            Ok(name) => {
+                let name = if name.len() > 15 { &name[..15] } else { &name };
+                axtask::current().set_name(name);
+                0
+            }
+            Err(e) => e,
+        },
+        PR_GET_NAME => {
+            let name = axtask::current().name();
+            let mut bytes = [0u8; 16];
+            let len = core::cmp::min(name.len(), 15);
+            bytes[..len].copy_from_slice(&name.as_bytes()[..len]);
+            match pulse_core::task::uaccess::write_user_bytes(&process, arg2, &bytes) {
+                Ok(_) => 0,
+                Err(e) => -e.code() as isize,
+            }
+        }
+        PR_SET_PDEATHSIG => {
+            let sig = arg2 as isize;
+            if !is_valid_signal(sig) {
+                return -LinuxError::EINVAL.code() as isize;
+            }
+            process.set_pdeath_sig(sig as i32);
+            0
+        }
+        PR_GET_PDEATHSIG => {
+            let sig = process.pdeath_sig();
+            match process.write_user_i32(arg2, sig) {
+                Ok(_) => 0,
+                Err(e) => -e.code() as isize,
+            }
+        }
+        PR_GET_DUMPABLE => {
+            process.dumpable() as isize
+        }
+        PR_SET_DUMPABLE => {
+            let dumpable = arg2 as i32;
+            if dumpable < 0 || dumpable > 2 {
+                return -LinuxError::EINVAL.code() as isize;
+            }
+            process.set_dumpable(dumpable);
+            0
+        }
+        _ => {
+            axlog::warn!("sys_prctl: unsupported option {}", option);
+            -LinuxError::EINVAL.code() as isize
+        }
+    }
+}
+
 
 
 

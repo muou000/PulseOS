@@ -29,10 +29,24 @@ static PROCESS_REGISTRY: Lazy<SpinNoIrq<BTreeMap<u64, Weak<Process>>>> =
 static THREAD_REGISTRY: Lazy<SpinNoIrq<BTreeMap<u64, Weak<Thread>>>> =
     Lazy::new(|| SpinNoIrq::new(BTreeMap::new()));
 
+static INIT_PID: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
 pub fn register_process(pid: u64, process: Arc<Process>) {
+    if INIT_PID.load(core::sync::atomic::Ordering::Relaxed) == 0 {
+        INIT_PID.store(pid, core::sync::atomic::Ordering::Relaxed);
+    }
     PROCESS_REGISTRY
         .lock()
         .insert(pid, Arc::downgrade(&process));
+}
+
+pub fn init_process() -> Option<Arc<Process>> {
+    let init_pid = INIT_PID.load(core::sync::atomic::Ordering::Relaxed);
+    if init_pid != 0 {
+        process_by_pid(init_pid)
+    } else {
+        None
+    }
 }
 
 pub fn register_thread_global(tid: u64, thread: Arc<Thread>) {
