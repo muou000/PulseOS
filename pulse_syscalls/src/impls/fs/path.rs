@@ -397,7 +397,7 @@ pub fn sys_mkdirat(dirfd: i32, pathname: usize, mode: usize) -> isize {
         Err(_) => return -LinuxError::EINVAL.code() as isize,
     };
 
-    axlog::info!("sys_mkdirat: dirfd={}, path='{}', mode={:#o}", dirfd, path, mode);
+    axlog::debug!("sys_mkdirat: dirfd={}, path='{}', mode={:#o}", dirfd, path, mode);
 
     let resolved_dirfd = if path.starts_with('/') {
         AT_FDCWD as i32
@@ -416,10 +416,10 @@ pub fn sys_mkdirat(dirfd: i32, pathname: usize, mode: usize) -> isize {
         Err(VfsError::NotFound) => {}
         Err(e) => return -LinuxError::from(e.canonicalize()).code() as isize,
     }
-    axlog::info!("sys_mkdirat: creating directory '{}'", path);
+    axlog::debug!("sys_mkdirat: creating directory '{}'", path);
     match ctx.create_dir(path, mkdir_mode(mode)) {
         Ok(_) => {
-            axlog::info!("sys_mkdirat: directory '{}' created successfully", path);
+            axlog::debug!("sys_mkdirat: directory '{}' created successfully", path);
             0
         }
         Err(e) => {
@@ -486,13 +486,13 @@ pub fn sys_mount(
         Err(e) => return -e.code() as isize,
     };
 
-    axlog::info!("sys_mount: source={}, target={}, fstype={}", source_path, target_path, fstype_name);
+    axlog::debug!("sys_mount: source={}, target={}, fstype={}", source_path, target_path, fstype_name);
 
     let fs_res = match mount_source_candidates(&source_path) {
         Ok(candidates) => {
             let mut res = Err(LinuxError::ENOENT);
             for cand in candidates {
-                axlog::info!("sys_mount: probing candidate '{}' with fstype '{}'", cand, fstype_name);
+                axlog::debug!("sys_mount: probing candidate '{}' with fstype '{}'", cand, fstype_name);
                 match lookup_or_probe_fs(&cand, &fstype_name) {
                     Ok(fs) => {
                         res = Ok(fs);
@@ -505,7 +505,7 @@ pub fn sys_mount(
                 }
             }
             if res.is_err() {
-                axlog::info!("sys_mount: falling back to source '{}' with fstype '{}'", source_path, fstype_name);
+                axlog::debug!("sys_mount: falling back to source '{}' with fstype '{}'", source_path, fstype_name);
                 match lookup_or_probe_fs(&source_path, &fstype_name) {
                     Ok(fs) => res = Ok(fs),
                     Err(e) => res = Err(e),
@@ -528,7 +528,7 @@ pub fn sys_mount(
             return -e.code() as isize;
         }
     };
-    axlog::info!("sys_mount: found filesystem, proceeding to mount on '{}'", target_path);
+    axlog::debug!("sys_mount: found filesystem, proceeding to mount on '{}'", target_path);
     let ctx = match context_for_dirfd(AT_FDCWD as i32) {
         Ok(ctx) => ctx,
         Err(e) => return -e.code() as isize,
@@ -545,10 +545,10 @@ pub fn sys_mount(
         }
     };
 
-    axlog::info!("sys_mount: target directory resolved, performing mount operation");
+    axlog::debug!("sys_mount: target directory resolved, performing mount operation");
     match mount_dir.mount(&fs) {
         Ok(mountpoint) => {
-            axlog::info!("sys_mount: mount successful on '{}'", target_path);
+            axlog::debug!("sys_mount: mount successful on '{}'", target_path);
             MOUNTED_TARGETS.lock().insert(target_path.clone());
             axfs::register_mounted_mountpoint(&target_path, mountpoint);
             axfs::register_mount(&source_path, &target_path, &fstype_name, "rw,relatime");

@@ -271,3 +271,59 @@ pub fn sys_setsid() -> isize {
     axlog::warn!("sys_setsid (stub): returning success");
     1
 }
+
+pub fn sys_getgroups(size: isize, list: usize) -> isize {
+    let process = match current_process() {
+        Ok(p) => p,
+        Err(e) => return -e.code() as isize,
+    };
+    let groups = process.groups();
+    if size < 0 {
+        return -LinuxError::EINVAL.code() as isize;
+    }
+    let size = size as usize;
+    if size == 0 {
+        return groups.len() as isize;
+    }
+    if groups.len() > size {
+        return -LinuxError::EINVAL.code() as isize;
+    }
+    if list == 0 {
+        return -LinuxError::EFAULT.code() as isize;
+    }
+    if let Err(e) = pulse_core::task::uaccess::write_user_plain_array(process.as_ref(), list, &groups) {
+        let errno: LinuxError = e.into();
+        return -errno.code() as isize;
+    }
+    groups.len() as isize
+}
+
+pub fn sys_setgroups(size: usize, list: usize) -> isize {
+    let process = match current_process() {
+        Ok(p) => p,
+        Err(e) => return -e.code() as isize,
+    };
+    if !process.is_root_user() {
+        return -LinuxError::EPERM.code() as isize;
+    }
+    if size > 65536 {
+        return -LinuxError::EINVAL.code() as isize;
+    }
+    let groups = if size == 0 {
+        alloc::vec::Vec::new()
+    } else {
+        if list == 0 {
+            return -LinuxError::EFAULT.code() as isize;
+        }
+        match pulse_core::task::uaccess::read_user_plain_array::<u32>(process.as_ref(), list, size) {
+            Ok(g) => g,
+            Err(e) => {
+                let errno: LinuxError = e.into();
+                return -errno.code() as isize;
+            }
+        }
+    };
+    process.set_groups(groups);
+    0
+}
+

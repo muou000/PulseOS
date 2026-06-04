@@ -3,7 +3,7 @@ use pulse_core::task::current_thread;
 pub fn sys_exit(exit_code: i32) -> ! {
     if exit_code != 0 {
         axlog::debug!("sys_exit: exit_code={}", exit_code);
-        axlog::info!("Task exit with code: {}", exit_code);
+        axlog::debug!("Task exit with code: {}", exit_code);
     }
     let thread = match current_thread() {
         Ok(thread) => thread,
@@ -15,7 +15,7 @@ pub fn sys_exit(exit_code: i32) -> ! {
 pub fn sys_exit_group(exit_code: i32) -> ! {
     if exit_code != 0 {
         axlog::debug!("sys_exit_group: exit_code={}", exit_code);
-        axlog::info!("Task group exit with code: {}", exit_code);
+        axlog::debug!("Task group exit with code: {}", exit_code);
     }
     let thread = match current_thread() {
         Ok(thread) => thread,

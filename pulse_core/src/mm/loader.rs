@@ -443,7 +443,7 @@ pub fn load_user_app(
         dispatch_entry = VirtAddr::from(interp_elf.header.pt2.entry_point() as usize)
             .checked_add(bias)
             .ok_or(AxError::OutOfRange)?;
-        axlog::info!(
+        axlog::debug!(
             "Loaded interpreter {} at bias={:#x}, entry={:#x}",
             interp_path,
             bias,

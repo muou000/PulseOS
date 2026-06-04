@@ -241,6 +241,7 @@ fn syscall_dispatcher(
         }
 
         Sysno::uname => impls::sys_uname(args[0]),
+        Sysno::sethostname => impls::sys_sethostname(args[0], args[1]),
         Sysno::sysinfo => impls::sys_sysinfo(args[0]),
         Sysno::syslog => impls::sys_syslog(args[0], args[1], args[2]),
         Sysno::rt_sigprocmask => impls::sys_rt_sigprocmask(args[0], args[1], args[2], args[3]),
@@ -270,6 +271,8 @@ fn syscall_dispatcher(
         Sysno::setresgid => impls::sys_setresgid(args[0], args[1], args[2]),
         Sysno::getresuid => impls::sys_getresuid(args[0], args[1], args[2]),
         Sysno::getresgid => impls::sys_getresgid(args[0], args[1], args[2]),
+        Sysno::getgroups => impls::sys_getgroups(args[0] as isize, args[1]),
+        Sysno::setgroups => impls::sys_setgroups(args[0], args[1]),
 
         Sysno::rt_sigaction => impls::sys_rt_sigaction(args[0], args[1], args[2], args[3]),
         Sysno::rt_sigreturn => impls::sys_rt_sigreturn(tf),

@@ -328,7 +328,7 @@ pub fn sys_fchmodat(dirfd: i32, pathname: usize, mode: usize, flags: usize) -> i
     } else {
         "<null>".into()
     };
-    axlog::info!(
+    axlog::debug!(
         "sys_fchmodat: dirfd={}, pathname={:#x} (\"{}\"), mode={:#o}, flags={:#x}",
         dirfd,
         pathname,
@@ -340,7 +340,7 @@ pub fn sys_fchmodat(dirfd: i32, pathname: usize, mode: usize, flags: usize) -> i
     // AT_SYMLINK_NOFOLLOW 和 AT_EMPTY_PATH 是允许的 flags
     let supported_flags = AT_SYMLINK_NOFOLLOW as usize | AT_EMPTY_PATH as usize;
     if (flags & !supported_flags) != 0 {
-        axlog::info!(
+        axlog::warn!(
             "sys_fchmodat: unsupported flags={:#x}, returning EINVAL",
             flags
         );
@@ -363,7 +363,7 @@ pub fn sys_fchmodat(dirfd: i32, pathname: usize, mode: usize, flags: usize) -> i
                 }
                 Err(e) => {
                     let err = LinuxError::from(e.canonicalize());
-                    axlog::debug!(
+                    axlog::warn!(
                         "sys_fchmodat: path \"{}\" update_metadata failed: {:?}, returning {}",
                         path_str,
                         err,
@@ -374,7 +374,7 @@ pub fn sys_fchmodat(dirfd: i32, pathname: usize, mode: usize, flags: usize) -> i
             }
         }
         Err(e) => {
-            axlog::info!(
+            axlog::warn!(
                 "sys_fchmodat: path \"{}\" resolve failed: {:?} (code={}), returning {}",
                 path_str,
                 e,
@@ -388,7 +388,7 @@ pub fn sys_fchmodat(dirfd: i32, pathname: usize, mode: usize, flags: usize) -> i
 
 /// `fchmod(fd, mode)` — 设置打开文件的权限位。
 pub fn sys_fchmod(fd: usize, mode: usize) -> isize {
-    axlog::info!("sys_fchmod: fd={}, mode={:#o}", fd, mode);
+    axlog::debug!("sys_fchmod: fd={}, mode={:#o}", fd, mode);
 
     let entry = match get_fd_entry(fd) {
         Ok(entry) => entry,
@@ -438,7 +438,7 @@ pub fn sys_fchownat(dirfd: i32, pathname: usize, uid: usize, gid: usize, flags: 
     } else {
         "<null>".into()
     };
-    axlog::info!(
+    axlog::debug!(
         "sys_fchownat: dirfd={}, path=\"{}\", uid={}, gid={}, flags={:#x}",
         dirfd,
         path_str,
@@ -453,8 +453,16 @@ pub fn sys_fchownat(dirfd: i32, pathname: usize, uid: usize, gid: usize, flags: 
                 Ok(meta) => meta,
                 Err(e) => return -LinuxError::from(e.canonicalize()).code() as isize,
             };
-            let new_uid = if (uid as u32) != u32::MAX { uid as u32 } else { current_meta.uid };
-            let new_gid = if (gid as u32) != u32::MAX { gid as u32 } else { current_meta.gid };
+            let new_uid = if (uid as u32) != u32::MAX {
+                uid as u32
+            } else {
+                current_meta.uid
+            };
+            let new_gid = if (gid as u32) != u32::MAX {
+                gid as u32
+            } else {
+                current_meta.gid
+            };
 
             let mut new_mode = current_meta.mode;
             if current_meta.node_type == axfs_ng_vfs::NodeType::RegularFile
