@@ -11,7 +11,7 @@ use pulse_core::fd_table::{FdEntry, FdFlags};
 
 use super::{addr::{NetSocketAddr, write_unix_addr}, get_socket};
 use crate::{impls::fs::common::{insert_fd_entry, remove_fd_entry}, net::{Socket, LocalSocket, SocketInner}};
-use core::sync::atomic::{AtomicU32, Ordering};
+use core::sync::atomic::Ordering;
 use alloc::collections::BTreeMap;
 use alloc::sync::Weak;
 use alloc::string::String;
