@@ -186,7 +186,7 @@ impl Drop for ShmInner {
     fn drop(&mut self) {
         if self.addr != 0 {
             global_allocator().dealloc_pages(self.addr, self.page_num);
-            axlog::info!(
+            axlog::debug!(
                 "[SharedMemory] dealloc pages: addr: {:#x}, page_count: {}, shmid: {}",
                 self.addr,
                 self.page_num,

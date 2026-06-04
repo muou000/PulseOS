@@ -275,6 +275,8 @@ pub struct Process {
     pub pdeath_sig: AtomicI32,
     pub dumpable: AtomicI32,
     pub reparented: AtomicBool,
+    groups: Mutex<Vec<u32>>,
+    hostname: Mutex<Arc<RwLock<[u8; 65]>>>,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -287,6 +289,7 @@ pub struct ForkParams {
     pub child_set_tid: Option<usize>,
     pub child_clear_tid: Option<usize>,
     pub share_sighand: bool,
+    pub share_uts: bool,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -300,6 +303,7 @@ pub struct CloneParams {
     pub child_set_tid: Option<usize>,
     pub child_clear_tid: Option<usize>,
     pub share_sighand: bool,
+    pub share_uts: bool,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -425,6 +429,10 @@ impl Process {
         self.fd_table.read().clone()
     }
 
+    pub fn hostname_handle(&self) -> Arc<RwLock<[u8; 65]>> {
+        self.hostname.lock().clone()
+    }
+
     pub fn unshare_fs(&self) -> AxResult<()> {
         let new_fs = {
             let binding = self.fs_context_handle();
@@ -445,6 +453,12 @@ impl Process {
         let mut slot = self.fd_table.write();
         *slot = Arc::new(RwLock::new(new_fd_table));
         Ok(())
+    }
+
+    pub fn unshare_uts(&self) {
+        let current_hostname = *self.hostname_handle().read();
+        let mut slot = self.hostname.lock();
+        *slot = Arc::new(RwLock::new(current_hostname));
     }
 
     fn clone_private_fs_context(parent: &Process) -> AxResult<Arc<Mutex<FsContext>>> {
@@ -563,6 +577,14 @@ impl Process {
 
     pub fn is_root_user(&self) -> bool {
         self.euid() == 0
+    }
+
+    pub fn groups(&self) -> Vec<u32> {
+        self.groups.lock().clone()
+    }
+
+    pub fn set_groups(&self, groups: Vec<u32>) {
+        *self.groups.lock() = groups;
     }
 
     pub fn memlock_limit_snapshot(&self) -> (u64, u64) {
@@ -1069,6 +1091,10 @@ impl Process {
             let _ = fd_table.insert_at(fd, entry);
         }
 
+        let mut hostname_buf = [0u8; 65];
+        let default_name = b"pulseos";
+        hostname_buf[..default_name.len()].copy_from_slice(default_name);
+
         Ok(Arc::new(Self {
             pid,
             parent_pid: AtomicU64::new(0),
@@ -1121,6 +1147,8 @@ impl Process {
             pdeath_sig: AtomicI32::new(0),
             dumpable: AtomicI32::new(1),
             reparented: AtomicBool::new(false),
+            groups: Mutex::new(Vec::new()),
+            hostname: Mutex::new(Arc::new(RwLock::new(hostname_buf))),
         }))
     }
 
@@ -1133,6 +1161,7 @@ impl Process {
         share_fs: bool,
         share_files: bool,
         share_sighand: bool,
+        share_uts: bool,
     ) -> AxResult<Arc<Self>> {
         let parent_arc = parent;
         let parent = parent_arc.as_ref();
@@ -1175,6 +1204,11 @@ impl Process {
         };
         let signal_trampoline = *parent.signal_trampoline.lock();
         let exec_path = parent.exec_path();
+        let hostname = if share_uts {
+            parent.hostname_handle()
+        } else {
+            Arc::new(RwLock::new(*parent.hostname_handle().read()))
+        };
 
         Ok(Arc::new(Self {
             pid,
@@ -1231,6 +1265,8 @@ impl Process {
             pdeath_sig: AtomicI32::new(0),
             dumpable: AtomicI32::new(parent.dumpable()),
             reparented: AtomicBool::new(false),
+            groups: Mutex::new(parent.groups.lock().clone()),
+            hostname: Mutex::new(hostname),
         }))
     }
 
@@ -2177,6 +2213,7 @@ impl Process {
             params.share_fs,
             params.share_files,
             params.share_sighand,
+            params.share_uts,
         )?;
 
         if let Some(addr) = params.parent_set_tid {
@@ -2254,6 +2291,7 @@ impl Process {
                 params.share_fs,
                 params.share_files,
                 params.share_sighand,
+                params.share_uts,
             )?
         };
 

@@ -21,7 +21,7 @@ impl Ext4 {
         child: &mut Ext4InodeRef,
         name: &str,
     ) -> Result<usize> {
-        log::info!("Ext4::link: parent={}, child={}, name='{}'", parent.inode_num, child.inode_num, name);
+        log::debug!("Ext4::link: parent={}, child={}, name='{}'", parent.inode_num, child.inode_num, name);
         // Add a directory entry in the parent directory pointing to the child inode
 
         // at this point should insert to existing block
@@ -30,7 +30,7 @@ impl Ext4 {
 
         // If this is the first link. add '.' and '..' entries
         if child.inode.is_dir() {
-            log::info!("Ext4::link: initializing directory '.' and '..'");
+            log::debug!("Ext4::link: initializing directory '.' and '..'");
             // let child_ref = child.clone();
             let new_child_ref = Ext4InodeRef {
                 inode_num: child.inode_num,
@@ -68,7 +68,7 @@ impl Ext4 {
     ///
     /// Returns:
     pub fn create(&self, parent: u32, name: &str, inode_mode: u16) -> Result<Ext4InodeRef> {
-        log::info!("Ext4::create: parent={}, name='{}', mode={:#o}", parent, name, inode_mode);
+        log::debug!("Ext4::create: parent={}, name='{}', mode={:#o}", parent, name, inode_mode);
         let mut parent_inode_ref = self.get_inode_ref(parent);
 
         // let mut child_inode_ref = self.create_inode(inode_mode)?;
@@ -87,7 +87,7 @@ impl Ext4 {
     }
 
     pub fn create_inode(&self, inode_mode: u16) -> Result<Ext4InodeRef> {
-        log::info!("Ext4::create_inode: mode={:#o}", inode_mode);
+        log::debug!("Ext4::create_inode: mode={:#o}", inode_mode);
 
         let inode_file_type = match InodeFileType::from_bits(inode_mode & EXT4_INODE_MODE_TYPE_MASK) {
             Some(file_type) => file_type,
@@ -98,7 +98,7 @@ impl Ext4 {
 
         // allocate inode
         let inode_num = self.alloc_inode(is_dir)?;
-        log::info!("Ext4::create_inode: allocated inode={}", inode_num);
+        log::debug!("Ext4::create_inode: allocated inode={}", inode_num);
 
         // initialize inode
         let mut inode = Ext4Inode::default();

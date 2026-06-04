@@ -29,7 +29,7 @@ fn do_handle_loop_ioctl(fd: usize, cmd: u32, arg: usize) -> Result<isize, LinuxE
         ((metadata.st_rdev >> 8) & 0xfff) as u32 | ((metadata.st_rdev >> 32) & !0xfff) as u32;
     let minor = (metadata.st_rdev & 0xff) as u32 | ((metadata.st_rdev >> 12) & !0xff) as u32;
 
-    axlog::info!(
+    axlog::debug!(
         "do_handle_loop_ioctl: fd={}, cmd={:#x}, major={}, minor={}",
         fd,
         cmd,
@@ -127,8 +127,7 @@ fn do_handle_loop_ioctl(fd: usize, cmd: u32, arg: usize) -> Result<isize, LinuxE
                 return Ok(0);
             }
             0x301 => {
-                // HDIO_GETGEO
-                axlog::info!(
+                axlog::debug!(
                     "do_handle_loop_ioctl: handling HDIO_GETGEO for loop{}",
                     loop_id
                 );
@@ -242,7 +241,7 @@ fn write_rtc_time(arg: usize) -> Result<(), LinuxError> {
 }
 
 pub fn sys_ioctl(fd: usize, cmd: usize, arg: usize) -> isize {
-    axlog::info!("sys_ioctl: fd={}, cmd={:#x}, arg={:#x}", fd, cmd, arg);
+    axlog::debug!("sys_ioctl: fd={}, cmd={:#x}, arg={:#x}", fd, cmd, arg);
 
     let cmd32 = cmd as u32;
 

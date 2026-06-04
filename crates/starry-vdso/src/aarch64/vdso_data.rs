@@ -39,6 +39,6 @@ pub fn enable_cntvct_access() {
         core::arch::asm!("msr CNTKCTL_EL1, {}", in(reg) cntkctl_el1);
         core::arch::asm!("isb");
 
-        log::info!("CNTKCTL_EL1 configured: {:#x}", cntkctl_el1);
+        log::debug!("CNTKCTL_EL1 configured: {:#x}", cntkctl_el1);
     }
 }

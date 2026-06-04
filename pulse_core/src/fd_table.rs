@@ -206,7 +206,8 @@ fn deliver_ctrl_c_signal() {
     } else {
         // Find the newest non-init process (highest PID > 1)
         let procs = crate::task::processes_snapshot();
-        procs.iter()
+        procs
+            .iter()
             .filter(|p| p.pid() > 1 && !p.is_zombie())
             .max_by_key(|p| p.pid())
             .map(|p| p.pgid())
@@ -216,7 +217,11 @@ fn deliver_ctrl_c_signal() {
         let procs = crate::task::processes_snapshot();
         for p in procs {
             if p.pgid() == t_pgid && p.pid() > 1 && !p.is_zombie() {
-                axlog::info!("Ctrl+C: Sending SIGINT to process {} (pgid {})", p.pid(), p.pgid());
+                axlog::info!(
+                    "Ctrl+C: Sending SIGINT to process {} (pgid {})",
+                    p.pid(),
+                    p.pgid()
+                );
                 crate::task::queue_signal_to_process(&p, SIGINT as usize);
             }
         }
@@ -362,8 +367,7 @@ impl FdObject for StdinObject {
                 }
             }
             STDIN_WAIT_QUEUE.wait_until(|| {
-                !STDIN_BUFFER.lock().is_empty()
-                    || Self::current_has_pending_signal()
+                !STDIN_BUFFER.lock().is_empty() || Self::current_has_pending_signal()
             });
             if Self::current_has_pending_signal() {
                 return Err(LinuxError::EINTR);
@@ -487,7 +491,9 @@ impl FileObject {
     }
 
     pub fn is_write_open(&self) -> bool {
-        self.inner.flags().intersects(AxFileFlags::WRITE | AxFileFlags::APPEND)
+        self.inner
+            .flags()
+            .intersects(AxFileFlags::WRITE | AxFileFlags::APPEND)
     }
 
     pub fn is_read_open(&self) -> bool {
@@ -628,7 +634,8 @@ impl FdObject for FileObject {
             let cur_size = metadata.size;
             if end > cur_size {
                 axlog::warn!(
-                    "sys_fallocate: physical space preallocation is not supported, falling back to set_len (new_len={})",
+                    "sys_fallocate: physical space preallocation is not supported, falling back \
+                     to set_len (new_len={})",
                     end
                 );
                 self.inner.access(AxFileFlags::WRITE)?.set_len(end)?;
@@ -956,7 +963,11 @@ impl PipeRingBuffer {
 
         self.arr = new_arr;
         self.head = 0;
-        self.tail = if current_unread == new_capacity { 0 } else { current_unread };
+        self.tail = if current_unread == new_capacity {
+            0
+        } else {
+            current_unread
+        };
         self.status = if current_unread == 0 {
             RingBufferStatus::Empty
         } else if current_unread == new_capacity {
@@ -1028,7 +1039,12 @@ impl PipeObject {
         )
     }
 
-    pub fn new_fifo(shared: Arc<PipeShared>, readable: bool, writable: bool, device_inode: Option<(u64, u64)>) -> Self {
+    pub fn new_fifo(
+        shared: Arc<PipeShared>,
+        readable: bool,
+        writable: bool,
+        device_inode: Option<(u64, u64)>,
+    ) -> Self {
         Self {
             readable,
             writable,
@@ -1163,12 +1179,14 @@ impl FdObject for PipeObject {
             let cap = ring_buffer.capacity();
             let head = ring_buffer.head;
             let first_part = core::cmp::min(chunk_limit, cap - head);
-            buf[read_size..read_size + first_part].copy_from_slice(&ring_buffer.arr[head..head + first_part]);
+            buf[read_size..read_size + first_part]
+                .copy_from_slice(&ring_buffer.arr[head..head + first_part]);
             ring_buffer.head = (head + first_part) % cap;
 
             let second_part = chunk_limit - first_part;
             if second_part > 0 {
-                buf[read_size + first_part..read_size + chunk_limit].copy_from_slice(&ring_buffer.arr[..second_part]);
+                buf[read_size + first_part..read_size + chunk_limit]
+                    .copy_from_slice(&ring_buffer.arr[..second_part]);
                 ring_buffer.head = second_part;
             }
 
@@ -1210,7 +1228,7 @@ impl FdObject for PipeObject {
                         Err(LinuxError::EAGAIN)
                     };
                 }
-                axlog::info!(
+                axlog::debug!(
                     "pipe write wait: tid={} shared={:p} read_closed={} nonblocking={} \
                      write_size={} want={}",
                     axtask::current().id().as_u64(),
@@ -1241,12 +1259,14 @@ impl FdObject for PipeObject {
             let cap = ring_buffer.capacity();
             let tail = ring_buffer.tail;
             let first_part = core::cmp::min(chunk_limit, cap - tail);
-            ring_buffer.arr[tail..tail + first_part].copy_from_slice(&buf[write_size..write_size + first_part]);
+            ring_buffer.arr[tail..tail + first_part]
+                .copy_from_slice(&buf[write_size..write_size + first_part]);
             ring_buffer.tail = (tail + first_part) % cap;
 
             let second_part = chunk_limit - first_part;
             if second_part > 0 {
-                ring_buffer.arr[..second_part].copy_from_slice(&buf[write_size + first_part..write_size + chunk_limit]);
+                ring_buffer.arr[..second_part]
+                    .copy_from_slice(&buf[write_size + first_part..write_size + chunk_limit]);
                 ring_buffer.tail = second_part;
             }
 
@@ -1452,7 +1472,12 @@ pub fn create_fifo_entry(
         }
     }
 
-    let object = Arc::new(PipeObject::new_fifo(shared, readable, writable, Some((device, inode))));
+    let object = Arc::new(PipeObject::new_fifo(
+        shared,
+        readable,
+        writable,
+        Some((device, inode)),
+    ));
     if flags.contains(FdFlags::NONBLOCK) {
         let _ = object.set_nonblocking(true);
     }
@@ -1487,7 +1512,7 @@ impl FdTable {
         for (fd, slot) in self.entries.iter_mut().enumerate() {
             if let Some(entry) = slot {
                 if entry.flags.contains(FdFlags::CLOEXEC) {
-                    axlog::info!(
+                    axlog::debug!(
                         "take_cloexec_on_exec: removing cloexec fd entry fd={}, flags={:?}, \
                          object={:p}",
                         fd,
@@ -1497,7 +1522,7 @@ impl FdTable {
                     if let Some(taken) = slot.take() {
                         removed.push(taken);
                         self.count = self.count.saturating_sub(1);
-                        
+
                         let word_idx = fd / 64;
                         let bit_idx = fd % 64;
                         if word_idx < self.open_fds.len() {
@@ -1523,7 +1548,10 @@ impl FdTable {
     }
 
     pub fn clone_all_entries(&self) -> alloc::vec::Vec<FdEntry> {
-        self.entries.iter().filter_map(|slot| slot.clone()).collect()
+        self.entries
+            .iter()
+            .filter_map(|slot| slot.clone())
+            .collect()
     }
 
     pub fn is_file_write_open_by_meta(&self, device: u64, inode: u64) -> bool {
@@ -1602,7 +1630,7 @@ impl FdTable {
                 return Err(LinuxError::EMFILE);
             }
             self.entries.resize_with(new_len, || None);
-            
+
             let new_bitmap_words = (new_len + 63) / 64;
             self.open_fds.resize(new_bitmap_words, 0);
         }
@@ -1619,17 +1647,17 @@ impl FdTable {
     pub fn insert_from(&mut self, min_fd: usize, entry: FdEntry) -> LinuxResult<usize> {
         let mut found_fd = None;
         let min_word = min_fd / 64;
-        
+
         if min_word < self.open_fds.len() {
             for word_idx in min_word..self.open_fds.len() {
                 let mut word = self.open_fds[word_idx];
-                
+
                 if word_idx == min_word {
                     let min_bit = min_fd % 64;
                     let mask = (1u64 << min_bit) - 1;
                     word |= mask;
                 }
-                
+
                 if word != u64::MAX {
                     let bit_idx = (!word).trailing_zeros() as usize;
                     let fd = word_idx * 64 + bit_idx;
@@ -1662,7 +1690,7 @@ impl FdTable {
                 return Err(LinuxError::EMFILE);
             }
             self.entries.resize_with(new_len, || None);
-            
+
             let new_bitmap_words = (new_len + 63) / 64;
             self.open_fds.resize(new_bitmap_words, 0);
         }
@@ -1717,12 +1745,18 @@ pub fn init_tty_callbacks() {
     struct TtyCallbacksImpl;
     impl axfs::TtyCallbacks for TtyCallbacksImpl {
         fn read(&self, buf: &mut [u8]) -> axfs_ng_vfs::VfsResult<usize> {
-            let read_len = STDIN_READER.lock().read(buf).map_err(|_| axfs_ng_vfs::VfsError::Io)?;
+            let read_len = STDIN_READER
+                .lock()
+                .read(buf)
+                .map_err(|_| axfs_ng_vfs::VfsError::Io)?;
             if buf.is_empty() || read_len > 0 {
                 return Ok(read_len);
             }
             loop {
-                let read_len = STDIN_READER.lock().read(buf).map_err(|_| axfs_ng_vfs::VfsError::Io)?;
+                let read_len = STDIN_READER
+                    .lock()
+                    .read(buf)
+                    .map_err(|_| axfs_ng_vfs::VfsError::Io)?;
                 if read_len > 0 {
                     return Ok(read_len);
                 }
@@ -1730,8 +1764,7 @@ pub fn init_tty_callbacks() {
                     return Err(axfs_ng_vfs::VfsError::Interrupted);
                 }
                 STDIN_WAIT_QUEUE.wait_until(|| {
-                    !STDIN_BUFFER.lock().is_empty()
-                        || StdinObject::current_has_pending_signal()
+                    !STDIN_BUFFER.lock().is_empty() || StdinObject::current_has_pending_signal()
                 });
                 if StdinObject::current_has_pending_signal() {
                     return Err(axfs_ng_vfs::VfsError::Interrupted);
@@ -1740,7 +1773,10 @@ pub fn init_tty_callbacks() {
         }
 
         fn write(&self, buf: &[u8]) -> axfs_ng_vfs::VfsResult<usize> {
-            STDOUT_WRITER.lock().write(buf).map_err(|_| axfs_ng_vfs::VfsError::Io)
+            STDOUT_WRITER
+                .lock()
+                .write(buf)
+                .map_err(|_| axfs_ng_vfs::VfsError::Io)
         }
 
         fn poll(&self) -> axpoll::IoEvents {
@@ -1754,4 +1790,3 @@ pub fn init_tty_callbacks() {
     }
     axfs::register_tty_callbacks(Arc::new(TtyCallbacksImpl));
 }
-

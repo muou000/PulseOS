@@ -52,9 +52,7 @@ pub fn init_process() -> Option<Arc<Process>> {
 }
 
 pub fn register_thread_global(tid: u64, thread: Arc<Thread>) {
-    THREAD_REGISTRY
-        .lock()
-        .insert(tid, Arc::downgrade(&thread));
+    THREAD_REGISTRY.lock().insert(tid, Arc::downgrade(&thread));
 }
 
 pub fn unregister_thread_global(tid: u64) {
@@ -63,27 +61,6 @@ pub fn unregister_thread_global(tid: u64) {
 
 pub fn thread_by_tid_global(tid: u64) -> Option<Arc<Thread>> {
     THREAD_REGISTRY.lock().get(&tid).and_then(|t| t.upgrade())
-}
-
-fn prune_dead_processes(registry: &mut BTreeMap<u64, Arc<Process>>, verbose: bool) {
-    if verbose {
-        for (pid, proc) in registry.iter() {
-            let sc = Arc::strong_count(proc);
-            let children_pids = proc.children_pids_snapshot();
-            let task_tids = proc.task_tids_snapshot();
-            axlog::info!(
-                "PROCESS DIAGNOSTIC: PID={}, Name={}, strong_count={}, parent_pid={}, zombie={}, reparented={}, children_pids={:?}, task_tids={:?}",
-                pid,
-                proc.name(),
-                sc,
-                proc.parent_pid(),
-                proc.is_zombie(),
-                proc.reparented.load(core::sync::atomic::Ordering::Relaxed),
-                children_pids,
-                task_tids
-            );
-        }
-    }
 }
 
 // Per-CPU `CURRENT_THREAD` and thread registry removed. Threads are
@@ -113,15 +90,13 @@ pub fn current_thread() -> LinuxResult<Arc<Thread>> {
 pub const ERESTARTSYS: i32 = 512;
 
 pub fn process_by_pid(pid: u64) -> Option<Arc<Process>> {
-    let mut registry = PROCESS_REGISTRY.lock();
-    prune_dead_processes(&mut registry, false);
+    let registry = PROCESS_REGISTRY.lock();
     registry.get(&pid).cloned()
 }
 
 pub fn processes_snapshot() -> Vec<Arc<Process>> {
     let mut unique = BTreeMap::new();
-    let mut registry = PROCESS_REGISTRY.lock();
-    prune_dead_processes(&mut registry, true);
+    let registry = PROCESS_REGISTRY.lock();
     for proc in registry.values() {
         unique.entry(proc.pid()).or_insert(proc.clone());
     }
@@ -155,15 +130,13 @@ pub fn thread_by_tid(process: &Process, tid: u64) -> Option<Arc<Thread>> {
 
 fn itimer_tick_hook() {
     crate::fd_table::poll_stdin();
-    let mut registry = PROCESS_REGISTRY.lock();
-    prune_dead_processes(&mut registry, false);
+    let registry = PROCESS_REGISTRY.lock();
     for proc in registry.values() {
         if !proc.is_zombie() {
             proc.check_itimer_real_tick();
         }
     }
 }
-
 
 /// Register the itimer tick hook with axtask. Should be called once during
 /// pulse_core initialization.
@@ -214,7 +187,10 @@ impl axfs::ProcfsProcessProvider for PulseProcessProvider {
         let proc = process_by_pid(pid)?;
         let name = proc.name();
 
-        let is_current = current_process().ok().map(|p| p.pid() == pid).unwrap_or(false);
+        let is_current = current_process()
+            .ok()
+            .map(|p| p.pid() == pid)
+            .unwrap_or(false);
         let state = if proc.is_zombie() {
             "Z (zombie)"
         } else if is_current {
@@ -239,8 +215,25 @@ impl axfs::ProcfsProcessProvider for PulseProcessProvider {
         let vm_rss_kb = vm_size_kb;
 
         Some(alloc::format!(
-            "Name:\t{}\nUmask:\t{:04o}\nState:\t{}\nTgid:\t{}\nPid:\t{}\nPPid:\t{}\nUid:\t{} {} {} {}\nGid:\t{} {} {} {}\nThreads:\t{}\nVmSize:\t{} kB\nVmRSS:\t{} kB\n",
-            name, umask, state, pid, pid, ppid, ruid, euid, suid, euid, rgid, egid, sgid, egid, threads, vm_size_kb, vm_rss_kb
+            "Name:\t{}\nUmask:\t{:04o}\nState:\t{}\nTgid:\t{}\nPid:\t{}\nPPid:\t{}\nUid:\t{} {} \
+             {} {}\nGid:\t{} {} {} {}\nThreads:\t{}\nVmSize:\t{} kB\nVmRSS:\t{} kB\n",
+            name,
+            umask,
+            state,
+            pid,
+            pid,
+            ppid,
+            ruid,
+            euid,
+            suid,
+            euid,
+            rgid,
+            egid,
+            sgid,
+            egid,
+            threads,
+            vm_size_kb,
+            vm_rss_kb
         ))
     }
 
@@ -253,7 +246,10 @@ impl axfs::ProcfsProcessProvider for PulseProcessProvider {
         let proc = process_by_pid(pid)?;
         let comm = proc.name();
 
-        let is_current = current_process().ok().map(|p| p.pid() == pid).unwrap_or(false);
+        let is_current = current_process()
+            .ok()
+            .map(|p| p.pid() == pid)
+            .unwrap_or(false);
         let state_char = if proc.is_zombie() {
             'Z'
         } else if is_current {
@@ -267,8 +263,14 @@ impl axfs::ProcfsProcessProvider for PulseProcessProvider {
         let (utime_ns, stime_ns) = proc.snapshot_cpu_time_ns(now_ns);
         let utime = utime_ns / 10_000_000;
         let stime = stime_ns / 10_000_000;
-        let cutime = proc.child_user_time_ns.load(core::sync::atomic::Ordering::Relaxed) / 10_000_000;
-        let cstime = proc.child_sys_time_ns.load(core::sync::atomic::Ordering::Relaxed) / 10_000_000;
+        let cutime = proc
+            .child_user_time_ns
+            .load(core::sync::atomic::Ordering::Relaxed)
+            / 10_000_000;
+        let cstime = proc
+            .child_sys_time_ns
+            .load(core::sync::atomic::Ordering::Relaxed)
+            / 10_000_000;
         let threads = proc.thread_count();
         let starttime = proc.start_mono_ns / 10_000_000;
 
@@ -281,8 +283,21 @@ impl axfs::ProcfsProcessProvider for PulseProcessProvider {
         let rss_pages = vm_size / 4096;
 
         Some(alloc::format!(
-            "{} ({}) {} {} 0 0 0 -1 0 0 0 0 0 {} {} {} {} 20 0 {} 0 {} {} {} {} 0 0 0 0 0 0 0 0 0 0 0 0 17 0 0 0 0 0 0 0 0 0 0 0 0 0 0\n",
-            pid, comm, state_char, ppid, utime, stime, cutime, cstime, threads, starttime, vm_size, rss_pages, u64::MAX
+            "{} ({}) {} {} 0 0 0 -1 0 0 0 0 0 {} {} {} {} 20 0 {} 0 {} {} {} {} 0 0 0 0 0 0 0 0 0 \
+             0 0 0 17 0 0 0 0 0 0 0 0 0 0 0 0 0 0\n",
+            pid,
+            comm,
+            state_char,
+            ppid,
+            utime,
+            stime,
+            cutime,
+            cstime,
+            threads,
+            starttime,
+            vm_size,
+            rss_pages,
+            u64::MAX
         ))
     }
 
@@ -336,9 +351,21 @@ impl axfs::ProcfsProcessProvider for PulseProcessProvider {
                 return;
             }
 
-            let r = if flags.contains(axhal::paging::MappingFlags::READ) { "r" } else { "-" };
-            let w = if flags.contains(axhal::paging::MappingFlags::WRITE) { "w" } else { "-" };
-            let x = if flags.contains(axhal::paging::MappingFlags::EXECUTE) { "x" } else { "-" };
+            let r = if flags.contains(axhal::paging::MappingFlags::READ) {
+                "r"
+            } else {
+                "-"
+            };
+            let w = if flags.contains(axhal::paging::MappingFlags::WRITE) {
+                "w"
+            } else {
+                "-"
+            };
+            let x = if flags.contains(axhal::paging::MappingFlags::EXECUTE) {
+                "x"
+            } else {
+                "-"
+            };
 
             let mut is_shared = false;
             let mut offset = 0;
@@ -379,7 +406,10 @@ impl axfs::ProcfsProcessProvider for PulseProcessProvider {
                     "{:x}-{:x} {}{}{}{} {:08x} {} {}\n",
                     start.as_usize(),
                     end.as_usize(),
-                    r, w, x, p_char,
+                    r,
+                    w,
+                    x,
+                    p_char,
                     offset,
                     dev_str,
                     inode
@@ -389,7 +419,10 @@ impl axfs::ProcfsProcessProvider for PulseProcessProvider {
                     "{:x}-{:x} {}{}{}{} {:08x} {} {:<7} {}\n",
                     start.as_usize(),
                     end.as_usize(),
-                    r, w, x, p_char,
+                    r,
+                    w,
+                    x,
+                    p_char,
                     offset,
                     dev_str,
                     inode,

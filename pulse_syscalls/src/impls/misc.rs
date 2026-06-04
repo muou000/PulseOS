@@ -110,6 +110,11 @@ pub fn sys_uname(buf: usize) -> isize {
         return -LinuxError::EFAULT.code() as isize;
     }
 
+    let process = match pulse_core::task::current_process() {
+        Ok(process) => process,
+        Err(e) => return -e.code() as isize,
+    };
+
     // Keep values simple and stable for userspace probing.
     let mut uts = UtsName {
         sysname: [0; 65],
@@ -120,7 +125,12 @@ pub fn sys_uname(buf: usize) -> isize {
         domainname: [0; 65],
     };
     write_cstr_field(&mut uts.sysname, "Linux");
-    write_cstr_field(&mut uts.nodename, "pulseos");
+    
+    let hostname_handle = process.hostname_handle();
+    let hostname_lock = hostname_handle.read();
+    uts.nodename.copy_from_slice(&*hostname_lock);
+    drop(hostname_lock);
+
     write_cstr_field(&mut uts.release, "6.1.0");
     write_cstr_field(&mut uts.version, "#1 PulseOS");
     #[cfg(target_arch = "riscv64")]
@@ -129,13 +139,45 @@ pub fn sys_uname(buf: usize) -> isize {
     write_cstr_field(&mut uts.machine, "loongarch64");
     write_cstr_field(&mut uts.domainname, "(none)");
 
-    match pulse_core::task::with_current_process(|process| {
-        uaccess::write_user_plain(process, buf, &uts)
-    }) {
-        Ok(Ok(())) => 0,
-        Ok(Err(_)) => -LinuxError::EFAULT.code() as isize,
-        Err(e) => -e.code() as isize,
+    match uaccess::write_user_plain(process.as_ref(), buf, &uts) {
+        Ok(()) => 0,
+        Err(_) => -LinuxError::EFAULT.code() as isize,
     }
+}
+
+/// sys_sethostname - 设置系统主机名
+pub fn sys_sethostname(name_addr: usize, len: usize) -> isize {
+    axlog::debug!("sys_sethostname: name_addr={:#x}, len={}", name_addr, len);
+
+    let process = match pulse_core::task::current_process() {
+        Ok(p) => p,
+        Err(e) => return -e.code() as isize,
+    };
+
+    // Only root user can change sethostname
+    if process.euid() != 0 {
+        return -LinuxError::EPERM.code() as isize;
+    }
+
+    if len > 64 {
+        return -LinuxError::EINVAL.code() as isize;
+    }
+
+    if name_addr == 0 {
+        return -LinuxError::EFAULT.code() as isize;
+    }
+
+    let mut buf = [0u8; 64];
+    if let Err(e) = crate::impls::utils::read_user_bytes(name_addr, &mut buf[..len]) {
+        return -e.code() as isize;
+    }
+
+    let hostname_handle = process.hostname_handle();
+    let mut hostname_lock = hostname_handle.write();
+    hostname_lock.fill(0);
+    hostname_lock[..len].copy_from_slice(&buf[..len]);
+
+    0
 }
 
 pub fn sys_umask(mask: usize) -> isize {

@@ -38,7 +38,7 @@ pub fn sys_getsockopt(
     optval: usize,
     optlen: usize,
 ) -> isize {
-    info!("sys_getsockopt: fd={fd}, level={level}, optname={optname}");
+    debug!("sys_getsockopt: fd={fd}, level={level}, optname={optname}");
     let socket = match get_socket(fd) {
         Ok(s) => s,
         Err(e) => return -(e.code() as isize),
@@ -49,7 +49,7 @@ pub fn sys_getsockopt(
         match optname {
             1 | 10 => {
                 // IP_TOS, IP_MTU_DISCOVER
-                info!("sys_getsockopt: level IPPROTO_IP, optname {optname} (stub success)");
+                debug!("sys_getsockopt: level IPPROTO_IP, optname {optname} (stub success)");
                 let val: i32 = 0;
                 if let Err(e) = write_user_plain(optval, &val) {
                     return -(e.code() as isize);
@@ -202,7 +202,7 @@ pub fn sys_getsockopt(
             }
             11 => {
                 // TCP_INFO
-                info!("sys_getsockopt: level IPPROTO_TCP, optname TCP_INFO (stub success)");
+                debug!("sys_getsockopt: level IPPROTO_TCP, optname TCP_INFO (stub success)");
                 let mut len: u32 = match read_user_plain(optlen) {
                     Ok(l) => l,
                     Err(e) => return -(e.code() as isize),
@@ -223,7 +223,7 @@ pub fn sys_getsockopt(
             }
             13 => {
                 // TCP_CONGESTION
-                info!("sys_getsockopt: level IPPROTO_TCP, optname TCP_CONGESTION (stub success)");
+                debug!("sys_getsockopt: level IPPROTO_TCP, optname TCP_CONGESTION (stub success)");
                 let val = "cubic\0";
                 let mut len: u32 = match read_user_plain(optlen) {
                     Ok(l) => l,
@@ -381,7 +381,7 @@ pub fn sys_getsockopt(
         }
     }
 
-    info!("sys_getsockopt (unsupported) <= fd: {fd}, level: {level}, optname: {optname}");
+    debug!("sys_getsockopt (unsupported) <= fd: {fd}, level: {level}, optname: {optname}");
     -(LinuxError::ENOPROTOOPT.code() as isize)
 }
 
@@ -392,7 +392,7 @@ pub fn sys_setsockopt(
     optval: usize,
     optlen: usize,
 ) -> isize {
-    info!("sys_setsockopt: fd={fd}, level={level}, optname={optname}");
+    debug!("sys_setsockopt: fd={fd}, level={level}, optname={optname}");
     let socket = match get_socket(fd) {
         Ok(s) => s,
         Err(e) => return -(e.code() as isize),

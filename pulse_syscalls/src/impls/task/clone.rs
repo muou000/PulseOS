@@ -52,6 +52,7 @@ pub fn sys_clone(tf: &TrapFrame, args: [usize; 6]) -> isize {
     let exit_signal = raw_flags & CloneFlags::CSIGNAL.bits();
     let child_stack = args[1];
     let parent_tid = args[2];
+    let share_uts = !flags.contains(CloneFlags::CLONE_NEWUTS);
     #[cfg(target_arch = "loongarch64")]
     let (child_tid, tls) = (args[3], args[4]);
     #[cfg(not(target_arch = "loongarch64"))]
@@ -156,6 +157,7 @@ pub fn sys_clone(tf: &TrapFrame, args: [usize; 6]) -> isize {
                 child_set_tid,
                 child_clear_tid,
                 share_sighand: flags.contains(CloneFlags::CLONE_SIGHAND),
+                share_uts,
             },
         ) {
             Ok(child_proc) => (child_proc.pid() as usize, None),
@@ -178,6 +180,7 @@ pub fn sys_clone(tf: &TrapFrame, args: [usize; 6]) -> isize {
                 child_set_tid,
                 child_clear_tid,
                 share_sighand: flags.contains(CloneFlags::CLONE_SIGHAND),
+                share_uts,
             },
         ) {
             Ok((tid, child_proc)) => (tid as usize, child_proc),
@@ -222,6 +225,10 @@ pub fn sys_unshare(flags: usize) -> isize {
         if let Err(e) = process.unshare_fs() {
             return -e.code() as isize;
         }
+    }
+
+    if clone_flags.contains(CloneFlags::CLONE_NEWUTS) {
+        process.unshare_uts();
     }
 
     // Other namespace flags (CLONE_NEWUSER, CLONE_NEWNET, CLONE_NEWNS, CLONE_NEWIPC, CLONE_NEWUTS, CLONE_NEWCGROUP, CLONE_NEWPID)
