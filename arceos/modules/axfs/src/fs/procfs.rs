@@ -1,4 +1,4 @@
-use alloc::{borrow::ToOwned, collections::BTreeMap, format, string::String, sync::Arc, vec::Vec};
+use alloc::{borrow::ToOwned, collections::BTreeMap, string::{String, ToString}, sync::Arc, vec::Vec};
 use core::{
     any::Any,
     borrow::Borrow,
@@ -475,7 +475,7 @@ impl ProcFilesystem {
                     
                     if let Some(fds) = provider.process_fds(pid) {
                         for fd in fds {
-                            let name = format!("{}", fd);
+                            let name = fd.to_string();
                             let child_ino = PID_INODE_START + (pid << PID_INODE_SHIFT) + SUB_INO_FD_BASE + fd as u64;
                             entries.insert(name.into(), InodeRef::new(child_ino));
                         }
@@ -606,12 +606,11 @@ fn render_meminfo() -> String {
     let mem_free = free_bytes.min(total_bytes);
     let mem_available = mem_free;
 
-    format!(
-        "MemTotal: {:>8} kB\nMemFree: {:>9} kB\nMemAvailable: {:>4} kB\n",
-        to_kib(total_bytes),
-        to_kib(mem_free),
-        to_kib(mem_available)
-    )
+    use core::fmt::Write;
+    let mut s = String::with_capacity(128);
+    let _ = write!(&mut s, "MemTotal: {:>8} kB\nMemFree: {:>9} kB\nMemAvailable: {:>4} kB\n",
+        to_kib(total_bytes), to_kib(mem_free), to_kib(mem_available));
+    s
 }
 
 fn render_mounts() -> String {
@@ -647,7 +646,7 @@ fn render_proc_file(fs: &ProcFilesystem, kind: ProcLiveFileKind) -> String {
         ProcLiveFileKind::SelfSymlink => {
             if let Some(provider) = PROCESS_PROVIDER.get() {
                 if let Some(pid) = provider.current_pid() {
-                    return format!("{}", pid);
+                    return pid.to_string();
                 }
             }
             "1".to_owned()
@@ -656,7 +655,7 @@ fn render_proc_file(fs: &ProcFilesystem, kind: ProcLiveFileKind) -> String {
             if let Some(provider) = PROCESS_PROVIDER.get() {
                 let pids = provider.process_pids();
                 if let Some(&min_pid) = pids.iter().min() {
-                    return format!("{}", min_pid);
+                    return min_pid.to_string();
                 }
             }
             "1".to_owned()
@@ -695,7 +694,9 @@ fn render_proc_file(fs: &ProcFilesystem, kind: ProcLiveFileKind) -> String {
             fs.gid_map_map.lock().get(&pid).cloned().unwrap_or_default()
         }
         ProcLiveFileKind::PidMax => {
-            format!("{}\n", PID_MAX.load(core::sync::atomic::Ordering::Acquire))
+            let mut s = PID_MAX.load(core::sync::atomic::Ordering::Acquire).to_string();
+            s.push('\n');
+            s
         }
         ProcLiveFileKind::Filesystems => render_filesystems(),
         ProcLiveFileKind::Tainted => {
@@ -906,7 +907,7 @@ impl DirNodeOps for ProcNode {
                     
                     if let Some(fds) = provider.process_fds(pid) {
                         for fd in fds {
-                            let name = format!("{}", fd);
+                            let name = fd.to_string();
                             let child_ino = PID_INODE_START + (pid << PID_INODE_SHIFT) + SUB_INO_FD_BASE + fd as u64;
                             all_entries.push((name, child_ino));
                         }
@@ -922,7 +923,7 @@ impl DirNodeOps for ProcNode {
             if self.ino == ROOT_INO {
                 if let Some(provider) = PROCESS_PROVIDER.get() {
                     for pid in provider.process_pids() {
-                        let name = format!("{}", pid);
+                        let name = pid.to_string();
                         let child_ino = PID_INODE_START + (pid << PID_INODE_SHIFT) + SUB_INO_DIR;
                         all_entries.push((name, child_ino));
                     }
