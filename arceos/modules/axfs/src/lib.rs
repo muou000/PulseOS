@@ -150,16 +150,16 @@ pub fn is_loop_bound(id: usize) -> bool {
     fs::loop_dev::LOOP_DEVICES[id].backing.lock().is_some()
 }
 
-pub fn set_loop_backing(id: usize, file: File) -> axfs_ng_vfs::VfsResult<()> {
+pub fn get_loop_size(id: usize) -> Option<u64> {
     if id >= 8 {
-        return Err(axfs_ng_vfs::VfsError::InvalidInput);
+        return None;
     }
-    let metadata = file.location().metadata()?;
-    *fs::loop_dev::LOOP_DEVICES[id].backing.lock() = Some(file);
-    fs::loop_dev::LOOP_DEVICES[id]
-        .size
-        .store(metadata.size, core::sync::atomic::Ordering::Release);
-    Ok(())
+    let dev = &fs::loop_dev::LOOP_DEVICES[id];
+    if dev.backing.lock().is_some() {
+        Some(dev.size.load(core::sync::atomic::Ordering::Acquire))
+    } else {
+        None
+    }
 }
 
 pub fn clear_loop_backing(id: usize) -> axfs_ng_vfs::VfsResult<()> {
@@ -173,6 +173,18 @@ pub fn clear_loop_backing(id: usize) -> axfs_ng_vfs::VfsResult<()> {
     fs::loop_dev::LOOP_DEVICES[id]
         .flags
         .store(0, core::sync::atomic::Ordering::Release);
+    Ok(())
+}
+
+pub fn set_loop_backing(id: usize, file: File) -> axfs_ng_vfs::VfsResult<()> {
+    if id >= 8 {
+        return Err(axfs_ng_vfs::VfsError::InvalidInput);
+    }
+    let metadata = file.location().metadata()?;
+    *fs::loop_dev::LOOP_DEVICES[id].backing.lock() = Some(Arc::new(file));
+    fs::loop_dev::LOOP_DEVICES[id]
+        .size
+        .store(metadata.size, core::sync::atomic::Ordering::Release);
     Ok(())
 }
 

@@ -809,12 +809,12 @@ impl FileNodeOps for DevNode {
                 Ok(n)
             }
             NodeContent::BlockDevice(block) => {
-                let size = inode.metadata.lock().size;
+                let mut disk = block.disk.lock();
+                let size = disk.size();
                 if offset >= size {
                     return Ok(0);
                 }
                 let len = min(buf.len() as u64, size - offset) as usize;
-                let mut disk = block.disk.lock();
                 disk.set_position(offset).map_err(map_dev_err)?;
                 disk.read(&mut buf[..len]).map_err(map_dev_err)
             }
@@ -857,12 +857,12 @@ impl FileNodeOps for DevNode {
                 _ => Err(VfsError::InvalidInput),
             },
             NodeContent::BlockDevice(block) => {
-                let size = inode.metadata.lock().size;
+                let mut disk = block.disk.lock();
+                let size = disk.size();
                 if offset >= size {
                     return Ok(0);
                 }
                 let len = min(buf.len() as u64, size - offset) as usize;
-                let mut disk = block.disk.lock();
                 disk.set_position(offset).map_err(map_dev_err)?;
                 disk.write(&buf[..len]).map_err(map_dev_err)
             }
@@ -928,6 +928,10 @@ impl FileNodeOps for DevNode {
 
     fn set_symlink(&self, _target: &str) -> VfsResult<()> {
         Err(VfsError::PermissionDenied)
+    }
+
+    fn ioctl(&self, _cmd: u32, _arg: usize) -> VfsResult<usize> {
+        Err(VfsError::NotATty)
     }
 }
 

@@ -1,20 +1,20 @@
 use core::sync::atomic::{AtomicBool, Ordering};
 extern crate alloc;
-use alloc::format;
 
 use axerrno::LinuxError;
 use chrono::{Datelike, Timelike, Utc};
+use linux_raw_sys::{
+    ioctl::{
+        BLKGETSIZE64, BLKSSZGET, RTC_RD_TIME, SIOCGIFFLAGS, SIOCGIFINDEX, SIOCSIFFLAGS, TCGETS,
+        TIOCGPGRP, TIOCGWINSZ, TIOCSPGRP,
+    },
+    loop_device::{
+        LOOP_CLR_FD, LOOP_CTL_GET_FREE, LOOP_GET_STATUS, LOOP_GET_STATUS64, LOOP_SET_FD,
+        LOOP_SET_STATUS, LOOP_SET_STATUS64,
+    },
+};
 
 use crate::impls::utils::{read_user_bytes, write_user_bytes};
-
-use linux_raw_sys::ioctl::{
-    BLKGETSIZE64, BLKSSZGET, RTC_RD_TIME, SIOCGIFFLAGS, SIOCGIFINDEX, SIOCSIFFLAGS, TCGETS, TIOCGPGRP,
-    TIOCGWINSZ, TIOCSPGRP,
-};
-use linux_raw_sys::loop_device::{
-    LOOP_CLR_FD, LOOP_CTL_GET_FREE, LOOP_GET_STATUS, LOOP_GET_STATUS64, LOOP_SET_FD,
-    LOOP_SET_STATUS, LOOP_SET_STATUS64,
-};
 
 static TTY_IOCTL_STUB_WARNED: AtomicBool = AtomicBool::new(false);
 
@@ -28,6 +28,14 @@ fn do_handle_loop_ioctl(fd: usize, cmd: u32, arg: usize) -> Result<isize, LinuxE
     let major =
         ((metadata.st_rdev >> 8) & 0xfff) as u32 | ((metadata.st_rdev >> 32) & !0xfff) as u32;
     let minor = (metadata.st_rdev & 0xff) as u32 | ((metadata.st_rdev >> 12) & !0xff) as u32;
+
+    axlog::info!(
+        "do_handle_loop_ioctl: fd={}, cmd={:#x}, major={}, minor={}",
+        fd,
+        cmd,
+        major,
+        minor
+    );
 
     if major == 10 && minor == 237 {
         // /dev/loop-control
@@ -74,19 +82,80 @@ fn do_handle_loop_ioctl(fd: usize, cmd: u32, arg: usize) -> Result<isize, LinuxE
                 }
             }
             BLKGETSIZE64 => {
-                let size = match axfs::lookup_location(&format!("/dev/loop{}", loop_id)) {
-                    Ok(loc) => match loc.metadata() {
-                        Ok(m) => m.size,
-                        Err(_) => 0,
-                    },
-                    Err(_) => 0,
-                };
+                let size = axfs::get_loop_size(loop_id).unwrap_or(0);
                 write_user_bytes(arg, &size.to_ne_bytes())?;
+                return Ok(0);
+            }
+            0x127a => {
+                // BLKGETSIZE (unsigned long)
+                let size = axfs::get_loop_size(loop_id).unwrap_or(0);
+                let sectors = (size / 512) as usize;
+                write_user_bytes(arg, &sectors.to_ne_bytes())?;
+                return Ok(0);
+            }
+            0x1277 => {
+                // BLKPBSZGET (unsigned int)
+                let val = 512u32;
+                write_user_bytes(arg, &val.to_ne_bytes())?;
+                return Ok(0);
+            }
+            0x1278 => {
+                // BLKDISCARDZEROES (unsigned int)
+                let val = 0u32;
+                write_user_bytes(arg, &val.to_ne_bytes())?;
+                return Ok(0);
+            }
+            0x1279 => {
+                // BLKSECTGET (unsigned short)
+                let val = 255u16;
+                write_user_bytes(arg, &val.to_ne_bytes())?;
+                return Ok(0);
+            }
+            0x127b => {
+                // BLKROTATIONAL (unsigned short)
+                let val = 0u16;
+                write_user_bytes(arg, &val.to_ne_bytes())?;
+                return Ok(0);
+            }
+            0x125e => {
+                // BLKFLUSH
                 return Ok(0);
             }
             BLKSSZGET => {
                 let ssz = 512i32;
                 write_user_bytes(arg, &ssz.to_ne_bytes())?;
+                return Ok(0);
+            }
+            0x301 => {
+                // HDIO_GETGEO
+                axlog::info!(
+                    "do_handle_loop_ioctl: handling HDIO_GETGEO for loop{}",
+                    loop_id
+                );
+                let size = axfs::get_loop_size(loop_id).unwrap_or(0);
+                let heads = 255u8;
+                let sectors = 63u8;
+                let cylinders = (size / (heads as u64 * sectors as u64 * 512)) as u16;
+
+                #[repr(C)]
+                struct HdGeometry {
+                    heads: u8,
+                    sectors: u8,
+                    cylinders: u16,
+                    start: u64,
+                }
+                let geo = HdGeometry {
+                    heads,
+                    sectors,
+                    cylinders,
+                    start: 0,
+                };
+                write_user_bytes(arg, unsafe {
+                    core::slice::from_raw_parts(
+                        (&geo as *const HdGeometry).cast::<u8>(),
+                        core::mem::size_of::<HdGeometry>(),
+                    )
+                })?;
                 return Ok(0);
             }
             _ => {}
@@ -173,7 +242,7 @@ fn write_rtc_time(arg: usize) -> Result<(), LinuxError> {
 }
 
 pub fn sys_ioctl(fd: usize, cmd: usize, arg: usize) -> isize {
-    axlog::debug!("sys_ioctl: fd={}, cmd={:#x}, arg={:#x}", fd, cmd, arg);
+    axlog::info!("sys_ioctl: fd={}, cmd={:#x}, arg={:#x}", fd, cmd, arg);
 
     let cmd32 = cmd as u32;
 

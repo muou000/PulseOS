@@ -9,12 +9,7 @@ impl Ext4 {
         let bg_count = self.super_block.block_group_count();
         let mut super_block = self.super_block;
 
-        while bgid <= bg_count {
-            if bgid == bg_count {
-                bgid = 0;
-                continue;
-            }
-
+        while bgid < bg_count {
             let mut bg =
                 Ext4BlockGroup::load_new(&self.block_device, &super_block, bgid as usize);
 

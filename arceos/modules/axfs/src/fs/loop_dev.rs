@@ -1,9 +1,10 @@
+use alloc::sync::Arc;
 use core::sync::atomic::{AtomicU64, Ordering};
 use spin::Mutex;
 use axdriver::prelude::{BaseDriverOps, BlockDriverOps, DeviceType, DevResult, DevError};
 
 pub struct LoopDeviceState {
-    pub backing: Mutex<Option<crate::highlevel::File>>,
+    pub backing: Mutex<Option<Arc<crate::highlevel::File>>>,
     pub size: AtomicU64,
     pub flags: core::sync::atomic::AtomicU32,
 }
@@ -52,8 +53,11 @@ impl BlockDriverOps for LoopBlockDevice {
     }
 
     fn read_block(&mut self, block_id: u64, buf: &mut [u8]) -> DevResult {
-        let backing = LOOP_DEVICES[self.id].backing.lock();
-        if let Some(file) = backing.as_ref() {
+        let file = {
+            let backing = LOOP_DEVICES[self.id].backing.lock();
+            backing.as_ref().cloned()
+        };
+        if let Some(file) = file {
             let offset = block_id * self.block_size() as u64;
             file.read_at(buf, offset).map_err(|_| DevError::Io)?;
             Ok(())
@@ -63,8 +67,11 @@ impl BlockDriverOps for LoopBlockDevice {
     }
 
     fn write_block(&mut self, block_id: u64, buf: &[u8]) -> DevResult {
-        let backing = LOOP_DEVICES[self.id].backing.lock();
-        if let Some(file) = backing.as_ref() {
+        let file = {
+            let backing = LOOP_DEVICES[self.id].backing.lock();
+            backing.as_ref().cloned()
+        };
+        if let Some(file) = file {
             let offset = block_id * self.block_size() as u64;
             file.write_at(buf, offset).map_err(|_| DevError::Io)?;
             Ok(())
