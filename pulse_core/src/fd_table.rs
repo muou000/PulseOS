@@ -145,6 +145,7 @@ fn metadata_to_stat(metadata: &Metadata) -> stat {
     let perm = metadata.mode.bits() as u32;
     let st_mode = ((ty as u32) << 12) | perm;
     stat {
+        st_dev: metadata.device as _,
         st_ino: metadata.inode as _,
         st_nlink: metadata.nlink as _,
         st_mode,
@@ -395,6 +396,14 @@ impl FdObject for StdinObject {
             writable: true,
         })
     }
+
+    fn is_read_open(&self) -> bool {
+        true
+    }
+
+    fn is_write_open(&self) -> bool {
+        false
+    }
 }
 
 pub struct StdoutObject;
@@ -474,6 +483,14 @@ impl FdObject for StdoutObject {
             readable: true,
             writable: true,
         })
+    }
+
+    fn is_read_open(&self) -> bool {
+        false
+    }
+
+    fn is_write_open(&self) -> bool {
+        true
     }
 }
 
@@ -735,6 +752,14 @@ impl FdObject for CpuDmaLatencyObject {
     fn location(&self) -> Option<Location> {
         Some(self.location.clone())
     }
+
+    fn is_read_open(&self) -> bool {
+        true
+    }
+
+    fn is_write_open(&self) -> bool {
+        true
+    }
 }
 
 #[repr(C, packed)]
@@ -808,6 +833,14 @@ impl FdObject for DirObject {
 
     fn sync_data(&self) -> LinuxResult {
         self.inner.sync(true).map_err(Into::into)
+    }
+
+    fn is_read_open(&self) -> bool {
+        true
+    }
+
+    fn is_write_open(&self) -> bool {
+        false
     }
 
     fn read_dirents64(&self, dirp: &mut [u8]) -> LinuxResult<usize> {

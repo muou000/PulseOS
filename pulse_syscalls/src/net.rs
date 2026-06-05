@@ -416,4 +416,12 @@ impl FdObject for Socket {
         self.set_nonblocking_inner(nonblocking);
         Ok(())
     }
+
+    fn is_read_open(&self) -> bool {
+        true
+    }
+
+    fn is_write_open(&self) -> bool {
+        true
+    }
 }

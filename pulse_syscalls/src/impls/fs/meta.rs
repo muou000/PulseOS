@@ -199,8 +199,9 @@ pub fn sys_statx(
     new_statx.stx_mtime = to_statx_timestamp(stat.st_mtime as i64, stat.st_mtime_nsec as i64);
     new_statx.stx_rdev_major = 0;
     new_statx.stx_rdev_minor = 0;
-    new_statx.stx_dev_major = 0;
-    new_statx.stx_dev_minor = 0;
+    let dev = axfs_ng_vfs::DeviceId(stat.st_dev as u64);
+    new_statx.stx_dev_major = dev.major();
+    new_statx.stx_dev_minor = dev.minor();
     new_statx.stx_mnt_id = 0;
     new_statx.stx_dio_mem_align = 0;
     new_statx.stx_dio_offset_align = 0;
@@ -224,21 +225,35 @@ pub fn sys_statx(
 }
 
 pub fn sys_utimensat(dirfd: i32, pathname: usize, times: usize, flags: usize) -> isize {
-    axlog::debug!(
-        "sys_utimensat: dirfd={}, pathname={:#x}, times={:#x}, flags={:#x}",
+    axlog::info!(
+        "sys_utimensat: dirfd={}, pathname={:#x}, times={:#x}, flags={:#x}, sizeof(timespec)={}",
         dirfd,
         pathname,
         times,
-        flags
+        flags,
+        core::mem::size_of::<timespec>()
     );
     let supported_flags = AT_SYMLINK_NOFOLLOW as usize | AT_EMPTY_PATH as usize;
     if (flags & !supported_flags) != 0 {
         return -LinuxError::EINVAL.code() as isize;
     }
 
-    let location = match resolve_location_at_ptr(dirfd, pathname, flags) {
-        Ok(location) => location,
-        Err(e) => return -e.code() as isize,
+    let location = if pathname == 0 {
+        match resolve_location_at_ptr(dirfd, pathname, flags | AT_EMPTY_PATH as usize) {
+            Ok(location) => location,
+            Err(e) => {
+                axlog::warn!("sys_utimensat: resolve_location failed for pathname=NULL: {:?}", e);
+                return -e.code() as isize;
+            }
+        }
+    } else {
+        match resolve_location_at_ptr(dirfd, pathname, flags) {
+            Ok(location) => location,
+            Err(e) => {
+                axlog::warn!("sys_utimensat: resolve_location failed: {:?}", e);
+                return -e.code() as isize;
+            }
+        }
     };
 
     let now = axhal::time::wall_time();
@@ -248,13 +263,19 @@ pub fn sys_utimensat(dirfd: i32, pathname: usize, times: usize, flags: usize) ->
         let atime = match read_user_timespec(times).and_then(|ts| timespec_to_update_time(ts, now))
         {
             Ok(atime) => atime,
-            Err(e) => return -e.code() as isize,
+            Err(e) => {
+                axlog::warn!("sys_utimensat: read_user_timespec(atime) failed at {:#x}: {:?}", times, e);
+                return -e.code() as isize;
+            }
         };
         let mtime_addr = times + core::mem::size_of::<timespec>();
         let mtime =
             match read_user_timespec(mtime_addr).and_then(|ts| timespec_to_update_time(ts, now)) {
                 Ok(mtime) => mtime,
-                Err(e) => return -e.code() as isize,
+                Err(e) => {
+                    axlog::warn!("sys_utimensat: read_user_timespec(mtime) failed at {:#x}: {:?}", mtime_addr, e);
+                    return -e.code() as isize;
+                }
             };
         (atime, mtime)
     };

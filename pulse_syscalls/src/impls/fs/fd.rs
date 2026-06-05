@@ -1,7 +1,7 @@
 use axerrno::LinuxError;
 use linux_raw_sys::general::{
     F_DUPFD, F_DUPFD_CLOEXEC, F_GETFD, F_GETFL, F_GETPIPE_SZ, F_SETFD, F_SETFL, F_SETPIPE_SZ,
-    FD_CLOEXEC, O_CLOEXEC, O_NONBLOCK,
+    FD_CLOEXEC, O_CLOEXEC, O_NONBLOCK, O_RDONLY, O_WRONLY, O_RDWR,
 };
 use pulse_core::fd_table::{FdEntry, FdFlags};
 
@@ -78,6 +78,13 @@ pub fn sys_fcntl(fd: usize, cmd: usize, arg: usize) -> isize {
                 let mut status = 0usize;
                 if entry.flags.contains(FdFlags::NONBLOCK) {
                     status |= O_NONBLOCK as usize;
+                }
+                if entry.object.is_read_open() && entry.object.is_write_open() {
+                    status |= O_RDWR as usize;
+                } else if entry.object.is_write_open() {
+                    status |= O_WRONLY as usize;
+                } else if entry.object.is_read_open() {
+                    status |= O_RDONLY as usize;
                 }
                 status as isize
             }
