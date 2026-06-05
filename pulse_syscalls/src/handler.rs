@@ -380,6 +380,7 @@ fn syscall_dispatcher(
             args[4],
         ),
         Sysno::flock => impls::sys_flock(args[0], args[1]),
+        Sysno::getcpu => impls::sys_getcpu(args[0], args[1], args[2]),
         Sysno::fadvise64 => 0,
         _ => {
             axlog::warn!("Unimplemented syscall: {:?} ({})", sysno, syscall_id);
