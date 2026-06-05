@@ -128,12 +128,30 @@ pub fn thread_by_tid(process: &Process, tid: u64) -> Option<Arc<Thread>> {
     thread_handle_from_task(&task).map(|handle| handle.thread_arc())
 }
 
+#[percpu::def_percpu]
+static LAST_TICK_NS: u64 = 0;
+
 fn itimer_tick_hook() {
+    let now_ns = axhal::time::monotonic_time_nanos() as u64;
+    let last_ns = LAST_TICK_NS.read_current();
+    LAST_TICK_NS.write_current(now_ns);
+    let elapsed_ns = if last_ns == 0 {
+        0
+    } else {
+        now_ns.saturating_sub(last_ns)
+    };
+
     crate::fd_table::poll_stdin();
     let registry = PROCESS_REGISTRY.lock();
     for proc in registry.values() {
         if !proc.is_zombie() {
             proc.check_itimer_real_tick();
+        }
+    }
+    if elapsed_ns > 0 {
+        if let Ok(curr) = current_process() {
+            curr.check_itimer_virt_tick(elapsed_ns);
+            curr.check_itimer_prof_tick(elapsed_ns);
         }
     }
 }
