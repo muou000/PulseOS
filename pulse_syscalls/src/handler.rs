@@ -257,6 +257,7 @@ fn syscall_dispatcher(
         Sysno::umask => impls::sys_umask(args[0]),
         Sysno::getppid => impls::sys_getppid(),
         Sysno::getpgid => impls::sys_getpgid(args[0] as isize),
+        Sysno::getsid => impls::sys_getsid(args[0] as isize),
         Sysno::setpgid => impls::sys_setpgid(args[0] as isize, args[1] as isize),
         Sysno::kill => impls::sys_kill(args[0] as isize, args[1] as isize),
         Sysno::tkill => impls::sys_tkill(args[0] as isize, args[1] as isize),
@@ -315,6 +316,7 @@ fn syscall_dispatcher(
         }
         Sysno::getcwd => impls::sys_getcwd(args[0], args[1]),
         Sysno::chdir => impls::sys_chdir(args[0]),
+        Sysno::fchdir => impls::sys_fchdir(args[0]),
         Sysno::unlinkat => impls::sys_unlinkat(args[0] as i32, args[1], args[2]),
         Sysno::linkat => impls::sys_linkat(
             args[0] as i32,

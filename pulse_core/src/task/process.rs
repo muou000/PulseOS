@@ -269,6 +269,10 @@ pub struct Process {
     /// 0 means the timer is disarmed. Uses atomics for interrupt-context safety.
     itimer_real_deadline_ns: AtomicU64,
     itimer_real_interval_ns: AtomicU64,
+    itimer_virt_remaining_ns: AtomicU64,
+    itimer_virt_interval_ns: AtomicU64,
+    itimer_prof_remaining_ns: AtomicU64,
+    itimer_prof_interval_ns: AtomicU64,
     pub stopped_signal_pending: AtomicI32,
     pub continued_signal_pending: AtomicBool,
     pgid: AtomicU64,
@@ -1141,6 +1145,10 @@ impl Process {
             sem_undos: Mutex::new(Vec::new()),
             itimer_real_deadline_ns: AtomicU64::new(0),
             itimer_real_interval_ns: AtomicU64::new(0),
+            itimer_virt_remaining_ns: AtomicU64::new(0),
+            itimer_virt_interval_ns: AtomicU64::new(0),
+            itimer_prof_remaining_ns: AtomicU64::new(0),
+            itimer_prof_interval_ns: AtomicU64::new(0),
             stopped_signal_pending: AtomicI32::new(0),
             continued_signal_pending: AtomicBool::new(false),
             pgid: AtomicU64::new(pid),
@@ -1259,6 +1267,10 @@ impl Process {
             sem_undos: Mutex::new(Vec::new()),
             itimer_real_deadline_ns: AtomicU64::new(0),
             itimer_real_interval_ns: AtomicU64::new(0),
+            itimer_virt_remaining_ns: AtomicU64::new(0),
+            itimer_virt_interval_ns: AtomicU64::new(0),
+            itimer_prof_remaining_ns: AtomicU64::new(0),
+            itimer_prof_interval_ns: AtomicU64::new(0),
             stopped_signal_pending: AtomicI32::new(0),
             continued_signal_pending: AtomicBool::new(false),
             pgid: AtomicU64::new(parent.pgid()),
@@ -1930,6 +1942,30 @@ impl Process {
         (remaining, interval)
     }
 
+    pub fn set_itimer_virt(&self, value_ns: u64, interval_ns: u64) -> (u64, u64) {
+        let old_remaining = self.itimer_virt_remaining_ns.swap(value_ns, Ordering::AcqRel);
+        let old_interval = self.itimer_virt_interval_ns.swap(interval_ns, Ordering::AcqRel);
+        (old_remaining, old_interval)
+    }
+
+    pub fn get_itimer_virt(&self) -> (u64, u64) {
+        let remaining = self.itimer_virt_remaining_ns.load(Ordering::Acquire);
+        let interval = self.itimer_virt_interval_ns.load(Ordering::Acquire);
+        (remaining, interval)
+    }
+
+    pub fn set_itimer_prof(&self, value_ns: u64, interval_ns: u64) -> (u64, u64) {
+        let old_remaining = self.itimer_prof_remaining_ns.swap(value_ns, Ordering::AcqRel);
+        let old_interval = self.itimer_prof_interval_ns.swap(interval_ns, Ordering::AcqRel);
+        (old_remaining, old_interval)
+    }
+
+    pub fn get_itimer_prof(&self) -> (u64, u64) {
+        let remaining = self.itimer_prof_remaining_ns.load(Ordering::Acquire);
+        let interval = self.itimer_prof_interval_ns.load(Ordering::Acquire);
+        (remaining, interval)
+    }
+
     /// Called from timer tick hook (interrupt context). Checks if ITIMER_REAL
     /// has expired and sends SIGALRM if so. Returns true if the timer fired.
     pub fn check_itimer_real_tick(&self) -> bool {
@@ -1960,6 +1996,40 @@ impl Process {
                 .store(new_deadline, Ordering::Release);
         }
         true
+    }
+
+    pub fn check_itimer_virt_tick(&self, elapsed_ns: u64) {
+        let mut remaining = self.itimer_virt_remaining_ns.load(Ordering::Acquire);
+        if remaining == 0 {
+            return;
+        }
+
+        if remaining <= elapsed_ns {
+            // Expired. Send SIGVTALRM (signal 26).
+            let _ = queue_signal_to_process(self, 26 /* SIGVTALRM */);
+            let interval = self.itimer_virt_interval_ns.load(Ordering::Acquire);
+            remaining = interval; // might be 0, which disarms it
+        } else {
+            remaining -= elapsed_ns;
+        }
+        self.itimer_virt_remaining_ns.store(remaining, Ordering::Release);
+    }
+
+    pub fn check_itimer_prof_tick(&self, elapsed_ns: u64) {
+        let mut remaining = self.itimer_prof_remaining_ns.load(Ordering::Acquire);
+        if remaining == 0 {
+            return;
+        }
+
+        if remaining <= elapsed_ns {
+            // Expired. Send SIGPROF (signal 27).
+            let _ = queue_signal_to_process(self, 27 /* SIGPROF */);
+            let interval = self.itimer_prof_interval_ns.load(Ordering::Acquire);
+            remaining = interval; // might be 0, which disarms it
+        } else {
+            remaining -= elapsed_ns;
+        }
+        self.itimer_prof_remaining_ns.store(remaining, Ordering::Release);
     }
 
     pub fn complete_vfork(&self) {

@@ -10,6 +10,7 @@ alarm03
 alarm05
 alarm06
 alarm07
+ar01.sh
 bind01
 bind02
 bind03
@@ -162,6 +163,8 @@ getrlimit02
 getrlimit03
 getrusage01
 getrusage02
+getsid01
+getsid02
 getsockname01
 getsockopt01
 gettid01

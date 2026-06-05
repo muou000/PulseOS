@@ -662,6 +662,30 @@ pub fn sys_getpgid(pid: isize) -> isize {
     target_proc.pgid() as isize
 }
 
+pub fn sys_getsid(pid: isize) -> isize {
+    axlog::debug!("sys_getsid: pid={}", pid);
+    if pid < 0 {
+        return -LinuxError::EINVAL.code() as isize;
+    }
+    let caller = match pulse_core::task::current_process() {
+        Ok(p) => p,
+        Err(e) => return -e.code() as isize,
+    };
+
+    let target_proc = if pid == 0 {
+        caller
+    } else {
+        match pulse_core::task::process_by_pid(pid as u64) {
+            Some(p) => p,
+            None => return -LinuxError::ESRCH.code() as isize,
+        }
+    };
+
+    // Since we don't fully track sessions yet and setsid returns 1 as a stub,
+    // we return the pgid as a fallback for getsid.
+    target_proc.pgid() as isize
+}
+
 pub fn sys_sysinfo(info: usize) -> isize {
     axlog::debug!("sys_sysinfo: info={:#x}", info);
     if info == 0 {

@@ -2,7 +2,7 @@ use axerrno::LinuxError;
 use linux_raw_sys::general::X_OK;
 
 use crate::impls::{
-    fs::common::check_faccess_permission,
+    fs::common::{check_faccess_permission, get_fd_entry},
     utils::{alloc_zeroed_bytes, read_user_cstring, with_process, write_user_bytes},
 };
 
@@ -51,6 +51,36 @@ pub fn sys_chdir(path: usize) -> isize {
             fs.resolve(path)
                 .map_err(|e| LinuxError::from(e.canonicalize()))?
         };
+        dir.check_is_dir()
+            .map_err(|e| LinuxError::from(e.canonicalize()))?;
+        let uid = process.euid();
+        let gid = process.egid();
+        check_faccess_permission(&dir, X_OK as usize, uid, gid)?;
+        process
+            .fs_context_handle()
+            .lock()
+            .set_current_dir(dir)
+            .map_err(|e| LinuxError::from(e.canonicalize()))?;
+        process.sync_fs_context();
+        Ok(())
+    }) {
+        Ok(Ok(())) => 0,
+        Ok(Err(e)) | Err(e) => -e.code() as isize,
+    }
+}
+
+pub fn sys_fchdir(fd: usize) -> isize {
+    axlog::debug!("sys_fchdir: fd={}", fd);
+    let entry = match get_fd_entry(fd) {
+        Ok(entry) => entry,
+        Err(e) => return -e.code() as isize,
+    };
+    let dir = match entry.object.location() {
+        Some(loc) => loc,
+        None => return -LinuxError::ENOTDIR.code() as isize,
+    };
+
+    match with_process(|process| -> Result<(), LinuxError> {
         dir.check_is_dir()
             .map_err(|e| LinuxError::from(e.canonicalize()))?;
         let uid = process.euid();

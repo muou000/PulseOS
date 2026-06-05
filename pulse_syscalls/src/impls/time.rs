@@ -589,10 +589,36 @@ pub fn sys_setitimer(which: usize, new_value: usize, old_value: usize) -> isize 
             }
             0
         }
-        ITIMER_VIRTUAL | ITIMER_PROF => {
-            // Stub: return success with zero old value
+        ITIMER_VIRTUAL => {
+            let (old_remaining, old_interval) = if new_value != 0 {
+                proc.set_itimer_virt(new_value_ns, new_interval_ns)
+            } else {
+                proc.get_itimer_virt()
+            };
+
             if old_value != 0 {
-                let old_itv = Itimerval::default();
+                let old_itv = Itimerval {
+                    it_interval: ns_to_timeval(old_interval),
+                    it_value: ns_to_timeval(old_remaining),
+                };
+                if let Err(e) = write_user_itimerval(old_value, &old_itv) {
+                    return -e.code() as isize;
+                }
+            }
+            0
+        }
+        ITIMER_PROF => {
+            let (old_remaining, old_interval) = if new_value != 0 {
+                proc.set_itimer_prof(new_value_ns, new_interval_ns)
+            } else {
+                proc.get_itimer_prof()
+            };
+
+            if old_value != 0 {
+                let old_itv = Itimerval {
+                    it_interval: ns_to_timeval(old_interval),
+                    it_value: ns_to_timeval(old_remaining),
+                };
                 if let Err(e) = write_user_itimerval(old_value, &old_itv) {
                     return -e.code() as isize;
                 }
@@ -624,7 +650,8 @@ pub fn sys_getitimer(which: usize, curr_value: usize) -> isize {
 
     let (remaining, interval) = match which {
         ITIMER_REAL => proc.get_itimer_real(),
-        ITIMER_VIRTUAL | ITIMER_PROF => (0, 0), // stub
+        ITIMER_VIRTUAL => proc.get_itimer_virt(),
+        ITIMER_PROF => proc.get_itimer_prof(),
         _ => return -LinuxError::EINVAL.code() as isize,
     };
 
