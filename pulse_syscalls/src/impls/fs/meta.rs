@@ -314,6 +314,11 @@ pub fn sys_utimensat(dirfd: i32, pathname: usize, times: usize, flags: usize) ->
         mtime,
         ..Default::default()
     };
+    // Timestamps update is a write; reject on read-only filesystem.
+    if crate::impls::fs::common::is_location_readonly(&location) {
+        return -LinuxError::EROFS.code() as isize;
+    }
+
     match location.update_metadata(update) {
         Ok(()) => 0,
         Err(e) => -LinuxError::from(e.canonicalize()).code() as isize,
@@ -395,7 +400,32 @@ pub fn sys_fchmodat(dirfd: i32, pathname: usize, mode: usize, flags: usize) -> i
 
     match resolve_location_at_ptr(dirfd, pathname, flags) {
         Ok(location) => {
-            let perm = axfs_ng_vfs::NodePermission::from_bits_truncate(mode as u16);
+            if crate::impls::fs::common::is_location_readonly(&location) {
+                return -LinuxError::EROFS.code() as isize;
+            }
+            let mut perm = axfs_ng_vfs::NodePermission::from_bits_truncate(mode as u16);
+
+            // POSIX: 若进程非 root，且文件 GID 既不匹配 EGID 也不在附属组中，
+            // 则自动清除 S_ISGID，即便用户请求中包含该位。
+            if perm.contains(axfs_ng_vfs::NodePermission::SET_GID) {
+                let should_clear = match (
+                    location.metadata(),
+                    with_process(|p| (p.euid(), p.egid(), p.groups())),
+                ) {
+                    (Ok(meta), Ok((euid, egid, groups))) => {
+                        euid != 0 && meta.gid != egid && !groups.contains(&meta.gid)
+                    }
+                    _ => false,
+                };
+                if should_clear {
+                    axlog::debug!(
+                        "sys_fchmodat: clearing S_ISGID on \"{}\" (non-root, GID mismatch)",
+                        path_str
+                    );
+                    perm.remove(axfs_ng_vfs::NodePermission::SET_GID);
+                }
+            }
+
             match location.update_metadata(axfs_ng_vfs::MetadataUpdate {
                 mode: Some(perm),
                 ..Default::default()
@@ -448,7 +478,33 @@ pub fn sys_fchmod(fd: usize, mode: usize) -> isize {
         None => return -LinuxError::EBADF.code() as isize,
     };
 
-    let perm = axfs_ng_vfs::NodePermission::from_bits_truncate(mode as u16);
+    if crate::impls::fs::common::is_location_readonly(&location) {
+        return -LinuxError::EROFS.code() as isize;
+    }
+
+    let mut perm = axfs_ng_vfs::NodePermission::from_bits_truncate(mode as u16);
+
+    // POSIX: 若进程非 root，且文件 GID 既不匹配 EGID 也不在附属组中，
+    // 则自动清除 S_ISGID，即便用户请求中包含该位。
+    if perm.contains(axfs_ng_vfs::NodePermission::SET_GID) {
+        let should_clear = match (
+            location.metadata(),
+            with_process(|p| (p.euid(), p.egid(), p.groups())),
+        ) {
+            (Ok(meta), Ok((euid, egid, groups))) => {
+                euid != 0 && meta.gid != egid && !groups.contains(&meta.gid)
+            }
+            _ => false,
+        };
+        if should_clear {
+            axlog::debug!(
+                "sys_fchmod: clearing S_ISGID on fd={} (non-root, GID mismatch)",
+                fd
+            );
+            perm.remove(axfs_ng_vfs::NodePermission::SET_GID);
+        }
+    }
+
     match location.update_metadata(axfs_ng_vfs::MetadataUpdate {
         mode: Some(perm),
         ..Default::default()
@@ -495,6 +551,9 @@ pub fn sys_fchownat(dirfd: i32, pathname: usize, uid: usize, gid: usize, flags: 
 
     match resolve_location_at_ptr(dirfd, pathname, flags) {
         Ok(location) => {
+            if crate::impls::fs::common::is_location_readonly(&location) {
+                return -LinuxError::EROFS.code() as isize;
+            }
             let current_meta = match location.metadata() {
                 Ok(meta) => meta,
                 Err(e) => return -LinuxError::from(e.canonicalize()).code() as isize,

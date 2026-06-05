@@ -253,6 +253,39 @@ pub fn sys_openat(dirfd: i32, pathname: usize, flags: usize, mode: usize) -> isi
         Err(e) => return -e.code() as isize,
     };
 
+    // Check for read-only filesystem before opening with write/create intent
+    {
+        let write_requested = (flags & (O_ACCMODE as usize) == O_WRONLY as usize)
+            || (flags & (O_ACCMODE as usize) == O_RDWR as usize)
+            || (flags & O_TRUNC as usize) != 0;
+        let create_requested = (flags & O_CREAT as usize) != 0;
+        if write_requested || create_requested {
+            let is_ro = match ctx.resolve_no_follow(path) {
+                Ok(loc) => {
+                    let ro = crate::impls::fs::common::is_location_readonly(&loc);
+                    // For O_CREAT-only (no write), allow opening an existing file.
+                    if !write_requested && ro {
+                        // file exists on ro fs but we only want O_CREAT; allow open (no creation needed)
+                        false
+                    } else {
+                        ro
+                    }
+                }
+                Err(_) => {
+                    // File doesn't exist; if create or write requested on ro fs → EROFS
+                    if let Ok((parent_loc, _)) = ctx.resolve_parent(axfs_ng_vfs::path::Path::new(path)) {
+                        crate::impls::fs::common::is_location_readonly(&parent_loc)
+                    } else {
+                        false
+                    }
+                }
+            };
+            if is_ro {
+                return -LinuxError::EROFS.code() as isize;
+            }
+        }
+    }
+
     let mut mode = mode;
     if path == "test_mmap.txt" || path.ends_with("/test_mmap.txt") {
         if mode == 2 {
@@ -408,6 +441,22 @@ pub fn sys_mkdirat(dirfd: i32, pathname: usize, mode: usize) -> isize {
         Ok(ctx) => ctx,
         Err(e) => return -e.code() as isize,
     };
+    // Check for read-only filesystem: resolve parent dir if path doesn't exist yet
+    {
+        let is_ro = match ctx.resolve_no_follow(path) {
+            Ok(loc) => crate::impls::fs::common::is_location_readonly(&loc),
+            Err(_) => {
+                if let Ok((parent_loc, _)) = ctx.resolve_parent(axfs_ng_vfs::path::Path::new(path)) {
+                    crate::impls::fs::common::is_location_readonly(&parent_loc)
+                } else {
+                    false
+                }
+            }
+        };
+        if is_ro {
+            return -LinuxError::EROFS.code() as isize;
+        }
+    }
     match ctx.resolve_no_follow(path) {
         Ok(_) => {
             axlog::debug!("sys_mkdirat: path '{}' already exists", path);
@@ -437,14 +486,15 @@ pub fn sys_mount(
     _data: usize,
 ) -> isize {
     axlog::debug!("sys_mount: target={:#x}, flags={:#x}", target, _flags);
-    if (_flags != 0 || _data != 0) && !MOUNT_FLAGS_WARNED.swap(true, Ordering::AcqRel) {
+    // Only warn if data is non-zero (flags may legitimately be set for remount/rdonly)
+    if _data != 0 && !MOUNT_FLAGS_WARNED.swap(true, Ordering::AcqRel) {
         axlog::warn!(
-            "sys_mount: mount flags/data are ignored (flags={:#x}, data={:#x}); semantics are \
-             simplified",
-            _flags,
+            "sys_mount: mount data is ignored (data={:#x}); semantics are simplified",
             _data
         );
     }
+    let is_remount = (_flags & MS_REMOUNT as usize) != 0;
+    let is_rdonly  = (_flags & MS_RDONLY  as usize) != 0;
     if target == 0 {
         return -LinuxError::EFAULT.code() as isize;
     }
@@ -470,6 +520,29 @@ pub fn sys_mount(
             return -e.code() as isize;
         }
     };
+
+    if is_remount {
+        // MS_REMOUNT: target must already be mounted.
+        if axfs::lookup_mounted_mountpoint(&target_path).is_none() {
+            return -LinuxError::EINVAL.code() as isize;
+        }
+        // Read source/fstype for updating the mount record (may be null/none for remount).
+        let source_path = match read_user_optional_path(source) {
+            Ok(Some(p)) => p,
+            Ok(None) => "none".to_string(),
+            Err(e) => return -e.code() as isize,
+        };
+        let fstype_name = match read_user_optional_path(fstype) {
+            Ok(Some(p)) => p,
+            Ok(None) => "none".to_string(),
+            Err(e) => return -e.code() as isize,
+        };
+        let options = if is_rdonly { "ro,relatime" } else { "rw,relatime" };
+        axlog::debug!("sys_mount: remount '{}' as {}", target_path, options);
+        axfs::register_mount(&source_path, &target_path, &fstype_name, options);
+        let _ = pulse_core::task::current_process().map(|process| process.save_fs_context());
+        return 0;
+    }
 
     if axfs::lookup_mounted_mountpoint(&target_path).is_some() {
         return -LinuxError::EBUSY.code() as isize;
@@ -551,7 +624,8 @@ pub fn sys_mount(
             axlog::debug!("sys_mount: mount successful on '{}'", target_path);
             MOUNTED_TARGETS.lock().insert(target_path.clone());
             axfs::register_mounted_mountpoint(&target_path, mountpoint);
-            axfs::register_mount(&source_path, &target_path, &fstype_name, "rw,relatime");
+            let options = if is_rdonly { "ro,relatime" } else { "rw,relatime" };
+            axfs::register_mount(&source_path, &target_path, &fstype_name, options);
             let _ = pulse_core::task::current_process().map(|process| process.save_fs_context());
             0
         }
@@ -647,6 +721,23 @@ pub fn sys_unlinkat(dirfd: i32, pathname: usize, flags: usize) -> isize {
         Ok(ctx) => ctx,
         Err(e) => return -e.code() as isize,
     };
+
+    // Check for read-only filesystem
+    {
+        let is_ro = match ctx.resolve_no_follow(path) {
+            Ok(loc) => crate::impls::fs::common::is_location_readonly(&loc),
+            Err(_) => {
+                if let Ok((parent_loc, _)) = ctx.resolve_parent(axfs_ng_vfs::path::Path::new(path)) {
+                    crate::impls::fs::common::is_location_readonly(&parent_loc)
+                } else {
+                    false
+                }
+            }
+        };
+        if is_ro {
+            return -LinuxError::EROFS.code() as isize;
+        }
+    }
 
     // 1. Resolve parent directory and child entry name
     let (parent_loc, entry_name) = match ctx.resolve_parent(Path::new(path)) {
@@ -772,6 +863,31 @@ pub fn sys_renameat2(
         }
     }
 
+    // Check for read-only filesystem on old or new path
+    {
+        let resolved_olddirfd = if oldpath.starts_with('/') { AT_FDCWD as i32 } else { olddirfd };
+        let resolved_newdirfd2 = if newpath.starts_with('/') { AT_FDCWD as i32 } else { newdirfd };
+        let old_ro = if let Ok(old_ctx) = context_for_dirfd(resolved_olddirfd) {
+            match old_ctx.resolve_no_follow(oldpath.as_str()) {
+                Ok(loc) => crate::impls::fs::common::is_location_readonly(&loc),
+                Err(_) => false,
+            }
+        } else { false };
+        let new_ro = if let Ok(new_ctx2) = context_for_dirfd(resolved_newdirfd2) {
+            match new_ctx2.resolve_no_follow(newpath.as_str()) {
+                Ok(loc) => crate::impls::fs::common::is_location_readonly(&loc),
+                Err(_) => {
+                    if let Ok((parent_loc, _)) = new_ctx2.resolve_parent(axfs_ng_vfs::path::Path::new(newpath.as_str())) {
+                        crate::impls::fs::common::is_location_readonly(&parent_loc)
+                    } else { false }
+                }
+            }
+        } else { false };
+        if old_ro || new_ro {
+            return -LinuxError::EROFS.code() as isize;
+        }
+    }
+
     match rename_at(olddirfd, oldpath.as_str(), newdirfd, newpath.as_str()) {
         Ok(()) => 0,
         Err(e) => -e.code() as isize,
@@ -816,6 +932,23 @@ pub fn sys_symlinkat(target: usize, newdirfd: i32, linkpath: usize) -> isize {
         Err(e) => return -e.code() as isize,
     };
 
+    // Check for read-only filesystem
+    {
+        let is_ro = match ctx.resolve_no_follow(link_str) {
+            Ok(loc) => crate::impls::fs::common::is_location_readonly(&loc),
+            Err(_) => {
+                if let Ok((parent_loc, _)) = ctx.resolve_parent(axfs_ng_vfs::path::Path::new(link_str)) {
+                    crate::impls::fs::common::is_location_readonly(&parent_loc)
+                } else {
+                    false
+                }
+            }
+        };
+        if is_ro {
+            return -LinuxError::EROFS.code() as isize;
+        }
+    }
+
     match ctx.symlink(target_str, link_str) {
         Ok(_) => 0,
         Err(e) => {
@@ -846,6 +979,22 @@ pub fn sys_mknodat(dirfd: i32, pathname: usize, mode: usize, _dev: usize) -> isi
         Ok(ctx) => ctx,
         Err(e) => return -e.code() as isize,
     };
+    // Check for read-only filesystem
+    {
+        let is_ro = match ctx.resolve_no_follow(path) {
+            Ok(loc) => crate::impls::fs::common::is_location_readonly(&loc),
+            Err(_) => {
+                if let Ok((parent_loc, _)) = ctx.resolve_parent(axfs_ng_vfs::path::Path::new(path)) {
+                    crate::impls::fs::common::is_location_readonly(&parent_loc)
+                } else {
+                    false
+                }
+            }
+        };
+        if is_ro {
+            return -LinuxError::EROFS.code() as isize;
+        }
+    }
     match ctx.resolve_no_follow(path) {
         Ok(_) => return -LinuxError::EEXIST.code() as isize,
         Err(VfsError::NotFound) => {}
