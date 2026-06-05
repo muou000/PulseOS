@@ -1,4 +1,5 @@
 use axerrno::LinuxError;
+use axfs::MountRecord;
 use axfs_ng_vfs::{Location, NodePermission, NodeType};
 use linux_raw_sys::general::*;
 
@@ -52,6 +53,43 @@ pub(crate) fn allowed_access_mask(
     }
 }
 
+pub(crate) fn is_location_readonly(location: &Location) -> bool {
+    let abs_path = match location.absolute_path() {
+        Ok(path) => path,
+        Err(_) => return false,
+    };
+    let path_str = abs_path.as_str();
+
+    // Get all mount records
+    let mounts = axfs::list_mounts();
+
+    // Find the longest target matching the path_str prefix.
+    let mut best_match: Option<MountRecord> = None;
+    for m in mounts {
+        if path_str.starts_with(&m.target) {
+            let target_len = m.target.len();
+            if m.target == "/"
+                || path_str.len() == target_len
+                || path_str.as_bytes().get(target_len) == Some(&b'/')
+            {
+                if let Some(ref best) = best_match {
+                    if m.target.len() > best.target.len() {
+                        best_match = Some(m);
+                    }
+                } else {
+                    best_match = Some(m);
+                }
+            }
+        }
+    }
+
+    if let Some(best) = best_match {
+        best.options.split(',').any(|opt| opt == "ro")
+    } else {
+        false
+    }
+}
+
 pub(crate) fn check_faccess_permission(
     location: &Location,
     mode: usize,
@@ -60,6 +98,10 @@ pub(crate) fn check_faccess_permission(
 ) -> Result<(), LinuxError> {
     if mode == 0 {
         return Ok(());
+    }
+
+    if (mode & W_OK as usize) != 0 && is_location_readonly(location) {
+        return Err(LinuxError::EROFS);
     }
 
     let meta = location
