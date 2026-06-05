@@ -257,3 +257,29 @@ fn is_supported_policy(policy: usize) -> bool {
         SCHED_NORMAL | SCHED_FIFO | SCHED_RR | SCHED_BATCH | SCHED_IDLE | SCHED_DEADLINE
     )
 }
+
+pub fn sys_getcpu(cpu_ptr: usize, node_ptr: usize, _tcache: usize) -> isize {
+    axlog::debug!(
+        "sys_getcpu: cpu_ptr={:#x}, node_ptr={:#x}, tcache={:#x}",
+        cpu_ptr,
+        node_ptr,
+        _tcache
+    );
+
+    if cpu_ptr != 0 {
+        let cpu_id = axhal::percpu::this_cpu_id() as u32;
+        if let Err(e) = write_plain(cpu_ptr, &cpu_id) {
+            return -e.code() as isize;
+        }
+    }
+
+    if node_ptr != 0 {
+        let node_id = 0u32;
+        if let Err(e) = write_plain(node_ptr, &node_id) {
+            return -e.code() as isize;
+        }
+    }
+
+    0
+}
+
