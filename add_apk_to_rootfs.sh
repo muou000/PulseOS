@@ -222,8 +222,8 @@ download_and_extract() {
     done
     
     echo "  Installing to overlay..."
-    # Copy sbin, lib, usr, etc if they exist in extracted files
-    for dir in sbin lib usr etc; do
+    # Copy bin, sbin, lib, usr, etc if they exist in extracted files
+    for dir in bin sbin lib usr etc; do
         if [[ -d "${dir}" ]]; then
             cp -rP "${dir}" "${dest_dir}/"
         fi
