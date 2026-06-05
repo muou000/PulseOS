@@ -8,7 +8,7 @@ use pulse_core::fd_table::location_to_stat;
 
 use crate::impls::{
     fs::common::{check_faccess_permission, get_fd_entry, resolve_location_at_ptr},
-    utils::{read_user_timespec, timespec_to_update_time, with_process, write_user_bytes},
+    utils::{read_user_cstring, read_user_timespec, timespec_to_update_time, with_process, write_user_bytes},
 };
 
 fn to_statx_timestamp(tv_sec: i64, tv_nsec: i64) -> statx_timestamp {
@@ -172,13 +172,38 @@ pub fn sys_statx(
     if statxbuf == 0 {
         return -LinuxError::EFAULT.code() as isize;
     }
-    let location = match resolve_location_at_ptr(dirfd, pathname, flags) {
-        Ok(loc) => loc,
-        Err(e) => return -e.code() as isize,
-    };
-    let stat = match location_to_stat(&location) {
-        Ok(stat) => stat,
-        Err(e) => return -e.code() as isize,
+
+    // 判断是否是对 FD 本身的 statx（AT_EMPTY_PATH + 路径为空或 pathname==0）
+    // 对于 stdin/stdout/pipe/socket 等没有文件系统路径的匿名 FD，
+    // resolve_location_at_ptr 会因为 location() 返回 None 而报 EBADF。
+    // 此时应直接通过 FD object 的 stat() 方法获取信息。
+    let is_empty_path = (flags & AT_EMPTY_PATH as usize) != 0 && (
+        pathname == 0
+        || read_user_cstring(pathname)
+            .map(|s| s.as_bytes().is_empty())
+            .unwrap_or(false)
+    );
+
+    let stat = if is_empty_path && dirfd >= 0 && dirfd != AT_FDCWD as i32 {
+        // AT_EMPTY_PATH + 合法 FD：优先直接通过 FD object 获取 stat，
+        // 以兼容 stdin/stdout/pipe 等无 VFS location 的匿名 FD。
+        match get_fd_entry(dirfd as usize) {
+            Ok(entry) => match entry.object.stat() {
+                Ok(stat) => stat,
+                Err(e) => return -e.code() as isize,
+            },
+            Err(e) => return -e.code() as isize,
+        }
+    } else {
+        // 普通路径：通过 VFS location 获取 stat
+        let location = match resolve_location_at_ptr(dirfd, pathname, flags) {
+            Ok(loc) => loc,
+            Err(e) => return -e.code() as isize,
+        };
+        match location_to_stat(&location) {
+            Ok(stat) => stat,
+            Err(e) => return -e.code() as isize,
+        }
     };
 
     let mut new_statx: statx = unsafe { core::mem::zeroed() };
