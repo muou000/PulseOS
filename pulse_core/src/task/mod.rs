@@ -10,6 +10,7 @@ use alloc::{
     sync::{Arc, Weak},
     vec::Vec,
 };
+use core::fmt::Write;
 
 use axerrno::{LinuxError, LinuxResult};
 use kspin::SpinNoIrq;
@@ -389,7 +390,8 @@ impl axfs::ProcfsProcessProvider for PulseProcessProvider {
             let mut offset = 0;
             let mut path_str = String::new();
             let mut inode = 0;
-            let mut dev_str = "00:00".to_string();
+            let mut major = 0;
+            let mut minor = 0;
 
             let mut curr_backend = backend;
             while let axmm::Backend::Cow(cow) = curr_backend {
@@ -407,9 +409,8 @@ impl axfs::ProcfsProcessProvider for PulseProcessProvider {
                     let loc = cached_file.location();
                     if let Ok(meta) = loc.metadata() {
                         inode = meta.inode;
-                        let major = meta.device >> 8;
-                        let minor = meta.device & 0xff;
-                        dev_str = alloc::format!("{:02x}:{:02x}", major, minor);
+                        major = meta.device >> 8;
+                        minor = meta.device & 0xff;
                     }
                     if let Ok(path) = loc.absolute_path() {
                         path_str = path.as_str().to_string();
@@ -420,8 +421,9 @@ impl axfs::ProcfsProcessProvider for PulseProcessProvider {
 
             let p_char = if is_shared { "s" } else { "p" };
             if path_str.is_empty() {
-                out.push_str(&alloc::format!(
-                    "{:x}-{:x} {}{}{}{} {:08x} {} {}\n",
+                let _ = write!(
+                    out,
+                    "{:x}-{:x} {}{}{}{} {:08x} {:02x}:{:02x} {}\n",
                     start.as_usize(),
                     end.as_usize(),
                     r,
@@ -429,12 +431,13 @@ impl axfs::ProcfsProcessProvider for PulseProcessProvider {
                     x,
                     p_char,
                     offset,
-                    dev_str,
+                    major, minor,
                     inode
-                ));
+                );
             } else {
-                out.push_str(&alloc::format!(
-                    "{:x}-{:x} {}{}{}{} {:08x} {} {:<7} {}\n",
+                let _ = write!(
+                    out,
+                    "{:x}-{:x} {}{}{}{} {:08x} {:02x}:{:02x} {:<7} {}\n",
                     start.as_usize(),
                     end.as_usize(),
                     r,
@@ -442,10 +445,10 @@ impl axfs::ProcfsProcessProvider for PulseProcessProvider {
                     x,
                     p_char,
                     offset,
-                    dev_str,
+                    major, minor,
                     inode,
                     path_str
-                ));
+                );
             }
         });
 
