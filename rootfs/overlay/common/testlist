@@ -128,6 +128,7 @@ futex_wake01
 getcwd01
 getcwd02
 getcwd03
+getcpu01
 getdents02
 getdomainname01
 getegid01
@@ -140,6 +141,7 @@ getgid03
 getgroups01
 gethostname01
 gethostname02
+getitimer01
 getitimer02
 getpagesize01
 getpeername01
@@ -185,7 +187,6 @@ mkdir02
 mkdir04
 mkdir05
 mkdir09
-mknodat01
 mlock01
 mlock02
 mlock04
@@ -272,10 +273,7 @@ readlinkat01
 readlinkat02
 readv01
 readv02
-recv01
 recvmmsg01
-recvmsg01
-recvmsg02
 rmdir01
 rmdir03
 rt_sigsuspend01
