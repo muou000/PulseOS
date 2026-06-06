@@ -95,6 +95,10 @@ pub trait FdObject: Send + Sync {
         None
     }
 
+    fn as_ns_fd(&self) -> Option<(u64, u32)> {
+        None
+    }
+
     fn read_dirents64(&self, _buf: &mut [u8]) -> LinuxResult<usize> {
         Err(LinuxError::ENOTDIR)
     }
@@ -519,6 +523,53 @@ impl FileObject {
 
     pub fn inner(&self) -> &File {
         &self.inner
+    }
+}
+
+pub struct NsFdObject {
+    pub ns_type: u32,
+    pub pid: u64,
+}
+
+impl FdObject for NsFdObject {
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn as_ns_fd(&self) -> Option<(u64, u32)> {
+        Some((self.pid, self.ns_type))
+    }
+
+    fn stat(&self) -> LinuxResult<stat> {
+        let ns_ino = axfs::fs::procfs::PID_INODE_START
+            + (self.pid << axfs::fs::procfs::PID_INODE_SHIFT)
+            + match self.ns_type {
+                CLONE_NEWUTS => axfs::fs::procfs::SUB_INO_NS_UTS,
+                CLONE_NEWIPC => axfs::fs::procfs::SUB_INO_NS_IPC,
+                CLONE_NEWNET => axfs::fs::procfs::SUB_INO_NS_NET,
+                CLONE_NEWNS => axfs::fs::procfs::SUB_INO_NS_MNT,
+                CLONE_NEWPID => axfs::fs::procfs::SUB_INO_NS_PID,
+                CLONE_NEWUSER => axfs::fs::procfs::SUB_INO_NS_USER,
+                CLONE_NEWCGROUP => axfs::fs::procfs::SUB_INO_NS_CGROUP,
+                _ => 0,
+            };
+
+        Ok(stat {
+            st_ino: ns_ino as _,
+            st_nlink: 1,
+            st_mode: S_IFLNK | 0o777,
+            st_uid: 0,
+            st_gid: 0,
+            st_blksize: 4096,
+            ..empty_stat()
+        })
+    }
+
+    fn poll(&self) -> LinuxResult<PollState> {
+        Ok(PollState {
+            readable: false,
+            writable: false,
+        })
     }
 }
 
@@ -1417,11 +1468,36 @@ pub fn stdio_entries() -> [FdEntry; 3] {
     ]
 }
 
+fn is_ns_location(location: &Location) -> Option<(u64, u32)> {
+    let metadata = location.metadata().ok()?;
+    let ino = metadata.inode;
+    if ino >= axfs::fs::procfs::PID_INODE_START {
+        let offset = ino - axfs::fs::procfs::PID_INODE_START;
+        let pid = offset >> axfs::fs::procfs::PID_INODE_SHIFT;
+        let sub = offset & ((1 << axfs::fs::procfs::PID_INODE_SHIFT) - 1);
+        let ns_type = match sub {
+            axfs::fs::procfs::SUB_INO_NS_UTS => CLONE_NEWUTS,
+            axfs::fs::procfs::SUB_INO_NS_IPC => CLONE_NEWIPC,
+            axfs::fs::procfs::SUB_INO_NS_NET => CLONE_NEWNET,
+            axfs::fs::procfs::SUB_INO_NS_MNT => CLONE_NEWNS,
+            axfs::fs::procfs::SUB_INO_NS_PID => CLONE_NEWPID,
+            axfs::fs::procfs::SUB_INO_NS_USER => CLONE_NEWUSER,
+            axfs::fs::procfs::SUB_INO_NS_CGROUP => CLONE_NEWCGROUP,
+            _ => return None,
+        };
+        Some((pid, ns_type))
+    } else {
+        None
+    }
+}
+
 pub fn open_result_to_entry(result: OpenResult, flags: FdFlags) -> FdEntry {
     let object: Arc<dyn FdObject> = match result {
         OpenResult::File(file) => {
             if is_cpu_dma_latency_device(file.location()) {
                 Arc::new(CpuDmaLatencyObject::new(file.location().clone()))
+            } else if let Some((pid, ns_type)) = is_ns_location(file.location()) {
+                Arc::new(NsFdObject { ns_type, pid })
             } else {
                 Arc::new(FileObject::new(file))
             }

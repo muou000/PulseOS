@@ -550,13 +550,11 @@ impl CachedFile {
         let shared = if let Some(shared) = guard.get::<FileUserData>().and_then(|it| it.get()) {
             shared
         } else {
-            let (shared, user_data) = if in_memory {
-                let shared = Arc::new(CachedFileShared::new(true));
-                (shared.clone(), FileUserData::Strong(shared))
+            let shared = shared_file_state(&location);
+            let user_data = if in_memory {
+                FileUserData::Strong(shared.clone())
             } else {
-                let shared = Arc::new(CachedFileShared::new(false));
-                let user_data = FileUserData::Weak(Arc::downgrade(&shared));
-                (shared, user_data)
+                FileUserData::Weak(Arc::downgrade(&shared))
             };
             guard.insert(user_data);
             shared

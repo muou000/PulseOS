@@ -59,6 +59,12 @@ impl FsContext {
         &self.root_dir
     }
 
+    pub fn set_root_dir(&mut self, root_dir: Location) -> VfsResult<()> {
+        root_dir.check_is_dir()?;
+        self.root_dir = root_dir;
+        Ok(())
+    }
+
     pub fn current_dir(&self) -> &Location {
         &self.current_dir
     }
@@ -108,6 +114,28 @@ impl FsContext {
         Ok(())
     }
 
+    pub fn check_write_permission(&self, dir: &Location) -> VfsResult<()> {
+        if let Some((uid, gid)) = self.credentials {
+            if uid == 0 {
+                return Ok(());
+            }
+            let meta = dir.metadata()?;
+            let is_owner = uid == meta.uid;
+            let is_group = gid == meta.gid;
+            let has_w = if is_owner {
+                meta.mode.contains(NodePermission::OWNER_WRITE)
+            } else if is_group {
+                meta.mode.contains(NodePermission::GROUP_WRITE)
+            } else {
+                meta.mode.contains(NodePermission::OTHER_WRITE)
+            };
+            if !has_w {
+                return Err(VfsError::PermissionDenied);
+            }
+        }
+        Ok(())
+    }
+
     /// Attempts to resolve a possible symlink, at the current location (this
     /// assumes that `loc` is a child of current directory).
     pub fn try_resolve_symlink(
@@ -126,7 +154,8 @@ impl FsContext {
         if target.is_empty() {
             return Err(VfsError::NotFound);
         }
-        self.resolve_components(PathBuf::from(target).components(), follow_count)
+        let parent = loc.parent().unwrap_or_else(|| self.root_dir.clone());
+        self.resolve_components_at(parent, PathBuf::from(target).components(), follow_count)
     }
 
     fn lookup(&self, dir: &Location, name: &str, follow_count: &mut usize) -> VfsResult<Location> {
@@ -135,18 +164,21 @@ impl FsContext {
             .try_resolve_symlink(loc, follow_count)
     }
 
-    fn resolve_components(
+    fn resolve_components_at(
         &self,
+        start: Location,
         components: Components,
         follow_count: &mut usize,
     ) -> VfsResult<Location> {
-        let mut dir = self.current_dir.clone();
+        let mut dir = start;
         for comp in components {
             match comp {
                 Component::CurDir => {}
                 Component::ParentDir => {
                     self.check_traverse_permission(&dir)?;
-                    dir = dir.parent().unwrap_or_else(|| self.root_dir.clone());
+                    if dir != self.root_dir {
+                        dir = dir.parent().unwrap_or_else(|| self.root_dir.clone());
+                    }
                 }
                 Component::RootDir => {
                     dir = self.root_dir.clone();
@@ -158,6 +190,14 @@ impl FsContext {
             }
         }
         Ok(dir)
+    }
+
+    fn resolve_components(
+        &self,
+        components: Components,
+        follow_count: &mut usize,
+    ) -> VfsResult<Location> {
+        self.resolve_components_at(self.current_dir.clone(), components, follow_count)
     }
 
     fn resolve_inner<'a>(
@@ -285,19 +325,17 @@ impl FsContext {
     /// Removes a file from the filesystem.
     pub fn remove_file(&self, path: impl AsRef<Path>) -> VfsResult<()> {
         let entry = self.resolve_no_follow(path.as_ref())?;
-        entry
-            .parent()
-            .ok_or(VfsError::IsADirectory)?
-            .unlink(entry.name(), false)
+        let parent = entry.parent().ok_or(VfsError::IsADirectory)?;
+        self.check_write_permission(&parent)?;
+        parent.unlink(entry.name(), false)
     }
 
     /// Removes a directory from the filesystem.
     pub fn remove_dir(&self, path: impl AsRef<Path>) -> VfsResult<()> {
         let entry = self.resolve_no_follow(path.as_ref())?;
-        entry
-            .parent()
-            .ok_or(VfsError::ResourceBusy)?
-            .unlink(entry.name(), true)
+        let parent = entry.parent().ok_or(VfsError::IsADirectory)?;
+        self.check_write_permission(&parent)?;
+        parent.unlink(entry.name(), true)
     }
 
     /// Renames a file or directory to a new name, replacing the original file
@@ -305,12 +343,15 @@ impl FsContext {
     pub fn rename(&self, from: impl AsRef<Path>, to: impl AsRef<Path>) -> VfsResult<()> {
         let (src_dir, src_name) = self.resolve_parent(from.as_ref())?;
         let (dst_dir, dst_name) = self.resolve_parent(to.as_ref())?;
+        self.check_write_permission(&src_dir)?;
+        self.check_write_permission(&dst_dir)?;
         src_dir.rename(&src_name, &dst_dir, &dst_name)
     }
 
     /// Creates a new, empty directory at the provided path.
     pub fn create_dir(&self, path: impl AsRef<Path>, mode: NodePermission) -> VfsResult<Location> {
         let (dir, name) = self.resolve_nonexistent(path.as_ref())?;
+        self.check_write_permission(&dir)?;
         let mut final_mode = mode;
         let mut final_credentials = self.credentials;
         if let Ok(parent_meta) = dir.metadata() {
@@ -339,6 +380,7 @@ impl FsContext {
     ) -> VfsResult<Location> {
         let old = self.resolve(old_path.as_ref())?;
         let (new_dir, new_name) = self.resolve_nonexistent(new_path.as_ref())?;
+        self.check_write_permission(&new_dir)?;
         new_dir.link(new_name, &old)
     }
 
@@ -349,6 +391,7 @@ impl FsContext {
         link_path: impl AsRef<Path>,
     ) -> VfsResult<Location> {
         let (dir, name) = self.resolve_nonexistent(link_path.as_ref())?;
+        self.check_write_permission(&dir)?;
         if dir.lookup_no_follow(name).is_ok() {
             return Err(VfsError::AlreadyExists);
         }

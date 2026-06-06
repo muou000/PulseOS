@@ -253,9 +253,14 @@ pub struct Process {
     ruid: AtomicU32,
     euid: AtomicU32,
     suid: AtomicU32,
+    fsuid: AtomicU32,
     rgid: AtomicU32,
     egid: AtomicU32,
     sgid: AtomicU32,
+    fsgid: AtomicU32,
+    cap_permitted: AtomicU64,
+    cap_effective: AtomicU64,
+    cap_inheritable: AtomicU64,
     umask: AtomicU32,
     rlimit_state: Mutex<RlimitState>,
     memlock_state: Mutex<MemlockState>,
@@ -437,6 +442,10 @@ impl Process {
         self.hostname.lock().clone()
     }
 
+    pub fn set_hostname_handle(&self, handle: Arc<RwLock<[u8; 65]>>) {
+        *self.hostname.lock() = handle;
+    }
+
     pub fn unshare_fs(&self) -> AxResult<()> {
         let new_fs = {
             let binding = self.fs_context_handle();
@@ -539,6 +548,10 @@ impl Process {
         self.suid.load(Ordering::Acquire)
     }
 
+    pub fn fsuid(&self) -> u32 {
+        self.fsuid.load(Ordering::Acquire)
+    }
+
     pub fn rgid(&self) -> u32 {
         self.rgid.load(Ordering::Acquire)
     }
@@ -551,12 +564,24 @@ impl Process {
         self.sgid.load(Ordering::Acquire)
     }
 
+    pub fn fsgid(&self) -> u32 {
+        self.fsgid.load(Ordering::Acquire)
+    }
+
     pub fn umask(&self) -> u32 {
         self.umask.load(Ordering::Acquire)
     }
 
     pub fn set_umask(&self, umask: u32) -> u32 {
         self.umask.swap(umask, Ordering::AcqRel)
+    }
+
+    pub fn set_fsuid(&self, uid: u32) -> u32 {
+        self.fsuid.swap(uid, Ordering::AcqRel)
+    }
+
+    pub fn set_fsgid(&self, gid: u32) -> u32 {
+        self.fsgid.swap(gid, Ordering::AcqRel)
     }
 
     pub fn uid_snapshot(&self) -> (u32, u32, u32) {
@@ -567,16 +592,70 @@ impl Process {
         (self.rgid(), self.egid(), self.sgid())
     }
 
+    pub fn capabilities(&self) -> (u64, u64, u64) {
+        (
+            self.cap_permitted.load(Ordering::Acquire),
+            self.cap_effective.load(Ordering::Acquire),
+            self.cap_inheritable.load(Ordering::Acquire),
+        )
+    }
+
+    pub fn set_capabilities(&self, p: u64, e: u64, i: u64) {
+        self.cap_permitted.store(p, Ordering::Release);
+        self.cap_effective.store(e, Ordering::Release);
+        self.cap_inheritable.store(i, Ordering::Release);
+    }
+
+    pub fn has_capability(&self, cap: u32) -> bool {
+        if cap >= 64 {
+            return false;
+        }
+        let effective = self.cap_effective.load(Ordering::Acquire);
+        (effective & (1 << cap)) != 0
+    }
+
     pub fn set_uids(&self, ruid: u32, euid: u32, suid: u32) {
+        let old_ruid = self.ruid();
+        let old_euid = self.euid();
+        let old_suid = self.suid();
+
         self.ruid.store(ruid, Ordering::Release);
         self.euid.store(euid, Ordering::Release);
         self.suid.store(suid, Ordering::Release);
+
+        if euid != old_euid {
+            self.fsuid.store(euid, Ordering::Release);
+        }
+
+        // Capability transition logic according to capabilities(7)
+        // 1. If euid is changed from 0 to nonzero, then all capabilities are cleared from the effective set.
+        if old_euid == 0 && euid != 0 {
+            self.cap_effective.store(0, Ordering::Release);
+        }
+        // 2. If euid is changed from nonzero to 0, then the permitted set is copied to the effective set.
+        if old_euid != 0 && euid == 0 {
+            let permitted = self.cap_permitted.load(Ordering::Acquire);
+            self.cap_effective.store(permitted, Ordering::Release);
+        }
+        // 3. If one or more of the real, effective, or saved set user IDs was 0,
+        //    and as the result of the UID change all of these IDs have a nonzero value,
+        //    then all capabilities are cleared from the permitted and effective capability sets.
+        if (old_ruid == 0 || old_euid == 0 || old_suid == 0)
+            && (ruid != 0 && euid != 0 && suid != 0)
+        {
+            self.cap_permitted.store(0, Ordering::Release);
+            self.cap_effective.store(0, Ordering::Release);
+        }
     }
 
     pub fn set_gids(&self, rgid: u32, egid: u32, sgid: u32) {
+        let old_egid = self.egid();
         self.rgid.store(rgid, Ordering::Release);
         self.egid.store(egid, Ordering::Release);
         self.sgid.store(sgid, Ordering::Release);
+        if egid != old_egid {
+            self.fsgid.store(egid, Ordering::Release);
+        }
     }
 
     pub fn is_root_user(&self) -> bool {
@@ -1130,10 +1209,15 @@ impl Process {
             ruid: AtomicU32::new(0),
             euid: AtomicU32::new(0),
             suid: AtomicU32::new(0),
+            fsuid: AtomicU32::new(0),
             rgid: AtomicU32::new(0),
             heap_top: Arc::new(Mutex::new(USER_HEAP_BASE + USER_HEAP_SIZE)),
             egid: AtomicU32::new(0),
             sgid: AtomicU32::new(0),
+            fsgid: AtomicU32::new(0),
+            cap_permitted: AtomicU64::new(u64::MAX),
+            cap_effective: AtomicU64::new(u64::MAX),
+            cap_inheritable: AtomicU64::new(0),
             umask: AtomicU32::new(0o022),
             rlimit_state: Mutex::new(RlimitState::default()),
             memlock_state: Mutex::new(MemlockState::new()),
@@ -1203,6 +1287,8 @@ impl Process {
         };
         let (ruid, euid, suid) = parent.uid_snapshot();
         let (rgid, egid, sgid) = parent.gid_snapshot();
+        let fsuid = parent.fsuid();
+        let fsgid = parent.fsgid();
         let rlimit_state = *parent.rlimit_state.lock();
         let (memlock_soft_limit, memlock_hard_limit) = parent.memlock_limit_snapshot();
         let signal_shared = if share_sighand {
@@ -1217,6 +1303,12 @@ impl Process {
         } else {
             Arc::new(RwLock::new(*parent.hostname_handle().read()))
         };
+
+        let (cap_p, cap_e, cap_i) = (
+            parent.cap_permitted.load(Ordering::Acquire),
+            parent.cap_effective.load(Ordering::Acquire),
+            parent.cap_inheritable.load(Ordering::Acquire),
+        );
 
         Ok(Arc::new(Self {
             pid,
@@ -1250,9 +1342,14 @@ impl Process {
             ruid: AtomicU32::new(ruid),
             euid: AtomicU32::new(euid),
             suid: AtomicU32::new(suid),
+            fsuid: AtomicU32::new(fsuid),
             rgid: AtomicU32::new(rgid),
             egid: AtomicU32::new(egid),
             sgid: AtomicU32::new(sgid),
+            fsgid: AtomicU32::new(fsgid),
+            cap_permitted: AtomicU64::new(cap_p),
+            cap_effective: AtomicU64::new(cap_e),
+            cap_inheritable: AtomicU64::new(cap_i),
             umask: AtomicU32::new(parent.umask()),
             rlimit_state: Mutex::new(rlimit_state),
             memlock_state: Mutex::new(MemlockState::new_with_limits(
@@ -1376,7 +1473,7 @@ impl Process {
 
     pub fn sync_fs_context(&self) {
         let mut fs = self.fs_context_handle().lock().clone();
-        fs.credentials = Some((self.euid(), self.egid()));
+        fs.credentials = Some((self.fsuid(), self.fsgid()));
         *axfs::FS_CONTEXT.lock() = fs;
     }
 

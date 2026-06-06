@@ -7,7 +7,7 @@ mod fat;
 pub mod ext4;
 
 pub(crate) mod devfs;
-mod procfs;
+pub mod procfs;
 mod tmpfs;
 pub mod loop_dev;
 

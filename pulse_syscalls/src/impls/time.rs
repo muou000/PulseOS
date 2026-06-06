@@ -299,15 +299,6 @@ pub fn sys_clock_gettime(clockid: i32, tp: usize) -> isize {
 pub fn sys_clock_settime(clockid: i32, tp: usize) -> isize {
     axlog::trace!("sys_clock_settime: clockid={}, tp={:#x}", clockid, tp);
 
-    let process = match pulse_core::task::current_process() {
-        Ok(proc) => proc,
-        Err(e) => return -e.code() as isize,
-    };
-    let (_, euid, _) = process.uid_snapshot();
-    if euid != 0 {
-        return -LinuxError::EPERM.code() as isize;
-    }
-
     if tp == 0 {
         return -LinuxError::EFAULT.code() as isize;
     }
@@ -316,13 +307,28 @@ pub fn sys_clock_settime(clockid: i32, tp: usize) -> isize {
         return -LinuxError::EINVAL.code() as isize;
     }
 
-    let req_ts = match read_user_timespec(tp).and_then(timespec_to_duration) {
+    let ts = match read_user_timespec(tp) {
         Ok(ts) => ts,
         Err(e) => {
             axlog::warn!("read user timespec failed: addr={:#x}, err={:?}", tp, e);
             return -e.code() as isize;
         }
     };
+
+    if ts.tv_sec < 0 || ts.tv_nsec < 0 || ts.tv_nsec >= 1_000_000_000 {
+        return -LinuxError::EINVAL.code() as isize;
+    }
+
+    let process = match pulse_core::task::current_process() {
+        Ok(proc) => proc,
+        Err(e) => return -e.code() as isize,
+    };
+    const CAP_SYS_TIME: u32 = 25;
+    if !process.has_capability(CAP_SYS_TIME) {
+        return -LinuxError::EPERM.code() as isize;
+    }
+
+    let req_ts = Duration::new(ts.tv_sec as u64, ts.tv_nsec as u32);
 
     let now_mono_ns = axhal::time::monotonic_time_nanos();
     let new_wall_ns = req_ts.as_nanos() as u64;
@@ -373,15 +379,6 @@ pub fn sys_gettimeofday(tv: usize, tz: usize) -> isize {
 pub fn sys_settimeofday(tv: usize, tz: usize) -> isize {
     axlog::trace!("sys_settimeofday: tv={:#x}, tz={:#x}", tv, tz);
 
-    let process = match pulse_core::task::current_process() {
-        Ok(proc) => proc,
-        Err(e) => return -e.code() as isize,
-    };
-    let (_, euid, _) = process.uid_snapshot();
-    if euid != 0 {
-        return -LinuxError::EPERM.code() as isize;
-    }
-
     if tz != 0 {
         if !GETTIMEOFDAY_TZ_WARNED.swap(true, Ordering::AcqRel) {
             axlog::warn!("sys_settimeofday: timezone argument is ignored");
@@ -400,8 +397,17 @@ pub fn sys_settimeofday(tv: usize, tz: usize) -> isize {
         }
     };
 
-    if req_tv.tv_usec < 0 || req_tv.tv_usec >= 1_000_000 {
+    if req_tv.tv_sec < 0 || req_tv.tv_usec < 0 || req_tv.tv_usec >= 1_000_000 {
         return -LinuxError::EINVAL.code() as isize;
+    }
+
+    let process = match pulse_core::task::current_process() {
+        Ok(proc) => proc,
+        Err(e) => return -e.code() as isize,
+    };
+    const CAP_SYS_TIME: u32 = 25;
+    if !process.has_capability(CAP_SYS_TIME) {
+        return -LinuxError::EPERM.code() as isize;
     }
 
     let new_wall_ns = match (req_tv.tv_sec as u64)

@@ -1,7 +1,7 @@
 use axerrno::LinuxError;
 use axfs_ng_vfs::{Location, MetadataUpdate};
 use linux_raw_sys::general::{
-    AT_EACCESS, AT_EMPTY_PATH, AT_FDCWD, AT_SYMLINK_NOFOLLOW, R_OK, STATX_BASIC_STATS,
+    AT_EACCESS, AT_EMPTY_PATH, AT_FDCWD, AT_SYMLINK_NOFOLLOW, CAP_CHOWN, R_OK, STATX_BASIC_STATS,
     STATX_MNT_ID, W_OK, X_OK, statfs, statx, statx_timestamp, timespec,
 };
 use pulse_core::fd_table::location_to_stat;
@@ -558,6 +558,40 @@ pub fn sys_fchownat(dirfd: i32, pathname: usize, uid: usize, gid: usize, flags: 
                 Ok(meta) => meta,
                 Err(e) => return -LinuxError::from(e.canonicalize()).code() as isize,
             };
+
+            // Permission check
+            let (fsuid, fsgid, groups, cap_effective) = match with_process(|process| {
+                (
+                    process.fsuid(),
+                    process.fsgid(),
+                    process.groups(),
+                    process.capabilities().1,
+                )
+            }) {
+                Ok(v) => v,
+                Err(e) => return -e.code() as isize,
+            };
+
+            let has_cap_chown = fsuid == 0 || (cap_effective & (1 << CAP_CHOWN)) != 0;
+
+            if !has_cap_chown {
+                // Not root, check if changing owner
+                if (uid as u32) != u32::MAX && (uid as u32) != current_meta.uid {
+                    return -LinuxError::EPERM.code() as isize;
+                }
+                // Check if changing group
+                if (gid as u32) != u32::MAX && (gid as u32) != current_meta.gid {
+                    // Must be owner
+                    if fsuid != current_meta.uid {
+                        return -LinuxError::EPERM.code() as isize;
+                    }
+                    // New group must be in process groups
+                    if (gid as u32) != fsgid && !groups.contains(&(gid as u32)) {
+                        return -LinuxError::EPERM.code() as isize;
+                    }
+                }
+            }
+
             let new_uid = if (uid as u32) != u32::MAX {
                 uid as u32
             } else {

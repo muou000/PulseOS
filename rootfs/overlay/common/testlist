@@ -21,6 +21,9 @@ bind05
 bind06
 brk01
 brk02
+capget01
+capget02
+capset01
 chdir01
 chdir04
 chmod01
@@ -33,6 +36,10 @@ chown02
 chown03
 chown04
 chown05
+chroot01
+chroot02
+chroot03
+chroot04
 clock_getres01
 clock_gettime01
 clock_gettime02
@@ -197,6 +204,10 @@ ioctl_ns07
 kill05
 kill11
 lftest
+link02
+link04
+link05
+link08
 llseek02
 llseek03
 ln_tests.sh
@@ -206,9 +217,11 @@ memcmp01
 memcpy01
 memset01
 mkdir02
+mkdir03
 mkdir04
 mkdir05
 mkdir09
+mkdir_tests.sh
 mlock01
 mlock02
 mlock04
@@ -328,6 +341,13 @@ sendto02
 sendto03
 setegid01
 setegid02
+setfsgid01
+setfsgid02
+setfsgid03
+setfsuid01
+setfsuid02
+setfsuid03
+setfsuid04
 setgid01
 setgid02
 setgid03
@@ -340,6 +360,8 @@ sethostname02
 sethostname03
 setitimer01
 setitimer02
+setns01
+setns02
 setpgid02
 setpgrp02
 setregid01
@@ -366,6 +388,7 @@ setrlimit03
 setrlimit04
 setrlimit05
 settimeofday01
+settimeofday02
 setuid01
 setuid03
 setuid04
