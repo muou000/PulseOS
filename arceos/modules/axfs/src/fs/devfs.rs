@@ -38,7 +38,7 @@ const NEXT_DYNAMIC_INO: u64 = TTYS0_INO + 1;
 
 const RANDOM_SEED: u64 = 0x0123_4567_89ab_cdef;
 
-pub(crate) struct BlockDeviceSpec {
+pub struct BlockDeviceSpec {
     pub name: String,
     pub device: SharedBlockDevice,
     pub major: u32,

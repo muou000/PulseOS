@@ -224,6 +224,9 @@ fn rename_at(olddirfd: i32, oldpath: &str, newdirfd: i32, newpath: &str) -> Resu
         .resolve_parent(Path::new(newpath))
         .map_err(|e| LinuxError::from(e.canonicalize()))?;
 
+    old_ctx.check_write_permission(&src_dir)?;
+    new_ctx.check_write_permission(&dst_dir)?;
+
     src_dir
         .rename(src_name.as_ref(), &dst_dir, dst_name.as_ref())
         .map_err(|e| LinuxError::from(e.canonicalize()))
@@ -309,7 +312,7 @@ pub fn sys_openat(dirfd: i32, pathname: usize, flags: usize, mode: usize) -> isi
         // O_NOATIME permission check
         if (flags & (O_NOATIME as usize)) != 0 {
             let current_uid = pulse_core::task::current_process()
-                .map(|process| process.euid())
+                .map(|process| process.fsuid())
                 .unwrap_or(0);
             if current_uid != 0 && current_uid != meta.uid {
                 return -LinuxError::EPERM.code() as isize;
@@ -361,7 +364,7 @@ pub fn sys_openat(dirfd: i32, pathname: usize, flags: usize, mode: usize) -> isi
         };
 
         let (uid, gid) = pulse_core::task::current_process()
-            .map(|process| (process.euid(), process.egid()))
+            .map(|process| (process.fsuid(), process.fsgid()))
             .unwrap_or((0, 0));
 
         if let Err(err) = crate::impls::fs::common::check_faccess_permission(location, required_mode, uid, gid) {
@@ -747,7 +750,7 @@ pub fn sys_unlinkat(dirfd: i32, pathname: usize, flags: usize) -> isize {
 
     // Get process credentials
     let (uid, gid) = pulse_core::task::current_process()
-        .map(|process| (process.euid(), process.egid()))
+        .map(|process| (process.fsuid(), process.fsgid()))
         .unwrap_or((0, 0));
 
     // 2. Enforce execute/search permission check on parent directory
@@ -1114,15 +1117,6 @@ pub fn sys_linkat(
         resolve_flags |= AT_EMPTY_PATH as usize;
     }
 
-    let old_loc = match resolve_location_at_ptr(olddirfd, oldpath, resolve_flags) {
-        Ok(loc) => loc,
-        Err(e) => return -e.code() as isize,
-    };
-
-    if old_loc.is_dir() {
-        return -LinuxError::EPERM.code() as isize;
-    }
-
     let resolved_newdirfd = if newpath_str.starts_with('/') {
         AT_FDCWD as i32
     } else {
@@ -1133,6 +1127,34 @@ pub fn sys_linkat(
         Err(e) => return -e.code() as isize,
     };
 
+    // Check for read-only filesystem
+    {
+        let is_ro = match new_ctx.resolve_no_follow(newpath_str) {
+            Ok(loc) => crate::impls::fs::common::is_location_readonly(&loc),
+            Err(_) => {
+                if let Ok((parent_loc, _)) =
+                    new_ctx.resolve_parent(axfs_ng_vfs::path::Path::new(newpath_str))
+                {
+                    crate::impls::fs::common::is_location_readonly(&parent_loc)
+                } else {
+                    false
+                }
+            }
+        };
+        if is_ro {
+            return -LinuxError::EROFS.code() as isize;
+        }
+    }
+
+    let old_loc = match resolve_location_at_ptr(olddirfd, oldpath, resolve_flags) {
+        Ok(loc) => loc,
+        Err(e) => return -e.code() as isize,
+    };
+
+    if old_loc.is_dir() {
+        return -LinuxError::EPERM.code() as isize;
+    }
+
     let (new_dir, new_name) = match new_ctx.resolve_parent(Path::new(newpath_str)) {
         Ok(res) => res,
         Err(e) => return -LinuxError::from(e.canonicalize()).code() as isize,
@@ -1140,6 +1162,10 @@ pub fn sys_linkat(
 
     if new_dir.lookup_no_follow(&new_name).is_ok() {
         return -LinuxError::EEXIST.code() as isize;
+    }
+
+    if let Err(e) = new_ctx.check_write_permission(&new_dir) {
+        return -LinuxError::from(e.canonicalize()).code() as isize;
     }
 
     match new_dir.link(&new_name, &old_loc) {

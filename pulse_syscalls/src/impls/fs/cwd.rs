@@ -1,8 +1,8 @@
 use axerrno::LinuxError;
-use linux_raw_sys::general::X_OK;
+use linux_raw_sys::general::{CAP_SYS_CHROOT, X_OK};
 
 use crate::impls::{
-    fs::common::{check_faccess_permission, get_fd_entry},
+    fs::common::{check_faccess_permission, get_fd_entry, resolve_location_at_ptr},
     utils::{alloc_zeroed_bytes, read_user_cstring, with_process, write_user_bytes},
 };
 
@@ -53,8 +53,8 @@ pub fn sys_chdir(path: usize) -> isize {
         };
         dir.check_is_dir()
             .map_err(|e| LinuxError::from(e.canonicalize()))?;
-        let uid = process.euid();
-        let gid = process.egid();
+        let uid = process.fsuid();
+        let gid = process.fsgid();
         check_faccess_permission(&dir, X_OK as usize, uid, gid)?;
         process
             .fs_context_handle()
@@ -83,13 +83,47 @@ pub fn sys_fchdir(fd: usize) -> isize {
     match with_process(|process| -> Result<(), LinuxError> {
         dir.check_is_dir()
             .map_err(|e| LinuxError::from(e.canonicalize()))?;
-        let uid = process.euid();
-        let gid = process.egid();
+        let uid = process.fsuid();
+        let gid = process.fsgid();
         check_faccess_permission(&dir, X_OK as usize, uid, gid)?;
         process
             .fs_context_handle()
             .lock()
             .set_current_dir(dir)
+            .map_err(|e| LinuxError::from(e.canonicalize()))?;
+        process.sync_fs_context();
+        Ok(())
+    }) {
+        Ok(Ok(())) => 0,
+        Ok(Err(e)) | Err(e) => -e.code() as isize,
+    }
+}
+
+pub fn sys_chroot(path: usize) -> isize {
+    axlog::debug!("sys_chroot: path={:#x}", path);
+    let dir = match resolve_location_at_ptr(linux_raw_sys::general::AT_FDCWD as i32, path, 0) {
+        Ok(loc) => loc,
+        Err(e) => return -e.code() as isize,
+    };
+
+    match with_process(|process| -> Result<(), LinuxError> {
+        dir.check_is_dir()
+            .map_err(|e| LinuxError::from(e.canonicalize()))?;
+
+        // 1. Check if user has search permission on the target directory (EACCES)
+        let uid = process.fsuid();
+        let gid = process.fsgid();
+        check_faccess_permission(&dir, X_OK as usize, uid, gid)?;
+
+        // 2. Check if user has the privilege to chroot (EPERM)
+        if uid != 0 && (process.capabilities().1 & (1 << CAP_SYS_CHROOT)) == 0 {
+            return Err(LinuxError::EPERM);
+        }
+
+        process
+            .fs_context_handle()
+            .lock()
+            .set_root_dir(dir)
             .map_err(|e| LinuxError::from(e.canonicalize()))?;
         process.sync_fs_context();
         Ok(())

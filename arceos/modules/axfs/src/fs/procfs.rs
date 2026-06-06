@@ -32,8 +32,8 @@ const CORE_PATTERN_INO: u64 = 10;
 const INIT_SYM_INO: u64 = 11;
 const NEXT_DYNAMIC_INO: u64 = INIT_SYM_INO + 1;
 
-const PID_INODE_START: u64 = 0x10_0000_0000;
-const PID_INODE_SHIFT: u32 = 16;
+pub const PID_INODE_START: u64 = 0x10_0000_0000;
+pub const PID_INODE_SHIFT: u32 = 16;
 
 const SUB_INO_DIR: u64 = 0;
 const SUB_INO_CMDLINE: u64 = 1;
@@ -47,6 +47,14 @@ const SUB_INO_PAGEMAP: u64 = 8;
 const SUB_INO_SETGROUPS: u64 = 9;
 const SUB_INO_UID_MAP: u64 = 10;
 const SUB_INO_GID_MAP: u64 = 11;
+pub const SUB_INO_NS_DIR: u64 = 12;
+pub const SUB_INO_NS_UTS: u64 = 13;
+pub const SUB_INO_NS_IPC: u64 = 14;
+pub const SUB_INO_NS_NET: u64 = 15;
+pub const SUB_INO_NS_MNT: u64 = 16;
+pub const SUB_INO_NS_PID: u64 = 17;
+pub const SUB_INO_NS_USER: u64 = 18;
+pub const SUB_INO_NS_CGROUP: u64 = 19;
 const SUB_INO_FD_BASE: u64 = 0x40;
 
 pub trait ProcfsProcessProvider: Send + Sync {
@@ -100,6 +108,7 @@ enum ProcLiveFileKind {
     PidSetgroups(u64),
     PidUidMap(u64),
     PidGidMap(u64),
+    PidNsSymlink(u64, u64 /* sub_ino */),
     PidMax,
     Filesystems,
     Tainted,
@@ -198,9 +207,10 @@ impl Inode {
 
     fn new_live_file(ino: u64, kind: ProcLiveFileKind, permission: NodePermission) -> Arc<Self> {
         let node_type = match kind {
-            ProcLiveFileKind::SelfSymlink | ProcLiveFileKind::InitSymlink | ProcLiveFileKind::PidExe(_) | ProcLiveFileKind::PidFdSymlink(_, _) => {
-                NodeType::Symlink
-            }
+            ProcLiveFileKind::SelfSymlink
+            | ProcLiveFileKind::InitSymlink
+            | ProcLiveFileKind::PidExe(_)
+            | ProcLiveFileKind::PidFdSymlink(_, _) => NodeType::Symlink,
             _ => NodeType::RegularFile,
         };
         Arc::new(Self {
@@ -459,9 +469,55 @@ impl ProcFilesystem {
                     entries.insert("fd".into(), InodeRef::new(PID_INODE_START + (pid << PID_INODE_SHIFT) + SUB_INO_FD_DIR));
                     entries.insert("maps".into(), InodeRef::new(PID_INODE_START + (pid << PID_INODE_SHIFT) + SUB_INO_MAPS));
                     entries.insert("pagemap".into(), InodeRef::new(PID_INODE_START + (pid << PID_INODE_SHIFT) + SUB_INO_PAGEMAP));
+                    entries.insert("ns".into(), InodeRef::new(PID_INODE_START + (pid << PID_INODE_SHIFT) + SUB_INO_NS_DIR));
                     entries.insert("setgroups".into(), InodeRef::new(PID_INODE_START + (pid << PID_INODE_SHIFT) + SUB_INO_SETGROUPS));
                     entries.insert("uid_map".into(), InodeRef::new(PID_INODE_START + (pid << PID_INODE_SHIFT) + SUB_INO_UID_MAP));
                     entries.insert("gid_map".into(), InodeRef::new(PID_INODE_START + (pid << PID_INODE_SHIFT) + SUB_INO_GID_MAP));
+                }
+                return Ok(dir);
+            }
+
+            if sub == SUB_INO_NS_DIR {
+                let dir = Inode::new_directory(
+                    ino,
+                    PID_INODE_START + (pid << PID_INODE_SHIFT) + SUB_INO_DIR,
+                    NodePermission::from_bits_truncate(0o555),
+                );
+                {
+                    let mut entries = dir.as_dir()?.entries.lock();
+                    entries.insert(".".into(), InodeRef::new(ino));
+                    entries.insert(
+                        "..".into(),
+                        InodeRef::new(PID_INODE_START + (pid << PID_INODE_SHIFT) + SUB_INO_DIR),
+                    );
+                    entries.insert(
+                        "uts".into(),
+                        InodeRef::new(PID_INODE_START + (pid << PID_INODE_SHIFT) + SUB_INO_NS_UTS),
+                    );
+                    entries.insert(
+                        "ipc".into(),
+                        InodeRef::new(PID_INODE_START + (pid << PID_INODE_SHIFT) + SUB_INO_NS_IPC),
+                    );
+                    entries.insert(
+                        "net".into(),
+                        InodeRef::new(PID_INODE_START + (pid << PID_INODE_SHIFT) + SUB_INO_NS_NET),
+                    );
+                    entries.insert(
+                        "mnt".into(),
+                        InodeRef::new(PID_INODE_START + (pid << PID_INODE_SHIFT) + SUB_INO_NS_MNT),
+                    );
+                    entries.insert(
+                        "pid".into(),
+                        InodeRef::new(PID_INODE_START + (pid << PID_INODE_SHIFT) + SUB_INO_NS_PID),
+                    );
+                    entries.insert(
+                        "user".into(),
+                        InodeRef::new(PID_INODE_START + (pid << PID_INODE_SHIFT) + SUB_INO_NS_USER),
+                    );
+                    entries.insert(
+                        "cgroup".into(),
+                        InodeRef::new(PID_INODE_START + (pid << PID_INODE_SHIFT) + SUB_INO_NS_CGROUP),
+                    );
                 }
                 return Ok(dir);
             }
@@ -505,6 +561,9 @@ impl ProcFilesystem {
                 SUB_INO_SETGROUPS => ProcLiveFileKind::PidSetgroups(pid),
                 SUB_INO_UID_MAP => ProcLiveFileKind::PidUidMap(pid),
                 SUB_INO_GID_MAP => ProcLiveFileKind::PidGidMap(pid),
+                SUB_INO_NS_UTS | SUB_INO_NS_IPC | SUB_INO_NS_NET | SUB_INO_NS_MNT | SUB_INO_NS_PID | SUB_INO_NS_USER | SUB_INO_NS_CGROUP => {
+                    ProcLiveFileKind::PidNsSymlink(pid, sub)
+                }
                 _ => return Err(VfsError::NotFound),
             };
 
@@ -693,6 +752,22 @@ fn render_proc_file(fs: &ProcFilesystem, kind: ProcLiveFileKind) -> String {
         }
         ProcLiveFileKind::PidGidMap(pid) => {
             fs.gid_map_map.lock().get(&pid).cloned().unwrap_or_default()
+        }
+        ProcLiveFileKind::PidNsSymlink(_pid, sub) => {
+            let ns_name = match sub {
+                SUB_INO_NS_UTS => "uts",
+                SUB_INO_NS_IPC => "ipc",
+                SUB_INO_NS_NET => "net",
+                SUB_INO_NS_MNT => "mnt",
+                SUB_INO_NS_PID => "pid",
+                SUB_INO_NS_USER => "user",
+                SUB_INO_NS_CGROUP => "cgroup",
+                _ => "unknown",
+            };
+            // Format: <ns_name>:[<inode>]
+            // Use the inode of the ns file itself as the namespace identifier.
+            let ino = PID_INODE_START + (_pid << PID_INODE_SHIFT) + sub;
+            format!("{}:[{}]", ns_name, ino)
         }
         ProcLiveFileKind::PidMax => {
             format!("{}\n", PID_MAX.load(core::sync::atomic::Ordering::Acquire))
@@ -895,11 +970,46 @@ impl DirNodeOps for ProcNode {
                     all_entries.push(("comm".to_owned(), PID_INODE_START + (pid << PID_INODE_SHIFT) + SUB_INO_COMM));
                     all_entries.push(("stat".to_owned(), PID_INODE_START + (pid << PID_INODE_SHIFT) + SUB_INO_STAT));
                     all_entries.push(("fd".to_owned(), PID_INODE_START + (pid << PID_INODE_SHIFT) + SUB_INO_FD_DIR));
+                    all_entries.push(("ns".to_owned(), PID_INODE_START + (pid << PID_INODE_SHIFT) + SUB_INO_NS_DIR));
                     all_entries.push(("maps".to_owned(), PID_INODE_START + (pid << PID_INODE_SHIFT) + SUB_INO_MAPS));
                     all_entries.push(("pagemap".to_owned(), PID_INODE_START + (pid << PID_INODE_SHIFT) + SUB_INO_PAGEMAP));
                     all_entries.push(("setgroups".to_owned(), PID_INODE_START + (pid << PID_INODE_SHIFT) + SUB_INO_SETGROUPS));
                     all_entries.push(("uid_map".to_owned(), PID_INODE_START + (pid << PID_INODE_SHIFT) + SUB_INO_UID_MAP));
                     all_entries.push(("gid_map".to_owned(), PID_INODE_START + (pid << PID_INODE_SHIFT) + SUB_INO_GID_MAP));
+                } else if sub == SUB_INO_NS_DIR {
+                    all_entries.push((".".to_owned(), self.ino));
+                    all_entries.push((
+                        "..".to_owned(),
+                        PID_INODE_START + (pid << PID_INODE_SHIFT) + SUB_INO_DIR,
+                    ));
+                    all_entries.push((
+                        "uts".to_owned(),
+                        PID_INODE_START + (pid << PID_INODE_SHIFT) + SUB_INO_NS_UTS,
+                    ));
+                    all_entries.push((
+                        "ipc".to_owned(),
+                        PID_INODE_START + (pid << PID_INODE_SHIFT) + SUB_INO_NS_IPC,
+                    ));
+                    all_entries.push((
+                        "net".to_owned(),
+                        PID_INODE_START + (pid << PID_INODE_SHIFT) + SUB_INO_NS_NET,
+                    ));
+                    all_entries.push((
+                        "mnt".to_owned(),
+                        PID_INODE_START + (pid << PID_INODE_SHIFT) + SUB_INO_NS_MNT,
+                    ));
+                    all_entries.push((
+                        "pid".to_owned(),
+                        PID_INODE_START + (pid << PID_INODE_SHIFT) + SUB_INO_NS_PID,
+                    ));
+                    all_entries.push((
+                        "user".to_owned(),
+                        PID_INODE_START + (pid << PID_INODE_SHIFT) + SUB_INO_NS_USER,
+                    ));
+                    all_entries.push((
+                        "cgroup".to_owned(),
+                        PID_INODE_START + (pid << PID_INODE_SHIFT) + SUB_INO_NS_CGROUP,
+                    ));
                 } else if sub == SUB_INO_FD_DIR {
                     all_entries.push((".".to_owned(), self.ino));
                     all_entries.push(("..".to_owned(), PID_INODE_START + (pid << PID_INODE_SHIFT) + SUB_INO_DIR));
@@ -972,11 +1082,29 @@ impl DirNodeOps for ProcNode {
                         "comm" => Some(SUB_INO_COMM),
                         "stat" => Some(SUB_INO_STAT),
                         "fd" => Some(SUB_INO_FD_DIR),
+                        "ns" => Some(SUB_INO_NS_DIR),
                         "maps" => Some(SUB_INO_MAPS),
                         "pagemap" => Some(SUB_INO_PAGEMAP),
                         "setgroups" => Some(SUB_INO_SETGROUPS),
                         "uid_map" => Some(SUB_INO_UID_MAP),
                         "gid_map" => Some(SUB_INO_GID_MAP),
+                        _ => None,
+                    };
+                    if let Some(ts) = target_sub {
+                        let ino = PID_INODE_START + (pid << PID_INODE_SHIFT) + ts;
+                        return self.build_entry(name, ino);
+                    }
+                } else if sub == SUB_INO_NS_DIR {
+                    let target_sub = match name {
+                        "." => Some(SUB_INO_NS_DIR),
+                        ".." => Some(SUB_INO_DIR),
+                        "uts" => Some(SUB_INO_NS_UTS),
+                        "ipc" => Some(SUB_INO_NS_IPC),
+                        "net" => Some(SUB_INO_NS_NET),
+                        "mnt" => Some(SUB_INO_NS_MNT),
+                        "pid" => Some(SUB_INO_NS_PID),
+                        "user" => Some(SUB_INO_NS_USER),
+                        "cgroup" => Some(SUB_INO_NS_CGROUP),
                         _ => None,
                     };
                     if let Some(ts) = target_sub {

@@ -327,3 +327,196 @@ pub fn sys_setgroups(size: usize, list: usize) -> isize {
     0
 }
 
+/// setfsuid(2): 返回旧 fsuid；合法值才生效，非法值静默忽略
+pub fn sys_setfsuid(raw_fsuid: usize) -> isize {
+    let new_fsuid = raw_fsuid as u32;
+    let process = match current_process() {
+        Ok(p) => p,
+        Err(e) => return -e.code() as isize,
+    };
+    let (ruid, euid, suid) = process.uid_snapshot();
+    let old_fsuid = process.fsuid();
+    // root 可设置任意值；否则只能设置为 ruid/euid/suid/old_fsuid 之一
+    // 且 u32::MAX (-1) 或 0xFFFF (16-bit -1) 始终被忽略（用于查询）
+    let allowed = new_fsuid != 0xFFFFFFFF && new_fsuid != 0xFFFF && (
+        euid == 0 || new_fsuid == ruid || new_fsuid == euid || new_fsuid == suid || new_fsuid == old_fsuid
+    );
+    if allowed {
+        process.set_fsuid(new_fsuid);
+    }
+    old_fsuid as isize
+}
+
+/// setfsgid(2): 返回旧 fsgid；合法值才生效，非法值静默忽略
+pub fn sys_setfsgid(raw_fsgid: usize) -> isize {
+    let new_fsgid = raw_fsgid as u32;
+    let process = match current_process() {
+        Ok(p) => p,
+        Err(e) => return -e.code() as isize,
+    };
+    let (rgid, egid, sgid) = process.gid_snapshot();
+    let old_fsgid = process.fsgid();
+    let allowed = new_fsgid != 0xFFFFFFFF && new_fsgid != 0xFFFF && (
+        process.euid() == 0 || new_fsgid == rgid || new_fsgid == egid || new_fsgid == sgid || new_fsgid == old_fsgid
+    );
+    if allowed {
+        process.set_fsgid(new_fsgid);
+    }
+    old_fsgid as isize
+}
+
+#[repr(C)]
+#[derive(Copy, Clone)]
+struct CapUserHeader {
+    version: u32,
+    pid: i32,
+}
+
+#[repr(C)]
+#[derive(Copy, Clone)]
+struct CapUserData {
+    effective: u32,
+    permitted: u32,
+    inheritable: u32,
+}
+
+const CAP_VERSION_1: u32 = 0x19980330;
+const CAP_VERSION_2: u32 = 0x20071026;
+const CAP_VERSION_3: u32 = 0x20080522;
+
+/// capget(2): 查询进程 capability
+pub fn sys_capget(hdrp: usize, datap: usize) -> isize {
+    if hdrp == 0 {
+        return -LinuxError::EFAULT.code() as isize;
+    }
+    let process = match current_process() {
+        Ok(p) => p,
+        Err(e) => return -e.code() as isize,
+    };
+
+    let mut header: CapUserHeader = match pulse_core::task::uaccess::read_user_plain(process.as_ref(), hdrp) {
+        Ok(h) => h,
+        Err(e) => {
+            let errno: LinuxError = e.into();
+            return -errno.code() as isize;
+        }
+    };
+
+    if header.version != CAP_VERSION_1 && header.version != CAP_VERSION_2 && header.version != CAP_VERSION_3 {
+        header.version = CAP_VERSION_3;
+        let _ = pulse_core::task::uaccess::write_user_plain(process.as_ref(), hdrp, &header);
+        return -LinuxError::EINVAL.code() as isize;
+    }
+
+    if header.pid < 0 {
+        return -LinuxError::EINVAL.code() as isize;
+    }
+
+    if header.pid != 0 && header.pid != process.pid() as i32 {
+        axlog::warn!("capget: lookup for pid {} not fully implemented, returning ESRCH", header.pid);
+        return -LinuxError::ESRCH.code() as isize;
+    }
+
+    if datap == 0 {
+        return 0;
+    }
+
+    let (cap_p, cap_e, cap_i) = process.capabilities();
+    let data0 = CapUserData {
+        effective: cap_e as u32,
+        permitted: cap_p as u32,
+        inheritable: cap_i as u32,
+    };
+
+    if let Err(e) = pulse_core::task::uaccess::write_user_plain(process.as_ref(), datap, &data0) {
+        let errno: LinuxError = e.into();
+        return -errno.code() as isize;
+    }
+
+    if header.version == CAP_VERSION_2 || header.version == CAP_VERSION_3 {
+        let data1 = CapUserData {
+            effective: (cap_e >> 32) as u32,
+            permitted: (cap_p >> 32) as u32,
+            inheritable: (cap_i >> 32) as u32,
+        };
+        if let Err(e) = pulse_core::task::uaccess::write_user_plain(process.as_ref(), datap + core::mem::size_of::<CapUserData>(), &data1) {
+            let errno: LinuxError = e.into();
+            return -errno.code() as isize;
+        }
+    }
+
+    0
+}
+
+/// capset(2): 设置进程 capability
+pub fn sys_capset(hdrp: usize, datap: usize) -> isize {
+    if hdrp == 0 {
+        return -LinuxError::EFAULT.code() as isize;
+    }
+    let process = match current_process() {
+        Ok(p) => p,
+        Err(e) => return -e.code() as isize,
+    };
+
+    let mut header: CapUserHeader = match pulse_core::task::uaccess::read_user_plain(process.as_ref(), hdrp) {
+        Ok(h) => h,
+        Err(e) => {
+            let errno: LinuxError = e.into();
+            return -errno.code() as isize;
+        }
+    };
+
+    if header.version != CAP_VERSION_1 && header.version != CAP_VERSION_2 && header.version != CAP_VERSION_3 {
+        header.version = CAP_VERSION_3;
+        let _ = pulse_core::task::uaccess::write_user_plain(process.as_ref(), hdrp, &header);
+        return -LinuxError::EINVAL.code() as isize;
+    }
+
+    if header.pid < -1 {
+        return -LinuxError::EINVAL.code() as isize;
+    }
+
+    if header.pid != 0 && header.pid != process.pid() as i32 {
+        return -LinuxError::ESRCH.code() as isize;
+    }
+
+    if datap == 0 {
+        return 0;
+    }
+
+    let data0: CapUserData = match pulse_core::task::uaccess::read_user_plain(process.as_ref(), datap) {
+        Ok(d) => d,
+        Err(e) => {
+            let errno: LinuxError = e.into();
+            return -errno.code() as isize;
+        }
+    };
+
+    let (mut cap_p, mut cap_e, mut cap_i) = (data0.permitted as u64, data0.effective as u64, data0.inheritable as u64);
+
+    if header.version == CAP_VERSION_2 || header.version == CAP_VERSION_3 {
+        let data1: CapUserData = match pulse_core::task::uaccess::read_user_plain(process.as_ref(), datap + core::mem::size_of::<CapUserData>()) {
+            Ok(d) => d,
+            Err(e) => {
+                let errno: LinuxError = e.into();
+                return -errno.code() as isize;
+            }
+        };
+        cap_p |= (data1.permitted as u64) << 32;
+        cap_e |= (data1.effective as u64) << 32;
+        cap_i |= (data1.inheritable as u64) << 32;
+    }
+
+    // 权限校验：非 root 只能缩小能力集，root 可任意（简化）
+    let (old_p, _old_e, _old_i) = process.capabilities();
+    if process.euid() != 0 {
+        // 非 root 只能设置 permitted 的子集
+        if (cap_p & !old_p) != 0 || (cap_e & !cap_p) != 0 {
+            return -LinuxError::EPERM.code() as isize;
+        }
+    }
+
+    process.set_capabilities(cap_p, cap_e, cap_i);
+    0
+}
+

@@ -204,6 +204,14 @@ impl fmt::Debug for Inner {
 #[derive(Debug, Clone)]
 pub struct DirEntry(Arc<Inner>);
 
+impl PartialEq for DirEntry {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
+}
+
+impl Eq for DirEntry {}
+
 #[derive(Debug, Clone)]
 pub struct WeakDirEntry(Weak<Inner>);
 

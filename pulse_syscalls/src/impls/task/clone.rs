@@ -236,3 +236,42 @@ pub fn sys_unshare(flags: usize) -> isize {
 
     0
 }
+
+pub fn sys_setns(fd: usize, nstype: usize) -> isize {
+    let process = match current_process() {
+        Ok(proc) => proc,
+        Err(e) => return -e.code() as isize,
+    };
+
+    let fd_table = process.fd_table();
+    let fd_table_guard = fd_table.read();
+    let entry = match fd_table_guard.get(fd) {
+        Some(entry) => entry,
+        None => return -LinuxError::EBADF.code() as isize,
+    };
+
+    let (ns_pid, fd_ns_type) = match entry.object.as_ns_fd() {
+        Some(val) => val,
+        None => return -LinuxError::EINVAL.code() as isize,
+    };
+
+    if nstype != 0 && (nstype as u32) != fd_ns_type {
+        return -LinuxError::EINVAL.code() as isize;
+    }
+
+    if !process.is_root_user() {
+        return -LinuxError::EPERM.code() as isize;
+    }
+
+    match fd_ns_type {
+        0x0400_0000 /* CLONE_NEWUTS */ => {
+            if let Some(target_proc) = pulse_core::task::process_by_pid(ns_pid) {
+                process.set_hostname_handle(target_proc.hostname_handle());
+            }
+        }
+        // Others are no-op stubs for now.
+        _ => {}
+    }
+
+    0
+}

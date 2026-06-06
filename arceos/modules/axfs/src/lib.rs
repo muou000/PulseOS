@@ -22,7 +22,7 @@ pub use axfs_ng_vfs::NodeType;
 use spin::{Lazy, Mutex};
 
 mod disk;
-mod fs;
+pub mod fs;
 
 pub use fs::{new_tmpfs, new_procfs, new_default, devfs::DevNode, TtyCallbacks, register_tty_callbacks};
 #[cfg(feature = "ext4")]

@@ -196,6 +196,7 @@ fn syscall_dispatcher(
         Sysno::mknodat => impls::sys_mknodat(args[0] as i32, args[1], args[2], args[3]),
         Sysno::mount => impls::sys_mount(args[0], args[1], args[2], args[3], args[4]),
         Sysno::umount2 => impls::sys_umount2(args[0], args[1]),
+        Sysno::chroot => impls::sys_chroot(args[0]),
         Sysno::getdents64 => impls::sys_getdents64(args[0], args[1], args[2]),
         Sysno::close => impls::sys_close(args[0]),
         Sysno::fstat => impls::sys_fstat(args[0], args[1]),
@@ -274,6 +275,10 @@ fn syscall_dispatcher(
         Sysno::getresgid => impls::sys_getresgid(args[0], args[1], args[2]),
         Sysno::getgroups => impls::sys_getgroups(args[0] as isize, args[1]),
         Sysno::setgroups => impls::sys_setgroups(args[0], args[1]),
+        Sysno::setfsuid => impls::sys_setfsuid(args[0]),
+        Sysno::setfsgid => impls::sys_setfsgid(args[0]),
+        Sysno::capget => impls::sys_capget(args[0], args[1]),
+        Sysno::capset => impls::sys_capset(args[0], args[1]),
 
         Sysno::rt_sigaction => impls::sys_rt_sigaction(args[0], args[1], args[2], args[3]),
         Sysno::rt_sigreturn => impls::sys_rt_sigreturn(tf),
@@ -373,6 +378,7 @@ fn syscall_dispatcher(
         Sysno::semop => impls::sys_semop(args[0] as i32, args[1], args[2]),
 
         Sysno::unshare => impls::sys_unshare(args[0]),
+        Sysno::setns => impls::sys_setns(args[0], args[1]),
         #[cfg(target_arch = "riscv64")]
         Sysno::riscv_hwprobe => impls::sys_riscv_hwprobe(
             args[0],

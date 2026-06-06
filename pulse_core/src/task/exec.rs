@@ -143,7 +143,7 @@ fn resolve_exec_path_and_args(
 impl Process {
     pub fn load_elf(&self, path: &str, args: &[&str], envs: &[&str]) -> AxResult<()> {
         let mut fs_ctx = self.fs_context_handle().lock().clone();
-        fs_ctx.credentials = Some((self.euid(), self.egid()));
+        fs_ctx.credentials = Some((self.fsuid(), self.fsgid()));
         let (path, argv) = resolve_exec_path_and_args(&fs_ctx, path, args)?;
         let argv_refs: Vec<&str> = argv.iter().map(|s| s.as_str()).collect();
         let aspace_handle = self.aspace_handle();
@@ -197,7 +197,7 @@ impl Process {
 
     pub fn exec(&self, path: &str, args: &[&str], envs: &[&str]) -> AxResult<()> {
         let mut fs_ctx = self.fs_context_handle().lock().clone();
-        fs_ctx.credentials = Some((self.euid(), self.egid()));
+        fs_ctx.credentials = Some((self.fsuid(), self.fsgid()));
         let (path, argv) = resolve_exec_path_and_args(&fs_ctx, path, args)?;
         let argv_refs: Vec<&str> = argv.iter().map(|s| s.as_str()).collect();
 

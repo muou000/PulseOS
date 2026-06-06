@@ -8,7 +8,7 @@ use crate::impls::utils::{read_user_cstring, with_process};
 pub(crate) fn context_for_dirfd(dirfd: i32) -> Result<FsContext, LinuxError> {
     let base = with_process(|process| {
         let mut fs = process.fs_context_handle().lock().clone();
-        fs.credentials = Some((process.euid(), process.egid()));
+        fs.credentials = Some((process.fsuid(), process.fsgid()));
         fs
     })?;
     if dirfd == AT_FDCWD as i32 {
@@ -17,7 +17,8 @@ pub(crate) fn context_for_dirfd(dirfd: i32) -> Result<FsContext, LinuxError> {
     if dirfd < 0 {
         return Err(LinuxError::EBADF);
     }
-    let location = with_process(|process| process.get_fd_location(dirfd as usize))??;
+    let entry = with_process(|process| process.get_fd_entry(dirfd as usize))??;
+    let location = entry.object.location().ok_or(LinuxError::ENOTDIR)?;
     if !location.is_dir() {
         return Err(LinuxError::ENOTDIR);
     }

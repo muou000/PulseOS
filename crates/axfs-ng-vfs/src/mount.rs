@@ -86,6 +86,14 @@ pub struct Location {
     entry: DirEntry,
 }
 
+impl PartialEq for Location {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.mountpoint, &other.mountpoint) && self.entry == other.entry
+    }
+}
+
+impl Eq for Location {}
+
 #[inherit_methods(from = "self.entry")]
 impl Location {
     pub fn inode(&self) -> u64;
