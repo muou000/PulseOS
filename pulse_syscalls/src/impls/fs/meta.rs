@@ -1,8 +1,8 @@
 use axerrno::LinuxError;
 use axfs_ng_vfs::{Location, MetadataUpdate};
 use linux_raw_sys::general::{
-    AT_EACCESS, AT_EMPTY_PATH, AT_FDCWD, AT_SYMLINK_NOFOLLOW, CAP_CHOWN, R_OK, STATX_BASIC_STATS,
-    STATX_MNT_ID, W_OK, X_OK, statfs, statx, statx_timestamp, timespec,
+    AT_EACCESS, AT_EMPTY_PATH, AT_FDCWD, AT_SYMLINK_NOFOLLOW, CAP_CHOWN, CAP_FOWNER, R_OK,
+    STATX_BASIC_STATS, STATX_MNT_ID, W_OK, X_OK, statfs, statx, statx_timestamp, timespec,
 };
 use pulse_core::fd_table::location_to_stat;
 
@@ -403,17 +403,32 @@ pub fn sys_fchmodat(dirfd: i32, pathname: usize, mode: usize, flags: usize) -> i
             if crate::impls::fs::common::is_location_readonly(&location) {
                 return -LinuxError::EROFS.code() as isize;
             }
+            let current_meta = match location.metadata() {
+                Ok(meta) => meta,
+                Err(e) => return -LinuxError::from(e.canonicalize()).code() as isize,
+            };
+
+            // Permission check: Only the owner or a privileged process can change the mode.
+            let (fsuid, cap_effective) = match with_process(|process| {
+                (process.fsuid(), process.capabilities().1)
+            }) {
+                Ok(v) => v,
+                Err(e) => return -e.code() as isize,
+            };
+
+            let has_cap_fowner = fsuid == 0 || (cap_effective & (1 << CAP_FOWNER)) != 0;
+            if !has_cap_fowner && fsuid != current_meta.uid {
+                return -LinuxError::EPERM.code() as isize;
+            }
+
             let mut perm = axfs_ng_vfs::NodePermission::from_bits_truncate(mode as u16);
 
             // POSIX: 若进程非 root，且文件 GID 既不匹配 EGID 也不在附属组中，
             // 则自动清除 S_ISGID，即便用户请求中包含该位。
             if perm.contains(axfs_ng_vfs::NodePermission::SET_GID) {
-                let should_clear = match (
-                    location.metadata(),
-                    with_process(|p| (p.euid(), p.egid(), p.groups())),
-                ) {
-                    (Ok(meta), Ok((euid, egid, groups))) => {
-                        euid != 0 && meta.gid != egid && !groups.contains(&meta.gid)
+                let should_clear = match with_process(|p| (p.euid(), p.egid(), p.groups())) {
+                    Ok((euid, egid, groups)) => {
+                        euid != 0 && current_meta.gid != egid && !groups.contains(&current_meta.gid)
                     }
                     _ => false,
                 };
@@ -482,17 +497,32 @@ pub fn sys_fchmod(fd: usize, mode: usize) -> isize {
         return -LinuxError::EROFS.code() as isize;
     }
 
+    let current_meta = match location.metadata() {
+        Ok(meta) => meta,
+        Err(e) => return -LinuxError::from(e.canonicalize()).code() as isize,
+    };
+
+    // Permission check: Only the owner or a privileged process can change the mode.
+    let (fsuid, cap_effective) = match with_process(|process| {
+        (process.fsuid(), process.capabilities().1)
+    }) {
+        Ok(v) => v,
+        Err(e) => return -e.code() as isize,
+    };
+
+    let has_cap_fowner = fsuid == 0 || (cap_effective & (1 << CAP_FOWNER)) != 0;
+    if !has_cap_fowner && fsuid != current_meta.uid {
+        return -LinuxError::EPERM.code() as isize;
+    }
+
     let mut perm = axfs_ng_vfs::NodePermission::from_bits_truncate(mode as u16);
 
     // POSIX: 若进程非 root，且文件 GID 既不匹配 EGID 也不在附属组中，
     // 则自动清除 S_ISGID，即便用户请求中包含该位。
     if perm.contains(axfs_ng_vfs::NodePermission::SET_GID) {
-        let should_clear = match (
-            location.metadata(),
-            with_process(|p| (p.euid(), p.egid(), p.groups())),
-        ) {
-            (Ok(meta), Ok((euid, egid, groups))) => {
-                euid != 0 && meta.gid != egid && !groups.contains(&meta.gid)
+        let should_clear = match with_process(|p| (p.euid(), p.egid(), p.groups())) {
+            Ok((euid, egid, groups)) => {
+                euid != 0 && current_meta.gid != egid && !groups.contains(&current_meta.gid)
             }
             _ => false,
         };
@@ -627,5 +657,98 @@ pub fn sys_fchownat(dirfd: i32, pathname: usize, uid: usize, gid: usize, flags: 
             }
         }
         Err(e) => -e.code() as isize,
+    }
+}
+
+/// `fchown(fd, uid, gid)` — 设置打开文件的所有者。
+pub fn sys_fchown(fd: usize, uid: usize, gid: usize) -> isize {
+    axlog::debug!("sys_fchown: fd={}, uid={}, gid={}", fd, uid, gid);
+
+    let entry = match get_fd_entry(fd) {
+        Ok(entry) => entry,
+        Err(e) => return -e.code() as isize,
+    };
+    if entry.flags.contains(pulse_core::fd_table::FdFlags::PATH) {
+        return -LinuxError::EBADF.code() as isize;
+    }
+    let location = match entry.object.location() {
+        Some(loc) => loc,
+        None => return -LinuxError::EBADF.code() as isize,
+    };
+
+    if crate::impls::fs::common::is_location_readonly(&location) {
+        return -LinuxError::EROFS.code() as isize;
+    }
+
+    let current_meta = match location.metadata() {
+        Ok(meta) => meta,
+        Err(e) => return -LinuxError::from(e.canonicalize()).code() as isize,
+    };
+
+    // Permission check
+    let (fsuid, fsgid, groups, cap_effective) = match with_process(|process| {
+        (
+            process.fsuid(),
+            process.fsgid(),
+            process.groups(),
+            process.capabilities().1,
+        )
+    }) {
+        Ok(v) => v,
+        Err(e) => return -e.code() as isize,
+    };
+
+    let has_cap_chown = fsuid == 0 || (cap_effective & (1 << CAP_CHOWN)) != 0;
+
+    if !has_cap_chown {
+        // Not root, check if changing owner
+        if (uid as u32) != u32::MAX && (uid as u32) != current_meta.uid {
+            return -LinuxError::EPERM.code() as isize;
+        }
+        // Check if changing group
+        if (gid as u32) != u32::MAX && (gid as u32) != current_meta.gid {
+            // Must be owner
+            if fsuid != current_meta.uid {
+                return -LinuxError::EPERM.code() as isize;
+            }
+            // New group must be in process groups
+            if (gid as u32) != fsgid && !groups.contains(&(gid as u32)) {
+                return -LinuxError::EPERM.code() as isize;
+            }
+        }
+    }
+
+    let new_uid = if (uid as u32) != u32::MAX {
+        uid as u32
+    } else {
+        current_meta.uid
+    };
+    let new_gid = if (gid as u32) != u32::MAX {
+        gid as u32
+    } else {
+        current_meta.gid
+    };
+
+    let mut new_mode = current_meta.mode;
+    if current_meta.node_type == axfs_ng_vfs::NodeType::RegularFile
+        && ((uid as u32) != u32::MAX || (gid as u32) != u32::MAX)
+    {
+        if new_mode.contains(axfs_ng_vfs::NodePermission::SET_UID) {
+            new_mode.remove(axfs_ng_vfs::NodePermission::SET_UID);
+        }
+        if new_mode.contains(axfs_ng_vfs::NodePermission::SET_GID)
+            && new_mode.contains(axfs_ng_vfs::NodePermission::GROUP_EXEC)
+        {
+            new_mode.remove(axfs_ng_vfs::NodePermission::SET_GID);
+        }
+    }
+
+    match location.update_metadata(axfs_ng_vfs::MetadataUpdate {
+        owner: Some((new_uid, new_gid)),
+        mode: Some(new_mode),
+        ..Default::default()
+    }) {
+        Ok(()) => 0,
+        Err(e) => -LinuxError::from(e.canonicalize()).code() as isize,
     }
 }

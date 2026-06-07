@@ -19,6 +19,8 @@ use crate::{
     path::{DOT, DOTDOT, PathBuf},
 };
 
+static DEVICE_COUNTER: AtomicU64 = AtomicU64::new(1);
+
 #[derive(Debug)]
 pub struct Mountpoint {
     /// Root dir entry in the mountpoint.
@@ -33,8 +35,6 @@ pub struct Mountpoint {
 
 impl Mountpoint {
     pub fn new(fs: &Filesystem, location_in_parent: Option<Location>) -> Arc<Self> {
-        static DEVICE_COUNTER: AtomicU64 = AtomicU64::new(1);
-
         let root = fs.root_dir();
         Arc::new(Self {
             root,
@@ -46,6 +46,16 @@ impl Mountpoint {
 
     pub fn new_root(fs: &Filesystem) -> Arc<Self> {
         Self::new(fs, None)
+    }
+
+    pub fn new_bind(source: Location, location_in_parent: Option<Location>) -> Arc<Self> {
+        let root = source.entry().clone();
+        Arc::new(Self {
+            root,
+            location: location_in_parent,
+            children: Mutex::default(),
+            device: DEVICE_COUNTER.fetch_add(1, Ordering::Relaxed),
+        })
     }
 
     pub fn root_location(self: &Arc<Self>) -> Location {
@@ -70,6 +80,9 @@ impl Mountpoint {
     pub(crate) fn effective_mountpoint(self: &Arc<Self>) -> Arc<Mountpoint> {
         let mut mountpoint = self.clone();
         while let Some(mount) = mountpoint.root.as_dir().unwrap().mountpoint() {
+            if Arc::ptr_eq(&mount, &mountpoint) {
+                break;
+            }
             mountpoint = mount;
         }
         mountpoint
@@ -293,6 +306,20 @@ impl Location {
             return Err(VfsError::ResourceBusy);
         }
         let result = Mountpoint::new(fs, Some(self.clone()));
+        *mountpoint = Some(result.clone());
+        self.mountpoint
+            .children
+            .lock()
+            .insert(self.entry.key(), Arc::downgrade(&result));
+        Ok(result)
+    }
+
+    pub fn mount_bind(&self, source: Location) -> VfsResult<Arc<Mountpoint>> {
+        let mut mountpoint = self.entry.as_dir()?.mountpoint.lock();
+        if mountpoint.is_some() {
+            return Err(VfsError::ResourceBusy);
+        }
+        let result = Mountpoint::new_bind(source, Some(self.clone()));
         *mountpoint = Some(result.clone());
         self.mountpoint
             .children
