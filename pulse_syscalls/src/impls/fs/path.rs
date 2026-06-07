@@ -497,7 +497,13 @@ pub fn sys_mount(
         );
     }
     let is_remount = (_flags & MS_REMOUNT as usize) != 0;
+    let is_bind    = (_flags & MS_BIND    as usize) != 0;
     let is_rdonly  = (_flags & MS_RDONLY  as usize) != 0;
+
+    // Propagation flags - currently we ignore them but they must not fail the mount.
+    const MS_PROPAGATION: usize = (MS_UNBINDABLE | MS_PRIVATE | MS_SLAVE | MS_SHARED | MS_REC) as usize;
+    let is_propagation = (_flags & MS_PROPAGATION) != 0;
+
     if target == 0 {
         return -LinuxError::EFAULT.code() as isize;
     }
@@ -545,6 +551,56 @@ pub fn sys_mount(
         axfs::register_mount(&source_path, &target_path, &fstype_name, options);
         let _ = pulse_core::task::current_process().map(|process| process.save_fs_context());
         return 0;
+    }
+
+    if is_propagation && !is_bind {
+        // If it's just a propagation change, we succeed silently.
+        // mount --make-private /
+        axlog::debug!("sys_mount: propagation flags {:#x} on '{}' (no-op)", _flags & MS_PROPAGATION, target_path);
+        return 0;
+    }
+
+    if is_bind {
+        let source_path = match read_user_optional_path(source) {
+            Ok(Some(path)) => path,
+            Ok(None) => return -LinuxError::EINVAL.code() as isize,
+            Err(e) => return -e.code() as isize,
+        };
+        axlog::debug!("sys_mount: bind mount '{}' to '{}'", source_path, target_path);
+        let ctx = match context_for_dirfd(AT_FDCWD as i32) {
+            Ok(ctx) => ctx,
+            Err(e) => return -e.code() as isize,
+        };
+        let source_loc = match ctx.resolve(&source_path) {
+            Ok(loc) => loc,
+            Err(e) => return -LinuxError::from(e.canonicalize()).code() as isize,
+        };
+        let mount_dir = match ctx.resolve(&target_path) {
+            Ok(loc) => loc,
+            Err(e) => return -LinuxError::from(e.canonicalize()).code() as isize,
+        };
+        // If target is already a mountpoint, Linux mount(2) behavior for MS_BIND
+        // depends on whether it's a new mount or a remount-bind.
+        // Our VFS currently errors if it's already a mountpoint.
+        if axfs::lookup_mounted_mountpoint(&target_path).is_some() {
+             return -LinuxError::EBUSY.code() as isize;
+        }
+
+        match mount_dir.mount_bind(source_loc) {
+            Ok(mountpoint) => {
+                axlog::debug!("sys_mount: bind mount successful on '{}'", target_path);
+                MOUNTED_TARGETS.lock().insert(target_path.clone());
+                axfs::register_mounted_mountpoint(&target_path, mountpoint);
+                let options = if is_rdonly { "ro,bind,relatime" } else { "rw,bind,relatime" };
+                axfs::register_mount(&source_path, &target_path, "none", options);
+                let _ = pulse_core::task::current_process().map(|process| process.save_fs_context());
+                return 0;
+            }
+            Err(e) => {
+                axlog::error!("sys_mount: bind mount failed: {:?}", e);
+                return -LinuxError::from(e.canonicalize()).code() as isize;
+            }
+        }
     }
 
     if axfs::lookup_mounted_mountpoint(&target_path).is_some() {
@@ -641,9 +697,10 @@ pub fn sys_mount(
 
 pub fn sys_umount2(target: usize, flags: usize) -> isize {
     axlog::debug!("sys_umount2: target={:#x}, flags={:#x}", target, flags);
-    if flags != 0 && !UMOUNT_FLAGS_WARNED.swap(true, Ordering::AcqRel) {
+    const UMOUNT_SUPPORTED_FLAGS: usize = (MNT_FORCE | MNT_DETACH | MNT_EXPIRE | UMOUNT_NOFOLLOW) as usize;
+    if (flags & !UMOUNT_SUPPORTED_FLAGS) != 0 && !UMOUNT_FLAGS_WARNED.swap(true, Ordering::AcqRel) {
         axlog::warn!(
-            "sys_umount2: unmount flags are ignored (flags={:#x}); semantics are simplified",
+            "sys_umount2: some unmount flags are ignored (flags={:#x}); semantics are simplified",
             flags
         );
     }
@@ -655,7 +712,7 @@ pub fn sys_umount2(target: usize, flags: usize) -> isize {
         Ok(target) => target,
         Err(e) => return -e.code() as isize,
     };
-    let target_path = match target.to_str() {
+    let target_path_raw = match target.to_str() {
         Ok(s) if !s.is_empty() => s,
         Ok(_) => return -LinuxError::EINVAL.code() as isize,
         Err(_) => return -LinuxError::EINVAL.code() as isize,
@@ -665,13 +722,28 @@ pub fn sys_umount2(target: usize, flags: usize) -> isize {
         Ok(ctx) => ctx,
         Err(e) => return -e.code() as isize,
     };
-    let target_path = match ctx.resolve(target_path) {
+    let target_path = match ctx.resolve(target_path_raw) {
         Ok(loc) => match loc.absolute_path() {
             Ok(path) => path.to_string(),
             Err(e) => return -LinuxError::from(e.canonicalize()).code() as isize,
         },
-        Err(e) => return -LinuxError::from(e.canonicalize()).code() as isize,
+        Err(e) => {
+             // If resolution fails, maybe it's already unmounted or path is invalid.
+             // But we should check our MOUNT_RECORDS/MOUNTED_TARGETS too.
+             let normalized = if target_path_raw.starts_with('/') {
+                 target_path_raw.to_string()
+             } else {
+                 // Attempt to join with CWD if not absolute, but ctx.resolve already did that if it could.
+                 target_path_raw.to_string()
+             };
+             if axfs::lookup_mounted_mountpoint(&normalized).is_some() {
+                 normalized
+             } else {
+                 return -LinuxError::from(e.canonicalize()).code() as isize;
+             }
+        }
     };
+
     if target_path == "/" {
         return -LinuxError::EBUSY.code() as isize;
     }
@@ -690,6 +762,7 @@ pub fn sys_umount2(target: usize, flags: usize) -> isize {
         Err(e) => -LinuxError::from(e.canonicalize()).code() as isize,
     }
 }
+
 
 pub fn sys_unlinkat(dirfd: i32, pathname: usize, flags: usize) -> isize {
     axlog::debug!(
