@@ -579,12 +579,6 @@ pub fn sys_mount(
             Ok(loc) => loc,
             Err(e) => return -LinuxError::from(e.canonicalize()).code() as isize,
         };
-        // If target is already a mountpoint, Linux mount(2) behavior for MS_BIND
-        // depends on whether it's a new mount or a remount-bind.
-        // Our VFS currently errors if it's already a mountpoint.
-        if axfs::lookup_mounted_mountpoint(&target_path).is_some() {
-             return -LinuxError::EBUSY.code() as isize;
-        }
 
         match mount_dir.mount_bind(source_loc) {
             Ok(mountpoint) => {
@@ -722,36 +716,23 @@ pub fn sys_umount2(target: usize, flags: usize) -> isize {
         Ok(ctx) => ctx,
         Err(e) => return -e.code() as isize,
     };
-    let target_path = match ctx.resolve(target_path_raw) {
-        Ok(loc) => match loc.absolute_path() {
-            Ok(path) => path.to_string(),
-            Err(e) => return -LinuxError::from(e.canonicalize()).code() as isize,
-        },
-        Err(e) => {
-             // If resolution fails, maybe it's already unmounted or path is invalid.
-             // But we should check our MOUNT_RECORDS/MOUNTED_TARGETS too.
-             let normalized = if target_path_raw.starts_with('/') {
-                 target_path_raw.to_string()
-             } else {
-                 // Attempt to join with CWD if not absolute, but ctx.resolve already did that if it could.
-                 target_path_raw.to_string()
-             };
-             if axfs::lookup_mounted_mountpoint(&normalized).is_some() {
-                 normalized
-             } else {
-                 return -LinuxError::from(e.canonicalize()).code() as isize;
-             }
-        }
+    let target_loc = match ctx.resolve(target_path_raw) {
+        Ok(loc) => loc,
+        Err(e) => return -LinuxError::from(e.canonicalize()).code() as isize,
+    };
+    if !target_loc.is_root_of_mount() {
+        return -LinuxError::EINVAL.code() as isize;
+    }
+    let target_path = match target_loc.absolute_path() {
+        Ok(path) => path.to_string(),
+        Err(e) => return -LinuxError::from(e.canonicalize()).code() as isize,
     };
 
     if target_path == "/" {
         return -LinuxError::EBUSY.code() as isize;
     }
-    let mountpoint = match axfs::lookup_mounted_mountpoint(&target_path) {
-        Some(mountpoint) => mountpoint,
-        None => return -LinuxError::EINVAL.code() as isize,
-    };
-    match mountpoint.root_location().unmount() {
+
+    match target_loc.unmount() {
         Ok(()) => {
             MOUNTED_TARGETS.lock().remove(&target_path);
             let _ = axfs::unregister_mount(&target_path);
