@@ -24,7 +24,7 @@ static DEVICE_COUNTER: AtomicU64 = AtomicU64::new(1);
 #[derive(Debug)]
 pub struct Mountpoint {
     /// Root dir entry in the mountpoint.
-    root: DirEntry,
+    pub(crate) root: DirEntry,
     /// Location in the parent mountpoint.
     location: Option<Location>,
     /// Children of the mountpoint.
@@ -54,7 +54,7 @@ impl Mountpoint {
             root,
             location: location_in_parent,
             children: Mutex::default(),
-            device: DEVICE_COUNTER.fetch_add(1, Ordering::Relaxed),
+            device: source.mountpoint().device(),
         })
     }
 
@@ -62,22 +62,20 @@ impl Mountpoint {
         Location::new(self.clone(), self.root.clone())
     }
 
-    /// Returns the location in the parent mountpoint.
     pub fn location(&self) -> Option<Location> {
         self.location.clone()
+    }
+
+    pub fn device(&self) -> u64 {
+        self.device
     }
 
     pub fn is_root(&self) -> bool {
         self.location.is_none()
     }
 
-    /// Returns the effective mountpoint.
-    ///
-    /// For example, first `mount /dev/sda1 /mnt` and then `mount /dev/sda2
-    /// /mnt`. After the second mount is completed, the content of the first
-    /// mount will be overridden (root mount -> mnt1 -> mnt2). We need to
-    /// return `mnt2` for `mnt1.effective_mountpoint()`.
-    pub(crate) fn effective_mountpoint(self: &Arc<Self>) -> Arc<Mountpoint> {
+    /// See [`Location::resolve_mountpoint`].
+    pub(crate) fn effective_mountpoint(self: &Arc<Self>) -> Arc<Self> {
         let mut mountpoint = self.clone();
         while let Some(mount) = mountpoint.root.as_dir().unwrap().mountpoint() {
             if Arc::ptr_eq(&mount, &mountpoint) {
@@ -86,10 +84,6 @@ impl Mountpoint {
             mountpoint = mount;
         }
         mountpoint
-    }
-
-    pub fn device(self: &Arc<Self>) -> u64 {
-        self.device
     }
 }
 
@@ -125,8 +119,6 @@ impl Location {
     pub fn is_dir(&self) -> bool;
 
     pub fn node_type(&self) -> NodeType;
-
-    pub fn is_root_of_mount(&self) -> bool;
 
     pub fn read_link(&self) -> VfsResult<String>;
 
@@ -170,7 +162,11 @@ impl Location {
     }
 
     pub fn is_root(&self) -> bool {
-        self.mountpoint.is_root() && self.entry.is_root_of_mount()
+        self.mountpoint.is_root() && self.is_root_of_mount()
+    }
+
+    pub fn is_root_of_mount(&self) -> bool {
+        self.entry.ptr_eq(&self.mountpoint.root)
     }
 
     pub fn check_is_dir(&self) -> VfsResult<()> {
@@ -191,7 +187,15 @@ impl Location {
         let mut components = vec![];
         let mut cur = self.clone();
         loop {
-            cur.entry.collect_absolute_path(&mut components);
+            let mut entry = cur.entry.clone();
+            while !entry.ptr_eq(&cur.mountpoint.root) {
+                components.push(String::from(entry.name()));
+                if let Some(parent) = entry.parent() {
+                    entry = parent;
+                } else {
+                    break;
+                }
+            }
             cur = match cur.mountpoint.location() {
                 Some(loc) => loc,
                 None => break,
@@ -302,9 +306,6 @@ impl Location {
 
     pub fn mount(&self, fs: &Filesystem) -> VfsResult<Arc<Mountpoint>> {
         let mut mountpoint = self.entry.as_dir()?.mountpoint.lock();
-        if mountpoint.is_some() {
-            return Err(VfsError::ResourceBusy);
-        }
         let result = Mountpoint::new(fs, Some(self.clone()));
         *mountpoint = Some(result.clone());
         self.mountpoint
@@ -316,9 +317,6 @@ impl Location {
 
     pub fn mount_bind(&self, source: Location) -> VfsResult<Arc<Mountpoint>> {
         let mut mountpoint = self.entry.as_dir()?.mountpoint.lock();
-        if mountpoint.is_some() {
-            return Err(VfsError::ResourceBusy);
-        }
         let result = Mountpoint::new_bind(source, Some(self.clone()));
         *mountpoint = Some(result.clone());
         self.mountpoint
@@ -338,6 +336,11 @@ impl Location {
         assert!(self.entry.ptr_eq(&self.mountpoint.root));
         self.entry.as_dir()?.forget();
         if let Some(parent_loc) = &self.mountpoint.location {
+            parent_loc
+                .mountpoint
+                .children
+                .lock()
+                .remove(&parent_loc.entry.key());
             *parent_loc.entry.as_dir()?.mountpoint.lock() = None;
         }
         Ok(())

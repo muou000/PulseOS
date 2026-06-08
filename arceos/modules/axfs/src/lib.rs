@@ -42,8 +42,8 @@ pub struct MountRecord {
 static MOUNT_RECORDS: Lazy<Mutex<Vec<MountRecord>>> = Lazy::new(|| Mutex::new(Vec::new()));
 static MOUNTABLE_FILESYSTEMS: Lazy<Mutex<BTreeMap<String, axfs_ng_vfs::Filesystem>>> =
     Lazy::new(|| Mutex::new(BTreeMap::new()));
-static MOUNTED_MOUNTPOINTS: Lazy<Mutex<BTreeMap<String, Arc<axfs_ng_vfs::Mountpoint>>>> =
-    Lazy::new(|| Mutex::new(BTreeMap::new()));
+static MOUNTED_MOUNTPOINTS: Lazy<Mutex<Vec<(String, Arc<axfs_ng_vfs::Mountpoint>)>>> =
+    Lazy::new(|| Mutex::new(Vec::new()));
 static PINNED_MOUNTPOINTS: Lazy<Mutex<Vec<Arc<axfs_ng_vfs::Mountpoint>>>> =
     Lazy::new(|| Mutex::new(Vec::new()));
 
@@ -80,19 +80,12 @@ fn pin_mountpoint(mountpoint: Arc<axfs_ng_vfs::Mountpoint>) {
 pub fn register_mount(source: &str, target: &str, fs_type: &str, options: &str) {
     let target = normalize_target(target);
     let mut mounts = MOUNT_RECORDS.lock();
-    if let Some(existing) = mounts.iter_mut().find(|m| m.target == target) {
-        existing.source = source.to_string();
-        existing.fs_type = fs_type.to_string();
-        existing.options = options.to_string();
-        return;
-    }
     mounts.push(MountRecord {
         source: source.to_string(),
         target,
         fs_type: fs_type.to_string(),
         options: options.to_string(),
     });
-    mounts.sort_unstable_by(|a, b| a.target.cmp(&b.target));
 }
 
 pub fn unregister_mount(target: &str) -> bool {
@@ -101,7 +94,7 @@ pub fn unregister_mount(target: &str) -> bool {
         return false;
     }
     let mut mounts = MOUNT_RECORDS.lock();
-    if let Some(index) = mounts.iter().position(|m| m.target == target) {
+    if let Some(index) = mounts.iter().rposition(|m| m.target == target) {
         mounts.remove(index);
         true
     } else {
@@ -127,11 +120,12 @@ pub fn lookup_mountable_filesystem(source: &str) -> Option<axfs_ng_vfs::Filesyst
 }
 
 pub fn register_mounted_mountpoint(target: &str, mountpoint: Arc<axfs_ng_vfs::Mountpoint>) {
-    MOUNTED_MOUNTPOINTS.lock().insert(normalize_target(target), mountpoint);
+    MOUNTED_MOUNTPOINTS.lock().push((normalize_target(target), mountpoint));
 }
 
 pub fn lookup_mounted_mountpoint(target: &str) -> Option<Arc<axfs_ng_vfs::Mountpoint>> {
-    MOUNTED_MOUNTPOINTS.lock().get(&normalize_target(target)).cloned()
+    let target = normalize_target(target);
+    MOUNTED_MOUNTPOINTS.lock().iter().rfind(|(t, _)| t == &target).map(|(_, m)| m.clone())
 }
 
 pub fn find_free_loop_device() -> Option<usize> {
@@ -223,7 +217,14 @@ pub fn probe_block_device(
 }
 
 pub fn unregister_mounted_mountpoint(target: &str) -> bool {
-    MOUNTED_MOUNTPOINTS.lock().remove(&normalize_target(target)).is_some()
+    let target = normalize_target(target);
+    let mut mps = MOUNTED_MOUNTPOINTS.lock();
+    if let Some(index) = mps.iter().rposition(|(t, _)| t == &target) {
+        mps.remove(index);
+        true
+    } else {
+        false
+    }
 }
 
 fn disk_node_name(index: usize) -> String {
