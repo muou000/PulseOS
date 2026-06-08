@@ -8,7 +8,7 @@ use hashbrown::HashMap;
 
 use super::DirEntry;
 use crate::{
-    MetadataUpdate, Mountpoint, Mutex, MutexGuard, NodeOps, NodePermission, NodeType, VfsError,
+    MetadataUpdate, Mutex, MutexGuard, NodeOps, NodePermission, NodeType, VfsError,
     VfsResult,
     path::{DOT, DOTDOT, MAX_NAME_LEN, verify_entry_name},
 };
@@ -117,7 +117,6 @@ impl Default for OpenOptions {
 pub struct DirNode {
     ops: Arc<dyn DirNodeOps>,
     cache: Mutex<DirChildren>,
-    pub(crate) mountpoint: Mutex<Option<Arc<Mountpoint>>>,
 }
 
 impl Deref for DirNode {
@@ -139,7 +138,6 @@ impl DirNode {
         Self {
             ops,
             cache: Mutex::default(),
-            mountpoint: Mutex::default(),
         }
     }
 
@@ -368,13 +366,6 @@ impl DirNode {
         Ok(entry)
     }
 
-    pub fn mountpoint(&self) -> Option<Arc<Mountpoint>> {
-        self.mountpoint.lock().clone()
-    }
-
-    pub fn is_mountpoint(&self) -> bool {
-        self.mountpoint.lock().is_some()
-    }
 
     /// Clears the cache of directory entries & user data, allowing them to be
     /// released.
