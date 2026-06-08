@@ -56,6 +56,9 @@ pub fn sys_execve(_tf: &TrapFrame, pathname: usize, argv: usize, envp: usize) ->
 
     let mut envs_strs: Vec<&str> = Vec::new();
     for s in &envs {
+        if s.starts_with("PATH=") {
+            axlog::debug!("sys_execve: env {}", s);
+        }
         envs_strs.push(s.as_str());
     }
 
@@ -158,6 +161,9 @@ pub fn sys_execveat(
 
     let mut envs_strs: Vec<&str> = Vec::new();
     for s in &envs {
+        if s.starts_with("PATH=") {
+            axlog::debug!("sys_execve: env {}", s);
+        }
         envs_strs.push(s.as_str());
     }
 

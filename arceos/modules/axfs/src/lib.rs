@@ -203,8 +203,8 @@ pub fn lookup_location(path: &str) -> axfs_ng_vfs::VfsResult<axfs_ng_vfs::Locati
 
 pub fn probe_block_device(
     path: &str,
+    loc: &axfs_ng_vfs::Location,
 ) -> axfs_ng_vfs::VfsResult<axfs_ng_vfs::Filesystem> {
-    let loc = lookup_location(path)?;
     let entry = loc.entry();
     let node = entry
         .downcast::<fs::devfs::DevNode>()
@@ -224,6 +224,37 @@ pub fn unregister_mounted_mountpoint(target: &str) -> bool {
         true
     } else {
         false
+    }
+}
+
+pub fn rename_mount_registry(old_prefix: &str, new_prefix: &str) {
+    let old_prefix = normalize_target(old_prefix);
+    let new_prefix = normalize_target(new_prefix);
+
+    // 1. Update MOUNT_RECORDS
+    {
+        let mut records = MOUNT_RECORDS.lock();
+        for record in records.iter_mut() {
+            if record.target == old_prefix {
+                record.target = new_prefix.clone();
+            } else if record.target.starts_with(&format!("{}/", old_prefix)) {
+                let suffix = &record.target[old_prefix.len()..];
+                record.target = format!("{}{}", new_prefix, suffix);
+            }
+        }
+    }
+
+    // 2. Update MOUNTED_MOUNTPOINTS
+    {
+        let mut mps = MOUNTED_MOUNTPOINTS.lock();
+        for (target, _mp) in mps.iter_mut() {
+            if target == &old_prefix {
+                *target = new_prefix.clone();
+            } else if target.starts_with(&format!("{}/", old_prefix)) {
+                let suffix = &target[old_prefix.len()..];
+                *target = format!("{}{}", new_prefix, suffix);
+            }
+        }
     }
 }
 
