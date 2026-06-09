@@ -138,8 +138,8 @@ pub fn sys_shmat(shmid: i32, shmaddr: usize, shmflg: i32) -> isize {
     // Record the attachment.
     inner.attach_process(pid);
     drop(inner);
-    proc.shared_memory
-        .lock()
+    proc.ipc.shared_memory
+        .write()
         .insert(VirtAddr::from(map_addr), shm_inner.clone());
 
     axlog::debug!("sys_shmat: mapped at {:#x}, size={}", map_addr, length);
@@ -160,7 +160,7 @@ pub fn sys_shmdt(shmaddr: usize) -> isize {
 
     // Find the ShmInner for this address in the process's registry.
     let shm_inner_arc = {
-        let mut shm_registry = proc.shared_memory.lock();
+        let mut shm_registry = proc.ipc.shared_memory.write();
         match shm_registry.remove(&VirtAddr::from(shmaddr)) {
             Some(inner) => inner,
             None => return -LinuxError::EINVAL.code() as isize,

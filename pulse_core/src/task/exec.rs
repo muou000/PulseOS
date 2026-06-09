@@ -11,6 +11,8 @@ use axhal::paging::MappingFlags;
 use memory_addr::va;
 use spin::Mutex;
 
+use core::sync::atomic::Ordering;
+
 use super::Process;
 use crate::config::*;
 
@@ -149,19 +151,19 @@ impl Process {
         let aspace_handle = self.aspace_handle();
         let mut aspace = aspace_handle.lock();
         let load_info = crate::mm::load_user_app(&mut aspace, &path, &argv_refs, envs)?;
-        *self.entry.lock() = load_info.entry;
-        *self.stack_top.lock() = load_info.user_sp;
+        self.entry.store(load_info.entry, Ordering::Release);
+        self.stack_top.store(load_info.user_sp, Ordering::Release);
         self.set_signal_trampoline(load_info.signal_trampoline);
         self.set_exec_path(path.clone());
-        *self.args.lock() = argv;
+        *self.args.write() = argv;
         self.set_dumpable(1);
         axtask::current().set_name(&self.name());
         Ok(())
     }
 
     pub fn enter_user_mode(&self) -> ! {
-        let entry = *self.entry.lock();
-        let stack_top = *self.stack_top.lock();
+        let entry = self.entry.load(Ordering::Acquire);
+        let stack_top = self.stack_top.load(Ordering::Acquire);
         let uctx = axhal::context::UspaceContext::new(entry, va!(stack_top), 0);
         self.mark_user_resume();
         if let Ok(thread) = super::current_thread() {
@@ -177,8 +179,8 @@ impl Process {
     }
 
     pub fn enter_user_mode_and_drop(self: Arc<Self>, thread: Arc<super::Thread>) -> ! {
-        let entry = *self.entry.lock();
-        let stack_top = *self.stack_top.lock();
+        let entry = self.entry.load(Ordering::Acquire);
+        let stack_top = self.stack_top.load(Ordering::Acquire);
         self.mark_user_resume();
         thread.mark_user_resume();
 
@@ -229,14 +231,14 @@ impl Process {
         self.complete_vfork();
 
         {
-            let mut shm = self.shared_memory.lock();
+            let mut shm = self.ipc.shared_memory.write();
             for inner_arc in shm.values() {
                 inner_arc.lock().detach_process(self.pid());
             }
             shm.clear();
         }
 
-        self.sem_undos.lock().clear();
+        self.ipc.sem_undos.lock().clear();
 
         let cloexec_entries = {
             let binding = self.fd_table();
@@ -244,13 +246,13 @@ impl Process {
             fd_table.take_cloexec_on_exec()
         };
         drop(cloexec_entries);
-        *self.heap_top.lock() = USER_HEAP_BASE + USER_HEAP_SIZE;
-        *self.stack_top.lock() = load_info.user_sp;
-        *self.entry.lock() = load_info.entry;
+        self.heap_top.store(USER_HEAP_BASE + USER_HEAP_SIZE, Ordering::Release);
+        self.stack_top.store(load_info.user_sp, Ordering::Release);
+        self.entry.store(load_info.entry, Ordering::Release);
         self.set_signal_trampoline(load_info.signal_trampoline);
         self.signal_shared().reset_on_exec();
         self.set_exec_path(path.clone());
-        *self.args.lock() = argv;
+        *self.args.write() = argv;
         axtask::current().set_name(&self.name());
         if let Ok(thread) = super::current_thread() {
             if thread.process().pid() == self.pid() {

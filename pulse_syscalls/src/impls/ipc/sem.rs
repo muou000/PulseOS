@@ -303,7 +303,7 @@ pub fn sys_semtimedop(semid: i32, sops: usize, nsops: usize, timeout: usize) -> 
             apply_ops(&mut semset.sems, &sops_vec, process.pid() as i32);
             semset.semid_ds.sem_otime = axhal::time::wall_time().as_secs() as i64;
 
-            let mut undos = process.sem_undos.lock();
+            let mut undos = process.ipc.sem_undos.lock();
             for op in &sops_vec {
                 if (op.sem_flg & 0o10000) != 0 { // SEM_UNDO
                     if let Some(entry) = undos.iter_mut().find(|e| e.semid == semid && e.sem_num == op.sem_num) {
