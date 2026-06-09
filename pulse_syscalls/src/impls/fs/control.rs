@@ -321,42 +321,55 @@ pub fn sys_ioctl(fd: usize, cmd: usize, arg: usize) -> isize {
             0
         }
         SIOCGIFINDEX => {
-            if arg != 0 {
-                let mut name_buf = [0u8; 16];
-                if let Ok(()) = crate::impls::utils::read_user_bytes(arg, &mut name_buf) {
-                    let name_str = core::str::from_utf8(&name_buf)
-                        .unwrap_or("")
-                        .trim_end_matches('\0');
-                    let ifindex = if name_str == "lo" { 1i32 } else { 2i32 };
-                    let bytes = ifindex.to_ne_bytes();
-                    if let Err(e) = crate::impls::utils::write_user_bytes(arg + 16, &bytes) {
-                        return -e.code() as isize;
-                    }
-                }
+            if arg == 0 {
+                return -LinuxError::EFAULT.code() as isize;
+            }
+            let mut name_buf = [0u8; 16];
+            if let Err(e) = crate::impls::utils::read_user_bytes(arg, &mut name_buf) {
+                return -e.code() as isize;
+            }
+            let name_str = core::str::from_utf8(&name_buf)
+                .unwrap_or("")
+                .trim_end_matches('\0');
+            let ifindex = if name_str == "lo" { 1i32 } else { 2i32 };
+            let bytes = ifindex.to_ne_bytes();
+            if let Err(e) = crate::impls::utils::write_user_bytes(arg + 16, &bytes) {
+                return -e.code() as isize;
             }
             0
         }
         SIOCGIFFLAGS => {
-            if arg != 0 {
-                let mut name_buf = [0u8; 16];
-                if let Ok(()) = crate::impls::utils::read_user_bytes(arg, &mut name_buf) {
-                    let name_str = core::str::from_utf8(&name_buf)
-                        .unwrap_or("")
-                        .trim_end_matches('\0');
-                    let flags: u16 = if name_str == "lo" {
-                        0x1 | 0x8 | 0x40 // IFF_UP | IFF_LOOPBACK | IFF_RUNNING
-                    } else {
-                        0x1 | 0x40 // IFF_UP | IFF_RUNNING
-                    };
-                    let bytes = flags.to_ne_bytes();
-                    if let Err(e) = crate::impls::utils::write_user_bytes(arg + 16, &bytes) {
-                        return -e.code() as isize;
-                    }
-                }
+            if arg == 0 {
+                return -LinuxError::EFAULT.code() as isize;
+            }
+            let mut name_buf = [0u8; 16];
+            if let Err(e) = crate::impls::utils::read_user_bytes(arg, &mut name_buf) {
+                return -e.code() as isize;
+            }
+            let name_str = core::str::from_utf8(&name_buf)
+                .unwrap_or("")
+                .trim_end_matches('\0');
+            let flags: u16 = if name_str == "lo" {
+                0x1 | 0x8 | 0x40 // IFF_UP | IFF_LOOPBACK | IFF_RUNNING
+            } else {
+                0x1 | 0x40 // IFF_UP | IFF_RUNNING
+            };
+            let bytes = flags.to_ne_bytes();
+            if let Err(e) = crate::impls::utils::write_user_bytes(arg + 16, &bytes) {
+                return -e.code() as isize;
             }
             0
         }
-        SIOCSIFFLAGS => 0,
+        SIOCSIFFLAGS => {
+            if arg == 0 {
+                return -LinuxError::EFAULT.code() as isize;
+            }
+            let mut name_buf = [0u8; 16];
+            if let Err(e) = crate::impls::utils::read_user_bytes(arg, &mut name_buf) {
+                return -e.code() as isize;
+            }
+            0
+        }
         _ => {
             // ENOTTY
             -LinuxError::ENOTTY.code() as isize

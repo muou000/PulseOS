@@ -7,6 +7,7 @@ use axerrno::LinuxError;
 use axio::PollState;
 use axnet::{TcpSocket, UdpSocket};
 use linux_raw_sys::general::{S_IFSOCK, stat};
+use linux_raw_sys::ioctl::{SIOCATMARK, SIOCGIFCONF};
 use pulse_core::fd_table::FdObject;
 
 const RING_BUFFER_SIZE: usize = 65536;
@@ -259,6 +260,8 @@ pub struct PacketSocket {
     pub version: AtomicU32,
     pub reserve: AtomicU32,
     pub has_vnet_hdr: AtomicBool,
+    pub rx_ring_active: AtomicBool,
+    pub tx_ring_active: AtomicBool,
 }
 
 impl PacketSocket {
@@ -267,6 +270,8 @@ impl PacketSocket {
             version: AtomicU32::new(0),
             reserve: AtomicU32::new(0),
             has_vnet_hdr: AtomicBool::new(false),
+            rx_ring_active: AtomicBool::new(false),
+            tx_ring_active: AtomicBool::new(false),
         }
     }
 }
@@ -361,6 +366,206 @@ impl FdObject for Socket {
             let process = pulse_core::task::current_process()?;
             process.write_user_bytes(arg, &n.to_ne_bytes())?;
             return Ok(0);
+        }
+        if cmd == SIOCATMARK {
+            match &self.inner {
+                SocketInner::Tcp(_) => {
+                    if arg == 0 {
+                        return Err(LinuxError::EFAULT);
+                    }
+                    let process = pulse_core::task::current_process()?;
+                    let val = 0i32;
+                    process.write_user_bytes(arg, &val.to_ne_bytes())?;
+                    return Ok(0);
+                }
+                _ => return Err(LinuxError::ENOTTY),
+            }
+        }
+        if cmd == SIOCGIFCONF {
+            if arg == 0 {
+                return Err(LinuxError::EFAULT);
+            }
+            let process = pulse_core::task::current_process()?;
+            
+            let mut len_bytes = [0u8; 4];
+            let mut buf_bytes = [0u8; 8];
+            process.read_user_bytes(arg, &mut len_bytes)?;
+            process.read_user_bytes(arg + 8, &mut buf_bytes)?;
+            
+            let ifc_len = i32::from_ne_bytes(len_bytes);
+            let ifc_buf = usize::from_ne_bytes(buf_bytes);
+            
+            let mut lo_ifr = [0u8; 40];
+            lo_ifr[..2].copy_from_slice(b"lo");
+            let family_inet = 2u16; // AF_INET
+            lo_ifr[16..18].copy_from_slice(&family_inet.to_ne_bytes());
+            lo_ifr[20..24].copy_from_slice(&[127, 0, 0, 1]);
+
+            let mut eth_ifr = [0u8; 40];
+            eth_ifr[..4].copy_from_slice(b"eth0");
+            eth_ifr[16..18].copy_from_slice(&family_inet.to_ne_bytes());
+            eth_ifr[20..24].copy_from_slice(&[10, 0, 2, 15]);
+            
+            if ifc_buf == 0 {
+                let needed_len = 80i32;
+                process.write_user_bytes(arg, &needed_len.to_ne_bytes())?;
+                return Ok(0);
+            }
+            
+            let limit = ifc_len as usize;
+            let mut bytes_to_write = alloc::vec::Vec::new();
+            if limit >= 40 {
+                bytes_to_write.extend_from_slice(&lo_ifr);
+            }
+            if limit >= 80 {
+                bytes_to_write.extend_from_slice(&eth_ifr);
+            }
+            
+            if !bytes_to_write.is_empty() {
+                process.write_user_bytes(ifc_buf, &bytes_to_write)?;
+            }
+            
+            let written_len = bytes_to_write.len() as i32;
+            process.write_user_bytes(arg, &written_len.to_ne_bytes())?;
+            return Ok(0);
+        }
+
+        // Interface ioctls
+        match cmd {
+            0x8913 => { // SIOCGIFFLAGS
+                if arg == 0 {
+                    return Err(LinuxError::EFAULT);
+                }
+                let process = pulse_core::task::current_process()?;
+                let mut name_bytes = [0u8; 16];
+                process.read_user_bytes(arg, &mut name_bytes)?;
+                let name = core::str::from_utf8(&name_bytes).unwrap_or("").trim_matches('\0');
+                let flags: u16 = if name.starts_with("lo") {
+                    0x1 | 0x4 | 0x8 // IFF_UP | IFF_RUNNING | IFF_LOOPBACK
+                } else {
+                    0x1 | 0x4 | 0x1000 // IFF_UP | IFF_RUNNING | IFF_MULTICAST
+                };
+                process.write_user_bytes(arg + 16, &flags.to_ne_bytes())?;
+                return Ok(0);
+            }
+            0x8914 => { // SIOCSIFFLAGS
+                return Ok(0); // Stub success
+            }
+            0x8921 => { // SIOCGIFMTU
+                if arg == 0 {
+                    return Err(LinuxError::EFAULT);
+                }
+                let process = pulse_core::task::current_process()?;
+                let mtu = 1500i32;
+                process.write_user_bytes(arg + 16, &mtu.to_ne_bytes())?;
+                return Ok(0);
+            }
+            0x8922 => { // SIOCSIFMTU
+                return Ok(0); // Stub success
+            }
+            0x8927 => { // SIOCGIFHWADDR
+                if arg == 0 {
+                    return Err(LinuxError::EFAULT);
+                }
+                let process = pulse_core::task::current_process()?;
+                let mut name_bytes = [0u8; 16];
+                process.read_user_bytes(arg, &mut name_bytes)?;
+                let name = core::str::from_utf8(&name_bytes).unwrap_or("").trim_matches('\0');
+                let mut hwaddr = [0u8; 16];
+                hwaddr[0..2].copy_from_slice(&1u16.to_ne_bytes()); // ARPHRD_ETHER
+                if name.starts_with("lo") {
+                    // Loopback MAC is all zeros
+                } else {
+                    hwaddr[2..8].copy_from_slice(&[0x52, 0x54, 0x00, 0x12, 0x34, 0x56]); // Dummy MAC
+                }
+                process.write_user_bytes(arg + 16, &hwaddr)?;
+                return Ok(0);
+            }
+            0x8924 => { // SIOCSIFHWADDR
+                return Ok(0); // Stub success
+            }
+            0x8933 => { // SIOCGIFINDEX
+                if arg == 0 {
+                    return Err(LinuxError::EFAULT);
+                }
+                let process = pulse_core::task::current_process()?;
+                let mut name_bytes = [0u8; 16];
+                process.read_user_bytes(arg, &mut name_bytes)?;
+                let name = core::str::from_utf8(&name_bytes).unwrap_or("").trim_matches('\0');
+                let index: i32 = if name.starts_with("lo") {
+                    1
+                } else if name.starts_with("eth") {
+                    2
+                } else {
+                    3
+                };
+                process.write_user_bytes(arg + 16, &index.to_ne_bytes())?;
+                return Ok(0);
+            }
+            0x8915 => { // SIOCGIFADDR
+                if arg == 0 {
+                    return Err(LinuxError::EFAULT);
+                }
+                let process = pulse_core::task::current_process()?;
+                let mut name_bytes = [0u8; 16];
+                process.read_user_bytes(arg, &mut name_bytes)?;
+                let name = core::str::from_utf8(&name_bytes).unwrap_or("").trim_matches('\0');
+                let mut addr = [0u8; 16];
+                addr[0..2].copy_from_slice(&2u16.to_ne_bytes()); // AF_INET
+                if name.starts_with("lo") {
+                    addr[4..8].copy_from_slice(&[127, 0, 0, 1]);
+                } else {
+                    addr[4..8].copy_from_slice(&[10, 0, 2, 15]);
+                }
+                process.write_user_bytes(arg + 16, &addr)?;
+                return Ok(0);
+            }
+            0x8916 => { // SIOCSIFADDR
+                return Ok(0); // Stub success
+            }
+            0x891b => { // SIOCGIFNETMASK
+                if arg == 0 {
+                    return Err(LinuxError::EFAULT);
+                }
+                let process = pulse_core::task::current_process()?;
+                let mut name_bytes = [0u8; 16];
+                process.read_user_bytes(arg, &mut name_bytes)?;
+                let name = core::str::from_utf8(&name_bytes).unwrap_or("").trim_matches('\0');
+                let mut mask = [0u8; 16];
+                mask[0..2].copy_from_slice(&2u16.to_ne_bytes()); // AF_INET
+                if name.starts_with("lo") {
+                    mask[4..8].copy_from_slice(&[255, 0, 0, 0]);
+                } else {
+                    mask[4..8].copy_from_slice(&[255, 255, 255, 0]);
+                }
+                process.write_user_bytes(arg + 16, &mask)?;
+                return Ok(0);
+            }
+            0x891c => { // SIOCSIFNETMASK
+                return Ok(0); // Stub success
+            }
+            0x8919 => { // SIOCGIFBRDADDR
+                if arg == 0 {
+                    return Err(LinuxError::EFAULT);
+                }
+                let process = pulse_core::task::current_process()?;
+                let mut name_bytes = [0u8; 16];
+                process.read_user_bytes(arg, &mut name_bytes)?;
+                let name = core::str::from_utf8(&name_bytes).unwrap_or("").trim_matches('\0');
+                let mut brd = [0u8; 16];
+                brd[0..2].copy_from_slice(&2u16.to_ne_bytes()); // AF_INET
+                if name.starts_with("lo") {
+                    brd[4..8].copy_from_slice(&[127, 255, 255, 255]);
+                } else {
+                    brd[4..8].copy_from_slice(&[10, 0, 2, 255]);
+                }
+                process.write_user_bytes(arg + 16, &brd)?;
+                return Ok(0);
+            }
+            0x891a => { // SIOCSIFBRDADDR
+                return Ok(0); // Stub success
+            }
+            _ => {}
         }
         Err(LinuxError::ENOTTY)
     }
