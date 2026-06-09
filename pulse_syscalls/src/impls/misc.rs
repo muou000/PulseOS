@@ -14,7 +14,7 @@ use linux_raw_sys::general::{
     RLIMIT_RSS, RLIMIT_RTPRIO, RLIMIT_RTTIME, RLIMIT_SIGPENDING, RLIMIT_STACK, SIG_BLOCK,
     SIG_SETMASK, SIG_UNBLOCK, SIGKILL, SIGSTOP, rlimit64, sigaction, siginfo, timespec,
 };
-use pulse_core::task::{NSIG, SIG_IGN, SigAction, uaccess};
+use pulse_core::task::{NSIG, SigAction, uaccess};
 
 use crate::{
     LinuxError,
@@ -125,7 +125,7 @@ pub fn sys_uname(buf: usize) -> isize {
         domainname: [0; 65],
     };
     write_cstr_field(&mut uts.sysname, "Linux");
-    
+
     let hostname_handle = process.hostname_handle();
     let hostname_lock = hostname_handle.read();
     uts.nodename.copy_from_slice(&*hostname_lock);
@@ -255,9 +255,7 @@ pub fn sys_getrusage(who: i32, addr: usize) -> isize {
             let now_ns = axhal::time::monotonic_time_nanos() as u64;
             process.snapshot_cpu_time_ns(now_ns)
         }
-        RUSAGE_CHILDREN => {
-            process.snapshot_children_cpu_time_ns()
-        }
+        RUSAGE_CHILDREN => process.snapshot_children_cpu_time_ns(),
         _ => unreachable!(),
     };
 
@@ -445,13 +443,7 @@ pub fn sys_rt_sigaction(_signum: usize, _act: usize, _oldact: usize, _sigsetsize
     if oldact != 0 {
         let old = shared.action(signum);
         let mut raw: sigaction = unsafe { core::mem::zeroed() };
-        raw.sa_handler = if old.handler == 0 {
-            None
-        } else if old.handler == SIG_IGN {
-            linux_raw_sys::signal_macros::sig_ign()
-        } else {
-            Some(unsafe { core::mem::transmute::<usize, _>(old.handler) })
-        };
+        raw.sa_handler = unsafe { core::mem::transmute(old.handler) };
         raw.sa_flags = old.flags as _;
         raw.sa_mask.sig = [old.mask as _];
         if process
@@ -471,10 +463,7 @@ pub fn sys_rt_sigaction(_signum: usize, _act: usize, _oldact: usize, _sigsetsize
             Ok(v) => v,
             Err(_) => return -LinuxError::EFAULT.code() as isize,
         };
-        let handler = match new_act.sa_handler {
-            None => 0usize,
-            Some(f) => unsafe { core::mem::transmute::<_, usize>(f) },
-        };
+        let handler = unsafe { core::mem::transmute::<_, usize>(new_act.sa_handler) };
         let flags = new_act.sa_flags as usize;
         let mask = new_act.sa_mask.sig[0] as u64;
         shared.set_action(signum, SigAction::from_parts(handler, flags, mask));
@@ -792,7 +781,8 @@ pub fn sys_riscv_hwprobe(
     flags: usize,
 ) -> isize {
     axlog::debug!(
-        "sys_riscv_hwprobe: pairs_addr={:#x}, pair_count={}, cpusetsize={}, cpus_addr={:#x}, flags={:#x}",
+        "sys_riscv_hwprobe: pairs_addr={:#x}, pair_count={}, cpusetsize={}, cpus_addr={:#x}, \
+         flags={:#x}",
         pairs_addr,
         pair_count,
         cpusetsize,
@@ -812,16 +802,20 @@ pub fn sys_riscv_hwprobe(
         let mut cpu_0_included = true;
         if cpus_addr != 0 && cpusetsize != 0 {
             let mut first_byte = 0u8;
-            if process.read_user_bytes(cpus_addr, core::slice::from_mut(&mut first_byte)).is_err() {
+            if process
+                .read_user_bytes(cpus_addr, core::slice::from_mut(&mut first_byte))
+                .is_err()
+            {
                 return Err(axerrno::AxError::BadAddress);
             }
             cpu_0_included = (first_byte & 1) != 0;
         }
 
-        let mut pairs = match uaccess::read_user_plain_array::<RiscvHwprobe>(process, pairs_addr, pair_count) {
-            Ok(p) => p,
-            Err(e) => return Err(e),
-        };
+        let mut pairs =
+            match uaccess::read_user_plain_array::<RiscvHwprobe>(process, pairs_addr, pair_count) {
+                Ok(p) => p,
+                Err(e) => return Err(e),
+            };
 
         const RISCV_HWPROBE_KEY_MVENDORID: i64 = 0;
         const RISCV_HWPROBE_KEY_MARCHID: i64 = 1;
@@ -843,10 +837,15 @@ pub fn sys_riscv_hwprobe(
         for pair in pairs.iter_mut() {
             if !cpu_0_included {
                 match pair.key {
-                    RISCV_HWPROBE_KEY_MVENDORID | RISCV_HWPROBE_KEY_MARCHID | RISCV_HWPROBE_KEY_MIMPID => {
+                    RISCV_HWPROBE_KEY_MVENDORID
+                    | RISCV_HWPROBE_KEY_MARCHID
+                    | RISCV_HWPROBE_KEY_MIMPID => {
                         pair.value = u64::MAX;
                     }
-                    RISCV_HWPROBE_KEY_BASE_BEHAVIOR | RISCV_HWPROBE_KEY_IMA_EXT_0 | RISCV_HWPROBE_KEY_CPUPERF_0 | RISCV_HWPROBE_KEY_ZICBOZ_BLOCK_SIZE => {
+                    RISCV_HWPROBE_KEY_BASE_BEHAVIOR
+                    | RISCV_HWPROBE_KEY_IMA_EXT_0
+                    | RISCV_HWPROBE_KEY_CPUPERF_0
+                    | RISCV_HWPROBE_KEY_ZICBOZ_BLOCK_SIZE => {
                         pair.value = 0;
                     }
                     _ => {

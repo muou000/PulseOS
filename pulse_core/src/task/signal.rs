@@ -373,13 +373,63 @@ impl ThreadSignal {
         *tf = saved.tf;
         let mut restored_mask = saved.old_mask;
         if let Some(user_ucontext) = saved.user_ucontext {
+            #[cfg(target_arch = "riscv64")]
+            {
+                let gregs_addr = user_ucontext + 176;
+                let mut gregs = [0u64; 32];
+                if process
+                    .read_user_bytes(gregs_addr, unsafe {
+                        core::slice::from_raw_parts_mut(gregs.as_mut_ptr() as *mut u8, 256)
+                    })
+                    .is_ok()
+                {
+                    tf.regs.ra = gregs[1] as usize;
+                    tf.regs.sp = gregs[2] as usize;
+                    tf.regs.gp = gregs[3] as usize;
+                    tf.regs.tp = gregs[4] as usize;
+                    tf.regs.t0 = gregs[5] as usize;
+                    tf.regs.t1 = gregs[6] as usize;
+                    tf.regs.t2 = gregs[7] as usize;
+                    tf.regs.s0 = gregs[8] as usize;
+                    tf.regs.s1 = gregs[9] as usize;
+                    tf.regs.a0 = gregs[10] as usize;
+                    tf.regs.a1 = gregs[11] as usize;
+                    tf.regs.a2 = gregs[12] as usize;
+                    tf.regs.a3 = gregs[13] as usize;
+                    tf.regs.a4 = gregs[14] as usize;
+                    tf.regs.a5 = gregs[15] as usize;
+                    tf.regs.a6 = gregs[16] as usize;
+                    tf.regs.a7 = gregs[17] as usize;
+                    tf.regs.s2 = gregs[18] as usize;
+                    tf.regs.s3 = gregs[19] as usize;
+                    tf.regs.s4 = gregs[20] as usize;
+                    tf.regs.s5 = gregs[21] as usize;
+                    tf.regs.s6 = gregs[22] as usize;
+                    tf.regs.s7 = gregs[23] as usize;
+                    tf.regs.s8 = gregs[24] as usize;
+                    tf.regs.s9 = gregs[25] as usize;
+                    tf.regs.s10 = gregs[26] as usize;
+                    tf.regs.s11 = gregs[27] as usize;
+                    tf.regs.t3 = gregs[28] as usize;
+                    tf.regs.t4 = gregs[29] as usize;
+                    tf.regs.t5 = gregs[30] as usize;
+                    tf.regs.t6 = gregs[31] as usize;
+                } else {
+                    axlog::warn!(
+                        "restore_from_sigreturn: failed to read riscv64 gregs from ucontext_t!"
+                    );
+                }
+            }
             #[cfg(target_arch = "loongarch64")]
             {
                 let gregs_addr = user_ucontext + 184;
                 let mut gregs = [0u64; 32];
-                if process.read_user_bytes(gregs_addr, unsafe {
-                    core::slice::from_raw_parts_mut(gregs.as_mut_ptr() as *mut u8, 256)
-                }).is_ok() {
+                if process
+                    .read_user_bytes(gregs_addr, unsafe {
+                        core::slice::from_raw_parts_mut(gregs.as_mut_ptr() as *mut u8, 256)
+                    })
+                    .is_ok()
+                {
                     tf.regs.ra = gregs[1] as usize;
                     tf.regs.tp = gregs[2] as usize;
                     tf.regs.sp = gregs[3] as usize;
@@ -413,12 +463,33 @@ impl ThreadSignal {
                     tf.regs.s8 = gregs[31] as usize;
                 }
             }
+            let tp = tf.regs.tp;
+            if tp != 0 {
+                let mut buf = [0u8; 8];
+                if tp >= 156 && process.read_user_bytes(tp - 156, &mut buf).is_ok() {
+                    let cancel = u32::from_ne_bytes([buf[0], buf[1], buf[2], buf[3]]);
+                    let canceldisable = buf[4];
+                    let cancelasync = buf[5];
+                    axlog::debug!(
+                        "restore_from_sigreturn: tp={:#x} cancel={} canceldisable={} \
+                         cancelasync={}",
+                        tp,
+                        cancel,
+                        canceldisable,
+                        cancelasync
+                    );
+                }
+            }
             if let Ok(pc) = read_user_signal_pc(process, user_ucontext) {
+                axlog::debug!("restore_from_sigreturn: read PC={:#x}", pc);
                 // Safety: Do not allow restoring a kernel address as the return PC.
                 if pc < axconfig::plat::KERNEL_ASPACE_BASE {
                     set_ip(tf, pc);
                 } else {
-                    axlog::warn!("rt_sigreturn: blocked attempt to restore kernel PC {:#x}", pc);
+                    axlog::warn!(
+                        "rt_sigreturn: blocked attempt to restore kernel PC {:#x}",
+                        pc
+                    );
                 }
             }
             if let Ok(mask) = read_user_signal_mask(process, user_ucontext) {
@@ -429,6 +500,11 @@ impl ThreadSignal {
             .store(sanitize_mask(restored_mask), Ordering::Release);
         self.in_handler.store(false, Ordering::Release);
         self.skip_once.store(true, Ordering::Release);
+        axlog::debug!(
+            "restore_from_sigreturn complete: tf.sepc={:#x}, tf.sp={:#x}",
+            current_ip(tf),
+            current_sp(tf)
+        );
         Ok(signal_return_value(tf))
     }
 
@@ -656,10 +732,7 @@ fn set_sp(tf: &mut TrapFrame, sp: usize) {
 const SIGINFO_FRAME_SIZE: usize = 128;
 const UCONTEXT_FRAME_SIZE: usize = 1024;
 const UCONTEXT_SIGMASK_OFFSET: usize = 40;
-#[cfg(target_arch = "loongarch64")]
 const UCONTEXT_PC_OFFSET: usize = 176;
-#[cfg(not(target_arch = "loongarch64"))]
-const UCONTEXT_PC_OFFSET: usize = 168;
 
 fn write_user_signal_frame(
     thread: &Thread,
@@ -675,20 +748,27 @@ fn write_user_signal_frame(
     thread
         .process()
         .write_user_usize(ucontext_addr + UCONTEXT_SIGMASK_OFFSET, old_mask as usize)?;
+    #[cfg(target_arch = "riscv64")]
+    {
+        // On riscv64, __gregs starts at offset 176 in ucontext_t.
+        let gregs_addr = ucontext_addr + 176;
+        let gregs_bytes =
+            unsafe { core::slice::from_raw_parts(&tf.regs as *const _ as *const u8, 32 * 8) };
+        let _ = thread.process().write_user_bytes(gregs_addr, gregs_bytes);
+    }
+
     thread
         .process()
         .write_user_usize(ucontext_addr + UCONTEXT_PC_OFFSET, current_ip(tf))?;
-    
     #[cfg(target_arch = "loongarch64")]
     {
         // On loongarch64, sc_regs starts at offset 184 in ucontext_t.
         let gregs_addr = ucontext_addr + 184;
-        let gregs_bytes = unsafe {
-            core::slice::from_raw_parts(&tf.regs as *const _ as *const u8, 32 * 8)
-        };
+        let gregs_bytes =
+            unsafe { core::slice::from_raw_parts(&tf.regs as *const _ as *const u8, 32 * 8) };
         let _ = thread.process().write_user_bytes(gregs_addr, gregs_bytes);
     }
-    
+
     Ok((siginfo_addr, ucontext_addr))
 }
 
@@ -709,13 +789,19 @@ pub fn can_signal(caller: &Process, target: &Process) -> bool {
 
 pub fn queue_signal_to_process(process: &Process, sig: usize) -> bool {
     if sig == SIGSTOP as usize {
-        process.stopped_signal_pending.store(sig as i32, Ordering::Release);
-        process.continued_signal_pending.store(false, Ordering::Release);
+        process
+            .stopped_signal_pending
+            .store(sig as i32, Ordering::Release);
+        process
+            .continued_signal_pending
+            .store(false, Ordering::Release);
         if let Some(parent) = process.parent_process() {
             parent.child_exit_event.notify_all(false);
         }
     } else if sig == SIGCONT as usize {
-        process.continued_signal_pending.store(true, Ordering::Release);
+        process
+            .continued_signal_pending
+            .store(true, Ordering::Release);
         process.stopped_signal_pending.store(0, Ordering::Release);
         if let Some(parent) = process.parent_process() {
             parent.child_exit_event.notify_all(false);
@@ -734,13 +820,19 @@ pub fn queue_signal_to_process(process: &Process, sig: usize) -> bool {
 pub fn queue_signal_to_thread(thread: &Thread, sig: usize) -> bool {
     let process = thread.process();
     if sig == SIGSTOP as usize {
-        process.stopped_signal_pending.store(sig as i32, Ordering::Release);
-        process.continued_signal_pending.store(false, Ordering::Release);
+        process
+            .stopped_signal_pending
+            .store(sig as i32, Ordering::Release);
+        process
+            .continued_signal_pending
+            .store(false, Ordering::Release);
         if let Some(parent) = process.parent_process() {
             parent.child_exit_event.notify_all(false);
         }
     } else if sig == SIGCONT as usize {
-        process.continued_signal_pending.store(true, Ordering::Release);
+        process
+            .continued_signal_pending
+            .store(true, Ordering::Release);
         process.stopped_signal_pending.store(0, Ordering::Release);
         if let Some(parent) = process.parent_process() {
             parent.child_exit_event.notify_all(false);
