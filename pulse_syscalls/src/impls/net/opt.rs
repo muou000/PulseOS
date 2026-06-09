@@ -16,6 +16,27 @@ struct TimeVal {
     tv_usec: i64,
 }
 
+#[derive(Copy, Clone, Default, Debug)]
+#[repr(C)]
+struct TpacketReq {
+    tp_block_size: u32,
+    tp_block_nr: u32,
+    tp_frame_size: u32,
+    tp_frame_nr: u32,
+}
+
+#[derive(Copy, Clone, Default, Debug)]
+#[repr(C)]
+struct TpacketReq3 {
+    tp_block_size: u32,
+    tp_block_nr: u32,
+    tp_frame_size: u32,
+    tp_frame_nr: u32,
+    tp_retire_blk_tov: u32,
+    tp_sizeof_priv: u32,
+    tp_feature_req_word: u32,
+}
+
 
 fn read_user_plain<T: Copy>(user_addr: usize) -> Result<T, LinuxError> {
     crate::impls::utils::with_process(|process| {
@@ -162,6 +183,24 @@ pub fn sys_getsockopt(
                 let expected_len = core::mem::size_of::<TimeVal>() as u32;
                 if len >= expected_len {
                     len = expected_len;
+                    if let Err(e) = write_user_plain(optlen, &len) {
+                        return -(e.code() as isize);
+                    }
+                }
+                return 0;
+            }
+            10 => {
+                // SO_OOBINLINE
+                let val: i32 = 0; // Default disabled/false
+                if let Err(e) = write_user_plain(optval, &val) {
+                    return -(e.code() as isize);
+                }
+                let mut len: u32 = match read_user_plain(optlen) {
+                    Ok(l) => l,
+                    Err(e) => return -(e.code() as isize),
+                };
+                if len >= 4 {
+                    len = 4;
                     if let Err(e) = write_user_plain(optlen, &len) {
                         return -(e.code() as isize);
                     }
@@ -382,7 +421,11 @@ pub fn sys_getsockopt(
     }
 
     debug!("sys_getsockopt (unsupported) <= fd: {fd}, level: {level}, optname: {optname}");
-    -(LinuxError::ENOPROTOOPT.code() as isize)
+    let err = match level {
+        0 | 1 | 6 | 41 | 263 => LinuxError::ENOPROTOOPT,
+        _ => LinuxError::EOPNOTSUPP,
+    };
+    -(err.code() as isize)
 }
 
 pub fn sys_setsockopt(
@@ -419,8 +462,8 @@ pub fn sys_setsockopt(
                 }
                 return 0;
             }
-            7 | 8 | 9 | 6 => {
-                // SO_SNDBUF, SO_RCVBUF, SO_KEEPALIVE, SO_BROADCAST
+            7 | 8 | 9 | 6 | 32 | 33 => {
+                // SO_SNDBUF, SO_RCVBUF, SO_KEEPALIVE, SO_BROADCAST, SO_SNDBUFFORCE, SO_RCVBUFFORCE
                 // Stub: return success to avoid failures in applications tuning buffers/keepalives
                 return 0;
             }
@@ -452,6 +495,17 @@ pub fn sys_setsockopt(
                     }
                     SocketInner::Local(_) | SocketInner::Packet(_) => {}
                 }
+                return 0;
+            }
+            10 => {
+                // SO_OOBINLINE
+                if optlen < 4 {
+                    return -(LinuxError::EINVAL.code() as isize);
+                }
+                let _val: i32 = match read_user_plain(optval) {
+                    Ok(v) => v,
+                    Err(e) => return -(e.code() as isize),
+                };
                 return 0;
             }
             _ => {}
@@ -583,6 +637,9 @@ pub fn sys_setsockopt(
                 }
                 match &socket.inner {
                     SocketInner::Packet(p) => {
+                        if p.rx_ring_active.load(Ordering::Acquire) || p.tx_ring_active.load(Ordering::Acquire) {
+                            return -(LinuxError::EBUSY.code() as isize);
+                        }
                         p.version.store(val as u32, Ordering::Release);
                     }
                     _ => return -(LinuxError::EOPNOTSUPP.code() as isize),
@@ -603,6 +660,9 @@ pub fn sys_setsockopt(
                 }
                 match &socket.inner {
                     SocketInner::Packet(p) => {
+                        if p.rx_ring_active.load(Ordering::Acquire) || p.tx_ring_active.load(Ordering::Acquire) {
+                            return -(LinuxError::EBUSY.code() as isize);
+                        }
                         p.reserve.store(val, Ordering::Release);
                     }
                     _ => return -(LinuxError::EOPNOTSUPP.code() as isize),
@@ -620,20 +680,85 @@ pub fn sys_setsockopt(
                 };
                 match &socket.inner {
                     SocketInner::Packet(p) => {
+                        if p.rx_ring_active.load(Ordering::Acquire) || p.tx_ring_active.load(Ordering::Acquire) {
+                            return -(LinuxError::EBUSY.code() as isize);
+                        }
                         p.has_vnet_hdr.store(val != 0, Ordering::Release);
                     }
                     _ => return -(LinuxError::EOPNOTSUPP.code() as isize),
                 }
                 return 0;
             }
-            5 => {
-                // PACKET_RX_RING
+            5 | 6 => {
+                // PACKET_RX_RING (5) / PACKET_TX_RING (6)
                 match &socket.inner {
                     SocketInner::Packet(p) => {
                         let has_vnet_hdr = p.has_vnet_hdr.load(Ordering::Acquire);
                         let version = p.version.load(Ordering::Acquire);
                         if has_vnet_hdr && version < 2 {
                             return -(LinuxError::EINVAL.code() as isize);
+                        }
+
+                        if optlen == 0 {
+                            return -(LinuxError::EINVAL.code() as isize);
+                        }
+
+                        if version == 2 {
+                            // TPACKET_V3
+                            if optlen < core::mem::size_of::<TpacketReq3>() {
+                                return -(LinuxError::EINVAL.code() as isize);
+                            }
+                            let req: TpacketReq3 = match read_user_plain(optval) {
+                                Ok(r) => r,
+                                Err(e) => return -(e.code() as isize),
+                            };
+                            if req.tp_block_nr > 0 {
+                                if req.tp_block_size == 0 || req.tp_block_size % 4096 != 0 {
+                                    return -(LinuxError::EINVAL.code() as isize);
+                                }
+                                if req.tp_sizeof_priv >= req.tp_block_size {
+                                    return -(LinuxError::EINVAL.code() as isize);
+                                }
+                                if req.tp_sizeof_priv > 0x7fffffff {
+                                    return -(LinuxError::EINVAL.code() as isize);
+                                }
+                                if optname == 5 {
+                                    p.rx_ring_active.store(true, Ordering::Release);
+                                } else {
+                                    p.tx_ring_active.store(true, Ordering::Release);
+                                }
+                            } else {
+                                if optname == 5 {
+                                    p.rx_ring_active.store(false, Ordering::Release);
+                                } else {
+                                    p.tx_ring_active.store(false, Ordering::Release);
+                                }
+                            }
+                        } else {
+                            // TPACKET_V1 / TPACKET_V2
+                            if optlen < core::mem::size_of::<TpacketReq>() {
+                                return -(LinuxError::EINVAL.code() as isize);
+                            }
+                            let req: TpacketReq = match read_user_plain(optval) {
+                                Ok(r) => r,
+                                Err(e) => return -(e.code() as isize),
+                            };
+                            if req.tp_block_nr > 0 {
+                                if req.tp_block_size == 0 || req.tp_block_size % 4096 != 0 {
+                                    return -(LinuxError::EINVAL.code() as isize);
+                                }
+                                if optname == 5 {
+                                    p.rx_ring_active.store(true, Ordering::Release);
+                                } else {
+                                    p.tx_ring_active.store(true, Ordering::Release);
+                                }
+                            } else {
+                                if optname == 5 {
+                                    p.rx_ring_active.store(false, Ordering::Release);
+                                } else {
+                                    p.tx_ring_active.store(false, Ordering::Release);
+                                }
+                            }
                         }
                         return 0;
                     }
@@ -644,7 +769,7 @@ pub fn sys_setsockopt(
         }
     }
 
-    warn!(
+    debug!(
         "sys_setsockopt (stub) <= fd: {fd}, level: {level}, optname: {optname} — returning \
          ENOPROTOOPT"
     );

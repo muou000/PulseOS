@@ -425,6 +425,11 @@ setrlimit02
 setrlimit03
 setrlimit04
 setrlimit05
+setsockopt01
+setsockopt02
+setsockopt03
+setsockopt04
+setsockopt09
 settimeofday01
 settimeofday02
 setuid01
@@ -449,6 +454,7 @@ socket01
 socket02
 socketpair01
 socketpair02
+sockioctl01
 stat01
 stat01_64
 stat02
