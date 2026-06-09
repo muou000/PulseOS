@@ -168,7 +168,10 @@ pub fn sys_bind(fd: usize, addr: usize, addrlen: usize) -> isize {
                     return -(e.code() as isize);
                 }
                 let name = String::from_utf8_lossy(&buf).into_owned();
-                alloc::format!("\0{}", name)
+                let mut res = String::with_capacity(name.len() + 1);
+                res.push('\0');
+                res.push_str(&name);
+                res
             } else {
                 // Pathname socket
                 let path_c = match crate::impls::utils::read_user_cstring(addr + 2) {
@@ -367,7 +370,10 @@ pub fn sys_connect(fd: usize, addr: usize, addrlen: usize) -> isize {
                     return -(e.code() as isize);
                 }
                 let name = String::from_utf8_lossy(&buf).into_owned();
-                alloc::format!("\0{}", name)
+                let mut res = String::with_capacity(name.len() + 1);
+                res.push('\0');
+                res.push_str(&name);
+                res
             } else {
                 // Pathname
                 let path_c = match crate::impls::utils::read_user_cstring(addr + 2) {

@@ -53,7 +53,10 @@ fn normalize_target(target: &str) -> String {
     } else if target.starts_with('/') {
         target.to_string()
     } else {
-        format!("/{}", target)
+        let mut res = String::with_capacity(target.len() + 1);
+        res.push('/');
+        res.push_str(target);
+        res
     }
 }
 
@@ -237,9 +240,12 @@ pub fn rename_mount_registry(old_prefix: &str, new_prefix: &str) {
         for record in records.iter_mut() {
             if record.target == old_prefix {
                 record.target = new_prefix.clone();
-            } else if record.target.starts_with(&format!("{}/", old_prefix)) {
-                let suffix = &record.target[old_prefix.len()..];
-                record.target = format!("{}{}", new_prefix, suffix);
+            } else if record.target.starts_with(&old_prefix) && record.target.as_bytes().get(old_prefix.len()) == Some(&b'/') {
+                let suffix = &record.target[old_prefix.len()..]; // Includes the leading '/'
+                let mut res = String::with_capacity(new_prefix.len() + suffix.len());
+                res.push_str(&new_prefix);
+                res.push_str(suffix);
+                record.target = res;
             }
         }
     }
@@ -250,9 +256,12 @@ pub fn rename_mount_registry(old_prefix: &str, new_prefix: &str) {
         for (target, _mp) in mps.iter_mut() {
             if target == &old_prefix {
                 *target = new_prefix.clone();
-            } else if target.starts_with(&format!("{}/", old_prefix)) {
-                let suffix = &target[old_prefix.len()..];
-                *target = format!("{}{}", new_prefix, suffix);
+            } else if target.starts_with(&old_prefix) && target.as_bytes().get(old_prefix.len()) == Some(&b'/') {
+                let suffix = &target[old_prefix.len()..]; // Includes the leading '/'
+                let mut res = String::with_capacity(new_prefix.len() + suffix.len());
+                res.push_str(&new_prefix);
+                res.push_str(suffix);
+                *target = res;
             }
         }
     }
@@ -268,12 +277,18 @@ fn disk_node_name(index: usize) -> String {
         }
         n = n / 26 - 1;
     }
-    format!("vd{}", suffix)
+    let mut res = String::with_capacity(2 + suffix.len());
+    res.push_str("vd");
+    res.push_str(&suffix);
+    res
 }
 
 fn register_mountable_device(source: &str, disk_name: &str, fs: &axfs_ng_vfs::Filesystem) {
     register_mountable_filesystem(source, fs);
-    register_mountable_filesystem(&format!("/dev/{}", disk_name), fs);
+    let mut dev_name = String::with_capacity(5 + disk_name.len());
+    dev_name.push_str("/dev/");
+    dev_name.push_str(disk_name);
+    register_mountable_filesystem(&dev_name, fs);
 }
 
 fn ensure_mount_dir(cx: &FsContext, path: &str) -> axfs_ng_vfs::VfsResult<axfs_ng_vfs::Location> {
@@ -376,9 +391,14 @@ pub fn init_filesystems(mut block_devs: AxDeviceContainer<AxBlockDevice>) {
 
     let root_mp = axfs_ng_vfs::Mountpoint::new_root(&root.fs);
     let cx = FsContext::new(root_mp.root_location());
-    register_mount(&format!("device{}", root.disk_idx), "/", root.fs.name(), "rw,relatime");
+
+    let mut root_dev_str = String::with_capacity(16);
+    use core::fmt::Write;
+    let _ = write!(root_dev_str, "device{}", root.disk_idx);
+
+    register_mount(&root_dev_str, "/", root.fs.name(), "rw,relatime");
     register_mountable_device(
-        &format!("device{}", root.disk_idx),
+        &root_dev_str,
         &disk_node_name(root.disk_idx),
         &root.fs,
     );
@@ -392,7 +412,9 @@ pub fn init_filesystems(mut block_devs: AxDeviceContainer<AxBlockDevice>) {
     });
 
     for cand in candidates {
-        let source = format!("device{}", cand.disk_idx);
+        let mut source = String::with_capacity(16);
+        let _ = write!(source, "device{}", cand.disk_idx);
+
         register_mountable_device(&source, &disk_node_name(cand.disk_idx), &cand.fs);
         info!(
             "  registered block device {} ({}) as {} for user-initiated mount",
@@ -408,8 +430,11 @@ pub fn init_filesystems(mut block_devs: AxDeviceContainer<AxBlockDevice>) {
 
     for i in 0..8 {
         let loop_dev = fs::loop_dev::LoopBlockDevice::new(i);
+        let mut loop_name = String::with_capacity(16);
+        use core::fmt::Write;
+        let _ = write!(loop_name, "loop{}", i);
         dev_nodes.push(fs::BlockDeviceSpec {
-            name: format!("loop{}", i),
+            name: loop_name,
             device: disk::SharedBlockDevice::new(alloc::boxed::Box::new(loop_dev)),
             major: 7,
             minor: i as u32,

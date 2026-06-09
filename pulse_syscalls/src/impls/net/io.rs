@@ -48,7 +48,10 @@ fn resolve_unix_addr(addr: usize, addrlen: usize) -> Result<core::net::SocketAdd
             let mut buf = alloc::vec![0u8; len];
             crate::impls::utils::read_user_bytes(addr + 3, &mut buf)?;
             let name = alloc::string::String::from_utf8_lossy(&buf).into_owned();
-            alloc::format!("\0{}", name)
+            let mut res = alloc::string::String::with_capacity(name.len() + 1);
+            res.push('\0');
+            res.push_str(&name);
+            res
         } else {
             let path_c = crate::impls::utils::read_user_cstring(addr + 2)?;
             path_c.to_str().map(alloc::string::String::from).unwrap_or_else(|_| alloc::string::String::new())

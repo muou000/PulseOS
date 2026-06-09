@@ -165,7 +165,10 @@ impl TaskInner {
 
     /// Get a combined string of the task ID and name.
     pub fn id_name(&self) -> alloc::string::String {
-        alloc::format!("Task({}, {:?})", self.id.as_u64(), *self.name.lock())
+        let mut out = alloc::string::String::with_capacity(32);
+        use core::fmt::Write;
+        let _ = write!(out, "Task({}, {:?})", self.id.as_u64(), *self.name.lock());
+        out
     }
 
     /// Wait for the task to exit, and return the exit code.
