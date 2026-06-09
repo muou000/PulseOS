@@ -119,8 +119,18 @@ impl VdsoTimeData {
         }
         let wall_ns = monotonic_time_nanos() + offset;
         let mono_ns = monotonic_time_nanos();
-        let ticks_per_sec = nanos_to_ticks(NANOS_PER_SEC);
-        let mult_shift = clocks_calc_mult_shift(ticks_per_sec, NANOS_PER_SEC, 10);
+        
+        static CACHED_MULT_SHIFT: AtomicU64 = AtomicU64::new(0);
+        let cached = CACHED_MULT_SHIFT.load(Ordering::Relaxed);
+        let mult_shift = if cached != 0 {
+            (cached as u32, (cached >> 32) as u32)
+        } else {
+            let ticks_per_sec = nanos_to_ticks(NANOS_PER_SEC);
+            let ms = clocks_calc_mult_shift(ticks_per_sec, NANOS_PER_SEC, 10);
+            let val = (ms.0 as u64) | ((ms.1 as u64) << 32);
+            CACHED_MULT_SHIFT.store(val, Ordering::Relaxed);
+            ms
+        };
 
         for clk in self.clock_data.iter_mut() {
             clk.write_seqcount_begin();

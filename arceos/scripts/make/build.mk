@@ -34,6 +34,7 @@ else ifneq ($(filter $(or $(MAKECMDGOALS), $(.DEFAULT_GOAL)), all build run just
   else ifeq ($(APP_TYPE), rust)
     RUSTFLAGS += $(RUSTFLAGS_LINK_ARGS)
   endif
+  RUSTFLAGS += $(EXTRA_RUSTFLAGS)
   $(if $(V), $(info RUSTFLAGS: "$(RUSTFLAGS)"))
   export RUSTFLAGS
 endif

@@ -31,3 +31,4 @@ bitflags.workspace = true
 percpu.workspace = true
 starry-vdso.workspace = true
 kspin = { version = "0.1" }
+hashbrown = "0.16.1"
