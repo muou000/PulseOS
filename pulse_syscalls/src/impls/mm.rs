@@ -46,10 +46,11 @@ pub fn sys_brk(addr: usize) -> isize {
         Err(e) => return -e.code() as isize,
     };
 
-    let mut heap_top = proc.heap_top.lock();
+    let _brk_lock = proc.brk_lock.lock();
+    let old_heap_top = proc.get_heap_top();
 
     if addr == 0 {
-        return *heap_top as isize;
+        return old_heap_top as isize;
     }
 
     if !(pulse_core::config::USER_HEAP_BASE
@@ -57,10 +58,9 @@ pub fn sys_brk(addr: usize) -> isize {
         .contains(&addr)
     {
         axlog::warn!("sys_brk: invalid addr {:#x}", addr);
-        return *heap_top as isize;
+        return old_heap_top as isize;
     }
 
-    let old_heap_top = *heap_top;
     let new_heap_top = addr;
 
     if new_heap_top > old_heap_top {
@@ -105,7 +105,7 @@ pub fn sys_brk(addr: usize) -> isize {
         }
     }
 
-    *heap_top = new_heap_top;
+    proc.set_heap_top(new_heap_top);
     axlog::debug!("sys_brk: updated heap_top to {:#x}", new_heap_top);
     new_heap_top as isize
 }

@@ -4,7 +4,7 @@ use alloc::{
     sync::{Arc, Weak},
     vec::Vec,
 };
-use core::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, AtomicU64, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 
 use axconfig::TASK_STACK_SIZE;
 use axerrno::{AxError, AxErrorKind, AxResult};
@@ -219,73 +219,225 @@ impl FutexTable {
 
 static GLOBAL_FUTEX_TABLE: Lazy<FutexTable> = Lazy::new(|| FutexTable::new());
 
+/// 进程凭证
+#[derive(Clone, Debug)]
+pub struct Credentials {
+    /// 真实用户ID
+    pub ruid: u32,
+    /// 有效用户ID
+    pub euid: u32,
+    /// 保存的用户ID
+    pub suid: u32,
+    /// 文件系统用户ID
+    pub fsuid: u32,
+    /// 真实组ID
+    pub rgid: u32,
+    /// 有效组ID
+    pub egid: u32,
+    /// 保存的组ID
+    pub sgid: u32,
+    /// 文件系统组ID
+    pub fsgid: u32,
+    /// 允许的能力集
+    pub cap_permitted: u64,
+    /// 有效的能力集
+    pub cap_effective: u64,
+    /// 可继承的能力集
+    pub cap_inheritable: u64,
+    /// 默认权限掩码
+    pub umask: u32,
+    /// 附加组ID 列表
+    pub groups: Vec<u32>,
+}
+
+impl Credentials {
+    fn new(
+        ruid: u32,
+        euid: u32,
+        suid: u32,
+        fsuid: u32,
+        rgid: u32,
+        egid: u32,
+        sgid: u32,
+        fsgid: u32,
+        cap_permitted: u64,
+        cap_effective: u64,
+        cap_inheritable: u64,
+        umask: u32,
+        groups: Vec<u32>,
+    ) -> Self {
+        Self {
+            ruid,
+            euid,
+            suid,
+            fsuid,
+            rgid,
+            egid,
+            sgid,
+            fsgid,
+            cap_permitted,
+            cap_effective,
+            cap_inheritable,
+            umask,
+            groups,
+        }
+    }
+}
+
+/// 进程资源限制上下文
+#[derive(Debug)]
+pub struct ResourceContext {
+    /// 资源上限限制状态
+    pub rlimit_state: RlimitState,
+    /// 物理内存锁定状态与限制
+    pub memlock_state: MemlockState,
+}
+
+/// UTS 命名空间
+#[derive(Clone)]
+pub struct UtsNamespace {
+    /// 主机名称
+    pub hostname: Arc<RwLock<[u8; 65]>>,
+}
+
+/// IPC 资源上下文
+pub struct IpcContext {
+    /// 共享内存注册表
+    pub shared_memory: Arc<RwLock<BTreeMap<VirtAddr, Arc<Mutex<crate::ipc::shm::ShmInner>>>>>,
+    /// 信号量退出撤销记录
+    pub sem_undos: Mutex<Vec<crate::ipc::sem::SemUndoEntry>>,
+}
+
+/// vfork 挂起同步控制上下文
+pub struct VforkContext {
+    /// 是否开启 vfork 等待
+    pub wait_enabled: bool,
+    /// vfork 操作是否已完成
+    pub done: AtomicBool,
+    /// 用于通知和等待 vfork 完成的等待队列
+    pub event: WaitQueue,
+}
+
+/// 进程时间与定时器上下文
+pub struct TimeContext {
+    /// 用户态执行时间
+    pub user_time_ns: AtomicU64,
+    /// 内核态执行时间
+    pub sys_time_ns: AtomicU64,
+    /// 子进程用户态消耗时间
+    pub child_user_time_ns: AtomicU64,
+    /// 子进程内核态消耗时间
+    pub child_sys_time_ns: AtomicU64,
+    /// 真实时间定时器截止单调时间戳
+    pub itimer_real_deadline_ns: AtomicU64,
+    /// 真实时间定时器重载时间间隔
+    pub itimer_real_interval_ns: AtomicU64,
+    /// 虚拟时间定时器剩余时间
+    pub itimer_virt_remaining_ns: AtomicU64,
+    /// 虚拟时间定时器重载时间间隔
+    pub itimer_virt_interval_ns: AtomicU64,
+    /// 剖析定时器剩余时间
+    pub itimer_prof_remaining_ns: AtomicU64,
+    /// 剖析定时器重载时间间隔
+    pub itimer_prof_interval_ns: AtomicU64,
+}
+
+impl TimeContext {
+    fn new() -> Self {
+        Self {
+            user_time_ns: AtomicU64::new(0),
+            sys_time_ns: AtomicU64::new(0),
+            child_user_time_ns: AtomicU64::new(0),
+            child_sys_time_ns: AtomicU64::new(0),
+            itimer_real_deadline_ns: AtomicU64::new(0),
+            itimer_real_interval_ns: AtomicU64::new(0),
+            itimer_virt_remaining_ns: AtomicU64::new(0),
+            itimer_virt_interval_ns: AtomicU64::new(0),
+            itimer_prof_remaining_ns: AtomicU64::new(0),
+            itimer_prof_interval_ns: AtomicU64::new(0),
+        }
+    }
+}
+
+/// 进程控制块
 pub struct Process {
+    /// 进程ID
     pid: u64,
+    /// 父进程ID
     parent_pid: AtomicU64,
-    parent: Mutex<Option<Weak<Process>>>,
-    aspace: Mutex<Arc<Mutex<AddrSpace>>>,
-    pub heap_top: Arc<Mutex<usize>>,
-    fs_context: Mutex<Arc<Mutex<FsContext>>>,
+    /// 父进程弱引用
+    parent: RwLock<Option<Weak<Process>>>,
+    /// 虚拟地址空间
+    aspace: RwLock<Arc<Mutex<AddrSpace>>>,
+    /// 堆顶指针
+    pub heap_top: Arc<AtomicUsize>,
+    /// brk 扩展排他锁
+    pub brk_lock: Mutex<()>,
+    /// 文件系统根目录与当前工作目录上下文
+    fs_context: RwLock<Arc<Mutex<FsContext>>>,
+    /// 文件描述符表
     fd_table: RwLock<SharedFdTable>,
+    /// 启动时的单调时间
     pub start_mono_ns: u64,
-    pub user_time_ns: Arc<AtomicU64>,
-    pub sys_time_ns: Arc<AtomicU64>,
-    pub child_user_time_ns: Arc<AtomicU64>,
-    pub child_sys_time_ns: Arc<AtomicU64>,
-    pub stack_top: Mutex<usize>,
-    pub entry: Mutex<usize>,
+    /// CPU 消耗时间及Itimer定时器
+    pub time_context: TimeContext,
+    /// 用户态栈顶指针
+    pub stack_top: AtomicUsize,
+    /// 程序入口地址
+    pub entry: AtomicUsize,
+    /// TID列表
     threads: SpinNoIrq<Vec<u64>>,
+    /// 线程的任务引用计数列表
     task_refs: SpinNoIrq<Vec<AxTaskRef>>,
+    /// 子进程列表，使用自旋锁保护
     children: SpinNoIrq<Vec<Arc<Process>>>,
+    /// 子进程退出等待事件队列
     pub child_exit_event: WaitQueue,
+    /// 标志进程是否已处于僵尸状态
     zombie: AtomicBool,
+    /// 用户空间分配资源是否已经被全部释放
     user_resources_released: AtomicBool,
+    /// 退出码
     exit_code: AtomicI32,
     /// 信号退出信息。
     /// 0 = 正常退出，>0 且低 7 位为信号号，bit8 (0x100) 为 core dump 标志
     exit_signal: AtomicI32,
+    /// 标志进程组是否正在退出
     group_exiting: AtomicBool,
+    /// 进程组退出码
     group_exit_code: AtomicI32,
+    /// Futex管理表
     futex_table: FutexTable,
-    vfork_wait_enabled: AtomicBool,
-    vfork_done: AtomicBool,
-    vfork_event: WaitQueue,
-    ruid: AtomicU32,
-    euid: AtomicU32,
-    suid: AtomicU32,
-    fsuid: AtomicU32,
-    rgid: AtomicU32,
-    egid: AtomicU32,
-    sgid: AtomicU32,
-    fsgid: AtomicU32,
-    cap_permitted: AtomicU64,
-    cap_effective: AtomicU64,
-    cap_inheritable: AtomicU64,
-    umask: AtomicU32,
-    rlimit_state: Mutex<RlimitState>,
-    memlock_state: Mutex<MemlockState>,
+    /// 当以 vfork 创建子进程时挂起父进程的同步机制
+    vfork_context: Option<VforkContext>,
+    /// 进程安全凭证
+    pub credentials: RwLock<Arc<Credentials>>,
+    /// 进程的系统级资源限制限制缓存
+    pub resources: Mutex<ResourceContext>,
+    /// 组内共享的信号行为及挂起信号控制
     signal_shared: Arc<SignalShared>,
-    exec_path: Mutex<Option<String>>,
-    pub args: Mutex<Vec<String>>,
-    signal_trampoline: Mutex<usize>,
-    pub shared_memory: Arc<Mutex<BTreeMap<VirtAddr, Arc<Mutex<crate::ipc::shm::ShmInner>>>>>,
-    pub sem_undos: Mutex<Vec<crate::ipc::sem::SemUndoEntry>>,
-    /// ITIMER_REAL state: (deadline_ns, interval_ns).
-    /// 0 means the timer is disarmed. Uses atomics for interrupt-context safety.
-    itimer_real_deadline_ns: AtomicU64,
-    itimer_real_interval_ns: AtomicU64,
-    itimer_virt_remaining_ns: AtomicU64,
-    itimer_virt_interval_ns: AtomicU64,
-    itimer_prof_remaining_ns: AtomicU64,
-    itimer_prof_interval_ns: AtomicU64,
+    /// 进程可执行文件的绝对路径
+    exec_path: RwLock<Option<String>>,
+    /// 命令行参数列表
+    pub args: RwLock<Vec<String>>,
+    /// 用户态信号处理器蹦床地址
+    signal_trampoline: AtomicUsize,
+    /// 共享内存与信号量撤销记录等 IPC 相关资源
+    pub ipc: IpcContext,
+    /// 被停止的挂起信号状态掩码
     pub stopped_signal_pending: AtomicI32,
+    /// 进程是否收到 SIGCONT 信号并继续运行的标志
     pub continued_signal_pending: AtomicBool,
+    /// 进程组标识符 (PGID)
     pgid: AtomicU64,
+    /// 进程死亡时的死亡信号标志 (pdeath_sig)
     pub pdeath_sig: AtomicI32,
+    /// 进程是否允许 Core Dump 的标志位 (Dumpable)
     pub dumpable: AtomicI32,
+    /// 标志此进程是否曾被重新指定父进程（收养）
     pub reparented: AtomicBool,
-    groups: Mutex<Vec<u32>>,
-    hostname: Mutex<Arc<RwLock<[u8; 65]>>>,
+    /// UTS 网络主机名隔离命名空间，通过 Arc 的 COW 机制实现命名空间共享和按需隔离
+    uts_ns: RwLock<Arc<UtsNamespace>>,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -431,7 +583,7 @@ impl Process {
     }
 
     pub fn fs_context_handle(&self) -> Arc<Mutex<FsContext>> {
-        self.fs_context.lock().clone()
+        self.fs_context.read().clone()
     }
 
     pub fn fd_table(&self) -> SharedFdTable {
@@ -439,20 +591,21 @@ impl Process {
     }
 
     pub fn hostname_handle(&self) -> Arc<RwLock<[u8; 65]>> {
-        self.hostname.lock().clone()
+        self.uts_ns.read().hostname.clone()
     }
 
     pub fn set_hostname_handle(&self, handle: Arc<RwLock<[u8; 65]>>) {
-        *self.hostname.lock() = handle;
+        let mut uts = self.uts_ns.write();
+        Arc::make_mut(&mut uts).hostname = handle;
     }
 
     pub fn unshare_fs(&self) -> AxResult<()> {
         let new_fs = {
             let binding = self.fs_context_handle();
-            let fs = binding.lock();
-            fs.clone()
+            let fs = binding.lock().clone();
+            fs
         };
-        let mut slot = self.fs_context.lock();
+        let mut slot = self.fs_context.write();
         *slot = Arc::new(Mutex::new(new_fs));
         Ok(())
     }
@@ -470,8 +623,9 @@ impl Process {
 
     pub fn unshare_uts(&self) {
         let current_hostname = *self.hostname_handle().read();
-        let mut slot = self.hostname.lock();
-        *slot = Arc::new(RwLock::new(current_hostname));
+        *self.uts_ns.write() = Arc::new(UtsNamespace {
+            hostname: Arc::new(RwLock::new(current_hostname)),
+        });
     }
 
     fn clone_private_fs_context(parent: &Process) -> AxResult<Arc<Mutex<FsContext>>> {
@@ -493,7 +647,7 @@ impl Process {
     }
 
     pub fn exec_path(&self) -> Option<String> {
-        self.exec_path.lock().clone()
+        self.exec_path.read().clone()
     }
 
     pub fn exec_path_or_default(&self) -> String {
@@ -501,15 +655,15 @@ impl Process {
     }
 
     pub fn set_exec_path(&self, path: String) {
-        *self.exec_path.lock() = Some(path);
+        *self.exec_path.write() = Some(path);
     }
 
     pub fn signal_trampoline(&self) -> usize {
-        *self.signal_trampoline.lock()
+        self.signal_trampoline.load(Ordering::Acquire)
     }
 
     pub fn set_signal_trampoline(&self, trampoline: usize) {
-        *self.signal_trampoline.lock() = trampoline;
+        self.signal_trampoline.store(trampoline, Ordering::Release);
     }
 
     pub fn parent_pid(&self) -> u64 {
@@ -537,125 +691,140 @@ impl Process {
     }
 
     pub fn ruid(&self) -> u32 {
-        self.ruid.load(Ordering::Acquire)
+        self.credentials.read().ruid
     }
 
     pub fn euid(&self) -> u32 {
-        self.euid.load(Ordering::Acquire)
+        self.credentials.read().euid
     }
 
     pub fn suid(&self) -> u32 {
-        self.suid.load(Ordering::Acquire)
+        self.credentials.read().suid
     }
 
     pub fn fsuid(&self) -> u32 {
-        self.fsuid.load(Ordering::Acquire)
+        self.credentials.read().fsuid
     }
 
     pub fn rgid(&self) -> u32 {
-        self.rgid.load(Ordering::Acquire)
+        self.credentials.read().rgid
     }
 
     pub fn egid(&self) -> u32 {
-        self.egid.load(Ordering::Acquire)
+        self.credentials.read().egid
     }
 
     pub fn sgid(&self) -> u32 {
-        self.sgid.load(Ordering::Acquire)
+        self.credentials.read().sgid
     }
 
     pub fn fsgid(&self) -> u32 {
-        self.fsgid.load(Ordering::Acquire)
+        self.credentials.read().fsgid
     }
 
     pub fn umask(&self) -> u32 {
-        self.umask.load(Ordering::Acquire)
+        self.credentials.read().umask
     }
 
     pub fn set_umask(&self, umask: u32) -> u32 {
-        self.umask.swap(umask, Ordering::AcqRel)
+        let mut creds = self.credentials.read().as_ref().clone();
+        let old = creds.umask;
+        creds.umask = umask;
+        *self.credentials.write() = Arc::new(creds);
+        old
     }
 
     pub fn set_fsuid(&self, uid: u32) -> u32 {
-        self.fsuid.swap(uid, Ordering::AcqRel)
+        let mut creds = self.credentials.read().as_ref().clone();
+        let old = creds.fsuid;
+        creds.fsuid = uid;
+        *self.credentials.write() = Arc::new(creds);
+        old
     }
 
     pub fn set_fsgid(&self, gid: u32) -> u32 {
-        self.fsgid.swap(gid, Ordering::AcqRel)
+        let mut creds = self.credentials.read().as_ref().clone();
+        let old = creds.fsgid;
+        creds.fsgid = gid;
+        *self.credentials.write() = Arc::new(creds);
+        old
     }
 
     pub fn uid_snapshot(&self) -> (u32, u32, u32) {
-        (self.ruid(), self.euid(), self.suid())
+        let creds = self.credentials.read();
+        (creds.ruid, creds.euid, creds.suid)
     }
 
     pub fn gid_snapshot(&self) -> (u32, u32, u32) {
-        (self.rgid(), self.egid(), self.sgid())
+        let creds = self.credentials.read();
+        (creds.rgid, creds.egid, creds.sgid)
     }
 
     pub fn capabilities(&self) -> (u64, u64, u64) {
+        let creds = self.credentials.read();
         (
-            self.cap_permitted.load(Ordering::Acquire),
-            self.cap_effective.load(Ordering::Acquire),
-            self.cap_inheritable.load(Ordering::Acquire),
+            creds.cap_permitted,
+            creds.cap_effective,
+            creds.cap_inheritable,
         )
     }
 
     pub fn set_capabilities(&self, p: u64, e: u64, i: u64) {
-        self.cap_permitted.store(p, Ordering::Release);
-        self.cap_effective.store(e, Ordering::Release);
-        self.cap_inheritable.store(i, Ordering::Release);
+        let mut creds = self.credentials.read().as_ref().clone();
+        creds.cap_permitted = p;
+        creds.cap_effective = e;
+        creds.cap_inheritable = i;
+        *self.credentials.write() = Arc::new(creds);
     }
 
     pub fn has_capability(&self, cap: u32) -> bool {
         if cap >= 64 {
             return false;
         }
-        let effective = self.cap_effective.load(Ordering::Acquire);
+        let effective = self.credentials.read().cap_effective;
         (effective & (1 << cap)) != 0
     }
 
     pub fn set_uids(&self, ruid: u32, euid: u32, suid: u32) {
-        let old_ruid = self.ruid();
-        let old_euid = self.euid();
-        let old_suid = self.suid();
+        let mut creds = self.credentials.read().as_ref().clone();
+        let old_ruid = creds.ruid;
+        let old_euid = creds.euid;
+        let old_suid = creds.suid;
 
-        self.ruid.store(ruid, Ordering::Release);
-        self.euid.store(euid, Ordering::Release);
-        self.suid.store(suid, Ordering::Release);
+        creds.ruid = ruid;
+        creds.euid = euid;
+        creds.suid = suid;
 
         if euid != old_euid {
-            self.fsuid.store(euid, Ordering::Release);
+            creds.fsuid = euid;
         }
 
         // Capability transition logic according to capabilities(7)
-        // 1. If euid is changed from 0 to nonzero, then all capabilities are cleared from the effective set.
         if old_euid == 0 && euid != 0 {
-            self.cap_effective.store(0, Ordering::Release);
+            creds.cap_effective = 0;
         }
-        // 2. If euid is changed from nonzero to 0, then the permitted set is copied to the effective set.
         if old_euid != 0 && euid == 0 {
-            let permitted = self.cap_permitted.load(Ordering::Acquire);
-            self.cap_effective.store(permitted, Ordering::Release);
+            creds.cap_effective = creds.cap_permitted;
         }
-        // 3. If one or more of the real, effective, or saved set user IDs was 0,
-        //    and as the result of the UID change all of these IDs have a nonzero value,
-        //    then all capabilities are cleared from the permitted and effective capability sets.
         if (old_ruid == 0 || old_euid == 0 || old_suid == 0)
             && (ruid != 0 && euid != 0 && suid != 0)
         {
-            self.cap_permitted.store(0, Ordering::Release);
-            self.cap_effective.store(0, Ordering::Release);
+            creds.cap_permitted = 0;
+            creds.cap_effective = 0;
         }
+        *self.credentials.write() = Arc::new(creds);
     }
 
     pub fn set_gids(&self, rgid: u32, egid: u32, sgid: u32) {
-        let old_egid = self.egid();
-        self.rgid.store(rgid, Ordering::Release);
-        self.egid.store(egid, Ordering::Release);
-        self.sgid.store(sgid, Ordering::Release);
+        let mut creds = self.credentials.read().as_ref().clone();
+        let old_egid = creds.egid;
+        creds.rgid = rgid;
+        creds.egid = egid;
+        creds.sgid = sgid;
         if egid != old_egid {
-            self.fsgid.store(egid, Ordering::Release);
+            creds.fsgid = egid;
         }
+        *self.credentials.write() = Arc::new(creds);
     }
 
     pub fn is_root_user(&self) -> bool {
@@ -663,54 +832,45 @@ impl Process {
     }
 
     pub fn groups(&self) -> Vec<u32> {
-        self.groups.lock().clone()
+        self.credentials.read().groups.clone()
     }
 
     pub fn set_groups(&self, groups: Vec<u32>) {
-        *self.groups.lock() = groups;
+        let mut creds = self.credentials.read().as_ref().clone();
+        creds.groups = groups;
+        *self.credentials.write() = Arc::new(creds);
     }
 
     pub fn memlock_limit_snapshot(&self) -> (u64, u64) {
-        let state = self.memlock_state.lock();
-        (state.soft_limit, state.hard_limit)
+        let res = self.resources.lock();
+        (res.memlock_state.soft_limit, res.memlock_state.hard_limit)
     }
 
     pub fn memlock_set_limit(&self, soft: u64, hard: u64) {
-        let mut state = self.memlock_state.lock();
-        state.soft_limit = soft;
-        state.hard_limit = hard;
+        let mut res = self.resources.lock();
+        res.memlock_state.soft_limit = soft;
+        res.memlock_state.hard_limit = hard;
     }
 
     pub fn get_rlimit(&self, resource: u32) -> Option<rlimit64> {
+        let res = self.resources.lock();
         match resource {
-            RLIMIT_STACK => {
-                let state = self.rlimit_state.lock();
-                Some(rlimit64 {
-                    rlim_cur: state.stack_soft,
-                    rlim_max: state.stack_hard,
-                })
-            }
-            RLIMIT_NOFILE => {
-                let state = self.rlimit_state.lock();
-                Some(rlimit64 {
-                    rlim_cur: state.nofile_soft,
-                    rlim_max: state.nofile_hard,
-                })
-            }
-            RLIMIT_CORE => {
-                let state = self.rlimit_state.lock();
-                Some(rlimit64 {
-                    rlim_cur: state.core_soft,
-                    rlim_max: state.core_hard,
-                })
-            }
-            RLIMIT_MEMLOCK => {
-                let state = self.memlock_state.lock();
-                Some(rlimit64 {
-                    rlim_cur: state.soft_limit,
-                    rlim_max: state.hard_limit,
-                })
-            }
+            RLIMIT_STACK => Some(rlimit64 {
+                rlim_cur: res.rlimit_state.stack_soft,
+                rlim_max: res.rlimit_state.stack_hard,
+            }),
+            RLIMIT_NOFILE => Some(rlimit64 {
+                rlim_cur: res.rlimit_state.nofile_soft,
+                rlim_max: res.rlimit_state.nofile_hard,
+            }),
+            RLIMIT_CORE => Some(rlimit64 {
+                rlim_cur: res.rlimit_state.core_soft,
+                rlim_max: res.rlimit_state.core_hard,
+            }),
+            RLIMIT_MEMLOCK => Some(rlimit64 {
+                rlim_cur: res.memlock_state.soft_limit,
+                rlim_max: res.memlock_state.hard_limit,
+            }),
             _ => None,
         }
     }
@@ -719,35 +879,32 @@ impl Process {
         if limit.rlim_cur > limit.rlim_max {
             return Err(AxError::InvalidInput);
         }
+        let mut res = self.resources.lock();
         match resource {
             RLIMIT_STACK => {
                 if limit.rlim_max > MAX_STACK_LIMIT_BYTES {
                     return Err(AxError::InvalidInput);
                 }
-                let mut state = self.rlimit_state.lock();
-                state.stack_soft = limit.rlim_cur;
-                state.stack_hard = limit.rlim_max;
+                res.rlimit_state.stack_soft = limit.rlim_cur;
+                res.rlimit_state.stack_hard = limit.rlim_max;
                 Ok(())
             }
             RLIMIT_NOFILE => {
                 if limit.rlim_max > MAX_NOFILE_LIMIT {
                     return Err(AxError::InvalidInput);
                 }
-                let mut state = self.rlimit_state.lock();
-                state.nofile_soft = limit.rlim_cur;
-                state.nofile_hard = limit.rlim_max;
+                res.rlimit_state.nofile_soft = limit.rlim_cur;
+                res.rlimit_state.nofile_hard = limit.rlim_max;
                 Ok(())
             }
             RLIMIT_CORE => {
-                let mut state = self.rlimit_state.lock();
-                state.core_soft = limit.rlim_cur;
-                state.core_hard = limit.rlim_max;
+                res.rlimit_state.core_soft = limit.rlim_cur;
+                res.rlimit_state.core_hard = limit.rlim_max;
                 Ok(())
             }
             RLIMIT_MEMLOCK => {
-                let mut state = self.memlock_state.lock();
-                state.soft_limit = limit.rlim_cur;
-                state.hard_limit = limit.rlim_max;
+                res.memlock_state.soft_limit = limit.rlim_cur;
+                res.memlock_state.hard_limit = limit.rlim_max;
                 Ok(())
             }
             _ => Err(AxError::InvalidInput),
@@ -755,15 +912,15 @@ impl Process {
     }
 
     pub fn memlock_locked_bytes(&self) -> usize {
-        self.memlock_state.lock().locked_bytes
+        self.resources.lock().memlock_state.locked_bytes
     }
 
     pub fn memlock_future_enabled(&self) -> bool {
-        self.memlock_state.lock().mlock_future
+        self.resources.lock().memlock_state.mlock_future
     }
 
     pub fn memlock_set_future(&self, enabled: bool) {
-        self.memlock_state.lock().mlock_future = enabled;
+        self.resources.lock().memlock_state.mlock_future = enabled;
     }
 
     pub fn memlock_try_lock_range(
@@ -776,19 +933,20 @@ impl Process {
             return Ok(());
         }
         let end = start.checked_add(len).ok_or(AxError::BadAddress)?;
-        let mut state = self.memlock_state.lock();
-        let additional = Self::memlock_additional_bytes(&state.ranges, start, end);
+        let mut res = self.resources.lock();
+        let additional = Self::memlock_additional_bytes(&res.memlock_state.ranges, start, end);
         if additional == 0 {
             return Ok(());
         }
-        if !privileged && state.soft_limit != u64::MAX {
-            let new_total = (state.locked_bytes as u128).saturating_add(additional as u128);
-            if new_total > state.soft_limit as u128 {
+        if !privileged && res.memlock_state.soft_limit != u64::MAX {
+            let new_total =
+                (res.memlock_state.locked_bytes as u128).saturating_add(additional as u128);
+            if new_total > res.memlock_state.soft_limit as u128 {
                 return Err(AxError::NoMemory);
             }
         }
-        Self::memlock_insert_range(&mut state.ranges, start, end)?;
-        state.locked_bytes = state.locked_bytes.saturating_add(additional);
+        Self::memlock_insert_range(&mut res.memlock_state.ranges, start, end)?;
+        res.memlock_state.locked_bytes = res.memlock_state.locked_bytes.saturating_add(additional);
         Ok(())
     }
 
@@ -797,17 +955,25 @@ impl Process {
             return Ok(());
         }
         let end = start.checked_add(len).ok_or(AxError::BadAddress)?;
-        let mut state = self.memlock_state.lock();
-        let removed = Self::memlock_remove_range(&mut state.ranges, start, end)?;
-        state.locked_bytes = state.locked_bytes.saturating_sub(removed);
+        let mut res = self.resources.lock();
+        let removed = Self::memlock_remove_range(&mut res.memlock_state.ranges, start, end)?;
+        res.memlock_state.locked_bytes = res.memlock_state.locked_bytes.saturating_sub(removed);
         Ok(())
     }
 
     pub fn memlock_unlock_all(&self) {
-        let mut state = self.memlock_state.lock();
-        state.ranges.clear();
-        state.locked_bytes = 0;
-        state.mlock_future = false;
+        let mut res = self.resources.lock();
+        res.memlock_state.ranges.clear();
+        res.memlock_state.locked_bytes = 0;
+        res.memlock_state.mlock_future = false;
+    }
+
+    pub fn get_heap_top(&self) -> usize {
+        self.heap_top.load(Ordering::Acquire)
+    }
+
+    pub fn set_heap_top(&self, top: usize) {
+        self.heap_top.store(top, Ordering::Release);
     }
 
     fn try_fault_in_user_range(
@@ -891,14 +1057,14 @@ impl Process {
     }
 
     pub fn aspace_handle(&self) -> Arc<Mutex<AddrSpace>> {
-        self.aspace.lock().clone()
+        self.aspace.read().clone()
     }
 
     pub fn replace_aspace_handle(
         &self,
         new_aspace: Arc<Mutex<AddrSpace>>,
     ) -> Arc<Mutex<AddrSpace>> {
-        let mut slot = self.aspace.lock();
+        let mut slot = self.aspace.write();
         core::mem::replace(&mut *slot, new_aspace)
     }
 
@@ -944,7 +1110,7 @@ impl Process {
         &self,
         entry: crate::fd_table::FdEntry,
     ) -> Result<usize, axerrno::LinuxError> {
-        let limit = self.rlimit_state.lock().nofile_soft as usize;
+        let limit = self.resources.lock().rlimit_state.nofile_soft as usize;
         let binding = self.fd_table();
         let mut table = binding.write();
         let fd = table.insert_next(entry)?;
@@ -960,7 +1126,7 @@ impl Process {
         min_fd: usize,
         entry: crate::fd_table::FdEntry,
     ) -> Result<usize, axerrno::LinuxError> {
-        let limit = self.rlimit_state.lock().nofile_soft as usize;
+        let limit = self.resources.lock().rlimit_state.nofile_soft as usize;
         let binding = self.fd_table();
         let mut table = binding.write();
         let fd = table.insert_from(min_fd, entry)?;
@@ -976,7 +1142,7 @@ impl Process {
         fd: usize,
         entry: crate::fd_table::FdEntry,
     ) -> Result<(), axerrno::LinuxError> {
-        let limit = self.rlimit_state.lock().nofile_soft as usize;
+        let limit = self.resources.lock().rlimit_state.nofile_soft as usize;
         if fd >= limit {
             return Err(axerrno::LinuxError::EBADF);
         }
@@ -1178,20 +1344,21 @@ impl Process {
         let default_name = b"pulseos";
         hostname_buf[..default_name.len()].copy_from_slice(default_name);
 
+        let uts_ns = RwLock::new(Arc::new(UtsNamespace {
+            hostname: Arc::new(RwLock::new(hostname_buf)),
+        }));
+
         Ok(Arc::new(Self {
             pid,
             parent_pid: AtomicU64::new(0),
-            parent: Mutex::new(None),
+            parent: RwLock::new(None),
             start_mono_ns: axhal::time::monotonic_time_nanos() as u64,
-            aspace: Mutex::new(Arc::new(Mutex::new(aspace))),
-            fs_context: Mutex::new(Arc::new(Mutex::new(fs_context))),
+            aspace: RwLock::new(Arc::new(Mutex::new(aspace))),
+            fs_context: RwLock::new(Arc::new(Mutex::new(fs_context))),
             fd_table: RwLock::new(Arc::new(RwLock::new(fd_table))),
-            user_time_ns: Arc::new(AtomicU64::new(0)),
-            sys_time_ns: Arc::new(AtomicU64::new(0)),
-            child_user_time_ns: Arc::new(AtomicU64::new(0)),
-            child_sys_time_ns: Arc::new(AtomicU64::new(0)),
-            stack_top: Mutex::new(USER_STACK_TOP),
-            entry: Mutex::new(0),
+            time_context: TimeContext::new(),
+            stack_top: AtomicUsize::new(USER_STACK_TOP),
+            entry: AtomicUsize::new(0),
             threads: SpinNoIrq::new(alloc::vec![pid]),
             task_refs: SpinNoIrq::new(Vec::new()),
             children: SpinNoIrq::new(Vec::new()),
@@ -1203,44 +1370,43 @@ impl Process {
             group_exiting: AtomicBool::new(false),
             group_exit_code: AtomicI32::new(0),
             futex_table: FutexTable::new(),
-            vfork_wait_enabled: AtomicBool::new(false),
-            vfork_done: AtomicBool::new(false),
-            vfork_event: WaitQueue::new(),
-            ruid: AtomicU32::new(0),
-            euid: AtomicU32::new(0),
-            suid: AtomicU32::new(0),
-            fsuid: AtomicU32::new(0),
-            rgid: AtomicU32::new(0),
-            heap_top: Arc::new(Mutex::new(USER_HEAP_BASE + USER_HEAP_SIZE)),
-            egid: AtomicU32::new(0),
-            sgid: AtomicU32::new(0),
-            fsgid: AtomicU32::new(0),
-            cap_permitted: AtomicU64::new(u64::MAX),
-            cap_effective: AtomicU64::new(u64::MAX),
-            cap_inheritable: AtomicU64::new(0),
-            umask: AtomicU32::new(0o022),
-            rlimit_state: Mutex::new(RlimitState::default()),
-            memlock_state: Mutex::new(MemlockState::new()),
+            vfork_context: None,
+            heap_top: Arc::new(AtomicUsize::new(USER_HEAP_BASE + USER_HEAP_SIZE)),
+            brk_lock: Mutex::new(()),
+            credentials: RwLock::new(Arc::new(Credentials::new(
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                u64::MAX,
+                u64::MAX,
+                0,
+                0o022,
+                Vec::new(),
+            ))),
+            resources: Mutex::new(ResourceContext {
+                rlimit_state: RlimitState::default(),
+                memlock_state: MemlockState::new(),
+            }),
             signal_shared: SignalShared::new(),
-            exec_path: Mutex::new(None),
-            args: Mutex::new(alloc::vec![String::from("pulse_init")]),
-            signal_trampoline: Mutex::new(0),
-            shared_memory: Arc::new(Mutex::new(BTreeMap::new())),
-            sem_undos: Mutex::new(Vec::new()),
-            itimer_real_deadline_ns: AtomicU64::new(0),
-            itimer_real_interval_ns: AtomicU64::new(0),
-            itimer_virt_remaining_ns: AtomicU64::new(0),
-            itimer_virt_interval_ns: AtomicU64::new(0),
-            itimer_prof_remaining_ns: AtomicU64::new(0),
-            itimer_prof_interval_ns: AtomicU64::new(0),
+            exec_path: RwLock::new(None),
+            args: RwLock::new(alloc::vec![String::from("pulse_init")]),
+            signal_trampoline: AtomicUsize::new(0),
+            ipc: IpcContext {
+                shared_memory: Arc::new(RwLock::new(BTreeMap::new())),
+                sem_undos: Mutex::new(Vec::new()),
+            },
             stopped_signal_pending: AtomicI32::new(0),
             continued_signal_pending: AtomicBool::new(false),
             pgid: AtomicU64::new(pid),
             pdeath_sig: AtomicI32::new(0),
             dumpable: AtomicI32::new(1),
             reparented: AtomicBool::new(false),
-            groups: Mutex::new(Vec::new()),
-            hostname: Mutex::new(Arc::new(RwLock::new(hostname_buf))),
+            uts_ns,
         }))
     }
 
@@ -1260,23 +1426,23 @@ impl Process {
         let heap_top = if share_vm {
             parent.heap_top.clone()
         } else {
-            Arc::new(Mutex::new(*parent.heap_top.lock()))
+            Arc::new(AtomicUsize::new(parent.get_heap_top()))
         };
         let shared_memory = if share_vm {
-            parent.shared_memory.clone()
+            parent.ipc.shared_memory.clone()
         } else {
             let mut new_shm = BTreeMap::new();
-            let parent_shm = parent.shared_memory.lock();
+            let parent_shm = parent.ipc.shared_memory.read();
             for (vaddr, inner_arc) in parent_shm.iter() {
                 inner_arc.lock().attach_process(pid);
                 new_shm.insert(*vaddr, inner_arc.clone());
             }
-            Arc::new(Mutex::new(new_shm))
+            Arc::new(RwLock::new(new_shm))
         };
         let fs_context = if share_fs {
-            Mutex::new(parent.fs_context_handle())
+            RwLock::new(parent.fs_context_handle())
         } else {
-            Mutex::new(Self::clone_private_fs_context(parent)?)
+            RwLock::new(Self::clone_private_fs_context(parent)?)
         };
         let fd_table = if share_files {
             RwLock::new(parent.fd_table())
@@ -1285,46 +1451,69 @@ impl Process {
                 parent.fd_table().read().clone_for_fork()?,
             )))
         };
-        let (ruid, euid, suid) = parent.uid_snapshot();
-        let (rgid, egid, sgid) = parent.gid_snapshot();
-        let fsuid = parent.fsuid();
-        let fsgid = parent.fsgid();
-        let rlimit_state = *parent.rlimit_state.lock();
-        let (memlock_soft_limit, memlock_hard_limit) = parent.memlock_limit_snapshot();
+        let parent_creds = parent.credentials.read();
+        let creds = Credentials::new(
+            parent_creds.ruid,
+            parent_creds.euid,
+            parent_creds.suid,
+            parent_creds.fsuid,
+            parent_creds.rgid,
+            parent_creds.egid,
+            parent_creds.sgid,
+            parent_creds.fsgid,
+            parent_creds.cap_permitted,
+            parent_creds.cap_effective,
+            parent_creds.cap_inheritable,
+            parent_creds.umask,
+            parent.groups(),
+        );
+        let parent_resources = parent.resources.lock();
+        let resources = ResourceContext {
+            rlimit_state: parent_resources.rlimit_state,
+            memlock_state: MemlockState::new_with_limits(
+                parent_resources.memlock_state.soft_limit,
+                parent_resources.memlock_state.hard_limit,
+            ),
+        };
+        drop(parent_resources);
         let signal_shared = if share_sighand {
             parent.signal_shared.clone()
         } else {
             SignalShared::clone_actions_only(&parent.signal_shared)
         };
-        let signal_trampoline = *parent.signal_trampoline.lock();
+        let signal_trampoline = parent.signal_trampoline.load(Ordering::Acquire);
         let exec_path = parent.exec_path();
-        let hostname = if share_uts {
-            parent.hostname_handle()
+        let uts_ns = if share_uts {
+            parent.uts_ns.read().clone()
         } else {
-            Arc::new(RwLock::new(*parent.hostname_handle().read()))
+            Arc::new(UtsNamespace {
+                hostname: Arc::new(RwLock::new(*parent.hostname_handle().read())),
+            })
         };
 
-        let (cap_p, cap_e, cap_i) = (
-            parent.cap_permitted.load(Ordering::Acquire),
-            parent.cap_effective.load(Ordering::Acquire),
-            parent.cap_inheritable.load(Ordering::Acquire),
-        );
+        let vfork_context = if is_vfork {
+            Some(VforkContext {
+                wait_enabled: true,
+                done: AtomicBool::new(false),
+                event: WaitQueue::new(),
+            })
+        } else {
+            None
+        };
 
         Ok(Arc::new(Self {
             pid,
             parent_pid: AtomicU64::new(parent.pid()),
-            parent: Mutex::new(Some(Arc::downgrade(&parent_arc))),
-            aspace: Mutex::new(aspace),
+            parent: RwLock::new(Some(Arc::downgrade(&parent_arc))),
+            aspace: RwLock::new(aspace),
             heap_top,
+            brk_lock: Mutex::new(()),
             fs_context,
             fd_table,
             start_mono_ns: axhal::time::monotonic_time_nanos() as u64,
-            user_time_ns: Arc::new(AtomicU64::new(0)),
-            sys_time_ns: Arc::new(AtomicU64::new(0)),
-            child_user_time_ns: Arc::new(AtomicU64::new(0)),
-            child_sys_time_ns: Arc::new(AtomicU64::new(0)),
-            stack_top: Mutex::new(*parent.stack_top.lock()),
-            entry: Mutex::new(*parent.entry.lock()),
+            time_context: TimeContext::new(),
+            stack_top: AtomicUsize::new(parent.stack_top.load(Ordering::Acquire)),
+            entry: AtomicUsize::new(parent.entry.load(Ordering::Acquire)),
             threads: SpinNoIrq::new(alloc::vec![pid]),
             task_refs: SpinNoIrq::new(Vec::new()),
             children: SpinNoIrq::new(Vec::new()),
@@ -1336,46 +1525,24 @@ impl Process {
             group_exiting: AtomicBool::new(false),
             group_exit_code: AtomicI32::new(0),
             futex_table: FutexTable::new(),
-            vfork_wait_enabled: AtomicBool::new(is_vfork),
-            vfork_done: AtomicBool::new(false),
-            vfork_event: WaitQueue::new(),
-            ruid: AtomicU32::new(ruid),
-            euid: AtomicU32::new(euid),
-            suid: AtomicU32::new(suid),
-            fsuid: AtomicU32::new(fsuid),
-            rgid: AtomicU32::new(rgid),
-            egid: AtomicU32::new(egid),
-            sgid: AtomicU32::new(sgid),
-            fsgid: AtomicU32::new(fsgid),
-            cap_permitted: AtomicU64::new(cap_p),
-            cap_effective: AtomicU64::new(cap_e),
-            cap_inheritable: AtomicU64::new(cap_i),
-            umask: AtomicU32::new(parent.umask()),
-            rlimit_state: Mutex::new(rlimit_state),
-            memlock_state: Mutex::new(MemlockState::new_with_limits(
-                memlock_soft_limit,
-                memlock_hard_limit,
-            )),
+            vfork_context,
+            credentials: RwLock::new(Arc::new(creds)),
+            resources: Mutex::new(resources),
             signal_shared,
-            exec_path: Mutex::new(exec_path),
-            args: Mutex::new(parent.args.lock().clone()),
-            signal_trampoline: Mutex::new(signal_trampoline),
-            shared_memory,
-            sem_undos: Mutex::new(Vec::new()),
-            itimer_real_deadline_ns: AtomicU64::new(0),
-            itimer_real_interval_ns: AtomicU64::new(0),
-            itimer_virt_remaining_ns: AtomicU64::new(0),
-            itimer_virt_interval_ns: AtomicU64::new(0),
-            itimer_prof_remaining_ns: AtomicU64::new(0),
-            itimer_prof_interval_ns: AtomicU64::new(0),
+            exec_path: RwLock::new(exec_path),
+            args: RwLock::new(parent.args.read().clone()),
+            signal_trampoline: AtomicUsize::new(signal_trampoline),
+            ipc: IpcContext {
+                shared_memory,
+                sem_undos: Mutex::new(Vec::new()),
+            },
             stopped_signal_pending: AtomicI32::new(0),
             continued_signal_pending: AtomicBool::new(false),
             pgid: AtomicU64::new(parent.pgid()),
             pdeath_sig: AtomicI32::new(0),
             dumpable: AtomicI32::new(parent.dumpable()),
             reparented: AtomicBool::new(false),
-            groups: Mutex::new(parent.groups.lock().clone()),
-            hostname: Mutex::new(hostname),
+            uts_ns: RwLock::new(uts_ns),
         }))
     }
 
@@ -1440,12 +1607,12 @@ impl Process {
             self.activate();
         }
         drop(old_handle);
-        *self.heap_top.lock() = USER_HEAP_BASE;
-        *self.stack_top.lock() = USER_STACK_TOP;
-        *self.entry.lock() = 0;
+        self.heap_top.store(USER_HEAP_BASE, Ordering::Release);
+        self.stack_top.store(USER_STACK_TOP, Ordering::Release);
+        self.entry.store(0, Ordering::Release);
 
         {
-            let mut shm = self.shared_memory.lock();
+            let mut shm = self.ipc.shared_memory.write();
             for inner_arc in shm.values() {
                 inner_arc.lock().detach_process(self.pid());
             }
@@ -1454,7 +1621,7 @@ impl Process {
 
         {
             let undos = {
-                let mut guard = self.sem_undos.lock();
+                let mut guard = self.ipc.sem_undos.lock();
                 core::mem::take(&mut *guard)
             };
             crate::ipc::sem::exit_sem_undos(self.pid() as i32, undos);
@@ -1595,8 +1762,12 @@ impl Process {
             if let Some(handle) = super::thread_handle_from_task(&task) {
                 let now_ns = axhal::time::monotonic_time_nanos() as u64;
                 let (u, s) = handle.snapshot_cpu_time_ns(now_ns);
-                self.user_time_ns.fetch_add(u, Ordering::Relaxed);
-                self.sys_time_ns.fetch_add(s, Ordering::Relaxed);
+                self.time_context
+                    .user_time_ns
+                    .fetch_add(u, Ordering::Relaxed);
+                self.time_context
+                    .sys_time_ns
+                    .fetch_add(s, Ordering::Relaxed);
             }
         }
 
@@ -1635,7 +1806,7 @@ impl Process {
         let is_reparented = self.reparented.load(Ordering::Acquire);
         let parent = self
             .parent
-            .lock()
+            .read()
             .as_ref()
             .and_then(|parent| parent.upgrade());
 
@@ -1683,7 +1854,7 @@ impl Process {
                         } else {
                             child.parent_pid.store(init.pid(), Ordering::Release);
                             child.reparented.store(true, Ordering::Release);
-                            *child.parent.lock() = Some(Arc::downgrade(&init));
+                            *child.parent.write() = Some(Arc::downgrade(&init));
                             init.add_child(child.clone());
 
                             let pdeath_sig = child.pdeath_sig();
@@ -1720,7 +1891,7 @@ impl Process {
     }
 
     pub fn parent_process(&self) -> Option<Arc<Process>> {
-        self.parent.lock().as_ref().and_then(|p| p.upgrade())
+        self.parent.read().as_ref().and_then(|p| p.upgrade())
     }
 
     pub fn waitid_find_and_reap(
@@ -1963,15 +2134,17 @@ impl Process {
     }
 
     pub fn add_child_time_ns(&self, child_user_ns: u64, child_sys_ns: u64) {
-        self.child_user_time_ns
+        self.time_context
+            .child_user_time_ns
             .fetch_add(child_user_ns, Ordering::Relaxed);
-        self.child_sys_time_ns
+        self.time_context
+            .child_sys_time_ns
             .fetch_add(child_sys_ns, Ordering::Relaxed);
     }
 
     pub fn snapshot_cpu_time_ns(&self, now_ns: u64) -> (u64, u64) {
-        let mut total_user = self.user_time_ns.load(Ordering::Relaxed);
-        let mut total_sys = self.sys_time_ns.load(Ordering::Relaxed);
+        let mut total_user = self.time_context.user_time_ns.load(Ordering::Relaxed);
+        let mut total_sys = self.time_context.sys_time_ns.load(Ordering::Relaxed);
         let task_refs = self.task_refs.lock();
         for task in task_refs.iter() {
             if let Some(handle) = super::thread_handle_from_task(task) {
@@ -1985,8 +2158,8 @@ impl Process {
 
     pub fn snapshot_children_cpu_time_ns(&self) -> (u64, u64) {
         (
-            self.child_user_time_ns.load(Ordering::Relaxed),
-            self.child_sys_time_ns.load(Ordering::Relaxed),
+            self.time_context.child_user_time_ns.load(Ordering::Relaxed),
+            self.time_context.child_sys_time_ns.load(Ordering::Relaxed),
         )
     }
 
@@ -2000,8 +2173,14 @@ impl Process {
     /// `interval_ns` is the repeat interval (0 = one-shot).
     pub fn set_itimer_real(&self, value_ns: u64, interval_ns: u64) -> (u64, u64) {
         let now_ns = axhal::time::monotonic_time_nanos() as u64;
-        let old_deadline = self.itimer_real_deadline_ns.load(Ordering::Acquire);
-        let old_interval = self.itimer_real_interval_ns.load(Ordering::Acquire);
+        let old_deadline = self
+            .time_context
+            .itimer_real_deadline_ns
+            .load(Ordering::Acquire);
+        let old_interval = self
+            .time_context
+            .itimer_real_interval_ns
+            .load(Ordering::Acquire);
         let old_remaining = if old_deadline == 0 {
             0
         } else if now_ns >= old_deadline {
@@ -2012,13 +2191,19 @@ impl Process {
 
         if value_ns == 0 {
             // Disarm
-            self.itimer_real_deadline_ns.store(0, Ordering::Release);
-            self.itimer_real_interval_ns.store(0, Ordering::Release);
+            self.time_context
+                .itimer_real_deadline_ns
+                .store(0, Ordering::Release);
+            self.time_context
+                .itimer_real_interval_ns
+                .store(0, Ordering::Release);
         } else {
             let deadline = now_ns.saturating_add(value_ns);
-            self.itimer_real_deadline_ns
+            self.time_context
+                .itimer_real_deadline_ns
                 .store(deadline, Ordering::Release);
-            self.itimer_real_interval_ns
+            self.time_context
+                .itimer_real_interval_ns
                 .store(interval_ns, Ordering::Release);
         }
         (old_remaining, old_interval)
@@ -2027,8 +2212,14 @@ impl Process {
     /// Get ITIMER_REAL. Returns (remaining_ns, interval_ns).
     pub fn get_itimer_real(&self) -> (u64, u64) {
         let now_ns = axhal::time::monotonic_time_nanos() as u64;
-        let deadline = self.itimer_real_deadline_ns.load(Ordering::Acquire);
-        let interval = self.itimer_real_interval_ns.load(Ordering::Acquire);
+        let deadline = self
+            .time_context
+            .itimer_real_deadline_ns
+            .load(Ordering::Acquire);
+        let interval = self
+            .time_context
+            .itimer_real_interval_ns
+            .load(Ordering::Acquire);
         let remaining = if deadline == 0 {
             0
         } else if now_ns >= deadline {
@@ -2040,33 +2231,60 @@ impl Process {
     }
 
     pub fn set_itimer_virt(&self, value_ns: u64, interval_ns: u64) -> (u64, u64) {
-        let old_remaining = self.itimer_virt_remaining_ns.swap(value_ns, Ordering::AcqRel);
-        let old_interval = self.itimer_virt_interval_ns.swap(interval_ns, Ordering::AcqRel);
+        let old_remaining = self
+            .time_context
+            .itimer_virt_remaining_ns
+            .swap(value_ns, Ordering::AcqRel);
+        let old_interval = self
+            .time_context
+            .itimer_virt_interval_ns
+            .swap(interval_ns, Ordering::AcqRel);
         (old_remaining, old_interval)
     }
 
     pub fn get_itimer_virt(&self) -> (u64, u64) {
-        let remaining = self.itimer_virt_remaining_ns.load(Ordering::Acquire);
-        let interval = self.itimer_virt_interval_ns.load(Ordering::Acquire);
+        let remaining = self
+            .time_context
+            .itimer_virt_remaining_ns
+            .load(Ordering::Acquire);
+        let interval = self
+            .time_context
+            .itimer_virt_interval_ns
+            .load(Ordering::Acquire);
         (remaining, interval)
     }
 
     pub fn set_itimer_prof(&self, value_ns: u64, interval_ns: u64) -> (u64, u64) {
-        let old_remaining = self.itimer_prof_remaining_ns.swap(value_ns, Ordering::AcqRel);
-        let old_interval = self.itimer_prof_interval_ns.swap(interval_ns, Ordering::AcqRel);
+        let old_remaining = self
+            .time_context
+            .itimer_prof_remaining_ns
+            .swap(value_ns, Ordering::AcqRel);
+        let old_interval = self
+            .time_context
+            .itimer_prof_interval_ns
+            .swap(interval_ns, Ordering::AcqRel);
         (old_remaining, old_interval)
     }
 
     pub fn get_itimer_prof(&self) -> (u64, u64) {
-        let remaining = self.itimer_prof_remaining_ns.load(Ordering::Acquire);
-        let interval = self.itimer_prof_interval_ns.load(Ordering::Acquire);
+        let remaining = self
+            .time_context
+            .itimer_prof_remaining_ns
+            .load(Ordering::Acquire);
+        let interval = self
+            .time_context
+            .itimer_prof_interval_ns
+            .load(Ordering::Acquire);
         (remaining, interval)
     }
 
     /// Called from timer tick hook (interrupt context). Checks if ITIMER_REAL
     /// has expired and sends SIGALRM if so. Returns true if the timer fired.
     pub fn check_itimer_real_tick(&self) -> bool {
-        let deadline = self.itimer_real_deadline_ns.load(Ordering::Acquire);
+        let deadline = self
+            .time_context
+            .itimer_real_deadline_ns
+            .load(Ordering::Acquire);
         if deadline == 0 {
             return false;
         }
@@ -2082,21 +2300,30 @@ impl Process {
             deadline
         );
         let _ = queue_signal_to_process(self, 14 /* SIGALRM */);
-        let interval = self.itimer_real_interval_ns.load(Ordering::Acquire);
+        let interval = self
+            .time_context
+            .itimer_real_interval_ns
+            .load(Ordering::Acquire);
         if interval == 0 {
             // One-shot: disarm
-            self.itimer_real_deadline_ns.store(0, Ordering::Release);
+            self.time_context
+                .itimer_real_deadline_ns
+                .store(0, Ordering::Release);
         } else {
             // Repeating: advance deadline
             let new_deadline = deadline.saturating_add(interval);
-            self.itimer_real_deadline_ns
+            self.time_context
+                .itimer_real_deadline_ns
                 .store(new_deadline, Ordering::Release);
         }
         true
     }
 
     pub fn check_itimer_virt_tick(&self, elapsed_ns: u64) {
-        let mut remaining = self.itimer_virt_remaining_ns.load(Ordering::Acquire);
+        let mut remaining = self
+            .time_context
+            .itimer_virt_remaining_ns
+            .load(Ordering::Acquire);
         if remaining == 0 {
             return;
         }
@@ -2104,16 +2331,24 @@ impl Process {
         if remaining <= elapsed_ns {
             // Expired. Send SIGVTALRM (signal 26).
             let _ = queue_signal_to_process(self, 26 /* SIGVTALRM */);
-            let interval = self.itimer_virt_interval_ns.load(Ordering::Acquire);
+            let interval = self
+                .time_context
+                .itimer_virt_interval_ns
+                .load(Ordering::Acquire);
             remaining = interval; // might be 0, which disarms it
         } else {
             remaining -= elapsed_ns;
         }
-        self.itimer_virt_remaining_ns.store(remaining, Ordering::Release);
+        self.time_context
+            .itimer_virt_remaining_ns
+            .store(remaining, Ordering::Release);
     }
 
     pub fn check_itimer_prof_tick(&self, elapsed_ns: u64) {
-        let mut remaining = self.itimer_prof_remaining_ns.load(Ordering::Acquire);
+        let mut remaining = self
+            .time_context
+            .itimer_prof_remaining_ns
+            .load(Ordering::Acquire);
         if remaining == 0 {
             return;
         }
@@ -2121,31 +2356,39 @@ impl Process {
         if remaining <= elapsed_ns {
             // Expired. Send SIGPROF (signal 27).
             let _ = queue_signal_to_process(self, 27 /* SIGPROF */);
-            let interval = self.itimer_prof_interval_ns.load(Ordering::Acquire);
+            let interval = self
+                .time_context
+                .itimer_prof_interval_ns
+                .load(Ordering::Acquire);
             remaining = interval; // might be 0, which disarms it
         } else {
             remaining -= elapsed_ns;
         }
-        self.itimer_prof_remaining_ns.store(remaining, Ordering::Release);
+        self.time_context
+            .itimer_prof_remaining_ns
+            .store(remaining, Ordering::Release);
     }
 
     pub fn complete_vfork(&self) {
-        if !self.vfork_wait_enabled.load(Ordering::Acquire) {
-            return;
-        }
-        if !self.vfork_done.swap(true, Ordering::AcqRel) {
-            // Keep vfork completion notification side-effect free with respect
-            // to scheduling while the child is still unwinding its exit path.
-            self.vfork_event.notify_all(false);
+        if let Some(ref ctx) = self.vfork_context {
+            if !ctx.wait_enabled {
+                return;
+            }
+            if !ctx.done.swap(true, Ordering::AcqRel) {
+                // Keep vfork completion notification side-effect free with respect
+                // to scheduling while the child is still unwinding its exit path.
+                ctx.event.notify_all(false);
+            }
         }
     }
 
     pub fn wait_for_vfork_completion(&self) {
-        if !self.vfork_wait_enabled.load(Ordering::Acquire) {
-            return;
+        if let Some(ref ctx) = self.vfork_context {
+            if !ctx.wait_enabled {
+                return;
+            }
+            ctx.event.wait_until(|| ctx.done.load(Ordering::Acquire));
         }
-        self.vfork_event
-            .wait_until(|| self.vfork_done.load(Ordering::Acquire));
     }
 
     fn futex_key(&self, addr: usize, is_private: bool) -> (usize, bool) {

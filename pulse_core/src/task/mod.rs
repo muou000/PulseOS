@@ -182,7 +182,7 @@ impl axfs::ProcfsProcessProvider for PulseProcessProvider {
         if proc.is_zombie() {
             return Some(String::new());
         }
-        let args = proc.args.lock();
+        let args = proc.args.read();
         if args.is_empty() {
             let path = proc.exec_path_or_default();
             Some(alloc::format!("{}\0", path))
@@ -283,10 +283,12 @@ impl axfs::ProcfsProcessProvider for PulseProcessProvider {
         let utime = utime_ns / 10_000_000;
         let stime = stime_ns / 10_000_000;
         let cutime = proc
+            .time_context
             .child_user_time_ns
             .load(core::sync::atomic::Ordering::Relaxed)
             / 10_000_000;
         let cstime = proc
+            .time_context
             .child_sys_time_ns
             .load(core::sync::atomic::Ordering::Relaxed)
             / 10_000_000;
