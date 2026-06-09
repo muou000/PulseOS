@@ -1,4 +1,11 @@
-use alloc::{borrow::ToOwned, collections::BTreeMap, format, string::String, sync::Arc, vec::Vec};
+use alloc::{
+    borrow::{Cow, ToOwned},
+    collections::BTreeMap,
+    format,
+    string::String,
+    sync::Arc,
+    vec::Vec,
+};
 use core::{
     any::Any,
     borrow::Borrow,
@@ -194,9 +201,9 @@ impl Inode {
 
     fn new_live_file(ino: u64, kind: ProcLiveFileKind, permission: NodePermission) -> Arc<Self> {
         let node_type = match kind {
-            ProcLiveFileKind::SelfSymlink | ProcLiveFileKind::PidExe(_) | ProcLiveFileKind::PidFdSymlink(_, _) => {
-                NodeType::Symlink
-            }
+            ProcLiveFileKind::SelfSymlink
+            | ProcLiveFileKind::PidExe(_)
+            | ProcLiveFileKind::PidFdSymlink(_, _) => NodeType::Symlink,
             _ => NodeType::RegularFile,
         };
         Arc::new(Self {
@@ -330,11 +337,8 @@ impl ProcFilesystem {
             ProcLiveFileKind::SelfSymlink,
             NodePermission::from_bits_truncate(0o777),
         );
-        let sys_dir = Inode::new_directory(
-            SYS_INO,
-            ROOT_INO,
-            NodePermission::from_bits_truncate(0o555),
-        );
+        let sys_dir =
+            Inode::new_directory(SYS_INO, ROOT_INO, NodePermission::from_bits_truncate(0o555));
         let kernel_dir = Inode::new_directory(
             KERNEL_INO,
             SYS_INO,
@@ -387,7 +391,11 @@ impl ProcFilesystem {
         }
 
         {
-            let mut entries = kernel_dir.as_dir().expect("proc sys kernel is dir").entries.lock();
+            let mut entries = kernel_dir
+                .as_dir()
+                .expect("proc sys kernel is dir")
+                .entries
+                .lock();
             entries.insert("pid_max".into(), InodeRef::new(PID_MAX_INO));
             entries.insert("tainted".into(), InodeRef::new(TAINTED_INO));
             entries.insert("core_pattern".into(), InodeRef::new(CORE_PATTERN_INO));
@@ -419,37 +427,89 @@ impl ProcFilesystem {
             let provider = PROCESS_PROVIDER.get().ok_or(VfsError::NotFound)?;
 
             if sub == SUB_INO_DIR {
-                let dir = Inode::new_directory(ino, ROOT_INO, NodePermission::from_bits_truncate(0o555));
+                let dir =
+                    Inode::new_directory(ino, ROOT_INO, NodePermission::from_bits_truncate(0o555));
                 {
                     let mut entries = dir.as_dir()?.entries.lock();
-                    entries.insert(".".into(), InodeRef::new(PID_INODE_START + (pid << PID_INODE_SHIFT) + SUB_INO_DIR));
+                    entries.insert(
+                        ".".into(),
+                        InodeRef::new(PID_INODE_START + (pid << PID_INODE_SHIFT) + SUB_INO_DIR),
+                    );
                     entries.insert("..".into(), InodeRef::new(ROOT_INO));
-                    entries.insert("cmdline".into(), InodeRef::new(PID_INODE_START + (pid << PID_INODE_SHIFT) + SUB_INO_CMDLINE));
-                    entries.insert("status".into(), InodeRef::new(PID_INODE_START + (pid << PID_INODE_SHIFT) + SUB_INO_STATUS));
-                    entries.insert("exe".into(), InodeRef::new(PID_INODE_START + (pid << PID_INODE_SHIFT) + SUB_INO_EXE));
-                    entries.insert("comm".into(), InodeRef::new(PID_INODE_START + (pid << PID_INODE_SHIFT) + SUB_INO_COMM));
-                    entries.insert("stat".into(), InodeRef::new(PID_INODE_START + (pid << PID_INODE_SHIFT) + SUB_INO_STAT));
-                    entries.insert("fd".into(), InodeRef::new(PID_INODE_START + (pid << PID_INODE_SHIFT) + SUB_INO_FD_DIR));
-                    entries.insert("maps".into(), InodeRef::new(PID_INODE_START + (pid << PID_INODE_SHIFT) + SUB_INO_MAPS));
-                    entries.insert("pagemap".into(), InodeRef::new(PID_INODE_START + (pid << PID_INODE_SHIFT) + SUB_INO_PAGEMAP));
-                    entries.insert("setgroups".into(), InodeRef::new(PID_INODE_START + (pid << PID_INODE_SHIFT) + SUB_INO_SETGROUPS));
-                    entries.insert("uid_map".into(), InodeRef::new(PID_INODE_START + (pid << PID_INODE_SHIFT) + SUB_INO_UID_MAP));
-                    entries.insert("gid_map".into(), InodeRef::new(PID_INODE_START + (pid << PID_INODE_SHIFT) + SUB_INO_GID_MAP));
+                    entries.insert(
+                        "cmdline".into(),
+                        InodeRef::new(PID_INODE_START + (pid << PID_INODE_SHIFT) + SUB_INO_CMDLINE),
+                    );
+                    entries.insert(
+                        "status".into(),
+                        InodeRef::new(PID_INODE_START + (pid << PID_INODE_SHIFT) + SUB_INO_STATUS),
+                    );
+                    entries.insert(
+                        "exe".into(),
+                        InodeRef::new(PID_INODE_START + (pid << PID_INODE_SHIFT) + SUB_INO_EXE),
+                    );
+                    entries.insert(
+                        "comm".into(),
+                        InodeRef::new(PID_INODE_START + (pid << PID_INODE_SHIFT) + SUB_INO_COMM),
+                    );
+                    entries.insert(
+                        "stat".into(),
+                        InodeRef::new(PID_INODE_START + (pid << PID_INODE_SHIFT) + SUB_INO_STAT),
+                    );
+                    entries.insert(
+                        "fd".into(),
+                        InodeRef::new(PID_INODE_START + (pid << PID_INODE_SHIFT) + SUB_INO_FD_DIR),
+                    );
+                    entries.insert(
+                        "maps".into(),
+                        InodeRef::new(PID_INODE_START + (pid << PID_INODE_SHIFT) + SUB_INO_MAPS),
+                    );
+                    entries.insert(
+                        "pagemap".into(),
+                        InodeRef::new(PID_INODE_START + (pid << PID_INODE_SHIFT) + SUB_INO_PAGEMAP),
+                    );
+                    entries.insert(
+                        "setgroups".into(),
+                        InodeRef::new(
+                            PID_INODE_START + (pid << PID_INODE_SHIFT) + SUB_INO_SETGROUPS,
+                        ),
+                    );
+                    entries.insert(
+                        "uid_map".into(),
+                        InodeRef::new(PID_INODE_START + (pid << PID_INODE_SHIFT) + SUB_INO_UID_MAP),
+                    );
+                    entries.insert(
+                        "gid_map".into(),
+                        InodeRef::new(PID_INODE_START + (pid << PID_INODE_SHIFT) + SUB_INO_GID_MAP),
+                    );
                 }
                 return Ok(dir);
             }
 
             if sub == SUB_INO_FD_DIR {
-                let dir = Inode::new_directory(ino, PID_INODE_START + (pid << PID_INODE_SHIFT) + SUB_INO_DIR, NodePermission::from_bits_truncate(0o555));
+                let dir = Inode::new_directory(
+                    ino,
+                    PID_INODE_START + (pid << PID_INODE_SHIFT) + SUB_INO_DIR,
+                    NodePermission::from_bits_truncate(0o555),
+                );
                 {
                     let mut entries = dir.as_dir()?.entries.lock();
-                    entries.insert(".".into(), InodeRef::new(PID_INODE_START + (pid << PID_INODE_SHIFT) + SUB_INO_FD_DIR));
-                    entries.insert("..".into(), InodeRef::new(PID_INODE_START + (pid << PID_INODE_SHIFT) + SUB_INO_DIR));
-                    
+                    entries.insert(
+                        ".".into(),
+                        InodeRef::new(PID_INODE_START + (pid << PID_INODE_SHIFT) + SUB_INO_FD_DIR),
+                    );
+                    entries.insert(
+                        "..".into(),
+                        InodeRef::new(PID_INODE_START + (pid << PID_INODE_SHIFT) + SUB_INO_DIR),
+                    );
+
                     if let Some(fds) = provider.process_fds(pid) {
                         for fd in fds {
                             let name = format!("{}", fd);
-                            let child_ino = PID_INODE_START + (pid << PID_INODE_SHIFT) + SUB_INO_FD_BASE + fd as u64;
+                            let child_ino = PID_INODE_START
+                                + (pid << PID_INODE_SHIFT)
+                                + SUB_INO_FD_BASE
+                                + fd as u64;
                             entries.insert(name.into(), InodeRef::new(child_ino));
                         }
                     }
@@ -481,18 +541,14 @@ impl ProcFilesystem {
                 _ => return Err(VfsError::NotFound),
             };
 
-            let perm = if sub == SUB_INO_EXE { 
-                0o777 
+            let perm = if sub == SUB_INO_EXE {
+                0o777
             } else if sub == SUB_INO_SETGROUPS || sub == SUB_INO_UID_MAP || sub == SUB_INO_GID_MAP {
                 0o644
-            } else { 
-                0o444 
+            } else {
+                0o444
             };
-            let file = Inode::new_live_file(
-                ino,
-                kind,
-                NodePermission::from_bits_truncate(perm),
-            );
+            let file = Inode::new_live_file(ino, kind, NodePermission::from_bits_truncate(perm));
             return Ok(file);
         }
 
@@ -615,33 +671,41 @@ fn render_proc_file(fs: &ProcFilesystem, kind: ProcLiveFileKind) -> String {
             }
             "1".to_owned()
         }
-        ProcLiveFileKind::PidCmdline(pid) => {
-            PROCESS_PROVIDER.get().and_then(|p| p.cmdline(pid)).unwrap_or_default()
-        }
-        ProcLiveFileKind::PidStatus(pid) => {
-            PROCESS_PROVIDER.get().and_then(|p| p.status(pid)).unwrap_or_default()
-        }
-        ProcLiveFileKind::PidExe(pid) => {
-            PROCESS_PROVIDER.get().and_then(|p| p.exe(pid)).unwrap_or_default()
-        }
-        ProcLiveFileKind::PidComm(pid) => {
-            PROCESS_PROVIDER.get().and_then(|p| p.comm(pid)).unwrap_or_default()
-        }
-        ProcLiveFileKind::PidStat(pid) => {
-            PROCESS_PROVIDER.get().and_then(|p| p.stat(pid)).unwrap_or_default()
-        }
-        ProcLiveFileKind::PidFdSymlink(pid, fd) => {
-            PROCESS_PROVIDER.get().and_then(|p| p.fd_path(pid, fd)).unwrap_or_default()
-        }
-        ProcLiveFileKind::PidMaps(pid) => {
-            PROCESS_PROVIDER.get().and_then(|p| p.maps(pid)).unwrap_or_default()
-        }
-        ProcLiveFileKind::PidPagemap(_pid) => {
-            String::new()
-        }
-        ProcLiveFileKind::PidSetgroups(pid) => {
-            fs.setgroups_map.lock().get(&pid).cloned().unwrap_or_else(|| "allow\n".to_owned())
-        }
+        ProcLiveFileKind::PidCmdline(pid) => PROCESS_PROVIDER
+            .get()
+            .and_then(|p| p.cmdline(pid))
+            .unwrap_or_default(),
+        ProcLiveFileKind::PidStatus(pid) => PROCESS_PROVIDER
+            .get()
+            .and_then(|p| p.status(pid))
+            .unwrap_or_default(),
+        ProcLiveFileKind::PidExe(pid) => PROCESS_PROVIDER
+            .get()
+            .and_then(|p| p.exe(pid))
+            .unwrap_or_default(),
+        ProcLiveFileKind::PidComm(pid) => PROCESS_PROVIDER
+            .get()
+            .and_then(|p| p.comm(pid))
+            .unwrap_or_default(),
+        ProcLiveFileKind::PidStat(pid) => PROCESS_PROVIDER
+            .get()
+            .and_then(|p| p.stat(pid))
+            .unwrap_or_default(),
+        ProcLiveFileKind::PidFdSymlink(pid, fd) => PROCESS_PROVIDER
+            .get()
+            .and_then(|p| p.fd_path(pid, fd))
+            .unwrap_or_default(),
+        ProcLiveFileKind::PidMaps(pid) => PROCESS_PROVIDER
+            .get()
+            .and_then(|p| p.maps(pid))
+            .unwrap_or_default(),
+        ProcLiveFileKind::PidPagemap(_pid) => String::new(),
+        ProcLiveFileKind::PidSetgroups(pid) => fs
+            .setgroups_map
+            .lock()
+            .get(&pid)
+            .cloned()
+            .unwrap_or_else(|| "allow\n".to_owned()),
         ProcLiveFileKind::PidUidMap(pid) => {
             fs.uid_map_map.lock().get(&pid).cloned().unwrap_or_default()
         }
@@ -651,12 +715,8 @@ fn render_proc_file(fs: &ProcFilesystem, kind: ProcLiveFileKind) -> String {
         ProcLiveFileKind::PidMax => {
             format!("{}\n", PID_MAX.load(core::sync::atomic::Ordering::Acquire))
         }
-        ProcLiveFileKind::Tainted => {
-            "0\n".to_owned()
-        }
-        ProcLiveFileKind::CorePattern => {
-            "core\n".to_owned()
-        }
+        ProcLiveFileKind::Tainted => "0\n".to_owned(),
+        ProcLiveFileKind::CorePattern => "core\n".to_owned(),
     }
 }
 
@@ -830,8 +890,9 @@ impl NodeOps for ProcNode {
 impl DirNodeOps for ProcNode {
     fn read_dir(&self, offset: u64, sink: &mut dyn DirEntrySink) -> VfsResult<usize> {
         let inode = self.inode_ref()?;
+        let mut entries_guard = None;
         let mut all_entries = Vec::new();
-        
+
         if self.ino >= PID_INODE_START {
             if let Some((pid, sub)) = decode_pid_inode(self.ino) {
                 let provider = PROCESS_PROVIDER.get().ok_or(VfsError::NotFound)?;
@@ -840,44 +901,83 @@ impl DirNodeOps for ProcNode {
                 }
 
                 if sub == SUB_INO_DIR {
-                    all_entries.push((".".to_owned(), self.ino));
-                    all_entries.push(("..".to_owned(), ROOT_INO));
-                    all_entries.push(("cmdline".to_owned(), PID_INODE_START + (pid << PID_INODE_SHIFT) + SUB_INO_CMDLINE));
-                    all_entries.push(("status".to_owned(), PID_INODE_START + (pid << PID_INODE_SHIFT) + SUB_INO_STATUS));
-                    all_entries.push(("exe".to_owned(), PID_INODE_START + (pid << PID_INODE_SHIFT) + SUB_INO_EXE));
-                    all_entries.push(("comm".to_owned(), PID_INODE_START + (pid << PID_INODE_SHIFT) + SUB_INO_COMM));
-                    all_entries.push(("stat".to_owned(), PID_INODE_START + (pid << PID_INODE_SHIFT) + SUB_INO_STAT));
-                    all_entries.push(("fd".to_owned(), PID_INODE_START + (pid << PID_INODE_SHIFT) + SUB_INO_FD_DIR));
-                    all_entries.push(("maps".to_owned(), PID_INODE_START + (pid << PID_INODE_SHIFT) + SUB_INO_MAPS));
-                    all_entries.push(("pagemap".to_owned(), PID_INODE_START + (pid << PID_INODE_SHIFT) + SUB_INO_PAGEMAP));
-                    all_entries.push(("setgroups".to_owned(), PID_INODE_START + (pid << PID_INODE_SHIFT) + SUB_INO_SETGROUPS));
-                    all_entries.push(("uid_map".to_owned(), PID_INODE_START + (pid << PID_INODE_SHIFT) + SUB_INO_UID_MAP));
-                    all_entries.push(("gid_map".to_owned(), PID_INODE_START + (pid << PID_INODE_SHIFT) + SUB_INO_GID_MAP));
+                    all_entries.push((Cow::Borrowed("."), self.ino));
+                    all_entries.push((Cow::Borrowed(".."), ROOT_INO));
+                    all_entries.push((
+                        Cow::Borrowed("cmdline"),
+                        PID_INODE_START + (pid << PID_INODE_SHIFT) + SUB_INO_CMDLINE,
+                    ));
+                    all_entries.push((
+                        Cow::Borrowed("status"),
+                        PID_INODE_START + (pid << PID_INODE_SHIFT) + SUB_INO_STATUS,
+                    ));
+                    all_entries.push((
+                        Cow::Borrowed("exe"),
+                        PID_INODE_START + (pid << PID_INODE_SHIFT) + SUB_INO_EXE,
+                    ));
+                    all_entries.push((
+                        Cow::Borrowed("comm"),
+                        PID_INODE_START + (pid << PID_INODE_SHIFT) + SUB_INO_COMM,
+                    ));
+                    all_entries.push((
+                        Cow::Borrowed("stat"),
+                        PID_INODE_START + (pid << PID_INODE_SHIFT) + SUB_INO_STAT,
+                    ));
+                    all_entries.push((
+                        Cow::Borrowed("fd"),
+                        PID_INODE_START + (pid << PID_INODE_SHIFT) + SUB_INO_FD_DIR,
+                    ));
+                    all_entries.push((
+                        Cow::Borrowed("maps"),
+                        PID_INODE_START + (pid << PID_INODE_SHIFT) + SUB_INO_MAPS,
+                    ));
+                    all_entries.push((
+                        Cow::Borrowed("pagemap"),
+                        PID_INODE_START + (pid << PID_INODE_SHIFT) + SUB_INO_PAGEMAP,
+                    ));
+                    all_entries.push((
+                        Cow::Borrowed("setgroups"),
+                        PID_INODE_START + (pid << PID_INODE_SHIFT) + SUB_INO_SETGROUPS,
+                    ));
+                    all_entries.push((
+                        Cow::Borrowed("uid_map"),
+                        PID_INODE_START + (pid << PID_INODE_SHIFT) + SUB_INO_UID_MAP,
+                    ));
+                    all_entries.push((
+                        Cow::Borrowed("gid_map"),
+                        PID_INODE_START + (pid << PID_INODE_SHIFT) + SUB_INO_GID_MAP,
+                    ));
                 } else if sub == SUB_INO_FD_DIR {
-                    all_entries.push((".".to_owned(), self.ino));
-                    all_entries.push(("..".to_owned(), PID_INODE_START + (pid << PID_INODE_SHIFT) + SUB_INO_DIR));
-                    
+                    all_entries.push((Cow::Borrowed("."), self.ino));
+                    all_entries.push((
+                        Cow::Borrowed(".."),
+                        PID_INODE_START + (pid << PID_INODE_SHIFT) + SUB_INO_DIR,
+                    ));
+
                     if let Some(fds) = provider.process_fds(pid) {
                         for fd in fds {
                             let name = format!("{}", fd);
-                            let child_ino = PID_INODE_START + (pid << PID_INODE_SHIFT) + SUB_INO_FD_BASE + fd as u64;
-                            all_entries.push((name, child_ino));
+                            let child_ino = PID_INODE_START
+                                + (pid << PID_INODE_SHIFT)
+                                + SUB_INO_FD_BASE
+                                + fd as u64;
+                            all_entries.push((Cow::Owned(name), child_ino));
                         }
                     }
                 }
             }
         } else {
-            let entries = inode.as_dir()?.entries.lock();
-            for (name, entry) in entries.iter() {
-                all_entries.push((name.0.clone(), entry.ino));
+            entries_guard = Some(inode.as_dir()?.entries.lock());
+            for (name, entry) in entries_guard.as_ref().unwrap().iter() {
+                all_entries.push((Cow::Borrowed(name.0.as_str()), entry.ino));
             }
-            
+
             if self.ino == ROOT_INO {
                 if let Some(provider) = PROCESS_PROVIDER.get() {
                     for pid in provider.process_pids() {
                         let name = format!("{}", pid);
                         let child_ino = PID_INODE_START + (pid << PID_INODE_SHIFT) + SUB_INO_DIR;
-                        all_entries.push((name, child_ino));
+                        all_entries.push((Cow::Owned(name), child_ino));
                     }
                 }
             }
@@ -891,13 +991,13 @@ impl DirNodeOps for ProcNode {
                     _ => 2,
                 }
             }
-            (index(&a.0), &a.0).cmp(&(index(&b.0), &b.0))
+            (index(a.0.as_ref()), a.0.as_ref()).cmp(&(index(b.0.as_ref()), b.0.as_ref()))
         });
 
         let mut count = 0;
         for (idx, (name, ino)) in all_entries.iter().enumerate().skip(offset as usize) {
             let node_type = self.fs.node_type_of(*ino)?;
-            if !sink.accept(name, *ino, node_type, (idx + 1) as u64) {
+            if !sink.accept(name.as_ref(), *ino, node_type, (idx + 1) as u64) {
                 break;
             }
             count += 1;
@@ -907,7 +1007,7 @@ impl DirNodeOps for ProcNode {
 
     fn lookup(&self, name: &str) -> VfsResult<DirEntry> {
         let inode = self.inode_ref()?;
-        
+
         if self.ino >= PID_INODE_START {
             if let Some((pid, sub)) = decode_pid_inode(self.ino) {
                 let provider = PROCESS_PROVIDER.get().ok_or(VfsError::NotFound)?;
@@ -946,7 +1046,10 @@ impl DirNodeOps for ProcNode {
                     if let Ok(fd) = name.parse::<u32>() {
                         if let Some(fds) = provider.process_fds(pid) {
                             if fds.contains(&fd) {
-                                let ino = PID_INODE_START + (pid << PID_INODE_SHIFT) + SUB_INO_FD_BASE + fd as u64;
+                                let ino = PID_INODE_START
+                                    + (pid << PID_INODE_SHIFT)
+                                    + SUB_INO_FD_BASE
+                                    + fd as u64;
                                 return self.build_entry(name, ino);
                             }
                         }
@@ -958,7 +1061,7 @@ impl DirNodeOps for ProcNode {
             if let Some(entry) = entries.get(name) {
                 return self.build_entry(name, entry.ino);
             }
-            
+
             if self.ino == ROOT_INO {
                 if let Ok(pid) = name.parse::<u64>() {
                     if let Some(provider) = PROCESS_PROVIDER.get() {
@@ -970,7 +1073,7 @@ impl DirNodeOps for ProcNode {
                 }
             }
         }
-        
+
         Err(VfsError::NotFound)
     }
 
