@@ -884,6 +884,13 @@ pub fn sys_sendfile(out_fd: usize, in_fd: usize, offset: usize, count: usize) ->
     }
     let input = in_entry.object;
 
+    if !out.is_write_open() {
+        return -LinuxError::EBADF.code() as isize;
+    }
+    if !input.is_read_open() {
+        return -LinuxError::EBADF.code() as isize;
+    }
+
     let use_explicit_offset = offset != 0;
     let mut file_offset = if use_explicit_offset {
         let off = match read_user_i64(offset) {
