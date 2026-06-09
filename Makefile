@@ -10,6 +10,13 @@ export MEM := 1G
 export ARCH ?= riscv64
 export LOG ?= info
 
+QPERF ?= n
+ifeq ($(QPERF),y)
+  EXTRA_RUSTFLAGS := -C debuginfo=2 -C force-frame-pointers=yes -C strip=none
+endif
+
+IMG ?= n
+
 prepare-cargo-config:
 	@if [ -d cargo ] && [ ! -d .cargo ]; then mv cargo .cargo; fi
 
@@ -35,12 +42,12 @@ all: prepare-tools
 
 test: prepare-tools
 	@ARCH=riscv64 APP_FEATURES=qemu,testcode LOG=$(LOG) $(MAKE) defconfig
-	@ARCH=riscv64 APP_FEATURES=qemu,testcode LOG=$(LOG) BUS=mmio $(MAKE) -C arceos build
+	@ARCH=riscv64 APP_FEATURES=qemu,testcode LOG=$(LOG) BUS=mmio $(MAKE) -C arceos build  EXTRA_RUSTFLAGS="$(EXTRA_RUSTFLAGS)"
 	@cp PulseOS_riscv64-qemu-virt.bin kernel-rv
 	@ARCH=loongarch64 APP_FEATURES=qemu,testcode LOG=$(LOG) FEATURES=bus-pci $(MAKE) defconfig
-	@ARCH=loongarch64 APP_FEATURES=qemu,testcode LOG=$(LOG) BUS=pci FEATURES=bus-pci $(MAKE) -C arceos build
+	@ARCH=loongarch64 APP_FEATURES=qemu,testcode LOG=$(LOG) BUS=pci FEATURES=bus-pci $(MAKE) -C arceos build  EXTRA_RUSTFLAGS="$(EXTRA_RUSTFLAGS)"
 	@cp PulseOS_loongarch64-qemu-virt.elf kernel-la
-	@$(MAKE) img_all
+	@if [ "$(IMG)" = "y" ]; then $(MAKE) img_all; fi
 
 debug: prepare-tools
 	@ARCH=riscv64 APP_FEATURES=qemu LOG=$(LOG) $(MAKE) defconfig
@@ -82,5 +89,8 @@ img_all:
 la: prepare-tools
 	@$(MAKE) ARCH=loongarch64 defconfig
 	@$(MAKE) -C arceos A=$(A) ARCH=loongarch64 run
+	
+analyze: prepare-tools
+	@$(MAKE) QPERF=y LOG=$(LOG) test
 
-.PHONY: all oscomp build run justrun clean defconfig img img_all la prepare-tools prepare-cargo-config
+.PHONY: all oscomp build run justrun clean defconfig img img_all la analyze prepare-tools prepare-cargo-config

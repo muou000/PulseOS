@@ -2205,6 +2205,7 @@ impl Process {
             self.time_context
                 .itimer_real_interval_ns
                 .store(interval_ns, Ordering::Release);
+            super::update_itimer_deadline(deadline);
         }
         (old_remaining, old_interval)
     }
@@ -2279,18 +2280,17 @@ impl Process {
     }
 
     /// Called from timer tick hook (interrupt context). Checks if ITIMER_REAL
-    /// has expired and sends SIGALRM if so. Returns true if the timer fired.
-    pub fn check_itimer_real_tick(&self) -> bool {
+    /// has expired and sends SIGALRM if so. Returns Some(next_deadline) if armed.
+    pub fn check_itimer_real_tick(&self, now_ns: u64) -> Option<u64> {
         let deadline = self
             .time_context
             .itimer_real_deadline_ns
             .load(Ordering::Acquire);
         if deadline == 0 {
-            return false;
+            return None;
         }
-        let now_ns = axhal::time::monotonic_time_nanos() as u64;
         if now_ns < deadline {
-            return false;
+            return Some(deadline);
         }
         // Timer expired. Send SIGALRM (signal 14).
         axlog::info!(
@@ -2309,14 +2309,15 @@ impl Process {
             self.time_context
                 .itimer_real_deadline_ns
                 .store(0, Ordering::Release);
+            None
         } else {
             // Repeating: advance deadline
             let new_deadline = deadline.saturating_add(interval);
             self.time_context
                 .itimer_real_deadline_ns
                 .store(new_deadline, Ordering::Release);
+            Some(new_deadline)
         }
-        true
     }
 
     pub fn check_itimer_virt_tick(&self, elapsed_ns: u64) {

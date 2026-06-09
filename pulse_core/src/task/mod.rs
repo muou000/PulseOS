@@ -5,11 +5,11 @@ mod thread;
 pub mod uaccess;
 
 use alloc::{
-    collections::BTreeMap,
     string::{String, ToString},
     sync::{Arc, Weak},
     vec::Vec,
 };
+use hashbrown::HashMap;
 
 use axerrno::{LinuxError, LinuxResult};
 use kspin::SpinNoIrq;
@@ -23,11 +23,11 @@ pub use signal::{
 use spin::Lazy;
 pub use thread::{Thread, ThreadHandle};
 
-static PROCESS_REGISTRY: Lazy<SpinNoIrq<BTreeMap<u64, Arc<Process>>>> =
-    Lazy::new(|| SpinNoIrq::new(BTreeMap::new()));
+static PROCESS_REGISTRY: Lazy<SpinNoIrq<HashMap<u64, Arc<Process>>>> =
+    Lazy::new(|| SpinNoIrq::new(HashMap::new()));
 
-static THREAD_REGISTRY: Lazy<SpinNoIrq<BTreeMap<u64, Weak<Thread>>>> =
-    Lazy::new(|| SpinNoIrq::new(BTreeMap::new()));
+static THREAD_REGISTRY: Lazy<SpinNoIrq<HashMap<u64, Weak<Thread>>>> =
+    Lazy::new(|| SpinNoIrq::new(HashMap::new()));
 
 static INIT_PID: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
 
@@ -95,12 +95,10 @@ pub fn process_by_pid(pid: u64) -> Option<Arc<Process>> {
 }
 
 pub fn processes_snapshot() -> Vec<Arc<Process>> {
-    let mut unique = BTreeMap::new();
     let registry = PROCESS_REGISTRY.lock();
-    for proc in registry.values() {
-        unique.entry(proc.pid()).or_insert(proc.clone());
-    }
-    unique.into_values().collect()
+    let mut procs: Vec<_> = registry.values().cloned().collect();
+    procs.sort_by_key(|p| p.pid());
+    procs
 }
 
 pub fn current_process() -> LinuxResult<Arc<Process>> {
@@ -131,6 +129,12 @@ pub fn thread_by_tid(process: &Process, tid: u64) -> Option<Arc<Thread>> {
 #[percpu::def_percpu]
 static LAST_TICK_NS: u64 = 0;
 
+static NEXT_ITIMER_DEADLINE: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(u64::MAX);
+
+pub fn update_itimer_deadline(deadline: u64) {
+    NEXT_ITIMER_DEADLINE.fetch_min(deadline, core::sync::atomic::Ordering::Relaxed);
+}
+
 fn itimer_tick_hook() {
     let now_ns = axhal::time::monotonic_time_nanos() as u64;
     let last_ns = LAST_TICK_NS.read_current();
@@ -142,12 +146,23 @@ fn itimer_tick_hook() {
     };
 
     crate::fd_table::poll_stdin();
-    let registry = PROCESS_REGISTRY.lock();
-    for proc in registry.values() {
-        if !proc.is_zombie() {
-            proc.check_itimer_real_tick();
+    
+    if now_ns >= NEXT_ITIMER_DEADLINE.load(core::sync::atomic::Ordering::Relaxed) {
+        NEXT_ITIMER_DEADLINE.store(u64::MAX, core::sync::atomic::Ordering::Relaxed);
+        let registry = PROCESS_REGISTRY.lock();
+        let mut next_min = u64::MAX;
+        for proc in registry.values() {
+            if !proc.is_zombie() {
+                if let Some(next_deadline) = proc.check_itimer_real_tick(now_ns) {
+                    if next_deadline < next_min {
+                        next_min = next_deadline;
+                    }
+                }
+            }
         }
+        NEXT_ITIMER_DEADLINE.fetch_min(next_min, core::sync::atomic::Ordering::Relaxed);
     }
+
     if elapsed_ns > 0 {
         if let Ok(curr) = current_process() {
             curr.check_itimer_virt_tick(elapsed_ns);
