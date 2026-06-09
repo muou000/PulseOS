@@ -68,8 +68,8 @@ pub fn sys_getsockopt(
     if level == 0 {
         // IPPROTO_IP
         match optname {
-            1 | 10 => {
-                // IP_TOS, IP_MTU_DISCOVER
+            1 | 10 | 11 => {
+                // IP_TOS, IP_MTU_DISCOVER, IP_RECVERR
                 debug!("sys_getsockopt: level IPPROTO_IP, optname {optname} (stub success)");
                 let val: i32 = 0;
                 if let Err(e) = write_user_plain(optval, &val) {
@@ -99,6 +99,7 @@ pub fn sys_getsockopt(
                     SocketInner::Udp(s) => s.is_reuse_addr(),
                     SocketInner::Local(_) => false,
                     SocketInner::Packet(_) => false,
+                    SocketInner::Netlink(_) => false,
                 };
                 let val: i32 = if reuse { 1 } else { 0 };
                 if let Err(e) = write_user_plain(optval, &val) {
@@ -134,8 +135,8 @@ pub fn sys_getsockopt(
                 }
                 return 0;
             }
-            9 | 6 => {
-                // SO_KEEPALIVE, SO_BROADCAST
+            9 | 6 | 5 | 15 => {
+                // SO_KEEPALIVE, SO_BROADCAST, SO_DONTROUTE, SO_REUSEPORT
                 let val: i32 = 0; // Default disabled/false
                 if let Err(e) = write_user_plain(optval, &val) {
                     return -(e.code() as isize);
@@ -222,8 +223,27 @@ pub fn sys_getsockopt(
                             0
                         }
                     }
-                    SocketInner::Udp(_) | SocketInner::Local(_) | SocketInner::Packet(_) => return -(LinuxError::EOPNOTSUPP.code() as isize),
+                    SocketInner::Udp(_) | SocketInner::Local(_) | SocketInner::Packet(_) | SocketInner::Netlink(_) => return -(LinuxError::EOPNOTSUPP.code() as isize),
                 };
+                if let Err(e) = write_user_plain(optval, &val) {
+                    return -(e.code() as isize);
+                }
+                let mut len: u32 = match read_user_plain(optlen) {
+                    Ok(l) => l,
+                    Err(e) => return -(e.code() as isize),
+                };
+                if len >= 4 {
+                    len = 4;
+                    if let Err(e) = write_user_plain(optlen, &len) {
+                        return -(e.code() as isize);
+                    }
+                }
+                return 0;
+            }
+            2 => {
+                // TCP_MAXSEG
+                debug!("sys_getsockopt: level IPPROTO_TCP, optname TCP_MAXSEG (stub success)");
+                let val: i32 = 1460;
                 if let Err(e) = write_user_plain(optval, &val) {
                     return -(e.code() as isize);
                 }
@@ -459,11 +479,12 @@ pub fn sys_setsockopt(
                     SocketInner::Udp(s) => s.set_reuse_addr(reuse),
                     SocketInner::Local(_) => {}
                     SocketInner::Packet(_) => {}
+                    SocketInner::Netlink(_) => {}
                 }
                 return 0;
             }
-            7 | 8 | 9 | 6 | 32 | 33 => {
-                // SO_SNDBUF, SO_RCVBUF, SO_KEEPALIVE, SO_BROADCAST, SO_SNDBUFFORCE, SO_RCVBUFFORCE
+            7 | 8 | 9 | 6 | 5 | 15 | 32 | 33 => {
+                // SO_SNDBUF, SO_RCVBUF, SO_KEEPALIVE, SO_BROADCAST, SO_DONTROUTE, SO_REUSEPORT, SO_SNDBUFFORCE, SO_RCVBUFFORCE
                 // Stub: return success to avoid failures in applications tuning buffers/keepalives
                 return 0;
             }
@@ -493,7 +514,7 @@ pub fn sys_setsockopt(
                             s.set_snd_timeout(ticks);
                         }
                     }
-                    SocketInner::Local(_) | SocketInner::Packet(_) => {}
+                    SocketInner::Local(_) | SocketInner::Packet(_) | SocketInner::Netlink(_) => {}
                 }
                 return 0;
             }
@@ -529,8 +550,19 @@ pub fn sys_setsockopt(
                             return -(LinuxError::from(e.canonicalize()).code() as isize);
                         }
                     }
-                    SocketInner::Udp(_) | SocketInner::Local(_) | SocketInner::Packet(_) => return -(LinuxError::EOPNOTSUPP.code() as isize),
+                    SocketInner::Udp(_) | SocketInner::Local(_) | SocketInner::Packet(_) | SocketInner::Netlink(_) => return -(LinuxError::EOPNOTSUPP.code() as isize),
                 }
+                return 0;
+            }
+            2 => {
+                // TCP_MAXSEG
+                if optlen < 4 {
+                    return -(LinuxError::EINVAL.code() as isize);
+                }
+                let _val: i32 = match read_user_plain(optval) {
+                    Ok(v) => v,
+                    Err(e) => return -(e.code() as isize),
+                };
                 return 0;
             }
             _ => {}
@@ -581,8 +613,19 @@ pub fn sys_setsockopt(
                             }
                         }
                     }
-                    SocketInner::Local(_) | SocketInner::Packet(_) => return -(LinuxError::EOPNOTSUPP.code() as isize),
+                    SocketInner::Local(_) | SocketInner::Packet(_) | SocketInner::Netlink(_) => return -(LinuxError::EOPNOTSUPP.code() as isize),
                 }
+            }
+            1 | 10 | 11 => {
+                // IP_TOS (1), IP_MTU_DISCOVER (10), IP_RECVERR (11)
+                if optlen < 4 {
+                    return -(LinuxError::EINVAL.code() as isize);
+                }
+                let _val: i32 = match read_user_plain(optval) {
+                    Ok(v) => v,
+                    Err(e) => return -(e.code() as isize),
+                };
+                return 0;
             }
             _ => {}
         }

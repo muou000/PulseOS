@@ -94,3 +94,6 @@ page_table_multiarch = { path = "../crates/page_table_multiarch" }
 
 [patch."https://github.com/arceos-org/allocator.git"]
 allocator = { path = "../crates/allocator" }
+
+[patch."https://github.com/rcore-os/smoltcp.git"]
+smoltcp = { path = "../crates/smoltcp" }

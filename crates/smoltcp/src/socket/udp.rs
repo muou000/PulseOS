@@ -117,6 +117,7 @@ impl std::error::Error for RecvError {}
 #[derive(Debug)]
 pub struct Socket<'a> {
     endpoint: IpListenEndpoint,
+    peer_endpoint: Option<IpEndpoint>,
     rx_buffer: PacketBuffer<'a>,
     tx_buffer: PacketBuffer<'a>,
     /// The time-to-live (IPv4) or hop limit (IPv6) value used in outgoing packets.
@@ -132,6 +133,7 @@ impl<'a> Socket<'a> {
     pub fn new(rx_buffer: PacketBuffer<'a>, tx_buffer: PacketBuffer<'a>) -> Socket<'a> {
         Socket {
             endpoint: IpListenEndpoint::default(),
+            peer_endpoint: None,
             rx_buffer,
             tx_buffer,
             hop_limit: None,
@@ -181,6 +183,18 @@ impl<'a> Socket<'a> {
     #[inline]
     pub fn endpoint(&self) -> IpListenEndpoint {
         self.endpoint
+    }
+
+    /// Return the connected remote endpoint, if any.
+    #[inline]
+    pub fn peer_endpoint(&self) -> Option<IpEndpoint> {
+        self.peer_endpoint
+    }
+
+    /// Set the connected remote endpoint.
+    #[inline]
+    pub fn set_peer_endpoint(&mut self, peer_endpoint: Option<IpEndpoint>) {
+        self.peer_endpoint = peer_endpoint;
     }
 
     /// Return the time-to-live (IPv4) or hop limit (IPv6) value used in outgoing packets.
@@ -240,6 +254,7 @@ impl<'a> Socket<'a> {
     pub fn close(&mut self) {
         // Clear the bound endpoint of the socket.
         self.endpoint = IpListenEndpoint::default();
+        self.peer_endpoint = None;
 
         // Reset the RX and TX buffers of the socket.
         self.tx_buffer.reset();
@@ -469,6 +484,12 @@ impl<'a> Socket<'a> {
             && !ip_repr.dst_addr().is_multicast()
         {
             return false;
+        }
+
+        if let Some(peer_endpoint) = self.peer_endpoint {
+            if peer_endpoint.port != repr.src_port || peer_endpoint.addr != ip_repr.src_addr() {
+                return false;
+            }
         }
 
         true

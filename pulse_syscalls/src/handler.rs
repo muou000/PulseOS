@@ -61,7 +61,9 @@ pub fn syscall_handler(tf: &mut TrapFrame, syscall_num: usize) -> isize {
         ret
     );
 
-    if ret == -(pulse_core::task::ERESTARTSYS as isize) {
+    let is_sigreturn = syscall_num == syscalls::Sysno::rt_sigreturn as usize;
+
+    if !is_sigreturn && ret == -(pulse_core::task::ERESTARTSYS as isize) {
         let sig_state = thread.signal();
         let mut should_restart = true;
 
@@ -106,6 +108,7 @@ pub fn syscall_handler(tf: &mut TrapFrame, syscall_num: usize) -> isize {
         thread.exit_current(process.group_exit_code());
     }
     process.mark_user_resume();
+
 
     syscall_ret(tf)
 }
@@ -189,7 +192,9 @@ fn syscall_dispatcher(
         Sysno::pwrite64 => impls::sys_pwrite64(args[0], args[1], args[2], args[3]),
         Sysno::writev => impls::sys_writev(args[0], args[1], args[2]),
         Sysno::pwritev => impls::sys_pwritev(args[0], args[1], args[2], args[3], args[4]),
-        Sysno::pwritev2 => impls::sys_pwritev2(args[0], args[1], args[2], args[3], args[4], args[5]),
+        Sysno::pwritev2 => {
+            impls::sys_pwritev2(args[0], args[1], args[2], args[3], args[4], args[5])
+        }
         Sysno::sendfile => impls::sys_sendfile(args[0], args[1], args[2], args[3]),
         Sysno::openat => impls::sys_openat(args[0] as i32, args[1], args[2], args[3]),
         Sysno::mkdirat => impls::sys_mkdirat(args[0] as i32, args[1], args[2]),
@@ -303,13 +308,9 @@ fn syscall_dispatcher(
             impls::sys_recvfrom(args[0], args[1], args[2], args[3], args[4], args[5])
         }
         Sysno::sendmsg => impls::sys_sendmsg(args[0], args[1], args[2]),
-        Sysno::sendmmsg => {
-            impls::sys_sendmmsg(args[0], args[1], args[2], args[3])
-        }
+        Sysno::sendmmsg => impls::sys_sendmmsg(args[0], args[1], args[2], args[3]),
         Sysno::recvmsg => impls::sys_recvmsg(args[0], args[1], args[2]),
-        Sysno::recvmmsg => {
-            impls::sys_recvmmsg(args[0], args[1], args[2], args[3], args[4])
-        }
+        Sysno::recvmmsg => impls::sys_recvmmsg(args[0], args[1], args[2], args[3], args[4]),
         Sysno::getsockname => impls::sys_getsockname(args[0], args[1], args[2]),
         Sysno::getpeername => impls::sys_getpeername(args[0], args[1], args[2]),
         Sysno::setsockopt => impls::sys_setsockopt(args[0], args[1], args[2], args[3], args[4]),
@@ -323,13 +324,9 @@ fn syscall_dispatcher(
         Sysno::chdir => impls::sys_chdir(args[0]),
         Sysno::fchdir => impls::sys_fchdir(args[0]),
         Sysno::unlinkat => impls::sys_unlinkat(args[0] as i32, args[1], args[2]),
-        Sysno::linkat => impls::sys_linkat(
-            args[0] as i32,
-            args[1],
-            args[2] as i32,
-            args[3],
-            args[4],
-        ),
+        Sysno::linkat => {
+            impls::sys_linkat(args[0] as i32, args[1], args[2] as i32, args[3], args[4])
+        }
         #[cfg(target_arch = "loongarch64")]
         Sysno::renameat => {
             impls::sys_renameat2(args[0] as i32, args[1], args[2] as i32, args[3], 0)
@@ -381,13 +378,9 @@ fn syscall_dispatcher(
         Sysno::unshare => impls::sys_unshare(args[0]),
         Sysno::setns => impls::sys_setns(args[0], args[1]),
         #[cfg(target_arch = "riscv64")]
-        Sysno::riscv_hwprobe => impls::sys_riscv_hwprobe(
-            args[0],
-            args[1],
-            args[2],
-            args[3],
-            args[4],
-        ),
+        Sysno::riscv_hwprobe => {
+            impls::sys_riscv_hwprobe(args[0], args[1], args[2], args[3], args[4])
+        }
         Sysno::flock => impls::sys_flock(args[0], args[1]),
         Sysno::getcpu => impls::sys_getcpu(args[0], args[1], args[2]),
         Sysno::fadvise64 => 0,

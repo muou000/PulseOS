@@ -108,3 +108,6 @@ axplat-riscv64-qemu-virt.workspace = true
 
 [target.'cfg(target_arch = "loongarch64")'.dependencies]
 axplat-loongarch64-qemu-virt.workspace = true
+
+[patch."https://github.com/rcore-os/smoltcp.git"]
+smoltcp = { path = "crates/smoltcp" }

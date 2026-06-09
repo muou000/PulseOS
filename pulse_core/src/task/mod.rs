@@ -234,7 +234,7 @@ impl axfs::ProcfsProcessProvider for PulseProcessProvider {
 
         Some(alloc::format!(
             "Name:\t{}\nUmask:\t{:04o}\nState:\t{}\nTgid:\t{}\nPid:\t{}\nPPid:\t{}\nUid:\t{} {} \
-             {} {}\nGid:\t{} {} {} {}\nThreads:\t{}\nVmSize:\t{} kB\nVmRSS:\t{} kB\n",
+             {} {}\nGid:\t{} {} {} {}\nThreads:\t{}\nVmSize:\t{} kB\nVmRSS:\t{} kB\nVmData:\t{} kB\n",
             name,
             umask,
             state,
@@ -251,7 +251,8 @@ impl axfs::ProcfsProcessProvider for PulseProcessProvider {
             egid,
             threads,
             vm_size_kb,
-            vm_rss_kb
+            vm_rss_kb,
+            vm_size_kb
         ))
     }
 
