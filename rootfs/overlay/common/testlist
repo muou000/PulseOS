@@ -189,6 +189,7 @@ ftruncate01
 ftruncate01_64
 futex_cmp_requeue02
 futex_wake01
+getaddrinfo_01
 getcwd01
 getcwd02
 getcwd03
@@ -237,6 +238,7 @@ gettimeofday02
 getuid01
 getuid03
 in6_01
+in6_02
 ioctl_ns07
 kill03
 kill05

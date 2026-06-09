@@ -133,7 +133,9 @@ pub fn sys_sendto(
             Ok(f) => f as u32,
             Err(e) => return -(e.code() as isize),
         };
-        if family == linux_raw_sys::net::AF_UNIX as u32 {
+        if family == 16 || family == 17 {
+            // AF_NETLINK or AF_PACKET, bypass resolution
+        } else if family == linux_raw_sys::net::AF_UNIX as u32 {
             match resolve_unix_addr(addr, addrlen) {
                 Ok(target_addr) => dest_addr = Some(target_addr),
                 Err(e) => return -(e.code() as isize),
@@ -200,6 +202,7 @@ pub fn sys_sendto(
         }
         SocketInner::Local(s) => s.write(&combined_data),
         SocketInner::Packet(_) => Ok(combined_data.len()),
+        SocketInner::Netlink(s) => s.write(&combined_data),
     };
 
     let pending_len = combined_data.len() - len;
@@ -296,6 +299,7 @@ pub fn sys_recvfrom(
             .map_err(|e| LinuxError::from(e.canonicalize())),
         SocketInner::Local(s) => s.read(&mut tmp).map(|n| (n, None)),
         SocketInner::Packet(_) => Ok((0, None)),
+        SocketInner::Netlink(s) => s.read(&mut tmp).map(|n| (n, None)),
     };
 
     match result {
@@ -314,6 +318,17 @@ pub fn sys_recvfrom(
                             if net_addr.write_to_raw(addr, &mut alen).is_ok() {
                                 let _ = write_user_plain(addrlen, &alen);
                             }
+                        }
+                    }
+                }
+            } else if let SocketInner::Netlink(_) = &socket.inner {
+                if addr != 0 && addrlen != 0 {
+                    if let Ok(current_len) = read_user_plain::<u32>(addrlen) {
+                        let mut nladdr = [0u8; 12];
+                        nladdr[0..2].copy_from_slice(&16u16.to_ne_bytes()); // nl_family = 16 (AF_NETLINK)
+                        let to_write = core::cmp::min(current_len as usize, 12);
+                        if crate::impls::utils::write_user_bytes(addr, &nladdr[..to_write]).is_ok() {
+                            let _ = write_user_plain(addrlen, &(to_write as u32));
                         }
                     }
                 }
@@ -384,7 +399,9 @@ fn do_sendmsg_core(
     let mut resolved_addr = None;
     if dest_addr != 0 && dest_addrlen != 0 {
         let family = read_family(dest_addr, dest_addrlen)?;
-        if family == linux_raw_sys::net::AF_UNIX as u16 {
+        if family == 16 || family == 17 {
+            // AF_NETLINK or AF_PACKET, bypass resolution
+        } else if family == linux_raw_sys::net::AF_UNIX as u16 {
             resolved_addr = Some(resolve_unix_addr(dest_addr, dest_addrlen as usize)?);
         } else {
             let net_addr = NetSocketAddr::read_from_raw(dest_addr, dest_addrlen)?;
@@ -445,6 +462,7 @@ fn do_sendmsg_core(
         }
         SocketInner::Local(s) => s.write(&combined_data),
         SocketInner::Packet(_) => Ok(combined_data.len()),
+        SocketInner::Netlink(s) => s.write(&combined_data),
     };
 
     let pending_len = combined_data.len() - flat_len;
@@ -603,6 +621,7 @@ fn do_recvmsg_core(socket: &crate::net::Socket, msg: usize, flags: usize) -> Res
             .map_err(|e| LinuxError::from(e.canonicalize())),
         SocketInner::Local(s) => s.read(&mut flat).map(|n| (n, None)),
         SocketInner::Packet(_) => Ok((0, None)),
+        SocketInner::Netlink(s) => s.read(&mut flat).map(|n| (n, None)),
     };
 
     match result {
@@ -614,6 +633,16 @@ fn do_recvmsg_core(socket: &crate::net::Socket, msg: usize, flags: usize) -> Res
                     let mut alen = msg_hdr.msg_namelen;
                     if net_addr.write_to_raw(name_ptr, &mut alen).is_ok() {
                         msg_hdr.msg_namelen = alen;
+                    }
+                }
+            } else if let SocketInner::Netlink(_) = &socket.inner {
+                let name_ptr = msg_hdr.msg_name as usize;
+                if name_ptr != 0 && msg_hdr.msg_namelen > 0 {
+                    let mut nladdr = [0u8; 12];
+                    nladdr[0..2].copy_from_slice(&16u16.to_ne_bytes()); // nl_family = 16 (AF_NETLINK)
+                    let to_write = core::cmp::min(msg_hdr.msg_namelen as usize, 12);
+                    if crate::impls::utils::write_user_bytes(name_ptr, &nladdr[..to_write]).is_ok() {
+                        msg_hdr.msg_namelen = to_write as u32;
                     }
                 }
             }

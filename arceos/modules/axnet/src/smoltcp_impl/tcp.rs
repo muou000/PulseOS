@@ -475,8 +475,8 @@ impl TcpSocket {
                         .map_err(|_| ax_err_type!(BadState, "socket recv() failed"))?;
                     Ok(len)
                 } else if !socket.is_active() {
-                    // not open
-                    ax_err!(ConnectionRefused, "socket recv() failed")
+                    // connection closed
+                    Ok(0)
                 } else if !socket.may_recv() {
                     // connection closed
                     Ok(0)
@@ -516,8 +516,8 @@ impl TcpSocket {
                         .map_err(|_| ax_err_type!(BadState, "socket recv() failed"))?;
                     Ok(len)
                 } else if !socket.is_active() {
-                    // not open
-                    ax_err!(ConnectionRefused, "socket recv() failed")
+                    // connection closed
+                    Ok(0)
                 } else if !socket.may_recv() {
                     // connection closed
                     Ok(0)
@@ -582,8 +582,8 @@ impl TcpSocket {
             STATE_CONNECTED => self.poll_stream(),
             STATE_LISTENING => self.poll_listener(),
             _ => Ok(PollState {
-                readable: false,
-                writable: false,
+                readable: true,
+                writable: true,
             }),
         }
     }
@@ -812,7 +812,7 @@ impl TcpSocket {
                 SOCKET_SET.poll_interfaces();
                 match f() {
                     Ok(t) => return Ok(t),
-                    Err(AxError::WouldBlock) => axtask::yield_now(),
+                    Err(AxError::WouldBlock) => axtask::sleep(core::time::Duration::from_millis(1)),
                     Err(e) => return Err(e),
                 }
             }

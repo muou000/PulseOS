@@ -487,6 +487,7 @@ pub fn sys_rt_sigreturn(tf: &mut TrapFrame) -> isize {
         Ok(t) => t,
         Err(e) => return -e.code() as isize,
     };
+
     match thread.restore_from_sigreturn(tf) {
         Ok(ret) => ret as isize,
         Err(_) => -LinuxError::EINVAL.code() as isize,

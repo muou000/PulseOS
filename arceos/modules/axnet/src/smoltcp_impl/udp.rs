@@ -234,7 +234,13 @@ impl UdpSocket {
             self.bind(into_core_sockaddr(UNSPECIFIED_ENDPOINT))?;
         }
 
-        *self_peer_addr = Some(from_core_sockaddr(addr));
+        let endpoint = from_core_sockaddr(addr);
+        *self_peer_addr = Some(endpoint);
+
+        SOCKET_SET.with_socket_mut::<udp::Socket, _, _>(self.handle, |socket| {
+            socket.set_peer_endpoint(Some(endpoint));
+        });
+
         debug!("UDP socket {}: connected to {}", self.handle, addr);
         Ok(())
     }
@@ -401,7 +407,7 @@ impl UdpSocket {
                 SOCKET_SET.poll_interfaces();
                 match f() {
                     Ok(t) => return Ok(t),
-                    Err(AxError::WouldBlock) => axtask::yield_now(),
+                    Err(AxError::WouldBlock) => axtask::sleep(core::time::Duration::from_millis(1)),
                     Err(e) => return Err(e),
                 }
             }

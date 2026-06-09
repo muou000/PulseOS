@@ -27,13 +27,26 @@ impl InterfaceInner {
         #[cfg(feature = "socket-udp")]
         {
             let mut is_received = false;
+            // First pass: deliver to matching connected sockets
             for udp_socket in sockets
                 .items_mut()
                 .filter_map(|i| UdpSocket::downcast_mut(&mut i.socket))
             {
-                if udp_socket.accepts(self, &ip_repr, &udp_repr) {
+                if udp_socket.peer_endpoint().is_some() && udp_socket.accepts(self, &ip_repr, &udp_repr) {
                     udp_socket.process(self, meta, &ip_repr, &udp_repr, udp_packet.payload());
                     is_received = true;
+                }
+            }
+            // Second pass: if no connected socket matched, deliver to unconnected sockets
+            if !is_received {
+                for udp_socket in sockets
+                    .items_mut()
+                    .filter_map(|i| UdpSocket::downcast_mut(&mut i.socket))
+                {
+                    if udp_socket.peer_endpoint().is_none() && udp_socket.accepts(self, &ip_repr, &udp_repr) {
+                        udp_socket.process(self, meta, &ip_repr, &udp_repr, udp_packet.payload());
+                        is_received = true;
+                    }
                 }
             }
             if is_received {

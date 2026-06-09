@@ -3,6 +3,7 @@
 cd /fs/glibc/ltp/testcases/bin
 PATH="$PWD:$PATH"
 export LTPROOT=/fs/glibc/ltp
+export LHOST_IFACES="eth0"
 test_list=$(cat /testlist)
 
 echo "#### OS COMP TEST GROUP START ltp-glibc ####"

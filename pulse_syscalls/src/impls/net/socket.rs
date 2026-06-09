@@ -95,7 +95,13 @@ pub fn sys_socket(domain: usize, raw_ty: usize, proto: usize) -> isize {
         (17, d) if d == linux_raw_sys::net::SOCK_DGRAM || d == SOCK_RAW => {
             Socket::new(domain, SocketInner::Packet(crate::net::PacketSocket::new()))
         }
-        (AF_INET | AF_INET6 | AF_UNIX | 17, _) => {
+        (16, d) if d == SOCK_RAW => {
+            if proto != 0 {
+                return -(LinuxError::EPROTONOSUPPORT.code() as isize);
+            }
+            Socket::new(domain, SocketInner::Netlink(crate::net::NetlinkSocket::new()))
+        }
+        (AF_INET | AF_INET6 | AF_UNIX | 17 | 16, _) => {
             warn!("Unsupported socket type: domain={domain}, ty={ty}");
             return -(LinuxError::ESOCKTNOSUPPORT.code() as isize);
         }
@@ -142,7 +148,7 @@ pub fn sys_bind(fd: usize, addr: usize, addrlen: usize) -> isize {
         }
     }
 
-    if family == 17 { // AF_PACKET
+    if family == 16 || family == 17 { // AF_NETLINK or AF_PACKET
         return 0;
     }
 
@@ -228,6 +234,7 @@ pub fn sys_bind(fd: usize, addr: usize, addrlen: usize) -> isize {
             SocketInner::Udp(s) => s.bind(bind_addr).map_err(|e| LinuxError::from(e.canonicalize())),
             SocketInner::Local(_) => Err(LinuxError::EINVAL),
             SocketInner::Packet(_) => Err(LinuxError::EINVAL),
+            SocketInner::Netlink(_) => Err(LinuxError::EINVAL),
         };
 
         if let Err(e) = res {
@@ -300,6 +307,7 @@ pub fn sys_bind(fd: usize, addr: usize, addrlen: usize) -> isize {
             .map_err(|e| LinuxError::from(e.canonicalize())),
         (SocketInner::Local(_), _) => Err(LinuxError::EINVAL),
         (SocketInner::Packet(_), _) => Err(LinuxError::EINVAL),
+        (SocketInner::Netlink(_), _) => Err(LinuxError::EINVAL),
     };
     match result {
         Ok(()) => 0,
@@ -337,6 +345,10 @@ pub fn sys_connect(fd: usize, addr: usize, addrlen: usize) -> isize {
         if !(socket_domain == AF_INET6 as u32 && family == AF_INET as u32) {
             return -(LinuxError::EAFNOSUPPORT.code() as isize);
         }
+    }
+
+    if family == 16 || family == 17 { // AF_NETLINK or AF_PACKET
+        return 0;
     }
 
     if family == AF_UNIX as u32 {
@@ -416,6 +428,7 @@ pub fn sys_connect(fd: usize, addr: usize, addrlen: usize) -> isize {
             SocketInner::Udp(s) => s.connect(target_addr).map_err(|e| LinuxError::from(e.canonicalize())),
             SocketInner::Local(_) => Err(LinuxError::EISCONN),
             SocketInner::Packet(_) => Err(LinuxError::EOPNOTSUPP),
+            SocketInner::Netlink(_) => Err(LinuxError::EOPNOTSUPP),
         };
 
         return match res {
@@ -460,6 +473,7 @@ pub fn sys_connect(fd: usize, addr: usize, addrlen: usize) -> isize {
             .map_err(|e| LinuxError::from(e.canonicalize())),
         SocketInner::Local(_) => Err(LinuxError::EISCONN),
         SocketInner::Packet(_) => Err(LinuxError::EOPNOTSUPP),
+        SocketInner::Netlink(_) => Err(LinuxError::EOPNOTSUPP),
     };
     match result {
         Ok(()) => 0,
@@ -481,6 +495,7 @@ pub fn sys_listen(fd: usize, _backlog: usize) -> isize {
         SocketInner::Udp(_) => -(LinuxError::EOPNOTSUPP.code() as isize),
         SocketInner::Local(_) => -(LinuxError::EINVAL.code() as isize),
         SocketInner::Packet(_) => -(LinuxError::EOPNOTSUPP.code() as isize),
+        SocketInner::Netlink(_) => -(LinuxError::EOPNOTSUPP.code() as isize),
     }
 }
 
@@ -505,6 +520,7 @@ pub fn sys_accept4(fd: usize, addr: usize, addrlen: usize, flags: usize) -> isiz
         SocketInner::Udp(_) => return -(LinuxError::EOPNOTSUPP.code() as isize),
         SocketInner::Local(_) => return -(LinuxError::EINVAL.code() as isize),
         SocketInner::Packet(_) => return -(LinuxError::EOPNOTSUPP.code() as isize),
+        SocketInner::Netlink(_) => return -(LinuxError::EOPNOTSUPP.code() as isize),
     };
 
     let remote_addr = new_tcp.peer_addr().ok();
@@ -593,6 +609,7 @@ pub fn sys_shutdown(fd: usize, how: usize) -> isize {
             _ => Err(LinuxError::EINVAL),
         },
         SocketInner::Packet(_) => Ok(()),
+        SocketInner::Netlink(_) => Ok(()),
     };
     match result {
         Ok(()) => 0,
