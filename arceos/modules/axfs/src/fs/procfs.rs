@@ -1,4 +1,4 @@
-use alloc::{borrow::ToOwned, collections::BTreeMap, format, string::String, sync::Arc, vec::Vec};
+use alloc::{borrow::ToOwned, collections::BTreeMap, format, string::{String, ToString}, sync::Arc, vec::Vec};
 use core::{
     any::Any,
     borrow::Borrow,
@@ -531,7 +531,7 @@ impl ProcFilesystem {
                     
                     if let Some(fds) = provider.process_fds(pid) {
                         for fd in fds {
-                            let name = format!("{}", fd);
+                            let name = fd.to_string(); // Bolt: Use to_string() instead of format! for single integer conversion to avoid allocation overhead
                             let child_ino = PID_INODE_START + (pid << PID_INODE_SHIFT) + SUB_INO_FD_BASE + fd as u64;
                             entries.insert(name.into(), InodeRef::new(child_ino));
                         }
@@ -706,7 +706,7 @@ fn render_proc_file(fs: &ProcFilesystem, kind: ProcLiveFileKind) -> String {
         ProcLiveFileKind::SelfSymlink => {
             if let Some(provider) = PROCESS_PROVIDER.get() {
                 if let Some(pid) = provider.current_pid() {
-                    return format!("{}", pid);
+                    return pid.to_string(); // Bolt: Use to_string() instead of format! for single integer conversion
                 }
             }
             "1".to_owned()
@@ -715,7 +715,7 @@ fn render_proc_file(fs: &ProcFilesystem, kind: ProcLiveFileKind) -> String {
             if let Some(provider) = PROCESS_PROVIDER.get() {
                 let pids = provider.process_pids();
                 if let Some(&min_pid) = pids.iter().min() {
-                    return format!("{}", min_pid);
+                    return min_pid.to_string(); // Bolt: Use to_string() instead of format! for single integer conversion
                 }
             }
             "1".to_owned()
@@ -1016,7 +1016,7 @@ impl DirNodeOps for ProcNode {
                     
                     if let Some(fds) = provider.process_fds(pid) {
                         for fd in fds {
-                            let name = format!("{}", fd);
+                            let name = fd.to_string(); // Bolt: Use to_string() instead of format! for single integer conversion to avoid allocation overhead
                             let child_ino = PID_INODE_START + (pid << PID_INODE_SHIFT) + SUB_INO_FD_BASE + fd as u64;
                             all_entries.push((name, child_ino));
                         }
@@ -1032,7 +1032,7 @@ impl DirNodeOps for ProcNode {
             if self.ino == ROOT_INO {
                 if let Some(provider) = PROCESS_PROVIDER.get() {
                     for pid in provider.process_pids() {
-                        let name = format!("{}", pid);
+                        let name = pid.to_string(); // Bolt: Use to_string() instead of format! for single integer conversion to avoid allocation overhead
                         let child_ino = PID_INODE_START + (pid << PID_INODE_SHIFT) + SUB_INO_DIR;
                         all_entries.push((name, child_ino));
                     }
