@@ -52,7 +52,7 @@ impl TimeIf for TimeIfImpl {
 
     /// Converts nanoseconds to hardware ticks.
     fn nanos_to_ticks(nanos: u64) -> u64 {
-        nanos / NANOS_PER_TICK
+        nanos.div_ceil(NANOS_PER_TICK)
     }
 
     /// Return epoch offset in nanoseconds (wall time offset to monotonic clock start).

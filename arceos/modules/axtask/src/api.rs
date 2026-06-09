@@ -142,6 +142,8 @@ pub fn on_timer_tick() {
     // Since irq and preemption are both disabled here,
     // we can get current run queue with the default `kernel_guard::NoOp`.
     current_run_queue::<NoOp>().scheduler_timer_tick();
+    // Reprogram the hardware timer.
+    crate::timers::reprogram_timer();
 }
 
 /// Adds the given task to the run queue, returns the task reference.
@@ -281,3 +283,22 @@ pub fn run_idle() -> ! {
         axhal::asm::wait_for_irqs();
     }
 }
+
+/// Reprogram the hardware timer.
+#[cfg(feature = "irq")]
+pub fn reprogram_timer() {
+    crate::timers::reprogram_timer();
+}
+
+/// Gets the next timer event deadline.
+#[cfg(feature = "irq")]
+pub fn next_deadline() -> Option<axhal::time::TimeValue> {
+    crate::timers::next_deadline()
+}
+
+/// Check if the current task needs to be preempted, and reschedule if so.
+pub fn check_preempt_pending() {
+    #[cfg(feature = "preempt")]
+    crate::task::TaskInner::current_check_preempt_pending();
+}
+

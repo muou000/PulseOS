@@ -313,7 +313,13 @@ impl TaskInner {
     }
 
     pub fn into_arc(self) -> AxTaskRef {
-        Arc::new(AxTask::new(self))
+        let task_ref = Arc::new(AxTask::new(self));
+        #[cfg(feature = "sched-rr")]
+        if let Some(curr) = crate::current_may_uninit() {
+            let prio = curr.as_task_ref().priority();
+            task_ref.set_priority(prio);
+        }
+        task_ref
     }
 
     #[inline]
@@ -426,7 +432,7 @@ impl TaskInner {
     }
 
     #[cfg(feature = "preempt")]
-    fn current_check_preempt_pending() {
+    pub(crate) fn current_check_preempt_pending() {
         use kernel_guard::NoPreemptIrqSave;
         let curr = crate::current();
         if curr.need_resched.load(Ordering::Acquire) && curr.can_preempt(0) {

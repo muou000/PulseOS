@@ -81,6 +81,7 @@ rand_pcg = { version = "0.10.2", default-features = false }
 lto = true
 
 [patch.crates-io]
+axsched = { path = "../crates/axsched" }
 memory_set = { path = "../crates/memory_set" }
 memory_addr = { path = "../crates/memory_addr" }
 axfs-ng-vfs = { path = "../crates/axfs-ng-vfs" }
@@ -89,7 +90,6 @@ axcpu = { path = "../crates/axcpu" }
 axplat-loongarch64-qemu-virt = { path = "../crates/axplat-loongarch64-qemu-virt" }
 axplat-riscv64-qemu-virt = { path = "../crates/axplat-riscv64-qemu-virt" }
 axio = { path = "../crates/axio" }
-page_table_entry = { path = "../vendor/page_table_entry" }
 page_table_multiarch = { path = "../crates/page_table_multiarch" }
 
 [patch."https://github.com/arceos-org/allocator.git"]
