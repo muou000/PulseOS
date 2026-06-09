@@ -506,7 +506,12 @@ impl AxRunQueue {
             // TODO: priority
             #[cfg(feature = "smp")]
             task.set_cpu_id(self.cpu_id as _);
-            self.scheduler.lock().put_prev_task(task, preempt);
+            let is_preempt = if current_state == TaskState::Blocked {
+                false
+            } else {
+                preempt
+            };
+            self.scheduler.lock().put_prev_task(task, is_preempt);
             true
         } else {
             false

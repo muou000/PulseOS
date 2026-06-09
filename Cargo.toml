@@ -67,6 +67,7 @@ chrono = { version = "0.4", default-features = false }
 starry-vdso = { path = "crates/starry-vdso" }
 
 [patch.crates-io]
+axsched = { path = "crates/axsched" }
 memory_set = { path = "crates/memory_set" }
 memory_addr = { path = "crates/memory_addr" }
 axfs-ng-vfs = { path = "crates/axfs-ng-vfs" }

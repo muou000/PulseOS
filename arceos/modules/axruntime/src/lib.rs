@@ -259,6 +259,7 @@ fn init_interrupt() {
     }
 
     axhal::irq::register(axconfig::devices::TIMER_IRQ, || {
+        #[cfg(not(feature = "multitask"))]
         update_timer();
         crate::vdso::update_vdso_data();
         #[cfg(feature = "multitask")]

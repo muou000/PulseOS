@@ -128,33 +128,67 @@ pub fn sys_sched_getscheduler(pid: usize) -> isize {
 }
 
 pub fn sys_sched_setparam(pid: usize, param_ptr: usize) -> isize {
-    axlog::warn!(
-        "sys_sched_setparam (stub): pid={}, param={:#x}; request accepted without scheduler state",
-        pid,
-        param_ptr
-    );
     if let Err(e) = check_pid(pid) {
         return -e.code() as isize;
     }
     if param_ptr == 0 {
         return -LinuxError::EFAULT.code() as isize;
     }
+
+    let mut sched_priority: i32 = 0;
+    if read_user_bytes(param_ptr, unsafe {
+        core::slice::from_raw_parts_mut(
+            &mut sched_priority as *mut i32 as *mut u8,
+            core::mem::size_of::<i32>(),
+        )
+    }).is_err() {
+        return -LinuxError::EFAULT.code() as isize;
+    }
+
+    let nice = if sched_priority > 0 {
+        if sched_priority > 99 {
+            return -LinuxError::EINVAL.code() as isize;
+        }
+        (20 - (sched_priority as isize * 40 / 100)).clamp(-20, 19)
+    } else {
+        0
+    };
+
+    axtask::set_priority(nice);
     0
 }
 
 pub fn sys_sched_setscheduler(pid: usize, policy: usize, param_ptr: usize) -> isize {
-    axlog::warn!(
-        "sys_sched_setscheduler (stub): pid={}, policy={}, param={:#x}; request ignored",
-        pid,
-        policy,
-        param_ptr
-    );
     if let Err(e) = check_pid(pid) {
         return -e.code() as isize;
     }
     if param_ptr == 0 || !is_supported_policy(policy) {
         return -LinuxError::EINVAL.code() as isize;
     }
+
+    let mut sched_priority: i32 = 0;
+    if read_user_bytes(param_ptr, unsafe {
+        core::slice::from_raw_parts_mut(
+            &mut sched_priority as *mut i32 as *mut u8,
+            core::mem::size_of::<i32>(),
+        )
+    }).is_err() {
+        return -LinuxError::EFAULT.code() as isize;
+    }
+
+    let nice = if policy as u32 == SCHED_FIFO || policy as u32 == SCHED_RR {
+        if sched_priority < 1 || sched_priority > 99 {
+            return -LinuxError::EINVAL.code() as isize;
+        }
+        (20 - (sched_priority as isize * 40 / 100)).clamp(-20, 19)
+    } else {
+        if sched_priority != 0 {
+            return -LinuxError::EINVAL.code() as isize;
+        }
+        0
+    };
+
+    axtask::set_priority(nice);
     0
 }
 

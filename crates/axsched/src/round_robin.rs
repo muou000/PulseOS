@@ -12,6 +12,7 @@ use crate::BaseScheduler;
 pub struct RRTask<T, const MAX_TIME_SLICE: usize> {
     inner: T,
     time_slice: AtomicIsize,
+    priority: AtomicIsize,
     links: Links<Self>,
 }
 
@@ -21,6 +22,7 @@ impl<T, const S: usize> RRTask<T, S> {
         Self {
             inner,
             time_slice: AtomicIsize::new(S as isize),
+            priority: AtomicIsize::new(0),
             links: Links::new(),
         }
     }
@@ -31,6 +33,14 @@ impl<T, const S: usize> RRTask<T, S> {
 
     fn reset_time_slice(&self) {
         self.time_slice.store(S as isize, Ordering::Release);
+    }
+
+    pub fn priority(&self) -> isize {
+        self.priority.load(Ordering::Acquire)
+    }
+
+    pub fn set_priority(&self, prio: isize) {
+        self.priority.store(prio, Ordering::Release);
     }
 
     /// Returns a reference to the inner task struct.
@@ -67,19 +77,29 @@ impl<T, const S: usize> Deref for RRTask<T, S> {
 /// [Round-Robin]: https://en.wikipedia.org/wiki/Round-robin_scheduling
 /// [`FifoScheduler`]: crate::FifoScheduler
 pub struct RRScheduler<T, const MAX_TIME_SLICE: usize> {
-    ready_queue: List<Arc<RRTask<T, MAX_TIME_SLICE>>>,
+    rt_queue: List<Arc<RRTask<T, MAX_TIME_SLICE>>>,
+    normal_queue: List<Arc<RRTask<T, MAX_TIME_SLICE>>>,
 }
 
 impl<T, const S: usize> RRScheduler<T, S> {
     /// Creates a new empty [`RRScheduler`].
     pub const fn new() -> Self {
         Self {
-            ready_queue: List::new(),
+            rt_queue: List::new(),
+            normal_queue: List::new(),
         }
     }
     /// get the name of scheduler
     pub fn scheduler_name() -> &'static str {
-        "Round-robin"
+        "Round-robin with RT priority"
+    }
+
+    unsafe fn clone_arc(task: &RRTask<T, S>) -> Arc<RRTask<T, S>> {
+        let ptr = task as *const RRTask<T, S>;
+        unsafe {
+            Arc::increment_strong_count(ptr);
+            Arc::from_raw(ptr)
+        }
     }
 }
 
@@ -89,23 +109,53 @@ impl<T, const S: usize> BaseScheduler for RRScheduler<T, S> {
     fn init(&mut self) {}
 
     fn add_task(&mut self, task: Self::SchedItem) {
-        self.ready_queue.push_back(task);
+        if task.priority() < 0 {
+            self.rt_queue.push_back(task);
+        } else {
+            self.normal_queue.push_back(task);
+        }
     }
 
     fn remove_task(&mut self, task: &Self::SchedItem) -> Option<Self::SchedItem> {
-        unsafe { self.ready_queue.remove(task) }
+        if task.priority() < 0 {
+            unsafe { self.rt_queue.remove(task) }
+        } else {
+            unsafe { self.normal_queue.remove(task) }
+        }
     }
 
     fn pick_next_task(&mut self) -> Option<Self::SchedItem> {
-        self.ready_queue.pop_front()
+        if self.rt_queue.is_empty() {
+            self.normal_queue.pop_front()
+        } else {
+            // Find the task with the highest priority (lowest priority() value)
+            let mut best: Option<Self::SchedItem> = None;
+            for task in self.rt_queue.iter() {
+                if let Some(ref b) = best {
+                    if task.priority() < b.priority() {
+                        best = Some(unsafe { Self::clone_arc(task) });
+                    }
+                } else {
+                    best = Some(unsafe { Self::clone_arc(task) });
+                }
+            }
+            if let Some(ref task) = best {
+                unsafe { self.rt_queue.remove(task) }
+            } else {
+                None
+            }
+        }
     }
 
     fn put_prev_task(&mut self, prev: Self::SchedItem, preempt: bool) {
+        let is_rt = prev.priority() < 0;
+        let queue = if is_rt { &mut self.rt_queue } else { &mut self.normal_queue };
+
         if prev.time_slice() > 0 && preempt {
-            self.ready_queue.push_front(prev)
+            queue.push_front(prev)
         } else {
             prev.reset_time_slice();
-            self.ready_queue.push_back(prev)
+            queue.push_back(prev)
         }
     }
 
@@ -114,8 +164,9 @@ impl<T, const S: usize> BaseScheduler for RRScheduler<T, S> {
         old_slice <= 1
     }
 
-    fn set_priority(&mut self, _task: &Self::SchedItem, _prio: isize) -> bool {
-        false
+    fn set_priority(&mut self, task: &Self::SchedItem, prio: isize) -> bool {
+        task.priority.store(prio, Ordering::Release);
+        true
     }
 }
 

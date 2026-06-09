@@ -97,6 +97,7 @@ fn deliver_pending_signal(tf: &mut TrapFrame) {
 #[register_trap_handler(USER_RETURN)]
 fn handle_user_return(tf: &mut TrapFrame) {
     deliver_pending_signal(tf);
+    axtask::check_preempt_pending();
 }
 
 /// Page fault处理程序

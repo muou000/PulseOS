@@ -43,3 +43,13 @@ pub fn wall_time_nanos() -> u64 {
 pub fn wall_time() -> TimeValue {
     TimeValue::from_nanos(wall_time_nanos())
 }
+
+/// Returns the current realtime offset to monotonic time in nanoseconds.
+pub fn current_epochoffset_nanos() -> u64 {
+    let mut offset = REALTIME_OFFSET_NANOS.load(Ordering::Acquire);
+    if offset == u64::MAX {
+        offset = epochoffset_nanos();
+        REALTIME_OFFSET_NANOS.store(offset, Ordering::Release);
+    }
+    offset
+}

@@ -35,12 +35,58 @@ impl TimerEvent for TaskWakeupEvent {
     }
 }
 
+percpu_static! {
+    NEXT_TICK_DEADLINE: u64 = 0,
+}
+
+pub fn reprogram_timer() {
+    let now_ns = axhal::time::monotonic_time_nanos();
+    let mut tick_deadline = unsafe { NEXT_TICK_DEADLINE.read_current_raw() };
+    let periodic_interval_nanos = axhal::time::NANOS_PER_SEC / axconfig::TICKS_PER_SEC as u64;
+
+    if now_ns >= tick_deadline {
+        tick_deadline = now_ns + periodic_interval_nanos;
+        unsafe { NEXT_TICK_DEADLINE.write_current_raw(tick_deadline) };
+    }
+
+    let mut final_deadline = tick_deadline;
+    if let Some(event_deadline) = unsafe {
+        let tl = TIMER_LIST.current_ref_raw();
+        if tl.is_inited() {
+            tl.next_deadline()
+        } else {
+            None
+        }
+    } {
+        let offset_ns = axhal::time::current_epochoffset_nanos();
+        let event_mono_ns = event_deadline.as_nanos() as u64;
+        let event_mono_ns = event_mono_ns.saturating_sub(offset_ns);
+        if event_mono_ns < final_deadline {
+            final_deadline = event_mono_ns;
+        }
+    }
+
+    axhal::time::set_oneshot_timer(final_deadline);
+}
+
+pub fn next_deadline() -> Option<TimeValue> {
+    unsafe {
+        let tl = TIMER_LIST.current_ref_raw();
+        if tl.is_inited() {
+            tl.next_deadline()
+        } else {
+            None
+        }
+    }
+}
+
 pub fn set_alarm_wakeup(deadline: TimeValue, task: AxTaskRef) {
     TIMER_LIST.with_current(|timer_list| {
         let ticket_id = TIMER_TICKET_ID.fetch_add(1, Ordering::AcqRel);
         task.set_timer_ticket(ticket_id);
         timer_list.set(deadline, TaskWakeupEvent { ticket_id, task });
-    })
+    });
+    reprogram_timer();
 }
 
 pub fn check_events() {
