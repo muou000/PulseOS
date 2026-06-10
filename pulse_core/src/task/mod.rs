@@ -311,7 +311,7 @@ impl axfs::ProcfsProcessProvider for PulseProcessProvider {
         });
         let rss_pages = vm_size / 4096;
 
-        let mut out = String::with_capacity(256);
+        let mut out = String::with_capacity(384);
         use core::fmt::Write;
         let _ = write!(
             out,
