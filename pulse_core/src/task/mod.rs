@@ -1,3 +1,4 @@
+use core::fmt::Write;
 mod exec;
 mod process;
 mod signal;
@@ -200,7 +201,12 @@ impl axfs::ProcfsProcessProvider for PulseProcessProvider {
         let args = proc.args.read();
         if args.is_empty() {
             let path = proc.exec_path_or_default();
-            Some(alloc::format!("{}\0", path))
+            {
+            let mut out = String::with_capacity(path.len() + 1);
+            out.push_str(&path);
+            out.push('\0');
+            Some(out)
+        }
         } else {
             let mut res = String::new();
             for arg in args.iter() {
@@ -213,7 +219,13 @@ impl axfs::ProcfsProcessProvider for PulseProcessProvider {
 
     fn comm(&self, pid: u64) -> Option<String> {
         let proc = process_by_pid(pid)?;
-        Some(alloc::format!("{}\n", proc.name()))
+        {
+        let name = proc.name();
+        let mut out = String::with_capacity(name.len() + 1);
+        out.push_str(&name);
+        out.push('\n');
+        Some(out)
+    }
     }
 
     fn status(&self, pid: u64) -> Option<String> {
@@ -247,7 +259,9 @@ impl axfs::ProcfsProcessProvider for PulseProcessProvider {
         let vm_size_kb = vm_size / 1024;
         let vm_rss_kb = vm_size_kb;
 
-        Some(alloc::format!(
+        let mut out = String::with_capacity(512);
+        let _ = write!(
+            &mut out,
             "Name:\t{}\nUmask:\t{:04o}\nState:\t{}\nTgid:\t{}\nPid:\t{}\nPPid:\t{}\nUid:\t{} {} \
              {} {}\nGid:\t{} {} {} {}\nThreads:\t{}\nVmSize:\t{} kB\nVmRSS:\t{} kB\nVmData:\t{} kB\n",
             name,
@@ -268,7 +282,8 @@ impl axfs::ProcfsProcessProvider for PulseProcessProvider {
             vm_size_kb,
             vm_rss_kb,
             vm_size_kb
-        ))
+        );
+        Some(out)
     }
 
     fn exe(&self, pid: u64) -> Option<String> {
@@ -318,7 +333,9 @@ impl axfs::ProcfsProcessProvider for PulseProcessProvider {
         });
         let rss_pages = vm_size / 4096;
 
-        Some(alloc::format!(
+        let mut out = String::with_capacity(256);
+        let _ = write!(
+            &mut out,
             "{} ({}) {} {} 0 0 0 -1 0 0 0 0 0 {} {} {} {} 20 0 {} 0 {} {} {} {} 0 0 0 0 0 0 0 0 0 \
              0 0 0 17 0 0 0 0 0 0 0 0 0 0 0 0 0 0\n",
             pid,
@@ -334,7 +351,8 @@ impl axfs::ProcfsProcessProvider for PulseProcessProvider {
             vm_size,
             rss_pages,
             u64::MAX
-        ))
+        );
+        Some(out)
     }
 
     fn process_fds(&self, pid: u64) -> Option<Vec<u32>> {
@@ -361,10 +379,18 @@ impl axfs::ProcfsProcessProvider for PulseProcessProvider {
             let mode = st.st_mode;
             if (mode & 0o170000) == 0o140000 {
                 // S_IFSOCK
-                Some(alloc::format!("socket:[{}]", st.st_ino))
+                {
+                let mut out = String::with_capacity(32);
+                let _ = write!(&mut out, "socket:[{}]", st.st_ino);
+                Some(out)
+            }
             } else if (mode & 0o170000) == 0o010000 {
                 // S_IFIFO
-                Some(alloc::format!("pipe:[{}]", st.st_ino))
+                {
+                let mut out = String::with_capacity(32);
+                let _ = write!(&mut out, "pipe:[{}]", st.st_ino);
+                Some(out)
+            }
             } else {
                 Some("/dev/null".to_string())
             }
@@ -427,7 +453,8 @@ impl axfs::ProcfsProcessProvider for PulseProcessProvider {
                         inode = meta.inode;
                         let major = meta.device >> 8;
                         let minor = meta.device & 0xff;
-                        dev_str = alloc::format!("{:02x}:{:02x}", major, minor);
+                        dev_str.clear();
+                        let _ = write!(&mut dev_str, "{:02x}:{:02x}", major, minor);
                     }
                     if let Ok(path) = loc.absolute_path() {
                         path_str = path.as_str().to_string();
@@ -438,7 +465,8 @@ impl axfs::ProcfsProcessProvider for PulseProcessProvider {
 
             let p_char = if is_shared { "s" } else { "p" };
             if path_str.is_empty() {
-                out.push_str(&alloc::format!(
+                let _ = write!(
+                    &mut out,
                     "{:x}-{:x} {}{}{}{} {:08x} {} {}\n",
                     start.as_usize(),
                     end.as_usize(),
@@ -449,9 +477,10 @@ impl axfs::ProcfsProcessProvider for PulseProcessProvider {
                     offset,
                     dev_str,
                     inode
-                ));
+                );
             } else {
-                out.push_str(&alloc::format!(
+                let _ = write!(
+                    &mut out,
                     "{:x}-{:x} {}{}{}{} {:08x} {} {:<7} {}\n",
                     start.as_usize(),
                     end.as_usize(),
@@ -463,7 +492,7 @@ impl axfs::ProcfsProcessProvider for PulseProcessProvider {
                     dev_str,
                     inode,
                     path_str
-                ));
+                );
             }
         });
 
