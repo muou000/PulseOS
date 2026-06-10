@@ -28,6 +28,32 @@ impl Ext4 {
 
     /// Load the inode reference from the disk.
     pub fn get_inode_ref(&self, inode_num: u32) -> Ext4InodeRef {
+        {
+            let mut cache = self.inode_cache.lock();
+            let mut found_idx = None;
+            for (i, entry) in cache.iter().enumerate() {
+                if let Some(e) = entry {
+                    if e.inode_num == inode_num {
+                        found_idx = Some(i);
+                        break;
+                    }
+                }
+            }
+            if let Some(idx) = found_idx {
+                let entry = cache[idx].unwrap();
+                if idx > 0 {
+                    for i in (0..idx).rev() {
+                        cache[i + 1] = cache[i];
+                    }
+                    cache[0] = Some(entry);
+                }
+                return Ext4InodeRef {
+                    inode_num,
+                    inode: entry.inode,
+                };
+            }
+        }
+
         let offset = self.inode_disk_pos(inode_num);
         let block_offset = (offset / BLOCK_SIZE) * BLOCK_SIZE;
         let inner_offset = offset % BLOCK_SIZE;
@@ -35,10 +61,22 @@ impl Ext4 {
         let mut ext4block = Block::load(&self.block_device, block_offset);
 
         let inode: &mut Ext4Inode = ext4block.read_offset_as_mut(inner_offset);
+        let inode_val = *inode;
+
+        {
+            let mut cache = self.inode_cache.lock();
+            for i in (0..15).rev() {
+                cache[i + 1] = cache[i];
+            }
+            cache[0] = Some(InodeCacheEntry {
+                inode_num,
+                inode: inode_val,
+            });
+        }
 
         Ext4InodeRef {
             inode_num,
-            inode: *inode,
+            inode: inode_val,
         }
     }
 
@@ -61,6 +99,18 @@ impl Ext4 {
         };
         block.data[inner_offset..inner_offset + write_size].copy_from_slice(inode_data);
         block.sync_blk_to_disk(&self.block_device);
+
+        {
+            let mut cache = self.inode_cache.lock();
+            for entry in cache.iter_mut() {
+                if let Some(ref mut e) = entry {
+                    if e.inode_num == inode_ref.inode_num {
+                        e.inode = inode_ref.inode;
+                        break;
+                    }
+                }
+            }
+        }
     }
 
     /// write back inode with checksum
@@ -77,6 +127,18 @@ impl Ext4 {
         };
         block.data[inner_offset..inner_offset + write_size].copy_from_slice(inode_data);
         block.sync_blk_to_disk(&self.block_device);
+
+        {
+            let mut cache = self.inode_cache.lock();
+            for entry in cache.iter_mut() {
+                if let Some(ref mut e) = entry {
+                    if e.inode_num == inode_ref.inode_num {
+                        e.inode = inode_ref.inode;
+                        break;
+                    }
+                }
+            }
+        }
     }
 
     /// Get physical block id of a logical block.

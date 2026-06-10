@@ -76,6 +76,7 @@ axcpu = { path = "crates/axcpu" }
 axplat-loongarch64-qemu-virt = { path = "crates/axplat-loongarch64-qemu-virt" }
 axplat-riscv64-qemu-virt = { path = "crates/axplat-riscv64-qemu-virt" }
 axio = { path = "crates/axio" }
+virtio-drivers = { path = "crates/virtio-drivers" }
 
 [patch."https://github.com/arceos-org/allocator.git"]
 allocator = { path = "crates/allocator" }

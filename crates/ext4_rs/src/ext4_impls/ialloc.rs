@@ -122,5 +122,17 @@ impl Ext4 {
             let self_mut = self as *const Self as *mut Self;
             (*self_mut).super_block = super_block;
         }
+
+        {
+            let mut cache = self.inode_cache.lock();
+            for entry in cache.iter_mut() {
+                if let Some(e) = entry {
+                    if e.inode_num == index {
+                        *entry = None;
+                        break;
+                    }
+                }
+            }
+        }
     }
 }

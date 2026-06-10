@@ -310,6 +310,7 @@ impl<H: Hal, const SIZE: usize> VirtQueue<H, SIZE> {
 
         // Wait until there is at least one element in the used ring.
         while !self.can_pop() {
+            H::busy_wait_yield();
             spin_loop();
         }
 

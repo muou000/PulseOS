@@ -168,4 +168,11 @@ unsafe impl VirtIoHal for VirtIoHalImpl {
 
     #[inline]
     unsafe fn unshare(_paddr: PhysAddr, _buffer: NonNull<[u8]>, _direction: BufferDirection) {}
+
+    #[inline]
+    fn busy_wait_yield() {
+        if axhal::asm::irqs_enabled() {
+            axtask::yield_now();
+        }
+    }
 }
