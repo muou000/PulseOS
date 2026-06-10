@@ -241,7 +241,10 @@ pub fn rename_mount_registry(old_prefix: &str, new_prefix: &str) {
             if record.target == old_prefix {
                 record.target = new_prefix.clone();
             } else if record.target.starts_with(&old_prefix) && record.target.as_bytes().get(old_prefix.len()) == Some(&b'/') {
-                let suffix = &record.target[old_prefix.len()..]; // Includes the leading '/'
+                let mut suffix = &record.target[old_prefix.len()..]; // Includes the leading '/'
+                if new_prefix.ends_with('/') {
+                    suffix = &suffix[1..];
+                }
                 let mut res = String::with_capacity(new_prefix.len() + suffix.len());
                 res.push_str(&new_prefix);
                 res.push_str(suffix);
@@ -257,7 +260,10 @@ pub fn rename_mount_registry(old_prefix: &str, new_prefix: &str) {
             if target == &old_prefix {
                 *target = new_prefix.clone();
             } else if target.starts_with(&old_prefix) && target.as_bytes().get(old_prefix.len()) == Some(&b'/') {
-                let suffix = &target[old_prefix.len()..]; // Includes the leading '/'
+                let mut suffix = &target[old_prefix.len()..]; // Includes the leading '/'
+                if new_prefix.ends_with('/') {
+                    suffix = &suffix[1..];
+                }
                 let mut res = String::with_capacity(new_prefix.len() + suffix.len());
                 res.push_str(&new_prefix);
                 res.push_str(suffix);
@@ -431,7 +437,6 @@ pub fn init_filesystems(mut block_devs: AxDeviceContainer<AxBlockDevice>) {
     for i in 0..8 {
         let loop_dev = fs::loop_dev::LoopBlockDevice::new(i);
         let mut loop_name = String::with_capacity(16);
-        use core::fmt::Write;
         let _ = write!(loop_name, "loop{}", i);
         dev_nodes.push(fs::BlockDeviceSpec {
             name: loop_name,

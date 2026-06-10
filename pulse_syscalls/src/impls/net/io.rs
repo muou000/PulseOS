@@ -174,41 +174,42 @@ pub fn sys_sendto(
     }
 
     let mut combined_data;
-    {
-        let mut pending = socket.pending_send.lock();
-        if pending.is_empty() {
-            combined_data = tmp;
-        } else {
-            combined_data = core::mem::take(&mut *pending);
-            combined_data.extend_from_slice(&tmp);
-        }
-    }
+    let mut pending = socket.pending_send.lock();
+    let pending_len = pending.len();
+    let data: &[u8] = if pending.is_empty() {
+        &tmp
+    } else {
+        combined_data = core::mem::take(&mut *pending);
+        combined_data.extend_from_slice(&tmp);
+        &combined_data
+    };
+    drop(pending);
+
     let final_dest_addr = dest_addr.or_else(|| socket.pending_addr.lock().take());
 
     let result = match &socket.inner {
         SocketInner::Tcp(s) => s
-            .send(&combined_data)
+            .send(data)
             .map_err(|e| LinuxError::from(e.canonicalize())),
         SocketInner::Udp(s) => {
             if (flags & 1) != 0 {
                 // MSG_OOB
                 Err(LinuxError::EOPNOTSUPP)
-            } else if combined_data.len() > 65507 {
+            } else if data.len() > 65507 {
                 Err(LinuxError::EMSGSIZE)
             } else if let Some(daddr) = final_dest_addr {
-                s.send_to(&combined_data, daddr)
+                s.send_to(data, daddr)
                     .map_err(|e| LinuxError::from(e.canonicalize()))
             } else {
-                s.send(&combined_data)
+                s.send(data)
                     .map_err(|e| LinuxError::from(e.canonicalize()))
             }
         }
-        SocketInner::Local(s) => s.write(&combined_data),
-        SocketInner::Packet(_) => Ok(combined_data.len()),
-        SocketInner::Netlink(s) => s.write(&combined_data),
+        SocketInner::Local(s) => s.write(data),
+        SocketInner::Packet(_) => Ok(data.len()),
+        SocketInner::Netlink(s) => s.write(data),
     };
 
-    let pending_len = combined_data.len() - len;
     match result {
         Ok(n) => {
             if n >= pending_len {

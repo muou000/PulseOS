@@ -1055,7 +1055,7 @@ impl Ext4 {
          * of the paths.
          */
         if pos == 0 && new_entry_count > 0 {
-            self.ext_correct_indexes(path)?;
+            self.ext_correct_indexes(inode_ref, path)?;
         }
 
         /* if this leaf is free, then we should
@@ -1165,11 +1165,40 @@ impl Ext4 {
             }
 
             let parent_idx = idx - 1;
-            let parent_index = &mut path.path[parent_idx].index.unwrap();
-            let current_index = &path.path[idx].index.unwrap();
+            let current_index = path.path[idx].index.unwrap();
 
-            parent_index.first_block = current_index.first_block;
-            self.write_back_inode(inode_ref);
+            // Update parent index in path (memory representation)
+            if let Some(ref mut parent_index) = path.path[parent_idx].index {
+                parent_index.first_block = current_index.first_block;
+            }
+
+            // Write the updated parent index back to disk
+            let parent_node = &path.path[parent_idx];
+            let parent_pblock = parent_node.pblock_of_node;
+            let parent_disk_pos = parent_pblock * BLOCK_SIZE;
+            let mut ext4block = if parent_disk_pos == 0 {
+                Block::load_inode_root_block(&inode_ref.inode.block)
+            } else {
+                Block::load(&self.block_device, parent_disk_pos)
+            };
+
+            let index_offset = size_of::<Ext4ExtentHeader>() + parent_node.position * size_of::<Ext4ExtentIndex>();
+            let parent_index_on_disk: &mut Ext4ExtentIndex = ext4block.read_offset_as_mut(index_offset);
+            parent_index_on_disk.first_block = current_index.first_block;
+
+            if parent_disk_pos == 0 {
+                let data = unsafe {
+                    let ptr = ext4block.data.as_ptr() as *const u32;
+                    core::slice::from_raw_parts(ptr, 15)
+                };
+                inode_ref.inode.block.copy_from_slice(data);
+                self.write_back_inode(inode_ref);
+            } else {
+                ext4block.sync_blk_to_disk(&self.block_device);
+                if let Err(e) = self.set_extent_block_checksum(inode_ref, parent_pblock) {
+                    log::warn!("Failed to set extent block checksum: {:?}", e);
+                }
+            }
 
             idx -= 1;
         }
@@ -1178,50 +1207,64 @@ impl Ext4 {
     }
 
     /// Correct the first block of the parent index.
-    fn ext_correct_indexes(&self, path: &mut SearchPath) -> Result<usize> {
+    fn ext_correct_indexes(
+        &self,
+        inode_ref: &mut Ext4InodeRef,
+        path: &mut SearchPath,
+    ) -> Result<usize> {
         // If child gets removed from parent, we need to update the parent's first_block
         let mut depth = path.depth as usize;
-        
-        // depth 2:
-        // +--------+--------+--------+
-        // |[empty] |  ext2  |  ext3  |
-        // +--------+--------+--------+
-        // ^
-        // pos=0, ext1_first_block=0(removed) parent index first block=0
-
-        // depth 2:
-        // +--------+--------+--------+
-        // |  ext2  |  ext3  |[empty] |
-        // +--------+--------+--------+
-        // ^
-        // pos=0, now first_block=ext2_first_block
-
-        // Update parent node index:
-        // depth 1:
-        // +-----------------------+
-        // | idx1_2 |...| idx1_n   |
-        // +-----------------------+
-        //     ^
-        //     Update parent node index (first_block)
-
-        // depth 0:
-        // +--------+--------+--------+
-        // |  idx1  |  idx2  |  idx3  |
-        // +--------+--------+--------+
-        //     |
-        //     Update root node index (first_block)
 
         while depth > 0 {
+            if path.path[depth].position != 0 {
+                break;
+            }
+
             let parent_idx = depth - 1;
-            
-            // Get the extent at the current level
-            if let Some(child_extent) = path.path[depth].extent {
-                // Get the parent node
-                let parent_node = &mut path.path[parent_idx];
-                // Get parent node's index and update first_block
-                if let Some(ref mut parent_index) = parent_node.index {
-                    parent_index.first_block = child_extent.first_block;
+
+            // Get the new first_block from the child node at current depth
+            let new_first_block = if let Some(child_extent) = path.path[depth].extent {
+                child_extent.first_block
+            } else if let Some(child_index) = path.path[depth].index {
+                child_index.first_block
+            } else {
+                break;
+            };
+
+            // Get the parent node
+            let parent_node = &mut path.path[parent_idx];
+
+            if let Some(ref mut parent_index) = parent_node.index {
+                parent_index.first_block = new_first_block;
+
+                // Write the updated parent index back to disk
+                let parent_pblock = parent_node.pblock_of_node;
+                let parent_disk_pos = parent_pblock * BLOCK_SIZE;
+                let mut ext4block = if parent_disk_pos == 0 {
+                    Block::load_inode_root_block(&inode_ref.inode.block)
+                } else {
+                    Block::load(&self.block_device, parent_disk_pos)
+                };
+
+                let index_offset = size_of::<Ext4ExtentHeader>() + parent_node.position * size_of::<Ext4ExtentIndex>();
+                let parent_index_on_disk: &mut Ext4ExtentIndex = ext4block.read_offset_as_mut(index_offset);
+                parent_index_on_disk.first_block = new_first_block;
+
+                if parent_disk_pos == 0 {
+                    let data = unsafe {
+                        let ptr = ext4block.data.as_ptr() as *const u32;
+                        core::slice::from_raw_parts(ptr, 15)
+                    };
+                    inode_ref.inode.block.copy_from_slice(data);
+                    self.write_back_inode(inode_ref);
+                } else {
+                    ext4block.sync_blk_to_disk(&self.block_device);
+                    if let Err(e) = self.set_extent_block_checksum(inode_ref, parent_pblock) {
+                        log::warn!("Failed to set extent block checksum: {:?}", e);
+                    }
                 }
+            } else {
+                break;
             }
 
             depth -= 1;

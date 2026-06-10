@@ -241,12 +241,15 @@ fn init_allocator() {
 #[cfg(feature = "irq")]
 fn init_interrupt() {
     // Setup timer interrupt handler
+    #[cfg(not(feature = "multitask"))]
     const PERIODIC_INTERVAL_NANOS: u64 =
         axhal::time::NANOS_PER_SEC / axconfig::TICKS_PER_SEC as u64;
 
+    #[cfg(not(feature = "multitask"))]
     #[percpu::def_percpu]
     static NEXT_DEADLINE: u64 = 0;
 
+    #[cfg(not(feature = "multitask"))]
     fn update_timer() {
         let now_ns = axhal::time::monotonic_time_nanos();
         // Safety: we have disabled preemption in IRQ handler.
