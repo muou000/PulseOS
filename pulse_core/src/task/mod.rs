@@ -405,9 +405,10 @@ impl axfs::ProcfsProcessProvider for PulseProcessProvider {
 
             let mut is_shared = false;
             let mut offset = 0;
-            let mut path_str = String::new();
+            let mut path_str = None;
             let mut inode = 0;
-            let mut dev_str = "00:00".to_string();
+            let mut dev_major = 0;
+            let mut dev_minor = 0;
 
             let mut curr_backend = backend;
             while let axmm::Backend::Cow(cow) = curr_backend {
@@ -425,45 +426,53 @@ impl axfs::ProcfsProcessProvider for PulseProcessProvider {
                     let loc = cached_file.location();
                     if let Ok(meta) = loc.metadata() {
                         inode = meta.inode;
-                        let major = meta.device >> 8;
-                        let minor = meta.device & 0xff;
-                        dev_str = alloc::format!("{:02x}:{:02x}", major, minor);
+                        dev_major = meta.device >> 8;
+                        dev_minor = meta.device & 0xff;
                     }
                     if let Ok(path) = loc.absolute_path() {
-                        path_str = path.as_str().to_string();
+                        path_str = Some(path);
                     }
                 }
                 _ => {}
             }
 
             let p_char = if is_shared { "s" } else { "p" };
-            if path_str.is_empty() {
-                out.push_str(&alloc::format!(
-                    "{:x}-{:x} {}{}{}{} {:08x} {} {}\n",
-                    start.as_usize(),
-                    end.as_usize(),
-                    r,
-                    w,
-                    x,
-                    p_char,
-                    offset,
-                    dev_str,
-                    inode
-                ));
+            // Bolt: Avoid intermediate String allocations in this hot loop by formatting directly into `out`
+            if let Some(path) = path_str {
+                let _ = core::fmt::write(
+                    &mut out,
+                    core::format_args!(
+                        "{:x}-{:x} {}{}{}{} {:08x} {:02x}:{:02x} {:<7} {}\n",
+                        start.as_usize(),
+                        end.as_usize(),
+                        r,
+                        w,
+                        x,
+                        p_char,
+                        offset,
+                        dev_major,
+                        dev_minor,
+                        inode,
+                        path
+                    ),
+                );
             } else {
-                out.push_str(&alloc::format!(
-                    "{:x}-{:x} {}{}{}{} {:08x} {} {:<7} {}\n",
-                    start.as_usize(),
-                    end.as_usize(),
-                    r,
-                    w,
-                    x,
-                    p_char,
-                    offset,
-                    dev_str,
-                    inode,
-                    path_str
-                ));
+                let _ = core::fmt::write(
+                    &mut out,
+                    core::format_args!(
+                        "{:x}-{:x} {}{}{}{} {:08x} {:02x}:{:02x} {}\n",
+                        start.as_usize(),
+                        end.as_usize(),
+                        r,
+                        w,
+                        x,
+                        p_char,
+                        offset,
+                        dev_major,
+                        dev_minor,
+                        inode
+                    ),
+                );
             }
         });
 
