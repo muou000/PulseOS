@@ -384,6 +384,9 @@ mmapstress01
 mount01
 mount02
 mount03
+mount05
+mount06
+mount07
 mprotect05
 munlock01
 munlock02

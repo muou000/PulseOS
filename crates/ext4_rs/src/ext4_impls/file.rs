@@ -595,6 +595,14 @@ impl Ext4 {
             return Ok(EOK);
         }
 
+        // Fast symlink check: fast symlinks have no allocated blocks,
+        // so we do not need to remove any space or parse extent trees.
+        if inode_ref.inode.is_link() && inode_ref.inode.blocks_count() == 0 {
+            inode_ref.inode.set_size(new_size);
+            self.write_back_inode(inode_ref);
+            return Ok(EOK);
+        }
+
         let block_size = self.super_block.block_size() as u64;
         let new_blocks_cnt = ((new_size + block_size - 1) / block_size) as u32;
         let old_blocks_cnt = ((old_size + block_size - 1) / block_size) as u32;
