@@ -27,23 +27,37 @@ pub fn sys_shmget(key: i32, size: usize, shmflg: i32) -> isize {
 
     const IPC_CREAT: i32 = 0o1000;
 
-    let pid = match pulse_core::task::current_process() {
-        Ok(proc) => proc.pid() as i32,
+    let proc = match pulse_core::task::current_process() {
+        Ok(proc) => proc,
         Err(e) => return -e.code() as isize,
     };
+    let credentials = proc.credentials.read();
+    let euid = credentials.euid;
+    let egid = credentials.egid;
+    let groups = credentials.groups.clone();
+    drop(credentials);
+    let pid = proc.pid() as i32;
 
     let mut manager = SHM_MANAGER.lock();
 
     // If key is not IPC_PRIVATE and IPC_CREAT is not set, just look up.
     if key != IPC_PRIVATE && (shmflg & IPC_CREAT) == 0 {
         match manager.get_shmid_by_key(key) {
-            Some(shmid) => return shmid as isize,
+            Some(shmid) => {
+                let inner = manager.get_inner_by_shmid(shmid).unwrap();
+                let inner_guard = inner.lock();
+                let req_mode = (shmflg & 0o777) as u32;
+                if !pulse_core::ipc::shm::ipc_has_permission(&inner_guard.shmid_ds.shm_perm, req_mode, euid, egid, &groups) {
+                    return -LinuxError::EACCES.code() as isize;
+                }
+                return shmid as isize;
+            }
             None => return -LinuxError::ENOENT.code() as isize,
         }
     }
 
     // Try to create or get existing.
-    match manager.create_shm(key, size, shmflg, pid) {
+    match manager.create_shm(key, size, shmflg, pid, euid, egid, &groups) {
         Ok(shmid) => shmid as isize,
         Err(e) => -LinuxError::from(e).code() as isize,
     }
@@ -77,7 +91,19 @@ pub fn sys_shmat(shmid: i32, shmaddr: usize, shmflg: i32) -> isize {
         }
     };
 
+    let credentials = proc.credentials.read();
+    let euid = credentials.euid;
+    let egid = credentials.egid;
+    let groups = credentials.groups.clone();
+    drop(credentials);
+
     let mut inner = shm_inner.lock();
+
+    // Permission check:
+    let req_mode = if (shmflg as u32) & SHM_RDONLY != 0 { 0o400 } else { 0o600 };
+    if !pulse_core::ipc::shm::ipc_has_permission(&inner.shmid_ds.shm_perm, req_mode, euid, egid, &groups) {
+        return -LinuxError::EACCES.code() as isize;
+    }
 
     // Allocate physical pages on first attach.
     if let Err(e) = inner.alloc_pages() {
@@ -213,10 +239,20 @@ pub fn sys_shmctl(shmid: i32, cmd: i32, buf: usize) -> isize {
             None => return -LinuxError::EINVAL.code() as isize,
         }
     };
+
+    let credentials = proc.credentials.read();
+    let euid = credentials.euid;
+    let egid = credentials.egid;
+    let groups = credentials.groups.clone();
+    drop(credentials);
+
     let mut inner = inner_arc.lock();
 
     match cmd {
         IPC_STAT => {
+            if !pulse_core::ipc::shm::ipc_has_permission(&inner.shmid_ds.shm_perm, 0o400, euid, egid, &groups) {
+                return -LinuxError::EACCES.code() as isize;
+            }
             if buf == 0 {
                 return -LinuxError::EFAULT.code() as isize;
             }
@@ -227,6 +263,9 @@ pub fn sys_shmctl(shmid: i32, cmd: i32, buf: usize) -> isize {
             }
         }
         IPC_SET => {
+            if euid != 0 && euid != inner.shmid_ds.shm_perm.uid && euid != inner.shmid_ds.shm_perm.cuid {
+                return -LinuxError::EPERM.code() as isize;
+            }
             if buf == 0 {
                 return -LinuxError::EFAULT.code() as isize;
             }
@@ -242,6 +281,9 @@ pub fn sys_shmctl(shmid: i32, cmd: i32, buf: usize) -> isize {
             0
         }
         IPC_RMID => {
+            if euid != 0 && euid != inner.shmid_ds.shm_perm.uid && euid != inner.shmid_ds.shm_perm.cuid {
+                return -LinuxError::EPERM.code() as isize;
+            }
             inner.rmid = true;
             if inner.attach_count() == 0 {
                 drop(inner);
