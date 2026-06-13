@@ -176,8 +176,9 @@ impl Ext4 {
 
         // get the inode reference
         let inode_ref = self.get_inode_ref(inode);
+        let block_size = self.super_block.block_size() as usize;
         let file_size = inode_ref.inode.size();
-        let total_blocks = (file_size + BLOCK_SIZE as u64 - 1) / BLOCK_SIZE as u64;
+        let total_blocks = (file_size + block_size as u64 - 1) / block_size as u64;
 
         // if the offset is greater than the file size, return 0
         if offset >= file_size as usize {
@@ -192,9 +193,9 @@ impl Ext4 {
         }
 
         // calculate the start block and unaligned size
-        let iblock_start = offset / BLOCK_SIZE;
-        let iblock_last = (offset + read_buf_len + BLOCK_SIZE - 1) / BLOCK_SIZE; // round up to include the last partial block
-        let unaligned_start_offset = offset % BLOCK_SIZE;
+        let iblock_start = offset / block_size;
+        let iblock_last = (offset + read_buf_len + block_size - 1) / block_size; // round up to include the last partial block
+        let unaligned_start_offset = offset % block_size;
         
         // Ensure we don't read beyond the last block
         let iblock_last = min(iblock_last, total_blocks as usize);
@@ -207,7 +208,7 @@ impl Ext4 {
 
         // Unaligned read at the beginning
         if unaligned_start_offset > 0 {
-            let adjust_read_size = min(BLOCK_SIZE - unaligned_start_offset, read_buf_len);
+            let adjust_read_size = min(block_size - unaligned_start_offset, read_buf_len);
 
             // get iblock physical block id
             let pblock_idx = match self.get_pblock_idx(&inode_ref, iblock as u32) {
@@ -220,8 +221,8 @@ impl Ext4 {
 
             if let Some(pblock_idx) = pblock_idx {
                 // read data
-                let mut data = vec![0u8; BLOCK_SIZE];
-                self.block_device.read_offset(pblock_idx as usize * BLOCK_SIZE, &mut data);
+                let mut data = vec![0u8; block_size];
+                self.block_device.read_offset(pblock_idx as usize * block_size, &mut data);
 
                 // copy data to read buffer
                 read_buf[cursor..cursor + adjust_read_size].copy_from_slice(
@@ -258,15 +259,15 @@ impl Ext4 {
                 }
             }
 
-            let max_read_for_extent = (contig_blocks as usize) * BLOCK_SIZE;
+            let max_read_for_extent = (contig_blocks as usize) * block_size;
             let mut read_length = min(max_read_for_extent, read_buf_len - total_bytes_read);
 
             // Limit by file size
-            let remaining_file_bytes = file_size as usize - (iblock * BLOCK_SIZE);
+            let remaining_file_bytes = file_size as usize - (iblock * block_size);
             read_length = min(read_length, remaining_file_bytes);
 
             if let Some(pblk) = pblock_idx {
-                self.block_device.read_offset(pblk as usize * BLOCK_SIZE, &mut read_buf[cursor..cursor + read_length]);
+                self.block_device.read_offset(pblk as usize * block_size, &mut read_buf[cursor..cursor + read_length]);
             } else {
                 read_buf[cursor..cursor + read_length].fill(0);
             }
@@ -274,7 +275,7 @@ impl Ext4 {
             // update cursor and total bytes read
             cursor += read_length;
             total_bytes_read += read_length;
-            iblock += (read_length + BLOCK_SIZE - 1) / BLOCK_SIZE;
+            iblock += (read_length + block_size - 1) / block_size;
         }
 
         Ok(total_bytes_read)
@@ -299,6 +300,7 @@ impl Ext4 {
 
         // get the inode reference
         let mut inode_ref = self.get_inode_ref(inode);
+        let block_size = self.super_block.block_size() as usize;
 
         // Get the file size
         let file_size = inode_ref.inode.size();
@@ -306,16 +308,16 @@ impl Ext4 {
             inode, offset, write_buf_len, file_size);
 
         // Calculate the start and end block index
-        let iblock_start = offset / BLOCK_SIZE;
-        let iblock_last = (offset + write_buf_len + BLOCK_SIZE - 1) / BLOCK_SIZE;
+        let iblock_start = offset / block_size;
+        let iblock_last = (offset + write_buf_len + block_size - 1) / block_size;
         let total_blocks_needed = iblock_last - iblock_start;
 
         // start block index
         let mut iblk_idx = iblock_start;
-        let ifile_blocks = (file_size + BLOCK_SIZE as u64 - 1) / BLOCK_SIZE as u64;
+        let ifile_blocks = (file_size + block_size as u64 - 1) / block_size as u64;
 
         // Calculate the unaligned size
-        let unaligned = offset % BLOCK_SIZE;
+        let unaligned = offset % block_size;
         if unaligned > 0 {
             log::trace!("[Alignment] Unaligned start: {} bytes", unaligned);
         }
@@ -351,12 +353,12 @@ impl Ext4 {
                 log::trace!("[Write] Could only allocate {} out of {} blocks", allocated_blocks.len(), blocks_to_allocate);
                 
                 // Calculate new write size based on allocated blocks
-                let max_write_size = allocated_blocks.len() * BLOCK_SIZE;
+                let max_write_size = allocated_blocks.len() * block_size;
                 let adjusted_write_size = if unaligned > 0 {
                     // For unaligned writes, we need to account for the unaligned portion
                     if allocated_blocks.len() > 0 {
-                        let first_block_available = BLOCK_SIZE - unaligned;
-                        let remaining_blocks_available = (allocated_blocks.len() - 1) * BLOCK_SIZE;
+                        let first_block_available = block_size - unaligned;
+                        let remaining_blocks_available = (allocated_blocks.len() - 1) * block_size;
                         first_block_available + remaining_blocks_available
                     } else {
                         0
@@ -379,7 +381,7 @@ impl Ext4 {
         }
 
         // Verify we have enough blocks for the write
-        let required_blocks = (write_buf_len + BLOCK_SIZE - 1) / BLOCK_SIZE;
+        let required_blocks = (write_buf_len + block_size - 1) / block_size;
         let available_blocks = if iblk_idx >= ifile_blocks as usize {
             new_blocks
         } else {
@@ -394,7 +396,7 @@ impl Ext4 {
 
         // Unaligned write
         if unaligned > 0 && written < write_buf_len {
-            let len = min(write_buf_len, BLOCK_SIZE - unaligned);
+            let len = min(write_buf_len, block_size - unaligned);
             log::trace!("[Unaligned Write] Writing {} bytes", len);
             
             let mut is_new_block = false;
@@ -419,11 +421,11 @@ impl Ext4 {
             };
             total_blocks += 1;
 
-            let block_offset = pblock_idx as usize * BLOCK_SIZE;
+            let block_offset = pblock_idx as usize * block_size;
             let mut block = if is_new_block {
                 Block {
                     disk_offset: block_offset,
-                    data: vec![0u8; BLOCK_SIZE],
+                    data: vec![0u8; block_size],
                 }
             } else {
                 Block::load(&self.block_device, block_offset)
@@ -440,7 +442,7 @@ impl Ext4 {
         // Aligned write
         let mut aligned_blocks = 0;
         let mut iterations = 0;
-        log::debug!("[Aligned Write] Starting aligned writes for {} blocks", (write_buf_len - written + BLOCK_SIZE - 1) / BLOCK_SIZE);
+        log::debug!("[Aligned Write] Starting aligned writes for {} blocks", (write_buf_len - written + block_size - 1) / block_size);
         
         while written < write_buf_len {
             iterations += 1;
@@ -471,27 +473,27 @@ impl Ext4 {
                 }
             };
 
-            let block_offset = pblock_idx as usize * BLOCK_SIZE;
+            let block_offset = pblock_idx as usize * block_size;
             
             // Calculate how much we can write in this batch
-            let max_write_for_extent = (contig_blocks as usize) * BLOCK_SIZE;
+            let max_write_for_extent = (contig_blocks as usize) * block_size;
             let write_size = min(max_write_for_extent, write_buf_len - written);
 
             // Separate full blocks from the partial tail block
-            let full_blocks_size = (write_size / BLOCK_SIZE) * BLOCK_SIZE;
+            let full_blocks_size = (write_size / block_size) * block_size;
             
             if full_blocks_size > 0 {
                 // Write all full blocks in one device call - Bypassing intermediate Block abstraction
                 self.block_device.write_offset(block_offset, &write_buf[written..written + full_blocks_size]);
                 written += full_blocks_size;
-                iblk_idx += (full_blocks_size / BLOCK_SIZE) as usize;
-                total_blocks += (full_blocks_size / BLOCK_SIZE) as usize;
-                aligned_blocks += (full_blocks_size / BLOCK_SIZE) as usize;
+                iblk_idx += (full_blocks_size / block_size) as usize;
+                total_blocks += (full_blocks_size / block_size) as usize;
+                aligned_blocks += (full_blocks_size / block_size) as usize;
             } else {
                 // write_size < BLOCK_SIZE, meaning we have a partial write on a single block
                 // This happens at the end of the buffer.
                 let mut block = if is_new_block {
-                    Block { disk_offset: block_offset, data: vec![0u8; BLOCK_SIZE] }
+                    Block { disk_offset: block_offset, data: vec![0u8; block_size] }
                 } else {
                     Block::load(&self.block_device, block_offset)
                 };
@@ -592,7 +594,7 @@ impl Ext4 {
             return Ok(EOK);
         }
 
-        let block_size = BLOCK_SIZE as u64;
+        let block_size = self.super_block.block_size() as u64;
         let new_blocks_cnt = ((new_size + block_size - 1) / block_size) as u32;
         let old_blocks_cnt = ((old_size + block_size - 1) / block_size) as u32;
         let diff_blocks_cnt = old_blocks_cnt - new_blocks_cnt;

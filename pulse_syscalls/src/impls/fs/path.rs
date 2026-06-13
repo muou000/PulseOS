@@ -1,9 +1,12 @@
-use alloc::{string::{String, ToString}, vec::Vec};
+use alloc::{
+    string::{String, ToString},
+    vec::Vec,
+};
 use core::sync::atomic::{AtomicBool, Ordering};
 
 use axerrno::LinuxError;
 use axfs::OpenOptions;
-use axfs_ng_vfs::{NodePermission, VfsError, NodeType, MetadataUpdate, path::Path};
+use axfs_ng_vfs::{MetadataUpdate, NodePermission, NodeType, VfsError, path::Path};
 use linux_raw_sys::general::*;
 use pulse_core::fd_table::open_result_to_entry;
 
@@ -168,7 +171,7 @@ fn lookup_or_probe_fs(source: &str, fstype: &str) -> Result<axfs_ng_vfs::Filesys
         let is_block = entry.node_type() == axfs_ng_vfs::NodeType::BlockDevice;
 
         match fstype {
-            "ext2" | "ext3" | "ext4" => {
+            "ext4" => {
                 #[cfg(feature = "ext4")]
                 {
                     if !is_block {
@@ -188,6 +191,11 @@ fn lookup_or_probe_fs(source: &str, fstype: &str) -> Result<axfs_ng_vfs::Filesys
                     return Err(LinuxError::ENODEV);
                 }
             }
+
+            "ext2" | "ext3" => {
+                return Err(LinuxError::ENODEV);
+            }
+
             "none" | "" => {
                 if !is_block {
                     return Err(LinuxError::ENOTBLK);
@@ -276,7 +284,9 @@ pub fn sys_openat(dirfd: i32, pathname: usize, flags: usize, mode: usize) -> isi
                 }
                 Err(_) => {
                     // File doesn't exist; if create or write requested on ro fs → EROFS
-                    if let Ok((parent_loc, _)) = ctx.resolve_parent(axfs_ng_vfs::path::Path::new(path)) {
+                    if let Ok((parent_loc, _)) =
+                        ctx.resolve_parent(axfs_ng_vfs::path::Path::new(path))
+                    {
                         crate::impls::fs::common::is_location_readonly(&parent_loc)
                     } else {
                         false
@@ -320,7 +330,9 @@ pub fn sys_openat(dirfd: i32, pathname: usize, flags: usize, mode: usize) -> isi
         }
         // FIFO O_NONBLOCK | O_WRONLY check
         if meta.node_type == NodeType::Fifo {
-            if (flags & (O_NONBLOCK as usize)) != 0 && (flags & (O_ACCMODE as usize)) == O_WRONLY as usize {
+            if (flags & (O_NONBLOCK as usize)) != 0
+                && (flags & (O_ACCMODE as usize)) == O_WRONLY as usize
+            {
                 let mut has_reader = false;
                 let procs = pulse_core::task::processes_snapshot();
                 for proc in procs {
@@ -367,7 +379,9 @@ pub fn sys_openat(dirfd: i32, pathname: usize, flags: usize, mode: usize) -> isi
             .map(|process| (process.fsuid(), process.fsgid()))
             .unwrap_or((0, 0));
 
-        if let Err(err) = crate::impls::fs::common::check_faccess_permission(location, required_mode, uid, gid) {
+        if let Err(err) =
+            crate::impls::fs::common::check_faccess_permission(location, required_mode, uid, gid)
+        {
             return -err.code() as isize;
         }
     }
@@ -433,7 +447,12 @@ pub fn sys_mkdirat(dirfd: i32, pathname: usize, mode: usize) -> isize {
         Err(_) => return -LinuxError::EINVAL.code() as isize,
     };
 
-    axlog::debug!("sys_mkdirat: dirfd={}, path='{}', mode={:#o}", dirfd, path, mode);
+    axlog::debug!(
+        "sys_mkdirat: dirfd={}, path='{}', mode={:#o}",
+        dirfd,
+        path,
+        mode
+    );
 
     let resolved_dirfd = if path.starts_with('/') {
         AT_FDCWD as i32
@@ -449,7 +468,8 @@ pub fn sys_mkdirat(dirfd: i32, pathname: usize, mode: usize) -> isize {
         let is_ro = match ctx.resolve_no_follow(path) {
             Ok(loc) => crate::impls::fs::common::is_location_readonly(&loc),
             Err(_) => {
-                if let Ok((parent_loc, _)) = ctx.resolve_parent(axfs_ng_vfs::path::Path::new(path)) {
+                if let Ok((parent_loc, _)) = ctx.resolve_parent(axfs_ng_vfs::path::Path::new(path))
+                {
                     crate::impls::fs::common::is_location_readonly(&parent_loc)
                 } else {
                     false
@@ -475,7 +495,11 @@ pub fn sys_mkdirat(dirfd: i32, pathname: usize, mode: usize) -> isize {
             0
         }
         Err(e) => {
-            axlog::error!("sys_mkdirat: failed to create directory '{}': {:?}", path, e);
+            axlog::error!(
+                "sys_mkdirat: failed to create directory '{}': {:?}",
+                path,
+                e
+            );
             -LinuxError::from(e.canonicalize()).code() as isize
         }
     }
@@ -488,30 +512,54 @@ fn sys_mount_propagation(target_path: &str, flags: usize) -> isize {
         None => {
             // Target path may not be a mountpoint itself; that's OK for
             // --make-private etc. on already-mounted paths – we just succeed.
-            axlog::debug!("sys_mount_propagation: '{}' not a mounted mountpoint, treating as no-op", target_path);
+            axlog::debug!(
+                "sys_mount_propagation: '{}' not a mounted mountpoint, treating as no-op",
+                target_path
+            );
             return 0;
         }
     };
 
-    let is_rec       = (flags & MS_REC       as usize) != 0;
-    let is_shared    = (flags & MS_SHARED    as usize) != 0;
-    let is_slave     = (flags & MS_SLAVE     as usize) != 0;
-    let is_private   = (flags & MS_PRIVATE   as usize) != 0;
-    let is_unbindable= (flags & MS_UNBINDABLE as usize) != 0;
+    let is_rec = (flags & MS_REC as usize) != 0;
+    let is_shared = (flags & MS_SHARED as usize) != 0;
+    let is_slave = (flags & MS_SLAVE as usize) != 0;
+    let is_private = (flags & MS_PRIVATE as usize) != 0;
+    let is_unbindable = (flags & MS_UNBINDABLE as usize) != 0;
 
     axlog::debug!(
         "sys_mount_propagation: target='{}' rec={} shared={} slave={} private={} unbindable={}",
-        target_path, is_rec, is_shared, is_slave, is_private, is_unbindable
+        target_path,
+        is_rec,
+        is_shared,
+        is_slave,
+        is_private,
+        is_unbindable
     );
 
     if is_shared {
-        if is_rec { mp.make_rshared(); } else { mp.make_shared(); }
+        if is_rec {
+            mp.make_rshared();
+        } else {
+            mp.make_shared();
+        }
     } else if is_slave {
-        if is_rec { mp.make_rslave(); } else { mp.make_slave(); }
+        if is_rec {
+            mp.make_rslave();
+        } else {
+            mp.make_slave();
+        }
     } else if is_private {
-        if is_rec { mp.make_rprivate(); } else { mp.make_private(); }
+        if is_rec {
+            mp.make_rprivate();
+        } else {
+            mp.make_private();
+        }
     } else if is_unbindable {
-        if is_rec { mp.make_runbindable(); } else { mp.make_unbindable(); }
+        if is_rec {
+            mp.make_runbindable();
+        } else {
+            mp.make_unbindable();
+        }
     }
 
     let _ = pulse_core::task::current_process().map(|process| process.save_fs_context());
@@ -602,11 +650,12 @@ pub fn sys_mount(
         );
     }
     let is_remount = (_flags & MS_REMOUNT as usize) != 0;
-    let is_bind    = (_flags & MS_BIND    as usize) != 0;
-    let is_rdonly  = (_flags & MS_RDONLY  as usize) != 0;
+    let is_bind = (_flags & MS_BIND as usize) != 0;
+    let is_rdonly = (_flags & MS_RDONLY as usize) != 0;
 
     // Propagation flags.
-    const MS_PROPAGATION: usize = (MS_UNBINDABLE | MS_PRIVATE | MS_SLAVE | MS_SHARED | MS_REC) as usize;
+    const MS_PROPAGATION: usize =
+        (MS_UNBINDABLE | MS_PRIVATE | MS_SLAVE | MS_SHARED | MS_REC) as usize;
     let is_propagation = (_flags & MS_PROPAGATION) != 0;
 
     if target == 0 {
@@ -667,15 +716,21 @@ pub fn sys_mount(
             Ok(None) => "none".to_string(),
             Err(e) => return -e.code() as isize,
         };
-        let options = if is_rdonly { "ro,relatime" } else { "rw,relatime" };
+        let options = if is_rdonly {
+            "ro,relatime"
+        } else {
+            "rw,relatime"
+        };
         axlog::debug!("sys_mount: remount '{}' as {}", target_path, options);
         axfs::register_mount(&source_path, &target_path, &fstype_name, options);
 
         // Update readonly status on the mountpoint and all its peer/slave propagation mounts!
         target_mp.set_readonly(is_rdonly);
+        target_mp.set_flags(_flags);
         let peer_mps = axfs_ng_vfs::collect_propagate_unmount(&target_mp);
         for peer in peer_mps {
             peer.set_readonly(is_rdonly);
+            peer.set_flags(_flags);
         }
 
         let _ = pulse_core::task::current_process().map(|process| process.save_fs_context());
@@ -699,7 +754,11 @@ pub fn sys_mount(
             Ok(None) => return -LinuxError::EINVAL.code() as isize,
             Err(e) => return -e.code() as isize,
         };
-        axlog::debug!("sys_mount: bind mount '{}' to '{}'", source_path, target_path);
+        axlog::debug!(
+            "sys_mount: bind mount '{}' to '{}'",
+            source_path,
+            target_path
+        );
         let source_loc = match ctx.resolve(&source_path) {
             Ok(loc) => loc,
             Err(e) => return -LinuxError::from(e.canonicalize()).code() as isize,
@@ -712,21 +771,30 @@ pub fn sys_mount(
         match mount_dir.mount_bind(source_loc.clone()) {
             Ok(mountpoint) => {
                 axlog::debug!("sys_mount: bind mount successful on '{}'", target_path);
-                
+
                 // Set readonly status
                 if is_rdonly {
                     mountpoint.set_readonly(true);
                 } else {
                     mountpoint.set_readonly(source_loc.mountpoint().is_readonly());
                 }
+                mountpoint.set_flags(_flags);
 
                 axfs::register_mounted_mountpoint(&target_path, mountpoint.clone());
-                let options = if is_rdonly { "ro,bind,relatime" } else { "rw,bind,relatime" };
+                let options = if is_rdonly {
+                    "ro,bind,relatime"
+                } else {
+                    "rw,bind,relatime"
+                };
                 axfs::register_mount(&source_path, &target_path, "none", options);
 
                 // Clone the existing subtree from source_loc to the new mountpoint
                 let mut self_shadows = Vec::new();
-                axfs_ng_vfs::propagate_subtree(&source_loc.mountpoint(), &mountpoint, &mut self_shadows);
+                axfs_ng_vfs::propagate_subtree(
+                    &source_loc.mountpoint(),
+                    &mountpoint,
+                    &mut self_shadows,
+                );
                 for (_peer_mp, shadow_mp) in self_shadows {
                     if let Some(loc) = shadow_mp.location() {
                         if let Ok(abs) = loc.absolute_path() {
@@ -756,7 +824,8 @@ pub fn sys_mount(
                     }
                 }
 
-                let _ = pulse_core::task::current_process().map(|process| process.save_fs_context());
+                let _ =
+                    pulse_core::task::current_process().map(|process| process.save_fs_context());
                 return 0;
             }
             Err(e) => {
@@ -781,13 +850,22 @@ pub fn sys_mount(
         Err(e) => return -e.code() as isize,
     };
 
-    axlog::debug!("sys_mount: source={}, target={}, fstype={}", source_path, target_path, fstype_name);
+    axlog::debug!(
+        "sys_mount: source={}, target={}, fstype={}",
+        source_path,
+        target_path,
+        fstype_name
+    );
 
     let fs_res = match mount_source_candidates(&source_path) {
         Ok(candidates) => {
             let mut res = Err(LinuxError::ENOENT);
             for cand in candidates {
-                axlog::debug!("sys_mount: probing candidate '{}' with fstype '{}'", cand, fstype_name);
+                axlog::debug!(
+                    "sys_mount: probing candidate '{}' with fstype '{}'",
+                    cand,
+                    fstype_name
+                );
                 match lookup_or_probe_fs(&cand, &fstype_name) {
                     Ok(fs) => {
                         res = Ok(fs);
@@ -800,7 +878,11 @@ pub fn sys_mount(
                 }
             }
             if res.is_err() {
-                axlog::debug!("sys_mount: falling back to source '{}' with fstype '{}'", source_path, fstype_name);
+                axlog::debug!(
+                    "sys_mount: falling back to source '{}' with fstype '{}'",
+                    source_path,
+                    fstype_name
+                );
                 match lookup_or_probe_fs(&source_path, &fstype_name) {
                     Ok(fs) => res = Ok(fs),
                     Err(e) => res = Err(e),
@@ -823,19 +905,27 @@ pub fn sys_mount(
             return -e.code() as isize;
         }
     };
-    axlog::debug!("sys_mount: found filesystem, proceeding to mount on '{}'", target_path);
+    axlog::debug!(
+        "sys_mount: found filesystem, proceeding to mount on '{}'",
+        target_path
+    );
     let mount_dir = target_loc;
 
     axlog::debug!("sys_mount: target directory resolved, performing mount operation");
     match mount_dir.mount(&fs) {
         Ok(mountpoint) => {
             axlog::debug!("sys_mount: mount successful on '{}'", target_path);
-            
+
             // Set readonly status
             mountpoint.set_readonly(is_rdonly);
+            mountpoint.set_flags(_flags);
 
             axfs::register_mounted_mountpoint(&target_path, mountpoint);
-            let options = if is_rdonly { "ro,relatime" } else { "rw,relatime" };
+            let options = if is_rdonly {
+                "ro,relatime"
+            } else {
+                "rw,relatime"
+            };
             axfs::register_mount(&source_path, &target_path, &fstype_name, options);
             let _ = pulse_core::task::current_process().map(|process| process.save_fs_context());
             0
@@ -849,7 +939,8 @@ pub fn sys_mount(
 
 pub fn sys_umount2(target: usize, flags: usize) -> isize {
     axlog::debug!("sys_umount2: target={:#x}, flags={:#x}", target, flags);
-    const UMOUNT_SUPPORTED_FLAGS: usize = (MNT_FORCE | MNT_DETACH | MNT_EXPIRE | UMOUNT_NOFOLLOW) as usize;
+    const UMOUNT_SUPPORTED_FLAGS: usize =
+        (MNT_FORCE | MNT_DETACH | MNT_EXPIRE | UMOUNT_NOFOLLOW) as usize;
     if (flags & !UMOUNT_SUPPORTED_FLAGS) != 0 && !UMOUNT_FLAGS_WARNED.swap(true, Ordering::AcqRel) {
         axlog::warn!(
             "sys_umount2: some unmount flags are ignored (flags={:#x}); semantics are simplified",
@@ -914,7 +1005,11 @@ pub fn sys_umount2(target: usize, flags: usize) -> isize {
                     let _ = axfs::unregister_mounted_mountpoint(&peer_path);
                 }
                 Err(e) => {
-                    axlog::error!("sys_umount2: failed to unmount propagated peer '{}': {:?}", peer_path, e);
+                    axlog::error!(
+                        "sys_umount2: failed to unmount propagated peer '{}': {:?}",
+                        peer_path,
+                        e
+                    );
                 }
             }
         }
@@ -937,7 +1032,6 @@ pub fn sys_umount2(target: usize, flags: usize) -> isize {
         Err(e) => -LinuxError::from(e.canonicalize()).code() as isize,
     }
 }
-
 
 pub fn sys_unlinkat(dirfd: i32, pathname: usize, flags: usize) -> isize {
     axlog::debug!(
@@ -978,7 +1072,8 @@ pub fn sys_unlinkat(dirfd: i32, pathname: usize, flags: usize) -> isize {
         let is_ro = match ctx.resolve_no_follow(path) {
             Ok(loc) => crate::impls::fs::common::is_location_readonly(&loc),
             Err(_) => {
-                if let Ok((parent_loc, _)) = ctx.resolve_parent(axfs_ng_vfs::path::Path::new(path)) {
+                if let Ok((parent_loc, _)) = ctx.resolve_parent(axfs_ng_vfs::path::Path::new(path))
+                {
                     crate::impls::fs::common::is_location_readonly(&parent_loc)
                 } else {
                     false
@@ -1002,12 +1097,9 @@ pub fn sys_unlinkat(dirfd: i32, pathname: usize, flags: usize) -> isize {
         .unwrap_or((0, 0));
 
     // 2. Enforce execute/search permission check on parent directory
-    if let Err(err) = crate::impls::fs::common::check_faccess_permission(
-        &parent_loc,
-        X_OK as usize,
-        uid,
-        gid,
-    ) {
+    if let Err(err) =
+        crate::impls::fs::common::check_faccess_permission(&parent_loc, X_OK as usize, uid, gid)
+    {
         return -err.code() as isize;
     }
 
@@ -1018,12 +1110,9 @@ pub fn sys_unlinkat(dirfd: i32, pathname: usize, flags: usize) -> isize {
     };
 
     // 4. Enforce write permission check on parent directory
-    if let Err(err) = crate::impls::fs::common::check_faccess_permission(
-        &parent_loc,
-        W_OK as usize,
-        uid,
-        gid,
-    ) {
+    if let Err(err) =
+        crate::impls::fs::common::check_faccess_permission(&parent_loc, W_OK as usize, uid, gid)
+    {
         return -err.code() as isize;
     }
 
@@ -1116,24 +1205,40 @@ pub fn sys_renameat2(
 
     // Check for read-only filesystem on old or new path
     {
-        let resolved_olddirfd = if oldpath.starts_with('/') { AT_FDCWD as i32 } else { olddirfd };
-        let resolved_newdirfd2 = if newpath.starts_with('/') { AT_FDCWD as i32 } else { newdirfd };
+        let resolved_olddirfd = if oldpath.starts_with('/') {
+            AT_FDCWD as i32
+        } else {
+            olddirfd
+        };
+        let resolved_newdirfd2 = if newpath.starts_with('/') {
+            AT_FDCWD as i32
+        } else {
+            newdirfd
+        };
         let old_ro = if let Ok(old_ctx) = context_for_dirfd(resolved_olddirfd) {
             match old_ctx.resolve_no_follow(oldpath.as_str()) {
                 Ok(loc) => crate::impls::fs::common::is_location_readonly(&loc),
                 Err(_) => false,
             }
-        } else { false };
+        } else {
+            false
+        };
         let new_ro = if let Ok(new_ctx2) = context_for_dirfd(resolved_newdirfd2) {
             match new_ctx2.resolve_no_follow(newpath.as_str()) {
                 Ok(loc) => crate::impls::fs::common::is_location_readonly(&loc),
                 Err(_) => {
-                    if let Ok((parent_loc, _)) = new_ctx2.resolve_parent(axfs_ng_vfs::path::Path::new(newpath.as_str())) {
+                    if let Ok((parent_loc, _)) =
+                        new_ctx2.resolve_parent(axfs_ng_vfs::path::Path::new(newpath.as_str()))
+                    {
                         crate::impls::fs::common::is_location_readonly(&parent_loc)
-                    } else { false }
+                    } else {
+                        false
+                    }
                 }
             }
-        } else { false };
+        } else {
+            false
+        };
         if old_ro || new_ro {
             return -LinuxError::EROFS.code() as isize;
         }
@@ -1188,7 +1293,9 @@ pub fn sys_symlinkat(target: usize, newdirfd: i32, linkpath: usize) -> isize {
         let is_ro = match ctx.resolve_no_follow(link_str) {
             Ok(loc) => crate::impls::fs::common::is_location_readonly(&loc),
             Err(_) => {
-                if let Ok((parent_loc, _)) = ctx.resolve_parent(axfs_ng_vfs::path::Path::new(link_str)) {
+                if let Ok((parent_loc, _)) =
+                    ctx.resolve_parent(axfs_ng_vfs::path::Path::new(link_str))
+                {
                     crate::impls::fs::common::is_location_readonly(&parent_loc)
                 } else {
                     false
@@ -1235,7 +1342,8 @@ pub fn sys_mknodat(dirfd: i32, pathname: usize, mode: usize, _dev: usize) -> isi
         let is_ro = match ctx.resolve_no_follow(path) {
             Ok(loc) => crate::impls::fs::common::is_location_readonly(&loc),
             Err(_) => {
-                if let Ok((parent_loc, _)) = ctx.resolve_parent(axfs_ng_vfs::path::Path::new(path)) {
+                if let Ok((parent_loc, _)) = ctx.resolve_parent(axfs_ng_vfs::path::Path::new(path))
+                {
                     crate::impls::fs::common::is_location_readonly(&parent_loc)
                 } else {
                     false
@@ -1424,4 +1532,3 @@ pub fn sys_linkat(
         }
     }
 }
-

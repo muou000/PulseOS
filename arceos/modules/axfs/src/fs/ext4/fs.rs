@@ -36,7 +36,9 @@ impl Ext4Filesystem {
     }
 
     pub(crate) fn lock(&self) -> MutexGuard<'_, Ext4> {
-        self.inner.lock()
+        let guard = self.inner.lock();
+        guard.block_device.set_block_size(guard.super_block.block_size() as usize);
+        guard
     }
 }
 

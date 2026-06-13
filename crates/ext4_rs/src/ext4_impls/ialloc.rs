@@ -18,9 +18,9 @@ impl Ext4 {
             if free_inodes > 0 {
                 let inode_bitmap_block = bg.get_inode_bitmap_block(&super_block);
 
-                let mut raw_data = vec![0u8; BLOCK_SIZE];
+                let mut raw_data = vec![0u8; self.super_block.block_size() as usize];
                 self.block_device
-                    .read_offset(inode_bitmap_block as usize * BLOCK_SIZE, &mut raw_data);
+                    .read_offset(inode_bitmap_block as usize * self.super_block.block_size() as usize, &mut raw_data);
 
                 let inodes_in_bg = super_block.get_inodes_in_group_cnt(bgid);
 
@@ -33,7 +33,7 @@ impl Ext4 {
 
                 // update bitmap in disk
                 self.block_device
-                    .write_offset(inode_bitmap_block as usize * BLOCK_SIZE, bitmap_data);
+                    .write_offset(inode_bitmap_block as usize * self.super_block.block_size() as usize, bitmap_data);
 
                 bg.set_block_group_ialloc_bitmap_csum(&super_block, bitmap_data);
 
@@ -89,9 +89,9 @@ impl Ext4 {
 
         // Load inode bitmap block
         let inode_bitmap_block = bg.get_inode_bitmap_block(&self.super_block);
-        let mut bitmap_data = vec![0u8; BLOCK_SIZE];
+        let mut bitmap_data = vec![0u8; self.super_block.block_size() as usize];
         self.block_device
-            .read_offset(inode_bitmap_block as usize * BLOCK_SIZE, &mut bitmap_data);
+            .read_offset(inode_bitmap_block as usize * self.super_block.block_size() as usize, &mut bitmap_data);
 
         // Find index within group and clear bit
         let index_in_group = self.inode_to_bgidx(index);
@@ -100,7 +100,7 @@ impl Ext4 {
         // Set new checksum after modification
         // update bitmap in disk
         self.block_device
-            .write_offset(inode_bitmap_block as usize * BLOCK_SIZE, &bitmap_data);
+            .write_offset(inode_bitmap_block as usize * self.super_block.block_size() as usize, &bitmap_data);
         bg.set_block_group_ialloc_bitmap_csum(&super_block, &bitmap_data);
 
         // Update free inodes count in block group

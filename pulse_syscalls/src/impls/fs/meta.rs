@@ -33,7 +33,12 @@ fn vfs_statfs_to_linux(location: &Location) -> Result<statfs, LinuxError> {
     out.f_ffree = fs_stat.free_file_count as _;
     out.f_namelen = fs_stat.name_length as _;
     out.f_frsize = fs_stat.fragment_size as _;
-    out.f_flags = fs_stat.mount_flags as _;
+    
+    let mut mount_flags = location.mountpoint().get_flags();
+    if location.mountpoint().is_readonly() {
+        mount_flags |= 1; // ST_RDONLY
+    }
+    out.f_flags = mount_flags as _;
     Ok(out)
 }
 

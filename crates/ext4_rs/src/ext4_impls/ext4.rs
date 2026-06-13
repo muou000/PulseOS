@@ -58,8 +58,12 @@ impl Ext4 {
     /// Opens and loads an Ext4 from the `block_device`.
     pub fn open(block_device: Arc<dyn BlockDevice>) -> Self {
         // Load the superblock (aligned to block 0)
+        block_device.set_block_size(4096);
         let block = Block::load(&block_device, 0);
         let super_block: Ext4Superblock = block.read_offset_as(SUPERBLOCK_OFFSET);
+
+        let block_size = super_block.block_size() as usize;
+        block_device.set_block_size(block_size);
 
         let group_count = super_block.block_group_count() as usize;
         log::debug!("Ext4::open: group_count={}", group_count);

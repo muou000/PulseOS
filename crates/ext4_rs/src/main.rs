@@ -66,7 +66,9 @@ enum ColorCode {
 }
 
 #[derive(Debug)]
-pub struct Disk {}
+pub struct Disk {
+    pub block_size: std::sync::atomic::AtomicUsize,
+}
 
 impl BlockDevice for Disk {
     fn read_offset(&self, offset: usize, buf: &mut [u8]) {
@@ -94,26 +96,35 @@ impl BlockDevice for Disk {
         let _r = file.seek(std::io::SeekFrom::Start(offset as u64));
         let _r = file.write_all(&data);
     }
+
+    fn block_size(&self) -> usize {
+        self.block_size.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    fn set_block_size(&self, size: usize) {
+        self.block_size.store(size, std::sync::atomic::Ordering::Relaxed);
+    }
 }
 
 fn test_raw_block_device_write(block_device: Arc<dyn BlockDevice>, size_mb: usize) {
     let write_size = size_mb * 1024 * 1024;
     let mut buffer = vec![0x41u8; write_size];
+    let block_size = block_device.block_size();
     
     // Start from block 1000 to avoid overwriting important data
     let start_block = 1000;
-    let start_offset = start_block * BLOCK_SIZE;
+    let start_offset = start_block * block_size;
     
     log::debug!("Starting raw BlockDevice write test: {} MB", size_mb);
     let start_time = std::time::Instant::now();
     
-    // Write in BLOCK_SIZE chunks
+    // Write in block_size chunks
     let mut written = 0;
     while written < write_size {
-        let write_size = std::cmp::min(BLOCK_SIZE, write_size - written);
+        let write_chunk = std::cmp::min(block_size, write_size - written);
         let offset = start_offset + written;
-        block_device.write_offset(offset, &buffer[written..written + write_size]);
-        written += write_size;
+        block_device.write_offset(offset, &buffer[written..written + write_chunk]);
+        written += write_chunk;
     }
     
     let end_time = start_time.elapsed();
@@ -126,7 +137,9 @@ fn test_raw_block_device_write(block_device: Arc<dyn BlockDevice>, size_mb: usiz
 fn main() {
     log::set_logger(&SimpleLogger).unwrap();
     log::set_max_level(LevelFilter::Trace);
-    let disk = Arc::new(Disk {});
+    let disk = Arc::new(Disk {
+        block_size: std::sync::atomic::AtomicUsize::new(4096),
+    });
     let block_device = disk.clone();  // Clone before using
     let ext4 = Ext4::open(disk);
 
@@ -201,11 +214,12 @@ fn main() {
     log::debug!("----write done verifying----");
     const BLOCKS_PER_128MB: usize = 32768; // 128MB / 4KB = 32768 blocks
     let mut last_progress = 0;
-    for i in 0..WRITE_SIZE/ BLOCK_SIZE {
-        let offset = (i * BLOCK_SIZE) as i64;
-        let write_data = vec![0x41 as u8; BLOCK_SIZE];
+    let block_size = ext4.super_block.block_size() as usize;
+    for i in 0..WRITE_SIZE / block_size {
+        let offset = (i * block_size) as i64;
+        let write_data = vec![0x41 as u8; block_size];
         let read_data = ext4
-            .ext4_file_read(inode_ref.inode_num as u64, BLOCK_SIZE as u32, offset)
+            .ext4_file_read(inode_ref.inode_num as u64, block_size as u32, offset)
             .unwrap();
         if read_data != write_data {
             log::debug!("Data mismatch at block {:x}", i);

@@ -6,7 +6,7 @@ use alloc::{
 };
 use core::{
     iter, mem,
-    sync::atomic::{AtomicBool, AtomicU64, Ordering},
+    sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
     task::Context,
 };
 
@@ -244,6 +244,8 @@ pub struct Mountpoint {
     pub(crate) propagation: Mutex<PropagationMode>,
     /// Read-only status
     pub(crate) read_only: AtomicBool,
+    /// Mount flags
+    pub(crate) flags: AtomicUsize,
 }
 
 unsafe impl Sync for Mountpoint {}
@@ -260,6 +262,7 @@ impl Mountpoint {
             id: MOUNT_ID_COUNTER.fetch_add(1, Ordering::Relaxed),
             propagation: Mutex::new(PropagationMode::Private),
             read_only: AtomicBool::new(false),
+            flags: AtomicUsize::new(0),
         })
     }
 
@@ -270,6 +273,7 @@ impl Mountpoint {
     pub fn new_bind(source: Location, location_in_parent: Option<Location>) -> Arc<Self> {
         let root = source.entry().clone();
         let ro = source.mountpoint().is_readonly();
+        let f = source.mountpoint().get_flags();
         Arc::new(Self {
             root,
             location: core::cell::UnsafeCell::new(location_in_parent),
@@ -278,6 +282,7 @@ impl Mountpoint {
             id: MOUNT_ID_COUNTER.fetch_add(1, Ordering::Relaxed),
             propagation: Mutex::new(PropagationMode::Private),
             read_only: AtomicBool::new(ro),
+            flags: AtomicUsize::new(f),
         })
     }
 
@@ -307,6 +312,14 @@ impl Mountpoint {
 
     pub fn set_readonly(&self, ro: bool) {
         self.read_only.store(ro, Ordering::Release);
+    }
+
+    pub fn get_flags(&self) -> usize {
+        self.flags.load(Ordering::Acquire)
+    }
+
+    pub fn set_flags(&self, flags: usize) {
+        self.flags.store(flags, Ordering::Release);
     }
 
     /// See [`Location::resolve_mountpoint`].

@@ -625,6 +625,10 @@ impl NodeOps for DevNode {
     }
 
     fn sync(&self, _data_only: bool) -> VfsResult<()> {
+        let inode = self.inode_ref()?;
+        if let NodeContent::BlockDevice(block) = &inode.content {
+            block.disk.lock().flush().map_err(map_dev_err)?;
+        }
         Ok(())
     }
 

@@ -284,7 +284,7 @@ impl NodeOps for Inode {
             uid: inode_ref.inode.uid() as u32,
             gid: inode_ref.inode.gid() as u32,
             size: inode_ref.inode.size(),
-            block_size: ext4_rs::BLOCK_SIZE as u64,
+            block_size: fs.super_block.block_size() as u64,
             blocks: inode_ref.inode.blocks_count(),
             rdev: Default::default(),
             atime: Duration::from_secs(inode_ref.inode.atime() as u64),
