@@ -138,6 +138,9 @@ pub unsafe trait Hal {
     /// any other thread for the duration of this method call. The `paddr` must be the value
     /// previously returned by the corresponding `share` call.
     unsafe fn unshare(paddr: PhysAddr, buffer: NonNull<[u8]>, direction: BufferDirection);
+
+    /// Yield the CPU during busy waiting.
+    fn busy_wait_yield() {}
 }
 
 /// The direction in which a buffer is passed.

@@ -46,24 +46,67 @@ pub(crate) fn read_user_iovec_array(
         .map_err(|e| LinuxError::from(e.canonicalize()))
 }
 
-pub(crate) fn alloc_zeroed_bytes(len: usize, _site: &'static str) -> Result<Vec<u8>, LinuxError> {
-    let mut out = Vec::new();
-    if out.try_reserve_exact(len).is_err() {
-        return Err(LinuxError::ENOMEM);
-    }
-    out.resize(len, 0);
-    Ok(out)
+pub(crate) enum ScratchBuffer {
+    Stack {
+        buf: [u8; 4096],
+        len: usize,
+    },
+    Heap(Vec<u8>),
 }
 
-pub(crate) fn alloc_uninit_bytes(len: usize, _site: &'static str) -> Result<Vec<u8>, LinuxError> {
-    let mut out = Vec::new();
-    if out.try_reserve_exact(len).is_err() {
-        return Err(LinuxError::ENOMEM);
+impl core::ops::Deref for ScratchBuffer {
+    type Target = [u8];
+    #[inline]
+    fn deref(&self) -> &Self::Target {
+        match self {
+            Self::Stack { buf, len } => &buf[..*len],
+            Self::Heap(vec) => vec.as_slice(),
+        }
     }
-    unsafe {
-        out.set_len(len);
+}
+
+impl core::ops::DerefMut for ScratchBuffer {
+    #[inline]
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        match self {
+            Self::Stack { buf, len } => &mut buf[..*len],
+            Self::Heap(vec) => vec.as_mut_slice(),
+        }
     }
-    Ok(out)
+}
+
+pub(crate) fn alloc_zeroed_bytes(len: usize, _site: &'static str) -> Result<ScratchBuffer, LinuxError> {
+    if len <= 4096 {
+        Ok(ScratchBuffer::Stack {
+            buf: [0; 4096],
+            len,
+        })
+    } else {
+        let mut out = Vec::new();
+        if out.try_reserve_exact(len).is_err() {
+            return Err(LinuxError::ENOMEM);
+        }
+        out.resize(len, 0);
+        Ok(ScratchBuffer::Heap(out))
+    }
+}
+
+pub(crate) fn alloc_uninit_bytes(len: usize, _site: &'static str) -> Result<ScratchBuffer, LinuxError> {
+    if len <= 4096 {
+        Ok(ScratchBuffer::Stack {
+            buf: [0; 4096],
+            len,
+        })
+    } else {
+        let mut out = Vec::new();
+        if out.try_reserve_exact(len).is_err() {
+            return Err(LinuxError::ENOMEM);
+        }
+        unsafe {
+            out.set_len(len);
+        }
+        Ok(ScratchBuffer::Heap(out))
+    }
 }
 
 pub(crate) fn read_user_timespec(user_addr: usize) -> Result<timespec, LinuxError> {

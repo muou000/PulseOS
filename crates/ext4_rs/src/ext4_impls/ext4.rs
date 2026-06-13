@@ -77,6 +77,7 @@ impl Ext4 {
             super_block,
             system_zone_cache: None,
             inode_table_cache,
+            inode_cache: spin::Mutex::new([None; 16]),
         };
         log::debug!("Ext4::open: initializing system zone cache");
         let zones = ext4_tmp.get_system_zone();
