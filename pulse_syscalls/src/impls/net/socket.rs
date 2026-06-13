@@ -582,13 +582,28 @@ pub fn sys_shutdown(fd: usize, how: usize) -> isize {
         Err(e) => return -(e.code() as isize),
     };
     let how = how as u32;
+    if how > 2 {
+        return -LinuxError::EINVAL.code() as isize;
+    }
+
+    match how {
+        SHUT_RD => socket.rx_shutdown.store(true, Ordering::Release),
+        SHUT_WR => socket.tx_shutdown.store(true, Ordering::Release),
+        SHUT_RDWR => {
+            socket.rx_shutdown.store(true, Ordering::Release);
+            socket.tx_shutdown.store(true, Ordering::Release);
+        }
+        _ => {}
+    }
+
     let result = match &socket.inner {
         SocketInner::Tcp(s) => match how {
-            SHUT_RD | SHUT_RDWR => s.shutdown().map_err(|e| LinuxError::from(e.canonicalize())),
+            SHUT_RD => Ok(()),
             SHUT_WR => {
                 s.close();
                 Ok(())
             }
+            SHUT_RDWR => s.shutdown().map_err(|e| LinuxError::from(e.canonicalize())),
             _ => Err(LinuxError::EINVAL),
         },
         SocketInner::Udp(s) => s.shutdown().map_err(|e| LinuxError::from(e.canonicalize())),

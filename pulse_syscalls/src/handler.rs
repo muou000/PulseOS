@@ -328,6 +328,14 @@ fn syscall_dispatcher(
         Sysno::pselect6 => {
             impls::sys_pselect6(args[0], args[1], args[2], args[3], args[4], args[5])
         }
+        Sysno::epoll_create1 => impls::sys_epoll_create1(args[0]),
+        Sysno::epoll_ctl => impls::sys_epoll_ctl(args[0], args[1], args[2], args[3]),
+        Sysno::epoll_pwait => {
+            impls::sys_epoll_pwait(args[0], args[1], args[2], args[3] as isize, args[4])
+        }
+        Sysno::epoll_pwait2 => {
+            impls::sys_epoll_pwait2(args[0], args[1], args[2], args[3], args[4], args[5])
+        }
         Sysno::getcwd => impls::sys_getcwd(args[0], args[1]),
         Sysno::chdir => impls::sys_chdir(args[0]),
         Sysno::fchdir => impls::sys_fchdir(args[0]),
