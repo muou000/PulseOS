@@ -1603,6 +1603,21 @@ impl Process {
         };
     }
 
+    pub fn detach_all_shared_memory(&self) {
+        let mut shm = self.ipc.shared_memory.write();
+        for inner_arc in shm.values() {
+            let mut inner = inner_arc.lock();
+            inner.detach_process(self.pid());
+            if inner.rmid && inner.attach_count() == 0 {
+                let shmid = inner.shmid;
+                drop(inner);
+                let mut manager = crate::ipc::shm::SHM_MANAGER.lock();
+                manager.remove_shmid(shmid);
+            }
+        }
+        shm.clear();
+    }
+
     fn release_zombie_resources(&self, switch_current_aspace: bool) -> AxResult<()> {
         if self.user_resources_released.swap(true, Ordering::AcqRel) {
             return Ok(());
@@ -1620,13 +1635,7 @@ impl Process {
         self.stack_top.store(USER_STACK_TOP, Ordering::Release);
         self.entry.store(0, Ordering::Release);
 
-        {
-            let mut shm = self.ipc.shared_memory.write();
-            for inner_arc in shm.values() {
-                inner_arc.lock().detach_process(self.pid());
-            }
-            shm.clear();
-        }
+        self.detach_all_shared_memory();
 
         {
             let undos = {

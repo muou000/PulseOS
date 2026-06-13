@@ -17,6 +17,8 @@ pub const IPC_SET: i32 = 1;
 pub const IPC_STAT: i32 = 2;
 pub const IPC_RMID: i32 = 0;
 pub const IPC_INFO: i32 = 3;
+pub const IPC_CREAT: i32 = 0o1000;
+pub const IPC_EXCL: i32 = 0o2000;
 pub const SHM_INFO: i32 = 14;
 pub const SHM_STAT: i32 = 13;
 pub const SHM_RDONLY: u32 = 0o10000;
@@ -70,13 +72,13 @@ pub struct IpcPerm {
 }
 
 impl IpcPerm {
-    pub fn new(key: i32, mode: u16, pid: i32) -> Self {
+    pub fn new(key: i32, mode: u16, uid: u32, gid: u32) -> Self {
         Self {
             key,
-            uid: 0,
-            gid: 0,
-            cuid: pid as u32,
-            cgid: pid as u32,
+            uid,
+            gid,
+            cuid: uid,
+            cgid: gid,
             mode,
             _pad: [0; 2],
             _seq: 0,
@@ -88,9 +90,9 @@ impl IpcPerm {
 }
 
 impl ShmidDs {
-    pub fn new(key: i32, size: usize, mode: u16, pid: i32) -> Self {
+    pub fn new(key: i32, size: usize, mode: u16, uid: u32, gid: u32, pid: i32) -> Self {
         Self {
-            shm_perm: IpcPerm::new(key, mode, pid),
+            shm_perm: IpcPerm::new(key, mode, uid, gid),
             shm_segsz: size,
             shm_atime: 0,
             shm_dtime: 0,
@@ -120,17 +122,40 @@ pub struct ShmInner {
 }
 
 impl ShmInner {
-    pub fn new(key: i32, shmid: i32, size: usize, mapping_flags: MappingFlags, pid: i32) -> Self {
+    pub fn new(key: i32, shmid: i32, size: usize, mapping_flags: MappingFlags, uid: u32, gid: u32, pid: i32) -> Self {
         Self {
             shmid,
             page_num: align_up_4k(size) / PAGE_SIZE_4K,
             addr: 0,
             rmid: false,
             mapping_flags,
-            shmid_ds: ShmidDs::new(key, size, mapping_flags.bits() as u16, pid),
+            shmid_ds: ShmidDs::new(key, size, mapping_flags.bits() as u16, uid, gid, pid),
         }
     }
+}
 
+/// Helper to check SysV IPC permissions based on standard Linux logic.
+pub fn ipc_has_permission(
+    perm: &IpcPerm,
+    req_mode: u32,
+    euid: u32,
+    egid: u32,
+    groups: &[u32],
+) -> bool {
+    if euid == 0 {
+        return true;
+    }
+    let granted_mode = if euid == perm.uid || euid == perm.cuid {
+        perm.mode as u32
+    } else if egid == perm.gid || egid == perm.cgid || groups.contains(&perm.gid) || groups.contains(&perm.cgid) {
+        (perm.mode as u32) << 3
+    } else {
+        (perm.mode as u32) << 6
+    };
+    (req_mode & !granted_mode & 0o777) == 0
+}
+
+impl ShmInner {
     /// Allocate physical pages for this segment (first attach).
     pub fn alloc_pages(&mut self) -> AxResult<()> {
         if self.addr != 0 {
@@ -285,7 +310,16 @@ impl ShmManager {
     }
 
     /// Create a new shared memory segment.
-    pub fn create_shm(&mut self, key: i32, size: usize, shmflg: i32, pid: i32) -> AxResult<i32> {
+    pub fn create_shm(
+        &mut self,
+        key: i32,
+        size: usize,
+        shmflg: i32,
+        pid: i32,
+        euid: u32,
+        egid: u32,
+        groups: &[u32],
+    ) -> AxResult<i32> {
         let page_num = align_up_4k(size) / PAGE_SIZE_4K;
         if page_num == 0 {
             return ax_err!(InvalidInput, "shm: size must be > 0");
@@ -299,16 +333,33 @@ impl ShmManager {
 
         if key != IPC_PRIVATE {
             if let Some(shmid) = self.get_shmid_by_key(key) {
+                if (shmflg & IPC_EXCL) != 0 {
+                    return ax_err!(AlreadyExists, "shmget: key already exists with IPC_EXCL");
+                }
                 let inner = self
                     .get_inner_by_shmid(shmid)
                     .ok_or(AxError::InvalidInput)?;
-                let mut inner = inner.lock();
-                return inner.try_update(size, mapping_flags, pid);
+                let mut inner_guard = inner.lock();
+
+                let req_mode = (shmflg & 0o777) as u32;
+                if !ipc_has_permission(&inner_guard.shmid_ds.shm_perm, req_mode, euid, egid, groups) {
+                    return ax_err!(PermissionDenied, "shmget: permission denied");
+                }
+
+                return inner_guard.try_update(size, mapping_flags, pid);
             }
         }
 
         let shmid = self.next_id();
-        let inner = ShmInner::new(key, shmid, size, mapping_flags, pid);
+        let inner = ShmInner::new(
+            key,
+            shmid,
+            size,
+            mapping_flags,
+            euid,
+            egid,
+            pid,
+        );
         let inner = Arc::new(Mutex::new(inner));
         self.insert_key_shmid(key, shmid);
         self.insert_shmid_inner(shmid, inner);

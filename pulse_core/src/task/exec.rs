@@ -230,13 +230,7 @@ impl Process {
         self.activate();
         self.complete_vfork();
 
-        {
-            let mut shm = self.ipc.shared_memory.write();
-            for inner_arc in shm.values() {
-                inner_arc.lock().detach_process(self.pid());
-            }
-            shm.clear();
-        }
+        self.detach_all_shared_memory();
 
         self.ipc.sem_undos.lock().clear();
 
