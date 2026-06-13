@@ -682,3 +682,164 @@ pub fn sys_getitimer(which: usize, curr_value: usize) -> isize {
         Err(e) => -e.code() as isize,
     }
 }
+
+const ADJ_OFFSET: u32 = 0x0001;
+const ADJ_FREQUENCY: u32 = 0x0002;
+const ADJ_MAXERROR: u32 = 0x0004;
+const ADJ_ESTERROR: u32 = 0x0008;
+const ADJ_STATUS: u32 = 0x0010;
+const ADJ_TIMECONST: u32 = 0x0020;
+const ADJ_MICRO: u32 = 0x1000;
+const ADJ_NANO: u32 = 0x2000;
+const ADJ_TICK: u32 = 0x4000;
+const ADJ_OFFSET_SINGLESHOT: u32 = 0x8001;
+const ADJ_OFFSET_SS_READ: u32 = 0xa001;
+
+const STA_UNSYNC: i32 = 0x0040;
+const STA_NANO: i32 = 0x2000;
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct timex {
+    pub modes: u32,
+    _pad1: u32,
+    pub offset: c_long,
+    pub freq: c_long,
+    pub maxerror: c_long,
+    pub esterror: c_long,
+    pub status: i32,
+    _pad2: u32,
+    pub constant: c_long,
+    pub precision: c_long,
+    pub tolerance: c_long,
+    pub time: timeval,
+    pub tick: c_long,
+    pub ppsfreq: c_long,
+    pub jitter: c_long,
+    pub shift: i32,
+    _pad3: u32,
+    pub stabil: c_long,
+    pub jitcnt: c_long,
+    pub calcnt: c_long,
+    pub errcnt: c_long,
+    pub stbcnt: c_long,
+    pub tai: i32,
+    _pad4: [i32; 11],
+}
+
+static GLOBAL_TIMEX: spin::Mutex<timex> = spin::Mutex::new(timex {
+    modes: 0,
+    _pad1: 0,
+    offset: 0,
+    freq: 0,
+    maxerror: 0,
+    esterror: 0,
+    status: STA_UNSYNC,
+    _pad2: 0,
+    constant: 0,
+    precision: 1,
+    tolerance: 32768000,
+    time: timeval { tv_sec: 0, tv_usec: 0 },
+    tick: 10000,
+    ppsfreq: 0,
+    jitter: 0,
+    shift: 0,
+    _pad3: 0,
+    stabil: 0,
+    jitcnt: 0,
+    calcnt: 0,
+    errcnt: 0,
+    stbcnt: 0,
+    tai: 0,
+    _pad4: [0; 11],
+});
+
+pub fn sys_clock_adjtime(clockid: i32, buf: usize) -> isize {
+    axlog::trace!("sys_clock_adjtime: clockid={}, buf={:#x}", clockid, buf);
+
+    if clockid != CLOCK_REALTIME as i32 {
+        return -LinuxError::EINVAL.code() as isize;
+    }
+
+    if buf == 0 {
+        return -LinuxError::EFAULT.code() as isize;
+    }
+
+    let proc = match pulse_core::task::current_process() {
+        Ok(proc) => proc,
+        Err(e) => return -e.code() as isize,
+    };
+
+    let tmx: timex = match uaccess::read_user_plain(proc.as_ref(), buf) {
+        Ok(t) => t,
+        Err(_) => return -LinuxError::EFAULT.code() as isize,
+    };
+
+    let modes = tmx.modes;
+
+    if modes != 0 && modes != ADJ_OFFSET_SS_READ {
+        const CAP_SYS_TIME: u32 = 25;
+        if !proc.has_capability(CAP_SYS_TIME) {
+            return -LinuxError::EPERM.code() as isize;
+        }
+    }
+
+    if (modes & ADJ_TICK) != 0 {
+        let tick_min = 900000 / CLK_TCK;
+        let tick_max = 1100000 / CLK_TCK;
+        if tmx.tick < tick_min as c_long || tmx.tick > tick_max as c_long {
+            return -LinuxError::EINVAL.code() as isize;
+        }
+    }
+
+    let mut g = GLOBAL_TIMEX.lock();
+
+    if (modes & ADJ_NANO) != 0 {
+        g.status |= STA_NANO;
+    }
+    if (modes & ADJ_MICRO) != 0 {
+        g.status &= !STA_NANO;
+    }
+
+    if (modes & ADJ_OFFSET) != 0 {
+        g.offset = tmx.offset;
+    }
+    if (modes & ADJ_FREQUENCY) != 0 {
+        g.freq = tmx.freq;
+    }
+    if (modes & ADJ_MAXERROR) != 0 {
+        g.maxerror = tmx.maxerror;
+    }
+    if (modes & ADJ_ESTERROR) != 0 {
+        g.esterror = tmx.esterror;
+    }
+    if (modes & ADJ_STATUS) != 0 {
+        g.status = tmx.status;
+    }
+    if (modes & ADJ_TIMECONST) != 0 {
+        g.constant = tmx.constant;
+    }
+    if (modes & ADJ_TICK) != 0 {
+        g.tick = tmx.tick;
+    }
+    if (modes & ADJ_OFFSET_SINGLESHOT) != 0 {
+        g.offset = tmx.offset;
+    }
+
+    let now = axhal::time::wall_time();
+    if (g.status & STA_NANO) != 0 {
+        g.time.tv_sec = now.as_secs() as _;
+        g.time.tv_usec = now.subsec_nanos() as _;
+    } else {
+        g.time.tv_sec = now.as_secs() as _;
+        g.time.tv_usec = now.subsec_micros() as _;
+    }
+
+    let tmx_to_write = *g;
+    drop(g);
+
+    match uaccess::write_user_plain(proc.as_ref(), buf, &tmx_to_write) {
+        Ok(()) => 0,
+        Err(_) => -LinuxError::EFAULT.code() as isize,
+    }
+}
