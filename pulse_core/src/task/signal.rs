@@ -87,37 +87,52 @@ struct SavedSignalContext {
     user_ucontext: Option<usize>,
 }
 
-pub struct SignalShared {
+pub struct SignalHandlers {
     actions: SpinNoIrq<[SigAction; NSIG + 1]>,
+}
+
+pub struct SignalShared {
+    handlers: Arc<SignalHandlers>,
     process_pending: AtomicU64,
 }
 
 impl SignalShared {
     pub fn new() -> Arc<Self> {
         Arc::new(Self {
-            actions: SpinNoIrq::new([SigAction::dfl(); NSIG + 1]),
+            handlers: Arc::new(SignalHandlers {
+                actions: SpinNoIrq::new([SigAction::dfl(); NSIG + 1]),
+            }),
+            process_pending: AtomicU64::new(0),
+        })
+    }
+
+    pub fn clone_sighand_only(from: &Arc<Self>) -> Arc<Self> {
+        Arc::new(Self {
+            handlers: from.handlers.clone(),
             process_pending: AtomicU64::new(0),
         })
     }
 
     pub fn clone_actions_only(from: &Arc<Self>) -> Arc<Self> {
-        let actions = *from.actions.lock();
+        let actions = *from.handlers.actions.lock();
         Arc::new(Self {
-            actions: SpinNoIrq::new(actions),
+            handlers: Arc::new(SignalHandlers {
+                actions: SpinNoIrq::new(actions),
+            }),
             process_pending: AtomicU64::new(0),
         })
     }
 
     pub fn action(&self, sig: usize) -> SigAction {
-        self.actions.lock()[sig]
+        self.handlers.actions.lock()[sig]
     }
 
     pub fn set_action(&self, sig: usize, act: SigAction) {
-        self.actions.lock()[sig] = act;
+        self.handlers.actions.lock()[sig] = act;
     }
 
     pub fn reset_on_exec(&self) {
-        let mut actions = self.actions.lock();
+        let mut actions = self.handlers.actions.lock();
         for sig in 1..=NSIG {
             let h = actions[sig].handler;
             if h != SIG_IGN {
