@@ -379,6 +379,7 @@ impl Ext4 {
         inode_ref: &mut Ext4InodeRef,
         start_bgid: &mut u32,
         block_count: usize,
+        iblock_start: u32,
     ) -> Result<Vec<Ext4Fsblk>> {
         let inode_size = inode_ref.inode.size();
         let block_size = self.super_block.block_size() as usize;
@@ -413,7 +414,7 @@ impl Ext4 {
         );
 
         // Find the starting logical block position
-        let mut current_iblk = iblock;
+        let mut current_iblk = core::cmp::max(iblock, iblock_start);
         let mut last_extent_end = if root_header.entries_count > 0 {
             // Get the end position of the last extent
             let last_extent = match self.get_last_extent(inode_ref) {
@@ -421,9 +422,9 @@ impl Ext4 {
                 Err(_) => {
                     log::warn!(
                         "[Batch Append] Could not get last extent, starting at block {}",
-                        iblock
+                        current_iblk
                     );
-                    iblock
+                    current_iblk
                 }
             };
             last_extent
@@ -541,8 +542,11 @@ impl Ext4 {
         }
 
         // Update inode size, ensuring it doesn't overflow
-        let new_size = match inode_size.checked_add((allocated_blocks.len() * block_size) as u64) {
-            Some(v) => v,
+        let new_size = match (current_iblk as u64).checked_add(allocated_blocks.len() as u64) {
+            Some(blocks) => match blocks.checked_mul(block_size as u64) {
+                Some(size) => core::cmp::max(inode_size, size),
+                None => return return_errno_with_message!(Errno::EINVAL, "File size overflow"),
+            },
             None => return return_errno_with_message!(Errno::EINVAL, "File size overflow"),
         };
         inode_ref.inode.set_size(new_size);

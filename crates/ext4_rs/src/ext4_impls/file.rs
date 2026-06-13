@@ -346,7 +346,8 @@ impl Ext4 {
             log::trace!("[Pre-allocation] Allocating {} blocks", blocks_to_allocate);
             
             // 使用append_inode_pblk_batch进行批量块分配
-            let allocated_blocks = self.append_inode_pblk_batch(&mut inode_ref, &mut start_bgid, blocks_to_allocate)?;
+            let iblock_start = core::cmp::max(iblk_idx, ifile_blocks as usize) as u32;
+            let allocated_blocks = self.append_inode_pblk_batch(&mut inode_ref, &mut start_bgid, blocks_to_allocate, iblock_start)?;
             
             // If we couldn't allocate all blocks, adjust the write size
             if allocated_blocks.len() < blocks_to_allocate {
