@@ -1,8 +1,3 @@
-use bitflags::bitflags;
-
-pub const BLOCK_SIZE: usize = 0x1000;                // 4KB
-pub const SECTORS_PER_BLOCK: usize = BLOCK_SIZE / 512;
-
 pub type Ext4Lblk = u32;
 pub type Ext4Fsblk = u64;
 

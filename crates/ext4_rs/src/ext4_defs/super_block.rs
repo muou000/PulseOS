@@ -214,11 +214,14 @@ impl Ext4Superblock {
     }
 
     pub fn sync_to_disk(&self, block_device: &Arc<dyn BlockDevice>) {
-        let mut block = Block::load(block_device, 0);
+        let block_size = self.block_size() as usize;
+        let block_idx = 1024 / block_size;
+        let inner_offset = 1024 % block_size;
+        let mut block = Block::load(block_device, block_idx * block_size);
         let data = unsafe {
             core::slice::from_raw_parts(self as *const _ as *const u8, size_of::<Ext4Superblock>())
         };
-        block.data[SUPERBLOCK_OFFSET..SUPERBLOCK_OFFSET + size_of::<Ext4Superblock>()].copy_from_slice(data);
+        block.data[inner_offset..inner_offset + size_of::<Ext4Superblock>()].copy_from_slice(data);
         block.sync_blk_to_disk(block_device);
     }
 
@@ -229,11 +232,14 @@ impl Ext4Superblock {
         let checksum = ext4_crc32c(EXT4_CRC32_INIT, data, 0x3fc);
 
         self.checksum = checksum;
-        let mut block = Block::load(block_device, 0);
+        let block_size = self.block_size() as usize;
+        let block_idx = 1024 / block_size;
+        let inner_offset = 1024 % block_size;
+        let mut block = Block::load(block_device, block_idx * block_size);
         let data = unsafe {
             core::slice::from_raw_parts(self as *const _ as *const u8, size_of::<Ext4Superblock>())
         };
-        block.data[SUPERBLOCK_OFFSET..SUPERBLOCK_OFFSET + size_of::<Ext4Superblock>()].copy_from_slice(data);
+        block.data[inner_offset..inner_offset + size_of::<Ext4Superblock>()].copy_from_slice(data);
         block.sync_blk_to_disk(block_device);
     }
 

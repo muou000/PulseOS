@@ -1,9 +1,10 @@
 use crate::prelude::*;
-use crate::ext4_defs::consts::BLOCK_SIZE;
 
 pub trait BlockDevice: Send + Sync + Any {
     fn read_offset(&self, offset: usize, buf: &mut [u8]);
     fn write_offset(&self, offset: usize, data: &[u8]);
+    fn block_size(&self) -> usize;
+    fn set_block_size(&self, size: usize);
 }
 
 pub struct Block {
@@ -14,7 +15,7 @@ pub struct Block {
 impl Block {
     /// Load the block from the disk.
     pub fn load(block_device: &Arc<dyn BlockDevice>, offset: usize) -> Self {
-        let mut data = vec![0u8; BLOCK_SIZE];
+        let mut data = vec![0u8; block_device.block_size()];
         block_device.read_offset(offset, &mut data);
         Block {
             disk_offset: offset,
