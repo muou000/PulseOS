@@ -126,6 +126,10 @@ pub trait FdObject: Send + Sync {
     fn is_read_open(&self) -> bool {
         false
     }
+
+    fn is_rdhup(&self) -> bool {
+        false
+    }
 }
 
 #[derive(Clone)]
@@ -1184,8 +1188,9 @@ impl PipeObject {
 
     fn ready_for(&self, wait_for_read: bool, wait_for_write: bool) -> bool {
         let buffer = self.shared.buffer.lock();
+        let limit = core::cmp::min(4096, buffer.capacity());
         (wait_for_read && (buffer.available_read() > 0 || self.write_end_closed()))
-            || (wait_for_write && (buffer.available_write() > 0 || self.read_end_closed()))
+            || (wait_for_write && (buffer.available_write() >= limit || self.read_end_closed()))
     }
 
     fn current_has_pending_signal() -> bool {
@@ -1415,9 +1420,10 @@ impl FdObject for PipeObject {
 
     fn poll(&self) -> LinuxResult<PollState> {
         let buffer = self.shared.buffer.lock();
+        let limit = core::cmp::min(4096, buffer.capacity());
         Ok(PollState {
             readable: self.readable && (buffer.available_read() > 0 || self.write_end_closed()),
-            writable: self.writable() && (buffer.available_write() > 0 || self.read_end_closed()),
+            writable: self.writable() && (buffer.available_write() >= limit || self.read_end_closed()),
         })
     }
 
@@ -1489,6 +1495,70 @@ impl Drop for PipeObject {
             self.shared.writer_count.fetch_sub(1, Ordering::AcqRel);
             self.shared.read_wait_queue.notify_all(false);
         }
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct EpollRegistration {
+    pub event: epoll_event,
+    pub reported_in: bool,
+    pub reported_out: bool,
+}
+
+pub struct EpollObject {
+    pub events: Mutex<BTreeMap<usize, EpollRegistration>>,
+}
+
+impl EpollObject {
+    pub fn new() -> Self {
+        Self {
+            events: Mutex::new(BTreeMap::new()),
+        }
+    }
+}
+
+impl FdObject for EpollObject {
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn stat(&self) -> LinuxResult<stat> {
+        let mut st = empty_stat();
+        st.st_ino = 1;
+        st.st_nlink = 1;
+        st.st_mode = S_IFREG | 0o600;
+        st.st_blksize = 4096;
+        Ok(st)
+    }
+
+    fn poll(&self) -> LinuxResult<PollState> {
+        let events = self.events.lock();
+        for (&fd, ev) in events.iter() {
+            if let Ok(entry) = crate::task::current_process()?.get_fd_entry(fd) {
+                if let Ok(state) = entry.object.poll() {
+                    let mut revents = 0u32;
+                    if state.readable && (ev.event.events & EPOLLIN != 0) {
+                        revents |= EPOLLIN;
+                    }
+                    if state.writable && (ev.event.events & EPOLLOUT != 0) {
+                        revents |= EPOLLOUT;
+                    }
+                    if ev.event.events & EPOLLRDHUP != 0 && entry.object.is_rdhup() {
+                        revents |= EPOLLRDHUP;
+                    }
+                    if revents != 0 {
+                        return Ok(PollState {
+                            readable: true,
+                            writable: false,
+                        });
+                    }
+                }
+            }
+        }
+        Ok(PollState {
+            readable: false,
+            writable: false,
+        })
     }
 }
 

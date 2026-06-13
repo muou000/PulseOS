@@ -242,6 +242,8 @@ pub struct Socket {
     pub inner: SocketInner,
     pub pending_send: Mutex<alloc::vec::Vec<u8>>,
     pub pending_addr: Mutex<Option<core::net::SocketAddr>>,
+    pub rx_shutdown: AtomicBool,
+    pub tx_shutdown: AtomicBool,
 }
 
 impl Socket {
@@ -251,6 +253,8 @@ impl Socket {
             inner,
             pending_send: Mutex::new(alloc::vec::Vec::new()),
             pending_addr: Mutex::new(None),
+            rx_shutdown: AtomicBool::new(false),
+            tx_shutdown: AtomicBool::new(false),
         }
     }
 }
@@ -852,6 +856,9 @@ impl FdObject for Socket {
     }
 
     fn read(&self, buf: &mut [u8]) -> Result<usize, LinuxError> {
+        if self.rx_shutdown.load(Ordering::Acquire) {
+            return Ok(0);
+        }
         match &self.inner {
             SocketInner::Tcp(s) => s.recv(buf).map_err(|e| LinuxError::from(e.canonicalize())),
             SocketInner::Udp(s) => s
@@ -865,6 +872,9 @@ impl FdObject for Socket {
     }
 
     fn write(&self, buf: &[u8]) -> Result<usize, LinuxError> {
+        if self.tx_shutdown.load(Ordering::Acquire) {
+            return Err(LinuxError::EPIPE);
+        }
         match &self.inner {
             SocketInner::Tcp(s) => s.send(buf).map_err(|e| LinuxError::from(e.canonicalize())),
             SocketInner::Udp(s) => s.send(buf).map_err(|e| LinuxError::from(e.canonicalize())),
@@ -885,7 +895,7 @@ impl FdObject for Socket {
 
     fn poll(&self) -> Result<PollState, LinuxError> {
         axnet::poll_interfaces();
-        match &self.inner {
+        let mut state = match &self.inner {
             SocketInner::Tcp(s) => s.poll().map_err(|e| LinuxError::from(e.canonicalize())),
             SocketInner::Udp(s) => s.poll().map_err(|e| LinuxError::from(e.canonicalize())),
             SocketInner::Local(s) => {
@@ -905,7 +915,14 @@ impl FdObject for Socket {
                     writable: true,
                 })
             }
+        }?;
+        if self.rx_shutdown.load(Ordering::Acquire) {
+            state.readable = true;
         }
+        if self.tx_shutdown.load(Ordering::Acquire) {
+            state.writable = true;
+        }
+        Ok(state)
     }
 
     fn set_nonblocking(&self, nonblocking: bool) -> Result<(), LinuxError> {
@@ -919,5 +936,22 @@ impl FdObject for Socket {
 
     fn is_write_open(&self) -> bool {
         true
+    }
+
+    fn is_rdhup(&self) -> bool {
+        if self.rx_shutdown.load(Ordering::Acquire) {
+            return true;
+        }
+        match &self.inner {
+            SocketInner::Tcp(tcp_sock) => {
+                tcp_sock.with_socket(|socket_opt| {
+                    socket_opt.map_or(false, |s| !s.may_recv())
+                })
+            }
+            SocketInner::Local(local_sock) => {
+                local_sock.peer_closed.load(Ordering::Acquire)
+            }
+            _ => false,
+        }
     }
 }
