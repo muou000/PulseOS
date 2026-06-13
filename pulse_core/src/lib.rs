@@ -8,5 +8,6 @@ pub mod fd_table;
 pub mod flock;
 pub mod ipc;
 pub mod mm;
+pub mod string;
 pub mod task;
 pub mod trap;

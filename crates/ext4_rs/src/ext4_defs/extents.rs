@@ -369,7 +369,7 @@ impl ExtentNode {
                 let start = size_of::<Ext4ExtentHeader>();
                 let indexes = &internal_data[start..];
 
-                let mut l = 0;
+                let mut l = 1;
                 let mut r = (self.header.entries_count - 1) as usize;
 
                 while l <= r {

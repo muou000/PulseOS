@@ -338,6 +338,12 @@ impl Ext4Inode {
     }
 }
 
+#[derive(Debug, Clone, Copy)]
+pub struct InodeCacheEntry {
+    pub inode_num: u32,
+    pub inode: Ext4Inode,
+}
+
 /// Reference to an inode.
 #[derive(Clone)]
 pub struct Ext4InodeRef {

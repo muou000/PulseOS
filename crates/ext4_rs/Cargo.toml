@@ -37,3 +37,6 @@ version = "2.2.1"
 
 [dependencies.log]
 version = "0.4"
+
+[dependencies.spin]
+version = "0.10.0"

@@ -4,7 +4,7 @@ use alloc::{
     sync::{Arc, Weak},
     vec::Vec,
 };
-use core::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, AtomicU64, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicI32, AtomicU64, AtomicUsize, Ordering};
 
 use axconfig::TASK_STACK_SIZE;
 use axerrno::{AxError, AxErrorKind, AxResult};
@@ -62,7 +62,7 @@ impl MemlockRange {
 }
 
 #[derive(Debug)]
-struct MemlockState {
+pub struct MemlockState {
     ranges: Vec<MemlockRange>,
     locked_bytes: usize,
     soft_limit: u64,
@@ -93,7 +93,7 @@ impl MemlockState {
 }
 
 #[derive(Clone, Copy, Debug)]
-struct RlimitState {
+pub struct RlimitState {
     stack_soft: u64,
     stack_hard: u64,
     nofile_soft: u64,

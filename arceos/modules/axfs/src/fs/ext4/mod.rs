@@ -80,11 +80,11 @@ impl<D: BlockDriverOps + 'static> Ext4Disk<D> {
         raw.drain(0..inner_offset);
         raw.truncate(BLOCK_SIZE);
 
+        buf.copy_from_slice(&raw);
         {
             let mut cache = self.block_cache.lock();
-            cache.put(block_offset, raw.clone());
+            cache.put(block_offset, raw);
         }
-        buf.copy_from_slice(&raw);
     }
 }
 
@@ -97,10 +97,14 @@ impl<D: BlockDriverOps + 'static> BlockDevice for Ext4Disk<D> {
             let inner_offset = current_offset % BLOCK_SIZE;
             let current_len = core::cmp::min(BLOCK_SIZE - inner_offset, buf.len() - bytes_read);
 
-            let mut block_data = [0u8; BLOCK_SIZE];
-            self.read_block_aligned(block_offset, &mut block_data);
-            buf[bytes_read..bytes_read + current_len]
-                .copy_from_slice(&block_data[inner_offset..inner_offset + current_len]);
+            if inner_offset == 0 && current_len == BLOCK_SIZE {
+                self.read_block_aligned(block_offset, &mut buf[bytes_read..bytes_read + current_len]);
+            } else {
+                let mut block_data = [0u8; BLOCK_SIZE];
+                self.read_block_aligned(block_offset, &mut block_data);
+                buf[bytes_read..bytes_read + current_len]
+                    .copy_from_slice(&block_data[inner_offset..inner_offset + current_len]);
+            }
             bytes_read += current_len;
         }
     }

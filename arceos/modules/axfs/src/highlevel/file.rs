@@ -340,14 +340,16 @@ pub struct PageCache {
 }
 
 impl PageCache {
-    fn new() -> VfsResult<Self> {
+    fn new(skip_zero: bool) -> VfsResult<Self> {
         let addr = global_allocator()
             .alloc_pages(1, PAGE_SIZE)
             .inspect_err(|err| {
                 warn!("Failed to allocate page cache: {:?}", err);
             })
             .map_err(|_| VfsError::StorageFull)?;
-        unsafe { core::ptr::write_bytes(addr as *mut u8, 0, PAGE_SIZE) };
+        if !skip_zero {
+            unsafe { core::ptr::write_bytes(addr as *mut u8, 0, PAGE_SIZE) };
+        }
         Ok(Self {
             addr: addr.into(),
             dirty: false,
@@ -420,19 +422,71 @@ impl CachedFileShared {
     }
 
     fn flush_dirty_pages(&self, file: &FileNode) -> VfsResult<()> {
+        const MAX_COALESCE_PAGES: usize = 32; // Limit contiguous writes to 128KB
         let file_len = file.len()?;
         let mut guard = self.page_cache.lock();
-        for (pn, page) in guard.iter_mut() {
-            if !page.dirty {
-                continue;
-            }
-            let page_start = *pn as u64 * PAGE_SIZE as u64;
-            let len = (file_len.saturating_sub(page_start)).min(PAGE_SIZE as u64) as usize;
-            if len > 0 {
-                file.write_at(&page.data()[..len], page_start)?;
-            }
-            page.dirty = false;
+
+        let mut dirty_pns: Vec<u32> = guard
+            .iter()
+            .filter(|(_, page)| page.dirty)
+            .map(|(pn, _)| *pn)
+            .collect();
+        dirty_pns.sort_unstable();
+
+        if dirty_pns.is_empty() {
+            return Ok(());
         }
+
+        let mut i = 0;
+        while i < dirty_pns.len() {
+            let mut j = i + 1;
+            while j < dirty_pns.len()
+                && dirty_pns[j] == dirty_pns[j - 1] + 1
+                && (j - i) < MAX_COALESCE_PAGES
+            {
+                j += 1;
+            }
+
+            let span_pns = &dirty_pns[i..j];
+            let start_pn = span_pns[0];
+
+            let mut combined_data = Vec::new();
+            for &pn in span_pns {
+                if let Some(page) = guard.get_mut(&pn) {
+                    let page_start = pn as u64 * PAGE_SIZE as u64;
+                    let len = (file_len.saturating_sub(page_start)).min(PAGE_SIZE as u64) as usize;
+                    if len > 0 {
+                        combined_data.extend_from_slice(&page.data()[..len]);
+                    }
+                }
+            }
+
+            if !combined_data.is_empty() {
+                let written = file.write_at(&combined_data, start_pn as u64 * PAGE_SIZE as u64)?;
+                let mut bytes_marked = 0;
+                for &pn in span_pns {
+                    if let Some(page) = guard.get_mut(&pn) {
+                        let page_start = pn as u64 * PAGE_SIZE as u64;
+                        let len = (file_len.saturating_sub(page_start)).min(PAGE_SIZE as u64) as usize;
+                        if bytes_marked + len <= written {
+                            bytes_marked += len;
+                            page.dirty = false;
+                        } else {
+                            break;
+                        }
+                    }
+                }
+            } else {
+                for &pn in span_pns {
+                    if let Some(page) = guard.get_mut(&pn) {
+                        page.dirty = false;
+                    }
+                }
+            }
+
+            i = j;
+        }
+
         Ok(())
     }
 
@@ -615,20 +669,7 @@ impl CachedFile {
     }
 
     fn flush_dirty_pages(&self, file: &FileNode) -> VfsResult<()> {
-        let file_len = file.len()?;
-        let mut guard = self.shared.page_cache.lock();
-        for (pn, page) in guard.iter_mut() {
-            if !page.dirty {
-                continue;
-            }
-            let page_start = *pn as u64 * PAGE_SIZE as u64;
-            let len = (file_len.saturating_sub(page_start)).min(PAGE_SIZE as u64) as usize;
-            if len > 0 {
-                file.write_at(&page.data()[..len], page_start)?;
-            }
-            page.dirty = false;
-        }
-        Ok(())
+        self.shared.flush_dirty_pages(file)
     }
 
     fn discard_pages(
@@ -683,9 +724,11 @@ impl CachedFile {
         }
 
         // Page not in cache, read it
-        let mut page = PageCache::new()?;
+        let mut page = PageCache::new(skip_read)?;
         if self.in_memory {
-            page.data().fill(0);
+            if !skip_read {
+                page.data().fill(0);
+            }
         } else if !skip_read {
             file.read_at(page.data(), pn as u64 * PAGE_SIZE as u64)?;
         }

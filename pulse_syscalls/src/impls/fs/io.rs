@@ -218,8 +218,16 @@ pub fn sys_writev(fd: usize, iov: usize, iovcnt: usize) -> isize {
         Ok(iovecs) => iovecs,
         Err(e) => return -e.code() as isize,
     };
+    let mut actual_len = 0usize;
+    for io_vec in &iovecs {
+        let len = match iov_len_to_usize(io_vec.iov_len) {
+            Ok(len) => len,
+            Err(e) => return -e.code() as isize,
+        };
+        actual_len = actual_len.saturating_add(len);
+    }
     let mut total = 0isize;
-    let mut buf = match alloc_uninit_bytes(MAX_IO_CHUNK, "sys_writev.tmp") {
+    let mut buf = match alloc_uninit_bytes(actual_len.min(MAX_IO_CHUNK), "sys_writev.tmp") {
         Ok(buf) => buf,
         Err(e) => return -e.code() as isize,
     };
@@ -267,8 +275,16 @@ pub fn sys_readv(fd: usize, iov: usize, iovcnt: usize) -> isize {
         Ok(iovecs) => iovecs,
         Err(e) => return -e.code() as isize,
     };
+    let mut actual_len = 0usize;
+    for io_vec in &iovecs {
+        let len = match iov_len_to_usize(io_vec.iov_len) {
+            Ok(len) => len,
+            Err(e) => return -e.code() as isize,
+        };
+        actual_len = actual_len.saturating_add(len);
+    }
     let mut total = 0isize;
-    let mut buf = match alloc_uninit_bytes(MAX_IO_CHUNK, "sys_readv.tmp") {
+    let mut buf = match alloc_uninit_bytes(actual_len.min(MAX_IO_CHUNK), "sys_readv.tmp") {
         Ok(buf) => buf,
         Err(e) => return -e.code() as isize,
     };
@@ -355,7 +371,7 @@ pub fn sys_preadv(
     }
 
     let mut total = 0isize;
-    let mut buf = match alloc_uninit_bytes(MAX_IO_CHUNK, "sys_preadv.tmp") {
+    let mut buf = match alloc_uninit_bytes(total_len.min(MAX_IO_CHUNK), "sys_preadv.tmp") {
         Ok(buf) => buf,
         Err(e) => return -e.code() as isize,
     };
@@ -599,7 +615,7 @@ pub fn sys_pwritev(
     }
 
     let mut total = 0isize;
-    let mut buf = match alloc_uninit_bytes(MAX_IO_CHUNK, "sys_pwritev.tmp") {
+    let mut buf = match alloc_uninit_bytes(total_len.min(MAX_IO_CHUNK), "sys_pwritev.tmp") {
         Ok(buf) => buf,
         Err(e) => return -e.code() as isize,
     };

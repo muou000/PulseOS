@@ -49,3 +49,4 @@ axalloc = { workspace = true, optional = true }
 axhal = { workspace = true, optional = true }
 axconfig = { workspace = true, optional = true }
 axdma = { workspace = true, optional = true }
+axtask = { workspace = true }
