@@ -7,7 +7,7 @@ const FUTEX_CMP_REQUEUE: i32 = 4;
 const FUTEX_WAIT_BITSET: i32 = 9;
 const FUTEX_CMD_MASK: i32 = 0x7f;
 
-fn read_absolute_timeout_ns(timeout: usize, _clock_realtime: bool) -> Result<Option<u64>, LinuxError> {
+fn read_absolute_timeout_ns(timeout: usize, clock_realtime: bool) -> Result<Option<u64>, LinuxError> {
     if timeout == 0 {
         return Ok(None);
     }
@@ -21,7 +21,11 @@ fn read_absolute_timeout_ns(timeout: usize, _clock_realtime: bool) -> Result<Opt
         .saturating_mul(1_000_000_000)
         .saturating_add(ts.tv_nsec as u64);
     
-    let now_ns = axhal::time::monotonic_time_nanos() as u64;
+    let now_ns = if clock_realtime {
+        axhal::time::wall_time().as_nanos() as u64
+    } else {
+        axhal::time::monotonic_time_nanos() as u64
+    };
     if target_ns <= now_ns {
         return Err(LinuxError::ETIMEDOUT);
     }
@@ -120,6 +124,60 @@ pub fn sys_futex(
         _ => {
             axlog::warn!("unsupported futex op: {:#x}", op);
             -LinuxError::ENOSYS.code() as isize
+        }
+    }
+}
+
+pub fn sys_futex_waitv(
+    waiters: usize,
+    nr_futexes: u32,
+    flags: u32,
+    timeout: usize,
+    clockid: u32,
+) -> isize {
+    axlog::debug!(
+        "sys_futex_waitv: waiters={:#x}, nr_futexes={}, flags={}, timeout={:#x}, clockid={}",
+        waiters, nr_futexes, flags, timeout, clockid
+    );
+
+    if flags != 0 {
+        return -LinuxError::EINVAL.code() as isize;
+    }
+
+    if nr_futexes == 0 || nr_futexes > 128 {
+        return -LinuxError::EINVAL.code() as isize;
+    }
+
+    if waiters == 0 {
+        return -LinuxError::EINVAL.code() as isize;
+    }
+
+    if waiters % 8 != 0 {
+        return -LinuxError::EINVAL.code() as isize;
+    }
+
+    let clock_realtime = match clockid {
+        0 => true,  // CLOCK_REALTIME
+        1 => false, // CLOCK_MONOTONIC
+        _ => return -LinuxError::EINVAL.code() as isize,
+    };
+
+    let timeout_ns = match read_absolute_timeout_ns(timeout, clock_realtime) {
+        Ok(t) => t,
+        Err(LinuxError::ETIMEDOUT) => return -LinuxError::ETIMEDOUT.code() as isize,
+        Err(e) => return -e.code() as isize,
+    };
+
+    let process = match pulse_core::task::current_process() {
+        Ok(process) => process,
+        Err(e) => return -e.code() as isize,
+    };
+
+    match process.futex_waitv(waiters, nr_futexes, flags, timeout_ns) {
+        Ok(idx) => idx,
+        Err(e) => {
+            let errno: LinuxError = e.into();
+            -errno.code() as isize
         }
     }
 }

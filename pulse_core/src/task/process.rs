@@ -61,6 +61,15 @@ impl MemlockRange {
     }
 }
 
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default)]
+pub struct FutexWaitv {
+    pub val: u64,
+    pub uaddr: u64,
+    pub flags: u32,
+    pub __reserved: u32,
+}
+
 #[derive(Debug)]
 pub struct MemlockState {
     ranges: Vec<MemlockRange>,
@@ -2422,6 +2431,123 @@ impl Process {
         }
     }
 
+    pub fn futex_waitv(
+        &self,
+        waiters_addr: usize,
+        nr_futexes: u32,
+        _flags: u32,
+        timeout_ns: Option<u64>,
+    ) -> AxResult<isize> {
+        let mut waiters = alloc::vec::Vec::with_capacity(nr_futexes as usize);
+        for i in 0..nr_futexes {
+            let mut w = FutexWaitv::default();
+            let buf = unsafe {
+                core::slice::from_raw_parts_mut(
+                    &mut w as *mut _ as *mut u8,
+                    core::mem::size_of::<FutexWaitv>(),
+                )
+            };
+            self.read_user_bytes(waiters_addr + i as usize * core::mem::size_of::<FutexWaitv>(), buf)?;
+            waiters.push(w);
+        }
+
+        for w in &waiters {
+            if w.__reserved != 0 {
+                return Err(AxError::InvalidInput);
+            }
+            let valid_flags = 0x02 | 0x80;
+            if (w.flags & !valid_flags) != 0 || (w.flags & 0x03) != 0x02 {
+                return Err(AxError::InvalidInput);
+            }
+            if w.uaddr % 4 != 0 {
+                return Err(AxError::InvalidInput);
+            }
+            if w.uaddr == 0 {
+                return Err(AxError::BadAddress);
+            }
+            self.read_user_u32(w.uaddr as usize)?;
+        }
+
+        let current_thread = super::current_thread().ok();
+        let signal_pending = || {
+            current_thread
+                .as_ref()
+                .map(|thread| thread.has_pending_signal())
+                .unwrap_or(false)
+        };
+
+        if signal_pending() {
+            return Err(unsafe { core::mem::transmute(-512i32) }); // ERESTARTSYS
+        }
+
+        let mut queues = alloc::vec::Vec::with_capacity(waiters.len());
+        for w in &waiters {
+            let is_priv = w.flags & 128 != 0; // 128 is FUTEX_PRIVATE_FLAG
+            let (key, is_priv) = self.futex_key(w.uaddr as usize, is_priv);
+            let queue = if is_priv {
+                self.futex_table.queue(key)
+            } else {
+                GLOBAL_FUTEX_TABLE.queue(key)
+            };
+            queues.push(queue);
+        }
+
+        let q_refs: alloc::vec::Vec<&axtask::WaitQueue> = queues.iter().map(|q| q.as_ref()).collect();
+
+        let mut mismatch = false;
+
+        let res = axtask::WaitQueue::wait_multiple_timeout_until(
+            &q_refs,
+            timeout_ns.map(core::time::Duration::from_nanos),
+            || {
+                if self.group_exiting() || signal_pending() {
+                    return true;
+                }
+                mismatch = false;
+                for w in waiters.iter() {
+                    match self.read_user_u32(w.uaddr as usize) {
+                        Ok(v) => {
+                            if v != w.val as u32 {
+                                mismatch = true;
+                                return true;
+                            }
+                        }
+                        Err(_) => {
+                            mismatch = true;
+                            return true;
+                        }
+                    }
+                }
+                false
+            },
+        );
+
+        // Remove from GLOBAL_FUTEX_TABLE if empty
+        if self.group_exiting() || mismatch || res.is_ok() || res.is_err() {
+            for (_i, w) in waiters.iter().enumerate() {
+                let is_priv = w.flags & 128 != 0;
+                if !is_priv {
+                    let (key, _) = self.futex_key(w.uaddr as usize, is_priv);
+                    GLOBAL_FUTEX_TABLE.remove_if_empty(key);
+                }
+            }
+        }
+
+        if mismatch {
+            return Err(AxError::from(AxErrorKind::WouldBlock)); // EAGAIN
+        }
+
+        if signal_pending() {
+            return Err(unsafe { core::mem::transmute(-512i32) }); // ERESTARTSYS
+        }
+
+        match res {
+            Ok(idx) => Ok(idx as isize),
+            Err(true) => Err(AxError::from(AxErrorKind::TimedOut)),
+            Err(false) => Err(unsafe { core::mem::transmute(-512i32) }), // Aborted not by timeout
+        }
+    }
+
     pub fn futex_wait(
         &self,
         addr: usize,
@@ -2443,7 +2569,7 @@ impl Process {
                 .unwrap_or(false)
         };
         if signal_pending() {
-            return Err(unsafe { core::mem::transmute(-512) });
+            return Err(unsafe { core::mem::transmute(-512i32) });
         }
 
         let (key, is_priv) = self.futex_key(addr, is_private);
@@ -2477,7 +2603,7 @@ impl Process {
             return Ok(());
         }
         if signal_pending() {
-            return Err(unsafe { core::mem::transmute(-512) });
+            return Err(unsafe { core::mem::transmute(-512i32) });
         }
         if timed_out {
             return Err(AxError::from(AxErrorKind::TimedOut));

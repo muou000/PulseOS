@@ -109,7 +109,6 @@ pub fn syscall_handler(tf: &mut TrapFrame, syscall_num: usize) -> isize {
     }
     process.mark_user_resume();
 
-
     syscall_ret(tf)
 }
 
@@ -245,6 +244,13 @@ fn syscall_dispatcher(
         Sysno::futex => {
             impls::sys_futex(args[0], args[1] as i32, args[2], args[3], args[4], args[5])
         }
+        Sysno::futex_waitv => impls::sys_futex_waitv(
+            args[0],
+            args[1] as u32,
+            args[2] as u32,
+            args[3],
+            args[4] as u32,
+        ),
 
         Sysno::uname => impls::sys_uname(args[0]),
         Sysno::sethostname => impls::sys_sethostname(args[0], args[1]),

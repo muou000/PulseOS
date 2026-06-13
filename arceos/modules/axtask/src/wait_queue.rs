@@ -180,6 +180,86 @@ impl WaitQueue {
         timeout
     }
 
+    /// Blocks the current task and put it into multiple wait queues, until the given
+    /// `condition` becomes true, or the given duration has elapsed, or it is awoken
+    /// by any of the given wait queues.
+    ///
+    /// Returns `Ok(index)` if woken by the queue at the given index, or `Err(timeout)`
+    /// indicating whether a timeout occurred (`true`) or the condition aborted the wait (`false`).
+    #[cfg(feature = "irq")]
+    pub fn wait_multiple_timeout_until<F>(
+        queues: &[&WaitQueue],
+        dur: Option<core::time::Duration>,
+        mut condition: F,
+    ) -> Result<usize, bool>
+    where
+        F: FnMut() -> bool,
+    {
+        let curr = crate::current();
+        let deadline = dur.map(|d| axhal::time::wall_time() + d);
+        if let Some(d) = deadline {
+            crate::timers::set_alarm_wakeup(d, curr.clone());
+        }
+
+        let mut timeout = dur.is_some();
+        let mut woken_by = None;
+
+        loop {
+            let mut rq = crate::run_queue::current_run_queue::<NoPreemptIrqSave>();
+            if let Some(d) = deadline {
+                if axhal::time::wall_time() >= d {
+                    break;
+                }
+            }
+
+            curr.set_state(crate::task::TaskState::Blocked);
+            curr.set_in_wait_queue(true);
+
+            for q in queues {
+                let mut wq = q.queue.lock();
+                if !wq.iter().any(|t| Arc::ptr_eq(t, curr.as_task_ref())) {
+                    wq.push_back(curr.as_task_ref().clone());
+                }
+            }
+
+            if condition() {
+                timeout = false;
+                if curr.transition_state(crate::task::TaskState::Blocked, crate::task::TaskState::Running) {
+                    curr.set_in_wait_queue(false);
+                    break;
+                }
+            }
+
+            rq.resched_blocked();
+
+            for (i, q) in queues.iter().enumerate() {
+                let wq = q.queue.lock();
+                if !wq.iter().any(|t| Arc::ptr_eq(t, curr.as_task_ref())) {
+                    woken_by = Some(i);
+                    break;
+                }
+            }
+            if woken_by.is_some() {
+                break;
+            }
+        }
+
+        for q in queues {
+            q.cancel_events(&curr, false);
+        }
+        if deadline.is_some() {
+            if let Some(q) = queues.first() {
+                q.cancel_events(&curr, true);
+            }
+        }
+
+        if let Some(idx) = woken_by {
+            Ok(idx)
+        } else {
+            Err(timeout)
+        }
+    }
+
     /// Wakes up one task in the wait queue, usually the first one.
     ///
     /// If `resched` is true, the current task will be preempted when the
