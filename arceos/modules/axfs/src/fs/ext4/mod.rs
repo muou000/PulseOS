@@ -125,6 +125,7 @@ impl<D: BlockDriverOps + 'static> BlockDevice for Ext4Disk<D> {
             return;
         }
         let block_size = self.block_size();
+        let mut dev = self.dev.lock();
         {
             let start_align = (offset / block_size) * block_size;
             let end_align = ((offset + data.len() - 1) / block_size) * block_size;
@@ -158,7 +159,6 @@ impl<D: BlockDriverOps + 'static> BlockDevice for Ext4Disk<D> {
             }
         }
         let (first_block, inner_offset, blocks) = self.byte_range(offset, data.len());
-        let mut dev = self.dev.lock();
         let total_blocks = dev.num_blocks();
         // Boundary check: reject obviously invalid block addresses
         if first_block + blocks as u64 > total_blocks {
