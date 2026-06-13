@@ -426,6 +426,20 @@ impl<G: BaseGuard> CurrentRunQueueRef<'_, G> {
         self.inner.resched();
     }
 
+    /// Block the current task and reschedule without a specific wait queue guard.
+    /// This is used for multi-queue waiting where locks cannot be held.
+    /// Note: The caller MUST ensure the task is already set to `Blocked` and `in_wait_queue` = true,
+    /// and that proper condition checks have been performed.
+    pub(crate) fn resched_blocked(&mut self) {
+        let curr = &self.current_task;
+        assert!(!curr.is_idle());
+        #[cfg(feature = "preempt")]
+        assert!(curr.can_preempt(1)); // 1 for `NoPreemptIrqSave`
+
+        trace!("task block multi: {}", curr.id_name());
+        self.inner.resched();
+    }
+
     #[cfg(feature = "irq")]
     pub fn sleep_until(&mut self, deadline: axhal::time::TimeValue) {
         let curr = &self.current_task;

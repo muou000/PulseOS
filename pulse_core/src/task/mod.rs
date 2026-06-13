@@ -220,14 +220,14 @@ impl axfs::ProcfsProcessProvider for PulseProcessProvider {
         let proc = process_by_pid(pid)?;
         let name = proc.name();
 
-        let is_current = current_process()
-            .ok()
-            .map(|p| p.pid() == pid)
-            .unwrap_or(false);
         let state = if proc.is_zombie() {
             "Z (zombie)"
-        } else if is_current {
-            "R (running)"
+        } else if let Some(task) = proc.task_ref_by_tid(pid) {
+            if task.is_running() || task.is_ready() {
+                "R (running)"
+            } else {
+                "S (sleeping)"
+            }
         } else {
             "S (sleeping)"
         };
@@ -280,14 +280,14 @@ impl axfs::ProcfsProcessProvider for PulseProcessProvider {
         let proc = process_by_pid(pid)?;
         let comm = proc.name();
 
-        let is_current = current_process()
-            .ok()
-            .map(|p| p.pid() == pid)
-            .unwrap_or(false);
         let state_char = if proc.is_zombie() {
             'Z'
-        } else if is_current {
-            'R'
+        } else if let Some(task) = proc.task_ref_by_tid(pid) {
+            if task.is_running() || task.is_ready() {
+                'R'
+            } else {
+                'S'
+            }
         } else {
             'S'
         };

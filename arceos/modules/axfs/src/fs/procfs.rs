@@ -30,7 +30,8 @@ const PID_MAX_INO: u64 = 8;
 const TAINTED_INO: u64 = 9;
 const CORE_PATTERN_INO: u64 = 10;
 const INIT_SYM_INO: u64 = 11;
-const NEXT_DYNAMIC_INO: u64 = INIT_SYM_INO + 1;
+const CPUINFO_INO: u64 = 12;
+const NEXT_DYNAMIC_INO: u64 = CPUINFO_INO + 1;
 
 pub const PID_INODE_START: u64 = 0x10_0000_0000;
 pub const PID_INODE_SHIFT: u32 = 16;
@@ -66,6 +67,12 @@ pub trait ProcfsProcessProvider: Send + Sync {
     fn status(&self, pid: u64) -> Option<String>;
     fn exe(&self, pid: u64) -> Option<String>;
     fn stat(&self, pid: u64) -> Option<String>;
+    fn thread_tids(&self, _pid: u64) -> Option<Vec<u64>> {
+        None
+    }
+    fn thread_stat(&self, _pid: u64, _tid: u64) -> Option<String> {
+        None
+    }
     fn process_fds(&self, pid: u64) -> Option<Vec<u32>>;
     fn fd_path(&self, pid: u64, fd: u32) -> Option<String>;
     fn maps(&self, pid: u64) -> Option<String>;
@@ -113,6 +120,7 @@ enum ProcLiveFileKind {
     Filesystems,
     Tainted,
     CorePattern,
+    Cpuinfo,
 }
 
 #[derive(PartialEq, Eq, Hash, Clone)]
@@ -379,6 +387,11 @@ impl ProcFilesystem {
             ProcLiveFileKind::CorePattern,
             NodePermission::from_bits_truncate(0o444),
         );
+        let cpuinfo = Inode::new_live_file(
+            CPUINFO_INO,
+            ProcLiveFileKind::Cpuinfo,
+            NodePermission::from_bits_truncate(0o444),
+        );
 
         root.metadata.lock().nlink = 3;
         sys_dir.metadata.lock().nlink = 3;
@@ -397,11 +410,13 @@ impl ProcFilesystem {
             inodes.insert(PID_MAX_INO, pid_max);
             inodes.insert(TAINTED_INO, tainted);
             inodes.insert(CORE_PATTERN_INO, core_pattern);
+            inodes.insert(CPUINFO_INO, cpuinfo);
         }
 
         {
             let mut entries = root.as_dir().expect("proc root is dir").entries.lock();
             entries.insert("meminfo".into(), InodeRef::new(MEMINFO_INO));
+            entries.insert("cpuinfo".into(), InodeRef::new(CPUINFO_INO));
             entries.insert("mounts".into(), InodeRef::new(MOUNTS_INO));
             entries.insert("filesystems".into(), InodeRef::new(FILESYSTEMS_INO));
             entries.insert("self".into(), InodeRef::new(SELF_INO));
@@ -778,6 +793,9 @@ fn render_proc_file(fs: &ProcFilesystem, kind: ProcLiveFileKind) -> String {
         }
         ProcLiveFileKind::CorePattern => {
             "core\n".to_owned()
+        }
+        ProcLiveFileKind::Cpuinfo => {
+            "processor\t: 0\nmodel name\t: QEMU Virtual CPU version 2.5+\n".to_owned()
         }
     }
 }

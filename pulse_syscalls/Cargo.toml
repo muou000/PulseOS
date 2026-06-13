@@ -28,6 +28,7 @@ linkme.workspace = true
 memory_addr.workspace = true
 bitflags.workspace = true
 spin.workspace = true
+kernel_guard.workspace = true
 linux-raw-sys = { workspace = true, features = ["system"] }
 pulse_core = { path = "../pulse_core" }
 starry-vdso = { workspace = true }

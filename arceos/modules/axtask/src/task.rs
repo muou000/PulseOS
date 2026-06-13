@@ -348,12 +348,12 @@ impl TaskInner {
     }
 
     #[inline]
-    pub(crate) fn is_running(&self) -> bool {
+    pub fn is_running(&self) -> bool {
         matches!(self.state(), TaskState::Running)
     }
 
     #[inline]
-    pub(crate) fn is_ready(&self) -> bool {
+    pub fn is_ready(&self) -> bool {
         matches!(self.state(), TaskState::Ready)
     }
 

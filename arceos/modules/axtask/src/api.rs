@@ -290,6 +290,12 @@ pub fn reprogram_timer() {
     crate::timers::reprogram_timer();
 }
 
+/// Check and trigger expired timer events.
+#[cfg(feature = "irq")]
+pub fn check_events() {
+    crate::timers::check_events();
+}
+
 /// Gets the next timer event deadline.
 #[cfg(feature = "irq")]
 pub fn next_deadline() -> Option<axhal::time::TimeValue> {

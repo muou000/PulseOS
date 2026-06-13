@@ -340,6 +340,12 @@ pub fn sys_clock_settime(clockid: i32, tp: usize) -> isize {
     starry_vdso::vdso::set_vdso_epoch_offset(new_offset);
     starry_vdso::vdso::update_vdso_data();
 
+    // Check if any timers expired due to the clock jump, and reprogram the timer
+    let _guard = kernel_guard::NoPreemptIrqSave::new();
+    axtask::check_events();
+    axtask::reprogram_timer();
+    drop(_guard);
+
     0
 }
 
@@ -426,6 +432,12 @@ pub fn sys_settimeofday(tv: usize, tz: usize) -> isize {
     // Synchronize vDSO wall time instantly
     starry_vdso::vdso::set_vdso_epoch_offset(new_offset);
     starry_vdso::vdso::update_vdso_data();
+
+    // Check if any timers expired due to the clock jump, and reprogram the timer
+    let _guard = kernel_guard::NoPreemptIrqSave::new();
+    axtask::check_events();
+    axtask::reprogram_timer();
+    drop(_guard);
 
     0
 }
