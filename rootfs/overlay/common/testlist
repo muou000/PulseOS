@@ -45,6 +45,7 @@ clock_gettime01
 clock_gettime02
 clock_gettime04
 clock_nanosleep01
+clock_nanosleep02
 clock_nanosleep04
 clock_settime01
 clock_settime02
@@ -52,8 +53,11 @@ clock_settime03
 clone01
 clone03
 clone04
+clone05
 clone06
 clone07
+clone08
+clone301
 clone302
 close01
 close02

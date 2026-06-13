@@ -573,6 +573,38 @@ impl FdObject for NsFdObject {
     }
 }
 
+pub struct PidfdObject {
+    pub pid: u64,
+}
+
+impl FdObject for PidfdObject {
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn stat(&self) -> LinuxResult<stat> {
+        Ok(stat {
+            st_ino: (20000 + self.pid) as _,
+            st_nlink: 1,
+            st_mode: S_IFREG | 0o600,
+            st_uid: 0,
+            st_gid: 0,
+            st_blksize: 4096,
+            ..empty_stat()
+        })
+    }
+
+    fn poll(&self) -> LinuxResult<PollState> {
+        let is_zombie = crate::task::process_by_pid(self.pid)
+            .map(|p| p.is_zombie())
+            .unwrap_or(true);
+        Ok(PollState {
+            readable: is_zombie,
+            writable: false,
+        })
+    }
+}
+
 impl FdObject for FileObject {
     fn as_any(&self) -> &dyn Any {
         self

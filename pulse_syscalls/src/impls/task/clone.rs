@@ -6,6 +6,7 @@ use bitflags::bitflags;
 use pulse_core::task::{CloneParams, ForkParams, current_process, current_thread};
 
 use crate::LinuxError;
+use crate::impls::utils::read_user_bytes;
 
 static CLONE_SIGHAND_WARNED: AtomicBool = AtomicBool::new(false);
 
@@ -38,6 +39,7 @@ bitflags! {
         const CLONE_NEWPID         = 0x2000_0000; // New pid namespace
         const CLONE_NEWNET         = 0x4000_0000; // New network namespace
         const CLONE_IO             = 0x8000_0000; // Clone io context
+        const CLONE_INTO_CGROUP    = 0x2_0000_0000; // Clone into cgroup
     }
 }
 
@@ -158,6 +160,7 @@ pub fn sys_clone(tf: &TrapFrame, args: [usize; 6]) -> isize {
                 child_clear_tid,
                 share_sighand: flags.contains(CloneFlags::CLONE_SIGHAND),
                 share_uts,
+                exit_signal: Some(exit_signal as i32),
             },
         ) {
             Ok(child_proc) => (child_proc.pid() as usize, None),
@@ -181,6 +184,7 @@ pub fn sys_clone(tf: &TrapFrame, args: [usize; 6]) -> isize {
                 child_clear_tid,
                 share_sighand: flags.contains(CloneFlags::CLONE_SIGHAND),
                 share_uts,
+                exit_signal: Some(exit_signal as i32),
             },
         ) {
             Ok((tid, child_proc)) => (tid as usize, child_proc),
@@ -190,6 +194,240 @@ pub fn sys_clone(tf: &TrapFrame, args: [usize; 6]) -> isize {
             }
         }
     };
+
+    if is_vfork {
+        let Some(child_proc) = child_proc_for_vfork else {
+            return -LinuxError::EINVAL.code() as isize;
+        };
+        child_proc.wait_for_vfork_completion();
+    }
+
+    child_tid_value as isize
+}
+
+#[repr(C)]
+#[derive(Debug, Default, Clone, Copy)]
+pub struct CloneArgs {
+    pub flags: u64,
+    pub pidfd: u64,
+    pub child_tid: u64,
+    pub parent_tid: u64,
+    pub exit_signal: u64,
+    pub stack: u64,
+    pub stack_size: u64,
+    pub tls: u64,
+    pub set_tid: u64,
+    pub set_tid_size: u64,
+    pub cgroup: u64,
+}
+
+pub fn sys_clone3(tf: &TrapFrame, args: [usize; 6]) -> isize {
+    let cl_args_ptr = args[0];
+    let size = args[1];
+
+    axlog::debug!("sys_clone3: cl_args_ptr={:#x}, size={}", cl_args_ptr, size);
+
+    if size < 64 {
+        return -LinuxError::EINVAL.code() as isize;
+    }
+
+    let mut clone_args = CloneArgs::default();
+    let copy_size = core::cmp::min(size, core::mem::size_of::<CloneArgs>());
+
+    let mut buf = [0u8; 88];
+    let slice = &mut buf[..copy_size];
+    if let Err(e) = read_user_bytes(cl_args_ptr, slice) {
+        return -e.code() as isize;
+    }
+
+    unsafe {
+        core::ptr::copy_nonoverlapping(
+            slice.as_ptr(),
+            (&mut clone_args as *mut CloneArgs).cast::<u8>(),
+            copy_size,
+        );
+    }
+
+    if size > core::mem::size_of::<CloneArgs>() {
+        let mut remaining = size - core::mem::size_of::<CloneArgs>();
+        let mut check_ptr = cl_args_ptr + core::mem::size_of::<CloneArgs>();
+        let mut temp = [0u8; 256];
+        while remaining > 0 {
+            let chunk = core::cmp::min(remaining, temp.len());
+            if let Err(e) = read_user_bytes(check_ptr, &mut temp[..chunk]) {
+                return -e.code() as isize;
+            }
+            if temp[..chunk].iter().any(|&b| b != 0) {
+                return -LinuxError::E2BIG.code() as isize;
+            }
+            remaining -= chunk;
+            check_ptr += chunk;
+        }
+    }
+
+    let flags = CloneFlags::from_bits_truncate(clone_args.flags as usize);
+    let exit_signal = clone_args.exit_signal;
+
+    if (clone_args.flags & 0xff) != 0 {
+        return -LinuxError::EINVAL.code() as isize;
+    }
+
+    if exit_signal > 64 {
+        return -LinuxError::EINVAL.code() as isize;
+    }
+
+    if (clone_args.stack == 0) != (clone_args.stack_size == 0) {
+        return -LinuxError::EINVAL.code() as isize;
+    }
+
+    if flags.contains(CloneFlags::CLONE_VM) && clone_args.stack == 0 {
+        return -LinuxError::EINVAL.code() as isize;
+    }
+
+    if flags.contains(CloneFlags::CLONE_SETTLS) && clone_args.tls == 0 {
+        return -LinuxError::EINVAL.code() as isize;
+    }
+
+    if flags.contains(CloneFlags::CLONE_THREAD)
+        && (!flags.contains(CloneFlags::CLONE_VM) || !flags.contains(CloneFlags::CLONE_SIGHAND))
+    {
+        return -LinuxError::EINVAL.code() as isize;
+    }
+
+    if flags.contains(CloneFlags::CLONE_SIGHAND) && !flags.contains(CloneFlags::CLONE_VM) {
+        return -LinuxError::EINVAL.code() as isize;
+    }
+
+    if flags.contains(CloneFlags::CLONE_VFORK)
+        && (!flags.contains(CloneFlags::CLONE_VM) || flags.contains(CloneFlags::CLONE_THREAD))
+    {
+        return -LinuxError::EINVAL.code() as isize;
+    }
+
+    if exit_signal != 0 && flags.contains(CloneFlags::CLONE_THREAD) {
+        return -LinuxError::EINVAL.code() as isize;
+    }
+
+    if flags.contains(CloneFlags::CLONE_FS) && flags.contains(CloneFlags::CLONE_NEWNS) {
+        return -LinuxError::EINVAL.code() as isize;
+    }
+
+    if clone_args.set_tid != 0 || clone_args.set_tid_size != 0 {
+        return -LinuxError::EINVAL.code() as isize;
+    }
+
+    if !flags.contains(CloneFlags::CLONE_INTO_CGROUP) && clone_args.cgroup != 0 {
+        return -LinuxError::EINVAL.code() as isize;
+    }
+
+    let parent_proc = match current_process() {
+        Ok(process) => process,
+        Err(_) => return -LinuxError::ESRCH.code() as isize,
+    };
+
+    if flags.contains(CloneFlags::CLONE_PIDFD) {
+        if let Err(e) = parent_proc.write_user_i32(clone_args.pidfd as usize, 0) {
+            return ax_error_to_linux_ret(e);
+        }
+    }
+
+    let share_uts = !flags.contains(CloneFlags::CLONE_NEWUTS);
+
+    let mut new_tf = *tf;
+    if flags.contains(CloneFlags::CLONE_SETTLS) {
+        new_tf.regs.tp = clone_args.tls as usize;
+    }
+
+    let share_fs = flags.contains(CloneFlags::CLONE_FS);
+    let share_files = flags.contains(CloneFlags::CLONE_FILES);
+    let is_thread_clone = flags.contains(CloneFlags::CLONE_THREAD);
+    let is_vfork = flags.contains(CloneFlags::CLONE_VFORK);
+    let child_stack = if clone_args.stack != 0 { ((clone_args.stack + clone_args.stack_size) & !15) as usize } else { 0 };
+
+    let child_set_tid = flags
+        .contains(CloneFlags::CLONE_CHILD_SETTID)
+        .then_some(clone_args.child_tid as usize)
+        .filter(|addr| *addr != 0);
+    let child_clear_tid = flags
+        .contains(CloneFlags::CLONE_CHILD_CLEARTID)
+        .then_some(clone_args.child_tid as usize)
+        .filter(|addr| *addr != 0);
+    let parent_set_tid = flags
+        .contains(CloneFlags::CLONE_PARENT_SETTID)
+        .then_some(clone_args.parent_tid as usize)
+        .filter(|addr| *addr != 0);
+
+    if flags.contains(CloneFlags::CLONE_SIGHAND)
+        && !CLONE_SIGHAND_WARNED.swap(true, Ordering::AcqRel)
+    {
+        axlog::debug!(
+            "sys_clone3: CLONE_SIGHAND requested; shared signal handlers are not fully implemented \
+             yet."
+        );
+    }
+
+    let (child_tid_value, child_proc_for_vfork) = if !flags.contains(CloneFlags::CLONE_VM) {
+        match parent_proc.spawn_fork_from_trap_frame(
+            &new_tf,
+            ForkParams {
+                child_stack: (child_stack != 0).then_some(child_stack),
+                is_vfork: false,
+                share_fs,
+                share_files,
+                parent_set_tid,
+                child_set_tid,
+                child_clear_tid,
+                share_sighand: flags.contains(CloneFlags::CLONE_SIGHAND),
+                share_uts,
+                exit_signal: Some(exit_signal as i32),
+            },
+        ) {
+            Ok(child_proc) => (child_proc.pid() as usize, None),
+            Err(e) => {
+                axlog::error!("fork error: {:?}", e);
+                return ax_error_to_linux_ret(e);
+            }
+        }
+    } else {
+        match parent_proc.spawn_from_trap_frame(
+            &new_tf,
+            CloneParams {
+                child_stack: (child_stack != 0).then_some(child_stack),
+                is_thread_clone,
+                is_vfork,
+                share_fs,
+                share_files,
+                parent_set_tid,
+                child_set_tid,
+                child_clear_tid,
+                share_sighand: flags.contains(CloneFlags::CLONE_SIGHAND),
+                share_uts,
+                exit_signal: Some(exit_signal as i32),
+            },
+        ) {
+            Ok((tid, child_proc)) => (tid as usize, child_proc),
+            Err(e) => {
+                axlog::error!("clone error: {:?}", e);
+                return ax_error_to_linux_ret(e);
+            }
+        }
+    };
+
+    if flags.contains(CloneFlags::CLONE_PIDFD) {
+        let pidfd_entry = pulse_core::fd_table::FdEntry::new(
+            alloc::sync::Arc::new(pulse_core::fd_table::PidfdObject { pid: child_tid_value as u64 }),
+            pulse_core::fd_table::FdFlags::empty(),
+        );
+        match parent_proc.insert_fd_entry(pidfd_entry) {
+            Ok(fd) => {
+                if let Err(e) = parent_proc.write_user_i32(clone_args.pidfd as usize, fd as i32) {
+                    let _ = parent_proc.remove_fd_entry(fd);
+                    return ax_error_to_linux_ret(e);
+                }
+            }
+            Err(e) => return -e.code() as isize,
+        }
+    }
 
     if is_vfork {
         let Some(child_proc) = child_proc_for_vfork else {

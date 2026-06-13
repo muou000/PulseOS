@@ -305,6 +305,96 @@ pub fn sys_prctl(option: i32, arg2: usize, _arg3: usize, _arg4: usize, _arg5: us
     }
 }
 
+pub fn sys_pidfd_open(pid: isize, flags: usize) -> isize {
+    axlog::debug!("sys_pidfd_open: pid={}, flags={}", pid, flags);
+
+    // We only support flags being 0 or PIDFD_NONBLOCK (0x800 / O_NONBLOCK).
+    if (flags & !0x800) != 0 {
+        return -LinuxError::EINVAL.code() as isize;
+    }
+
+    if pid <= 0 {
+        return -LinuxError::EINVAL.code() as isize;
+    }
+
+    let caller = match current_process() {
+        Ok(process) => process,
+        Err(e) => return -e.code() as isize,
+    };
+
+    // Check if target process exists
+    let Some(_) = process_by_pid(pid as u64) else {
+        return -LinuxError::ESRCH.code() as isize;
+    };
+
+    // Allocate a new fd for PidfdObject
+    let entry = pulse_core::fd_table::FdEntry::new(
+        alloc::sync::Arc::new(pulse_core::fd_table::PidfdObject { pid: pid as u64 }),
+        pulse_core::fd_table::FdFlags::empty(),
+    );
+
+    match caller.insert_fd_entry(entry) {
+        Ok(fd) => fd as isize,
+        Err(e) => -e.code() as isize,
+    }
+}
+
+pub fn sys_pidfd_send_signal(pidfd: isize, sig: isize, info_ptr: usize, flags: usize) -> isize {
+    axlog::debug!("sys_pidfd_send_signal: pidfd={}, sig={}, info_ptr={:#x}, flags={}", pidfd, sig, info_ptr, flags);
+
+    if flags != 0 {
+        return -LinuxError::EINVAL.code() as isize;
+    }
+
+    if !is_valid_signal(sig) {
+        return -LinuxError::EINVAL.code() as isize;
+    }
+
+    let caller = match current_process() {
+        Ok(process) => process,
+        Err(e) => return -e.code() as isize,
+    };
+
+    // Retrieve the fd entry
+    let fd_entry = match caller.get_fd_entry(pidfd as usize) {
+        Ok(entry) => entry,
+        Err(_) => return -LinuxError::EBADF.code() as isize,
+    };
+
+    // Check if it's a PidfdObject
+    let pidfd_obj = match fd_entry.object.as_any().downcast_ref::<pulse_core::fd_table::PidfdObject>() {
+        Some(obj) => obj,
+        None => return -LinuxError::EBADF.code() as isize,
+    };
+
+    let Some(target) = process_by_pid(pidfd_obj.pid) else {
+        return -LinuxError::ESRCH.code() as isize;
+    };
+
+    if !can_signal(&caller, target.as_ref()) {
+        return -LinuxError::EPERM.code() as isize;
+    }
+
+    if sig == 0 {
+        return 0;
+    }
+
+    // Read siginfo if provided
+    let info = if info_ptr != 0 {
+        let mut info_bytes = [0u8; 128];
+        if let Err(e) = caller.read_user_bytes(info_ptr, &mut info_bytes) {
+            return -e.code() as isize;
+        }
+        Some(info_bytes)
+    } else {
+        None
+    };
+
+    // Deliver signal to process
+    let _ = pulse_core::task::queue_signal_to_process_with_info(target.as_ref(), sig as usize, info);
+    0
+}
+
 
 
 

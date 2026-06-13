@@ -447,6 +447,8 @@ pub struct Process {
     pub reparented: AtomicBool,
     /// UTS 网络主机名隔离命名空间，通过 Arc 的 COW 机制实现命名空间共享和按需隔离
     uts_ns: RwLock<Arc<UtsNamespace>>,
+    /// 进程死亡时发送给父进程的信号，默认为 SIGCHLD (17)
+    pub parent_exit_signal: AtomicI32,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -460,6 +462,7 @@ pub struct ForkParams {
     pub child_clear_tid: Option<usize>,
     pub share_sighand: bool,
     pub share_uts: bool,
+    pub exit_signal: Option<i32>,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -474,6 +477,7 @@ pub struct CloneParams {
     pub child_clear_tid: Option<usize>,
     pub share_sighand: bool,
     pub share_uts: bool,
+    pub exit_signal: Option<i32>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -1416,6 +1420,7 @@ impl Process {
             dumpable: AtomicI32::new(1),
             reparented: AtomicBool::new(false),
             uts_ns,
+            parent_exit_signal: AtomicI32::new(SIGCHLD as i32),
         }))
     }
 
@@ -1552,6 +1557,7 @@ impl Process {
             dumpable: AtomicI32::new(parent.dumpable()),
             reparented: AtomicBool::new(false),
             uts_ns: RwLock::new(uts_ns),
+            parent_exit_signal: AtomicI32::new(SIGCHLD as i32),
         }))
     }
 
@@ -1577,6 +1583,14 @@ impl Process {
 
     pub fn set_dumpable(&self, dumpable: i32) {
         self.dumpable.store(dumpable, Ordering::Release);
+    }
+
+    pub fn parent_exit_signal(&self) -> i32 {
+        self.parent_exit_signal.load(Ordering::Acquire)
+    }
+
+    pub fn set_parent_exit_signal(&self, sig: i32) {
+        self.parent_exit_signal.store(sig, Ordering::Release);
     }
 
     pub fn signal_shared(&self) -> Arc<SignalShared> {
@@ -1872,6 +1886,7 @@ impl Process {
                         } else {
                             child.parent_pid.store(init.pid(), Ordering::Release);
                             child.reparented.store(true, Ordering::Release);
+                            child.parent_exit_signal.store(SIGCHLD as i32, Ordering::Release);
                             *child.parent.write() = Some(Arc::downgrade(&init));
                             init.add_child(child.clone());
 
@@ -1895,7 +1910,10 @@ impl Process {
             }
 
             if let Some(parent) = parent {
-                let _ = queue_signal_to_process(parent.as_ref(), SIGCHLD as usize);
+                let sig = self.parent_exit_signal();
+                if sig > 0 {
+                    let _ = queue_signal_to_process(parent.as_ref(), sig as usize);
+                }
                 // The exiting task is still on its own kernel stack here.
                 // Wake waiters without forcing an immediate reschedule from inside
                 // the teardown path.
@@ -2762,6 +2780,10 @@ impl Process {
             params.share_uts,
         )?;
 
+        if let Some(sig) = params.exit_signal {
+            child_proc.set_parent_exit_signal(sig);
+        }
+
         if let Some(addr) = params.parent_set_tid {
             let child_tid = child_tid as u32;
             self.write_user_bytes_in_aspace(&mut parent_aspace, addr, &child_tid.to_ne_bytes())?;
@@ -2825,7 +2847,7 @@ impl Process {
             self.clone()
         } else {
             let parent_aspace_handle = self.aspace_handle();
-            Self::new_child_process(
+            let proc = Self::new_child_process(
                 child_tid,
                 self.clone(),
                 parent_aspace_handle.clone(),
@@ -2835,7 +2857,11 @@ impl Process {
                 params.share_files,
                 params.share_sighand,
                 params.share_uts,
-            )?
+            )?;
+            if let Some(sig) = params.exit_signal {
+                proc.set_parent_exit_signal(sig);
+            }
+            proc
         };
 
         if let Some(parent_tid_addr) = params.parent_set_tid {
