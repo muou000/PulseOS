@@ -1486,7 +1486,7 @@ impl Process {
         };
         drop(parent_resources);
         let signal_shared = if share_sighand {
-            parent.signal_shared.clone()
+            SignalShared::clone_sighand_only(&parent.signal_shared)
         } else {
             SignalShared::clone_actions_only(&parent.signal_shared)
         };
@@ -2825,14 +2825,11 @@ impl Process {
             self.clone()
         } else {
             let parent_aspace_handle = self.aspace_handle();
-            let mut parent_aspace = parent_aspace_handle.lock();
-            let new_aspace = parent_aspace.try_clone()?;
-            let new_aspace_arc = Arc::new(Mutex::new(new_aspace));
             Self::new_child_process(
                 child_tid,
                 self.clone(),
-                new_aspace_arc,
-                false,
+                parent_aspace_handle.clone(),
+                true,
                 params.is_vfork,
                 params.share_fs,
                 params.share_files,
