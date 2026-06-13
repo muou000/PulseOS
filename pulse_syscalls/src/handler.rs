@@ -167,6 +167,7 @@ fn syscall_dispatcher(
             impls::sys_exit_group(args[0] as i32);
         }
         Sysno::clone => impls::sys_clone(tf, args),
+        Sysno::clone3 => impls::sys_clone3(tf, args),
         Sysno::wait4 => impls::sys_wait4(args[0] as isize, args[1], args[2] as i32, args[3]),
         Sysno::waitid => impls::sys_waitid(args[0], args[1], args[2], args[3] as i32),
         Sysno::sched_yield => impls::sys_yield(),
@@ -390,6 +391,13 @@ fn syscall_dispatcher(
         Sysno::flock => impls::sys_flock(args[0], args[1]),
         Sysno::getcpu => impls::sys_getcpu(args[0], args[1], args[2]),
         Sysno::fadvise64 => 0,
+        Sysno::pidfd_open => impls::sys_pidfd_open(args[0] as isize, args[1]),
+        Sysno::pidfd_send_signal => impls::sys_pidfd_send_signal(
+            args[0] as isize,
+            args[1] as isize,
+            args[2],
+            args[3],
+        ),
         _ => {
             axlog::warn!("Unimplemented syscall: {:?} ({})", sysno, syscall_id);
             -LinuxError::ENOSYS.code() as isize

@@ -1,4 +1,4 @@
-use alloc::{sync::Arc, vec::Vec};
+use alloc::{collections::BTreeMap, sync::Arc, vec::Vec};
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use axerrno::{AxError, AxResult};
@@ -94,6 +94,7 @@ pub struct SignalHandlers {
 pub struct SignalShared {
     handlers: Arc<SignalHandlers>,
     process_pending: AtomicU64,
+    pub pending_siginfo: Mutex<BTreeMap<usize, [u8; 128]>>,
 }
 
 impl SignalShared {
@@ -103,6 +104,7 @@ impl SignalShared {
                 actions: SpinNoIrq::new([SigAction::dfl(); NSIG + 1]),
             }),
             process_pending: AtomicU64::new(0),
+            pending_siginfo: Mutex::new(BTreeMap::new()),
         })
     }
 
@@ -110,6 +112,7 @@ impl SignalShared {
         Arc::new(Self {
             handlers: from.handlers.clone(),
             process_pending: AtomicU64::new(0),
+            pending_siginfo: Mutex::new(BTreeMap::new()),
         })
     }
 
@@ -120,6 +123,7 @@ impl SignalShared {
                 actions: SpinNoIrq::new(actions),
             }),
             process_pending: AtomicU64::new(0),
+            pending_siginfo: Mutex::new(BTreeMap::new()),
         })
     }
 
@@ -140,6 +144,7 @@ impl SignalShared {
             }
         }
         self.process_pending.store(0, Ordering::Release);
+        self.pending_siginfo.lock().clear();
     }
 
     pub fn queue_process_signal(&self, sig: usize) -> bool {
@@ -212,6 +217,7 @@ pub struct ThreadSignal {
     saved_ctx: Mutex<Option<SavedSignalContext>>,
     altstack: Mutex<SignalAltStack>,
     sigsuspend_restore: Mutex<Option<u64>>,
+    pub pending_siginfo: Mutex<BTreeMap<usize, [u8; 128]>>,
 }
 
 impl ThreadSignal {
@@ -230,6 +236,7 @@ impl ThreadSignal {
                 flags: 0,
             }),
             sigsuspend_restore: Mutex::new(None),
+            pending_siginfo: Mutex::new(BTreeMap::new()),
         })
     }
 
@@ -272,6 +279,7 @@ impl ThreadSignal {
         self.skip_once.store(false, Ordering::Release);
         *self.saved_ctx.lock() = None;
         *self.sigsuspend_restore.lock() = None;
+        self.pending_siginfo.lock().clear();
     }
 
     pub fn set_altstack(&self, ss: SignalAltStack) {
@@ -540,7 +548,8 @@ impl ThreadSignal {
         None
     }
 
-    fn dequeue_unblocked(&self) -> Option<usize> {
+
+    pub fn dequeue_unblocked_with_info(&self) -> (Option<usize>, Option<[u8; 128]>) {
         let blocked = self.blocked_mask();
 
         loop {
@@ -555,14 +564,20 @@ impl ThreadSignal {
                     .compare_exchange(pending, new_pending, Ordering::AcqRel, Ordering::Acquire)
                     .is_ok()
                 {
-                    return Some(idx + 1);
+                    let sig = idx + 1;
+                    let info = self.pending_siginfo.lock().remove(&sig);
+                    return (Some(sig), info);
                 }
                 continue;
             }
             break;
         }
 
-        self.shared.dequeue_process_unblocked(blocked)
+        if let Some(sig) = self.shared.dequeue_process_unblocked(blocked) {
+            let info = self.shared.pending_siginfo.lock().remove(&sig);
+            return (Some(sig), info);
+        }
+        (None, None)
     }
 
     fn save_context(&self, tf: &TrapFrame, old_mask: u64, user_ucontext: Option<usize>) {
@@ -753,13 +768,22 @@ fn write_user_signal_frame(
     thread: &Thread,
     tf: &TrapFrame,
     old_mask: u64,
+    siginfo: Option<[u8; 128]>,
 ) -> AxResult<(usize, usize)> {
     let frame_size = SIGINFO_FRAME_SIZE + UCONTEXT_FRAME_SIZE;
     let frame_base = current_sp(tf).saturating_sub(frame_size) & !15;
     let siginfo_addr = frame_base;
     let ucontext_addr = frame_base + SIGINFO_FRAME_SIZE;
-    let zeroes = [0u8; SIGINFO_FRAME_SIZE + UCONTEXT_FRAME_SIZE];
-    thread.process().write_user_bytes(frame_base, &zeroes)?;
+    
+    let mut siginfo_bytes = [0u8; SIGINFO_FRAME_SIZE];
+    if let Some(info) = siginfo {
+        siginfo_bytes.copy_from_slice(&info);
+    }
+    thread.process().write_user_bytes(siginfo_addr, &siginfo_bytes)?;
+    
+    let zeroes = [0u8; UCONTEXT_FRAME_SIZE];
+    thread.process().write_user_bytes(ucontext_addr, &zeroes)?;
+    
     thread
         .process()
         .write_user_usize(ucontext_addr + UCONTEXT_SIGMASK_OFFSET, old_mask as usize)?;
@@ -860,13 +884,28 @@ pub fn queue_signal_to_thread(thread: &Thread, sig: usize) -> bool {
     queued
 }
 
+pub fn queue_signal_to_process_with_info(process: &Process, sig: usize, info: Option<[u8; 128]>) -> bool {
+    if let Some(data) = info {
+        process.signal_shared().pending_siginfo.lock().insert(sig, data);
+    }
+    queue_signal_to_process(process, sig)
+}
+
+pub fn queue_signal_to_thread_with_info(thread: &Thread, sig: usize, info: Option<[u8; 128]>) -> bool {
+    if let Some(data) = info {
+        thread.signal().pending_siginfo.lock().insert(sig, data);
+    }
+    queue_signal_to_thread(thread, sig)
+}
+
 pub fn check_signals_and_deliver(thread: &Thread, tf: &mut TrapFrame) -> Option<SignalDelivery> {
     let sig_state = thread.signal();
     if sig_state.clear_skip_once() {
         return None;
     }
 
-    let sig = sig_state.dequeue_unblocked()?;
+    let (sig_opt, siginfo) = sig_state.dequeue_unblocked_with_info();
+    let sig = sig_opt?;
     let action = resolve_action(&sig_state.shared(), sig);
 
     match action {
@@ -891,7 +930,7 @@ pub fn check_signals_and_deliver(thread: &Thread, tf: &mut TrapFrame) -> Option<
                 new_mask |= bit;
             }
             new_mask = sanitize_mask(new_mask);
-            match write_user_signal_frame(thread, tf, old_mask) {
+            match write_user_signal_frame(thread, tf, old_mask, siginfo) {
                 Ok((siginfo_addr, ucontext_addr)) => {
                     sig_state.save_context(tf, old_mask, Some(ucontext_addr));
                     set_arg1(tf, siginfo_addr);
