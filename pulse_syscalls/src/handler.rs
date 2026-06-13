@@ -232,6 +232,7 @@ fn syscall_dispatcher(
         Sysno::clock_getres => impls::sys_clock_getres(args[0] as i32, args[1]),
         Sysno::clock_gettime => impls::sys_clock_gettime(args[0] as i32, args[1]),
         Sysno::clock_settime => impls::sys_clock_settime(args[0] as i32, args[1]),
+        Sysno::clock_adjtime => impls::sys_clock_adjtime(args[0] as i32, args[1]),
         Sysno::gettimeofday => impls::sys_gettimeofday(args[0], args[1]),
         Sysno::settimeofday => impls::sys_settimeofday(args[0], args[1]),
         Sysno::times => impls::sys_times(args[0]),

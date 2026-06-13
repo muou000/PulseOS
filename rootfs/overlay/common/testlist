@@ -40,6 +40,8 @@ chroot01
 chroot02
 chroot03
 chroot04
+clock_adjtime01
+clock_adjtime02
 clock_getres01
 clock_gettime01
 clock_gettime02
