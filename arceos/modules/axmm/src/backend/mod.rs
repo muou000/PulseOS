@@ -125,6 +125,7 @@ impl Backend {
     pub(crate) fn handle_page_fault(
         &self,
         vaddr: VirtAddr,
+        area_end: VirtAddr,
         orig_flags: MappingFlags,
         page_table: &mut PageTable,
     ) -> bool {
@@ -132,12 +133,12 @@ impl Backend {
             Self::Shared { .. } => false,
             Self::Linear { .. } => false, // Linear mappings should not trigger page faults.
             Self::Alloc { populate, .. } => {
-                self.handle_page_fault_alloc(vaddr, orig_flags, page_table, *populate)
+                self.handle_page_fault_alloc(vaddr, area_end, orig_flags, page_table, *populate)
             }
             Self::File(mapping) => {
-                self.handle_page_fault_file(vaddr, orig_flags, page_table, mapping)
+                self.handle_page_fault_file(vaddr, area_end, orig_flags, page_table, mapping)
             }
-            Self::Cow(cow) => cow.handle_page_fault(vaddr, orig_flags, page_table),
+            Self::Cow(cow) => cow.handle_page_fault(vaddr, area_end, orig_flags, page_table),
         }
     }
 

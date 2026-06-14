@@ -23,6 +23,7 @@ impl CowMapping {
     pub(crate) fn handle_page_fault(
         &self,
         vaddr: VirtAddr,
+        area_end: VirtAddr,
         orig_flags: MappingFlags,
         pt: &mut PageTable,
     ) -> bool {
@@ -73,13 +74,13 @@ impl CowMapping {
                     // Not a COW fault, maybe just a permission upgrade (e.g. READ -> READ|EXEC)
                     // or the page is already writable.
                     // Delegate to inner to be safe, although we could handle it here.
-                    return self.inner.handle_page_fault(vaddr, orig_flags, pt);
+                    return self.inner.handle_page_fault(vaddr, area_end, orig_flags, pt);
                 }
             }
         }
 
         // Page is not mapped or inner needs to handle it (e.g. demand paging).
-        self.inner.handle_page_fault(vaddr, orig_flags, pt)
+        self.inner.handle_page_fault(vaddr, area_end, orig_flags, pt)
     }
 
     fn sync_executable_if_needed(&self, flags: MappingFlags) {

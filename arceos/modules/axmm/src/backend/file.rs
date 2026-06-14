@@ -245,6 +245,7 @@ impl Backend {
     pub(crate) fn handle_page_fault_file(
         &self,
         vaddr: VirtAddr,
+        _area_end: VirtAddr,
         orig_flags: MappingFlags,
         pt: &mut PageTable,
         mapping: &FileMapping,
