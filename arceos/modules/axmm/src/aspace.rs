@@ -728,7 +728,7 @@ impl AddrSpace {
             let mut vaddr = area.start();
             let area_end = area.end();
             while vaddr < area_end {
-                match self.pt.query(vaddr) {
+                match self.pt.query_skip(vaddr) {
                     Ok((paddr, flags, page_size)) => {
                         if paddr.as_usize() != 0 {
                             if is_cow {
@@ -765,9 +765,10 @@ impl AddrSpace {
                         let next_vaddr = (vaddr.as_usize() & !(page_size as usize - 1)) + page_size as usize;
                         vaddr = VirtAddr::from(next_vaddr);
                     }
-                    Err(_) => {
-                        // Page not mapped, skip to next 4K
-                        vaddr += PAGE_SIZE_4K;
+                    Err(skip_size) => {
+                        // Skip to the start of the next unmapped block boundary of skip_size
+                        let next_vaddr = (vaddr.as_usize() & !(skip_size - 1)) + skip_size;
+                        vaddr = VirtAddr::from(next_vaddr);
                     }
                 }
             }

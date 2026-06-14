@@ -146,6 +146,59 @@ impl<M: PagingMetaData, PTE: GenericPTE, H: PagingHandler> PageTable64<M, PTE, H
         Ok((entry.paddr().add(off), entry.flags(), size))
     }
 
+    /// Queries the mapping at `vaddr`.
+    /// 
+    /// If the mapping is present, returns `Ok((paddr, flags, page_size))`.
+    /// If the mapping is not present, returns `Err(skip_size)` which indicates
+    /// the block size of the level that was found to be unmapped.
+    pub fn query_skip(&self, vaddr: M::VirtAddr) -> Result<(PhysAddr, MappingFlags, PageSize), usize> {
+        let vaddr_usize: usize = vaddr.into();
+        let p3 = if M::LEVELS == 3 {
+            self.table_of(self.root_paddr())
+        } else if M::LEVELS == 4 {
+            let p4 = self.table_of(self.root_paddr());
+            let p4e = &p4[p4_index(vaddr_usize)];
+            match self.next_table(p4e) {
+                Ok(p3) => p3,
+                Err(_) => return Err(1usize << 39),
+            }
+        } else {
+            unreachable!()
+        };
+        let p3e = &p3[p3_index(vaddr_usize)];
+        if !p3e.is_present() {
+            return Err(1usize << 30);
+        }
+        if p3e.is_huge() {
+            let off = PageSize::Size1G.align_offset(vaddr_usize);
+            return Ok((p3e.paddr().add(off), p3e.flags(), PageSize::Size1G));
+        }
+
+        let p2 = match self.next_table(p3e) {
+            Ok(p2) => p2,
+            Err(_) => return Err(1usize << 30),
+        };
+        let p2e = &p2[p2_index(vaddr_usize)];
+        if !p2e.is_present() {
+            return Err(1usize << 21);
+        }
+        if p2e.is_huge() {
+            let off = PageSize::Size2M.align_offset(vaddr_usize);
+            return Ok((p2e.paddr().add(off), p2e.flags(), PageSize::Size2M));
+        }
+
+        let p1 = match self.next_table(p2e) {
+            Ok(p1) => p1,
+            Err(_) => return Err(1usize << 21),
+        };
+        let p1e = &p1[p1_index(vaddr_usize)];
+        if !p1e.is_present() {
+            return Err(1usize << 12);
+        }
+        let off = PageSize::Size4K.align_offset(vaddr_usize);
+        Ok((p1e.paddr().add(off), p1e.flags(), PageSize::Size4K))
+    }
+
     /// Maps a contiguous virtual memory region to a contiguous physical memory
     /// region with the given mapping `flags`.
     ///
