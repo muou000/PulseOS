@@ -25,6 +25,46 @@ pub const SHM_RDONLY: u32 = 0o10000;
 pub const SHM_RND: u32 = 0o20000;
 pub const SHM_REMAP: u32 = 0o40000;
 
+pub const SHM_LOCK: i32 = 11;
+pub const SHM_UNLOCK: i32 = 12;
+pub const SHM_LOCKED: u16 = 0o2000;
+
+/// Linux-compatible `shminfo` structure (C ABI).
+#[repr(C)]
+#[derive(Clone, Copy, Default, Debug)]
+pub struct IpcInfo {
+    pub shmmax: usize,
+    pub shmmin: usize,
+    pub shmmni: usize,
+    pub shmseg: usize,
+    pub shmall: usize,
+}
+
+impl IpcInfo {
+    pub fn new() -> Self {
+        Self {
+            shmmax: usize::MAX,
+            shmmin: 1,
+            shmmni: 4096,
+            shmseg: 4096,
+            shmall: usize::MAX,
+        }
+    }
+}
+
+/// Linux-compatible `shm_info` structure (C ABI).
+#[repr(C)]
+#[derive(Clone, Copy, Default, Debug)]
+pub struct ShmInfo {
+    pub used_ids: i32,
+    pub shm_tot: usize,
+    pub shm_rss: usize,
+    pub shm_swp: usize,
+    pub swap_attempts: usize,
+    pub swap_successes: usize,
+}
+
+
 /// Linux-compatible `shmid_ds` structure (C ABI).
 #[repr(C)]
 #[derive(Clone, Copy, Default)]
@@ -307,6 +347,35 @@ impl ShmManager {
     pub fn remove_shmid(&mut self, shmid: i32) {
         self.key_shmid.remove_by_value(&shmid);
         self.shmid_inner.remove(&shmid);
+    }
+
+    /// Get the highest index of the shared memory segments.
+    pub fn get_highest_index(&self) -> usize {
+        self.shmid_inner.len().saturating_sub(1)
+    }
+
+    /// Get the shared memory inner state by index.
+    pub fn get_inner_by_index(&self, index: usize) -> Option<(i32, Arc<Mutex<ShmInner>>)> {
+        self.shmid_inner.iter().nth(index).map(|(&shmid, inner)| (shmid, inner.clone()))
+    }
+
+    /// Get total resources (total bytes, total allocated resident pages).
+    pub fn get_total_resources(&self) -> (usize, usize) {
+        let mut tot = 0;
+        let mut rss = 0;
+        for inner in self.shmid_inner.values() {
+            let guard = inner.lock();
+            tot += guard.shmid_ds.shm_segsz;
+            if guard.addr != 0 {
+                rss += guard.page_num;
+            }
+        }
+        (tot, rss)
+    }
+
+    /// Get the number of shared memory segments.
+    pub fn len(&self) -> usize {
+        self.shmid_inner.len()
     }
 
     /// Create a new shared memory segment.

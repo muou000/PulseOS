@@ -232,6 +232,79 @@ pub fn sys_shmctl(shmid: i32, cmd: i32, buf: usize) -> isize {
         Err(e) => return -e.code() as isize,
     };
 
+    let credentials = proc.credentials.read();
+    let euid = credentials.euid;
+    let egid = credentials.egid;
+    let groups = credentials.groups.clone();
+    drop(credentials);
+
+    // 1. Handle non-shmid queries (IPC_INFO, SHM_INFO, SHM_STAT)
+    match cmd {
+        IPC_INFO => {
+            if buf == 0 {
+                return -LinuxError::EFAULT.code() as isize;
+            }
+            let info = pulse_core::ipc::shm::IpcInfo::new();
+            return match pulse_core::task::uaccess::write_user_plain(proc.as_ref(), buf, &info) {
+                Ok(()) => {
+                    let manager = SHM_MANAGER.lock();
+                    manager.get_highest_index() as isize
+                }
+                Err(_) => -LinuxError::EFAULT.code() as isize,
+            };
+        }
+        SHM_INFO => {
+            if buf == 0 {
+                return -LinuxError::EFAULT.code() as isize;
+            }
+            let (shm_tot, shm_rss) = {
+                let manager = SHM_MANAGER.lock();
+                manager.get_total_resources()
+            };
+            let info = pulse_core::ipc::shm::ShmInfo {
+                used_ids: {
+                    let manager = SHM_MANAGER.lock();
+                    manager.len() as i32
+                },
+                shm_tot,
+                shm_rss,
+                shm_swp: 0,
+                swap_attempts: 0,
+                swap_successes: 0,
+            };
+            return match pulse_core::task::uaccess::write_user_plain(proc.as_ref(), buf, &info) {
+                Ok(()) => {
+                    let manager = SHM_MANAGER.lock();
+                    manager.get_highest_index() as isize
+                }
+                Err(_) => -LinuxError::EFAULT.code() as isize,
+            };
+        }
+        SHM_STAT => {
+            if buf == 0 {
+                return -LinuxError::EFAULT.code() as isize;
+            }
+            let (actual_shmid, inner_arc) = {
+                let manager = SHM_MANAGER.lock();
+                match manager.get_inner_by_index(shmid as usize) {
+                    Some(val) => val,
+                    None => return -LinuxError::EINVAL.code() as isize,
+                }
+            };
+            let inner = inner_arc.lock();
+            if !pulse_core::ipc::shm::ipc_has_permission(&inner.shmid_ds.shm_perm, 0o400, euid, egid, &groups) {
+                return -LinuxError::EACCES.code() as isize;
+            }
+            let ds = inner.shmid_ds;
+            return match pulse_core::task::uaccess::write_user_plain(proc.as_ref(), buf, &ds) {
+                Ok(()) => actual_shmid as isize,
+                Err(_) => -LinuxError::EFAULT.code() as isize,
+            };
+        }
+        _ => {}
+    }
+
+    // 2. Handle queries requiring exact shmid (IPC_STAT, IPC_SET, IPC_RMID, SHM_LOCK, SHM_UNLOCK)
     let inner_arc = {
         let manager = SHM_MANAGER.lock();
         match manager.get_inner_by_shmid(shmid) {
@@ -239,12 +312,6 @@ pub fn sys_shmctl(shmid: i32, cmd: i32, buf: usize) -> isize {
             None => return -LinuxError::EINVAL.code() as isize,
         }
     };
-
-    let credentials = proc.credentials.read();
-    let euid = credentials.euid;
-    let egid = credentials.egid;
-    let groups = credentials.groups.clone();
-    drop(credentials);
 
     let mut inner = inner_arc.lock();
 
@@ -292,9 +359,18 @@ pub fn sys_shmctl(shmid: i32, cmd: i32, buf: usize) -> isize {
             }
             0
         }
-        IPC_INFO | SHM_INFO | SHM_STAT => {
-            // Stub: return 0 for now.
-            axlog::warn!("sys_shmctl: cmd={} not fully implemented", cmd);
+        pulse_core::ipc::shm::SHM_LOCK => {
+            if euid != 0 {
+                return -LinuxError::EPERM.code() as isize;
+            }
+            inner.shmid_ds.shm_perm.mode |= pulse_core::ipc::shm::SHM_LOCKED;
+            0
+        }
+        pulse_core::ipc::shm::SHM_UNLOCK => {
+            if euid != 0 {
+                return -LinuxError::EPERM.code() as isize;
+            }
+            inner.shmid_ds.shm_perm.mode &= !pulse_core::ipc::shm::SHM_LOCKED;
             0
         }
         _ => -LinuxError::EINVAL.code() as isize,
