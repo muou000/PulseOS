@@ -496,7 +496,7 @@ impl Ext4Extent {
 
     /// Get the last file block number that this extent covers.
     pub fn get_last_block(&self) -> u32 {
-        self.first_block + self.block_count as u32 - 1
+        self.first_block + self.get_actual_len() as u32 - 1
     }
 
     /// Set the last file block number for this extent.
@@ -639,7 +639,10 @@ mod tests {
 
         // Search for a block outside the extents
         let result = node.binsearch_extent(20);
-        assert!(result.is_none());
+        assert!(result.is_some());
+        let (extent, pos) = result.unwrap();
+        assert_eq!(extent.first_block, 10);
+        assert_eq!(pos, 1);
     }
 
     #[test]
