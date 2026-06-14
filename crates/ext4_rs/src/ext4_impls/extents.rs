@@ -148,7 +148,7 @@ impl Ext4 {
             // merge:       |<---found_ext--->|<---newex--->|
             //              10               20            40
             if pos < last_extent_pos
-                && ((ex.first_block + ex.block_count as u32) < newex.first_block)
+                && ((ex.first_block + ex.get_actual_len() as u32) < newex.first_block)
             {
                 if let Ok(next_extent) = self.get_extent_from_node(node, pos + 1) {
                     if self.can_merge(&next_extent, newex) {
@@ -165,7 +165,7 @@ impl Ext4 {
             //           0                  10          20                 30    40          50
             // merge:    |<---newex--->|<---found_ext--->|....|<---ext2--->|
             //           0            20                30    40          50
-            if pos > 0 && (newex.first_block + newex.block_count as u32) < ex.first_block {
+            if pos > 0 && (newex.first_block + newex.get_actual_len() as u32) < ex.first_block {
                 if let Ok(mut prev_extent) = self.get_extent_from_node(node, pos - 1) {
                     if self.can_merge(&prev_extent, newex) {
                         self.merge_extent(&search_path, &mut prev_extent, newex)?;
@@ -730,7 +730,7 @@ impl Ext4 {
             let mut newex = Ext4Extent::default();
             let unwritten = ex.is_unwritten();
             let ee_block = ex.first_block;
-            let block_count = ex.block_count;
+            let block_count = ex.get_actual_len();
             let newblock = to + 1 - ee_block + ex.get_pblock() as u32;
             ex.block_count = from as u16 - ee_block as u16;
 
@@ -739,6 +739,9 @@ impl Ext4 {
             }
             newex.first_block = to + 1;
             newex.block_count = (ee_block + block_count as u32 - 1 - to) as u16;
+            if unwritten {
+                newex.mark_unwritten();
+            }
             newex.start_lo = newblock;
             newex.start_hi = ((newblock as u64) >> 32) as u16;
 

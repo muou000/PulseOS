@@ -399,6 +399,7 @@ fn syscall_dispatcher(
         }
         Sysno::flock => impls::sys_flock(args[0], args[1]),
         Sysno::getcpu => impls::sys_getcpu(args[0], args[1], args[2]),
+        Sysno::madvise => 0,
         Sysno::fadvise64 => 0,
         Sysno::pidfd_open => impls::sys_pidfd_open(args[0] as isize, args[1]),
         Sysno::pidfd_send_signal => impls::sys_pidfd_send_signal(

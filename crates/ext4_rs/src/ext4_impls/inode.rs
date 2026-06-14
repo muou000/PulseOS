@@ -418,7 +418,7 @@ impl Ext4 {
         let mut last_extent_end = if root_header.entries_count > 0 {
             // Get the end position of the last extent
             let last_extent = match self.get_last_extent(inode_ref) {
-                Ok(extent) => extent.first_block + extent.block_count as u32,
+                Ok(extent) => extent.first_block + extent.get_actual_len() as u32,
                 Err(_) => {
                     log::warn!(
                         "[Batch Append] Could not get last extent, starting at block {}",
@@ -623,16 +623,17 @@ impl Ext4 {
         }
 
         // Check if the extent length is valid
-        if extent.block_count == 0 || extent.block_count > EXT_INIT_MAX_LEN {
+        let len = extent.get_actual_len();
+        if len == 0 || len > EXT_INIT_MAX_LEN {
             log::error!(
                 "[Extent Validation] Invalid extent length {}",
-                extent.block_count
+                len
             );
             return false;
         }
 
         // Check if the extent would cause overflow
-        if let Some(end_block) = extent.first_block.checked_add(extent.block_count as u32) {
+        if let Some(end_block) = extent.first_block.checked_add(len as u32) {
             if end_block > EXT_MAX_BLOCKS {
                 log::error!(
                     "[Extent Validation] Extent end block {} exceeds maximum",
