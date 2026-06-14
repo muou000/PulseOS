@@ -60,8 +60,9 @@ pub enum Backend {
 impl MappingBackend for Backend {
     type Addr = VirtAddr;
     type Flags = MappingFlags;
-    type PageTable = PageTable;
-    fn map(&self, start: VirtAddr, size: usize, flags: MappingFlags, pt: &mut PageTable) -> bool {
+    type PageTable = spin::Mutex<PageTable>;
+    fn map(&self, start: VirtAddr, size: usize, flags: MappingFlags, pt: &mut Self::PageTable) -> bool {
+        let pt = pt.get_mut();
         match self {
             Self::Shared { shared_frame, .. } => {
                 Self::map_shared(start, size, flags, pt, VirtAddr::from(shared_frame.vaddr))
@@ -80,12 +81,13 @@ impl MappingBackend for Backend {
         }
     }
 
-    fn unmap(&self, start: VirtAddr, size: usize, pt: &mut PageTable) -> bool {
+    fn unmap(&self, start: VirtAddr, size: usize, pt: &mut Self::PageTable) -> bool {
+        let pt_mut = pt.get_mut();
         match self {
-            Self::Shared { .. } => Self::unmap_shared(start, size, pt),
-            Self::Linear { pa_va_offset } => self.unmap_linear(start, size, pt, *pa_va_offset),
-            Self::Alloc { populate, .. } => self.unmap_alloc(start, size, pt, *populate),
-            Self::File(_) => self.unmap_file(start, size, pt),
+            Self::Shared { .. } => Self::unmap_shared(start, size, pt_mut),
+            Self::Linear { pa_va_offset } => self.unmap_linear(start, size, pt_mut, *pa_va_offset),
+            Self::Alloc { populate, .. } => self.unmap_alloc(start, size, pt_mut, *populate),
+            Self::File(_) => self.unmap_file(start, size, pt_mut),
             Self::Cow(cow) => cow.inner.unmap(start, size, pt),
         }
     }
@@ -97,16 +99,17 @@ impl MappingBackend for Backend {
         new_flags: Self::Flags,
         page_table: &mut Self::PageTable,
     ) -> bool {
+        let pt_mut = page_table.get_mut();
         match self {
-            Self::Shared { .. } | Self::Linear { .. } => page_table
+            Self::Shared { .. } | Self::Linear { .. } => pt_mut
                 .protect_region(start, size, new_flags, true)
                 .map(|tlb| tlb.ignore())
                 .is_ok(),
             Self::Alloc { populate, .. } => {
-                self.protect_alloc(start, size, new_flags, page_table, *populate)
+                self.protect_alloc(start, size, new_flags, pt_mut, *populate)
             }
             Self::File(mapping) => {
-                self.protect_file(start, size, new_flags, page_table, mapping)
+                self.protect_file(start, size, new_flags, pt_mut, mapping)
             }
             Self::Cow(cow) => cow.inner.protect(start, size, new_flags, page_table),
         }
@@ -127,7 +130,7 @@ impl Backend {
         vaddr: VirtAddr,
         area_end: VirtAddr,
         orig_flags: MappingFlags,
-        page_table: &mut PageTable,
+        page_table: &spin::Mutex<PageTable>,
     ) -> bool {
         match self {
             Self::Shared { .. } => false,
@@ -149,7 +152,7 @@ impl Backend {
         start: VirtAddr,
         size: usize,
         sync: bool,
-        pt: &PageTable,
+        pt: &spin::Mutex<PageTable>,
     ) -> bool {
         match self {
             Self::File(_) => self.writeback_file_range_impl(start, size, sync, pt),

@@ -38,8 +38,8 @@ const MAX_STACK_LIMIT_BYTES: u64 = USER_STACK_SIZE as u64;
 const DEFAULT_NOFILE_LIMIT: u64 = 1024;
 const MAX_NOFILE_LIMIT: u64 = FD_LIMIT as u64;
 
-static ZOMBIE_ASPACE_HANDLE: Lazy<Arc<Mutex<AddrSpace>>> = Lazy::new(|| {
-    Arc::new(Mutex::new(
+static ZOMBIE_ASPACE_HANDLE: Lazy<Arc<RwLock<AddrSpace>>> = Lazy::new(|| {
+    Arc::new(RwLock::new(
         axmm::new_user_aspace(va!(USER_SPACE_BASE), USER_SPACE_SIZE)
             .expect("failed to create shared zombie addrspace"),
     ))
@@ -377,7 +377,7 @@ pub struct Process {
     /// 父进程弱引用
     parent: RwLock<Option<Weak<Process>>>,
     /// 虚拟地址空间
-    aspace: RwLock<Arc<Mutex<AddrSpace>>>,
+    aspace: RwLock<Arc<RwLock<AddrSpace>>>,
     /// 堆顶指针
     pub heap_top: Arc<AtomicUsize>,
     /// brk 扩展排他锁
@@ -1004,12 +1004,26 @@ impl Process {
         let access = access | MappingFlags::USER;
 
         let aspace_handle = self.aspace_handle();
-        let mut aspace = aspace_handle.lock();
         let pages =
             memory_addr::PageIter4K::new(start_page, end_page).ok_or(AxError::BadAddress)?;
         for page in pages {
-            if !aspace.handle_page_fault(page, access) {
-                return Err(AxError::BadAddress);
+            let mut done = false;
+            let aspace = aspace_handle.read();
+            match aspace.handle_page_fault(page, access) {
+                axmm::PageFaultResult::Handled(ok) => {
+                    if !ok {
+                        return Err(AxError::BadAddress);
+                    }
+                    done = true;
+                }
+                axmm::PageFaultResult::NeedWriteLock => {}
+            }
+            drop(aspace);
+            if !done {
+                let mut aspace = aspace_handle.write();
+                if !aspace.handle_page_fault_write(page, access) {
+                    return Err(AxError::BadAddress);
+                }
             }
         }
         Ok(())
@@ -1038,8 +1052,18 @@ impl Process {
         let pages =
             memory_addr::PageIter4K::new(start_page, end_page).ok_or(AxError::BadAddress)?;
         for page in pages {
-            if !aspace.handle_page_fault(page, MappingFlags::WRITE | MappingFlags::USER) {
-                return Err(AxError::BadAddress);
+            let pf_flags = MappingFlags::WRITE | MappingFlags::USER;
+            match aspace.handle_page_fault(page, pf_flags) {
+                axmm::PageFaultResult::Handled(ok) => {
+                    if !ok {
+                        return Err(AxError::BadAddress);
+                    }
+                }
+                axmm::PageFaultResult::NeedWriteLock => {
+                    if !aspace.handle_page_fault_write(page, pf_flags) {
+                        return Err(AxError::BadAddress);
+                    }
+                }
             }
         }
         aspace.write(start, bytes).map_err(AxError::from)
@@ -1051,38 +1075,38 @@ impl Process {
         let aspace_handle = self.aspace_handle();
 
         // Try fast path first without faulting
-        if let Ok(()) = aspace_handle.lock().read(start, bytes) {
+        if let Ok(()) = aspace_handle.read().read(start, bytes) {
             return Ok(());
         }
 
         // If it fails, fault-in the pages and retry once
         self.try_fault_in_user_range(user_addr, bytes.len(), MappingFlags::READ)?;
         aspace_handle
-            .lock()
+            .read()
             .read(start, bytes)
             .map_err(AxError::from)
     }
 
     pub fn write_user_bytes(&self, user_addr: usize, bytes: &[u8]) -> AxResult<()> {
         let aspace_handle = self.aspace_handle();
-        let mut aspace = aspace_handle.lock();
+        let mut aspace = aspace_handle.write();
         self.write_user_bytes_in_aspace(&mut aspace, user_addr, bytes)
     }
 
-    pub fn aspace_handle(&self) -> Arc<Mutex<AddrSpace>> {
+    pub fn aspace_handle(&self) -> Arc<RwLock<AddrSpace>> {
         self.aspace.read().clone()
     }
 
     pub fn replace_aspace_handle(
         &self,
-        new_aspace: Arc<Mutex<AddrSpace>>,
-    ) -> Arc<Mutex<AddrSpace>> {
+        new_aspace: Arc<RwLock<AddrSpace>>,
+    ) -> Arc<RwLock<AddrSpace>> {
         let mut slot = self.aspace.write();
         core::mem::replace(&mut *slot, new_aspace)
     }
 
     pub fn page_table_root(&self) -> PhysAddr {
-        self.aspace_handle().lock().page_table_root()
+        self.aspace_handle().read().page_table_root()
     }
 
     pub fn read_user_u32(&self, user_addr: usize) -> AxResult<u32> {
@@ -1233,7 +1257,7 @@ impl Process {
             return true;
         }
         let aspace_handle = self.aspace_handle();
-        let aspace = aspace_handle.lock();
+        let aspace = aspace_handle.read();
         aspace.can_access_range(VirtAddr::from(addr), len, MappingFlags::empty())
     }
 
@@ -1242,7 +1266,7 @@ impl Process {
             return Ok(());
         }
         let aspace_handle = self.aspace_handle();
-        let mut aspace = aspace_handle.lock();
+        let mut aspace = aspace_handle.write();
         let start = VirtAddr::from(addr);
         if !aspace.can_access_range(start, len, MappingFlags::empty()) {
             return Err(axerrno::LinuxError::ENOMEM);
@@ -1252,14 +1276,19 @@ impl Process {
             .ok_or(axerrno::LinuxError::EINVAL)?;
         for page in pages {
             let already_resident = aspace
-                .page_table()
-                .query(page)
+                .query_vaddr(page)
                 .map(|(frame, flags, _)| frame.as_usize() != 0 && !flags.is_empty())
                 .unwrap_or(false);
             if already_resident {
                 continue;
             }
-            if !aspace.handle_page_fault(page, MappingFlags::USER) {
+            let handled = match aspace.handle_page_fault(page, MappingFlags::USER) {
+                axmm::PageFaultResult::Handled(success) => success,
+                axmm::PageFaultResult::NeedWriteLock => {
+                    aspace.handle_page_fault_write(page, MappingFlags::USER)
+                }
+            };
+            if !handled {
                 return Err(axerrno::LinuxError::ENOMEM);
             }
         }
@@ -1284,7 +1313,7 @@ impl Process {
         let user_area_count = {
             let mut count = 0usize;
             let aspace_handle = self.aspace_handle();
-            let aspace = aspace_handle.lock();
+            let aspace = aspace_handle.read();
             aspace.for_each_area(|_, _, flags| {
                 if flags.contains(MappingFlags::USER) {
                     count = count.saturating_add(1);
@@ -1299,7 +1328,7 @@ impl Process {
         }
         {
             let aspace_handle = self.aspace_handle();
-            let aspace = aspace_handle.lock();
+            let aspace = aspace_handle.read();
             aspace.for_each_area(|start, end, flags| {
                 if !flags.contains(MappingFlags::USER) {
                     return;
@@ -1366,7 +1395,7 @@ impl Process {
             parent_pid: AtomicU64::new(0),
             parent: RwLock::new(None),
             start_mono_ns: axhal::time::monotonic_time_nanos() as u64,
-            aspace: RwLock::new(Arc::new(Mutex::new(aspace))),
+            aspace: RwLock::new(Arc::new(RwLock::new(aspace))),
             fs_context: RwLock::new(Arc::new(Mutex::new(fs_context))),
             fd_table: RwLock::new(Arc::new(RwLock::new(fd_table))),
             time_context: TimeContext::new(),
@@ -1427,7 +1456,7 @@ impl Process {
     fn new_child_process(
         pid: u64,
         parent: Arc<Process>,
-        aspace: Arc<Mutex<AddrSpace>>,
+        aspace: Arc<RwLock<AddrSpace>>,
         share_vm: bool,
         is_vfork: bool,
         share_fs: bool,
@@ -1598,7 +1627,16 @@ impl Process {
     }
 
     pub fn handle_page_fault(&self, vaddr: VirtAddr, flags: axhal::trap::PageFaultFlags) -> bool {
-        self.aspace_handle().lock().handle_page_fault(vaddr, flags)
+        let aspace_handle = self.aspace_handle();
+        let aspace = aspace_handle.read();
+        match aspace.handle_page_fault(vaddr, flags) {
+            axmm::PageFaultResult::Handled(success) => success,
+            axmm::PageFaultResult::NeedWriteLock => {
+                drop(aspace);
+                let mut aspace = aspace_handle.write();
+                aspace.handle_page_fault_write(vaddr, flags)
+            }
+        }
     }
 
     pub fn activate(&self) {
@@ -1638,7 +1676,7 @@ impl Process {
         }
 
         let new_handle = ZOMBIE_ASPACE_HANDLE.clone();
-        let new_pt_root = new_handle.lock().page_table_root();
+        let new_pt_root = new_handle.read().page_table_root();
         let old_handle = self.replace_aspace_handle(new_handle);
         if switch_current_aspace {
             axtask::set_current_page_table_root(new_pt_root);
@@ -2433,25 +2471,39 @@ impl Process {
             (addr, true)
         } else {
             let aspace_handle = self.aspace_handle();
-            let mut aspace = aspace_handle.lock();
+            let aspace = aspace_handle.read();
             let vaddr = VirtAddr::from(addr);
-            let query_res = aspace.page_table().query(vaddr);
+            let query_res = aspace.query_vaddr(vaddr);
             let paddr = match query_res {
                 Ok((paddr, ..)) => paddr.as_usize(),
                 Err(_) => {
                     // Try to handle page fault on-demand (simulate a read fault from user space to populate it)
-                    if aspace.handle_page_fault(
+                    let mut paddr_res = addr;
+                    match aspace.handle_page_fault(
                         vaddr,
                         axhal::trap::PageFaultFlags::READ | axhal::trap::PageFaultFlags::USER,
                     ) {
-                        aspace
-                            .page_table()
-                            .query(vaddr)
-                            .map(|(paddr, ..)| paddr.as_usize())
-                            .unwrap_or(addr)
-                    } else {
-                        addr
+                        axmm::PageFaultResult::Handled(success) => {
+                            if success {
+                                if let Ok((paddr, ..)) = aspace.query_vaddr(vaddr) {
+                                    paddr_res = paddr.as_usize();
+                                }
+                            }
+                        }
+                        axmm::PageFaultResult::NeedWriteLock => {
+                            drop(aspace);
+                            let mut aspace_write = aspace_handle.write();
+                            if aspace_write.handle_page_fault_write(
+                                vaddr,
+                                axhal::trap::PageFaultFlags::READ | axhal::trap::PageFaultFlags::USER,
+                            ) {
+                                if let Ok((paddr, ..)) = aspace_write.query_vaddr(vaddr) {
+                                    paddr_res = paddr.as_usize();
+                                }
+                            }
+                        }
                     }
+                    paddr_res
                 }
             };
             (paddr, false)
@@ -2745,7 +2797,7 @@ impl Process {
         }
 
         let parent_aspace_handle = self.aspace_handle();
-        let mut parent_aspace = parent_aspace_handle.lock();
+        let mut parent_aspace = parent_aspace_handle.write();
         let new_aspace = parent_aspace.try_clone()?;
 
         let mut inner = TaskInner::try_new(
@@ -2767,7 +2819,7 @@ impl Process {
         )?;
 
         let child_tid = inner.id().as_u64();
-        let new_aspace_arc = Arc::new(Mutex::new(new_aspace));
+        let new_aspace_arc = Arc::new(RwLock::new(new_aspace));
         let child_proc = Self::new_child_process(
             child_tid,
             self.clone(),

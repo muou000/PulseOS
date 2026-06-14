@@ -69,7 +69,7 @@ pub fn sys_brk(addr: usize) -> isize {
 
         if end > start {
             let aspace_handle = proc.aspace_handle();
-            let mut aspace = aspace_handle.lock();
+            let mut aspace = aspace_handle.write();
             let flags = MappingFlags::READ | MappingFlags::WRITE | MappingFlags::USER;
             if let Err(e) = aspace.map_alloc(VirtAddr::from(start), end - start, flags, false) {
                 axlog::error!("sys_brk: failed to expand heap: {:?}", e);
@@ -78,7 +78,7 @@ pub fn sys_brk(addr: usize) -> isize {
             drop(aspace);
             if let Err(e) = proc.maybe_lock_future_range(start, end - start) {
                 let aspace_handle = proc.aspace_handle();
-                let mut aspace = aspace_handle.lock();
+                let mut aspace = aspace_handle.write();
                 if let Err(unmap_e) = aspace.unmap(VirtAddr::from(start), end - start) {
                     axlog::warn!(
                         "sys_brk: rollback unmap failed at {:#x}, len={:#x}, err={:?}",
@@ -96,7 +96,7 @@ pub fn sys_brk(addr: usize) -> isize {
 
         if end > start {
             let aspace_handle = proc.aspace_handle();
-            let mut aspace = aspace_handle.lock();
+            let mut aspace = aspace_handle.write();
             if let Err(e) = aspace.unmap(VirtAddr::from(start), end - start) {
                 axlog::error!("sys_brk: failed to shrink heap: {:?}", e);
                 return old_heap_top as isize;
@@ -219,7 +219,7 @@ pub fn sys_mmap(
     let aligned_length = (length + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
 
     let aspace_handle = proc.aspace_handle();
-    let mut aspace = aspace_handle.lock();
+    let mut aspace = aspace_handle.write();
 
     let aligned_addr = addr & !(PAGE_SIZE - 1);
     let map_addr = if (flags & MAP_FIXED) != 0 {
@@ -348,7 +348,7 @@ pub fn sys_mmap(
 
             if let Err(e) = proc.maybe_lock_future_range(map_addr, aligned_length) {
                 let aspace_handle = proc.aspace_handle();
-                let mut aspace = aspace_handle.lock();
+                let mut aspace = aspace_handle.write();
                 if let Err(unmap_e) = aspace.unmap(VirtAddr::from(map_addr), aligned_length) {
                     axlog::warn!(
                         "sys_mmap: rollback unmap failed at {:#x}, len={:#x}, err={:?}",
@@ -405,7 +405,7 @@ pub fn sys_munmap(addr: usize, length: usize) -> isize {
     }
 
     let aspace_handle = proc.aspace_handle();
-    let mut aspace = aspace_handle.lock();
+    let mut aspace = aspace_handle.write();
     match aspace.unmap(VirtAddr::from(aligned_addr), aligned_length) {
         Ok(_) => {
             let _ = proc.memlock_unlock_range(aligned_addr, aligned_length);
@@ -505,7 +505,7 @@ pub fn sys_mprotect(addr: usize, length: usize, prot: usize) -> isize {
     }
 
     let aspace_handle = proc.aspace_handle();
-    let mut aspace = aspace_handle.lock();
+    let mut aspace = aspace_handle.write();
     let start = VirtAddr::from(addr);
     if !aspace.can_access_range(start, aligned_length, MappingFlags::empty()) {
         return -LinuxError::ENOMEM.code() as isize;
@@ -602,7 +602,7 @@ pub fn sys_msync(addr: usize, length: usize, flags: usize) -> isize {
 
     let aligned_length = (length + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
     let aspace_handle = proc.aspace_handle();
-    let aspace = aspace_handle.lock();
+    let aspace = aspace_handle.read();
 
     match aspace.writeback_file_range(VirtAddr::from(addr), aligned_length, has_sync) {
         Ok(()) => 0,

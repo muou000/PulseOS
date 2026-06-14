@@ -240,7 +240,7 @@ impl axfs::ProcfsProcessProvider for PulseProcessProvider {
         let threads = proc.thread_count();
 
         let mut vm_size = 0;
-        proc.aspace_handle().lock().for_each_area(|start, end, _| {
+        proc.aspace_handle().read().for_each_area(|start, end, _| {
             if start.as_usize() < 0x8000_0000_0000 {
                 vm_size += end.as_usize() - start.as_usize();
             }
@@ -312,7 +312,7 @@ impl axfs::ProcfsProcessProvider for PulseProcessProvider {
         let starttime = proc.start_mono_ns / 10_000_000;
 
         let mut vm_size = 0;
-        proc.aspace_handle().lock().for_each_area(|start, end, _| {
+        proc.aspace_handle().read().for_each_area(|start, end, _| {
             if start.as_usize() < 0x8000_0000_0000 {
                 vm_size += end.as_usize() - start.as_usize();
             }
@@ -380,7 +380,7 @@ impl axfs::ProcfsProcessProvider for PulseProcessProvider {
             return Some(String::new());
         }
         let aspace_handle = proc.aspace_handle();
-        let aspace = aspace_handle.lock();
+        let aspace = aspace_handle.read();
         let mut out = String::new();
 
         aspace.for_each_area_with_backend(|start, end, flags, backend| {
@@ -410,9 +410,9 @@ impl axfs::ProcfsProcessProvider for PulseProcessProvider {
             let mut inode = 0;
             let mut dev_str = "00:00".to_string();
 
-            let mut curr_backend = backend;
-            while let axmm::Backend::Cow(cow) = curr_backend {
-                curr_backend = cow.inner();
+            let mut curr_backend = backend.clone();
+            while let axmm::Backend::Cow(cow) = &curr_backend {
+                curr_backend = cow.inner().clone();
             }
 
             match curr_backend {
@@ -477,7 +477,7 @@ impl axfs::ProcfsProcessProvider for PulseProcessProvider {
             return Some(0);
         }
         let aspace_handle = proc.aspace_handle();
-        let aspace = aspace_handle.lock();
+        let aspace = aspace_handle.read();
 
         let bytes_to_read = buf.len();
         if bytes_to_read == 0 {
@@ -496,7 +496,7 @@ impl axfs::ProcfsProcessProvider for PulseProcessProvider {
             }
 
             let mut pagemap_entry: u64 = 0;
-            if let Ok((paddr, flags, _page_size)) = aspace.page_table().query(vaddr) {
+            if let Ok((paddr, flags, _page_size)) = aspace.query_vaddr(vaddr) {
                 if paddr.as_usize() != 0 && !flags.is_empty() {
                     let pfn = (paddr.as_usize() / 4096) as u64;
                     pagemap_entry = (1u64 << 63) | (pfn & 0x007f_ffff_ffff_ffff);

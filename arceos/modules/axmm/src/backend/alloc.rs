@@ -189,11 +189,11 @@ impl Backend {
         vaddr: VirtAddr,
         area_end: VirtAddr,
         orig_flags: MappingFlags,
-        pt: &mut PageTable,
+        pt: &spin::Mutex<PageTable>,
         populate: bool,
     ) -> bool {
         let page = vaddr.align_down_4k();
-        let query_res = pt.query(page);
+        let query_res = pt.lock().query(page);
         let is_placeholder = match query_res {
             Ok((old_frame, old_flags, _)) => old_flags.is_empty() || old_frame.as_usize() == 0,
             _ => false,
@@ -207,7 +207,7 @@ impl Backend {
                 if current_page >= area_end {
                     break;
                 }
-                let cur_query = pt.query(current_page);
+                let cur_query = pt.lock().query(current_page);
                 let need_map = match cur_query {
                     Err(_) => Some(true),
                     Ok((frame, _, _)) if frame.as_usize() == 0 => Some(false),
@@ -215,20 +215,38 @@ impl Backend {
                 };
                 if let Some(is_map) = need_map {
                     if let Some(frame) = alloc_frame(true) {
-                        let ok = if is_map {
-                            pt.map(current_page, frame, PageSize::Size4K, orig_flags)
-                                .map(|tlb| tlb.flush())
-                                .is_ok()
-                        } else {
-                            pt.remap(current_page, frame, orig_flags)
-                                .map(|(_, tlb)| tlb.flush())
-                                .is_ok()
+                        let mut pt_guard = pt.lock();
+                        // Re-verify under lock
+                        let re_query = pt_guard.query(current_page);
+                        let mut already_mapped = false;
+                        let ok = match re_query {
+                            Err(_) if is_map => {
+                                pt_guard.map(current_page, frame, PageSize::Size4K, orig_flags)
+                                    .map(|tlb| tlb.flush())
+                                    .is_ok()
+                            }
+                            Ok((curr_frame, _, _)) if !is_map && curr_frame.as_usize() == 0 => {
+                                pt_guard.remap(current_page, frame, orig_flags)
+                                    .map(|(_, tlb)| tlb.flush())
+                                    .is_ok()
+                            }
+                            Ok((curr_frame, _, _)) if curr_frame.as_usize() != 0 => {
+                                already_mapped = true;
+                                false
+                            }
+                            _ => false,
                         };
                         if ok {
                             handled_any = true;
                         } else {
                             dealloc_frame(frame);
-                            break;
+                            if already_mapped {
+                                if current_page == page {
+                                    handled_any = true;
+                                }
+                            } else {
+                                break;
+                            }
                         }
                     } else {
                         break;
@@ -238,7 +256,7 @@ impl Backend {
             }
             return handled_any;
         }
-        if let Ok((old_frame, old_flags, _)) = pt.query(page) {
+        if let Ok((old_frame, old_flags, _)) = query_res {
             // Lazy anonymous mappings install an empty placeholder PTE first.
             // Their first access should allocate a fresh zeroed frame rather
             // than taking the COW path.
@@ -260,34 +278,31 @@ impl Backend {
                     return false;
                 }
                 if let Some(frame) = alloc_frame(true) {
-                    let ok = pt
-                        .remap(page, frame, orig_flags)
-                        .map(|(_, tlb)| tlb.flush())
-                        .is_ok();
-                    if !ok {
-                        debug!(
-                            "handle_page_fault_alloc: reject=placeholder_remap_failed vaddr={:#x} page={:#x} fault_flags={:?} pte_flags={:?} old_frame={:#x} new_frame={:#x} backend_populate={}",
-                            vaddr,
-                            page,
-                            orig_flags,
-                            old_flags,
-                            old_frame,
-                            frame,
-                            populate
-                        );
-                        dealloc_frame(frame);
+                    let mut pt_guard = pt.lock();
+                    // Re-verify
+                    if let Ok((curr_frame, curr_flags, _)) = pt_guard.query(page) {
+                        if curr_flags.is_empty() || curr_frame.as_usize() == 0 {
+                            let ok = pt_guard
+                                .remap(page, frame, orig_flags)
+                                .map(|(_, tlb)| tlb.flush())
+                                .is_ok();
+                            if ok {
+                                return true;
+                            }
+                        }
                     }
-                    return ok;
+                    debug!(
+                        "handle_page_fault_alloc: reject=placeholder_remap_failed vaddr={:#x} page={:#x} fault_flags={:?} pte_flags={:?} old_frame={:#x} new_frame={:#x} backend_populate={}",
+                        vaddr,
+                        page,
+                        orig_flags,
+                        old_flags,
+                        old_frame,
+                        frame,
+                        populate
+                    );
+                    dealloc_frame(frame);
                 }
-                error!(
-                    "handle_page_fault_alloc: reject=placeholder_alloc_failed vaddr={:#x} page={:#x} fault_flags={:?} pte_flags={:?} frame={:#x} backend_populate={}",
-                    vaddr,
-                    page,
-                    orig_flags,
-                    old_flags,
-                    old_frame,
-                    populate
-                );
                 return false;
             }
 
@@ -299,27 +314,33 @@ impl Backend {
                         core::ptr::copy_nonoverlapping(src, dst, PAGE_SIZE_4K);
                     }
 
-                    if pt
-                        .remap(page, new_frame, orig_flags)
-                        .map(|(_, tlb)| tlb.flush())
-                        .is_ok()
-                    {
-                        dealloc_frame(old_frame);
-                        true
-                    } else {
-                        error!(
-                            "handle_page_fault_alloc: reject=cow_remap_failed vaddr={:#x} page={:#x} fault_flags={:?} pte_flags={:?} old_frame={:#x} new_frame={:#x} backend_populate={}",
-                            vaddr,
-                            page,
-                            orig_flags,
-                            old_flags,
-                            old_frame,
-                            new_frame,
-                            populate
-                        );
-                        dealloc_frame(new_frame);
-                        false
+                    let mut pt_guard = pt.lock();
+                    // Re-verify under lock
+                    if let Ok((curr_frame, curr_flags, _)) = pt_guard.query(page) {
+                        if curr_frame == old_frame && !curr_flags.contains(MappingFlags::WRITE) {
+                            if pt_guard
+                                .remap(page, new_frame, orig_flags)
+                                .map(|(_, tlb)| tlb.flush())
+                                .is_ok()
+                            {
+                                drop(pt_guard); // Release lock before deallocating
+                                dealloc_frame(old_frame);
+                                return true;
+                            }
+                        }
                     }
+                    debug!(
+                        "handle_page_fault_alloc: reject=cow_remap_failed vaddr={:#x} page={:#x} fault_flags={:?} pte_flags={:?} old_frame={:#x} new_frame={:#x} backend_populate={}",
+                        vaddr,
+                        page,
+                        orig_flags,
+                        old_flags,
+                        old_frame,
+                        new_frame,
+                        populate
+                    );
+                    dealloc_frame(new_frame);
+                    false
                 } else {
                     error!(
                         "handle_page_fault_alloc: reject=cow_alloc_failed vaddr={:#x} page={:#x} fault_flags={:?} pte_flags={:?} frame={:#x} backend_populate={}",
@@ -337,24 +358,19 @@ impl Backend {
                 // access doesn't require a write upgrade. Check if any other
                 // flags need upgrading (e.g., USER flag for PagePrivilegeIllegal
                 // handling on loongarch64).
-                let new_flags = old_flags | orig_flags;
-                if pt
-                    .remap(page, old_frame, new_flags)
-                    .map(|(_, tlb)| tlb.flush())
-                    .is_ok()
-                {
-                    return true;
+                let mut pt_guard = pt.lock();
+                if let Ok((curr_frame, curr_flags, _)) = pt_guard.query(page) {
+                    if curr_frame == old_frame {
+                        let new_flags = curr_flags | orig_flags;
+                        if pt_guard
+                            .remap(page, old_frame, new_flags)
+                            .map(|(_, tlb)| tlb.flush())
+                            .is_ok()
+                        {
+                            return true;
+                        }
+                    }
                 }
-                error!(
-                    "handle_page_fault_alloc: reject=flag_upgrade_remap_failed vaddr={:#x} page={:#x} fault_flags={:?} pte_flags={:?} new_flags={:?} frame={:#x} backend_populate={}",
-                    vaddr,
-                    page,
-                    orig_flags,
-                    old_flags,
-                    new_flags,
-                    old_frame,
-                    populate
-                );
                 false
             }
         } else if populate {
@@ -370,7 +386,15 @@ impl Backend {
             // Allocate a physical frame lazily and map it to the fault address.
             // `vaddr` does not need to be aligned. `pt.map()` will create the
             // intermediate page-table levels on demand for true lazy mappings.
-            let ok = pt
+            let mut pt_guard = pt.lock();
+            // Re-verify
+            if let Ok((curr_frame, _, _)) = pt_guard.query(page) {
+                if curr_frame.as_usize() != 0 {
+                    dealloc_frame(frame);
+                    return true;
+                }
+            }
+            let ok = pt_guard
                 .map(page, frame, PageSize::Size4K, orig_flags)
                 .map(|tlb| tlb.flush())
                 .is_ok();

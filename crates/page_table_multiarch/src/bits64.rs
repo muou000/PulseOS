@@ -166,12 +166,13 @@ impl<M: PagingMetaData, PTE: GenericPTE, H: PagingHandler> PageTable64<M, PTE, H
             unreachable!()
         };
         let p3e = &p3[p3_index(vaddr_usize)];
-        if !p3e.is_present() {
-            return Err(1usize << 30);
-        }
         if p3e.is_huge() {
-            let off = PageSize::Size1G.align_offset(vaddr_usize);
-            return Ok((p3e.paddr().add(off), p3e.flags(), PageSize::Size1G));
+            if p3e.is_present() {
+                let off = PageSize::Size1G.align_offset(vaddr_usize);
+                return Ok((p3e.paddr().add(off), p3e.flags(), PageSize::Size1G));
+            } else {
+                return Err(1usize << 30);
+            }
         }
 
         let p2 = match self.next_table(p3e) {
@@ -179,12 +180,13 @@ impl<M: PagingMetaData, PTE: GenericPTE, H: PagingHandler> PageTable64<M, PTE, H
             Err(_) => return Err(1usize << 30),
         };
         let p2e = &p2[p2_index(vaddr_usize)];
-        if !p2e.is_present() {
-            return Err(1usize << 21);
-        }
         if p2e.is_huge() {
-            let off = PageSize::Size2M.align_offset(vaddr_usize);
-            return Ok((p2e.paddr().add(off), p2e.flags(), PageSize::Size2M));
+            if p2e.is_present() {
+                let off = PageSize::Size2M.align_offset(vaddr_usize);
+                return Ok((p2e.paddr().add(off), p2e.flags(), PageSize::Size2M));
+            } else {
+                return Err(1usize << 21);
+            }
         }
 
         let p1 = match self.next_table(p2e) {

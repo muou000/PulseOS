@@ -183,11 +183,18 @@ fn write_user_region(aspace: &mut AddrSpace, start: VirtAddr, bytes: &[u8]) -> A
     let pages = memory_addr::PageIter4K::new(start.align_down_4k(), end.align_up_4k())
         .ok_or(AxError::BadAddress)?;
     for page in pages {
-        if !aspace.handle_page_fault(
-            page,
-            axhal::trap::PageFaultFlags::WRITE | axhal::trap::PageFaultFlags::USER,
-        ) {
-            return Err(AxError::BadAddress);
+        let pf_flags = axhal::trap::PageFaultFlags::WRITE | axhal::trap::PageFaultFlags::USER;
+        match aspace.handle_page_fault(page, pf_flags) {
+            axmm::PageFaultResult::Handled(ok) => {
+                if !ok {
+                    return Err(AxError::BadAddress);
+                }
+            }
+            axmm::PageFaultResult::NeedWriteLock => {
+                if !aspace.handle_page_fault_write(page, pf_flags) {
+                    return Err(AxError::BadAddress);
+                }
+            }
         }
     }
     aspace.write(start, bytes).map_err(|e| AxError::from(e))

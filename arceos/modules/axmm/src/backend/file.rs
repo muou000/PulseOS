@@ -206,7 +206,7 @@ impl Backend {
         start: VirtAddr,
         size: usize,
         sync: bool,
-        pt: &PageTable,
+        pt: &spin::Mutex<PageTable>,
     ) -> bool {
         let mapping = match self {
             Backend::File(m) => m,
@@ -222,7 +222,7 @@ impl Backend {
             return false;
         };
         for addr in pages {
-            if let Ok((frame, _flags, _)) = pt.query(addr) {
+            if let Ok((frame, _flags, _)) = pt.lock().query(addr) {
                 if frame.as_usize() != 0 {
                     let Some((file_offset, _)) = mapping.page_read_window(addr) else {
                         continue;
@@ -247,7 +247,7 @@ impl Backend {
         vaddr: VirtAddr,
         _area_end: VirtAddr,
         orig_flags: MappingFlags,
-        pt: &mut PageTable,
+        pt: &spin::Mutex<PageTable>,
         mapping: &FileMapping,
     ) -> bool {
         if !mapping.permits(orig_flags) {
@@ -261,16 +261,24 @@ impl Backend {
             return false;
         }
 
-        if let Ok((old_frame, old_flags, _)) = pt.query(page_addr) {
+        let query_res = pt.lock().query(page_addr);
+        if let Ok((old_frame, old_flags, _)) = query_res {
             if old_frame.as_usize() != 0 {
                 let new_flags = old_flags | orig_flags;
                 if old_flags.contains(new_flags) {
                     return true;
                 }
-                return pt
-                    .remap(page_addr, old_frame, new_flags)
-                    .map(|(_, tlb)| tlb.flush())
-                    .is_ok();
+                let mut pt_guard = pt.lock();
+                if let Ok((curr_frame, curr_flags, _)) = pt_guard.query(page_addr) {
+                    if curr_frame == old_frame {
+                        let new_flags = curr_flags | orig_flags;
+                        return pt_guard
+                            .remap(page_addr, old_frame, new_flags)
+                            .map(|(_, tlb)| tlb.flush())
+                            .is_ok();
+                    }
+                }
+                return true;
             }
         }
 
@@ -284,7 +292,13 @@ impl Backend {
                 Err(_) => return false,
             };
 
-            return pt
+            let mut pt_guard = pt.lock();
+            if let Ok((curr_frame, _, _)) = pt_guard.query(page_addr) {
+                if curr_frame.as_usize() != 0 {
+                    return true; // Already mapped
+                }
+            }
+            return pt_guard
                 .map(page_addr, frame, PageSize::Size4K, orig_flags)
                 .map(|tlb| {
                     tlb.flush();
@@ -306,7 +320,14 @@ impl Backend {
             }
         }
 
-        if pt
+        let mut pt_guard = pt.lock();
+        if let Ok((curr_frame, _, _)) = pt_guard.query(page_addr) {
+            if curr_frame.as_usize() != 0 {
+                dealloc_frame(frame);
+                return true; // Already mapped
+            }
+        }
+        if pt_guard
             .map(page_addr, frame, PageSize::Size4K, orig_flags)
             .map(|tlb| {
                 tlb.flush();

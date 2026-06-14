@@ -9,7 +9,7 @@ use axfs::FsContext;
 use axfs_ng_vfs::{NodePermission, NodeType};
 use axhal::paging::MappingFlags;
 use memory_addr::va;
-use spin::Mutex;
+use spin::RwLock;
 
 use core::sync::atomic::Ordering;
 
@@ -149,7 +149,7 @@ impl Process {
         let (path, argv) = resolve_exec_path_and_args(&fs_ctx, path, args)?;
         let argv_refs: Vec<&str> = argv.iter().map(|s| s.as_str()).collect();
         let aspace_handle = self.aspace_handle();
-        let mut aspace = aspace_handle.lock();
+        let mut aspace = aspace_handle.write();
         let load_info = crate::mm::load_user_app(&mut aspace, &path, &argv_refs, envs)?;
         self.entry.store(load_info.entry, Ordering::Release);
         self.stack_top.store(load_info.user_sp, Ordering::Release);
@@ -222,8 +222,8 @@ impl Process {
 
         let load_info = crate::mm::load_user_app(&mut new_aspace, &path, &argv_refs, envs)?;
 
-        let new_aspace_handle = Arc::new(Mutex::new(new_aspace));
-        let new_pt_root = new_aspace_handle.lock().page_table_root();
+        let new_aspace_handle = Arc::new(RwLock::new(new_aspace));
+        let new_pt_root = new_aspace_handle.read().page_table_root();
         let _old_aspace = self.replace_aspace_handle(new_aspace_handle);
 
         axtask::set_current_page_table_root(new_pt_root);

@@ -4,7 +4,7 @@ use axerrno::{AxError, AxResult, ax_err};
 use axfs::{CachedFile, FileFlags};
 use axhal::{
     mem::{phys_to_virt, PhysAddr},
-    paging::{MappingFlags, PageSize, PageTable},
+    paging::{MappingFlags, PageSize, PageTable, PagingResult},
     trap::PageFaultFlags,
 };
 use memory_addr::{
@@ -14,11 +14,20 @@ use memory_set::{MemoryArea, MemorySet};
 
 use crate::{backend::Backend, mapping_err_to_ax_err};
 
+/// The result of a page fault handling operation on AddrSpace.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PageFaultResult {
+    /// The page fault was handled successfully (with boolean success).
+    Handled(bool),
+    /// The page fault requires the write lock of the address space (stack grows down).
+    NeedWriteLock,
+}
+
 /// The virtual memory address space.
 pub struct AddrSpace {
     va_range: VirtAddrRange,
     areas: MemorySet<Backend>,
-    pt: PageTable,
+    pt: spin::Mutex<PageTable>,
 }
 
 impl AddrSpace {
@@ -47,14 +56,14 @@ impl AddrSpace {
         self.va_range.size()
     }
 
-    /// Returns the reference to the inner page table.
-    pub const fn page_table(&self) -> &PageTable {
-        &self.pt
+    /// Query a virtual address mapping from the inner page table under lock.
+    pub fn query_vaddr(&self, vaddr: VirtAddr) -> PagingResult<(PhysAddr, MappingFlags, PageSize)> {
+        self.pt.lock().query(vaddr)
     }
 
     /// Returns the root physical address of the inner page table.
-    pub const fn page_table_root(&self) -> PhysAddr {
-        self.pt.root_paddr()
+    pub fn page_table_root(&self) -> PhysAddr {
+        self.pt.lock().root_paddr()
     }
 
     /// Checks if the address space contains the given address range.
@@ -68,7 +77,7 @@ impl AddrSpace {
         Ok(Self {
             va_range: VirtAddrRange::from_start_size(base, size),
             areas: MemorySet::new(),
-            pt: PageTable::try_new().map_err(|_| AxError::NoMemory)?,
+            pt: spin::Mutex::new(PageTable::try_new().map_err(|_| AxError::NoMemory)?),
         })
     }
 
@@ -83,7 +92,7 @@ impl AddrSpace {
         if self.va_range.overlaps(other.va_range) {
             return ax_err!(InvalidInput, "address space overlap");
         }
-        self.pt.copy_from(&other.pt, other.base(), other.size());
+        self.pt.get_mut().copy_from(&*other.pt.lock(), other.base(), other.size());
         Ok(())
     }
 
@@ -283,7 +292,7 @@ impl AddrSpace {
         // Now manually map each physical page into the page table.
         let pages = PageIter4K::new(start, start + size).unwrap();
         for (vaddr, &frame) in pages.zip(phys_pages.iter()) {
-            if let Ok(tlb) = self.pt.map(vaddr, frame, PageSize::Size4K, flags) {
+            if let Ok(tlb) = self.pt.get_mut().map(vaddr, frame, PageSize::Size4K, flags) {
                 tlb.ignore();
             }
         }
@@ -324,7 +333,7 @@ impl AddrSpace {
         for vaddr in PageIter4K::new(start.align_down_4k(), end_align_up)
             .expect("Failed to create page iterator")
         {
-            let (mut paddr, ..) = self.pt.query(vaddr).map_err(|_| AxError::BadAddress)?;
+            let (mut paddr, ..) = self.pt.lock().query(vaddr).map_err(|_| AxError::BadAddress)?;
             if paddr.as_usize() == 0 {
                 // Placeholder PTEs are used for lazy mappings. They are not
                 // readable/writable yet, so force the caller onto the page-fault
@@ -433,7 +442,7 @@ impl AddrSpace {
             return ax_err!(BadAddress, "address not mapped");
         }
 
-        self.pt
+        self.pt.get_mut()
             .protect_region(start, size, flags, true)
             .map_err(|_| AxError::BadState)?
             .ignore();
@@ -454,9 +463,9 @@ impl AddrSpace {
             return ax_err!(InvalidInput, "address not aligned");
         }
 
-        if self.pt.query(vaddr).is_ok() {
-            self.pt
-                .remap(vaddr, paddr, flags)
+        let pt = self.pt.get_mut();
+        if pt.query(vaddr).is_ok() {
+            pt.remap(vaddr, paddr, flags)
                 .map_err(|_| AxError::BadState)?
                 .1
                 .flush();
@@ -464,8 +473,7 @@ impl AddrSpace {
             // True lazy mappings may not have allocated any intermediate page
             // tables yet, so COW install/remap must be able to materialize the
             // first concrete PTE on demand.
-            self.pt
-                .map(vaddr, paddr, PageSize::Size4K, flags)
+            pt.map(vaddr, paddr, PageSize::Size4K, flags)
                 .map_err(|_| AxError::BadState)?
                 .flush();
         }
@@ -548,13 +556,11 @@ impl AddrSpace {
     /// Handles a page fault at the given address.
     ///
     /// `access_flags` indicates the access type that caused the page fault.
-    ///
-    /// Returns `true` if the page fault is handled successfully (not a real
-    /// fault).
-    pub fn handle_page_fault(&mut self, vaddr: VirtAddr, access_flags: PageFaultFlags) -> bool {
+    pub fn handle_page_fault(&self, vaddr: VirtAddr, access_flags: PageFaultFlags) -> PageFaultResult {
         let page = vaddr.align_down_4k();
         let pte_before = self
             .pt
+            .lock()
             .query(page)
             .ok()
             .map(|(frame, flags, _)| (frame, flags));
@@ -564,7 +570,7 @@ impl AddrSpace {
                  aspace_range={:?} pte_before={:?}",
                 vaddr, page, access_flags, self.va_range, pte_before
             );
-            return false;
+            return PageFaultResult::Handled(false);
         }
         if let Some(area) = self.areas.find(vaddr) {
             let orig_flags = area.flags();
@@ -584,10 +590,11 @@ impl AddrSpace {
             if orig_flags.contains(access_flags) {
                 let handled = area
                     .backend()
-                    .handle_page_fault(vaddr, area.end(), orig_flags, &mut self.pt);
+                    .handle_page_fault(vaddr, area.end(), orig_flags, &self.pt);
                 if !handled {
                     let pte_after = self
                         .pt
+                        .lock()
                         .query(page)
                         .ok()
                         .map(|(frame, flags, _)| (frame, flags));
@@ -597,7 +604,7 @@ impl AddrSpace {
                         vaddr, page, access_flags, orig_flags, backend_kind, pte_before, pte_after
                     );
                 }
-                return handled;
+                return PageFaultResult::Handled(handled);
             }
             error!(
                 "handle_page_fault: reject=area_permission vaddr={:#x} page={:#x} access={:?} \
@@ -618,31 +625,8 @@ impl AddrSpace {
                 }
             }
 
-            if let Some(flags) = growsdown_area_info {
-                debug!(
-                    "handle_page_fault: growing stack downward at {:#x} for next area start {:#x}",
-                    page, next_page
-                );
-                // Linux stack_guard_gap check: do not allow stack to grow closer than 256 pages to an existing mapping.
-                let guard_gap_size = 256 * PAGE_SIZE_4K;
-                let guard_start = if page.as_usize() > guard_gap_size {
-                    VirtAddr::from(page.as_usize() - guard_gap_size)
-                } else {
-                    VirtAddr::from(0)
-                };
-                let guard_size = page.as_usize() - guard_start.as_usize();
-                if self.has_overlap(guard_start, guard_size) {
-                    warn!(
-                        "handle_page_fault: stack growth rejected at {:#x} due to overlap in guard gap [{:#x}, {:#x})",
-                        page, guard_start, page
-                    );
-                    return false;
-                }
-
-                let backend = Backend::new_alloc_grows_down(false, true);
-                if self.map_with_backend(page, PAGE_SIZE_4K, flags, backend).is_ok() {
-                    return self.handle_page_fault(vaddr, access_flags);
-                }
+            if growsdown_area_info.is_some() {
+                return PageFaultResult::NeedWriteLock;
             }
 
             error!(
@@ -650,6 +634,53 @@ impl AddrSpace {
                  pte_before={:?}",
                 vaddr, page, access_flags, pte_before
             );
+        }
+        PageFaultResult::Handled(false)
+    }
+
+    /// Handles a page fault that requires stack growth (write lock held).
+    pub fn handle_page_fault_write(&mut self, vaddr: VirtAddr, access_flags: PageFaultFlags) -> bool {
+        let page = vaddr.align_down_4k();
+        // Check for stack grows down auto-extension.
+        let next_page = page + PAGE_SIZE_4K;
+        let mut growsdown_area_info = None;
+        for area in self.areas.iter() {
+            if area.start() == next_page {
+                if area.backend().is_grows_down() {
+                    growsdown_area_info = Some(area.flags());
+                }
+                break;
+            }
+        }
+
+        if let Some(flags) = growsdown_area_info {
+            debug!(
+                "handle_page_fault: growing stack downward at {:#x} for next area start {:#x}",
+                page, next_page
+            );
+            // Linux stack_guard_gap check
+            let guard_gap_size = 256 * PAGE_SIZE_4K;
+            let guard_start = if page.as_usize() > guard_gap_size {
+                VirtAddr::from(page.as_usize() - guard_gap_size)
+            } else {
+                VirtAddr::from(0)
+            };
+            let guard_size = page.as_usize() - guard_start.as_usize();
+            if self.has_overlap(guard_start, guard_size) {
+                warn!(
+                    "handle_page_fault: stack growth rejected at {:#x} due to overlap in guard gap [{:#x}, {:#x})",
+                    page, guard_start, page
+                );
+                return false;
+            }
+
+            let backend = Backend::new_alloc_grows_down(false, true);
+            if self.map_with_backend(page, PAGE_SIZE_4K, flags, backend).is_ok() {
+                match self.handle_page_fault(vaddr, access_flags) {
+                    PageFaultResult::Handled(success) => return success,
+                    _ => return false,
+                }
+            }
         }
         false
     }
@@ -728,7 +759,7 @@ impl AddrSpace {
             let mut vaddr = area.start();
             let area_end = area.end();
             while vaddr < area_end {
-                match self.pt.query_skip(vaddr) {
+                match self.pt.get_mut().query_skip(vaddr) {
                     Ok((paddr, flags, page_size)) => {
                         if paddr.as_usize() != 0 {
                             if is_cow {
@@ -737,13 +768,13 @@ impl AddrSpace {
 
                                 // Demote parent if writable
                                 if flags.contains(MappingFlags::WRITE) {
-                                    if let Err(e) = self.pt.protect(vaddr, cow_flags) {
+                                    if let Err(e) = self.pt.get_mut().protect(vaddr, cow_flags) {
                                         error!("try_clone: failed to protect parent page {:#x}: {:?}", vaddr, e);
                                     }
                                 }
 
                                 // Map child
-                                if let Err(e) = new_aspace.pt.map(vaddr, paddr, page_size, cow_flags).map(|tlb| tlb.ignore()) {
+                                if let Err(e) = new_aspace.pt.get_mut().map(vaddr, paddr, page_size, cow_flags).map(|tlb| tlb.ignore()) {
                                     error!("try_clone: failed to map child page {:#x}: {:?}", vaddr, e);
                                     if crate::backend::cow_dec_frame_ref(paddr) {
                                         axalloc::global_allocator().dealloc_pages(phys_to_virt(paddr).as_usize(), page_size as usize / PAGE_SIZE_4K);
@@ -753,7 +784,7 @@ impl AddrSpace {
                                 }
                             } else if let Backend::File(mapping) = area.backend() {
                                 if mapping.is_shared() {
-                                    if let Err(e) = new_aspace.pt.map(vaddr, paddr, page_size, flags).map(|tlb| tlb.ignore()) {
+                                    if let Err(e) = new_aspace.pt.get_mut().map(vaddr, paddr, page_size, flags).map(|tlb| tlb.ignore()) {
                                         error!("try_clone: failed to map shared file page {:#x}: {:?}", vaddr, e);
                                         new_aspace.clear();
                                         return Err(AxError::NoMemory);
@@ -791,7 +822,7 @@ impl fmt::Debug for AddrSpace {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         f.debug_struct("AddrSpace")
             .field("va_range", &self.va_range)
-            .field("page_table_root", &self.pt.root_paddr())
+            .field("page_table_root", &self.pt.lock().root_paddr())
             .field("areas", &self.areas)
             .finish()
     }
