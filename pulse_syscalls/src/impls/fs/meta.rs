@@ -34,11 +34,46 @@ fn vfs_statfs_to_linux(location: &Location) -> Result<statfs, LinuxError> {
     out.f_namelen = fs_stat.name_length as _;
     out.f_frsize = fs_stat.fragment_size as _;
     
-    let mut mount_flags = location.mountpoint().get_flags();
-    if location.mountpoint().is_readonly() {
-        mount_flags |= 1; // ST_RDONLY
+    let mount_flags = location.mountpoint().get_flags();
+    let mut statfs_flags = 0;
+    
+    // Map standard flags (where MS_* values match ST_* values)
+    if location.mountpoint().is_readonly() || (mount_flags & 1) != 0 { // MS_RDONLY = 1
+        statfs_flags |= 1; // ST_RDONLY
     }
-    out.f_flags = mount_flags as _;
+    if (mount_flags & 2) != 0 { // MS_NOSUID = 2
+        statfs_flags |= 2; // ST_NOSUID
+    }
+    if (mount_flags & 4) != 0 { // MS_NODEV = 4
+        statfs_flags |= 4; // ST_NODEV
+    }
+    if (mount_flags & 8) != 0 { // MS_NOEXEC = 8
+        statfs_flags |= 8; // ST_NOEXEC
+    }
+    if (mount_flags & 16) != 0 { // MS_SYNCHRONOUS = 16
+        statfs_flags |= 16; // ST_SYNCHRONOUS
+    }
+    if (mount_flags & 64) != 0 { // MS_MANDLOCK = 64
+        statfs_flags |= 64; // ST_MANDLOCK
+    }
+    if (mount_flags & 1024) != 0 { // MS_NOATIME = 1024
+        statfs_flags |= 1024; // ST_NOATIME
+    }
+    if (mount_flags & 2048) != 0 { // MS_NODIRATIME = 2048
+        statfs_flags |= 2048; // ST_NODIRATIME
+    }
+    if (mount_flags & 4096) != 0 { // MS_RELATIME = 4096
+        statfs_flags |= 4096; // ST_RELATIME
+    }
+    
+    // Map mismatched flag: MS_NOSYMFOLLOW (256) -> ST_NOSYMFOLLOW (8192 / 0x2000)
+    const MS_NOSYMFOLLOW: usize = 256;
+    const ST_NOSYMFOLLOW: usize = 0x2000;
+    if (mount_flags & MS_NOSYMFOLLOW) != 0 {
+        statfs_flags |= ST_NOSYMFOLLOW;
+    }
+
+    out.f_flags = statfs_flags as _;
     Ok(out)
 }
 

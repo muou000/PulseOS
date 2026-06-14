@@ -542,11 +542,8 @@ impl Ext4 {
         }
 
         // Update inode size, ensuring it doesn't overflow
-        let new_size = match (current_iblk as u64).checked_add(allocated_blocks.len() as u64) {
-            Some(blocks) => match blocks.checked_mul(block_size as u64) {
-                Some(size) => core::cmp::max(inode_size, size),
-                None => return return_errno_with_message!(Errno::EINVAL, "File size overflow"),
-            },
+        let new_size = match (current_iblk as u64).checked_mul(block_size as u64) {
+            Some(size) => core::cmp::max(inode_size, size),
             None => return return_errno_with_message!(Errno::EINVAL, "File size overflow"),
         };
         inode_ref.inode.set_size(new_size);
