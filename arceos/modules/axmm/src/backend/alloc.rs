@@ -187,11 +187,57 @@ impl Backend {
     pub(crate) fn handle_page_fault_alloc(
         &self,
         vaddr: VirtAddr,
+        area_end: VirtAddr,
         orig_flags: MappingFlags,
         pt: &mut PageTable,
         populate: bool,
     ) -> bool {
         let page = vaddr.align_down_4k();
+        let query_res = pt.query(page);
+        let is_placeholder = match query_res {
+            Ok((old_frame, old_flags, _)) => old_flags.is_empty() || old_frame.as_usize() == 0,
+            _ => false,
+        };
+        let is_unmapped = query_res.is_err();
+
+        if (is_unmapped || is_placeholder) && !populate {
+            let mut current_page = page;
+            let mut handled_any = false;
+            for _ in 0..4 {
+                if current_page >= area_end {
+                    break;
+                }
+                let cur_query = pt.query(current_page);
+                let need_map = match cur_query {
+                    Err(_) => Some(true),
+                    Ok((frame, _, _)) if frame.as_usize() == 0 => Some(false),
+                    _ => None,
+                };
+                if let Some(is_map) = need_map {
+                    if let Some(frame) = alloc_frame(true) {
+                        let ok = if is_map {
+                            pt.map(current_page, frame, PageSize::Size4K, orig_flags)
+                                .map(|tlb| tlb.flush())
+                                .is_ok()
+                        } else {
+                            pt.remap(current_page, frame, orig_flags)
+                                .map(|(_, tlb)| tlb.flush())
+                                .is_ok()
+                        };
+                        if ok {
+                            handled_any = true;
+                        } else {
+                            dealloc_frame(frame);
+                            break;
+                        }
+                    } else {
+                        break;
+                    }
+                }
+                current_page += PAGE_SIZE_4K;
+            }
+            return handled_any;
+        }
         if let Ok((old_frame, old_flags, _)) = pt.query(page) {
             // Lazy anonymous mappings install an empty placeholder PTE first.
             // Their first access should allocate a fresh zeroed frame rather

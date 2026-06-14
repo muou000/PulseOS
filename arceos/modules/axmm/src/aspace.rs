@@ -584,7 +584,7 @@ impl AddrSpace {
             if orig_flags.contains(access_flags) {
                 let handled = area
                     .backend()
-                    .handle_page_fault(vaddr, orig_flags, &mut self.pt);
+                    .handle_page_fault(vaddr, area.end(), orig_flags, &mut self.pt);
                 if !handled {
                     let pte_after = self
                         .pt
