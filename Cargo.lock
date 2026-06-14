@@ -1217,8 +1217,6 @@ dependencies = [
 [[package]]
 name = "page_table_multiarch"
 version = "0.5.7"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9fa11a21844255e14aa6688ef0eafb058d7be19338633024fb59417f1bfb07f8"
 dependencies = [
  "bitmaps",
  "log",

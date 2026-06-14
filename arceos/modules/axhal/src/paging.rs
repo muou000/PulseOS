@@ -72,6 +72,10 @@ impl PageTable {
         self.inner.query(vaddr)
     }
 
+    pub fn query_skip(&self, vaddr: VirtAddr) -> Result<(PhysAddr, MappingFlags, PageSize), usize> {
+        self.inner.query_skip(vaddr)
+    }
+
     pub fn unmap(&mut self, vaddr: VirtAddr) -> PagingResult<(PhysAddr, PageSize, TlbFlush)> {
         self.inner.unmap(vaddr)
     }
