@@ -147,7 +147,7 @@ fn itimer_tick_hook() {
     };
 
     crate::fd_table::poll_stdin();
-    
+
     if now_ns >= NEXT_ITIMER_DEADLINE.load(core::sync::atomic::Ordering::Relaxed) {
         NEXT_ITIMER_DEADLINE.store(u64::MAX, core::sync::atomic::Ordering::Relaxed);
         let registry = PROCESS_REGISTRY.lock();
@@ -177,8 +177,6 @@ fn itimer_tick_hook() {
 pub fn init_itimer_hook() {
     axtask::register_timer_hook(itimer_tick_hook);
 }
-
-use core::fmt::Write;
 
 struct PulseProcessProvider;
 
@@ -430,8 +428,7 @@ impl axfs::ProcfsProcessProvider for PulseProcessProvider {
                         inode = meta.inode;
                         let major = meta.device >> 8;
                         let minor = meta.device & 0xff;
-                        dev_str.clear();
-                        core::write!(&mut dev_str, "{:02x}:{:02x}", major, minor).unwrap();
+                        dev_str = alloc::format!("{:02x}:{:02x}", major, minor);
                     }
                     if let Ok(path) = loc.absolute_path() {
                         path_str = path.as_str().to_string();
@@ -441,10 +438,8 @@ impl axfs::ProcfsProcessProvider for PulseProcessProvider {
             }
 
             let p_char = if is_shared { "s" } else { "p" };
-            // Use `core::write!` macro directly onto a mutable `String` buffer inside loop to eliminate intermediate `alloc::format!` memory allocations in hot loop
             if path_str.is_empty() {
-                core::write!(
-                    &mut out,
+                out.push_str(&alloc::format!(
                     "{:x}-{:x} {}{}{}{} {:08x} {} {}\n",
                     start.as_usize(),
                     end.as_usize(),
@@ -455,10 +450,9 @@ impl axfs::ProcfsProcessProvider for PulseProcessProvider {
                     offset,
                     dev_str,
                     inode
-                ).unwrap();
+                ));
             } else {
-                core::write!(
-                    &mut out,
+                out.push_str(&alloc::format!(
                     "{:x}-{:x} {}{}{}{} {:08x} {} {:<7} {}\n",
                     start.as_usize(),
                     end.as_usize(),
@@ -470,7 +464,7 @@ impl axfs::ProcfsProcessProvider for PulseProcessProvider {
                     dev_str,
                     inode,
                     path_str
-                ).unwrap();
+                ));
             }
         });
 

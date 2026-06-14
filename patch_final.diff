@@ -1,0 +1,54 @@
+--- pulse_core/src/task/mod.rs
++++ pulse_core/src/task/mod.rs
+@@ -190,6 +190,8 @@
+     axtask::register_timer_hook(itimer_tick_hook);
+ }
+
++use core::fmt::Write;
++
+ struct PulseProcessProvider;
+
+ impl axfs::ProcfsProcessProvider for PulseProcessProvider {
+@@ -428,7 +430,8 @@
+                         inode = meta.inode;
+                         let major = meta.device >> 8;
+                         let minor = meta.device & 0xff;
+-                        dev_str = alloc::format!("{:02x}:{:02x}", major, minor);
++                        dev_str.clear();
++                        core::write!(&mut dev_str, "{:02x}:{:02x}", major, minor).unwrap();
+                     }
+                     if let Ok(path) = loc.absolute_path() {
+                         path_str = path.as_str().to_string();
+@@ -438,8 +441,10 @@
+             }
+
+             let p_char = if is_shared { "s" } else { "p" };
++            // Use `core::write!` macro directly onto a mutable `String` buffer inside loop to eliminate intermediate `alloc::format!` memory allocations in hot loop
+             if path_str.is_empty() {
+-                out.push_str(&alloc::format!(
++                core::write!(
++                    &mut out,
+                     "{:x}-{:x} {}{}{}{} {:08x} {} {}\n",
+                     start.as_usize(),
+                     end.as_usize(),
+@@ -450,9 +455,10 @@
+                     offset,
+                     dev_str,
+                     inode
+-                ));
++                ).unwrap();
+             } else {
+-                out.push_str(&alloc::format!(
++                core::write!(
++                    &mut out,
+                     "{:x}-{:x} {}{}{}{} {:08x} {} {:<7} {}\n",
+                     start.as_usize(),
+                     end.as_usize(),
+@@ -464,7 +470,7 @@
+                     dev_str,
+                     inode,
+                     path_str
+-                ));
++                ).unwrap();
+             }
+         });
