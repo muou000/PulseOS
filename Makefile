@@ -17,10 +17,8 @@ endif
 
 IMG ?= n
 
-prepare-cargo-config:
+prepare-tools:
 	@if [ -d cargo ] && [ ! -d .cargo ]; then mv cargo .cargo; fi
-
-prepare-tools: prepare-cargo-config
 	@command -v axconfig-gen >/dev/null || (echo "Error: missing axconfig-gen in PATH (expected in $(A)/bin)"; exit 1)
 	@command -v cargo-axplat >/dev/null || (echo "Error: missing cargo-axplat in PATH (expected in $(A)/bin)"; exit 1)
 	@command -v rust-objcopy >/dev/null || (echo "Error: missing rust-objcopy in PATH (expected in $(A)/bin)"; exit 1)
@@ -28,10 +26,6 @@ prepare-tools: prepare-cargo-config
 	@echo "[tools] Using prebuilt tools from $(A)/bin"
 
 all: prepare-tools
-	@$(MAKE) prepare-cargo-config >/dev/null
-	@command -v axconfig-gen >/dev/null || (echo "Error: missing axconfig-gen in PATH"; exit 1)
-	@command -v cargo-axplat >/dev/null || (echo "Error: missing cargo-axplat in PATH"; exit 1)
-	@command -v rust-objcopy >/dev/null || (echo "Error: missing rust-objcopy in PATH"; exit 1)
 	@ARCH=riscv64 APP_FEATURES=qemu,testcode LOG=off $(MAKE) defconfig
 	@ARCH=riscv64 APP_FEATURES=qemu,testcode LOG=off BUS=mmio $(MAKE) -C arceos build
 	@cp $(NAME)_riscv64-qemu-virt.bin kernel-rv
@@ -56,7 +50,6 @@ debug: prepare-tools
 	@ARCH=loongarch64 APP_FEATURES=qemu LOG=$(LOG) FEATURES=bus-pci $(MAKE) defconfig
 	@ARCH=loongarch64 APP_FEATURES=qemu LOG=$(LOG) BUS=pci FEATURES=bus-pci $(MAKE) -C arceos build
 	@cp PulseOS_loongarch64-qemu-virt.elf kernel-la
-	@$(MAKE) img_all
 
 build run justrun: prepare-tools defconfig
 	@$(MAKE) -C arceos A=$(A) ARCH=$(ARCH) $@
@@ -75,10 +68,6 @@ defconfig: prepare-tools
 	@rm -f .axconfig.toml
 	@$(MAKE) -C arceos A=$(A) ARCH=$(ARCH) $@
 
-img:
-	@./build_img.sh $(ARCH)
-	@cp rootfs-$(ARCH).img arceos/disk.img
-
 img_all:
 	@./build_img.sh all
 	@cp rootfs-riscv64.img disk.img
@@ -93,4 +82,4 @@ la: prepare-tools
 analyze: prepare-tools
 	@$(MAKE) QPERF=y LOG=$(LOG) test
 
-.PHONY: all oscomp build run justrun clean defconfig img img_all la analyze prepare-tools prepare-cargo-config
+.PHONY: all test debug build run justrun clean defconfig img_all la analyze prepare-tools
