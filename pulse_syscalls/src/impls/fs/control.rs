@@ -6,7 +6,7 @@ use chrono::{Datelike, Timelike, Utc};
 use linux_raw_sys::{
     ioctl::{
         BLKGETSIZE64, BLKSSZGET, RTC_RD_TIME, SIOCGIFFLAGS, SIOCGIFINDEX, SIOCSIFFLAGS, TCGETS,
-        TIOCGPGRP, TIOCGWINSZ, TIOCSPGRP,
+        TCSETS, TCSETSW, TCSETSF, TCGETS2, TCSETS2, TCSETSW2, TCSETSF2, TIOCGPGRP, TIOCGWINSZ, TIOCSPGRP,
     },
     loop_device::{
         LOOP_CLR_FD, LOOP_CTL_GET_FREE, LOOP_GET_STATUS, LOOP_GET_STATUS64, LOOP_SET_FD,
@@ -269,8 +269,39 @@ pub fn sys_ioctl(fd: usize, cmd: usize, arg: usize) -> isize {
 
     match cmd32 {
         TCGETS => {
-            // It's a stub to tell musl it is a terminal
             warn_tty_ioctl_stub_once(fd, cmd32);
+            if arg != 0 {
+                if let Err(e) = pulse_core::fd_table::read_tty_termios(arg) {
+                    return -e.code() as isize;
+                }
+            }
+            0
+        }
+        TCSETS | TCSETSW | TCSETSF => {
+            warn_tty_ioctl_stub_once(fd, cmd32);
+            if arg != 0 {
+                if let Err(e) = pulse_core::fd_table::write_tty_termios(arg) {
+                    return -e.code() as isize;
+                }
+            }
+            0
+        }
+        TCGETS2 => {
+            warn_tty_ioctl_stub_once(fd, cmd32);
+            if arg != 0 {
+                if let Err(e) = pulse_core::fd_table::read_tty_termios2(arg) {
+                    return -e.code() as isize;
+                }
+            }
+            0
+        }
+        TCSETS2 | TCSETSW2 | TCSETSF2 => {
+            warn_tty_ioctl_stub_once(fd, cmd32);
+            if arg != 0 {
+                if let Err(e) = pulse_core::fd_table::write_tty_termios2(arg) {
+                    return -e.code() as isize;
+                }
+            }
             0
         }
         TIOCGPGRP => {
@@ -278,7 +309,11 @@ pub fn sys_ioctl(fd: usize, cmd: usize, arg: usize) -> isize {
             if arg != 0 {
                 let mut pgid = pulse_core::fd_table::get_foreground_pgid();
                 if pgid == 0 {
-                    pgid = 1;
+                    if let Ok(process) = pulse_core::task::current_process() {
+                        pgid = process.pgid();
+                    } else {
+                        pgid = 1;
+                    }
                 }
                 let value = (pgid as i32).to_ne_bytes();
                 if let Err(e) = write_user_bytes(arg, &value) {

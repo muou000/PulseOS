@@ -11,7 +11,7 @@ use core::{
 use axerrno::{LinuxError, LinuxResult};
 use axfs::{File, FileFlags as AxFileFlags, OpenResult};
 use axfs_ng_vfs::{Location, Metadata, NodeType};
-use axio::{BufReader, PollState, Read, Seek, SeekFrom, Write};
+use axio::{PollState, Read, Seek, SeekFrom, Write};
 use kspin::SpinNoIrq;
 use linux_raw_sys::general::*;
 use spin::{Lazy, Mutex, RwLock};
@@ -279,12 +279,121 @@ impl Write for StdoutRaw {
     }
 }
 
-static STDIN_READER: Lazy<Mutex<BufReader<StdinRaw>>> =
-    Lazy::new(|| Mutex::new(BufReader::new(StdinRaw)));
+static STDIN_READER: Lazy<Mutex<StdinRaw>> =
+    Lazy::new(|| Mutex::new(StdinRaw));
 static STDOUT_WRITER: Lazy<Mutex<StdoutRaw>> = Lazy::new(|| Mutex::new(StdoutRaw));
+
+static TTY_TERMIOS: Lazy<SpinNoIrq<termios2>> = Lazy::new(|| {
+    SpinNoIrq::new(termios2 {
+        c_iflag: 0x500,
+        c_oflag: 0x5,
+        c_cflag: 0xbf,
+        c_lflag: 0x8a3b,
+        c_line: 0,
+        c_cc: [
+            3, 28, 127, 21, 4, 0, 1, 0,
+            17, 19, 26, 0, 18, 15, 23, 22,
+            0, 0, 0
+        ],
+        c_ispeed: 9600,
+        c_ospeed: 9600,
+    })
+});
+
+pub fn read_tty_termios(user_addr: usize) -> LinuxResult {
+    let t = TTY_TERMIOS.lock();
+    let term = termios {
+        c_iflag: t.c_iflag,
+        c_oflag: t.c_oflag,
+        c_cflag: t.c_cflag,
+        c_lflag: t.c_lflag,
+        c_line: t.c_line,
+        c_cc: t.c_cc,
+    };
+    let process = crate::task::current_process()?;
+    let bytes = unsafe {
+        core::slice::from_raw_parts(
+            (&term as *const termios).cast::<u8>(),
+            core::mem::size_of::<termios>(),
+        )
+    };
+    process.write_user_bytes(user_addr, bytes)?;
+    Ok(())
+}
+
+pub fn write_tty_termios(user_addr: usize) -> LinuxResult {
+    let mut term = termios {
+        c_iflag: 0,
+        c_oflag: 0,
+        c_cflag: 0,
+        c_lflag: 0,
+        c_line: 0,
+        c_cc: [0; 19],
+    };
+    let process = crate::task::current_process()?;
+    let bytes = unsafe {
+        core::slice::from_raw_parts_mut(
+            (&mut term as *mut termios).cast::<u8>(),
+            core::mem::size_of::<termios>(),
+        )
+    };
+    process.read_user_bytes(user_addr, bytes)?;
+    
+    let mut t = TTY_TERMIOS.lock();
+    t.c_iflag = term.c_iflag;
+    t.c_oflag = term.c_oflag;
+    t.c_cflag = term.c_cflag;
+    t.c_lflag = term.c_lflag;
+    t.c_line = term.c_line;
+    t.c_cc = term.c_cc;
+    Ok(())
+}
+
+pub fn read_tty_termios2(user_addr: usize) -> LinuxResult {
+    let termios_data = *TTY_TERMIOS.lock();
+    let process = crate::task::current_process()?;
+    let bytes = unsafe {
+        core::slice::from_raw_parts(
+            (&termios_data as *const termios2).cast::<u8>(),
+            core::mem::size_of::<termios2>(),
+        )
+    };
+    process.write_user_bytes(user_addr, bytes)?;
+    Ok(())
+}
+
+pub fn write_tty_termios2(user_addr: usize) -> LinuxResult {
+    let mut termios_data = termios2 {
+        c_iflag: 0,
+        c_oflag: 0,
+        c_cflag: 0,
+        c_lflag: 0,
+        c_line: 0,
+        c_cc: [0; 19],
+        c_ispeed: 0,
+        c_ospeed: 0,
+    };
+    let process = crate::task::current_process()?;
+    let bytes = unsafe {
+        core::slice::from_raw_parts_mut(
+            (&mut termios_data as *mut termios2).cast::<u8>(),
+            core::mem::size_of::<termios2>(),
+        )
+    };
+    process.read_user_bytes(user_addr, bytes)?;
+    *TTY_TERMIOS.lock() = termios_data;
+    Ok(())
+}
 
 const FIONREAD: u32 = 0x541B;
 const TCGETS: u32 = 0x5401;
+const TCSETS: u32 = 0x5402;
+const TCSETSW: u32 = 0x5403;
+const TCSETSF: u32 = 0x5404;
+const TCGETS2: u32 = 0x802c542a;
+const TCSETS2: u32 = 0x402c542b;
+const TCSETSW2: u32 = 0x402c542c;
+const TCSETSF2: u32 = 0x402c542d;
 const TIOCGPGRP: u32 = 0x540F;
 const TIOCSPGRP: u32 = 0x5410;
 const TIOCGWINSZ: u32 = 0x5413;
@@ -314,12 +423,35 @@ impl FdObject for StdinObject {
 
     fn ioctl(&self, cmd: u32, arg: usize) -> LinuxResult<isize> {
         match cmd {
-            TCGETS => Ok(0),
+            TCGETS => {
+                if arg != 0 {
+                    read_tty_termios(arg)?;
+                }
+                Ok(0)
+            }
+            TCSETS | TCSETSW | TCSETSF => {
+                if arg != 0 {
+                    write_tty_termios(arg)?;
+                }
+                Ok(0)
+            }
+            TCGETS2 => {
+                if arg != 0 {
+                    read_tty_termios2(arg)?;
+                }
+                Ok(0)
+            }
+            TCSETS2 | TCSETSW2 | TCSETSF2 => {
+                if arg != 0 {
+                    write_tty_termios2(arg)?;
+                }
+                Ok(0)
+            }
             TIOCGPGRP => {
                 if arg != 0 {
                     let mut pgid = get_foreground_pgid();
                     if pgid == 0 {
-                        pgid = 1;
+                        pgid = crate::task::current_process()?.pgid();
                     }
                     let value = (pgid as i32).to_ne_bytes();
                     crate::task::current_process()?.write_user_bytes(arg, &value)?;
@@ -423,12 +555,35 @@ impl FdObject for StdoutObject {
 
     fn ioctl(&self, cmd: u32, arg: usize) -> LinuxResult<isize> {
         match cmd {
-            TCGETS => Ok(0),
+            TCGETS => {
+                if arg != 0 {
+                    read_tty_termios(arg)?;
+                }
+                Ok(0)
+            }
+            TCSETS | TCSETSW | TCSETSF => {
+                if arg != 0 {
+                    write_tty_termios(arg)?;
+                }
+                Ok(0)
+            }
+            TCGETS2 => {
+                if arg != 0 {
+                    read_tty_termios2(arg)?;
+                }
+                Ok(0)
+            }
+            TCSETS2 | TCSETSW2 | TCSETSF2 => {
+                if arg != 0 {
+                    write_tty_termios2(arg)?;
+                }
+                Ok(0)
+            }
             TIOCGPGRP => {
                 if arg != 0 {
                     let mut pgid = get_foreground_pgid();
                     if pgid == 0 {
-                        pgid = 1;
+                        pgid = crate::task::current_process()?.pgid();
                     }
                     let value = (pgid as i32).to_ne_bytes();
                     crate::task::current_process()?.write_user_bytes(arg, &value)?;
