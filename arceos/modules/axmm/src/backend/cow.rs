@@ -25,23 +25,30 @@ impl CowMapping {
         vaddr: VirtAddr,
         area_end: VirtAddr,
         orig_flags: MappingFlags,
-        pt: &mut PageTable,
+        pt: &spin::Mutex<PageTable>,
     ) -> bool {
         let page = vaddr.align_down_4k();
-        if let Ok((old_frame, old_flags, _)) = pt.query(page) {
+        let query_res = pt.lock().query(page).ok().map(|(frame, flags, _)| (frame, flags));
+        if let Some((old_frame, old_flags)) = query_res {
             if old_frame.as_usize() != 0 {
                 // Page is mapped. Check if it's a COW fault (write to read-only page).
                 if orig_flags.contains(MappingFlags::WRITE) && !old_flags.contains(MappingFlags::WRITE) {
                     let ref_count = frame_table().get_ref(old_frame);
                     if ref_count == 1 {
                         // Only one reference, upgrade to WRITE.
-                        let new_flags = old_flags | MappingFlags::WRITE;
-                        return pt.remap(page, old_frame, new_flags)
-                            .map(|(_, tlb)| {
-                                tlb.flush();
-                                self.sync_executable_if_needed(new_flags);
-                            })
-                            .is_ok();
+                        let mut pt_guard = pt.lock();
+                        if let Ok((curr_frame, curr_flags, _)) = pt_guard.query(page) {
+                            if curr_frame == old_frame && !curr_flags.contains(MappingFlags::WRITE) {
+                                let new_flags = curr_flags | MappingFlags::WRITE;
+                                return pt_guard.remap(page, old_frame, new_flags)
+                                    .map(|(_, tlb)| {
+                                        tlb.flush();
+                                        self.sync_executable_if_needed(new_flags);
+                                    })
+                                    .is_ok();
+                            }
+                        }
+                        return true;
                     } else {
                         // Multiple references, copy-on-write
                         let Some(new_frame) = alloc_frame(false) else {
@@ -55,19 +62,34 @@ impl CowMapping {
                         }
 
                         // Map new frame with WRITE permission
-                        let new_flags = old_flags | MappingFlags::WRITE;
-                        if pt.remap(page, new_frame, new_flags)
-                            .map(|(_, tlb)| {
-                                tlb.flush();
-                                self.sync_executable_if_needed(new_flags);
-                            })
-                            .is_ok()
-                        {
+                        let mut pt_guard = pt.lock();
+                        // Re-verify under lock
+                        let (ok, already_handled) = if let Ok((curr_frame, curr_flags, _)) = pt_guard.query(page) {
+                            if curr_frame == old_frame && !curr_flags.contains(MappingFlags::WRITE) {
+                                let new_flags = curr_flags | MappingFlags::WRITE;
+                                let success = pt_guard.remap(page, new_frame, new_flags)
+                                    .map(|(_, tlb)| {
+                                        tlb.flush();
+                                        self.sync_executable_if_needed(new_flags);
+                                    })
+                                    .is_ok();
+                                (success, false)
+                            } else if curr_flags.contains(MappingFlags::WRITE) {
+                                (false, true)
+                            } else {
+                                (false, false)
+                            }
+                        } else {
+                            (false, false)
+                        };
+
+                        if ok {
+                            drop(pt_guard); // Release lock before deallocating
                             dealloc_frame(old_frame);
                             return true;
                         } else {
                             dealloc_frame(new_frame);
-                            return false;
+                            return already_handled;
                         }
                     }
                 } else {

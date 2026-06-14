@@ -158,12 +158,12 @@ fn handle_page_fault(vaddr: VirtAddr, access_flags: MappingFlags, is_user: bool)
         
         let mut signo = 11; // Default to SIGSEGV
         let aspace_handle = proc.aspace_handle();
-        let aspace = aspace_handle.lock();
+        let aspace = aspace_handle.read();
         aspace.for_each_area_with_backend(|start, end, _flags, backend| {
             if vaddr >= start && vaddr < end {
-                let mut curr_backend = backend;
-                while let axmm::Backend::Cow(cow) = curr_backend {
-                    curr_backend = cow.inner();
+                let mut curr_backend = backend.clone();
+                while let axmm::Backend::Cow(cow) = &curr_backend {
+                    curr_backend = cow.inner().clone();
                 }
                 if let axmm::Backend::File(mapping) = curr_backend {
                     let current_file_bytes = mapping.file_bytes();

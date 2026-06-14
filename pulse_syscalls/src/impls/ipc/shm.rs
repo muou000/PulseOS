@@ -118,7 +118,7 @@ pub fn sys_shmat(shmid: i32, shmaddr: usize, shmflg: i32) -> isize {
 
     // Determine the virtual address to map at.
     let aspace_handle = proc.aspace_handle();
-    let mut aspace = aspace_handle.lock();
+    let mut aspace = aspace_handle.write();
 
     let map_addr = if shmaddr != 0 && (shmflg as u32) & SHM_RND != 0 {
         // SHM_RND: round down to SHMLBA (use PAGE_SIZE_4K for now)
@@ -199,7 +199,7 @@ pub fn sys_shmdt(shmaddr: usize) -> isize {
 
     // Unmap the virtual address range.
     let aspace_handle = proc.aspace_handle();
-    let mut aspace = aspace_handle.lock();
+    let mut aspace = aspace_handle.write();
     if let Err(e) = aspace.unmap(VirtAddr::from(shmaddr), length) {
         axlog::warn!("sys_shmdt: unmap failed: {:?}", e);
     }
