@@ -194,7 +194,7 @@ impl AddrSpace {
 
     /// Write back all resident dirty pages in the given range to their
     /// underlying files. Only shared file-backed mappings are affected.
-    pub fn writeback_file_range(&self, start: VirtAddr, size: usize) -> AxResult {
+    pub fn writeback_file_range(&self, start: VirtAddr, size: usize, sync: bool) -> AxResult {
         if size == 0 {
             return Ok(());
         }
@@ -216,7 +216,7 @@ impl AddrSpace {
             let overlap_start = if area.start() > start { area.start() } else { start };
             let overlap_end = if area.end() < end { area.end() } else { end };
             if overlap_start < overlap_end {
-                if !area.backend().writeback_file_range(overlap_start, overlap_end - overlap_start, &self.pt) {
+                if !area.backend().writeback_file_range(overlap_start, overlap_end - overlap_start, sync, &self.pt) {
                     return ax_err!(Io, "writeback failed");
                 }
             }

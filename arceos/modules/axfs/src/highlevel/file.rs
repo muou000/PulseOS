@@ -542,11 +542,18 @@ impl CachedFileShared {
 impl Drop for CachedFileShared {
     fn drop(&mut self) {
         let mut guard = self.page_cache.lock();
+        let mut dirty_count = 0;
         while let Some((_pn, page)) = guard.pop_lru() {
             if page.dirty {
-                warn!("dirty page dropped without flushing");
+                dirty_count += 1;
             }
             drop(page);
+        }
+        if dirty_count > 0 {
+            error!(
+                "CachedFileShared drop: {} dirty page(s) discarded without flushing!",
+                dirty_count
+            );
         }
     }
 }
@@ -591,7 +598,9 @@ impl Drop for CachedFile {
     fn drop(&mut self) {
         if Arc::strong_count(&self.shared) == 1 {
             if let Ok(file) = self.inner.entry().as_file() {
-                let _ = self.flush_dirty_pages(file);
+                if let Err(err) = self.flush_dirty_pages(file) {
+                    error!("CachedFile drop: failed to flush dirty pages: {:?}", err);
+                }
             }
         }
     }
