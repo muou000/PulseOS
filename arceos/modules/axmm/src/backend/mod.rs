@@ -147,11 +147,12 @@ impl Backend {
         &self,
         start: VirtAddr,
         size: usize,
+        sync: bool,
         pt: &PageTable,
     ) -> bool {
         match self {
-            Self::File(_) => self.writeback_file_range_impl(start, size, pt),
-            Self::Cow(cow) => cow.inner.writeback_file_range(start, size, pt),
+            Self::File(_) => self.writeback_file_range_impl(start, size, sync, pt),
+            Self::Cow(cow) => cow.inner.writeback_file_range(start, size, sync, pt),
             _ => true, // Non-file backends have nothing to write back.
         }
     }

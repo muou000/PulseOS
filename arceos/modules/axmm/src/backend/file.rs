@@ -205,6 +205,7 @@ impl Backend {
         &self,
         start: VirtAddr,
         size: usize,
+        sync: bool,
         pt: &PageTable,
     ) -> bool {
         let mapping = match self {
@@ -231,6 +232,11 @@ impl Backend {
                         return false;
                     }
                 }
+            }
+        }
+        if sync {
+            if mapping.file.sync(false).is_err() {
+                return false;
             }
         }
         true

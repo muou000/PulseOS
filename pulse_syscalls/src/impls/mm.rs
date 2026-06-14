@@ -604,7 +604,7 @@ pub fn sys_msync(addr: usize, length: usize, flags: usize) -> isize {
     let aspace_handle = proc.aspace_handle();
     let aspace = aspace_handle.lock();
 
-    match aspace.writeback_file_range(VirtAddr::from(addr), aligned_length) {
+    match aspace.writeback_file_range(VirtAddr::from(addr), aligned_length, has_sync) {
         Ok(()) => 0,
         Err(e) => -LinuxError::from(e).code() as isize,
     }
