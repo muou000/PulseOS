@@ -381,7 +381,7 @@ impl Ext4 {
             let idx_in_bg = start % blocks_per_group as u64;
 
             let mut bg =
-                Ext4BlockGroup::load_new(&self.block_device, &super_block, bgid as usize);
+                Ext4BlockGroup::load_new(&self.block_device, &super_block, bg_first as usize);
 
             let block_bitmap_block = bg.get_block_bitmap_block(&super_block);
             let mut raw_data = vec![0u8; block_size];
@@ -428,7 +428,7 @@ impl Ext4 {
             let mut fb_cnt = bg.get_free_blocks_count();
             fb_cnt += free_cnt as u64;
             bg.set_free_blocks_count(fb_cnt as u32);
-            bg.sync_to_disk_with_csum(&self.block_device, bgid as usize, &super_block);
+            bg.sync_to_disk_with_csum(&self.block_device, bg_first as usize, &super_block);
 
             bg_first += 1;
         }
