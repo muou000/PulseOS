@@ -15,25 +15,41 @@ static mut BOOT_PT_L0: Aligned4K<[LA64PTE; 512]> = Aligned4K::new([LA64PTE::empt
 #[unsafe(link_section = ".data")]
 static mut BOOT_PT_L1: Aligned4K<[LA64PTE; 512]> = Aligned4K::new([LA64PTE::empty(); 512]);
 
+#[unsafe(link_section = ".data")]
+static mut BOOT_PT_L2_LOW: Aligned4K<[LA64PTE; 512]> = Aligned4K::new([LA64PTE::empty(); 512]);
+
+#[unsafe(link_section = ".data")]
+static mut BOOT_PT_L2_KPT: Aligned4K<[LA64PTE; 512]> = Aligned4K::new([LA64PTE::empty(); 512]);
+
 unsafe fn init_boot_page_table() {
     unsafe {
         let l1_paddr = boot_paddr(&raw const BOOT_PT_L1);
+        let l2_low_paddr = boot_paddr(&raw const BOOT_PT_L2_LOW);
+        let l2_kpt_paddr = boot_paddr(&raw const BOOT_PT_L2_KPT);
         // 0x0000_0000_0000 ~ 0x0080_0000_0000, table
         BOOT_PT_L0[0] = LA64PTE::new_table(l1_paddr);
         // Higher-half mapping for canonical addresses (bit 47 = 1).
         BOOT_PT_L0[0x100] = LA64PTE::new_table(l1_paddr);
-        // 0x0000_0000..0x4000_0000, VPWXGD, 1G block
-        BOOT_PT_L1[0] = LA64PTE::new_page(
-            pa!(0),
-            MappingFlags::READ | MappingFlags::WRITE | MappingFlags::DEVICE,
-            true,
-        );
-        // 0x8000_0000..0xc000_0000, VPWXGD, 1G block
-        BOOT_PT_L1[2] = LA64PTE::new_page(
-            pa!(0x8000_0000),
-            MappingFlags::READ | MappingFlags::WRITE | MappingFlags::EXECUTE,
-            true,
-        );
+        // Link PUD entry 0 to BOOT_PT_L2_LOW PMD table (0x0000_0000..0x4000_0000)
+        BOOT_PT_L1[0] = LA64PTE::new_table(l2_low_paddr);
+        // Link PUD entry 2 to BOOT_PT_L2_KPT PMD table (0x8000_0000..0xc000_0000)
+        BOOT_PT_L1[2] = LA64PTE::new_table(l2_kpt_paddr);
+        // Map 0x0000_0000..0x4000_0000 (0..1GB) as 512 entries of 2MB pages
+        for i in 0..512 {
+            BOOT_PT_L2_LOW[i] = LA64PTE::new_page(
+                pa!(i * 0x200_000),
+                MappingFlags::READ | MappingFlags::WRITE | MappingFlags::DEVICE,
+                true,
+            );
+        }
+        // Map 0x8000_0000..0xc000_0000 (2GB..3GB) as 512 entries of 2MB pages
+        for i in 0..512 {
+            BOOT_PT_L2_KPT[i] = LA64PTE::new_page(
+                pa!(0x8000_0000 + i * 0x200_000),
+                MappingFlags::READ | MappingFlags::WRITE | MappingFlags::EXECUTE,
+                true,
+            );
+        }
     }
 }
 

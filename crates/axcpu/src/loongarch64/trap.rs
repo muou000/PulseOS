@@ -64,7 +64,13 @@ fn loongarch64_trap_handler(tf: &mut TrapFrame, from_user: bool) {
                 handle_trap!(ADDRESS_ERROR, tf, tf.era, from_user)
             } else { false };
             if !handled {
-                panic!("Address error in kernel at {:#x}:\n{:#x?}", tf.era, tf);
+                panic!(
+                    "Address error in kernel at {:#x} (badv={:#x}, estat={:#x}):\n{:#x?}",
+                    tf.era,
+                    badv::read().raw(),
+                    estat.raw(),
+                    tf
+                );
             }
         }
         Trap::Exception(Exception::StorePageFault)

@@ -137,6 +137,10 @@ impl GenericPTE for LA64PTE {
         let mut flags = PTEFlags::from(flags);
         if is_huge {
             flags |= PTEFlags::GH;
+        } else {
+            if !flags.contains(PTEFlags::PLVL) {
+                flags |= PTEFlags::GH;
+            }
         }
         Self(flags.bits() | ((paddr.as_usize()) as u64 & Self::PHYS_ADDR_MASK))
     }
@@ -156,6 +160,10 @@ impl GenericPTE for LA64PTE {
         let mut flags = PTEFlags::from(flags);
         if is_huge {
             flags |= PTEFlags::GH;
+        } else {
+            if !flags.contains(PTEFlags::PLVL) {
+                flags |= PTEFlags::GH;
+            }
         }
         self.0 = (self.0 & Self::PHYS_ADDR_MASK) | flags.bits();
     }

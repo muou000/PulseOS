@@ -1206,8 +1206,6 @@ checksum = "384b8ab6d37215f3c5301a95a4accb5d64aa607f1fcb26a11b5303878451b4fe"
 [[package]]
 name = "page_table_entry"
 version = "0.5.7"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "dda9891ec368fda90e4b2cc36592b4881073e25a339fe7e3eddd811f0cf6bf18"
 dependencies = [
  "aarch64-cpu",
  "bitflags 2.11.1",

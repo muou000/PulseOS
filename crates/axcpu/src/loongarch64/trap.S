@@ -74,10 +74,125 @@ handle_tlb_refill:
     csrwr   $t0, LA_CSR_TLBRSAVE
     csrrd   $t0, LA_CSR_PGD
     lddir   $t0, $t0, 3
+    beqz    $t0, .Lrefill_fail
     lddir   $t0, $t0, 2
+    beqz    $t0, .Lrefill_fail
+
+    // Save PUD entry to TLBRELO0 temporarily
+    csrwr   $t0, LA_CSR_TLBRELO0
+    // Read PUD entry back to check bit 6 (HUGE)
+    csrrd   $t0, LA_CSR_TLBRELO0
+    andi    $t0, $t0, 0x40
+    bnez    $t0, .Lhuge_page_1g
+
+    // Restore PUD entry from TLBRELO0
+    csrrd   $t0, LA_CSR_TLBRELO0
     lddir   $t0, $t0, 1
+    beqz    $t0, .Lrefill_fail
+
+    // Save PMD entry to TLBRELO0 temporarily
+    csrwr   $t0, LA_CSR_TLBRELO0
+    // Read PMD entry back to check bit 6 (HUGE)
+    csrrd   $t0, LA_CSR_TLBRELO0
+    andi    $t0, $t0, 0x40
+    bnez    $t0, .Lhuge_page_2m
+
+    // Normal 4KB page path: set TLBREHI.PS to 12
+    csrrd   $t0, LA_CSR_TLBREHI
+    srli.d  $t0, $t0, 6
+    slli.d  $t0, $t0, 6
+    ori     $t0, $t0, 12
+    csrwr   $t0, LA_CSR_TLBREHI
+
+    // Restore PMD entry from TLBRELO0
+    csrrd   $t0, LA_CSR_TLBRELO0
+
     ldpte   $t0, 0
     ldpte   $t0, 1
+    tlbfill
+    csrrd   $t0, LA_CSR_TLBRSAVE
+    ertn
+
+.Lhuge_page_1g:
+    // Set page size to 30 (1GB) in TLBREHI and clear bits 13-29 of TLBREHI
+    csrrd   $t0, LA_CSR_TLBREHI
+    srli.d  $t0, $t0, 30
+    slli.d  $t0, $t0, 30
+    ori     $t0, $t0, 30
+    csrwr   $t0, LA_CSR_TLBREHI
+
+    // Save t1 in KSAVE_TEMP
+    csrwr   $t1, KSAVE_TEMP
+
+    // Determine even or odd page from TLBRBADV (bit 30)
+    csrrd   $t1, LA_CSR_TLBRBADV
+    srli.d  $t1, $t1, 30
+    andi    $t1, $t1, 1
+    // Restore entry from TLBRELO0 into t0
+    csrrd   $t0, LA_CSR_TLBRELO0
+    bnez    $t1, .Lhuge_1g_odd
+
+    // Even page:
+    csrwr   $t0, LA_CSR_TLBRELO0
+    addi.d  $t1, $zero, 1
+    bstrins.d $t0, $t1, 30, 30
+    csrwr   $t0, LA_CSR_TLBRELO1
+    b       .Ltlb_fill_exit_1g
+
+.Lhuge_1g_odd:
+    csrwr   $t0, LA_CSR_TLBRELO1
+    move    $t1, $zero
+    bstrins.d $t0, $t1, 30, 30
+    csrwr   $t0, LA_CSR_TLBRELO0
+
+.Ltlb_fill_exit_1g:
+    csrrd   $t1, KSAVE_TEMP
+    b       .Ltlb_fill_exit
+
+.Lhuge_page_2m:
+    // Set page size to 21 (2MB) in TLBREHI and clear bits 13-20 of TLBREHI
+    csrrd   $t0, LA_CSR_TLBREHI
+    srli.d  $t0, $t0, 21
+    slli.d  $t0, $t0, 21
+    ori     $t0, $t0, 21
+    csrwr   $t0, LA_CSR_TLBREHI
+
+    // Save t1 in KSAVE_TEMP
+    csrwr   $t1, KSAVE_TEMP
+
+    // Determine even or odd page from TLBRBADV (bit 21)
+    csrrd   $t1, LA_CSR_TLBRBADV
+    srli.d  $t1, $t1, 21
+    andi    $t1, $t1, 1
+    // Restore entry from TLBRELO0 into t0
+    csrrd   $t0, LA_CSR_TLBRELO0
+    bnez    $t1, .Lhuge_2m_odd
+
+    // Even page:
+    csrwr   $t0, LA_CSR_TLBRELO0
+    addi.d  $t1, $zero, 1
+    bstrins.d $t0, $t1, 21, 21
+    csrwr   $t0, LA_CSR_TLBRELO1
+    b       .Ltlb_fill_exit_2m
+
+.Lhuge_2m_odd:
+    csrwr   $t0, LA_CSR_TLBRELO1
+    move    $t1, $zero
+    bstrins.d $t0, $t1, 21, 21
+    csrwr   $t0, LA_CSR_TLBRELO0
+
+.Ltlb_fill_exit_2m:
+    csrrd   $t1, KSAVE_TEMP
+    b       .Ltlb_fill_exit
+
+.Ltlb_fill_exit:
+    tlbfill
+    csrrd   $t0, LA_CSR_TLBRSAVE
+    ertn
+
+.Lrefill_fail:
+    csrwr   $zero, LA_CSR_TLBRELO0
+    csrwr   $zero, LA_CSR_TLBRELO1
     tlbfill
     csrrd   $t0, LA_CSR_TLBRSAVE
     ertn

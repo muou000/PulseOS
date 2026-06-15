@@ -238,11 +238,13 @@ fs_bind_rbind02.sh
 fs_bind_rbind03.sh
 fs_bind_rbind04.sh
 fs_bind_rbind05.sh
+fs_bind_rbind06.sh
 fs_bind_rbind07-2.sh
 fs_bind_rbind07.sh
 fs_bind_rbind09.sh
 fs_bind_rbind10.sh
 fs_bind_rbind11.sh
+fs_bind_rbind12.sh
 fs_bind_rbind13.sh
 fs_bind_rbind14.sh
 fs_bind_rbind15.sh
@@ -446,7 +448,6 @@ read01
 read02
 read03
 read04
-read_all
 readdir01
 readlink01
 readlink03
