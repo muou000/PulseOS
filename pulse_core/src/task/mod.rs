@@ -439,32 +439,38 @@ impl axfs::ProcfsProcessProvider for PulseProcessProvider {
 
             let p_char = if is_shared { "s" } else { "p" };
             if path_str.is_empty() {
-                out.push_str(&alloc::format!(
-                    "{:x}-{:x} {}{}{}{} {:08x} {} {}\n",
-                    start.as_usize(),
-                    end.as_usize(),
-                    r,
-                    w,
-                    x,
-                    p_char,
-                    offset,
-                    dev_str,
-                    inode
-                ));
+                let _ = core::fmt::write(
+                    &mut out,
+                    format_args!(
+                        "{:x}-{:x} {}{}{}{} {:08x} {} {}\n",
+                        start.as_usize(),
+                        end.as_usize(),
+                        r,
+                        w,
+                        x,
+                        p_char,
+                        offset,
+                        dev_str,
+                        inode
+                    ),
+                );
             } else {
-                out.push_str(&alloc::format!(
-                    "{:x}-{:x} {}{}{}{} {:08x} {} {:<7} {}\n",
-                    start.as_usize(),
-                    end.as_usize(),
-                    r,
-                    w,
-                    x,
-                    p_char,
-                    offset,
-                    dev_str,
-                    inode,
-                    path_str
-                ));
+                let _ = core::fmt::write(
+                    &mut out,
+                    format_args!(
+                        "{:x}-{:x} {}{}{}{} {:08x} {} {:<7} {}\n",
+                        start.as_usize(),
+                        end.as_usize(),
+                        r,
+                        w,
+                        x,
+                        p_char,
+                        offset,
+                        dev_str,
+                        inode,
+                        path_str
+                    ),
+                );
             }
         });
 
