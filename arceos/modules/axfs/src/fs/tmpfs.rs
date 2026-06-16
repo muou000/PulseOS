@@ -237,7 +237,7 @@ impl TmpNode {
     fn new_entry(&self, name: &str, node_type: NodeType, inode: Arc<Inode>) -> VfsResult<DirEntry> {
         let fs = self.fs.clone();
         let reference = Reference::new(
-            self.this.as_ref().and_then(WeakDirEntry::upgrade),
+            self.this.clone(),
             name.to_owned(),
         );
         Ok(if node_type == NodeType::Directory {

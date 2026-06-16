@@ -126,7 +126,7 @@ impl Inode {
         name: impl Into<String>,
     ) -> DirEntry {
         let reference = Reference::new(
-            self.this.as_ref().and_then(WeakDirEntry::upgrade),
+            self.this.clone(),
             name.into(),
         );
         if is_dir {

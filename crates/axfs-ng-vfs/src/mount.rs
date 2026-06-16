@@ -588,7 +588,7 @@ impl Location {
 
     pub fn parent(&self) -> Option<Self> {
         if !self.is_root_of_mount() {
-            return Some(self.wrap(self.entry.parent().unwrap()));
+            return self.entry.parent().map(|parent| self.wrap(parent));
         }
         self.mountpoint.location()?.parent()
     }

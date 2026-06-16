@@ -127,12 +127,12 @@ pub type ReferenceKey = (usize, String);
 
 #[derive(Debug)]
 pub struct Reference {
-    parent: Option<DirEntry>,
+    parent: Option<WeakDirEntry>,
     name: String,
 }
 
 impl Reference {
-    pub fn new(parent: Option<DirEntry>, name: String) -> Self {
+    pub fn new(parent: Option<WeakDirEntry>, name: String) -> Self {
         Self { parent, name }
     }
 
@@ -144,7 +144,7 @@ impl Reference {
         let address = self
             .parent
             .as_ref()
-            .map_or(0, |it| Arc::as_ptr(&it.0) as usize);
+            .map_or(0, |it| Weak::as_ptr(&it.0) as usize);
         (address, self.name.clone())
     }
 }
@@ -294,7 +294,7 @@ impl DirEntry {
     }
 
     pub fn parent(&self) -> Option<Self> {
-        self.0.reference.parent.clone()
+        self.0.reference.parent.as_ref().and_then(WeakDirEntry::upgrade)
     }
 
     pub fn name(&self) -> &str {
