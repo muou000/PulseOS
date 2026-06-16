@@ -44,22 +44,30 @@ impl<D: BlockDriverOps + 'static> Ext4Disk<D> {
         let block_size = self.block_size();
         {
             let mut cache = self.block_cache.lock();
-            let mut cache_hit = false;
             if let Some(data) = cache.get(&block_offset) {
                 if data.len() == buf.len() {
                     buf.copy_from_slice(data);
-                    cache_hit = true;
+                    return;
                 }
             }
-            if cache_hit {
-                return;
-            }
-            cache.pop(&block_offset);
         }
 
         let (first_block, inner_offset, blocks) = self.byte_range(block_offset, block_size);
         let mut raw = vec![0; blocks * self.sector_size];
         let mut dev = self.dev.lock();
+
+        // Re-check the cache under dev.lock() to avoid redundant I/O if another thread
+        // has populated the cache, and to ensure we do not overwrite newer writes.
+        {
+            let mut cache = self.block_cache.lock();
+            if let Some(data) = cache.get(&block_offset) {
+                if data.len() == buf.len() {
+                    buf.copy_from_slice(data);
+                    return;
+                }
+            }
+        }
+
         let total_blocks = dev.num_blocks();
         if first_block + blocks as u64 > total_blocks {
             log::error!(
