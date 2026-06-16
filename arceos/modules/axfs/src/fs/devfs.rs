@@ -538,7 +538,7 @@ impl DevNode {
     fn build_entry(&self, name: &str, target_ino: u64) -> VfsResult<DirEntry> {
         let node_type = self.fs.node_type_of(target_ino)?;
         let reference =
-            Reference::new(self.this.as_ref().and_then(WeakDirEntry::upgrade), name.to_owned());
+            Reference::new(self.this.clone(), name.to_owned());
 
         Ok(if node_type == NodeType::Directory {
             DirEntry::new_dir(

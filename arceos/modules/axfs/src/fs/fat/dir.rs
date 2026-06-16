@@ -32,7 +32,7 @@ impl FatDirNode {
     }
 
     fn create_entry(&self, entry: ff::DirEntry, name: impl Into<String>, inode: u64) -> DirEntry {
-        let reference = Reference::new(self.this.upgrade(), name.into());
+        let reference = Reference::new(Some(self.this.clone()), name.into());
         if entry.is_file() {
             DirEntry::new_file(
                 FatFileNode::new(self.fs.clone(), entry.to_file(), inode),
@@ -155,7 +155,7 @@ impl DirNodeOps for FatDirNode {
     ) -> VfsResult<DirEntry> {
         let mut fs = self.fs.lock();
         let dir = self.inner.borrow(&fs);
-        let reference = Reference::new(self.this.upgrade(), name.to_ascii_lowercase());
+        let reference = Reference::new(Some(self.this.clone()), name.to_ascii_lowercase());
         match node_type {
             NodeType::RegularFile => dir
                 .create_file(name)
