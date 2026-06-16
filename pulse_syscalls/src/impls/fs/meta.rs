@@ -181,7 +181,7 @@ pub fn sys_readlinkat(dirfd: i32, pathname: usize, buf: usize, bufsiz: usize) ->
     if buf == 0 && bufsiz != 0 {
         return -LinuxError::EFAULT.code() as isize;
     }
-    if bufsiz <= 1 {
+    if bufsiz == 0 {
         return -LinuxError::EINVAL.code() as isize;
     }
 
