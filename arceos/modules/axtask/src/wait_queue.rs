@@ -120,7 +120,7 @@ impl WaitQueue {
     pub fn wait_timeout(&self, dur: core::time::Duration) -> bool {
         let mut rq = current_run_queue::<NoPreemptIrqSave>();
         let curr = crate::current();
-        let deadline = axhal::time::wall_time() + dur;
+        let deadline = axhal::time::monotonic_time() + dur;
         debug!(
             "task wait_timeout: {} deadline={:?}",
             curr.id_name(),
@@ -152,7 +152,7 @@ impl WaitQueue {
         F: Fn() -> bool,
     {
         let curr = crate::current();
-        let deadline = axhal::time::wall_time() + dur;
+        let deadline = axhal::time::monotonic_time() + dur;
         debug!(
             "task wait_timeout: {}, deadline={:?}",
             curr.id_name(),
@@ -163,7 +163,7 @@ impl WaitQueue {
         let mut timeout = true;
         loop {
             let mut rq = current_run_queue::<NoPreemptIrqSave>();
-            if axhal::time::wall_time() >= deadline {
+            if axhal::time::monotonic_time() >= deadline {
                 break;
             }
             let wq = self.queue.lock();
@@ -196,7 +196,7 @@ impl WaitQueue {
         F: FnMut() -> bool,
     {
         let curr = crate::current();
-        let deadline = dur.map(|d| axhal::time::wall_time() + d);
+        let deadline = dur.map(|d| axhal::time::monotonic_time() + d);
         if let Some(d) = deadline {
             crate::timers::set_alarm_wakeup(d, curr.clone());
         }
@@ -207,7 +207,7 @@ impl WaitQueue {
         loop {
             let mut rq = crate::run_queue::current_run_queue::<NoPreemptIrqSave>();
             if let Some(d) = deadline {
-                if axhal::time::wall_time() >= d {
+                if axhal::time::monotonic_time() >= d {
                     break;
                 }
             }

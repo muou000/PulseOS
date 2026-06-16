@@ -4,7 +4,7 @@ use kernel_guard::NoOp;
 use lazyinit::LazyInit;
 use timer_list::{TimeValue, TimerEvent, TimerList};
 
-use axhal::time::wall_time;
+use axhal::time::monotonic_time;
 
 use crate::{AxTaskRef, select_run_queue};
 
@@ -40,13 +40,23 @@ percpu_static! {
 }
 
 pub fn reprogram_timer() {
+    reprogram_timer_internal(false);
+}
+
+pub(crate) fn reprogram_timer_from_tick() {
+    reprogram_timer_internal(true);
+}
+
+fn reprogram_timer_internal(from_tick: bool) {
     let now_ns = axhal::time::monotonic_time_nanos();
     let mut tick_deadline = unsafe { NEXT_TICK_DEADLINE.read_current_raw() };
     let periodic_interval_nanos = axhal::time::NANOS_PER_SEC / axconfig::TICKS_PER_SEC as u64;
 
-    if now_ns >= tick_deadline {
-        tick_deadline = now_ns + periodic_interval_nanos;
-        unsafe { NEXT_TICK_DEADLINE.write_current_raw(tick_deadline) };
+    if from_tick {
+        if now_ns >= tick_deadline {
+            tick_deadline = now_ns + periodic_interval_nanos;
+            unsafe { NEXT_TICK_DEADLINE.write_current_raw(tick_deadline) };
+        }
     }
 
     let mut final_deadline = tick_deadline;
@@ -58,12 +68,14 @@ pub fn reprogram_timer() {
             None
         }
     } {
-        let offset_ns = axhal::time::current_epochoffset_nanos();
         let event_mono_ns = event_deadline.as_nanos() as u64;
-        let event_mono_ns = event_mono_ns.saturating_sub(offset_ns);
         if event_mono_ns < final_deadline {
             final_deadline = event_mono_ns;
         }
+    }
+
+    if final_deadline < now_ns {
+        final_deadline = now_ns;
     }
 
     axhal::time::set_oneshot_timer(final_deadline);
@@ -91,7 +103,7 @@ pub fn set_alarm_wakeup(deadline: TimeValue, task: AxTaskRef) {
 
 pub fn check_events() {
     loop {
-        let now = wall_time();
+        let now = monotonic_time();
         let event = unsafe {
             // Safety: IRQs are disabled at this time.
             TIMER_LIST.current_ref_mut_raw()
