@@ -22,7 +22,7 @@ impl<T, const S: usize> RRTask<T, S> {
         Self {
             inner,
             time_slice: AtomicIsize::new(S as isize),
-            priority: AtomicIsize::new(0),
+            priority: AtomicIsize::new(-100), // Default is normal nice 0, encoded as -100
             links: Links::new(),
         }
     }
@@ -77,7 +77,8 @@ impl<T, const S: usize> Deref for RRTask<T, S> {
 /// [Round-Robin]: https://en.wikipedia.org/wiki/Round-robin_scheduling
 /// [`FifoScheduler`]: crate::FifoScheduler
 pub struct RRScheduler<T, const MAX_TIME_SLICE: usize> {
-    rt_queue: List<Arc<RRTask<T, MAX_TIME_SLICE>>>,
+    rt_queues: [List<Arc<RRTask<T, MAX_TIME_SLICE>>>; 99],
+    rt_bitmap: u128,
     normal_queue: List<Arc<RRTask<T, MAX_TIME_SLICE>>>,
 }
 
@@ -85,21 +86,14 @@ impl<T, const S: usize> RRScheduler<T, S> {
     /// Creates a new empty [`RRScheduler`].
     pub const fn new() -> Self {
         Self {
-            rt_queue: List::new(),
+            rt_queues: [const { List::new() }; 99],
+            rt_bitmap: 0,
             normal_queue: List::new(),
         }
     }
     /// get the name of scheduler
     pub fn scheduler_name() -> &'static str {
         "Round-robin with RT priority"
-    }
-
-    unsafe fn clone_arc(task: &RRTask<T, S>) -> Arc<RRTask<T, S>> {
-        let ptr = task as *const RRTask<T, S>;
-        unsafe {
-            Arc::increment_strong_count(ptr);
-            Arc::from_raw(ptr)
-        }
     }
 }
 
@@ -109,53 +103,64 @@ impl<T, const S: usize> BaseScheduler for RRScheduler<T, S> {
     fn init(&mut self) {}
 
     fn add_task(&mut self, task: Self::SchedItem) {
-        if task.priority() < 0 {
-            self.rt_queue.push_back(task);
+        let prio = task.priority();
+        if (1..=99).contains(&prio) {
+            let index = (99 - prio) as usize;
+            self.rt_queues[index].push_back(task);
+            self.rt_bitmap |= 1u128 << index;
         } else {
             self.normal_queue.push_back(task);
         }
     }
 
     fn remove_task(&mut self, task: &Self::SchedItem) -> Option<Self::SchedItem> {
-        if task.priority() < 0 {
-            unsafe { self.rt_queue.remove(task) }
+        let prio = task.priority();
+        if (1..=99).contains(&prio) {
+            let index = (99 - prio) as usize;
+            let removed = unsafe { self.rt_queues[index].remove(task) };
+            if removed.is_some() && self.rt_queues[index].is_empty() {
+                self.rt_bitmap &= !(1u128 << index);
+            }
+            removed
         } else {
             unsafe { self.normal_queue.remove(task) }
         }
     }
 
     fn pick_next_task(&mut self) -> Option<Self::SchedItem> {
-        if self.rt_queue.is_empty() {
-            self.normal_queue.pop_front()
+        if self.rt_bitmap != 0 {
+            let index = self.rt_bitmap.trailing_zeros() as usize;
+            let task = self.rt_queues[index].pop_front();
+            if self.rt_queues[index].is_empty() {
+                self.rt_bitmap &= !(1u128 << index);
+            }
+            task
         } else {
-            // Find the task with the highest priority (lowest priority() value)
-            let mut best: Option<Self::SchedItem> = None;
-            for task in self.rt_queue.iter() {
-                if let Some(ref b) = best {
-                    if task.priority() < b.priority() {
-                        best = Some(unsafe { Self::clone_arc(task) });
-                    }
-                } else {
-                    best = Some(unsafe { Self::clone_arc(task) });
-                }
-            }
-            if let Some(ref task) = best {
-                unsafe { self.rt_queue.remove(task) }
-            } else {
-                None
-            }
+            self.normal_queue.pop_front()
         }
     }
 
     fn put_prev_task(&mut self, prev: Self::SchedItem, preempt: bool) {
-        let is_rt = prev.priority() < 0;
-        let queue = if is_rt { &mut self.rt_queue } else { &mut self.normal_queue };
+        let prio = prev.priority();
+        let is_rt = (1..=99).contains(&prio);
+        let time_slice_pos = prev.time_slice() > 0;
 
-        if prev.time_slice() > 0 && preempt {
-            queue.push_front(prev)
+        if is_rt {
+            let index = (99 - prio) as usize;
+            if time_slice_pos && preempt {
+                self.rt_queues[index].push_front(prev);
+            } else {
+                prev.reset_time_slice();
+                self.rt_queues[index].push_back(prev);
+            }
+            self.rt_bitmap |= 1u128 << index;
         } else {
-            prev.reset_time_slice();
-            queue.push_back(prev)
+            if time_slice_pos && preempt {
+                self.normal_queue.push_front(prev);
+            } else {
+                prev.reset_time_slice();
+                self.normal_queue.push_back(prev);
+            }
         }
     }
 
@@ -165,7 +170,11 @@ impl<T, const S: usize> BaseScheduler for RRScheduler<T, S> {
     }
 
     fn set_priority(&mut self, task: &Self::SchedItem, prio: isize) -> bool {
-        task.priority.store(prio, Ordering::Release);
+        let was_in_queue = self.remove_task(task).is_some();
+        task.set_priority(prio);
+        if was_in_queue {
+            self.add_task(task.clone());
+        }
         true
     }
 }

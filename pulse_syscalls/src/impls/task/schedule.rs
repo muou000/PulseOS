@@ -141,20 +141,21 @@ pub fn sys_sched_setparam(pid: usize, param_ptr: usize) -> isize {
             &mut sched_priority as *mut i32 as *mut u8,
             core::mem::size_of::<i32>(),
         )
-    }).is_err() {
+    })
+    .is_err()
+    {
         return -LinuxError::EFAULT.code() as isize;
     }
 
-    let nice = if sched_priority > 0 {
-        if sched_priority > 99 {
-            return -LinuxError::EINVAL.code() as isize;
-        }
-        (20 - (sched_priority as isize * 40 / 100)).clamp(-20, 19)
-    } else {
-        0
-    };
+    if sched_priority < 0 || sched_priority > 99 {
+        return -LinuxError::EINVAL.code() as isize;
+    }
 
-    axtask::set_priority(nice);
+    if sched_priority > 0 {
+        axtask::set_priority(sched_priority as isize);
+    } else {
+        axtask::set_priority(-100);
+    }
     0
 }
 
@@ -172,36 +173,40 @@ pub fn sys_sched_setscheduler(pid: usize, policy: usize, param_ptr: usize) -> is
             &mut sched_priority as *mut i32 as *mut u8,
             core::mem::size_of::<i32>(),
         )
-    }).is_err() {
+    })
+    .is_err()
+    {
         return -LinuxError::EFAULT.code() as isize;
     }
 
-    let nice = if policy as u32 == SCHED_FIFO || policy as u32 == SCHED_RR {
+    if policy as u32 == SCHED_FIFO || policy as u32 == SCHED_RR {
         if sched_priority < 1 || sched_priority > 99 {
             return -LinuxError::EINVAL.code() as isize;
         }
-        (20 - (sched_priority as isize * 40 / 100)).clamp(-20, 19)
+        axtask::set_priority(sched_priority as isize);
     } else {
         if sched_priority != 0 {
             return -LinuxError::EINVAL.code() as isize;
         }
-        0
-    };
-
-    axtask::set_priority(nice);
+        axtask::set_priority(-100);
+    }
     0
 }
 
-pub fn sys_sched_getparam(pid: usize, param: usize) -> isize {
-    axlog::warn!(
-        "sys_sched_getparam (stub): pid={}, param={:#x}; reporting fixed RT priority",
-        pid,
-        param
-    );
+pub fn sys_sched_getparam(pid: usize, param_ptr: usize) -> isize {
     if let Err(e) = check_pid(pid) {
         return -e.code() as isize;
     }
-    write_plain(param, &(DEFAULT_RT_PRIORITY as i32))
+    if param_ptr == 0 {
+        return -LinuxError::EFAULT.code() as isize;
+    }
+    let prio = axtask::current().as_task_ref().priority();
+    let rt_prio = if (1..=99).contains(&prio) {
+        prio as i32
+    } else {
+        0
+    };
+    write_plain(param_ptr, &rt_prio)
         .map(|_| 0)
         .unwrap_or_else(|e| -e.code() as isize)
 }
@@ -316,4 +321,3 @@ pub fn sys_getcpu(cpu_ptr: usize, node_ptr: usize, _tcache: usize) -> isize {
 
     0
 }
-

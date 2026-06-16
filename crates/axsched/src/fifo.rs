@@ -11,6 +11,12 @@ def_node! {
     pub struct FifoTask<T>(T);
 }
 
+impl<T> FifoTask<T> {
+    pub fn priority(&self) -> isize {
+        0
+    }
+}
+
 /// A simple FIFO (First-In-First-Out) cooperative scheduler.
 ///
 /// When a task is added to the scheduler, it's placed at the end of the ready
