@@ -34,7 +34,6 @@ dependencies = [
  "bitmap-allocator",
  "cfg-if",
  "rlsf",
- "slab_allocator",
 ]
 
 [[package]]
@@ -660,12 +659,6 @@ name = "bitmaps"
 version = "3.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a1d084b0137aaa901caf9f1e8b21daa6aa24d41cd806e111335541eff9683bd6"
-
-[[package]]
-name = "buddy_system_allocator"
-version = "0.10.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a7913f22349ffcfc6ca0ca9a656ec26cfbba538ed49c31a273dff2c5d1ea83d9"
 
 [[package]]
 name = "byteorder"
@@ -1482,14 +1475,6 @@ name = "slab"
 version = "0.4.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0c790de23124f9ab44544d7ac05d60440adc586479ce501c1d6d7da3cd8c9cf5"
-
-[[package]]
-name = "slab_allocator"
-version = "0.3.1"
-source = "git+https://github.com/arceos-org/slab_allocator.git?tag=v0.3.1#3c13499d664ccd36f66786985b753340aea57f5a"
-dependencies = [
- "buddy_system_allocator",
-]
 
 [[package]]
 name = "smallvec"
