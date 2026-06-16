@@ -146,7 +146,7 @@ pub fn on_timer_tick() {
     // we can get current run queue with the default `kernel_guard::NoOp`.
     current_run_queue::<NoOp>().scheduler_timer_tick();
     // Reprogram the hardware timer.
-    crate::timers::reprogram_timer();
+    crate::timers::reprogram_timer_from_tick();
 }
 
 /// Adds the given task to the run queue, returns the task reference.
@@ -257,7 +257,7 @@ pub fn set_current_page_table_root(pt_root: memory_addr::PhysAddr) {
 ///
 /// If the feature `irq` is not enabled, it uses busy-wait instead.
 pub fn sleep(dur: core::time::Duration) {
-    sleep_until(axhal::time::wall_time() + dur);
+    sleep_until(axhal::time::monotonic_time() + dur);
 }
 
 /// Current task is going to sleep, it will be woken up at the given deadline.

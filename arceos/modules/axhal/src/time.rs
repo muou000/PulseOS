@@ -14,12 +14,12 @@ static REALTIME_OFFSET_NANOS: AtomicU64 = AtomicU64::new(u64::MAX);
 
 /// Busy waiting for the given duration.
 pub fn busy_wait(dur: Duration) {
-    busy_wait_until(wall_time() + dur);
+    busy_wait_until(monotonic_time() + dur);
 }
 
 /// Busy waiting until reaching the given deadline.
 pub fn busy_wait_until(deadline: TimeValue) {
-    while wall_time() < deadline {
+    while monotonic_time() < deadline {
         core::hint::spin_loop();
     }
 }
