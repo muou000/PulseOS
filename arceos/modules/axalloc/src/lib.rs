@@ -110,10 +110,19 @@ impl GlobalAllocator {
                 return Ok(ptr);
             } else {
                 let old_size = balloc.total_bytes();
-                let expand_size = old_size
+                let mut expand_size = old_size
                     .max(layout.size())
                     .next_power_of_two()
                     .max(PAGE_SIZE);
+
+                // Cap the maximum expansion size to prevent allocating too many contiguous pages,
+                // but scale it if the requested layout size itself is large to prevent infinite loops.
+                const MAX_EXPAND_SIZE: usize = 2 * 1024 * 1024; // 2 MB
+                if expand_size > MAX_EXPAND_SIZE {
+                    let required_size = layout.size().saturating_mul(2).next_power_of_two();
+                    expand_size = required_size.max(MAX_EXPAND_SIZE);
+                }
+
                 let heap_ptr = self.alloc_pages(expand_size / PAGE_SIZE, PAGE_SIZE)?;
                 debug!(
                     "expand heap memory: [{:#x}, {:#x})",
