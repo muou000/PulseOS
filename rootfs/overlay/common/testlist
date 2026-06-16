@@ -379,7 +379,6 @@ mmap17
 mmap18
 mmap19
 mmap20
-mmapstress01
 mount01
 mount02
 mount03
@@ -537,8 +536,6 @@ setsockopt02
 setsockopt03
 setsockopt04
 setsockopt09
-settimeofday01
-settimeofday02
 setuid01
 setuid03
 setuid04
