@@ -84,6 +84,10 @@ impl<T> CFSTask<T> {
         self.delta.fetch_add(1, Ordering::Release);
     }
 
+    pub fn priority(&self) -> isize {
+        self.nice.load(Ordering::Acquire)
+    }
+
     /// Returns a reference to the inner task struct.
     pub const fn inner(&self) -> &T {
         &self.inner
@@ -183,8 +187,13 @@ impl<T> BaseScheduler for CFScheduler<T> {
     }
 
     fn set_priority(&mut self, task: &Self::SchedItem, prio: isize) -> bool {
-        if (-20..=19).contains(&prio) {
-            task.set_priority(prio);
+        let nice = if prio < -50 {
+            prio + 100
+        } else {
+            prio
+        };
+        if (-20..=19).contains(&nice) {
+            task.set_priority(nice);
             true
         } else {
             false
