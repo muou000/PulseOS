@@ -6,7 +6,7 @@ use core::{
 
 use axerrno::{AxError, AxResult};
 use axhal::context::TrapFrame;
-use axtask::{AxTaskRef, TaskExtSwitch, WaitQueue, def_task_ext};
+use axtask::{AxTaskRef, AxTaskWeak, TaskExtSwitch, WaitQueue, def_task_ext};
 use spin::Mutex;
 
 use super::{Process, SignalAltStack, ThreadSignal};
@@ -17,7 +17,7 @@ pub struct Thread {
     clear_child_tid: AtomicUsize,
     set_child_tid: AtomicUsize,
     robust_list_head: AtomicUsize,
-    task_ref: Mutex<Option<AxTaskRef>>,
+    task_ref: Mutex<Option<AxTaskWeak>>,
     pub user_time_ns: AtomicU64,
     pub sys_time_ns: AtomicU64,
     pub last_user_enter_ns: AtomicU64,
@@ -78,13 +78,15 @@ impl Thread {
     }
 
     pub fn attach_task_ref(&self, task: AxTaskRef) {
-        *self.task_ref.lock() = Some(task);
+        *self.task_ref.lock() = Some(Arc::downgrade(&task));
     }
 
     pub fn notify_signal_pending(&self) {
         self.signal.notify_waiters();
-        if let Some(task) = self.task_ref.lock().clone() {
-            axtask::wake_task(task, true);
+        if let Some(weak_task) = self.task_ref.lock().as_ref() {
+            if let Some(task) = weak_task.upgrade() {
+                axtask::wake_task(task, true);
+            }
         }
     }
 
@@ -252,7 +254,6 @@ impl Thread {
             self.process().group_exiting(),
             exit_code
         );
-        self.task_ref.lock().take();
         self.run_exit_hooks();
         let final_code = if self.process().group_exiting() {
             self.process().group_exit_code()
