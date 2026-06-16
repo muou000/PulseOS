@@ -1700,6 +1700,46 @@ impl Process {
         self.close_all_files();
         self.futex_table.clear();
         self.memlock_unlock_all();
+
+        // Release fs_context, credentials, uts_ns, args, and exec_path early during exit phase.
+        if let Some(root_context) = axfs::ROOT_FS_CONTEXT.get() {
+            *self.fs_context.write() = Arc::new(Mutex::new(root_context.clone()));
+        }
+
+        // Keep original UIDs/GIDs to preserve status and signal permission checks (like kill(pid, 0)),
+        // but drop group vectors and capabilities.
+        let (ruid, euid, suid, fsuid, rgid, egid, sgid, fsgid) = {
+            let creds = self.credentials.read();
+            (creds.ruid, creds.euid, creds.suid, creds.fsuid, creds.rgid, creds.egid, creds.sgid, creds.fsgid)
+        };
+        let dummy_credentials = Credentials::new(
+            ruid,
+            euid,
+            suid,
+            fsuid,
+            rgid,
+            egid,
+            sgid,
+            fsgid,
+            0,
+            0,
+            0,
+            0o022,
+            Vec::new(),
+        );
+        *self.credentials.write() = Arc::new(dummy_credentials);
+
+        let mut hostname_buf = [0u8; 65];
+        let default_name = b"pulseos";
+        hostname_buf[..default_name.len()].copy_from_slice(default_name);
+        let dummy_uts_ns = UtsNamespace {
+            hostname: Arc::new(RwLock::new(hostname_buf)),
+        };
+        *self.uts_ns.write() = Arc::new(dummy_uts_ns);
+
+        self.args.write().clear();
+        *self.exec_path.write() = None;
+
         axlog::debug!("release_zombie_resources: pid={}", self.pid());
         Ok(())
     }
