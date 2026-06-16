@@ -50,3 +50,13 @@ pub fn init_network(mut net_devs: AxDeviceContainer<AxNetDevice>) {
     info!("  use NIC 0: {:?}", dev.device_name());
     net_impl::init(dev);
 }
+
+static HAVE_SIGNALS_CALLBACK: spin::Once<fn() -> bool> = spin::Once::new();
+
+pub fn register_have_signals_callback(f: fn() -> bool) {
+    HAVE_SIGNALS_CALLBACK.call_once(|| f);
+}
+
+pub fn current_have_signals() -> bool {
+    HAVE_SIGNALS_CALLBACK.get().map(|f| f()).unwrap_or(false)
+}

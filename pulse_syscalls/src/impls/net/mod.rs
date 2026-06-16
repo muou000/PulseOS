@@ -1,6 +1,7 @@
 use alloc::sync::Arc;
 use axerrno::LinuxError;
-use crate::{impls::fs::common::get_fd_entry, net::Socket};
+use crate::impls::fs::common::get_fd_entry;
+use pulse_core::net::Socket;
 
 mod addr;
 mod io;

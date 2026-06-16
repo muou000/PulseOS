@@ -11,7 +11,7 @@ documentation = "https://rcore-os.github.io/arceos/axnet/index.html"
 keywords = ["Starry"]
 
 [features]
-monolithic = ["dep:pulse_core"]
+monolithic = []
 
 smoltcp = []
 
@@ -32,7 +32,6 @@ axsync = { workspace = true }
 axtask = { workspace = true }
 axdriver = { workspace = true, features = ["net"] }
 axio = { workspace = true }
-pulse_core = { path = "../../../pulse_core", optional = true }
 
 [dependencies.smoltcp]
 git = "https://github.com/rcore-os/smoltcp.git"

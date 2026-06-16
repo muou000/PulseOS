@@ -169,6 +169,7 @@ fn itimer_tick_hook() {
 /// pulse_core initialization.
 pub fn init_itimer_hook() {
     axtask::register_timer_hook(itimer_tick_hook);
+    axnet::register_have_signals_callback(current_have_signals);
 }
 
 struct PulseProcessProvider;

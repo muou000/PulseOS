@@ -427,7 +427,6 @@ dependencies = [
  "cfg-if",
  "lazyinit",
  "log",
- "pulse_core",
  "smoltcp",
  "spin 0.9.8",
 ]
@@ -1295,6 +1294,7 @@ dependencies = [
  "axio",
  "axlog",
  "axmm",
+ "axnet",
  "axpoll",
  "axtask",
  "bitflags 2.11.1",

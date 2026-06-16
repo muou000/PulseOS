@@ -19,6 +19,7 @@ axpoll.workspace = true
 axmm.workspace = true
 axerrno.workspace = true
 axio.workspace = true
+axnet.workspace = true
 
 linux-raw-sys.workspace = true
 linkme.workspace = true

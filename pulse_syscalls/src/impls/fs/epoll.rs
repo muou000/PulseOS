@@ -95,7 +95,7 @@ pub fn sys_epoll_ctl(
         || target_obj.as_any().is::<StdinObject>()
         || target_obj.as_any().is::<StdoutObject>()
         || target_obj.as_any().is::<PidfdObject>()
-        || target_obj.as_any().is::<crate::net::Socket>();
+        || target_obj.as_any().is::<pulse_core::net::Socket>();
 
     if !is_pollable {
         return -LinuxError::EPERM.code() as isize;
