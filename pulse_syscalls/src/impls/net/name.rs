@@ -3,7 +3,7 @@ use axerrno::LinuxError;
 use axlog::*;
 
 use super::{addr::{NetSocketAddr, write_unix_addr}, get_socket};
-use crate::net::SocketInner;
+use pulse_core::net::SocketInner;
 
 fn read_user_plain<T: Copy>(user_addr: usize) -> Result<T, LinuxError> {
     crate::impls::utils::with_process(|process| {
@@ -34,7 +34,7 @@ pub fn sys_getsockname(fd: usize, addr: usize, addrlen: usize) -> isize {
             }
         }
         let path = {
-            let registry = crate::impls::net::UNIX_REGISTRY.lock();
+            let registry = pulse_core::net::UNIX_REGISTRY.lock();
             registry.iter().find_map(|(k, v)| {
                 if let Some(s) = v.1.upgrade() {
                     if alloc::sync::Arc::ptr_eq(&s, &socket) {
@@ -127,7 +127,7 @@ pub fn sys_getpeername(fd: usize, addr: usize, addrlen: usize) -> isize {
             Err(e) => return -(e.code() as isize),
         };
         let path = {
-            let registry = crate::impls::net::UNIX_REGISTRY.lock();
+            let registry = pulse_core::net::UNIX_REGISTRY.lock();
             registry.iter().find_map(|(k, v)| {
                 if v.0 == peer_addr {
                     Some(k.clone())

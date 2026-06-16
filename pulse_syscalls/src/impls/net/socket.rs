@@ -10,14 +10,10 @@ use linux_raw_sys::{
 use pulse_core::fd_table::{FdEntry, FdFlags};
 
 use super::{addr::{NetSocketAddr, write_unix_addr}, get_socket};
-use crate::{impls::fs::common::{insert_fd_entry, remove_fd_entry}, net::{Socket, LocalSocket, SocketInner}};
+use crate::impls::fs::common::{insert_fd_entry, remove_fd_entry};
+use pulse_core::net::{Socket, LocalSocket, SocketInner, UNIX_REGISTRY};
 use core::sync::atomic::Ordering;
-use alloc::collections::BTreeMap;
-use alloc::sync::Weak;
 use alloc::string::String;
-use spin::Mutex as SpinMutex;
-
-pub(crate) static UNIX_REGISTRY: SpinMutex<BTreeMap<String, (core::net::SocketAddr, Weak<Socket>)>> = SpinMutex::new(BTreeMap::new());
 
 fn read_family(addr: usize, addrlen: u32) -> Result<u16, LinuxError> {
     if addrlen > 128 {
@@ -93,13 +89,13 @@ pub fn sys_socket(domain: usize, raw_ty: usize, proto: usize) -> isize {
             Socket::new(domain, SocketInner::Udp(UdpSocket::new()))
         }
         (17, d) if d == linux_raw_sys::net::SOCK_DGRAM || d == SOCK_RAW => {
-            Socket::new(domain, SocketInner::Packet(crate::net::PacketSocket::new()))
+            Socket::new(domain, SocketInner::Packet(pulse_core::net::PacketSocket::new()))
         }
         (16, d) if d == SOCK_RAW => {
             if proto != 0 {
                 return -(LinuxError::EPROTONOSUPPORT.code() as isize);
             }
-            Socket::new(domain, SocketInner::Netlink(crate::net::NetlinkSocket::new()))
+            Socket::new(domain, SocketInner::Netlink(pulse_core::net::NetlinkSocket::new()))
         }
         (AF_INET | AF_INET6 | AF_UNIX | 17 | 16, _) => {
             warn!("Unsupported socket type: domain={domain}, ty={ty}");
@@ -549,7 +545,7 @@ pub fn sys_accept4(fd: usize, addr: usize, addrlen: usize, flags: usize) -> isiz
         if socket.domain.load(Ordering::Acquire) == AF_UNIX {
             let peer_addr = remote_addr;
             let path = peer_addr.and_then(|pa| {
-                let registry = crate::impls::net::UNIX_REGISTRY.lock();
+                let registry = UNIX_REGISTRY.lock();
                 registry.iter().find_map(|(k, v)| {
                     if v.0 == pa {
                         Some(k.clone())

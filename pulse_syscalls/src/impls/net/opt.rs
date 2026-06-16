@@ -7,7 +7,7 @@ use core::sync::atomic::Ordering;
 use axerrno::LinuxError;
 use axlog::*;
 use super::get_socket;
-use crate::net::SocketInner;
+use pulse_core::net::SocketInner;
 
 #[derive(Copy, Clone, Default, Debug)]
 #[repr(C)]

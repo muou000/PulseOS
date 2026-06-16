@@ -8,9 +8,11 @@ use axio::PollState;
 use axnet::{TcpSocket, UdpSocket};
 use linux_raw_sys::general::{S_IFSOCK, stat};
 use linux_raw_sys::ioctl::{SIOCATMARK, SIOCGIFCONF};
-use pulse_core::fd_table::FdObject;
+use crate::fd_table::FdObject;
 
 const RING_BUFFER_SIZE: usize = 65536;
+
+pub static UNIX_REGISTRY: spin::Mutex<alloc::collections::BTreeMap<alloc::string::String, (core::net::SocketAddr, alloc::sync::Weak<Socket>)>> = spin::Mutex::new(alloc::collections::BTreeMap::new());
 
 pub struct LocalSocketRingBuffer {
     arr: [u8; RING_BUFFER_SIZE],
@@ -139,7 +141,7 @@ impl LocalSocket {
     }
 
     fn current_has_pending_signal(&self) -> bool {
-        pulse_core::task::current_thread()
+        crate::task::current_thread()
             .map(|thread| thread.has_pending_signal())
             .unwrap_or(false)
     }
@@ -322,7 +324,7 @@ impl NetlinkSocket {
         let nlmsg_type = u16::from_ne_bytes(buf[4..6].try_into().unwrap());
         let nlmsg_seq = u32::from_ne_bytes(buf[8..12].try_into().unwrap());
         let nlmsg_pid_val = u32::from_ne_bytes(buf[12..16].try_into().unwrap());
-        let process_pid = pulse_core::task::current_process().map(|p| p.pid() as u32).unwrap_or(0);
+        let process_pid = crate::task::current_process().map(|p| p.pid() as u32).unwrap_or(0);
         let nlmsg_pid = if nlmsg_pid_val == 0 { process_pid } else { nlmsg_pid_val };
 
         let mut rx = self.rx_data.lock();
@@ -617,7 +619,7 @@ impl FdObject for Socket {
     fn ioctl(&self, cmd: u32, arg: usize) -> Result<isize, LinuxError> {
         if cmd == 0x541B { // FIONREAD
             let n = self.recv_queue() as i32;
-            let process = pulse_core::task::current_process()?;
+            let process = crate::task::current_process()?;
             process.write_user_bytes(arg, &n.to_ne_bytes())?;
             return Ok(0);
         }
@@ -627,7 +629,7 @@ impl FdObject for Socket {
                     if arg == 0 {
                         return Err(LinuxError::EFAULT);
                     }
-                    let process = pulse_core::task::current_process()?;
+                    let process = crate::task::current_process()?;
                     let val = 0i32;
                     process.write_user_bytes(arg, &val.to_ne_bytes())?;
                     return Ok(0);
@@ -639,7 +641,7 @@ impl FdObject for Socket {
             if arg == 0 {
                 return Err(LinuxError::EFAULT);
             }
-            let process = pulse_core::task::current_process()?;
+            let process = crate::task::current_process()?;
             
             let mut len_bytes = [0u8; 4];
             let mut buf_bytes = [0u8; 8];
@@ -690,7 +692,7 @@ impl FdObject for Socket {
                 if arg == 0 {
                     return Err(LinuxError::EFAULT);
                 }
-                let process = pulse_core::task::current_process()?;
+                let process = crate::task::current_process()?;
                 let mut name_bytes = [0u8; 16];
                 process.read_user_bytes(arg, &mut name_bytes)?;
                 let name = core::str::from_utf8(&name_bytes).unwrap_or("").trim_matches('\0');
@@ -709,7 +711,7 @@ impl FdObject for Socket {
                 if arg == 0 {
                     return Err(LinuxError::EFAULT);
                 }
-                let process = pulse_core::task::current_process()?;
+                let process = crate::task::current_process()?;
                 let mtu = 1500i32;
                 process.write_user_bytes(arg + 16, &mtu.to_ne_bytes())?;
                 return Ok(0);
@@ -721,7 +723,7 @@ impl FdObject for Socket {
                 if arg == 0 {
                     return Err(LinuxError::EFAULT);
                 }
-                let process = pulse_core::task::current_process()?;
+                let process = crate::task::current_process()?;
                 let mut name_bytes = [0u8; 16];
                 process.read_user_bytes(arg, &mut name_bytes)?;
                 let name = core::str::from_utf8(&name_bytes).unwrap_or("").trim_matches('\0');
@@ -742,7 +744,7 @@ impl FdObject for Socket {
                 if arg == 0 {
                     return Err(LinuxError::EFAULT);
                 }
-                let process = pulse_core::task::current_process()?;
+                let process = crate::task::current_process()?;
                 let txqlen = 1000i32;
                 process.write_user_bytes(arg + 16, &txqlen.to_ne_bytes())?;
                 return Ok(0);
@@ -754,7 +756,7 @@ impl FdObject for Socket {
                 if arg == 0 {
                     return Err(LinuxError::EFAULT);
                 }
-                let process = pulse_core::task::current_process()?;
+                let process = crate::task::current_process()?;
                 let mut index_bytes = [0u8; 4];
                 process.read_user_bytes(arg + 16, &mut index_bytes)?;
                 let index = i32::from_ne_bytes(index_bytes);
@@ -773,7 +775,7 @@ impl FdObject for Socket {
                 if arg == 0 {
                     return Err(LinuxError::EFAULT);
                 }
-                let process = pulse_core::task::current_process()?;
+                let process = crate::task::current_process()?;
                 let mut name_bytes = [0u8; 16];
                 process.read_user_bytes(arg, &mut name_bytes)?;
                 let name = core::str::from_utf8(&name_bytes).unwrap_or("").trim_matches('\0');
@@ -791,7 +793,7 @@ impl FdObject for Socket {
                 if arg == 0 {
                     return Err(LinuxError::EFAULT);
                 }
-                let process = pulse_core::task::current_process()?;
+                let process = crate::task::current_process()?;
                 let mut name_bytes = [0u8; 16];
                 process.read_user_bytes(arg, &mut name_bytes)?;
                 let name = core::str::from_utf8(&name_bytes).unwrap_or("").trim_matches('\0');
@@ -812,7 +814,7 @@ impl FdObject for Socket {
                 if arg == 0 {
                     return Err(LinuxError::EFAULT);
                 }
-                let process = pulse_core::task::current_process()?;
+                let process = crate::task::current_process()?;
                 let mut name_bytes = [0u8; 16];
                 process.read_user_bytes(arg, &mut name_bytes)?;
                 let name = core::str::from_utf8(&name_bytes).unwrap_or("").trim_matches('\0');
@@ -833,7 +835,7 @@ impl FdObject for Socket {
                 if arg == 0 {
                     return Err(LinuxError::EFAULT);
                 }
-                let process = pulse_core::task::current_process()?;
+                let process = crate::task::current_process()?;
                 let mut name_bytes = [0u8; 16];
                 process.read_user_bytes(arg, &mut name_bytes)?;
                 let name = core::str::from_utf8(&name_bytes).unwrap_or("").trim_matches('\0');

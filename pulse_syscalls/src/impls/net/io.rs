@@ -5,7 +5,7 @@ use axlog::*;
 use linux_raw_sys::general::iovec;
 
 use super::{addr::NetSocketAddr, get_socket};
-use crate::net::SocketInner;
+use pulse_core::net::{Socket, SocketInner};
 
 fn read_user_plain<T: Copy>(user_addr: usize) -> Result<T, LinuxError> {
     crate::impls::utils::with_process(|process| {
@@ -57,7 +57,7 @@ fn resolve_unix_addr(addr: usize, addrlen: usize) -> Result<core::net::SocketAdd
     if path.is_empty() {
         return Err(LinuxError::EINVAL);
     }
-    let mut registry = super::socket::UNIX_REGISTRY.lock();
+    let mut registry = pulse_core::net::UNIX_REGISTRY.lock();
     let target_addr = match registry.get(&path) {
         Some(&(a, ref weak_sock)) => {
             if weak_sock.upgrade().is_some() {
@@ -106,7 +106,7 @@ pub fn sys_sendto(
     let originally_nonblocking = socket.is_nonblocking();
     let dont_wait = (flags & 0x40) != 0;
     struct TemporaryNonblocking<'a> {
-        socket: &'a crate::net::Socket,
+        socket: &'a Socket,
         originally_nonblocking: bool,
         active: bool,
     }
@@ -269,7 +269,7 @@ pub fn sys_recvfrom(
     let originally_nonblocking = socket.is_nonblocking();
     let dont_wait = (flags & 0x40) != 0;
     struct TemporaryNonblocking<'a> {
-        socket: &'a crate::net::Socket,
+        socket: &'a Socket,
         originally_nonblocking: bool,
         active: bool,
     }
@@ -354,7 +354,7 @@ struct MsgHdr {
 }
 
 fn do_sendmsg_core(
-    socket: &crate::net::Socket,
+    socket: &Socket,
     msg: usize,
     flags: usize,
 ) -> Result<usize, LinuxError> {
@@ -491,7 +491,7 @@ pub fn sys_sendmsg(fd: usize, msg: usize, flags: usize) -> isize {
     let originally_nonblocking = socket.is_nonblocking();
     let dont_wait = (flags & 0x40) != 0;
     struct TemporaryNonblocking<'a> {
-        socket: &'a crate::net::Socket,
+        socket: &'a Socket,
         originally_nonblocking: bool,
         active: bool,
     }
@@ -565,7 +565,7 @@ pub fn sys_sendmmsg(
     sent_count as isize
 }
 
-fn do_recvmsg_core(socket: &crate::net::Socket, msg: usize, flags: usize) -> Result<usize, LinuxError> {
+fn do_recvmsg_core(socket: &Socket, msg: usize, flags: usize) -> Result<usize, LinuxError> {
     if (flags & 1) != 0 {
         // MSG_OOB
         return Err(LinuxError::EINVAL);
@@ -689,7 +689,7 @@ pub fn sys_recvmsg(fd: usize, msg: usize, flags: usize) -> isize {
     let originally_nonblocking = socket.is_nonblocking();
     let dont_wait = (flags & 0x40) != 0;
     struct TemporaryNonblocking<'a> {
-        socket: &'a crate::net::Socket,
+        socket: &'a Socket,
         originally_nonblocking: bool,
         active: bool,
     }
@@ -763,7 +763,7 @@ pub fn sys_recvmmsg(
     let originally_nonblocking = socket.is_nonblocking();
 
     struct TemporaryNonblocking<'a> {
-        socket: &'a crate::net::Socket,
+        socket: &'a Socket,
         originally_nonblocking: bool,
     }
 

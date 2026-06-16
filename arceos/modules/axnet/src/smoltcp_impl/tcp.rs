@@ -805,7 +805,7 @@ impl TcpSocket {
         } else {
             loop {
                 #[cfg(feature = "monolithic")]
-                if pulse_core::task::current_have_signals() {
+                if crate::current_have_signals() {
                     return Err(AxError::Interrupted);
                 }
 
