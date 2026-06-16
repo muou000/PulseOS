@@ -306,73 +306,22 @@ impl Backend {
                 return false;
             }
 
-            if orig_flags.contains(MappingFlags::WRITE) && !old_flags.contains(MappingFlags::WRITE) {
-                if let Some(new_frame) = alloc_frame(false) {
-                    let src = phys_to_virt(old_frame).as_ptr() as *const u8;
-                    let dst = phys_to_virt(new_frame).as_mut_ptr() as *mut u8;
-                    unsafe {
-                        core::ptr::copy_nonoverlapping(src, dst, PAGE_SIZE_4K);
-                    }
-
-                    let mut pt_guard = pt.lock();
-                    // Re-verify under lock
-                    if let Ok((curr_frame, curr_flags, _)) = pt_guard.query(page) {
-                        if curr_frame == old_frame && !curr_flags.contains(MappingFlags::WRITE) {
-                            if pt_guard
-                                .remap(page, new_frame, orig_flags)
-                                .map(|(_, tlb)| tlb.flush())
-                                .is_ok()
-                            {
-                                drop(pt_guard); // Release lock before deallocating
-                                dealloc_frame(old_frame);
-                                return true;
-                            }
-                        }
-                    }
-                    debug!(
-                        "handle_page_fault_alloc: reject=cow_remap_failed vaddr={:#x} page={:#x} fault_flags={:?} pte_flags={:?} old_frame={:#x} new_frame={:#x} backend_populate={}",
-                        vaddr,
-                        page,
-                        orig_flags,
-                        old_flags,
-                        old_frame,
-                        new_frame,
-                        populate
-                    );
-                    dealloc_frame(new_frame);
-                    false
-                } else {
-                    error!(
-                        "handle_page_fault_alloc: reject=cow_alloc_failed vaddr={:#x} page={:#x} fault_flags={:?} pte_flags={:?} frame={:#x} backend_populate={}",
-                        vaddr,
-                        page,
-                        orig_flags,
-                        old_flags,
-                        old_frame,
-                        populate
-                    );
-                    false
-                }
-            } else {
-                // PTE already has the requested R/W/X permissions or the
-                // access doesn't require a write upgrade. Check if any other
-                // flags need upgrading (e.g., USER flag for PagePrivilegeIllegal
-                // handling on loongarch64).
-                let mut pt_guard = pt.lock();
-                if let Ok((curr_frame, curr_flags, _)) = pt_guard.query(page) {
-                    if curr_frame == old_frame {
-                        let new_flags = curr_flags | orig_flags;
-                        if pt_guard
-                            .remap(page, old_frame, new_flags)
-                            .map(|(_, tlb)| tlb.flush())
-                            .is_ok()
-                        {
-                            return true;
-                        }
+            // PTE already has some flags. Check if any flags need upgrading
+            // (e.g., USER flag, or WRITE flag on non-cloned pages).
+            let mut pt_guard = pt.lock();
+            if let Ok((curr_frame, curr_flags, _)) = pt_guard.query(page) {
+                if curr_frame == old_frame {
+                    let new_flags = curr_flags | orig_flags;
+                    if pt_guard
+                        .remap(page, old_frame, new_flags)
+                        .map(|(_, tlb)| tlb.flush())
+                        .is_ok()
+                    {
+                        return true;
                     }
                 }
-                false
             }
+            false
         } else if populate {
             error!(
                 "handle_page_fault_alloc: reject=query_miss_in_populated_mapping vaddr={:#x} page={:#x} fault_flags={:?} backend_populate={}",

@@ -63,7 +63,7 @@ pub fn sys_execve(_tf: &TrapFrame, pathname: usize, argv: usize, envp: usize) ->
     }
 
     if let Err(e) = process.exec(&path_str, &args_strs, &envs_strs) {
-        axlog::error!("sys_execve failed: {:?} (path={:?})", e, path_str);
+        axlog::info!("sys_execve failed: {:?} (path={:?})", e, path_str);
         let errno: LinuxError = e.into();
         return -errno.code() as isize;
     }
@@ -168,7 +168,7 @@ pub fn sys_execveat(
     }
 
     if let Err(e) = process.exec(&path_str, &args_strs, &envs_strs) {
-        axlog::error!("sys_execveat failed: {:?}", e);
+        axlog::info!("sys_execveat failed: {:?}", e);
         let errno: LinuxError = e.into();
         return -errno.code() as isize;
     }
