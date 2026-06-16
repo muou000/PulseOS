@@ -20,8 +20,6 @@ for file in $test_list; do
 
     if [ "$file" = "fork13" ]; then
       LTP_RUNTIME_MUL=0.01 "./$file"
-    elif [ "$file" = "read_all" ]; then
-      "./$file" -d /fs
     else
       "./$file"
     fi
