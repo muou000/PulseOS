@@ -1,8 +1,9 @@
-use alloc::{ffi::CString, vec::Vec};
+use alloc::{ffi::CString, vec::Vec, sync::Arc};
 use core::time::Duration;
 
 use axerrno::LinuxError;
 use linux_raw_sys::general::{UTIME_NOW, UTIME_OMIT, iovec, timespec, timeval};
+use memory_addr::MemoryAddr;
 use pulse_core::task::uaccess;
 
 const MAX_USER_IOVCNT: usize = 1024;
@@ -52,6 +53,11 @@ pub(crate) enum ScratchBuffer {
         len: usize,
     },
     Heap(Vec<u8>),
+    ThreadLocal {
+        thread: Arc<pulse_core::task::Thread>,
+        buffer: Option<Vec<u8>>,
+        len: usize,
+    },
 }
 
 impl core::ops::Deref for ScratchBuffer {
@@ -61,6 +67,7 @@ impl core::ops::Deref for ScratchBuffer {
         match self {
             Self::Stack { buf, len } => &buf[..*len],
             Self::Heap(vec) => vec.as_slice(),
+            Self::ThreadLocal { buffer, len, .. } => &buffer.as_ref().unwrap()[..*len],
         }
     }
 }
@@ -71,6 +78,17 @@ impl core::ops::DerefMut for ScratchBuffer {
         match self {
             Self::Stack { buf, len } => &mut buf[..*len],
             Self::Heap(vec) => vec.as_mut_slice(),
+            Self::ThreadLocal { buffer, len, .. } => &mut buffer.as_mut().unwrap()[..*len],
+        }
+    }
+}
+
+impl Drop for ScratchBuffer {
+    fn drop(&mut self) {
+        if let Self::ThreadLocal { thread, buffer, .. } = self {
+            if let Some(buf) = buffer.take() {
+                thread.put_io_buffer(buf);
+            }
         }
     }
 }
@@ -82,12 +100,30 @@ pub(crate) fn alloc_zeroed_bytes(len: usize, _site: &'static str) -> Result<Scra
             len,
         })
     } else {
-        let mut out = Vec::new();
-        if out.try_reserve_exact(len).is_err() {
-            return Err(LinuxError::ENOMEM);
+        if let Ok(thread) = pulse_core::task::current_thread() {
+            let mut buf = thread.take_io_buffer();
+            if buf.len() < len {
+                if buf.try_reserve_exact(len - buf.len()).is_err() {
+                    thread.put_io_buffer(buf);
+                    return Err(LinuxError::ENOMEM);
+                }
+                buf.resize(len, 0);
+            } else {
+                buf[..len].fill(0);
+            }
+            Ok(ScratchBuffer::ThreadLocal {
+                thread,
+                buffer: Some(buf),
+                len,
+            })
+        } else {
+            let mut out = Vec::new();
+            if out.try_reserve_exact(len).is_err() {
+                return Err(LinuxError::ENOMEM);
+            }
+            out.resize(len, 0);
+            Ok(ScratchBuffer::Heap(out))
         }
-        out.resize(len, 0);
-        Ok(ScratchBuffer::Heap(out))
     }
 }
 
@@ -98,14 +134,30 @@ pub(crate) fn alloc_uninit_bytes(len: usize, _site: &'static str) -> Result<Scra
             len,
         })
     } else {
-        let mut out = Vec::new();
-        if out.try_reserve_exact(len).is_err() {
-            return Err(LinuxError::ENOMEM);
+        if let Ok(thread) = pulse_core::task::current_thread() {
+            let mut buf = thread.take_io_buffer();
+            if buf.len() < len {
+                if buf.try_reserve_exact(len - buf.len()).is_err() {
+                    thread.put_io_buffer(buf);
+                    return Err(LinuxError::ENOMEM);
+                }
+                buf.resize(len, 0);
+            }
+            Ok(ScratchBuffer::ThreadLocal {
+                thread,
+                buffer: Some(buf),
+                len,
+            })
+        } else {
+            let mut out = Vec::new();
+            if out.try_reserve_exact(len).is_err() {
+                return Err(LinuxError::ENOMEM);
+            }
+            unsafe {
+                out.set_len(len);
+            }
+            Ok(ScratchBuffer::Heap(out))
         }
-        unsafe {
-            out.set_len(len);
-        }
-        Ok(ScratchBuffer::Heap(out))
     }
 }
 
@@ -147,5 +199,39 @@ pub(crate) fn timespec_to_update_time(
         return Err(LinuxError::EINVAL);
     }
 
-    Ok(Some(Duration::new(ts.tv_sec as u64, nsec as u32)))
+    Ok(Some(Duration::new(ts.tv_sec as u64, ts.tv_nsec as u32)))
+}
+
+pub(crate) fn query_user_page_slice(
+    user_addr: usize,
+    max_len: usize,
+    write: bool,
+) -> Option<*mut [u8]> {
+    let process = pulse_core::task::current_process().ok()?;
+    let aspace_handle = process.aspace_handle();
+    let aspace = aspace_handle.read();
+    
+    let vaddr = memory_addr::VirtAddr::from(user_addr);
+    let page = vaddr.align_down_4k();
+    let offset = vaddr.align_offset_4k();
+    let chunk_len = core::cmp::min(max_len, 4096 - offset);
+    
+    let required_flags = if write {
+        axhal::paging::MappingFlags::WRITE | axhal::paging::MappingFlags::USER
+    } else {
+        axhal::paging::MappingFlags::READ | axhal::paging::MappingFlags::USER
+    };
+    
+    if !aspace.can_access_range(vaddr, chunk_len, required_flags) {
+        return None;
+    }
+    
+    let (paddr, flags, _) = aspace.query_vaddr(page).ok()?;
+    if paddr.as_usize() == 0 || !flags.contains(required_flags) {
+        return None;
+    }
+    
+    let kvaddr = axhal::mem::phys_to_virt(paddr) + offset;
+    let ptr = kvaddr.as_mut_ptr();
+    Some(core::ptr::slice_from_raw_parts_mut(ptr, chunk_len))
 }
