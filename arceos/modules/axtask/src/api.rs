@@ -1,6 +1,6 @@
 //! Task APIs for multi-task configuration.
 
-use alloc::{string::String, sync::Arc};
+use alloc::{string::String, sync::{Arc, Weak}};
 use core::sync::atomic::{AtomicPtr, Ordering};
 
 use kernel_guard::NoPreemptIrqSave;
@@ -29,6 +29,9 @@ pub use crate::wait_queue::WaitQueue;
 
 /// The reference type of a task.
 pub type AxTaskRef = Arc<AxTask>;
+
+/// The weak reference type of a task.
+pub type AxTaskWeak = Weak<AxTask>;
 
 /// The wrapper type for [`cpumask::CpuMask`] with SMP configuration.
 pub type AxCpuMask = cpumask::CpuMask<{ axconfig::plat::MAX_CPU_NUM }>;
