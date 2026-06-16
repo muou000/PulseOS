@@ -13,7 +13,7 @@ repository = "https://github.com/muou000/PulseOS"
 
 [workspace.dependencies]
 axfeat = { path = "arceos/api/axfeat", features = [
-    "alloc-slab",
+    "alloc-tlsf",
     "page-alloc-4g",
     "multitask",
     "sched-rr",

@@ -12,7 +12,7 @@ use rlsf::Tlsf;
 /// It's just a wrapper structure of [`rlsf::Tlsf`], with `FLLEN` and `SLLEN`
 /// fixed to 28 and 32.
 pub struct TlsfByteAllocator {
-    inner: Tlsf<'static, u32, u32, 28, 32>, // max pool size: 32 * 2^28 = 8G
+    inner: Tlsf<'static, u32, u32, 25, 32>, // max pool size: 32 * 2^25 = 1G
     total_bytes: usize,
     used_bytes: usize,
 }
