@@ -22,6 +22,7 @@ pub struct Thread {
     pub sys_time_ns: AtomicU64,
     pub last_user_enter_ns: AtomicU64,
     pub in_user_mode: AtomicBool,
+    io_buffer: Mutex<alloc::vec::Vec<u8>>,
 }
 
 pub struct ThreadHandle(Arc<Thread>);
@@ -58,7 +59,18 @@ impl Thread {
             sys_time_ns: AtomicU64::new(0),
             last_user_enter_ns: AtomicU64::new(0),
             in_user_mode: AtomicBool::new(false),
+            io_buffer: Mutex::new(alloc::vec::Vec::new()),
         })
+    }
+
+    pub fn take_io_buffer(&self) -> alloc::vec::Vec<u8> {
+        let mut guard = self.io_buffer.lock();
+        core::mem::take(&mut *guard)
+    }
+
+    pub fn put_io_buffer(&self, buf: alloc::vec::Vec<u8>) {
+        let mut guard = self.io_buffer.lock();
+        *guard = buf;
     }
 
     pub fn tid(&self) -> u64 {

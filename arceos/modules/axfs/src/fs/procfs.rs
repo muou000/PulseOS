@@ -1168,7 +1168,7 @@ impl DirNodeOps for ProcNode {
     }
 
     fn is_cacheable(&self) -> bool {
-        true
+        false
     }
 
     fn create(
