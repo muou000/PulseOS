@@ -904,6 +904,10 @@ pub fn check_signals_and_deliver(thread: &Thread, tf: &mut TrapFrame) -> Option<
         return None;
     }
 
+    if !sig_state.has_pending_unblocked() {
+        return None;
+    }
+
     let (sig_opt, siginfo) = sig_state.dequeue_unblocked_with_info();
     let sig = sig_opt?;
     let action = resolve_action(&sig_state.shared(), sig);
