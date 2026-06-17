@@ -386,10 +386,11 @@ struct CachedFileShared {
     page_cache: Mutex<LruCache<u32, PageCache>>,
     evict_listeners: Mutex<Vec<Arc<EvictListener>>>,
     io_lock: RwLock<()>,
+    size: Mutex<u64>,
 }
 
 impl CachedFileShared {
-    pub fn new(in_memory: bool) -> Self {
+    pub fn new(in_memory: bool, size: u64) -> Self {
         Self {
             page_cache: if in_memory {
                 Mutex::new(LruCache::unbounded())
@@ -398,6 +399,7 @@ impl CachedFileShared {
             },
             evict_listeners: Mutex::new(Vec::new()),
             io_lock: RwLock::new(()),
+            size: Mutex::new(size),
         }
     }
 
@@ -411,8 +413,12 @@ impl CachedFileShared {
             (listener.listener)(pn, page);
         }
         if page.dirty {
+            let cached_size = *self.size.lock();
+            if file.len()? < cached_size {
+                file.set_len(cached_size)?;
+            }
             let page_start = pn as u64 * PAGE_SIZE as u64;
-            let len = (file.len()?.saturating_sub(page_start)).min(PAGE_SIZE as u64) as usize;
+            let len = (cached_size.saturating_sub(page_start)).min(PAGE_SIZE as u64) as usize;
             if len > 0 {
                 file.write_at(&page.data()[..len], page_start)?;
             }
@@ -423,7 +429,10 @@ impl CachedFileShared {
 
     fn flush_dirty_pages(&self, file: &FileNode) -> VfsResult<()> {
         const MAX_COALESCE_PAGES: usize = 32; // Limit contiguous writes to 128KB
-        let file_len = file.len()?;
+        let file_len = *self.size.lock();
+        if file.len()? < file_len {
+            file.set_len(file_len)?;
+        }
         let mut guard = self.page_cache.lock();
 
         let mut dirty_pns: Vec<u32> = guard
@@ -568,9 +577,19 @@ fn shared_file_state(location: &Location) -> Arc<CachedFileShared> {
     }
     prune_file_shared_states(&mut registry);
 
-    let state = Arc::new(CachedFileShared::new(in_memory));
+    let size = location.len().unwrap_or(0);
+    let state = Arc::new(CachedFileShared::new(in_memory, size));
     registry.insert(key, Arc::downgrade(&state));
     state
+}
+
+pub fn cached_file_size(location: &Location) -> VfsResult<u64> {
+    let key = file_cache_key(location);
+    if let Some(state) = FILE_SHARED_STATES.lock().get(&key).and_then(Weak::upgrade) {
+        Ok(*state.size.lock())
+    } else {
+        location.len()
+    }
 }
 
 enum FileUserData {
@@ -598,6 +617,12 @@ impl Drop for CachedFile {
     fn drop(&mut self) {
         if Arc::strong_count(&self.shared) == 1 {
             if let Ok(file) = self.inner.entry().as_file() {
+                let cached_size = *self.shared.size.lock();
+                if let Ok(current_size) = file.len() {
+                    if cached_size != current_size {
+                        let _ = file.set_len(cached_size);
+                    }
+                }
                 if let Err(err) = self.flush_dirty_pages(file) {
                     error!("CachedFile drop: failed to flush dirty pages: {:?}", err);
                 }
@@ -667,8 +692,12 @@ impl CachedFile {
             (listener.listener)(pn, page);
         }
         if page.dirty {
+            let cached_size = *self.shared.size.lock();
+            if file.len()? < cached_size {
+                file.set_len(cached_size)?;
+            }
             let page_start = pn as u64 * PAGE_SIZE as u64;
-            let len = (file.len()?.saturating_sub(page_start)).min(PAGE_SIZE as u64) as usize;
+            let len = (cached_size.saturating_sub(page_start)).min(PAGE_SIZE as u64) as usize;
             if len > 0 {
                 file.write_at(&page.data()[..len], page_start)?;
             }
@@ -713,7 +742,7 @@ impl CachedFile {
         file: &FileNode,
         cache: &'a mut LruCache<u32, PageCache>,
         pn: u32,
-        skip_read: bool,
+        mut skip_read: bool,
     ) -> VfsResult<(&'a mut PageCache, Option<(u32, PageCache)>)> {
         // TODO: Matching the result of `get_mut` confuses compiler. See
         // https://users.rust-lang.org/t/return-do-not-release-mutable-borrow/55757.
@@ -733,6 +762,10 @@ impl CachedFile {
         }
 
         // Page not in cache, read it
+        let file_len = *self.shared.size.lock();
+        if (pn as u64 * PAGE_SIZE as u64) >= file_len {
+            skip_read = true;
+        }
         let mut page = PageCache::new(skip_read)?;
         if self.in_memory {
             if !skip_read {
@@ -795,7 +828,7 @@ impl CachedFile {
 
     pub fn read_at(&self, mut dst: impl Write + IoBufMut, offset: u64) -> VfsResult<usize> {
         let _guard = self.shared.io_lock.read();
-        let len = self.inner.len()?;
+        let len = *self.shared.size.lock();
         let end = (offset + dst.remaining_mut() as u64).min(len);
         if end <= offset {
             return Ok(0);
@@ -817,9 +850,10 @@ impl CachedFile {
         self.with_pages(
             offset..end,
             true,
-            |file| {
-                if end > file.len()? {
-                    file.set_len(end)?;
+            |_file| {
+                let mut size_guard = self.shared.size.lock();
+                if end > *size_guard {
+                    *size_guard = end;
                 }
                 Ok(0)
             },
@@ -841,8 +875,7 @@ impl CachedFile {
 
     pub fn append(&self, buf: impl Read + IoBuf) -> VfsResult<(usize, u64)> {
         let _guard = self.shared.io_lock.write();
-        let file = self.inner.entry().as_file()?;
-        let len = file.len()?;
+        let len = *self.shared.size.lock();
         self.write_at_locked(buf, len)
             .map(|written| (written, len + written as u64))
     }
@@ -850,8 +883,8 @@ impl CachedFile {
     pub fn set_len(&self, len: u64) -> VfsResult<()> {
         let _guard = self.shared.io_lock.write();
         let file = self.inner.entry().as_file()?;
-        let old_len = file.len()?;
-        file.set_len(len)?;
+        let old_len = *self.shared.size.lock();
+        *self.shared.size.lock() = len;
 
         let old_last_page = (old_len / PAGE_SIZE as u64) as u32;
         let new_last_page = (len / PAGE_SIZE as u64) as u32;
@@ -890,6 +923,10 @@ impl CachedFile {
         }
         let _guard = self.shared.io_lock.write();
         let file = self.inner.entry().as_file()?;
+        let cached_size = *self.shared.size.lock();
+        if file.len()? != cached_size {
+            file.set_len(cached_size)?;
+        }
         self.flush_dirty_pages(file)?;
         file.sync(data_only)?;
         Ok(())
@@ -941,6 +978,10 @@ impl FileBackend {
                 let len = dst.remaining_mut();
                 if len >= 8192 && !cached.in_memory() {
                     let file = cached.location().entry().as_file()?;
+                    let cached_size = *cached.shared.size.lock();
+                    if file.len()? != cached_size {
+                        file.set_len(cached_size)?;
+                    }
                     cached.flush_dirty_pages(file)?;
                     let shared = shared_file_state(cached.location());
                     let _guard = shared.io_lock.read();
@@ -979,6 +1020,10 @@ impl FileBackend {
                 let len = src.remaining();
                 if len >= 8192 && !cached.in_memory() {
                     let file = cached.location().entry().as_file()?;
+                    let cached_size = *cached.shared.size.lock();
+                    if file.len()? != cached_size {
+                        file.set_len(cached_size)?;
+                    }
                     cached.flush_dirty_pages(file)?;
                     let shared = shared_file_state(cached.location());
                     let _guard = shared.io_lock.write();
@@ -988,6 +1033,11 @@ impl FileBackend {
                         })
                     }));
                     let invalidate = shared.discard_all_pages(file, false);
+                    let new_end = offset;
+                    let mut size_guard = cached.shared.size.lock();
+                    if new_end > *size_guard {
+                        *size_guard = new_end;
+                    }
                     match (result, invalidate) {
                         (Ok(written), Ok(())) => Ok(written),
                         (Err(err), Ok(())) => Err(err),
@@ -1009,6 +1059,10 @@ impl FileBackend {
                 } else {
                     let shared = shared_file_state(loc);
                     let _guard = shared.io_lock.write();
+                    let cached_size = *shared.size.lock();
+                    if file.len()? != cached_size {
+                        file.set_len(cached_size)?;
+                    }
                     shared.flush_dirty_pages(file)?;
                     let result = src.write_to(&mut axio::write_fn(|buf| {
                         file.write_at(buf, offset).inspect(|written| {
@@ -1016,6 +1070,11 @@ impl FileBackend {
                         })
                     }));
                     let invalidate = shared.discard_all_pages(file, false);
+                    let new_end = offset;
+                    let mut size_guard = shared.size.lock();
+                    if new_end > *size_guard {
+                        *size_guard = new_end;
+                    }
                     match (result, invalidate) {
                         (Ok(written), Ok(())) => Ok(written),
                         (Err(err), Ok(())) => Err(err),
@@ -1035,6 +1094,10 @@ impl FileBackend {
                 let shared = shared_file_state(loc);
                 let _guard = shared.io_lock.write();
                 let file = loc.entry().as_file()?;
+                let cached_size = *shared.size.lock();
+                if file.len()? != cached_size {
+                    file.set_len(cached_size)?;
+                }
                 shared.flush_dirty_pages(file)?;
                 let mut end = 0;
                 let result = src.write_to(&mut axio::write_fn(|buf| {
@@ -1044,6 +1107,9 @@ impl FileBackend {
                     })
                 }));
                 let invalidate = shared.discard_all_pages(file, false);
+                if result.is_ok() {
+                    *shared.size.lock() = end;
+                }
                 match (result, invalidate) {
                     (Ok(n), Ok(())) => Ok((n, end)),
                     (Err(err), Ok(())) => Err(err),
@@ -1068,6 +1134,10 @@ impl FileBackend {
                 let shared = shared_file_state(loc);
                 let _guard = shared.io_lock.write();
                 let file = loc.entry().as_file()?;
+                let cached_size = *shared.size.lock();
+                if file.len()? != cached_size {
+                    file.set_len(cached_size)?;
+                }
                 shared.flush_dirty_pages(file)?;
                 file.sync(data_only)
             }
@@ -1081,6 +1151,7 @@ impl FileBackend {
                 let shared = shared_file_state(loc);
                 let _guard = shared.io_lock.write();
                 let file = loc.entry().as_file()?;
+                *shared.size.lock() = len;
                 shared.flush_dirty_pages(file)?;
                 let result = file.set_len(len);
                 let invalidate = shared.discard_all_pages(file, false);
