@@ -2331,6 +2331,7 @@ impl Process {
             self.time_context
                 .itimer_real_interval_ns
                 .store(0, Ordering::Release);
+            super::remove_from_itimer_real(self.pid());
         } else {
             let deadline = now_ns.saturating_add(value_ns);
             self.time_context
@@ -2339,6 +2340,7 @@ impl Process {
             self.time_context
                 .itimer_real_interval_ns
                 .store(interval_ns, Ordering::Release);
+            super::add_to_itimer_real(self.pid());
             super::update_itimer_deadline(deadline);
         }
         (old_remaining, old_interval)
