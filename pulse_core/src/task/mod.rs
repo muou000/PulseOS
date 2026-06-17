@@ -9,7 +9,7 @@ use alloc::{
     sync::{Arc, Weak},
     vec::Vec,
 };
-use hashbrown::HashMap;
+use hashbrown::{HashMap, HashSet};
 
 use axerrno::{LinuxError, LinuxResult};
 use kspin::SpinNoIrq;
@@ -30,6 +30,17 @@ static PROCESS_REGISTRY: Lazy<SpinNoIrq<HashMap<u64, Arc<Process>>>> =
 static THREAD_REGISTRY: Lazy<SpinNoIrq<HashMap<u64, Weak<Thread>>>> =
     Lazy::new(|| SpinNoIrq::new(HashMap::new()));
 
+static ITIMER_REAL_PROCESSES: Lazy<SpinNoIrq<HashSet<u64>>> =
+    Lazy::new(|| SpinNoIrq::new(HashSet::new()));
+
+pub fn add_to_itimer_real(pid: u64) {
+    ITIMER_REAL_PROCESSES.lock().insert(pid);
+}
+
+pub fn remove_from_itimer_real(pid: u64) {
+    ITIMER_REAL_PROCESSES.lock().remove(&pid);
+}
+
 static INIT_PROCESS: spin::Once<Arc<Process>> = spin::Once::new();
 
 pub fn register_process(pid: u64, process: Arc<Process>) {
@@ -39,6 +50,7 @@ pub fn register_process(pid: u64, process: Arc<Process>) {
 
 pub fn unregister_process(pid: u64) {
     PROCESS_REGISTRY.lock().remove(&pid);
+    remove_from_itimer_real(pid);
 }
 
 pub fn init_process() -> Option<Arc<Process>> {
@@ -143,17 +155,38 @@ fn itimer_tick_hook() {
     
     if now_ns >= NEXT_ITIMER_DEADLINE.load(core::sync::atomic::Ordering::Relaxed) {
         NEXT_ITIMER_DEADLINE.store(u64::MAX, core::sync::atomic::Ordering::Relaxed);
+        
+        let active_pids: Vec<u64> = ITIMER_REAL_PROCESSES.lock().iter().copied().collect();
         let registry = PROCESS_REGISTRY.lock();
         let mut next_min = u64::MAX;
-        for proc in registry.values() {
-            if !proc.is_zombie() {
-                if let Some(next_deadline) = proc.check_itimer_real_tick(now_ns) {
-                    if next_deadline < next_min {
-                        next_min = next_deadline;
+        let mut to_remove = Vec::new();
+        
+        for pid in active_pids {
+            if let Some(proc) = registry.get(&pid) {
+                if !proc.is_zombie() {
+                    if let Some(next_deadline) = proc.check_itimer_real_tick(now_ns) {
+                        if next_deadline < next_min {
+                            next_min = next_deadline;
+                        }
+                    } else {
+                        to_remove.push(pid);
                     }
+                } else {
+                    to_remove.push(pid);
                 }
+            } else {
+                to_remove.push(pid);
             }
         }
+        drop(registry);
+        
+        if !to_remove.is_empty() {
+            let mut active = ITIMER_REAL_PROCESSES.lock();
+            for pid in to_remove {
+                active.remove(&pid);
+            }
+        }
+        
         NEXT_ITIMER_DEADLINE.fetch_min(next_min, core::sync::atomic::Ordering::Relaxed);
     }
 
