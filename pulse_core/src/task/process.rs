@@ -31,6 +31,12 @@ use crate::{
     fd_table::{FD_LIMIT, FdTable, SharedFdTable, stdio_entries},
 };
 
+#[derive(Clone)]
+pub enum ThreadState {
+    Pending,
+    Active(AxTaskRef),
+}
+
 const ROBUST_LIST_LIMIT: usize = 2048;
 const DEFAULT_MEMLOCK_LIMIT_BYTES: u64 = u64::MAX;
 const DEFAULT_STACK_LIMIT_BYTES: u64 = USER_STACK_SIZE as u64;
@@ -394,10 +400,8 @@ pub struct Process {
     pub stack_top: AtomicUsize,
     /// 程序入口地址
     pub entry: AtomicUsize,
-    /// TID列表
-    threads: SpinNoIrq<Vec<u64>>,
-    /// 线程的任务引用计数列表
-    task_refs: SpinNoIrq<Vec<AxTaskRef>>,
+    /// 线程与任务状态注册表
+    threads: SpinNoIrq<BTreeMap<u64, ThreadState>>,
     /// 子进程列表，使用自旋锁保护
     children: SpinNoIrq<Vec<Arc<Process>>>,
     /// 子进程退出等待事件队列
@@ -688,7 +692,7 @@ impl Process {
     }
 
     pub fn thread_ids_snapshot(&self) -> Vec<u64> {
-        self.threads.lock().clone()
+        self.threads.lock().keys().copied().collect()
     }
 
     pub fn children_pids_snapshot(&self) -> Vec<u64> {
@@ -696,10 +700,13 @@ impl Process {
     }
 
     pub fn task_tids_snapshot(&self) -> Vec<u64> {
-        self.task_refs
+        self.threads
             .lock()
             .iter()
-            .map(|t| t.id().as_u64())
+            .filter_map(|(tid, state)| match state {
+                ThreadState::Active(_) => Some(*tid),
+                _ => None,
+            })
             .collect()
     }
 
@@ -1405,8 +1412,11 @@ impl Process {
             time_context: TimeContext::new(),
             stack_top: AtomicUsize::new(USER_STACK_TOP),
             entry: AtomicUsize::new(0),
-            threads: SpinNoIrq::new(alloc::vec![pid]),
-            task_refs: SpinNoIrq::new(Vec::new()),
+            threads: SpinNoIrq::new({
+                let mut map = BTreeMap::new();
+                map.insert(pid, ThreadState::Pending);
+                map
+            }),
             children: SpinNoIrq::new(Vec::new()),
             child_exit_event: WaitQueue::new(),
             zombie: AtomicBool::new(false),
@@ -1561,8 +1571,11 @@ impl Process {
             time_context: TimeContext::new(),
             stack_top: AtomicUsize::new(parent.stack_top.load(Ordering::Acquire)),
             entry: AtomicUsize::new(parent.entry.load(Ordering::Acquire)),
-            threads: SpinNoIrq::new(alloc::vec![pid]),
-            task_refs: SpinNoIrq::new(Vec::new()),
+            threads: SpinNoIrq::new({
+                let mut map = BTreeMap::new();
+                map.insert(pid, ThreadState::Pending);
+                map
+            }),
             children: SpinNoIrq::new(Vec::new()),
             child_exit_event: WaitQueue::new(),
             zombie: AtomicBool::new(false),
@@ -1730,7 +1743,16 @@ impl Process {
         // but drop group vectors and capabilities.
         let (ruid, euid, suid, fsuid, rgid, egid, sgid, fsgid) = {
             let creds = self.credentials.read();
-            (creds.ruid, creds.euid, creds.suid, creds.fsuid, creds.rgid, creds.egid, creds.sgid, creds.fsgid)
+            (
+                creds.ruid,
+                creds.euid,
+                creds.suid,
+                creds.fsuid,
+                creds.rgid,
+                creds.egid,
+                creds.sgid,
+                creds.fsgid,
+            )
         };
         let dummy_credentials = Credentials::new(
             ruid,
@@ -1779,58 +1801,52 @@ impl Process {
     }
 
     pub fn register_thread(&self, tid: u64) {
-        let mut threads = self.threads.lock();
-        if !threads.contains(&tid) {
-            threads.push(tid);
-        }
+        let mut registry = self.threads.lock();
+        registry.insert(tid, ThreadState::Pending);
     }
 
     pub fn register_task_ref(&self, task: AxTaskRef) {
         if let Some(handle) = super::thread_handle_from_task(&task) {
             handle.attach_task_ref(task.clone());
         }
-        let mut task_refs = self.task_refs.lock();
+        let mut registry = self.threads.lock();
         let tid = task.id().as_u64();
-        if task_refs
-            .iter()
-            .any(|task_ref| task_ref.id().as_u64() == tid)
-        {
-            return;
-        }
-        task_refs.push(task);
+        registry.insert(tid, ThreadState::Active(task));
     }
 
     pub fn task_ref_by_tid(&self, tid: u64) -> Option<AxTaskRef> {
-        self.task_refs
-            .lock()
-            .iter()
-            .find(|task| task.id().as_u64() == tid)
-            .cloned()
+        let registry = self.threads.lock();
+        match registry.get(&tid) {
+            Some(ThreadState::Active(task)) => Some(task.clone()),
+            _ => None,
+        }
     }
 
     pub fn take_task_ref_by_tid(&self, tid: u64) -> Option<AxTaskRef> {
-        let mut task_refs = self.task_refs.lock();
-        let idx = task_refs
-            .iter()
-            .position(|task| task.id().as_u64() == tid)?;
-        Some(task_refs.remove(idx))
+        let mut registry = self.threads.lock();
+        match registry.remove(&tid) {
+            Some(ThreadState::Active(task)) => Some(task),
+            _ => None,
+        }
     }
 
     pub fn wait_task_refs_exited(&self) {
-        let task_refs = self.task_refs.lock().clone();
-        for task in task_refs {
-            let _ = task.join();
+        let registry = self.threads.lock().clone();
+        for (_, state) in registry {
+            if let ThreadState::Active(task) = state {
+                let _ = task.join();
+            }
         }
     }
 
     pub fn release_task_refs(&self) {
-        self.task_refs.lock().clear();
+        self.threads.lock().clear();
     }
 
     pub fn unregister_thread(&self, tid: u64) -> usize {
-        let mut threads = self.threads.lock();
-        threads.retain(|thread_tid| *thread_tid != tid);
-        threads.len()
+        let mut registry = self.threads.lock();
+        registry.remove(&tid);
+        registry.len()
     }
 
     pub fn begin_group_exit(&self, exit_code: i32) {
@@ -1838,10 +1854,12 @@ impl Process {
         self.group_exiting.store(true, Ordering::Release);
         self.futex_table.wake_all();
 
-        let tasks = self.task_refs.lock().clone();
-        for task in tasks {
-            if let Some(handle) = thread_handle_from_task(&task) {
-                handle.signal_wait_queue().notify_all(false);
+        let registry = self.threads.lock().clone();
+        for (_, state) in registry {
+            if let ThreadState::Active(task) = state {
+                if let Some(handle) = thread_handle_from_task(&task) {
+                    handle.signal_wait_queue().notify_all(false);
+                }
             }
         }
     }
@@ -1921,7 +1939,7 @@ impl Process {
         } else {
             exit_code
         };
-        self.task_refs.lock().clear();
+        self.threads.lock().clear();
         self.exit_code.store(final_code, Ordering::Release);
         self.zombie.store(true, Ordering::Release);
         self.complete_vfork();
@@ -1984,7 +2002,9 @@ impl Process {
                         } else {
                             child.parent_pid.store(init.pid(), Ordering::Release);
                             child.reparented.store(true, Ordering::Release);
-                            child.parent_exit_signal.store(SIGCHLD as i32, Ordering::Release);
+                            child
+                                .parent_exit_signal
+                                .store(SIGCHLD as i32, Ordering::Release);
                             *child.parent.write() = Some(Arc::downgrade(&init));
                             init.add_child(child.clone());
 
@@ -2279,12 +2299,14 @@ impl Process {
     pub fn snapshot_cpu_time_ns(&self, now_ns: u64) -> (u64, u64) {
         let mut total_user = self.time_context.user_time_ns.load(Ordering::Relaxed);
         let mut total_sys = self.time_context.sys_time_ns.load(Ordering::Relaxed);
-        let task_refs = self.task_refs.lock();
-        for task in task_refs.iter() {
-            if let Some(handle) = super::thread_handle_from_task(task) {
-                let (u, s) = handle.snapshot_cpu_time_ns(now_ns);
-                total_user = total_user.saturating_add(u);
-                total_sys = total_sys.saturating_add(s);
+        let registry = self.threads.lock();
+        for state in registry.values() {
+            if let ThreadState::Active(task) = state {
+                if let Some(handle) = super::thread_handle_from_task(task) {
+                    let (u, s) = handle.snapshot_cpu_time_ns(now_ns);
+                    total_user = total_user.saturating_add(u);
+                    total_sys = total_sys.saturating_add(s);
+                }
             }
         }
         (total_user, total_sys)
@@ -2557,7 +2579,8 @@ impl Process {
                             let mut aspace_write = aspace_handle.write();
                             if aspace_write.handle_page_fault_write(
                                 vaddr,
-                                axhal::trap::PageFaultFlags::READ | axhal::trap::PageFaultFlags::USER,
+                                axhal::trap::PageFaultFlags::READ
+                                    | axhal::trap::PageFaultFlags::USER,
                             ) {
                                 if let Ok((paddr, ..)) = aspace_write.query_vaddr(vaddr) {
                                     paddr_res = paddr.as_usize();
@@ -2588,7 +2611,10 @@ impl Process {
                     core::mem::size_of::<FutexWaitv>(),
                 )
             };
-            self.read_user_bytes(waiters_addr + i as usize * core::mem::size_of::<FutexWaitv>(), buf)?;
+            self.read_user_bytes(
+                waiters_addr + i as usize * core::mem::size_of::<FutexWaitv>(),
+                buf,
+            )?;
             waiters.push(w);
         }
 
@@ -2633,7 +2659,8 @@ impl Process {
             queues.push(queue);
         }
 
-        let q_refs: alloc::vec::Vec<&axtask::WaitQueue> = queues.iter().map(|q| q.as_ref()).collect();
+        let q_refs: alloc::vec::Vec<&axtask::WaitQueue> =
+            queues.iter().map(|q| q.as_ref()).collect();
 
         let mut mismatch = false;
 
