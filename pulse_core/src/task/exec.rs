@@ -224,9 +224,10 @@ impl Process {
 
         let new_aspace_handle = Arc::new(RwLock::new(new_aspace));
         let new_pt_root = new_aspace_handle.read().page_table_root();
+        let new_asid = new_aspace_handle.read().asid();
         let _old_aspace = self.replace_aspace_handle(new_aspace_handle);
 
-        axtask::set_current_page_table_root(new_pt_root);
+        axtask::set_current_page_table_root(new_pt_root, new_asid);
         self.activate();
         self.complete_vfork();
 

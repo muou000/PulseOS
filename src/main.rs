@@ -65,7 +65,8 @@ fn main() {
             info!("Created initial user process");
 
             let pt_root = init_thread.process().page_table_root();
-            inner.ctx_mut().set_page_table_root(pt_root);
+            let asid = init_thread.process().asid();
+            inner.ctx_mut().set_page_table_root(pt_root, asid);
 
             init_thread.process().sync_fs_context();
 

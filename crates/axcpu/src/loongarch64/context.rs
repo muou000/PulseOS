@@ -144,6 +144,9 @@ pub struct TaskContext {
     #[cfg(feature = "uspace")]
     /// user page table root
     pub pgdl: usize,
+    #[cfg(feature = "uspace")]
+    /// user space address space identifier
+    pub asid: usize,
     #[cfg(feature = "fp-simd")]
     /// Floating Point Unit states
     pub fpu: FpuState,
@@ -172,8 +175,9 @@ impl TaskContext {
     /// The hardware register for user page table root (`pgdl` for loongarch64)
     /// will be updated to the next task's after [`Self::switch_to`].
     #[cfg(feature = "uspace")]
-    pub fn set_page_table_root(&mut self, pgdl: memory_addr::PhysAddr) {
+    pub fn set_page_table_root(&mut self, pgdl: memory_addr::PhysAddr, asid: usize) {
         self.pgdl = pgdl.as_usize();
+        self.asid = asid;
     }
 
     /// Switches to another task.
@@ -189,9 +193,11 @@ impl TaskContext {
         #[cfg(feature = "uspace")]
         {
             crate::asm::write_kernel_sp(next_ctx.kernel_sp);
-            if self.pgdl != next_ctx.pgdl {
-                unsafe { crate::asm::write_user_page_table(pa!(next_ctx.pgdl)) };
-                crate::asm::flush_tlb(None); // currently flush the entire TLB
+            if self.pgdl != next_ctx.pgdl || self.asid != next_ctx.asid {
+                unsafe {
+                    crate::asm::write_user_page_table(pa!(next_ctx.pgdl));
+                    crate::asm::write_user_asid(next_ctx.asid);
+                };
             }
         }
         #[cfg(feature = "fp-simd")]

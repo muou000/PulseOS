@@ -1109,6 +1109,10 @@ impl Process {
         self.aspace_handle().read().page_table_root()
     }
 
+    pub fn asid(&self) -> usize {
+        self.aspace_handle().read().asid()
+    }
+
     pub fn read_user_u32(&self, user_addr: usize) -> AxResult<u32> {
         let mut bytes = [0u8; core::mem::size_of::<u32>()];
         self.read_user_bytes(user_addr, &mut bytes)?;
@@ -1641,9 +1645,24 @@ impl Process {
 
     pub fn activate(&self) {
         let pt_root = self.page_table_root();
+        let asid = self.asid();
         unsafe {
-            axhal::asm::write_user_page_table(pt_root);
-            axhal::asm::flush_tlb(None);
+            #[cfg(target_arch = "riscv64")]
+            {
+                axhal::asm::write_user_page_table(pt_root, asid);
+                axhal::asm::flush_tlb(None);
+            }
+            #[cfg(target_arch = "loongarch64")]
+            {
+                axhal::asm::write_user_page_table(pt_root);
+                axhal::asm::write_user_asid(asid);
+                axhal::asm::flush_tlb(None);
+            }
+            #[cfg(not(any(target_arch = "riscv64", target_arch = "loongarch64")))]
+            {
+                axhal::asm::write_user_page_table(pt_root);
+                axhal::asm::flush_tlb(None);
+            }
         }
     }
 
@@ -1677,9 +1696,10 @@ impl Process {
 
         let new_handle = ZOMBIE_ASPACE_HANDLE.clone();
         let new_pt_root = new_handle.read().page_table_root();
+        let new_asid = new_handle.read().asid();
         let old_handle = self.replace_aspace_handle(new_handle);
         if switch_current_aspace {
-            axtask::set_current_page_table_root(new_pt_root);
+            axtask::set_current_page_table_root(new_pt_root, new_asid);
             self.activate();
         }
         drop(old_handle);
@@ -2893,7 +2913,8 @@ impl Process {
         }
 
         let pt_root = child_proc.page_table_root();
-        inner.ctx_mut().set_page_table_root(pt_root);
+        let asid = child_proc.asid();
+        inner.ctx_mut().set_page_table_root(pt_root, asid);
         super::register_process(child_proc.pid(), child_proc.clone());
         inner.init_task_ext(super::ThreadHandle::new(child_thread));
 
@@ -2978,7 +2999,8 @@ impl Process {
         }
 
         let pt_root = child_proc.page_table_root();
-        inner.ctx_mut().set_page_table_root(pt_root);
+        let asid = child_proc.asid();
+        inner.ctx_mut().set_page_table_root(pt_root, asid);
         if !params.is_thread_clone {
             // Thread clones reuse the existing PROCESS_REGISTRY entry for this pid.
             super::register_process(child_proc.pid(), child_proc.clone());

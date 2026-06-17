@@ -195,6 +195,9 @@ pub struct TaskContext {
     /// The `satp` register value, i.e., the page table root.
     #[cfg(feature = "uspace")]
     pub satp: memory_addr::PhysAddr,
+    #[cfg(feature = "uspace")]
+    /// user space address space identifier
+    pub asid: usize,
     #[cfg(feature = "fp-simd")]
     pub fp_state: FpState,
 }
@@ -228,8 +231,9 @@ impl TaskContext {
     /// The hardware register for page table root (`satp` for riscv64) will be
     /// updated to the next task's after [`Self::switch_to`].
     #[cfg(feature = "uspace")]
-    pub fn set_page_table_root(&mut self, satp: memory_addr::PhysAddr) {
+    pub fn set_page_table_root(&mut self, satp: memory_addr::PhysAddr, asid: usize) {
         self.satp = satp;
+        self.asid = asid;
     }
 
     /// Switches to another task.
@@ -243,9 +247,8 @@ impl TaskContext {
             unsafe { crate::asm::write_thread_pointer(next_ctx.tp) };
         }
         #[cfg(feature = "uspace")]
-        if self.satp != next_ctx.satp {
-            unsafe { crate::asm::write_user_page_table(next_ctx.satp) };
-            crate::asm::flush_tlb(None); // currently flush the entire TLB
+        if self.satp != next_ctx.satp || self.asid != next_ctx.asid {
+            unsafe { crate::asm::write_user_page_table(next_ctx.satp, next_ctx.asid) };
         }
         #[cfg(feature = "fp-simd")]
         {

@@ -5,10 +5,26 @@ use page_table_entry::riscv::Rv64PTE;
 
 #[inline]
 fn riscv_flush_tlb(vaddr: Option<memory_addr::VirtAddr>) {
+    let mut satp_val: usize;
+    unsafe {
+        core::arch::asm!("csrr {}, satp", out(reg) satp_val);
+    }
+    let asid = (satp_val >> 44) & 0xffff; // Extract ASID (bits 44-59)
     if let Some(vaddr) = vaddr {
-        riscv::asm::sfence_vma(0, vaddr.as_usize())
+        unsafe {
+            core::arch::asm!(
+                "sfence.vma {}, {}",
+                in(reg) vaddr.as_usize(),
+                in(reg) asid
+            );
+        }
     } else {
-        riscv::asm::sfence_vma_all();
+        unsafe {
+            core::arch::asm!(
+                "sfence.vma x0, {}",
+                in(reg) asid
+            );
+        }
     }
 }
 
