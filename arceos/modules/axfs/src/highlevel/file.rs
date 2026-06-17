@@ -1181,7 +1181,7 @@ impl File {
             None
         } else {
             Some(Mutex::new(if flags.contains(FileFlags::APPEND) {
-                inner.location().len().unwrap_or_default()
+                cached_file_size(inner.location()).unwrap_or_default()
             } else {
                 0
             }))
@@ -1356,7 +1356,7 @@ impl Seek for &File {
             let new_pos = match pos {
                 SeekFrom::Start(pos) => pos,
                 SeekFrom::End(off) => {
-                    let size = self.access(FileFlags::empty())?.location().len()?;
+                    let size = cached_file_size(self.access(FileFlags::empty())?.location())?;
                     size.checked_add_signed(off).ok_or(VfsError::InvalidInput)?
                 }
                 SeekFrom::Current(off) => guard

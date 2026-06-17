@@ -175,10 +175,11 @@ pub fn set_loop_backing(id: usize, file: File) -> axfs_ng_vfs::VfsResult<()> {
         return Err(axfs_ng_vfs::VfsError::InvalidInput);
     }
     let metadata = file.location().metadata()?;
+    let size = cached_file_size(file.location()).unwrap_or(metadata.size);
     *fs::loop_dev::LOOP_DEVICES[id].backing.lock() = Some(Arc::new(file));
     fs::loop_dev::LOOP_DEVICES[id]
         .size
-        .store(metadata.size, core::sync::atomic::Ordering::Release);
+        .store(size, core::sync::atomic::Ordering::Release);
     Ok(())
 }
 

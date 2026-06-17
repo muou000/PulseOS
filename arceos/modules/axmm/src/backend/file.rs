@@ -103,7 +103,7 @@ impl FileMapping {
     }
 
     pub fn file_bytes(&self) -> usize {
-        self.file.location().len().map(|len| len as usize).unwrap_or(self.file_bytes)
+        axfs::cached_file_size(self.file.location()).map(|len| len as usize).unwrap_or(self.file_bytes)
     }
 
     fn page_read_window(&self, page_addr: VirtAddr) -> Option<(u64, usize)> {

@@ -894,7 +894,7 @@ impl FdObject for FileObject {
                 len
             );
         } else {
-            let cur_size = metadata.size;
+            let cur_size = axfs::cached_file_size(self.inner.location()).unwrap_or(metadata.size);
             if end > cur_size {
                 axlog::warn!(
                     "sys_fallocate: physical space preallocation is not supported, falling back \
