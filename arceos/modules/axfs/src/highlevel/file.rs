@@ -773,13 +773,13 @@ impl CachedFile {
         let start_page = (range.start / PAGE_SIZE as u64) as u32;
         let end_page = range.end.div_ceil(PAGE_SIZE as u64) as u32;
         let mut page_offset = (range.start % PAGE_SIZE as u64) as usize;
+        let mut guard = self.shared.page_cache.lock();
         for pn in start_page..end_page {
             let page_start = pn as u64 * PAGE_SIZE as u64;
             let page_end = (range.end - page_start).min(PAGE_SIZE as u64) as usize;
 
             let skip_read = is_write && (page_offset == 0) && (page_end == PAGE_SIZE);
 
-            let mut guard = self.shared.page_cache.lock();
             let page = self.page_or_insert(file, &mut guard, pn, skip_read)?.0;
 
             initial = page_each(
@@ -937,7 +937,22 @@ impl FileBackend {
 
     pub fn read_at(&self, mut dst: impl Write + IoBufMut, mut offset: u64) -> VfsResult<usize> {
         match self {
-            Self::Cached(cached) => cached.read_at(dst, offset),
+            Self::Cached(cached) => {
+                let len = dst.remaining_mut();
+                if len >= 8192 && !cached.in_memory() {
+                    let file = cached.location().entry().as_file()?;
+                    cached.flush_dirty_pages(file)?;
+                    let shared = shared_file_state(cached.location());
+                    let _guard = shared.io_lock.read();
+                    dst.read_from(&mut axio::read_fn(|buf| {
+                        cached.location().entry().as_file()?.read_at(buf, offset).inspect(|read| {
+                            offset += *read as u64;
+                        })
+                    }))
+                } else {
+                    cached.read_at(dst, offset)
+                }
+            }
             Self::Direct(loc) => {
                 let shared = shared_file_state(loc);
                 let _guard = shared.io_lock.read();
@@ -952,7 +967,29 @@ impl FileBackend {
 
     pub fn write_at(&self, mut src: impl Read + IoBuf, mut offset: u64) -> VfsResult<usize> {
         match self {
-            Self::Cached(cached) => cached.write_at(src, offset),
+            Self::Cached(cached) => {
+                let len = src.remaining();
+                if len >= 8192 && !cached.in_memory() {
+                    let file = cached.location().entry().as_file()?;
+                    cached.flush_dirty_pages(file)?;
+                    let shared = shared_file_state(cached.location());
+                    let _guard = shared.io_lock.write();
+                    let result = src.write_to(&mut axio::write_fn(|buf| {
+                        file.write_at(buf, offset).inspect(|written| {
+                            offset += *written as u64;
+                        })
+                    }));
+                    let invalidate = shared.discard_all_pages(file, false);
+                    match (result, invalidate) {
+                        (Ok(written), Ok(())) => Ok(written),
+                        (Err(err), Ok(())) => Err(err),
+                        (Ok(_), Err(err)) => Err(err),
+                        (Err(err), Err(_)) => Err(err),
+                    }
+                } else {
+                    cached.write_at(src, offset)
+                }
+            }
             Self::Direct(loc) => {
                 let shared = shared_file_state(loc);
                 let _guard = shared.io_lock.write();
@@ -973,6 +1010,7 @@ impl FileBackend {
             }
         }
     }
+
 
     pub fn append(&self, mut src: impl Read + IoBuf) -> VfsResult<(usize, u64)> {
         match self {
