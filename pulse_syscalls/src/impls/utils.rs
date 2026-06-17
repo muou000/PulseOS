@@ -212,9 +212,8 @@ pub(crate) fn query_user_page_slice(
     let aspace = aspace_handle.read();
     
     let vaddr = memory_addr::VirtAddr::from(user_addr);
-    let page = vaddr.align_down_4k();
+    let start_page = vaddr.align_down_4k();
     let offset = vaddr.align_offset_4k();
-    let chunk_len = core::cmp::min(max_len, 4096 - offset);
     
     let required_flags = if write {
         axhal::paging::MappingFlags::WRITE | axhal::paging::MappingFlags::USER
@@ -222,16 +221,51 @@ pub(crate) fn query_user_page_slice(
         axhal::paging::MappingFlags::READ | axhal::paging::MappingFlags::USER
     };
     
-    if !aspace.can_access_range(vaddr, chunk_len, required_flags) {
+    let first_chunk_len = core::cmp::min(max_len, 4096 - offset);
+    if !aspace.can_access_range(vaddr, first_chunk_len, required_flags) {
         return None;
     }
     
-    let (paddr, flags, _) = aspace.query_vaddr(page).ok()?;
-    if paddr.as_usize() == 0 || !flags.contains(required_flags) {
+    let (start_paddr, flags, _) = aspace.query_vaddr(start_page).ok()?;
+    if start_paddr.as_usize() == 0 || !flags.contains(required_flags) {
         return None;
     }
     
-    let kvaddr = axhal::mem::phys_to_virt(paddr) + offset;
+    let mut total_len = first_chunk_len;
+    let mut current_page = start_page;
+    let mut expected_paddr = start_paddr;
+    
+    while total_len < max_len {
+        let next_page = match current_page.checked_add(4096) {
+            Some(addr) => addr,
+            None => break,
+        };
+        let next_expected_paddr = match expected_paddr.checked_add(4096) {
+            Some(addr) => addr,
+            None => break,
+        };
+        
+        let remaining = max_len - total_len;
+        let chunk = core::cmp::min(remaining, 4096);
+        
+        if !aspace.can_access_range(next_page, chunk, required_flags) {
+            break;
+        }
+        
+        if let Ok((paddr, flags, _)) = aspace.query_vaddr(next_page) {
+            if paddr == next_expected_paddr && flags.contains(required_flags) {
+                total_len += chunk;
+                current_page = next_page;
+                expected_paddr = next_expected_paddr;
+            } else {
+                break;
+            }
+        } else {
+            break;
+        }
+    }
+    
+    let kvaddr = axhal::mem::phys_to_virt(start_paddr) + offset;
     let ptr = kvaddr.as_mut_ptr();
-    Some(core::ptr::slice_from_raw_parts_mut(ptr, chunk_len))
+    Some(core::ptr::slice_from_raw_parts_mut(ptr, total_len))
 }
