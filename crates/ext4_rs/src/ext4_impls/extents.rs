@@ -1144,6 +1144,9 @@ impl Ext4 {
         block_header.entries_count = header.entries_count;
 
         if node_disk_pos == 0 {
+            if header.entries_count == 0 {
+                block_header.depth = 0;
+            }
             let data = unsafe {
                 let ptr = ext4block.data.as_ptr() as *const u32;
                 core::slice::from_raw_parts(ptr, 15)
