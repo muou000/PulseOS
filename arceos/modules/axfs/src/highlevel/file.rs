@@ -1,6 +1,6 @@
 use alloc::{
     boxed::Box,
-    collections::BTreeMap,
+    collections::{BTreeMap, VecDeque},
     sync::{Arc, Weak},
     vec::Vec,
 };
@@ -386,7 +386,7 @@ struct CachedFileShared {
     page_cache: Mutex<LruCache<u32, PageCache>>,
     evict_listeners: Mutex<Vec<Arc<EvictListener>>>,
     io_lock: RwLock<()>,
-    size: Mutex<u64>,
+    size: SpinMutex<u64>,
 }
 
 impl CachedFileShared {
@@ -399,7 +399,7 @@ impl CachedFileShared {
             },
             evict_listeners: Mutex::new(Vec::new()),
             io_lock: RwLock::new(()),
-            size: Mutex::new(size),
+            size: SpinMutex::new(size),
         }
     }
 
@@ -567,6 +567,9 @@ impl Drop for CachedFileShared {
     }
 }
 
+static RECENTLY_CLOSED_FILES: Lazy<SpinMutex<VecDeque<Arc<CachedFileShared>>>> =
+    Lazy::new(|| SpinMutex::new(VecDeque::new()));
+
 fn shared_file_state(location: &Location) -> Arc<CachedFileShared> {
     let key = file_cache_key(location);
     let in_memory = location.filesystem().name() == "tmpfs";
@@ -625,6 +628,16 @@ impl Drop for CachedFile {
                 }
                 if let Err(err) = self.flush_dirty_pages(file) {
                     error!("CachedFile drop: failed to flush dirty pages: {:?}", err);
+                }
+            }
+            if !self.in_memory {
+                let mut queue = RECENTLY_CLOSED_FILES.lock();
+                if let Some(pos) = queue.iter().position(|x| Arc::ptr_eq(x, &self.shared)) {
+                    queue.remove(pos);
+                }
+                queue.push_back(self.shared.clone());
+                while queue.len() > 8 {
+                    queue.pop_front();
                 }
             }
         }
