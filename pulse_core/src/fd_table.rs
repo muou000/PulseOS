@@ -174,7 +174,11 @@ fn metadata_to_stat(metadata: &Metadata) -> stat {
 }
 
 pub fn location_to_stat(location: &Location) -> LinuxResult<stat> {
-    Ok(metadata_to_stat(&location.metadata()?))
+    let mut st = metadata_to_stat(&location.metadata()?);
+    if let Ok(size) = axfs::cached_file_size(location) {
+        st.st_size = size as _;
+    }
+    Ok(st)
 }
 
 struct StdinRaw;
