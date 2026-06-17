@@ -111,7 +111,8 @@ pub fn flush_tlb(vaddr: Option<VirtAddr>) {
             //
             // When the operation indicated by op does not require an ASID, the
             // general register rj should be set to r0.
-            asm!("dbar 0; invtlb 0x05, $r0, {reg}; dbar 0; ibar 0", reg = in(reg) vaddr.as_usize());
+            let cur_asid = asid::read().asid();
+            asm!("dbar 0; invtlb 0x05, {asid}, {reg}; dbar 0; ibar 0", asid = in(reg) cur_asid, reg = in(reg) vaddr.as_usize());
         } else {
             // op 0x0: Clear all page table entries
             asm!("dbar 0; invtlb 0x00, $r0, $r0; dbar 0; ibar 0");
