@@ -563,10 +563,10 @@ fn shared_file_state(location: &Location) -> Arc<CachedFileShared> {
     let in_memory = location.filesystem().name() == "tmpfs";
 
     let mut registry = FILE_SHARED_STATES.lock();
-    prune_file_shared_states(&mut registry);
     if let Some(state) = registry.get(&key).and_then(Weak::upgrade) {
         return state;
     }
+    prune_file_shared_states(&mut registry);
 
     let state = Arc::new(CachedFileShared::new(in_memory));
     registry.insert(key, Arc::downgrade(&state));
@@ -954,13 +954,21 @@ impl FileBackend {
                 }
             }
             Self::Direct(loc) => {
-                let shared = shared_file_state(loc);
-                let _guard = shared.io_lock.read();
-                dst.read_from(&mut axio::read_fn(|buf| {
-                    loc.entry().as_file()?.read_at(buf, offset).inspect(|read| {
-                        offset += *read as u64;
-                    })
-                }))
+                if loc.flags().contains(NodeFlags::STREAM) {
+                    dst.read_from(&mut axio::read_fn(|buf| {
+                        loc.entry().as_file()?.read_at(buf, offset).inspect(|read| {
+                            offset += *read as u64;
+                        })
+                    }))
+                } else {
+                    let shared = shared_file_state(loc);
+                    let _guard = shared.io_lock.read();
+                    dst.read_from(&mut axio::read_fn(|buf| {
+                        loc.entry().as_file()?.read_at(buf, offset).inspect(|read| {
+                            offset += *read as u64;
+                        })
+                    }))
+                }
             }
         }
     }
@@ -991,21 +999,29 @@ impl FileBackend {
                 }
             }
             Self::Direct(loc) => {
-                let shared = shared_file_state(loc);
-                let _guard = shared.io_lock.write();
                 let file = loc.entry().as_file()?;
-                shared.flush_dirty_pages(file)?;
-                let result = src.write_to(&mut axio::write_fn(|buf| {
-                    file.write_at(buf, offset).inspect(|written| {
-                        offset += *written as u64;
-                    })
-                }));
-                let invalidate = shared.discard_all_pages(file, false);
-                match (result, invalidate) {
-                    (Ok(written), Ok(())) => Ok(written),
-                    (Err(err), Ok(())) => Err(err),
-                    (Ok(_), Err(err)) => Err(err),
-                    (Err(err), Err(_)) => Err(err),
+                if loc.flags().contains(NodeFlags::STREAM) {
+                    src.write_to(&mut axio::write_fn(|buf| {
+                        file.write_at(buf, offset).inspect(|written| {
+                            offset += *written as u64;
+                        })
+                    }))
+                } else {
+                    let shared = shared_file_state(loc);
+                    let _guard = shared.io_lock.write();
+                    shared.flush_dirty_pages(file)?;
+                    let result = src.write_to(&mut axio::write_fn(|buf| {
+                        file.write_at(buf, offset).inspect(|written| {
+                            offset += *written as u64;
+                        })
+                    }));
+                    let invalidate = shared.discard_all_pages(file, false);
+                    match (result, invalidate) {
+                        (Ok(written), Ok(())) => Ok(written),
+                        (Err(err), Ok(())) => Err(err),
+                        (Ok(_), Err(err)) => Err(err),
+                        (Err(err), Err(_)) => Err(err),
+                    }
                 }
             }
         }
