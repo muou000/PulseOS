@@ -42,7 +42,6 @@ pub struct VdsoClock {
     pub mult: u32,
     pub shift: u32,
     pub time_data: [VdsoTimestamp; VDSO_BASES],
-    pub _unused: u32,
 }
 
 impl Default for VdsoClock {
@@ -66,7 +65,6 @@ impl VdsoClock {
             mult: 0,
             shift: 32,
             time_data: [VdsoTimestamp::new(); VDSO_BASES],
-            _unused: 0,
         }
     }
 
@@ -87,6 +85,7 @@ impl VdsoClock {
 #[repr(align(4096))]
 pub struct VdsoTimeData {
     pub clock_data: [VdsoClock; 2],
+    pub aux_clock_data: [VdsoClock; 8],
     pub tz_minuteswest: i32,
     pub tz_dsttime: i32,
     pub hrtimer_res: u32,
@@ -103,6 +102,16 @@ impl VdsoTimeData {
     pub const fn new() -> Self {
         Self {
             clock_data: [VdsoClock::new(), VdsoClock::new()],
+            aux_clock_data: [
+                VdsoClock::new(),
+                VdsoClock::new(),
+                VdsoClock::new(),
+                VdsoClock::new(),
+                VdsoClock::new(),
+                VdsoClock::new(),
+                VdsoClock::new(),
+                VdsoClock::new(),
+            ],
             tz_minuteswest: 0,
             tz_dsttime: 0,
             hrtimer_res: 1,
@@ -148,51 +157,34 @@ pub fn update_vdso_clock(
     mono_ns: u64,
     mult_shift: (u32, u32),
 ) {
-    let prev_cycle = clk.cycle_last.load(Ordering::Relaxed);
-    let prev_basetime_ns = clk.time_data[1]
-        .sec
-        .wrapping_mul(NANOS_PER_SEC)
-        .wrapping_add(clk.time_data[1].nsec);
-
     // Check if this is a counter-based clock mode (non-None)
     let is_counter_mode = clk.clock_mode != (ClockMode::None as i32);
 
     if is_counter_mode {
         // Counter-based modes: Tsc (x86_64), Csr (riscv64/loongarch64), Cntvct
         // (aarch64)
-        if prev_cycle == 0 {
-            let (mult, shift) = mult_shift;
-            clk.mult = mult;
-            clk.shift = shift;
-            clk.time_data[1].sec = mono_ns / NANOS_PER_SEC;
-            clk.time_data[1].nsec = (mono_ns % NANOS_PER_SEC) << shift;
-            clk.cycle_last.store(cycle_now, Ordering::Relaxed);
-        } else {
-            let (mult, shift) = mult_shift;
-            if !(mult == u32::MAX && shift == 0) {
-                clk.mult = mult;
-                clk.shift = shift;
-                clk.time_data[1].sec = mono_ns / NANOS_PER_SEC;
-                clk.time_data[1].nsec = (mono_ns % NANOS_PER_SEC) << shift;
-                clk.cycle_last.store(cycle_now, Ordering::Relaxed);
-            } else {
-                let delta_cycles = (cycle_now.wrapping_sub(prev_cycle)) & clk.mask;
-                let delta_ns = mono_ns.saturating_sub(prev_basetime_ns);
-                if delta_cycles != 0 && delta_ns > 0 {
-                    let (mult, shift) = clocks_calc_mult_shift(delta_cycles, delta_ns, 1);
-                    clk.mult = mult;
-                    clk.shift = shift;
-                    clk.time_data[1].sec = mono_ns / NANOS_PER_SEC;
-                    clk.time_data[1].nsec = (mono_ns % NANOS_PER_SEC) << shift;
-                    clk.cycle_last.store(cycle_now, Ordering::Relaxed);
-                }
-            }
-        }
+        let (mult, shift) = mult_shift;
+        clk.mult = mult;
+        clk.shift = shift;
+        clk.time_data[1].sec = mono_ns / NANOS_PER_SEC;
+        clk.time_data[1].nsec = (mono_ns % NANOS_PER_SEC) << shift;
+        
+        // Update CLOCK_MONOTONIC_RAW (index 4)
+        clk.time_data[4].sec = mono_ns / NANOS_PER_SEC;
+        clk.time_data[4].nsec = (mono_ns % NANOS_PER_SEC) << shift;
+
+        clk.cycle_last.store(cycle_now, Ordering::Relaxed);
     } else {
         // ClockMode::None - No cycle->ns conversion; store direct monotonic ns.
         clk.mult = 0;
+        clk.shift = 0;
         clk.time_data[1].sec = mono_ns / NANOS_PER_SEC;
         clk.time_data[1].nsec = mono_ns % NANOS_PER_SEC;
+
+        // Update CLOCK_MONOTONIC_RAW (index 4)
+        clk.time_data[4].sec = mono_ns / NANOS_PER_SEC;
+        clk.time_data[4].nsec = mono_ns % NANOS_PER_SEC;
+
         clk.cycle_last.store(0, Ordering::Relaxed);
     }
 
@@ -202,6 +194,12 @@ pub fn update_vdso_clock(
     clk.time_data[0].nsec = (wall_ns % NANOS_PER_SEC) << shift;
     clk.time_data[7].sec = clk.time_data[1].sec;
     clk.time_data[7].nsec = clk.time_data[1].nsec;
+
+    // Update coarse clocks (un-shifted)
+    clk.time_data[5].sec = wall_ns / NANOS_PER_SEC;
+    clk.time_data[5].nsec = wall_ns % NANOS_PER_SEC;
+    clk.time_data[6].sec = mono_ns / NANOS_PER_SEC;
+    clk.time_data[6].nsec = mono_ns % NANOS_PER_SEC;
 
     if clk.seq.load(Ordering::Relaxed) < 10 {
         let cycle_val = clk.cycle_last.load(Ordering::Relaxed);

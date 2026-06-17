@@ -294,6 +294,59 @@ fn map_vdso_segments(
     Ok(mappings)
 }
 
+fn find_symbol_offset(elf_bytes: &[u8], symbol_name: &str) -> Option<usize> {
+    use xmas_elf::symbol_table::Entry;
+    let elf = xmas_elf::ElfFile::new(elf_bytes).ok()?;
+    
+    // Find the symbol table (either SHT_DYNSYM or SHT_SYMTAB)
+    for section in elf.section_iter() {
+        let sh_type = section.get_type().ok()?;
+        if sh_type == xmas_elf::sections::ShType::DynSym || sh_type == xmas_elf::sections::ShType::SymTab {
+            let data = section.get_data(&elf).ok()?;
+            match data {
+                xmas_elf::sections::SectionData::SymbolTable32(entries) => {
+                    for entry in entries {
+                        if let Ok(name) = entry.get_name(&elf) {
+                            if name == symbol_name {
+                                return Some(entry.value() as usize);
+                            }
+                        }
+                    }
+                }
+                xmas_elf::sections::SectionData::SymbolTable64(entries) => {
+                    for entry in entries {
+                        if let Ok(name) = entry.get_name(&elf) {
+                            if name == symbol_name {
+                                return Some(entry.value() as usize);
+                            }
+                        }
+                    }
+                }
+                xmas_elf::sections::SectionData::DynSymbolTable32(entries) => {
+                    for entry in entries {
+                        if let Ok(name) = entry.get_name(&elf) {
+                            if name == symbol_name {
+                                return Some(entry.value() as usize);
+                            }
+                        }
+                    }
+                }
+                xmas_elf::sections::SectionData::DynSymbolTable64(entries) => {
+                    for entry in entries {
+                        if let Ok(name) = entry.get_name(&elf) {
+                            if name == symbol_name {
+                                return Some(entry.value() as usize);
+                            }
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    None
+}
+
 #[cfg(not(target_arch = "x86_64"))]
 pub fn get_trampoline_addr(auxv: &[AuxEntry]) -> Option<usize> {
     let vdso_base = auxv
@@ -320,7 +373,12 @@ pub fn get_trampoline_addr(auxv: &[AuxEntry]) -> Option<usize> {
             &vdso_end as *const u8 as usize,
         );
         if end > start {
-            sigreturn_offset = Some(crate::config::SIGRETURN_SYM_OFFSET);
+            let vdso_bytes = core::slice::from_raw_parts(&vdso_start as *const u8, end - start);
+            sigreturn_offset = find_symbol_offset(vdso_bytes, "__vdso_rt_sigreturn");
+            if sigreturn_offset.is_none() {
+                warn!("__vdso_rt_sigreturn not found in vDSO ELF, falling back to config offset");
+                sigreturn_offset = Some(crate::config::SIGRETURN_SYM_OFFSET);
+            }
         }
     }
 
