@@ -37,11 +37,10 @@ pub fn syscall_handler(tf: &mut TrapFrame, syscall_num: usize) -> isize {
         tf.arg5(),
     ];
 
-    let exe = process.exec_path().unwrap_or_default();
     axlog::debug!(
         "Syscall: pid={} exe={} tid={} id={} args=[{:#x}, {:#x}, {:#x}, {:#x}, {:#x}, {:#x}]",
         process.pid(),
-        exe,
+        process.exec_path().unwrap_or_default(),
         axtask::current().id().as_u64(),
         syscall_num,
         args[0],
@@ -55,7 +54,7 @@ pub fn syscall_handler(tf: &mut TrapFrame, syscall_num: usize) -> isize {
     axlog::debug!(
         "Syscall ret: pid={} exe={} tid={} id={} ret={}",
         process.pid(),
-        exe,
+        process.exec_path().unwrap_or_default(),
         axtask::current().id().as_u64(),
         syscall_num,
         ret
@@ -148,8 +147,6 @@ fn syscall_dispatcher(
     args: [usize; 6],
     process: &pulse_core::task::Process,
 ) -> isize {
-    process.sync_fs_context();
-
     let sysno = match Sysno::new(syscall_id) {
         Some(sysno) => sysno,
         None => {
@@ -157,6 +154,46 @@ fn syscall_dispatcher(
             return -LinuxError::ENOSYS.code() as isize;
         }
     };
+
+    let mut is_fs_syscall = matches!(
+        sysno,
+        Sysno::openat
+            | Sysno::mkdirat
+            | Sysno::mknodat
+            | Sysno::mount
+            | Sysno::umount2
+            | Sysno::chroot
+            | Sysno::statfs
+            | Sysno::statx
+            | Sysno::getcwd
+            | Sysno::chdir
+            | Sysno::fchdir
+            | Sysno::unlinkat
+            | Sysno::linkat
+            | Sysno::renameat2
+            | Sysno::utimensat
+            | Sysno::readlinkat
+            | Sysno::symlinkat
+            | Sysno::faccessat
+            | Sysno::faccessat2
+            | Sysno::fchmodat
+            | Sysno::fchownat
+            | Sysno::execve
+            | Sysno::execveat
+            | Sysno::getrandom
+    );
+    #[cfg(target_arch = "loongarch64")]
+    {
+        is_fs_syscall |= matches!(sysno, Sysno::fstatat | Sysno::renameat);
+    }
+    #[cfg(target_arch = "riscv64")]
+    {
+        is_fs_syscall |= matches!(sysno, Sysno::newfstatat);
+    }
+
+    if is_fs_syscall {
+        process.sync_fs_context();
+    }
 
     match sysno {
         Sysno::getpid => impls::sys_getpid(),
