@@ -28,6 +28,7 @@ pub struct AddrSpace {
     va_range: VirtAddrRange,
     areas: MemorySet<Backend>,
     pt: spin::Mutex<PageTable>,
+    asid: usize,
 }
 
 impl AddrSpace {
@@ -66,6 +67,11 @@ impl AddrSpace {
         self.pt.lock().root_paddr()
     }
 
+    /// Returns the ASID of this address space.
+    pub fn asid(&self) -> usize {
+        self.asid
+    }
+
     /// Checks if the address space contains the given address range.
     pub fn contains_range(&self, start: VirtAddr, size: usize) -> bool {
         self.va_range
@@ -74,10 +80,12 @@ impl AddrSpace {
 
     /// Creates a new empty address space.
     pub fn new_empty(base: VirtAddr, size: usize) -> AxResult<Self> {
+        let asid = ASID_ALLOCATOR.lock().alloc();
         Ok(Self {
             va_range: VirtAddrRange::from_start_size(base, size),
             areas: MemorySet::new(),
             pt: spin::Mutex::new(PageTable::try_new().map_err(|_| AxError::NoMemory)?),
+            asid,
         })
     }
 
@@ -828,8 +836,69 @@ impl fmt::Debug for AddrSpace {
     }
 }
 
+#[cfg(target_arch = "riscv64")]
+unsafe fn flush_tlb_asid(asid: usize) {
+    unsafe { core::arch::asm!("sfence.vma x0, {}", in(reg) asid) };
+}
+
+#[cfg(target_arch = "loongarch64")]
+unsafe fn flush_tlb_asid(asid: usize) {
+    unsafe { core::arch::asm!("dbar 0; invtlb 0x06, {}, $r0; dbar 0; ibar 0", in(reg) asid) };
+}
+
+#[cfg(not(any(target_arch = "riscv64", target_arch = "loongarch64")))]
+unsafe fn flush_tlb_asid(_asid: usize) {
+    axhal::asm::flush_tlb(None);
+}
+
+struct AsidAllocator {
+    used: [bool; 1024],
+    next: usize,
+}
+
+impl AsidAllocator {
+    const fn new() -> Self {
+        let mut used = [false; 1024];
+        used[0] = true; // reserve ASID 0 for kernel/special tasks
+        Self { used, next: 1 }
+    }
+
+    fn alloc(&mut self) -> usize {
+        let start = self.next;
+        loop {
+            if !self.used[self.next] {
+                let asid = self.next;
+                self.used[asid] = true;
+                self.next = (self.next + 1) % 1024;
+                if self.next == 0 {
+                    self.next = 1;
+                }
+                return asid;
+            }
+            self.next = (self.next + 1) % 1024;
+            if self.next == 0 {
+                self.next = 1;
+            }
+            if self.next == start {
+                panic!("Out of ASIDs!");
+            }
+        }
+    }
+
+    fn free(&mut self, asid: usize) {
+        if asid > 0 && asid < 1024 {
+            self.used[asid] = false;
+        }
+    }
+}
+
+static ASID_ALLOCATOR: spin::Mutex<AsidAllocator> = spin::Mutex::new(AsidAllocator::new());
+
 impl Drop for AddrSpace {
     fn drop(&mut self) {
         self.clear();
+        let asid = self.asid;
+        ASID_ALLOCATOR.lock().free(asid);
+        unsafe { flush_tlb_asid(asid) };
     }
 }

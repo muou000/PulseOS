@@ -71,8 +71,8 @@ pub fn read_kernel_page_table() -> PhysAddr {
 ///
 /// This function is unsafe as it changes the virtual memory address space.
 #[inline]
-pub unsafe fn write_user_page_table(root_paddr: PhysAddr) {
-    unsafe { satp::set(satp::Mode::Sv39, 0, root_paddr.as_usize() >> 12) };
+pub unsafe fn write_user_page_table(root_paddr: PhysAddr, asid: usize) {
+    unsafe { satp::set(satp::Mode::Sv39, asid, root_paddr.as_usize() >> 12) };
 }
 
 /// Writes the register to update the current page table root for user space
@@ -88,7 +88,7 @@ pub unsafe fn write_user_page_table(root_paddr: PhysAddr) {
 /// This function is unsafe as it changes the virtual memory address space.
 #[inline]
 pub unsafe fn write_kernel_page_table(root_paddr: PhysAddr) {
-    unsafe { write_user_page_table(root_paddr) };
+    unsafe { write_user_page_table(root_paddr, 0) };
 }
 
 /// Flushes the TLB.

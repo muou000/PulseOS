@@ -2,7 +2,7 @@
 
 use core::arch::asm;
 
-use loongArch64::register::{crmd, ecfg, eentry, pgdh, pgdl};
+use loongArch64::register::{asid, crmd, ecfg, eentry, pgdh, pgdl};
 use memory_addr::{PhysAddr, VirtAddr};
 
 /// Allows the current CPU to respond to interrupts.
@@ -64,6 +64,15 @@ pub fn read_kernel_page_table() -> PhysAddr {
 /// This function is unsafe as it changes the virtual memory address space.
 pub unsafe fn write_user_page_table(root_paddr: PhysAddr) {
     pgdl::set_base(root_paddr.as_usize() as _);
+}
+
+/// Writes the register to update the current ASID.
+///
+/// # Safety
+///
+/// This function is unsafe as it changes the virtual memory address space.
+pub unsafe fn write_user_asid(val: usize) {
+    asid::set_asid(val);
 }
 
 /// Writes the register to update the current page table root for kernel space

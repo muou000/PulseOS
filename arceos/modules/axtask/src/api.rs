@@ -246,10 +246,10 @@ pub fn wake_task(task: AxTaskRef, resched: bool) {
 }
 
 /// Updates the saved page table root of the current task context.
-pub fn set_current_page_table_root(pt_root: memory_addr::PhysAddr) {
+pub fn set_current_page_table_root(pt_root: memory_addr::PhysAddr, asid: usize) {
     let curr = current();
     unsafe {
-        (*curr.ctx_mut_ptr()).set_page_table_root(pt_root);
+        (*curr.ctx_mut_ptr()).set_page_table_root(pt_root, asid);
     }
 }
 
