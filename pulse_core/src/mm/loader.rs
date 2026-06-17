@@ -103,6 +103,49 @@ fn vdso_segment_flags(flags: MemRegionFlags) -> MappingFlags {
     map_flags
 }
 
+pub fn prefault_range(
+    aspace: &mut AddrSpace,
+    start_vaddr: VirtAddr,
+    size: usize,
+    flags: MappingFlags,
+) -> AxResult<()> {
+    if size == 0 {
+        return Ok(());
+    }
+    let end_vaddr = start_vaddr.checked_add(size).ok_or(AxError::OutOfRange)?;
+    let pages = memory_addr::PageIter4K::new(start_vaddr.align_down_4k(), end_vaddr.align_up_4k())
+        .ok_or(AxError::BadAddress)?;
+    for page in pages {
+        let mut access_flags = axhal::trap::PageFaultFlags::USER;
+        if flags.contains(MappingFlags::READ) {
+            access_flags |= axhal::trap::PageFaultFlags::READ;
+        }
+        if flags.contains(MappingFlags::WRITE) {
+            access_flags |= axhal::trap::PageFaultFlags::WRITE;
+        }
+        if flags.contains(MappingFlags::EXECUTE) {
+            access_flags |= axhal::trap::PageFaultFlags::EXECUTE;
+        }
+
+        let mut done = false;
+        match aspace.handle_page_fault(page, access_flags) {
+            axmm::PageFaultResult::Handled(ok) => {
+                if !ok {
+                    return Err(AxError::BadAddress);
+                }
+                done = true;
+            }
+            axmm::PageFaultResult::NeedWriteLock => {}
+        }
+        if !done {
+            if !aspace.handle_page_fault_write(page, access_flags) {
+                return Err(AxError::BadAddress);
+            }
+        }
+    }
+    Ok(())
+}
+
 fn load_segments(
     aspace: &mut AddrSpace,
     elf: &ElfFile<'_>,
@@ -141,7 +184,8 @@ fn load_segments(
         let flags = segment_flags(&ph);
 
         if ph.flags().is_write() {
-            aspace.map_alloc(seg_start_page, seg_end_page - seg_start_page, flags, true)?;
+            let seg_len = seg_end_page - seg_start_page;
+            aspace.map_alloc(seg_start_page, seg_len, flags, true)?;
             if p_filesz > 0 {
                 let file_buf = read_elf_range(path, p_offset as u64, p_filesz)?;
                 write_user_region(aspace, p_vaddr, &file_buf)?;
@@ -149,9 +193,10 @@ fn load_segments(
         } else {
             if p_filesz > 0 {
                 let file_bytes = file_backed_end.sub_addr(seg_start_page);
+                let map_len = file_backed_end_page - seg_start_page;
                 aspace.map_file(
                     seg_start_page,
-                    file_backed_end_page - seg_start_page,
+                    map_len,
                     flags,
                     elf_file.clone(),
                     file_flags_for_segment(&ph),
@@ -159,15 +204,18 @@ fn load_segments(
                     file_bytes,
                     false, // ELF segments are private mappings
                 )?;
+                prefault_range(aspace, seg_start_page, map_len, flags)?;
             }
 
             if seg_end_page > file_backed_end_page {
+                let map_len = seg_end_page - file_backed_end_page;
                 aspace.map_alloc(
                     file_backed_end_page,
-                    seg_end_page - file_backed_end_page,
+                    map_len,
                     flags,
                     false,
                 )?;
+                prefault_range(aspace, file_backed_end_page, map_len, flags)?;
             }
         }
     }
