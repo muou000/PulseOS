@@ -4,3 +4,10 @@
 ## 2024-06-07 - Avoid vec![0; N] when the buffer is immediately overwritten
 **Learning:** Initializing large buffers with `vec![0; N]` in `#![no_std]` allocates and zeroes out the memory. For buffers like block device reads (`raw` array in `ext4`) that are immediately overwritten by a `read_block` system call, this zeroing is unnecessary overhead. However, safe Rust requires `read_block` to write to a valid initialized buffer (or an `&mut [u8]`). Using `vec![0; N]` is often fine for small arrays, but can be a bottleneck for large ones. In Ext4 write/read block functions, there are allocations for `vec![0u8; self.sector_size]` which is 512 bytes or 4KB, where zero initialization happens every time. Given safe Rust limitations without `MaybeUninit`, keeping `vec![0; ...]` might be necessary, but we can potentially optimize buffer usage or caching. Another optimization is `String::to_string` instead of `format!`.
 **Action:** Replace `format!("{}", fd)` with `fd.to_string()` in procfs iteration as it is an easy and significant performance improvement within hot loop.
+## 2023-10-25 - Arc::make_mut optimization for RwLock<Arc<T>>
+**Learning:** Using `clone()` then `Arc::new()` inside an `RwLock` to mutate a struct not only incurs two expensive heap allocations but also introduces a race condition if you swap from a `read` lock to a `write` lock.
+**Action:** Always prefer obtaining a single `write` lock and mutating via `Arc::make_mut(&mut *lock)` for `RwLock<Arc<T>>` to ensure thread-safety and eliminate redundant cloning/allocations when exclusively owned.
+
+## 2023-10-25 - Limited compiler tools in build container
+**Learning:** In this strictly offline no_std build environment, standard C compilers (`riscv64-linux-gnu-gcc`) and `std` targets for Rust are not available, preventing the creation of standalone benchmark binaries for user space tests.
+**Action:** When needing to provide users a way to benchmark performance in the OS, fallback to modifying existing test suite entrypoints (e.g., `testcode.sh`) to loop over built-in utilities (like `busybox id`) that trigger the relevant kernel paths.
