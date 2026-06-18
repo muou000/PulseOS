@@ -806,7 +806,9 @@ impl Process {
     }
 
     pub fn set_uids(&self, ruid: u32, euid: u32, suid: u32) {
-        let mut creds = self.credentials.read().as_ref().clone();
+        let mut creds_lock = self.credentials.write();
+        let creds = Arc::make_mut(&mut *creds_lock);
+
         let old_ruid = creds.ruid;
         let old_euid = creds.euid;
         let old_suid = creds.suid;
@@ -832,19 +834,20 @@ impl Process {
             creds.cap_permitted = 0;
             creds.cap_effective = 0;
         }
-        *self.credentials.write() = Arc::new(creds);
     }
 
     pub fn set_gids(&self, rgid: u32, egid: u32, sgid: u32) {
-        let mut creds = self.credentials.read().as_ref().clone();
+        let mut creds_lock = self.credentials.write();
+        let creds = Arc::make_mut(&mut *creds_lock);
+
         let old_egid = creds.egid;
         creds.rgid = rgid;
         creds.egid = egid;
         creds.sgid = sgid;
+
         if egid != old_egid {
             creds.fsgid = egid;
         }
-        *self.credentials.write() = Arc::new(creds);
     }
 
     pub fn is_root_user(&self) -> bool {
@@ -856,9 +859,9 @@ impl Process {
     }
 
     pub fn set_groups(&self, groups: Vec<u32>) {
-        let mut creds = self.credentials.read().as_ref().clone();
+        let mut creds_lock = self.credentials.write();
+        let creds = Arc::make_mut(&mut *creds_lock);
         creds.groups = groups;
-        *self.credentials.write() = Arc::new(creds);
     }
 
     pub fn memlock_limit_snapshot(&self) -> (u64, u64) {
