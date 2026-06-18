@@ -656,11 +656,13 @@ impl Process {
     }
 
     pub fn name(&self) -> String {
-        self.exec_path.read()
-            .as_ref()
-            .and_then(|p| p.split('/').last())
-            .map(|s| s.to_string())
-            .unwrap_or_else(|| "pulse_init".to_string())
+        let name = self
+            .exec_path
+            .read()
+            .as_deref()
+            .and_then(|p| p.rsplit('/').next())
+            .map(|s| s.to_string());
+        name.unwrap_or_else(|| "pulse_init".to_string())
     }
 
     pub fn exec_path(&self) -> Option<String> {

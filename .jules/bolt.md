@@ -7,3 +7,7 @@
 ## 2025-06-18 - Avoid cloning full strings behind RwLocks before splitting
 **Learning:** In a codebase, fetching a property that returns an `Option<String>` wrapped in a `RwLock` by doing `self.property.read().clone()` results in an unnecessary heap allocation and a full copy of the string memory. When the caller only needs to parse or split this string (e.g., getting the last segment of a path) and returns a smaller `String`, this overhead is highly inefficient.
 **Action:** When extracting a substring from a locked string, directly hold the read guard, deref to the `&str` using `.as_deref()` or `.as_ref()`, and perform the string manipulation inside the guard. Map the final, smaller slice to a `String` to minimize allocation size. Only allocate the memory for the portion of the string that is actually required.
+
+## 2025-06-18 - Reduce Lock Hold Times with local variable assignments
+**Learning:** Chained calls on lock guards (like `.unwrap_or_else(|| alloc())`) keep the lock held for the entire expression evaluation, including the slow allocation logic inside the fallback closure. This unnecessarily blocks other threads trying to acquire a lock.
+**Action:** When extracting a substring from a locked string and providing a fallback, split the expression. First evaluate the locked data and assign the result to a local `let name = ...;` variable to release the `RwLockReadGuard`. Then evaluate the slow fallback using `name.unwrap_or_else(...)`. This guarantees minimal lock hold times.
