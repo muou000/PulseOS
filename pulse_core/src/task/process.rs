@@ -656,7 +656,7 @@ impl Process {
     }
 
     pub fn name(&self) -> String {
-        self.exec_path()
+        self.exec_path.read()
             .as_ref()
             .and_then(|p| p.split('/').last())
             .map(|s| s.to_string())
