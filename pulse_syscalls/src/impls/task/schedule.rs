@@ -6,8 +6,6 @@ use pulse_core::task::current_thread;
 
 use crate::impls::utils::{alloc_zeroed_bytes, read_user_bytes, write_user_bytes};
 
-const DEFAULT_SCHED_POLICY: u32 = SCHED_RR;
-const DEFAULT_RT_PRIORITY: u32 = 1;
 const RT_PRIORITY_MIN: isize = 1;
 const RT_PRIORITY_MAX: isize = 99;
 const SCHED_ATTR_SIZE: u32 = core::mem::size_of::<SchedAttr>() as u32;
@@ -118,13 +116,15 @@ pub fn sys_sched_setaffinity(pid: usize, cpusetsize: usize, mask: usize) -> isiz
 }
 
 pub fn sys_sched_getscheduler(pid: usize) -> isize {
-    axlog::warn!(
-        "sys_sched_getscheduler (stub): reporting SCHED_RR without per-task scheduler state"
-    );
+    axlog::debug!("sys_sched_getscheduler: pid={}", pid);
     if let Err(e) = check_pid(pid) {
         return -e.code() as isize;
     }
-    DEFAULT_SCHED_POLICY as isize
+    let thread = match current_thread() {
+        Ok(t) => t,
+        Err(e) => return -e.code() as isize,
+    };
+    thread.sched_policy.load(core::sync::atomic::Ordering::Relaxed) as isize
 }
 
 pub fn sys_sched_setparam(pid: usize, param_ptr: usize) -> isize {
@@ -160,6 +160,12 @@ pub fn sys_sched_setparam(pid: usize, param_ptr: usize) -> isize {
 }
 
 pub fn sys_sched_setscheduler(pid: usize, policy: usize, param_ptr: usize) -> isize {
+    axlog::debug!(
+        "sys_sched_setscheduler: pid={}, policy={}, param_ptr={:#x}",
+        pid,
+        policy,
+        param_ptr
+    );
     if let Err(e) = check_pid(pid) {
         return -e.code() as isize;
     }
@@ -190,6 +196,12 @@ pub fn sys_sched_setscheduler(pid: usize, policy: usize, param_ptr: usize) -> is
         }
         axtask::set_priority(-100);
     }
+
+    let thread = match current_thread() {
+        Ok(t) => t,
+        Err(e) => return -e.code() as isize,
+    };
+    thread.sched_policy.store(policy as u32, core::sync::atomic::Ordering::Relaxed);
     0
 }
 
@@ -241,13 +253,7 @@ pub fn sys_sched_rr_get_interval(pid: usize, interval: usize) -> isize {
 }
 
 pub fn sys_sched_setattr(pid: usize, attr: usize, flags: usize) -> isize {
-    axlog::warn!(
-        "sys_sched_setattr (stub): pid={}, attr={:#x}, flags={:#x}; request accepted without \
-         scheduler state",
-        pid,
-        attr,
-        flags
-    );
+    axlog::debug!("sys_sched_setattr: pid={}, attr={:#x}, flags={:#x}", pid, attr, flags);
     if flags != 0 {
         return -LinuxError::EINVAL.code() as isize;
     }
@@ -257,13 +263,82 @@ pub fn sys_sched_setattr(pid: usize, attr: usize, flags: usize) -> isize {
     if attr == 0 {
         return -LinuxError::EFAULT.code() as isize;
     }
+
+    let mut user_attr = SchedAttr {
+        size: 0,
+        sched_policy: 0,
+        sched_flags: 0,
+        sched_nice: 0,
+        sched_priority: 0,
+        sched_runtime: 0,
+        sched_deadline: 0,
+        sched_period: 0,
+    };
+    if read_user_bytes(attr, unsafe {
+        core::slice::from_raw_parts_mut(
+            &mut user_attr as *mut SchedAttr as *mut u8,
+            core::mem::size_of::<SchedAttr>(),
+        )
+    })
+    .is_err()
+    {
+        return -LinuxError::EFAULT.code() as isize;
+    }
+
+    if user_attr.size < SCHED_ATTR_SIZE {
+        return -LinuxError::EINVAL.code() as isize;
+    }
+    if !is_supported_policy(user_attr.sched_policy as usize) {
+        return -LinuxError::EINVAL.code() as isize;
+    }
+
+    let policy = user_attr.sched_policy;
+    let priority = user_attr.sched_priority;
+
+    if policy == SCHED_FIFO || policy == SCHED_RR || policy == SCHED_DEADLINE {
+        if policy == SCHED_DEADLINE {
+            if priority != 0 {
+                return -LinuxError::EINVAL.code() as isize;
+            }
+            if user_attr.sched_runtime == 0 || user_attr.sched_deadline == 0 || user_attr.sched_period == 0 {
+                return -LinuxError::EINVAL.code() as isize;
+            }
+            if user_attr.sched_runtime > user_attr.sched_deadline || user_attr.sched_deadline > user_attr.sched_period {
+                return -LinuxError::EINVAL.code() as isize;
+            }
+        } else {
+            if priority < 1 || priority > 99 {
+                return -LinuxError::EINVAL.code() as isize;
+            }
+        }
+        axtask::set_priority(priority as isize);
+    } else {
+        if priority != 0 {
+            return -LinuxError::EINVAL.code() as isize;
+        }
+        if user_attr.sched_nice < -20 || user_attr.sched_nice > 19 {
+            return -LinuxError::EINVAL.code() as isize;
+        }
+        axtask::set_priority(-100);
+    }
+
+    let thread = match current_thread() {
+        Ok(t) => t,
+        Err(e) => return -e.code() as isize,
+    };
+    thread.sched_policy.store(policy, core::sync::atomic::Ordering::Relaxed);
+    thread.sched_flags.store(user_attr.sched_flags, core::sync::atomic::Ordering::Relaxed);
+    thread.sched_nice.store(user_attr.sched_nice, core::sync::atomic::Ordering::Relaxed);
+    thread.sched_runtime.store(user_attr.sched_runtime, core::sync::atomic::Ordering::Relaxed);
+    thread.sched_deadline.store(user_attr.sched_deadline, core::sync::atomic::Ordering::Relaxed);
+    thread.sched_period.store(user_attr.sched_period, core::sync::atomic::Ordering::Relaxed);
+
     0
 }
 
 pub fn sys_sched_getattr(pid: usize, attr: usize, size: usize, flags: usize) -> isize {
-    axlog::warn!(
-        "sys_sched_getattr (stub): pid={}, attr={:#x}, size={}, flags={:#x}; reporting fixed RT \
-         attributes",
+    axlog::debug!(
+        "sys_sched_getattr: pid={}, attr={:#x}, size={}, flags={:#x}",
         pid,
         attr,
         size,
@@ -275,15 +350,28 @@ pub fn sys_sched_getattr(pid: usize, attr: usize, size: usize, flags: usize) -> 
     if let Err(e) = check_pid(pid) {
         return -e.code() as isize;
     }
+
+    let thread = match current_thread() {
+        Ok(t) => t,
+        Err(e) => return -e.code() as isize,
+    };
+
+    let prio = axtask::current().as_task_ref().priority();
+    let rt_prio = if (1..=99).contains(&prio) {
+        prio as u32
+    } else {
+        0
+    };
+
     let sched_attr = SchedAttr {
         size: SCHED_ATTR_SIZE,
-        sched_policy: DEFAULT_SCHED_POLICY,
-        sched_flags: 0,
-        sched_nice: 0,
-        sched_priority: DEFAULT_RT_PRIORITY,
-        sched_runtime: 0,
-        sched_deadline: 0,
-        sched_period: 0,
+        sched_policy: thread.sched_policy.load(core::sync::atomic::Ordering::Relaxed),
+        sched_flags: thread.sched_flags.load(core::sync::atomic::Ordering::Relaxed),
+        sched_nice: thread.sched_nice.load(core::sync::atomic::Ordering::Relaxed),
+        sched_priority: rt_prio,
+        sched_runtime: thread.sched_runtime.load(core::sync::atomic::Ordering::Relaxed),
+        sched_deadline: thread.sched_deadline.load(core::sync::atomic::Ordering::Relaxed),
+        sched_period: thread.sched_period.load(core::sync::atomic::Ordering::Relaxed),
     };
     write_plain(attr, &sched_attr)
         .map(|_| 0)
