@@ -255,7 +255,8 @@ impl axfs::ProcfsProcessProvider for PulseProcessProvider {
             let path = proc.exec_path_or_default();
             Some(alloc::format!("{}\0", path))
         } else {
-            let mut res = String::new();
+            let total_len: usize = args.iter().map(|s| s.len() + 1).sum();
+            let mut res = String::with_capacity(total_len);
             for arg in args.iter() {
                 res.push_str(arg);
                 res.push('\0');
