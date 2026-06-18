@@ -9,6 +9,7 @@ use alloc::{
     sync::{Arc, Weak},
     vec::Vec,
 };
+use core::fmt::Write;
 
 use axerrno::{LinuxError, LinuxResult};
 use hashbrown::{HashMap, HashSet};
@@ -491,7 +492,8 @@ impl axfs::ProcfsProcessProvider for PulseProcessProvider {
 
             let p_char = if is_shared { "s" } else { "p" };
             if path_str.is_empty() {
-                out.push_str(&alloc::format!(
+                core::write!(
+                    out,
                     "{:x}-{:x} {}{}{}{} {:08x} {} {}\n",
                     start.as_usize(),
                     end.as_usize(),
@@ -502,9 +504,11 @@ impl axfs::ProcfsProcessProvider for PulseProcessProvider {
                     offset,
                     dev_str,
                     inode
-                ));
+                )
+                .unwrap();
             } else {
-                out.push_str(&alloc::format!(
+                core::write!(
+                    out,
                     "{:x}-{:x} {}{}{}{} {:08x} {} {:<7} {}\n",
                     start.as_usize(),
                     end.as_usize(),
@@ -516,7 +520,8 @@ impl axfs::ProcfsProcessProvider for PulseProcessProvider {
                     dev_str,
                     inode,
                     path_str
-                ));
+                )
+                .unwrap();
             }
         });
 
