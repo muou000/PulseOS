@@ -7,3 +7,16 @@
 ## 2023-06-18 - format! macro overhead optimization in no_std
 **Learning:** In #![no_std] environments, `alloc::format!` is particularly heavy because it pulls in a large amount of formatting logic overhead that causes code bloat. For simple fixed-string prefixing (like prepending a null byte `\0`), explicit string operations like `String::with_capacity` followed by `.push()` and `.push_str()` are strictly superior. Furthermore, when reading lossy UTF8 via `String::from_utf8_lossy(&buf)`, immediately calling `.into_owned()` creates an unnecessary allocation if the string is already valid UTF-8. Retaining it as a `Cow<'_, str>` and referencing it via `.len()` and `&name` to build the new string avoids redundant copying.
 **Action:** Always scrutinize `format!` macros in `#![no_std]` projects for string concatenation. When combining small static literals with variables, manually preallocate strings instead. Delay or avoid `.into_owned()` on `Cow` types unless absolute ownership is necessary for the final type, utilizing references instead to build up new strings.
+## 2024-05-24 - [Avoid reallocations when appending to joined strings]
+**Learning:** [When joining strings and subsequently appending characters (like a trailing null byte `\0`), using `slice::join` followed by `.push` is significantly slower than manual capacity pre-allocation. `join` allocates exact capacity, so the next `.push` forces a full string reallocation, defeating the purpose of the optimization.]
+**Action:** [When modifying joined strings, calculate the total length and use `String::with_capacity` rather than `slice::join` + `.push` to avoid reallocation penalties.]
+## 2024-06-18 - Optimize proc/maps generation
+**Learning:** In highly iterated mapping logic over process areas in `/proc/maps`, avoiding short-lived allocations by using `core::write!` on a pre-allocated String buffer drastically improves the execution performance.
+**Action:** Always favor formatting directly into pre-allocated `String` buffers using `core::fmt::Write` over allocating string copies with `alloc::format!` in performance-sensitive loops or paths.
+## 2023-10-25 - Arc::make_mut optimization for RwLock<Arc<T>>
+**Learning:** Using `clone()` then `Arc::new()` inside an `RwLock` to mutate a struct not only incurs two expensive heap allocations but also introduces a race condition if you swap from a `read` lock to a `write` lock.
+**Action:** Always prefer obtaining a single `write` lock and mutating via `Arc::make_mut(&mut *lock)` for `RwLock<Arc<T>>` to ensure thread-safety and eliminate redundant cloning/allocations when exclusively owned.
+
+## 2023-10-25 - Limited compiler tools in build container
+**Learning:** In this strictly offline no_std build environment, standard C compilers (`riscv64-linux-gnu-gcc`) and `std` targets for Rust are not available, preventing the creation of standalone benchmark binaries for user space tests.
+**Action:** When needing to provide users a way to benchmark performance in the OS, fallback to modifying existing test suite entrypoints (e.g., `testcode.sh`) to loop over built-in utilities (like `busybox id`) that trigger the relevant kernel paths.
