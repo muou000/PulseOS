@@ -1,7 +1,7 @@
 use alloc::sync::{Arc, Weak};
 use core::{
     ops::Deref,
-    sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
+    sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering, AtomicU32, AtomicI32},
 };
 
 use axerrno::{AxError, AxResult};
@@ -23,6 +23,12 @@ pub struct Thread {
     pub last_user_enter_ns: AtomicU64,
     pub in_user_mode: AtomicBool,
     io_buffer: Mutex<alloc::vec::Vec<u8>>,
+    pub sched_policy: AtomicU32,
+    pub sched_flags: AtomicU64,
+    pub sched_nice: AtomicI32,
+    pub sched_runtime: AtomicU64,
+    pub sched_deadline: AtomicU64,
+    pub sched_period: AtomicU64,
 }
 
 pub struct ThreadHandle(Arc<Thread>);
@@ -60,6 +66,12 @@ impl Thread {
             last_user_enter_ns: AtomicU64::new(0),
             in_user_mode: AtomicBool::new(false),
             io_buffer: Mutex::new(alloc::vec::Vec::new()),
+            sched_policy: AtomicU32::new(2), // DEFAULT_SCHED_POLICY = SCHED_RR
+            sched_flags: AtomicU64::new(0),
+            sched_nice: AtomicI32::new(0),
+            sched_runtime: AtomicU64::new(0),
+            sched_deadline: AtomicU64::new(0),
+            sched_period: AtomicU64::new(0),
         })
     }
 
