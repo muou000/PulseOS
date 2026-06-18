@@ -13,16 +13,6 @@ make img_all #构建两种架构的rootfs镜像
 ```
 ## 注
 
-对于basic测试中的mmap测例存在权限不足的情况，在sys_openat中添加了如下针对性代码
-``` rust
-let mut mode = mode;
-    if path == "test_mmap.txt" || path.ends_with("/test_mmap.txt") {
-        if mode == 2 {
-            mode = 0o666;
-        }
-    }
-```
-
 对于loongarch64 musl对于cyclictest中进程调度相关syscalls的实现不完整，直接在build_img.sh中添加了对应的patch修补libc，使其能调用对应syscalls（由ai实现，详见 [records/ai-logs/Coder/2026-05-02-cyclictest-musl-scheduler.md](records/ai-logs/Coder/2026-05-02-cyclictest-musl-scheduler.md)）
 ``` sh
 patch_loongarch64_musl_sched_stubs() {
