@@ -27,3 +27,6 @@
 ## 2023-10-25 - Limited compiler tools in build container
 **Learning:** In this strictly offline no_std build environment, standard C compilers (`riscv64-linux-gnu-gcc`) and `std` targets for Rust are not available, preventing the creation of standalone benchmark binaries for user space tests.
 **Action:** When needing to provide users a way to benchmark performance in the OS, fallback to modifying existing test suite entrypoints (e.g., `testcode.sh`) to loop over built-in utilities (like `busybox id`) that trigger the relevant kernel paths.
+## 2025-06-18 - Avoid O(N) string clones when comparing locked strings across collections
+**Learning:** When checking the value of a string wrapped in an `RwLock<Option<String>>` inside a collection (like iterating over all processes), fetching it via `.read().clone()` and then comparing the result causes an unnecessary string allocation on every iteration. This is particularly expensive in system call paths.
+**Action:** When checking equality of a string protected by an `RwLock`, do not extract and clone the string just to compare it. Instead, perform the equality check directly against the dereferenced guard (e.g., `lock.read().as_deref() == Some(target_str)`) to prevent unnecessary heap allocations, especially in loops.
