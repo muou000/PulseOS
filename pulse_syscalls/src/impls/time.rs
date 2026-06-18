@@ -1,6 +1,5 @@
 use core::{
     ffi::c_long,
-    sync::atomic::{AtomicBool, Ordering},
     time::Duration,
 };
 
@@ -17,9 +16,6 @@ use crate::{
 };
 
 const CLK_TCK: u64 = 100;
-static CLOCK_NANOSLEEP_COMPAT_WARNED: AtomicBool = AtomicBool::new(false);
-static CLOCK_GETRES_FIXED_WARNED: AtomicBool = AtomicBool::new(false);
-static GETTIMEOFDAY_TZ_WARNED: AtomicBool = AtomicBool::new(false);
 
 fn timespec_to_duration(ts: timespec) -> Result<Duration, LinuxError> {
     if ts.tv_sec < 0 || ts.tv_nsec < 0 || ts.tv_nsec > 999_999_999 {
@@ -205,9 +201,6 @@ pub fn sys_nanosleep(req: usize, rem: usize) -> isize {
 }
 
 pub fn sys_clock_nanosleep(clockid: i32, flags: usize, req: usize, rem: usize) -> isize {
-    if !CLOCK_NANOSLEEP_COMPAT_WARNED.swap(true, Ordering::AcqRel) {
-        axlog::warn!("sys_clock_nanosleep: using task sleep with simplified EINTR/rem semantics");
-    }
 
     if req == 0 {
         return -LinuxError::EFAULT.code() as isize;
@@ -267,10 +260,6 @@ pub fn sys_clock_nanosleep(clockid: i32, flags: usize, req: usize, rem: usize) -
 pub fn sys_clock_getres(clockid: i32, res: usize) -> isize {
     if !is_supported_clock(clockid) {
         return -LinuxError::EINVAL.code() as isize;
-    }
-
-    if !CLOCK_GETRES_FIXED_WARNED.swap(true, Ordering::AcqRel) {
-        axlog::warn!("sys_clock_getres: reporting fixed nanosecond timer resolution");
     }
 
     if res == 0 {
@@ -359,12 +348,6 @@ pub fn sys_clock_settime(clockid: i32, tp: usize) -> isize {
 pub fn sys_gettimeofday(tv: usize, tz: usize) -> isize {
     axlog::trace!("sys_gettimeofday: tv={:#x}, tz={:#x}", tv, tz);
 
-    if tz != 0 {
-        if !GETTIMEOFDAY_TZ_WARNED.swap(true, Ordering::AcqRel) {
-            axlog::warn!("sys_gettimeofday: timezone argument is ignored");
-        }
-    }
-
     if tv == 0 {
         return 0;
     }
@@ -390,12 +373,6 @@ pub fn sys_gettimeofday(tv: usize, tz: usize) -> isize {
 /// sys_settimeofday - 设置墙上时间
 pub fn sys_settimeofday(tv: usize, tz: usize) -> isize {
     axlog::trace!("sys_settimeofday: tv={:#x}, tz={:#x}", tv, tz);
-
-    if tz != 0 {
-        if !GETTIMEOFDAY_TZ_WARNED.swap(true, Ordering::AcqRel) {
-            axlog::warn!("sys_settimeofday: timezone argument is ignored");
-        }
-    }
 
     if tv == 0 {
         return 0;
