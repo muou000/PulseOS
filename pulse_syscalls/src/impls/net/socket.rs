@@ -362,8 +362,11 @@ pub fn sys_connect(fd: usize, addr: usize, addrlen: usize) -> isize {
                 if let Err(e) = crate::impls::utils::read_user_bytes(addr + 3, &mut buf) {
                     return -(e.code() as isize);
                 }
-                let name = String::from_utf8_lossy(&buf).into_owned();
-                alloc::format!("\0{}", name)
+                let name = String::from_utf8_lossy(&buf);
+                let mut res = String::with_capacity(name.len() + 1);
+                res.push('\0');
+                res.push_str(&name);
+                res
             } else {
                 // Pathname
                 let path_c = match crate::impls::utils::read_user_cstring(addr + 2) {
