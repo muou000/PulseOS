@@ -125,7 +125,7 @@ fn sleep_for_duration_interruptible(dur: Duration) -> Result<Duration, LinuxErro
         if current_has_pending_signal() {
             return Ok(deadline.saturating_sub(now));
         }
-        axtask::sleep(deadline.saturating_sub(now));
+        axtask::sleep_until(deadline);
     }
 }
 
@@ -134,18 +134,24 @@ fn sleep_until_clock_interruptible(clockid: i32, target: Duration) -> Result<Dur
         CLOCK_REALTIME | CLOCK_MONOTONIC | CLOCK_BOOTTIME => {}
         _ => return Err(LinuxError::EINVAL),
     }
+
+    let target_mono = if clockid as u32 == CLOCK_REALTIME {
+        let offset = Duration::from_nanos(axhal::time::current_epochoffset_nanos());
+        target.saturating_sub(offset)
+    } else {
+        target
+    };
+
     loop {
-        let now = clock_now(clockid)?;
-        if now >= target {
+        let now = axhal::time::monotonic_time();
+        if now >= target_mono {
             return Ok(Duration::ZERO);
         }
         if current_has_pending_signal() {
-            return Ok(target.saturating_sub(now));
+            let now_clock = clock_now(clockid)?;
+            return Ok(target.saturating_sub(now_clock));
         }
-        let sleep_dur = target.saturating_sub(now);
-        if sleep_dur > Duration::ZERO {
-            axtask::sleep(sleep_dur);
-        }
+        axtask::sleep_until(target_mono);
     }
 }
 

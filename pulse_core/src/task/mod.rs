@@ -9,17 +9,17 @@ use alloc::{
     sync::{Arc, Weak},
     vec::Vec,
 };
-use hashbrown::{HashMap, HashSet};
 
 use axerrno::{LinuxError, LinuxResult};
+use hashbrown::{HashMap, HashSet};
 use kspin::SpinNoIrq;
 pub use process::{CloneParams, ForkParams, Process, WaitidStatusType};
 pub use signal::{
     DefaultSignalAction, NSIG, SIG_DFL, SIG_IGN, SigAction, SignalAction, SignalAltStack,
     SignalDelivery, SignalShared, ThreadSignal, blocked_mask as thread_blocked_mask, can_signal,
     check_signals_and_deliver, pending_mask as thread_pending_mask, queue_signal_to_process,
-    queue_signal_to_thread, resolve_action, queue_signal_to_process_with_info,
-    queue_signal_to_thread_with_info,
+    queue_signal_to_process_with_info, queue_signal_to_thread, queue_signal_to_thread_with_info,
+    resolve_action,
 };
 use spin::Lazy;
 pub use thread::{Thread, ThreadHandle};
@@ -135,10 +135,22 @@ pub fn thread_by_tid(process: &Process, tid: u64) -> Option<Arc<Thread>> {
 #[percpu::def_percpu]
 static LAST_TICK_NS: u64 = 0;
 
-static NEXT_ITIMER_DEADLINE: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(u64::MAX);
+static NEXT_ITIMER_DEADLINE: core::sync::atomic::AtomicU64 =
+    core::sync::atomic::AtomicU64::new(u64::MAX);
 
 pub fn update_itimer_deadline(deadline: u64) {
     NEXT_ITIMER_DEADLINE.fetch_min(deadline, core::sync::atomic::Ordering::Relaxed);
+}
+
+static STDIN_POLLING_ENABLED: core::sync::atomic::AtomicBool =
+    core::sync::atomic::AtomicBool::new(true);
+
+pub fn set_stdin_polling_enabled(enabled: bool) {
+    STDIN_POLLING_ENABLED.store(enabled, core::sync::atomic::Ordering::Relaxed);
+}
+
+pub fn is_stdin_polling_enabled() -> bool {
+    STDIN_POLLING_ENABLED.load(core::sync::atomic::Ordering::Relaxed)
 }
 
 fn itimer_tick_hook() {
@@ -151,16 +163,28 @@ fn itimer_tick_hook() {
         now_ns.saturating_sub(last_ns)
     };
 
-    crate::fd_table::poll_stdin();
-    
+    if is_stdin_polling_enabled() {
+        static STDIN_POLL_COUNTER: core::sync::atomic::AtomicU64 =
+            core::sync::atomic::AtomicU64::new(0);
+        let count = STDIN_POLL_COUNTER.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+        let poll_interval = if !crate::fd_table::STDIN_WAIT_QUEUE.is_empty() {
+            5
+        } else {
+            20
+        };
+        if count % poll_interval == 0 {
+            crate::fd_table::poll_stdin();
+        }
+    }
+
     if now_ns >= NEXT_ITIMER_DEADLINE.load(core::sync::atomic::Ordering::Relaxed) {
         NEXT_ITIMER_DEADLINE.store(u64::MAX, core::sync::atomic::Ordering::Relaxed);
-        
+
         let active_pids: Vec<u64> = ITIMER_REAL_PROCESSES.lock().iter().copied().collect();
         let registry = PROCESS_REGISTRY.lock();
         let mut next_min = u64::MAX;
         let mut to_remove = Vec::new();
-        
+
         for pid in active_pids {
             if let Some(proc) = registry.get(&pid) {
                 if !proc.is_zombie() {
@@ -179,14 +203,14 @@ fn itimer_tick_hook() {
             }
         }
         drop(registry);
-        
+
         if !to_remove.is_empty() {
             let mut active = ITIMER_REAL_PROCESSES.lock();
             for pid in to_remove {
                 active.remove(&pid);
             }
         }
-        
+
         NEXT_ITIMER_DEADLINE.fetch_min(next_min, core::sync::atomic::Ordering::Relaxed);
     }
 
@@ -277,7 +301,8 @@ impl axfs::ProcfsProcessProvider for PulseProcessProvider {
 
         Some(alloc::format!(
             "Name:\t{}\nUmask:\t{:04o}\nState:\t{}\nTgid:\t{}\nPid:\t{}\nPPid:\t{}\nUid:\t{} {} \
-             {} {}\nGid:\t{} {} {} {}\nThreads:\t{}\nVmSize:\t{} kB\nVmRSS:\t{} kB\nVmData:\t{} kB\n",
+             {} {}\nGid:\t{} {} {} {}\nThreads:\t{}\nVmSize:\t{} kB\nVmRSS:\t{} kB\nVmData:\t{} \
+             kB\n",
             name,
             umask,
             state,

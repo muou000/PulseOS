@@ -18,6 +18,11 @@ fn main() {
     pulse_core::task::init_itimer_hook();
     info!("itimer hook registered");
 
+    if cfg!(feature = "testcode") {
+        pulse_core::task::set_stdin_polling_enabled(false);
+        info!("testcode feature active: stdin polling disabled");
+    }
+
     pulse_core::task::init_procfs_provider();
     info!("procfs provider registered");
 
