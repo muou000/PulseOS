@@ -342,6 +342,7 @@ fn syscall_dispatcher(
         Sysno::rt_sigreturn => impls::sys_rt_sigreturn(tf),
         Sysno::rt_sigsuspend => impls::sys_rt_sigsuspend(args[0], args[1]),
         Sysno::rt_sigtimedwait => impls::sys_rt_sigtimedwait(args[0], args[1], args[2], args[3]),
+        Sysno::sigaltstack => impls::sys_sigaltstack(args[0], args[1]),
         Sysno::membarrier => impls::sys_membarrier(args[0] as i32, args[1] as i32, args[2] as i32),
 
         Sysno::ioctl => impls::sys_ioctl(args[0], args[1], args[2]),
