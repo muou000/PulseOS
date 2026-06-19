@@ -894,3 +894,79 @@ pub fn sys_riscv_hwprobe(
         Err(e) => -e.code() as isize,
     }
 }
+
+use linux_raw_sys::general::membarrier_cmd::*;
+
+static REGISTERED_PRIVATE_EXPEDITED: core::sync::atomic::AtomicBool =
+    core::sync::atomic::AtomicBool::new(false);
+static REGISTERED_PRIVATE_EXPEDITED_SYNC_CORE: core::sync::atomic::AtomicBool =
+    core::sync::atomic::AtomicBool::new(false);
+static REGISTERED_GLOBAL_EXPEDITED: core::sync::atomic::AtomicBool =
+    core::sync::atomic::AtomicBool::new(false);
+
+pub fn sys_membarrier(cmd: i32, flags: i32, _cpu_id: i32) -> isize {
+    axlog::debug!("sys_membarrier: cmd={}, flags={}", cmd, flags);
+    if flags != 0 {
+        return -LinuxError::EINVAL.code() as isize;
+    }
+
+    let cmd_enum = match cmd {
+        0 => MEMBARRIER_CMD_QUERY,
+        1 => MEMBARRIER_CMD_GLOBAL,
+        2 => MEMBARRIER_CMD_GLOBAL_EXPEDITED,
+        4 => MEMBARRIER_CMD_REGISTER_GLOBAL_EXPEDITED,
+        8 => MEMBARRIER_CMD_PRIVATE_EXPEDITED,
+        16 => MEMBARRIER_CMD_REGISTER_PRIVATE_EXPEDITED,
+        32 => MEMBARRIER_CMD_PRIVATE_EXPEDITED_SYNC_CORE,
+        64 => MEMBARRIER_CMD_REGISTER_PRIVATE_EXPEDITED_SYNC_CORE,
+        _ => return -LinuxError::EINVAL.code() as isize,
+    };
+
+    match cmd_enum {
+        MEMBARRIER_CMD_GLOBAL => {
+            core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
+            0
+        }
+
+        MEMBARRIER_CMD_PRIVATE_EXPEDITED => {
+            if REGISTERED_PRIVATE_EXPEDITED.load(core::sync::atomic::Ordering::Acquire) {
+                core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
+                0
+            } else {
+                -LinuxError::EPERM.code() as isize
+            }
+        }
+
+        MEMBARRIER_CMD_REGISTER_PRIVATE_EXPEDITED => {
+            REGISTERED_PRIVATE_EXPEDITED.store(true, core::sync::atomic::Ordering::Release);
+            0
+        }
+
+        MEMBARRIER_CMD_PRIVATE_EXPEDITED_SYNC_CORE => {
+            if REGISTERED_PRIVATE_EXPEDITED_SYNC_CORE.load(core::sync::atomic::Ordering::Acquire) {
+                core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
+                0
+            } else {
+                -LinuxError::EPERM.code() as isize
+            }
+        }
+
+        MEMBARRIER_CMD_REGISTER_PRIVATE_EXPEDITED_SYNC_CORE => {
+            REGISTERED_PRIVATE_EXPEDITED_SYNC_CORE
+                .store(true, core::sync::atomic::Ordering::Release);
+            0
+        }
+
+        MEMBARRIER_CMD_GLOBAL_EXPEDITED => {
+            core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
+            0
+        }
+
+        MEMBARRIER_CMD_REGISTER_GLOBAL_EXPEDITED => {
+            REGISTERED_GLOBAL_EXPEDITED.store(true, core::sync::atomic::Ordering::Release);
+            0
+        }
+
+        _ => -LinuxError::EINVAL.code() as isize,
+    }
+}
