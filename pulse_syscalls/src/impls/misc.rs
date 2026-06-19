@@ -895,6 +895,71 @@ pub fn sys_riscv_hwprobe(
     }
 }
 
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+struct stack_t {
+    ss_sp: usize,
+    ss_flags: i32,
+    ss_size: usize,
+}
+
+pub fn sys_sigaltstack(ss: usize, oss: usize) -> isize {
+    axlog::debug!("sys_sigaltstack: ss={:#x}, oss={:#x}", ss, oss);
+
+    let thread = match pulse_core::task::current_thread() {
+        Ok(t) => t,
+        Err(e) => return -e.code() as isize,
+    };
+    let process = thread.process();
+
+    if oss != 0 {
+        let current_altstack = thread.signal_altstack();
+        let raw_oss = stack_t {
+            ss_sp: current_altstack.sp,
+            ss_flags: current_altstack.flags as i32,
+            ss_size: current_altstack.size,
+        };
+        if uaccess::write_user_plain(&process, oss, &raw_oss).is_err() {
+            return -LinuxError::EFAULT.code() as isize;
+        }
+    }
+
+    if ss != 0 {
+        let raw_ss: stack_t = match uaccess::read_user_plain(&process, ss) {
+            Ok(v) => v,
+            Err(_) => return -LinuxError::EFAULT.code() as isize,
+        };
+
+        const SS_DISABLE: i32 = 2;
+        const SS_ONSTACK: i32 = 1;
+
+        let current_altstack = thread.signal_altstack();
+        if current_altstack.flags & (SS_ONSTACK as usize) != 0 {
+            return -LinuxError::EPERM.code() as isize;
+        }
+
+        if raw_ss.ss_flags & SS_DISABLE != 0 {
+            thread.set_signal_altstack(pulse_core::task::SignalAltStack {
+                sp: 0,
+                size: 0,
+                flags: SS_DISABLE as usize,
+            });
+        } else {
+            const MINSIGSTKSZ: usize = 2048;
+            if raw_ss.ss_size < MINSIGSTKSZ {
+                return -LinuxError::ENOMEM.code() as isize;
+            }
+            thread.set_signal_altstack(pulse_core::task::SignalAltStack {
+                sp: raw_ss.ss_sp,
+                size: raw_ss.ss_size,
+                flags: raw_ss.ss_flags as usize,
+            });
+        }
+    }
+
+    0
+}
+
 use linux_raw_sys::general::membarrier_cmd::*;
 
 static REGISTERED_PRIVATE_EXPEDITED: core::sync::atomic::AtomicBool =
