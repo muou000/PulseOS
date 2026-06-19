@@ -262,6 +262,14 @@ fn syscall_dispatcher(
 
         Sysno::setitimer => impls::sys_setitimer(args[0], args[1], args[2]),
         Sysno::getitimer => impls::sys_getitimer(args[0], args[1]),
+        Sysno::timer_create => {
+            impls::sys_timer_create(args[0] as i32, args[1], args[2])
+        }
+        Sysno::timer_settime => {
+            impls::sys_timer_settime(args[0], args[1], args[2], args[3])
+        }
+        Sysno::timer_gettime => impls::sys_timer_gettime(args[0], args[1]),
+        Sysno::timer_delete => impls::sys_timer_delete(args[0]),
         Sysno::nanosleep => impls::sys_nanosleep(args[0], args[1]),
         Sysno::clock_nanosleep => {
             impls::sys_clock_nanosleep(args[0] as i32, args[1], args[2], args[3])

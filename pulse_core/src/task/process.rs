@@ -19,6 +19,7 @@ use kernel_guard::NoPreemptIrqSave;
 use kspin::SpinNoIrq;
 use linux_raw_sys::general::{
     RLIMIT_CORE, RLIMIT_MEMLOCK, RLIMIT_NOFILE, RLIMIT_STACK, SIGCHLD, rlimit64,
+    sigevent, itimerspec,
 };
 use memory_addr::{MemoryAddr, PhysAddr, VirtAddr, va};
 use spin::{Lazy, Mutex, RwLock};
@@ -43,6 +44,22 @@ const DEFAULT_STACK_LIMIT_BYTES: u64 = USER_STACK_SIZE as u64;
 const MAX_STACK_LIMIT_BYTES: u64 = USER_STACK_SIZE as u64;
 const DEFAULT_NOFILE_LIMIT: u64 = 1024;
 const MAX_NOFILE_LIMIT: u64 = FD_LIMIT as u64;
+
+pub const MAX_POSIX_TIMER_COUNT: usize = 16;
+
+#[derive(Clone, Copy)]
+pub struct PosixTimer {
+    pub id: usize,
+    pub clock_id: i32,
+    pub event: sigevent,
+    pub itimer_spec: itimerspec,
+    pub overrun: i32,
+    pub next_deadline_ns: u64,
+    pub interval_ns: u64,
+}
+
+unsafe impl Send for PosixTimer {}
+unsafe impl Sync for PosixTimer {}
 
 static ZOMBIE_ASPACE_HANDLE: Lazy<Arc<RwLock<AddrSpace>>> = Lazy::new(|| {
     Arc::new(RwLock::new(
@@ -453,6 +470,8 @@ pub struct Process {
     uts_ns: RwLock<Arc<UtsNamespace>>,
     /// 进程死亡时发送给父进程的信号，默认为 SIGCHLD (17)
     pub parent_exit_signal: AtomicI32,
+    /// POSIX 定时器列表
+    pub posix_timers: SpinNoIrq<[Option<PosixTimer>; MAX_POSIX_TIMER_COUNT]>,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -1473,6 +1492,7 @@ impl Process {
             reparented: AtomicBool::new(false),
             uts_ns,
             parent_exit_signal: AtomicI32::new(SIGCHLD as i32),
+            posix_timers: SpinNoIrq::new([None; MAX_POSIX_TIMER_COUNT]),
         }))
     }
 
@@ -1613,6 +1633,7 @@ impl Process {
             reparented: AtomicBool::new(false),
             uts_ns: RwLock::new(uts_ns),
             parent_exit_signal: AtomicI32::new(SIGCHLD as i32),
+            posix_timers: SpinNoIrq::new([None; MAX_POSIX_TIMER_COUNT]),
         }))
     }
 
@@ -1869,6 +1890,7 @@ impl Process {
                 if let Some(handle) = thread_handle_from_task(&task) {
                     handle.signal_wait_queue().notify_all(false);
                 }
+                axtask::wake_task(task, true);
             }
         }
     }
@@ -3051,5 +3073,71 @@ impl Process {
         let task = axtask::spawn_task(inner);
         child_proc.register_task_ref(task.clone());
         Ok((child_tid, (!params.is_thread_clone).then_some(child_proc)))
+    }
+
+    pub fn alloc_posix_timer(&self, clock_id: i32, event: sigevent) -> Result<i32, axerrno::LinuxError> {
+        match clock_id {
+            0 | 1 | 2 | 3 | 7 => {}
+            _ => return Err(axerrno::LinuxError::EINVAL),
+        }
+
+        let mut timers = self.posix_timers.lock();
+        for (i, slot) in timers.iter_mut().enumerate() {
+            if slot.is_none() {
+                *slot = Some(PosixTimer {
+                    id: i,
+                    clock_id,
+                    event,
+                    itimer_spec: unsafe { core::mem::zeroed() },
+                    overrun: 0,
+                    next_deadline_ns: 0,
+                    interval_ns: 0,
+                });
+                return Ok(i as i32);
+            }
+        }
+        Err(axerrno::LinuxError::ENOSPC)
+    }
+
+    pub fn check_posix_timers_tick(&self, now_ns: u64) -> Option<u64> {
+        let mut timers = self.posix_timers.lock();
+        let mut next_min = None;
+        for slot in timers.iter_mut() {
+            if let Some(timer) = slot {
+                if timer.next_deadline_ns == 0 {
+                    continue;
+                }
+                if now_ns >= timer.next_deadline_ns {
+                    // Expired!
+                    let sig = timer.event.sigev_signo as usize;
+                    let notify = timer.event.sigev_notify;
+                    if notify == 0 { // SIGEV_SIGNAL
+                        let _ = queue_signal_to_process(self, sig);
+                    }
+                    if timer.interval_ns > 0 {
+                        let mut next = timer.next_deadline_ns.saturating_add(timer.interval_ns);
+                        while next <= now_ns {
+                            timer.overrun = timer.overrun.saturating_add(1);
+                            next = next.saturating_add(timer.interval_ns);
+                        }
+                        timer.next_deadline_ns = next;
+                        if let Some(min) = next_min {
+                            next_min = Some(core::cmp::min(min, next));
+                        } else {
+                            next_min = Some(next);
+                        }
+                    } else {
+                        timer.next_deadline_ns = 0;
+                    }
+                } else {
+                    if let Some(min) = next_min {
+                        next_min = Some(core::cmp::min(min, timer.next_deadline_ns));
+                    } else {
+                        next_min = Some(timer.next_deadline_ns);
+                    }
+                }
+            }
+        }
+        next_min
     }
 }
