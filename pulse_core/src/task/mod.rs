@@ -14,7 +14,7 @@ use core::fmt::Write;
 use axerrno::{LinuxError, LinuxResult};
 use hashbrown::{HashMap, HashSet};
 use kspin::SpinNoIrq;
-pub use process::{CloneParams, ForkParams, Process, WaitidStatusType};
+pub use process::{CloneParams, ForkParams, Process, WaitidStatusType, MAX_POSIX_TIMER_COUNT};
 pub use signal::{
     DefaultSignalAction, NSIG, SIG_DFL, SIG_IGN, SigAction, SignalAction, SignalAltStack,
     SignalDelivery, SignalShared, ThreadSignal, blocked_mask as thread_blocked_mask, can_signal,
@@ -34,12 +34,23 @@ static THREAD_REGISTRY: Lazy<SpinNoIrq<HashMap<u64, Weak<Thread>>>> =
 static ITIMER_REAL_PROCESSES: Lazy<SpinNoIrq<HashSet<u64>>> =
     Lazy::new(|| SpinNoIrq::new(HashSet::new()));
 
+static POSIX_TIMER_PROCESSES: Lazy<SpinNoIrq<HashSet<u64>>> =
+    Lazy::new(|| SpinNoIrq::new(HashSet::new()));
+
 pub fn add_to_itimer_real(pid: u64) {
     ITIMER_REAL_PROCESSES.lock().insert(pid);
 }
 
 pub fn remove_from_itimer_real(pid: u64) {
     ITIMER_REAL_PROCESSES.lock().remove(&pid);
+}
+
+pub fn add_to_posix_timers(pid: u64) {
+    POSIX_TIMER_PROCESSES.lock().insert(pid);
+}
+
+pub fn remove_from_posix_timers(pid: u64) {
+    POSIX_TIMER_PROCESSES.lock().remove(&pid);
 }
 
 static INIT_PROCESS: spin::Once<Arc<Process>> = spin::Once::new();
@@ -52,6 +63,7 @@ pub fn register_process(pid: u64, process: Arc<Process>) {
 pub fn unregister_process(pid: u64) {
     PROCESS_REGISTRY.lock().remove(&pid);
     remove_from_itimer_real(pid);
+    remove_from_posix_timers(pid);
 }
 
 pub fn init_process() -> Option<Arc<Process>> {
@@ -213,6 +225,40 @@ fn itimer_tick_hook() {
         }
 
         NEXT_ITIMER_DEADLINE.fetch_min(next_min, core::sync::atomic::Ordering::Relaxed);
+
+        // Check POSIX timers
+        let posix_pids: Vec<u64> = POSIX_TIMER_PROCESSES.lock().iter().copied().collect();
+        let registry = PROCESS_REGISTRY.lock();
+        let mut posix_next_min = u64::MAX;
+        let mut posix_to_remove = Vec::new();
+
+        for pid in posix_pids {
+            if let Some(proc) = registry.get(&pid) {
+                if !proc.is_zombie() {
+                    if let Some(next_deadline) = proc.check_posix_timers_tick(now_ns) {
+                        if next_deadline < posix_next_min {
+                            posix_next_min = next_deadline;
+                        }
+                    } else {
+                        posix_to_remove.push(pid);
+                    }
+                } else {
+                    posix_to_remove.push(pid);
+                }
+            } else {
+                posix_to_remove.push(pid);
+            }
+        }
+        drop(registry);
+
+        if !posix_to_remove.is_empty() {
+            let mut active = POSIX_TIMER_PROCESSES.lock();
+            for pid in posix_to_remove {
+                active.remove(&pid);
+            }
+        }
+
+        NEXT_ITIMER_DEADLINE.fetch_min(posix_next_min, core::sync::atomic::Ordering::Relaxed);
     }
 
     if elapsed_ns > 0 {
