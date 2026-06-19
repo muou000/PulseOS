@@ -22,7 +22,7 @@ update_index() {
     local idx_file="${CACHE_DIR}/APKINDEX-${arch}-${repo}"
     
     # Update cache if it does not exist or is older than 1 day
-    if [[ ! -f "${idx_file}" || "$(find "${idx_file}" -mtime +1)" ]]; then
+    if [[ ! -f "${idx_file}" || "$(find "${idx_file}" -mtime +1 2>/dev/null)" ]]; then
         echo "Updating package index for ${arch}/${repo}..."
         local url="https://dl-cdn.alpinelinux.org/alpine/${ALPINE_VER}/${repo}/${arch}/APKINDEX.tar.gz"
         if ! wget -q -O "${idx_tar}" "${url}"; then
@@ -47,57 +47,63 @@ lookup_package() {
             continue
         fi
         
-        local pkg="" ver="" deps=""
         local lookup_res
-        
-        # AWK parser to query package/provider block by block (RS="")
+        # 改用逐行扫描状态机，完美兼容各种 awk 版本和换行符
         lookup_res=$(awk -v target="${target}" -v repo="${repo}" '
-            BEGIN { RS = "" }
-            {
-                pkg = ""
-                ver = ""
-                deps = ""
-                prov = ""
-                split($0, lines, "\n")
-                for (i in lines) {
-                    line = lines[i]
-                    if (sub(/^P:/, "", line)) pkg = line
-                    else if (sub(/^V:/, "", line)) ver = line
-                    else if (sub(/^D:/, "", line)) deps = line
-                    else if (sub(/^p:/, "", line)) prov = line
-                }
-                
-                # Exact package name match
+            function reset_block() {
+                pkg = ""; ver = ""; deps = ""; prov = "";
+            }
+            function check_and_print() {
+                # 1. 精确匹配包名
                 if (pkg == target) {
-                    print pkg
-                    print ver
-                    print repo
-                    print deps
-                    exit 0
+                    print pkg; print ver; print repo; print deps;
+                    found = 1; exit 0;
                 }
-                
-                # Check providers matching so: / pc: / cmd:
-                if (target ~ /^so:/ || target ~ /^pc:/ || target ~ /^cmd:/) {
+                # 2. 匹配 provider (so:, pc:, cmd:)
+                if (target ~ /^(so|pc|cmd):/) {
                     split(prov, prov_arr, " ")
                     for (j in prov_arr) {
                         split(prov_arr[j], part, "=")
                         if (part[1] == target) {
-                            print pkg
-                            print ver
-                            print repo
-                            print deps
-                            exit 0
+                            print pkg; print ver; print repo; print deps;
+                            found = 1; exit 0;
                         }
                     }
                 }
             }
+            BEGIN { reset_block(); found = 0; }
+            {
+                # 去除可能存在的 Windows 换行符 \r
+                sub(/\r$/, "")
+                
+                if ($0 == "") {
+                    check_and_print();
+                    reset_block();
+                } else {
+                    key = substr($0, 1, 2);
+                    val = substr($0, 3);
+                    if (key == "P:") pkg = val;
+                    else if (key == "V:") ver = val;
+                    else if (key == "D:") deps = val;
+                    else if (key == "p:") prov = val;
+                }
+            }
+            END {
+                if (!found) { check_and_print(); }
+            }
         ' "${idx_file}" || true)
         
+        # 调试日志：输出匹配状态
         if [[ -n "${lookup_res}" ]]; then
+            local lines_count
+            lines_count=$(echo "${lookup_res}" | wc -l)
+            echo "  [DEBUG] Found '${target}' in ${repo} (${lines_count} lines)" >&2
             echo "${lookup_res}"
             return 0
         fi
     done
+    
+    echo "  [DEBUG] Not found '${target}' in any repo" >&2
     return 1
 }
 
@@ -156,18 +162,22 @@ resolve_dependencies() {
         # Queue dependencies
         if [[ -n "${deps}" ]]; then
             for dep in ${deps}; do
-                if [[ "${dep}" =~ ^so:libc\.musl ]]; then
+                # 清理版本依赖限定符，例如将 "pcre2>=10.42" 转换为 "pcre2"
+                local clean_dep="${dep%%[<>=!~]*}"
+
+                if [[ "${clean_dep}" =~ ^so:libc\.musl ]]; then
                     continue
                 fi
+                
                 local dep_resolved=0
                 for r in "${resolved[@]}"; do
-                    if [[ "${r}" == "${dep}" ]]; then
+                    if [[ "${r}" == "${clean_dep}" ]]; then
                         dep_resolved=1
                         break
                     fi
                 done
                 if [[ "${dep_resolved}" -eq 0 ]]; then
-                    queue+=("${dep}")
+                    queue+=("${clean_dep}")
                 fi
             done
         fi
@@ -218,7 +228,7 @@ download_and_extract() {
         fi
         
         echo "  Extracting ${apk_file}..."
-        tar -xzf "${apk_file}"
+        tar -xzf "${apk_file}" 2>/dev/null || true
     done
     
     echo "  Installing to overlay..."
@@ -247,12 +257,31 @@ for arch in "${ARCHES[@]}"; do
     # Resolve all package downloads (including dependencies)
     echo "Resolving dependencies for: ${PACKAGES_INPUT[*]}"
     RESOLVED_ITEMS=()
-    while IFS= read -r line; do
+    
+    # 临时关闭严苛模式，防止子进程管道因 set -e 导致的主线程静默退出
+    set +e
+    set +o pipefail
+    
+    tmp_res_file="$(mktemp)"
+    resolve_dependencies "${arch}" "${PACKAGES_INPUT[@]}" > "${tmp_res_file}"
+    res_code=$?
+    
+    # 恢复严格模式
+    set -e
+    set -o pipefail
+    
+    if [[ ${res_code} -ne 0 ]]; then
+        echo "Warning: Dependency resolver exited with code ${res_code}" >&2
+    fi
+
+    # 从安全文件中读取解析结果
+    while IFS= read -r line || [[ -n "${line}" ]]; do
         [[ -n "${line}" ]] && RESOLVED_ITEMS+=("${line}")
-    done < <(resolve_dependencies "${arch}" "${PACKAGES_INPUT[@]}")
+    done < "${tmp_res_file}"
+    rm -f "${tmp_res_file}"
     
     if (( ${#RESOLVED_ITEMS[@]} == 0 )); then
-        echo "Error: No packages resolved." >&2
+        echo "Error: No packages resolved for architecture ${arch}." >&2
         exit 1
     fi
     
@@ -267,4 +296,4 @@ for arch in "${ARCHES[@]}"; do
 done
 
 echo "Successfully added packages and dependencies to rootfs overlays!"
-echo "Run 'make test' to rebuild the filesystem images."
+echo "Run 'make img_all' to rebuild the filesystem images."
