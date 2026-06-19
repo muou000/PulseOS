@@ -988,24 +988,7 @@ impl FileBackend {
     pub fn read_at(&self, mut dst: impl Write + IoBufMut, mut offset: u64) -> VfsResult<usize> {
         match self {
             Self::Cached(cached) => {
-                let len = dst.remaining_mut();
-                if len >= 8192 && !cached.in_memory() {
-                    let file = cached.location().entry().as_file()?;
-                    let cached_size = *cached.shared.size.lock();
-                    if file.len()? != cached_size {
-                        file.set_len(cached_size)?;
-                    }
-                    cached.flush_dirty_pages(file)?;
-                    let shared = shared_file_state(cached.location());
-                    let _guard = shared.io_lock.read();
-                    dst.read_from(&mut axio::read_fn(|buf| {
-                        cached.location().entry().as_file()?.read_at(buf, offset).inspect(|read| {
-                            offset += *read as u64;
-                        })
-                    }))
-                } else {
-                    cached.read_at(dst, offset)
-                }
+                cached.read_at(dst, offset)
             }
             Self::Direct(loc) => {
                 if loc.flags().contains(NodeFlags::STREAM) {
@@ -1030,36 +1013,7 @@ impl FileBackend {
     pub fn write_at(&self, mut src: impl Read + IoBuf, mut offset: u64) -> VfsResult<usize> {
         match self {
             Self::Cached(cached) => {
-                let len = src.remaining();
-                if len >= 8192 && !cached.in_memory() {
-                    let file = cached.location().entry().as_file()?;
-                    let cached_size = *cached.shared.size.lock();
-                    if file.len()? != cached_size {
-                        file.set_len(cached_size)?;
-                    }
-                    cached.flush_dirty_pages(file)?;
-                    let shared = shared_file_state(cached.location());
-                    let _guard = shared.io_lock.write();
-                    let result = src.write_to(&mut axio::write_fn(|buf| {
-                        file.write_at(buf, offset).inspect(|written| {
-                            offset += *written as u64;
-                        })
-                    }));
-                    let invalidate = shared.discard_all_pages(file, false);
-                    let new_end = offset;
-                    let mut size_guard = cached.shared.size.lock();
-                    if new_end > *size_guard {
-                        *size_guard = new_end;
-                    }
-                    match (result, invalidate) {
-                        (Ok(written), Ok(())) => Ok(written),
-                        (Err(err), Ok(())) => Err(err),
-                        (Ok(_), Err(err)) => Err(err),
-                        (Err(err), Err(_)) => Err(err),
-                    }
-                } else {
-                    cached.write_at(src, offset)
-                }
+                cached.write_at(src, offset)
             }
             Self::Direct(loc) => {
                 let file = loc.entry().as_file()?;
@@ -1247,6 +1201,22 @@ impl File {
 
     pub fn location(&self) -> &Location {
         self.inner.location()
+    }
+
+    pub fn is_direct_regular_file(&self) -> bool {
+        if matches!(self.inner, FileBackend::Direct(_)) {
+            if let Ok(metadata) = self.inner.location().metadata() {
+                if metadata.node_type == NodeType::RegularFile {
+                    let fs_name = self.inner.location().filesystem().name();
+                    return fs_name != "proc" && fs_name != "devfs" && fs_name != "tmpfs";
+                }
+            }
+        }
+        false
+    }
+
+    pub fn block_size(&self) -> u64 {
+        self.inner.location().metadata().map(|m| m.block_size).unwrap_or(512)
     }
 
     /// Reads a number of bytes starting from a given offset.
