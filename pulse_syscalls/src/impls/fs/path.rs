@@ -387,10 +387,9 @@ pub fn sys_openat(dirfd: i32, pathname: usize, flags: usize, mode: usize) -> isi
             if let Ok(abs_path) = file.location().absolute_path() {
                 let procs = pulse_core::task::processes_snapshot();
                 for proc in procs {
-                    if let Some(exec_path) = proc.exec_path() {
-                        if exec_path == abs_path.as_str() {
-                            return -LinuxError::ETXTBSY.code() as isize;
-                        }
+                    // Bolt: Avoid cloning the `exec_path` string for every process by checking equality inside the read lock.
+                    if proc.is_exec_path(abs_path.as_str()) {
+                        return -LinuxError::ETXTBSY.code() as isize;
                     }
                 }
             }

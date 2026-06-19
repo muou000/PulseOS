@@ -669,6 +669,10 @@ impl Process {
         self.exec_path.read().clone()
     }
 
+    pub fn is_exec_path(&self, path: &str) -> bool {
+        self.exec_path.read().as_deref() == Some(path)
+    }
+
     pub fn exec_path_or_default(&self) -> String {
         self.exec_path().unwrap_or_else(|| "pulse_init".to_string())
     }
