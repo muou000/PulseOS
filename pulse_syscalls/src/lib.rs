@@ -9,3 +9,4 @@ mod handler;
 mod impls;
 
 pub use handler::syscall_handler;
+pub use impls::sys_sync;

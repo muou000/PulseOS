@@ -154,7 +154,7 @@ fn lookup_or_probe_fs(source: &str, fstype: &str) -> Result<axfs_ng_vfs::Filesys
     if fstype == "tmpfs" {
         return Ok(axfs::new_tmpfs());
     }
-    if fstype == "proc" || fstype == "procfs" {
+    if fstype == "proc" {
         return Ok(axfs::new_procfs());
     }
 
@@ -1126,7 +1126,9 @@ pub fn sys_unlinkat(dirfd: i32, pathname: usize, flags: usize) -> isize {
 
     if (flags & AT_REMOVEDIR as usize) != 0 {
         return match ctx.remove_dir(Path::new(path)) {
-            Ok(()) => 0,
+            Ok(()) => {
+                0
+            }
             Err(e) => {
                 let errno = LinuxError::from(e.canonicalize());
                 -errno.code() as isize
@@ -1135,7 +1137,9 @@ pub fn sys_unlinkat(dirfd: i32, pathname: usize, flags: usize) -> isize {
     }
 
     match ctx.remove_file(Path::new(path)) {
-        Ok(()) => 0,
+        Ok(()) => {
+            0
+        }
         Err(e) => {
             let errno = LinuxError::from(e.canonicalize());
             -errno.code() as isize

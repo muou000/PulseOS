@@ -23,8 +23,18 @@ use spin::{Lazy, Mutex};
 
 mod disk;
 pub mod fs;
+mod writeback;
 
+pub use disk::flush_all_disks;
 pub use fs::{new_tmpfs, new_procfs, new_default, devfs::DevNode, TtyCallbacks, register_tty_callbacks};
+
+pub fn flush_all_filesystems() -> axfs_ng_vfs::VfsResult<()> {
+    let mps = MOUNTED_MOUNTPOINTS.lock();
+    for (_, mp) in mps.iter() {
+        let _ = mp.root_location().filesystem().flush();
+    }
+    Ok(())
+}
 #[cfg(feature = "ext4")]
 pub use fs::ext4;
 
@@ -429,6 +439,7 @@ pub fn init_filesystems(mut block_devs: AxDeviceContainer<AxBlockDevice>) {
 
     ROOT_FS_CONTEXT.call_once(|| cx.clone());
     *FS_CONTEXT.lock() = cx;
+    writeback::init_writeback_daemon();
 }
 
 pub use fs::{ProcfsProcessProvider, register_process_provider};

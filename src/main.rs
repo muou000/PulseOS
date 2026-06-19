@@ -90,10 +90,12 @@ fn main() {
             let _ = init_thread.process().take_task_ref_by_tid(init_tid);
             init_thread.process().release_task_refs();
 
+            pulse_syscalls::sys_sync();
             axhal::power::system_off();
         }
         Err(e) => {
             error!("Failed to create user process: {:?}", e);
+            pulse_syscalls::sys_sync();
             axhal::power::system_off();
         }
     }

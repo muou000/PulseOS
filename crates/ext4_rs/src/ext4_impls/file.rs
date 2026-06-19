@@ -3,6 +3,28 @@ use crate::return_errno_with_message;
 use crate::utils::path_check;
 use crate::ext4_defs::*;
 use core::cmp::max;
+use alloc::sync::Arc;
+
+struct JournalMetadataWritingGuard<'a> {
+    journal: Option<&'a Arc<crate::journal::JournalBlockDevice>>,
+}
+
+impl<'a> JournalMetadataWritingGuard<'a> {
+    fn new(journal: Option<&'a Arc<crate::journal::JournalBlockDevice>>, enabled: bool) -> Self {
+        if let Some(ref j) = journal {
+            j.set_metadata_writing(enabled);
+        }
+        Self { journal }
+    }
+}
+
+impl<'a> Drop for JournalMetadataWritingGuard<'a> {
+    fn drop(&mut self) {
+        if let Some(ref j) = self.journal {
+            j.set_metadata_writing(true);
+        }
+    }
+}
 // use std::time::{Duration, Instant};
 
 impl Ext4 {
@@ -21,42 +43,47 @@ impl Ext4 {
         child: &mut Ext4InodeRef,
         name: &str,
     ) -> Result<usize> {
-        log::debug!("Ext4::link: parent={}, child={}, name='{}'", parent.inode_num, child.inode_num, name);
-        // Add a directory entry in the parent directory pointing to the child inode
-
-        // at this point should insert to existing block
-        self.dir_add_entry(parent, child, name)?;
-        self.write_back_inode_without_csum(parent);
-
-        // If this is the first link. add '.' and '..' entries
-        if child.inode.is_dir() {
-            log::debug!("Ext4::link: initializing directory '.' and '..'");
-            // let child_ref = child.clone();
-            let new_child_ref = Ext4InodeRef {
-                inode_num: child.inode_num,
-                inode: child.inode,
-            };
-
-            // at this point child need a new block
-            // Create "." entry pointing to the child directory itself
-            self.dir_add_entry(child, &new_child_ref, ".")?;
+        self.start_transaction();
+        let res = (|| {
+            log::debug!("Ext4::link: parent={}, child={}, name='{}'", parent.inode_num, child.inode_num, name);
+            // Add a directory entry in the parent directory pointing to the child inode
 
             // at this point should insert to existing block
-            // Create ".." entry pointing to the parent directory
-            self.dir_add_entry(child, parent, "..")?;
+            self.dir_add_entry(parent, child, name)?;
+            self.write_back_inode_without_csum(parent);
 
-            child.inode.set_links_count(2);
-            let link_cnt = parent.inode.links_count() + 1;
-            parent.inode.set_links_count(link_cnt);
+            // If this is the first link. add '.' and '..' entries
+            if child.inode.is_dir() {
+                log::debug!("Ext4::link: initializing directory '.' and '..'");
+                // let child_ref = child.clone();
+                let new_child_ref = Ext4InodeRef {
+                    inode_num: child.inode_num,
+                    inode: child.inode,
+                };
 
-            return Ok(EOK);
-        }
+                // at this point child need a new block
+                // Create "." entry pointing to the child directory itself
+                self.dir_add_entry(child, &new_child_ref, ".")?;
 
-        // Increment the link count of the child inode
-        let link_cnt = child.inode.links_count() + 1;
-        child.inode.set_links_count(link_cnt);
+                // at this point should insert to existing block
+                // Create ".." entry pointing to the parent directory
+                self.dir_add_entry(child, parent, "..")?;
 
-        Ok(EOK)
+                child.inode.set_links_count(2);
+                let link_cnt = parent.inode.links_count() + 1;
+                parent.inode.set_links_count(link_cnt);
+
+                return Ok(EOK);
+            }
+
+            // Increment the link count of the child inode
+            let link_cnt = child.inode.links_count() + 1;
+            child.inode.set_links_count(link_cnt);
+
+            Ok(EOK)
+        })();
+        self.stop_transaction()?;
+        res
     }
 
     /// create a new inode and link it to the parent directory
@@ -68,61 +95,71 @@ impl Ext4 {
     ///
     /// Returns:
     pub fn create(&self, parent: u32, name: &str, inode_mode: u16) -> Result<Ext4InodeRef> {
-        log::debug!("Ext4::create: parent={}, name='{}', mode={:#o}", parent, name, inode_mode);
-        let mut parent_inode_ref = self.get_inode_ref(parent);
+        self.start_transaction();
+        let res = (|| {
+            log::debug!("Ext4::create: parent={}, name='{}', mode={:#o}", parent, name, inode_mode);
+            let mut parent_inode_ref = self.get_inode_ref(parent);
 
-        // let mut child_inode_ref = self.create_inode(inode_mode)?;
-        let init_child_ref = self.create_inode(inode_mode)?;
+            // let mut child_inode_ref = self.create_inode(inode_mode)?;
+            let init_child_ref = self.create_inode(inode_mode)?;
 
-        self.write_back_inode_without_csum(&init_child_ref);
-        // load new
-        let mut child_inode_ref = self.get_inode_ref(init_child_ref.inode_num);
+            self.write_back_inode_without_csum(&init_child_ref);
+            // load new
+            let mut child_inode_ref = self.get_inode_ref(init_child_ref.inode_num);
 
-        self.link(&mut parent_inode_ref, &mut child_inode_ref, name)?;
+            self.link(&mut parent_inode_ref, &mut child_inode_ref, name)?;
 
-        self.write_back_inode(&mut parent_inode_ref);
-        self.write_back_inode(&mut child_inode_ref);
+            self.write_back_inode(&mut parent_inode_ref);
+            self.write_back_inode(&mut child_inode_ref);
 
-        Ok(child_inode_ref)
+            Ok(child_inode_ref)
+        })();
+        self.stop_transaction()?;
+        res
     }
 
     pub fn create_inode(&self, inode_mode: u16) -> Result<Ext4InodeRef> {
-        log::debug!("Ext4::create_inode: mode={:#o}", inode_mode);
+        self.start_transaction();
+        let res = (|| {
+            log::debug!("Ext4::create_inode: mode={:#o}", inode_mode);
 
-        let inode_file_type = match InodeFileType::from_bits(inode_mode & EXT4_INODE_MODE_TYPE_MASK) {
-            Some(file_type) => file_type,
-            None => InodeFileType::S_IFREG,
-        };
+            let inode_file_type = match InodeFileType::from_bits(inode_mode & EXT4_INODE_MODE_TYPE_MASK) {
+                Some(file_type) => file_type,
+                None => InodeFileType::S_IFREG,
+            };
 
-        let is_dir = inode_file_type == InodeFileType::S_IFDIR;
+            let is_dir = inode_file_type == InodeFileType::S_IFDIR;
 
-        // allocate inode
-        let inode_num = self.alloc_inode(is_dir)?;
-        log::debug!("Ext4::create_inode: allocated inode={}", inode_num);
+            // allocate inode
+            let inode_num = self.alloc_inode(is_dir)?;
+            log::debug!("Ext4::create_inode: allocated inode={}", inode_num);
 
-        // initialize inode
-        let mut inode = Ext4Inode::default();
+            // initialize inode
+            let mut inode = Ext4Inode::default();
 
-        // set mode
-        inode.set_mode(inode_mode | 0o777);
+            // set mode
+            inode.set_mode(inode_mode | 0o777);
 
-        // set extra size
-        let inode_size = self.super_block.inode_size();
-        let extra_size = self.super_block.extra_size();
-        if inode_size > EXT4_GOOD_OLD_INODE_SIZE {
-            inode.set_i_extra_isize(extra_size);
-        }
+            // set extra size
+            let inode_size = self.super_block.inode_size();
+            let extra_size = self.super_block.extra_size();
+            if inode_size > EXT4_GOOD_OLD_INODE_SIZE {
+                inode.set_i_extra_isize(extra_size);
+            }
 
-        // set extent
-        inode.set_flags(EXT4_INODE_FLAG_EXTENTS as u32);
-        inode.extent_tree_init();
+            // set extent
+            inode.set_flags(EXT4_INODE_FLAG_EXTENTS as u32);
+            inode.extent_tree_init();
 
-        let inode_ref = Ext4InodeRef {
-            inode_num,
-            inode,
-        };
+            let inode_ref = Ext4InodeRef {
+                inode_num,
+                inode,
+            };
 
-        Ok(inode_ref)
+            Ok(inode_ref)
+        })();
+        self.stop_transaction()?;
+        res
     }
 
 
@@ -137,24 +174,29 @@ impl Ext4 {
     ///
     /// Returns:
     pub fn create_with_attr(&self, parent: u32, name: &str, inode_mode: u16, uid:u16, gid: u16) -> Result<Ext4InodeRef> {
-        let mut parent_inode_ref = self.get_inode_ref(parent);
+        self.start_transaction();
+        let res = (|| {
+            let mut parent_inode_ref = self.get_inode_ref(parent);
 
-        // let mut child_inode_ref = self.create_inode(inode_mode)?;
-        let mut init_child_ref = self.create_inode(inode_mode)?;
+            // let mut child_inode_ref = self.create_inode(inode_mode)?;
+            let mut init_child_ref = self.create_inode(inode_mode)?;
 
-        init_child_ref.inode.set_uid(uid);
-        init_child_ref.inode.set_gid(gid);
+            init_child_ref.inode.set_uid(uid);
+            init_child_ref.inode.set_gid(gid);
 
-        self.write_back_inode_without_csum(&init_child_ref);
-        // load new
-        let mut child_inode_ref = self.get_inode_ref(init_child_ref.inode_num);
+            self.write_back_inode_without_csum(&init_child_ref);
+            // load new
+            let mut child_inode_ref = self.get_inode_ref(init_child_ref.inode_num);
 
-        self.link(&mut parent_inode_ref, &mut child_inode_ref, name)?;
+            self.link(&mut parent_inode_ref, &mut child_inode_ref, name)?;
 
-        self.write_back_inode(&mut parent_inode_ref);
-        self.write_back_inode(&mut child_inode_ref);
+            self.write_back_inode(&mut parent_inode_ref);
+            self.write_back_inode(&mut child_inode_ref);
 
-        Ok(child_inode_ref)
+            Ok(child_inode_ref)
+        })();
+        self.stop_transaction()?;
+        res
     }
 
     /// Read data from a file at a given offset
@@ -291,251 +333,265 @@ impl Ext4 {
     /// Returns:
     /// `Result<usize>` - number of bytes written
     pub fn write_at(&self, inode: u32, offset: usize, write_buf: &[u8]) -> Result<usize> {
-        // write buf is empty, return 0
-        let mut write_buf_len = write_buf.len();
-        if write_buf_len == 0 {
-            log::debug!("[Write] Empty write buffer, returning 0");
-            return Ok(0);
-        }
-
-        // get the inode reference
-        let mut inode_ref = self.get_inode_ref(inode);
-        let block_size = self.super_block.block_size() as usize;
-
-        // Get the file size
-        let file_size = inode_ref.inode.size();
-        log::trace!("[Write] Starting write - inode: {}, offset: {}, size: {}, current file size: {}", 
-            inode, offset, write_buf_len, file_size);
-
-        // Calculate the start and end block index
-        let iblock_start = offset / block_size;
-        let iblock_last = (offset + write_buf_len + block_size - 1) / block_size;
-        let total_blocks_needed = iblock_last - iblock_start;
-
-        // start block index
-        let mut iblk_idx = iblock_start;
-        let ifile_blocks = (file_size + block_size as u64 - 1) / block_size as u64;
-
-        // Calculate the unaligned size
-        let unaligned = offset % block_size;
-        if unaligned > 0 {
-            log::trace!("[Alignment] Unaligned start: {} bytes", unaligned);
-        }
-
-        // Buffer to keep track of written bytes
-        let mut written = 0;
-        let mut total_blocks = 0;
-        let mut new_blocks = 0;
-
-        // Start bgid for block allocation
-        let mut start_bgid = 1;
-
-        // Pre-allocate blocks if needed
-        let blocks_to_allocate = if iblk_idx >= ifile_blocks as usize {
-            total_blocks_needed
-        } else {
-            let existing = ifile_blocks as usize - iblk_idx;
-            if existing >= total_blocks_needed {
-                0
-            } else {
-                total_blocks_needed - existing
+        self.start_transaction();
+        let res = (|| {
+            // write buf is empty, return 0
+            let mut write_buf_len = write_buf.len();
+            if write_buf_len == 0 {
+                log::debug!("[Write] Empty write buffer, returning 0");
+                return Ok(0);
             }
-        };
 
-        if blocks_to_allocate > 0 {
-            log::trace!("[Pre-allocation] Allocating {} blocks", blocks_to_allocate);
-            
-            // 使用append_inode_pblk_batch进行批量块分配
-            let iblock_start = core::cmp::max(iblk_idx, ifile_blocks as usize) as u32;
-            let allocated_blocks = self.append_inode_pblk_batch(&mut inode_ref, &mut start_bgid, blocks_to_allocate, iblock_start)?;
-            
-            // If we couldn't allocate all blocks, adjust the write size
-            if allocated_blocks.len() < blocks_to_allocate {
-                log::trace!("[Write] Could only allocate {} out of {} blocks", allocated_blocks.len(), blocks_to_allocate);
-                
-                // Calculate new write size based on allocated blocks
-                let max_write_size = allocated_blocks.len() * block_size;
-                let adjusted_write_size = if unaligned > 0 {
-                    // For unaligned writes, we need to account for the unaligned portion
-                    if allocated_blocks.len() > 0 {
-                        let first_block_available = block_size - unaligned;
-                        let remaining_blocks_available = (allocated_blocks.len() - 1) * block_size;
-                        first_block_available + remaining_blocks_available
-                    } else {
-                        0
-                    }
+            // get the inode reference
+            let mut inode_ref = self.get_inode_ref(inode);
+            let block_size = self.super_block.block_size() as usize;
+
+            // Get the file size
+            let file_size = inode_ref.inode.size();
+            log::trace!("[Write] Starting write - inode: {}, offset: {}, size: {}, current file size: {}", 
+                inode, offset, write_buf_len, file_size);
+
+            // Calculate the start and end block index
+            let iblock_start = offset / block_size;
+            let iblock_last = (offset + write_buf_len + block_size - 1) / block_size;
+            let total_blocks_needed = iblock_last - iblock_start;
+
+            // start block index
+            let mut iblk_idx = iblock_start;
+            let ifile_blocks = (file_size + block_size as u64 - 1) / block_size as u64;
+
+            // Calculate the unaligned size
+            let unaligned = offset % block_size;
+            if unaligned > 0 {
+                log::trace!("[Alignment] Unaligned start: {} bytes", unaligned);
+            }
+
+            // Buffer to keep track of written bytes
+            let mut written = 0;
+            let mut total_blocks = 0;
+            let mut new_blocks = 0;
+
+            // Start bgid for block allocation
+            let mut start_bgid = 1;
+
+            // Pre-allocate blocks if needed
+            let blocks_to_allocate = if iblk_idx >= ifile_blocks as usize {
+                total_blocks_needed
+            } else {
+                let existing = ifile_blocks as usize - iblk_idx;
+                if existing >= total_blocks_needed {
+                    0
                 } else {
-                    max_write_size
-                };
+                    total_blocks_needed - existing
+                }
+            };
+
+            if blocks_to_allocate > 0 {
+                log::trace!("[Pre-allocation] Allocating {} blocks", blocks_to_allocate);
                 
-                if adjusted_write_size == 0 {
-                    log::error!("[Write] No space available for write after block allocation");
-                    return return_errno_with_message!(Errno::ENOSPC, "No blocks available for write");
+                // 使用append_inode_pblk_batch进行批量块分配
+                let iblock_start = core::cmp::max(iblk_idx, ifile_blocks as usize) as u32;
+                let allocated_blocks = self.append_inode_pblk_batch(&mut inode_ref, &mut start_bgid, blocks_to_allocate, iblock_start)?;
+                
+                // If we couldn't allocate all blocks, adjust the write size
+                if allocated_blocks.len() < blocks_to_allocate {
+                    log::trace!("[Write] Could only allocate {} out of {} blocks", allocated_blocks.len(), blocks_to_allocate);
+                    
+                    // Calculate new write size based on allocated blocks
+                    let max_write_size = allocated_blocks.len() * block_size;
+                    let adjusted_write_size = if unaligned > 0 {
+                        // For unaligned writes, we need to account for the unaligned portion
+                        if allocated_blocks.len() > 0 {
+                            let first_block_available = block_size - unaligned;
+                            let remaining_blocks_available = (allocated_blocks.len() - 1) * block_size;
+                            first_block_available + remaining_blocks_available
+                        } else {
+                            0
+                        }
+                    } else {
+                        max_write_size
+                    };
+                    
+                    if adjusted_write_size == 0 {
+                        log::error!("[Write] No space available for write after block allocation");
+                        return return_errno_with_message!(Errno::ENOSPC, "No blocks available for write");
+                    }
+                    
+                    // Update write size
+                    write_buf_len = min(write_buf_len, adjusted_write_size);
+                    log::trace!("[Write] Adjusted write size from {} to {} bytes", write_buf.len(), write_buf_len);
                 }
                 
-                // Update write size
-                write_buf_len = min(write_buf_len, adjusted_write_size);
-                log::trace!("[Write] Adjusted write size from {} to {} bytes", write_buf.len(), write_buf_len);
+                new_blocks += allocated_blocks.len();
             }
-            
-            new_blocks += allocated_blocks.len();
-        }
 
-        // Verify we have enough blocks for the write
-        let required_blocks = (write_buf_len + block_size - 1) / block_size;
-        let available_blocks = if iblk_idx >= ifile_blocks as usize {
-            new_blocks
-        } else {
-            (ifile_blocks as usize - iblk_idx) + new_blocks
-        };
-
-        if available_blocks < required_blocks {
-            log::error!("[Write] Not enough blocks available: required {}, available {}", 
-                required_blocks, available_blocks);
-            return return_errno_with_message!(Errno::ENOSPC, "Not enough blocks available for write");
-        }
-
-        // Unaligned write
-        if unaligned > 0 && written < write_buf_len {
-            let len = min(write_buf_len, block_size - unaligned);
-            log::trace!("[Unaligned Write] Writing {} bytes", len);
-            
-            let mut is_new_block = false;
-            // Get the physical block id
-            let pblock_idx = match self.get_pblock_idx(&inode_ref, iblk_idx as u32) {
-                Ok(idx) => idx,
-                Err(e) if e.error() == Errno::ENOENT => {
-                    // Allocate a new block
-                    let new_block = self.balloc_alloc_block(&mut inode_ref, None)?;
-                    let mut newex = Ext4Extent::default();
-                    newex.first_block = iblk_idx as u32;
-                    newex.store_pblock(new_block);
-                    newex.block_count = 1;
-                    self.insert_extent(&mut inode_ref, &mut newex)?;
-                    is_new_block = true;
-                    new_block
-                }
-                Err(e) => {
-                    log::error!("[Write] Failed to get physical block for logical block {}: {:?}", iblk_idx, e);
-                    return Err(e);
-                }
-            };
-            total_blocks += 1;
-
-            let block_offset = pblock_idx as usize * block_size;
-            let mut block = if is_new_block {
-                Block {
-                    disk_offset: block_offset,
-                    data: vec![0u8; block_size],
-                }
+            // Verify we have enough blocks for the write
+            let required_blocks = (write_buf_len + block_size - 1) / block_size;
+            let available_blocks = if iblk_idx >= ifile_blocks as usize {
+                new_blocks
             } else {
-                Block::load(&self.block_device, block_offset)
+                (ifile_blocks as usize - iblk_idx) + new_blocks
             };
 
-            block.write_offset(unaligned, &write_buf[..len], len);
+            if available_blocks < required_blocks {
+                log::error!("[Write] Not enough blocks available: required {}, available {}", 
+                    required_blocks, available_blocks);
+                return return_errno_with_message!(Errno::ENOSPC, "Not enough blocks available for write");
+            }
 
-            block.sync_blk_to_disk(&self.block_device);
+            // Unaligned write
+            if unaligned > 0 && written < write_buf_len {
+                let len = min(write_buf_len, block_size - unaligned);
+                log::trace!("[Unaligned Write] Writing {} bytes", len);
+                
+                let mut is_new_block = false;
+                // Get the physical block id
+                let pblock_idx = match self.get_pblock_idx(&inode_ref, iblk_idx as u32) {
+                    Ok(idx) => idx,
+                    Err(e) if e.error() == Errno::ENOENT => {
+                        // Allocate a new block
+                        let new_block = self.balloc_alloc_block(&mut inode_ref, None)?;
+                        let mut newex = Ext4Extent::default();
+                        newex.first_block = iblk_idx as u32;
+                        newex.store_pblock(new_block);
+                        newex.block_count = 1;
+                        self.insert_extent(&mut inode_ref, &mut newex)?;
+                        is_new_block = true;
+                        new_block
+                    }
+                    Err(e) => {
+                        log::error!("[Write] Failed to get physical block for logical block {}: {:?}", iblk_idx, e);
+                        return Err(e);
+                    }
+                };
+                total_blocks += 1;
 
-            written += len;
-            iblk_idx += 1;
-        }
-
-        // Aligned write
-        let mut aligned_blocks = 0;
-        let mut iterations = 0;
-        log::debug!("[Aligned Write] Starting aligned writes for {} blocks", (write_buf_len - written + block_size - 1) / block_size);
-        
-        while written < write_buf_len {
-            iterations += 1;
-            
-            let mut is_new_block = false;
-            let mut contig_blocks = 1;
-
-            // Get the physical block id and contiguous length
-            let pblock_idx = match self.get_pblock_and_len(&inode_ref, iblk_idx as u32) {
-                Ok((idx, len)) => {
-                    contig_blocks = len;
-                    idx
-                },
-                Err(e) if e.error() == Errno::ENOENT => {
-                    // Allocate a new block
-                    let new_block = self.balloc_alloc_block(&mut inode_ref, None)?;
-                    let mut newex = Ext4Extent::default();
-                    newex.first_block = iblk_idx as u32;
-                    newex.store_pblock(new_block);
-                    newex.block_count = 1;
-                    self.insert_extent(&mut inode_ref, &mut newex)?;
-                    is_new_block = true;
-                    new_block
-                }
-                Err(e) => {
-                    log::error!("[Write] Failed to get physical block for logical block {}: {:?}", iblk_idx, e);
-                    return Err(e);
-                }
-            };
-
-            let block_offset = pblock_idx as usize * block_size;
-            
-            // Calculate how much we can write in this batch
-            let max_write_for_extent = (contig_blocks as usize) * block_size;
-            let write_size = min(max_write_for_extent, write_buf_len - written);
-
-            // Separate full blocks from the partial tail block
-            let full_blocks_size = (write_size / block_size) * block_size;
-            
-            if full_blocks_size > 0 {
-                // Write all full blocks in one device call - Bypassing intermediate Block abstraction
-                self.block_device.write_offset(block_offset, &write_buf[written..written + full_blocks_size]);
-                written += full_blocks_size;
-                iblk_idx += (full_blocks_size / block_size) as usize;
-                total_blocks += (full_blocks_size / block_size) as usize;
-                aligned_blocks += (full_blocks_size / block_size) as usize;
-            } else {
-                // write_size < BLOCK_SIZE, meaning we have a partial write on a single block
-                // This happens at the end of the buffer.
+                let block_offset = pblock_idx as usize * block_size;
                 let mut block = if is_new_block {
-                    Block { disk_offset: block_offset, data: vec![0u8; block_size] }
+                    Block {
+                        disk_offset: block_offset,
+                        data: vec![0u8; block_size],
+                    }
                 } else {
                     Block::load(&self.block_device, block_offset)
                 };
-                
-                block.write_offset(0, &write_buf[written..written + write_size], write_size);
-                block.sync_blk_to_disk(&self.block_device);
-                
-                written += write_size;
+
+                block.write_offset(unaligned, &write_buf[..len], len);
+
+                {
+                    let _guard = JournalMetadataWritingGuard::new(self.journal.as_ref(), false);
+                    block.sync_blk_to_disk(&self.block_device);
+                }
+
+                written += len;
                 iblk_idx += 1;
-                total_blocks += 1;
-                aligned_blocks += 1;
             }
 
-            if iterations % 100 == 0 {
-                log::trace!("[Progress] Processed {} iterations, {} bytes", iterations, written);
-            }
-        }
-        
-        // Update file size if necessary
-        let new_size = offset + written;
-        if new_size > file_size as usize {
-            log::trace!("[Write] Updating file size from {} to {}", file_size, new_size);
+            // Aligned write
+            let mut aligned_blocks = 0;
+            let mut iterations = 0;
+            log::debug!("[Aligned Write] Starting aligned writes for {} blocks", (write_buf_len - written + block_size - 1) / block_size);
             
-            // Verify the new size is valid
-            if new_size > EXT4_MAX_FILE_SIZE as usize {
-                log::error!("[Write] New file size {} exceeds maximum allowed size", new_size);
-                return return_errno_with_message!(Errno::EFBIG, "File size too large");
+            while written < write_buf_len {
+                iterations += 1;
+                
+                let mut is_new_block = false;
+                let mut contig_blocks = 1;
+
+                // Get the physical block id and contiguous length
+                let pblock_idx = match self.get_pblock_and_len(&inode_ref, iblk_idx as u32) {
+                    Ok((idx, len)) => {
+                        contig_blocks = len;
+                        idx
+                    },
+                    Err(e) if e.error() == Errno::ENOENT => {
+                        // Allocate a new block
+                        let new_block = self.balloc_alloc_block(&mut inode_ref, None)?;
+                        let mut newex = Ext4Extent::default();
+                        newex.first_block = iblk_idx as u32;
+                        newex.store_pblock(new_block);
+                        newex.block_count = 1;
+                        self.insert_extent(&mut inode_ref, &mut newex)?;
+                        is_new_block = true;
+                        new_block
+                    }
+                    Err(e) => {
+                        log::error!("[Write] Failed to get physical block for logical block {}: {:?}", iblk_idx, e);
+                        return Err(e);
+                    }
+                };
+
+                let block_offset = pblock_idx as usize * block_size;
+                
+                // Calculate how much we can write in this batch
+                let max_write_for_extent = (contig_blocks as usize) * block_size;
+                let write_size = min(max_write_for_extent, write_buf_len - written);
+
+                // Separate full blocks from the partial tail block
+                let full_blocks_size = (write_size / block_size) * block_size;
+                
+                if full_blocks_size > 0 {
+                    // Write all full blocks in one device call - Bypassing intermediate Block abstraction
+                    {
+                        let _guard = JournalMetadataWritingGuard::new(self.journal.as_ref(), false);
+                        self.block_device.write_offset(block_offset, &write_buf[written..written + full_blocks_size]);
+                    }
+                    written += full_blocks_size;
+                    iblk_idx += (full_blocks_size / block_size) as usize;
+                    total_blocks += (full_blocks_size / block_size) as usize;
+                    aligned_blocks += (full_blocks_size / block_size) as usize;
+                } else {
+                    // write_size < BLOCK_SIZE, meaning we have a partial write on a single block
+                    // This happens at the end of the buffer.
+                    let mut block = if is_new_block {
+                        Block { disk_offset: block_offset, data: vec![0u8; block_size] }
+                    } else {
+                        Block::load(&self.block_device, block_offset)
+                    };
+                    
+                    block.write_offset(0, &write_buf[written..written + write_size], write_size);
+                    {
+                        let _guard = JournalMetadataWritingGuard::new(self.journal.as_ref(), false);
+                        block.sync_blk_to_disk(&self.block_device);
+                    }
+                    
+                    written += write_size;
+                    iblk_idx += 1;
+                    total_blocks += 1;
+                    aligned_blocks += 1;
+                }
+
+                if iterations % 100 == 0 {
+                    log::trace!("[Progress] Processed {} iterations, {} bytes", iterations, written);
+                }
             }
             
-            inode_ref.inode.set_size(new_size as u64);
-            self.write_back_inode(&mut inode_ref);
-        }
+            // Update file size if necessary
+            let new_size = offset + written;
+            if new_size > file_size as usize {
+                log::trace!("[Write] Updating file size from {} to {}", file_size, new_size);
+                
+                // Verify the new size is valid
+                if new_size > EXT4_MAX_FILE_SIZE as usize {
+                    log::error!("[Write] New file size {} exceeds maximum allowed size", new_size);
+                    return return_errno_with_message!(Errno::EFBIG, "File size too large");
+                }
+                
+                inode_ref.inode.set_size(new_size as u64);
+                self.write_back_inode(&mut inode_ref);
+            }
 
-        log::debug!("=== Write Performance Summary ===");
-        log::debug!("[Blocks] Total blocks: {}, New blocks: {}, Aligned blocks: {}", 
-            total_blocks, new_blocks, aligned_blocks);
-        log::debug!("[Bytes] Total written: {}", written);
-        log::debug!("[File] Final size: {}", inode_ref.inode.size());
-        log::debug!("=== End of Write Analysis ===");
+            log::debug!("=== Write Performance Summary ===");
+            log::debug!("[Blocks] Total blocks: {}, New blocks: {}, Aligned blocks: {}", 
+                total_blocks, new_blocks, aligned_blocks);
+            log::debug!("[Bytes] Total written: {}", written);
+            log::debug!("[File] Final size: {}", inode_ref.inode.size());
+            log::debug!("=== End of Write Analysis ===");
 
-        Ok(written)
+            Ok(written)
+        })();
+        self.stop_transaction()?;
+        res
     }
 
     /// File remove

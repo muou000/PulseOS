@@ -19,15 +19,23 @@ pub(crate) struct Ext4Disk<D: BlockDriverOps> {
     block_size: core::sync::atomic::AtomicUsize,
 }
 
-impl<D: BlockDriverOps> Ext4Disk<D> {
+impl<D: BlockDriverOps + 'static> crate::disk::DiskFlushable for Ext4Disk<D> {
+    fn flush_disk(&self) -> axdriver::prelude::DevResult<()> {
+        self.dev.lock().flush()
+    }
+}
+
+impl<D: BlockDriverOps + 'static> Ext4Disk<D> {
     pub(crate) fn new(dev: D) -> Arc<Self> {
         let sector_size = dev.block_size();
-        Arc::new(Self {
+        let disk = Arc::new(Self {
             dev: Mutex::new(dev),
             sector_size,
             block_cache: Mutex::new(LruCache::new(NonZeroUsize::new(512).unwrap())),
             block_size: core::sync::atomic::AtomicUsize::new(4096),
-        })
+        });
+        crate::disk::DISK_FLUSHERS.lock().push(Arc::downgrade(&disk) as _);
+        disk
     }
 
     fn byte_range(&self, offset: usize, len: usize) -> (u64, usize, usize) {

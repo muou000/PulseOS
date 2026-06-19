@@ -15,7 +15,10 @@ use crate::impls::{
 pub fn sys_close(fd: usize) -> isize {
     axlog::debug!("sys_close: fd={}", fd);
     match remove_fd_entry(fd) {
-        Ok(_) => 0,
+        Ok(entry) => {
+            let _ = entry.object.flush();
+            0
+        }
         Err(e) => -e.code() as isize,
     }
 }

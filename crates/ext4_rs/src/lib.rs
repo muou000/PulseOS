@@ -5,6 +5,7 @@ extern crate alloc;
 
 pub mod utils;
 pub mod prelude;
+pub mod journal;
 
 pub use utils::*;
 pub use prelude::*;
