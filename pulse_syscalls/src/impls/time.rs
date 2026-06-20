@@ -983,8 +983,7 @@ pub fn sys_timer_settime(
             now_ns.saturating_add(val_dur.as_nanos() as u64)
         };
         timer.next_deadline_ns = deadline;
-        pulse_core::task::add_to_posix_timers(proc.pid());
-        pulse_core::task::update_itimer_deadline(deadline);
+        pulse_core::task::schedule_posix_timer_event(proc.pid(), timerid, deadline);
     }
 
     0

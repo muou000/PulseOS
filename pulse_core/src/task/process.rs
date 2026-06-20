@@ -2384,7 +2384,6 @@ impl Process {
             self.time_context
                 .itimer_real_interval_ns
                 .store(0, Ordering::Release);
-            super::remove_from_itimer_real(self.pid());
         } else {
             let deadline = now_ns.saturating_add(value_ns);
             self.time_context
@@ -2393,8 +2392,7 @@ impl Process {
             self.time_context
                 .itimer_real_interval_ns
                 .store(interval_ns, Ordering::Release);
-            super::add_to_itimer_real(self.pid());
-            super::update_itimer_deadline(deadline);
+            super::schedule_itimer_event(self.pid(), deadline);
         }
         (old_remaining, old_interval)
     }
@@ -2469,45 +2467,6 @@ impl Process {
     }
 
     /// Called from timer tick hook (interrupt context). Checks if ITIMER_REAL
-    /// has expired and sends SIGALRM if so. Returns Some(next_deadline) if armed.
-    pub fn check_itimer_real_tick(&self, now_ns: u64) -> Option<u64> {
-        let deadline = self
-            .time_context
-            .itimer_real_deadline_ns
-            .load(Ordering::Acquire);
-        if deadline == 0 {
-            return None;
-        }
-        if now_ns < deadline {
-            return Some(deadline);
-        }
-        // Timer expired. Send SIGALRM (signal 14).
-        axlog::info!(
-            "itimer expired for pid={} now={} deadline={}",
-            self.pid(),
-            now_ns,
-            deadline
-        );
-        let _ = queue_signal_to_process(self, 14 /* SIGALRM */);
-        let interval = self
-            .time_context
-            .itimer_real_interval_ns
-            .load(Ordering::Acquire);
-        if interval == 0 {
-            // One-shot: disarm
-            self.time_context
-                .itimer_real_deadline_ns
-                .store(0, Ordering::Release);
-            None
-        } else {
-            // Repeating: advance deadline
-            let new_deadline = deadline.saturating_add(interval);
-            self.time_context
-                .itimer_real_deadline_ns
-                .store(new_deadline, Ordering::Release);
-            Some(new_deadline)
-        }
-    }
 
     pub fn check_itimer_virt_tick(&self, elapsed_ns: u64) {
         let mut remaining = self
@@ -3099,45 +3058,5 @@ impl Process {
         Err(axerrno::LinuxError::ENOSPC)
     }
 
-    pub fn check_posix_timers_tick(&self, now_ns: u64) -> Option<u64> {
-        let mut timers = self.posix_timers.lock();
-        let mut next_min = None;
-        for slot in timers.iter_mut() {
-            if let Some(timer) = slot {
-                if timer.next_deadline_ns == 0 {
-                    continue;
-                }
-                if now_ns >= timer.next_deadline_ns {
-                    // Expired!
-                    let sig = timer.event.sigev_signo as usize;
-                    let notify = timer.event.sigev_notify;
-                    if notify == 0 { // SIGEV_SIGNAL
-                        let _ = queue_signal_to_process(self, sig);
-                    }
-                    if timer.interval_ns > 0 {
-                        let mut next = timer.next_deadline_ns.saturating_add(timer.interval_ns);
-                        while next <= now_ns {
-                            timer.overrun = timer.overrun.saturating_add(1);
-                            next = next.saturating_add(timer.interval_ns);
-                        }
-                        timer.next_deadline_ns = next;
-                        if let Some(min) = next_min {
-                            next_min = Some(core::cmp::min(min, next));
-                        } else {
-                            next_min = Some(next);
-                        }
-                    } else {
-                        timer.next_deadline_ns = 0;
-                    }
-                } else {
-                    if let Some(min) = next_min {
-                        next_min = Some(core::cmp::min(min, timer.next_deadline_ns));
-                    } else {
-                        next_min = Some(timer.next_deadline_ns);
-                    }
-                }
-            }
-        }
-        next_min
-    }
+
 }
