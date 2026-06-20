@@ -34,7 +34,7 @@ const CPUINFO_INO: u64 = 12;
 const NEXT_DYNAMIC_INO: u64 = CPUINFO_INO + 1;
 
 pub const PID_INODE_START: u64 = 0x10_0000_0000;
-pub const PID_INODE_SHIFT: u32 = 16;
+pub const PID_INODE_SHIFT: u32 = 24;
 
 const SUB_INO_DIR: u64 = 0;
 const SUB_INO_CMDLINE: u64 = 1;
@@ -56,7 +56,16 @@ pub const SUB_INO_NS_MNT: u64 = 16;
 pub const SUB_INO_NS_PID: u64 = 17;
 pub const SUB_INO_NS_USER: u64 = 18;
 pub const SUB_INO_NS_CGROUP: u64 = 19;
+pub const SUB_INO_CHILDREN: u64 = 20;
+pub const SUB_INO_TASK_DIR: u64 = 21;
+
 const SUB_INO_FD_BASE: u64 = 0x40;
+
+const SUB_INO_TASK_BASE: u64 = 0x80_0000;
+const SUB_TASK_DIR: u64 = 0;
+const SUB_TASK_STATUS: u64 = 1;
+const SUB_TASK_COMM: u64 = 2;
+const SUB_TASK_STAT: u64 = 3;
 
 pub trait ProcfsProcessProvider: Send + Sync {
     fn current_pid(&self) -> Option<u64>;
@@ -77,6 +86,15 @@ pub trait ProcfsProcessProvider: Send + Sync {
     fn fd_path(&self, pid: u64, fd: u32) -> Option<String>;
     fn maps(&self, pid: u64) -> Option<String>;
     fn pagemap(&self, _pid: u64, _offset: u64, _buf: &mut [u8]) -> Option<usize> {
+        None
+    }
+    fn children(&self, _pid: u64) -> Option<Vec<u64>> {
+        None
+    }
+    fn thread_status(&self, _pid: u64, _tid: u64) -> Option<String> {
+        None
+    }
+    fn thread_comm(&self, _pid: u64, _tid: u64) -> Option<String> {
         None
     }
 }
@@ -121,6 +139,10 @@ enum ProcLiveFileKind {
     Tainted,
     CorePattern,
     Cpuinfo,
+    PidChildren(u64),
+    ThreadStatus(u64, u64),
+    ThreadComm(u64, u64),
+    ThreadStat(u64, u64),
 }
 
 #[derive(PartialEq, Eq, Hash, Clone)]
@@ -488,6 +510,8 @@ impl ProcFilesystem {
                     entries.insert("setgroups".into(), InodeRef::new(PID_INODE_START + (pid << PID_INODE_SHIFT) + SUB_INO_SETGROUPS));
                     entries.insert("uid_map".into(), InodeRef::new(PID_INODE_START + (pid << PID_INODE_SHIFT) + SUB_INO_UID_MAP));
                     entries.insert("gid_map".into(), InodeRef::new(PID_INODE_START + (pid << PID_INODE_SHIFT) + SUB_INO_GID_MAP));
+                    entries.insert("children".into(), InodeRef::new(PID_INODE_START + (pid << PID_INODE_SHIFT) + SUB_INO_CHILDREN));
+                    entries.insert("task".into(), InodeRef::new(PID_INODE_START + (pid << PID_INODE_SHIFT) + SUB_INO_TASK_DIR));
                 }
                 return Ok(dir);
             }
@@ -555,12 +579,62 @@ impl ProcFilesystem {
                 return Ok(dir);
             }
 
-            if sub >= SUB_INO_FD_BASE {
+            if sub == SUB_INO_TASK_DIR {
+                let dir = Inode::new_directory(ino, PID_INODE_START + (pid << PID_INODE_SHIFT) + SUB_INO_DIR, NodePermission::from_bits_truncate(0o555));
+                {
+                    let mut entries = dir.as_dir()?.entries.lock();
+                    entries.insert(".".into(), InodeRef::new(ino));
+                    entries.insert("..".into(), InodeRef::new(PID_INODE_START + (pid << PID_INODE_SHIFT) + SUB_INO_DIR));
+                    
+                    if let Some(tids) = provider.thread_tids(pid) {
+                        for tid in tids {
+                            let name = tid.to_string();
+                            let child_ino = PID_INODE_START + (pid << PID_INODE_SHIFT) + SUB_INO_TASK_BASE + (tid << 4) + SUB_TASK_DIR;
+                            entries.insert(name.into(), InodeRef::new(child_ino));
+                        }
+                    }
+                }
+                return Ok(dir);
+            }
+
+            if sub >= SUB_INO_FD_BASE && sub < SUB_INO_TASK_BASE {
                 let fd = (sub - SUB_INO_FD_BASE) as u32;
                 let file = Inode::new_live_file(
                     ino,
                     ProcLiveFileKind::PidFdSymlink(pid, fd),
                     NodePermission::from_bits_truncate(0o777),
+                );
+                return Ok(file);
+            }
+
+            if sub >= SUB_INO_TASK_BASE {
+                let task_offset = sub - SUB_INO_TASK_BASE;
+                let tid = task_offset >> 4;
+                let task_sub = task_offset & 0xf;
+                
+                if task_sub == SUB_TASK_DIR {
+                    let dir = Inode::new_directory(ino, PID_INODE_START + (pid << PID_INODE_SHIFT) + SUB_INO_TASK_DIR, NodePermission::from_bits_truncate(0o555));
+                    {
+                        let mut entries = dir.as_dir()?.entries.lock();
+                        entries.insert(".".into(), InodeRef::new(ino));
+                        entries.insert("..".into(), InodeRef::new(PID_INODE_START + (pid << PID_INODE_SHIFT) + SUB_INO_TASK_DIR));
+                        entries.insert("status".into(), InodeRef::new(PID_INODE_START + (pid << PID_INODE_SHIFT) + SUB_INO_TASK_BASE + (tid << 4) + SUB_TASK_STATUS));
+                        entries.insert("comm".into(), InodeRef::new(PID_INODE_START + (pid << PID_INODE_SHIFT) + SUB_INO_TASK_BASE + (tid << 4) + SUB_TASK_COMM));
+                        entries.insert("stat".into(), InodeRef::new(PID_INODE_START + (pid << PID_INODE_SHIFT) + SUB_INO_TASK_BASE + (tid << 4) + SUB_TASK_STAT));
+                    }
+                    return Ok(dir);
+                }
+                
+                let kind = match task_sub {
+                    SUB_TASK_STATUS => ProcLiveFileKind::ThreadStatus(pid, tid),
+                    SUB_TASK_COMM => ProcLiveFileKind::ThreadComm(pid, tid),
+                    SUB_TASK_STAT => ProcLiveFileKind::ThreadStat(pid, tid),
+                    _ => return Err(VfsError::NotFound),
+                };
+                let file = Inode::new_live_file(
+                    ino,
+                    kind,
+                    NodePermission::from_bits_truncate(0o444),
                 );
                 return Ok(file);
             }
@@ -576,6 +650,7 @@ impl ProcFilesystem {
                 SUB_INO_SETGROUPS => ProcLiveFileKind::PidSetgroups(pid),
                 SUB_INO_UID_MAP => ProcLiveFileKind::PidUidMap(pid),
                 SUB_INO_GID_MAP => ProcLiveFileKind::PidGidMap(pid),
+                SUB_INO_CHILDREN => ProcLiveFileKind::PidChildren(pid),
                 SUB_INO_NS_UTS | SUB_INO_NS_IPC | SUB_INO_NS_NET | SUB_INO_NS_MNT | SUB_INO_NS_PID | SUB_INO_NS_USER | SUB_INO_NS_CGROUP => {
                     ProcLiveFileKind::PidNsSymlink(pid, sub)
                 }
@@ -797,6 +872,31 @@ fn render_proc_file(fs: &ProcFilesystem, kind: ProcLiveFileKind) -> String {
         ProcLiveFileKind::Cpuinfo => {
             "processor\t: 0\nmodel name\t: QEMU Virtual CPU version 2.5+\n".to_owned()
         }
+        ProcLiveFileKind::PidChildren(pid) => {
+            if let Some(provider) = PROCESS_PROVIDER.get() {
+                if let Some(children) = provider.children(pid) {
+                    let mut out = String::new();
+                    for (i, child_pid) in children.iter().enumerate() {
+                        if i > 0 {
+                            out.push(' ');
+                        }
+                        out.push_str(&child_pid.to_string());
+                    }
+                    out.push('\n');
+                    return out;
+                }
+            }
+            String::new()
+        }
+        ProcLiveFileKind::ThreadStatus(pid, tid) => {
+            PROCESS_PROVIDER.get().and_then(|p| p.thread_status(pid, tid)).unwrap_or_default()
+        }
+        ProcLiveFileKind::ThreadComm(pid, tid) => {
+            PROCESS_PROVIDER.get().and_then(|p| p.thread_comm(pid, tid)).unwrap_or_default()
+        }
+        ProcLiveFileKind::ThreadStat(pid, tid) => {
+            PROCESS_PROVIDER.get().and_then(|p| p.thread_stat(pid, tid)).unwrap_or_default()
+        }
     }
 }
 
@@ -994,6 +1094,29 @@ impl DirNodeOps for ProcNode {
                     all_entries.push(("setgroups".to_owned(), PID_INODE_START + (pid << PID_INODE_SHIFT) + SUB_INO_SETGROUPS));
                     all_entries.push(("uid_map".to_owned(), PID_INODE_START + (pid << PID_INODE_SHIFT) + SUB_INO_UID_MAP));
                     all_entries.push(("gid_map".to_owned(), PID_INODE_START + (pid << PID_INODE_SHIFT) + SUB_INO_GID_MAP));
+                    all_entries.push(("children".to_owned(), PID_INODE_START + (pid << PID_INODE_SHIFT) + SUB_INO_CHILDREN));
+                    all_entries.push(("task".to_owned(), PID_INODE_START + (pid << PID_INODE_SHIFT) + SUB_INO_TASK_DIR));
+                } else if sub == SUB_INO_TASK_DIR {
+                    all_entries.push((".".to_owned(), self.ino));
+                    all_entries.push(("..".to_owned(), PID_INODE_START + (pid << PID_INODE_SHIFT) + SUB_INO_DIR));
+                    if let Some(tids) = provider.thread_tids(pid) {
+                        for tid in tids {
+                            let name = tid.to_string();
+                            let child_ino = PID_INODE_START + (pid << PID_INODE_SHIFT) + SUB_INO_TASK_BASE + (tid << 4) + SUB_TASK_DIR;
+                            all_entries.push((name, child_ino));
+                        }
+                    }
+                } else if sub >= SUB_INO_TASK_BASE {
+                    let task_offset = sub - SUB_INO_TASK_BASE;
+                    let tid = task_offset >> 4;
+                    let task_sub = task_offset & 0xf;
+                    if task_sub == SUB_TASK_DIR {
+                        all_entries.push((".".to_owned(), self.ino));
+                        all_entries.push(("..".to_owned(), PID_INODE_START + (pid << PID_INODE_SHIFT) + SUB_INO_TASK_DIR));
+                        all_entries.push(("status".to_owned(), PID_INODE_START + (pid << PID_INODE_SHIFT) + SUB_INO_TASK_BASE + (tid << 4) + SUB_TASK_STATUS));
+                        all_entries.push(("comm".to_owned(), PID_INODE_START + (pid << PID_INODE_SHIFT) + SUB_INO_TASK_BASE + (tid << 4) + SUB_TASK_COMM));
+                        all_entries.push(("stat".to_owned(), PID_INODE_START + (pid << PID_INODE_SHIFT) + SUB_INO_TASK_BASE + (tid << 4) + SUB_TASK_STAT));
+                    }
                 } else if sub == SUB_INO_NS_DIR {
                     all_entries.push((".".to_owned(), self.ino));
                     all_entries.push((
@@ -1106,11 +1229,46 @@ impl DirNodeOps for ProcNode {
                         "setgroups" => Some(SUB_INO_SETGROUPS),
                         "uid_map" => Some(SUB_INO_UID_MAP),
                         "gid_map" => Some(SUB_INO_GID_MAP),
+                        "children" => Some(SUB_INO_CHILDREN),
+                        "task" => Some(SUB_INO_TASK_DIR),
                         _ => None,
                     };
                     if let Some(ts) = target_sub {
                         let ino = PID_INODE_START + (pid << PID_INODE_SHIFT) + ts;
                         return self.build_entry(name, ino);
+                    }
+                } else if sub == SUB_INO_TASK_DIR {
+                    if name == "." {
+                        return self.build_entry(name, self.ino);
+                    } else if name == ".." {
+                        let parent_ino = PID_INODE_START + (pid << PID_INODE_SHIFT) + SUB_INO_DIR;
+                        return self.build_entry(name, parent_ino);
+                    }
+                    if let Ok(tid) = name.parse::<u64>() {
+                        if let Some(tids) = provider.thread_tids(pid) {
+                            if tids.contains(&tid) {
+                                let ino = PID_INODE_START + (pid << PID_INODE_SHIFT) + SUB_INO_TASK_BASE + (tid << 4) + SUB_TASK_DIR;
+                                return self.build_entry(name, ino);
+                            }
+                        }
+                    }
+                } else if sub >= SUB_INO_TASK_BASE {
+                    let task_offset = sub - SUB_INO_TASK_BASE;
+                    let tid = task_offset >> 4;
+                    let task_sub = task_offset & 0xf;
+                    if task_sub == SUB_TASK_DIR {
+                        let target_sub = match name {
+                            "." => Some(SUB_TASK_DIR),
+                            ".." => return self.build_entry(name, PID_INODE_START + (pid << PID_INODE_SHIFT) + SUB_INO_TASK_DIR),
+                            "status" => Some(SUB_TASK_STATUS),
+                            "comm" => Some(SUB_TASK_COMM),
+                            "stat" => Some(SUB_TASK_STAT),
+                            _ => None,
+                        };
+                        if let Some(ts) = target_sub {
+                            let ino = PID_INODE_START + (pid << PID_INODE_SHIFT) + SUB_INO_TASK_BASE + (tid << 4) + ts;
+                            return self.build_entry(name, ino);
+                        }
                     }
                 } else if sub == SUB_INO_NS_DIR {
                     let target_sub = match name {
