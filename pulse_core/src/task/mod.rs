@@ -571,6 +571,119 @@ impl axfs::ProcfsProcessProvider for PulseProcessProvider {
 
         Some(bytes_written)
     }
+
+    fn children(&self, pid: u64) -> Option<Vec<u64>> {
+        let proc = process_by_pid(pid)?;
+        Some(proc.children_pids_snapshot())
+    }
+
+    fn thread_tids(&self, pid: u64) -> Option<Vec<u64>> {
+        let proc = process_by_pid(pid)?;
+        Some(proc.thread_ids_snapshot())
+    }
+
+    fn thread_comm(&self, pid: u64, tid: u64) -> Option<String> {
+        let proc = process_by_pid(pid)?;
+        let task = proc.task_ref_by_tid(tid)?;
+        Some(alloc::format!("{}\n", task.name()))
+    }
+
+    fn thread_status(&self, pid: u64, tid: u64) -> Option<String> {
+        let proc = process_by_pid(pid)?;
+        let task = proc.task_ref_by_tid(tid)?;
+        let name = task.name();
+        let state = if task.is_running() || task.is_ready() {
+            "R (running)"
+        } else {
+            "S (sleeping)"
+        };
+        let umask = proc.umask();
+        let ppid = proc.parent_pid();
+        let (ruid, euid, suid) = proc.uid_snapshot();
+        let (rgid, egid, sgid) = proc.gid_snapshot();
+        let threads = proc.thread_count();
+
+        let mut vm_size = 0;
+        proc.aspace_handle().read().for_each_area(|start, end, _| {
+            if start.as_usize() < 0x8000_0000_0000 {
+                vm_size += end.as_usize() - start.as_usize();
+            }
+        });
+        let vm_size_kb = vm_size / 1024;
+        let vm_rss_kb = vm_size_kb;
+
+        Some(alloc::format!(
+            "Name:\t{}\nUmask:\t{:04o}\nState:\t{}\nTgid:\t{}\nPid:\t{}\nPPid:\t{}\nUid:\t{} {} \
+             {} {}\nGid:\t{} {} {} {}\nThreads:\t{}\nVmSize:\t{} kB\nVmRSS:\t{} kB\nVmData:\t{} \
+             kB\n",
+            name,
+            umask,
+            state,
+            pid,
+            tid,
+            ppid,
+            ruid,
+            euid,
+            suid,
+            euid,
+            rgid,
+            egid,
+            sgid,
+            egid,
+            threads,
+            vm_size_kb,
+            vm_rss_kb,
+            vm_size_kb
+        ))
+    }
+
+    fn thread_stat(&self, pid: u64, tid: u64) -> Option<String> {
+        let proc = process_by_pid(pid)?;
+        let task = proc.task_ref_by_tid(tid)?;
+        let comm = task.name();
+
+        let state_char = if task.is_running() || task.is_ready() {
+            'R'
+        } else {
+            'S'
+        };
+
+        let handle = thread_handle_from_task(&task)?;
+        let now_ns = axhal::time::monotonic_time_nanos() as u64;
+        let (utime_ns, stime_ns) = handle.snapshot_cpu_time_ns(now_ns);
+        let utime = utime_ns / 10_000_000;
+        let stime = stime_ns / 10_000_000;
+        let cutime = 0;
+        let cstime = 0;
+        let threads = proc.thread_count();
+        let starttime = proc.start_mono_ns / 10_000_000;
+
+        let mut vm_size = 0;
+        proc.aspace_handle().read().for_each_area(|start, end, _| {
+            if start.as_usize() < 0x8000_0000_0000 {
+                vm_size += end.as_usize() - start.as_usize();
+            }
+        });
+        let rss_pages = vm_size / 4096;
+
+        Some(alloc::format!(
+            "{} ({}) {} {} 0 0 0 -1 0 0 0 0 0 {} {} {} {} 20 0 {} 0 {} {} {} {} 0 0 0 0 0 0 0 0 0 \
+             0 0 0 17 0 0 0 0 0 0 0 0 0 0 0 0 0 0\n",
+            tid,
+            comm,
+            state_char,
+            pid, // TGID of the process
+            utime,
+            stime,
+            cutime,
+            cstime,
+            threads,
+            starttime,
+            vm_size,
+            rss_pages,
+            u64::MAX
+        ))
+    }
 }
 
 pub fn init_procfs_provider() {
