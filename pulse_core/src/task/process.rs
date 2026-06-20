@@ -772,26 +772,26 @@ impl Process {
     }
 
     pub fn set_umask(&self, umask: u32) -> u32 {
-        let mut creds = self.credentials.read().as_ref().clone();
+        let mut creds_lock = self.credentials.write();
+        let creds = Arc::make_mut(&mut *creds_lock);
         let old = creds.umask;
         creds.umask = umask;
-        *self.credentials.write() = Arc::new(creds);
         old
     }
 
     pub fn set_fsuid(&self, uid: u32) -> u32 {
-        let mut creds = self.credentials.read().as_ref().clone();
+        let mut creds_lock = self.credentials.write();
+        let creds = Arc::make_mut(&mut *creds_lock);
         let old = creds.fsuid;
         creds.fsuid = uid;
-        *self.credentials.write() = Arc::new(creds);
         old
     }
 
     pub fn set_fsgid(&self, gid: u32) -> u32 {
-        let mut creds = self.credentials.read().as_ref().clone();
+        let mut creds_lock = self.credentials.write();
+        let creds = Arc::make_mut(&mut *creds_lock);
         let old = creds.fsgid;
         creds.fsgid = gid;
-        *self.credentials.write() = Arc::new(creds);
         old
     }
 
@@ -815,11 +815,11 @@ impl Process {
     }
 
     pub fn set_capabilities(&self, p: u64, e: u64, i: u64) {
-        let mut creds = self.credentials.read().as_ref().clone();
+        let mut creds_lock = self.credentials.write();
+        let creds = Arc::make_mut(&mut *creds_lock);
         creds.cap_permitted = p;
         creds.cap_effective = e;
         creds.cap_inheritable = i;
-        *self.credentials.write() = Arc::new(creds);
     }
 
     pub fn has_capability(&self, cap: u32) -> bool {
