@@ -66,8 +66,13 @@ impl Ext4 {
         let block_size = super_block.block_size() as usize;
         block_device.set_block_size(block_size);
 
+        #[cfg(feature = "journal")]
         let journal_device = Arc::new(crate::journal::JournalBlockDevice::new(block_device));
+        #[cfg(feature = "journal")]
         let journal_device_dyn: Arc<dyn BlockDevice> = journal_device.clone();
+
+        #[cfg(not(feature = "journal"))]
+        let journal_device_dyn = block_device;
 
         let group_count = super_block.block_group_count() as usize;
         log::debug!("Ext4::open: group_count={}", group_count);
@@ -86,9 +91,11 @@ impl Ext4 {
             system_zone_cache: None,
             inode_table_cache,
             inode_cache: spin::Mutex::new([None; 16]),
+            #[cfg(feature = "journal")]
             journal: None,
         };
 
+        #[cfg(feature = "journal")]
         if super_block.journal_inode_number > 0 {
             log::info!("Ext4::open: journal inode number = {}", super_block.journal_inode_number);
             
