@@ -1831,11 +1831,21 @@ impl Process {
     }
 
     pub fn wait_task_refs_exited(&self) {
-        let registry = self.threads.lock().clone();
-        for (_, state) in registry {
-            if let ThreadState::Active(task) = state {
-                let _ = task.join();
-            }
+        let tasks: Vec<AxTaskRef> = {
+            let registry = self.threads.lock();
+            registry
+                .values()
+                .filter_map(|state| {
+                    if let ThreadState::Active(task) = state {
+                        Some(task.clone())
+                    } else {
+                        None
+                    }
+                })
+                .collect()
+        };
+        for task in tasks {
+            let _ = task.join();
         }
     }
 
@@ -1854,12 +1864,23 @@ impl Process {
         self.group_exiting.store(true, Ordering::Release);
         self.futex_table.wake_all();
 
-        let registry = self.threads.lock().clone();
-        for (_, state) in registry {
-            if let ThreadState::Active(task) = state {
-                if let Some(handle) = thread_handle_from_task(&task) {
-                    handle.signal_wait_queue().notify_all(false);
-                }
+        let tasks: Vec<AxTaskRef> = {
+            let registry = self.threads.lock();
+            registry
+                .values()
+                .filter_map(|state| {
+                    if let ThreadState::Active(task) = state {
+                        Some(task.clone())
+                    } else {
+                        None
+                    }
+                })
+                .collect()
+        };
+
+        for task in tasks {
+            if let Some(handle) = thread_handle_from_task(&task) {
+                handle.signal_wait_queue().notify_all(false);
             }
         }
     }
