@@ -5,10 +5,12 @@ use crate::ext4_defs::*;
 use core::cmp::max;
 use alloc::sync::Arc;
 
+#[cfg(feature = "journal")]
 struct JournalMetadataWritingGuard<'a> {
     journal: Option<&'a Arc<crate::journal::JournalBlockDevice>>,
 }
 
+#[cfg(feature = "journal")]
 impl<'a> JournalMetadataWritingGuard<'a> {
     fn new(journal: Option<&'a Arc<crate::journal::JournalBlockDevice>>, enabled: bool) -> Self {
         if let Some(ref j) = journal {
@@ -18,6 +20,7 @@ impl<'a> JournalMetadataWritingGuard<'a> {
     }
 }
 
+#[cfg(feature = "journal")]
 impl<'a> Drop for JournalMetadataWritingGuard<'a> {
     fn drop(&mut self) {
         if let Some(ref j) = self.journal {
@@ -479,6 +482,7 @@ impl Ext4 {
                 block.write_offset(unaligned, &write_buf[..len], len);
 
                 {
+                    #[cfg(feature = "journal")]
                     let _guard = JournalMetadataWritingGuard::new(self.journal.as_ref(), false);
                     block.sync_blk_to_disk(&self.block_device);
                 }
@@ -533,6 +537,7 @@ impl Ext4 {
                 if full_blocks_size > 0 {
                     // Write all full blocks in one device call - Bypassing intermediate Block abstraction
                     {
+                        #[cfg(feature = "journal")]
                         let _guard = JournalMetadataWritingGuard::new(self.journal.as_ref(), false);
                         self.block_device.write_offset(block_offset, &write_buf[written..written + full_blocks_size]);
                     }
@@ -551,6 +556,7 @@ impl Ext4 {
                     
                     block.write_offset(0, &write_buf[written..written + write_size], write_size);
                     {
+                        #[cfg(feature = "journal")]
                         let _guard = JournalMetadataWritingGuard::new(self.journal.as_ref(), false);
                         block.sync_blk_to_disk(&self.block_device);
                     }
