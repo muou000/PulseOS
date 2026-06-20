@@ -18,6 +18,12 @@ pub fn register_timer_hook(hook: fn()) {
     TIMER_HOOK.store(hook as *mut (), Ordering::Release);
 }
 
+/// Sets a generic oneshot timer that fires at the specified deadline.
+#[cfg(feature = "irq")]
+pub fn set_generic_timer(deadline_ns: u64, callback: alloc::boxed::Box<dyn FnOnce(timer_list::TimeValue) + Send + Sync>) {
+    crate::timers::set_generic_timer(timer_list::TimeValue::from_nanos(deadline_ns), callback);
+}
+
 pub(crate) use crate::run_queue::{current_run_queue, select_run_queue};
 
 #[doc(cfg(feature = "multitask"))]
@@ -280,10 +286,10 @@ pub fn exit(exit_code: i32) -> ! {
 /// It runs an infinite loop that keeps calling [`yield_now()`].
 pub fn run_idle() -> ! {
     loop {
+        #[cfg(feature = "preempt")]
+        core::hint::spin_loop();
+        #[cfg(not(feature = "preempt"))]
         yield_now();
-        trace!("idle task: waiting for IRQs...");
-        #[cfg(feature = "irq")]
-        axhal::asm::wait_for_irqs();
     }
 }
 

@@ -58,4 +58,8 @@ pub trait BaseScheduler {
 
     /// set priority for a task
     fn set_priority(&mut self, task: &Self::SchedItem, prio: isize) -> bool;
+
+    /// Returns `true` if there are no tasks in the scheduler's ready queue.
+    fn is_empty(&self) -> bool;
 }
+
