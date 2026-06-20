@@ -529,7 +529,7 @@ impl DevNode {
     pub fn get_block_device(&self) -> VfsResult<SharedBlockDevice> {
         let inode = self.inode_ref()?;
         if let NodeContent::BlockDevice(block) = &inode.content {
-            Ok(block.disk.lock().device().lock().clone())
+            Ok(block.disk.lock().device().clone())
         } else {
             Err(VfsError::InvalidInput)
         }

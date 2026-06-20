@@ -1,6 +1,6 @@
 use core::sync::atomic::{AtomicU64, Ordering};
 
-use kernel_guard::{NoOp, NoPreempt};
+use kernel_guard::NoOp;
 use lazyinit::LazyInit;
 use timer_list::{TimeValue, TimerEvent, TimerList};
 
@@ -10,33 +10,28 @@ use crate::{AxTaskRef, select_run_queue};
 
 static TIMER_TICKET_ID: AtomicU64 = AtomicU64::new(1);
 
-pub enum AxTimerEvent {
-    TaskWakeup {
-        ticket_id: u64,
-        task: AxTaskRef,
-    },
-    Generic {
-        callback: alloc::boxed::Box<dyn FnOnce(TimeValue) + Send + Sync>,
-    },
-}
-
 percpu_static! {
-    TIMER_LIST: LazyInit<TimerList<AxTimerEvent>> = LazyInit::new(),
+    TIMER_LIST: LazyInit<TimerList<TaskWakeupEvent>> = LazyInit::new(),
 }
 
-impl TimerEvent for AxTimerEvent {
+struct TaskWakeupEvent {
+    ticket_id: u64,
+    task: AxTaskRef,
+}
+
+impl TimerEvent for TaskWakeupEvent {
     fn callback(self, _now: TimeValue) {
-        match self {
-            Self::TaskWakeup { ticket_id, task } => {
-                if task.timer_ticket() != ticket_id {
-                    return;
-                }
-                select_run_queue::<NoOp>(&task).unblock_task(task, true);
-            }
-            Self::Generic { callback } => {
-                callback(_now);
-            }
+        // Ignore the timer event if timeout was set but not triggered
+        // (wake up by `WaitQueue::notify()`).
+        // Judge if this timer event is still valid by checking the ticket ID.
+        if self.task.timer_ticket() != self.ticket_id {
+            // Timer ticket ID is not matched.
+            // Just ignore this timer event and return.
+            return;
         }
+
+        // Timer ticket match.
+        select_run_queue::<NoOp>(&self.task).unblock_task(self.task, true)
     }
 }
 
@@ -52,11 +47,6 @@ pub(crate) fn reprogram_timer_from_tick() {
     reprogram_timer_internal(true);
 }
 
-fn tick_needed() -> bool {
-    let rq = crate::run_queue::current_run_queue::<NoPreempt>();
-    !rq.inner.scheduler_is_empty()
-}
-
 fn reprogram_timer_internal(from_tick: bool) {
     let now_ns = axhal::time::monotonic_time_nanos();
     let mut tick_deadline = unsafe { NEXT_TICK_DEADLINE.read_current_raw() };
@@ -69,11 +59,7 @@ fn reprogram_timer_internal(from_tick: bool) {
         }
     }
 
-    let mut final_deadline = u64::MAX;
-    if tick_needed() {
-        final_deadline = tick_deadline;
-    }
-
+    let mut final_deadline = tick_deadline;
     if let Some(event_deadline) = unsafe {
         let tl = TIMER_LIST.current_ref_raw();
         if tl.is_inited() {
@@ -88,12 +74,11 @@ fn reprogram_timer_internal(from_tick: bool) {
         }
     }
 
-    if final_deadline != u64::MAX {
-        if final_deadline < now_ns {
-            final_deadline = now_ns;
-        }
-        axhal::time::set_oneshot_timer(final_deadline);
+    if final_deadline < now_ns {
+        final_deadline = now_ns;
     }
+
+    axhal::time::set_oneshot_timer(final_deadline);
 }
 
 pub fn next_deadline() -> Option<TimeValue> {
@@ -111,14 +96,7 @@ pub fn set_alarm_wakeup(deadline: TimeValue, task: AxTaskRef) {
     TIMER_LIST.with_current(|timer_list| {
         let ticket_id = TIMER_TICKET_ID.fetch_add(1, Ordering::AcqRel);
         task.set_timer_ticket(ticket_id);
-        timer_list.set(deadline, AxTimerEvent::TaskWakeup { ticket_id, task });
-    });
-    reprogram_timer();
-}
-
-pub fn set_generic_timer(deadline: TimeValue, callback: alloc::boxed::Box<dyn FnOnce(TimeValue) + Send + Sync>) {
-    TIMER_LIST.with_current(|timer_list| {
-        timer_list.set(deadline, AxTimerEvent::Generic { callback });
+        timer_list.set(deadline, TaskWakeupEvent { ticket_id, task });
     });
     reprogram_timer();
 }

@@ -11,7 +11,6 @@ mod time;
 mod utils;
 
 pub(crate) use fs::*;
-pub use fs::sys_sync;
 pub(crate) use futex::*;
 pub(crate) use ipc::*;
 pub(crate) use misc::*;

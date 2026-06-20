@@ -50,7 +50,7 @@ pub struct Ext4Superblock {
 
     // Journaling support - if EXT4_FEATURE_COMPAT_HAS_JOURNAL set
     journal_uuid: [u8; 16],    // UUID of journal superblock
-    pub journal_inode_number: u32, // Inode number of journal file
+    journal_inode_number: u32, // Inode number of journal file
     journal_dev: u32,          // Device number of journal file
     last_orphan: u32,          // Head of list of inodes to delete
     hash_seed: [u32; 4],       // HTREE hash seed

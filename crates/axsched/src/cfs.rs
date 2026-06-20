@@ -199,10 +199,6 @@ impl<T> BaseScheduler for CFScheduler<T> {
             false
         }
     }
-
-    fn is_empty(&self) -> bool {
-        self.ready_queue.is_empty()
-    }
 }
 
 impl<T> Default for CFScheduler<T> {

@@ -55,7 +55,6 @@ impl Ext4 {
         log::debug!("get_system_zone: finished, total zones={}", zones.len());
         zones
     }
-
     /// Opens and loads an Ext4 from the `block_device`.
     pub fn open(block_device: Arc<dyn BlockDevice>) -> Self {
         // Load the superblock (aligned to block 0)
@@ -66,14 +65,6 @@ impl Ext4 {
         let block_size = super_block.block_size() as usize;
         block_device.set_block_size(block_size);
 
-        #[cfg(feature = "journal")]
-        let journal_device = Arc::new(crate::journal::JournalBlockDevice::new(block_device));
-        #[cfg(feature = "journal")]
-        let journal_device_dyn: Arc<dyn BlockDevice> = journal_device.clone();
-
-        #[cfg(not(feature = "journal"))]
-        let journal_device_dyn = block_device;
-
         let group_count = super_block.block_group_count() as usize;
         log::debug!("Ext4::open: group_count={}", group_count);
         let mut inode_table_cache = Vec::with_capacity(group_count);
@@ -81,62 +72,24 @@ impl Ext4 {
             if bgid % 1024 == 0 && bgid > 0 {
                 log::debug!("Ext4::open: caching inode tables {}/{}", bgid, group_count);
             }
-            let block_group = Ext4BlockGroup::load_new(&journal_device_dyn, &super_block, bgid);
+            let block_group = Ext4BlockGroup::load_new(&block_device, &super_block, bgid);
             inode_table_cache.push(block_group.get_inode_table_blk_num());
         }
         
-        let mut ext4 = Ext4 {
-            block_device: journal_device_dyn.clone(),
+        let ext4_tmp = Ext4 {
+            block_device,
             super_block,
             system_zone_cache: None,
             inode_table_cache,
             inode_cache: spin::Mutex::new([None; 16]),
-            #[cfg(feature = "journal")]
-            journal: None,
         };
-
-        #[cfg(feature = "journal")]
-        if super_block.journal_inode_number > 0 {
-            log::info!("Ext4::open: journal inode number = {}", super_block.journal_inode_number);
-            
-            // Read journal inode info directly (avoiding cache lookup issues before journal is ready)
-            let offset = ext4.inode_disk_pos(super_block.journal_inode_number);
-            let block_offset = (offset / block_size) * block_size;
-            let inner_offset = offset % block_size;
-
-            let mut ext4block = Block::load(&journal_device_dyn, block_offset);
-            let inode_val: Ext4Inode = ext4block.read_offset_as(inner_offset);
-            let journal_inode_ref = Ext4InodeRef {
-                inode_num: super_block.journal_inode_number,
-                inode: inode_val,
-            };
-
-            let j_size = journal_inode_ref.inode.size();
-            let num_blocks = (j_size / block_size as u64) as u32;
-            let mut journal_blocks = Vec::new();
-            for lblk in 0..num_blocks {
-                if let Ok(pblk) = ext4.get_pblock_idx(&journal_inode_ref, lblk) {
-                    journal_blocks.push(pblk);
-                }
-            }
-
-            if !journal_blocks.is_empty() {
-                log::info!("Ext4::open: found {} blocks for journal", journal_blocks.len());
-                journal_device.init_journal(journal_blocks);
-                if let Err(e) = journal_device.recover() {
-                    log::error!("Journal recovery failed: {:?}", e);
-                }
-                ext4.journal = Some(journal_device);
-            }
-        }
-
         log::debug!("Ext4::open: initializing system zone cache");
-        let zones = ext4.get_system_zone();
+        let zones = ext4_tmp.get_system_zone();
 
         log::debug!("Ext4::open: complete");
         Ext4 {
             system_zone_cache: Some(zones),
-            ..ext4
+            ..ext4_tmp
         }
     }
 
@@ -217,16 +170,17 @@ impl Ext4 {
 
     #[allow(unused)]
     pub fn dir_mk(&self, path: &str) -> Result<usize> {
-        self.start_transaction();
-        let res = (|| {
-            let mut nameoff = 0;
-            let filetype = InodeFileType::S_IFDIR;
-            let mut parent = ROOT_INODE;
-            let _ = self.generic_open(path, &mut parent, true, filetype.bits(), &mut nameoff)?;
-            Ok(EOK)
-        })();
-        self.stop_transaction()?;
-        res
+        let mut nameoff = 0;
+
+        let filetype = InodeFileType::S_IFDIR;
+
+        // todo get this path's parent
+
+        // start from root
+        let mut parent = ROOT_INODE;
+
+        let r = self.generic_open(path, &mut parent, true, filetype.bits(), &mut nameoff);
+        Ok(EOK)
     }
 
     pub fn unlink(
@@ -235,14 +189,12 @@ impl Ext4 {
         child: &mut Ext4InodeRef,
         name: &str,
     ) -> Result<usize> {
-        self.start_transaction();
-        let res = (|| {
-            self.dir_remove_entry(parent, name)?;
-            let is_dir = child.inode.is_dir();
-            self.ialloc_free_inode(child.inode_num, is_dir);
-            Ok(EOK)
-        })();
-        self.stop_transaction()?;
-        res
+        self.dir_remove_entry(parent, name)?;
+
+        let is_dir = child.inode.is_dir();
+
+        self.ialloc_free_inode(child.inode_num, is_dir);
+
+        Ok(EOK)
     }
 }

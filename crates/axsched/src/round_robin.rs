@@ -177,10 +177,6 @@ impl<T, const S: usize> BaseScheduler for RRScheduler<T, S> {
         }
         true
     }
-
-    fn is_empty(&self) -> bool {
-        self.rt_bitmap == 0 && self.normal_queue.is_empty()
-    }
 }
 
 impl<T, const S: usize> Default for RRScheduler<T, S> {

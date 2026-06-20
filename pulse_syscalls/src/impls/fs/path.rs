@@ -154,7 +154,7 @@ fn lookup_or_probe_fs(source: &str, fstype: &str) -> Result<axfs_ng_vfs::Filesys
     if fstype == "tmpfs" {
         return Ok(axfs::new_tmpfs());
     }
-    if fstype == "proc" {
+    if fstype == "proc" || fstype == "procfs" {
         return Ok(axfs::new_procfs());
     }
 
@@ -387,9 +387,10 @@ pub fn sys_openat(dirfd: i32, pathname: usize, flags: usize, mode: usize) -> isi
             if let Ok(abs_path) = file.location().absolute_path() {
                 let procs = pulse_core::task::processes_snapshot();
                 for proc in procs {
-                    // Bolt: Avoid cloning the `exec_path` string for every process by checking equality inside the read lock.
-                    if proc.is_exec_path(abs_path.as_str()) {
-                        return -LinuxError::ETXTBSY.code() as isize;
+                    if let Some(exec_path) = proc.exec_path() {
+                        if exec_path == abs_path.as_str() {
+                            return -LinuxError::ETXTBSY.code() as isize;
+                        }
                     }
                 }
             }
@@ -1126,9 +1127,7 @@ pub fn sys_unlinkat(dirfd: i32, pathname: usize, flags: usize) -> isize {
 
     if (flags & AT_REMOVEDIR as usize) != 0 {
         return match ctx.remove_dir(Path::new(path)) {
-            Ok(()) => {
-                0
-            }
+            Ok(()) => 0,
             Err(e) => {
                 let errno = LinuxError::from(e.canonicalize());
                 -errno.code() as isize
@@ -1137,9 +1136,7 @@ pub fn sys_unlinkat(dirfd: i32, pathname: usize, flags: usize) -> isize {
     }
 
     match ctx.remove_file(Path::new(path)) {
-        Ok(()) => {
-            0
-        }
+        Ok(()) => 0,
         Err(e) => {
             let errno = LinuxError::from(e.canonicalize());
             -errno.code() as isize

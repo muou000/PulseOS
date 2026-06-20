@@ -84,7 +84,6 @@ impl FilesystemOps for Ext4Filesystem {
     }
 
     fn flush(&self) -> VfsResult<()> {
-        crate::disk::flush_all_disks().map_err(|_| axfs_ng_vfs::VfsError::Io)?;
         Ok(())
     }
 }

@@ -5,8 +5,6 @@ extern crate alloc;
 
 pub mod utils;
 pub mod prelude;
-#[cfg(feature = "journal")]
-pub mod journal;
 
 pub use utils::*;
 pub use prelude::*;

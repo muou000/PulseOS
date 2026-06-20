@@ -52,10 +52,6 @@ impl Filesystem {
     pub fn stat(&self) -> VfsResult<StatFs> {
         self.ops.stat()
     }
-
-    pub fn flush(&self) -> VfsResult<()> {
-        self.ops.flush()
-    }
 }
 
 impl Filesystem {

@@ -861,9 +861,7 @@ fn get_ephemeral_port() -> AxResult<u16> {
         } else {
             *curr += 1;
         }
-        if LISTEN_TABLE.can_listen(port)
-        && SOCKET_SET.bind_check(super::addr::UNSPECIFIED_IP, port, None).is_ok()
-        {
+        if LISTEN_TABLE.can_listen(port) {
             return Ok(port);
         }
         tries += 1;

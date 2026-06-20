@@ -212,7 +212,7 @@ impl<G: BaseGuard> Drop for AxRunQueueRef<'_, G> {
 /// [`CurrentRunQueueRef`] is used to get a reference to the run queue on current CPU,
 /// in which scheduling operations can be performed.
 pub(crate) struct CurrentRunQueueRef<'a, G: BaseGuard> {
-    pub(crate) inner: &'a mut AxRunQueue,
+    inner: &'a mut AxRunQueue,
     current_task: CurrentTask,
     state: G::State,
     _phantom: core::marker::PhantomData<G>,
@@ -237,8 +237,6 @@ impl<G: BaseGuard> AxRunQueueRef<'_, G> {
         );
         assert!(task.is_ready());
         self.inner.scheduler.lock().add_task(task);
-        #[cfg(feature = "irq")]
-        crate::timers::reprogram_timer();
     }
 
     /// Unblock one task by inserting it into the run queue.
@@ -265,8 +263,6 @@ impl<G: BaseGuard> AxRunQueueRef<'_, G> {
                 #[cfg(feature = "preempt")]
                 crate::current().set_preempt_pending(true);
             }
-            #[cfg(feature = "irq")]
-            crate::timers::reprogram_timer();
         }
     }
 }
@@ -468,10 +464,6 @@ impl<G: BaseGuard> CurrentRunQueueRef<'_, G> {
 }
 
 impl AxRunQueue {
-    pub(crate) fn scheduler_is_empty(&self) -> bool {
-        self.scheduler.lock().is_empty()
-    }
-
     /// Create a new run queue for the specified CPU.
     /// The run queue is initialized with a per-CPU gc task in its scheduler.
     fn new(cpu_id: usize) -> Self {

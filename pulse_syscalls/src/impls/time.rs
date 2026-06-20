@@ -6,7 +6,7 @@ use core::{
 use linux_raw_sys::general::{
     CLOCK_BOOTTIME, CLOCK_MONOTONIC, CLOCK_MONOTONIC_COARSE, CLOCK_MONOTONIC_RAW,
     CLOCK_PROCESS_CPUTIME_ID, CLOCK_REALTIME, CLOCK_REALTIME_COARSE, CLOCK_THREAD_CPUTIME_ID,
-    TIMER_ABSTIME, timespec, timeval, itimerspec,
+    TIMER_ABSTIME, timespec, timeval,
 };
 use pulse_core::task::uaccess;
 
@@ -107,14 +107,8 @@ fn current_has_pending_signal() -> bool {
         .unwrap_or(false)
 }
 
-fn current_is_group_exiting() -> bool {
-    pulse_core::task::current_process()
-        .map(|process| process.group_exiting())
-        .unwrap_or(false)
-}
-
 fn sleep_for_duration_interruptible(dur: Duration) -> Result<Duration, LinuxError> {
-    if current_has_pending_signal() || current_is_group_exiting() {
+    if current_has_pending_signal() {
         return Ok(dur);
     }
     let start = axhal::time::monotonic_time();
@@ -124,7 +118,7 @@ fn sleep_for_duration_interruptible(dur: Duration) -> Result<Duration, LinuxErro
         if now >= deadline {
             return Ok(Duration::ZERO);
         }
-        if current_has_pending_signal() || current_is_group_exiting() {
+        if current_has_pending_signal() {
             return Ok(deadline.saturating_sub(now));
         }
         axtask::sleep_until(deadline);
@@ -149,7 +143,7 @@ fn sleep_until_clock_interruptible(clockid: i32, target: Duration) -> Result<Dur
         if now >= target_mono {
             return Ok(Duration::ZERO);
         }
-        if current_has_pending_signal() || current_is_group_exiting() {
+        if current_has_pending_signal() {
             let now_clock = clock_now(clockid)?;
             return Ok(target.saturating_sub(now_clock));
         }
@@ -830,221 +824,5 @@ pub fn sys_clock_adjtime(clockid: i32, buf: usize) -> isize {
     match uaccess::write_user_plain(proc.as_ref(), buf, &tmx_to_write) {
         Ok(()) => 0,
         Err(_) => -LinuxError::EFAULT.code() as isize,
-    }
-}
-
-pub fn sys_timer_create(clockid: i32, sevp: usize, timerid: usize) -> isize {
-    axlog::debug!(
-        "sys_timer_create: clockid={}, sevp={:#x}, timerid={:#x}",
-        clockid,
-        sevp,
-        timerid
-    );
-
-    if timerid == 0 {
-        return -LinuxError::EFAULT.code() as isize;
-    }
-
-    let proc = match pulse_core::task::current_process() {
-        Ok(proc) => proc,
-        Err(e) => return -e.code() as isize,
-    };
-
-    let mut event: linux_raw_sys::general::sigevent = unsafe { core::mem::zeroed() };
-    if sevp != 0 {
-        match uaccess::read_user_plain(proc.as_ref(), sevp) {
-            Ok(ev) => event = ev,
-            Err(_) => return -LinuxError::EFAULT.code() as isize,
-        }
-    } else {
-        event.sigev_notify = 0; // SIGEV_SIGNAL
-        event.sigev_signo = 14; // SIGALRM
-    }
-
-    match proc.alloc_posix_timer(clockid, event) {
-        Ok(id) => {
-            match uaccess::write_user_plain(proc.as_ref(), timerid, &id) {
-                Ok(()) => 0,
-                Err(_) => -LinuxError::EFAULT.code() as isize,
-            }
-        }
-        Err(e) => -e.code() as isize,
-    }
-}
-
-fn read_user_itimerspec(addr: usize) -> Result<itimerspec, LinuxError> {
-    if addr == 0 {
-        return Err(LinuxError::EFAULT);
-    }
-    let proc = pulse_core::task::current_process()?;
-    let val: itimerspec =
-        uaccess::read_user_plain(proc.as_ref(), addr).map_err(|_| LinuxError::EFAULT)?;
-    Ok(val)
-}
-
-fn write_user_itimerspec(addr: usize, val: &itimerspec) -> Result<(), LinuxError> {
-    if addr == 0 {
-        return Ok(());
-    }
-    let proc = pulse_core::task::current_process()?;
-    uaccess::write_user_plain(proc.as_ref(), addr, val).map_err(|_| LinuxError::EFAULT)
-}
-
-fn ns_to_timespec(ns: u64) -> timespec {
-    timespec {
-        tv_sec: (ns / 1_000_000_000) as _,
-        tv_nsec: (ns % 1_000_000_000) as _,
-    }
-}
-
-pub fn sys_timer_settime(
-    timerid: usize,
-    flags: usize,
-    new_value: usize,
-    old_value: usize,
-) -> isize {
-    axlog::debug!(
-        "sys_timer_settime: timerid={}, flags={}, new_value={:#x}, old_value={:#x}",
-        timerid,
-        flags,
-        new_value,
-        old_value
-    );
-
-    if timerid >= pulse_core::task::MAX_POSIX_TIMER_COUNT {
-        return -LinuxError::EINVAL.code() as isize;
-    }
-
-    let proc = match pulse_core::task::current_process() {
-        Ok(proc) => proc,
-        Err(e) => return -e.code() as isize,
-    };
-
-    let new_spec = if new_value != 0 {
-        match read_user_itimerspec(new_value) {
-            Ok(v) => v,
-            Err(e) => return -e.code() as isize,
-        }
-    } else {
-        return -LinuxError::EINVAL.code() as isize;
-    };
-
-    let val_dur = match timespec_to_duration(new_spec.it_value) {
-        Ok(d) => d,
-        Err(e) => return -e.code() as isize,
-    };
-
-    let int_dur = match timespec_to_duration(new_spec.it_interval) {
-        Ok(d) => d,
-        Err(e) => return -e.code() as isize,
-    };
-
-    let mut timers = proc.posix_timers.lock();
-    let timer = match &mut timers[timerid] {
-        Some(t) => t,
-        None => return -LinuxError::EINVAL.code() as isize,
-    };
-
-    if old_value != 0 {
-        let now_ns = axhal::time::monotonic_time_nanos() as u64;
-        let prev_val_ns = if timer.next_deadline_ns == 0 {
-            0
-        } else if now_ns >= timer.next_deadline_ns {
-            0
-        } else {
-            timer.next_deadline_ns - now_ns
-        };
-        let old_spec = itimerspec {
-            it_interval: ns_to_timespec(timer.interval_ns),
-            it_value: ns_to_timespec(prev_val_ns),
-        };
-        let val_write = write_user_itimerspec(old_value, &old_spec);
-        if let Err(e) = val_write {
-            return -e.code() as isize;
-        }
-    }
-
-    timer.itimer_spec = new_spec;
-    timer.interval_ns = int_dur.as_nanos() as u64;
-
-    if val_dur.is_zero() {
-        timer.next_deadline_ns = 0;
-    } else {
-        let now_ns = axhal::time::monotonic_time_nanos() as u64;
-        let deadline = if (flags & TIMER_ABSTIME as usize) != 0 {
-            let req_ns = val_dur.as_nanos() as u64;
-            if timer.clock_id as u32 == CLOCK_REALTIME {
-                let offset = axhal::time::current_epochoffset_nanos();
-                req_ns.saturating_sub(offset)
-            } else {
-                req_ns
-            }
-        } else {
-            now_ns.saturating_add(val_dur.as_nanos() as u64)
-        };
-        timer.next_deadline_ns = deadline;
-        pulse_core::task::schedule_posix_timer_event(proc.pid(), timerid, deadline);
-    }
-
-    0
-}
-
-pub fn sys_timer_gettime(timerid: usize, curr_value: usize) -> isize {
-    axlog::debug!("sys_timer_gettime: timerid={}, curr_value={:#x}", timerid, curr_value);
-
-    if timerid >= pulse_core::task::MAX_POSIX_TIMER_COUNT {
-        return -LinuxError::EINVAL.code() as isize;
-    }
-    if curr_value == 0 {
-        return -LinuxError::EFAULT.code() as isize;
-    }
-
-    let proc = match pulse_core::task::current_process() {
-        Ok(proc) => proc,
-        Err(e) => return -e.code() as isize,
-    };
-
-    let timers = proc.posix_timers.lock();
-    let timer = match &timers[timerid] {
-        Some(t) => t,
-        None => return -LinuxError::EINVAL.code() as isize,
-    };
-
-    let now_ns = axhal::time::monotonic_time_nanos() as u64;
-    let prev_val_ns = if timer.next_deadline_ns == 0 {
-        0
-    } else if now_ns >= timer.next_deadline_ns {
-        0
-    } else {
-        timer.next_deadline_ns - now_ns
-    };
-    let curr_spec = itimerspec {
-        it_interval: ns_to_timespec(timer.interval_ns),
-        it_value: ns_to_timespec(prev_val_ns),
-    };
-    match write_user_itimerspec(curr_value, &curr_spec) {
-        Ok(()) => 0,
-        Err(e) => -e.code() as isize,
-    }
-}
-
-pub fn sys_timer_delete(timerid: usize) -> isize {
-    axlog::debug!("sys_timer_delete: timerid={}", timerid);
-
-    if timerid >= pulse_core::task::MAX_POSIX_TIMER_COUNT {
-        return -LinuxError::EINVAL.code() as isize;
-    }
-
-    let proc = match pulse_core::task::current_process() {
-        Ok(proc) => proc,
-        Err(e) => return -e.code() as isize,
-    };
-
-    let mut timers = proc.posix_timers.lock();
-    if timers[timerid].is_some() {
-        timers[timerid] = None;
-        0
-    } else {
-        -LinuxError::EINVAL.code() as isize
     }
 }
