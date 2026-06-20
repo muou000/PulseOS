@@ -19,6 +19,7 @@ use kernel_guard::NoPreemptIrqSave;
 use kspin::SpinNoIrq;
 use linux_raw_sys::general::{
     RLIMIT_CORE, RLIMIT_MEMLOCK, RLIMIT_NOFILE, RLIMIT_STACK, SIGCHLD, rlimit64,
+    sigevent, itimerspec,
 };
 use memory_addr::{MemoryAddr, PhysAddr, VirtAddr, va};
 use spin::{Lazy, Mutex, RwLock};
@@ -43,6 +44,22 @@ const DEFAULT_STACK_LIMIT_BYTES: u64 = USER_STACK_SIZE as u64;
 const MAX_STACK_LIMIT_BYTES: u64 = USER_STACK_SIZE as u64;
 const DEFAULT_NOFILE_LIMIT: u64 = 1024;
 const MAX_NOFILE_LIMIT: u64 = FD_LIMIT as u64;
+
+pub const MAX_POSIX_TIMER_COUNT: usize = 16;
+
+#[derive(Clone, Copy)]
+pub struct PosixTimer {
+    pub id: usize,
+    pub clock_id: i32,
+    pub event: sigevent,
+    pub itimer_spec: itimerspec,
+    pub overrun: i32,
+    pub next_deadline_ns: u64,
+    pub interval_ns: u64,
+}
+
+unsafe impl Send for PosixTimer {}
+unsafe impl Sync for PosixTimer {}
 
 static ZOMBIE_ASPACE_HANDLE: Lazy<Arc<RwLock<AddrSpace>>> = Lazy::new(|| {
     Arc::new(RwLock::new(
@@ -453,6 +470,8 @@ pub struct Process {
     uts_ns: RwLock<Arc<UtsNamespace>>,
     /// 进程死亡时发送给父进程的信号，默认为 SIGCHLD (17)
     pub parent_exit_signal: AtomicI32,
+    /// POSIX 定时器列表
+    pub posix_timers: SpinNoIrq<[Option<PosixTimer>; MAX_POSIX_TIMER_COUNT]>,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -656,15 +675,21 @@ impl Process {
     }
 
     pub fn name(&self) -> String {
-        self.exec_path()
-            .as_ref()
-            .and_then(|p| p.split('/').last())
-            .map(|s| s.to_string())
-            .unwrap_or_else(|| "pulse_init".to_string())
+        let name = self
+            .exec_path
+            .read()
+            .as_deref()
+            .and_then(|p| p.rsplit('/').next())
+            .map(|s| s.to_string());
+        name.unwrap_or_else(|| "pulse_init".to_string())
     }
 
     pub fn exec_path(&self) -> Option<String> {
         self.exec_path.read().clone()
+    }
+
+    pub fn is_exec_path(&self, path: &str) -> bool {
+        self.exec_path.read().as_deref() == Some(path)
     }
 
     pub fn exec_path_or_default(&self) -> String {
@@ -747,26 +772,26 @@ impl Process {
     }
 
     pub fn set_umask(&self, umask: u32) -> u32 {
-        let mut creds = self.credentials.read().as_ref().clone();
+        let mut creds_lock = self.credentials.write();
+        let creds = Arc::make_mut(&mut *creds_lock);
         let old = creds.umask;
         creds.umask = umask;
-        *self.credentials.write() = Arc::new(creds);
         old
     }
 
     pub fn set_fsuid(&self, uid: u32) -> u32 {
-        let mut creds = self.credentials.read().as_ref().clone();
+        let mut creds_lock = self.credentials.write();
+        let creds = Arc::make_mut(&mut *creds_lock);
         let old = creds.fsuid;
         creds.fsuid = uid;
-        *self.credentials.write() = Arc::new(creds);
         old
     }
 
     pub fn set_fsgid(&self, gid: u32) -> u32 {
-        let mut creds = self.credentials.read().as_ref().clone();
+        let mut creds_lock = self.credentials.write();
+        let creds = Arc::make_mut(&mut *creds_lock);
         let old = creds.fsgid;
         creds.fsgid = gid;
-        *self.credentials.write() = Arc::new(creds);
         old
     }
 
@@ -790,11 +815,11 @@ impl Process {
     }
 
     pub fn set_capabilities(&self, p: u64, e: u64, i: u64) {
-        let mut creds = self.credentials.read().as_ref().clone();
+        let mut creds_lock = self.credentials.write();
+        let creds = Arc::make_mut(&mut *creds_lock);
         creds.cap_permitted = p;
         creds.cap_effective = e;
         creds.cap_inheritable = i;
-        *self.credentials.write() = Arc::new(creds);
     }
 
     pub fn has_capability(&self, cap: u32) -> bool {
@@ -806,7 +831,9 @@ impl Process {
     }
 
     pub fn set_uids(&self, ruid: u32, euid: u32, suid: u32) {
-        let mut creds = self.credentials.read().as_ref().clone();
+        let mut creds_lock = self.credentials.write();
+        let creds = Arc::make_mut(&mut *creds_lock);
+
         let old_ruid = creds.ruid;
         let old_euid = creds.euid;
         let old_suid = creds.suid;
@@ -832,19 +859,20 @@ impl Process {
             creds.cap_permitted = 0;
             creds.cap_effective = 0;
         }
-        *self.credentials.write() = Arc::new(creds);
     }
 
     pub fn set_gids(&self, rgid: u32, egid: u32, sgid: u32) {
-        let mut creds = self.credentials.read().as_ref().clone();
+        let mut creds_lock = self.credentials.write();
+        let creds = Arc::make_mut(&mut *creds_lock);
+
         let old_egid = creds.egid;
         creds.rgid = rgid;
         creds.egid = egid;
         creds.sgid = sgid;
+
         if egid != old_egid {
             creds.fsgid = egid;
         }
-        *self.credentials.write() = Arc::new(creds);
     }
 
     pub fn is_root_user(&self) -> bool {
@@ -856,9 +884,9 @@ impl Process {
     }
 
     pub fn set_groups(&self, groups: Vec<u32>) {
-        let mut creds = self.credentials.read().as_ref().clone();
+        let mut creds_lock = self.credentials.write();
+        let creds = Arc::make_mut(&mut *creds_lock);
         creds.groups = groups;
-        *self.credentials.write() = Arc::new(creds);
     }
 
     pub fn memlock_limit_snapshot(&self) -> (u64, u64) {
@@ -1464,6 +1492,7 @@ impl Process {
             reparented: AtomicBool::new(false),
             uts_ns,
             parent_exit_signal: AtomicI32::new(SIGCHLD as i32),
+            posix_timers: SpinNoIrq::new([None; MAX_POSIX_TIMER_COUNT]),
         }))
     }
 
@@ -1604,6 +1633,7 @@ impl Process {
             reparented: AtomicBool::new(false),
             uts_ns: RwLock::new(uts_ns),
             parent_exit_signal: AtomicI32::new(SIGCHLD as i32),
+            posix_timers: SpinNoIrq::new([None; MAX_POSIX_TIMER_COUNT]),
         }))
     }
 
@@ -2374,7 +2404,6 @@ impl Process {
             self.time_context
                 .itimer_real_interval_ns
                 .store(0, Ordering::Release);
-            super::remove_from_itimer_real(self.pid());
         } else {
             let deadline = now_ns.saturating_add(value_ns);
             self.time_context
@@ -2383,8 +2412,7 @@ impl Process {
             self.time_context
                 .itimer_real_interval_ns
                 .store(interval_ns, Ordering::Release);
-            super::add_to_itimer_real(self.pid());
-            super::update_itimer_deadline(deadline);
+            super::schedule_itimer_event(self.pid(), deadline);
         }
         (old_remaining, old_interval)
     }
@@ -2459,45 +2487,6 @@ impl Process {
     }
 
     /// Called from timer tick hook (interrupt context). Checks if ITIMER_REAL
-    /// has expired and sends SIGALRM if so. Returns Some(next_deadline) if armed.
-    pub fn check_itimer_real_tick(&self, now_ns: u64) -> Option<u64> {
-        let deadline = self
-            .time_context
-            .itimer_real_deadline_ns
-            .load(Ordering::Acquire);
-        if deadline == 0 {
-            return None;
-        }
-        if now_ns < deadline {
-            return Some(deadline);
-        }
-        // Timer expired. Send SIGALRM (signal 14).
-        axlog::info!(
-            "itimer expired for pid={} now={} deadline={}",
-            self.pid(),
-            now_ns,
-            deadline
-        );
-        let _ = queue_signal_to_process(self, 14 /* SIGALRM */);
-        let interval = self
-            .time_context
-            .itimer_real_interval_ns
-            .load(Ordering::Acquire);
-        if interval == 0 {
-            // One-shot: disarm
-            self.time_context
-                .itimer_real_deadline_ns
-                .store(0, Ordering::Release);
-            None
-        } else {
-            // Repeating: advance deadline
-            let new_deadline = deadline.saturating_add(interval);
-            self.time_context
-                .itimer_real_deadline_ns
-                .store(new_deadline, Ordering::Release);
-            Some(new_deadline)
-        }
-    }
 
     pub fn check_itimer_virt_tick(&self, elapsed_ns: u64) {
         let mut remaining = self
@@ -3064,4 +3053,30 @@ impl Process {
         child_proc.register_task_ref(task.clone());
         Ok((child_tid, (!params.is_thread_clone).then_some(child_proc)))
     }
+
+    pub fn alloc_posix_timer(&self, clock_id: i32, event: sigevent) -> Result<i32, axerrno::LinuxError> {
+        match clock_id {
+            0 | 1 | 2 | 3 | 7 => {}
+            _ => return Err(axerrno::LinuxError::EINVAL),
+        }
+
+        let mut timers = self.posix_timers.lock();
+        for (i, slot) in timers.iter_mut().enumerate() {
+            if slot.is_none() {
+                *slot = Some(PosixTimer {
+                    id: i,
+                    clock_id,
+                    event,
+                    itimer_spec: unsafe { core::mem::zeroed() },
+                    overrun: 0,
+                    next_deadline_ns: 0,
+                    interval_ns: 0,
+                });
+                return Ok(i as i32);
+            }
+        }
+        Err(axerrno::LinuxError::ENOSPC)
+    }
+
+
 }

@@ -6,7 +6,7 @@ mod util;
 
 use core::cell::UnsafeCell;
 
-use fatfs::SeekFrom;
+use fatfs::{SeekFrom, Seek};
 pub use fs::FatFilesystem;
 use fs::FatFilesystemInner;
 

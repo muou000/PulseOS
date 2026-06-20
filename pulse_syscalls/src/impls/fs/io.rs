@@ -6,7 +6,7 @@ use linux_raw_sys::general::{
     O_CLOEXEC, O_NONBLOCK, POLLERR, POLLHUP, POLLIN, POLLNVAL, POLLOUT, pollfd,
 };
 use pulse_core::{
-    fd_table::{FD_LIMIT, pipe_entries},
+    fd_table::{FD_LIMIT, FileObject, FdObject, pipe_entries},
     task::uaccess,
 };
 
@@ -68,6 +68,18 @@ pub fn sys_read(fd: usize, buf: usize, count: usize) -> isize {
         return -LinuxError::EBADF.code() as isize;
     }
     let object = entry.object;
+    if let Some(file_obj) = object.as_any().downcast_ref::<FileObject>() {
+        if file_obj.inner().is_direct_regular_file() {
+            let block_size = file_obj.inner().block_size() as usize;
+            let offset = match file_obj.seek(SeekFrom::Current(0)) {
+                Ok(off) => off as usize,
+                Err(e) => return -e.code() as isize,
+            };
+            if buf % block_size != 0 || offset % block_size != 0 || count % block_size != 0 {
+                return -LinuxError::EINVAL.code() as isize;
+            }
+        }
+    }
     let mut total = 0usize;
     let mut fallback_tmp = None;
 
@@ -161,6 +173,18 @@ pub fn sys_write(fd: usize, buf: usize, count: usize) -> isize {
         return -LinuxError::EBADF.code() as isize;
     }
     let object = entry.object;
+    if let Some(file_obj) = object.as_any().downcast_ref::<FileObject>() {
+        if file_obj.inner().is_direct_regular_file() {
+            let block_size = file_obj.inner().block_size() as usize;
+            let offset = match file_obj.seek(SeekFrom::Current(0)) {
+                Ok(off) => off as usize,
+                Err(e) => return -e.code() as isize,
+            };
+            if buf % block_size != 0 || offset % block_size != 0 || count % block_size != 0 {
+                return -LinuxError::EINVAL.code() as isize;
+            }
+        }
+    }
     let mut total = 0usize;
     let mut fallback_tmp = None;
 
@@ -296,6 +320,28 @@ pub fn sys_writev(fd: usize, iov: usize, iovcnt: usize) -> isize {
         Ok(iovecs) => iovecs,
         Err(e) => return -e.code() as isize,
     };
+    if let Some(file_obj) = object.as_any().downcast_ref::<FileObject>() {
+        if file_obj.inner().is_direct_regular_file() {
+            let block_size = file_obj.inner().block_size() as usize;
+            let offset = match file_obj.seek(SeekFrom::Current(0)) {
+                Ok(off) => off as usize,
+                Err(e) => return -e.code() as isize,
+            };
+            if offset % block_size != 0 {
+                return -LinuxError::EINVAL.code() as isize;
+            }
+            for io_vec in &iovecs {
+                let addr = io_vec.iov_base as usize;
+                let len = match iov_len_to_usize(io_vec.iov_len) {
+                    Ok(l) => l,
+                    Err(e) => return -e.code() as isize,
+                };
+                if addr % block_size != 0 || len % block_size != 0 {
+                    return -LinuxError::EINVAL.code() as isize;
+                }
+            }
+        }
+    }
     let mut actual_len = 0usize;
     for io_vec in &iovecs {
         let len = match iov_len_to_usize(io_vec.iov_len) {
@@ -353,6 +399,28 @@ pub fn sys_readv(fd: usize, iov: usize, iovcnt: usize) -> isize {
         Ok(iovecs) => iovecs,
         Err(e) => return -e.code() as isize,
     };
+    if let Some(file_obj) = object.as_any().downcast_ref::<FileObject>() {
+        if file_obj.inner().is_direct_regular_file() {
+            let block_size = file_obj.inner().block_size() as usize;
+            let offset = match file_obj.seek(SeekFrom::Current(0)) {
+                Ok(off) => off as usize,
+                Err(e) => return -e.code() as isize,
+            };
+            if offset % block_size != 0 {
+                return -LinuxError::EINVAL.code() as isize;
+            }
+            for io_vec in &iovecs {
+                let addr = io_vec.iov_base as usize;
+                let len = match iov_len_to_usize(io_vec.iov_len) {
+                    Ok(l) => l,
+                    Err(e) => return -e.code() as isize,
+                };
+                if addr % block_size != 0 || len % block_size != 0 {
+                    return -LinuxError::EINVAL.code() as isize;
+                }
+            }
+        }
+    }
     let mut actual_len = 0usize;
     for io_vec in &iovecs {
         let len = match iov_len_to_usize(io_vec.iov_len) {
@@ -432,6 +500,24 @@ pub fn sys_preadv(
         Ok(iovecs) => iovecs,
         Err(e) => return -e.code() as isize,
     };
+    if let Some(file_obj) = object.as_any().downcast_ref::<FileObject>() {
+        if file_obj.inner().is_direct_regular_file() {
+            let block_size = file_obj.inner().block_size() as usize;
+            if (offset as usize) % block_size != 0 {
+                return -LinuxError::EINVAL.code() as isize;
+            }
+            for io_vec in &iovecs {
+                let addr = io_vec.iov_base as usize;
+                let len = match iov_len_to_usize(io_vec.iov_len) {
+                    Ok(l) => l,
+                    Err(e) => return -e.code() as isize,
+                };
+                if addr % block_size != 0 || len % block_size != 0 {
+                    return -LinuxError::EINVAL.code() as isize;
+                }
+            }
+        }
+    }
 
     let mut total_len = 0usize;
     for io_vec in &iovecs {
@@ -541,6 +627,14 @@ pub fn sys_pread64(fd: usize, buf: usize, count: usize, offset: usize) -> isize 
         return -LinuxError::EBADF.code() as isize;
     }
     let object = entry.object;
+    if let Some(file_obj) = object.as_any().downcast_ref::<FileObject>() {
+        if file_obj.inner().is_direct_regular_file() {
+            let block_size = file_obj.inner().block_size() as usize;
+            if buf % block_size != 0 || (offset as usize) % block_size != 0 || count % block_size != 0 {
+                return -LinuxError::EINVAL.code() as isize;
+            }
+        }
+    }
     let mut total = 0usize;
     let mut fallback_tmp = None;
 
@@ -642,6 +736,14 @@ pub fn sys_pwrite64(fd: usize, buf: usize, count: usize, offset: usize) -> isize
         return -LinuxError::EBADF.code() as isize;
     }
     let object = entry.object;
+    if let Some(file_obj) = object.as_any().downcast_ref::<FileObject>() {
+        if file_obj.inner().is_direct_regular_file() {
+            let block_size = file_obj.inner().block_size() as usize;
+            if buf % block_size != 0 || (offset as usize) % block_size != 0 || count % block_size != 0 {
+                return -LinuxError::EINVAL.code() as isize;
+            }
+        }
+    }
     let mut total = 0usize;
     let mut fallback_tmp = None;
 
@@ -753,6 +855,24 @@ pub fn sys_pwritev(
         Ok(iovecs) => iovecs,
         Err(e) => return -e.code() as isize,
     };
+    if let Some(file_obj) = object.as_any().downcast_ref::<FileObject>() {
+        if file_obj.inner().is_direct_regular_file() {
+            let block_size = file_obj.inner().block_size() as usize;
+            if (offset as usize) % block_size != 0 {
+                return -LinuxError::EINVAL.code() as isize;
+            }
+            for io_vec in &iovecs {
+                let addr = io_vec.iov_base as usize;
+                let len = match iov_len_to_usize(io_vec.iov_len) {
+                    Ok(l) => l,
+                    Err(e) => return -e.code() as isize,
+                };
+                if addr % block_size != 0 || len % block_size != 0 {
+                    return -LinuxError::EINVAL.code() as isize;
+                }
+            }
+        }
+    }
 
     let mut total_len = 0usize;
     for io_vec in &iovecs {
@@ -1268,6 +1388,10 @@ pub fn sys_sync() -> isize {
     for object in unique_objects.into_values() {
         let _ = object.flush();
     }
+
+    let _ = axfs::flush_all_filesystems();
+    let _ = axfs::flush_all_disks();
+
     0
 }
 

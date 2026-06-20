@@ -50,6 +50,7 @@ impl Ext4 {
         bkuptime: Option<u32>,
         flags: Option<u32>,
     ) {
+        self.start_transaction();
         let mut inode_ref = self.get_inode_ref(ino as u32);
 
         let mut attr = FileAttr::default();
@@ -105,6 +106,7 @@ impl Ext4 {
         inode_ref.set_attr(&attr);
 
         self.write_back_inode(&mut inode_ref);
+        let _ = self.stop_transaction();
     }
 
     /// Read symbolic link.
@@ -225,40 +227,50 @@ impl Ext4 {
     }
     /// Remove a directory.
     pub fn fuse_rmdir(&mut self, parent: u64, name: &str) -> Result<usize> {
-        let mut search_result = Ext4DirSearchResult::new(Ext4DirEntry::default());
+        self.start_transaction();
+        let res = (|| {
+            let mut search_result = Ext4DirSearchResult::new(Ext4DirEntry::default());
 
-        let r = self.dir_find_entry(parent as u32, name, &mut search_result)?;
+            let r = self.dir_find_entry(parent as u32, name, &mut search_result)?;
 
-        let mut parent_inode_ref = self.get_inode_ref(parent as u32);
-        let mut child_inode_ref = self.get_inode_ref(search_result.dentry.inode);
+            let mut parent_inode_ref = self.get_inode_ref(parent as u32);
+            let mut child_inode_ref = self.get_inode_ref(search_result.dentry.inode);
 
-        self.truncate_inode(&mut child_inode_ref, 0)?;
+            self.truncate_inode(&mut child_inode_ref, 0)?;
 
-        self.unlink(&mut parent_inode_ref, &mut child_inode_ref, name)?;
+            self.unlink(&mut parent_inode_ref, &mut child_inode_ref, name)?;
 
-        self.write_back_inode(&mut parent_inode_ref);
+            self.write_back_inode(&mut parent_inode_ref);
 
-        // to do
-        // ext4_inode_set_del_time
-        // ext4_inode_set_links_cnt
-        // ext4_fs_free_inode(&child)
+            // to do
+            // ext4_inode_set_del_time
+            // ext4_inode_set_links_cnt
+            // ext4_fs_free_inode(&child)
 
-        Ok(EOK)
+            Ok(EOK)
+        })();
+        self.stop_transaction()?;
+        res
     }
     /// Create a symbolic link.
     pub fn fuse_symlink(&mut self, parent: u64, link_name: &str, target: &str) -> Result<usize> {
-        let mut search_result = Ext4DirSearchResult::new(Ext4DirEntry::default());
-        let r = self.dir_find_entry(parent as u32, link_name, &mut search_result);
-        if r.is_ok() {
-            return_errno!(Errno::EEXIST);
-        }
+        self.start_transaction();
+        let res = (|| {
+            let mut search_result = Ext4DirSearchResult::new(Ext4DirEntry::default());
+            let r = self.dir_find_entry(parent as u32, link_name, &mut search_result);
+            if r.is_ok() {
+                return_errno!(Errno::EEXIST);
+            }
 
-        let mut mode = 0o777;
-        let file_type = InodeFileType::S_IFLNK;
-        mode |= file_type.bits();
+            let mut mode = 0o777;
+            let file_type = InodeFileType::S_IFLNK;
+            mode |= file_type.bits();
 
-        let inode_ref = self.create(parent as u32, link_name, mode)?;
-        Ok(EOK)
+            let inode_ref = self.create(parent as u32, link_name, mode)?;
+            Ok(EOK)
+        })();
+        self.stop_transaction()?;
+        res
     }
     /// Create a hard link.
     /// Params:

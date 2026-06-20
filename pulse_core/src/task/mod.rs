@@ -9,11 +9,12 @@ use alloc::{
     sync::{Arc, Weak},
     vec::Vec,
 };
+use core::fmt::Write;
 
 use axerrno::{LinuxError, LinuxResult};
-use hashbrown::{HashMap, HashSet};
+use hashbrown::HashMap;
 use kspin::SpinNoIrq;
-pub use process::{CloneParams, ForkParams, Process, WaitidStatusType};
+pub use process::{CloneParams, ForkParams, Process, WaitidStatusType, MAX_POSIX_TIMER_COUNT};
 pub use signal::{
     DefaultSignalAction, NSIG, SIG_DFL, SIG_IGN, SigAction, SignalAction, SignalAltStack,
     SignalDelivery, SignalShared, ThreadSignal, blocked_mask as thread_blocked_mask, can_signal,
@@ -30,17 +31,6 @@ static PROCESS_REGISTRY: Lazy<SpinNoIrq<HashMap<u64, Arc<Process>>>> =
 static THREAD_REGISTRY: Lazy<SpinNoIrq<HashMap<u64, Weak<Thread>>>> =
     Lazy::new(|| SpinNoIrq::new(HashMap::new()));
 
-static ITIMER_REAL_PROCESSES: Lazy<SpinNoIrq<HashSet<u64>>> =
-    Lazy::new(|| SpinNoIrq::new(HashSet::new()));
-
-pub fn add_to_itimer_real(pid: u64) {
-    ITIMER_REAL_PROCESSES.lock().insert(pid);
-}
-
-pub fn remove_from_itimer_real(pid: u64) {
-    ITIMER_REAL_PROCESSES.lock().remove(&pid);
-}
-
 static INIT_PROCESS: spin::Once<Arc<Process>> = spin::Once::new();
 
 pub fn register_process(pid: u64, process: Arc<Process>) {
@@ -50,7 +40,6 @@ pub fn register_process(pid: u64, process: Arc<Process>) {
 
 pub fn unregister_process(pid: u64) {
     PROCESS_REGISTRY.lock().remove(&pid);
-    remove_from_itimer_real(pid);
 }
 
 pub fn init_process() -> Option<Arc<Process>> {
@@ -135,13 +124,6 @@ pub fn thread_by_tid(process: &Process, tid: u64) -> Option<Arc<Thread>> {
 #[percpu::def_percpu]
 static LAST_TICK_NS: u64 = 0;
 
-static NEXT_ITIMER_DEADLINE: core::sync::atomic::AtomicU64 =
-    core::sync::atomic::AtomicU64::new(u64::MAX);
-
-pub fn update_itimer_deadline(deadline: u64) {
-    NEXT_ITIMER_DEADLINE.fetch_min(deadline, core::sync::atomic::Ordering::Relaxed);
-}
-
 static STDIN_POLLING_ENABLED: core::sync::atomic::AtomicBool =
     core::sync::atomic::AtomicBool::new(true);
 
@@ -177,49 +159,65 @@ fn itimer_tick_hook() {
         }
     }
 
-    if now_ns >= NEXT_ITIMER_DEADLINE.load(core::sync::atomic::Ordering::Relaxed) {
-        NEXT_ITIMER_DEADLINE.store(u64::MAX, core::sync::atomic::Ordering::Relaxed);
-
-        let active_pids: Vec<u64> = ITIMER_REAL_PROCESSES.lock().iter().copied().collect();
-        let registry = PROCESS_REGISTRY.lock();
-        let mut next_min = u64::MAX;
-        let mut to_remove = Vec::new();
-
-        for pid in active_pids {
-            if let Some(proc) = registry.get(&pid) {
-                if !proc.is_zombie() {
-                    if let Some(next_deadline) = proc.check_itimer_real_tick(now_ns) {
-                        if next_deadline < next_min {
-                            next_min = next_deadline;
-                        }
-                    } else {
-                        to_remove.push(pid);
-                    }
-                } else {
-                    to_remove.push(pid);
-                }
-            } else {
-                to_remove.push(pid);
-            }
-        }
-        drop(registry);
-
-        if !to_remove.is_empty() {
-            let mut active = ITIMER_REAL_PROCESSES.lock();
-            for pid in to_remove {
-                active.remove(&pid);
-            }
-        }
-
-        NEXT_ITIMER_DEADLINE.fetch_min(next_min, core::sync::atomic::Ordering::Relaxed);
-    }
-
     if elapsed_ns > 0 {
         if let Ok(curr) = current_process() {
             curr.check_itimer_virt_tick(elapsed_ns);
             curr.check_itimer_prof_tick(elapsed_ns);
         }
     }
+}
+
+pub fn schedule_itimer_event(pid: u64, deadline: u64) {
+    axtask::set_generic_timer(deadline, alloc::boxed::Box::new(move |_now| {
+        if let Some(proc) = process_by_pid(pid) {
+            if !proc.is_zombie() {
+                let current_deadline = proc.time_context.itimer_real_deadline_ns.load(core::sync::atomic::Ordering::Acquire);
+                if current_deadline == deadline {
+                    let _ = queue_signal_to_process(&proc, 14 /* SIGALRM */);
+                    let interval = proc.time_context.itimer_real_interval_ns.load(core::sync::atomic::Ordering::Acquire);
+                    if interval > 0 {
+                        let new_deadline = deadline.saturating_add(interval);
+                        proc.time_context.itimer_real_deadline_ns.store(new_deadline, core::sync::atomic::Ordering::Release);
+                        schedule_itimer_event(pid, new_deadline);
+                    } else {
+                        proc.time_context.itimer_real_deadline_ns.store(0, core::sync::atomic::Ordering::Release);
+                    }
+                }
+            }
+        }
+    }));
+}
+
+pub fn schedule_posix_timer_event(pid: u64, timer_id: usize, deadline: u64) {
+    axtask::set_generic_timer(deadline, alloc::boxed::Box::new(move |_now| {
+        if let Some(proc) = process_by_pid(pid) {
+            if !proc.is_zombie() {
+                let mut timers = proc.posix_timers.lock();
+                if let Some(timer) = &mut timers[timer_id] {
+                    if timer.next_deadline_ns == deadline {
+                        let sig = timer.event.sigev_signo as usize;
+                        let notify = timer.event.sigev_notify;
+                        if notify == 0 { // SIGEV_SIGNAL
+                            let _ = queue_signal_to_process(&proc, sig);
+                        }
+                        if timer.interval_ns > 0 {
+                            let mut next = deadline.saturating_add(timer.interval_ns);
+                            let now_ns = axhal::time::monotonic_time_nanos() as u64;
+                            while next <= now_ns {
+                                timer.overrun = timer.overrun.saturating_add(1);
+                                next = next.saturating_add(timer.interval_ns);
+                            }
+                            timer.next_deadline_ns = next;
+                            drop(timers);
+                            schedule_posix_timer_event(pid, timer_id, next);
+                        } else {
+                            timer.next_deadline_ns = 0;
+                        }
+                    }
+                }
+            }
+        }
+    }));
 }
 
 /// Register the itimer tick hook with axtask. Should be called once during
@@ -254,7 +252,8 @@ impl axfs::ProcfsProcessProvider for PulseProcessProvider {
             let path = proc.exec_path_or_default();
             Some(alloc::format!("{}\0", path))
         } else {
-            let mut res = String::new();
+            let total_len: usize = args.iter().map(|s| s.len() + 1).sum();
+            let mut res = String::with_capacity(total_len);
             for arg in args.iter() {
                 res.push_str(arg);
                 res.push('\0');
@@ -491,7 +490,8 @@ impl axfs::ProcfsProcessProvider for PulseProcessProvider {
 
             let p_char = if is_shared { "s" } else { "p" };
             if path_str.is_empty() {
-                out.push_str(&alloc::format!(
+                core::write!(
+                    out,
                     "{:x}-{:x} {}{}{}{} {:08x} {} {}\n",
                     start.as_usize(),
                     end.as_usize(),
@@ -502,9 +502,11 @@ impl axfs::ProcfsProcessProvider for PulseProcessProvider {
                     offset,
                     dev_str,
                     inode
-                ));
+                )
+                .unwrap();
             } else {
-                out.push_str(&alloc::format!(
+                core::write!(
+                    out,
                     "{:x}-{:x} {}{}{}{} {:08x} {} {:<7} {}\n",
                     start.as_usize(),
                     end.as_usize(),
@@ -516,7 +518,8 @@ impl axfs::ProcfsProcessProvider for PulseProcessProvider {
                     dev_str,
                     inode,
                     path_str
-                ));
+                )
+                .unwrap();
             }
         });
 
