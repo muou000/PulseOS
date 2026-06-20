@@ -927,6 +927,28 @@ impl FdObject for Socket {
         Ok(state)
     }
 
+    fn get_wait_queues<'a>(
+        &'a self,
+        events: i16,
+        wqs: &mut alloc::vec::Vec<&'a axtask::WaitQueue>,
+    ) -> Result<bool, LinuxError> {
+        match &self.inner {
+            SocketInner::Local(s) => {
+                let mut supported = false;
+                if (events & (linux_raw_sys::general::POLLIN as i16)) != 0 {
+                    wqs.push(&s.rx.read_wait_queue);
+                    supported = true;
+                }
+                if (events & (linux_raw_sys::general::POLLOUT as i16)) != 0 {
+                    wqs.push(&s.tx.write_wait_queue);
+                    supported = true;
+                }
+                Ok(supported || events == 0)
+            }
+            _ => Ok(false),
+        }
+    }
+
     fn set_nonblocking(&self, nonblocking: bool) -> Result<(), LinuxError> {
         self.set_nonblocking_inner(nonblocking);
         Ok(())

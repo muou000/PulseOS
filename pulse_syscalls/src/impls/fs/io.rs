@@ -1073,6 +1073,121 @@ pub fn sys_ppoll(
         }
     }
 
+    // Try to retrieve wait queues for all monitored file descriptors.
+    // If all monitored fds support wait queues, we can block on them event-driven.
+    let mut objects = alloc::vec::Vec::with_capacity(nfds);
+    let mut all_wqs_supported = true;
+    for pfd in &pollfds {
+        if pfd.fd < 0 {
+            continue;
+        }
+        let fd = pfd.fd as usize;
+        match get_fd_entry(fd) {
+            Ok(entry) => {
+                if all_wqs_supported {
+                    let mut dummy = alloc::vec::Vec::new();
+                    match entry.object.get_wait_queues(pfd.events, &mut dummy) {
+                        Ok(true) => {
+                            objects.push((entry.object.clone(), pfd.events));
+                        }
+                        _ => {
+                            all_wqs_supported = false;
+                        }
+                    }
+                }
+            }
+            Err(_) => {
+                return -LinuxError::EBADF.code() as isize;
+            }
+        }
+    }
+
+    if all_wqs_supported && !objects.is_empty() {
+        let mut wqs = alloc::vec::Vec::new();
+        for (obj, events) in &objects {
+            let _ = obj.get_wait_queues(*events, &mut wqs);
+        }
+        // Fast-path poll
+        let mut ready = 0usize;
+        for pfd in pollfds.iter_mut() {
+            pfd.revents = 0;
+            if pfd.fd < 0 {
+                continue;
+            }
+            let fd = pfd.fd as usize;
+            if let Ok(entry) = get_fd_entry(fd) {
+                if let Ok(state) = entry.object.poll() {
+                    pfd.revents = requested_poll_revents(pfd.events, state);
+                    if pfd.revents != 0 {
+                        ready += 1;
+                    }
+                }
+            }
+        }
+        if ready > 0 {
+            return write_back(&pollfds, ready as isize);
+        }
+
+        // Wait until one or more monitored objects become ready, a signal is pending,
+        // or the timeout is reached.
+        let check_ready = || {
+            if let Ok(thread) = pulse_core::task::current_thread() {
+                if thread.has_pending_signal() {
+                    return true;
+                }
+            }
+            for (obj, events) in &objects {
+                if let Ok(state) = obj.poll() {
+                    if requested_poll_revents(*events, state) != 0 {
+                        return true;
+                    }
+                }
+            }
+            false
+        };
+
+        // If we have a deadline, calculate duration to wait
+        let remain_dur = deadline.map(|ddl| {
+            let now = axhal::time::monotonic_time();
+            if now >= ddl {
+                Duration::ZERO
+            } else {
+                ddl - now
+            }
+        });
+
+        if let Some(Duration::ZERO) = remain_dur {
+            // Already timed out, do not block
+        } else {
+            let _ = axtask::WaitQueue::wait_multiple_timeout_until(&wqs, remain_dur, check_ready);
+        }
+
+        if let Ok(thread) = pulse_core::task::current_thread() {
+            if thread.has_pending_signal() {
+                return -LinuxError::EINTR.code() as isize;
+            }
+        }
+
+        // Final poll pass
+        let mut ready = 0usize;
+        for pfd in pollfds.iter_mut() {
+            pfd.revents = 0;
+            if pfd.fd < 0 {
+                continue;
+            }
+            let fd = pfd.fd as usize;
+            if let Ok(entry) = get_fd_entry(fd) {
+                if let Ok(state) = entry.object.poll() {
+                    pfd.revents = requested_poll_revents(pfd.events, state);
+                    if pfd.revents != 0 {
+                        ready += 1;
+                    }
+                }
+            }
+        }
+        return write_back(&pollfds, ready as isize);
+    }
+
     // Hybrid wait strategy:
     // - keep a short active-yield phase for high-frequency IPC readiness;
     // - then fall back to short sleeps to avoid permanent hot spinning.

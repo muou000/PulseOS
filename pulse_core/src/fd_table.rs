@@ -67,6 +67,16 @@ pub trait FdObject: Send + Sync {
         Err(LinuxError::EOPNOTSUPP)
     }
 
+    /// Gets the wait queues associated with the requested events for this object.
+    /// Returns Ok(true) if wait queues are supported by this object, or Ok(false) otherwise.
+    fn get_wait_queues<'a>(
+        &'a self,
+        _events: i16,
+        _wqs: &mut alloc::vec::Vec<&'a axtask::WaitQueue>,
+    ) -> LinuxResult<bool> {
+        Ok(false)
+    }
+
     fn set_nonblocking(&self, _nonblocking: bool) -> LinuxResult {
         Ok(())
     }
@@ -539,6 +549,19 @@ impl FdObject for StdinObject {
             readable: has_data,
             writable: true,
         })
+    }
+
+    fn get_wait_queues<'a>(
+        &'a self,
+        events: i16,
+        wqs: &mut alloc::vec::Vec<&'a axtask::WaitQueue>,
+    ) -> LinuxResult<bool> {
+        if (events & (POLLIN as i16)) != 0 {
+            wqs.push(&STDIN_WAIT_QUEUE);
+            Ok(true)
+        } else {
+            Ok(false)
+        }
     }
 
     fn is_read_open(&self) -> bool {
@@ -1635,6 +1658,23 @@ impl FdObject for PipeObject {
                 Ok(true)
             }
         }
+    }
+
+    fn get_wait_queues<'a>(
+        &'a self,
+        events: i16,
+        wqs: &mut alloc::vec::Vec<&'a axtask::WaitQueue>,
+    ) -> LinuxResult<bool> {
+        let mut supported = false;
+        if self.readable && (events & (POLLIN as i16)) != 0 {
+            wqs.push(&self.shared.read_wait_queue);
+            supported = true;
+        }
+        if self.writable && (events & (POLLOUT as i16)) != 0 {
+            wqs.push(&self.shared.write_wait_queue);
+            supported = true;
+        }
+        Ok(supported || events == 0)
     }
 
     fn allocate(&self, _mode: u32, _offset: u64, _len: u64) -> LinuxResult {
