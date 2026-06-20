@@ -18,8 +18,8 @@ use axtask::{AxTaskRef, TaskInner, WaitQueue};
 use kernel_guard::NoPreemptIrqSave;
 use kspin::SpinNoIrq;
 use linux_raw_sys::general::{
-    RLIMIT_CORE, RLIMIT_MEMLOCK, RLIMIT_NOFILE, RLIMIT_STACK, SIGCHLD, rlimit64,
-    sigevent, itimerspec,
+    RLIMIT_CORE, RLIMIT_MEMLOCK, RLIMIT_NOFILE, RLIMIT_STACK, SIGCHLD, itimerspec, rlimit64,
+    sigevent,
 };
 use memory_addr::{MemoryAddr, PhysAddr, VirtAddr, va};
 use spin::{Lazy, Mutex, RwLock};
@@ -1861,11 +1861,18 @@ impl Process {
     }
 
     pub fn wait_task_refs_exited(&self) {
-        let registry = self.threads.lock().clone();
-        for (_, state) in registry {
-            if let ThreadState::Active(task) = state {
-                let _ = task.join();
+        let tasks = {
+            let registry = self.threads.lock();
+            let mut tasks = Vec::with_capacity(registry.len());
+            for state in registry.values() {
+                if let ThreadState::Active(task) = state {
+                    tasks.push(task.clone());
+                }
             }
+            tasks
+        };
+        for task in tasks {
+            let _ = task.join();
         }
     }
 
@@ -1884,14 +1891,22 @@ impl Process {
         self.group_exiting.store(true, Ordering::Release);
         self.futex_table.wake_all();
 
-        let registry = self.threads.lock().clone();
-        for (_, state) in registry {
-            if let ThreadState::Active(task) = state {
-                if let Some(handle) = thread_handle_from_task(&task) {
-                    handle.signal_wait_queue().notify_all(false);
+        let tasks = {
+            let registry = self.threads.lock();
+            let mut tasks = Vec::with_capacity(registry.len());
+            for state in registry.values() {
+                if let ThreadState::Active(task) = state {
+                    tasks.push(task.clone());
                 }
-                axtask::wake_task(task, true);
             }
+            tasks
+        };
+
+        for task in tasks {
+            if let Some(handle) = thread_handle_from_task(&task) {
+                handle.signal_wait_queue().notify_all(false);
+            }
+            axtask::wake_task(task, true);
         }
     }
 
@@ -3034,7 +3049,11 @@ impl Process {
         Ok((child_tid, (!params.is_thread_clone).then_some(child_proc)))
     }
 
-    pub fn alloc_posix_timer(&self, clock_id: i32, event: sigevent) -> Result<i32, axerrno::LinuxError> {
+    pub fn alloc_posix_timer(
+        &self,
+        clock_id: i32,
+        event: sigevent,
+    ) -> Result<i32, axerrno::LinuxError> {
         match clock_id {
             0 | 1 | 2 | 3 | 7 => {}
             _ => return Err(axerrno::LinuxError::EINVAL),
@@ -3057,6 +3076,4 @@ impl Process {
         }
         Err(axerrno::LinuxError::ENOSPC)
     }
-
-
 }
