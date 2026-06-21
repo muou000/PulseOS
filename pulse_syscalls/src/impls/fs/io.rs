@@ -1162,20 +1162,40 @@ pub fn sys_ppoll(
             false
         };
 
-        // If we have a deadline, calculate duration to wait
-        let remain_dur = deadline.map(|ddl| {
-            let now = axhal::time::monotonic_time();
-            if now >= ddl {
-                Duration::ZERO
-            } else {
-                ddl - now
+        // Hybrid active-yield strategy for event-driven path:
+        // - For high-frequency IPC, keep a short active-yield phase;
+        // - If ready, we can return immediately without enrolling in any wait queues.
+        const POLL_ACTIVE_YIELD_ROUNDS: usize = 64;
+        let mut yield_success = false;
+        for _ in 0..POLL_ACTIVE_YIELD_ROUNDS {
+            if check_ready() {
+                yield_success = true;
+                break;
             }
-        });
+            if let Some(ddl) = deadline {
+                if axhal::time::monotonic_time() >= ddl {
+                    break;
+                }
+            }
+            axtask::yield_now();
+        }
 
-        if let Some(Duration::ZERO) = remain_dur {
-            // Already timed out, do not block
-        } else {
-            let _ = axtask::WaitQueue::wait_multiple_timeout_until(&wqs, remain_dur, check_ready);
+        if !yield_success {
+            // If we have a deadline, calculate duration to wait
+            let remain_dur = deadline.map(|ddl| {
+                let now = axhal::time::monotonic_time();
+                if now >= ddl {
+                    Duration::ZERO
+                } else {
+                    ddl - now
+                }
+            });
+
+            if let Some(Duration::ZERO) = remain_dur {
+                // Already timed out, do not block
+            } else {
+                let _ = axtask::WaitQueue::wait_multiple_timeout_until(&wqs, remain_dur, check_ready);
+            }
         }
 
         if let Ok(thread) = pulse_core::task::current_thread() {
