@@ -32,7 +32,8 @@ pub fn sys_execve(_tf: &TrapFrame, pathname: usize, argv: usize, envp: usize) ->
         Ok(path) => {
             let allocator = axalloc::global_allocator();
             axlog::info!(
-                "sys_execve: path={:?}, mem=[used_pages={}, free_pages={}, used_bytes={}, free_bytes={}]",
+                "sys_execve: path={:?}, mem=[used_pages={}, free_pages={}, used_bytes={}, \
+                 free_bytes={}]",
                 path,
                 allocator.used_pages(),
                 allocator.available_pages(),
@@ -71,7 +72,7 @@ pub fn sys_execve(_tf: &TrapFrame, pathname: usize, argv: usize, envp: usize) ->
     }
 
     if let Err(e) = process.exec(&path_str, &args_strs, &envs_strs) {
-        axlog::info!("sys_execve failed: {:?} (path={:?})", e, path_str);
+        axlog::debug!("sys_execve failed: {:?} (path={:?})", e, path_str);
         let errno: LinuxError = e.into();
         return -errno.code() as isize;
     }
@@ -145,7 +146,8 @@ pub fn sys_execveat(
             let path = p.to_string();
             let allocator = axalloc::global_allocator();
             axlog::info!(
-                "sys_execveat: path={:?}, mem=[used_pages={}, free_pages={}, used_bytes={}, free_bytes={}]",
+                "sys_execveat: path={:?}, mem=[used_pages={}, free_pages={}, used_bytes={}, \
+                 free_bytes={}]",
                 path,
                 allocator.used_pages(),
                 allocator.available_pages(),
@@ -188,7 +190,7 @@ pub fn sys_execveat(
     }
 
     if let Err(e) = process.exec(&path_str, &args_strs, &envs_strs) {
-        axlog::info!("sys_execveat failed: {:?}", e);
+        axlog::debug!("sys_execveat failed: {:?}", e);
         let errno: LinuxError = e.into();
         return -errno.code() as isize;
     }

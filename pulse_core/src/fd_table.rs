@@ -2,6 +2,9 @@ use alloc::{
     collections::{BTreeMap, VecDeque},
     sync::{Arc, Weak},
 };
+use memory_addr::{PhysAddr, VirtAddr};
+use axhal::paging::MappingFlags;
+
 use core::{
     any::Any,
     sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
@@ -1282,12 +1285,28 @@ impl PipeRingBuffer {
     }
 }
 
+#[derive(Debug)]
+pub struct ZeroCopyPage {
+    pub paddr: PhysAddr,
+    pub offset: usize,
+    pub len: usize,
+}
+
+fn dealloc_physical_frame(frame: PhysAddr) {
+    if axalloc::frame_table().contains(frame) {
+        if axalloc::frame_table().dec_ref(frame) == 0 {
+            axalloc::global_allocator().dealloc_pages(axhal::mem::phys_to_virt(frame).as_usize(), 1);
+        }
+    }
+}
+
 pub struct PipeShared {
     buffer: Mutex<PipeRingBuffer>,
     read_wait_queue: axtask::WaitQueue,
     write_wait_queue: axtask::WaitQueue,
     reader_count: AtomicUsize,
     writer_count: AtomicUsize,
+    pub zc_pages: Mutex<alloc::collections::VecDeque<ZeroCopyPage>>,
 }
 
 impl PipeShared {
@@ -1298,6 +1317,7 @@ impl PipeShared {
             write_wait_queue: axtask::WaitQueue::new(),
             reader_count: AtomicUsize::new(1),
             writer_count: AtomicUsize::new(1),
+            zc_pages: Mutex::new(alloc::collections::VecDeque::new()),
         }
     }
 
@@ -1308,6 +1328,16 @@ impl PipeShared {
             write_wait_queue: axtask::WaitQueue::new(),
             reader_count: AtomicUsize::new(0),
             writer_count: AtomicUsize::new(0),
+            zc_pages: Mutex::new(alloc::collections::VecDeque::new()),
+        }
+    }
+}
+
+impl Drop for PipeShared {
+    fn drop(&mut self) {
+        let mut zc = self.zc_pages.lock();
+        while let Some(page) = zc.pop_front() {
+            dealloc_physical_frame(page.paddr);
         }
     }
 }
@@ -1369,16 +1399,185 @@ impl PipeObject {
     }
 
     fn ready_for(&self, wait_for_read: bool, wait_for_write: bool) -> bool {
+        let zc_len = self.shared.zc_pages.lock().len() * 4096;
         let buffer = self.shared.buffer.lock();
         let limit = core::cmp::min(4096, buffer.capacity());
-        (wait_for_read && (buffer.available_read() > 0 || self.write_end_closed()))
-            || (wait_for_write && (buffer.available_write() >= limit || self.read_end_closed()))
+        let avail_read = buffer.available_read() + zc_len;
+        let avail_write = buffer.capacity().saturating_sub(avail_read);
+        (wait_for_read && (avail_read > 0 || self.write_end_closed()))
+            || (wait_for_write && (avail_write >= limit || self.read_end_closed()))
     }
 
     fn current_has_pending_signal() -> bool {
         crate::task::current_thread()
             .map(|thread| thread.has_pending_signal())
             .unwrap_or(false)
+    }
+
+    pub fn write_zerocopy(&self, writer_vaddr: usize, count: usize) -> LinuxResult<usize> {
+        if !self.writable() {
+            return Err(LinuxError::EPERM);
+        }
+        if count == 0 {
+            return Ok(0);
+        }
+
+        loop {
+            let zc_len = self.shared.zc_pages.lock().len() * 4096;
+            let rb_len = self.shared.buffer.lock().available_read();
+            let cap = self.shared.buffer.lock().capacity();
+            if zc_len + rb_len < cap {
+                break;
+            }
+
+            if self.read_end_closed() {
+                return Err(LinuxError::EPIPE);
+            }
+            if self.nonblocking.load(Ordering::Acquire) {
+                return Err(LinuxError::EAGAIN);
+            }
+            self.shared.write_wait_queue.wait_until(|| {
+                let zc_len = self.shared.zc_pages.lock().len() * 4096;
+                let rb_len = self.shared.buffer.lock().available_read();
+                let cap = self.shared.buffer.lock().capacity();
+                zc_len + rb_len < cap
+                    || self.read_end_closed()
+                    || Self::current_has_pending_signal()
+            });
+            if Self::current_has_pending_signal() {
+                return Err(LinuxError::EINTR);
+            }
+        }
+
+        if self.read_end_closed() {
+            return Err(LinuxError::EPIPE);
+        }
+
+        let process = crate::task::current_process()?;
+        let aspace = process.aspace_handle();
+        let aspace_guard = aspace.read();
+
+        let num_pages = count / 4096;
+        let mut paddrs = alloc::vec::Vec::with_capacity(num_pages);
+        for i in 0..num_pages {
+            let page_vaddr = VirtAddr::from(writer_vaddr + i * 4096);
+            let (paddr, flags, _) = aspace_guard.query_vaddr(page_vaddr)
+                .map_err(|_| LinuxError::EFAULT)?;
+            if paddr.as_usize() == 0 || !flags.contains(MappingFlags::READ | MappingFlags::USER) {
+                return Err(LinuxError::EFAULT);
+            }
+            paddrs.push(paddr);
+        }
+        drop(aspace_guard);
+
+        for &paddr in &paddrs {
+            axmm::cow_inc_frame_ref(paddr);
+        }
+
+        let mut zc = self.shared.zc_pages.lock();
+        for paddr in paddrs {
+            zc.push_back(ZeroCopyPage {
+                paddr,
+                offset: 0,
+                len: 4096,
+            });
+        }
+        drop(zc);
+
+        self.shared.read_wait_queue.notify_all(true);
+        Ok(count)
+    }
+
+    pub fn read_zerocopy(&self, reader_vaddr: usize, count: usize) -> LinuxResult<usize> {
+        if !self.readable {
+            return Err(LinuxError::EPERM);
+        }
+        if count == 0 {
+            return Ok(0);
+        }
+
+        loop {
+            let zc_empty = self.shared.zc_pages.lock().is_empty();
+            let rb_empty = self.shared.buffer.lock().available_read() == 0;
+            if !zc_empty || !rb_empty {
+                break;
+            }
+
+            if self.write_end_closed() {
+                return Ok(0);
+            }
+            if self.nonblocking.load(Ordering::Acquire) {
+                return Err(LinuxError::EAGAIN);
+            }
+            self.shared.read_wait_queue.wait_until(|| {
+                !self.shared.zc_pages.lock().is_empty()
+                    || self.shared.buffer.lock().available_read() > 0
+                    || self.write_end_closed()
+                    || Self::current_has_pending_signal()
+            });
+            if Self::current_has_pending_signal() {
+                return Err(LinuxError::EINTR);
+            }
+        }
+
+        let process = crate::task::current_process()?;
+        let aspace = process.aspace_handle();
+
+        let num_pages = count / 4096;
+        let mut read_pages = 0;
+
+        for i in 0..num_pages {
+            let page_vaddr = VirtAddr::from(reader_vaddr + i * 4096);
+            let mut zc = self.shared.zc_pages.lock();
+            let can_remap = if let Some(page) = zc.front() {
+                page.offset == 0 && page.len == 4096
+            } else {
+                false
+            };
+
+            if can_remap {
+                let page = zc.pop_front().unwrap();
+                drop(zc);
+
+                let mut aspace_guard = aspace.write();
+                let old_frame = if let Ok((old_f, _, _)) = aspace_guard.query_vaddr(page_vaddr) {
+                    old_f
+                } else {
+                    PhysAddr::from(0)
+                };
+
+                let remap_res = aspace_guard.remap_page(
+                    page_vaddr,
+                    page.paddr,
+                    MappingFlags::READ | MappingFlags::WRITE | MappingFlags::USER,
+                );
+
+                if remap_res.is_ok() {
+                    if old_frame.as_usize() != 0 {
+                        dealloc_physical_frame(old_frame);
+                    }
+                    read_pages += 1;
+                } else {
+                    self.shared.zc_pages.lock().push_front(page);
+                    break;
+                }
+            } else {
+                drop(zc);
+                break;
+            }
+        }
+
+        if read_pages > 0 {
+            self.shared.write_wait_queue.notify_all(true);
+            return Ok(read_pages * 4096);
+        }
+
+        let mut buf = alloc::vec![0u8; count];
+        let bytes_read = self.read(&mut buf)?;
+        if bytes_read > 0 {
+            process.write_user_bytes(reader_vaddr, &buf[..bytes_read])?;
+        }
+        Ok(bytes_read)
     }
 }
 
@@ -1442,6 +1641,31 @@ impl FdObject for PipeObject {
         }
         let mut read_size = 0usize;
         while read_size < buf.len() {
+            let mut zc = self.shared.zc_pages.lock();
+            if let Some(page) = zc.front_mut() {
+                let chunk_limit = core::cmp::min(page.len, buf.len() - read_size);
+                let src_kvaddr = axhal::mem::phys_to_virt(page.paddr) + page.offset;
+                unsafe {
+                    core::ptr::copy_nonoverlapping(
+                        src_kvaddr.as_ptr(),
+                        buf[read_size..].as_mut_ptr(),
+                        chunk_limit,
+                    );
+                }
+                page.offset += chunk_limit;
+                page.len -= chunk_limit;
+                read_size += chunk_limit;
+                let page_empty = page.len == 0;
+                if page_empty {
+                    let popped = zc.pop_front().unwrap();
+                    dealloc_physical_frame(popped.paddr);
+                }
+                drop(zc);
+                self.shared.write_wait_queue.notify_all(false);
+                continue;
+            }
+            drop(zc);
+
             let mut ring_buffer = self.shared.buffer.lock();
             let available = ring_buffer.available_read();
             if available == 0 {
@@ -1467,8 +1691,8 @@ impl FdObject for PipeObject {
                 );
                 drop(ring_buffer);
                 self.shared.read_wait_queue.wait_until(|| {
-                    let buffer = self.shared.buffer.lock();
-                    buffer.available_read() > 0
+                    !self.shared.zc_pages.lock().is_empty()
+                        || self.shared.buffer.lock().available_read() > 0
                         || self.write_end_closed()
                         || Self::current_has_pending_signal()
                 });
@@ -1521,8 +1745,9 @@ impl FdObject for PipeObject {
                     Err(LinuxError::EPIPE)
                 };
             }
+            let zc_len = self.shared.zc_pages.lock().len() * 4096;
             let mut ring_buffer = self.shared.buffer.lock();
-            let available = ring_buffer.available_write();
+            let available = ring_buffer.available_write().saturating_sub(zc_len);
             if available == 0 {
                 if self.nonblocking.load(Ordering::Acquire) {
                     return if write_size > 0 {
@@ -1543,8 +1768,9 @@ impl FdObject for PipeObject {
                 );
                 drop(ring_buffer);
                 self.shared.write_wait_queue.wait_until(|| {
+                    let zc_len = self.shared.zc_pages.lock().len() * 4096;
                     let buffer = self.shared.buffer.lock();
-                    buffer.available_write() > 0
+                    buffer.available_write() > zc_len
                         || self.read_end_closed()
                         || Self::current_has_pending_signal()
                 });
@@ -1601,11 +1827,14 @@ impl FdObject for PipeObject {
     }
 
     fn poll(&self) -> LinuxResult<PollState> {
+        let zc_len = self.shared.zc_pages.lock().len() * 4096;
         let buffer = self.shared.buffer.lock();
         let limit = core::cmp::min(4096, buffer.capacity());
+        let avail_read = buffer.available_read() + zc_len;
+        let avail_write = buffer.capacity().saturating_sub(avail_read);
         Ok(PollState {
-            readable: self.readable && (buffer.available_read() > 0 || self.write_end_closed()),
-            writable: self.writable() && (buffer.available_write() >= limit || self.read_end_closed()),
+            readable: self.readable && (avail_read > 0 || self.write_end_closed()),
+            writable: self.writable() && (avail_write >= limit || self.read_end_closed()),
         })
     }
 

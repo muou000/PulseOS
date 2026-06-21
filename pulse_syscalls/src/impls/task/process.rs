@@ -287,9 +287,7 @@ pub fn sys_prctl(option: i32, arg2: usize, _arg3: usize, _arg4: usize, _arg5: us
                 Err(e) => -e.code() as isize,
             }
         }
-        PR_GET_DUMPABLE => {
-            process.dumpable() as isize
-        }
+        PR_GET_DUMPABLE => process.dumpable() as isize,
         PR_SET_DUMPABLE => {
             let dumpable = arg2 as i32;
             if dumpable < 0 || dumpable > 2 {
@@ -340,7 +338,13 @@ pub fn sys_pidfd_open(pid: isize, flags: usize) -> isize {
 }
 
 pub fn sys_pidfd_send_signal(pidfd: isize, sig: isize, info_ptr: usize, flags: usize) -> isize {
-    axlog::debug!("sys_pidfd_send_signal: pidfd={}, sig={}, info_ptr={:#x}, flags={}", pidfd, sig, info_ptr, flags);
+    axlog::debug!(
+        "sys_pidfd_send_signal: pidfd={}, sig={}, info_ptr={:#x}, flags={}",
+        pidfd,
+        sig,
+        info_ptr,
+        flags
+    );
 
     if flags != 0 {
         return -LinuxError::EINVAL.code() as isize;
@@ -362,7 +366,11 @@ pub fn sys_pidfd_send_signal(pidfd: isize, sig: isize, info_ptr: usize, flags: u
     };
 
     // Check if it's a PidfdObject
-    let pidfd_obj = match fd_entry.object.as_any().downcast_ref::<pulse_core::fd_table::PidfdObject>() {
+    let pidfd_obj = match fd_entry
+        .object
+        .as_any()
+        .downcast_ref::<pulse_core::fd_table::PidfdObject>()
+    {
         Some(obj) => obj,
         None => return -LinuxError::EBADF.code() as isize,
     };
@@ -391,10 +399,7 @@ pub fn sys_pidfd_send_signal(pidfd: isize, sig: isize, info_ptr: usize, flags: u
     };
 
     // Deliver signal to process
-    let _ = pulse_core::task::queue_signal_to_process_with_info(target.as_ref(), sig as usize, info);
+    let _ =
+        pulse_core::task::queue_signal_to_process_with_info(target.as_ref(), sig as usize, info);
     0
 }
-
-
-
-

@@ -68,6 +68,14 @@ pub fn sys_read(fd: usize, buf: usize, count: usize) -> isize {
         return -LinuxError::EBADF.code() as isize;
     }
     let object = entry.object;
+    if let Some(pipe) = object.as_any().downcast_ref::<pulse_core::fd_table::PipeObject>() {
+        if buf % 4096 == 0 && count >= 4096 && count % 4096 == 0 {
+            match pipe.read_zerocopy(buf, count) {
+                Ok(ret) => return ret as isize,
+                Err(e) => return -e.code() as isize,
+            }
+        }
+    }
     if let Some(file_obj) = object.as_any().downcast_ref::<FileObject>() {
         if file_obj.inner().is_direct_regular_file() {
             let block_size = file_obj.inner().block_size() as usize;
@@ -173,6 +181,14 @@ pub fn sys_write(fd: usize, buf: usize, count: usize) -> isize {
         return -LinuxError::EBADF.code() as isize;
     }
     let object = entry.object;
+    if let Some(pipe) = object.as_any().downcast_ref::<pulse_core::fd_table::PipeObject>() {
+        if buf % 4096 == 0 && count >= 4096 && count % 4096 == 0 {
+            match pipe.write_zerocopy(buf, count) {
+                Ok(ret) => return ret as isize,
+                Err(e) => return -e.code() as isize,
+            }
+        }
+    }
     if let Some(file_obj) = object.as_any().downcast_ref::<FileObject>() {
         if file_obj.inner().is_direct_regular_file() {
             let block_size = file_obj.inner().block_size() as usize;
