@@ -43,8 +43,8 @@ const RANDOM_SEED: u64 = 0xA2CE_05A2_CE05_A2CE;
 const STANDARD_MTU: usize = 1500;
 const TCP_RX_BUF_LEN: usize = 256 * 1024;
 const TCP_TX_BUF_LEN: usize = 256 * 1024;
-const UDP_RX_BUF_LEN: usize = 512 * 1024;
-const UDP_TX_BUF_LEN: usize = 512 * 1024;
+const UDP_RX_BUF_LEN: usize = 4 * 1024 * 1024;
+const UDP_TX_BUF_LEN: usize = 4 * 1024 * 1024;
 const LISTEN_QUEUE_SIZE: usize = 512;
 
 static LISTEN_TABLE: LazyInit<ListenTable> = LazyInit::new();
@@ -87,11 +87,11 @@ impl<'a> SocketSetWrapper<'a> {
 
     pub fn new_udp_socket() -> socket::udp::Socket<'a> {
         let udp_rx_buffer = socket::udp::PacketBuffer::new(
-            vec![socket::udp::PacketMetadata::EMPTY; 512],
+            vec![socket::udp::PacketMetadata::EMPTY; 4096],
             vec![0; UDP_RX_BUF_LEN],
         );
         let udp_tx_buffer = socket::udp::PacketBuffer::new(
-            vec![socket::udp::PacketMetadata::EMPTY; 512],
+            vec![socket::udp::PacketMetadata::EMPTY; 4096],
             vec![0; UDP_TX_BUF_LEN],
         );
         socket::udp::Socket::new(udp_rx_buffer, udp_tx_buffer)
