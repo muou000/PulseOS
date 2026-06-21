@@ -56,6 +56,8 @@ pub struct PosixTimer {
     pub overrun: i32,
     pub next_deadline_ns: u64,
     pub interval_ns: u64,
+    pub is_absolute: bool,
+    pub first_expired: bool,
 }
 
 unsafe impl Send for PosixTimer {}
@@ -3070,6 +3072,8 @@ impl Process {
                     overrun: 0,
                     next_deadline_ns: 0,
                     interval_ns: 0,
+                    is_absolute: false,
+                    first_expired: false,
                 });
                 return Ok(i as i32);
             }

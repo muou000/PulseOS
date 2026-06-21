@@ -131,20 +131,22 @@ fn sleep_for_duration_interruptible(dur: Duration) -> Result<Duration, LinuxErro
     }
 }
 
+static REALTIME_SLEEPERS: spin::Mutex<alloc::vec::Vec<axtask::AxTaskRef>> = spin::Mutex::new(alloc::vec::Vec::new());
+
 fn sleep_until_clock_interruptible(clockid: i32, target: Duration) -> Result<Duration, LinuxError> {
     match clockid as u32 {
         CLOCK_REALTIME | CLOCK_MONOTONIC | CLOCK_BOOTTIME => {}
         _ => return Err(LinuxError::EINVAL),
     }
 
-    let target_mono = if clockid as u32 == CLOCK_REALTIME {
-        let offset = Duration::from_nanos(axhal::time::current_epochoffset_nanos());
-        target.saturating_sub(offset)
-    } else {
-        target
-    };
-
     loop {
+        let target_mono = if clockid as u32 == CLOCK_REALTIME {
+            let offset = Duration::from_nanos(axhal::time::current_epochoffset_nanos());
+            target.saturating_sub(offset)
+        } else {
+            target
+        };
+
         let now = axhal::time::monotonic_time();
         if now >= target_mono {
             return Ok(Duration::ZERO);
@@ -153,7 +155,21 @@ fn sleep_until_clock_interruptible(clockid: i32, target: Duration) -> Result<Dur
             let now_clock = clock_now(clockid)?;
             return Ok(target.saturating_sub(now_clock));
         }
+
+        if clockid as u32 == CLOCK_REALTIME {
+            let current_task = axtask::current().as_task_ref().clone();
+            REALTIME_SLEEPERS.lock().push(current_task);
+        }
+
         axtask::sleep_until(target_mono);
+
+        if clockid as u32 == CLOCK_REALTIME {
+            let current_task = axtask::current().as_task_ref().clone();
+            let mut guard = REALTIME_SLEEPERS.lock();
+            if let Some(pos) = guard.iter().position(|t| alloc::sync::Arc::ptr_eq(t, &current_task)) {
+                guard.swap_remove(pos);
+            }
+        }
     }
 }
 
@@ -341,6 +357,18 @@ pub fn sys_clock_settime(clockid: i32, tp: usize) -> isize {
     starry_vdso::vdso::set_vdso_epoch_offset(new_offset);
     starry_vdso::vdso::update_vdso_data();
 
+    // Wake up all tasks sleeping on CLOCK_REALTIME
+    let sleepers = {
+        let mut guard = REALTIME_SLEEPERS.lock();
+        core::mem::take(&mut *guard)
+    };
+    for task in sleepers {
+        axtask::wake_task(task, true);
+    }
+
+    // Adjust absolute POSIX timers
+    pulse_core::task::adjust_absolute_timers();
+
     // Check if any timers expired due to the clock jump, and reprogram the timer
     let _guard = kernel_guard::NoPreemptIrqSave::new();
     axtask::check_events();
@@ -421,6 +449,18 @@ pub fn sys_settimeofday(tv: usize, tz: usize) -> isize {
     // Synchronize vDSO wall time instantly
     starry_vdso::vdso::set_vdso_epoch_offset(new_offset);
     starry_vdso::vdso::update_vdso_data();
+
+    // Wake up all tasks sleeping on CLOCK_REALTIME
+    let sleepers = {
+        let mut guard = REALTIME_SLEEPERS.lock();
+        core::mem::take(&mut *guard)
+    };
+    for task in sleepers {
+        axtask::wake_task(task, true);
+    }
+
+    // Adjust absolute POSIX timers
+    pulse_core::task::adjust_absolute_timers();
 
     // Check if any timers expired due to the clock jump, and reprogram the timer
     let _guard = kernel_guard::NoPreemptIrqSave::new();
@@ -966,6 +1006,8 @@ pub fn sys_timer_settime(
 
     timer.itimer_spec = new_spec;
     timer.interval_ns = int_dur.as_nanos() as u64;
+    timer.is_absolute = (flags & TIMER_ABSTIME as usize) != 0;
+    timer.first_expired = false;
 
     if val_dur.is_zero() {
         timer.next_deadline_ns = 0;
