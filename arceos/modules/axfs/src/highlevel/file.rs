@@ -374,7 +374,19 @@ impl Drop for PageCache {
         if self.dirty {
             warn!("dirty page dropped without flushing");
         }
-        global_allocator().dealloc_pages(self.addr.as_usize(), 1);
+        let paddr = self.paddr();
+        if axalloc::frame_table().contains(paddr) {
+            let ref_count = axalloc::frame_table().get_ref(paddr);
+            if ref_count == 0 {
+                global_allocator().dealloc_pages(self.addr.as_usize(), 1);
+            } else {
+                if axalloc::frame_table().dec_ref(paddr) == 0 {
+                    global_allocator().dealloc_pages(self.addr.as_usize(), 1);
+                }
+            }
+        } else {
+            global_allocator().dealloc_pages(self.addr.as_usize(), 1);
+        }
     }
 }
 

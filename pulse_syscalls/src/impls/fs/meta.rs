@@ -8,7 +8,10 @@ use pulse_core::fd_table::location_to_stat;
 
 use crate::impls::{
     fs::common::{check_faccess_permission, get_fd_entry, resolve_location_at_ptr},
-    utils::{read_user_cstring, read_user_timespec, timespec_to_update_time, with_process, write_user_bytes},
+    utils::{
+        read_user_cstring, read_user_timespec, timespec_to_update_time, with_process,
+        write_user_bytes,
+    },
 };
 
 fn to_statx_timestamp(tv_sec: i64, tv_nsec: i64) -> statx_timestamp {
@@ -33,39 +36,48 @@ fn vfs_statfs_to_linux(location: &Location) -> Result<statfs, LinuxError> {
     out.f_ffree = fs_stat.free_file_count as _;
     out.f_namelen = fs_stat.name_length as _;
     out.f_frsize = fs_stat.fragment_size as _;
-    
+
     let mount_flags = location.mountpoint().get_flags();
     let mut statfs_flags = 0;
-    
+
     // Map standard flags (where MS_* values match ST_* values)
-    if location.mountpoint().is_readonly() || (mount_flags & 1) != 0 { // MS_RDONLY = 1
+    if location.mountpoint().is_readonly() || (mount_flags & 1) != 0 {
+        // MS_RDONLY = 1
         statfs_flags |= 1; // ST_RDONLY
     }
-    if (mount_flags & 2) != 0 { // MS_NOSUID = 2
+    if (mount_flags & 2) != 0 {
+        // MS_NOSUID = 2
         statfs_flags |= 2; // ST_NOSUID
     }
-    if (mount_flags & 4) != 0 { // MS_NODEV = 4
+    if (mount_flags & 4) != 0 {
+        // MS_NODEV = 4
         statfs_flags |= 4; // ST_NODEV
     }
-    if (mount_flags & 8) != 0 { // MS_NOEXEC = 8
+    if (mount_flags & 8) != 0 {
+        // MS_NOEXEC = 8
         statfs_flags |= 8; // ST_NOEXEC
     }
-    if (mount_flags & 16) != 0 { // MS_SYNCHRONOUS = 16
+    if (mount_flags & 16) != 0 {
+        // MS_SYNCHRONOUS = 16
         statfs_flags |= 16; // ST_SYNCHRONOUS
     }
-    if (mount_flags & 64) != 0 { // MS_MANDLOCK = 64
+    if (mount_flags & 64) != 0 {
+        // MS_MANDLOCK = 64
         statfs_flags |= 64; // ST_MANDLOCK
     }
-    if (mount_flags & 1024) != 0 { // MS_NOATIME = 1024
+    if (mount_flags & 1024) != 0 {
+        // MS_NOATIME = 1024
         statfs_flags |= 1024; // ST_NOATIME
     }
-    if (mount_flags & 2048) != 0 { // MS_NODIRATIME = 2048
+    if (mount_flags & 2048) != 0 {
+        // MS_NODIRATIME = 2048
         statfs_flags |= 2048; // ST_NODIRATIME
     }
-    if (mount_flags & 4096) != 0 { // MS_RELATIME = 4096
+    if (mount_flags & 4096) != 0 {
+        // MS_RELATIME = 4096
         statfs_flags |= 4096; // ST_RELATIME
     }
-    
+
     // Map mismatched flag: MS_NOSYMFOLLOW (256) -> ST_NOSYMFOLLOW (8192 / 0x2000)
     const MS_NOSYMFOLLOW: usize = 256;
     const ST_NOSYMFOLLOW: usize = 0x2000;
@@ -217,12 +229,11 @@ pub fn sys_statx(
     // 对于 stdin/stdout/pipe/socket 等没有文件系统路径的匿名 FD，
     // resolve_location_at_ptr 会因为 location() 返回 None 而报 EBADF。
     // 此时应直接通过 FD object 的 stat() 方法获取信息。
-    let is_empty_path = (flags & AT_EMPTY_PATH as usize) != 0 && (
-        pathname == 0
-        || read_user_cstring(pathname)
-            .map(|s| s.as_bytes().is_empty())
-            .unwrap_or(false)
-    );
+    let is_empty_path = (flags & AT_EMPTY_PATH as usize) != 0
+        && (pathname == 0
+            || read_user_cstring(pathname)
+                .map(|s| s.as_bytes().is_empty())
+                .unwrap_or(false));
 
     let stat = if is_empty_path && dirfd >= 0 && dirfd != AT_FDCWD as i32 {
         // AT_EMPTY_PATH + 合法 FD：优先直接通过 FD object 获取 stat，
@@ -290,7 +301,7 @@ pub fn sys_statx(
 }
 
 pub fn sys_utimensat(dirfd: i32, pathname: usize, times: usize, flags: usize) -> isize {
-    axlog::info!(
+    axlog::debug!(
         "sys_utimensat: dirfd={}, pathname={:#x}, times={:#x}, flags={:#x}, sizeof(timespec)={}",
         dirfd,
         pathname,
@@ -307,7 +318,10 @@ pub fn sys_utimensat(dirfd: i32, pathname: usize, times: usize, flags: usize) ->
         match resolve_location_at_ptr(dirfd, pathname, flags | AT_EMPTY_PATH as usize) {
             Ok(location) => location,
             Err(e) => {
-                axlog::warn!("sys_utimensat: resolve_location failed for pathname=NULL: {:?}", e);
+                axlog::warn!(
+                    "sys_utimensat: resolve_location failed for pathname=NULL: {:?}",
+                    e
+                );
                 return -e.code() as isize;
             }
         }
@@ -329,7 +343,11 @@ pub fn sys_utimensat(dirfd: i32, pathname: usize, times: usize, flags: usize) ->
         {
             Ok(atime) => atime,
             Err(e) => {
-                axlog::warn!("sys_utimensat: read_user_timespec(atime) failed at {:#x}: {:?}", times, e);
+                axlog::warn!(
+                    "sys_utimensat: read_user_timespec(atime) failed at {:#x}: {:?}",
+                    times,
+                    e
+                );
                 return -e.code() as isize;
             }
         };
@@ -338,7 +356,11 @@ pub fn sys_utimensat(dirfd: i32, pathname: usize, times: usize, flags: usize) ->
             match read_user_timespec(mtime_addr).and_then(|ts| timespec_to_update_time(ts, now)) {
                 Ok(mtime) => mtime,
                 Err(e) => {
-                    axlog::warn!("sys_utimensat: read_user_timespec(mtime) failed at {:#x}: {:?}", mtime_addr, e);
+                    axlog::warn!(
+                        "sys_utimensat: read_user_timespec(mtime) failed at {:#x}: {:?}",
+                        mtime_addr,
+                        e
+                    );
                     return -e.code() as isize;
                 }
             };
@@ -449,12 +471,11 @@ pub fn sys_fchmodat(dirfd: i32, pathname: usize, mode: usize, flags: usize) -> i
             };
 
             // Permission check: Only the owner or a privileged process can change the mode.
-            let (fsuid, cap_effective) = match with_process(|process| {
-                (process.fsuid(), process.capabilities().1)
-            }) {
-                Ok(v) => v,
-                Err(e) => return -e.code() as isize,
-            };
+            let (fsuid, cap_effective) =
+                match with_process(|process| (process.fsuid(), process.capabilities().1)) {
+                    Ok(v) => v,
+                    Err(e) => return -e.code() as isize,
+                };
 
             let has_cap_fowner = fsuid == 0 || (cap_effective & (1 << CAP_FOWNER)) != 0;
             if !has_cap_fowner && fsuid != current_meta.uid {
@@ -543,12 +564,11 @@ pub fn sys_fchmod(fd: usize, mode: usize) -> isize {
     };
 
     // Permission check: Only the owner or a privileged process can change the mode.
-    let (fsuid, cap_effective) = match with_process(|process| {
-        (process.fsuid(), process.capabilities().1)
-    }) {
-        Ok(v) => v,
-        Err(e) => return -e.code() as isize,
-    };
+    let (fsuid, cap_effective) =
+        match with_process(|process| (process.fsuid(), process.capabilities().1)) {
+            Ok(v) => v,
+            Err(e) => return -e.code() as isize,
+        };
 
     let has_cap_fowner = fsuid == 0 || (cap_effective & (1 << CAP_FOWNER)) != 0;
     if !has_cap_fowner && fsuid != current_meta.uid {
