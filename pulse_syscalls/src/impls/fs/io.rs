@@ -69,7 +69,7 @@ pub fn sys_read(fd: usize, buf: usize, count: usize) -> isize {
     }
     let object = entry.object;
     if let Some(pipe) = object.as_any().downcast_ref::<pulse_core::fd_table::PipeObject>() {
-        if buf % 4096 == 0 && count >= 4096 && count % 4096 == 0 {
+        if buf % 4096 == 0 && count >= 65536 && count % 4096 == 0 {
             match pipe.read_zerocopy(buf, count) {
                 Ok(ret) => return ret as isize,
                 Err(e) => return -e.code() as isize,
@@ -182,7 +182,7 @@ pub fn sys_write(fd: usize, buf: usize, count: usize) -> isize {
     }
     let object = entry.object;
     if let Some(pipe) = object.as_any().downcast_ref::<pulse_core::fd_table::PipeObject>() {
-        if buf % 4096 == 0 && count >= 4096 && count % 4096 == 0 {
+        if buf % 4096 == 0 && count >= 65536 && count % 4096 == 0 {
             match pipe.write_zerocopy(buf, count) {
                 Ok(ret) => return ret as isize,
                 Err(e) => return -e.code() as isize,
