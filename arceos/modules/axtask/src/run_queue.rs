@@ -463,6 +463,8 @@ impl<G: BaseGuard> CurrentRunQueueRef<'_, G> {
             crate::timers::set_alarm_wakeup(deadline, curr.clone());
             curr.set_state(TaskState::Blocked);
             self.inner.resched();
+            let ticket_id = curr.timer_ticket();
+            crate::timers::cancel_alarm_wakeup(ticket_id);
             curr.timer_ticket_expired();
         }
     }
