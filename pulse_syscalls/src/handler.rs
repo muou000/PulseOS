@@ -85,18 +85,20 @@ pub fn syscall_handler(tf: &mut TrapFrame, syscall_num: usize) -> isize {
         set_syscall_ret(tf, ret);
     }
 
-    if let Some(delivery) = pulse_core::task::check_signals_and_deliver(thread.as_ref(), tf) {
-        use pulse_core::task::{DefaultSignalAction, SignalAction};
-        match delivery.action {
-            SignalAction::Default(DefaultSignalAction::Terminate) => {
-                process.set_exit_signal(delivery.sig as i32, false);
-                process.begin_group_exit(delivery.sig as i32);
+    if thread.signal().has_pending_or_skip_once() {
+        if let Some(delivery) = pulse_core::task::check_signals_and_deliver(thread.as_ref(), tf) {
+            use pulse_core::task::{DefaultSignalAction, SignalAction};
+            match delivery.action {
+                SignalAction::Default(DefaultSignalAction::Terminate) => {
+                    process.set_exit_signal(delivery.sig as i32, false);
+                    process.begin_group_exit(delivery.sig as i32);
+                }
+                SignalAction::Default(DefaultSignalAction::CoreDump) => {
+                    process.set_exit_signal(delivery.sig as i32, true);
+                    process.begin_group_exit(delivery.sig as i32);
+                }
+                _ => {}
             }
-            SignalAction::Default(DefaultSignalAction::CoreDump) => {
-                process.set_exit_signal(delivery.sig as i32, true);
-                process.begin_group_exit(delivery.sig as i32);
-            }
-            _ => {}
         }
     }
 
@@ -262,12 +264,8 @@ fn syscall_dispatcher(
 
         Sysno::setitimer => impls::sys_setitimer(args[0], args[1], args[2]),
         Sysno::getitimer => impls::sys_getitimer(args[0], args[1]),
-        Sysno::timer_create => {
-            impls::sys_timer_create(args[0] as i32, args[1], args[2])
-        }
-        Sysno::timer_settime => {
-            impls::sys_timer_settime(args[0], args[1], args[2], args[3])
-        }
+        Sysno::timer_create => impls::sys_timer_create(args[0] as i32, args[1], args[2]),
+        Sysno::timer_settime => impls::sys_timer_settime(args[0], args[1], args[2], args[3]),
         Sysno::timer_gettime => impls::sys_timer_gettime(args[0], args[1]),
         Sysno::timer_delete => impls::sys_timer_delete(args[0]),
         Sysno::nanosleep => impls::sys_nanosleep(args[0], args[1]),
@@ -449,12 +447,9 @@ fn syscall_dispatcher(
         Sysno::madvise => 0,
         Sysno::fadvise64 => 0,
         Sysno::pidfd_open => impls::sys_pidfd_open(args[0] as isize, args[1]),
-        Sysno::pidfd_send_signal => impls::sys_pidfd_send_signal(
-            args[0] as isize,
-            args[1] as isize,
-            args[2],
-            args[3],
-        ),
+        Sysno::pidfd_send_signal => {
+            impls::sys_pidfd_send_signal(args[0] as isize, args[1] as isize, args[2], args[3])
+        }
         _ => {
             axlog::warn!("Unimplemented syscall: {:?} ({})", sysno, syscall_id);
             -LinuxError::ENOSYS.code() as isize
