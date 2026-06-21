@@ -6,14 +6,14 @@ use timer_list::{TimeValue, TimerEvent, TimerList};
 
 use axhal::time::monotonic_time;
 
-use crate::{AxTaskRef, select_run_queue};
+use crate::{AxTaskRef, AxTaskWeak, select_run_queue};
 
 static TIMER_TICKET_ID: AtomicU64 = AtomicU64::new(1);
 
 pub enum AxTimerEvent {
     TaskWakeup {
         ticket_id: u64,
-        task: AxTaskRef,
+        task: AxTaskWeak,
     },
     Generic {
         callback: alloc::boxed::Box<dyn FnOnce(TimeValue) + Send + Sync>,
@@ -28,10 +28,12 @@ impl TimerEvent for AxTimerEvent {
     fn callback(self, _now: TimeValue) {
         match self {
             Self::TaskWakeup { ticket_id, task } => {
-                if task.timer_ticket() != ticket_id {
-                    return;
+                if let Some(task) = task.upgrade() {
+                    if task.timer_ticket() != ticket_id {
+                        return;
+                    }
+                    select_run_queue::<NoOp>(&task).unblock_task(task, true);
                 }
-                select_run_queue::<NoOp>(&task).unblock_task(task, true);
             }
             Self::Generic { callback } => {
                 callback(_now);
@@ -111,7 +113,13 @@ pub fn set_alarm_wakeup(deadline: TimeValue, task: AxTaskRef) {
     TIMER_LIST.with_current(|timer_list| {
         let ticket_id = TIMER_TICKET_ID.fetch_add(1, Ordering::AcqRel);
         task.set_timer_ticket(ticket_id);
-        timer_list.set(deadline, AxTimerEvent::TaskWakeup { ticket_id, task });
+        timer_list.set(
+            deadline,
+            AxTimerEvent::TaskWakeup {
+                ticket_id,
+                task: alloc::sync::Arc::downgrade(&task),
+            },
+        );
     });
     reprogram_timer();
 }
