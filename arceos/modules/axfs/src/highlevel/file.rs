@@ -337,6 +337,7 @@ const PAGE_SIZE: usize = 4096;
 pub struct PageCache {
     addr: VirtAddr,
     dirty: bool,
+    pub has_user_mapping: bool,
 }
 
 impl PageCache {
@@ -353,6 +354,7 @@ impl PageCache {
         Ok(Self {
             addr: addr.into(),
             dirty: false,
+            has_user_mapping: false,
         })
     }
 
@@ -375,7 +377,7 @@ impl Drop for PageCache {
             warn!("dirty page dropped without flushing");
         }
         let paddr = self.paddr();
-        if axalloc::frame_table().contains(paddr) {
+        if self.has_user_mapping && axalloc::frame_table().contains(paddr) {
             let ref_count = axalloc::frame_table().get_ref(paddr);
             if ref_count == 0 {
                 global_allocator().dealloc_pages(self.addr.as_usize(), 1);
@@ -965,7 +967,10 @@ impl CachedFile {
     ///
     /// If the page is not in the cache, it will be read from the file.
     pub fn get_shared_page_paddr(&self, pn: u32) -> VfsResult<PhysAddr> {
-        self.with_page_or_insert(pn, |page, _| Ok(page.paddr()))
+        self.with_page_or_insert(pn, |page, _| {
+            page.has_user_mapping = true;
+            Ok(page.paddr())
+        })
     }
 
     /// Marks the page at the given page index as dirty.
