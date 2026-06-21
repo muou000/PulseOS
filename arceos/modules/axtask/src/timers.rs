@@ -66,7 +66,8 @@ fn reprogram_timer_internal(from_tick: bool) {
 
     if from_tick {
         if now_ns >= tick_deadline {
-            tick_deadline = now_ns + periodic_interval_nanos;
+            let missed_ticks = (now_ns - tick_deadline) / periodic_interval_nanos + 1;
+            tick_deadline += missed_ticks * periodic_interval_nanos;
             unsafe { NEXT_TICK_DEADLINE.write_current_raw(tick_deadline) };
         }
     }
@@ -124,6 +125,17 @@ pub fn set_alarm_wakeup(deadline: TimeValue, task: AxTaskRef) {
     reprogram_timer();
 }
 
+pub fn cancel_alarm_wakeup(ticket_id: u64) {
+    if ticket_id != 0 {
+        TIMER_LIST.with_current(|timer_list| {
+            timer_list.cancel(|event| match event {
+                AxTimerEvent::TaskWakeup { ticket_id: id, .. } => *id == ticket_id,
+                _ => false,
+            });
+        });
+    }
+}
+
 pub fn set_generic_timer(deadline: TimeValue, callback: alloc::boxed::Box<dyn FnOnce(TimeValue) + Send + Sync>) {
     TIMER_LIST.with_current(|timer_list| {
         timer_list.set(deadline, AxTimerEvent::Generic { callback });
@@ -151,4 +163,6 @@ pub fn init() {
     TIMER_LIST.with_current(|timer_list| {
         timer_list.init_once(TimerList::new());
     });
+    let first_deadline = axhal::time::monotonic_time_nanos() + axhal::time::NANOS_PER_SEC / axconfig::TICKS_PER_SEC as u64;
+    unsafe { NEXT_TICK_DEADLINE.write_current_raw(first_deadline) };
 }
