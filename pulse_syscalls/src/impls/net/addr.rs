@@ -175,27 +175,31 @@ pub fn write_unix_addr(path_opt: Option<alloc::string::String>, dst: usize, addr
     let alen = read_user_plain::<u32>(addrlen)?;
     
     let family = AF_UNIX as u16;
-    let mut bytes = alloc::vec![0u8; 2];
+    // ⚡ Bolt: Replace heap allocation with stack array
+    let mut bytes = [0u8; 128];
+    let mut curr_len = 2;
     bytes[0..2].copy_from_slice(&family.to_ne_bytes());
     
     if let Some(path) = path_opt {
-        if path.starts_with('\0') {
-            // Abstract socket
-            bytes.extend_from_slice(path.as_bytes());
-        } else {
+        let path_bytes = path.as_bytes();
+        let copy_len = path_bytes.len().min(128 - curr_len);
+        bytes[curr_len..curr_len + copy_len].copy_from_slice(&path_bytes[..copy_len]);
+        curr_len += copy_len;
+
+        if !path.starts_with('\0') && curr_len < 128 {
             // Pathname socket
-            bytes.extend_from_slice(path.as_bytes());
-            bytes.push(0); // Null terminator
+            bytes[curr_len] = 0; // Null terminator
+            curr_len += 1;
         }
     }
     
-    let copy_len = (alen as usize).min(bytes.len());
+    let copy_len = (alen as usize).min(curr_len);
     if dst == 0 {
         return Err(LinuxError::EFAULT);
     }
     crate::impls::utils::write_user_bytes(dst, &bytes[..copy_len])?;
     
-    let out_len = bytes.len() as u32;
+    let out_len = curr_len as u32;
     write_user_plain(addrlen, &out_len)?;
     Ok(())
 }

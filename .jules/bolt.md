@@ -34,3 +34,7 @@
 ## 2025-05-20 - Avoid format! macro allocations in hot loops for prefix checking using replace_range
 **Learning:** Even when avoiding allocations on non-matching strings by using slicing, creating a completely new `String` for the matches via `format!` triggers a heap allocation. In many cases where the input is already an owned `String`, using `replace_range` on the matched target correctly allows the existing allocation to be reused.
 **Action:** When validating target string matches and a string requires replacement inside a struct/array, prefer `String::replace_range` on the owned string to avoid creating a new `String` object via `format!`.
+
+## 2024-06-21 - [Always validate bounds when optimizing allocations in syscalls]
+**Learning:** [When replacing dynamic heap allocations (`alloc::vec![0u8; len]`) with fixed-size stack arrays (e.g., `[0u8; 128]`) for performance, it is absolutely critical to bound the user-provided lengths (e.g., `len.min(128)`) before slicing the array. Failure to do so in syscall boundaries results in unhandled out-of-bounds panics, causing Denial of Service vulnerabilities.]
+**Action:** [Whenever introducing fixed-size stack buffers, explicitly verify or clamp user input lengths before indexing or slicing.]
