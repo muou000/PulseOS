@@ -30,3 +30,7 @@
 ## 2025-06-18 - Avoid O(N) string clones when comparing locked strings across collections
 **Learning:** When checking the value of a string wrapped in an `RwLock<Option<String>>` inside a collection (like iterating over all processes), fetching it via `.read().clone()` and then comparing the result causes an unnecessary string allocation on every iteration. This is particularly expensive in system call paths.
 **Action:** When checking equality of a string protected by an `RwLock`, do not extract and clone the string just to compare it. Instead, perform the equality check directly against the dereferenced guard (e.g., `lock.read().as_deref() == Some(target_str)`) to prevent unnecessary heap allocations, especially in loops.
+
+## 2025-05-20 - Avoid format! macro allocations in hot loops for prefix checking using replace_range
+**Learning:** Even when avoiding allocations on non-matching strings by using slicing, creating a completely new `String` for the matches via `format!` triggers a heap allocation. In many cases where the input is already an owned `String`, using `replace_range` on the matched target correctly allows the existing allocation to be reused.
+**Action:** When validating target string matches and a string requires replacement inside a struct/array, prefer `String::replace_range` on the owned string to avoid creating a new `String` object via `format!`.

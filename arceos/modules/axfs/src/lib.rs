@@ -248,9 +248,10 @@ pub fn rename_mount_registry(old_prefix: &str, new_prefix: &str) {
         for record in records.iter_mut() {
             if record.target == old_prefix {
                 record.target = new_prefix.clone();
-            } else if record.target.starts_with(&format!("{}/", old_prefix)) {
-                let suffix = &record.target[old_prefix.len()..];
-                record.target = format!("{}{}", new_prefix, suffix);
+            } else if record.target.starts_with(&old_prefix)
+                && record.target[old_prefix.len()..].starts_with('/')
+            {
+                record.target.replace_range(..old_prefix.len(), &new_prefix);
             }
         }
     }
@@ -261,9 +262,10 @@ pub fn rename_mount_registry(old_prefix: &str, new_prefix: &str) {
         for (target, _mp) in mps.iter_mut() {
             if target == &old_prefix {
                 *target = new_prefix.clone();
-            } else if target.starts_with(&format!("{}/", old_prefix)) {
-                let suffix = &target[old_prefix.len()..];
-                *target = format!("{}{}", new_prefix, suffix);
+            } else if target.starts_with(&old_prefix)
+                && target[old_prefix.len()..].starts_with('/')
+            {
+                target.replace_range(..old_prefix.len(), &new_prefix);
             }
         }
     }
