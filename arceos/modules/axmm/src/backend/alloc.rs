@@ -4,7 +4,7 @@ use axhal::paging::{MappingFlags, PageSize, PageTable};
 use memory_addr::{MemoryAddr, PAGE_SIZE_4K, PageIter4K, PhysAddr, VirtAddr};
 
 use super::Backend;
-use crate::frameinfo::frame_table;
+use axalloc::frame_table;
 
 pub(crate) fn cow_inc_frame_ref(frame: PhysAddr) {
     frame_table().inc_ref(frame);
@@ -189,11 +189,11 @@ impl Backend {
         vaddr: VirtAddr,
         area_end: VirtAddr,
         orig_flags: MappingFlags,
-        pt: &spin::Mutex<PageTable>,
+        pt: &crate::PageTableLockManager,
         populate: bool,
     ) -> bool {
         let page = vaddr.align_down_4k();
-        let query_res = pt.lock().query(page);
+        let query_res = pt.lock_for_addr(page).query(page);
         let is_placeholder = match query_res {
             Ok((old_frame, old_flags, _)) => old_flags.is_empty() || old_frame.as_usize() == 0,
             _ => false,
@@ -207,7 +207,7 @@ impl Backend {
                 if current_page >= area_end {
                     break;
                 }
-                let cur_query = pt.lock().query(current_page);
+                let cur_query = pt.lock_for_addr(current_page).query(current_page);
                 let need_map = match cur_query {
                     Err(_) => Some(true),
                     Ok((frame, _, _)) if frame.as_usize() == 0 => Some(false),
@@ -215,7 +215,7 @@ impl Backend {
                 };
                 if let Some(is_map) = need_map {
                     if let Some(frame) = alloc_frame(true) {
-                        let mut pt_guard = pt.lock();
+                        let mut pt_guard = pt.lock_for_addr(current_page);
                         // Re-verify under lock
                         let re_query = pt_guard.query(current_page);
                         let mut already_mapped = false;
@@ -278,7 +278,7 @@ impl Backend {
                     return false;
                 }
                 if let Some(frame) = alloc_frame(true) {
-                    let mut pt_guard = pt.lock();
+                    let mut pt_guard = pt.lock_for_addr(page);
                     // Re-verify
                     if let Ok((curr_frame, curr_flags, _)) = pt_guard.query(page) {
                         if curr_flags.is_empty() || curr_frame.as_usize() == 0 {
@@ -308,7 +308,7 @@ impl Backend {
 
             // PTE already has some flags. Check if any flags need upgrading
             // (e.g., USER flag, or WRITE flag on non-cloned pages).
-            let mut pt_guard = pt.lock();
+            let mut pt_guard = pt.lock_for_addr(page);
             if let Ok((curr_frame, curr_flags, _)) = pt_guard.query(page) {
                 if curr_frame == old_frame {
                     let new_flags = curr_flags | orig_flags;
@@ -335,7 +335,7 @@ impl Backend {
             // Allocate a physical frame lazily and map it to the fault address.
             // `vaddr` does not need to be aligned. `pt.map()` will create the
             // intermediate page-table levels on demand for true lazy mappings.
-            let mut pt_guard = pt.lock();
+            let mut pt_guard = pt.lock_for_addr(page);
             // Re-verify
             if let Ok((curr_frame, _, _)) = pt_guard.query(page) {
                 if curr_frame.as_usize() != 0 {

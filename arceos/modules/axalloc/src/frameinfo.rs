@@ -1,4 +1,4 @@
-use core::sync::atomic::{AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 use alloc::boxed::Box;
 use lazyinit::LazyInit;
 use memory_addr::PhysAddr;
@@ -8,13 +8,13 @@ const FRAME_SHIFT: usize = 12;
 static FRAME_TABLE: LazyInit<FrameTable> = LazyInit::new();
 
 pub struct FrameInfo {
-    ref_count: AtomicUsize,
+    ref_count: AtomicU32,
 }
 
 impl Default for FrameInfo {
     fn default() -> Self {
         Self {
-            ref_count: AtomicUsize::new(0),
+            ref_count: AtomicU32::new(0),
         }
     }
 }
@@ -60,7 +60,7 @@ impl FrameTable {
             panic!("FrameTable: dec_ref on frame with 0 references at {:#x}", paddr);
         }
         self.total_refs.fetch_sub(1, Ordering::SeqCst);
-        old_ref - 1
+        (old_ref - 1) as usize
     }
 
     pub fn mark_used(&self, paddr: PhysAddr) {
@@ -72,7 +72,7 @@ impl FrameTable {
     }
 
     pub fn get_ref(&self, paddr: PhysAddr) -> usize {
-        self.info(paddr).ref_count.load(Ordering::SeqCst)
+        self.info(paddr).ref_count.load(Ordering::SeqCst) as usize
     }
 
     #[allow(dead_code)]

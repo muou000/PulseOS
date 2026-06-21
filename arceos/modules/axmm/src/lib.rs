@@ -8,9 +8,8 @@ extern crate alloc;
 
 mod aspace;
 mod backend;
-mod frameinfo;
 
-use crate::frameinfo::frame_table;
+use axalloc::{frame_table, init_frame_table};
 use axerrno::{AxError, AxResult};
 use axhal::{
     mem::{MemRegionFlags, phys_to_virt},
@@ -21,7 +20,7 @@ use lazyinit::LazyInit;
 use memory_addr::{MemoryAddr, PhysAddr, VirtAddr, va};
 use memory_set::MappingError;
 
-pub use self::{aspace::{AddrSpace, PageFaultResult}, backend::Backend};
+pub use self::{aspace::{AddrSpace, PageFaultResult, PageTableLockManager}, backend::Backend};
 
 static KERNEL_ASPACE: LazyInit<SpinNoIrq<AddrSpace>> = LazyInit::new();
 
@@ -157,7 +156,9 @@ pub fn init_memory_management() {
     let total_memory_size = max_paddr.as_usize() - min_paddr.as_usize();
     info!("FrameTable: range [{:#x}, {:#x}), size {:#x}", min_paddr, max_paddr, total_memory_size);
 
-    self::frameinfo::init_frame_table(min_paddr, total_memory_size);
+    init_frame_table(min_paddr, total_memory_size);
+
+
 
     let kernel_aspace = new_kernel_aspace().expect("failed to initialize kernel address space");
     debug!("kernel address space init OK: {:#x?}", kernel_aspace);

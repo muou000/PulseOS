@@ -169,6 +169,7 @@ dependencies = [
  "axerrno",
  "cfg-if",
  "kspin",
+ "lazyinit",
  "log",
  "memory_addr",
 ]

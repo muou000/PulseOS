@@ -1,6 +1,6 @@
 //! Memory mapping backends.
 
-use axhal::paging::{MappingFlags, PageSize, PageTable};
+use axhal::paging::{MappingFlags, PageSize};
 use memory_addr::VirtAddr;
 use memory_set::MappingBackend;
 use ::alloc::sync::Arc;
@@ -60,7 +60,7 @@ pub enum Backend {
 impl MappingBackend for Backend {
     type Addr = VirtAddr;
     type Flags = MappingFlags;
-    type PageTable = spin::Mutex<PageTable>;
+    type PageTable = crate::PageTableLockManager;
     fn map(&self, start: VirtAddr, size: usize, flags: MappingFlags, pt: &mut Self::PageTable) -> bool {
         let pt = pt.get_mut();
         match self {
@@ -130,7 +130,8 @@ impl Backend {
         vaddr: VirtAddr,
         area_end: VirtAddr,
         orig_flags: MappingFlags,
-        page_table: &spin::Mutex<PageTable>,
+        page_table: &crate::PageTableLockManager,
+        access_flags: MappingFlags,
     ) -> bool {
         match self {
             Self::Shared { .. } => false,
@@ -139,9 +140,9 @@ impl Backend {
                 self.handle_page_fault_alloc(vaddr, area_end, orig_flags, page_table, *populate)
             }
             Self::File(mapping) => {
-                self.handle_page_fault_file(vaddr, area_end, orig_flags, page_table, mapping)
+                self.handle_page_fault_file(vaddr, area_end, orig_flags, page_table, mapping, access_flags)
             }
-            Self::Cow(cow) => cow.handle_page_fault(vaddr, area_end, orig_flags, page_table),
+            Self::Cow(cow) => cow.handle_page_fault(vaddr, area_end, orig_flags, page_table, access_flags),
         }
     }
 
@@ -152,7 +153,7 @@ impl Backend {
         start: VirtAddr,
         size: usize,
         sync: bool,
-        pt: &spin::Mutex<PageTable>,
+        pt: &crate::PageTableLockManager,
     ) -> bool {
         match self {
             Self::File(_) => self.writeback_file_range_impl(start, size, sync, pt),

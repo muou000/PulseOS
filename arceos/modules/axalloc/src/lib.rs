@@ -12,6 +12,9 @@ extern crate log;
 extern crate alloc;
 
 mod page;
+mod frameinfo;
+
+pub use frameinfo::{frame_table, init_frame_table, FrameTable};
 
 use allocator::{AllocResult, BaseAllocator, BitmapPageAllocator, ByteAllocator, PageAllocator};
 use core::alloc::{GlobalAlloc, Layout};

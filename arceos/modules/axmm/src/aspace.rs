@@ -23,11 +23,61 @@ pub enum PageFaultResult {
     NeedWriteLock,
 }
 
+pub struct PageTableLockManager {
+    pt: spin::Mutex<PageTable>,
+}
+
+pub struct PageTableGuard<'a>(spin::MutexGuard<'a, PageTable>);
+
+unsafe impl<'a> Send for PageTableGuard<'a> {}
+unsafe impl<'a> Sync for PageTableGuard<'a> {}
+
+impl<'a> core::ops::Deref for PageTableGuard<'a> {
+    type Target = PageTable;
+    #[inline]
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl<'a> core::ops::DerefMut for PageTableGuard<'a> {
+    #[inline]
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
+    }
+}
+
+impl PageTableLockManager {
+    pub fn new(pt: PageTable) -> Self {
+        Self {
+            pt: spin::Mutex::new(pt),
+        }
+    }
+
+    #[inline]
+    pub fn root_paddr(&self) -> PhysAddr {
+        self.pt.lock().root_paddr()
+    }
+
+    #[inline]
+    pub fn get_mut(&mut self) -> &mut PageTable {
+        self.pt.get_mut()
+    }
+
+    pub fn lock(&self) -> PageTableGuard {
+        PageTableGuard(self.pt.lock())
+    }
+
+    pub fn lock_for_addr(&self, _vaddr: VirtAddr) -> PageTableGuard {
+        PageTableGuard(self.pt.lock())
+    }
+}
+
 /// The virtual memory address space.
 pub struct AddrSpace {
     va_range: VirtAddrRange,
     areas: MemorySet<Backend>,
-    pt: spin::Mutex<PageTable>,
+    pt: PageTableLockManager,
     asid: usize,
 }
 
@@ -59,12 +109,12 @@ impl AddrSpace {
 
     /// Query a virtual address mapping from the inner page table under lock.
     pub fn query_vaddr(&self, vaddr: VirtAddr) -> PagingResult<(PhysAddr, MappingFlags, PageSize)> {
-        self.pt.lock().query(vaddr)
+        self.pt.lock_for_addr(vaddr).query(vaddr)
     }
 
     /// Returns the root physical address of the inner page table.
     pub fn page_table_root(&self) -> PhysAddr {
-        self.pt.lock().root_paddr()
+        self.pt.root_paddr()
     }
 
     /// Returns the ASID of this address space.
@@ -84,7 +134,7 @@ impl AddrSpace {
         Ok(Self {
             va_range: VirtAddrRange::from_start_size(base, size),
             areas: MemorySet::new(),
-            pt: spin::Mutex::new(PageTable::try_new().map_err(|_| AxError::NoMemory)?),
+            pt: PageTableLockManager::new(PageTable::try_new().map_err(|_| AxError::NoMemory)?),
             asid,
         })
     }
@@ -341,7 +391,7 @@ impl AddrSpace {
         for vaddr in PageIter4K::new(start.align_down_4k(), end_align_up)
             .expect("Failed to create page iterator")
         {
-            let (mut paddr, ..) = self.pt.lock().query(vaddr).map_err(|_| AxError::BadAddress)?;
+            let (mut paddr, ..) = self.pt.lock_for_addr(vaddr).query(vaddr).map_err(|_| AxError::BadAddress)?;
             if paddr.as_usize() == 0 {
                 // Placeholder PTEs are used for lazy mappings. They are not
                 // readable/writable yet, so force the caller onto the page-fault
@@ -568,7 +618,7 @@ impl AddrSpace {
         let page = vaddr.align_down_4k();
         let pte_before = self
             .pt
-            .lock()
+            .lock_for_addr(page)
             .query(page)
             .ok()
             .map(|(frame, flags, _)| (frame, flags));
@@ -598,11 +648,11 @@ impl AddrSpace {
             if orig_flags.contains(access_flags) {
                 let handled = area
                     .backend()
-                    .handle_page_fault(vaddr, area.end(), orig_flags, &self.pt);
+                    .handle_page_fault(vaddr, area.end(), orig_flags, &self.pt, access_flags);
                 if !handled {
                     let pte_after = self
                         .pt
-                        .lock()
+                        .lock_for_addr(page)
                         .query(page)
                         .ok()
                         .map(|(frame, flags, _)| (frame, flags));
@@ -710,7 +760,7 @@ impl AddrSpace {
                 continue;
             }
 
-            debug!("try_clone: cloning area [{:#x}, {:#x}) flags={:?} backend={}", 
+            debug!("try_clone: cloning area [{:#x}, {:#x}) flags={:?} backend={}",
                 area.start(), area.end(), area.flags(), match area.backend() {
                     Backend::Alloc { .. } => "alloc",
                     Backend::File(_) => "file",
@@ -763,58 +813,34 @@ impl AddrSpace {
                 continue;
             }
 
-            // Efficiently iterate only over actually mapped pages in this area.
-            let mut vaddr = area.start();
-            let area_end = area.end();
-            while vaddr < area_end {
-                match self.pt.get_mut().query_skip(vaddr) {
-                    Ok((paddr, flags, page_size)) => {
-                        if paddr.as_usize() != 0 {
-                            if is_cow {
-                                crate::cow_inc_frame_ref(paddr);
-                                let cow_flags = flags & !MappingFlags::WRITE;
+            let should_copy = if is_cow {
+                true
+            } else if let Backend::File(mapping) = area.backend() {
+                mapping.is_shared()
+            } else {
+                false
+            };
 
-                                // Demote parent if writable
-                                if flags.contains(MappingFlags::WRITE) {
-                                    if let Err(e) = self.pt.get_mut().protect(vaddr, cow_flags) {
-                                        error!("try_clone: failed to protect parent page {:#x}: {:?}", vaddr, e);
-                                    }
-                                }
-
-                                // Map child
-                                if let Err(e) = new_aspace.pt.get_mut().map(vaddr, paddr, page_size, cow_flags).map(|tlb| tlb.ignore()) {
-                                    error!("try_clone: failed to map child page {:#x}: {:?}", vaddr, e);
-                                    if crate::backend::cow_dec_frame_ref(paddr) {
-                                        axalloc::global_allocator().dealloc_pages(phys_to_virt(paddr).as_usize(), page_size as usize / PAGE_SIZE_4K);
-                                    }
-                                    new_aspace.clear();
-                                    return Err(AxError::NoMemory);
-                                }
-                            } else if let Backend::File(mapping) = area.backend() {
-                                if mapping.is_shared() {
-                                    if let Err(e) = new_aspace.pt.get_mut().map(vaddr, paddr, page_size, flags).map(|tlb| tlb.ignore()) {
-                                        error!("try_clone: failed to map shared file page {:#x}: {:?}", vaddr, e);
-                                        new_aspace.clear();
-                                        return Err(AxError::NoMemory);
-                                    }
-                                }
-                            }
-                        }
-                        // Advance to the next page of the same size, correctly aligned.
-                        let next_vaddr = (vaddr.as_usize() & !(page_size as usize - 1)) + page_size as usize;
-                        vaddr = VirtAddr::from(next_vaddr);
-                    }
-                    Err(skip_size) => {
-                        // Skip to the start of the next unmapped block boundary of skip_size
-                        let next_vaddr = (vaddr.as_usize() & !(skip_size - 1)) + skip_size;
-                        vaddr = VirtAddr::from(next_vaddr);
-                    }
+            if should_copy {
+                let inc_ref = |paddr| {
+                    crate::cow_inc_frame_ref(paddr);
+                };
+                if new_aspace.pt.get_mut().copy_cow_range(
+                    self.pt.get_mut(),
+                    area.start(),
+                    area.size(),
+                    is_cow,
+                    inc_ref,
+                ).is_err() {
+                    error!("try_clone: failed to copy user page table");
+                    new_aspace.clear();
+                    return Err(AxError::NoMemory);
                 }
             }
         }
 
-        // Mandatory full TLB flush for parent after permission demotion.
-        axhal::asm::flush_tlb(None);
+        // Mandatory TLB flush for parent after permission demotion.
+        unsafe { flush_tlb_asid(self.asid) };
 
         for (start, backend) in areas_to_convert {
             if let Some(area) = self.areas.get_area_mut(start) {
@@ -843,7 +869,7 @@ unsafe fn flush_tlb_asid(asid: usize) {
 
 #[cfg(target_arch = "loongarch64")]
 unsafe fn flush_tlb_asid(asid: usize) {
-    unsafe { core::arch::asm!("dbar 0; invtlb 0x06, {}, $r0; dbar 0; ibar 0", in(reg) asid) };
+    unsafe { core::arch::asm!("dbar 0; invtlb 0x04, {}, $r0; dbar 0; ibar 0", in(reg) asid) };
 }
 
 #[cfg(not(any(target_arch = "riscv64", target_arch = "loongarch64")))]

@@ -1,10 +1,10 @@
 use alloc::boxed::Box;
-use axhal::paging::{MappingFlags, PageTable};
+use axhal::paging::MappingFlags;
 use memory_addr::{VirtAddr, PAGE_SIZE_4K, MemoryAddr};
 use axhal::mem::phys_to_virt;
 use super::Backend;
 use super::alloc::{alloc_frame, dealloc_frame};
-use crate::frameinfo::frame_table;
+use axalloc::frame_table;
 
 #[derive(Clone)]
 pub struct CowMapping {
@@ -25,18 +25,19 @@ impl CowMapping {
         vaddr: VirtAddr,
         area_end: VirtAddr,
         orig_flags: MappingFlags,
-        pt: &spin::Mutex<PageTable>,
+        pt: &crate::PageTableLockManager,
+        access_flags: MappingFlags,
     ) -> bool {
         let page = vaddr.align_down_4k();
-        let query_res = pt.lock().query(page).ok().map(|(frame, flags, _)| (frame, flags));
+        let query_res = pt.lock_for_addr(page).query(page).ok().map(|(frame, flags, _)| (frame, flags));
         if let Some((old_frame, old_flags)) = query_res {
             if old_frame.as_usize() != 0 {
                 // Page is mapped. Check if it's a COW fault (write to read-only page).
-                if orig_flags.contains(MappingFlags::WRITE) && !old_flags.contains(MappingFlags::WRITE) {
+                if orig_flags.contains(MappingFlags::WRITE) && access_flags.contains(MappingFlags::WRITE) && !old_flags.contains(MappingFlags::WRITE) {
                     let ref_count = frame_table().get_ref(old_frame);
                     if ref_count == 1 {
                         // Only one reference, upgrade to WRITE.
-                        let mut pt_guard = pt.lock();
+                        let mut pt_guard = pt.lock_for_addr(page);
                         if let Ok((curr_frame, curr_flags, _)) = pt_guard.query(page) {
                             if curr_frame == old_frame && !curr_flags.contains(MappingFlags::WRITE) {
                                 let new_flags = curr_flags | MappingFlags::WRITE;
@@ -62,7 +63,7 @@ impl CowMapping {
                         }
 
                         // Map new frame with WRITE permission
-                        let mut pt_guard = pt.lock();
+                        let mut pt_guard = pt.lock_for_addr(page);
                         // Re-verify under lock
                         let (ok, already_handled) = if let Ok((curr_frame, curr_flags, _)) = pt_guard.query(page) {
                             if curr_frame == old_frame && !curr_flags.contains(MappingFlags::WRITE) {
@@ -96,13 +97,13 @@ impl CowMapping {
                     // Not a COW fault, maybe just a permission upgrade (e.g. READ -> READ|EXEC)
                     // or the page is already writable.
                     // Delegate to inner to be safe, although we could handle it here.
-                    return self.inner.handle_page_fault(vaddr, area_end, orig_flags, pt);
+                    return self.inner.handle_page_fault(vaddr, area_end, orig_flags, pt, access_flags);
                 }
             }
         }
 
         // Page is not mapped or inner needs to handle it (e.g. demand paging).
-        self.inner.handle_page_fault(vaddr, area_end, orig_flags, pt)
+        self.inner.handle_page_fault(vaddr, area_end, orig_flags, pt, access_flags)
     }
 
     fn sync_executable_if_needed(&self, flags: MappingFlags) {
