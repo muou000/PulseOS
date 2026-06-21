@@ -409,6 +409,162 @@ impl<M: PagingMetaData, PTE: GenericPTE, H: PagingHandler> PageTable64<M, PTE, H
             *entry = src_table[i];
         }
     }
+
+    pub fn copy_cow_range(
+        &mut self,
+        other: &mut Self,
+        start: M::VirtAddr,
+        size: usize,
+        is_cow: bool,
+        mut inc_ref: impl FnMut(PhysAddr),
+    ) -> PagingResult {
+        if size == 0 {
+            return Ok(());
+        }
+        let start_vaddr: usize = start.into();
+        let end_vaddr = start_vaddr + size;
+        self.copy_cow_range_recursive(
+            other,
+            0,
+            self.root_paddr,
+            other.root_paddr,
+            0,
+            start_vaddr,
+            end_vaddr,
+            is_cow,
+            &mut inc_ref,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn copy_cow_range_recursive(
+        &mut self,
+        other: &mut Self,
+        level: usize,
+        dst_table_paddr: PhysAddr,
+        src_table_paddr: PhysAddr,
+        table_start_vaddr: usize,
+        start_vaddr: usize,
+        end_vaddr: usize,
+        is_cow: bool,
+        inc_ref: &mut impl FnMut(PhysAddr),
+    ) -> PagingResult {
+        let step = 1usize << (12 + (M::LEVELS - 1 - level) * 9);
+        let index_fn = if level == 0 {
+            if M::LEVELS == 3 {
+                p3_index
+            } else if M::LEVELS == 4 {
+                p4_index
+            } else {
+                unreachable!()
+            }
+        } else if level == 1 {
+            if M::LEVELS == 3 {
+                p2_index
+            } else if M::LEVELS == 4 {
+                p3_index
+            } else {
+                unreachable!()
+            }
+        } else if level == 2 {
+            if M::LEVELS == 3 {
+                p1_index
+            } else if M::LEVELS == 4 {
+                p2_index
+            } else {
+                unreachable!()
+            }
+        } else if level == 3 {
+            p1_index
+        } else {
+            unreachable!()
+        };
+
+        let start_idx = index_fn(start_vaddr);
+        let end_idx = index_fn(end_vaddr - 1) + 1;
+
+        let src_table = unsafe {
+            let ptr = H::phys_to_virt(src_table_paddr).as_mut_ptr() as *mut PTE;
+            core::slice::from_raw_parts_mut(ptr, ENTRY_COUNT)
+        };
+        let dst_table = unsafe {
+            let ptr = H::phys_to_virt(dst_table_paddr).as_mut_ptr() as *mut PTE;
+            core::slice::from_raw_parts_mut(ptr, ENTRY_COUNT)
+        };
+
+        for i in start_idx..end_idx {
+            let src_entry = &mut src_table[i];
+            let is_present = if src_entry.is_huge() || level == M::LEVELS - 1 {
+                src_entry.is_present()
+            } else {
+                !src_entry.is_unused()
+            };
+            if !is_present {
+                continue;
+            }
+
+            let entry_start = table_start_vaddr + i * step;
+            let entry_end = entry_start + step;
+            let overlap_start = start_vaddr.max(entry_start);
+            let overlap_end = end_vaddr.min(entry_end);
+
+            if overlap_start >= overlap_end {
+                continue;
+            }
+
+            if src_entry.is_huge() || level == M::LEVELS - 1 {
+                // Leaf entry.
+                let paddr = src_entry.paddr();
+                if paddr.as_usize() != 0 {
+                    let flags = src_entry.flags();
+                    let page_size = if level == M::LEVELS - 1 {
+                        PageSize::Size4K
+                    } else if level == M::LEVELS - 2 {
+                        PageSize::Size2M
+                    } else {
+                        PageSize::Size1G
+                    };
+
+                    let map_flags = if is_cow {
+                        inc_ref(paddr);
+                        let cow_flags = flags & !MappingFlags::WRITE;
+                        if flags.contains(MappingFlags::WRITE) {
+                            src_entry.set_flags(cow_flags, page_size.is_huge());
+                        }
+                        cow_flags
+                    } else {
+                        flags
+                    };
+
+                    dst_table[i] = GenericPTE::new_page(paddr, map_flags, page_size.is_huge());
+                }
+            } else {
+                // Intermediate table entry.
+                let next_src_paddr = src_entry.paddr();
+                let dst_entry = &mut dst_table[i];
+                let next_dst_paddr = if dst_entry.is_unused() {
+                    let paddr = Self::alloc_table()?;
+                    *dst_entry = GenericPTE::new_table(paddr);
+                    paddr
+                } else {
+                    dst_entry.paddr()
+                };
+
+                self.copy_cow_range_recursive(
+                    other,
+                    level + 1,
+                    next_dst_paddr,
+                    next_src_paddr,
+                    entry_start,
+                    overlap_start,
+                    overlap_end,
+                    is_cow,
+                    inc_ref,
+                )?;
+            }
+        }
+        Ok(())
+    }
 }
 
 // Private implements.
@@ -566,7 +722,12 @@ impl<M: PagingMetaData, PTE: GenericPTE, H: PagingHandler> PageTable64<M, PTE, H
             let vaddr_usize = start_vaddr_usize + (i << (12 + (M::LEVELS - 1 - level) * 9));
             let vaddr = vaddr_usize.into();
 
-            if entry.is_present() {
+            let is_present = if entry.is_huge() || level == M::LEVELS - 1 {
+                entry.is_present()
+            } else {
+                !entry.is_unused()
+            };
+            if is_present {
                 if let Some(func) = pre_func {
                     func(level, i, vaddr, entry);
                 }
