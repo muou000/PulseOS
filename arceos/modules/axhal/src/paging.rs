@@ -68,6 +68,17 @@ impl PageTable {
         self.inner.copy_from(&other.inner, start, size)
     }
 
+    pub fn copy_cow_range(
+        &mut self,
+        other: &mut Self,
+        start: VirtAddr,
+        size: usize,
+        is_cow: bool,
+        inc_ref: impl FnMut(PhysAddr),
+    ) -> PagingResult {
+        self.inner.copy_cow_range(&mut other.inner, start, size, is_cow, inc_ref)
+    }
+
     pub fn query(&self, vaddr: VirtAddr) -> PagingResult<(PhysAddr, MappingFlags, PageSize)> {
         self.inner.query(vaddr)
     }
