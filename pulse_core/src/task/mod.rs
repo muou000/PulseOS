@@ -200,6 +200,7 @@ pub fn schedule_posix_timer_event(pid: u64, timer_id: usize, deadline: u64) {
                         if notify == 0 { // SIGEV_SIGNAL
                             let _ = queue_signal_to_process(&proc, sig);
                         }
+                        timer.first_expired = true;
                         if timer.interval_ns > 0 {
                             let mut next = deadline.saturating_add(timer.interval_ns);
                             let now_ns = axhal::time::monotonic_time_nanos() as u64;
@@ -218,6 +219,36 @@ pub fn schedule_posix_timer_event(pid: u64, timer_id: usize, deadline: u64) {
             }
         }
     }));
+}
+
+pub fn adjust_absolute_timers() {
+    let procs = processes_snapshot();
+    let new_offset = axhal::time::current_epochoffset_nanos();
+    for proc in procs {
+        if proc.is_zombie() {
+            continue;
+        }
+        let mut to_schedule = Vec::new();
+        {
+            let mut timers = proc.posix_timers.lock();
+            for timer_opt in timers.iter_mut() {
+                if let Some(timer) = timer_opt {
+                    if timer.clock_id == 0 && timer.is_absolute && !timer.first_expired && timer.next_deadline_ns > 0 {
+                        let sec = timer.itimer_spec.it_value.tv_sec as u64;
+                        let nsec = timer.itimer_spec.it_value.tv_nsec as u64;
+                        if let Some(req_ns) = sec.checked_mul(1_000_000_000).and_then(|s| s.checked_add(nsec)) {
+                            let new_deadline = req_ns.saturating_sub(new_offset);
+                            timer.next_deadline_ns = new_deadline;
+                            to_schedule.push((timer.id, new_deadline));
+                        }
+                    }
+                }
+            }
+        }
+        for (timer_id, new_deadline) in to_schedule {
+            schedule_posix_timer_event(proc.pid(), timer_id, new_deadline);
+        }
+    }
 }
 
 /// Register the itimer tick hook with axtask. Should be called once during
