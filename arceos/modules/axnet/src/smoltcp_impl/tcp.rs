@@ -198,7 +198,31 @@ impl TcpSocket {
     /// Connects to the given address and port.
     ///
     /// The local port is generated automatically.
+    /// Connects to the given address and port.
+    ///
+    /// The local port is generated automatically.
     pub fn connect(&self, remote_addr: SocketAddr) -> AxResult {
+        let mut retries = 0;
+        let remote_is_loopback = remote_addr.ip().is_loopback();
+        loop {
+            let res = self.connect_inner(remote_addr);
+            match res {
+                Ok(()) => return Ok(()),
+                Err(e) => {
+                    if remote_is_loopback && e == AxError::ConnectionRefused && retries < 10 {
+                        retries += 1;
+                        debug!("Connect to loopback refused, retrying {}...", retries);
+                        axtask::sleep(core::time::Duration::from_millis(50));
+                        self.set_state(STATE_CLOSED);
+                        continue;
+                    }
+                    return Err(e);
+                }
+            }
+        }
+    }
+
+    fn connect_inner(&self, remote_addr: SocketAddr) -> AxResult {
         self.update_state(STATE_CLOSED, STATE_CONNECTING, || {
             // SAFETY: no other threads can read or write these fields.
             let handle = unsafe { self.handle.get().read().unwrap() };
