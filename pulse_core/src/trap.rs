@@ -66,30 +66,32 @@ fn deliver_pending_signal(tf: &mut TrapFrame) {
         );
         thread.exit_current(process.group_exit_code());
     }
-    if let Some(delivery) = crate::task::check_signals_and_deliver(thread.as_ref(), tf) {
-        use crate::task::{DefaultSignalAction, SignalAction};
-        axlog::debug!(
-            "Delivering signal: pid={} sig={} action={:?}",
-            process.pid(),
-            delivery.sig,
-            delivery.action
-        );
-        match delivery.action {
-            SignalAction::Default(DefaultSignalAction::Terminate) => {
-                process.set_exit_signal(delivery.sig as i32, false);
-                process.begin_group_exit(delivery.sig as i32);
-                thread.exit_current(process.group_exit_code());
+    if thread.signal().has_pending_or_skip_once() {
+        if let Some(delivery) = crate::task::check_signals_and_deliver(thread.as_ref(), tf) {
+            use crate::task::{DefaultSignalAction, SignalAction};
+            axlog::debug!(
+                "Delivering signal: pid={} sig={} action={:?}",
+                process.pid(),
+                delivery.sig,
+                delivery.action
+            );
+            match delivery.action {
+                SignalAction::Default(DefaultSignalAction::Terminate) => {
+                    process.set_exit_signal(delivery.sig as i32, false);
+                    process.begin_group_exit(delivery.sig as i32);
+                    thread.exit_current(process.group_exit_code());
+                }
+                SignalAction::Default(DefaultSignalAction::CoreDump) => {
+                    process.set_exit_signal(delivery.sig as i32, true);
+                    process.begin_group_exit(delivery.sig as i32);
+                    thread.exit_current(process.group_exit_code());
+                }
+                SignalAction::Default(DefaultSignalAction::Stop)
+                | SignalAction::Default(DefaultSignalAction::Continue)
+                | SignalAction::Default(DefaultSignalAction::Ignore)
+                | SignalAction::Ignore
+                | SignalAction::Handler(_) => {}
             }
-            SignalAction::Default(DefaultSignalAction::CoreDump) => {
-                process.set_exit_signal(delivery.sig as i32, true);
-                process.begin_group_exit(delivery.sig as i32);
-                thread.exit_current(process.group_exit_code());
-            }
-            SignalAction::Default(DefaultSignalAction::Stop)
-            | SignalAction::Default(DefaultSignalAction::Continue)
-            | SignalAction::Default(DefaultSignalAction::Ignore)
-            | SignalAction::Ignore
-            | SignalAction::Handler(_) => {}
         }
     }
 }
@@ -155,7 +157,7 @@ fn handle_page_fault(vaddr: VirtAddr, access_flags: MappingFlags, is_user: bool)
             proc.exec_path()
         );
         axlog::error!("  vaddr={:#x}, flags={:?}", vaddr, access_flags);
-        
+
         let mut signo = 11; // Default to SIGSEGV
         let aspace_handle = proc.aspace_handle();
         let aspace = aspace_handle.read();

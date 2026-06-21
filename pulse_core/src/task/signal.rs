@@ -308,6 +308,10 @@ impl ThreadSignal {
         ((thread_pending | proc_pending) & !blocked) != 0
     }
 
+    pub fn has_pending_or_skip_once(&self) -> bool {
+        self.has_pending_unblocked() || self.skip_once.load(Ordering::Acquire)
+    }
+
     pub fn has_pending_unblocked_not_in_set(&self, set: u64) -> bool {
         let set = sanitize_mask(set);
         let blocked = self.blocked_mask();
