@@ -1,6 +1,6 @@
 use axalloc::global_allocator;
 use axhal::mem::{phys_to_virt, virt_to_phys};
-use axhal::paging::{MappingFlags, PageSize, PageTable};
+use axhal::paging::{MappingFlags, PageSize, PageTable, TlbFlush};
 use memory_addr::{MemoryAddr, PAGE_SIZE_4K, PageIter4K, PhysAddr, VirtAddr};
 
 use super::Backend;
@@ -203,57 +203,77 @@ impl Backend {
         if (is_unmapped || is_placeholder) && !populate {
             let mut current_page = page;
             let mut handled_any = false;
+            
+            // 1. Allocate up to 4 frames beforehand without holding the page table lock
+            let mut allocated_frames = alloc::vec::Vec::with_capacity(4);
             for _ in 0..4 {
-                if current_page >= area_end {
+                if let Some(frame) = alloc_frame(true) {
+                    allocated_frames.push(frame);
+                } else {
                     break;
                 }
-                let cur_query = pt.lock_for_addr(current_page).query(current_page);
-                let need_map = match cur_query {
-                    Err(_) => Some(true),
-                    Ok((frame, _, _)) if frame.as_usize() == 0 => Some(false),
-                    _ => None,
-                };
-                if let Some(is_map) = need_map {
-                    if let Some(frame) = alloc_frame(true) {
-                        let mut pt_guard = pt.lock_for_addr(current_page);
-                        // Re-verify under lock
-                        let re_query = pt_guard.query(current_page);
-                        let mut already_mapped = false;
-                        let ok = match re_query {
-                            Err(_) if is_map => {
-                                pt_guard.map(current_page, frame, PageSize::Size4K, orig_flags)
-                                    .map(|tlb| tlb.flush())
-                                    .is_ok()
-                            }
-                            Ok((curr_frame, _, _)) if !is_map && curr_frame.as_usize() == 0 => {
-                                pt_guard.remap(current_page, frame, orig_flags)
-                                    .map(|(_, tlb)| tlb.flush())
-                                    .is_ok()
-                            }
-                            Ok((curr_frame, _, _)) if curr_frame.as_usize() != 0 => {
-                                already_mapped = true;
-                                false
-                            }
-                            _ => false,
-                        };
-                        if ok {
-                            handled_any = true;
-                        } else {
-                            dealloc_frame(frame);
-                            if already_mapped {
-                                if current_page == page {
-                                    handled_any = true;
-                                }
-                            } else {
-                                break;
-                            }
-                        }
-                    } else {
+            }
+            
+            if !allocated_frames.is_empty() {
+                // 2. Acquire the page table lock ONCE for the entire batch mapping
+                let mut pt_guard = pt.lock_for_addr(page);
+                let mut frame_idx = 0;
+                let mut tlb_flushes = alloc::vec::Vec::with_capacity(4);
+                
+                for _ in 0..4 {
+                    if current_page >= area_end || frame_idx >= allocated_frames.len() {
                         break;
                     }
+                    
+                    let cur_query = pt_guard.query(current_page);
+                    let need_map = match cur_query {
+                        Err(_) => Some(true),
+                        Ok((frame, _, _)) if frame.as_usize() == 0 => Some(false),
+                        _ => None,
+                    };
+                    
+                    if let Some(is_map) = need_map {
+                        let frame = allocated_frames[frame_idx];
+                        let ok = if is_map {
+                            if let Ok(tlb) = pt_guard.map(current_page, frame, PageSize::Size4K, orig_flags) {
+                                tlb_flushes.push(tlb);
+                                true
+                            } else {
+                                false
+                            }
+                        } else {
+                            if let Ok((_, tlb)) = pt_guard.remap(current_page, frame, orig_flags) {
+                                tlb_flushes.push(tlb);
+                                true
+                            } else {
+                                false
+                            }
+                        };
+                        
+                        if ok {
+                            frame_idx += 1;
+                            handled_any = true;
+                        } else {
+                            // If mapping failed, stop batching
+                            break;
+                        }
+                    } else {
+                        // Page is already mapped, skip it
+                    }
+                    current_page += PAGE_SIZE_4K;
                 }
-                current_page += PAGE_SIZE_4K;
+                
+                // 3. Flush all TLBs gathered during batch mapping
+                for tlb in tlb_flushes {
+                    tlb.flush();
+                }
+                
+                // 4. Deallocate any unused pre-allocated frames
+                for frame in allocated_frames.into_iter().skip(frame_idx) {
+                    dealloc_frame(frame);
+                }
             }
+            
             return handled_any;
         }
         if let Ok((old_frame, old_flags, _)) = query_res {

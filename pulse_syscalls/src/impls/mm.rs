@@ -71,7 +71,7 @@ pub fn sys_brk(addr: usize) -> isize {
             let aspace_handle = proc.aspace_handle();
             let mut aspace = aspace_handle.write();
             let flags = MappingFlags::READ | MappingFlags::WRITE | MappingFlags::USER;
-            if let Err(e) = aspace.map_alloc(VirtAddr::from(start), end - start, flags, false) {
+            if let Err(e) = aspace.map_alloc(VirtAddr::from(start), end - start, flags, true) {
                 axlog::error!("sys_brk: failed to expand heap: {:?}", e);
                 return old_heap_top as isize;
             }
