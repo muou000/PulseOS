@@ -630,6 +630,15 @@ impl AddrSpace {
             );
             return PageFaultResult::Handled(false);
         }
+        if let Some((frame, flags)) = pte_before {
+            if access_flags.contains(PageFaultFlags::WRITE) && flags.contains(MappingFlags::WRITE) {
+                let mut pt_guard = self.pt.lock_for_addr(page);
+                if let Ok((_, tlb)) = pt_guard.remap(page, frame, flags) {
+                    tlb.flush();
+                    return PageFaultResult::Handled(true);
+                }
+            }
+        }
         if let Some(area) = self.areas.find(vaddr) {
             let orig_flags = area.flags();
             let backend_kind = Self::backend_kind(area.backend());
