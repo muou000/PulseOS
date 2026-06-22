@@ -1,8 +1,7 @@
 use alloc::{borrow::ToOwned, collections::BTreeMap, string::String, sync::Arc, vec::Vec};
 use core::{
     any::Any,
-    borrow::Borrow,
-    cmp::{Ordering, min},
+    cmp::min,
     ops::Deref,
     task::Context,
     time::Duration,
@@ -12,6 +11,7 @@ use axfs_ng_vfs::{
     DeviceId, DirEntry, DirEntrySink, DirNode, DirNodeOps, FileNode, FileNodeOps, Filesystem,
     FilesystemOps, Metadata, MetadataUpdate, NodeFlags, NodeOps, NodePermission, NodeType,
     Reference, StatFs, VfsError, VfsResult, WeakDirEntry, path::MAX_NAME_LEN,
+    InMemDir, InMemInode, update_metadata_impl, read_dir_impl,
 };
 use axpoll::{IoEvents, Pollable};
 use rand_core::{Rng, SeedableRng};
@@ -85,47 +85,7 @@ struct BlockDeviceKind {
     disk: Mutex<SeekableDisk<SharedBlockDevice>>,
 }
 
-#[derive(PartialEq, Eq, Hash, Clone)]
-struct FileName(String);
-
-impl PartialOrd for FileName {
-    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        Some(self.cmp(other))
-    }
-}
-
-impl Ord for FileName {
-    fn cmp(&self, other: &Self) -> Ordering {
-        fn index(s: &str) -> u8 {
-            match s {
-                "." => 0,
-                ".." => 1,
-                _ => 2,
-            }
-        }
-        (index(&self.0), &self.0).cmp(&(index(&other.0), &other.0))
-    }
-}
-
-impl<T> From<T> for FileName
-where
-    T: Into<String>,
-{
-    fn from(name: T) -> Self {
-        Self(name.into())
-    }
-}
-
-impl Borrow<str> for FileName {
-    fn borrow(&self) -> &str {
-        &self.0
-    }
-}
-
-#[derive(Default)]
-struct DirContent {
-    entries: Mutex<BTreeMap<FileName, InodeRef>>,
-}
+type DirContent = InMemDir<InodeRef>;
 
 #[derive(Default)]
 struct FileContent {
@@ -139,154 +99,138 @@ enum NodeContent {
     File(FileContent),
 }
 
-struct Inode {
+type Inode = InMemInode<NodeContent>;
+type InodeRef = u64;
+
+fn new_directory(ino: u64, parent_ino: u64, permission: NodePermission) -> Arc<Inode> {
+    let inode = Arc::new(InMemInode::new(
+        ino,
+        Metadata {
+            device: 0,
+            inode: ino,
+            nlink: 0,
+            mode: permission,
+            node_type: NodeType::Directory,
+            uid: 0,
+            gid: 0,
+            size: 0,
+            block_size: 4096,
+            blocks: 0,
+            rdev: DeviceId::default(),
+            atime: now(),
+            mtime: now(),
+            ctime: now(),
+        },
+        NodeContent::Directory(DirContent::new()),
+    ));
+
+    {
+        let mut entries = inode_as_dir(&inode).expect("directory inode").entries.lock();
+        entries.insert(".".into(), ino);
+        entries.insert("..".into(), parent_ino);
+    }
+    inode
+}
+
+fn new_character_device(
     ino: u64,
-    metadata: Mutex<Metadata>,
-    content: NodeContent,
+    kind: DevDeviceKind,
+    mode: u16,
+    major: u32,
+    minor: u32,
+) -> Arc<Inode> {
+    Arc::new(InMemInode::new(
+        ino,
+        Metadata {
+            device: 0,
+            inode: ino,
+            nlink: 0,
+            mode: NodePermission::from_bits_truncate(mode),
+            node_type: NodeType::CharacterDevice,
+            uid: 0,
+            gid: 0,
+            size: 0,
+            block_size: 4096,
+            blocks: 0,
+            rdev: DeviceId::new(major, minor),
+            atime: now(),
+            mtime: now(),
+            ctime: now(),
+        },
+        NodeContent::CharacterDevice(kind),
+    ))
 }
 
-impl Inode {
-    fn new_directory(ino: u64, parent_ino: u64, permission: NodePermission) -> Arc<Self> {
-        let inode = Arc::new(Self {
-            ino,
-            metadata: Mutex::new(Metadata {
-                device: 0,
-                inode: ino,
-                nlink: 0,
-                mode: permission,
-                node_type: NodeType::Directory,
-                uid: 0,
-                gid: 0,
-                size: 0,
-                block_size: 4096,
-                blocks: 0,
-                rdev: DeviceId::default(),
-                atime: now(),
-                mtime: now(),
-                ctime: now(),
-            }),
-            content: NodeContent::Directory(DirContent::default()),
-        });
-
-        {
-            let mut entries = inode.as_dir().expect("directory inode").entries.lock();
-            entries.insert(".".into(), InodeRef::new(ino));
-            entries.insert("..".into(), InodeRef::new(parent_ino));
-        }
-        inode
-    }
-
-    fn new_character_device(
-        ino: u64,
-        kind: DevDeviceKind,
-        mode: u16,
-        major: u32,
-        minor: u32,
-    ) -> Arc<Self> {
-        Arc::new(Self {
-            ino,
-            metadata: Mutex::new(Metadata {
-                device: 0,
-                inode: ino,
-                nlink: 0,
-                mode: NodePermission::from_bits_truncate(mode),
-                node_type: NodeType::CharacterDevice,
-                uid: 0,
-                gid: 0,
-                size: 0,
-                block_size: 4096,
-                blocks: 0,
-                rdev: DeviceId::new(major, minor),
-                atime: now(),
-                mtime: now(),
-                ctime: now(),
-            }),
-            content: NodeContent::CharacterDevice(kind),
-        })
-    }
-
-    fn new_block_device(
-        ino: u64,
-        device: SharedBlockDevice,
-        mode: u16,
-        major: u32,
-        minor: u32,
-    ) -> Arc<Self> {
-        let size = device.size();
-        let block_size = device.block_size() as u64;
-        Arc::new(Self {
-            ino,
-            metadata: Mutex::new(Metadata {
-                device: 0,
-                inode: ino,
-                nlink: 0,
-                mode: NodePermission::from_bits_truncate(mode),
-                node_type: NodeType::BlockDevice,
-                uid: 0,
-                gid: 0,
-                size,
-                block_size,
-                blocks: size.div_ceil(512),
-                rdev: DeviceId::new(major, minor),
-                atime: now(),
-                mtime: now(),
-                ctime: now(),
-            }),
-            content: NodeContent::BlockDevice(BlockDeviceKind {
-                disk: Mutex::new(SeekableDisk::new(device)),
-            }),
-        })
-    }
-
-    fn new_file(ino: u64, node_type: NodeType, permission: NodePermission) -> Arc<Self> {
-        Arc::new(Self {
-            ino,
-            metadata: Mutex::new(Metadata {
-                device: 0,
-                inode: ino,
-                nlink: 0,
-                mode: permission,
-                node_type,
-                uid: 0,
-                gid: 0,
-                size: 0,
-                block_size: 4096,
-                blocks: 0,
-                rdev: DeviceId::default(),
-                atime: now(),
-                mtime: now(),
-                ctime: now(),
-            }),
-            content: NodeContent::File(FileContent::default()),
-        })
-    }
-
-    fn as_dir(&self) -> VfsResult<&DirContent> {
-        match &self.content {
-            NodeContent::Directory(content) => Ok(content),
-            _ => Err(VfsError::NotADirectory),
-        }
-    }
-
-    fn as_file(&self) -> VfsResult<&FileContent> {
-        match &self.content {
-            NodeContent::File(content) => Ok(content),
-            NodeContent::CharacterDevice(_) | NodeContent::BlockDevice(_) => {
-                Err(VfsError::OperationNotPermitted)
-            }
-            NodeContent::Directory(_) => Err(VfsError::IsADirectory),
-        }
-    }
-}
-
-#[derive(Clone)]
-struct InodeRef {
+fn new_block_device(
     ino: u64,
+    device: SharedBlockDevice,
+    mode: u16,
+    major: u32,
+    minor: u32,
+) -> Arc<Inode> {
+    let size = device.size();
+    let block_size = device.block_size() as u64;
+    Arc::new(InMemInode::new(
+        ino,
+        Metadata {
+            device: 0,
+            inode: ino,
+            nlink: 0,
+            mode: NodePermission::from_bits_truncate(mode),
+            node_type: NodeType::BlockDevice,
+            uid: 0,
+            gid: 0,
+            size,
+            block_size,
+            blocks: size.div_ceil(512),
+            rdev: DeviceId::new(major, minor),
+            atime: now(),
+            mtime: now(),
+            ctime: now(),
+        },
+        NodeContent::BlockDevice(BlockDeviceKind {
+            disk: Mutex::new(SeekableDisk::new(device)),
+        }),
+    ))
 }
 
-impl InodeRef {
-    fn new(ino: u64) -> Self {
-        Self { ino }
+fn new_file(ino: u64, node_type: NodeType, permission: NodePermission) -> Arc<Inode> {
+    Arc::new(InMemInode::new(
+        ino,
+        Metadata {
+            device: 0,
+            inode: ino,
+            nlink: 0,
+            mode: permission,
+            node_type,
+            uid: 0,
+            gid: 0,
+            size: 0,
+            block_size: 4096,
+            blocks: 0,
+            rdev: DeviceId::default(),
+            atime: now(),
+            mtime: now(),
+            ctime: now(),
+        },
+        NodeContent::File(FileContent::default()),
+    ))
+}
+
+fn inode_as_dir(inode: &Inode) -> VfsResult<&DirContent> {
+    match &inode.content {
+        NodeContent::Directory(content) => Ok(content),
+        _ => Err(VfsError::NotADirectory),
+    }
+}
+
+fn inode_as_file(inode: &Inode) -> VfsResult<&FileContent> {
+    match &inode.content {
+        NodeContent::File(content) => Ok(content),
+        NodeContent::CharacterDevice(_) | NodeContent::BlockDevice(_) => {
+            Err(VfsError::OperationNotPermitted)
+        }
+        NodeContent::Directory(_) => Err(VfsError::IsADirectory),
     }
 }
 
@@ -319,46 +263,46 @@ impl DevFilesystem {
         let mut inodes = self.inodes.lock();
 
         let root =
-            Inode::new_directory(ROOT_INO, ROOT_INO, NodePermission::from_bits_truncate(0o755));
+            new_directory(ROOT_INO, ROOT_INO, NodePermission::from_bits_truncate(0o755));
         let misc =
-            Inode::new_directory(MISC_INO, ROOT_INO, NodePermission::from_bits_truncate(0o755));
+            new_directory(MISC_INO, ROOT_INO, NodePermission::from_bits_truncate(0o755));
         let shm =
-            Inode::new_directory(SHM_INO, ROOT_INO, NodePermission::from_bits_truncate(0o777));
+            new_directory(SHM_INO, ROOT_INO, NodePermission::from_bits_truncate(0o777));
 
-        let null = Inode::new_character_device(NULL_INO, DevDeviceKind::Null, 0o666, 1, 3);
-        let zero = Inode::new_character_device(ZERO_INO, DevDeviceKind::Zero, 0o666, 1, 5);
-        let rtc = Inode::new_character_device(RTC_INO, DevDeviceKind::Rtc, 0o666, 254, 0);
-        let random = Inode::new_character_device(
+        let null = new_character_device(NULL_INO, DevDeviceKind::Null, 0o666, 1, 3);
+        let zero = new_character_device(ZERO_INO, DevDeviceKind::Zero, 0o666, 1, 5);
+        let rtc = new_character_device(RTC_INO, DevDeviceKind::Rtc, 0o666, 254, 0);
+        let random = new_character_device(
             RANDOM_INO,
             DevDeviceKind::Random(RandomDevice::new()),
             0o666,
             1,
             8,
         );
-        let urandom = Inode::new_character_device(
+        let urandom = new_character_device(
             URANDOM_INO,
             DevDeviceKind::Random(RandomDevice::new()),
             0o666,
             1,
             9,
         );
-        let cpu_dma = Inode::new_character_device(
+        let cpu_dma = new_character_device(
             CPU_DMA_LATENCY_INO,
             DevDeviceKind::CpuDmaLatency,
             0o666,
             10,
             63,
         );
-        let loop_ctrl = Inode::new_character_device(
+        let loop_ctrl = new_character_device(
             LOOP_CTRL_INO,
             DevDeviceKind::LoopControl,
             0o600,
             10,
             237,
         );
-        let tty = Inode::new_character_device(TTY_INO, DevDeviceKind::Tty, 0o666, 5, 0);
-        let console = Inode::new_character_device(CONSOLE_INO, DevDeviceKind::Console, 0o666, 5, 1);
-        let tty_s0 = Inode::new_character_device(TTYS0_INO, DevDeviceKind::TtyS0, 0o660, 4, 64);
+        let tty = new_character_device(TTY_INO, DevDeviceKind::Tty, 0o666, 5, 0);
+        let console = new_character_device(CONSOLE_INO, DevDeviceKind::Console, 0o666, 5, 1);
+        let tty_s0 = new_character_device(TTYS0_INO, DevDeviceKind::TtyS0, 0o660, 4, 64);
 
         root.metadata.lock().nlink = 2;
         misc.metadata.lock().nlink = 2;
@@ -380,7 +324,7 @@ impl DevFilesystem {
 
         for spec in block_devices {
             let ino = self.allocate_ino();
-            let block = Inode::new_block_device(ino, spec.device, 0o660, spec.major, spec.minor);
+            let block = new_block_device(ino, spec.device, 0o660, spec.major, spec.minor);
             inodes.insert(ino, block);
             self.insert_entry_locked(&root, &spec.name, ino, &inodes);
         }
@@ -407,8 +351,8 @@ impl DevFilesystem {
         target_ino: u64,
         inodes: &BTreeMap<u64, Arc<Inode>>,
     ) {
-        if let Ok(content) = dir.as_dir() {
-            content.entries.lock().insert(name.into(), InodeRef::new(target_ino));
+        if let Ok(content) = inode_as_dir(dir) {
+            content.entries.lock().insert(name.into(), target_ino);
             if let Some(target) = inodes.get(&target_ino) {
                 target.metadata.lock().nlink += 1;
             }
@@ -434,11 +378,11 @@ impl DevFilesystem {
     ) -> VfsResult<Arc<Inode>> {
         let ino = self.allocate_ino();
         let inode = match node_type {
-            NodeType::Directory => Inode::new_directory(ino, parent_ino, permission),
+            NodeType::Directory => new_directory(ino, parent_ino, permission),
             NodeType::CharacterDevice | NodeType::BlockDevice => {
                 return Err(VfsError::OperationNotPermitted);
             }
-            _ => Inode::new_file(ino, node_type, permission),
+            _ => new_file(ino, node_type, permission),
         };
 
         self.inodes.lock().insert(ino, inode.clone());
@@ -559,15 +503,15 @@ impl DevNode {
             return Err(VfsError::InvalidInput);
         }
         let dir = self.inode_ref()?;
-        let dir_content = dir.as_dir()?;
+        let dir_content = inode_as_dir(&dir)?;
         let mut entries = dir_content.entries.lock();
         let Some(entry) = entries.get(name).cloned() else {
             return Err(VfsError::NotFound);
         };
 
-        let target = self.fs.get_inode(entry.ino)?;
+        let target = self.fs.get_inode(entry)?;
         if target.metadata.lock().node_type == NodeType::Directory {
-            let child_entries = target.as_dir()?.entries.lock();
+            let child_entries = inode_as_dir(&target)?.entries.lock();
             if child_entries.len() > 2 {
                 return Err(VfsError::DirectoryNotEmpty);
             }
@@ -577,7 +521,7 @@ impl DevNode {
 
         entries.remove(name);
         drop(entries);
-        self.fs.bump_nlink(entry.ino, -1)
+        self.fs.bump_nlink(entry, -1)
     }
 }
 
@@ -603,20 +547,7 @@ impl NodeOps for DevNode {
 
     fn update_metadata(&self, update: MetadataUpdate) -> VfsResult<()> {
         let inode = self.inode_ref()?;
-        let mut metadata = inode.metadata.lock();
-        if let Some(mode) = update.mode {
-            metadata.mode = mode;
-        }
-        if let Some((uid, gid)) = update.owner {
-            metadata.uid = uid;
-            metadata.gid = gid;
-        }
-        if let Some(atime) = update.atime {
-            metadata.atime = atime;
-        }
-        if let Some(mtime) = update.mtime {
-            metadata.mtime = mtime;
-        }
+        update_metadata_impl(&mut inode.metadata.lock(), update);
         Ok(())
     }
 
@@ -651,23 +582,19 @@ impl NodeOps for DevNode {
 impl DirNodeOps for DevNode {
     fn read_dir(&self, offset: u64, sink: &mut dyn DirEntrySink) -> VfsResult<usize> {
         let inode = self.inode_ref()?;
-        let entries = inode.as_dir()?.entries.lock();
-        let mut count = 0;
-        for (idx, (name, entry)) in entries.iter().enumerate().skip(offset as usize) {
-            let node_type = self.fs.node_type_of(entry.ino)?;
-            if !sink.accept(&name.0, entry.ino, node_type, (idx + 1) as u64) {
-                break;
-            }
-            count += 1;
-        }
-        Ok(count)
+        let dir = inode_as_dir(&inode)?;
+        read_dir_impl(&dir.entries, offset, sink, |&entry| {
+            let node_type = self.fs.node_type_of(entry).unwrap_or(NodeType::RegularFile);
+            (entry, node_type)
+        })
     }
 
     fn lookup(&self, name: &str) -> VfsResult<DirEntry> {
         let inode = self.inode_ref()?;
-        let entries = inode.as_dir()?.entries.lock();
+        let dir = inode_as_dir(&inode)?;
+        let entries = dir.entries.lock();
         let entry = entries.get(name).ok_or(VfsError::NotFound)?;
-        self.build_entry(name, entry.ino)
+        self.build_entry(name, *entry)
     }
 
     fn is_cacheable(&self) -> bool {
@@ -685,7 +612,7 @@ impl DirNodeOps for DevNode {
         }
 
         let parent = self.inode_ref()?;
-        let parent_dir = parent.as_dir()?;
+        let parent_dir = inode_as_dir(&parent)?;
         let mut entries = parent_dir.entries.lock();
         if entries.contains_key(name) {
             return Err(VfsError::AlreadyExists);
@@ -696,7 +623,7 @@ impl DirNodeOps for DevNode {
             self.fs.bump_nlink(self.ino, 1)?;
         }
 
-        entries.insert(name.into(), InodeRef::new(inode.ino));
+        entries.insert(name.into(), inode.ino);
         drop(entries);
         self.fs.bump_nlink(inode.ino, 1)?;
 
@@ -715,13 +642,13 @@ impl DirNodeOps for DevNode {
         }
 
         let parent = self.inode_ref()?;
-        let parent_dir = parent.as_dir()?;
+        let parent_dir = inode_as_dir(&parent)?;
         let mut entries = parent_dir.entries.lock();
         if entries.contains_key(name) {
             return Err(VfsError::AlreadyExists);
         }
 
-        entries.insert(name.into(), InodeRef::new(target.ino));
+        entries.insert(name.into(), target.ino);
         drop(entries);
         self.fs.bump_nlink(target.ino, 1)?;
         self.build_entry(name, target.ino)
@@ -742,7 +669,7 @@ impl DirNodeOps for DevNode {
         }
 
         let src_inode = self.inode_ref()?;
-        let src_dir = src_inode.as_dir()?;
+        let src_dir = inode_as_dir(&src_inode)?;
         let moved_ref = {
             let src_entries = src_dir.entries.lock();
             src_entries.get(src_name).cloned().ok_or(VfsError::NotFound)?
@@ -750,12 +677,12 @@ impl DirNodeOps for DevNode {
 
         if let Ok(existing) = dst_node.lookup(dst_name) {
             let existing = existing.downcast::<Self>()?;
-            if existing.ino == moved_ref.ino {
+            if existing.ino == moved_ref {
                 return Ok(());
             }
             let existing_inode = existing.inode_ref()?;
             if existing_inode.metadata.lock().node_type == NodeType::Directory {
-                let existing_entries = existing_inode.as_dir()?.entries.lock();
+                let existing_entries = inode_as_dir(&existing_inode)?.entries.lock();
                 if existing_entries.len() > 2 {
                     return Err(VfsError::DirectoryNotEmpty);
                 }
@@ -771,17 +698,17 @@ impl DirNodeOps for DevNode {
             dst_node.remove_entry(dst_name)?;
         }
 
-        let moved_inode = self.fs.get_inode(moved_ref.ino)?;
+        let moved_inode = self.fs.get_inode(moved_ref)?;
         let moved_type = moved_inode.metadata.lock().node_type;
 
         if moved_type == NodeType::Directory && self.ino != dst_node.ino {
             self.fs.bump_nlink(self.ino, -1)?;
             self.fs.bump_nlink(dst_node.ino, 1)?;
-            moved_inode.as_dir()?.entries.lock().insert("..".into(), InodeRef::new(dst_node.ino));
+            inode_as_dir(&moved_inode)?.entries.lock().insert("..".into(), dst_node.ino);
         }
 
         let dst_inode = dst_node.inode_ref()?;
-        let dst_content = dst_inode.as_dir()?;
+        let dst_content = inode_as_dir(&dst_inode)?;
         dst_content.entries.lock().insert(dst_name.into(), moved_ref);
         Ok(())
     }
@@ -926,7 +853,7 @@ impl FileNodeOps for DevNode {
         if matches!(&inode.content, NodeContent::CharacterDevice(_) | NodeContent::BlockDevice(_)) {
             return Err(VfsError::InvalidInput);
         }
-        *inode.as_file()?.length.lock() = len;
+        *inode_as_file(&inode)?.length.lock() = len;
         Ok(())
     }
 
