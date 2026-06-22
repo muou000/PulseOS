@@ -74,9 +74,12 @@ impl WaitQueue {
         // Just mark task's current timer ticket ID as expired.
         #[cfg(feature = "irq")]
         if _from_timer_list {
-            let ticket_id = curr.timer_ticket();
-            crate::timers::cancel_alarm_wakeup(ticket_id);
             curr.timer_ticket_expired();
+            // Note:
+            //  this task is still not removed from timer list of target CPU,
+            //  which may cause some redundant timer events because it still needs to
+            //  go through the process of expiring an event from the timer list and invoking the callback.
+            //  (it can be considered a lazy-removal strategy, it will be ignored when it is about to take effect.)
         }
     }
 
