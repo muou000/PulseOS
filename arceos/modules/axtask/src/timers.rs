@@ -125,17 +125,6 @@ pub fn set_alarm_wakeup(deadline: TimeValue, task: AxTaskRef) {
     reprogram_timer();
 }
 
-pub fn cancel_alarm_wakeup(ticket_id: u64) {
-    if ticket_id != 0 {
-        TIMER_LIST.with_current(|timer_list| {
-            timer_list.cancel(|event| match event {
-                AxTimerEvent::TaskWakeup { ticket_id: id, .. } => *id == ticket_id,
-                _ => false,
-            });
-        });
-    }
-}
-
 pub fn set_generic_timer(deadline: TimeValue, callback: alloc::boxed::Box<dyn FnOnce(TimeValue) + Send + Sync>) {
     TIMER_LIST.with_current(|timer_list| {
         timer_list.set(deadline, AxTimerEvent::Generic { callback });
