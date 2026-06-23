@@ -17,7 +17,7 @@ use axio::{SeekFrom, prelude::*};
 use axpoll::{IoEvents, Pollable};
 use axsync::Mutex;
 use lru::LruCache;
-use spin::{Lazy, Mutex as SpinMutex, RwLock};
+use spin::{Lazy, Mutex as SpinMutex};
 
 use super::FsContext;
 
@@ -399,7 +399,7 @@ struct EvictListener {
 struct CachedFileShared {
     page_cache: Mutex<LruCache<u32, PageCache>>,
     evict_listeners: Mutex<Vec<Arc<EvictListener>>>,
-    io_lock: RwLock<()>,
+    io_lock: Mutex<()>,
     size: SpinMutex<u64>,
 }
 
@@ -412,7 +412,7 @@ impl CachedFileShared {
                 Mutex::new(LruCache::new(NonZeroUsize::new(16384).unwrap()))
             },
             evict_listeners: Mutex::new(Vec::new()),
-            io_lock: RwLock::new(()),
+            io_lock: Mutex::new(()),
             size: SpinMutex::new(size),
         }
     }
@@ -806,7 +806,7 @@ impl CachedFile {
     }
 
     pub fn with_page<R>(&self, pn: u32, f: impl FnOnce(Option<&mut PageCache>) -> R) -> R {
-        let _guard = self.shared.io_lock.read();
+        let _guard = self.shared.io_lock.lock();
         f(self.shared.page_cache.lock().get_mut(&pn))
     }
 
@@ -815,7 +815,7 @@ impl CachedFile {
         pn: u32,
         f: impl FnOnce(&mut PageCache, Option<(u32, PageCache)>) -> VfsResult<R>,
     ) -> VfsResult<R> {
-        let _guard = self.shared.io_lock.write();
+        let _guard = self.shared.io_lock.lock();
         let mut guard = self.shared.page_cache.lock();
         let (page, evicted) = self.page_or_insert(self.inner.entry().as_file()?, &mut guard, pn, false)?;
         f(page, evicted)
@@ -854,7 +854,7 @@ impl CachedFile {
     }
 
     pub fn read_at(&self, mut dst: impl Write + IoBufMut, offset: u64) -> VfsResult<usize> {
-        let _guard = self.shared.io_lock.read();
+        let _guard = self.shared.io_lock.lock();
         let len = *self.shared.size.lock();
         let end = (offset + dst.remaining_mut() as u64).min(len);
         if end <= offset {
@@ -896,19 +896,19 @@ impl CachedFile {
     }
 
     pub fn write_at(&self, buf: impl Read + IoBuf, offset: u64) -> VfsResult<usize> {
-        let _guard = self.shared.io_lock.write();
+        let _guard = self.shared.io_lock.lock();
         self.write_at_locked(buf, offset)
     }
 
     pub fn append(&self, buf: impl Read + IoBuf) -> VfsResult<(usize, u64)> {
-        let _guard = self.shared.io_lock.write();
+        let _guard = self.shared.io_lock.lock();
         let len = *self.shared.size.lock();
         self.write_at_locked(buf, len)
             .map(|written| (written, len + written as u64))
     }
 
     pub fn set_len(&self, len: u64) -> VfsResult<()> {
-        let _guard = self.shared.io_lock.write();
+        let _guard = self.shared.io_lock.lock();
         let file = self.inner.entry().as_file()?;
         let old_len = *self.shared.size.lock();
         *self.shared.size.lock() = len;
@@ -948,7 +948,7 @@ impl CachedFile {
         if self.in_memory {
             return Ok(());
         }
-        let _guard = self.shared.io_lock.write();
+        let _guard = self.shared.io_lock.lock();
         let file = self.inner.entry().as_file()?;
         let cached_size = *self.shared.size.lock();
         if file.len()? != cached_size {
@@ -1016,7 +1016,7 @@ impl FileBackend {
                     }))
                 } else {
                     let shared = shared_file_state(loc);
-                    let _guard = shared.io_lock.read();
+                    let _guard = shared.io_lock.lock();
                     dst.read_from(&mut axio::read_fn(|buf| {
                         loc.entry().as_file()?.read_at(buf, offset).inspect(|read| {
                             offset += *read as u64;
@@ -1042,7 +1042,7 @@ impl FileBackend {
                     }))
                 } else {
                     let shared = shared_file_state(loc);
-                    let _guard = shared.io_lock.write();
+                    let _guard = shared.io_lock.lock();
                     let cached_size = *shared.size.lock();
                     if file.len()? != cached_size {
                         file.set_len(cached_size)?;
@@ -1076,7 +1076,7 @@ impl FileBackend {
             Self::Cached(cached) => cached.append(src),
             Self::Direct(loc) => {
                 let shared = shared_file_state(loc);
-                let _guard = shared.io_lock.write();
+                let _guard = shared.io_lock.lock();
                 let file = loc.entry().as_file()?;
                 let cached_size = *shared.size.lock();
                 if file.len()? != cached_size {
@@ -1116,7 +1116,7 @@ impl FileBackend {
             Self::Cached(cached) => cached.sync(data_only),
             Self::Direct(loc) => {
                 let shared = shared_file_state(loc);
-                let _guard = shared.io_lock.write();
+                let _guard = shared.io_lock.lock();
                 let file = loc.entry().as_file()?;
                 let cached_size = *shared.size.lock();
                 if file.len()? != cached_size {
@@ -1133,7 +1133,7 @@ impl FileBackend {
             Self::Cached(cached) => cached.set_len(len),
             Self::Direct(loc) => {
                 let shared = shared_file_state(loc);
-                let _guard = shared.io_lock.write();
+                let _guard = shared.io_lock.lock();
                 let file = loc.entry().as_file()?;
                 *shared.size.lock() = len;
                 shared.flush_dirty_pages(file)?;

@@ -1,4 +1,5 @@
 use alloc::sync::Arc;
+use alloc::boxed::Box;
 use core::cell::OnceCell;
 
 use axdriver::prelude::BlockDriverOps;
@@ -6,26 +7,39 @@ use axfs_ng_vfs::{
     DirEntry, DirNode, Filesystem, FilesystemOps, Reference, StatFs, VfsResult, WeakDirEntry,
     path::MAX_NAME_LEN,
 };
-use ext4_rs::Ext4;
+use ext4plus::Ext4;
 use axsync::{Mutex, MutexGuard};
-use super::{Ext4Disk, Inode, cleanup_dir_cache_registry};
+use super::{Ext4Disk, Ext4DiskWrapper, Inode, cleanup_dir_cache_registry};
 
 const ROOT_INODE: u32 = 2;
 
 pub struct Ext4Filesystem {
     inner: Mutex<Ext4>,
     root_dir: OnceCell<WeakDirEntry>,
+    pub(crate) block_size: usize,
 }
 
 impl Ext4Filesystem {
     pub fn new<D: BlockDriverOps + 'static>(dev: D) -> VfsResult<Filesystem> {
         log::info!("Ext4Filesystem::new: opening block device");
         let disk = Ext4Disk::new(dev);
-        let ext4 = Ext4::open(disk);
+        let ext4 = Ext4::load_with_writer(
+            Box::new(Ext4DiskWrapper(disk.clone())),
+            Some(Box::new(Ext4DiskWrapper(disk.clone()))),
+        ).map_err(|e| {
+            log::error!("Failed to load ext4 filesystem: {:?}", e);
+            axfs_ng_vfs::VfsError::Io
+        })?;
+        let mut log_block_size_buf = [0u8; 4];
+        disk.read_offset(1048, &mut log_block_size_buf);
+        let log_block_size = u32::from_le_bytes(log_block_size_buf);
+        let block_size = 1024usize << log_block_size;
+        disk.set_block_size(block_size);
         log::info!("Ext4Filesystem::new: block device opened successfully");
         let fs = Arc::new(Self {
             inner: Mutex::new(ext4),
             root_dir: OnceCell::new(),
+            block_size,
         });
         let root_dir = DirEntry::new_dir(
             |this| DirNode::new(Inode::new(fs.clone(), ROOT_INODE, Some(this))),
@@ -36,9 +50,7 @@ impl Ext4Filesystem {
     }
 
     pub(crate) fn lock(&self) -> MutexGuard<'_, Ext4> {
-        let guard = self.inner.lock();
-        guard.block_device.set_block_size(guard.super_block.block_size() as usize);
-        guard
+        self.inner.lock()
     }
 }
 
@@ -68,14 +80,15 @@ impl FilesystemOps for Ext4Filesystem {
 
     fn stat(&self) -> VfsResult<StatFs> {
         let fs = self.lock();
-        let sb = &fs.super_block;
+        let sb = fs.superblock();
+        let total_inodes = sb.num_block_groups() as u64 * sb.inodes_per_block_group().get() as u64;
         Ok(StatFs {
             fs_type: 0xef53,
-            block_size: sb.block_size(),
-            blocks: sb.blocks_count() as u64,
+            block_size: self.block_size as u32,
+            blocks: sb.blocks_count(),
             blocks_free: sb.free_blocks_count(),
             blocks_available: sb.free_blocks_count(),
-            file_count: sb.total_inodes() as u64,
+            file_count: total_inodes,
             free_file_count: sb.free_inodes_count() as u64,
             name_length: MAX_NAME_LEN as u32,
             fragment_size: 0,
