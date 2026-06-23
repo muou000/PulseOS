@@ -34,3 +34,7 @@
 ## 2025-05-20 - Avoid format! macro allocations in hot loops for prefix checking using replace_range
 **Learning:** Even when avoiding allocations on non-matching strings by using slicing, creating a completely new `String` for the matches via `format!` triggers a heap allocation. In many cases where the input is already an owned `String`, using `replace_range` on the matched target correctly allows the existing allocation to be reused.
 **Action:** When validating target string matches and a string requires replacement inside a struct/array, prefer `String::replace_range` on the owned string to avoid creating a new `String` object via `format!`.
+
+## 2024-05-19 - [Avoid dynamic allocations for UNIX sockets and net opts]
+**Learning:** In OS environments like `pulse_syscalls`, dynamic heap allocations in hot paths like `sys_setsockopt` and `resolve_unix_addr` (using `alloc::vec![0u8; len]`) incur unnecessary performance overhead when copying data from user-space.
+**Action:** Always prefer using fixed-size stack arrays (e.g., `[0u8; 128]`) and `.min(cap)` length truncation for small buffers such as UNIX domain socket paths and `setsockopt` structs in system calls, minimizing memory allocator lock contention.

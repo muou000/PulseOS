@@ -44,10 +44,12 @@ fn resolve_unix_addr(addr: usize, addrlen: usize) -> Result<core::net::SocketAdd
     } else {
         let first_byte = read_user_plain::<u8>(addr + 2)?;
         if first_byte == 0 {
+            // Optimization: Use a fixed stack buffer for reading abstract UNIX socket names instead of allocating a vec on the heap
             let len = (addrlen as usize).saturating_sub(3);
-            let mut buf = alloc::vec![0u8; len];
-            crate::impls::utils::read_user_bytes(addr + 3, &mut buf)?;
-            let name = alloc::string::String::from_utf8_lossy(&buf);
+            let read_len = len.min(128);
+            let mut buf = [0u8; 128];
+            crate::impls::utils::read_user_bytes(addr + 3, &mut buf[..read_len])?;
+            let name = alloc::string::String::from_utf8_lossy(&buf[..read_len]);
             let mut s = alloc::string::String::with_capacity(name.len() + 1);
             s.push('\0');
             s.push_str(&name);
