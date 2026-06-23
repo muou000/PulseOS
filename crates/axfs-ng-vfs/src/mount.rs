@@ -239,7 +239,7 @@ pub struct Mountpoint {
     /// Device ID
     device: u64,
     /// Unique mount ID (used for propagation bookkeeping)
-    pub(crate) id: u64,
+    pub id: u64,
     /// Propagation mode
     pub(crate) propagation: Mutex<PropagationMode>,
     /// Read-only status
@@ -492,14 +492,17 @@ impl Mountpoint {
 }
 
 fn is_mount_ancestor_of(mp1: &Arc<Mountpoint>, mp2: &Arc<Mountpoint>) -> bool {
+    if Arc::ptr_eq(mp1, mp2) {
+        return false;
+    }
     let mut cur = mp2.clone();
     let mut visited = vec![mp2.id];
     loop {
-        if Arc::ptr_eq(mp1, &cur) {
-            return true;
-        }
         let next = cur.location().map(|loc| loc.mountpoint().clone());
         if let Some(next_mp) = next {
+            if Arc::ptr_eq(mp1, &next_mp) {
+                return true;
+            }
             if visited.contains(&next_mp.id) {
                 break;
             }
