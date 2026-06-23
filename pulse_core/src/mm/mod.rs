@@ -2,7 +2,7 @@ mod loader;
 
 use axerrno::AxResult;
 use axmm::AddrSpace;
-pub use loader::{load_user_app, prefault_range};
+pub use loader::{check_elf_header, load_user_app, prefault_range};
 
 /// If the target architecture requires it, the kernel portion of the address
 /// space will be copied to the user address space.

@@ -203,8 +203,10 @@ impl Process {
         let (path, argv) = resolve_exec_path_and_args(&fs_ctx, path, args)?;
         let argv_refs: Vec<&str> = argv.iter().map(|s| s.as_str()).collect();
 
+        // Validate ELF header and interpreter in reversible phase
+        crate::mm::check_elf_header(&path)?;
+
         // Build the new image in an isolated address space first.
-        // If loading fails, the current process image remains intact.
         let mut new_aspace = axmm::new_user_aspace(va!(USER_SPACE_BASE), USER_SPACE_SIZE)?;
         let stack_bottom = USER_STACK_TOP - USER_STACK_SIZE;
         new_aspace.map_alloc(
@@ -220,15 +222,38 @@ impl Process {
             false,
         )?;
 
-        let load_info = crate::mm::load_user_app(&mut new_aspace, &path, &argv_refs, envs)?;
-
         let new_aspace_handle = Arc::new(RwLock::new(new_aspace));
         let new_pt_root = new_aspace_handle.read().page_table_root();
         let new_asid = new_aspace_handle.read().asid();
-        let _old_aspace = self.replace_aspace_handle(new_aspace_handle);
+        let old_aspace = self.replace_aspace_handle(new_aspace_handle.clone());
 
         axtask::set_current_page_table_root(new_pt_root, new_asid);
+        self.activate(); // Activate new page table
+        drop(old_aspace); // Free old address space immediately to reduce memory peak!
+
+        let load_info = match crate::mm::load_user_app(&mut *new_aspace_handle.write(), &path, &argv_refs, envs) {
+            Ok(info) => info,
+            Err(e) => {
+                axlog::error!("sys_execve load_user_app failed after commit: {:?}", e);
+                // Since the old address space was freed, we cannot return an error to user mode.
+                // Terminate the current thread/process directly.
+                if let Ok(thread) = super::current_thread() {
+                    thread.exit_current(-1);
+                } else {
+                    axtask::exit(-1);
+                }
+            }
+        };
+
+        // Flush TLB and instruction cache after loading is complete
         self.activate();
+        unsafe {
+            #[cfg(target_arch = "riscv64")]
+            core::arch::asm!("fence.i", options(nostack, preserves_flags));
+            #[cfg(target_arch = "loongarch64")]
+            core::arch::asm!("dbar 0; ibar 0", options(nostack, preserves_flags));
+        }
+
         self.complete_vfork();
 
         self.detach_all_shared_memory();

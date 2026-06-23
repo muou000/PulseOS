@@ -439,11 +439,34 @@ fn read_elf_range(path: &str, offset: u64, len: usize) -> AxResult<Vec<u8>> {
             offset,
             len,
             read,
-            whole.len()
+            whole.len(),
         );
         return Err(AxError::InvalidExecutable);
     }
     Ok(whole[start..end].to_vec())
+}
+
+pub fn check_elf_header(path: &str) -> AxResult<()> {
+    axlog::debug!("check_elf_header: path={:?}", path);
+    let main_image = read_elf_file(path)?;
+    let main_data = main_image.bytes();
+    if main_data.is_empty() {
+        return Err(AxError::InvalidExecutable);
+    }
+    let main_elf = ElfFile::new(main_data).map_err(|_| AxError::InvalidExecutable)?;
+    validate_machine(&main_elf, path)?;
+
+    // Check interpreter if present
+    if let Some(interp_path) = read_interp_path(&main_elf, main_data)? {
+        let interp_image = read_elf_file(&interp_path)?;
+        let interp_data = interp_image.bytes();
+        if interp_data.is_empty() {
+            return Err(AxError::InvalidExecutable);
+        }
+        let interp_elf = ElfFile::new(interp_data).map_err(|_| AxError::InvalidExecutable)?;
+        validate_machine(&interp_elf, &interp_path)?;
+    }
+    Ok(())
 }
 
 pub fn load_user_app(
