@@ -72,7 +72,7 @@ pub fn sys_brk(addr: usize) -> isize {
             let mut aspace = aspace_handle.write();
             let flags = MappingFlags::READ | MappingFlags::WRITE | MappingFlags::USER;
             if let Err(e) = aspace.map_alloc(VirtAddr::from(start), end - start, flags, false) {
-                axlog::error!("sys_brk: failed to expand heap: {:?}", e);
+                axlog::debug!("sys_brk: failed to expand heap: {:?}", e);
                 return old_heap_top as isize;
             }
             drop(aspace);
@@ -98,7 +98,7 @@ pub fn sys_brk(addr: usize) -> isize {
             let aspace_handle = proc.aspace_handle();
             let mut aspace = aspace_handle.write();
             if let Err(e) = aspace.unmap(VirtAddr::from(start), end - start) {
-                axlog::error!("sys_brk: failed to shrink heap: {:?}", e);
+                axlog::debug!("sys_brk: failed to shrink heap: {:?}", e);
                 return old_heap_top as isize;
             }
             let _ = proc.memlock_unlock_range(start, end - start);
@@ -245,12 +245,12 @@ pub fn sys_mmap(
                     ) {
                         Some(vaddr) => vaddr.as_usize(),
                         None => {
-                            axlog::error!("sys_mmap: no free area found");
+                            axlog::debug!("sys_mmap: no free area found");
                             return -crate::LinuxError::ENOMEM.code() as isize;
                         }
                     }
                 } else {
-                    axlog::error!("sys_mmap: no free area found");
+                    axlog::debug!("sys_mmap: no free area found");
                     return -crate::LinuxError::ENOMEM.code() as isize;
                 }
             }
@@ -379,7 +379,7 @@ pub fn sys_mmap(
             map_addr as isize
         }
         Err(e) => {
-            axlog::error!("sys_mmap: failed to map at {:#x}: {:?}", map_addr, e);
+            axlog::debug!("sys_mmap: failed to map at {:#x}: {:?}", map_addr, e);
             -LinuxError::from(e).code() as isize
         }
     }
@@ -417,7 +417,7 @@ pub fn sys_munmap(addr: usize, length: usize) -> isize {
             0
         }
         Err(e) => {
-            axlog::error!("sys_munmap: failed: {:?}", e);
+            axlog::debug!("sys_munmap: failed: {:?}", e);
             -LinuxError::from(e).code() as isize
         }
     }
@@ -514,7 +514,7 @@ pub fn sys_mprotect(addr: usize, length: usize, prot: usize) -> isize {
     match aspace.protect(start, aligned_length, map_flags) {
         Ok(_) => 0,
         Err(e) => {
-            axlog::error!(
+            axlog::debug!(
                 "sys_mprotect: failed to protect [{:#x}, {:#x}): {:?}",
                 addr,
                 addr + aligned_length,

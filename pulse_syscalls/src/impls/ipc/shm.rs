@@ -141,7 +141,7 @@ pub fn sys_shmat(shmid: i32, shmaddr: usize, shmflg: i32) -> isize {
         ) {
             Some(vaddr) => vaddr.as_usize(),
             None => {
-                axlog::error!("sys_shmat: no free area found");
+                axlog::debug!("sys_shmat: no free area found");
                 return -LinuxError::ENOMEM.code() as isize;
             }
         }
@@ -155,7 +155,7 @@ pub fn sys_shmat(shmid: i32, shmaddr: usize, shmflg: i32) -> isize {
     // Map the shared physical pages into this process's address space.
     let paddr = virt_to_phys(VirtAddr::from(inner.addr));
     if let Err(e) = aspace.map_linear(VirtAddr::from(map_addr), paddr, length, mapping_flags) {
-        axlog::error!("sys_shmat: map_linear failed: {:?}", e);
+        axlog::debug!("sys_shmat: map_linear failed: {:?}", e);
         return -LinuxError::from(e).code() as isize;
     }
 

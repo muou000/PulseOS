@@ -16,7 +16,7 @@ fn handle_illegal_instruction(tf: &mut TrapFrame, _vaddr: usize, is_user: bool) 
             #[cfg(target_arch = "loongarch64")]
             let pc = tf.era;
 
-            axlog::error!(
+            axlog::warn!(
                 "Illegal instruction! pid={} exe={:?} ip={:#x}",
                 thread.process().pid(),
                 thread.process().exec_path(),
@@ -38,7 +38,7 @@ fn handle_address_error(tf: &mut TrapFrame, vaddr: usize, is_user: bool) -> bool
             #[cfg(target_arch = "loongarch64")]
             let pc = tf.era;
 
-            axlog::error!(
+            axlog::warn!(
                 "Address error! pid={} exe={:?} ip={:#x} vaddr={:#x}",
                 thread.process().pid(),
                 thread.process().exec_path(),
@@ -151,12 +151,12 @@ fn handle_page_fault(vaddr: VirtAddr, access_flags: MappingFlags, is_user: bool)
     } else {
         let leave_ns = axhal::time::monotonic_time_nanos() as u64;
         proc.add_sys_time_ns(leave_ns.saturating_sub(enter_ns));
-        axlog::error!(
+        axlog::warn!(
             "Failed to handle page fault! pid={} exe={:?}",
             proc.pid(),
             proc.exec_path()
         );
-        axlog::error!("  vaddr={:#x}, flags={:?}", vaddr, access_flags);
+        axlog::warn!("  vaddr={:#x}, flags={:?}", vaddr, access_flags);
 
         let mut signo = 11; // Default to SIGSEGV
         let aspace_handle = proc.aspace_handle();
