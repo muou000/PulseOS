@@ -53,7 +53,7 @@ fn validate_machine(elf: &ElfFile<'_>, path: &str) -> AxResult {
     if ok {
         Ok(())
     } else {
-        axlog::error!(
+        axlog::warn!(
             "ELF machine {:?} of {} does not match current arch",
             machine,
             path
@@ -433,7 +433,7 @@ fn read_elf_range(path: &str, offset: u64, len: usize) -> AxResult<Vec<u8>> {
     let start = usize::try_from(offset).map_err(|_| AxError::InvalidExecutable)?;
     let end = start.checked_add(len).ok_or(AxError::InvalidExecutable)?;
     if end > whole.len() {
-        axlog::error!(
+        axlog::warn!(
             "short read while loading {}: offset={:#x} size={:#x} read={:#x} whole_len={:#x}",
             path,
             offset,
@@ -495,7 +495,7 @@ pub fn load_user_app(
 
     let interp_path = read_interp_path(&main_elf, main_data)?;
     if main_elf.header.pt2.type_().as_type() == ElfType::SharedObject && interp_path.is_none() {
-        axlog::error!("ET_DYN executable {} has no PT_INTERP", path);
+        axlog::warn!("ET_DYN executable {} has no PT_INTERP", path);
         return Err(AxError::Unsupported);
     }
 

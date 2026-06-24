@@ -488,7 +488,7 @@ pub fn sys_mkdirat(dirfd: i32, pathname: usize, mode: usize) -> isize {
             0
         }
         Err(e) => {
-            axlog::error!(
+            axlog::debug!(
                 "sys_mkdirat: failed to create directory '{}': {:?}",
                 path,
                 e
@@ -673,7 +673,7 @@ pub fn sys_mount(
     let target_loc = match ctx.resolve(Path::new(target_path_str)) {
         Ok(loc) => loc,
         Err(e) => {
-            axlog::error!(
+            axlog::debug!(
                 "sys_mount: failed to resolve target path '{}': {:?}",
                 target_path_str,
                 e
@@ -822,7 +822,7 @@ pub fn sys_mount(
                 return 0;
             }
             Err(e) => {
-                axlog::error!("sys_mount: bind mount failed: {:?}", e);
+                axlog::debug!("sys_mount: bind mount failed: {:?}", e);
                 return -LinuxError::from(e.canonicalize()).code() as isize;
             }
         }
@@ -889,7 +889,7 @@ pub fn sys_mount(
     let fs = match fs_res {
         Ok(fs) => fs,
         Err(e) => {
-            axlog::error!(
+            axlog::debug!(
                 "sys_mount: failed to find filesystem for source '{}', fstype '{}': {:?}",
                 source_path,
                 fstype_name,
@@ -924,7 +924,7 @@ pub fn sys_mount(
             0
         }
         Err(e) => {
-            axlog::error!("sys_mount: mount operation failed: {:?}", e);
+            axlog::debug!("sys_mount: mount operation failed: {:?}", e);
             -LinuxError::from(e.canonicalize()).code() as isize
         }
     }
@@ -998,7 +998,7 @@ pub fn sys_umount2(target: usize, flags: usize) -> isize {
                     let _ = axfs::unregister_mounted_mountpoint(&peer_path);
                 }
                 Err(e) => {
-                    axlog::error!(
+                    axlog::warn!(
                         "sys_umount2: failed to unmount propagated peer '{}': {:?}",
                         peer_path,
                         e

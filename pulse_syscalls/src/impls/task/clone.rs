@@ -165,7 +165,7 @@ pub fn sys_clone(tf: &TrapFrame, args: [usize; 6]) -> isize {
         ) {
             Ok(child_proc) => (child_proc.pid() as usize, None),
             Err(e) => {
-                axlog::error!("fork error: {:?}", e);
+                axlog::debug!("fork error: {:?}", e);
                 return ax_error_to_linux_ret(e);
             }
         }
@@ -189,7 +189,7 @@ pub fn sys_clone(tf: &TrapFrame, args: [usize; 6]) -> isize {
         ) {
             Ok((tid, child_proc)) => (tid as usize, child_proc),
             Err(e) => {
-                axlog::error!("clone error: {:?}", e);
+                axlog::debug!("clone error: {:?}", e);
                 return ax_error_to_linux_ret(e);
             }
         }
@@ -384,7 +384,7 @@ pub fn sys_clone3(tf: &TrapFrame, args: [usize; 6]) -> isize {
         ) {
             Ok(child_proc) => (child_proc.pid() as usize, None),
             Err(e) => {
-                axlog::error!("fork error: {:?}", e);
+                axlog::debug!("fork error: {:?}", e);
                 return ax_error_to_linux_ret(e);
             }
         }
@@ -407,7 +407,7 @@ pub fn sys_clone3(tf: &TrapFrame, args: [usize; 6]) -> isize {
         ) {
             Ok((tid, child_proc)) => (tid as usize, child_proc),
             Err(e) => {
-                axlog::error!("clone error: {:?}", e);
+                axlog::debug!("clone error: {:?}", e);
                 return ax_error_to_linux_ret(e);
             }
         }
