@@ -329,7 +329,9 @@ impl axfs::ProcfsProcessProvider for PulseProcessProvider {
         let vm_size_kb = vm_size / 1024;
         let vm_rss_kb = vm_size_kb;
 
-        Some(alloc::format!(
+        let mut out = String::with_capacity(512);
+        core::write!(
+            out,
             "Name:\t{}\nUmask:\t{:04o}\nState:\t{}\nTgid:\t{}\nPid:\t{}\nPPid:\t{}\nUid:\t{} {} \
              {} {}\nGid:\t{} {} {} {}\nThreads:\t{}\nVmSize:\t{} kB\nVmRSS:\t{} kB\nVmData:\t{} \
              kB\n",
@@ -351,7 +353,9 @@ impl axfs::ProcfsProcessProvider for PulseProcessProvider {
             vm_size_kb,
             vm_rss_kb,
             vm_size_kb
-        ))
+        )
+        .unwrap();
+        Some(out)
     }
 
     fn exe(&self, pid: u64) -> Option<String> {
@@ -401,7 +405,9 @@ impl axfs::ProcfsProcessProvider for PulseProcessProvider {
         });
         let rss_pages = vm_size / 4096;
 
-        Some(alloc::format!(
+        let mut out = String::with_capacity(256);
+        core::write!(
+            out,
             "{} ({}) {} {} 0 0 0 -1 0 0 0 0 0 {} {} {} {} 20 0 {} 0 {} {} {} {} 0 0 0 0 0 0 0 0 0 \
              0 0 0 17 0 0 0 0 0 0 0 0 0 0 0 0 0 0\n",
             pid,
@@ -417,7 +423,9 @@ impl axfs::ProcfsProcessProvider for PulseProcessProvider {
             vm_size,
             rss_pages,
             u64::MAX
-        ))
+        )
+        .unwrap();
+        Some(out)
     }
 
     fn process_fds(&self, pid: u64) -> Option<Vec<u32>> {
@@ -463,7 +471,7 @@ impl axfs::ProcfsProcessProvider for PulseProcessProvider {
         }
         let aspace_handle = proc.aspace_handle();
         let aspace = aspace_handle.read();
-        let mut out = String::new();
+        let mut out = String::with_capacity(1024);
 
         aspace.for_each_area_with_backend(|start, end, flags, backend| {
             if start.as_usize() >= 0x8000_0000_0000 {
@@ -488,9 +496,10 @@ impl axfs::ProcfsProcessProvider for PulseProcessProvider {
 
             let mut is_shared = false;
             let mut offset = 0;
-            let mut path_str = String::new();
+            let mut path_opt = None;
             let mut inode = 0;
-            let mut dev_str = "00:00".to_string();
+            let mut dev_major = 0;
+            let mut dev_minor = 0;
 
             let mut curr_backend = backend.clone();
             while let axmm::Backend::Cow(cow) = &curr_backend {
@@ -508,22 +517,21 @@ impl axfs::ProcfsProcessProvider for PulseProcessProvider {
                     let loc = cached_file.location();
                     if let Ok(meta) = loc.metadata() {
                         inode = meta.inode;
-                        let major = meta.device >> 8;
-                        let minor = meta.device & 0xff;
-                        dev_str = alloc::format!("{:02x}:{:02x}", major, minor);
+                        dev_major = meta.device >> 8;
+                        dev_minor = meta.device & 0xff;
                     }
                     if let Ok(path) = loc.absolute_path() {
-                        path_str = path.as_str().to_string();
+                        path_opt = Some(path);
                     }
                 }
                 _ => {}
             }
 
             let p_char = if is_shared { "s" } else { "p" };
-            if path_str.is_empty() {
+            if let Some(path) = path_opt {
                 core::write!(
                     out,
-                    "{:x}-{:x} {}{}{}{} {:08x} {} {}\n",
+                    "{:x}-{:x} {}{}{}{} {:08x} {:02x}:{:02x} {:<7} {}\n",
                     start.as_usize(),
                     end.as_usize(),
                     r,
@@ -531,14 +539,16 @@ impl axfs::ProcfsProcessProvider for PulseProcessProvider {
                     x,
                     p_char,
                     offset,
-                    dev_str,
-                    inode
+                    dev_major,
+                    dev_minor,
+                    inode,
+                    path.as_str()
                 )
                 .unwrap();
             } else {
                 core::write!(
                     out,
-                    "{:x}-{:x} {}{}{}{} {:08x} {} {:<7} {}\n",
+                    "{:x}-{:x} {}{}{}{} {:08x} {:02x}:{:02x} {}\n",
                     start.as_usize(),
                     end.as_usize(),
                     r,
@@ -546,9 +556,9 @@ impl axfs::ProcfsProcessProvider for PulseProcessProvider {
                     x,
                     p_char,
                     offset,
-                    dev_str,
-                    inode,
-                    path_str
+                    dev_major,
+                    dev_minor,
+                    inode
                 )
                 .unwrap();
             }
@@ -643,7 +653,9 @@ impl axfs::ProcfsProcessProvider for PulseProcessProvider {
         let vm_size_kb = vm_size / 1024;
         let vm_rss_kb = vm_size_kb;
 
-        Some(alloc::format!(
+        let mut out = String::with_capacity(512);
+        core::write!(
+            out,
             "Name:\t{}\nUmask:\t{:04o}\nState:\t{}\nTgid:\t{}\nPid:\t{}\nPPid:\t{}\nUid:\t{} {} \
              {} {}\nGid:\t{} {} {} {}\nThreads:\t{}\nVmSize:\t{} kB\nVmRSS:\t{} kB\nVmData:\t{} \
              kB\n",
@@ -665,7 +677,9 @@ impl axfs::ProcfsProcessProvider for PulseProcessProvider {
             vm_size_kb,
             vm_rss_kb,
             vm_size_kb
-        ))
+        )
+        .unwrap();
+        Some(out)
     }
 
     fn thread_stat(&self, pid: u64, tid: u64) -> Option<String> {
@@ -697,7 +711,9 @@ impl axfs::ProcfsProcessProvider for PulseProcessProvider {
         });
         let rss_pages = vm_size / 4096;
 
-        Some(alloc::format!(
+        let mut out = String::with_capacity(256);
+        core::write!(
+            out,
             "{} ({}) {} {} 0 0 0 -1 0 0 0 0 0 {} {} {} {} 20 0 {} 0 {} {} {} {} 0 0 0 0 0 0 0 0 0 \
              0 0 0 17 0 0 0 0 0 0 0 0 0 0 0 0 0 0\n",
             tid,
@@ -713,7 +729,9 @@ impl axfs::ProcfsProcessProvider for PulseProcessProvider {
             vm_size,
             rss_pages,
             u64::MAX
-        ))
+        )
+        .unwrap();
+        Some(out)
     }
 }
 
