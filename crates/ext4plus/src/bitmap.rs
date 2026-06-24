@@ -75,17 +75,16 @@ impl BitmapHandle {
         range: impl RangeBounds<u32>,
         ext4: &Ext4,
     ) -> Result<Option<u32>, Ext4Error> {
-        let block_size = ext4.0.superblock.block_size().to_usize();
-        let mut dst = vec![0; block_size];
-        ext4.read_from_block(self.block, 0, &mut dst).await?;
-        for byte_index in 0..block_size {
-            let byte_val = dst[byte_index];
+        let mut dst = [0; 1];
+        for byte_index in 0..ext4.0.superblock.block_size().to_u32() {
+            ext4.read_from_block(self.block, byte_index, &mut dst)
+                .await?;
             if value {
                 // Look for a bit with value 1.
-                if byte_val != 0 {
+                if dst[0] != 0 {
                     for bit_index in 0..8 {
-                        if (byte_val & (1 << bit_index)) != 0 {
-                            let index = calc_index(byte_index as u32, bit_index);
+                        if (dst[0] & (1 << bit_index)) != 0 {
+                            let index = calc_index(byte_index, bit_index);
                             if !range.contains(&(index)) {
                                 continue;
                             }
@@ -95,10 +94,10 @@ impl BitmapHandle {
                 }
             } else {
                 // Look for a bit with value 0.
-                if byte_val != 0xFF {
+                if dst[0] != 0xFF {
                     for bit_index in 0..8 {
-                        if (byte_val & (1 << bit_index)) == 0 {
-                            let index = calc_index(byte_index as u32, bit_index);
+                        if (dst[0] & (1 << bit_index)) == 0 {
+                            let index = calc_index(byte_index, bit_index);
                             if !range.contains(&(index)) {
                                 continue;
                             }
@@ -121,15 +120,14 @@ impl BitmapHandle {
         range: impl RangeBounds<u32>,
         ext4: &Ext4,
     ) -> Result<Option<u32>, Ext4Error> {
-        let block_size = ext4.0.superblock.block_size().to_usize();
-        let mut dst = vec![0; block_size];
-        ext4.read_from_block(self.block, 0, &mut dst).await?;
+        let mut dst = [0; 1];
         let mut count: u32 = 0;
-        for byte_index in 0..block_size {
-            let byte_val = dst[byte_index];
+        for byte_index in 0..ext4.0.superblock.block_size().to_u32() {
+            ext4.read_from_block(self.block, byte_index, &mut dst)
+                .await?;
             for bit_index in 0..8 {
-                if ((byte_val & (1 << bit_index)) != 0) == value {
-                    let index = calc_index(byte_index as u32, bit_index);
+                if ((dst[0] & (1 << bit_index)) != 0) == value {
+                    let index = calc_index(byte_index, bit_index);
 
                     if !range.contains(&(index)) {
                         count = 0;

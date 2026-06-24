@@ -60,7 +60,6 @@ std = []
 sync = [
     "maybe-async/is_sync",
     "dep:spin",
-    "dep:axsync",
 ]
 
 [lib]
@@ -86,13 +85,6 @@ version = "0.2"
 [dependencies.spin]
 version = "0.10"
 optional = true
-
-[dependencies.axsync]
-path = "../../arceos/modules/axsync"
-optional = true
-
-[dependencies.log]
-version = "0.4"
 
 [dev-dependencies.anyhow]
 version = "1.0"

@@ -213,11 +213,9 @@ impl Superblock {
         {
             let mut checksum = Checksum::new();
             checksum.update(&bytes[..S_CHECKSUM_OFFSET]);
-            // Some prebuilt test images might have incorrect or outdated superblock checksums,
-            // so we skip enforcing this check to ensure compatibility and reliability.
-            // if s_checksum != checksum.finalize() {
-            //     return Err(CorruptKind::SuperblockChecksum.into());
-            // }
+            if s_checksum != checksum.finalize() {
+                return Err(CorruptKind::SuperblockChecksum.into());
+            }
         }
 
         let checksum_seed = if incompatible_features

@@ -338,10 +338,6 @@ impl ExtentNode {
             }
         }
         if let Some(checksum_base) = checksum_base {
-            let checksum_offset = self.header.checksum_offset();
-            if bytes.len() < checksum_offset {
-                bytes.resize(checksum_offset, 0);
-            }
             let mut checksum = checksum_base.clone();
             checksum.update(&bytes);
             bytes.extend_from_slice(&checksum.finalize().to_le_bytes());
@@ -475,16 +471,8 @@ impl ExtentTree {
     async fn collect_extents(&self) -> Result<Vec<Extent>, Ext4Error> {
         let mut out = Vec::new();
         let mut stack = vec![self.node.clone()];
-        let mut visited = Vec::new();
 
         while let Some(node) = stack.pop() {
-            if let Some(block) = node.block {
-                if visited.contains(&block) {
-                    log::error!("collect_extents: cycle detected on block {} for inode {}", block, self.inode);
-                    return Err(CorruptKind::ExtentDepth(self.inode).into());
-                }
-                visited.push(block);
-            }
             match node.entries {
                 ExtentNodeEntries::Leaf(extents) => out.extend(extents),
                 ExtentNodeEntries::Internal(internal_nodes) => {
@@ -510,16 +498,8 @@ impl ExtentTree {
     ) -> Result<Vec<FsBlockIndex>, Ext4Error> {
         let mut out = Vec::new();
         let mut stack = vec![self.node.clone()];
-        let mut visited = Vec::new();
 
         while let Some(node) = stack.pop() {
-            if let Some(block) = node.block {
-                if visited.contains(&block) {
-                    log::error!("collect_metadata_blocks: cycle detected on block {} for inode {}", block, self.inode);
-                    return Err(CorruptKind::ExtentDepth(self.inode).into());
-                }
-                visited.push(block);
-            }
             match node.entries {
                 ExtentNodeEntries::Leaf(_) => {}
                 ExtentNodeEntries::Internal(internal_nodes) => {
@@ -813,13 +793,7 @@ impl ExtentTree {
         block_index: FileBlockIndex,
     ) -> Result<Option<Extent>, Ext4Error> {
         let mut node = self.node.clone();
-        let mut depth_limit = 100;
         loop {
-            depth_limit -= 1;
-            if depth_limit == 0 {
-                log::error!("find_extent depth limit exceeded! block_index = {}", block_index);
-                return Err(CorruptKind::ExtentDepth(self.inode).into());
-            }
             match &node.entries {
                 ExtentNodeEntries::Leaf(extents) => {
                     for extent in extents {
@@ -836,18 +810,9 @@ impl ExtentTree {
                     let next_node_index =
                         match find_child_index(internal_nodes, block_index) {
                             Some(i) => i,
-                            None => {
-                                log::debug!("find_extent: find_child_index returned None for block_index = {}", block_index);
-                                return Ok(None);
-                            }
+                            None => return Ok(None),
                         };
                     let next_node_block = internal_nodes[next_node_index].block;
-                    log::debug!(
-                        "find_extent: block_index = {}, internal_nodes = {:?}, next_node_block = {}",
-                        block_index,
-                        internal_nodes.iter().map(|n| (n.block_within_file, n.block)).collect::<alloc::vec::Vec<_>>(),
-                        next_node_block
-                    );
                     let next_node_data =
                         self.ext4.read_block(next_node_block).await?;
                     node = ExtentNode::from_bytes(
