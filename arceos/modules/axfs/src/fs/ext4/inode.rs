@@ -627,12 +627,14 @@ impl DirNodeOps for Inode {
                         still_active = true;
                     }
                 }
+                if !still_active {
+                    active.remove(&child_ino);
+                }
                 still_active
             };
             if !has_other_active {
                 log::debug!("ext4: unlink deleting unlinked file (ino {}) immediately because no active references", child_ino);
                 fs.delete_file(child_inode).map_err(into_vfs_err)?;
-                self.fs.active_inodes.lock().remove(&child_ino);
                 crate::invalidate_file_cache(ext4_fs_id(&self.fs), child_ino as u64);
             }
         }
@@ -702,12 +704,14 @@ impl DirNodeOps for Inode {
                             still_active = true;
                         }
                     }
+                    if !still_active {
+                        active.remove(&dst_inode_ino);
+                    }
                     still_active
                 };
                 if !has_other_active {
                     log::debug!("ext4: rename deleting unlinked dst file (ino {}) immediately because no active references", dst_inode_ino);
                     fs.delete_file(dst_inode).map_err(into_vfs_err)?;
-                    dst_dir.fs.active_inodes.lock().remove(&dst_inode_ino);
                     crate::invalidate_file_cache(ext4_fs_id(&dst_dir.fs), dst_inode_ino as u64);
                 }
             }
@@ -735,12 +739,14 @@ impl DirNodeOps for Inode {
                         still_active = true;
                     }
                 }
+                if !still_active {
+                    active.remove(&src_ino);
+                }
                 still_active
             };
             if !has_other_active {
                 log::debug!("ext4: rename deleting unlinked src file (ino {}) immediately because no active references", src_ino);
                 fs.delete_file(src_inode).map_err(into_vfs_err)?;
-                self.fs.active_inodes.lock().remove(&src_ino);
                 crate::invalidate_file_cache(ext4_fs_id(&self.fs), src_ino as u64);
             }
         }
@@ -756,20 +762,17 @@ impl DirNodeOps for Inode {
 impl Drop for Inode {
     fn drop(&mut self) {
         let is_unlinked = self.is_unlinked.load(core::sync::atomic::Ordering::Relaxed);
-        let has_other_active = {
-            let mut active = self.fs.active_inodes.lock();
-            let mut still_active = false;
-            if let Some(list) = active.get_mut(&self.ino) {
-                list.retain(|w| w.strong_count() > 0);
-                if !list.is_empty() {
-                    still_active = true;
-                }
+        let mut active = self.fs.active_inodes.lock();
+        let mut still_active = false;
+        if let Some(list) = active.get_mut(&self.ino) {
+            list.retain(|w| w.strong_count() > 0);
+            if !list.is_empty() {
+                still_active = true;
             }
-            still_active
-        };
+        }
 
-        if !has_other_active {
-            self.fs.active_inodes.lock().remove(&self.ino);
+        if !still_active {
+            active.remove(&self.ino);
             if is_unlinked {
                 crate::invalidate_file_cache(ext4_fs_id(&self.fs), self.ino as u64);
                 self.fs.pending_deletions.lock().push(self.ino);
