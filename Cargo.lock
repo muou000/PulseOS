@@ -617,6 +617,7 @@ dependencies = [
  "axtask",
  "kspin",
  "lock_api",
+ "spin 0.10.0",
 ]
 
 [[package]]

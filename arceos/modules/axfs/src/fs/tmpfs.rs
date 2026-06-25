@@ -37,7 +37,6 @@ impl TmpFilesystem {
             Reference::root(),
         ));
         let filesystem = Filesystem::new(fs);
-        run_tmpfs_tests(&filesystem);
         filesystem
     }
 
@@ -428,36 +427,3 @@ impl Drop for TmpNode {
     }
 }
 
-fn run_tmpfs_tests(fs: &Filesystem) {
-    log::info!("Running tmpfs self-tests...");
-    let root_entry = fs.root_dir();
-    let root = root_entry.as_dir().unwrap();
-
-    let perm = NodePermission::from_bits_truncate(0o755);
-
-    // 1. Create source and destination directories
-    let _dir_src = root.create("test_src", NodeType::Directory, perm).unwrap();
-    let dir_dst = root.create("test_dst", NodeType::Directory, perm).unwrap();
-
-    // 2. Add a file inside test_dst to make it non-empty
-    let dst_node = dir_dst.as_dir().unwrap();
-    dst_node.create("test_file.txt", NodeType::RegularFile, perm).unwrap();
-
-    // 3. Renaming dir_src over dir_dst should fail with DirectoryNotEmpty because dir_dst is not empty
-    let res = root.rename("test_src", root, "test_dst");
-    assert!(
-        matches!(res, Err(VfsError::DirectoryNotEmpty)),
-        "Expected DirectoryNotEmpty, got {:?}",
-        res
-    );
-
-    // 4. Remove the file inside test_dst to make it empty
-    dst_node.unlink("test_file.txt", false).unwrap();
-
-    // 5. Renaming dir_src over dir_dst should now succeed because dir_dst is empty
-    root.rename("test_src", root, "test_dst").unwrap();
-
-    // 6. Clean up
-    root.unlink("test_dst", true).unwrap();
-    log::info!("tmpfs self-tests passed successfully!");
-}

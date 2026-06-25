@@ -14,6 +14,7 @@ use axsync::Mutex;
 struct CacheBlock {
     data: Vec<u8>,
     dirty: bool,
+    flushing: bool,
 }
 
 pub(crate) struct Ext4Disk<D: BlockDriverOps> {
@@ -23,20 +24,45 @@ pub(crate) struct Ext4Disk<D: BlockDriverOps> {
     block_size: core::sync::atomic::AtomicUsize,
 }
 
+struct FlushingGuard<'a, D: BlockDriverOps> {
+    disk: &'a Ext4Disk<D>,
+    offsets: Vec<usize>,
+}
+
+impl<'a, D: BlockDriverOps> Drop for FlushingGuard<'a, D> {
+    fn drop(&mut self) {
+        let mut cache = self.disk.block_cache.lock();
+        for offset in &self.offsets {
+            if let Some(block) = cache.get_mut(offset) {
+                block.flushing = false;
+            }
+        }
+    }
+}
+
 impl<D: BlockDriverOps + 'static> crate::disk::DiskFlushable for Ext4Disk<D> {
     fn flush_disk(&self) -> axdriver::prelude::DevResult<()> {
         let block_size = self.block_size();
-        let mut dirty_blocks = {
+        let (dirty_blocks, flushing_offsets) = {
             let mut cache = self.block_cache.lock();
             let mut list = vec![];
+            let mut offsets = vec![];
             for (&offset, block) in cache.iter_mut() {
                 if block.dirty {
+                    block.flushing = true;
                     list.push((offset, block.data.clone()));
+                    offsets.push(offset);
                 }
             }
-            list
+            (list, offsets)
         };
         
+        let _guard = FlushingGuard {
+            disk: self,
+            offsets: flushing_offsets,
+        };
+
+        let mut dirty_blocks = dirty_blocks;
         dirty_blocks.sort_by_key(|(offset, _)| *offset);
 
         let mut i = 0;
@@ -60,7 +86,10 @@ impl<D: BlockDriverOps + 'static> crate::disk::DiskFlushable for Ext4Disk<D> {
                     let written_data = &dirty_blocks[k].1;
                     if let Some(block) = cache.get_mut(&offset) {
                         if &block.data == written_data {
-                            block.dirty = false;
+                            if block.flushing {
+                                block.dirty = false;
+                                block.flushing = false;
+                            }
                         }
                     }
                 }
@@ -83,6 +112,23 @@ impl<D: BlockDriverOps + 'static> Ext4Disk<D> {
         });
         crate::disk::DISK_FLUSHERS.lock().push(Arc::downgrade(&disk) as _);
         disk
+    }
+
+    fn evict_if_full(&self, cache: &mut LruCache<usize, CacheBlock>, to_write: &mut Vec<(usize, Vec<u8>)>) {
+        if cache.len() >= cache.cap().get() {
+            let ev_key = cache.iter()
+                .rev()
+                .filter(|(_, block)| !block.flushing)
+                .map(|(key, _)| *key)
+                .next();
+            if let Some(key) = ev_key {
+                if let Some((ev_offset, ev_block)) = cache.pop_entry(&key) {
+                    if ev_block.dirty {
+                        to_write.push((ev_offset, ev_block.data));
+                    }
+                }
+            }
+        }
     }
 
     fn byte_range(&self, offset: usize, len: usize) -> (u64, usize, usize) {
@@ -192,13 +238,9 @@ impl<D: BlockDriverOps + 'static> Ext4Disk<D> {
                         let block_start = start - b_offset;
                         buf[buf_start..buf_start + overlap_len].copy_from_slice(&b_data[block_start..block_start + overlap_len]);
                         
-                        let block = CacheBlock { data: b_data, dirty: false };
-                        if !cache.contains(&b_offset) && cache.len() >= cache.cap().get() {
-                            if let Some((ev_offset, ev_block)) = cache.pop_lru() {
-                                if ev_block.dirty {
-                                    to_write.push((ev_offset, ev_block.data));
-                                }
-                            }
+                        let block = CacheBlock { data: b_data, dirty: false, flushing: false };
+                        if !cache.contains(&b_offset) {
+                            self.evict_if_full(&mut cache, &mut to_write);
                         }
                         cache.put(b_offset, block);
                     }
@@ -241,6 +283,7 @@ impl<D: BlockDriverOps + 'static> Ext4Disk<D> {
                     block.data[block_start..block_start + overlap_len]
                         .copy_from_slice(&data[data_start..data_start + overlap_len]);
                     block.dirty = true;
+                    block.flushing = false;
                     true
                 } else {
                     false
@@ -258,12 +301,12 @@ impl<D: BlockDriverOps + 'static> Ext4Disk<D> {
                 let mut to_write = None;
                 {
                     let mut cache = self.block_cache.lock();
-                    let block = CacheBlock { data: block_data, dirty: true };
-                    if !cache.contains(&current_block_offset) && cache.len() >= cache.cap().get() {
-                        if let Some((ev_offset, ev_block)) = cache.pop_lru() {
-                            if ev_block.dirty {
-                                to_write = Some((ev_offset, ev_block.data));
-                            }
+                    let block = CacheBlock { data: block_data, dirty: true, flushing: false };
+                    if !cache.contains(&current_block_offset) {
+                        let mut ev_write = Vec::new();
+                        self.evict_if_full(&mut cache, &mut ev_write);
+                        if let Some((offset, data)) = ev_write.pop() {
+                            to_write = Some((offset, data));
                         }
                     }
                     cache.put(current_block_offset, block);
@@ -313,13 +356,9 @@ impl<D: BlockDriverOps + 'static> Ext4Disk<D> {
                             .copy_from_slice(&data[data_start..data_start + overlap_len]);
                         
                         // Cache put (and handle eviction writebacks)
-                        let block = CacheBlock { data: b_data, dirty: true };
-                        if !cache.contains(&b_offset) && cache.len() >= cache.cap().get() {
-                            if let Some((ev_offset, ev_block)) = cache.pop_lru() {
-                                if ev_block.dirty {
-                                    to_write.push((ev_offset, ev_block.data));
-                                }
-                            }
+                        let block = CacheBlock { data: b_data, dirty: true, flushing: false };
+                        if !cache.contains(&b_offset) {
+                            self.evict_if_full(&mut cache, &mut to_write);
                         }
                         cache.put(b_offset, block);
                     }

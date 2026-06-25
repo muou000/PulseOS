@@ -137,10 +137,14 @@ pub fn flush_all_disks() -> DevResult<()> {
         });
         active
     };
+    let mut ret = Ok(());
     for flusher in flushers {
-        flusher.flush_disk()?;
+        if let Err(e) = flusher.flush_disk() {
+            log::error!("Failed to flush disk: {:?}", e);
+            ret = Err(e);
+        }
     }
-    Ok(())
+    ret
 }
 
 /// A disk device with a cursor.
