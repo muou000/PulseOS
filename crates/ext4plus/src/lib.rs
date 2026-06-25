@@ -793,6 +793,17 @@ impl Ext4 {
                     ))
                     .unwrap();
 
+                if let Err(err) = self.clear_block(block_index).await {
+                    let block_bitmap_handle = self.get_block_bitmap_handle(bg_id);
+                    let _ = block_bitmap_handle.set(block_num, false, self).await;
+                    let _ = self.update_block_bitmap_checksum(bg_id, block_bitmap_handle).await;
+                    bg.set_free_blocks_count(free_blocks.get());
+                    let _ = bg.write(self).await;
+                    self.0.superblock.inc_free_blocks_count(1);
+                    let _ = self.0.superblock.write(self).await;
+                    return Err(err);
+                }
+
                 return Ok(block_index);
             }
 
@@ -862,6 +873,22 @@ impl Ext4 {
                 .ok_or(Ext4Error::NoSpace)?
                 .checked_add(u64::from(self.0.superblock.first_data_block()))
                 .ok_or(Ext4Error::NoSpace)?;
+
+                if let Err(err) = self.clear_blocks(block_index, num_blocks).await {
+                    let block_bitmap_handle = self.get_block_bitmap_handle(bg_id);
+                    for i in 0..num_blocks.get() {
+                        let _ = block_bitmap_handle
+                            .set(block_num.checked_add(i).unwrap(), false, self)
+                            .await;
+                    }
+                    let _ = self.update_block_bitmap_checksum(bg_id, block_bitmap_handle).await;
+                    bg.set_free_blocks_count(free_blocks);
+                    let _ = bg.write(self).await;
+                    self.0.superblock.inc_free_blocks_count(u64::from(num_blocks.get()));
+                    let _ = self.0.superblock.write(self).await;
+                    return Err(err);
+                }
+
                 return Ok(block_index);
             }
             bg_id = bg_id.saturating_add(1);
@@ -890,7 +917,6 @@ impl Ext4 {
         Err(Ext4Error::NoSpace)
     }
 
-    #[expect(unused)]
     #[maybe_async::maybe_async]
     pub(crate) async fn clear_block(
         &self,
@@ -900,7 +926,6 @@ impl Ext4 {
         self.write_to_block(block_index, 0, &zeroes).await
     }
 
-    #[expect(unused)]
     #[maybe_async::maybe_async]
     pub(crate) async fn clear_blocks(
         &self,
