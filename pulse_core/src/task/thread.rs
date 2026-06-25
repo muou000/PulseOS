@@ -7,7 +7,7 @@ use core::{
 use axerrno::{AxError, AxResult};
 use axhal::context::TrapFrame;
 use axtask::{AxTaskRef, AxTaskWeak, TaskExtSwitch, WaitQueue, def_task_ext};
-use spin::Mutex;
+use crate::sync::Mutex;
 
 use super::{Process, SignalAltStack, ThreadSignal};
 

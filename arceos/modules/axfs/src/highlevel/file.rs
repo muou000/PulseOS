@@ -53,6 +53,19 @@ fn prune_file_shared_states(registry: &mut BTreeMap<FileCacheKey, Weak<CachedFil
     registry.retain(|_, state| state.strong_count() > 0);
 }
 
+pub fn invalidate_file_cache(fs_id: usize, inode: u64) {
+    let key = FileCacheKey { fs_id, inode };
+    let mut registry = FILE_SHARED_STATES.lock();
+    if let Some(weak_shared) = registry.remove(&key) {
+        if let Some(shared) = weak_shared.upgrade() {
+            let mut queue = RECENTLY_CLOSED_FILES.lock();
+            if let Some(pos) = queue.iter().position(|x| Arc::ptr_eq(x, &shared)) {
+                queue.remove(pos);
+            }
+        }
+    }
+}
+
 static FILE_SHARED_STATES: Lazy<SpinMutex<BTreeMap<FileCacheKey, Weak<CachedFileShared>>>> =
     Lazy::new(|| SpinMutex::new(BTreeMap::new()));
 
@@ -588,22 +601,35 @@ fn shared_file_state(location: &Location) -> Arc<CachedFileShared> {
     let key = file_cache_key(location);
     let in_memory = location.filesystem().name() == "tmpfs";
 
-    let mut registry = FILE_SHARED_STATES.lock();
-    if let Some(state) = registry.get(&key).and_then(Weak::upgrade) {
-        return state;
+    {
+        let registry = FILE_SHARED_STATES.lock();
+        if let Some(state) = registry.get(&key).and_then(Weak::upgrade) {
+            return state;
+        }
     }
-    prune_file_shared_states(&mut registry);
 
     let size = location.len().unwrap_or(0);
     let state = Arc::new(CachedFileShared::new(in_memory, size));
+
+    let mut registry = FILE_SHARED_STATES.lock();
+    if let Some(existing_state) = registry.get(&key).and_then(Weak::upgrade) {
+        return existing_state;
+    }
+    prune_file_shared_states(&mut registry);
     registry.insert(key, Arc::downgrade(&state));
     state
 }
 
 pub fn cached_file_size(location: &Location) -> VfsResult<u64> {
     let key = file_cache_key(location);
-    if let Some(state) = FILE_SHARED_STATES.lock().get(&key).and_then(Weak::upgrade) {
-        Ok(*state.size.lock())
+    let cached_size = {
+        FILE_SHARED_STATES.lock()
+            .get(&key)
+            .and_then(Weak::upgrade)
+            .map(|state| *state.size.lock())
+    };
+    if let Some(size) = cached_size {
+        Ok(size)
     } else {
         location.len()
     }

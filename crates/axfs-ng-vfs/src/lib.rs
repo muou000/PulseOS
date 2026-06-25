@@ -17,5 +17,3 @@ pub use inmem::*;
 
 pub type VfsError = axerrno::AxError;
 pub type VfsResult<T> = Result<T, VfsError>;
-
-use spin::{Mutex, MutexGuard};

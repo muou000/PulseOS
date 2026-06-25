@@ -7,7 +7,7 @@ use alloc::{
 use core::mem;
 
 use axdriver::{AxBlockDevice, prelude::*};
-use spin::Mutex;
+use kspin::SpinNoIrq as Mutex;
 
 fn take<'a>(buf: &mut &'a [u8], cnt: usize) -> &'a [u8] {
     let (first, rem) = buf.split_at(cnt);
@@ -124,15 +124,14 @@ pub static DISK_FLUSHERS: spin::Lazy<Mutex<alloc::vec::Vec<alloc::sync::Weak<dyn
 
 /// Flushes all registered disks.
 pub fn flush_all_disks() -> DevResult<()> {
-    let mut flushers = DISK_FLUSHERS.lock();
-    flushers.retain(|weak| {
-        if let Some(flusher) = weak.upgrade() {
-            let _ = flusher.flush_disk();
-            true
-        } else {
-            false
-        }
-    });
+    let flushers: alloc::vec::Vec<Arc<dyn DiskFlushable>> = {
+        let mut guard = DISK_FLUSHERS.lock();
+        guard.retain(|weak| weak.strong_count() > 0);
+        guard.iter().filter_map(|weak| weak.upgrade()).collect()
+    };
+    for flusher in flushers {
+        let _ = flusher.flush_disk();
+    }
     Ok(())
 }
 
@@ -278,10 +277,10 @@ impl<D: BlockDriverOps + 'static> SeekableDisk<D> {
         if buf.len() >= self.block_size() {
             let blocks = buf.len() >> self.block_size_log2;
             let length = blocks << self.block_size_log2;
-            self.dev.lock().write_block(self.inner.lock().block_id, take(&mut buf, length))?;
+            let mut inner = self.inner.lock();
+            self.dev.lock().write_block(inner.block_id, take(&mut buf, length))?;
             written += length;
 
-            let mut inner = self.inner.lock();
             inner.block_id += blocks as u64;
         }
         if !buf.is_empty() {

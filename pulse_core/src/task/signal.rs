@@ -8,7 +8,7 @@ use kspin::SpinNoIrq;
 use linux_raw_sys::general::{
     SA_NODEFER, SA_RESETHAND, SIGCHLD, SIGCONT, SIGKILL, SIGSTOP, SIGURG, SIGWINCH,
 };
-use spin::Mutex;
+use crate::sync::Mutex;
 
 use super::{Process, Thread};
 

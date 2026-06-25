@@ -1,5 +1,8 @@
 use alloc::sync::Arc;
 use alloc::boxed::Box;
+use alloc::collections::BTreeMap;
+use alloc::sync::Weak;
+use alloc::vec::Vec;
 use core::cell::OnceCell;
 
 use axdriver::prelude::BlockDriverOps;
@@ -16,6 +19,7 @@ const ROOT_INODE: u32 = 2;
 pub struct Ext4Filesystem {
     inner: Mutex<Ext4>,
     root_dir: OnceCell<WeakDirEntry>,
+    pub(super) active_inodes: Mutex<BTreeMap<u32, Vec<Weak<Inode>>>>,
     pub(crate) block_size: usize,
 }
 
@@ -39,6 +43,7 @@ impl Ext4Filesystem {
         let fs = Arc::new(Self {
             inner: Mutex::new(ext4),
             root_dir: OnceCell::new(),
+            active_inodes: Mutex::new(BTreeMap::new()),
             block_size,
         });
         let root_dir = DirEntry::new_dir(

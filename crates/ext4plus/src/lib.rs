@@ -581,6 +581,7 @@ impl Ext4 {
                     )
                     .await?
                 else {
+                    bg_id = bg_id.saturating_add(1);
                     continue;
                 };
                 inode_bitmap_handle.set(inode_num, true, self).await?;
@@ -767,6 +768,7 @@ impl Ext4 {
                 let Some(block_num) =
                     block_bitmap_handle.find_first(false, .., self).await?
                 else {
+                    bg_id = bg_id.saturating_add(1);
                     continue;
                 };
                 block_bitmap_handle.set(block_num, true, self).await?;
@@ -832,6 +834,7 @@ impl Ext4 {
                     .find_first_n(num_blocks.into(), false, .., self)
                     .await?
                 else {
+                    bg_id = bg_id.saturating_add(1);
                     continue;
                 };
                 for i in 0..num_blocks.get() {

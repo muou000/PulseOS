@@ -1,7 +1,7 @@
 use alloc::sync::Arc;
 use core::{any::Any, net::SocketAddr};
 use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
-use spin::Mutex;
+use crate::sync::Mutex;
 
 use axerrno::LinuxError;
 use axio::PollState;
@@ -12,7 +12,7 @@ use crate::fd_table::FdObject;
 
 const RING_BUFFER_SIZE: usize = 65536;
 
-pub static UNIX_REGISTRY: spin::Mutex<alloc::collections::BTreeMap<alloc::string::String, (core::net::SocketAddr, alloc::sync::Weak<Socket>)>> = spin::Mutex::new(alloc::collections::BTreeMap::new());
+pub static UNIX_REGISTRY: Mutex<alloc::collections::BTreeMap<alloc::string::String, (core::net::SocketAddr, alloc::sync::Weak<Socket>)>> = Mutex::new(alloc::collections::BTreeMap::new());
 
 pub struct LocalSocketRingBuffer {
     arr: [u8; RING_BUFFER_SIZE],

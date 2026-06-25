@@ -15,7 +15,7 @@ use axfs_ng_vfs::{
     InMemDir, InMemInode, update_metadata_impl, cmp_file_name,
 };
 use axpoll::{IoEvents, Pollable};
-use spin::Mutex;
+use kspin::SpinNoIrq as Mutex;
 
 static PID_MAX: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(32768);
 

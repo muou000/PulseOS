@@ -16,7 +16,7 @@ use axfs_ng_vfs::{
 use axpoll::{IoEvents, Pollable};
 use rand_core::{Rng, SeedableRng};
 use rand_pcg::Pcg64Mcg;
-use spin::Mutex;
+use kspin::SpinNoIrq as Mutex;
 
 use super::super::disk::{SeekableDisk, SharedBlockDevice};
 

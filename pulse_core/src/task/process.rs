@@ -22,7 +22,8 @@ use linux_raw_sys::general::{
     sigevent,
 };
 use memory_addr::{MemoryAddr, PhysAddr, VirtAddr, va};
-use spin::{Lazy, Mutex, RwLock};
+use spin::Lazy;
+use crate::sync::{Mutex, RwLock};
 
 use super::{
     SignalShared, Thread, current_thread, queue_signal_to_process, thread_handle_from_task,
@@ -244,7 +245,7 @@ impl FutexTable {
         let mut queues = self.queues.lock();
         if let Some(queue) = queues.get(&addr) {
             queue.prune_exited();
-            if queue.is_empty() {
+            if queue.is_empty() && Arc::strong_count(queue) <= 2 {
                 queues.remove(&addr);
             }
         }
@@ -1905,6 +1906,7 @@ impl Process {
         };
 
         for task in tasks {
+            axlog::info!("begin_group_exit: waking task {:?}", task.inner());
             if let Some(handle) = thread_handle_from_task(&task) {
                 handle.signal_wait_queue().notify_all(false);
             }
@@ -1971,13 +1973,31 @@ impl Process {
             let _ = self.take_task_ref_by_tid(tid);
         }
         let remaining = self.unregister_thread(tid);
-        axlog::debug!(
-            "finish_thread_exit: pid={}, tid={}, remaining_threads={}, group_exiting={}",
-            self.pid(),
-            tid,
-            remaining,
-            self.group_exiting()
-        );
+        if remaining > 0 {
+            let threads_lock = self.threads.lock();
+            let mut details = alloc::vec::Vec::new();
+            for (t_id, state) in threads_lock.iter() {
+                match state {
+                    ThreadState::Pending => details.push(alloc::format!("Pending({})", t_id)),
+                    ThreadState::Active(task) => details.push(alloc::format!("Active({}, state={:?})", t_id, task.inner())),
+                }
+            }
+            axlog::info!(
+                "finish_thread_exit: pid={}, tid={}, remaining_threads={}, threads={:?}, group_exiting={}",
+                self.pid(),
+                tid,
+                remaining,
+                details,
+                self.group_exiting()
+            );
+        } else {
+            axlog::info!(
+                "finish_thread_exit: pid={}, tid={}, remaining_threads=0, group_exiting={}",
+                self.pid(),
+                tid,
+                self.group_exiting()
+            );
+        }
         if remaining != 0 {
             return;
         }
@@ -2598,6 +2618,7 @@ impl Process {
                     paddr_res
                 }
             };
+            axlog::info!("futex_key: addr={:#x}, paddr={:#x}", addr, paddr);
             (paddr, false)
         }
     }
@@ -2639,8 +2660,24 @@ impl Process {
             if w.uaddr == 0 {
                 return Err(AxError::BadAddress);
             }
-            self.read_user_u32(w.uaddr as usize)?;
+            let val = self.read_user_u32(w.uaddr as usize)?;
+            self.write_user_bytes(w.uaddr as usize, &val.to_ne_bytes())?;
         }
+
+        // Translate the virtual addresses to physical addresses outside the run queue lock.
+        let mut kvaddrs = alloc::vec::Vec::with_capacity(waiters.len());
+        let aspace = self.aspace_handle();
+        let aspace_guard = aspace.read();
+        for w in &waiters {
+            let start = VirtAddr::from(w.uaddr as usize);
+            let (paddr, ..) = aspace_guard
+                .query_vaddr(start)
+                .map_err(|_| AxError::BadAddress)?;
+            let paddr = paddr.align_down_4k() + start.align_offset_4k();
+            let kvaddr = axhal::mem::phys_to_virt(paddr);
+            kvaddrs.push(kvaddr.as_usize());
+        }
+        drop(aspace_guard);
 
         let current_thread = super::current_thread().ok();
         let signal_pending = || {
@@ -2669,31 +2706,31 @@ impl Process {
         let q_refs: alloc::vec::Vec<&axtask::WaitQueue> =
             queues.iter().map(|q| q.as_ref()).collect();
 
+        let first_time = core::cell::Cell::new(true);
         let mut mismatch = false;
 
         let res = axtask::WaitQueue::wait_multiple_timeout_until(
             &q_refs,
             timeout_ns.map(core::time::Duration::from_nanos),
             || {
-                if self.group_exiting() || signal_pending() {
-                    return true;
-                }
-                mismatch = false;
-                for w in waiters.iter() {
-                    match self.read_user_u32(w.uaddr as usize) {
-                        Ok(v) => {
-                            if v != w.val as u32 {
-                                mismatch = true;
-                                return true;
-                            }
-                        }
-                        Err(_) => {
+                if first_time.get() {
+                    first_time.set(false);
+                    if self.group_exiting() || signal_pending() {
+                        return true;
+                    }
+                    mismatch = false;
+                    for (i, w) in waiters.iter().enumerate() {
+                        let kvaddr = kvaddrs[i];
+                        let val = unsafe { core::ptr::read_volatile(kvaddr as *const u32) };
+                        if val != w.val as u32 {
                             mismatch = true;
                             return true;
                         }
                     }
+                    false
+                } else {
+                    true
                 }
-                false
             },
         );
 
@@ -2730,12 +2767,23 @@ impl Process {
         timeout_ns: Option<u64>,
         is_private: bool,
     ) -> AxResult<()> {
-        if match self.read_user_u32(addr) {
-            Ok(v) => v != expected,
-            Err(e) => return Err(e),
-        } {
+        // Pre-fault the page as writable to break COW and ensure it is mapped.
+        let val = self.read_user_u32(addr)?;
+        self.write_user_bytes(addr, &val.to_ne_bytes())?;
+        if val != expected {
             return Err(AxError::from(AxErrorKind::WouldBlock));
         }
+
+        // Translate the virtual address to a physical address outside the run queue lock.
+        let aspace = self.aspace_handle();
+        let start = VirtAddr::from(addr);
+        let (paddr, ..) = aspace
+            .read()
+            .query_vaddr(start)
+            .map_err(|_| AxError::BadAddress)?;
+        let paddr = paddr.align_down_4k() + start.align_offset_4k();
+        let kvaddr = axhal::mem::phys_to_virt(paddr);
+
         let current_thread = super::current_thread().ok();
         let signal_pending = || {
             current_thread
@@ -2748,6 +2796,15 @@ impl Process {
         }
 
         let (key, is_priv) = self.futex_key(addr, is_private);
+
+        axlog::info!(
+            "futex_wait: tid={}, addr={:#x}, paddr={:#x}, expected={}, is_private={}",
+            axtask::current().id().as_u64(),
+            addr,
+            paddr.as_usize(),
+            expected,
+            is_private
+        );
 
         let queue = if is_priv {
             self.futex_table.queue(key)
@@ -2762,11 +2819,44 @@ impl Process {
             return Ok(());
         }
 
+        let first_time = core::cell::Cell::new(true);
+        let mismatch = core::sync::atomic::AtomicBool::new(false);
+
         let timed_out = if let Some(timeout_ns) = timeout_ns {
             let dur = core::time::Duration::from_nanos(timeout_ns);
-            queue.wait_timeout(dur)
+            queue.wait_timeout_until(dur, || {
+                if first_time.get() {
+                    first_time.set(false);
+                    if self.group_exiting() || signal_pending() {
+                        return true;
+                    }
+                    let val = unsafe { core::ptr::read_volatile(kvaddr.as_usize() as *const u32) };
+                    if val != expected {
+                        mismatch.store(true, core::sync::atomic::Ordering::Relaxed);
+                        return true;
+                    }
+                    false
+                } else {
+                    true
+                }
+            })
         } else {
-            queue.wait();
+            queue.wait_until(|| {
+                if first_time.get() {
+                    first_time.set(false);
+                    if self.group_exiting() || signal_pending() {
+                        return true;
+                    }
+                    let val = unsafe { core::ptr::read_volatile(kvaddr.as_usize() as *const u32) };
+                    if val != expected {
+                        mismatch.store(true, core::sync::atomic::Ordering::Relaxed);
+                        return true;
+                    }
+                    false
+                } else {
+                    true
+                }
+            });
             false
         };
 
@@ -2779,6 +2869,9 @@ impl Process {
         }
         if signal_pending() {
             return Err(unsafe { core::mem::transmute(-512i32) });
+        }
+        if mismatch.load(core::sync::atomic::Ordering::Relaxed) {
+            return Err(AxError::from(AxErrorKind::WouldBlock));
         }
         if timed_out {
             return Err(AxError::from(AxErrorKind::TimedOut));
@@ -2802,6 +2895,15 @@ impl Process {
                 GLOBAL_FUTEX_TABLE.wake_no_resched(key, count)
             }
         };
+
+        axlog::info!(
+            "futex_wake: tid={}, addr={:#x}, count={}, is_private={}, woken={}",
+            axtask::current().id().as_u64(),
+            addr,
+            count,
+            is_private,
+            woken
+        );
 
         if !is_priv {
             GLOBAL_FUTEX_TABLE.remove_if_empty(key);

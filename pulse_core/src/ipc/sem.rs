@@ -4,7 +4,8 @@ extern crate alloc;
 
 use alloc::{collections::BTreeMap, sync::Arc, vec::Vec};
 use core::sync::atomic::{AtomicI32, Ordering};
-use spin::{Lazy, Mutex};
+use spin::Lazy;
+use crate::sync::Mutex;
 use axerrno::{AxError, AxResult, ax_err};
 use axtask::WaitQueue;
 

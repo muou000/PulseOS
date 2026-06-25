@@ -1,7 +1,8 @@
 use alloc::{collections::BTreeMap, sync::Arc};
 use core::sync::atomic::{AtomicI32, Ordering};
 
-use spin::{Lazy, Mutex};
+use spin::Lazy;
+use crate::sync::Mutex;
 
 const UNCONSTRAINED_LATENCY_US: i32 = i32::MAX;
 

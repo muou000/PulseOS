@@ -3,7 +3,7 @@ use core::{any::Any, task::Context, time::Duration};
 
 use axpoll::{IoEvents, Pollable};
 use slab::Slab;
-use spin::Mutex;
+use kspin::SpinNoIrq as Mutex;
 
 use axfs_ng_vfs::{
     DeviceId, DirEntry, DirEntrySink, DirNode, DirNodeOps, FileNode, FileNodeOps, Filesystem,
@@ -348,10 +348,11 @@ impl DirNodeOps for TmpNode {
         let Some(entry) = entries.get(name) else {
             return Err(VfsError::NotFound);
         };
-        if let NodeContent::Dir(dir_content) = &entry.get().content
-            && dir_content.entries.lock().len() > 2
-        {
-            return Err(VfsError::DirectoryNotEmpty);
+        if let NodeContent::Dir(dir_content) = &entry.get().content {
+            if dir_content.entries.lock().len() > 2 {
+                return Err(VfsError::DirectoryNotEmpty);
+            }
+            dir_content.entries.lock().clear();
         }
         entries.remove(name);
         Ok(())
@@ -371,19 +372,21 @@ impl DirNodeOps for TmpNode {
             .lock()
             .remove(src_name)
             .ok_or(VfsError::NotFound)?;
-        inode_as_dir(&dst_node.inode)?
+        let old_dst = inode_as_dir(&dst_node.inode)?
             .entries
             .lock()
             .insert(dst_name.into(), src_entry);
+        if let Some(old_dst) = old_dst {
+            if let NodeContent::Dir(dir_content) = &old_dst.get().content {
+                dir_content.entries.lock().clear();
+            }
+        }
         Ok(())
     }
 }
 
 impl Drop for TmpNode {
     fn drop(&mut self) {
-        if let NodeContent::Dir(dir) = &self.inode.content {
-            dir.entries.lock().clear();
-        }
         release_inode(&self.fs, &self.inode, 0);
     }
 }

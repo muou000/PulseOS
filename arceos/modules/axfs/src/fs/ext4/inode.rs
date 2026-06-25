@@ -110,13 +110,16 @@ fn invalidate_dir_cache(fs: &Arc<Ext4Filesystem>, ino: u32) {
 
 impl Inode {
     pub(crate) fn new(fs: Arc<Ext4Filesystem>, ino: u32, this: Option<WeakDirEntry>) -> Arc<Self> {
+        log::debug!("ext4: Inode::new ino={}", ino);
         let dir_cache = dir_cache_state(&fs, ino);
-        Arc::new(Self {
-            fs,
+        let inode = Arc::new(Self {
+            fs: fs.clone(),
             ino,
             this,
             dir_cache,
-        })
+        });
+        fs.active_inodes.lock().entry(ino).or_default().push(Arc::downgrade(&inode));
+        inode
     }
 
     fn create_entry(
@@ -576,7 +579,26 @@ impl DirNodeOps for Inode {
 
         let child_ino = child_inode.index.get();
         let is_dir = child_inode.file_type() == ext4plus::FileType::Directory;
-        dir.unlink(name_ref, child_inode).map_err(into_vfs_err)?;
+        let child_inode = dir.unlink(name_ref, child_inode).map_err(into_vfs_err)?;
+        if child_inode.links_count() == 0 {
+            let has_other_active = {
+                let mut active = self.fs.active_inodes.lock();
+                let mut still_active = false;
+                if let Some(list) = active.get_mut(&child_ino) {
+                    list.retain(|w| w.strong_count() > 0);
+                    if !list.is_empty() {
+                        still_active = true;
+                    }
+                }
+                still_active
+            };
+            if !has_other_active {
+                log::debug!("ext4: unlink deleting unlinked file (ino {}) immediately because no active references", child_ino);
+                fs.delete_file(child_inode).map_err(into_vfs_err)?;
+                self.fs.active_inodes.lock().remove(&child_ino);
+                crate::invalidate_file_cache(ext4_fs_id(&self.fs), child_ino as u64);
+            }
+        }
         self.invalidate_snapshot(self.ino);
         if is_dir {
             self.invalidate_snapshot(child_ino);
@@ -617,7 +639,26 @@ impl DirNodeOps for Inode {
 
             let dst_inode_ino = dst_inode.index.get();
             let dst_is_dir = dst_inode.file_type() == ext4plus::FileType::Directory;
-            dst_dir_obj.unlink(dst_name_ref, dst_inode).map_err(into_vfs_err)?;
+            let dst_inode = dst_dir_obj.unlink(dst_name_ref, dst_inode).map_err(into_vfs_err)?;
+            if dst_inode.links_count() == 0 {
+                let has_other_active = {
+                    let mut active = dst_dir.fs.active_inodes.lock();
+                    let mut still_active = false;
+                    if let Some(list) = active.get_mut(&dst_inode_ino) {
+                        list.retain(|w| w.strong_count() > 0);
+                        if !list.is_empty() {
+                            still_active = true;
+                        }
+                    }
+                    still_active
+                };
+                if !has_other_active {
+                    log::debug!("ext4: rename deleting unlinked dst file (ino {}) immediately because no active references", dst_inode_ino);
+                    fs.delete_file(dst_inode).map_err(into_vfs_err)?;
+                    dst_dir.fs.active_inodes.lock().remove(&dst_inode_ino);
+                    crate::invalidate_file_cache(ext4_fs_id(&dst_dir.fs), dst_inode_ino as u64);
+                }
+            }
             dst_dir.invalidate_snapshot(dst_dir.ino);
             if dst_is_dir {
                 dst_dir.invalidate_snapshot(dst_inode_ino);
@@ -625,13 +666,76 @@ impl DirNodeOps for Inode {
         }
 
         dst_dir_obj.link(dst_name_ref, &mut src_inode).map_err(into_vfs_err)?;
-        src_dir.unlink(src_name_ref, src_inode).map_err(into_vfs_err)?;
+        let src_inode = src_dir.unlink(src_name_ref, src_inode).map_err(into_vfs_err)?;
+        if src_inode.links_count() == 0 {
+            let src_ino = src_inode.index.get();
+            let has_other_active = {
+                let mut active = self.fs.active_inodes.lock();
+                let mut still_active = false;
+                if let Some(list) = active.get_mut(&src_ino) {
+                    list.retain(|w| w.strong_count() > 0);
+                    if !list.is_empty() {
+                        still_active = true;
+                    }
+                }
+                still_active
+            };
+            if !has_other_active {
+                log::debug!("ext4: rename deleting unlinked src file (ino {}) immediately because no active references", src_ino);
+                fs.delete_file(src_inode).map_err(into_vfs_err)?;
+                self.fs.active_inodes.lock().remove(&src_ino);
+                crate::invalidate_file_cache(ext4_fs_id(&self.fs), src_ino as u64);
+            }
+        }
 
         self.invalidate_snapshot(self.ino);
         if dst_dir.ino != self.ino {
             dst_dir.invalidate_snapshot(dst_dir.ino);
         }
         Ok(())
+    }
+}
+
+impl Drop for Inode {
+    fn drop(&mut self) {
+        let fs = self.fs.lock();
+        if let Some(idx) = core::num::NonZeroU32::new(self.ino) {
+            if let Ok(inode) = ext4plus::inode::Inode::read(&fs, idx) {
+                if inode.links_count() == 0 {
+                    // Check if there are other active references to this inode
+                    let has_other_active = {
+                        let mut active = self.fs.active_inodes.lock();
+                        let mut still_active = false;
+                        if let Some(list) = active.get_mut(&self.ino) {
+                            list.retain(|w| w.strong_count() > 0);
+                            if !list.is_empty() {
+                                still_active = true;
+                            }
+                        }
+                        still_active
+                    };
+                    if !has_other_active {
+                        log::debug!("ext4: dropping last reference to unlinked inode {}, deleting file", self.ino);
+                        if let Err(e) = fs.delete_file(inode) {
+                            log::error!("ext4: failed to delete unlinked file (ino {}): {:?}", self.ino, e);
+                        }
+                        log::debug!("ext4: drop after delete_file, removing from active_inodes");
+                        self.fs.active_inodes.lock().remove(&self.ino);
+                        log::debug!("ext4: drop removed from active_inodes");
+                        crate::invalidate_file_cache(ext4_fs_id(&self.fs), self.ino as u64);
+                    }
+                } else {
+                    // Clean up our entry in active_inodes anyway
+                    let mut active = self.fs.active_inodes.lock();
+                    if let Some(list) = active.get_mut(&self.ino) {
+                        list.retain(|w| w.strong_count() > 0);
+                        if list.is_empty() {
+                            active.remove(&self.ino);
+                        }
+                    }
+                }
+            }
+        }
     }
 }
 

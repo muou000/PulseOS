@@ -2,6 +2,7 @@ use core::fmt;
 
 use axerrno::{AxError, AxResult, ax_err};
 use axfs::{CachedFile, FileFlags};
+use kernel_guard::IrqSave;
 use axhal::{
     mem::{phys_to_virt, PhysAddr},
     paging::{MappingFlags, PageSize, PageTable, PagingResult},
@@ -24,10 +25,10 @@ pub enum PageFaultResult {
 }
 
 pub struct PageTableLockManager {
-    pt: spin::Mutex<PageTable>,
+    pt: kspin::SpinNoIrq<PageTable>,
 }
 
-pub struct PageTableGuard<'a>(spin::MutexGuard<'a, PageTable>);
+pub struct PageTableGuard<'a>(kspin::SpinNoIrqGuard<'a, PageTable>);
 
 unsafe impl<'a> Send for PageTableGuard<'a> {}
 unsafe impl<'a> Sync for PageTableGuard<'a> {}
@@ -50,7 +51,7 @@ impl<'a> core::ops::DerefMut for PageTableGuard<'a> {
 impl PageTableLockManager {
     pub fn new(pt: PageTable) -> Self {
         Self {
-            pt: spin::Mutex::new(pt),
+            pt: kspin::SpinNoIrq::new(pt),
         }
     }
 
@@ -615,6 +616,7 @@ impl AddrSpace {
     ///
     /// `access_flags` indicates the access type that caused the page fault.
     pub fn handle_page_fault(&self, vaddr: VirtAddr, access_flags: PageFaultFlags) -> PageFaultResult {
+        let _irq = IrqSave::new();
         let page = vaddr.align_down_4k();
         let pte_before = self
             .pt
@@ -707,6 +709,7 @@ impl AddrSpace {
 
     /// Handles a page fault that requires stack growth (write lock held).
     pub fn handle_page_fault_write(&mut self, vaddr: VirtAddr, access_flags: PageFaultFlags) -> bool {
+        let _irq = IrqSave::new();
         let page = vaddr.align_down_4k();
         // Check for stack grows down auto-extension.
         let next_page = page + PAGE_SIZE_4K;

@@ -727,7 +727,7 @@ impl Dir {
         &mut self,
         name: DirEntryName<'_>,
         mut inode: Inode,
-    ) -> Result<Option<Inode>, Ext4Error> {
+    ) -> Result<Inode, Ext4Error> {
         if name.0 == b"." || name.0 == b".." {
             return Err(Ext4Error::DotEntry);
         }
@@ -743,12 +743,7 @@ impl Dir {
         inode.set_links_count(old.saturating_sub(1));
         inode.write(&self.fs).await?;
         remove_dir_entry(&self.fs, &mut self.inode, name).await?;
-        if inode.links_count() == 0 {
-            self.fs.delete_file(inode).await?;
-            Ok(None)
-        } else {
-            Ok(Some(inode))
-        }
+        Ok(inode)
     }
 
     /// Return the inode for this directory.

@@ -62,8 +62,33 @@ mod sync_inner {
         }
 
         /// Acquires a lock, blocking the current thread until it is able to do so.
-        pub fn lock(&self) -> spin::MutexGuard<'_, T> {
-            self.inner.lock()
+        pub fn lock(&self) -> MutexGuard<'_, T> {
+            let guard = kernel_guard::NoPreempt::new();
+            MutexGuard {
+                inner: self.inner.lock(),
+                _guard: guard,
+            }
+        }
+    }
+
+    /// A guard that provides mutable data access for [`Mutex`].
+    pub struct MutexGuard<'a, T> {
+        inner: spin::MutexGuard<'a, T>,
+        _guard: kernel_guard::NoPreempt,
+    }
+
+    impl<'a, T> core::ops::Deref for MutexGuard<'a, T> {
+        type Target = T;
+        #[inline]
+        fn deref(&self) -> &T {
+            &*self.inner
+        }
+    }
+
+    impl<'a, T> core::ops::DerefMut for MutexGuard<'a, T> {
+        #[inline]
+        fn deref_mut(&mut self) -> &mut T {
+            &mut *self.inner
         }
     }
 
@@ -81,13 +106,56 @@ mod sync_inner {
         }
 
         /// Acquires a shared read lock, blocking the current thread until it is able to do so.
-        pub fn read(&self) -> spin::RwLockReadGuard<'_, T> {
-            self.inner.read()
+        pub fn read(&self) -> RwLockReadGuard<'_, T> {
+            let guard = kernel_guard::NoPreempt::new();
+            RwLockReadGuard {
+                inner: self.inner.read(),
+                _guard: guard,
+            }
         }
 
         /// Acquires an exclusive write lock, blocking the current thread until it is able to do so.
-        pub fn write(&self) -> spin::RwLockWriteGuard<'_, T> {
-            self.inner.write()
+        pub fn write(&self) -> RwLockWriteGuard<'_, T> {
+            let guard = kernel_guard::NoPreempt::new();
+            RwLockWriteGuard {
+                inner: self.inner.write(),
+                _guard: guard,
+            }
+        }
+    }
+
+    /// A guard that provides read access for [`RwLock`].
+    pub struct RwLockReadGuard<'a, T> {
+        inner: spin::RwLockReadGuard<'a, T>,
+        _guard: kernel_guard::NoPreempt,
+    }
+
+    impl<'a, T> core::ops::Deref for RwLockReadGuard<'a, T> {
+        type Target = T;
+        #[inline]
+        fn deref(&self) -> &T {
+            &*self.inner
+        }
+    }
+
+    /// A guard that provides write access for [`RwLock`].
+    pub struct RwLockWriteGuard<'a, T> {
+        inner: spin::RwLockWriteGuard<'a, T>,
+        _guard: kernel_guard::NoPreempt,
+    }
+
+    impl<'a, T> core::ops::Deref for RwLockWriteGuard<'a, T> {
+        type Target = T;
+        #[inline]
+        fn deref(&self) -> &T {
+            &*self.inner
+        }
+    }
+
+    impl<'a, T> core::ops::DerefMut for RwLockWriteGuard<'a, T> {
+        #[inline]
+        fn deref_mut(&mut self) -> &mut T {
+            &mut *self.inner
         }
     }
 }

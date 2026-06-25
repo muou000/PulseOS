@@ -7,6 +7,7 @@ use crate::*;
 
 #[register_trap_handler(SYSCALL)]
 pub fn syscall_handler(tf: &mut TrapFrame, syscall_num: usize) -> isize {
+    axhal::asm::enable_irqs();
     let syscall_enter_ns = axhal::time::monotonic_time_nanos() as u64;
     let thread = match pulse_core::task::current_thread() {
         Ok(thread) => thread,
@@ -110,6 +111,7 @@ pub fn syscall_handler(tf: &mut TrapFrame, syscall_num: usize) -> isize {
     }
     process.mark_user_resume();
 
+    axhal::asm::disable_irqs();
     syscall_ret(tf)
 }
 

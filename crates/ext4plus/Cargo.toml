@@ -60,6 +60,7 @@ std = []
 sync = [
     "maybe-async/is_sync",
     "dep:spin",
+    "dep:kernel_guard",
 ]
 
 [lib]
@@ -68,6 +69,10 @@ path = "src/lib.rs"
 
 [dependencies.async-lock]
 version = "3.4"
+default-features = false
+
+[dependencies.log]
+version = "0.4"
 default-features = false
 
 [dependencies.async-trait]
@@ -84,6 +89,10 @@ version = "0.2"
 
 [dependencies.spin]
 version = "0.10"
+optional = true
+
+[dependencies.kernel_guard]
+path = "../../vendor/kernel_guard"
 optional = true
 
 [dev-dependencies.anyhow]

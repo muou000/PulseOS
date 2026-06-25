@@ -9,7 +9,7 @@ use axfs::FsContext;
 use axfs_ng_vfs::{NodePermission, NodeType};
 use axhal::paging::MappingFlags;
 use memory_addr::va;
-use spin::RwLock;
+use crate::sync::RwLock;
 
 use core::sync::atomic::Ordering;
 
