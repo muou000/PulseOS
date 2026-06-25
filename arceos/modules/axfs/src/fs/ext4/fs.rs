@@ -90,32 +90,46 @@ impl Ext4Filesystem {
         let inodes_to_check = core::mem::take(&mut *pending);
         drop(pending);
 
+        let mut failed = Vec::new();
+
         for ino in inodes_to_check {
             if let Some(idx) = core::num::NonZeroU32::new(ino) {
-                if let Ok(inode) = ext4plus::inode::Inode::read(fs, idx) {
-                    if inode.links_count() == 0 {
-                        let has_other_active = {
-                            let mut active = self.active_inodes.lock();
-                            let mut still_active = false;
-                            if let Some(list) = active.get_mut(&ino) {
-                                list.retain(|w| w.strong_count() > 0);
-                                if !list.is_empty() {
-                                    still_active = true;
+                match ext4plus::inode::Inode::read(fs, idx) {
+                    Ok(inode) => {
+                        if inode.links_count() == 0 {
+                            let has_other_active = {
+                                let mut active = self.active_inodes.lock();
+                                let mut still_active = false;
+                                if let Some(list) = active.get_mut(&ino) {
+                                    list.retain(|w| w.strong_count() > 0);
+                                    if !list.is_empty() {
+                                        still_active = true;
+                                    }
+                                }
+                                still_active
+                            };
+                            if !has_other_active {
+                                log::debug!("ext4: deferred deleting unlinked file (ino {})", ino);
+                                if let Err(e) = fs.delete_file(inode) {
+                                    log::error!("ext4: failed to delete unlinked file (ino {}): {:?}", ino, e);
+                                    failed.push(ino);
+                                } else {
+                                    self.active_inodes.lock().remove(&ino);
+                                    crate::invalidate_file_cache(self as *const Self as usize, ino as u64);
                                 }
                             }
-                            still_active
-                        };
-                        if !has_other_active {
-                            log::debug!("ext4: deferred deleting unlinked file (ino {})", ino);
-                            if let Err(e) = fs.delete_file(inode) {
-                                log::error!("ext4: failed to delete unlinked file (ino {}): {:?}", ino, e);
-                            }
-                            self.active_inodes.lock().remove(&ino);
-                            crate::invalidate_file_cache(self as *const Self as usize, ino as u64);
                         }
+                    }
+                    Err(e) => {
+                        log::error!("ext4: failed to read inode (ino {}): {:?}", ino, e);
+                        failed.push(ino);
                     }
                 }
             }
+        }
+
+        if !failed.is_empty() {
+            self.pending_deletions.lock().extend(failed);
         }
     }
 }
