@@ -21,6 +21,7 @@ pub struct Ext4Filesystem {
     root_dir: OnceCell<WeakDirEntry>,
     pub(super) active_inodes: Mutex<BTreeMap<u32, Vec<Weak<Inode>>>>,
     pub(crate) block_size: usize,
+    pub(super) pending_deletions: Mutex<Vec<u32>>,
 }
 
 impl Ext4Filesystem {
@@ -65,6 +66,7 @@ impl Ext4Filesystem {
             root_dir: OnceCell::new(),
             active_inodes: Mutex::new(BTreeMap::new()),
             block_size,
+            pending_deletions: Mutex::new(Vec::new()),
         });
         let root_dir = DirEntry::new_dir(
             |this| DirNode::new(Inode::new(fs.clone(), ROOT_INODE, Some(this))),
@@ -75,7 +77,46 @@ impl Ext4Filesystem {
     }
 
     pub(crate) fn lock(&self) -> MutexGuard<'_, Ext4> {
-        self.inner.lock()
+        let fs = self.inner.lock();
+        self.process_pending_deletions(&fs);
+        fs
+    }
+
+    pub(crate) fn process_pending_deletions(&self, fs: &Ext4) {
+        let mut pending = self.pending_deletions.lock();
+        if pending.is_empty() {
+            return;
+        }
+        let inodes_to_check = core::mem::take(&mut *pending);
+        drop(pending);
+
+        for ino in inodes_to_check {
+            if let Some(idx) = core::num::NonZeroU32::new(ino) {
+                if let Ok(inode) = ext4plus::inode::Inode::read(fs, idx) {
+                    if inode.links_count() == 0 {
+                        let has_other_active = {
+                            let mut active = self.active_inodes.lock();
+                            let mut still_active = false;
+                            if let Some(list) = active.get_mut(&ino) {
+                                list.retain(|w| w.strong_count() > 0);
+                                if !list.is_empty() {
+                                    still_active = true;
+                                }
+                            }
+                            still_active
+                        };
+                        if !has_other_active {
+                            log::debug!("ext4: deferred deleting unlinked file (ino {})", ino);
+                            if let Err(e) = fs.delete_file(inode) {
+                                log::error!("ext4: failed to delete unlinked file (ino {}): {:?}", ino, e);
+                            }
+                            self.active_inodes.lock().remove(&ino);
+                            crate::invalidate_file_cache(self as *const Self as usize, ino as u64);
+                        }
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -88,6 +129,7 @@ impl Drop for Ext4Filesystem {
         // Use the same pointer-based id as ext4_fs_id so the registry cleanup
         // targets exactly this filesystem's cached directory states.
         cleanup_dir_cache_registry(self as *const Self as usize);
+        let _ = self.lock();
     }
 }
 

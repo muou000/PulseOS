@@ -21,29 +21,38 @@ impl<T> Mutex<T> {
     pub fn lock(&self) -> MutexGuard<'_, T> {
         let guard = kernel_guard::NoPreempt::new();
         MutexGuard {
-            inner: self.inner.lock(),
-            _guard: guard,
+            inner: core::mem::ManuallyDrop::new(self.inner.lock()),
+            _guard: core::mem::ManuallyDrop::new(guard),
         }
     }
 }
 
 pub struct MutexGuard<'a, T> {
-    inner: spin::MutexGuard<'a, T>,
-    _guard: kernel_guard::NoPreempt,
+    inner: core::mem::ManuallyDrop<spin::MutexGuard<'a, T>>,
+    _guard: core::mem::ManuallyDrop<kernel_guard::NoPreempt>,
 }
 
 impl<'a, T> core::ops::Deref for MutexGuard<'a, T> {
     type Target = T;
     #[inline]
     fn deref(&self) -> &T {
-        &*self.inner
+        &**self.inner
     }
 }
 
 impl<'a, T> core::ops::DerefMut for MutexGuard<'a, T> {
     #[inline]
     fn deref_mut(&mut self) -> &mut T {
-        &mut *self.inner
+        &mut **self.inner
+    }
+}
+
+impl<'a, T> Drop for MutexGuard<'a, T> {
+    fn drop(&mut self) {
+        unsafe {
+            core::mem::ManuallyDrop::drop(&mut self.inner);
+            core::mem::ManuallyDrop::drop(&mut self._guard);
+        }
     }
 }
 

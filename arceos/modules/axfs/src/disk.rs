@@ -126,8 +126,16 @@ pub static DISK_FLUSHERS: spin::Lazy<Mutex<alloc::vec::Vec<alloc::sync::Weak<dyn
 pub fn flush_all_disks() -> DevResult<()> {
     let flushers: alloc::vec::Vec<Arc<dyn DiskFlushable>> = {
         let mut guard = DISK_FLUSHERS.lock();
-        guard.retain(|weak| weak.strong_count() > 0);
-        guard.iter().filter_map(|weak| weak.upgrade()).collect()
+        let mut active = alloc::vec::Vec::new();
+        guard.retain(|weak| {
+            if let Some(strong) = weak.upgrade() {
+                active.push(strong);
+                true
+            } else {
+                false
+            }
+        });
+        active
     };
     for flusher in flushers {
         flusher.flush_disk()?;

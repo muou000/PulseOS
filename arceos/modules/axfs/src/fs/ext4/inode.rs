@@ -25,6 +25,7 @@ pub struct Inode {
     ino: u32,
     this: Option<WeakDirEntry>,
     dir_cache: Arc<DirCacheState>,
+    pub(super) is_unlinked: core::sync::atomic::AtomicBool,
 }
 
 #[derive(Clone)]
@@ -117,6 +118,7 @@ impl Inode {
             ino,
             this,
             dir_cache,
+            is_unlinked: core::sync::atomic::AtomicBool::new(false),
         });
         fs.active_inodes.lock().entry(ino).or_default().push(Arc::downgrade(&inode));
         inode
@@ -373,10 +375,10 @@ impl FileNodeOps for Inode {
             let target_path = inode.symlink_target(&fs).map_err(into_vfs_err)?;
             let target_bytes = target_path.as_ref();
             let size = target_bytes.len();
-            let offset = offset as usize;
-            if offset >= size {
+            if offset >= size as u64 {
                 return Ok(0);
             }
+            let offset = offset as usize;
             let available = size - offset;
             let len = available.min(buf.len());
             buf[..len].copy_from_slice(&target_bytes[offset..offset + len]);
@@ -616,6 +618,11 @@ impl DirNodeOps for Inode {
                 let mut still_active = false;
                 if let Some(list) = active.get_mut(&child_ino) {
                     list.retain(|w| w.strong_count() > 0);
+                    for w in list.iter() {
+                        if let Some(inode) = w.upgrade() {
+                            inode.is_unlinked.store(true, core::sync::atomic::Ordering::Relaxed);
+                        }
+                    }
                     if !list.is_empty() {
                         still_active = true;
                     }
@@ -686,6 +693,11 @@ impl DirNodeOps for Inode {
                     let mut still_active = false;
                     if let Some(list) = active.get_mut(&dst_inode_ino) {
                         list.retain(|w| w.strong_count() > 0);
+                        for w in list.iter() {
+                            if let Some(inode) = w.upgrade() {
+                                inode.is_unlinked.store(true, core::sync::atomic::Ordering::Relaxed);
+                            }
+                        }
                         if !list.is_empty() {
                             still_active = true;
                         }
@@ -714,6 +726,11 @@ impl DirNodeOps for Inode {
                 let mut still_active = false;
                 if let Some(list) = active.get_mut(&src_ino) {
                     list.retain(|w| w.strong_count() > 0);
+                    for w in list.iter() {
+                        if let Some(inode) = w.upgrade() {
+                            inode.is_unlinked.store(true, core::sync::atomic::Ordering::Relaxed);
+                        }
+                    }
                     if !list.is_empty() {
                         still_active = true;
                     }
@@ -738,42 +755,24 @@ impl DirNodeOps for Inode {
 
 impl Drop for Inode {
     fn drop(&mut self) {
-        let fs = self.fs.lock();
-        if let Some(idx) = core::num::NonZeroU32::new(self.ino) {
-            if let Ok(inode) = ext4plus::inode::Inode::read(&fs, idx) {
-                if inode.links_count() == 0 {
-                    // Check if there are other active references to this inode
-                    let has_other_active = {
-                        let mut active = self.fs.active_inodes.lock();
-                        let mut still_active = false;
-                        if let Some(list) = active.get_mut(&self.ino) {
-                            list.retain(|w| w.strong_count() > 0);
-                            if !list.is_empty() {
-                                still_active = true;
-                            }
-                        }
-                        still_active
-                    };
-                    if !has_other_active {
-                        log::debug!("ext4: dropping last reference to unlinked inode {}, deleting file", self.ino);
-                        if let Err(e) = fs.delete_file(inode) {
-                            log::error!("ext4: failed to delete unlinked file (ino {}): {:?}", self.ino, e);
-                        }
-                        log::debug!("ext4: drop after delete_file, removing from active_inodes");
-                        self.fs.active_inodes.lock().remove(&self.ino);
-                        log::debug!("ext4: drop removed from active_inodes");
-                        crate::invalidate_file_cache(ext4_fs_id(&self.fs), self.ino as u64);
-                    }
-                } else {
-                    // Clean up our entry in active_inodes anyway
-                    let mut active = self.fs.active_inodes.lock();
-                    if let Some(list) = active.get_mut(&self.ino) {
-                        list.retain(|w| w.strong_count() > 0);
-                        if list.is_empty() {
-                            active.remove(&self.ino);
-                        }
-                    }
+        let is_unlinked = self.is_unlinked.load(core::sync::atomic::Ordering::Relaxed);
+        let has_other_active = {
+            let mut active = self.fs.active_inodes.lock();
+            let mut still_active = false;
+            if let Some(list) = active.get_mut(&self.ino) {
+                list.retain(|w| w.strong_count() > 0);
+                if !list.is_empty() {
+                    still_active = true;
                 }
+            }
+            still_active
+        };
+
+        if !has_other_active {
+            self.fs.active_inodes.lock().remove(&self.ino);
+            if is_unlinked {
+                crate::invalidate_file_cache(ext4_fs_id(&self.fs), self.ino as u64);
+                self.fs.pending_deletions.lock().push(self.ino);
             }
         }
     }

@@ -162,16 +162,15 @@ impl<D: BlockDriverOps + 'static> Ext4Disk<D> {
             } else {
                 // Cache miss. Find consecutive cache misses.
                 let mut consecutive_misses = 1;
-                while current_block_offset + consecutive_misses * block_size <= end_block_offset {
-                    let next_block_offset = current_block_offset + consecutive_misses * block_size;
-                    let is_hit = {
-                        let cache = self.block_cache.lock();
-                        cache.contains(&next_block_offset)
-                    };
-                    if is_hit {
-                        break;
+                {
+                    let cache = self.block_cache.lock();
+                    while current_block_offset + consecutive_misses * block_size <= end_block_offset {
+                        let next_block_offset = current_block_offset + consecutive_misses * block_size;
+                        if cache.contains(&next_block_offset) {
+                            break;
+                        }
+                        consecutive_misses += 1;
                     }
-                    consecutive_misses += 1;
                 }
                 
                 // Read all consecutive misses from disk in one go
@@ -276,22 +275,21 @@ impl<D: BlockDriverOps + 'static> Ext4Disk<D> {
             } else {
                 // Partial block write with cache miss. Find consecutive cache misses that need partial write.
                 let mut consecutive_misses = 1;
-                while current_block_offset + consecutive_misses * block_size <= end_block_offset {
-                    let next_block_offset = current_block_offset + consecutive_misses * block_size;
-                    let is_hit = {
-                        let cache = self.block_cache.lock();
-                        cache.contains(&next_block_offset)
-                    };
-                    if is_hit {
-                        break;
+                {
+                    let cache = self.block_cache.lock();
+                    while current_block_offset + consecutive_misses * block_size <= end_block_offset {
+                        let next_block_offset = current_block_offset + consecutive_misses * block_size;
+                        if cache.contains(&next_block_offset) {
+                            break;
+                        }
+                        let next_start = core::cmp::max(offset, next_block_offset);
+                        let next_end = core::cmp::min(offset + data.len(), next_block_offset + block_size);
+                        let next_overlap = next_end - next_start;
+                        if next_overlap == block_size {
+                            break;
+                        }
+                        consecutive_misses += 1;
                     }
-                    let next_start = core::cmp::max(offset, next_block_offset);
-                    let next_end = core::cmp::min(offset + data.len(), next_block_offset + block_size);
-                    let next_overlap = next_end - next_start;
-                    if next_overlap == block_size {
-                        break;
-                    }
-                    consecutive_misses += 1;
                 }
                 
                 // Pre-read consecutive partial miss blocks from disk in one go
