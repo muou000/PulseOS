@@ -36,7 +36,9 @@ impl TmpFilesystem {
             |this| DirNode::new(TmpNode::new(fs.clone(), root_ino, Some(this))),
             Reference::root(),
         ));
-        Filesystem::new(fs)
+        let filesystem = Filesystem::new(fs);
+        run_tmpfs_tests(&filesystem);
+        filesystem
     }
 
     fn get(&self, ino: u64) -> Arc<Inode> {
@@ -367,18 +369,61 @@ impl DirNodeOps for TmpNode {
             }
         }
 
-        let src_entry = inode_as_dir(&self.inode)?
-            .entries
-            .lock()
-            .remove(src_name)
-            .ok_or(VfsError::NotFound)?;
-        let old_dst = inode_as_dir(&dst_node.inode)?
-            .entries
-            .lock()
-            .insert(dst_name.into(), src_entry);
-        if let Some(old_dst) = old_dst {
-            if let NodeContent::Dir(dir_content) = &old_dst.get().content {
-                dir_content.entries.lock().clear();
+        if self.inode.ino == dst_node.inode.ino {
+            let mut entries = inode_as_dir(&self.inode)?.entries.lock();
+            if !entries.contains_key(src_name) {
+                return Err(VfsError::NotFound);
+            }
+            if let Some(old_entry) = entries.get(dst_name) {
+                if let NodeContent::Dir(dir_content) = &old_entry.get().content {
+                    if dir_content.entries.lock().len() > 2 {
+                        return Err(VfsError::DirectoryNotEmpty);
+                    }
+                }
+            }
+            let src_entry = entries.remove(src_name).unwrap();
+            let old_dst = entries.insert(dst_name.into(), src_entry);
+            if let Some(old_dst) = old_dst {
+                if let NodeContent::Dir(dir_content) = &old_dst.get().content {
+                    dir_content.entries.lock().clear();
+                }
+            }
+        } else if self.inode.ino < dst_node.inode.ino {
+            let mut src_entries = inode_as_dir(&self.inode)?.entries.lock();
+            if !src_entries.contains_key(src_name) {
+                return Err(VfsError::NotFound);
+            }
+            let mut dst_entries = inode_as_dir(&dst_node.inode)?.entries.lock();
+            if let Some(old_entry) = dst_entries.get(dst_name) {
+                if let NodeContent::Dir(dir_content) = &old_entry.get().content {
+                    if dir_content.entries.lock().len() > 2 {
+                        return Err(VfsError::DirectoryNotEmpty);
+                    }
+                }
+            }
+            let src_entry = src_entries.remove(src_name).unwrap();
+            let old_dst = dst_entries.insert(dst_name.into(), src_entry);
+            if let Some(old_dst) = old_dst {
+                if let NodeContent::Dir(dir_content) = &old_dst.get().content {
+                    dir_content.entries.lock().clear();
+                }
+            }
+        } else {
+            let mut dst_entries = inode_as_dir(&dst_node.inode)?.entries.lock();
+            if let Some(old_entry) = dst_entries.get(dst_name) {
+                if let NodeContent::Dir(dir_content) = &old_entry.get().content {
+                    if dir_content.entries.lock().len() > 2 {
+                        return Err(VfsError::DirectoryNotEmpty);
+                    }
+                }
+            }
+            let mut src_entries = inode_as_dir(&self.inode)?.entries.lock();
+            let src_entry = src_entries.remove(src_name).ok_or(VfsError::NotFound)?;
+            let old_dst = dst_entries.insert(dst_name.into(), src_entry);
+            if let Some(old_dst) = old_dst {
+                if let NodeContent::Dir(dir_content) = &old_dst.get().content {
+                    dir_content.entries.lock().clear();
+                }
             }
         }
         Ok(())
@@ -389,4 +434,38 @@ impl Drop for TmpNode {
     fn drop(&mut self) {
         release_inode(&self.fs, &self.inode, 0);
     }
+}
+
+fn run_tmpfs_tests(fs: &Filesystem) {
+    log::info!("Running tmpfs self-tests...");
+    let root_entry = fs.root_dir();
+    let root = root_entry.as_dir().unwrap();
+
+    let perm = NodePermission::from_bits_truncate(0o755);
+
+    // 1. Create source and destination directories
+    let _dir_src = root.create("test_src", NodeType::Directory, perm).unwrap();
+    let dir_dst = root.create("test_dst", NodeType::Directory, perm).unwrap();
+
+    // 2. Add a file inside test_dst to make it non-empty
+    let dst_node = dir_dst.as_dir().unwrap();
+    dst_node.create("test_file.txt", NodeType::RegularFile, perm).unwrap();
+
+    // 3. Renaming dir_src over dir_dst should fail with DirectoryNotEmpty because dir_dst is not empty
+    let res = root.rename("test_src", root, "test_dst");
+    assert!(
+        matches!(res, Err(VfsError::DirectoryNotEmpty)),
+        "Expected DirectoryNotEmpty, got {:?}",
+        res
+    );
+
+    // 4. Remove the file inside test_dst to make it empty
+    dst_node.unlink("test_file.txt", false).unwrap();
+
+    // 5. Renaming dir_src over dir_dst should now succeed because dir_dst is empty
+    root.rename("test_src", root, "test_dst").unwrap();
+
+    // 6. Clean up
+    root.unlink("test_dst", true).unwrap();
+    log::info!("tmpfs self-tests passed successfully!");
 }
