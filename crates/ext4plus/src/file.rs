@@ -19,7 +19,7 @@ use crate::file_blocks::FileBlocks;
 use crate::inode::Inode;
 use crate::path::Path;
 use crate::resolve::FollowSymlinks;
-use crate::util::{u64_from_usize, usize_from_u32};
+use crate::util::u64_from_usize;
 use core::fmt::{self, Debug, Formatter};
 
 /// An open file within an [`Ext4`] filesystem.
@@ -239,8 +239,6 @@ fn offset_in_block_u32(offset: u64, block_size: u64) -> Result<u32, Ext4Error> {
         .map_err(|_| CorruptKind::InvalidBlockSize.into())
 }
 
-/// Read from `inode` into `buf` starting at `offset`, returning how many bytes were read.
-/// The number may be smaller than the length of the input buffer if the read is only partially successful (e.g., due to reaching EOF).
 #[maybe_async::maybe_async]
 pub(crate) async fn read_at_inner(
     ext4: &Ext4,
@@ -270,28 +268,33 @@ pub(crate) async fn read_at_inner(
 
     let block_size = ext4.0.superblock.block_size();
     let block_size_u64 = block_size.to_u64();
-    let offset_within_block = offset_in_block_u32(offset, block_size_u64)?;
-    let bytes_remaining_in_block = block_size
-        .to_u32()
-        .checked_sub(offset_within_block)
-        .ok_or(CorruptKind::InvalidBlockSize)?;
+    let mut bytes_read = 0usize;
 
-    if buf.len() > usize_from_u32(bytes_remaining_in_block) {
-        buf = &mut buf[..usize_from_u32(bytes_remaining_in_block)];
-    }
+    while bytes_read < buf.len() {
+        let current_offset = offset + bytes_read as u64;
+        let offset_within_block = offset_in_block_u32(current_offset, block_size_u64)?;
+        let bytes_remaining_in_block = block_size
+            .to_u32()
+            .checked_sub(offset_within_block)
+            .ok_or(CorruptKind::InvalidBlockSize)?;
 
-    let block_index = file_blocks
-        .get_block(file_block_from_offset(offset, block_size_u64)?)
-        .await?;
-    if block_index == 0 {
-        buf.fill(0);
-    } else {
-        ext4.read_from_block(block_index, offset_within_block, buf)
+        let chunk_len = core::cmp::min(buf.len() - bytes_read, bytes_remaining_in_block as usize);
+        let block_index = file_blocks
+            .get_block(file_block_from_offset(current_offset, block_size_u64)?)
             .await?;
+        let dest = &mut buf[bytes_read..bytes_read + chunk_len];
+        if block_index == 0 {
+            dest.fill(0);
+        } else {
+            ext4.read_from_block(block_index, offset_within_block, dest)
+                .await?;
+        }
+        bytes_read += chunk_len;
     }
 
-    Ok(buf.len())
+    Ok(bytes_read)
 }
+
 
 /// Read from `inode` into `buf` starting at `offset`, returning how many bytes were read.
 /// The number may be smaller than the length of the input buffer if the read is only partially successful (e.g., due to reaching EOF).
