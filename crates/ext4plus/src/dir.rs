@@ -697,16 +697,16 @@ impl Dir {
     ) -> Result<(), Ext4Error> {
         let old = target_inode.links_count();
         let new = old.checked_add(1).ok_or(Ext4Error::Readonly)?;
-        target_inode.set_links_count(new);
-        target_inode.write(&self.fs).await?;
 
-        if target_inode.file_type() == FileType::Directory {
+        let is_dir = target_inode.file_type() == FileType::Directory;
+        let parent_new = if is_dir {
             let parent_old = self.inode.links_count();
             let parent_new =
                 parent_old.checked_add(1).ok_or(Ext4Error::Readonly)?;
-            self.inode.set_links_count(parent_new);
-            self.inode.write(&self.fs).await?;
-        }
+            Some(parent_new)
+        } else {
+            None
+        };
 
         add_dir_entry(
             &self.fs,
@@ -716,6 +716,15 @@ impl Dir {
             target_inode.file_type(),
         )
         .await?;
+
+        target_inode.set_links_count(new);
+        target_inode.write(&self.fs).await?;
+
+        if let Some(p_new) = parent_new {
+            self.inode.set_links_count(p_new);
+            self.inode.write(&self.fs).await?;
+        }
+
         Ok(())
     }
 
@@ -746,9 +755,26 @@ impl Dir {
         }
 
         let old = inode.links_count();
-        inode.set_links_count(old.saturating_sub(1));
-        inode.write(&self.fs).await?;
+        let new = old.saturating_sub(1);
+
+        let is_dir = inode.file_type() == FileType::Directory;
+        let parent_new = if is_dir {
+            let parent_old = self.inode.links_count();
+            Some(parent_old.saturating_sub(1))
+        } else {
+            None
+        };
+
         remove_dir_entry(&self.fs, &mut self.inode, name).await?;
+
+        inode.set_links_count(new);
+        inode.write(&self.fs).await?;
+
+        if let Some(p_new) = parent_new {
+            self.inode.set_links_count(p_new);
+            self.inode.write(&self.fs).await?;
+        }
+
         Ok(inode)
     }
 
