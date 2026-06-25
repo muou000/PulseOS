@@ -12,7 +12,7 @@ pub use crate::inode::{Inode, InodeCreationOptions, InodeFlags, InodeMode};
 pub use crate::iters::read_dir::ReadDir;
 pub use crate::iters::{AsyncFilter, AsyncIterator, AsyncMap, AsyncSkip};
 pub use crate::label::Label;
-pub use crate::mem_io_error::MemIoError;
+pub use crate::mem_io_error::{MemIoError, MemWriteError};
 pub use crate::metadata::Metadata;
 pub use crate::path::{Component, Components, Path, PathBuf, PathError};
 pub use crate::reader::Ext4Read;

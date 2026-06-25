@@ -295,10 +295,12 @@ impl AsyncIterator for JournalBlockIter {
         while self.skip_count > 0 {
             if let Some(iter) = &mut self.current_iter {
                 match iter.next().await {
-                    Some(_) => self.skip_count = self.skip_count.checked_sub(1).unwrap(),
+                    Some(Ok(_)) => self.skip_count = self.skip_count.checked_sub(1).unwrap(),
+                    Some(Err(e)) => return Some(Err(e)),
                     None => {
                         self.skip_count = 0;
-                        break;
+                        self.state = 2;
+                        return None;
                     }
                 }
             } else {
@@ -375,10 +377,12 @@ impl Iterator for JournalBlockIter {
         while self.skip_count > 0 {
             if let Some(iter) = &mut self.current_iter {
                 match iter.next() {
-                    Some(_) => self.skip_count = self.skip_count.checked_sub(1).unwrap(),
+                    Some(Ok(_)) => self.skip_count = self.skip_count.checked_sub(1).unwrap(),
+                    Some(Err(e)) => return Some(Err(e)),
                     None => {
                         self.skip_count = 0;
-                        break;
+                        self.state = 2;
+                        return None;
                     }
                 }
             } else {

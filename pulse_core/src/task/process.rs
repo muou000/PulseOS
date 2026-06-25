@@ -1906,7 +1906,7 @@ impl Process {
         };
 
         for task in tasks {
-            axlog::info!("begin_group_exit: waking task {:?}", task.inner());
+            axlog::debug!("begin_group_exit: waking task {}", task.id_name());
             if let Some(handle) = thread_handle_from_task(&task) {
                 handle.signal_wait_queue().notify_all(false);
             }
@@ -1979,10 +1979,10 @@ impl Process {
             for (t_id, state) in threads_lock.iter() {
                 match state {
                     ThreadState::Pending => details.push(alloc::format!("Pending({})", t_id)),
-                    ThreadState::Active(task) => details.push(alloc::format!("Active({}, state={:?})", t_id, task.inner())),
+                    ThreadState::Active(task) => details.push(alloc::format!("Active({}, name={:?})", t_id, task.name())),
                 }
             }
-            axlog::info!(
+            axlog::debug!(
                 "finish_thread_exit: pid={}, tid={}, remaining_threads={}, threads={:?}, group_exiting={}",
                 self.pid(),
                 tid,

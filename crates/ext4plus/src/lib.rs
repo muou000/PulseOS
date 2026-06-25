@@ -183,7 +183,7 @@ pub use file_type::FileType;
 pub use format::BytesDisplay;
 pub use iters::read_dir::ReadDir;
 pub use label::Label;
-pub use mem_io_error::MemIoError;
+pub use mem_io_error::{MemIoError, MemWriteError};
 pub use metadata::Metadata;
 pub use reader::Ext4Read;
 pub use resolve::FollowSymlinks;

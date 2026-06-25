@@ -36,7 +36,10 @@ impl Extent {
         amount: u16,
         fs: &Ext4,
     ) -> Result<Self, Ext4Error> {
-        let mut tried_blocks = amount;
+        if amount == 0 {
+            return Err(Ext4Error::NoSpace);
+        }
+        let mut tried_blocks = amount.min(32768);
         let start_fs_block = loop {
             match fs
                 .alloc_contiguous_blocks(
