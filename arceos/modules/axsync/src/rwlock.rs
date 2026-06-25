@@ -7,6 +7,7 @@ use core::ops::{Deref, DerefMut};
 pub struct RwLock<T: ?Sized> {
     wq: WaitQueue,
     state: AtomicI32, // 0: unlocked, >0: readers, -1: writer
+    waiting_writers: AtomicI32,
     value: UnsafeCell<T>,
 }
 
@@ -19,6 +20,7 @@ impl<T> RwLock<T> {
         Self {
             wq: WaitQueue::new(),
             state: AtomicI32::new(0),
+            waiting_writers: AtomicI32::new(0),
             value: UnsafeCell::new(value),
         }
     }
@@ -29,7 +31,8 @@ impl<T: ?Sized> RwLock<T> {
     pub fn read(&self) -> RwLockReadGuard<'_, T> {
         loop {
             let current_state = self.state.load(Ordering::Acquire);
-            if current_state >= 0 {
+            let waiting = self.waiting_writers.load(Ordering::Relaxed);
+            if current_state >= 0 && waiting == 0 {
                 if self.state.compare_exchange_weak(
                     current_state,
                     current_state + 1,
@@ -39,7 +42,10 @@ impl<T: ?Sized> RwLock<T> {
                     break;
                 }
             } else {
-                self.wq.wait_until(|| self.state.load(Ordering::Relaxed) >= 0);
+                self.wq.wait_until(|| {
+                    self.state.load(Ordering::Relaxed) >= 0 &&
+                    self.waiting_writers.load(Ordering::Relaxed) == 0
+                });
             }
         }
         RwLockReadGuard { lock: self }
@@ -47,6 +53,15 @@ impl<T: ?Sized> RwLock<T> {
 
     /// Acquires an exclusive write lock, blocking the current task until unlocked.
     pub fn write(&self) -> RwLockWriteGuard<'_, T> {
+        if self.state.compare_exchange(
+            0,
+            -1,
+            Ordering::SeqCst,
+            Ordering::Relaxed,
+        ).is_ok() {
+            return RwLockWriteGuard { lock: self };
+        }
+        self.waiting_writers.fetch_add(1, Ordering::SeqCst);
         loop {
             if self.state.compare_exchange_weak(
                 0,
@@ -58,6 +73,7 @@ impl<T: ?Sized> RwLock<T> {
             }
             self.wq.wait_until(|| self.state.load(Ordering::Relaxed) == 0);
         }
+        self.waiting_writers.fetch_sub(1, Ordering::SeqCst);
         RwLockWriteGuard { lock: self }
     }
 }
