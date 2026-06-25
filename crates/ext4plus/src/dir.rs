@@ -143,13 +143,20 @@ pub(crate) async fn add_dir_entry(
     let mut block_buf = vec![0u8; block_size];
     let mut is_first = true;
 
+    let tail_size = if fs.has_metadata_checksums() {
+        12usize
+    } else {
+        0usize
+    };
+    let usable_limit = checked_sub_usize(block_size, tail_size, dir_inode.index)?;
+
     while let Some(block_index_res) = file_blocks.next().await {
         let block_index = block_index_res?;
         fs.read_from_block(block_index, 0, &mut block_buf).await?;
 
         // Walk entries in this block looking for usable slack space.
         let mut off = 0usize;
-        while off < block_size {
+        while off < usable_limit {
             let inode_field = read_u32le(&block_buf, off);
             let rec_len_offset = checked_add_usize(off, 4, dir_inode.index)?;
             let rec_len = read_u16le(&block_buf, rec_len_offset);
@@ -975,9 +982,16 @@ pub(crate) async fn add_dir_entry_htree(
 
     let need = dir_entry_min_size(name.as_ref().len(), dir_inode.index)?;
 
+    let tail_size = if fs.has_metadata_checksums() {
+        12usize
+    } else {
+        0usize
+    };
+    let usable_limit = checked_sub_usize(block_size, tail_size, dir_inode.index)?;
+
     let mut off = 0usize;
 
-    while off < block_size {
+    while off < usable_limit {
         let inode_field = read_u32le(&block_buf, off);
         let rec_len_offset = checked_add_usize(off, 4, dir_inode.index)?;
         let rec_len = read_u16le(&block_buf, rec_len_offset);
@@ -1367,4 +1381,61 @@ mod tests {
             .unwrap();
         assert_eq!(old_entry.file_type(), FileType::Regular);
     }
+
+    #[maybe_async::test(
+        feature = "sync",
+        async(not(feature = "sync"), tokio::test)
+    )]
+    async fn test_dir_checksum_tail_protection() {
+        let fs = load_test_disk1_rw().await;
+        let root_inode = fs.read_root_inode().await.unwrap();
+        let mut dir = Dir::open_inode(&fs.0, root_inode).unwrap();
+
+        let mut new_dir_inode = fs
+            .create_inode(InodeCreationOptions {
+                file_type: FileType::Directory,
+                mode: InodeMode::S_IRWXU | InodeMode::S_IFDIR,
+                uid: 0,
+                gid: 0,
+                time: Default::default(),
+                flags: InodeFlags::empty(),
+            })
+            .await
+            .unwrap();
+
+        dir.link(
+            DirEntryName::try_from("test_dir_tail").unwrap(),
+            &mut new_dir_inode,
+        )
+        .await
+        .unwrap();
+
+        let mut sub_dir = Dir::open_inode(&fs.0, new_dir_inode).unwrap();
+
+        for i in 0..200 {
+            let name = format!("{:03}", i);
+            let mut file_inode = fs
+                .create_inode(InodeCreationOptions {
+                    file_type: FileType::Regular,
+                    mode: InodeMode::S_IRUSR | InodeMode::S_IWUSR | InodeMode::S_IFREG,
+                    uid: 0,
+                    gid: 0,
+                    time: Default::default(),
+                    flags: InodeFlags::empty(),
+                })
+                .await
+                .unwrap();
+
+            match sub_dir.link(
+                DirEntryName::try_from(name.as_bytes()).unwrap(),
+                &mut file_inode,
+            )
+            .await {
+                Ok(_) => {}
+                Err(Ext4Error::NoSpace) => break,
+                Err(e) => panic!("Unexpected error: {:?}", e),
+            }
+        }
+    }
 }
+
