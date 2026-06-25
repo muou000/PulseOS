@@ -32,7 +32,6 @@ impl<D: BlockDriverOps + 'static> crate::disk::DiskFlushable for Ext4Disk<D> {
             for (&offset, block) in cache.iter_mut() {
                 if block.dirty {
                     list.push((offset, block.data.clone()));
-                    block.dirty = false;
                 }
             }
             list
@@ -52,7 +51,20 @@ impl<D: BlockDriverOps + 'static> crate::disk::DiskFlushable for Ext4Disk<D> {
             for k in i..j {
                 merged_data.extend_from_slice(&dirty_blocks[k].1);
             }
-            self.write_block_to_disk(start_offset, &merged_data);
+            self.write_block_to_disk(start_offset, &merged_data)?;
+            
+            {
+                let mut cache = self.block_cache.lock();
+                for k in i..j {
+                    let offset = dirty_blocks[k].0;
+                    let written_data = &dirty_blocks[k].1;
+                    if let Some(block) = cache.get_mut(&offset) {
+                        if &block.data == written_data {
+                            block.dirty = false;
+                        }
+                    }
+                }
+            }
             i = j;
         }
 
@@ -81,7 +93,7 @@ impl<D: BlockDriverOps + 'static> Ext4Disk<D> {
         (first_block, inner_offset, blocks)
     }
 
-    fn write_block_to_disk(&self, block_offset: usize, data: &[u8]) {
+    fn write_block_to_disk(&self, block_offset: usize, data: &[u8]) -> axdriver::prelude::DevResult<()> {
         let (first_block, _, _) = self.byte_range(block_offset, data.len());
         let mut dev = self.dev.lock();
         if let Err(err) = dev.write_block(first_block, data) {
@@ -90,10 +102,12 @@ impl<D: BlockDriverOps + 'static> Ext4Disk<D> {
                 block_offset,
                 err
             );
+            return Err(err);
         }
+        Ok(())
     }
 
-    fn read_blocks_from_disk(&self, block_offset: usize, num_blocks: usize, dest: &mut [u8]) {
+    fn read_blocks_from_disk(&self, block_offset: usize, num_blocks: usize, dest: &mut [u8]) -> axdriver::prelude::DevResult<()> {
         let block_size = self.block_size();
         let (first_block, inner_offset, blocks) = self.byte_range(block_offset, num_blocks * block_size);
         let mut raw = vec![0; blocks * self.sector_size];
@@ -104,7 +118,7 @@ impl<D: BlockDriverOps + 'static> Ext4Disk<D> {
                 "ext4 read_blocks_from_disk OOB: block_offset={:#x}, num_blocks={}, first_block={}, blocks={}, num_blocks={}",
                 block_offset, num_blocks, first_block, blocks, total_blocks
             );
-            return;
+            return Err(axdriver::prelude::DevError::InvalidParam);
         }
         if let Err(err) = dev.read_block(first_block, &mut raw) {
             log::error!(
@@ -113,16 +127,15 @@ impl<D: BlockDriverOps + 'static> Ext4Disk<D> {
                 num_blocks,
                 err
             );
-            return;
+            return Err(err);
         }
         dest.copy_from_slice(&raw[inner_offset..inner_offset + num_blocks * block_size]);
+        Ok(())
     }
 
-
-
-    pub fn read_offset(&self, offset: usize, buf: &mut [u8]) {
+    pub fn read_offset(&self, offset: usize, buf: &mut [u8]) -> axdriver::prelude::DevResult<()> {
         if buf.is_empty() {
-            return;
+            return Ok(());
         }
         log::debug!("ext4 read_offset: offset={}, len={}", offset, buf.len());
         let block_size = self.block_size();
@@ -163,7 +176,7 @@ impl<D: BlockDriverOps + 'static> Ext4Disk<D> {
                 
                 // Read all consecutive misses from disk in one go
                 let mut run_data = vec![0u8; consecutive_misses * block_size];
-                self.read_blocks_from_disk(current_block_offset, consecutive_misses, &mut run_data);
+                self.read_blocks_from_disk(current_block_offset, consecutive_misses, &mut run_data)?;
                 
                 // Populate cache and copy to buf
                 let mut to_write = Vec::new();
@@ -194,18 +207,19 @@ impl<D: BlockDriverOps + 'static> Ext4Disk<D> {
                 
                 // Flush evicted dirty blocks
                 for (ev_offset, ev_data) in to_write {
-                    self.write_block_to_disk(ev_offset, &ev_data);
+                    self.write_block_to_disk(ev_offset, &ev_data)?;
                 }
                 
                 current_block_offset += consecutive_misses * block_size;
             }
         }
         log::debug!("ext4 read_offset done: offset={}", offset);
+        Ok(())
     }
 
-    pub fn write_offset(&self, offset: usize, data: &[u8]) {
+    pub fn write_offset(&self, offset: usize, data: &[u8]) -> axdriver::prelude::DevResult<()> {
         if data.is_empty() {
-            return;
+            return Ok(());
         }
         log::debug!("ext4 write_offset: offset={}, len={}", offset, data.len());
         let block_size = self.block_size();
@@ -256,7 +270,7 @@ impl<D: BlockDriverOps + 'static> Ext4Disk<D> {
                     cache.put(current_block_offset, block);
                 }
                 if let Some((offset, data)) = to_write {
-                    self.write_block_to_disk(offset, &data);
+                    self.write_block_to_disk(offset, &data)?;
                 }
                 current_block_offset += block_size;
             } else {
@@ -282,7 +296,7 @@ impl<D: BlockDriverOps + 'static> Ext4Disk<D> {
                 
                 // Pre-read consecutive partial miss blocks from disk in one go
                 let mut run_data = vec![0u8; consecutive_misses * block_size];
-                self.read_blocks_from_disk(current_block_offset, consecutive_misses, &mut run_data);
+                self.read_blocks_from_disk(current_block_offset, consecutive_misses, &mut run_data)?;
                 
                 // Populate cache, apply writes, and copy
                 let mut to_write = Vec::new();
@@ -315,13 +329,14 @@ impl<D: BlockDriverOps + 'static> Ext4Disk<D> {
                 
                 // Flush evicted dirty blocks
                 for (ev_offset, ev_data) in to_write {
-                    self.write_block_to_disk(ev_offset, &ev_data);
+                    self.write_block_to_disk(ev_offset, &ev_data)?;
                 }
                 
                 current_block_offset += consecutive_misses * block_size;
             }
         }
         log::debug!("ext4 write_offset done: offset={}", offset);
+        Ok(())
     }
 
     pub fn block_size(&self) -> usize {
@@ -342,16 +357,25 @@ impl<D: BlockDriverOps> Clone for Ext4DiskWrapper<D> {
     }
 }
 
+#[derive(Debug)]
+struct Ext4DevError(axdriver::prelude::DevError);
+
+impl core::fmt::Display for Ext4DevError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(f, "Device error: {:?}", self.0)
+    }
+}
+
+impl core::error::Error for Ext4DevError {}
+
 impl<D: BlockDriverOps + 'static> ext4plus::Ext4Read for Ext4DiskWrapper<D> {
     fn read(&self, start_byte: u64, dst: &mut [u8]) -> Result<(), alloc::boxed::Box<dyn core::error::Error + Send + Sync + 'static>> {
-        self.0.read_offset(start_byte as usize, dst);
-        Ok(())
+        self.0.read_offset(start_byte as usize, dst).map_err(|err| alloc::boxed::Box::new(Ext4DevError(err)) as _)
     }
 }
 
 impl<D: BlockDriverOps + 'static> ext4plus::Ext4Write for Ext4DiskWrapper<D> {
     fn write(&self, start_byte: u64, src: &[u8]) -> Result<(), alloc::boxed::Box<dyn core::error::Error + Send + Sync + 'static>> {
-        self.0.write_offset(start_byte as usize, src);
-        Ok(())
+        self.0.write_offset(start_byte as usize, src).map_err(|err| alloc::boxed::Box::new(Ext4DevError(err)) as _)
     }
 }

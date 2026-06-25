@@ -29,7 +29,10 @@ impl Ext4Filesystem {
         let disk = Ext4Disk::new(dev);
 
         let mut log_block_size_buf = [0u8; 4];
-        disk.read_offset(1048, &mut log_block_size_buf);
+        disk.read_offset(1048, &mut log_block_size_buf).map_err(|e| {
+            log::error!("Failed to read block size: {:?}", e);
+            axfs_ng_vfs::VfsError::Io
+        })?;
         let log_block_size = u32::from_le_bytes(log_block_size_buf);
         if log_block_size > 6 {
             log::error!("Invalid ext4 log_block_size: {}", log_block_size);
