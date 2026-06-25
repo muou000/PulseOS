@@ -305,9 +305,8 @@ impl BlockGroupDescriptor {
             .read_only_compatible_features()
             .contains(ReadOnlyCompatibleFeatures::GROUP_DESCRIPTOR_CHECKSUMS)
         {
-            unimplemented!(
-                "Support for the GROUP_DESCRIPTOR_CHECKSUMS feature is not yet implemented"
-            );
+            // Support for the GROUP_DESCRIPTOR_CHECKSUMS feature is not yet implemented
+            // for writing, but we reject GROUP_DESCRIPTOR_CHECKSUMS on writable mounts anyway.
         }
     }
 
@@ -406,6 +405,9 @@ impl BlockGroupDescriptor {
         // Allocate a byte vec to read the raw data into.
         let block_group_descriptor_size =
             usize::from(sb.block_group_descriptor_size());
+        if block_group_descriptor_size != 32 && block_group_descriptor_size != 64 {
+            return Err(CorruptKind::BlockGroupDescriptor(bgd_index).into());
+        }
         let mut data = vec![0; block_group_descriptor_size];
 
         let start = Self::get_start_byte(sb, bgd_index)

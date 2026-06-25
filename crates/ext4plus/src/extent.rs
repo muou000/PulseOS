@@ -46,7 +46,10 @@ impl Extent {
                 .await
             {
                 Ok(start_fs) => break start_fs,
-                Err(_) => {
+                Err(err) => {
+                    if !matches!(err, Ext4Error::NoSpace) {
+                        return Err(err);
+                    }
                     if tried_blocks == 0 {
                         return Err(Ext4Error::NoSpace);
                     }
@@ -72,18 +75,12 @@ impl Extent {
         start_block: FsBlockIndex,
         num_blocks: u16,
     ) -> Self {
-        // Per ext4 spec, ee_len <= 32768 is initialized, > 32768 is uninitialized.
-        let is_initialized = num_blocks <= 32768;
-        let num_blocks = if is_initialized {
-            num_blocks
-        } else {
-            num_blocks & 0x7FFF
-        };
+        assert!(num_blocks <= 32768, "num_blocks exceeds maximum initialized extent size");
         Self {
             block_within_file,
             start_block,
             num_blocks,
-            is_initialized,
+            is_initialized: true,
         }
     }
 
@@ -95,7 +92,19 @@ impl Extent {
 
         let start_block = u64_from_hilo(u32::from(ee_start_hi), ee_start_low);
 
-        Self::new(ee_block, start_block, ee_len)
+        let is_initialized = ee_len <= 32768;
+        let num_blocks = if is_initialized {
+            ee_len
+        } else {
+            ee_len & 0x7FFF
+        };
+
+        Self {
+            block_within_file: ee_block,
+            start_block,
+            num_blocks,
+            is_initialized,
+        }
     }
 
     pub(crate) fn to_bytes(self) -> Result<[u8; 12], Ext4Error> {

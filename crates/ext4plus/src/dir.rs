@@ -741,10 +741,9 @@ impl Dir {
 
         let linked_inode =
             get_dir_entry_inode_by_name(&self.fs, &self.inode, name).await?;
-        assert_eq!(
-            linked_inode.index, inode.index,
-            "unlink called with inode that does not match directory entry"
-        );
+        if linked_inode.index != inode.index {
+            return Err(Ext4Error::NotFound);
+        }
 
         let old = inode.links_count();
         inode.set_links_count(old.saturating_sub(1));

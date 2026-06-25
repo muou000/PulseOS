@@ -654,29 +654,32 @@ async fn append_htree_block(
 /// Ensure that the parent node of `lookup` has room for one more child
 /// entry, splitting index blocks like `ext4_dir_idx.c` when needed.
 #[maybe_async::maybe_async]
-pub(crate) async fn split_index_path_for_new_child(
+async fn ensure_room_at_index(
     fs: &Ext4,
     inode: &mut Inode,
     lookup: &mut HtreeLeafLookup,
+    index: usize,
 ) -> Result<(), Ext4Error> {
     let block_size = fs.0.superblock.block_size().to_usize();
     let node_limit = non_root_node_limit(fs)?;
-    let mut parent_block = vec![0; block_size];
 
-    let parent = lookup.parent();
-    let parent_node =
-        read_internal_node_at_path(fs, inode, parent, &mut parent_block)
-            .await?;
-    if parent_node.num_entries() < parent_node.limit() {
+    // Read the node at `index`.
+    let mut node_block = vec![0; block_size];
+    let node_entry = lookup.path[index];
+    let node = read_internal_node_at_path(fs, inode, node_entry, &mut node_block).await?;
+
+    if node.num_entries() < node.limit() {
         return Ok(());
     }
 
-    let parent_entries_offset = parent.kind.entries_offset();
-    let parent_count = parent_node.num_entries();
-    let corrupt = || Ext4Error::from(CorruptKind::DirEntry(inode.index));
+    // If we are at the root, split the root.
+    if index == 0 {
+        assert_eq!(node_entry.kind, HtreeNodeKind::Root);
+        let parent_count = node.num_entries();
+        let parent_entries_offset = node_entry.kind.entries_offset();
+        let corrupt = || Ext4Error::from(CorruptKind::DirEntry(inode.index));
 
-    if parent.kind == HtreeNodeKind::Root {
-        let old_child_entry_index = parent.child_entry_index;
+        let old_child_entry_index = node_entry.child_entry_index;
         let parent_bytes_len = parent_count
             .checked_mul(InternalNode::ENTRY_SIZE)
             .ok_or(Ext4Error::NoSpace)?;
@@ -691,7 +694,7 @@ pub(crate) async fn split_index_path_for_new_child(
             .ok_or(Ext4Error::NoSpace)?;
         new_block[HtreeNodeKind::Internal.entries_offset()..new_entries_end]
             .copy_from_slice(
-                &parent_block[parent_entries_offset..old_entries_end],
+                &node_block[parent_entries_offset..old_entries_end],
             );
         write_u16le(
             &mut new_block,
@@ -720,34 +723,34 @@ pub(crate) async fn split_index_path_for_new_child(
             append_htree_block(fs, inode, &new_block).await?;
 
         write_u16le(
-            &mut parent_block,
+            &mut node_block,
             parent_entries_offset
                 .checked_add(2)
                 .ok_or(Ext4Error::NoSpace)?,
             1,
         );
         write_u32le(
-            &mut parent_block,
+            &mut node_block,
             parent_entries_offset
                 .checked_add(4)
                 .ok_or(Ext4Error::NoSpace)?,
             new_relative_block,
         );
-        parent_block[0x1e] = 1;
+        node_block[0x1e] = 1;
         DirBlock {
             fs,
-            block_index: parent.absolute_block,
+            block_index: node_entry.absolute_block,
             is_first: true,
             dir_inode: inode.index,
             has_htree: true,
             checksum_base: inode.checksum_base().clone(),
         }
-        .update_checksum(&mut parent_block)?;
-        fs.write_to_block(parent.absolute_block, 0, &parent_block)
+        .update_checksum(&mut node_block)?;
+        fs.write_to_block(node_entry.absolute_block, 0, &node_block)
             .await?;
 
         lookup.path[0].child_entry_index = 0;
-        lookup.path.push(HtreePathEntry {
+        lookup.path.insert(1, HtreePathEntry {
             kind: HtreeNodeKind::Internal,
             absolute_block: new_absolute_block,
             relative_block: new_relative_block,
@@ -756,23 +759,25 @@ pub(crate) async fn split_index_path_for_new_child(
         return Ok(());
     }
 
-    if lookup.path.len() != 2 {
-        return Err(Ext4Error::NoSpace);
-    }
+    // Otherwise, we are at an internal node (index > 0).
+    // First, make sure there is room in the parent of this node.
+    ensure_room_at_index(fs, inode, lookup, index - 1).await?;
 
-    let root = lookup.path[0];
-    let mut root_block = vec![0; block_size];
-    let root_node =
-        read_internal_node_at_path(fs, inode, root, &mut root_block).await?;
-    if root_node.num_entries() >= root_node.limit() {
-        return Err(Ext4Error::NoSpace);
-    }
+    let mut node_block = vec![0; block_size];
+    let current_index = lookup.path.iter().position(|e| e.absolute_block == node_entry.absolute_block).unwrap();
+    let node_entry = lookup.path[current_index];
+    let parent_entry = lookup.path[current_index - 1];
+
+    let node = read_internal_node_at_path(fs, inode, node_entry, &mut node_block).await?;
+    let parent_count = node.num_entries();
+    let parent_entries_offset = node_entry.kind.entries_offset();
+    let corrupt = || Ext4Error::from(CorruptKind::DirEntry(inode.index));
 
     let count_left = parent_count / 2;
     let count_right = parent_count
         .checked_sub(count_left)
         .ok_or(Ext4Error::NoSpace)?;
-    let hash_right = parent_node.get_entry(count_left).0;
+    let hash_right = node.get_entry(count_left).0;
 
     let right_src_offset = parent_entries_offset
         .checked_add(
@@ -794,7 +799,7 @@ pub(crate) async fn split_index_path_for_new_child(
         .checked_add(right_len)
         .ok_or(Ext4Error::NoSpace)?;
     new_block[HtreeNodeKind::Internal.entries_offset()..new_entries_end]
-        .copy_from_slice(&parent_block[right_src_offset..right_src_end]);
+        .copy_from_slice(&node_block[right_src_offset..right_src_end]);
     write_u16le(
         &mut new_block,
         HtreeNodeKind::Internal.entries_offset(),
@@ -819,7 +824,7 @@ pub(crate) async fn split_index_path_for_new_child(
     .update_checksum(&mut new_block)?;
 
     write_u16le(
-        &mut parent_block,
+        &mut node_block,
         parent_entries_offset
             .checked_add(2)
             .ok_or(Ext4Error::NoSpace)?,
@@ -827,32 +832,32 @@ pub(crate) async fn split_index_path_for_new_child(
     );
     DirBlock {
         fs,
-        block_index: parent.absolute_block,
+        block_index: node_entry.absolute_block,
         is_first: false,
         dir_inode: inode.index,
         has_htree: true,
         checksum_base: inode.checksum_base().clone(),
     }
-    .update_checksum(&mut parent_block)?;
+    .update_checksum(&mut node_block)?;
 
     let (new_absolute_block, new_relative_block) =
         append_htree_block(fs, inode, &new_block).await?;
-    fs.write_to_block(parent.absolute_block, 0, &parent_block)
+    fs.write_to_block(node_entry.absolute_block, 0, &node_block)
         .await?;
 
-    insert_child_into_parent(fs, inode, root, hash_right, new_relative_block)
+    insert_child_into_parent(fs, inode, parent_entry, hash_right, new_relative_block)
         .await?;
 
-    if lookup.path[1].child_entry_index >= count_left {
-        lookup.path[0].child_entry_index = lookup.path[0]
+    if lookup.path[current_index].child_entry_index >= count_left {
+        lookup.path[current_index - 1].child_entry_index = lookup.path[current_index - 1]
             .child_entry_index
             .checked_add(1)
             .ok_or(Ext4Error::NoSpace)?;
-        lookup.path[1] = HtreePathEntry {
+        lookup.path[current_index] = HtreePathEntry {
             kind: HtreeNodeKind::Internal,
             absolute_block: new_absolute_block,
             relative_block: new_relative_block,
-            child_entry_index: lookup.path[1]
+            child_entry_index: lookup.path[current_index]
                 .child_entry_index
                 .checked_sub(count_left)
                 .ok_or(Ext4Error::NoSpace)?,
@@ -860,6 +865,19 @@ pub(crate) async fn split_index_path_for_new_child(
     }
 
     Ok(())
+}
+
+#[maybe_async::maybe_async]
+pub(crate) async fn split_index_path_for_new_child(
+    fs: &Ext4,
+    inode: &mut Inode,
+    lookup: &mut HtreeLeafLookup,
+) -> Result<(), Ext4Error> {
+    if lookup.path.is_empty() {
+        return Err(Ext4Error::NoSpace);
+    }
+    let last_index = lookup.path.len() - 1;
+    ensure_room_at_index(fs, inode, lookup, last_index).await
 }
 
 #[maybe_async::maybe_async]

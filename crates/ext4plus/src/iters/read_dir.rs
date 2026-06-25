@@ -96,61 +96,64 @@ impl ReadDir {
 
     #[maybe_async::maybe_async]
     async fn next_impl(&mut self) -> Result<Option<DirEntry>, Ext4Error> {
-        // Get the block index, or get the next one if not set.
-        let block_index = if let Some(block_index) = self.block_index {
-            block_index
-        } else {
-            match self.file_blocks.next().await {
-                Some(Ok(block_index)) => {
-                    self.block_index = Some(block_index);
-                    self.offset_within_block = 0;
+        loop {
+            // Get the block index, or get the next one if not set.
+            let block_index = if let Some(block_index) = self.block_index {
+                block_index
+            } else {
+                match self.file_blocks.next().await {
+                    Some(Ok(block_index)) => {
+                        self.block_index = Some(block_index);
+                        self.offset_within_block = 0;
 
-                    block_index
+                        block_index
+                    }
+                    Some(Err(err)) => return Err(err),
+                    None => {
+                        self.is_done = true;
+                        return Ok(None);
+                    }
                 }
-                Some(Err(err)) => return Err(err),
-                None => {
-                    self.is_done = true;
-                    return Ok(None);
+            };
+
+            // If a block has been fully processed, move to the next block.
+            let block_size = self.fs.0.superblock.block_size();
+            if self.offset_within_block >= block_size {
+                self.is_first_block = false;
+                self.block_index = None;
+                continue;
+            }
+
+            // If at the start of a new block, read it and verify the checksum.
+            if self.offset_within_block == 0 {
+                DirBlock {
+                    fs: &self.fs,
+                    dir_inode: self.inode,
+                    block_index,
+                    is_first: self.is_first_block,
+                    has_htree: self.has_htree,
+                    checksum_base: self.checksum_base.clone(),
                 }
+                .read(&mut self.block)
+                .await?;
             }
-        };
 
-        // If a block has been fully processed, move to the next block
-        // on the next iteration.
-        let block_size = self.fs.0.superblock.block_size();
-        if self.offset_within_block >= block_size {
-            self.is_first_block = false;
-            self.block_index = None;
-            return Ok(None);
-        }
+            let (entry, entry_size) = DirEntry::from_bytes(
+                self.fs.clone(),
+                &self.block[self.offset_within_block..],
+                self.inode,
+                self.path.clone(),
+            )?;
 
-        // If at the start of a new block, read it and verify the checksum.
-        if self.offset_within_block == 0 {
-            DirBlock {
-                fs: &self.fs,
-                dir_inode: self.inode,
-                block_index,
-                is_first: self.is_first_block,
-                has_htree: self.has_htree,
-                checksum_base: self.checksum_base.clone(),
+            self.offset_within_block = self
+                .offset_within_block
+                .checked_add(entry_size.get())
+                .ok_or(CorruptKind::DirEntry(self.inode))?;
+
+            if let Some(entry) = entry {
+                return Ok(Some(entry));
             }
-            .read(&mut self.block)
-            .await?;
         }
-
-        let (entry, entry_size) = DirEntry::from_bytes(
-            self.fs.clone(),
-            &self.block[self.offset_within_block..],
-            self.inode,
-            self.path.clone(),
-        )?;
-
-        self.offset_within_block = self
-            .offset_within_block
-            .checked_add(entry_size.get())
-            .ok_or(CorruptKind::DirEntry(self.inode))?;
-
-        Ok(entry)
     }
 }
 

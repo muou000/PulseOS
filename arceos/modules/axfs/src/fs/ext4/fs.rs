@@ -44,7 +44,17 @@ impl Ext4Filesystem {
         let ext4 = Ext4::load_with_writer(
             Box::new(Ext4DiskWrapper(disk.clone())),
             Some(Box::new(Ext4DiskWrapper(disk.clone()))),
-        ).map_err(|e| {
+        ).or_else(|e| {
+            if matches!(e, ext4plus::prelude::Ext4Error::Readonly) {
+                log::info!("Ext4 filesystem has write-incompatible features, falling back to read-only mount.");
+                Ext4::load_with_writer(
+                    Box::new(Ext4DiskWrapper(disk.clone())),
+                    None,
+                )
+            } else {
+                Err(e)
+            }
+        }).map_err(|e| {
             log::error!("Failed to load ext4 filesystem: {:?}", e);
             axfs_ng_vfs::VfsError::Io
         })?;

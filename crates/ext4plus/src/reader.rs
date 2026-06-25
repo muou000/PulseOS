@@ -197,14 +197,21 @@ impl Ext4Read for std::fs::File {
     ) -> Result<(), BoxedError> {
         use std::os::unix::fs::FileExt;
 
-        let total = self.read_at(dst, start_byte).map_err(Box::new)?;
-        if total != dst.len() {
-            return Err(Box::new(MemIoError {
-                start: start_byte,
-                read_len: dst.len(),
-                src_len: total,
-            })
-            .into());
+        let mut offset = start_byte;
+        let mut remaining_len = dst.len();
+        while remaining_len > 0 {
+            let start = (offset - start_byte) as usize;
+            let read_len = self.read_at(&mut dst[start..], offset).map_err(Box::new)?;
+            if read_len == 0 {
+                return Err(Box::new(MemIoError {
+                    start: start_byte,
+                    read_len: dst.len(),
+                    src_len: start,
+                })
+                .into());
+            }
+            offset += read_len as u64;
+            remaining_len -= read_len;
         }
         Ok(())
     }
@@ -225,14 +232,21 @@ impl Ext4Read for std::fs::File {
     ) -> Result<(), BoxedError> {
         use std::os::unix::fs::FileExt;
 
-        let total = self.read_at(dst, start_byte).map_err(Box::new)?;
-        if total != dst.len() {
-            return Err(Box::new(MemIoError {
-                start: start_byte,
-                read_len: dst.len(),
-                src_len: total,
-            })
-            .into());
+        let mut offset = start_byte;
+        let mut remaining_len = dst.len();
+        while remaining_len > 0 {
+            let start = (offset - start_byte) as usize;
+            let read_len = self.read_at(&mut dst[start..], offset).map_err(Box::new)?;
+            if read_len == 0 {
+                return Err(Box::new(MemIoError {
+                    start: start_byte,
+                    read_len: dst.len(),
+                    src_len: start,
+                })
+                .into());
+            }
+            offset += read_len as u64;
+            remaining_len -= read_len;
         }
         Ok(())
     }
@@ -243,14 +257,21 @@ impl Ext4Read for std::fs::File {
     fn read(&self, start_byte: u64, dst: &mut [u8]) -> Result<(), BoxedError> {
         use std::os::unix::fs::FileExt;
 
-        let total = self.read_at(dst, start_byte).map_err(Box::new)?;
-        if total != dst.len() {
-            return Err(Box::new(MemIoError {
-                start: start_byte,
-                read_len: dst.len(),
-                src_len: total,
-            })
-            .into());
+        let mut offset = start_byte;
+        let mut remaining_len = dst.len();
+        while remaining_len > 0 {
+            let start = (offset - start_byte) as usize;
+            let read_len = self.read_at(&mut dst[start..], offset).map_err(Box::new)?;
+            if read_len == 0 {
+                return Err(Box::new(MemIoError {
+                    start: start_byte,
+                    read_len: dst.len(),
+                    src_len: start,
+                })
+                .into());
+            }
+            offset += read_len as u64;
+            remaining_len -= read_len;
         }
         Ok(())
     }
@@ -268,6 +289,7 @@ fn read_from_bytes(src: &[u8], start_byte: u64, dst: &mut [u8]) -> Option<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(feature = "multi-threaded")]
     use alloc::sync::Arc;
 
     #[test]
@@ -304,6 +326,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "multi-threaded")]
     #[maybe_async::test(
         feature = "sync",
         async(not(feature = "sync"), tokio::test)

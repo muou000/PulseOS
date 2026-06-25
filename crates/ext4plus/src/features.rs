@@ -61,7 +61,7 @@ bitflags! {
         const BTREE_DIR = 0x4;
         const HUGE_FILES = 0x8;
         const GROUP_DESCRIPTOR_CHECKSUMS = 0x10;
-        const LARGE_DIRECTORIES = 0x20;
+        const DIR_NLINK = 0x20;
         const LARGE_INODES = 0x40;
         const HAS_SNAPSHOT = 0x80;
         const QUOTA = 0x100;

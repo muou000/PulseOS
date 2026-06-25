@@ -351,10 +351,11 @@ impl DirNodeOps for TmpNode {
             return Err(VfsError::NotFound);
         };
         if let NodeContent::Dir(dir_content) = &entry.get().content {
-            if dir_content.entries.lock().len() > 2 {
+            let mut sub_entries = dir_content.entries.lock();
+            if sub_entries.len() > 2 {
                 return Err(VfsError::DirectoryNotEmpty);
             }
-            dir_content.entries.lock().clear();
+            sub_entries.clear();
         }
         entries.remove(name);
         Ok(())
@@ -376,18 +377,15 @@ impl DirNodeOps for TmpNode {
             }
             if let Some(old_entry) = entries.get(dst_name) {
                 if let NodeContent::Dir(dir_content) = &old_entry.get().content {
-                    if dir_content.entries.lock().len() > 2 {
+                    let mut sub_entries = dir_content.entries.lock();
+                    if sub_entries.len() > 2 {
                         return Err(VfsError::DirectoryNotEmpty);
                     }
+                    sub_entries.clear();
                 }
             }
             let src_entry = entries.remove(src_name).unwrap();
-            let old_dst = entries.insert(dst_name.into(), src_entry);
-            if let Some(old_dst) = old_dst {
-                if let NodeContent::Dir(dir_content) = &old_dst.get().content {
-                    dir_content.entries.lock().clear();
-                }
-            }
+            entries.insert(dst_name.into(), src_entry);
         } else if self.inode.ino < dst_node.inode.ino {
             let mut src_entries = inode_as_dir(&self.inode)?.entries.lock();
             if !src_entries.contains_key(src_name) {
@@ -396,35 +394,29 @@ impl DirNodeOps for TmpNode {
             let mut dst_entries = inode_as_dir(&dst_node.inode)?.entries.lock();
             if let Some(old_entry) = dst_entries.get(dst_name) {
                 if let NodeContent::Dir(dir_content) = &old_entry.get().content {
-                    if dir_content.entries.lock().len() > 2 {
+                    let mut sub_entries = dir_content.entries.lock();
+                    if sub_entries.len() > 2 {
                         return Err(VfsError::DirectoryNotEmpty);
                     }
+                    sub_entries.clear();
                 }
             }
             let src_entry = src_entries.remove(src_name).unwrap();
-            let old_dst = dst_entries.insert(dst_name.into(), src_entry);
-            if let Some(old_dst) = old_dst {
-                if let NodeContent::Dir(dir_content) = &old_dst.get().content {
-                    dir_content.entries.lock().clear();
-                }
-            }
+            dst_entries.insert(dst_name.into(), src_entry);
         } else {
             let mut dst_entries = inode_as_dir(&dst_node.inode)?.entries.lock();
             if let Some(old_entry) = dst_entries.get(dst_name) {
                 if let NodeContent::Dir(dir_content) = &old_entry.get().content {
-                    if dir_content.entries.lock().len() > 2 {
+                    let mut sub_entries = dir_content.entries.lock();
+                    if sub_entries.len() > 2 {
                         return Err(VfsError::DirectoryNotEmpty);
                     }
+                    sub_entries.clear();
                 }
             }
             let mut src_entries = inode_as_dir(&self.inode)?.entries.lock();
             let src_entry = src_entries.remove(src_name).ok_or(VfsError::NotFound)?;
-            let old_dst = dst_entries.insert(dst_name.into(), src_entry);
-            if let Some(old_dst) = old_dst {
-                if let NodeContent::Dir(dir_content) = &old_dst.get().content {
-                    dir_content.entries.lock().clear();
-                }
-            }
+            dst_entries.insert(dst_name.into(), src_entry);
         }
         Ok(())
     }

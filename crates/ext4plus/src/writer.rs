@@ -193,14 +193,21 @@ impl Ext4Write for std::fs::File {
     ) -> Result<(), BoxedError> {
         use std::os::unix::fs::FileExt;
 
-        let total = self.write_at(src, start_byte).map_err(Box::new)?;
-        if total != src.len() {
-            return Err(Box::new(crate::MemIoError {
-                start: start_byte,
-                read_len: src.len(),
-                src_len: total,
-            })
-            .into());
+        let mut offset = start_byte;
+        let mut remaining_len = src.len();
+        while remaining_len > 0 {
+            let start = (offset - start_byte) as usize;
+            let write_len = self.write_at(&src[start..], offset).map_err(Box::new)?;
+            if write_len == 0 {
+                return Err(Box::new(crate::MemIoError {
+                    start: start_byte,
+                    read_len: src.len(),
+                    src_len: start,
+                })
+                .into());
+            }
+            offset += write_len as u64;
+            remaining_len -= write_len;
         }
         Ok(())
     }
@@ -221,14 +228,21 @@ impl Ext4Write for std::fs::File {
     ) -> Result<(), BoxedError> {
         use std::os::unix::fs::FileExt;
 
-        let total = self.write_at(src, start_byte).map_err(Box::new)?;
-        if total != src.len() {
-            return Err(Box::new(crate::MemIoError {
-                start: start_byte,
-                read_len: src.len(),
-                src_len: total,
-            })
-            .into());
+        let mut offset = start_byte;
+        let mut remaining_len = src.len();
+        while remaining_len > 0 {
+            let start = (offset - start_byte) as usize;
+            let write_len = self.write_at(&src[start..], offset).map_err(Box::new)?;
+            if write_len == 0 {
+                return Err(Box::new(crate::MemIoError {
+                    start: start_byte,
+                    read_len: src.len(),
+                    src_len: start,
+                })
+                .into());
+            }
+            offset += write_len as u64;
+            remaining_len -= write_len;
         }
         Ok(())
     }
@@ -239,14 +253,21 @@ impl Ext4Write for std::fs::File {
     fn write(&self, start_byte: u64, src: &[u8]) -> Result<(), BoxedError> {
         use std::os::unix::fs::FileExt;
 
-        let total = self.write_at(src, start_byte).map_err(Box::new)?;
-        if total != src.len() {
-            return Err(Box::new(crate::MemIoError {
-                start: start_byte,
-                read_len: src.len(),
-                src_len: total,
-            })
-            .into());
+        let mut offset = start_byte;
+        let mut remaining_len = src.len();
+        while remaining_len > 0 {
+            let start = (offset - start_byte) as usize;
+            let write_len = self.write_at(&src[start..], offset).map_err(Box::new)?;
+            if write_len == 0 {
+                return Err(Box::new(crate::MemIoError {
+                    start: start_byte,
+                    read_len: src.len(),
+                    src_len: start,
+                })
+                .into());
+            }
+            offset += write_len as u64;
+            remaining_len -= write_len;
         }
         Ok(())
     }
@@ -255,7 +276,10 @@ impl Ext4Write for std::fs::File {
 #[cfg(all(test, feature = "std"))]
 mod tests {
     use super::*;
-    use std::sync::Arc;
+    #[cfg(feature = "multi-threaded")]
+    use std::sync::Arc as RefCount;
+    #[cfg(not(feature = "multi-threaded"))]
+    use std::rc::Rc as RefCount;
 
     #[test]
     fn test_write_to_bytes() {
@@ -289,7 +313,7 @@ mod tests {
         async(not(feature = "sync"), tokio::test)
     )]
     async fn test_arc_write_delegates_to_inner_writer() {
-        let storage = Arc::new(Mutex::new(vec![0, 0, 0, 0]));
+        let storage = RefCount::new(Mutex::new(vec![0, 0, 0, 0]));
 
         storage.write(2, &[5, 6]).await.unwrap();
 

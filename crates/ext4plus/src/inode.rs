@@ -172,13 +172,13 @@ pub struct Inode {
     pub index: InodeIndex,
 
     /// Kept for backwards compatibility, because initialization can cause erroring out.
-    file_type: FileType,
+    pub(crate) file_type: FileType,
 
     /// Full inode data as read from disk.
     pub(crate) inode_data: Vec<u8>,
 
     /// Checksum seed used in various places.
-    checksum_base: Checksum,
+    pub(crate) checksum_base: Checksum,
 }
 
 impl Inode {

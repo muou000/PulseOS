@@ -225,7 +225,9 @@ impl Deref for Ext4Wrapper {
 
 impl Drop for Ext4Wrapper {
     fn drop(&mut self) {
-        fsck_ext4_arc_image(&self.1);
+        if !std::thread::panicking() {
+            fsck_ext4_arc_image(&self.1);
+        }
     }
 }
 

@@ -2618,7 +2618,7 @@ impl Process {
                     paddr_res
                 }
             };
-            axlog::info!("futex_key: addr={:#x}, paddr={:#x}", addr, paddr);
+            axlog::debug!("futex_key: addr={:#x}, paddr={:#x}", addr, paddr);
             (paddr, false)
         }
     }
@@ -2661,6 +2661,9 @@ impl Process {
                 return Err(AxError::BadAddress);
             }
             let val = self.read_user_u32(w.uaddr as usize)?;
+            if val != w.val as u32 {
+                return Err(AxError::from(AxErrorKind::WouldBlock));
+            }
             self.write_user_bytes(w.uaddr as usize, &val.to_ne_bytes())?;
         }
 
@@ -2767,12 +2770,11 @@ impl Process {
         timeout_ns: Option<u64>,
         is_private: bool,
     ) -> AxResult<()> {
-        // Pre-fault the page as writable to break COW and ensure it is mapped.
         let val = self.read_user_u32(addr)?;
-        self.write_user_bytes(addr, &val.to_ne_bytes())?;
         if val != expected {
             return Err(AxError::from(AxErrorKind::WouldBlock));
         }
+        self.write_user_bytes(addr, &val.to_ne_bytes())?;
 
         // Translate the virtual address to a physical address outside the run queue lock.
         let aspace = self.aspace_handle();
@@ -2797,7 +2799,7 @@ impl Process {
 
         let (key, is_priv) = self.futex_key(addr, is_private);
 
-        axlog::info!(
+        axlog::debug!(
             "futex_wait: tid={}, addr={:#x}, paddr={:#x}, expected={}, is_private={}",
             axtask::current().id().as_u64(),
             addr,
@@ -2896,7 +2898,7 @@ impl Process {
             }
         };
 
-        axlog::info!(
+        axlog::debug!(
             "futex_wake: tid={}, addr={:#x}, count={}, is_private={}, woken={}",
             axtask::current().id().as_u64(),
             addr,

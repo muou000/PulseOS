@@ -154,6 +154,7 @@ use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
 use bitmap::BitmapHandle;
+use checksum::Checksum;
 use block_group::{BlockGroupDescriptor, BlockGroupIndex};
 use block_index::FsBlockIndex;
 use core::fmt::{self, Debug, Formatter};
@@ -162,7 +163,7 @@ use core::num::NonZeroU64;
 use core::time::Duration;
 use dir::Dir;
 use error::{CorruptKind, Ext4Error};
-use features::ReadOnlyCompatibleFeatures;
+use features::{CompatibleFeatures, ReadOnlyCompatibleFeatures};
 use file::{File, write_at};
 use file_blocks::FileBlocks;
 use inode::{
@@ -201,6 +202,9 @@ struct Ext4Inner {
     reader: Box<dyn Ext4Read>,
     /// Optional writer providing write access to the underlying storage.
     writer: Option<Box<dyn Ext4Write>>,
+
+    /// Locks per block group to prevent concurrent race conditions on bitmap RMW.
+    group_locks: Vec<crate::sync::Mutex<()>>,
 }
 
 /// Read-only access to an [ext4] filesystem.
@@ -239,9 +243,23 @@ impl Ext4 {
 
         let superblock = Superblock::from_bytes(&data)?;
 
+        if writer.is_some()
+            && (superblock.compatible_features().contains(CompatibleFeatures::HAS_JOURNAL)
+                || superblock.incompatible_features().contains(IncompatibleFeatures::RECOVERY)
+                || superblock.read_only_compatible_features().contains(ReadOnlyCompatibleFeatures::GROUP_DESCRIPTOR_CHECKSUMS))
+        {
+            return Err(Ext4Error::Readonly);
+        }
+
         if superblock.read_only() {
             writer = None;
         }
+        let num_groups = superblock.num_block_groups() as usize;
+        let mut group_locks = Vec::with_capacity(num_groups);
+        for _ in 0..num_groups {
+            group_locks.push(crate::sync::Mutex::new(()));
+        }
+
         let mut fs = Self(PtrPrimitive::new(Ext4Inner {
             block_group_descriptors: BlockGroupDescriptor::read_all(
                 &superblock,
@@ -254,6 +272,7 @@ impl Ext4 {
             // Initialize with an empty journal, because loading the
             // journal requires a valid `Ext4` object.
             journal: Journal::empty(),
+            group_locks,
         }));
 
         // Load the actual journal, if present.
@@ -281,7 +300,10 @@ impl Ext4 {
     pub async fn load_from_path_rw<P: AsRef<std::path::Path>>(
         path: P,
     ) -> Result<Self, Ext4Error> {
-        let file = std::fs::File::open(path)
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(path)
             .map_err(|err| Ext4Error::Io(Box::new(err)))?;
         let file = PtrPrimitive::new(file);
         Self::load_with_writer(Box::new(file.clone()), Some(Box::new(file)))
@@ -567,6 +589,7 @@ impl Ext4 {
             }
 
             let bg = self.get_block_group_descriptor(bg_id);
+            let _lock_guard = self.0.group_locks[bg_id as usize].lock_maybe().await;
 
             let free_inodes = bg.free_inodes_count();
             let used_dirs = bg.used_dirs_count();
@@ -661,6 +684,8 @@ impl Ext4 {
     ) -> Result<(), Ext4Error> {
         let (block_group_index, inode_offset) =
             get_inode_block_group_location(&self.0.superblock, inode.index)?;
+        let _lock_guard = self.0.group_locks[block_group_index as usize].lock_maybe().await;
+
         let inode_bitmap_handle =
             self.get_inode_bitmap_handle(block_group_index);
         inode_bitmap_handle.set(inode_offset, false, self).await?;
@@ -836,6 +861,7 @@ impl Ext4 {
             }
 
             let bg = self.get_block_group_descriptor(bg_id);
+            let _lock_guard = self.0.group_locks[bg_id as usize].lock_maybe().await;
 
             let free_blocks = bg.free_blocks_count();
 
@@ -954,6 +980,8 @@ impl Ext4 {
         assert_ne!(block_index, 0);
         let (block_group_index, block_offset) =
             self.block_block_group_location(block_index)?;
+        let _lock_guard = self.0.group_locks[block_group_index as usize].lock_maybe().await;
+
         let block_bitmap_handle =
             self.get_block_bitmap_handle(block_group_index);
         block_bitmap_handle.set(block_offset, false, self).await?;
@@ -982,6 +1010,8 @@ impl Ext4 {
         assert_ne!(block_index, 0);
         let (block_group_index, block_offset) =
             self.block_block_group_location(block_index)?;
+        let _lock_guard = self.0.group_locks[block_group_index as usize].lock_maybe().await;
+
         let block_bitmap_handle =
             self.get_block_bitmap_handle(block_group_index);
         for i in 0..num_blocks.get() {
@@ -1036,8 +1066,21 @@ impl Ext4 {
         options: InodeCreationOptions,
     ) -> Result<Inode, Ext4Error> {
         // TODO: for the purposes of fscking during recovery, it is proper to write inode data, then mark as used
-        let inode_index = self.alloc_inode(options.file_type).await?;
-        Inode::create(inode_index, options, self).await
+        let file_type = options.file_type;
+        let inode_index = self.alloc_inode(file_type).await?;
+        match Inode::create(inode_index, options, self).await {
+            Ok(inode) => Ok(inode),
+            Err(err) => {
+                let dummy_inode = Inode {
+                    index: inode_index,
+                    file_type,
+                    inode_data: Vec::new(),
+                    checksum_base: Checksum::new(),
+                };
+                let _ = self.free_inode(dummy_inode).await;
+                Err(err)
+            }
+        }
     }
 
     /// Read the entire contents of a file into a `Vec<u8>`.

@@ -21,22 +21,25 @@ pub(crate) struct BlockSize(NonZero<u32>);
 
 impl BlockSize {
     pub(crate) fn from_superblock_value(log_block_size: u32) -> Option<Self> {
+        if log_block_size > 6 {
+            return None;
+        }
         let exp = log_block_size.checked_add(10)?;
         let block_size = 2u32.checked_pow(exp)?;
         // OK to unwrap: the smallest value of `log_block_size` is 0, so
         // the smallest value of `block_size` is `2^(0+10)=1024`.
         Some(Self(NonZero::new(block_size).unwrap()))
     }
-
+ 
     pub(crate) const fn to_u32(self) -> u32 {
         self.0.get()
     }
-
+ 
     #[expect(dead_code)]
     pub(crate) const fn to_nz_u32(self) -> NonZero<u32> {
         self.0
     }
-
+ 
     pub(crate) const fn to_u64(self) -> u64 {
         // Cannot use `u64::try_from` in a `const fn`.
         #[expect(clippy::as_conversions)]
@@ -44,84 +47,83 @@ impl BlockSize {
             self.0.get() as u64
         }
     }
-
+ 
     pub(crate) const fn to_nz_u64(self) -> NonZero<u64> {
         // OK to unwrap: a `NonZero<u32>` always fits in a `NonZero<u64>`.
         NonZero::new(self.to_u64()).unwrap()
     }
-
+ 
     pub(crate) const fn to_usize(self) -> usize {
         usize_from_u32(self.0.get())
     }
 }
-
+ 
 impl Display for BlockSize {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         Display::fmt(&self.0, f)
     }
 }
-
+ 
 impl PartialEq<u32> for BlockSize {
     fn eq(&self, v: &u32) -> bool {
         self.to_u32() == *v
     }
 }
-
+ 
 impl PartialEq<BlockSize> for u16 {
     fn eq(&self, v: &BlockSize) -> bool {
         u32::from(*self) == v.to_u32()
     }
 }
-
+ 
 impl PartialEq<BlockSize> for u32 {
     fn eq(&self, v: &BlockSize) -> bool {
         *self == v.to_u32()
     }
 }
-
+ 
 impl PartialEq<BlockSize> for usize {
     fn eq(&self, v: &BlockSize) -> bool {
         *self == v.to_usize()
     }
 }
-
+ 
 impl PartialOrd<BlockSize> for u16 {
     fn partial_cmp(&self, v: &BlockSize) -> Option<Ordering> {
         u32::from(*self).partial_cmp(&v.to_u32())
     }
 }
-
+ 
 impl PartialOrd<BlockSize> for u32 {
     fn partial_cmp(&self, v: &BlockSize) -> Option<Ordering> {
         self.partial_cmp(&v.to_u32())
     }
 }
-
+ 
 impl PartialOrd<BlockSize> for usize {
     fn partial_cmp(&self, v: &BlockSize) -> Option<Ordering> {
         self.partial_cmp(&v.to_usize())
     }
 }
-
+ 
 #[cfg(test)]
 mod tests {
     use super::*;
-
+ 
     #[test]
     fn test_block_size_display() {
         let bs = BlockSize::from_superblock_value(0).unwrap();
         assert_eq!(format!("{bs}"), "1024");
     }
-
+ 
     #[test]
     fn test_block_size_from_superblock_value() {
         assert_eq!(BlockSize::from_superblock_value(0).unwrap().0.get(), 1024);
         assert_eq!(BlockSize::from_superblock_value(1).unwrap().0.get(), 2048);
         assert_eq!(BlockSize::from_superblock_value(2).unwrap().0.get(), 4096);
-        assert_eq!(
-            BlockSize::from_superblock_value(21).unwrap().0.get(),
-            2_147_483_648
-        );
+        assert_eq!(BlockSize::from_superblock_value(6).unwrap().0.get(), 65536);
+        assert!(BlockSize::from_superblock_value(7).is_none());
+        assert!(BlockSize::from_superblock_value(21).is_none());
         assert!(BlockSize::from_superblock_value(22).is_none());
     }
 

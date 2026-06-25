@@ -33,7 +33,7 @@ pub struct Metadata {
     /// Access time.
     pub atime: Duration,
 
-    /// Creation time.
+    /// Status change time.
     pub ctime: Duration,
 
     /// Delete time.

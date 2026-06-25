@@ -206,7 +206,19 @@ impl Inode {
                 Err(_) => alloc::format!("{}", entry.file_name().display()),
             };
 
-            let de_type = entry.file_type().unwrap_or(ext4plus::FileType::Regular);
+            let de_type = match entry.file_type() {
+                Ok(t) => t,
+                Err(_) => {
+                    if let Some(idx) = core::num::NonZeroU32::new(entry.inode.get()) {
+                        match ext4plus::inode::Inode::read(fs, idx) {
+                            Ok(inode) => inode.file_type(),
+                            Err(_) => ext4plus::FileType::Regular,
+                        }
+                    } else {
+                        ext4plus::FileType::Regular
+                    }
+                }
+            };
             let node_type = into_vfs_type(de_type);
             let is_dir = de_type == ext4plus::FileType::Directory;
 
@@ -519,25 +531,39 @@ impl DirNodeOps for Inode {
         };
 
         let mut new_inode = fs.create_inode(options).map_err(into_vfs_err)?;
-        let dir_idx = core::num::NonZeroU32::new(self.ino).ok_or(VfsError::InvalidData)?;
-        let parent_inode = ext4plus::inode::Inode::read(&fs, dir_idx).map_err(into_vfs_err)?;
-        let mut dir = ext4plus::dir::Dir::open_inode(&fs, parent_inode).map_err(into_vfs_err)?;
+        let new_inode_idx = new_inode.index;
 
-        if node_type == NodeType::Directory {
-            let new_dir = ext4plus::dir::Dir::init(fs.clone(), new_inode, dir_idx).map_err(into_vfs_err)?;
-            new_inode = new_dir.inode().clone();
+        let res = (|| -> VfsResult<DirEntry> {
+            let dir_idx = core::num::NonZeroU32::new(self.ino).ok_or(VfsError::InvalidData)?;
+            let parent_inode = ext4plus::inode::Inode::read(&fs, dir_idx).map_err(into_vfs_err)?;
+            let mut dir = ext4plus::dir::Dir::open_inode(&fs, parent_inode).map_err(into_vfs_err)?;
+
+            if node_type == NodeType::Directory {
+                let new_dir = ext4plus::dir::Dir::init(fs.clone(), new_inode, dir_idx).map_err(into_vfs_err)?;
+                new_inode = new_dir.inode().clone();
+            }
+
+            let name_ref = ext4plus::DirEntryName::try_from(name).map_err(|_| VfsError::InvalidInput)?;
+            dir.link(name_ref, &mut new_inode).map_err(into_vfs_err)?;
+
+            self.invalidate_snapshot(self.ino);
+            Ok(self.create_entry(
+                new_inode.index.get(),
+                node_type,
+                node_type == NodeType::Directory,
+                name,
+            ))
+        })();
+
+        match res {
+            Ok(entry) => Ok(entry),
+            Err(e) => {
+                if let Ok(inode) = ext4plus::inode::Inode::read(&fs, new_inode_idx) {
+                    let _ = fs.delete_file(inode);
+                }
+                Err(e)
+            }
         }
-
-        let name_ref = ext4plus::DirEntryName::try_from(name).map_err(|_| VfsError::InvalidInput)?;
-        dir.link(name_ref, &mut new_inode).map_err(into_vfs_err)?;
-
-        self.invalidate_snapshot(self.ino);
-        Ok(self.create_entry(
-            new_inode.index.get(),
-            node_type,
-            node_type == NodeType::Directory,
-            name,
-        ))
     }
 
     fn link(&self, name: &str, node: &DirEntry) -> VfsResult<DirEntry> {
@@ -549,6 +575,10 @@ impl DirNodeOps for Inode {
 
         let child_idx = core::num::NonZeroU32::new(node.inode() as u32).ok_or(VfsError::InvalidData)?;
         let mut child_inode = ext4plus::inode::Inode::read(&fs, child_idx).map_err(into_vfs_err)?;
+
+        if child_inode.file_type() == ext4plus::FileType::Directory {
+            return Err(VfsError::OperationNotSupported);
+        }
 
         let name_ref = ext4plus::DirEntryName::try_from(name).map_err(|_| VfsError::InvalidInput)?;
         dir.link(name_ref, &mut child_inode).map_err(into_vfs_err)?;
@@ -631,6 +661,16 @@ impl DirNodeOps for Inode {
         if let Ok(dst_inode) = dst_dir_obj.get_entry(dst_name_ref) {
             if dst_inode.index == src_inode.index {
                 return Ok(());
+            }
+
+            let src_is_dir = src_inode.file_type() == ext4plus::FileType::Directory;
+            let dst_is_dir = dst_inode.file_type() == ext4plus::FileType::Directory;
+            if src_is_dir != dst_is_dir {
+                if dst_is_dir {
+                    return Err(VfsError::IsADirectory);
+                } else {
+                    return Err(VfsError::NotADirectory);
+                }
             }
 
             if dst_inode.file_type() == ext4plus::FileType::Directory && self.dir_has_children(&fs, dst_inode.index.get()) {

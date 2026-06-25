@@ -52,6 +52,14 @@ pub(crate) enum HashAlg {
 impl HashAlg {
     /// Create a `HashAlg` from the numeric value stored in a directory
     /// root block.
+    ///
+    /// Supported algorithm IDs:
+    /// - 1: HalfMd4
+    /// - 2: Tea
+    ///
+    /// Unsupported algorithm IDs (e.g. 0: Legacy, 3: Legacy Unsigned,
+    /// 4: HalfMD4 Unsigned, 5: TEA Unsigned, 6: SipHash) will return
+    /// an incompatibility error.
     pub(crate) fn from_u8(alg: u8) -> Result<Self, Ext4Error> {
         if alg == 1 {
             Ok(Self::HalfMd4)

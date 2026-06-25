@@ -7,6 +7,9 @@ mod async_inner {
         inner: async_lock::Mutex<T>,
     }
 
+    /// Alias for MutexGuard under async.
+    pub type MutexGuardRaw<'a, T> = async_lock::MutexGuard<'a, T>;
+
     impl<T> Mutex<T> {
         /// Create a new mutex in an unlocked state ready for use.
         pub fn new(t: T) -> Self {
@@ -17,6 +20,11 @@ mod async_inner {
 
         /// Acquires a lock, blocking the current task until it is able to do so.
         pub async fn lock(&self) -> async_lock::MutexGuard<'_, T> {
+            self.inner.lock().await
+        }
+
+        /// Lock helper for maybe_async context.
+        pub async fn lock_maybe(&self) -> MutexGuardRaw<'_, T> {
             self.inner.lock().await
         }
     }
@@ -53,6 +61,9 @@ mod sync_inner {
         inner: spin::Mutex<T>,
     }
 
+    /// Alias for MutexGuard under sync.
+    pub type MutexGuardRaw<'a, T> = MutexGuard<'a, T>;
+
     impl<T> Mutex<T> {
         /// Create a new mutex in an unlocked state ready for use.
         pub fn new(t: T) -> Self {
@@ -68,6 +79,11 @@ mod sync_inner {
                 inner: self.inner.lock(),
                 _guard: guard,
             }
+        }
+
+        /// Lock helper for maybe_async context.
+        pub fn lock_maybe(&self) -> MutexGuardRaw<'_, T> {
+            self.lock()
         }
     }
 

@@ -27,8 +27,7 @@ use crate::util::usize_from_u32;
 use alloc::collections::BTreeMap;
 use alloc::vec;
 use alloc::vec::Vec;
-#[cfg(feature = "sync")]
-use core::iter::Skip;
+
 
 /// Map from a block somewhere in the filesystem to a block in the
 /// journal. Both the key and value are absolute block indices.
@@ -88,10 +87,7 @@ struct BlockMapLoader<'a> {
 
     /// Iterator over blocks in the journal inode. At construction, the
     /// iterator is advanced to the journal start block.
-    #[cfg(not(feature = "sync"))]
-    journal_block_iter: AsyncSkip<FileBlocks>,
-    #[cfg(feature = "sync")]
-    journal_block_iter: Skip<FileBlocks>,
+    journal_block_iter: JournalBlockIter,
 
     /// Current block index.
     block_index: FsBlockIndex,
@@ -124,12 +120,7 @@ impl<'a> BlockMapLoader<'a> {
         superblock: &'a JournalSuperblock,
         journal_inode: &Inode,
     ) -> Result<Self, Ext4Error> {
-        // Get an iterator over the journal's block indices.
-        let journal_block_iter = FileBlocks::new(fs.clone(), journal_inode)?;
-
-        // Skip forward to the start block.
-        let journal_block_iter =
-            journal_block_iter.skip(usize_from_u32(superblock.start_block));
+        let journal_block_iter = JournalBlockIter::new(fs.clone(), journal_inode.clone(), superblock.start_block)?;
 
         Ok(Self {
             fs,
@@ -258,5 +249,200 @@ impl<'a> BlockMapLoader<'a> {
             .ok_or(CorruptKind::JournalSequenceOverflow)?;
 
         Ok(())
+    }
+}
+
+#[cfg(not(feature = "sync"))]
+use crate::iters::AsyncIterator;
+
+pub(super) struct JournalBlockIter {
+    fs: Ext4,
+    journal_inode: Inode,
+    start_block: u32,
+    state: u8,
+    current_iter: Option<FileBlocks>,
+    remaining_count: usize,
+    skip_count: usize,
+}
+
+impl JournalBlockIter {
+    pub(super) fn new(fs: Ext4, journal_inode: Inode, start_block: u32) -> Result<Self, Ext4Error> {
+        let state = 0;
+        let current_iter = FileBlocks::new(fs.clone(), &journal_inode)?;
+        let skip_count = usize_from_u32(start_block);
+        let remaining_count = if start_block > 0 {
+            usize_from_u32(start_block).checked_sub(1).unwrap()
+        } else {
+            0
+        };
+        Ok(Self {
+            fs,
+            journal_inode,
+            start_block,
+            state,
+            current_iter: Some(current_iter),
+            remaining_count,
+            skip_count,
+        })
+    }
+}
+
+#[cfg(not(feature = "sync"))]
+impl AsyncIterator for JournalBlockIter {
+    type Item = Result<FsBlockIndex, Ext4Error>;
+
+    async fn next(&mut self) -> Option<Self::Item> {
+        while self.skip_count > 0 {
+            if let Some(iter) = &mut self.current_iter {
+                match iter.next().await {
+                    Some(_) => self.skip_count = self.skip_count.checked_sub(1).unwrap(),
+                    None => {
+                        self.skip_count = 0;
+                        break;
+                    }
+                }
+            } else {
+                self.skip_count = 0;
+                break;
+            }
+        }
+
+        loop {
+            match self.state {
+                0 => {
+                    if let Some(iter) = &mut self.current_iter {
+                        match iter.next().await {
+                            Some(res) => return Some(res),
+                            None => {
+                                if self.start_block > 0 && self.remaining_count > 0 {
+                                    self.state = 1;
+                                    let mut next_iter = match FileBlocks::new(self.fs.clone(), &self.journal_inode) {
+                                        Ok(it) => it,
+                                        Err(e) => return Some(Err(e)),
+                                    };
+                                    match next_iter.next().await {
+                                        Some(_) => {},
+                                        None => {
+                                            self.state = 2;
+                                            return None;
+                                        }
+                                    }
+                                    self.current_iter = Some(next_iter);
+                                } else {
+                                    self.state = 2;
+                                    return None;
+                                }
+                            }
+                        }
+                    } else {
+                        self.state = 2;
+                        return None;
+                    }
+                }
+                1 => {
+                    if self.remaining_count > 0 {
+                        if let Some(iter) = &mut self.current_iter {
+                            match iter.next().await {
+                                Some(res) => {
+                                    self.remaining_count = self.remaining_count.checked_sub(1).unwrap();
+                                    return Some(res);
+                                }
+                                None => {
+                                    self.state = 2;
+                                    return None;
+                                }
+                            }
+                        } else {
+                            self.state = 2;
+                            return None;
+                        }
+                    } else {
+                        self.state = 2;
+                        return None;
+                    }
+                }
+                _ => return None,
+            }
+        }
+    }
+}
+
+#[cfg(feature = "sync")]
+impl Iterator for JournalBlockIter {
+    type Item = Result<FsBlockIndex, Ext4Error>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        while self.skip_count > 0 {
+            if let Some(iter) = &mut self.current_iter {
+                match iter.next() {
+                    Some(_) => self.skip_count = self.skip_count.checked_sub(1).unwrap(),
+                    None => {
+                        self.skip_count = 0;
+                        break;
+                    }
+                }
+            } else {
+                self.skip_count = 0;
+                break;
+            }
+        }
+
+        loop {
+            match self.state {
+                0 => {
+                    if let Some(iter) = &mut self.current_iter {
+                        match iter.next() {
+                            Some(res) => return Some(res),
+                            None => {
+                                if self.start_block > 0 && self.remaining_count > 0 {
+                                    self.state = 1;
+                                    let mut next_iter = match FileBlocks::new(self.fs.clone(), &self.journal_inode) {
+                                        Ok(it) => it,
+                                        Err(e) => return Some(Err(e)),
+                                    };
+                                    match next_iter.next() {
+                                        Some(_) => {},
+                                        None => {
+                                            self.state = 2;
+                                            return None;
+                                        }
+                                    }
+                                    self.current_iter = Some(next_iter);
+                                } else {
+                                    self.state = 2;
+                                    return None;
+                                }
+                            }
+                        }
+                    } else {
+                        self.state = 2;
+                        return None;
+                    }
+                }
+                1 => {
+                    if self.remaining_count > 0 {
+                        if let Some(iter) = &mut self.current_iter {
+                            match iter.next() {
+                                Some(res) => {
+                                    self.remaining_count = self.remaining_count.checked_sub(1).unwrap();
+                                    return Some(res);
+                                }
+                                None => {
+                                    self.state = 2;
+                                    return None;
+                                }
+                            }
+                        } else {
+                            self.state = 2;
+                            return None;
+                        }
+                    } else {
+                        self.state = 2;
+                        return None;
+                    }
+                }
+                _ => return None,
+            }
+        }
     }
 }

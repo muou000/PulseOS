@@ -165,6 +165,9 @@ impl Superblock {
         // `num_data_blocks = 3` and `s_blocks_per_group = 4`; that is
         // one block group, but regular division would calculate zero
         // instead of one.)
+        if s_blocks_per_group == 0 {
+            return Err(CorruptKind::BlocksPerGroup.into());
+        }
         let num_block_groups = u32::try_from(
             num_data_blocks.div_ceil(u64::from(s_blocks_per_group)),
         )
@@ -175,7 +178,9 @@ impl Superblock {
 
         let block_group_descriptor_size =
             if incompatible_features.contains(IncompatibleFeatures::IS_64BIT) {
-                assert_eq!(s_desc_size, 64);
+                if s_desc_size != 64 {
+                    return Err(CorruptKind::BlockGroupDescriptorSize(s_desc_size).into());
+                }
                 s_desc_size
             } else {
                 32
@@ -262,6 +267,8 @@ impl Superblock {
     pub(crate) fn read_only(&self) -> bool {
         self.incompatible_features()
             .contains(IncompatibleFeatures::RECOVERY)
+            || self.read_only_compatible_features()
+                .contains(ReadOnlyCompatibleFeatures::READ_ONLY)
             || !check_read_only_compat_features(
                 self.read_only_compatible_features().bits(),
             )
@@ -550,7 +557,7 @@ mod tests {
                         ReadOnlyCompatibleFeatures::SPARSE_SUPERBLOCKS
                             | ReadOnlyCompatibleFeatures::LARGE_FILES
                             | ReadOnlyCompatibleFeatures::HUGE_FILES
-                            | ReadOnlyCompatibleFeatures::LARGE_DIRECTORIES
+                            | ReadOnlyCompatibleFeatures::DIR_NLINK
                             | ReadOnlyCompatibleFeatures::LARGE_INODES
                             | ReadOnlyCompatibleFeatures::METADATA_CHECKSUMS,
                     compatible: CompatibleFeatures::EXT_ATTR

@@ -69,7 +69,7 @@ impl DirBlock<'_> {
         let actual_checksum = if block_type == DirBlockType::Leaf {
             self.calc_leaf_checksum(block)
         } else {
-            self.calc_internal_checksum(block, block_type)
+            self.calc_internal_checksum(block, block_type)?
         };
 
         if actual_checksum.finalize() == expected_checksum {
@@ -99,7 +99,7 @@ impl DirBlock<'_> {
         let checksum = if block_type == DirBlockType::Leaf {
             self.calc_leaf_checksum(block)
         } else {
-            self.calc_internal_checksum(block, block_type)
+            self.calc_internal_checksum(block, block_type)?
         };
 
         // Stored in the last four bytes of the block.
@@ -136,7 +136,7 @@ impl DirBlock<'_> {
         &self,
         block: &[u8],
         block_type: DirBlockType,
-    ) -> Checksum {
+    ) -> Result<Checksum, Ext4Error> {
         let tail_entry_size = 8;
 
         // OK to unwrap: minimum block size is 1024.
@@ -158,15 +158,19 @@ impl DirBlock<'_> {
         // at most 0x20, so the maximum result is 524,312. This fits in
         // a `u32`, and we assume that `usize` is at least that large.
         let num_bytes = limit_offset
-            .checked_add(usize::from(count).checked_mul(8).unwrap())
-            .unwrap();
+            .checked_add(usize::from(count).checked_mul(8).ok_or(CorruptKind::DirBlockChecksum(self.dir_inode))?)
+            .ok_or(CorruptKind::DirBlockChecksum(self.dir_inode))?;
+
+        if num_bytes > tail_entry_offset {
+            return Err(CorruptKind::DirBlockChecksum(self.dir_inode).into());
+        }
 
         let mut checksum = self.checksum_base.clone();
         checksum.update(&block[..num_bytes]);
         checksum.update_u32_le(read_u32le(block, tail_entry_offset));
         checksum.update_u32_le(0);
 
-        checksum
+        Ok(checksum)
     }
 
     fn get_block_type(&self, block: &[u8]) -> DirBlockType {

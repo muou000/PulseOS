@@ -271,6 +271,11 @@ impl DirEntry {
                 CorruptKind::DirEntryRecordTooSmall(inode, rec_len).into()
             );
         }
+        if rec_len > bytes.len() {
+            return Err(
+                CorruptKind::DirEntryRecordTooSmall(inode, rec_len).into()
+            );
+        }
         // OK to unwrap: above check ensures that `rec_len >= NAME_OFFSET`.
         let rec_len = NonZero::new(rec_len).unwrap();
 
@@ -290,6 +295,12 @@ impl DirEntry {
         // at most 255, so the result fits in a `u16`, which is the
         // minimum size of `usize`.
         let name_end: usize = NAME_OFFSET.checked_add(name_len_usize).unwrap();
+
+        if name_end > rec_len.get() {
+            return Err(
+                CorruptKind::DirEntryNameTooLarge(inode, name_len).into()
+            );
+        }
 
         // Get the entry's name.
         let name_slice = bytes

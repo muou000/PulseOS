@@ -109,7 +109,9 @@ pub(crate) async fn resolve_path(
         // OK to unwrap: never exceeds `MAX_ITERATIONS`, which is much
         // less than `usize::MAX`.
         num_iterations = num_iterations.checked_add(1).unwrap();
-        assert!(num_iterations <= MAX_ITERATIONS);
+        if num_iterations > MAX_ITERATIONS {
+            return Err(Ext4Error::TooManySymlinks);
+        }
 
         // Find the end of the component. This is either the next '/',
         // or the end of the path.

@@ -467,10 +467,23 @@ impl Inode {
 
         let file_acl = self.file_acl();
         if file_acl != 0 {
-            ext4.free_block(file_acl).await?;
             self.set_file_acl(0);
             let fs_blocks = self.fs_blocks(ext4)?;
             self.set_fs_blocks(fs_blocks.checked_sub(1).unwrap(), ext4)?;
+
+            let mut block = ext4.read_block(file_acl).await?;
+            if block.len() >= EXT4_XATTR_BLOCK_HEADER_SIZE && read_u32le(&block, 0) == EXT4_XATTR_MAGIC {
+                let refcount = read_u32le(&block, 4);
+                if refcount > 1 {
+                    let new_refcount = refcount - 1;
+                    write_u32le(&mut block, 4, new_refcount);
+                    ext4.write_to_block(file_acl, 0, &block).await?;
+                } else {
+                    ext4.free_block(file_acl).await?;
+                }
+            } else {
+                ext4.free_block(file_acl).await?;
+            }
         }
 
         self.write(ext4).await
@@ -517,10 +530,23 @@ impl Inode {
 
         let file_acl = self.file_acl();
         if file_acl != 0 {
-            ext4.free_block(file_acl).await?;
             self.set_file_acl(0);
             let fs_blocks = self.fs_blocks(ext4)?;
             self.set_fs_blocks(fs_blocks.checked_sub(1).unwrap(), ext4)?;
+
+            let mut block = ext4.read_block(file_acl).await?;
+            if block.len() >= EXT4_XATTR_BLOCK_HEADER_SIZE && read_u32le(&block, 0) == EXT4_XATTR_MAGIC {
+                let refcount = read_u32le(&block, 4);
+                if refcount > 1 {
+                    let new_refcount = refcount - 1;
+                    write_u32le(&mut block, 4, new_refcount);
+                    ext4.write_to_block(file_acl, 0, &block).await?;
+                } else {
+                    ext4.free_block(file_acl).await?;
+                }
+            } else {
+                ext4.free_block(file_acl).await?;
+            }
         }
 
         self.write(ext4).await

@@ -130,7 +130,7 @@ pub fn flush_all_disks() -> DevResult<()> {
         guard.iter().filter_map(|weak| weak.upgrade()).collect()
     };
     for flusher in flushers {
-        let _ = flusher.flush_disk();
+        flusher.flush_disk()?;
     }
     Ok(())
 }

@@ -194,8 +194,7 @@ impl From<Ext4Error> for std::io::Error {
             Ext4Error::NotUtf8 => InvalidData.into(),
             Ext4Error::Encrypted => PermissionDenied.into(),
             Ext4Error::Readonly => PermissionDenied.into(),
-            // TODO: Fix
-            Ext4Error::NoSpace => Self::other(e),
+            Ext4Error::NoSpace => StorageFull.into(),
             Ext4Error::AlreadyExists => AlreadyExists.into(),
         }
     }
@@ -235,6 +234,12 @@ pub(crate) enum CorruptKind {
 
     /// The number of inodes per block group is zero.
     InodesPerBlockGroup,
+
+    /// The number of blocks per block group is zero.
+    BlocksPerGroup,
+
+    /// The block group descriptor size is invalid.
+    BlockGroupDescriptorSize(u16),
 
     /// The inode size exceeds the block size.
     InodeSize,
@@ -455,6 +460,12 @@ impl Display for CorruptKind {
             Self::TooManyBlockGroups => write!(f, "too many block groups"),
             Self::InodesPerBlockGroup => {
                 write!(f, "inodes per block group is zero")
+            }
+            Self::BlocksPerGroup => {
+                write!(f, "blocks per block group is zero")
+            }
+            Self::BlockGroupDescriptorSize(size) => {
+                write!(f, "invalid block group descriptor size: {size}")
             }
             Self::InodeSize => write!(f, "inode size is invalid"),
             Self::JournalInode => write!(f, "invalid journal inode"),

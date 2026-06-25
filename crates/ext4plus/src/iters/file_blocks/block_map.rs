@@ -195,9 +195,15 @@ struct IndirectBlockIter {
 impl IndirectBlockIter {
     #[maybe_async::maybe_async]
     async fn new(fs: Ext4, block_index: u32) -> Result<Self, Ext4Error> {
-        let mut block = vec![0u8; fs.0.superblock.block_size().to_usize()];
-        fs.read_from_block(FsBlockIndex::from(block_index), 0, &mut block)
-            .await?;
+        let block_size = fs.0.superblock.block_size().to_usize();
+        let block = if block_index == 0 {
+            vec![0u8; block_size]
+        } else {
+            let mut block = vec![0u8; block_size];
+            fs.read_from_block(FsBlockIndex::from(block_index), 0, &mut block)
+                .await?;
+            block
+        };
 
         Ok(Self {
             block,

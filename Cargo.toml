@@ -1,6 +1,6 @@
 [workspace]
 
-exclude = ["arceos", "crates/axconfig-gen"]
+exclude = ["arceos", "crates/axconfig-gen", "crates/ext4plus"]
 members = ["pulse_core", "pulse_syscalls"]
 
 [workspace.package]
