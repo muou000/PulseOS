@@ -330,6 +330,7 @@ impl<D: BlockDriverOps + 'static> Ext4Disk<D> {
 
     pub fn set_block_size(&self, size: usize) {
         self.block_size.store(size, core::sync::atomic::Ordering::Relaxed);
+        self.block_cache.lock().clear();
     }
 }
 

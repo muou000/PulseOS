@@ -27,6 +27,17 @@ impl Ext4Filesystem {
     pub fn new<D: BlockDriverOps + 'static>(dev: D) -> VfsResult<Filesystem> {
         log::info!("Ext4Filesystem::new: opening block device");
         let disk = Ext4Disk::new(dev);
+
+        let mut log_block_size_buf = [0u8; 4];
+        disk.read_offset(1048, &mut log_block_size_buf);
+        let log_block_size = u32::from_le_bytes(log_block_size_buf);
+        if log_block_size > 6 {
+            log::error!("Invalid ext4 log_block_size: {}", log_block_size);
+            return Err(axfs_ng_vfs::VfsError::InvalidInput);
+        }
+        let block_size = 1024usize << log_block_size;
+        disk.set_block_size(block_size);
+
         let ext4 = Ext4::load_with_writer(
             Box::new(Ext4DiskWrapper(disk.clone())),
             Some(Box::new(Ext4DiskWrapper(disk.clone()))),
@@ -34,11 +45,7 @@ impl Ext4Filesystem {
             log::error!("Failed to load ext4 filesystem: {:?}", e);
             axfs_ng_vfs::VfsError::Io
         })?;
-        let mut log_block_size_buf = [0u8; 4];
-        disk.read_offset(1048, &mut log_block_size_buf);
-        let log_block_size = u32::from_le_bytes(log_block_size_buf);
-        let block_size = 1024usize << log_block_size;
-        disk.set_block_size(block_size);
+
         log::info!("Ext4Filesystem::new: block device opened successfully");
         let fs = Arc::new(Self {
             inner: Mutex::new(ext4),
