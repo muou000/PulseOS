@@ -10,7 +10,7 @@ use axfs_ng_vfs::{
     DirEntry, DirNode, Filesystem, FilesystemOps, Reference, StatFs, VfsResult, WeakDirEntry,
     path::MAX_NAME_LEN,
 };
-use ext4plus::Ext4;
+use ext4plus::{Ext4, prelude::Ext4Error};
 use axsync::{Mutex, MutexGuard};
 use super::{Ext4Disk, Ext4DiskWrapper, Inode, cleanup_dir_cache_registry};
 
@@ -90,7 +90,9 @@ impl Ext4Filesystem {
         if pending.is_empty() {
             return;
         }
-        let inodes_to_check = core::mem::take(&mut *pending);
+        let mut inodes_to_check = core::mem::take(&mut *pending);
+        inodes_to_check.sort_unstable();
+        inodes_to_check.dedup();
         drop(pending);
 
         let mut failed = Vec::new();
@@ -118,7 +120,9 @@ impl Ext4Filesystem {
                                 log::debug!("ext4: deferred deleting unlinked file (ino {})", ino);
                                 if let Err(e) = fs.delete_file(inode) {
                                     log::error!("ext4: failed to delete unlinked file (ino {}): {:?}", ino, e);
-                                    failed.push(ino);
+                                    if !matches!(e, Ext4Error::Corrupt(_) | Ext4Error::NotFound) {
+                                        failed.push(ino);
+                                    }
                                 } else {
                                     crate::invalidate_file_cache(self as *const Self as usize, ino as u64);
                                 }
@@ -127,7 +131,9 @@ impl Ext4Filesystem {
                     }
                     Err(e) => {
                         log::error!("ext4: failed to read inode (ino {}): {:?}", ino, e);
-                        failed.push(ino);
+                        if !matches!(e, Ext4Error::Corrupt(_) | Ext4Error::NotFound) {
+                            failed.push(ino);
+                        }
                     }
                 }
             }

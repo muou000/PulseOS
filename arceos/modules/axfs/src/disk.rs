@@ -122,8 +122,19 @@ impl<D: BlockDriverOps> DiskFlushable for DiskFlusher<D> {
 pub static DISK_FLUSHERS: spin::Lazy<Mutex<alloc::vec::Vec<alloc::sync::Weak<dyn DiskFlushable>>>> =
     spin::Lazy::new(|| Mutex::new(alloc::vec::Vec::new()));
 
+pub static FLUSHING_TASKS: spin::Lazy<Mutex<alloc::collections::BTreeSet<u64>>> =
+    spin::Lazy::new(|| Mutex::new(alloc::collections::BTreeSet::new()));
+
 /// Flushes all registered disks.
 pub fn flush_all_disks() -> DevResult<()> {
+    let task_id = axtask::current().id().as_u64();
+    {
+        let mut guard = FLUSHING_TASKS.lock();
+        if !guard.insert(task_id) {
+            return Ok(());
+        }
+    }
+
     let flushers: alloc::vec::Vec<Arc<dyn DiskFlushable>> = {
         let mut guard = DISK_FLUSHERS.lock();
         let mut active = alloc::vec::Vec::new();
@@ -144,6 +155,8 @@ pub fn flush_all_disks() -> DevResult<()> {
             ret = Err(e);
         }
     }
+
+    FLUSHING_TASKS.lock().remove(&task_id);
     ret
 }
 

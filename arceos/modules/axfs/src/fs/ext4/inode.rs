@@ -107,6 +107,16 @@ fn invalidate_dir_cache(fs: &Arc<Ext4Filesystem>, ino: u32) {
 
 impl Inode {
     pub(crate) fn new(fs: Arc<Ext4Filesystem>, ino: u32, this: Option<WeakDirEntry>) -> Arc<Self> {
+        let mut active = fs.active_inodes.lock();
+        if let Some(list) = active.get_mut(&ino) {
+            list.retain(|w| w.strong_count() > 0);
+            for w in list.iter() {
+                if let Some(inode) = w.upgrade() {
+                    return inode;
+                }
+            }
+        }
+
         log::debug!("ext4: Inode::new ino={}", ino);
         let dir_cache = dir_cache_state(&fs, ino);
         let inode = Arc::new(Self {
@@ -116,7 +126,7 @@ impl Inode {
             dir_cache,
             is_unlinked: core::sync::atomic::AtomicBool::new(false),
         });
-        fs.active_inodes.lock().entry(ino).or_default().push(Arc::downgrade(&inode));
+        active.entry(ino).or_default().push(Arc::downgrade(&inode));
         inode
     }
 

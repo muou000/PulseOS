@@ -59,8 +59,7 @@ multi-threaded = []
 std = []
 sync = [
     "maybe-async/is_sync",
-    "dep:spin",
-    "dep:kernel_guard",
+    "dep:axsync",
 ]
 
 [lib]
@@ -87,12 +86,8 @@ version = "3.0"
 [dependencies.maybe-async]
 version = "0.2"
 
-[dependencies.spin]
-version = "0.10"
-optional = true
-
-[dependencies.kernel_guard]
-version = "0.1"
+[dependencies.axsync]
+path = "../../arceos/modules/axsync"
 optional = true
 
 [dev-dependencies.anyhow]
