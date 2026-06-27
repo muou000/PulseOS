@@ -378,6 +378,9 @@ impl DirNodeOps for TmpNode {
     }
 
     fn rename(&self, src_name: &str, dst_dir: &DirNode, dst_name: &str) -> VfsResult<()> {
+        if src_name == "." || src_name == ".." || dst_name == "." || dst_name == ".." {
+            return Err(VfsError::InvalidInput);
+        }
         let dst_node = dst_dir.downcast::<Self>()?;
         if let Ok(entry) = dst_dir.lookup(dst_name) {
             let src_entry = self.lookup(src_name)?;

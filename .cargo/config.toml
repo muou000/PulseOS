@@ -6,15 +6,5 @@ git = "https://github.com/arceos-org/axdriver_crates.git"
 tag = "v0.1.2"
 replace-with = "vendored-sources"
 
-[source."git+https://github.com/arceos-org/slab_allocator.git?tag=v0.3.1"]
-git = "https://github.com/arceos-org/slab_allocator.git"
-tag = "v0.3.1"
-replace-with = "vendored-sources"
-
-[source."git+https://github.com/rcore-os/smoltcp.git?rev=8bf9a9a"]
-git = "https://github.com/rcore-os/smoltcp.git"
-rev = "8bf9a9a"
-replace-with = "vendored-sources"
-
 [source.vendored-sources]
 directory = "vendor"

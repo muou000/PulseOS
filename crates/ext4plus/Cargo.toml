@@ -92,7 +92,7 @@ version = "0.10"
 optional = true
 
 [dependencies.kernel_guard]
-path = "../../vendor/kernel_guard"
+version = "0.1"
 optional = true
 
 [dev-dependencies.anyhow]
