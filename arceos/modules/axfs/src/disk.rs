@@ -242,10 +242,20 @@ impl<D: BlockDriverOps + 'static> SeekableDisk<D> {
         if buf.len() >= self.block_size() {
             let blocks = buf.len() >> self.block_size_log2;
             let length = blocks << self.block_size_log2;
-            let block_id = self.inner.lock().block_id;
-            self.dev.lock().read_block(block_id, take_mut(&mut buf, length))?;
+            let block_id = {
+                let mut inner = self.inner.lock();
+                let old_id = inner.block_id;
+                inner.block_id += blocks as u64;
+                old_id
+            };
+            if let Err(e) = self.dev.lock().read_block(block_id, take_mut(&mut buf, length)) {
+                let mut inner = self.inner.lock();
+                if inner.block_id >= blocks as u64 {
+                    inner.block_id -= blocks as u64;
+                }
+                return Err(e);
+            }
             read += length;
-            self.inner.lock().block_id += blocks as u64;
         }
         if !buf.is_empty() {
             read += self.read_partial(&mut buf)?;
@@ -288,10 +298,20 @@ impl<D: BlockDriverOps + 'static> SeekableDisk<D> {
         if buf.len() >= self.block_size() {
             let blocks = buf.len() >> self.block_size_log2;
             let length = blocks << self.block_size_log2;
-            let block_id = self.inner.lock().block_id;
-            self.dev.lock().write_block(block_id, take(&mut buf, length))?;
+            let block_id = {
+                let mut inner = self.inner.lock();
+                let old_id = inner.block_id;
+                inner.block_id += blocks as u64;
+                old_id
+            };
+            if let Err(e) = self.dev.lock().write_block(block_id, take(&mut buf, length)) {
+                let mut inner = self.inner.lock();
+                if inner.block_id >= blocks as u64 {
+                    inner.block_id -= blocks as u64;
+                }
+                return Err(e);
+            }
             written += length;
-            self.inner.lock().block_id += blocks as u64;
         }
         if !buf.is_empty() {
             written += self.write_partial(&mut buf)?;

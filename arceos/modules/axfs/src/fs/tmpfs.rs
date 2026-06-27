@@ -1,5 +1,5 @@
-use alloc::{borrow::ToOwned, string::String, sync::Arc};
-use core::{any::Any, task::Context, time::Duration};
+use alloc::{borrow::ToOwned, string::String, sync::{Arc, Weak}};
+use core::{any::Any, task::Context, time::Duration, cell::OnceCell};
 
 use axpoll::{IoEvents, Pollable};
 use slab::Slab;
@@ -16,7 +16,7 @@ const TMPFS_MAGIC: u64 = 0x0102_1994;
 
 pub struct TmpFilesystem {
     inodes: Mutex<Slab<Arc<Inode>>>,
-    root: Mutex<Option<DirEntry>>,
+    root: OnceCell<WeakDirEntry>,
 }
 
 impl TmpFilesystem {
@@ -24,7 +24,7 @@ impl TmpFilesystem {
     pub fn new() -> Filesystem {
         let fs = Arc::new(Self {
             inodes: Mutex::new(Slab::new()),
-            root: Mutex::default(),
+            root: OnceCell::new(),
         });
         let root_ino = new_inode(
             &fs,
@@ -32,12 +32,12 @@ impl TmpFilesystem {
             NodeType::Directory,
             NodePermission::from_bits_truncate(0o755),
         );
-        *fs.root.lock() = Some(DirEntry::new_dir(
+        let root_dir = DirEntry::new_dir(
             |this| DirNode::new(TmpNode::new(fs.clone(), root_ino, Some(this))),
             Reference::root(),
-        ));
-        let filesystem = Filesystem::new(fs);
-        filesystem
+        );
+        let _ = fs.root.set(root_dir.downgrade());
+        Filesystem::new(fs)
     }
 
     fn get(&self, ino: u64) -> Arc<Inode> {
@@ -45,13 +45,19 @@ impl TmpFilesystem {
     }
 }
 
+unsafe impl Send for TmpFilesystem {}
+unsafe impl Sync for TmpFilesystem {}
+
 impl FilesystemOps for TmpFilesystem {
     fn name(&self) -> &str {
         "tmpfs"
     }
 
     fn root_dir(&self) -> DirEntry {
-        self.root.lock().clone().unwrap()
+        self.root
+            .get()
+            .and_then(WeakDirEntry::upgrade)
+            .expect("tmpfs root directory should be alive while filesystem is mounted")
     }
 
     fn stat(&self) -> VfsResult<StatFs> {
@@ -158,24 +164,32 @@ fn inode_as_dir(inode: &Inode) -> VfsResult<&DirContent> {
 }
 
 struct InodeRef {
-    fs: Arc<TmpFilesystem>,
+    fs: Weak<TmpFilesystem>,
     ino: u64,
 }
 
 impl InodeRef {
     pub fn new(fs: Arc<TmpFilesystem>, ino: u64) -> Self {
         fs.get(ino).metadata.lock().nlink += 1;
-        Self { fs, ino }
+        Self {
+            fs: Arc::downgrade(&fs),
+            ino,
+        }
     }
 
     fn get(&self) -> Arc<Inode> {
-        self.fs.get(self.ino)
+        self.fs
+            .upgrade()
+            .expect("tmpfs filesystem was dropped while inodes are still referenced")
+            .get(self.ino)
     }
 }
 
 impl Drop for InodeRef {
     fn drop(&mut self) {
-        release_inode(&self.fs, &self.get(), 1);
+        if let Some(fs) = self.fs.upgrade() {
+            release_inode(&fs, &fs.get(self.ino), 1);
+        }
     }
 }
 
