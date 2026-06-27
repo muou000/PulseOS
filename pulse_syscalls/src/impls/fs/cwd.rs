@@ -30,7 +30,7 @@ pub fn sys_getcwd(buf: usize, size: usize) -> isize {
     };
     tmp[..cwd.len()].copy_from_slice(cwd);
     match write_user_bytes(buf, &tmp) {
-        Ok(()) => buf as isize,
+        Ok(()) => (cwd.len() + 1) as isize,
         Err(e) => -e.code() as isize,
     }
 }
