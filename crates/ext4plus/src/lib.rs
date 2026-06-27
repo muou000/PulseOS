@@ -243,13 +243,13 @@ impl Ext4 {
 
         let superblock = Superblock::from_bytes(&data)?;
 
-        if writer.is_some()
-            && (superblock.compatible_features().contains(CompatibleFeatures::HAS_JOURNAL)
-                || superblock.incompatible_features().contains(IncompatibleFeatures::RECOVERY)
-                || superblock.read_only_compatible_features().contains(ReadOnlyCompatibleFeatures::GROUP_DESCRIPTOR_CHECKSUMS))
-        {
-            return Err(Ext4Error::Readonly);
-        }
+        // if writer.is_some()
+        //     && (superblock.compatible_features().contains(CompatibleFeatures::HAS_JOURNAL)
+        //         || superblock.incompatible_features().contains(IncompatibleFeatures::RECOVERY)
+        //         || superblock.read_only_compatible_features().contains(ReadOnlyCompatibleFeatures::GROUP_DESCRIPTOR_CHECKSUMS))
+        // {
+        //     return Err(Ext4Error::Readonly);
+        // }
 
         if superblock.read_only() {
             writer = None;
