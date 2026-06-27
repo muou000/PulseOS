@@ -22,8 +22,7 @@ use linux_raw_sys::general::{
     sigevent,
 };
 use memory_addr::{MemoryAddr, PhysAddr, VirtAddr, va};
-use spin::Lazy;
-use crate::sync::{Mutex, RwLock};
+use spin::{Lazy, Mutex, RwLock};
 
 use super::{
     SignalShared, Thread, current_thread, queue_signal_to_process, thread_handle_from_task,

@@ -401,7 +401,11 @@ impl Backend {
                 }
             } else {
                 // Read/Execute fault: map page cache frame read-only
-                let ref_count = frame_table().get_ref(frame);
+                let ref_count = if frame_table().contains(frame) {
+                    frame_table().get_ref(frame)
+                } else {
+                    0
+                };
                 if ref_count == 0 {
                     cow_mark_frame_used(frame); // 0 -> 1
                     cow_inc_frame_ref(frame);   // 1 -> 2

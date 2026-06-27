@@ -9,8 +9,7 @@ use axalloc::global_allocator;
 use axerrno::{AxError, AxResult, ax_err};
 use axhal::paging::MappingFlags;
 use memory_addr::PAGE_SIZE_4K;
-use spin::Lazy;
-use crate::sync::Mutex;
+use spin::{Lazy, Mutex};
 
 // IPC constants (from linux-raw-sys / Linux ABI)
 pub const IPC_PRIVATE: i32 = 0;

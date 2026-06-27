@@ -11,4 +11,3 @@ pub mod mm;
 pub mod net;
 pub mod task;
 pub mod trap;
-pub mod sync;

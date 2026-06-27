@@ -1,7 +1,7 @@
 use alloc::sync::Arc;
 use core::{any::Any, net::SocketAddr};
 use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
-use crate::sync::Mutex;
+use spin::Mutex;
 
 use axerrno::LinuxError;
 use axio::PollState;

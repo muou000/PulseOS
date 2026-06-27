@@ -1,7 +1,6 @@
 use alloc::collections::BTreeMap;
 use alloc::sync::Arc;
-use spin::Lazy;
-use crate::sync::Mutex;
+use spin::{Lazy, Mutex};
 use axerrno::{LinuxError, LinuxResult};
 use crate::fd_table::FdObject;
 

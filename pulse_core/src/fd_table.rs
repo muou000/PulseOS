@@ -17,8 +17,7 @@ use axfs_ng_vfs::{Location, Metadata, NodeType};
 use axio::{PollState, Read, Seek, SeekFrom, Write};
 use kspin::SpinNoIrq;
 use linux_raw_sys::general::*;
-use spin::Lazy;
-use crate::sync::{Mutex, RwLock};
+use spin::{Lazy, Mutex, RwLock};
 
 use crate::cpu_dma_latency::{CpuDmaLatencyRequest, effective_latency_us};
 
