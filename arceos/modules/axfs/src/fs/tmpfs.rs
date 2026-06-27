@@ -16,7 +16,7 @@ const TMPFS_MAGIC: u64 = 0x0102_1994;
 
 pub struct TmpFilesystem {
     inodes: Mutex<Slab<Arc<Inode>>>,
-    root: OnceCell<WeakDirEntry>,
+    root: OnceCell<DirEntry>,
 }
 
 impl TmpFilesystem {
@@ -36,7 +36,7 @@ impl TmpFilesystem {
             |this| DirNode::new(TmpNode::new(fs.clone(), root_ino, Some(this))),
             Reference::root(),
         );
-        let _ = fs.root.set(root_dir.downgrade());
+        let _ = fs.root.set(root_dir.clone());
         Filesystem::new(fs)
     }
 
@@ -56,7 +56,7 @@ impl FilesystemOps for TmpFilesystem {
     fn root_dir(&self) -> DirEntry {
         self.root
             .get()
-            .and_then(WeakDirEntry::upgrade)
+            .cloned()
             .expect("tmpfs root directory should be alive while filesystem is mounted")
     }
 
