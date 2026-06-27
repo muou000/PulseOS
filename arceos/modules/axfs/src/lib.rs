@@ -29,8 +29,11 @@ pub use disk::flush_all_disks;
 pub use fs::{new_tmpfs, new_procfs, new_default, devfs::DevNode, TtyCallbacks, register_tty_callbacks};
 
 pub fn flush_all_filesystems() -> axfs_ng_vfs::VfsResult<()> {
-    let mps = MOUNTED_MOUNTPOINTS.lock();
-    for (_, mp) in mps.iter() {
+    let mps: Vec<Arc<axfs_ng_vfs::Mountpoint>> = {
+        let guard = MOUNTED_MOUNTPOINTS.lock();
+        guard.iter().map(|(_, mp)| mp.clone()).collect()
+    };
+    for mp in mps {
         let _ = mp.root_location().filesystem().flush();
     }
     Ok(())
@@ -72,15 +75,27 @@ fn reset_mount_records() {
 }
 
 fn reset_mountable_filesystems() {
-    MOUNTABLE_FILESYSTEMS.lock().clear();
+    let cleared = {
+        let mut guard = MOUNTABLE_FILESYSTEMS.lock();
+        core::mem::take(&mut *guard)
+    };
+    drop(cleared);
 }
 
 fn reset_mounted_mountpoints() {
-    MOUNTED_MOUNTPOINTS.lock().clear();
+    let cleared = {
+        let mut guard = MOUNTED_MOUNTPOINTS.lock();
+        core::mem::take(&mut *guard)
+    };
+    drop(cleared);
 }
 
 fn reset_pinned_mountpoints() {
-    PINNED_MOUNTPOINTS.lock().clear();
+    let cleared = {
+        let mut guard = PINNED_MOUNTPOINTS.lock();
+        core::mem::take(&mut *guard)
+    };
+    drop(cleared);
 }
 
 fn pin_mountpoint(mountpoint: Arc<axfs_ng_vfs::Mountpoint>) {
@@ -231,7 +246,9 @@ pub fn unregister_mounted_mountpoint(target: &str) -> bool {
     let target = normalize_target(target);
     let mut mps = MOUNTED_MOUNTPOINTS.lock();
     if let Some(index) = mps.iter().rposition(|(t, _)| t == &target) {
-        mps.remove(index);
+        let removed = mps.remove(index);
+        drop(mps);
+        drop(removed);
         true
     } else {
         false

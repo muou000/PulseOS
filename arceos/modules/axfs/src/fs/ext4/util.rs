@@ -1,48 +1,48 @@
-use core::time::Duration;
-
-use axerrno::LinuxError;
 use axfs_ng_vfs::{NodeType, VfsError};
-use ext4_rs::{Ext4Error, InodeFileType};
+use ext4plus::error::Ext4Error;
+use ext4plus::FileType;
 
 pub fn into_vfs_err(err: Ext4Error) -> VfsError {
-    let linux_error = LinuxError::try_from(err.error() as i32).unwrap_or(LinuxError::EIO);
-    VfsError::from(linux_error).canonicalize()
+    let vfs_err = match err {
+        Ext4Error::NotFound => VfsError::NotFound,
+        Ext4Error::NotADirectory => VfsError::NotADirectory,
+        Ext4Error::IsADirectory => VfsError::IsADirectory,
+        Ext4Error::Io(_) => VfsError::Io,
+        Ext4Error::Incompatible(_) => VfsError::Unsupported,
+        Ext4Error::UnsupportedOperation(_) => VfsError::Unsupported,
+        Ext4Error::Readonly => VfsError::ReadOnlyFilesystem,
+        Ext4Error::NoSpace => VfsError::StorageFull,
+        Ext4Error::AlreadyExists => VfsError::AlreadyExists,
+        _ => VfsError::InvalidData,
+    };
+    if let VfsError::InvalidData = vfs_err {
+        log::error!("ext4plus error mapped to InvalidData: {:?}", err);
+    }
+    vfs_err
 }
 
-pub fn into_vfs_type(ty: InodeFileType) -> NodeType {
+pub fn into_vfs_type(ty: FileType) -> NodeType {
     match ty {
-        InodeFileType::S_IFREG => NodeType::RegularFile,
-        InodeFileType::S_IFDIR => NodeType::Directory,
-        InodeFileType::S_IFCHR => NodeType::CharacterDevice,
-        InodeFileType::S_IFBLK => NodeType::BlockDevice,
-        InodeFileType::S_IFIFO => NodeType::Fifo,
-        InodeFileType::S_IFSOCK => NodeType::Socket,
-        InodeFileType::S_IFLNK => NodeType::Symlink,
-        _ => NodeType::Unknown,
+        FileType::Regular => NodeType::RegularFile,
+        FileType::Directory => NodeType::Directory,
+        FileType::CharacterDevice => NodeType::CharacterDevice,
+        FileType::BlockDevice => NodeType::BlockDevice,
+        FileType::Fifo => NodeType::Fifo,
+        FileType::Socket => NodeType::Socket,
+        FileType::Symlink => NodeType::Symlink,
     }
 }
 
-pub fn into_ext4_type(ty: NodeType) -> Result<InodeFileType, VfsError> {
+pub fn into_ext4_file_type(ty: NodeType) -> Result<FileType, VfsError> {
     Ok(match ty {
-        NodeType::Fifo => InodeFileType::S_IFIFO,
-        NodeType::CharacterDevice => InodeFileType::S_IFCHR,
-        NodeType::Directory => InodeFileType::S_IFDIR,
-        NodeType::BlockDevice => InodeFileType::S_IFBLK,
-        NodeType::RegularFile => InodeFileType::S_IFREG,
-        NodeType::Symlink => InodeFileType::S_IFLNK,
-        NodeType::Socket => InodeFileType::S_IFSOCK,
+        NodeType::Fifo => FileType::Fifo,
+        NodeType::CharacterDevice => FileType::CharacterDevice,
+        NodeType::Directory => FileType::Directory,
+        NodeType::BlockDevice => FileType::BlockDevice,
+        NodeType::RegularFile => FileType::Regular,
+        NodeType::Symlink => FileType::Symlink,
+        NodeType::Socket => FileType::Socket,
         NodeType::Unknown => return Err(VfsError::InvalidData),
     })
 }
 
-pub fn duration_to_ext4_time(value: Duration) -> u32 {
-    value.as_secs().min(u32::MAX as u64) as u32
-}
-
-pub fn now_as_ext4_time() -> Option<u32> {
-    if cfg!(feature = "times") {
-        Some(duration_to_ext4_time(axhal::time::wall_time()))
-    } else {
-        None
-    }
-}

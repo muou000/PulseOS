@@ -7,15 +7,23 @@ use super::Backend;
 use axalloc::frame_table;
 
 pub(crate) fn cow_inc_frame_ref(frame: PhysAddr) {
-    frame_table().inc_ref(frame);
+    if frame_table().contains(frame) {
+        frame_table().inc_ref(frame);
+    }
 }
 
 pub(crate) fn cow_dec_frame_ref(frame: PhysAddr) -> bool {
-    drop_frame_mapping_ref(frame)
+    if frame_table().contains(frame) {
+        drop_frame_mapping_ref(frame)
+    } else {
+        false
+    }
 }
 
 pub(crate) fn cow_mark_frame_used(frame: PhysAddr) {
-    frame_table().mark_used(frame);
+    if frame_table().contains(frame) {
+        frame_table().mark_used(frame);
+    }
 }
 
 fn drop_frame_mapping_ref(frame: PhysAddr) -> bool {

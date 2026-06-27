@@ -17,9 +17,13 @@ pub fn sys_close(fd: usize) -> isize {
     match remove_fd_entry(fd) {
         Ok(entry) => {
             let _ = entry.object.flush();
+            axlog::debug!("sys_close: fd={} done", fd);
             0
         }
-        Err(e) => -e.code() as isize,
+        Err(e) => {
+            axlog::debug!("sys_close: fd={} err: {:?}", fd, e);
+            -e.code() as isize
+        }
     }
 }
 

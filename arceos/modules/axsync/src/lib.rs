@@ -18,11 +18,20 @@ pub use kspin as spin;
 
 #[cfg(feature = "multitask")]
 mod mutex;
+#[cfg(feature = "multitask")]
+mod rwlock;
 
 #[cfg(feature = "multitask")]
 #[doc(cfg(feature = "multitask"))]
-pub use self::mutex::{Mutex, MutexGuard, RawMutex};
+pub use self::{
+    mutex::{Mutex, MutexGuard, RawMutex},
+    rwlock::{RwLock, RwLockReadGuard, RwLockWriteGuard},
+};
 
 #[cfg(not(feature = "multitask"))]
 #[doc(cfg(not(feature = "multitask")))]
 pub use kspin::{SpinNoIrq as Mutex, SpinNoIrqGuard as MutexGuard};
+
+#[cfg(not(feature = "multitask"))]
+#[doc(cfg(not(feature = "multitask")))]
+pub use spin::{RwLock, RwLockReadGuard, RwLockWriteGuard};

@@ -124,16 +124,27 @@ pub static DISK_FLUSHERS: spin::Lazy<Mutex<alloc::vec::Vec<alloc::sync::Weak<dyn
 
 /// Flushes all registered disks.
 pub fn flush_all_disks() -> DevResult<()> {
-    let mut flushers = DISK_FLUSHERS.lock();
-    flushers.retain(|weak| {
-        if let Some(flusher) = weak.upgrade() {
-            let _ = flusher.flush_disk();
-            true
-        } else {
-            false
+    let flushers: alloc::vec::Vec<Arc<dyn DiskFlushable>> = {
+        let mut guard = DISK_FLUSHERS.lock();
+        let mut active = alloc::vec::Vec::new();
+        guard.retain(|weak| {
+            if let Some(strong) = weak.upgrade() {
+                active.push(strong);
+                true
+            } else {
+                false
+            }
+        });
+        active
+    };
+    let mut ret = Ok(());
+    for flusher in flushers {
+        if let Err(e) = flusher.flush_disk() {
+            log::error!("Failed to flush disk: {:?}", e);
+            ret = Err(e);
         }
-    });
-    Ok(())
+    }
+    ret
 }
 
 /// A disk device with a cursor.
@@ -233,9 +244,8 @@ impl<D: BlockDriverOps + 'static> SeekableDisk<D> {
             let length = blocks << self.block_size_log2;
             let mut inner = self.inner.lock();
             self.dev.lock().read_block(inner.block_id, take_mut(&mut buf, length))?;
-            read += length;
-
             inner.block_id += blocks as u64;
+            read += length;
         }
         if !buf.is_empty() {
             read += self.read_partial(&mut buf)?;
@@ -278,11 +288,10 @@ impl<D: BlockDriverOps + 'static> SeekableDisk<D> {
         if buf.len() >= self.block_size() {
             let blocks = buf.len() >> self.block_size_log2;
             let length = blocks << self.block_size_log2;
-            self.dev.lock().write_block(self.inner.lock().block_id, take(&mut buf, length))?;
-            written += length;
-
             let mut inner = self.inner.lock();
+            self.dev.lock().write_block(inner.block_id, take(&mut buf, length))?;
             inner.block_id += blocks as u64;
+            written += length;
         }
         if !buf.is_empty() {
             written += self.write_partial(&mut buf)?;

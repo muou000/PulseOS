@@ -232,7 +232,7 @@ build_one_arch() {
 
     echo "[${arch}] Building ext4 image (${img_mib} MiB): ${out_img}"
     truncate -s "${img_mib}M" "${tmp_img}"
-    mkfs.ext4 -q -F -L "${fs_label}" -d "${stage_dir}" "${tmp_img}"
+    mkfs.ext4 -q -F -O ^has_journal,^metadata_csum -L "${fs_label}" -d "${stage_dir}" "${tmp_img}"
     mv -f "${tmp_img}" "${out_img}"
 
     local logical_size disk_usage

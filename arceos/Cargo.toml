@@ -85,7 +85,6 @@ axsched = { path = "../crates/axsched" }
 memory_set = { path = "../crates/memory_set" }
 memory_addr = { path = "../crates/memory_addr" }
 axfs-ng-vfs = { path = "../crates/axfs-ng-vfs" }
-ext4_rs = { path = "../crates/ext4_rs" }
 axcpu = { path = "../crates/axcpu" }
 axplat-loongarch64-qemu-virt = { path = "../crates/axplat-loongarch64-qemu-virt" }
 axplat-riscv64-qemu-virt = { path = "../crates/axplat-riscv64-qemu-virt" }
