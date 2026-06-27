@@ -29,8 +29,11 @@ impl Ext4Filesystem {
         log::info!("Ext4Filesystem::new: opening block device");
         let disk = Ext4Disk::new(dev);
 
+        const EXT4_SUPERBLOCK_OFFSET: usize = 1024;
+        const LOG_BLOCK_SIZE_OFFSET: usize = 24;
+
         let mut log_block_size_buf = [0u8; 4];
-        disk.read_offset(1048, &mut log_block_size_buf).map_err(|e| {
+        disk.read_offset(EXT4_SUPERBLOCK_OFFSET + LOG_BLOCK_SIZE_OFFSET, &mut log_block_size_buf).map_err(|e| {
             log::error!("Failed to read block size: {:?}", e);
             axfs_ng_vfs::VfsError::Io
         })?;

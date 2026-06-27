@@ -641,6 +641,18 @@ impl DirNodeOps for Inode {
         Ok(())
     }
 
+    /// Rename a file or directory.
+    ///
+    /// # Limitation
+    /// Since the underlying `ext4plus` library does not support atomic rename,
+    /// this operation is implemented in a non-atomic sequence:
+    /// 1. Unlink the destination file if it exists.
+    /// 2. Link the source file to the destination name.
+    /// 3. Unlink the source file from its old name.
+    ///
+    /// If an intermediate step fails (e.g., out of disk space during link, or power failure),
+    /// this could result in data loss (destination file deleted but new file not linked)
+    /// or duplicate links (new file linked but old file not unlinked).
     fn rename(&self, src_name: &str, dst_dir: &DirNode, dst_name: &str) -> VfsResult<()> {
         let dst_dir: Arc<Self> = dst_dir.downcast().map_err(|_| VfsError::InvalidInput)?;
         let fs = self.fs.lock();
