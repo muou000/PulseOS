@@ -23,7 +23,6 @@ use spin::{Lazy, Mutex};
 
 mod disk;
 pub mod fs;
-mod writeback;
 
 pub use disk::flush_all_disks;
 pub use fs::{new_tmpfs, new_procfs, new_default, devfs::DevNode, TtyCallbacks, register_tty_callbacks};
@@ -458,7 +457,6 @@ pub fn init_filesystems(mut block_devs: AxDeviceContainer<AxBlockDevice>) {
 
     ROOT_FS_CONTEXT.call_once(|| cx.clone());
     *FS_CONTEXT.lock() = cx;
-    writeback::init_writeback_daemon();
 }
 
 pub use fs::{ProcfsProcessProvider, register_process_provider};

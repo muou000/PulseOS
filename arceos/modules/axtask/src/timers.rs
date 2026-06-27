@@ -1,6 +1,6 @@
 use core::sync::atomic::{AtomicU64, Ordering};
 
-use kernel_guard::{NoOp, NoPreempt};
+use kernel_guard::NoOp;
 use lazyinit::LazyInit;
 use timer_list::{TimeValue, TimerEvent, TimerList};
 
@@ -54,10 +54,6 @@ pub(crate) fn reprogram_timer_from_tick() {
     reprogram_timer_internal(true);
 }
 
-fn tick_needed() -> bool {
-    let rq = crate::run_queue::current_run_queue::<NoPreempt>();
-    !rq.inner.scheduler_is_empty()
-}
 
 fn reprogram_timer_internal(from_tick: bool) {
     let now_ns = axhal::time::monotonic_time_nanos();
@@ -72,10 +68,7 @@ fn reprogram_timer_internal(from_tick: bool) {
         }
     }
 
-    let mut final_deadline = u64::MAX;
-    if tick_needed() {
-        final_deadline = tick_deadline;
-    }
+    let mut final_deadline = tick_deadline;
 
     if let Some(event_deadline) = unsafe {
         let tl = TIMER_LIST.current_ref_raw();
