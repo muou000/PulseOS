@@ -106,6 +106,9 @@ impl Ext4Filesystem {
                                         still_active = true;
                                     }
                                 }
+                                if !still_active {
+                                    active.remove(&ino);
+                                }
                                 still_active
                             };
                             if !has_other_active {
@@ -114,7 +117,6 @@ impl Ext4Filesystem {
                                     log::error!("ext4: failed to delete unlinked file (ino {}): {:?}", ino, e);
                                     failed.push(ino);
                                 } else {
-                                    self.active_inodes.lock().remove(&ino);
                                     crate::invalidate_file_cache(self as *const Self as usize, ino as u64);
                                 }
                             }

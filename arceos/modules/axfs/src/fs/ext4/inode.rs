@@ -73,13 +73,9 @@ struct DirCacheKey {
 static DIR_CACHE_REGISTRY: Lazy<Mutex<BTreeMap<DirCacheKey, Weak<DirCacheState>>>> =
     Lazy::new(|| Mutex::new(BTreeMap::new()));
 
-pub(crate) fn ext4_fs_id(fs: &Arc<Ext4Filesystem>) -> usize {
-    Arc::as_ptr(fs) as usize
-}
-
 fn dir_cache_key(fs: &Arc<Ext4Filesystem>, ino: u32) -> DirCacheKey {
     DirCacheKey {
-        fs_id: ext4_fs_id(fs),
+        fs_id: Arc::as_ptr(fs) as usize,
         ino,
     }
 }
@@ -635,7 +631,7 @@ impl DirNodeOps for Inode {
             if !has_other_active {
                 log::debug!("ext4: unlink deleting unlinked file (ino {}) immediately because no active references", child_ino);
                 fs.delete_file(child_inode).map_err(into_vfs_err)?;
-                crate::invalidate_file_cache(ext4_fs_id(&self.fs), child_ino as u64);
+                crate::invalidate_file_cache(Arc::as_ptr(&self.fs) as usize, child_ino as u64);
             }
         }
         self.invalidate_snapshot(self.ino);
@@ -712,7 +708,7 @@ impl DirNodeOps for Inode {
                 if !has_other_active {
                     log::debug!("ext4: rename deleting unlinked dst file (ino {}) immediately because no active references", dst_inode_ino);
                     fs.delete_file(dst_inode).map_err(into_vfs_err)?;
-                    crate::invalidate_file_cache(ext4_fs_id(&dst_dir.fs), dst_inode_ino as u64);
+                    crate::invalidate_file_cache(Arc::as_ptr(&dst_dir.fs) as usize, dst_inode_ino as u64);
                 }
             }
             dst_dir.invalidate_snapshot(dst_dir.ino);
@@ -747,7 +743,7 @@ impl Drop for Inode {
         if !still_active {
             active.remove(&self.ino);
             if is_unlinked {
-                crate::invalidate_file_cache(ext4_fs_id(&self.fs), self.ino as u64);
+                crate::invalidate_file_cache(Arc::as_ptr(&self.fs) as usize, self.ino as u64);
                 self.fs.pending_deletions.lock().push(self.ino);
             }
         }

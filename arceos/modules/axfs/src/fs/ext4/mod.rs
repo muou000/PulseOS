@@ -241,13 +241,16 @@ impl<D: BlockDriverOps + 'static> Ext4Disk<D> {
                         let overlap_len = end - start;
                         let buf_start = start - offset;
                         let block_start = start - b_offset;
-                        buf[buf_start..buf_start + overlap_len].copy_from_slice(&b_data[block_start..block_start + overlap_len]);
                         
-                        let block = CacheBlock { data: b_data, dirty: false, flushing: false };
-                        if !cache.contains(&b_offset) {
+                        if let Some(existing) = cache.get(&b_offset) {
+                            buf[buf_start..buf_start + overlap_len]
+                                .copy_from_slice(&existing.data[block_start..block_start + overlap_len]);
+                        } else {
+                            buf[buf_start..buf_start + overlap_len].copy_from_slice(&b_data[block_start..block_start + overlap_len]);
+                            let block = CacheBlock { data: b_data, dirty: false, flushing: false };
                             self.evict_if_full(&mut cache, &mut to_write);
+                            cache.put(b_offset, block);
                         }
-                        cache.put(b_offset, block);
                     }
                 }
                 
@@ -357,15 +360,19 @@ impl<D: BlockDriverOps + 'static> Ext4Disk<D> {
                         let overlap_len = end - start;
                         let data_start = start - offset;
                         let block_start = start - b_offset;
-                        b_data[block_start..block_start + overlap_len]
-                            .copy_from_slice(&data[data_start..data_start + overlap_len]);
                         
-                        // Cache put (and handle eviction writebacks)
-                        let block = CacheBlock { data: b_data, dirty: true, flushing: false };
-                        if !cache.contains(&b_offset) {
+                        if let Some(existing) = cache.get_mut(&b_offset) {
+                            existing.data[block_start..block_start + overlap_len]
+                                .copy_from_slice(&data[data_start..data_start + overlap_len]);
+                            existing.dirty = true;
+                            existing.flushing = false;
+                        } else {
+                            b_data[block_start..block_start + overlap_len]
+                                .copy_from_slice(&data[data_start..data_start + overlap_len]);
+                            let block = CacheBlock { data: b_data, dirty: true, flushing: false };
                             self.evict_if_full(&mut cache, &mut to_write);
+                            cache.put(b_offset, block);
                         }
-                        cache.put(b_offset, block);
                     }
                 }
                 
