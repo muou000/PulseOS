@@ -16,7 +16,7 @@ pub(crate) fn cow_dec_frame_ref(frame: PhysAddr) -> bool {
     if frame_table().contains(frame) {
         drop_frame_mapping_ref(frame)
     } else {
-        true
+        false
     }
 }
 

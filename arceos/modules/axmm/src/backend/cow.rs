@@ -39,7 +39,7 @@ impl CowMapping {
                     let ref_count = if frame_table().contains(old_frame) {
                         frame_table().get_ref(old_frame)
                     } else {
-                        1
+                        2 // Treat unknown frames as shared (ref_count > 1) to reject exclusive upgrade
                     };
                     if ref_count == 1 {
                         // Only one reference, upgrade to WRITE.

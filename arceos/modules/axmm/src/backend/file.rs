@@ -401,11 +401,39 @@ impl Backend {
                 }
             } else {
                 // Read/Execute fault: map page cache frame read-only
-                let ref_count = if frame_table().contains(frame) {
-                    frame_table().get_ref(frame)
-                } else {
-                    0
-                };
+                if !frame_table().contains(frame) {
+                    let Some(new_frame) = alloc_frame(false) else {
+                        return false;
+                    };
+                    let src = phys_to_virt(frame).as_ptr();
+                    let dst = phys_to_virt(new_frame).as_mut_ptr();
+                    unsafe {
+                        core::ptr::copy_nonoverlapping(src, dst, PAGE_SIZE_4K);
+                    }
+                    let mut pt_guard = pt.lock_for_addr(page_addr);
+                    if let Ok((curr_frame, _, _)) = pt_guard.query(page_addr) {
+                        if curr_frame.as_usize() != 0 {
+                            drop(pt_guard);
+                            dealloc_frame(new_frame);
+                            return true; // Already mapped
+                        }
+                    }
+                    return if pt_guard
+                        .map(page_addr, new_frame, PageSize::Size4K, orig_flags)
+                        .map(|tlb| {
+                            tlb.flush();
+                            sync_executable_mapping(orig_flags);
+                        })
+                        .is_ok()
+                    {
+                        true
+                    } else {
+                        dealloc_frame(new_frame);
+                        false
+                    };
+                }
+
+                let ref_count = frame_table().get_ref(frame);
                 if ref_count == 0 {
                     cow_mark_frame_used(frame); // 0 -> 1
                     cow_inc_frame_ref(frame);   // 1 -> 2
