@@ -430,7 +430,6 @@ dependencies = [
  "axerrno",
  "axfs",
  "axhal",
- "kernel_guard 0.1.3 (registry+https://github.com/rust-lang/crates.io-index)",
  "kspin",
  "lazyinit",
  "log",

@@ -24,4 +24,3 @@ memory_addr = "0.4"
 kspin = "0.1"
 spin = { workspace = true }
 memory_set = "0.4"
-kernel_guard = "0.1"
