@@ -58,7 +58,7 @@ mod async_inner {
 mod sync_inner {
     /// A mutual exclusion primitive useful for protecting shared data.
     pub struct Mutex<T> {
-        inner: spin::Mutex<T>,
+        inner: axsync::Mutex<T>,
     }
 
     /// Alias for MutexGuard under sync.
@@ -68,16 +68,14 @@ mod sync_inner {
         /// Create a new mutex in an unlocked state ready for use.
         pub fn new(t: T) -> Self {
             Self {
-                inner: spin::Mutex::new(t),
+                inner: axsync::Mutex::new(t),
             }
         }
 
         /// Acquires a lock, blocking the current thread until it is able to do so.
         pub fn lock(&self) -> MutexGuard<'_, T> {
-            let guard = kernel_guard::NoPreempt::new();
             MutexGuard {
                 inner: self.inner.lock(),
-                _guard: guard,
             }
         }
 
@@ -89,8 +87,7 @@ mod sync_inner {
 
     /// A guard that provides mutable data access for [`Mutex`].
     pub struct MutexGuard<'a, T> {
-        inner: spin::MutexGuard<'a, T>,
-        _guard: kernel_guard::NoPreempt,
+        inner: axsync::MutexGuard<'a, T>,
     }
 
     impl<'a, T> core::ops::Deref for MutexGuard<'a, T> {
@@ -110,40 +107,35 @@ mod sync_inner {
 
     /// A reader-writer lock.
     pub struct RwLock<T> {
-        inner: spin::RwLock<T>,
+        inner: axsync::RwLock<T>,
     }
 
     impl<T> RwLock<T> {
         /// Create a new RwLock in an unlocked state ready for use.
         pub fn new(t: T) -> Self {
             Self {
-                inner: spin::RwLock::new(t),
+                inner: axsync::RwLock::new(t),
             }
         }
 
         /// Acquires a shared read lock, blocking the current thread until it is able to do so.
         pub fn read(&self) -> RwLockReadGuard<'_, T> {
-            let guard = kernel_guard::NoPreempt::new();
             RwLockReadGuard {
                 inner: self.inner.read(),
-                _guard: guard,
             }
         }
 
         /// Acquires an exclusive write lock, blocking the current thread until it is able to do so.
         pub fn write(&self) -> RwLockWriteGuard<'_, T> {
-            let guard = kernel_guard::NoPreempt::new();
             RwLockWriteGuard {
                 inner: self.inner.write(),
-                _guard: guard,
             }
         }
     }
 
     /// A guard that provides read access for [`RwLock`].
     pub struct RwLockReadGuard<'a, T> {
-        inner: spin::RwLockReadGuard<'a, T>,
-        _guard: kernel_guard::NoPreempt,
+        inner: axsync::RwLockReadGuard<'a, T>,
     }
 
     impl<'a, T> core::ops::Deref for RwLockReadGuard<'a, T> {
@@ -156,8 +148,7 @@ mod sync_inner {
 
     /// A guard that provides write access for [`RwLock`].
     pub struct RwLockWriteGuard<'a, T> {
-        inner: spin::RwLockWriteGuard<'a, T>,
-        _guard: kernel_guard::NoPreempt,
+        inner: axsync::RwLockWriteGuard<'a, T>,
     }
 
     impl<'a, T> core::ops::Deref for RwLockWriteGuard<'a, T> {
