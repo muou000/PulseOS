@@ -248,17 +248,20 @@ impl<D: BlockDriverOps + 'static> Ext4Disk<D> {
                         if let Some(existing) = cache.get(&b_offset) {
                             buf[buf_start..buf_start + overlap_len]
                                 .copy_from_slice(&existing.data[block_start..block_start + overlap_len]);
-                        } else if let Some(flushing_data) = self.flushing_evicted.lock().get(&b_offset) {
-                            buf[buf_start..buf_start + overlap_len]
-                                .copy_from_slice(&flushing_data[block_start..block_start + overlap_len]);
-                            let block = CacheBlock { data: flushing_data.clone(), dirty: false, flushing: false };
-                            self.evict_if_full(&mut cache, &mut to_write);
-                            cache.put(b_offset, block);
                         } else {
-                            buf[buf_start..buf_start + overlap_len].copy_from_slice(&b_data[block_start..block_start + overlap_len]);
-                            let block = CacheBlock { data: b_data, dirty: false, flushing: false };
-                            self.evict_if_full(&mut cache, &mut to_write);
-                            cache.put(b_offset, block);
+                            let flushing_data = self.flushing_evicted.lock().get(&b_offset).cloned();
+                            if let Some(flushing_data) = flushing_data {
+                                buf[buf_start..buf_start + overlap_len]
+                                    .copy_from_slice(&flushing_data[block_start..block_start + overlap_len]);
+                                let block = CacheBlock { data: flushing_data, dirty: false, flushing: false };
+                                self.evict_if_full(&mut cache, &mut to_write);
+                                cache.put(b_offset, block);
+                            } else {
+                                buf[buf_start..buf_start + overlap_len].copy_from_slice(&b_data[block_start..block_start + overlap_len]);
+                                let block = CacheBlock { data: b_data, dirty: false, flushing: false };
+                                self.evict_if_full(&mut cache, &mut to_write);
+                                cache.put(b_offset, block);
+                            }
                         }
                     }
                 }
@@ -379,19 +382,22 @@ impl<D: BlockDriverOps + 'static> Ext4Disk<D> {
                                 .copy_from_slice(&data[data_start..data_start + overlap_len]);
                             existing.dirty = true;
                             existing.flushing = false;
-                        } else if let Some(flushing_data) = self.flushing_evicted.lock().get(&b_offset) {
-                            let mut b_data = flushing_data.clone();
-                            b_data[block_start..block_start + overlap_len]
-                                .copy_from_slice(&data[data_start..data_start + overlap_len]);
-                            let block = CacheBlock { data: b_data, dirty: true, flushing: false };
-                            self.evict_if_full(&mut cache, &mut to_write);
-                            cache.put(b_offset, block);
                         } else {
-                            b_data[block_start..block_start + overlap_len]
-                                .copy_from_slice(&data[data_start..data_start + overlap_len]);
-                            let block = CacheBlock { data: b_data, dirty: true, flushing: false };
-                            self.evict_if_full(&mut cache, &mut to_write);
-                            cache.put(b_offset, block);
+                            let flushing_data = self.flushing_evicted.lock().get(&b_offset).cloned();
+                            if let Some(flushing_data) = flushing_data {
+                                let mut b_data = flushing_data;
+                                b_data[block_start..block_start + overlap_len]
+                                    .copy_from_slice(&data[data_start..data_start + overlap_len]);
+                                let block = CacheBlock { data: b_data, dirty: true, flushing: false };
+                                self.evict_if_full(&mut cache, &mut to_write);
+                                cache.put(b_offset, block);
+                            } else {
+                                b_data[block_start..block_start + overlap_len]
+                                    .copy_from_slice(&data[data_start..data_start + overlap_len]);
+                                let block = CacheBlock { data: b_data, dirty: true, flushing: false };
+                                self.evict_if_full(&mut cache, &mut to_write);
+                                cache.put(b_offset, block);
+                            }
                         }
                     }
                 }
