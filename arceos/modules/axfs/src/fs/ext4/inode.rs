@@ -722,34 +722,7 @@ impl DirNodeOps for Inode {
         }
 
         dst_dir_obj.link(dst_name_ref, &mut src_inode).map_err(into_vfs_err)?;
-        let src_inode = src_dir.unlink(src_name_ref, src_inode).map_err(into_vfs_err)?;
-        if src_inode.links_count() == 0 {
-            let src_ino = src_inode.index.get();
-            let has_other_active = {
-                let mut active = self.fs.active_inodes.lock();
-                let mut still_active = false;
-                if let Some(list) = active.get_mut(&src_ino) {
-                    list.retain(|w| w.strong_count() > 0);
-                    for w in list.iter() {
-                        if let Some(inode) = w.upgrade() {
-                            inode.is_unlinked.store(true, core::sync::atomic::Ordering::Relaxed);
-                        }
-                    }
-                    if !list.is_empty() {
-                        still_active = true;
-                    }
-                }
-                if !still_active {
-                    active.remove(&src_ino);
-                }
-                still_active
-            };
-            if !has_other_active {
-                log::debug!("ext4: rename deleting unlinked src file (ino {}) immediately because no active references", src_ino);
-                fs.delete_file(src_inode).map_err(into_vfs_err)?;
-                crate::invalidate_file_cache(ext4_fs_id(&self.fs), src_ino as u64);
-            }
-        }
+        src_dir.unlink(src_name_ref, src_inode).map_err(into_vfs_err)?;
 
         self.invalidate_snapshot(self.ino);
         if dst_dir.ino != self.ino {
