@@ -192,18 +192,23 @@ impl<D: BlockDriverOps + 'static> Ext4Disk<D> {
         let mut current_block_offset = start_block_offset;
         while current_block_offset <= end_block_offset {
             // Check cache hit
-            let cache_hit_data = {
+            let hit = {
                 let mut cache = self.block_cache.lock();
-                cache.get(&current_block_offset).map(|block| block.data.clone())
+                if let Some(block) = cache.get(&current_block_offset) {
+                    let start = core::cmp::max(offset, current_block_offset);
+                    let end = core::cmp::min(offset + buf.len(), current_block_offset + block_size);
+                    let overlap_len = end - start;
+                    let buf_start = start - offset;
+                    let block_start = start - current_block_offset;
+                    buf[buf_start..buf_start + overlap_len]
+                        .copy_from_slice(&block.data[block_start..block_start + overlap_len]);
+                    true
+                } else {
+                    false
+                }
             };
             
-            if let Some(cached_data) = cache_hit_data {
-                let start = core::cmp::max(offset, current_block_offset);
-                let end = core::cmp::min(offset + buf.len(), current_block_offset + block_size);
-                let overlap_len = end - start;
-                let buf_start = start - offset;
-                let block_start = start - current_block_offset;
-                buf[buf_start..buf_start + overlap_len].copy_from_slice(&cached_data[block_start..block_start + overlap_len]);
+            if hit {
                 current_block_offset += block_size;
             } else {
                 // Cache miss. Find consecutive cache misses.
