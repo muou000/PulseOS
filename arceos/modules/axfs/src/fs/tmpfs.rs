@@ -415,6 +415,10 @@ impl DirNodeOps for TmpNode {
                 }
             }
             let src_entry = src_entries.remove(src_name).unwrap();
+            if let NodeContent::Dir(dir_content) = &src_entry.get().content {
+                let mut sub_entries = dir_content.entries.lock();
+                sub_entries.insert("..".into(), InodeRef::new(self.fs.clone(), dst_node.inode.ino));
+            }
             dst_entries.insert(dst_name.into(), src_entry);
         } else {
             let mut dst_entries = inode_as_dir(&dst_node.inode)?.entries.lock();
@@ -429,6 +433,10 @@ impl DirNodeOps for TmpNode {
             }
             let mut src_entries = inode_as_dir(&self.inode)?.entries.lock();
             let src_entry = src_entries.remove(src_name).ok_or(VfsError::NotFound)?;
+            if let NodeContent::Dir(dir_content) = &src_entry.get().content {
+                let mut sub_entries = dir_content.entries.lock();
+                sub_entries.insert("..".into(), InodeRef::new(self.fs.clone(), dst_node.inode.ino));
+            }
             dst_entries.insert(dst_name.into(), src_entry);
         }
         Ok(())

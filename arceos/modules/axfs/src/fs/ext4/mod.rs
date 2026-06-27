@@ -2,7 +2,7 @@ mod fs;
 mod inode;
 mod util;
 
-use alloc::{sync::Arc, vec, vec::Vec};
+use alloc::{sync::Arc, vec, vec::Vec, collections::BTreeMap};
 use core::num::NonZeroUsize;
 use lru::LruCache;
 
@@ -22,6 +22,7 @@ pub(crate) struct Ext4Disk<D: BlockDriverOps> {
     sector_size: usize,
     block_cache: Mutex<LruCache<usize, CacheBlock>>,
     block_size: core::sync::atomic::AtomicUsize,
+    flushing_evicted: Mutex<BTreeMap<usize, Vec<u8>>>,
 }
 
 struct FlushingGuard<'a, D: BlockDriverOps> {
@@ -109,6 +110,7 @@ impl<D: BlockDriverOps + 'static> Ext4Disk<D> {
             sector_size,
             block_cache: Mutex::new(LruCache::new(NonZeroUsize::new(512).unwrap())),
             block_size: core::sync::atomic::AtomicUsize::new(4096),
+            flushing_evicted: Mutex::new(BTreeMap::new()),
         });
         crate::disk::DISK_FLUSHERS.lock().push(Arc::downgrade(&disk) as _);
         disk
@@ -124,7 +126,8 @@ impl<D: BlockDriverOps + 'static> Ext4Disk<D> {
             if let Some(key) = ev_key {
                 if let Some((ev_offset, ev_block)) = cache.pop_entry(&key) {
                     if ev_block.dirty {
-                        to_write.push((ev_offset, ev_block.data));
+                        to_write.push((ev_offset, ev_block.data.clone()));
+                        self.flushing_evicted.lock().insert(ev_offset, ev_block.data);
                     }
                 }
             }
@@ -245,6 +248,12 @@ impl<D: BlockDriverOps + 'static> Ext4Disk<D> {
                         if let Some(existing) = cache.get(&b_offset) {
                             buf[buf_start..buf_start + overlap_len]
                                 .copy_from_slice(&existing.data[block_start..block_start + overlap_len]);
+                        } else if let Some(flushing_data) = self.flushing_evicted.lock().get(&b_offset) {
+                            buf[buf_start..buf_start + overlap_len]
+                                .copy_from_slice(&flushing_data[block_start..block_start + overlap_len]);
+                            let block = CacheBlock { data: flushing_data.clone(), dirty: false, flushing: false };
+                            self.evict_if_full(&mut cache, &mut to_write);
+                            cache.put(b_offset, block);
                         } else {
                             buf[buf_start..buf_start + overlap_len].copy_from_slice(&b_data[block_start..block_start + overlap_len]);
                             let block = CacheBlock { data: b_data, dirty: false, flushing: false };
@@ -256,7 +265,9 @@ impl<D: BlockDriverOps + 'static> Ext4Disk<D> {
                 
                 // Flush evicted dirty blocks
                 for (ev_offset, ev_data) in to_write {
-                    self.write_block_to_disk(ev_offset, &ev_data)?;
+                    let res = self.write_block_to_disk(ev_offset, &ev_data);
+                    self.flushing_evicted.lock().remove(&ev_offset);
+                    res?;
                 }
                 
                 current_block_offset += consecutive_misses * block_size;
@@ -320,7 +331,9 @@ impl<D: BlockDriverOps + 'static> Ext4Disk<D> {
                     cache.put(current_block_offset, block);
                 }
                 if let Some((offset, data)) = to_write {
-                    self.write_block_to_disk(offset, &data)?;
+                    let res = self.write_block_to_disk(offset, &data);
+                    self.flushing_evicted.lock().remove(&offset);
+                    res?;
                 }
                 current_block_offset += block_size;
             } else {
@@ -366,6 +379,13 @@ impl<D: BlockDriverOps + 'static> Ext4Disk<D> {
                                 .copy_from_slice(&data[data_start..data_start + overlap_len]);
                             existing.dirty = true;
                             existing.flushing = false;
+                        } else if let Some(flushing_data) = self.flushing_evicted.lock().get(&b_offset) {
+                            let mut b_data = flushing_data.clone();
+                            b_data[block_start..block_start + overlap_len]
+                                .copy_from_slice(&data[data_start..data_start + overlap_len]);
+                            let block = CacheBlock { data: b_data, dirty: true, flushing: false };
+                            self.evict_if_full(&mut cache, &mut to_write);
+                            cache.put(b_offset, block);
                         } else {
                             b_data[block_start..block_start + overlap_len]
                                 .copy_from_slice(&data[data_start..data_start + overlap_len]);
@@ -378,7 +398,9 @@ impl<D: BlockDriverOps + 'static> Ext4Disk<D> {
                 
                 // Flush evicted dirty blocks
                 for (ev_offset, ev_data) in to_write {
-                    self.write_block_to_disk(ev_offset, &ev_data)?;
+                    let res = self.write_block_to_disk(ev_offset, &ev_data);
+                    self.flushing_evicted.lock().remove(&ev_offset);
+                    res?;
                 }
                 
                 current_block_offset += consecutive_misses * block_size;
