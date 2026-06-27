@@ -1991,7 +1991,7 @@ impl Process {
                 self.group_exiting()
             );
         } else {
-            axlog::info!(
+            axlog::debug!(
                 "finish_thread_exit: pid={}, tid={}, remaining_threads=0, group_exiting={}",
                 self.pid(),
                 tid,
