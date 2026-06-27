@@ -76,6 +76,37 @@ impl<T: ?Sized> RwLock<T> {
         self.waiting_writers.fetch_sub(1, Ordering::SeqCst);
         RwLockWriteGuard { lock: self }
     }
+
+    /// Attempts to acquire this lock with shared read access.
+    pub fn try_read(&self) -> Option<RwLockReadGuard<'_, T>> {
+        let current_state = self.state.load(Ordering::Acquire);
+        let waiting = self.waiting_writers.load(Ordering::Relaxed);
+        if current_state >= 0 && waiting == 0 {
+            if self.state.compare_exchange(
+                current_state,
+                current_state + 1,
+                Ordering::SeqCst,
+                Ordering::Relaxed,
+            ).is_ok() {
+                return Some(RwLockReadGuard { lock: self });
+            }
+        }
+        None
+    }
+
+    /// Attempts to acquire this lock with exclusive write access.
+    pub fn try_write(&self) -> Option<RwLockWriteGuard<'_, T>> {
+        if self.state.compare_exchange(
+            0,
+            -1,
+            Ordering::SeqCst,
+            Ordering::Relaxed,
+        ).is_ok() {
+            Some(RwLockWriteGuard { lock: self })
+        } else {
+            None
+        }
+    }
 }
 
 impl<T: Default> Default for RwLock<T> {

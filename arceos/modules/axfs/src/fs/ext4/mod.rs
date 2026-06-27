@@ -69,7 +69,7 @@ impl<D: BlockDriverOps + 'static> crate::disk::DiskFlushable for Ext4Disk<D> {
         let mut i = 0;
         while i < dirty_blocks.len() {
             let mut j = i + 1;
-            while j < dirty_blocks.len() && dirty_blocks[j].0 == dirty_blocks[j - 1].0 + block_size {
+            while j < dirty_blocks.len() && dirty_blocks[j].0 == dirty_blocks[j - 1].0 + block_size && (j - i) < 32 {
                 j += 1;
             }
             
