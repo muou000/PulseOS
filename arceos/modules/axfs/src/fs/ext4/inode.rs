@@ -23,7 +23,7 @@ use super::{
 pub struct Inode {
     fs: Arc<Ext4Filesystem>,
     ino: u32,
-    this: Option<WeakDirEntry>,
+    this: Mutex<Option<WeakDirEntry>>,
     dir_cache: Arc<DirCacheState>,
     pub(super) is_unlinked: core::sync::atomic::AtomicBool,
 }
@@ -112,6 +112,9 @@ impl Inode {
             list.retain(|w| w.strong_count() > 0);
             for w in list.iter() {
                 if let Some(inode) = w.upgrade() {
+                    if this.is_some() {
+                        *inode.this.lock() = this;
+                    }
                     return inode;
                 }
             }
@@ -122,7 +125,7 @@ impl Inode {
         let inode = Arc::new(Self {
             fs: fs.clone(),
             ino,
-            this,
+            this: Mutex::new(this),
             dir_cache,
             is_unlinked: core::sync::atomic::AtomicBool::new(false),
         });
@@ -138,7 +141,7 @@ impl Inode {
         name: impl Into<String>,
     ) -> DirEntry {
         let reference = Reference::new(
-            self.this.clone(),
+            self.this.lock().clone(),
             name.into(),
         );
         if is_dir {
