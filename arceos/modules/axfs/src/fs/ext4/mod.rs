@@ -218,9 +218,10 @@ impl<D: BlockDriverOps + 'static> Ext4Disk<D> {
                 let mut consecutive_misses = 1;
                 {
                     let cache = self.block_cache.lock();
+                    let flushing = self.flushing_evicted.lock();
                     while current_block_offset + consecutive_misses * block_size <= end_block_offset {
                         let next_block_offset = current_block_offset + consecutive_misses * block_size;
-                        if cache.contains(&next_block_offset) {
+                        if cache.contains(&next_block_offset) || flushing.contains_key(&next_block_offset) {
                             break;
                         }
                         consecutive_misses += 1;
@@ -344,9 +345,10 @@ impl<D: BlockDriverOps + 'static> Ext4Disk<D> {
                 let mut consecutive_misses = 1;
                 {
                     let cache = self.block_cache.lock();
+                    let flushing = self.flushing_evicted.lock();
                     while current_block_offset + consecutive_misses * block_size <= end_block_offset {
                         let next_block_offset = current_block_offset + consecutive_misses * block_size;
-                        if cache.contains(&next_block_offset) {
+                        if cache.contains(&next_block_offset) || flushing.contains_key(&next_block_offset) {
                             break;
                         }
                         let next_start = core::cmp::max(offset, next_block_offset);

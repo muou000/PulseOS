@@ -242,20 +242,9 @@ impl<D: BlockDriverOps + 'static> SeekableDisk<D> {
         if buf.len() >= self.block_size() {
             let blocks = buf.len() >> self.block_size_log2;
             let length = blocks << self.block_size_log2;
-            let old_id = {
-                let mut inner = self.inner.lock();
-                let old_id = inner.block_id;
-                inner.block_id += blocks as u64;
-                old_id
-            };
-            let expected_id = old_id + blocks as u64;
-            if let Err(e) = self.dev.lock().read_block(old_id, take_mut(&mut buf, length)) {
-                let mut inner = self.inner.lock();
-                if inner.block_id == expected_id {
-                    inner.block_id = old_id;
-                }
-                return Err(e);
-            }
+            let mut inner = self.inner.lock();
+            self.dev.lock().read_block(inner.block_id, take_mut(&mut buf, length))?;
+            inner.block_id += blocks as u64;
             read += length;
         }
         if !buf.is_empty() {
@@ -299,20 +288,9 @@ impl<D: BlockDriverOps + 'static> SeekableDisk<D> {
         if buf.len() >= self.block_size() {
             let blocks = buf.len() >> self.block_size_log2;
             let length = blocks << self.block_size_log2;
-            let old_id = {
-                let mut inner = self.inner.lock();
-                let old_id = inner.block_id;
-                inner.block_id += blocks as u64;
-                old_id
-            };
-            let expected_id = old_id + blocks as u64;
-            if let Err(e) = self.dev.lock().write_block(old_id, take(&mut buf, length)) {
-                let mut inner = self.inner.lock();
-                if inner.block_id == expected_id {
-                    inner.block_id = old_id;
-                }
-                return Err(e);
-            }
+            let mut inner = self.inner.lock();
+            self.dev.lock().write_block(inner.block_id, take(&mut buf, length))?;
+            inner.block_id += blocks as u64;
             written += length;
         }
         if !buf.is_empty() {
