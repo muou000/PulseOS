@@ -113,7 +113,14 @@ impl Inode {
             for w in list.iter() {
                 if let Some(inode) = w.upgrade() {
                     if this.is_some() {
-                        *inode.this.lock() = this;
+                        let mut guard = inode.this.lock();
+                        let need_update = match &*guard {
+                            Some(weak) => weak.upgrade().is_none(),
+                            None => true,
+                        };
+                        if need_update {
+                            *guard = this;
+                        }
                     }
                     return inode;
                 }
