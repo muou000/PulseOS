@@ -1,5 +1,5 @@
-use alloc::{borrow::ToOwned, string::String, sync::Arc};
-use core::{any::Any, task::Context, time::Duration};
+use alloc::{borrow::ToOwned, string::String, sync::{Arc, Weak}};
+use core::{any::Any, task::Context, time::Duration, cell::OnceCell};
 
 use axpoll::{IoEvents, Pollable};
 use slab::Slab;
@@ -16,7 +16,7 @@ const TMPFS_MAGIC: u64 = 0x0102_1994;
 
 pub struct TmpFilesystem {
     inodes: Mutex<Slab<Arc<Inode>>>,
-    root: Mutex<Option<DirEntry>>,
+    root: OnceCell<DirEntry>,
 }
 
 impl TmpFilesystem {
@@ -24,7 +24,7 @@ impl TmpFilesystem {
     pub fn new() -> Filesystem {
         let fs = Arc::new(Self {
             inodes: Mutex::new(Slab::new()),
-            root: Mutex::default(),
+            root: OnceCell::new(),
         });
         let root_ino = new_inode(
             &fs,
@@ -32,10 +32,11 @@ impl TmpFilesystem {
             NodeType::Directory,
             NodePermission::from_bits_truncate(0o755),
         );
-        *fs.root.lock() = Some(DirEntry::new_dir(
+        let root_dir = DirEntry::new_dir(
             |this| DirNode::new(TmpNode::new(fs.clone(), root_ino, Some(this))),
             Reference::root(),
-        ));
+        );
+        let _ = fs.root.set(root_dir.clone());
         Filesystem::new(fs)
     }
 
@@ -44,13 +45,19 @@ impl TmpFilesystem {
     }
 }
 
+unsafe impl Send for TmpFilesystem {}
+unsafe impl Sync for TmpFilesystem {}
+
 impl FilesystemOps for TmpFilesystem {
     fn name(&self) -> &str {
         "tmpfs"
     }
 
     fn root_dir(&self) -> DirEntry {
-        self.root.lock().clone().unwrap()
+        self.root
+            .get()
+            .cloned()
+            .expect("tmpfs root directory should be alive while filesystem is mounted")
     }
 
     fn stat(&self) -> VfsResult<StatFs> {
@@ -157,24 +164,32 @@ fn inode_as_dir(inode: &Inode) -> VfsResult<&DirContent> {
 }
 
 struct InodeRef {
-    fs: Arc<TmpFilesystem>,
+    fs: Weak<TmpFilesystem>,
     ino: u64,
 }
 
 impl InodeRef {
     pub fn new(fs: Arc<TmpFilesystem>, ino: u64) -> Self {
         fs.get(ino).metadata.lock().nlink += 1;
-        Self { fs, ino }
+        Self {
+            fs: Arc::downgrade(&fs),
+            ino,
+        }
     }
 
     fn get(&self) -> Arc<Inode> {
-        self.fs.get(self.ino)
+        self.fs
+            .upgrade()
+            .expect("tmpfs filesystem was dropped while inodes are still referenced")
+            .get(self.ino)
     }
 }
 
 impl Drop for InodeRef {
     fn drop(&mut self) {
-        release_inode(&self.fs, &self.get(), 1);
+        if let Some(fs) = self.fs.upgrade() {
+            release_inode(&fs, &fs.get(self.ino), 1);
+        }
     }
 }
 
@@ -342,22 +357,30 @@ impl DirNodeOps for TmpNode {
     }
 
     fn unlink(&self, name: &str) -> VfsResult<()> {
+        if name == "." || name == ".." {
+            return Err(VfsError::InvalidInput);
+        }
         let dir = inode_as_dir(&self.inode)?;
         let mut entries = dir.entries.lock();
 
         let Some(entry) = entries.get(name) else {
             return Err(VfsError::NotFound);
         };
-        if let NodeContent::Dir(dir_content) = &entry.get().content
-            && dir_content.entries.lock().len() > 2
-        {
-            return Err(VfsError::DirectoryNotEmpty);
+        if let NodeContent::Dir(dir_content) = &entry.get().content {
+            let mut sub_entries = dir_content.entries.lock();
+            if sub_entries.len() > 2 {
+                return Err(VfsError::DirectoryNotEmpty);
+            }
+            sub_entries.clear();
         }
         entries.remove(name);
         Ok(())
     }
 
     fn rename(&self, src_name: &str, dst_dir: &DirNode, dst_name: &str) -> VfsResult<()> {
+        if src_name == "." || src_name == ".." || dst_name == "." || dst_name == ".." {
+            return Err(VfsError::InvalidInput);
+        }
         let dst_node = dst_dir.downcast::<Self>()?;
         if let Ok(entry) = dst_dir.lookup(dst_name) {
             let src_entry = self.lookup(src_name)?;
@@ -366,24 +389,151 @@ impl DirNodeOps for TmpNode {
             }
         }
 
-        let src_entry = inode_as_dir(&self.inode)?
-            .entries
-            .lock()
-            .remove(src_name)
-            .ok_or(VfsError::NotFound)?;
-        inode_as_dir(&dst_node.inode)?
-            .entries
-            .lock()
-            .insert(dst_name.into(), src_entry);
+        let src_entry_ino = {
+            let entries = inode_as_dir(&self.inode)?.entries.lock();
+            let Some(entry) = entries.get(src_name) else {
+                return Err(VfsError::NotFound);
+            };
+            entry.ino
+        };
+
+        let src_node = self.fs.get(src_entry_ino);
+        if let NodeContent::Dir(_) = &src_node.content {
+            let mut curr_ino = dst_node.inode.ino;
+            loop {
+                if curr_ino == src_entry_ino {
+                    return Err(VfsError::InvalidInput);
+                }
+                let curr_node = self.fs.get(curr_ino);
+                let NodeContent::Dir(dir_content) = &curr_node.content else {
+                    break;
+                };
+                let entries = dir_content.entries.lock();
+                let Some(parent_ref) = entries.get("..") else {
+                    break;
+                };
+                let parent_ino = parent_ref.ino;
+                if parent_ino == curr_ino {
+                    break;
+                }
+                curr_ino = parent_ino;
+            }
+        }
+
+        if self.inode.ino == dst_node.inode.ino {
+            let mut entries = inode_as_dir(&self.inode)?.entries.lock();
+            if !entries.contains_key(src_name) {
+                return Err(VfsError::NotFound);
+            }
+            if let Some(old_entry) = entries.get(dst_name) {
+                let src_ref = entries.get(src_name).unwrap();
+                let is_src_dir = match &src_ref.get().content {
+                    NodeContent::Dir(_) => true,
+                    _ => false,
+                };
+                let is_dst_dir = match &old_entry.get().content {
+                    NodeContent::Dir(_) => true,
+                    _ => false,
+                };
+                match (is_src_dir, is_dst_dir) {
+                    (true, false) => return Err(VfsError::NotADirectory),
+                    (false, true) => return Err(VfsError::IsADirectory),
+                    (true, true) => {
+                        if let NodeContent::Dir(dir_content) = &old_entry.get().content {
+                            let mut sub_entries = dir_content.entries.lock();
+                            if sub_entries.len() > 2 {
+                                return Err(VfsError::DirectoryNotEmpty);
+                            }
+                            sub_entries.clear();
+                        }
+                    }
+                    (false, false) => {}
+                }
+            }
+            let src_entry = entries.remove(src_name).unwrap();
+            entries.insert(dst_name.into(), src_entry);
+        } else if self.inode.ino < dst_node.inode.ino {
+            let mut src_entries = inode_as_dir(&self.inode)?.entries.lock();
+            if !src_entries.contains_key(src_name) {
+                return Err(VfsError::NotFound);
+            }
+            let mut dst_entries = inode_as_dir(&dst_node.inode)?.entries.lock();
+            if let Some(old_entry) = dst_entries.get(dst_name) {
+                let src_ref = src_entries.get(src_name).unwrap();
+                let is_src_dir = match &src_ref.get().content {
+                    NodeContent::Dir(_) => true,
+                    _ => false,
+                };
+                let is_dst_dir = match &old_entry.get().content {
+                    NodeContent::Dir(_) => true,
+                    _ => false,
+                };
+                match (is_src_dir, is_dst_dir) {
+                    (true, false) => return Err(VfsError::NotADirectory),
+                    (false, true) => return Err(VfsError::IsADirectory),
+                    (true, true) => {
+                        if let NodeContent::Dir(dir_content) = &old_entry.get().content {
+                            let mut sub_entries = dir_content.entries.lock();
+                            if sub_entries.len() > 2 {
+                                return Err(VfsError::DirectoryNotEmpty);
+                            }
+                            sub_entries.clear();
+                        }
+                    }
+                    (false, false) => {}
+                }
+            }
+            let src_entry = src_entries.remove(src_name).unwrap();
+            if let NodeContent::Dir(dir_content) = &src_entry.get().content {
+                let mut sub_entries = dir_content.entries.lock();
+                sub_entries.insert("..".into(), InodeRef::new(self.fs.clone(), dst_node.inode.ino));
+            }
+            dst_entries.insert(dst_name.into(), src_entry);
+        } else {
+            let mut dst_entries = inode_as_dir(&dst_node.inode)?.entries.lock();
+            let mut src_entries = inode_as_dir(&self.inode)?.entries.lock();
+            if !src_entries.contains_key(src_name) {
+                return Err(VfsError::NotFound);
+            }
+            if let Some(old_entry) = dst_entries.get(dst_name) {
+                let src_ref = src_entries.get(src_name).unwrap();
+                let is_src_dir = match &src_ref.get().content {
+                    NodeContent::Dir(_) => true,
+                    _ => false,
+                };
+                let is_dst_dir = match &old_entry.get().content {
+                    NodeContent::Dir(_) => true,
+                    _ => false,
+                };
+                match (is_src_dir, is_dst_dir) {
+                    (true, false) => return Err(VfsError::NotADirectory),
+                    (false, true) => return Err(VfsError::IsADirectory),
+                    (true, true) => {
+                        if let NodeContent::Dir(dir_content) = &old_entry.get().content {
+                            let mut sub_entries = dir_content.entries.lock();
+                            if sub_entries.len() > 2 {
+                                return Err(VfsError::DirectoryNotEmpty);
+                            }
+                            sub_entries.clear();
+                        }
+                    }
+                    (false, false) => {}
+                }
+            }
+            let src_entry = src_entries.remove(src_name).unwrap();
+            if let NodeContent::Dir(dir_content) = &src_entry.get().content {
+                let mut sub_entries = dir_content.entries.lock();
+                sub_entries.insert("..".into(), InodeRef::new(self.fs.clone(), dst_node.inode.ino));
+            }
+            dst_entries.insert(dst_name.into(), src_entry);
+        }
         Ok(())
     }
 }
 
 impl Drop for TmpNode {
     fn drop(&mut self) {
-        if let NodeContent::Dir(dir) = &self.inode.content {
-            dir.entries.lock().clear();
-        }
         release_inode(&self.fs, &self.inode, 0);
     }
 }
+

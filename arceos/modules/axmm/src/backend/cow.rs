@@ -32,9 +32,15 @@ impl CowMapping {
         let query_res = pt.lock_for_addr(page).query(page).ok().map(|(frame, flags, _)| (frame, flags));
         if let Some((old_frame, old_flags)) = query_res {
             if old_frame.as_usize() != 0 {
-                // Page is mapped. Check if it's a COW fault (write to read-only page).
-                if orig_flags.contains(MappingFlags::WRITE) && access_flags.contains(MappingFlags::WRITE) && !old_flags.contains(MappingFlags::WRITE) {
-                    let ref_count = frame_table().get_ref(old_frame);
+                if orig_flags.contains(MappingFlags::WRITE)
+                    && access_flags.contains(MappingFlags::WRITE)
+                    && !old_flags.contains(MappingFlags::WRITE)
+                {
+                    let ref_count = if frame_table().contains(old_frame) {
+                        frame_table().get_ref(old_frame)
+                    } else {
+                        2 // Treat unknown frames as shared (ref_count > 1) to reject exclusive upgrade
+                    };
                     if ref_count == 1 {
                         // Only one reference, upgrade to WRITE.
                         let mut pt_guard = pt.lock_for_addr(page);
