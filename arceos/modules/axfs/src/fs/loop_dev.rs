@@ -1,6 +1,6 @@
 use alloc::sync::Arc;
 use core::sync::atomic::{AtomicU64, Ordering};
-use kspin::SpinNoIrq as Mutex;
+use spin::Mutex;
 use axdriver::prelude::{BaseDriverOps, BlockDriverOps, DeviceType, DevResult, DevError};
 
 pub struct LoopDeviceState {

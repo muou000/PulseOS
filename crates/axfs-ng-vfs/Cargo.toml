@@ -58,6 +58,3 @@ version = "1.15"
 version = "0.10"
 features = ["mutex"]
 default-features = false
-
-[dependencies.kernel_guard]
-version = "0.1"

@@ -1,57 +1,7 @@
 use alloc::{collections::BTreeMap, string::String};
 use core::cmp::Ordering;
 use core::borrow::Borrow;
-pub struct Mutex<T> {
-    inner: spin::Mutex<T>,
-}
-
-impl<T: core::fmt::Debug> core::fmt::Debug for Mutex<T> {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        core::fmt::Debug::fmt(&self.inner, f)
-    }
-}
-
-impl<T> Mutex<T> {
-    pub const fn new(t: T) -> Self {
-        Self {
-            inner: spin::Mutex::new(t),
-        }
-    }
-
-    pub fn lock(&self) -> MutexGuard<'_, T> {
-        let guard = kernel_guard::NoPreempt::new();
-        MutexGuard {
-            inner: self.inner.lock(),
-            _guard: guard,
-        }
-    }
-}
-
-pub struct MutexGuard<'a, T> {
-    inner: spin::MutexGuard<'a, T>,
-    _guard: kernel_guard::NoPreempt,
-}
-
-impl<'a, T> core::ops::Deref for MutexGuard<'a, T> {
-    type Target = T;
-    #[inline]
-    fn deref(&self) -> &T {
-        &*self.inner
-    }
-}
-
-impl<'a, T> core::ops::DerefMut for MutexGuard<'a, T> {
-    #[inline]
-    fn deref_mut(&mut self) -> &mut T {
-        &mut *self.inner
-    }
-}
-
-impl<T: Default> Default for Mutex<T> {
-    fn default() -> Self {
-        Self::new(T::default())
-    }
-}
+use spin::Mutex;
 
 use crate::{DirEntrySink, NodeType, Metadata, MetadataUpdate, VfsResult};
 

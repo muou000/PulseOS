@@ -3,7 +3,7 @@ use core::{any::Any, task::Context, time::Duration, cell::OnceCell};
 
 use axpoll::{IoEvents, Pollable};
 use slab::Slab;
-use kspin::SpinNoIrq as Mutex;
+use spin::Mutex;
 
 use axfs_ng_vfs::{
     DeviceId, DirEntry, DirEntrySink, DirNode, DirNodeOps, FileNode, FileNodeOps, Filesystem,

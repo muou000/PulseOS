@@ -7,7 +7,7 @@ use alloc::{
 use core::mem;
 
 use axdriver::{AxBlockDevice, prelude::*};
-use kspin::SpinNoIrq as Mutex;
+use spin::Mutex;
 
 fn take<'a>(buf: &mut &'a [u8], cnt: usize) -> &'a [u8] {
     let (first, rem) = buf.split_at(cnt);
