@@ -869,7 +869,6 @@ impl Location {
             let prop = *self.mountpoint.propagation.lock();
             remove_from_registry(&self.mountpoint, prop);
         }
-        self.entry.as_dir()?.forget();
         if let Some(parent_loc) = self.mountpoint.location() {
             parent_loc
                 .mountpoint
