@@ -476,10 +476,6 @@ impl<G: BaseGuard> CurrentRunQueueRef<'_, G> {
 }
 
 impl AxRunQueue {
-    pub(crate) fn scheduler_is_empty(&self) -> bool {
-        self.scheduler.lock().is_empty()
-    }
-
     /// Create a new run queue for the specified CPU.
     /// The run queue is initialized with a per-CPU gc task in its scheduler.
     fn new(cpu_id: usize) -> Self {
