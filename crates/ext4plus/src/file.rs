@@ -268,26 +268,54 @@ pub(crate) async fn read_at_inner(
 
     let block_size = ext4.0.superblock.block_size();
     let block_size_u64 = block_size.to_u64();
+    let block_size_usize = block_size.to_usize();
     let mut bytes_read = 0usize;
 
     while bytes_read < buf.len() {
         let current_offset = offset + bytes_read as u64;
         let offset_within_block = offset_in_block_u32(current_offset, block_size_u64)?;
-        let bytes_remaining_in_block = block_size
-            .to_u32()
-            .checked_sub(offset_within_block)
-            .ok_or(CorruptKind::InvalidBlockSize)?;
 
-        let chunk_len = core::cmp::min(buf.len() - bytes_read, bytes_remaining_in_block as usize);
-        let block_index = file_blocks
-            .get_block(file_block_from_offset(current_offset, block_size_u64)?)
-            .await?;
+        let start_lblock = file_block_from_offset(current_offset, block_size_u64)?;
+        let start_pblock = file_blocks.get_block(start_lblock).await?;
+
+        let mut run_blocks = 1usize;
+        let max_blocks_needed = (buf.len() - bytes_read + offset_within_block as usize).div_ceil(block_size_usize);
+
+        if start_pblock == 0 {
+            while run_blocks < max_blocks_needed {
+                if let Ok(next_lblock) = FileBlockIndex::try_from(start_lblock as u64 + run_blocks as u64) {
+                    if let Ok(next_pblock) = file_blocks.get_block(next_lblock).await {
+                        if next_pblock == 0 {
+                            run_blocks += 1;
+                            continue;
+                        }
+                    }
+                }
+                break;
+            }
+        } else {
+            while run_blocks < max_blocks_needed {
+                if let Ok(next_lblock) = FileBlockIndex::try_from(start_lblock as u64 + run_blocks as u64) {
+                    if let Ok(next_pblock) = file_blocks.get_block(next_lblock).await {
+                        if next_pblock == start_pblock.checked_add(run_blocks as u64).unwrap_or(0) {
+                            run_blocks += 1;
+                            continue;
+                        }
+                    }
+                }
+                break;
+            }
+        }
+
+        let first_block_capacity = block_size_usize - offset_within_block as usize;
+        let run_bytes_capacity = first_block_capacity + (run_blocks - 1) * block_size_usize;
+        let chunk_len = core::cmp::min(buf.len() - bytes_read, run_bytes_capacity);
+
         let dest = &mut buf[bytes_read..bytes_read + chunk_len];
-        if block_index == 0 {
+        if start_pblock == 0 {
             dest.fill(0);
         } else {
-            ext4.read_from_block(block_index, offset_within_block, dest)
-                .await?;
+            ext4.read_from_block_range(start_pblock, offset_within_block, dest).await?;
         }
         bytes_read += chunk_len;
     }

@@ -117,19 +117,24 @@ impl<D: BlockDriverOps + 'static> Ext4Disk<D> {
     }
 
     fn evict_if_full(&self, cache: &mut LruCache<usize, CacheBlock>, to_write: &mut Vec<(usize, Vec<u8>)>) {
-        if cache.len() >= cache.cap().get() {
-            let ev_key = cache.iter()
-                .rev()
-                .filter(|(_, block)| !block.flushing)
-                .map(|(key, _)| *key)
-                .next();
-            if let Some(key) = ev_key {
-                if let Some((ev_offset, ev_block)) = cache.pop_entry(&key) {
-                    if ev_block.dirty {
-                        to_write.push((ev_offset, ev_block.data.clone()));
-                        self.flushing_evicted.lock().insert(ev_offset, ev_block.data);
+        let mut limit = 32;
+        while cache.len() >= cache.cap().get() && limit > 0 {
+            let peeked = cache.peek_lru().map(|(&k, v)| (k, v.flushing));
+            if let Some((key, flushing)) = peeked {
+                if flushing {
+                    cache.promote(&key);
+                    limit -= 1;
+                } else {
+                    if let Some((ev_offset, ev_block)) = cache.pop_lru() {
+                        if ev_block.dirty {
+                            to_write.push((ev_offset, ev_block.data.clone()));
+                            self.flushing_evicted.lock().insert(ev_offset, ev_block.data);
+                        }
                     }
+                    break;
                 }
+            } else {
+                break;
             }
         }
     }
@@ -159,7 +164,6 @@ impl<D: BlockDriverOps + 'static> Ext4Disk<D> {
     fn read_blocks_from_disk(&self, block_offset: usize, num_blocks: usize, dest: &mut [u8]) -> axdriver::prelude::DevResult<()> {
         let block_size = self.block_size();
         let (first_block, inner_offset, blocks) = self.byte_range(block_offset, num_blocks * block_size);
-        let mut raw = vec![0; blocks * self.sector_size];
         let mut dev = self.dev.lock();
         let total_blocks = dev.num_blocks();
         if first_block + blocks as u64 > total_blocks {
@@ -169,16 +173,29 @@ impl<D: BlockDriverOps + 'static> Ext4Disk<D> {
             );
             return Err(axdriver::prelude::DevError::InvalidParam);
         }
-        if let Err(err) = dev.read_block(first_block, &mut raw) {
-            log::error!(
-                "ext4 read_blocks_from_disk failed: block_offset={}, num_blocks={}, err={:?}",
-                block_offset,
-                num_blocks,
-                err
-            );
-            return Err(err);
+        if inner_offset == 0 && dest.len() == blocks * self.sector_size {
+            if let Err(err) = dev.read_block(first_block, dest) {
+                log::error!(
+                    "ext4 read_blocks_from_disk failed: block_offset={}, num_blocks={}, err={:?}",
+                    block_offset,
+                    num_blocks,
+                    err
+                );
+                return Err(err);
+            }
+        } else {
+            let mut raw = vec![0; blocks * self.sector_size];
+            if let Err(err) = dev.read_block(first_block, &mut raw) {
+                log::error!(
+                    "ext4 read_blocks_from_disk failed: block_offset={}, num_blocks={}, err={:?}",
+                    block_offset,
+                    num_blocks,
+                    err
+                );
+                return Err(err);
+            }
+            dest.copy_from_slice(&raw[inner_offset..inner_offset + num_blocks * block_size]);
         }
-        dest.copy_from_slice(&raw[inner_offset..inner_offset + num_blocks * block_size]);
         Ok(())
     }
 
@@ -191,6 +208,26 @@ impl<D: BlockDriverOps + 'static> Ext4Disk<D> {
         
         let start_block_offset = (offset / block_size) * block_size;
         let end_block_offset = ((offset + buf.len() - 1) / block_size) * block_size;
+        
+        if offset % block_size == 0 && buf.len() % block_size == 0 {
+            let has_any_cache = {
+                let cache = self.block_cache.lock();
+                let flushing = self.flushing_evicted.lock();
+                let mut current = start_block_offset;
+                let mut found = false;
+                while current <= end_block_offset {
+                    if cache.contains(&current) || flushing.contains_key(&current) {
+                        found = true;
+                        break;
+                    }
+                    current += block_size;
+                }
+                found
+            };
+            if !has_any_cache {
+                return self.read_blocks_from_disk(offset, buf.len() / block_size, buf);
+            }
+        }
         
         let mut current_block_offset = start_block_offset;
         while current_block_offset <= end_block_offset {
@@ -298,6 +335,20 @@ impl<D: BlockDriverOps + 'static> Ext4Disk<D> {
         let start_block_offset = (offset / block_size) * block_size;
         let end_block_offset = ((offset + data.len() - 1) / block_size) * block_size;
         
+        if offset % block_size == 0 && data.len() % block_size == 0 {
+            {
+                let mut cache = self.block_cache.lock();
+                let mut flushing = self.flushing_evicted.lock();
+                let mut current = start_block_offset;
+                while current <= end_block_offset {
+                    cache.pop(&current);
+                    flushing.remove(&current);
+                    current += block_size;
+                }
+            }
+            return self.write_block_to_disk(offset, data);
+        }
+        
         let mut current_block_offset = start_block_offset;
         while current_block_offset <= end_block_offset {
             let start = core::cmp::max(offset, current_block_offset);
@@ -327,32 +378,8 @@ impl<D: BlockDriverOps + 'static> Ext4Disk<D> {
             
             // Cache miss. Check if we can write a full block directly without pre-reading.
             if block_start == 0 && overlap_len == block_size {
-                let block_data = data[data_start..data_start + block_size].to_vec();
-                let mut to_write = None;
-                {
-                    let mut cache = self.block_cache.lock();
-                    let block = CacheBlock { data: block_data, dirty: true, flushing: false };
-                    if !cache.contains(&current_block_offset) {
-                        let mut ev_write = Vec::new();
-                        self.evict_if_full(&mut cache, &mut ev_write);
-                        if let Some((offset, data)) = ev_write.pop() {
-                            to_write = Some((offset, data));
-                        }
-                    }
-                    cache.put(current_block_offset, block);
-                }
-                if let Some((offset, data)) = to_write {
-                    let res = self.write_block_to_disk(offset, &data);
-                    {
-                        let mut flushing = self.flushing_evicted.lock();
-                        if let Some(curr_data) = flushing.get(&offset) {
-                            if curr_data == &data {
-                                flushing.remove(&offset);
-                            }
-                        }
-                    }
-                    res?;
-                }
+                self.write_block_to_disk(current_block_offset, &data[data_start..data_start + block_size])?;
+                self.flushing_evicted.lock().remove(&current_block_offset);
                 current_block_offset += block_size;
             } else {
                 // Partial block write with cache miss. Find consecutive cache misses that need partial write.

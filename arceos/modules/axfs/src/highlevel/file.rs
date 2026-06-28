@@ -414,6 +414,8 @@ struct CachedFileShared {
     evict_listeners: Mutex<Vec<Arc<EvictListener>>>,
     io_lock: RwLock<()>,
     size: SpinMutex<u64>,
+    last_read_pn: core::sync::atomic::AtomicU32,
+    is_flushing: core::sync::atomic::AtomicBool,
 }
 
 impl CachedFileShared {
@@ -427,6 +429,8 @@ impl CachedFileShared {
             evict_listeners: Mutex::new(Vec::new()),
             io_lock: RwLock::new(()),
             size: SpinMutex::new(size),
+            last_read_pn: core::sync::atomic::AtomicU32::new(u32::MAX),
+            is_flushing: core::sync::atomic::AtomicBool::new(false),
         }
     }
 
@@ -441,9 +445,6 @@ impl CachedFileShared {
         }
         if page.dirty {
             let cached_size = *self.size.lock();
-            if file.len()? < cached_size {
-                file.set_len(cached_size)?;
-            }
             let page_start = pn as u64 * PAGE_SIZE as u64;
             let len = (cached_size.saturating_sub(page_start)).min(PAGE_SIZE as u64) as usize;
             if len > 0 {
@@ -454,14 +455,11 @@ impl CachedFileShared {
         Ok(())
     }
 
-    fn flush_dirty_pages(&self, file: &FileNode) -> VfsResult<()> {
-        const MAX_COALESCE_PAGES: usize = 32; // Limit contiguous writes to 128KB
-        let file_len = *self.size.lock();
-        if file.len()? < file_len {
-            file.set_len(file_len)?;
-        }
-        let mut guard = self.page_cache.lock();
-
+    fn flush_dirty_pages_locked(
+        file_len: u64,
+        file: &FileNode,
+        guard: &mut LruCache<u32, PageCache>,
+    ) -> VfsResult<()> {
         let mut dirty_pns: Vec<u32> = guard
             .iter()
             .filter(|(_, page)| page.dirty)
@@ -475,55 +473,69 @@ impl CachedFileShared {
 
         let mut i = 0;
         while i < dirty_pns.len() {
-            let mut j = i + 1;
-            while j < dirty_pns.len()
-                && dirty_pns[j] == dirty_pns[j - 1] + 1
-                && (j - i) < MAX_COALESCE_PAGES
+            let mut j = i;
+            while j + 1 < dirty_pns.len()
+                && dirty_pns[j + 1] == dirty_pns[j] + 1
+                && (j - i) < 31
             {
                 j += 1;
             }
 
-            let span_pns = &dirty_pns[i..j];
-            let start_pn = span_pns[0];
+            let pn_start = dirty_pns[i];
+            let pn_end = dirty_pns[j];
+            let page_start = pn_start as u64 * PAGE_SIZE as u64;
+            let last_page_start = pn_end as u64 * PAGE_SIZE as u64;
+            let last_len = (file_len.saturating_sub(last_page_start)).min(PAGE_SIZE as u64) as usize;
 
-            let mut combined_data = Vec::new();
-            for &pn in span_pns {
-                if let Some(page) = guard.get_mut(&pn) {
-                    let page_start = pn as u64 * PAGE_SIZE as u64;
-                    let len = (file_len.saturating_sub(page_start)).min(PAGE_SIZE as u64) as usize;
-                    if len > 0 {
-                        combined_data.extend_from_slice(&page.data()[..len]);
+            if last_len > 0 {
+                let total_len = (pn_end - pn_start) as usize * PAGE_SIZE + last_len;
+                let mut merged_buf = alloc::vec::Vec::with_capacity(total_len);
+                for k in i..=j {
+                    let pn_curr = dirty_pns[k];
+                    if let Some(page) = guard.get_mut(&pn_curr) {
+                        let curr_page_start = pn_curr as u64 * PAGE_SIZE as u64;
+                        let curr_len = (file_len.saturating_sub(curr_page_start)).min(PAGE_SIZE as u64) as usize;
+                        merged_buf.extend_from_slice(&page.data()[..curr_len]);
                     }
                 }
-            }
 
-            if !combined_data.is_empty() {
-                let written = file.write_at(&combined_data, start_pn as u64 * PAGE_SIZE as u64)?;
-                let mut bytes_marked = 0;
-                for &pn in span_pns {
-                    if let Some(page) = guard.get_mut(&pn) {
-                        let page_start = pn as u64 * PAGE_SIZE as u64;
-                        let len = (file_len.saturating_sub(page_start)).min(PAGE_SIZE as u64) as usize;
-                        if bytes_marked + len <= written {
-                            bytes_marked += len;
+                let written = file.write_at(&merged_buf, page_start)?;
+                if written == total_len {
+                    for k in i..=j {
+                        if let Some(page) = guard.get_mut(&dirty_pns[k]) {
                             page.dirty = false;
-                        } else {
-                            break;
                         }
                     }
+                } else {
+                    let pages_written = written / PAGE_SIZE;
+                    for k in 0..pages_written {
+                        if let Some(page) = guard.get_mut(&dirty_pns[i + k]) {
+                            page.dirty = false;
+                        }
+                    }
+                    break;
                 }
             } else {
-                for &pn in span_pns {
-                    if let Some(page) = guard.get_mut(&pn) {
+                for k in i..=j {
+                    if let Some(page) = guard.get_mut(&dirty_pns[k]) {
                         page.dirty = false;
                     }
                 }
             }
 
-            i = j;
+            i = j + 1;
         }
 
         Ok(())
+    }
+
+    fn flush_dirty_pages(&self, file: &FileNode) -> VfsResult<()> {
+        let file_len = *self.size.lock();
+        if file.len()? < file_len {
+            file.set_len(file_len)?;
+        }
+        let mut guard = self.page_cache.lock();
+        Self::flush_dirty_pages_locked(file_len, file, &mut guard)
     }
 
     #[allow(dead_code)]
@@ -746,9 +758,6 @@ impl CachedFile {
         }
         if page.dirty {
             let cached_size = *self.shared.size.lock();
-            if file.len()? < cached_size {
-                file.set_len(cached_size)?;
-            }
             let page_start = pn as u64 * PAGE_SIZE as u64;
             let len = (cached_size.saturating_sub(page_start)).min(PAGE_SIZE as u64) as usize;
             if len > 0 {
@@ -804,6 +813,12 @@ impl CachedFile {
         }
         let mut evicted = None;
         if cache.len() == cache.cap().get() {
+            let is_lru_dirty = cache.peek_lru().map(|(_, page)| page.dirty).unwrap_or(false);
+            if is_lru_dirty {
+                let file_len = *self.shared.size.lock();
+                CachedFileShared::flush_dirty_pages_locked(file_len, file, cache)?;
+            }
+
             // Cache is full, remove the least recently used page
             if let Some((pn, mut page)) = cache.pop_lru() {
                 if let Err(err) = self.evict_cache(file, pn, &mut page) {
@@ -819,7 +834,7 @@ impl CachedFile {
         if (pn as u64 * PAGE_SIZE as u64) >= file_len {
             skip_read = true;
         }
-        let mut page = PageCache::new(skip_read)?;
+        let mut page = PageCache::new(!skip_read)?;
         if self.in_memory {
             if !skip_read {
                 page.data().fill(0);

@@ -424,6 +424,80 @@ impl Ext4 {
         Ok(())
     }
 
+    #[maybe_async::maybe_async]
+    pub(crate) async fn read_from_block_range(
+        &self,
+        original_block_index: FsBlockIndex,
+        offset_within_block: u32,
+        dst: &mut [u8],
+    ) -> Result<(), Ext4Error> {
+        let block_size = self.0.superblock.block_size().to_u64();
+        let num_blocks = dst.len().div_ceil(block_size as usize);
+
+        let mut is_contiguous = true;
+        let start_mapped = self.0.journal.map_block_index(original_block_index);
+        for k in 1..num_blocks {
+            let next_mapped = self.0.journal.map_block_index(original_block_index + k as u64);
+            if next_mapped != start_mapped + k as u64 {
+                is_contiguous = false;
+                break;
+            }
+        }
+
+        if is_contiguous {
+            let err = || {
+                Ext4Error::from(CorruptKind::BlockRead {
+                    block_index: start_mapped,
+                    original_block_index,
+                    offset_within_block,
+                    read_len: dst.len(),
+                })
+            };
+
+            if start_mapped == 0 && offset_within_block < 1024 {
+                return Err(err());
+            }
+
+            if start_mapped >= self.0.superblock.blocks_count() {
+                return Err(err());
+            }
+
+            self.0
+                .reader
+                .read(
+                    start_mapped
+                        .checked_mul(block_size)
+                        .ok_or(CorruptKind::InvalidBlockSize)?
+                        .checked_add(u64::from(offset_within_block))
+                        .ok_or(CorruptKind::InvalidBlockSize)?,
+                    dst,
+                )
+                .await
+                .map_err(Ext4Error::Io)?;
+        } else {
+            let mut read_bytes = 0usize;
+            let mut current_block_index = original_block_index;
+            let mut current_offset = offset_within_block;
+
+            while read_bytes < dst.len() {
+                let remaining = dst.len() - read_bytes;
+                let take = core::cmp::min(remaining, (block_size - current_offset as u64) as usize);
+
+                self.read_from_block(
+                    current_block_index,
+                    current_offset,
+                    &mut dst[read_bytes..read_bytes + take],
+                )
+                .await?;
+
+                read_bytes += take;
+                current_block_index += 1;
+                current_offset = 0;
+            }
+        }
+        Ok(())
+    }
+
     /// Read a whole block
     #[maybe_async::maybe_async]
     async fn read_block(
@@ -496,6 +570,83 @@ impl Ext4 {
                 .map_err(Ext4Error::Io)?;
         } else {
             return Err(Ext4Error::Readonly);
+        }
+        Ok(())
+    }
+
+    #[maybe_async::maybe_async]
+    pub(crate) async fn write_to_block_range(
+        &self,
+        original_block_index: FsBlockIndex,
+        offset_within_block: u32,
+        src: &[u8],
+    ) -> Result<(), Ext4Error> {
+        let block_size = self.0.superblock.block_size().to_u64();
+        let num_blocks = src.len().div_ceil(block_size as usize);
+
+        let mut is_contiguous = true;
+        let start_mapped = self.0.journal.map_block_index(original_block_index);
+        for k in 1..num_blocks {
+            let next_mapped = self.0.journal.map_block_index(original_block_index + k as u64);
+            if next_mapped != start_mapped + k as u64 {
+                is_contiguous = false;
+                break;
+            }
+        }
+
+        if is_contiguous {
+            let err = || {
+                Ext4Error::from(CorruptKind::BlockWrite {
+                    block_index: start_mapped,
+                    original_block_index,
+                    offset_within_block,
+                    write_len: src.len(),
+                })
+            };
+
+            if start_mapped == 0 && offset_within_block < 1024 {
+                return Err(err());
+            }
+
+            if start_mapped >= self.0.superblock.blocks_count() {
+                return Err(err());
+            }
+
+            if let Some(writer) = &self.0.writer {
+                writer
+                    .write(
+                        start_mapped
+                            .checked_mul(block_size)
+                            .ok_or(CorruptKind::InvalidBlockSize)?
+                            .checked_add(u64::from(offset_within_block))
+                            .ok_or(CorruptKind::InvalidBlockSize)?,
+                        src,
+                    )
+                    .await
+                    .map_err(Ext4Error::Io)?;
+            } else {
+                return Err(Ext4Error::Readonly);
+            }
+        } else {
+            let mut written_bytes = 0usize;
+            let mut current_block_index = original_block_index;
+            let mut current_offset = offset_within_block;
+
+            while written_bytes < src.len() {
+                let remaining = src.len() - written_bytes;
+                let take = core::cmp::min(remaining, (block_size - current_offset as u64) as usize);
+
+                self.write_to_block(
+                    current_block_index,
+                    current_offset,
+                    &src[written_bytes..written_bytes + take],
+                )
+                .await?;
+
+                written_bytes += take;
+                current_block_index += 1;
+                current_offset = 0;
+            }
         }
         Ok(())
     }
