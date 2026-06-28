@@ -15,7 +15,8 @@ use axfs_ng_vfs::{
 use axhal::mem::{PhysAddr, VirtAddr, virt_to_phys};
 use axio::{SeekFrom, prelude::*};
 use axpoll::{IoEvents, Pollable};
-use axsync::{Mutex, RwLock};
+use axsync::Mutex;
+use axtask::WaitQueue;
 use lru::LruCache;
 use spin::{Lazy, Mutex as SpinMutex};
 
@@ -409,10 +410,107 @@ struct EvictListener {
     listener: Box<dyn Fn(u32, &PageCache) + Send + Sync>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum RangeLockType {
+    Read,
+    Write,
+}
+
+struct RangeLockEntry {
+    range: Range<u64>,
+    lock_type: RangeLockType,
+    task_id: u64,
+}
+
+pub struct RangeLock {
+    inner: SpinMutex<Vec<RangeLockEntry>>,
+    wq: WaitQueue,
+}
+
+impl RangeLock {
+    pub const fn new() -> Self {
+        Self {
+            inner: SpinMutex::new(Vec::new()),
+            wq: WaitQueue::new(),
+        }
+    }
+
+    fn intersects(r1: &Range<u64>, r2: &Range<u64>) -> bool {
+        r1.start < r2.end && r2.start < r1.end
+    }
+
+    fn has_conflict(active_locks: &[RangeLockEntry], range: &Range<u64>, lock_type: RangeLockType) -> bool {
+        for entry in active_locks {
+            if Self::intersects(&entry.range, range) {
+                if lock_type == RangeLockType::Write || entry.lock_type == RangeLockType::Write {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
+    pub fn lock(&self, range: Range<u64>, is_write: bool) -> RangeLockGuard {
+        let lock_type = if is_write {
+            RangeLockType::Write
+        } else {
+            RangeLockType::Read
+        };
+        let current_id = axtask::current().id().as_u64();
+        
+        self.wq.wait_until(|| {
+            let guard = self.inner.lock();
+            !Self::has_conflict(&guard, &range, lock_type)
+        });
+
+        let mut guard = self.inner.lock();
+        guard.push(RangeLockEntry {
+            range: range.clone(),
+            lock_type,
+            task_id: current_id,
+        });
+
+        RangeLockGuard {
+            lock: self,
+            range,
+            lock_type,
+        }
+    }
+
+    pub fn unlock(&self, range: &Range<u64>, lock_type: RangeLockType) {
+        let mut guard = self.inner.lock();
+        let current_id = axtask::current().id().as_u64();
+        if let Some(pos) = guard.iter().position(|entry| {
+            entry.range == *range && entry.lock_type == lock_type && entry.task_id == current_id
+        }) {
+            guard.remove(pos);
+            drop(guard);
+            self.wq.notify_all(true);
+        } else {
+            panic!(
+                "RangeLock::unlock: lock not found for range {:?}, type {:?}",
+                range, lock_type
+            );
+        }
+    }
+}
+
+pub struct RangeLockGuard<'a> {
+    lock: &'a RangeLock,
+    range: Range<u64>,
+    lock_type: RangeLockType,
+}
+
+impl<'a> Drop for RangeLockGuard<'a> {
+    fn drop(&mut self) {
+        self.lock.unlock(&self.range, self.lock_type);
+    }
+}
+
 struct CachedFileShared {
     page_cache: Mutex<LruCache<u32, PageCache>>,
     evict_listeners: Mutex<Vec<Arc<EvictListener>>>,
-    io_lock: RwLock<()>,
+    io_lock: RangeLock,
     size: SpinMutex<u64>,
     last_read_pn: core::sync::atomic::AtomicU32,
     is_flushing: core::sync::atomic::AtomicBool,
@@ -427,7 +525,7 @@ impl CachedFileShared {
                 Mutex::new(LruCache::new(NonZeroUsize::new(16384).unwrap()))
             },
             evict_listeners: Mutex::new(Vec::new()),
-            io_lock: RwLock::new(()),
+            io_lock: RangeLock::new(),
             size: SpinMutex::new(size),
             last_read_pn: core::sync::atomic::AtomicU32::new(u32::MAX),
             is_flushing: core::sync::atomic::AtomicBool::new(false),
@@ -721,6 +819,18 @@ impl CachedFile {
         }
     }
 
+    fn get_page_for_io(&self, file: &FileNode, pn: u32, skip_read: bool) -> VfsResult<PageCache> {
+        let mut page = PageCache::new(!skip_read)?;
+        if self.in_memory {
+            if !skip_read {
+                page.data().fill(0);
+            }
+        } else if !skip_read {
+            file.read_at(page.data(), pn as u64 * PAGE_SIZE as u64)?;
+        }
+        Ok(page)
+    }
+
     pub fn ptr_eq(&self, other: &Self) -> bool {
         Arc::ptr_eq(&self.shared, &other.shared)
     }
@@ -799,55 +909,11 @@ impl CachedFile {
         Ok(())
     }
 
-    fn page_or_insert<'a>(
-        &self,
-        file: &FileNode,
-        cache: &'a mut LruCache<u32, PageCache>,
-        pn: u32,
-        mut skip_read: bool,
-    ) -> VfsResult<(&'a mut PageCache, Option<(u32, PageCache)>)> {
-        // TODO: Matching the result of `get_mut` confuses compiler. See
-        // https://users.rust-lang.org/t/return-do-not-release-mutable-borrow/55757.
-        if cache.contains(&pn) {
-            return Ok((cache.get_mut(&pn).unwrap(), None));
-        }
-        let mut evicted = None;
-        if cache.len() == cache.cap().get() {
-            let is_lru_dirty = cache.peek_lru().map(|(_, page)| page.dirty).unwrap_or(false);
-            if is_lru_dirty {
-                let file_len = *self.shared.size.lock();
-                CachedFileShared::flush_dirty_pages_locked(file_len, file, cache)?;
-            }
 
-            // Cache is full, remove the least recently used page
-            if let Some((pn, mut page)) = cache.pop_lru() {
-                if let Err(err) = self.evict_cache(file, pn, &mut page) {
-                    cache.put(pn, page);
-                    return Err(err);
-                }
-                evicted = Some((pn, page));
-            }
-        }
-
-        // Page not in cache, read it
-        let file_len = *self.shared.size.lock();
-        if (pn as u64 * PAGE_SIZE as u64) >= file_len {
-            skip_read = true;
-        }
-        let mut page = PageCache::new(!skip_read)?;
-        if self.in_memory {
-            if !skip_read {
-                page.data().fill(0);
-            }
-        } else if !skip_read {
-            file.read_at(page.data(), pn as u64 * PAGE_SIZE as u64)?;
-        }
-        cache.put(pn, page);
-        Ok((cache.get_mut(&pn).unwrap(), evicted))
-    }
 
     pub fn with_page<R>(&self, pn: u32, f: impl FnOnce(Option<&mut PageCache>) -> R) -> R {
-        let _guard = self.shared.io_lock.read();
+        let page_start = pn as u64 * PAGE_SIZE as u64;
+        let _guard = self.shared.io_lock.lock(page_start..page_start + PAGE_SIZE as u64, false);
         f(self.shared.page_cache.lock().get_mut(&pn))
     }
 
@@ -856,9 +922,41 @@ impl CachedFile {
         pn: u32,
         f: impl FnOnce(&mut PageCache, Option<(u32, PageCache)>) -> VfsResult<R>,
     ) -> VfsResult<R> {
-        let _guard = self.shared.io_lock.write();
+        let page_start = pn as u64 * PAGE_SIZE as u64;
+        let _lock_guard = self.shared.io_lock.lock(page_start..page_start + PAGE_SIZE as u64, true);
+        let file = self.inner.entry().as_file()?;
+
         let mut guard = self.shared.page_cache.lock();
-        let (page, evicted) = self.page_or_insert(self.inner.entry().as_file()?, &mut guard, pn, false)?;
+        if guard.contains(&pn) {
+            let page = guard.get_mut(&pn).unwrap();
+            return f(page, None);
+        }
+
+        let mut evicted_page = None;
+        let mut evicted_pn = 0;
+        if guard.len() == guard.cap().get() {
+            if let Some((epn, epage)) = guard.pop_lru() {
+                evicted_pn = epn;
+                evicted_page = Some(epage);
+            }
+        }
+        drop(guard);
+
+        if let Some(ref mut epage) = evicted_page {
+            self.shared.evict_cache(file, evicted_pn, epage)?;
+        }
+
+        let new_page = self.get_page_for_io(file, pn, false)?;
+
+        let mut guard = self.shared.page_cache.lock();
+        let page = if guard.contains(&pn) {
+            guard.get_mut(&pn).unwrap()
+        } else {
+            guard.put(pn, new_page);
+            guard.get_mut(&pn).unwrap()
+        };
+
+        let evicted = evicted_page.map(|p| (evicted_pn, p));
         f(page, evicted)
     }
 
@@ -874,14 +972,44 @@ impl CachedFile {
         let start_page = (range.start / PAGE_SIZE as u64) as u32;
         let end_page = range.end.div_ceil(PAGE_SIZE as u64) as u32;
         let mut page_offset = (range.start % PAGE_SIZE as u64) as usize;
-        let mut guard = self.shared.page_cache.lock();
+
         for pn in start_page..end_page {
             let page_start = pn as u64 * PAGE_SIZE as u64;
             let page_end = (range.end - page_start).min(PAGE_SIZE as u64) as usize;
 
             let skip_read = is_write && (page_offset == 0) && (page_end == PAGE_SIZE);
 
-            let page = self.page_or_insert(file, &mut guard, pn, skip_read)?.0;
+            let mut guard = self.shared.page_cache.lock();
+            if guard.contains(&pn) {
+                let page = guard.get_mut(&pn).unwrap();
+                initial = page_each(initial, page, page_offset..page_end)?;
+                page_offset = 0;
+                continue;
+            }
+
+            let mut evicted_page = None;
+            let mut evicted_pn = 0;
+            if guard.len() == guard.cap().get() {
+                if let Some((epn, epage)) = guard.pop_lru() {
+                    evicted_pn = epn;
+                    evicted_page = Some(epage);
+                }
+            }
+            drop(guard);
+
+            if let Some(mut epage) = evicted_page {
+                self.shared.evict_cache(file, evicted_pn, &mut epage)?;
+            }
+
+            let new_page = self.get_page_for_io(file, pn, skip_read)?;
+
+            let mut guard = self.shared.page_cache.lock();
+            let page = if guard.contains(&pn) {
+                guard.get_mut(&pn).unwrap()
+            } else {
+                guard.put(pn, new_page);
+                guard.get_mut(&pn).unwrap()
+            };
 
             initial = page_each(
                 initial,
@@ -895,12 +1023,12 @@ impl CachedFile {
     }
 
     pub fn read_at(&self, mut dst: impl Write + IoBufMut, offset: u64) -> VfsResult<usize> {
-        let _guard = self.shared.io_lock.read();
         let len = *self.shared.size.lock();
         let end = (offset + dst.remaining_mut() as u64).min(len);
         if end <= offset {
             return Ok(0);
         }
+        let _guard = self.shared.io_lock.lock(offset..end, false);
         self.with_pages(
             offset..end,
             false,
@@ -937,19 +1065,20 @@ impl CachedFile {
     }
 
     pub fn write_at(&self, buf: impl Read + IoBuf, offset: u64) -> VfsResult<usize> {
-        let _guard = self.shared.io_lock.write();
+        let end = offset + buf.remaining() as u64;
+        let _guard = self.shared.io_lock.lock(offset..end, true);
         self.write_at_locked(buf, offset)
     }
 
     pub fn append(&self, buf: impl Read + IoBuf) -> VfsResult<(usize, u64)> {
-        let _guard = self.shared.io_lock.write();
         let len = *self.shared.size.lock();
+        let _guard = self.shared.io_lock.lock(len..u64::MAX, true);
         self.write_at_locked(buf, len)
             .map(|written| (written, len + written as u64))
     }
 
     pub fn set_len(&self, len: u64) -> VfsResult<()> {
-        let _guard = self.shared.io_lock.write();
+        let _guard = self.shared.io_lock.lock(0..u64::MAX, true);
         let file = self.inner.entry().as_file()?;
         let old_len = *self.shared.size.lock();
         *self.shared.size.lock() = len;
@@ -989,7 +1118,7 @@ impl CachedFile {
         if self.in_memory {
             return Ok(());
         }
-        let _guard = self.shared.io_lock.write();
+        let _guard = self.shared.io_lock.lock(0..u64::MAX, true);
         let file = self.inner.entry().as_file()?;
         let cached_size = *self.shared.size.lock();
         if file.len()? != cached_size {
@@ -1057,7 +1186,8 @@ impl FileBackend {
                     }))
                 } else {
                     let shared = shared_file_state(loc);
-                    let _guard = shared.io_lock.read();
+                    let end = offset + dst.remaining_mut() as u64;
+                    let _guard = shared.io_lock.lock(offset..end, false);
                     dst.read_from(&mut axio::read_fn(|buf| {
                         loc.entry().as_file()?.read_at(buf, offset).inspect(|read| {
                             offset += *read as u64;
@@ -1083,7 +1213,8 @@ impl FileBackend {
                     }))
                 } else {
                     let shared = shared_file_state(loc);
-                    let _guard = shared.io_lock.write();
+                    let end = offset + src.remaining() as u64;
+                    let _guard = shared.io_lock.lock(offset..end, true);
                     let cached_size = *shared.size.lock();
                     if file.len()? != cached_size {
                         file.set_len(cached_size)?;
@@ -1117,9 +1248,9 @@ impl FileBackend {
             Self::Cached(cached) => cached.append(src),
             Self::Direct(loc) => {
                 let shared = shared_file_state(loc);
-                let _guard = shared.io_lock.write();
-                let file = loc.entry().as_file()?;
                 let cached_size = *shared.size.lock();
+                let _guard = shared.io_lock.lock(cached_size..u64::MAX, true);
+                let file = loc.entry().as_file()?;
                 if file.len()? != cached_size {
                     file.set_len(cached_size)?;
                 }
@@ -1157,7 +1288,7 @@ impl FileBackend {
             Self::Cached(cached) => cached.sync(data_only),
             Self::Direct(loc) => {
                 let shared = shared_file_state(loc);
-                let _guard = shared.io_lock.write();
+                let _guard = shared.io_lock.lock(0..u64::MAX, true);
                 let file = loc.entry().as_file()?;
                 let cached_size = *shared.size.lock();
                 if file.len()? != cached_size {
@@ -1174,7 +1305,7 @@ impl FileBackend {
             Self::Cached(cached) => cached.set_len(len),
             Self::Direct(loc) => {
                 let shared = shared_file_state(loc);
-                let _guard = shared.io_lock.write();
+                let _guard = shared.io_lock.lock(0..u64::MAX, true);
                 let file = loc.entry().as_file()?;
                 *shared.size.lock() = len;
                 shared.flush_dirty_pages(file)?;
