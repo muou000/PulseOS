@@ -124,8 +124,11 @@ impl AddrSpace {
 
     /// Checks if the address space contains the given address range.
     pub fn contains_range(&self, start: VirtAddr, size: usize) -> bool {
-        self.va_range
-            .contains_range(VirtAddrRange::from_start_size(start, size))
+        if let Some(range) = VirtAddrRange::try_from_start_size(start, size) {
+            self.va_range.contains_range(range)
+        } else {
+            false
+        }
     }
 
     /// Creates a new empty address space.
@@ -553,7 +556,10 @@ impl AddrSpace {
         size: usize,
         access_flags: MappingFlags,
     ) -> bool {
-        let mut range = VirtAddrRange::from_start_size(start, size);
+        let mut range = match VirtAddrRange::try_from_start_size(start, size) {
+            Some(r) => r,
+            None => return false,
+        };
         for area in self.areas.iter() {
             if area.end() <= range.start {
                 continue;
@@ -578,7 +584,10 @@ impl AddrSpace {
 
     /// Checks if a virtual address range overlaps with any registered area.
     pub fn has_overlap(&self, start: VirtAddr, size: usize) -> bool {
-        let range = VirtAddrRange::from_start_size(start, size);
+        let range = match VirtAddrRange::try_from_start_size(start, size) {
+            Some(r) => r,
+            None => return false,
+        };
         for area in self.areas.iter() {
             if area.end() <= range.start {
                 continue;
