@@ -89,7 +89,6 @@ pub fn sys_read(fd: usize, buf: usize, count: usize) -> isize {
         }
     }
     let mut total = 0usize;
-    let mut fallback_tmp = None;
 
     while total < count {
         let user_buf = match buf.checked_add(total) {
@@ -118,23 +117,7 @@ pub fn sys_read(fd: usize, buf: usize, count: usize) -> isize {
                 break;
             }
         } else {
-            let tmp = match fallback_tmp.as_mut() {
-                Some(t) => t,
-                None => {
-                    let t = match alloc_uninit_bytes(remaining.min(MAX_IO_CHUNK), "sys_read.tmp") {
-                        Ok(b) => b,
-                        Err(e) => {
-                            return if total > 0 {
-                                total as isize
-                            } else {
-                                -e.code() as isize
-                            };
-                        }
-                    };
-                    fallback_tmp = Some(t);
-                    fallback_tmp.as_mut().unwrap()
-                }
-            };
+            let mut tmp = [0u8; 4096];
             let chunk = core::cmp::min(tmp.len(), remaining);
             let ret = match object.read(&mut tmp[..chunk]) {
                 Ok(ret) => ret,
@@ -202,7 +185,6 @@ pub fn sys_write(fd: usize, buf: usize, count: usize) -> isize {
         }
     }
     let mut total = 0usize;
-    let mut fallback_tmp = None;
 
     while total < count {
         let user_buf = buf + total;
@@ -228,23 +210,7 @@ pub fn sys_write(fd: usize, buf: usize, count: usize) -> isize {
                 break;
             }
         } else {
-            let tmp = match fallback_tmp.as_mut() {
-                Some(t) => t,
-                None => {
-                    let t = match alloc_uninit_bytes(remaining.min(MAX_IO_CHUNK), "sys_write.tmp") {
-                        Ok(b) => b,
-                        Err(e) => {
-                            return if total > 0 {
-                                total as isize
-                            } else {
-                                -e.code() as isize
-                            };
-                        }
-                    };
-                    fallback_tmp = Some(t);
-                    fallback_tmp.as_mut().unwrap()
-                }
-            };
+            let mut tmp = [0u8; 4096];
             let chunk = core::cmp::min(tmp.len(), remaining);
             if let Err(e) = read_user_bytes(user_buf, &mut tmp[..chunk]) {
                 return if total > 0 {
@@ -382,13 +348,24 @@ pub fn sys_writev(fd: usize, iov: usize, iovcnt: usize) -> isize {
         let mut offset = 0usize;
         while offset < len {
             let chunk = core::cmp::min(buf.len(), len - offset);
-            if let Err(e) = read_user_bytes(io_vec.iov_base as usize + offset, &mut buf[..chunk]) {
-                return if total > 0 { total } else { -e.code() as isize };
-            }
-            let ret = match object.write(&buf[..chunk]) {
-                Ok(ret) => ret as isize,
-                Err(e) => return if total > 0 { total } else { -e.code() as isize },
+            let user_buf = io_vec.iov_base as usize + offset;
+
+            let ret = if let Some(slice_ptr) = query_user_page_slice(user_buf, chunk, false) {
+                let slice = unsafe { &*slice_ptr };
+                match object.write(slice) {
+                    Ok(ret) => ret as isize,
+                    Err(e) => return if total > 0 { total } else { -e.code() as isize },
+                }
+            } else {
+                if let Err(e) = read_user_bytes(user_buf, &mut buf[..chunk]) {
+                    return if total > 0 { total } else { -e.code() as isize };
+                }
+                match object.write(&buf[..chunk]) {
+                    Ok(ret) => ret as isize,
+                    Err(e) => return if total > 0 { total } else { -e.code() as isize },
+                }
             };
+
             if ret <= 0 {
                 return total + ret;
             }
@@ -461,17 +438,30 @@ pub fn sys_readv(fd: usize, iov: usize, iovcnt: usize) -> isize {
         let mut offset = 0usize;
         while offset < len {
             let chunk = core::cmp::min(buf.len(), len - offset);
-            let ret = match object.read(&mut buf[..chunk]) {
-                Ok(ret) => ret as isize,
-                Err(e) => return if total > 0 { total } else { -e.code() as isize },
+            let user_buf = io_vec.iov_base as usize + offset;
+
+            let ret = if let Some(slice_ptr) = query_user_page_slice(user_buf, chunk, true) {
+                let slice = unsafe { &mut *slice_ptr };
+                match object.read(slice) {
+                    Ok(ret) => ret as isize,
+                    Err(e) => return if total > 0 { total } else { -e.code() as isize },
+                }
+            } else {
+                let ret = match object.read(&mut buf[..chunk]) {
+                    Ok(ret) => ret as isize,
+                    Err(e) => return if total > 0 { total } else { -e.code() as isize },
+                };
+                if ret <= 0 {
+                    return total + ret;
+                }
+                if let Err(e) = write_user_bytes(user_buf, &buf[..ret as usize]) {
+                    return if total > 0 { total } else { -e.code() as isize };
+                }
+                ret
             };
+
             if ret <= 0 {
                 return total + ret;
-            }
-            if let Err(e) =
-                write_user_bytes(io_vec.iov_base as usize + offset, &buf[..ret as usize])
-            {
-                return if total > 0 { total } else { -e.code() as isize };
             }
             total += ret;
             offset += ret as usize;
@@ -567,21 +557,34 @@ pub fn sys_preadv(
         let mut offset_in_vec = 0usize;
         while offset_in_vec < len {
             let chunk = core::cmp::min(buf.len(), len - offset_in_vec);
+            let user_buf = io_vec.iov_base as usize + offset_in_vec;
             let file_offset = match (offset as u64).checked_add(total as u64) {
                 Some(off) => off,
                 None => return if total > 0 { total } else { -LinuxError::EINVAL.code() as isize },
             };
-            let ret = match object.read_at(&mut buf[..chunk], file_offset) {
-                Ok(ret) => ret as isize,
-                Err(e) => return if total > 0 { total } else { -e.code() as isize },
+
+            let ret = if let Some(slice_ptr) = query_user_page_slice(user_buf, chunk, true) {
+                let slice = unsafe { &mut *slice_ptr };
+                match object.read_at(slice, file_offset) {
+                    Ok(ret) => ret as isize,
+                    Err(e) => return if total > 0 { total } else { -e.code() as isize },
+                }
+            } else {
+                let ret = match object.read_at(&mut buf[..chunk], file_offset) {
+                    Ok(ret) => ret as isize,
+                    Err(e) => return if total > 0 { total } else { -e.code() as isize },
+                };
+                if ret <= 0 {
+                    return total + ret;
+                }
+                if let Err(e) = write_user_bytes(user_buf, &buf[..ret as usize]) {
+                    return if total > 0 { total } else { -e.code() as isize };
+                }
+                ret
             };
+
             if ret <= 0 {
                 return total + ret;
-            }
-            if let Err(e) =
-                write_user_bytes(io_vec.iov_base as usize + offset_in_vec, &buf[..ret as usize])
-            {
-                return if total > 0 { total } else { -e.code() as isize };
             }
             total += ret;
             offset_in_vec += ret as usize;
@@ -922,17 +925,33 @@ pub fn sys_pwritev(
         let mut offset_in_vec = 0usize;
         while offset_in_vec < len {
             let chunk = core::cmp::min(buf.len(), len - offset_in_vec);
-            if let Err(e) = read_user_bytes(io_vec.iov_base as usize + offset_in_vec, &mut buf[..chunk]) {
-                return if total > 0 { total } else { -e.code() as isize };
-            }
+            let user_buf = io_vec.iov_base as usize + offset_in_vec;
+
             let file_offset = match (offset as u64).checked_add(total as u64) {
                 Some(off) => off,
                 None => return if total > 0 { total } else { -LinuxError::EINVAL.code() as isize },
             };
-            let ret = match object.write_at(&buf[..chunk], file_offset) {
-                Ok(ret) => ret as isize,
-                Err(e) => return if total > 0 { total } else { -e.code() as isize },
+
+            let ret = if let Some(slice_ptr) = query_user_page_slice(user_buf, chunk, false) {
+                let slice = unsafe { &*slice_ptr };
+                match object.write_at(slice, file_offset) {
+                    Ok(ret) => ret as isize,
+                    Err(e) => return if total > 0 { total } else { -e.code() as isize },
+                }
+            } else {
+                if let Err(e) = read_user_bytes(user_buf, &mut buf[..chunk]) {
+                    return if total > 0 { total } else { -e.code() as isize };
+                }
+                let ret = match object.write_at(&buf[..chunk], file_offset) {
+                    Ok(ret) => ret as isize,
+                    Err(e) => return if total > 0 { total } else { -e.code() as isize },
+                };
+                if ret <= 0 {
+                    return total + ret;
+                }
+                ret
             };
+
             if ret <= 0 {
                 return total + ret;
             }

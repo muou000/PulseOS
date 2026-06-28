@@ -1677,7 +1677,6 @@ impl ExtentTree {
                 .ok_or(Ext4Error::FileTooLarge)
         }
 
-        #[expect(clippy::too_many_arguments)]
         #[maybe_async::maybe_async]
         async fn write_into_mapped_initialized_extent(
             ext4: &Ext4,
@@ -1703,8 +1702,9 @@ impl ExtentTree {
             }
 
             let mut written = 0usize;
+            let mut i = 0usize;
 
-            for i in 0..blocks_to_write {
+            while i < blocks_to_write {
                 let fs_block_offset = offset_in_extent
                     .checked_add(i)
                     .ok_or(Ext4Error::FileTooLarge)?;
@@ -1736,28 +1736,34 @@ impl ExtentTree {
                 let write_end = range_end(written, take)?;
 
                 if block_off == 0 && take == block_size {
-                    ext4.write_to_block(fs_block, 0, &buf[written..write_end])
+                    let mut run_count = 1usize;
+                    while i + run_count < blocks_to_write {
+                        let next_remaining = buf.len().saturating_sub(written + run_count * block_size);
+                        if next_remaining >= block_size {
+                            run_count += 1;
+                        } else {
+                            break;
+                        }
+                    }
+
+                    let run_bytes = run_count * block_size;
+                    let run_write_end = range_end(written, run_bytes)?;
+                    ext4.write_to_block_range(fs_block, 0, &buf[written..run_write_end])
                         .await?;
-                    written = write_end;
+                    written = run_write_end;
+                    i += run_count;
                     continue;
                 }
 
-                let mut block_buf = alloc::vec![0u8; block_size];
-                ext4.read_from_block(fs_block, 0, &mut block_buf).await?;
-                let block_end = block_off
-                    .checked_add(take)
-                    .ok_or(CorruptKind::InvalidBlockSize)?;
-                block_buf[block_off..block_end]
-                    .copy_from_slice(&buf[written..write_end]);
-                ext4.write_to_block(fs_block, 0, &block_buf).await?;
+                write_partial_block(&ext4, fs_block, block_off, take, &buf[written..write_end], block_size, true).await?;
 
                 written = write_end;
+                i += 1;
             }
 
             Ok(written)
         }
 
-        #[expect(clippy::too_many_arguments)]
         #[maybe_async::maybe_async]
         async fn write_into_uninitialized_extent(
             extent_tree: &mut ExtentTree,
@@ -1788,8 +1794,9 @@ impl ExtentTree {
 
             let mut written = 0usize;
             let mut blocks_written = 0usize;
+            let mut i = 0usize;
 
-            for i in 0..blocks_to_write {
+            while i < blocks_to_write {
                 let fs_block_offset = offset_in_extent
                     .checked_add(i)
                     .ok_or(Ext4Error::FileTooLarge)?;
@@ -1822,19 +1829,31 @@ impl ExtentTree {
                 let chunk = &buf[written..write_end];
 
                 if block_offset == 0 && take == block_size {
-                    ext4.write_to_block(fs_block, 0, chunk).await?;
-                } else {
-                    let mut block_buf = alloc::vec![0u8; block_size];
-                    let block_end = block_offset
-                        .checked_add(take)
-                        .ok_or(CorruptKind::InvalidBlockSize)?;
-                    block_buf[block_offset..block_end].copy_from_slice(chunk);
-                    ext4.write_to_block(fs_block, 0, &block_buf).await?;
+                    let mut run_count = 1usize;
+                    while i + run_count < blocks_to_write {
+                        let next_remaining = buf.len().saturating_sub(written + run_count * block_size);
+                        if next_remaining >= block_size {
+                            run_count += 1;
+                        } else {
+                            break;
+                        }
+                    }
+
+                    let run_bytes = run_count * block_size;
+                    let run_write_end = range_end(written, run_bytes)?;
+                    ext4.write_to_block_range(fs_block, 0, &buf[written..run_write_end])
+                        .await?;
+                    written = run_write_end;
+                    i += run_count;
+                    blocks_written = i;
+                    continue;
                 }
 
+                write_partial_block(&ext4, fs_block, block_offset, take, chunk, block_size, false).await?;
+
                 written = write_end;
-                blocks_written =
-                    i.checked_add(1).ok_or(Ext4Error::FileTooLarge)?;
+                i += 1;
+                blocks_written = i;
             }
 
             if blocks_written > 0 {
@@ -1895,8 +1914,9 @@ impl ExtentTree {
             }
 
             let mut written = 0usize;
+            let mut i = 0usize;
 
-            for i in 0..blocks_to_write {
+            while i < blocks_to_write {
                 let fs_block = extent
                     .start_block
                     .checked_add(
@@ -1928,17 +1948,29 @@ impl ExtentTree {
                     block_offset == 0 && take == block_size;
 
                 if is_full_block_write {
-                    ext4.write_to_block(fs_block, 0, chunk).await?;
+                    let mut run_count = 1usize;
+                    while i + run_count < blocks_to_write {
+                        let next_remaining = buf.len().saturating_sub(written + run_count * block_size);
+                        if next_remaining >= block_size {
+                            run_count += 1;
+                        } else {
+                            break;
+                        }
+                    }
+
+                    let run_bytes = run_count * block_size;
+                    let run_write_end = range_end(written, run_bytes)?;
+                    ext4.write_to_block_range(fs_block, 0, &buf[written..run_write_end])
+                        .await?;
+                    written = run_write_end;
+                    i += run_count;
+                    continue;
                 } else {
-                    let mut block_buf = alloc::vec![0u8; block_size];
-                    let block_end = block_offset
-                        .checked_add(take)
-                        .ok_or(CorruptKind::InvalidBlockSize)?;
-                    block_buf[block_offset..block_end].copy_from_slice(chunk);
-                    ext4.write_to_block(fs_block, 0, &block_buf).await?;
+                    write_partial_block(&ext4, fs_block, block_offset, take, chunk, block_size, false).await?;
                 }
 
                 written = write_end;
+                i += 1;
             }
 
             Ok(written)
@@ -2288,6 +2320,38 @@ impl ExtentTree {
         inode.write(&self.ext4).await?;
         Ok(())
     }
+}
+
+#[maybe_async::maybe_async]
+async fn write_partial_block(
+    ext4: &Ext4,
+    fs_block: FsBlockIndex,
+    block_offset: usize,
+    take: usize,
+    chunk: &[u8],
+    block_size: usize,
+    pre_read: bool,
+) -> Result<(), Ext4Error> {
+    let block_end = block_offset
+        .checked_add(take)
+        .ok_or(CorruptKind::InvalidBlockSize)?;
+
+    if block_size == 4096 {
+        let mut block_buf = [0u8; 4096];
+        if pre_read {
+            ext4.read_from_block(fs_block, 0, &mut block_buf).await?;
+        }
+        block_buf[block_offset..block_end].copy_from_slice(chunk);
+        ext4.write_to_block(fs_block, 0, &block_buf).await?;
+    } else {
+        let mut block_buf = alloc::vec![0u8; block_size];
+        if pre_read {
+            ext4.read_from_block(fs_block, 0, &mut block_buf).await?;
+        }
+        block_buf[block_offset..block_end].copy_from_slice(chunk);
+        ext4.write_to_block(fs_block, 0, &block_buf).await?;
+    }
+    Ok(())
 }
 
 #[cfg(all(test, feature = "std"))]
