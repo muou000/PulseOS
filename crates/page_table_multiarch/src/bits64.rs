@@ -533,6 +533,7 @@ impl<M: PagingMetaData, PTE: GenericPTE, H: PagingHandler> PageTable64<M, PTE, H
                         }
                         cow_flags
                     } else {
+                        inc_ref(paddr);
                         flags
                     };
 
