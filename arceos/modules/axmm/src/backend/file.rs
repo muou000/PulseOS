@@ -187,14 +187,12 @@ impl Backend {
                 tlb.flush();
                 if frame.as_usize() != 0 {
                     if mapping.shared {
-                        let Some((file_offset, _)) = mapping.page_read_window(addr) else {
-                            continue;
-                        };
-                        let pn = (file_offset / PAGE_SIZE_4K as u64) as u32;
-                        let _ = mapping.file.mark_page_dirty(pn);
-                    } else {
-                        dealloc_frame(frame);
+                        if let Some((file_offset, _)) = mapping.page_read_window(addr) {
+                            let pn = (file_offset / PAGE_SIZE_4K as u64) as u32;
+                            let _ = mapping.file.mark_page_dirty(pn);
+                        }
                     }
+                    dealloc_frame(frame);
                 }
             }
         }
@@ -351,6 +349,15 @@ impl Backend {
                     return true; // Already mapped
                 }
             }
+
+            let ref_count = frame_table().get_ref(frame);
+            if ref_count == 0 {
+                cow_mark_frame_used(frame);
+                cow_inc_frame_ref(frame);
+            } else {
+                cow_inc_frame_ref(frame);
+            }
+
             return pt_guard
                 .map(page_addr, frame, PageSize::Size4K, orig_flags)
                 .map(|tlb| {

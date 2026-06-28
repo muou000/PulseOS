@@ -840,7 +840,10 @@ impl CachedFile {
                 page.data().fill(0);
             }
         } else if !skip_read {
-            file.read_at(page.data(), pn as u64 * PAGE_SIZE as u64)?;
+            let read_len = file.read_at(page.data(), pn as u64 * PAGE_SIZE as u64)?;
+            if read_len < PAGE_SIZE {
+                page.data()[read_len..].fill(0);
+            }
         }
         cache.put(pn, page);
         Ok((cache.get_mut(&pn).unwrap(), evicted))
