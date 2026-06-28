@@ -79,6 +79,7 @@ pub struct AddrSpace {
     areas: MemorySet<Backend>,
     pt: PageTableLockManager,
     asid: usize,
+    last_alloc_addr: core::sync::atomic::AtomicUsize,
 }
 
 impl AddrSpace {
@@ -139,6 +140,7 @@ impl AddrSpace {
             areas: MemorySet::new(),
             pt: PageTableLockManager::new(PageTable::try_new().map_err(|_| AxError::NoMemory)?),
             asid,
+            last_alloc_addr: core::sync::atomic::AtomicUsize::new(base.as_usize()),
         })
     }
 
@@ -169,7 +171,35 @@ impl AddrSpace {
         size: usize,
         limit: VirtAddrRange,
     ) -> Option<VirtAddr> {
-        self.areas.find_free_area(hint, size, limit, PAGE_SIZE_4K)
+        // `self.areas::find_free_area` requires the size to be multiple of the alignment.
+        // So we pass 4K alignment here.
+        let is_hint_base = hint == self.va_range.start;
+        let search_hint = if is_hint_base {
+            let last_alloc = self.last_alloc_addr.load(core::sync::atomic::Ordering::Acquire);
+            if last_alloc >= self.va_range.start.as_usize() && last_alloc < self.va_range.end.as_usize() {
+                VirtAddr::from(last_alloc)
+            } else {
+                hint
+            }
+        } else {
+            hint
+        };
+
+        if let Some(vaddr) = self.areas.find_free_area(search_hint, size, limit, PAGE_SIZE_4K) {
+            if is_hint_base {
+                self.last_alloc_addr.store(vaddr.as_usize() + size, core::sync::atomic::Ordering::Release);
+            }
+            return Some(vaddr);
+        }
+
+        if is_hint_base && search_hint != hint {
+            if let Some(vaddr) = self.areas.find_free_area(hint, size, limit, PAGE_SIZE_4K) {
+                self.last_alloc_addr.store(vaddr.as_usize() + size, core::sync::atomic::Ordering::Release);
+                return Some(vaddr);
+            }
+        }
+
+        None
     }
 
     /// Add a new linear mapping.
@@ -764,6 +794,8 @@ impl AddrSpace {
     /// Attempts to clone the current address space into a new one.
     pub fn try_clone(&mut self) -> AxResult<Self> {
         let mut new_aspace = Self::new_empty(self.va_range.start, self.va_range.size())?;
+        let last_alloc = self.last_alloc_addr.load(core::sync::atomic::Ordering::Acquire);
+        new_aspace.last_alloc_addr.store(last_alloc, core::sync::atomic::Ordering::Release);
 
         if !cfg!(target_arch = "aarch64") && !cfg!(target_arch = "loongarch64") {
             new_aspace.copy_mappings_from(&*crate::kernel_aspace().lock())?;
