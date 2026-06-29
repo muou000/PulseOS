@@ -109,6 +109,29 @@ pub(super) fn dealloc_frame(frame: PhysAddr) {
     global_allocator().dealloc_pages(phys_to_virt(frame).as_usize(), 1);
 }
 
+pub(super) fn alloc_contiguous_frames(num_pages: usize, zeroed: bool) -> Option<(PhysAddr, usize)> {
+    if num_pages == 0 {
+        return None;
+    }
+    if let Ok(pos) = global_allocator().alloc_pages(num_pages, PAGE_SIZE_4K) {
+        let vaddr = VirtAddr::from(pos);
+        if zeroed {
+            unsafe { core::ptr::write_bytes(vaddr.as_mut_ptr(), 0, num_pages * PAGE_SIZE_4K) };
+        }
+        let paddr = virt_to_phys(vaddr);
+        for i in 0..num_pages {
+            let frame = paddr + i * PAGE_SIZE_4K;
+            cow_mark_frame_used(frame);
+        }
+        Some((paddr, num_pages))
+    } else if num_pages > 1 {
+        // Fallback: try allocating a single page frame
+        alloc_contiguous_frames(1, zeroed)
+    } else {
+        None
+    }
+}
+
 impl Backend {
     /// Creates a new allocation mapping backend.
     pub const fn new_alloc(populate: bool) -> Self {
@@ -209,60 +232,86 @@ impl Backend {
         let is_unmapped = query_res.is_err();
 
         if (is_unmapped || is_placeholder) && !populate {
-            let mut current_page = page;
-            let mut handled_any = false;
-            for _ in 0..4 {
-                if current_page >= area_end {
+            let mut alloc_count = 0;
+            let mut check_page = page;
+            while alloc_count < 4 && check_page < area_end {
+                let cur_query = pt.lock_for_addr(check_page).query(check_page);
+                let needs_mapping = match cur_query {
+                    Err(_) => true,
+                    Ok((frame, _, _)) if frame.as_usize() == 0 => true,
+                    _ => false,
+                };
+                if needs_mapping {
+                    alloc_count += 1;
+                    check_page += PAGE_SIZE_4K;
+                } else {
                     break;
                 }
-                let cur_query = pt.lock_for_addr(current_page).query(current_page);
-                let need_map = match cur_query {
-                    Err(_) => Some(true),
-                    Ok((frame, _, _)) if frame.as_usize() == 0 => Some(false),
-                    _ => None,
-                };
-                if let Some(is_map) = need_map {
-                    if let Some(frame) = alloc_frame(true) {
+            }
+
+            if alloc_count == 0 {
+                return false;
+            }
+
+            if let Some((paddr, actual_count)) = alloc_contiguous_frames(alloc_count, true) {
+                debug!(
+                    "handle_page_fault_alloc pre-map: requested contiguous allocation of {} pages, got {} pages starting at paddr {:#x}",
+                    alloc_count, actual_count, paddr
+                );
+                let mut handled_any = false;
+                let mut keep_mapping = true;
+                for i in 0..actual_count {
+                    let current_page = page + i * PAGE_SIZE_4K;
+                    let frame = paddr + i * PAGE_SIZE_4K;
+
+                    let mut mapped_successfully = false;
+                    let mut already_mapped = false;
+
+                    if keep_mapping {
                         let mut pt_guard = pt.lock_for_addr(current_page);
-                        // Re-verify under lock
                         let re_query = pt_guard.query(current_page);
-                        let mut already_mapped = false;
-                        let ok = match re_query {
-                            Err(_) if is_map => {
-                                pt_guard.map(current_page, frame, PageSize::Size4K, orig_flags)
+                        match re_query {
+                            Err(_) => {
+                                if pt_guard
+                                    .map(current_page, frame, PageSize::Size4K, orig_flags)
                                     .map(|tlb| tlb.flush())
                                     .is_ok()
+                                {
+                                    mapped_successfully = true;
+                                    handled_any = true;
+                                }
                             }
-                            Ok((curr_frame, _, _)) if !is_map && curr_frame.as_usize() == 0 => {
-                                pt_guard.remap(current_page, frame, orig_flags)
+                            Ok((curr_frame, _, _)) if curr_frame.as_usize() == 0 => {
+                                if pt_guard
+                                    .remap(current_page, frame, orig_flags)
                                     .map(|(_, tlb)| tlb.flush())
                                     .is_ok()
+                                {
+                                    mapped_successfully = true;
+                                    handled_any = true;
+                                }
                             }
                             Ok((curr_frame, _, _)) if curr_frame.as_usize() != 0 => {
                                 already_mapped = true;
-                                false
-                            }
-                            _ => false,
-                        };
-                        if ok {
-                            handled_any = true;
-                        } else {
-                            dealloc_frame(frame);
-                            if already_mapped {
                                 if current_page == page {
                                     handled_any = true;
                                 }
-                            } else {
-                                break;
                             }
+                            _ => {}
                         }
-                    } else {
-                        break;
+                    }
+
+                    if !mapped_successfully {
+                        dealloc_frame(frame);
+                        if !already_mapped {
+                            keep_mapping = false;
+                        }
                     }
                 }
-                current_page += PAGE_SIZE_4K;
+                return handled_any;
+            } else {
+                return false;
             }
-            return handled_any;
         }
         if let Ok((old_frame, old_flags, _)) = query_res {
             // Lazy anonymous mappings install an empty placeholder PTE first.
