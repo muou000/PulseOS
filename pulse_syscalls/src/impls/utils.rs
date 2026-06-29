@@ -268,5 +268,9 @@ pub(crate) fn query_user_page_slice(
     
     let kvaddr = axhal::mem::phys_to_virt(start_paddr) + offset;
     let ptr = kvaddr.as_mut_ptr();
+    axlog::debug!(
+        "query_user_page_slice: user_addr={:#x}, max_len={}, total_len={}",
+        user_addr, max_len, total_len
+    );
     Some(core::ptr::slice_from_raw_parts_mut(ptr, total_len))
 }
