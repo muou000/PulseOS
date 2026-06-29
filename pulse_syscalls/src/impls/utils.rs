@@ -208,18 +208,21 @@ pub(crate) fn query_user_page_slice(
     write: bool,
 ) -> Option<*mut [u8]> {
     let process = pulse_core::task::current_process().ok()?;
-    let aspace_handle = process.aspace_handle();
-    let aspace = aspace_handle.read();
-    
-    let vaddr = memory_addr::VirtAddr::from(user_addr);
-    let start_page = vaddr.align_down_4k();
-    let offset = vaddr.align_offset_4k();
     
     let required_flags = if write {
         axhal::paging::MappingFlags::WRITE | axhal::paging::MappingFlags::USER
     } else {
         axhal::paging::MappingFlags::READ | axhal::paging::MappingFlags::USER
     };
+    
+    let _ = process.try_fault_in_user_range(user_addr, max_len, required_flags);
+    
+    let aspace_handle = process.aspace_handle();
+    let aspace = aspace_handle.read();
+    
+    let vaddr = memory_addr::VirtAddr::from(user_addr);
+    let start_page = vaddr.align_down_4k();
+    let offset = vaddr.align_offset_4k();
     
     let all_accessible = aspace.can_access_range(vaddr, max_len, required_flags);
     let first_chunk_len = core::cmp::min(max_len, 4096 - offset);
