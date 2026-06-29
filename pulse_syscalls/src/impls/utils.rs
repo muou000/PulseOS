@@ -221,8 +221,9 @@ pub(crate) fn query_user_page_slice(
         axhal::paging::MappingFlags::READ | axhal::paging::MappingFlags::USER
     };
     
+    let all_accessible = aspace.can_access_range(vaddr, max_len, required_flags);
     let first_chunk_len = core::cmp::min(max_len, 4096 - offset);
-    if !aspace.can_access_range(vaddr, first_chunk_len, required_flags) {
+    if !all_accessible && !aspace.can_access_range(vaddr, first_chunk_len, required_flags) {
         return None;
     }
     
@@ -248,7 +249,7 @@ pub(crate) fn query_user_page_slice(
         let remaining = max_len - total_len;
         let chunk = core::cmp::min(remaining, 4096);
         
-        if !aspace.can_access_range(next_page, chunk, required_flags) {
+        if !all_accessible && !aspace.can_access_range(next_page, chunk, required_flags) {
             break;
         }
         
