@@ -1026,12 +1026,13 @@ impl Process {
         self.heap_top.store(top, Ordering::Release);
     }
 
-    fn try_fault_in_user_range(
+    pub fn try_fault_in_user_range(
         &self,
         user_addr: usize,
         len: usize,
         access: MappingFlags,
     ) -> AxResult<()> {
+        self.validate_user_range(user_addr, len)?;
         if len == 0 {
             return Ok(());
         }
@@ -1046,6 +1047,12 @@ impl Process {
         for page in pages {
             let mut done = false;
             let aspace = aspace_handle.read();
+            if let Ok((paddr, flags, _)) = aspace.query_vaddr(page) {
+                if paddr.as_usize() != 0 && flags.contains(access) {
+                    drop(aspace);
+                    continue;
+                }
+            }
             match aspace.handle_page_fault(page, access) {
                 axmm::PageFaultResult::Handled(ok) => {
                     if !ok {
