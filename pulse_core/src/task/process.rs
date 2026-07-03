@@ -2056,12 +2056,7 @@ impl Process {
             // Re-parent all children of this process to the init process
             if let Some(init) = super::init_process() {
                 if self.pid() != init.pid() {
-                    let children_to_reparent = {
-                        let mut my_children = self.children.lock();
-                        let list = my_children.clone();
-                        my_children.clear();
-                        list
-                    };
+                    let children_to_reparent = core::mem::take(&mut *self.children.lock());
                     for child in children_to_reparent {
                         if child.is_zombie() {
                             // Reap zombie child immediately instead of reparenting it
