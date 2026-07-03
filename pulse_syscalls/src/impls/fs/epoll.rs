@@ -229,8 +229,8 @@ fn sys_epoll_pwait_inner(
     let mut idle_rounds: usize = 0;
 
     loop {
-        let mut ready_list = Vec::new();
-        let mut oneshots_to_disable = Vec::new();
+        let mut ready_list = Vec::with_capacity(maxevents);
+        let mut oneshots_to_disable = Vec::with_capacity(maxevents.min(128));
         {
             let mut monitored = epoll_obj.events.lock();
             for (&fd, ev) in monitored.iter_mut() {
