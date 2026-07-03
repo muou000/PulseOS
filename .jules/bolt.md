@@ -34,3 +34,7 @@
 ## 2025-05-20 - Avoid format! macro allocations in hot loops for prefix checking using replace_range
 **Learning:** Even when avoiding allocations on non-matching strings by using slicing, creating a completely new `String` for the matches via `format!` triggers a heap allocation. In many cases where the input is already an owned `String`, using `replace_range` on the matched target correctly allows the existing allocation to be reused.
 **Action:** When validating target string matches and a string requires replacement inside a struct/array, prefer `String::replace_range` on the owned string to avoid creating a new `String` object via `format!`.
+
+## 2025-06-25 - Avoid heap allocation in abstract socket parsing by clamping small arrays
+**Learning:** In performance-critical paths such as syscalls, when a temporary buffer has a known, small maximum length (e.g., <= 128 bytes), prefer using stack-allocated arrays (e.g., `[0u8; 128]`) and slicing them (`&mut buf[..len]`) instead of heap allocations like `alloc::vec![0u8; len]` to avoid dynamic allocation overhead and reduce memory fragmentation.
+**Action:** When extracting abstract socket names from `sockaddr_un`, which has a max path length of 108 bytes, safely clamp the length (`len.min(108)`) and read into a local fixed-size array (`[0u8; 108]`) to completely eliminate the need for `alloc::vec!`.

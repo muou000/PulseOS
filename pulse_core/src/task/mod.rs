@@ -281,7 +281,11 @@ impl axfs::ProcfsProcessProvider for PulseProcessProvider {
         let args = proc.args.read();
         if args.is_empty() {
             let path = proc.exec_path_or_default();
-            Some(alloc::format!("{}\0", path))
+            // Bolt: Replace format! macro overhead with manual string allocations in #![no_std]
+            let mut s = String::with_capacity(path.len() + 1);
+            s.push_str(&path);
+            s.push('\0');
+            Some(s)
         } else {
             let total_len: usize = args.iter().map(|s| s.len() + 1).sum();
             let mut res = String::with_capacity(total_len);
@@ -295,7 +299,11 @@ impl axfs::ProcfsProcessProvider for PulseProcessProvider {
 
     fn comm(&self, pid: u64) -> Option<String> {
         let proc = process_by_pid(pid)?;
-        Some(alloc::format!("{}\n", proc.name()))
+        let name = proc.name();
+        let mut s = String::with_capacity(name.len() + 1);
+        s.push_str(&name);
+        s.push('\n');
+        Some(s)
     }
 
     fn status(&self, pid: u64) -> Option<String> {
@@ -444,10 +452,14 @@ impl axfs::ProcfsProcessProvider for PulseProcessProvider {
             let mode = st.st_mode;
             if (mode & 0o170000) == 0o140000 {
                 // S_IFSOCK
-                Some(alloc::format!("socket:[{}]", st.st_ino))
+                let mut s = String::with_capacity(32);
+                core::write!(s, "socket:[{}]", st.st_ino).unwrap();
+                Some(s)
             } else if (mode & 0o170000) == 0o010000 {
                 // S_IFIFO
-                Some(alloc::format!("pipe:[{}]", st.st_ino))
+                let mut s = String::with_capacity(32);
+                core::write!(s, "pipe:[{}]", st.st_ino).unwrap();
+                Some(s)
             } else {
                 Some("/dev/null".to_string())
             }
@@ -616,7 +628,11 @@ impl axfs::ProcfsProcessProvider for PulseProcessProvider {
     fn thread_comm(&self, pid: u64, tid: u64) -> Option<String> {
         let proc = process_by_pid(pid)?;
         let task = proc.task_ref_by_tid(tid)?;
-        Some(alloc::format!("{}\n", task.name()))
+        let name = task.name();
+        let mut s = String::with_capacity(name.len() + 1);
+        s.push_str(&name);
+        s.push('\n');
+        Some(s)
     }
 
     fn thread_status(&self, pid: u64, tid: u64) -> Option<String> {
