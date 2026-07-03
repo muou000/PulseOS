@@ -1268,8 +1268,11 @@ impl Process {
         self.fd_table().read().get_location(fd)
     }
 
-    pub fn clone_all_fd_entries(&self) -> Vec<crate::fd_table::FdEntry> {
-        self.fd_table().read().clone_all_entries()
+    pub fn for_each_fd_entry<F>(&self, f: F)
+    where
+        F: FnMut(&crate::fd_table::FdEntry),
+    {
+        self.fd_table().read().for_each_entry(f);
     }
 
     pub fn is_user_range(&self, addr: usize, len: usize) -> bool {
