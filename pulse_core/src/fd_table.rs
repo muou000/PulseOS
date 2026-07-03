@@ -2186,11 +2186,15 @@ impl FdTable {
         removed
     }
 
-    pub fn clone_all_entries(&self) -> alloc::vec::Vec<FdEntry> {
-        self.entries
-            .iter()
-            .filter_map(|slot| slot.clone())
-            .collect()
+    pub fn for_each_entry<F>(&self, mut f: F)
+    where
+        F: FnMut(&FdEntry),
+    {
+        for slot in &self.entries {
+            if let Some(entry) = slot {
+                f(entry);
+            }
+        }
     }
 
     pub fn is_file_write_open_by_meta(&self, device: u64, inode: u64) -> bool {
