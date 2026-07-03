@@ -53,12 +53,12 @@ extern crate log;
 use core::fmt::{self, Write};
 use core::str::FromStr;
 
-use log::{Level, LevelFilter, Log, Metadata, Record};
+pub use log::{Level, LevelFilter, Log, Metadata, Record};
 
 #[cfg(not(feature = "std"))]
 use crate_interface::call_interface;
 
-pub use log::{debug, error, info, trace, warn};
+pub use log::{debug, error, info, log_enabled, trace, warn};
 
 /// Prints to the console.
 ///

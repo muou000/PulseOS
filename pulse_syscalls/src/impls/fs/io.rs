@@ -1110,7 +1110,7 @@ pub fn sys_ppoll(
 
     // Try to retrieve wait queues for all monitored file descriptors.
     // If all monitored fds support wait queues, we can block on them event-driven.
-    let mut objects = alloc::vec::Vec::with_capacity(nfds);
+    let mut objects = alloc::vec::Vec::with_capacity(nfds.min(128));
     let mut all_wqs_supported = true;
     for pfd in &pollfds {
         if pfd.fd < 0 {
@@ -1138,7 +1138,7 @@ pub fn sys_ppoll(
     }
 
     if all_wqs_supported && !objects.is_empty() {
-        let mut wqs = alloc::vec::Vec::new();
+        let mut wqs = alloc::vec::Vec::with_capacity(objects.len().min(128));
         for (obj, events) in &objects {
             let _ = obj.get_wait_queues(*events, &mut wqs);
         }
@@ -1643,26 +1643,28 @@ pub fn sys_pselect6(
         }
     }
 
-    let mut read_fds = alloc::vec::Vec::new();
-    let mut write_fds = alloc::vec::Vec::new();
-    let mut except_fds = alloc::vec::Vec::new();
-    for fd in 0..nfds.min(1024) {
-        if has_read && in_read.is_set(fd) {
-            read_fds.push(fd);
+    if axlog::log_enabled!(axlog::Level::Debug) {
+        let mut read_fds = alloc::vec::Vec::with_capacity(nfds.min(1024));
+        let mut write_fds = alloc::vec::Vec::with_capacity(nfds.min(1024));
+        let mut except_fds = alloc::vec::Vec::with_capacity(nfds.min(1024));
+        for fd in 0..nfds.min(1024) {
+            if has_read && in_read.is_set(fd) {
+                read_fds.push(fd);
+            }
+            if has_write && in_write.is_set(fd) {
+                write_fds.push(fd);
+            }
+            if has_except && in_except.is_set(fd) {
+                except_fds.push(fd);
+            }
         }
-        if has_write && in_write.is_set(fd) {
-            write_fds.push(fd);
-        }
-        if has_except && in_except.is_set(fd) {
-            except_fds.push(fd);
-        }
+        axlog::debug!(
+            "sys_pselect6 => read_fds: {:?}, write_fds: {:?}, except_fds: {:?}",
+            read_fds,
+            write_fds,
+            except_fds
+        );
     }
-    axlog::debug!(
-        "sys_pselect6 => read_fds: {:?}, write_fds: {:?}, except_fds: {:?}",
-        read_fds,
-        write_fds,
-        except_fds
-    );
 
     let timeout_dur = if timeout != 0 {
         let ts = match read_user_timespec(timeout) {
@@ -1677,7 +1679,7 @@ pub fn sys_pselect6(
         None
     };
 
-    let mut pollfds = alloc::vec::Vec::new();
+    let mut pollfds = alloc::vec::Vec::with_capacity(nfds.min(1024));
     for fd in 0..nfds.min(1024) {
         let mut events = 0i16;
         if has_read && in_read.is_set(fd) {
@@ -1698,13 +1700,15 @@ pub fn sys_pselect6(
         }
     }
 
-    axlog::debug!(
-        "sys_pselect6 => pollfds collected: {:?}",
-        pollfds
-            .iter()
-            .map(|p| (p.fd, p.events))
-            .collect::<alloc::vec::Vec<_>>()
-    );
+    if axlog::log_enabled!(axlog::Level::Debug) {
+        axlog::debug!(
+            "sys_pselect6 => pollfds collected: {:?}",
+            pollfds
+                .iter()
+                .map(|p| (p.fd, p.events))
+                .collect::<alloc::vec::Vec<_>>()
+        );
+    }
 
     if pollfds.is_empty() {
         if let Some(timeout_dur) = timeout_dur {
@@ -1751,14 +1755,16 @@ pub fn sys_pselect6(
         }
 
         if ready > 0 {
-            axlog::debug!(
-                "sys_pselect6 => ready fds detected: {:?}",
-                pollfds
-                    .iter()
-                    .filter(|p| p.revents != 0)
-                    .map(|p| (p.fd, p.revents))
-                    .collect::<alloc::vec::Vec<_>>()
-            );
+            if axlog::log_enabled!(axlog::Level::Debug) {
+                axlog::debug!(
+                    "sys_pselect6 => ready fds detected: {:?}",
+                    pollfds
+                        .iter()
+                        .filter(|p| p.revents != 0)
+                        .map(|p| (p.fd, p.revents))
+                        .collect::<alloc::vec::Vec<_>>()
+                );
+            }
             break;
         }
 

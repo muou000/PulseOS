@@ -382,7 +382,8 @@ fn do_sendmsg_core(
     let iovecs = crate::impls::utils::read_user_iovec_array(msg_hdr.msg_iov as usize, msg_hdr.msg_iovlen)?;
 
     // Flatten iov segments.
-    let mut flat: Vec<u8> = Vec::new();
+    let total_len: usize = iovecs.iter().map(|iov| iov.iov_len as usize).sum();
+    let mut flat: Vec<u8> = Vec::with_capacity(total_len);
     for iov in iovecs {
         let iov_len = match usize::try_from(iov.iov_len) {
             Ok(l) => l,
