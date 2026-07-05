@@ -40,7 +40,7 @@ pub fn syscall_handler(tf: &mut TrapFrame, syscall_num: usize) -> isize {
     axlog::debug!(
         "Syscall: pid={} exe={} tid={} id={} args=[{:#x}, {:#x}, {:#x}, {:#x}, {:#x}, {:#x}]",
         process.pid(),
-        process.exec_path().unwrap_or_default(),
+        process.exec_path_or_default(),
         axtask::current().id().as_u64(),
         syscall_num,
         args[0],
@@ -54,7 +54,7 @@ pub fn syscall_handler(tf: &mut TrapFrame, syscall_num: usize) -> isize {
     axlog::debug!(
         "Syscall ret: pid={} exe={} tid={} id={} ret={}",
         process.pid(),
-        process.exec_path().unwrap_or_default(),
+        process.exec_path_or_default(),
         axtask::current().id().as_u64(),
         syscall_num,
         ret

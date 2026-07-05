@@ -34,3 +34,11 @@
 ## 2025-05-20 - Avoid format! macro allocations in hot loops for prefix checking using replace_range
 **Learning:** Even when avoiding allocations on non-matching strings by using slicing, creating a completely new `String` for the matches via `format!` triggers a heap allocation. In many cases where the input is already an owned `String`, using `replace_range` on the matched target correctly allows the existing allocation to be reused.
 **Action:** When validating target string matches and a string requires replacement inside a struct/array, prefer `String::replace_range` on the owned string to avoid creating a new `String` object via `format!`.
+
+## 2024-07-06 - Avoid unnecessary optimization of debug macros
+**Learning:** `debug!` macros and other logging macros often do not execute their arguments if the log level is disabled. Modifying arguments passed exclusively to these macros does not yield performance benefits in production (where these logs are off) and introduces noise.
+**Action:** Do not attempt to optimize paths that are only invoked within debug logging statements unless explicitly instructed or if evaluating the arguments has side-effects (which it shouldn't). Always focus on code paths that are actively executed in standard workflows.
+
+## 2024-07-06 - Avoid unnecessary Arc::make_mut / RwLock over Arc when clone is fast
+**Learning:** `RwLock<Arc<T>>` has its uses when multiple threads might replace the inner data entirely, but replacing `.read().clone()` with complex pointer gymnastics inside a fast path when the `clone` is an `Arc::clone` is a micro-optimization that often introduces complexity. `Arc::clone()` is extremely fast. However, if the `RwLock` guards a `String` or `Option<String>`, `.read().clone()` does indeed copy the heap data.
+**Action:** Always differentiate between `Arc::clone` and deep clones (like `String` or collections) before making structural changes to avoid redundant operations.

@@ -281,7 +281,10 @@ impl axfs::ProcfsProcessProvider for PulseProcessProvider {
         let args = proc.args.read();
         if args.is_empty() {
             let path = proc.exec_path_or_default();
-            Some(alloc::format!("{}\0", path))
+            let mut res = String::with_capacity(path.len() + 1);
+            res.push_str(&path);
+            res.push('\0');
+            Some(res)
         } else {
             let total_len: usize = args.iter().map(|s| s.len() + 1).sum();
             let mut res = String::with_capacity(total_len);
@@ -295,7 +298,11 @@ impl axfs::ProcfsProcessProvider for PulseProcessProvider {
 
     fn comm(&self, pid: u64) -> Option<String> {
         let proc = process_by_pid(pid)?;
-        Some(alloc::format!("{}\n", proc.name()))
+        let name = proc.name();
+        let mut res = String::with_capacity(name.len() + 1);
+        res.push_str(&name);
+        res.push('\n');
+        Some(res)
     }
 
     fn status(&self, pid: u64) -> Option<String> {
