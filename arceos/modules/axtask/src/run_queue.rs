@@ -2,6 +2,7 @@ use alloc::{collections::VecDeque, sync::Arc};
 use core::mem::MaybeUninit;
 #[cfg(feature = "smp")]
 use alloc::sync::Weak;
+use core::task::{Context, Poll, Waker};
 
 use axhal::percpu::this_cpu_id;
 use axsched::BaseScheduler;
@@ -13,6 +14,7 @@ use crate::{
     AxCpuMask, AxTaskRef, Scheduler, TaskInner, WaitQueue,
     task::{CurrentTask, TaskState},
     wait_queue::WaitQueueGuard,
+    future::AxWaker,
 };
 
 macro_rules! percpu_static {
@@ -547,21 +549,53 @@ impl AxRunQueue {
     /// Core reschedule subroutine.
     /// Pick the next task to run and switch to it.
     fn resched(&mut self) {
-        let next = self
-            .scheduler
-            .lock()
-            .pick_next_task()
-            .unwrap_or_else(|| unsafe {
-                // Safety: IRQs must be disabled at this time.
-                IDLE_TASK.current_ref_raw().get_unchecked().clone()
-            });
-        assert!(
-            next.is_ready(),
-            "next {} is not ready: {:?}",
-            next.id_name(),
-            next.state()
-        );
-        self.switch_to(crate::current(), next);
+        loop {
+            let next = self
+                .scheduler
+                .lock()
+                .pick_next_task()
+                .unwrap_or_else(|| unsafe {
+                    // Safety: IRQs must be disabled at this time.
+                    IDLE_TASK.current_ref_raw().get_unchecked().clone()
+                });
+            assert!(
+                next.is_ready(),
+                "next {} is not ready: {:?}",
+                next.id_name(),
+                next.state()
+            );
+
+            if next.is_future() {
+                // Poll the future of the task.
+                let waker = Waker::from(Arc::new(AxWaker::new(next.clone())));
+                let mut cx = Context::from_waker(&waker);
+
+                // Set state to Blocked before polling, so that the waker can
+                // wake it up (transition to Ready) if it returns Pending.
+                next.set_state(TaskState::Blocked);
+                match next.poll_future(&mut cx) {
+                    Poll::Ready(_) => {
+                        next.set_state(TaskState::Exited);
+                        next.notify_exit(0);
+                        unsafe {
+                            // Push current task to the `EXITED_TASKS` list, which will be consumed by the GC task.
+                            EXITED_TASKS.current_ref_mut_raw().push_back(next.clone());
+                            // Wake up the GC task to drop the exited tasks.
+                            WAIT_FOR_EXIT.current_ref_mut_raw().notify_one(false);
+                        }
+                        // Task finished, pick the next one.
+                        continue;
+                    }
+                    Poll::Pending => {
+                        // Task is blocked, pick the next one.
+                        continue;
+                    }
+                }
+            } else {
+                self.switch_to(crate::current(), next);
+                break;
+            }
+        }
     }
 
     fn switch_to(&mut self, prev_task: CurrentTask, next_task: AxTaskRef) {

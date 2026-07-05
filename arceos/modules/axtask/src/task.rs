@@ -4,8 +4,11 @@ use core::sync::atomic::AtomicUsize;
 use core::{
     cell::UnsafeCell,
     fmt,
+    future::Future,
     ops::Deref,
+    pin::Pin,
     sync::atomic::{AtomicBool, AtomicI32, AtomicU8, AtomicU32, AtomicU64, Ordering},
+    task::{Context, Poll},
 };
 
 use axalloc::global_allocator;
@@ -46,6 +49,7 @@ pub struct TaskInner {
     is_init: bool,
 
     entry: SpinNoIrq<Option<Box<dyn FnOnce() + Send>>>,
+    future: SpinNoIrq<Option<Pin<Box<dyn Future<Output = ()> + Send>>>>,
     state: AtomicU8,
 
     /// CPU affinity mask.
@@ -144,6 +148,20 @@ impl TaskInner {
             t.is_idle = true;
         }
         Ok(t)
+    }
+
+    /// Create a new task with the given future.
+    pub fn new_async<F>(future: F, name: String) -> Self
+    where
+        F: Future<Output = ()> + Send + 'static,
+    {
+        let mut t = Self::new_common(TaskId::new(), name);
+        debug!("new async task: {}", t.id_name());
+        *t.future.lock() = Some(Box::pin(future));
+        if *t.name.lock() == "idle" {
+            t.is_idle = true;
+        }
+        t
     }
 
     /// Gets the ID of the task.
@@ -270,6 +288,7 @@ impl TaskInner {
             is_idle: false,
             is_init: false,
             entry: SpinNoIrq::new(None),
+            future: SpinNoIrq::new(None),
             state: AtomicU8::new(TaskState::Ready as u8),
             // By default, the task is allowed to run on all CPUs.
             cpumask: SpinNoIrq::new(cpumask),
@@ -325,6 +344,21 @@ impl TaskInner {
     #[inline]
     pub(crate) fn state(&self) -> TaskState {
         self.state.load(Ordering::Acquire).into()
+    }
+
+    /// Returns `true` if the task is a future task.
+    #[inline]
+    pub fn is_future(&self) -> bool {
+        self.future.lock().is_some()
+    }
+
+    /// Polls the future of the task.
+    pub fn poll_future(&self, cx: &mut Context) -> Poll<()> {
+        if let Some(future) = self.future.lock().as_mut() {
+            future.as_mut().poll(cx)
+        } else {
+            Poll::Ready(())
+        }
     }
 
     #[inline]

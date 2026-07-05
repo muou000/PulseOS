@@ -190,6 +190,16 @@ where
     spawn_raw(f, "".into(), axconfig::TASK_STACK_SIZE)
 }
 
+/// Spawns a new async task with the given future.
+///
+/// Returns the task reference.
+pub fn spawn_async<F>(f: F) -> AxTaskRef
+where
+    F: core::future::Future<Output = ()> + Send + 'static,
+{
+    spawn_task(TaskInner::new_async(f, "".into()))
+}
+
 /// Set the priority for current task.
 ///
 /// The range of the priority is dependent on the underlying scheduler. For

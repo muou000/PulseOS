@@ -1,4 +1,5 @@
 use alloc::{collections::VecDeque, sync::Arc, vec::Vec};
+use core::task::Waker;
 
 use kernel_guard::{NoOp, NoPreemptIrqSave};
 use kspin::{SpinNoIrq, SpinNoIrqGuard};
@@ -29,6 +30,7 @@ use crate::{AxTaskRef, CurrentTask, current_run_queue, select_run_queue};
 /// ```
 pub struct WaitQueue {
     queue: SpinNoIrq<VecDeque<AxTaskRef>>,
+    wakers: SpinNoIrq<VecDeque<(u64, Waker)>>,
 }
 
 pub(crate) type WaitQueueGuard<'a> = SpinNoIrqGuard<'a, VecDeque<AxTaskRef>>;
@@ -38,6 +40,7 @@ impl WaitQueue {
     pub const fn new() -> Self {
         Self {
             queue: SpinNoIrq::new(VecDeque::new()),
+            wakers: SpinNoIrq::new(VecDeque::new()),
         }
     }
 
@@ -45,6 +48,7 @@ impl WaitQueue {
     pub fn with_capacity(capacity: usize) -> Self {
         Self {
             queue: SpinNoIrq::new(VecDeque::with_capacity(capacity)),
+            wakers: SpinNoIrq::new(VecDeque::with_capacity(capacity)),
         }
     }
 
@@ -260,31 +264,36 @@ impl WaitQueue {
         }
     }
 
-    /// Wakes up one task in the wait queue, usually the first one.
+    /// Wake up a task in the wait queue.
     ///
-    /// If `resched` is true, the current task will be preempted when the
-    /// preemption is enabled.
+    /// If `resched` is true, the current task will yield the CPU.
     pub fn notify_one(&self, resched: bool) -> bool {
-        let task = {
-            let mut wq = self.queue.lock();
-            let mut target = None;
-            while let Some(task) = wq.pop_front() {
-                if task.state() == crate::task::TaskState::Blocked {
-                    target = Some(task);
-                    break;
-                }
-                // The task is no longer blocked (e.g., timed out), but still in the wait queue.
-                // We should mark it as not in the wait queue.
-                task.set_in_wait_queue(false);
+        let mut wq = self.queue.lock();
+        let mut target = None;
+        while let Some(task) = wq.pop_front() {
+            if task.state() == crate::task::TaskState::Blocked {
+                target = Some(task);
+                break;
             }
-            target
-        };
+            // The task is no longer blocked (e.g., timed out), but still in the wait queue.
+            // We should mark it as not in the wait queue.
+            task.set_in_wait_queue(false);
+        }
+        drop(wq);
 
-        if let Some(task) = task {
+        if let Some(task) = target {
             unblock_one_task(task, resched);
             true
         } else {
-            false
+            let wakers = {
+                let mut wakers = self.wakers.lock();
+                core::mem::take(&mut *wakers)
+            };
+            let has_wakers = !wakers.is_empty();
+            for (_, waker) in wakers {
+                waker.wake();
+            }
+            has_wakers
         }
     }
 
@@ -307,6 +316,14 @@ impl WaitQueue {
                     task.set_in_wait_queue(false);
                 }
             }
+        }
+
+        let wakers = {
+            let mut wakers = self.wakers.lock();
+            core::mem::take(&mut *wakers)
+        };
+        for (_, waker) in wakers {
+            waker.wake();
         }
     }
 
@@ -368,6 +385,15 @@ impl WaitQueue {
     /// Remove all exited tasks from the wait queue.
     pub fn prune_exited(&self) {
         self.queue.lock().retain(|t| t.state() != crate::task::TaskState::Exited);
+    }
+
+    /// Registers a waker to the wait queue.
+    pub fn register_waker(&self, waker: &core::task::Waker) {
+        let mut wakers = self.wakers.lock();
+        let task_id = crate::current().id().as_u64();
+        if !wakers.iter().any(|(id, _)| *id == task_id) {
+            wakers.push_back((task_id, waker.clone()));
+        }
     }
 }
 

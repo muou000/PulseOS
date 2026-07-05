@@ -128,3 +128,24 @@ fn test_task_join() {
         assert_eq!(tasks[i].join(), Some(i as _));
     }
 }
+
+#[test]
+fn test_async_task() {
+    use core::sync::atomic::AtomicBool;
+    let _lock = SERIAL.lock();
+    INIT.call_once(axtask::init_scheduler);
+
+    static FINISHED: AtomicBool = AtomicBool::new(false);
+
+    axtask::spawn_async(async {
+        println!("async task: Hello, world!");
+        crate::future::yield_now().await;
+        println!("async task: Resumed!");
+        FINISHED.store(true, Ordering::Release);
+    });
+
+    while !FINISHED.load(Ordering::Acquire) {
+        axtask::yield_now();
+    }
+    assert!(FINISHED.load(Ordering::Acquire));
+}
