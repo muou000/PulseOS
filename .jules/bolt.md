@@ -34,3 +34,10 @@
 ## 2025-05-20 - Avoid format! macro allocations in hot loops for prefix checking using replace_range
 **Learning:** Even when avoiding allocations on non-matching strings by using slicing, creating a completely new `String` for the matches via `format!` triggers a heap allocation. In many cases where the input is already an owned `String`, using `replace_range` on the matched target correctly allows the existing allocation to be reused.
 **Action:** When validating target string matches and a string requires replacement inside a struct/array, prefer `String::replace_range` on the owned string to avoid creating a new `String` object via `format!`.
+## 2025-02-12 - Rootfs UNIX Domain Socket Write Path Allocation Avoidance
+**Learning:** Found that `write_unix_addr`, `resolve_unix_addr`, and `sys_setsockopt` network system calls dynamically allocated `alloc::vec![0u8; len]` (which incurs heap allocation lock contention and overhead per syscall). Because `UNIX_PATH_MAX` is exactly 108 bytes on Linux, stack arrays like `[0u8; 110]` or `[0u8; 128]` can trivially absorb these allocations on the stack.
+**Action:** Next time you see `alloc::vec!` for bounded-length buffer buffers (e.g. `<= 128`), convert it to `[0u8; 128]` clamped slices to completely bypass the memory allocator.
+
+## 2025-02-12 - Cross-compilation Cargo Check Target Errors
+**Learning:** `cargo check --workspace` fails in this environment because modules like `page_table_entry` and `percpu` attempt to check x86_64 and UNIX `libc` dependencies that are missing or incompatible when run without target specificity.
+**Action:** Always prefer using the root Makefile's `make build` and `make test` for `riscv64` and `loongarch64` targets instead of `cargo check` when verifying codebase modifications.

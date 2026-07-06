@@ -575,21 +575,23 @@ pub fn sys_setsockopt(
                 if optlen < 4 {
                     return -(LinuxError::EINVAL.code() as isize);
                 }
-                let mut gr_buf = alloc::vec![0u8; optlen];
-                if let Err(e) = crate::impls::utils::read_user_bytes(optval, &mut gr_buf) {
+                let len = optlen.min(128);
+                let mut gr_buf = [0u8; 128];
+                if let Err(e) = crate::impls::utils::read_user_bytes(optval, &mut gr_buf[..len]) {
                     return -(e.code() as isize);
                 }
+                let gr_slice = &gr_buf[..len];
 
                 match &socket.inner {
                     SocketInner::Tcp(s) => {
                         let mut groups = s.multicast_groups.lock();
                         if optname == 42 {
-                            if !groups.contains(&gr_buf) {
-                                groups.push(gr_buf);
+                            if !groups.iter().any(|g| g.as_slice() == gr_slice) {
+                                groups.push(gr_slice.to_vec());
                             }
                             return 0;
                         } else {
-                            if let Some(pos) = groups.iter().position(|x| x == &gr_buf) {
+                            if let Some(pos) = groups.iter().position(|x| x.as_slice() == gr_slice) {
                                 groups.remove(pos);
                                 return 0;
                             } else {
@@ -600,12 +602,12 @@ pub fn sys_setsockopt(
                     SocketInner::Udp(s) => {
                         let mut groups = s.multicast_groups.lock();
                         if optname == 42 {
-                            if !groups.contains(&gr_buf) {
-                                groups.push(gr_buf);
+                            if !groups.iter().any(|g| g.as_slice() == gr_slice) {
+                                groups.push(gr_slice.to_vec());
                             }
                             return 0;
                         } else {
-                            if let Some(pos) = groups.iter().position(|x| x == &gr_buf) {
+                            if let Some(pos) = groups.iter().position(|x| x.as_slice() == gr_slice) {
                                 groups.remove(pos);
                                 return 0;
                             } else {

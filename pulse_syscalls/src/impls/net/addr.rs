@@ -175,27 +175,32 @@ pub fn write_unix_addr(path_opt: Option<alloc::string::String>, dst: usize, addr
     let alen = read_user_plain::<u32>(addrlen)?;
     
     let family = AF_UNIX as u16;
-    let mut bytes = alloc::vec![0u8; 2];
+    let mut bytes = [0u8; 110]; // 108 for UNIX_PATH_MAX + 2 for family
     bytes[0..2].copy_from_slice(&family.to_ne_bytes());
     
+    let mut total_len = 2;
     if let Some(path) = path_opt {
-        if path.starts_with('\0') {
-            // Abstract socket
-            bytes.extend_from_slice(path.as_bytes());
-        } else {
+        let path_bytes = path.as_bytes();
+        let copy_len = path_bytes.len().min(108); // Ensure it fits
+        bytes[2..2 + copy_len].copy_from_slice(&path_bytes[..copy_len]);
+        total_len += copy_len;
+
+        if !path.starts_with('\0') {
             // Pathname socket
-            bytes.extend_from_slice(path.as_bytes());
-            bytes.push(0); // Null terminator
+            if total_len < 110 {
+                bytes[total_len] = 0; // Null terminator
+                total_len += 1;
+            }
         }
     }
     
-    let copy_len = (alen as usize).min(bytes.len());
+    let copy_len = (alen as usize).min(total_len);
     if dst == 0 {
         return Err(LinuxError::EFAULT);
     }
     crate::impls::utils::write_user_bytes(dst, &bytes[..copy_len])?;
     
-    let out_len = bytes.len() as u32;
+    let out_len = total_len as u32;
     write_user_plain(addrlen, &out_len)?;
     Ok(())
 }
