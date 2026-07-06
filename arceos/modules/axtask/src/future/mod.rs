@@ -101,3 +101,60 @@ impl<'a> Future for WaitFuture<'a> {
         }
     }
 }
+
+/// A future that polls for I/O events.
+pub struct IoFuture<'a, P, F, T>
+where
+    P: axpoll::Pollable,
+    F: FnMut() -> axio::Result<T>,
+{
+    pollable: &'a P,
+    events: axpoll::IoEvents,
+    f: F,
+}
+
+impl<'a, P, F, T> Future for IoFuture<'a, P, F, T>
+where
+    P: axpoll::Pollable,
+    F: FnMut() -> axio::Result<T>,
+{
+    type Output = axio::Result<T>;
+
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        let this = unsafe { self.get_unchecked_mut() };
+        match (this.f)() {
+            Ok(res) => Poll::Ready(Ok(res)),
+            Err(e) if e == axio::Error::WouldBlock => {
+                this.pollable.register(cx, this.events);
+                Poll::Pending
+            }
+            Err(e) => Poll::Ready(Err(e)),
+        }
+    }
+}
+
+/// Polls for I/O events.
+pub fn poll_io<'a, P, F, T>(
+    pollable: &'a P,
+    events: axpoll::IoEvents,
+    nonblocking: bool,
+    f: F,
+) -> impl Future<Output = axio::Result<T>> + 'a
+where
+    P: axpoll::Pollable,
+    F: FnMut() -> axio::Result<T> + 'a,
+    T: 'a,
+{
+    async move {
+        let mut f = f;
+        if nonblocking {
+            return f();
+        }
+        IoFuture {
+            pollable,
+            events,
+            f,
+        }
+        .await
+    }
+}

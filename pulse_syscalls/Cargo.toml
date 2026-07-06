@@ -22,6 +22,7 @@ axtask = { workspace = true, features = ["multitask"] }
 axconfig.workspace = true
 axnet.workspace = true
 axio.workspace = true
+axpoll.workspace = true
 axfs.workspace = true
 axfs-ng-vfs.workspace = true
 linkme.workspace = true

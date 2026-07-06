@@ -84,6 +84,11 @@ pub trait FdObject: Send + Sync {
         Ok(())
     }
 
+    /// Registers a waker for the requested events.
+    fn register_poll(&self, _cx: &mut core::task::Context<'_>, _events: axpoll::IoEvents) -> LinuxResult {
+        Ok(())
+    }
+
     fn location(&self) -> Option<Location> {
         None
     }
@@ -569,6 +574,13 @@ impl FdObject for StdinObject {
         } else {
             Ok(false)
         }
+    }
+
+    fn register_poll(&self, cx: &mut core::task::Context<'_>, events: axpoll::IoEvents) -> LinuxResult {
+        if events.intersects(axpoll::IoEvents::IN | axpoll::IoEvents::RDHUP) {
+            STDIN_WAIT_QUEUE.register_waker(cx.waker());
+        }
+        Ok(())
     }
 
     fn is_read_open(&self) -> bool {
@@ -1910,6 +1922,16 @@ impl FdObject for PipeObject {
         Ok(supported || events == 0)
     }
 
+    fn register_poll(&self, cx: &mut core::task::Context<'_>, events: axpoll::IoEvents) -> LinuxResult {
+        if self.readable && events.intersects(axpoll::IoEvents::IN | axpoll::IoEvents::RDHUP) {
+            self.shared.read_wait_queue.register_waker(cx.waker());
+        }
+        if self.writable && events.contains(axpoll::IoEvents::OUT) {
+            self.shared.write_wait_queue.register_waker(cx.waker());
+        }
+        Ok(())
+    }
+
     fn allocate(&self, _mode: u32, _offset: u64, _len: u64) -> LinuxResult {
         Err(LinuxError::ESPIPE)
     }
@@ -1991,6 +2013,23 @@ impl FdObject for EpollObject {
             readable: false,
             writable: false,
         })
+    }
+
+    fn register_poll(&self, cx: &mut core::task::Context<'_>, _events: axpoll::IoEvents) -> LinuxResult {
+        let monitored = self.events.lock();
+        for (&fd, ev) in monitored.iter() {
+            if let Ok(entry) = crate::task::current_process()?.get_fd_entry(fd) {
+                let mut target_events = axpoll::IoEvents::empty();
+                if ev.event.events & EPOLLIN != 0 { target_events |= axpoll::IoEvents::IN; }
+                if ev.event.events & EPOLLOUT != 0 { target_events |= axpoll::IoEvents::OUT; }
+                if ev.event.events & EPOLLRDHUP != 0 { target_events |= axpoll::IoEvents::RDHUP; }
+
+                if !target_events.is_empty() {
+                    entry.object.register_poll(cx, target_events)?;
+                }
+            }
+        }
+        Ok(())
     }
 }
 

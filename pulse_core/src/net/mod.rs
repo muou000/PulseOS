@@ -953,6 +953,24 @@ impl FdObject for Socket {
         }
     }
 
+    fn register_poll(&self, cx: &mut core::task::Context<'_>, events: axpoll::IoEvents) -> Result<(), LinuxError> {
+        match &self.inner {
+            SocketInner::Local(s) => {
+                if events.intersects(axpoll::IoEvents::IN | axpoll::IoEvents::RDHUP) {
+                    s.rx.read_wait_queue.register_waker(cx.waker());
+                }
+                if events.contains(axpoll::IoEvents::OUT) {
+                    s.tx.write_wait_queue.register_waker(cx.waker());
+                }
+            }
+            SocketInner::Tcp(_) | SocketInner::Udp(_) => {
+                axnet::NET_WAIT_QUEUE.register_waker(cx.waker());
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
     fn set_nonblocking(&self, nonblocking: bool) -> Result<(), LinuxError> {
         self.set_nonblocking_inner(nonblocking);
         Ok(())

@@ -395,6 +395,11 @@ impl WaitQueue {
             wakers.push_back((task_id, waker.clone()));
         }
     }
+
+    /// Returns a future that waits for the wait queue.
+    pub fn wait_async(&self) -> crate::future::WaitFuture {
+        crate::future::WaitFuture::new(self)
+    }
 }
 
 fn unblock_one_task(task: AxTaskRef, resched: bool) {
