@@ -1,11 +1,15 @@
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::time::Duration;
+use core::future::Future;
+use core::pin::Pin;
+use core::task::{Context, Poll};
 
 use axerrno::LinuxError;
 use linux_raw_sys::general::{
     epoll_event, EPOLLERR, EPOLLHUP, EPOLLIN, EPOLLOUT, EPOLL_CLOEXEC, EPOLL_CTL_ADD,
     EPOLL_CTL_DEL, EPOLL_CTL_MOD, EPOLLET, EPOLLONESHOT, EPOLLRDHUP,
+    POLLIN, POLLOUT, POLLRDHUP,
 };
 use pulse_core::fd_table::{
     FdEntry, FdFlags, EpollObject, EpollRegistration, FdObject, PipeObject, StdinObject,
@@ -158,6 +162,156 @@ pub fn sys_epoll_ctl(
     0
 }
 
+struct EpollFuture<'a> {
+    epoll_obj: &'a EpollObject,
+    maxevents: usize,
+    deadline: Option<axhal::time::TimeValue>,
+}
+
+impl<'a> Future for EpollFuture<'a> {
+    type Output = Result<Vec<epoll_event>, LinuxError>;
+
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        let mut ready_list = Vec::with_capacity(self.maxevents);
+        let mut oneshots_to_disable = Vec::new();
+
+        {
+            let mut monitored = self.epoll_obj.events.lock();
+            for (&fd, ev) in monitored.iter_mut() {
+                if ready_list.len() >= self.maxevents {
+                    break;
+                }
+                match get_fd_entry(fd) {
+                    Err(_) => {
+                        if (ev.event.events & (EPOLLERR | EPOLLHUP)) != 0 {
+                            ready_list.push(epoll_event {
+                                events: ev.event.events & (EPOLLERR | EPOLLHUP),
+                                data: ev.event.data,
+                            });
+                            if ev.event.events & EPOLLONESHOT != 0 {
+                                oneshots_to_disable.push(fd);
+                            }
+                        }
+                    }
+                    Ok(entry) => {
+                        match entry.object.poll() {
+                            Ok(state) => {
+                                let mut revents = 0u32;
+                                if state.readable {
+                                    if ev.event.events & EPOLLIN != 0 {
+                                        if ev.event.events & EPOLLET != 0 {
+                                            if !ev.reported_in {
+                                                revents |= EPOLLIN;
+                                                ev.reported_in = true;
+                                            }
+                                        } else {
+                                            revents |= EPOLLIN;
+                                        }
+                                    }
+                                } else {
+                                    ev.reported_in = false;
+                                }
+
+                                if state.writable {
+                                    if ev.event.events & EPOLLOUT != 0 {
+                                        if ev.event.events & EPOLLET != 0 {
+                                            if !ev.reported_out {
+                                                revents |= EPOLLOUT;
+                                                ev.reported_out = true;
+                                            }
+                                        } else {
+                                            revents |= EPOLLOUT;
+                                        }
+                                    }
+                                } else {
+                                    ev.reported_out = false;
+                                }
+
+                                if ev.event.events & EPOLLRDHUP != 0 && entry.object.is_rdhup() {
+                                    if ev.event.events & EPOLLET != 0 {
+                                        if !ev.reported_in {
+                                            revents |= EPOLLRDHUP;
+                                            ev.reported_in = true;
+                                        }
+                                    } else {
+                                        revents |= EPOLLRDHUP;
+                                    }
+                                }
+
+                                if revents != 0 {
+                                    ready_list.push(epoll_event {
+                                        events: revents,
+                                        data: ev.event.data,
+                                    });
+                                    if ev.event.events & EPOLLONESHOT != 0 {
+                                        oneshots_to_disable.push(fd);
+                                    }
+                                }
+                            }
+                            Err(_) => {
+                                if (ev.event.events & EPOLLERR) != 0 {
+                                    ready_list.push(epoll_event {
+                                        events: EPOLLERR,
+                                        data: ev.event.data,
+                                    });
+                                    if ev.event.events & EPOLLONESHOT != 0 {
+                                        oneshots_to_disable.push(fd);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            for fd in oneshots_to_disable {
+                if let Some(ev) = monitored.get_mut(&fd) {
+                    ev.event.events = 0;
+                }
+            }
+        }
+
+        if !ready_list.is_empty() {
+            return Poll::Ready(Ok(ready_list));
+        }
+
+        if let Ok(thread) = pulse_core::task::current_thread() {
+            if thread.has_pending_signal() {
+                return Poll::Ready(Err(LinuxError::EINTR));
+            }
+        }
+
+        if let Some(dl) = self.deadline {
+            if axhal::time::monotonic_time() >= dl {
+                return Poll::Ready(Ok(ready_list));
+            }
+        }
+
+        // Not ready, register wakers.
+        {
+            let monitored = self.epoll_obj.events.lock();
+            for (&fd, ev) in monitored.iter() {
+                if let Ok(entry) = get_fd_entry(fd) {
+                    let mut target_events = 0i16;
+                    if ev.event.events & EPOLLIN != 0 { target_events |= POLLIN as i16; }
+                    if ev.event.events & EPOLLOUT != 0 { target_events |= POLLOUT as i16; }
+                    if ev.event.events & EPOLLRDHUP != 0 { target_events |= POLLRDHUP as i16; }
+
+                    if target_events != 0 {
+                        let mut wqs = Vec::new();
+                        if entry.object.get_wait_queues(target_events, &mut wqs).unwrap_or(false) {
+                            for wq in wqs {
+                                wq.register_waker(cx.waker());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        Poll::Pending
+    }
+}
+
 fn sys_epoll_pwait_inner(
     epfd: usize,
     events: usize,
@@ -224,113 +378,17 @@ fn sys_epoll_pwait_inner(
         None => return -LinuxError::EINVAL.code() as isize,
     };
 
-    const POLL_ACTIVE_YIELD_ROUNDS: usize = 64;
-    const POLL_SLEEP_QUANTUM: Duration = Duration::from_micros(100);
-    let mut idle_rounds: usize = 0;
+    let future = EpollFuture {
+        epoll_obj,
+        maxevents,
+        deadline,
+    };
 
-    loop {
-        let mut ready_list = Vec::with_capacity(maxevents);
-        let mut oneshots_to_disable = Vec::with_capacity(maxevents.min(128));
-        {
-            let mut monitored = epoll_obj.events.lock();
-            for (&fd, ev) in monitored.iter_mut() {
-                if ready_list.len() >= maxevents {
-                    break;
-                }
-                match get_fd_entry(fd) {
-                    Err(_) => {
-                        if (ev.event.events & (EPOLLERR | EPOLLHUP)) != 0 {
-                            ready_list.push(epoll_event {
-                                events: ev.event.events & (EPOLLERR | EPOLLHUP),
-                                data: ev.event.data,
-                            });
-                            if ev.event.events & EPOLLONESHOT != 0 {
-                                oneshots_to_disable.push(fd);
-                            }
-                        }
-                    }
-                    Ok(entry) => {
-                        match entry.object.poll() {
-                            Ok(state) => {
-                                let mut revents = 0u32;
-                                
-                                // Check readable
-                                if state.readable {
-                                    if ev.event.events & EPOLLIN != 0 {
-                                        if ev.event.events & EPOLLET != 0 {
-                                            if !ev.reported_in {
-                                                revents |= EPOLLIN;
-                                                ev.reported_in = true;
-                                            }
-                                        } else {
-                                            revents |= EPOLLIN;
-                                        }
-                                    }
-                                } else {
-                                    ev.reported_in = false;
-                                }
-
-                                // Check writable
-                                if state.writable {
-                                    if ev.event.events & EPOLLOUT != 0 {
-                                        if ev.event.events & EPOLLET != 0 {
-                                            if !ev.reported_out {
-                                                revents |= EPOLLOUT;
-                                                ev.reported_out = true;
-                                            }
-                                        } else {
-                                            revents |= EPOLLOUT;
-                                        }
-                                    }
-                                } else {
-                                    ev.reported_out = false;
-                                }
-
-                                // Check EPOLLRDHUP
-                                if ev.event.events & EPOLLRDHUP != 0 && entry.object.is_rdhup() {
-                                    if ev.event.events & EPOLLET != 0 {
-                                        if !ev.reported_in {
-                                            revents |= EPOLLRDHUP;
-                                            ev.reported_in = true;
-                                        }
-                                    } else {
-                                        revents |= EPOLLRDHUP;
-                                    }
-                                }
-
-                                if revents != 0 {
-                                    ready_list.push(epoll_event {
-                                        events: revents,
-                                        data: ev.event.data,
-                                    });
-                                    if ev.event.events & EPOLLONESHOT != 0 {
-                                        oneshots_to_disable.push(fd);
-                                    }
-                                }
-                            }
-                            Err(_) => {
-                                if (ev.event.events & EPOLLERR) != 0 {
-                                    ready_list.push(epoll_event {
-                                        events: EPOLLERR,
-                                        data: ev.event.data,
-                                    });
-                                    if ev.event.events & EPOLLONESHOT != 0 {
-                                        oneshots_to_disable.push(fd);
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
+    match axtask::future::block_on(future) {
+        Ok(ready_list) => {
+            if ready_list.is_empty() {
+                return 0;
             }
-            for fd in oneshots_to_disable {
-                if let Some(ev) = monitored.get_mut(&fd) {
-                    ev.event.events = 0;
-                }
-            }
-        }
-
-        if !ready_list.is_empty() {
             let bytes = unsafe {
                 core::slice::from_raw_parts(
                     ready_list.as_ptr().cast::<u8>(),
@@ -340,39 +398,9 @@ fn sys_epoll_pwait_inner(
             if let Err(e) = write_user_bytes(events, bytes) {
                 return -e.code() as isize;
             }
-            return ready_list.len() as isize;
+            ready_list.len() as isize
         }
-
-        if let Ok(thread) = pulse_core::task::current_thread() {
-            if thread.has_pending_signal() {
-                return -LinuxError::EINTR.code() as isize;
-            }
-        }
-
-        if let Some(deadline) = deadline {
-            let now = axhal::time::monotonic_time();
-            if now >= deadline {
-                return 0;
-            }
-            idle_rounds = idle_rounds.saturating_add(1);
-            if idle_rounds <= POLL_ACTIVE_YIELD_ROUNDS {
-                axtask::yield_now();
-            } else {
-                let sleep_dur = core::cmp::min(deadline - now, POLL_SLEEP_QUANTUM);
-                if sleep_dur > Duration::ZERO {
-                    axtask::sleep(sleep_dur);
-                } else {
-                    axtask::yield_now();
-                }
-            }
-        } else {
-            idle_rounds = idle_rounds.saturating_add(1);
-            if idle_rounds <= POLL_ACTIVE_YIELD_ROUNDS {
-                axtask::yield_now();
-            } else {
-                axtask::sleep(POLL_SLEEP_QUANTUM);
-            }
-        }
+        Err(e) => -e.code() as isize,
     }
 }
 

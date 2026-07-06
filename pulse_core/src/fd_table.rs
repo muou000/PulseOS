@@ -143,6 +143,10 @@ pub trait FdObject: Send + Sync {
     fn is_rdhup(&self) -> bool {
         false
     }
+
+    fn poll_set(&self) -> Option<&axpoll::PollSet> {
+        None
+    }
 }
 
 #[derive(Clone)]

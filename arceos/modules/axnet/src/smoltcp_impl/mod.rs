@@ -49,6 +49,7 @@ const LISTEN_QUEUE_SIZE: usize = 512;
 
 static LISTEN_TABLE: LazyInit<ListenTable> = LazyInit::new();
 static SOCKET_SET: LazyInit<SocketSetWrapper> = LazyInit::new();
+pub static NET_WAIT_QUEUE: axtask::WaitQueue = axtask::WaitQueue::new();
 
 mod loopback;
 static LOOPBACK_DEV: LazyInit<Mutex<LoopbackDev>> = LazyInit::new();
@@ -168,6 +169,7 @@ impl<'a> SocketSetWrapper<'a> {
         );
 
         ETH0.poll(&self.0);
+        NET_WAIT_QUEUE.notify_all(true);
     }
 
     pub fn remove(&self, handle: SocketHandle) {
@@ -402,6 +404,14 @@ pub(crate) fn init(_net_dev: AxNetDevice) {
 
     SOCKET_SET.init_once(SocketSetWrapper::new());
     LISTEN_TABLE.init_once(ListenTable::new());
+
+    #[cfg(feature = "multitask")]
+    axtask::spawn(|| {
+        loop {
+            poll_interfaces();
+            axtask::yield_now();
+        }
+    });
 }
 
 /// Check if an IP address is a local interface IP (loopback, unspecified, or dynamic ETH0 IP).

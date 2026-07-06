@@ -14,6 +14,7 @@ keywords = ["Starry"]
 monolithic = []
 
 smoltcp = []
+multitask = []
 
 # 启用ip协议与否
 ip = []

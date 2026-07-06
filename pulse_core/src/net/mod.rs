@@ -945,6 +945,10 @@ impl FdObject for Socket {
                 }
                 Ok(supported || events == 0)
             }
+            SocketInner::Tcp(_) | SocketInner::Udp(_) => {
+                wqs.push(&axnet::NET_WAIT_QUEUE);
+                Ok(true)
+            }
             _ => Ok(false),
         }
     }

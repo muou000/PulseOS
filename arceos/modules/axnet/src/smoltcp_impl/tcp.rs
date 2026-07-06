@@ -677,6 +677,11 @@ impl TcpSocket {
             socket.map(|s| s.recv_queue()).unwrap_or(0)
         })
     }
+
+    /// Returns the wait queue for this socket.
+    pub fn get_wait_queue(&self) -> &axtask::WaitQueue {
+        &super::NET_WAIT_QUEUE
+    }
 }
 
 /// Private methods
@@ -827,19 +832,23 @@ impl TcpSocket {
         if self.is_nonblocking() {
             f()
         } else {
-            loop {
-                #[cfg(feature = "monolithic")]
-                if crate::current_have_signals() {
-                    return Err(AxError::Interrupted);
-                }
+            axtask::future::block_on(async {
+                loop {
+                    #[cfg(feature = "monolithic")]
+                    if crate::current_have_signals() {
+                        return Err(AxError::Interrupted);
+                    }
 
-                SOCKET_SET.poll_interfaces();
-                match f() {
-                    Ok(t) => return Ok(t),
-                    Err(AxError::WouldBlock) => axtask::sleep(core::time::Duration::from_millis(1)),
-                    Err(e) => return Err(e),
+                    SOCKET_SET.poll_interfaces();
+                    match f() {
+                        Ok(t) => return Ok(t),
+                        Err(AxError::WouldBlock) => {
+                            axtask::future::WaitFuture::new(self.get_wait_queue()).await;
+                        }
+                        Err(e) => return Err(e),
+                    }
                 }
-            }
+            })
         }
     }
 }
