@@ -1,3 +1,4 @@
+use alloc::sync::Arc;
 use core::cell::UnsafeCell;
 use core::net::SocketAddr;
 use core::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
@@ -5,6 +6,7 @@ use core::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
 use axerrno::{ax_err, ax_err_type, AxError, AxResult};
 use axhal::time::current_ticks;
 use axio::{PollState, Read, Write};
+use axpoll::{IoEvents, Pollable};
 use axsync::Mutex;
 
 use smoltcp::iface::SocketHandle;
@@ -12,7 +14,7 @@ use smoltcp::socket::tcp::{self, ConnectError, State};
 use smoltcp::wire::{IpEndpoint, IpListenEndpoint};
 
 use super::addr::{from_core_sockaddr, into_core_sockaddr, is_unspecified, UNSPECIFIED_ENDPOINT};
-use super::{SocketSetWrapper, LISTEN_TABLE, SOCKET_SET};
+use super::{register_wait_queue, unregister_wait_queue, SocketSetWrapper, LISTEN_TABLE, SOCKET_SET};
 
 // State transitions:
 // CLOSED -(connect)-> BUSY -> CONNECTING -> CONNECTED -(shutdown)-> BUSY -> CLOSED
@@ -46,6 +48,7 @@ pub struct TcpSocket {
     rcv_timeout: AtomicU64,
     snd_timeout: AtomicU64,
     pub multicast_groups: Mutex<alloc::vec::Vec<alloc::vec::Vec<u8>>>,
+    wait_queue: Arc<axtask::WaitQueue>,
 }
 
 unsafe impl Sync for TcpSocket {}
@@ -54,6 +57,8 @@ impl TcpSocket {
     /// Creates a new TCP socket.
     pub fn new() -> Self {
         let handle = SOCKET_SET.add(SocketSetWrapper::new_tcp_socket());
+        let wait_queue = Arc::new(axtask::WaitQueue::new());
+        register_wait_queue(handle, wait_queue.clone());
         Self {
             state: AtomicU8::new(STATE_CLOSED),
             handle: UnsafeCell::new(Some(handle)),
@@ -64,6 +69,7 @@ impl TcpSocket {
             rcv_timeout: AtomicU64::new(0),
             snd_timeout: AtomicU64::new(0),
             multicast_groups: Mutex::new(alloc::vec::Vec::new()),
+            wait_queue,
         }
     }
 
@@ -72,6 +78,7 @@ impl TcpSocket {
         handle: SocketHandle,
         local_addr: IpEndpoint,
         peer_addr: IpEndpoint,
+        wait_queue: Arc<axtask::WaitQueue>,
     ) -> Self {
         Self {
             state: AtomicU8::new(STATE_CONNECTED),
@@ -83,6 +90,7 @@ impl TcpSocket {
             rcv_timeout: AtomicU64::new(0),
             snd_timeout: AtomicU64::new(0),
             multicast_groups: Mutex::new(alloc::vec::Vec::new()),
+            wait_queue,
         }
     }
 
@@ -407,7 +415,14 @@ impl TcpSocket {
             match LISTEN_TABLE.accept(local_port) {
                 Ok((handle, (local_addr, peer_addr))) => {
                     debug!("TCP socket accepted a new connection {}", peer_addr);
-                    Ok(TcpSocket::new_connected(handle, local_addr, peer_addr))
+                    let wait_queue = Arc::new(axtask::WaitQueue::new());
+                    register_wait_queue(handle, wait_queue.clone());
+                    Ok(TcpSocket::new_connected(
+                        handle,
+                        local_addr,
+                        peer_addr,
+                        wait_queue,
+                    ))
                 }
                 Err(AxError::WouldBlock) => {
                     if let Some(expire_at) = expire_at {
@@ -598,8 +613,6 @@ impl TcpSocket {
             })
         })
     }
-
-    /// Whether the socket is readable or writable.
     pub fn poll(&self) -> AxResult<PollState> {
         match self.get_state() {
             STATE_CONNECTING => self.poll_connect(),
@@ -611,7 +624,57 @@ impl TcpSocket {
             }),
         }
     }
+}
 
+impl Pollable for TcpSocket {
+    fn poll(&self) -> IoEvents {
+        match self.get_state() {
+            STATE_CONNECTING => {
+                let res = self.poll_connect().unwrap_or(PollState {
+                    readable: false,
+                    writable: false,
+                });
+                let mut events = IoEvents::empty();
+                if res.writable {
+                    events |= IoEvents::OUT;
+                }
+                events
+            }
+            STATE_CONNECTED => {
+                let res = self.poll_stream().unwrap_or(PollState {
+                    readable: false,
+                    writable: false,
+                });
+                let mut events = IoEvents::empty();
+                if res.readable {
+                    events |= IoEvents::IN;
+                }
+                if res.writable {
+                    events |= IoEvents::OUT;
+                }
+                events
+            }
+            STATE_LISTENING => {
+                let res = self.poll_listener().unwrap_or(PollState {
+                    readable: false,
+                    writable: false,
+                });
+                let mut events = IoEvents::empty();
+                if res.readable {
+                    events |= IoEvents::IN;
+                }
+                events
+            }
+            _ => IoEvents::IN | IoEvents::OUT,
+        }
+    }
+
+    fn register(&self, context: &mut core::task::Context<'_>, _events: IoEvents) {
+        self.wait_queue.register_waker(context.waker());
+    }
+}
+
+impl TcpSocket {
     /// To set the nagle algorithm enabled or not.
     pub fn set_nagle_enabled(&self, enabled: bool) -> AxResult {
         let handle = unsafe { self.handle.get().read() };
@@ -680,7 +743,7 @@ impl TcpSocket {
 
     /// Returns the wait queue for this socket.
     pub fn get_wait_queue(&self) -> &axtask::WaitQueue {
-        &super::NET_WAIT_QUEUE
+        &self.wait_queue
     }
 }
 
@@ -874,6 +937,7 @@ impl Drop for TcpSocket {
         self.shutdown().ok();
         // Safe because we have mut reference to `self`.
         if let Some(handle) = unsafe { self.handle.get().read() } {
+            unregister_wait_queue(handle);
             SOCKET_SET.remove(handle);
         }
     }

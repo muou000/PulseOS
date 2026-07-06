@@ -142,6 +142,7 @@ pub fn init_scheduler_secondary() {
 pub fn on_timer_tick() {
     use kernel_guard::NoOp;
     crate::timers::check_events();
+    crate::future::check_timer_events();
     // Invoke the registered timer hook (e.g. itimer check).
     let ptr = TIMER_HOOK.load(Ordering::Acquire);
     if !ptr.is_null() {

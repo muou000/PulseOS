@@ -1,81 +1,111 @@
 use alloc::sync::Arc;
-use core::{
-    future::Future,
-    pin::Pin,
-    task::{Context, Poll, Waker},
-};
+use core::future::{Future, IntoFuture};
+use core::pin::pin;
+use core::task::{Context, Poll, Waker};
+use kspin::SpinNoIrq;
 
-use crate::AxTaskRef;
-use crate::task::TaskState;
-use alloc::task::Wake;
+use crate::{AxTaskRef, AxTaskWeak, current};
+
+mod poll;
+mod time;
+
+pub use self::poll::*;
+pub use self::time::*;
 
 /// A waker that wakes up the associated task.
-pub struct AxWaker(AxTaskRef);
+pub struct AxWaker {
+    task: AxTaskWeak,
+    woke: Arc<SpinNoIrq<bool>>,
+}
 
 impl AxWaker {
     /// Creates a new [`AxWaker`] from a task reference.
-    pub fn new(task: AxTaskRef) -> Self {
-        Self(task)
+    pub fn new(task: &AxTaskRef) -> Arc<Self> {
+        Arc::new(Self {
+            task: Arc::downgrade(task),
+            woke: Arc::new(SpinNoIrq::new(false)),
+        })
     }
 
     /// Returns the task associated with this waker.
-    pub fn task(&self) -> &AxTaskRef {
-        &self.0
+    pub fn task(&self) -> AxTaskWeak {
+        self.task.clone()
     }
 }
 
-impl Wake for AxWaker {
+impl alloc::task::Wake for AxWaker {
     fn wake(self: Arc<Self>) {
-        crate::wake_task(self.0.clone(), true);
+        self.wake_by_ref();
     }
 
     fn wake_by_ref(self: &Arc<Self>) {
-        crate::wake_task(self.0.clone(), true);
+        if let Some(task) = self.task.upgrade() {
+            let mut rq = crate::api::select_run_queue::<kernel_guard::NoPreemptIrqSave>(&task);
+            *self.woke.lock() = true;
+            rq.unblock_task(task, false);
+        }
     }
 }
 
 /// Runs a future to completion on the current task.
 ///
 /// This function will block the current task until the future is ready.
-pub fn block_on<F: Future>(mut f: F) -> F::Output {
-    let curr = crate::current();
-    let waker = Waker::from(Arc::new(AxWaker::new(curr.as_task_ref().clone())));
+pub fn block_on<F: IntoFuture>(f: F) -> F::Output {
+    let mut fut = pin!(f.into_future());
+
+    let curr = current();
+    // It's necessary to keep a strong reference to the current task
+    // to prevent it from being dropped while blocking.
+    let task = curr.as_task_ref().clone();
+
+    let waker_arc = AxWaker::new(&task);
+    let woke = waker_arc.woke.clone();
+    let waker = Waker::from(waker_arc);
     let mut cx = Context::from_waker(&waker);
 
-    // SAFETY: The future is pinned on the stack.
-    let mut f = unsafe { Pin::new_unchecked(&mut f) };
-
     loop {
-        match f.as_mut().poll(&mut cx) {
-            Poll::Ready(res) => return res,
+        *woke.lock() = false;
+        match fut.as_mut().poll(&mut cx) {
             Poll::Pending => {
                 let mut rq = crate::api::current_run_queue::<kernel_guard::NoPreemptIrqSave>();
-                curr.set_state(TaskState::Blocked);
-                rq.resched_blocked();
+                let woke_guard = woke.lock();
+                if !*woke_guard {
+                    rq.blocked_resched_woke(woke_guard);
+                } else {
+                    // Immediately woken
+                    drop(woke_guard);
+                    crate::api::yield_now();
+                }
             }
+            Poll::Ready(output) => break output,
         }
     }
 }
 
 /// Yields the current task until the future is ready.
-pub async fn yield_now() {
-    struct YieldFuture(bool);
-    impl Future for YieldFuture {
-        type Output = ();
-        fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-            if self.0 {
-                Poll::Ready(())
-            } else {
-                self.0 = true;
-                cx.waker().wake_by_ref();
-                Poll::Pending
-            }
-        }
-    }
-    YieldFuture(false).await;
+pub fn yield_now() -> YieldNow {
+    YieldNow(false)
 }
 
-/// A future that waits for a [`WaitQueue`].
+/// A future that yields the current task.
+#[must_use = "futures do nothing unless you `.await` or poll them"]
+pub struct YieldNow(bool);
+
+impl Future for YieldNow {
+    type Output = ();
+
+    fn poll(mut self: core::pin::Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        if self.0 {
+            Poll::Ready(())
+        } else {
+            self.0 = true;
+            cx.waker().wake_by_ref();
+            Poll::Pending
+        }
+    }
+}
+
+/// A future that waits for a [`WaitQueue`](crate::wait_queue::WaitQueue).
 pub struct WaitFuture<'a> {
     wq: &'a crate::wait_queue::WaitQueue,
     registered: bool,
@@ -84,14 +114,17 @@ pub struct WaitFuture<'a> {
 impl<'a> WaitFuture<'a> {
     /// Creates a new [`WaitFuture`].
     pub fn new(wq: &'a crate::wait_queue::WaitQueue) -> Self {
-        Self { wq, registered: false }
+        Self {
+            wq,
+            registered: false,
+        }
     }
 }
 
 impl<'a> Future for WaitFuture<'a> {
     type Output = ();
 
-    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+    fn poll(mut self: core::pin::Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         if self.registered {
             Poll::Ready(())
         } else {
@@ -99,62 +132,5 @@ impl<'a> Future for WaitFuture<'a> {
             self.registered = true;
             Poll::Pending
         }
-    }
-}
-
-/// A future that polls for I/O events.
-pub struct IoFuture<'a, P, F, T>
-where
-    P: axpoll::Pollable,
-    F: FnMut() -> axio::Result<T>,
-{
-    pollable: &'a P,
-    events: axpoll::IoEvents,
-    f: F,
-}
-
-impl<'a, P, F, T> Future for IoFuture<'a, P, F, T>
-where
-    P: axpoll::Pollable,
-    F: FnMut() -> axio::Result<T>,
-{
-    type Output = axio::Result<T>;
-
-    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        let this = unsafe { self.get_unchecked_mut() };
-        match (this.f)() {
-            Ok(res) => Poll::Ready(Ok(res)),
-            Err(e) if e == axio::Error::WouldBlock => {
-                this.pollable.register(cx, this.events);
-                Poll::Pending
-            }
-            Err(e) => Poll::Ready(Err(e)),
-        }
-    }
-}
-
-/// Polls for I/O events.
-pub fn poll_io<'a, P, F, T>(
-    pollable: &'a P,
-    events: axpoll::IoEvents,
-    nonblocking: bool,
-    f: F,
-) -> impl Future<Output = axio::Result<T>> + 'a
-where
-    P: axpoll::Pollable,
-    F: FnMut() -> axio::Result<T> + 'a,
-    T: 'a,
-{
-    async move {
-        let mut f = f;
-        if nonblocking {
-            return f();
-        }
-        IoFuture {
-            pollable,
-            events,
-            f,
-        }
-        .await
     }
 }

@@ -7,7 +7,7 @@ use core::task::{Context, Poll, Waker};
 use axhal::percpu::this_cpu_id;
 use axsched::BaseScheduler;
 use kernel_guard::BaseGuard;
-use kspin::SpinRaw;
+use kspin::{SpinNoIrqGuard, SpinRaw};
 use lazyinit::LazyInit;
 
 use crate::{
@@ -438,6 +438,25 @@ impl<G: BaseGuard> CurrentRunQueueRef<'_, G> {
         self.inner.resched();
     }
 
+    /// Block the current task and reschedule, with a "woke" flag.
+    ///
+    /// The caller must ensure the "woke" flag is protected by a lock that
+    /// is also held when waking the task.
+    pub fn blocked_resched_woke(&mut self, mut woke: SpinNoIrqGuard<'_, bool>) {
+        let curr = &self.current_task;
+        assert!(curr.is_running());
+        assert!(!curr.is_idle());
+        #[cfg(feature = "preempt")]
+        assert!(curr.can_preempt(2));
+
+        curr.set_state(TaskState::Blocked);
+        *woke = false;
+        drop(woke);
+
+        trace!("task block woke: {}", curr.id_name());
+        self.inner.resched();
+    }
+
     /// Block the current task and reschedule without a specific wait queue guard.
     /// This is used for multi-queue waiting where locks cannot be held.
     /// Note: The caller MUST ensure the task is already set to `Blocked` and `in_wait_queue` = true,
@@ -567,7 +586,7 @@ impl AxRunQueue {
 
             if next.is_future() {
                 // Poll the future of the task.
-                let waker = Waker::from(Arc::new(AxWaker::new(next.clone())));
+                let waker = Waker::from(AxWaker::new(&next));
                 let mut cx = Context::from_waker(&waker);
 
                 // Set state to Blocked before polling, so that the waker can

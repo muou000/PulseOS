@@ -5,6 +5,8 @@ mod listen_table;
 
 mod tcp;
 mod udp;
+use alloc::collections::BTreeMap;
+use alloc::sync::Arc;
 use alloc::vec;
 use axerrno::{AxError, AxResult};
 use core::cell::RefCell;
@@ -49,6 +51,8 @@ const LISTEN_QUEUE_SIZE: usize = 512;
 
 static LISTEN_TABLE: LazyInit<ListenTable> = LazyInit::new();
 static SOCKET_SET: LazyInit<SocketSetWrapper> = LazyInit::new();
+static SOCKET_WAIT_QUEUES: LazyInit<Mutex<BTreeMap<SocketHandle, Arc<axtask::WaitQueue>>>> =
+    LazyInit::new();
 pub static NET_WAIT_QUEUE: axtask::WaitQueue = axtask::WaitQueue::new();
 
 mod loopback;
@@ -169,6 +173,22 @@ impl<'a> SocketSetWrapper<'a> {
         );
 
         ETH0.poll(&self.0);
+
+        // Notify specific sockets
+        let wq_map = SOCKET_WAIT_QUEUES.lock();
+        let mut sockets = self.0.lock();
+        for (handle, wq) in wq_map.iter() {
+            if let Some(socket) = sockets.iter_mut().find(|(h, _)| h == handle).map(|(_, s)| s) {
+                let can_io = match socket {
+                    Socket::Tcp(s) => s.can_recv() || s.can_send() || !s.is_active(),
+                    Socket::Udp(s) => s.can_recv() || s.can_send(),
+                    _ => false,
+                };
+                if can_io {
+                    wq.notify_all(true);
+                }
+            }
+        }
         NET_WAIT_QUEUE.notify_all(true);
     }
 
@@ -403,6 +423,7 @@ pub(crate) fn init(_net_dev: AxNetDevice) {
     info!("  gateway:  {}", gateway);
 
     SOCKET_SET.init_once(SocketSetWrapper::new());
+    SOCKET_WAIT_QUEUES.init_once(Mutex::new(BTreeMap::new()));
     LISTEN_TABLE.init_once(ListenTable::new());
 
     #[cfg(feature = "multitask")]
@@ -412,6 +433,14 @@ pub(crate) fn init(_net_dev: AxNetDevice) {
             axtask::yield_now();
         }
     });
+}
+
+pub(crate) fn register_wait_queue(handle: SocketHandle, wq: Arc<axtask::WaitQueue>) {
+    SOCKET_WAIT_QUEUES.lock().insert(handle, wq);
+}
+
+pub(crate) fn unregister_wait_queue(handle: SocketHandle) {
+    SOCKET_WAIT_QUEUES.lock().remove(&handle);
 }
 
 /// Check if an IP address is a local interface IP (loopback, unspecified, or dynamic ETH0 IP).

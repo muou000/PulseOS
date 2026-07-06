@@ -53,6 +53,7 @@ cpumask = { version = "0.1", optional = true }
 axsched = { version = "0.3", optional = true }
 axpoll = { workspace = true }
 axio = { workspace = true }
+futures-util = { version = "0.3", default-features = false, features = ["alloc", "async-await-macro"] }
 
 [dev-dependencies]
 rand = "0.9"

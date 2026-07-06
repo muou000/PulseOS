@@ -1,9 +1,11 @@
 use core::net::SocketAddr;
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use alloc::sync::Arc;
 
 use axerrno::{ax_err, ax_err_type, AxError, AxResult};
 use axhal::time::current_ticks;
 use axio::{PollState, Read, Write};
+use axpoll::{IoEvents, Pollable};
 use axsync::Mutex;
 use spin::RwLock;
 
@@ -12,7 +14,7 @@ use smoltcp::socket::udp::{self, BindError, SendError};
 use smoltcp::wire::{IpEndpoint, IpListenEndpoint};
 
 use super::addr::{from_core_sockaddr, into_core_sockaddr, is_unspecified, UNSPECIFIED_ENDPOINT};
-use super::{SocketSetWrapper, SOCKET_SET};
+use super::{register_wait_queue, unregister_wait_queue, SocketSetWrapper, SOCKET_SET};
 
 /// A UDP socket that provides POSIX-like APIs.
 pub struct UdpSocket {
@@ -24,6 +26,7 @@ pub struct UdpSocket {
     rcv_timeout: AtomicU64,
     snd_timeout: AtomicU64,
     pub multicast_groups: Mutex<alloc::vec::Vec<alloc::vec::Vec<u8>>>,
+    wait_queue: Arc<axtask::WaitQueue>,
 }
 
 impl UdpSocket {
@@ -32,6 +35,8 @@ impl UdpSocket {
     pub fn new() -> Self {
         let socket = SocketSetWrapper::new_udp_socket();
         let handle = SOCKET_SET.add(socket);
+        let wait_queue = Arc::new(axtask::WaitQueue::new());
+        register_wait_queue(handle, wait_queue.clone());
         Self {
             handle,
             local_addr: RwLock::new(None),
@@ -41,6 +46,7 @@ impl UdpSocket {
             rcv_timeout: AtomicU64::new(0),
             snd_timeout: AtomicU64::new(0),
             multicast_groups: Mutex::new(alloc::vec::Vec::new()),
+            wait_queue,
         }
     }
 
@@ -289,7 +295,6 @@ impl UdpSocket {
         Ok(())
     }
 
-    /// Whether the socket is readable or writable.
     pub fn poll(&self) -> AxResult<PollState> {
         if self.local_addr.read().is_none() {
             return Ok(PollState {
@@ -303,6 +308,28 @@ impl UdpSocket {
                 writable: socket.can_send(),
             })
         })
+    }
+}
+
+impl Pollable for UdpSocket {
+    fn poll(&self) -> IoEvents {
+        if self.local_addr.read().is_none() {
+            return IoEvents::empty();
+        }
+        SOCKET_SET.with_socket_mut::<udp::Socket, _, _>(self.handle, |socket| {
+            let mut events = IoEvents::empty();
+            if socket.can_recv() {
+                events |= IoEvents::IN;
+            }
+            if socket.can_send() {
+                events |= IoEvents::OUT;
+            }
+            events
+        })
+    }
+
+    fn register(&self, context: &mut core::task::Context<'_>, _events: IoEvents) {
+        self.wait_queue.register_waker(context.waker());
     }
 }
 
@@ -438,7 +465,7 @@ impl UdpSocket {
 
     /// Returns the wait queue for this socket.
     pub fn get_wait_queue(&self) -> &axtask::WaitQueue {
-        &super::NET_WAIT_QUEUE
+        &self.wait_queue
     }
 }
 
@@ -461,6 +488,7 @@ impl Write for UdpSocket {
 impl Drop for UdpSocket {
     fn drop(&mut self) {
         self.shutdown().ok();
+        unregister_wait_queue(self.handle);
         SOCKET_SET.remove(self.handle);
     }
 }

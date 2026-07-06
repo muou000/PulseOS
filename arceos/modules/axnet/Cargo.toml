@@ -33,6 +33,7 @@ axsync = { workspace = true }
 axtask = { workspace = true }
 axdriver = { workspace = true, features = ["net"] }
 axio = { workspace = true }
+axpoll = { workspace = true }
 
 [dependencies.smoltcp]
 git = "https://github.com/rcore-os/smoltcp.git"

@@ -261,7 +261,7 @@ fn init_interrupt() {
         axhal::time::set_oneshot_timer(deadline);
     }
 
-    axhal::irq::register(axconfig::devices::TIMER_IRQ, || {
+    axhal::irq::register(axconfig::devices::TIMER_IRQ, |_irq| {
         #[cfg(not(feature = "multitask"))]
         update_timer();
         crate::vdso::update_vdso_data();
@@ -270,7 +270,7 @@ fn init_interrupt() {
     });
 
     #[cfg(feature = "ipi")]
-    axhal::irq::register(axhal::irq::IPI_IRQ, || {
+    axhal::irq::register(axhal::irq::IPI_IRQ, |_irq| {
         axipi::ipi_handler();
     });
 

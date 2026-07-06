@@ -143,7 +143,7 @@ impl IrqIf for IrqIfImpl {
                 let handler = TIMER_HANDLER.load(Ordering::Acquire);
                 if !handler.is_null() {
                     // SAFETY: The handler is guaranteed to be a valid function pointer.
-                    unsafe { core::mem::transmute::<*mut (), IrqHandler>(handler)() };
+                    unsafe { core::mem::transmute::<*mut (), IrqHandler>(handler)(irq) };
                 }
             },
             @S_SOFT => {
@@ -151,7 +151,7 @@ impl IrqIf for IrqIfImpl {
                 let handler = IPI_HANDLER.load(Ordering::Acquire);
                 if !handler.is_null() {
                     // SAFETY: The handler is guaranteed to be a valid function pointer.
-                    unsafe { core::mem::transmute::<*mut (), IrqHandler>(handler)() };
+                    unsafe { core::mem::transmute::<*mut (), IrqHandler>(handler)(irq) };
                 }
                 unsafe {
                     riscv::register::sip::clear_ssoft();

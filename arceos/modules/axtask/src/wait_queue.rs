@@ -391,7 +391,11 @@ impl WaitQueue {
     pub fn register_waker(&self, waker: &core::task::Waker) {
         let mut wakers = self.wakers.lock();
         let task_id = crate::current().id().as_u64();
-        if !wakers.iter().any(|(id, _)| *id == task_id) {
+        if let Some((_, old_waker)) = wakers.iter_mut().find(|(id, _)| *id == task_id) {
+            if !old_waker.will_wake(waker) {
+                *old_waker = waker.clone();
+            }
+        } else {
             wakers.push_back((task_id, waker.clone()));
         }
     }
