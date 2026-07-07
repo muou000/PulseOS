@@ -371,6 +371,35 @@ pub fn poll_interfaces() {
     SOCKET_SET.poll_interfaces();
 }
 
+/// Returns the delay until the next timer expires.
+pub fn poll_delay() -> Option<smoltcp::time::Duration> {
+    let timestamp = Instant::from_micros_const((current_time_nanos() / NANOS_PER_MICROS) as i64);
+    let sockets = SOCKET_SET.0.lock();
+    
+    #[cfg(feature = "monolithic")]
+    let delay_loopback = {
+        if LOOPBACK.is_inited() {
+            LOOPBACK.lock().poll_delay(timestamp, &*sockets)
+        } else {
+            None
+        }
+    };
+    #[cfg(not(feature = "monolithic"))]
+    let delay_loopback = None;
+
+    let delay_eth0 = if ETH0.is_inited() {
+        ETH0.iface.lock().poll_delay(timestamp, &*sockets)
+    } else {
+        None
+    };
+
+    match (delay_loopback, delay_eth0) {
+        (Some(d1), Some(d2)) => Some(d1.min(d2)),
+        (Some(d), None) | (None, Some(d)) => Some(d),
+        (None, None) => None,
+    }
+}
+
 /// Benchmark raw socket transmit bandwidth.
 pub fn bench_transmit() {
     ETH0.dev.lock().bench_transmit_bandwidth();
@@ -428,9 +457,36 @@ pub(crate) fn init(_net_dev: AxNetDevice) {
 
     #[cfg(feature = "multitask")]
     axtask::spawn(|| {
+        struct NetWaker;
+        impl alloc::task::Wake for NetWaker {
+            fn wake(self: Arc<Self>) {
+                crate::NET_WAIT_QUEUE.notify_all(true);
+            }
+            fn wake_by_ref(self: &Arc<Self>) {
+                crate::NET_WAIT_QUEUE.notify_all(true);
+            }
+        }
+
+        let waker = core::task::Waker::from(Arc::new(NetWaker));
+
         loop {
             poll_interfaces();
-            axtask::yield_now();
+
+            if ETH0.is_inited() {
+                let dev = ETH0.dev.lock();
+                let inner = dev.inner.borrow();
+                if let Some(poll_set) = inner.poll_set() {
+                    poll_set.register(&waker);
+                }
+            }
+
+            let delay = poll_delay();
+            if let Some(d) = delay {
+                let duration = core::time::Duration::from_micros(d.total_micros());
+                crate::NET_WAIT_QUEUE.wait_timeout(duration);
+            } else {
+                crate::NET_WAIT_QUEUE.wait();
+            }
         }
     });
 }
