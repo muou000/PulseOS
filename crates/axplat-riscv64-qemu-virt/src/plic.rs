@@ -4,6 +4,9 @@
 
 use core::ptr::{read_volatile, write_volatile};
 use crate::config::plat::PHYS_VIRT_OFFSET;
+use kspin::SpinNoIrq;
+
+static PLIC_LOCK: SpinNoIrq<()> = SpinNoIrq::new(());
 
 /// The PLIC base virtual address.
 const PLIC_BASE: usize = 0x0c00_0000 + PHYS_VIRT_OFFSET;
@@ -42,6 +45,7 @@ pub fn set_enable(hart_id: usize, irq: usize, enabled: bool) {
     let context = s_mode_context(hart_id);
     let ptr = (PLIC_ENABLE_BASE + context * 0x80 + (irq / 32) * 4) as *mut u32;
     let mask = 1 << (irq % 32);
+    let _guard = PLIC_LOCK.lock();
     unsafe {
         let mut val = read_volatile(ptr);
         if enabled {

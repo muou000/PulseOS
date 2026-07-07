@@ -1,5 +1,8 @@
 use core::ptr::{read_volatile, write_volatile};
 use axplat::mem::PhysAddr;
+use kspin::SpinNoIrq;
+
+static PIC_LOCK: SpinNoIrq<()> = SpinNoIrq::new(());
 
 const PCH_PIC_INT_EDGE: usize = 0x000;
 const PCH_PIC_INT_POL: usize = 0x080;
@@ -56,6 +59,7 @@ impl PchPic {
 
     pub fn set_enable(&self, irq: usize, enabled: bool) {
         if irq >= 64 { return; }
+        let _guard = PIC_LOCK.lock();
         unsafe {
             let mask = self.read_reg64(PCH_PIC_INT_MASK);
             if enabled {

@@ -537,6 +537,7 @@ dependencies = [
  "axconfig-macros",
  "axcpu",
  "axplat",
+ "kspin",
  "log",
  "riscv",
  "riscv_goldfish",
