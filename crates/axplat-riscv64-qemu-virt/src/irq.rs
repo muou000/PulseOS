@@ -51,7 +51,12 @@ pub(super) fn init_percpu(cpu_id: usize) {
     unsafe {
         sie::set_ssoft();
         sie::set_stimer();
-        sie::set_sext();
+        // External interrupts (S_EXT / PLIC) are gated to Hart 0 only.
+        // This is consistent with PLIC operations (set_enable, claim, complete)
+        // which are hardcoded to context 0 (Hart 0).
+        if cpu_id == 0 {
+            sie::set_sext();
+        }
     }
     crate::plic::init_hart(cpu_id);
 }
@@ -61,6 +66,8 @@ struct IrqIfImpl;
 #[impl_plat_interface]
 impl IrqIf for IrqIfImpl {
     /// Enables or disables the given IRQ.
+    ///
+    /// Note: Peripheral interrupts (PLIC-backed) are routed only to context 0 (Hart 0).
     fn set_enable(irq: usize, enabled: bool) {
         if irq & INTC_IRQ_BASE == 0 {
             crate::plic::set_enable(0, irq, enabled);
@@ -164,6 +171,8 @@ impl IrqIf for IrqIfImpl {
                 }
             },
             @S_EXT => {
+                // Claim and complete on context 0 (Hart 0) only, as external
+                // interrupts are gated to Hart 0 in init_percpu.
                 let irq_num = crate::plic::claim(0);
                 if irq_num != 0 {
                     if !IRQ_HANDLER_TABLE.handle(irq_num as usize) {
