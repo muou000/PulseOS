@@ -1,4 +1,4 @@
-//! TODO: PLIC
+//! Platform-level Interrupt Controller (PLIC) support.
 
 use axplat::irq::{HandlerTable, IpiTarget, IrqHandler, IrqIf};
 use core::sync::atomic::{AtomicPtr, Ordering};
@@ -46,13 +46,14 @@ macro_rules! with_cause {
     };
 }
 
-pub(super) fn init_percpu() {
+pub(super) fn init_percpu(cpu_id: usize) {
     // enable soft interrupts, timer interrupts, and external interrupts
     unsafe {
         sie::set_ssoft();
         sie::set_stimer();
         sie::set_sext();
     }
+    crate::plic::init_hart(cpu_id);
 }
 
 struct IrqIfImpl;
@@ -60,9 +61,10 @@ struct IrqIfImpl;
 #[impl_plat_interface]
 impl IrqIf for IrqIfImpl {
     /// Enables or disables the given IRQ.
-    fn set_enable(irq: usize, _enabled: bool) {
-        // TODO: set enable in PLIC
-        warn!("set_enable is not implemented for IRQ {}", irq);
+    fn set_enable(irq: usize, enabled: bool) {
+        if irq & INTC_IRQ_BASE == 0 {
+            crate::plic::set_enable(0, irq, enabled);
+        }
     }
 
     /// Registers an IRQ handler for the given IRQ.
@@ -89,6 +91,7 @@ impl IrqIf for IrqIfImpl {
             },
             @EX_IRQ => {
                 if IRQ_HANDLER_TABLE.register_handler(irq, handler) {
+                    crate::plic::set_priority(irq, 1);
                     Self::set_enable(irq, true);
                     true
                 } else {
@@ -158,9 +161,12 @@ impl IrqIf for IrqIfImpl {
                 }
             },
             @S_EXT => {
-                // TODO: get IRQ number from PLIC
-                if !IRQ_HANDLER_TABLE.handle(0) {
-                    warn!("Unhandled IRQ {}", 0);
+                let irq_num = crate::plic::claim(0);
+                if irq_num != 0 {
+                    if !IRQ_HANDLER_TABLE.handle(irq_num as usize) {
+                        warn!("Unhandled PLIC IRQ {}", irq_num);
+                    }
+                    crate::plic::complete(0, irq_num);
                 }
             },
             @EX_IRQ => {
