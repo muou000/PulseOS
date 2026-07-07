@@ -19,6 +19,16 @@ impl<H: Hal, T: Transport> VirtIoBlkDev<H, T> {
             inner: InnerDev::new(transport).map_err(as_dev_err)?,
         })
     }
+
+    /// Enables interrupts from the device.
+    pub fn enable_interrupts(&mut self) {
+        self.inner.enable_interrupts();
+    }
+
+    /// Acknowledges a pending interrupt.
+    pub fn ack_interrupt(&mut self) -> bool {
+        self.inner.ack_interrupt()
+    }
 }
 
 impl<H: Hal, T: Transport> BaseDriverOps for VirtIoBlkDev<H, T> {

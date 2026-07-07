@@ -70,6 +70,16 @@ impl<H: Hal, T: Transport, const QS: usize> VirtIoNetDev<H, T, QS> {
         // 3. Return the driver instance.
         Ok(dev)
     }
+
+    /// Enables interrupts from the device.
+    pub fn enable_interrupts(&mut self) {
+        self.inner.enable_interrupts();
+    }
+
+    /// Acknowledges a pending interrupt.
+    pub fn ack_interrupt(&mut self) -> bool {
+        self.inner.ack_interrupt()
+    }
 }
 
 impl<H: Hal, T: Transport, const QS: usize> BaseDriverOps for VirtIoNetDev<H, T, QS> {
