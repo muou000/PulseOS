@@ -83,5 +83,8 @@ timer-frequency = 100_000_000           # uint
 # Timer interrupt number.
 timer-irq = 11                          # uint
 
+# PCH-PIC Address
+pch-pic-paddr = 0x1000_0000             # uint
+
 # RTC (ls7a) Address
 rtc-paddr = 0x100d_0100                 # uint

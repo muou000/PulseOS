@@ -1,11 +1,18 @@
 use axplat::irq::{HandlerTable, IpiTarget, IrqHandler, IrqIf};
+use axplat::mem::pa;
 use loongArch64::register::{
     ecfg::{self, LineBasedInterrupt},
     ticlr,
 };
 
+mod pch_pic;
+mod eiointc;
+
 /// The maximum number of IRQs.
-pub const MAX_IRQ_COUNT: usize = 12;
+pub const MAX_IRQ_COUNT: usize = 256;
+
+/// The base IRQ number for PCH-PIC interrupts.
+pub const PCH_PIC_IRQ_BASE: usize = 32;
 
 static IRQ_HANDLER_TABLE: HandlerTable<MAX_IRQ_COUNT> = HandlerTable::new();
 
@@ -22,6 +29,10 @@ impl IrqIf for IrqIfImpl {
                 false => old_value & !LineBasedInterrupt::TIMER,
             };
             ecfg::set_lie(new_value);
+        } else if (PCH_PIC_IRQ_BASE..PCH_PIC_IRQ_BASE + 64).contains(&irq_num) {
+            if let Some(pic) = pch_pic::PCH_PIC.get() {
+                pic.set_enable(irq_num - PCH_PIC_IRQ_BASE, enabled);
+            }
         }
     }
 
@@ -36,26 +47,37 @@ impl IrqIf for IrqIfImpl {
     }
 
     /// Unregisters the IRQ handler for the given IRQ.
-    ///
-    /// It also disables the IRQ if the unregistration succeeds. It returns the
-    /// existing handler if it is registered, `None` otherwise.
     fn unregister(irq: usize) -> Option<IrqHandler> {
         Self::set_enable(irq, false);
         IRQ_HANDLER_TABLE.unregister_handler(irq)
     }
 
     /// Handles the IRQ.
-    ///
-    /// It is called by the common interrupt handler. It should look up in the
-    /// IRQ handler table and calls the corresponding handler. If necessary, it
-    /// also acknowledges the interrupt controller after handling.
     fn handle(irq: usize) {
         if irq == crate::config::devices::TIMER_IRQ {
             ticlr::clear_timer_interrupt();
-        }
-        trace!("IRQ {}", irq);
-        if !IRQ_HANDLER_TABLE.handle(irq) {
-            warn!("Unhandled IRQ {}", irq);
+            if !IRQ_HANDLER_TABLE.handle(irq) {
+                warn!("Unhandled Timer IRQ");
+            }
+        } else if irq == loongArch64::register::estat::Interrupt::HWI0 as usize {
+            // External interrupt from EIOINTC/PCH-PIC
+            let pending = eiointc::get_pending();
+            if pending != 0 {
+                let pch_irq = pending.trailing_zeros() as usize;
+                let global_irq = PCH_PIC_IRQ_BASE + pch_irq;
+                trace!("PCH-PIC IRQ {}", pch_irq);
+                if !IRQ_HANDLER_TABLE.handle(global_irq) {
+                    warn!("Unhandled PCH-PIC IRQ {}", pch_irq);
+                }
+                if let Some(pic) = pch_pic::PCH_PIC.get() {
+                    pic.clear_irq(pch_irq);
+                }
+            }
+        } else {
+            trace!("IRQ {}", irq);
+            if !IRQ_HANDLER_TABLE.handle(irq) {
+                warn!("Unhandled IRQ {}", irq);
+            }
         }
     }
 
@@ -63,4 +85,12 @@ impl IrqIf for IrqIfImpl {
     fn send_ipi(_irq_num: usize, _target: IpiTarget) {
         todo!()
     }
+}
+
+pub(crate) fn init_early() {
+    eiointc::init();
+    pch_pic::init(pa!(crate::config::devices::PCH_PIC_PADDR));
+    // Enable HWI0 in ECFG
+    let old_value = ecfg::read().lie();
+    ecfg::set_lie(old_value | LineBasedInterrupt::HWI0);
 }
