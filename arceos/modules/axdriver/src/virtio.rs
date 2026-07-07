@@ -25,7 +25,7 @@ pub trait VirtIoDevMeta {
     type Device: BaseDriverOps;
     type Driver = VirtIoDriver<Self>;
 
-    fn try_new(transport: VirtIoTransport) -> DevResult<AxDeviceEnum>;
+    fn try_new(transport: VirtIoTransport, irq: usize) -> DevResult<AxDeviceEnum>;
 }
 
 cfg_if! {
@@ -36,7 +36,7 @@ cfg_if! {
             const DEVICE_TYPE: DeviceType = DeviceType::Net;
             type Device = axdriver_virtio::VirtIoNetDev<VirtIoHalImpl, VirtIoTransport, 64>;
 
-            fn try_new(transport: VirtIoTransport) -> DevResult<AxDeviceEnum> {
+            fn try_new(transport: VirtIoTransport, _irq: usize) -> DevResult<AxDeviceEnum> {
                 Ok(AxDeviceEnum::from_net(Self::Device::try_new(transport)?))
             }
         }
@@ -51,7 +51,7 @@ cfg_if! {
             const DEVICE_TYPE: DeviceType = DeviceType::Block;
             type Device = axdriver_virtio::VirtIoBlkDev<VirtIoHalImpl, VirtIoTransport>;
 
-            fn try_new(transport: VirtIoTransport) -> DevResult<AxDeviceEnum> {
+            fn try_new(transport: VirtIoTransport, _irq: usize) -> DevResult<AxDeviceEnum> {
                 Ok(AxDeviceEnum::from_block(Self::Device::try_new(transport)?))
             }
         }
@@ -66,7 +66,7 @@ cfg_if! {
             const DEVICE_TYPE: DeviceType = DeviceType::Display;
             type Device = axdriver_virtio::VirtIoGpuDev<VirtIoHalImpl, VirtIoTransport>;
 
-            fn try_new(transport: VirtIoTransport) -> DevResult<AxDeviceEnum> {
+            fn try_new(transport: VirtIoTransport, _irq: usize) -> DevResult<AxDeviceEnum> {
                 Ok(AxDeviceEnum::from_display(Self::Device::try_new(transport)?))
             }
         }
@@ -84,7 +84,12 @@ impl<D: VirtIoDevMeta> DriverProbe for VirtIoDriver<D> {
             axdriver_virtio::probe_mmio_device(base_vaddr.as_mut_ptr(), mmio_size)
             && ty == D::DEVICE_TYPE
         {
-            match D::try_new(transport) {
+            let irq = if cfg!(target_arch = "riscv64") && mmio_base >= 0x1000_1000 {
+                (mmio_base - 0x1000_1000) / 0x1000 + 1
+            } else {
+                0
+            };
+            match D::try_new(transport, irq) {
                 Ok(dev) => return Some(dev),
                 Err(e) => {
                     warn!(
@@ -120,7 +125,9 @@ impl<D: VirtIoDevMeta> DriverProbe for VirtIoDriver<D> {
             axdriver_virtio::probe_pci_device::<VirtIoHalImpl>(root, bdf, dev_info)
         {
             if ty == D::DEVICE_TYPE {
-                match D::try_new(transport) {
+                let word = root.config_read_word(bdf, 0x3c);
+                let irq = (word & 0xff) as usize;
+                match D::try_new(transport, irq) {
                     Ok(dev) => return Some(dev),
                     Err(e) => {
                         warn!(
