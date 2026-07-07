@@ -52,9 +52,13 @@ cfg_if! {
     if #[cfg(net_dev = "virtio-net")] {
         pub struct VirtIoNet;
 
-        pub struct VirtIoNetDevWrapper<H: VirtIoHal, T: virtio_drivers::transport::Transport, const QS: usize> {
+        pub struct VirtIoNetDevInner<H: VirtIoHal, T: virtio_drivers::transport::Transport, const QS: usize> {
             inner: SpinNoIrq<axdriver_virtio::VirtIoNetDev<H, T, QS>>,
             poll_set: Arc<PollSet>,
+        }
+
+        pub struct VirtIoNetDevWrapper<H: VirtIoHal, T: virtio_drivers::transport::Transport, const QS: usize> {
+            inner: Arc<VirtIoNetDevInner<H, T, QS>>,
             irq: usize,
         }
 
@@ -66,17 +70,16 @@ cfg_if! {
                 let mut dev = axdriver_virtio::VirtIoNetDev::try_new(transport)?;
                 dev.enable_interrupts();
                 let poll_set = Arc::new(PollSet::new());
-                let wrapper = Self {
+                let inner = Arc::new(VirtIoNetDevInner {
                     inner: SpinNoIrq::new(dev),
                     poll_set,
-                    irq,
-                };
+                });
                 if irq > 0 {
-                    let dev_ptr = &wrapper as *const Self as *const ();
+                    let dev_ptr = Arc::as_ptr(&inner) as *const ();
                     unsafe fn handler<H: VirtIoHal, T: virtio_drivers::transport::Transport, const QS: usize>(ptr: *const ()) {
-                        let w = unsafe { &*(ptr as *const VirtIoNetDevWrapper<H, T, QS>) };
-                        let mut inner = w.inner.lock();
-                        if inner.ack_interrupt() {
+                        let w = unsafe { &*(ptr as *const VirtIoNetDevInner<H, T, QS>) };
+                        let mut inner_dev = w.inner.lock();
+                        if inner_dev.ack_interrupt() {
                             w.poll_set.wake();
                         }
                     }
@@ -85,8 +88,9 @@ cfg_if! {
                         handler: handler::<H, T, QS>,
                     });
                     axhal::irq::register(irq, common_virtio_irq_handler);
+                    axhal::irq::set_enable(irq, true);
                 }
-                Ok(wrapper)
+                Ok(Self { inner, irq })
             }
         }
 
@@ -101,37 +105,37 @@ cfg_if! {
 
         impl<H: VirtIoHal, T: virtio_drivers::transport::Transport, const QS: usize> axdriver_net::NetDriverOps for VirtIoNetDevWrapper<H, T, QS> {
             fn mac_address(&self) -> axdriver_net::EthernetAddress {
-                self.inner.lock().mac_address()
+                self.inner.inner.lock().mac_address()
             }
             fn can_transmit(&self) -> bool {
-                self.inner.lock().can_transmit()
+                self.inner.inner.lock().can_transmit()
             }
             fn can_receive(&self) -> bool {
-                self.inner.lock().can_receive()
+                self.inner.inner.lock().can_receive()
             }
             fn rx_queue_size(&self) -> usize {
-                self.inner.lock().rx_queue_size()
+                self.inner.inner.lock().rx_queue_size()
             }
             fn tx_queue_size(&self) -> usize {
-                self.inner.lock().tx_queue_size()
+                self.inner.inner.lock().tx_queue_size()
             }
             fn recycle_rx_buffer(&mut self, rx_buf: axdriver_net::NetBufPtr) -> DevResult {
-                self.inner.lock().recycle_rx_buffer(rx_buf)
+                self.inner.inner.lock().recycle_rx_buffer(rx_buf)
             }
             fn recycle_tx_buffers(&mut self) -> DevResult {
-                self.inner.lock().recycle_tx_buffers()
+                self.inner.inner.lock().recycle_tx_buffers()
             }
             fn transmit(&mut self, tx_buf: axdriver_net::NetBufPtr) -> DevResult {
-                self.inner.lock().transmit(tx_buf)
+                self.inner.inner.lock().transmit(tx_buf)
             }
             fn receive(&mut self) -> DevResult<axdriver_net::NetBufPtr> {
-                self.inner.lock().receive()
+                self.inner.inner.lock().receive()
             }
             fn alloc_tx_buffer(&mut self, size: usize) -> DevResult<axdriver_net::NetBufPtr> {
-                self.inner.lock().alloc_tx_buffer(size)
+                self.inner.inner.lock().alloc_tx_buffer(size)
             }
             fn poll_set(&self) -> Option<&axpoll::PollSet> {
-                Some(&self.poll_set)
+                Some(&self.inner.poll_set)
             }
         }
 
@@ -150,10 +154,14 @@ cfg_if! {
     if #[cfg(block_dev = "virtio-blk")] {
         pub struct VirtIoBlk;
 
-        pub struct VirtIoBlkDevWrapper<H: VirtIoHal, T: virtio_drivers::transport::Transport> {
+        pub struct VirtIoBlkDevInner<H: VirtIoHal, T: virtio_drivers::transport::Transport> {
             inner: SpinNoIrq<axdriver_virtio::VirtIoBlkDev<H, T>>,
             #[cfg(feature = "multitask")]
             wait_queue: axtask::WaitQueue,
+        }
+
+        pub struct VirtIoBlkDevWrapper<H: VirtIoHal, T: virtio_drivers::transport::Transport> {
+            inner: Arc<VirtIoBlkDevInner<H, T>>,
             irq: usize,
         }
 
@@ -164,18 +172,17 @@ cfg_if! {
             pub fn try_new(transport: T, irq: usize) -> DevResult<Self> {
                 let mut dev = axdriver_virtio::VirtIoBlkDev::try_new(transport)?;
                 dev.enable_interrupts();
-                let wrapper = Self {
+                let inner = Arc::new(VirtIoBlkDevInner {
                     inner: SpinNoIrq::new(dev),
                     #[cfg(feature = "multitask")]
                     wait_queue: axtask::WaitQueue::new(),
-                    irq,
-                };
+                });
                 if irq > 0 {
-                    let dev_ptr = &wrapper as *const Self as *const ();
+                    let dev_ptr = Arc::as_ptr(&inner) as *const ();
                     unsafe fn handler<H: VirtIoHal, T: virtio_drivers::transport::Transport>(ptr: *const ()) {
-                        let w = unsafe { &*(ptr as *const VirtIoBlkDevWrapper<H, T>) };
-                        let mut inner = w.inner.lock();
-                        if inner.ack_interrupt() {
+                        let w = unsafe { &*(ptr as *const VirtIoBlkDevInner<H, T>) };
+                        let mut inner_dev = w.inner.lock();
+                        if inner_dev.ack_interrupt() {
                             #[cfg(feature = "multitask")]
                             w.wait_queue.notify_all(true);
                         }
@@ -185,8 +192,9 @@ cfg_if! {
                         handler: handler::<H, T>,
                     });
                     axhal::irq::register(irq, common_virtio_irq_handler);
+                    axhal::irq::set_enable(irq, true);
                 }
-                Ok(wrapper)
+                Ok(Self { inner, irq })
             }
         }
 
@@ -201,13 +209,13 @@ cfg_if! {
 
         impl<H: VirtIoHal, T: virtio_drivers::transport::Transport> axdriver_block::BlockDriverOps for VirtIoBlkDevWrapper<H, T> {
             fn num_blocks(&self) -> u64 {
-                self.inner.lock().num_blocks()
+                self.inner.inner.lock().num_blocks()
             }
             fn block_size(&self) -> usize {
-                self.inner.lock().block_size()
+                self.inner.inner.lock().block_size()
             }
             fn read_block(&mut self, block_id: u64, buf: &mut [u8]) -> DevResult {
-                let mut inner = self.inner.lock();
+                let mut inner = self.inner.inner.lock();
                 let mut req = virtio_drivers::device::blk::BlkReq::default();
                 let mut resp = virtio_drivers::device::blk::BlkResp::default();
                 let token = unsafe {
@@ -225,18 +233,24 @@ cfg_if! {
 
                 #[cfg(feature = "multitask")]
                 {
-                    while self.inner.lock().inner.peek_used() != Some(token) {
-                        self.wait_queue.wait();
+                    if axhal::asm::irqs_enabled() {
+                        while self.inner.inner.lock().inner.peek_used() != Some(token) {
+                            self.inner.wait_queue.wait();
+                        }
+                    } else {
+                        while self.inner.inner.lock().inner.peek_used() != Some(token) {
+                            core::hint::spin_loop();
+                        }
                     }
                 }
                 #[cfg(not(feature = "multitask"))]
                 {
-                    while self.inner.lock().inner.peek_used() != Some(token) {
+                    while self.inner.inner.lock().inner.peek_used() != Some(token) {
                         core::hint::spin_loop();
                     }
                 }
 
-                let mut inner = self.inner.lock();
+                let mut inner = self.inner.inner.lock();
                 unsafe {
                     inner.inner.complete_read_blocks(token, &req, buf, &mut resp)
                 }.map_err(|e| {
@@ -252,7 +266,7 @@ cfg_if! {
             }
 
             fn write_block(&mut self, block_id: u64, buf: &[u8]) -> DevResult {
-                let mut inner = self.inner.lock();
+                let mut inner = self.inner.inner.lock();
                 let mut req = virtio_drivers::device::blk::BlkReq::default();
                 let mut resp = virtio_drivers::device::blk::BlkResp::default();
                 let token = unsafe {
@@ -270,18 +284,24 @@ cfg_if! {
 
                 #[cfg(feature = "multitask")]
                 {
-                    while self.inner.lock().inner.peek_used() != Some(token) {
-                        self.wait_queue.wait();
+                    if axhal::asm::irqs_enabled() {
+                        while self.inner.inner.lock().inner.peek_used() != Some(token) {
+                            self.inner.wait_queue.wait();
+                        }
+                    } else {
+                        while self.inner.inner.lock().inner.peek_used() != Some(token) {
+                            core::hint::spin_loop();
+                        }
                     }
                 }
                 #[cfg(not(feature = "multitask"))]
                 {
-                    while self.inner.lock().inner.peek_used() != Some(token) {
+                    while self.inner.inner.lock().inner.peek_used() != Some(token) {
                         core::hint::spin_loop();
                     }
                 }
 
-                let mut inner = self.inner.lock();
+                let mut inner = self.inner.inner.lock();
                 unsafe {
                     inner.inner.complete_write_blocks(token, &req, buf, &mut resp)
                 }.map_err(|e| {
@@ -297,7 +317,7 @@ cfg_if! {
             }
 
             fn flush(&mut self) -> DevResult {
-                self.inner.lock().flush()
+                self.inner.inner.lock().flush()
             }
         }
 
@@ -380,7 +400,11 @@ impl<D: VirtIoDevMeta> DriverProbe for VirtIoDriver<D> {
         {
             if ty == D::DEVICE_TYPE {
                 let word = root.config_read_word(bdf, 0x3c);
-                let irq = (word & 0xff) as usize;
+                let mut irq = (word & 0xff) as usize;
+                #[cfg(target_arch = "loongarch64")]
+                if irq < 32 {
+                    irq += 32;
+                }
                 match D::try_new(transport, irq) {
                     Ok(dev) => return Some(dev),
                     Err(e) => {
