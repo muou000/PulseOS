@@ -5,7 +5,7 @@ use virtio_drivers::{device::blk::VirtIOBlk as InnerDev, transport::Transport, H
 
 /// The VirtIO block device driver.
 pub struct VirtIoBlkDev<H: Hal, T: Transport> {
-    inner: InnerDev<H, T>,
+    pub inner: InnerDev<H, T>,
 }
 
 unsafe impl<H: Hal, T: Transport> Send for VirtIoBlkDev<H, T> {}

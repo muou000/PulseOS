@@ -52,6 +52,7 @@ path = "src/lib.rs"
 [dependencies]
 log = "0.4"
 spin = "0.9"
+axpoll = "0.3"
 
 [dependencies.axdriver_base]
 version = "0.1"

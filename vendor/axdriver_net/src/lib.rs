@@ -65,6 +65,11 @@ pub trait NetDriverOps: BaseDriverOps {
     /// Allocate a memory buffer of a specified size for network transmission,
     /// returns [`DevResult`]
     fn alloc_tx_buffer(&mut self, size: usize) -> DevResult<NetBufPtr>;
+
+    /// Returns the poll set of the device, if supported.
+    fn poll_set(&self) -> Option<&axpoll::PollSet> {
+        None
+    }
 }
 
 /// A raw buffer struct for network device.

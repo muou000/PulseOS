@@ -1,8 +1,11 @@
 use core::marker::PhantomData;
 use core::ptr::NonNull;
+use alloc::sync::Arc;
+use axpoll::PollSet;
+use kspin::SpinNoIrq;
 
 use axalloc::global_allocator;
-use axdriver_base::{BaseDriverOps, DevResult, DeviceType};
+use axdriver_base::{BaseDriverOps, DevResult, DevError, DeviceType};
 use axdriver_virtio::{BufferDirection, PhysAddr, VirtIoHal};
 use axhal::mem::{phys_to_virt, virt_to_phys};
 use cfg_if::cfg_if;
@@ -28,16 +31,116 @@ pub trait VirtIoDevMeta {
     fn try_new(transport: VirtIoTransport, irq: usize) -> DevResult<AxDeviceEnum>;
 }
 
+struct VirtioInterruptInfo {
+    dev_ptr: *const (),
+    handler: unsafe fn(*const ()),
+}
+
+unsafe impl Send for VirtioInterruptInfo {}
+unsafe impl Sync for VirtioInterruptInfo {}
+
+static VIRTIO_INTERRUPTS: SpinNoIrq<alloc::collections::BTreeMap<usize, VirtioInterruptInfo>> = SpinNoIrq::new(alloc::collections::BTreeMap::new());
+
+fn common_virtio_irq_handler(irq: usize) {
+    let guard = VIRTIO_INTERRUPTS.lock();
+    if let Some(info) = guard.get(&irq) {
+        unsafe { (info.handler)(info.dev_ptr); }
+    }
+}
+
 cfg_if! {
     if #[cfg(net_dev = "virtio-net")] {
         pub struct VirtIoNet;
 
+        pub struct VirtIoNetDevWrapper<H: VirtIoHal, T: virtio_drivers::transport::Transport, const QS: usize> {
+            inner: SpinNoIrq<axdriver_virtio::VirtIoNetDev<H, T, QS>>,
+            poll_set: Arc<PollSet>,
+            irq: usize,
+        }
+
+        unsafe impl<H: VirtIoHal, T: virtio_drivers::transport::Transport, const QS: usize> Send for VirtIoNetDevWrapper<H, T, QS> {}
+        unsafe impl<H: VirtIoHal, T: virtio_drivers::transport::Transport, const QS: usize> Sync for VirtIoNetDevWrapper<H, T, QS> {}
+
+        impl<H: VirtIoHal, T: virtio_drivers::transport::Transport, const QS: usize> VirtIoNetDevWrapper<H, T, QS> {
+            pub fn try_new(transport: T, irq: usize) -> DevResult<Self> {
+                let mut dev = axdriver_virtio::VirtIoNetDev::try_new(transport)?;
+                dev.enable_interrupts();
+                let poll_set = Arc::new(PollSet::new());
+                let wrapper = Self {
+                    inner: SpinNoIrq::new(dev),
+                    poll_set,
+                    irq,
+                };
+                if irq > 0 {
+                    let dev_ptr = &wrapper as *const Self as *const ();
+                    unsafe fn handler<H: VirtIoHal, T: virtio_drivers::transport::Transport, const QS: usize>(ptr: *const ()) {
+                        let w = unsafe { &*(ptr as *const VirtIoNetDevWrapper<H, T, QS>) };
+                        let mut inner = w.inner.lock();
+                        if inner.ack_interrupt() {
+                            w.poll_set.wake();
+                        }
+                    }
+                    VIRTIO_INTERRUPTS.lock().insert(irq, VirtioInterruptInfo {
+                        dev_ptr,
+                        handler: handler::<H, T, QS>,
+                    });
+                    axhal::irq::register(irq, common_virtio_irq_handler);
+                }
+                Ok(wrapper)
+            }
+        }
+
+        impl<H: VirtIoHal, T: virtio_drivers::transport::Transport, const QS: usize> BaseDriverOps for VirtIoNetDevWrapper<H, T, QS> {
+            fn device_name(&self) -> &str {
+                "virtio-net"
+            }
+            fn device_type(&self) -> DeviceType {
+                DeviceType::Net
+            }
+        }
+
+        impl<H: VirtIoHal, T: virtio_drivers::transport::Transport, const QS: usize> axdriver_net::NetDriverOps for VirtIoNetDevWrapper<H, T, QS> {
+            fn mac_address(&self) -> axdriver_net::EthernetAddress {
+                self.inner.lock().mac_address()
+            }
+            fn can_transmit(&self) -> bool {
+                self.inner.lock().can_transmit()
+            }
+            fn can_receive(&self) -> bool {
+                self.inner.lock().can_receive()
+            }
+            fn rx_queue_size(&self) -> usize {
+                self.inner.lock().rx_queue_size()
+            }
+            fn tx_queue_size(&self) -> usize {
+                self.inner.lock().tx_queue_size()
+            }
+            fn recycle_rx_buffer(&mut self, rx_buf: axdriver_net::NetBufPtr) -> DevResult {
+                self.inner.lock().recycle_rx_buffer(rx_buf)
+            }
+            fn recycle_tx_buffers(&mut self) -> DevResult {
+                self.inner.lock().recycle_tx_buffers()
+            }
+            fn transmit(&mut self, tx_buf: axdriver_net::NetBufPtr) -> DevResult {
+                self.inner.lock().transmit(tx_buf)
+            }
+            fn receive(&mut self) -> DevResult<axdriver_net::NetBufPtr> {
+                self.inner.lock().receive()
+            }
+            fn alloc_tx_buffer(&mut self, size: usize) -> DevResult<axdriver_net::NetBufPtr> {
+                self.inner.lock().alloc_tx_buffer(size)
+            }
+            fn poll_set(&self) -> Option<&axpoll::PollSet> {
+                Some(&self.poll_set)
+            }
+        }
+
         impl VirtIoDevMeta for VirtIoNet {
             const DEVICE_TYPE: DeviceType = DeviceType::Net;
-            type Device = axdriver_virtio::VirtIoNetDev<VirtIoHalImpl, VirtIoTransport, 64>;
+            type Device = VirtIoNetDevWrapper<VirtIoHalImpl, VirtIoTransport, 64>;
 
-            fn try_new(transport: VirtIoTransport, _irq: usize) -> DevResult<AxDeviceEnum> {
-                Ok(AxDeviceEnum::from_net(Self::Device::try_new(transport)?))
+            fn try_new(transport: VirtIoTransport, irq: usize) -> DevResult<AxDeviceEnum> {
+                Ok(AxDeviceEnum::from_net(Self::Device::try_new(transport, irq)?))
             }
         }
     }
@@ -47,12 +150,163 @@ cfg_if! {
     if #[cfg(block_dev = "virtio-blk")] {
         pub struct VirtIoBlk;
 
+        pub struct VirtIoBlkDevWrapper<H: VirtIoHal, T: virtio_drivers::transport::Transport> {
+            inner: SpinNoIrq<axdriver_virtio::VirtIoBlkDev<H, T>>,
+            #[cfg(feature = "multitask")]
+            wait_queue: axtask::WaitQueue,
+            irq: usize,
+        }
+
+        unsafe impl<H: VirtIoHal, T: virtio_drivers::transport::Transport> Send for VirtIoBlkDevWrapper<H, T> {}
+        unsafe impl<H: VirtIoHal, T: virtio_drivers::transport::Transport> Sync for VirtIoBlkDevWrapper<H, T> {}
+
+        impl<H: VirtIoHal, T: virtio_drivers::transport::Transport> VirtIoBlkDevWrapper<H, T> {
+            pub fn try_new(transport: T, irq: usize) -> DevResult<Self> {
+                let mut dev = axdriver_virtio::VirtIoBlkDev::try_new(transport)?;
+                dev.enable_interrupts();
+                let wrapper = Self {
+                    inner: SpinNoIrq::new(dev),
+                    #[cfg(feature = "multitask")]
+                    wait_queue: axtask::WaitQueue::new(),
+                    irq,
+                };
+                if irq > 0 {
+                    let dev_ptr = &wrapper as *const Self as *const ();
+                    unsafe fn handler<H: VirtIoHal, T: virtio_drivers::transport::Transport>(ptr: *const ()) {
+                        let w = unsafe { &*(ptr as *const VirtIoBlkDevWrapper<H, T>) };
+                        let mut inner = w.inner.lock();
+                        if inner.ack_interrupt() {
+                            #[cfg(feature = "multitask")]
+                            w.wait_queue.notify_all(true);
+                        }
+                    }
+                    VIRTIO_INTERRUPTS.lock().insert(irq, VirtioInterruptInfo {
+                        dev_ptr,
+                        handler: handler::<H, T>,
+                    });
+                    axhal::irq::register(irq, common_virtio_irq_handler);
+                }
+                Ok(wrapper)
+            }
+        }
+
+        impl<H: VirtIoHal, T: virtio_drivers::transport::Transport> BaseDriverOps for VirtIoBlkDevWrapper<H, T> {
+            fn device_name(&self) -> &str {
+                "virtio-blk"
+            }
+            fn device_type(&self) -> DeviceType {
+                DeviceType::Block
+            }
+        }
+
+        impl<H: VirtIoHal, T: virtio_drivers::transport::Transport> axdriver_block::BlockDriverOps for VirtIoBlkDevWrapper<H, T> {
+            fn num_blocks(&self) -> u64 {
+                self.inner.lock().num_blocks()
+            }
+            fn block_size(&self) -> usize {
+                self.inner.lock().block_size()
+            }
+            fn read_block(&mut self, block_id: u64, buf: &mut [u8]) -> DevResult {
+                let mut inner = self.inner.lock();
+                let mut req = virtio_drivers::device::blk::BlkReq::default();
+                let mut resp = virtio_drivers::device::blk::BlkResp::default();
+                let token = unsafe {
+                    inner.inner.read_blocks_nb(block_id as usize, &mut req, buf, &mut resp)
+                }.map_err(|e| {
+                    use virtio_drivers::Error::*;
+                    match e {
+                        QueueFull => DevError::BadState,
+                        InvalidParam => DevError::InvalidParam,
+                        DmaError => DevError::Io,
+                        _ => DevError::Io,
+                    }
+                })?;
+                drop(inner);
+
+                #[cfg(feature = "multitask")]
+                {
+                    while self.inner.lock().inner.peek_used() != Some(token) {
+                        self.wait_queue.wait();
+                    }
+                }
+                #[cfg(not(feature = "multitask"))]
+                {
+                    while self.inner.lock().inner.peek_used() != Some(token) {
+                        core::hint::spin_loop();
+                    }
+                }
+
+                let mut inner = self.inner.lock();
+                unsafe {
+                    inner.inner.complete_read_blocks(token, &req, buf, &mut resp)
+                }.map_err(|e| {
+                    use virtio_drivers::Error::*;
+                    match e {
+                        QueueFull => DevError::BadState,
+                        InvalidParam => DevError::InvalidParam,
+                        DmaError => DevError::Io,
+                        _ => DevError::Io,
+                    }
+                })?;
+                Ok(())
+            }
+
+            fn write_block(&mut self, block_id: u64, buf: &[u8]) -> DevResult {
+                let mut inner = self.inner.lock();
+                let mut req = virtio_drivers::device::blk::BlkReq::default();
+                let mut resp = virtio_drivers::device::blk::BlkResp::default();
+                let token = unsafe {
+                    inner.inner.write_blocks_nb(block_id as usize, &mut req, buf, &mut resp)
+                }.map_err(|e| {
+                    use virtio_drivers::Error::*;
+                    match e {
+                        QueueFull => DevError::BadState,
+                        InvalidParam => DevError::InvalidParam,
+                        DmaError => DevError::Io,
+                        _ => DevError::Io,
+                    }
+                })?;
+                drop(inner);
+
+                #[cfg(feature = "multitask")]
+                {
+                    while self.inner.lock().inner.peek_used() != Some(token) {
+                        self.wait_queue.wait();
+                    }
+                }
+                #[cfg(not(feature = "multitask"))]
+                {
+                    while self.inner.lock().inner.peek_used() != Some(token) {
+                        core::hint::spin_loop();
+                    }
+                }
+
+                let mut inner = self.inner.lock();
+                unsafe {
+                    inner.inner.complete_write_blocks(token, &req, buf, &mut resp)
+                }.map_err(|e| {
+                    use virtio_drivers::Error::*;
+                    match e {
+                        QueueFull => DevError::BadState,
+                        InvalidParam => DevError::InvalidParam,
+                        DmaError => DevError::Io,
+                        _ => DevError::Io,
+                    }
+                })?;
+                Ok(())
+            }
+
+            fn flush(&mut self) -> DevResult {
+                self.inner.lock().flush()
+            }
+        }
+
         impl VirtIoDevMeta for VirtIoBlk {
             const DEVICE_TYPE: DeviceType = DeviceType::Block;
-            type Device = axdriver_virtio::VirtIoBlkDev<VirtIoHalImpl, VirtIoTransport>;
+            type Device = VirtIoBlkDevWrapper<VirtIoHalImpl, VirtIoTransport>;
 
-            fn try_new(transport: VirtIoTransport, _irq: usize) -> DevResult<AxDeviceEnum> {
-                Ok(AxDeviceEnum::from_block(Self::Device::try_new(transport)?))
+            fn try_new(transport: VirtIoTransport, irq: usize) -> DevResult<AxDeviceEnum> {
+                Ok(AxDeviceEnum::from_block(Self::Device::try_new(transport, irq)?))
             }
         }
     }
