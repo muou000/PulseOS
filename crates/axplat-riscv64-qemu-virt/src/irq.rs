@@ -129,7 +129,10 @@ impl IrqIf for IrqIfImpl {
                 warn!("External IRQ should be got from PLIC, not scause");
                 None
             },
-            @EX_IRQ => IRQ_HANDLER_TABLE.unregister_handler(irq)
+            @EX_IRQ => {
+                Self::set_enable(irq, false);
+                IRQ_HANDLER_TABLE.unregister_handler(irq)
+            }
         )
     }
 
