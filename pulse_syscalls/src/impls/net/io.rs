@@ -44,10 +44,11 @@ fn resolve_unix_addr(addr: usize, addrlen: usize) -> Result<core::net::SocketAdd
     } else {
         let first_byte = read_user_plain::<u8>(addr + 2)?;
         if first_byte == 0 {
-            let len = (addrlen as usize).saturating_sub(3);
-            let mut buf = alloc::vec![0u8; len];
-            crate::impls::utils::read_user_bytes(addr + 3, &mut buf)?;
-            let name = alloc::string::String::from_utf8_lossy(&buf);
+            let len = (addrlen as usize).saturating_sub(3).min(128);
+            let mut buf = [0u8; 128];
+            let buf_slice = &mut buf[..len];
+            crate::impls::utils::read_user_bytes(addr + 3, buf_slice)?;
+            let name = alloc::string::String::from_utf8_lossy(buf_slice);
             let mut s = alloc::string::String::with_capacity(name.len() + 1);
             s.push('\0');
             s.push_str(&name);

@@ -34,3 +34,6 @@
 ## 2025-05-20 - Avoid format! macro allocations in hot loops for prefix checking using replace_range
 **Learning:** Even when avoiding allocations on non-matching strings by using slicing, creating a completely new `String` for the matches via `format!` triggers a heap allocation. In many cases where the input is already an owned `String`, using `replace_range` on the matched target correctly allows the existing allocation to be reused.
 **Action:** When validating target string matches and a string requires replacement inside a struct/array, prefer `String::replace_range` on the owned string to avoid creating a new `String` object via `format!`.
+## 2026-07-09 - Replace dynamic vec allocation with stack array in syscalls
+**Learning:** In performance-critical paths such as syscalls, when a temporary buffer has a known, small maximum length (e.g., <= 128 bytes), using `alloc::vec![0u8; len]` introduces dynamic allocation overhead and memory fragmentation. The system call path can be heavily optimized by placing these small buffers on the stack.
+**Action:** Use a fixed-size stack array (e.g., `[0u8; 128]`) and slice it to the required length (e.g., `&mut buf[..len]`). Always ensure the user-provided length is safely clamped (e.g., `len.min(128)`) before slicing to prevent out-of-bounds panics that could lead to Denial of Service vulnerabilities.
