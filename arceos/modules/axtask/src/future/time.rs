@@ -8,7 +8,7 @@ use core::{
 };
 
 use axerrno::AxError;
-use axhal::time::{TimeValue, wall_time};
+use axhal::time::{TimeValue, monotonic_time};
 use futures_util::{FutureExt, select_biased};
 
 macro_rules! percpu_static {
@@ -44,7 +44,7 @@ impl TimerRuntime {
     }
 
     fn add(&mut self, deadline: TimeValue) -> Option<TimerKey> {
-        if deadline <= wall_time() {
+        if deadline <= monotonic_time() {
             return None;
         }
 
@@ -76,7 +76,7 @@ impl TimerRuntime {
             return;
         }
 
-        let now = wall_time();
+        let now = monotonic_time();
 
         let pending = self.wheel.split_off(&TimerKey {
             deadline: now,
@@ -125,7 +125,7 @@ impl Drop for TimerFuture {
 
 /// Waits until `duration` has elapsed.
 pub async fn sleep(duration: Duration) {
-    sleep_until(wall_time() + duration).await
+    sleep_until(monotonic_time() + duration).await
 }
 
 /// Waits until `deadline` is reached.
@@ -158,7 +158,7 @@ pub async fn timeout<F: IntoFuture>(
     f: F,
 ) -> Result<F::Output, Elapsed> {
     timeout_at(
-        duration.and_then(|x| x.checked_add(axhal::time::wall_time())),
+        duration.and_then(|x| x.checked_add(axhal::time::monotonic_time())),
         f,
     )
     .await
