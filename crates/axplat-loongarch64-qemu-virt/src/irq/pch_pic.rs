@@ -13,27 +13,21 @@ const PCH_PIC_INT_STATUS: usize = 0x0c0;
 const PCH_PIC_INT_ROUTE: usize = 0x100;
 const PCH_PIC_HTMSI_VEC: usize = 0x200;
 
-const PCH_PIC_BASE_VADDR: usize = 0xffff_8000_1000_0000;
-
-pub struct PchPic;
+pub struct PchPic {
+    base_vaddr: usize,
+}
 
 impl PchPic {
-    pub const fn new(_base_vaddr: usize) -> Self {
-        Self
+    pub const fn new(base_vaddr: usize) -> Self {
+        Self { base_vaddr }
     }
 
     unsafe fn write_reg64(&self, offset: usize, val: u64) {
-        let high = core::hint::black_box(0xffff_8000_0000_0000usize);
-        let low = core::hint::black_box(0x1000_0000usize);
-        let base = high + low;
-        write_volatile((base + offset) as *mut u64, val);
+        write_volatile((self.base_vaddr + offset) as *mut u64, val);
     }
 
     unsafe fn read_reg64(&self, offset: usize) -> u64 {
-        let high = core::hint::black_box(0xffff_8000_0000_0000usize);
-        let low = core::hint::black_box(0x1000_0000usize);
-        let base = high + low;
-        read_volatile((base + offset) as *const u64)
+        read_volatile((self.base_vaddr + offset) as *const u64)
     }
 
     pub fn init(&self) {
