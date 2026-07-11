@@ -4,14 +4,14 @@ use kspin::SpinNoIrq;
 
 static PIC_LOCK: SpinNoIrq<()> = SpinNoIrq::new(());
 
-const PCH_PIC_INT_EDGE: usize = 0x000;
+const PCH_PIC_INT_MASK: usize = 0x020;
+const PCH_PIC_HTMSI_EN: usize = 0x040;
+const PCH_PIC_INT_EDGE: usize = 0x060;
 const PCH_PIC_INT_POL: usize = 0x080;
-const PCH_PIC_INT_MASK: usize = 0x100;
-const PCH_PIC_HTE: usize = 0x180;
-const PCH_PIC_INT_EN: usize = 0x200;
-const PCH_PIC_INT_CLR: usize = 0x280;
-const PCH_PIC_INT_STATUS: usize = 0x300;
-const PCH_PIC_INT_ROUTE: usize = 0x380;
+const PCH_PIC_INT_CLR: usize = 0x0a0;
+const PCH_PIC_INT_STATUS: usize = 0x0c0;
+const PCH_PIC_INT_ROUTE: usize = 0x100;
+const PCH_PIC_HTMSI_VEC: usize = 0x200;
 
 const PCH_PIC_BASE_VADDR: usize = 0xffff_8000_1000_0000;
 
@@ -44,8 +44,8 @@ impl PchPic {
             self.write_reg64(PCH_PIC_INT_EDGE, 0);
             // Set all to high-level/rising-edge active (0 for high, 1 for low)
             self.write_reg64(PCH_PIC_INT_POL, 0);
-            // Disable all High Trigger Enable
-            self.write_reg64(PCH_PIC_HTE, 0);
+            // Disable HTMSI translation
+            self.write_reg64(PCH_PIC_HTMSI_EN, 0);
 
             // Route interrupts 0..64 to outputs 0..64 (which go to EIOINTC)
             // Use 64-bit (8-byte) writes to avoid byte-sized MMIO access constraints on QEMU.
@@ -60,8 +60,7 @@ impl PchPic {
 
             // Clear all pending interrupts
             self.write_reg64(PCH_PIC_INT_CLR, 0xffff_ffff_ffff_ffff);
-            // Enable all interrupts in the controller (still masked by INT_MASK)
-            self.write_reg64(PCH_PIC_INT_EN, 0xffff_ffff_ffff_ffff);
+
         }
     }
 
