@@ -51,9 +51,9 @@ pub fn csr_mail_send(entry: u64, cpu: usize, mailbox: usize) {
 }
 
 pub fn send_ipi_single(cpu: usize, action: u32) {
-    let mut val: u32 = IOCSR_IPI_SEND_BLOCKING;
     for i in 0..32 {
         if (action & (1 << i)) != 0 {
+            let mut val: u32 = IOCSR_IPI_SEND_BLOCKING;
             val |= (cpu << IOCSR_IPI_SEND_CPU_SHIFT) as u32;
             val |= i as u32;
             iocsr_write_u32(LOONGARCH_IOCSR_IPI_SEND, val);
