@@ -181,8 +181,8 @@ cfg_if! {
                     let dev_ptr = Arc::as_ptr(&inner) as *const ();
                     unsafe fn handler<H: VirtIoHal, T: virtio_drivers::transport::Transport>(ptr: *const ()) {
                         let w = unsafe { &*(ptr as *const VirtIoBlkDevInner<H, T>) };
-                        let mut inner_dev = w.inner.lock();
-                        if inner_dev.ack_interrupt() {
+                        let acked = w.inner.lock().ack_interrupt();
+                        if acked {
                             #[cfg(feature = "multitask")]
                             w.wait_queue.notify_all(true);
                         }
@@ -230,13 +230,12 @@ cfg_if! {
                     }
                 })?;
                 drop(inner);
-
                 #[cfg(feature = "multitask")]
                 {
                     if axhal::asm::irqs_enabled() {
-                        while self.inner.inner.lock().inner.peek_used() != Some(token) {
-                            self.inner.wait_queue.wait();
-                        }
+                        self.inner.wait_queue.wait_until(|| {
+                            self.inner.inner.lock().inner.peek_used() == Some(token)
+                        });
                     } else {
                         while self.inner.inner.lock().inner.peek_used() != Some(token) {
                             core::hint::spin_loop();
@@ -281,13 +280,12 @@ cfg_if! {
                     }
                 })?;
                 drop(inner);
-
                 #[cfg(feature = "multitask")]
                 {
                     if axhal::asm::irqs_enabled() {
-                        while self.inner.inner.lock().inner.peek_used() != Some(token) {
-                            self.inner.wait_queue.wait();
-                        }
+                        self.inner.wait_queue.wait_until(|| {
+                            self.inner.inner.lock().inner.peek_used() == Some(token)
+                        });
                     } else {
                         while self.inner.inner.lock().inner.peek_used() != Some(token) {
                             core::hint::spin_loop();
