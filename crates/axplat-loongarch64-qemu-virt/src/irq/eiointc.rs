@@ -1,8 +1,5 @@
-const IOCSR_DMW_BASE: usize = 0x8000_0000_0000_0000;
-
 #[inline]
 fn iocsr_read_d(reg: usize) -> u64 {
-    let reg = reg | IOCSR_DMW_BASE;
     let val: u64;
     unsafe {
         core::arch::asm!("iocsrrd.d {},{}", out(reg) val, in(reg) reg);
@@ -12,7 +9,6 @@ fn iocsr_read_d(reg: usize) -> u64 {
 
 #[inline]
 fn iocsr_write_b(reg: usize, value: u8) {
-    let reg = reg | IOCSR_DMW_BASE;
     unsafe {
         core::arch::asm!("iocsrwr.b {},{}", in(reg) value, in(reg) reg);
     }
@@ -20,7 +16,6 @@ fn iocsr_write_b(reg: usize, value: u8) {
 
 #[inline]
 fn iocsr_write_d(reg: usize, value: u64) {
-    let reg = reg | IOCSR_DMW_BASE;
     unsafe {
         core::arch::asm!("iocsrwr.d {},{}", in(reg) value, in(reg) reg);
     }

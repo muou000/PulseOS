@@ -1,6 +1,4 @@
 use axplat::mem::PhysAddr;
-const IOCSR_DMW_BASE: usize = 0x8000_0000_0000_0000;
-
 const LOONGARCH_IOCSR_IPI_SEND: usize = 0x1040;
 const LOONGARCH_IOCSR_MBUF_SEND: usize = 0x1048;
 
@@ -15,7 +13,6 @@ const IOCSR_MBUF_SEND_H32_MASK: u64 = 0xffff_ffff_0000_0000;
 
 #[inline]
 fn iocsr_write_u32(addr: usize, value: u32) {
-    let addr = addr | IOCSR_DMW_BASE;
     unsafe {
         core::arch::asm!("iocsrwr.w {},{}", in(reg) value, in(reg) addr);
     }
@@ -23,7 +20,6 @@ fn iocsr_write_u32(addr: usize, value: u32) {
 
 #[inline]
 fn iocsr_write_u64(addr: usize, value: u64) {
-    let addr = addr | IOCSR_DMW_BASE;
     unsafe {
         core::arch::asm!("iocsrwr.d {},{}", in(reg) value, in(reg) addr);
     }
