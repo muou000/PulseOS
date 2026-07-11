@@ -60,19 +60,26 @@ impl IrqIf for IrqIfImpl {
                 warn!("Unhandled Timer IRQ");
             }
         } else if irq == loongArch64::register::estat::Interrupt::HWI0 as usize {
-            // External interrupt from EIOINTC/PCH-PIC
-            let mut pending = eiointc::get_pending();
-            while pending != 0 {
-                let pch_irq = pending.trailing_zeros() as usize;
-                let global_irq = PCH_PIC_IRQ_BASE + pch_irq;
-                trace!("PCH-PIC IRQ {}", pch_irq);
-                if !IRQ_HANDLER_TABLE.handle(global_irq) {
-                    warn!("Unhandled PCH-PIC IRQ {}", pch_irq);
+            // External interrupt from EIOINTC
+            for group in 0..4 {
+                let mut pending = eiointc::get_pending_group(group);
+                while pending != 0 {
+                    let bit = pending.trailing_zeros() as usize;
+                    let irq_num = group * 64 + bit;
+                    let global_irq = PCH_PIC_IRQ_BASE + irq_num;
+                    trace!("EIOINTC IRQ {}", irq_num);
+                    if !IRQ_HANDLER_TABLE.handle(global_irq) {
+                        warn!("Unhandled EIOINTC IRQ {}", irq_num);
+                    }
+                    if irq_num < 64 {
+                        if let Some(pic) = pch_pic::PCH_PIC.get() {
+                            pic.clear_irq(irq_num);
+                        }
+                    } else {
+                        eiointc::clear_pending(irq_num);
+                    }
+                    pending &= !(1u64 << bit);
                 }
-                if let Some(pic) = pch_pic::PCH_PIC.get() {
-                    pic.clear_irq(pch_irq);
-                }
-                pending &= !(1u64 << pch_irq);
             }
         } else {
             trace!("IRQ {}", irq);

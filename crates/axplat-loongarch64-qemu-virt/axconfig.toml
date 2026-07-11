@@ -86,5 +86,8 @@ timer-irq = 11                          # uint
 # PCH-PIC Address
 pch-pic-paddr = 0x1000_0000             # uint
 
+# PCH-MSI Address
+pch-msi-paddr = 0x2ff0_0000             # uint
+
 # RTC (ls7a) Address
 rtc-paddr = 0x100d_0100                 # uint

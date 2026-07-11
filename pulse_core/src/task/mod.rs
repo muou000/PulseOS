@@ -1,4 +1,4 @@
-mod exec;
+pub mod exec;
 mod process;
 mod signal;
 mod thread;

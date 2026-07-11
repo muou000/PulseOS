@@ -36,6 +36,12 @@ axmm = { path = "arceos/modules/axmm" }
 axerrno = "0.2"
 axpoll = "0.3"
 
+axdriver_base = { path = "vendor/axdriver_base" }
+axdriver_block = { path = "vendor/axdriver_block" }
+axdriver_net = { path = "vendor/axdriver_net" }
+axdriver_pci = { path = "vendor/axdriver_pci" }
+axdriver_virtio = { path = "vendor/axdriver_virtio" }
+
 axplat-riscv64-qemu-virt = "0.3.0"
 axplat-loongarch64-qemu-virt = "0.3.0"
 
@@ -116,3 +122,11 @@ axplat-loongarch64-qemu-virt.workspace = true
 
 [patch."https://github.com/rcore-os/smoltcp.git"]
 smoltcp = { path = "crates/smoltcp" }
+
+[patch."https://github.com/arceos-org/axdriver_crates.git"]
+axdriver_base = { path = "vendor/axdriver_base" }
+axdriver_block = { path = "vendor/axdriver_block" }
+axdriver_net = { path = "vendor/axdriver_net" }
+axdriver_pci = { path = "vendor/axdriver_pci" }
+axdriver_virtio = { path = "vendor/axdriver_virtio" }
+

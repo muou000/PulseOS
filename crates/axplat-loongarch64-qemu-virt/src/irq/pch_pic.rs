@@ -13,25 +13,27 @@ const PCH_PIC_INT_CLR: usize = 0x280;
 const PCH_PIC_INT_STATUS: usize = 0x300;
 const PCH_PIC_INT_ROUTE: usize = 0x380;
 
-pub struct PchPic {
-    base_vaddr: usize,
-}
+const PCH_PIC_BASE_VADDR: usize = 0xffff_8000_1000_0000;
+
+pub struct PchPic;
 
 impl PchPic {
-    pub const fn new(base_vaddr: usize) -> Self {
-        Self { base_vaddr }
+    pub const fn new(_base_vaddr: usize) -> Self {
+        Self
     }
 
     unsafe fn write_reg64(&self, offset: usize, val: u64) {
-        write_volatile((self.base_vaddr + offset) as *mut u64, val);
+        let high = core::hint::black_box(0xffff_8000_0000_0000usize);
+        let low = core::hint::black_box(0x1000_0000usize);
+        let base = high + low;
+        write_volatile((base + offset) as *mut u64, val);
     }
 
     unsafe fn read_reg64(&self, offset: usize) -> u64 {
-        read_volatile((self.base_vaddr + offset) as *const u64)
-    }
-
-    unsafe fn write_reg8(&self, offset: usize, val: u8) {
-        write_volatile((self.base_vaddr + offset) as *mut u8, val);
+        let high = core::hint::black_box(0xffff_8000_0000_0000usize);
+        let low = core::hint::black_box(0x1000_0000usize);
+        let base = high + low;
+        read_volatile((base + offset) as *const u64)
     }
 
     pub fn init(&self) {
@@ -44,12 +46,18 @@ impl PchPic {
             self.write_reg64(PCH_PIC_INT_POL, 0);
             // Disable all High Trigger Enable
             self.write_reg64(PCH_PIC_HTE, 0);
-            
+
             // Route interrupts 0..64 to outputs 0..64 (which go to EIOINTC)
-            for i in 0..64 {
-                self.write_reg8(PCH_PIC_INT_ROUTE + i, i as u8);
+            // Use 64-bit (8-byte) writes to avoid byte-sized MMIO access constraints on QEMU.
+            for g in 0..8 {
+                let mut val = 0u64;
+                for i in 0..8 {
+                    let irq = g * 8 + i;
+                    val |= (irq as u64) << (i * 8);
+                }
+                self.write_reg64(PCH_PIC_INT_ROUTE + g * 8, val);
             }
-            
+
             // Clear all pending interrupts
             self.write_reg64(PCH_PIC_INT_CLR, 0xffff_ffff_ffff_ffff);
             // Enable all interrupts in the controller (still masked by INT_MASK)

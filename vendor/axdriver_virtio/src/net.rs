@@ -16,7 +16,7 @@ pub struct VirtIoNetDev<H: Hal, T: Transport, const QS: usize> {
     tx_buffers: [Option<NetBufBox>; QS],
     free_tx_bufs: Vec<NetBufBox>,
     buf_pool: Arc<NetBufPool>,
-    inner: InnerDev<H, T, QS>,
+    pub inner: InnerDev<H, T, QS>,
 }
 
 unsafe impl<H: Hal, T: Transport, const QS: usize> Send for VirtIoNetDev<H, T, QS> {}

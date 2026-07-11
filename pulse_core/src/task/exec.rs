@@ -62,7 +62,7 @@ fn check_txt_busy(loc: &axfs_ng_vfs::Location) -> AxResult<()> {
     Ok(())
 }
 
-fn resolve_exec_path_and_args(
+pub fn resolve_exec_path_and_args(
     fs: &FsContext,
     path: &str,
     args: &[&str],
@@ -144,6 +144,7 @@ fn resolve_exec_path_and_args(
 
 impl Process {
     pub fn load_elf(&self, path: &str, args: &[&str], envs: &[&str]) -> AxResult<()> {
+        axhal::asm::enable_irqs();
         let mut fs_ctx = self.fs_context_handle().lock().clone();
         fs_ctx.credentials = Some((self.fsuid(), self.fsgid()));
         let (path, argv) = resolve_exec_path_and_args(&fs_ctx, path, args)?;

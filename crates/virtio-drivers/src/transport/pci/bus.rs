@@ -191,7 +191,7 @@ impl PciRoot {
     }
 
     /// Writes 4 bytes to configuration space using the appropriate CAM.
-    pub(crate) fn config_write_word(
+    pub fn config_write_word(
         &mut self,
         device_function: DeviceFunction,
         register_offset: u8,

@@ -14,7 +14,7 @@ use crate::{AxDeviceEnum, drivers::DriverProbe};
 
 cfg_if! {
     if #[cfg(bus = "pci")] {
-        use axdriver_pci::{PciRoot, DeviceFunction, DeviceFunctionInfo};
+        use axdriver_pci::{PciRoot, DeviceFunction, DeviceFunctionInfo, BarInfo};
         type VirtIoTransport = axdriver_virtio::PciTransport;
     } else if #[cfg(bus =  "mmio")] {
         type VirtIoTransport = axdriver_virtio::MmioTransport;
@@ -395,16 +395,84 @@ impl<D: VirtIoDevMeta> DriverProbe for VirtIoDriver<D> {
             _ => return None,
         }
 
-        if let Some((ty, transport)) =
+        if let Some((ty, mut transport)) =
             axdriver_virtio::probe_pci_device::<VirtIoHalImpl>(root, bdf, dev_info)
         {
             if ty == D::DEVICE_TYPE {
-                let word = root.config_read_word(bdf, 0x3c);
-                let mut irq = (word & 0xff) as usize;
+                let mut irq = 0;
+                let mut msix_success = false;
+
                 #[cfg(target_arch = "loongarch64")]
-                if irq < 32 {
-                    irq += 32;
+                {
+                    // 1. Find MSI-X capability
+                    let mut msix_cap_offset = None;
+                    for cap in root.capabilities(bdf) {
+                        if cap.id == 0x11 { // MSI-X capability ID is 0x11
+                            msix_cap_offset = Some(cap.offset);
+                            break;
+                        }
+                    }
+
+                    if let Some(offset) = msix_cap_offset {
+                        // 2. Allocate an MSI-X vector (96..255)
+                        static NEXT_MSI_VECTOR: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(96);
+                        let msi_vector = NEXT_MSI_VECTOR.fetch_add(1, core::sync::atomic::Ordering::SeqCst);
+                        if msi_vector < 256 {
+                            // 3. Configure MSI-X Table
+                            let cap_word0 = root.config_read_word(bdf, offset);
+                            let msg_ctrl = (cap_word0 >> 16) as u16;
+                            let table_word = root.config_read_word(bdf, offset + 4);
+                            let table_bir = (table_word & 0x7) as u8;
+                            let table_offset = (table_word & !0x7) as usize;
+
+                            let bar_info = root.bar_info(bdf, table_bir).unwrap();
+                            if let BarInfo::Memory { address, .. } = bar_info {
+                                let table_paddr = address as usize + table_offset;
+                                let table_vaddr = phys_to_virt(table_paddr.into()).as_usize();
+
+                                // Write Vector 0 entry
+                                unsafe {
+                                    core::ptr::write_volatile((table_vaddr + 0) as *mut u32, 0x2ff00000); // Msg Addr Low (PCH-MSI)
+                                    core::ptr::write_volatile((table_vaddr + 4) as *mut u32, 0);          // Msg Addr High
+                                    core::ptr::write_volatile((table_vaddr + 8) as *mut u32, msi_vector as u32); // Msg Data
+                                    core::ptr::write_volatile((table_vaddr + 12) as *mut u32, 0);         // Vector Control (0 means unmasked)
+                                }
+
+                                // 4. Enable MSI-X in device configuration space
+                                let new_msg_ctrl = msg_ctrl | (1 << 15); // Enable bit
+                                let new_cap_word0 = (cap_word0 & 0xffff) | ((new_msg_ctrl as u32) << 16);
+                                root.config_write_word(bdf, offset, new_cap_word0);
+
+                                // 5. Bind VirtIO queue/config to MSI-X vector 0
+                                transport.set_config_msix_vector(0);
+                                for q in 0..16 {
+                                    transport.set_queue_msix_vector(q, 0);
+                                }
+                                transport.set_msix_enabled(true);
+
+                                // Global IRQ is 32 + msi_vector
+                                irq = 32 + msi_vector;
+                                msix_success = true;
+                                info!("PCI device at {} configured to use MSI-X (vector {}, irq {})", bdf, msi_vector, irq);
+                            }
+                        }
+                    }
                 }
+
+                if !msix_success {
+                    let word = root.config_read_word(bdf, 0x3c);
+                    irq = (word & 0xff) as usize;
+                    #[cfg(target_arch = "loongarch64")]
+                    {
+                        if irq == 0 || irq == 255 {
+                            irq = 16 + (bdf.device as usize % 4);
+                        }
+                        if irq < 32 {
+                            irq += 32;
+                        }
+                    }
+                }
+
                 match D::try_new(transport, irq) {
                     Ok(dev) => return Some(dev),
                     Err(e) => {
