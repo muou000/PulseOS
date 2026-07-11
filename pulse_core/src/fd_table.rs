@@ -1,6 +1,7 @@
 use alloc::{
     collections::{BTreeMap, VecDeque},
     sync::{Arc, Weak},
+    vec::Vec,
 };
 use memory_addr::{PhysAddr, VirtAddr};
 use axhal::paging::MappingFlags;
@@ -2016,18 +2017,26 @@ impl FdObject for EpollObject {
     }
 
     fn register_poll(&self, cx: &mut core::task::Context<'_>, _events: axpoll::IoEvents) -> LinuxResult {
-        let monitored = self.events.lock();
-        for (&fd, ev) in monitored.iter() {
-            if let Ok(entry) = crate::task::current_process()?.get_fd_entry(fd) {
-                let mut target_events = axpoll::IoEvents::empty();
-                if ev.event.events & EPOLLIN != 0 { target_events |= axpoll::IoEvents::IN; }
-                if ev.event.events & EPOLLOUT != 0 { target_events |= axpoll::IoEvents::OUT; }
-                if ev.event.events & EPOLLRDHUP != 0 { target_events |= axpoll::IoEvents::RDHUP; }
+        let targets: Vec<(Arc<dyn FdObject>, axpoll::IoEvents)> = {
+            let monitored = self.events.lock();
+            let mut list = Vec::new();
+            for (&fd, ev) in monitored.iter() {
+                if let Ok(entry) = crate::task::current_process()?.get_fd_entry(fd) {
+                    let mut target_events = axpoll::IoEvents::empty();
+                    if ev.event.events & EPOLLIN != 0 { target_events |= axpoll::IoEvents::IN; }
+                    if ev.event.events & EPOLLOUT != 0 { target_events |= axpoll::IoEvents::OUT; }
+                    if ev.event.events & EPOLLRDHUP != 0 { target_events |= axpoll::IoEvents::RDHUP; }
 
-                if !target_events.is_empty() {
-                    entry.object.register_poll(cx, target_events)?;
+                    if !target_events.is_empty() {
+                        list.push((entry.object.clone(), target_events));
+                    }
                 }
             }
+            list
+        };
+
+        for (object, target_events) in targets {
+            object.register_poll(cx, target_events)?;
         }
         Ok(())
     }

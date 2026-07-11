@@ -287,18 +287,26 @@ impl<'a> Future for EpollFuture<'a> {
 
         // Not ready, register wakers.
         {
-            let monitored = self.epoll_obj.events.lock();
-            for (&fd, ev) in monitored.iter() {
-                if let Ok(entry) = get_fd_entry(fd) {
-                    let mut target_events = axpoll::IoEvents::empty();
-                    if ev.event.events & EPOLLIN != 0 { target_events |= axpoll::IoEvents::IN; }
-                    if ev.event.events & EPOLLOUT != 0 { target_events |= axpoll::IoEvents::OUT; }
-                    if ev.event.events & EPOLLRDHUP != 0 { target_events |= axpoll::IoEvents::RDHUP; }
+            let targets: Vec<(FdEntry, axpoll::IoEvents)> = {
+                let monitored = self.epoll_obj.events.lock();
+                let mut list = Vec::new();
+                for (&fd, ev) in monitored.iter() {
+                    if let Ok(entry) = get_fd_entry(fd) {
+                        let mut target_events = axpoll::IoEvents::empty();
+                        if ev.event.events & EPOLLIN != 0 { target_events |= axpoll::IoEvents::IN; }
+                        if ev.event.events & EPOLLOUT != 0 { target_events |= axpoll::IoEvents::OUT; }
+                        if ev.event.events & EPOLLRDHUP != 0 { target_events |= axpoll::IoEvents::RDHUP; }
 
-                    if !target_events.is_empty() {
-                        let _ = entry.object.register_poll(cx, target_events);
+                        if !target_events.is_empty() {
+                            list.push((entry, target_events));
+                        }
                     }
                 }
+                list
+            };
+
+            for (entry, target_events) in targets {
+                let _ = entry.object.register_poll(cx, target_events);
             }
         }
 
