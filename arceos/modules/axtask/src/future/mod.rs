@@ -72,9 +72,7 @@ pub fn block_on<F: IntoFuture>(f: F) -> F::Output {
                 if !*woke_guard {
                     rq.blocked_resched_woke(woke_guard);
                 } else {
-                    // Immediately woken
                     drop(woke_guard);
-                    crate::api::yield_now();
                 }
             }
             Poll::Ready(output) => break output,
