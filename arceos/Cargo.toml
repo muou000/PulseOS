@@ -67,11 +67,11 @@ axdma = { path = "modules/axdma" }
 axipi = { path = "modules/axipi" }
 axerrno = "0.2"
 
-axdriver_base = { path = "../vendor/axdriver_base" }
-axdriver_block = { path = "../vendor/axdriver_block" }
-axdriver_net = { path = "../vendor/axdriver_net" }
-axdriver_pci = { path = "../vendor/axdriver_pci" }
-axdriver_virtio = { path = "../vendor/axdriver_virtio" }
+axdriver_base = { path = "../crates/axdriver_base" }
+axdriver_block = { path = "../crates/axdriver_block" }
+axdriver_net = { path = "../crates/axdriver_net" }
+axdriver_pci = { path = "../crates/axdriver_pci" }
+axdriver_virtio = { path = "../crates/axdriver_virtio" }
 
 axio = { version = "0.3.0-pre.1" }
 axpoll = "0.3"
@@ -103,11 +103,11 @@ handler_table = { path = "../crates/handler_table" }
 virtio-drivers = { path = "../crates/virtio-drivers" }
 
 [patch."https://github.com/arceos-org/axdriver_crates.git"]
-axdriver_base = { path = "../vendor/axdriver_base" }
-axdriver_block = { path = "../vendor/axdriver_block" }
-axdriver_net = { path = "../vendor/axdriver_net" }
-axdriver_pci = { path = "../vendor/axdriver_pci" }
-axdriver_virtio = { path = "../vendor/axdriver_virtio" }
+axdriver_base = { path = "../crates/axdriver_base" }
+axdriver_block = { path = "../crates/axdriver_block" }
+axdriver_net = { path = "../crates/axdriver_net" }
+axdriver_pci = { path = "../crates/axdriver_pci" }
+axdriver_virtio = { path = "../crates/axdriver_virtio" }
 
 [patch."https://github.com/arceos-org/allocator.git"]
 allocator = { path = "../crates/allocator" }
