@@ -25,8 +25,14 @@ virtio = ["axdriver_virtio", "dep:axalloc", "dep:axhal", "dep:axconfig"]
 
 multitask = []
 
+# Async block I/O interface (AsyncBlockDriverOps trait implementation).
+# Requires `multitask` + `irq` to be effective at runtime.
+# TODO: currently only VirtIoBlkDevWrapper implements AsyncBlockDriverOps.
+#       Other block drivers (ramdisk, bcm2835-sdhci) still use sync-only BlockDriverOps.
+async = ["axdriver_block/async"]
+
 # various types of drivers
-virtio-blk = ["block", "virtio", "axdriver_virtio/block"]
+virtio-blk = ["block", "virtio", "axdriver_virtio/block", "async"]
 virtio-net = ["net", "virtio", "axdriver_virtio/net"]
 virtio-gpu = ["display", "virtio", "axdriver_virtio/gpu"]
 ramdisk = ["block", "axdriver_block/ramdisk"]
@@ -55,3 +61,4 @@ axhal = { workspace = true, optional = true }
 axconfig = { workspace = true, optional = true }
 axdma = { workspace = true, optional = true }
 axtask = { workspace = true }
+axlog = { workspace = true }

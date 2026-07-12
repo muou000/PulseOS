@@ -39,12 +39,18 @@ struct VirtioInterruptInfo {
 unsafe impl Send for VirtioInterruptInfo {}
 unsafe impl Sync for VirtioInterruptInfo {}
 
-static VIRTIO_INTERRUPTS: SpinNoIrq<alloc::collections::BTreeMap<usize, VirtioInterruptInfo>> = SpinNoIrq::new(alloc::collections::BTreeMap::new());
+static VIRTIO_INTERRUPTS: SpinNoIrq<alloc::collections::BTreeMap<usize, alloc::vec::Vec<VirtioInterruptInfo>>> = SpinNoIrq::new(alloc::collections::BTreeMap::new());
 
 fn common_virtio_irq_handler(irq: usize) {
+    axlog::info!("common_virtio_irq_handler: irq={}", irq);
     let guard = VIRTIO_INTERRUPTS.lock();
-    if let Some(info) = guard.get(&irq) {
-        unsafe { (info.handler)(info.dev_ptr); }
+    if let Some(infos) = guard.get(&irq) {
+        axlog::info!("common_virtio_irq_handler: found {} handlers for irq={}", infos.len(), irq);
+        for info in infos {
+            unsafe { (info.handler)(info.dev_ptr); }
+        }
+    } else {
+        axlog::info!("common_virtio_irq_handler: no handlers found for irq={}", irq);
     }
 }
 
@@ -83,7 +89,7 @@ cfg_if! {
                             w.poll_set.wake();
                         }
                     }
-                    VIRTIO_INTERRUPTS.lock().insert(irq, VirtioInterruptInfo {
+                    VIRTIO_INTERRUPTS.lock().entry(irq).or_default().push(VirtioInterruptInfo {
                         dev_ptr,
                         handler: handler::<H, T, QS>,
                     });
@@ -154,6 +160,17 @@ cfg_if! {
     if #[cfg(block_dev = "virtio-blk")] {
         pub struct VirtIoBlk;
 
+        /// Converts a `virtio_drivers::Error` into a `DevError`.
+        /// Extracted to avoid repeating this conversion in read/write paths.
+        fn virtio_err_to_dev(e: virtio_drivers::Error) -> axdriver_base::DevError {
+            use virtio_drivers::Error::*;
+            match e {
+                QueueFull => axdriver_base::DevError::BadState,
+                InvalidParam => axdriver_base::DevError::InvalidParam,
+                _ => axdriver_base::DevError::Io,
+            }
+        }
+
         pub struct VirtIoBlkDevInner<H: VirtIoHal, T: virtio_drivers::transport::Transport> {
             inner: SpinNoIrq<axdriver_virtio::VirtIoBlkDev<H, T>>,
             #[cfg(feature = "multitask")]
@@ -181,13 +198,15 @@ cfg_if! {
                     let dev_ptr = Arc::as_ptr(&inner) as *const ();
                     unsafe fn handler<H: VirtIoHal, T: virtio_drivers::transport::Transport>(ptr: *const ()) {
                         let w = unsafe { &*(ptr as *const VirtIoBlkDevInner<H, T>) };
+                        axlog::info!("virtio-blk interrupt handler: checking interrupt");
                         let acked = w.inner.lock().ack_interrupt();
+                        axlog::info!("virtio-blk interrupt handler: acked={}", acked);
                         if acked {
                             #[cfg(feature = "multitask")]
                             w.wait_queue.notify_all(true);
                         }
                     }
-                    VIRTIO_INTERRUPTS.lock().insert(irq, VirtioInterruptInfo {
+                    VIRTIO_INTERRUPTS.lock().entry(irq).or_default().push(VirtioInterruptInfo {
                         dev_ptr,
                         handler: handler::<H, T>,
                     });
@@ -215,107 +234,191 @@ cfg_if! {
                 self.inner.inner.lock().block_size()
             }
             fn read_block(&mut self, block_id: u64, buf: &mut [u8]) -> DevResult {
-                let mut inner = self.inner.inner.lock();
+                axlog::info!("virtio::read_block: block_id={}, buf_len={}", block_id, buf.len());
                 let mut req = virtio_drivers::device::blk::BlkReq::default();
                 let mut resp = virtio_drivers::device::blk::BlkResp::default();
                 let token = unsafe {
-                    inner.inner.read_blocks_nb(block_id as usize, &mut req, buf, &mut resp)
-                }.map_err(|e| {
-                    use virtio_drivers::Error::*;
-                    match e {
-                        QueueFull => DevError::BadState,
-                        InvalidParam => DevError::InvalidParam,
-                        DmaError => DevError::Io,
-                        _ => DevError::Io,
-                    }
-                })?;
-                drop(inner);
+                    self.inner.inner.lock().inner
+                        .read_blocks_nb(block_id as usize, &mut req, buf, &mut resp)
+                }.map_err(virtio_err_to_dev)?;
+                axlog::info!("virtio::read_block: read_blocks_nb initiated, token={}", token);
                 #[cfg(feature = "multitask")]
                 {
                     if axhal::asm::irqs_enabled() {
+                        axlog::info!("virtio::read_block: irqs_enabled, waiting in wait_queue");
                         self.inner.wait_queue.wait_until(|| {
                             self.inner.inner.lock().inner.peek_used() == Some(token)
                         });
+                        axlog::info!("virtio::read_block: wait_queue finished");
                     } else {
+                        axlog::info!("virtio::read_block: irqs_disabled, spinning");
                         while self.inner.inner.lock().inner.peek_used() != Some(token) {
                             core::hint::spin_loop();
                         }
+                        axlog::info!("virtio::read_block: spin finished");
                     }
                 }
                 #[cfg(not(feature = "multitask"))]
                 {
+                    axlog::info!("virtio::read_block: multitask disabled, spinning");
                     while self.inner.inner.lock().inner.peek_used() != Some(token) {
                         core::hint::spin_loop();
                     }
+                    axlog::info!("virtio::read_block: spin finished");
                 }
-
-                let mut inner = self.inner.inner.lock();
+                axlog::info!("virtio::read_block: completing read blocks");
                 unsafe {
-                    inner.inner.complete_read_blocks(token, &req, buf, &mut resp)
-                }.map_err(|e| {
-                    use virtio_drivers::Error::*;
-                    match e {
-                        QueueFull => DevError::BadState,
-                        InvalidParam => DevError::InvalidParam,
-                        DmaError => DevError::Io,
-                        _ => DevError::Io,
-                    }
-                })?;
+                    self.inner.inner.lock().inner
+                        .complete_read_blocks(token, &req, buf, &mut resp)
+                }.map_err(virtio_err_to_dev)?;
+                axlog::info!("virtio::read_block: completed successfully");
                 Ok(())
             }
 
             fn write_block(&mut self, block_id: u64, buf: &[u8]) -> DevResult {
-                let mut inner = self.inner.inner.lock();
+                axlog::info!("virtio::write_block: block_id={}, buf_len={}", block_id, buf.len());
                 let mut req = virtio_drivers::device::blk::BlkReq::default();
                 let mut resp = virtio_drivers::device::blk::BlkResp::default();
                 let token = unsafe {
-                    inner.inner.write_blocks_nb(block_id as usize, &mut req, buf, &mut resp)
-                }.map_err(|e| {
-                    use virtio_drivers::Error::*;
-                    match e {
-                        QueueFull => DevError::BadState,
-                        InvalidParam => DevError::InvalidParam,
-                        DmaError => DevError::Io,
-                        _ => DevError::Io,
-                    }
-                })?;
-                drop(inner);
+                    self.inner.inner.lock().inner
+                        .write_blocks_nb(block_id as usize, &mut req, buf, &mut resp)
+                }.map_err(virtio_err_to_dev)?;
+                axlog::info!("virtio::write_block: write_blocks_nb initiated, token={}", token);
                 #[cfg(feature = "multitask")]
                 {
                     if axhal::asm::irqs_enabled() {
+                        axlog::info!("virtio::write_block: irqs_enabled, waiting in wait_queue");
                         self.inner.wait_queue.wait_until(|| {
                             self.inner.inner.lock().inner.peek_used() == Some(token)
                         });
+                        axlog::info!("virtio::write_block: wait_queue finished");
                     } else {
+                        axlog::info!("virtio::write_block: irqs_disabled, spinning");
                         while self.inner.inner.lock().inner.peek_used() != Some(token) {
                             core::hint::spin_loop();
                         }
+                        axlog::info!("virtio::write_block: spin finished");
                     }
                 }
                 #[cfg(not(feature = "multitask"))]
                 {
+                    axlog::info!("virtio::write_block: multitask disabled, spinning");
                     while self.inner.inner.lock().inner.peek_used() != Some(token) {
                         core::hint::spin_loop();
                     }
+                    axlog::info!("virtio::write_block: spin finished");
                 }
-
-                let mut inner = self.inner.inner.lock();
+                axlog::info!("virtio::write_block: completing write blocks");
                 unsafe {
-                    inner.inner.complete_write_blocks(token, &req, buf, &mut resp)
-                }.map_err(|e| {
-                    use virtio_drivers::Error::*;
-                    match e {
-                        QueueFull => DevError::BadState,
-                        InvalidParam => DevError::InvalidParam,
-                        DmaError => DevError::Io,
-                        _ => DevError::Io,
-                    }
-                })?;
+                    self.inner.inner.lock().inner
+                        .complete_write_blocks(token, &req, buf, &mut resp)
+                }.map_err(virtio_err_to_dev)?;
+                axlog::info!("virtio::write_block: completed successfully");
                 Ok(())
             }
 
             fn flush(&mut self) -> DevResult {
                 self.inner.inner.lock().flush()
+            }
+        }
+
+        /// `AsyncBlockDriverOps` implementation for VirtIoBlkDevWrapper.
+        ///
+        /// Gate: requires `multitask` (for WaitQueue) + `async` feature (for the trait).
+        /// The implementation uses `WaitFuture` to suspend the calling task at `.await`
+        /// points, relying on the interrupt handler's `notify_all()` to wake wakers.
+        ///
+        /// # TODO (tracking)
+        /// - Validate end-to-end async path on LoongArch64 (MSI-X interrupt → waker wake).
+        /// - Add timeout support: if an interrupt is missed, the future will hang forever.
+        ///   Consider wrapping with `axtask::future::time::sleep_until()` as a guard.
+        /// - Consider exposing a `flush_async` variant if the underlying device supports it.
+        #[cfg(all(feature = "multitask", feature = "async"))]
+        impl<H: VirtIoHal + Send + Sync + 'static,
+             T: virtio_drivers::transport::Transport + Send + Sync + 'static>
+            axdriver_block::AsyncBlockDriverOps for VirtIoBlkDevWrapper<H, T>
+        {
+            type ReadFuture<'a> = impl core::future::Future<Output = axdriver_base::DevResult> + Send + 'a
+            where
+                Self: 'a;
+
+            type WriteFuture<'a> = impl core::future::Future<Output = axdriver_base::DevResult> + Send + 'a
+            where
+                Self: 'a;
+
+            fn read_block_async<'a>(
+                &'a mut self,
+                block_id: u64,
+                buf: &'a mut [u8],
+            ) -> Self::ReadFuture<'a> {
+                async move {
+                    // req and resp live in the Future state machine across .await points.
+                    // They must remain valid until complete_read_blocks() is called.
+                    let mut req = virtio_drivers::device::blk::BlkReq::default();
+                    let mut resp = virtio_drivers::device::blk::BlkResp::default();
+
+                    // 1. Submit non-blocking request and immediately release the lock.
+                    let token = unsafe {
+                        self.inner.inner.lock().inner
+                            .read_blocks_nb(block_id as usize, &mut req, buf, &mut resp)
+                    }.map_err(virtio_err_to_dev)?;
+
+                    axlog::debug!("virtio::read_block_async: token={} submitted", token);
+
+                    // 2. Wait loop: re-check condition after each wakeup to handle
+                    //    spurious wakeups (WaitFuture does not carry a predicate).
+                    loop {
+                        if self.inner.inner.lock().inner.peek_used() == Some(token) {
+                            break;
+                        }
+                        // Register our waker and suspend. The interrupt handler calls
+                        // notify_all() which wakes all wakers registered in wait_queue.
+                        self.inner.wait_queue.wait_async().await;
+                    }
+
+                    axlog::debug!("virtio::read_block_async: token={} ready, completing", token);
+
+                    // 3. Complete the transfer (reads DMA buffer back into `buf`).
+                    unsafe {
+                        self.inner.inner.lock().inner
+                            .complete_read_blocks(token, &req, buf, &mut resp)
+                    }.map_err(virtio_err_to_dev)
+                }
+            }
+
+            fn write_block_async<'a>(
+                &'a mut self,
+                block_id: u64,
+                buf: &'a [u8],
+            ) -> Self::WriteFuture<'a> {
+                async move {
+                    let mut req = virtio_drivers::device::blk::BlkReq::default();
+                    let mut resp = virtio_drivers::device::blk::BlkResp::default();
+
+                    // 1. Submit non-blocking write request.
+                    let token = unsafe {
+                        self.inner.inner.lock().inner
+                            .write_blocks_nb(block_id as usize, &mut req, buf, &mut resp)
+                    }.map_err(virtio_err_to_dev)?;
+
+                    axlog::debug!("virtio::write_block_async: token={} submitted", token);
+
+                    // 2. Wait loop with spurious-wakeup guard.
+                    loop {
+                        if self.inner.inner.lock().inner.peek_used() == Some(token) {
+                            break;
+                        }
+                        self.inner.wait_queue.wait_async().await;
+                    }
+
+                    axlog::debug!("virtio::write_block_async: token={} ready, completing", token);
+
+                    // 3. Complete the write transfer.
+                    unsafe {
+                        self.inner.inner.lock().inner
+                            .complete_write_blocks(token, &req, buf, &mut resp)
+                    }.map_err(virtio_err_to_dev)
+                }
             }
         }
 
@@ -412,8 +515,10 @@ impl<D: VirtIoDevMeta> DriverProbe for VirtIoDriver<D> {
                     }
 
                     if let Some(offset) = msix_cap_offset {
-                        // 2. Allocate an MSI-X vector (96..255)
-                        static NEXT_MSI_VECTOR: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(96);
+                        // 2. Allocate an MSI-X vector in the PCH-MSI range (EIOINTC pins 64..255)
+                        // QEMU pch_msi computes: irq_num = (Msg Data & 0xff) - 64
+                        // so Msg Data must be in [64, 255].
+                        static NEXT_MSI_VECTOR: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(64);
                         let msi_vector = NEXT_MSI_VECTOR.fetch_add(1, core::sync::atomic::Ordering::SeqCst);
                         if msi_vector < 256 {
                             // 3. Configure MSI-X Table
@@ -429,11 +534,13 @@ impl<D: VirtIoDevMeta> DriverProbe for VirtIoDriver<D> {
                                 let table_vaddr = phys_to_virt(table_paddr.into()).as_usize();
 
                                 // Write Vector 0 entry
+                                // Msg Addr = 0x2ff00000 (PCH-MSI base, correct for loongarch_virt)
+                                // Msg Data = msi_vector (absolute EIOINTC pin number >= 64)
                                 unsafe {
-                                    core::ptr::write_volatile((table_vaddr + 0) as *mut u32, 0x2ff00000); // Msg Addr Low (PCH-MSI)
+                                    core::ptr::write_volatile((table_vaddr + 0) as *mut u32, 0x2ff00000); // Msg Addr Low (PCH-MSI base)
                                     core::ptr::write_volatile((table_vaddr + 4) as *mut u32, 0);          // Msg Addr High
-                                    core::ptr::write_volatile((table_vaddr + 8) as *mut u32, msi_vector as u32); // Msg Data
-                                    core::ptr::write_volatile((table_vaddr + 12) as *mut u32, 0);         // Vector Control (0 means unmasked)
+                                    core::ptr::write_volatile((table_vaddr + 8) as *mut u32, msi_vector as u32); // Msg Data = EIOINTC pin
+                                    core::ptr::write_volatile((table_vaddr + 12) as *mut u32, 0);         // Vector Control (0 = unmasked)
                                 }
 
                                 // 4. Enable MSI-X in device configuration space
@@ -448,10 +555,10 @@ impl<D: VirtIoDevMeta> DriverProbe for VirtIoDriver<D> {
                                 }
                                 transport.set_msix_enabled(true);
 
-                                // Global IRQ is 32 + msi_vector
-                                irq = 32 + msi_vector;
+                                // IRQ number = EIOINTC pin number directly (no offset)
+                                irq = msi_vector;
                                 msix_success = true;
-                                info!("PCI device at {} configured to use MSI-X (vector {}, irq {})", bdf, msi_vector, irq);
+                                info!("PCI device at {} configured to use MSI-X (eiointc_pin {}, irq {})", bdf, msi_vector, irq);
                             }
                         }
                     }

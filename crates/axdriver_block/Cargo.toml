@@ -38,6 +38,7 @@ license = "GPL-3.0-or-later OR Apache-2.0 OR MulanPSL-2.0"
 repository = "https://github.com/arceos-org/axdriver_crates"
 
 [features]
+async = []
 bcm2835-sdhci = ["dep:bcm2835-sdhci"]
 default = []
 ramdisk = []
