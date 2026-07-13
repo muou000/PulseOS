@@ -201,7 +201,7 @@ pub fn sys_readlinkat(dirfd: i32, pathname: usize, buf: usize, bufsiz: usize) ->
         Ok(loc) => loc,
         Err(e) => return -e.code() as isize,
     };
-    let target = match location.read_link() {
+    let target = match axtask::future::block_on(location.read_link()) {
         Ok(target) => target,
         Err(e) => return -LinuxError::from(e.canonicalize()).code() as isize,
     };
@@ -381,7 +381,7 @@ pub fn sys_utimensat(dirfd: i32, pathname: usize, times: usize, flags: usize) ->
         return -LinuxError::EROFS.code() as isize;
     }
 
-    match location.update_metadata(update) {
+    match axtask::future::block_on(location.update_metadata(update)) {
         Ok(()) => 0,
         Err(e) => -LinuxError::from(e.canonicalize()).code() as isize,
     }
@@ -465,7 +465,7 @@ pub fn sys_fchmodat(dirfd: i32, pathname: usize, mode: usize, flags: usize) -> i
             if crate::impls::fs::common::is_location_readonly(&location) {
                 return -LinuxError::EROFS.code() as isize;
             }
-            let current_meta = match location.metadata() {
+            let current_meta = match axtask::future::block_on(location.metadata()) {
                 Ok(meta) => meta,
                 Err(e) => return -LinuxError::from(e.canonicalize()).code() as isize,
             };
@@ -502,10 +502,10 @@ pub fn sys_fchmodat(dirfd: i32, pathname: usize, mode: usize, flags: usize) -> i
                 }
             }
 
-            match location.update_metadata(axfs_ng_vfs::MetadataUpdate {
+            match axtask::future::block_on(location.update_metadata(axfs_ng_vfs::MetadataUpdate {
                 mode: Some(perm),
                 ..Default::default()
-            }) {
+            })) {
                 Ok(()) => {
                     axlog::debug!(
                         "sys_fchmodat: path \"{}\" resolved and metadata updated OK, returning 0",
@@ -558,7 +558,7 @@ pub fn sys_fchmod(fd: usize, mode: usize) -> isize {
         return -LinuxError::EROFS.code() as isize;
     }
 
-    let current_meta = match location.metadata() {
+    let current_meta = match axtask::future::block_on(location.metadata()) {
         Ok(meta) => meta,
         Err(e) => return -LinuxError::from(e.canonicalize()).code() as isize,
     };
@@ -595,10 +595,10 @@ pub fn sys_fchmod(fd: usize, mode: usize) -> isize {
         }
     }
 
-    match location.update_metadata(axfs_ng_vfs::MetadataUpdate {
+    match axtask::future::block_on(location.update_metadata(axfs_ng_vfs::MetadataUpdate {
         mode: Some(perm),
         ..Default::default()
-    }) {
+    })) {
         Ok(()) => {
             axlog::debug!(
                 "sys_fchmod: fd={} resolved and metadata updated OK, returning 0",
@@ -644,7 +644,7 @@ pub fn sys_fchownat(dirfd: i32, pathname: usize, uid: usize, gid: usize, flags: 
             if crate::impls::fs::common::is_location_readonly(&location) {
                 return -LinuxError::EROFS.code() as isize;
             }
-            let current_meta = match location.metadata() {
+            let current_meta = match axtask::future::block_on(location.metadata()) {
                 Ok(meta) => meta,
                 Err(e) => return -LinuxError::from(e.canonicalize()).code() as isize,
             };
@@ -707,11 +707,11 @@ pub fn sys_fchownat(dirfd: i32, pathname: usize, uid: usize, gid: usize, flags: 
                 }
             }
 
-            match location.update_metadata(axfs_ng_vfs::MetadataUpdate {
+            match axtask::future::block_on(location.update_metadata(axfs_ng_vfs::MetadataUpdate {
                 owner: Some((new_uid, new_gid)),
                 mode: Some(new_mode),
                 ..Default::default()
-            }) {
+            })) {
                 Ok(()) => 0,
                 Err(e) => -LinuxError::from(e.canonicalize()).code() as isize,
             }
@@ -740,7 +740,7 @@ pub fn sys_fchown(fd: usize, uid: usize, gid: usize) -> isize {
         return -LinuxError::EROFS.code() as isize;
     }
 
-    let current_meta = match location.metadata() {
+    let current_meta = match axtask::future::block_on(location.metadata()) {
         Ok(meta) => meta,
         Err(e) => return -LinuxError::from(e.canonicalize()).code() as isize,
     };
@@ -803,11 +803,11 @@ pub fn sys_fchown(fd: usize, uid: usize, gid: usize) -> isize {
         }
     }
 
-    match location.update_metadata(axfs_ng_vfs::MetadataUpdate {
+    match axtask::future::block_on(location.update_metadata(axfs_ng_vfs::MetadataUpdate {
         owner: Some((new_uid, new_gid)),
         mode: Some(new_mode),
         ..Default::default()
-    }) {
+    })) {
         Ok(()) => 0,
         Err(e) => -LinuxError::from(e.canonicalize()).code() as isize,
     }

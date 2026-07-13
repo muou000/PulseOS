@@ -258,6 +258,7 @@ dependencies = [
  "axdriver_pci",
  "axdriver_virtio",
  "axhal",
+ "axlog",
  "axpoll",
  "axtask",
  "cfg-if",
@@ -335,6 +336,8 @@ dependencies = [
 name = "axfs"
 version = "0.2.0"
 dependencies = [
+ "async-lock",
+ "async-trait",
  "axalloc",
  "axdriver",
  "axerrno",
@@ -363,8 +366,9 @@ dependencies = [
 name = "axfs-ng-vfs"
 version = "0.1.1"
 dependencies = [
+ "async-lock",
+ "async-trait",
  "axerrno",
- "axlog",
  "axpoll",
  "bitflags 2.11.1",
  "cfg-if",
@@ -972,7 +976,6 @@ version = "0.1.0-rc.2"
 dependencies = [
  "async-lock",
  "async-trait",
- "axsync",
  "bitflags 2.11.1",
  "crc",
  "log",

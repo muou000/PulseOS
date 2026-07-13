@@ -127,7 +127,7 @@ pub fn sys_execveat(
             Err(e) => return -e.code() as isize,
         };
 
-    let metadata = match loc.metadata() {
+    let metadata = match axtask::future::block_on(loc.metadata()) {
         Ok(m) => m,
         Err(e) => {
             let errno: LinuxError = e.into();

@@ -50,7 +50,7 @@ fn parse_shebang_line(file_data: &[u8]) -> AxResult<Option<(String, Option<Strin
 }
 
 fn check_txt_busy(loc: &axfs_ng_vfs::Location) -> AxResult<()> {
-    let meta = loc.metadata().map_err(|_| AxError::InvalidData)?;
+    let meta = axtask::future::block_on(loc.metadata()).map_err(|_| AxError::InvalidData)?;
     let device = meta.device;
     let inode = meta.inode;
     let procs = super::processes_snapshot();
@@ -68,11 +68,11 @@ pub fn resolve_exec_path_and_args(
     args: &[&str],
 ) -> AxResult<(String, Vec<String>)> {
     let normalize_path = |candidate: &str| -> AxResult<String> {
-        let loc = fs.resolve(candidate)?;
+        let loc = axtask::future::block_on(fs.resolve(candidate))?;
         let path = loc.absolute_path()?;
 
         // Check if the file is a regular file
-        let meta = loc.metadata()?;
+        let meta = axtask::future::block_on(loc.metadata())?;
         if meta.node_type != NodeType::RegularFile {
             return Err(AxError::PermissionDenied);
         }
@@ -119,8 +119,7 @@ pub fn resolve_exec_path_and_args(
     for _ in 0..SHEBANG_MAX_DEPTH {
         current_path = normalize_path(&current_path)?;
         axlog::debug!("resolve_exec_path_and_args: probing {}", current_path);
-        let file_data = fs
-            .read_prefix(&current_path, SHEBANG_PROBE_LEN)
+        let file_data = axtask::future::block_on(fs.read_prefix(&current_path, SHEBANG_PROBE_LEN))
             .map_err(|_| AxError::NotFound)?;
         let Some((interp, interp_arg)) = parse_shebang_line(&file_data)? else {
             axlog::debug!("resolve_exec_path_and_args: final {}", current_path);

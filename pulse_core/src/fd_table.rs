@@ -197,7 +197,7 @@ fn metadata_to_stat(metadata: &Metadata) -> stat {
 }
 
 pub fn location_to_stat(location: &Location) -> LinuxResult<stat> {
-    let mut st = metadata_to_stat(&location.metadata()?);
+    let mut st = metadata_to_stat(&axtask::future::block_on(location.metadata())?);
     if let Ok(size) = axfs::cached_file_size(location) {
         st.st_size = size as _;
     }
@@ -831,12 +831,12 @@ impl FdObject for FileObject {
 
     fn read(&self, buf: &mut [u8]) -> LinuxResult<usize> {
         let file = &self.inner;
-        Ok(file.read(buf)?)
+        Ok(axtask::future::block_on(file.read(buf))?)
     }
 
     fn write(&self, buf: &[u8]) -> LinuxResult<usize> {
         let file = &self.inner;
-        Ok(file.write(buf)?)
+        Ok(axtask::future::block_on(file.write(buf))?)
     }
 
     fn stat(&self) -> LinuxResult<stat> {
@@ -874,17 +874,17 @@ impl FdObject for FileObject {
     }
 
     fn read_at(&self, buf: &mut [u8], offset: u64) -> LinuxResult<usize> {
-        Ok(self.inner.read_at(buf, offset)?)
+        Ok(axtask::future::block_on(self.inner.read_at(buf, offset))?)
     }
 
     fn write_at(&self, buf: &[u8], offset: u64) -> LinuxResult<usize> {
         let file = &self.inner;
         if file.flags().contains(AxFileFlags::APPEND) {
             let backend = file.backend()?;
-            let (written, _) = backend.append(buf)?;
+            let (written, _) = axtask::future::block_on(backend.append(buf))?;
             Ok(written)
         } else {
-            Ok(file.write_at(buf, offset)?)
+            Ok(axtask::future::block_on(file.write_at(buf, offset))?)
         }
     }
 
@@ -893,16 +893,16 @@ impl FdObject for FileObject {
     }
 
     fn truncate(&self, len: u64) -> LinuxResult {
-        self.inner.access(AxFileFlags::WRITE)?.set_len(len)?;
+        axtask::future::block_on(self.inner.access(AxFileFlags::WRITE)?.set_len(len))?;
         Ok(())
     }
 
     fn flush(&self) -> LinuxResult {
-        self.inner.sync(false).map_err(Into::into)
+        axtask::future::block_on(self.inner.sync(false)).map_err(Into::into)
     }
 
     fn sync_data(&self) -> LinuxResult {
-        self.inner.sync(true).map_err(Into::into)
+        axtask::future::block_on(self.inner.sync(true)).map_err(Into::into)
     }
 
     fn allocate(&self, mode: u32, offset: u64, len: u64) -> LinuxResult {
@@ -914,7 +914,7 @@ impl FdObject for FileObject {
         }
         let end = offset.checked_add(len).ok_or(LinuxError::EFBIG)?;
 
-        let metadata = self.inner.location().metadata()?;
+        let metadata = axtask::future::block_on(self.inner.location().metadata())?;
         if metadata.node_type != NodeType::RegularFile {
             if metadata.node_type == NodeType::Directory {
                 return Err(LinuxError::EISDIR);
@@ -944,7 +944,7 @@ impl FdObject for FileObject {
                      to set_len (new_len={})",
                     end
                 );
-                self.inner.access(AxFileFlags::WRITE)?.set_len(end)?;
+                axtask::future::block_on(self.inner.access(AxFileFlags::WRITE)?.set_len(end))?;
             }
         }
 
@@ -977,7 +977,7 @@ fn parse_cpu_dma_latency_value(buf: &[u8]) -> LinuxResult<i32> {
 }
 
 fn is_cpu_dma_latency_device(location: &Location) -> bool {
-    let Ok(metadata) = location.metadata() else {
+    let Ok(metadata) = axtask::future::block_on(location.metadata()) else {
         return false;
     };
     metadata.node_type == NodeType::CharacterDevice
@@ -1117,11 +1117,11 @@ impl FdObject for DirObject {
     }
 
     fn flush(&self) -> LinuxResult {
-        self.inner.sync(false).map_err(Into::into)
+        axtask::future::block_on(self.inner.sync(false)).map_err(Into::into)
     }
 
     fn sync_data(&self) -> LinuxResult {
-        self.inner.sync(true).map_err(Into::into)
+        axtask::future::block_on(self.inner.sync(true)).map_err(Into::into)
     }
 
     fn is_read_open(&self) -> bool {
@@ -1136,7 +1136,7 @@ impl FdObject for DirObject {
         let mut offset = self.offset.lock();
         let mut written = 0usize;
         let mut break_out = false;
-        let res = self.inner.read_dir(*offset, &mut |name: &str,
+        let res = axtask::future::block_on(self.inner.read_dir(*offset, &mut |name: &str,
                                                      ino: u64,
                                                      node_type: NodeType,
                                                      next_off: u64|
@@ -1180,7 +1180,7 @@ impl FdObject for DirObject {
             written += reclen;
             *offset = next_off;
             true
-        });
+        }));
         if written == 0 {
             res?;
         }
@@ -2051,7 +2051,7 @@ pub fn stdio_entries() -> [FdEntry; 3] {
 }
 
 fn is_ns_location(location: &Location) -> Option<(u64, u32)> {
-    let metadata = location.metadata().ok()?;
+    let metadata = axtask::future::block_on(location.metadata()).ok()?;
     let ino = metadata.inode;
     if ino >= axfs::fs::procfs::PID_INODE_START {
         let offset = ino - axfs::fs::procfs::PID_INODE_START;
@@ -2258,7 +2258,7 @@ impl FdTable {
                             return true;
                         }
                     } else if let Some(loc) = entry.object.location() {
-                        if let Ok(meta) = loc.metadata() {
+                        if let Ok(meta) = axtask::future::block_on(loc.metadata()) {
                             if meta.device == device && meta.inode == inode {
                                 return true;
                             }
@@ -2279,7 +2279,7 @@ impl FdTable {
                             return true;
                         }
                     } else if let Some(loc) = entry.object.location() {
-                        if let Ok(meta) = loc.metadata() {
+                        if let Ok(meta) = axtask::future::block_on(loc.metadata()) {
                             if meta.device == device && meta.inode == inode {
                                 return true;
                             }
