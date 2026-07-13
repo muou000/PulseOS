@@ -285,15 +285,19 @@ impl WaitQueue {
             unblock_one_task(task, resched);
             true
         } else {
-            let wakers = {
+            // Only remove and wake one registered waker, matching the
+            // single-task semantics of `notify_one`. All other wakers
+            // remain registered for future notifications.
+            let waker = {
                 let mut wakers = self.wakers.lock();
-                core::mem::take(&mut *wakers)
+                wakers.pop_front()
             };
-            let has_wakers = !wakers.is_empty();
-            for (_, waker) in wakers {
+            if let Some((_, waker)) = waker {
                 waker.wake();
+                true
+            } else {
+                false
             }
-            has_wakers
         }
     }
 
@@ -358,7 +362,7 @@ impl WaitQueue {
     /// * `target` - The target wait queue to which tasks will be moved.
     ///
     /// ## Returns
-    /// The number of tasks actually requeued.  
+    /// The number of tasks actually requeued.
     pub fn requeue(&self, mut count: usize, target: &WaitQueue) -> usize {
         let tasks: Vec<_> = {
             let mut wq = self.queue.lock();
