@@ -1,14 +1,16 @@
-use alloc::{borrow::ToOwned, string::String, sync::Arc};
+use alloc::{borrow::ToOwned, string::String, sync::Arc, boxed::Box};
 use core::{
     mem,
     ops::{Deref, DerefMut},
 };
 
 use hashbrown::HashMap;
+use async_trait::async_trait;
+use async_lock::{Mutex, MutexGuard};
 
 use super::DirEntry;
 use crate::{
-    MetadataUpdate, Mutex, MutexGuard, NodeOps, NodePermission, NodeType, VfsError,
+    MetadataUpdate, NodeOps, NodePermission, NodeType, VfsError,
     VfsResult,
     path::{DOT, DOTDOT, MAX_NAME_LEN, verify_entry_name},
 };
@@ -33,6 +35,7 @@ impl<F: FnMut(&str, u64, NodeType, u64) -> bool> DirEntrySink for F {
 
 type DirChildren = HashMap<String, DirEntry>;
 
+#[async_trait]
 pub trait DirNodeOps: NodeOps {
     /// Reads directory entries.
     ///
@@ -40,10 +43,10 @@ pub trait DirNodeOps: NodeOps {
     ///
     /// Implementations should ensure that `.` and `..` are present in the
     /// result.
-    fn read_dir(&self, offset: u64, sink: &mut dyn DirEntrySink) -> VfsResult<usize>;
+    async fn read_dir(&self, offset: u64, sink: &mut (dyn DirEntrySink + Send)) -> VfsResult<usize>;
 
     /// Lookups a directory entry by name.
-    fn lookup(&self, name: &str) -> VfsResult<DirEntry>;
+    async fn lookup(&self, name: &str) -> VfsResult<DirEntry>;
 
     /// Returns whether directory entries can be cached.
     ///
@@ -60,7 +63,7 @@ pub trait DirNodeOps: NodeOps {
     }
 
     /// Creates a directory entry.
-    fn create(
+    async fn create(
         &self,
         name: &str,
         node_type: NodeType,
@@ -68,13 +71,13 @@ pub trait DirNodeOps: NodeOps {
     ) -> VfsResult<DirEntry>;
 
     /// Creates a link to a node.
-    fn link(&self, name: &str, node: &DirEntry) -> VfsResult<DirEntry>;
+    async fn link(&self, name: &str, node: &DirEntry) -> VfsResult<DirEntry>;
 
     /// Unlinks a directory entry by name.
     ///
     /// If the entry is a non-empty directory, it should return `ENOTEMPTY`
     /// error.
-    fn unlink(&self, name: &str) -> VfsResult<()>;
+    async fn unlink(&self, name: &str) -> VfsResult<()>;
 
     /// Renames a directory entry, replacing the original entry (dst) if it
     /// already exists.
@@ -87,7 +90,7 @@ pub trait DirNodeOps: NodeOps {
     ///   directory.
     /// - If `src` is not a directory, `dst` must not exist or not be a
     ///   directory.
-    fn rename(&self, src_name: &str, dst_dir: &DirNode, dst_name: &str) -> VfsResult<()>;
+    async fn rename(&self, src_name: &str, dst_dir: &DirNode, dst_name: &str) -> VfsResult<()>;
 }
 
 /// Options for opening (or creating) a directory entry.
@@ -161,12 +164,12 @@ impl DirNode {
         }
     }
 
-    fn lookup_locked(&self, name: &str, children: &mut DirChildren) -> VfsResult<DirEntry> {
+    async fn lookup_locked(&self, name: &str, children: &mut DirChildren) -> VfsResult<DirEntry> {
         use hashbrown::hash_map::Entry;
         match children.entry(name.to_owned()) {
             Entry::Occupied(e) => Ok(e.get().clone()),
             Entry::Vacant(e) => {
-                let node = self.ops.lookup(name)?;
+                let node = self.ops.lookup(name).await?;
                 if self.ops.is_cacheable() {
                     e.insert(node.clone());
                 }
@@ -176,22 +179,22 @@ impl DirNode {
     }
 
     /// Looks up a directory entry by name.
-    pub fn lookup(&self, name: &str) -> VfsResult<DirEntry> {
+    pub async fn lookup(&self, name: &str) -> VfsResult<DirEntry> {
         if name.len() > MAX_NAME_LEN {
             return Err(VfsError::NameTooLong);
         }
         // Fast path
         if self.ops.is_cacheable() {
-            self.lookup_locked(name, &mut self.cache.lock())
+            self.lookup_locked(name, &mut *self.cache.lock().await).await
         } else {
-            self.ops.lookup(name)
+            self.ops.lookup(name).await
         }
     }
 
     /// Looks up a directory entry by name in cache.
     pub fn lookup_cache(&self, name: &str) -> Option<DirEntry> {
         if self.ops.is_cacheable() {
-            self.cache.lock().get(name).cloned()
+            self.cache.try_lock().and_then(|guard| guard.get(name).cloned())
         } else {
             None
         }
@@ -200,44 +203,44 @@ impl DirNode {
     /// Inserts a directory entry into the cache.
     pub fn insert_cache(&self, name: String, entry: DirEntry) -> Option<DirEntry> {
         if self.ops.is_cacheable() {
-            self.cache.lock().insert(name, entry)
+            self.cache.try_lock().and_then(|mut guard| guard.insert(name, entry))
         } else {
             None
         }
     }
 
-    pub fn read_dir(&self, offset: u64, sink: &mut dyn DirEntrySink) -> VfsResult<usize> {
-        self.ops.read_dir(offset, sink)
+    pub async fn read_dir(&self, offset: u64, sink: &mut (dyn DirEntrySink + Send)) -> VfsResult<usize> {
+        self.ops.read_dir(offset, sink).await
     }
 
     /// Creates a link to a node.
-    pub fn link(&self, name: &str, node: &DirEntry) -> VfsResult<DirEntry> {
+    pub async fn link(&self, name: &str, node: &DirEntry) -> VfsResult<DirEntry> {
         verify_entry_name(name)?;
 
-        self.ops.link(name, node).inspect(|entry| {
-            self.cache.lock().insert(name.to_owned(), entry.clone());
-        })
+        let entry = self.ops.link(name, node).await?;
+        self.cache.lock().await.insert(name.to_owned(), entry.clone());
+        Ok(entry)
     }
 
     /// Unlinks a directory entry by name.
-    pub fn unlink(&self, name: &str, is_dir: bool) -> VfsResult<()> {
+    pub async fn unlink(&self, name: &str, is_dir: bool) -> VfsResult<()> {
         verify_entry_name(name)?;
 
-        let mut children = self.cache.lock();
-        let entry = self.lookup_locked(name, &mut children)?;
+        let mut children = self.cache.lock().await;
+        let entry = self.lookup_locked(name, &mut children).await?;
         match (entry.is_dir(), is_dir) {
             (true, false) => return Err(VfsError::IsADirectory),
             (false, true) => return Err(VfsError::NotADirectory),
             _ => {}
         }
 
-        self.ops.unlink(name).inspect(|_| {
-            Self::forget_entry(&mut children, name);
-        })
+        self.ops.unlink(name).await?;
+        Self::forget_entry(&mut children, name);
+        Ok(())
     }
 
     /// Returns whether the directory contains children.
-    pub fn has_children(&self) -> VfsResult<bool> {
+    pub async fn has_children(&self) -> VfsResult<bool> {
         let mut has_children = false;
         self.read_dir(0, &mut |name: &str, _, _, _| {
             if name != DOT && name != DOTDOT {
@@ -246,66 +249,66 @@ impl DirNode {
             } else {
                 true
             }
-        })?;
+        }).await?;
         Ok(has_children)
     }
 
-    fn create_locked(
+    async fn create_locked(
         &self,
         name: &str,
         node_type: NodeType,
         permission: NodePermission,
         children: &mut DirChildren,
     ) -> VfsResult<DirEntry> {
-        let entry = self.ops.create(name, node_type, permission)?;
+        let entry = self.ops.create(name, node_type, permission).await?;
         children.insert(name.to_owned(), entry.clone());
         Ok(entry)
     }
 
     /// Creates a directory entry.
-    pub fn create(
+    pub async fn create(
         &self,
         name: &str,
         node_type: NodeType,
         permission: NodePermission,
     ) -> VfsResult<DirEntry> {
         verify_entry_name(name)?;
-        self.create_locked(name, node_type, permission, &mut self.cache.lock())
+        self.create_locked(name, node_type, permission, &mut *self.cache.lock().await).await
     }
 
-    fn lock_both_cache<'a>(
+    async fn lock_both_cache<'a>(
         &'a self,
         other: &'a Self,
     ) -> (
         MutexGuard<'a, DirChildren>,
         Option<MutexGuard<'a, DirChildren>>,
     ) {
-        let src_children = self.cache.lock();
+        let src_children = self.cache.lock().await;
         let dst_children = if core::ptr::eq(self, other) {
             None
         } else {
-            Some(other.cache.lock())
+            Some(other.cache.lock().await)
         };
         (src_children, dst_children)
     }
 
     /// Renames a directory entry.
-    pub fn rename(&self, src_name: &str, dst_dir: &Self, dst_name: &str) -> VfsResult<()> {
+    pub async fn rename(&self, src_name: &str, dst_dir: &Self, dst_name: &str) -> VfsResult<()> {
         verify_entry_name(src_name)?;
         verify_entry_name(dst_name)?;
 
-        let (mut src_children, mut dst_children) = self.lock_both_cache(dst_dir);
+        let (mut src_children, mut dst_children) = self.lock_both_cache(dst_dir).await;
 
-        let src = self.lookup_locked(src_name, &mut src_children)?;
+        let src = self.lookup_locked(src_name, &mut src_children).await?;
         if let Ok(dst) = dst_dir.lookup_locked(
             dst_name,
             dst_children
                 .as_mut()
                 .map_or_else(|| src_children.deref_mut(), DerefMut::deref_mut),
-        ) {
+        ).await {
             if src.node_type() == NodeType::Directory {
                 if let Ok(dir) = dst.as_dir()
-                    && dir.has_children()?
+                    && dir.has_children().await?
                 {
                     return Err(VfsError::DirectoryNotEmpty);
                 }
@@ -316,24 +319,24 @@ impl DirNode {
         drop(src_children);
         drop(dst_children);
 
-        self.ops.rename(src_name, dst_dir, dst_name).inspect(|_| {
-            let (mut src_children, mut dst_children) = self.lock_both_cache(dst_dir);
-            Self::forget_entry(&mut src_children, src_name);
-            Self::forget_entry(
-                dst_children
-                    .as_mut()
-                    .map_or_else(|| src_children.deref_mut(), DerefMut::deref_mut),
-                dst_name,
-            );
-        })
+        self.ops.rename(src_name, dst_dir, dst_name).await?;
+        let (mut src_children, mut dst_children) = self.lock_both_cache(dst_dir).await;
+        Self::forget_entry(&mut src_children, src_name);
+        Self::forget_entry(
+            dst_children
+                .as_mut()
+                .map_or_else(|| src_children.deref_mut(), DerefMut::deref_mut),
+            dst_name,
+        );
+        Ok(())
     }
 
     /// Opens (or creates) a file in the directory.
-    pub fn open_file(&self, name: &str, options: &OpenOptions) -> VfsResult<DirEntry> {
+    pub async fn open_file(&self, name: &str, options: &OpenOptions) -> VfsResult<DirEntry> {
         verify_entry_name(name)?;
 
-        let mut children = self.cache.lock();
-        match self.lookup_locked(name, &mut children) {
+        let mut children = self.cache.lock().await;
+        match self.lookup_locked(name, &mut children).await {
             Ok(val) => {
                 if options.create_new {
                     return Err(VfsError::AlreadyExists);
@@ -345,7 +348,7 @@ impl DirNode {
         }
         let mut permission = options.permission;
         let mut user = options.user;
-        if let Ok(parent_meta) = self.metadata() {
+        if let Ok(parent_meta) = self.metadata().await {
             if parent_meta.mode.contains(NodePermission::SET_GID) {
                 if options.node_type == NodeType::Directory {
                     permission |= NodePermission::SET_GID;
@@ -356,23 +359,24 @@ impl DirNode {
             }
         }
         let entry =
-            self.create_locked(name, options.node_type, permission, &mut children)?;
+            self.create_locked(name, options.node_type, permission, &mut children).await?;
         if user.is_some() {
             entry.update_metadata(MetadataUpdate {
                 owner: user,
                 ..Default::default()
-            })?;
+            }).await?;
         }
         Ok(entry)
     }
 
-
     /// Clears the cache of directory entries & user data, allowing them to be
     /// released.
-    pub(crate) fn forget(&self) {
-        for (_, child) in mem::take(self.cache.lock().deref_mut()) {
-            if let Ok(dir) = child.as_dir() {
-                dir.forget();
+    pub fn forget(&self) {
+        if let Some(mut guard) = self.cache.try_lock() {
+            for (_, child) in mem::take(guard.deref_mut()) {
+                if let Ok(dir) = child.as_dir() {
+                    dir.forget();
+                }
             }
         }
     }

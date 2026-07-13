@@ -107,7 +107,7 @@ impl NodeOps for FatDirNode {
 }
 
 impl DirNodeOps for FatDirNode {
-    fn read_dir(&self, offset: u64, sink: &mut dyn DirEntrySink) -> VfsResult<usize> {
+    fn read_dir(&self, offset: u64, sink: &mut (dyn DirEntrySink + Send)) -> VfsResult<usize> {
         let mut fs = self.fs.lock();
         let dir = self.inner.borrow(&fs);
         let this_entry = self.this.upgrade().unwrap();

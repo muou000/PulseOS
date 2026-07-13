@@ -11,16 +11,16 @@ pub mod procfs;
 mod tmpfs;
 pub mod loop_dev;
 
-use axdriver::prelude::BlockDriverOps;
+use axdriver::prelude::{BlockDriverOps, AsyncBlockDriverOps};
 use axfs_ng_vfs::{Filesystem, VfsResult};
 use cfg_if::cfg_if;
 pub(crate) use devfs::BlockDeviceSpec;
 pub use devfs::{TtyCallbacks, register_tty_callbacks};
 
-pub fn new_default<D: BlockDriverOps + 'static>(dev: D) -> VfsResult<Filesystem> {
+pub async fn new_default<D: AsyncBlockDriverOps + 'static>(dev: D) -> VfsResult<Filesystem> {
     cfg_if! {
         if #[cfg(feature = "ext4")] {
-            ext4::Ext4Filesystem::new(dev)
+            ext4::Ext4Filesystem::new(dev).await
         } else if #[cfg(feature = "fat")] {
             Ok(fat::FatFilesystem::new(dev))
         } else {

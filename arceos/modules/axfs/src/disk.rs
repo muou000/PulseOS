@@ -86,6 +86,27 @@ impl BlockDriverOps for SharedBlockDevice {
     }
 }
 
+impl AsyncBlockDriverOps for SharedBlockDevice {
+    type ReadFuture<'a> = core::pin::Pin<Box<dyn core::future::Future<Output = DevResult> + Send + 'a>>;
+    type WriteFuture<'a> = core::pin::Pin<Box<dyn core::future::Future<Output = DevResult> + Send + 'a>>;
+
+    fn read_block_async<'a>(&'a mut self, block_id: u64, buf: &'a mut [u8]) -> Self::ReadFuture<'a> {
+        let dev_ptr = Arc::as_ptr(&self.dev) as *mut Mutex<AxBlockDevice>;
+        let dev_mut = unsafe { &mut *dev_ptr };
+        let dev_guard = dev_mut.get_mut();
+        let res = dev_guard.read_block(block_id, buf);
+        Box::pin(async move { res })
+    }
+
+    fn write_block_async<'a>(&'a mut self, block_id: u64, buf: &'a [u8]) -> Self::WriteFuture<'a> {
+        let dev_ptr = Arc::as_ptr(&self.dev) as *mut Mutex<AxBlockDevice>;
+        let dev_mut = unsafe { &mut *dev_ptr };
+        let dev_guard = dev_mut.get_mut();
+        let res = dev_guard.write_block(block_id, buf);
+        Box::pin(async move { res })
+    }
+}
+
 /// Inner mutable state of a disk device.
 pub struct SeekableDiskInner {
     block_id: u64,

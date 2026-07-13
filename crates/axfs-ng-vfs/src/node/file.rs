@@ -1,32 +1,35 @@
 use alloc::sync::Arc;
+use alloc::boxed::Box;
 use core::ops::Deref;
 
 use axpoll::Pollable;
+use async_trait::async_trait;
 
 use super::NodeOps;
 use crate::{VfsError, VfsResult};
 
+#[async_trait]
 pub trait FileNodeOps: NodeOps + Pollable {
     /// Reads a number of bytes starting from a given offset.
-    fn read_at(&self, buf: &mut [u8], offset: u64) -> VfsResult<usize>;
+    async fn read_at(&self, buf: &mut [u8], offset: u64) -> VfsResult<usize>;
 
     /// Writes a number of bytes starting from a given offset.
-    fn write_at(&self, buf: &[u8], offset: u64) -> VfsResult<usize>;
+    async fn write_at(&self, buf: &[u8], offset: u64) -> VfsResult<usize>;
 
     /// Appends data to the file.
     ///
     /// Returns `(written, offset)` where `written` is the number of bytes
     /// written and `offset` is the new file size.
-    fn append(&self, buf: &[u8]) -> VfsResult<(usize, u64)>;
+    async fn append(&self, buf: &[u8]) -> VfsResult<(usize, u64)>;
 
     /// Sets the size of the file.
-    fn set_len(&self, len: u64) -> VfsResult<()>;
+    async fn set_len(&self, len: u64) -> VfsResult<()>;
 
     /// Sets the file's symlink target.
-    fn set_symlink(&self, target: &str) -> VfsResult<()>;
+    async fn set_symlink(&self, target: &str) -> VfsResult<()>;
 
     /// Manipulates the underlying device parameters of special files.
-    fn ioctl(&self, _cmd: u32, _arg: usize) -> VfsResult<usize> {
+    async fn ioctl(&self, _cmd: u32, _arg: usize) -> VfsResult<usize> {
         Err(VfsError::NotATty)
     }
 }

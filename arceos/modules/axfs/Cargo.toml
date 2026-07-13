@@ -18,7 +18,7 @@ std = []
 [dependencies]
 axalloc = { workspace = true }
 axtask = { workspace = true }
-axdriver = { workspace = true, features = ["block"] }
+axdriver = { workspace = true, features = ["block", "async"] }
 axerrno = "0.2"
 axfs-ng-vfs = "0.1"
 axhal = { workspace = true }
@@ -37,11 +37,13 @@ rand_pcg = { workspace = true }
 scope-local = { workspace = true }
 slab = { version = "0.4.9", default-features = false }
 spin = { workspace = true }
+async-trait = "0.1"
+async-lock = { version = "3.4", default-features = false }
 
 [dependencies.ext4plus]
 path = "../../../crates/ext4plus"
 default-features = false
-features = ["sync", "multi-threaded"]
+features = ["multi-threaded"]
 optional = true
 
 [dependencies.fatfs]
@@ -52,5 +54,5 @@ optional = true
 features = ["alloc", "lfn", "log_level_trace", "unicode"]
 
 [dev-dependencies]
-axdriver = { workspace = true, features = ["block", "ramdisk"] }
+axdriver = { workspace = true, features = ["block", "ramdisk", "async"] }
 env_logger = "0.11.8"

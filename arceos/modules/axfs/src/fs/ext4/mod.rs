@@ -2,8 +2,9 @@ mod fs;
 mod inode;
 mod util;
 
-use alloc::{sync::Arc, vec, vec::Vec, collections::BTreeMap};
+use alloc::{sync::Arc, vec, vec::Vec, collections::BTreeMap, boxed::Box};
 use core::num::NonZeroUsize;
+use async_trait::async_trait;
 use lru::LruCache;
 
 use axdriver::prelude::BlockDriverOps;
@@ -495,14 +496,16 @@ impl core::fmt::Display for Ext4DevError {
 
 impl core::error::Error for Ext4DevError {}
 
+#[async_trait]
 impl<D: BlockDriverOps + 'static> ext4plus::Ext4Read for Ext4DiskWrapper<D> {
-    fn read(&self, start_byte: u64, dst: &mut [u8]) -> Result<(), alloc::boxed::Box<dyn core::error::Error + Send + Sync + 'static>> {
+    async fn read(&self, start_byte: u64, dst: &mut [u8]) -> Result<(), alloc::boxed::Box<dyn core::error::Error + Send + Sync + 'static>> {
         self.0.read_offset(start_byte as usize, dst).map_err(|err| alloc::boxed::Box::new(Ext4DevError(err)) as _)
     }
 }
 
+#[async_trait]
 impl<D: BlockDriverOps + 'static> ext4plus::Ext4Write for Ext4DiskWrapper<D> {
-    fn write(&self, start_byte: u64, src: &[u8]) -> Result<(), alloc::boxed::Box<dyn core::error::Error + Send + Sync + 'static>> {
+    async fn write(&self, start_byte: u64, src: &[u8]) -> Result<(), alloc::boxed::Box<dyn core::error::Error + Send + Sync + 'static>> {
         self.0.write_offset(start_byte as usize, src).map_err(|err| alloc::boxed::Box::new(Ext4DevError(err)) as _)
     }
 }
