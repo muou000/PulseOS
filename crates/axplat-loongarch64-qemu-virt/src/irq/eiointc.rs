@@ -35,6 +35,7 @@ const EIOINTC_BASE: usize = 0x1400;
 const EIOINTC_NODEMAP: usize = 0x14a0;
 const EIOINTC_IPMAP: usize = 0x14c0;
 const EIOINTC_ENABLE: usize = 0x1600;
+const EIOINTC_BOUNCE: usize = 0x1680;
 const EIOINTC_ISR: usize = 0x1800;
 const EIOINTC_ROUTE: usize = 0x1c00;
 
@@ -52,19 +53,19 @@ pub fn init() {
     let misc = iocsr_read_d(LOONGARCH_IOCSR_MISC_FUNC);
     iocsr_write_d(LOONGARCH_IOCSR_MISC_FUNC, misc | (1u64 << 48));
 
-    // 1. Route EIOINTC inputs 0..256 to CPU0
+    // 1. Route EIOINTC inputs 0..256 to CPU0.
     for i in 0..256 {
         route_interrupt(i, 0); // 0 means CPU0
     }
 
-    // 2. Map all 256 EIOINTC interrupts (8 groups of 32) to CPU HWI0 (IP2 / pin index 0).
-    // Each group is configured via a 1-byte register. EIOINTC_IPMAP is at 0x14c0 (8 bytes).
+    // 2. Map all 256 EIOINTC interrupts to CPU HWI0 (IP2 / pin index 0).
     iocsr_write_w(EIOINTC_IPMAP, 0);
     iocsr_write_w(EIOINTC_IPMAP + 4, 0);
 
-    // 3. Enable EIOINTC for IRQ 0..255
+    // 3. Enable EIOINTC for IRQ 0..255 and allow bounce delivery.
     for i in 0..8 {
         iocsr_write_w(EIOINTC_ENABLE + i * 4, 0xffff_ffff);
+        iocsr_write_w(EIOINTC_BOUNCE + i * 4, 0xffff_ffff);
     }
 }
 
@@ -82,24 +83,27 @@ pub fn get_pending_group(group: usize) -> u64 {
 }
 
 pub fn clear_pending(irq_num: usize) {
-    let group = irq_num / 32;
-    let bit = irq_num % 32;
-    iocsr_write_w(EIOINTC_ISR + group * 4, 1u32 << bit);
+    if irq_num >= 256 {
+        return;
+    }
+    let group = irq_num / 64;
+    let bit = irq_num % 64;
+    iocsr_write_d(EIOINTC_ISR + group * 8, 1u64 << bit);
 }
 
 pub fn set_enable(irq_num: usize, enabled: bool) {
     if irq_num >= 256 {
         return;
     }
-    let group = irq_num / 32;
-    let bit = irq_num % 32;
-    let reg = EIOINTC_ENABLE + group * 4;
-    let old = iocsr_read_w(reg);
+    let group = irq_num / 64;
+    let bit = irq_num % 64;
+    let reg = EIOINTC_ENABLE + group * 8;
+    let old = iocsr_read_d(reg);
     let new = if enabled {
-        old | (1u32 << bit)
+        old | (1u64 << bit)
     } else {
-        old & !(1u32 << bit)
+        old & !(1u64 << bit)
     };
-    iocsr_write_w(reg, new);
+    iocsr_write_d(reg, new);
 }
 

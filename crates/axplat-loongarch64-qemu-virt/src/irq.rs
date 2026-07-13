@@ -76,15 +76,14 @@ impl IrqIf for IrqIfImpl {
                     let irq_num = group * 64 + bit;
                     let global_irq = irq_num;
                     info!("EIOINTC IRQ group={} bit={} irq_num={} global_irq={}", group, bit, irq_num, global_irq);
-                    if !IRQ_HANDLER_TABLE.handle(global_irq) {
-                        warn!("Unhandled EIOINTC IRQ {}", irq_num);
-                    }
+                    eiointc::clear_pending(irq_num);
                     if irq_num < 64 {
                         if let Some(pic) = pch_pic::PCH_PIC.get() {
                             pic.clear_irq(irq_num);
                         }
-                    } else {
-                        eiointc::clear_pending(irq_num);
+                    }
+                    if !IRQ_HANDLER_TABLE.handle(global_irq) {
+                        warn!("Unhandled EIOINTC IRQ {}", irq_num);
                     }
                     pending &= !(1u64 << bit);
                 }

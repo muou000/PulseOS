@@ -30,6 +30,10 @@ impl PchPic {
         read_volatile((self.base_vaddr + offset) as *const u64)
     }
 
+    unsafe fn write_reg8(&self, offset: usize, val: u8) {
+        write_volatile((self.base_vaddr + offset) as *mut u8, val);
+    }
+
     pub fn init(&self) {
         unsafe {
             // Mask all interrupts
@@ -64,6 +68,7 @@ impl PchPic {
         unsafe {
             let mask = self.read_reg64(PCH_PIC_INT_MASK);
             if enabled {
+                self.write_reg8(PCH_PIC_HTMSI_VEC + irq, irq as u8);
                 self.write_reg64(PCH_PIC_INT_MASK, mask & !(1 << irq));
             } else {
                 self.write_reg64(PCH_PIC_INT_MASK, mask | (1 << irq));
