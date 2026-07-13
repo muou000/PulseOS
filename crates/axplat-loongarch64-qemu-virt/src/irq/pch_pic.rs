@@ -7,11 +7,11 @@ static PIC_LOCK: SpinNoIrq<()> = SpinNoIrq::new(());
 const PCH_PIC_INT_MASK: usize = 0x020;
 const PCH_PIC_HTMSI_EN: usize = 0x040;
 const PCH_PIC_INT_EDGE: usize = 0x060;
-const PCH_PIC_INT_POL: usize = 0x080;
-const PCH_PIC_INT_CLR: usize = 0x0a0;
-const PCH_PIC_INT_STATUS: usize = 0x0c0;
+const PCH_PIC_INT_CLR: usize = 0x080;
+const PCH_PIC_INT_STATUS: usize = 0x3a0;
 const PCH_PIC_INT_ROUTE: usize = 0x100;
 const PCH_PIC_HTMSI_VEC: usize = 0x200;
+const PCH_PIC_INT_POL: usize = 0x3e0;
 
 pub struct PchPic {
     base_vaddr: usize,

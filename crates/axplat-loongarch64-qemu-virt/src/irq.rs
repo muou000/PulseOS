@@ -29,10 +29,15 @@ impl IrqIf for IrqIfImpl {
                 false => old_value & !LineBasedInterrupt::TIMER,
             };
             ecfg::set_lie(new_value);
-        } else if (PCH_PIC_IRQ_BASE..PCH_PIC_IRQ_BASE + 64).contains(&irq_num) {
+        } else if irq_num < 64 {
+            // PCH-PIC pins: unmask in PCH-PIC and keep EIOINTC enabled
             if let Some(pic) = pch_pic::PCH_PIC.get() {
-                pic.set_enable(irq_num - PCH_PIC_IRQ_BASE, enabled);
+                pic.set_enable(irq_num, enabled);
             }
+            eiointc::set_enable(irq_num, enabled);
+        } else if irq_num < 256 {
+            // PCH-MSI pins (64..255): directly connected to EIOINTC, bypasses PCH-PIC entirely
+            eiointc::set_enable(irq_num, enabled);
         }
     }
 
@@ -61,13 +66,16 @@ impl IrqIf for IrqIfImpl {
             }
         } else if irq == loongArch64::register::estat::Interrupt::HWI0 as usize {
             // External interrupt from EIOINTC
+            info!("HWI0 interrupt received, scanning EIOINTC pending");
+            let mut any_pending = false;
             for group in 0..4 {
                 let mut pending = eiointc::get_pending_group(group);
                 while pending != 0 {
+                    any_pending = true;
                     let bit = pending.trailing_zeros() as usize;
                     let irq_num = group * 64 + bit;
-                    let global_irq = PCH_PIC_IRQ_BASE + irq_num;
-                    trace!("EIOINTC IRQ {}", irq_num);
+                    let global_irq = irq_num;
+                    info!("EIOINTC IRQ group={} bit={} irq_num={} global_irq={}", group, bit, irq_num, global_irq);
                     if !IRQ_HANDLER_TABLE.handle(global_irq) {
                         warn!("Unhandled EIOINTC IRQ {}", irq_num);
                     }
@@ -81,8 +89,11 @@ impl IrqIf for IrqIfImpl {
                     pending &= !(1u64 << bit);
                 }
             }
+            if !any_pending {
+                info!("HWI0: no pending IRQs found in EIOINTC ISR");
+            }
         } else {
-            trace!("IRQ {}", irq);
+            info!("IRQ {}", irq);
             if !IRQ_HANDLER_TABLE.handle(irq) {
                 warn!("Unhandled IRQ {}", irq);
             }

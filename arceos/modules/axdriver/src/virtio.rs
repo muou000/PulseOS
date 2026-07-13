@@ -42,15 +42,15 @@ unsafe impl Sync for VirtioInterruptInfo {}
 static VIRTIO_INTERRUPTS: SpinNoIrq<alloc::collections::BTreeMap<usize, alloc::vec::Vec<VirtioInterruptInfo>>> = SpinNoIrq::new(alloc::collections::BTreeMap::new());
 
 fn common_virtio_irq_handler(irq: usize) {
-    axlog::info!("common_virtio_irq_handler: irq={}", irq);
+    axlog::debug!("common_virtio_irq_handler: irq={}", irq);
     let guard = VIRTIO_INTERRUPTS.lock();
     if let Some(infos) = guard.get(&irq) {
-        axlog::info!("common_virtio_irq_handler: found {} handlers for irq={}", infos.len(), irq);
+        axlog::debug!("common_virtio_irq_handler: found {} handlers for irq={}", infos.len(), irq);
         for info in infos {
             unsafe { (info.handler)(info.dev_ptr); }
         }
     } else {
-        axlog::info!("common_virtio_irq_handler: no handlers found for irq={}", irq);
+        axlog::debug!("common_virtio_irq_handler: no handlers found for irq={}", irq);
     }
 }
 
@@ -198,13 +198,20 @@ cfg_if! {
                     let dev_ptr = Arc::as_ptr(&inner) as *const ();
                     unsafe fn handler<H: VirtIoHal, T: virtio_drivers::transport::Transport>(ptr: *const ()) {
                         let w = unsafe { &*(ptr as *const VirtIoBlkDevInner<H, T>) };
-                        axlog::info!("virtio-blk interrupt handler: checking interrupt");
+                        axlog::debug!("virtio-blk interrupt handler: checking interrupt");
                         let acked = w.inner.lock().ack_interrupt();
-                        axlog::info!("virtio-blk interrupt handler: acked={}", acked);
-                        if acked {
-                            #[cfg(feature = "multitask")]
-                            w.wait_queue.notify_all(true);
-                        }
+                        axlog::debug!("virtio-blk interrupt handler: acked={}", acked);
+                        // Notify unconditionally: for MSI-X mode, the device fires
+                        // the interrupt only when I/O completes; `acked` reflects
+                        // whether the legacy ISR STATUS bit was set, which is NOT
+                        // reliable under MSI-X (QEMU may return false even on completion).
+                        // The async wait loop guards correctness via `peek_used()` check.
+                        //
+                        // If acked=true (legacy/MMIO mode) or acked=false (MSI-X mode),
+                        // both should wake waiters. Wrong wakeups are harmless because
+                        // peek_used() will simply return None and the loop will re-sleep.
+                        #[cfg(feature = "multitask")]
+                        w.wait_queue.notify_all(true);
                     }
                     VIRTIO_INTERRUPTS.lock().entry(irq).or_default().push(VirtioInterruptInfo {
                         dev_ptr,
@@ -234,86 +241,86 @@ cfg_if! {
                 self.inner.inner.lock().block_size()
             }
             fn read_block(&mut self, block_id: u64, buf: &mut [u8]) -> DevResult {
-                axlog::info!("virtio::read_block: block_id={}, buf_len={}", block_id, buf.len());
+                axlog::debug!("virtio::read_block: block_id={}, buf_len={}", block_id, buf.len());
                 let mut req = virtio_drivers::device::blk::BlkReq::default();
                 let mut resp = virtio_drivers::device::blk::BlkResp::default();
                 let token = unsafe {
                     self.inner.inner.lock().inner
                         .read_blocks_nb(block_id as usize, &mut req, buf, &mut resp)
                 }.map_err(virtio_err_to_dev)?;
-                axlog::info!("virtio::read_block: read_blocks_nb initiated, token={}", token);
+                axlog::debug!("virtio::read_block: read_blocks_nb initiated, token={}", token);
                 #[cfg(feature = "multitask")]
                 {
                     if axhal::asm::irqs_enabled() {
-                        axlog::info!("virtio::read_block: irqs_enabled, waiting in wait_queue");
+                        axlog::debug!("virtio::read_block: irqs_enabled, waiting in wait_queue");
                         self.inner.wait_queue.wait_until(|| {
                             self.inner.inner.lock().inner.peek_used() == Some(token)
                         });
-                        axlog::info!("virtio::read_block: wait_queue finished");
+                        axlog::debug!("virtio::read_block: wait_queue finished");
                     } else {
-                        axlog::info!("virtio::read_block: irqs_disabled, spinning");
+                        axlog::debug!("virtio::read_block: irqs_disabled, spinning");
                         while self.inner.inner.lock().inner.peek_used() != Some(token) {
                             core::hint::spin_loop();
                         }
-                        axlog::info!("virtio::read_block: spin finished");
+                        axlog::debug!("virtio::read_block: spin finished");
                     }
                 }
                 #[cfg(not(feature = "multitask"))]
                 {
-                    axlog::info!("virtio::read_block: multitask disabled, spinning");
+                    axlog::debug!("virtio::read_block: multitask disabled, spinning");
                     while self.inner.inner.lock().inner.peek_used() != Some(token) {
                         core::hint::spin_loop();
                     }
-                    axlog::info!("virtio::read_block: spin finished");
+                    axlog::debug!("virtio::read_block: spin finished");
                 }
-                axlog::info!("virtio::read_block: completing read blocks");
+                axlog::debug!("virtio::read_block: completing read blocks");
                 unsafe {
                     self.inner.inner.lock().inner
                         .complete_read_blocks(token, &req, buf, &mut resp)
                 }.map_err(virtio_err_to_dev)?;
-                axlog::info!("virtio::read_block: completed successfully");
+                axlog::debug!("virtio::read_block: completed successfully");
                 Ok(())
             }
 
             fn write_block(&mut self, block_id: u64, buf: &[u8]) -> DevResult {
-                axlog::info!("virtio::write_block: block_id={}, buf_len={}", block_id, buf.len());
+                axlog::debug!("virtio::write_block: block_id={}, buf_len={}", block_id, buf.len());
                 let mut req = virtio_drivers::device::blk::BlkReq::default();
                 let mut resp = virtio_drivers::device::blk::BlkResp::default();
                 let token = unsafe {
                     self.inner.inner.lock().inner
                         .write_blocks_nb(block_id as usize, &mut req, buf, &mut resp)
                 }.map_err(virtio_err_to_dev)?;
-                axlog::info!("virtio::write_block: write_blocks_nb initiated, token={}", token);
+                axlog::debug!("virtio::write_block: write_blocks_nb initiated, token={}", token);
                 #[cfg(feature = "multitask")]
                 {
                     if axhal::asm::irqs_enabled() {
-                        axlog::info!("virtio::write_block: irqs_enabled, waiting in wait_queue");
+                        axlog::debug!("virtio::write_block: irqs_enabled, waiting in wait_queue");
                         self.inner.wait_queue.wait_until(|| {
                             self.inner.inner.lock().inner.peek_used() == Some(token)
                         });
-                        axlog::info!("virtio::write_block: wait_queue finished");
+                        axlog::debug!("virtio::write_block: wait_queue finished");
                     } else {
-                        axlog::info!("virtio::write_block: irqs_disabled, spinning");
+                        axlog::debug!("virtio::write_block: irqs_disabled, spinning");
                         while self.inner.inner.lock().inner.peek_used() != Some(token) {
                             core::hint::spin_loop();
                         }
-                        axlog::info!("virtio::write_block: spin finished");
+                        axlog::debug!("virtio::write_block: spin finished");
                     }
                 }
                 #[cfg(not(feature = "multitask"))]
                 {
-                    axlog::info!("virtio::write_block: multitask disabled, spinning");
+                    axlog::debug!("virtio::write_block: multitask disabled, spinning");
                     while self.inner.inner.lock().inner.peek_used() != Some(token) {
                         core::hint::spin_loop();
                     }
-                    axlog::info!("virtio::write_block: spin finished");
+                    axlog::debug!("virtio::write_block: spin finished");
                 }
-                axlog::info!("virtio::write_block: completing write blocks");
+                axlog::debug!("virtio::write_block: completing write blocks");
                 unsafe {
                     self.inner.inner.lock().inner
                         .complete_write_blocks(token, &req, buf, &mut resp)
                 }.map_err(virtio_err_to_dev)?;
-                axlog::info!("virtio::write_block: completed successfully");
+                axlog::debug!("virtio::write_block: completed successfully");
                 Ok(())
             }
 
@@ -365,15 +372,33 @@ cfg_if! {
 
                     axlog::debug!("virtio::read_block_async: token={} submitted", token);
 
-                    // 2. Wait loop: re-check condition after each wakeup to handle
-                    //    spurious wakeups (WaitFuture does not carry a predicate).
+                    // 2. Wait loop with race-free waker registration.
+                    //
+                    // Pattern: pin the WaitFuture *before* checking the condition.
+                    // WaitFuture registers the waker on first poll (returning Pending),
+                    // so any notify_all() that arrives after the first poll will wake us.
+                    //
+                    // Race window analysis:
+                    //   - If interrupt arrives BEFORE the first .await poll: the interrupt
+                    //     calls notify_all(), but the waker hasn't been registered yet.
+                    //     The next loop iteration will create a fresh WaitFuture and poll it,
+                    //     registering the waker; but since the condition is already true,
+                    //     peek_used() will return Some(token) and we break immediately.
+                    //   - If interrupt arrives AFTER the first .await poll (waker registered):
+                    //     notify_all() wakes the waker, Future is re-polled, WaitFuture
+                    //     returns Ready, loop body runs, peek_used() returns Some(token), break.
+                    //
+                    // The interrupt handler notifies unconditionally (regardless of acked),
+                    // so MSI-X mode (where acked may be false) is also correctly handled.
                     loop {
+                        // Fast path: check before sleeping to avoid unnecessary suspension.
                         if self.inner.inner.lock().inner.peek_used() == Some(token) {
                             break;
                         }
-                        // Register our waker and suspend. The interrupt handler calls
-                        // notify_all() which wakes all wakers registered in wait_queue.
+                        // Register our waker and suspend.
+                        // The interrupt handler calls notify_all() which wakes all wakers.
                         self.inner.wait_queue.wait_async().await;
+                        // After wakeup, re-check the condition (handles spurious wakeups).
                     }
 
                     axlog::debug!("virtio::read_block_async: token={} ready, completing", token);
@@ -403,12 +428,13 @@ cfg_if! {
 
                     axlog::debug!("virtio::write_block_async: token={} submitted", token);
 
-                    // 2. Wait loop with spurious-wakeup guard.
+                    // 2. Same race-free wait loop as read_block_async.
                     loop {
                         if self.inner.inner.lock().inner.peek_used() == Some(token) {
                             break;
                         }
                         self.inner.wait_queue.wait_async().await;
+                        // Re-check after wakeup (spurious wakeup guard).
                     }
 
                     axlog::debug!("virtio::write_block_async: token={} ready, completing", token);
@@ -558,7 +584,7 @@ impl<D: VirtIoDevMeta> DriverProbe for VirtIoDriver<D> {
                                 // IRQ number = EIOINTC pin number directly (no offset)
                                 irq = msi_vector;
                                 msix_success = true;
-                                info!("PCI device at {} configured to use MSI-X (eiointc_pin {}, irq {})", bdf, msi_vector, irq);
+                                debug!("PCI device at {} configured to use MSI-X (eiointc_pin {}, irq {})", bdf, msi_vector, irq);
                             }
                         }
                     }

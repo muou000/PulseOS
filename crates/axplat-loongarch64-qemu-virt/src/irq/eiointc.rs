@@ -8,18 +8,29 @@ fn iocsr_read_d(reg: usize) -> u64 {
 }
 
 #[inline]
-fn iocsr_write_b(reg: usize, value: u8) {
-    unsafe {
-        core::arch::asm!("iocsrwr.b {},{}", in(reg) value, in(reg) reg);
-    }
-}
-
-#[inline]
 fn iocsr_write_d(reg: usize, value: u64) {
     unsafe {
         core::arch::asm!("iocsrwr.d {},{}", in(reg) value, in(reg) reg);
     }
 }
+
+#[inline]
+fn iocsr_read_w(reg: usize) -> u32 {
+    let val: u32;
+    unsafe {
+        core::arch::asm!("iocsrrd.w {},{}", out(reg) val, in(reg) reg);
+    }
+    val
+}
+
+#[inline]
+fn iocsr_write_w(reg: usize, value: u32) {
+    unsafe {
+        core::arch::asm!("iocsrwr.w {},{}", in(reg) value, in(reg) reg);
+    }
+}
+
+const LOONGARCH_IOCSR_MISC_FUNC: usize = 0x0420;
 const EIOINTC_BASE: usize = 0x1400;
 const EIOINTC_NODEMAP: usize = 0x14a0;
 const EIOINTC_IPMAP: usize = 0x14c0;
@@ -29,41 +40,66 @@ const EIOINTC_ROUTE: usize = 0x1c00;
 
 #[inline(never)]
 fn route_interrupt(irq: usize, cpu: u8) {
-    iocsr_write_b(EIOINTC_ROUTE + irq, cpu);
+    let reg = EIOINTC_ROUTE + (irq & !3);
+    let shift = (irq & 3) * 8;
+    let old = iocsr_read_w(reg);
+    let new = (old & !(0xff << shift)) | ((cpu as u32) << shift);
+    iocsr_write_w(reg, new);
 }
 
 pub fn init() {
+    // Enable Extended I/O Interrupt (EXT_INT_en, bit 48 of 0x0420)
+    let misc = iocsr_read_d(LOONGARCH_IOCSR_MISC_FUNC);
+    iocsr_write_d(LOONGARCH_IOCSR_MISC_FUNC, misc | (1u64 << 48));
+
     // 1. Route EIOINTC inputs 0..256 to CPU0
     for i in 0..256 {
         route_interrupt(i, 0); // 0 means CPU0
     }
 
-    // 2. Map EIOINTC interrupts to CPU HWI lines
-    // We want IRQs 0..255 to go to HWI0 (IP2).
-    // IPMAP: each group of 32 interrupts uses 4 bits.
-    // So for 256 interrupts (8 groups), we set the low 32 bits to 0x2222_2222.
-    let mut ipmap0 = iocsr_read_d(EIOINTC_IPMAP);
-    ipmap0 &= !0xffff_ffff;
-    ipmap0 |= 0x2222_2222; // Map IRQ 0..255 to IP2
-    iocsr_write_d(EIOINTC_IPMAP, ipmap0);
+    // 2. Map all 256 EIOINTC interrupts (8 groups of 32) to CPU HWI0 (IP2 / pin index 0).
+    // Each group is configured via a 1-byte register. EIOINTC_IPMAP is at 0x14c0 (8 bytes).
+    iocsr_write_w(EIOINTC_IPMAP, 0);
+    iocsr_write_w(EIOINTC_IPMAP + 4, 0);
 
     // 3. Enable EIOINTC for IRQ 0..255
-    iocsr_write_d(EIOINTC_ENABLE, 0xffff_ffff_ffff_ffff);
-    iocsr_write_d(EIOINTC_ENABLE + 8, 0xffff_ffff_ffff_ffff);
-    iocsr_write_d(EIOINTC_ENABLE + 16, 0xffff_ffff_ffff_ffff);
-    iocsr_write_d(EIOINTC_ENABLE + 24, 0xffff_ffff_ffff_ffff);
+    for i in 0..8 {
+        iocsr_write_w(EIOINTC_ENABLE + i * 4, 0xffff_ffff);
+    }
 }
 
 pub fn get_pending() -> u64 {
-    iocsr_read_d(EIOINTC_ISR)
+    let low = iocsr_read_w(EIOINTC_ISR) as u64;
+    let high = iocsr_read_w(EIOINTC_ISR + 4) as u64;
+    low | (high << 32)
 }
 
 pub fn get_pending_group(group: usize) -> u64 {
-    iocsr_read_d(EIOINTC_ISR + group * 8)
+    let reg = EIOINTC_ISR + group * 8;
+    let low = iocsr_read_w(reg) as u64;
+    let high = iocsr_read_w(reg + 4) as u64;
+    low | (high << 32)
 }
 
 pub fn clear_pending(irq_num: usize) {
-    let group = irq_num / 64;
-    let bit = irq_num % 64;
-    iocsr_write_d(EIOINTC_ISR + group * 8, 1u64 << bit);
+    let group = irq_num / 32;
+    let bit = irq_num % 32;
+    iocsr_write_w(EIOINTC_ISR + group * 4, 1u32 << bit);
 }
+
+pub fn set_enable(irq_num: usize, enabled: bool) {
+    if irq_num >= 256 {
+        return;
+    }
+    let group = irq_num / 32;
+    let bit = irq_num % 32;
+    let reg = EIOINTC_ENABLE + group * 4;
+    let old = iocsr_read_w(reg);
+    let new = if enabled {
+        old | (1u32 << bit)
+    } else {
+        old & !(1u32 << bit)
+    };
+    iocsr_write_w(reg, new);
+}
+
