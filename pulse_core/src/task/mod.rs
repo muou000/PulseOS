@@ -280,8 +280,9 @@ impl axfs::ProcfsProcessProvider for PulseProcessProvider {
         }
         let args = proc.args.read();
         if args.is_empty() {
-            let path = proc.exec_path_or_default();
-            Some(alloc::format!("{}\0", path))
+            let mut path = proc.exec_path_or_default();
+            path.push('\0');
+            Some(path)
         } else {
             let total_len: usize = args.iter().map(|s| s.len() + 1).sum();
             let mut res = String::with_capacity(total_len);
@@ -295,7 +296,9 @@ impl axfs::ProcfsProcessProvider for PulseProcessProvider {
 
     fn comm(&self, pid: u64) -> Option<String> {
         let proc = process_by_pid(pid)?;
-        Some(alloc::format!("{}\n", proc.name()))
+        let mut name = proc.name();
+        name.push('\n');
+        Some(name)
     }
 
     fn status(&self, pid: u64) -> Option<String> {
@@ -490,7 +493,8 @@ impl axfs::ProcfsProcessProvider for PulseProcessProvider {
             let mut offset = 0;
             let mut path_str = String::new();
             let mut inode = 0;
-            let mut dev_str = "00:00".to_string();
+            let mut dev_major = 0;
+            let mut dev_minor = 0;
 
             let mut curr_backend = backend.clone();
             while let axmm::Backend::Cow(cow) = &curr_backend {
@@ -510,7 +514,8 @@ impl axfs::ProcfsProcessProvider for PulseProcessProvider {
                         inode = meta.inode;
                         let major = meta.device >> 8;
                         let minor = meta.device & 0xff;
-                        dev_str = alloc::format!("{:02x}:{:02x}", major, minor);
+                        dev_major = major;
+                        dev_minor = minor;
                     }
                     if let Ok(path) = loc.absolute_path() {
                         path_str = path.as_str().to_string();
@@ -523,7 +528,7 @@ impl axfs::ProcfsProcessProvider for PulseProcessProvider {
             if path_str.is_empty() {
                 core::write!(
                     out,
-                    "{:x}-{:x} {}{}{}{} {:08x} {} {}\n",
+                    "{:x}-{:x} {}{}{}{} {:08x} {:02x}:{:02x} {}\n",
                     start.as_usize(),
                     end.as_usize(),
                     r,
@@ -531,14 +536,14 @@ impl axfs::ProcfsProcessProvider for PulseProcessProvider {
                     x,
                     p_char,
                     offset,
-                    dev_str,
+                    dev_major, dev_minor,
                     inode
                 )
                 .unwrap();
             } else {
                 core::write!(
                     out,
-                    "{:x}-{:x} {}{}{}{} {:08x} {} {:<7} {}\n",
+                    "{:x}-{:x} {}{}{}{} {:08x} {:02x}:{:02x} {:<7} {}\n",
                     start.as_usize(),
                     end.as_usize(),
                     r,
@@ -546,7 +551,7 @@ impl axfs::ProcfsProcessProvider for PulseProcessProvider {
                     x,
                     p_char,
                     offset,
-                    dev_str,
+                    dev_major, dev_minor,
                     inode,
                     path_str
                 )
@@ -616,7 +621,9 @@ impl axfs::ProcfsProcessProvider for PulseProcessProvider {
     fn thread_comm(&self, pid: u64, tid: u64) -> Option<String> {
         let proc = process_by_pid(pid)?;
         let task = proc.task_ref_by_tid(tid)?;
-        Some(alloc::format!("{}\n", task.name()))
+        let mut name = task.name();
+        name.push('\n');
+        Some(name)
     }
 
     fn thread_status(&self, pid: u64, tid: u64) -> Option<String> {
