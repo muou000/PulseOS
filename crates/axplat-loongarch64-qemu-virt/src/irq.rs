@@ -1,18 +1,20 @@
-use axplat::irq::{HandlerTable, IpiTarget, IrqHandler, IrqIf};
-use axplat::mem::pa;
+use axplat::{
+    irq::{HandlerTable, IpiTarget, IrqHandler, IrqIf},
+    mem::pa,
+};
 use loongArch64::register::{
     ecfg::{self, LineBasedInterrupt},
     ticlr,
 };
 
-mod pch_pic;
 mod eiointc;
+mod irq_common;
+mod pch_pic;
+
+use irq_common::EIOINTC_CPU_IRQ;
 
 /// The maximum number of IRQs.
 pub const MAX_IRQ_COUNT: usize = 256;
-
-/// The base IRQ number for PCH-PIC interrupts.
-pub const PCH_PIC_IRQ_BASE: usize = 32;
 
 static IRQ_HANDLER_TABLE: HandlerTable<MAX_IRQ_COUNT> = HandlerTable::new();
 
@@ -64,32 +66,15 @@ impl IrqIf for IrqIfImpl {
             if !IRQ_HANDLER_TABLE.handle(irq) {
                 warn!("Unhandled Timer IRQ");
             }
-        } else if irq == loongArch64::register::estat::Interrupt::HWI0 as usize {
-            // External interrupt from EIOINTC
-            info!("HWI0 interrupt received, scanning EIOINTC pending");
-            let mut any_pending = false;
-            for group in 0..4 {
-                let mut pending = eiointc::get_pending_group(group);
-                while pending != 0 {
-                    any_pending = true;
-                    let bit = pending.trailing_zeros() as usize;
-                    let irq_num = group * 64 + bit;
-                    let global_irq = irq_num;
-                    info!("EIOINTC IRQ group={} bit={} irq_num={} global_irq={}", group, bit, irq_num, global_irq);
-                    eiointc::clear_pending(irq_num);
-                    if irq_num < 64 {
-                        if let Some(pic) = pch_pic::PCH_PIC.get() {
-                            pic.clear_irq(irq_num);
-                        }
-                    }
-                    if !IRQ_HANDLER_TABLE.handle(global_irq) {
-                        warn!("Unhandled EIOINTC IRQ {}", irq_num);
-                    }
-                    pending &= !(1u64 << bit);
+        } else if irq == EIOINTC_CPU_IRQ {
+            if let Some(irq_num) = eiointc::claim_irq() {
+                trace!("EIOINTC IRQ {}", irq_num);
+                if !IRQ_HANDLER_TABLE.handle(irq_num) {
+                    warn!("Unhandled EIOINTC IRQ {}", irq_num);
                 }
-            }
-            if !any_pending {
-                info!("HWI0: no pending IRQs found in EIOINTC ISR");
+                eiointc::complete_irq(irq_num);
+            } else {
+                debug!("Spurious EIOINTC interrupt");
             }
         } else {
             info!("IRQ {}", irq);
@@ -108,7 +93,7 @@ impl IrqIf for IrqIfImpl {
 pub(crate) fn init_early() {
     eiointc::init();
     pch_pic::init(pa!(crate::config::devices::PCH_PIC_PADDR));
-    // Enable HWI0 in ECFG
+    // QEMU routes the EIOINTC cascade through CPU HWI1 (IRQ 3).
     let old_value = ecfg::read().lie();
-    ecfg::set_lie(old_value | LineBasedInterrupt::HWI0);
+    ecfg::set_lie(old_value | LineBasedInterrupt::HWI1);
 }

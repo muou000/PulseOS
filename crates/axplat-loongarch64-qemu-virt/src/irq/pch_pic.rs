@@ -1,4 +1,5 @@
 use core::ptr::{read_volatile, write_volatile};
+
 use axplat::mem::PhysAddr;
 use kspin::SpinNoIrq;
 
@@ -8,8 +9,6 @@ const PCH_PIC_INT_MASK: usize = 0x020;
 const PCH_PIC_HTMSI_EN: usize = 0x040;
 const PCH_PIC_INT_EDGE: usize = 0x060;
 const PCH_PIC_INT_CLR: usize = 0x080;
-const PCH_PIC_INT_STATUS: usize = 0x3a0;
-const PCH_PIC_INT_ROUTE: usize = 0x100;
 const PCH_PIC_HTMSI_VEC: usize = 0x200;
 const PCH_PIC_INT_POL: usize = 0x3e0;
 
@@ -23,15 +22,15 @@ impl PchPic {
     }
 
     unsafe fn write_reg64(&self, offset: usize, val: u64) {
-        write_volatile((self.base_vaddr + offset) as *mut u64, val);
+        unsafe { write_volatile((self.base_vaddr + offset) as *mut u64, val) };
     }
 
     unsafe fn read_reg64(&self, offset: usize) -> u64 {
-        read_volatile((self.base_vaddr + offset) as *const u64)
+        unsafe { read_volatile((self.base_vaddr + offset) as *const u64) }
     }
 
     unsafe fn write_reg8(&self, offset: usize, val: u8) {
-        write_volatile((self.base_vaddr + offset) as *mut u8, val);
+        unsafe { write_volatile((self.base_vaddr + offset) as *mut u8, val) };
     }
 
     pub fn init(&self) {
@@ -45,46 +44,29 @@ impl PchPic {
             // Disable HTMSI translation
             self.write_reg64(PCH_PIC_HTMSI_EN, 0);
 
-            // Route interrupts 0..64 to outputs 0..64 (which go to EIOINTC)
-            // Use 64-bit (8-byte) writes to avoid byte-sized MMIO access constraints on QEMU.
-            for g in 0..8 {
-                let mut val = 0u64;
-                for i in 0..8 {
-                    let irq = g * 8 + i;
-                    val |= (irq as u64) << (i * 8);
-                }
-                self.write_reg64(PCH_PIC_INT_ROUTE + g * 8, val);
-            }
-
             // Clear all pending interrupts
             self.write_reg64(PCH_PIC_INT_CLR, 0xffff_ffff_ffff_ffff);
-
         }
     }
 
     pub fn set_enable(&self, irq: usize, enabled: bool) {
-        if irq >= 64 { return; }
+        if irq >= 64 {
+            return;
+        }
         let _guard = PIC_LOCK.lock();
         unsafe {
+            let irq_bit = 1u64 << irq;
             let mask = self.read_reg64(PCH_PIC_INT_MASK);
+            let htmsi_enable = self.read_reg64(PCH_PIC_HTMSI_EN);
             if enabled {
                 self.write_reg8(PCH_PIC_HTMSI_VEC + irq, irq as u8);
-                self.write_reg64(PCH_PIC_INT_MASK, mask & !(1 << irq));
+                self.write_reg64(PCH_PIC_HTMSI_EN, htmsi_enable | irq_bit);
+                self.write_reg64(PCH_PIC_INT_MASK, mask & !irq_bit);
             } else {
-                self.write_reg64(PCH_PIC_INT_MASK, mask | (1 << irq));
+                self.write_reg64(PCH_PIC_INT_MASK, mask | irq_bit);
+                self.write_reg64(PCH_PIC_HTMSI_EN, htmsi_enable & !irq_bit);
             }
         }
-    }
-
-    pub fn clear_irq(&self, irq: usize) {
-        if irq >= 64 { return; }
-        unsafe {
-            self.write_reg64(PCH_PIC_INT_CLR, 1 << irq);
-        }
-    }
-
-    pub fn pending_irqs(&self) -> u64 {
-        unsafe { self.read_reg64(PCH_PIC_INT_STATUS) }
     }
 }
 
