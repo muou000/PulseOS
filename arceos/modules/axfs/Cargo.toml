@@ -16,43 +16,36 @@ times = []
 std = []
 
 [dependencies]
-axalloc = { workspace = true }
-axtask = { workspace = true }
+axalloc.workspace = true
+axtask.workspace = true
 axdriver = { workspace = true, features = ["block", "async"] }
-axerrno = "0.2"
-axfs-ng-vfs = "0.1"
-axhal = { workspace = true }
+axerrno.workspace = true
+axfs-ng-vfs.workspace = true
+axhal.workspace = true
 axio = { workspace = true, features = ["alloc"] }
-axpoll = { workspace = true }
-axsync = { workspace = true }
-bitflags = "2.10"
-cfg-if = { workspace = true }
-chrono = { workspace = true }
-intrusive-collections = "0.9.7"
-kspin = { workspace = true }
-log = { workspace = true }
-lru = "0.16.0"
-rand_core = { workspace = true }
-rand_pcg = { workspace = true }
-scope-local = { workspace = true }
-slab = { version = "0.4.9", default-features = false }
-spin = { workspace = true }
-async-trait = "0.1"
-async-lock = { version = "3.4", default-features = false }
-
-[dependencies.ext4plus]
-path = "../../../crates/ext4plus"
-default-features = false
-features = ["multi-threaded"]
-optional = true
+axpoll.workspace = true
+axsync.workspace = true
+bitflags.workspace = true
+cfg-if.workspace = true
+chrono.workspace = true
+intrusive-collections.workspace = true
+kspin.workspace = true
+log.workspace = true
+lru.workspace = true
+rand_core.workspace = true
+rand_pcg.workspace = true
+scope-local.workspace = true
+slab.workspace = true
+spin.workspace = true
+async-trait.workspace = true
+async-lock.workspace = true
+ext4plus = { workspace = true, features = ["multi-threaded"], optional = true }
 
 [dependencies.fatfs]
-git = "https://github.com/Starry-OS/rust-fatfs.git"
-rev = "2685439"
-default-features = false
-optional = true
+workspace = true
 features = ["alloc", "lfn", "log_level_trace", "unicode"]
+optional = true
 
 [dev-dependencies]
 axdriver = { workspace = true, features = ["block", "ramdisk", "async"] }
-env_logger = "0.11.8"
+env_logger.workspace = true

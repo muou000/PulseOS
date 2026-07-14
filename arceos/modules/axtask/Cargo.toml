@@ -36,26 +36,26 @@ sched-cfs = ["multitask", "preempt"]
 test = ["percpu?/sp-naive"]
 
 [dependencies]
-cfg-if = "1.0"
-log = "=0.4.21"
-axhal = { workspace = true }
-axerrno = "0.2"
+cfg-if.workspace = true
+log.workspace = true
+axhal.workspace = true
+axerrno.workspace = true
 axconfig = { workspace = true, optional = true }
 axalloc = { workspace = true, optional = true }
-percpu = { version = "0.2", optional = true }
-kspin = { version = "0.1", optional = true }
-lazyinit = { version = "0.2" }
-memory_addr = { version = "0.4", optional = true }
-timer_list = { version = "0.1", optional = true }
-kernel_guard = { version = "0.1", optional = true }
-crate_interface = { version = "0.1", optional = true }
-cpumask = { version = "0.1", optional = true }
-axsched = { version = "0.3", optional = true }
-axpoll = { workspace = true }
-axio = { workspace = true }
-futures-util = { version = "0.3", default-features = false, features = ["alloc", "async-await-macro"] }
+percpu = { workspace = true, optional = true }
+kspin = { workspace = true, optional = true }
+lazyinit.workspace = true
+memory_addr = { workspace = true, optional = true }
+timer_list = { workspace = true, optional = true }
+kernel_guard = { workspace = true, optional = true }
+crate_interface = { workspace = true, optional = true }
+cpumask = { workspace = true, optional = true }
+axsched = { workspace = true, optional = true }
+axpoll.workspace = true
+axio.workspace = true
+futures-util.workspace = true
 
 [dev-dependencies]
-rand = "0.9"
+rand.workspace = true
 axhal = { workspace = true, features = ["fp-simd"] }
 axtask = { workspace = true, features = ["test", "multitask"] }

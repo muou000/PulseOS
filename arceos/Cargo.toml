@@ -5,6 +5,7 @@ members = [
     "modules/axalloc",
     "modules/axconfig",
     "modules/axdisplay",
+    "modules/axdma",
     "modules/axdriver",
     "modules/axfs",
     "modules/axhal",
@@ -53,6 +54,7 @@ axfeat = { path = "api/axfeat" }
 axalloc = { path = "modules/axalloc" }
 axconfig = { path = "modules/axconfig" }
 axdisplay = { path = "modules/axdisplay" }
+axdma = { path = "modules/axdma" }
 axdriver = { path = "modules/axdriver" }
 axfs = { path = "modules/axfs" }
 axhal = { path = "modules/axhal" }
@@ -63,26 +65,66 @@ axns = { path = "modules/axns" }
 axruntime = { path = "modules/axruntime" }
 axsync = { path = "modules/axsync" }
 axtask = { path = "modules/axtask" }
-axdma = { path = "modules/axdma" }
 axipi = { path = "modules/axipi" }
 axerrno = "0.2"
 
 axdriver_base = { path = "../crates/axdriver_base" }
 axdriver_block = { path = "../crates/axdriver_block" }
+axdriver_display = { git = "https://github.com/arceos-org/axdriver_crates.git", tag = "v0.1.2" }
 axdriver_net = { path = "../crates/axdriver_net" }
 axdriver_pci = { path = "../crates/axdriver_pci" }
 axdriver_virtio = { path = "../crates/axdriver_virtio" }
 
+aarch64-cpu = "10.0"
+allocator = { git = "https://github.com/arceos-org/allocator.git", tag = "v0.1.1" }
+async-lock = { version = "3.4", default-features = false }
+async-trait = "0.1"
+axconfig-macros = "0.2"
+axcpu = "0.2"
+axfs-ng-vfs = "0.1"
 axio = { version = "0.3.0-pre.1" }
 axpoll = "0.3"
+axplat = "0.3"
+axplat-aarch64-qemu-virt = "0.3"
+axplat-loongarch64-qemu-virt = "0.3"
+axplat-riscv64-qemu-virt = "0.3"
+axplat-x86-pc = "0.3"
+axsched = "0.3"
+bitflags = "2.10"
 cfg-if = "1.0"
 chrono = { version = "0.4", default-features = false }
+cpumask = "0.1"
+crate_interface = "0.1.4"
+ctor_bare = "0.2"
+env_logger = "0.11.8"
+ext4plus = { path = "../crates/ext4plus", default-features = false }
+fatfs = { git = "https://github.com/Starry-OS/rust-fatfs.git", rev = "2685439", default-features = false }
+futures-util = { version = "0.3", default-features = false, features = [
+    "alloc",
+    "async-await-macro",
+] }
+heapless = "0.9"
+intrusive-collections = "0.9.7"
+kernel_guard = "0.1"
 kspin = "0.1"
-log = "0.4"
-scope-local = "0.1"
-spin = "0.10"
+lazyinit = "0.2"
+linkme = "0.3.33"
+lock_api = { version = "0.4", default-features = false }
+log = "=0.4.21"
+lru = "0.16.0"
+memory_addr = "0.4"
+memory_set = "0.4"
+page_table_multiarch = { version = "0.5", features = ["copy-from"] }
+percpu = "0.2"
+rand = "0.9"
 rand_core = { version = "0.10.1", default-features = false }
 rand_pcg = { version = "0.10.2", default-features = false }
+scope-local = "0.1"
+slab = { version = "0.4.9", default-features = false }
+smoltcp = { git = "https://github.com/rcore-os/smoltcp.git", rev = "8bf9a9a", default-features = false }
+spin = "0.10"
+timer_list = "0.1"
+virtio-drivers = "0.7.4"
 
 [profile.release]
 lto = true
