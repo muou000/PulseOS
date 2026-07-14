@@ -90,20 +90,21 @@ impl AsyncBlockDriverOps for SharedBlockDevice {
     type ReadFuture<'a> = core::pin::Pin<Box<dyn core::future::Future<Output = DevResult> + Send + 'a>>;
     type WriteFuture<'a> = core::pin::Pin<Box<dyn core::future::Future<Output = DevResult> + Send + 'a>>;
 
-    fn read_block_async<'a>(&'a mut self, block_id: u64, buf: &'a mut [u8]) -> Self::ReadFuture<'a> {
-        let dev_ptr = Arc::as_ptr(&self.dev) as *mut Mutex<AxBlockDevice>;
-        let dev_mut = unsafe { &mut *dev_ptr };
-        let dev_guard = dev_mut.get_mut();
-        let res = dev_guard.read_block(block_id, buf);
-        Box::pin(async move { res })
+    fn read_block_async<'a>(
+        &'a mut self,
+        block_id: u64,
+        buf: &'a mut [u8],
+    ) -> Self::ReadFuture<'a> {
+        // VirtIO wrappers are cheap handles over shared synchronized state.
+        // Clone the handle while locked, then release the outer spin lock
+        // before the request can suspend.
+        let mut dev = self.dev.lock().clone();
+        Box::pin(async move { dev.read_block_async(block_id, buf).await })
     }
 
     fn write_block_async<'a>(&'a mut self, block_id: u64, buf: &'a [u8]) -> Self::WriteFuture<'a> {
-        let dev_ptr = Arc::as_ptr(&self.dev) as *mut Mutex<AxBlockDevice>;
-        let dev_mut = unsafe { &mut *dev_ptr };
-        let dev_guard = dev_mut.get_mut();
-        let res = dev_guard.write_block(block_id, buf);
-        Box::pin(async move { res })
+        let mut dev = self.dev.lock().clone();
+        Box::pin(async move { dev.write_block_async(block_id, buf).await })
     }
 }
 
@@ -334,4 +335,3 @@ impl<D: BlockDriverOps + 'static> SeekableDisk<D> {
         Ok(written)
     }
 }
-

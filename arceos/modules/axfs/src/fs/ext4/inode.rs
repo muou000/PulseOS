@@ -309,7 +309,7 @@ impl NodeOps for Inode {
     }
 
     async fn metadata(&self) -> VfsResult<Metadata> {
-        let fs = self.fs.lock();
+        let fs = &self.fs.inner;
         self.validate_inode_num(&fs, self.ino)?;
         let idx = core::num::NonZeroU32::new(self.ino).ok_or(VfsError::InvalidData)?;
         let inode = ext4plus::inode::Inode::read(&fs, idx).await.map_err(into_vfs_err)?;
@@ -334,7 +334,7 @@ impl NodeOps for Inode {
     }
 
     async fn len(&self) -> VfsResult<u64> {
-        let fs = self.fs.lock();
+        let fs = &self.fs.inner;
         self.validate_inode_num(&fs, self.ino)?;
         let idx = core::num::NonZeroU32::new(self.ino).ok_or(VfsError::InvalidData)?;
         let inode = ext4plus::inode::Inode::read(&fs, idx).await.map_err(into_vfs_err)?;
@@ -342,7 +342,7 @@ impl NodeOps for Inode {
     }
 
     async fn update_metadata(&self, update: MetadataUpdate) -> VfsResult<()> {
-        let fs = self.fs.lock();
+        let fs = &self.fs.inner;
         self.validate_inode_num(&fs, self.ino)?;
         let idx = core::num::NonZeroU32::new(self.ino).ok_or(VfsError::InvalidData)?;
         let mut inode = ext4plus::inode::Inode::read(&fs, idx).await.map_err(into_vfs_err)?;
@@ -389,7 +389,7 @@ impl NodeOps for Inode {
 #[async_trait]
 impl FileNodeOps for Inode {
     async fn read_at(&self, buf: &mut [u8], offset: u64) -> VfsResult<usize> {
-        let fs = self.fs.lock();
+        let fs = &self.fs.inner;
         self.validate_inode_num(&fs, self.ino)?;
         let idx = core::num::NonZeroU32::new(self.ino).ok_or(VfsError::InvalidData)?;
         let inode = ext4plus::inode::Inode::read(&fs, idx).await.map_err(into_vfs_err)?;
@@ -411,7 +411,7 @@ impl FileNodeOps for Inode {
 
     async fn write_at(&self, buf: &[u8], offset: u64) -> VfsResult<usize> {
         log::debug!("ext4 inode::write_at: offset={}, len={}", offset, buf.len());
-        let fs = self.fs.lock();
+        let fs = &self.fs.inner;
         self.validate_inode_num(&fs, self.ino)?;
         let idx = core::num::NonZeroU32::new(self.ino).ok_or(VfsError::InvalidData)?;
         let mut inode = ext4plus::inode::Inode::read(&fs, idx).await.map_err(into_vfs_err)?;
@@ -428,7 +428,7 @@ impl FileNodeOps for Inode {
     }
 
     async fn set_len(&self, len: u64) -> VfsResult<()> {
-        let fs = self.fs.lock();
+        let fs = &self.fs.inner;
         self.validate_inode_num(&fs, self.ino)?;
         let idx = core::num::NonZeroU32::new(self.ino).ok_or(VfsError::InvalidData)?;
         let mut inode = ext4plus::inode::Inode::read(&fs, idx).await.map_err(into_vfs_err)?;
@@ -442,7 +442,7 @@ impl FileNodeOps for Inode {
     }
 
     async fn set_symlink(&self, target: &str) -> VfsResult<()> {
-        let fs = self.fs.lock();
+        let fs = &self.fs.inner;
         self.validate_inode_num(&fs, self.ino)?;
         let idx = core::num::NonZeroU32::new(self.ino).ok_or(VfsError::InvalidData)?;
         let mut inode = ext4plus::inode::Inode::read(&fs, idx).await.map_err(into_vfs_err)?;
@@ -472,7 +472,7 @@ impl DirNodeOps for Inode {
     }
 
     async fn read_dir(&self, offset: u64, sink: &mut (dyn DirEntrySink + Send)) -> VfsResult<usize> {
-        let fs = self.fs.lock();
+        let fs = &self.fs.inner;
         self.validate_inode_num(&fs, self.ino)?;
         let snapshot = self.dir_snapshot(&fs).await;
         let mut count = 0usize;
@@ -491,7 +491,7 @@ impl DirNodeOps for Inode {
     }
 
     async fn lookup(&self, name: &str) -> VfsResult<DirEntry> {
-        let fs = self.fs.lock();
+        let fs = &self.fs.inner;
         self.validate_inode_num(&fs, self.ino)?;
 
         if let Some(snapshot) = self.dir_cache.get() {
@@ -525,7 +525,7 @@ impl DirNodeOps for Inode {
         node_type: NodeType,
         permission: NodePermission,
     ) -> VfsResult<DirEntry> {
-        let fs = self.fs.lock();
+        let fs = &self.fs.inner;
         self.validate_inode_num(&fs, self.ino)?;
 
         let exists = if let Some(snapshot) = self.dir_cache.get() {
@@ -592,7 +592,7 @@ impl DirNodeOps for Inode {
     }
 
     async fn link(&self, name: &str, node: &DirEntry) -> VfsResult<DirEntry> {
-        let fs = self.fs.lock();
+        let fs = &self.fs.inner;
         self.validate_inode_num(&fs, self.ino)?;
         let dir_idx = core::num::NonZeroU32::new(self.ino).ok_or(VfsError::InvalidData)?;
         let dir_inode = ext4plus::inode::Inode::read(&fs, dir_idx).await.map_err(into_vfs_err)?;
@@ -618,7 +618,7 @@ impl DirNodeOps for Inode {
     }
 
     async fn unlink(&self, name: &str) -> VfsResult<()> {
-        let fs = self.fs.lock();
+        let fs = &self.fs.inner;
         self.validate_inode_num(&fs, self.ino)?;
 
         let dir_idx = core::num::NonZeroU32::new(self.ino).ok_or(VfsError::InvalidData)?;
@@ -670,7 +670,7 @@ impl DirNodeOps for Inode {
 
     async fn rename(&self, src_name: &str, dst_dir: &DirNode, dst_name: &str) -> VfsResult<()> {
         let dst_dir: Arc<Self> = dst_dir.downcast().map_err(|_| VfsError::InvalidInput)?;
-        let fs = self.fs.lock();
+        let fs = &self.fs.inner;
         self.validate_inode_num(&fs, self.ino)?;
         self.validate_inode_num(&fs, dst_dir.ino)?;
 

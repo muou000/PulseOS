@@ -1,14 +1,17 @@
-use core::marker::PhantomData;
-use core::ptr::NonNull;
-use alloc::sync::Arc;
-use axpoll::PollSet;
-use kspin::SpinNoIrq;
+use alloc::sync::{Arc, Weak};
+use core::{
+    marker::PhantomData,
+    ptr::NonNull,
+    sync::atomic::{AtomicUsize, Ordering},
+};
 
 use axalloc::global_allocator;
-use axdriver_base::{BaseDriverOps, DevResult, DevError, DeviceType};
+use axdriver_base::{BaseDriverOps, DevError, DevResult, DeviceType};
 use axdriver_virtio::{BufferDirection, PhysAddr, VirtIoHal};
 use axhal::mem::{phys_to_virt, virt_to_phys};
+use axpoll::PollSet;
 use cfg_if::cfg_if;
+use kspin::SpinNoIrq;
 
 use crate::{AxDeviceEnum, drivers::DriverProbe};
 
@@ -31,26 +34,106 @@ pub trait VirtIoDevMeta {
     fn try_new(transport: VirtIoTransport, irq: usize) -> DevResult<AxDeviceEnum>;
 }
 
-struct VirtioInterruptInfo {
-    dev_ptr: *const (),
-    handler: unsafe fn(*const ()),
+trait VirtioInterruptHandler: Send + Sync {
+    fn handle(&self);
 }
 
-unsafe impl Send for VirtioInterruptInfo {}
-unsafe impl Sync for VirtioInterruptInfo {}
+struct WeakVirtioInterruptHandler<T> {
+    device: Weak<T>,
+    handler: fn(&T),
+}
 
-static VIRTIO_INTERRUPTS: SpinNoIrq<alloc::collections::BTreeMap<usize, alloc::vec::Vec<VirtioInterruptInfo>>> = SpinNoIrq::new(alloc::collections::BTreeMap::new());
+impl<T: Send + Sync + 'static> VirtioInterruptHandler for WeakVirtioInterruptHandler<T> {
+    fn handle(&self) {
+        if let Some(device) = self.device.upgrade() {
+            (self.handler)(&device);
+        }
+    }
+}
+
+#[derive(Clone)]
+struct VirtioInterruptInfo {
+    id: usize,
+    handler: Arc<dyn VirtioInterruptHandler>,
+}
+
+struct VirtioIrqRegistration {
+    irq: usize,
+    id: usize,
+}
+
+impl Drop for VirtioIrqRegistration {
+    fn drop(&mut self) {
+        let remove_irq = {
+            let mut guard = VIRTIO_INTERRUPTS.lock();
+            let Some(infos) = guard.get_mut(&self.irq) else {
+                return;
+            };
+            infos.retain(|info| info.id != self.id);
+            if infos.is_empty() {
+                guard.remove(&self.irq);
+                true
+            } else {
+                false
+            }
+        };
+
+        if remove_irq {
+            axhal::irq::set_enable(self.irq, false);
+            let _ = axhal::irq::unregister(self.irq);
+        }
+    }
+}
+
+static VIRTIO_INTERRUPTS: SpinNoIrq<
+    alloc::collections::BTreeMap<usize, alloc::vec::Vec<VirtioInterruptInfo>>,
+> = SpinNoIrq::new(alloc::collections::BTreeMap::new());
+static NEXT_VIRTIO_INTERRUPT_ID: AtomicUsize = AtomicUsize::new(1);
+
+fn register_virtio_interrupt<T: Send + Sync + 'static>(
+    irq: usize,
+    device: &Arc<T>,
+    handler: fn(&T),
+) -> DevResult<Option<VirtioIrqRegistration>> {
+    if irq == 0 {
+        return Ok(None);
+    }
+
+    let id = NEXT_VIRTIO_INTERRUPT_ID.fetch_add(1, Ordering::Relaxed);
+    let mut guard = VIRTIO_INTERRUPTS.lock();
+    if !guard.contains_key(&irq) && !axhal::irq::register(irq, common_virtio_irq_handler) {
+        return Err(DevError::BadState);
+    }
+    guard.entry(irq).or_default().push(VirtioInterruptInfo {
+        id,
+        handler: Arc::new(WeakVirtioInterruptHandler {
+            device: Arc::downgrade(device),
+            handler,
+        }),
+    });
+    drop(guard);
+    axhal::irq::set_enable(irq, true);
+
+    Ok(Some(VirtioIrqRegistration { irq, id }))
+}
 
 fn common_virtio_irq_handler(irq: usize) {
     axlog::debug!("common_virtio_irq_handler: irq={}", irq);
-    let guard = VIRTIO_INTERRUPTS.lock();
-    if let Some(infos) = guard.get(&irq) {
-        axlog::debug!("common_virtio_irq_handler: found {} handlers for irq={}", infos.len(), irq);
+    let infos = VIRTIO_INTERRUPTS.lock().get(&irq).cloned();
+    if let Some(infos) = infos {
+        axlog::debug!(
+            "common_virtio_irq_handler: found {} handlers for irq={}",
+            infos.len(),
+            irq
+        );
         for info in infos {
-            unsafe { (info.handler)(info.dev_ptr); }
+            info.handler.handle();
         }
     } else {
-        axlog::debug!("common_virtio_irq_handler: no handlers found for irq={}", irq);
+        axlog::debug!(
+            "common_virtio_irq_handler: no handlers found for irq={}",
+            irq
+        );
     }
 }
 
@@ -64,14 +147,16 @@ cfg_if! {
         }
 
         pub struct VirtIoNetDevWrapper<H: VirtIoHal, T: virtio_drivers::transport::Transport, const QS: usize> {
+            _irq_registration: Option<VirtioIrqRegistration>,
             inner: Arc<VirtIoNetDevInner<H, T, QS>>,
-            irq: usize,
         }
 
         unsafe impl<H: VirtIoHal, T: virtio_drivers::transport::Transport, const QS: usize> Send for VirtIoNetDevWrapper<H, T, QS> {}
         unsafe impl<H: VirtIoHal, T: virtio_drivers::transport::Transport, const QS: usize> Sync for VirtIoNetDevWrapper<H, T, QS> {}
 
-        impl<H: VirtIoHal, T: virtio_drivers::transport::Transport, const QS: usize> VirtIoNetDevWrapper<H, T, QS> {
+        impl<H: VirtIoHal + Send + Sync + 'static,
+             T: virtio_drivers::transport::Transport + Send + Sync + 'static,
+             const QS: usize> VirtIoNetDevWrapper<H, T, QS> {
             pub fn try_new(transport: T, irq: usize) -> DevResult<Self> {
                 let mut dev = axdriver_virtio::VirtIoNetDev::try_new(transport)?;
                 dev.enable_interrupts();
@@ -80,23 +165,20 @@ cfg_if! {
                     inner: SpinNoIrq::new(dev),
                     poll_set,
                 });
-                if irq > 0 {
-                    let dev_ptr = Arc::as_ptr(&inner) as *const ();
-                    unsafe fn handler<H: VirtIoHal, T: virtio_drivers::transport::Transport, const QS: usize>(ptr: *const ()) {
-                        let w = unsafe { &*(ptr as *const VirtIoNetDevInner<H, T, QS>) };
-                        let mut inner_dev = w.inner.lock();
-                        if inner_dev.ack_interrupt() {
-                            w.poll_set.wake();
-                        }
+                fn handler<H: VirtIoHal, T: virtio_drivers::transport::Transport, const QS: usize>(
+                    w: &VirtIoNetDevInner<H, T, QS>,
+                ) {
+                    let mut inner_dev = w.inner.lock();
+                    if inner_dev.ack_interrupt() {
+                        w.poll_set.wake();
                     }
-                    VIRTIO_INTERRUPTS.lock().entry(irq).or_default().push(VirtioInterruptInfo {
-                        dev_ptr,
-                        handler: handler::<H, T, QS>,
-                    });
-                    axhal::irq::register(irq, common_virtio_irq_handler);
-                    axhal::irq::set_enable(irq, true);
                 }
-                Ok(Self { inner, irq })
+                let irq_registration =
+                    register_virtio_interrupt(irq, &inner, handler::<H, T, QS>)?;
+                Ok(Self {
+                    _irq_registration: irq_registration,
+                    inner,
+                })
             }
         }
 
@@ -171,21 +253,51 @@ cfg_if! {
             }
         }
 
+        #[cfg(all(feature = "multitask", feature = "async"))]
+        fn register_then_check(
+            register_waker: impl FnOnce(),
+            is_ready: impl FnOnce() -> bool,
+        ) -> core::task::Poll<()> {
+            register_waker();
+            if is_ready() {
+                core::task::Poll::Ready(())
+            } else {
+                core::task::Poll::Pending
+            }
+        }
+
         pub struct VirtIoBlkDevInner<H: VirtIoHal, T: virtio_drivers::transport::Transport> {
             inner: SpinNoIrq<axdriver_virtio::VirtIoBlkDev<H, T>>,
             #[cfg(feature = "multitask")]
             wait_queue: axtask::WaitQueue,
+            #[cfg(all(feature = "multitask", feature = "async"))]
+            async_waiters: SpinNoIrq<alloc::collections::BTreeMap<u16, core::task::Waker>>,
         }
 
         pub struct VirtIoBlkDevWrapper<H: VirtIoHal, T: virtio_drivers::transport::Transport> {
+            _irq_registration: Option<VirtioIrqRegistration>,
             inner: Arc<VirtIoBlkDevInner<H, T>>,
-            irq: usize,
+        }
+
+        impl<H: VirtIoHal, T: virtio_drivers::transport::Transport> Clone
+            for VirtIoBlkDevWrapper<H, T>
+        {
+            fn clone(&self) -> Self {
+                // The original handle owns the IRQ registration. Clones keep the
+                // shared device state alive and are used for concurrent requests.
+                Self {
+                    _irq_registration: None,
+                    inner: self.inner.clone(),
+                }
+            }
         }
 
         unsafe impl<H: VirtIoHal, T: virtio_drivers::transport::Transport> Send for VirtIoBlkDevWrapper<H, T> {}
         unsafe impl<H: VirtIoHal, T: virtio_drivers::transport::Transport> Sync for VirtIoBlkDevWrapper<H, T> {}
 
-        impl<H: VirtIoHal, T: virtio_drivers::transport::Transport> VirtIoBlkDevWrapper<H, T> {
+        impl<H: VirtIoHal + Send + Sync + 'static,
+             T: virtio_drivers::transport::Transport + Send + Sync + 'static>
+            VirtIoBlkDevWrapper<H, T> {
             pub fn try_new(transport: T, irq: usize) -> DevResult<Self> {
                 let mut dev = axdriver_virtio::VirtIoBlkDev::try_new(transport)?;
                 dev.enable_interrupts();
@@ -193,34 +305,63 @@ cfg_if! {
                     inner: SpinNoIrq::new(dev),
                     #[cfg(feature = "multitask")]
                     wait_queue: axtask::WaitQueue::new(),
+                    #[cfg(all(feature = "multitask", feature = "async"))]
+                    async_waiters: SpinNoIrq::new(alloc::collections::BTreeMap::new()),
                 });
-                if irq > 0 {
-                    let dev_ptr = Arc::as_ptr(&inner) as *const ();
-                    unsafe fn handler<H: VirtIoHal, T: virtio_drivers::transport::Transport>(ptr: *const ()) {
-                        let w = unsafe { &*(ptr as *const VirtIoBlkDevInner<H, T>) };
-                        axlog::debug!("virtio-blk interrupt handler: checking interrupt");
-                        let acked = w.inner.lock().ack_interrupt();
-                        axlog::debug!("virtio-blk interrupt handler: acked={}", acked);
-                        // Notify unconditionally: for MSI-X mode, the device fires
-                        // the interrupt only when I/O completes; `acked` reflects
-                        // whether the legacy ISR STATUS bit was set, which is NOT
-                        // reliable under MSI-X (QEMU may return false even on completion).
-                        // The async wait loop guards correctness via `peek_used()` check.
-                        //
-                        // If acked=true (legacy/MMIO mode) or acked=false (MSI-X mode),
-                        // both should wake waiters. Wrong wakeups are harmless because
-                        // peek_used() will simply return None and the loop will re-sleep.
+                fn handler<H: VirtIoHal, T: virtio_drivers::transport::Transport>(
+                    w: &VirtIoBlkDevInner<H, T>,
+                ) {
+                    axlog::debug!("virtio-blk interrupt handler: checking interrupt");
+                    let acked = w.inner.lock().ack_interrupt();
+                    axlog::debug!("virtio-blk interrupt handler: acked={}", acked);
+                    // Notify unconditionally: for MSI-X mode, the device fires
+                    // the interrupt only when I/O completes; `acked` reflects
+                    // whether the legacy ISR STATUS bit was set, which is NOT
+                    // reliable under MSI-X (QEMU may return false even on completion).
+                    // The async wait loop guards correctness via `peek_used()` check.
+                    //
+                    // If acked=true (legacy/MMIO mode) or acked=false (MSI-X mode),
+                    // both should wake waiters. Wrong wakeups are harmless because
+                    // peek_used() will simply return None and the loop will re-sleep.
                         #[cfg(feature = "multitask")]
-                        w.wait_queue.notify_all(true);
+                        {
+                            axlog::debug!("virtio-blk interrupt handler: notifying wait queue");
+                            w.wait_queue.notify_all(true);
+                        }
+                        #[cfg(all(feature = "multitask", feature = "async"))]
+                        w.wake_next_async();
                     }
-                    VIRTIO_INTERRUPTS.lock().entry(irq).or_default().push(VirtioInterruptInfo {
-                        dev_ptr,
-                        handler: handler::<H, T>,
-                    });
-                    axhal::irq::register(irq, common_virtio_irq_handler);
-                    axhal::irq::set_enable(irq, true);
+                let irq_registration = register_virtio_interrupt(irq, &inner, handler::<H, T>)?;
+                Ok(Self {
+                    _irq_registration: irq_registration,
+                    inner,
+                })
+            }
+        }
+
+        #[cfg(all(feature = "multitask", feature = "async"))]
+        impl<H: VirtIoHal, T: virtio_drivers::transport::Transport>
+            VirtIoBlkDevInner<H, T>
+        {
+            fn poll_token(&self, token: u16, waker: &core::task::Waker) -> core::task::Poll<()> {
+                // Register first, then inspect the used ring. This ordering makes
+                // an interrupt racing with registration observable in either path.
+                self.async_waiters.lock().insert(token, waker.clone());
+                if self.inner.lock().inner.peek_used() == Some(token) {
+                    self.async_waiters.lock().remove(&token);
+                    core::task::Poll::Ready(())
+                } else {
+                    core::task::Poll::Pending
                 }
-                Ok(Self { inner, irq })
+            }
+
+            fn wake_next_async(&self) {
+                let token = self.inner.lock().inner.peek_used();
+                if let Some(token) = token
+                    && let Some(waker) = self.async_waiters.lock().remove(&token)
+                {
+                    waker.wake();
+                }
             }
         }
 
@@ -332,8 +473,8 @@ cfg_if! {
         /// `AsyncBlockDriverOps` implementation for VirtIoBlkDevWrapper.
         ///
         /// Gate: requires `multitask` (for WaitQueue) + `async` feature (for the trait).
-        /// The implementation uses `WaitFuture` to suspend the calling task at `.await`
-        /// points, relying on the interrupt handler's `notify_all()` to wake wakers.
+        /// The implementation registers the task waker before checking completion,
+        /// relying on the interrupt handler's `notify_all()` to wake pending futures.
         ///
         /// # TODO (tracking)
         /// - Validate end-to-end async path on LoongArch64 (MSI-X interrupt → waker wake).
@@ -372,42 +513,22 @@ cfg_if! {
 
                     axlog::debug!("virtio::read_block_async: token={} submitted", token);
 
-                    // 2. Wait loop with race-free waker registration.
-                    //
-                    // Pattern: pin the WaitFuture *before* checking the condition.
-                    // WaitFuture registers the waker on first poll (returning Pending),
-                    // so any notify_all() that arrives after the first poll will wake us.
-                    //
-                    // Race window analysis:
-                    //   - If interrupt arrives BEFORE the first .await poll: the interrupt
-                    //     calls notify_all(), but the waker hasn't been registered yet.
-                    //     The next loop iteration will create a fresh WaitFuture and poll it,
-                    //     registering the waker; but since the condition is already true,
-                    //     peek_used() will return Some(token) and we break immediately.
-                    //   - If interrupt arrives AFTER the first .await poll (waker registered):
-                    //     notify_all() wakes the waker, Future is re-polled, WaitFuture
-                    //     returns Ready, loop body runs, peek_used() returns Some(token), break.
-                    //
-                    // The interrupt handler notifies unconditionally (regardless of acked),
-                    // so MSI-X mode (where acked may be false) is also correctly handled.
-                    loop {
-                        // Fast path: check before sleeping to avoid unnecessary suspension.
-                        if self.inner.inner.lock().inner.peek_used() == Some(token) {
-                            break;
-                        }
-                        // Register our waker and suspend.
-                        // The interrupt handler calls notify_all() which wakes all wakers.
-                        self.inner.wait_queue.wait_async().await;
-                        // After wakeup, re-check the condition (handles spurious wakeups).
-                    }
+                    // Register the waker before checking the used ring. This closes the
+                    // lost-wakeup window between `peek_used()` and suspension.
+                    core::future::poll_fn(|cx| self.inner.poll_token(token, cx.waker())).await;
 
                     axlog::debug!("virtio::read_block_async: token={} ready, completing", token);
 
                     // 3. Complete the transfer (reads DMA buffer back into `buf`).
-                    unsafe {
+                    let result = unsafe {
                         self.inner.inner.lock().inner
                             .complete_read_blocks(token, &req, buf, &mut resp)
-                    }.map_err(virtio_err_to_dev)
+                    }.map_err(virtio_err_to_dev);
+                    // Several descriptors may already be present in the used ring,
+                    // while the device generated only one interrupt. Completing the
+                    // head must therefore explicitly hand off to the next waiter.
+                    self.inner.wake_next_async();
+                    result
                 }
             }
 
@@ -428,22 +549,19 @@ cfg_if! {
 
                     axlog::debug!("virtio::write_block_async: token={} submitted", token);
 
-                    // 2. Same race-free wait loop as read_block_async.
-                    loop {
-                        if self.inner.inner.lock().inner.peek_used() == Some(token) {
-                            break;
-                        }
-                        self.inner.wait_queue.wait_async().await;
-                        // Re-check after wakeup (spurious wakeup guard).
-                    }
+                    // Register before checking to avoid missing an interrupt that arrives
+                    // immediately before the future suspends.
+                    core::future::poll_fn(|cx| self.inner.poll_token(token, cx.waker())).await;
 
                     axlog::debug!("virtio::write_block_async: token={} ready, completing", token);
 
                     // 3. Complete the write transfer.
-                    unsafe {
+                    let result = unsafe {
                         self.inner.inner.lock().inner
                             .complete_write_blocks(token, &req, buf, &mut resp)
-                    }.map_err(virtio_err_to_dev)
+                    }.map_err(virtio_err_to_dev);
+                    self.inner.wake_next_async();
+                    result
                 }
             }
         }
@@ -534,7 +652,8 @@ impl<D: VirtIoDevMeta> DriverProbe for VirtIoDriver<D> {
                     // 1. Find MSI-X capability
                     let mut msix_cap_offset = None;
                     for cap in root.capabilities(bdf) {
-                        if cap.id == 0x11 { // MSI-X capability ID is 0x11
+                        if cap.id == 0x11 {
+                            // MSI-X capability ID is 0x11
                             msix_cap_offset = Some(cap.offset);
                             break;
                         }
@@ -544,8 +663,10 @@ impl<D: VirtIoDevMeta> DriverProbe for VirtIoDriver<D> {
                         // 2. Allocate an MSI-X vector in the PCH-MSI range (EIOINTC pins 64..255)
                         // QEMU pch_msi computes: irq_num = (Msg Data & 0xff) - 64
                         // so Msg Data must be in [64, 255].
-                        static NEXT_MSI_VECTOR: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(64);
-                        let msi_vector = NEXT_MSI_VECTOR.fetch_add(1, core::sync::atomic::Ordering::SeqCst);
+                        static NEXT_MSI_VECTOR: core::sync::atomic::AtomicUsize =
+                            core::sync::atomic::AtomicUsize::new(64);
+                        let msi_vector =
+                            NEXT_MSI_VECTOR.fetch_add(1, core::sync::atomic::Ordering::SeqCst);
                         if msi_vector < 256 {
                             // 3. Configure MSI-X Table
                             let cap_word0 = root.config_read_word(bdf, offset);
@@ -563,28 +684,37 @@ impl<D: VirtIoDevMeta> DriverProbe for VirtIoDriver<D> {
                                 // Msg Addr = 0x2ff00000 (PCH-MSI base, correct for loongarch_virt)
                                 // Msg Data = msi_vector (absolute EIOINTC pin number >= 64)
                                 unsafe {
-                                    core::ptr::write_volatile((table_vaddr + 0) as *mut u32, 0x2ff00000); // Msg Addr Low (PCH-MSI base)
-                                    core::ptr::write_volatile((table_vaddr + 4) as *mut u32, 0);          // Msg Addr High
-                                    core::ptr::write_volatile((table_vaddr + 8) as *mut u32, msi_vector as u32); // Msg Data = EIOINTC pin
-                                    core::ptr::write_volatile((table_vaddr + 12) as *mut u32, 0);         // Vector Control (0 = unmasked)
+                                    core::ptr::write_volatile(
+                                        (table_vaddr + 0) as *mut u32,
+                                        0x2ff00000,
+                                    ); // Msg Addr Low (PCH-MSI base)
+                                    core::ptr::write_volatile((table_vaddr + 4) as *mut u32, 0); // Msg Addr High
+                                    core::ptr::write_volatile(
+                                        (table_vaddr + 8) as *mut u32,
+                                        msi_vector as u32,
+                                    ); // Msg Data = EIOINTC pin
+                                    core::ptr::write_volatile((table_vaddr + 12) as *mut u32, 0); // Vector Control (0 = unmasked)
                                 }
 
                                 // 4. Enable MSI-X in device configuration space
                                 let new_msg_ctrl = msg_ctrl | (1 << 15); // Enable bit
-                                let new_cap_word0 = (cap_word0 & 0xffff) | ((new_msg_ctrl as u32) << 16);
+                                let new_cap_word0 =
+                                    (cap_word0 & 0xffff) | ((new_msg_ctrl as u32) << 16);
                                 root.config_write_word(bdf, offset, new_cap_word0);
 
                                 // 5. Bind VirtIO queue/config to MSI-X vector 0
                                 transport.set_config_msix_vector(0);
-                                for q in 0..16 {
-                                    transport.set_queue_msix_vector(q, 0);
-                                }
+                                transport.set_default_queue_msix_vector(0);
                                 transport.set_msix_enabled(true);
 
                                 // IRQ number = EIOINTC pin number directly (no offset)
                                 irq = msi_vector;
                                 msix_success = true;
-                                debug!("PCI device at {} configured to use MSI-X (eiointc_pin {}, irq {})", bdf, msi_vector, irq);
+                                debug!(
+                                    "PCI device at {} configured to use MSI-X (eiointc_pin {}, \
+                                     irq {})",
+                                    bdf, msi_vector, irq
+                                );
                             }
                         }
                     }
@@ -597,9 +727,6 @@ impl<D: VirtIoDevMeta> DriverProbe for VirtIoDriver<D> {
                     {
                         if irq == 0 || irq == 255 {
                             irq = 16 + (bdf.device as usize % 4);
-                        }
-                        if irq < 32 {
-                            irq += 32;
                         }
                     }
                 }
@@ -622,13 +749,27 @@ impl<D: VirtIoDevMeta> DriverProbe for VirtIoDriver<D> {
 
 pub struct VirtIoHalImpl;
 
+const DMA_PAGE_SIZE: usize = 0x1000;
+
+unsafe fn zero_dma_region(vaddr: usize, size: usize) {
+    // SAFETY: The caller owns `size` contiguous bytes starting at `vaddr`.
+    unsafe { core::ptr::write_bytes(vaddr as *mut u8, 0, size) };
+}
+
 unsafe impl VirtIoHal for VirtIoHalImpl {
     fn dma_alloc(pages: usize, _direction: BufferDirection) -> (PhysAddr, NonNull<u8>) {
-        let vaddr = if let Ok(vaddr) = global_allocator().alloc_pages(pages, 0x1000) {
+        let Some(size) = pages.checked_mul(DMA_PAGE_SIZE).filter(|_| pages > 0) else {
+            return (0, NonNull::dangling());
+        };
+        let vaddr = if let Ok(vaddr) = global_allocator().alloc_pages(pages, DMA_PAGE_SIZE) {
             vaddr
         } else {
             return (0, NonNull::dangling());
         };
+        // VirtIO may expose freshly allocated descriptor/status memory to the
+        // device before every byte is initialized, so the HAL contract requires
+        // DMA pages to start zeroed.
+        unsafe { zero_dma_region(vaddr, size) };
         let paddr = virt_to_phys(vaddr.into());
         let ptr = NonNull::new(vaddr as _).unwrap();
         (paddr.as_usize(), ptr)

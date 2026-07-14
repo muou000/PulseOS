@@ -229,7 +229,8 @@ impl FsContext {
         match name {
             Some(name) => {
                 self.check_traverse_permission(&dir).await?;
-                self.lookup(&dir, name, &mut follow_count).await
+                let loc = self.lookup(&dir, name, &mut follow_count).await?;
+                Ok(loc)
             }
             None => Ok(dir),
         }
@@ -241,7 +242,8 @@ impl FsContext {
         match name {
             Some(name) => {
                 self.check_traverse_permission(&dir).await?;
-                dir.lookup_no_follow(name).await
+                let loc = dir.lookup_no_follow(name).await?;
+                Ok(loc)
             }
             None => Ok(dir),
         }

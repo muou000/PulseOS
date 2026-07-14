@@ -850,6 +850,65 @@ impl CachedFile {
         Ok((cache.get_mut(&pn).unwrap(), evicted))
     }
 
+    async fn ensure_page_async(&self, file: &FileNode, pn: u32) -> VfsResult<()> {
+        if self.shared.page_cache.lock().contains(&pn) {
+            return Ok(());
+        }
+
+        let file_len = *self.shared.size.lock();
+        let skip_read = pn as u64 * PAGE_SIZE as u64 >= file_len;
+        let mut new_page = PageCache::new(!skip_read)?;
+        if self.in_memory {
+            if !skip_read {
+                new_page.data().fill(0);
+            }
+        } else if !skip_read {
+            // No page-cache or spin-RwLock guard is held while the backend
+            // future waits for the block-device interrupt.
+            let read_len = file
+                .read_at(new_page.data(), pn as u64 * PAGE_SIZE as u64)
+                .await?;
+            if read_len < PAGE_SIZE {
+                new_page.data()[read_len..].fill(0);
+            }
+        }
+
+        loop {
+            let evicted = {
+                let mut cache = self.shared.page_cache.lock();
+                if cache.contains(&pn) {
+                    return Ok(());
+                }
+                if cache.len() == cache.cap().get() {
+                    cache.pop_lru()
+                } else {
+                    cache.put(pn, new_page);
+                    return Ok(());
+                }
+            };
+
+            if let Some((evicted_pn, mut page)) = evicted {
+                let listeners = self.shared.evict_listeners_snapshot();
+                for listener in listeners.iter() {
+                    (listener.listener)(evicted_pn, &page);
+                }
+                if page.dirty {
+                    let cached_size = *self.shared.size.lock();
+                    let page_start = evicted_pn as u64 * PAGE_SIZE as u64;
+                    let len = (cached_size.saturating_sub(page_start))
+                        .min(PAGE_SIZE as u64) as usize;
+                    if len > 0 {
+                        if let Err(err) = file.write_at(&page.data()[..len], page_start).await {
+                            self.shared.page_cache.lock().put(evicted_pn, page);
+                            return Err(err);
+                        }
+                    }
+                    page.dirty = false;
+                }
+            }
+        }
+    }
+
     pub fn with_page<R>(&self, pn: u32, f: impl FnOnce(Option<&mut PageCache>) -> R) -> R {
         let _guard = self.shared.io_lock.read();
         f(self.shared.page_cache.lock().get_mut(&pn))
@@ -898,23 +957,53 @@ impl CachedFile {
         Ok(initial)
     }
 
-    pub fn read_at(&self, mut dst: impl Write + IoBufMut, offset: u64) -> VfsResult<usize> {
-        let _guard = self.shared.io_lock.read();
+    async fn read_at_async(&self, mut dst: impl Write + IoBufMut, offset: u64) -> VfsResult<usize> {
         let len = *self.shared.size.lock();
         let end = (offset + dst.remaining_mut() as u64).min(len);
         if end <= offset {
             return Ok(0);
         }
-        self.with_pages(
-            offset..end,
-            false,
-            |_| Ok(0),
-            |read, page, range| {
-                let len = range.end - range.start;
-                dst.write(&page.data()[range.start..range.end])?;
-                Ok(read + len)
-            },
-        )
+        let file = self.inner.entry().as_file()?;
+        let start_page = (offset / PAGE_SIZE as u64) as u32;
+        let end_page = end.div_ceil(PAGE_SIZE as u64) as u32;
+        let mut page_offset = (offset % PAGE_SIZE as u64) as usize;
+        let mut read = 0;
+        for pn in start_page..end_page {
+            let page_start = pn as u64 * PAGE_SIZE as u64;
+            let page_end = (end - page_start).min(PAGE_SIZE as u64) as usize;
+            let hit = {
+                let _io_guard = self.shared.io_lock.read();
+                let mut cache = self.shared.page_cache.lock();
+                if let Some(page) = cache.get_mut(&pn) {
+                    let copied = page_end - page_offset;
+                    dst.write(&page.data()[page_offset..page_end])?;
+                    read += copied;
+                    true
+                } else {
+                    false
+                }
+            };
+            if hit {
+                page_offset = 0;
+                continue;
+            }
+
+            self.ensure_page_async(file, pn).await?;
+            // Writers hold the exclusive I/O lock. Take the read side only for
+            // the in-memory copy, never across an await.
+            let _io_guard = self.shared.io_lock.read();
+            let mut cache = self.shared.page_cache.lock();
+            let page = cache.get_mut(&pn).ok_or(VfsError::Io)?;
+            let copied = page_end - page_offset;
+            dst.write(&page.data()[page_offset..page_end])?;
+            read += copied;
+            page_offset = 0;
+        }
+        Ok(read)
+    }
+
+    pub fn read_at(&self, dst: impl Write + IoBufMut, offset: u64) -> VfsResult<usize> {
+        axtask::future::block_on(self.read_at_async(dst, offset))
     }
 
     fn write_at_locked(&self, mut buf: impl Read + IoBuf, offset: u64) -> VfsResult<usize> {
@@ -1050,25 +1139,20 @@ impl FileBackend {
     pub async fn read_at(&self, mut dst: impl Write + IoBufMut, mut offset: u64) -> VfsResult<usize> {
         match self {
             Self::Cached(cached) => {
-                cached.read_at(dst, offset)
+                cached.read_at_async(dst, offset).await
             }
             Self::Direct(loc) => {
                 let file = loc.entry().as_file()?;
-                if loc.flags().contains(NodeFlags::STREAM) {
-                    dst.read_from(&mut axio::read_fn(|buf| {
-                        axtask::future::block_on(file.read_at(buf, offset)).inspect(|read| {
-                            offset += *read as u64;
-                        })
-                    }))
-                } else {
+                if !loc.flags().contains(NodeFlags::STREAM) {
                     let shared = shared_file_state(loc);
-                    let _guard = shared.io_lock.read();
-                    dst.read_from(&mut axio::read_fn(|buf| {
-                        axtask::future::block_on(file.read_at(buf, offset)).inspect(|read| {
-                            offset += *read as u64;
-                        })
-                    }))
+                    // Synchronize cache bookkeeping, but never retain the spin
+                    // RwLock while awaiting the filesystem backend.
+                    drop(shared.io_lock.read());
                 }
+                // Keep the adapter bounded for very large vectored/user buffers.
+                let mut tmp = alloc::vec![0u8; dst.remaining_mut().min(64 * 1024)];
+                let read = file.read_at(&mut tmp, offset).await?;
+                dst.write(&tmp[..read])
             }
         }
     }

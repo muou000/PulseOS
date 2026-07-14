@@ -5,13 +5,12 @@ use alloc::sync::Weak;
 use alloc::vec::Vec;
 use core::cell::OnceCell;
 
-use axdriver::prelude::BlockDriverOps;
 use axfs_ng_vfs::{
     DirEntry, DirNode, Filesystem, FilesystemOps, Reference, StatFs, VfsResult, WeakDirEntry,
     path::MAX_NAME_LEN,
 };
 use ext4plus::{Ext4, prelude::Ext4Error};
-use axsync::{Mutex, MutexGuard};
+use axsync::Mutex;
 use async_trait::async_trait;
 use axdriver::prelude::AsyncBlockDriverOps;
 use super::{Ext4Disk, Ext4DiskWrapper, Inode, cleanup_dir_cache_registry};
@@ -19,7 +18,7 @@ use super::{Ext4Disk, Ext4DiskWrapper, Inode, cleanup_dir_cache_registry};
 const ROOT_INODE: u32 = 2;
 
 pub struct Ext4Filesystem {
-    inner: Mutex<Ext4>,
+    pub(crate) inner: Ext4,
     root_dir: OnceCell<WeakDirEntry>,
     pub(super) active_inodes: Mutex<BTreeMap<u32, Vec<Weak<Inode>>>>,
     pub(crate) block_size: usize,
@@ -27,7 +26,7 @@ pub struct Ext4Filesystem {
 }
 
 impl Ext4Filesystem {
-    pub async fn new<D: AsyncBlockDriverOps + 'static>(dev: D) -> VfsResult<Filesystem> {
+    pub async fn new<D: AsyncBlockDriverOps + Clone + 'static>(dev: D) -> VfsResult<Filesystem> {
         log::info!("Ext4Filesystem::new: opening block device");
         let disk = Ext4Disk::new(dev);
 
@@ -35,7 +34,7 @@ impl Ext4Filesystem {
         const LOG_BLOCK_SIZE_OFFSET: usize = 24;
 
         let mut log_block_size_buf = [0u8; 4];
-        disk.read_offset(EXT4_SUPERBLOCK_OFFSET + LOG_BLOCK_SIZE_OFFSET, &mut log_block_size_buf).map_err(|e| {
+        disk.read_offset(EXT4_SUPERBLOCK_OFFSET + LOG_BLOCK_SIZE_OFFSET, &mut log_block_size_buf).await.map_err(|e| {
             log::error!("Failed to read block size: {:?}", e);
             axfs_ng_vfs::VfsError::Io
         })?;
@@ -71,7 +70,7 @@ impl Ext4Filesystem {
 
         log::info!("Ext4Filesystem::new: block device opened successfully");
         let fs = Arc::new(Self {
-            inner: Mutex::new(ext4),
+            inner: ext4,
             root_dir: OnceCell::new(),
             active_inodes: Mutex::new(BTreeMap::new()),
             block_size,
@@ -83,10 +82,6 @@ impl Ext4Filesystem {
         );
         let _ = fs.root_dir.set(root_dir.downgrade());
         Ok(Filesystem::new(fs))
-    }
-
-    pub(crate) fn lock(&self) -> MutexGuard<'_, Ext4> {
-        self.inner.lock()
     }
 
     pub(crate) async fn process_pending_deletions(&self, fs: &Ext4) {
@@ -158,7 +153,7 @@ impl Drop for Ext4Filesystem {
         // Use the same pointer-based id as ext4_fs_id so the registry cleanup
         // targets exactly this filesystem's cached directory states.
         cleanup_dir_cache_registry(self as *const Self as usize);
-        let _ = self.lock();
+        let _ = &self.inner;
     }
 }
 
@@ -176,7 +171,7 @@ impl FilesystemOps for Ext4Filesystem {
     }
 
     fn stat(&self) -> VfsResult<StatFs> {
-        let fs = self.lock();
+        let fs = &self.inner;
         let sb = fs.superblock();
         let total_inodes = sb.num_block_groups() as u64 * sb.inodes_per_block_group().get() as u64;
         Ok(StatFs {

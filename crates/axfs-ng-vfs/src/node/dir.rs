@@ -217,8 +217,9 @@ impl DirNode {
     pub async fn link(&self, name: &str, node: &DirEntry) -> VfsResult<DirEntry> {
         verify_entry_name(name)?;
 
+        let mut children = self.cache.lock().await;
         let entry = self.ops.link(name, node).await?;
-        self.cache.lock().await.insert(name.to_owned(), entry.clone());
+        children.insert(name.to_owned(), entry.clone());
         Ok(entry)
     }
 
