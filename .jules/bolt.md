@@ -34,3 +34,6 @@
 ## 2025-05-20 - Avoid format! macro allocations in hot loops for prefix checking using replace_range
 **Learning:** Even when avoiding allocations on non-matching strings by using slicing, creating a completely new `String` for the matches via `format!` triggers a heap allocation. In many cases where the input is already an owned `String`, using `replace_range` on the matched target correctly allows the existing allocation to be reused.
 **Action:** When validating target string matches and a string requires replacement inside a struct/array, prefer `String::replace_range` on the owned string to avoid creating a new `String` object via `format!`.
+## 2025-06-18 - format! double allocation on owned String
+**Learning:** If a function already returns an owned `String` (like `proc.name()`), wrapping it in `alloc::format!` just to append characters (e.g., `alloc::format!("{}\n", proc.name())`) will cause an unnecessary double allocation and pull in macro formatting overhead.
+**Action:** Bind the returned `String` to a `mut` variable and directly append to it using `.push()` or `.push_str()`.

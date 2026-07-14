@@ -280,8 +280,10 @@ impl axfs::ProcfsProcessProvider for PulseProcessProvider {
         }
         let args = proc.args.read();
         if args.is_empty() {
-            let path = proc.exec_path_or_default();
-            Some(alloc::format!("{}\0", path))
+            // Bolt: Append character to existing owned String instead of using format! to avoid double allocation
+            let mut path = proc.exec_path_or_default();
+            path.push('\0');
+            Some(path)
         } else {
             let total_len: usize = args.iter().map(|s| s.len() + 1).sum();
             let mut res = String::with_capacity(total_len);
@@ -295,7 +297,10 @@ impl axfs::ProcfsProcessProvider for PulseProcessProvider {
 
     fn comm(&self, pid: u64) -> Option<String> {
         let proc = process_by_pid(pid)?;
-        Some(alloc::format!("{}\n", proc.name()))
+        // Bolt: Append character to existing owned String instead of using format! to avoid double allocation
+        let mut name = proc.name();
+        name.push('\n');
+        Some(name)
     }
 
     fn status(&self, pid: u64) -> Option<String> {
@@ -616,7 +621,10 @@ impl axfs::ProcfsProcessProvider for PulseProcessProvider {
     fn thread_comm(&self, pid: u64, tid: u64) -> Option<String> {
         let proc = process_by_pid(pid)?;
         let task = proc.task_ref_by_tid(tid)?;
-        Some(alloc::format!("{}\n", task.name()))
+        // Bolt: Append character to existing owned String instead of using format! to avoid double allocation
+        let mut name = task.name();
+        name.push('\n');
+        Some(name)
     }
 
     fn thread_status(&self, pid: u64, tid: u64) -> Option<String> {
