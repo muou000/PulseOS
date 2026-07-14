@@ -52,11 +52,8 @@ fn main() {
             };
             let shell_envs: &[&str] = &["PATH=/usr/sbin:/usr/bin:/sbin:/bin"];
 
-            info!("Resolving shell...");
             let fs_handle = proc.fs_context_handle();
-            info!("1");
             let fs_ctx = fs_handle.lock();
-            info!("2");
             match resolve_exec_path_and_args(&fs_ctx, SHELL_ELF_PATH, shell_args_base) {
                 Ok((shell_path, shell_args)) => {
                     info!("Preparing to load shell: path={}, args={:?}", shell_path, shell_args);

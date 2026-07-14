@@ -115,7 +115,7 @@ pub fn prefault_range(
     let end_vaddr = start_vaddr.checked_add(size).ok_or(AxError::OutOfRange)?;
     let pages = memory_addr::PageIter4K::new(start_vaddr.align_down_4k(), end_vaddr.align_up_4k())
         .ok_or(AxError::BadAddress)?;
-    for page in pages {
+    for (page_idx, page) in pages.enumerate() {
         let mut access_flags = axhal::trap::PageFaultFlags::USER;
         if flags.contains(MappingFlags::READ) {
             access_flags |= axhal::trap::PageFaultFlags::READ;
