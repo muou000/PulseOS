@@ -1,7 +1,8 @@
 //! Platform-level Interrupt Controller (PLIC) support.
 
-use axplat::irq::{HandlerTable, IpiTarget, IrqHandler, IrqIf};
 use core::sync::atomic::{AtomicPtr, Ordering};
+
+use axplat::irq::{HandlerTable, IpiTarget, IrqHandler, IrqIf};
 use riscv::register::sie;
 use sbi_rt::HartMask;
 
@@ -28,7 +29,13 @@ pub const MAX_IRQ_COUNT: usize = 1024;
 static IRQ_HANDLER_TABLE: HandlerTable<MAX_IRQ_COUNT> = HandlerTable::new();
 
 macro_rules! with_cause {
-    ($cause: expr, @S_TIMER => $timer_op: expr, @S_SOFT => $ipi_op: expr, @S_EXT => $ext_op: expr, @EX_IRQ => $plic_op: expr $(,)?) => {
+    (
+        $cause:expr, @S_TIMER =>
+        $timer_op:expr, @S_SOFT =>
+        $ipi_op:expr, @S_EXT =>
+        $ext_op:expr, @EX_IRQ =>
+        $plic_op:expr $(,)?
+    ) => {
         match $cause {
             S_TIMER => $timer_op,
             S_SOFT => $ipi_op,
@@ -47,6 +54,8 @@ macro_rules! with_cause {
 }
 
 pub(super) fn init_percpu(cpu_id: usize) {
+    // Clear firmware state before the CPU is allowed to take external IRQs.
+    crate::plic::init_hart(cpu_id);
     // enable soft interrupts, timer interrupts, and external interrupts
     unsafe {
         sie::set_ssoft();
@@ -58,7 +67,6 @@ pub(super) fn init_percpu(cpu_id: usize) {
             sie::set_sext();
         }
     }
-    crate::plic::init_hart(cpu_id);
 }
 
 struct IrqIfImpl;
@@ -97,7 +105,10 @@ impl IrqIf for IrqIfImpl {
                 false
             },
             @EX_IRQ => {
-                if IRQ_HANDLER_TABLE.register_handler(irq, handler) {
+                if !crate::plic::is_valid_irq(irq) {
+                    warn!("invalid PLIC IRQ {}", irq);
+                    false
+                } else if IRQ_HANDLER_TABLE.register_handler(irq, handler) {
                     crate::plic::set_priority(irq, 1);
                     Self::set_enable(irq, true);
                     true
@@ -137,8 +148,12 @@ impl IrqIf for IrqIfImpl {
                 None
             },
             @EX_IRQ => {
-                Self::set_enable(irq, false);
-                IRQ_HANDLER_TABLE.unregister_handler(irq)
+                if crate::plic::is_valid_irq(irq) {
+                    Self::set_enable(irq, false);
+                    IRQ_HANDLER_TABLE.unregister_handler(irq)
+                } else {
+                    None
+                }
             }
         )
     }

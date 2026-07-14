@@ -24,6 +24,15 @@ const PLIC_ENABLE_BASE: usize = PLIC_BASE + 0x2000;
 /// Context threshold and claim/complete register.
 const PLIC_CONTEXT_BASE: usize = PLIC_BASE + 0x200000;
 
+/// QEMU `virt` exposes interrupt source IDs 1..=1023. Source 0 is reserved.
+const MAX_INTERRUPT_SOURCES: usize = 1024;
+const ENABLE_WORDS_PER_CONTEXT: usize = MAX_INTERRUPT_SOURCES / 32;
+
+#[inline]
+pub(crate) const fn is_valid_irq(irq: usize) -> bool {
+    irq > 0 && irq < MAX_INTERRUPT_SOURCES
+}
+
 /// Returns the S-mode context ID for a given hart.
 ///
 /// In QEMU virt machine, each hart has two contexts:
@@ -36,12 +45,18 @@ const fn s_mode_context(hart_id: usize) -> usize {
 
 /// Sets the priority for a given interrupt source.
 pub fn set_priority(irq: usize, priority: u32) {
+    if !is_valid_irq(irq) {
+        return;
+    }
     let ptr = (PLIC_PRIORITY_BASE + irq * 4) as *mut u32;
     unsafe { write_volatile(ptr, priority) };
 }
 
 /// Enables or disables a given interrupt source for a given hart's S-mode context.
 pub fn set_enable(hart_id: usize, irq: usize, enabled: bool) {
+    if !is_valid_irq(irq) {
+        return;
+    }
     let context = s_mode_context(hart_id);
     let ptr = (PLIC_ENABLE_BASE + context * 0x80 + (irq / 32) * 4) as *mut u32;
     let mask = 1 << (irq % 32);
@@ -82,5 +97,40 @@ pub fn complete(hart_id: usize, irq: u32) {
 
 /// Initializes PLIC for the current hart's S-mode context.
 pub fn init_hart(hart_id: usize) {
+    // Firmware is allowed to leave priorities and enable bits configured.
+    // Reset global source priorities once, before enabling any source in S-mode.
+    if hart_id == 0 {
+        for irq in 1..MAX_INTERRUPT_SOURCES {
+            set_priority(irq, 0);
+        }
+    }
+
+    let context = s_mode_context(hart_id);
+    let _guard = PLIC_LOCK.lock();
+    for word in 0..ENABLE_WORDS_PER_CONTEXT {
+        let ptr = (PLIC_ENABLE_BASE + context * 0x80 + word * 4) as *mut u32;
+        unsafe { write_volatile(ptr, 0) };
+    }
+    drop(_guard);
     set_threshold(hart_id, 0);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rejects_reserved_and_out_of_range_interrupt_sources() {
+        assert!(!is_valid_irq(0));
+        assert!(is_valid_irq(1));
+        assert!(is_valid_irq(MAX_INTERRUPT_SOURCES - 1));
+        assert!(!is_valid_irq(MAX_INTERRUPT_SOURCES));
+        assert!(!is_valid_irq(usize::MAX));
+    }
+
+    #[test]
+    fn maps_harts_to_supervisor_contexts() {
+        assert_eq!(s_mode_context(0), 1);
+        assert_eq!(s_mode_context(1), 3);
+    }
 }
