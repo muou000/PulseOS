@@ -216,17 +216,20 @@ impl<'a, H> PacketBuffer<'a, H> {
     /// its payload as well as its header, or return `Err(Error:Exhausted)` if the buffer is empty.
     ///
     /// This function otherwise behaves identically to [dequeue](#method.dequeue).
-    pub fn peek(&mut self) -> Result<(&H, &[u8]), Empty> {
-        self.dequeue_padding();
-
-        if let Some(metadata) = self.metadata_ring.get_allocated(0, 1).first() {
-            Ok((
-                metadata.header.as_ref().unwrap(),
-                self.payload_ring.get_allocated(0, metadata.size),
-            ))
-        } else {
-            Err(Empty)
+    pub fn peek(&self) -> Result<(&H, &[u8]), Empty> {
+        let mut payload_offset = 0;
+        for metadata_offset in 0..self.metadata_ring.len() {
+            let metadata = &self.metadata_ring.get_allocated(metadata_offset, 1)[0];
+            if let Some(header) = metadata.header.as_ref() {
+                return Ok((
+                    header,
+                    self.payload_ring
+                        .get_allocated(payload_offset, metadata.size),
+                ));
+            }
+            payload_offset += metadata.size;
         }
+        Err(Empty)
     }
 
     /// Return the maximum number packets that can be stored.
@@ -286,6 +289,7 @@ mod test {
         assert_eq!(buffer.metadata_ring.len(), 3);
         assert!(buffer.dequeue().is_ok());
 
+        assert_eq!(buffer.peek().unwrap().1, &b"abcd"[..]);
         assert_eq!(buffer.dequeue().unwrap().1, &b"abcd"[..]);
         assert_eq!(buffer.metadata_ring.len(), 0);
     }

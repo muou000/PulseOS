@@ -477,6 +477,14 @@ impl Interface {
         sockets
             .items()
             .filter_map(move |item| {
+                if item
+                    .socket
+                    .egress_destination()
+                    .is_some_and(|dst_addr| !inner.can_egress(&dst_addr))
+                {
+                    return None;
+                }
+
                 let socket_poll_at = item.socket.poll_at(inner);
                 match item
                     .meta
@@ -591,6 +599,14 @@ impl Interface {
 
         let mut emitted_any = false;
         for item in sockets.items_mut() {
+            if item
+                .socket
+                .egress_destination()
+                .is_some_and(|dst_addr| !self.inner.can_egress(&dst_addr))
+            {
+                continue;
+            }
+
             if !item
                 .meta
                 .egress_permitted(self.inner.now, |ip_addr| self.inner.has_neighbor(&ip_addr))
@@ -888,6 +904,35 @@ impl InterfaceInner {
 
         // Route via a router.
         self.routes.lookup(addr, timestamp)
+    }
+
+    fn can_egress(&self, addr: &IpAddress) -> bool {
+        let is_loopback = match addr {
+            #[cfg(feature = "proto-ipv4")]
+            IpAddress::Ipv4(addr) => addr.is_loopback(),
+            #[cfg(feature = "proto-ipv6")]
+            IpAddress::Ipv6(addr) => addr.is_loopback(),
+        };
+        let has_loopback_addr = self.ip_addrs.iter().any(|cidr| match cidr.address() {
+            #[cfg(feature = "proto-ipv4")]
+            IpAddress::Ipv4(addr) => addr.is_loopback(),
+            #[cfg(feature = "proto-ipv6")]
+            IpAddress::Ipv6(addr) => addr.is_loopback(),
+        });
+        let has_non_loopback_addr = self.ip_addrs.iter().any(|cidr| match cidr.address() {
+            #[cfg(feature = "proto-ipv4")]
+            IpAddress::Ipv4(addr) => !addr.is_loopback(),
+            #[cfg(feature = "proto-ipv6")]
+            IpAddress::Ipv6(addr) => !addr.is_loopback(),
+        });
+
+        if is_loopback {
+            has_loopback_addr
+        } else if !has_non_loopback_addr {
+            false
+        } else {
+            addr.is_multicast() || self.route(addr, self.now).is_some()
+        }
     }
 
     fn has_neighbor(&self, addr: &IpAddress) -> bool {

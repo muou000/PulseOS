@@ -1,5 +1,61 @@
 use super::*;
 
+#[test]
+#[cfg(all(
+    feature = "alloc",
+    feature = "medium-ip",
+    feature = "medium-ethernet",
+    feature = "socket-udp"
+))]
+fn shared_socket_set_routes_udp_to_eligible_interface() {
+    use crate::socket::udp;
+    use crate::tests::TestingDevice;
+
+    let mut loopback_device = TestingDevice::new(Medium::Ip);
+    let mut loopback = Interface::new(
+        Config::new(HardwareAddress::Ip),
+        &mut loopback_device,
+        Instant::ZERO,
+    );
+    loopback.update_ip_addrs(|addrs| {
+        addrs
+            .push(IpCidr::new(IpAddress::v4(127, 0, 0, 1), 8))
+            .unwrap();
+    });
+
+    let mut ethernet_device = TestingDevice::new(Medium::Ethernet);
+    let mut ethernet = Interface::new(
+        Config::new(HardwareAddress::Ethernet(EthernetAddress::from_bytes(&[
+            0x02, 0x02, 0x02, 0x02, 0x02, 0x02,
+        ]))),
+        &mut ethernet_device,
+        Instant::ZERO,
+    );
+    ethernet.update_ip_addrs(|addrs| {
+        addrs
+            .push(IpCidr::new(IpAddress::v4(10, 0, 2, 15), 24))
+            .unwrap();
+    });
+
+    let rx_buffer = udp::PacketBuffer::new(vec![udp::PacketMetadata::EMPTY], vec![0; 64]);
+    let tx_buffer = udp::PacketBuffer::new(vec![udp::PacketMetadata::EMPTY], vec![0; 64]);
+    let mut socket = udp::Socket::new(rx_buffer, tx_buffer);
+    socket.bind(49152).unwrap();
+    socket
+        .send_slice(b"dns", IpEndpoint::new(IpAddress::v4(10, 0, 2, 3), 53))
+        .unwrap();
+
+    let mut sockets = SocketSet::new(vec![]);
+    sockets.add(socket);
+
+    loopback.poll(Instant::ZERO, &mut loopback_device, &mut sockets);
+    assert!(loopback_device.queue.is_empty());
+    assert_eq!(loopback.poll_delay(Instant::ZERO, &sockets), None);
+
+    ethernet.poll(Instant::ZERO, &mut ethernet_device, &mut sockets);
+    assert!(!ethernet_device.queue.is_empty());
+}
+
 #[rstest]
 #[case(Medium::Ethernet)]
 #[cfg(feature = "medium-ethernet")]
