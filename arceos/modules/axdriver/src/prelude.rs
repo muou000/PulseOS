@@ -5,7 +5,7 @@ pub use axdriver_base::{BaseDriverOps, DevError, DevResult, DeviceType};
 #[cfg(feature = "block")]
 pub use {crate::structs::AxBlockDevice, axdriver_block::BlockDriverOps};
 #[cfg(all(feature = "block", feature = "async"))]
-pub use axdriver_block::AsyncBlockDriverOps;
+pub use axdriver_block::{AsyncBlockDriverOps, DynAsyncBlockDriverOps};
 #[cfg(feature = "display")]
 pub use {crate::structs::AxDisplayDevice, axdriver_display::DisplayDriverOps};
 #[cfg(feature = "net")]

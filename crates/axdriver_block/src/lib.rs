@@ -3,11 +3,15 @@
 #![no_std]
 #![cfg_attr(doc, feature(doc_auto_cfg))]
 
+extern crate alloc;
+
 #[cfg(feature = "ramdisk")]
 pub mod ramdisk;
 
 #[cfg(feature = "bcm2835-sdhci")]
 pub mod bcm2835sdhci;
+
+use alloc::boxed::Box;
 
 #[doc(no_inline)]
 pub use axdriver_base::{BaseDriverOps, DevError, DevResult, DeviceType};
@@ -52,18 +56,23 @@ pub trait BlockDriverOps: BaseDriverOps {
 ///    resuming the future. Re-check the condition to handle spurious wakeups.
 /// 4. Acquire the lock again and call `complete_*()`.
 ///
-/// # TODO: Integration Points
+/// # Object safety
 ///
-/// - `axfs` block I/O path currently uses synchronous [`BlockDriverOps`]. To fully
-///   leverage async I/O, the filesystem layer needs to be wrapped in async tasks
-///   and use `axtask::future::block_on()` or native async context.
-/// - The `dyn AsyncBlockDriverOps` (object-safe) variant is NOT yet implemented.
-///   If dynamic dispatch is needed, a `DynAsyncBlockDriverOps` wrapper trait
-///   returning `Pin<Box<dyn Future>>` should be added.
+/// `+ Send + Sync` is required on the trait itself so that
+/// `Arc<dyn AsyncBlockDriverOps + Send + Sync>` (the unified handle used by
+/// `arceos::axfs::disk::SharedBlockDevice`) is valid. Implementors do not need
+/// to provide separate `unsafe impl Send/Sync` — the bound enforces them.
+///
+/// # Integration Points
+///
+/// - `axfs` block I/O path is built around `SharedBlockDevice`, whose inner
+///   handle is `Arc<dyn AsyncBlockDriverOps + Send + Sync>`. The Arc is
+///   cloned across the async boundary (no outer `Mutex<Box<dyn …>>`), which
+///   avoids `E0599: Box<dyn BlockDriverOps> not Clone`.
 /// - LoongArch64 path: interrupt delivery via MSI-X is wired up but end-to-end
 ///   async I/O on LA64 should be validated separately.
 #[cfg(feature = "async")]
-pub trait AsyncBlockDriverOps: BlockDriverOps {
+pub trait AsyncBlockDriverOps: BlockDriverOps + Send + Sync {
     /// Future type returned by [`read_block_async`](Self::read_block_async).
     type ReadFuture<'a>: core::future::Future<Output = DevResult> + Send + 'a
     where
@@ -91,4 +100,55 @@ pub trait AsyncBlockDriverOps: BlockDriverOps {
     /// Same lifetime constraints as [`read_block_async`](Self::read_block_async).
     fn write_block_async<'a>(&'a mut self, block_id: u64, buf: &'a [u8])
         -> Self::WriteFuture<'a>;
+}
+
+/// Object-safe counterpart to [`AsyncBlockDriverOps`].
+///
+/// Because [`AsyncBlockDriverOps`] carries a generic associated type, it is
+/// **not** dyn-compatible: `Box<dyn AsyncBlockDriverOps>` is rejected by the
+/// compiler (`E0038`). To represent a clonable, type-erased handle such as
+/// `Arc<dyn DynAsyncBlockDriverOps + Send + Sync>` (used by
+/// `arceos::axfs::disk::SharedBlockDevice`), we provide this alternate trait
+/// whose futures are boxed.
+///
+/// # Blanket implementation
+///
+/// Every `T: AsyncBlockDriverOps + Send + Sync + 'static` automatically
+/// obtains a `DynAsyncBlockDriverOps` impl via the blanket impl below, so
+/// concrete drivers do not need to implement this trait by hand.
+#[cfg(feature = "async")]
+pub trait DynAsyncBlockDriverOps: BlockDriverOps + Send + Sync + 'static {
+    fn read_block_async_dyn<'a>(
+        &'a mut self,
+        block_id: u64,
+        buf: &'a mut [u8],
+    ) -> core::pin::Pin<Box<dyn core::future::Future<Output = DevResult> + Send + 'a>>;
+
+    fn write_block_async_dyn<'a>(
+        &'a mut self,
+        block_id: u64,
+        buf: &'a [u8],
+    ) -> core::pin::Pin<Box<dyn core::future::Future<Output = DevResult> + Send + 'a>>;
+}
+
+#[cfg(feature = "async")]
+impl<T> DynAsyncBlockDriverOps for T
+where
+    T: AsyncBlockDriverOps + Send + Sync + 'static,
+{
+    fn read_block_async_dyn<'a>(
+        &'a mut self,
+        block_id: u64,
+        buf: &'a mut [u8],
+    ) -> core::pin::Pin<Box<dyn core::future::Future<Output = DevResult> + Send + 'a>> {
+        Box::pin(<Self as AsyncBlockDriverOps>::read_block_async(self, block_id, buf))
+    }
+
+    fn write_block_async_dyn<'a>(
+        &'a mut self,
+        block_id: u64,
+        buf: &'a [u8],
+    ) -> core::pin::Pin<Box<dyn core::future::Future<Output = DevResult> + Send + 'a>> {
+        Box::pin(<Self as AsyncBlockDriverOps>::write_block_async(self, block_id, buf))
+    }
 }
