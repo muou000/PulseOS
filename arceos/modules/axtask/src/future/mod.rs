@@ -1,6 +1,7 @@
 use alloc::sync::Arc;
 use core::future::{Future, IntoFuture};
 use core::pin::pin;
+use core::sync::atomic::{AtomicBool, Ordering};
 use core::task::{Context, Poll, Waker};
 use kspin::SpinNoIrq;
 
@@ -104,9 +105,16 @@ impl Future for YieldNow {
 }
 
 /// A future that waits for a [`WaitQueue`](crate::wait_queue::WaitQueue).
+///
+/// The future registers itself with the queue on the first poll and captures
+/// a shared notification flag. It only completes when a matching
+/// `notify_one` / `notify_all` has observed and consumed that registration
+/// (i.e. set the flag), not merely when the future was once registered. This
+/// honors the `Future` contract, which permits being polled again after
+/// returning `Pending` even when the awaited event has not occurred.
 pub struct WaitFuture<'a> {
     wq: &'a crate::wait_queue::WaitQueue,
-    registered: bool,
+    notified: Option<Arc<AtomicBool>>,
 }
 
 impl<'a> WaitFuture<'a> {
@@ -114,7 +122,7 @@ impl<'a> WaitFuture<'a> {
     pub fn new(wq: &'a crate::wait_queue::WaitQueue) -> Self {
         Self {
             wq,
-            registered: false,
+            notified: None,
         }
     }
 }
@@ -123,11 +131,29 @@ impl<'a> Future for WaitFuture<'a> {
     type Output = ();
 
     fn poll(mut self: core::pin::Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        if self.registered {
+        // Lazy registration: capture the notification flag on the first poll
+        // and reuse it on subsequent polls so that spurious or unrelated
+        // wakes do not cause premature completion.
+        let flag = if let Some(f) = self.notified.as_ref() {
+            // We only registered one waker; the executor may have reused
+            // the same waker across polls, so re-registering isn't strictly
+            // required here. Keep the original entry so its flag stays in
+            // sync with the wait queue's storage.
+            f.clone()
+        } else {
+            let f = self.wq.register_waker(cx.waker());
+            self.notified = Some(f.clone());
+            f
+        };
+
+        // Only complete when an actual notify_* has set the flag. If the
+        // notification raced in between registering and checking, the load
+        // below will observe `true` since both the store in `notify_*` and
+        // our register_waker/load sequence are ordered by the wait queue's
+        // internal locks and the Release/Acquire pair on the flag itself.
+        if flag.load(Ordering::Acquire) {
             Poll::Ready(())
         } else {
-            self.wq.register_waker(cx.waker());
-            self.registered = true;
             Poll::Pending
         }
     }
