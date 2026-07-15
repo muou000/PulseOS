@@ -1,7 +1,7 @@
-use alloc::sync::Arc;
+use alloc::{boxed::Box, sync::Arc};
 use core::sync::atomic::{AtomicU64, Ordering};
 use spin::Mutex;
-use axdriver::prelude::{BaseDriverOps, BlockDriverOps, DeviceType, DevResult, DevError};
+use axdriver::prelude::{AsyncBlockDriverOps, BaseDriverOps, BlockDriverOps, DeviceType, DevResult, DevError};
 
 pub struct LoopDeviceState {
     pub backing: Mutex<Option<Arc<crate::highlevel::File>>>,
@@ -86,5 +86,38 @@ impl BlockDriverOps for LoopBlockDevice {
             axtask::future::block_on(file.sync(false)).map_err(|_| DevError::Io)?;
         }
         Ok(())
+    }
+}
+
+/// `LoopBlockDevice` has no real DMA/interrupt path — its I/O goes through
+/// `axfs::highlevel::File::read_at` / `write_at` which already use
+/// `axtask::future::block_on`. We provide the trait so the unified
+/// `dyn DynAsyncBlockDriverOps + Send + Sync` handle accepts loop devices
+/// alongside `VirtIoBlkDevWrapper`. The returned future is **immediately
+/// ready**, matching the wrapper's semantics in `SharedBlockDevice`.
+impl AsyncBlockDriverOps for LoopBlockDevice {
+    type ReadFuture<'a>
+        = core::pin::Pin<Box<dyn core::future::Future<Output = DevResult> + Send + 'a>>
+    where
+        Self: 'a;
+    type WriteFuture<'a>
+        = core::pin::Pin<Box<dyn core::future::Future<Output = DevResult> + Send + 'a>>
+    where
+        Self: 'a;
+
+    fn read_block_async<'a>(
+        &'a mut self,
+        block_id: u64,
+        buf: &'a mut [u8],
+    ) -> Self::ReadFuture<'a> {
+        Box::pin(async move { self.read_block(block_id, buf) })
+    }
+
+    fn write_block_async<'a>(
+        &'a mut self,
+        block_id: u64,
+        buf: &'a [u8],
+    ) -> Self::WriteFuture<'a> {
+        Box::pin(async move { self.write_block(block_id, buf) })
     }
 }
