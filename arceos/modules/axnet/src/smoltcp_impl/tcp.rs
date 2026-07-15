@@ -1,20 +1,26 @@
 use alloc::sync::Arc;
-use core::cell::UnsafeCell;
-use core::net::SocketAddr;
-use core::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
+use core::{
+    cell::UnsafeCell,
+    net::SocketAddr,
+    sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering},
+};
 
-use axerrno::{ax_err, ax_err_type, AxError, AxResult};
+use axerrno::{AxError, AxResult, ax_err, ax_err_type};
 use axhal::time::current_ticks;
 use axio::{PollState, Read, Write};
 use axpoll::{IoEvents, Pollable};
 use axsync::Mutex;
+use smoltcp::{
+    iface::SocketHandle,
+    socket::tcp::{self, ConnectError, State},
+    wire::{IpEndpoint, IpListenEndpoint},
+};
 
-use smoltcp::iface::SocketHandle;
-use smoltcp::socket::tcp::{self, ConnectError, State};
-use smoltcp::wire::{IpEndpoint, IpListenEndpoint};
-
-use super::addr::{from_core_sockaddr, into_core_sockaddr, is_unspecified, UNSPECIFIED_ENDPOINT};
-use super::{register_wait_queue, unregister_wait_queue, SocketSetWrapper, LISTEN_TABLE, SOCKET_SET};
+use super::{
+    LISTEN_TABLE, SOCKET_SET, SocketSetWrapper,
+    addr::{UNSPECIFIED_ENDPOINT, from_core_sockaddr, into_core_sockaddr, is_unspecified},
+    register_wait_queue, unregister_wait_queue,
+};
 
 // State transitions:
 // CLOSED -(connect)-> BUSY -> CONNECTING -> CONNECTED -(shutdown)-> BUSY -> CLOSED
@@ -138,7 +144,7 @@ impl TcpSocket {
         self.nonblock.store(nonblocking, Ordering::Release);
     }
 
-    ///Returns whether this socket is in reuse address mode.
+    /// Returns whether this socket is in reuse address mode.
     #[inline]
     pub fn is_reuse_addr(&self) -> bool {
         self.reuse_addr.load(Ordering::Acquire)
@@ -242,7 +248,7 @@ impl TcpSocket {
             let iface = if remote_endpoint.addr.as_bytes()[0] == 127 {
                 super::LOOPBACK.get().unwrap()
             } else {
-                info!("Use eth net");
+                debug!("Use eth net");
                 &super::ETH0.iface
             };
 
@@ -253,9 +259,9 @@ impl TcpSocket {
                 }
             }
 
-            info!("bound endpoint: {:?}", bound_endpoint);
-            info!("remote endpoint: {:?}", remote_endpoint);
-            warn!("Temporarily net bridge used");
+            debug!("bound endpoint: {:?}", bound_endpoint);
+            debug!("remote endpoint: {:?}", remote_endpoint);
+            debug!("Temporarily net bridge used");
 
             let mut iface_lock = iface.lock();
             let (local_endpoint, remote_endpoint) = SOCKET_SET
@@ -301,7 +307,10 @@ impl TcpSocket {
             };
 
             self.block_on(|| {
-                debug!("TcpSocket::connect: polling connect state={:?}", self.get_state());
+                debug!(
+                    "TcpSocket::connect: polling connect state={:?}",
+                    self.get_state()
+                );
                 let PollState { writable, .. } = self.poll_connect()?;
                 if !writable {
                     if let Some(expire_at) = expire_at {
@@ -411,30 +420,25 @@ impl TcpSocket {
         // SAFETY: `self.local_addr` should be initialized after `bind()`.
         let local_port = unsafe { self.local_addr.get().read().port };
         debug!("TcpSocket::accept: port={}", local_port);
-        self.block_on(|| {
-            match LISTEN_TABLE.accept(local_port) {
-                Ok((handle, (local_addr, peer_addr))) => {
-                    debug!("TCP socket accepted a new connection {}", peer_addr);
-                    let wait_queue = Arc::new(axtask::WaitQueue::new());
-                    register_wait_queue(handle, wait_queue.clone());
-                    Ok(TcpSocket::new_connected(
-                        handle,
-                        local_addr,
-                        peer_addr,
-                        wait_queue,
-                    ))
-                }
-                Err(AxError::WouldBlock) => {
-                    if let Some(expire_at) = expire_at {
-                        if current_ticks() > expire_at {
-                            debug!("TcpSocket::accept: timed out");
-                            return Err(AxError::TimedOut);
-                        }
-                    }
-                    Err(AxError::WouldBlock)
-                }
-                Err(e) => Err(e),
+        self.block_on(|| match LISTEN_TABLE.accept(local_port) {
+            Ok((handle, (local_addr, peer_addr))) => {
+                debug!("TCP socket accepted a new connection {}", peer_addr);
+                let wait_queue = Arc::new(axtask::WaitQueue::new());
+                register_wait_queue(handle, wait_queue.clone());
+                Ok(TcpSocket::new_connected(
+                    handle, local_addr, peer_addr, wait_queue,
+                ))
             }
+            Err(AxError::WouldBlock) => {
+                if let Some(expire_at) = expire_at {
+                    if current_ticks() > expire_at {
+                        debug!("TcpSocket::accept: timed out");
+                        return Err(AxError::TimedOut);
+                    }
+                }
+                Err(AxError::WouldBlock)
+            }
+            Err(e) => Err(e),
         })
     }
 
@@ -736,9 +740,7 @@ impl TcpSocket {
     }
 
     pub fn recv_queue(&self) -> usize {
-        self.with_socket(|socket| {
-            socket.map(|s| s.recv_queue()).unwrap_or(0)
-        })
+        self.with_socket(|socket| socket.map(|s| s.recv_queue()).unwrap_or(0))
     }
 
     /// Returns the wait queue for this socket.
@@ -959,7 +961,9 @@ fn get_ephemeral_port() -> AxResult<u16> {
             *curr += 1;
         }
         if LISTEN_TABLE.can_listen(port)
-        && SOCKET_SET.bind_check(super::addr::UNSPECIFIED_IP, port, None).is_ok()
+            && SOCKET_SET
+                .bind_check(super::addr::UNSPECIFIED_IP, port, None)
+                .is_ok()
         {
             return Ok(port);
         }

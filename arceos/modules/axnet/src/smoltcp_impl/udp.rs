@@ -1,20 +1,26 @@
-use core::net::SocketAddr;
-use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use alloc::sync::Arc;
+use core::{
+    net::SocketAddr,
+    sync::atomic::{AtomicBool, AtomicU64, Ordering},
+};
 
-use axerrno::{ax_err, ax_err_type, AxError, AxResult};
+use axerrno::{AxError, AxResult, ax_err, ax_err_type};
 use axhal::time::current_ticks;
 use axio::{PollState, Read, Write};
 use axpoll::{IoEvents, Pollable};
 use axsync::Mutex;
+use smoltcp::{
+    iface::SocketHandle,
+    socket::udp::{self, BindError, SendError},
+    wire::{IpEndpoint, IpListenEndpoint},
+};
 use spin::RwLock;
 
-use smoltcp::iface::SocketHandle;
-use smoltcp::socket::udp::{self, BindError, SendError};
-use smoltcp::wire::{IpEndpoint, IpListenEndpoint};
-
-use super::addr::{from_core_sockaddr, into_core_sockaddr, is_unspecified, UNSPECIFIED_ENDPOINT};
-use super::{register_wait_queue, unregister_wait_queue, SocketSetWrapper, SOCKET_SET};
+use super::{
+    SOCKET_SET, SocketSetWrapper,
+    addr::{UNSPECIFIED_ENDPOINT, from_core_sockaddr, into_core_sockaddr, is_unspecified},
+    register_wait_queue, unregister_wait_queue,
+};
 
 /// A UDP socket that provides POSIX-like APIs.
 pub struct UdpSocket {
@@ -266,7 +272,9 @@ impl UdpSocket {
                 let (packet_buf, meta) = socket
                     .recv()
                     .map_err(|_| ax_err_type!(BadState, "socket recv() failed"))?;
-                if !is_unspecified(remote_endpoint.addr) && remote_endpoint.addr != meta.endpoint.addr {
+                if !is_unspecified(remote_endpoint.addr)
+                    && remote_endpoint.addr != meta.endpoint.addr
+                {
                     return Err(AxError::WouldBlock);
                 }
                 if remote_endpoint.port != 0 && remote_endpoint.port != meta.endpoint.port {
@@ -455,11 +463,9 @@ impl UdpSocket {
     }
 
     pub fn recv_queue(&self) -> usize {
-        SOCKET_SET.with_socket_mut::<udp::Socket, _, _>(self.handle, |socket| {
-            match socket.peek() {
-                Ok((packet, _)) => packet.len(),
-                Err(_) => 0,
-            }
+        SOCKET_SET.with_socket_mut::<udp::Socket, _, _>(self.handle, |socket| match socket.peek() {
+            Ok((packet, _)) => packet.len(),
+            Err(_) => 0,
         })
     }
 
@@ -506,7 +512,10 @@ fn get_ephemeral_port() -> AxResult<u16> {
         } else {
             *curr += 1;
         }
-        if SOCKET_SET.bind_check(super::addr::UNSPECIFIED_IP, port, None).is_ok() {
+        if SOCKET_SET
+            .bind_check(super::addr::UNSPECIFIED_IP, port, None)
+            .is_ok()
+        {
             return Ok(port);
         }
         tries += 1;

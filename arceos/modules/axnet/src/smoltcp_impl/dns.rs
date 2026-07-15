@@ -1,13 +1,14 @@
 use alloc::vec::Vec;
-use axerrno::{ax_err_type, AxError, AxResult};
 use core::net::IpAddr;
 
-use smoltcp::iface::SocketHandle;
-use smoltcp::socket::dns::{self, GetQueryResultError, StartQueryError};
-use smoltcp::wire::DnsQueryType;
+use axerrno::{AxError, AxResult, ax_err_type};
+use smoltcp::{
+    iface::SocketHandle,
+    socket::dns::{self, GetQueryResultError, StartQueryError},
+    wire::DnsQueryType,
+};
 
-use super::addr::into_core_ipaddr;
-use super::{SocketSetWrapper, SOCKET_SET};
+use super::{SOCKET_SET, SocketSetWrapper, addr::into_core_ipaddr};
 
 /// A DNS socket.
 struct DnsSocket {
@@ -36,10 +37,13 @@ impl DnsSocket {
         // let local_addr = self.local_addr.unwrap_or_else(f);
         let handle = self.handle.ok_or_else(|| ax_err_type!(InvalidInput))?;
 
-        let iface = &super::ETH0.iface;
+        // Keep the same lock order as network polling: interface first, then
+        // the global socket set. Taking these locks in the opposite order can
+        // deadlock with `poll_interfaces()` or `poll_delay()`.
+        let mut iface = super::ETH0.iface.lock();
         let query_handle = SOCKET_SET
             .with_socket_mut::<dns::Socket, _, _>(handle, |socket| {
-                socket.start_query(iface.lock().context(), name, query_type)
+                socket.start_query(iface.context(), name, query_type)
             })
             .map_err(|e| match e {
                 StartQueryError::NoFreeSlot => {
@@ -52,6 +56,7 @@ impl DnsSocket {
                     ax_err_type!(InvalidInput, "socket query() failed: too long name")
                 }
             })?;
+        drop(iface);
         loop {
             SOCKET_SET.poll_interfaces();
             match SOCKET_SET.with_socket_mut::<dns::Socket, _, _>(handle, |socket| {

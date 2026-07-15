@@ -8,6 +8,7 @@ mod udp;
 use alloc::collections::BTreeMap;
 use alloc::sync::Arc;
 use alloc::vec;
+use alloc::vec::Vec;
 use axerrno::{AxError, AxResult};
 use core::cell::RefCell;
 use core::ops::DerefMut;
@@ -165,31 +166,47 @@ impl<'a> SocketSetWrapper<'a> {
     pub fn poll_interfaces(&self) {
         let timestamp =
             Instant::from_micros_const((current_time_nanos() / NANOS_PER_MICROS) as i64);
+        let mut readiness_may_have_changed = false;
         #[cfg(feature = "monolithic")]
-        LOOPBACK.lock().poll(
-            timestamp,
-            LOOPBACK_DEV.lock().deref_mut(),
-            &mut self.0.lock(),
-        );
-
-        ETH0.poll(&self.0);
-
-        // Notify specific sockets
-        let wq_map = SOCKET_WAIT_QUEUES.lock();
-        let mut sockets = self.0.lock();
-        for (handle, wq) in wq_map.iter() {
-            if let Some(socket) = sockets.iter_mut().find(|(h, _)| h == handle).map(|(_, s)| s) {
-                let can_io = match socket {
-                    Socket::Tcp(s) => s.can_recv() || s.can_send() || !s.is_active(),
-                    Socket::Udp(s) => s.can_recv() || s.can_send(),
-                    _ => false,
-                };
-                if can_io {
-                    wq.notify_all(true);
-                }
-            }
+        {
+            readiness_may_have_changed |= LOOPBACK.lock().poll(
+                timestamp,
+                LOOPBACK_DEV.lock().deref_mut(),
+                &mut self.0.lock(),
+            );
         }
-        NET_WAIT_QUEUE.notify_all(true);
+
+        readiness_may_have_changed |= ETH0.poll(&self.0);
+
+        // Determine which sockets are ready while holding the socket-set lock,
+        // but wake their tasks only after all network locks have been released.
+        // Waking a task may enter the scheduler synchronously and must not leave
+        // the global socket set locked if scheduling is delayed.
+        let ready_wait_queues: Vec<_> = {
+            let wq_map = SOCKET_WAIT_QUEUES.lock();
+            let mut sockets = self.0.lock();
+            sockets
+                .iter_mut()
+                .filter_map(|(handle, socket)| {
+                    let can_io = match socket {
+                        Socket::Tcp(s) => s.can_recv() || s.can_send() || !s.is_active(),
+                        Socket::Udp(s) => s.can_recv() || s.can_send(),
+                        _ => false,
+                    };
+                    if can_io {
+                        wq_map.get(&handle).map(Arc::clone)
+                    } else {
+                        None
+                    }
+                })
+                .collect()
+        };
+        for wq in ready_wait_queues {
+            wq.notify_all(true);
+        }
+        if readiness_may_have_changed {
+            NET_WAIT_QUEUE.notify_all(true);
+        }
     }
 
     pub fn remove(&self, handle: SocketHandle) {
@@ -241,12 +258,12 @@ impl InterfaceWrapper {
         };
     }
 
-    pub fn poll(&self, sockets: &Mutex<SocketSet>) {
+    pub fn poll(&self, sockets: &Mutex<SocketSet>) -> bool {
         let mut dev = self.dev.lock();
         let mut iface = self.iface.lock();
         let mut sockets = sockets.lock();
         let timestamp = Self::current_time();
-        iface.poll(timestamp, dev.deref_mut(), &mut sockets);
+        iface.poll(timestamp, dev.deref_mut(), &mut sockets)
     }
 }
 
@@ -374,12 +391,16 @@ pub fn poll_interfaces() {
 /// Returns the delay until the next timer expires.
 pub fn poll_delay() -> Option<smoltcp::time::Duration> {
     let timestamp = Instant::from_micros_const((current_time_nanos() / NANOS_PER_MICROS) as i64);
-    let sockets = SOCKET_SET.0.lock();
-    
+
     #[cfg(feature = "monolithic")]
     let delay_loopback = {
         if LOOPBACK.is_inited() {
-            LOOPBACK.lock().poll_delay(timestamp, &*sockets)
+            // Keep the same lock order as `poll_interfaces`: interface first,
+            // then the global socket set. Reversing this order can deadlock
+            // with an application task polling the network stack.
+            let mut iface = LOOPBACK.lock();
+            let sockets = SOCKET_SET.0.lock();
+            iface.poll_delay(timestamp, &sockets)
         } else {
             None
         }
@@ -388,7 +409,9 @@ pub fn poll_delay() -> Option<smoltcp::time::Duration> {
     let delay_loopback = None;
 
     let delay_eth0 = if ETH0.is_inited() {
-        ETH0.iface.lock().poll_delay(timestamp, &*sockets)
+        let mut iface = ETH0.iface.lock();
+        let sockets = SOCKET_SET.0.lock();
+        iface.poll_delay(timestamp, &sockets)
     } else {
         None
     };

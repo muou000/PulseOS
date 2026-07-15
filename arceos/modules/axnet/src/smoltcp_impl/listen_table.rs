@@ -1,13 +1,15 @@
 use alloc::{boxed::Box, collections::VecDeque};
 use core::ops::{Deref, DerefMut};
 
-use axerrno::{ax_err, AxError, AxResult};
+use axerrno::{AxError, AxResult, ax_err};
 use axsync::Mutex;
-use smoltcp::iface::{SocketHandle, SocketSet};
-use smoltcp::socket::tcp::{self, State};
-use smoltcp::wire::{IpAddress, IpEndpoint, IpListenEndpoint};
+use smoltcp::{
+    iface::{SocketHandle, SocketSet},
+    socket::tcp::{self, State},
+    wire::{IpAddress, IpEndpoint, IpListenEndpoint},
+};
 
-use super::{SocketSetWrapper, LISTEN_QUEUE_SIZE, SOCKET_SET};
+use super::{LISTEN_QUEUE_SIZE, SOCKET_SET, SocketSetWrapper};
 
 const PORT_NUM: usize = 65536;
 
@@ -106,9 +108,7 @@ impl ListenTable {
                 }
             };
 
-            let connected_idx = handles
-                .iter()
-                .position(|&handle| is_connected(handle));
+            let connected_idx = handles.iter().position(|&handle| is_connected(handle));
 
             let idx = match connected_idx {
                 Some(idx) => idx,
@@ -125,9 +125,15 @@ impl ListenTable {
                     drop(entry_guard);
                     if is_closed(handle) {
                         SOCKET_SET.remove(handle);
-                        return ax_err!(ConnectionReset, "socket accept() failed: connection reset");
+                        return ax_err!(
+                            ConnectionReset,
+                            "socket accept() failed: connection reset"
+                        );
                     } else {
-                        log::debug!("LISTEN_TABLE::accept: successfully returning handle {}", handle);
+                        log::debug!(
+                            "LISTEN_TABLE::accept: successfully returning handle {}",
+                            handle
+                        );
                         return Ok((handle, get_addr_tuple(handle)));
                     }
                 }
@@ -163,12 +169,18 @@ impl ListenTable {
                     handle, src, entry.listen_endpoint
                 );
                 entry.syn_queue.push_back(handle);
-                log::debug!("incoming_tcp_packet: added new socket handle {} to syn_queue", handle);
+                log::debug!(
+                    "incoming_tcp_packet: added new socket handle {} to syn_queue",
+                    handle
+                );
             } else {
                 log::error!("incoming_tcp_packet: failed to listen on new socket");
             }
         } else {
-            log::warn!("incoming_tcp_packet: no listening socket on port {}", dst.port);
+            log::warn!(
+                "incoming_tcp_packet: no listening socket on port {}",
+                dst.port
+            );
         }
     }
 }
