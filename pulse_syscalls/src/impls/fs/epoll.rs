@@ -305,8 +305,27 @@ impl<'a> Future for EpollFuture<'a> {
                 list
             };
 
+            // 不再静默吞掉 `register_poll` 的错误：若任意一个被监控 fd
+            // 不支持基于 waker 的等待，登记就根本无法唤醒当前任务，
+            // 继续返回 `Poll::Pending` 会让 `block_on` 永久挂起。
+            // 对于返回 `EOPNOTSUPP`（或类似）错误的 fd，将整次 `epoll_wait`
+            // 标记为"不可安全等待"，由调用方按需选择退避或换用其他机制。
+            let mut unsupported = false;
             for (entry, target_events) in targets {
-                let _ = entry.object.register_poll(cx, target_events);
+                if let Err(e) = entry.object.register_poll(cx, target_events) {
+                    axlog::warn!(
+                        "epoll: register_poll failed: {:?}",
+                        e
+                    );
+                    if matches!(e, LinuxError::EOPNOTSUPP) {
+                        unsupported = true;
+                    } else {
+                        return Poll::Ready(Err(e));
+                    }
+                }
+            }
+            if unsupported {
+                return Poll::Ready(Err(LinuxError::EOPNOTSUPP));
             }
         }
 

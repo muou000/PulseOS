@@ -425,6 +425,10 @@ pub struct Process {
     children: SpinNoIrq<Vec<Arc<Process>>>,
     /// 子进程退出等待事件队列
     pub child_exit_event: WaitQueue,
+    /// 进程自身进入僵尸态时唤醒等待本进程 pidfd 的观察者。
+    /// 与 `child_exit_event` 不同：后者由父进程等待子进程使用，前者由
+    /// `PidfdObject::register_poll` 持有，用于在 epoll/poll 中唤醒观察者。
+    pub pid_exit_event: WaitQueue,
     /// 标志进程是否已处于僵尸状态
     zombie: AtomicBool,
     /// 用户空间分配资源是否已经被全部释放
@@ -1459,6 +1463,7 @@ impl Process {
             }),
             children: SpinNoIrq::new(Vec::new()),
             child_exit_event: WaitQueue::new(),
+            pid_exit_event: WaitQueue::new(),
             zombie: AtomicBool::new(false),
             user_resources_released: AtomicBool::new(false),
             exit_code: AtomicI32::new(0),
@@ -1619,6 +1624,7 @@ impl Process {
             }),
             children: SpinNoIrq::new(Vec::new()),
             child_exit_event: WaitQueue::new(),
+            pid_exit_event: WaitQueue::new(),
             zombie: AtomicBool::new(false),
             user_resources_released: AtomicBool::new(false),
             exit_code: AtomicI32::new(0),
@@ -2019,6 +2025,10 @@ impl Process {
         self.threads.lock().clear();
         self.exit_code.store(final_code, Ordering::Release);
         self.zombie.store(true, Ordering::Release);
+        // 唤醒所有通过 `PidfdObject::register_poll` 在 `pid_exit_event` 上挂起的
+        // 观察者（例如 epoll_wait、poll）。必须在任何资源释放或 reparent 之前
+        // 完成，否则观察者可能在状态尚可读时收到唤醒但已被回收。
+        self.pid_exit_event.notify_all(false);
         self.complete_vfork();
         if let Err(e) = self.release_zombie_resources(true) {
             axlog::warn!(

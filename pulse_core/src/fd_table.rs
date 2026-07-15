@@ -86,8 +86,16 @@ pub trait FdObject: Send + Sync {
     }
 
     /// Registers a waker for the requested events.
+    ///
+    /// The default implementation returns [`LinuxError::EOPNOTSUPP`]. This
+    /// ensures that any `FdObject` which does not explicitly support
+    /// waker-based wait (and therefore cannot wake a blocked epoll/poll
+    /// caller) cannot silently break waker-based waiters. Concrete
+    /// implementations that *do* support such waiting (e.g. `PipeObject`,
+    /// `StdinObject`, `EpollObject`, `Socket`, `PidfdObject`) must override
+    /// this method and register the waker on their underlying wait queue.
     fn register_poll(&self, _cx: &mut core::task::Context<'_>, _events: axpoll::IoEvents) -> LinuxResult {
-        Ok(())
+        Err(LinuxError::EOPNOTSUPP)
     }
 
     fn location(&self) -> Option<Location> {
@@ -808,6 +816,26 @@ impl FdObject for PidfdObject {
             readable: is_zombie,
             writable: false,
         })
+    }
+
+    /// 将当前 waker 注册到目标进程自身的 `pid_exit_event` 等待队列上。
+    ///
+    /// `pidfd` 只关心目标进程进入僵尸态这一事件；只要目标进程在生命周期内，
+    /// `Process::finish_thread_exit` 会在写入 `zombie = true` 之后立即
+    /// `notify_all(false)`，从而唤醒 epoll/poll 等待者。
+    ///
+    /// 如果目标进程已不存在（已被 reap 并从全局表中注销），`poll()` 视为
+    /// 始终可读，调用方不会走到这里；为防御性目的，进程已消失时直接返回
+    /// `Ok(())`，不注册任何 waker，让 poll 端的下一次轮询自行退出。
+    fn register_poll(
+        &self,
+        cx: &mut core::task::Context<'_>,
+        _events: axpoll::IoEvents,
+    ) -> LinuxResult {
+        if let Some(process) = crate::task::process_by_pid(self.pid) {
+            process.pid_exit_event.register_waker(cx.waker());
+        }
+        Ok(())
     }
 }
 
