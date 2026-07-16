@@ -253,25 +253,10 @@ cfg_if! {
             }
         }
 
-        #[cfg(all(feature = "multitask", feature = "async"))]
-        fn register_then_check(
-            register_waker: impl FnOnce(),
-            is_ready: impl FnOnce() -> bool,
-        ) -> core::task::Poll<()> {
-            register_waker();
-            if is_ready() {
-                core::task::Poll::Ready(())
-            } else {
-                core::task::Poll::Pending
-            }
-        }
-
         pub struct VirtIoBlkDevInner<H: VirtIoHal, T: virtio_drivers::transport::Transport> {
             inner: SpinNoIrq<axdriver_virtio::VirtIoBlkDev<H, T>>,
             #[cfg(feature = "multitask")]
             wait_queue: axtask::WaitQueue,
-            #[cfg(all(feature = "multitask", feature = "async"))]
-            async_waiters: SpinNoIrq<alloc::collections::BTreeMap<u16, core::task::Waker>>,
         }
 
         pub struct VirtIoBlkDevWrapper<H: VirtIoHal, T: virtio_drivers::transport::Transport> {
@@ -305,8 +290,6 @@ cfg_if! {
                     inner: SpinNoIrq::new(dev),
                     #[cfg(feature = "multitask")]
                     wait_queue: axtask::WaitQueue::new(),
-                    #[cfg(all(feature = "multitask", feature = "async"))]
-                    async_waiters: SpinNoIrq::new(alloc::collections::BTreeMap::new()),
                 });
                 fn handler<H: VirtIoHal, T: virtio_drivers::transport::Transport>(
                     w: &VirtIoBlkDevInner<H, T>,
@@ -318,7 +301,7 @@ cfg_if! {
                     // the interrupt only when I/O completes; `acked` reflects
                     // whether the legacy ISR STATUS bit was set, which is NOT
                     // reliable under MSI-X (QEMU may return false even on completion).
-                    // The async wait loop guards correctness via `peek_used()` check.
+                    // The block wait loops guard correctness via `peek_used()` checks.
                     //
                     // If acked=true (legacy/MMIO mode) or acked=false (MSI-X mode),
                     // both should wake waiters. Wrong wakeups are harmless because
@@ -328,40 +311,12 @@ cfg_if! {
                             axlog::debug!("virtio-blk interrupt handler: notifying wait queue");
                             w.wait_queue.notify_all(true);
                         }
-                        #[cfg(all(feature = "multitask", feature = "async"))]
-                        w.wake_next_async();
                     }
                 let irq_registration = register_virtio_interrupt(irq, &inner, handler::<H, T>)?;
                 Ok(Self {
                     _irq_registration: irq_registration,
                     inner,
                 })
-            }
-        }
-
-        #[cfg(all(feature = "multitask", feature = "async"))]
-        impl<H: VirtIoHal, T: virtio_drivers::transport::Transport>
-            VirtIoBlkDevInner<H, T>
-        {
-            fn poll_token(&self, token: u16, waker: &core::task::Waker) -> core::task::Poll<()> {
-                // Register first, then inspect the used ring. This ordering makes
-                // an interrupt racing with registration observable in either path.
-                self.async_waiters.lock().insert(token, waker.clone());
-                if self.inner.lock().inner.peek_used() == Some(token) {
-                    self.async_waiters.lock().remove(&token);
-                    core::task::Poll::Ready(())
-                } else {
-                    core::task::Poll::Pending
-                }
-            }
-
-            fn wake_next_async(&self) {
-                let token = self.inner.lock().inner.peek_used();
-                if let Some(token) = token
-                    && let Some(waker) = self.async_waiters.lock().remove(&token)
-                {
-                    waker.wake();
-                }
             }
         }
 
@@ -472,14 +427,13 @@ cfg_if! {
 
         /// `AsyncBlockDriverOps` implementation for VirtIoBlkDevWrapper.
         ///
-        /// Gate: requires `multitask` (for WaitQueue) + `async` feature (for the trait).
-        /// The implementation registers the task waker before checking completion,
-        /// relying on the interrupt handler's `notify_all()` to wake pending futures.
+        /// This conservatively uses the synchronous completion path inside one
+        /// Future poll. The Future therefore cannot return `Pending` after DMA is
+        /// submitted, so dropping it can never invalidate an in-flight buffer.
         ///
         /// # TODO (tracking)
-        /// - Validate end-to-end async path on LoongArch64 (MSI-X interrupt → waker wake).
-        /// - Add timeout support: if an interrupt is missed, the future will hang forever.
-        ///   Consider wrapping with `axtask::future::time::sleep_until()` as a guard.
+        /// - Restore interrupt-driven suspension only after requests, DMA buffers,
+        ///   IRQ registration, and device lifetime are owned independently of the Future.
         /// - Consider exposing a `flush_async` variant if the underlying device supports it.
         #[cfg(all(feature = "multitask", feature = "async"))]
         impl<H: VirtIoHal + Send + Sync + 'static,
@@ -500,35 +454,7 @@ cfg_if! {
                 buf: &'a mut [u8],
             ) -> Self::ReadFuture<'a> {
                 async move {
-                    // req and resp live in the Future state machine across .await points.
-                    // They must remain valid until complete_read_blocks() is called.
-                    let mut req = virtio_drivers::device::blk::BlkReq::default();
-                    let mut resp = virtio_drivers::device::blk::BlkResp::default();
-
-                    // 1. Submit non-blocking request and immediately release the lock.
-                    let token = unsafe {
-                        self.inner.inner.lock().inner
-                            .read_blocks_nb(block_id as usize, &mut req, buf, &mut resp)
-                    }.map_err(virtio_err_to_dev)?;
-
-                    axlog::debug!("virtio::read_block_async: token={} submitted", token);
-
-                    // Register the waker before checking the used ring. This closes the
-                    // lost-wakeup window between `peek_used()` and suspension.
-                    core::future::poll_fn(|cx| self.inner.poll_token(token, cx.waker())).await;
-
-                    axlog::debug!("virtio::read_block_async: token={} ready, completing", token);
-
-                    // 3. Complete the transfer (reads DMA buffer back into `buf`).
-                    let result = unsafe {
-                        self.inner.inner.lock().inner
-                            .complete_read_blocks(token, &req, buf, &mut resp)
-                    }.map_err(virtio_err_to_dev);
-                    // Several descriptors may already be present in the used ring,
-                    // while the device generated only one interrupt. Completing the
-                    // head must therefore explicitly hand off to the next waiter.
-                    self.inner.wake_next_async();
-                    result
+                    <Self as axdriver_block::BlockDriverOps>::read_block(self, block_id, buf)
                 }
             }
 
@@ -538,30 +464,7 @@ cfg_if! {
                 buf: &'a [u8],
             ) -> Self::WriteFuture<'a> {
                 async move {
-                    let mut req = virtio_drivers::device::blk::BlkReq::default();
-                    let mut resp = virtio_drivers::device::blk::BlkResp::default();
-
-                    // 1. Submit non-blocking write request.
-                    let token = unsafe {
-                        self.inner.inner.lock().inner
-                            .write_blocks_nb(block_id as usize, &mut req, buf, &mut resp)
-                    }.map_err(virtio_err_to_dev)?;
-
-                    axlog::debug!("virtio::write_block_async: token={} submitted", token);
-
-                    // Register before checking to avoid missing an interrupt that arrives
-                    // immediately before the future suspends.
-                    core::future::poll_fn(|cx| self.inner.poll_token(token, cx.waker())).await;
-
-                    axlog::debug!("virtio::write_block_async: token={} ready, completing", token);
-
-                    // 3. Complete the write transfer.
-                    let result = unsafe {
-                        self.inner.inner.lock().inner
-                            .complete_write_blocks(token, &req, buf, &mut resp)
-                    }.map_err(virtio_err_to_dev);
-                    self.inner.wake_next_async();
-                    result
+                    <Self as axdriver_block::BlockDriverOps>::write_block(self, block_id, buf)
                 }
             }
         }

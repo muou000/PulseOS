@@ -85,19 +85,22 @@ pub trait AsyncBlockDriverOps: BlockDriverOps + Send + Sync {
 
     /// Asynchronously reads blocked data from the given block.
     ///
-    /// The returned future must be `.await`-ed. The task will suspend via
-    /// `WaitFuture` until an interrupt signals that the DMA transfer is complete.
+    /// The returned future must be `.await`-ed. Implementations may suspend the
+    /// task until an interrupt signals that the transfer is complete.
     ///
     /// # Safety / Lifetime
     ///
     /// `buf` must remain valid for the entire lifetime `'a` of the returned future,
-    /// including across any `.await` suspension points.
+    /// including across any `.await` suspension points. Implementations must also
+    /// be cancellation-safe: after the returned future is dropped, the driver must
+    /// not access `buf` or any other storage owned by the future.
     fn read_block_async<'a>(&'a mut self, block_id: u64, buf: &'a mut [u8])
         -> Self::ReadFuture<'a>;
 
     /// Asynchronously writes blocked data to the given block.
     ///
-    /// Same lifetime constraints as [`read_block_async`](Self::read_block_async).
+    /// Same lifetime and cancellation-safety constraints as
+    /// [`read_block_async`](Self::read_block_async).
     fn write_block_async<'a>(&'a mut self, block_id: u64, buf: &'a [u8])
         -> Self::WriteFuture<'a>;
 }
