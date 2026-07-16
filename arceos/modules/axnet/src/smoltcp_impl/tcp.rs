@@ -18,7 +18,7 @@ use smoltcp::{
 use super::{
     LISTEN_TABLE, SOCKET_SET, SocketSetWrapper, SocketWaitQueues,
     addr::{UNSPECIFIED_ENDPOINT, from_core_sockaddr, into_core_sockaddr, is_unspecified},
-    block_on_socket_io, deadline_from_ticks, register_wait_queue, socket_deadline,
+    block_on_socket_io, deadline_from_ticks, register_wait_queue, schedule_poll, socket_deadline,
     unregister_wait_queue,
 };
 
@@ -292,6 +292,8 @@ impl TcpSocket {
         })
         .unwrap_or_else(|_| ax_err!(AlreadyExists, "socket connect() failed: already connected"))?; // EISCONN
 
+        schedule_poll();
+
         // HACK: yield() to let server to listen
         axtask::yield_now();
 
@@ -563,7 +565,7 @@ impl TcpSocket {
         // SAFETY: `self.handle` should be initialized in a connected socket.
         let handle = unsafe { self.handle.get().read().unwrap() };
         self.block_on(IoEvents::OUT, socket_deadline(self.snd_timeout()), || {
-            SOCKET_SET.with_socket_mut::<tcp::Socket, _, _>(handle, |socket| {
+            let result = SOCKET_SET.with_socket_mut::<tcp::Socket, _, _>(handle, |socket| {
                 if !socket.is_active() || !socket.may_send() {
                     // closed by remote or shutdown locally
                     ax_err!(BrokenPipe, "socket send() failed")
@@ -578,7 +580,11 @@ impl TcpSocket {
                     // tx buffer is full
                     Err(AxError::WouldBlock)
                 }
-            })
+            });
+            if result.as_ref().is_ok_and(|len| *len != 0) {
+                schedule_poll();
+            }
+            result
         })
     }
     pub fn poll(&self) -> AxResult<PollState> {

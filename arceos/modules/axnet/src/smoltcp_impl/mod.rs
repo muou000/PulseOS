@@ -14,6 +14,7 @@ use core::cell::RefCell;
 use core::future::{Future, poll_fn};
 use core::ops::DerefMut;
 use core::pin::pin;
+use core::sync::atomic::{AtomicU64, Ordering};
 use core::task::Poll;
 
 use axdriver::prelude::*;
@@ -62,6 +63,10 @@ static SOCKET_SET: LazyInit<SocketSetWrapper> = LazyInit::new();
 static SOCKET_WAIT_QUEUES: LazyInit<Mutex<BTreeMap<SocketHandle, SocketWaitEntry>>> =
     LazyInit::new();
 pub static NET_WAIT_QUEUE: axtask::WaitQueue = axtask::WaitQueue::new();
+// Keep background scheduling separate from the public readiness queue so a
+// successful stack poll cannot wake the poller into a self-sustaining loop.
+static NET_POLL_WAIT_QUEUE: axtask::WaitQueue = axtask::WaitQueue::new();
+static NET_POLL_EPOCH: AtomicU64 = AtomicU64::new(0);
 
 pub(crate) struct SocketWaitQueues {
     read: axtask::WaitQueue,
@@ -257,6 +262,9 @@ impl<'a> SocketSetWrapper<'a> {
                     let entry = wq_map.get(&handle)?;
                     let events = match (socket, entry.kind) {
                         (Socket::Tcp(s), SocketWaitKind::Normal) => {
+                            if matches!(s.state(), socket::tcp::State::SynSent) {
+                                return None;
+                            }
                             let mut events = IoEvents::empty();
                             if s.can_recv() || !s.may_recv() {
                                 events |= IoEvents::IN;
@@ -479,6 +487,11 @@ pub fn poll_interfaces() {
     SOCKET_SET.poll_interfaces();
 }
 
+pub(crate) fn schedule_poll() {
+    NET_POLL_EPOCH.fetch_add(1, Ordering::Release);
+    NET_POLL_WAIT_QUEUE.notify_one(true);
+}
+
 /// Returns the delay until the next timer expires.
 pub fn poll_delay() -> Option<smoltcp::time::Duration> {
     let timestamp = Instant::from_micros_const((current_time_nanos() / NANOS_PER_MICROS) as i64);
@@ -574,18 +587,20 @@ pub(crate) fn init(_net_dev: AxNetDevice) {
         struct NetWaker;
         impl alloc::task::Wake for NetWaker {
             fn wake(self: Arc<Self>) {
-                crate::NET_WAIT_QUEUE.notify_all(true);
+                schedule_poll();
             }
             fn wake_by_ref(self: &Arc<Self>) {
-                crate::NET_WAIT_QUEUE.notify_all(true);
+                schedule_poll();
             }
         }
 
         let waker = core::task::Waker::from(Arc::new(NetWaker));
 
         loop {
-            poll_interfaces();
+            let observed_epoch = NET_POLL_EPOCH.load(Ordering::Acquire);
 
+            // Register before polling. The epoch condition below closes the
+            // remaining poll-to-sleep window if this waker fires meanwhile.
             if ETH0.is_inited() {
                 let dev = ETH0.dev.lock();
                 let inner = dev.inner.borrow();
@@ -594,12 +609,18 @@ pub(crate) fn init(_net_dev: AxNetDevice) {
                 }
             }
 
+            poll_interfaces();
+
             let delay = poll_delay();
             if let Some(d) = delay {
                 let duration = core::time::Duration::from_micros(d.total_micros());
-                crate::NET_WAIT_QUEUE.wait_timeout(duration);
+                NET_POLL_WAIT_QUEUE.wait_timeout_until(duration, || {
+                    NET_POLL_EPOCH.load(Ordering::Acquire) != observed_epoch
+                });
             } else {
-                crate::NET_WAIT_QUEUE.wait();
+                NET_POLL_WAIT_QUEUE.wait_until(|| {
+                    NET_POLL_EPOCH.load(Ordering::Acquire) != observed_epoch
+                });
             }
         }
     });

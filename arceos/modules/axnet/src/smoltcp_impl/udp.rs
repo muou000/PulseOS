@@ -18,7 +18,7 @@ use spin::RwLock;
 use super::{
     SOCKET_SET, SocketSetWrapper, SocketWaitQueues,
     addr::{UNSPECIFIED_ENDPOINT, from_core_sockaddr, into_core_sockaddr, is_unspecified},
-    block_on_socket_io, deadline_from_ticks, register_wait_queue, socket_deadline,
+    block_on_socket_io, deadline_from_ticks, register_wait_queue, schedule_poll, socket_deadline,
     unregister_wait_queue,
 };
 
@@ -355,7 +355,7 @@ impl UdpSocket {
         }
         // info!("send to addr: {:?}", remote_endpoint);
         self.block_on(IoEvents::OUT, socket_deadline(self.snd_timeout()), || {
-            SOCKET_SET.with_socket_mut::<udp::Socket, _, _>(self.handle, |socket| {
+            let result = SOCKET_SET.with_socket_mut::<udp::Socket, _, _>(self.handle, |socket| {
                 if !socket.is_open() {
                     // not connected
                     ax_err!(NotConnected, "socket send() failed")
@@ -373,7 +373,11 @@ impl UdpSocket {
                     // tx buffer is full
                     Err(AxError::WouldBlock)
                 }
-            })
+            });
+            if result.as_ref().is_ok_and(|len| *len != 0) {
+                schedule_poll();
+            }
+            result
         })
     }
 
