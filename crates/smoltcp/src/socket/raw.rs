@@ -96,7 +96,7 @@ pub struct Socket<'a> {
 
 impl<'a> Socket<'a> {
     pub(crate) fn egress_destination(&self) -> Option<IpAddress> {
-        let (_, packet) = self.tx_buffer.peek().ok()?;
+        let (_, packet) = self.tx_buffer.peek_unmodified().ok()?;
         match IpVersion::of_packet(packet).ok()? {
             #[cfg(feature = "proto-ipv4")]
             IpVersion::Ipv4 => Some(Ipv4Packet::new_checked(packet).ok()?.dst_addr().into()),

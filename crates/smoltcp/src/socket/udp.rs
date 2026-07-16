@@ -131,7 +131,7 @@ pub struct Socket<'a> {
 impl<'a> Socket<'a> {
     pub(crate) fn egress_destination(&self) -> Option<IpAddress> {
         self.tx_buffer
-            .peek()
+            .peek_unmodified()
             .ok()
             .map(|(meta, _)| meta.endpoint.addr)
     }

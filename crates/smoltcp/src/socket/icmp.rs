@@ -130,7 +130,7 @@ pub struct Socket<'a> {
 
 impl<'a> Socket<'a> {
     pub(crate) fn egress_destination(&self) -> Option<IpAddress> {
-        self.tx_buffer.peek().ok().map(|(addr, _)| *addr)
+        self.tx_buffer.peek_unmodified().ok().map(|(addr, _)| *addr)
     }
 
     /// Create an ICMP socket with the given buffers.

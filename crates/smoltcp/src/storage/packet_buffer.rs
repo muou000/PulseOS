@@ -216,7 +216,15 @@ impl<'a, H> PacketBuffer<'a, H> {
     /// its payload as well as its header, or return `Err(Error:Exhausted)` if the buffer is empty.
     ///
     /// This function otherwise behaves identically to [dequeue](#method.dequeue).
-    pub fn peek(&self) -> Result<(&H, &[u8]), Empty> {
+    pub fn peek(&mut self) -> Result<(&H, &[u8]), Empty> {
+        self.dequeue_padding();
+        self.peek_unmodified()
+    }
+
+    /// Peek at the first packet without reclaiming any leading padding.
+    ///
+    /// This is used by read-only socket inspection, where mutating the queue is not possible.
+    pub(crate) fn peek_unmodified(&self) -> Result<(&H, &[u8]), Empty> {
         let mut payload_offset = 0;
         for metadata_offset in 0..self.metadata_ring.len() {
             let metadata = &self.metadata_ring.get_allocated(metadata_offset, 1)[0];
@@ -258,6 +266,18 @@ mod test {
         PacketBuffer::new(vec![PacketMetadata::EMPTY; 4], vec![0u8; 16])
     }
 
+    fn buffer_with_leading_padding() -> PacketBuffer<'static, ()> {
+        let mut buffer = buffer();
+        assert!(buffer.enqueue(6, ()).is_ok());
+        assert!(buffer.enqueue(8, ()).is_ok());
+        assert!(buffer.dequeue().is_ok());
+        buffer.enqueue(4, ()).unwrap().copy_from_slice(b"abcd");
+        assert!(buffer.dequeue().is_ok());
+        assert_eq!(buffer.metadata_ring.len(), 2);
+        assert_eq!(buffer.payload_ring.len(), 6);
+        buffer
+    }
+
     #[test]
     fn test_simple() {
         let mut buffer = buffer();
@@ -281,17 +301,21 @@ mod test {
 
     #[test]
     fn test_padding() {
-        let mut buffer = buffer();
-        assert!(buffer.enqueue(6, ()).is_ok());
-        assert!(buffer.enqueue(8, ()).is_ok());
-        assert!(buffer.dequeue().is_ok());
-        buffer.enqueue(4, ()).unwrap().copy_from_slice(b"abcd");
-        assert_eq!(buffer.metadata_ring.len(), 3);
-        assert!(buffer.dequeue().is_ok());
-
+        let mut buffer = buffer_with_leading_padding();
         assert_eq!(buffer.peek().unwrap().1, &b"abcd"[..]);
+        assert_eq!(buffer.metadata_ring.len(), 1);
+        assert_eq!(buffer.payload_ring.len(), 4);
+        assert!(buffer.enqueue(12, ()).is_ok());
         assert_eq!(buffer.dequeue().unwrap().1, &b"abcd"[..]);
-        assert_eq!(buffer.metadata_ring.len(), 0);
+    }
+
+    #[test]
+    fn test_unmodified_peek_preserves_padding() {
+        let buffer = buffer_with_leading_padding();
+
+        assert_eq!(buffer.peek_unmodified().unwrap().1, &b"abcd"[..]);
+        assert_eq!(buffer.metadata_ring.len(), 2);
+        assert_eq!(buffer.payload_ring.len(), 6);
     }
 
     #[test]
