@@ -2053,13 +2053,19 @@ pub struct EpollRegistration {
 
 pub struct EpollObject {
     pub events: Mutex<BTreeMap<usize, EpollRegistration>>,
+    control_wait_queue: Arc<axtask::WaitQueue>,
 }
 
 impl EpollObject {
     pub fn new() -> Self {
         Self {
             events: Mutex::new(BTreeMap::new()),
+            control_wait_queue: Arc::new(axtask::WaitQueue::new()),
         }
+    }
+
+    pub fn notify_control(&self) {
+        self.control_wait_queue.notify_all(false);
     }
 }
 
@@ -2113,6 +2119,12 @@ impl FdObject for EpollObject {
         _events: axpoll::IoEvents,
         registrations: &mut Vec<PollRegistration>,
     ) -> LinuxResult {
+        let control_wait_queue = self.control_wait_queue.clone();
+        let registration = control_wait_queue.register_owned_waker(cx.waker());
+        registrations.push(PollRegistration::new(move || {
+            control_wait_queue.unregister_waker(registration);
+        }));
+
         let targets: Vec<(Arc<dyn FdObject>, axpoll::IoEvents)> = {
             let monitored = self.events.lock();
             let mut list = Vec::new();

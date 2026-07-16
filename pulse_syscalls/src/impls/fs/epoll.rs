@@ -158,6 +158,8 @@ pub fn sys_epoll_ctl(
         }
         _ => return -LinuxError::EINVAL.code() as isize,
     }
+    drop(events);
+    epoll_obj.notify_control();
     0
 }
 
