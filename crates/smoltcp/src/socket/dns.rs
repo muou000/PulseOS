@@ -145,6 +145,16 @@ pub struct Socket<'a> {
 }
 
 impl<'a> Socket<'a> {
+    pub(crate) fn egress_destination(&self) -> Option<IpAddress> {
+        self.queries.iter().flatten().find_map(|query| {
+            if let State::Pending(pending) = &query.state {
+                self.servers.get(pending.server_idx).copied()
+            } else {
+                None
+            }
+        })
+    }
+
     /// Create a DNS socket.
     ///
     /// # Panics

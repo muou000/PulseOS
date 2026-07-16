@@ -28,6 +28,12 @@ unsafe fn init_boot_page_table() {
             MappingFlags::READ | MappingFlags::WRITE | MappingFlags::DEVICE,
             true,
         );
+        // 0x4000_0000..0x8000_0000, VPWXGD, 1G block
+        BOOT_PT_L1[1] = LA64PTE::new_page(
+            pa!(0x4000_0000),
+            MappingFlags::READ | MappingFlags::WRITE | MappingFlags::DEVICE,
+            true,
+        );
         // 0x8000_0000..0xc000_0000, VPWXGD, 1G block
         BOOT_PT_L1[2] = LA64PTE::new_page(
             pa!(0x8000_0000),

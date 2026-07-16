@@ -1,6 +1,8 @@
 use alloc::{
+    boxed::Box,
     collections::{BTreeMap, VecDeque},
     sync::{Arc, Weak},
+    vec::Vec,
 };
 use memory_addr::{PhysAddr, VirtAddr};
 use axhal::paging::MappingFlags;
@@ -30,6 +32,27 @@ bitflags::bitflags! {
         const CLOEXEC = 1 << 0;
         const NONBLOCK = 1 << 1;
         const PATH = 1 << 2;
+    }
+}
+
+/// Owns one waker registration made while polling an fd.
+pub struct PollRegistration {
+    cancel: Option<Box<dyn FnOnce() + Send + 'static>>,
+}
+
+impl PollRegistration {
+    pub fn new(cancel: impl FnOnce() + Send + 'static) -> Self {
+        Self {
+            cancel: Some(Box::new(cancel)),
+        }
+    }
+}
+
+impl Drop for PollRegistration {
+    fn drop(&mut self) {
+        if let Some(cancel) = self.cancel.take() {
+            cancel();
+        }
     }
 }
 
@@ -82,6 +105,24 @@ pub trait FdObject: Send + Sync {
 
     fn set_nonblocking(&self, _nonblocking: bool) -> LinuxResult {
         Ok(())
+    }
+
+    /// Registers a waker for the requested events.
+    ///
+    /// The default implementation returns [`LinuxError::EOPNOTSUPP`]. This
+    /// ensures that any `FdObject` which does not explicitly support
+    /// waker-based wait (and therefore cannot wake a blocked epoll/poll
+    /// caller) cannot silently break waker-based waiters. Concrete
+    /// implementations that *do* support such waiting (e.g. `PipeObject`,
+    /// `StdinObject`, `EpollObject`, `Socket`, `PidfdObject`) must override
+    /// this method and register the waker on their underlying wait queue.
+    fn register_poll(
+        self: Arc<Self>,
+        _cx: &mut core::task::Context<'_>,
+        _events: axpoll::IoEvents,
+        _registrations: &mut Vec<PollRegistration>,
+    ) -> LinuxResult {
+        Err(LinuxError::EOPNOTSUPP)
     }
 
     fn location(&self) -> Option<Location> {
@@ -143,6 +184,10 @@ pub trait FdObject: Send + Sync {
     fn is_rdhup(&self) -> bool {
         false
     }
+
+    fn poll_set(&self) -> Option<&axpoll::PollSet> {
+        None
+    }
 }
 
 #[derive(Clone)]
@@ -187,7 +232,7 @@ fn metadata_to_stat(metadata: &Metadata) -> stat {
 }
 
 pub fn location_to_stat(location: &Location) -> LinuxResult<stat> {
-    let mut st = metadata_to_stat(&location.metadata()?);
+    let mut st = metadata_to_stat(&axtask::future::block_on(location.metadata())?);
     if let Ok(size) = axfs::cached_file_size(location) {
         st.st_size = size as _;
     }
@@ -567,6 +612,21 @@ impl FdObject for StdinObject {
         }
     }
 
+    fn register_poll(
+        self: Arc<Self>,
+        cx: &mut core::task::Context<'_>,
+        events: axpoll::IoEvents,
+        registrations: &mut Vec<PollRegistration>,
+    ) -> LinuxResult {
+        if events.intersects(axpoll::IoEvents::IN | axpoll::IoEvents::RDHUP) {
+            let registration = STDIN_WAIT_QUEUE.register_owned_waker(cx.waker());
+            registrations.push(PollRegistration::new(move || {
+                STDIN_WAIT_QUEUE.unregister_waker(registration);
+            }));
+        }
+        Ok(())
+    }
+
     fn is_read_open(&self) -> bool {
         true
     }
@@ -673,9 +733,20 @@ impl FdObject for StdoutObject {
 
     fn poll(&self) -> LinuxResult<PollState> {
         Ok(PollState {
-            readable: true,
+            readable: false,
             writable: true,
         })
+    }
+
+    fn register_poll(
+        self: Arc<Self>,
+        _cx: &mut core::task::Context<'_>,
+        _events: axpoll::IoEvents,
+        _registrations: &mut Vec<PollRegistration>,
+    ) -> LinuxResult {
+        // Stdout writability is static. Non-writable event masks can still be
+        // interrupted by a signal, timeout, or a change to the epoll set.
+        Ok(())
     }
 
     fn is_read_open(&self) -> bool {
@@ -792,6 +863,30 @@ impl FdObject for PidfdObject {
             writable: false,
         })
     }
+
+    /// 将当前 waker 注册到目标进程自身的 `pid_exit_event` 等待队列上。
+    ///
+    /// `pidfd` 只关心目标进程进入僵尸态这一事件；只要目标进程在生命周期内，
+    /// `Process::finish_thread_exit` 会在写入 `zombie = true` 之后立即
+    /// `notify_all(false)`，从而唤醒 epoll/poll 等待者。
+    ///
+    /// 如果目标进程已不存在（已被 reap 并从全局表中注销），`poll()` 视为
+    /// 始终可读，调用方不会走到这里；为防御性目的，进程已消失时直接返回
+    /// `Ok(())`，不注册任何 waker，让 poll 端的下一次轮询自行退出。
+    fn register_poll(
+        self: Arc<Self>,
+        cx: &mut core::task::Context<'_>,
+        _events: axpoll::IoEvents,
+        registrations: &mut Vec<PollRegistration>,
+    ) -> LinuxResult {
+        if let Some(process) = crate::task::process_by_pid(self.pid) {
+            let registration = process.pid_exit_event.register_owned_waker(cx.waker());
+            registrations.push(PollRegistration::new(move || {
+                process.pid_exit_event.unregister_waker(registration);
+            }));
+        }
+        Ok(())
+    }
 }
 
 impl FdObject for FileObject {
@@ -814,12 +909,12 @@ impl FdObject for FileObject {
 
     fn read(&self, buf: &mut [u8]) -> LinuxResult<usize> {
         let file = &self.inner;
-        Ok(file.read(buf)?)
+        Ok(axtask::future::block_on(file.read(buf))?)
     }
 
     fn write(&self, buf: &[u8]) -> LinuxResult<usize> {
         let file = &self.inner;
-        Ok(file.write(buf)?)
+        Ok(axtask::future::block_on(file.write(buf))?)
     }
 
     fn stat(&self) -> LinuxResult<stat> {
@@ -857,17 +952,17 @@ impl FdObject for FileObject {
     }
 
     fn read_at(&self, buf: &mut [u8], offset: u64) -> LinuxResult<usize> {
-        Ok(self.inner.read_at(buf, offset)?)
+        Ok(axtask::future::block_on(self.inner.read_at(buf, offset))?)
     }
 
     fn write_at(&self, buf: &[u8], offset: u64) -> LinuxResult<usize> {
         let file = &self.inner;
         if file.flags().contains(AxFileFlags::APPEND) {
             let backend = file.backend()?;
-            let (written, _) = backend.append(buf)?;
+            let (written, _) = axtask::future::block_on(backend.append(buf))?;
             Ok(written)
         } else {
-            Ok(file.write_at(buf, offset)?)
+            Ok(axtask::future::block_on(file.write_at(buf, offset))?)
         }
     }
 
@@ -876,16 +971,16 @@ impl FdObject for FileObject {
     }
 
     fn truncate(&self, len: u64) -> LinuxResult {
-        self.inner.access(AxFileFlags::WRITE)?.set_len(len)?;
+        axtask::future::block_on(self.inner.access(AxFileFlags::WRITE)?.set_len(len))?;
         Ok(())
     }
 
     fn flush(&self) -> LinuxResult {
-        self.inner.sync(false).map_err(Into::into)
+        axtask::future::block_on(self.inner.sync(false)).map_err(Into::into)
     }
 
     fn sync_data(&self) -> LinuxResult {
-        self.inner.sync(true).map_err(Into::into)
+        axtask::future::block_on(self.inner.sync(true)).map_err(Into::into)
     }
 
     fn allocate(&self, mode: u32, offset: u64, len: u64) -> LinuxResult {
@@ -897,7 +992,7 @@ impl FdObject for FileObject {
         }
         let end = offset.checked_add(len).ok_or(LinuxError::EFBIG)?;
 
-        let metadata = self.inner.location().metadata()?;
+        let metadata = axtask::future::block_on(self.inner.location().metadata())?;
         if metadata.node_type != NodeType::RegularFile {
             if metadata.node_type == NodeType::Directory {
                 return Err(LinuxError::EISDIR);
@@ -927,7 +1022,7 @@ impl FdObject for FileObject {
                      to set_len (new_len={})",
                     end
                 );
-                self.inner.access(AxFileFlags::WRITE)?.set_len(end)?;
+                axtask::future::block_on(self.inner.access(AxFileFlags::WRITE)?.set_len(end))?;
             }
         }
 
@@ -960,7 +1055,7 @@ fn parse_cpu_dma_latency_value(buf: &[u8]) -> LinuxResult<i32> {
 }
 
 fn is_cpu_dma_latency_device(location: &Location) -> bool {
-    let Ok(metadata) = location.metadata() else {
+    let Ok(metadata) = axtask::future::block_on(location.metadata()) else {
         return false;
     };
     metadata.node_type == NodeType::CharacterDevice
@@ -1100,11 +1195,11 @@ impl FdObject for DirObject {
     }
 
     fn flush(&self) -> LinuxResult {
-        self.inner.sync(false).map_err(Into::into)
+        axtask::future::block_on(self.inner.sync(false)).map_err(Into::into)
     }
 
     fn sync_data(&self) -> LinuxResult {
-        self.inner.sync(true).map_err(Into::into)
+        axtask::future::block_on(self.inner.sync(true)).map_err(Into::into)
     }
 
     fn is_read_open(&self) -> bool {
@@ -1119,7 +1214,7 @@ impl FdObject for DirObject {
         let mut offset = self.offset.lock();
         let mut written = 0usize;
         let mut break_out = false;
-        let res = self.inner.read_dir(*offset, &mut |name: &str,
+        let res = axtask::future::block_on(self.inner.read_dir(*offset, &mut |name: &str,
                                                      ino: u64,
                                                      node_type: NodeType,
                                                      next_off: u64|
@@ -1163,7 +1258,7 @@ impl FdObject for DirObject {
             written += reclen;
             *offset = next_off;
             true
-        });
+        }));
         if written == 0 {
             res?;
         }
@@ -1906,6 +2001,29 @@ impl FdObject for PipeObject {
         Ok(supported || events == 0)
     }
 
+    fn register_poll(
+        self: Arc<Self>,
+        cx: &mut core::task::Context<'_>,
+        events: axpoll::IoEvents,
+        registrations: &mut Vec<PollRegistration>,
+    ) -> LinuxResult {
+        if self.readable && events.intersects(axpoll::IoEvents::IN | axpoll::IoEvents::RDHUP) {
+            let owner = self.clone();
+            let registration = owner.shared.read_wait_queue.register_owned_waker(cx.waker());
+            registrations.push(PollRegistration::new(move || {
+                owner.shared.read_wait_queue.unregister_waker(registration);
+            }));
+        }
+        if self.writable && events.contains(axpoll::IoEvents::OUT) {
+            let owner = self.clone();
+            let registration = owner.shared.write_wait_queue.register_owned_waker(cx.waker());
+            registrations.push(PollRegistration::new(move || {
+                owner.shared.write_wait_queue.unregister_waker(registration);
+            }));
+        }
+        Ok(())
+    }
+
     fn allocate(&self, _mode: u32, _offset: u64, _len: u64) -> LinuxResult {
         Err(LinuxError::ESPIPE)
     }
@@ -1935,13 +2053,19 @@ pub struct EpollRegistration {
 
 pub struct EpollObject {
     pub events: Mutex<BTreeMap<usize, EpollRegistration>>,
+    control_wait_queue: Arc<axtask::WaitQueue>,
 }
 
 impl EpollObject {
     pub fn new() -> Self {
         Self {
             events: Mutex::new(BTreeMap::new()),
+            control_wait_queue: Arc::new(axtask::WaitQueue::new()),
         }
+    }
+
+    pub fn notify_control(&self) {
+        self.control_wait_queue.notify_all(false);
     }
 }
 
@@ -1988,6 +2112,42 @@ impl FdObject for EpollObject {
             writable: false,
         })
     }
+
+    fn register_poll(
+        self: Arc<Self>,
+        cx: &mut core::task::Context<'_>,
+        _events: axpoll::IoEvents,
+        registrations: &mut Vec<PollRegistration>,
+    ) -> LinuxResult {
+        let control_wait_queue = self.control_wait_queue.clone();
+        let registration = control_wait_queue.register_owned_waker(cx.waker());
+        registrations.push(PollRegistration::new(move || {
+            control_wait_queue.unregister_waker(registration);
+        }));
+
+        let targets: Vec<(Arc<dyn FdObject>, axpoll::IoEvents)> = {
+            let monitored = self.events.lock();
+            let mut list = Vec::new();
+            for (&fd, ev) in monitored.iter() {
+                if let Ok(entry) = crate::task::current_process()?.get_fd_entry(fd) {
+                    let mut target_events = axpoll::IoEvents::empty();
+                    if ev.event.events & EPOLLIN != 0 { target_events |= axpoll::IoEvents::IN; }
+                    if ev.event.events & EPOLLOUT != 0 { target_events |= axpoll::IoEvents::OUT; }
+                    if ev.event.events & EPOLLRDHUP != 0 { target_events |= axpoll::IoEvents::RDHUP; }
+
+                    if !target_events.is_empty() {
+                        list.push((entry.object.clone(), target_events));
+                    }
+                }
+            }
+            list
+        };
+
+        for (object, target_events) in targets {
+            object.register_poll(cx, target_events, registrations)?;
+        }
+        Ok(())
+    }
 }
 
 pub fn stdio_entries() -> [FdEntry; 3] {
@@ -1999,7 +2159,7 @@ pub fn stdio_entries() -> [FdEntry; 3] {
 }
 
 fn is_ns_location(location: &Location) -> Option<(u64, u32)> {
-    let metadata = location.metadata().ok()?;
+    let metadata = axtask::future::block_on(location.metadata()).ok()?;
     let ino = metadata.inode;
     if ino >= axfs::fs::procfs::PID_INODE_START {
         let offset = ino - axfs::fs::procfs::PID_INODE_START;
@@ -2206,7 +2366,7 @@ impl FdTable {
                             return true;
                         }
                     } else if let Some(loc) = entry.object.location() {
-                        if let Ok(meta) = loc.metadata() {
+                        if let Ok(meta) = axtask::future::block_on(loc.metadata()) {
                             if meta.device == device && meta.inode == inode {
                                 return true;
                             }
@@ -2227,7 +2387,7 @@ impl FdTable {
                             return true;
                         }
                     } else if let Some(loc) = entry.object.location() {
-                        if let Ok(meta) = loc.metadata() {
+                        if let Ok(meta) = axtask::future::block_on(loc.metadata()) {
                             if meta.device == device && meta.inode == inode {
                                 return true;
                             }

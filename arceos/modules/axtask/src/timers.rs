@@ -6,7 +6,7 @@ use timer_list::{TimeValue, TimerEvent, TimerList};
 
 use axhal::time::monotonic_time;
 
-use crate::{AxTaskRef, AxTaskWeak, select_run_queue};
+use crate::{AxTaskRef, AxTaskWeak, select_wake_run_queue};
 
 static TIMER_TICKET_ID: AtomicU64 = AtomicU64::new(1);
 
@@ -32,7 +32,7 @@ impl TimerEvent for AxTimerEvent {
                     if task.timer_ticket() != ticket_id {
                         return;
                     }
-                    select_run_queue::<NoOp>(&task).unblock_task(task, true);
+                    select_wake_run_queue::<NoOp>(&task).unblock_task(task, true);
                 }
             }
             Self::Generic { callback } => {
@@ -54,7 +54,6 @@ pub(crate) fn reprogram_timer_from_tick() {
     reprogram_timer_internal(true);
 }
 
-
 fn reprogram_timer_internal(from_tick: bool) {
     let now_ns = axhal::time::monotonic_time_nanos();
     let mut tick_deadline = unsafe { NEXT_TICK_DEADLINE.read_current_raw() };
@@ -70,15 +69,20 @@ fn reprogram_timer_internal(from_tick: bool) {
 
     let mut final_deadline = tick_deadline;
 
-    if let Some(event_deadline) = unsafe {
+    let task_event_deadline = unsafe {
         let tl = TIMER_LIST.current_ref_raw();
         if tl.is_inited() {
             tl.next_deadline()
         } else {
             None
         }
-    } {
-        let event_mono_ns = event_deadline.as_nanos() as u64;
+    };
+    let future_deadline = crate::future::next_timer_deadline();
+    for event_deadline in [task_event_deadline, future_deadline]
+        .into_iter()
+        .flatten()
+    {
+        let event_mono_ns = event_deadline.as_nanos().min(u64::MAX as u128) as u64;
         if event_mono_ns < final_deadline {
             final_deadline = event_mono_ns;
         }
@@ -93,13 +97,18 @@ fn reprogram_timer_internal(from_tick: bool) {
 }
 
 pub fn next_deadline() -> Option<TimeValue> {
-    unsafe {
+    let task_event_deadline = unsafe {
         let tl = TIMER_LIST.current_ref_raw();
         if tl.is_inited() {
             tl.next_deadline()
         } else {
             None
         }
+    };
+    match (task_event_deadline, crate::future::next_timer_deadline()) {
+        (Some(a), Some(b)) => Some(core::cmp::min(a, b)),
+        (Some(deadline), None) | (None, Some(deadline)) => Some(deadline),
+        (None, None) => None,
     }
 }
 

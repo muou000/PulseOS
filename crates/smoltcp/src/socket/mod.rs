@@ -72,6 +72,23 @@ pub enum Socket<'a> {
 }
 
 impl<'a> Socket<'a> {
+    pub(crate) fn egress_destination(&self) -> Option<crate::wire::IpAddress> {
+        match self {
+            #[cfg(feature = "socket-raw")]
+            Socket::Raw(s) => s.egress_destination(),
+            #[cfg(feature = "socket-icmp")]
+            Socket::Icmp(s) => s.egress_destination(),
+            #[cfg(feature = "socket-udp")]
+            Socket::Udp(s) => s.egress_destination(),
+            #[cfg(feature = "socket-tcp")]
+            Socket::Tcp(s) => s.egress_destination(),
+            #[cfg(feature = "socket-dhcpv4")]
+            Socket::Dhcpv4(s) => s.egress_destination(),
+            #[cfg(feature = "socket-dns")]
+            Socket::Dns(s) => s.egress_destination(),
+        }
+    }
+
     pub(crate) fn poll_at(&self, cx: &mut Context) -> PollAt {
         match self {
             #[cfg(feature = "socket-raw")]

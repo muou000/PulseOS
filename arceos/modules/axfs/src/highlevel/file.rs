@@ -5,8 +5,13 @@ use alloc::{
     vec::Vec,
 };
 #[cfg(feature = "times")]
-use core::sync::atomic::{AtomicU8, Ordering};
-use core::{num::NonZeroUsize, ops::Range, task::Context};
+use core::sync::atomic::AtomicU8;
+use core::{
+    num::NonZeroUsize,
+    ops::Range,
+    sync::atomic::{AtomicU64, Ordering},
+    task::Context,
+};
 
 use axalloc::global_allocator;
 use axfs_ng_vfs::{
@@ -220,7 +225,7 @@ impl OpenOptions {
         self
     }
 
-    fn _open(&self, loc: Location) -> VfsResult<OpenResult> {
+    async fn _open(&self, loc: Location) -> VfsResult<OpenResult> {
         let flags = self.to_flags()?;
 
         if loc.is_dir() && (self.create || self.create_new || flags.contains(FileFlags::WRITE)) {
@@ -233,8 +238,8 @@ impl OpenOptions {
             }
             loc.check_is_dir()?;
         }
-        if self.truncate && loc.metadata()?.node_type == NodeType::RegularFile {
-            loc.entry().as_file()?.set_len(0)?;
+        if self.truncate && loc.metadata().await?.node_type == NodeType::RegularFile {
+            loc.entry().as_file()?.set_len(0).await?;
         }
 
         Ok(if loc.is_dir() {
@@ -242,7 +247,7 @@ impl OpenOptions {
         } else {
             // TODO(mivik): is this correct?
             let non_cacheable_type = matches!(
-                loc.metadata()?.node_type,
+                loc.metadata().await?.node_type,
                 NodeType::CharacterDevice
                     | NodeType::BlockDevice
                     | NodeType::Fifo
@@ -253,6 +258,7 @@ impl OpenOptions {
                 || self.path
                 || self.direct
                 || loc.flags().contains(NodeFlags::NON_CACHEABLE);
+
             let backend = if !direct || loc.flags().contains(NodeFlags::ALWAYS_CACHE) {
                 FileBackend::new_cached(loc)
             } else {
@@ -262,19 +268,19 @@ impl OpenOptions {
         })
     }
 
-    pub fn open_loc(&self, loc: Location) -> VfsResult<OpenResult> {
+    pub async fn open_loc(&self, loc: Location) -> VfsResult<OpenResult> {
         if !self.is_valid() {
             return Err(VfsError::InvalidInput);
         }
-        self._open(loc)
+        self._open(loc).await
     }
 
-    pub fn open(&self, context: &FsContext, path: impl AsRef<Path>) -> VfsResult<OpenResult> {
+    pub async fn open(&self, context: &FsContext, path: impl AsRef<Path>) -> VfsResult<OpenResult> {
         if !self.is_valid() {
             return Err(VfsError::InvalidInput);
         }
 
-        let loc = match context.resolve_parent(path.as_ref()) {
+        let loc = match context.resolve_parent(path.as_ref()).await {
             Ok((parent, name)) => {
                 let mut loc = parent.open_file(
                     &name,
@@ -285,11 +291,11 @@ impl OpenOptions {
                         permission: NodePermission::from_bits_truncate(self.mode as _),
                         user: self.user.or(context.credentials),
                     },
-                )?;
+                ).await?;
                 if !self.no_follow {
                     loc = context
                         .with_current_dir(parent)?
-                        .try_resolve_symlink(loc, &mut 0)?;
+                        .try_resolve_symlink(loc, &mut 0).await?;
                 }
                 loc
             }
@@ -299,7 +305,7 @@ impl OpenOptions {
             }
             Err(err) => return Err(err),
         };
-        self._open(loc)
+        self._open(loc).await
     }
 
     pub(crate) fn to_flags(&self) -> VfsResult<FileFlags> {
@@ -382,6 +388,7 @@ impl PageCache {
     pub fn data(&mut self) -> &mut [u8] {
         unsafe { core::slice::from_raw_parts_mut(self.addr.as_mut_ptr(), PAGE_SIZE) }
     }
+
 }
 
 impl Drop for PageCache {
@@ -414,6 +421,7 @@ struct CachedFileShared {
     evict_listeners: Mutex<Vec<Arc<EvictListener>>>,
     io_lock: RwLock<()>,
     size: SpinMutex<u64>,
+    cache_generation: AtomicU64,
     last_read_pn: core::sync::atomic::AtomicU32,
     is_flushing: core::sync::atomic::AtomicBool,
 }
@@ -429,6 +437,7 @@ impl CachedFileShared {
             evict_listeners: Mutex::new(Vec::new()),
             io_lock: RwLock::new(()),
             size: SpinMutex::new(size),
+            cache_generation: AtomicU64::new(0),
             last_read_pn: core::sync::atomic::AtomicU32::new(u32::MAX),
             is_flushing: core::sync::atomic::AtomicBool::new(false),
         }
@@ -448,11 +457,51 @@ impl CachedFileShared {
             let page_start = pn as u64 * PAGE_SIZE as u64;
             let len = (cached_size.saturating_sub(page_start)).min(PAGE_SIZE as u64) as usize;
             if len > 0 {
-                file.write_at(&page.data()[..len], page_start)?;
+                axtask::future::block_on(file.write_at(&page.data()[..len], page_start))?;
             }
             page.dirty = false;
         }
         Ok(())
+    }
+
+    async fn evict_lru_async(
+        &self,
+        file: &FileNode,
+    ) -> VfsResult<Option<(u32, PageCache)>> {
+        let writeback = {
+            let mut cache = self.page_cache.lock();
+            let Some((&pn, page)) = cache.peek_lru() else {
+                return Ok(None);
+            };
+            if !page.dirty {
+                return Ok(cache.pop_lru());
+            }
+
+            let page_start = pn as u64 * PAGE_SIZE as u64;
+            let len = (*self.size.lock())
+                .saturating_sub(page_start)
+                .min(PAGE_SIZE as u64) as usize;
+            let page = cache.get_mut(&pn).ok_or(VfsError::Io)?;
+            (pn, page_start, page.data()[..len].to_vec())
+        };
+
+        let (pn, page_start, data) = writeback;
+        if !data.is_empty() {
+            let written = file.write_at(&data, page_start).await?;
+            if written != data.len() {
+                return Err(VfsError::Io);
+            }
+        }
+
+        // The page stays dirty and resident until writeback succeeds. If this
+        // future is cancelled, the only copy of the dirty data is not lost.
+        let mut page = self
+            .page_cache
+            .lock()
+            .pop(&pn)
+            .ok_or(VfsError::Io)?;
+        page.dirty = false;
+        Ok(Some((pn, page)))
     }
 
     fn flush_dirty_pages_locked(
@@ -499,7 +548,7 @@ impl CachedFileShared {
                     }
                 }
 
-                let written = file.write_at(&merged_buf, page_start)?;
+                let written = axtask::future::block_on(file.write_at(&merged_buf, page_start))?;
                 if written == total_len {
                     for k in i..=j {
                         if let Some(page) = guard.get_mut(&dirty_pns[k]) {
@@ -531,8 +580,8 @@ impl CachedFileShared {
 
     fn flush_dirty_pages(&self, file: &FileNode) -> VfsResult<()> {
         let file_len = *self.size.lock();
-        if file.len()? < file_len {
-            file.set_len(file_len)?;
+        if axtask::future::block_on(file.len())? < file_len {
+            axtask::future::block_on(file.set_len(file_len))?;
         }
         let mut guard = self.page_cache.lock();
         Self::flush_dirty_pages_locked(file_len, file, &mut guard)
@@ -568,6 +617,9 @@ impl CachedFileShared {
     }
 
     fn discard_all_pages(&self, file: &FileNode, write_back_dirty: bool) -> VfsResult<()> {
+        // Callers hold the exclusive I/O lock. In-flight cache fills use this
+        // generation to reject data read before the invalidation.
+        self.cache_generation.fetch_add(1, Ordering::AcqRel);
         let mut guard = self.page_cache.lock();
         while let Some((pn, mut page)) = guard.pop_lru() {
             if page.dirty && write_back_dirty {
@@ -620,7 +672,7 @@ fn shared_file_state(location: &Location) -> Arc<CachedFileShared> {
         }
     }
 
-    let size = location.len().unwrap_or(0);
+    let size = axtask::future::block_on(location.len()).unwrap_or(0);
     let state = Arc::new(CachedFileShared::new(in_memory, size));
 
     let mut registry = FILE_SHARED_STATES.lock();
@@ -643,7 +695,7 @@ pub fn cached_file_size(location: &Location) -> VfsResult<u64> {
     if let Some(size) = cached_size {
         Ok(size)
     } else {
-        location.len()
+        axtask::future::block_on(location.len())
     }
 }
 
@@ -673,9 +725,9 @@ impl Drop for CachedFile {
         if Arc::strong_count(&self.shared) == 1 {
             if let Ok(file) = self.inner.entry().as_file() {
                 let cached_size = *self.shared.size.lock();
-                if let Ok(current_size) = file.len() {
+                if let Ok(current_size) = axtask::future::block_on(file.len()) {
                     if cached_size != current_size {
-                        let _ = file.set_len(cached_size);
+                        let _ = axtask::future::block_on(file.set_len(cached_size));
                     }
                 }
                 if let Err(err) = self.flush_dirty_pages(file) {
@@ -761,7 +813,7 @@ impl CachedFile {
             let page_start = pn as u64 * PAGE_SIZE as u64;
             let len = (cached_size.saturating_sub(page_start)).min(PAGE_SIZE as u64) as usize;
             if len > 0 {
-                file.write_at(&page.data()[..len], page_start)?;
+                axtask::future::block_on(file.write_at(&page.data()[..len], page_start))?;
             }
             page.dirty = false;
         }
@@ -840,13 +892,79 @@ impl CachedFile {
                 page.data().fill(0);
             }
         } else if !skip_read {
-            let read_len = file.read_at(page.data(), pn as u64 * PAGE_SIZE as u64)?;
+            let read_len = axtask::future::block_on(file.read_at(page.data(), pn as u64 * PAGE_SIZE as u64))?;
             if read_len < PAGE_SIZE {
                 page.data()[read_len..].fill(0);
             }
         }
         cache.put(pn, page);
         Ok((cache.get_mut(&pn).unwrap(), evicted))
+    }
+
+    async fn ensure_page_async(&self, file: &FileNode, pn: u32) -> VfsResult<()> {
+        loop {
+            let (generation, file_len) = {
+                let _io_guard = self.shared.io_lock.read();
+                if self.shared.page_cache.lock().contains(&pn) {
+                    return Ok(());
+                }
+                (
+                    self.shared.cache_generation.load(Ordering::Acquire),
+                    *self.shared.size.lock(),
+                )
+            };
+
+            let skip_read = pn as u64 * PAGE_SIZE as u64 >= file_len;
+            let mut new_page = PageCache::new(!skip_read)?;
+            if self.in_memory {
+                if !skip_read {
+                    new_page.data().fill(0);
+                }
+            } else if !skip_read {
+                // No page-cache or spin-RwLock guard is held while the backend
+                // future waits for the block-device interrupt.
+                let read_len = file
+                    .read_at(new_page.data(), pn as u64 * PAGE_SIZE as u64)
+                    .await?;
+                if read_len < PAGE_SIZE {
+                    new_page.data()[read_len..].fill(0);
+                }
+            }
+
+            // Direct writes hold the exclusive side while changing the backend
+            // and invalidating the cache. Validate and publish under the shared
+            // side so a stale fill can never be inserted after that invalidation.
+            let io_guard = self.shared.io_lock.write();
+            if self.shared.cache_generation.load(Ordering::Acquire) != generation {
+                continue;
+            }
+
+            let mut cache = self.shared.page_cache.lock();
+            if cache.contains(&pn) {
+                return Ok(());
+            }
+            let cache_full = cache.len() == cache.cap().get();
+            drop(cache);
+
+            let evicted = if cache_full {
+                self.shared.evict_lru_async(file).await?
+            } else {
+                None
+            };
+
+            let mut cache = self.shared.page_cache.lock();
+            cache.put(pn, new_page);
+            drop(cache);
+            drop(io_guard);
+
+            if let Some((evicted_pn, page)) = evicted {
+                let listeners = self.shared.evict_listeners_snapshot();
+                for listener in listeners.iter() {
+                    (listener.listener)(evicted_pn, &page);
+                }
+            }
+            return Ok(());
+        }
     }
 
     pub fn with_page<R>(&self, pn: u32, f: impl FnOnce(Option<&mut PageCache>) -> R) -> R {
@@ -897,23 +1015,48 @@ impl CachedFile {
         Ok(initial)
     }
 
-    pub fn read_at(&self, mut dst: impl Write + IoBufMut, offset: u64) -> VfsResult<usize> {
-        let _guard = self.shared.io_lock.read();
+    async fn read_at_async(&self, mut dst: impl Write + IoBufMut, offset: u64) -> VfsResult<usize> {
         let len = *self.shared.size.lock();
         let end = (offset + dst.remaining_mut() as u64).min(len);
         if end <= offset {
             return Ok(0);
         }
-        self.with_pages(
-            offset..end,
-            false,
-            |_| Ok(0),
-            |read, page, range| {
-                let len = range.end - range.start;
-                dst.write(&page.data()[range.start..range.end])?;
-                Ok(read + len)
-            },
-        )
+        let file = self.inner.entry().as_file()?;
+        let start_page = (offset / PAGE_SIZE as u64) as u32;
+        let end_page = end.div_ceil(PAGE_SIZE as u64) as u32;
+        let mut page_offset = (offset % PAGE_SIZE as u64) as usize;
+        let mut read = 0;
+        for pn in start_page..end_page {
+            let page_start = pn as u64 * PAGE_SIZE as u64;
+            let page_end = (end - page_start).min(PAGE_SIZE as u64) as usize;
+            loop {
+                let hit = {
+                    let _io_guard = self.shared.io_lock.read();
+                    let mut cache = self.shared.page_cache.lock();
+                    if let Some(page) = cache.get_mut(&pn) {
+                        let copied = page_end - page_offset;
+                        dst.write(&page.data()[page_offset..page_end])?;
+                        read += copied;
+                        true
+                    } else {
+                        false
+                    }
+                };
+                if hit {
+                    break;
+                }
+
+                // The page can be invalidated after a fill returns but before
+                // this task reacquires the read lock, so retry the lookup.
+                self.ensure_page_async(file, pn).await?;
+            }
+            page_offset = 0;
+        }
+        Ok(read)
+    }
+
+    pub fn read_at(&self, dst: impl Write + IoBufMut, offset: u64) -> VfsResult<usize> {
+        axtask::future::block_on(self.read_at_async(dst, offset))
     }
 
     fn write_at_locked(&self, mut buf: impl Read + IoBuf, offset: u64) -> VfsResult<usize> {
@@ -955,6 +1098,9 @@ impl CachedFile {
         let _guard = self.shared.io_lock.write();
         let file = self.inner.entry().as_file()?;
         let old_len = *self.shared.size.lock();
+        if old_len != len {
+            self.shared.cache_generation.fetch_add(1, Ordering::AcqRel);
+        }
         *self.shared.size.lock() = len;
 
         let old_last_page = (old_len / PAGE_SIZE as u64) as u32;
@@ -995,11 +1141,11 @@ impl CachedFile {
         let _guard = self.shared.io_lock.write();
         let file = self.inner.entry().as_file()?;
         let cached_size = *self.shared.size.lock();
-        if file.len()? != cached_size {
-            file.set_len(cached_size)?;
+        if axtask::future::block_on(file.len())? != cached_size {
+            axtask::future::block_on(file.set_len(cached_size))?;
         }
         self.flush_dirty_pages(file)?;
-        file.sync(data_only)?;
+        axtask::future::block_on(file.sync(data_only))?;
         Ok(())
     }
 
@@ -1046,32 +1192,28 @@ impl FileBackend {
         Self::Cached(CachedFile::get_or_create(location))
     }
 
-    pub fn read_at(&self, mut dst: impl Write + IoBufMut, mut offset: u64) -> VfsResult<usize> {
+    pub async fn read_at(&self, mut dst: impl Write + IoBufMut, mut offset: u64) -> VfsResult<usize> {
         match self {
             Self::Cached(cached) => {
-                cached.read_at(dst, offset)
+                cached.read_at_async(dst, offset).await
             }
             Self::Direct(loc) => {
-                if loc.flags().contains(NodeFlags::STREAM) {
-                    dst.read_from(&mut axio::read_fn(|buf| {
-                        loc.entry().as_file()?.read_at(buf, offset).inspect(|read| {
-                            offset += *read as u64;
-                        })
-                    }))
-                } else {
+                let file = loc.entry().as_file()?;
+                if !loc.flags().contains(NodeFlags::STREAM) {
                     let shared = shared_file_state(loc);
-                    let _guard = shared.io_lock.read();
-                    dst.read_from(&mut axio::read_fn(|buf| {
-                        loc.entry().as_file()?.read_at(buf, offset).inspect(|read| {
-                            offset += *read as u64;
-                        })
-                    }))
+                    // Synchronize cache bookkeeping, but never retain the spin
+                    // RwLock while awaiting the filesystem backend.
+                    drop(shared.io_lock.read());
                 }
+                // Keep the adapter bounded for very large vectored/user buffers.
+                let mut tmp = alloc::vec![0u8; dst.remaining_mut().min(64 * 1024)];
+                let read = file.read_at(&mut tmp, offset).await?;
+                dst.write(&tmp[..read])
             }
         }
     }
 
-    pub fn write_at(&self, mut src: impl Read + IoBuf, mut offset: u64) -> VfsResult<usize> {
+    pub async fn write_at(&self, mut src: impl Read + IoBuf, mut offset: u64) -> VfsResult<usize> {
         match self {
             Self::Cached(cached) => {
                 cached.write_at(src, offset)
@@ -1080,7 +1222,7 @@ impl FileBackend {
                 let file = loc.entry().as_file()?;
                 if loc.flags().contains(NodeFlags::STREAM) {
                     src.write_to(&mut axio::write_fn(|buf| {
-                        file.write_at(buf, offset).inspect(|written| {
+                        axtask::future::block_on(file.write_at(buf, offset)).inspect(|written| {
                             offset += *written as u64;
                         })
                     }))
@@ -1088,12 +1230,12 @@ impl FileBackend {
                     let shared = shared_file_state(loc);
                     let _guard = shared.io_lock.write();
                     let cached_size = *shared.size.lock();
-                    if file.len()? != cached_size {
-                        file.set_len(cached_size)?;
+                    if axtask::future::block_on(file.len())? != cached_size {
+                        axtask::future::block_on(file.set_len(cached_size))?;
                     }
                     shared.flush_dirty_pages(file)?;
                     let result = src.write_to(&mut axio::write_fn(|buf| {
-                        file.write_at(buf, offset).inspect(|written| {
+                        axtask::future::block_on(file.write_at(buf, offset)).inspect(|written| {
                             offset += *written as u64;
                         })
                     }));
@@ -1115,7 +1257,7 @@ impl FileBackend {
     }
 
 
-    pub fn append(&self, mut src: impl Read + IoBuf) -> VfsResult<(usize, u64)> {
+    pub async fn append(&self, mut src: impl Read + IoBuf) -> VfsResult<(usize, u64)> {
         match self {
             Self::Cached(cached) => cached.append(src),
             Self::Direct(loc) => {
@@ -1123,13 +1265,13 @@ impl FileBackend {
                 let _guard = shared.io_lock.write();
                 let file = loc.entry().as_file()?;
                 let cached_size = *shared.size.lock();
-                if file.len()? != cached_size {
-                    file.set_len(cached_size)?;
+                if axtask::future::block_on(file.len())? != cached_size {
+                    axtask::future::block_on(file.set_len(cached_size))?;
                 }
                 shared.flush_dirty_pages(file)?;
                 let mut end = 0;
                 let result = src.write_to(&mut axio::write_fn(|buf| {
-                    file.append(buf).map(|(n, offset)| {
+                    axtask::future::block_on(file.append(buf)).map(|(n, offset)| {
                         end = offset;
                         n
                     })
@@ -1155,7 +1297,7 @@ impl FileBackend {
         }
     }
 
-    pub fn sync(&self, data_only: bool) -> VfsResult<()> {
+    pub async fn sync(&self, data_only: bool) -> VfsResult<()> {
         match self {
             Self::Cached(cached) => cached.sync(data_only),
             Self::Direct(loc) => {
@@ -1163,16 +1305,16 @@ impl FileBackend {
                 let _guard = shared.io_lock.write();
                 let file = loc.entry().as_file()?;
                 let cached_size = *shared.size.lock();
-                if file.len()? != cached_size {
-                    file.set_len(cached_size)?;
+                if axtask::future::block_on(file.len())? != cached_size {
+                    axtask::future::block_on(file.set_len(cached_size))?;
                 }
                 shared.flush_dirty_pages(file)?;
-                file.sync(data_only)
+                axtask::future::block_on(file.sync(data_only))
             }
         }
     }
 
-    pub fn set_len(&self, len: u64) -> VfsResult<()> {
+    pub async fn set_len(&self, len: u64) -> VfsResult<()> {
         match self {
             Self::Cached(cached) => cached.set_len(len),
             Self::Direct(loc) => {
@@ -1181,7 +1323,7 @@ impl FileBackend {
                 let file = loc.entry().as_file()?;
                 *shared.size.lock() = len;
                 shared.flush_dirty_pages(file)?;
-                let result = file.set_len(len);
+                let result = axtask::future::block_on(file.set_len(len));
                 let invalidate = shared.discard_all_pages(file, false);
                 match (result, invalidate) {
                     (Ok(()), Ok(())) => Ok(()),
@@ -1223,19 +1365,19 @@ impl File {
         }
     }
 
-    pub fn open(context: &FsContext, path: impl AsRef<Path>) -> VfsResult<Self> {
+    pub async fn open(context: &FsContext, path: impl AsRef<Path>) -> VfsResult<Self> {
         OpenOptions::new()
             .read(true)
-            .open(context, path.as_ref())
+            .open(context, path.as_ref()).await
             .and_then(OpenResult::into_file)
     }
 
-    pub fn create(context: &FsContext, path: impl AsRef<Path>) -> VfsResult<Self> {
+    pub async fn create(context: &FsContext, path: impl AsRef<Path>) -> VfsResult<Self> {
         OpenOptions::new()
             .write(true)
             .create(true)
             .truncate(true)
-            .open(context, path.as_ref())
+            .open(context, path.as_ref()).await
             .and_then(OpenResult::into_file)
     }
 
@@ -1266,7 +1408,7 @@ impl File {
 
     pub fn is_direct_regular_file(&self) -> bool {
         if matches!(self.inner, FileBackend::Direct(_)) {
-            if let Ok(metadata) = self.inner.location().metadata() {
+            if let Ok(metadata) = axtask::future::block_on(self.inner.location().metadata()) {
                 if metadata.node_type == NodeType::RegularFile {
                     let fs_name = self.inner.location().filesystem().name();
                     return fs_name != "proc" && fs_name != "devfs" && fs_name != "tmpfs";
@@ -1277,44 +1419,44 @@ impl File {
     }
 
     pub fn block_size(&self) -> u64 {
-        self.inner.location().metadata().map(|m| m.block_size).unwrap_or(512)
+        axtask::future::block_on(self.inner.location().metadata()).map(|m| m.block_size).unwrap_or(512)
     }
 
     /// Reads a number of bytes starting from a given offset.
-    pub fn read_at(&self, dst: impl Write + IoBufMut, offset: u64) -> VfsResult<usize> {
-        self.access(FileFlags::READ)?.read_at(dst, offset)
+    pub async fn read_at(&self, dst: impl Write + IoBufMut, offset: u64) -> VfsResult<usize> {
+        self.access(FileFlags::READ)?.read_at(dst, offset).await
     }
 
     /// Writes a number of bytes starting from a given offset.
-    pub fn write_at(&self, src: impl Read + IoBuf, offset: u64) -> VfsResult<usize> {
-        self.access(FileFlags::WRITE)?.write_at(src, offset)
+    pub async fn write_at(&self, src: impl Read + IoBuf, offset: u64) -> VfsResult<usize> {
+        self.access(FileFlags::WRITE)?.write_at(src, offset).await
     }
 
     /// Attempts to sync OS-internal file content and metadata to disk.
     ///
     /// If `data_only` is `true`, only the file data is synced, not the
     /// metadata.
-    pub fn sync(&self, data_only: bool) -> VfsResult<()> {
+    pub async fn sync(&self, data_only: bool) -> VfsResult<()> {
         self.access(FileFlags::empty())?;
-        self.inner.sync(data_only)
+        self.inner.sync(data_only).await
     }
 
-    pub fn read(&self, dst: impl Write + IoBufMut) -> axio::Result<usize> {
+    pub async fn read(&self, dst: impl Write + IoBufMut) -> axio::Result<usize> {
         #[cfg(feature = "times")]
         {
             self.access_flags.fetch_or(1, Ordering::AcqRel);
         }
         if let Some(pos) = self.position.as_ref() {
             let mut pos = pos.lock();
-            self.read_at(dst, *pos).inspect(|n| {
+            self.read_at(dst, *pos).await.inspect(|n| {
                 *pos += *n as u64;
             })
         } else {
-            self.read_at(dst, 0)
+            self.read_at(dst, 0).await
         }
     }
 
-    pub fn write(&self, src: impl Read + IoBuf) -> axio::Result<usize> {
+    pub async fn write(&self, src: impl Read + IoBuf) -> axio::Result<usize> {
         #[cfg(feature = "times")]
         {
             self.access_flags.fetch_or(3, Ordering::AcqRel);
@@ -1322,22 +1464,22 @@ impl File {
         if let Some(pos) = self.position.as_ref() {
             let mut pos = pos.lock();
             if let Ok(f) = self.access(FileFlags::APPEND) {
-                f.append(src).map(|(written, new_size)| {
+                f.append(src).await.map(|(written, new_size)| {
                     *pos = new_size;
                     written
                 })
             } else {
-                self.write_at(src, *pos).inspect(|n| {
+                self.write_at(src, *pos).await.inspect(|n| {
                     *pos += *n as u64;
                 })
             }
         } else {
-            self.write_at(src, 0)
+            self.write_at(src, 0).await
         }
     }
 
-    pub fn flush(&self) -> axio::Result {
-        self.sync(false)
+    pub async fn flush(&self) -> axio::Result {
+        self.sync(false).await
     }
 
     pub fn position(&self) -> Option<u64> {
@@ -1361,7 +1503,7 @@ impl File {
             update.mtime = Some(now);
         }
 
-        if let Err(err) = self.inner.location().update_metadata(update) {
+        if let Err(err) = axtask::future::block_on(self.inner.location().update_metadata(update)) {
             warn!("Failed to update file times on drop: {err:?}");
         }
     }
@@ -1371,23 +1513,23 @@ impl Drop for File {
     fn drop(&mut self) {
         #[cfg(feature = "times")]
         self.update_timestamps_on_drop();
-        let _ = self.sync(false);
+        let _ = axtask::future::block_on(self.sync(false));
     }
 }
 
 impl Read for &File {
     fn read(&mut self, buf: &mut [u8]) -> axio::Result<usize> {
-        (*self).read(buf)
+        axtask::future::block_on((*self).read(buf))
     }
 }
 
 impl Write for &File {
     fn write(&mut self, buf: &[u8]) -> axio::Result<usize> {
-        (*self).write(buf)
+        axtask::future::block_on((*self).write(buf))
     }
 
     fn flush(&mut self) -> axio::Result {
-        (*self).flush()
+        axtask::future::block_on((*self).flush())
     }
 }
 

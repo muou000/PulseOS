@@ -337,7 +337,7 @@ pub fn sys_getrandom(buf: usize, buflen: usize, flags: usize) -> isize {
     } else {
         "/dev/urandom"
     };
-    let tmp = match FS_CONTEXT.lock().read_prefix(path, buflen) {
+    let tmp = match axtask::future::block_on(FS_CONTEXT.lock().read_prefix(path, buflen)) {
         Ok(buf) => buf,
         Err(e) => return -e.code() as isize,
     };

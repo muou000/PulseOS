@@ -17,10 +17,10 @@ axalloc = { workspace = true }
 axconfig = { workspace = true }
 axfs = { workspace = true }
 
-log = "=0.4.21"
-axerrno = "0.2"
-lazyinit = "0.2"
-memory_addr = "0.4"
-kspin = "0.1"
-spin = { workspace = true }
-memory_set = "0.4"
+log.workspace = true
+axerrno.workspace = true
+lazyinit.workspace = true
+memory_addr.workspace = true
+kspin.workspace = true
+spin.workspace = true
+memory_set.workspace = true

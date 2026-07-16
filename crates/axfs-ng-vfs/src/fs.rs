@@ -1,4 +1,6 @@
 use alloc::sync::Arc;
+use alloc::boxed::Box;
+use async_trait::async_trait;
 
 use crate::{DirEntry, VfsResult};
 
@@ -18,6 +20,7 @@ pub struct StatFs {
 }
 
 /// Trait for filesystem operations
+#[async_trait]
 pub trait FilesystemOps: Send + Sync {
     /// Gets the name of the filesystem
     fn name(&self) -> &str;
@@ -29,7 +32,7 @@ pub trait FilesystemOps: Send + Sync {
     fn stat(&self) -> VfsResult<StatFs>;
 
     /// Flushes the filesystem, ensuring all data is written to disk
-    fn flush(&self) -> VfsResult<()> {
+    async fn flush(&self) -> VfsResult<()> {
         Ok(())
     }
 }
@@ -53,8 +56,8 @@ impl Filesystem {
         self.ops.stat()
     }
 
-    pub fn flush(&self) -> VfsResult<()> {
-        self.ops.flush()
+    pub async fn flush(&self) -> VfsResult<()> {
+        self.ops.flush().await
     }
 }
 

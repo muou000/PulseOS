@@ -7,6 +7,7 @@ use alloc::{
     sync::{Arc, Weak},
     vec,
     vec::Vec,
+    boxed::Box,
 };
 use bitflags::bitflags;
 use core::{
@@ -16,11 +17,11 @@ use core::{
     task::Context,
 };
 use smallvec::SmallVec;
+use async_trait::async_trait;
 
 use axpoll::{IoEvents, Pollable};
 pub use dir::*;
 pub use file::*;
-use inherit_methods_macro::inherit_methods;
 
 use crate::{
     FilesystemOps, Metadata, MetadataUpdate, Mutex, MutexGuard, NodeType, VfsError, VfsResult,
@@ -59,26 +60,27 @@ bitflags! {
 
 /// Filesystem node operationss
 #[allow(clippy::len_without_is_empty)]
+#[async_trait]
 pub trait NodeOps: Send + Sync + 'static {
     /// Gets the inode number of the node.
     fn inode(&self) -> u64;
 
     /// Gets the metadata of the node.
-    fn metadata(&self) -> VfsResult<Metadata>;
+    async fn metadata(&self) -> VfsResult<Metadata>;
 
     /// Updates the metadata of the node.
-    fn update_metadata(&self, update: MetadataUpdate) -> VfsResult<()>;
+    async fn update_metadata(&self, update: MetadataUpdate) -> VfsResult<()>;
 
     /// Gets the filesystem
     fn filesystem(&self) -> &dyn FilesystemOps;
 
     /// Gets the size of the node.
-    fn len(&self) -> VfsResult<u64> {
-        self.metadata().map(|m| m.size)
+    async fn len(&self) -> VfsResult<u64> {
+        self.metadata().await.map(|m| m.size)
     }
 
     /// Synchronizes the file to disk.
-    fn sync(&self, data_only: bool) -> VfsResult<()>;
+    async fn sync(&self, data_only: bool) -> VfsResult<()>;
 
     /// Casts the node to a `&dyn core::any::Any`.
     fn into_any(self: Arc<Self>) -> Arc<dyn Any + Send + Sync>;
@@ -230,20 +232,31 @@ impl From<Node> for Arc<dyn NodeOps> {
     }
 }
 
-#[inherit_methods(from = "self.0.node")]
 impl DirEntry {
-    pub fn inode(&self) -> u64;
+    pub fn inode(&self) -> u64 {
+        self.0.node.inode()
+    }
 
-    pub fn filesystem(&self) -> &dyn FilesystemOps;
+    pub fn filesystem(&self) -> &dyn FilesystemOps {
+        self.0.node.filesystem()
+    }
 
-    pub fn update_metadata(&self, update: MetadataUpdate) -> VfsResult<()>;
+    pub async fn update_metadata(&self, update: MetadataUpdate) -> VfsResult<()> {
+        self.0.node.update_metadata(update).await
+    }
 
     #[allow(clippy::len_without_is_empty)]
-    pub fn len(&self) -> VfsResult<u64>;
+    pub async fn len(&self) -> VfsResult<u64> {
+        self.0.node.len().await
+    }
 
-    pub fn flags(&self) -> NodeFlags;
+    pub fn flags(&self) -> NodeFlags {
+        self.0.node.flags()
+    }
 
-    pub fn sync(&self, data_only: bool) -> VfsResult<()>;
+    pub async fn sync(&self, data_only: bool) -> VfsResult<()> {
+        self.0.node.sync(data_only).await
+    }
 }
 
 impl DirEntry {
@@ -265,8 +278,8 @@ impl DirEntry {
         }))
     }
 
-    pub fn metadata(&self) -> VfsResult<Metadata> {
-        self.0.node.metadata().map(|mut metadata| {
+    pub async fn metadata(&self) -> VfsResult<Metadata> {
+        self.0.node.metadata().await.map(|mut metadata| {
             metadata.node_type = self.0.node_type;
             metadata
         })
@@ -371,19 +384,19 @@ impl DirEntry {
         Arc::as_ptr(&self.0) as usize
     }
 
-    pub fn read_link(&self) -> VfsResult<String> {
+    pub async fn read_link(&self) -> VfsResult<String> {
         if self.node_type() != NodeType::Symlink {
             return Err(VfsError::InvalidData);
         }
         let file = self.as_file()?;
-        let mut buf = vec![0; file.len()? as usize];
-        file.read_at(&mut buf, 0)?;
+        let mut buf = vec![0; file.len().await? as usize];
+        file.read_at(&mut buf, 0).await?;
         String::from_utf8(buf).map_err(|_| VfsError::InvalidData)
     }
 
-    pub fn ioctl(&self, cmd: u32, arg: usize) -> VfsResult<usize> {
+    pub async fn ioctl(&self, cmd: u32, arg: usize) -> VfsResult<usize> {
         match &self.0.node {
-            Node::File(file) => file.ioctl(cmd, arg),
+            Node::File(file) => file.ioctl(cmd, arg).await,
             Node::Dir(_) => Err(VfsError::NotATty),
         }
     }

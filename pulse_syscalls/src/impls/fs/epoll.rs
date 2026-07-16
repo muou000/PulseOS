@@ -1,6 +1,9 @@
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::time::Duration;
+use core::future::Future;
+use core::pin::Pin;
+use core::task::{Context, Poll};
 
 use axerrno::LinuxError;
 use linux_raw_sys::general::{
@@ -9,7 +12,7 @@ use linux_raw_sys::general::{
 };
 use pulse_core::fd_table::{
     FdEntry, FdFlags, EpollObject, EpollRegistration, FdObject, PipeObject, StdinObject,
-    StdoutObject, PidfdObject,
+    StdoutObject, PidfdObject, PollRegistration,
 };
 
 use crate::impls::{
@@ -155,7 +158,179 @@ pub fn sys_epoll_ctl(
         }
         _ => return -LinuxError::EINVAL.code() as isize,
     }
+    drop(events);
+    epoll_obj.notify_control();
     0
+}
+
+struct EpollFuture {
+    epoll: Arc<dyn FdObject>,
+    maxevents: usize,
+    registrations: Vec<PollRegistration>,
+}
+
+impl Future for EpollFuture {
+    type Output = Result<Vec<epoll_event>, LinuxError>;
+
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        let this = self.as_mut().get_mut();
+        this.registrations.clear();
+        let epoll = this.epoll.clone();
+        let Some(epoll_obj) = epoll.as_any().downcast_ref::<EpollObject>() else {
+            return Poll::Ready(Err(LinuxError::EINVAL));
+        };
+        let maxevents = this.maxevents;
+        let collect_ready = || {
+            let mut ready_list = Vec::with_capacity(maxevents);
+            let mut oneshots_to_disable = Vec::new();
+
+            let mut monitored = epoll_obj.events.lock();
+            for (&fd, ev) in monitored.iter_mut() {
+                if ready_list.len() >= maxevents {
+                    break;
+                }
+                match get_fd_entry(fd) {
+                    Err(_) => {
+                        if (ev.event.events & (EPOLLERR | EPOLLHUP)) != 0 {
+                            ready_list.push(epoll_event {
+                                events: ev.event.events & (EPOLLERR | EPOLLHUP),
+                                data: ev.event.data,
+                            });
+                            if ev.event.events & EPOLLONESHOT != 0 {
+                                oneshots_to_disable.push(fd);
+                            }
+                        }
+                    }
+                    Ok(entry) => {
+                        match entry.object.poll() {
+                            Ok(state) => {
+                                let mut revents = 0u32;
+                                if state.readable {
+                                    if ev.event.events & EPOLLIN != 0 {
+                                        if ev.event.events & EPOLLET != 0 {
+                                            if !ev.reported_in {
+                                                revents |= EPOLLIN;
+                                                ev.reported_in = true;
+                                            }
+                                        } else {
+                                            revents |= EPOLLIN;
+                                        }
+                                    }
+                                } else {
+                                    ev.reported_in = false;
+                                }
+
+                                if state.writable {
+                                    if ev.event.events & EPOLLOUT != 0 {
+                                        if ev.event.events & EPOLLET != 0 {
+                                            if !ev.reported_out {
+                                                revents |= EPOLLOUT;
+                                                ev.reported_out = true;
+                                            }
+                                        } else {
+                                            revents |= EPOLLOUT;
+                                        }
+                                    }
+                                } else {
+                                    ev.reported_out = false;
+                                }
+
+                                if ev.event.events & EPOLLRDHUP != 0 && entry.object.is_rdhup() {
+                                    if ev.event.events & EPOLLET != 0 {
+                                        if !ev.reported_in {
+                                            revents |= EPOLLRDHUP;
+                                            ev.reported_in = true;
+                                        }
+                                    } else {
+                                        revents |= EPOLLRDHUP;
+                                    }
+                                }
+
+                                if revents != 0 {
+                                    ready_list.push(epoll_event {
+                                        events: revents,
+                                        data: ev.event.data,
+                                    });
+                                    if ev.event.events & EPOLLONESHOT != 0 {
+                                        oneshots_to_disable.push(fd);
+                                    }
+                                }
+                            }
+                            Err(_) => {
+                                if (ev.event.events & EPOLLERR) != 0 {
+                                    ready_list.push(epoll_event {
+                                        events: EPOLLERR,
+                                        data: ev.event.data,
+                                    });
+                                    if ev.event.events & EPOLLONESHOT != 0 {
+                                        oneshots_to_disable.push(fd);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            for fd in oneshots_to_disable {
+                if let Some(ev) = monitored.get_mut(&fd) {
+                    ev.event.events = 0;
+                }
+            }
+            ready_list
+        };
+
+        let ready_list = collect_ready();
+
+        if !ready_list.is_empty() {
+            return Poll::Ready(Ok(ready_list));
+        }
+
+        let thread = pulse_core::task::current_thread().ok();
+        if let Some(thread) = thread.as_ref() {
+            if thread.has_pending_signal() {
+                return Poll::Ready(Err(LinuxError::EINTR));
+            }
+        }
+
+        // Register every leaf queue through the root epoll object. Nested
+        // epolls flatten their registrations into this same owned list.
+        if let Err(e) = this.epoll.clone().register_poll(
+            cx,
+            axpoll::IoEvents::IN,
+            &mut this.registrations,
+        ) {
+            axlog::warn!("epoll: register_poll failed: {:?}", e);
+            this.registrations.clear();
+            return Poll::Ready(Err(e));
+        }
+
+        if let Some(thread) = thread.as_ref() {
+            let registration = thread
+                .signal_wait_queue()
+                .register_owned_waker(cx.waker());
+            let owner = thread.clone();
+            this.registrations.push(PollRegistration::new(move || {
+                owner.signal_wait_queue().unregister_waker(registration);
+            }));
+        }
+
+        // Recheck after every registration pass. This closes the race where fd
+        // readiness or a signal changes after the first scan but before its
+        // corresponding waker is installed.
+        let ready_list = collect_ready();
+        if !ready_list.is_empty() {
+            this.registrations.clear();
+            return Poll::Ready(Ok(ready_list));
+        }
+        if let Some(thread) = thread {
+            if thread.has_pending_signal() {
+                this.registrations.clear();
+                return Poll::Ready(Err(LinuxError::EINTR));
+            }
+        }
+
+        Poll::Pending
+    }
 }
 
 fn sys_epoll_pwait_inner(
@@ -219,118 +394,21 @@ fn sys_epoll_pwait_inner(
         Err(e) => return -e.code() as isize,
     };
 
-    let epoll_obj = match epoll_entry.object.as_any().downcast_ref::<EpollObject>() {
-        Some(obj) => obj,
-        None => return -LinuxError::EINVAL.code() as isize,
+    if !epoll_entry.object.as_any().is::<EpollObject>() {
+        return -LinuxError::EINVAL.code() as isize;
+    }
+
+    let future = EpollFuture {
+        epoll: epoll_entry.object.clone(),
+        maxevents,
+        registrations: Vec::new(),
     };
 
-    const POLL_ACTIVE_YIELD_ROUNDS: usize = 64;
-    const POLL_SLEEP_QUANTUM: Duration = Duration::from_micros(100);
-    let mut idle_rounds: usize = 0;
-
-    loop {
-        let mut ready_list = Vec::with_capacity(maxevents);
-        let mut oneshots_to_disable = Vec::with_capacity(maxevents.min(128));
-        {
-            let mut monitored = epoll_obj.events.lock();
-            for (&fd, ev) in monitored.iter_mut() {
-                if ready_list.len() >= maxevents {
-                    break;
-                }
-                match get_fd_entry(fd) {
-                    Err(_) => {
-                        if (ev.event.events & (EPOLLERR | EPOLLHUP)) != 0 {
-                            ready_list.push(epoll_event {
-                                events: ev.event.events & (EPOLLERR | EPOLLHUP),
-                                data: ev.event.data,
-                            });
-                            if ev.event.events & EPOLLONESHOT != 0 {
-                                oneshots_to_disable.push(fd);
-                            }
-                        }
-                    }
-                    Ok(entry) => {
-                        match entry.object.poll() {
-                            Ok(state) => {
-                                let mut revents = 0u32;
-                                
-                                // Check readable
-                                if state.readable {
-                                    if ev.event.events & EPOLLIN != 0 {
-                                        if ev.event.events & EPOLLET != 0 {
-                                            if !ev.reported_in {
-                                                revents |= EPOLLIN;
-                                                ev.reported_in = true;
-                                            }
-                                        } else {
-                                            revents |= EPOLLIN;
-                                        }
-                                    }
-                                } else {
-                                    ev.reported_in = false;
-                                }
-
-                                // Check writable
-                                if state.writable {
-                                    if ev.event.events & EPOLLOUT != 0 {
-                                        if ev.event.events & EPOLLET != 0 {
-                                            if !ev.reported_out {
-                                                revents |= EPOLLOUT;
-                                                ev.reported_out = true;
-                                            }
-                                        } else {
-                                            revents |= EPOLLOUT;
-                                        }
-                                    }
-                                } else {
-                                    ev.reported_out = false;
-                                }
-
-                                // Check EPOLLRDHUP
-                                if ev.event.events & EPOLLRDHUP != 0 && entry.object.is_rdhup() {
-                                    if ev.event.events & EPOLLET != 0 {
-                                        if !ev.reported_in {
-                                            revents |= EPOLLRDHUP;
-                                            ev.reported_in = true;
-                                        }
-                                    } else {
-                                        revents |= EPOLLRDHUP;
-                                    }
-                                }
-
-                                if revents != 0 {
-                                    ready_list.push(epoll_event {
-                                        events: revents,
-                                        data: ev.event.data,
-                                    });
-                                    if ev.event.events & EPOLLONESHOT != 0 {
-                                        oneshots_to_disable.push(fd);
-                                    }
-                                }
-                            }
-                            Err(_) => {
-                                if (ev.event.events & EPOLLERR) != 0 {
-                                    ready_list.push(epoll_event {
-                                        events: EPOLLERR,
-                                        data: ev.event.data,
-                                    });
-                                    if ev.event.events & EPOLLONESHOT != 0 {
-                                        oneshots_to_disable.push(fd);
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
+    match axtask::future::block_on(axtask::future::timeout_at(deadline, future)) {
+        Ok(Ok(ready_list)) => {
+            if ready_list.is_empty() {
+                return 0;
             }
-            for fd in oneshots_to_disable {
-                if let Some(ev) = monitored.get_mut(&fd) {
-                    ev.event.events = 0;
-                }
-            }
-        }
-
-        if !ready_list.is_empty() {
             let bytes = unsafe {
                 core::slice::from_raw_parts(
                     ready_list.as_ptr().cast::<u8>(),
@@ -340,39 +418,10 @@ fn sys_epoll_pwait_inner(
             if let Err(e) = write_user_bytes(events, bytes) {
                 return -e.code() as isize;
             }
-            return ready_list.len() as isize;
+            ready_list.len() as isize
         }
-
-        if let Ok(thread) = pulse_core::task::current_thread() {
-            if thread.has_pending_signal() {
-                return -LinuxError::EINTR.code() as isize;
-            }
-        }
-
-        if let Some(deadline) = deadline {
-            let now = axhal::time::monotonic_time();
-            if now >= deadline {
-                return 0;
-            }
-            idle_rounds = idle_rounds.saturating_add(1);
-            if idle_rounds <= POLL_ACTIVE_YIELD_ROUNDS {
-                axtask::yield_now();
-            } else {
-                let sleep_dur = core::cmp::min(deadline - now, POLL_SLEEP_QUANTUM);
-                if sleep_dur > Duration::ZERO {
-                    axtask::sleep(sleep_dur);
-                } else {
-                    axtask::yield_now();
-                }
-            }
-        } else {
-            idle_rounds = idle_rounds.saturating_add(1);
-            if idle_rounds <= POLL_ACTIVE_YIELD_ROUNDS {
-                axtask::yield_now();
-            } else {
-                axtask::sleep(POLL_SLEEP_QUANTUM);
-            }
-        }
+        Ok(Err(e)) => -e.code() as isize,
+        Err(_) => 0,
     }
 }
 

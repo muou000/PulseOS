@@ -85,10 +85,10 @@ pub(crate) fn resolve_location_at_ptr(
     }
     let ctx = context_for_dirfd(dirfd)?;
     let result = if (flags & AT_SYMLINK_NOFOLLOW as usize) != 0 {
-        ctx.resolve_no_follow(path.as_ref())
+        axtask::future::block_on(ctx.resolve_no_follow(path.as_ref()))
             .map_err(|e| LinuxError::from(e.canonicalize()))
     } else {
-        ctx.resolve(path.as_ref())
+        axtask::future::block_on(ctx.resolve(path.as_ref()))
             .map_err(|e| LinuxError::from(e.canonicalize()))
     };
     match &result {
@@ -127,7 +127,7 @@ fn try_resolve_location_fast(
         return Some(Err(LinuxError::ENOTDIR));
     }
     Some(
-        base.lookup_no_follow(path)
+        axtask::future::block_on(base.lookup_no_follow(path))
             .map_err(|e| LinuxError::from(e.canonicalize())),
     )
 }

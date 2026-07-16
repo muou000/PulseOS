@@ -761,7 +761,10 @@ async fn ensure_room_at_index(
 
     // Otherwise, we are at an internal node (index > 0).
     // First, make sure there is room in the parent of this node.
-    ensure_room_at_index(fs, inode, lookup, index - 1).await?;
+    #[cfg(feature = "sync")]
+    ensure_room_at_index(fs, inode, lookup, index - 1)?;
+    #[cfg(not(feature = "sync"))]
+    alloc::boxed::Box::pin(ensure_room_at_index(fs, inode, lookup, index - 1)).await?;
 
     let mut node_block = vec![0; block_size];
     let current_index = lookup.path.iter().position(|e| e.absolute_block == node_entry.absolute_block).unwrap();

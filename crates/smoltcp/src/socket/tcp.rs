@@ -773,6 +773,10 @@ impl<'a> Socket<'a> {
         Some(self.tuple?.remote)
     }
 
+    pub(crate) fn egress_destination(&self) -> Option<IpAddress> {
+        self.remote_endpoint().map(|endpoint| endpoint.addr)
+    }
+
     /// get bound endpoint.
     #[inline]
     pub fn get_bound_endpoint(&self) -> IpListenEndpoint {

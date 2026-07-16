@@ -190,7 +190,7 @@ pub fn sys_bind(fd: usize, addr: usize, addrlen: usize) -> isize {
             let parent_res = crate::impls::utils::with_process(|process| {
                 let binding = process.fs_context_handle();
                 let fs = binding.lock();
-                fs.resolve_parent(axfs_ng_vfs::path::Path::new(&path))
+                axtask::future::block_on(fs.resolve_parent(axfs_ng_vfs::path::Path::new(&path)))
             });
             match parent_res {
                 Ok(Ok((_parent, _name))) => {}
@@ -207,7 +207,7 @@ pub fn sys_bind(fd: usize, addr: usize, addrlen: usize) -> isize {
             let exists = crate::impls::utils::with_process(|process| {
                 let binding = process.fs_context_handle();
                 let fs = binding.lock();
-                fs.resolve(axfs_ng_vfs::path::Path::new(&path)).is_ok()
+                axtask::future::block_on(fs.resolve(axfs_ng_vfs::path::Path::new(&path))).is_ok()
             }).unwrap_or(false);
 
             if exists {
@@ -252,7 +252,7 @@ pub fn sys_bind(fd: usize, addr: usize, addrlen: usize) -> isize {
             let create_res = crate::impls::utils::with_process(|process| {
                 let binding = process.fs_context_handle();
                 let fs = binding.lock();
-                fs.write(axfs_ng_vfs::path::Path::new(&path), [])
+                axtask::future::block_on(fs.write(axfs_ng_vfs::path::Path::new(&path), []))
             });
             match create_res {
                 Ok(Ok(())) => {}
@@ -393,7 +393,7 @@ pub fn sys_connect(fd: usize, addr: usize, addrlen: usize) -> isize {
             let exists = crate::impls::utils::with_process(|process| {
                 let binding = process.fs_context_handle();
                 let fs = binding.lock();
-                fs.resolve(axfs_ng_vfs::path::Path::new(&path)).is_ok()
+                axtask::future::block_on(fs.resolve(axfs_ng_vfs::path::Path::new(&path))).is_ok()
             }).unwrap_or(false);
 
             if !exists {

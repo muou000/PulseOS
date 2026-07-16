@@ -115,7 +115,7 @@ pub fn prefault_range(
     let end_vaddr = start_vaddr.checked_add(size).ok_or(AxError::OutOfRange)?;
     let pages = memory_addr::PageIter4K::new(start_vaddr.align_down_4k(), end_vaddr.align_up_4k())
         .ok_or(AxError::BadAddress)?;
-    for page in pages {
+    for (page_idx, page) in pages.enumerate() {
         let mut access_flags = axhal::trap::PageFaultFlags::USER;
         if flags.contains(MappingFlags::READ) {
             access_flags |= axhal::trap::PageFaultFlags::READ;
@@ -387,14 +387,12 @@ fn read_elf_file(path: &str) -> AxResult<Arc<CachedElfImage>> {
         guard.clone()
     };
 
-    let location = fs_ctx.resolve(path).map_err(|_| AxError::NotFound)?;
-    let mut prefix = fs_ctx
-        .read_prefix(path, PAGE_SIZE_4K)
+    let location = axtask::future::block_on(fs_ctx.resolve(path)).map_err(|_| AxError::NotFound)?;
+    let mut prefix = axtask::future::block_on(fs_ctx.read_prefix(path, PAGE_SIZE_4K))
         .map_err(|_| AxError::NotFound)?;
     let mut needed = compute_needed_prefix_len(&prefix)?;
     if needed > prefix.len() {
-        prefix = fs_ctx
-            .read_prefix(path, needed)
+        prefix = axtask::future::block_on(fs_ctx.read_prefix(path, needed))
             .map_err(|_| AxError::NotFound)?;
         needed = compute_needed_prefix_len(&prefix)?;
     }
@@ -420,16 +418,15 @@ fn read_elf_range(path: &str, offset: u64, len: usize) -> AxResult<Vec<u8>> {
         let guard = axfs::FS_CONTEXT.lock();
         guard.clone()
     };
-    let file = File::open(&fs_ctx, path).map_err(|_| AxError::NotFound)?;
+    let file = axtask::future::block_on(File::open(&fs_ctx, path)).map_err(|_| AxError::NotFound)?;
     let mut buf = vec![0u8; len];
-    let read = file
-        .read_at(&mut buf[..], offset)
+    let read = axtask::future::block_on(file.read_at(&mut buf[..], offset))
         .map_err(|_| AxError::InvalidExecutable)?;
     if read == len {
         return Ok(buf);
     }
 
-    let whole = fs_ctx.read(path).map_err(|_| AxError::NotFound)?;
+    let whole = axtask::future::block_on(fs_ctx.read(path)).map_err(|_| AxError::NotFound)?;
     let start = usize::try_from(offset).map_err(|_| AxError::InvalidExecutable)?;
     let end = start.checked_add(len).ok_or(AxError::InvalidExecutable)?;
     if end > whole.len() {

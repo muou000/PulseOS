@@ -198,7 +198,7 @@ pub fn set_loop_backing(id: usize, file: File) -> axfs_ng_vfs::VfsResult<()> {
     if id >= 8 {
         return Err(axfs_ng_vfs::VfsError::InvalidInput);
     }
-    let metadata = file.location().metadata()?;
+    let metadata = axtask::future::block_on(file.location().metadata())?;
     let size = cached_file_size(file.location()).unwrap_or(metadata.size);
     *fs::loop_dev::LOOP_DEVICES[id].backing.lock() = Some(Arc::new(file));
     fs::loop_dev::LOOP_DEVICES[id]
@@ -223,7 +223,7 @@ pub fn set_loop_flags(id: usize, flags: u32) -> axfs_ng_vfs::VfsResult<()> {
 }
 
 pub fn lookup_location(path: &str) -> axfs_ng_vfs::VfsResult<axfs_ng_vfs::Location> {
-    FS_CONTEXT.lock().resolve(path)
+    axtask::future::block_on(FS_CONTEXT.lock().resolve(path))
 }
 
 pub fn probe_block_device(
@@ -236,7 +236,7 @@ pub fn probe_block_device(
         .map_err(|_| axfs_ng_vfs::VfsError::InvalidInput)?;
     let disk = node.get_block_device()?;
 
-    let fs = fs::new_default(disk.clone())?;
+    let fs = axtask::future::block_on(fs::new_default(disk.clone()))?;
     register_mountable_device(path, path, &fs);
     Ok(fs)
 }
@@ -306,12 +306,12 @@ fn register_mountable_device(source: &str, disk_name: &str, fs: &axfs_ng_vfs::Fi
 }
 
 fn ensure_mount_dir(cx: &FsContext, path: &str) -> axfs_ng_vfs::VfsResult<axfs_ng_vfs::Location> {
-    match cx.resolve(path) {
+    match axtask::future::block_on(cx.resolve(path)) {
         Ok(loc) => {
             loc.check_is_dir()?;
             Ok(loc)
         }
-        Err(_) => cx.create_dir(path, NodePermission::default()),
+        Err(_) => axtask::future::block_on(cx.create_dir(path, NodePermission::default())),
     }
 }
 
@@ -369,7 +369,7 @@ pub fn init_filesystems(mut block_devs: AxDeviceContainer<AxBlockDevice>) {
         let dev_name = shared_dev.device_name().to_string();
         info!("  probing block device {}: {}", disk_idx, dev_name);
 
-        let fs = match fs::new_default(shared_dev.clone()) {
+        let fs = match axtask::future::block_on(fs::new_default(shared_dev.clone())) {
             Ok(fs) => fs,
             Err(e) => {
                 warn!(

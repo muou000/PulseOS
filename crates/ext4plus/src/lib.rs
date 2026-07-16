@@ -163,7 +163,7 @@ use core::num::NonZeroU64;
 use core::time::Duration;
 use dir::Dir;
 use error::{CorruptKind, Ext4Error};
-use features::{CompatibleFeatures, ReadOnlyCompatibleFeatures};
+use features::ReadOnlyCompatibleFeatures;
 use file::{File, write_at};
 use file_blocks::FileBlocks;
 use inode::{
@@ -432,17 +432,15 @@ impl Ext4 {
         dst: &mut [u8],
     ) -> Result<(), Ext4Error> {
         let block_size = self.0.superblock.block_size().to_u64();
-        let num_blocks = dst.len().div_ceil(block_size as usize);
-
-        let mut is_contiguous = true;
+        let bytes_touched = usize_from_u32(offset_within_block)
+            .checked_add(dst.len())
+            .ok_or(CorruptKind::InvalidBlockSize)?;
+        let num_blocks = bytes_touched.div_ceil(block_size as usize);
         let start_mapped = self.0.journal.map_block_index(original_block_index);
-        for k in 1..num_blocks {
-            let next_mapped = self.0.journal.map_block_index(original_block_index + k as u64);
-            if next_mapped != start_mapped + k as u64 {
-                is_contiguous = false;
-                break;
-            }
-        }
+        let is_contiguous = (1..num_blocks).all(|k| {
+            self.0.journal.map_block_index(original_block_index + k as u64)
+                == start_mapped + k as u64
+        });
 
         if is_contiguous {
             let err = || {
@@ -453,12 +451,13 @@ impl Ext4 {
                     read_len: dst.len(),
                 })
             };
-
-            if start_mapped == 0 && offset_within_block < 1024 {
-                return Err(err());
-            }
-
-            if start_mapped >= self.0.superblock.blocks_count() {
+            let end_block = start_mapped
+                .checked_add(num_blocks.saturating_sub(1) as u64)
+                .ok_or_else(err)?;
+            if (start_mapped == 0 && offset_within_block < 1024)
+                || offset_within_block as u64 >= block_size
+                || end_block >= self.0.superblock.blocks_count()
+            {
                 return Err(err());
             }
 
@@ -478,18 +477,16 @@ impl Ext4 {
             let mut read_bytes = 0usize;
             let mut current_block_index = original_block_index;
             let mut current_offset = offset_within_block;
-
             while read_bytes < dst.len() {
                 let remaining = dst.len() - read_bytes;
-                let take = core::cmp::min(remaining, (block_size - current_offset as u64) as usize);
-
+                let available = (block_size - u64::from(current_offset)) as usize;
+                let take = core::cmp::min(remaining, available);
                 self.read_from_block(
                     current_block_index,
                     current_offset,
                     &mut dst[read_bytes..read_bytes + take],
                 )
                 .await?;
-
                 read_bytes += take;
                 current_block_index += 1;
                 current_offset = 0;

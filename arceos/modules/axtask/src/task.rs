@@ -378,6 +378,13 @@ impl TaskInner {
         self.in_wait_queue.store(in_wait_queue, Ordering::Release);
     }
 
+    #[inline]
+    pub(crate) fn consume_wait_queue_entry(&self) -> bool {
+        self.in_wait_queue
+            .compare_exchange(true, false, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+    }
+
     /// Returns task's current timer ticket ID.
     #[inline]
     #[cfg(feature = "irq")]

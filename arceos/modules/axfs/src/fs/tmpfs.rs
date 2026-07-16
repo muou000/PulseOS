@@ -1,5 +1,6 @@
-use alloc::{borrow::ToOwned, string::String, sync::{Arc, Weak}};
+use alloc::{borrow::ToOwned, string::String, sync::{Arc, Weak}, boxed::Box};
 use core::{any::Any, task::Context, time::Duration, cell::OnceCell};
+use async_trait::async_trait;
 
 use axpoll::{IoEvents, Pollable};
 use slab::Slab;
@@ -48,6 +49,7 @@ impl TmpFilesystem {
 unsafe impl Send for TmpFilesystem {}
 unsafe impl Sync for TmpFilesystem {}
 
+#[async_trait]
 impl FilesystemOps for TmpFilesystem {
     fn name(&self) -> &str {
         "tmpfs"
@@ -225,12 +227,13 @@ impl TmpNode {
     }
 }
 
+#[async_trait]
 impl NodeOps for TmpNode {
     fn inode(&self) -> u64 {
         self.inode.ino
     }
 
-    fn metadata(&self) -> VfsResult<Metadata> {
+    async fn metadata(&self) -> VfsResult<Metadata> {
         let mut metadata = self.inode.metadata.lock().clone();
         match &self.inode.content {
             NodeContent::File(content) => {
@@ -243,7 +246,7 @@ impl NodeOps for TmpNode {
         Ok(metadata)
     }
 
-    fn update_metadata(&self, update: MetadataUpdate) -> VfsResult<()> {
+    async fn update_metadata(&self, update: MetadataUpdate) -> VfsResult<()> {
         update_metadata_impl(&mut self.inode.metadata.lock(), update);
         Ok(())
     }
@@ -252,7 +255,7 @@ impl NodeOps for TmpNode {
         self.fs.as_ref()
     }
 
-    fn sync(&self, _data_only: bool) -> VfsResult<()> {
+    async fn sync(&self, _data_only: bool) -> VfsResult<()> {
         Ok(())
     }
 
@@ -265,8 +268,9 @@ impl NodeOps for TmpNode {
     }
 }
 
+#[async_trait]
 impl FileNodeOps for TmpNode {
-    fn read_at(&self, buf: &mut [u8], offset: u64) -> VfsResult<usize> {
+    async fn read_at(&self, buf: &mut [u8], offset: u64) -> VfsResult<usize> {
         let file = inode_as_file(&self.inode)?;
         if let Some(symlink) = file.symlink.lock().as_ref() {
             assert_eq!(offset, 0);
@@ -277,20 +281,20 @@ impl FileNodeOps for TmpNode {
         unreachable!("page cache should handle reading");
     }
 
-    fn write_at(&self, _buf: &[u8], _offset: u64) -> VfsResult<usize> {
+    async fn write_at(&self, _buf: &[u8], _offset: u64) -> VfsResult<usize> {
         unreachable!("page cache should handle writing");
     }
 
-    fn append(&self, _buf: &[u8]) -> VfsResult<(usize, u64)> {
+    async fn append(&self, _buf: &[u8]) -> VfsResult<(usize, u64)> {
         unreachable!("page cache should handle writing");
     }
 
-    fn set_len(&self, len: u64) -> VfsResult<()> {
+    async fn set_len(&self, len: u64) -> VfsResult<()> {
         *inode_as_file(&self.inode)?.length.lock() = len;
         Ok(())
     }
 
-    fn set_symlink(&self, target: &str) -> VfsResult<()> {
+    async fn set_symlink(&self, target: &str) -> VfsResult<()> {
         let file = inode_as_file(&self.inode)?;
         *file.length.lock() = target.len() as u64;
         *file.symlink.lock() = Some(target.to_owned());
@@ -306,15 +310,16 @@ impl Pollable for TmpNode {
     fn register(&self, _context: &mut Context<'_>, _events: IoEvents) {}
 }
 
+#[async_trait]
 impl DirNodeOps for TmpNode {
-    fn read_dir(&self, offset: u64, sink: &mut dyn DirEntrySink) -> VfsResult<usize> {
+    async fn read_dir(&self, offset: u64, sink: &mut (dyn DirEntrySink + Send)) -> VfsResult<usize> {
         let dir = inode_as_dir(&self.inode)?;
         read_dir_impl(&dir.entries, offset, sink, |entry| {
             (entry.ino, entry.get().metadata.lock().node_type)
         })
     }
 
-    fn lookup(&self, name: &str) -> VfsResult<DirEntry> {
+    async fn lookup(&self, name: &str) -> VfsResult<DirEntry> {
         let dir = inode_as_dir(&self.inode)?;
         let entries = dir.entries.lock();
 
@@ -324,7 +329,7 @@ impl DirNodeOps for TmpNode {
         self.new_entry(name, node_type, inode)
     }
 
-    fn create(
+    async fn create(
         &self,
         name: &str,
         node_type: NodeType,
@@ -341,7 +346,7 @@ impl DirNodeOps for TmpNode {
         self.new_entry(name, node_type, inode)
     }
 
-    fn link(&self, name: &str, target: &DirEntry) -> VfsResult<DirEntry> {
+    async fn link(&self, name: &str, target: &DirEntry) -> VfsResult<DirEntry> {
         let dir = inode_as_dir(&self.inode)?;
         let mut entries = dir.entries.lock();
 
@@ -351,12 +356,12 @@ impl DirNodeOps for TmpNode {
             return Err(VfsError::AlreadyExists);
         }
         let inode = target.inode.clone();
-        let node_type = target.metadata()?.node_type;
+        let node_type = target.metadata().await?.node_type;
         entries.insert(name.into(), InodeRef::new(self.fs.clone(), inode.ino));
         self.new_entry(name, node_type, inode)
     }
 
-    fn unlink(&self, name: &str) -> VfsResult<()> {
+    async fn unlink(&self, name: &str) -> VfsResult<()> {
         if name == "." || name == ".." {
             return Err(VfsError::InvalidInput);
         }
@@ -377,13 +382,13 @@ impl DirNodeOps for TmpNode {
         Ok(())
     }
 
-    fn rename(&self, src_name: &str, dst_dir: &DirNode, dst_name: &str) -> VfsResult<()> {
+    async fn rename(&self, src_name: &str, dst_dir: &DirNode, dst_name: &str) -> VfsResult<()> {
         if src_name == "." || src_name == ".." || dst_name == "." || dst_name == ".." {
             return Err(VfsError::InvalidInput);
         }
         let dst_node = dst_dir.downcast::<Self>()?;
-        if let Ok(entry) = dst_dir.lookup(dst_name) {
-            let src_entry = self.lookup(src_name)?;
+        if let Ok(entry) = dst_dir.lookup(dst_name).await {
+            let src_entry = self.lookup(src_name).await?;
             if entry.inode() == src_entry.inode() {
                 return Ok(());
             }

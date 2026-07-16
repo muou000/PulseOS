@@ -1,11 +1,20 @@
-use axplat::irq::{HandlerTable, IpiTarget, IrqHandler, IrqIf};
+use axplat::{
+    irq::{HandlerTable, IpiTarget, IrqHandler, IrqIf},
+    mem::pa,
+};
 use loongArch64::register::{
     ecfg::{self, LineBasedInterrupt},
     ticlr,
 };
 
+mod eiointc;
+mod irq_common;
+mod pch_pic;
+
+use irq_common::EIOINTC_CPU_IRQ;
+
 /// The maximum number of IRQs.
-pub const MAX_IRQ_COUNT: usize = 12;
+pub const MAX_IRQ_COUNT: usize = 256;
 
 static IRQ_HANDLER_TABLE: HandlerTable<MAX_IRQ_COUNT> = HandlerTable::new();
 
@@ -22,6 +31,15 @@ impl IrqIf for IrqIfImpl {
                 false => old_value & !LineBasedInterrupt::TIMER,
             };
             ecfg::set_lie(new_value);
+        } else if irq_num < 64 {
+            // PCH-PIC pins: unmask in PCH-PIC and keep EIOINTC enabled
+            if let Some(pic) = pch_pic::PCH_PIC.get() {
+                pic.set_enable(irq_num, enabled);
+            }
+            eiointc::set_enable(irq_num, enabled);
+        } else if irq_num < 256 {
+            // PCH-MSI pins (64..255): directly connected to EIOINTC, bypasses PCH-PIC entirely
+            eiointc::set_enable(irq_num, enabled);
         }
     }
 
@@ -36,26 +54,33 @@ impl IrqIf for IrqIfImpl {
     }
 
     /// Unregisters the IRQ handler for the given IRQ.
-    ///
-    /// It also disables the IRQ if the unregistration succeeds. It returns the
-    /// existing handler if it is registered, `None` otherwise.
     fn unregister(irq: usize) -> Option<IrqHandler> {
         Self::set_enable(irq, false);
         IRQ_HANDLER_TABLE.unregister_handler(irq)
     }
 
     /// Handles the IRQ.
-    ///
-    /// It is called by the common interrupt handler. It should look up in the
-    /// IRQ handler table and calls the corresponding handler. If necessary, it
-    /// also acknowledges the interrupt controller after handling.
     fn handle(irq: usize) {
         if irq == crate::config::devices::TIMER_IRQ {
             ticlr::clear_timer_interrupt();
-        }
-        trace!("IRQ {}", irq);
-        if !IRQ_HANDLER_TABLE.handle(irq) {
-            warn!("Unhandled IRQ {}", irq);
+            if !IRQ_HANDLER_TABLE.handle(irq) {
+                warn!("Unhandled Timer IRQ");
+            }
+        } else if irq == EIOINTC_CPU_IRQ {
+            if let Some(irq_num) = eiointc::claim_irq() {
+                trace!("EIOINTC IRQ {}", irq_num);
+                if !IRQ_HANDLER_TABLE.handle(irq_num) {
+                    warn!("Unhandled EIOINTC IRQ {}", irq_num);
+                }
+                eiointc::complete_irq(irq_num);
+            } else {
+                debug!("Spurious EIOINTC interrupt");
+            }
+        } else {
+            info!("IRQ {}", irq);
+            if !IRQ_HANDLER_TABLE.handle(irq) {
+                warn!("Unhandled IRQ {}", irq);
+            }
         }
     }
 
@@ -63,4 +88,12 @@ impl IrqIf for IrqIfImpl {
     fn send_ipi(_irq_num: usize, _target: IpiTarget) {
         todo!()
     }
+}
+
+pub(crate) fn init_early() {
+    eiointc::init();
+    pch_pic::init(pa!(crate::config::devices::PCH_PIC_PADDR));
+    // QEMU routes the EIOINTC cascade through CPU HWI1 (IRQ 3).
+    let old_value = ecfg::read().lie();
+    ecfg::set_lie(old_value | LineBasedInterrupt::HWI1);
 }

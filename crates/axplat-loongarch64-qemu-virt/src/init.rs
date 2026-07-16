@@ -10,6 +10,8 @@ impl InitIf for InitIfImpl {
     fn init_early(_cpu_id: usize, _mbi: usize) {
         crate::console::init();
         axcpu::init::init_trap();
+        #[cfg(feature = "irq")]
+        crate::irq::init_early();
         crate::time::init_early();
     }
 

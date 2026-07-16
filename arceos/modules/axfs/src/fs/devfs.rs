@@ -1,4 +1,4 @@
-use alloc::{borrow::ToOwned, collections::BTreeMap, string::String, sync::Arc, vec::Vec};
+use alloc::{borrow::ToOwned, collections::BTreeMap, string::String, sync::Arc, vec::Vec, boxed::Box};
 use core::{
     any::Any,
     cmp::min,
@@ -6,6 +6,7 @@ use core::{
     task::Context,
     time::Duration,
 };
+use async_trait::async_trait;
 
 use axfs_ng_vfs::{
     DeviceId, DirEntry, DirEntrySink, DirNode, DirNodeOps, FileNode, FileNodeOps, Filesystem,
@@ -409,6 +410,7 @@ impl DevFilesystem {
     }
 }
 
+#[async_trait]
 impl FilesystemOps for DevFilesystem {
     fn name(&self) -> &str {
         "devtmpfs"
@@ -525,12 +527,13 @@ impl DevNode {
     }
 }
 
+#[async_trait]
 impl NodeOps for DevNode {
     fn inode(&self) -> u64 {
         self.ino
     }
 
-    fn metadata(&self) -> VfsResult<Metadata> {
+    async fn metadata(&self) -> VfsResult<Metadata> {
         let inode = self.inode_ref()?;
         let mut metadata = inode.metadata.lock().clone();
         if let NodeContent::Directory(dir) = &inode.content {
@@ -545,7 +548,7 @@ impl NodeOps for DevNode {
         Ok(metadata)
     }
 
-    fn update_metadata(&self, update: MetadataUpdate) -> VfsResult<()> {
+    async fn update_metadata(&self, update: MetadataUpdate) -> VfsResult<()> {
         let inode = self.inode_ref()?;
         update_metadata_impl(&mut inode.metadata.lock(), update);
         Ok(())
@@ -555,7 +558,7 @@ impl NodeOps for DevNode {
         self.fs.deref()
     }
 
-    fn sync(&self, _data_only: bool) -> VfsResult<()> {
+    async fn sync(&self, _data_only: bool) -> VfsResult<()> {
         let inode = self.inode_ref()?;
         if let NodeContent::BlockDevice(block) = &inode.content {
             block.disk.lock().flush().map_err(map_dev_err)?;
@@ -579,8 +582,9 @@ impl NodeOps for DevNode {
     }
 }
 
+#[async_trait]
 impl DirNodeOps for DevNode {
-    fn read_dir(&self, offset: u64, sink: &mut dyn DirEntrySink) -> VfsResult<usize> {
+    async fn read_dir(&self, offset: u64, sink: &mut (dyn DirEntrySink + Send)) -> VfsResult<usize> {
         let inode = self.inode_ref()?;
         let dir = inode_as_dir(&inode)?;
         read_dir_impl(&dir.entries, offset, sink, |&entry| {
@@ -589,7 +593,7 @@ impl DirNodeOps for DevNode {
         })
     }
 
-    fn lookup(&self, name: &str) -> VfsResult<DirEntry> {
+    async fn lookup(&self, name: &str) -> VfsResult<DirEntry> {
         let inode = self.inode_ref()?;
         let dir = inode_as_dir(&inode)?;
         let entries = dir.entries.lock();
@@ -601,7 +605,7 @@ impl DirNodeOps for DevNode {
         true
     }
 
-    fn create(
+    async fn create(
         &self,
         name: &str,
         node_type: NodeType,
@@ -630,7 +634,7 @@ impl DirNodeOps for DevNode {
         self.build_entry(name, inode.ino)
     }
 
-    fn link(&self, name: &str, target: &DirEntry) -> VfsResult<DirEntry> {
+    async fn link(&self, name: &str, target: &DirEntry) -> VfsResult<DirEntry> {
         if name == "." || name == ".." {
             return Err(VfsError::InvalidInput);
         }
@@ -654,11 +658,11 @@ impl DirNodeOps for DevNode {
         self.build_entry(name, target.ino)
     }
 
-    fn unlink(&self, name: &str) -> VfsResult<()> {
+    async fn unlink(&self, name: &str) -> VfsResult<()> {
         self.remove_entry(name)
     }
 
-    fn rename(&self, src_name: &str, dst_dir: &DirNode, dst_name: &str) -> VfsResult<()> {
+    async fn rename(&self, src_name: &str, dst_dir: &DirNode, dst_name: &str) -> VfsResult<()> {
         if src_name == "." || src_name == ".." || dst_name == "." || dst_name == ".." {
             return Err(VfsError::InvalidInput);
         }
@@ -675,7 +679,7 @@ impl DirNodeOps for DevNode {
             src_entries.get(src_name).cloned().ok_or(VfsError::NotFound)?
         };
 
-        if let Ok(existing) = dst_node.lookup(dst_name) {
+        if let Ok(existing) = dst_node.lookup(dst_name).await {
             let existing = existing.downcast::<Self>()?;
             if existing.ino == moved_ref {
                 return Ok(());
@@ -694,7 +698,7 @@ impl DirNodeOps for DevNode {
             src_entries.remove(src_name).ok_or(VfsError::NotFound)?
         };
 
-        if dst_node.lookup(dst_name).is_ok() {
+        if dst_node.lookup(dst_name).await.is_ok() {
             dst_node.remove_entry(dst_name)?;
         }
 
@@ -714,8 +718,9 @@ impl DirNodeOps for DevNode {
     }
 }
 
+#[async_trait]
 impl FileNodeOps for DevNode {
-    fn read_at(&self, buf: &mut [u8], offset: u64) -> VfsResult<usize> {
+    async fn read_at(&self, buf: &mut [u8], offset: u64) -> VfsResult<usize> {
         let inode = self.inode_ref()?;
         match &inode.content {
             NodeContent::CharacterDevice(DevDeviceKind::Null) => Ok(0),
@@ -773,7 +778,7 @@ impl FileNodeOps for DevNode {
         }
     }
 
-    fn write_at(&self, buf: &[u8], offset: u64) -> VfsResult<usize> {
+    async fn write_at(&self, buf: &[u8], offset: u64) -> VfsResult<usize> {
         let inode = self.inode_ref()?;
         match &inode.content {
             NodeContent::CharacterDevice(DevDeviceKind::Null) => Ok(buf.len()),
@@ -819,7 +824,7 @@ impl FileNodeOps for DevNode {
         }
     }
 
-    fn append(&self, buf: &[u8]) -> VfsResult<(usize, u64)> {
+    async fn append(&self, buf: &[u8]) -> VfsResult<(usize, u64)> {
         let inode = self.inode_ref()?;
         match &inode.content {
             NodeContent::CharacterDevice(DevDeviceKind::Null) => Ok((buf.len(), 0)),
@@ -830,7 +835,7 @@ impl FileNodeOps for DevNode {
             NodeContent::CharacterDevice(DevDeviceKind::LoopControl) => Ok((buf.len(), 0)),
             NodeContent::CharacterDevice(DevDeviceKind::Random(_)) => Ok((buf.len(), 0)),
             NodeContent::CharacterDevice(DevDeviceKind::CpuDmaLatency) => {
-                self.write_at(buf, 0).map(|n| (n, 0))
+                self.write_at(buf, 0).await.map(|n| (n, 0))
             }
             NodeContent::BlockDevice(_) => Err(VfsError::OperationNotPermitted),
             NodeContent::File(file) => {
@@ -842,13 +847,13 @@ impl FileNodeOps for DevNode {
             NodeContent::CharacterDevice(DevDeviceKind::Tty)
             | NodeContent::CharacterDevice(DevDeviceKind::Console)
             | NodeContent::CharacterDevice(DevDeviceKind::TtyS0) => {
-                self.write_at(buf, 0).map(|n| (n, 0))
+                self.write_at(buf, 0).await.map(|n| (n, 0))
             }
             NodeContent::Directory(_) => Err(VfsError::IsADirectory),
         }
     }
 
-    fn set_len(&self, len: u64) -> VfsResult<()> {
+    async fn set_len(&self, len: u64) -> VfsResult<()> {
         let inode = self.inode_ref()?;
         if matches!(&inode.content, NodeContent::CharacterDevice(_) | NodeContent::BlockDevice(_)) {
             return Err(VfsError::InvalidInput);
@@ -857,11 +862,11 @@ impl FileNodeOps for DevNode {
         Ok(())
     }
 
-    fn set_symlink(&self, _target: &str) -> VfsResult<()> {
+    async fn set_symlink(&self, _target: &str) -> VfsResult<()> {
         Err(VfsError::PermissionDenied)
     }
 
-    fn ioctl(&self, _cmd: u32, _arg: usize) -> VfsResult<usize> {
+    async fn ioctl(&self, _cmd: u32, _arg: usize) -> VfsResult<usize> {
         Err(VfsError::NotATty)
     }
 }

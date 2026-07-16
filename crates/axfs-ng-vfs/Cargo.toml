@@ -58,3 +58,10 @@ version = "1.15"
 version = "0.10"
 features = ["mutex"]
 default-features = false
+
+[dependencies.async-trait]
+version = "0.1"
+
+[dependencies.async-lock]
+version = "3.4"
+default-features = false

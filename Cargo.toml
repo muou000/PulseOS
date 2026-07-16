@@ -1,7 +1,7 @@
 [workspace]
-
+resolver = "3"
 exclude = ["arceos", "crates/axconfig-gen", "crates/ext4plus"]
-members = ["pulse_core", "pulse_syscalls"]
+members = ["pulse_core", "pulse_syscalls", "crates/starry-vdso"]
 
 [workspace.package]
 version = "0.1.0"
@@ -12,6 +12,9 @@ homepage = "https://github.com/muou000/PulseOS"
 repository = "https://github.com/muou000/PulseOS"
 
 [workspace.dependencies]
+pulse_core = { path = "pulse_core" }
+pulse_syscalls = { path = "pulse_syscalls" }
+
 axfeat = { path = "arceos/api/axfeat", features = [
     "alloc-tlsf",
     "page-alloc-4g",
@@ -35,6 +38,12 @@ axfs = { path = "arceos/modules/axfs", features = ["times"] }
 axmm = { path = "arceos/modules/axmm" }
 axerrno = "0.2"
 axpoll = "0.3"
+
+axdriver_base = { path = "crates/axdriver_base" }
+axdriver_block = { path = "crates/axdriver_block" }
+axdriver_net = { path = "crates/axdriver_net" }
+axdriver_pci = { path = "crates/axdriver_pci" }
+axdriver_virtio = { path = "crates/axdriver_virtio" }
 
 axplat-riscv64-qemu-virt = "0.3.0"
 axplat-loongarch64-qemu-virt = "0.3.0"
@@ -63,6 +72,10 @@ rand = { version = "0.9.2", default-features = false }
 rand_core = { version = "0.10.1", default-features = false }
 rand_pcg = { version = "0.10.2", default-features = false }
 chrono = { version = "0.4", default-features = false }
+hashbrown = "0.16.1"
+kspin = "0.1"
+sbi-rt = "0.0.3"
+scope-local = "0.1"
 
 starry-vdso = { path = "crates/starry-vdso" }
 
@@ -75,8 +88,11 @@ axcpu = { path = "crates/axcpu" }
 axplat-loongarch64-qemu-virt = { path = "crates/axplat-loongarch64-qemu-virt" }
 axplat-riscv64-qemu-virt = { path = "crates/axplat-riscv64-qemu-virt" }
 axio = { path = "crates/axio" }
+axpoll = { path = "crates/axpoll" }
 virtio-drivers = { path = "crates/virtio-drivers" }
 page_table_multiarch = { path = "crates/page_table_multiarch" }
+axplat = { path = "crates/axplat" }
+handler_table = { path = "crates/handler_table" }
 
 [patch."https://github.com/arceos-org/allocator.git"]
 allocator = { path = "crates/allocator" }
@@ -101,8 +117,8 @@ axlog.workspace = true
 axruntime.workspace = true
 axfeat.workspace = true
 axtask.workspace = true
-pulse_syscalls = { path = "pulse_syscalls" }
-pulse_core = { path = "pulse_core" }
+pulse_syscalls.workspace = true
+pulse_core.workspace = true
 starry-vdso.workspace = true
 
 [target.'cfg(target_arch = "riscv64")'.dependencies]
@@ -113,3 +129,10 @@ axplat-loongarch64-qemu-virt.workspace = true
 
 [patch."https://github.com/rcore-os/smoltcp.git"]
 smoltcp = { path = "crates/smoltcp" }
+
+[patch."https://github.com/arceos-org/axdriver_crates.git"]
+axdriver_base = { path = "crates/axdriver_base" }
+axdriver_block = { path = "crates/axdriver_block" }
+axdriver_net = { path = "crates/axdriver_net" }
+axdriver_pci = { path = "crates/axdriver_pci" }
+axdriver_virtio = { path = "crates/axdriver_virtio" }

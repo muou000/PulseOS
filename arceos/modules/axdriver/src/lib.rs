@@ -56,9 +56,13 @@
 
 #![no_std]
 #![feature(associated_type_defaults)]
+// Required for `impl Trait` in associated type position (GAT concrete types),
+// used in `AsyncBlockDriverOps` impl for `VirtIoBlkDevWrapper` in virtio.rs.
+#![cfg_attr(feature = "async", feature(impl_trait_in_assoc_type))]
 
 #[macro_use]
 extern crate log;
+extern crate axlog;
 
 #[cfg(feature = "dyn")]
 extern crate alloc;

@@ -258,21 +258,23 @@ dependencies = [
  "axdriver_pci",
  "axdriver_virtio",
  "axhal",
+ "axlog",
+ "axpoll",
  "axtask",
  "cfg-if",
  "crate_interface",
+ "kspin",
  "log",
+ "virtio-drivers",
 ]
 
 [[package]]
 name = "axdriver_base"
 version = "0.1.2"
-source = "git+https://github.com/arceos-org/axdriver_crates.git?tag=v0.1.2#84eb2170f865e6fa29b78995a86f4fcdcede63df"
 
 [[package]]
 name = "axdriver_block"
 version = "0.1.2"
-source = "git+https://github.com/arceos-org/axdriver_crates.git?tag=v0.1.2#84eb2170f865e6fa29b78995a86f4fcdcede63df"
 dependencies = [
  "axdriver_base",
  "log",
@@ -281,9 +283,9 @@ dependencies = [
 [[package]]
 name = "axdriver_net"
 version = "0.1.2"
-source = "git+https://github.com/arceos-org/axdriver_crates.git?tag=v0.1.2#84eb2170f865e6fa29b78995a86f4fcdcede63df"
 dependencies = [
  "axdriver_base",
+ "axpoll",
  "log",
  "spin 0.9.8",
 ]
@@ -291,7 +293,6 @@ dependencies = [
 [[package]]
 name = "axdriver_pci"
 version = "0.1.2"
-source = "git+https://github.com/arceos-org/axdriver_crates.git?tag=v0.1.2#84eb2170f865e6fa29b78995a86f4fcdcede63df"
 dependencies = [
  "virtio-drivers",
 ]
@@ -299,7 +300,6 @@ dependencies = [
 [[package]]
 name = "axdriver_virtio"
 version = "0.1.2"
-source = "git+https://github.com/arceos-org/axdriver_crates.git?tag=v0.1.2#84eb2170f865e6fa29b78995a86f4fcdcede63df"
 dependencies = [
  "axdriver_base",
  "axdriver_block",
@@ -336,6 +336,8 @@ dependencies = [
 name = "axfs"
 version = "0.2.0"
 dependencies = [
+ "async-lock",
+ "async-trait",
  "axalloc",
  "axdriver",
  "axerrno",
@@ -364,6 +366,8 @@ dependencies = [
 name = "axfs-ng-vfs"
 version = "0.1.1"
 dependencies = [
+ "async-lock",
+ "async-trait",
  "axerrno",
  "axpoll",
  "bitflags 2.11.1",
@@ -446,6 +450,7 @@ dependencies = [
  "axerrno",
  "axhal",
  "axio",
+ "axpoll",
  "axsync",
  "axtask",
  "cfg-if",
@@ -458,8 +463,6 @@ dependencies = [
 [[package]]
 name = "axplat"
 version = "0.3.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "397e19d768dbf9573cf40663d65671a98c8b8a2a3b3947191d4aab6a33e01a15"
 dependencies = [
  "axplat-macros",
  "bitflags 2.11.1",
@@ -538,6 +541,7 @@ dependencies = [
  "axconfig-macros",
  "axcpu",
  "axplat",
+ "kspin",
  "log",
  "riscv",
  "riscv_goldfish",
@@ -572,8 +576,6 @@ dependencies = [
 [[package]]
 name = "axpoll"
 version = "0.3.9"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ac49f8a312eafa1a2c53e540883f3f5056ff92aa1dd8199dbdd3124836c04dee"
 dependencies = [
  "ax-kspin",
  "bitflags 2.11.1",
@@ -626,10 +628,13 @@ dependencies = [
  "axconfig",
  "axerrno",
  "axhal",
+ "axio",
+ "axpoll",
  "axsched",
  "cfg-if",
  "cpumask",
  "crate_interface",
+ "futures-util",
  "kernel_guard",
  "kspin",
  "lazyinit",
@@ -971,7 +976,6 @@ version = "0.1.0-rc.2"
 dependencies = [
  "async-lock",
  "async-trait",
- "axsync",
  "bitflags 2.11.1",
  "crc",
  "log",
@@ -991,10 +995,44 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "77ce24cb58228fbb8aa041425bb1050850ac19177686ea6e0f41a70416f56fdb"
 
 [[package]]
+name = "futures-core"
+version = "0.3.32"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7e3450815272ef58cec6d564423f6e755e25379b217b0bc688e295ba24df6b1d"
+
+[[package]]
+name = "futures-macro"
+version = "0.3.32"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e835b70203e41293343137df5c0664546da5745f82ec9b84d40be8336958447b"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.117",
+]
+
+[[package]]
+name = "futures-task"
+version = "0.3.32"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "037711b3d59c33004d3856fbdc83b99d4ff37a24768fa1be9ce3538a1cde4393"
+
+[[package]]
+name = "futures-util"
+version = "0.3.32"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "389ca41296e6190b48053de0321d02a77f32f8a5d2461dd38762c0593805c6d6"
+dependencies = [
+ "futures-core",
+ "futures-macro",
+ "futures-task",
+ "pin-project-lite",
+ "slab",
+]
+
+[[package]]
 name = "handler_table"
 version = "0.1.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "702cb690200d6303c1e1992bc648f3f3bf9c1d6a27fcf50551c513d61f339c99"
 
 [[package]]
 name = "hash32"
@@ -1421,6 +1459,7 @@ dependencies = [
  "axlog",
  "axmm",
  "axnet",
+ "axpoll",
  "axtask",
  "bitflags 2.11.1",
  "chrono",

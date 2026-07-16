@@ -193,6 +193,10 @@ pub struct Socket<'a> {
 /// You must query the configuration with `.poll()` after every call to `Interface::poll()`,
 /// and apply the configuration to the `Interface`.
 impl<'a> Socket<'a> {
+    pub(crate) fn egress_destination(&self) -> Option<IpAddress> {
+        Some(Ipv4Address::BROADCAST.into())
+    }
+
     /// Create a DHCPv4 socket
     #[allow(clippy::new_without_default)]
     pub fn new() -> Self {

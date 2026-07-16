@@ -1,4 +1,5 @@
 use core::net::{IpAddr, SocketAddr};
+
 use smoltcp::wire::{IpAddress, IpEndpoint, Ipv4Address, Ipv6Address};
 
 pub const fn from_core_ipaddr(ip: IpAddr) -> IpAddress {

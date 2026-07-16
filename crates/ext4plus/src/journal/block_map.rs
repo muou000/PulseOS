@@ -252,8 +252,6 @@ impl<'a> BlockMapLoader<'a> {
     }
 }
 
-#[cfg(not(feature = "sync"))]
-use crate::iters::AsyncIterator;
 
 pub(super) struct JournalBlockIter {
     fs: Ext4,

@@ -84,12 +84,12 @@ impl FsContext {
         })
     }
 
-    pub fn check_traverse_permission(&self, dir: &Location) -> VfsResult<()> {
+    pub async fn check_traverse_permission(&self, dir: &Location) -> VfsResult<()> {
         if let Some((uid, gid)) = self.credentials {
             if uid == 0 {
                 return Ok(());
             }
-            let meta = dir.metadata()?;
+            let meta = dir.metadata().await?;
             log::debug!(
                 "check_traverse_permission: credentials={:?}, dir={:?}, meta.uid={}, meta.gid={}, meta.mode={:#o}",
                 self.credentials,
@@ -114,12 +114,12 @@ impl FsContext {
         Ok(())
     }
 
-    pub fn check_write_permission(&self, dir: &Location) -> VfsResult<()> {
+    pub async fn check_write_permission(&self, dir: &Location) -> VfsResult<()> {
         if let Some((uid, gid)) = self.credentials {
             if uid == 0 {
                 return Ok(());
             }
-            let meta = dir.metadata()?;
+            let meta = dir.metadata().await?;
             let is_owner = uid == meta.uid;
             let is_group = gid == meta.gid;
             let has_w = if is_owner {
@@ -138,7 +138,7 @@ impl FsContext {
 
     /// Attempts to resolve a possible symlink, at the current location (this
     /// assumes that `loc` is a child of current directory).
-    pub fn try_resolve_symlink(
+    pub async fn try_resolve_symlink(
         &self,
         loc: Location,
         follow_count: &mut usize,
@@ -150,24 +150,31 @@ impl FsContext {
             return Err(VfsError::FilesystemLoop);
         }
         *follow_count += 1;
-        let target = loc.read_link()?;
+        let target = loc.read_link().await?;
         if target.is_empty() {
             return Err(VfsError::NotFound);
         }
         let parent = loc.parent().unwrap_or_else(|| self.root_dir.clone());
-        self.resolve_components_at(parent, PathBuf::from(target).components(), follow_count)
+        self.resolve_components_at(parent, PathBuf::from(target).components(), follow_count).await
     }
 
-    fn lookup(&self, dir: &Location, name: &str, follow_count: &mut usize) -> VfsResult<Location> {
-        let loc = dir.lookup_no_follow(name)?;
-        self.with_current_dir(dir.clone())?
-            .try_resolve_symlink(loc, follow_count)
+    fn lookup<'a>(
+        &'a self,
+        dir: &'a Location,
+        name: &'a str,
+        follow_count: &'a mut usize,
+    ) -> core::pin::Pin<alloc::boxed::Box<dyn core::future::Future<Output = VfsResult<Location>> + Send + 'a>> {
+        alloc::boxed::Box::pin(async move {
+            let loc = dir.lookup_no_follow(name).await?;
+            self.with_current_dir(dir.clone())?
+                .try_resolve_symlink(loc, follow_count).await
+        })
     }
 
-    fn resolve_components_at(
+    async fn resolve_components_at(
         &self,
         start: Location,
-        components: Components,
+        components: Components<'_>,
         follow_count: &mut usize,
     ) -> VfsResult<Location> {
         let mut dir = start;
@@ -175,7 +182,7 @@ impl FsContext {
             match comp {
                 Component::CurDir => {}
                 Component::ParentDir => {
-                    self.check_traverse_permission(&dir)?;
+                    self.check_traverse_permission(&dir).await?;
                     if dir != self.root_dir {
                         dir = dir.parent().unwrap_or_else(|| self.root_dir.clone());
                     }
@@ -184,23 +191,23 @@ impl FsContext {
                     dir = self.root_dir.clone();
                 }
                 Component::Normal(name) => {
-                    self.check_traverse_permission(&dir)?;
-                    dir = self.lookup(&dir, name, follow_count)?;
+                    self.check_traverse_permission(&dir).await?;
+                    dir = self.lookup(&dir, name, follow_count).await?;
                 }
             }
         }
         Ok(dir)
     }
 
-    fn resolve_components(
+    async fn resolve_components(
         &self,
-        components: Components,
+        components: Components<'_>,
         follow_count: &mut usize,
     ) -> VfsResult<Location> {
-        self.resolve_components_at(self.current_dir.clone(), components, follow_count)
+        self.resolve_components_at(self.current_dir.clone(), components, follow_count).await
     }
 
-    fn resolve_inner<'a>(
+    async fn resolve_inner<'a>(
         &self,
         path: &'a Path,
         follow_count: &mut usize,
@@ -210,31 +217,33 @@ impl FsContext {
         if entry_name.is_some() {
             components.next_back();
         }
-        let dir = self.resolve_components(components, follow_count)?;
+        let dir = self.resolve_components(components, follow_count).await?;
         dir.check_is_dir()?;
         Ok((dir, entry_name))
     }
 
     /// Resolves a path starting from `current_dir`.
-    pub fn resolve(&self, path: impl AsRef<Path>) -> VfsResult<Location> {
+    pub async fn resolve(&self, path: impl AsRef<Path>) -> VfsResult<Location> {
         let mut follow_count = 0;
-        let (dir, name) = self.resolve_inner(path.as_ref(), &mut follow_count)?;
+        let (dir, name) = self.resolve_inner(path.as_ref(), &mut follow_count).await?;
         match name {
             Some(name) => {
-                self.check_traverse_permission(&dir)?;
-                self.lookup(&dir, name, &mut follow_count)
+                self.check_traverse_permission(&dir).await?;
+                let loc = self.lookup(&dir, name, &mut follow_count).await?;
+                Ok(loc)
             }
             None => Ok(dir),
         }
     }
 
     /// Resolves a path starting from `current_dir` not following symlinks.
-    pub fn resolve_no_follow(&self, path: impl AsRef<Path>) -> VfsResult<Location> {
-        let (dir, name) = self.resolve_inner(path.as_ref(), &mut 0)?;
+    pub async fn resolve_no_follow(&self, path: impl AsRef<Path>) -> VfsResult<Location> {
+        let (dir, name) = self.resolve_inner(path.as_ref(), &mut 0).await?;
         match name {
             Some(name) => {
-                self.check_traverse_permission(&dir)?;
-                dir.lookup_no_follow(name)
+                self.check_traverse_permission(&dir).await?;
+                let loc = dir.lookup_no_follow(name).await?;
+                Ok(loc)
             }
             None => Ok(dir),
         }
@@ -245,9 +254,9 @@ impl FsContext {
     ///
     /// Returns `(parent_dir, entry_name)`, where `entry_name` is the name of
     /// the entry.
-    pub fn resolve_parent<'a>(&self, path: &'a Path) -> VfsResult<(Location, Cow<'a, str>)> {
-        let (dir, name) = self.resolve_inner(path, &mut 0)?;
-        self.check_traverse_permission(&dir)?;
+    pub async fn resolve_parent<'a>(&self, path: &'a Path) -> VfsResult<(Location, Cow<'a, str>)> {
+        let (dir, name) = self.resolve_inner(path, &mut 0).await?;
+        self.check_traverse_permission(&dir).await?;
         if let Some(name) = name {
             Ok((dir, Cow::Borrowed(name)))
         } else if let Some(parent) = dir.parent() {
@@ -264,9 +273,9 @@ impl FsContext {
     /// exists. Note that, it does not perform an actual check to ensure the
     /// entry's non-existence. It simply raises an error if the entry name is
     /// not present in the path.
-    pub fn resolve_nonexistent<'a>(&self, path: &'a Path) -> VfsResult<(Location, &'a str)> {
-        let (dir, name) = self.resolve_inner(path, &mut 0)?;
-        self.check_traverse_permission(&dir)?;
+    pub async fn resolve_nonexistent<'a>(&self, path: &'a Path) -> VfsResult<(Location, &'a str)> {
+        let (dir, name) = self.resolve_inner(path, &mut 0).await?;
+        self.check_traverse_permission(&dir).await?;
         if let Some(name) = name {
             Ok((dir, name))
         } else {
@@ -275,45 +284,45 @@ impl FsContext {
     }
 
     /// Retrieves metadata for the file.
-    pub fn metadata(&self, path: impl AsRef<Path>) -> VfsResult<Metadata> {
-        self.resolve(path)?.metadata()
+    pub async fn metadata(&self, path: impl AsRef<Path>) -> VfsResult<Metadata> {
+        self.resolve(path).await?.metadata().await
     }
 
     /// Reads the entire contents of a file into a bytes vector.
-    pub fn read(&self, path: impl AsRef<Path>) -> VfsResult<Vec<u8>> {
+    pub async fn read(&self, path: impl AsRef<Path>) -> VfsResult<Vec<u8>> {
         let mut buf = Vec::new();
-        let file = File::open(self, path.as_ref())?;
+        let file = File::open(self, path.as_ref()).await?;
         (&file).read_to_end(&mut buf)?;
         Ok(buf)
     }
 
     /// Reads up to `limit` bytes from the start of a file.
-    pub fn read_prefix(&self, path: impl AsRef<Path>, limit: usize) -> VfsResult<Vec<u8>> {
-        let file = File::open(self, path.as_ref())?;
+    pub async fn read_prefix(&self, path: impl AsRef<Path>, limit: usize) -> VfsResult<Vec<u8>> {
+        let file = File::open(self, path.as_ref()).await?;
         let mut buf = vec![0u8; limit];
-        let read = file.read_at(&mut buf[..], 0)?;
+        let read = file.read_at(&mut buf[..], 0).await?;
         buf.truncate(read);
         Ok(buf)
     }
 
     /// Reads the entire contents of a file into a string.
-    pub fn read_to_string(&self, path: impl AsRef<Path>) -> VfsResult<String> {
-        String::from_utf8(self.read(path)?).map_err(|_| VfsError::InvalidData)
+    pub async fn read_to_string(&self, path: impl AsRef<Path>) -> VfsResult<String> {
+        String::from_utf8(self.read(path).await?).map_err(|_| VfsError::InvalidData)
     }
 
     /// Writes a slice as the entire contents of a file.
     ///
     /// This function will create a file if it does not exist, and will entirely
     /// replace its contents if it does.
-    pub fn write(&self, path: impl AsRef<Path>, buf: impl AsRef<[u8]>) -> VfsResult<()> {
-        let file = File::create(self, path.as_ref())?;
+    pub async fn write(&self, path: impl AsRef<Path>, buf: impl AsRef<[u8]>) -> VfsResult<()> {
+        let file = File::create(self, path.as_ref()).await?;
         (&file).write_all(buf.as_ref())?;
         Ok(())
     }
 
     /// Returns an iterator over the entries in a directory.
-    pub fn read_dir(&self, path: impl AsRef<Path>) -> VfsResult<ReadDir> {
-        let dir = self.resolve(path)?;
+    pub async fn read_dir(&self, path: impl AsRef<Path>) -> VfsResult<ReadDir> {
+        let dir = self.resolve(path).await?;
         Ok(ReadDir {
             dir,
             buf: VecDeque::new(),
@@ -323,38 +332,38 @@ impl FsContext {
     }
 
     /// Removes a file from the filesystem.
-    pub fn remove_file(&self, path: impl AsRef<Path>) -> VfsResult<()> {
-        let entry = self.resolve_no_follow(path.as_ref())?;
+    pub async fn remove_file(&self, path: impl AsRef<Path>) -> VfsResult<()> {
+        let entry = self.resolve_no_follow(path.as_ref()).await?;
         let parent = entry.parent().ok_or(VfsError::IsADirectory)?;
-        self.check_write_permission(&parent)?;
-        parent.unlink(entry.name(), false)
+        self.check_write_permission(&parent).await?;
+        parent.unlink(entry.name(), false).await
     }
 
     /// Removes a directory from the filesystem.
-    pub fn remove_dir(&self, path: impl AsRef<Path>) -> VfsResult<()> {
-        let entry = self.resolve_no_follow(path.as_ref())?;
+    pub async fn remove_dir(&self, path: impl AsRef<Path>) -> VfsResult<()> {
+        let entry = self.resolve_no_follow(path.as_ref()).await?;
         let parent = entry.parent().ok_or(VfsError::IsADirectory)?;
-        self.check_write_permission(&parent)?;
-        parent.unlink(entry.name(), true)
+        self.check_write_permission(&parent).await?;
+        parent.unlink(entry.name(), true).await
     }
 
     /// Renames a file or directory to a new name, replacing the original file
     /// if `to` already exists.
-    pub fn rename(&self, from: impl AsRef<Path>, to: impl AsRef<Path>) -> VfsResult<()> {
-        let (src_dir, src_name) = self.resolve_parent(from.as_ref())?;
-        let (dst_dir, dst_name) = self.resolve_parent(to.as_ref())?;
-        self.check_write_permission(&src_dir)?;
-        self.check_write_permission(&dst_dir)?;
-        src_dir.rename(&src_name, &dst_dir, &dst_name)
+    pub async fn rename(&self, from: impl AsRef<Path>, to: impl AsRef<Path>) -> VfsResult<()> {
+        let (src_dir, src_name) = self.resolve_parent(from.as_ref()).await?;
+        let (dst_dir, dst_name) = self.resolve_parent(to.as_ref()).await?;
+        self.check_write_permission(&src_dir).await?;
+        self.check_write_permission(&dst_dir).await?;
+        src_dir.rename(&src_name, &dst_dir, &dst_name).await
     }
 
     /// Creates a new, empty directory at the provided path.
-    pub fn create_dir(&self, path: impl AsRef<Path>, mode: NodePermission) -> VfsResult<Location> {
-        let (dir, name) = self.resolve_nonexistent(path.as_ref())?;
-        self.check_write_permission(&dir)?;
+    pub async fn create_dir(&self, path: impl AsRef<Path>, mode: NodePermission) -> VfsResult<Location> {
+        let (dir, name) = self.resolve_nonexistent(path.as_ref()).await?;
+        self.check_write_permission(&dir).await?;
         let mut final_mode = mode;
         let mut final_credentials = self.credentials;
-        if let Ok(parent_meta) = dir.metadata() {
+        if let Ok(parent_meta) = dir.metadata().await {
             if parent_meta.mode.contains(NodePermission::SET_GID) {
                 final_mode |= NodePermission::SET_GID;
                 if let Some((uid, _)) = final_credentials {
@@ -362,61 +371,61 @@ impl FsContext {
                 }
             }
         }
-        let loc = dir.create(name, NodeType::Directory, final_mode)?;
+        let loc = dir.create(name, NodeType::Directory, final_mode).await?;
         if let Some((uid, gid)) = final_credentials {
             let _ = loc.update_metadata(MetadataUpdate {
                 owner: Some((uid, gid)),
                 ..Default::default()
-            });
+            }).await;
         }
         Ok(loc)
     }
 
     /// Creates a new hard link on the filesystem.
-    pub fn link(
+    pub async fn link(
         &self,
         old_path: impl AsRef<Path>,
         new_path: impl AsRef<Path>,
     ) -> VfsResult<Location> {
-        let old = self.resolve(old_path.as_ref())?;
-        let (new_dir, new_name) = self.resolve_nonexistent(new_path.as_ref())?;
-        self.check_write_permission(&new_dir)?;
-        new_dir.link(new_name, &old)
+        let old = self.resolve(old_path.as_ref()).await?;
+        let (new_dir, new_name) = self.resolve_nonexistent(new_path.as_ref()).await?;
+        self.check_write_permission(&new_dir).await?;
+        new_dir.link(new_name, &old).await
     }
 
     /// Creates a new symbolic link on the filesystem.
-    pub fn symlink(
+    pub async fn symlink(
         &self,
         target: impl AsRef<str>,
         link_path: impl AsRef<Path>,
     ) -> VfsResult<Location> {
-        let (dir, name) = self.resolve_nonexistent(link_path.as_ref())?;
-        self.check_write_permission(&dir)?;
-        if dir.lookup_no_follow(name).is_ok() {
+        let (dir, name) = self.resolve_nonexistent(link_path.as_ref()).await?;
+        self.check_write_permission(&dir).await?;
+        if dir.lookup_no_follow(name).await.is_ok() {
             return Err(VfsError::AlreadyExists);
         }
         let mut final_credentials = self.credentials;
-        if let Ok(parent_meta) = dir.metadata() {
+        if let Ok(parent_meta) = dir.metadata().await {
             if parent_meta.mode.contains(NodePermission::SET_GID) {
                 if let Some((uid, _)) = final_credentials {
                     final_credentials = Some((uid, parent_meta.gid));
                 }
             }
         }
-        let symlink = dir.create(name, NodeType::Symlink, NodePermission::default())?;
-        symlink.entry().as_file()?.set_symlink(target.as_ref())?;
+        let symlink = dir.create(name, NodeType::Symlink, NodePermission::default()).await?;
+        symlink.entry().as_file()?.set_symlink(target.as_ref()).await?;
         if let Some((uid, gid)) = final_credentials {
             let _ = symlink.update_metadata(MetadataUpdate {
                 owner: Some((uid, gid)),
                 ..Default::default()
-            });
+            }).await;
         }
         Ok(symlink)
     }
 
     /// Returns the canonical, absolute form of a path.
-    pub fn canonicalize(&self, path: impl AsRef<Path>) -> VfsResult<PathBuf> {
-        self.resolve(path.as_ref())?.absolute_path()
+    pub async fn canonicalize(&self, path: impl AsRef<Path>) -> VfsResult<PathBuf> {
+        self.resolve(path.as_ref()).await?.absolute_path()
     }
 }
 
@@ -443,7 +452,7 @@ impl Iterator for ReadDir {
 
         if self.buf.is_empty() {
             self.buf.clear();
-            let result = self.dir.read_dir(
+            let result = axtask::future::block_on(self.dir.read_dir(
                 self.offset,
                 &mut |name: &str, ino: u64, node_type: NodeType, offset: u64| {
                     self.buf.push_back(ReadDirEntry {
@@ -455,7 +464,7 @@ impl Iterator for ReadDir {
                     self.offset = offset;
                     self.buf.len() < Self::BUF_SIZE
                 },
-            );
+            ));
 
             // We handle errors only if we didn't get any entries
             if self.buf.is_empty() {
