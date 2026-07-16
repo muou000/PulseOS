@@ -7,6 +7,7 @@ use alloc::{
 use core::mem;
 
 use axdriver::{AxBlockDevice, prelude::*};
+use axsync::Mutex as DeviceMutex;
 use spin::Mutex;
 
 fn take<'a>(buf: &mut &'a [u8], cnt: usize) -> &'a [u8] {
@@ -35,7 +36,8 @@ fn take_mut<'a>(buf: &mut &'a mut [u8], cnt: usize) -> &'a mut [u8] {
 ///    for the synchronous surface: Rust's `Arc` does **not** implement
 ///    `DerefMut`, so `&mut *arc` cannot grant `&mut dyn …` from a shared
 ///    `Arc`. (`E0596`.)
-/// 3. The right shape retains the outer `Mutex` for `&mut`-granting — the
+/// 3. The right shape retains an outer task-aware `Mutex` for `&mut`-granting —
+///    the
 ///    fix is **what we put inside the Mutex**: `Arc::new(Box<dyn … as
 ///    DynAsyncBlockDriverOps + Send + Sync + 'static>>)`. The outer `Arc`
 ///    is cheaply cloneable across the async boundary; the inner `Mutex`
@@ -45,31 +47,29 @@ fn take_mut<'a>(buf: &mut &'a mut [u8], cnt: usize) -> &'a mut [u8] {
 ///
 /// The async future clones only the outer `Arc`, so it does not require
 /// `Box<dyn …>` to be `Clone`. Inside the future we briefly take the
-/// `MutexGuard`, dispatch to the driver's `read_block`/`write_block` sync
-/// entry point, drop the guard, and yield a future that is **immediately
-/// ready** — matching the original `4e357ea4` semantics ("virtio wrappers
-/// are cheap handles over shared synchronized state"). The async behaviour
-/// on the underlying driver (e.g. `VirtIoBlkDevWrapper`'s WaitFuture) is
-/// preserved because the synchronous path goes through the driver's own
-/// locked state.
+/// `MutexGuard` and dispatch to the driver's `read_block`/`write_block` sync
+/// entry point. VirtIO may suspend the task while that call waits for an IRQ,
+/// so this mutex must put competing tasks to sleep rather than spin until the
+/// operation completes.
 #[derive(Clone)]
 pub struct SharedBlockDevice {
     name: String,
-    // Retain the original `Arc<Mutex<AxBlockDevice>>` shape; only the inner
-    // `AxBlockDevice` type alias changed (now `Box<dyn DynAsyncBlockDriverOps +
-    // Send + Sync>`). This keeps `Mutex` happy with a `Sized` payload.
-    dev: Arc<Mutex<AxBlockDevice>>,
+    // Retain the original `Arc<Mutex<AxBlockDevice>>` shape; only the lock is
+    // task-aware so a driver may sleep while it owns the mutable device. The
+    // inner `AxBlockDevice` type alias changed (now `Box<dyn
+    // DynAsyncBlockDriverOps + Send + Sync>`), keeping the mutex payload sized.
+    dev: Arc<DeviceMutex<AxBlockDevice>>,
 }
 
 impl SharedBlockDevice {
     /// Wraps a block device so the same underlying driver can be reused.
     pub fn new(dev: AxBlockDevice) -> Self {
         let name = dev.device_name().to_string();
-        Self { name, dev: Arc::new(Mutex::new(dev)) }
+        Self { name, dev: Arc::new(DeviceMutex::new(dev)) }
     }
 
-    /// Builds a `SharedBlockDevice` from a pre-existing `Arc<Mutex<…>>` handle.
-    pub fn from_arc(dev: Arc<Mutex<AxBlockDevice>>) -> Self {
+    /// Builds a `SharedBlockDevice` from a pre-existing task-aware mutex handle.
+    pub fn from_arc(dev: Arc<DeviceMutex<AxBlockDevice>>) -> Self {
         let name = dev.lock().device_name().to_string();
         Self { name, dev }
     }
@@ -143,10 +143,8 @@ impl AsyncBlockDriverOps for SharedBlockDevice {
         // async block to dispatch to the synchronous entry point.
         let arc = self.dev.clone();
         Box::pin(async move {
-            // Lock the inner Mutex synchronously (the outer `Arc` carries
-            // it), dispatch to the driver's *synchronous* read path, and
-            // release the guard before yielding the ready future. This
-            // matches the design noted in commit `4e357ea4`.
+            // The task-aware mutex lets another caller sleep if this driver's
+            // synchronous completion path waits for an interrupt.
             let res = {
                 let mut g = arc.lock();
                 g.read_block(block_id, buf)
