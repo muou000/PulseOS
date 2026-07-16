@@ -773,8 +773,9 @@ impl Drop for Inode {
         if !still_active {
             active.remove(&self.ino);
             if is_unlinked {
+                drop(active);
                 crate::invalidate_file_cache(Arc::as_ptr(&self.fs) as usize, self.ino as u64);
-                self.fs.pending_deletions.lock().push(self.ino);
+                self.fs.queue_deletion(self.ino);
             }
         }
     }

@@ -4,6 +4,7 @@ use alloc::collections::BTreeMap;
 use alloc::sync::Weak;
 use alloc::vec::Vec;
 use core::cell::OnceCell;
+use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use axfs_ng_vfs::{
     DirEntry, DirNode, Filesystem, FilesystemOps, Reference, StatFs, VfsResult, WeakDirEntry,
@@ -22,7 +23,10 @@ pub struct Ext4Filesystem {
     root_dir: OnceCell<WeakDirEntry>,
     pub(super) active_inodes: Mutex<BTreeMap<u32, Vec<Weak<Inode>>>>,
     pub(crate) block_size: usize,
-    pub(super) pending_deletions: Mutex<Vec<u32>>,
+    pending_deletions: Mutex<Vec<u32>>,
+    deletion_generation: AtomicU64,
+    deletion_worker_running: AtomicBool,
+    deletion_processing: async_lock::Mutex<()>,
 }
 
 impl Ext4Filesystem {
@@ -75,6 +79,9 @@ impl Ext4Filesystem {
             active_inodes: Mutex::new(BTreeMap::new()),
             block_size,
             pending_deletions: Mutex::new(Vec::new()),
+            deletion_generation: AtomicU64::new(0),
+            deletion_worker_running: AtomicBool::new(false),
+            deletion_processing: async_lock::Mutex::new(()),
         });
         let root_dir = DirEntry::new_dir(
             |this| DirNode::new(Inode::new(fs.clone(), ROOT_INODE, Some(this))),
@@ -84,7 +91,49 @@ impl Ext4Filesystem {
         Ok(Filesystem::new(fs))
     }
 
-    pub(crate) async fn process_pending_deletions(&self, fs: &Ext4) {
+    pub(super) fn queue_deletion(self: &Arc<Self>, ino: u32) {
+        self.pending_deletions.lock().push(ino);
+        self.deletion_generation.fetch_add(1, Ordering::Release);
+        self.start_deletion_worker();
+    }
+
+    fn start_deletion_worker(self: &Arc<Self>) {
+        if self
+            .deletion_worker_running
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            return;
+        }
+
+        let fs = self.clone();
+        axtask::spawn_async(async move {
+            fs.run_deletion_worker().await;
+        });
+    }
+
+    async fn run_deletion_worker(self: Arc<Self>) {
+        loop {
+            let generation = self.deletion_generation.load(Ordering::Acquire);
+            self.process_pending_deletions().await;
+
+            // Publish idle before rechecking the enqueue generation. A new
+            // close either claims the worker flag itself or makes us loop.
+            self.deletion_worker_running.store(false, Ordering::Release);
+
+            if self.deletion_generation.load(Ordering::Acquire) == generation
+                || self
+                    .deletion_worker_running
+                    .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+                    .is_err()
+            {
+                break;
+            }
+        }
+    }
+
+    async fn process_pending_deletions(&self) {
+        let _processing = self.deletion_processing.lock().await;
         let mut pending = self.pending_deletions.lock();
         if pending.is_empty() {
             return;
@@ -98,7 +147,7 @@ impl Ext4Filesystem {
 
         for ino in inodes_to_check {
             if let Some(idx) = core::num::NonZeroU32::new(ino) {
-                match ext4plus::inode::Inode::read(fs, idx).await {
+                match ext4plus::inode::Inode::read(&self.inner, idx).await {
                     Ok(inode) => {
                         if inode.links_count() == 0 {
                             let has_other_active = {
@@ -117,7 +166,7 @@ impl Ext4Filesystem {
                             };
                             if !has_other_active {
                                 log::debug!("ext4: deferred deleting unlinked file (ino {})", ino);
-                                if let Err(e) = fs.delete_file(inode).await {
+                                if let Err(e) = self.inner.delete_file(inode).await {
                                     log::error!("ext4: failed to delete unlinked file (ino {}): {:?}", ino, e);
                                     if !matches!(e, Ext4Error::Corrupt(_) | Ext4Error::NotFound) {
                                         failed.push(ino);
@@ -189,6 +238,7 @@ impl FilesystemOps for Ext4Filesystem {
     }
 
     async fn flush(&self) -> VfsResult<()> {
+        self.process_pending_deletions().await;
         crate::disk::flush_all_disks().map_err(|_| axfs_ng_vfs::VfsError::Io)?;
         Ok(())
     }
