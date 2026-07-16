@@ -388,6 +388,7 @@ impl PageCache {
     pub fn data(&mut self) -> &mut [u8] {
         unsafe { core::slice::from_raw_parts_mut(self.addr.as_mut_ptr(), PAGE_SIZE) }
     }
+
 }
 
 impl Drop for PageCache {
@@ -461,6 +462,46 @@ impl CachedFileShared {
             page.dirty = false;
         }
         Ok(())
+    }
+
+    async fn evict_lru_async(
+        &self,
+        file: &FileNode,
+    ) -> VfsResult<Option<(u32, PageCache)>> {
+        let writeback = {
+            let mut cache = self.page_cache.lock();
+            let Some((&pn, page)) = cache.peek_lru() else {
+                return Ok(None);
+            };
+            if !page.dirty {
+                return Ok(cache.pop_lru());
+            }
+
+            let page_start = pn as u64 * PAGE_SIZE as u64;
+            let len = (*self.size.lock())
+                .saturating_sub(page_start)
+                .min(PAGE_SIZE as u64) as usize;
+            let page = cache.get_mut(&pn).ok_or(VfsError::Io)?;
+            (pn, page_start, page.data()[..len].to_vec())
+        };
+
+        let (pn, page_start, data) = writeback;
+        if !data.is_empty() {
+            let written = file.write_at(&data, page_start).await?;
+            if written != data.len() {
+                return Err(VfsError::Io);
+            }
+        }
+
+        // The page stays dirty and resident until writeback succeeds. If this
+        // future is cancelled, the only copy of the dirty data is not lost.
+        let mut page = self
+            .page_cache
+            .lock()
+            .pop(&pn)
+            .ok_or(VfsError::Io)?;
+        page.dirty = false;
+        Ok(Some((pn, page)))
     }
 
     fn flush_dirty_pages_locked(
@@ -893,7 +934,7 @@ impl CachedFile {
             // Direct writes hold the exclusive side while changing the backend
             // and invalidating the cache. Validate and publish under the shared
             // side so a stale fill can never be inserted after that invalidation.
-            let _io_guard = self.shared.io_lock.read();
+            let io_guard = self.shared.io_lock.write();
             if self.shared.cache_generation.load(Ordering::Acquire) != generation {
                 continue;
             }
@@ -902,15 +943,26 @@ impl CachedFile {
             if cache.contains(&pn) {
                 return Ok(());
             }
-            if cache.len() == cache.cap().get() {
-                if let Some((evicted_pn, mut page)) = cache.pop_lru() {
-                    if let Err(err) = self.evict_cache(file, evicted_pn, &mut page) {
-                        cache.put(evicted_pn, page);
-                        return Err(err);
-                    }
+            let cache_full = cache.len() == cache.cap().get();
+            drop(cache);
+
+            let evicted = if cache_full {
+                self.shared.evict_lru_async(file).await?
+            } else {
+                None
+            };
+
+            let mut cache = self.shared.page_cache.lock();
+            cache.put(pn, new_page);
+            drop(cache);
+            drop(io_guard);
+
+            if let Some((evicted_pn, page)) = evicted {
+                let listeners = self.shared.evict_listeners_snapshot();
+                for listener in listeners.iter() {
+                    (listener.listener)(evicted_pn, &page);
                 }
             }
-            cache.put(pn, new_page);
             return Ok(());
         }
     }
