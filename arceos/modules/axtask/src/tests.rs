@@ -1,5 +1,5 @@
 use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{Mutex, Once};
+use std::sync::{Arc, Mutex, Once};
 
 use axerrno::{AxError, AxResult};
 use axpoll::{IoEvents, Pollable};
@@ -221,4 +221,80 @@ fn test_poll_io_registers_before_recheck() {
 
     assert_eq!(result, Ok(7));
     assert_eq!(pollable.registrations.load(Ordering::Relaxed), 1);
+}
+
+#[test]
+fn test_notify_one_consumes_one_running_waiter() {
+    use crate::task::{TaskInner, TaskState};
+
+    let _lock = SERIAL.lock();
+    INIT.call_once(axtask::init_scheduler);
+
+    let first = TaskInner::new_init("running-waiter-1".into()).into_arc();
+    let second = TaskInner::new_init("running-waiter-2".into()).into_arc();
+    for task in [&first, &second] {
+        task.set_state(TaskState::Running);
+        task.set_in_wait_queue(true);
+    }
+
+    let queue = WaitQueue::new();
+    queue.enqueue_task_for_test(first.clone());
+    queue.enqueue_task_for_test(second.clone());
+
+    assert!(queue.notify_one(false));
+    assert!(!first.in_wait_queue());
+    assert!(second.in_wait_queue());
+    assert_eq!(queue.len(), 1);
+
+    assert!(queue.notify_one(false));
+    assert!(!second.in_wait_queue());
+    assert!(queue.is_empty());
+}
+
+#[test]
+fn test_wait_future_refreshes_and_cancels_waker() {
+    use core::{
+        future::Future,
+        task::{Context, Poll, Waker},
+    };
+    use std::task::Wake;
+
+    struct CountWake(AtomicUsize);
+
+    impl Wake for CountWake {
+        fn wake(self: Arc<Self>) {
+            self.0.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    let _lock = SERIAL.lock();
+    INIT.call_once(axtask::init_scheduler);
+
+    let queue = WaitQueue::new();
+    let first = Arc::new(CountWake(AtomicUsize::new(0)));
+    let second = Arc::new(CountWake(AtomicUsize::new(0)));
+    let first_waker = Waker::from(first.clone());
+    let second_waker = Waker::from(second.clone());
+    let mut first_cx = Context::from_waker(&first_waker);
+    let mut second_cx = Context::from_waker(&second_waker);
+    let mut future = Box::pin(queue.wait_async());
+
+    assert_eq!(future.as_mut().poll(&mut first_cx), Poll::Pending);
+    assert_eq!(future.as_mut().poll(&mut second_cx), Poll::Pending);
+    assert!(queue.notify_one(false));
+    assert_eq!(first.0.load(Ordering::Relaxed), 0);
+    assert_eq!(second.0.load(Ordering::Relaxed), 1);
+    assert_eq!(future.as_mut().poll(&mut second_cx), Poll::Ready(()));
+
+    let cancelled = Arc::new(CountWake(AtomicUsize::new(0)));
+    let cancelled_waker = Waker::from(cancelled.clone());
+    let mut cancelled_cx = Context::from_waker(&cancelled_waker);
+    let mut cancelled_future = Box::pin(queue.wait_async());
+    assert_eq!(
+        cancelled_future.as_mut().poll(&mut cancelled_cx),
+        Poll::Pending
+    );
+    drop(cancelled_future);
+    assert!(!queue.notify_one(false));
+    assert_eq!(cancelled.0.load(Ordering::Relaxed), 0);
 }

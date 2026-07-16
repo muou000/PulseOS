@@ -10,6 +10,7 @@ use core::{
 use axerrno::AxError;
 use axhal::time::{TimeValue, monotonic_time};
 use futures_util::{FutureExt, select_biased};
+use kspin::SpinNoIrq;
 
 macro_rules! percpu_static {
     ($(
@@ -92,7 +93,7 @@ impl TimerRuntime {
 }
 
 percpu_static! {
-    TIMER_RUNTIME: TimerRuntime = TimerRuntime::new(),
+    TIMER_RUNTIME: SpinNoIrq<TimerRuntime> = SpinNoIrq::new(TimerRuntime::new()),
 }
 
 #[allow(dead_code)]
@@ -100,10 +101,13 @@ pub(crate) fn check_timer_events() {
     let now = monotonic_time();
     loop {
         let waker = {
-            // SAFETY: only called in the local CPU's timer hook or an
-            // equivalent IRQ-disabled context. This borrow ends before the
-            // waker is invoked below.
-            unsafe { TIMER_RUNTIME.current_ref_mut_raw() }.pop_expired(now)
+            let _guard = kernel_guard::NoPreemptIrqSave::new();
+            // SAFETY: preemption is disabled while resolving the current
+            // CPU's per-CPU address. The runtime lock permits timer futures
+            // running on another CPU to access their owner runtime safely.
+            unsafe { TIMER_RUNTIME.current_ref_raw() }
+                .lock()
+                .pop_expired(now)
         };
         match waker {
             Some(waker) => waker.wake(),
@@ -118,26 +122,54 @@ pub(crate) fn next_timer_deadline() -> Option<TimeValue> {
 }
 
 fn with_current<R>(f: impl FnOnce(&mut TimerRuntime) -> R) -> R {
-    let _g = kernel_guard::NoPreemptIrqSave::new();
-    f(unsafe { TIMER_RUNTIME.current_ref_mut_raw() })
+    let _guard = kernel_guard::NoPreemptIrqSave::new();
+    // SAFETY: preemption is disabled while resolving the current per-CPU
+    // address, and all runtime mutation is serialized by its lock.
+    f(&mut unsafe { TIMER_RUNTIME.current_ref_raw() }.lock())
+}
+
+fn with_cpu<R>(cpu_id: usize, f: impl FnOnce(&mut TimerRuntime) -> R) -> R {
+    // SAFETY: `cpu_id` was captured from `this_cpu_id()` when this timer was
+    // registered, and the runtime lock serializes local and remote access.
+    f(&mut unsafe { TIMER_RUNTIME.remote_ref_raw(cpu_id) }.lock())
 }
 
 /// Future returned by `sleep` and `sleep_until`.
 #[must_use = "futures do nothing unless you `.await` or poll them"]
-pub struct TimerFuture(TimerKey);
+pub struct TimerFuture {
+    owner_cpu: usize,
+    key: TimerKey,
+}
 
 impl Future for TimerFuture {
     type Output = ();
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        with_current(|r| r.poll(&self.0, cx))
+        with_cpu(self.owner_cpu, |runtime| runtime.poll(&self.key, cx))
     }
 }
 
 impl Drop for TimerFuture {
     fn drop(&mut self) {
-        with_current(|r| r.cancel(&self.0));
+        with_cpu(self.owner_cpu, |runtime| runtime.cancel(&self.key));
     }
+}
+
+fn register_timer(deadline: TimeValue) -> Option<TimerFuture> {
+    let _guard = kernel_guard::NoPreemptIrqSave::new();
+    let owner_cpu = axhal::percpu::this_cpu_id();
+    let key = {
+        // SAFETY: preemption is disabled, so this remains the runtime for
+        // `owner_cpu` until the registration is complete.
+        unsafe { TIMER_RUNTIME.current_ref_raw() }
+            .lock()
+            .add(deadline)
+    }?;
+
+    #[cfg(feature = "irq")]
+    crate::timers::reprogram_timer();
+
+    Some(TimerFuture { owner_cpu, key })
 }
 
 /// Waits until `duration` has elapsed.
@@ -147,11 +179,8 @@ pub async fn sleep(duration: Duration) {
 
 /// Waits until `deadline` is reached.
 pub async fn sleep_until(deadline: TimeValue) {
-    let key = with_current(|r| r.add(deadline));
-    if let Some(key) = key {
-        #[cfg(feature = "irq")]
-        crate::timers::reprogram_timer();
-        TimerFuture(key).await;
+    if let Some(timer) = register_timer(deadline) {
+        timer.await;
     }
 }
 
@@ -200,10 +229,10 @@ pub async fn timeout_at<F: IntoFuture>(
 
 #[cfg(test)]
 mod tests {
-    use alloc::sync::Arc;
+    use alloc::{sync::Arc, task::Wake};
     use core::{
         sync::atomic::{AtomicUsize, Ordering},
-        task::{Wake, Waker},
+        task::Waker,
     };
 
     use super::{TimeValue, TimerKey, TimerRuntime};

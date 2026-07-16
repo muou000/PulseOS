@@ -153,28 +153,27 @@ impl<'a> Future for WaitFuture<'a> {
     type Output = ();
 
     fn poll(mut self: core::pin::Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        // Lazy registration: capture the notification flag on the first poll
-        // and reuse it on subsequent polls so that spurious or unrelated
-        // wakes do not cause premature completion.
-        let flag = if let Some(f) = self.notified.as_ref() {
-            // We only registered one waker; the executor may have reused
-            // the same waker across polls, so re-registering isn't strictly
-            // required here. Keep the original entry so its flag stays in
-            // sync with the wait queue's storage.
-            f.clone()
+        let flag = if let Some(flag) = self.notified.as_ref() {
+            flag.clone()
         } else {
-            let (registration, f) = self.wq.register_wait_future_waker(cx.waker());
+            let (registration, flag) = self.wq.register_wait_future_waker(cx.waker());
             self.registration = Some(registration);
-            self.notified = Some(f.clone());
-            f
+            self.notified = Some(flag.clone());
+            flag
         };
 
-        // Only complete when an actual notify_* has set the flag. If the
-        // notification raced in between registering and checking, the load
-        // below will observe `true` since both the store in `notify_*` and
-        // our register_waker/load sequence are ordered by the wait queue's
-        // internal locks and the Release/Acquire pair on the flag itself.
+        if let Some(registration) = self.registration.as_ref() {
+            // A Future may be moved between executors or tasks while Pending.
+            // Always retain the waker supplied by the latest poll.
+            self.wq.update_registered_waker(registration, cx.waker());
+        }
+
         if flag.load(Ordering::Acquire) {
+            // The notifier may already have dequeued this registration; in
+            // that case unregistering is a harmless no-op.
+            if let Some(registration) = self.registration.take() {
+                self.wq.unregister_waker(registration);
+            }
             Poll::Ready(())
         } else {
             Poll::Pending

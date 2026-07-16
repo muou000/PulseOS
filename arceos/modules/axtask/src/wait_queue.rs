@@ -310,19 +310,34 @@ impl WaitQueue {
     pub fn notify_one(&self, resched: bool) -> bool {
         let mut wq = self.queue.lock();
         let mut target = None;
+        let mut consumed_running = false;
         while let Some(task) = wq.pop_front() {
-            if task.state() == crate::task::TaskState::Blocked {
-                target = Some(task);
-                break;
+            match task.state() {
+                crate::task::TaskState::Blocked => {
+                    target = Some(task);
+                    break;
+                }
+                crate::task::TaskState::Running if task.consume_wait_queue_entry() => {
+                    // `wait_multiple_timeout_until` enrolls the current task
+                    // before changing it to Blocked. Consuming that Running
+                    // entry is the one notification; do not drain later
+                    // Running waiters while looking for a Blocked task.
+                    consumed_running = true;
+                    break;
+                }
+                _ => {
+                    // A timeout or a notification through another queue can
+                    // leave a stale entry behind until the waiter cleans up.
+                    task.set_in_wait_queue(false);
+                }
             }
-            // The task is no longer blocked (e.g., timed out), but still in the wait queue.
-            // We should mark it as not in the wait queue.
-            task.set_in_wait_queue(false);
         }
         drop(wq);
 
         if let Some(task) = target {
             unblock_one_task(task, resched);
+            true
+        } else if consumed_running {
             true
         } else {
             // Only remove and wake one registered waker, matching the
@@ -330,13 +345,16 @@ impl WaitQueue {
             // remain registered for future notifications.
             let entry = {
                 let mut wakers = self.wakers.lock();
-                wakers.pop_front()
+                let entry = wakers.pop_front();
+                if let Some(entry) = entry.as_ref() {
+                    // Keep this store under the queue lock. A concurrent poll
+                    // that fails to find the removed registration must then
+                    // observe the completed notification.
+                    entry.notified.store(true, Ordering::Release);
+                }
+                entry
             };
             if let Some(entry) = entry {
-                // Mark the registered future as notified *before* waking, so
-                // that any subsequent poll observes completion even if the
-                // waker has not yet been processed by the executor.
-                entry.notified.store(true, Ordering::Release);
                 entry.waker.wake();
                 true
             } else {
@@ -368,13 +386,12 @@ impl WaitQueue {
 
         let wakers = {
             let mut wakers = self.wakers.lock();
+            for entry in wakers.iter() {
+                entry.notified.store(true, Ordering::Release);
+            }
             core::mem::take(&mut *wakers)
         };
         for entry in wakers {
-            // Mark all registered futures as notified before waking, so they
-            // observe completion on their next poll even if the wakers have
-            // not yet been processed.
-            entry.notified.store(true, Ordering::Release);
             entry.waker.wake();
         }
     }
@@ -502,6 +519,19 @@ impl WaitQueue {
         (WakerRegistration(id), notified)
     }
 
+    pub(crate) fn update_registered_waker(
+        &self,
+        registration: &WakerRegistration,
+        waker: &core::task::Waker,
+    ) {
+        let mut wakers = self.wakers.lock();
+        if let Some(entry) = wakers.iter_mut().find(|entry| entry.id == registration.0)
+            && !entry.waker.will_wake(waker)
+        {
+            entry.waker = waker.clone();
+        }
+    }
+
     pub fn unregister_waker(&self, registration: WakerRegistration) {
         self.wakers
             .lock()
@@ -511,6 +541,11 @@ impl WaitQueue {
     /// Returns a future that waits for the wait queue.
     pub fn wait_async(&self) -> crate::future::WaitFuture {
         crate::future::WaitFuture::new(self)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn enqueue_task_for_test(&self, task: AxTaskRef) {
+        self.queue.lock().push_back(task);
     }
 }
 
