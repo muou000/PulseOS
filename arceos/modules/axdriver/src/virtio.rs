@@ -94,9 +94,9 @@ fn register_virtio_interrupt<T: Send + Sync + 'static>(
     irq: usize,
     device: &Arc<T>,
     handler: fn(&T),
-) -> DevResult<Option<VirtioIrqRegistration>> {
+) -> DevResult<VirtioIrqRegistration> {
     if irq == 0 {
-        return Ok(None);
+        return Err(DevError::BadState);
     }
 
     let id = NEXT_VIRTIO_INTERRUPT_ID.fetch_add(1, Ordering::Relaxed);
@@ -114,7 +114,7 @@ fn register_virtio_interrupt<T: Send + Sync + 'static>(
     drop(guard);
     axhal::irq::set_enable(irq, true);
 
-    Ok(Some(VirtioIrqRegistration { irq, id }))
+    Ok(VirtioIrqRegistration { irq, id })
 }
 
 fn common_virtio_irq_handler(irq: usize) {
@@ -137,6 +137,71 @@ fn common_virtio_irq_handler(irq: usize) {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct NoopInterruptHandler;
+
+    impl VirtioInterruptHandler for NoopInterruptHandler {
+        fn handle(&self) {}
+    }
+
+    fn noop_device_handler(_: &()) {}
+
+    #[test]
+    fn zero_irq_is_rejected() {
+        let device = Arc::new(());
+        assert!(matches!(
+            register_virtio_interrupt(0, &device, noop_device_handler),
+            Err(DevError::BadState)
+        ));
+    }
+
+    #[test]
+    fn registration_lives_until_last_shared_owner() {
+        let id = NEXT_VIRTIO_INTERRUPT_ID.fetch_add(2, Ordering::Relaxed);
+        let sentinel_id = id + 1;
+        let irq = usize::MAX - id;
+        let handler: Arc<dyn VirtioInterruptHandler> = Arc::new(NoopInterruptHandler);
+
+        VIRTIO_INTERRUPTS.lock().insert(
+            irq,
+            alloc::vec![
+                VirtioInterruptInfo {
+                    id,
+                    handler: handler.clone(),
+                },
+                // Keep the shared IRQ populated so this unit test never calls
+                // into a real platform IRQ controller.
+                VirtioInterruptInfo {
+                    id: sentinel_id,
+                    handler,
+                },
+            ],
+        );
+
+        let registration = Arc::new(VirtioIrqRegistration { irq, id });
+        let cloned_registration = registration.clone();
+        drop(registration);
+        assert!(
+            VIRTIO_INTERRUPTS
+                .lock()
+                .get(&irq)
+                .is_some_and(|infos| infos.iter().any(|info| info.id == id))
+        );
+
+        drop(cloned_registration);
+        let mut interrupts = VIRTIO_INTERRUPTS.lock();
+        assert!(
+            interrupts
+                .get(&irq)
+                .is_some_and(|infos| infos.iter().all(|info| info.id != id))
+        );
+        interrupts.remove(&irq);
+    }
+}
+
 cfg_if! {
     if #[cfg(net_dev = "virtio-net")] {
         pub struct VirtIoNet;
@@ -147,7 +212,7 @@ cfg_if! {
         }
 
         pub struct VirtIoNetDevWrapper<H: VirtIoHal, T: virtio_drivers::transport::Transport, const QS: usize> {
-            _irq_registration: Option<VirtioIrqRegistration>,
+            _irq_registration: VirtioIrqRegistration,
             inner: Arc<VirtIoNetDevInner<H, T, QS>>,
         }
 
@@ -260,7 +325,7 @@ cfg_if! {
         }
 
         pub struct VirtIoBlkDevWrapper<H: VirtIoHal, T: virtio_drivers::transport::Transport> {
-            _irq_registration: Option<VirtioIrqRegistration>,
+            _irq_registration: Arc<VirtioIrqRegistration>,
             inner: Arc<VirtIoBlkDevInner<H, T>>,
         }
 
@@ -268,10 +333,8 @@ cfg_if! {
             for VirtIoBlkDevWrapper<H, T>
         {
             fn clone(&self) -> Self {
-                // The original handle owns the IRQ registration. Clones keep the
-                // shared device state alive and are used for concurrent requests.
                 Self {
-                    _irq_registration: None,
+                    _irq_registration: self._irq_registration.clone(),
                     inner: self.inner.clone(),
                 }
             }
@@ -312,7 +375,11 @@ cfg_if! {
                             w.wait_queue.notify_all(true);
                         }
                     }
-                let irq_registration = register_virtio_interrupt(irq, &inner, handler::<H, T>)?;
+                let irq_registration = Arc::new(register_virtio_interrupt(
+                    irq,
+                    &inner,
+                    handler::<H, T>,
+                )?);
                 Ok(Self {
                     _irq_registration: irq_registration,
                     inner,
@@ -370,10 +437,15 @@ cfg_if! {
                     axlog::debug!("virtio::read_block: spin finished");
                 }
                 axlog::debug!("virtio::read_block: completing read blocks");
-                unsafe {
+                let result = unsafe {
                     self.inner.inner.lock().inner
                         .complete_read_blocks(token, &req, buf, &mut resp)
-                }.map_err(virtio_err_to_dev)?;
+                }.map_err(virtio_err_to_dev);
+                // One interrupt may cover several used entries. Once the head
+                // is popped, wake every waiter so the new head can be claimed.
+                #[cfg(feature = "multitask")]
+                self.inner.wait_queue.notify_all(false);
+                result?;
                 axlog::debug!("virtio::read_block: completed successfully");
                 Ok(())
             }
@@ -412,10 +484,15 @@ cfg_if! {
                     axlog::debug!("virtio::write_block: spin finished");
                 }
                 axlog::debug!("virtio::write_block: completing write blocks");
-                unsafe {
+                let result = unsafe {
                     self.inner.inner.lock().inner
                         .complete_write_blocks(token, &req, buf, &mut resp)
-                }.map_err(virtio_err_to_dev)?;
+                }.map_err(virtio_err_to_dev);
+                // Handoff is required even when the device response reports an
+                // error, because complete_write_blocks may already have popped.
+                #[cfg(feature = "multitask")]
+                self.inner.wait_queue.notify_all(false);
+                result?;
                 axlog::debug!("virtio::write_block: completed successfully");
                 Ok(())
             }
