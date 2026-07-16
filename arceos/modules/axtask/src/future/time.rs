@@ -1,10 +1,10 @@
-use alloc::collections::BTreeMap;
+use alloc::{collections::BTreeMap, vec::Vec};
 use core::{
     fmt,
+    future::{Future, IntoFuture},
     pin::Pin,
     task::{Context, Poll, Waker},
     time::Duration,
-    future::{Future, IntoFuture},
 };
 
 use axerrno::AxError;
@@ -76,9 +76,16 @@ impl TimerRuntime {
         self.wheel.keys().next().map(|key| key.deadline)
     }
 
-    fn wake(&mut self) {
+    /// Removes all expired timers and returns their wakers without invoking
+    /// them while `self` is mutably borrowed.
+    ///
+    /// A timer waker may unblock a task and reprogram the hardware timer. That
+    /// path queries this same per-CPU runtime again, so calling `wake()` from
+    /// inside this method would create a re-entrant mutable reference to
+    /// `TIMER_RUNTIME`.
+    fn drain_expired(&mut self) -> Vec<Waker> {
         if self.wheel.is_empty() {
-            return;
+            return Vec::new();
         }
 
         let now = monotonic_time();
@@ -88,10 +95,9 @@ impl TimerRuntime {
             key: u64::MAX,
         });
 
-        let expired = core::mem::replace(&mut self.wheel, pending);
-        for (_, w) in expired {
-            w.wake();
-        }
+        core::mem::replace(&mut self.wheel, pending)
+            .into_values()
+            .collect()
     }
 }
 
@@ -101,8 +107,13 @@ percpu_static! {
 
 #[allow(dead_code)]
 pub(crate) fn check_timer_events() {
-    // SAFETY: only called in timer hook or similar
-    unsafe { TIMER_RUNTIME.current_ref_mut_raw() }.wake();
+    // SAFETY: only called in the local CPU's timer hook or an equivalent
+    // IRQ-disabled context. End the per-CPU mutable borrow before invoking any
+    // waker because waking a task may re-enter timer reprogramming.
+    let expired = unsafe { TIMER_RUNTIME.current_ref_mut_raw() }.drain_expired();
+    for waker in expired {
+        waker.wake();
+    }
 }
 
 #[cfg(feature = "irq")]
@@ -188,5 +199,46 @@ pub async fn timeout_at<F: IntoFuture>(
         }
     } else {
         Ok(f.into_future().await)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use alloc::sync::Arc;
+    use core::{
+        sync::atomic::{AtomicUsize, Ordering},
+        task::{Wake, Waker},
+    };
+
+    use super::{TimeValue, TimerKey, TimerRuntime};
+
+    struct CountWake(AtomicUsize);
+
+    impl Wake for CountWake {
+        fn wake(self: Arc<Self>) {
+            self.0.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    #[test]
+    fn draining_expired_timers_does_not_invoke_wakers() {
+        let counter = Arc::new(CountWake(AtomicUsize::new(0)));
+        let mut runtime = TimerRuntime::new();
+        runtime.wheel.insert(
+            TimerKey {
+                deadline: TimeValue::from_nanos(0),
+                key: 0,
+            },
+            Waker::from(counter.clone()),
+        );
+
+        let expired = runtime.drain_expired();
+        assert_eq!(counter.0.load(Ordering::Relaxed), 0);
+        assert_eq!(expired.len(), 1);
+
+        for waker in expired {
+            waker.wake();
+        }
+        assert_eq!(counter.0.load(Ordering::Relaxed), 1);
     }
 }
