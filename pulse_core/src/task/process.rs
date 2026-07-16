@@ -2723,31 +2723,25 @@ impl Process {
         let q_refs: alloc::vec::Vec<&axtask::WaitQueue> =
             queues.iter().map(|q| q.as_ref()).collect();
 
-        let first_time = core::cell::Cell::new(true);
         let mut mismatch = false;
 
         let res = axtask::WaitQueue::wait_multiple_timeout_until(
             &q_refs,
             timeout_ns.map(core::time::Duration::from_nanos),
             || {
-                if first_time.get() {
-                    first_time.set(false);
-                    if self.group_exiting() || signal_pending() {
+                if self.group_exiting() || signal_pending() {
+                    return true;
+                }
+                mismatch = false;
+                for (i, w) in waiters.iter().enumerate() {
+                    let kvaddr = kvaddrs[i];
+                    let val = unsafe { core::ptr::read_volatile(kvaddr as *const u32) };
+                    if val != w.val as u32 {
+                        mismatch = true;
                         return true;
                     }
-                    mismatch = false;
-                    for (i, w) in waiters.iter().enumerate() {
-                        let kvaddr = kvaddrs[i];
-                        let val = unsafe { core::ptr::read_volatile(kvaddr as *const u32) };
-                        if val != w.val as u32 {
-                            mismatch = true;
-                            return true;
-                        }
-                    }
-                    false
-                } else {
-                    true
                 }
+                false
             },
         );
 
