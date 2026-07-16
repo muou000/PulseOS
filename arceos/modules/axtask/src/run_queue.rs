@@ -2,7 +2,6 @@ use alloc::{collections::VecDeque, sync::Arc};
 use core::mem::MaybeUninit;
 #[cfg(feature = "smp")]
 use alloc::sync::Weak;
-use core::task::{Context, Poll, Waker};
 
 use axhal::percpu::this_cpu_id;
 use axsched::BaseScheduler;
@@ -14,7 +13,6 @@ use crate::{
     AxCpuMask, AxTaskRef, Scheduler, TaskInner, WaitQueue,
     task::{CurrentTask, TaskState},
     wait_queue::WaitQueueGuard,
-    future::AxWaker,
 };
 
 macro_rules! percpu_static {
@@ -171,6 +169,47 @@ pub(crate) fn select_run_queue<G: BaseGuard>(task: &AxTaskRef) -> AxRunQueueRef<
     {
         // When SMP is enabled, select the run queue based on the task's CPU affinity and load balance.
         let index = select_run_queue_index(task.cpumask());
+        AxRunQueueRef {
+            inner: get_run_queue(index),
+            state: irq_state,
+            _phantom: core::marker::PhantomData,
+        }
+    }
+}
+
+/// Selects a run queue for waking a blocked task.
+///
+/// Wakeups prefer the task's previous CPU. Besides preserving cache locality,
+/// this keeps per-CPU timer registrations and other CPU-local wait state valid
+/// across a `block_on` suspension. If affinity excludes that CPU, the CPU
+/// performing the wakeup is preferred before falling back to normal placement.
+#[inline]
+pub(crate) fn select_wake_run_queue<G: BaseGuard>(
+    task: &AxTaskRef,
+) -> AxRunQueueRef<'static, G> {
+    let irq_state = G::acquire();
+    #[cfg(not(feature = "smp"))]
+    {
+        let _ = task;
+        AxRunQueueRef {
+            inner: unsafe { RUN_QUEUE.current_ref_mut_raw() },
+            state: irq_state,
+            _phantom: core::marker::PhantomData,
+        }
+    }
+    #[cfg(feature = "smp")]
+    {
+        let current_cpu = this_cpu_id();
+        let previous_cpu = task.cpu_id() as usize;
+        let cpu_num = axhal::cpu_num();
+        let cpumask = task.cpumask();
+        let index = if previous_cpu < cpu_num && cpumask.get(previous_cpu) {
+            previous_cpu
+        } else if current_cpu < cpu_num && cpumask.get(current_cpu) {
+            current_cpu
+        } else {
+            select_run_queue_index(cpumask)
+        };
         AxRunQueueRef {
             inner: get_run_queue(index),
             state: irq_state,
@@ -498,67 +537,22 @@ impl<G: BaseGuard> CurrentRunQueueRef<'_, G> {
     /// Core reschedule subroutine.
     /// Pick the next task to run and switch to it.
     fn resched(&mut self) {
-        loop {
-            let next = self
-                .inner
-                .scheduler
-                .lock()
-                .pick_next_task()
-                .unwrap_or_else(|| unsafe {
-                    // Safety: IRQs must be disabled at this time.
-                    IDLE_TASK.current_ref_raw().get_unchecked().clone()
-                });
-            assert!(
-                next.is_ready(),
-                "next {} is not ready: {:?}",
-                next.id_name(),
-                next.state()
-            );
-
-            if next.is_future() {
-                // Poll the future of the task.
-                let waker = Waker::from(AxWaker::new(&next));
-                let mut cx = Context::from_waker(&waker);
-
-                // Set state to Blocked before polling, so that the waker can
-                // wake it up (transition to Ready) if it returns Pending.
-                next.set_state(TaskState::Blocked);
-
-                // Temporarily enable local interrupts while polling, keeping preemption disabled.
-                let irqs_enabled = axhal::asm::irqs_enabled();
-                if !irqs_enabled {
-                    axhal::asm::enable_irqs();
-                }
-
-                let poll_ret = next.poll_future(&mut cx);
-
-                if !irqs_enabled {
-                    axhal::asm::disable_irqs();
-                }
-
-                match poll_ret {
-                    Poll::Ready(_) => {
-                        next.set_state(TaskState::Exited);
-                        next.notify_exit(0);
-                        unsafe {
-                            // Push current task to the `EXITED_TASKS` list, which will be consumed by the GC task.
-                            EXITED_TASKS.current_ref_mut_raw().push_back(next.clone());
-                            // Wake up the GC task to drop the exited tasks.
-                            WAIT_FOR_EXIT.current_ref_mut_raw().notify_one(false);
-                        }
-                        // Task finished, pick the next one.
-                        continue;
-                    }
-                    Poll::Pending => {
-                        // Task is blocked, pick the next one.
-                        continue;
-                    }
-                }
-            } else {
-                self.inner.switch_to(crate::current(), next);
-                break;
-            }
-        }
+        let next = self
+            .inner
+            .scheduler
+            .lock()
+            .pick_next_task()
+            .unwrap_or_else(|| unsafe {
+                // Safety: IRQs must be disabled at this time.
+                IDLE_TASK.current_ref_raw().get_unchecked().clone()
+            });
+        assert!(
+            next.is_ready(),
+            "next {} is not ready: {:?}",
+            next.id_name(),
+            next.state()
+        );
+        self.inner.switch_to(crate::current(), next);
     }
 }
 

@@ -897,23 +897,20 @@ impl TcpSocket {
         if self.is_nonblocking() {
             f()
         } else {
-            axtask::future::block_on(async {
-                loop {
+            axtask::future::block_on(axtask::future::poll_io(
+                self,
+                IoEvents::IN | IoEvents::OUT,
+                false,
+                || {
                     #[cfg(feature = "monolithic")]
                     if crate::current_have_signals() {
                         return Err(AxError::Interrupted);
                     }
 
                     SOCKET_SET.poll_interfaces();
-                    match f() {
-                        Ok(t) => return Ok(t),
-                        Err(AxError::WouldBlock) => {
-                            axtask::future::WaitFuture::new(self.get_wait_queue()).await;
-                        }
-                        Err(e) => return Err(e),
-                    }
-                }
-            })
+                    f()
+                },
+            ))
         }
     }
 }

@@ -1,11 +1,11 @@
 use alloc::{collections::VecDeque, sync::Arc, vec::Vec};
-use core::sync::atomic::{AtomicBool, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use core::task::Waker;
 
 use kernel_guard::{NoOp, NoPreemptIrqSave};
 use kspin::{SpinNoIrq, SpinNoIrqGuard};
 
-use crate::{AxTaskRef, CurrentTask, current_run_queue, select_run_queue};
+use crate::{AxTaskRef, CurrentTask, current_run_queue, select_wake_run_queue};
 
 /// A queue to store sleeping tasks.
 ///
@@ -41,7 +41,14 @@ pub struct WaitQueue {
 /// (e.g. [`crate::future::WaitFuture`]) can poll this flag to detect that a
 /// matching notification has occurred without having to rely on `waker.wake()`
 /// to schedule another poll.
-type WakerEntry = (u64, Arc<AtomicBool>, Waker);
+struct WakerEntry {
+    id: u64,
+    task_id: u64,
+    notified: Arc<AtomicBool>,
+    waker: Waker,
+}
+
+static WAKER_ENTRY_ID: AtomicU64 = AtomicU64::new(1);
 
 pub(crate) type WaitQueueGuard<'a> = SpinNoIrqGuard<'a, VecDeque<AxTaskRef>>;
 
@@ -322,12 +329,12 @@ impl WaitQueue {
                 let mut wakers = self.wakers.lock();
                 wakers.pop_front()
             };
-            if let Some((_, flag, waker)) = entry {
+            if let Some(entry) = entry {
                 // Mark the registered future as notified *before* waking, so
                 // that any subsequent poll observes completion even if the
                 // waker has not yet been processed by the executor.
-                flag.store(true, Ordering::Release);
-                waker.wake();
+                entry.notified.store(true, Ordering::Release);
+                entry.waker.wake();
                 true
             } else {
                 false
@@ -360,12 +367,12 @@ impl WaitQueue {
             let mut wakers = self.wakers.lock();
             core::mem::take(&mut *wakers)
         };
-        for (_, flag, waker) in wakers {
+        for entry in wakers {
             // Mark all registered futures as notified before waking, so they
             // observe completion on their next poll even if the wakers have
             // not yet been processed.
-            flag.store(true, Ordering::Release);
-            waker.wake();
+            entry.notified.store(true, Ordering::Release);
+            entry.waker.wake();
         }
     }
 
@@ -443,19 +450,47 @@ impl WaitQueue {
     /// discard the returned value; the waker is still registered and will be
     /// invoked on the next matching notification.
     pub fn register_waker(&self, waker: &core::task::Waker) -> Arc<AtomicBool> {
+        self.register_waker_inner(waker, true).1
+    }
+
+    fn register_waker_inner(
+        &self,
+        waker: &core::task::Waker,
+        deduplicate_task: bool,
+    ) -> (u64, Arc<AtomicBool>) {
         let mut wakers = self.wakers.lock();
         let task_id = crate::current().id().as_u64();
-        if let Some((_, flag, old_waker)) = wakers.iter_mut().find(|(id, _, _)| *id == task_id)
-        {
-            if !old_waker.will_wake(waker) {
-                *old_waker = waker.clone();
+        if deduplicate_task {
+            if let Some(entry) = wakers.iter_mut().find(|entry| entry.task_id == task_id) {
+                if !entry.waker.will_wake(waker) {
+                    entry.waker = waker.clone();
+                }
+                return (entry.id, entry.notified.clone());
             }
-            flag.clone()
-        } else {
-            let flag = Arc::new(AtomicBool::new(false));
-            wakers.push_back((task_id, flag.clone(), waker.clone()));
-            flag
         }
+
+        let id = WAKER_ENTRY_ID.fetch_add(1, Ordering::Relaxed);
+        let notified = Arc::new(AtomicBool::new(false));
+        wakers.push_back(WakerEntry {
+            id,
+            task_id,
+            notified: notified.clone(),
+            waker: waker.clone(),
+        });
+        (id, notified)
+    }
+
+    pub(crate) fn register_wait_future_waker(
+        &self,
+        waker: &core::task::Waker,
+    ) -> (u64, Arc<AtomicBool>) {
+        self.register_waker_inner(waker, false)
+    }
+
+    pub(crate) fn unregister_waker(&self, registration_id: u64) {
+        self.wakers
+            .lock()
+            .retain(|entry| entry.id != registration_id);
     }
 
     /// Returns a future that waits for the wait queue.
@@ -475,5 +510,5 @@ fn unblock_one_task_locked(task: AxTaskRef, resched: bool) {
     // Select run queue by the CPU set of the task.
     // Use `NoOp` kernel guard here because the function is called with holding the
     // lock of wait queue, or an explicit `NoPreemptIrqSave` guard.
-    select_run_queue::<NoOp>(&task).unblock_task(task, resched)
+    select_wake_run_queue::<NoOp>(&task).unblock_task(task, resched)
 }

@@ -16,7 +16,8 @@ pub use self::time::*;
 /// A waker that wakes up the associated task.
 pub struct AxWaker {
     task: AxTaskWeak,
-    woke: Arc<SpinNoIrq<bool>>,
+    active: AtomicBool,
+    woke: SpinNoIrq<bool>,
 }
 
 impl AxWaker {
@@ -24,13 +25,23 @@ impl AxWaker {
     pub fn new(task: &AxTaskRef) -> Arc<Self> {
         Arc::new(Self {
             task: Arc::downgrade(task),
-            woke: Arc::new(SpinNoIrq::new(false)),
+            active: AtomicBool::new(true),
+            woke: SpinNoIrq::new(false),
         })
     }
 
     /// Returns the task associated with this waker.
     pub fn task(&self) -> AxTaskWeak {
         self.task.clone()
+    }
+
+    /// Prevents registrations retained by an already completed `block_on`
+    /// invocation from waking the task during an unrelated later wait.
+    fn deactivate(&self) {
+        // Serialize with wake_by_ref and let an already-started wake finish
+        // before block_on returns to synchronous task code.
+        let _woke = self.woke.lock();
+        self.active.store(false, Ordering::Release);
     }
 }
 
@@ -41,9 +52,17 @@ impl alloc::task::Wake for AxWaker {
 
     fn wake_by_ref(self: &Arc<Self>) {
         if let Some(task) = self.task.upgrade() {
-            let mut rq = crate::api::select_run_queue::<kernel_guard::NoPreemptIrqSave>(&task);
-            *self.woke.lock() = true;
-            rq.unblock_task(task, false);
+            let mut rq =
+                crate::api::select_wake_run_queue::<kernel_guard::NoPreemptIrqSave>(&task);
+            // Keep this guard until unblock_task has completed. This pairs
+            // with deactivate so a wake either finishes within this
+            // block_on lifetime or observes the inactive state.
+            let mut woke = self.woke.lock();
+            if !self.active.load(Ordering::Acquire) {
+                return;
+            }
+            *woke = true;
+            rq.unblock_task(task, true);
         }
     }
 }
@@ -60,16 +79,15 @@ pub fn block_on<F: IntoFuture>(f: F) -> F::Output {
     let task = curr.as_task_ref().clone();
 
     let waker_arc = AxWaker::new(&task);
-    let woke = waker_arc.woke.clone();
-    let waker = Waker::from(waker_arc);
+    let waker = Waker::from(waker_arc.clone());
     let mut cx = Context::from_waker(&waker);
 
-    loop {
-        *woke.lock() = false;
+    let output = loop {
+        *waker_arc.woke.lock() = false;
         match fut.as_mut().poll(&mut cx) {
             Poll::Pending => {
                 let mut rq = crate::api::current_run_queue::<kernel_guard::NoPreemptIrqSave>();
-                let woke_guard = woke.lock();
+                let woke_guard = waker_arc.woke.lock();
                 if !*woke_guard {
                     rq.blocked_resched_woke(woke_guard);
                 } else {
@@ -78,7 +96,9 @@ pub fn block_on<F: IntoFuture>(f: F) -> F::Output {
             }
             Poll::Ready(output) => break output,
         }
-    }
+    };
+    waker_arc.deactivate();
+    output
 }
 
 /// Yields the current task until the future is ready.
@@ -115,6 +135,7 @@ impl Future for YieldNow {
 pub struct WaitFuture<'a> {
     wq: &'a crate::wait_queue::WaitQueue,
     notified: Option<Arc<AtomicBool>>,
+    registration_id: Option<u64>,
 }
 
 impl<'a> WaitFuture<'a> {
@@ -123,6 +144,7 @@ impl<'a> WaitFuture<'a> {
         Self {
             wq,
             notified: None,
+            registration_id: None,
         }
     }
 }
@@ -141,7 +163,8 @@ impl<'a> Future for WaitFuture<'a> {
             // sync with the wait queue's storage.
             f.clone()
         } else {
-            let f = self.wq.register_waker(cx.waker());
+            let (registration_id, f) = self.wq.register_wait_future_waker(cx.waker());
+            self.registration_id = Some(registration_id);
             self.notified = Some(f.clone());
             f
         };
@@ -155,6 +178,14 @@ impl<'a> Future for WaitFuture<'a> {
             Poll::Ready(())
         } else {
             Poll::Pending
+        }
+    }
+}
+
+impl Drop for WaitFuture<'_> {
+    fn drop(&mut self) {
+        if let Some(registration_id) = self.registration_id.take() {
+            self.wq.unregister_waker(registration_id);
         }
     }
 }

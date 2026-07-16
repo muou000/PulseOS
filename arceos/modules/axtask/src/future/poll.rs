@@ -41,27 +41,94 @@ pub async fn poll_io<P: Pollable, F: FnMut() -> AxResult<T>, T>(
 #[cfg(feature = "irq")]
 /// Registers a waker for the given IRQ number.
 pub fn register_irq_waker(irq: usize, waker: &core::task::Waker) {
-    use alloc::collections::{BTreeMap, btree_map::Entry};
+    use alloc::{collections::BTreeMap, sync::Arc, vec::Vec};
+    use core::sync::atomic::{AtomicBool, Ordering};
 
     use axpoll::PollSet;
     use kspin::SpinNoIrq;
 
-    static POLL_IRQ: SpinNoIrq<BTreeMap<usize, PollSet>> = SpinNoIrq::new(BTreeMap::new());
+    struct IrqPollState {
+        pending: bool,
+        poll: Arc<PollSet>,
+    }
 
-    #[allow(dead_code)]
+    static POLL_IRQ: SpinNoIrq<BTreeMap<usize, IrqPollState>> =
+        SpinNoIrq::new(BTreeMap::new());
+    static DRAIN_WAIT: crate::WaitQueue = crate::WaitQueue::new();
+    static DRAIN_SPAWNED: AtomicBool = AtomicBool::new(false);
+
     fn irq_hook(irq: usize) {
-        if let Some(s) = POLL_IRQ.lock().get(&irq) {
-            s.wake();
+        let registered = {
+            let mut states = POLL_IRQ.lock();
+            if let Some(state) = states.get_mut(&irq) {
+                state.pending = true;
+                true
+            } else {
+                false
+            }
+        };
+        if registered {
+            DRAIN_WAIT.notify_one(false);
         }
     }
 
-    match POLL_IRQ.lock().entry(irq) {
-        Entry::Vacant(e) => {
-            axhal::irq::register(irq, irq_hook);
-            axhal::irq::set_enable(irq, true);
-            e.insert(PollSet::new())
+    fn ensure_drain_task() {
+        if DRAIN_SPAWNED
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            return;
         }
-        Entry::Occupied(e) => e.into_mut(),
+
+        crate::spawn_raw(
+            || loop {
+                DRAIN_WAIT.wait_until(|| POLL_IRQ.lock().values().any(|state| state.pending));
+
+                let pending: Vec<Arc<PollSet>> = {
+                    let mut states = POLL_IRQ.lock();
+                    states
+                        .values_mut()
+                        .filter_map(|state| {
+                            if state.pending {
+                                state.pending = false;
+                                Some(state.poll.clone())
+                            } else {
+                                None
+                            }
+                        })
+                        .collect()
+                };
+                for poll in pending {
+                    poll.wake();
+                }
+            },
+            "irq_waker_drain".into(),
+            axconfig::TASK_STACK_SIZE,
+        );
     }
-    .register(waker);
+
+    ensure_drain_task();
+
+    let (poll, should_install) = {
+        let mut states = POLL_IRQ.lock();
+        if let Some(state) = states.get(&irq) {
+            (state.poll.clone(), false)
+        } else {
+            let poll = Arc::new(PollSet::new());
+            states.insert(
+                irq,
+                IrqPollState {
+                    pending: false,
+                    poll: poll.clone(),
+                },
+            );
+            (poll, true)
+        }
+    };
+    poll.register(waker);
+
+    if should_install {
+        axhal::irq::register(irq, irq_hook);
+        axhal::irq::set_enable(irq, true);
+    }
 }

@@ -1,5 +1,8 @@
-use core::sync::atomic::{AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Mutex, Once};
+
+use axerrno::{AxError, AxResult};
+use axpoll::{IoEvents, Pollable};
 
 use crate::{WaitQueue, api as axtask, current};
 
@@ -131,21 +134,91 @@ fn test_task_join() {
 
 #[test]
 fn test_async_task() {
-    use core::sync::atomic::AtomicBool;
+    use core::sync::atomic::AtomicU64;
     let _lock = SERIAL.lock();
     INIT.call_once(axtask::init_scheduler);
 
-    static FINISHED: AtomicBool = AtomicBool::new(false);
+    static HAS_KERNEL_STACK: AtomicBool = AtomicBool::new(false);
+    static TASK_ID_BEFORE_YIELD: AtomicU64 = AtomicU64::new(0);
+    static TASK_ID_AFTER_YIELD: AtomicU64 = AtomicU64::new(0);
 
-    axtask::spawn_async(async {
+    HAS_KERNEL_STACK.store(false, Ordering::Release);
+    TASK_ID_BEFORE_YIELD.store(0, Ordering::Release);
+    TASK_ID_AFTER_YIELD.store(0, Ordering::Release);
+
+    let task = axtask::spawn_async(async {
         println!("async task: Hello, world!");
+        let curr = current();
+        HAS_KERNEL_STACK.store(curr.kernel_stack_top().is_some(), Ordering::Release);
+        TASK_ID_BEFORE_YIELD.store(curr.id().as_u64(), Ordering::Release);
+
+        // Waking and returning Ready in the same poll is legal. The stack-backed
+        // block_on model must not leave a stale scheduler entry in this case.
+        core::future::poll_fn(|cx| {
+            cx.waker().wake_by_ref();
+            core::task::Poll::Ready(())
+        })
+        .await;
+
         crate::future::yield_now().await;
         println!("async task: Resumed!");
-        FINISHED.store(true, Ordering::Release);
+        TASK_ID_AFTER_YIELD.store(current().id().as_u64(), Ordering::Release);
     });
 
-    while !FINISHED.load(Ordering::Acquire) {
-        axtask::yield_now();
+    assert_eq!(task.join(), Some(0));
+    assert!(HAS_KERNEL_STACK.load(Ordering::Acquire));
+    assert_eq!(
+        TASK_ID_BEFORE_YIELD.load(Ordering::Acquire),
+        task.id().as_u64()
+    );
+    assert_eq!(
+        TASK_ID_AFTER_YIELD.load(Ordering::Acquire),
+        task.id().as_u64()
+    );
+}
+
+#[test]
+fn test_poll_io_registers_before_recheck() {
+    struct RegisterMakesReady {
+        ready: AtomicBool,
+        registrations: AtomicUsize,
     }
-    assert!(FINISHED.load(Ordering::Acquire));
+
+    impl Pollable for RegisterMakesReady {
+        fn poll(&self) -> IoEvents {
+            if self.ready.load(Ordering::Acquire) {
+                IoEvents::IN
+            } else {
+                IoEvents::empty()
+            }
+        }
+
+        fn register(&self, _context: &mut core::task::Context<'_>, _events: IoEvents) {
+            self.registrations.fetch_add(1, Ordering::Relaxed);
+            self.ready.store(true, Ordering::Release);
+        }
+    }
+
+    let _lock = SERIAL.lock();
+    INIT.call_once(axtask::init_scheduler);
+
+    let pollable = RegisterMakesReady {
+        ready: AtomicBool::new(false),
+        registrations: AtomicUsize::new(0),
+    };
+    let result = crate::future::block_on(crate::future::poll_io(
+        &pollable,
+        IoEvents::IN,
+        false,
+        || -> AxResult<usize> {
+            if pollable.ready.load(Ordering::Acquire) {
+                Ok(7)
+            } else {
+                Err(AxError::WouldBlock)
+            }
+        },
+    ));
+
+    assert_eq!(result, Ok(7));
+    assert_eq!(pollable.registrations.load(Ordering::Relaxed), 1);
 }

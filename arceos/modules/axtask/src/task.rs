@@ -4,11 +4,8 @@ use core::sync::atomic::AtomicUsize;
 use core::{
     cell::UnsafeCell,
     fmt,
-    future::Future,
     ops::Deref,
-    pin::Pin,
     sync::atomic::{AtomicBool, AtomicI32, AtomicU8, AtomicU32, AtomicU64, Ordering},
-    task::{Context, Poll},
 };
 
 use axalloc::global_allocator;
@@ -16,7 +13,7 @@ use axerrno::{AxError, AxResult};
 use axhal::context::TaskContext;
 #[cfg(feature = "tls")]
 use axhal::tls::TlsArea;
-use kspin::{SpinNoIrq, SpinRaw};
+use kspin::SpinNoIrq;
 use memory_addr::{MemoryAddr, PAGE_SIZE_4K, VirtAddr, align_up_4k};
 
 use crate::{AxCpuMask, AxTask, AxTaskRef, WaitQueue, task_ext::AxTaskExt};
@@ -49,28 +46,6 @@ pub struct TaskInner {
     is_init: bool,
 
     entry: SpinNoIrq<Option<Box<dyn FnOnce() + Send>>>,
-    /// The future polled by the scheduler for this async task.
-    ///
-    /// This field is protected by a [`SpinRaw`] (NOT a [`SpinNoIrq`]) because
-    /// the future is polled by the run-queue scheduler while IRQs are enabled
-    /// (see `AxRunQueue::resched`). Holding an IRQ-disabling lock across
-    /// arbitrary `Future::poll` code would otherwise increase interrupt
-    /// latency and could deadlock with IRQ-driven wakers.
-    ///
-    /// # Scheduler invariant
-    ///
-    /// The only callers that access this field are:
-    /// - `TaskInner::new_async` during task construction, before the task is
-    ///   ever inserted into a run queue, and
-    /// - the per-CPU run-queue's `resched` path (via `is_future` /
-    ///   `poll_future`), which is serialized per-CPU by the
-    ///   `CurrentRunQueueRef` mechanism.
-    ///
-    /// Wakers produced by `poll_future` do not access this field directly;
-    /// they only transition the task's state through `unblock_task`.
-    /// Therefore, no concurrent access to `future` is possible, and the
-    /// lighter `SpinRaw` is sufficient.
-    future: SpinRaw<Option<Pin<Box<dyn Future<Output = ()> + Send>>>>,
     state: AtomicU8,
 
     /// CPU affinity mask.
@@ -169,20 +144,6 @@ impl TaskInner {
             t.is_idle = true;
         }
         Ok(t)
-    }
-
-    /// Create a new task with the given future.
-    pub fn new_async<F>(future: F, name: String) -> Self
-    where
-        F: Future<Output = ()> + Send + 'static,
-    {
-        let mut t = Self::new_common(TaskId::new(), name);
-        debug!("new async task: {}", t.id_name());
-        *t.future.lock() = Some(Box::pin(future));
-        if *t.name.lock() == "idle" {
-            t.is_idle = true;
-        }
-        t
     }
 
     /// Gets the ID of the task.
@@ -309,7 +270,6 @@ impl TaskInner {
             is_idle: false,
             is_init: false,
             entry: SpinNoIrq::new(None),
-            future: SpinRaw::new(None),
             state: AtomicU8::new(TaskState::Ready as u8),
             // By default, the task is allowed to run on all CPUs.
             cpumask: SpinNoIrq::new(cpumask),
@@ -365,30 +325,6 @@ impl TaskInner {
     #[inline]
     pub(crate) fn state(&self) -> TaskState {
         self.state.load(Ordering::Acquire).into()
-    }
-
-    /// Returns `true` if the task is a future task.
-    ///
-    /// This is a brief, IRQ-safe check: the underlying `SpinRaw` does not
-    /// disable local interrupts.
-    #[inline]
-    pub fn is_future(&self) -> bool {
-        self.future.lock().is_some()
-    }
-
-    /// Polls the future of the task.
-    ///
-    /// This polls the stored future without holding any IRQ-disabling lock,
-    /// so it is safe to call from `AxRunQueue::resched` which has local IRQs
-    /// enabled around the call (see `run_queue.rs`). The future storage is
-    /// protected by a [`SpinRaw`], relying on the scheduler invariant that
-    /// only the per-CPU run-queue polls a given task's future.
-    pub fn poll_future(&self, cx: &mut Context) -> Poll<()> {
-        if let Some(future) = self.future.lock().as_mut() {
-            future.as_mut().poll(cx)
-        } else {
-            Poll::Ready(())
-        }
     }
 
     #[inline]

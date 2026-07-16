@@ -164,20 +164,21 @@ pub fn sys_epoll_ctl(
 struct EpollFuture<'a> {
     epoll_obj: &'a EpollObject,
     maxevents: usize,
-    deadline: Option<axhal::time::TimeValue>,
 }
 
 impl<'a> Future for EpollFuture<'a> {
     type Output = Result<Vec<epoll_event>, LinuxError>;
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        let mut ready_list = Vec::with_capacity(self.maxevents);
-        let mut oneshots_to_disable = Vec::new();
+        let epoll_obj = self.epoll_obj;
+        let maxevents = self.maxevents;
+        let collect_ready = || {
+            let mut ready_list = Vec::with_capacity(maxevents);
+            let mut oneshots_to_disable = Vec::new();
 
-        {
-            let mut monitored = self.epoll_obj.events.lock();
+            let mut monitored = epoll_obj.events.lock();
             for (&fd, ev) in monitored.iter_mut() {
-                if ready_list.len() >= self.maxevents {
+                if ready_list.len() >= maxevents {
                     break;
                 }
                 match get_fd_entry(fd) {
@@ -267,21 +268,19 @@ impl<'a> Future for EpollFuture<'a> {
                     ev.event.events = 0;
                 }
             }
-        }
+            ready_list
+        };
+
+        let ready_list = collect_ready();
 
         if !ready_list.is_empty() {
             return Poll::Ready(Ok(ready_list));
         }
 
-        if let Ok(thread) = pulse_core::task::current_thread() {
+        let thread = pulse_core::task::current_thread().ok();
+        if let Some(thread) = thread.as_ref() {
             if thread.has_pending_signal() {
                 return Poll::Ready(Err(LinuxError::EINTR));
-            }
-        }
-
-        if let Some(dl) = self.deadline {
-            if axhal::time::monotonic_time() >= dl {
-                return Poll::Ready(Ok(ready_list));
             }
         }
 
@@ -326,6 +325,23 @@ impl<'a> Future for EpollFuture<'a> {
             }
             if unsupported {
                 return Poll::Ready(Err(LinuxError::EOPNOTSUPP));
+            }
+        }
+
+        if let Some(thread) = thread.as_ref() {
+            thread.signal_wait_queue().register_waker(cx.waker());
+        }
+
+        // Recheck after every registration pass. This closes the race where fd
+        // readiness or a signal changes after the first scan but before its
+        // corresponding waker is installed.
+        let ready_list = collect_ready();
+        if !ready_list.is_empty() {
+            return Poll::Ready(Ok(ready_list));
+        }
+        if let Some(thread) = thread {
+            if thread.has_pending_signal() {
+                return Poll::Ready(Err(LinuxError::EINTR));
             }
         }
 
@@ -402,11 +418,10 @@ fn sys_epoll_pwait_inner(
     let future = EpollFuture {
         epoll_obj,
         maxevents,
-        deadline,
     };
 
-    match axtask::future::block_on(future) {
-        Ok(ready_list) => {
+    match axtask::future::block_on(axtask::future::timeout_at(deadline, future)) {
+        Ok(Ok(ready_list)) => {
             if ready_list.is_empty() {
                 return 0;
             }
@@ -421,7 +436,8 @@ fn sys_epoll_pwait_inner(
             }
             ready_list.len() as isize
         }
-        Err(e) => -e.code() as isize,
+        Ok(Err(e)) => -e.code() as isize,
+        Err(_) => 0,
     }
 }
 
