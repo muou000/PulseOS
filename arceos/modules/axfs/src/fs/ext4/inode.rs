@@ -26,6 +26,7 @@ pub struct Inode {
     fs: Arc<Ext4Filesystem>,
     ino: u32,
     this: Mutex<Option<WeakDirEntry>>,
+    metadata_update_lock: async_lock::Mutex<()>,
     dir_cache: Arc<DirCacheState>,
     pub(super) is_unlinked: core::sync::atomic::AtomicBool,
 }
@@ -135,6 +136,7 @@ impl Inode {
             fs: fs.clone(),
             ino,
             this: Mutex::new(this),
+            metadata_update_lock: async_lock::Mutex::new(()),
             dir_cache,
             is_unlinked: core::sync::atomic::AtomicBool::new(false),
         });
@@ -345,6 +347,7 @@ impl NodeOps for Inode {
         let fs = &self.fs.inner;
         self.validate_inode_num(&fs, self.ino)?;
         let idx = core::num::NonZeroU32::new(self.ino).ok_or(VfsError::InvalidData)?;
+        let _update_guard = self.metadata_update_lock.lock().await;
         let mut inode = ext4plus::inode::Inode::read(&fs, idx).await.map_err(into_vfs_err)?;
         if let Some(mode) = update.mode {
             let perm = mode.bits() & 0x0fff;
