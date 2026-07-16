@@ -1,4 +1,4 @@
-use alloc::{collections::BTreeMap, vec::Vec};
+use alloc::collections::BTreeMap;
 use core::{
     fmt,
     future::{Future, IntoFuture},
@@ -76,28 +76,18 @@ impl TimerRuntime {
         self.wheel.keys().next().map(|key| key.deadline)
     }
 
-    /// Removes all expired timers and returns their wakers without invoking
-    /// them while `self` is mutably borrowed.
+    /// Removes the earliest expired timer and returns its waker without
+    /// invoking it while `self` is mutably borrowed.
     ///
     /// A timer waker may unblock a task and reprogram the hardware timer. That
     /// path queries this same per-CPU runtime again, so calling `wake()` from
     /// inside this method would create a re-entrant mutable reference to
     /// `TIMER_RUNTIME`.
-    fn drain_expired(&mut self) -> Vec<Waker> {
-        if self.wheel.is_empty() {
-            return Vec::new();
+    fn pop_expired(&mut self, now: TimeValue) -> Option<Waker> {
+        match self.wheel.first_key_value() {
+            Some((key, _)) if key.deadline <= now => self.wheel.pop_first().map(|(_, waker)| waker),
+            _ => None,
         }
-
-        let now = monotonic_time();
-
-        let pending = self.wheel.split_off(&TimerKey {
-            deadline: now,
-            key: u64::MAX,
-        });
-
-        core::mem::replace(&mut self.wheel, pending)
-            .into_values()
-            .collect()
     }
 }
 
@@ -107,12 +97,18 @@ percpu_static! {
 
 #[allow(dead_code)]
 pub(crate) fn check_timer_events() {
-    // SAFETY: only called in the local CPU's timer hook or an equivalent
-    // IRQ-disabled context. End the per-CPU mutable borrow before invoking any
-    // waker because waking a task may re-enter timer reprogramming.
-    let expired = unsafe { TIMER_RUNTIME.current_ref_mut_raw() }.drain_expired();
-    for waker in expired {
-        waker.wake();
+    let now = monotonic_time();
+    loop {
+        let waker = {
+            // SAFETY: only called in the local CPU's timer hook or an
+            // equivalent IRQ-disabled context. This borrow ends before the
+            // waker is invoked below.
+            unsafe { TIMER_RUNTIME.current_ref_mut_raw() }.pop_expired(now)
+        };
+        match waker {
+            Some(waker) => waker.wake(),
+            None => break,
+        }
     }
 }
 
@@ -220,25 +216,62 @@ mod tests {
         }
     }
 
-    #[test]
-    fn draining_expired_timers_does_not_invoke_wakers() {
-        let counter = Arc::new(CountWake(AtomicUsize::new(0)));
-        let mut runtime = TimerRuntime::new();
-        runtime.wheel.insert(
-            TimerKey {
-                deadline: TimeValue::from_nanos(0),
-                key: 0,
-            },
-            Waker::from(counter.clone()),
-        );
-
-        let expired = runtime.drain_expired();
-        assert_eq!(counter.0.load(Ordering::Relaxed), 0);
-        assert_eq!(expired.len(), 1);
-
-        for waker in expired {
-            waker.wake();
+    fn timer_key(deadline_ns: u64, key: u64) -> TimerKey {
+        TimerKey {
+            deadline: TimeValue::from_nanos(deadline_ns),
+            key,
         }
-        assert_eq!(counter.0.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn popping_expired_timers_defers_wake_and_preserves_order() {
+        let first = Arc::new(CountWake(AtomicUsize::new(0)));
+        let second = Arc::new(CountWake(AtomicUsize::new(0)));
+        let future = Arc::new(CountWake(AtomicUsize::new(0)));
+        let mut runtime = TimerRuntime::new();
+        runtime
+            .wheel
+            .insert(timer_key(10, 1), Waker::from(second.clone()));
+        runtime
+            .wheel
+            .insert(timer_key(10, 0), Waker::from(first.clone()));
+        runtime
+            .wheel
+            .insert(timer_key(11, 0), Waker::from(future.clone()));
+
+        let waker = runtime.pop_expired(TimeValue::from_nanos(10)).unwrap();
+        assert_eq!(first.0.load(Ordering::Relaxed), 0);
+        assert_eq!(second.0.load(Ordering::Relaxed), 0);
+        waker.wake();
+        assert_eq!(first.0.load(Ordering::Relaxed), 1);
+        assert_eq!(second.0.load(Ordering::Relaxed), 0);
+
+        let waker = runtime.pop_expired(TimeValue::from_nanos(10)).unwrap();
+        assert_eq!(second.0.load(Ordering::Relaxed), 0);
+        waker.wake();
+        assert_eq!(second.0.load(Ordering::Relaxed), 1);
+
+        assert!(runtime.pop_expired(TimeValue::from_nanos(10)).is_none());
+        assert_eq!(runtime.wheel.len(), 1);
+        assert_eq!(
+            runtime.wheel.first_key_value().unwrap().0.deadline,
+            TimeValue::from_nanos(11)
+        );
+        assert_eq!(future.0.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn pop_expired_leaves_empty_and_future_queues_untouched() {
+        let mut runtime = TimerRuntime::new();
+        assert!(runtime.pop_expired(TimeValue::from_nanos(10)).is_none());
+
+        let future = Arc::new(CountWake(AtomicUsize::new(0)));
+        runtime
+            .wheel
+            .insert(timer_key(11, 0), Waker::from(future.clone()));
+
+        assert!(runtime.pop_expired(TimeValue::from_nanos(10)).is_none());
+        assert_eq!(runtime.wheel.len(), 1);
+        assert_eq!(future.0.load(Ordering::Relaxed), 0);
     }
 }
