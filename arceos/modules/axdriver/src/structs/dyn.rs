@@ -7,7 +7,18 @@ use alloc::{boxed::Box, vec, vec::Vec};
 #[cfg(feature = "net")]
 pub type AxNetDevice = Box<dyn NetDriverOps>;
 /// The unified type of the block storage devices.
-#[cfg(feature = "block")]
+///
+/// The trait object is `DynAsyncBlockDriverOps` (object-safe) rather than
+/// `AsyncBlockDriverOps` because the latter carries a generic associated type
+/// and cannot be used as `dyn` (`E0038`). The blanket impl above auto-derives
+/// `DynAsyncBlockDriverOps` for every concrete `T: AsyncBlockDriverOps + Send
+/// + Sync + 'static`, so all current drivers (e.g. `VirtIoBlkDevWrapper`)
+/// continue to satisfy this bound. The async surface is stored in
+/// `arceos::axfs::disk::SharedBlockDevice` as
+/// `Arc<dyn DynAsyncBlockDriverOps + Send + Sync>`.
+#[cfg(all(feature = "block", feature = "async"))]
+pub type AxBlockDevice = Box<dyn DynAsyncBlockDriverOps + Send + Sync>;
+#[cfg(all(feature = "block", not(feature = "async")))]
 pub type AxBlockDevice = Box<dyn BlockDriverOps>;
 /// The unified type of the graphics display devices.
 #[cfg(feature = "display")]
@@ -21,7 +32,13 @@ impl super::AxDeviceEnum {
     }
 
     /// Constructs a block device.
-    #[cfg(feature = "block")]
+    #[cfg(all(feature = "block", feature = "async"))]
+    pub fn from_block(
+        dev: impl BlockDriverOps + AsyncBlockDriverOps + Send + Sync + 'static,
+    ) -> Self {
+        Self::Block(Box::new(dev))
+    }
+    #[cfg(all(feature = "block", not(feature = "async")))]
     pub fn from_block(dev: impl BlockDriverOps + 'static) -> Self {
         Self::Block(Box::new(dev))
     }

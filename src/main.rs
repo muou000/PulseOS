@@ -10,6 +10,10 @@ extern crate pulse_core;
 extern crate pulse_syscalls;
 extern crate starry_vdso;
 
+use alloc::vec::Vec;
+use pulse_core::task::exec::resolve_exec_path_and_args;
+use pulse_core::task::Process;
+
 #[unsafe(no_mangle)]
 fn main() {
     starry_vdso::vdso::init_vdso_data();
@@ -31,30 +35,47 @@ fn main() {
 
     pulse_core::trap::init();
 
-    use axtask::TaskInner;
     const SHELL_ELF_PATH: &str = "/bin/sh";
+
+    use axtask::TaskInner;
+
     let mut inner = TaskInner::new(
         || {
             let thread =
                 pulse_core::task::current_thread().expect("init task entered without Thread");
             let proc = thread.process();
-            proc.activate();
-            info!("User process address space activated");
 
-            let shell_args: &[&str] = if cfg!(feature = "testcode") {
+            let shell_args_base: &[&str] = if cfg!(feature = "testcode") {
                 &["sh", "/testcode.sh"]
             } else {
                 &["sh"]
             };
-
             let shell_envs: &[&str] = &["PATH=/usr/sbin:/usr/bin:/sbin:/bin"];
-            match proc.load_elf(SHELL_ELF_PATH, shell_args, shell_envs) {
-                Ok(_) => {
-                    info!("Successfully loaded {}", SHELL_ELF_PATH);
-                    proc.enter_user_mode();
+
+            let fs_handle = proc.fs_context_handle();
+            let fs_ctx = fs_handle.lock();
+            match resolve_exec_path_and_args(&fs_ctx, SHELL_ELF_PATH, shell_args_base) {
+                Ok((shell_path, shell_args)) => {
+                    info!("Preparing to load shell: path={}, args={:?}", shell_path, shell_args);
+                    let args_refs: Vec<&str> = shell_args.iter().map(|s| s.as_str()).collect();
+
+                    core::mem::drop(fs_ctx);
+
+                    match proc.load_elf(&shell_path, &args_refs, shell_envs) {
+                        Ok(_) => {
+                            info!("User process loaded successfully, activating address space...");
+                            proc.activate();
+                            info!("User space activated, entering uspace...");
+                            proc.enter_user_mode();
+                        }
+                        Err(e) => {
+                            error!("Failed to load shell ELF: {:?}", e);
+                            thread.exit_current(1);
+                        }
+                    }
                 }
                 Err(e) => {
-                    error!("Failed to load {}: {:?}", SHELL_ELF_PATH, e);
+                    error!("Failed to resolve shell path: {:?}", e);
                     thread.exit_current(1);
                 }
             }
@@ -62,6 +83,7 @@ fn main() {
         "pulse_init".into(),
         0x8000,
     );
+
     let init_tid = inner.id().as_u64();
     match pulse_core::task::Process::new_uspace(init_tid) {
         Ok(proc) => {
@@ -81,22 +103,34 @@ fn main() {
             let init_task = axtask::spawn_task(inner);
             init_thread.process().register_task_ref(init_task.clone());
 
-            match init_task.join() {
-                Some(0) => info!("Init task exited normally"),
-                Some(exit_code) => error!("Init task exited with failure code {}", exit_code),
-                None => error!("Init task join returned no exit code"),
-            }
-            pulse_core::task::unregister_thread_global(init_tid);
-            let _ = init_thread.process().take_task_ref_by_tid(init_tid);
-            init_thread.process().release_task_refs();
+            if cfg!(feature = "testcode") {
+                match init_task.join() {
+                    Some(0) => info!("Init task exited normally"),
+                    Some(exit_code) => error!("Init task exited with failure code {}", exit_code),
+                    None => error!("Init task join returned no exit code"),
+                }
+                pulse_core::task::unregister_thread_global(init_tid);
+                let _ = init_thread.process().take_task_ref_by_tid(init_tid);
+                init_thread.process().release_task_refs();
 
-            pulse_syscalls::sys_sync();
-            axhal::power::system_off();
+                pulse_syscalls::sys_sync();
+                axhal::power::system_off();
+            } else {
+                loop {
+                    axtask::yield_now();
+                }
+            }
         }
         Err(e) => {
             error!("Failed to create user process: {:?}", e);
-            pulse_syscalls::sys_sync();
-            axhal::power::system_off();
+            if cfg!(feature = "testcode") {
+                pulse_syscalls::sys_sync();
+                axhal::power::system_off();
+            } else {
+                loop {
+                    axtask::yield_now();
+                }
+            }
         }
     }
 }

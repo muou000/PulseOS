@@ -12,6 +12,7 @@ mod init;
 mod irq;
 mod mem;
 mod power;
+mod plic;
 mod time;
 
 pub mod config {

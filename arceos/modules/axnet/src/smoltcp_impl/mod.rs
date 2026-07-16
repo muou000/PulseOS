@@ -5,13 +5,24 @@ mod listen_table;
 
 mod tcp;
 mod udp;
+use alloc::collections::BTreeMap;
+use alloc::sync::Arc;
 use alloc::vec;
+use alloc::vec::Vec;
 use axerrno::{AxError, AxResult};
 use core::cell::RefCell;
+use core::future::{Future, poll_fn};
 use core::ops::DerefMut;
+use core::pin::pin;
+use core::sync::atomic::{AtomicU64, Ordering};
+use core::task::Poll;
 
 use axdriver::prelude::*;
-use axhal::time::{monotonic_time_nanos as current_time_nanos, NANOS_PER_MICROS};
+use axhal::time::{
+    NANOS_PER_MICROS, TimeValue, monotonic_time, monotonic_time_nanos as current_time_nanos,
+    ticks_to_nanos,
+};
+use axpoll::IoEvents;
 use axsync::Mutex;
 use axdriver_net::{DevError, NetBufPtr};
 use lazyinit::LazyInit;
@@ -49,6 +60,70 @@ const LISTEN_QUEUE_SIZE: usize = 512;
 
 static LISTEN_TABLE: LazyInit<ListenTable> = LazyInit::new();
 static SOCKET_SET: LazyInit<SocketSetWrapper> = LazyInit::new();
+static SOCKET_WAIT_QUEUES: LazyInit<Mutex<BTreeMap<SocketHandle, SocketWaitEntry>>> =
+    LazyInit::new();
+pub static NET_WAIT_QUEUE: axtask::WaitQueue = axtask::WaitQueue::new();
+// Keep background scheduling separate from the public readiness queue so a
+// successful stack poll cannot wake the poller into a self-sustaining loop.
+static NET_POLL_WAIT_QUEUE: axtask::WaitQueue = axtask::WaitQueue::new();
+static NET_POLL_EPOCH: AtomicU64 = AtomicU64::new(0);
+
+pub(crate) struct SocketWaitQueues {
+    read: axtask::WaitQueue,
+    write: axtask::WaitQueue,
+    any: axtask::WaitQueue,
+}
+
+impl SocketWaitQueues {
+    pub(crate) const fn new() -> Self {
+        Self {
+            read: axtask::WaitQueue::new(),
+            write: axtask::WaitQueue::new(),
+            any: axtask::WaitQueue::new(),
+        }
+    }
+
+    fn queue(&self, events: IoEvents) -> &axtask::WaitQueue {
+        if events.intersects(IoEvents::IN | IoEvents::RDHUP) {
+            &self.read
+        } else {
+            debug_assert!(events.intersects(IoEvents::OUT));
+            &self.write
+        }
+    }
+
+    fn notify(&self, events: IoEvents) {
+        if events.intersects(IoEvents::IN | IoEvents::RDHUP) {
+            self.read.notify_all(true);
+        }
+        if events.intersects(IoEvents::OUT) {
+            self.write.notify_all(true);
+        }
+        if !events.is_empty() {
+            self.any.notify_all(true);
+        }
+    }
+
+    fn register(&self, context: &mut core::task::Context<'_>, events: IoEvents) {
+        if events.intersects(IoEvents::IN | IoEvents::RDHUP) {
+            self.read.register_waker(context.waker());
+        }
+        if events.intersects(IoEvents::OUT) {
+            self.write.register_waker(context.waker());
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum SocketWaitKind {
+    Normal,
+    ListenerChild,
+}
+
+struct SocketWaitEntry {
+    queues: Arc<SocketWaitQueues>,
+    kind: SocketWaitKind,
+}
 
 mod loopback;
 static LOOPBACK_DEV: LazyInit<Mutex<LoopbackDev>> = LazyInit::new();
@@ -160,14 +235,77 @@ impl<'a> SocketSetWrapper<'a> {
     pub fn poll_interfaces(&self) {
         let timestamp =
             Instant::from_micros_const((current_time_nanos() / NANOS_PER_MICROS) as i64);
+        let mut readiness_may_have_changed = false;
         #[cfg(feature = "monolithic")]
-        LOOPBACK.lock().poll(
-            timestamp,
-            LOOPBACK_DEV.lock().deref_mut(),
-            &mut self.0.lock(),
-        );
+        {
+            readiness_may_have_changed |= LOOPBACK.lock().poll(
+                timestamp,
+                LOOPBACK_DEV.lock().deref_mut(),
+                &mut self.0.lock(),
+            );
+        }
 
-        ETH0.poll(&self.0);
+        readiness_may_have_changed |= ETH0.poll(&self.0);
+
+        // Determine which sockets are ready while holding the socket-set lock,
+        // but wake their tasks only after all network locks have been released.
+        // Waking a task may enter the scheduler synchronously and must not leave
+        // the global socket set locked if scheduling is delayed.
+        let ready_wait_queues: Vec<_> = {
+            let mut sockets = self.0.lock();
+            // Incoming TCP packets register listener children while holding
+            // this lock, so all paths acquire the socket set before the map.
+            let wq_map = SOCKET_WAIT_QUEUES.lock();
+            sockets
+                .iter_mut()
+                .filter_map(|(handle, socket)| {
+                    let entry = wq_map.get(&handle)?;
+                    let events = match (socket, entry.kind) {
+                        (Socket::Tcp(s), SocketWaitKind::Normal) => {
+                            if matches!(s.state(), socket::tcp::State::SynSent) {
+                                return None;
+                            }
+                            let mut events = IoEvents::empty();
+                            if s.can_recv() || !s.may_recv() {
+                                events |= IoEvents::IN;
+                            }
+                            if s.can_send() || !s.may_send() {
+                                events |= IoEvents::OUT;
+                            }
+                            events
+                        }
+                        (Socket::Tcp(s), SocketWaitKind::ListenerChild) => {
+                            if matches!(
+                                s.state(),
+                                socket::tcp::State::Listen | socket::tcp::State::SynReceived
+                            ) {
+                                IoEvents::empty()
+                            } else {
+                                IoEvents::IN
+                            }
+                        }
+                        (Socket::Udp(s), SocketWaitKind::Normal) => {
+                            let mut events = IoEvents::empty();
+                            if s.can_recv() {
+                                events |= IoEvents::IN;
+                            }
+                            if s.can_send() {
+                                events |= IoEvents::OUT;
+                            }
+                            events
+                        }
+                        _ => IoEvents::empty(),
+                    };
+                    (!events.is_empty()).then(|| (Arc::clone(&entry.queues), events))
+                })
+                .collect()
+        };
+        for (queues, events) in ready_wait_queues {
+            queues.notify(events);
+        }
+        if readiness_may_have_changed {
+            NET_WAIT_QUEUE.notify_all(true);
+        }
     }
 
     pub fn remove(&self, handle: SocketHandle) {
@@ -219,12 +357,12 @@ impl InterfaceWrapper {
         };
     }
 
-    pub fn poll(&self, sockets: &Mutex<SocketSet>) {
+    pub fn poll(&self, sockets: &Mutex<SocketSet>) -> bool {
         let mut dev = self.dev.lock();
         let mut iface = self.iface.lock();
         let mut sockets = sockets.lock();
         let timestamp = Self::current_time();
-        iface.poll(timestamp, dev.deref_mut(), &mut sockets);
+        iface.poll(timestamp, dev.deref_mut(), &mut sockets)
     }
 }
 
@@ -349,6 +487,46 @@ pub fn poll_interfaces() {
     SOCKET_SET.poll_interfaces();
 }
 
+pub(crate) fn schedule_poll() {
+    NET_POLL_EPOCH.fetch_add(1, Ordering::Release);
+    NET_POLL_WAIT_QUEUE.notify_one(true);
+}
+
+/// Returns the delay until the next timer expires.
+pub fn poll_delay() -> Option<smoltcp::time::Duration> {
+    let timestamp = Instant::from_micros_const((current_time_nanos() / NANOS_PER_MICROS) as i64);
+
+    #[cfg(feature = "monolithic")]
+    let delay_loopback = {
+        if LOOPBACK.is_inited() {
+            // Keep the same lock order as `poll_interfaces`: interface first,
+            // then the global socket set. Reversing this order can deadlock
+            // with an application task polling the network stack.
+            let mut iface = LOOPBACK.lock();
+            let sockets = SOCKET_SET.0.lock();
+            iface.poll_delay(timestamp, &sockets)
+        } else {
+            None
+        }
+    };
+    #[cfg(not(feature = "monolithic"))]
+    let delay_loopback = None;
+
+    let delay_eth0 = if ETH0.is_inited() {
+        let mut iface = ETH0.iface.lock();
+        let sockets = SOCKET_SET.0.lock();
+        iface.poll_delay(timestamp, &sockets)
+    } else {
+        None
+    };
+
+    match (delay_loopback, delay_eth0) {
+        (Some(d1), Some(d2)) => Some(d1.min(d2)),
+        (Some(d), None) | (None, Some(d)) => Some(d),
+        (None, None) => None,
+    }
+}
+
 /// Benchmark raw socket transmit bandwidth.
 pub fn bench_transmit() {
     ETH0.dev.lock().bench_transmit_bandwidth();
@@ -401,7 +579,130 @@ pub(crate) fn init(_net_dev: AxNetDevice) {
     info!("  gateway:  {}", gateway);
 
     SOCKET_SET.init_once(SocketSetWrapper::new());
+    SOCKET_WAIT_QUEUES.init_once(Mutex::new(BTreeMap::new()));
     LISTEN_TABLE.init_once(ListenTable::new());
+
+    #[cfg(feature = "multitask")]
+    axtask::spawn(|| {
+        struct NetWaker;
+        impl alloc::task::Wake for NetWaker {
+            fn wake(self: Arc<Self>) {
+                schedule_poll();
+            }
+            fn wake_by_ref(self: &Arc<Self>) {
+                schedule_poll();
+            }
+        }
+
+        let waker = core::task::Waker::from(Arc::new(NetWaker));
+
+        loop {
+            let observed_epoch = NET_POLL_EPOCH.load(Ordering::Acquire);
+
+            // Register before polling. The epoch condition below closes the
+            // remaining poll-to-sleep window if this waker fires meanwhile.
+            if ETH0.is_inited() {
+                let dev = ETH0.dev.lock();
+                let inner = dev.inner.borrow();
+                if let Some(poll_set) = inner.poll_set() {
+                    poll_set.register(&waker);
+                }
+            }
+
+            poll_interfaces();
+
+            let delay = poll_delay();
+            if let Some(d) = delay {
+                let duration = core::time::Duration::from_micros(d.total_micros());
+                NET_POLL_WAIT_QUEUE.wait_timeout_until(duration, || {
+                    NET_POLL_EPOCH.load(Ordering::Acquire) != observed_epoch
+                });
+            } else {
+                NET_POLL_WAIT_QUEUE.wait_until(|| {
+                    NET_POLL_EPOCH.load(Ordering::Acquire) != observed_epoch
+                });
+            }
+        }
+    });
+}
+
+pub(crate) fn register_wait_queue(handle: SocketHandle, queues: Arc<SocketWaitQueues>) {
+    SOCKET_WAIT_QUEUES.lock().insert(
+        handle,
+        SocketWaitEntry {
+            queues,
+            kind: SocketWaitKind::Normal,
+        },
+    );
+}
+
+pub(crate) fn register_listener_wait_queue(handle: SocketHandle, queues: Arc<SocketWaitQueues>) {
+    SOCKET_WAIT_QUEUES.lock().insert(
+        handle,
+        SocketWaitEntry {
+            queues,
+            kind: SocketWaitKind::ListenerChild,
+        },
+    );
+}
+
+pub(crate) fn unregister_wait_queue(handle: SocketHandle) {
+    SOCKET_WAIT_QUEUES.lock().remove(&handle);
+}
+
+pub(crate) fn deadline_from_ticks(ticks: u64) -> TimeValue {
+    monotonic_time()
+        .checked_add(core::time::Duration::from_nanos(ticks_to_nanos(ticks)))
+        .unwrap_or(core::time::Duration::MAX)
+}
+
+pub(crate) fn socket_deadline(ticks: u64) -> Option<TimeValue> {
+    (ticks != 0).then(|| deadline_from_ticks(ticks))
+}
+
+pub(crate) fn block_on_socket_io<F, T>(
+    queue: &axtask::WaitQueue,
+    nonblocking: bool,
+    deadline: Option<TimeValue>,
+    mut op: F,
+) -> AxResult<T>
+where
+    F: FnMut() -> AxResult<T>,
+{
+    if nonblocking {
+        return op();
+    }
+
+    let wait_for_io = async {
+        loop {
+            match op() {
+                Err(AxError::WouldBlock) => {}
+                result => return result,
+            }
+
+            // Register before checking readiness again. This closes the window
+            // where an event could arrive after the first check but before the
+            // task became visible to the notifier.
+            let mut wait = pin!(queue.wait_async());
+            let already_notified =
+                poll_fn(|cx| Poll::Ready(wait.as_mut().poll(cx).is_ready())).await;
+
+            match op() {
+                Err(AxError::WouldBlock) => {}
+                result => return result,
+            }
+
+            if !already_notified {
+                wait.await;
+            }
+        }
+    };
+
+    axtask::future::block_on(async {
+        axtask::future::timeout_at(deadline, wait_for_io)
+            .await
+            .map_err(|_| AxError::TimedOut)?
+    })
 }
 
 /// Check if an IP address is a local interface IP (loopback, unspecified, or dynamic ETH0 IP).

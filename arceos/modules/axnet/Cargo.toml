@@ -14,6 +14,7 @@ keywords = ["Starry"]
 monolithic = []
 
 smoltcp = []
+multitask = []
 
 # 启用ip协议与否
 ip = []
@@ -21,22 +22,22 @@ ip = []
 default = ["smoltcp"]
 
 [dependencies]
-log = "0.4"
-cfg-if = "1.0"
+log.workspace = true
+cfg-if.workspace = true
+# axnet still depends on the spin 0.9 API; the workspace default is spin 0.10.
 spin = "0.9"
-axdriver_net = { git = "https://github.com/arceos-org/axdriver_crates.git", tag = "v0.1.2" }
-lazyinit = "0.2"
-axerrno = "0.2"
-axhal = { workspace = true }
-axsync = { workspace = true }
-axtask = { workspace = true }
+axdriver_net.workspace = true
+lazyinit.workspace = true
+axerrno.workspace = true
+axhal.workspace = true
+axsync.workspace = true
+axtask.workspace = true
 axdriver = { workspace = true, features = ["net"] }
-axio = { workspace = true }
+axio.workspace = true
+axpoll.workspace = true
 
 [dependencies.smoltcp]
-git = "https://github.com/rcore-os/smoltcp.git"
-rev = "8bf9a9a"
-default-features = false
+workspace = true
 features = [
   "alloc", "log",   # no std
   "medium-ethernet",

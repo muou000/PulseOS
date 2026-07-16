@@ -1,4 +1,4 @@
-mod exec;
+pub mod exec;
 mod process;
 mod signal;
 mod thread;
@@ -506,7 +506,7 @@ impl axfs::ProcfsProcessProvider for PulseProcessProvider {
                     offset = mapping.file_offset();
                     let cached_file = mapping.file();
                     let loc = cached_file.location();
-                    if let Ok(meta) = loc.metadata() {
+                    if let Ok(meta) = axtask::future::block_on(loc.metadata()) {
                         inode = meta.inode;
                         let major = meta.device >> 8;
                         let minor = meta.device & 0xff;

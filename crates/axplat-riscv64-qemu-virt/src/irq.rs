@@ -1,7 +1,8 @@
-//! TODO: PLIC
+//! Platform-level Interrupt Controller (PLIC) support.
+
+use core::sync::atomic::{AtomicPtr, Ordering};
 
 use axplat::irq::{HandlerTable, IpiTarget, IrqHandler, IrqIf};
-use core::sync::atomic::{AtomicPtr, Ordering};
 use riscv::register::sie;
 use sbi_rt::HartMask;
 
@@ -28,7 +29,13 @@ pub const MAX_IRQ_COUNT: usize = 1024;
 static IRQ_HANDLER_TABLE: HandlerTable<MAX_IRQ_COUNT> = HandlerTable::new();
 
 macro_rules! with_cause {
-    ($cause: expr, @S_TIMER => $timer_op: expr, @S_SOFT => $ipi_op: expr, @S_EXT => $ext_op: expr, @EX_IRQ => $plic_op: expr $(,)?) => {
+    (
+        $cause:expr, @S_TIMER =>
+        $timer_op:expr, @S_SOFT =>
+        $ipi_op:expr, @S_EXT =>
+        $ext_op:expr, @EX_IRQ =>
+        $plic_op:expr $(,)?
+    ) => {
         match $cause {
             S_TIMER => $timer_op,
             S_SOFT => $ipi_op,
@@ -46,12 +53,19 @@ macro_rules! with_cause {
     };
 }
 
-pub(super) fn init_percpu() {
+pub(super) fn init_percpu(cpu_id: usize) {
+    // Clear firmware state before the CPU is allowed to take external IRQs.
+    crate::plic::init_hart(cpu_id);
     // enable soft interrupts, timer interrupts, and external interrupts
     unsafe {
         sie::set_ssoft();
         sie::set_stimer();
-        sie::set_sext();
+        // External interrupts (S_EXT / PLIC) are gated to Hart 0 only.
+        // This is consistent with PLIC operations (set_enable, claim, complete)
+        // which are hardcoded to context 0 (Hart 0).
+        if cpu_id == 0 {
+            sie::set_sext();
+        }
     }
 }
 
@@ -60,9 +74,12 @@ struct IrqIfImpl;
 #[impl_plat_interface]
 impl IrqIf for IrqIfImpl {
     /// Enables or disables the given IRQ.
-    fn set_enable(irq: usize, _enabled: bool) {
-        // TODO: set enable in PLIC
-        warn!("set_enable is not implemented for IRQ {}", irq);
+    ///
+    /// Note: Peripheral interrupts (PLIC-backed) are routed only to context 0 (Hart 0).
+    fn set_enable(irq: usize, enabled: bool) {
+        if irq & INTC_IRQ_BASE == 0 {
+            crate::plic::set_enable(0, irq, enabled);
+        }
     }
 
     /// Registers an IRQ handler for the given IRQ.
@@ -88,7 +105,11 @@ impl IrqIf for IrqIfImpl {
                 false
             },
             @EX_IRQ => {
-                if IRQ_HANDLER_TABLE.register_handler(irq, handler) {
+                if !crate::plic::is_valid_irq(irq) {
+                    warn!("invalid PLIC IRQ {}", irq);
+                    false
+                } else if IRQ_HANDLER_TABLE.register_handler(irq, handler) {
+                    crate::plic::set_priority(irq, 1);
                     Self::set_enable(irq, true);
                     true
                 } else {
@@ -126,7 +147,14 @@ impl IrqIf for IrqIfImpl {
                 warn!("External IRQ should be got from PLIC, not scause");
                 None
             },
-            @EX_IRQ => IRQ_HANDLER_TABLE.unregister_handler(irq)
+            @EX_IRQ => {
+                if crate::plic::is_valid_irq(irq) {
+                    Self::set_enable(irq, false);
+                    IRQ_HANDLER_TABLE.unregister_handler(irq)
+                } else {
+                    None
+                }
+            }
         )
     }
 
@@ -143,7 +171,7 @@ impl IrqIf for IrqIfImpl {
                 let handler = TIMER_HANDLER.load(Ordering::Acquire);
                 if !handler.is_null() {
                     // SAFETY: The handler is guaranteed to be a valid function pointer.
-                    unsafe { core::mem::transmute::<*mut (), IrqHandler>(handler)() };
+                    unsafe { core::mem::transmute::<*mut (), IrqHandler>(handler)(irq) };
                 }
             },
             @S_SOFT => {
@@ -151,16 +179,21 @@ impl IrqIf for IrqIfImpl {
                 let handler = IPI_HANDLER.load(Ordering::Acquire);
                 if !handler.is_null() {
                     // SAFETY: The handler is guaranteed to be a valid function pointer.
-                    unsafe { core::mem::transmute::<*mut (), IrqHandler>(handler)() };
+                    unsafe { core::mem::transmute::<*mut (), IrqHandler>(handler)(irq) };
                 }
                 unsafe {
                     riscv::register::sip::clear_ssoft();
                 }
             },
             @S_EXT => {
-                // TODO: get IRQ number from PLIC
-                if !IRQ_HANDLER_TABLE.handle(0) {
-                    warn!("Unhandled IRQ {}", 0);
+                // Claim and complete on context 0 (Hart 0) only, as external
+                // interrupts are gated to Hart 0 in init_percpu.
+                let irq_num = crate::plic::claim(0);
+                if irq_num != 0 {
+                    if !IRQ_HANDLER_TABLE.handle(irq_num as usize) {
+                        warn!("Unhandled PLIC IRQ {}", irq_num);
+                    }
+                    crate::plic::complete(0, irq_num);
                 }
             },
             @EX_IRQ => {

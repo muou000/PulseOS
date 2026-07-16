@@ -22,6 +22,7 @@ axtask = { workspace = true, features = ["multitask"] }
 axconfig.workspace = true
 axnet.workspace = true
 axio.workspace = true
+axpoll.workspace = true
 axfs.workspace = true
 axfs-ng-vfs.workspace = true
 linkme.workspace = true
@@ -30,17 +31,16 @@ bitflags.workspace = true
 spin.workspace = true
 kernel_guard.workspace = true
 linux-raw-sys = { workspace = true, features = ["system"] }
-pulse_core = { path = "../pulse_core" }
-starry-vdso = { workspace = true }
-scope-local = "0.1"
+pulse_core.workspace = true
+starry-vdso.workspace = true
+scope-local.workspace = true
 rand_core.workspace = true
 rand_pcg.workspace = true
 chrono.workspace = true
 
-
 [target.'cfg(target_arch = "riscv64")'.dependencies]
 syscalls = { workspace = true, features = ["riscv64"] }
-sbi-rt = { version = "0.0.3", features = ["legacy"] }
+sbi-rt = { workspace = true, features = ["legacy"] }
 
 [target.'cfg(target_arch = "loongarch64")'.dependencies]
 syscalls = { workspace = true, features = ["loongarch64"] }

@@ -1200,20 +1200,34 @@ pub fn sys_ppoll(
         }
 
         if !yield_success {
-            // If we have a deadline, calculate duration to wait
-            let remain_dur = deadline.map(|ddl| {
-                let now = axhal::time::monotonic_time();
-                if now >= ddl {
-                    Duration::ZERO
-                } else {
-                    ddl - now
+            loop {
+                if check_ready() {
+                    break;
                 }
-            });
 
-            if let Some(Duration::ZERO) = remain_dur {
-                // Already timed out, do not block
-            } else {
-                let _ = axtask::WaitQueue::wait_multiple_timeout_until(&wqs, remain_dur, check_ready);
+                // Recalculate the remaining duration after every wake. A wait queue
+                // notification only means that readiness may have changed; it is not
+                // itself a reason for ppoll() to return.
+                let remain_dur = deadline.map(|ddl| {
+                    let now = axhal::time::monotonic_time();
+                    if now >= ddl {
+                        Duration::ZERO
+                    } else {
+                        ddl - now
+                    }
+                });
+
+                if let Some(Duration::ZERO) = remain_dur {
+                    break;
+                }
+
+                let wait_result =
+                    axtask::WaitQueue::wait_multiple_timeout_until(&wqs, remain_dur, || {
+                        check_ready()
+                    });
+                if matches!(wait_result, Err(true)) {
+                    break;
+                }
             }
         }
 

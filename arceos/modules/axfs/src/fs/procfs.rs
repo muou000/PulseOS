@@ -1,4 +1,4 @@
-use alloc::{borrow::ToOwned, collections::BTreeMap, format, string::{String, ToString}, sync::Arc, vec::Vec};
+use alloc::{borrow::ToOwned, collections::BTreeMap, format, string::{String, ToString}, sync::Arc, vec::Vec, boxed::Box};
 use core::{
     any::Any,
     cmp::min,
@@ -6,6 +6,7 @@ use core::{
     task::Context,
     time::Duration,
 };
+use async_trait::async_trait;
 
 use axalloc::global_allocator;
 use axfs_ng_vfs::{
@@ -658,6 +659,7 @@ impl ProcFilesystem {
     }
 }
 
+#[async_trait]
 impl FilesystemOps for ProcFilesystem {
     fn name(&self) -> &str {
         "proc"
@@ -927,12 +929,13 @@ impl ProcNode {
     }
 }
 
+#[async_trait]
 impl NodeOps for ProcNode {
     fn inode(&self) -> u64 {
         self.ino
     }
 
-    fn metadata(&self) -> VfsResult<Metadata> {
+    async fn metadata(&self) -> VfsResult<Metadata> {
         let inode = self.inode_ref()?;
         let mut metadata = inode.metadata.lock().clone();
 
@@ -941,7 +944,7 @@ impl NodeOps for ProcNode {
                 metadata.size = dir.entries.lock().len() as u64;
             }
             NodeContent::Live(kind) => {
-                if let ProcLiveFileKind::PidPagemap(_) = kind {
+                if let ProcLiveFileKind::PidPagemap(_pid) = kind {
                     metadata.size = 0x8000_0000_0000;
                     metadata.blocks = metadata.size.div_ceil(512);
                 } else {
@@ -958,7 +961,7 @@ impl NodeOps for ProcNode {
         Ok(metadata)
     }
 
-    fn update_metadata(&self, update: MetadataUpdate) -> VfsResult<()> {
+    async fn update_metadata(&self, update: MetadataUpdate) -> VfsResult<()> {
         let inode = self.inode_ref()?;
         if (update.mode.is_some() || update.owner.is_some())
             && (inode_live_kind(&inode).is_some() || self.ino >= PID_INODE_START)
@@ -973,7 +976,7 @@ impl NodeOps for ProcNode {
         self.fs.deref()
     }
 
-    fn sync(&self, _data_only: bool) -> VfsResult<()> {
+    async fn sync(&self, _data_only: bool) -> VfsResult<()> {
         Ok(())
     }
 
@@ -984,21 +987,15 @@ impl NodeOps for ProcNode {
     fn flags(&self) -> NodeFlags {
         if self.ino >= PID_INODE_START {
             NodeFlags::NON_CACHEABLE
-        } else if self
-            .inode_ref()
-            .ok()
-            .and_then(|inode| inode_live_kind(&inode))
-            .is_some()
-        {
-            NodeFlags::NON_CACHEABLE
         } else {
-            NodeFlags::ALWAYS_CACHE
+            NodeFlags::NON_CACHEABLE
         }
     }
 }
 
+#[async_trait]
 impl DirNodeOps for ProcNode {
-    fn read_dir(&self, offset: u64, sink: &mut dyn DirEntrySink) -> VfsResult<usize> {
+    async fn read_dir(&self, offset: u64, sink: &mut (dyn DirEntrySink + Send)) -> VfsResult<usize> {
         let inode = self.inode_ref()?;
         let mut all_entries = Vec::new();
 
@@ -1124,7 +1121,7 @@ impl DirNodeOps for ProcNode {
         Ok(count)
     }
 
-    fn lookup(&self, name: &str) -> VfsResult<DirEntry> {
+    async fn lookup(&self, name: &str) -> VfsResult<DirEntry> {
         let inode = self.inode_ref()?;
 
         if self.ino >= PID_INODE_START {
@@ -1250,7 +1247,7 @@ impl DirNodeOps for ProcNode {
         false
     }
 
-    fn create(
+    async fn create(
         &self,
         name: &str,
         node_type: NodeType,
@@ -1282,7 +1279,7 @@ impl DirNodeOps for ProcNode {
         self.build_entry(name, inode.ino)
     }
 
-    fn link(&self, name: &str, target: &DirEntry) -> VfsResult<DirEntry> {
+    async fn link(&self, name: &str, target: &DirEntry) -> VfsResult<DirEntry> {
         if self.ino >= PID_INODE_START {
             return Err(VfsError::ReadOnlyFilesystem);
         }
@@ -1309,14 +1306,14 @@ impl DirNodeOps for ProcNode {
         self.build_entry(name, target.ino)
     }
 
-    fn unlink(&self, name: &str) -> VfsResult<()> {
+    async fn unlink(&self, name: &str) -> VfsResult<()> {
         if self.ino >= PID_INODE_START {
             return Err(VfsError::ReadOnlyFilesystem);
         }
         self.remove_entry(name)
     }
 
-    fn rename(&self, src_name: &str, dst_dir: &DirNode, dst_name: &str) -> VfsResult<()> {
+    async fn rename(&self, src_name: &str, dst_dir: &DirNode, dst_name: &str) -> VfsResult<()> {
         if self.ino >= PID_INODE_START {
             return Err(VfsError::ReadOnlyFilesystem);
         }
@@ -1343,7 +1340,7 @@ impl DirNodeOps for ProcNode {
                 .ok_or(VfsError::NotFound)?
         };
 
-        if let Ok(existing) = dst_node.lookup(dst_name) {
+        if let Ok(existing) = dst_node.lookup(dst_name).await {
             let existing = existing.downcast::<Self>()?;
             if existing.ino == moved_ref {
                 return Ok(());
@@ -1356,7 +1353,7 @@ impl DirNodeOps for ProcNode {
             src_entries.remove(src_name).ok_or(VfsError::NotFound)?
         };
 
-        if dst_node.lookup(dst_name).is_ok() {
+        if dst_node.lookup(dst_name).await.is_ok() {
             dst_node.remove_entry(dst_name)?;
         }
 
@@ -1382,8 +1379,9 @@ impl DirNodeOps for ProcNode {
     }
 }
 
+#[async_trait]
 impl FileNodeOps for ProcNode {
-    fn read_at(&self, buf: &mut [u8], offset: u64) -> VfsResult<usize> {
+    async fn read_at(&self, buf: &mut [u8], offset: u64) -> VfsResult<usize> {
         let inode = self.inode_ref()?;
 
         if let Some(kind) = inode_live_kind(&inode) {
@@ -1418,7 +1416,7 @@ impl FileNodeOps for ProcNode {
         Ok(read_len)
     }
 
-    fn write_at(&self, buf: &[u8], offset: u64) -> VfsResult<usize> {
+    async fn write_at(&self, buf: &[u8], offset: u64) -> VfsResult<usize> {
         let inode = self.inode_ref()?;
         if let Some(kind) = inode_live_kind(&inode) {
             match kind {
@@ -1467,7 +1465,7 @@ impl FileNodeOps for ProcNode {
         Ok(buf.len())
     }
 
-    fn append(&self, buf: &[u8]) -> VfsResult<(usize, u64)> {
+    async fn append(&self, buf: &[u8]) -> VfsResult<(usize, u64)> {
         let inode = self.inode_ref()?;
         if let Some(kind) = inode_live_kind(&inode) {
             match kind {
@@ -1503,7 +1501,7 @@ impl FileNodeOps for ProcNode {
         Ok((buf.len(), offset))
     }
 
-    fn set_len(&self, len: u64) -> VfsResult<()> {
+    async fn set_len(&self, len: u64) -> VfsResult<()> {
         let inode = self.inode_ref()?;
         if let Some(kind) = inode_live_kind(&inode) {
             match kind {
@@ -1520,8 +1518,12 @@ impl FileNodeOps for ProcNode {
         Ok(())
     }
 
-    fn set_symlink(&self, _target: &str) -> VfsResult<()> {
+    async fn set_symlink(&self, _target: &str) -> VfsResult<()> {
         Err(VfsError::PermissionDenied)
+    }
+
+    async fn ioctl(&self, _cmd: u32, _arg: usize) -> VfsResult<usize> {
+        Err(VfsError::NotATty)
     }
 }
 

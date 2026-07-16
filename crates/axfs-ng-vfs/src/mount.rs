@@ -534,32 +534,55 @@ impl PartialEq for Location {
 
 impl Eq for Location {}
 
-#[inherit_methods(from = "self.entry")]
 impl Location {
-    pub fn inode(&self) -> u64;
+    pub fn inode(&self) -> u64 {
+        self.entry.inode()
+    }
 
-    pub fn filesystem(&self) -> &dyn FilesystemOps;
+    pub fn filesystem(&self) -> &dyn FilesystemOps {
+        self.entry.filesystem()
+    }
 
-    pub fn update_metadata(&self, update: MetadataUpdate) -> VfsResult<()>;
+    pub async fn update_metadata(&self, update: MetadataUpdate) -> VfsResult<()> {
+        self.entry.update_metadata(update).await
+    }
 
     #[allow(clippy::len_without_is_empty)]
-    pub fn len(&self) -> VfsResult<u64>;
+    pub async fn len(&self) -> VfsResult<u64> {
+        self.entry.len().await
+    }
 
-    pub fn sync(&self, data_only: bool) -> VfsResult<()>;
+    pub async fn sync(&self, data_only: bool) -> VfsResult<()> {
+        self.entry.sync(data_only).await
+    }
 
-    pub fn is_file(&self) -> bool;
+    pub fn is_file(&self) -> bool {
+        self.entry.is_file()
+    }
 
-    pub fn is_dir(&self) -> bool;
+    pub fn is_dir(&self) -> bool {
+        self.entry.is_dir()
+    }
 
-    pub fn node_type(&self) -> NodeType;
+    pub fn node_type(&self) -> NodeType {
+        self.entry.node_type()
+    }
 
-    pub fn read_link(&self) -> VfsResult<String>;
+    pub async fn read_link(&self) -> VfsResult<String> {
+        self.entry.read_link().await
+    }
 
-    pub fn ioctl(&self, cmd: u32, arg: usize) -> VfsResult<usize>;
+    pub async fn ioctl(&self, cmd: u32, arg: usize) -> VfsResult<usize> {
+        self.entry.ioctl(cmd, arg).await
+    }
 
-    pub fn flags(&self) -> NodeFlags;
+    pub fn flags(&self) -> NodeFlags {
+        self.entry.flags()
+    }
 
-    pub fn user_data(&self) -> MutexGuard<'_, TypeMap>;
+    pub fn user_data(&self) -> MutexGuard<'_, TypeMap> {
+        self.entry.user_data()
+    }
 }
 
 impl Location {
@@ -616,8 +639,8 @@ impl Location {
         self.entry.as_file().map(|_| ())
     }
 
-    pub fn metadata(&self) -> VfsResult<Metadata> {
-        let mut metadata = self.entry.metadata()?;
+    pub async fn metadata(&self) -> VfsResult<Metadata> {
+        let mut metadata = self.entry.metadata().await?;
         metadata.device = self.mountpoint.device();
         Ok(metadata)
     }
@@ -692,18 +715,18 @@ impl Location {
         self.resolve_mountpoint()
     }
 
-    pub fn lookup_no_follow(&self, name: &str) -> VfsResult<Self> {
+    pub async fn lookup_no_follow(&self, name: &str) -> VfsResult<Self> {
         Ok(match name {
             DOT => self.clone(),
             DOTDOT => self.parent().unwrap_or_else(|| self.clone()),
             _ => {
-                let loc = Self::new(self.mountpoint.clone(), self.entry.as_dir()?.lookup(name)?);
+                let loc = Self::new(self.mountpoint.clone(), self.entry.as_dir()?.lookup(name).await?);
                 loc.resolve_mounted_location()
             }
         })
     }
 
-    pub fn create(
+    pub async fn create(
         &self,
         name: &str,
         node_type: NodeType,
@@ -712,20 +735,22 @@ impl Location {
         self.entry
             .as_dir()?
             .create(name, node_type, permission)
+            .await
             .map(|entry| self.wrap(entry))
     }
 
-    pub fn link(&self, name: &str, node: &Self) -> VfsResult<Self> {
+    pub async fn link(&self, name: &str, node: &Self) -> VfsResult<Self> {
         if !Arc::ptr_eq(&self.mountpoint, &node.mountpoint) {
             return Err(VfsError::CrossesDevices);
         }
         self.entry
             .as_dir()?
             .link(name, &node.entry)
+            .await
             .map(|entry| self.wrap(entry))
     }
 
-    pub fn rename(&self, src_name: &str, dst_dir: &Self, dst_name: &str) -> VfsResult<()> {
+    pub async fn rename(&self, src_name: &str, dst_dir: &Self, dst_name: &str) -> VfsResult<()> {
         if !Arc::ptr_eq(&self.mountpoint, &dst_dir.mountpoint) {
             return Err(VfsError::CrossesDevices);
         }
@@ -735,22 +760,24 @@ impl Location {
         self.entry
             .as_dir()?
             .rename(src_name, dst_dir.entry.as_dir()?, dst_name)
+            .await
     }
 
-    pub fn unlink(&self, name: &str, is_dir: bool) -> VfsResult<()> {
-        self.entry.as_dir()?.unlink(name, is_dir)
+    pub async fn unlink(&self, name: &str, is_dir: bool) -> VfsResult<()> {
+        self.entry.as_dir()?.unlink(name, is_dir).await
     }
 
-    pub fn open_file(&self, name: &str, options: &OpenOptions) -> VfsResult<Location> {
+    pub async fn open_file(&self, name: &str, options: &OpenOptions) -> VfsResult<Location> {
         self.entry
             .as_dir()?
             .open_file(name, options)
+            .await
             .map(|entry| self.wrap(entry).resolve_mounted_location())
     }
 
-    pub fn read_dir(&self, offset: u64, sink: &mut dyn DirEntrySink) -> VfsResult<usize> {
+    pub async fn read_dir(&self, offset: u64, sink: &mut (dyn DirEntrySink + Send)) -> VfsResult<usize> {
         let loc = self.clone().resolve_mounted_location();
-        loc.entry.as_dir()?.read_dir(offset, sink)
+        loc.entry.as_dir()?.read_dir(offset, sink).await
     }
 
     // -----------------------------------------------------------------------

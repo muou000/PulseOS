@@ -44,6 +44,7 @@ cfg_if::cfg_if! {
         mod task_ext;
         mod api;
         mod wait_queue;
+        pub mod future;
 
         #[cfg(feature = "irq")]
         mod timers;

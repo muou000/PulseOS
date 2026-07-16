@@ -24,7 +24,9 @@ pub fn set_generic_timer(deadline_ns: u64, callback: alloc::boxed::Box<dyn FnOnc
     crate::timers::set_generic_timer(timer_list::TimeValue::from_nanos(deadline_ns), callback);
 }
 
-pub(crate) use crate::run_queue::{current_run_queue, select_run_queue};
+pub(crate) use crate::run_queue::{
+    current_run_queue, select_run_queue, select_wake_run_queue,
+};
 
 #[doc(cfg(feature = "multitask"))]
 pub use crate::task::{CurrentTask, TaskId, TaskInner};
@@ -142,6 +144,7 @@ pub fn init_scheduler_secondary() {
 pub fn on_timer_tick() {
     use kernel_guard::NoOp;
     crate::timers::check_events();
+    crate::future::check_timer_events();
     // Invoke the registered timer hook (e.g. itimer check).
     let ptr = TIMER_HOOK.load(Ordering::Acquire);
     if !ptr.is_null() {
@@ -188,6 +191,23 @@ where
     F: FnOnce() + Send + 'static,
 {
     spawn_raw(f, "".into(), axconfig::TASK_STACK_SIZE)
+}
+
+/// Spawns a new stack-backed task that runs the given future to completion.
+///
+/// The future is driven by [`crate::future::block_on`] from a regular kernel
+/// task. This keeps the normal current-task, kernel-stack, TLS, task-extension,
+/// and scheduler semantics while allowing the future to suspend on wakers.
+/// The future state itself remains heap-pinned so large async state machines do
+/// not consume the task's kernel stack.
+///
+/// Returns the task reference.
+pub fn spawn_async<F>(f: F) -> AxTaskRef
+where
+    F: core::future::Future<Output = ()> + Send + 'static,
+{
+    let future = alloc::boxed::Box::pin(f);
+    spawn(move || crate::future::block_on(future))
 }
 
 /// Set the priority for current task.
@@ -248,7 +268,7 @@ pub fn yield_now() {
 
 /// Wakes a blocked task and puts it back into a run queue.
 pub fn wake_task(task: AxTaskRef, resched: bool) {
-    select_run_queue::<NoPreemptIrqSave>(&task).unblock_task(task, resched)
+    select_wake_run_queue::<NoPreemptIrqSave>(&task).unblock_task(task, resched)
 }
 
 /// Updates the saved page table root of the current task context.
@@ -316,4 +336,3 @@ pub fn check_preempt_pending() {
     #[cfg(feature = "preempt")]
     crate::task::TaskInner::current_check_preempt_pending();
 }
-

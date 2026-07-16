@@ -43,6 +43,8 @@ multitask = [
     "axtask/multitask",
     "axsync/multitask",
     "axruntime/multitask",
+    "axnet?/multitask",
+    "axdriver?/multitask",
 ]
 sched-fifo = ["axtask/sched-fifo"]
 sched-rr = ["axtask/sched-rr", "irq"]

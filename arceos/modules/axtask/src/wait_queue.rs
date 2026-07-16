@@ -1,9 +1,11 @@
 use alloc::{collections::VecDeque, sync::Arc, vec::Vec};
+use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use core::task::Waker;
 
 use kernel_guard::{NoOp, NoPreemptIrqSave};
 use kspin::{SpinNoIrq, SpinNoIrqGuard};
 
-use crate::{AxTaskRef, CurrentTask, current_run_queue, select_run_queue};
+use crate::{AxTaskRef, CurrentTask, current_run_queue, select_wake_run_queue};
 
 /// A queue to store sleeping tasks.
 ///
@@ -29,7 +31,27 @@ use crate::{AxTaskRef, CurrentTask, current_run_queue, select_run_queue};
 /// ```
 pub struct WaitQueue {
     queue: SpinNoIrq<VecDeque<AxTaskRef>>,
+    wakers: SpinNoIrq<VecDeque<WakerEntry>>,
 }
+
+/// A registered waker plus its companion notification flag.
+///
+/// `notified` is set to `true` by `notify_one` / `notify_all` immediately
+/// before the stored `waker` is invoked. Holders of the `Arc<AtomicBool>`
+/// (e.g. [`crate::future::WaitFuture`]) can poll this flag to detect that a
+/// matching notification has occurred without having to rely on `waker.wake()`
+/// to schedule another poll.
+struct WakerEntry {
+    id: u64,
+    task_id: u64,
+    notified: Arc<AtomicBool>,
+    waker: Waker,
+}
+
+static WAKER_ENTRY_ID: AtomicU64 = AtomicU64::new(1);
+
+/// An opaque handle for one independently owned waker registration.
+pub struct WakerRegistration(u64);
 
 pub(crate) type WaitQueueGuard<'a> = SpinNoIrqGuard<'a, VecDeque<AxTaskRef>>;
 
@@ -38,6 +60,7 @@ impl WaitQueue {
     pub const fn new() -> Self {
         Self {
             queue: SpinNoIrq::new(VecDeque::new()),
+            wakers: SpinNoIrq::new(VecDeque::new()),
         }
     }
 
@@ -45,16 +68,13 @@ impl WaitQueue {
     pub fn with_capacity(capacity: usize) -> Self {
         Self {
             queue: SpinNoIrq::new(VecDeque::with_capacity(capacity)),
+            wakers: SpinNoIrq::new(VecDeque::with_capacity(capacity)),
         }
     }
 
     /// Cancel events by removing the task from the wait queue.
     /// If `from_timer_list` is true, try to remove the task from the timer list.
     fn cancel_events(&self, curr: &CurrentTask, _from_timer_list: bool) {
-        if !curr.in_wait_queue() {
-            return;
-        }
-
         // A task can be wake up only one events (timer or `notify()`), remove
         // the event from another queue. Use the queue membership as the source
         // of truth instead of the task-local flag to avoid stale state.
@@ -205,16 +225,24 @@ impl WaitQueue {
         let mut woken_by = None;
 
         loop {
-            let mut rq = crate::run_queue::current_run_queue::<NoPreemptIrqSave>();
             if let Some(d) = deadline {
                 if axhal::time::monotonic_time() >= d {
                     break;
                 }
             }
 
-            curr.set_state(crate::task::TaskState::Blocked);
-            curr.set_in_wait_queue(true);
+            // The condition may enter a sleeping kernel lock, so it must be
+            // checked while the current task is still Running and without a
+            // run-queue guard held.
+            if condition() {
+                timeout = false;
+                break;
+            }
 
+            // Enroll while still Running. A concurrent notifier that removes
+            // an entry in this window records the wake by clearing
+            // `in_wait_queue`; this is checked again after changing the state.
+            curr.set_in_wait_queue(true);
             for q in queues {
                 let mut wq = q.queue.lock();
                 if !wq.iter().any(|t| Arc::ptr_eq(t, curr.as_task_ref())) {
@@ -222,15 +250,30 @@ impl WaitQueue {
                 }
             }
 
+            // Close the check/enroll race. If readiness changed before the
+            // task was visible in a queue, this second check observes it.
             if condition() {
                 timeout = false;
-                if curr.transition_state(crate::task::TaskState::Blocked, crate::task::TaskState::Running) {
-                    curr.set_in_wait_queue(false);
-                    break;
-                }
+                break;
             }
 
-            rq.resched_blocked();
+            let mut rq = crate::run_queue::current_run_queue::<NoPreemptIrqSave>();
+            curr.set_state(crate::task::TaskState::Blocked);
+
+            // A notifier may have consumed an entry while the task was still
+            // Running. Restore Running locally if it won that race; if it
+            // already changed Blocked to Ready, reschedule to consume the
+            // queued wakeup normally.
+            let consumed_while_running = !curr.in_wait_queue()
+                && curr.transition_state(
+                    crate::task::TaskState::Blocked,
+                    crate::task::TaskState::Running,
+                );
+            if consumed_while_running {
+                drop(rq);
+            } else {
+                rq.resched_blocked();
+            }
 
             for (i, q) in queues.iter().enumerate() {
                 let wq = q.queue.lock();
@@ -247,6 +290,7 @@ impl WaitQueue {
         for q in queues {
             q.cancel_events(&curr, false);
         }
+        curr.set_in_wait_queue(false);
         if deadline.is_some() {
             if let Some(q) = queues.first() {
                 q.cancel_events(&curr, true);
@@ -260,31 +304,62 @@ impl WaitQueue {
         }
     }
 
-    /// Wakes up one task in the wait queue, usually the first one.
+    /// Wake up a task in the wait queue.
     ///
-    /// If `resched` is true, the current task will be preempted when the
-    /// preemption is enabled.
+    /// If `resched` is true, the current task will yield the CPU.
     pub fn notify_one(&self, resched: bool) -> bool {
-        let task = {
-            let mut wq = self.queue.lock();
-            let mut target = None;
-            while let Some(task) = wq.pop_front() {
-                if task.state() == crate::task::TaskState::Blocked {
+        let mut wq = self.queue.lock();
+        let mut target = None;
+        let mut consumed_running = false;
+        while let Some(task) = wq.pop_front() {
+            match task.state() {
+                crate::task::TaskState::Blocked => {
                     target = Some(task);
                     break;
                 }
-                // The task is no longer blocked (e.g., timed out), but still in the wait queue.
-                // We should mark it as not in the wait queue.
-                task.set_in_wait_queue(false);
+                crate::task::TaskState::Running if task.consume_wait_queue_entry() => {
+                    // `wait_multiple_timeout_until` enrolls the current task
+                    // before changing it to Blocked. Consuming that Running
+                    // entry is the one notification; do not drain later
+                    // Running waiters while looking for a Blocked task.
+                    consumed_running = true;
+                    break;
+                }
+                _ => {
+                    // A timeout or a notification through another queue can
+                    // leave a stale entry behind until the waiter cleans up.
+                    task.set_in_wait_queue(false);
+                }
             }
-            target
-        };
+        }
+        drop(wq);
 
-        if let Some(task) = task {
+        if let Some(task) = target {
             unblock_one_task(task, resched);
             true
+        } else if consumed_running {
+            true
         } else {
-            false
+            // Only remove and wake one registered waker, matching the
+            // single-task semantics of `notify_one`. All other wakers
+            // remain registered for future notifications.
+            let entry = {
+                let mut wakers = self.wakers.lock();
+                let entry = wakers.pop_front();
+                if let Some(entry) = entry.as_ref() {
+                    // Keep this store under the queue lock. A concurrent poll
+                    // that fails to find the removed registration must then
+                    // observe the completed notification.
+                    entry.notified.store(true, Ordering::Release);
+                }
+                entry
+            };
+            if let Some(entry) = entry {
+                entry.waker.wake();
+                true
+            } else {
+                false
+            }
         }
     }
 
@@ -307,6 +382,17 @@ impl WaitQueue {
                     task.set_in_wait_queue(false);
                 }
             }
+        }
+
+        let wakers = {
+            let mut wakers = self.wakers.lock();
+            for entry in wakers.iter() {
+                entry.notified.store(true, Ordering::Release);
+            }
+            core::mem::take(&mut *wakers)
+        };
+        for entry in wakers {
+            entry.waker.wake();
         }
     }
 
@@ -341,7 +427,7 @@ impl WaitQueue {
     /// * `target` - The target wait queue to which tasks will be moved.
     ///
     /// ## Returns
-    /// The number of tasks actually requeued.  
+    /// The number of tasks actually requeued.
     pub fn requeue(&self, mut count: usize, target: &WaitQueue) -> usize {
         let tasks: Vec<_> = {
             let mut wq = self.queue.lock();
@@ -369,6 +455,98 @@ impl WaitQueue {
     pub fn prune_exited(&self) {
         self.queue.lock().retain(|t| t.state() != crate::task::TaskState::Exited);
     }
+
+    /// Registers a waker to the wait queue.
+    ///
+    /// Returns a shared notification flag (`Arc<AtomicBool>`) tied to the
+    /// current task's registration. `notify_one` / `notify_all` will set this
+    /// flag to `true` before invoking the waker; holders of the returned
+    /// `Arc` (such as [`crate::future::WaitFuture`]) should treat the flag
+    /// as the authoritative completion signal rather than relying on the
+    /// waker alone, since spurious or unrelated wakes are permitted by the
+    /// `Future` contract.
+    ///
+    /// Callers that do not need to observe the flag directly may simply
+    /// discard the returned value; the waker is still registered and will be
+    /// invoked on the next matching notification.
+    pub fn register_waker(&self, waker: &core::task::Waker) -> Arc<AtomicBool> {
+        self.register_waker_inner(waker, true).1
+    }
+
+    /// Registers a waker without task-level deduplication.
+    ///
+    /// The returned handle owns exactly one queue entry and must eventually
+    /// be passed to [`WaitQueue::unregister_waker`].
+    pub fn register_owned_waker(
+        &self,
+        waker: &core::task::Waker,
+    ) -> WakerRegistration {
+        WakerRegistration(self.register_waker_inner(waker, false).0)
+    }
+
+    fn register_waker_inner(
+        &self,
+        waker: &core::task::Waker,
+        deduplicate_task: bool,
+    ) -> (u64, Arc<AtomicBool>) {
+        let mut wakers = self.wakers.lock();
+        let task_id = crate::current().id().as_u64();
+        if deduplicate_task {
+            if let Some(entry) = wakers.iter_mut().find(|entry| entry.task_id == task_id) {
+                if !entry.waker.will_wake(waker) {
+                    entry.waker = waker.clone();
+                }
+                return (entry.id, entry.notified.clone());
+            }
+        }
+
+        let id = WAKER_ENTRY_ID.fetch_add(1, Ordering::Relaxed);
+        let notified = Arc::new(AtomicBool::new(false));
+        wakers.push_back(WakerEntry {
+            id,
+            task_id,
+            notified: notified.clone(),
+            waker: waker.clone(),
+        });
+        (id, notified)
+    }
+
+    pub(crate) fn register_wait_future_waker(
+        &self,
+        waker: &core::task::Waker,
+    ) -> (WakerRegistration, Arc<AtomicBool>) {
+        let (id, notified) = self.register_waker_inner(waker, false);
+        (WakerRegistration(id), notified)
+    }
+
+    pub(crate) fn update_registered_waker(
+        &self,
+        registration: &WakerRegistration,
+        waker: &core::task::Waker,
+    ) {
+        let mut wakers = self.wakers.lock();
+        if let Some(entry) = wakers.iter_mut().find(|entry| entry.id == registration.0)
+            && !entry.waker.will_wake(waker)
+        {
+            entry.waker = waker.clone();
+        }
+    }
+
+    pub fn unregister_waker(&self, registration: WakerRegistration) {
+        self.wakers
+            .lock()
+            .retain(|entry| entry.id != registration.0);
+    }
+
+    /// Returns a future that waits for the wait queue.
+    pub fn wait_async(&self) -> crate::future::WaitFuture {
+        crate::future::WaitFuture::new(self)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn enqueue_task_for_test(&self, task: AxTaskRef) {
+        self.queue.lock().push_back(task);
+    }
 }
 
 fn unblock_one_task(task: AxTaskRef, resched: bool) {
@@ -382,5 +560,5 @@ fn unblock_one_task_locked(task: AxTaskRef, resched: bool) {
     // Select run queue by the CPU set of the task.
     // Use `NoOp` kernel guard here because the function is called with holding the
     // lock of wait queue, or an explicit `NoPreemptIrqSave` guard.
-    select_run_queue::<NoOp>(&task).unblock_task(task, resched)
+    select_wake_run_queue::<NoOp>(&task).unblock_task(task, resched)
 }

@@ -23,8 +23,16 @@ display = ["axdriver_display"]
 # Enabled by features `virtio-*`
 virtio = ["axdriver_virtio", "dep:axalloc", "dep:axhal", "dep:axconfig"]
 
+multitask = []
+
+# Async block I/O interface (AsyncBlockDriverOps trait implementation).
+# Requires `multitask` + `irq` to be effective at runtime.
+# TODO: currently only VirtIoBlkDevWrapper implements AsyncBlockDriverOps.
+#       Other block drivers (ramdisk, bcm2835-sdhci) still use sync-only BlockDriverOps.
+async = ["axdriver_block/async"]
+
 # various types of drivers
-virtio-blk = ["block", "virtio", "axdriver_virtio/block"]
+virtio-blk = ["block", "virtio", "axdriver_virtio/block", "async"]
 virtio-net = ["net", "virtio", "axdriver_virtio/net"]
 virtio-gpu = ["display", "virtio", "axdriver_virtio/gpu"]
 ramdisk = ["block", "axdriver_block/ramdisk"]
@@ -36,17 +44,21 @@ fxmac = ["net", "axdriver_net/fxmac", "dep:axalloc", "dep:axhal", "dep:axdma"]
 default = ["bus-pci"]
 
 [dependencies]
-log = "=0.4.21"
-cfg-if = "1.0"
-crate_interface = "0.1.4"
-axdriver_base = { git = "https://github.com/arceos-org/axdriver_crates.git", tag = "v0.1.2" }
-axdriver_block = { git = "https://github.com/arceos-org/axdriver_crates.git", tag = "v0.1.2", optional = true }
-axdriver_net = { git = "https://github.com/arceos-org/axdriver_crates.git", tag = "v0.1.2", optional = true }
-axdriver_display = { git = "https://github.com/arceos-org/axdriver_crates.git", tag = "v0.1.2", optional = true }
-axdriver_pci = { git = "https://github.com/arceos-org/axdriver_crates.git", tag = "v0.1.2", optional = true }
-axdriver_virtio = { git = "https://github.com/arceos-org/axdriver_crates.git", tag = "v0.1.2", optional = true }
+log.workspace = true
+cfg-if.workspace = true
+crate_interface.workspace = true
+axpoll.workspace = true
+kspin.workspace = true
+virtio-drivers.workspace = true
+axdriver_base.workspace = true
+axdriver_block = { workspace = true, optional = true }
+axdriver_net = { workspace = true, optional = true }
+axdriver_display = { workspace = true, optional = true }
+axdriver_pci = { workspace = true, optional = true }
+axdriver_virtio = { workspace = true, optional = true }
 axalloc = { workspace = true, optional = true }
 axhal = { workspace = true, optional = true }
 axconfig = { workspace = true, optional = true }
 axdma = { workspace = true, optional = true }
 axtask = { workspace = true }
+axlog = { workspace = true }

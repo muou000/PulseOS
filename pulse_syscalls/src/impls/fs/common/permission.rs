@@ -70,8 +70,7 @@ pub(crate) fn check_faccess_permission(
         return Err(LinuxError::EROFS);
     }
 
-    let meta = location
-        .metadata()
+    let meta = axtask::future::block_on(location.metadata())
         .map_err(|e| LinuxError::from(e.canonicalize()))?;
 
     axlog::debug!(

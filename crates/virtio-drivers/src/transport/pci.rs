@@ -93,6 +93,9 @@ pub struct PciTransport {
     isr_status: NonNull<Volatile<u8>>,
     /// The VirtIO device-specific configuration within some BAR.
     config_space: Option<NonNull<[u32]>>,
+    msix_enabled: bool,
+    msix_config_vector: Option<u16>,
+    msix_queue_vector: Option<u16>,
 }
 
 impl PciTransport {
@@ -195,7 +198,41 @@ impl PciTransport {
             notify_off_multiplier,
             isr_status,
             config_space,
+            msix_enabled: false,
+            msix_config_vector: None,
+            msix_queue_vector: None,
         })
+    }
+
+    /// Sets the MSI-X vector for the configuration change interrupt.
+    pub fn set_config_msix_vector(&mut self, vector: u16) -> bool {
+        self.msix_config_vector = Some(vector);
+        unsafe {
+            volwrite!(self.common_cfg, msix_config, vector);
+            volread!(self.common_cfg, msix_config) != 0xffff
+        }
+    }
+
+    /// Sets the MSI-X vector for the given queue.
+    pub fn set_queue_msix_vector(&mut self, queue: u16, vector: u16) -> bool {
+        unsafe {
+            volwrite!(self.common_cfg, queue_select, queue);
+            volwrite!(self.common_cfg, queue_msix_vector, vector);
+            volread!(self.common_cfg, queue_msix_vector) != 0xffff
+        }
+    }
+
+    /// Sets the MSI-X vector assigned as each queue is initialized.
+    ///
+    /// Unlike [`Self::set_queue_msix_vector`], this assignment survives the
+    /// device reset performed by [`Transport::begin_init`].
+    pub fn set_default_queue_msix_vector(&mut self, vector: u16) {
+        self.msix_queue_vector = Some(vector);
+    }
+
+    /// Sets whether MSI-X is enabled.
+    pub fn set_msix_enabled(&mut self, enabled: bool) {
+        self.msix_enabled = enabled;
     }
 }
 
@@ -266,6 +303,14 @@ impl Transport for PciTransport {
         // was aligned.
         unsafe {
             volwrite!(self.common_cfg, device_status, status.bits() as u8);
+            // A VirtIO device reset clears the device-side MSI-X vector
+            // assignments. Restore the configuration vector as initialization
+            // resumes; queue vectors are restored when each queue is created.
+            if !status.is_empty() && self.msix_enabled {
+                if let Some(vector) = self.msix_config_vector {
+                    volwrite!(self.common_cfg, msix_config, vector);
+                }
+            }
         }
     }
 
@@ -293,6 +338,11 @@ impl Transport for PciTransport {
             volwrite!(self.common_cfg, queue_desc, descriptors as u64);
             volwrite!(self.common_cfg, queue_driver, driver_area as u64);
             volwrite!(self.common_cfg, queue_device, device_area as u64);
+            if self.msix_enabled {
+                if let Some(vector) = self.msix_queue_vector {
+                    volwrite!(self.common_cfg, queue_msix_vector, vector);
+                }
+            }
             volwrite!(self.common_cfg, queue_enable, 1);
         }
     }
@@ -312,6 +362,9 @@ impl Transport for PciTransport {
     }
 
     fn ack_interrupt(&mut self) -> bool {
+        if self.msix_enabled {
+            return true;
+        }
         // Safe because the common config pointer is valid and we checked in get_bar_region that it
         // was aligned.
         // Reading the ISR status resets it to 0 and causes the device to de-assert the interrupt.

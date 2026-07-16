@@ -99,8 +99,7 @@ fn mkdir_mode(mode: usize) -> NodePermission {
 
 fn resolve_existing_mount_path(path: &str) -> Result<String, LinuxError> {
     let ctx = context_for_dirfd(AT_FDCWD as i32)?;
-    let loc = ctx
-        .resolve(Path::new(path))
+    let loc = axtask::future::block_on(ctx.resolve(Path::new(path)))
         .map_err(|e| LinuxError::from(e.canonicalize()))?;
     loc.check_is_dir()
         .map_err(|e| LinuxError::from(e.canonicalize()))?;
@@ -112,7 +111,7 @@ fn resolve_existing_mount_path(path: &str) -> Result<String, LinuxError> {
 
 fn resolve_source_path(source: &str) -> Result<String, LinuxError> {
     let ctx = context_for_dirfd(AT_FDCWD as i32)?;
-    match ctx.resolve(Path::new(source)) {
+    match axtask::future::block_on(ctx.resolve(Path::new(source))) {
         Ok(loc) => Ok(loc
             .absolute_path()
             .map_err(|e| LinuxError::from(e.canonicalize()))?
@@ -183,7 +182,7 @@ fn lookup_or_probe_fs(source: &str, fstype: &str) -> Result<axfs_ng_vfs::Filesys
                     let disk = node
                         .get_block_device()
                         .map_err(|e| LinuxError::from(e.canonicalize()))?;
-                    return axfs::ext4::Ext4Filesystem::new(disk)
+                    return axtask::future::block_on(axfs::ext4::Ext4Filesystem::new(disk))
                         .map_err(|e| LinuxError::from(e.canonicalize()));
                 }
                 #[cfg(not(feature = "ext4"))]
@@ -225,18 +224,15 @@ fn rename_at(olddirfd: i32, oldpath: &str, newdirfd: i32, newpath: &str) -> Resu
     let old_ctx = context_for_dirfd(olddirfd)?;
     let new_ctx = context_for_dirfd(newdirfd)?;
 
-    let (src_dir, src_name) = old_ctx
-        .resolve_parent(Path::new(oldpath))
+    let (src_dir, src_name) = axtask::future::block_on(old_ctx.resolve_parent(Path::new(oldpath)))
         .map_err(|e| LinuxError::from(e.canonicalize()))?;
-    let (dst_dir, dst_name) = new_ctx
-        .resolve_parent(Path::new(newpath))
+    let (dst_dir, dst_name) = axtask::future::block_on(new_ctx.resolve_parent(Path::new(newpath)))
         .map_err(|e| LinuxError::from(e.canonicalize()))?;
 
-    old_ctx.check_write_permission(&src_dir)?;
-    new_ctx.check_write_permission(&dst_dir)?;
+    axtask::future::block_on(old_ctx.check_write_permission(&src_dir))?;
+    axtask::future::block_on(new_ctx.check_write_permission(&dst_dir))?;
 
-    src_dir
-        .rename(src_name.as_ref(), &dst_dir, dst_name.as_ref())
+    axtask::future::block_on(src_dir.rename(src_name.as_ref(), &dst_dir, dst_name.as_ref()))
         .map_err(|e| LinuxError::from(e.canonicalize()))
 }
 
@@ -271,7 +267,7 @@ pub fn sys_openat(dirfd: i32, pathname: usize, flags: usize, mode: usize) -> isi
             || (flags & O_TRUNC as usize) != 0;
         let create_requested = (flags & O_CREAT as usize) != 0;
         if write_requested || create_requested {
-            let is_ro = match ctx.resolve_no_follow(path) {
+            let is_ro = match axtask::future::block_on(ctx.resolve_no_follow(path)) {
                 Ok(loc) => {
                     let ro = crate::impls::fs::common::is_location_readonly(&loc);
                     // For O_CREAT-only (no write), allow opening an existing file.
@@ -285,7 +281,7 @@ pub fn sys_openat(dirfd: i32, pathname: usize, flags: usize, mode: usize) -> isi
                 Err(_) => {
                     // File doesn't exist; if create or write requested on ro fs → EROFS
                     if let Ok((parent_loc, _)) =
-                        ctx.resolve_parent(axfs_ng_vfs::path::Path::new(path))
+                        axtask::future::block_on(ctx.resolve_parent(axfs_ng_vfs::path::Path::new(path)))
                     {
                         crate::impls::fs::common::is_location_readonly(&parent_loc)
                     } else {
@@ -300,7 +296,7 @@ pub fn sys_openat(dirfd: i32, pathname: usize, flags: usize, mode: usize) -> isi
     }
 
     let options = flags_to_options(flags, mode);
-    let opened = match options.open(&ctx, path) {
+    let opened = match axtask::future::block_on(options.open(&ctx, path)) {
         Ok(opened) => opened,
         Err(e) => {
             let err = LinuxError::from(e.canonicalize());
@@ -309,8 +305,8 @@ pub fn sys_openat(dirfd: i32, pathname: usize, flags: usize, mode: usize) -> isi
     };
 
     let metadata = match &opened {
-        axfs::OpenResult::File(file) => file.location().metadata(),
-        axfs::OpenResult::Dir(dir) => dir.metadata(),
+        axfs::OpenResult::File(file) => axtask::future::block_on(file.location().metadata()),
+        axfs::OpenResult::Dir(dir) => axtask::future::block_on(dir.metadata()),
     };
     if let Ok(ref meta) = metadata {
         // O_NOATIME permission check
@@ -458,10 +454,10 @@ pub fn sys_mkdirat(dirfd: i32, pathname: usize, mode: usize) -> isize {
     };
     // Check for read-only filesystem: resolve parent dir if path doesn't exist yet
     {
-        let is_ro = match ctx.resolve_no_follow(path) {
+        let is_ro = match axtask::future::block_on(ctx.resolve_no_follow(path)) {
             Ok(loc) => crate::impls::fs::common::is_location_readonly(&loc),
             Err(_) => {
-                if let Ok((parent_loc, _)) = ctx.resolve_parent(axfs_ng_vfs::path::Path::new(path))
+                if let Ok((parent_loc, _)) = axtask::future::block_on(ctx.resolve_parent(axfs_ng_vfs::path::Path::new(path)))
                 {
                     crate::impls::fs::common::is_location_readonly(&parent_loc)
                 } else {
@@ -473,7 +469,7 @@ pub fn sys_mkdirat(dirfd: i32, pathname: usize, mode: usize) -> isize {
             return -LinuxError::EROFS.code() as isize;
         }
     }
-    match ctx.resolve_no_follow(path) {
+    match axtask::future::block_on(ctx.resolve_no_follow(path)) {
         Ok(_) => {
             axlog::debug!("sys_mkdirat: path '{}' already exists", path);
             return -LinuxError::EEXIST.code() as isize;
@@ -482,7 +478,7 @@ pub fn sys_mkdirat(dirfd: i32, pathname: usize, mode: usize) -> isize {
         Err(e) => return -LinuxError::from(e.canonicalize()).code() as isize,
     }
     axlog::debug!("sys_mkdirat: creating directory '{}'", path);
-    match ctx.create_dir(path, mkdir_mode(mode)) {
+    match axtask::future::block_on(ctx.create_dir(path, mkdir_mode(mode))) {
         Ok(_) => {
             axlog::debug!("sys_mkdirat: directory '{}' created successfully", path);
             0
@@ -577,7 +573,7 @@ fn sys_mount_move(source_uptr: usize, target_path: &str) -> isize {
         Err(e) => return -e.code() as isize,
     };
     // Source must be a mountpoint root.
-    let source_loc = match ctx.resolve(&source_path) {
+    let source_loc = match axtask::future::block_on(ctx.resolve(&source_path)) {
         Ok(loc) => loc,
         Err(e) => return -LinuxError::from(e.canonicalize()).code() as isize,
     };
@@ -585,7 +581,7 @@ fn sys_mount_move(source_uptr: usize, target_path: &str) -> isize {
         return -LinuxError::EINVAL.code() as isize;
     }
     // Target must exist and not already be a mount.
-    let target_loc = match ctx.resolve(target_path) {
+    let target_loc = match axtask::future::block_on(ctx.resolve(target_path)) {
         Ok(loc) => loc,
         Err(e) => return -LinuxError::from(e.canonicalize()).code() as isize,
     };
@@ -670,7 +666,7 @@ pub fn sys_mount(
         Err(e) => return -e.code() as isize,
     };
 
-    let target_loc = match ctx.resolve(Path::new(target_path_str)) {
+    let target_loc = match axtask::future::block_on(ctx.resolve(Path::new(target_path_str))) {
         Ok(loc) => loc,
         Err(e) => {
             axlog::debug!(
@@ -752,7 +748,7 @@ pub fn sys_mount(
             source_path,
             target_path
         );
-        let source_loc = match ctx.resolve(&source_path) {
+        let source_loc = match axtask::future::block_on(ctx.resolve(&source_path)) {
             Ok(loc) => loc,
             Err(e) => return -LinuxError::from(e.canonicalize()).code() as isize,
         };
@@ -958,7 +954,7 @@ pub fn sys_umount2(target: usize, flags: usize) -> isize {
         Ok(ctx) => ctx,
         Err(e) => return -e.code() as isize,
     };
-    let target_loc = match ctx.resolve(target_path_raw) {
+    let target_loc = match axtask::future::block_on(ctx.resolve(target_path_raw)) {
         Ok(loc) => loc,
         Err(e) => return -LinuxError::from(e.canonicalize()).code() as isize,
     };
@@ -1062,10 +1058,10 @@ pub fn sys_unlinkat(dirfd: i32, pathname: usize, flags: usize) -> isize {
 
     // Check for read-only filesystem
     {
-        let is_ro = match ctx.resolve_no_follow(path) {
+        let is_ro = match axtask::future::block_on(ctx.resolve_no_follow(path)) {
             Ok(loc) => crate::impls::fs::common::is_location_readonly(&loc),
             Err(_) => {
-                if let Ok((parent_loc, _)) = ctx.resolve_parent(axfs_ng_vfs::path::Path::new(path))
+                if let Ok((parent_loc, _)) = axtask::future::block_on(ctx.resolve_parent(axfs_ng_vfs::path::Path::new(path)))
                 {
                     crate::impls::fs::common::is_location_readonly(&parent_loc)
                 } else {
@@ -1079,7 +1075,7 @@ pub fn sys_unlinkat(dirfd: i32, pathname: usize, flags: usize) -> isize {
     }
 
     // 1. Resolve parent directory and child entry name
-    let (parent_loc, entry_name) = match ctx.resolve_parent(Path::new(path)) {
+    let (parent_loc, entry_name) = match axtask::future::block_on(ctx.resolve_parent(Path::new(path))) {
         Ok(res) => res,
         Err(e) => return -LinuxError::from(e.canonicalize()).code() as isize,
     };
@@ -1097,7 +1093,7 @@ pub fn sys_unlinkat(dirfd: i32, pathname: usize, flags: usize) -> isize {
     }
 
     // 3. Lookup the child entry to ensure it exists (ENOENT if not found)
-    let child_loc = match parent_loc.lookup_no_follow(entry_name.as_ref()) {
+    let child_loc = match axtask::future::block_on(parent_loc.lookup_no_follow(entry_name.as_ref())) {
         Ok(loc) => loc,
         Err(e) => return -LinuxError::from(e.canonicalize()).code() as isize,
     };
@@ -1110,12 +1106,12 @@ pub fn sys_unlinkat(dirfd: i32, pathname: usize, flags: usize) -> isize {
     }
 
     // 5. Enforce sticky bit rules if parent has STICKY bit set
-    let parent_meta = match parent_loc.metadata() {
+    let parent_meta = match axtask::future::block_on(parent_loc.metadata()) {
         Ok(meta) => meta,
         Err(e) => return -LinuxError::from(e.canonicalize()).code() as isize,
     };
     if parent_meta.mode.contains(NodePermission::STICKY) {
-        let child_meta = match child_loc.metadata() {
+        let child_meta = match axtask::future::block_on(child_loc.metadata()) {
             Ok(meta) => meta,
             Err(e) => return -LinuxError::from(e.canonicalize()).code() as isize,
         };
@@ -1125,7 +1121,7 @@ pub fn sys_unlinkat(dirfd: i32, pathname: usize, flags: usize) -> isize {
     }
 
     if (flags & AT_REMOVEDIR as usize) != 0 {
-        return match ctx.remove_dir(Path::new(path)) {
+        return match axtask::future::block_on(ctx.remove_dir(Path::new(path))) {
             Ok(()) => {
                 0
             }
@@ -1136,7 +1132,7 @@ pub fn sys_unlinkat(dirfd: i32, pathname: usize, flags: usize) -> isize {
         };
     }
 
-    match ctx.remove_file(Path::new(path)) {
+    match axtask::future::block_on(ctx.remove_file(Path::new(path))) {
         Ok(()) => {
             0
         }
@@ -1189,7 +1185,7 @@ pub fn sys_renameat2(
             Ok(ctx) => ctx,
             Err(e) => return -e.code() as isize,
         };
-        match new_ctx.resolve_no_follow(newpath.as_str()) {
+        match axtask::future::block_on(new_ctx.resolve_no_follow(newpath.as_str())) {
             Ok(_) => return -LinuxError::EEXIST.code() as isize,
             Err(e) => {
                 let errno = LinuxError::from(e.canonicalize());
@@ -1213,7 +1209,7 @@ pub fn sys_renameat2(
             newdirfd
         };
         let old_ro = if let Ok(old_ctx) = context_for_dirfd(resolved_olddirfd) {
-            match old_ctx.resolve_no_follow(oldpath.as_str()) {
+            match axtask::future::block_on(old_ctx.resolve_no_follow(oldpath.as_str())) {
                 Ok(loc) => crate::impls::fs::common::is_location_readonly(&loc),
                 Err(_) => false,
             }
@@ -1221,11 +1217,11 @@ pub fn sys_renameat2(
             false
         };
         let new_ro = if let Ok(new_ctx2) = context_for_dirfd(resolved_newdirfd2) {
-            match new_ctx2.resolve_no_follow(newpath.as_str()) {
+            match axtask::future::block_on(new_ctx2.resolve_no_follow(newpath.as_str())) {
                 Ok(loc) => crate::impls::fs::common::is_location_readonly(&loc),
                 Err(_) => {
                     if let Ok((parent_loc, _)) =
-                        new_ctx2.resolve_parent(axfs_ng_vfs::path::Path::new(newpath.as_str()))
+                        axtask::future::block_on(new_ctx2.resolve_parent(axfs_ng_vfs::path::Path::new(newpath.as_str())))
                     {
                         crate::impls::fs::common::is_location_readonly(&parent_loc)
                     } else {
@@ -1287,11 +1283,11 @@ pub fn sys_symlinkat(target: usize, newdirfd: i32, linkpath: usize) -> isize {
 
     // Check for read-only filesystem
     {
-        let is_ro = match ctx.resolve_no_follow(link_str) {
+        let is_ro = match axtask::future::block_on(ctx.resolve_no_follow(link_str)) {
             Ok(loc) => crate::impls::fs::common::is_location_readonly(&loc),
             Err(_) => {
                 if let Ok((parent_loc, _)) =
-                    ctx.resolve_parent(axfs_ng_vfs::path::Path::new(link_str))
+                    axtask::future::block_on(ctx.resolve_parent(axfs_ng_vfs::path::Path::new(link_str)))
                 {
                     crate::impls::fs::common::is_location_readonly(&parent_loc)
                 } else {
@@ -1304,7 +1300,7 @@ pub fn sys_symlinkat(target: usize, newdirfd: i32, linkpath: usize) -> isize {
         }
     }
 
-    match ctx.symlink(target_str, link_str) {
+    match axtask::future::block_on(ctx.symlink(target_str, link_str)) {
         Ok(_) => 0,
         Err(e) => {
             let errno = LinuxError::from(e.canonicalize());
@@ -1336,10 +1332,10 @@ pub fn sys_mknodat(dirfd: i32, pathname: usize, mode: usize, _dev: usize) -> isi
     };
     // Check for read-only filesystem
     {
-        let is_ro = match ctx.resolve_no_follow(path) {
+        let is_ro = match axtask::future::block_on(ctx.resolve_no_follow(path)) {
             Ok(loc) => crate::impls::fs::common::is_location_readonly(&loc),
             Err(_) => {
-                if let Ok((parent_loc, _)) = ctx.resolve_parent(axfs_ng_vfs::path::Path::new(path))
+                if let Ok((parent_loc, _)) = axtask::future::block_on(ctx.resolve_parent(axfs_ng_vfs::path::Path::new(path)))
                 {
                     crate::impls::fs::common::is_location_readonly(&parent_loc)
                 } else {
@@ -1351,7 +1347,7 @@ pub fn sys_mknodat(dirfd: i32, pathname: usize, mode: usize, _dev: usize) -> isi
             return -LinuxError::EROFS.code() as isize;
         }
     }
-    match ctx.resolve_no_follow(path) {
+    match axtask::future::block_on(ctx.resolve_no_follow(path)) {
         Ok(_) => return -LinuxError::EEXIST.code() as isize,
         Err(VfsError::NotFound) => {}
         Err(e) => return -LinuxError::from(e.canonicalize()).code() as isize,
@@ -1378,14 +1374,14 @@ pub fn sys_mknodat(dirfd: i32, pathname: usize, mode: usize, _dev: usize) -> isi
     let perm = ((mode as u32) & !umask) & 0o7777;
     let node_permission = NodePermission::from_bits_truncate(perm as _);
 
-    let (dir, name) = match ctx.resolve_nonexistent(Path::new(path)) {
+    let (dir, name) = match axtask::future::block_on(ctx.resolve_nonexistent(Path::new(path))) {
         Ok(res) => res,
         Err(e) => return -LinuxError::from(e.canonicalize()).code() as isize,
     };
 
     let mut final_perm = node_permission;
     let mut final_credentials = ctx.credentials;
-    if let Ok(parent_meta) = dir.metadata() {
+    if let Ok(parent_meta) = axtask::future::block_on(dir.metadata()) {
         if parent_meta.mode.contains(NodePermission::SET_GID) {
             if node_type == NodeType::Directory {
                 final_perm |= NodePermission::SET_GID;
@@ -1396,16 +1392,16 @@ pub fn sys_mknodat(dirfd: i32, pathname: usize, mode: usize, _dev: usize) -> isi
         }
     }
 
-    let loc = match dir.create(name, node_type, final_perm) {
+    let loc = match axtask::future::block_on(dir.create(name, node_type, final_perm)) {
         Ok(loc) => loc,
         Err(e) => return -LinuxError::from(e.canonicalize()).code() as isize,
     };
 
     if let Some((uid, gid)) = final_credentials {
-        let _ = loc.update_metadata(MetadataUpdate {
+        let _ = axtask::future::block_on(loc.update_metadata(MetadataUpdate {
             owner: Some((uid, gid)),
             ..Default::default()
-        });
+        }));
     }
 
     0
@@ -1482,12 +1478,12 @@ pub fn sys_linkat(
 
     // Check for read-only filesystem
     {
-        let is_ro = match new_ctx.resolve_no_follow(newpath_str) {
+        let is_ro = match axtask::future::block_on(new_ctx.resolve_no_follow(newpath_str)) {
             Ok(loc) => crate::impls::fs::common::is_location_readonly(&loc),
             Err(_) => {
-                if let Ok((parent_loc, _)) =
-                    new_ctx.resolve_parent(axfs_ng_vfs::path::Path::new(newpath_str))
-                {
+                if let Ok((parent_loc, _)) = axtask::future::block_on(
+                    new_ctx.resolve_parent(axfs_ng_vfs::path::Path::new(newpath_str)),
+                ) {
                     crate::impls::fs::common::is_location_readonly(&parent_loc)
                 } else {
                     false
@@ -1508,20 +1504,20 @@ pub fn sys_linkat(
         return -LinuxError::EPERM.code() as isize;
     }
 
-    let (new_dir, new_name) = match new_ctx.resolve_parent(Path::new(newpath_str)) {
+    let (new_dir, new_name) = match axtask::future::block_on(new_ctx.resolve_parent(Path::new(newpath_str))) {
         Ok(res) => res,
         Err(e) => return -LinuxError::from(e.canonicalize()).code() as isize,
     };
 
-    if new_dir.lookup_no_follow(&new_name).is_ok() {
+    if axtask::future::block_on(new_dir.lookup_no_follow(&new_name)).is_ok() {
         return -LinuxError::EEXIST.code() as isize;
     }
 
-    if let Err(e) = new_ctx.check_write_permission(&new_dir) {
+    if let Err(e) = axtask::future::block_on(new_ctx.check_write_permission(&new_dir)) {
         return -LinuxError::from(e.canonicalize()).code() as isize;
     }
 
-    match new_dir.link(&new_name, &old_loc) {
+    match axtask::future::block_on(new_dir.link(&new_name, &old_loc)) {
         Ok(_) => 0,
         Err(e) => {
             let errno = LinuxError::from(e.canonicalize());

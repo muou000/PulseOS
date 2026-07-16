@@ -8,7 +8,7 @@ use crate::socket::PollAt;
 use crate::socket::WakerRegistration;
 
 use crate::storage::Empty;
-use crate::wire::{IpProtocol, IpRepr, IpVersion};
+use crate::wire::{IpAddress, IpProtocol, IpRepr, IpVersion};
 #[cfg(feature = "proto-ipv4")]
 use crate::wire::{Ipv4Packet, Ipv4Repr};
 #[cfg(feature = "proto-ipv6")]
@@ -95,6 +95,16 @@ pub struct Socket<'a> {
 }
 
 impl<'a> Socket<'a> {
+    pub(crate) fn egress_destination(&self) -> Option<IpAddress> {
+        let (_, packet) = self.tx_buffer.peek_unmodified().ok()?;
+        match IpVersion::of_packet(packet).ok()? {
+            #[cfg(feature = "proto-ipv4")]
+            IpVersion::Ipv4 => Some(Ipv4Packet::new_checked(packet).ok()?.dst_addr().into()),
+            #[cfg(feature = "proto-ipv6")]
+            IpVersion::Ipv6 => Some(Ipv6Packet::new_checked(packet).ok()?.dst_addr().into()),
+        }
+    }
+
     /// Create a raw IP socket bound to the given IP version and datagram protocol,
     /// with the given buffers.
     pub fn new(
