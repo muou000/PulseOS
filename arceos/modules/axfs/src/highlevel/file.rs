@@ -5,8 +5,13 @@ use alloc::{
     vec::Vec,
 };
 #[cfg(feature = "times")]
-use core::sync::atomic::{AtomicU8, Ordering};
-use core::{num::NonZeroUsize, ops::Range, task::Context};
+use core::sync::atomic::AtomicU8;
+use core::{
+    num::NonZeroUsize,
+    ops::Range,
+    sync::atomic::{AtomicU64, Ordering},
+    task::Context,
+};
 
 use axalloc::global_allocator;
 use axfs_ng_vfs::{
@@ -415,6 +420,7 @@ struct CachedFileShared {
     evict_listeners: Mutex<Vec<Arc<EvictListener>>>,
     io_lock: RwLock<()>,
     size: SpinMutex<u64>,
+    cache_generation: AtomicU64,
     last_read_pn: core::sync::atomic::AtomicU32,
     is_flushing: core::sync::atomic::AtomicBool,
 }
@@ -430,6 +436,7 @@ impl CachedFileShared {
             evict_listeners: Mutex::new(Vec::new()),
             io_lock: RwLock::new(()),
             size: SpinMutex::new(size),
+            cache_generation: AtomicU64::new(0),
             last_read_pn: core::sync::atomic::AtomicU32::new(u32::MAX),
             is_flushing: core::sync::atomic::AtomicBool::new(false),
         }
@@ -569,6 +576,9 @@ impl CachedFileShared {
     }
 
     fn discard_all_pages(&self, file: &FileNode, write_back_dirty: bool) -> VfsResult<()> {
+        // Callers hold the exclusive I/O lock. In-flight cache fills use this
+        // generation to reject data read before the invalidation.
+        self.cache_generation.fetch_add(1, Ordering::AcqRel);
         let mut guard = self.page_cache.lock();
         while let Some((pn, mut page)) = guard.pop_lru() {
             if page.dirty && write_back_dirty {
@@ -851,61 +861,57 @@ impl CachedFile {
     }
 
     async fn ensure_page_async(&self, file: &FileNode, pn: u32) -> VfsResult<()> {
-        if self.shared.page_cache.lock().contains(&pn) {
-            return Ok(());
-        }
-
-        let file_len = *self.shared.size.lock();
-        let skip_read = pn as u64 * PAGE_SIZE as u64 >= file_len;
-        let mut new_page = PageCache::new(!skip_read)?;
-        if self.in_memory {
-            if !skip_read {
-                new_page.data().fill(0);
-            }
-        } else if !skip_read {
-            // No page-cache or spin-RwLock guard is held while the backend
-            // future waits for the block-device interrupt.
-            let read_len = file
-                .read_at(new_page.data(), pn as u64 * PAGE_SIZE as u64)
-                .await?;
-            if read_len < PAGE_SIZE {
-                new_page.data()[read_len..].fill(0);
-            }
-        }
-
         loop {
-            let evicted = {
-                let mut cache = self.shared.page_cache.lock();
-                if cache.contains(&pn) {
+            let (generation, file_len) = {
+                let _io_guard = self.shared.io_lock.read();
+                if self.shared.page_cache.lock().contains(&pn) {
                     return Ok(());
                 }
-                if cache.len() == cache.cap().get() {
-                    cache.pop_lru()
-                } else {
-                    cache.put(pn, new_page);
-                    return Ok(());
-                }
+                (
+                    self.shared.cache_generation.load(Ordering::Acquire),
+                    *self.shared.size.lock(),
+                )
             };
 
-            if let Some((evicted_pn, mut page)) = evicted {
-                let listeners = self.shared.evict_listeners_snapshot();
-                for listener in listeners.iter() {
-                    (listener.listener)(evicted_pn, &page);
+            let skip_read = pn as u64 * PAGE_SIZE as u64 >= file_len;
+            let mut new_page = PageCache::new(!skip_read)?;
+            if self.in_memory {
+                if !skip_read {
+                    new_page.data().fill(0);
                 }
-                if page.dirty {
-                    let cached_size = *self.shared.size.lock();
-                    let page_start = evicted_pn as u64 * PAGE_SIZE as u64;
-                    let len = (cached_size.saturating_sub(page_start))
-                        .min(PAGE_SIZE as u64) as usize;
-                    if len > 0 {
-                        if let Err(err) = file.write_at(&page.data()[..len], page_start).await {
-                            self.shared.page_cache.lock().put(evicted_pn, page);
-                            return Err(err);
-                        }
-                    }
-                    page.dirty = false;
+            } else if !skip_read {
+                // No page-cache or spin-RwLock guard is held while the backend
+                // future waits for the block-device interrupt.
+                let read_len = file
+                    .read_at(new_page.data(), pn as u64 * PAGE_SIZE as u64)
+                    .await?;
+                if read_len < PAGE_SIZE {
+                    new_page.data()[read_len..].fill(0);
                 }
             }
+
+            // Direct writes hold the exclusive side while changing the backend
+            // and invalidating the cache. Validate and publish under the shared
+            // side so a stale fill can never be inserted after that invalidation.
+            let _io_guard = self.shared.io_lock.read();
+            if self.shared.cache_generation.load(Ordering::Acquire) != generation {
+                continue;
+            }
+
+            let mut cache = self.shared.page_cache.lock();
+            if cache.contains(&pn) {
+                return Ok(());
+            }
+            if cache.len() == cache.cap().get() {
+                if let Some((evicted_pn, mut page)) = cache.pop_lru() {
+                    if let Err(err) = self.evict_cache(file, evicted_pn, &mut page) {
+                        cache.put(evicted_pn, page);
+                        return Err(err);
+                    }
+                }
+            }
+            cache.put(pn, new_page);
+            return Ok(());
         }
     }
 
@@ -971,32 +977,27 @@ impl CachedFile {
         for pn in start_page..end_page {
             let page_start = pn as u64 * PAGE_SIZE as u64;
             let page_end = (end - page_start).min(PAGE_SIZE as u64) as usize;
-            let hit = {
-                let _io_guard = self.shared.io_lock.read();
-                let mut cache = self.shared.page_cache.lock();
-                if let Some(page) = cache.get_mut(&pn) {
-                    let copied = page_end - page_offset;
-                    dst.write(&page.data()[page_offset..page_end])?;
-                    read += copied;
-                    true
-                } else {
-                    false
+            loop {
+                let hit = {
+                    let _io_guard = self.shared.io_lock.read();
+                    let mut cache = self.shared.page_cache.lock();
+                    if let Some(page) = cache.get_mut(&pn) {
+                        let copied = page_end - page_offset;
+                        dst.write(&page.data()[page_offset..page_end])?;
+                        read += copied;
+                        true
+                    } else {
+                        false
+                    }
+                };
+                if hit {
+                    break;
                 }
-            };
-            if hit {
-                page_offset = 0;
-                continue;
-            }
 
-            self.ensure_page_async(file, pn).await?;
-            // Writers hold the exclusive I/O lock. Take the read side only for
-            // the in-memory copy, never across an await.
-            let _io_guard = self.shared.io_lock.read();
-            let mut cache = self.shared.page_cache.lock();
-            let page = cache.get_mut(&pn).ok_or(VfsError::Io)?;
-            let copied = page_end - page_offset;
-            dst.write(&page.data()[page_offset..page_end])?;
-            read += copied;
+                // The page can be invalidated after a fill returns but before
+                // this task reacquires the read lock, so retry the lookup.
+                self.ensure_page_async(file, pn).await?;
+            }
             page_offset = 0;
         }
         Ok(read)
@@ -1045,6 +1046,9 @@ impl CachedFile {
         let _guard = self.shared.io_lock.write();
         let file = self.inner.entry().as_file()?;
         let old_len = *self.shared.size.lock();
+        if old_len != len {
+            self.shared.cache_generation.fetch_add(1, Ordering::AcqRel);
+        }
         *self.shared.size.lock() = len;
 
         let old_last_page = (old_len / PAGE_SIZE as u64) as u32;
