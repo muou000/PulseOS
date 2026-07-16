@@ -26,7 +26,7 @@ pub struct Inode {
     fs: Arc<Ext4Filesystem>,
     ino: u32,
     this: Mutex<Option<WeakDirEntry>>,
-    metadata_update_lock: async_lock::Mutex<()>,
+    mutation_lock: async_lock::Mutex<()>,
     dir_cache: Arc<DirCacheState>,
     pub(super) is_unlinked: core::sync::atomic::AtomicBool,
 }
@@ -136,7 +136,7 @@ impl Inode {
             fs: fs.clone(),
             ino,
             this: Mutex::new(this),
-            metadata_update_lock: async_lock::Mutex::new(()),
+            mutation_lock: async_lock::Mutex::new(()),
             dir_cache,
             is_unlinked: core::sync::atomic::AtomicBool::new(false),
         });
@@ -347,7 +347,7 @@ impl NodeOps for Inode {
         let fs = &self.fs.inner;
         self.validate_inode_num(&fs, self.ino)?;
         let idx = core::num::NonZeroU32::new(self.ino).ok_or(VfsError::InvalidData)?;
-        let _update_guard = self.metadata_update_lock.lock().await;
+        let _mutation_guard = self.mutation_lock.lock().await;
         let mut inode = ext4plus::inode::Inode::read(&fs, idx).await.map_err(into_vfs_err)?;
         if let Some(mode) = update.mode {
             let perm = mode.bits() & 0x0fff;
@@ -417,6 +417,7 @@ impl FileNodeOps for Inode {
         let fs = &self.fs.inner;
         self.validate_inode_num(&fs, self.ino)?;
         let idx = core::num::NonZeroU32::new(self.ino).ok_or(VfsError::InvalidData)?;
+        let _mutation_guard = self.mutation_lock.lock().await;
         let mut inode = ext4plus::inode::Inode::read(&fs, idx).await.map_err(into_vfs_err)?;
         let written = ext4plus::file::write_at(&fs, &mut inode, buf, offset).await.map_err(into_vfs_err)?;
         inode.write(&fs).await.map_err(into_vfs_err)?;
@@ -425,8 +426,16 @@ impl FileNodeOps for Inode {
     }
 
     async fn append(&self, buf: &[u8]) -> VfsResult<(usize, u64)> {
-        let length = self.len().await?;
-        let written = self.write_at(buf, length).await?;
+        let fs = &self.fs.inner;
+        self.validate_inode_num(&fs, self.ino)?;
+        let idx = core::num::NonZeroU32::new(self.ino).ok_or(VfsError::InvalidData)?;
+        let _mutation_guard = self.mutation_lock.lock().await;
+        let mut inode = ext4plus::inode::Inode::read(&fs, idx).await.map_err(into_vfs_err)?;
+        let length = inode.size_in_bytes();
+        let written = ext4plus::file::write_at(&fs, &mut inode, buf, length)
+            .await
+            .map_err(into_vfs_err)?;
+        inode.write(&fs).await.map_err(into_vfs_err)?;
         Ok((written, length + written as u64))
     }
 
@@ -434,6 +443,7 @@ impl FileNodeOps for Inode {
         let fs = &self.fs.inner;
         self.validate_inode_num(&fs, self.ino)?;
         let idx = core::num::NonZeroU32::new(self.ino).ok_or(VfsError::InvalidData)?;
+        let _mutation_guard = self.mutation_lock.lock().await;
         let mut inode = ext4plus::inode::Inode::read(&fs, idx).await.map_err(into_vfs_err)?;
         let old_len = inode.size_in_bytes();
         if len == old_len {
@@ -448,6 +458,7 @@ impl FileNodeOps for Inode {
         let fs = &self.fs.inner;
         self.validate_inode_num(&fs, self.ino)?;
         let idx = core::num::NonZeroU32::new(self.ino).ok_or(VfsError::InvalidData)?;
+        let _mutation_guard = self.mutation_lock.lock().await;
         let mut inode = ext4plus::inode::Inode::read(&fs, idx).await.map_err(into_vfs_err)?;
         let bytes = target.as_bytes();
         ext4plus::file::truncate(&fs, &mut inode, 0).await.map_err(into_vfs_err)?;
