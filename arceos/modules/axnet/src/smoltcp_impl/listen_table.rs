@@ -1,4 +1,4 @@
-use alloc::{boxed::Box, collections::VecDeque};
+use alloc::{boxed::Box, collections::VecDeque, sync::Arc};
 use core::ops::{Deref, DerefMut};
 
 use axerrno::{AxError, AxResult, ax_err};
@@ -9,20 +9,25 @@ use smoltcp::{
     wire::{IpAddress, IpEndpoint, IpListenEndpoint},
 };
 
-use super::{LISTEN_QUEUE_SIZE, SOCKET_SET, SocketSetWrapper};
+use super::{
+    LISTEN_QUEUE_SIZE, SOCKET_SET, SocketSetWrapper, SocketWaitQueues,
+    register_listener_wait_queue, unregister_wait_queue,
+};
 
 const PORT_NUM: usize = 65536;
 
 struct ListenTableEntry {
     listen_endpoint: IpListenEndpoint,
     syn_queue: VecDeque<SocketHandle>,
+    wait_queues: Arc<SocketWaitQueues>,
 }
 
 impl ListenTableEntry {
-    pub fn new(listen_endpoint: IpListenEndpoint) -> Self {
+    pub fn new(listen_endpoint: IpListenEndpoint, wait_queues: Arc<SocketWaitQueues>) -> Self {
         Self {
             listen_endpoint,
             syn_queue: VecDeque::with_capacity(LISTEN_QUEUE_SIZE),
+            wait_queues,
         }
     }
 
@@ -38,6 +43,7 @@ impl ListenTableEntry {
 impl Drop for ListenTableEntry {
     fn drop(&mut self) {
         for &handle in &self.syn_queue {
+            unregister_wait_queue(handle);
             SOCKET_SET.remove(handle);
         }
     }
@@ -63,12 +69,19 @@ impl ListenTable {
         self.tcp[port as usize].lock().is_none()
     }
 
-    pub fn listen(&self, listen_endpoint: IpListenEndpoint) -> AxResult {
+    pub fn listen(
+        &self,
+        listen_endpoint: IpListenEndpoint,
+        wait_queues: Arc<SocketWaitQueues>,
+    ) -> AxResult {
         let port = listen_endpoint.port;
         assert_ne!(port, 0);
         let mut entry = self.tcp[port as usize].lock();
         if entry.is_none() {
-            *entry = Some(Box::new(ListenTableEntry::new(listen_endpoint)));
+            *entry = Some(Box::new(ListenTableEntry::new(
+                listen_endpoint,
+                wait_queues,
+            )));
             Ok(())
         } else {
             ax_err!(AddrInUse, "socket listen() failed")
@@ -124,6 +137,7 @@ impl ListenTable {
                     let handle = syn_queue.swap_remove_front(actual_idx).unwrap();
                     drop(entry_guard);
                     if is_closed(handle) {
+                        unregister_wait_queue(handle);
                         SOCKET_SET.remove(handle);
                         return ax_err!(
                             ConnectionReset,
@@ -169,6 +183,7 @@ impl ListenTable {
                     handle, src, entry.listen_endpoint
                 );
                 entry.syn_queue.push_back(handle);
+                register_listener_wait_queue(handle, entry.wait_queues.clone());
                 log::debug!(
                     "incoming_tcp_packet: added new socket handle {} to syn_queue",
                     handle

@@ -11,10 +11,17 @@ use alloc::vec;
 use alloc::vec::Vec;
 use axerrno::{AxError, AxResult};
 use core::cell::RefCell;
+use core::future::{Future, poll_fn};
 use core::ops::DerefMut;
+use core::pin::pin;
+use core::task::Poll;
 
 use axdriver::prelude::*;
-use axhal::time::{monotonic_time_nanos as current_time_nanos, NANOS_PER_MICROS};
+use axhal::time::{
+    NANOS_PER_MICROS, TimeValue, monotonic_time, monotonic_time_nanos as current_time_nanos,
+    ticks_to_nanos,
+};
+use axpoll::IoEvents;
 use axsync::Mutex;
 use axdriver_net::{DevError, NetBufPtr};
 use lazyinit::LazyInit;
@@ -52,9 +59,66 @@ const LISTEN_QUEUE_SIZE: usize = 512;
 
 static LISTEN_TABLE: LazyInit<ListenTable> = LazyInit::new();
 static SOCKET_SET: LazyInit<SocketSetWrapper> = LazyInit::new();
-static SOCKET_WAIT_QUEUES: LazyInit<Mutex<BTreeMap<SocketHandle, Arc<axtask::WaitQueue>>>> =
+static SOCKET_WAIT_QUEUES: LazyInit<Mutex<BTreeMap<SocketHandle, SocketWaitEntry>>> =
     LazyInit::new();
 pub static NET_WAIT_QUEUE: axtask::WaitQueue = axtask::WaitQueue::new();
+
+pub(crate) struct SocketWaitQueues {
+    read: axtask::WaitQueue,
+    write: axtask::WaitQueue,
+    any: axtask::WaitQueue,
+}
+
+impl SocketWaitQueues {
+    pub(crate) const fn new() -> Self {
+        Self {
+            read: axtask::WaitQueue::new(),
+            write: axtask::WaitQueue::new(),
+            any: axtask::WaitQueue::new(),
+        }
+    }
+
+    fn queue(&self, events: IoEvents) -> &axtask::WaitQueue {
+        if events.intersects(IoEvents::IN | IoEvents::RDHUP) {
+            &self.read
+        } else {
+            debug_assert!(events.intersects(IoEvents::OUT));
+            &self.write
+        }
+    }
+
+    fn notify(&self, events: IoEvents) {
+        if events.intersects(IoEvents::IN | IoEvents::RDHUP) {
+            self.read.notify_all(true);
+        }
+        if events.intersects(IoEvents::OUT) {
+            self.write.notify_all(true);
+        }
+        if !events.is_empty() {
+            self.any.notify_all(true);
+        }
+    }
+
+    fn register(&self, context: &mut core::task::Context<'_>, events: IoEvents) {
+        if events.intersects(IoEvents::IN | IoEvents::RDHUP) {
+            self.read.register_waker(context.waker());
+        }
+        if events.intersects(IoEvents::OUT) {
+            self.write.register_waker(context.waker());
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum SocketWaitKind {
+    Normal,
+    ListenerChild,
+}
+
+struct SocketWaitEntry {
+    queues: Arc<SocketWaitQueues>,
+    kind: SocketWaitKind,
+}
 
 mod loopback;
 static LOOPBACK_DEV: LazyInit<Mutex<LoopbackDev>> = LazyInit::new();
@@ -183,26 +247,53 @@ impl<'a> SocketSetWrapper<'a> {
         // Waking a task may enter the scheduler synchronously and must not leave
         // the global socket set locked if scheduling is delayed.
         let ready_wait_queues: Vec<_> = {
-            let wq_map = SOCKET_WAIT_QUEUES.lock();
             let mut sockets = self.0.lock();
+            // Incoming TCP packets register listener children while holding
+            // this lock, so all paths acquire the socket set before the map.
+            let wq_map = SOCKET_WAIT_QUEUES.lock();
             sockets
                 .iter_mut()
                 .filter_map(|(handle, socket)| {
-                    let can_io = match socket {
-                        Socket::Tcp(s) => s.can_recv() || s.can_send() || !s.is_active(),
-                        Socket::Udp(s) => s.can_recv() || s.can_send(),
-                        _ => false,
+                    let entry = wq_map.get(&handle)?;
+                    let events = match (socket, entry.kind) {
+                        (Socket::Tcp(s), SocketWaitKind::Normal) => {
+                            let mut events = IoEvents::empty();
+                            if s.can_recv() || !s.may_recv() {
+                                events |= IoEvents::IN;
+                            }
+                            if s.can_send() || !s.may_send() {
+                                events |= IoEvents::OUT;
+                            }
+                            events
+                        }
+                        (Socket::Tcp(s), SocketWaitKind::ListenerChild) => {
+                            if matches!(
+                                s.state(),
+                                socket::tcp::State::Listen | socket::tcp::State::SynReceived
+                            ) {
+                                IoEvents::empty()
+                            } else {
+                                IoEvents::IN
+                            }
+                        }
+                        (Socket::Udp(s), SocketWaitKind::Normal) => {
+                            let mut events = IoEvents::empty();
+                            if s.can_recv() {
+                                events |= IoEvents::IN;
+                            }
+                            if s.can_send() {
+                                events |= IoEvents::OUT;
+                            }
+                            events
+                        }
+                        _ => IoEvents::empty(),
                     };
-                    if can_io {
-                        wq_map.get(&handle).map(Arc::clone)
-                    } else {
-                        None
-                    }
+                    (!events.is_empty()).then(|| (Arc::clone(&entry.queues), events))
                 })
                 .collect()
         };
-        for wq in ready_wait_queues {
-            wq.notify_all(true);
+        for (queues, events) in ready_wait_queues {
+            queues.notify(events);
         }
         if readiness_may_have_changed {
             NET_WAIT_QUEUE.notify_all(true);
@@ -514,12 +605,83 @@ pub(crate) fn init(_net_dev: AxNetDevice) {
     });
 }
 
-pub(crate) fn register_wait_queue(handle: SocketHandle, wq: Arc<axtask::WaitQueue>) {
-    SOCKET_WAIT_QUEUES.lock().insert(handle, wq);
+pub(crate) fn register_wait_queue(handle: SocketHandle, queues: Arc<SocketWaitQueues>) {
+    SOCKET_WAIT_QUEUES.lock().insert(
+        handle,
+        SocketWaitEntry {
+            queues,
+            kind: SocketWaitKind::Normal,
+        },
+    );
+}
+
+pub(crate) fn register_listener_wait_queue(handle: SocketHandle, queues: Arc<SocketWaitQueues>) {
+    SOCKET_WAIT_QUEUES.lock().insert(
+        handle,
+        SocketWaitEntry {
+            queues,
+            kind: SocketWaitKind::ListenerChild,
+        },
+    );
 }
 
 pub(crate) fn unregister_wait_queue(handle: SocketHandle) {
     SOCKET_WAIT_QUEUES.lock().remove(&handle);
+}
+
+pub(crate) fn deadline_from_ticks(ticks: u64) -> TimeValue {
+    monotonic_time()
+        .checked_add(core::time::Duration::from_nanos(ticks_to_nanos(ticks)))
+        .unwrap_or(core::time::Duration::MAX)
+}
+
+pub(crate) fn socket_deadline(ticks: u64) -> Option<TimeValue> {
+    (ticks != 0).then(|| deadline_from_ticks(ticks))
+}
+
+pub(crate) fn block_on_socket_io<F, T>(
+    queue: &axtask::WaitQueue,
+    nonblocking: bool,
+    deadline: Option<TimeValue>,
+    mut op: F,
+) -> AxResult<T>
+where
+    F: FnMut() -> AxResult<T>,
+{
+    if nonblocking {
+        return op();
+    }
+
+    let wait_for_io = async {
+        loop {
+            match op() {
+                Err(AxError::WouldBlock) => {}
+                result => return result,
+            }
+
+            // Register before checking readiness again. This closes the window
+            // where an event could arrive after the first check but before the
+            // task became visible to the notifier.
+            let mut wait = pin!(queue.wait_async());
+            let already_notified =
+                poll_fn(|cx| Poll::Ready(wait.as_mut().poll(cx).is_ready())).await;
+
+            match op() {
+                Err(AxError::WouldBlock) => {}
+                result => return result,
+            }
+
+            if !already_notified {
+                wait.await;
+            }
+        }
+    };
+
+    axtask::future::block_on(async {
+        axtask::future::timeout_at(deadline, wait_for_io)
+            .await
+            .map_err(|_| AxError::TimedOut)?
+    })
 }
 
 /// Check if an IP address is a local interface IP (loopback, unspecified, or dynamic ETH0 IP).

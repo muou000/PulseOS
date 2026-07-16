@@ -5,7 +5,6 @@ use core::{
 };
 
 use axerrno::{AxError, AxResult, ax_err, ax_err_type};
-use axhal::time::current_ticks;
 use axio::{PollState, Read, Write};
 use axpoll::{IoEvents, Pollable};
 use axsync::Mutex;
@@ -17,9 +16,10 @@ use smoltcp::{
 use spin::RwLock;
 
 use super::{
-    SOCKET_SET, SocketSetWrapper,
+    SOCKET_SET, SocketSetWrapper, SocketWaitQueues,
     addr::{UNSPECIFIED_ENDPOINT, from_core_sockaddr, into_core_sockaddr, is_unspecified},
-    register_wait_queue, unregister_wait_queue,
+    block_on_socket_io, deadline_from_ticks, register_wait_queue, socket_deadline,
+    unregister_wait_queue,
 };
 
 /// A UDP socket that provides POSIX-like APIs.
@@ -32,7 +32,7 @@ pub struct UdpSocket {
     rcv_timeout: AtomicU64,
     snd_timeout: AtomicU64,
     pub multicast_groups: Mutex<alloc::vec::Vec<alloc::vec::Vec<u8>>>,
-    wait_queue: Arc<axtask::WaitQueue>,
+    wait_queues: Arc<SocketWaitQueues>,
 }
 
 impl UdpSocket {
@@ -41,8 +41,8 @@ impl UdpSocket {
     pub fn new() -> Self {
         let socket = SocketSetWrapper::new_udp_socket();
         let handle = SOCKET_SET.add(socket);
-        let wait_queue = Arc::new(axtask::WaitQueue::new());
-        register_wait_queue(handle, wait_queue.clone());
+        let wait_queues = Arc::new(SocketWaitQueues::new());
+        register_wait_queue(handle, wait_queues.clone());
         Self {
             handle,
             local_addr: RwLock::new(None),
@@ -52,7 +52,7 @@ impl UdpSocket {
             rcv_timeout: AtomicU64::new(0),
             snd_timeout: AtomicU64::new(0),
             multicast_groups: Mutex::new(alloc::vec::Vec::new()),
-            wait_queue,
+            wait_queues,
         }
     }
 
@@ -188,13 +188,15 @@ impl UdpSocket {
     /// Receives a single datagram message on the socket. On success, returns
     /// the number of bytes read and the origin.
     pub fn recv_from(&self, buf: &mut [u8]) -> AxResult<(usize, SocketAddr)> {
-        self.recv_impl(|socket| match socket.recv() {
-            Ok((packet_buf, meta)) => {
-                let copied_len = core::cmp::min(buf.len(), packet_buf.len());
-                buf[..copied_len].copy_from_slice(&packet_buf[..copied_len]);
-                Ok((copied_len, into_core_sockaddr(meta.endpoint)))
+        self.recv_impl(socket_deadline(self.rcv_timeout()), |socket| {
+            match socket.recv() {
+                Ok((packet_buf, meta)) => {
+                    let copied_len = core::cmp::min(buf.len(), packet_buf.len());
+                    buf[..copied_len].copy_from_slice(&packet_buf[..copied_len]);
+                    Ok((copied_len, into_core_sockaddr(meta.endpoint)))
+                }
+                Err(_) => ax_err!(BadState, "socket recv_from() failed"),
             }
-            Err(_) => ax_err!(BadState, "socket recv_from() failed"),
         })
     }
 
@@ -202,19 +204,14 @@ impl UdpSocket {
     ///
     /// It will return [`Err(Timeout)`](AxError::Timeout) if expired.
     pub fn recv_from_timeout(&self, buf: &mut [u8], ticks: u64) -> AxResult<(usize, SocketAddr)> {
-        let expire_at = current_ticks() + ticks;
-        self.recv_impl(|socket| match socket.recv() {
-            Ok((packet_buf, meta)) => {
-                let copied_len = core::cmp::min(buf.len(), packet_buf.len());
-                buf[..copied_len].copy_from_slice(&packet_buf[..copied_len]);
-                Ok((copied_len, into_core_sockaddr(meta.endpoint)))
-            }
-            Err(_) => {
-                if current_ticks() > expire_at {
-                    Err(AxError::TimedOut)
-                } else {
-                    Err(AxError::WouldBlock)
+        self.recv_impl(Some(deadline_from_ticks(ticks)), |socket| {
+            match socket.recv() {
+                Ok((packet_buf, meta)) => {
+                    let copied_len = core::cmp::min(buf.len(), packet_buf.len());
+                    buf[..copied_len].copy_from_slice(&packet_buf[..copied_len]);
+                    Ok((copied_len, into_core_sockaddr(meta.endpoint)))
                 }
+                Err(_) => Err(AxError::WouldBlock),
             }
         })
     }
@@ -222,13 +219,15 @@ impl UdpSocket {
     /// Receives a single datagram message on the socket, without removing it from
     /// the queue. On success, returns the number of bytes read and the origin.
     pub fn peek_from(&self, buf: &mut [u8]) -> AxResult<(usize, SocketAddr)> {
-        self.recv_impl(|socket| match socket.peek() {
-            Ok((packet_buf, meta)) => {
-                let copied_len = core::cmp::min(buf.len(), packet_buf.len());
-                buf[..copied_len].copy_from_slice(&packet_buf[..copied_len]);
-                Ok((copied_len, into_core_sockaddr(meta.endpoint)))
+        self.recv_impl(socket_deadline(self.rcv_timeout()), |socket| {
+            match socket.peek() {
+                Ok((packet_buf, meta)) => {
+                    let copied_len = core::cmp::min(buf.len(), packet_buf.len());
+                    buf[..copied_len].copy_from_slice(&packet_buf[..copied_len]);
+                    Ok((copied_len, into_core_sockaddr(meta.endpoint)))
+                }
+                Err(_) => ax_err!(BadState, "socket recv_from() failed"),
             }
-            Err(_) => ax_err!(BadState, "socket recv_from() failed"),
         })
     }
 
@@ -268,7 +267,7 @@ impl UdpSocket {
     pub fn recv(&self, buf: &mut [u8]) -> AxResult<usize> {
         let remote_endpoint = self.remote_endpoint()?;
         loop {
-            let res = self.recv_impl(|socket| {
+            let res = self.recv_impl(socket_deadline(self.rcv_timeout()), |socket| {
                 let (packet_buf, meta) = socket
                     .recv()
                     .map_err(|_| ax_err_type!(BadState, "socket recv() failed"))?;
@@ -336,8 +335,8 @@ impl Pollable for UdpSocket {
         })
     }
 
-    fn register(&self, context: &mut core::task::Context<'_>, _events: IoEvents) {
-        self.wait_queue.register_waker(context.waker());
+    fn register(&self, context: &mut core::task::Context<'_>, events: IoEvents) {
+        self.wait_queues.register(context, events);
     }
 }
 
@@ -355,14 +354,7 @@ impl UdpSocket {
             self.bind(into_core_sockaddr(UNSPECIFIED_ENDPOINT))?;
         }
         // info!("send to addr: {:?}", remote_endpoint);
-        let timeout = self.snd_timeout();
-        let expire_at = if timeout > 0 {
-            Some(current_ticks() + timeout)
-        } else {
-            None
-        };
-
-        self.block_on(|| {
+        self.block_on(IoEvents::OUT, socket_deadline(self.snd_timeout()), || {
             SOCKET_SET.with_socket_mut::<udp::Socket, _, _>(self.handle, |socket| {
                 if !socket.is_open() {
                     // not connected
@@ -379,18 +371,13 @@ impl UdpSocket {
                     Ok(buf.len())
                 } else {
                     // tx buffer is full
-                    if let Some(expire_at) = expire_at {
-                        if current_ticks() > expire_at {
-                            return Err(AxError::TimedOut);
-                        }
-                    }
                     Err(AxError::WouldBlock)
                 }
             })
         })
     }
 
-    fn recv_impl<F, T>(&self, mut op: F) -> AxResult<T>
+    fn recv_impl<F, T>(&self, deadline: Option<axhal::time::TimeValue>, mut op: F) -> AxResult<T>
     where
         F: FnMut(&mut udp::Socket) -> AxResult<T>,
     {
@@ -398,14 +385,7 @@ impl UdpSocket {
             self.bind(into_core_sockaddr(UNSPECIFIED_ENDPOINT))?;
         }
 
-        let timeout = self.rcv_timeout();
-        let expire_at = if timeout > 0 {
-            Some(current_ticks() + timeout)
-        } else {
-            None
-        };
-
-        self.block_on(|| {
+        self.block_on(IoEvents::IN, deadline, || {
             SOCKET_SET.with_socket_mut::<udp::Socket, _, _>(self.handle, |socket| {
                 if !socket.is_open() {
                     // not bound
@@ -415,39 +395,35 @@ impl UdpSocket {
                     op(socket)
                 } else {
                     // no more data
-                    if let Some(expire_at) = expire_at {
-                        if current_ticks() > expire_at {
-                            return Err(AxError::TimedOut);
-                        }
-                    }
                     Err(AxError::WouldBlock)
                 }
             })
         })
     }
 
-    fn block_on<F, T>(&self, mut f: F) -> AxResult<T>
+    fn block_on<F, T>(
+        &self,
+        events: IoEvents,
+        deadline: Option<axhal::time::TimeValue>,
+        mut f: F,
+    ) -> AxResult<T>
     where
         F: FnMut() -> AxResult<T>,
     {
-        if self.is_nonblocking() {
-            f()
-        } else {
-            axtask::future::block_on(axtask::future::poll_io(
-                self,
-                IoEvents::IN | IoEvents::OUT,
-                false,
-                || {
-                    #[cfg(feature = "monolithic")]
-                    if crate::current_have_signals() {
-                        return Err(AxError::Interrupted);
-                    }
+        block_on_socket_io(
+            self.wait_queues.queue(events),
+            self.is_nonblocking(),
+            deadline,
+            || {
+                #[cfg(feature = "monolithic")]
+                if crate::current_have_signals() {
+                    return Err(AxError::Interrupted);
+                }
 
-                    SOCKET_SET.poll_interfaces();
-                    f()
-                },
-            ))
-        }
+                SOCKET_SET.poll_interfaces();
+                f()
+            },
+        )
     }
 
     /// To get the socket and call the given function.
@@ -468,7 +444,7 @@ impl UdpSocket {
 
     /// Returns the wait queue for this socket.
     pub fn get_wait_queue(&self) -> &axtask::WaitQueue {
-        &self.wait_queue
+        &self.wait_queues.any
     }
 }
 
