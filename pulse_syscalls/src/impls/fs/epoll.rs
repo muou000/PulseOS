@@ -12,7 +12,7 @@ use linux_raw_sys::general::{
 };
 use pulse_core::fd_table::{
     FdEntry, FdFlags, EpollObject, EpollRegistration, FdObject, PipeObject, StdinObject,
-    StdoutObject, PidfdObject,
+    StdoutObject, PidfdObject, PollRegistration,
 };
 
 use crate::impls::{
@@ -161,17 +161,23 @@ pub fn sys_epoll_ctl(
     0
 }
 
-struct EpollFuture<'a> {
-    epoll_obj: &'a EpollObject,
+struct EpollFuture {
+    epoll: Arc<dyn FdObject>,
     maxevents: usize,
+    registrations: Vec<PollRegistration>,
 }
 
-impl<'a> Future for EpollFuture<'a> {
+impl Future for EpollFuture {
     type Output = Result<Vec<epoll_event>, LinuxError>;
 
-    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        let epoll_obj = self.epoll_obj;
-        let maxevents = self.maxevents;
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        let this = self.as_mut().get_mut();
+        this.registrations.clear();
+        let epoll = this.epoll.clone();
+        let Some(epoll_obj) = epoll.as_any().downcast_ref::<EpollObject>() else {
+            return Poll::Ready(Err(LinuxError::EINVAL));
+        };
+        let maxevents = this.maxevents;
         let collect_ready = || {
             let mut ready_list = Vec::with_capacity(maxevents);
             let mut oneshots_to_disable = Vec::new();
@@ -284,52 +290,26 @@ impl<'a> Future for EpollFuture<'a> {
             }
         }
 
-        // Not ready, register wakers.
-        {
-            let targets: Vec<(FdEntry, axpoll::IoEvents)> = {
-                let monitored = self.epoll_obj.events.lock();
-                let mut list = Vec::new();
-                for (&fd, ev) in monitored.iter() {
-                    if let Ok(entry) = get_fd_entry(fd) {
-                        let mut target_events = axpoll::IoEvents::empty();
-                        if ev.event.events & EPOLLIN != 0 { target_events |= axpoll::IoEvents::IN; }
-                        if ev.event.events & EPOLLOUT != 0 { target_events |= axpoll::IoEvents::OUT; }
-                        if ev.event.events & EPOLLRDHUP != 0 { target_events |= axpoll::IoEvents::RDHUP; }
-
-                        if !target_events.is_empty() {
-                            list.push((entry, target_events));
-                        }
-                    }
-                }
-                list
-            };
-
-            // 不再静默吞掉 `register_poll` 的错误：若任意一个被监控 fd
-            // 不支持基于 waker 的等待，登记就根本无法唤醒当前任务，
-            // 继续返回 `Poll::Pending` 会让 `block_on` 永久挂起。
-            // 对于返回 `EOPNOTSUPP`（或类似）错误的 fd，将整次 `epoll_wait`
-            // 标记为"不可安全等待"，由调用方按需选择退避或换用其他机制。
-            let mut unsupported = false;
-            for (entry, target_events) in targets {
-                if let Err(e) = entry.object.register_poll(cx, target_events) {
-                    axlog::warn!(
-                        "epoll: register_poll failed: {:?}",
-                        e
-                    );
-                    if matches!(e, LinuxError::EOPNOTSUPP) {
-                        unsupported = true;
-                    } else {
-                        return Poll::Ready(Err(e));
-                    }
-                }
-            }
-            if unsupported {
-                return Poll::Ready(Err(LinuxError::EOPNOTSUPP));
-            }
+        // Register every leaf queue through the root epoll object. Nested
+        // epolls flatten their registrations into this same owned list.
+        if let Err(e) = this.epoll.clone().register_poll(
+            cx,
+            axpoll::IoEvents::IN,
+            &mut this.registrations,
+        ) {
+            axlog::warn!("epoll: register_poll failed: {:?}", e);
+            this.registrations.clear();
+            return Poll::Ready(Err(e));
         }
 
         if let Some(thread) = thread.as_ref() {
-            thread.signal_wait_queue().register_waker(cx.waker());
+            let registration = thread
+                .signal_wait_queue()
+                .register_owned_waker(cx.waker());
+            let owner = thread.clone();
+            this.registrations.push(PollRegistration::new(move || {
+                owner.signal_wait_queue().unregister_waker(registration);
+            }));
         }
 
         // Recheck after every registration pass. This closes the race where fd
@@ -337,10 +317,12 @@ impl<'a> Future for EpollFuture<'a> {
         // corresponding waker is installed.
         let ready_list = collect_ready();
         if !ready_list.is_empty() {
+            this.registrations.clear();
             return Poll::Ready(Ok(ready_list));
         }
         if let Some(thread) = thread {
             if thread.has_pending_signal() {
+                this.registrations.clear();
                 return Poll::Ready(Err(LinuxError::EINTR));
             }
         }
@@ -410,14 +392,14 @@ fn sys_epoll_pwait_inner(
         Err(e) => return -e.code() as isize,
     };
 
-    let epoll_obj = match epoll_entry.object.as_any().downcast_ref::<EpollObject>() {
-        Some(obj) => obj,
-        None => return -LinuxError::EINVAL.code() as isize,
-    };
+    if !epoll_entry.object.as_any().is::<EpollObject>() {
+        return -LinuxError::EINVAL.code() as isize;
+    }
 
     let future = EpollFuture {
-        epoll_obj,
+        epoll: epoll_entry.object.clone(),
         maxevents,
+        registrations: Vec::new(),
     };
 
     match axtask::future::block_on(axtask::future::timeout_at(deadline, future)) {

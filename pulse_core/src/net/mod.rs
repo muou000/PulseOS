@@ -8,7 +8,7 @@ use axio::PollState;
 use axnet::{TcpSocket, UdpSocket};
 use linux_raw_sys::general::{S_IFSOCK, stat};
 use linux_raw_sys::ioctl::{SIOCATMARK, SIOCGIFCONF};
-use crate::fd_table::FdObject;
+use crate::fd_table::{FdObject, PollRegistration};
 
 const RING_BUFFER_SIZE: usize = 65536;
 
@@ -953,18 +953,34 @@ impl FdObject for Socket {
         }
     }
 
-    fn register_poll(&self, cx: &mut core::task::Context<'_>, events: axpoll::IoEvents) -> Result<(), LinuxError> {
+    fn register_poll(
+        self: Arc<Self>,
+        cx: &mut core::task::Context<'_>,
+        events: axpoll::IoEvents,
+        registrations: &mut alloc::vec::Vec<PollRegistration>,
+    ) -> Result<(), LinuxError> {
         match &self.inner {
             SocketInner::Local(s) => {
                 if events.intersects(axpoll::IoEvents::IN | axpoll::IoEvents::RDHUP) {
-                    s.rx.read_wait_queue.register_waker(cx.waker());
+                    let owner = s.rx.clone();
+                    let registration = owner.read_wait_queue.register_owned_waker(cx.waker());
+                    registrations.push(PollRegistration::new(move || {
+                        owner.read_wait_queue.unregister_waker(registration);
+                    }));
                 }
                 if events.contains(axpoll::IoEvents::OUT) {
-                    s.tx.write_wait_queue.register_waker(cx.waker());
+                    let owner = s.tx.clone();
+                    let registration = owner.write_wait_queue.register_owned_waker(cx.waker());
+                    registrations.push(PollRegistration::new(move || {
+                        owner.write_wait_queue.unregister_waker(registration);
+                    }));
                 }
             }
             SocketInner::Tcp(_) | SocketInner::Udp(_) => {
-                axnet::NET_WAIT_QUEUE.register_waker(cx.waker());
+                let registration = axnet::NET_WAIT_QUEUE.register_owned_waker(cx.waker());
+                registrations.push(PollRegistration::new(move || {
+                    axnet::NET_WAIT_QUEUE.unregister_waker(registration);
+                }));
             }
             _ => {}
         }

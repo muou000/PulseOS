@@ -50,6 +50,9 @@ struct WakerEntry {
 
 static WAKER_ENTRY_ID: AtomicU64 = AtomicU64::new(1);
 
+/// An opaque handle for one independently owned waker registration.
+pub struct WakerRegistration(u64);
+
 pub(crate) type WaitQueueGuard<'a> = SpinNoIrqGuard<'a, VecDeque<AxTaskRef>>;
 
 impl WaitQueue {
@@ -453,6 +456,17 @@ impl WaitQueue {
         self.register_waker_inner(waker, true).1
     }
 
+    /// Registers a waker without task-level deduplication.
+    ///
+    /// The returned handle owns exactly one queue entry and must eventually
+    /// be passed to [`WaitQueue::unregister_waker`].
+    pub fn register_owned_waker(
+        &self,
+        waker: &core::task::Waker,
+    ) -> WakerRegistration {
+        WakerRegistration(self.register_waker_inner(waker, false).0)
+    }
+
     fn register_waker_inner(
         &self,
         waker: &core::task::Waker,
@@ -483,14 +497,15 @@ impl WaitQueue {
     pub(crate) fn register_wait_future_waker(
         &self,
         waker: &core::task::Waker,
-    ) -> (u64, Arc<AtomicBool>) {
-        self.register_waker_inner(waker, false)
+    ) -> (WakerRegistration, Arc<AtomicBool>) {
+        let (id, notified) = self.register_waker_inner(waker, false);
+        (WakerRegistration(id), notified)
     }
 
-    pub(crate) fn unregister_waker(&self, registration_id: u64) {
+    pub fn unregister_waker(&self, registration: WakerRegistration) {
         self.wakers
             .lock()
-            .retain(|entry| entry.id != registration_id);
+            .retain(|entry| entry.id != registration.0);
     }
 
     /// Returns a future that waits for the wait queue.

@@ -1,4 +1,5 @@
 use alloc::{
+    boxed::Box,
     collections::{BTreeMap, VecDeque},
     sync::{Arc, Weak},
     vec::Vec,
@@ -31,6 +32,27 @@ bitflags::bitflags! {
         const CLOEXEC = 1 << 0;
         const NONBLOCK = 1 << 1;
         const PATH = 1 << 2;
+    }
+}
+
+/// Owns one waker registration made while polling an fd.
+pub struct PollRegistration {
+    cancel: Option<Box<dyn FnOnce() + Send + 'static>>,
+}
+
+impl PollRegistration {
+    pub fn new(cancel: impl FnOnce() + Send + 'static) -> Self {
+        Self {
+            cancel: Some(Box::new(cancel)),
+        }
+    }
+}
+
+impl Drop for PollRegistration {
+    fn drop(&mut self) {
+        if let Some(cancel) = self.cancel.take() {
+            cancel();
+        }
     }
 }
 
@@ -94,7 +116,12 @@ pub trait FdObject: Send + Sync {
     /// implementations that *do* support such waiting (e.g. `PipeObject`,
     /// `StdinObject`, `EpollObject`, `Socket`, `PidfdObject`) must override
     /// this method and register the waker on their underlying wait queue.
-    fn register_poll(&self, _cx: &mut core::task::Context<'_>, _events: axpoll::IoEvents) -> LinuxResult {
+    fn register_poll(
+        self: Arc<Self>,
+        _cx: &mut core::task::Context<'_>,
+        _events: axpoll::IoEvents,
+        _registrations: &mut Vec<PollRegistration>,
+    ) -> LinuxResult {
         Err(LinuxError::EOPNOTSUPP)
     }
 
@@ -585,9 +612,17 @@ impl FdObject for StdinObject {
         }
     }
 
-    fn register_poll(&self, cx: &mut core::task::Context<'_>, events: axpoll::IoEvents) -> LinuxResult {
+    fn register_poll(
+        self: Arc<Self>,
+        cx: &mut core::task::Context<'_>,
+        events: axpoll::IoEvents,
+        registrations: &mut Vec<PollRegistration>,
+    ) -> LinuxResult {
         if events.intersects(axpoll::IoEvents::IN | axpoll::IoEvents::RDHUP) {
-            STDIN_WAIT_QUEUE.register_waker(cx.waker());
+            let registration = STDIN_WAIT_QUEUE.register_owned_waker(cx.waker());
+            registrations.push(PollRegistration::new(move || {
+                STDIN_WAIT_QUEUE.unregister_waker(registration);
+            }));
         }
         Ok(())
     }
@@ -704,9 +739,10 @@ impl FdObject for StdoutObject {
     }
 
     fn register_poll(
-        &self,
+        self: Arc<Self>,
         _cx: &mut core::task::Context<'_>,
         _events: axpoll::IoEvents,
+        _registrations: &mut Vec<PollRegistration>,
     ) -> LinuxResult {
         // Stdout writability is static. Non-writable event masks can still be
         // interrupted by a signal, timeout, or a change to the epoll set.
@@ -838,12 +874,16 @@ impl FdObject for PidfdObject {
     /// 始终可读，调用方不会走到这里；为防御性目的，进程已消失时直接返回
     /// `Ok(())`，不注册任何 waker，让 poll 端的下一次轮询自行退出。
     fn register_poll(
-        &self,
+        self: Arc<Self>,
         cx: &mut core::task::Context<'_>,
         _events: axpoll::IoEvents,
+        registrations: &mut Vec<PollRegistration>,
     ) -> LinuxResult {
         if let Some(process) = crate::task::process_by_pid(self.pid) {
-            process.pid_exit_event.register_waker(cx.waker());
+            let registration = process.pid_exit_event.register_owned_waker(cx.waker());
+            registrations.push(PollRegistration::new(move || {
+                process.pid_exit_event.unregister_waker(registration);
+            }));
         }
         Ok(())
     }
@@ -1961,12 +2001,25 @@ impl FdObject for PipeObject {
         Ok(supported || events == 0)
     }
 
-    fn register_poll(&self, cx: &mut core::task::Context<'_>, events: axpoll::IoEvents) -> LinuxResult {
+    fn register_poll(
+        self: Arc<Self>,
+        cx: &mut core::task::Context<'_>,
+        events: axpoll::IoEvents,
+        registrations: &mut Vec<PollRegistration>,
+    ) -> LinuxResult {
         if self.readable && events.intersects(axpoll::IoEvents::IN | axpoll::IoEvents::RDHUP) {
-            self.shared.read_wait_queue.register_waker(cx.waker());
+            let owner = self.clone();
+            let registration = owner.shared.read_wait_queue.register_owned_waker(cx.waker());
+            registrations.push(PollRegistration::new(move || {
+                owner.shared.read_wait_queue.unregister_waker(registration);
+            }));
         }
         if self.writable && events.contains(axpoll::IoEvents::OUT) {
-            self.shared.write_wait_queue.register_waker(cx.waker());
+            let owner = self.clone();
+            let registration = owner.shared.write_wait_queue.register_owned_waker(cx.waker());
+            registrations.push(PollRegistration::new(move || {
+                owner.shared.write_wait_queue.unregister_waker(registration);
+            }));
         }
         Ok(())
     }
@@ -2054,7 +2107,12 @@ impl FdObject for EpollObject {
         })
     }
 
-    fn register_poll(&self, cx: &mut core::task::Context<'_>, _events: axpoll::IoEvents) -> LinuxResult {
+    fn register_poll(
+        self: Arc<Self>,
+        cx: &mut core::task::Context<'_>,
+        _events: axpoll::IoEvents,
+        registrations: &mut Vec<PollRegistration>,
+    ) -> LinuxResult {
         let targets: Vec<(Arc<dyn FdObject>, axpoll::IoEvents)> = {
             let monitored = self.events.lock();
             let mut list = Vec::new();
@@ -2074,7 +2132,7 @@ impl FdObject for EpollObject {
         };
 
         for (object, target_events) in targets {
-            object.register_poll(cx, target_events)?;
+            object.register_poll(cx, target_events, registrations)?;
         }
         Ok(())
     }

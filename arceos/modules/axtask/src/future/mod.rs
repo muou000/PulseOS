@@ -135,7 +135,7 @@ impl Future for YieldNow {
 pub struct WaitFuture<'a> {
     wq: &'a crate::wait_queue::WaitQueue,
     notified: Option<Arc<AtomicBool>>,
-    registration_id: Option<u64>,
+    registration: Option<crate::wait_queue::WakerRegistration>,
 }
 
 impl<'a> WaitFuture<'a> {
@@ -144,7 +144,7 @@ impl<'a> WaitFuture<'a> {
         Self {
             wq,
             notified: None,
-            registration_id: None,
+            registration: None,
         }
     }
 }
@@ -163,8 +163,8 @@ impl<'a> Future for WaitFuture<'a> {
             // sync with the wait queue's storage.
             f.clone()
         } else {
-            let (registration_id, f) = self.wq.register_wait_future_waker(cx.waker());
-            self.registration_id = Some(registration_id);
+            let (registration, f) = self.wq.register_wait_future_waker(cx.waker());
+            self.registration = Some(registration);
             self.notified = Some(f.clone());
             f
         };
@@ -184,8 +184,8 @@ impl<'a> Future for WaitFuture<'a> {
 
 impl Drop for WaitFuture<'_> {
     fn drop(&mut self) {
-        if let Some(registration_id) = self.registration_id.take() {
-            self.wq.unregister_waker(registration_id);
+        if let Some(registration) = self.registration.take() {
+            self.wq.unregister_waker(registration);
         }
     }
 }
