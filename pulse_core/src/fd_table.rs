@@ -698,9 +698,19 @@ impl FdObject for StdoutObject {
 
     fn poll(&self) -> LinuxResult<PollState> {
         Ok(PollState {
-            readable: true,
+            readable: false,
             writable: true,
         })
+    }
+
+    fn register_poll(
+        &self,
+        _cx: &mut core::task::Context<'_>,
+        _events: axpoll::IoEvents,
+    ) -> LinuxResult {
+        // Stdout writability is static. Non-writable event masks can still be
+        // interrupted by a signal, timeout, or a change to the epoll set.
+        Ok(())
     }
 
     fn is_read_open(&self) -> bool {
