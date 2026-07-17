@@ -520,7 +520,7 @@ impl axfs::ProcfsProcessProvider for PulseProcessProvider {
             }
 
             let p_char = if is_shared { "s" } else { "p" };
-            if let Some(path) = &path_buf {
+            if let Some(path) = path_buf.as_ref().filter(|path| !path.as_str().is_empty()) {
                 core::write!(
                     out,
                     "{:x}-{:x} {}{}{}{} {:08x} {:02x}:{:02x} {:<7} {}\n",
