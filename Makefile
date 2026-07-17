@@ -10,10 +10,7 @@ export MEM := 1G
 export ARCH ?= riscv64
 export LOG ?= info
 
-QPERF ?= n
-ifeq ($(QPERF),y)
-  EXTRA_RUSTFLAGS := -C debuginfo=2 -C force-frame-pointers=yes -C strip=none
-endif
+EXTRA_RUSTFLAGS := -C debuginfo=2 -C force-frame-pointers=yes -C strip=none
 
 IMG ?= n
 
@@ -51,7 +48,7 @@ debug: prepare-tools
 	@ARCH=loongarch64 APP_FEATURES=qemu LOG=$(LOG) BUS=pci FEATURES=bus-pci $(MAKE) -C arceos build
 	@cp $(NAME)_loongarch64-qemu-virt.elf kernel-la
 
-build run justrun: prepare-tools defconfig
+build: prepare-tools defconfig
 	@$(MAKE) -C arceos A=$(A) ARCH=$(ARCH) $@
 
 clean:
@@ -75,11 +72,4 @@ img_all:
 	@cp disk.img arceos/disk.img
 	@cp disk-la.img arceos/disk-la.img
 
-la: prepare-tools
-	@$(MAKE) ARCH=loongarch64 defconfig
-	@$(MAKE) -C arceos A=$(A) ARCH=loongarch64 run
-	
-analyze: prepare-tools
-	@$(MAKE) QPERF=y LOG=$(LOG) test
-
-.PHONY: all test debug build run justrun clean defconfig img_all la analyze prepare-tools
+.PHONY: all test debug build run justrun clean defconfig img_all la prepare-tools
