@@ -34,3 +34,7 @@
 ## 2025-05-20 - Avoid format! macro allocations in hot loops for prefix checking using replace_range
 **Learning:** Even when avoiding allocations on non-matching strings by using slicing, creating a completely new `String` for the matches via `format!` triggers a heap allocation. In many cases where the input is already an owned `String`, using `replace_range` on the matched target correctly allows the existing allocation to be reused.
 **Action:** When validating target string matches and a string requires replacement inside a struct/array, prefer `String::replace_range` on the owned string to avoid creating a new `String` object via `format!`.
+
+## 2025-06-18 - Rejected Change: Invalid Assumptions About Buffer Limits in Network Syscalls
+**Learning:** When attempting to optimize heap allocations with fixed-size stack buffers in network syscalls, I assumed a 128-byte limit was universally safe. This caused a rejection because: 1. Abstract socket names could be incorrectly truncated if longer than the arbitrary limit. 2. `group_req` structs can legitimately be 136 bytes on 64-bit systems, and capping it to 128 bytes corrupted the payload.
+**Action:** Never assume arbitrary buffer sizes (like 128 bytes) for syscall payloads (like socket paths or struct sizes) unless verified by kernel definitions (e.g., `linux_raw_sys`). If an allocation is dynamically sized by the user (`addrlen`, `optlen`) and removing it sacrifices correctness or corrupts standard structs, the heap allocation is strictly required and must not be "optimized away".
