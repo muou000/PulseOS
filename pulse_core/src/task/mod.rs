@@ -280,7 +280,6 @@ impl axfs::ProcfsProcessProvider for PulseProcessProvider {
         }
         let args = proc.args.read();
         if args.is_empty() {
-            // Bolt: Optimize format! macro overhead by mutating existing string allocation directly
             let mut path = proc.exec_path_or_default();
             path.push('\0');
             Some(path)
@@ -297,7 +296,6 @@ impl axfs::ProcfsProcessProvider for PulseProcessProvider {
 
     fn comm(&self, pid: u64) -> Option<String> {
         let proc = process_by_pid(pid)?;
-        // Bolt: Optimize format! macro overhead by mutating existing string allocation directly
         let mut name = proc.name();
         name.push('\n');
         Some(name)
@@ -621,7 +619,6 @@ impl axfs::ProcfsProcessProvider for PulseProcessProvider {
     fn thread_comm(&self, pid: u64, tid: u64) -> Option<String> {
         let proc = process_by_pid(pid)?;
         let task = proc.task_ref_by_tid(tid)?;
-        // Bolt: Optimize format! macro overhead by mutating existing string allocation directly
         let mut name = task.name();
         name.push('\n');
         Some(name)
