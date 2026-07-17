@@ -26,7 +26,7 @@
 
 ## 运行测试方式
 
-统一使用以下命令进行qemu测试，而不是`make run`或`make la`,除非用户要求，否则不主动进行qemu测试
+统一使用以下命令进行qemu测试，而不是`make run`或`make la`:
 
 ### RISC-V 64
 
