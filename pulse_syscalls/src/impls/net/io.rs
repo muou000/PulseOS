@@ -3,9 +3,12 @@ use alloc::vec::Vec;
 use axerrno::LinuxError;
 use axlog::*;
 use linux_raw_sys::general::iovec;
-
-use super::{addr::NetSocketAddr, get_socket};
 use pulse_core::net::{Socket, SocketInner};
+
+use super::{
+    addr::{NetSocketAddr, read_unix_path},
+    get_socket,
+};
 
 fn read_user_plain<T: Copy>(user_addr: usize) -> Result<T, LinuxError> {
     crate::impls::utils::with_process(|process| {
@@ -35,32 +38,7 @@ fn read_family(addr: usize, addrlen: u32) -> Result<u16, LinuxError> {
 }
 
 fn resolve_unix_addr(addr: usize, addrlen: usize) -> Result<core::net::SocketAddr, LinuxError> {
-    let family = read_family(addr, addrlen as u32)?;
-    if family != linux_raw_sys::net::AF_UNIX as u16 {
-        return Err(LinuxError::EINVAL);
-    }
-    let path = if addrlen <= 2 {
-        alloc::string::String::new()
-    } else {
-        let first_byte = read_user_plain::<u8>(addr + 2)?;
-        if first_byte == 0 {
-            let len = (addrlen as usize).saturating_sub(3);
-            let safe_len = len.min(108);
-            let mut stack_buf = [0u8; 108];
-            crate::impls::utils::read_user_bytes(addr + 3, &mut stack_buf[..safe_len])?;
-            let name = alloc::string::String::from_utf8_lossy(&stack_buf[..safe_len]);
-            let mut s = alloc::string::String::with_capacity(name.len() + 1);
-            s.push('\0');
-            s.push_str(&name);
-            s
-        } else {
-            let path_c = crate::impls::utils::read_user_cstring(addr + 2)?;
-            path_c.to_str().map(alloc::string::String::from).unwrap_or_else(|_| alloc::string::String::new())
-        }
-    };
-    if path.is_empty() {
-        return Err(LinuxError::EINVAL);
-    }
+    let path = read_unix_path(addr, addrlen)?;
     let mut registry = pulse_core::net::UNIX_REGISTRY.lock();
     let target_addr = match registry.get(&path) {
         Some(&(a, ref weak_sock)) => {
