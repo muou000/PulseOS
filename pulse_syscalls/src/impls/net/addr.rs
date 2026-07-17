@@ -3,6 +3,7 @@
 //! Only AF_INET (IPv4) and AF_INET6 (IPv6) are supported.
 //! AF_UNIX and AF_VSOCK are intentionally omitted (functional degradation).
 
+use alloc::string::String;
 use core::{
     mem::size_of,
     net::{Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6},
@@ -10,6 +11,10 @@ use core::{
 
 use axerrno::LinuxError;
 use linux_raw_sys::net::*;
+
+const UNIX_PATH_MAX: usize = 108;
+const UNIX_FAMILY_LEN: usize = size_of::<__kernel_sa_family_t>();
+const UNIX_ADDR_MAX: usize = UNIX_FAMILY_LEN + UNIX_PATH_MAX;
 
 fn read_user_plain<T: Copy>(user_addr: usize) -> Result<T, LinuxError> {
     crate::impls::utils::with_process(|process| {
@@ -37,6 +42,33 @@ fn read_family(addr: usize, addrlen: u32) -> Result<u16, LinuxError> {
     }
     let family = read_user_plain::<__kernel_sa_family_t>(addr)?;
     Ok(family)
+}
+
+pub(super) fn read_unix_path(addr: usize, addrlen: usize) -> Result<String, LinuxError> {
+    if addrlen <= UNIX_FAMILY_LEN || addrlen > UNIX_ADDR_MAX {
+        return Err(LinuxError::EINVAL);
+    }
+    if addr == 0 {
+        return Err(LinuxError::EFAULT);
+    }
+    if read_user_plain::<__kernel_sa_family_t>(addr)? as u32 != AF_UNIX {
+        return Err(LinuxError::EINVAL);
+    }
+
+    let path_len = addrlen - UNIX_FAMILY_LEN;
+    let mut path_buf = [0u8; UNIX_PATH_MAX];
+    crate::impls::utils::read_user_bytes(addr + UNIX_FAMILY_LEN, &mut path_buf[..path_len])?;
+
+    let path_bytes = if path_buf[0] == 0 {
+        &path_buf[..path_len]
+    } else {
+        let end = path_buf[..path_len]
+            .iter()
+            .position(|&byte| byte == 0)
+            .unwrap_or(path_len);
+        &path_buf[..end]
+    };
+    Ok(String::from_utf8_lossy(path_bytes).into_owned())
 }
 
 fn read_v4(addr: usize, addrlen: u32) -> Result<SocketAddrV4, LinuxError> {
@@ -168,34 +200,41 @@ impl From<NetSocketAddr> for SocketAddr {
     }
 }
 
-pub fn write_unix_addr(path_opt: Option<alloc::string::String>, dst: usize, addrlen: usize) -> Result<(), LinuxError> {
+pub fn write_unix_addr(
+    path_opt: Option<String>,
+    dst: usize,
+    addrlen: usize,
+) -> Result<(), LinuxError> {
     if addrlen == 0 {
         return Err(LinuxError::EFAULT);
     }
     let alen = read_user_plain::<u32>(addrlen)?;
     
     let family = AF_UNIX as u16;
-    let mut bytes = alloc::vec![0u8; 2];
+    let mut bytes = [0u8; UNIX_ADDR_MAX];
     bytes[0..2].copy_from_slice(&family.to_ne_bytes());
+    let mut len = 2;
     
     if let Some(path) = path_opt {
-        if path.starts_with('\0') {
-            // Abstract socket
-            bytes.extend_from_slice(path.as_bytes());
-        } else {
-            // Pathname socket
-            bytes.extend_from_slice(path.as_bytes());
-            bytes.push(0); // Null terminator
+        let path_bytes = path.as_bytes();
+        if path_bytes.len() > UNIX_PATH_MAX {
+            return Err(LinuxError::ENAMETOOLONG);
+        }
+        bytes[len..len + path_bytes.len()].copy_from_slice(path_bytes);
+        len += path_bytes.len();
+        if !path.starts_with('\0') && path_bytes.len() < UNIX_PATH_MAX {
+            bytes[len] = 0;
+            len += 1;
         }
     }
     
-    let copy_len = (alen as usize).min(bytes.len());
+    let copy_len = (alen as usize).min(len);
     if dst == 0 {
         return Err(LinuxError::EFAULT);
     }
     crate::impls::utils::write_user_bytes(dst, &bytes[..copy_len])?;
     
-    let out_len = bytes.len() as u32;
+    let out_len = len as u32;
     write_user_plain(addrlen, &out_len)?;
     Ok(())
 }

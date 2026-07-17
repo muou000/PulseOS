@@ -9,11 +9,13 @@ use linux_raw_sys::{
 };
 use pulse_core::fd_table::{FdEntry, FdFlags};
 
-use super::{addr::{NetSocketAddr, write_unix_addr}, get_socket};
+use super::{
+    addr::{NetSocketAddr, read_unix_path, write_unix_addr},
+    get_socket,
+};
 use crate::impls::fs::common::{insert_fd_entry, remove_fd_entry};
 use pulse_core::net::{Socket, LocalSocket, SocketInner, UNIX_REGISTRY};
 use core::sync::atomic::Ordering;
-use alloc::string::String;
 
 fn read_family(addr: usize, addrlen: u32) -> Result<u16, LinuxError> {
     if addrlen > 128 {
@@ -149,39 +151,10 @@ pub fn sys_bind(fd: usize, addr: usize, addrlen: usize) -> isize {
     }
 
     if family == AF_UNIX as u32 {
-        let path = if addrlen <= 2 {
-            String::new()
-        } else {
-            let first_byte = match read_user_plain::<u8>(addr + 2) {
-                Ok(b) => b,
-                Err(e) => return -(e.code() as isize),
-            };
-            if first_byte == 0 {
-                // Abstract socket
-                let len = (addrlen as usize).saturating_sub(3);
-                let mut buf = [0u8; 128];
-                let buf_slice = &mut buf[..len];
-                if let Err(e) = crate::impls::utils::read_user_bytes(addr + 3, buf_slice) {
-                    return -(e.code() as isize);
-                }
-                let lossy = String::from_utf8_lossy(buf_slice);
-                let mut name = String::with_capacity(lossy.len() + 1);
-                name.push('\0');
-                name.push_str(&lossy);
-                name
-            } else {
-                // Pathname socket
-                let path_c = match crate::impls::utils::read_user_cstring(addr + 2) {
-                    Ok(c) => c,
-                    Err(e) => return -(e.code() as isize),
-                };
-                path_c.to_str().map(String::from).unwrap_or_else(|_| String::new())
-            }
+        let path = match read_unix_path(addr, addrlen) {
+            Ok(path) => path,
+            Err(e) => return -(e.code() as isize),
         };
-
-        if path.is_empty() {
-            return -(LinuxError::EINVAL.code() as isize);
-        }
 
         let is_abstract = path.starts_with('\0');
 
@@ -352,39 +325,10 @@ pub fn sys_connect(fd: usize, addr: usize, addrlen: usize) -> isize {
     }
 
     if family == AF_UNIX as u32 {
-        let path = if addrlen <= 2 {
-            String::new()
-        } else {
-            let first_byte = match read_user_plain::<u8>(addr + 2) {
-                Ok(b) => b,
-                Err(e) => return -(e.code() as isize),
-            };
-            if first_byte == 0 {
-                // Abstract
-                let len = (addrlen as usize).saturating_sub(3);
-                let mut buf = [0u8; 128];
-                let buf_slice = &mut buf[..len];
-                if let Err(e) = crate::impls::utils::read_user_bytes(addr + 3, buf_slice) {
-                    return -(e.code() as isize);
-                }
-                let lossy = String::from_utf8_lossy(buf_slice);
-                let mut name = String::with_capacity(lossy.len() + 1);
-                name.push('\0');
-                name.push_str(&lossy);
-                name
-            } else {
-                // Pathname
-                let path_c = match crate::impls::utils::read_user_cstring(addr + 2) {
-                    Ok(c) => c,
-                    Err(e) => return -(e.code() as isize),
-                };
-                path_c.to_str().map(String::from).unwrap_or_else(|_| String::new())
-            }
+        let path = match read_unix_path(addr, addrlen) {
+            Ok(path) => path,
+            Err(e) => return -(e.code() as isize),
         };
-
-        if path.is_empty() {
-            return -(LinuxError::EINVAL.code() as isize);
-        }
 
         let is_abstract = path.starts_with('\0');
 
