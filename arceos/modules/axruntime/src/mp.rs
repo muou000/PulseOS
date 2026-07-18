@@ -10,7 +10,7 @@ use axhal::{
 static mut SECONDARY_BOOT_STACK: [[u8; TASK_STACK_SIZE]; MAX_CPU_NUM - 1] =
     [[0; TASK_STACK_SIZE]; MAX_CPU_NUM - 1];
 
-static ENTERED_CPUS: AtomicUsize = AtomicUsize::new(1);
+static ENTERED_CPU_MASK: AtomicUsize = AtomicUsize::new(0);
 
 #[allow(clippy::absurd_extreme_comparisons)]
 pub fn start_secondary_cpus(primary_cpu_id: usize) {
@@ -25,18 +25,23 @@ pub fn start_secondary_cpus(primary_cpu_id: usize) {
 
             debug!("starting CPU {}...", cpu_id);
             let cpu_bit = 1usize << cpu_id;
-            let entered_before = ENTERED_CPUS.load(Ordering::Acquire);
             super::BOOTED_CPU_MASK.fetch_or(cpu_bit, Ordering::Release);
-            if let Err(error) = axhal::power::cpu_boot(cpu_id, stack_top.as_usize()) {
-                super::BOOTED_CPU_MASK.fetch_and(!cpu_bit, Ordering::AcqRel);
-                warn!("failed to start CPU {cpu_id}: {error}");
-                if error == CpuBootError::NotSupported {
-                    break;
+            match axhal::power::cpu_boot(cpu_id, stack_top.as_usize()) {
+                Ok(()) => {}
+                Err(CpuBootError::AlreadyOn) => {
+                    warn!("CPU {cpu_id} is already running; waiting for its runtime entry");
                 }
-                continue;
+                Err(error) => {
+                    super::BOOTED_CPU_MASK.fetch_and(!cpu_bit, Ordering::AcqRel);
+                    warn!("failed to start CPU {cpu_id}: {error}");
+                    if error == CpuBootError::NotSupported {
+                        break;
+                    }
+                    continue;
+                }
             }
 
-            while ENTERED_CPUS.load(Ordering::Acquire) <= entered_before {
+            while ENTERED_CPU_MASK.load(Ordering::Acquire) & cpu_bit == 0 {
                 core::hint::spin_loop();
             }
         }
@@ -52,7 +57,7 @@ pub fn rust_main_secondary(cpu_id: usize) -> ! {
     axhal::init_percpu_secondary(cpu_id);
     axhal::init_early_secondary(cpu_id);
 
-    ENTERED_CPUS.fetch_add(1, Ordering::Release);
+    ENTERED_CPU_MASK.fetch_or(1usize << cpu_id, Ordering::Release);
     info!("Secondary CPU {} started.", cpu_id);
 
     #[cfg(feature = "paging")]
@@ -69,8 +74,6 @@ pub fn rust_main_secondary(cpu_id: usize) -> ! {
         axipi::mark_current_cpu_ready();
     }
 
-    axhal::mark_cpu_online(cpu_id);
-
     info!("Secondary CPU {:x} init OK.", cpu_id);
     super::INITED_CPUS.fetch_add(1, Ordering::Release);
 
@@ -80,6 +83,8 @@ pub fn rust_main_secondary(cpu_id: usize) -> ! {
 
     #[cfg(feature = "irq")]
     axhal::asm::enable_irqs();
+
+    axhal::mark_cpu_online(cpu_id);
 
     #[cfg(all(feature = "tls", not(feature = "multitask")))]
     super::init_tls();

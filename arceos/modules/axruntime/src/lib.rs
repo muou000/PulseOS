@@ -185,6 +185,12 @@ pub fn rust_main(cpu_id: usize, arg: usize) -> ! {
         axipi::mark_current_cpu_ready();
     }
 
+    #[cfg(feature = "irq")]
+    {
+        info!("Initialize interrupt handlers...");
+        init_interrupt();
+    }
+
     axhal::mark_cpu_online(cpu_id);
 
     #[cfg(any(feature = "fs", feature = "net", feature = "display"))]
@@ -206,10 +212,7 @@ pub fn rust_main(cpu_id: usize, arg: usize) -> ! {
     self::mp::start_secondary_cpus(cpu_id);
 
     #[cfg(feature = "irq")]
-    {
-        info!("Initialize interrupt handlers...");
-        init_interrupt();
-    }
+    axhal::asm::enable_irqs();
 
     #[cfg(all(feature = "tls", not(feature = "multitask")))]
     {
@@ -223,6 +226,12 @@ pub fn rust_main(cpu_id: usize, arg: usize) -> ! {
     INITED_CPUS.fetch_add(1, Ordering::Release);
 
     while !is_init_ok() {
+        core::hint::spin_loop();
+    }
+
+    #[cfg(feature = "smp")]
+    while axhal::online_cpu_count() != BOOTED_CPU_MASK.load(Ordering::Acquire).count_ones() as usize
+    {
         core::hint::spin_loop();
     }
 
@@ -306,8 +315,6 @@ fn init_interrupt() {
         axipi::ipi_handler();
     });
 
-    // Enable IRQs before starting app
-    axhal::asm::enable_irqs();
 }
 
 #[cfg(all(feature = "tls", not(feature = "multitask")))]

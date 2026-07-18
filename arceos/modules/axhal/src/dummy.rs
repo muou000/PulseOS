@@ -95,7 +95,7 @@ impl PowerIf for DummyPower {
         _cpu_id: usize,
         _stack_top_paddr: usize,
     ) -> Result<(), axplat::power::CpuBootError> {
-        Ok(())
+        Err(axplat::power::CpuBootError::NotSupported)
     }
 
     fn system_off() -> ! {
