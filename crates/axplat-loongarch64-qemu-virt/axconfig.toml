@@ -82,9 +82,9 @@ uart-paddr = 0x1FE001E0                 # uint
 # Timer interrupt frequency in Hz.
 timer-frequency = 100_000_000           # uint
 # Timer interrupt number.
-timer-irq = 11                          # uint
+timer-irq = "0x8000_0000_0000_000b"     # uint
 # IPI interrupt number.
-ipi-irq = 12                            # uint
+ipi-irq = "0x8000_0000_0000_000c"       # uint
 
 # PCH-PIC Address
 pch-pic-paddr = 0x1000_0000             # uint

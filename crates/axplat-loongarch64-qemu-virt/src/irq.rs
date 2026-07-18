@@ -1,4 +1,4 @@
-use core::sync::atomic::{AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicPtr, AtomicUsize, Ordering};
 
 use axplat::{
     irq::{HandlerTable, IpiError, IpiTarget, IrqHandler, IrqIf},
@@ -16,7 +16,9 @@ mod eiointc;
 mod irq_common;
 mod pch_pic;
 
-use irq_common::EIOINTC_CPU_IRQ;
+use irq_common::{
+    EIOINTC_CPU_IRQ, IPI_IRQ, RAW_IPI_IRQ, RAW_TIMER_IRQ, TIMER_IRQ, is_external_irq,
+};
 
 /// The maximum number of IRQs.
 pub const MAX_IRQ_COUNT: usize = 256;
@@ -29,7 +31,12 @@ const IOCSR_IPI_SEND_BLOCKING: u32 = 1 << 31;
 const IPI_VECTOR: u32 = 0;
 
 static IRQ_HANDLER_TABLE: HandlerTable<MAX_IRQ_COUNT> = HandlerTable::new();
+static TIMER_HANDLER: AtomicPtr<()> = AtomicPtr::new(core::ptr::null_mut());
+static IPI_HANDLER: AtomicPtr<()> = AtomicPtr::new(core::ptr::null_mut());
 static ONLINE_CPUS: AtomicUsize = AtomicUsize::new(0);
+
+const _: () = assert!(crate::config::devices::TIMER_IRQ == TIMER_IRQ);
+const _: () = assert!(crate::config::devices::IPI_IRQ == IPI_IRQ);
 
 struct IrqIfImpl;
 
@@ -37,26 +44,37 @@ struct IrqIfImpl;
 impl IrqIf for IrqIfImpl {
     /// Enables or disables the given IRQ.
     fn set_enable(irq_num: usize, enabled: bool) {
-        if irq_num == crate::config::devices::IPI_IRQ {
+        if irq_num == IPI_IRQ {
             iocsr_write_w(IOCSR_IPI_ENABLE, if enabled { u32::MAX } else { 0 });
             set_local_line(LineBasedInterrupt::IPI, enabled);
-        } else if irq_num == crate::config::devices::TIMER_IRQ {
+        } else if irq_num == TIMER_IRQ {
             set_local_line(LineBasedInterrupt::TIMER, enabled);
-        } else if irq_num < 64 {
+        } else if is_external_irq(irq_num) && irq_num < 64 {
             // PCH-PIC pins: unmask in PCH-PIC and keep EIOINTC enabled
             if let Some(pic) = pch_pic::PCH_PIC.get() {
                 pic.set_enable(irq_num, enabled);
             }
             eiointc::set_enable(irq_num, enabled);
-        } else if irq_num < 256 {
+        } else if is_external_irq(irq_num) {
             // PCH-MSI pins (64..255): directly connected to EIOINTC, bypasses PCH-PIC entirely
             eiointc::set_enable(irq_num, enabled);
+        } else {
+            warn!("invalid IRQ {}", irq_num);
         }
     }
 
     /// Registers an IRQ handler for the given IRQ.
     fn register(irq_num: usize, handler: IrqHandler) -> bool {
-        if IRQ_HANDLER_TABLE.register_handler(irq_num, handler) {
+        let registered = if irq_num == TIMER_IRQ {
+            register_local_handler(&TIMER_HANDLER, handler)
+        } else if irq_num == IPI_IRQ {
+            register_local_handler(&IPI_HANDLER, handler)
+        } else if is_external_irq(irq_num) {
+            IRQ_HANDLER_TABLE.register_handler(irq_num, handler)
+        } else {
+            false
+        };
+        if registered {
             Self::set_enable(irq_num, true);
             return true;
         }
@@ -66,13 +84,24 @@ impl IrqIf for IrqIfImpl {
 
     /// Unregisters the IRQ handler for the given IRQ.
     fn unregister(irq: usize) -> Option<IrqHandler> {
-        Self::set_enable(irq, false);
-        IRQ_HANDLER_TABLE.unregister_handler(irq)
+        let handler = if irq == TIMER_IRQ {
+            unregister_local_handler(&TIMER_HANDLER)
+        } else if irq == IPI_IRQ {
+            unregister_local_handler(&IPI_HANDLER)
+        } else if is_external_irq(irq) {
+            IRQ_HANDLER_TABLE.unregister_handler(irq)
+        } else {
+            None
+        };
+        if handler.is_some() {
+            Self::set_enable(irq, false);
+        }
+        handler
     }
 
     /// Handles the IRQ.
     fn handle(irq: usize, _cpu_id: usize) {
-        if irq == crate::config::devices::IPI_IRQ {
+        if irq == RAW_IPI_IRQ {
             let mut status = iocsr_read_w(IOCSR_IPI_STATUS);
             if status == 0 {
                 debug!("Spurious IPI");
@@ -81,13 +110,13 @@ impl IrqIf for IrqIfImpl {
             iocsr_write_w(IOCSR_IPI_CLEAR, status);
             while status != 0 {
                 status &= status - 1;
-                if !IRQ_HANDLER_TABLE.handle(irq) {
+                if !handle_local_irq(&IPI_HANDLER, IPI_IRQ) {
                     warn!("Unhandled IPI IRQ");
                 }
             }
-        } else if irq == crate::config::devices::TIMER_IRQ {
+        } else if irq == RAW_TIMER_IRQ {
             ticlr::clear_timer_interrupt();
-            if !IRQ_HANDLER_TABLE.handle(irq) {
+            if !handle_local_irq(&TIMER_HANDLER, TIMER_IRQ) {
                 warn!("Unhandled Timer IRQ");
             }
         } else if irq == EIOINTC_CPU_IRQ {
@@ -101,10 +130,7 @@ impl IrqIf for IrqIfImpl {
                 debug!("Spurious EIOINTC interrupt");
             }
         } else {
-            info!("IRQ {}", irq);
-            if !IRQ_HANDLER_TABLE.handle(irq) {
-                warn!("Unhandled IRQ {}", irq);
-            }
+            warn!("Unhandled CPU-local IRQ {}", irq);
         }
     }
 
@@ -131,6 +157,37 @@ impl IrqIf for IrqIfImpl {
             }
         }
         Ok(())
+    }
+}
+
+fn register_local_handler(slot: &AtomicPtr<()>, handler: IrqHandler) -> bool {
+    slot.compare_exchange(
+        core::ptr::null_mut(),
+        handler as *mut (),
+        Ordering::AcqRel,
+        Ordering::Acquire,
+    )
+    .is_ok()
+}
+
+fn unregister_local_handler(slot: &AtomicPtr<()>) -> Option<IrqHandler> {
+    let handler = slot.swap(core::ptr::null_mut(), Ordering::AcqRel);
+    if handler.is_null() {
+        None
+    } else {
+        // SAFETY: Only pointers converted from IrqHandler are stored in this slot.
+        Some(unsafe { core::mem::transmute::<*mut (), IrqHandler>(handler) })
+    }
+}
+
+fn handle_local_irq(slot: &AtomicPtr<()>, irq: usize) -> bool {
+    let handler = slot.load(Ordering::Acquire);
+    if handler.is_null() {
+        false
+    } else {
+        // SAFETY: Only pointers converted from IrqHandler are stored in this slot.
+        unsafe { core::mem::transmute::<*mut (), IrqHandler>(handler)(irq) };
+        true
     }
 }
 
