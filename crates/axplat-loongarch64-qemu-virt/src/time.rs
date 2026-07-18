@@ -120,15 +120,19 @@ impl TimeIf for TimeIfImpl {
     /// LoongArch64 TCFG CSR: <https://loongson.github.io/LoongArch-Documentation/LoongArch-Vol1-EN.html#timer-configuration>
     #[cfg(feature = "irq")]
     fn set_oneshot_timer(deadline_ns: u64) {
-        use loongArch64::register::{tcfg, ticlr};
+        use loongArch64::register::{prcfg1, tcfg, ticlr};
 
         let ticks_now = Self::current_ticks();
         let ticks_deadline = Self::nanos_to_ticks(deadline_ns);
-        let init_value = crate::time_common::oneshot_delta_ticks(ticks_now, ticks_deadline);
+        let timer_bits = prcfg1::read().timer_bits();
+        let init_value =
+            crate::time_common::oneshot_delta_ticks(ticks_now, ticks_deadline, timer_bits);
+        let init_value =
+            usize::try_from(init_value).expect("LoongArch64 timer interval must fit in usize");
 
         tcfg::set_en(false);
         tcfg::set_periodic(false);
-        tcfg::set_init_val(init_value as _);
+        tcfg::set_init_val(init_value);
         ticlr::clear_timer_interrupt();
         tcfg::set_en(true);
     }
