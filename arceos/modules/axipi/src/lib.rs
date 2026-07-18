@@ -6,7 +6,7 @@
 extern crate log;
 extern crate alloc;
 
-use core::sync::atomic::{AtomicBool, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering, fence};
 
 use axhal::{
     irq::{IPI_IRQ, IpiError, IpiTarget},
@@ -26,6 +26,11 @@ static IPI_EVENT_QUEUE: LazyInit<SpinNoIrq<IpiEventQueue>> = LazyInit::new();
 
 static IPI_CPU_READY: [AtomicBool; axconfig::plat::MAX_CPU_NUM] =
     [const { AtomicBool::new(false) }; axconfig::plat::MAX_CPU_NUM];
+
+static TLB_SHOOTDOWN_REQUESTED: [AtomicUsize; axconfig::plat::MAX_CPU_NUM] =
+    [const { AtomicUsize::new(0) }; axconfig::plat::MAX_CPU_NUM];
+static TLB_SHOOTDOWN_COMPLETED: [AtomicUsize; axconfig::plat::MAX_CPU_NUM] =
+    [const { AtomicUsize::new(0) }; axconfig::plat::MAX_CPU_NUM];
 
 /// Initialize the per-CPU IPI event queue.
 pub fn init() {
@@ -91,8 +96,66 @@ pub fn run_on_each_cpu<T: Into<MulticastCallback>>(callback: T) -> Result<(), Ip
     Ok(())
 }
 
+/// Flushes the TLB on every online CPU and waits for completion.
+///
+/// TLB shootdowns use fixed per-CPU mailboxes instead of queued callbacks so
+/// they remain safe when multiple CPUs fault concurrently with IRQs disabled.
+pub fn flush_tlb_all_cpus() -> Result<(), IpiError> {
+    let current_cpu_id = this_cpu_id();
+    let mut target_mask = 0usize;
+    let mut target_tickets = [0usize; axconfig::plat::MAX_CPU_NUM];
+
+    fence(Ordering::Release);
+    for cpu_id in 0..axhal::cpu_num() {
+        if cpu_id == current_cpu_id || !axhal::is_cpu_online(cpu_id) {
+            continue;
+        }
+        if !IPI_CPU_READY[cpu_id].load(Ordering::Acquire) {
+            return Err(IpiError::CpuOffline);
+        }
+        target_tickets[cpu_id] = TLB_SHOOTDOWN_REQUESTED[cpu_id]
+            .fetch_add(1, Ordering::AcqRel)
+            .checked_add(1)
+            .expect("TLB shootdown ticket overflow");
+        target_mask |= 1usize << cpu_id;
+    }
+
+    axhal::asm::flush_tlb(None);
+    for cpu_id in 0..axhal::cpu_num() {
+        if target_mask & (1usize << cpu_id) != 0 {
+            axhal::irq::send_ipi(IPI_IRQ, IpiTarget::Other { cpu_id })?;
+        }
+    }
+
+    while (0..axhal::cpu_num()).any(|cpu_id| {
+        target_mask & (1usize << cpu_id) != 0
+            && TLB_SHOOTDOWN_COMPLETED[cpu_id].load(Ordering::Acquire) < target_tickets[cpu_id]
+    }) {
+        // A peer can be waiting here with IRQs disabled as well. Only service
+        // the fixed TLB mailbox; draining arbitrary IPI callbacks is unsafe in
+        // a page-fault critical section.
+        service_tlb_shootdown();
+        core::hint::spin_loop();
+    }
+    Ok(())
+}
+
+fn service_tlb_shootdown() {
+    let cpu_id = this_cpu_id();
+    loop {
+        let requested = TLB_SHOOTDOWN_REQUESTED[cpu_id].load(Ordering::Acquire);
+        if TLB_SHOOTDOWN_COMPLETED[cpu_id].load(Ordering::Relaxed) >= requested {
+            return;
+        }
+        fence(Ordering::Acquire);
+        axhal::asm::flush_tlb(None);
+        TLB_SHOOTDOWN_COMPLETED[cpu_id].store(requested, Ordering::Release);
+    }
+}
+
 /// The handler for IPI events. It retrieves the events from the queue and calls the corresponding callbacks.
 pub fn ipi_handler() {
+    service_tlb_shootdown();
     while let Some((src_cpu_id, callback)) = unsafe { IPI_EVENT_QUEUE.current_ref_mut_raw() }
         .lock()
         .pop_one()
@@ -100,4 +163,5 @@ pub fn ipi_handler() {
         debug!("Received IPI event from CPU {}", src_cpu_id);
         callback.call();
     }
+    service_tlb_shootdown();
 }

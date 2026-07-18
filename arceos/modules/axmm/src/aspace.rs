@@ -479,6 +479,21 @@ impl AddrSpace {
         if !self.can_access_range(start, buf.len(), MappingFlags::WRITE | MappingFlags::USER) {
             return Err(AxError::BadAddress);
         }
+
+        let end = start.checked_add(buf.len()).ok_or(AxError::BadAddress)?;
+        let pages = PageIter4K::new(start.align_down_4k(), end.align_up_4k())
+            .ok_or(AxError::BadAddress)?;
+        for page in pages {
+            let (paddr, flags, _) = self.query_vaddr(page).map_err(|_| AxError::BadAddress)?;
+            if paddr.as_usize() == 0
+                || !flags.contains(MappingFlags::WRITE | MappingFlags::USER)
+            {
+                // Let the caller fault in lazy pages or break COW before a
+                // kernel write reaches the underlying physical frame.
+                return Err(AxError::BadAddress);
+            }
+        }
+
         self.process_area_data(start, buf.len(), |dst, offset, write_size| unsafe {
             core::ptr::copy_nonoverlapping(buf.as_ptr().add(offset), dst.as_mut_ptr(), write_size);
         })
@@ -697,6 +712,19 @@ impl AddrSpace {
                 let handled = area
                     .backend()
                     .handle_page_fault(vaddr, area.end(), orig_flags, &self.pt, access_flags);
+                if handled {
+                    let pte_after = self
+                        .pt
+                        .lock_for_addr(page)
+                        .query(page)
+                        .ok()
+                        .map(|(frame, flags, _)| (frame, flags));
+                    if pte_before.is_some() && pte_after != pte_before {
+                        // A COW remap can leave the old readable frame cached
+                        // on CPUs where this address space ran previously.
+                        flush_tlb_asid_all(self.asid);
+                    }
+                }
                 if !handled {
                     let pte_after = self
                         .pt
@@ -889,8 +917,9 @@ impl AddrSpace {
             }
         }
 
-        // Mandatory TLB flush for parent after permission demotion.
-        unsafe { flush_tlb_asid(self.asid) };
+        // COW demotes parent mappings from writable to read-only. A task may
+        // have cached those mappings on any CPU it previously ran on.
+        flush_tlb_asid_all(self.asid);
 
         for (start, backend) in areas_to_convert {
             if let Some(area) = self.areas.get_area_mut(start) {
@@ -925,6 +954,19 @@ unsafe fn flush_tlb_asid(asid: usize) {
 #[cfg(not(any(target_arch = "riscv64", target_arch = "loongarch64")))]
 unsafe fn flush_tlb_asid(_asid: usize) {
     axhal::asm::flush_tlb(None);
+}
+
+fn flush_tlb_asid_all(asid: usize) {
+    #[cfg(feature = "ipi")]
+    {
+        let _ = asid;
+        axipi::flush_tlb_all_cpus().expect("failed to issue TLB shootdown IPI");
+    }
+
+    #[cfg(not(feature = "ipi"))]
+    unsafe {
+        flush_tlb_asid(asid);
+    }
 }
 
 struct AsidAllocator {

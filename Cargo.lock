@@ -447,6 +447,7 @@ dependencies = [
  "axerrno",
  "axfs",
  "axhal",
+ "axipi",
  "kspin",
  "lazyinit",
  "log",
