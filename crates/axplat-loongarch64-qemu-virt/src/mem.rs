@@ -3,6 +3,12 @@ use axplat::mem::{MemIf, PhysAddr, RawRange, VirtAddr, pa, va};
 use crate::config::devices::MMIO_RANGES;
 use crate::config::plat::{PHYS_MEMORY_BASE, PHYS_MEMORY_SIZE, PHYS_VIRT_OFFSET};
 
+const LOW_MEMORY_SIZE: usize = 0x1000_0000;
+const RAM_RANGES: [RawRange; 2] = [
+    (0, LOW_MEMORY_SIZE),
+    (PHYS_MEMORY_BASE, PHYS_MEMORY_SIZE - LOW_MEMORY_SIZE),
+];
+
 struct MemIfImpl;
 
 #[allow(dead_code)]
@@ -17,7 +23,9 @@ impl MemIf for MemIfImpl {
     /// All memory ranges except reserved ranges (including the kernel loaded
     /// range) are free for allocation.
     fn phys_ram_ranges() -> &'static [RawRange] {
-        &[(PHYS_MEMORY_BASE, PHYS_MEMORY_SIZE)]
+        // QEMU virt exposes the first 256 MiB below the MMIO hole and places
+        // the remainder at PHYS_MEMORY_BASE.
+        &RAM_RANGES
     }
 
     /// Returns all reserved physical memory ranges on the platform.

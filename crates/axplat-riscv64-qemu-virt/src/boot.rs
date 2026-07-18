@@ -1,5 +1,9 @@
-use crate::config::plat::{BOOT_STACK_SIZE, PHYS_VIRT_OFFSET};
 use axplat::mem::{Aligned4K, pa};
+
+use crate::config::plat::{BOOT_STACK_SIZE, PHYS_MEMORY_BASE, PHYS_MEMORY_SIZE, PHYS_VIRT_OFFSET};
+
+const GIGA_PAGE_SIZE: usize = 0x4000_0000;
+const GIGA_PAGE_FLAGS: u64 = 0xef;
 
 #[unsafe(link_section = ".bss.stack")]
 static mut BOOT_STACK: [u8; BOOT_STACK_SIZE] = [0; BOOT_STACK_SIZE];
@@ -7,18 +11,31 @@ static mut BOOT_STACK: [u8; BOOT_STACK_SIZE] = [0; BOOT_STACK_SIZE];
 #[unsafe(link_section = ".data")]
 static mut BOOT_PT_SV39: Aligned4K<[u64; 512]> = Aligned4K::new([0; 512]);
 
-#[allow(clippy::identity_op)] // (0x0 << 10) here makes sense because it's an address
 unsafe fn init_boot_page_table() {
     unsafe {
-        // 0x0000_0000..0x4000_0000, VRWX_GAD, 1G block
-        BOOT_PT_SV39[0] = (0x0 << 10) | 0xef;
-        // 0x8000_0000..0xc000_0000, VRWX_GAD, 1G block
-        BOOT_PT_SV39[2] = (0x80000 << 10) | 0xef;
-        // 0xffff_ffc0_0000_0000..0xffff_ffc0_4000_0000, VRWX_GAD, 1G block
-        BOOT_PT_SV39[0x100] = (0x0 << 10) | 0xef;
-        // 0xffff_ffc0_8000_0000..0xffff_ffc0_c000_0000, VRWX_GAD, 1G block
-        BOOT_PT_SV39[0x102] = (0x80000 << 10) | 0xef;
+        // Keep low MMIO reachable through both identity and direct mappings.
+        BOOT_PT_SV39[0] = giga_page_entry(0);
+        BOOT_PT_SV39[direct_map_index(0)] = giga_page_entry(0);
+
+        // QEMU places the DTB near the top of RAM, so all configured RAM must
+        // be reachable before init_topology() parses it.
+        let first = PHYS_MEMORY_BASE / GIGA_PAGE_SIZE;
+        let end = (PHYS_MEMORY_BASE + PHYS_MEMORY_SIZE).div_ceil(GIGA_PAGE_SIZE);
+        for index in first..end {
+            let paddr = index * GIGA_PAGE_SIZE;
+            let entry = giga_page_entry(paddr);
+            BOOT_PT_SV39[index] = entry;
+            BOOT_PT_SV39[direct_map_index(paddr)] = entry;
+        }
     }
+}
+
+const fn giga_page_entry(paddr: usize) -> u64 {
+    ((paddr >> 12) as u64) << 10 | GIGA_PAGE_FLAGS
+}
+
+const fn direct_map_index(paddr: usize) -> usize {
+    (PHYS_VIRT_OFFSET.wrapping_add(paddr) >> 30) & 0x1ff
 }
 
 unsafe fn init_mmu() {
