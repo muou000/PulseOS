@@ -229,7 +229,9 @@ pub fn set_priority(prio: isize) -> bool {
 ///
 /// TODO: support set the affinity for other tasks.
 pub fn set_current_affinity(cpumask: AxCpuMask) -> bool {
-    if cpumask.is_empty() {
+    let has_online_cpu =
+        (0..axhal::cpu_num()).any(|cpu_id| cpumask.get(cpu_id) && axhal::is_cpu_online(cpu_id));
+    if cpumask.is_empty() || !has_online_cpu {
         false
     } else {
         let curr = current().clone();
@@ -306,9 +308,6 @@ pub fn exit(exit_code: i32) -> ! {
 /// It runs an infinite loop that keeps calling [`yield_now()`].
 pub fn run_idle() -> ! {
     loop {
-        #[cfg(feature = "preempt")]
-        core::hint::spin_loop();
-        #[cfg(not(feature = "preempt"))]
         yield_now();
     }
 }

@@ -14,6 +14,8 @@ use axhal::context::TaskContext;
 #[cfg(feature = "tls")]
 use axhal::tls::TlsArea;
 use kspin::SpinNoIrq;
+#[cfg(feature = "smp")]
+use kspin::SpinRaw;
 use memory_addr::{MemoryAddr, PAGE_SIZE_4K, VirtAddr, align_up_4k};
 
 use crate::{AxCpuMask, AxTask, AxTaskRef, WaitQueue, task_ext::AxTaskExt};
@@ -38,6 +40,12 @@ pub(crate) enum TaskState {
     Exited  = 4,
 }
 
+#[cfg(feature = "smp")]
+struct SwitchState {
+    on_cpu: bool,
+    deferred_wake: Option<(u32, AxTaskRef)>,
+}
+
 /// The inner task structure.
 pub struct TaskInner {
     id: TaskId,
@@ -56,9 +64,9 @@ pub struct TaskInner {
 
     /// Used to indicate the CPU ID where the task is running or will run.
     cpu_id: AtomicU32,
-    /// Used to indicate whether the task is running on a CPU.
+    /// Serializes context switch completion with a racing remote wake.
     #[cfg(feature = "smp")]
-    on_cpu: AtomicBool,
+    switch_state: SpinRaw<SwitchState>,
 
     /// A ticket ID used to identify the timer event.
     /// Set by `set_timer_ticket()` when creating a timer event in `set_alarm_wakeup()`,
@@ -278,7 +286,10 @@ impl TaskInner {
             timer_ticket_id: AtomicU64::new(0),
             cpu_id: AtomicU32::new(0),
             #[cfg(feature = "smp")]
-            on_cpu: AtomicBool::new(false),
+            switch_state: SpinRaw::new(SwitchState {
+                on_cpu: false,
+                deferred_wake: None,
+            }),
             #[cfg(feature = "preempt")]
             need_resched: AtomicBool::new(false),
             #[cfg(feature = "preempt")]
@@ -305,7 +316,7 @@ impl TaskInner {
         let mut t = Self::new_common(TaskId::new(), name);
         t.is_init = true;
         #[cfg(feature = "smp")]
-        t.set_on_cpu(true);
+        t.claim_on_cpu();
         if *t.name.lock() == "idle" {
             t.is_idle = true;
         }
@@ -480,23 +491,48 @@ impl TaskInner {
         self.cpu_id.store(cpu_id, Ordering::Release);
     }
 
-    /// Returns whether the task is running on a CPU.
-    ///
-    /// It is used to protect the task from being moved to a different run queue
-    /// while it has not finished its scheduling process.
-    /// The `on_cpu field is set to `true` when the task is preparing to run on a CPU,
-    /// and it is set to `false` when the task has finished its scheduling process in `clear_prev_task_on_cpu()`.
+    /// Claims this task for execution after it has been selected by a run queue.
     #[cfg(feature = "smp")]
     #[inline]
-    pub(crate) fn on_cpu(&self) -> bool {
-        self.on_cpu.load(Ordering::Acquire)
+    pub(crate) fn claim_on_cpu(&self) {
+        let mut state = self.switch_state.lock();
+        assert!(!state.on_cpu, "task is already owned by a CPU");
+        assert!(
+            state.deferred_wake.is_none(),
+            "task has an unconsumed deferred wake"
+        );
+        state.on_cpu = true;
     }
 
-    /// Sets whether the task is running on a CPU.
+    /// Records a wake that raced context switch-out.
+    ///
+    /// Returns `true` when the owning CPU must enqueue the task after saving its
+    /// context, or `false` when the waker can enqueue it immediately. Ownership
+    /// of `task` keeps the allocation alive between wait-queue removal and the
+    /// deferred run-queue insertion.
     #[cfg(feature = "smp")]
     #[inline]
-    pub(crate) fn set_on_cpu(&self, on_cpu: bool) {
-        self.on_cpu.store(on_cpu, Ordering::Release)
+    pub(crate) fn defer_wake(&self, target_cpu: u32, task: AxTaskRef) -> bool {
+        let mut state = self.switch_state.lock();
+        if !state.on_cpu {
+            return false;
+        }
+        assert!(
+            state.deferred_wake.is_none(),
+            "task already has a deferred wake"
+        );
+        state.deferred_wake = Some((target_cpu, task));
+        true
+    }
+
+    /// Publishes a fully saved context and consumes a wake deferred to this CPU.
+    #[cfg(feature = "smp")]
+    #[inline]
+    pub(crate) fn finish_switch_out(&self) -> Option<(u32, AxTaskRef)> {
+        let mut state = self.switch_state.lock();
+        assert!(state.on_cpu, "task is not owned by a CPU");
+        state.on_cpu = false;
+        state.deferred_wake.take()
     }
 }
 

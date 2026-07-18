@@ -109,6 +109,7 @@ repository.workspace = true
 [features]
 default = []
 qemu = []
+smp = ["axfeat/smp", "axfeat/ipi"]
 testcode = []
 
 [dependencies]

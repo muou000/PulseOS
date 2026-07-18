@@ -2674,11 +2674,15 @@ impl Process {
             if w.uaddr == 0 {
                 return Err(AxError::BadAddress);
             }
+            self.try_fault_in_user_range(
+                w.uaddr as usize,
+                core::mem::size_of::<u32>(),
+                MappingFlags::WRITE,
+            )?;
             let val = self.read_user_u32(w.uaddr as usize)?;
             if val != w.val as u32 {
                 return Err(AxError::from(AxErrorKind::WouldBlock));
             }
-            self.write_user_bytes(w.uaddr as usize, &val.to_ne_bytes())?;
         }
 
         // Translate the virtual addresses to physical addresses outside the run queue lock.
@@ -2778,11 +2782,11 @@ impl Process {
         timeout_ns: Option<u64>,
         is_private: bool,
     ) -> AxResult<()> {
+        self.try_fault_in_user_range(addr, core::mem::size_of::<u32>(), MappingFlags::WRITE)?;
         let val = self.read_user_u32(addr)?;
         if val != expected {
             return Err(AxError::from(AxErrorKind::WouldBlock));
         }
-        self.write_user_bytes(addr, &val.to_ne_bytes())?;
 
         // Translate the virtual address to a physical address outside the run queue lock.
         let aspace = self.aspace_handle();
