@@ -22,6 +22,7 @@ pub mod config {
 }
 
 mod boot;
+mod boot_common;
 mod console;
 mod init;
 #[cfg(feature = "irq")]

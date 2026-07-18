@@ -1,11 +1,19 @@
 use axplat::mem::{Aligned4K, PhysAddr, pa};
 use page_table_entry::{GenericPTE, MappingFlags, loongarch64::LA64PTE};
 
-use crate::config::plat::{BOOT_STACK_SIZE, PHYS_VIRT_OFFSET};
+use crate::{
+    boot_common::{L1_BLOCK_SIZE, high_memory_l1_blocks, l1_block_index},
+    config::plat::{BOOT_STACK_SIZE, PHYS_MEMORY_BASE, PHYS_MEMORY_SIZE, PHYS_VIRT_OFFSET},
+};
 
 const DMW_VIRT_MASK: usize = 0x0fff_ffff_ffff_ffff;
 const DMW_CACHED_BASE: usize = 0x9000_0000_0000_0000;
 const IOCSR_MAILBOX1: usize = 0x1028;
+const BOOT_RAM_L1_START: usize = l1_block_index(PHYS_MEMORY_BASE);
+const BOOT_RAM_L1_BLOCKS: usize = high_memory_l1_blocks(PHYS_MEMORY_SIZE);
+
+const _: () = assert!(PHYS_MEMORY_BASE % L1_BLOCK_SIZE == 0);
+const _: () = assert!(BOOT_RAM_L1_START + BOOT_RAM_L1_BLOCKS <= 512);
 
 #[unsafe(link_section = ".bss.stack")]
 static mut BOOT_STACK: [u8; BOOT_STACK_SIZE] = [0; BOOT_STACK_SIZE];
@@ -35,12 +43,15 @@ unsafe fn init_boot_page_table() {
             MappingFlags::READ | MappingFlags::WRITE | MappingFlags::DEVICE,
             true,
         );
-        // 0x8000_0000..0xc000_0000, VPWXGD, 1G block
-        BOOT_PT_L1[2] = LA64PTE::new_page(
-            pa!(0x8000_0000),
-            MappingFlags::READ | MappingFlags::WRITE | MappingFlags::EXECUTE,
-            true,
-        );
+        // QEMU places RAM above the MMIO hole at PHYS_MEMORY_BASE. Map every
+        // 1G block needed while the final kernel page table is being built.
+        for index in BOOT_RAM_L1_START..BOOT_RAM_L1_START + BOOT_RAM_L1_BLOCKS {
+            BOOT_PT_L1[index] = LA64PTE::new_page(
+                PhysAddr::from(index * L1_BLOCK_SIZE),
+                MappingFlags::READ | MappingFlags::WRITE | MappingFlags::EXECUTE,
+                true,
+            );
+        }
     }
 }
 
