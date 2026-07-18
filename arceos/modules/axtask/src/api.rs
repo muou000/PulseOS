@@ -241,12 +241,11 @@ pub fn set_current_affinity(cpumask: AxCpuMask) -> bool {
         // the affinity. If not, we need to migrate the task to the correct CPU.
         #[cfg(feature = "smp")]
         if !cpumask.get(axhal::percpu::this_cpu_id()) {
-            const MIGRATION_TASK_STACK_SIZE: usize = 4096;
-            // Spawn a new migration task for migrating.
+            // Migration executes scheduler and IPI paths on this stack.
             let migration_task = TaskInner::new(
                 move || crate::run_queue::migrate_entry(curr),
                 "migration-task".into(),
-                MIGRATION_TASK_STACK_SIZE,
+                axconfig::TASK_STACK_SIZE,
             )
             .into_arc();
 
