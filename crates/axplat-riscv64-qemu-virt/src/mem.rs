@@ -77,8 +77,8 @@ pub(super) fn init_from_fdt(fdt: &Fdt<'_>, dtb_paddr: usize) {
             };
             let end = start.saturating_add(size).min(configured_end);
             let start = start.max(KERNEL_BASE_PADDR);
-            if start < end {
-                ram.push((start, end - start));
+            if start < end && !ram.push((start, end - start)) {
+                warn!("too many DTB RAM ranges; ignoring [{start:#x}, {end:#x})");
             }
         }
     }
@@ -90,27 +90,37 @@ pub(super) fn init_from_fdt(fdt: &Fdt<'_>, dtb_paddr: usize) {
     let mut candidates = RangeList::<MAX_RESERVED_RANGES>::new();
     // Keep the live DTB ahead of firmware-provided entries so fixed capacity
     // can never make the allocator reclaim the blob while it is still in use.
-    candidates.push((dtb_paddr, fdt.header().totalsize as usize));
+    assert!(
+        candidates.push((dtb_paddr, fdt.header().totalsize as usize)),
+        "DTB reserved-memory range capacity exhausted"
+    );
     for reservation in fdt.memory_reservations() {
-        push_u64_range(&mut candidates, reservation.address, reservation.size);
+        assert!(
+            push_u64_range(&mut candidates, reservation.address, reservation.size),
+            "invalid or excessive DTB memreserve entries"
+        );
     }
     for node in fdt.reserved_memory() {
         if let Some(regions) = node.reg() {
             for region in regions {
                 if let Some(size) = region.size {
-                    push_u64_range(&mut candidates, region.address, size);
+                    assert!(
+                        push_u64_range(&mut candidates, region.address, size),
+                        "invalid or excessive /reserved-memory entries"
+                    );
                 }
             }
         }
     }
     let mut reserved = RangeList::<MAX_RESERVED_RANGES>::new();
     for candidate in candidates.as_slice() {
-        let Some(aligned) = align_reserved(*candidate) else {
-            continue;
-        };
+        let aligned = align_reserved(*candidate).expect("invalid DTB reserved-memory range");
         for ram_range in ram.as_slice() {
             if let Some(intersection) = intersect(aligned, *ram_range) {
-                reserved.push(intersection);
+                assert!(
+                    reserved.push(intersection),
+                    "DTB reserved-memory intersection capacity exhausted"
+                );
             }
         }
     }
@@ -131,11 +141,11 @@ fn publish_memory_layout(
     RESERVED_RANGES.publish(&reserved);
 }
 
-fn push_u64_range<const N: usize>(ranges: &mut RangeList<N>, start: u64, size: u64) {
+fn push_u64_range<const N: usize>(ranges: &mut RangeList<N>, start: u64, size: u64) -> bool {
     let (Ok(start), Ok(size)) = (usize::try_from(start), usize::try_from(size)) else {
-        return;
+        return false;
     };
-    ranges.push((start, size));
+    start.checked_add(size).is_some() && ranges.push((start, size))
 }
 
 fn align_reserved((start, size): RawRange) -> Option<RawRange> {
@@ -205,19 +215,23 @@ impl<const N: usize> RangeList<N> {
 
     fn from_one(range: RawRange) -> Self {
         let mut result = Self::new();
-        result.push(range);
+        assert!(
+            result.push(range),
+            "range list must have capacity for one entry"
+        );
         result
     }
 
-    fn push(&mut self, range: RawRange) {
+    fn push(&mut self, range: RawRange) -> bool {
         if range.1 == 0 {
-            return;
+            return true;
         }
         if self.count < N {
             self.ranges[self.count] = range;
             self.count += 1;
+            true
         } else {
-            warn!("too many DTB memory ranges; ignoring {range:#x?}");
+            false
         }
     }
 
@@ -263,11 +277,19 @@ mod tests {
     #[test]
     fn normalizes_unsorted_overlapping_ranges() {
         let mut ranges = RangeList::<4>::new();
-        ranges.push((0x3000, 0x1000));
-        ranges.push((0x1000, 0x1800));
-        ranges.push((0x2000, 0x2000));
+        assert!(ranges.push((0x3000, 0x1000)));
+        assert!(ranges.push((0x1000, 0x1800)));
+        assert!(ranges.push((0x2000, 0x2000)));
         ranges.normalize();
         assert_eq!(ranges.as_slice(), &[(0x1000, 0x3000)]);
+    }
+
+    #[test]
+    fn reports_capacity_exhaustion() {
+        let mut ranges = RangeList::<1>::new();
+        assert!(ranges.push((0x1000, 0x1000)));
+        assert!(!ranges.push((0x3000, 0x1000)));
+        assert_eq!(ranges.as_slice(), &[(0x1000, 0x1000)]);
     }
 
     #[test]
