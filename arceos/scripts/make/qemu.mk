@@ -23,7 +23,11 @@ else ifeq ($(ARCH), aarch64)
   endif
 else ifeq ($(ARCH), loongarch64)
   machine := virt
-  override MEM := 8G
+  # Replace only the generic makefile default; preserve environment and
+  # command-line values such as `make MEM=1G`.
+  ifeq ($(origin MEM), file)
+    MEM := 8G
+  endif
 endif
 
 qemu_args-x86_64 := \

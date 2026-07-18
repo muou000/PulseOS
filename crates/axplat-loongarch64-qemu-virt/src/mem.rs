@@ -4,7 +4,7 @@ use crate::config::devices::MMIO_RANGES;
 use crate::config::plat::{PHYS_MEMORY_BASE, PHYS_MEMORY_SIZE, PHYS_VIRT_OFFSET};
 
 const LOW_MEMORY_SIZE: usize = 0x1000_0000;
-const RAM_RANGES: [RawRange; 2] = [
+pub(crate) const RAM_RANGES: [RawRange; 2] = [
     (0, LOW_MEMORY_SIZE),
     (PHYS_MEMORY_BASE, PHYS_MEMORY_SIZE - LOW_MEMORY_SIZE),
 ];

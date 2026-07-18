@@ -2,7 +2,7 @@ use axplat::{mem::PhysAddr, power::CpuBootError};
 use loongArch64::ipi::{csr_mail_send, send_ipi_single};
 
 use crate::{
-    config::plat::{MAX_CPU_NUM, PHYS_MEMORY_BASE, PHYS_MEMORY_SIZE, PHYS_VIRT_OFFSET},
+    config::plat::{MAX_CPU_NUM, PHYS_VIRT_OFFSET},
     mp_common::{kernel_virt_to_cached_dmw, phys_to_cached_dmw, valid_stack_top},
 };
 
@@ -15,7 +15,10 @@ pub fn start_secondary_cpu(cpu_id: usize, stack_top: PhysAddr) -> Result<(), Cpu
     }
 
     let stack_top = stack_top.as_usize();
-    if !valid_stack_top(stack_top, PHYS_MEMORY_BASE, PHYS_MEMORY_SIZE) {
+    if !crate::mem::RAM_RANGES
+        .iter()
+        .any(|&(base, size)| valid_stack_top(stack_top, base, size))
+    {
         return Err(CpuBootError::InvalidAddress);
     }
 

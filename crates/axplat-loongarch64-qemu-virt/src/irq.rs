@@ -84,6 +84,13 @@ impl IrqIf for IrqIfImpl {
 
     /// Unregisters the IRQ handler for the given IRQ.
     fn unregister(irq: usize) -> Option<IrqHandler> {
+        if (irq == TIMER_IRQ || irq == IPI_IRQ)
+            && ONLINE_CPUS.load(Ordering::Acquire).count_ones() > 1
+        {
+            warn!("cannot unregister CPU-local IRQ {irq} while multiple CPUs are online");
+            return None;
+        }
+
         let handler = if irq == TIMER_IRQ {
             unregister_local_handler(&TIMER_HANDLER)
         } else if irq == IPI_IRQ {
