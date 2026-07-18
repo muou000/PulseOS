@@ -254,7 +254,7 @@ impl Thread {
         if clear_child_tid == 0 {
             return Ok(());
         }
-        self.process().write_user_u32_no_fault(clear_child_tid, 0)?;
+        self.process().write_user_u32(clear_child_tid, 0)?;
         self.process()
             .futex_wake_no_resched(clear_child_tid, 1, true);
         self.process()

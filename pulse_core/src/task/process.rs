@@ -1199,14 +1199,6 @@ impl Process {
         self.write_user_bytes(user_addr, &value.to_ne_bytes())
     }
 
-    pub fn write_user_u32_no_fault(&self, user_addr: usize, value: u32) -> AxResult<()> {
-        self.validate_user_range(user_addr, core::mem::size_of::<u32>())?;
-        self.aspace_handle()
-            .read()
-            .write(VirtAddr::from(user_addr), &value.to_ne_bytes())
-            .map_err(AxError::from)
-    }
-
     pub fn write_user_i32(&self, user_addr: usize, value: i32) -> AxResult<()> {
         self.write_user_bytes(user_addr, &value.to_ne_bytes())
     }
@@ -2712,6 +2704,7 @@ impl Process {
         }
 
         let mut queues = alloc::vec::Vec::with_capacity(waiters.len());
+        let mut queue_keys = alloc::vec::Vec::with_capacity(waiters.len());
         for w in &waiters {
             let is_priv = w.flags & 128 != 0; // 128 is FUTEX_PRIVATE_FLAG
             let (key, is_priv) = self.futex_key(w.uaddr as usize, is_priv);
@@ -2721,6 +2714,7 @@ impl Process {
                 GLOBAL_FUTEX_TABLE.queue(key)
             };
             queues.push(queue);
+            queue_keys.push((key, is_priv));
         }
 
         let q_refs: alloc::vec::Vec<&axtask::WaitQueue> =
@@ -2750,9 +2744,7 @@ impl Process {
 
         drop(q_refs);
         drop(queues);
-        for w in &waiters {
-            let is_private = w.flags & 128 != 0;
-            let (key, is_priv) = self.futex_key(w.uaddr as usize, is_private);
+        for (key, is_priv) in queue_keys {
             if is_priv {
                 self.futex_table.remove_if_empty(key);
             } else {
