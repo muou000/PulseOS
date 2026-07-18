@@ -108,6 +108,7 @@ pub fn syscall_handler(tf: &mut TrapFrame, syscall_num: usize) -> isize {
     if process.group_exiting() {
         thread.exit_current(process.group_exit_code());
     }
+    axtask::current().clear_interrupt();
     process.mark_user_resume();
 
     syscall_ret(tf)

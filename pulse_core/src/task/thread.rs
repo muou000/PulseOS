@@ -107,9 +107,11 @@ impl Thread {
 
     pub fn notify_signal_pending(&self) {
         self.signal.notify_waiters();
-        if let Some(weak_task) = self.task_ref.lock().as_ref() {
+        if self.signal.has_deliverable_pending_signal()
+            && let Some(weak_task) = self.task_ref.lock().as_ref()
+        {
             if let Some(task) = weak_task.upgrade() {
-                axtask::wake_task(task, true);
+                axtask::interrupt_task(task, true);
             }
         }
     }
@@ -211,7 +213,8 @@ impl Thread {
         if self.process().group_exiting() {
             self.exit_current(self.process().group_exit_code());
         }
-        self.process().sync_fs_context();
+        // Filesystem syscalls synchronize this context on demand in the
+        // dispatcher. Avoid touching the shared FS context for empty threads.
         self.write_set_child_tid_on_start()?;
         self.process().mark_user_resume();
         self.mark_user_resume();
@@ -251,7 +254,7 @@ impl Thread {
         if clear_child_tid == 0 {
             return Ok(());
         }
-        self.process().write_user_u32(clear_child_tid, 0)?;
+        self.process().write_user_u32_no_fault(clear_child_tid, 0)?;
         self.process()
             .futex_wake_no_resched(clear_child_tid, 1, true);
         self.process()

@@ -177,6 +177,8 @@ impl FutexTable {
         while woken < count && queue.notify_one(true) {
             woken += 1;
         }
+        drop(queue);
+        self.remove_if_empty(addr);
         woken
     }
 
@@ -193,6 +195,8 @@ impl FutexTable {
         while woken < count && queue.notify_one(false) {
             woken += 1;
         }
+        drop(queue);
+        self.remove_if_empty(addr);
         woken
     }
 
@@ -244,7 +248,10 @@ impl FutexTable {
         let mut queues = self.queues.lock();
         if let Some(queue) = queues.get(&addr) {
             queue.prune_exited();
-            if queue.is_empty() && Arc::strong_count(queue) <= 2 {
+            // The table must be the sole Arc owner. A waiter obtains an Arc
+            // before it enrolls in the WaitQueue, so removing at a count of 2
+            // can orphan that waiter before a concurrent wake lookup.
+            if queue.is_empty() && Arc::strong_count(queue) == 1 {
                 queues.remove(&addr);
             }
         }
@@ -1136,7 +1143,16 @@ impl Process {
     }
 
     pub fn write_user_bytes(&self, user_addr: usize, bytes: &[u8]) -> AxResult<()> {
+        self.validate_user_range(user_addr, bytes.len())?;
+        let start = VirtAddr::from(user_addr);
         let aspace_handle = self.aspace_handle();
+
+        // Most kernel writes target resident writable pages. Keep that path
+        // shared; only page faults and COW resolution need exclusive access.
+        if let Ok(()) = aspace_handle.read().write(start, bytes) {
+            return Ok(());
+        }
+
         let mut aspace = aspace_handle.write();
         self.write_user_bytes_in_aspace(&mut aspace, user_addr, bytes)
     }
@@ -1181,6 +1197,14 @@ impl Process {
 
     pub fn write_user_u32(&self, user_addr: usize, value: u32) -> AxResult<()> {
         self.write_user_bytes(user_addr, &value.to_ne_bytes())
+    }
+
+    pub fn write_user_u32_no_fault(&self, user_addr: usize, value: u32) -> AxResult<()> {
+        self.validate_user_range(user_addr, core::mem::size_of::<u32>())?;
+        self.aspace_handle()
+            .read()
+            .write(VirtAddr::from(user_addr), &value.to_ne_bytes())
+            .map_err(AxError::from)
     }
 
     pub fn write_user_i32(&self, user_addr: usize, value: i32) -> AxResult<()> {
@@ -1848,11 +1872,6 @@ impl Process {
         *self.fs_context_handle().lock() = axfs::FS_CONTEXT.lock().clone();
     }
 
-    pub fn register_thread(&self, tid: u64) {
-        let mut registry = self.threads.lock();
-        registry.insert(tid, ThreadState::Pending);
-    }
-
     pub fn register_task_ref(&self, task: AxTaskRef) {
         if let Some(handle) = super::thread_handle_from_task(&task) {
             handle.attach_task_ref(task.clone());
@@ -1898,10 +1917,13 @@ impl Process {
         self.threads.lock().clear();
     }
 
-    pub fn unregister_thread(&self, tid: u64) -> usize {
+    fn take_exiting_thread(&self, tid: u64) -> (Option<AxTaskRef>, usize) {
         let mut registry = self.threads.lock();
-        registry.remove(&tid);
-        registry.len()
+        let task = match registry.remove(&tid) {
+            Some(ThreadState::Active(task)) => Some(task),
+            _ => None,
+        };
+        (task, registry.len())
     }
 
     pub fn begin_group_exit(&self, exit_code: i32) {
@@ -1925,7 +1947,7 @@ impl Process {
             if let Some(handle) = thread_handle_from_task(&task) {
                 handle.signal_wait_queue().notify_all(false);
             }
-            axtask::wake_task(task, true);
+            axtask::interrupt_task(task, true);
         }
     }
 
@@ -1971,7 +1993,8 @@ impl Process {
 
     pub fn finish_thread_exit(&self, tid: u64, exit_code: i32) {
         super::unregister_thread_global(tid);
-        if let Some(task) = self.task_ref_by_tid(tid) {
+        let (task, remaining) = self.take_exiting_thread(tid);
+        if let Some(task) = task {
             if let Some(handle) = super::thread_handle_from_task(&task) {
                 let now_ns = axhal::time::monotonic_time_nanos() as u64;
                 let (u, s) = handle.snapshot_cpu_time_ns(now_ns);
@@ -1983,36 +2006,13 @@ impl Process {
                     .fetch_add(s, Ordering::Relaxed);
             }
         }
-
-        if tid != self.pid() {
-            let _ = self.take_task_ref_by_tid(tid);
-        }
-        let remaining = self.unregister_thread(tid);
-        if remaining > 0 {
-            let threads_lock = self.threads.lock();
-            let mut details = alloc::vec::Vec::new();
-            for (t_id, state) in threads_lock.iter() {
-                match state {
-                    ThreadState::Pending => details.push(alloc::format!("Pending({})", t_id)),
-                    ThreadState::Active(task) => details.push(alloc::format!("Active({}, name={:?})", t_id, task.name())),
-                }
-            }
-            axlog::debug!(
-                "finish_thread_exit: pid={}, tid={}, remaining_threads={}, threads={:?}, group_exiting={}",
-                self.pid(),
-                tid,
-                remaining,
-                details,
-                self.group_exiting()
-            );
-        } else {
-            axlog::debug!(
-                "finish_thread_exit: pid={}, tid={}, remaining_threads=0, group_exiting={}",
-                self.pid(),
-                tid,
-                self.group_exiting()
-            );
-        }
+        axlog::debug!(
+            "finish_thread_exit: pid={}, tid={}, remaining_threads={}, group_exiting={}",
+            self.pid(),
+            tid,
+            remaining,
+            self.group_exiting()
+        );
         if remaining != 0 {
             return;
         }
@@ -2022,7 +2022,6 @@ impl Process {
         } else {
             exit_code
         };
-        self.threads.lock().clear();
         self.exit_code.store(final_code, Ordering::Release);
         self.zombie.store(true, Ordering::Release);
         // 唤醒所有通过 `PidfdObject::register_poll` 在 `pid_exit_event` 上挂起的
@@ -2749,14 +2748,15 @@ impl Process {
             },
         );
 
-        // Remove from GLOBAL_FUTEX_TABLE if empty
-        if self.group_exiting() || mismatch || res.is_ok() || res.is_err() {
-            for (_i, w) in waiters.iter().enumerate() {
-                let is_priv = w.flags & 128 != 0;
-                if !is_priv {
-                    let (key, _) = self.futex_key(w.uaddr as usize, is_priv);
-                    GLOBAL_FUTEX_TABLE.remove_if_empty(key);
-                }
+        drop(q_refs);
+        drop(queues);
+        for w in &waiters {
+            let is_private = w.flags & 128 != 0;
+            let (key, is_priv) = self.futex_key(w.uaddr as usize, is_private);
+            if is_priv {
+                self.futex_table.remove_if_empty(key);
+            } else {
+                GLOBAL_FUTEX_TABLE.remove_if_empty(key);
             }
         }
 
@@ -2827,7 +2827,10 @@ impl Process {
         };
 
         if self.group_exiting() {
-            if !is_priv {
+            drop(queue);
+            if is_priv {
+                self.futex_table.remove_if_empty(key);
+            } else {
                 GLOBAL_FUTEX_TABLE.remove_if_empty(key);
             }
             return Ok(());
@@ -2874,7 +2877,10 @@ impl Process {
             false
         };
 
-        if !is_priv {
+        drop(queue);
+        if is_priv {
+            self.futex_table.remove_if_empty(key);
+        } else {
             GLOBAL_FUTEX_TABLE.remove_if_empty(key);
         }
 
@@ -2919,9 +2925,6 @@ impl Process {
             woken
         );
 
-        if !is_priv {
-            GLOBAL_FUTEX_TABLE.remove_if_empty(key);
-        }
         woken
     }
 
@@ -2950,7 +2953,10 @@ impl Process {
             GLOBAL_FUTEX_TABLE.requeue(key, wake_count, target_key, requeue_count)
         };
 
-        if !is_priv {
+        if is_priv {
+            self.futex_table.remove_if_empty(key);
+            self.futex_table.remove_if_empty(target_key);
+        } else {
             GLOBAL_FUTEX_TABLE.remove_if_empty(key);
             GLOBAL_FUTEX_TABLE.remove_if_empty(target_key);
         }
@@ -3108,7 +3114,6 @@ impl Process {
 
         let child_tid = inner.id().as_u64();
         let child_proc = if params.is_thread_clone {
-            self.register_thread(child_tid);
             self.clone()
         } else {
             let parent_aspace_handle = self.aspace_handle();
@@ -3131,9 +3136,6 @@ impl Process {
 
         if let Some(parent_tid_addr) = params.parent_set_tid {
             if let Err(e) = self.write_user_u32(parent_tid_addr, child_tid as u32) {
-                if params.is_thread_clone {
-                    self.unregister_thread(child_tid);
-                }
                 return Err(e);
             }
         }
@@ -3162,8 +3164,13 @@ impl Process {
         if !params.is_thread_clone {
             self.add_child(child_proc.clone());
         }
-        let task = axtask::spawn_task(inner);
+        // Publish the task in the process registry before another CPU can run
+        // it. An empty thread may otherwise exit between spawn_task() and
+        // register_task_ref(), leaving a stale exited entry reinserted after
+        // finish_thread_exit() removed the Pending slot.
+        let task = inner.into_arc();
         child_proc.register_task_ref(task.clone());
+        axtask::spawn_task_ref(task.clone());
         Ok((child_tid, (!params.is_thread_clone).then_some(child_proc)))
     }
 

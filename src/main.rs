@@ -12,7 +12,6 @@ extern crate starry_vdso;
 
 use alloc::vec::Vec;
 use pulse_core::task::exec::resolve_exec_path_and_args;
-use pulse_core::task::Process;
 
 #[unsafe(no_mangle)]
 fn main() {
