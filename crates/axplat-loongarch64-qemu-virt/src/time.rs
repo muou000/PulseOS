@@ -10,10 +10,11 @@ static mut RTC_EPOCHOFFSET_NANOS: u64 = 0;
 pub(super) fn init_percpu() {
     #[cfg(feature = "irq")]
     {
-        use loongArch64::register::tcfg;
-        tcfg::set_init_val(0);
+        use loongArch64::register::{tcfg, ticlr};
+
+        tcfg::set_en(false);
         tcfg::set_periodic(false);
-        tcfg::set_en(true);
+        ticlr::clear_timer_interrupt();
         axplat::irq::set_enable(crate::config::devices::TIMER_IRQ, true);
     }
 }
@@ -28,9 +29,10 @@ pub(super) fn init_percpu() {
 /// [2]: https://gitlab.com/qemu-project/qemu/-/blob/1cf9bc6eba7506ab6d9de635f224259225f63466/hw/rtc/ls7a_rtc.c
 #[cfg(feature = "rtc")]
 fn init_rtc() {
-    use crate::mem::phys_to_virt;
     use axplat::mem::{PhysAddr, pa};
     use chrono::{TimeZone, Timelike, Utc};
+
+    use crate::mem::phys_to_virt;
 
     const SYS_TOY_READ0: usize = 0x2C;
     const SYS_TOY_READ1: usize = 0x30;
@@ -118,14 +120,16 @@ impl TimeIf for TimeIfImpl {
     /// LoongArch64 TCFG CSR: <https://loongson.github.io/LoongArch-Documentation/LoongArch-Vol1-EN.html#timer-configuration>
     #[cfg(feature = "irq")]
     fn set_oneshot_timer(deadline_ns: u64) {
-        use loongArch64::register::tcfg;
+        use loongArch64::register::{tcfg, ticlr};
 
         let ticks_now = Self::current_ticks();
         let ticks_deadline = Self::nanos_to_ticks(deadline_ns);
-        // Saturate to prevent u64 underflow when the deadline has already passed.
-        // Use max(4) because TCFG init_val must be a nonzero multiple of 4.
-        let init_value = ticks_deadline.saturating_sub(ticks_now).max(4);
+        let init_value = crate::time_common::oneshot_delta_ticks(ticks_now, ticks_deadline);
+
+        tcfg::set_en(false);
+        tcfg::set_periodic(false);
         tcfg::set_init_val(init_value as _);
+        ticlr::clear_timer_interrupt();
         tcfg::set_en(true);
     }
 }
