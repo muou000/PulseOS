@@ -5,6 +5,7 @@ use crate::config::plat::{BOOT_STACK_SIZE, PHYS_VIRT_OFFSET};
 
 const DMW_VIRT_MASK: usize = 0x0fff_ffff_ffff_ffff;
 const DMW_CACHED_BASE: usize = 0x9000_0000_0000_0000;
+const IOCSR_MAILBOX1: usize = 0x1028;
 
 #[unsafe(link_section = ".bss.stack")]
 static mut BOOT_STACK: [u8; BOOT_STACK_SIZE] = [0; BOOT_STACK_SIZE];
@@ -58,10 +59,7 @@ fn enable_fp_simd() {
 }
 
 fn init_mmu() {
-    axcpu::init::init_mmu(
-        boot_paddr(&raw const BOOT_PT_L0),
-        PHYS_VIRT_OFFSET,
-    );
+    axcpu::init::init_mmu(boot_paddr(&raw const BOOT_PT_L0), PHYS_VIRT_OFFSET);
 }
 
 /// The earliest entry point for the primary CPU.
@@ -130,7 +128,7 @@ unsafe extern "C" fn _start() -> ! {
 #[cfg(feature = "smp")]
 #[unsafe(naked)]
 #[unsafe(no_mangle)]
-unsafe extern "C" fn _start_secondary() -> ! {
+pub(crate) unsafe extern "C" fn _start_secondary() -> ! {
     core::arch::naked_asm!("
         ori          $t0, $zero, 0x1     # CSR_DMW1_PLV0
         lu52i.d      $t0, $t0, -2048     # UC, PLV0, 0x8000 xxxx xxxx xxxx
@@ -144,8 +142,8 @@ unsafe extern "C" fn _start_secondary() -> ! {
         jirl         $zero, $t0, 0
 
     2:
-        la.pcrel     $t0, {sm_boot_stack_top}
-        ld.d         $sp, $t0,0          # read boot stack top
+        li.w         $t0, {iocsr_mailbox1}
+        iocsrrd.d    $sp, $t0             # read this CPU's boot stack top
 
         # Init MMU
         bl           {enable_fp_simd}    # enable FP/SIMD instructions
@@ -169,8 +167,8 @@ unsafe extern "C" fn _start_secondary() -> ! {
         jirl         $zero, $t0, 0",
         dmw_virt_mask = const DMW_VIRT_MASK,
         dmw_cached_base = const DMW_CACHED_BASE,
+        iocsr_mailbox1 = const IOCSR_MAILBOX1,
         phys_virt_offset = const PHYS_VIRT_OFFSET,
-        sm_boot_stack_top = sym super::mp::SMP_BOOT_STACK_TOP,
         enable_fp_simd = sym enable_fp_simd,
         init_mmu = sym init_mmu,
         entry = sym axplat::call_secondary_main,

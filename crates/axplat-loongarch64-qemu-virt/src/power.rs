@@ -1,5 +1,7 @@
-use axplat::mem::pa;
-use axplat::power::{CpuBootError, PowerIf};
+use axplat::{
+    mem::pa,
+    power::{CpuBootError, PowerIf},
+};
 
 struct PowerImpl;
 
@@ -12,8 +14,7 @@ impl PowerIf for PowerImpl {
     /// CPU cores on the platform).
     #[cfg(feature = "smp")]
     fn cpu_boot(cpu_id: usize, stack_top_paddr: usize) -> Result<(), CpuBootError> {
-        crate::mp::start_secondary_cpu(cpu_id, pa!(stack_top_paddr));
-        Ok(())
+        crate::mp::start_secondary_cpu(cpu_id, pa!(stack_top_paddr))
     }
 
     /// Shutdown the whole system.

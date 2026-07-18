@@ -1,77 +1,36 @@
-use axplat::mem::PhysAddr;
-const LOONGARCH_IOCSR_IPI_SEND: usize = 0x1040;
-const LOONGARCH_IOCSR_MBUF_SEND: usize = 0x1048;
+use axplat::{mem::PhysAddr, power::CpuBootError};
+use loongArch64::ipi::{csr_mail_send, send_ipi_single};
 
-const IOCSR_IPI_SEND_CPU_SHIFT: usize = 16;
-const IOCSR_IPI_SEND_BLOCKING: u32 = 1 << 31;
-
-const IOCSR_MBUF_SEND_CPU_SHIFT: usize = 16;
-const IOCSR_MBUF_SEND_BOX_SHIFT: usize = 26;
-const IOCSR_MBUF_SEND_BUF_SHIFT: usize = 32;
-const IOCSR_MBUF_SEND_BLOCKING: u64 = 1 << 31;
-const IOCSR_MBUF_SEND_H32_MASK: u64 = 0xffff_ffff_0000_0000;
-
-#[inline]
-fn iocsr_write_u32(addr: usize, value: u32) {
-    unsafe {
-        core::arch::asm!("iocsrwr.w {},{}", in(reg) value, in(reg) addr);
-    }
-}
-
-#[inline]
-fn iocsr_write_u64(addr: usize, value: u64) {
-    unsafe {
-        core::arch::asm!("iocsrwr.d {},{}", in(reg) value, in(reg) addr);
-    }
-}
-
-fn iocsr_mbuf_send_box_lo(box_: usize) -> usize {
-    box_ << 1
-}
-fn iocsr_mbuf_send_box_hi(box_: usize) -> usize {
-    (box_ << 1) + 1
-}
-
-pub fn csr_mail_send(entry: u64, cpu: usize, mailbox: usize) {
-    let mut val: u64;
-    val = IOCSR_MBUF_SEND_BLOCKING;
-    val |= (iocsr_mbuf_send_box_hi(mailbox) << IOCSR_MBUF_SEND_BOX_SHIFT) as u64;
-    val |= (cpu << IOCSR_MBUF_SEND_CPU_SHIFT) as u64;
-    val |= entry & IOCSR_MBUF_SEND_H32_MASK;
-    iocsr_write_u64(LOONGARCH_IOCSR_MBUF_SEND, val);
-    val = IOCSR_MBUF_SEND_BLOCKING;
-    val |= (iocsr_mbuf_send_box_lo(mailbox) << IOCSR_MBUF_SEND_BOX_SHIFT) as u64;
-    val |= (cpu << IOCSR_MBUF_SEND_CPU_SHIFT) as u64;
-    val |= entry << IOCSR_MBUF_SEND_BUF_SHIFT;
-    iocsr_write_u64(LOONGARCH_IOCSR_MBUF_SEND, val);
-}
-
-pub fn send_ipi_single(cpu: usize, action: u32) {
-    for i in 0..32 {
-        if (action & (1 << i)) != 0 {
-            let mut val: u32 = IOCSR_IPI_SEND_BLOCKING;
-            val |= (cpu << IOCSR_IPI_SEND_CPU_SHIFT) as u32;
-            val |= i as u32;
-            iocsr_write_u32(LOONGARCH_IOCSR_IPI_SEND, val);
-        }
-    }
-}
-
-use crate::mem::phys_to_virt;
+use crate::{
+    config::plat::{MAX_CPU_NUM, PHYS_MEMORY_BASE, PHYS_MEMORY_SIZE, PHYS_VIRT_OFFSET},
+    mp_common::{kernel_virt_to_cached_dmw, phys_to_cached_dmw, valid_stack_top},
+};
 
 const ACTION_BOOT_CPU: u32 = 1;
 
-pub static mut SMP_BOOT_STACK_TOP: usize = 0;
-
 /// Starts the given secondary CPU with its boot stack.
-pub fn start_secondary_cpu(cpu_id: usize, stack_top: PhysAddr) {
-    unsafe extern "C" {
-        fn _start_secondary();
+pub fn start_secondary_cpu(cpu_id: usize, stack_top: PhysAddr) -> Result<(), CpuBootError> {
+    if cpu_id == 0 || cpu_id >= MAX_CPU_NUM {
+        return Err(CpuBootError::InvalidParameter);
     }
-    let stack_top_virt_addr = phys_to_virt(stack_top).as_usize();
+
+    let stack_top = stack_top.as_usize();
+    if !valid_stack_top(stack_top, PHYS_MEMORY_BASE, PHYS_MEMORY_SIZE) {
+        return Err(CpuBootError::InvalidAddress);
+    }
+
+    let entry = kernel_virt_to_cached_dmw(
+        crate::boot::_start_secondary as *const () as usize,
+        PHYS_VIRT_OFFSET,
+    )
+    .ok_or(CpuBootError::InvalidAddress)?;
+    let stack_top = phys_to_cached_dmw(stack_top).ok_or(CpuBootError::InvalidAddress)?;
+
     unsafe {
-        SMP_BOOT_STACK_TOP = stack_top_virt_addr;
+        core::arch::asm!("dbar 0", options(nostack));
     }
-    csr_mail_send(_start_secondary as *const () as _, cpu_id, 0);
+    csr_mail_send(stack_top as u64, cpu_id, 1);
+    csr_mail_send(entry as u64, cpu_id, 0);
     send_ipi_single(cpu_id, ACTION_BOOT_CPU);
+    Ok(())
 }

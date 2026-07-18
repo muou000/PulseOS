@@ -16,7 +16,8 @@ pub mod config {
     assert_str_eq!(
         PACKAGE,
         env!("CARGO_PKG_NAME"),
-        "`PACKAGE` field in the configuration does not match the Package name. Please check your configuration file."
+        "`PACKAGE` field in the configuration does not match the Package name. Please check your \
+         configuration file."
     );
 }
 
@@ -28,5 +29,7 @@ mod irq;
 mod mem;
 #[cfg(feature = "smp")]
 mod mp;
+#[cfg(feature = "smp")]
+mod mp_common;
 mod power;
 mod time;
