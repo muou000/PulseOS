@@ -46,6 +46,11 @@ unsafe extern "C" fn _start() -> ! {
         call    {init_boot_page_table}
         call    {init_mmu}              // setup boot page table and enabel MMU
 
+        mv      a0, s0
+        mv      a1, s1
+        call    {init_topology}          // map the boot hart to a logical CPU ID
+        mv      s0, a0
+
         li      s2, {phys_virt_offset}  // fix up virtual high address
         add     sp, sp, s2
 
@@ -60,6 +65,7 @@ unsafe extern "C" fn _start() -> ! {
         boot_stack = sym BOOT_STACK,
         init_boot_page_table = sym init_boot_page_table,
         init_mmu = sym init_mmu,
+        init_topology = sym crate::topology::init_from_dtb,
         entry = sym axplat::call_main,
     )
 }
@@ -77,8 +83,11 @@ unsafe extern "C" fn _start_secondary() -> ! {
 
         call    {init_mmu}              // setup boot page table and enabel MMU
 
+        mv      a0, s0
+        call    {logical_cpu_id}         // map the firmware hart ID to a logical CPU ID
+        mv      s0, a0
+
         li      s1, {phys_virt_offset}  // fix up virtual high address
-        add     a1, a1, s1
         add     sp, sp, s1
 
         mv      a0, s0
@@ -88,6 +97,7 @@ unsafe extern "C" fn _start_secondary() -> ! {
         j       .",
         phys_virt_offset = const PHYS_VIRT_OFFSET,
         init_mmu = sym init_mmu,
+        logical_cpu_id = sym crate::topology::logical_cpu_id,
         entry = sym axplat::call_secondary_main,
     )
 }

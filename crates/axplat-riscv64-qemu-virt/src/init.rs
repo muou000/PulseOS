@@ -7,7 +7,8 @@ impl InitIf for InitIfImpl {
     /// This function should be called immediately after the kernel has booted,
     /// and performed earliest platform configuration and initialization (e.g.,
     /// early console, clocking).
-    fn init_early(_cpu_id: usize, _mbi: usize) {
+    fn init_early(_cpu_id: usize, mbi: usize) {
+        crate::topology::init_platform_from_dtb(mbi);
         axcpu::init::init_trap();
         crate::time::init_early();
     }
@@ -25,7 +26,7 @@ impl InitIf for InitIfImpl {
     /// platform configuration and initialization.
     fn init_later(cpu_id: usize, _arg: usize) {
         #[cfg(feature = "irq")]
-        crate::irq::init_percpu(cpu_id);
+        crate::irq::init_primary(cpu_id);
         crate::time::init_percpu();
     }
 
@@ -33,7 +34,7 @@ impl InitIf for InitIfImpl {
     #[cfg(feature = "smp")]
     fn init_later_secondary(cpu_id: usize) {
         #[cfg(feature = "irq")]
-        crate::irq::init_percpu(cpu_id);
+        crate::irq::init_secondary(cpu_id);
         crate::time::init_percpu();
     }
 }

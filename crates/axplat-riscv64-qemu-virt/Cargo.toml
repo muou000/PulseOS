@@ -70,6 +70,9 @@ version = "0.2"
 [dependencies.axplat]
 version = "0.3.0"
 
+[dependencies.fdt-raw]
+version = "0.3"
+
 [dependencies.kspin]
 version = "0.1"
 

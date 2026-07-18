@@ -1,7 +1,10 @@
 use core::sync::atomic::{AtomicUsize, Ordering};
 
 use axconfig::{TASK_STACK_SIZE, plat::MAX_CPU_NUM};
-use axhal::mem::{VirtAddr, virt_to_phys};
+use axhal::{
+    mem::{VirtAddr, virt_to_phys},
+    power::CpuBootError,
+};
 
 #[unsafe(link_section = ".bss.stack")]
 static mut SECONDARY_BOOT_STACK: [[u8; TASK_STACK_SIZE]; MAX_CPU_NUM - 1] =
@@ -11,23 +14,34 @@ static ENTERED_CPUS: AtomicUsize = AtomicUsize::new(1);
 
 #[allow(clippy::absurd_extreme_comparisons)]
 pub fn start_secondary_cpus(primary_cpu_id: usize) {
-    let mut logic_cpu_id = 0;
+    let mut stack_slot = 0;
     let cpu_num = axhal::cpu_num();
-    for i in 0..cpu_num {
-        if i != primary_cpu_id && logic_cpu_id < cpu_num - 1 {
+    for cpu_id in 0..cpu_num {
+        if cpu_id != primary_cpu_id && stack_slot < MAX_CPU_NUM - 1 {
             let stack_top = virt_to_phys(VirtAddr::from(unsafe {
-                SECONDARY_BOOT_STACK[logic_cpu_id].as_ptr_range().end as usize
+                SECONDARY_BOOT_STACK[stack_slot].as_ptr_range().end as usize
             }));
+            stack_slot += 1;
 
-            debug!("starting CPU {}...", i);
-            axhal::power::cpu_boot(i, stack_top.as_usize());
-            logic_cpu_id += 1;
+            debug!("starting CPU {}...", cpu_id);
+            let cpu_bit = 1usize << cpu_id;
+            let entered_before = ENTERED_CPUS.load(Ordering::Acquire);
+            super::BOOTED_CPU_MASK.fetch_or(cpu_bit, Ordering::Release);
+            if let Err(error) = axhal::power::cpu_boot(cpu_id, stack_top.as_usize()) {
+                super::BOOTED_CPU_MASK.fetch_and(!cpu_bit, Ordering::AcqRel);
+                warn!("failed to start CPU {cpu_id}: {error}");
+                if error == CpuBootError::NotSupported {
+                    break;
+                }
+                continue;
+            }
 
-            while ENTERED_CPUS.load(Ordering::Acquire) <= logic_cpu_id {
+            while ENTERED_CPUS.load(Ordering::Acquire) <= entered_before {
                 core::hint::spin_loop();
             }
         }
     }
+    super::SECONDARY_START_COMPLETE.store(true, Ordering::Release);
 }
 
 /// The main entry point of the ArceOS runtime for secondary cores.
@@ -50,7 +64,12 @@ pub fn rust_main_secondary(cpu_id: usize) -> ! {
     axtask::init_scheduler_secondary();
 
     #[cfg(feature = "ipi")]
-    axipi::init();
+    {
+        axipi::init();
+        axipi::mark_current_cpu_ready();
+    }
+
+    axhal::mark_cpu_online(cpu_id);
 
     info!("Secondary CPU {:x} init OK.", cpu_id);
     super::INITED_CPUS.fetch_add(1, Ordering::Release);

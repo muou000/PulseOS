@@ -2,7 +2,7 @@
 
 use core::sync::atomic::{AtomicPtr, Ordering};
 
-use axplat::irq::{HandlerTable, IpiTarget, IrqHandler, IrqIf};
+use axplat::irq::{HandlerTable, IpiError, IpiTarget, IrqHandler, IrqIf};
 use riscv::register::sie;
 use sbi_rt::HartMask;
 
@@ -53,19 +53,21 @@ macro_rules! with_cause {
     };
 }
 
-pub(super) fn init_percpu(cpu_id: usize) {
-    // Clear firmware state before the CPU is allowed to take external IRQs.
-    crate::plic::init_hart(cpu_id);
-    // enable soft interrupts, timer interrupts, and external interrupts
+pub(super) fn init_primary(_cpu_id: usize) {
+    crate::plic::init_primary();
+    enable_local_interrupts();
+}
+
+pub(super) fn init_secondary(cpu_id: usize) {
+    crate::plic::init_secondary(cpu_id);
+    enable_local_interrupts();
+}
+
+fn enable_local_interrupts() {
     unsafe {
         sie::set_ssoft();
         sie::set_stimer();
-        // External interrupts (S_EXT / PLIC) are gated to Hart 0 only.
-        // This is consistent with PLIC operations (set_enable, claim, complete)
-        // which are hardcoded to context 0 (Hart 0).
-        if cpu_id == 0 {
-            sie::set_sext();
-        }
+        sie::set_sext();
     }
 }
 
@@ -74,11 +76,9 @@ struct IrqIfImpl;
 #[impl_plat_interface]
 impl IrqIf for IrqIfImpl {
     /// Enables or disables the given IRQ.
-    ///
-    /// Note: Peripheral interrupts (PLIC-backed) are routed only to context 0 (Hart 0).
     fn set_enable(irq: usize, enabled: bool) {
-        if irq & INTC_IRQ_BASE == 0 {
-            crate::plic::set_enable(0, irq, enabled);
+        if irq & INTC_IRQ_BASE == 0 && crate::plic::is_valid_irq(irq) {
+            crate::plic::set_source_enabled(irq, enabled);
         }
     }
 
@@ -109,7 +109,6 @@ impl IrqIf for IrqIfImpl {
                     warn!("invalid PLIC IRQ {}", irq);
                     false
                 } else if IRQ_HANDLER_TABLE.register_handler(irq, handler) {
-                    crate::plic::set_priority(irq, 1);
                     Self::set_enable(irq, true);
                     true
                 } else {
@@ -163,7 +162,7 @@ impl IrqIf for IrqIfImpl {
     /// It is called by the common interrupt handler. It should look up in the
     /// IRQ handler table and calls the corresponding handler. If necessary, it
     /// also acknowledges the interrupt controller after handling.
-    fn handle(irq: usize) {
+    fn handle(irq: usize, cpu_id: usize) {
         with_cause!(
             irq,
             @S_TIMER => {
@@ -176,24 +175,22 @@ impl IrqIf for IrqIfImpl {
             },
             @S_SOFT => {
                 trace!("IRQ: IPI");
+                unsafe {
+                    riscv::register::sip::clear_ssoft();
+                }
                 let handler = IPI_HANDLER.load(Ordering::Acquire);
                 if !handler.is_null() {
                     // SAFETY: The handler is guaranteed to be a valid function pointer.
                     unsafe { core::mem::transmute::<*mut (), IrqHandler>(handler)(irq) };
                 }
-                unsafe {
-                    riscv::register::sip::clear_ssoft();
-                }
             },
             @S_EXT => {
-                // Claim and complete on context 0 (Hart 0) only, as external
-                // interrupts are gated to Hart 0 in init_percpu.
-                let irq_num = crate::plic::claim(0);
+                let irq_num = crate::plic::claim(cpu_id);
                 if irq_num != 0 {
                     if !IRQ_HANDLER_TABLE.handle(irq_num as usize) {
                         warn!("Unhandled PLIC IRQ {}", irq_num);
                     }
-                    crate::plic::complete(0, irq_num);
+                    crate::plic::complete(cpu_id, irq_num);
                 }
             },
             @EX_IRQ => {
@@ -202,31 +199,42 @@ impl IrqIf for IrqIfImpl {
         )
     }
 
+    fn cpu_online(cpu_id: usize) {
+        crate::plic::cpu_online(cpu_id);
+    }
+
     /// Sends an inter-processor interrupt (IPI) to the specified target CPU or all CPUs.
-    fn send_ipi(_irq_num: usize, target: IpiTarget) {
+    fn send_ipi(_irq_num: usize, target: IpiTarget) -> Result<(), IpiError> {
         match target {
             IpiTarget::Current { cpu_id } => {
-                let res = sbi_rt::send_ipi(HartMask::from_mask_base(1 << cpu_id, 0));
-                if res.is_err() {
-                    warn!("send_ipi failed: {:?}", res);
-                }
+                send_ipi_to_cpu(cpu_id)?;
             }
             IpiTarget::Other { cpu_id } => {
-                let res = sbi_rt::send_ipi(HartMask::from_mask_base(1 << cpu_id, 0));
-                if res.is_err() {
-                    warn!("send_ipi failed: {:?}", res);
-                }
+                send_ipi_to_cpu(cpu_id)?;
             }
             IpiTarget::AllExceptCurrent { cpu_id, cpu_num } => {
                 for i in 0..cpu_num {
                     if i != cpu_id {
-                        let res = sbi_rt::send_ipi(HartMask::from_mask_base(1 << i, 0));
-                        if res.is_err() {
-                            warn!("send_ipi_all_others failed: {:?}", res);
-                        }
+                        send_ipi_to_cpu(i)?;
                     }
                 }
             }
         }
+        Ok(())
+    }
+}
+
+fn send_ipi_to_cpu(cpu_id: usize) -> Result<(), IpiError> {
+    let hart_id = crate::topology::hart_id(cpu_id).ok_or(IpiError::InvalidTarget)?;
+    if !crate::plic::is_cpu_online(cpu_id) {
+        return Err(IpiError::CpuOffline);
+    }
+    let result = sbi_rt::send_ipi(HartMask::from_mask_base(1, hart_id));
+    if result.is_ok() {
+        Ok(())
+    } else if result.error == sbi_rt::SbiRet::not_supported().error {
+        Err(IpiError::NotSupported)
+    } else {
+        Err(IpiError::Firmware(result.error as isize))
     }
 }
