@@ -25,6 +25,10 @@ pub const fn is_external_irq(irq: usize) -> bool {
     irq < EIOINTC_VECTOR_COUNT
 }
 
+pub const fn update_enable_mask(old: u64, bit: u64, enabled: bool) -> u64 {
+    if enabled { old | bit } else { old & !bit }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -59,5 +63,11 @@ mod tests {
         assert!(is_external_irq(RAW_IPI_IRQ));
         assert!(!is_external_irq(TIMER_IRQ));
         assert!(!is_external_irq(IPI_IRQ));
+    }
+
+    #[test]
+    fn updates_one_enable_bit_without_losing_others() {
+        assert_eq!(update_enable_mask(0b1010, 0b0100, true), 0b1110);
+        assert_eq!(update_enable_mask(0b1110, 0b0100, false), 0b1010);
     }
 }
