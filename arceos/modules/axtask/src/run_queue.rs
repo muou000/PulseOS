@@ -1,5 +1,3 @@
-#[cfg(feature = "smp")]
-use alloc::sync::Weak;
 use alloc::{collections::VecDeque, sync::Arc};
 use core::mem::MaybeUninit;
 #[cfg(feature = "smp")]
@@ -34,11 +32,10 @@ percpu_static! {
     RUN_QUEUE: LazyInit<AxRunQueue> = LazyInit::new(),
     EXITED_TASKS: VecDeque<AxTaskRef> = VecDeque::new(),
     WAIT_FOR_EXIT: WaitQueue = WaitQueue::new(),
-    GC_TASK: LazyInit<AxTaskRef> = LazyInit::new(),
     IDLE_TASK: LazyInit<AxTaskRef> = LazyInit::new(),
-    /// Stores the weak reference to the previous task that is running on this CPU.
+    /// Keeps the previous task alive until the non-preemptible switch completes.
     #[cfg(feature = "smp")]
-    PREV_TASK: Weak<crate::AxTask> = Weak::new(),
+    PREV_TASK: Option<AxTaskRef> = None,
 }
 
 /// An array of references to run queues, one for each CPU, indexed by cpu_id.
@@ -470,7 +467,7 @@ impl<G: BaseGuard> CurrentRunQueueRef<'_, G> {
     /// Exit the current task with the specified exit code.
     /// This function will never return.
     pub fn exit_current(&mut self, exit_code: i32) -> ! {
-        let curr = self.current_task.clone();
+        let curr = &self.current_task;
         assert!(curr.is_running(), "task is not running: {:?}", curr.state());
         assert!(!curr.is_idle());
         if curr.is_init() {
@@ -495,17 +492,10 @@ impl<G: BaseGuard> CurrentRunQueueRef<'_, G> {
                 WAIT_FOR_EXIT.current_ref_mut_raw().notify_one(false);
             }
 
-            // Let the per-CPU GC task run immediately so exited tasks do not
-            // accumulate a large backlog of unreclaimed kernel stacks.
-            let next = GC_TASK.with_current(|gc_task| {
-                let gc_task = gc_task.get().expect("GC task is uninitialized");
-                self.inner
-                    .scheduler
-                    .lock()
-                    .remove_task(gc_task)
-                    .unwrap_or_else(|| gc_task.clone())
-            });
-            self.inner.switch_to(crate::current(), next);
+            // The GC task is woken through WAIT_FOR_EXIT and must be selected
+            // through the scheduler. Bypassing its Blocked/Ready transition can
+            // leave it both running and linked in the wait queue.
+            self.resched();
         }
         unreachable!("task exited!");
     }
@@ -630,9 +620,6 @@ impl AxRunQueue {
         let gc_task = TaskInner::new(gc_entry, "gc".into(), axconfig::TASK_STACK_SIZE).into_arc();
         // gc task should be pinned to the current CPU.
         gc_task.set_cpumask(AxCpuMask::one_shot(cpu_id));
-        GC_TASK.with_current(|g| {
-            g.init_once(gc_task.clone());
-        });
 
         let mut scheduler = Scheduler::new();
         scheduler.add_task(gc_task);
@@ -718,10 +705,11 @@ impl AxRunQueue {
             let prev_ctx_ptr = prev_task.ctx_mut_ptr();
             let next_ctx_ptr = next_task.ctx_mut_ptr();
 
-            // Store the weak pointer of **prev_task** in percpu variable `PREV_TASK`.
+            // Keep a counted reference until the next stack publishes that the
+            // previous context is fully saved. GC must not reclaim it earlier.
             #[cfg(feature = "smp")]
             {
-                *PREV_TASK.current_ref_mut_raw() = Arc::downgrade(prev_task.as_task_ref());
+                *PREV_TASK.current_ref_mut_raw() = Some(prev_task.clone());
             }
 
             // The strong reference count of `prev_task` will be decremented by 1,
@@ -749,17 +737,20 @@ fn gc_entry() {
             // Do not do the slow drops in the critical section.
             let task = EXITED_TASKS.with_current(|exited_tasks| exited_tasks.pop_front());
             if let Some(task) = task {
-                // Reclaim the large per-task kernel stack first to avoid OOM,
-                // then keep deferring full task drop to avoid known instability
-                // in the exited-task full-drop path.
-                task.reclaim_kernel_stack();
-                // core::mem::forget(task);
+                if Arc::strong_count(&task) == 1 {
+                    drop(task);
+                } else {
+                    // A switch frame or joiner still owns the task. Keep its
+                    // stack alive until all of those references are gone.
+                    EXITED_TASKS.with_current(|exited_tasks| exited_tasks.push_back(task));
+                }
             }
         }
         // Note: we cannot block current task with preemption disabled,
         // use `current_ref_raw` to get the `WAIT_FOR_EXIT`'s reference here to avoid the use of `NoPreemptGuard`.
         // Since gc task is pinned to the current CPU, there is no affection if the gc task is preempted during the process.
-        unsafe { WAIT_FOR_EXIT.current_ref_raw() }.wait();
+        let _ = unsafe { WAIT_FOR_EXIT.current_ref_raw() }
+            .wait_timeout(core::time::Duration::from_millis(100));
     }
 }
 
@@ -784,9 +775,9 @@ pub(crate) fn migrate_entry(migrated_task: AxTaskRef) {
 /// Clear the previous task's `on_cpu` field and finish a deferred remote wake.
 #[cfg(feature = "smp")]
 pub(crate) unsafe fn clear_prev_task_on_cpu() {
-    let prev = unsafe { PREV_TASK.current_ref_raw() }
-        .upgrade()
-        .expect("Invalid prev_task pointer or prev_task has been dropped");
+    let prev = unsafe { PREV_TASK.current_ref_mut_raw() }
+        .take()
+        .expect("PREV_TASK should have been set by switch_to");
     if let Some((target, task)) = prev
         .finish_switch_out()
         .map(|(cpu_id, task)| (cpu_id as usize, task))

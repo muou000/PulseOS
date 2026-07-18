@@ -272,6 +272,14 @@ pub fn wake_task(task: AxTaskRef, resched: bool) {
     select_wake_run_queue::<NoPreemptIrqSave>(&task).unblock_task(task, resched)
 }
 
+/// Interrupts a task blocked in an interruptible future or wait operation.
+pub fn interrupt_task(task: AxTaskRef, resched: bool) {
+    task.interrupt();
+    if task.state() == crate::task::TaskState::Blocked {
+        select_wake_run_queue::<NoPreemptIrqSave>(&task).unblock_task(task, resched);
+    }
+}
+
 /// Updates the saved page table root of the current task context.
 pub fn set_current_page_table_root(pt_root: memory_addr::PhysAddr, asid: usize) {
     let curr = current();
