@@ -356,7 +356,7 @@ const PAGE_SIZE: usize = 4096;
 pub struct PageCache {
     addr: VirtAddr,
     dirty: bool,
-    pub has_user_mapping: bool,
+    may_write_mapping: bool,
 }
 
 impl PageCache {
@@ -373,7 +373,7 @@ impl PageCache {
         Ok(Self {
             addr: addr.into(),
             dirty: false,
-            has_user_mapping: false,
+            may_write_mapping: false,
         })
     }
 
@@ -383,6 +383,11 @@ impl PageCache {
 
     pub fn mark_dirty(&mut self) {
         self.dirty = true;
+    }
+
+    fn has_user_mapping(&self) -> bool {
+        let paddr = self.paddr();
+        axalloc::frame_table().contains(paddr) && axalloc::frame_table().get_ref(paddr) > 1
     }
 
     pub fn data(&mut self) -> &mut [u8] {
@@ -397,7 +402,7 @@ impl Drop for PageCache {
             warn!("dirty page dropped without flushing");
         }
         let paddr = self.paddr();
-        if self.has_user_mapping && axalloc::frame_table().contains(paddr) {
+        if axalloc::frame_table().contains(paddr) {
             let ref_count = axalloc::frame_table().get_ref(paddr);
             if ref_count == 0 {
                 global_allocator().dealloc_pages(self.addr.as_usize(), 1);
@@ -419,15 +424,18 @@ struct EvictListener {
 struct CachedFileShared {
     page_cache: Mutex<LruCache<u32, PageCache>>,
     evict_listeners: Mutex<Vec<Arc<EvictListener>>>,
+    backing: Option<Weak<dyn axfs_ng_vfs::FileNodeOps>>,
     io_lock: RwLock<()>,
     size: SpinMutex<u64>,
     cache_generation: AtomicU64,
-    last_read_pn: core::sync::atomic::AtomicU32,
-    is_flushing: core::sync::atomic::AtomicBool,
 }
 
 impl CachedFileShared {
-    pub fn new(in_memory: bool, size: u64) -> Self {
+    fn new(
+        in_memory: bool,
+        size: u64,
+        backing: Option<Weak<dyn axfs_ng_vfs::FileNodeOps>>,
+    ) -> Self {
         Self {
             page_cache: if in_memory {
                 Mutex::new(LruCache::unbounded())
@@ -435,11 +443,10 @@ impl CachedFileShared {
                 Mutex::new(LruCache::new(NonZeroUsize::new(16384).unwrap()))
             },
             evict_listeners: Mutex::new(Vec::new()),
+            backing,
             io_lock: RwLock::new(()),
             size: SpinMutex::new(size),
             cache_generation: AtomicU64::new(0),
-            last_read_pn: core::sync::atomic::AtomicU32::new(u32::MAX),
-            is_flushing: core::sync::atomic::AtomicBool::new(false),
         }
     }
 
@@ -470,11 +477,23 @@ impl CachedFileShared {
     ) -> VfsResult<Option<(u32, PageCache)>> {
         let writeback = {
             let mut cache = self.page_cache.lock();
-            let Some((&pn, page)) = cache.peek_lru() else {
+            let Some(pn) = cache
+                .iter()
+                .rev()
+                .find_map(|(&pn, page)| (!page.has_user_mapping()).then_some(pn))
+            else {
+                let capacity = cache
+                    .cap()
+                    .get()
+                    .checked_add(1)
+                    .and_then(NonZeroUsize::new)
+                    .ok_or(VfsError::StorageFull)?;
+                cache.resize(capacity);
                 return Ok(None);
             };
+            let page = cache.peek(&pn).ok_or(VfsError::Io)?;
             if !page.dirty {
-                return Ok(cache.pop_lru());
+                return Ok(cache.pop(&pn).map(|page| (pn, page)));
             }
 
             let page_start = pn as u64 * PAGE_SIZE as u64;
@@ -509,6 +528,11 @@ impl CachedFileShared {
         file: &FileNode,
         guard: &mut LruCache<u32, PageCache>,
     ) -> VfsResult<()> {
+        for (_, page) in guard.iter_mut() {
+            if page.may_write_mapping && page.has_user_mapping() {
+                page.mark_dirty();
+            }
+        }
         let mut dirty_pns: Vec<u32> = guard
             .iter()
             .filter(|(_, page)| page.dirty)
@@ -587,6 +611,17 @@ impl CachedFileShared {
         Self::flush_dirty_pages_locked(file_len, file, &mut guard)
     }
 
+    fn reload_page(file: &FileNode, pn: u32, page: &mut PageCache) -> VfsResult<()> {
+        let read = axtask::future::block_on(
+            file.read_at(page.data(), pn as u64 * PAGE_SIZE as u64),
+        )?;
+        if read < PAGE_SIZE {
+            page.data()[read..].fill(0);
+        }
+        page.dirty = false;
+        Ok(())
+    }
+
     #[allow(dead_code)]
     fn discard_pages(
         &self,
@@ -596,6 +631,16 @@ impl CachedFileShared {
     ) -> VfsResult<()> {
         let mut guard = self.page_cache.lock();
         for pn in keys {
+            if let Some(page) = guard.get_mut(&pn)
+                && page.has_user_mapping()
+            {
+                if page.dirty && write_back_dirty {
+                    self.evict_cache(file, pn, page)?;
+                } else if !write_back_dirty {
+                    Self::reload_page(file, pn, page)?;
+                }
+                continue;
+            }
             let Some(mut page) = guard.pop(&pn) else {
                 continue;
             };
@@ -621,7 +666,21 @@ impl CachedFileShared {
         // generation to reject data read before the invalidation.
         self.cache_generation.fetch_add(1, Ordering::AcqRel);
         let mut guard = self.page_cache.lock();
-        while let Some((pn, mut page)) = guard.pop_lru() {
+        let keys = guard.iter().map(|(pn, _)| *pn).collect::<Vec<_>>();
+        for pn in keys {
+            if let Some(page) = guard.get_mut(&pn)
+                && page.has_user_mapping()
+            {
+                if page.dirty && write_back_dirty {
+                    self.evict_cache(file, pn, page)?;
+                } else if !write_back_dirty {
+                    Self::reload_page(file, pn, page)?;
+                }
+                continue;
+            }
+            let Some(mut page) = guard.pop(&pn) else {
+                continue;
+            };
             if page.dirty && write_back_dirty {
                 if let Err(err) = self.evict_cache(file, pn, &mut page) {
                     guard.put(pn, page);
@@ -661,6 +720,40 @@ impl Drop for CachedFileShared {
 static RECENTLY_CLOSED_FILES: Lazy<SpinMutex<VecDeque<Arc<CachedFileShared>>>> =
     Lazy::new(|| SpinMutex::new(VecDeque::new()));
 
+pub(crate) fn flush_all_file_caches() -> VfsResult<()> {
+    let states = {
+        let mut registry = FILE_SHARED_STATES.lock();
+        prune_file_shared_states(&mut registry);
+        registry.values().filter_map(Weak::upgrade).collect::<Vec<_>>()
+    };
+
+    let mut first_error = None;
+    for state in states {
+        let Some(file) = state.backing.as_ref().and_then(Weak::upgrade) else {
+            continue;
+        };
+        let file = FileNode::new(file);
+        let result = {
+            let _guard = state.io_lock.write();
+            let cached_size = *state.size.lock();
+            (|| {
+                if axtask::future::block_on(file.len())? != cached_size {
+                    axtask::future::block_on(file.set_len(cached_size))?;
+                }
+                state.flush_dirty_pages(&file)
+            })()
+        };
+        if let Err(err) = result {
+            error!("Failed to flush cached inode {}: {:?}", file.inode(), err);
+            if first_error.is_none() {
+                first_error = Some(err);
+            }
+        }
+    }
+
+    first_error.map_or(Ok(()), Err)
+}
+
 fn shared_file_state(location: &Location) -> Arc<CachedFileShared> {
     let key = file_cache_key(location);
     let in_memory = location.filesystem().name() == "tmpfs";
@@ -673,7 +766,16 @@ fn shared_file_state(location: &Location) -> Arc<CachedFileShared> {
     }
 
     let size = axtask::future::block_on(location.len()).unwrap_or(0);
-    let state = Arc::new(CachedFileShared::new(in_memory, size));
+    let backing = if in_memory {
+        None
+    } else {
+        location
+            .entry()
+            .as_file()
+            .ok()
+            .map(|file| Arc::downgrade(file.inner()))
+    };
+    let state = Arc::new(CachedFileShared::new(in_memory, size, backing));
 
     let mut registry = FILE_SHARED_STATES.lock();
     if let Some(existing_state) = registry.get(&key).and_then(Weak::upgrade) {
@@ -865,19 +967,31 @@ impl CachedFile {
         }
         let mut evicted = None;
         if cache.len() == cache.cap().get() {
-            let is_lru_dirty = cache.peek_lru().map(|(_, page)| page.dirty).unwrap_or(false);
-            if is_lru_dirty {
-                let file_len = *self.shared.size.lock();
-                CachedFileShared::flush_dirty_pages_locked(file_len, file, cache)?;
-            }
-
-            // Cache is full, remove the least recently used page
-            if let Some((pn, mut page)) = cache.pop_lru() {
-                if let Err(err) = self.evict_cache(file, pn, &mut page) {
-                    cache.put(pn, page);
-                    return Err(err);
+            let candidate = cache
+                .iter()
+                .rev()
+                .find_map(|(&pn, page)| (!page.has_user_mapping()).then_some((pn, page.dirty)));
+            if let Some((evict_pn, dirty)) = candidate {
+                if dirty {
+                    let file_len = *self.shared.size.lock();
+                    CachedFileShared::flush_dirty_pages_locked(file_len, file, cache)?;
                 }
-                evicted = Some((pn, page));
+
+                if let Some(mut page) = cache.pop(&evict_pn) {
+                    if let Err(err) = self.evict_cache(file, evict_pn, &mut page) {
+                        cache.put(evict_pn, page);
+                        return Err(err);
+                    }
+                    evicted = Some((evict_pn, page));
+                }
+            } else {
+                let capacity = cache
+                    .cap()
+                    .get()
+                    .checked_add(1)
+                    .and_then(NonZeroUsize::new)
+                    .ok_or(VfsError::StorageFull)?;
+                cache.resize(capacity);
             }
         }
 
@@ -939,7 +1053,7 @@ impl CachedFile {
                 continue;
             }
 
-            let mut cache = self.shared.page_cache.lock();
+            let cache = self.shared.page_cache.lock();
             if cache.contains(&pn) {
                 return Ok(());
             }
@@ -1098,9 +1212,12 @@ impl CachedFile {
         let _guard = self.shared.io_lock.write();
         let file = self.inner.entry().as_file()?;
         let old_len = *self.shared.size.lock();
-        if old_len != len {
-            self.shared.cache_generation.fetch_add(1, Ordering::AcqRel);
+        if old_len == len {
+            return Ok(());
         }
+
+        axtask::future::block_on(file.set_len(len))?;
+        self.shared.cache_generation.fetch_add(1, Ordering::AcqRel);
         *self.shared.size.lock() = len;
 
         let old_last_page = (old_len / PAGE_SIZE as u64) as u32;
@@ -1112,21 +1229,23 @@ impl CachedFile {
                 let old_page_offset = (old_len - page_start) as usize;
                 let new_page_offset = (len - page_start).min(PAGE_SIZE as u64) as usize;
                 page.data()[old_page_offset..new_page_offset].fill(0);
+                if !self.in_memory {
+                    page.mark_dirty();
+                }
             }
-        } else if old_last_page > new_last_page {
-            // For truncating, we need to remove all pages that are beyond the
-            // new length
-            // TODO(mivik): can this be more efficient?
+        } else {
             let mut guard = self.shared.page_cache.lock();
-            if let Some(page) = guard.get_mut(&new_last_page) {
-                let page_start = new_last_page as u64 * PAGE_SIZE as u64;
-                let new_page_offset = (len - page_start) as usize;
-                page.data()[new_page_offset..].fill(0);
+            let tail = (len % PAGE_SIZE as u64) as usize;
+            if tail != 0
+                && let Some(page) = guard.get_mut(&new_last_page)
+            {
+                page.data()[tail..].fill(0);
             }
+            let first_discarded_page = len.div_ceil(PAGE_SIZE as u64) as u32;
             let keys = guard
                 .iter()
                 .map(|(k, _)| *k)
-                .filter(|it| *it > new_last_page)
+                .filter(|it| *it >= first_discarded_page)
                 .collect::<Vec<_>>();
             drop(guard);
             self.discard_pages(file, keys, false)?;
@@ -1156,23 +1275,51 @@ impl CachedFile {
     /// Returns the physical address of the page at the given page index.
     ///
     /// If the page is not in the cache, it will be read from the file.
-    pub fn get_shared_page_paddr(&self, pn: u32) -> VfsResult<PhysAddr> {
+    pub fn get_shared_page_paddr(&self, pn: u32, may_write: bool) -> VfsResult<PhysAddr> {
         self.with_page_or_insert(pn, |page, _| {
-            page.has_user_mapping = true;
-            Ok(page.paddr())
+            let paddr = page.paddr();
+            if !axalloc::frame_table().contains(paddr) {
+                return Err(VfsError::BadState);
+            }
+            if !page.has_user_mapping() {
+                page.may_write_mapping = false;
+            }
+            page.may_write_mapping |= may_write;
+            if axalloc::frame_table().get_ref(paddr) == 0 {
+                axalloc::frame_table().mark_used(paddr);
+            }
+            axalloc::frame_table().inc_ref(paddr);
+            Ok(paddr)
+        })
+    }
+
+    /// Returns a resident page's physical address without adding a mapping pin.
+    pub fn shared_page_paddr(&self, pn: u32) -> VfsResult<PhysAddr> {
+        self.with_page(pn, |page| page.map(|page| page.paddr()).ok_or(VfsError::BadState))
+    }
+
+    pub fn mark_shared_page_writable(&self, pn: u32, paddr: PhysAddr) -> VfsResult<()> {
+        self.with_page(pn, |page| {
+            let page = page.ok_or(VfsError::BadState)?;
+            if page.paddr() != paddr || !page.has_user_mapping() {
+                return Err(VfsError::BadState);
+            }
+            page.may_write_mapping = true;
+            Ok(())
         })
     }
 
     /// Marks the page at the given page index as dirty.
     pub fn mark_page_dirty(&self, pn: u32) -> VfsResult<()> {
-        self.with_page(pn, |page| {
-            if let Some(page) = page {
+        self.with_page(pn, |page| match page {
+            Some(page) => {
                 if !self.in_memory {
                     page.mark_dirty();
                 }
+                Ok(())
             }
-        });
-        Ok(())
+            None => Err(VfsError::BadState),
+        })
     }
 }
 
@@ -1192,7 +1339,7 @@ impl FileBackend {
         Self::Cached(CachedFile::get_or_create(location))
     }
 
-    pub async fn read_at(&self, mut dst: impl Write + IoBufMut, mut offset: u64) -> VfsResult<usize> {
+    pub async fn read_at(&self, mut dst: impl Write + IoBufMut, offset: u64) -> VfsResult<usize> {
         match self {
             Self::Cached(cached) => {
                 cached.read_at_async(dst, offset).await
@@ -1201,9 +1348,16 @@ impl FileBackend {
                 let file = loc.entry().as_file()?;
                 if !loc.flags().contains(NodeFlags::STREAM) {
                     let shared = shared_file_state(loc);
-                    // Synchronize cache bookkeeping, but never retain the spin
-                    // RwLock while awaiting the filesystem backend.
-                    drop(shared.io_lock.read());
+                    let _guard = shared.io_lock.write();
+                    let cached_size = *shared.size.lock();
+                    if axtask::future::block_on(file.len())? != cached_size {
+                        axtask::future::block_on(file.set_len(cached_size))?;
+                    }
+                    shared.flush_dirty_pages(file)?;
+
+                    let mut tmp = alloc::vec![0u8; dst.remaining_mut().min(64 * 1024)];
+                    let read = file.read_at(&mut tmp, offset).await?;
+                    return dst.write(&tmp[..read]);
                 }
                 // Keep the adapter bounded for very large vectored/user buffers.
                 let mut tmp = alloc::vec![0u8; dst.remaining_mut().min(64 * 1024)];
@@ -1239,12 +1393,10 @@ impl FileBackend {
                             offset += *written as u64;
                         })
                     }));
-                    let invalidate = shared.discard_all_pages(file, false);
-                    let new_end = offset;
-                    let mut size_guard = shared.size.lock();
-                    if new_end > *size_guard {
-                        *size_guard = new_end;
+                    if let Ok(backend_size) = axtask::future::block_on(file.len()) {
+                        *shared.size.lock() = backend_size;
                     }
+                    let invalidate = shared.discard_all_pages(file, false);
                     match (result, invalidate) {
                         (Ok(written), Ok(())) => Ok(written),
                         (Err(err), Ok(())) => Err(err),
@@ -1276,10 +1428,10 @@ impl FileBackend {
                         n
                     })
                 }));
-                let invalidate = shared.discard_all_pages(file, false);
-                if result.is_ok() {
-                    *shared.size.lock() = end;
+                if let Ok(backend_size) = axtask::future::block_on(file.len()) {
+                    *shared.size.lock() = backend_size;
                 }
+                let invalidate = shared.discard_all_pages(file, false);
                 match (result, invalidate) {
                     (Ok(n), Ok(())) => Ok((n, end)),
                     (Err(err), Ok(())) => Err(err),
@@ -1321,16 +1473,10 @@ impl FileBackend {
                 let shared = shared_file_state(loc);
                 let _guard = shared.io_lock.write();
                 let file = loc.entry().as_file()?;
-                *shared.size.lock() = len;
                 shared.flush_dirty_pages(file)?;
-                let result = axtask::future::block_on(file.set_len(len));
-                let invalidate = shared.discard_all_pages(file, false);
-                match (result, invalidate) {
-                    (Ok(()), Ok(())) => Ok(()),
-                    (Err(err), Ok(())) => Err(err),
-                    (Ok(()), Err(err)) => Err(err),
-                    (Err(err), Err(_)) => Err(err),
-                }
+                axtask::future::block_on(file.set_len(len))?;
+                *shared.size.lock() = len;
+                shared.discard_all_pages(file, false)
             }
         }
     }
