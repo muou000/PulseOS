@@ -20,6 +20,7 @@ const ROOT_INODE: u32 = 2;
 
 pub struct Ext4Filesystem {
     pub(crate) inner: Ext4,
+    disk_flusher: Arc<dyn crate::disk::DiskFlushable>,
     root_dir: OnceCell<WeakDirEntry>,
     pub(super) active_inodes: Mutex<BTreeMap<u32, Vec<Weak<Inode>>>>,
     pub(crate) block_size: usize,
@@ -74,8 +75,10 @@ impl Ext4Filesystem {
         };
 
         log::info!("Ext4Filesystem::new: block device opened successfully");
+        let disk_flusher: Arc<dyn crate::disk::DiskFlushable> = disk;
         let fs = Arc::new(Self {
             inner: ext4,
+            disk_flusher,
             root_dir: OnceCell::new(),
             active_inodes: Mutex::new(BTreeMap::new()),
             block_size,
@@ -91,6 +94,12 @@ impl Ext4Filesystem {
         );
         let _ = fs.root_dir.set(root_dir.downgrade());
         Ok(Filesystem::new(fs))
+    }
+
+    pub(super) fn flush_storage(&self) -> VfsResult<()> {
+        self.disk_flusher
+            .flush_disk()
+            .map_err(|_| axfs_ng_vfs::VfsError::Io)
     }
 
     pub(super) fn queue_deletion(self: &Arc<Self>, ino: u32) {
@@ -241,7 +250,6 @@ impl FilesystemOps for Ext4Filesystem {
 
     async fn flush(&self) -> VfsResult<()> {
         self.process_pending_deletions().await;
-        crate::disk::flush_all_disks().map_err(|_| axfs_ng_vfs::VfsError::Io)?;
-        Ok(())
+        self.flush_storage()
     }
 }

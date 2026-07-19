@@ -10,7 +10,7 @@ use lru::LruCache;
 use axdriver::prelude::{AsyncBlockDriverOps, BlockDriverOps};
 pub use fs::*;
 pub use inode::*;
-use axsync::Mutex;
+use axsync::{Mutex, RwLock};
 
 struct CacheBlock {
     data: Vec<u8>,
@@ -24,6 +24,7 @@ pub(crate) struct Ext4Disk<D: BlockDriverOps> {
     block_cache: Mutex<LruCache<usize, CacheBlock>>,
     block_size: core::sync::atomic::AtomicUsize,
     flushing_evicted: Mutex<BTreeMap<usize, Vec<u8>>>,
+    io_lock: RwLock<()>,
 }
 
 struct FlushingGuard<'a, D: BlockDriverOps> {
@@ -44,19 +45,20 @@ impl<'a, D: BlockDriverOps> Drop for FlushingGuard<'a, D> {
 
 impl<D: BlockDriverOps + 'static> crate::disk::DiskFlushable for Ext4Disk<D> {
     fn flush_disk(&self) -> axdriver::prelude::DevResult<()> {
+        let _io_guard = self.io_lock.write();
         let block_size = self.block_size();
         let (dirty_blocks, flushing_offsets) = {
             let mut cache = self.block_cache.lock();
-            let mut list = vec![];
+            let mut blocks = self.flushing_evicted.lock().clone();
             let mut offsets = vec![];
             for (&offset, block) in cache.iter_mut() {
                 if block.dirty {
                     block.flushing = true;
-                    list.push((offset, block.data.clone()));
+                    blocks.insert(offset, block.data.clone());
                     offsets.push(offset);
                 }
             }
-            (list, offsets)
+            (blocks.into_iter().collect::<Vec<_>>(), offsets)
         };
 
         let _guard = FlushingGuard {
@@ -83,6 +85,7 @@ impl<D: BlockDriverOps + 'static> crate::disk::DiskFlushable for Ext4Disk<D> {
 
             {
                 let mut cache = self.block_cache.lock();
+                let mut evicted = self.flushing_evicted.lock();
                 for k in i..j {
                     let offset = dirty_blocks[k].0;
                     let written_data = &dirty_blocks[k].1;
@@ -94,6 +97,7 @@ impl<D: BlockDriverOps + 'static> crate::disk::DiskFlushable for Ext4Disk<D> {
                             }
                         }
                     }
+                    evicted.remove(&offset);
                 }
             }
             i = j;
@@ -112,6 +116,7 @@ impl<D: BlockDriverOps + 'static> Ext4Disk<D> {
             block_cache: Mutex::new(LruCache::new(NonZeroUsize::new(512).unwrap())),
             block_size: core::sync::atomic::AtomicUsize::new(4096),
             flushing_evicted: Mutex::new(BTreeMap::new()),
+            io_lock: RwLock::new(()),
         });
         crate::disk::DISK_FLUSHERS.lock().push(Arc::downgrade(&disk) as _);
         disk
@@ -158,44 +163,6 @@ impl<D: BlockDriverOps + 'static> Ext4Disk<D> {
                 err
             );
             return Err(err);
-        }
-        Ok(())
-    }
-
-    fn read_blocks_from_disk(&self, block_offset: usize, num_blocks: usize, dest: &mut [u8]) -> axdriver::prelude::DevResult<()> {
-        let block_size = self.block_size();
-        let (first_block, inner_offset, blocks) = self.byte_range(block_offset, num_blocks * block_size);
-        let mut dev = self.dev.lock();
-        let total_blocks = dev.num_blocks();
-        if first_block + blocks as u64 > total_blocks {
-            log::error!(
-                "ext4 read_blocks_from_disk OOB: block_offset={:#x}, num_blocks={}, first_block={}, blocks={}, num_blocks={}",
-                block_offset, num_blocks, first_block, blocks, total_blocks
-            );
-            return Err(axdriver::prelude::DevError::InvalidParam);
-        }
-        if inner_offset == 0 && dest.len() == blocks * self.sector_size {
-            if let Err(err) = dev.read_block(first_block, dest) {
-                log::error!(
-                    "ext4 read_blocks_from_disk failed: block_offset={}, num_blocks={}, err={:?}",
-                    block_offset,
-                    num_blocks,
-                    err
-                );
-                return Err(err);
-            }
-        } else {
-            let mut raw = vec![0; blocks * self.sector_size];
-            if let Err(err) = dev.read_block(first_block, &mut raw) {
-                log::error!(
-                    "ext4 read_blocks_from_disk failed: block_offset={}, num_blocks={}, err={:?}",
-                    block_offset,
-                    num_blocks,
-                    err
-                );
-                return Err(err);
-            }
-            dest.copy_from_slice(&raw[inner_offset..inner_offset + num_blocks * block_size]);
         }
         Ok(())
     }
@@ -261,6 +228,7 @@ impl<D: BlockDriverOps + 'static> Ext4Disk<D> {
     where
         D: AsyncBlockDriverOps + Clone,
     {
+        let _io_guard = self.io_lock.read();
         if buf.is_empty() {
             return Ok(());
         }
@@ -305,7 +273,19 @@ impl<D: BlockDriverOps + 'static> Ext4Disk<D> {
                         .copy_from_slice(&block.data[block_start..block_start + overlap_len]);
                     true
                 } else {
-                    false
+                    let flushing = self.flushing_evicted.lock();
+                    if let Some(data) = flushing.get(&current_block_offset) {
+                        let start = core::cmp::max(offset, current_block_offset);
+                        let end = core::cmp::min(offset + buf.len(), current_block_offset + block_size);
+                        let overlap_len = end - start;
+                        let buf_start = start - offset;
+                        let block_start = start - current_block_offset;
+                        buf[buf_start..buf_start + overlap_len]
+                            .copy_from_slice(&data[block_start..block_start + overlap_len]);
+                        true
+                    } else {
+                        false
+                    }
                 }
             };
 
@@ -352,13 +332,10 @@ impl<D: BlockDriverOps + 'static> Ext4Disk<D> {
                             buf[buf_start..buf_start + overlap_len]
                                 .copy_from_slice(&existing.data[block_start..block_start + overlap_len]);
                         } else {
-                            let flushing_data = self.flushing_evicted.lock().remove(&b_offset);
+                            let flushing_data = self.flushing_evicted.lock().get(&b_offset).cloned();
                             if let Some(flushing_data) = flushing_data {
                                 buf[buf_start..buf_start + overlap_len]
                                     .copy_from_slice(&flushing_data[block_start..block_start + overlap_len]);
-                                let block = CacheBlock { data: flushing_data, dirty: false, flushing: false };
-                                self.evict_if_full(&mut cache, &mut to_write);
-                                cache.put(b_offset, block);
                             } else {
                                 buf[buf_start..buf_start + overlap_len].copy_from_slice(&b_data[block_start..block_start + overlap_len]);
                                 let block = CacheBlock { data: b_data, dirty: false, flushing: false };
@@ -372,7 +349,7 @@ impl<D: BlockDriverOps + 'static> Ext4Disk<D> {
                 // Flush evicted dirty blocks
                 for (ev_offset, ev_data) in to_write {
                     let res = self.write_block_to_disk_async(ev_offset, &ev_data).await;
-                    {
+                    if res.is_ok() {
                         let mut flushing = self.flushing_evicted.lock();
                         if let Some(curr_data) = flushing.get(&ev_offset) {
                             if curr_data == &ev_data {
@@ -394,6 +371,7 @@ impl<D: BlockDriverOps + 'static> Ext4Disk<D> {
     where
         D: AsyncBlockDriverOps + Clone,
     {
+        let _io_guard = self.io_lock.write();
         if data.is_empty() {
             return Ok(());
         }
@@ -404,6 +382,7 @@ impl<D: BlockDriverOps + 'static> Ext4Disk<D> {
         let end_block_offset = ((offset + data.len() - 1) / block_size) * block_size;
 
         if offset % block_size == 0 && data.len() % block_size == 0 {
+            self.write_block_to_disk_async(offset, data).await?;
             {
                 let mut cache = self.block_cache.lock();
                 let mut flushing = self.flushing_evicted.lock();
@@ -414,7 +393,7 @@ impl<D: BlockDriverOps + 'static> Ext4Disk<D> {
                     current += block_size;
                 }
             }
-            return self.write_block_to_disk_async(offset, data).await;
+            return Ok(());
         }
 
         let mut current_block_offset = start_block_offset;
@@ -523,7 +502,7 @@ impl<D: BlockDriverOps + 'static> Ext4Disk<D> {
                 // Flush evicted dirty blocks
                 for (ev_offset, ev_data) in to_write {
                     let res = self.write_block_to_disk_async(ev_offset, &ev_data).await;
-                    {
+                    if res.is_ok() {
                         let mut flushing = self.flushing_evicted.lock();
                         if let Some(curr_data) = flushing.get(&ev_offset) {
                             if curr_data == &ev_data {
@@ -546,6 +525,7 @@ impl<D: BlockDriverOps + 'static> Ext4Disk<D> {
     }
 
     pub fn set_block_size(&self, size: usize) {
+        let _io_guard = self.io_lock.write();
         self.block_size.store(size, core::sync::atomic::Ordering::Relaxed);
         self.block_cache.lock().clear();
     }

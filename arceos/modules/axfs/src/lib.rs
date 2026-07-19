@@ -28,14 +28,33 @@ pub use disk::flush_all_disks;
 pub use fs::{new_tmpfs, new_procfs, new_default, devfs::DevNode, TtyCallbacks, register_tty_callbacks};
 
 pub fn flush_all_filesystems() -> axfs_ng_vfs::VfsResult<()> {
+    let mut first_error = highlevel::flush_all_file_caches().err();
+    let mut roots = BTreeMap::new();
+    if let Some(cx) = ROOT_FS_CONTEXT.get() {
+        let root = cx.root_dir().clone();
+        roots.insert(filesystem_id(root.filesystem()), root);
+    }
     let mps: Vec<Arc<axfs_ng_vfs::Mountpoint>> = {
         let guard = MOUNTED_MOUNTPOINTS.lock();
         guard.iter().map(|(_, mp)| mp.clone()).collect()
     };
     for mp in mps {
-        let _ = mp.root_location().filesystem().flush();
+        let root = mp.root_location();
+        roots.entry(filesystem_id(root.filesystem())).or_insert(root);
     }
-    Ok(())
+    for root in roots.into_values() {
+        if let Err(err) = axtask::future::block_on(root.filesystem().flush()) {
+            error!("Failed to flush {} filesystem: {:?}", root.filesystem().name(), err);
+            if first_error.is_none() {
+                first_error = Some(err);
+            }
+        }
+    }
+    first_error.map_or(Ok(()), Err)
+}
+
+fn filesystem_id(fs: &dyn axfs_ng_vfs::FilesystemOps) -> usize {
+    fs as *const dyn axfs_ng_vfs::FilesystemOps as *const () as usize
 }
 #[cfg(feature = "ext4")]
 pub use fs::ext4;
