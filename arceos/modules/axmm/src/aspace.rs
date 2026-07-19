@@ -14,13 +14,64 @@ use memory_set::{MemoryArea, MemorySet};
 
 use crate::{backend::Backend, mapping_err_to_ax_err};
 
-/// The result of a page fault handling operation on AddrSpace.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// A TLB shootdown that must run after releasing the address-space lock.
+#[derive(Debug)]
+pub struct TlbShootdown {
+    asid: usize,
+}
+
+impl TlbShootdown {
+    fn new(asid: usize) -> Self {
+        Self { asid }
+    }
+
+    /// Completes the shootdown without holding an address-space lock.
+    pub fn complete_after_unlock(self) {
+        flush_tlb_asid_all(self.asid);
+    }
+}
+
+/// The result of a page fault handling operation on [`AddrSpace`].
+#[derive(Debug)]
 pub enum PageFaultResult {
-    /// The page fault was handled successfully (with boolean success).
+    /// The page fault completed without requiring a remote TLB shootdown.
     Handled(bool),
+    /// The page fault completed and requires a remote TLB shootdown.
+    HandledWithShootdown(TlbShootdown),
     /// The page fault requires the write lock of the address space (stack grows down).
     NeedWriteLock,
+}
+
+impl PageFaultResult {
+    /// Returns the handling result, completing any deferred TLB shootdown first.
+    ///
+    /// This must only be called after the lock used to access the address space
+    /// has been released. `None` means the fault needs to be retried with the
+    /// address-space write lock.
+    pub fn complete_after_unlock(self) -> Option<bool> {
+        match self {
+            Self::Handled(success) => Some(success),
+            Self::HandledWithShootdown(shootdown) => {
+                shootdown.complete_after_unlock();
+                Some(true)
+            }
+            Self::NeedWriteLock => None,
+        }
+    }
+}
+
+/// The result of cloning an address space, including the parent TLB update.
+pub struct AddrSpaceCloneResult {
+    result: AxResult<AddrSpace>,
+    shootdown: TlbShootdown,
+}
+
+impl AddrSpaceCloneResult {
+    /// Completes the parent TLB shootdown and returns the cloned address space.
+    pub fn complete_after_unlock(self) -> AxResult<AddrSpace> {
+        self.shootdown.complete_after_unlock();
+        self.result
+    }
 }
 
 pub struct PageTableLockManager {
@@ -712,31 +763,29 @@ impl AddrSpace {
                 let handled = area
                     .backend()
                     .handle_page_fault(vaddr, area.end(), orig_flags, &self.pt, access_flags);
-                if handled {
-                    let pte_after = self
-                        .pt
-                        .lock_for_addr(page)
-                        .query(page)
-                        .ok()
-                        .map(|(frame, flags, _)| (frame, flags));
-                    if pte_before.is_some() && pte_after != pte_before {
-                        // A COW remap can leave the old readable frame cached
-                        // on CPUs where this address space ran previously.
-                        flush_tlb_asid_all(self.asid);
-                    }
-                }
+                let pte_after = self
+                    .pt
+                    .lock_for_addr(page)
+                    .query(page)
+                    .ok()
+                    .map(|(frame, flags, _)| (frame, flags));
                 if !handled {
-                    let pte_after = self
-                        .pt
-                        .lock_for_addr(page)
-                        .query(page)
-                        .ok()
-                        .map(|(frame, flags, _)| (frame, flags));
                     error!(
                         "handle_page_fault: reject=backend_not_handled vaddr={:#x} page={:#x} \
                          access={:?} area_flags={:?} backend={} pte_before={:?} pte_after={:?}",
                         vaddr, page, access_flags, orig_flags, backend_kind, pte_before, pte_after
                     );
+                }
+                let had_resident_mapping = pte_before
+                    .as_ref()
+                    .map(|(frame, _)| frame.as_usize() != 0)
+                    .unwrap_or(false);
+                if handled && had_resident_mapping && pte_after != pte_before {
+                    // A COW remap can leave the old readable frame cached on
+                    // CPUs where this address space ran previously. Waiting
+                    // for those CPUs while holding the address-space lock can
+                    // deadlock with a concurrent writer such as mprotect.
+                    return PageFaultResult::HandledWithShootdown(TlbShootdown::new(self.asid));
                 }
                 return PageFaultResult::Handled(handled);
             }
@@ -773,7 +822,11 @@ impl AddrSpace {
     }
 
     /// Handles a page fault that requires stack growth (write lock held).
-    pub fn handle_page_fault_write(&mut self, vaddr: VirtAddr, access_flags: PageFaultFlags) -> bool {
+    pub fn handle_page_fault_write(
+        &mut self,
+        vaddr: VirtAddr,
+        access_flags: PageFaultFlags,
+    ) -> PageFaultResult {
         let page = vaddr.align_down_4k();
         // Check for stack grows down auto-extension.
         let next_page = page + PAGE_SIZE_4K;
@@ -805,22 +858,25 @@ impl AddrSpace {
                     "handle_page_fault: stack growth rejected at {:#x} due to overlap in guard gap [{:#x}, {:#x})",
                     page, guard_start, page
                 );
-                return false;
+                return PageFaultResult::Handled(false);
             }
 
             let backend = Backend::new_alloc_grows_down(false, true);
             if self.map_with_backend(page, PAGE_SIZE_4K, flags, backend).is_ok() {
-                match self.handle_page_fault(vaddr, access_flags) {
-                    PageFaultResult::Handled(success) => return success,
-                    _ => return false,
-                }
+                return self.handle_page_fault(vaddr, access_flags);
             }
         }
-        false
+        PageFaultResult::Handled(false)
     }
 
     /// Attempts to clone the current address space into a new one.
-    pub fn try_clone(&mut self) -> AxResult<Self> {
+    pub fn try_clone(&mut self) -> AddrSpaceCloneResult {
+        let shootdown = TlbShootdown::new(self.asid);
+        let result = self.try_clone_inner();
+        AddrSpaceCloneResult { result, shootdown }
+    }
+
+    fn try_clone_inner(&mut self) -> AxResult<Self> {
         let mut new_aspace = Self::new_empty(self.va_range.start, self.va_range.size())?;
         let last_alloc = self.last_alloc_addr.load(core::sync::atomic::Ordering::Acquire);
         new_aspace.last_alloc_addr.store(last_alloc, core::sync::atomic::Ordering::Release);
@@ -916,10 +972,6 @@ impl AddrSpace {
                 }
             }
         }
-
-        // COW demotes parent mappings from writable to read-only. A task may
-        // have cached those mappings on any CPU it previously ran on.
-        flush_tlb_asid_all(self.asid);
 
         for (start, backend) in areas_to_convert {
             if let Some(area) = self.areas.get_area_mut(start) {

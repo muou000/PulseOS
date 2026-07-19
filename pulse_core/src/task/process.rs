@@ -1056,72 +1056,33 @@ impl Process {
         let pages =
             memory_addr::PageIter4K::new(start_page, end_page).ok_or(AxError::BadAddress)?;
         for page in pages {
-            let mut done = false;
-            let aspace = aspace_handle.read();
-            if let Ok((paddr, flags, _)) = aspace.query_vaddr(page) {
-                if paddr.as_usize() != 0 && flags.contains(access) {
-                    drop(aspace);
-                    continue;
-                }
-            }
-            match aspace.handle_page_fault(page, access) {
-                axmm::PageFaultResult::Handled(ok) => {
-                    if !ok {
-                        return Err(AxError::BadAddress);
+            let result = {
+                let aspace = aspace_handle.read();
+                if let Ok((paddr, flags, _)) = aspace.query_vaddr(page) {
+                    if paddr.as_usize() != 0 && flags.contains(access) {
+                        None
+                    } else {
+                        Some(aspace.handle_page_fault(page, access))
                     }
-                    done = true;
+                } else {
+                    Some(aspace.handle_page_fault(page, access))
                 }
-                axmm::PageFaultResult::NeedWriteLock => {}
-            }
-            drop(aspace);
-            if !done {
-                let mut aspace = aspace_handle.write();
-                if !aspace.handle_page_fault_write(page, access) {
-                    return Err(AxError::BadAddress);
+            };
+            let Some(result) = result else {
+                continue;
+            };
+            let result = match result {
+                axmm::PageFaultResult::NeedWriteLock => {
+                    let mut aspace = aspace_handle.write();
+                    aspace.handle_page_fault_write(page, access)
                 }
+                result => result,
+            };
+            if !result.complete_after_unlock().unwrap_or(false) {
+                return Err(AxError::BadAddress);
             }
         }
         Ok(())
-    }
-
-    fn write_user_bytes_in_aspace(
-        &self,
-        aspace: &mut AddrSpace,
-        user_addr: usize,
-        bytes: &[u8],
-    ) -> AxResult<()> {
-        self.validate_user_range(user_addr, bytes.len())?;
-        let start = VirtAddr::from(user_addr);
-
-        // Try fast path first without faulting.
-        if let Ok(()) = aspace.write(start, bytes) {
-            return Ok(());
-        }
-
-        // If it fails, fault-in the pages and retry once.
-        let end = user_addr
-            .checked_add(bytes.len())
-            .ok_or(AxError::BadAddress)?;
-        let start_page = VirtAddr::from(user_addr).align_down_4k();
-        let end_page = VirtAddr::from(end).align_up_4k();
-        let pages =
-            memory_addr::PageIter4K::new(start_page, end_page).ok_or(AxError::BadAddress)?;
-        for page in pages {
-            let pf_flags = MappingFlags::WRITE | MappingFlags::USER;
-            match aspace.handle_page_fault(page, pf_flags) {
-                axmm::PageFaultResult::Handled(ok) => {
-                    if !ok {
-                        return Err(AxError::BadAddress);
-                    }
-                }
-                axmm::PageFaultResult::NeedWriteLock => {
-                    if !aspace.handle_page_fault_write(page, pf_flags) {
-                        return Err(AxError::BadAddress);
-                    }
-                }
-            }
-        }
-        aspace.write(start, bytes).map_err(AxError::from)
     }
 
     pub fn read_user_bytes(&self, user_addr: usize, bytes: &mut [u8]) -> AxResult<()> {
@@ -1153,8 +1114,11 @@ impl Process {
             return Ok(());
         }
 
-        let mut aspace = aspace_handle.write();
-        self.write_user_bytes_in_aspace(&mut aspace, user_addr, bytes)
+        self.try_fault_in_user_range(user_addr, bytes.len(), MappingFlags::WRITE)?;
+        aspace_handle
+            .read()
+            .write(start, bytes)
+            .map_err(AxError::from)
     }
 
     pub fn aspace_handle(&self) -> Arc<RwLock<AddrSpace>> {
@@ -1337,33 +1301,15 @@ impl Process {
             return Ok(());
         }
         let aspace_handle = self.aspace_handle();
-        let mut aspace = aspace_handle.write();
         let start = VirtAddr::from(addr);
-        if !aspace.can_access_range(start, len, MappingFlags::empty()) {
+        if !aspace_handle
+            .read()
+            .can_access_range(start, len, MappingFlags::empty())
+        {
             return Err(axerrno::LinuxError::ENOMEM);
         }
-        let end = addr.checked_add(len).ok_or(axerrno::LinuxError::EINVAL)?;
-        let pages = memory_addr::PageIter4K::new(VirtAddr::from(addr), VirtAddr::from(end))
-            .ok_or(axerrno::LinuxError::EINVAL)?;
-        for page in pages {
-            let already_resident = aspace
-                .query_vaddr(page)
-                .map(|(frame, flags, _)| frame.as_usize() != 0 && !flags.is_empty())
-                .unwrap_or(false);
-            if already_resident {
-                continue;
-            }
-            let handled = match aspace.handle_page_fault(page, MappingFlags::USER) {
-                axmm::PageFaultResult::Handled(success) => success,
-                axmm::PageFaultResult::NeedWriteLock => {
-                    aspace.handle_page_fault_write(page, MappingFlags::USER)
-                }
-            };
-            if !handled {
-                return Err(axerrno::LinuxError::ENOMEM);
-            }
-        }
-        Ok(())
+        self.try_fault_in_user_range(addr, len, MappingFlags::empty())
+            .map_err(|_| axerrno::LinuxError::ENOMEM)
     }
 
     pub fn lock_mapped_range(&self, addr: usize, len: usize) -> Result<(), axerrno::LinuxError> {
@@ -1709,15 +1655,15 @@ impl Process {
 
     pub fn handle_page_fault(&self, vaddr: VirtAddr, flags: axhal::trap::PageFaultFlags) -> bool {
         let aspace_handle = self.aspace_handle();
-        let aspace = aspace_handle.read();
-        match aspace.handle_page_fault(vaddr, flags) {
-            axmm::PageFaultResult::Handled(success) => success,
+        let result = aspace_handle.read().handle_page_fault(vaddr, flags);
+        let result = match result {
             axmm::PageFaultResult::NeedWriteLock => {
-                drop(aspace);
                 let mut aspace = aspace_handle.write();
                 aspace.handle_page_fault_write(vaddr, flags)
             }
-        }
+            result => result,
+        };
+        result.complete_after_unlock().unwrap_or(false)
     }
 
     pub fn activate(&self) {
@@ -2586,43 +2532,18 @@ impl Process {
         if is_private {
             (addr, true)
         } else {
+            let _ = self.try_fault_in_user_range(
+                addr,
+                core::mem::size_of::<u32>(),
+                MappingFlags::READ,
+            );
             let aspace_handle = self.aspace_handle();
             let aspace = aspace_handle.read();
             let vaddr = VirtAddr::from(addr);
-            let query_res = aspace.query_vaddr(vaddr);
-            let paddr = match query_res {
-                Ok((paddr, ..)) => paddr.as_usize(),
-                Err(_) => {
-                    // Try to handle page fault on-demand (simulate a read fault from user space to populate it)
-                    let mut paddr_res = addr;
-                    match aspace.handle_page_fault(
-                        vaddr,
-                        axhal::trap::PageFaultFlags::READ | axhal::trap::PageFaultFlags::USER,
-                    ) {
-                        axmm::PageFaultResult::Handled(success) => {
-                            if success {
-                                if let Ok((paddr, ..)) = aspace.query_vaddr(vaddr) {
-                                    paddr_res = paddr.as_usize();
-                                }
-                            }
-                        }
-                        axmm::PageFaultResult::NeedWriteLock => {
-                            drop(aspace);
-                            let mut aspace_write = aspace_handle.write();
-                            if aspace_write.handle_page_fault_write(
-                                vaddr,
-                                axhal::trap::PageFaultFlags::READ
-                                    | axhal::trap::PageFaultFlags::USER,
-                            ) {
-                                if let Ok((paddr, ..)) = aspace_write.query_vaddr(vaddr) {
-                                    paddr_res = paddr.as_usize();
-                                }
-                            }
-                        }
-                    }
-                    paddr_res
-                }
-            };
+            let paddr = aspace
+                .query_vaddr(vaddr)
+                .map(|(paddr, ..)| paddr.as_usize())
+                .unwrap_or(addr);
             axlog::debug!("futex_key: addr={:#x}, paddr={:#x}", addr, paddr);
             (paddr, false)
         }
@@ -2668,7 +2589,7 @@ impl Process {
             self.try_fault_in_user_range(
                 w.uaddr as usize,
                 core::mem::size_of::<u32>(),
-                MappingFlags::WRITE,
+                MappingFlags::READ,
             )?;
             let val = self.read_user_u32(w.uaddr as usize)?;
             if val != w.val as u32 {
@@ -2774,7 +2695,7 @@ impl Process {
         timeout_ns: Option<u64>,
         is_private: bool,
     ) -> AxResult<()> {
-        self.try_fault_in_user_range(addr, core::mem::size_of::<u32>(), MappingFlags::WRITE)?;
+        self.try_fault_in_user_range(addr, core::mem::size_of::<u32>(), MappingFlags::READ)?;
         let val = self.read_user_u32(addr)?;
         if val != expected {
             return Err(AxError::from(AxErrorKind::WouldBlock));
@@ -3007,8 +2928,8 @@ impl Process {
         }
 
         let parent_aspace_handle = self.aspace_handle();
-        let mut parent_aspace = parent_aspace_handle.write();
-        let new_aspace = parent_aspace.try_clone()?;
+        let clone_result = parent_aspace_handle.write().try_clone();
+        let new_aspace = clone_result.complete_after_unlock()?;
 
         let mut inner = TaskInner::try_new(
             move || {
@@ -3048,7 +2969,7 @@ impl Process {
 
         if let Some(addr) = params.parent_set_tid {
             let child_tid = child_tid as u32;
-            self.write_user_bytes_in_aspace(&mut parent_aspace, addr, &child_tid.to_ne_bytes())?;
+            self.write_user_bytes(addr, &child_tid.to_ne_bytes())?;
         }
         let child_thread = Thread::new(child_proc.clone());
         super::register_thread_global(child_tid, child_thread.clone());
