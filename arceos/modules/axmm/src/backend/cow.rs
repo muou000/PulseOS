@@ -27,6 +27,7 @@ impl CowMapping {
         orig_flags: MappingFlags,
         pt: &crate::PageTableLockManager,
         access_flags: MappingFlags,
+        reclaim: &mut super::DeferredReclaims,
     ) -> bool {
         let page = vaddr.align_down_4k();
         let query_res = pt.lock_for_addr(page).query(page).ok().map(|(frame, flags, _)| (frame, flags));
@@ -92,7 +93,7 @@ impl CowMapping {
 
                         if ok {
                             drop(pt_guard); // Release lock before deallocating
-                            dealloc_frame(old_frame);
+                            reclaim.defer_frame(old_frame);
                             return true;
                         } else {
                             dealloc_frame(new_frame);
@@ -103,13 +104,13 @@ impl CowMapping {
                     // Not a COW fault, maybe just a permission upgrade (e.g. READ -> READ|EXEC)
                     // or the page is already writable.
                     // Delegate to inner to be safe, although we could handle it here.
-                    return self.inner.handle_page_fault(vaddr, area_end, orig_flags, pt, access_flags);
+                    return self.inner.handle_page_fault(vaddr, area_end, orig_flags, pt, access_flags, reclaim);
                 }
             }
         }
 
         // Page is not mapped or inner needs to handle it (e.g. demand paging).
-        self.inner.handle_page_fault(vaddr, area_end, orig_flags, pt, access_flags)
+        self.inner.handle_page_fault(vaddr, area_end, orig_flags, pt, access_flags, reclaim)
     }
 
     fn sync_executable_if_needed(&self, flags: MappingFlags) {

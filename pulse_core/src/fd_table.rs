@@ -1620,6 +1620,7 @@ impl PipeObject {
 
         let num_pages = count / 4096;
         let mut read_pages = 0;
+        let mut pending_shootdown: Option<axmm::TlbShootdown> = None;
 
         for i in 0..num_pages {
             let page_vaddr = VirtAddr::from(reader_vaddr + i * 4096);
@@ -1635,22 +1636,23 @@ impl PipeObject {
                 drop(zc);
 
                 let mut aspace_guard = aspace.write();
-                let old_frame = if let Ok((old_f, _, _)) = aspace_guard.query_vaddr(page_vaddr) {
-                    old_f
-                } else {
-                    PhysAddr::from(0)
-                };
-
-                let remap_res = aspace_guard.remap_page(
-                    page_vaddr,
-                    page.paddr,
-                    MappingFlags::READ | MappingFlags::WRITE | MappingFlags::USER,
-                );
+                let (remap_res, shootdown) = aspace_guard
+                    .remap_page(
+                        page_vaddr,
+                        page.paddr,
+                        MappingFlags::READ | MappingFlags::WRITE | MappingFlags::USER,
+                    )
+                    .into_parts();
+                drop(aspace_guard);
+                if let Some(shootdown) = shootdown {
+                    if let Some(pending) = pending_shootdown.as_mut() {
+                        pending.merge(shootdown);
+                    } else {
+                        pending_shootdown = Some(shootdown);
+                    }
+                }
 
                 if remap_res.is_ok() {
-                    if old_frame.as_usize() != 0 {
-                        dealloc_physical_frame(old_frame);
-                    }
                     read_pages += 1;
                 } else {
                     self.shared.zc_pages.lock().push_front(page);
@@ -1660,6 +1662,12 @@ impl PipeObject {
                 drop(zc);
                 break;
             }
+        }
+
+        if let Some(shootdown) = pending_shootdown
+            && shootdown.complete_after_unlock().is_err()
+        {
+            return Err(LinuxError::EIO);
         }
 
         if read_pages > 0 {

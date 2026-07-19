@@ -109,12 +109,6 @@ pub(super) fn dealloc_frame(frame: PhysAddr) {
     global_allocator().dealloc_pages(phys_to_virt(frame).as_usize(), 1);
 }
 
-fn dealloc_frame_run(start: PhysAddr, num_pages: usize) {
-    if num_pages != 0 {
-        global_allocator().dealloc_pages(phys_to_virt(start).as_usize(), num_pages);
-    }
-}
-
 pub(super) fn alloc_contiguous_frames(num_pages: usize, zeroed: bool) -> Option<(PhysAddr, usize)> {
     if num_pages == 0 {
         return None;
@@ -169,7 +163,15 @@ impl Backend {
             for addr in PageIter4K::new(start, start + size).unwrap() {
                 let Some(frame) = alloc_frame(true) else {
                     if mapped_pages != 0 {
-                        let _ = self.unmap_alloc(start, mapped_pages * PAGE_SIZE_4K, pt, true);
+                        let mut reclaim = super::DeferredReclaims::default();
+                        let _ = self.unmap_alloc(
+                            start,
+                            mapped_pages * PAGE_SIZE_4K,
+                            pt,
+                            true,
+                            &mut reclaim,
+                        );
+                        reclaim.reclaim();
                     }
                     return false;
                 };
@@ -179,7 +181,15 @@ impl Backend {
                 } else {
                     dealloc_frame(frame);
                     if mapped_pages != 0 {
-                        let _ = self.unmap_alloc(start, mapped_pages * PAGE_SIZE_4K, pt, true);
+                        let mut reclaim = super::DeferredReclaims::default();
+                        let _ = self.unmap_alloc(
+                            start,
+                            mapped_pages * PAGE_SIZE_4K,
+                            pt,
+                            true,
+                            &mut reclaim,
+                        );
+                        reclaim.reclaim();
                     }
                     return false;
                 }
@@ -201,44 +211,17 @@ impl Backend {
         size: usize,
         pt: &mut PageTable,
         _populate: bool,
+        reclaim: &mut super::DeferredReclaims,
     ) -> bool {
         debug!("unmap_alloc: [{:#x}, {:#x})", start, start + size);
-        let mut free_run_start = None;
-        let mut free_run_len = 0usize;
         for addr in PageIter4K::new(start, start + size).unwrap() {
             if let Ok((frame, page_size, tlb)) = pt.unmap(addr) {
-                // Deallocate the physical frame if there is a mapping in the
-                // page table.
                 if page_size.is_huge() {
-                    if let Some(start) = free_run_start.take() {
-                        dealloc_frame_run(start, free_run_len);
-                    }
                     return false;
                 }
                 tlb.flush();
-                let can_free = frame.as_usize() != 0 && cow_dec_frame_ref(frame);
-                if can_free {
-                    if free_run_start
-                        .is_some_and(|start: PhysAddr| start + free_run_len * PAGE_SIZE_4K == frame)
-                    {
-                        free_run_len += 1;
-                    } else {
-                        if let Some(start) = free_run_start.take() {
-                            dealloc_frame_run(start, free_run_len);
-                        }
-                        free_run_start = Some(frame);
-                        free_run_len = 1;
-                    }
-                } else if let Some(start) = free_run_start.take() {
-                    dealloc_frame_run(start, free_run_len);
-                    free_run_len = 0;
-                }
-            } else {
-                // Deallocation is needn't if the page is not mapped.
+                reclaim.defer_frame(frame);
             }
-        }
-        if let Some(start) = free_run_start {
-            dealloc_frame_run(start, free_run_len);
         }
         true
     }

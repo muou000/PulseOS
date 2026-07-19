@@ -21,6 +21,35 @@ mod queue;
 pub use event::{Callback, MulticastCallback};
 use queue::IpiEventQueue;
 
+/// A TLB shootdown failure together with its completion guarantee.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TlbShootdownError {
+    /// No shootdown request was published, so stale remote translations may remain.
+    Incomplete(IpiError),
+    /// Direct delivery failed, but all targets completed through the fallback path.
+    Completed(IpiError),
+}
+
+impl TlbShootdownError {
+    /// Returns whether every targeted CPU acknowledged the shootdown.
+    pub const fn completion_guaranteed(self) -> bool {
+        matches!(self, Self::Completed(_))
+    }
+}
+
+impl core::fmt::Display for TlbShootdownError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::Incomplete(error) => write!(f, "incomplete TLB shootdown: {error}"),
+            Self::Completed(error) => {
+                write!(f, "TLB shootdown completed after delivery error: {error}")
+            }
+        }
+    }
+}
+
+impl core::error::Error for TlbShootdownError {}
+
 #[percpu::def_percpu]
 static IPI_EVENT_QUEUE: LazyInit<SpinNoIrq<IpiEventQueue>> = LazyInit::new();
 
@@ -102,7 +131,7 @@ pub fn run_on_each_cpu<T: Into<MulticastCallback>>(callback: T) -> Result<(), Ip
 ///
 /// TLB shootdowns use fixed per-CPU mailboxes instead of queued callbacks so
 /// they remain safe when multiple CPUs fault concurrently with IRQs disabled.
-pub fn flush_tlb_all_cpus() -> Result<(), IpiError> {
+pub fn flush_tlb_all_cpus() -> Result<(), TlbShootdownError> {
     let current_cpu_id = this_cpu_id();
     let cpu_num = axhal::cpu_num();
     let mut target_mask = 0usize;
@@ -116,7 +145,7 @@ pub fn flush_tlb_all_cpus() -> Result<(), IpiError> {
             continue;
         }
         if !IPI_CPU_READY[cpu_id].load(Ordering::Acquire) {
-            return Err(IpiError::CpuOffline);
+            return Err(TlbShootdownError::Incomplete(IpiError::CpuOffline));
         }
         target_mask |= 1usize << cpu_id;
     }
@@ -148,7 +177,7 @@ pub fn flush_tlb_all_cpus() -> Result<(), IpiError> {
     // Keep failed deliveries armed: the periodic interrupt path services the
     // mailbox, so no caller observes an error while a remote stale TLB remains.
     wait_for_tlb_shootdowns(target_mask, &target_tickets, cpu_num);
-    delivery_error.map_or(Ok(()), Err)
+    delivery_error.map_or(Ok(()), |error| Err(TlbShootdownError::Completed(error)))
 }
 
 fn wait_for_tlb_shootdowns(target_mask: usize, target_tickets: &[usize], cpu_num: usize) {

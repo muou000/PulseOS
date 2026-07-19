@@ -21,7 +21,7 @@ use memory_addr::{MemoryAddr, PhysAddr, VirtAddr, va};
 use memory_set::MappingError;
 
 pub use self::{
-    aspace::{AddrSpace, AddrSpaceCloneResult, PageFaultResult, PageTableLockManager, TlbShootdown},
+    aspace::{AddrSpace, AddrSpaceCloneResult, AddrSpaceMutation, PageFaultResult, PageTableLockManager, TlbShootdown},
     backend::Backend,
 };
 

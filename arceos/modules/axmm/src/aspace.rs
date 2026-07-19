@@ -12,22 +12,114 @@ use memory_addr::{
 };
 use memory_set::{MemoryArea, MemorySet};
 
-use crate::{backend::Backend, mapping_err_to_ax_err};
+use crate::{
+    backend::{Backend, DeferredReclaims},
+    mapping_err_to_ax_err,
+};
 
 /// A TLB shootdown that must run after releasing the address-space lock.
-#[derive(Debug)]
+#[must_use = "a TLB shootdown must be completed after releasing the address-space lock"]
 pub struct TlbShootdown {
-    asid: usize,
+    asids: alloc::vec::Vec<usize>,
+    reclaims: DeferredReclaims,
 }
 
 impl TlbShootdown {
-    fn new(asid: usize) -> Self {
-        Self { asid }
+    fn new(asid: usize, reclaims: DeferredReclaims) -> Self {
+        Self {
+            asids: alloc::vec![asid],
+            reclaims,
+        }
+    }
+
+    fn without_reclaims(asid: usize) -> Self {
+        Self::new(asid, DeferredReclaims::default())
+    }
+
+    /// Merges another deferred shootdown into this batch.
+    pub fn merge(&mut self, other: Self) {
+        let Self { asids, reclaims } = other;
+        for asid in asids {
+            if !self.asids.contains(&asid) {
+                self.asids.push(asid);
+            }
+        }
+        self.reclaims.append(reclaims);
     }
 
     /// Completes the shootdown without holding an address-space lock.
     pub fn complete_after_unlock(self) -> AxResult {
-        flush_tlb_asid_all(self.asid)
+        let Self { asids, reclaims } = self;
+
+        #[cfg(feature = "ipi")]
+        {
+            let _ = asids;
+            match axipi::flush_tlb_all_cpus() {
+                Ok(()) => {
+                    reclaims.reclaim();
+                    Ok(())
+                }
+                Err(shootdown_error) => {
+                    let completed = shootdown_error.completion_guaranteed();
+                    if completed {
+                        warn!("{shootdown_error}");
+                        reclaims.reclaim();
+                        Ok(())
+                    } else {
+                        error!("{shootdown_error}");
+                        // DeferredReclaims intentionally leaks mapping references
+                        // when dropped before a completion guarantee.
+                        drop(reclaims);
+                        Err(AxError::BadState)
+                    }
+                }
+            }
+        }
+
+        #[cfg(not(feature = "ipi"))]
+        {
+            for asid in asids {
+                unsafe { flush_tlb_asid(asid) };
+            }
+            reclaims.reclaim();
+            Ok(())
+        }
+    }
+}
+
+impl fmt::Debug for TlbShootdown {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("TlbShootdown")
+            .field("asids", &self.asids)
+            .field("has_reclaims", &!self.reclaims.is_empty())
+            .finish()
+    }
+}
+
+/// A page-table mutation whose shootdown must be completed after unlocking.
+#[must_use = "the mutation result may contain a required TLB shootdown"]
+pub struct AddrSpaceMutation<T> {
+    result: AxResult<T>,
+    shootdown: Option<TlbShootdown>,
+}
+
+impl<T> AddrSpaceMutation<T> {
+    fn new(result: AxResult<T>, shootdown: Option<TlbShootdown>) -> Self {
+        Self { result, shootdown }
+    }
+
+    /// Splits the operation result from its deferred shootdown.
+    pub fn into_parts(self) -> (AxResult<T>, Option<TlbShootdown>) {
+        (self.result, self.shootdown)
+    }
+
+    /// Completes the deferred shootdown and then returns the operation result.
+    pub fn complete_after_unlock(self) -> AxResult<T> {
+        let (result, shootdown) = self.into_parts();
+        if let Some(shootdown) = shootdown {
+            shootdown.complete_after_unlock()?;
+        }
+        result
     }
 }
 
@@ -37,7 +129,10 @@ pub enum PageFaultResult {
     /// The page fault completed without requiring a remote TLB shootdown.
     Handled(bool),
     /// The page fault completed and requires a remote TLB shootdown.
-    HandledWithShootdown(TlbShootdown),
+    HandledWithShootdown {
+        handled: bool,
+        shootdown: TlbShootdown,
+    },
     /// The page fault requires the write lock of the address space (stack grows down).
     NeedWriteLock,
 }
@@ -51,9 +146,9 @@ impl PageFaultResult {
     pub fn complete_after_unlock(self) -> AxResult<Option<bool>> {
         match self {
             Self::Handled(success) => Ok(Some(success)),
-            Self::HandledWithShootdown(shootdown) => {
+            Self::HandledWithShootdown { handled, shootdown } => {
                 shootdown.complete_after_unlock()?;
-                Ok(Some(true))
+                Ok(Some(handled))
             }
             Self::NeedWriteLock => Ok(None),
         }
@@ -135,6 +230,14 @@ pub struct AddrSpace {
 }
 
 impl AddrSpace {
+    fn map_area(&mut self, area: MemoryArea<Backend>) -> memory_set::MappingResult {
+        let mut reclaim = DeferredReclaims::default();
+        let result = self.areas.map(area, &mut self.pt, false, &mut reclaim);
+        debug_assert!(reclaim.is_empty());
+        reclaim.reclaim();
+        result
+    }
+
     fn backend_kind(backend: &Backend) -> &'static str {
         match backend {
             Backend::Shared { .. } => "shared",
@@ -278,9 +381,7 @@ impl AddrSpace {
 
         let offset = start_vaddr.as_usize() - start_paddr.as_usize();
         let area = MemoryArea::new(start_vaddr, size, flags, Backend::new_linear(offset));
-        self.areas
-            .map(area, &mut self.pt, false)
-            .map_err(mapping_err_to_ax_err)?;
+        self.map_area(area).map_err(mapping_err_to_ax_err)?;
         Ok(())
     }
 
@@ -307,9 +408,7 @@ impl AddrSpace {
         }
 
         let area = MemoryArea::new(start, size, flags, Backend::new_alloc(populate));
-        self.areas
-            .map(area, &mut self.pt, false)
-            .map_err(mapping_err_to_ax_err)?;
+        self.map_area(area).map_err(mapping_err_to_ax_err)?;
         Ok(())
     }
 
@@ -338,9 +437,7 @@ impl AddrSpace {
             flags,
             Backend::new_file(start, file, file_flags, file_offset, file_bytes, shared),
         );
-        self.areas
-            .map(area, &mut self.pt, false)
-            .map_err(mapping_err_to_ax_err)?;
+        self.map_area(area).map_err(mapping_err_to_ax_err)?;
         Ok(())
     }
 
@@ -392,9 +489,7 @@ impl AddrSpace {
         }
 
         let area = MemoryArea::new(start, size, flags, backend);
-        self.areas
-            .map(area, &mut self.pt, false)
-            .map_err(mapping_err_to_ax_err)?;
+        self.map_area(area).map_err(mapping_err_to_ax_err)?;
         Ok(())
     }
 
@@ -428,9 +523,7 @@ impl AddrSpace {
         // Register the area with Alloc(populate=false) so unmap works
         // without trying to dealloc shared frames.
         let area = MemoryArea::new(start, size, flags, Backend::new_alloc(false));
-        self.areas
-            .map(area, &mut self.pt, false)
-            .map_err(mapping_err_to_ax_err)?;
+        self.map_area(area).map_err(mapping_err_to_ax_err)?;
 
         // Now manually map each physical page into the page table.
         let pages = PageIter4K::new(start, start + size).unwrap();
@@ -446,18 +539,32 @@ impl AddrSpace {
     ///
     /// Returns an error if the address range is out of the address space or not
     /// aligned.
-    pub fn unmap(&mut self, start: VirtAddr, size: usize) -> AxResult {
-        if !self.contains_range(start, size) {
-            return ax_err!(InvalidInput, "address out of range");
-        }
-        if !start.is_aligned_4k() || !is_aligned_4k(size) {
-            return ax_err!(InvalidInput, "address not aligned");
-        }
+    pub fn unmap(&mut self, start: VirtAddr, size: usize) -> AddrSpaceMutation<()> {
+        let mut reclaim = DeferredReclaims::default();
+        let mut attempted = false;
+        let result = (|| -> AxResult {
+            if !self.contains_range(start, size) {
+                return ax_err!(InvalidInput, "address out of range");
+            }
+            if !start.is_aligned_4k() || !is_aligned_4k(size) {
+                return ax_err!(InvalidInput, "address not aligned");
+            }
+            if !self.has_overlap(start, size) {
+                return Ok(());
+            }
 
-        self.areas
-            .unmap(start, size, &mut self.pt)
-            .map_err(mapping_err_to_ax_err)?;
-        Ok(())
+            attempted = true;
+            self.areas
+                .unmap(start, size, &mut self.pt, &mut reclaim)
+                .map_err(mapping_err_to_ax_err)
+        })();
+        let shootdown = if attempted {
+            Some(TlbShootdown::new(self.asid, reclaim))
+        } else {
+            reclaim.reclaim();
+            None
+        };
+        AddrSpaceMutation::new(result, shootdown)
     }
 
     /// To process data in this area with the given function.
@@ -555,27 +662,31 @@ impl AddrSpace {
     ///
     /// Returns an error if the address range is out of the address space or not
     /// aligned.
-    pub fn protect(&mut self, start: VirtAddr, size: usize, flags: MappingFlags) -> AxResult {
-        if size == 0 {
-            return Ok(());
-        }
-        if !self.contains_range(start, size) {
-            return ax_err!(InvalidInput, "address out of range");
-        }
-        if !start.is_aligned_4k() || !is_aligned_4k(size) {
-            return ax_err!(InvalidInput, "address not aligned");
-        }
-        if !self.can_access_range(start, size, MappingFlags::empty()) {
-            return ax_err!(BadAddress, "address not mapped");
-        }
+    pub fn protect(&mut self, start: VirtAddr, size: usize, flags: MappingFlags) -> AddrSpaceMutation<()> {
+        let mut attempted = false;
+        let result = (|| -> AxResult {
+            if size == 0 {
+                return Ok(());
+            }
+            if !self.contains_range(start, size) {
+                return ax_err!(InvalidInput, "address out of range");
+            }
+            if !start.is_aligned_4k() || !is_aligned_4k(size) {
+                return ax_err!(InvalidInput, "address not aligned");
+            }
+            if !self.can_access_range(start, size, MappingFlags::empty()) {
+                return ax_err!(BadAddress, "address not mapped");
+            }
 
-        // Update both page-table permissions and MemorySet area flags.
-        // Updating only page tables would make area metadata stale and break
-        // future permission checks (e.g. page fault validation).
-        self.areas
-            .protect(start, size, |_| Some(flags), &mut self.pt)
-            .map_err(mapping_err_to_ax_err)?;
-        Ok(())
+            attempted = true;
+            self.areas
+                .protect(start, size, |_| Some(flags), &mut self.pt)
+                .map_err(mapping_err_to_ax_err)
+        })();
+        AddrSpaceMutation::new(
+            result,
+            attempted.then(|| TlbShootdown::without_reclaims(self.asid)),
+        )
     }
 
     /// Updates only page-table permissions within the specified range.
@@ -586,25 +697,34 @@ impl AddrSpace {
         start: VirtAddr,
         size: usize,
         flags: MappingFlags,
-    ) -> AxResult {
-        if size == 0 {
-            return Ok(());
-        }
-        if !self.contains_range(start, size) {
-            return ax_err!(InvalidInput, "address out of range");
-        }
-        if !start.is_aligned_4k() || !is_aligned_4k(size) {
-            return ax_err!(InvalidInput, "address not aligned");
-        }
-        if !self.can_access_range(start, size, MappingFlags::empty()) {
-            return ax_err!(BadAddress, "address not mapped");
-        }
+    ) -> AddrSpaceMutation<()> {
+        let mut attempted = false;
+        let result = (|| -> AxResult {
+            if size == 0 {
+                return Ok(());
+            }
+            if !self.contains_range(start, size) {
+                return ax_err!(InvalidInput, "address out of range");
+            }
+            if !start.is_aligned_4k() || !is_aligned_4k(size) {
+                return ax_err!(InvalidInput, "address not aligned");
+            }
+            if !self.can_access_range(start, size, MappingFlags::empty()) {
+                return ax_err!(BadAddress, "address not mapped");
+            }
 
-        self.pt.get_mut()
-            .protect_region(start, size, flags, true)
-            .map_err(|_| AxError::BadState)?
-            .ignore();
-        Ok(())
+            attempted = true;
+            self.pt
+                .get_mut()
+                .protect_region(start, size, flags, false)
+                .map_err(|_| AxError::BadState)?
+                .ignore();
+            Ok(())
+        })();
+        AddrSpaceMutation::new(
+            result,
+            attempted.then(|| TlbShootdown::without_reclaims(self.asid)),
+        )
     }
 
     /// Remap a single 4K page to a specified physical frame.
@@ -613,34 +733,69 @@ impl AddrSpace {
         vaddr: VirtAddr,
         paddr: PhysAddr,
         flags: MappingFlags,
-    ) -> AxResult {
-        if !self.contains_range(vaddr, PAGE_SIZE_4K) {
-            return ax_err!(InvalidInput, "address out of range");
-        }
-        if !vaddr.is_aligned_4k() || !paddr.is_aligned_4k() {
-            return ax_err!(InvalidInput, "address not aligned");
-        }
+    ) -> AddrSpaceMutation<()> {
+        let mut reclaim = DeferredReclaims::default();
+        let mut changed_existing = false;
+        let result = (|| -> AxResult {
+            if !self.contains_range(vaddr, PAGE_SIZE_4K) {
+                return ax_err!(InvalidInput, "address out of range");
+            }
+            if !vaddr.is_aligned_4k() || !paddr.is_aligned_4k() {
+                return ax_err!(InvalidInput, "address not aligned");
+            }
 
-        let pt = self.pt.get_mut();
-        if pt.query(vaddr).is_ok() {
-            pt.remap(vaddr, paddr, flags)
-                .map_err(|_| AxError::BadState)?
-                .1
-                .flush();
+            let pt = self.pt.get_mut();
+            if let Ok((old_frame, old_flags, _)) = pt.query(vaddr) {
+                pt.remap(vaddr, paddr, flags)
+                    .map_err(|_| AxError::BadState)?
+                    .1
+                    .ignore();
+                if old_frame.as_usize() != 0 {
+                    changed_existing = old_frame != paddr || old_flags != flags;
+                    if old_frame != paddr {
+                        reclaim.defer_frame(old_frame);
+                    }
+                }
+            } else {
+                pt.map(vaddr, paddr, PageSize::Size4K, flags)
+                    .map_err(|_| AxError::BadState)?
+                    .ignore();
+            }
+            Ok(())
+        })();
+        let needs_shootdown = changed_existing || !reclaim.is_empty();
+        let shootdown = if needs_shootdown {
+            Some(TlbShootdown::new(self.asid, reclaim))
         } else {
-            // True lazy mappings may not have allocated any intermediate page
-            // tables yet, so COW install/remap must be able to materialize the
-            // first concrete PTE on demand.
-            pt.map(vaddr, paddr, PageSize::Size4K, flags)
-                .map_err(|_| AxError::BadState)?
-                .flush();
-        }
-        Ok(())
+            reclaim.reclaim();
+            None
+        };
+        AddrSpaceMutation::new(result, shootdown)
     }
 
     /// Removes all mappings in the address space.
-    pub fn clear(&mut self) {
-        self.areas.clear(&mut self.pt).unwrap();
+    pub fn clear(&mut self) -> AddrSpaceMutation<()> {
+        let had_mappings = !self.areas.is_empty();
+        let mut reclaim = DeferredReclaims::default();
+        let result = self
+            .areas
+            .clear(&mut self.pt, &mut reclaim)
+            .map_err(mapping_err_to_ax_err);
+        let shootdown = if had_mappings {
+            Some(TlbShootdown::new(self.asid, reclaim))
+        } else {
+            reclaim.reclaim();
+            None
+        };
+        AddrSpaceMutation::new(result, shootdown)
+    }
+
+    fn clear_unpublished(&mut self) {
+        let mut reclaim = DeferredReclaims::default();
+        if let Err(error) = self.areas.clear(&mut self.pt, &mut reclaim) {
+            error!("failed to clear unpublished address space: {error:?}");
+        }
+        reclaim.reclaim();
     }
 
     /// Checks whether an access to the specified memory region is valid.
@@ -761,9 +916,15 @@ impl AddrSpace {
                 pte_before
             );
             if orig_flags.contains(access_flags) {
-                let handled = area
-                    .backend()
-                    .handle_page_fault(vaddr, area.end(), orig_flags, &self.pt, access_flags);
+                let mut reclaim = DeferredReclaims::default();
+                let handled = area.backend().handle_page_fault(
+                    vaddr,
+                    area.end(),
+                    orig_flags,
+                    &self.pt,
+                    access_flags,
+                    &mut reclaim,
+                );
                 let pte_after = self
                     .pt
                     .lock_for_addr(page)
@@ -781,13 +942,17 @@ impl AddrSpace {
                     .as_ref()
                     .map(|(frame, _)| frame.as_usize() != 0)
                     .unwrap_or(false);
-                if handled && had_resident_mapping && pte_after != pte_before {
+                if (had_resident_mapping && pte_after != pte_before) || !reclaim.is_empty() {
                     // A COW remap can leave the old readable frame cached on
                     // CPUs where this address space ran previously. Waiting
                     // for those CPUs while holding the address-space lock can
                     // deadlock with a concurrent writer such as mprotect.
-                    return PageFaultResult::HandledWithShootdown(TlbShootdown::new(self.asid));
+                    return PageFaultResult::HandledWithShootdown {
+                        handled,
+                        shootdown: TlbShootdown::new(self.asid, reclaim),
+                    };
                 }
+                reclaim.reclaim();
                 return PageFaultResult::Handled(handled);
             }
             error!(
@@ -872,7 +1037,7 @@ impl AddrSpace {
 
     /// Attempts to clone the current address space into a new one.
     pub fn try_clone(&mut self) -> AddrSpaceCloneResult {
-        let shootdown = TlbShootdown::new(self.asid);
+        let shootdown = TlbShootdown::without_reclaims(self.asid);
         let result = self.try_clone_inner();
         AddrSpaceCloneResult { result, shootdown }
     }
@@ -927,8 +1092,8 @@ impl AddrSpace {
             };
 
             let new_area = MemoryArea::new(area.start(), area.size(), area.flags(), backend.clone());
-            if let Err(e) = new_aspace.areas.map(new_area, &mut new_aspace.pt, false) {
-                new_aspace.clear();
+            if let Err(e) = new_aspace.map_area(new_area) {
+                new_aspace.clear_unpublished();
                 return Err(mapping_err_to_ax_err(e));
             }
 
@@ -968,7 +1133,7 @@ impl AddrSpace {
                     inc_ref,
                 ).is_err() {
                     error!("try_clone: failed to copy user page table");
-                    new_aspace.clear();
+                    new_aspace.clear_unpublished();
                     return Err(AxError::NoMemory);
                 }
             }
@@ -1010,23 +1175,6 @@ unsafe fn flush_tlb_asid(asid: usize) {
 ))]
 unsafe fn flush_tlb_asid(_asid: usize) {
     axhal::asm::flush_tlb(None);
-}
-
-fn flush_tlb_asid_all(asid: usize) -> AxResult {
-    #[cfg(feature = "ipi")]
-    {
-        let _ = asid;
-        axipi::flush_tlb_all_cpus().map_err(|error| {
-            error!("failed to complete TLB shootdown: {error}");
-            AxError::BadState
-        })?;
-    }
-
-    #[cfg(not(feature = "ipi"))]
-    unsafe {
-        flush_tlb_asid(asid);
-    }
-    Ok(())
 }
 
 struct AsidAllocator {
@@ -1074,9 +1222,16 @@ static ASID_ALLOCATOR: spin::Mutex<AsidAllocator> = spin::Mutex::new(AsidAllocat
 
 impl Drop for AddrSpace {
     fn drop(&mut self) {
-        self.clear();
         let asid = self.asid;
-        if flush_tlb_asid_all(asid).is_ok() {
+        let (clear_result, shootdown) = self.clear().into_parts();
+        if let Err(error) = clear_result {
+            error!("failed to retire address-space mappings: {error:?}");
+        }
+        let shootdown_completed = shootdown
+            .map(TlbShootdown::complete_after_unlock)
+            .unwrap_or(Ok(()))
+            .is_ok();
+        if shootdown_completed {
             ASID_ALLOCATOR.lock().free(asid);
         } else {
             error!("failed to flush retired address space; ASID {asid} will not be reused");
