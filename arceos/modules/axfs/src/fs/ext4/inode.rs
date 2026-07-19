@@ -5,7 +5,11 @@ use alloc::{
     vec::Vec,
     boxed::Box,
 };
-use core::{any::Any, task::Context};
+use core::{
+    any::Any,
+    sync::atomic::{AtomicU64, Ordering},
+    task::Context,
+};
 
 use axfs_ng_vfs::{
     DirEntry, DirEntrySink, DirNode, DirNodeOps, FileNode, FileNodeOps, FilesystemOps, Metadata,
@@ -13,7 +17,10 @@ use axfs_ng_vfs::{
     WeakDirEntry,
 };
 use axpoll::{IoEvents, Pollable};
-use ext4plus::{Ext4, prelude::AsyncIterator};
+use ext4plus::{
+    Ext4,
+    prelude::{AsyncIterator, Ext4Error},
+};
 use spin::{Lazy, Mutex};
 use async_trait::async_trait;
 
@@ -31,12 +38,10 @@ pub struct Inode {
     pub(super) is_unlinked: core::sync::atomic::AtomicBool,
 }
 
-#[derive(Clone)]
 struct CachedDirEntry {
     name: String,
     inode_num: u32,
     node_type: NodeType,
-    is_dir: bool,
 }
 
 struct DirSnapshot {
@@ -44,25 +49,46 @@ struct DirSnapshot {
 }
 
 struct DirCacheState {
-    snapshot: Mutex<Option<Arc<DirSnapshot>>>,
+    generation: AtomicU64,
+    snapshot: Mutex<Option<(u64, Arc<DirSnapshot>)>>,
 }
 
 impl DirCacheState {
     fn new() -> Self {
         Self {
+            generation: AtomicU64::new(0),
             snapshot: Mutex::new(None),
         }
     }
 
     fn get(&self) -> Option<Arc<DirSnapshot>> {
-        self.snapshot.lock().clone()
+        let generation = self.generation.load(Ordering::Acquire);
+        let snapshot = self
+            .snapshot
+            .lock()
+            .as_ref()
+            .filter(|(snapshot_generation, _)| *snapshot_generation == generation)
+            .map(|(_, snapshot)| snapshot.clone());
+        (self.generation.load(Ordering::Acquire) == generation)
+            .then_some(snapshot)
+            .flatten()
     }
 
-    fn set(&self, snapshot: Arc<DirSnapshot>) {
-        *self.snapshot.lock() = Some(snapshot);
+    fn generation(&self) -> u64 {
+        self.generation.load(Ordering::Acquire)
+    }
+
+    fn publish(&self, generation: u64, snapshot: Arc<DirSnapshot>) -> bool {
+        let mut cached = self.snapshot.lock();
+        if self.generation.load(Ordering::Acquire) != generation {
+            return false;
+        }
+        *cached = Some((generation, snapshot));
+        true
     }
 
     fn invalidate(&self) {
+        self.generation.fetch_add(1, Ordering::AcqRel);
         *self.snapshot.lock() = None;
     }
 }
@@ -177,95 +203,64 @@ impl Inode {
         }
     }
 
-    async fn build_dir_snapshot_uncached(&self, fs: &Ext4, dir_ino: u32) -> Arc<DirSnapshot> {
+    async fn build_dir_snapshot_uncached(&self, fs: &Ext4, dir_ino: u32) -> VfsResult<Arc<DirSnapshot>> {
         let mut entries = Vec::new();
         let total_inodes = fs.superblock().num_block_groups() as u64 * fs.superblock().inodes_per_block_group().get() as u64;
 
-        let dir_idx = match core::num::NonZeroU32::new(dir_ino) {
-            Some(idx) => idx,
-            None => return Arc::new(DirSnapshot { entries }),
-        };
-        let dir_inode = match ext4plus::inode::Inode::read(fs, dir_idx).await {
-            Ok(inode) => inode,
-            Err(e) => {
-                log::error!("ext4: failed to read dir inode {}: {:?}", dir_ino, e);
-                return Arc::new(DirSnapshot { entries });
-            }
-        };
-        let dir = match ext4plus::dir::Dir::open_inode(fs, dir_inode) {
-            Ok(d) => d,
-            Err(e) => {
-                log::error!("ext4: failed to open dir {}: {:?}", dir_ino, e);
-                return Arc::new(DirSnapshot { entries });
-            }
-        };
-        let read_dir = match dir.read_dir() {
-            Ok(rd) => rd,
-            Err(e) => {
-                log::error!("ext4: failed to read_dir {}: {:?}", dir_ino, e);
-                return Arc::new(DirSnapshot { entries });
-            }
-        };
+        let dir_idx = core::num::NonZeroU32::new(dir_ino).ok_or(VfsError::InvalidData)?;
+        let dir_inode = ext4plus::inode::Inode::read(fs, dir_idx).await.map_err(into_vfs_err)?;
+        let dir = ext4plus::dir::Dir::open_inode(fs, dir_inode).map_err(into_vfs_err)?;
+        let read_dir = dir.read_dir().map_err(into_vfs_err)?;
 
         let mut read_dir = read_dir;
         while let Some(entry_res) = read_dir.next().await {
-            let entry = match entry_res {
-                Ok(e) => e,
-                Err(e) => {
-                    log::warn!("ext4: skip invalid dir entry: {:?}", e);
-                    continue;
-                }
-            };
+            let entry = entry_res.map_err(into_vfs_err)?;
             if entry.inode.get() == 0 || entry.inode.get() as u64 > total_inodes {
-                log::warn!(
+                log::error!(
                     "ext4: skip invalid dir entry ino={} in dir ino={}",
                     entry.inode,
                     dir_ino
                 );
-                continue;
+                return Err(VfsError::InvalidData);
             }
             let name = match entry.file_name().as_str() {
-                Ok(n) => String::from(n),
+                Ok(name) => String::from(name),
                 Err(_) => alloc::format!("{}", entry.file_name().display()),
             };
 
             let de_type = match entry.file_type() {
                 Ok(t) => t,
                 Err(_) => {
-                    if let Some(idx) = core::num::NonZeroU32::new(entry.inode.get()) {
-                        match ext4plus::inode::Inode::read(fs, idx).await {
-                            Ok(inode) => inode.file_type(),
-                            Err(_) => ext4plus::FileType::Regular,
-                        }
-                    } else {
-                        ext4plus::FileType::Regular
-                    }
+                    let idx = core::num::NonZeroU32::new(entry.inode.get()).ok_or(VfsError::InvalidData)?;
+                    ext4plus::inode::Inode::read(fs, idx).await.map_err(into_vfs_err)?.file_type()
                 }
             };
             let node_type = into_vfs_type(de_type);
-            let is_dir = de_type == ext4plus::FileType::Directory;
 
             entries.push(CachedDirEntry {
                 name,
                 inode_num: entry.inode.get(),
                 node_type,
-                is_dir,
             });
         }
 
-        Arc::new(DirSnapshot { entries })
+        Ok(Arc::new(DirSnapshot { entries }))
     }
 
-    async fn dir_snapshot(&self, fs: &Ext4) -> Arc<DirSnapshot> {
-        if let Some(snapshot) = self.dir_cache.get() {
-            return snapshot.clone();
+    async fn dir_snapshot(&self, fs: &Ext4) -> VfsResult<Arc<DirSnapshot>> {
+        loop {
+            if let Some(snapshot) = self.dir_cache.get() {
+                return Ok(snapshot);
+            }
+            let generation = self.dir_cache.generation();
+            let snapshot = self.build_dir_snapshot_uncached(fs, self.ino).await?;
+            if self.dir_cache.publish(generation, snapshot.clone()) {
+                return Ok(snapshot);
+            }
         }
-        let snapshot = self.build_dir_snapshot_uncached(fs, self.ino).await;
-        self.dir_cache.set(snapshot.clone());
-        snapshot
     }
 
-    async fn build_dir_snapshot(&self, fs: &Ext4, dir_ino: u32) -> Arc<DirSnapshot> {
+    async fn build_dir_snapshot(&self, fs: &Ext4, dir_ino: u32) -> VfsResult<Arc<DirSnapshot>> {
         if dir_ino == self.ino {
             self.dir_snapshot(fs).await
         } else {
@@ -287,20 +282,12 @@ impl Inode {
         Ok(())
     }
 
-    fn cached_entry<'a>(
-        &self,
-        snapshot: &'a DirSnapshot,
-        name: &str,
-    ) -> Option<&'a CachedDirEntry> {
-        snapshot.entries.iter().find(|entry| entry.name == name)
-    }
-
-    async fn dir_has_children(&self, fs: &Ext4, dir_ino: u32) -> bool {
-        let snapshot = self.build_dir_snapshot(fs, dir_ino).await;
-        snapshot
+    async fn dir_has_children(&self, fs: &Ext4, dir_ino: u32) -> VfsResult<bool> {
+        let snapshot = self.build_dir_snapshot(fs, dir_ino).await?;
+        Ok(snapshot
             .entries
             .iter()
-            .any(|entry| entry.name != "." && entry.name != "..")
+            .any(|entry| entry.name != "." && entry.name != ".."))
     }
 }
 
@@ -377,7 +364,7 @@ impl NodeOps for Inode {
     }
 
     async fn sync(&self, _data_only: bool) -> VfsResult<()> {
-        Ok(())
+        self.fs.flush_storage()
     }
 
     fn into_any(self: Arc<Self>) -> Arc<dyn Any + Send + Sync> {
@@ -488,7 +475,7 @@ impl DirNodeOps for Inode {
     async fn read_dir(&self, offset: u64, sink: &mut (dyn DirEntrySink + Send)) -> VfsResult<usize> {
         let fs = &self.fs.inner;
         self.validate_inode_num(&fs, self.ino)?;
-        let snapshot = self.dir_snapshot(&fs).await;
+        let snapshot = self.dir_snapshot(&fs).await?;
         let mut count = 0usize;
         for (index, entry) in snapshot.entries.iter().enumerate().skip(offset as usize) {
             if !sink.accept(
@@ -508,13 +495,6 @@ impl DirNodeOps for Inode {
         let fs = &self.fs.inner;
         self.validate_inode_num(&fs, self.ino)?;
 
-        if let Some(snapshot) = self.dir_cache.get() {
-            let Some(entry) = self.cached_entry(&snapshot, name) else {
-                return Err(VfsError::NotFound);
-            };
-            return Ok(self.create_entry(entry.inode_num, entry.node_type, entry.is_dir, &entry.name));
-        }
-
         let dir_idx = core::num::NonZeroU32::new(self.ino).ok_or(VfsError::InvalidData)?;
         let dir_inode = ext4plus::inode::Inode::read(&fs, dir_idx).await.map_err(into_vfs_err)?;
         let dir = ext4plus::dir::Dir::open_inode(&fs, dir_inode).map_err(into_vfs_err)?;
@@ -529,7 +509,7 @@ impl DirNodeOps for Inode {
                     name,
                 ))
             }
-            Err(_) => Err(VfsError::NotFound),
+            Err(e) => Err(into_vfs_err(e)),
         }
     }
 
@@ -543,14 +523,14 @@ impl DirNodeOps for Inode {
         self.validate_inode_num(&fs, self.ino)?;
         let _directory_guard = self.fs.directory_mutation.lock().await;
 
-        let exists = if let Some(snapshot) = self.dir_cache.get() {
-            self.cached_entry(&snapshot, name).is_some()
-        } else {
-            let dir_idx = core::num::NonZeroU32::new(self.ino).ok_or(VfsError::InvalidData)?;
-            let dir_inode = ext4plus::inode::Inode::read(&fs, dir_idx).await.map_err(into_vfs_err)?;
-            let dir = ext4plus::dir::Dir::open_inode(&fs, dir_inode).map_err(into_vfs_err)?;
-            let name_ref = ext4plus::DirEntryName::try_from(name).map_err(|_| VfsError::InvalidInput)?;
-            dir.get_entry(name_ref).await.is_ok()
+        let dir_idx = core::num::NonZeroU32::new(self.ino).ok_or(VfsError::InvalidData)?;
+        let dir_inode = ext4plus::inode::Inode::read(&fs, dir_idx).await.map_err(into_vfs_err)?;
+        let dir = ext4plus::dir::Dir::open_inode(&fs, dir_inode).map_err(into_vfs_err)?;
+        let name_ref = ext4plus::DirEntryName::try_from(name).map_err(|_| VfsError::InvalidInput)?;
+        let exists = match dir.get_entry(name_ref).await {
+            Ok(_) => true,
+            Err(Ext4Error::NotFound) => false,
+            Err(e) => return Err(into_vfs_err(e)),
         };
 
         if exists {
@@ -645,7 +625,9 @@ impl DirNodeOps for Inode {
         let name_ref = ext4plus::DirEntryName::try_from(name).map_err(|_| VfsError::InvalidInput)?;
         let child_inode = dir.get_entry(name_ref).await.map_err(into_vfs_err)?;
 
-        if child_inode.file_type() == ext4plus::FileType::Directory && self.dir_has_children(&fs, child_inode.index.get()).await {
+        if child_inode.file_type() == ext4plus::FileType::Directory
+            && self.dir_has_children(&fs, child_inode.index.get()).await?
+        {
             return Err(VfsError::DirectoryNotEmpty);
         }
 
@@ -708,7 +690,12 @@ impl DirNodeOps for Inode {
         let mut dst_dir_obj = ext4plus::dir::Dir::open_inode(&fs, dst_dir_inode).map_err(into_vfs_err)?;
         let dst_name_ref = ext4plus::DirEntryName::try_from(dst_name).map_err(|_| VfsError::InvalidInput)?;
 
-        if let Ok(dst_inode) = dst_dir_obj.get_entry(dst_name_ref).await {
+        let dst_inode = match dst_dir_obj.get_entry(dst_name_ref).await {
+            Ok(inode) => Some(inode),
+            Err(Ext4Error::NotFound) => None,
+            Err(e) => return Err(into_vfs_err(e)),
+        };
+        if let Some(dst_inode) = dst_inode {
             if dst_inode.index == src_inode.index {
                 return Ok(());
             }
@@ -723,7 +710,9 @@ impl DirNodeOps for Inode {
                 }
             }
 
-            if dst_inode.file_type() == ext4plus::FileType::Directory && self.dir_has_children(&fs, dst_inode.index.get()).await {
+            if dst_inode.file_type() == ext4plus::FileType::Directory
+                && self.dir_has_children(&fs, dst_inode.index.get()).await?
+            {
                 return Err(VfsError::DirectoryNotEmpty);
             }
 
@@ -806,5 +795,27 @@ fn into_ext4_type_bits(ty: NodeType) -> u16 {
         NodeType::Symlink => ext4plus::inode::InodeMode::S_IFLNK.bits(),
         NodeType::Socket => ext4plus::inode::InodeMode::S_IFSOCK.bits(),
         NodeType::Unknown => 0,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{DirCacheState, DirSnapshot};
+    use alloc::sync::Arc;
+    use alloc::vec::Vec;
+
+    #[test]
+    fn invalidated_directory_snapshot_cannot_be_published() {
+        let state = DirCacheState::new();
+        let stale_generation = state.generation();
+        let stale = Arc::new(DirSnapshot { entries: Vec::new() });
+
+        state.invalidate();
+        assert!(!state.publish(stale_generation, stale));
+        assert!(state.get().is_none());
+
+        let current = Arc::new(DirSnapshot { entries: Vec::new() });
+        assert!(state.publish(state.generation(), current.clone()));
+        assert!(Arc::ptr_eq(&state.get().unwrap(), &current));
     }
 }
