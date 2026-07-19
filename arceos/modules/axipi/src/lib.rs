@@ -31,6 +31,8 @@ static TLB_SHOOTDOWN_REQUESTED: [AtomicUsize; axconfig::plat::MAX_CPU_NUM] =
     [const { AtomicUsize::new(0) }; axconfig::plat::MAX_CPU_NUM];
 static TLB_SHOOTDOWN_COMPLETED: [AtomicUsize; axconfig::plat::MAX_CPU_NUM] =
     [const { AtomicUsize::new(0) }; axconfig::plat::MAX_CPU_NUM];
+static TLB_SHOOTDOWN_STATE_LOCKS: [SpinNoIrq<()>; axconfig::plat::MAX_CPU_NUM] =
+    [const { SpinNoIrq::new(()) }; axconfig::plat::MAX_CPU_NUM];
 
 /// Initialize the per-CPU IPI event queue.
 pub fn init() {
@@ -102,32 +104,60 @@ pub fn run_on_each_cpu<T: Into<MulticastCallback>>(callback: T) -> Result<(), Ip
 /// they remain safe when multiple CPUs fault concurrently with IRQs disabled.
 pub fn flush_tlb_all_cpus() -> Result<(), IpiError> {
     let current_cpu_id = this_cpu_id();
+    let cpu_num = axhal::cpu_num();
     let mut target_mask = 0usize;
+    let mut sent_mask = 0usize;
     let mut target_tickets = [0usize; axconfig::plat::MAX_CPU_NUM];
 
-    fence(Ordering::Release);
-    for cpu_id in 0..axhal::cpu_num() {
+    // CPU readiness is published before the CPU is marked online and remains
+    // stable for its lifetime. Validate every target before publishing any
+    // shootdown request so an error cannot leave a partially armed operation.
+    for cpu_id in 0..cpu_num {
         if cpu_id == current_cpu_id || !axhal::is_cpu_online(cpu_id) {
             continue;
         }
         if !IPI_CPU_READY[cpu_id].load(Ordering::Acquire) {
             return Err(IpiError::CpuOffline);
         }
-        target_tickets[cpu_id] = TLB_SHOOTDOWN_REQUESTED[cpu_id]
-            .fetch_add(1, Ordering::AcqRel)
-            .checked_add(1)
-            .expect("TLB shootdown ticket overflow");
         target_mask |= 1usize << cpu_id;
     }
 
+    fence(Ordering::Release);
     axhal::asm::flush_tlb(None);
-    for cpu_id in 0..axhal::cpu_num() {
+    for cpu_id in 0..cpu_num {
         if target_mask & (1usize << cpu_id) != 0 {
-            axhal::irq::send_ipi(IPI_IRQ, IpiTarget::Other { cpu_id })?;
+            let send_result = {
+                // Serializing publication with target-side service makes the
+                // just-published ticket safe to roll back on delivery failure.
+                let _state_guard = TLB_SHOOTDOWN_STATE_LOCKS[cpu_id].lock();
+                let ticket = TLB_SHOOTDOWN_REQUESTED[cpu_id]
+                    .fetch_add(1, Ordering::AcqRel)
+                    .checked_add(1)
+                    .expect("TLB shootdown ticket overflow");
+                target_tickets[cpu_id] = ticket;
+
+                let result = axhal::irq::send_ipi(IPI_IRQ, IpiTarget::Other { cpu_id });
+                if result.is_err() {
+                    let requested = TLB_SHOOTDOWN_REQUESTED[cpu_id].fetch_sub(1, Ordering::AcqRel);
+                    debug_assert_eq!(requested, ticket);
+                }
+                result
+            };
+
+            if let Err(error) = send_result {
+                wait_for_tlb_shootdowns(sent_mask, &target_tickets, cpu_num);
+                return Err(error);
+            }
+            sent_mask |= 1usize << cpu_id;
         }
     }
 
-    while (0..axhal::cpu_num()).any(|cpu_id| {
+    wait_for_tlb_shootdowns(sent_mask, &target_tickets, cpu_num);
+    Ok(())
+}
+
+fn wait_for_tlb_shootdowns(target_mask: usize, target_tickets: &[usize], cpu_num: usize) {
+    while (0..cpu_num).any(|cpu_id| {
         target_mask & (1usize << cpu_id) != 0
             && TLB_SHOOTDOWN_COMPLETED[cpu_id].load(Ordering::Acquire) < target_tickets[cpu_id]
     }) {
@@ -137,11 +167,14 @@ pub fn flush_tlb_all_cpus() -> Result<(), IpiError> {
         service_tlb_shootdown();
         core::hint::spin_loop();
     }
-    Ok(())
 }
 
-fn service_tlb_shootdown() {
+/// Services pending fixed-mailbox TLB shootdowns on the current CPU.
+///
+/// A periodic interrupt may also call this to service a delayed IPI promptly.
+pub fn service_tlb_shootdown() {
     let cpu_id = this_cpu_id();
+    let _state_guard = TLB_SHOOTDOWN_STATE_LOCKS[cpu_id].lock();
     loop {
         let requested = TLB_SHOOTDOWN_REQUESTED[cpu_id].load(Ordering::Acquire);
         if TLB_SHOOTDOWN_COMPLETED[cpu_id].load(Ordering::Relaxed) >= requested {
