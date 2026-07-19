@@ -83,7 +83,11 @@ pub fn sys_fcntl(fd: usize, cmd: usize, arg: usize) -> isize {
         F_GETFL => match get_fd_entry(fd) {
             Ok(entry) => {
                 let mut status = 0usize;
-                if entry.flags.contains(FdFlags::NONBLOCK) {
+                if entry
+                    .object
+                    .nonblocking_state()
+                    .unwrap_or_else(|| entry.flags.contains(FdFlags::NONBLOCK))
+                {
                     status |= O_NONBLOCK as usize;
                 }
                 if entry.object.is_read_open() && entry.object.is_write_open() {

@@ -6,7 +6,7 @@ use linux_raw_sys::general::{
     O_CLOEXEC, O_NONBLOCK, POLLERR, POLLHUP, POLLIN, POLLNVAL, POLLOUT, pollfd,
 };
 use pulse_core::{
-    fd_table::{FD_LIMIT, FileObject, FdObject, pipe_entries},
+    fd_table::{EventFdObject, FD_LIMIT, FileObject, FdObject, pipe_entries},
     task::uaccess,
 };
 
@@ -58,6 +58,11 @@ pub fn sys_read(fd: usize, buf: usize, count: usize) -> isize {
         return -LinuxError::EFAULT.code() as isize;
     }
     if count == 0 {
+        if get_fd_entry(fd)
+            .is_ok_and(|entry| entry.object.as_any().is::<EventFdObject>())
+        {
+            return -LinuxError::EINVAL.code() as isize;
+        }
         return 0;
     }
     let entry = match get_fd_entry(fd) {
@@ -154,6 +159,11 @@ pub fn sys_write(fd: usize, buf: usize, count: usize) -> isize {
         return -LinuxError::EFAULT.code() as isize;
     }
     if count == 0 {
+        if get_fd_entry(fd)
+            .is_ok_and(|entry| entry.object.as_any().is::<EventFdObject>())
+        {
+            return -LinuxError::EINVAL.code() as isize;
+        }
         return 0;
     }
     let entry = match get_fd_entry(fd) {
