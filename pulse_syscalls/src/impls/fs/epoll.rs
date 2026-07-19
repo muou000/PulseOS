@@ -11,8 +11,8 @@ use linux_raw_sys::general::{
     EPOLL_CTL_DEL, EPOLL_CTL_MOD, EPOLLET, EPOLLONESHOT, EPOLLRDHUP,
 };
 use pulse_core::fd_table::{
-    FdEntry, FdFlags, EpollObject, EpollRegistration, FdObject, PipeObject, StdinObject,
-    StdoutObject, PidfdObject, PollRegistration,
+    EpollObject, EpollRegistration, EventFdObject, FdEntry, FdFlags, FdObject, PidfdObject,
+    PipeObject, PollRegistration, StdinObject, StdoutObject,
 };
 
 use crate::impls::{
@@ -98,6 +98,7 @@ pub fn sys_epoll_ctl(
         || target_obj.as_any().is::<StdinObject>()
         || target_obj.as_any().is::<StdoutObject>()
         || target_obj.as_any().is::<PidfdObject>()
+        || target_obj.as_any().is::<EventFdObject>()
         || target_obj.as_any().is::<pulse_core::net::Socket>();
 
     if !is_pollable {
@@ -140,6 +141,8 @@ pub fn sys_epoll_ctl(
                 event: user_event,
                 reported_in: false,
                 reported_out: false,
+                reported_in_sequence: None,
+                reported_out_sequence: None,
             });
         }
         EPOLL_CTL_MOD => {
@@ -147,6 +150,8 @@ pub fn sys_epoll_ctl(
                 ev.event = user_event;
                 ev.reported_in = false;
                 ev.reported_out = false;
+                ev.reported_in_sequence = None;
+                ev.reported_out_sequence = None;
             } else {
                 return -LinuxError::ENOENT.code() as isize;
             }
@@ -205,12 +210,19 @@ impl Future for EpollFuture {
                         match entry.object.poll() {
                             Ok(state) => {
                                 let mut revents = 0u32;
+                                let sequence = entry.object.poll_event_sequence();
                                 if state.readable {
                                     if ev.event.events & EPOLLIN != 0 {
                                         if ev.event.events & EPOLLET != 0 {
-                                            if !ev.reported_in {
+                                            let sequence_changed = sequence.is_some_and(|seq| {
+                                                ev.reported_in_sequence != Some(seq.readable)
+                                            });
+                                            if !ev.reported_in || sequence_changed {
                                                 revents |= EPOLLIN;
                                                 ev.reported_in = true;
+                                                if let Some(seq) = sequence {
+                                                    ev.reported_in_sequence = Some(seq.readable);
+                                                }
                                             }
                                         } else {
                                             revents |= EPOLLIN;
@@ -223,9 +235,15 @@ impl Future for EpollFuture {
                                 if state.writable {
                                     if ev.event.events & EPOLLOUT != 0 {
                                         if ev.event.events & EPOLLET != 0 {
-                                            if !ev.reported_out {
+                                            let sequence_changed = sequence.is_some_and(|seq| {
+                                                ev.reported_out_sequence != Some(seq.writable)
+                                            });
+                                            if !ev.reported_out || sequence_changed {
                                                 revents |= EPOLLOUT;
                                                 ev.reported_out = true;
+                                                if let Some(seq) = sequence {
+                                                    ev.reported_out_sequence = Some(seq.writable);
+                                                }
                                             }
                                         } else {
                                             revents |= EPOLLOUT;

@@ -352,6 +352,7 @@ fn syscall_dispatcher(
         Sysno::dup => impls::sys_dup(args[0]),
         Sysno::dup3 => impls::sys_dup3(args[0], args[1], args[2]),
         Sysno::pipe2 => impls::sys_pipe2(args[0], args[1]),
+        Sysno::eventfd2 => impls::sys_eventfd2(args[0] as u32, args[1] as u32),
         Sysno::socket => impls::sys_socket(args[0], args[1], args[2]),
         Sysno::socketpair => impls::sys_socketpair(args[0], args[1], args[2], args[3]),
         Sysno::bind => impls::sys_bind(args[0], args[1], args[2]),

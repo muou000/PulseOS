@@ -40,6 +40,12 @@ pub struct PollRegistration {
     cancel: Option<Box<dyn FnOnce() + Send + 'static>>,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct PollEventSequence {
+    pub readable: u64,
+    pub writable: u64,
+}
+
 impl PollRegistration {
     pub fn new(cancel: impl FnOnce() + Send + 'static) -> Self {
         Self {
@@ -114,8 +120,9 @@ pub trait FdObject: Send + Sync {
     /// waker-based wait (and therefore cannot wake a blocked epoll/poll
     /// caller) cannot silently break waker-based waiters. Concrete
     /// implementations that *do* support such waiting (e.g. `PipeObject`,
-    /// `StdinObject`, `EpollObject`, `Socket`, `PidfdObject`) must override
-    /// this method and register the waker on their underlying wait queue.
+    /// `EventFdObject`, `StdinObject`, `EpollObject`, `Socket`, `PidfdObject`)
+    /// must override this method and register the waker on their underlying
+    /// wait queue.
     fn register_poll(
         self: Arc<Self>,
         _cx: &mut core::task::Context<'_>,
@@ -186,6 +193,14 @@ pub trait FdObject: Send + Sync {
     }
 
     fn poll_set(&self) -> Option<&axpoll::PollSet> {
+        None
+    }
+
+    fn nonblocking_state(&self) -> Option<bool> {
+        None
+    }
+
+    fn poll_event_sequence(&self) -> Option<PollEventSequence> {
         None
     }
 }
@@ -1395,6 +1410,270 @@ fn dealloc_physical_frame(frame: PhysAddr) {
     }
 }
 
+const EVENTFD_COUNTER_MAX: u64 = u64::MAX - 1;
+
+pub struct EventFdObject {
+    counter: AtomicU64,
+    semaphore: bool,
+    nonblocking: AtomicBool,
+    read_wait_queue: axtask::WaitQueue,
+    write_wait_queue: axtask::WaitQueue,
+    readable_sequence: AtomicU64,
+    writable_sequence: AtomicU64,
+}
+
+impl EventFdObject {
+    fn new(initval: u32, semaphore: bool, nonblocking: bool) -> Self {
+        Self {
+            counter: AtomicU64::new(initval as u64),
+            semaphore,
+            nonblocking: AtomicBool::new(nonblocking),
+            read_wait_queue: axtask::WaitQueue::new(),
+            write_wait_queue: axtask::WaitQueue::new(),
+            readable_sequence: AtomicU64::new(0),
+            writable_sequence: AtomicU64::new(0),
+        }
+    }
+
+    #[inline]
+    fn current_has_pending_signal() -> bool {
+        crate::task::current_have_signals()
+    }
+
+    #[inline]
+    fn can_write(counter: u64, value: u64) -> bool {
+        u64::MAX - counter > value
+    }
+
+    fn ready_for(&self, wait_for_read: bool, wait_for_write: bool) -> bool {
+        let counter = self.counter.load(Ordering::Acquire);
+        (wait_for_read && counter > 0)
+            || (wait_for_write && counter < EVENTFD_COUNTER_MAX)
+    }
+
+    fn wait_for_ready(
+        &self,
+        wait_queue: &axtask::WaitQueue,
+        wait_for_read: bool,
+        wait_for_write: bool,
+        deadline: Option<Duration>,
+    ) -> LinuxResult<bool> {
+        let condition = || {
+            self.ready_for(wait_for_read, wait_for_write)
+                || Self::current_has_pending_signal()
+        };
+
+        match deadline {
+            Some(deadline) => {
+                let now = axhal::time::monotonic_time();
+                if now >= deadline {
+                    return Ok(self.ready_for(wait_for_read, wait_for_write));
+                }
+                wait_queue.wait_timeout_until(deadline - now, condition);
+            }
+            None => wait_queue.wait_until(condition),
+        }
+
+        if Self::current_has_pending_signal() {
+            return Err(LinuxError::EINTR);
+        }
+        Ok(self.ready_for(wait_for_read, wait_for_write))
+    }
+}
+
+impl FdObject for EventFdObject {
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn is_read_open(&self) -> bool {
+        true
+    }
+
+    fn is_write_open(&self) -> bool {
+        true
+    }
+
+    fn read(&self, buf: &mut [u8]) -> LinuxResult<usize> {
+        if buf.len() < core::mem::size_of::<u64>() {
+            return Err(LinuxError::EINVAL);
+        }
+
+        loop {
+            let counter = self.counter.load(Ordering::Acquire);
+            if counter == 0 {
+                if self.nonblocking.load(Ordering::Acquire) {
+                    return Err(LinuxError::EAGAIN);
+                }
+                self.read_wait_queue.wait_until(|| {
+                    self.counter.load(Ordering::Acquire) > 0
+                        || Self::current_has_pending_signal()
+                });
+                if Self::current_has_pending_signal() {
+                    return Err(LinuxError::EINTR);
+                }
+                continue;
+            }
+
+            let value = if self.semaphore { 1 } else { counter };
+            if self
+                .counter
+                .compare_exchange_weak(
+                    counter,
+                    counter - value,
+                    Ordering::AcqRel,
+                    Ordering::Acquire,
+                )
+                .is_ok()
+            {
+                buf[..core::mem::size_of::<u64>()].copy_from_slice(&value.to_ne_bytes());
+                self.writable_sequence.fetch_add(1, Ordering::Release);
+                self.write_wait_queue.notify_all(true);
+                return Ok(core::mem::size_of::<u64>());
+            }
+        }
+    }
+
+    fn write(&self, buf: &[u8]) -> LinuxResult<usize> {
+        if buf.len() != core::mem::size_of::<u64>() {
+            return Err(LinuxError::EINVAL);
+        }
+        let value = u64::from_ne_bytes(buf.try_into().unwrap());
+        if value == u64::MAX {
+            return Err(LinuxError::EINVAL);
+        }
+
+        loop {
+            let counter = self.counter.load(Ordering::Acquire);
+            if !Self::can_write(counter, value) {
+                if self.nonblocking.load(Ordering::Acquire) {
+                    return Err(LinuxError::EAGAIN);
+                }
+                self.write_wait_queue.wait_until(|| {
+                    Self::can_write(self.counter.load(Ordering::Acquire), value)
+                        || Self::current_has_pending_signal()
+                });
+                if Self::current_has_pending_signal() {
+                    return Err(LinuxError::EINTR);
+                }
+                continue;
+            }
+
+            if self
+                .counter
+                .compare_exchange_weak(
+                    counter,
+                    counter + value,
+                    Ordering::AcqRel,
+                    Ordering::Acquire,
+                )
+                .is_ok()
+            {
+                self.readable_sequence.fetch_add(1, Ordering::Release);
+                self.read_wait_queue.notify_all(true);
+                return Ok(core::mem::size_of::<u64>());
+            }
+        }
+    }
+
+    fn stat(&self) -> LinuxResult<stat> {
+        Ok(stat {
+            st_ino: 1,
+            st_nlink: 1,
+            st_mode: S_IFREG | 0o600,
+            st_blksize: 4096,
+            ..empty_stat()
+        })
+    }
+
+    fn poll(&self) -> LinuxResult<PollState> {
+        let counter = self.counter.load(Ordering::Acquire);
+        Ok(PollState {
+            readable: counter > 0,
+            writable: counter < EVENTFD_COUNTER_MAX,
+        })
+    }
+
+    fn set_nonblocking(&self, nonblocking: bool) -> LinuxResult {
+        self.nonblocking.store(nonblocking, Ordering::Release);
+        Ok(())
+    }
+
+    fn nonblocking_state(&self) -> Option<bool> {
+        Some(self.nonblocking.load(Ordering::Acquire))
+    }
+
+    fn poll_event_sequence(&self) -> Option<PollEventSequence> {
+        Some(PollEventSequence {
+            readable: self.readable_sequence.load(Ordering::Acquire),
+            writable: self.writable_sequence.load(Ordering::Acquire),
+        })
+    }
+
+    fn wait_ready(&self, events: i16, deadline: Option<Duration>) -> LinuxResult<bool> {
+        let wait_for_read = (events & POLLIN as i16) != 0;
+        let wait_for_write = (events & POLLOUT as i16) != 0;
+        if !wait_for_read && !wait_for_write {
+            return Err(LinuxError::EOPNOTSUPP);
+        }
+        if self.ready_for(wait_for_read, wait_for_write) {
+            return Ok(true);
+        }
+
+        let wait_queue = if wait_for_read {
+            &self.read_wait_queue
+        } else {
+            &self.write_wait_queue
+        };
+        self.wait_for_ready(
+            wait_queue,
+            wait_for_read,
+            wait_for_write,
+            deadline,
+        )
+    }
+
+    fn get_wait_queues<'a>(
+        &'a self,
+        events: i16,
+        wqs: &mut Vec<&'a axtask::WaitQueue>,
+    ) -> LinuxResult<bool> {
+        let mut supported = false;
+        if (events & POLLIN as i16) != 0 {
+            wqs.push(&self.read_wait_queue);
+            supported = true;
+        }
+        if (events & POLLOUT as i16) != 0 {
+            wqs.push(&self.write_wait_queue);
+            supported = true;
+        }
+        Ok(supported || events == 0)
+    }
+
+    fn register_poll(
+        self: Arc<Self>,
+        cx: &mut core::task::Context<'_>,
+        events: axpoll::IoEvents,
+        registrations: &mut Vec<PollRegistration>,
+    ) -> LinuxResult {
+        if events.contains(axpoll::IoEvents::IN) {
+            let owner = self.clone();
+            let registration = owner.read_wait_queue.register_owned_waker(cx.waker());
+            registrations.push(PollRegistration::new(move || {
+                owner.read_wait_queue.unregister_waker(registration);
+            }));
+        }
+        if events.contains(axpoll::IoEvents::OUT) {
+            let owner = self.clone();
+            let registration = owner.write_wait_queue.register_owned_waker(cx.waker());
+            registrations.push(PollRegistration::new(move || {
+                owner.write_wait_queue.unregister_waker(registration);
+            }));
+        }
+        Ok(())
+    }
+}
+
 pub struct PipeShared {
     buffer: Mutex<PipeRingBuffer>,
     read_wait_queue: axtask::WaitQueue,
@@ -2057,6 +2336,8 @@ pub struct EpollRegistration {
     pub event: epoll_event,
     pub reported_in: bool,
     pub reported_out: bool,
+    pub reported_in_sequence: Option<u64>,
+    pub reported_out_sequence: Option<u64>,
 }
 
 pub struct EpollObject {
@@ -2220,6 +2501,15 @@ pub fn pipe_entries(flags: FdFlags) -> (FdEntry, FdEntry) {
         FdEntry::new(read_object, flags),
         FdEntry::new(write_object, flags),
     )
+}
+
+pub fn eventfd_entry(initval: u32, semaphore: bool, flags: FdFlags) -> FdEntry {
+    let object: Arc<dyn FdObject> = Arc::new(EventFdObject::new(
+        initval,
+        semaphore,
+        flags.contains(FdFlags::NONBLOCK),
+    ));
+    FdEntry::new(object, flags)
 }
 
 static FIFO_REGISTRY: Lazy<Mutex<BTreeMap<(u64, u64), Weak<PipeShared>>>> =
