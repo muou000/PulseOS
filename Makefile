@@ -6,7 +6,7 @@ export AX_LIB := axfeat
 export APP_FEATURES := qemu
 export BLK := y
 
-export MEM := 1G
+export MEM := 8G
 export ARCH ?= riscv64
 export LOG ?= info
 

@@ -229,7 +229,9 @@ pub fn set_priority(prio: isize) -> bool {
 ///
 /// TODO: support set the affinity for other tasks.
 pub fn set_current_affinity(cpumask: AxCpuMask) -> bool {
-    if cpumask.is_empty() {
+    let has_online_cpu =
+        (0..axhal::cpu_num()).any(|cpu_id| cpumask.get(cpu_id) && axhal::is_cpu_online(cpu_id));
+    if cpumask.is_empty() || !has_online_cpu {
         false
     } else {
         let curr = current().clone();
@@ -239,12 +241,11 @@ pub fn set_current_affinity(cpumask: AxCpuMask) -> bool {
         // the affinity. If not, we need to migrate the task to the correct CPU.
         #[cfg(feature = "smp")]
         if !cpumask.get(axhal::percpu::this_cpu_id()) {
-            const MIGRATION_TASK_STACK_SIZE: usize = 4096;
-            // Spawn a new migration task for migrating.
+            // Migration executes scheduler and IPI paths on this stack.
             let migration_task = TaskInner::new(
                 move || crate::run_queue::migrate_entry(curr),
                 "migration-task".into(),
-                MIGRATION_TASK_STACK_SIZE,
+                axconfig::TASK_STACK_SIZE,
             )
             .into_arc();
 
@@ -269,6 +270,14 @@ pub fn yield_now() {
 /// Wakes a blocked task and puts it back into a run queue.
 pub fn wake_task(task: AxTaskRef, resched: bool) {
     select_wake_run_queue::<NoPreemptIrqSave>(&task).unblock_task(task, resched)
+}
+
+/// Interrupts a task blocked in an interruptible future or wait operation.
+pub fn interrupt_task(task: AxTaskRef, resched: bool) {
+    task.interrupt();
+    if task.state() == crate::task::TaskState::Blocked {
+        select_wake_run_queue::<NoPreemptIrqSave>(&task).unblock_task(task, resched);
+    }
 }
 
 /// Updates the saved page table root of the current task context.
@@ -306,9 +315,6 @@ pub fn exit(exit_code: i32) -> ! {
 /// It runs an infinite loop that keeps calling [`yield_now()`].
 pub fn run_idle() -> ! {
     loop {
-        #[cfg(feature = "preempt")]
-        core::hint::spin_loop();
-        #[cfg(not(feature = "preempt"))]
         yield_now();
     }
 }

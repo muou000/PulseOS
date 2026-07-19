@@ -25,6 +25,7 @@ multitask = [
     "dep:cpumask",
 ]
 irq = []
+ipi = ["irq", "dep:axipi"]
 tls = ["axhal/tls"]
 preempt = ["irq", "percpu?/preempt", "kernel_guard/preempt"]
 smp = ["kspin/smp"]
@@ -54,6 +55,7 @@ axsched = { workspace = true, optional = true }
 axpoll.workspace = true
 axio.workspace = true
 futures-util.workspace = true
+axipi = { workspace = true, optional = true }
 
 [dev-dependencies]
 rand.workspace = true

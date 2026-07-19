@@ -1,6 +1,6 @@
 use core::sync::atomic::{AtomicU64, Ordering};
 
-use kernel_guard::NoOp;
+use kernel_guard::{NoOp, NoPreemptIrqSave};
 use lazyinit::LazyInit;
 use timer_list::{TimeValue, TimerEvent, TimerList};
 
@@ -20,6 +20,8 @@ pub enum AxTimerEvent {
     },
 }
 
+// Task-context insertions must disable local IRQs because the timer IRQ also
+// mutates this per-CPU heap.
 percpu_static! {
     TIMER_LIST: LazyInit<TimerList<AxTimerEvent>> = LazyInit::new(),
 }
@@ -113,6 +115,7 @@ pub fn next_deadline() -> Option<TimeValue> {
 }
 
 pub fn set_alarm_wakeup(deadline: TimeValue, task: AxTaskRef) {
+    let _guard = NoPreemptIrqSave::new();
     TIMER_LIST.with_current(|timer_list| {
         let ticket_id = TIMER_TICKET_ID.fetch_add(1, Ordering::AcqRel);
         task.set_timer_ticket(ticket_id);
@@ -128,6 +131,7 @@ pub fn set_alarm_wakeup(deadline: TimeValue, task: AxTaskRef) {
 }
 
 pub fn set_generic_timer(deadline: TimeValue, callback: alloc::boxed::Box<dyn FnOnce(TimeValue) + Send + Sync>) {
+    let _guard = NoPreemptIrqSave::new();
     TIMER_LIST.with_current(|timer_list| {
         timer_list.set(deadline, AxTimerEvent::Generic { callback });
     });

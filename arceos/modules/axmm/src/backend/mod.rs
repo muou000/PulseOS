@@ -1,9 +1,9 @@
 //! Memory mapping backends.
 
 use axhal::paging::{MappingFlags, PageSize};
-use memory_addr::VirtAddr;
+use memory_addr::{PhysAddr, VirtAddr};
 use memory_set::MappingBackend;
-use ::alloc::sync::Arc;
+use ::alloc::{sync::Arc, vec::Vec};
 
 mod alloc;
 mod cow;
@@ -57,10 +57,84 @@ pub enum Backend {
     Cow(CowMapping),
 }
 
+enum DeferredReclaim {
+    Frame(PhysAddr),
+    Backend(Backend),
+}
+
+/// Mapping references kept alive until a remote TLB shootdown has completed.
+pub struct DeferredReclaims {
+    actions: Option<Vec<DeferredReclaim>>,
+}
+
+impl Default for DeferredReclaims {
+    fn default() -> Self {
+        Self {
+            actions: Some(Vec::new()),
+        }
+    }
+}
+
+impl DeferredReclaims {
+    pub(crate) fn defer_frame(&mut self, frame: PhysAddr) {
+        if frame.as_usize() != 0 {
+            self.actions
+                .as_mut()
+                .unwrap()
+                .push(DeferredReclaim::Frame(frame));
+        }
+    }
+
+    fn defer_backend(&mut self, backend: Backend) {
+        self.actions
+            .as_mut()
+            .unwrap()
+            .push(DeferredReclaim::Backend(backend));
+    }
+
+    pub(crate) fn is_empty(&self) -> bool {
+        self.actions.as_ref().unwrap().is_empty()
+    }
+
+    pub(crate) fn append(&mut self, other: Self) {
+        let mut actions = other.into_actions();
+        self.actions.as_mut().unwrap().append(&mut actions);
+    }
+
+    pub(crate) fn reclaim(self) {
+        for action in self.into_actions() {
+            match action {
+                DeferredReclaim::Frame(frame) => self::alloc::dealloc_frame(frame),
+                DeferredReclaim::Backend(backend) => drop(backend),
+            }
+        }
+    }
+
+    fn into_actions(mut self) -> Vec<DeferredReclaim> {
+        self.actions.take().unwrap()
+    }
+}
+
+impl Drop for DeferredReclaims {
+    fn drop(&mut self) {
+        let Some(actions) = self.actions.take() else {
+            return;
+        };
+        if !actions.is_empty() {
+            error!(
+                "leaking {} deferred mapping references after incomplete TLB shootdown",
+                actions.len()
+            );
+            core::mem::forget(actions);
+        }
+    }
+}
+
 impl MappingBackend for Backend {
     type Addr = VirtAddr;
     type Flags = MappingFlags;
     type PageTable = crate::PageTableLockManager;
+    type Reclaim = DeferredReclaims;
     fn map(&self, start: VirtAddr, size: usize, flags: MappingFlags, pt: &mut Self::PageTable) -> bool {
         let pt = pt.get_mut();
         match self {
@@ -81,14 +155,25 @@ impl MappingBackend for Backend {
         }
     }
 
-    fn unmap(&self, start: VirtAddr, size: usize, pt: &mut Self::PageTable) -> bool {
+    fn unmap(
+        &self,
+        start: VirtAddr,
+        size: usize,
+        pt: &mut Self::PageTable,
+        reclaim: &mut Self::Reclaim,
+    ) -> bool {
         let pt_mut = pt.get_mut();
         match self {
-            Self::Shared { .. } => Self::unmap_shared(start, size, pt_mut),
+            Self::Shared { .. } => {
+                reclaim.defer_backend(self.clone());
+                Self::unmap_shared(start, size, pt_mut)
+            }
             Self::Linear { pa_va_offset } => self.unmap_linear(start, size, pt_mut, *pa_va_offset),
-            Self::Alloc { populate, .. } => self.unmap_alloc(start, size, pt_mut, *populate),
-            Self::File(_) => self.unmap_file(start, size, pt_mut),
-            Self::Cow(cow) => cow.inner.unmap(start, size, pt),
+            Self::Alloc { populate, .. } => {
+                self.unmap_alloc(start, size, pt_mut, *populate, reclaim)
+            }
+            Self::File(_) => self.unmap_file(start, size, pt_mut, reclaim),
+            Self::Cow(cow) => cow.inner.unmap(start, size, pt, reclaim),
         }
     }
 
@@ -132,6 +217,7 @@ impl Backend {
         orig_flags: MappingFlags,
         page_table: &crate::PageTableLockManager,
         access_flags: MappingFlags,
+        reclaim: &mut DeferredReclaims,
     ) -> bool {
         match self {
             Self::Shared { .. } => false,
@@ -139,10 +225,23 @@ impl Backend {
             Self::Alloc { populate, .. } => {
                 self.handle_page_fault_alloc(vaddr, area_end, orig_flags, page_table, *populate)
             }
-            Self::File(mapping) => {
-                self.handle_page_fault_file(vaddr, area_end, orig_flags, page_table, mapping, access_flags)
-            }
-            Self::Cow(cow) => cow.handle_page_fault(vaddr, area_end, orig_flags, page_table, access_flags),
+            Self::File(mapping) => self.handle_page_fault_file(
+                vaddr,
+                area_end,
+                orig_flags,
+                page_table,
+                mapping,
+                access_flags,
+                reclaim,
+            ),
+            Self::Cow(cow) => cow.handle_page_fault(
+                vaddr,
+                area_end,
+                orig_flags,
+                page_table,
+                access_flags,
+                reclaim,
+            ),
         }
     }
 

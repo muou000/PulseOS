@@ -120,6 +120,7 @@ impl<B: MappingBackend> MemorySet<B> {
         area: MemoryArea<B>,
         page_table: &mut B::PageTable,
         unmap_overlap: bool,
+        reclaim: &mut B::Reclaim,
     ) -> MappingResult {
         if area.va_range().is_empty() {
             return Err(MappingError::InvalidParam);
@@ -127,7 +128,7 @@ impl<B: MappingBackend> MemorySet<B> {
 
         if self.overlaps(area.va_range()) {
             if unmap_overlap {
-                self.unmap(area.start(), area.size(), page_table)?;
+                self.unmap(area.start(), area.size(), page_table, reclaim)?;
             } else {
                 return Err(MappingError::AlreadyExists);
             }
@@ -149,6 +150,7 @@ impl<B: MappingBackend> MemorySet<B> {
         start: B::Addr,
         size: usize,
         page_table: &mut B::PageTable,
+        reclaim: &mut B::Reclaim,
     ) -> MappingResult {
         let range =
             AddrRange::try_from_start_size(start, size).ok_or(MappingError::InvalidParam)?;
@@ -159,14 +161,23 @@ impl<B: MappingBackend> MemorySet<B> {
         let end = range.end;
 
         // Unmap entire areas that are contained by the range.
+        let mut unmap_error = None;
         self.areas.retain(|_, area| {
             if area.va_range().contained_in(range) {
-                area.unmap_area(page_table).unwrap();
-                false
+                match area.unmap_area(page_table, reclaim) {
+                    Ok(()) => false,
+                    Err(error) => {
+                        unmap_error.get_or_insert(error);
+                        true
+                    }
+                }
             } else {
                 true
             }
         });
+        if let Some(error) = unmap_error {
+            return Err(error);
+        }
 
         // Shrink right if the area intersects with the left boundary.
         if let Some((&before_start, before)) = self.areas.range_mut(..start).last() {
@@ -174,11 +185,18 @@ impl<B: MappingBackend> MemorySet<B> {
             if before_end > start {
                 if before_end <= end {
                     // the unmapped area is at the end of `before`.
-                    before.shrink_right(start.sub_addr(before_start), page_table)?;
+                    before.shrink_right(start.sub_addr(before_start), page_table, reclaim)?;
                 } else {
                     // the unmapped area is in the middle `before`, need to split.
+                    let middle_part = MemoryArea::new(
+                        start,
+                        end.sub_addr(start),
+                        before.flags(),
+                        before.backend().clone(),
+                    );
+                    middle_part.unmap_area(page_table, reclaim)?;
                     let right_part = before.split(end).unwrap();
-                    before.shrink_right(start.sub_addr(before_start), page_table)?;
+                    before.set_end(start);
                     assert_eq!(right_part.start().into(), Into::<usize>::into(end));
                     self.areas.insert(end, right_part);
                 }
@@ -190,10 +208,17 @@ impl<B: MappingBackend> MemorySet<B> {
             let after_end = after.end();
             if after_start < end {
                 // the unmapped area is at the start of `after`.
-                let mut new_area = self.areas.remove(&after_start).unwrap();
-                new_area.shrink_left(after_end.sub_addr(end), page_table)?;
-                assert_eq!(new_area.start().into(), Into::<usize>::into(end));
-                self.areas.insert(end, new_area);
+                let prefix = MemoryArea::new(
+                    after_start,
+                    end.sub_addr(after_start),
+                    after.flags(),
+                    after.backend().clone(),
+                );
+                prefix.unmap_area(page_table, reclaim)?;
+                let right_part = after.split(end).unwrap();
+                self.areas.remove(&after_start).unwrap();
+                assert_eq!(right_part.end().into(), Into::<usize>::into(after_end));
+                self.areas.insert(end, right_part);
             }
         }
 
@@ -201,12 +226,19 @@ impl<B: MappingBackend> MemorySet<B> {
     }
 
     /// Remove all memory areas and the underlying mappings.
-    pub fn clear(&mut self, page_table: &mut B::PageTable) -> MappingResult {
+    pub fn clear(
+        &mut self,
+        page_table: &mut B::PageTable,
+        reclaim: &mut B::Reclaim,
+    ) -> MappingResult {
+        let mut unmap_error = None;
         for (_, area) in self.areas.iter() {
-            area.unmap_area(page_table)?;
+            if let Err(error) = area.unmap_area(page_table, reclaim) {
+                unmap_error.get_or_insert(error);
+            }
         }
         self.areas.clear();
-        Ok(())
+        unmap_error.map_or(Ok(()), Err)
     }
 
     /// Change the flags of memory mappings within the given address range.
@@ -227,19 +259,26 @@ impl<B: MappingBackend> MemorySet<B> {
     ) -> MappingResult {
         let end = start.checked_add(size).ok_or(MappingError::InvalidParam)?;
         let mut to_insert = Vec::new();
+        let mut protect_error = None;
         for (&area_start, area) in self.areas.iter_mut() {
             let area_end = area.end();
 
-            if let Some(new_flags) = update_flags(area.flags()) {
-                if area_start >= end {
-                    // [ prot ]
-                    //          [ area ]
-                    break;
-                } else if area_end <= start {
-                    //          [ prot ]
-                    // [ area ]
-                    // Do nothing
-                } else if area_start >= start && area_end <= end {
+            if area_start >= end {
+                // [ prot ]
+                //          [ area ]
+                break;
+            }
+            if area_end <= start {
+                //          [ prot ]
+                // [ area ]
+                continue;
+            }
+            let Some(new_flags) = update_flags(area.flags()) else {
+                continue;
+            };
+
+            let area_result = (|| -> MappingResult {
+                if area_start >= start && area_end <= end {
                     // [   prot   ]
                     //   [ area ]
                     area.protect_area(new_flags, page_table)?;
@@ -247,37 +286,53 @@ impl<B: MappingBackend> MemorySet<B> {
                 } else if area_start < start && area_end > end {
                     //        [ prot ]
                     // [ left | area | right ]
-                    let right_part = area.split(end).unwrap();
-                    area.set_end(start);
-
                     let mut middle_part =
                         MemoryArea::new(start, size, area.flags(), area.backend().clone());
                     middle_part.protect_area(new_flags, page_table)?;
                     middle_part.set_flags(new_flags);
 
+                    let right_part = area.split(end).unwrap();
+                    area.set_end(start);
                     to_insert.push((right_part.start(), right_part));
                     to_insert.push((middle_part.start(), middle_part));
                 } else if area_end > end {
                     // [    prot ]
                     //   [  area | right ]
+                    let mut protected_part = MemoryArea::new(
+                        area_start,
+                        end.sub_addr(area_start),
+                        area.flags(),
+                        area.backend().clone(),
+                    );
+                    protected_part.protect_area(new_flags, page_table)?;
                     let right_part = area.split(end).unwrap();
-                    area.protect_area(new_flags, page_table)?;
                     area.set_flags(new_flags);
 
                     to_insert.push((right_part.start(), right_part));
                 } else {
                     //        [ prot    ]
                     // [ left |  area ]
+                    let mut protected_part = MemoryArea::new(
+                        start,
+                        area_end.sub_addr(start),
+                        area.flags(),
+                        area.backend().clone(),
+                    );
+                    protected_part.protect_area(new_flags, page_table)?;
                     let mut right_part = area.split(start).unwrap();
-                    right_part.protect_area(new_flags, page_table)?;
                     right_part.set_flags(new_flags);
 
                     to_insert.push((right_part.start(), right_part));
                 }
+                Ok(())
+            })();
+            if let Err(error) = area_result {
+                protect_error = Some(error);
+                break;
             }
         }
         self.areas.extend(to_insert);
-        Ok(())
+        protect_error.map_or(Ok(()), Err)
     }
 }
 

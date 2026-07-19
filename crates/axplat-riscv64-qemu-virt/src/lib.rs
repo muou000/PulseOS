@@ -7,6 +7,7 @@ extern crate axplat;
 
 mod boot;
 mod console;
+mod cpu_topology;
 mod init;
 #[cfg(feature = "irq")]
 mod irq;
@@ -14,6 +15,7 @@ mod mem;
 mod power;
 mod plic;
 mod time;
+mod topology;
 
 pub mod config {
     //! Platform configuration module.

@@ -27,6 +27,7 @@ pub struct Ext4Filesystem {
     deletion_generation: AtomicU64,
     deletion_worker_running: AtomicBool,
     deletion_processing: async_lock::Mutex<()>,
+    pub(super) directory_mutation: async_lock::Mutex<()>,
 }
 
 impl Ext4Filesystem {
@@ -82,6 +83,7 @@ impl Ext4Filesystem {
             deletion_generation: AtomicU64::new(0),
             deletion_worker_running: AtomicBool::new(false),
             deletion_processing: async_lock::Mutex::new(()),
+            directory_mutation: async_lock::Mutex::new(()),
         });
         let root_dir = DirEntry::new_dir(
             |this| DirNode::new(Inode::new(fs.clone(), ROOT_INODE, Some(this))),

@@ -85,6 +85,10 @@ pub fn syscall_handler(tf: &mut TrapFrame, syscall_num: usize) -> isize {
         set_syscall_ret(tf, ret);
     }
 
+    // Consume the interrupt that ended this syscall before checking signals.
+    // A signal arriving during or after the check must remain latched.
+    axtask::current().clear_interrupt();
+
     if thread.signal().has_pending_or_skip_once() {
         if let Some(delivery) = pulse_core::task::check_signals_and_deliver(thread.as_ref(), tf) {
             use pulse_core::task::{DefaultSignalAction, SignalAction};

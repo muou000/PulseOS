@@ -14,6 +14,8 @@ pub trait MappingBackend: Clone {
     type Flags: Copy;
     /// The page table type used in the memory area.
     type PageTable;
+    /// Resources whose reclamation must be deferred by the caller after unmap.
+    type Reclaim;
 
     /// What to do when mapping a region within the area with the given flags.
     fn map(
@@ -25,7 +27,16 @@ pub trait MappingBackend: Clone {
     ) -> bool;
 
     /// What to do when unmaping a memory region within the area.
-    fn unmap(&self, start: Self::Addr, size: usize, page_table: &mut Self::PageTable) -> bool;
+    ///
+    /// Resources detached from the page table must be added to `reclaim`,
+    /// including when the operation returns `false` after a partial unmap.
+    fn unmap(
+        &self,
+        start: Self::Addr,
+        size: usize,
+        page_table: &mut Self::PageTable,
+        reclaim: &mut Self::Reclaim,
+    ) -> bool;
 
     /// What to do when changing access flags.
     fn protect(

@@ -699,8 +699,9 @@ where
     };
 
     axtask::future::block_on(async {
-        axtask::future::timeout_at(deadline, wait_for_io)
+        axtask::future::interruptible(axtask::future::timeout_at(deadline, wait_for_io))
             .await
+            .map_err(AxError::from)?
             .map_err(|_| AxError::TimedOut)?
     })
 }

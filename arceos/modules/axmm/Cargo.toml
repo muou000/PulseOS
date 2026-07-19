@@ -10,12 +10,14 @@ repository = "https://github.com/arceos-org/arceos/tree/main/modules/axmm"
 documentation = "https://arceos-org.github.io/arceos/axmm/index.html"
 
 [features]
+ipi = ["dep:axipi"]
 
 [dependencies]
 axhal = { workspace = true, features = ["paging"] }
 axalloc = { workspace = true }
 axconfig = { workspace = true }
 axfs = { workspace = true }
+axipi = { workspace = true, optional = true }
 
 log.workspace = true
 axerrno.workspace = true

@@ -177,6 +177,8 @@ impl FutexTable {
         while woken < count && queue.notify_one(true) {
             woken += 1;
         }
+        drop(queue);
+        self.remove_if_empty(addr);
         woken
     }
 
@@ -193,6 +195,8 @@ impl FutexTable {
         while woken < count && queue.notify_one(false) {
             woken += 1;
         }
+        drop(queue);
+        self.remove_if_empty(addr);
         woken
     }
 
@@ -244,7 +248,10 @@ impl FutexTable {
         let mut queues = self.queues.lock();
         if let Some(queue) = queues.get(&addr) {
             queue.prune_exited();
-            if queue.is_empty() && Arc::strong_count(queue) <= 2 {
+            // The table must be the sole Arc owner. A waiter obtains an Arc
+            // before it enrolls in the WaitQueue, so removing at a count of 2
+            // can orphan that waiter before a concurrent wake lookup.
+            if queue.is_empty() && Arc::strong_count(queue) == 1 {
                 queues.remove(&addr);
             }
         }
@@ -1049,72 +1056,33 @@ impl Process {
         let pages =
             memory_addr::PageIter4K::new(start_page, end_page).ok_or(AxError::BadAddress)?;
         for page in pages {
-            let mut done = false;
-            let aspace = aspace_handle.read();
-            if let Ok((paddr, flags, _)) = aspace.query_vaddr(page) {
-                if paddr.as_usize() != 0 && flags.contains(access) {
-                    drop(aspace);
-                    continue;
-                }
-            }
-            match aspace.handle_page_fault(page, access) {
-                axmm::PageFaultResult::Handled(ok) => {
-                    if !ok {
-                        return Err(AxError::BadAddress);
+            let result = {
+                let aspace = aspace_handle.read();
+                if let Ok((paddr, flags, _)) = aspace.query_vaddr(page) {
+                    if paddr.as_usize() != 0 && flags.contains(access) {
+                        None
+                    } else {
+                        Some(aspace.handle_page_fault(page, access))
                     }
-                    done = true;
+                } else {
+                    Some(aspace.handle_page_fault(page, access))
                 }
-                axmm::PageFaultResult::NeedWriteLock => {}
-            }
-            drop(aspace);
-            if !done {
-                let mut aspace = aspace_handle.write();
-                if !aspace.handle_page_fault_write(page, access) {
-                    return Err(AxError::BadAddress);
+            };
+            let Some(result) = result else {
+                continue;
+            };
+            let result = match result {
+                axmm::PageFaultResult::NeedWriteLock => {
+                    let mut aspace = aspace_handle.write();
+                    aspace.handle_page_fault_write(page, access)
                 }
+                result => result,
+            };
+            if !result.complete_after_unlock()?.unwrap_or(false) {
+                return Err(AxError::BadAddress);
             }
         }
         Ok(())
-    }
-
-    fn write_user_bytes_in_aspace(
-        &self,
-        aspace: &mut AddrSpace,
-        user_addr: usize,
-        bytes: &[u8],
-    ) -> AxResult<()> {
-        self.validate_user_range(user_addr, bytes.len())?;
-        let start = VirtAddr::from(user_addr);
-
-        // Try fast path first without faulting.
-        if let Ok(()) = aspace.write(start, bytes) {
-            return Ok(());
-        }
-
-        // If it fails, fault-in the pages and retry once.
-        let end = user_addr
-            .checked_add(bytes.len())
-            .ok_or(AxError::BadAddress)?;
-        let start_page = VirtAddr::from(user_addr).align_down_4k();
-        let end_page = VirtAddr::from(end).align_up_4k();
-        let pages =
-            memory_addr::PageIter4K::new(start_page, end_page).ok_or(AxError::BadAddress)?;
-        for page in pages {
-            let pf_flags = MappingFlags::WRITE | MappingFlags::USER;
-            match aspace.handle_page_fault(page, pf_flags) {
-                axmm::PageFaultResult::Handled(ok) => {
-                    if !ok {
-                        return Err(AxError::BadAddress);
-                    }
-                }
-                axmm::PageFaultResult::NeedWriteLock => {
-                    if !aspace.handle_page_fault_write(page, pf_flags) {
-                        return Err(AxError::BadAddress);
-                    }
-                }
-            }
-        }
-        aspace.write(start, bytes).map_err(AxError::from)
     }
 
     pub fn read_user_bytes(&self, user_addr: usize, bytes: &mut [u8]) -> AxResult<()> {
@@ -1136,9 +1104,21 @@ impl Process {
     }
 
     pub fn write_user_bytes(&self, user_addr: usize, bytes: &[u8]) -> AxResult<()> {
+        self.validate_user_range(user_addr, bytes.len())?;
+        let start = VirtAddr::from(user_addr);
         let aspace_handle = self.aspace_handle();
-        let mut aspace = aspace_handle.write();
-        self.write_user_bytes_in_aspace(&mut aspace, user_addr, bytes)
+
+        // Most kernel writes target resident writable pages. Keep that path
+        // shared; only page faults and COW resolution need exclusive access.
+        if let Ok(()) = aspace_handle.read().write(start, bytes) {
+            return Ok(());
+        }
+
+        self.try_fault_in_user_range(user_addr, bytes.len(), MappingFlags::WRITE)?;
+        aspace_handle
+            .read()
+            .write(start, bytes)
+            .map_err(AxError::from)
     }
 
     pub fn aspace_handle(&self) -> Arc<RwLock<AddrSpace>> {
@@ -1321,33 +1301,15 @@ impl Process {
             return Ok(());
         }
         let aspace_handle = self.aspace_handle();
-        let mut aspace = aspace_handle.write();
         let start = VirtAddr::from(addr);
-        if !aspace.can_access_range(start, len, MappingFlags::empty()) {
+        if !aspace_handle
+            .read()
+            .can_access_range(start, len, MappingFlags::empty())
+        {
             return Err(axerrno::LinuxError::ENOMEM);
         }
-        let end = addr.checked_add(len).ok_or(axerrno::LinuxError::EINVAL)?;
-        let pages = memory_addr::PageIter4K::new(VirtAddr::from(addr), VirtAddr::from(end))
-            .ok_or(axerrno::LinuxError::EINVAL)?;
-        for page in pages {
-            let already_resident = aspace
-                .query_vaddr(page)
-                .map(|(frame, flags, _)| frame.as_usize() != 0 && !flags.is_empty())
-                .unwrap_or(false);
-            if already_resident {
-                continue;
-            }
-            let handled = match aspace.handle_page_fault(page, MappingFlags::USER) {
-                axmm::PageFaultResult::Handled(success) => success,
-                axmm::PageFaultResult::NeedWriteLock => {
-                    aspace.handle_page_fault_write(page, MappingFlags::USER)
-                }
-            };
-            if !handled {
-                return Err(axerrno::LinuxError::ENOMEM);
-            }
-        }
-        Ok(())
+        self.try_fault_in_user_range(addr, len, MappingFlags::empty())
+            .map_err(|_| axerrno::LinuxError::ENOMEM)
     }
 
     pub fn lock_mapped_range(&self, addr: usize, len: usize) -> Result<(), axerrno::LinuxError> {
@@ -1693,13 +1655,20 @@ impl Process {
 
     pub fn handle_page_fault(&self, vaddr: VirtAddr, flags: axhal::trap::PageFaultFlags) -> bool {
         let aspace_handle = self.aspace_handle();
-        let aspace = aspace_handle.read();
-        match aspace.handle_page_fault(vaddr, flags) {
-            axmm::PageFaultResult::Handled(success) => success,
+        let result = aspace_handle.read().handle_page_fault(vaddr, flags);
+        let result = match result {
             axmm::PageFaultResult::NeedWriteLock => {
-                drop(aspace);
                 let mut aspace = aspace_handle.write();
                 aspace.handle_page_fault_write(vaddr, flags)
+            }
+            result => result,
+        };
+        match result.complete_after_unlock() {
+            Ok(Some(handled)) => handled,
+            Ok(None) => false,
+            Err(error) => {
+                axlog::error!("page fault TLB shootdown failed: {error:?}");
+                false
             }
         }
     }
@@ -1848,11 +1817,6 @@ impl Process {
         *self.fs_context_handle().lock() = axfs::FS_CONTEXT.lock().clone();
     }
 
-    pub fn register_thread(&self, tid: u64) {
-        let mut registry = self.threads.lock();
-        registry.insert(tid, ThreadState::Pending);
-    }
-
     pub fn register_task_ref(&self, task: AxTaskRef) {
         if let Some(handle) = super::thread_handle_from_task(&task) {
             handle.attach_task_ref(task.clone());
@@ -1898,10 +1862,13 @@ impl Process {
         self.threads.lock().clear();
     }
 
-    pub fn unregister_thread(&self, tid: u64) -> usize {
+    fn take_exiting_thread(&self, tid: u64) -> (Option<AxTaskRef>, usize) {
         let mut registry = self.threads.lock();
-        registry.remove(&tid);
-        registry.len()
+        let task = match registry.remove(&tid) {
+            Some(ThreadState::Active(task)) => Some(task),
+            _ => None,
+        };
+        (task, registry.len())
     }
 
     pub fn begin_group_exit(&self, exit_code: i32) {
@@ -1925,7 +1892,7 @@ impl Process {
             if let Some(handle) = thread_handle_from_task(&task) {
                 handle.signal_wait_queue().notify_all(false);
             }
-            axtask::wake_task(task, true);
+            axtask::interrupt_task(task, true);
         }
     }
 
@@ -1971,7 +1938,8 @@ impl Process {
 
     pub fn finish_thread_exit(&self, tid: u64, exit_code: i32) {
         super::unregister_thread_global(tid);
-        if let Some(task) = self.task_ref_by_tid(tid) {
+        let (task, remaining) = self.take_exiting_thread(tid);
+        if let Some(task) = task {
             if let Some(handle) = super::thread_handle_from_task(&task) {
                 let now_ns = axhal::time::monotonic_time_nanos() as u64;
                 let (u, s) = handle.snapshot_cpu_time_ns(now_ns);
@@ -1983,36 +1951,13 @@ impl Process {
                     .fetch_add(s, Ordering::Relaxed);
             }
         }
-
-        if tid != self.pid() {
-            let _ = self.take_task_ref_by_tid(tid);
-        }
-        let remaining = self.unregister_thread(tid);
-        if remaining > 0 {
-            let threads_lock = self.threads.lock();
-            let mut details = alloc::vec::Vec::new();
-            for (t_id, state) in threads_lock.iter() {
-                match state {
-                    ThreadState::Pending => details.push(alloc::format!("Pending({})", t_id)),
-                    ThreadState::Active(task) => details.push(alloc::format!("Active({}, name={:?})", t_id, task.name())),
-                }
-            }
-            axlog::debug!(
-                "finish_thread_exit: pid={}, tid={}, remaining_threads={}, threads={:?}, group_exiting={}",
-                self.pid(),
-                tid,
-                remaining,
-                details,
-                self.group_exiting()
-            );
-        } else {
-            axlog::debug!(
-                "finish_thread_exit: pid={}, tid={}, remaining_threads=0, group_exiting={}",
-                self.pid(),
-                tid,
-                self.group_exiting()
-            );
-        }
+        axlog::debug!(
+            "finish_thread_exit: pid={}, tid={}, remaining_threads={}, group_exiting={}",
+            self.pid(),
+            tid,
+            remaining,
+            self.group_exiting()
+        );
         if remaining != 0 {
             return;
         }
@@ -2022,7 +1967,6 @@ impl Process {
         } else {
             exit_code
         };
-        self.threads.lock().clear();
         self.exit_code.store(final_code, Ordering::Release);
         self.zombie.store(true, Ordering::Release);
         // 唤醒所有通过 `PidfdObject::register_poll` 在 `pid_exit_event` 上挂起的
@@ -2595,43 +2539,18 @@ impl Process {
         if is_private {
             (addr, true)
         } else {
+            let _ = self.try_fault_in_user_range(
+                addr,
+                core::mem::size_of::<u32>(),
+                MappingFlags::READ,
+            );
             let aspace_handle = self.aspace_handle();
             let aspace = aspace_handle.read();
             let vaddr = VirtAddr::from(addr);
-            let query_res = aspace.query_vaddr(vaddr);
-            let paddr = match query_res {
-                Ok((paddr, ..)) => paddr.as_usize(),
-                Err(_) => {
-                    // Try to handle page fault on-demand (simulate a read fault from user space to populate it)
-                    let mut paddr_res = addr;
-                    match aspace.handle_page_fault(
-                        vaddr,
-                        axhal::trap::PageFaultFlags::READ | axhal::trap::PageFaultFlags::USER,
-                    ) {
-                        axmm::PageFaultResult::Handled(success) => {
-                            if success {
-                                if let Ok((paddr, ..)) = aspace.query_vaddr(vaddr) {
-                                    paddr_res = paddr.as_usize();
-                                }
-                            }
-                        }
-                        axmm::PageFaultResult::NeedWriteLock => {
-                            drop(aspace);
-                            let mut aspace_write = aspace_handle.write();
-                            if aspace_write.handle_page_fault_write(
-                                vaddr,
-                                axhal::trap::PageFaultFlags::READ
-                                    | axhal::trap::PageFaultFlags::USER,
-                            ) {
-                                if let Ok((paddr, ..)) = aspace_write.query_vaddr(vaddr) {
-                                    paddr_res = paddr.as_usize();
-                                }
-                            }
-                        }
-                    }
-                    paddr_res
-                }
-            };
+            let paddr = aspace
+                .query_vaddr(vaddr)
+                .map(|(paddr, ..)| paddr.as_usize())
+                .unwrap_or(addr);
             axlog::debug!("futex_key: addr={:#x}, paddr={:#x}", addr, paddr);
             (paddr, false)
         }
@@ -2674,11 +2593,15 @@ impl Process {
             if w.uaddr == 0 {
                 return Err(AxError::BadAddress);
             }
+            self.try_fault_in_user_range(
+                w.uaddr as usize,
+                core::mem::size_of::<u32>(),
+                MappingFlags::READ,
+            )?;
             let val = self.read_user_u32(w.uaddr as usize)?;
             if val != w.val as u32 {
                 return Err(AxError::from(AxErrorKind::WouldBlock));
             }
-            self.write_user_bytes(w.uaddr as usize, &val.to_ne_bytes())?;
         }
 
         // Translate the virtual addresses to physical addresses outside the run queue lock.
@@ -2709,6 +2632,7 @@ impl Process {
         }
 
         let mut queues = alloc::vec::Vec::with_capacity(waiters.len());
+        let mut queue_keys = alloc::vec::Vec::with_capacity(waiters.len());
         for w in &waiters {
             let is_priv = w.flags & 128 != 0; // 128 is FUTEX_PRIVATE_FLAG
             let (key, is_priv) = self.futex_key(w.uaddr as usize, is_priv);
@@ -2718,6 +2642,7 @@ impl Process {
                 GLOBAL_FUTEX_TABLE.queue(key)
             };
             queues.push(queue);
+            queue_keys.push((key, is_priv));
         }
 
         let q_refs: alloc::vec::Vec<&axtask::WaitQueue> =
@@ -2745,14 +2670,13 @@ impl Process {
             },
         );
 
-        // Remove from GLOBAL_FUTEX_TABLE if empty
-        if self.group_exiting() || mismatch || res.is_ok() || res.is_err() {
-            for (_i, w) in waiters.iter().enumerate() {
-                let is_priv = w.flags & 128 != 0;
-                if !is_priv {
-                    let (key, _) = self.futex_key(w.uaddr as usize, is_priv);
-                    GLOBAL_FUTEX_TABLE.remove_if_empty(key);
-                }
+        drop(q_refs);
+        drop(queues);
+        for (key, is_priv) in queue_keys {
+            if is_priv {
+                self.futex_table.remove_if_empty(key);
+            } else {
+                GLOBAL_FUTEX_TABLE.remove_if_empty(key);
             }
         }
 
@@ -2778,11 +2702,11 @@ impl Process {
         timeout_ns: Option<u64>,
         is_private: bool,
     ) -> AxResult<()> {
+        self.try_fault_in_user_range(addr, core::mem::size_of::<u32>(), MappingFlags::READ)?;
         let val = self.read_user_u32(addr)?;
         if val != expected {
             return Err(AxError::from(AxErrorKind::WouldBlock));
         }
-        self.write_user_bytes(addr, &val.to_ne_bytes())?;
 
         // Translate the virtual address to a physical address outside the run queue lock.
         let aspace = self.aspace_handle();
@@ -2823,7 +2747,10 @@ impl Process {
         };
 
         if self.group_exiting() {
-            if !is_priv {
+            drop(queue);
+            if is_priv {
+                self.futex_table.remove_if_empty(key);
+            } else {
                 GLOBAL_FUTEX_TABLE.remove_if_empty(key);
             }
             return Ok(());
@@ -2870,7 +2797,10 @@ impl Process {
             false
         };
 
-        if !is_priv {
+        drop(queue);
+        if is_priv {
+            self.futex_table.remove_if_empty(key);
+        } else {
             GLOBAL_FUTEX_TABLE.remove_if_empty(key);
         }
 
@@ -2915,9 +2845,6 @@ impl Process {
             woken
         );
 
-        if !is_priv {
-            GLOBAL_FUTEX_TABLE.remove_if_empty(key);
-        }
         woken
     }
 
@@ -2946,7 +2873,10 @@ impl Process {
             GLOBAL_FUTEX_TABLE.requeue(key, wake_count, target_key, requeue_count)
         };
 
-        if !is_priv {
+        if is_priv {
+            self.futex_table.remove_if_empty(key);
+            self.futex_table.remove_if_empty(target_key);
+        } else {
             GLOBAL_FUTEX_TABLE.remove_if_empty(key);
             GLOBAL_FUTEX_TABLE.remove_if_empty(target_key);
         }
@@ -3005,8 +2935,8 @@ impl Process {
         }
 
         let parent_aspace_handle = self.aspace_handle();
-        let mut parent_aspace = parent_aspace_handle.write();
-        let new_aspace = parent_aspace.try_clone()?;
+        let clone_result = parent_aspace_handle.write().try_clone();
+        let new_aspace = clone_result.complete_after_unlock()?;
 
         let mut inner = TaskInner::try_new(
             move || {
@@ -3046,7 +2976,7 @@ impl Process {
 
         if let Some(addr) = params.parent_set_tid {
             let child_tid = child_tid as u32;
-            self.write_user_bytes_in_aspace(&mut parent_aspace, addr, &child_tid.to_ne_bytes())?;
+            self.write_user_bytes(addr, &child_tid.to_ne_bytes())?;
         }
         let child_thread = Thread::new(child_proc.clone());
         super::register_thread_global(child_tid, child_thread.clone());
@@ -3104,7 +3034,6 @@ impl Process {
 
         let child_tid = inner.id().as_u64();
         let child_proc = if params.is_thread_clone {
-            self.register_thread(child_tid);
             self.clone()
         } else {
             let parent_aspace_handle = self.aspace_handle();
@@ -3127,9 +3056,6 @@ impl Process {
 
         if let Some(parent_tid_addr) = params.parent_set_tid {
             if let Err(e) = self.write_user_u32(parent_tid_addr, child_tid as u32) {
-                if params.is_thread_clone {
-                    self.unregister_thread(child_tid);
-                }
                 return Err(e);
             }
         }
@@ -3158,8 +3084,13 @@ impl Process {
         if !params.is_thread_clone {
             self.add_child(child_proc.clone());
         }
-        let task = axtask::spawn_task(inner);
+        // Publish the task in the process registry before another CPU can run
+        // it. An empty thread may otherwise exit between spawn_task() and
+        // register_task_ref(), leaving a stale exited entry reinserted after
+        // finish_thread_exit() removed the Pending slot.
+        let task = inner.into_arc();
         child_proc.register_task_ref(task.clone());
+        axtask::spawn_task_ref(task.clone());
         Ok((child_tid, (!params.is_thread_clone).then_some(child_proc)))
     }
 

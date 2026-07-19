@@ -6,14 +6,18 @@ use core::{
     fmt,
     ops::Deref,
     sync::atomic::{AtomicBool, AtomicI32, AtomicU8, AtomicU32, AtomicU64, Ordering},
+    task::{Context, Poll},
 };
 
 use axalloc::global_allocator;
 use axerrno::{AxError, AxResult};
-use axhal::context::TaskContext;
 #[cfg(feature = "tls")]
 use axhal::tls::TlsArea;
+use axhal::{context::TaskContext, percpu::this_cpu_id};
+use futures_util::task::AtomicWaker;
 use kspin::SpinNoIrq;
+#[cfg(feature = "smp")]
+use kspin::SpinRaw;
 use memory_addr::{MemoryAddr, PAGE_SIZE_4K, VirtAddr, align_up_4k};
 
 use crate::{AxCpuMask, AxTask, AxTaskRef, WaitQueue, task_ext::AxTaskExt};
@@ -38,6 +42,12 @@ pub(crate) enum TaskState {
     Exited  = 4,
 }
 
+#[cfg(feature = "smp")]
+struct SwitchState {
+    on_cpu: bool,
+    deferred_wake: Option<(u32, AxTaskRef)>,
+}
+
 /// The inner task structure.
 pub struct TaskInner {
     id: TaskId,
@@ -56,9 +66,12 @@ pub struct TaskInner {
 
     /// Used to indicate the CPU ID where the task is running or will run.
     cpu_id: AtomicU32,
-    /// Used to indicate whether the task is running on a CPU.
+    /// Serializes context switch completion with a racing remote wake.
     #[cfg(feature = "smp")]
-    on_cpu: AtomicBool,
+    switch_state: SpinRaw<SwitchState>,
+
+    interrupted: AtomicBool,
+    interrupt_waker: AtomicWaker,
 
     /// A ticket ID used to identify the timer event.
     /// Set by `set_timer_ticket()` when creating a timer event in `set_alarm_wakeup()`,
@@ -222,17 +235,6 @@ impl TaskInner {
         self.kstack.lock().as_ref().map(TaskStack::top)
     }
 
-    /// Reclaim the kernel stack of an exited task while keeping the task object.
-    ///
-    /// This is used by the GC path to avoid retaining large per-task stacks
-    /// even when full task dropping is deferred.
-    pub(crate) fn reclaim_kernel_stack(&self) {
-        if self.state() != TaskState::Exited {
-            return;
-        }
-        let _ = self.kstack.lock().take();
-    }
-
     /// Returns the CPU ID where the task is running or will run.
     ///
     /// Note: the task may not be running on the CPU, it just exists in the run queue.
@@ -257,6 +259,27 @@ impl TaskInner {
     pub fn set_cpumask(&self, cpumask: AxCpuMask) {
         *self.cpumask.lock() = cpumask
     }
+
+    /// Polls and consumes a pending task interruption.
+    pub fn poll_interrupt(&self, cx: &Context<'_>) -> Poll<()> {
+        self.interrupt_waker.register(cx.waker());
+        if self.interrupted.swap(false, Ordering::AcqRel) {
+            Poll::Ready(())
+        } else {
+            Poll::Pending
+        }
+    }
+
+    /// Clears a pending task interruption.
+    pub fn clear_interrupt(&self) {
+        self.interrupted.store(false, Ordering::Release);
+    }
+
+    /// Interrupts the task and wakes an interruptible future, if registered.
+    pub fn interrupt(&self) {
+        self.interrupted.store(true, Ordering::Release);
+        self.interrupt_waker.wake();
+    }
 }
 
 // private methods
@@ -278,7 +301,12 @@ impl TaskInner {
             timer_ticket_id: AtomicU64::new(0),
             cpu_id: AtomicU32::new(0),
             #[cfg(feature = "smp")]
-            on_cpu: AtomicBool::new(false),
+            switch_state: SpinRaw::new(SwitchState {
+                on_cpu: false,
+                deferred_wake: None,
+            }),
+            interrupted: AtomicBool::new(false),
+            interrupt_waker: AtomicWaker::new(),
             #[cfg(feature = "preempt")]
             need_resched: AtomicBool::new(false),
             #[cfg(feature = "preempt")]
@@ -305,7 +333,7 @@ impl TaskInner {
         let mut t = Self::new_common(TaskId::new(), name);
         t.is_init = true;
         #[cfg(feature = "smp")]
-        t.set_on_cpu(true);
+        t.claim_on_cpu();
         if *t.name.lock() == "idle" {
             t.is_idle = true;
         }
@@ -480,23 +508,48 @@ impl TaskInner {
         self.cpu_id.store(cpu_id, Ordering::Release);
     }
 
-    /// Returns whether the task is running on a CPU.
-    ///
-    /// It is used to protect the task from being moved to a different run queue
-    /// while it has not finished its scheduling process.
-    /// The `on_cpu field is set to `true` when the task is preparing to run on a CPU,
-    /// and it is set to `false` when the task has finished its scheduling process in `clear_prev_task_on_cpu()`.
+    /// Claims this task for execution after it has been selected by a run queue.
     #[cfg(feature = "smp")]
     #[inline]
-    pub(crate) fn on_cpu(&self) -> bool {
-        self.on_cpu.load(Ordering::Acquire)
+    pub(crate) fn claim_on_cpu(&self) {
+        let mut state = self.switch_state.lock();
+        assert!(!state.on_cpu, "task is already owned by a CPU");
+        assert!(
+            state.deferred_wake.is_none(),
+            "task has an unconsumed deferred wake"
+        );
+        state.on_cpu = true;
     }
 
-    /// Sets whether the task is running on a CPU.
+    /// Records a wake that raced context switch-out.
+    ///
+    /// Returns `true` when the owning CPU must enqueue the task after saving its
+    /// context, or `false` when the waker can enqueue it immediately. Ownership
+    /// of `task` keeps the allocation alive between wait-queue removal and the
+    /// deferred run-queue insertion.
     #[cfg(feature = "smp")]
     #[inline]
-    pub(crate) fn set_on_cpu(&self, on_cpu: bool) {
-        self.on_cpu.store(on_cpu, Ordering::Release)
+    pub(crate) fn defer_wake(&self, target_cpu: u32, task: AxTaskRef) -> bool {
+        let mut state = self.switch_state.lock();
+        if !state.on_cpu {
+            return false;
+        }
+        assert!(
+            state.deferred_wake.is_none(),
+            "task already has a deferred wake"
+        );
+        state.deferred_wake = Some((target_cpu, task));
+        true
+    }
+
+    /// Publishes a fully saved context and consumes a wake deferred to this CPU.
+    #[cfg(feature = "smp")]
+    #[inline]
+    pub(crate) fn finish_switch_out(&self) -> Option<(u32, AxTaskRef)> {
+        let mut state = self.switch_state.lock();
+        assert!(state.on_cpu, "task is not owned by a CPU");
+        state.on_cpu = false;
+        state.deferred_wake.take()
     }
 }
 
@@ -516,10 +569,47 @@ impl Drop for TaskInner {
     }
 }
 
+const TASK_STACK_CACHE_CAPACITY: usize = 8;
+
+struct TaskStackCache {
+    starts: [usize; TASK_STACK_CACHE_CAPACITY],
+    len: usize,
+}
+
+impl TaskStackCache {
+    const fn new() -> Self {
+        Self {
+            starts: [0; TASK_STACK_CACHE_CAPACITY],
+            len: 0,
+        }
+    }
+
+    fn pop(&mut self) -> Option<usize> {
+        if self.len == 0 {
+            return None;
+        }
+        self.len -= 1;
+        Some(self.starts[self.len])
+    }
+
+    fn push(&mut self, start: usize) -> bool {
+        if self.len == TASK_STACK_CACHE_CAPACITY {
+            return false;
+        }
+        self.starts[self.len] = start;
+        self.len += 1;
+        true
+    }
+}
+
+static TASK_STACK_CACHES: [SpinNoIrq<TaskStackCache>; axconfig::plat::MAX_CPU_NUM] =
+    [const { SpinNoIrq::new(TaskStackCache::new()) }; axconfig::plat::MAX_CPU_NUM];
+
 struct TaskStack {
     start: VirtAddr,
     size: usize,
     num_pages: usize,
+    cache_cpu: usize,
 }
 
 impl TaskStack {
@@ -541,6 +631,17 @@ impl TaskStack {
         );
         debug_assert_eq!(size % PAGE_SIZE_4K, 0);
         let num_pages = size / PAGE_SIZE_4K;
+        let cache_cpu = this_cpu_id();
+        if size == align_up_4k(axconfig::TASK_STACK_SIZE)
+            && let Some(start) = TASK_STACK_CACHES[cache_cpu].lock().pop()
+        {
+            return Ok(Self {
+                start: start.into(),
+                size,
+                num_pages,
+                cache_cpu,
+            });
+        }
         let start = match global_allocator().alloc_pages(num_pages, PAGE_SIZE_4K) {
             Ok(start) => start,
             Err(_) => {
@@ -551,6 +652,7 @@ impl TaskStack {
             start: start.into(),
             size,
             num_pages,
+            cache_cpu,
         })
     }
 
@@ -561,6 +663,13 @@ impl TaskStack {
 
 impl Drop for TaskStack {
     fn drop(&mut self) {
+        if self.size == align_up_4k(axconfig::TASK_STACK_SIZE)
+            && TASK_STACK_CACHES[self.cache_cpu]
+                .lock()
+                .push(self.start.as_usize())
+        {
+            return;
+        }
         global_allocator().dealloc_pages(self.start.as_usize(), self.num_pages);
     }
 }

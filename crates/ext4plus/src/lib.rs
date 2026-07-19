@@ -889,6 +889,7 @@ impl Ext4 {
     ) -> Result<(), Ext4Error> {
         let (block_group_index, block_offset) =
             self.block_block_group_location(block)?;
+        let _lock_guard = self.0.group_locks[block_group_index as usize].lock_maybe().await;
         let block_bitmap_handle =
             self.get_block_bitmap_handle(block_group_index);
         if block_bitmap_handle.query(block_offset, self).await? {
@@ -931,6 +932,7 @@ impl Ext4 {
             }
 
             let bg = self.get_block_group_descriptor(bg_id);
+            let _lock_guard = self.0.group_locks[bg_id as usize].lock_maybe().await;
 
             let free_blocks = bg.free_blocks_count();
 

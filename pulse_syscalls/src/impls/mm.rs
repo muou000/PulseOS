@@ -70,6 +70,7 @@ pub fn sys_brk(addr: usize) -> isize {
     let mut need_unmap = false;
     let mut unmap_start = 0;
     let mut unmap_len = 0;
+    let mut pending_shootdown = None;
 
     let aspace_handle = proc.aspace_handle();
     {
@@ -114,8 +115,16 @@ pub fn sys_brk(addr: usize) -> isize {
             let end = mapped_heap_end;
 
             if end > start {
-                if let Err(e) = aspace.unmap(VirtAddr::from(start), end - start) {
+                let (unmap_result, shootdown) = aspace
+                    .unmap(VirtAddr::from(start), end - start)
+                    .into_parts();
+                pending_shootdown = shootdown;
+                if let Err(e) = unmap_result {
                     axlog::debug!("sys_brk: failed to shrink heap: {:?}", e);
+                    drop(aspace);
+                    if let Some(shootdown) = pending_shootdown.take() {
+                        let _ = shootdown.complete_after_unlock();
+                    }
                     return old_heap_top as isize;
                 }
                 need_unmap = true;
@@ -125,10 +134,20 @@ pub fn sys_brk(addr: usize) -> isize {
         }
     }
 
+    if let Some(shootdown) = pending_shootdown
+        && let Err(error) = shootdown.complete_after_unlock()
+    {
+        axlog::error!("sys_brk: TLB shootdown failed: {error:?}");
+        return old_heap_top as isize;
+    }
+
     if need_map {
         if let Err(e) = proc.maybe_lock_future_range(map_start, map_len) {
-            let mut aspace = aspace_handle.write();
-            if let Err(unmap_e) = aspace.unmap(VirtAddr::from(map_start), map_len) {
+            let rollback = {
+                let mut aspace = aspace_handle.write();
+                aspace.unmap(VirtAddr::from(map_start), map_len)
+            };
+            if let Err(unmap_e) = rollback.complete_after_unlock() {
                 axlog::warn!(
                     "sys_brk: rollback unmap failed at {:#x}, len={:#x}, err={:?}",
                     map_start,
@@ -250,15 +269,18 @@ pub fn sys_mmap(
             }
         }
     }
-
     if length == 0 {
         return -LinuxError::EINVAL.code() as isize;
+    }
+    if file_backed && file.as_ref().and_then(|file| file.location()).is_none() {
+        return -LinuxError::ENODEV.code() as isize;
     }
 
     let aligned_length = (length + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
 
     let aspace_handle = proc.aspace_handle();
     let mut aspace = aspace_handle.write();
+    let mut pending_shootdown = None;
 
     let aligned_addr = addr & !(PAGE_SIZE - 1);
     let map_addr = if (flags & MAP_FIXED) != 0 {
@@ -315,7 +337,11 @@ pub fn sys_mmap(
     }
 
     if (flags & MAP_FIXED) != 0 {
-        if let Err(e) = aspace.unmap(VirtAddr::from(map_addr), aligned_length) {
+        let (unmap_result, shootdown) = aspace
+            .unmap(VirtAddr::from(map_addr), aligned_length)
+            .into_parts();
+        pending_shootdown = shootdown;
+        if let Err(e) = unmap_result {
             axlog::warn!(
                 "sys_mmap: MAP_FIXED pre-unmap failed at {:#x}, len={:#x}, err={:?}",
                 map_addr,
@@ -350,9 +376,9 @@ pub fn sys_mmap(
             aspace.map_alloc(VirtAddr::from(map_addr), aligned_length, map_flags, false)
         }
     } else if let Some(file) = file.as_ref() {
-        let Some(location) = file.location() else {
-            return -LinuxError::ENODEV.code() as isize;
-        };
+        let location = file
+            .location()
+            .expect("file-backed mmap location checked before address-space mutation");
         let file_flags = file
             .mmap_file_flags()
             .unwrap_or_else(|| file_flags_for_mapping(map_flags));
@@ -381,14 +407,23 @@ pub fn sys_mmap(
         aspace.map_alloc(VirtAddr::from(map_addr), aligned_length, map_flags, false)
     };
 
+    drop(aspace);
+    if let Some(shootdown) = pending_shootdown
+        && let Err(error) = shootdown.complete_after_unlock()
+    {
+        axlog::error!("sys_mmap: MAP_FIXED TLB shootdown failed: {error:?}");
+        return -LinuxError::EIO.code() as isize;
+    }
+
     match map_result {
         Ok(_) => {
-            drop(aspace);
-
             if let Err(e) = proc.maybe_lock_future_range(map_addr, aligned_length) {
                 let aspace_handle = proc.aspace_handle();
-                let mut aspace = aspace_handle.write();
-                if let Err(unmap_e) = aspace.unmap(VirtAddr::from(map_addr), aligned_length) {
+                let rollback = {
+                    let mut aspace = aspace_handle.write();
+                    aspace.unmap(VirtAddr::from(map_addr), aligned_length)
+                };
+                if let Err(unmap_e) = rollback.complete_after_unlock() {
                     axlog::warn!(
                         "sys_mmap: rollback unmap failed at {:#x}, len={:#x}, err={:?}",
                         map_addr,
@@ -445,7 +480,9 @@ pub fn sys_munmap(addr: usize, length: usize) -> isize {
 
     let aspace_handle = proc.aspace_handle();
     let mut aspace = aspace_handle.write();
-    match aspace.unmap(VirtAddr::from(aligned_addr), aligned_length) {
+    let mutation = aspace.unmap(VirtAddr::from(aligned_addr), aligned_length);
+    drop(aspace);
+    match mutation.complete_after_unlock() {
         Ok(_) => {
             let _ = proc.memlock_unlock_range(aligned_addr, aligned_length);
             axlog::debug!(
@@ -550,7 +587,9 @@ pub fn sys_mprotect(addr: usize, length: usize, prot: usize) -> isize {
         return -LinuxError::ENOMEM.code() as isize;
     }
 
-    match aspace.protect(start, aligned_length, map_flags) {
+    let mutation = aspace.protect(start, aligned_length, map_flags);
+    drop(aspace);
+    match mutation.complete_after_unlock() {
         Ok(_) => 0,
         Err(e) => {
             axlog::debug!(

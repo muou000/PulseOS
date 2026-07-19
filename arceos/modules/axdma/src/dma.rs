@@ -92,13 +92,14 @@ impl DmaAllocator {
         flags: MappingFlags,
     ) -> AllocResult<()> {
         let expand_size = num_pages * PAGE_SIZE_4K;
-        axmm::kernel_aspace()
-            .lock()
-            .protect(vaddr, expand_size, flags)
-            .map_err(|e| {
-                error!("change table flag fail: {e:?}");
-                AllocError::NoMemory
-            })
+        let mutation = {
+            let mut aspace = axmm::kernel_aspace().lock();
+            aspace.protect(vaddr, expand_size, flags)
+        };
+        mutation.complete_after_unlock().map_err(|e| {
+            error!("change table flag fail: {e:?}");
+            AllocError::NoMemory
+        })
     }
 
     /// Gives back the allocated region to the byte allocator.
@@ -106,12 +107,20 @@ impl DmaAllocator {
         if layout.size() >= PAGE_SIZE_4K {
             let num_pages = layout_pages(&layout);
             let virt_raw = dma.cpu_addr.as_ptr() as usize;
-            global_allocator().dealloc_pages(virt_raw, num_pages);
-            let _ = self.update_flags(
-                va!(virt_raw),
-                num_pages,
-                MappingFlags::READ | MappingFlags::WRITE,
-            );
+            if self
+                .update_flags(
+                    va!(virt_raw),
+                    num_pages,
+                    MappingFlags::READ | MappingFlags::WRITE,
+                )
+                .is_ok()
+            {
+                global_allocator().dealloc_pages(virt_raw, num_pages);
+            } else {
+                error!(
+                    "leaking coherent DMA pages at {virt_raw:#x}: cache-attribute shootdown failed"
+                );
+            }
         } else {
             self.alloc.dealloc(dma.cpu_addr, layout)
         }

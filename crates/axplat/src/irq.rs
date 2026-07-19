@@ -1,5 +1,7 @@
 //! Interrupt request (IRQ) handling.
 
+use core::fmt;
+
 pub use handler_table::HandlerTable;
 
 /// The type if an IRQ handler.
@@ -26,6 +28,32 @@ pub enum IpiTarget {
     },
 }
 
+/// Error returned when an inter-processor interrupt cannot be delivered.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum IpiError {
+    /// The logical target CPU does not exist.
+    InvalidTarget,
+    /// The target CPU exists but is not online.
+    CpuOffline,
+    /// The platform does not support inter-processor interrupts.
+    NotSupported,
+    /// Platform firmware returned an error code.
+    Firmware(isize),
+}
+
+impl fmt::Display for IpiError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::InvalidTarget => f.write_str("invalid IPI target CPU"),
+            Self::CpuOffline => f.write_str("IPI target CPU is offline"),
+            Self::NotSupported => f.write_str("inter-processor interrupts are not supported"),
+            Self::Firmware(error) => write!(f, "firmware IPI error {error}"),
+        }
+    }
+}
+
+impl core::error::Error for IpiError {}
+
 /// IRQ management interface.
 #[def_plat_interface]
 pub trait IrqIf {
@@ -49,8 +77,11 @@ pub trait IrqIf {
     /// It is called by the common interrupt handler. It should look up in the
     /// IRQ handler table and calls the corresponding handler. If necessary, it
     /// also acknowledges the interrupt controller after handling.
-    fn handle(irq: usize);
+    fn handle(irq: usize, cpu_id: usize);
+
+    /// Notifies the interrupt controller that a logical CPU is ready to receive IRQs.
+    fn cpu_online(cpu_id: usize);
 
     /// Sends an inter-processor interrupt (IPI) to the specified target CPU or all CPUs.
-    fn send_ipi(irq_num: usize, target: IpiTarget);
+    fn send_ipi(irq_num: usize, target: IpiTarget) -> Result<(), IpiError>;
 }

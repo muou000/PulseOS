@@ -119,6 +119,7 @@ pub fn sys_shmat(shmid: i32, shmaddr: usize, shmflg: i32) -> isize {
     // Determine the virtual address to map at.
     let aspace_handle = proc.aspace_handle();
     let mut aspace = aspace_handle.write();
+    let mut pending_shootdown = None;
 
     let map_addr = if shmaddr != 0 && (shmflg as u32) & SHM_RND != 0 {
         // SHM_RND: round down to SHMLBA (use PAGE_SIZE_4K for now)
@@ -149,17 +150,27 @@ pub fn sys_shmat(shmid: i32, shmaddr: usize, shmflg: i32) -> isize {
 
     if (shmflg as u32) & SHM_REMAP != 0 {
         // Unmap existing mapping at the target address if SHM_REMAP is set.
-        let _ = aspace.unmap(VirtAddr::from(map_addr), length);
+        let (unmap_result, shootdown) = aspace.unmap(VirtAddr::from(map_addr), length).into_parts();
+        pending_shootdown = shootdown;
+        if let Err(error) = unmap_result {
+            axlog::warn!("sys_shmat: SHM_REMAP pre-unmap failed: {error:?}");
+        }
     }
 
     // Map the shared physical pages into this process's address space.
     let paddr = virt_to_phys(VirtAddr::from(inner.addr));
-    if let Err(e) = aspace.map_linear(VirtAddr::from(map_addr), paddr, length, mapping_flags) {
+    let map_result = aspace.map_linear(VirtAddr::from(map_addr), paddr, length, mapping_flags);
+    drop(aspace);
+    if let Some(shootdown) = pending_shootdown
+        && let Err(error) = shootdown.complete_after_unlock()
+    {
+        axlog::error!("sys_shmat: SHM_REMAP TLB shootdown failed: {error:?}");
+        return -LinuxError::EIO.code() as isize;
+    }
+    if let Err(e) = map_result {
         axlog::debug!("sys_shmat: map_linear failed: {:?}", e);
         return -LinuxError::from(e).code() as isize;
     }
-
-    drop(aspace);
 
     // Record the attachment.
     inner.attach_process(pid);
@@ -200,10 +211,17 @@ pub fn sys_shmdt(shmaddr: usize) -> isize {
     // Unmap the virtual address range.
     let aspace_handle = proc.aspace_handle();
     let mut aspace = aspace_handle.write();
-    if let Err(e) = aspace.unmap(VirtAddr::from(shmaddr), length) {
-        axlog::warn!("sys_shmdt: unmap failed: {:?}", e);
-    }
+    let mutation = aspace.unmap(VirtAddr::from(shmaddr), length);
     drop(aspace);
+    if let Err(e) = mutation.complete_after_unlock() {
+        axlog::warn!("sys_shmdt: unmap or TLB shootdown failed: {:?}", e);
+        drop(inner);
+        proc.ipc
+            .shared_memory
+            .write()
+            .insert(VirtAddr::from(shmaddr), shm_inner_arc);
+        return -LinuxError::from(e).code() as isize;
+    }
 
     // Detach the process from the ShmInner.
     inner.detach_process(pid);

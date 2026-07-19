@@ -166,7 +166,13 @@ impl Backend {
         true
     }
 
-    pub(crate) fn unmap_file(&self, start: VirtAddr, size: usize, pt: &mut PageTable) -> bool {
+    pub(crate) fn unmap_file(
+        &self,
+        start: VirtAddr,
+        size: usize,
+        pt: &mut PageTable,
+        reclaim: &mut super::DeferredReclaims,
+    ) -> bool {
         debug!("unmap_file: [{:#x}, {:#x})", start, start + size);
         if size == 0 {
             return true;
@@ -192,7 +198,7 @@ impl Backend {
                             let _ = mapping.file.mark_page_dirty(pn);
                         }
                     }
-                    dealloc_frame(frame);
+                    reclaim.defer_frame(frame);
                 }
             }
         }
@@ -250,6 +256,7 @@ impl Backend {
         pt: &crate::PageTableLockManager,
         mapping: &FileMapping,
         access_flags: MappingFlags,
+        reclaim: &mut super::DeferredReclaims,
     ) -> bool {
         if !mapping.permits(orig_flags) {
             return false;
@@ -287,7 +294,7 @@ impl Backend {
                             if let Ok((_, tlb)) = pt_guard.remap(page_addr, new_frame, orig_flags) {
                                 tlb.flush();
                                 drop(pt_guard);
-                                dealloc_frame(old_frame);
+                                reclaim.defer_frame(old_frame);
                                 sync_executable_mapping(orig_flags);
                                 return true;
                             }

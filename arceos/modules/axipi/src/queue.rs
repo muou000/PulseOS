@@ -44,6 +44,11 @@ impl IpiEventQueue {
             None
         }
     }
+
+    /// Removes the newest event after a failed hardware IPI send.
+    pub fn pop_back(&mut self) {
+        self.events.pop_back();
+    }
 }
 
 impl Default for IpiEventQueue {
