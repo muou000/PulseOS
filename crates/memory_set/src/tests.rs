@@ -16,6 +16,7 @@ impl MappingBackend for MockBackend {
     type Addr = VirtAddr;
     type Flags = MockFlags;
     type PageTable = MockPageTable;
+    type Reclaim = Vec<(usize, usize)>;
 
     fn map(&self, start: VirtAddr, size: usize, flags: MockFlags, pt: &mut MockPageTable) -> bool {
         for entry in pt.iter_mut().skip(start.as_usize()).take(size) {
@@ -27,7 +28,14 @@ impl MappingBackend for MockBackend {
         true
     }
 
-    fn unmap(&self, start: VirtAddr, size: usize, pt: &mut MockPageTable) -> bool {
+    fn unmap(
+        &self,
+        start: VirtAddr,
+        size: usize,
+        pt: &mut MockPageTable,
+        reclaim: &mut Self::Reclaim,
+    ) -> bool {
+        reclaim.push((start.as_usize(), size));
         for entry in pt.iter_mut().skip(start.as_usize()).take(size) {
             if *entry == 0 {
                 return false;
@@ -51,6 +59,111 @@ impl MappingBackend for MockBackend {
             *entry = new_flags;
         }
         true
+    }
+}
+
+#[derive(Clone)]
+struct RejectProtectBackend;
+
+impl MappingBackend for RejectProtectBackend {
+    type Addr = VirtAddr;
+    type Flags = MockFlags;
+    type PageTable = MockPageTable;
+    type Reclaim = Vec<(usize, usize)>;
+
+    fn map(&self, start: VirtAddr, size: usize, flags: MockFlags, pt: &mut MockPageTable) -> bool {
+        MockBackend.map(start, size, flags, pt)
+    }
+
+    fn unmap(
+        &self,
+        start: VirtAddr,
+        size: usize,
+        pt: &mut MockPageTable,
+        reclaim: &mut Self::Reclaim,
+    ) -> bool {
+        MockBackend.unmap(start, size, pt, reclaim)
+    }
+
+    fn protect(
+        &self,
+        _start: VirtAddr,
+        _size: usize,
+        _new_flags: MockFlags,
+        _pt: &mut MockPageTable,
+    ) -> bool {
+        false
+    }
+}
+
+#[derive(Clone)]
+struct RejectUnmapBackend;
+
+impl MappingBackend for RejectUnmapBackend {
+    type Addr = VirtAddr;
+    type Flags = MockFlags;
+    type PageTable = MockPageTable;
+    type Reclaim = Vec<(usize, usize)>;
+
+    fn map(&self, start: VirtAddr, size: usize, flags: MockFlags, pt: &mut MockPageTable) -> bool {
+        MockBackend.map(start, size, flags, pt)
+    }
+
+    fn unmap(
+        &self,
+        start: VirtAddr,
+        size: usize,
+        pt: &mut MockPageTable,
+        reclaim: &mut Self::Reclaim,
+    ) -> bool {
+        let _ = MockBackend.unmap(start, size, pt, reclaim);
+        false
+    }
+
+    fn protect(
+        &self,
+        start: VirtAddr,
+        size: usize,
+        new_flags: MockFlags,
+        pt: &mut MockPageTable,
+    ) -> bool {
+        MockBackend.protect(start, size, new_flags, pt)
+    }
+}
+
+#[derive(Clone)]
+struct ConditionalProtectBackend {
+    reject: bool,
+}
+
+impl MappingBackend for ConditionalProtectBackend {
+    type Addr = VirtAddr;
+    type Flags = MockFlags;
+    type PageTable = MockPageTable;
+    type Reclaim = Vec<(usize, usize)>;
+
+    fn map(&self, start: VirtAddr, size: usize, flags: MockFlags, pt: &mut MockPageTable) -> bool {
+        MockBackend.map(start, size, flags, pt)
+    }
+
+    fn unmap(
+        &self,
+        start: VirtAddr,
+        size: usize,
+        pt: &mut MockPageTable,
+        reclaim: &mut Self::Reclaim,
+    ) -> bool {
+        MockBackend.unmap(start, size, pt, reclaim)
+    }
+
+    fn protect(
+        &self,
+        start: VirtAddr,
+        size: usize,
+        new_flags: MockFlags,
+        pt: &mut MockPageTable,
+    ) -> bool {
+        !self.reject && MockBackend.protect(start, size, new_flags, pt)
     }
 }
 
@@ -84,6 +197,7 @@ fn dump_memory_set(set: &MockMemorySet) {
 fn test_map_unmap() {
     let mut set = MockMemorySet::new();
     let mut pt = [0; MAX_ADDR];
+    let mut reclaim = Vec::new();
 
     // Map [0, 0x1000), [0x2000, 0x3000), [0x4000, 0x5000), ...
     for start in (0..MAX_ADDR).step_by(0x2000) {
@@ -91,6 +205,7 @@ fn test_map_unmap() {
             MemoryArea::new(start.into(), 0x1000, 1, MockBackend),
             &mut pt,
             false,
+            &mut reclaim,
         ));
     }
     // Map [0x1000, 0x2000), [0x3000, 0x4000), [0x5000, 0x6000), ...
@@ -99,6 +214,7 @@ fn test_map_unmap() {
             MemoryArea::new(start.into(), 0x1000, 2, MockBackend),
             &mut pt,
             false,
+            &mut reclaim,
         ));
     }
     dump_memory_set(&set);
@@ -119,7 +235,8 @@ fn test_map_unmap() {
         set.map(
             MemoryArea::new(0x4000.into(), 0x4000, 3, MockBackend),
             &mut pt,
-            false
+            false,
+            &mut reclaim,
         ),
         AlreadyExists
     );
@@ -127,8 +244,11 @@ fn test_map_unmap() {
     assert_ok!(set.map(
         MemoryArea::new(0x4000.into(), 0x4000, 3, MockBackend),
         &mut pt,
-        true
+        true,
+        &mut reclaim,
     ));
+    assert!(!reclaim.is_empty());
+    reclaim.clear();
     dump_memory_set(&set);
     assert_eq!(set.len(), 13);
 
@@ -142,10 +262,11 @@ fn test_map_unmap() {
     }
 
     // Unmap areas in the middle.
-    assert_ok!(set.unmap(0x4000.into(), 0x8000, &mut pt));
+    assert_ok!(set.unmap(0x4000.into(), 0x8000, &mut pt, &mut reclaim));
+    assert!(!reclaim.is_empty());
     assert_eq!(set.len(), 8);
     // Unmap the remaining areas, including the unmapped ranges.
-    assert_ok!(set.unmap(0.into(), MAX_ADDR * 2, &mut pt));
+    assert_ok!(set.unmap(0.into(), MAX_ADDR * 2, &mut pt, &mut reclaim));
     assert_eq!(set.len(), 0);
     for &e in &pt[0..MAX_ADDR] {
         assert_eq!(e, 0);
@@ -156,6 +277,7 @@ fn test_map_unmap() {
 fn test_unmap_split() {
     let mut set = MockMemorySet::new();
     let mut pt = [0; MAX_ADDR];
+    let mut reclaim = Vec::new();
 
     // Map [0, 0x1000), [0x2000, 0x3000), [0x4000, 0x5000), ...
     for start in (0..MAX_ADDR).step_by(0x2000) {
@@ -163,6 +285,7 @@ fn test_unmap_split() {
             MemoryArea::new(start.into(), 0x1000, 1, MockBackend),
             &mut pt,
             false,
+            &mut reclaim,
         ));
     }
     assert_eq!(set.len(), 8);
@@ -170,7 +293,7 @@ fn test_unmap_split() {
     // Unmap [0xc00, 0x2400), [0x2c00, 0x4400), [0x4c00, 0x6400), ...
     // The areas are shrinked at the left and right boundaries.
     for start in (0..MAX_ADDR).step_by(0x2000) {
-        assert_ok!(set.unmap((start + 0xc00).into(), 0x1800, &mut pt));
+        assert_ok!(set.unmap((start + 0xc00).into(), 0x1800, &mut pt, &mut reclaim));
     }
     dump_memory_set(&set);
     assert_eq!(set.len(), 8);
@@ -191,7 +314,7 @@ fn test_unmap_split() {
     // Unmap [0x800, 0x900), [0x2800, 0x2900), [0x4800, 0x4900), ...
     // The areas are split into two areas.
     for start in (0..MAX_ADDR).step_by(0x2000) {
-        assert_ok!(set.unmap((start + 0x800).into(), 0x100, &mut pt));
+        assert_ok!(set.unmap((start + 0x800).into(), 0x100, &mut pt, &mut reclaim));
     }
     dump_memory_set(&set);
     assert_eq!(set.len(), 16);
@@ -222,7 +345,7 @@ fn test_unmap_split() {
     drop(iter);
 
     // Unmap all areas.
-    assert_ok!(set.unmap(0.into(), MAX_ADDR, &mut pt));
+    assert_ok!(set.unmap(0.into(), MAX_ADDR, &mut pt, &mut reclaim));
     assert_eq!(set.len(), 0);
     for &e in &pt[0..MAX_ADDR] {
         assert_eq!(e, 0);
@@ -233,6 +356,7 @@ fn test_unmap_split() {
 fn test_protect() {
     let mut set = MockMemorySet::new();
     let mut pt = [0; MAX_ADDR];
+    let mut reclaim = Vec::new();
     let update_flags = |new_flags: MockFlags| {
         move |old_flags: MockFlags| -> Option<MockFlags> {
             if (old_flags & 0x7) == (new_flags & 0x7) {
@@ -249,6 +373,7 @@ fn test_protect() {
             MemoryArea::new(start.into(), 0x1000, 0x7, MockBackend),
             &mut pt,
             false,
+            &mut reclaim,
         ));
     }
     assert_eq!(set.len(), 8);
@@ -316,7 +441,7 @@ fn test_protect() {
     assert_eq!(set.len(), 39);
 
     // Unmap all areas.
-    assert_ok!(set.unmap(0.into(), MAX_ADDR, &mut pt));
+    assert_ok!(set.unmap(0.into(), MAX_ADDR, &mut pt, &mut reclaim));
     assert_eq!(set.len(), 0);
     for &e in &pt[0..MAX_ADDR] {
         assert_eq!(e, 0);
@@ -324,9 +449,104 @@ fn test_protect() {
 }
 
 #[test]
+fn test_protect_failure_is_propagated() {
+    let mut set = MemorySet::<RejectProtectBackend>::new();
+    let mut pt = [0; MAX_ADDR];
+    let mut reclaim = Vec::new();
+    assert_ok!(set.map(
+        MemoryArea::new(0x1000.into(), 0x3000, 0x7, RejectProtectBackend),
+        &mut pt,
+        false,
+        &mut reclaim,
+    ));
+
+    assert_err!(
+        set.protect(0x2000.into(), 0x1000, |_| Some(0x1), &mut pt),
+        BadState
+    );
+    assert_eq!(set.len(), 1);
+    assert_eq!(set.find(0x1000.into()).unwrap().va_range(), va_range!(0x1000..0x4000));
+    assert!(pt[0x1000..0x4000].iter().all(|&flags| flags == 0x7));
+}
+
+#[test]
+fn test_unmap_failure_preserves_area_layout() {
+    let mut set = MemorySet::<RejectUnmapBackend>::new();
+    let mut pt = [0; MAX_ADDR];
+    let mut reclaim = Vec::new();
+    assert_ok!(set.map(
+        MemoryArea::new(0x1000.into(), 0x3000, 0x7, RejectUnmapBackend),
+        &mut pt,
+        false,
+        &mut reclaim,
+    ));
+
+    assert_err!(
+        set.unmap(0x2000.into(), 0x1000, &mut pt, &mut reclaim),
+        BadState
+    );
+    assert_eq!(set.len(), 1);
+    assert_eq!(set.find(0x1000.into()).unwrap().va_range(), va_range!(0x1000..0x4000));
+    assert_eq!(reclaim, [(0x2000, 0x1000)]);
+}
+
+#[test]
+fn test_protect_commits_prior_splits_before_later_failure() {
+    let mut set = MemorySet::<ConditionalProtectBackend>::new();
+    let mut pt = [0; MAX_ADDR];
+    let mut reclaim = Vec::new();
+    for (start, reject) in [(0x1000, false), (0x4000, true)] {
+        assert_ok!(set.map(
+            MemoryArea::new(
+                start.into(),
+                0x2000,
+                0x7,
+                ConditionalProtectBackend { reject },
+            ),
+            &mut pt,
+            false,
+            &mut reclaim,
+        ));
+    }
+
+    assert_err!(
+        set.protect(0x2000.into(), 0x3000, |_| Some(0x1), &mut pt),
+        BadState
+    );
+    let areas = set.iter().collect::<Vec<_>>();
+    assert_eq!(areas.len(), 3);
+    assert_eq!(areas[0].va_range(), va_range!(0x1000..0x2000));
+    assert_eq!(areas[0].flags(), 0x7);
+    assert_eq!(areas[1].va_range(), va_range!(0x2000..0x3000));
+    assert_eq!(areas[1].flags(), 0x1);
+    assert_eq!(areas[2].va_range(), va_range!(0x4000..0x6000));
+    assert_eq!(areas[2].flags(), 0x7);
+}
+
+#[test]
+fn test_clear_collects_all_reclaims_after_unmap_failure() {
+    let mut set = MemorySet::<RejectUnmapBackend>::new();
+    let mut pt = [0; MAX_ADDR];
+    let mut reclaim = Vec::new();
+    for start in [0x1000, 0x3000] {
+        assert_ok!(set.map(
+            MemoryArea::new(start.into(), 0x1000, 0x7, RejectUnmapBackend),
+            &mut pt,
+            false,
+            &mut reclaim,
+        ));
+    }
+
+    assert_err!(set.clear(&mut pt, &mut reclaim), BadState);
+    assert!(set.is_empty());
+    assert_eq!(reclaim, [(0x1000, 0x1000), (0x3000, 0x1000)]);
+}
+
+#[test]
 fn test_find_free_area() {
     let mut set = MockMemorySet::new();
     let mut pt = [0; MAX_ADDR];
+    let mut reclaim = Vec::new();
 
     // Map [0, 0x1000), [0x2000, 0x3000), ..., [0xe000, 0xf000)
     for start in (0..MAX_ADDR).step_by(0x2000) {
@@ -334,6 +554,7 @@ fn test_find_free_area() {
             MemoryArea::new(start.into(), 0x1000, 1, MockBackend),
             &mut pt,
             false,
+            &mut reclaim,
         ));
     }
 

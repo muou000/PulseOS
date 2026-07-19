@@ -325,11 +325,13 @@ dependencies = [
  "axdriver",
  "axfs",
  "axhal",
+ "axipi",
  "axlog",
  "axnet",
  "axruntime",
  "axsync",
  "axtask",
+ "kspin",
 ]
 
 [[package]]
@@ -415,6 +417,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "axipi"
+version = "0.2.0"
+dependencies = [
+ "axconfig",
+ "axhal",
+ "kspin",
+ "lazyinit",
+ "log",
+ "percpu",
+]
+
+[[package]]
 name = "axlog"
 version = "0.2.0"
 dependencies = [
@@ -433,6 +447,7 @@ dependencies = [
  "axerrno",
  "axfs",
  "axhal",
+ "axipi",
  "kspin",
  "lazyinit",
  "log",
@@ -541,6 +556,7 @@ dependencies = [
  "axconfig-macros",
  "axcpu",
  "axplat",
+ "fdt-raw",
  "kspin",
  "log",
  "riscv",
@@ -592,6 +608,7 @@ dependencies = [
  "axdriver",
  "axfs",
  "axhal",
+ "axipi",
  "axlog",
  "axmm",
  "axnet",
@@ -629,6 +646,7 @@ dependencies = [
  "axerrno",
  "axhal",
  "axio",
+ "axipi",
  "axpoll",
  "axsched",
  "cfg-if",
@@ -980,6 +998,17 @@ dependencies = [
  "crc",
  "log",
  "maybe-async",
+]
+
+[[package]]
+name = "fdt-raw"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "91e6747052012035c3473585be1d706207893d8db73101825d8a3f75effa9843"
+dependencies = [
+ "heapless 0.9.3",
+ "log",
+ "thiserror",
 ]
 
 [[package]]

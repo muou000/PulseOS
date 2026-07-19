@@ -1,11 +1,12 @@
 //! Dummy implementation of platform-related interfaces defined in [`axplat`].
 
+#[cfg(feature = "irq")]
 use axplat::impl_plat_interface;
 
 use axplat::console::ConsoleIf;
 use axplat::init::InitIf;
 #[cfg(feature = "irq")]
-use axplat::irq::{IpiTarget, IrqHandler, IrqIf};
+use axplat::irq::{IpiError, IpiTarget, IrqHandler, IrqIf};
 use axplat::mem::{MemIf, RawRange};
 use axplat::power::PowerIf;
 use axplat::time::TimeIf;
@@ -90,7 +91,12 @@ impl TimeIf for DummyTime {
 #[impl_plat_interface]
 impl PowerIf for DummyPower {
     #[cfg(feature = "smp")]
-    fn cpu_boot(_cpu_id: usize, _stack_top_paddr: usize) {}
+    fn cpu_boot(
+        _cpu_id: usize,
+        _stack_top_paddr: usize,
+    ) -> Result<(), axplat::power::CpuBootError> {
+        Err(axplat::power::CpuBootError::NotSupported)
+    }
 
     fn system_off() -> ! {
         unimplemented!()
@@ -114,7 +120,11 @@ impl IrqIf for DummyIrq {
         None
     }
 
-    fn handle(_irq: usize) {}
+    fn handle(_irq: usize, _cpu_id: usize) {}
 
-    fn send_ipi(_irq: usize, _target: IpiTarget) {}
+    fn cpu_online(_cpu_id: usize) {}
+
+    fn send_ipi(_irq: usize, _target: IpiTarget) -> Result<(), IpiError> {
+        Err(IpiError::NotSupported)
+    }
 }

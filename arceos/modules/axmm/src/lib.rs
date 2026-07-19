@@ -20,7 +20,10 @@ use lazyinit::LazyInit;
 use memory_addr::{MemoryAddr, PhysAddr, VirtAddr, va};
 use memory_set::MappingError;
 
-pub use self::{aspace::{AddrSpace, PageFaultResult, PageTableLockManager}, backend::Backend};
+pub use self::{
+    aspace::{AddrSpace, AddrSpaceCloneResult, AddrSpaceMutation, PageFaultResult, PageTableLockManager, TlbShootdown},
+    backend::Backend,
+};
 
 static KERNEL_ASPACE: LazyInit<SpinNoIrq<AddrSpace>> = LazyInit::new();
 

@@ -163,7 +163,15 @@ impl Backend {
             for addr in PageIter4K::new(start, start + size).unwrap() {
                 let Some(frame) = alloc_frame(true) else {
                     if mapped_pages != 0 {
-                        let _ = self.unmap_alloc(start, mapped_pages * PAGE_SIZE_4K, pt, true);
+                        let mut reclaim = super::DeferredReclaims::default();
+                        let _ = self.unmap_alloc(
+                            start,
+                            mapped_pages * PAGE_SIZE_4K,
+                            pt,
+                            true,
+                            &mut reclaim,
+                        );
+                        reclaim.reclaim();
                     }
                     return false;
                 };
@@ -173,7 +181,15 @@ impl Backend {
                 } else {
                     dealloc_frame(frame);
                     if mapped_pages != 0 {
-                        let _ = self.unmap_alloc(start, mapped_pages * PAGE_SIZE_4K, pt, true);
+                        let mut reclaim = super::DeferredReclaims::default();
+                        let _ = self.unmap_alloc(
+                            start,
+                            mapped_pages * PAGE_SIZE_4K,
+                            pt,
+                            true,
+                            &mut reclaim,
+                        );
+                        reclaim.reclaim();
                     }
                     return false;
                 }
@@ -195,21 +211,16 @@ impl Backend {
         size: usize,
         pt: &mut PageTable,
         _populate: bool,
+        reclaim: &mut super::DeferredReclaims,
     ) -> bool {
         debug!("unmap_alloc: [{:#x}, {:#x})", start, start + size);
         for addr in PageIter4K::new(start, start + size).unwrap() {
             if let Ok((frame, page_size, tlb)) = pt.unmap(addr) {
-                // Deallocate the physical frame if there is a mapping in the
-                // page table.
                 if page_size.is_huge() {
                     return false;
                 }
                 tlb.flush();
-                if frame.as_usize() != 0 {
-                    dealloc_frame(frame);
-                }
-            } else {
-                // Deallocation is needn't if the page is not mapped.
+                reclaim.defer_frame(frame);
             }
         }
         true
@@ -224,7 +235,8 @@ impl Backend {
         populate: bool,
     ) -> bool {
         let page = vaddr.align_down_4k();
-        let query_res = pt.lock_for_addr(page).query(page);
+        let initial_pt_guard = pt.lock_for_addr(page);
+        let query_res = initial_pt_guard.query(page);
         let is_placeholder = match query_res {
             Ok((old_frame, old_flags, _)) => old_flags.is_empty() || old_frame.as_usize() == 0,
             _ => false,
@@ -235,7 +247,7 @@ impl Backend {
             let mut alloc_count = 0;
             let mut check_page = page;
             while alloc_count < 4 && check_page < area_end {
-                let cur_query = pt.lock_for_addr(check_page).query(check_page);
+                let cur_query = initial_pt_guard.query(check_page);
                 let needs_mapping = match cur_query {
                     Err(_) => true,
                     Ok((frame, _, _)) if frame.as_usize() == 0 => true,
@@ -248,6 +260,7 @@ impl Backend {
                     break;
                 }
             }
+            drop(initial_pt_guard);
 
             if alloc_count == 0 {
                 return false;
@@ -260,59 +273,68 @@ impl Backend {
                 );
                 let mut handled_any = false;
                 let mut keep_mapping = true;
-                for i in 0..actual_count {
-                    let current_page = page + i * PAGE_SIZE_4K;
-                    let frame = paddr + i * PAGE_SIZE_4K;
+                let mut unused_frames = [0usize; 4];
+                let mut unused_count = 0usize;
+                {
+                    let mut pt_guard = pt.lock_for_addr(page);
+                    for i in 0..actual_count {
+                        let current_page = page + i * PAGE_SIZE_4K;
+                        let frame = paddr + i * PAGE_SIZE_4K;
 
-                    let mut mapped_successfully = false;
-                    let mut already_mapped = false;
+                        let mut mapped_successfully = false;
+                        let mut already_mapped = false;
 
-                    if keep_mapping {
-                        let mut pt_guard = pt.lock_for_addr(current_page);
-                        let re_query = pt_guard.query(current_page);
-                        match re_query {
-                            Err(_) => {
-                                if pt_guard
-                                    .map(current_page, frame, PageSize::Size4K, orig_flags)
-                                    .map(|tlb| tlb.flush())
-                                    .is_ok()
-                                {
-                                    mapped_successfully = true;
-                                    handled_any = true;
+                        if keep_mapping {
+                            let re_query = pt_guard.query(current_page);
+                            match re_query {
+                                Err(_) => {
+                                    if pt_guard
+                                        .map(current_page, frame, PageSize::Size4K, orig_flags)
+                                        .map(|tlb| tlb.flush())
+                                        .is_ok()
+                                    {
+                                        mapped_successfully = true;
+                                        handled_any = true;
+                                    }
                                 }
-                            }
-                            Ok((curr_frame, _, _)) if curr_frame.as_usize() == 0 => {
-                                if pt_guard
-                                    .remap(current_page, frame, orig_flags)
-                                    .map(|(_, tlb)| tlb.flush())
-                                    .is_ok()
-                                {
-                                    mapped_successfully = true;
-                                    handled_any = true;
+                                Ok((curr_frame, _, _)) if curr_frame.as_usize() == 0 => {
+                                    if pt_guard
+                                        .remap(current_page, frame, orig_flags)
+                                        .map(|(_, tlb)| tlb.flush())
+                                        .is_ok()
+                                    {
+                                        mapped_successfully = true;
+                                        handled_any = true;
+                                    }
                                 }
-                            }
-                            Ok((curr_frame, _, _)) if curr_frame.as_usize() != 0 => {
-                                already_mapped = true;
-                                if current_page == page {
-                                    handled_any = true;
+                                Ok((curr_frame, _, _)) if curr_frame.as_usize() != 0 => {
+                                    already_mapped = true;
+                                    if current_page == page {
+                                        handled_any = true;
+                                    }
                                 }
+                                _ => {}
                             }
-                            _ => {}
+                        }
+
+                        if !mapped_successfully {
+                            unused_frames[unused_count] = frame.as_usize();
+                            unused_count += 1;
+                            if !already_mapped {
+                                keep_mapping = false;
+                            }
                         }
                     }
-
-                    if !mapped_successfully {
-                        dealloc_frame(frame);
-                        if !already_mapped {
-                            keep_mapping = false;
-                        }
-                    }
+                }
+                for frame in unused_frames.into_iter().take(unused_count) {
+                    dealloc_frame(PhysAddr::from(frame));
                 }
                 return handled_any;
             } else {
                 return false;
             }
         }
+        drop(initial_pt_guard);
         if let Ok((old_frame, old_flags, _)) = query_res {
             // Lazy anonymous mappings install an empty placeholder PTE first.
             // Their first access should allocate a fresh zeroed frame rather
@@ -456,7 +478,7 @@ mod tests {
         let frame = PhysAddr::from(axconfig::plat::PHYS_MEMORY_BASE);
         // Note: FRAME_TABLE should be initialized before running this test.
         // In a real test environment, this might need more setup.
-        
+
         frame_table().get_ref(frame); // ensure it doesn't panic if initialized
 
         cow_inc_frame_ref(frame); // 0 -> 1 -> 2

@@ -1,8 +1,12 @@
+use kspin::SpinNoIrq;
+use loongArch64::iocsr::*;
+
 use super::irq_common::{
     EIOINTC_CPU0_ROUTE_WORD, EIOINTC_IPMAP_WORD, EIOINTC_VECTOR_COUNT, eiointc_nodemap_word,
-    eiointc_reg_bit,
+    eiointc_reg_bit, update_enable_mask,
 };
-use loongArch64::iocsr::*;
+
+static ENABLE_LOCK: SpinNoIrq<()> = SpinNoIrq::new(());
 
 const LOONGARCH_IOCSR_MISC_FUNC: usize = 0x0420;
 const EIOINTC_NODEMAP: usize = 0x14a0;
@@ -65,7 +69,8 @@ pub fn set_enable(irq_num: usize, enabled: bool) {
     }
     let (offset, bit) = eiointc_reg_bit(irq_num);
     let reg = EIOINTC_ENABLE + offset;
+    let _guard = ENABLE_LOCK.lock();
     let old = iocsr_read_d(reg);
-    let new = if enabled { old | bit } else { old & !bit };
+    let new = update_enable_mask(old, bit, enabled);
     iocsr_write_d(reg, new);
 }

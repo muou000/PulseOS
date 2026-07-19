@@ -1,4 +1,4 @@
-use axplat::power::PowerIf;
+use axplat::power::{CpuBootError, PowerIf};
 
 struct PowerImpl;
 
@@ -10,17 +10,21 @@ impl PowerIf for PowerImpl {
     /// Where `cpu_id` is the logical CPU ID (0, 1, ..., N-1, N is the number of
     /// CPU cores on the platform).
     #[cfg(feature = "smp")]
-    fn cpu_boot(cpu_id: usize, stack_top_paddr: usize) {
+    fn cpu_boot(cpu_id: usize, stack_top_paddr: usize) -> Result<(), CpuBootError> {
         use axplat::mem::{va, virt_to_phys};
         unsafe extern "C" {
             fn _start_secondary();
         }
         if sbi_rt::probe_extension(sbi_rt::Hsm).is_unavailable() {
-            warn!("HSM SBI extension is not supported for current SEE.");
-            return;
+            return Err(CpuBootError::NotSupported);
         }
+        let hart_id = crate::topology::hart_id(cpu_id).ok_or(CpuBootError::InvalidParameter)?;
         let entry = virt_to_phys(va!(_start_secondary as *const () as usize));
-        sbi_rt::hart_start(cpu_id, entry.as_usize(), stack_top_paddr);
+        decode_hart_start(sbi_rt::hart_start(
+            hart_id,
+            entry.as_usize(),
+            stack_top_paddr,
+        ))
     }
 
     /// Shutdown the whole system.
@@ -35,6 +39,27 @@ impl PowerIf for PowerImpl {
 
     /// Get the number of CPU cores available on this platform.
     fn cpu_num() -> usize {
-        crate::config::plat::MAX_CPU_NUM
+        crate::topology::cpu_count()
+    }
+}
+
+#[cfg(feature = "smp")]
+fn decode_hart_start(result: sbi_rt::SbiRet) -> Result<(), CpuBootError> {
+    match result.error {
+        error if error == sbi_rt::SbiRet::success(0).error => Ok(()),
+        error if error == sbi_rt::SbiRet::not_supported().error => Err(CpuBootError::NotSupported),
+        error if error == sbi_rt::SbiRet::invalid_param().error => {
+            Err(CpuBootError::InvalidParameter)
+        }
+        error if error == sbi_rt::SbiRet::invalid_address().error => {
+            Err(CpuBootError::InvalidAddress)
+        }
+        error
+            if error == sbi_rt::SbiRet::already_available().error
+                || error == sbi_rt::SbiRet::already_started().error =>
+        {
+            Err(CpuBootError::AlreadyOn)
+        }
+        error => Err(CpuBootError::Firmware(error as isize)),
     }
 }

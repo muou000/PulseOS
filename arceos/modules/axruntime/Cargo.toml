@@ -17,7 +17,7 @@ irq = ["axhal/irq", "axtask?/irq", "percpu"]
 tls = ["axhal/tls", "axtask?/tls"]
 alloc = ["axalloc"]
 paging = ["axhal/paging", "axmm"]
-ipi = ["dep:axipi"]
+ipi = ["dep:axipi", "axmm?/ipi"]
 
 multitask = ["axtask/multitask"]
 fs = ["axdriver", "axfs"]

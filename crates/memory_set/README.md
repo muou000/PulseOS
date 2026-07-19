@@ -30,15 +30,19 @@ struct MockBackend;
 
 let mut pt = [0; MAX_ADDR];
 let mut memory_set = MemorySet::<MockBackend>::new();
+let mut reclaim = ();
 
 // Map [0x1000..0x5000).
 memory_set.map(
     /* area: */ MemoryArea::new(va!(0x1000), 0x4000, 1, MockBackend),
     /* page_table: */ &mut pt,
-    /* unmap_overlap */ false,
+    /* unmap_overlap: */ false,
+    /* reclaim: */ &mut reclaim,
 ).unwrap();
 // Unmap [0x2000..0x4000), will split the area into two parts.
-memory_set.unmap(va!(0x2000), 0x2000, &mut pt).unwrap();
+memory_set
+    .unmap(va!(0x2000), 0x2000, &mut pt, &mut reclaim)
+    .unwrap();
 
 let areas = memory_set.iter().collect::<Vec<_>>();
 assert_eq!(areas.len(), 2);
@@ -50,6 +54,7 @@ impl MappingBackend for MockBackend {
     type Addr = VirtAddr;
     type Flags = MockFlags;
     type PageTable = MockPageTable;
+    type Reclaim = ();
 
     fn map(&self, start: VirtAddr, size: usize, flags: MockFlags, pt: &mut MockPageTable) -> bool {
         for entry in pt.iter_mut().skip(start.as_usize()).take(size) {
@@ -61,7 +66,13 @@ impl MappingBackend for MockBackend {
         true
     }
 
-    fn unmap(&self, start: VirtAddr, size: usize, pt: &mut MockPageTable) -> bool {
+    fn unmap(
+        &self,
+        start: VirtAddr,
+        size: usize,
+        pt: &mut MockPageTable,
+        _reclaim: &mut Self::Reclaim,
+    ) -> bool {
         for entry in pt.iter_mut().skip(start.as_usize()).take(size) {
             if *entry == 0 {
                 return false;

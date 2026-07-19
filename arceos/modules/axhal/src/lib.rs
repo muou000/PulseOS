@@ -81,7 +81,7 @@ pub mod console {
 pub mod power {
     #[cfg(feature = "smp")]
     pub use axplat::power::cpu_boot;
-    pub use axplat::power::system_off;
+    pub use axplat::power::{CpuBootError, system_off};
 }
 
 /// Trap handling.
@@ -106,7 +106,6 @@ pub mod context {
 }
 
 pub use axcpu::asm;
-
 #[cfg(feature = "smp")]
 pub use axplat::init::{init_early_secondary, init_later_secondary};
 #[cfg(feature = "smp")]
@@ -152,12 +151,16 @@ pub fn get_bootarg() -> usize {
     *BOOT_ARG
 }
 
-/// The number of CPUs in the system. Based on the number declared by the
-/// platform crate and limited by the configured maximum CPU number.
+/// The number of possible CPUs in the system. Based on the number declared by
+/// the platform crate and limited by the configured maximum CPU number.
 #[cfg(feature = "smp")]
 static CPU_NUM: AtomicUsize = AtomicUsize::new(1);
 
-/// Gets the number of CPUs running in the system.
+/// Bit mask of CPUs that completed per-CPU initialization and can receive work.
+#[cfg(feature = "smp")]
+static ONLINE_CPU_MASK: AtomicUsize = AtomicUsize::new(0);
+
+/// Gets the number of possible CPUs in the system.
 ///
 /// When SMP is disabled, this function always returns 1.
 ///
@@ -186,6 +189,43 @@ pub fn cpu_num() -> usize {
     }
 }
 
+/// Returns a bit mask containing every online logical CPU.
+pub fn online_cpu_mask() -> usize {
+    #[cfg(feature = "smp")]
+    {
+        ONLINE_CPU_MASK.load(Ordering::Acquire)
+    }
+    #[cfg(not(feature = "smp"))]
+    {
+        1
+    }
+}
+
+/// Returns the number of CPUs that are ready to receive tasks and interrupts.
+pub fn online_cpu_count() -> usize {
+    online_cpu_mask().count_ones() as usize
+}
+
+/// Returns whether a logical CPU is online.
+pub fn is_cpu_online(cpu_id: usize) -> bool {
+    cpu_id < usize::BITS as usize && online_cpu_mask() & (1usize << cpu_id) != 0
+}
+
+/// Publishes a logical CPU after all of its per-CPU runtime state is initialized.
+pub fn mark_cpu_online(cpu_id: usize) {
+    assert!(cpu_id < cpu_num(), "invalid online CPU ID {cpu_id}");
+    assert!(
+        cpu_id < usize::BITS as usize,
+        "online CPU mask is too small"
+    );
+    #[cfg(feature = "irq")]
+    axplat::irq::cpu_online(cpu_id);
+    #[cfg(feature = "smp")]
+    ONLINE_CPU_MASK.fetch_or(1usize << cpu_id, Ordering::Release);
+    #[cfg(not(feature = "smp"))]
+    let _ = cpu_id;
+}
+
 /// Initializes the CPU number information.
 fn init_cpu_num() {
     #[cfg(feature = "smp")]
@@ -193,6 +233,11 @@ fn init_cpu_num() {
         let plat_cpu_num = axplat::power::cpu_num();
         let max_cpu_num = axconfig::plat::MAX_CPU_NUM;
         let cpu_num = plat_cpu_num.min(max_cpu_num);
+
+        assert!(
+            cpu_num <= usize::BITS as usize,
+            "configured CPU count exceeds the online CPU mask width"
+        );
 
         info!("CPU number: max = {max_cpu_num}, platform = {plat_cpu_num}, use = {cpu_num}",);
         ax_println!("smp = {}", cpu_num); // for test purposes

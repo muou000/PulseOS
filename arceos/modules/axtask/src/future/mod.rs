@@ -1,5 +1,6 @@
 use alloc::sync::Arc;
-use core::future::{Future, IntoFuture};
+use core::fmt;
+use core::future::{Future, IntoFuture, poll_fn};
 use core::pin::pin;
 use core::sync::atomic::{AtomicBool, Ordering};
 use core::task::{Context, Poll, Waker};
@@ -99,6 +100,36 @@ pub fn block_on<F: IntoFuture>(f: F) -> F::Output {
     };
     waker_arc.deactivate();
     output
+}
+
+/// Error returned when an interruptible future observes a task interruption.
+#[derive(Debug, PartialEq, Eq)]
+pub struct Interrupted;
+
+impl fmt::Display for Interrupted {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "interrupted")
+    }
+}
+
+impl From<Interrupted> for axerrno::AxError {
+    fn from(_: Interrupted) -> Self {
+        axerrno::AxError::Interrupted
+    }
+}
+
+/// Runs a future until it completes or the current task is interrupted.
+pub async fn interruptible<F: IntoFuture>(f: F) -> Result<F::Output, Interrupted> {
+    let mut f = pin!(f.into_future());
+    let curr = current();
+    poll_fn(|cx| {
+        if curr.poll_interrupt(cx).is_ready() {
+            Poll::Ready(Err(Interrupted))
+        } else {
+            f.as_mut().poll(cx).map(Ok)
+        }
+    })
+    .await
 }
 
 /// Yields the current task until the future is ready.

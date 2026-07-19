@@ -86,12 +86,29 @@ impl axlog::LogIf for LogIfImpl {
 }
 
 use core::sync::atomic::{AtomicUsize, Ordering};
+#[cfg(feature = "smp")]
+use core::sync::atomic::AtomicBool;
 
 /// Number of CPUs that have completed initialization.
 static INITED_CPUS: AtomicUsize = AtomicUsize::new(0);
 
+#[cfg(feature = "smp")]
+static BOOTED_CPU_MASK: AtomicUsize = AtomicUsize::new(0);
+
+#[cfg(feature = "smp")]
+static SECONDARY_START_COMPLETE: AtomicBool = AtomicBool::new(false);
+
 fn is_init_ok() -> bool {
-    INITED_CPUS.load(Ordering::Acquire) == axhal::cpu_num()
+    #[cfg(feature = "smp")]
+    {
+        SECONDARY_START_COMPLETE.load(Ordering::Acquire)
+            && INITED_CPUS.load(Ordering::Acquire)
+                == BOOTED_CPU_MASK.load(Ordering::Acquire).count_ones() as usize
+    }
+    #[cfg(not(feature = "smp"))]
+    {
+        INITED_CPUS.load(Ordering::Acquire) == 1
+    }
 }
 
 /// The main entry point of the ArceOS runtime.
@@ -108,6 +125,8 @@ fn is_init_ok() -> bool {
 pub fn rust_main(cpu_id: usize, arg: usize) -> ! {
     unsafe { axhal::mem::clear_bss() };
     axhal::init_percpu(cpu_id);
+    #[cfg(feature = "smp")]
+    BOOTED_CPU_MASK.store(1usize << cpu_id, Ordering::Release);
     axhal::init_early(cpu_id, arg);
 
     ax_println!("{}", LOGO);
@@ -160,6 +179,20 @@ pub fn rust_main(cpu_id: usize, arg: usize) -> ! {
     #[cfg(feature = "multitask")]
     axtask::init_scheduler();
 
+    #[cfg(feature = "ipi")]
+    {
+        axipi::init();
+        axipi::mark_current_cpu_ready();
+    }
+
+    #[cfg(feature = "irq")]
+    {
+        info!("Initialize interrupt handlers...");
+        init_interrupt();
+    }
+
+    axhal::mark_cpu_online(cpu_id);
+
     #[cfg(any(feature = "fs", feature = "net", feature = "display"))]
     {
         #[allow(unused_variables)]
@@ -179,10 +212,7 @@ pub fn rust_main(cpu_id: usize, arg: usize) -> ! {
     self::mp::start_secondary_cpus(cpu_id);
 
     #[cfg(feature = "irq")]
-    {
-        info!("Initialize interrupt handlers...");
-        init_interrupt();
-    }
+    axhal::asm::enable_irqs();
 
     #[cfg(all(feature = "tls", not(feature = "multitask")))]
     {
@@ -197,6 +227,17 @@ pub fn rust_main(cpu_id: usize, arg: usize) -> ! {
 
     while !is_init_ok() {
         core::hint::spin_loop();
+    }
+
+    #[cfg(feature = "smp")]
+    while axhal::online_cpu_count() != BOOTED_CPU_MASK.load(Ordering::Acquire).count_ones() as usize
+    {
+        core::hint::spin_loop();
+    }
+
+    #[cfg(feature = "ipi")]
+    {
+        axipi::wait_for_all_cpus_ready();
     }
 
     unsafe { main() };
@@ -262,6 +303,8 @@ fn init_interrupt() {
     }
 
     axhal::irq::register(axconfig::devices::TIMER_IRQ, |_irq| {
+        #[cfg(feature = "ipi")]
+        axipi::service_tlb_shootdown();
         #[cfg(not(feature = "multitask"))]
         update_timer();
         crate::vdso::update_vdso_data();
@@ -274,8 +317,6 @@ fn init_interrupt() {
         axipi::ipi_handler();
     });
 
-    // Enable IRQs before starting app
-    axhal::asm::enable_irqs();
 }
 
 #[cfg(all(feature = "tls", not(feature = "multitask")))]

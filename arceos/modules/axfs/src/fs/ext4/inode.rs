@@ -541,6 +541,7 @@ impl DirNodeOps for Inode {
     ) -> VfsResult<DirEntry> {
         let fs = &self.fs.inner;
         self.validate_inode_num(&fs, self.ino)?;
+        let _directory_guard = self.fs.directory_mutation.lock().await;
 
         let exists = if let Some(snapshot) = self.dir_cache.get() {
             self.cached_entry(&snapshot, name).is_some()
@@ -608,6 +609,7 @@ impl DirNodeOps for Inode {
     async fn link(&self, name: &str, node: &DirEntry) -> VfsResult<DirEntry> {
         let fs = &self.fs.inner;
         self.validate_inode_num(&fs, self.ino)?;
+        let _directory_guard = self.fs.directory_mutation.lock().await;
         let dir_idx = core::num::NonZeroU32::new(self.ino).ok_or(VfsError::InvalidData)?;
         let dir_inode = ext4plus::inode::Inode::read(&fs, dir_idx).await.map_err(into_vfs_err)?;
         let mut dir = ext4plus::dir::Dir::open_inode(&fs, dir_inode).map_err(into_vfs_err)?;
@@ -634,6 +636,7 @@ impl DirNodeOps for Inode {
     async fn unlink(&self, name: &str) -> VfsResult<()> {
         let fs = &self.fs.inner;
         self.validate_inode_num(&fs, self.ino)?;
+        let _directory_guard = self.fs.directory_mutation.lock().await;
 
         let dir_idx = core::num::NonZeroU32::new(self.ino).ok_or(VfsError::InvalidData)?;
         let dir_inode = ext4plus::inode::Inode::read(&fs, dir_idx).await.map_err(into_vfs_err)?;
@@ -687,6 +690,7 @@ impl DirNodeOps for Inode {
         let fs = &self.fs.inner;
         self.validate_inode_num(&fs, self.ino)?;
         self.validate_inode_num(&fs, dst_dir.ino)?;
+        let _directory_guard = self.fs.directory_mutation.lock().await;
 
         let src_dir_idx = core::num::NonZeroU32::new(self.ino).ok_or(VfsError::InvalidData)?;
         let src_dir_inode = ext4plus::inode::Inode::read(&fs, src_dir_idx).await.map_err(into_vfs_err)?;

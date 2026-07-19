@@ -28,8 +28,10 @@ pub use thread::{Thread, ThreadHandle};
 static PROCESS_REGISTRY: Lazy<SpinNoIrq<HashMap<u64, Arc<Process>>>> =
     Lazy::new(|| SpinNoIrq::new(HashMap::new()));
 
-static THREAD_REGISTRY: Lazy<SpinNoIrq<HashMap<u64, Weak<Thread>>>> =
-    Lazy::new(|| SpinNoIrq::new(HashMap::new()));
+const THREAD_REGISTRY_SHARDS: usize = 16;
+
+static THREAD_REGISTRY: Lazy<[SpinNoIrq<HashMap<u64, Weak<Thread>>>; THREAD_REGISTRY_SHARDS]> =
+    Lazy::new(|| core::array::from_fn(|_| SpinNoIrq::new(HashMap::new())));
 
 static INIT_PROCESS: spin::Once<Arc<Process>> = spin::Once::new();
 
@@ -47,15 +49,22 @@ pub fn init_process() -> Option<Arc<Process>> {
 }
 
 pub fn register_thread_global(tid: u64, thread: Arc<Thread>) {
-    THREAD_REGISTRY.lock().insert(tid, Arc::downgrade(&thread));
+    THREAD_REGISTRY[tid as usize % THREAD_REGISTRY_SHARDS]
+        .lock()
+        .insert(tid, Arc::downgrade(&thread));
 }
 
 pub fn unregister_thread_global(tid: u64) {
-    THREAD_REGISTRY.lock().remove(&tid);
+    THREAD_REGISTRY[tid as usize % THREAD_REGISTRY_SHARDS]
+        .lock()
+        .remove(&tid);
 }
 
 pub fn thread_by_tid_global(tid: u64) -> Option<Arc<Thread>> {
-    THREAD_REGISTRY.lock().get(&tid).and_then(|t| t.upgrade())
+    THREAD_REGISTRY[tid as usize % THREAD_REGISTRY_SHARDS]
+        .lock()
+        .get(&tid)
+        .and_then(|t| t.upgrade())
 }
 
 // Per-CPU `CURRENT_THREAD` and thread registry removed. Threads are
