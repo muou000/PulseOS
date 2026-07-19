@@ -159,7 +159,13 @@ impl TypeMap {
     }
 
     pub fn insert<T: Any + Send + Sync>(&mut self, value: T) {
-        self.0.push((TypeId::of::<T>(), Arc::new(value)));
+        let type_id = TypeId::of::<T>();
+        let value = Arc::new(value);
+        if let Some((_, existing)) = self.0.iter_mut().find(|(id, _)| *id == type_id) {
+            *existing = value;
+        } else {
+            self.0.push((type_id, value));
+        }
     }
 
     pub fn get<T: Any + Send + Sync>(&self) -> Option<Arc<T>> {
@@ -419,5 +425,20 @@ impl Pollable for DirEntry {
             Node::File(file) => file.register(context, events),
             Node::Dir(_) => {}
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::TypeMap;
+
+    #[test]
+    fn type_map_insert_replaces_existing_value() {
+        let mut map = TypeMap::new();
+        map.insert::<u64>(1);
+        map.insert::<u64>(2);
+
+        assert_eq!(*map.get::<u64>().unwrap(), 2);
+        assert_eq!(map.0.len(), 1);
     }
 }
