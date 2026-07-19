@@ -133,7 +133,7 @@ pub fn prefault_range(
             }
             result => result,
         };
-        if !result.complete_after_unlock().unwrap_or(false) {
+        if !result.complete_after_unlock()?.unwrap_or(false) {
             return Err(AxError::BadAddress);
         }
     }
@@ -232,7 +232,7 @@ fn write_user_region(aspace: &mut AddrSpace, start: VirtAddr, bytes: &[u8]) -> A
             }
             result => result,
         };
-        if !result.complete_after_unlock().unwrap_or(false) {
+        if !result.complete_after_unlock()?.unwrap_or(false) {
             return Err(AxError::BadAddress);
         }
     }

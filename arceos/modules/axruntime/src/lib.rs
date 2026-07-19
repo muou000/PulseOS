@@ -303,6 +303,8 @@ fn init_interrupt() {
     }
 
     axhal::irq::register(axconfig::devices::TIMER_IRQ, |_irq| {
+        #[cfg(feature = "ipi")]
+        axipi::service_tlb_shootdown();
         #[cfg(not(feature = "multitask"))]
         update_timer();
         crate::vdso::update_vdso_data();

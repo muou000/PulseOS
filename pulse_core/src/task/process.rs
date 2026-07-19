@@ -1078,7 +1078,7 @@ impl Process {
                 }
                 result => result,
             };
-            if !result.complete_after_unlock().unwrap_or(false) {
+            if !result.complete_after_unlock()?.unwrap_or(false) {
                 return Err(AxError::BadAddress);
             }
         }
@@ -1663,7 +1663,14 @@ impl Process {
             }
             result => result,
         };
-        result.complete_after_unlock().unwrap_or(false)
+        match result.complete_after_unlock() {
+            Ok(Some(handled)) => handled,
+            Ok(None) => false,
+            Err(error) => {
+                axlog::error!("page fault TLB shootdown failed: {error:?}");
+                false
+            }
+        }
     }
 
     pub fn activate(&self) {

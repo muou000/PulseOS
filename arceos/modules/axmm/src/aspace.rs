@@ -26,8 +26,8 @@ impl TlbShootdown {
     }
 
     /// Completes the shootdown without holding an address-space lock.
-    pub fn complete_after_unlock(self) {
-        flush_tlb_asid_all(self.asid);
+    pub fn complete_after_unlock(self) -> AxResult {
+        flush_tlb_asid_all(self.asid)
     }
 }
 
@@ -48,14 +48,14 @@ impl PageFaultResult {
     /// This must only be called after the lock used to access the address space
     /// has been released. `None` means the fault needs to be retried with the
     /// address-space write lock.
-    pub fn complete_after_unlock(self) -> Option<bool> {
+    pub fn complete_after_unlock(self) -> AxResult<Option<bool>> {
         match self {
-            Self::Handled(success) => Some(success),
+            Self::Handled(success) => Ok(Some(success)),
             Self::HandledWithShootdown(shootdown) => {
-                shootdown.complete_after_unlock();
-                Some(true)
+                shootdown.complete_after_unlock()?;
+                Ok(Some(true))
             }
-            Self::NeedWriteLock => None,
+            Self::NeedWriteLock => Ok(None),
         }
     }
 }
@@ -69,8 +69,9 @@ pub struct AddrSpaceCloneResult {
 impl AddrSpaceCloneResult {
     /// Completes the parent TLB shootdown and returns the cloned address space.
     pub fn complete_after_unlock(self) -> AxResult<AddrSpace> {
-        self.shootdown.complete_after_unlock();
-        self.result
+        let Self { result, shootdown } = self;
+        shootdown.complete_after_unlock()?;
+        result
     }
 }
 
@@ -993,32 +994,39 @@ impl fmt::Debug for AddrSpace {
     }
 }
 
-#[cfg(target_arch = "riscv64")]
+#[cfg(all(not(feature = "ipi"), target_arch = "riscv64"))]
 unsafe fn flush_tlb_asid(asid: usize) {
     unsafe { core::arch::asm!("sfence.vma x0, {}", in(reg) asid) };
 }
 
-#[cfg(target_arch = "loongarch64")]
+#[cfg(all(not(feature = "ipi"), target_arch = "loongarch64"))]
 unsafe fn flush_tlb_asid(asid: usize) {
     unsafe { core::arch::asm!("dbar 0; invtlb 0x04, {}, $r0; dbar 0; ibar 0", in(reg) asid) };
 }
 
-#[cfg(not(any(target_arch = "riscv64", target_arch = "loongarch64")))]
+#[cfg(all(
+    not(feature = "ipi"),
+    not(any(target_arch = "riscv64", target_arch = "loongarch64"))
+))]
 unsafe fn flush_tlb_asid(_asid: usize) {
     axhal::asm::flush_tlb(None);
 }
 
-fn flush_tlb_asid_all(asid: usize) {
+fn flush_tlb_asid_all(asid: usize) -> AxResult {
     #[cfg(feature = "ipi")]
     {
         let _ = asid;
-        axipi::flush_tlb_all_cpus().expect("failed to issue TLB shootdown IPI");
+        axipi::flush_tlb_all_cpus().map_err(|error| {
+            error!("failed to complete TLB shootdown: {error}");
+            AxError::BadState
+        })?;
     }
 
     #[cfg(not(feature = "ipi"))]
     unsafe {
         flush_tlb_asid(asid);
     }
+    Ok(())
 }
 
 struct AsidAllocator {
@@ -1068,7 +1076,10 @@ impl Drop for AddrSpace {
     fn drop(&mut self) {
         self.clear();
         let asid = self.asid;
-        ASID_ALLOCATOR.lock().free(asid);
-        unsafe { flush_tlb_asid(asid) };
+        if flush_tlb_asid_all(asid).is_ok() {
+            ASID_ALLOCATOR.lock().free(asid);
+        } else {
+            error!("failed to flush retired address space; ASID {asid} will not be reused");
+        }
     }
 }

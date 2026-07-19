@@ -106,7 +106,6 @@ pub fn flush_tlb_all_cpus() -> Result<(), IpiError> {
     let current_cpu_id = this_cpu_id();
     let cpu_num = axhal::cpu_num();
     let mut target_mask = 0usize;
-    let mut sent_mask = 0usize;
     let mut target_tickets = [0usize; axconfig::plat::MAX_CPU_NUM];
 
     // CPU readiness is published before the CPU is marked online and remains
@@ -124,11 +123,12 @@ pub fn flush_tlb_all_cpus() -> Result<(), IpiError> {
 
     fence(Ordering::Release);
     axhal::asm::flush_tlb(None);
+    let mut delivery_error = None;
     for cpu_id in 0..cpu_num {
         if target_mask & (1usize << cpu_id) != 0 {
             let send_result = {
-                // Serializing publication with target-side service makes the
-                // just-published ticket safe to roll back on delivery failure.
+                // Serialize ticket publication with target-side service so
+                // completion cannot race ahead of the delivery attempt.
                 let _state_guard = TLB_SHOOTDOWN_STATE_LOCKS[cpu_id].lock();
                 let ticket = TLB_SHOOTDOWN_REQUESTED[cpu_id]
                     .fetch_add(1, Ordering::AcqRel)
@@ -136,24 +136,19 @@ pub fn flush_tlb_all_cpus() -> Result<(), IpiError> {
                     .expect("TLB shootdown ticket overflow");
                 target_tickets[cpu_id] = ticket;
 
-                let result = axhal::irq::send_ipi(IPI_IRQ, IpiTarget::Other { cpu_id });
-                if result.is_err() {
-                    let requested = TLB_SHOOTDOWN_REQUESTED[cpu_id].fetch_sub(1, Ordering::AcqRel);
-                    debug_assert_eq!(requested, ticket);
-                }
-                result
+                axhal::irq::send_ipi(IPI_IRQ, IpiTarget::Other { cpu_id })
             };
 
             if let Err(error) = send_result {
-                wait_for_tlb_shootdowns(sent_mask, &target_tickets, cpu_num);
-                return Err(error);
+                delivery_error.get_or_insert(error);
             }
-            sent_mask |= 1usize << cpu_id;
         }
     }
 
-    wait_for_tlb_shootdowns(sent_mask, &target_tickets, cpu_num);
-    Ok(())
+    // Keep failed deliveries armed: the periodic interrupt path services the
+    // mailbox, so no caller observes an error while a remote stale TLB remains.
+    wait_for_tlb_shootdowns(target_mask, &target_tickets, cpu_num);
+    delivery_error.map_or(Ok(()), Err)
 }
 
 fn wait_for_tlb_shootdowns(target_mask: usize, target_tickets: &[usize], cpu_num: usize) {
@@ -171,7 +166,8 @@ fn wait_for_tlb_shootdowns(target_mask: usize, target_tickets: &[usize], cpu_num
 
 /// Services pending fixed-mailbox TLB shootdowns on the current CPU.
 ///
-/// A periodic interrupt may also call this to service a delayed IPI promptly.
+/// A periodic interrupt must also call this so a failed IPI delivery cannot
+/// leave a pending TLB shootdown unserviced.
 pub fn service_tlb_shootdown() {
     let cpu_id = this_cpu_id();
     let _state_guard = TLB_SHOOTDOWN_STATE_LOCKS[cpu_id].lock();
