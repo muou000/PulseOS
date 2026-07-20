@@ -13,6 +13,7 @@ use linux_raw_sys::{
         LOOP_SET_STATUS, LOOP_SET_STATUS64,
     },
 };
+use pulse_core::fd_table::FdEntry;
 
 use crate::impls::utils::{read_user_bytes, write_user_bytes};
 
@@ -182,6 +183,34 @@ fn warn_tty_ioctl_stub_once(fd: usize, cmd: u32) {
     }
 }
 
+fn is_tty_ioctl(cmd: u32) -> bool {
+    matches!(
+        cmd,
+        TCGETS
+            | TCSETS
+            | TCSETSW
+            | TCSETSF
+            | TCGETS2
+            | TCSETS2
+            | TCSETSW2
+            | TCSETSF2
+            | TIOCGPGRP
+            | TIOCSPGRP
+            | TIOCGWINSZ
+    )
+}
+
+fn is_devfs_tty(entry: &FdEntry) -> bool {
+    let Some(location) = entry.object.location() else {
+        return false;
+    };
+    location
+        .entry()
+        .downcast::<axfs::DevNode>()
+        .map(|node| node.is_tty())
+        .unwrap_or(false)
+}
+
 #[repr(C)]
 struct WinSize {
     ws_row: u16,
@@ -245,14 +274,24 @@ pub fn sys_ioctl(fd: usize, cmd: usize, arg: usize) -> isize {
 
     let cmd32 = cmd as u32;
 
-    if let Ok(process) = pulse_core::task::current_process() {
-        if let Ok(entry) = process.fd_table().read().get_entry_cloned(fd) {
-            match entry.object.ioctl(cmd32, arg) {
-                Ok(res) => return res,
-                Err(LinuxError::ENOTTY) => {}
-                Err(e) => return -e.code() as isize,
-            }
-        }
+    let process = match pulse_core::task::current_process() {
+        Ok(process) => process,
+        Err(e) => return -e.code() as isize,
+    };
+    let entry = match process.fd_table().read().get_entry_cloned(fd) {
+        Ok(entry) => entry,
+        Err(e) => return -e.code() as isize,
+    };
+    match entry.object.ioctl(cmd32, arg) {
+        Ok(res) => return res,
+        Err(LinuxError::ENOTTY) => {}
+        Err(e) => return -e.code() as isize,
+    }
+
+    // Only devfs TTY nodes may use the compatibility fallback. In particular,
+    // pipes must preserve ENOTTY so libc's isatty() reports them correctly.
+    if is_tty_ioctl(cmd32) && !is_devfs_tty(&entry) {
+        return -LinuxError::ENOTTY.code() as isize;
     }
 
     let res = handle_loop_ioctl(fd, cmd32, arg);
