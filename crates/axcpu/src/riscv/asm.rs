@@ -30,6 +30,18 @@ pub fn wait_for_irqs() {
     riscv::asm::wfi()
 }
 
+/// Waits for a locally enabled interrupt while the global SIE bit is clear.
+///
+/// RISC-V requires WFI wakeup to be independent of the global interrupt-enable
+/// bit. Keeping SIE clear lets an idle loop check its run queue and enter WFI
+/// without losing an interrupt in between; the caller handles the pending
+/// interrupt after restoring SIE.
+#[inline]
+pub fn wait_for_irqs_disabled() {
+    debug_assert!(!irqs_enabled());
+    riscv::asm::wfi()
+}
+
 /// Halt the current CPU.
 #[inline]
 pub fn halt() {

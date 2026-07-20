@@ -312,10 +312,10 @@ pub fn exit(exit_code: i32) -> ! {
 
 /// The idle task routine.
 ///
-/// It runs an infinite loop that keeps calling [`yield_now()`].
+/// It runs an infinite loop that waits for interrupts when no task is ready.
 pub fn run_idle() -> ! {
     loop {
-        yield_now();
+        current_run_queue::<NoPreemptIrqSave>().idle_wait();
     }
 }
 

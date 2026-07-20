@@ -376,6 +376,22 @@ impl<G: BaseGuard> AxRunQueueRef<'_, G> {
 
 /// Core functions of run queue.
 impl<G: BaseGuard> CurrentRunQueueRef<'_, G> {
+    /// Waits efficiently when the current task is idle, or schedules ready work.
+    pub fn idle_wait(&mut self) {
+        #[cfg(target_arch = "riscv64")]
+        {
+            if self.inner.scheduler.lock().is_empty() {
+                // The NoPreemptIrqSave guard keeps SIE clear across the empty
+                // check and WFI. A timer or reschedule IPI remains pending and
+                // wakes WFI, then is handled when the guard restores SIE.
+                axhal::asm::wait_for_irqs_disabled();
+                return;
+            }
+        }
+
+        self.yield_current();
+    }
+
     #[cfg(feature = "irq")]
     pub fn scheduler_timer_tick(&mut self) {
         let curr = &self.current_task;
