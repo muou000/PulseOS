@@ -66,6 +66,42 @@ impl BitmapHandle {
         Ok(())
     }
 
+    /// Set a contiguous range with one bitmap read and one bitmap write.
+    #[maybe_async::maybe_async]
+    pub(crate) async fn set_range(
+        &self,
+        start: u32,
+        count: u32,
+        value: bool,
+        ext4: &Ext4,
+    ) -> Result<(), Ext4Error> {
+        if count == 0 {
+            return Ok(());
+        }
+        let end = start.checked_add(count).ok_or(Ext4Error::NoSpace)?;
+        let block_size = ext4.0.superblock.block_size().to_usize();
+        let bitmap_bits = u32::try_from(block_size)
+            .ok()
+            .and_then(|size| size.checked_mul(8))
+            .ok_or(Ext4Error::NoSpace)?;
+        if end > bitmap_bits {
+            return Err(Ext4Error::NoSpace);
+        }
+
+        let mut data = vec![0; block_size];
+        ext4.read_from_block(self.block, 0, &mut data).await?;
+        for bit in start..end {
+            let byte_index = usize_from_u32(bit / 8);
+            let mask = 1 << (bit % 8);
+            if value {
+                data[byte_index] |= mask;
+            } else {
+                data[byte_index] &= !mask;
+            }
+        }
+        ext4.write_to_block(self.block, 0, &data).await
+    }
+
     /// Find the first bit in the bitmap with value `value`, and return its index.
     /// Returns `Ok(None)` if no such bit is found.
     #[maybe_async::maybe_async]

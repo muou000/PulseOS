@@ -30,7 +30,7 @@ pub(crate) struct Extent {
 
 impl Extent {
     #[maybe_async::maybe_async]
-    pub(crate) async fn allocate(
+    pub(crate) async fn allocate_uninitialized(
         inode_index: InodeIndex,
         current_block: FileBlockIndex,
         amount: u16,
@@ -39,13 +39,11 @@ impl Extent {
         if amount == 0 {
             return Err(Ext4Error::NoSpace);
         }
-        let mut tried_blocks = amount.min(32768);
+        let mut tried_blocks = amount.min(32_767);
         let start_fs_block = loop {
+            let blocks = NonZeroU32::new(u32::from(tried_blocks)).unwrap();
             match fs
-                .alloc_contiguous_blocks(
-                    inode_index,
-                    NonZeroU32::new(u32::from(tried_blocks)).unwrap(),
-                )
+                .alloc_uninitialized_contiguous_blocks(inode_index, blocks)
                 .await
             {
                 Ok(start_fs) => break start_fs,
@@ -70,7 +68,9 @@ impl Extent {
             }
         };
         // Insert extent: file-blocks [current_block, current_block + tried_blocks) -> FS blocks [start_fs_block, ...]
-        Ok(Self::new(current_block, start_fs_block, tried_blocks))
+        let mut extent = Self::new(current_block, start_fs_block, tried_blocks);
+        extent.is_initialized = false;
+        Ok(extent)
     }
 
     pub(crate) fn new(
