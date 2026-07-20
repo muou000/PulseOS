@@ -140,6 +140,7 @@ fn handle_page_fault(vaddr: VirtAddr, access_flags: MappingFlags, is_user: bool)
     }
 
     if proc.handle_page_fault(vaddr, access_flags) {
+        axhal::asm::flush_tlb(Some(vaddr));
         let leave_ns = axhal::time::monotonic_time_nanos() as u64;
         proc.add_sys_time_ns(leave_ns.saturating_sub(enter_ns));
         if proc.group_exiting() {
