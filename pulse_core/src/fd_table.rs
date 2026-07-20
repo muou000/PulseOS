@@ -463,6 +463,7 @@ pub fn write_tty_termios2(user_addr: usize) -> LinuxResult {
 }
 
 const FIONREAD: u32 = 0x541B;
+const FIONBIO: u32 = 0x5421;
 const TCGETS: u32 = 0x5401;
 const TCSETS: u32 = 0x5402;
 const TCSETSW: u32 = 0x5403;
@@ -1981,13 +1982,21 @@ impl FdObject for PipeObject {
     }
 
     fn ioctl(&self, cmd: u32, arg: usize) -> LinuxResult<isize> {
-        if cmd == FIONREAD {
-            let n = self.shared.buffer.lock().available_read() as i32;
-            let process = crate::task::current_process()?;
-            process.write_user_bytes(arg, &n.to_ne_bytes())?;
-            return Ok(0);
+        match cmd {
+            FIONREAD => {
+                let n = self.shared.buffer.lock().available_read() as i32;
+                let process = crate::task::current_process()?;
+                process.write_user_bytes(arg, &n.to_ne_bytes())?;
+                Ok(0)
+            }
+            FIONBIO => {
+                let process = crate::task::current_process()?;
+                let enabled = process.read_user_u32(arg)? != 0;
+                self.nonblocking.store(enabled, Ordering::Release);
+                Ok(0)
+            }
+            _ => Err(LinuxError::ENOTTY),
         }
-        Err(LinuxError::ENOTTY)
     }
 
     fn set_pipe_size(&self, size: usize) -> LinuxResult<usize> {
