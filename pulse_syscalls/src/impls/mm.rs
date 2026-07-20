@@ -75,44 +75,23 @@ pub fn sys_brk(addr: usize) -> isize {
     let aspace_handle = proc.aspace_handle();
     {
         let mut aspace = aspace_handle.write();
-        let mut mapped_heap_end = pulse_core::config::USER_HEAP_BASE;
-        aspace.for_each_area(|start, end, _flags| {
-            let s = start.as_usize();
-            let e = end.as_usize();
-            if s >= pulse_core::config::USER_HEAP_BASE
-                && e <= pulse_core::config::USER_HEAP_BASE + pulse_core::config::USER_HEAP_SIZE_MAX
-            {
-                if e > mapped_heap_end {
-                    mapped_heap_end = e;
-                }
-            }
-        });
-
         if new_heap_top > old_heap_top {
-            if new_heap_top > mapped_heap_end {
-                let start = mapped_heap_end;
-                const BRK_CHUNK_SIZE: usize = 256 * 1024;
-                let chunk_aligned_end = (new_heap_top + BRK_CHUNK_SIZE - 1) & !(BRK_CHUNK_SIZE - 1);
-                let max_heap_end = pulse_core::config::USER_HEAP_BASE + pulse_core::config::USER_HEAP_SIZE_MAX;
-                let end = core::cmp::min(chunk_aligned_end, max_heap_end);
-                let end = (end + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
+            let start = (old_heap_top + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
+            let end = (new_heap_top + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
 
-                if end > start {
-                    let flags = MappingFlags::READ | MappingFlags::WRITE | MappingFlags::USER;
-                    if let Err(e) = aspace.map_alloc(VirtAddr::from(start), end - start, flags, false) {
-                        axlog::debug!("sys_brk: failed to expand heap: {:?}", e);
-                        return old_heap_top as isize;
-                    }
-                    need_map = true;
-                    map_start = start;
-                    map_len = end - start;
+            if end > start {
+                let flags = MappingFlags::READ | MappingFlags::WRITE | MappingFlags::USER;
+                if let Err(e) = aspace.map_alloc(VirtAddr::from(start), end - start, flags, false) {
+                    axlog::debug!("sys_brk: failed to expand heap: {:?}", e);
+                    return old_heap_top as isize;
                 }
+                need_map = true;
+                map_start = start;
+                map_len = end - start;
             }
         } else if new_heap_top < old_heap_top {
-            const BRK_CHUNK_SIZE: usize = 256 * 1024;
-            let new_mapped_end = (new_heap_top + BRK_CHUNK_SIZE - 1) & !(BRK_CHUNK_SIZE - 1);
-            let start = (new_mapped_end + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
-            let end = mapped_heap_end;
+            let start = (new_heap_top + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
+            let end = (old_heap_top + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
 
             if end > start {
                 let (unmap_result, shootdown) = aspace
