@@ -622,8 +622,12 @@ pub fn sys_socketpair(domain: usize, raw_ty: usize, proto: usize, fds: usize) ->
         }
     }
 
-    // AF_UNIX: we only support SOCK_STREAM and SOCK_DGRAM
-    if ty != linux_raw_sys::net::SOCK_STREAM && ty != linux_raw_sys::net::SOCK_DGRAM {
+    // Local sockets share the same in-kernel transport. Accept SEQPACKET as
+    // well so Linux's fork/exec error channel can use socketpair(2).
+    if ty != linux_raw_sys::net::SOCK_STREAM
+        && ty != linux_raw_sys::net::SOCK_DGRAM
+        && ty != linux_raw_sys::net::SOCK_SEQPACKET
+    {
         return -(LinuxError::EPROTOTYPE.code() as isize);
     }
     if proto != 0 {
