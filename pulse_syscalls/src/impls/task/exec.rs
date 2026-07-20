@@ -23,11 +23,6 @@ pub fn sys_execve(_tf: &TrapFrame, pathname: usize, argv: usize, envp: usize) ->
     };
     let process = thread.process_arc();
 
-    if process.thread_count() > 1 {
-        axlog::warn!("sys_execve: multi-thread exec is not supported yet");
-        return -LinuxError::EAGAIN.code() as isize;
-    }
-
     let path_str = match read_user_cstring(&process, pathname) {
         Ok(path) => {
             let allocator = axalloc::global_allocator();
@@ -71,7 +66,7 @@ pub fn sys_execve(_tf: &TrapFrame, pathname: usize, argv: usize, envp: usize) ->
         envs_strs.push(s.as_str());
     }
 
-    if let Err(e) = process.exec(&path_str, &args_strs, &envs_strs) {
+    if let Err(e) = process.exec(&thread, &path_str, &args_strs, &envs_strs) {
         axlog::debug!("sys_execve failed: {:?} (path={:?})", e, path_str);
         let errno: LinuxError = e.into();
         return -errno.code() as isize;
@@ -115,11 +110,6 @@ pub fn sys_execveat(
         Err(e) => return -e.code() as isize,
     };
     let process = thread.process_arc();
-
-    if process.thread_count() > 1 {
-        axlog::warn!("sys_execveat: multi-thread exec is not supported yet");
-        return -LinuxError::EAGAIN.code() as isize;
-    }
 
     let loc =
         match crate::impls::fs::common::resolve_location_at_ptr(dirfd, pathname, flags as usize) {
@@ -189,7 +179,7 @@ pub fn sys_execveat(
         envs_strs.push(s.as_str());
     }
 
-    if let Err(e) = process.exec(&path_str, &args_strs, &envs_strs) {
+    if let Err(e) = process.exec(&thread, &path_str, &args_strs, &envs_strs) {
         axlog::debug!("sys_execveat failed: {:?}", e);
         let errno: LinuxError = e.into();
         return -errno.code() as isize;

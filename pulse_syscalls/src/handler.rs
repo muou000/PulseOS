@@ -24,6 +24,7 @@ pub fn syscall_handler(tf: &mut TrapFrame, syscall_num: usize) -> isize {
     };
     let process = thread.process_arc();
     process.on_kernel_entry_from_user(syscall_enter_ns);
+    thread.exit_if_exec_requested();
     if process.group_exiting() {
         thread.exit_current(process.group_exit_code());
     }
@@ -41,7 +42,7 @@ pub fn syscall_handler(tf: &mut TrapFrame, syscall_num: usize) -> isize {
         "Syscall: pid={} exe={} tid={} id={} args=[{:#x}, {:#x}, {:#x}, {:#x}, {:#x}, {:#x}]",
         process.pid(),
         process.exec_path().unwrap_or_default(),
-        axtask::current().id().as_u64(),
+        thread.tid(),
         syscall_num,
         args[0],
         args[1],
@@ -51,11 +52,12 @@ pub fn syscall_handler(tf: &mut TrapFrame, syscall_num: usize) -> isize {
         args[5]
     );
     let ret = syscall_dispatcher(tf, syscall_num, args, process.as_ref());
+    thread.exit_if_exec_requested();
     axlog::debug!(
         "Syscall ret: pid={} exe={} tid={} id={} ret={}",
         process.pid(),
         process.exec_path().unwrap_or_default(),
-        axtask::current().id().as_u64(),
+        thread.tid(),
         syscall_num,
         ret
     );
@@ -109,6 +111,7 @@ pub fn syscall_handler(tf: &mut TrapFrame, syscall_num: usize) -> isize {
     let syscall_leave_ns = axhal::time::monotonic_time_nanos() as u64;
     let delta_ns = syscall_leave_ns.saturating_sub(syscall_enter_ns);
     process.add_sys_time_ns(delta_ns);
+    thread.exit_if_exec_requested();
     if process.group_exiting() {
         thread.exit_current(process.group_exit_code());
     }
@@ -341,6 +344,7 @@ fn syscall_dispatcher(
         Sysno::capset => impls::sys_capset(args[0], args[1]),
 
         Sysno::rt_sigaction => impls::sys_rt_sigaction(args[0], args[1], args[2], args[3]),
+        Sysno::rt_sigpending => impls::sys_rt_sigpending(args[0], args[1]),
         Sysno::rt_sigreturn => impls::sys_rt_sigreturn(tf),
         Sysno::rt_sigsuspend => impls::sys_rt_sigsuspend(args[0], args[1]),
         Sysno::rt_sigtimedwait => impls::sys_rt_sigtimedwait(args[0], args[1], args[2], args[3]),

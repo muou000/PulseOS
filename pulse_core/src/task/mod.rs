@@ -60,6 +60,33 @@ pub fn unregister_thread_global(tid: u64) {
         .remove(&tid);
 }
 
+pub(super) fn rebind_thread_global_for_exec(old_tid: u64, new_tid: u64, thread: &Arc<Thread>) {
+    if old_tid == new_tid {
+        return;
+    }
+
+    let old_shard = old_tid as usize % THREAD_REGISTRY_SHARDS;
+    let new_shard = new_tid as usize % THREAD_REGISTRY_SHARDS;
+    if old_shard == new_shard {
+        let mut registry = THREAD_REGISTRY[old_shard].lock();
+        registry.remove(&old_tid);
+        registry.insert(new_tid, Arc::downgrade(thread));
+        return;
+    }
+
+    if old_shard < new_shard {
+        let mut old_registry = THREAD_REGISTRY[old_shard].lock();
+        let mut new_registry = THREAD_REGISTRY[new_shard].lock();
+        old_registry.remove(&old_tid);
+        new_registry.insert(new_tid, Arc::downgrade(thread));
+    } else {
+        let mut new_registry = THREAD_REGISTRY[new_shard].lock();
+        let mut old_registry = THREAD_REGISTRY[old_shard].lock();
+        old_registry.remove(&old_tid);
+        new_registry.insert(new_tid, Arc::downgrade(thread));
+    }
+}
+
 pub fn thread_by_tid_global(tid: u64) -> Option<Arc<Thread>> {
     THREAD_REGISTRY[tid as usize % THREAD_REGISTRY_SHARDS]
         .lock()
@@ -111,7 +138,7 @@ pub fn current_process() -> LinuxResult<Arc<Process>> {
 
 pub fn current_have_signals() -> bool {
     if let Ok(thread) = current_thread() {
-        thread.signal().has_deliverable_pending_signal() || thread.process().group_exiting()
+        thread.has_pending_signal() || thread.process().group_exiting()
     } else {
         false
     }
@@ -197,13 +224,18 @@ pub fn schedule_itimer_event(pid: u64, deadline: u64) {
     }));
 }
 
-pub fn schedule_posix_timer_event(pid: u64, timer_id: usize, deadline: u64) {
+pub fn schedule_posix_timer_event(
+    pid: u64,
+    timer_id: usize,
+    deadline: u64,
+    generation: u64,
+) {
     axtask::set_generic_timer(deadline, alloc::boxed::Box::new(move |_now| {
         if let Some(proc) = process_by_pid(pid) {
             if !proc.is_zombie() {
                 let mut timers = proc.posix_timers.lock();
                 if let Some(timer) = &mut timers[timer_id] {
-                    if timer.next_deadline_ns == deadline {
+                    if timer.generation == generation && timer.next_deadline_ns == deadline {
                         let sig = timer.event.sigev_signo as usize;
                         let notify = timer.event.sigev_notify;
                         if notify == 0 { // SIGEV_SIGNAL
@@ -219,7 +251,7 @@ pub fn schedule_posix_timer_event(pid: u64, timer_id: usize, deadline: u64) {
                             }
                             timer.next_deadline_ns = next;
                             drop(timers);
-                            schedule_posix_timer_event(pid, timer_id, next);
+                            schedule_posix_timer_event(pid, timer_id, next, generation);
                         } else {
                             timer.next_deadline_ns = 0;
                         }
@@ -248,14 +280,14 @@ pub fn adjust_absolute_timers() {
                         if let Some(req_ns) = sec.checked_mul(1_000_000_000).and_then(|s| s.checked_add(nsec)) {
                             let new_deadline = req_ns.saturating_sub(new_offset);
                             timer.next_deadline_ns = new_deadline;
-                            to_schedule.push((timer.id, new_deadline));
+                            to_schedule.push((timer.id, new_deadline, timer.generation));
                         }
                     }
                 }
             }
         }
-        for (timer_id, new_deadline) in to_schedule {
-            schedule_posix_timer_event(proc.pid(), timer_id, new_deadline);
+        for (timer_id, new_deadline, generation) in to_schedule {
+            schedule_posix_timer_event(proc.pid(), timer_id, new_deadline, generation);
         }
     }
 }

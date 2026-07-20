@@ -29,8 +29,7 @@ fn kernel_cpumask_bytes() -> usize {
 }
 
 fn current_tid() -> Result<usize, LinuxError> {
-    current_thread()?;
-    Ok(axtask::current().id().as_u64() as usize)
+    Ok(current_thread()?.tid() as usize)
 }
 
 fn check_pid(pid: usize) -> Result<(), LinuxError> {

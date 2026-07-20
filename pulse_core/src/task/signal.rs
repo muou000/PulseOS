@@ -135,7 +135,7 @@ impl SignalShared {
         self.handlers.actions.lock()[sig] = act;
     }
 
-    pub fn reset_on_exec(&self) {
+    pub fn reset_dispositions_on_exec(&self) {
         let mut actions = self.handlers.actions.lock();
         for sig in 1..=NSIG {
             let h = actions[sig].handler;
@@ -143,8 +143,6 @@ impl SignalShared {
                 actions[sig] = SigAction::dfl();
             }
         }
-        self.process_pending.store(0, Ordering::Release);
-        self.pending_siginfo.lock().clear();
     }
 
     pub fn queue_process_signal(&self, sig: usize) -> bool {
@@ -273,13 +271,16 @@ impl ThreadSignal {
         self.signal_wait.notify_all(true);
     }
 
-    pub fn reset_on_exec(&self) {
-        self.thread_pending.store(0, Ordering::Release);
+    pub fn reset_runtime_on_exec(&self) {
         self.in_handler.store(false, Ordering::Release);
         self.skip_once.store(false, Ordering::Release);
         *self.saved_ctx.lock() = None;
         *self.sigsuspend_restore.lock() = None;
-        self.pending_siginfo.lock().clear();
+        *self.altstack.lock() = SignalAltStack {
+            sp: 0,
+            size: 0,
+            flags: 0,
+        };
     }
 
     pub fn set_altstack(&self, ss: SignalAltStack) {
@@ -312,6 +313,11 @@ impl ThreadSignal {
         self.has_pending_unblocked() || self.skip_once.load(Ordering::Acquire)
     }
 
+    pub fn pending_mask(&self) -> u64 {
+        self.thread_pending.load(Ordering::Acquire)
+            | self.shared.process_pending.load(Ordering::Acquire)
+    }
+
     pub fn has_pending_unblocked_not_in_set(&self, set: u64) -> bool {
         let set = sanitize_mask(set);
         let blocked = self.blocked_mask();
@@ -336,7 +342,7 @@ impl ThreadSignal {
             || self.pending_mask_has_deliverable_match(proc_pending)
     }
 
-    pub fn dequeue_waitset(&self, waitset: u64) -> Option<usize> {
+    pub fn dequeue_waitset_with_info(&self, waitset: u64) -> Option<(usize, Option<[u8; 128]>)> {
         let waitset = sanitize_mask(waitset);
 
         loop {
@@ -351,14 +357,18 @@ impl ThreadSignal {
                     .compare_exchange(pending, new_pending, Ordering::AcqRel, Ordering::Acquire)
                     .is_ok()
                 {
-                    return Some(idx + 1);
+                    let sig = idx + 1;
+                    let info = self.pending_siginfo.lock().remove(&sig);
+                    return Some((sig, info));
                 }
                 continue;
             }
             break;
         }
 
-        self.shared.dequeue_process_from_mask(waitset)
+        let sig = self.shared.dequeue_process_from_mask(waitset)?;
+        let info = self.shared.pending_siginfo.lock().remove(&sig);
+        Some((sig, info))
     }
 
     pub fn clear_skip_once(&self) -> bool {
@@ -552,7 +562,6 @@ impl ThreadSignal {
         None
     }
 
-
     pub fn dequeue_unblocked_with_info(&self) -> (Option<usize>, Option<[u8; 128]>) {
         let blocked = self.blocked_mask();
 
@@ -609,16 +618,50 @@ mod tests {
     use super::*;
 
     #[test]
-    fn reset_on_exec_preserves_blocked_mask() {
+    fn exec_reset_preserves_pending_signals_and_blocked_mask() {
         let shared = SignalShared::new();
-        let signal = ThreadSignal::new(shared);
+        let signal = ThreadSignal::new(shared.clone());
 
         signal.set_blocked_mask(0b1010);
         signal.queue_thread_signal(1);
-        signal.reset_on_exec();
+        signal.pending_siginfo.lock().insert(1, [1; 128]);
+        shared.queue_process_signal(3);
+        shared.pending_siginfo.lock().insert(3, [3; 128]);
+        shared.set_action(10, SigAction::from_parts(0x1234, 7, 0x55));
+        shared.set_action(12, SigAction::from_parts(SIG_IGN, 9, 0xaa));
+        signal.set_altstack(SignalAltStack {
+            sp: 0x1000,
+            size: 0x2000,
+            flags: 0,
+        });
+        signal.in_handler.store(true, Ordering::Release);
+        signal.skip_once.store(true, Ordering::Release);
+        *signal.sigsuspend_restore.lock() = Some(0x44);
+
+        shared.reset_dispositions_on_exec();
+        signal.reset_runtime_on_exec();
 
         assert_eq!(signal.blocked_mask(), 0b1010);
-        assert_eq!(signal.thread_pending.load(Ordering::Acquire), 0);
+        assert_ne!(signal.thread_pending.load(Ordering::Acquire), 0);
+        assert_ne!(shared.process_pending.load(Ordering::Acquire), 0);
+        assert_eq!(signal.pending_mask(), 0b0101);
+        assert_eq!(signal.pending_siginfo.lock().get(&1), Some(&[1; 128]));
+        assert_eq!(shared.pending_siginfo.lock().get(&3), Some(&[3; 128]));
+        assert_eq!(shared.action(10).handler, SIG_DFL);
+        assert_eq!(shared.action(12).handler, SIG_IGN);
+        assert!(!signal.in_handler.load(Ordering::Acquire));
+        assert!(!signal.skip_once.load(Ordering::Acquire));
+        assert!(signal.sigsuspend_restore.lock().is_none());
+        let altstack = signal.altstack();
+        assert_eq!((altstack.sp, altstack.size, altstack.flags), (0, 0, 0));
+        assert_eq!(
+            signal.dequeue_waitset_with_info(1),
+            Some((1, Some([1; 128])))
+        );
+        assert_eq!(
+            signal.dequeue_waitset_with_info(1 << 2),
+            Some((3, Some([3; 128])))
+        );
     }
 }
 
@@ -778,16 +821,18 @@ fn write_user_signal_frame(
     let frame_base = current_sp(tf).saturating_sub(frame_size) & !15;
     let siginfo_addr = frame_base;
     let ucontext_addr = frame_base + SIGINFO_FRAME_SIZE;
-    
+
     let mut siginfo_bytes = [0u8; SIGINFO_FRAME_SIZE];
     if let Some(info) = siginfo {
         siginfo_bytes.copy_from_slice(&info);
     }
-    thread.process().write_user_bytes(siginfo_addr, &siginfo_bytes)?;
-    
+    thread
+        .process()
+        .write_user_bytes(siginfo_addr, &siginfo_bytes)?;
+
     let zeroes = [0u8; UCONTEXT_FRAME_SIZE];
     thread.process().write_user_bytes(ucontext_addr, &zeroes)?;
-    
+
     thread
         .process()
         .write_user_usize(ucontext_addr + UCONTEXT_SIGMASK_OFFSET, old_mask as usize)?;
@@ -888,14 +933,26 @@ pub fn queue_signal_to_thread(thread: &Thread, sig: usize) -> bool {
     queued
 }
 
-pub fn queue_signal_to_process_with_info(process: &Process, sig: usize, info: Option<[u8; 128]>) -> bool {
+pub fn queue_signal_to_process_with_info(
+    process: &Process,
+    sig: usize,
+    info: Option<[u8; 128]>,
+) -> bool {
     if let Some(data) = info {
-        process.signal_shared().pending_siginfo.lock().insert(sig, data);
+        process
+            .signal_shared()
+            .pending_siginfo
+            .lock()
+            .insert(sig, data);
     }
     queue_signal_to_process(process, sig)
 }
 
-pub fn queue_signal_to_thread_with_info(thread: &Thread, sig: usize, info: Option<[u8; 128]>) -> bool {
+pub fn queue_signal_to_thread_with_info(
+    thread: &Thread,
+    sig: usize,
+    info: Option<[u8; 128]>,
+) -> bool {
     if let Some(data) = info {
         thread.signal().pending_siginfo.lock().insert(sig, data);
     }
