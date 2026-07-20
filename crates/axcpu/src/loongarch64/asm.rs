@@ -120,6 +120,17 @@ pub fn flush_tlb(vaddr: Option<VirtAddr>) {
     }
 }
 
+/// Flushes non-global TLB entries belonging to the given address-space ID.
+#[inline]
+pub fn flush_tlb_asid(asid: usize) {
+    unsafe {
+        asm!(
+            "dbar 0; invtlb 0x04, {asid}, $r0; dbar 0; ibar 0",
+            asid = in(reg) asid
+        );
+    }
+}
+
 /// Writes the Exception Entry Base Address register (`EENTRY`).
 ///
 /// It also set the Exception Configuration register (`ECFG`) to `VS=0`.

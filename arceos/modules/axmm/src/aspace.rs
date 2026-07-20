@@ -53,27 +53,22 @@ impl TlbShootdown {
 
         #[cfg(feature = "ipi")]
         {
-            let _ = asids;
-            match axipi::flush_tlb_all_cpus() {
-                Ok(()) => {
-                    reclaims.reclaim();
-                    Ok(())
-                }
-                Err(shootdown_error) => {
-                    let completed = shootdown_error.completion_guaranteed();
-                    if completed {
+            for asid in asids {
+                let target_mask = axipi::asid_active_cpu_mask(asid);
+                if let Err(shootdown_error) = axipi::flush_tlb_asid_cpus(asid, target_mask) {
+                    if shootdown_error.completion_guaranteed() {
                         warn!("{shootdown_error}");
-                        reclaims.reclaim();
-                        Ok(())
                     } else {
                         error!("{shootdown_error}");
                         // DeferredReclaims intentionally leaks mapping references
                         // when dropped before a completion guarantee.
                         drop(reclaims);
-                        Err(AxError::BadState)
+                        return Err(AxError::BadState);
                     }
                 }
             }
+            reclaims.reclaim();
+            Ok(())
         }
 
         #[cfg(not(feature = "ipi"))]
@@ -290,6 +285,8 @@ impl AddrSpace {
     /// Creates a new empty address space.
     pub fn new_empty(base: VirtAddr, size: usize) -> AxResult<Self> {
         let asid = ASID_ALLOCATOR.lock().alloc();
+        #[cfg(feature = "ipi")]
+        axipi::reset_asid_active_cpu_mask(asid);
         Ok(Self {
             va_range: VirtAddrRange::from_start_size(base, size),
             areas: MemorySet::new(),

@@ -282,6 +282,11 @@ pub fn interrupt_task(task: AxTaskRef, resched: bool) {
 
 /// Updates the saved page table root of the current task context.
 pub fn set_current_page_table_root(pt_root: memory_addr::PhysAddr, asid: usize) {
+    #[cfg(all(
+        feature = "ipi",
+        any(target_arch = "riscv64", target_arch = "loongarch64")
+    ))]
+    axipi::mark_current_cpu_asid_active(asid);
     let curr = current();
     unsafe {
         (*curr.ctx_mut_ptr()).set_page_table_root(pt_root, asid);
