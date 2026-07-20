@@ -1,7 +1,7 @@
 use alloc::sync::{Arc, Weak};
 use core::{
     ops::Deref,
-    sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering, AtomicU32, AtomicI32},
+    sync::atomic::{AtomicBool, AtomicI32, AtomicU32, AtomicU64, AtomicUsize, Ordering},
 };
 
 use axerrno::{AxError, AxResult};
@@ -12,8 +12,10 @@ use spin::Mutex;
 use super::{Process, SignalAltStack, ThreadSignal};
 
 pub struct Thread {
+    tid: AtomicU64,
     process_weak: Weak<Process>,
     signal: Arc<ThreadSignal>,
+    exec_exit_requested: AtomicBool,
     clear_child_tid: AtomicUsize,
     set_child_tid: AtomicUsize,
     robust_list_head: AtomicUsize,
@@ -53,10 +55,12 @@ impl Deref for ThreadHandle {
 }
 
 impl Thread {
-    pub fn new(process: Arc<Process>) -> Arc<Self> {
+    pub fn new(process: Arc<Process>, tid: u64) -> Arc<Self> {
         Arc::new(Self {
+            tid: AtomicU64::new(tid),
             signal: ThreadSignal::new(process.signal_shared()),
             process_weak: Arc::downgrade(&process),
+            exec_exit_requested: AtomicBool::new(false),
             clear_child_tid: AtomicUsize::new(0),
             set_child_tid: AtomicUsize::new(0),
             robust_list_head: AtomicUsize::new(0),
@@ -86,7 +90,26 @@ impl Thread {
     }
 
     pub fn tid(&self) -> u64 {
-        axtask::current().id().as_u64()
+        self.tid.load(Ordering::Acquire)
+    }
+
+    pub(crate) fn set_tid_for_exec(&self, tid: u64) {
+        self.tid.store(tid, Ordering::Release);
+    }
+
+    pub fn request_exec_exit(&self) {
+        self.exec_exit_requested.store(true, Ordering::Release);
+        self.signal.notify_waiters();
+    }
+
+    pub fn exec_exit_requested(&self) -> bool {
+        self.exec_exit_requested.load(Ordering::Acquire)
+    }
+
+    pub fn exit_if_exec_requested(&self) {
+        if self.exec_exit_requested() {
+            self.exit_current(0);
+        }
     }
 
     pub fn process(&self) -> Arc<Process> {
@@ -141,7 +164,7 @@ impl Thread {
     }
 
     pub fn has_pending_signal(&self) -> bool {
-        self.signal.has_deliverable_pending_signal()
+        self.exec_exit_requested() || self.signal.has_deliverable_pending_signal()
     }
 
     pub fn has_pending_unblocked_signal_not_in_set(&self, set: u64) -> bool {
@@ -152,8 +175,8 @@ impl Thread {
         self.signal.has_waitset_signal(waitset)
     }
 
-    pub fn dequeue_waitset_signal(&self, waitset: u64) -> Option<usize> {
-        self.signal.dequeue_waitset(waitset)
+    pub fn dequeue_waitset_signal(&self, waitset: u64) -> Option<(usize, Option<[u8; 128]>)> {
+        self.signal.dequeue_waitset_with_info(waitset)
     }
 
     pub fn signal_wait_queue(&self) -> &WaitQueue {
@@ -192,7 +215,7 @@ impl Thread {
         self.clear_child_tid.store(0, Ordering::Relaxed);
         self.set_child_tid.store(0, Ordering::Relaxed);
         self.robust_list_head.store(0, Ordering::Relaxed);
-        self.signal.reset_on_exec();
+        self.signal.reset_runtime_on_exec();
     }
 
     pub fn write_set_child_tid_on_start(&self) -> AxResult<()> {
@@ -200,16 +223,17 @@ impl Thread {
         if set_child_tid == 0 {
             return Ok(());
         }
-        let tid = axtask::current().id().as_u64();
+        let tid = self.tid();
         self.process().write_user_u32(set_child_tid, tid as u32)
     }
 
     pub fn prepare_for_user_entry(&self) -> AxResult<()> {
         axlog::debug!(
             "prepare_for_user_entry: tid={}, group_exiting={}",
-            axtask::current().id().as_u64(),
+            self.tid(),
             self.process().group_exiting()
         );
+        self.exit_if_exec_requested();
         if self.process().group_exiting() {
             self.exit_current(self.process().group_exit_code());
         }
@@ -277,7 +301,7 @@ impl Thread {
     pub fn exit_current(&self, exit_code: i32) -> ! {
         axlog::debug!(
             "exit_current: tid={}, group_exiting={}, exit_code={}",
-            axtask::current().id().as_u64(),
+            self.tid(),
             self.process().group_exiting(),
             exit_code
         );
@@ -287,7 +311,7 @@ impl Thread {
         } else {
             exit_code
         };
-        let tid = axtask::current().id().as_u64();
+        let tid = self.tid();
         self.process().finish_thread_exit(tid, final_code);
         axtask::exit(final_code);
     }

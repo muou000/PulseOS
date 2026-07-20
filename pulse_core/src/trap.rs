@@ -58,6 +58,7 @@ fn deliver_pending_signal(tf: &mut TrapFrame) {
         return;
     };
     let process = thread.process();
+    thread.exit_if_exec_requested();
     if process.group_exiting() {
         axlog::debug!(
             "Process group exiting: pid={} exit_code={}",
@@ -124,6 +125,7 @@ fn handle_page_fault(vaddr: VirtAddr, access_flags: MappingFlags, is_user: bool)
     }
 
     let thread = thread_result.unwrap();
+    thread.exit_if_exec_requested();
 
     if !is_user {
         let proc = thread.process();

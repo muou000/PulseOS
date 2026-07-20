@@ -13,11 +13,18 @@ use spin::RwLock;
 
 use core::sync::atomic::Ordering;
 
-use super::Process;
+use super::{Process, Thread};
 use crate::config::*;
 
 const SHEBANG_MAX_DEPTH: usize = 4;
 const SHEBANG_PROBE_LEN: usize = 256;
+
+struct PreparedExec {
+    aspace: Arc<RwLock<axmm::AddrSpace>>,
+    load_info: crate::mm::UserAppLoadInfo,
+    path: String,
+    argv: Vec<String>,
+}
 
 fn parse_shebang_line(file_data: &[u8]) -> AxResult<Option<(String, Option<String>)>> {
     if !file_data.starts_with(b"#!") {
@@ -196,16 +203,34 @@ impl Process {
         }
     }
 
-    pub fn exec(&self, path: &str, args: &[&str], envs: &[&str]) -> AxResult<()> {
+    pub fn exec(
+        &self,
+        caller: &Arc<Thread>,
+        path: &str,
+        args: &[&str],
+        envs: &[&str],
+    ) -> AxResult<()> {
+        if caller.process().pid() != self.pid() {
+            return Err(AxError::InvalidInput);
+        }
+
+        let exec_guard = loop {
+            if caller.exec_exit_requested() || self.group_exiting() {
+                return Err(AxError::Interrupted);
+            }
+            if let Some(guard) = self.try_lock_exec() {
+                break guard;
+            }
+            axtask::yield_now();
+        };
+
         let mut fs_ctx = self.fs_context_handle().lock().clone();
         fs_ctx.credentials = Some((self.fsuid(), self.fsgid()));
         let (path, argv) = resolve_exec_path_and_args(&fs_ctx, path, args)?;
         let argv_refs: Vec<&str> = argv.iter().map(|s| s.as_str()).collect();
 
-        // Validate ELF header and interpreter in reversible phase
-        crate::mm::check_elf_header(&path)?;
-
-        // Build the new image in an isolated address space first.
+        // Complete every fallible load step before changing the old image or
+        // terminating sibling threads.
         let mut new_aspace = axmm::new_user_aspace(va!(USER_SPACE_BASE), USER_SPACE_SIZE)?;
         let stack_bottom = USER_STACK_TOP - USER_STACK_SIZE;
         new_aspace.map_alloc(
@@ -221,28 +246,46 @@ impl Process {
             false,
         )?;
 
-        let new_aspace_handle = Arc::new(RwLock::new(new_aspace));
+        let load_info = crate::mm::load_user_app(&mut new_aspace, &path, &argv_refs, envs)?;
+        drop(argv_refs);
+        let prepared = PreparedExec {
+            aspace: Arc::new(RwLock::new(new_aspace)),
+            load_info,
+            path,
+            argv,
+        };
+
+        if self.group_exiting() {
+            return Err(AxError::Interrupted);
+        }
+
+        let caller_tid = caller.tid();
+        self.begin_exec_teardown(caller_tid);
+        self.terminate_exec_siblings(caller_tid);
+        if self.group_exiting() {
+            self.end_exec_teardown();
+            drop(exec_guard);
+            caller.exit_current(self.group_exit_code());
+        }
+        self.end_exec_teardown();
+
+        if caller_tid != self.pid() {
+            self.rebind_exec_thread(caller, caller_tid, self.pid());
+        }
+
+        let PreparedExec {
+            aspace: new_aspace_handle,
+            load_info,
+            path,
+            argv,
+        } = prepared;
         let new_pt_root = new_aspace_handle.read().page_table_root();
         let new_asid = new_aspace_handle.read().asid();
-        let old_aspace = self.replace_aspace_handle(new_aspace_handle.clone());
+        let old_aspace = self.replace_aspace_handle(new_aspace_handle);
 
         axtask::set_current_page_table_root(new_pt_root, new_asid);
-        self.activate(); // Activate new page table
-        drop(old_aspace); // Free old address space immediately to reduce memory peak!
-
-        let load_info = match crate::mm::load_user_app(&mut *new_aspace_handle.write(), &path, &argv_refs, envs) {
-            Ok(info) => info,
-            Err(e) => {
-                axlog::error!("sys_execve load_user_app failed after commit: {:?}", e);
-                // Since the old address space was freed, we cannot return an error to user mode.
-                // Terminate the current thread/process directly.
-                if let Ok(thread) = super::current_thread() {
-                    thread.exit_current(-1);
-                } else {
-                    axtask::exit(-1);
-                }
-            }
-        };
+        self.activate();
+        drop(old_aspace);
 
         // Flush TLB and instruction cache after loading is complete
         self.activate();
@@ -269,15 +312,11 @@ impl Process {
         self.stack_top.store(load_info.user_sp, Ordering::Release);
         self.entry.store(load_info.entry, Ordering::Release);
         self.set_signal_trampoline(load_info.signal_trampoline);
-        self.signal_shared().reset_on_exec();
+        self.signal_shared().reset_dispositions_on_exec();
+        self.clear_posix_timers_on_exec();
         self.set_exec_path(path.clone());
         *self.args.write() = argv;
         axtask::current().set_name(&self.name());
-        if let Ok(thread) = super::current_thread() {
-            if thread.process().pid() == self.pid() {
-                thread.signal().reset_on_exec();
-            }
-        }
         Ok(())
     }
 }

@@ -50,6 +50,7 @@ pub const MAX_POSIX_TIMER_COUNT: usize = 16;
 #[derive(Clone, Copy)]
 pub struct PosixTimer {
     pub id: usize,
+    pub generation: u64,
     pub clock_id: i32,
     pub event: sigevent,
     pub itimer_spec: itimerspec,
@@ -428,6 +429,10 @@ pub struct Process {
     pub entry: AtomicUsize,
     /// 线程与任务状态注册表
     threads: SpinNoIrq<BTreeMap<u64, ThreadState>>,
+    /// Serializes exec and identifies the thread performing irreversible teardown.
+    exec_lock: Mutex<()>,
+    exec_teardown_owner: AtomicU64,
+    thread_exit_event: WaitQueue,
     /// 子进程列表，使用自旋锁保护
     children: SpinNoIrq<Vec<Arc<Process>>>,
     /// 子进程退出等待事件队列
@@ -485,6 +490,7 @@ pub struct Process {
     pub parent_exit_signal: AtomicI32,
     /// POSIX 定时器列表
     pub posix_timers: SpinNoIrq<[Option<PosixTimer>; MAX_POSIX_TIMER_COUNT]>,
+    posix_timer_generation: AtomicU64,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -727,6 +733,85 @@ impl Process {
 
     pub fn thread_count(&self) -> usize {
         self.threads.lock().len()
+    }
+
+    pub(super) fn try_lock_exec(&self) -> Option<spin::MutexGuard<'_, ()>> {
+        self.exec_lock.try_lock()
+    }
+
+    pub(super) fn begin_exec_teardown(&self, caller_tid: u64) {
+        self.exec_teardown_owner
+            .store(caller_tid, Ordering::Release);
+    }
+
+    pub(super) fn end_exec_teardown(&self) {
+        self.exec_teardown_owner.store(0, Ordering::Release);
+    }
+
+    fn has_exec_siblings(&self, caller_tid: u64) -> bool {
+        self.threads
+            .lock()
+            .keys()
+            .any(|tid| *tid != caller_tid)
+    }
+
+    pub(super) fn terminate_exec_siblings(&self, caller_tid: u64) {
+        loop {
+            let siblings = {
+                let registry = self.threads.lock();
+                registry
+                    .iter()
+                    .filter_map(|(tid, state)| {
+                        if *tid == caller_tid {
+                            return None;
+                        }
+                        match state {
+                            ThreadState::Active(task) => Some(task.clone()),
+                            ThreadState::Pending => None,
+                        }
+                    })
+                    .collect::<Vec<_>>()
+            };
+
+            if siblings.is_empty() && !self.has_exec_siblings(caller_tid) {
+                return;
+            }
+
+            for task in siblings {
+                if let Some(handle) = super::thread_handle_from_task(&task) {
+                    handle.request_exec_exit();
+                }
+                axtask::interrupt_task(task, true);
+            }
+
+            self.thread_exit_event
+                .wait_until(|| !self.has_exec_siblings(caller_tid));
+        }
+    }
+
+    pub(super) fn rebind_exec_thread(
+        &self,
+        thread: &Arc<Thread>,
+        old_tid: u64,
+        new_tid: u64,
+    ) {
+        if old_tid == new_tid {
+            return;
+        }
+
+        let mut registry = self.threads.lock();
+        assert_eq!(registry.len(), 1, "exec TID rebind with live siblings");
+        let state = registry
+            .remove(&old_tid)
+            .expect("exec caller missing from process thread registry");
+        assert!(
+            !registry.contains_key(&new_tid),
+            "exec target TID is still occupied"
+        );
+
+        thread.set_tid_for_exec(new_tid);
+        super::rebind_thread_global_for_exec(old_tid, new_tid, thread);
+        registry.insert(new_tid, state);
     }
 
     pub fn thread_ids_snapshot(&self) -> Vec<u64> {
@@ -1423,6 +1508,9 @@ impl Process {
                 map.insert(pid, ThreadState::Pending);
                 map
             }),
+            exec_lock: Mutex::new(()),
+            exec_teardown_owner: AtomicU64::new(0),
+            thread_exit_event: WaitQueue::new(),
             children: SpinNoIrq::new(Vec::new()),
             child_exit_event: WaitQueue::new(),
             pid_exit_event: WaitQueue::new(),
@@ -1472,6 +1560,7 @@ impl Process {
             uts_ns,
             parent_exit_signal: AtomicI32::new(SIGCHLD as i32),
             posix_timers: SpinNoIrq::new([None; MAX_POSIX_TIMER_COUNT]),
+            posix_timer_generation: AtomicU64::new(1),
         }))
     }
 
@@ -1584,6 +1673,9 @@ impl Process {
                 map.insert(pid, ThreadState::Pending);
                 map
             }),
+            exec_lock: Mutex::new(()),
+            exec_teardown_owner: AtomicU64::new(0),
+            thread_exit_event: WaitQueue::new(),
             children: SpinNoIrq::new(Vec::new()),
             child_exit_event: WaitQueue::new(),
             pid_exit_event: WaitQueue::new(),
@@ -1614,6 +1706,7 @@ impl Process {
             uts_ns: RwLock::new(uts_ns),
             parent_exit_signal: AtomicI32::new(SIGCHLD as i32),
             posix_timers: SpinNoIrq::new([None; MAX_POSIX_TIMER_COUNT]),
+            posix_timer_generation: AtomicU64::new(1),
         }))
     }
 
@@ -1818,12 +1911,26 @@ impl Process {
     }
 
     pub fn register_task_ref(&self, task: AxTaskRef) {
-        if let Some(handle) = super::thread_handle_from_task(&task) {
+        let thread = super::thread_handle_from_task(&task).map(|handle| {
             handle.attach_task_ref(task.clone());
-        }
+            handle.thread_arc()
+        });
         let mut registry = self.threads.lock();
-        let tid = task.id().as_u64();
-        registry.insert(tid, ThreadState::Active(task));
+        let tid = thread
+            .as_ref()
+            .map(|thread| thread.tid())
+            .unwrap_or_else(|| task.id().as_u64());
+        registry.insert(tid, ThreadState::Active(task.clone()));
+        let exec_owner = self.exec_teardown_owner.load(Ordering::Acquire);
+        drop(registry);
+
+        if exec_owner != 0
+            && exec_owner != tid
+            && let Some(thread) = thread
+        {
+            thread.request_exec_exit();
+            axtask::interrupt_task(task, true);
+        }
     }
 
     pub fn task_ref_by_tid(&self, tid: u64) -> Option<AxTaskRef> {
@@ -1951,6 +2058,7 @@ impl Process {
                     .fetch_add(s, Ordering::Relaxed);
             }
         }
+        self.thread_exit_event.notify_all(false);
         axlog::debug!(
             "finish_thread_exit: pid={}, tid={}, remaining_threads={}, group_exiting={}",
             self.pid(),
@@ -2531,7 +2639,16 @@ impl Process {
             if !ctx.wait_enabled {
                 return;
             }
-            ctx.event.wait_until(|| ctx.done.load(Ordering::Acquire));
+            let current_thread = super::current_thread().ok();
+            ctx.event.wait_until(|| {
+                ctx.done.load(Ordering::Acquire)
+                    || current_thread
+                        .as_ref()
+                        .map(|thread| {
+                            thread.exec_exit_requested() || thread.process().group_exiting()
+                        })
+                        .unwrap_or(false)
+            });
         }
     }
 
@@ -2733,7 +2850,10 @@ impl Process {
 
         axlog::debug!(
             "futex_wait: tid={}, addr={:#x}, paddr={:#x}, expected={}, is_private={}",
-            axtask::current().id().as_u64(),
+            current_thread
+                .as_ref()
+                .map(|thread| thread.tid())
+                .unwrap_or(0),
             addr,
             paddr.as_usize(),
             expected,
@@ -2838,7 +2958,7 @@ impl Process {
 
         axlog::debug!(
             "futex_wake: tid={}, addr={:#x}, count={}, is_private={}, woken={}",
-            axtask::current().id().as_u64(),
+            current_thread().map(|thread| thread.tid()).unwrap_or(0),
             addr,
             count,
             is_private,
@@ -2978,7 +3098,7 @@ impl Process {
             let child_tid = child_tid as u32;
             self.write_user_bytes(addr, &child_tid.to_ne_bytes())?;
         }
-        let child_thread = Thread::new(child_proc.clone());
+        let child_thread = Thread::new(child_proc.clone(), child_tid);
         super::register_thread_global(child_tid, child_thread.clone());
         if let Ok(parent_thread) = current_thread() {
             child_thread.set_signal_blocked_mask(parent_thread.signal_blocked_mask());
@@ -3060,7 +3180,7 @@ impl Process {
             }
         }
 
-        let child_thread = Thread::new(child_proc.clone());
+        let child_thread = Thread::new(child_proc.clone(), child_tid);
         super::register_thread_global(child_tid, child_thread.clone());
         if let Ok(parent_thread) = current_thread() {
             child_thread.set_signal_blocked_mask(parent_thread.signal_blocked_mask());
@@ -3109,6 +3229,7 @@ impl Process {
             if slot.is_none() {
                 *slot = Some(PosixTimer {
                     id: i,
+                    generation: self.next_posix_timer_generation(),
                     clock_id,
                     event,
                     itimer_spec: unsafe { core::mem::zeroed() },
@@ -3122,5 +3243,13 @@ impl Process {
             }
         }
         Err(axerrno::LinuxError::ENOSPC)
+    }
+
+    pub fn next_posix_timer_generation(&self) -> u64 {
+        self.posix_timer_generation.fetch_add(1, Ordering::AcqRel)
+    }
+
+    pub fn clear_posix_timers_on_exec(&self) {
+        self.posix_timers.lock().fill(None);
     }
 }

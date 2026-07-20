@@ -984,6 +984,7 @@ pub fn sys_timer_settime(
         Some(t) => t,
         None => return -LinuxError::EINVAL.code() as isize,
     };
+    let generation = proc.next_posix_timer_generation();
 
     if old_value != 0 {
         let now_ns = axhal::time::monotonic_time_nanos() as u64;
@@ -1005,6 +1006,7 @@ pub fn sys_timer_settime(
     }
 
     timer.itimer_spec = new_spec;
+    timer.generation = generation;
     timer.interval_ns = int_dur.as_nanos() as u64;
     timer.is_absolute = (flags & TIMER_ABSTIME as usize) != 0;
     timer.first_expired = false;
@@ -1025,7 +1027,12 @@ pub fn sys_timer_settime(
             now_ns.saturating_add(val_dur.as_nanos() as u64)
         };
         timer.next_deadline_ns = deadline;
-        pulse_core::task::schedule_posix_timer_event(proc.pid(), timerid, deadline);
+        pulse_core::task::schedule_posix_timer_event(
+            proc.pid(),
+            timerid,
+            deadline,
+            generation,
+        );
     }
 
     0

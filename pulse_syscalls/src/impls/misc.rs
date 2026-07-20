@@ -193,7 +193,7 @@ pub fn sys_set_tid_address(tidptr: usize) -> isize {
     match pulse_core::task::current_thread() {
         Ok(thread) => {
             thread.set_clear_child_tid(tidptr);
-            axtask::current().id().as_u64() as isize
+            thread.tid() as isize
         }
         Err(e) => -e.code() as isize,
     }
@@ -202,7 +202,7 @@ pub fn sys_set_tid_address(tidptr: usize) -> isize {
 pub fn sys_gettid() -> isize {
     axlog::debug!("sys_gettid");
     match pulse_core::task::current_thread() {
-        Ok(_) => axtask::current().id().as_u64() as isize,
+        Ok(thread) => thread.tid() as isize,
         Err(e) => -e.code() as isize,
     }
 }
@@ -377,7 +377,7 @@ pub fn sys_get_robust_list(pid: usize, head_ptr: usize, len_ptr: usize) -> isize
         Ok(thread) => thread,
         Err(e) => return -e.code() as isize,
     };
-    if pid != 0 && pid != axtask::current().id().as_u64() as usize {
+    if pid != 0 && pid != thread.tid() as usize {
         return -LinuxError::ESRCH.code() as isize;
     }
 
@@ -471,6 +471,25 @@ pub fn sys_rt_sigaction(_signum: usize, _act: usize, _oldact: usize, _sigsetsize
     0
 }
 
+pub fn sys_rt_sigpending(set: usize, sigsetsize: usize) -> isize {
+    if set == 0 {
+        return -LinuxError::EFAULT.code() as isize;
+    }
+    if sigsetsize != core::mem::size_of::<u64>() {
+        return -LinuxError::EINVAL.code() as isize;
+    }
+
+    let thread = match pulse_core::task::current_thread() {
+        Ok(thread) => thread,
+        Err(e) => return -e.code() as isize,
+    };
+    let process = thread.process();
+    match process.write_user_usize(set, thread.signal().pending_mask() as usize) {
+        Ok(()) => 0,
+        Err(_) => -LinuxError::EFAULT.code() as isize,
+    }
+}
+
 pub fn sys_rt_sigreturn(tf: &mut TrapFrame) -> isize {
     let thread = match pulse_core::task::current_thread() {
         Ok(t) => t,
@@ -533,18 +552,23 @@ pub fn sys_rt_sigtimedwait(set: usize, info: usize, timeout: usize, sigsetsize: 
     };
 
     loop {
-        if thread.process().group_exiting() {
+        if thread.exec_exit_requested() || thread.process().group_exiting() {
             return -LinuxError::EINTR.code() as isize;
         }
 
-        if let Some(sig) = thread.dequeue_waitset_signal(waitset) {
+        if let Some((sig, siginfo)) = thread.dequeue_waitset_signal(waitset) {
             if info != 0 {
-                let mut raw: siginfo = unsafe { core::mem::zeroed() };
-                raw.__bindgen_anon_1.__bindgen_anon_1.si_signo =
-                    sig as linux_raw_sys::ctypes::c_int;
-                raw.__bindgen_anon_1.__bindgen_anon_1.si_errno = 0;
-                raw.__bindgen_anon_1.__bindgen_anon_1.si_code = 0;
-                if uaccess::write_user_plain(&process, info, &raw).is_err() {
+                let write_result = if let Some(raw) = siginfo {
+                    process.write_user_bytes(info, &raw)
+                } else {
+                    let mut raw: siginfo = unsafe { core::mem::zeroed() };
+                    raw.__bindgen_anon_1.__bindgen_anon_1.si_signo =
+                        sig as linux_raw_sys::ctypes::c_int;
+                    raw.__bindgen_anon_1.__bindgen_anon_1.si_errno = 0;
+                    raw.__bindgen_anon_1.__bindgen_anon_1.si_code = 0;
+                    uaccess::write_user_plain(&process, info, &raw)
+                };
+                if write_result.is_err() {
                     return -LinuxError::EFAULT.code() as isize;
                 }
             }
@@ -567,11 +591,13 @@ pub fn sys_rt_sigtimedwait(set: usize, info: usize, timeout: usize, sigsetsize: 
                     let timed_out = signal_wait.wait_timeout_until(remain, || {
                         thread.has_waitset_signal(waitset)
                             || thread.has_pending_unblocked_signal_not_in_set(waitset)
+                            || thread.exec_exit_requested()
                             || thread.process().group_exiting()
                     });
                     if timed_out
                         && !thread.has_waitset_signal(waitset)
                         && !thread.has_pending_unblocked_signal_not_in_set(waitset)
+                        && !thread.exec_exit_requested()
                         && !thread.process().group_exiting()
                     {
                         return -LinuxError::EAGAIN.code() as isize;
@@ -589,6 +615,7 @@ pub fn sys_rt_sigtimedwait(set: usize, info: usize, timeout: usize, sigsetsize: 
                 signal_wait.wait_until(|| {
                     thread.has_waitset_signal(waitset)
                         || thread.has_pending_unblocked_signal_not_in_set(waitset)
+                        || thread.exec_exit_requested()
                         || thread.process().group_exiting()
                 });
             }
