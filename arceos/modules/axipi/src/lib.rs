@@ -56,10 +56,18 @@ static IPI_EVENT_QUEUE: LazyInit<SpinNoIrq<IpiEventQueue>> = LazyInit::new();
 static IPI_CPU_READY: [AtomicBool; axconfig::plat::MAX_CPU_NUM] =
     [const { AtomicBool::new(false) }; axconfig::plat::MAX_CPU_NUM];
 
+const TRACKED_ASID_COUNT: usize = 1024;
+const TLB_FLUSH_ALL: usize = usize::MAX - 1;
+const TLB_FLUSH_NONE: usize = usize::MAX;
+
+static ASID_ACTIVE_CPU_MASKS: [AtomicUsize; TRACKED_ASID_COUNT] =
+    [const { AtomicUsize::new(0) }; TRACKED_ASID_COUNT];
 static TLB_SHOOTDOWN_REQUESTED: [AtomicUsize; axconfig::plat::MAX_CPU_NUM] =
     [const { AtomicUsize::new(0) }; axconfig::plat::MAX_CPU_NUM];
 static TLB_SHOOTDOWN_COMPLETED: [AtomicUsize; axconfig::plat::MAX_CPU_NUM] =
     [const { AtomicUsize::new(0) }; axconfig::plat::MAX_CPU_NUM];
+static TLB_SHOOTDOWN_FLUSH: [AtomicUsize; axconfig::plat::MAX_CPU_NUM] =
+    [const { AtomicUsize::new(TLB_FLUSH_NONE) }; axconfig::plat::MAX_CPU_NUM];
 static TLB_SHOOTDOWN_STATE_LOCKS: [SpinNoIrq<()>; axconfig::plat::MAX_CPU_NUM] =
     [const { SpinNoIrq::new(()) }; axconfig::plat::MAX_CPU_NUM];
 
@@ -81,6 +89,40 @@ pub fn wait_for_all_cpus_ready() {
         axhal::is_cpu_online(cpu_id) && !IPI_CPU_READY[cpu_id].load(Ordering::Acquire)
     }) {
         core::hint::spin_loop();
+    }
+}
+
+/// Records that the current CPU may cache translations for `asid`.
+pub fn mark_current_cpu_asid_active(asid: usize) {
+    let Some(mask) = ASID_ACTIVE_CPU_MASKS.get(asid) else {
+        return;
+    };
+    let bit = 1usize << this_cpu_id();
+    if mask.load(Ordering::Relaxed) & bit == 0 {
+        mask.fetch_or(bit, Ordering::Release);
+    }
+}
+
+/// Returns the online CPUs that may cache translations for `asid`.
+pub fn asid_active_cpu_mask(asid: usize) -> usize {
+    #[cfg(any(target_arch = "riscv64", target_arch = "loongarch64"))]
+    {
+        ASID_ACTIVE_CPU_MASKS
+            .get(asid)
+            .map(|mask| mask.load(Ordering::Acquire) & axhal::online_cpu_mask())
+            .unwrap_or_else(axhal::online_cpu_mask)
+    }
+    #[cfg(not(any(target_arch = "riscv64", target_arch = "loongarch64")))]
+    {
+        let _ = asid;
+        axhal::online_cpu_mask()
+    }
+}
+
+/// Clears CPU residency state before a retired ASID is reused.
+pub fn reset_asid_active_cpu_mask(asid: usize) {
+    if let Some(mask) = ASID_ACTIVE_CPU_MASKS.get(asid) {
+        mask.store(0, Ordering::Release);
     }
 }
 
@@ -132,33 +174,53 @@ pub fn run_on_each_cpu<T: Into<MulticastCallback>>(callback: T) -> Result<(), Ip
 /// TLB shootdowns use fixed per-CPU mailboxes instead of queued callbacks so
 /// they remain safe when multiple CPUs fault concurrently with IRQs disabled.
 pub fn flush_tlb_all_cpus() -> Result<(), TlbShootdownError> {
+    flush_tlb_on_cpus(TLB_FLUSH_ALL, axhal::online_cpu_mask())
+}
+
+/// Flushes one ASID on CPUs where that address space may have run.
+///
+/// The current CPU is always included as a conservative fallback for callers
+/// that mutate a page table before their task residency has been published.
+pub fn flush_tlb_asid_cpus(asid: usize, target_mask: usize) -> Result<(), TlbShootdownError> {
+    debug_assert!(asid < TRACKED_ASID_COUNT);
+    let target_mask = target_mask | (1usize << this_cpu_id());
+    flush_tlb_on_cpus(asid, target_mask)
+}
+
+fn flush_tlb_on_cpus(flush: usize, target_mask: usize) -> Result<(), TlbShootdownError> {
     let current_cpu_id = this_cpu_id();
     let cpu_num = axhal::cpu_num();
-    let mut target_mask = 0usize;
+    let current_cpu_bit = 1usize << current_cpu_id;
+    let target_mask = target_mask & axhal::online_cpu_mask();
+    let remote_mask = target_mask & !current_cpu_bit;
     let mut target_tickets = [0usize; axconfig::plat::MAX_CPU_NUM];
 
     // CPU readiness is published before the CPU is marked online and remains
     // stable for its lifetime. Validate every target before publishing any
     // shootdown request so an error cannot leave a partially armed operation.
     for cpu_id in 0..cpu_num {
-        if cpu_id == current_cpu_id || !axhal::is_cpu_online(cpu_id) {
+        if remote_mask & (1usize << cpu_id) == 0 {
             continue;
         }
         if !IPI_CPU_READY[cpu_id].load(Ordering::Acquire) {
             return Err(TlbShootdownError::Incomplete(IpiError::CpuOffline));
         }
-        target_mask |= 1usize << cpu_id;
     }
 
     fence(Ordering::Release);
-    axhal::asm::flush_tlb(None);
+    if target_mask & current_cpu_bit != 0 {
+        execute_tlb_flush(flush);
+    }
     let mut delivery_error = None;
     for cpu_id in 0..cpu_num {
-        if target_mask & (1usize << cpu_id) != 0 {
+        if remote_mask & (1usize << cpu_id) != 0 {
             let send_result = {
                 // Serialize ticket publication with target-side service so
                 // completion cannot race ahead of the delivery attempt.
                 let _state_guard = TLB_SHOOTDOWN_STATE_LOCKS[cpu_id].lock();
+                let pending = TLB_SHOOTDOWN_FLUSH[cpu_id].load(Ordering::Relaxed);
+                TLB_SHOOTDOWN_FLUSH[cpu_id]
+                    .store(merge_tlb_flush(pending, flush), Ordering::Release);
                 let ticket = TLB_SHOOTDOWN_REQUESTED[cpu_id]
                     .fetch_add(1, Ordering::AcqRel)
                     .checked_add(1)
@@ -176,8 +238,26 @@ pub fn flush_tlb_all_cpus() -> Result<(), TlbShootdownError> {
 
     // Keep failed deliveries armed: the periodic interrupt path services the
     // mailbox, so no caller observes an error while a remote stale TLB remains.
-    wait_for_tlb_shootdowns(target_mask, &target_tickets, cpu_num);
+    wait_for_tlb_shootdowns(remote_mask, &target_tickets, cpu_num);
     delivery_error.map_or(Ok(()), |error| Err(TlbShootdownError::Completed(error)))
+}
+
+#[inline]
+fn merge_tlb_flush(pending: usize, requested: usize) -> usize {
+    if pending == TLB_FLUSH_NONE || pending == requested {
+        requested
+    } else {
+        TLB_FLUSH_ALL
+    }
+}
+
+#[inline]
+fn execute_tlb_flush(flush: usize) {
+    if flush < TRACKED_ASID_COUNT {
+        axhal::asm::flush_tlb_asid(flush);
+    } else {
+        axhal::asm::flush_tlb(None);
+    }
 }
 
 fn wait_for_tlb_shootdowns(target_mask: usize, target_tickets: &[usize], cpu_num: usize) {
@@ -206,7 +286,8 @@ pub fn service_tlb_shootdown() {
             return;
         }
         fence(Ordering::Acquire);
-        axhal::asm::flush_tlb(None);
+        let flush = TLB_SHOOTDOWN_FLUSH[cpu_id].swap(TLB_FLUSH_NONE, Ordering::AcqRel);
+        execute_tlb_flush(flush);
         TLB_SHOOTDOWN_COMPLETED[cpu_id].store(requested, Ordering::Release);
     }
 }

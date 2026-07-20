@@ -116,6 +116,12 @@ pub fn flush_tlb(vaddr: Option<VirtAddr>) {
     }
 }
 
+/// Flushes non-global TLB entries belonging to the given address-space ID.
+#[inline]
+pub fn flush_tlb_asid(asid: usize) {
+    asm::sfence_vma(asid, 0);
+}
+
 /// Writes the Supervisor Trap Vector Base Address register (`stvec`).
 ///
 /// # Safety

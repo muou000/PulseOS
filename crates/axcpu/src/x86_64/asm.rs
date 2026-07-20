@@ -120,6 +120,14 @@ pub fn flush_tlb(vaddr: Option<VirtAddr>) {
     }
 }
 
+/// Flushes TLB entries belonging to an address-space ID.
+///
+/// x86 support currently falls back to a full local flush.
+#[inline]
+pub fn flush_tlb_asid(_asid: usize) {
+    flush_tlb(None);
+}
+
 /// Reads the thread pointer of the current CPU (`FS_BASE`).
 ///
 /// It is used to implement TLS (Thread Local Storage).

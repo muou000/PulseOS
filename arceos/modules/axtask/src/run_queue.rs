@@ -721,6 +721,12 @@ impl AxRunQueue {
             let prev_ctx_ptr = prev_task.ctx_mut_ptr();
             let next_ctx_ptr = next_task.ctx_mut_ptr();
 
+            #[cfg(all(
+                feature = "ipi",
+                any(target_arch = "riscv64", target_arch = "loongarch64")
+            ))]
+            axipi::mark_current_cpu_asid_active((*next_ctx_ptr).page_table_asid());
+
             // Keep a counted reference until the next stack publishes that the
             // previous context is fully saved. GC must not reclaim it earlier.
             #[cfg(feature = "smp")]

@@ -149,6 +149,14 @@ pub fn flush_tlb(vaddr: Option<VirtAddr>) {
     }
 }
 
+/// Flushes TLB entries belonging to an address-space ID.
+///
+/// AArch64 support currently falls back to a full local flush.
+#[inline]
+pub fn flush_tlb_asid(_asid: usize) {
+    flush_tlb(None);
+}
+
 /// Flushes the entire instruction cache.
 #[inline]
 pub fn flush_icache_all() {

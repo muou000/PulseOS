@@ -236,6 +236,18 @@ impl TaskContext {
         self.asid = asid;
     }
 
+    /// Returns the address-space ID saved in this task context.
+    pub const fn page_table_asid(&self) -> usize {
+        #[cfg(feature = "uspace")]
+        {
+            self.asid
+        }
+        #[cfg(not(feature = "uspace"))]
+        {
+            0
+        }
+    }
+
     /// Switches to another task.
     ///
     /// It first saves the current task's context from CPU to this place, and then
