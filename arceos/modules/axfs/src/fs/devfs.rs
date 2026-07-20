@@ -481,6 +481,18 @@ impl DevNode {
         }
     }
 
+    pub fn is_tty(&self) -> bool {
+        let Ok(inode) = self.inode_ref() else {
+            return false;
+        };
+        matches!(
+            &inode.content,
+            NodeContent::CharacterDevice(
+                DevDeviceKind::Tty | DevDeviceKind::Console | DevDeviceKind::TtyS0
+            )
+        )
+    }
+
     fn build_entry(&self, name: &str, target_ino: u64) -> VfsResult<DirEntry> {
         let node_type = self.fs.node_type_of(target_ino)?;
         let reference =
