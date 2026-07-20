@@ -407,7 +407,6 @@ impl FileNodeOps for Inode {
         let _mutation_guard = self.mutation_lock.lock().await;
         let mut inode = ext4plus::inode::Inode::read(&fs, idx).await.map_err(into_vfs_err)?;
         let written = ext4plus::file::write_at(&fs, &mut inode, buf, offset).await.map_err(into_vfs_err)?;
-        inode.write(&fs).await.map_err(into_vfs_err)?;
         log::debug!("ext4 inode::write_at done: written={}", written);
         Ok(written)
     }
@@ -422,7 +421,6 @@ impl FileNodeOps for Inode {
         let written = ext4plus::file::write_at(&fs, &mut inode, buf, length)
             .await
             .map_err(into_vfs_err)?;
-        inode.write(&fs).await.map_err(into_vfs_err)?;
         Ok((written, length + written as u64))
     }
 
@@ -437,7 +435,6 @@ impl FileNodeOps for Inode {
             return Ok(());
         }
         ext4plus::file::truncate(&fs, &mut inode, len).await.map_err(into_vfs_err)?;
-        inode.write(&fs).await.map_err(into_vfs_err)?;
         Ok(())
     }
 
@@ -453,7 +450,6 @@ impl FileNodeOps for Inode {
         if written != bytes.len() {
             return Err(VfsError::StorageFull);
         }
-        inode.write(&fs).await.map_err(into_vfs_err)?;
         Ok(())
     }
 }
