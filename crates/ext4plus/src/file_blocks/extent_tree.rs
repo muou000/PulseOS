@@ -338,6 +338,11 @@ impl ExtentNode {
             }
         }
         if let Some(checksum_base) = checksum_base {
+            let checksum_offset = self.header.checksum_offset();
+            if bytes.len() > checksum_offset {
+                return Err(Ext4Error::NoSpace);
+            }
+            bytes.resize(checksum_offset, 0);
             let mut checksum = checksum_base.clone();
             checksum.update(&bytes);
             bytes.extend_from_slice(&checksum.finalize().to_le_bytes());
@@ -1192,11 +1197,10 @@ impl ExtentTree {
                         }
                         Err(_) => MAX_UNINITIALIZED_EXTENT_BLOCKS,
                     };
-                    let mut extent = Extent::allocate(
+                    let extent = Extent::allocate_uninitialized(
                         self.inode, hole_start, to_try, &self.ext4,
                     )
                     .await?;
-                    extent.is_initialized = false;
                     claimed = claimed
                         .checked_add(u32::from(extent.num_blocks))
                         .ok_or(Ext4Error::NoSpace)?;
@@ -1876,106 +1880,6 @@ impl ExtentTree {
             Ok(written)
         }
 
-        #[maybe_async::maybe_async]
-        async fn write_into_newly_allocated_extent(
-            ext4: &Ext4,
-            inode: &Inode,
-            extent: &Extent,
-            offset_in_block: usize,
-            buf: &[u8],
-            block_size: usize,
-        ) -> Result<usize, Ext4Error> {
-            if buf.is_empty() {
-                return Ok(0);
-            }
-            if offset_in_block >= block_size {
-                return Err(CorruptKind::InvalidBlockSize.into());
-            }
-
-            let first_block_capacity = block_size
-                .checked_sub(offset_in_block)
-                .ok_or(CorruptKind::InvalidBlockSize)?;
-            let needed_blocks = if buf.len() <= first_block_capacity {
-                1usize
-            } else {
-                let remaining_after_first = buf
-                    .len()
-                    .checked_sub(first_block_capacity)
-                    .ok_or(Ext4Error::FileTooLarge)?;
-                1usize
-                    .checked_add(remaining_after_first.div_ceil(block_size))
-                    .ok_or(Ext4Error::FileTooLarge)?
-            };
-
-            let extent_blocks = usize::from(extent.num_blocks);
-            let blocks_to_write = core::cmp::min(needed_blocks, extent_blocks);
-            if blocks_to_write == 0 {
-                return Ok(0);
-            }
-
-            let mut written = 0usize;
-            let mut i = 0usize;
-
-            while i < blocks_to_write {
-                let fs_block = extent
-                    .start_block
-                    .checked_add(
-                        u64::try_from(i)
-                            .map_err(|_| Ext4Error::FileTooLarge)?,
-                    )
-                    .ok_or(CorruptKind::ExtentBlock(inode.index))?;
-
-                let (block_offset, capacity) = if i == 0 {
-                    (
-                        offset_in_block,
-                        block_size
-                            .checked_sub(offset_in_block)
-                            .ok_or(CorruptKind::InvalidBlockSize)?,
-                    )
-                } else {
-                    (0usize, block_size)
-                };
-
-                let remaining = buf.len().saturating_sub(written);
-                let take = core::cmp::min(remaining, capacity);
-                if take == 0 {
-                    break;
-                }
-
-                let write_end = range_end(written, take)?;
-                let chunk = &buf[written..write_end];
-                let is_full_block_write =
-                    block_offset == 0 && take == block_size;
-
-                if is_full_block_write {
-                    let mut run_count = 1usize;
-                    while i + run_count < blocks_to_write {
-                        let next_remaining = buf.len().saturating_sub(written + run_count * block_size);
-                        if next_remaining >= block_size {
-                            run_count += 1;
-                        } else {
-                            break;
-                        }
-                    }
-
-                    let run_bytes = run_count * block_size;
-                    let run_write_end = range_end(written, run_bytes)?;
-                    ext4.write_to_block_range(fs_block, 0, &buf[written..run_write_end])
-                        .await?;
-                    written = run_write_end;
-                    i += run_count;
-                    continue;
-                } else {
-                    write_partial_block(&ext4, fs_block, block_offset, take, chunk, block_size, false).await?;
-                }
-
-                written = write_end;
-                i += 1;
-            }
-
-            Ok(written)
-        }
-
         let ext4 = self.ext4.clone();
         let block_size = ext4.0.superblock.block_size();
         let block_size_u64 = block_size.to_u64();
@@ -2100,7 +2004,7 @@ impl ExtentTree {
                         Ok(blocks) => blocks.min(MAX_INITIALIZED_EXTENT_BLOCKS),
                         Err(_) => MAX_INITIALIZED_EXTENT_BLOCKS,
                     };
-                    let new_extent = Extent::allocate(
+                    let new_extent = Extent::allocate_uninitialized(
                         inode.index,
                         current_block,
                         to_try,
@@ -2110,11 +2014,30 @@ impl ExtentTree {
                     let tried_blocks = new_extent.num_blocks;
                     let metadata_before = self.metadata_block_count().await?;
                     self.insert_extent(new_extent).await?;
+                    let data_delta = i64::from(tried_blocks);
+                    let want_bytes = bytes_for_blocks(
+                        usize::from(tried_blocks),
+                        start_offset_in_block,
+                        block_size_usize,
+                    )?;
+                    let slice_len = core::cmp::min(want_bytes, bytes_remaining);
+                    let slice_end = range_end(buf_pos, slice_len)?;
+                    let written_in_run = write_into_uninitialized_extent(
+                        self,
+                        &ext4,
+                        inode,
+                        &new_extent,
+                        0,
+                        usize::from(tried_blocks),
+                        &buf[buf_pos..slice_end],
+                        start_offset_in_block,
+                        block_size_usize,
+                    )
+                    .await?;
                     let metadata_after = self.metadata_block_count().await?;
                     let metadata_delta = i64::from(metadata_after)
                         .checked_sub(i64::from(metadata_before))
                         .ok_or(Ext4Error::FileTooLarge)?;
-                    let data_delta = i64::from(tried_blocks);
                     let total_delta = data_delta
                         .checked_add(metadata_delta)
                         .ok_or(Ext4Error::FileTooLarge)?;
@@ -2133,22 +2056,6 @@ impl ExtentTree {
                             .ok_or(Ext4Error::FileTooLarge)?
                     };
                     inode.set_fs_blocks(new_fs_blocks, &ext4)?;
-                    let want_bytes = bytes_for_blocks(
-                        usize::from(tried_blocks),
-                        start_offset_in_block,
-                        block_size_usize,
-                    )?;
-                    let slice_len = core::cmp::min(want_bytes, bytes_remaining);
-                    let slice_end = range_end(buf_pos, slice_len)?;
-                    let written_in_run = write_into_newly_allocated_extent(
-                        &ext4,
-                        inode,
-                        &new_extent,
-                        start_offset_in_block,
-                        &buf[buf_pos..slice_end],
-                        block_size_usize,
-                    )
-                    .await?;
                     total_written = total_written
                         .checked_add(written_in_run)
                         .ok_or(Ext4Error::FileTooLarge)?;
@@ -2361,11 +2268,30 @@ mod tests {
     use crate::file_blocks::extent_tree::ExtentTree;
     use crate::inode::Inode;
     use crate::test_util::{load_test_disk1_rw, load_test_disk1_rw_no_fsck};
+
+    #[test]
+    fn extent_node_checksum_is_written_at_tail() {
+        let node = ExtentNode {
+            block: Some(1),
+            header: NodeHeader {
+                num_entries: 1,
+                max_entries: 340,
+                depth: 0,
+                generation: 0,
+            },
+            entries: ExtentNodeEntries::Leaf(vec![Extent::new(0, 100, 1)]),
+        };
+
+        let bytes = node.to_bytes(Some(Checksum::new())).unwrap();
+        assert_eq!(bytes.len(), 4096);
+        assert!(bytes[24..4092].iter().all(|byte| *byte == 0));
+        assert_ne!(&bytes[4092..], &[0; 4]);
+    }
     use crate::{FileType, InodeCreationOptions, InodeFlags, InodeMode};
 
     use super::{
-        CorruptKind, ENTRY_SIZE_IN_BYTES, Ext4, Ext4Error, ExtentInternalNode,
-        ExtentNode, ExtentNodeEntries, NodeHeader,
+        Checksum, CorruptKind, ENTRY_SIZE_IN_BYTES, Ext4, Ext4Error, Extent,
+        ExtentInternalNode, ExtentNode, ExtentNodeEntries, NodeHeader,
     };
     use crate::error::Corrupt;
     use maybe_async::maybe_async;

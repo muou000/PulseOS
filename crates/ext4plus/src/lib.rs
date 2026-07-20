@@ -686,7 +686,6 @@ impl Ext4 {
             bitmap_handle.calc_checksum(self, block_group_index).await?;
         let block_group = self.get_block_group_descriptor(block_group_index);
         block_group.set_block_bitmap_checksum(checksum);
-        block_group.write(self).await?;
         Ok(())
     }
 
@@ -700,7 +699,6 @@ impl Ext4 {
             bitmap_handle.calc_checksum(self, block_group_index).await?;
         let block_group = self.get_block_group_descriptor(block_group_index);
         block_group.set_inode_bitmap_checksum(checksum);
-        block_group.write(self).await?;
         Ok(())
     }
 
@@ -988,12 +986,34 @@ impl Ext4 {
         Err(Ext4Error::NoSpace)
     }
 
-    /// Tries to allocate `num_blocks` contiguous blocks.
+    /// Tries to allocate and zero `num_blocks` contiguous blocks.
     #[maybe_async::maybe_async]
     pub(crate) async fn alloc_contiguous_blocks(
         &self,
         inode_index: InodeIndex,
         num_blocks: NonZeroU32,
+    ) -> Result<FsBlockIndex, Ext4Error> {
+        self.alloc_contiguous_blocks_inner(inode_index, num_blocks, true)
+            .await
+    }
+
+    /// Tries to allocate `num_blocks` contiguous blocks as unwritten storage.
+    #[maybe_async::maybe_async]
+    pub(crate) async fn alloc_uninitialized_contiguous_blocks(
+        &self,
+        inode_index: InodeIndex,
+        num_blocks: NonZeroU32,
+    ) -> Result<FsBlockIndex, Ext4Error> {
+        self.alloc_contiguous_blocks_inner(inode_index, num_blocks, false)
+            .await
+    }
+
+    #[maybe_async::maybe_async]
+    async fn alloc_contiguous_blocks_inner(
+        &self,
+        inode_index: InodeIndex,
+        num_blocks: NonZeroU32,
+        clear: bool,
     ) -> Result<FsBlockIndex, Ext4Error> {
         let mut bg_id = (inode_index.get() - 1)
             / self.0.superblock.inodes_per_block_group();
@@ -1024,11 +1044,9 @@ impl Ext4 {
                     bg_id = bg_id.saturating_add(1);
                     continue;
                 };
-                for i in 0..num_blocks.get() {
-                    block_bitmap_handle
-                        .set(block_num.checked_add(i).unwrap(), true, self)
-                        .await?;
-                }
+                block_bitmap_handle
+                    .set_range(block_num, num_blocks.get(), true, self)
+                    .await?;
                 self.update_block_bitmap_checksum(bg_id, block_bitmap_handle)
                     .await?;
                 bg.set_free_blocks_count(
@@ -1050,13 +1068,11 @@ impl Ext4 {
                 .checked_add(u64::from(self.0.superblock.first_data_block()))
                 .ok_or(Ext4Error::NoSpace)?;
 
-                if let Err(err) = self.clear_blocks(block_index, num_blocks).await {
+                if clear && let Err(err) = self.clear_blocks(block_index, num_blocks).await {
                     let block_bitmap_handle = self.get_block_bitmap_handle(bg_id);
-                    for i in 0..num_blocks.get() {
-                        let _ = block_bitmap_handle
-                            .set(block_num.checked_add(i).unwrap(), false, self)
-                            .await;
-                    }
+                    let _ = block_bitmap_handle
+                        .set_range(block_num, num_blocks.get(), false, self)
+                        .await;
                     let _ = self.update_block_bitmap_checksum(bg_id, block_bitmap_handle).await;
                     bg.set_free_blocks_count(free_blocks);
                     let _ = bg.write(self).await;
@@ -1108,16 +1124,30 @@ impl Ext4 {
         block_index: FsBlockIndex,
         num_blocks: NonZeroU32,
     ) -> Result<(), Ext4Error> {
-        let zeroes = vec![0; self.0.superblock.block_size().to_usize()];
-        for i in 0..num_blocks.get() {
-            self.write_to_block(
+        const MAX_CLEAR_BLOCKS_PER_IO: u32 = 256;
+        let block_size = self.0.superblock.block_size().to_usize();
+        let max_blocks = num_blocks.get().min(MAX_CLEAR_BLOCKS_PER_IO);
+        let zeroes = vec![
+            0;
+            block_size
+                .checked_mul(usize_from_u32(max_blocks))
+                .ok_or(Ext4Error::NoSpace)?
+        ];
+        let mut cleared = 0u32;
+        while cleared < num_blocks.get() {
+            let blocks = (num_blocks.get() - cleared).min(MAX_CLEAR_BLOCKS_PER_IO);
+            let len = block_size
+                .checked_mul(usize_from_u32(blocks))
+                .ok_or(Ext4Error::NoSpace)?;
+            self.write_to_block_range(
                 block_index
-                    .checked_add(u64::from(i))
+                    .checked_add(u64::from(cleared))
                     .ok_or(Ext4Error::NoSpace)?,
                 0,
-                &zeroes,
+                &zeroes[..len],
             )
             .await?;
+            cleared = cleared.checked_add(blocks).ok_or(Ext4Error::NoSpace)?;
         }
         Ok(())
     }
@@ -1164,11 +1194,9 @@ impl Ext4 {
 
         let block_bitmap_handle =
             self.get_block_bitmap_handle(block_group_index);
-        for i in 0..num_blocks.get() {
-            block_bitmap_handle
-                .set(block_offset.checked_add(i).unwrap(), false, self)
-                .await?;
-        }
+        block_bitmap_handle
+            .set_range(block_offset, num_blocks.get(), false, self)
+            .await?;
         self.update_block_bitmap_checksum(
             block_group_index,
             block_bitmap_handle,
