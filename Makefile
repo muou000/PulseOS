@@ -3,9 +3,11 @@ export NAME := $(notdir $(A))
 export PATH := $(A)/bin:$(PATH)
 export NO_AXSTD := y
 export AX_LIB := axfeat
-export APP_FEATURES := qemu
+FEATURE ?= final-testcode
+export APP_FEATURES := qemu,$(FEATURE)
 export BLK := y
 
+export SMP ?= 8
 export MEM := 8G
 export ARCH ?= riscv64
 export LOG ?= info
@@ -23,22 +25,22 @@ prepare-tools:
 	@echo "[tools] Using prebuilt tools from $(A)/bin"
 
 all: prepare-tools
-	@ARCH=riscv64 APP_FEATURES=qemu,testcode LOG=off $(MAKE) defconfig
-	@ARCH=riscv64 APP_FEATURES=qemu,testcode LOG=off BUS=mmio $(MAKE) -C arceos build
+	@ARCH=riscv64 APP_FEATURES=qemu,$(FEATURE) LOG=off $(MAKE) defconfig
+	@ARCH=riscv64 APP_FEATURES=qemu,$(FEATURE) LOG=off BUS=mmio $(MAKE) -C arceos build
 	@cp $(NAME)_riscv64-qemu-virt.bin kernel-rv
-	@ARCH=loongarch64 APP_FEATURES=qemu,testcode LOG=off FEATURES=bus-pci $(MAKE) defconfig
-	@ARCH=loongarch64 APP_FEATURES=qemu,testcode LOG=off BUS=pci FEATURES=bus-pci $(MAKE) -C arceos build
+	@ARCH=loongarch64 APP_FEATURES=qemu,$(FEATURE) LOG=off FEATURES=bus-pci $(MAKE) defconfig
+	@ARCH=loongarch64 APP_FEATURES=qemu,$(FEATURE) LOG=off BUS=pci FEATURES=bus-pci $(MAKE) -C arceos build
 	@cp $(NAME)_loongarch64-qemu-virt.elf kernel-la
-	@$(MAKE) img_all
+	@if [ "$(FEATURE)" = "pre-testcode" ]; then $(MAKE) img_all; fi
 
 test: prepare-tools
-	@ARCH=riscv64 APP_FEATURES=qemu,testcode LOG=$(LOG) $(MAKE) defconfig
-	@ARCH=riscv64 APP_FEATURES=qemu,testcode LOG=$(LOG) BUS=mmio $(MAKE) -C arceos build  EXTRA_RUSTFLAGS="$(EXTRA_RUSTFLAGS)"
+	@ARCH=riscv64 APP_FEATURES=qemu,$(FEATURE) LOG=$(LOG) $(MAKE) defconfig
+	@ARCH=riscv64 APP_FEATURES=qemu,$(FEATURE) LOG=$(LOG) BUS=mmio $(MAKE) -C arceos build  EXTRA_RUSTFLAGS="$(EXTRA_RUSTFLAGS)"
 	@cp $(NAME)_riscv64-qemu-virt.bin kernel-rv
-	@ARCH=loongarch64 APP_FEATURES=qemu,testcode LOG=$(LOG) FEATURES=bus-pci $(MAKE) defconfig
-	@ARCH=loongarch64 APP_FEATURES=qemu,testcode LOG=$(LOG) BUS=pci FEATURES=bus-pci $(MAKE) -C arceos build  EXTRA_RUSTFLAGS="$(EXTRA_RUSTFLAGS)"
+	@ARCH=loongarch64 APP_FEATURES=qemu,$(FEATURE) LOG=$(LOG) FEATURES=bus-pci $(MAKE) defconfig
+	@ARCH=loongarch64 APP_FEATURES=qemu,$(FEATURE) LOG=$(LOG) BUS=pci FEATURES=bus-pci $(MAKE) -C arceos build  EXTRA_RUSTFLAGS="$(EXTRA_RUSTFLAGS)"
 	@cp $(NAME)_loongarch64-qemu-virt.elf kernel-la
-	@if [ "$(IMG)" = "y" ]; then $(MAKE) img_all; fi
+	@if [ "$(FEATURE)" = "pre-testcode" -a "$(IMG)" = "y" ]; then $(MAKE) img_all; fi
 
 debug: prepare-tools
 	@ARCH=riscv64 APP_FEATURES=qemu LOG=$(LOG) $(MAKE) defconfig

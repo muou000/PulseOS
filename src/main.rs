@@ -21,7 +21,7 @@ fn main() {
     pulse_core::task::init_itimer_hook();
     info!("itimer hook registered");
 
-    if cfg!(feature = "testcode") {
+    if cfg!(any(feature = "pre-testcode", feature = "final-testcode")) {
         pulse_core::task::set_stdin_polling_enabled(false);
         info!("testcode feature active: stdin polling disabled");
     }
@@ -44,8 +44,10 @@ fn main() {
                 pulse_core::task::current_thread().expect("init task entered without Thread");
             let proc = thread.process();
 
-            let shell_args_base: &[&str] = if cfg!(feature = "testcode") {
+            let shell_args_base: &[&str] = if cfg!(feature = "pre-testcode") {
                 &["sh", "/testcode.sh"]
+            } else if cfg!(feature = "final-testcode") {
+                &["sh", "-c", "cd /glibc && ./cagent_testcode.sh"]
             } else {
                 &["sh"]
             };
@@ -102,7 +104,7 @@ fn main() {
             let init_task = axtask::spawn_task(inner);
             init_thread.process().register_task_ref(init_task.clone());
 
-            if cfg!(feature = "testcode") {
+            if cfg!(any(feature = "pre-testcode", feature = "final-testcode")) {
                 match init_task.join() {
                     Some(0) => info!("Init task exited normally"),
                     Some(exit_code) => error!("Init task exited with failure code {}", exit_code),
@@ -122,7 +124,7 @@ fn main() {
         }
         Err(e) => {
             error!("Failed to create user process: {:?}", e);
-            if cfg!(feature = "testcode") {
+            if cfg!(any(feature = "pre-testcode", feature = "final-testcode")) {
                 pulse_syscalls::sys_sync();
                 axhal::power::system_off();
             } else {

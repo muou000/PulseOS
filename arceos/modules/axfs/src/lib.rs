@@ -408,12 +408,19 @@ pub fn init_filesystems(mut block_devs: AxDeviceContainer<AxBlockDevice>) {
 
     assert!(!candidates.is_empty(), "No usable filesystem found!");
 
-    // Use block device 1 as the root filesystem. The remaining devices are
+    // Use block device as the root filesystem. The remaining devices are
     // registered for user-initiated mount.
+    let root_disk_idx = if cfg!(feature = "pre-testcode") {
+        1
+    } else if cfg!(feature = "final-testcode") {
+        0
+    } else {
+        0
+    };
     let root_pos = candidates
         .iter()
-        .position(|cand| cand.disk_idx == 1)
-        .expect("block device1 is required for the root filesystem");
+        .position(|cand| cand.disk_idx == root_disk_idx)
+        .expect("block device is required for the root filesystem");
     let root = candidates.swap_remove(root_pos);
     info!(
         "  select block device {} ({}, {} KiB) as root filesystem",
