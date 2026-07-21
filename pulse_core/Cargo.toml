@@ -33,3 +33,7 @@ percpu.workspace = true
 starry-vdso.workspace = true
 kspin.workspace = true
 hashbrown.workspace = true
+
+[features]
+pre-testcode = ["axfs/pre-testcode"]
+final-testcode = ["axfs/final-testcode"]
