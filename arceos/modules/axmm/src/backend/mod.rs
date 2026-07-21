@@ -14,6 +14,7 @@ mod shared;
 pub use self::shared::SharedFrame;
 pub(crate) use alloc::{cow_dec_frame_ref, cow_inc_frame_ref};
 pub use self::cow::CowMapping;
+pub use self::file::{FilePageLoad, FilePagePrepared};
 
 /// A unified enum type for different memory mapping backends.
 ///
@@ -210,6 +211,22 @@ impl Backend {
         }
     }
 
+    pub(crate) fn page_fault_load_request(
+        &self,
+        vaddr: VirtAddr,
+        orig_flags: MappingFlags,
+        page_table: &crate::PageTableLockManager,
+    ) -> Option<FilePageLoad> {
+        match self {
+            Self::File(mapping) => mapping.page_load_request(vaddr, orig_flags, page_table),
+            Self::Cow(cow) => {
+                cow.inner()
+                    .page_fault_load_request(vaddr, orig_flags, page_table)
+            }
+            _ => None,
+        }
+    }
+
     pub(crate) fn handle_page_fault(
         &self,
         vaddr: VirtAddr,
@@ -242,6 +259,34 @@ impl Backend {
                 access_flags,
                 reclaim,
             ),
+        }
+    }
+
+    pub(crate) fn handle_prepared_file_page(
+        &self,
+        vaddr: VirtAddr,
+        orig_flags: MappingFlags,
+        page_table: &crate::PageTableLockManager,
+        access_flags: MappingFlags,
+        prepared: &mut FilePagePrepared,
+    ) -> bool {
+        match self {
+            Self::File(mapping) => self.handle_prepared_page_fault_file(
+                vaddr,
+                orig_flags,
+                page_table,
+                mapping,
+                access_flags,
+                prepared,
+            ),
+            Self::Cow(cow) => cow.inner().handle_prepared_file_page(
+                vaddr,
+                orig_flags,
+                page_table,
+                access_flags,
+                prepared,
+            ),
+            _ => false,
         }
     }
 

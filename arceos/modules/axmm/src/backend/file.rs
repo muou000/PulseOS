@@ -1,3 +1,4 @@
+use axerrno::{AxError, AxResult};
 use axfs::{CachedFile, FileFlags};
 use axhal::{
     mem::phys_to_virt,
@@ -9,7 +10,6 @@ use super::{
     Backend,
     alloc::{alloc_frame, dealloc_frame},
 };
-use axalloc::frame_table;
 
 fn sync_executable_mapping(flags: MappingFlags) {
     if !flags.contains(MappingFlags::EXECUTE) {
@@ -69,6 +69,82 @@ pub struct FileMapping {
     shared: bool,
 }
 
+#[derive(Clone)]
+pub struct FilePageLoad {
+    file: CachedFile,
+    page_number: u32,
+    may_write: bool,
+}
+
+pub struct FilePagePrepared {
+    file: CachedFile,
+    page_number: u32,
+    frame: Option<PhysAddr>,
+}
+
+impl core::fmt::Debug for FilePageLoad {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("FilePageLoad")
+            .field("page_number", &self.page_number)
+            .finish_non_exhaustive()
+    }
+}
+
+impl FilePageLoad {
+    pub fn prepare(self) -> AxResult<FilePagePrepared> {
+        loop {
+            self.file
+                .ensure_page_resident(self.page_number)
+                .map_err(|_| AxError::Io)?;
+            match self
+                .file
+                .try_pin_shared_page_paddr(self.page_number, self.may_write)
+                .map_err(|_| AxError::Io)?
+            {
+                Some(frame) => {
+                    return Ok(FilePagePrepared {
+                        file: self.file,
+                        page_number: self.page_number,
+                        frame: Some(frame),
+                    });
+                }
+                None => continue,
+            }
+        }
+    }
+}
+
+impl core::fmt::Debug for FilePagePrepared {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("FilePagePrepared")
+            .field("page_number", &self.page_number)
+            .field("frame", &self.frame)
+            .finish_non_exhaustive()
+    }
+}
+
+impl Drop for FilePagePrepared {
+    fn drop(&mut self) {
+        if let Some(frame) = self.frame.take() {
+            dealloc_frame(frame);
+        }
+    }
+}
+
+impl FilePagePrepared {
+    fn matches(&self, file: &CachedFile, page_number: u32) -> bool {
+        self.page_number == page_number && self.file.shares_page_cache_with(file)
+    }
+
+    fn frame(&self) -> Option<PhysAddr> {
+        self.frame
+    }
+
+    fn take_frame(&mut self) -> Option<PhysAddr> {
+        self.frame.take()
+    }
+}
+
 impl FileMapping {
 
     pub(crate) fn permits(&self, flags: MappingFlags) -> bool {
@@ -122,10 +198,32 @@ impl FileMapping {
         Some((file_offset as u64, read_len))
     }
 
-    fn page_number(&self, page_addr: VirtAddr) -> Option<u32> {
-        let relative = page_addr.as_usize().checked_sub(self.start.as_usize())?;
-        let file_offset = self.file_offset.checked_add(relative)?;
-        u32::try_from(file_offset / PAGE_SIZE_4K).ok()
+    pub(crate) fn page_load_request(
+        &self,
+        vaddr: VirtAddr,
+        orig_flags: MappingFlags,
+        pt: &crate::PageTableLockManager,
+    ) -> Option<FilePageLoad> {
+        if !self.permits(orig_flags) {
+            return None;
+        }
+
+        let page_addr = vaddr.align_down_4k();
+        let (file_offset, _) = self.page_read_window(page_addr)?;
+        if pt
+            .lock_for_addr(page_addr)
+            .query(page_addr)
+            .is_ok_and(|(frame, _, _)| frame.as_usize() != 0)
+        {
+            return None;
+        }
+
+        let page_number = u32::try_from(file_offset / PAGE_SIZE_4K as u64).ok()?;
+        Some(FilePageLoad {
+            file: self.file.clone(),
+            page_number,
+            may_write: self.shared && self.file_flags.contains(FileFlags::WRITE),
+        })
     }
 }
 
@@ -310,23 +408,14 @@ impl Backend {
                     return false;
                 }
 
-                // If not COW write fault: normal upgrade or already mapped
-                let mut is_shared_pc = false;
-                if !mapping.shared {
-                    if let Some(pn) = mapping.page_number(page_addr) {
-                        if let Ok(paddr) = mapping.file.shared_page_paddr(pn) {
-                            if old_frame == paddr {
-                                is_shared_pc = true;
-                            }
-                        }
-                    }
-                }
-
+                // If not a COW write fault, perform only a permission upgrade.
+                // Private file pages remain read-only so the next write takes
+                // the COW path without consulting the page cache here.
                 let mut pt_guard = pt.lock_for_addr(page_addr);
                 if let Ok((curr_frame, curr_flags, _)) = pt_guard.query(page_addr) {
                     if curr_frame == old_frame {
                         let mut new_flags = curr_flags | orig_flags;
-                        if is_shared_pc {
+                        if !mapping.shared {
                             new_flags &= !MappingFlags::WRITE;
                         }
                         if curr_flags.contains(new_flags) {
@@ -345,27 +434,44 @@ impl Backend {
             }
         }
 
+        // Missing file pages are prepared outside the address-space lock.
+        false
+    }
+
+    pub(crate) fn handle_prepared_page_fault_file(
+        &self,
+        vaddr: VirtAddr,
+        orig_flags: MappingFlags,
+        pt: &crate::PageTableLockManager,
+        mapping: &FileMapping,
+        access_flags: MappingFlags,
+        prepared: &mut FilePagePrepared,
+    ) -> bool {
+        if !mapping.permits(orig_flags) {
+            return false;
+        }
+
+        let page_addr = vaddr.align_down_4k();
+        let Some((file_offset, _)) = mapping.page_read_window(page_addr) else {
+            return false;
+        };
+        let page_number = (file_offset / PAGE_SIZE_4K as u64) as u32;
+        if !prepared.matches(&mapping.file, page_number) {
+            return false;
+        }
+        let Some(frame) = prepared.frame() else {
+            return false;
+        };
+
+        let mut pt_guard = pt.lock_for_addr(page_addr);
+        if pt_guard
+            .query(page_addr)
+            .is_ok_and(|(current, _, _)| current.as_usize() != 0)
+        {
+            return true;
+        }
+
         if mapping.shared {
-            let Some((file_offset, _)) = mapping.page_read_window(page_addr) else {
-                return false;
-            };
-            let pn = (file_offset / PAGE_SIZE_4K as u64) as u32;
-            let frame = match mapping
-                .file
-                .get_shared_page_paddr(pn, orig_flags.contains(MappingFlags::WRITE))
-            {
-                Ok(paddr) => paddr,
-                Err(_) => return false,
-            };
-
-            let mut pt_guard = pt.lock_for_addr(page_addr);
-            if let Ok((curr_frame, _, _)) = pt_guard.query(page_addr) {
-                if curr_frame.as_usize() != 0 {
-                    dealloc_frame(frame);
-                    return true; // Already mapped
-                }
-            }
-
             let mapped = pt_guard
                 .map(page_addr, frame, PageSize::Size4K, orig_flags)
                 .map(|tlb| {
@@ -373,149 +479,48 @@ impl Backend {
                     sync_executable_mapping(orig_flags);
                 })
                 .is_ok();
-            if !mapped {
-                dealloc_frame(frame);
+            if mapped {
+                prepared.take_frame();
             }
             return mapped;
         }
 
-        // Private mapping: let's try zero-copy shared map (direct map from Page Cache).
-        if let Some((file_offset, _)) = mapping.page_read_window(page_addr) {
-            let pn = (file_offset / PAGE_SIZE_4K as u64) as u32;
-            let frame = match mapping.file.get_shared_page_paddr(pn, false) {
-                Ok(paddr) => paddr,
-                Err(_) => return false,
-            };
-
-            // If the fault is a WRITE fault, copy immediately to avoid mapping read-only first
-            if orig_flags.contains(MappingFlags::WRITE) && access_flags.contains(MappingFlags::WRITE) {
-                let Some(new_frame) = alloc_frame(false) else {
-                    dealloc_frame(frame);
-                    return false;
-                };
-                let src = phys_to_virt(frame).as_ptr();
-                let dst = phys_to_virt(new_frame).as_mut_ptr();
-                unsafe {
-                    core::ptr::copy_nonoverlapping(src, dst, PAGE_SIZE_4K);
-                }
-                dealloc_frame(frame);
-
-                let mut pt_guard = pt.lock_for_addr(page_addr);
-                if let Ok((curr_frame, _, _)) = pt_guard.query(page_addr) {
-                    if curr_frame.as_usize() != 0 {
-                        dealloc_frame(new_frame);
-                        return true; // Already mapped
-                    }
-                }
-                if pt_guard
-                    .map(page_addr, new_frame, PageSize::Size4K, orig_flags)
-                    .map(|tlb| {
-                        tlb.flush();
-                        sync_executable_mapping(orig_flags);
-                    })
-                    .is_ok()
-                {
-                    true
-                } else {
-                    dealloc_frame(new_frame);
-                    false
-                }
-            } else {
-                // Read/Execute fault: map page cache frame read-only
-                if !frame_table().contains(frame) {
-                    let Some(new_frame) = alloc_frame(false) else {
-                        dealloc_frame(frame);
-                        return false;
-                    };
-                    let src = phys_to_virt(frame).as_ptr();
-                    let dst = phys_to_virt(new_frame).as_mut_ptr();
-                    unsafe {
-                        core::ptr::copy_nonoverlapping(src, dst, PAGE_SIZE_4K);
-                    }
-                    dealloc_frame(frame);
-                    let mut pt_guard = pt.lock_for_addr(page_addr);
-                    if let Ok((curr_frame, _, _)) = pt_guard.query(page_addr) {
-                        if curr_frame.as_usize() != 0 {
-                            drop(pt_guard);
-                            dealloc_frame(new_frame);
-                            return true; // Already mapped
-                        }
-                    }
-                    return if pt_guard
-                        .map(page_addr, new_frame, PageSize::Size4K, orig_flags)
-                        .map(|tlb| {
-                            tlb.flush();
-                            sync_executable_mapping(orig_flags);
-                        })
-                        .is_ok()
-                    {
-                        true
-                    } else {
-                        dealloc_frame(new_frame);
-                        false
-                    };
-                }
-
-                // Private mappings must not have WRITE permission to the shared page cache frame.
-                // Clear WRITE flag so writes trigger copy-on-write (COW).
-                let map_flags = orig_flags & !MappingFlags::WRITE;
-
-                let mut pt_guard = pt.lock_for_addr(page_addr);
-                if let Ok((curr_frame, _, _)) = pt_guard.query(page_addr) {
-                    if curr_frame.as_usize() != 0 {
-                        // Already mapped. Since we incremented it, we must decrement it back.
-                        drop(pt_guard); // release lock
-                        dealloc_frame(frame);
-                        return true;
-                    }
-                }
-
-                if pt_guard
-                    .map(page_addr, frame, PageSize::Size4K, map_flags)
-                    .map(|tlb| {
-                        tlb.flush();
-                        sync_executable_mapping(map_flags);
-                    })
-                    .is_ok()
-                {
-                    true
-                } else {
-                    drop(pt_guard);
-                    dealloc_frame(frame);
-                    false
-                }
-            }
-        } else {
-            // Beyond file size: allocate a new frame and zero-fill it.
-            let Some(frame) = alloc_frame(false) else {
+        if orig_flags.contains(MappingFlags::WRITE) && access_flags.contains(MappingFlags::WRITE) {
+            let Some(new_frame) = alloc_frame(false) else {
                 return false;
             };
-            let dst = unsafe {
-                core::slice::from_raw_parts_mut(phys_to_virt(frame).as_mut_ptr(), PAGE_SIZE_4K)
-            };
-            dst.fill(0);
-
-            let mut pt_guard = pt.lock_for_addr(page_addr);
-            if let Ok((curr_frame, _, _)) = pt_guard.query(page_addr) {
-                if curr_frame.as_usize() != 0 {
-                    dealloc_frame(frame);
-                    return true; // Already mapped
-                }
+            unsafe {
+                core::ptr::copy_nonoverlapping(
+                    phys_to_virt(frame).as_ptr(),
+                    phys_to_virt(new_frame).as_mut_ptr(),
+                    PAGE_SIZE_4K,
+                );
             }
-            if pt_guard
-                .map(page_addr, frame, PageSize::Size4K, orig_flags)
+            let mapped = pt_guard
+                .map(page_addr, new_frame, PageSize::Size4K, orig_flags)
                 .map(|tlb| {
                     tlb.flush();
                     sync_executable_mapping(orig_flags);
                 })
-                .is_ok()
-            {
-                true
-            } else {
-                dealloc_frame(frame);
-                false
+                .is_ok();
+            if !mapped {
+                dealloc_frame(new_frame);
             }
+            return mapped;
         }
+
+        let map_flags = orig_flags & !MappingFlags::WRITE;
+        let mapped = pt_guard
+            .map(page_addr, frame, PageSize::Size4K, map_flags)
+            .map(|tlb| {
+                tlb.flush();
+                sync_executable_mapping(map_flags);
+            })
+            .is_ok();
+        if mapped {
+            prepared.take_frame();
+        }
+        mapped
     }
 
     pub(crate) fn protect_file(
@@ -548,22 +553,16 @@ impl Backend {
                 continue; // allow placeholder
             }
 
-            let mut flags = new_flags;
-            if !mapping.shared {
-                // If it's a private mapping, we must keep the page read-only if it points to the shared page cache.
-                if let Some(pn) = mapping.page_number(page) {
-                    if let Ok(paddr) = mapping.file.shared_page_paddr(pn) {
-                        if frame == paddr {
-                            flags &= !MappingFlags::WRITE;
-                        }
-                    }
-                }
-            } else if new_flags.contains(MappingFlags::WRITE)
-                && let Some(pn) = mapping.page_number(page)
-                && mapping.file.shared_page_paddr(pn) == Ok(frame)
-            {
-                let _ = mapping.file.mark_shared_page_writable(pn, frame);
-            }
+            // Never acquire page-cache locks while the address-space write
+            // lock is held. Private file pages stay read-only and take the
+            // existing COW fault path on their next write. This is also safe
+            // for pages that have already been copied, at the cost of one
+            // additional copy after a permission transition.
+            let flags = if mapping.shared {
+                new_flags
+            } else {
+                new_flags & !MappingFlags::WRITE
+            };
 
             if pt.protect(page, flags).map(|(_, tlb)| tlb.flush()).is_err() {
                 error!(
