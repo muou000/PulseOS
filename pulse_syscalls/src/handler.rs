@@ -242,6 +242,9 @@ fn syscall_dispatcher(
             impls::sys_pwritev2(args[0], args[1], args[2], args[3], args[4], args[5])
         }
         Sysno::sendfile => impls::sys_sendfile(args[0], args[1], args[2], args[3]),
+        Sysno::copy_file_range => {
+            impls::sys_copy_file_range(args[0], args[1], args[2], args[3], args[4], args[5])
+        }
         Sysno::openat => impls::sys_openat(args[0] as i32, args[1], args[2], args[3]),
         Sysno::mkdirat => impls::sys_mkdirat(args[0] as i32, args[1], args[2]),
         Sysno::mknodat => impls::sys_mknodat(args[0] as i32, args[1], args[2], args[3]),
