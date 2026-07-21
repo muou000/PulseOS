@@ -1141,29 +1141,18 @@ impl Process {
         let pages =
             memory_addr::PageIter4K::new(start_page, end_page).ok_or(AxError::BadAddress)?;
         for page in pages {
-            let result = {
+            let already_resident = {
                 let aspace = aspace_handle.read();
                 if let Ok((paddr, flags, _)) = aspace.query_vaddr(page) {
-                    if paddr.as_usize() != 0 && flags.contains(access) {
-                        None
-                    } else {
-                        Some(aspace.handle_page_fault(page, access))
-                    }
+                    paddr.as_usize() != 0 && flags.contains(access)
                 } else {
-                    Some(aspace.handle_page_fault(page, access))
+                    false
                 }
             };
-            let Some(result) = result else {
+            if already_resident {
                 continue;
-            };
-            let result = match result {
-                axmm::PageFaultResult::NeedWriteLock => {
-                    let mut aspace = aspace_handle.write();
-                    aspace.handle_page_fault_write(page, access)
-                }
-                result => result,
-            };
-            if !result.complete_after_unlock()?.unwrap_or(false) {
+            }
+            if !self.resolve_page_fault(&aspace_handle, page, access)? {
                 return Err(AxError::BadAddress);
             }
         }
@@ -1748,21 +1737,50 @@ impl Process {
 
     pub fn handle_page_fault(&self, vaddr: VirtAddr, flags: axhal::trap::PageFaultFlags) -> bool {
         let aspace_handle = self.aspace_handle();
-        let result = aspace_handle.read().handle_page_fault(vaddr, flags);
-        let result = match result {
-            axmm::PageFaultResult::NeedWriteLock => {
-                let mut aspace = aspace_handle.write();
-                aspace.handle_page_fault_write(vaddr, flags)
-            }
-            result => result,
-        };
-        match result.complete_after_unlock() {
-            Ok(Some(handled)) => handled,
-            Ok(None) => false,
+        match self.resolve_page_fault(&aspace_handle, vaddr, flags) {
+            Ok(handled) => handled,
             Err(error) => {
-                axlog::error!("page fault TLB shootdown failed: {error:?}");
+                axlog::error!("page fault resolution failed: {error:?}");
                 false
             }
+        }
+    }
+
+    fn resolve_page_fault(
+        &self,
+        aspace_handle: &Arc<RwLock<AddrSpace>>,
+        vaddr: VirtAddr,
+        flags: axhal::trap::PageFaultFlags,
+    ) -> AxResult<bool> {
+        let result = {
+            let aspace = aspace_handle.read();
+            aspace.handle_page_fault(vaddr, flags)
+        };
+        let mut outcome = result.complete_after_unlock()?;
+
+        loop {
+            outcome = match outcome {
+                axmm::PageFaultOutcome::Handled(handled) => return Ok(handled),
+                axmm::PageFaultOutcome::LoadFilePage(load) => {
+                    let mut prepared = load.prepare()?;
+                    let result = {
+                        let aspace = aspace_handle.read();
+                        aspace.handle_prepared_file_page(vaddr, flags, &mut prepared)
+                    };
+                    result.complete_after_unlock()?
+                }
+                axmm::PageFaultOutcome::RetryWithWriteLock => {
+                    let result = {
+                        let mut aspace = aspace_handle.write();
+                        aspace.handle_page_fault_write(vaddr, flags)
+                    };
+                    let outcome = result.complete_after_unlock()?;
+                    if matches!(outcome, axmm::PageFaultOutcome::RetryWithWriteLock) {
+                        return Err(AxError::BadState);
+                    }
+                    outcome
+                }
+            };
         }
     }
 

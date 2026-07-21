@@ -103,6 +103,36 @@ fn vdso_segment_flags(flags: MemRegionFlags) -> MappingFlags {
     map_flags
 }
 
+fn resolve_page_fault(
+    aspace: &mut AddrSpace,
+    page: VirtAddr,
+    flags: axhal::trap::PageFaultFlags,
+) -> AxResult<bool> {
+    let mut outcome = aspace
+        .handle_page_fault(page, flags)
+        .complete_after_unlock()?;
+    loop {
+        outcome = match outcome {
+            axmm::PageFaultOutcome::Handled(handled) => return Ok(handled),
+            axmm::PageFaultOutcome::LoadFilePage(load) => {
+                let mut prepared = load.prepare()?;
+                aspace
+                    .handle_prepared_file_page(page, flags, &mut prepared)
+                    .complete_after_unlock()?
+            }
+            axmm::PageFaultOutcome::RetryWithWriteLock => {
+                let outcome = aspace
+                    .handle_page_fault_write(page, flags)
+                    .complete_after_unlock()?;
+                if matches!(outcome, axmm::PageFaultOutcome::RetryWithWriteLock) {
+                    return Err(AxError::BadState);
+                }
+                outcome
+            }
+        };
+    }
+}
+
 pub fn prefault_range(
     aspace: &mut AddrSpace,
     start_vaddr: VirtAddr,
@@ -127,13 +157,7 @@ pub fn prefault_range(
             access_flags |= axhal::trap::PageFaultFlags::EXECUTE;
         }
 
-        let result = match aspace.handle_page_fault(page, access_flags) {
-            axmm::PageFaultResult::NeedWriteLock => {
-                aspace.handle_page_fault_write(page, access_flags)
-            }
-            result => result,
-        };
-        if !result.complete_after_unlock()?.unwrap_or(false) {
+        if !resolve_page_fault(aspace, page, access_flags)? {
             return Err(AxError::BadAddress);
         }
     }
@@ -226,13 +250,7 @@ fn write_user_region(aspace: &mut AddrSpace, start: VirtAddr, bytes: &[u8]) -> A
         .ok_or(AxError::BadAddress)?;
     for page in pages {
         let pf_flags = axhal::trap::PageFaultFlags::WRITE | axhal::trap::PageFaultFlags::USER;
-        let result = match aspace.handle_page_fault(page, pf_flags) {
-            axmm::PageFaultResult::NeedWriteLock => {
-                aspace.handle_page_fault_write(page, pf_flags)
-            }
-            result => result,
-        };
-        if !result.complete_after_unlock()?.unwrap_or(false) {
+        if !resolve_page_fault(aspace, page, pf_flags)? {
             return Err(AxError::BadAddress);
         }
     }

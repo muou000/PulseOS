@@ -21,8 +21,11 @@ use memory_addr::{MemoryAddr, PhysAddr, VirtAddr, va};
 use memory_set::MappingError;
 
 pub use self::{
-    aspace::{AddrSpace, AddrSpaceCloneResult, AddrSpaceMutation, PageFaultResult, PageTableLockManager, TlbShootdown},
-    backend::Backend,
+    aspace::{
+        AddrSpace, AddrSpaceCloneResult, AddrSpaceMutation, PageFaultOutcome, PageFaultResult,
+        PageTableLockManager, TlbShootdown,
+    },
+    backend::{Backend, FilePageLoad, FilePagePrepared},
 };
 
 static KERNEL_ASPACE: LazyInit<SpinNoIrq<AddrSpace>> = LazyInit::new();

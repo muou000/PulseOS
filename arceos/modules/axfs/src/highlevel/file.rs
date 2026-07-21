@@ -473,58 +473,6 @@ impl CachedFileShared {
         Ok(())
     }
 
-    async fn evict_lru_async(
-        &self,
-        file: &FileNode,
-    ) -> VfsResult<Option<(u32, PageCache)>> {
-        let writeback = {
-            let mut cache = self.page_cache.lock();
-            let Some(pn) = cache
-                .iter()
-                .rev()
-                .find_map(|(&pn, page)| (!page.has_user_mapping()).then_some(pn))
-            else {
-                let capacity = cache
-                    .cap()
-                    .get()
-                    .checked_add(1)
-                    .and_then(NonZeroUsize::new)
-                    .ok_or(VfsError::StorageFull)?;
-                cache.resize(capacity);
-                return Ok(None);
-            };
-            let page = cache.peek(&pn).ok_or(VfsError::Io)?;
-            if !page.dirty {
-                return Ok(cache.pop(&pn).map(|page| (pn, page)));
-            }
-
-            let page_start = pn as u64 * PAGE_SIZE as u64;
-            let len = (*self.size.lock())
-                .saturating_sub(page_start)
-                .min(PAGE_SIZE as u64) as usize;
-            let page = cache.get_mut(&pn).ok_or(VfsError::Io)?;
-            (pn, page_start, page.data()[..len].to_vec())
-        };
-
-        let (pn, page_start, data) = writeback;
-        if !data.is_empty() {
-            let written = file.write_at(&data, page_start).await?;
-            if written != data.len() {
-                return Err(VfsError::Io);
-            }
-        }
-
-        // The page stays dirty and resident until writeback succeeds. If this
-        // future is cancelled, the only copy of the dirty data is not lost.
-        let mut page = self
-            .page_cache
-            .lock()
-            .pop(&pn)
-            .ok_or(VfsError::Io)?;
-        page.dirty = false;
-        Ok(Some((pn, page)))
-    }
-
     fn flush_dirty_pages_locked(
         file_len: u64,
         file: &FileNode,
@@ -1148,24 +1096,33 @@ impl CachedFile {
             }
 
             let mut evicted_pages = Vec::new();
+            let mut cache = self.shared.page_cache.lock();
             for (page_num, page) in new_pages {
-                let cache = self.shared.page_cache.lock();
                 if cache.contains(&page_num) {
                     continue;
                 }
-                let cache_full = cache.len() == cache.cap().get();
-                drop(cache);
 
-                if cache_full
-                    && let Some(evicted) = self.shared.evict_lru_async(file).await?
-                {
-                    evicted_pages.push(evicted);
+                if cache.len() == cache.cap().get() {
+                    let clean_evictable = cache.iter().rev().find_map(|(&pn, cached)| {
+                        (!cached.has_user_mapping() && !cached.dirty).then_some(pn)
+                    });
+                    if let Some(evict_pn) = clean_evictable {
+                        if let Some(evicted) = cache.pop(&evict_pn) {
+                            evicted_pages.push((evict_pn, evicted));
+                        }
+                    } else {
+                        let capacity = cache
+                            .cap()
+                            .get()
+                            .checked_add(1)
+                            .and_then(NonZeroUsize::new)
+                            .ok_or(VfsError::StorageFull)?;
+                        cache.resize(capacity);
+                    }
                 }
-                let mut cache = self.shared.page_cache.lock();
-                if !cache.contains(&page_num) {
-                    cache.put(page_num, page);
-                }
+                cache.put(page_num, page);
             }
+            drop(cache);
             drop(io_guard);
 
             for (evicted_pn, page) in evicted_pages {
@@ -1372,15 +1329,32 @@ impl CachedFile {
         Ok(())
     }
 
+    /// Returns whether two handles refer to the same shared page cache.
+    pub fn shares_page_cache_with(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.shared, &other.shared)
+    }
+
     pub fn location(&self) -> &Location {
         &self.inner
     }
 
-    /// Returns the physical address of the page at the given page index.
-    ///
-    /// If the page is not in the cache, it will be read from the file.
-    pub fn get_shared_page_paddr(&self, pn: u32, may_write: bool) -> VfsResult<PhysAddr> {
-        self.with_page_or_insert(pn, |page, _| {
+    /// Ensures that a page is resident without retaining any page-cache lock
+    /// while the backing I/O future is pending.
+    pub fn ensure_page_resident(&self, pn: u32) -> VfsResult<()> {
+        let file = self.inner.entry().as_file()?;
+        axtask::future::block_on(self.ensure_pages_async(file, pn, 1))
+    }
+
+    /// Pins a resident page for a user mapping without performing I/O.
+    pub fn try_pin_shared_page_paddr(
+        &self,
+        pn: u32,
+        may_write: bool,
+    ) -> VfsResult<Option<PhysAddr>> {
+        self.with_page(pn, |page| {
+            let Some(page) = page else {
+                return Ok(None);
+            };
             let paddr = page.paddr();
             if !axalloc::frame_table().contains(paddr) {
                 return Err(VfsError::BadState);
@@ -1393,8 +1367,17 @@ impl CachedFile {
                 axalloc::frame_table().mark_used(paddr);
             }
             axalloc::frame_table().inc_ref(paddr);
-            Ok(paddr)
+            Ok(Some(paddr))
         })
+    }
+
+    /// Returns the physical address of the page at the given page index.
+    ///
+    /// If the page is not in the cache, it will be read from the file.
+    pub fn get_shared_page_paddr(&self, pn: u32, may_write: bool) -> VfsResult<PhysAddr> {
+        self.ensure_page_resident(pn)?;
+        self.try_pin_shared_page_paddr(pn, may_write)?
+            .ok_or(VfsError::BadState)
     }
 
     /// Returns a resident page's physical address without adding a mapping pin.

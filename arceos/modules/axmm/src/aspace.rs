@@ -13,7 +13,7 @@ use memory_addr::{
 use memory_set::{MemoryArea, MemorySet};
 
 use crate::{
-    backend::{Backend, DeferredReclaims},
+    backend::{Backend, DeferredReclaims, FilePageLoad, FilePagePrepared},
     mapping_err_to_ax_err,
 };
 
@@ -130,22 +130,28 @@ pub enum PageFaultResult {
     },
     /// The page fault requires the write lock of the address space (stack grows down).
     NeedWriteLock,
+    /// A file-backed page must be loaded after releasing the address-space lock.
+    NeedFilePage(FilePageLoad),
+}
+
+#[derive(Debug)]
+pub enum PageFaultOutcome {
+    Handled(bool),
+    RetryWithWriteLock,
+    LoadFilePage(FilePageLoad),
 }
 
 impl PageFaultResult {
-    /// Returns the handling result, completing any deferred TLB shootdown first.
-    ///
-    /// This must only be called after the lock used to access the address space
-    /// has been released. `None` means the fault needs to be retried with the
-    /// address-space write lock.
-    pub fn complete_after_unlock(self) -> AxResult<Option<bool>> {
+    /// Resolves deferred work after the address-space lock has been released.
+    pub fn complete_after_unlock(self) -> AxResult<PageFaultOutcome> {
         match self {
-            Self::Handled(success) => Ok(Some(success)),
+            Self::Handled(success) => Ok(PageFaultOutcome::Handled(success)),
             Self::HandledWithShootdown { handled, shootdown } => {
                 shootdown.complete_after_unlock()?;
-                Ok(Some(handled))
+                Ok(PageFaultOutcome::Handled(handled))
             }
-            Self::NeedWriteLock => Ok(None),
+            Self::NeedWriteLock => Ok(PageFaultOutcome::RetryWithWriteLock),
+            Self::NeedFilePage(load) => Ok(PageFaultOutcome::LoadFilePage(load)),
         }
     }
 }
@@ -913,6 +919,13 @@ impl AddrSpace {
                 pte_before
             );
             if orig_flags.contains(access_flags) {
+                if let Some(load) = area.backend().page_fault_load_request(
+                    vaddr,
+                    orig_flags,
+                    &self.pt,
+                ) {
+                    return PageFaultResult::NeedFilePage(load);
+                }
                 let mut reclaim = DeferredReclaims::default();
                 let handled = area.backend().handle_page_fault(
                     vaddr,
@@ -929,6 +942,14 @@ impl AddrSpace {
                     .ok()
                     .map(|(frame, flags, _)| (frame, flags));
                 if !handled {
+                    if let Some(load) = area.backend().page_fault_load_request(
+                        vaddr,
+                        orig_flags,
+                        &self.pt,
+                    ) {
+                        reclaim.reclaim();
+                        return PageFaultResult::NeedFilePage(load);
+                    }
                     error!(
                         "handle_page_fault: reject=backend_not_handled vaddr={:#x} page={:#x} \
                          access={:?} area_flags={:?} backend={} pte_before={:?} pte_after={:?}",
@@ -982,6 +1003,49 @@ impl AddrSpace {
             );
         }
         PageFaultResult::Handled(false)
+    }
+
+    /// Installs a file page that was loaded and pinned without holding the
+    /// address-space lock.
+    pub fn handle_prepared_file_page(
+        &self,
+        vaddr: VirtAddr,
+        access_flags: PageFaultFlags,
+        prepared: &mut FilePagePrepared,
+    ) -> PageFaultResult {
+        let page = vaddr.align_down_4k();
+        if !self.va_range.contains(vaddr) {
+            return PageFaultResult::Handled(false);
+        }
+
+        if self
+            .pt
+            .lock_for_addr(page)
+            .query(page)
+            .is_ok_and(|(frame, _, _)| frame.as_usize() != 0)
+        {
+            return self.handle_page_fault(vaddr, access_flags);
+        }
+
+        let Some(area) = self.areas.find(vaddr) else {
+            return self.handle_page_fault(vaddr, access_flags);
+        };
+        let orig_flags = area.flags();
+        if !orig_flags.contains(access_flags) {
+            return PageFaultResult::Handled(false);
+        }
+
+        if area.backend().handle_prepared_file_page(
+            vaddr,
+            orig_flags,
+            &self.pt,
+            access_flags,
+            prepared,
+        ) {
+            PageFaultResult::Handled(true)
+        } else {
+            self.handle_page_fault(vaddr, access_flags)
+        }
     }
 
     /// Handles a page fault that requires stack growth (write lock held).
