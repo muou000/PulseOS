@@ -146,6 +146,10 @@ impl FilePagePrepared {
 }
 
 impl FileMapping {
+    pub(crate) fn update_address(&mut self, new_start: VirtAddr, new_size: usize) {
+        self.start = new_start;
+        self.file_bytes = new_size;
+    }
 
     pub(crate) fn permits(&self, flags: MappingFlags) -> bool {
         if flags.contains(MappingFlags::READ) && !self.file_flags.contains(FileFlags::READ) {

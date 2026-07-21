@@ -261,6 +261,7 @@ fn syscall_dispatcher(
 
         Sysno::brk => impls::sys_brk(args[0]),
         Sysno::mmap => impls::sys_mmap(args[0], args[1], args[2], args[3], args[4] as i32, args[5]),
+        Sysno::mremap => impls::sys_mremap(args[0], args[1], args[2], args[3], args[4]),
         Sysno::munmap => impls::sys_munmap(args[0], args[1]),
         Sysno::mprotect => impls::sys_mprotect(args[0], args[1], args[2]),
         Sysno::mlock => impls::sys_mlock(args[0], args[1]),

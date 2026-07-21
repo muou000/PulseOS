@@ -203,6 +203,28 @@ impl MappingBackend for Backend {
 }
 
 impl Backend {
+    pub(crate) fn update_address(
+        &mut self,
+        old_start: VirtAddr,
+        new_start: VirtAddr,
+        old_size: usize,
+        new_size: usize,
+    ) {
+        match self {
+            Self::File(mapping) => {
+                mapping.update_address(new_start, new_size);
+            }
+            Self::Cow(cow) => {
+                cow.inner.update_address(old_start, new_start, old_size, new_size);
+            }
+            Self::Linear { pa_va_offset } => {
+                let diff = new_start.as_usize() as isize - old_start.as_usize() as isize;
+                *pa_va_offset = (*pa_va_offset as isize + diff) as usize;
+            }
+            _ => {}
+        }
+    }
+
     pub fn is_grows_down(&self) -> bool {
         match self {
             Self::Alloc { grows_down, .. } => *grows_down,
