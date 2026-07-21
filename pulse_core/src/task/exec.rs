@@ -307,6 +307,7 @@ impl Process {
             let mut fd_table = binding.write();
             fd_table.take_cloexec_on_exec()
         };
+        self.release_posix_locks_for_entries(&cloexec_entries);
         drop(cloexec_entries);
         self.heap_top.store(USER_HEAP_BASE + USER_HEAP_SIZE, Ordering::Release);
         self.stack_top.store(load_info.user_sp, Ordering::Release);
