@@ -10,7 +10,7 @@ use axhal::{
 use memory_addr::{
     MemoryAddr, PAGE_SIZE_4K, PageIter4K, VirtAddr, VirtAddrRange, is_aligned_4k,
 };
-use memory_set::{MemoryArea, MemorySet};
+use memory_set::{MappingBackend, MemoryArea, MemorySet};
 
 use crate::{
     backend::{Backend, DeferredReclaims, FilePageLoad, FilePagePrepared},
@@ -853,6 +853,208 @@ impl AddrSpace {
             return true;
         }
         false
+    }
+
+    /// Remap a virtual memory area, optionally moving it or resizing it.
+    pub fn mremap(
+        &mut self,
+        old_addr: VirtAddr,
+        old_size: usize,
+        new_size: usize,
+        flags: usize,
+        new_addr: Option<VirtAddr>,
+    ) -> AddrSpaceMutation<VirtAddr> {
+        let mut reclaim = DeferredReclaims::default();
+        let mut tlb_shootdown = TlbShootdown::without_reclaims(self.asid);
+        let mut attempted_shootdown = false;
+
+        const MREMAP_MAYMOVE: usize = 1;
+        const MREMAP_FIXED: usize = 2;
+
+        let result = (|| -> AxResult<VirtAddr> {
+            if !old_addr.is_aligned_4k() || !is_aligned_4k(old_size) || !is_aligned_4k(new_size) {
+                return Err(AxError::InvalidInput);
+            }
+            if old_size == 0 || new_size == 0 {
+                return Err(AxError::InvalidInput);
+            }
+
+            // Find the area containing [old_addr, old_addr + old_size)
+            let old_area_start = self.areas.iter().find(|area| {
+                area.start() <= old_addr && area.end() >= old_addr + old_size
+            }).map(|area| area.start()).ok_or(AxError::BadAddress)?;
+
+            // Extract area attributes
+            let (old_area_start_val, old_area_end, old_flags, old_backend) = {
+                let area = self.areas.find(old_area_start).unwrap();
+                (area.start(), area.end(), area.flags(), area.backend().clone())
+            };
+
+            // Remove the old area to perform splitting and modifications
+            let old_area = self.areas.remove(old_area_start).unwrap();
+
+            // Re-insert left split if any
+            if old_addr > old_area_start_val {
+                let left_size = old_addr.as_usize() - old_area_start_val.as_usize();
+                let left_area = MemoryArea::new(old_area_start_val, left_size, old_flags, old_backend.clone());
+                self.areas.insert(old_area_start_val, left_area);
+            }
+
+            // Re-insert right split if any
+            if old_addr + old_size < old_area_end {
+                let right_start = old_addr + old_size;
+                let right_size = old_area_end.as_usize() - right_start.as_usize();
+                let right_area = MemoryArea::new(right_start, right_size, old_flags, old_backend.clone());
+                self.areas.insert(right_start, right_area);
+            }
+
+            // The target area for remapping
+            let mut middle_area = MemoryArea::new(old_addr, old_size, old_flags, old_backend);
+
+            // Check if we need to move
+            let mut should_move = false;
+            let mut target_addr = old_addr;
+
+            if let Some(fixed_addr) = new_addr {
+                if (flags & MREMAP_FIXED) != 0 {
+                    if fixed_addr != old_addr {
+                        should_move = true;
+                        target_addr = fixed_addr;
+                    }
+                }
+            }
+
+            if new_size > old_size && !should_move {
+                // Check if we can expand in-place
+                let has_right_neighbor = old_addr + old_size < old_area_end;
+                let has_overlap = self.has_overlap(old_addr + old_size, new_size - old_size);
+                if has_right_neighbor || has_overlap {
+                    if (flags & MREMAP_MAYMOVE) != 0 {
+                        should_move = true;
+                    } else {
+                        // Re-insert middle_area before returning error
+                        self.areas.insert(old_addr, middle_area);
+                        return Err(AxError::NoMemory);
+                    }
+                }
+            }
+
+            if should_move {
+                if (flags & MREMAP_FIXED) != 0 {
+                    let dest_addr = new_addr.ok_or(AxError::InvalidInput)?;
+                    if !dest_addr.is_aligned_4k() {
+                        self.areas.insert(old_addr, middle_area);
+                        return Err(AxError::InvalidInput);
+                    }
+                    if dest_addr == old_addr {
+                        self.areas.insert(old_addr, middle_area);
+                        return Err(AxError::InvalidInput);
+                    }
+                    // Unmap any overlapping regions at destination
+                    let (unmap_res, shootdown) = self.unmap(dest_addr, new_size).into_parts();
+                    if let Some(sd) = shootdown {
+                        tlb_shootdown.merge(sd);
+                    }
+                    attempted_shootdown = true;
+                    if let Err(e) = unmap_res {
+                        self.areas.insert(old_addr, middle_area);
+                        return Err(e);
+                    }
+                    target_addr = dest_addr;
+                } else {
+                    // MREMAP_MAYMOVE: find a free area
+                    let limit = self.va_range;
+                    target_addr = match self.find_free_area(VirtAddr::from(old_addr), new_size, limit) {
+                        Some(addr) => addr,
+                        None => {
+                            self.areas.insert(old_addr, middle_area);
+                            return Err(AxError::NoMemory);
+                        }
+                    };
+                }
+
+                // Move physical pages: unmap from old address, but keep frames
+                let mut phys_pages = alloc::vec::Vec::new();
+                for page in PageIter4K::new(old_addr, old_addr + old_size).unwrap() {
+                    let rel_offset = page.as_usize() - old_addr.as_usize();
+                    if let Ok((frame, page_size, tlb)) = self.pt.get_mut().unmap(page) {
+                        if page_size.is_huge() {
+                            // Re-insert middle_area and rollback (though this shouldn't happen for user pages)
+                            self.areas.insert(old_addr, middle_area);
+                            return Err(AxError::InvalidInput);
+                        }
+                        if frame.as_usize() != 0 {
+                            phys_pages.push((rel_offset, frame));
+                        }
+                        tlb.ignore(); // we will flush all together
+                    }
+                }
+                tlb_shootdown.merge(TlbShootdown::without_reclaims(self.asid));
+                attempted_shootdown = true;
+
+                // Update backend address
+                let mut bk = middle_area.backend().clone();
+                bk.update_address(old_addr, target_addr, old_size, new_size);
+                
+                // Create new MemoryArea at target
+                let mut new_area = MemoryArea::new(target_addr, new_size, old_flags, bk);
+                self.areas.insert(target_addr, new_area);
+
+                // Map physical pages at new address
+                for (rel_offset, frame) in phys_pages {
+                    let new_page = target_addr + rel_offset;
+                    if let Err(_) = self.pt.get_mut().map(new_page, frame, PageSize::Size4K, old_flags) {
+                        return Err(AxError::NoMemory);
+                    }
+                }
+
+                // Map any expanded space
+                if new_size > old_size {
+                    let expand_size = new_size - old_size;
+                    let new_area_ref = self.areas.find(target_addr).unwrap();
+                    new_area_ref.backend().map(target_addr + old_size, expand_size, old_flags, &mut self.pt);
+                }
+
+                Ok(target_addr)
+            } else {
+                // In-place changes
+                if new_size < old_size {
+                    // In-place shrink: unmap tail
+                    let cut_start = old_addr + new_size;
+                    let cut_size = old_size - new_size;
+                    middle_area.backend().unmap(cut_start, cut_size, &mut self.pt, &mut reclaim);
+                    middle_area.set_end(old_addr + new_size);
+                    self.areas.insert(old_addr, middle_area);
+                    attempted_shootdown = true;
+                    Ok(old_addr)
+                } else if new_size > old_size {
+                    // In-place expand
+                    let mut bk = middle_area.backend().clone();
+                    bk.update_address(old_addr, old_addr, old_size, new_size);
+                    middle_area.set_backend(bk);
+                    middle_area.set_end(old_addr + new_size);
+
+                    let expand_size = new_size - old_size;
+                    middle_area.backend().map(old_addr + old_size, expand_size, old_flags, &mut self.pt);
+                    self.areas.insert(old_addr, middle_area);
+                    Ok(old_addr)
+                } else {
+                    // Size unchanged, just return old_addr
+                    self.areas.insert(old_addr, middle_area);
+                    Ok(old_addr)
+                }
+            }
+        })();
+
+        let shootdown = if attempted_shootdown || !reclaim.is_empty() {
+            tlb_shootdown.merge(TlbShootdown::new(self.asid, reclaim));
+            Some(tlb_shootdown)
+        } else {
+            reclaim.reclaim();
+            None
+        };
+
+        AddrSpaceMutation::new(result, shootdown)
     }
 
     /// Visits all mapped virtual memory areas tracked by this address space.

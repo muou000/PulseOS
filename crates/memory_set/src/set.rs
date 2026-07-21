@@ -61,6 +61,16 @@ impl<B: MappingBackend> MemorySet<B> {
         self.areas.get_mut(&start)
     }
 
+    /// Removes and returns the memory area starting at the given address, without modifying the page table.
+    pub fn remove(&mut self, start: B::Addr) -> Option<MemoryArea<B>> {
+        self.areas.remove(&start)
+    }
+
+    /// Inserts a memory area directly, without modifying the page table.
+    pub fn insert(&mut self, start: B::Addr, area: MemoryArea<B>) {
+        assert!(self.areas.insert(start, area).is_none());
+    }
+
     /// Finds a free area that can accommodate the given size.
     ///
     /// The search starts from the given `hint` address, and the area should be

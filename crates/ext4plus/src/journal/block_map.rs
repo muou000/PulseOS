@@ -13,7 +13,7 @@ use crate::error::{CorruptKind, Ext4Error, IncompatibleKind};
 use crate::inode::Inode;
 use crate::iters::file_blocks::FileBlocks;
 #[cfg(not(feature = "sync"))]
-use crate::iters::{AsyncIterator, AsyncSkip};
+use crate::iters::AsyncIterator;
 use crate::journal::block_header::{JournalBlockHeader, JournalBlockType};
 use crate::journal::commit_block::validate_commit_block_checksum;
 use crate::journal::descriptor_block::{

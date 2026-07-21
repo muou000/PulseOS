@@ -478,6 +478,106 @@ pub fn sys_munmap(addr: usize, length: usize) -> isize {
     }
 }
 
+pub fn sys_mremap(
+    old_address: usize,
+    old_size: usize,
+    new_size: usize,
+    flags: usize,
+    new_address: usize,
+) -> isize {
+    axlog::debug!(
+        "sys_mremap: old_address={:#x}, old_size={:#x}, new_size={:#x}, flags={:#x}, new_address={:#x}",
+        old_address,
+        old_size,
+        new_size,
+        flags,
+        new_address
+    );
+
+    let proc = match pulse_core::task::current_process() {
+        Ok(proc) => proc,
+        Err(e) => return -e.code() as isize,
+    };
+
+    const MREMAP_MAYMOVE: usize = 1;
+    const MREMAP_FIXED: usize = 2;
+    const MREMAP_DONTUNMAP: usize = 4;
+
+    if (flags & MREMAP_FIXED) != 0 && (flags & MREMAP_MAYMOVE) == 0 {
+        return -LinuxError::EINVAL.code() as isize;
+    }
+    if (flags & MREMAP_DONTUNMAP) != 0 && (flags & MREMAP_MAYMOVE) == 0 {
+        return -LinuxError::EINVAL.code() as isize;
+    }
+    if (flags & MREMAP_DONTUNMAP) != 0 && old_size != new_size {
+        return -LinuxError::EINVAL.code() as isize;
+    }
+    if (flags & MREMAP_FIXED) != 0 && old_address != new_address {
+        let aligned_old_size = (old_size + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
+        let aligned_new_size = (new_size + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
+        let overlaps = !(new_address + aligned_new_size <= old_address || new_address >= old_address + aligned_old_size);
+        if overlaps {
+            return -LinuxError::EINVAL.code() as isize;
+        }
+    }
+    if (flags & MREMAP_DONTUNMAP) != 0 {
+        return -LinuxError::ENOSYS.code() as isize;
+    }
+    let supported_flags = MREMAP_MAYMOVE | MREMAP_FIXED | MREMAP_DONTUNMAP;
+    if (flags & !supported_flags) != 0 {
+        return -LinuxError::EINVAL.code() as isize;
+    }
+
+    if old_address & (PAGE_SIZE - 1) != 0 {
+        return -LinuxError::EINVAL.code() as isize;
+    }
+    if (flags & MREMAP_FIXED) != 0 && new_address & (PAGE_SIZE - 1) != 0 {
+        return -LinuxError::EINVAL.code() as isize;
+    }
+    if old_size == 0 || new_size == 0 {
+        return -LinuxError::EINVAL.code() as isize;
+    }
+
+    let aligned_old_size = (old_size + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
+    let aligned_new_size = (new_size + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
+
+    if !proc.is_user_range(old_address, aligned_old_size) {
+        return -LinuxError::EFAULT.code() as isize;
+    }
+    if (flags & MREMAP_FIXED) != 0 && !proc.is_user_range(new_address, aligned_new_size) {
+        return -LinuxError::EFAULT.code() as isize;
+    }
+
+    let aspace_handle = proc.aspace_handle();
+    let mut aspace = aspace_handle.write();
+
+    let new_addr_opt = if (flags & MREMAP_FIXED) != 0 {
+        Some(VirtAddr::from(new_address))
+    } else {
+        None
+    };
+
+    let mutation = aspace.mremap(
+        VirtAddr::from(old_address),
+        aligned_old_size,
+        aligned_new_size,
+        flags,
+        new_addr_opt,
+    );
+    drop(aspace);
+
+    match mutation.complete_after_unlock() {
+        Ok(addr) => {
+            let _ = proc.memlock_unlock_range(old_address, aligned_old_size);
+            if let Err(e) = proc.maybe_lock_future_range(addr.as_usize(), aligned_new_size) {
+                axlog::warn!("sys_mremap: maybe_lock_future_range failed: {:?}", e);
+            }
+            addr.as_usize() as isize
+        }
+        Err(e) => -LinuxError::from(e).code() as isize,
+    }
+}
+
 pub fn sys_mlock(addr: usize, len: usize) -> isize {
     let proc = match pulse_core::task::current_process() {
         Ok(proc) => proc,
