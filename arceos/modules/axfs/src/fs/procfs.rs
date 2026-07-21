@@ -32,7 +32,8 @@ const TAINTED_INO: u64 = 9;
 const CORE_PATTERN_INO: u64 = 10;
 const INIT_SYM_INO: u64 = 11;
 const CPUINFO_INO: u64 = 12;
-const NEXT_DYNAMIC_INO: u64 = CPUINFO_INO + 1;
+const UPTIME_INO: u64 = 13;
+const NEXT_DYNAMIC_INO: u64 = UPTIME_INO + 1;
 
 pub const PID_INODE_START: u64 = 0x10_0000_0000;
 pub const PID_INODE_SHIFT: u32 = 24;
@@ -140,6 +141,7 @@ enum ProcLiveFileKind {
     Tainted,
     CorePattern,
     Cpuinfo,
+    Uptime,
     PidChildren(u64),
     ThreadStatus(u64, u64),
     ThreadComm(u64, u64),
@@ -359,6 +361,11 @@ impl ProcFilesystem {
             ProcLiveFileKind::Cpuinfo,
             NodePermission::from_bits_truncate(0o444),
         );
+        let uptime = new_live_file(
+            UPTIME_INO,
+            ProcLiveFileKind::Uptime,
+            NodePermission::from_bits_truncate(0o444),
+        );
 
         root.metadata.lock().nlink = 3;
         sys_dir.metadata.lock().nlink = 3;
@@ -378,6 +385,7 @@ impl ProcFilesystem {
             inodes.insert(TAINTED_INO, tainted);
             inodes.insert(CORE_PATTERN_INO, core_pattern);
             inodes.insert(CPUINFO_INO, cpuinfo);
+            inodes.insert(UPTIME_INO, uptime);
         }
 
         {
@@ -389,6 +397,7 @@ impl ProcFilesystem {
             entries.insert("self".into(), SELF_INO);
             entries.insert("1".into(), INIT_SYM_INO);
             entries.insert("sys".into(), SYS_INO);
+            entries.insert("uptime".into(), UPTIME_INO);
         }
 
         {
@@ -817,6 +826,12 @@ fn render_proc_file(fs: &ProcFilesystem, kind: ProcLiveFileKind) -> String {
         }
         ProcLiveFileKind::Cpuinfo => {
             "processor\t: 0\nmodel name\t: QEMU Virtual CPU version 2.5+\n".to_owned()
+        }
+        ProcLiveFileKind::Uptime => {
+            let mono = axhal::time::monotonic_time();
+            let secs = mono.as_secs();
+            let centis = mono.subsec_millis() / 10;
+            format!("{}.{:02} 0.00\n", secs, centis)
         }
         ProcLiveFileKind::PidChildren(pid) => {
             if let Some(provider) = PROCESS_PROVIDER.get() {
