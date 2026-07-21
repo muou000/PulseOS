@@ -1,9 +1,15 @@
 use axerrno::LinuxError;
+use axio::SeekFrom;
 use linux_raw_sys::general::{
-    F_DUPFD, F_DUPFD_CLOEXEC, F_GETFD, F_GETFL, F_GETPIPE_SZ, F_SETFD, F_SETFL, F_SETPIPE_SZ,
-    FD_CLOEXEC, O_CLOEXEC, O_NONBLOCK, O_RDONLY, O_WRONLY, O_RDWR,
+    F_DUPFD, F_DUPFD_CLOEXEC, F_GETFD, F_GETFL, F_GETPIPE_SZ, F_RDLCK, F_SETFD, F_SETFL, F_SETLK,
+    F_SETPIPE_SZ, F_UNLCK, F_WRLCK, FD_CLOEXEC, O_CLOEXEC, O_NONBLOCK, O_RDONLY, O_RDWR, O_WRONLY,
+    SEEK_CUR, SEEK_END, SEEK_SET, flock,
 };
-use pulse_core::fd_table::{FdEntry, FdFlags};
+use pulse_core::{
+    fd_table::{FdEntry, FdFlags},
+    record_lock::RecordLockType,
+    task::uaccess,
+};
 
 use crate::impls::{
     fs::common::{
@@ -125,6 +131,10 @@ pub fn sys_fcntl(fd: usize, cmd: usize, arg: usize) -> isize {
                 Err(e) => -e.code() as isize,
             }
         }
+        F_SETLK => match sys_fcntl_setlk(fd, arg) {
+            Ok(ret) => ret,
+            Err(e) => -e.code() as isize,
+        },
         F_SETPIPE_SZ => match get_fd_entry(fd) {
             Ok(entry) => match entry.object.set_pipe_size(arg) {
                 Ok(new_size) => new_size as isize,
@@ -143,6 +153,55 @@ pub fn sys_fcntl(fd: usize, cmd: usize, arg: usize) -> isize {
             axlog::warn!("unsupported fcntl parameters: cmd {}", cmd);
             0
         }
+    }
+}
+
+fn sys_fcntl_setlk(fd: usize, arg: usize) -> Result<isize, LinuxError> {
+    let entry = get_fd_entry(fd)?;
+    if entry.flags.contains(FdFlags::PATH) {
+        return Err(LinuxError::EBADF);
+    }
+
+    let lock: flock = with_process(|process| uaccess::read_user_plain(process, arg))?
+        .map_err(|e| LinuxError::from(e.canonicalize()))?;
+    let base = match lock.l_whence as u32 {
+        SEEK_SET => 0,
+        SEEK_CUR => i64::try_from(entry.object.seek(SeekFrom::Current(0))?)
+            .map_err(|_| LinuxError::EINVAL)?,
+        SEEK_END => {
+            let size = entry.object.stat()?.st_size;
+            if size < 0 {
+                return Err(LinuxError::EINVAL);
+            }
+            size as i64
+        }
+        _ => return Err(LinuxError::EINVAL),
+    };
+    let (start, end) = pulse_core::record_lock::resolve_range(base, lock.l_start, lock.l_len)?;
+    let owner = with_process(|process| process.pid())?;
+    let target = pulse_core::flock::get_lock_target(&entry.object);
+
+    match lock.l_type as u32 {
+        F_UNLCK => pulse_core::record_lock::unlock_posix_lock(owner, target, start, end),
+        F_RDLCK => {
+            if !entry.object.is_read_open() {
+                return Err(LinuxError::EBADF);
+            }
+            pulse_core::record_lock::set_posix_lock(owner, target, start, end, RecordLockType::Read)
+        }
+        F_WRLCK => {
+            if !entry.object.is_write_open() {
+                return Err(LinuxError::EBADF);
+            }
+            pulse_core::record_lock::set_posix_lock(
+                owner,
+                target,
+                start,
+                end,
+                RecordLockType::Write,
+            )
+        }
+        _ => Err(LinuxError::EINVAL),
     }
 }
 

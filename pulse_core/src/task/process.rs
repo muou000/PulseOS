@@ -1289,14 +1289,37 @@ impl Process {
         if fd >= limit {
             return Err(axerrno::LinuxError::EBADF);
         }
-        self.fd_table().write().insert_at(fd, entry)
+        let replaced = {
+            let binding = self.fd_table();
+            let mut table = binding.write();
+            let replaced = table.get(fd).cloned();
+            table.insert_at(fd, entry)?;
+            replaced
+        };
+        if let Some(entry) = replaced {
+            self.release_posix_locks_for_entry(&entry);
+        }
+        Ok(())
     }
 
     pub fn remove_fd_entry(
         &self,
         fd: usize,
     ) -> Result<crate::fd_table::FdEntry, axerrno::LinuxError> {
-        self.fd_table().write().remove_or_err(fd)
+        let entry = self.fd_table().write().remove_or_err(fd)?;
+        self.release_posix_locks_for_entry(&entry);
+        Ok(entry)
+    }
+
+    fn release_posix_locks_for_entry(&self, entry: &crate::fd_table::FdEntry) {
+        let target = crate::flock::get_lock_target(&entry.object);
+        crate::record_lock::release_posix_owner_target(self.pid(), target);
+    }
+
+    pub(super) fn release_posix_locks_for_entries(&self, entries: &[crate::fd_table::FdEntry]) {
+        for entry in entries {
+            self.release_posix_locks_for_entry(entry);
+        }
     }
 
     pub fn set_fd_cloexec(&self, fd: usize, cloexec: bool) -> Result<(), axerrno::LinuxError> {
@@ -1808,6 +1831,7 @@ impl Process {
     }
 
     pub fn close_all_files(&self) {
+        crate::record_lock::release_posix_owner(self.pid());
         let _entries = {
             let binding = self.fd_table();
             let mut table = binding.write();
