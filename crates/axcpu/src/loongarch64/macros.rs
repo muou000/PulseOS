@@ -140,46 +140,46 @@ macro_rules! include_fp_asm_macros {
 
         // LoongArch64 specific floating point macros
         .macro PUSH_POP_FLOAT_REGS, op, base_reg
-            \op $f0,  \base_reg, 0*8
-            \op $f1,  \base_reg, 1*8
-            \op $f2,  \base_reg, 2*8
-            \op $f3,  \base_reg, 3*8
-            \op $f4,  \base_reg, 4*8
-            \op $f5,  \base_reg, 5*8
-            \op $f6,  \base_reg, 6*8
-            \op $f7,  \base_reg, 7*8
-            \op $f8,  \base_reg, 8*8
-            \op $f9,  \base_reg, 9*8
-            \op $f10, \base_reg, 10*8
-            \op $f11, \base_reg, 11*8
-            \op $f12, \base_reg, 12*8
-            \op $f13, \base_reg, 13*8
-            \op $f14, \base_reg, 14*8
-            \op $f15, \base_reg, 15*8
-            \op $f16, \base_reg, 16*8
-            \op $f17, \base_reg, 17*8
-            \op $f18, \base_reg, 18*8
-            \op $f19, \base_reg, 19*8
-            \op $f20, \base_reg, 20*8
-            \op $f21, \base_reg, 21*8
-            \op $f22, \base_reg, 22*8
-            \op $f23, \base_reg, 23*8
-            \op $f24, \base_reg, 24*8
-            \op $f25, \base_reg, 25*8
-            \op $f26, \base_reg, 26*8
-            \op $f27, \base_reg, 27*8
-            \op $f28, \base_reg, 28*8
-            \op $f29, \base_reg, 29*8
-            \op $f30, \base_reg, 30*8
-            \op $f31, \base_reg, 31*8
+            \op $vr0,  \base_reg, 0*16
+            \op $vr1,  \base_reg, 1*16
+            \op $vr2,  \base_reg, 2*16
+            \op $vr3,  \base_reg, 3*16
+            \op $vr4,  \base_reg, 4*16
+            \op $vr5,  \base_reg, 5*16
+            \op $vr6,  \base_reg, 6*16
+            \op $vr7,  \base_reg, 7*16
+            \op $vr8,  \base_reg, 8*16
+            \op $vr9,  \base_reg, 9*16
+            \op $vr10, \base_reg, 10*16
+            \op $vr11, \base_reg, 11*16
+            \op $vr12, \base_reg, 12*16
+            \op $vr13, \base_reg, 13*16
+            \op $vr14, \base_reg, 14*16
+            \op $vr15, \base_reg, 15*16
+            \op $vr16, \base_reg, 16*16
+            \op $vr17, \base_reg, 17*16
+            \op $vr18, \base_reg, 18*16
+            \op $vr19, \base_reg, 19*16
+            \op $vr20, \base_reg, 20*16
+            \op $vr21, \base_reg, 21*16
+            \op $vr22, \base_reg, 22*16
+            \op $vr23, \base_reg, 23*16
+            \op $vr24, \base_reg, 24*16
+            \op $vr25, \base_reg, 25*16
+            \op $vr26, \base_reg, 26*16
+            \op $vr27, \base_reg, 27*16
+            \op $vr28, \base_reg, 28*16
+            \op $vr29, \base_reg, 29*16
+            \op $vr30, \base_reg, 30*16
+            \op $vr31, \base_reg, 31*16
         .endm
 
         .macro SAVE_FP, base_reg
-            PUSH_POP_FLOAT_REGS fst.d, \base_reg
+            PUSH_POP_FLOAT_REGS vst, \base_reg
         .endm
 
         .macro RESTORE_FP, base_reg
-            PUSH_POP_FLOAT_REGS fld.d, \base_reg
+            PUSH_POP_FLOAT_REGS vld, \base_reg
         .endm
 
         .endif"#
