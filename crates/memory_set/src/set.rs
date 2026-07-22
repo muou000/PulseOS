@@ -302,21 +302,12 @@ impl<B: MappingBackend> MemorySet<B> {
         page_table: &mut B::PageTable,
     ) -> MappingResult {
         let end = start.checked_add(size).ok_or(MappingError::InvalidParam)?;
+        let range = AddrRange::new(start, end);
         let mut to_insert = Vec::new();
         let mut protect_error = None;
-        for (&area_start, area) in self.areas.iter_mut() {
+        for area in self.iter_overlapping_mut(range) {
+            let area_start = area.start();
             let area_end = area.end();
-
-            if area_start >= end {
-                // [ prot ]
-                //          [ area ]
-                break;
-            }
-            if area_end <= start {
-                //          [ prot ]
-                // [ area ]
-                continue;
-            }
             let Some(new_flags) = update_flags(area.flags()) else {
                 continue;
             };
