@@ -462,9 +462,14 @@ pub fn sys_munmap(addr: usize, length: usize) -> isize {
         return -LinuxError::EINVAL.code() as isize;
     }
 
+    let preparation = axmm::AddrSpaceUnmapPreparation::new(aligned_length);
     let aspace_handle = proc.aspace_handle();
     let mut aspace = aspace_handle.write();
-    let mutation = aspace.unmap(VirtAddr::from(aligned_addr), aligned_length);
+    let mutation = aspace.unmap_prepared(
+        VirtAddr::from(aligned_addr),
+        aligned_length,
+        preparation,
+    );
     drop(aspace);
     match mutation.complete_after_unlock() {
         Ok(_) => {

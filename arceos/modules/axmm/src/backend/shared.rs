@@ -64,7 +64,7 @@ impl Backend {
 
     pub(crate) fn unmap_shared(start_va: VirtAddr, size: usize, pt: &mut PageTable) -> bool {
         debug!("unmap_shared: [{:#x}, {:#x})", start_va, start_va + size);
-        pt.unmap_region(start_va, size, true)
+        pt.unmap_region(start_va, size, false)
             .map(|tlb| tlb.ignore())
             .is_ok()
     }

@@ -39,8 +39,8 @@ impl Backend {
         _pa_va_offset: usize,
     ) -> bool {
         debug!("unmap_linear: [{:#x}, {:#x})", start, start + size);
-        pt.unmap_region(start, size, true)
-            .map(|tlb| tlb.ignore()) // flush each page on unmap, do not flush the entire TLB.
+        pt.unmap_region(start, size, false)
+            .map(|tlb| tlb.ignore()) // The owning AddrSpace flushes the ASID after unlocking.
             .is_ok()
     }
 }

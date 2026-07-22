@@ -320,7 +320,9 @@ impl Backend {
                 if page_size != PageSize::Size4K {
                     return false;
                 }
-                tlb.flush();
+                // The owning AddrSpace batches the ASID shootdown after its
+                // write lock is released.
+                tlb.ignore();
                 if frame.as_usize() != 0 {
                     if mapping.shared {
                         if let Some((file_offset, _)) = mapping.page_read_window(addr) {
