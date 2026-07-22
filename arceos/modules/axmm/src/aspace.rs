@@ -1020,15 +1020,13 @@ impl AddrSpace {
         size: usize,
         access_flags: MappingFlags,
     ) -> bool {
-        let mut range = match VirtAddrRange::try_from_start_size(start, size) {
+        let range = match VirtAddrRange::try_from_start_size(start, size) {
             Some(r) => r,
             None => return false,
         };
-        for area in self.areas.iter() {
-            if area.end() <= range.start {
-                continue;
-            }
-            if area.start() > range.start {
+        let mut covered_end = range.start;
+        for area in self.areas.iter_overlapping(range) {
+            if area.start() > covered_end {
                 return false;
             }
 
@@ -1037,8 +1035,8 @@ impl AddrSpace {
                 return false;
             }
 
-            range.start = area.end();
-            if range.is_empty() {
+            covered_end = area.end();
+            if covered_end >= range.end {
                 return true;
             }
         }
@@ -1052,16 +1050,7 @@ impl AddrSpace {
             Some(r) => r,
             None => return false,
         };
-        for area in self.areas.iter() {
-            if area.end() <= range.start {
-                continue;
-            }
-            if area.start() >= range.end {
-                break;
-            }
-            return true;
-        }
-        false
+        self.areas.overlaps(range)
     }
 
     /// Remap a virtual memory area, optionally moving it or resizing it.

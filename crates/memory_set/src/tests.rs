@@ -579,3 +579,47 @@ fn test_find_free_area() {
     let addr = set.find_free_area(0xf001.into(), 0x1000, va_range!(0..MAX_ADDR), 0x1000);
     assert_eq!(addr, None);
 }
+
+#[test]
+fn test_iter_overlapping() {
+    let mut set = MockMemorySet::new();
+    let mut pt = [0; MAX_ADDR];
+    let mut reclaim = Vec::new();
+
+    for (start, size) in [(0x1000, 0x2000), (0x4000, 0x1000), (0x5000, 0x1000)] {
+        assert_ok!(set.map(
+            MemoryArea::new(start.into(), size, 1, MockBackend),
+            &mut pt,
+            false,
+            &mut reclaim,
+        ));
+    }
+
+    let ranges = |range| {
+        set.iter_overlapping(range)
+            .map(|area| area.va_range())
+            .collect::<Vec<_>>()
+    };
+
+    assert_eq!(
+        ranges(va_range!(0x1800..0x4800)),
+        [va_range!(0x1000..0x3000), va_range!(0x4000..0x5000)]
+    );
+    assert_eq!(ranges(va_range!(0x3000..0x4000)), []);
+    assert_eq!(
+        ranges(va_range!(0x3000..0x5000)),
+        [va_range!(0x4000..0x5000)]
+    );
+    assert_eq!(
+        ranges(va_range!(0x5000..0x6000)),
+        [va_range!(0x5000..0x6000)]
+    );
+    assert_eq!(ranges(va_range!(0x6000..0x6000)), []);
+
+    for area in set.iter_overlapping_mut(va_range!(0x2800..0x5800)) {
+        area.set_flags(2);
+    }
+    assert_eq!(set.find(0x1800.into()).unwrap().flags(), 2);
+    assert_eq!(set.find(0x4800.into()).unwrap().flags(), 2);
+    assert_eq!(set.find(0x5800.into()).unwrap().flags(), 2);
+}

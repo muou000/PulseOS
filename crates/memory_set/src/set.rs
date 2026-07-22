@@ -35,6 +35,40 @@ impl<B: MappingBackend> MemorySet<B> {
         self.areas.values()
     }
 
+    fn first_overlapping_key(&self, range: AddrRange<B::Addr>) -> B::Addr {
+        if range.is_empty() {
+            return range.end;
+        }
+        self.areas
+            .range(..=range.start)
+            .next_back()
+            .filter(|(_, area)| area.end() > range.start)
+            .map(|(&start, _)| start)
+            .unwrap_or(range.start)
+    }
+
+    /// Returns an iterator over memory areas that overlap the given range.
+    ///
+    /// The first candidate is found through the predecessor of `range.start`,
+    /// so creating the iterator is O(log N) and iteration is bounded by
+    /// `range.end`.
+    pub fn iter_overlapping(
+        &self,
+        range: AddrRange<B::Addr>,
+    ) -> impl Iterator<Item = &MemoryArea<B>> {
+        let first = self.first_overlapping_key(range);
+        self.areas.range(first..range.end).map(|(_, area)| area)
+    }
+
+    /// Returns a mutable iterator over memory areas that overlap the given range.
+    pub fn iter_overlapping_mut(
+        &mut self,
+        range: AddrRange<B::Addr>,
+    ) -> impl Iterator<Item = &mut MemoryArea<B>> {
+        let first = self.first_overlapping_key(range);
+        self.areas.range_mut(first..range.end).map(|(_, area)| area)
+    }
+
     /// Returns whether the given address range overlaps with any existing area.
     pub fn overlaps(&self, range: AddrRange<B::Addr>) -> bool {
         if let Some((_, before)) = self.areas.range(..range.start).last() {
