@@ -5,7 +5,7 @@ use core::sync::atomic::{AtomicBool, Ordering};
 
 use axhal::percpu::this_cpu_id;
 use axsched::BaseScheduler;
-use kernel_guard::BaseGuard;
+use kernel_guard::{BaseGuard, NoPreemptIrqSave};
 use kspin::{SpinNoIrqGuard, SpinRaw};
 use lazyinit::LazyInit;
 
@@ -81,6 +81,25 @@ pub(crate) fn current_run_queue<G: BaseGuard>() -> CurrentRunQueueRef<'static, G
         state: irq_state,
         _phantom: core::marker::PhantomData,
     }
+}
+
+/// Yields the current task after avoiding the task lookup when no peer is ready.
+pub(crate) fn yield_current() {
+    let irq_state = NoPreemptIrqSave::acquire();
+    let inner = unsafe { RUN_QUEUE.current_ref_mut_raw() };
+
+    if inner.scheduler.lock().is_empty() {
+        NoPreemptIrqSave::release(irq_state);
+        return;
+    }
+
+    let mut run_queue: CurrentRunQueueRef<'_, NoPreemptIrqSave> = CurrentRunQueueRef {
+        inner,
+        current_task: crate::current(),
+        state: irq_state,
+        _phantom: core::marker::PhantomData,
+    };
+    run_queue.yield_current();
 }
 
 /// Selects the run queue index based on a CPU set bitmap and load balancing.
