@@ -237,7 +237,7 @@ impl FileMapping {
         let page_addr = vaddr.align_down_4k();
         let (file_offset, _) = self.page_read_window(page_addr)?;
         if pt
-            .lock_for_addr(page_addr)
+            .read_for_addr(page_addr)
             .query(page_addr)
             .is_ok_and(|(frame, _, _)| frame.as_usize() != 0)
         {
@@ -357,7 +357,7 @@ impl Backend {
         let pages = PageIter4K::new(start, start + size).ok_or(())?;
         let mut page_numbers = Vec::new();
         for addr in pages {
-            if let Ok((frame, _flags, _)) = pt.lock_for_addr(addr).query(addr) {
+            if let Ok((frame, _flags, _)) = pt.read_for_addr(addr).query(addr) {
                 if frame.as_usize() != 0 {
                     let Some((file_offset, _)) = mapping.page_read_window(addr) else {
                         continue;
@@ -395,7 +395,7 @@ impl Backend {
             return false;
         }
 
-        let query_res = pt.lock_for_addr(page_addr).query(page_addr);
+        let query_res = pt.read_for_addr(page_addr).query(page_addr);
         if let Ok((old_frame, old_flags, _)) = query_res {
             if old_frame.as_usize() != 0 {
                 // If it's a private mapping and we are trying to write to a read-only mapped page:

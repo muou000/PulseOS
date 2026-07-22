@@ -172,13 +172,24 @@ impl AddrSpaceCloneResult {
 }
 
 pub struct PageTableLockManager {
-    pt: spin::Mutex<PageTable>,
+    pt: spin::RwLock<PageTable>,
 }
 
-pub struct PageTableGuard<'a>(spin::MutexGuard<'a, PageTable>);
+pub struct PageTableReadGuard<'a>(spin::RwLockReadGuard<'a, PageTable>);
+pub struct PageTableGuard<'a>(spin::RwLockWriteGuard<'a, PageTable>);
 
+unsafe impl<'a> Send for PageTableReadGuard<'a> {}
+unsafe impl<'a> Sync for PageTableReadGuard<'a> {}
 unsafe impl<'a> Send for PageTableGuard<'a> {}
 unsafe impl<'a> Sync for PageTableGuard<'a> {}
+
+impl<'a> core::ops::Deref for PageTableReadGuard<'a> {
+    type Target = PageTable;
+    #[inline]
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
 
 impl<'a> core::ops::Deref for PageTableGuard<'a> {
     type Target = PageTable;
@@ -198,13 +209,13 @@ impl<'a> core::ops::DerefMut for PageTableGuard<'a> {
 impl PageTableLockManager {
     pub fn new(pt: PageTable) -> Self {
         Self {
-            pt: spin::Mutex::new(pt),
+            pt: spin::RwLock::new(pt),
         }
     }
 
     #[inline]
     pub fn root_paddr(&self) -> PhysAddr {
-        self.pt.lock().root_paddr()
+        self.pt.read().root_paddr()
     }
 
     #[inline]
@@ -212,12 +223,16 @@ impl PageTableLockManager {
         self.pt.get_mut()
     }
 
-    pub fn lock(&self) -> PageTableGuard {
-        PageTableGuard(self.pt.lock())
+    pub fn lock(&self) -> PageTableReadGuard {
+        PageTableReadGuard(self.pt.read())
+    }
+
+    pub fn read_for_addr(&self, _vaddr: VirtAddr) -> PageTableReadGuard {
+        PageTableReadGuard(self.pt.read())
     }
 
     pub fn lock_for_addr(&self, _vaddr: VirtAddr) -> PageTableGuard {
-        PageTableGuard(self.pt.lock())
+        PageTableGuard(self.pt.write())
     }
 }
 
@@ -266,7 +281,7 @@ impl AddrSpace {
 
     /// Query a virtual address mapping from the inner page table under lock.
     pub fn query_vaddr(&self, vaddr: VirtAddr) -> PagingResult<(PhysAddr, MappingFlags, PageSize)> {
-        self.pt.lock_for_addr(vaddr).query(vaddr)
+        self.pt.read_for_addr(vaddr).query(vaddr)
     }
 
     /// Returns the root physical address of the inner page table.
@@ -598,7 +613,11 @@ impl AddrSpace {
         for vaddr in PageIter4K::new(start.align_down_4k(), end_align_up)
             .expect("Failed to create page iterator")
         {
-            let (mut paddr, ..) = self.pt.lock_for_addr(vaddr).query(vaddr).map_err(|_| AxError::BadAddress)?;
+            let (mut paddr, ..) = self
+                .pt
+                .read_for_addr(vaddr)
+                .query(vaddr)
+                .map_err(|_| AxError::BadAddress)?;
             if paddr.as_usize() == 0 {
                 // Placeholder PTEs are used for lazy mappings. They are not
                 // readable/writable yet, so force the caller onto the page-fault
@@ -1096,7 +1115,7 @@ impl AddrSpace {
         let page = vaddr.align_down_4k();
         let pte_before = self
             .pt
-            .lock_for_addr(page)
+            .read_for_addr(page)
             .query(page)
             .ok()
             .map(|(frame, flags, _)| (frame, flags));
@@ -1151,7 +1170,7 @@ impl AddrSpace {
                 );
                 let pte_after = self
                     .pt
-                    .lock_for_addr(page)
+                    .read_for_addr(page)
                     .query(page)
                     .ok()
                     .map(|(frame, flags, _)| (frame, flags));
@@ -1234,7 +1253,7 @@ impl AddrSpace {
 
         if self
             .pt
-            .lock_for_addr(page)
+            .read_for_addr(page)
             .query(page)
             .is_ok_and(|(frame, _, _)| frame.as_usize() != 0)
         {
