@@ -30,7 +30,11 @@ impl CowMapping {
         reclaim: &mut super::DeferredReclaims,
     ) -> bool {
         let page = vaddr.align_down_4k();
-        let query_res = pt.lock_for_addr(page).query(page).ok().map(|(frame, flags, _)| (frame, flags));
+        let query_res = pt
+            .read_for_addr(page)
+            .query(page)
+            .ok()
+            .map(|(frame, flags, _)| (frame, flags));
         if let Some((old_frame, old_flags)) = query_res {
             if old_frame.as_usize() != 0 {
                 if orig_flags.contains(MappingFlags::WRITE)

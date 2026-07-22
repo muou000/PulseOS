@@ -235,7 +235,7 @@ impl Backend {
         populate: bool,
     ) -> bool {
         let page = vaddr.align_down_4k();
-        let initial_pt_guard = pt.lock_for_addr(page);
+        let initial_pt_guard = pt.read_for_addr(page);
         let query_res = initial_pt_guard.query(page);
         let is_placeholder = match query_res {
             Ok((old_frame, old_flags, _)) => old_flags.is_empty() || old_frame.as_usize() == 0,
