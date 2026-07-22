@@ -320,6 +320,7 @@ cfg_if! {
 
         pub struct VirtIoBlkDevInner<H: VirtIoHal, T: virtio_drivers::transport::Transport> {
             inner: SpinNoIrq<axdriver_virtio::VirtIoBlkDev<H, T>>,
+            completion_irq_count: AtomicUsize,
             #[cfg(feature = "multitask")]
             wait_queue: axtask::WaitQueue,
         }
@@ -351,6 +352,7 @@ cfg_if! {
                 dev.enable_interrupts();
                 let inner = Arc::new(VirtIoBlkDevInner {
                     inner: SpinNoIrq::new(dev),
+                    completion_irq_count: AtomicUsize::new(0),
                     #[cfg(feature = "multitask")]
                     wait_queue: axtask::WaitQueue::new(),
                 });
@@ -359,6 +361,7 @@ cfg_if! {
                 ) {
                     axlog::debug!("virtio-blk interrupt handler: checking interrupt");
                     let acked = w.inner.lock().ack_interrupt();
+                    w.completion_irq_count.fetch_add(1, Ordering::Relaxed);
                     axlog::debug!("virtio-blk interrupt handler: acked={}", acked);
                     // Notify unconditionally: for MSI-X mode, the device fires
                     // the interrupt only when I/O completes; `acked` reflects
@@ -369,12 +372,12 @@ cfg_if! {
                     // If acked=true (legacy/MMIO mode) or acked=false (MSI-X mode),
                     // both should wake waiters. Wrong wakeups are harmless because
                     // peek_used() will simply return None and the loop will re-sleep.
-                        #[cfg(feature = "multitask")]
-                        {
-                            axlog::debug!("virtio-blk interrupt handler: notifying wait queue");
-                            w.wait_queue.notify_all(true);
-                        }
+                    #[cfg(feature = "multitask")]
+                    {
+                        axlog::debug!("virtio-blk interrupt handler: notifying wait queue");
+                        w.wait_queue.notify_all(true);
                     }
+                }
                 let irq_registration = Arc::new(register_virtio_interrupt(
                     irq,
                     &inner,
@@ -384,6 +387,38 @@ cfg_if! {
                     _irq_registration: irq_registration,
                     inner,
                 })
+            }
+        }
+
+        impl<H: VirtIoHal, T: virtio_drivers::transport::Transport>
+            VirtIoBlkDevWrapper<H, T> {
+            #[cfg(all(feature = "multitask", feature = "irq"))]
+            fn wait_for_used(&self, token: u16, operation: &str) {
+                let irq_count_before = self
+                    .inner
+                    .completion_irq_count
+                    .load(Ordering::Relaxed);
+                loop {
+                    let timed_out = self.inner.wait_queue.wait_timeout_until(
+                        core::time::Duration::from_millis(100),
+                        || self.inner.inner.lock().inner.peek_used() == Some(token),
+                    );
+                    let ready = self.inner.inner.lock().inner.peek_used() == Some(token);
+                    let irq_observed = self
+                        .inner
+                        .completion_irq_count
+                        .load(Ordering::Relaxed)
+                        != irq_count_before;
+                    if timed_out && ready && !irq_observed {
+                        axlog::warn!(
+                            "virtio-blk {operation} completed without a wakeup interrupt: \
+                             token={token}"
+                        );
+                    }
+                    if ready {
+                        break;
+                    }
+                }
             }
         }
 
@@ -416,6 +451,9 @@ cfg_if! {
                 {
                     if axhal::asm::irqs_enabled() {
                         axlog::debug!("virtio::read_block: irqs_enabled, waiting in wait_queue");
+                        #[cfg(feature = "irq")]
+                        self.wait_for_used(token, "read");
+                        #[cfg(not(feature = "irq"))]
                         self.inner.wait_queue.wait_until(|| {
                             self.inner.inner.lock().inner.peek_used() == Some(token)
                         });
@@ -463,6 +501,9 @@ cfg_if! {
                 {
                     if axhal::asm::irqs_enabled() {
                         axlog::debug!("virtio::write_block: irqs_enabled, waiting in wait_queue");
+                        #[cfg(feature = "irq")]
+                        self.wait_for_used(token, "write");
+                        #[cfg(not(feature = "irq"))]
                         self.inner.wait_queue.wait_until(|| {
                             self.inner.inner.lock().inner.peek_used() == Some(token)
                         });

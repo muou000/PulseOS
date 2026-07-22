@@ -19,7 +19,7 @@ smp = ["axhal/smp", "axruntime/smp", "axtask?/smp", "kspin/smp"]
 fp-simd = ["axhal/fp-simd"]
 
 # Interrupts
-irq = ["axhal/irq", "axruntime/irq", "axtask?/irq"]
+irq = ["axhal/irq", "axruntime/irq", "axtask?/irq", "axdriver?/irq"]
 ipi = ["irq", "dep:axipi", "axhal/ipi", "axruntime/ipi", "axtask?/ipi"]
 
 # Custom or default platforms

@@ -24,6 +24,7 @@ display = ["axdriver_display"]
 virtio = ["axdriver_virtio", "dep:axalloc", "dep:axhal", "dep:axconfig"]
 
 multitask = []
+irq = ["axtask/irq"]
 
 # Async block I/O interface (AsyncBlockDriverOps trait implementation).
 # Requires `multitask` + `irq` to be effective at runtime.
