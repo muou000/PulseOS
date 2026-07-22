@@ -7,6 +7,8 @@ use memory_addr::{MemoryAddr, PAGE_SIZE_4K, PageIter4K, PhysAddr, VirtAddr};
 use super::Backend;
 use axalloc::frame_table;
 
+const MAX_FAULT_BATCH_PAGES: usize = 4;
+
 #[derive(Debug)]
 pub struct AnonPageLoad {
     page: VirtAddr,
@@ -15,11 +17,11 @@ pub struct AnonPageLoad {
 
 impl AnonPageLoad {
     pub fn prepare(self) -> AxResult<AnonPagePrepared> {
-        let (start_frame, page_count) =
-            alloc_contiguous_frames(self.page_count, true).ok_or(AxError::NoMemory)?;
+        let (frames, page_count) =
+            alloc_frame_batch(self.page_count, true).ok_or(AxError::NoMemory)?;
         Ok(AnonPagePrepared {
             page: self.page,
-            start_frame,
+            frames,
             page_count,
             mapped_mask: 0,
         })
@@ -28,7 +30,7 @@ impl AnonPageLoad {
 
 pub struct AnonPagePrepared {
     page: VirtAddr,
-    start_frame: PhysAddr,
+    frames: [PhysAddr; MAX_FAULT_BATCH_PAGES],
     page_count: usize,
     mapped_mask: u8,
 }
@@ -49,7 +51,7 @@ impl AnonPagePrepared {
 
     fn frame(&self, index: usize) -> PhysAddr {
         debug_assert!(index < self.page_count);
-        self.start_frame + index * PAGE_SIZE_4K
+        self.frames[index]
     }
 }
 
@@ -166,27 +168,31 @@ pub(super) fn dealloc_frame(frame: PhysAddr) {
     global_allocator().dealloc_pages(phys_to_virt(frame).as_usize(), 1);
 }
 
-pub(super) fn alloc_contiguous_frames(num_pages: usize, zeroed: bool) -> Option<(PhysAddr, usize)> {
-    if num_pages == 0 {
+fn alloc_frame_batch(
+    num_pages: usize,
+    zeroed: bool,
+) -> Option<([PhysAddr; MAX_FAULT_BATCH_PAGES], usize)> {
+    if num_pages == 0 || num_pages > MAX_FAULT_BATCH_PAGES {
         return None;
     }
-    if let Ok(pos) = global_allocator().alloc_pages(num_pages, PAGE_SIZE_4K) {
-        let vaddr = VirtAddr::from(pos);
-        if zeroed {
-            unsafe { core::ptr::write_bytes(vaddr.as_mut_ptr(), 0, num_pages * PAGE_SIZE_4K) };
-        }
-        let paddr = virt_to_phys(vaddr);
-        for i in 0..num_pages {
-            let frame = paddr + i * PAGE_SIZE_4K;
-            cow_mark_frame_used(frame);
-        }
-        Some((paddr, num_pages))
-    } else if num_pages > 1 {
-        // Fallback: try allocating a single page frame
-        alloc_contiguous_frames(1, zeroed)
-    } else {
-        None
+
+    let mut vaddrs = [0usize; MAX_FAULT_BATCH_PAGES];
+    let page_count = global_allocator().alloc_page_batch(&mut vaddrs[..num_pages]);
+    if page_count == 0 {
+        return None;
     }
+
+    let mut frames = [PhysAddr::from(0); MAX_FAULT_BATCH_PAGES];
+    for (index, vaddr) in vaddrs.into_iter().take(page_count).enumerate() {
+        let vaddr = VirtAddr::from(vaddr);
+        if zeroed {
+            unsafe { core::ptr::write_bytes(vaddr.as_mut_ptr(), 0, PAGE_SIZE_4K) };
+        }
+        let frame = virt_to_phys(vaddr);
+        cow_mark_frame_used(frame);
+        frames[index] = frame;
+    }
+    Some((frames, page_count))
 }
 
 impl Backend {
@@ -301,7 +307,7 @@ impl Backend {
         let pt_guard = pt.read_for_addr(page);
         let mut page_count = 0;
         let mut check_page = page;
-        while page_count < 4 && check_page < area_end {
+        while page_count < MAX_FAULT_BATCH_PAGES && check_page < area_end {
             let needs_mapping = match pt_guard.query(check_page) {
                 Err(_) => true,
                 Ok((frame, _, _)) => frame.as_usize() == 0,
