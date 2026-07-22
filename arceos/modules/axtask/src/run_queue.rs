@@ -413,6 +413,12 @@ impl<G: BaseGuard> CurrentRunQueueRef<'_, G> {
     /// This function will put the current task into this run queue with `Ready` state,
     /// and reschedule to the next task on this run queue.
     pub fn yield_current(&mut self) {
+        // Yielding cannot make progress when this CPU has no other ready task.
+        // Avoid enqueueing and immediately switching back to the current task.
+        if self.inner.scheduler.lock().is_empty() {
+            return;
+        }
+
         let curr = self.current_task.clone();
         trace!("task yield: {}", curr.id_name());
         assert!(curr.is_running());
