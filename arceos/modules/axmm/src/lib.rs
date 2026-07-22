@@ -22,8 +22,8 @@ use memory_set::MappingError;
 
 pub use self::{
     aspace::{
-        AddrSpace, AddrSpaceCloneResult, AddrSpaceMutation, PageFaultOutcome, PageFaultResult,
-        PageTableLockManager, TlbShootdown,
+        AddrSpace, AddrSpaceCloneResult, AddrSpaceMutation, AddrSpaceUnmapPreparation,
+        PageFaultOutcome, PageFaultResult, PageTableLockManager, TlbShootdown,
     },
     backend::{
         AnonPageLoad, AnonPagePrepared, Backend, FilePageLoad, FilePagePrepared, FileWritebacks,

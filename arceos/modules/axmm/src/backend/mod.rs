@@ -90,6 +90,12 @@ impl Default for DeferredReclaims {
 }
 
 impl DeferredReclaims {
+    pub(crate) fn with_capacity(capacity: usize) -> Self {
+        Self {
+            actions: Some(Vec::with_capacity(capacity)),
+        }
+    }
+
     pub(crate) fn defer_frame(&mut self, frame: PhysAddr) {
         if frame.as_usize() != 0 {
             self.actions

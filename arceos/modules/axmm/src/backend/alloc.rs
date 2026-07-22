@@ -282,7 +282,9 @@ impl Backend {
                 if page_size.is_huge() {
                     return false;
                 }
-                tlb.flush();
+                // The owning AddrSpace batches the ASID shootdown after its
+                // write lock is released.
+                tlb.ignore();
                 reclaim.defer_frame(frame);
             }
         }

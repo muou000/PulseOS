@@ -23,14 +23,16 @@ use crate::{
 /// A TLB shootdown that must run after releasing the address-space lock.
 #[must_use = "a TLB shootdown must be completed after releasing the address-space lock"]
 pub struct TlbShootdown {
-    asids: alloc::vec::Vec<usize>,
+    primary_asid: usize,
+    additional_asids: alloc::vec::Vec<usize>,
     reclaims: DeferredReclaims,
 }
 
 impl TlbShootdown {
     fn new(asid: usize, reclaims: DeferredReclaims) -> Self {
         Self {
-            asids: alloc::vec![asid],
+            primary_asid: asid,
+            additional_asids: alloc::vec::Vec::new(),
             reclaims,
         }
     }
@@ -41,10 +43,14 @@ impl TlbShootdown {
 
     /// Merges another deferred shootdown into this batch.
     pub fn merge(&mut self, other: Self) {
-        let Self { asids, reclaims } = other;
-        for asid in asids {
-            if !self.asids.contains(&asid) {
-                self.asids.push(asid);
+        let Self {
+            primary_asid,
+            additional_asids,
+            reclaims,
+        } = other;
+        for asid in core::iter::once(primary_asid).chain(additional_asids) {
+            if asid != self.primary_asid && !self.additional_asids.contains(&asid) {
+                self.additional_asids.push(asid);
             }
         }
         self.reclaims.append(reclaims);
@@ -52,11 +58,15 @@ impl TlbShootdown {
 
     /// Completes the shootdown without holding an address-space lock.
     pub fn complete_after_unlock(self) -> AxResult {
-        let Self { asids, reclaims } = self;
+        let Self {
+            primary_asid,
+            additional_asids,
+            reclaims,
+        } = self;
 
         #[cfg(feature = "ipi")]
         {
-            for asid in asids {
+            for asid in core::iter::once(primary_asid).chain(additional_asids) {
                 let target_mask = axipi::asid_active_cpu_mask(asid);
                 if let Err(shootdown_error) = axipi::flush_tlb_asid_cpus(asid, target_mask) {
                     if shootdown_error.completion_guaranteed() {
@@ -76,7 +86,7 @@ impl TlbShootdown {
 
         #[cfg(not(feature = "ipi"))]
         {
-            for asid in asids {
+            for asid in core::iter::once(primary_asid).chain(additional_asids) {
                 unsafe { flush_tlb_asid(asid) };
             }
             reclaims.reclaim();
@@ -88,9 +98,38 @@ impl TlbShootdown {
 impl fmt::Debug for TlbShootdown {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("TlbShootdown")
-            .field("asids", &self.asids)
+            .field("primary_asid", &self.primary_asid)
+            .field("additional_asids", &self.additional_asids)
             .field("has_reclaims", &!self.reclaims.is_empty())
             .finish()
+    }
+}
+
+const MAX_PREALLOCATED_UNMAP_RECLAIMS: usize = 64;
+
+/// Reclaim storage allocated before entering an address-space write section.
+pub struct AddrSpaceUnmapPreparation {
+    reclaims: DeferredReclaims,
+}
+
+impl AddrSpaceUnmapPreparation {
+    /// Prepares bounded reclaim storage for an upcoming unmap operation.
+    pub fn new(size: usize) -> Self {
+        let pages = size.saturating_add(PAGE_SIZE_4K - 1) / PAGE_SIZE_4K;
+        let capacity = pages
+            .saturating_add(1)
+            .min(MAX_PREALLOCATED_UNMAP_RECLAIMS);
+        Self {
+            reclaims: DeferredReclaims::with_capacity(capacity),
+        }
+    }
+}
+
+impl Default for AddrSpaceUnmapPreparation {
+    fn default() -> Self {
+        Self {
+            reclaims: DeferredReclaims::default(),
+        }
     }
 }
 
@@ -698,7 +737,18 @@ impl AddrSpace {
     /// Returns an error if the address range is out of the address space or not
     /// aligned.
     pub fn unmap(&mut self, start: VirtAddr, size: usize) -> AddrSpaceMutation<()> {
-        let mut reclaim = DeferredReclaims::default();
+        self.unmap_prepared(start, size, AddrSpaceUnmapPreparation::default())
+    }
+
+    /// Removes mappings using reclaim storage prepared before taking the
+    /// address-space write lock.
+    pub fn unmap_prepared(
+        &mut self,
+        start: VirtAddr,
+        size: usize,
+        preparation: AddrSpaceUnmapPreparation,
+    ) -> AddrSpaceMutation<()> {
+        let mut reclaim = preparation.reclaims;
         let mut attempted = false;
         let result = (|| -> AxResult {
             if !self.contains_range(start, size) {
