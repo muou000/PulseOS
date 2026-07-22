@@ -672,10 +672,6 @@ pub fn sys_mprotect(addr: usize, length: usize, prot: usize) -> isize {
     let aspace_handle = proc.aspace_handle();
     let mut aspace = aspace_handle.write();
     let start = VirtAddr::from(addr);
-    if !aspace.can_access_range(start, aligned_length, MappingFlags::empty()) {
-        return -LinuxError::ENOMEM.code() as isize;
-    }
-
     let mutation = aspace.protect(start, aligned_length, map_flags);
     drop(aspace);
     match mutation.complete_after_unlock() {
