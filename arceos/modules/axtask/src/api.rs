@@ -25,7 +25,7 @@ pub fn set_generic_timer(deadline_ns: u64, callback: alloc::boxed::Box<dyn FnOnc
 }
 
 pub(crate) use crate::run_queue::{
-    current_run_queue, select_run_queue, select_wake_run_queue,
+    current_run_queue, select_run_queue, select_wake_run_queue, yield_current,
 };
 
 #[doc(cfg(feature = "multitask"))]
@@ -264,7 +264,7 @@ pub fn set_current_affinity(cpumask: AxCpuMask) -> bool {
 /// Current task gives up the CPU time voluntarily, and switches to another
 /// ready task.
 pub fn yield_now() {
-    current_run_queue::<NoPreemptIrqSave>().yield_current()
+    yield_current()
 }
 
 /// Wakes a blocked task and puts it back into a run queue.
