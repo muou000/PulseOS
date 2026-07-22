@@ -257,6 +257,29 @@ pub fn sys_mmap(
 
     let aligned_length = (length + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
 
+    // Creating the first CachedFile for an inode may read its length. Prepare
+    // it before taking the non-sleepable address-space lock.
+    let mut is_zero_device = false;
+    let file_mapping = if let Some(file) = file.as_ref() {
+        let location = file
+            .location()
+            .expect("file-backed mmap location checked before address-space mutation");
+        if location
+            .absolute_path()
+            .is_ok_and(|path| path.as_str() == "/dev/zero")
+        {
+            is_zero_device = true;
+            None
+        } else {
+            let file_flags = file
+                .mmap_file_flags()
+                .unwrap_or_else(|| file_flags_for_mapping(map_flags));
+            Some((CachedFile::get_or_create(location), file_flags))
+        }
+    } else {
+        None
+    };
+
     let aspace_handle = proc.aspace_handle();
     let mut aspace = aspace_handle.write();
     let mut pending_shootdown = None;
@@ -332,17 +355,6 @@ pub fn sys_mmap(
         }
     }
 
-    let mut is_zero_device = false;
-    if let Some(file) = file.as_ref() {
-        if let Some(loc) = file.location() {
-            if let Ok(path) = loc.absolute_path() {
-                if path.as_str() == "/dev/zero" {
-                    is_zero_device = true;
-                }
-            }
-        }
-    }
-
     let map_result = if is_zero_device {
         if is_shared {
             use axhal::paging::PageSize;
@@ -354,20 +366,13 @@ pub fn sys_mmap(
         } else {
             aspace.map_alloc(VirtAddr::from(map_addr), aligned_length, map_flags, false)
         }
-    } else if let Some(file) = file.as_ref() {
-        let location = file
-            .location()
-            .expect("file-backed mmap location checked before address-space mutation");
-        let file_flags = file
-            .mmap_file_flags()
-            .unwrap_or_else(|| file_flags_for_mapping(map_flags));
-        let cached = CachedFile::get_or_create(location);
+    } else if let Some((cached, file_flags)) = file_mapping.as_ref() {
         aspace.map_file(
             VirtAddr::from(map_addr),
             aligned_length,
             map_flags,
-            cached,
-            file_flags,
+            cached.clone(),
+            *file_flags,
             offset,
             length,
             is_shared,
@@ -759,9 +764,12 @@ pub fn sys_msync(addr: usize, length: usize, flags: usize) -> isize {
 
     let aligned_length = (length + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
     let aspace_handle = proc.aspace_handle();
-    let aspace = aspace_handle.read();
+    let writebacks = {
+        let aspace = aspace_handle.read();
+        aspace.prepare_file_writeback_range(VirtAddr::from(addr), aligned_length, has_sync)
+    };
 
-    match aspace.writeback_file_range(VirtAddr::from(addr), aligned_length, has_sync) {
+    match writebacks.and_then(axmm::FileWritebacks::complete) {
         Ok(()) => 0,
         Err(e) => -LinuxError::from(e).code() as isize,
     }

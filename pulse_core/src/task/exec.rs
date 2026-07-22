@@ -9,18 +9,17 @@ use axfs::FsContext;
 use axfs_ng_vfs::{NodePermission, NodeType};
 use axhal::paging::MappingFlags;
 use memory_addr::va;
-use spin::RwLock;
 
 use core::sync::atomic::Ordering;
 
-use super::{Process, Thread};
+use super::{AddressSpaceLock, Process, Thread};
 use crate::config::*;
 
 const SHEBANG_MAX_DEPTH: usize = 4;
 const SHEBANG_PROBE_LEN: usize = 256;
 
 struct PreparedExec {
-    aspace: Arc<RwLock<axmm::AddrSpace>>,
+    aspace: Arc<AddressSpaceLock>,
     load_info: crate::mm::UserAppLoadInfo,
     path: String,
     argv: Vec<String>,
@@ -154,9 +153,29 @@ impl Process {
         fs_ctx.credentials = Some((self.fsuid(), self.fsgid()));
         let (path, argv) = resolve_exec_path_and_args(&fs_ctx, path, args)?;
         let argv_refs: Vec<&str> = argv.iter().map(|s| s.as_str()).collect();
-        let aspace_handle = self.aspace_handle();
-        let mut aspace = aspace_handle.write();
-        let load_info = crate::mm::load_user_app(&mut aspace, &path, &argv_refs, envs)?;
+
+        let mut new_aspace = axmm::new_user_aspace(va!(USER_SPACE_BASE), USER_SPACE_SIZE)?;
+        let stack_bottom = USER_STACK_TOP - USER_STACK_SIZE;
+        new_aspace.map_alloc(
+            va!(stack_bottom),
+            USER_STACK_SIZE,
+            MappingFlags::READ | MappingFlags::WRITE | MappingFlags::USER,
+            false,
+        )?;
+        new_aspace.map_alloc(
+            va!(USER_HEAP_BASE),
+            USER_HEAP_SIZE,
+            MappingFlags::READ | MappingFlags::WRITE | MappingFlags::USER,
+            false,
+        )?;
+        let load_info = crate::mm::load_user_app(&mut new_aspace, &path, &argv_refs, envs)?;
+        let new_aspace_handle = Arc::new(AddressSpaceLock::new(new_aspace));
+        let new_pt_root = new_aspace_handle.read().page_table_root();
+        let new_asid = new_aspace_handle.read().asid();
+        let old_aspace = self.replace_aspace_handle(new_aspace_handle);
+        axtask::set_current_page_table_root(new_pt_root, new_asid);
+        drop(old_aspace);
+
         self.entry.store(load_info.entry, Ordering::Release);
         self.stack_top.store(load_info.user_sp, Ordering::Release);
         self.set_signal_trampoline(load_info.signal_trampoline);
@@ -249,7 +268,7 @@ impl Process {
         let load_info = crate::mm::load_user_app(&mut new_aspace, &path, &argv_refs, envs)?;
         drop(argv_refs);
         let prepared = PreparedExec {
-            aspace: Arc::new(RwLock::new(new_aspace)),
+            aspace: Arc::new(AddressSpaceLock::new(new_aspace)),
             load_info,
             path,
             argv,

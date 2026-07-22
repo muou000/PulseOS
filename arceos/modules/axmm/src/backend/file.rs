@@ -1,3 +1,5 @@
+use alloc::vec::Vec;
+
 use axerrno::{AxError, AxResult};
 use axfs::{CachedFile, FileFlags};
 use axhal::{
@@ -80,6 +82,26 @@ pub struct FilePagePrepared {
     file: CachedFile,
     page_number: u32,
     frame: Option<PhysAddr>,
+}
+
+pub(super) struct FileWriteback {
+    file: CachedFile,
+    page_numbers: Vec<u32>,
+    sync: bool,
+}
+
+impl FileWriteback {
+    pub(super) fn complete(self) -> AxResult {
+        for page_number in self.page_numbers {
+            self.file
+                .mark_page_dirty(page_number)
+                .map_err(|_| AxError::Io)?;
+        }
+        if self.sync {
+            self.file.sync(false).map_err(|_| AxError::Io)?;
+        }
+        Ok(())
+    }
 }
 
 impl core::fmt::Debug for FilePageLoad {
@@ -315,26 +337,25 @@ impl Backend {
 
     /// Write back all resident pages in the given range to the underlying file.
     /// Only meaningful for shared file mappings.
-    pub(crate) fn writeback_file_range_impl(
+    pub(super) fn prepare_file_writeback_range_impl(
         &self,
         start: VirtAddr,
         size: usize,
         sync: bool,
         pt: &crate::PageTableLockManager,
-    ) -> bool {
+    ) -> Result<Option<FileWriteback>, ()> {
         let mapping = match self {
             Backend::File(m) => m,
-            _ => return false,
+            _ => return Err(()),
         };
         if !mapping.shared {
-            return true; // Nothing to do for private mappings.
+            return Ok(None);
         }
         if size == 0 {
-            return true;
+            return Ok(None);
         }
-        let Some(pages) = PageIter4K::new(start, start + size) else {
-            return false;
-        };
+        let pages = PageIter4K::new(start, start + size).ok_or(())?;
+        let mut page_numbers = Vec::new();
         for addr in pages {
             if let Ok((frame, _flags, _)) = pt.lock_for_addr(addr).query(addr) {
                 if frame.as_usize() != 0 {
@@ -342,18 +363,15 @@ impl Backend {
                         continue;
                     };
                     let pn = (file_offset / PAGE_SIZE_4K as u64) as u32;
-                    if mapping.file.mark_page_dirty(pn).is_err() {
-                        return false;
-                    }
+                    page_numbers.push(pn);
                 }
             }
         }
-        if sync {
-            if mapping.file.sync(false).is_err() {
-                return false;
-            }
-        }
-        true
+        Ok(Some(FileWriteback {
+            file: mapping.file.clone(),
+            page_numbers,
+            sync,
+        }))
     }
 
     pub(crate) fn handle_page_fault_file(
