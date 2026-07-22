@@ -23,7 +23,7 @@ pub fn syscall_handler(tf: &mut TrapFrame, syscall_num: usize) -> isize {
         }
     };
     let process = thread.process_arc();
-    process.on_kernel_entry_from_user(syscall_enter_ns);
+    thread.on_kernel_entry_from_user(syscall_enter_ns);
     thread.exit_if_exec_requested();
     if process.group_exiting() {
         thread.exit_current(process.group_exit_code());
@@ -110,12 +110,12 @@ pub fn syscall_handler(tf: &mut TrapFrame, syscall_num: usize) -> isize {
 
     let syscall_leave_ns = axhal::time::monotonic_time_nanos() as u64;
     let delta_ns = syscall_leave_ns.saturating_sub(syscall_enter_ns);
-    process.add_sys_time_ns(delta_ns);
+    thread.add_sys_time_ns(delta_ns);
     thread.exit_if_exec_requested();
     if process.group_exiting() {
         thread.exit_current(process.group_exit_code());
     }
-    process.mark_user_resume();
+    thread.mark_user_resume();
 
     syscall_ret(tf)
 }
