@@ -67,6 +67,23 @@ impl<M: PagingMetaData, PTE: GenericPTE, H: PagingHandler> PageTable64<M, PTE, H
         page_size: PageSize,
         flags: MappingFlags,
     ) -> PagingResult<TlbFlush<M>> {
+        // SAFETY: `&mut self` guarantees exclusive access to the whole page table.
+        unsafe { self.map_with_external_lock(vaddr, target, page_size, flags) }
+    }
+
+    /// Maps one page while synchronization is provided by the caller.
+    ///
+    /// # Safety
+    ///
+    /// The caller must exclude all accesses to the affected page-table entries,
+    /// including creation of shared intermediate tables.
+    pub unsafe fn map_with_external_lock(
+        &self,
+        vaddr: M::VirtAddr,
+        target: PhysAddr,
+        page_size: PageSize,
+        flags: MappingFlags,
+    ) -> PagingResult<TlbFlush<M>> {
         // `vaddr` does not need to be page-aligned here; `get_entry_mut_or_create`
         // internally maps `vaddr` to its corresponding page table entry (PTE).
         let entry = self.get_entry_mut_or_create(vaddr, page_size)?;
@@ -90,6 +107,21 @@ impl<M: PagingMetaData, PTE: GenericPTE, H: PagingHandler> PageTable64<M, PTE, H
         paddr: PhysAddr,
         flags: MappingFlags,
     ) -> PagingResult<(PageSize, TlbFlush<M>)> {
+        // SAFETY: `&mut self` guarantees exclusive access to the whole page table.
+        unsafe { self.remap_with_external_lock(vaddr, paddr, flags) }
+    }
+
+    /// Remaps one page while synchronization is provided by the caller.
+    ///
+    /// # Safety
+    ///
+    /// The caller must exclude all accesses to the affected page-table entry.
+    pub unsafe fn remap_with_external_lock(
+        &self,
+        vaddr: M::VirtAddr,
+        paddr: PhysAddr,
+        flags: MappingFlags,
+    ) -> PagingResult<(PageSize, TlbFlush<M>)> {
         let (entry, size) = self.get_entry_mut(vaddr)?;
         entry.set_paddr(paddr);
         entry.set_flags(flags, size.is_huge());
@@ -107,6 +139,20 @@ impl<M: PagingMetaData, PTE: GenericPTE, H: PagingHandler> PageTable64<M, PTE, H
         vaddr: M::VirtAddr,
         flags: MappingFlags,
     ) -> PagingResult<(PageSize, TlbFlush<M>)> {
+        // SAFETY: `&mut self` guarantees exclusive access to the whole page table.
+        unsafe { self.protect_with_external_lock(vaddr, flags) }
+    }
+
+    /// Protects one page while synchronization is provided by the caller.
+    ///
+    /// # Safety
+    ///
+    /// The caller must exclude all accesses to the affected page-table entry.
+    pub unsafe fn protect_with_external_lock(
+        &self,
+        vaddr: M::VirtAddr,
+        flags: MappingFlags,
+    ) -> PagingResult<(PageSize, TlbFlush<M>)> {
         let (entry, size) = self.get_entry_mut(vaddr)?;
         if !entry.is_present() {
             return Err(PagingError::NotMapped);
@@ -120,6 +166,19 @@ impl<M: PagingMetaData, PTE: GenericPTE, H: PagingHandler> PageTable64<M, PTE, H
     /// Returns [`Err(PagingError::NotMapped)`](PagingError::NotMapped) if the
     /// mapping is not present.
     pub fn unmap(&mut self, vaddr: M::VirtAddr) -> PagingResult<(PhysAddr, PageSize, TlbFlush<M>)> {
+        // SAFETY: `&mut self` guarantees exclusive access to the whole page table.
+        unsafe { self.unmap_with_external_lock(vaddr) }
+    }
+
+    /// Unmaps one page while synchronization is provided by the caller.
+    ///
+    /// # Safety
+    ///
+    /// The caller must exclude all accesses to the affected page-table entry.
+    pub unsafe fn unmap_with_external_lock(
+        &self,
+        vaddr: M::VirtAddr,
+    ) -> PagingResult<(PhysAddr, PageSize, TlbFlush<M>)> {
         let (entry, size) = self.get_entry_mut(vaddr)?;
         if !entry.is_present() {
             entry.clear();
@@ -585,7 +644,9 @@ impl<M: PagingMetaData, PTE: GenericPTE, H: PagingHandler> PageTable64<M, PTE, H
         unsafe { core::slice::from_raw_parts(ptr, ENTRY_COUNT) }
     }
 
-    fn table_of_mut<'a>(&mut self, paddr: PhysAddr) -> &'a mut [PTE] {
+    // Page-table pages live in externally managed physical memory, not inside
+    // `self`. Public shared mutation remains unsafe and requires external locks.
+    fn table_of_mut<'a>(&self, paddr: PhysAddr) -> &'a mut [PTE] {
         let ptr = H::phys_to_virt(paddr).as_mut_ptr() as _;
         unsafe { core::slice::from_raw_parts_mut(ptr, ENTRY_COUNT) }
     }
@@ -600,7 +661,7 @@ impl<M: PagingMetaData, PTE: GenericPTE, H: PagingHandler> PageTable64<M, PTE, H
         }
     }
 
-    fn next_table_mut<'a>(&mut self, entry: &PTE) -> PagingResult<&'a mut [PTE]> {
+    fn next_table_mut<'a>(&self, entry: &PTE) -> PagingResult<&'a mut [PTE]> {
         if entry.paddr().as_usize() == 0 {
             Err(PagingError::NotMapped)
         } else if entry.is_huge() {
@@ -610,7 +671,7 @@ impl<M: PagingMetaData, PTE: GenericPTE, H: PagingHandler> PageTable64<M, PTE, H
         }
     }
 
-    fn next_table_mut_or_create<'a>(&mut self, entry: &mut PTE) -> PagingResult<&'a mut [PTE]> {
+    fn next_table_mut_or_create<'a>(&self, entry: &mut PTE) -> PagingResult<&'a mut [PTE]> {
         if entry.is_unused() {
             let paddr = Self::alloc_table()?;
             *entry = GenericPTE::new_table(paddr);
@@ -647,7 +708,7 @@ impl<M: PagingMetaData, PTE: GenericPTE, H: PagingHandler> PageTable64<M, PTE, H
         Ok((p1e, PageSize::Size4K))
     }
 
-    fn get_entry_mut(&mut self, vaddr: M::VirtAddr) -> PagingResult<(&mut PTE, PageSize)> {
+    fn get_entry_mut(&self, vaddr: M::VirtAddr) -> PagingResult<(&mut PTE, PageSize)> {
         let vaddr: usize = vaddr.into();
         let p3 = if M::LEVELS == 3 {
             self.table_of_mut(self.root_paddr())
@@ -675,7 +736,7 @@ impl<M: PagingMetaData, PTE: GenericPTE, H: PagingHandler> PageTable64<M, PTE, H
     }
 
     fn get_entry_mut_or_create(
-        &mut self,
+        &self,
         vaddr: M::VirtAddr,
         page_size: PageSize,
     ) -> PagingResult<&mut PTE> {

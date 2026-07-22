@@ -304,11 +304,10 @@ impl Backend {
         }
 
         let page = vaddr.align_down_4k();
-        let pt_guard = pt.read_for_addr(page);
         let mut page_count = 0;
         let mut check_page = page;
         while page_count < MAX_FAULT_BATCH_PAGES && check_page < area_end {
-            let needs_mapping = match pt_guard.query(check_page) {
+            let needs_mapping = match pt.read_for_addr(check_page).query(check_page) {
                 Err(_) => true,
                 Ok((frame, _, _)) => frame.as_usize() == 0,
             };
@@ -337,7 +336,6 @@ impl Backend {
 
         let mut handled_any = false;
         let mut keep_mapping = true;
-        let mut pt_guard = pt.lock_for_addr(page);
         for index in 0..prepared.page_count() {
             let current_page = page + index * PAGE_SIZE_4K;
             if current_page >= area_end {
@@ -348,6 +346,7 @@ impl Backend {
             let mut already_mapped = false;
 
             if keep_mapping {
+                let mut pt_guard = pt.lock_for_addr(current_page);
                 match pt_guard.query(current_page) {
                     Err(_) => {
                         if pt_guard
