@@ -16,6 +16,18 @@ pub(crate) use alloc::{cow_dec_frame_ref, cow_inc_frame_ref};
 pub use self::cow::CowMapping;
 pub use self::file::{FilePageLoad, FilePagePrepared};
 
+#[derive(Default)]
+pub struct FileWritebacks(Vec<file::FileWriteback>);
+
+impl FileWritebacks {
+    pub fn complete(self) -> axerrno::AxResult {
+        for writeback in self.0 {
+            writeback.complete()?;
+        }
+        Ok(())
+    }
+}
+
 /// A unified enum type for different memory mapping backends.
 ///
 /// Currently, two backends are implemented:
@@ -173,7 +185,12 @@ impl MappingBackend for Backend {
             Self::Alloc { populate, .. } => {
                 self.unmap_alloc(start, size, pt_mut, *populate, reclaim)
             }
-            Self::File(_) => self.unmap_file(start, size, pt_mut, reclaim),
+            Self::File(_) => {
+                // Keep the CachedFile alive until after the address-space lock
+                // is released; dropping its final reference may perform I/O.
+                reclaim.defer_backend(self.clone());
+                self.unmap_file(start, size, pt_mut, reclaim)
+            }
             Self::Cow(cow) => cow.inner.unmap(start, size, pt, reclaim),
         }
     }
@@ -314,16 +331,26 @@ impl Backend {
 
     /// Write back all resident dirty pages in the given range to the
     /// underlying file. Only meaningful for shared file mappings.
-    pub(crate) fn writeback_file_range(
+    pub(crate) fn prepare_file_writeback_range(
         &self,
         start: VirtAddr,
         size: usize,
         sync: bool,
         pt: &crate::PageTableLockManager,
+        writebacks: &mut FileWritebacks,
     ) -> bool {
         match self {
-            Self::File(_) => self.writeback_file_range_impl(start, size, sync, pt),
-            Self::Cow(cow) => cow.inner.writeback_file_range(start, size, sync, pt),
+            Self::File(_) => match self.prepare_file_writeback_range_impl(start, size, sync, pt) {
+                Ok(Some(writeback)) => {
+                    writebacks.0.push(writeback);
+                    true
+                }
+                Ok(None) => true,
+                Err(()) => false,
+            },
+            Self::Cow(cow) => cow
+                .inner
+                .prepare_file_writeback_range(start, size, sync, pt, writebacks),
             _ => true, // Non-file backends have nothing to write back.
         }
     }

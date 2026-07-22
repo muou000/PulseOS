@@ -1,4 +1,5 @@
 pub mod exec;
+mod aspace_lock;
 mod process;
 mod signal;
 mod thread;
@@ -14,6 +15,7 @@ use core::fmt::Write;
 use axerrno::{LinuxError, LinuxResult};
 use hashbrown::HashMap;
 use kspin::SpinNoIrq;
+pub use aspace_lock::AddressSpaceLock;
 pub use process::{CloneParams, ForkParams, Process, WaitidStatusType, MAX_POSIX_TIMER_COUNT};
 pub use signal::{
     DefaultSignalAction, NSIG, SIG_DFL, SIG_IGN, SigAction, SignalAction, SignalAltStack,
@@ -506,14 +508,18 @@ impl axfs::ProcfsProcessProvider for PulseProcessProvider {
             return Some(String::new());
         }
         let aspace_handle = proc.aspace_handle();
-        let aspace = aspace_handle.read();
+        let mut areas = Vec::new();
+        {
+            let aspace = aspace_handle.read();
+            aspace.for_each_area_with_backend(|start, end, flags, backend| {
+                if start.as_usize() < 0x8000_0000_0000 {
+                    areas.push((start, end, flags, backend.clone()));
+                }
+            });
+        }
         let mut out = String::new();
 
-        aspace.for_each_area_with_backend(|start, end, flags, backend| {
-            if start.as_usize() >= 0x8000_0000_0000 {
-                return;
-            }
-
+        for (start, end, flags, backend) in areas {
             let r = if flags.contains(axhal::paging::MappingFlags::READ) {
                 "r"
             } else {
@@ -537,7 +543,7 @@ impl axfs::ProcfsProcessProvider for PulseProcessProvider {
             let mut dev_major = 0;
             let mut dev_minor = 0;
 
-            let mut curr_backend = backend.clone();
+            let mut curr_backend = backend;
             while let axmm::Backend::Cow(cow) = &curr_backend {
                 curr_backend = cow.inner().clone();
             }
@@ -598,7 +604,7 @@ impl axfs::ProcfsProcessProvider for PulseProcessProvider {
                 )
                 .unwrap();
             }
-        });
+        }
 
         Some(out)
     }

@@ -13,7 +13,7 @@ use memory_addr::{
 use memory_set::{MappingBackend, MemoryArea, MemorySet};
 
 use crate::{
-    backend::{Backend, DeferredReclaims, FilePageLoad, FilePagePrepared},
+    backend::{Backend, DeferredReclaims, FilePageLoad, FilePagePrepared, FileWritebacks},
     mapping_err_to_ax_err,
 };
 
@@ -446,9 +446,14 @@ impl AddrSpace {
 
     /// Write back all resident dirty pages in the given range to their
     /// underlying files. Only shared file-backed mappings are affected.
-    pub fn writeback_file_range(&self, start: VirtAddr, size: usize, sync: bool) -> AxResult {
+    pub fn prepare_file_writeback_range(
+        &self,
+        start: VirtAddr,
+        size: usize,
+        sync: bool,
+    ) -> AxResult<FileWritebacks> {
         if size == 0 {
-            return Ok(());
+            return Ok(FileWritebacks::default());
         }
         if !self.contains_range(start, size) {
             return ax_err!(InvalidInput, "address out of range");
@@ -458,6 +463,7 @@ impl AddrSpace {
         }
 
         let end = start + size;
+        let mut writebacks = FileWritebacks::default();
         for area in self.areas.iter() {
             if area.end() <= start {
                 continue;
@@ -468,12 +474,18 @@ impl AddrSpace {
             let overlap_start = if area.start() > start { area.start() } else { start };
             let overlap_end = if area.end() < end { area.end() } else { end };
             if overlap_start < overlap_end {
-                if !area.backend().writeback_file_range(overlap_start, overlap_end - overlap_start, sync, &self.pt) {
+                if !area.backend().prepare_file_writeback_range(
+                    overlap_start,
+                    overlap_end - overlap_start,
+                    sync,
+                    &self.pt,
+                    &mut writebacks,
+                ) {
                     return ax_err!(Io, "writeback failed");
                 }
             }
         }
-        Ok(())
+        Ok(writebacks)
     }
 
     /// Add a new mapping with an existing backend.

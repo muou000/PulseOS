@@ -13,7 +13,6 @@ use axhal::{
     context::{TrapFrame, UspaceContext},
     paging::MappingFlags,
 };
-use axmm::AddrSpace;
 use axtask::{AxTaskRef, TaskInner, WaitQueue};
 use kernel_guard::NoPreemptIrqSave;
 use kspin::SpinNoIrq;
@@ -25,7 +24,8 @@ use memory_addr::{MemoryAddr, PhysAddr, VirtAddr, va};
 use spin::{Lazy, Mutex, RwLock};
 
 use super::{
-    SignalShared, Thread, current_thread, queue_signal_to_process, thread_handle_from_task,
+    AddressSpaceLock, SignalShared, Thread, current_thread, queue_signal_to_process,
+    thread_handle_from_task,
 };
 use crate::{
     config::*,
@@ -64,8 +64,8 @@ pub struct PosixTimer {
 unsafe impl Send for PosixTimer {}
 unsafe impl Sync for PosixTimer {}
 
-static ZOMBIE_ASPACE_HANDLE: Lazy<Arc<RwLock<AddrSpace>>> = Lazy::new(|| {
-    Arc::new(RwLock::new(
+static ZOMBIE_ASPACE_HANDLE: Lazy<Arc<AddressSpaceLock>> = Lazy::new(|| {
+    Arc::new(AddressSpaceLock::new(
         axmm::new_user_aspace(va!(USER_SPACE_BASE), USER_SPACE_SIZE)
             .expect("failed to create shared zombie addrspace"),
     ))
@@ -410,7 +410,7 @@ pub struct Process {
     /// 父进程弱引用
     parent: RwLock<Option<Weak<Process>>>,
     /// 虚拟地址空间
-    aspace: RwLock<Arc<RwLock<AddrSpace>>>,
+    aspace: RwLock<Arc<AddressSpaceLock>>,
     /// 堆顶指针
     pub heap_top: Arc<AtomicUsize>,
     /// brk 扩展排他锁
@@ -1195,14 +1195,14 @@ impl Process {
             .map_err(AxError::from)
     }
 
-    pub fn aspace_handle(&self) -> Arc<RwLock<AddrSpace>> {
+    pub fn aspace_handle(&self) -> Arc<AddressSpaceLock> {
         self.aspace.read().clone()
     }
 
     pub fn replace_aspace_handle(
         &self,
-        new_aspace: Arc<RwLock<AddrSpace>>,
-    ) -> Arc<RwLock<AddrSpace>> {
+        new_aspace: Arc<AddressSpaceLock>,
+    ) -> Arc<AddressSpaceLock> {
         let mut slot = self.aspace.write();
         core::mem::replace(&mut *slot, new_aspace)
     }
@@ -1509,7 +1509,7 @@ impl Process {
             parent_pid: AtomicU64::new(0),
             parent: RwLock::new(None),
             start_mono_ns: axhal::time::monotonic_time_nanos() as u64,
-            aspace: RwLock::new(Arc::new(RwLock::new(aspace))),
+            aspace: RwLock::new(Arc::new(AddressSpaceLock::new(aspace))),
             fs_context: RwLock::new(Arc::new(Mutex::new(fs_context))),
             fd_table: RwLock::new(Arc::new(RwLock::new(fd_table))),
             time_context: TimeContext::new(),
@@ -1579,7 +1579,7 @@ impl Process {
     fn new_child_process(
         pid: u64,
         parent: Arc<Process>,
-        aspace: Arc<RwLock<AddrSpace>>,
+        aspace: Arc<AddressSpaceLock>,
         share_vm: bool,
         is_vfork: bool,
         share_fs: bool,
@@ -1771,7 +1771,7 @@ impl Process {
 
     fn resolve_page_fault(
         &self,
-        aspace_handle: &Arc<RwLock<AddrSpace>>,
+        aspace_handle: &Arc<AddressSpaceLock>,
         vaddr: VirtAddr,
         flags: axhal::trap::PageFaultFlags,
     ) -> AxResult<bool> {
@@ -3089,7 +3089,6 @@ impl Process {
         tf: &TrapFrame,
         params: ForkParams,
     ) -> AxResult<Arc<Process>> {
-        let _guard = NoPreemptIrqSave::new();
         let mut child_uctx = UspaceContext::from(tf);
         child_uctx.set_retval(0);
         if let Some(sp) = params.child_stack {
@@ -3099,6 +3098,7 @@ impl Process {
         let parent_aspace_handle = self.aspace_handle();
         let clone_result = parent_aspace_handle.write().try_clone();
         let new_aspace = clone_result.complete_after_unlock()?;
+        let _guard = NoPreemptIrqSave::new();
 
         let mut inner = TaskInner::try_new(
             move || {
@@ -3119,7 +3119,7 @@ impl Process {
         )?;
 
         let child_tid = inner.id().as_u64();
-        let new_aspace_arc = Arc::new(RwLock::new(new_aspace));
+        let new_aspace_arc = Arc::new(AddressSpaceLock::new(new_aspace));
         let child_proc = Self::new_child_process(
             child_tid,
             self.clone(),
