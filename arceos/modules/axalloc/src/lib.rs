@@ -158,6 +158,23 @@ impl GlobalAllocator {
         self.palloc.lock().alloc_pages(num_pages, align_pow2)
     }
 
+    /// Allocates independent 4K pages while holding the page allocator lock once.
+    ///
+    /// Returns the number of initialized entries in `pages`. A short allocation
+    /// indicates that the allocator ran out of pages.
+    pub fn alloc_page_batch(&self, pages: &mut [usize]) -> usize {
+        let mut palloc = self.palloc.lock();
+        let mut allocated = 0;
+        for page in pages {
+            let Ok(pos) = palloc.alloc_pages(1, PAGE_SIZE) else {
+                break;
+            };
+            *page = pos;
+            allocated += 1;
+        }
+        allocated
+    }
+
     /// Allocates contiguous pages starting from the given address.
     ///
     /// It allocates `num_pages` pages from the page allocator starting from the
