@@ -25,7 +25,9 @@ pub use self::{
         AddrSpace, AddrSpaceCloneResult, AddrSpaceMutation, PageFaultOutcome, PageFaultResult,
         PageTableLockManager, TlbShootdown,
     },
-    backend::{Backend, FilePageLoad, FilePagePrepared, FileWritebacks},
+    backend::{
+        AnonPageLoad, AnonPagePrepared, Backend, FilePageLoad, FilePagePrepared, FileWritebacks,
+    },
 };
 
 static KERNEL_ASPACE: LazyInit<SpinNoIrq<AddrSpace>> = LazyInit::new();

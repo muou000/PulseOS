@@ -120,6 +120,12 @@ fn resolve_page_fault(
                     .handle_prepared_file_page(page, flags, &mut prepared)
                     .complete_after_unlock()?
             }
+            axmm::PageFaultOutcome::PrepareAnonPage(load) => {
+                let mut prepared = load.prepare()?;
+                aspace
+                    .handle_prepared_anon_page(page, flags, &mut prepared)
+                    .complete_after_unlock()?
+            }
             axmm::PageFaultOutcome::RetryWithWriteLock => {
                 let outcome = aspace
                     .handle_page_fault_write(page, flags)
