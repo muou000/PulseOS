@@ -1,8 +1,14 @@
 //! Wrapper functions for assembly instructions.
 
+use core::sync::atomic::{AtomicUsize, Ordering};
+
 use memory_addr::{PhysAddr, VirtAddr};
-use riscv::asm;
-use riscv::register::{satp, sstatus, stvec};
+use riscv::{
+    asm,
+    register::{satp, sstatus, stvec},
+};
+
+static KERNEL_PAGE_TABLE_ROOT: AtomicUsize = AtomicUsize::new(0);
 
 /// Allows the current CPU to respond to interrupts.
 #[inline]
@@ -63,12 +69,19 @@ pub fn read_user_page_table() -> PhysAddr {
 /// Reads the current page table root register for kernel space (`satp`).
 ///
 /// RISC-V does not have a separate page table root register for user and
-/// kernel space, so this operation is the same as [`read_user_page_table`].
+/// kernel space. The kernel root is therefore recorded when it is installed,
+/// so creating a kernel task while a user address space is active does not
+/// capture that user's page table.
 ///
 /// Returns the physical address of the page table root.
 #[inline]
 pub fn read_kernel_page_table() -> PhysAddr {
-    read_user_page_table()
+    let root = KERNEL_PAGE_TABLE_ROOT.load(Ordering::Acquire);
+    if root == 0 {
+        read_user_page_table()
+    } else {
+        pa!(root)
+    }
 }
 
 /// Writes the register to update the current page table root for user space
@@ -101,6 +114,7 @@ pub unsafe fn write_user_page_table(root_paddr: PhysAddr, asid: usize) {
 #[inline]
 pub unsafe fn write_kernel_page_table(root_paddr: PhysAddr) {
     unsafe { write_user_page_table(root_paddr, 0) };
+    KERNEL_PAGE_TABLE_ROOT.store(root_paddr.as_usize(), Ordering::Release);
 }
 
 /// Flushes the TLB.
