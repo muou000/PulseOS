@@ -91,6 +91,18 @@ impl PageTable {
         self.inner.unmap(vaddr)
     }
 
+    /// Unmaps one page while synchronization is provided by the caller.
+    ///
+    /// # Safety
+    ///
+    /// The caller must exclude all accesses to the affected page-table entry.
+    pub unsafe fn unmap_with_external_lock(
+        &self,
+        vaddr: VirtAddr,
+    ) -> PagingResult<(PhysAddr, PageSize, TlbFlush)> {
+        unsafe { self.inner.unmap_with_external_lock(vaddr) }
+    }
+
     pub fn unmap_region(&mut self, vaddr: VirtAddr, size: usize, flush_tlb_by_page: bool) -> PagingResult<TlbFlushAll> {
         self.inner.unmap_region(vaddr, size, flush_tlb_by_page)
     }
@@ -106,6 +118,26 @@ impl PageTable {
         self.inner.map(vaddr, target, page_size, flags)
     }
 
+    /// Maps one page while synchronization is provided by the caller.
+    ///
+    /// # Safety
+    ///
+    /// The caller must exclude all accesses to the affected page-table entries,
+    /// including creation of shared intermediate tables.
+    pub unsafe fn map_with_external_lock(
+        &self,
+        vaddr: VirtAddr,
+        target: PhysAddr,
+        page_size: PageSize,
+        flags: MappingFlags,
+    ) -> PagingResult<TlbFlush> {
+        let flags = Self::adjust_flags(flags);
+        unsafe {
+            self.inner
+                .map_with_external_lock(vaddr, target, page_size, flags)
+        }
+    }
+
     pub fn remap(
         &mut self,
         vaddr: VirtAddr,
@@ -116,9 +148,38 @@ impl PageTable {
         self.inner.remap(vaddr, paddr, flags)
     }
 
+    /// Remaps one page while synchronization is provided by the caller.
+    ///
+    /// # Safety
+    ///
+    /// The caller must exclude all accesses to the affected page-table entry.
+    pub unsafe fn remap_with_external_lock(
+        &self,
+        vaddr: VirtAddr,
+        paddr: PhysAddr,
+        flags: MappingFlags,
+    ) -> PagingResult<(PageSize, TlbFlush)> {
+        let flags = Self::adjust_flags(flags);
+        unsafe { self.inner.remap_with_external_lock(vaddr, paddr, flags) }
+    }
+
     pub fn protect(&mut self, vaddr: VirtAddr, flags: MappingFlags) -> PagingResult<(PageSize, TlbFlush)> {
         let flags = Self::adjust_flags(flags);
         self.inner.protect(vaddr, flags)
+    }
+
+    /// Protects one page while synchronization is provided by the caller.
+    ///
+    /// # Safety
+    ///
+    /// The caller must exclude all accesses to the affected page-table entry.
+    pub unsafe fn protect_with_external_lock(
+        &self,
+        vaddr: VirtAddr,
+        flags: MappingFlags,
+    ) -> PagingResult<(PageSize, TlbFlush)> {
+        let flags = Self::adjust_flags(flags);
+        unsafe { self.inner.protect_with_external_lock(vaddr, flags) }
     }
 
     pub fn map_region(
