@@ -13,6 +13,7 @@ mod shared;
 
 pub use self::shared::SharedFrame;
 pub(crate) use alloc::{cow_dec_frame_ref, cow_inc_frame_ref};
+pub use alloc::{AnonPageLoad, AnonPagePrepared};
 pub use self::cow::CowMapping;
 pub use self::file::{FilePageLoad, FilePagePrepared};
 
@@ -266,6 +267,15 @@ impl Backend {
         }
     }
 
+    pub(crate) fn page_fault_anon_request(
+        &self,
+        vaddr: VirtAddr,
+        area_end: VirtAddr,
+        page_table: &crate::PageTableLockManager,
+    ) -> Option<AnonPageLoad> {
+        self.page_fault_alloc_request(vaddr, area_end, page_table)
+    }
+
     pub(crate) fn handle_page_fault(
         &self,
         vaddr: VirtAddr,
@@ -323,6 +333,33 @@ impl Backend {
                 orig_flags,
                 page_table,
                 access_flags,
+                prepared,
+            ),
+            _ => false,
+        }
+    }
+
+    pub(crate) fn handle_prepared_anon_page(
+        &self,
+        vaddr: VirtAddr,
+        area_end: VirtAddr,
+        orig_flags: MappingFlags,
+        page_table: &crate::PageTableLockManager,
+        prepared: &mut AnonPagePrepared,
+    ) -> bool {
+        match self {
+            Self::Alloc { populate: false, .. } => self.handle_prepared_page_fault_alloc(
+                vaddr,
+                area_end,
+                orig_flags,
+                page_table,
+                prepared,
+            ),
+            Self::Cow(cow) => cow.inner().handle_prepared_anon_page(
+                vaddr,
+                area_end,
+                orig_flags,
+                page_table,
                 prepared,
             ),
             _ => false,

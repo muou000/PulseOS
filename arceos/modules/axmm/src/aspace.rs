@@ -13,7 +13,10 @@ use memory_addr::{
 use memory_set::{MappingBackend, MemoryArea, MemorySet};
 
 use crate::{
-    backend::{Backend, DeferredReclaims, FilePageLoad, FilePagePrepared, FileWritebacks},
+    backend::{
+        AnonPageLoad, AnonPagePrepared, Backend, DeferredReclaims, FilePageLoad,
+        FilePagePrepared, FileWritebacks,
+    },
     mapping_err_to_ax_err,
 };
 
@@ -132,6 +135,8 @@ pub enum PageFaultResult {
     NeedWriteLock,
     /// A file-backed page must be loaded after releasing the address-space lock.
     NeedFilePage(FilePageLoad),
+    /// Anonymous frames must be allocated and zeroed after releasing the address-space lock.
+    NeedAnonPage(AnonPageLoad),
 }
 
 #[derive(Debug)]
@@ -139,6 +144,7 @@ pub enum PageFaultOutcome {
     Handled(bool),
     RetryWithWriteLock,
     LoadFilePage(FilePageLoad),
+    PrepareAnonPage(AnonPageLoad),
 }
 
 impl PageFaultResult {
@@ -152,6 +158,7 @@ impl PageFaultResult {
             }
             Self::NeedWriteLock => Ok(PageFaultOutcome::RetryWithWriteLock),
             Self::NeedFilePage(load) => Ok(PageFaultOutcome::LoadFilePage(load)),
+            Self::NeedAnonPage(load) => Ok(PageFaultOutcome::PrepareAnonPage(load)),
         }
     }
 }
@@ -1159,6 +1166,12 @@ impl AddrSpace {
                 ) {
                     return PageFaultResult::NeedFilePage(load);
                 }
+                if let Some(load) =
+                    area.backend()
+                        .page_fault_anon_request(vaddr, area.end(), &self.pt)
+                {
+                    return PageFaultResult::NeedAnonPage(load);
+                }
                 let mut reclaim = DeferredReclaims::default();
                 let handled = area.backend().handle_page_fault(
                     vaddr,
@@ -1273,6 +1286,38 @@ impl AddrSpace {
             orig_flags,
             &self.pt,
             access_flags,
+            prepared,
+        ) {
+            PageFaultResult::Handled(true)
+        } else {
+            self.handle_page_fault(vaddr, access_flags)
+        }
+    }
+
+    /// Installs anonymous frames allocated and zeroed without the address-space lock.
+    pub fn handle_prepared_anon_page(
+        &self,
+        vaddr: VirtAddr,
+        access_flags: PageFaultFlags,
+        prepared: &mut AnonPagePrepared,
+    ) -> PageFaultResult {
+        if !self.va_range.contains(vaddr) {
+            return PageFaultResult::Handled(false);
+        }
+
+        let Some(area) = self.areas.find(vaddr) else {
+            return self.handle_page_fault(vaddr, access_flags);
+        };
+        let orig_flags = area.flags();
+        if !orig_flags.contains(access_flags) {
+            return PageFaultResult::Handled(false);
+        }
+
+        if area.backend().handle_prepared_anon_page(
+            vaddr,
+            area.end(),
+            orig_flags,
+            &self.pt,
             prepared,
         ) {
             PageFaultResult::Handled(true)

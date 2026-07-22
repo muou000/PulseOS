@@ -1792,6 +1792,14 @@ impl Process {
                     };
                     result.complete_after_unlock()?
                 }
+                axmm::PageFaultOutcome::PrepareAnonPage(load) => {
+                    let mut prepared = load.prepare()?;
+                    let result = {
+                        let aspace = aspace_handle.read();
+                        aspace.handle_prepared_anon_page(vaddr, flags, &mut prepared)
+                    };
+                    result.complete_after_unlock()?
+                }
                 axmm::PageFaultOutcome::RetryWithWriteLock => {
                     let result = {
                         let mut aspace = aspace_handle.write();
