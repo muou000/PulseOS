@@ -753,42 +753,33 @@ impl Ext4 {
                     bg_id = bg_id.saturating_add(1);
                     continue;
                 };
+                let inodes_per_group =
+                    self.0.superblock.inodes_per_block_group().get();
+                let unused_inodes = bg.unused_inodes_count();
+                // A completely unused group has its first unused inode at index 0.
+                let first_unused_inode = inodes_per_group
+                    .checked_sub(unused_inodes)
+                    .ok_or(
+                        CorruptKind::BlockGroupDescriptorTooManyUnusedInodes {
+                            block_group_num: bg_id,
+                            num_unused_inodes: unused_inodes,
+                        },
+                    )?;
+                let new_unused_inodes = if first_unused_inode <= inode_num {
+                    inodes_per_group
+                        .checked_sub(inode_num)
+                        .unwrap()
+                        .checked_sub(1)
+                        .unwrap()
+                } else {
+                    unused_inodes
+                };
+
                 inode_bitmap_handle.set(inode_num, true, self).await?;
                 self.update_inode_bitmap_checksum(bg_id, inode_bitmap_handle)
                     .await?;
                 bg.set_free_inodes_count(free_inodes.checked_sub(1).unwrap());
-                if self
-                    .0
-                    .superblock
-                    .inodes_per_block_group()
-                    .get()
-                    .checked_sub(bg.unused_inodes_count())
-                    .ok_or(
-                        CorruptKind::BlockGroupDescriptorTooManyUnusedInodes {
-                            block_group_num: bg_id,
-                            num_unused_inodes: bg.unused_inodes_count(),
-                        },
-                    )?
-                    .checked_sub(1)
-                    .ok_or(
-                        CorruptKind::BlockGroupDescriptorTooManyUnusedInodes {
-                            block_group_num: bg_id,
-                            num_unused_inodes: bg.unused_inodes_count(),
-                        },
-                    )?
-                    <= inode_num
-                {
-                    bg.set_unused_inodes_count(
-                        self.0
-                            .superblock
-                            .inodes_per_block_group()
-                            .get()
-                            .checked_sub(inode_num)
-                            .unwrap()
-                            .checked_sub(1)
-                            .unwrap(),
-                    );
-                }
+                bg.set_unused_inodes_count(new_unused_inodes);
 
                 if matches!(inode_type, FileType::Directory) {
                     bg.set_used_dirs_count(used_dirs.saturating_add(1));
