@@ -69,6 +69,7 @@ pub struct FileMapping {
     file_offset: usize,
     file_bytes: usize,
     shared: bool,
+    _write_access: Option<axfs::WriteAccessGuard>,
 }
 
 #[derive(Clone)]
@@ -261,6 +262,7 @@ impl Backend {
         file_offset: usize,
         file_bytes: usize,
         shared: bool,
+        write_access: Option<axfs::WriteAccessGuard>,
     ) -> Self {
         Self::File(FileMapping {
             start,
@@ -269,6 +271,7 @@ impl Backend {
             file_offset,
             file_bytes,
             shared,
+            _write_access: write_access,
         })
     }
 

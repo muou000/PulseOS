@@ -274,7 +274,12 @@ pub fn sys_mmap(
             let file_flags = file
                 .mmap_file_flags()
                 .unwrap_or_else(|| file_flags_for_mapping(map_flags));
-            Some((CachedFile::get_or_create(location), file_flags))
+            let write_access = if is_shared {
+                file.mmap_write_access()
+            } else {
+                None
+            };
+            Some((CachedFile::get_or_create(location), file_flags, write_access))
         }
     } else {
         None
@@ -366,7 +371,7 @@ pub fn sys_mmap(
         } else {
             aspace.map_alloc(VirtAddr::from(map_addr), aligned_length, map_flags, false)
         }
-    } else if let Some((cached, file_flags)) = file_mapping.as_ref() {
+    } else if let Some((cached, file_flags, write_access)) = file_mapping.as_ref() {
         aspace.map_file(
             VirtAddr::from(map_addr),
             aligned_length,
@@ -376,6 +381,7 @@ pub fn sys_mmap(
             offset,
             length,
             is_shared,
+            write_access.clone(),
         )
     } else if is_shared {
         use axhal::paging::PageSize;

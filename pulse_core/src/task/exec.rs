@@ -6,7 +6,7 @@ use alloc::{
 
 use axerrno::{AxError, AxResult};
 use axfs::FsContext;
-use axfs_ng_vfs::{NodePermission, NodeType};
+use axfs_ng_vfs::{Location, NodePermission, NodeType};
 use axhal::paging::MappingFlags;
 use memory_addr::va;
 
@@ -21,6 +21,13 @@ const SHEBANG_PROBE_LEN: usize = 256;
 struct PreparedExec {
     aspace: Arc<AddressSpaceLock>,
     load_info: crate::mm::UserAppLoadInfo,
+    path: String,
+    argv: Vec<String>,
+}
+
+struct ResolvedExec {
+    location: Location,
+    exec_access: axfs::ExecAccessGuard,
     path: String,
     argv: Vec<String>,
 }
@@ -55,32 +62,20 @@ fn parse_shebang_line(file_data: &[u8]) -> AxResult<Option<(String, Option<Strin
     Ok(Some((String::from(interp), interp_arg)))
 }
 
-fn check_txt_busy(loc: &axfs_ng_vfs::Location) -> AxResult<()> {
-    let target = (loc.mountpoint().device(), loc.inode());
-    let procs = super::processes_snapshot();
-    for proc in procs {
-        for entry in proc.fd_entries_snapshot() {
-            if !entry.object.is_write_open() {
-                continue;
-            }
-            let matches = entry.object.fifo_device_inode() == Some(target)
-                || entry.object.location().is_some_and(|open_loc| {
-                    (open_loc.mountpoint().device(), open_loc.inode()) == target
-                });
-            if matches {
-                return Err(axerrno::LinuxError::ETXTBSY.into());
-            }
-        }
-    }
-    Ok(())
+fn read_exec_prefix(location: &Location) -> AxResult<Vec<u8>> {
+    let file = axfs::CachedFile::get_or_create(location.clone());
+    let mut prefix = alloc::vec![0u8; SHEBANG_PROBE_LEN];
+    let read = file.read_at(&mut prefix[..], 0)?;
+    prefix.truncate(read);
+    Ok(prefix)
 }
 
-pub fn resolve_exec_path_and_args(
+fn resolve_exec_target_and_args(
     fs: &FsContext,
     path: &str,
     args: &[&str],
-) -> AxResult<(String, Vec<String>)> {
-    let normalize_path = |candidate: &str| -> AxResult<String> {
+) -> AxResult<ResolvedExec> {
+    let normalize_path = |candidate: &str| -> AxResult<(Location, String)> {
         let loc = axtask::future::block_on(fs.resolve(candidate))?;
         let path = loc.absolute_path()?;
 
@@ -89,9 +84,6 @@ pub fn resolve_exec_path_and_args(
         if meta.node_type != NodeType::RegularFile {
             return Err(AxError::PermissionDenied);
         }
-
-        // Check if the file is currently open for writing by any process
-        check_txt_busy(&loc)?;
 
         // Check execute permission based on credentials (uid/gid)
         if let Some((uid, gid)) = fs.credentials {
@@ -119,10 +111,10 @@ pub fn resolve_exec_path_and_args(
             }
         }
 
-        Ok(path.to_string())
+        Ok((loc, path.to_string()))
     };
 
-    let mut current_path = normalize_path(path)?;
+    let (mut current_location, mut current_path) = normalize_path(path)?;
     let mut current_args: Vec<String> = if args.is_empty() {
         alloc::vec![current_path.clone()]
     } else {
@@ -130,14 +122,19 @@ pub fn resolve_exec_path_and_args(
     };
 
     for _ in 0..SHEBANG_MAX_DEPTH {
-        current_path = normalize_path(&current_path)?;
+        let exec_access = axfs::acquire_exec_access(&current_location)?;
         axlog::debug!("resolve_exec_path_and_args: probing {}", current_path);
-        let file_data = axtask::future::block_on(fs.read_prefix(&current_path, SHEBANG_PROBE_LEN))
-            .map_err(|_| AxError::NotFound)?;
+        let file_data = read_exec_prefix(&current_location).map_err(|_| AxError::NotFound)?;
         let Some((interp, interp_arg)) = parse_shebang_line(&file_data)? else {
             axlog::debug!("resolve_exec_path_and_args: final {}", current_path);
-            return Ok((current_path, current_args));
+            return Ok(ResolvedExec {
+                location: current_location,
+                exec_access,
+                path: current_path,
+                argv: current_args,
+            });
         };
+        drop(exec_access);
 
         let mut next_args = Vec::new();
         next_args.push(interp.clone());
@@ -147,18 +144,32 @@ pub fn resolve_exec_path_and_args(
         next_args.push(current_path.clone());
         next_args.extend(current_args.into_iter().skip(1));
 
-        current_path = interp;
+        (current_location, current_path) = normalize_path(&interp)?;
         current_args = next_args;
     }
 
     Err(AxError::Unsupported)
 }
 
+pub fn resolve_exec_path_and_args(
+    fs: &FsContext,
+    path: &str,
+    args: &[&str],
+) -> AxResult<(String, Vec<String>)> {
+    let resolved = resolve_exec_target_and_args(fs, path, args)?;
+    Ok((resolved.path, resolved.argv))
+}
+
 impl Process {
     pub fn load_elf(&self, path: &str, args: &[&str], envs: &[&str]) -> AxResult<()> {
         let mut fs_ctx = self.fs_context_handle().lock().clone();
         fs_ctx.credentials = Some((self.fsuid(), self.fsgid()));
-        let (path, argv) = resolve_exec_path_and_args(&fs_ctx, path, args)?;
+        let ResolvedExec {
+            location,
+            exec_access,
+            path,
+            argv,
+        } = resolve_exec_target_and_args(&fs_ctx, path, args)?;
         let argv_refs: Vec<&str> = argv.iter().map(|s| s.as_str()).collect();
 
         let mut new_aspace = axmm::new_user_aspace(va!(USER_SPACE_BASE), USER_SPACE_SIZE)?;
@@ -175,13 +186,23 @@ impl Process {
             MappingFlags::READ | MappingFlags::WRITE | MappingFlags::USER,
             false,
         )?;
-        let load_info = crate::mm::load_user_app(&mut new_aspace, &path, &argv_refs, envs)?;
+        let load_info = crate::mm::load_user_app(
+            &mut new_aspace,
+            &fs_ctx,
+            location,
+            exec_access,
+            &path,
+            &argv_refs,
+            envs,
+        )?;
         let new_aspace_handle = Arc::new(AddressSpaceLock::new(new_aspace));
         let new_pt_root = new_aspace_handle.read().page_table_root();
         let new_asid = new_aspace_handle.read().asid();
         let old_aspace = self.replace_aspace_handle(new_aspace_handle);
         axtask::set_current_page_table_root(new_pt_root, new_asid);
+        let old_exec_access = self.replace_exec_access(load_info.exec_access);
         drop(old_aspace);
+        drop(old_exec_access);
 
         self.entry.store(load_info.entry, Ordering::Release);
         self.stack_top.store(load_info.user_sp, Ordering::Release);
@@ -252,7 +273,12 @@ impl Process {
 
         let mut fs_ctx = self.fs_context_handle().lock().clone();
         fs_ctx.credentials = Some((self.fsuid(), self.fsgid()));
-        let (path, argv) = resolve_exec_path_and_args(&fs_ctx, path, args)?;
+        let ResolvedExec {
+            location,
+            exec_access,
+            path,
+            argv,
+        } = resolve_exec_target_and_args(&fs_ctx, path, args)?;
         let argv_refs: Vec<&str> = argv.iter().map(|s| s.as_str()).collect();
 
         // Complete every fallible load step before changing the old image or
@@ -272,7 +298,15 @@ impl Process {
             false,
         )?;
 
-        let load_info = crate::mm::load_user_app(&mut new_aspace, &path, &argv_refs, envs)?;
+        let load_info = crate::mm::load_user_app(
+            &mut new_aspace,
+            &fs_ctx,
+            location,
+            exec_access,
+            &path,
+            &argv_refs,
+            envs,
+        )?;
         drop(argv_refs);
         let prepared = PreparedExec {
             aspace: Arc::new(AddressSpaceLock::new(new_aspace)),
@@ -311,7 +345,9 @@ impl Process {
 
         axtask::set_current_page_table_root(new_pt_root, new_asid);
         self.activate();
+        let old_exec_access = self.replace_exec_access(load_info.exec_access);
         drop(old_aspace);
+        drop(old_exec_access);
 
         // Flush TLB and instruction cache after loading is complete
         self.activate();

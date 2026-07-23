@@ -6,7 +6,7 @@ use alloc::{
 };
 
 use axerrno::{AxError, AxResult};
-use axfs::{CachedFile, File, FileFlags};
+use axfs::{CachedFile, ExecAccessGuard, FileFlags, FsContext};
 use axhal::{mem::MemRegionFlags, paging::MappingFlags};
 use axmm::AddrSpace;
 use kernel_elf_parser::{AuxEntry, AuxType, ELFHeadersBuilder, ELFParser, app_stack_region};
@@ -41,6 +41,7 @@ pub struct UserAppLoadInfo {
     pub entry: usize,
     pub user_sp: usize,
     pub signal_trampoline: usize,
+    pub exec_access: Vec<ExecAccessGuard>,
 }
 
 fn validate_machine(elf: &ElfFile<'_>, path: &str) -> AxResult {
@@ -174,7 +175,6 @@ fn load_segments(
     aspace: &mut AddrSpace,
     elf: &ElfFile<'_>,
     elf_file: &CachedFile,
-    path: &str,
     bias: usize,
 ) -> AxResult {
     for ph in elf.program_iter() {
@@ -211,7 +211,7 @@ fn load_segments(
             let seg_len = seg_end_page - seg_start_page;
             aspace.map_alloc(seg_start_page, seg_len, flags, true)?;
             if p_filesz > 0 {
-                let file_buf = read_elf_range(path, p_offset as u64, p_filesz)?;
+                let file_buf = read_elf_range(elf_file, p_offset as u64, p_filesz)?;
                 write_user_region(aspace, p_vaddr, &file_buf)?;
             }
         } else {
@@ -227,6 +227,7 @@ fn load_segments(
                     file_start_page,
                     file_bytes,
                     false, // ELF segments are private mappings
+                    None,
                 )?;
                 prefault_range(aspace, seg_start_page, map_len, flags)?;
             }
@@ -331,11 +332,20 @@ fn build_auxv(
     Ok(auxv)
 }
 
-fn get_from_cache(path: &str) -> Option<Arc<CachedElfImage>> {
+fn same_file(left: &axfs_ng_vfs::Location, right: &axfs_ng_vfs::Location) -> bool {
+    let left_fs = left.filesystem() as *const dyn axfs_ng_vfs::FilesystemOps as *const ();
+    let right_fs = right.filesystem() as *const dyn axfs_ng_vfs::FilesystemOps as *const ();
+    left_fs == right_fs && left.inode() == right.inode()
+}
+
+fn get_from_cache(
+    path: &str,
+    location: &axfs_ng_vfs::Location,
+) -> Option<Arc<CachedElfImage>> {
     ELF_FILE_CACHE
         .lock()
         .iter()
-        .find(|(p, _)| p == path)
+        .find(|(p, image)| p == path && same_file(image.file.location(), location))
         .map(|(_, d)| d.clone())
 }
 
@@ -389,26 +399,33 @@ fn put_into_cache(path: &str, data: Arc<CachedElfImage>) {
     cache.push((path.to_string(), data));
 }
 
-fn read_elf_file(path: &str) -> AxResult<Arc<CachedElfImage>> {
-    if let Some(image) = get_from_cache(path) {
+fn read_prefix(file: &CachedFile, limit: usize) -> AxResult<Vec<u8>> {
+    let size = axfs::cached_file_size(file.location()).map_err(|_| AxError::NotFound)?;
+    let read_len = usize::try_from(size.min(limit as u64)).map_err(|_| AxError::OutOfRange)?;
+    let mut prefix = vec![0u8; read_len];
+    let read = file
+        .read_at(&mut prefix[..], 0)
+        .map_err(|_| AxError::NotFound)?;
+    prefix.truncate(read);
+    Ok(prefix)
+}
+
+fn read_elf_file_at(
+    path: &str,
+    location: axfs_ng_vfs::Location,
+) -> AxResult<Arc<CachedElfImage>> {
+    if let Some(image) = get_from_cache(path, &location) {
         if validate_cached_image(path, &image) {
             return Ok(image);
         }
-        invalidate_cache(path);
     }
+    invalidate_cache(path);
 
-    let fs_ctx = {
-        let guard = axfs::FS_CONTEXT.lock();
-        guard.clone()
-    };
-
-    let location = axtask::future::block_on(fs_ctx.resolve(path)).map_err(|_| AxError::NotFound)?;
-    let mut prefix = axtask::future::block_on(fs_ctx.read_prefix(path, PAGE_SIZE_4K))
-        .map_err(|_| AxError::NotFound)?;
+    let file = CachedFile::get_or_create(location);
+    let mut prefix = read_prefix(&file, PAGE_SIZE_4K)?;
     let mut needed = compute_needed_prefix_len(&prefix)?;
     if needed > prefix.len() {
-        prefix = axtask::future::block_on(fs_ctx.read_prefix(path, needed))
-            .map_err(|_| AxError::NotFound)?;
+        prefix = read_prefix(&file, needed)?;
         needed = compute_needed_prefix_len(&prefix)?;
     }
     if needed > prefix.len() {
@@ -417,7 +434,7 @@ fn read_elf_file(path: &str) -> AxResult<Arc<CachedElfImage>> {
 
     let image = Arc::new(CachedElfImage {
         prefix,
-        file: CachedFile::get_or_create(location),
+        file,
     });
 
     if !validate_cached_image(path, &image) {
@@ -428,34 +445,24 @@ fn read_elf_file(path: &str) -> AxResult<Arc<CachedElfImage>> {
     Ok(image)
 }
 
-fn read_elf_range(path: &str, offset: u64, len: usize) -> AxResult<Vec<u8>> {
+fn read_elf_file(path: &str) -> AxResult<Arc<CachedElfImage>> {
     let fs_ctx = {
         let guard = axfs::FS_CONTEXT.lock();
         guard.clone()
     };
-    let file = axtask::future::block_on(File::open(&fs_ctx, path)).map_err(|_| AxError::NotFound)?;
+    let location = axtask::future::block_on(fs_ctx.resolve(path)).map_err(|_| AxError::NotFound)?;
+    read_elf_file_at(path, location)
+}
+
+fn read_elf_range(file: &CachedFile, offset: u64, len: usize) -> AxResult<Vec<u8>> {
     let mut buf = vec![0u8; len];
-    let read = axtask::future::block_on(file.read_at(&mut buf[..], offset))
+    let read = file
+        .read_at(&mut buf[..], offset)
         .map_err(|_| AxError::InvalidExecutable)?;
     if read == len {
         return Ok(buf);
     }
-
-    let whole = axtask::future::block_on(fs_ctx.read(path)).map_err(|_| AxError::NotFound)?;
-    let start = usize::try_from(offset).map_err(|_| AxError::InvalidExecutable)?;
-    let end = start.checked_add(len).ok_or(AxError::InvalidExecutable)?;
-    if end > whole.len() {
-        axlog::warn!(
-            "short read while loading {}: offset={:#x} size={:#x} read={:#x} whole_len={:#x}",
-            path,
-            offset,
-            len,
-            read,
-            whole.len(),
-        );
-        return Err(AxError::InvalidExecutable);
-    }
-    Ok(whole[start..end].to_vec())
+    Err(AxError::InvalidExecutable)
 }
 
 pub fn check_elf_header(path: &str) -> AxResult<()> {
@@ -483,11 +490,15 @@ pub fn check_elf_header(path: &str) -> AxResult<()> {
 
 pub fn load_user_app(
     aspace: &mut AddrSpace,
+    fs: &FsContext,
+    main_location: axfs_ng_vfs::Location,
+    main_exec_access: ExecAccessGuard,
     path: &str,
     args: &[&str],
     envs: &[&str],
 ) -> AxResult<UserAppLoadInfo> {
-    let main_image = read_elf_file(path)?;
+    let mut exec_access = vec![main_exec_access];
+    let main_image = read_elf_file_at(path, main_location)?;
     let main_data = main_image.bytes();
     if main_data.is_empty() {
         return Err(AxError::InvalidExecutable);
@@ -500,7 +511,7 @@ pub fn load_user_app(
         ElfType::SharedObject => compute_load_bias(&main_elf, USER_DYN_BASE)?,
         _ => return Err(AxError::InvalidExecutable),
     };
-    load_segments(aspace, &main_elf, &main_image.file, path, main_bias)?;
+    load_segments(aspace, &main_elf, &main_image.file, main_bias)?;
     let main_entry = VirtAddr::from(main_elf.header.pt2.entry_point() as usize)
         .checked_add(main_bias)
         .ok_or(AxError::OutOfRange)?;
@@ -515,7 +526,10 @@ pub fn load_user_app(
     let mut dispatch_entry = main_entry;
 
     if let Some(interp_path) = interp_path {
-        let interp_image = read_elf_file(&interp_path)?;
+        let interp_location = axtask::future::block_on(fs.resolve(&interp_path))?;
+        let interp_exec_access = axfs::acquire_exec_access(&interp_location)?;
+        let interp_image = read_elf_file_at(&interp_path, interp_location)?;
+        exec_access.push(interp_exec_access);
         let interp_data = interp_image.bytes();
         if interp_data.is_empty() {
             return Err(AxError::InvalidExecutable);
@@ -528,7 +542,7 @@ pub fn load_user_app(
             ElfType::SharedObject => compute_load_bias(&interp_elf, USER_INTERP_BASE)?,
             _ => return Err(AxError::InvalidExecutable),
         };
-        load_segments(aspace, &interp_elf, &interp_image.file, &interp_path, bias)?;
+        load_segments(aspace, &interp_elf, &interp_image.file, bias)?;
         interp_base = Some(bias);
         dispatch_entry = VirtAddr::from(interp_elf.header.pt2.entry_point() as usize)
             .checked_add(bias)
@@ -571,5 +585,6 @@ pub fn load_user_app(
         entry: dispatch_entry.as_usize(),
         user_sp: user_sp.as_usize(),
         signal_trampoline: vdso_trampoline,
+        exec_access,
     })
 }

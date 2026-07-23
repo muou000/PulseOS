@@ -60,8 +60,7 @@ fn do_handle_loop_ioctl(fd: usize, cmd: u32, arg: usize) -> Result<isize, LinuxE
                     .downcast_ref::<pulse_core::fd_table::FileObject>()
                 {
                     let file = file_obj.inner();
-                    let backend = file.backend().map_err(LinuxError::from)?.clone();
-                    axfs::set_loop_backing(loop_id, axfs::File::new(backend, file.flags()))
+                    axfs::set_loop_backing(loop_id, file.clone_with_new_position())
                         .map_err(LinuxError::from)?;
                     return Ok(0);
                 } else {
