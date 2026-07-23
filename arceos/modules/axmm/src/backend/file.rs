@@ -117,7 +117,7 @@ impl FilePageLoad {
     pub fn prepare(self) -> AxResult<FilePagePrepared> {
         loop {
             self.file
-                .ensure_page_resident(self.page_number)
+                .ensure_page_resident_readahead(self.page_number)
                 .map_err(|_| AxError::Io)?;
             match self
                 .file
