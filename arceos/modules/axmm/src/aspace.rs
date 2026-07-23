@@ -608,6 +608,7 @@ impl AddrSpace {
         file_offset: usize,
         file_bytes: usize,
         shared: bool,
+        write_access: Option<axfs::WriteAccessGuard>,
     ) -> AxResult {
         if !self.contains_range(start, size) {
             return ax_err!(InvalidInput, "address out of range");
@@ -620,7 +621,15 @@ impl AddrSpace {
             start,
             size,
             flags,
-            Backend::new_file(start, file, file_flags, file_offset, file_bytes, shared),
+            Backend::new_file(
+                start,
+                file,
+                file_flags,
+                file_offset,
+                file_bytes,
+                shared,
+                write_access,
+            ),
         );
         self.map_area(area).map_err(mapping_err_to_ax_err)?;
         Ok(())

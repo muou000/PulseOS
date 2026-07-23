@@ -9,11 +9,12 @@ use core::sync::atomic::AtomicU8;
 use core::{
     num::NonZeroUsize,
     ops::Range,
-    sync::atomic::{AtomicU64, Ordering},
+    sync::atomic::{AtomicIsize, AtomicU64, Ordering},
     task::Context,
 };
 
 use axalloc::global_allocator;
+use axerrno::LinuxError;
 use axfs_ng_vfs::{
     FileNode, Location, NodeFlags, NodePermission, NodeType, VfsError, VfsResult, path::Path,
 };
@@ -73,6 +74,123 @@ pub fn invalidate_file_cache(fs_id: usize, inode: u64) {
 
 static FILE_SHARED_STATES: Lazy<SpinMutex<BTreeMap<FileCacheKey, Weak<CachedFileShared>>>> =
     Lazy::new(|| SpinMutex::new(BTreeMap::new()));
+
+struct InodeAccessState {
+    count: AtomicIsize,
+}
+
+impl InodeAccessState {
+    const fn new() -> Self {
+        Self {
+            count: AtomicIsize::new(0),
+        }
+    }
+
+    fn acquire_write(self: &Arc<Self>) -> VfsResult<WriteAccessGuard> {
+        let mut count = self.count.load(Ordering::Acquire);
+        loop {
+            if count < 0 {
+                return Err(VfsError::from(LinuxError::ETXTBSY));
+            }
+            let next = count.checked_add(1).ok_or(VfsError::BadState)?;
+            match self.count.compare_exchange_weak(
+                count,
+                next,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => {
+                    return Ok(WriteAccessGuard {
+                        _lease: Arc::new(WriteAccessLease {
+                            state: self.clone(),
+                        }),
+                    });
+                }
+                Err(observed) => count = observed,
+            }
+        }
+    }
+
+    fn acquire_exec(self: &Arc<Self>) -> VfsResult<ExecAccessGuard> {
+        let mut count = self.count.load(Ordering::Acquire);
+        loop {
+            if count > 0 {
+                return Err(VfsError::from(LinuxError::ETXTBSY));
+            }
+            let next = count.checked_sub(1).ok_or(VfsError::BadState)?;
+            match self.count.compare_exchange_weak(
+                count,
+                next,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => {
+                    return Ok(ExecAccessGuard {
+                        _lease: Arc::new(ExecAccessLease {
+                            state: self.clone(),
+                        }),
+                    });
+                }
+                Err(observed) => count = observed,
+            }
+        }
+    }
+}
+
+struct WriteAccessLease {
+    state: Arc<InodeAccessState>,
+}
+
+impl Drop for WriteAccessLease {
+    fn drop(&mut self) {
+        let previous = self.state.count.fetch_sub(1, Ordering::AcqRel);
+        debug_assert!(previous > 0);
+    }
+}
+
+#[derive(Clone)]
+pub struct WriteAccessGuard {
+    _lease: Arc<WriteAccessLease>,
+}
+
+struct ExecAccessLease {
+    state: Arc<InodeAccessState>,
+}
+
+impl Drop for ExecAccessLease {
+    fn drop(&mut self) {
+        let previous = self.state.count.fetch_add(1, Ordering::AcqRel);
+        debug_assert!(previous < 0);
+    }
+}
+
+#[derive(Clone)]
+pub struct ExecAccessGuard {
+    _lease: Arc<ExecAccessLease>,
+}
+
+static INODE_ACCESS_STATES: Lazy<SpinMutex<BTreeMap<FileCacheKey, Weak<InodeAccessState>>>> =
+    Lazy::new(|| SpinMutex::new(BTreeMap::new()));
+
+fn inode_access_state(location: &Location) -> Arc<InodeAccessState> {
+    let key = file_cache_key(location);
+    let mut registry = INODE_ACCESS_STATES.lock();
+    if let Some(state) = registry.get(&key).and_then(Weak::upgrade) {
+        return state;
+    }
+    registry.retain(|_, state| state.strong_count() > 0);
+    let state = Arc::new(InodeAccessState::new());
+    registry.insert(key, Arc::downgrade(&state));
+    state
+}
+
+pub fn acquire_exec_access(location: &Location) -> VfsResult<ExecAccessGuard> {
+    inode_access_state(location).acquire_exec()
+}
+
+fn acquire_write_access(location: &Location) -> VfsResult<WriteAccessGuard> {
+    inode_access_state(location).acquire_write()
+}
 
 /// Results returned by [`OpenOptions::open`].
 pub enum OpenResult {
@@ -238,7 +356,16 @@ impl OpenOptions {
             }
             loc.check_is_dir()?;
         }
-        if self.truncate && loc.metadata().await?.node_type == NodeType::RegularFile {
+        let metadata = loc.metadata().await?;
+        let write_access = if metadata.node_type == NodeType::RegularFile
+            && flags.intersects(FileFlags::WRITE | FileFlags::APPEND)
+            && !flags.contains(FileFlags::PATH)
+        {
+            Some(acquire_write_access(&loc)?)
+        } else {
+            None
+        };
+        if self.truncate && metadata.node_type == NodeType::RegularFile {
             loc.entry().as_file()?.set_len(0).await?;
         }
 
@@ -247,7 +374,7 @@ impl OpenOptions {
         } else {
             // TODO(mivik): is this correct?
             let non_cacheable_type = matches!(
-                loc.metadata().await?.node_type,
+                metadata.node_type,
                 NodeType::CharacterDevice
                     | NodeType::BlockDevice
                     | NodeType::Fifo
@@ -264,7 +391,7 @@ impl OpenOptions {
             } else {
                 FileBackend::new_direct(loc)
             };
-            OpenResult::File(File::new(backend, flags))
+            OpenResult::File(File::new(backend, flags, write_access))
         })
     }
 
@@ -1574,12 +1701,17 @@ pub struct File {
     inner: FileBackend,
     flags: FileFlags,
     position: Option<Mutex<u64>>,
+    _write_access: Option<WriteAccessGuard>,
     #[cfg(feature = "times")]
     access_flags: AtomicU8,
 }
 
 impl File {
-    pub fn new(inner: FileBackend, flags: FileFlags) -> Self {
+    fn new(
+        inner: FileBackend,
+        flags: FileFlags,
+        write_access: Option<WriteAccessGuard>,
+    ) -> Self {
         let position = if inner.location().flags().contains(NodeFlags::STREAM) {
             None
         } else {
@@ -1593,9 +1725,22 @@ impl File {
             inner,
             flags,
             position,
+            _write_access: write_access,
             #[cfg(feature = "times")]
             access_flags: AtomicU8::new(0),
         }
+    }
+
+    pub fn clone_with_new_position(&self) -> Self {
+        Self::new(
+            self.inner.clone(),
+            self.flags,
+            self._write_access.clone(),
+        )
+    }
+
+    pub fn write_access_guard(&self) -> Option<WriteAccessGuard> {
+        self._write_access.clone()
     }
 
     pub async fn open(context: &FsContext, path: impl AsRef<Path>) -> VfsResult<Self> {

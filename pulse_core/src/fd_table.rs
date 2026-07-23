@@ -156,6 +156,10 @@ pub trait FdObject: Send + Sync {
         None
     }
 
+    fn mmap_write_access(&self) -> Option<axfs::WriteAccessGuard> {
+        None
+    }
+
     fn as_ns_fd(&self) -> Option<(u64, u32)> {
         None
     }
@@ -984,6 +988,10 @@ impl FdObject for FileObject {
 
     fn mmap_file_flags(&self) -> Option<AxFileFlags> {
         Some(self.inner.flags())
+    }
+
+    fn mmap_write_access(&self) -> Option<axfs::WriteAccessGuard> {
+        self.inner.write_access_guard()
     }
 
     fn truncate(&self, len: u64) -> LinuxResult {

@@ -356,22 +356,6 @@ pub fn sys_openat(dirfd: i32, pathname: usize, flags: usize, mode: usize) -> isi
         }
     }
 
-    let write_requested = (flags & (O_ACCMODE as usize) == O_WRONLY as usize)
-        || (flags & (O_ACCMODE as usize) == O_RDWR as usize);
-    if write_requested {
-        if let axfs::OpenResult::File(ref file) = opened {
-            if let Ok(abs_path) = file.location().absolute_path() {
-                let procs = pulse_core::task::processes_snapshot();
-                for proc in procs {
-                    // Bolt: Avoid cloning the `exec_path` string for every process by checking equality inside the read lock.
-                    if proc.is_exec_path(abs_path.as_str()) {
-                        return -LinuxError::ETXTBSY.code() as isize;
-                    }
-                }
-            }
-        }
-    }
-
     let is_fifo = if let Ok(ref meta) = metadata {
         meta.node_type == NodeType::Fifo
     } else {

@@ -466,6 +466,8 @@ pub struct Process {
     signal_shared: Arc<SignalShared>,
     /// 进程可执行文件的绝对路径
     exec_path: RwLock<Option<String>>,
+    /// Keeps executable inodes write-denied for the lifetime of this image.
+    exec_access: RwLock<Vec<axfs::ExecAccessGuard>>,
     /// 命令行参数列表
     pub args: RwLock<Vec<String>>,
     /// 用户态信号处理器蹦床地址
@@ -707,16 +709,19 @@ impl Process {
         self.exec_path.read().clone()
     }
 
-    pub fn is_exec_path(&self, path: &str) -> bool {
-        self.exec_path.read().as_deref() == Some(path)
-    }
-
     pub fn exec_path_or_default(&self) -> String {
         self.exec_path().unwrap_or_else(|| "pulse_init".to_string())
     }
 
     pub fn set_exec_path(&self, path: String) {
         *self.exec_path.write() = Some(path);
+    }
+
+    pub(super) fn replace_exec_access(
+        &self,
+        access: Vec<axfs::ExecAccessGuard>,
+    ) -> Vec<axfs::ExecAccessGuard> {
+        core::mem::replace(&mut *self.exec_access.write(), access)
     }
 
     pub fn signal_trampoline(&self) -> usize {
@@ -1560,6 +1565,7 @@ impl Process {
             }),
             signal_shared: SignalShared::new(),
             exec_path: RwLock::new(None),
+            exec_access: RwLock::new(Vec::new()),
             args: RwLock::new(alloc::vec![String::from("pulse_init")]),
             signal_trampoline: AtomicUsize::new(0),
             ipc: IpcContext {
@@ -1652,6 +1658,7 @@ impl Process {
         };
         let signal_trampoline = parent.signal_trampoline.load(Ordering::Acquire);
         let exec_path = parent.exec_path();
+        let exec_access = parent.exec_access.read().clone();
         let uts_ns = if share_uts {
             parent.uts_ns.read().clone()
         } else {
@@ -1706,6 +1713,7 @@ impl Process {
             resources: Mutex::new(resources),
             signal_shared,
             exec_path: RwLock::new(exec_path),
+            exec_access: RwLock::new(exec_access),
             args: RwLock::new(parent.args.read().clone()),
             signal_trampoline: AtomicUsize::new(signal_trampoline),
             ipc: IpcContext {
@@ -1944,6 +1952,7 @@ impl Process {
 
         self.args.write().clear();
         *self.exec_path.write() = None;
+        self.exec_access.write().clear();
 
         axlog::debug!("release_zombie_resources: pid={}", self.pid());
         Ok(())
