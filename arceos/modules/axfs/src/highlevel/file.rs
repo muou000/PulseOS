@@ -1,6 +1,6 @@
 use alloc::{
     boxed::Box,
-    collections::{BTreeMap, VecDeque},
+    collections::BTreeMap,
     sync::{Arc, Weak},
     vec::Vec,
 };
@@ -61,15 +61,7 @@ fn prune_file_shared_states(registry: &mut BTreeMap<FileCacheKey, Weak<CachedFil
 
 pub fn invalidate_file_cache(fs_id: usize, inode: u64) {
     let key = FileCacheKey { fs_id, inode };
-    let mut registry = FILE_SHARED_STATES.lock();
-    if let Some(weak_shared) = registry.remove(&key) {
-        if let Some(shared) = weak_shared.upgrade() {
-            let mut queue = RECENTLY_CLOSED_FILES.lock();
-            if let Some(pos) = queue.iter().position(|x| Arc::ptr_eq(x, &shared)) {
-                queue.remove(pos);
-            }
-        }
-    }
+    FILE_SHARED_STATES.lock().remove(&key);
 }
 
 static FILE_SHARED_STATES: Lazy<SpinMutex<BTreeMap<FileCacheKey, Weak<CachedFileShared>>>> =
@@ -870,9 +862,6 @@ impl Drop for CachedFileShared {
     }
 }
 
-static RECENTLY_CLOSED_FILES: Lazy<SpinMutex<VecDeque<Arc<CachedFileShared>>>> =
-    Lazy::new(|| SpinMutex::new(VecDeque::new()));
-
 pub(crate) fn flush_all_file_caches() -> VfsResult<()> {
     let states = {
         let mut registry = FILE_SHARED_STATES.lock();
@@ -989,16 +978,6 @@ impl Drop for CachedFile {
                 }
                 if let Err(err) = self.flush_dirty_pages(file) {
                     error!("CachedFile drop: failed to flush dirty pages: {:?}", err);
-                }
-            }
-            if !self.in_memory {
-                let mut queue = RECENTLY_CLOSED_FILES.lock();
-                if let Some(pos) = queue.iter().position(|x| Arc::ptr_eq(x, &self.shared)) {
-                    queue.remove(pos);
-                }
-                queue.push_back(self.shared.clone());
-                while queue.len() > 8 {
-                    queue.pop_front();
                 }
             }
         }
