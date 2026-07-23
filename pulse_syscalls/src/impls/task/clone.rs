@@ -481,11 +481,9 @@ pub fn sys_setns(fd: usize, nstype: usize) -> isize {
         Err(e) => return -e.code() as isize,
     };
 
-    let fd_table = process.fd_table();
-    let fd_table_guard = fd_table.read();
-    let entry = match fd_table_guard.get(fd) {
-        Some(entry) => entry,
-        None => return -LinuxError::EBADF.code() as isize,
+    let entry = match process.get_fd_entry(fd) {
+        Ok(entry) => entry,
+        Err(e) => return -e.code() as isize,
     };
 
     let (ns_pid, fd_ns_type) = match entry.object.as_ns_fd() {
