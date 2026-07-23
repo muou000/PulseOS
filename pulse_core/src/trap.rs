@@ -22,7 +22,7 @@ fn handle_illegal_instruction(tf: &mut TrapFrame, _vaddr: usize, is_user: bool) 
                 thread.process().exec_path(),
                 pc
             );
-            crate::task::queue_signal_to_thread(thread.as_ref(), 4); // SIGILL
+            crate::task::force_signal_to_thread(thread.as_ref(), 4); // SIGILL
             return true;
         }
     }
@@ -46,7 +46,7 @@ fn handle_address_error(tf: &mut TrapFrame, vaddr: usize, is_user: bool) -> bool
                 vaddr
             );
             // Usually SIGSEGV, sometimes SIGBUS. We use SIGSEGV as default.
-            crate::task::queue_signal_to_thread(thread.as_ref(), 11); // SIGSEGV
+            crate::task::force_signal_to_thread(thread.as_ref(), 11); // SIGSEGV
             return true;
         }
     }
@@ -162,10 +162,19 @@ fn handle_page_fault(vaddr: VirtAddr, access_flags: MappingFlags, is_user: bool)
         axlog::warn!("  vaddr={:#x}, flags={:?}", vaddr, access_flags);
 
         let mut signo = 11; // Default to SIGSEGV
+        let mut fault_area = None;
+        let mut previous_area = None;
+        let mut next_area = None;
         let aspace_handle = proc.aspace_handle();
         let aspace = aspace_handle.read();
-        aspace.for_each_area_with_backend(|start, end, _flags, backend| {
+        aspace.for_each_area_with_backend(|start, end, flags, backend| {
+            if end <= vaddr {
+                previous_area = Some((start, end, flags));
+            } else if start > vaddr && next_area.is_none() {
+                next_area = Some((start, end, flags));
+            }
             if vaddr >= start && vaddr < end {
+                fault_area = Some((start, end, flags));
                 let mut curr_backend = backend.clone();
                 while let axmm::Backend::Cow(cow) = &curr_backend {
                     curr_backend = cow.inner().clone();
@@ -181,7 +190,32 @@ fn handle_page_fault(vaddr: VirtAddr, access_flags: MappingFlags, is_user: bool)
         });
         drop(aspace);
 
-        crate::task::queue_signal_to_thread(thread.as_ref(), signo as usize);
+        let signal = thread.signal();
+        let blocked_mask = signal.blocked_mask();
+        let signal_bit = 1u64 << (signo - 1);
+        let action = crate::task::resolve_action(&signal.shared(), signo as usize);
+        axlog::warn!(
+            "  heap_top={:#x}, area={:?}, previous_area={:?}, next_area={:?}",
+            proc.get_heap_top(),
+            fault_area,
+            previous_area,
+            next_area
+        );
+        axlog::warn!(
+            "  synchronous signal: signo={}, action={:?}, blocked={}, blocked_mask={:#x}, \
+             in_handler={}",
+            signo,
+            action,
+            (blocked_mask & signal_bit) != 0,
+            blocked_mask,
+            signal.is_in_handler()
+        );
+        let newly_queued = crate::task::force_signal_to_thread(thread.as_ref(), signo as usize);
+        axlog::warn!(
+            "  synchronous signal newly_queued={}, pending_mask={:#x}",
+            newly_queued,
+            signal.pending_mask()
+        );
         proc.mark_user_resume();
         true
     }

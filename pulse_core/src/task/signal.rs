@@ -313,6 +313,31 @@ impl ThreadSignal {
         self.has_pending_unblocked() || self.skip_once.load(Ordering::Acquire)
     }
 
+    pub fn is_in_handler(&self) -> bool {
+        self.in_handler.load(Ordering::Acquire)
+    }
+
+    fn prepare_for_forced_signal(&self, sig: usize) -> bool {
+        let Some(bit) = sig_bit(sig) else {
+            return false;
+        };
+        let action = resolve_action(&self.shared, sig);
+        let was_blocked = (self.blocked.load(Ordering::Acquire) & bit) != 0;
+        let was_ignored = is_ignored_action(action);
+
+        if was_blocked || was_ignored {
+            self.shared.set_action(sig, SigAction::dfl());
+        }
+        if was_blocked {
+            self.blocked.fetch_and(!bit, Ordering::AcqRel);
+        }
+
+        // A synchronous fault is a new delivery point, even immediately after
+        // rt_sigreturn consumed the normal one-shot delivery suppression.
+        self.skip_once.store(false, Ordering::Release);
+        true
+    }
+
     pub fn pending_mask(&self) -> u64 {
         self.thread_pending.load(Ordering::Acquire)
             | self.shared.process_pending.load(Ordering::Acquire)
@@ -663,6 +688,58 @@ mod tests {
             Some((3, Some([3; 128])))
         );
     }
+
+    #[test]
+    fn forced_signal_unblocks_and_resets_a_blocked_handler() {
+        const SIGSEGV: usize = 11;
+        let shared = SignalShared::new();
+        let signal = ThreadSignal::new(shared.clone());
+        let sigsegv_bit = sig_bit(SIGSEGV).unwrap();
+
+        shared.set_action(SIGSEGV, SigAction::from_parts(0x1234, 0, 0));
+        signal.set_blocked_mask(sigsegv_bit);
+        signal.skip_once.store(true, Ordering::Release);
+
+        assert!(signal.prepare_for_forced_signal(SIGSEGV));
+        assert_eq!(signal.blocked_mask() & sigsegv_bit, 0);
+        assert!(!signal.skip_once.load(Ordering::Acquire));
+        assert_eq!(shared.action(SIGSEGV).handler, SIG_DFL);
+        assert!(matches!(
+            resolve_action(&shared, SIGSEGV),
+            SignalAction::Default(DefaultSignalAction::CoreDump)
+        ));
+
+        signal.queue_thread_signal(SIGSEGV);
+        assert!(signal.has_pending_unblocked());
+    }
+
+    #[test]
+    fn forced_signal_preserves_an_unblocked_handler() {
+        const SIGSEGV: usize = 11;
+        let shared = SignalShared::new();
+        let signal = ThreadSignal::new(shared.clone());
+
+        shared.set_action(SIGSEGV, SigAction::from_parts(0x1234, 0, 0));
+
+        assert!(signal.prepare_for_forced_signal(SIGSEGV));
+        assert_eq!(shared.action(SIGSEGV).handler, 0x1234);
+    }
+
+    #[test]
+    fn forced_signal_resets_an_ignored_disposition() {
+        const SIGSEGV: usize = 11;
+        let shared = SignalShared::new();
+        let signal = ThreadSignal::new(shared.clone());
+
+        shared.set_action(SIGSEGV, SigAction::from_parts(SIG_IGN, 0, 0));
+
+        assert!(signal.prepare_for_forced_signal(SIGSEGV));
+        assert_eq!(shared.action(SIGSEGV).handler, SIG_DFL);
+        assert!(matches!(
+            resolve_action(&shared, SIGSEGV),
+            SignalAction::Default(DefaultSignalAction::CoreDump)
+        ));
+    }
 }
 
 fn default_action(sig: usize) -> DefaultSignalAction {
@@ -931,6 +1008,18 @@ pub fn queue_signal_to_thread(thread: &Thread, sig: usize) -> bool {
     // Always notify even if already queued
     thread.notify_signal_pending();
     queued
+}
+
+/// Queues a signal caused synchronously by the current thread's execution.
+///
+/// A blocked or ignored synchronous fault cannot remain pending while the
+/// faulting instruction is retried. Match Linux force-signal behavior by
+/// restoring the default disposition and unblocking it before queuing.
+pub fn force_signal_to_thread(thread: &Thread, sig: usize) -> bool {
+    if !thread.signal().prepare_for_forced_signal(sig) {
+        return false;
+    }
+    queue_signal_to_thread(thread, sig)
 }
 
 pub fn queue_signal_to_process_with_info(
