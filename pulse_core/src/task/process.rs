@@ -412,7 +412,7 @@ pub struct Process {
     /// 虚拟地址空间
     aspace: RwLock<Arc<AddressSpaceLock>>,
     /// 堆顶指针
-    pub heap_top: Arc<AtomicUsize>,
+    heap_top: RwLock<Arc<AtomicUsize>>,
     /// brk 扩展排他锁
     pub brk_lock: Mutex<()>,
     /// 文件系统根目录与当前工作目录上下文
@@ -1120,11 +1120,15 @@ impl Process {
     }
 
     pub fn get_heap_top(&self) -> usize {
-        self.heap_top.load(Ordering::Acquire)
+        self.heap_top.read().load(Ordering::Acquire)
     }
 
     pub fn set_heap_top(&self, top: usize) {
-        self.heap_top.store(top, Ordering::Release);
+        self.heap_top.read().store(top, Ordering::Release);
+    }
+
+    pub fn reset_heap_top(&self, top: usize) {
+        *self.heap_top.write() = Arc::new(AtomicUsize::new(top));
     }
 
     pub fn try_fault_in_user_range(
@@ -1542,7 +1546,9 @@ impl Process {
             group_exit_code: AtomicI32::new(0),
             futex_table: FutexTable::new(),
             vfork_context: None,
-            heap_top: Arc::new(AtomicUsize::new(USER_HEAP_BASE + USER_HEAP_SIZE)),
+            heap_top: RwLock::new(Arc::new(AtomicUsize::new(
+                USER_HEAP_BASE + USER_HEAP_SIZE,
+            ))),
             brk_lock: Mutex::new(()),
             credentials: RwLock::new(Arc::new(Credentials::new(
                 0,
@@ -1599,7 +1605,7 @@ impl Process {
         let parent_arc = parent;
         let parent = parent_arc.as_ref();
         let heap_top = if share_vm {
-            parent.heap_top.clone()
+            parent.heap_top.read().clone()
         } else {
             Arc::new(AtomicUsize::new(parent.get_heap_top()))
         };
@@ -1682,7 +1688,7 @@ impl Process {
             parent_pid: AtomicU64::new(parent.pid()),
             parent: RwLock::new(Some(Arc::downgrade(&parent_arc))),
             aspace: RwLock::new(aspace),
-            heap_top,
+            heap_top: RwLock::new(heap_top),
             brk_lock: Mutex::new(()),
             fs_context,
             fd_table,
@@ -1887,7 +1893,7 @@ impl Process {
             self.activate();
         }
         drop(old_handle);
-        self.heap_top.store(USER_HEAP_BASE, Ordering::Release);
+        self.reset_heap_top(USER_HEAP_BASE);
         self.stack_top.store(USER_STACK_TOP, Ordering::Release);
         self.entry.store(0, Ordering::Release);
 
