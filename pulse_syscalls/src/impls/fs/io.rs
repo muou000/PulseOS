@@ -1770,10 +1770,10 @@ pub fn sys_sync() -> isize {
     let mut unique_objects = alloc::collections::BTreeMap::new();
 
     for proc in procs {
-        proc.for_each_fd_entry(|entry| {
+        for entry in proc.fd_entries_snapshot() {
             let ptr = alloc::sync::Arc::as_ptr(&entry.object) as *const () as usize;
             unique_objects.entry(ptr).or_insert_with(|| entry.object.clone());
-        });
+        }
     }
 
     for object in unique_objects.into_values() {

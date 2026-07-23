@@ -2547,6 +2547,14 @@ pub fn create_fifo_entry(
     let shared = get_or_create_fifo_shared(device, inode);
     let nonblock = flags.contains(FdFlags::NONBLOCK);
 
+    if writable
+        && !readable
+        && nonblock
+        && shared.reader_count.load(Ordering::Acquire) == 0
+    {
+        return Err(LinuxError::ENXIO);
+    }
+
     if readable {
         shared.reader_count.fetch_add(1, Ordering::AcqRel);
         // Wake up any waiting writers
@@ -2653,57 +2661,8 @@ impl FdTable {
         removed
     }
 
-    pub fn for_each_entry<F>(&self, mut f: F)
-    where
-        F: FnMut(&FdEntry),
-    {
-        for slot in &self.entries {
-            if let Some(entry) = slot {
-                f(entry);
-            }
-        }
-    }
-
-    pub fn is_file_write_open_by_meta(&self, device: u64, inode: u64) -> bool {
-        for slot in &self.entries {
-            if let Some(entry) = slot {
-                if entry.object.is_write_open() {
-                    if let Some((d, i)) = entry.object.fifo_device_inode() {
-                        if d == device && i == inode {
-                            return true;
-                        }
-                    } else if let Some(loc) = entry.object.location() {
-                        if let Ok(meta) = axtask::future::block_on(loc.metadata()) {
-                            if meta.device == device && meta.inode == inode {
-                                return true;
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        false
-    }
-
-    pub fn is_file_read_open_by_meta(&self, device: u64, inode: u64) -> bool {
-        for slot in &self.entries {
-            if let Some(entry) = slot {
-                if entry.object.is_read_open() {
-                    if let Some((d, i)) = entry.object.fifo_device_inode() {
-                        if d == device && i == inode {
-                            return true;
-                        }
-                    } else if let Some(loc) = entry.object.location() {
-                        if let Ok(meta) = axtask::future::block_on(loc.metadata()) {
-                            if meta.device == device && meta.inode == inode {
-                                return true;
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        false
+    pub fn entries_snapshot(&self) -> alloc::vec::Vec<FdEntry> {
+        self.entries.iter().flatten().cloned().collect()
     }
 
     pub fn get(&self, fd: usize) -> Option<&FdEntry> {
@@ -2716,10 +2675,6 @@ impl FdTable {
 
     pub fn get_object(&self, fd: usize) -> LinuxResult<Arc<dyn FdObject>> {
         Ok(self.get_entry_cloned(fd)?.object)
-    }
-
-    pub fn get_location(&self, fd: usize) -> LinuxResult<Location> {
-        self.get_object(fd)?.location().ok_or(LinuxError::EBADF)
     }
 
     pub fn get_mut(&mut self, fd: usize) -> Option<&mut FdEntry> {

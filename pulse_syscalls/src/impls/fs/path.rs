@@ -318,26 +318,6 @@ pub fn sys_openat(dirfd: i32, pathname: usize, flags: usize, mode: usize) -> isi
                 return -LinuxError::EPERM.code() as isize;
             }
         }
-        // FIFO O_NONBLOCK | O_WRONLY check
-        if meta.node_type == NodeType::Fifo {
-            if (flags & (O_NONBLOCK as usize)) != 0
-                && (flags & (O_ACCMODE as usize)) == O_WRONLY as usize
-            {
-                let mut has_reader = false;
-                let procs = pulse_core::task::processes_snapshot();
-                for proc in procs {
-                    let fd_table = proc.fd_table();
-                    let fd_table_guard = fd_table.read();
-                    if fd_table_guard.is_file_read_open_by_meta(meta.device, meta.inode) {
-                        has_reader = true;
-                        break;
-                    }
-                }
-                if !has_reader {
-                    return -LinuxError::ENXIO.code() as isize;
-                }
-            }
-        }
         // O_NOFOLLOW symlink check
         if (flags & (O_NOFOLLOW as usize)) != 0
             && (flags & (O_PATH as usize)) == 0

@@ -481,9 +481,7 @@ impl axfs::ProcfsProcessProvider for PulseProcessProvider {
 
     fn fd_path(&self, pid: u64, fd: u32) -> Option<String> {
         let proc = process_by_pid(pid)?;
-        let binding = proc.fd_table();
-        let fd_table = binding.read();
-        let entry = fd_table.get(fd as usize)?;
+        let entry = proc.get_fd_entry(fd as usize).ok()?;
         if let Some(loc) = entry.object.location() {
             Some(loc.absolute_path().ok()?.as_str().to_string())
         } else if let Ok(st) = entry.object.stat() {

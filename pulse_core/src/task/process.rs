@@ -1335,25 +1335,28 @@ impl Process {
         fd: usize,
         nonblocking: bool,
     ) -> Result<(), axerrno::LinuxError> {
-        let binding = self.fd_table();
-        let mut table = binding.write();
-        let entry = table.get_mut(fd).ok_or(axerrno::LinuxError::EBADF)?;
-        entry
-            .flags
-            .set(crate::fd_table::FdFlags::NONBLOCK, nonblocking);
-        entry.object.set_nonblocking(nonblocking)?;
+        let object = {
+            let binding = self.fd_table();
+            let mut table = binding.write();
+            let entry = table.get_mut(fd).ok_or(axerrno::LinuxError::EBADF)?;
+            entry
+                .flags
+                .set(crate::fd_table::FdFlags::NONBLOCK, nonblocking);
+            entry.object.clone()
+        };
+        object.set_nonblocking(nonblocking)?;
         Ok(())
     }
 
     pub fn get_fd_location(&self, fd: usize) -> Result<axfs_ng_vfs::Location, axerrno::LinuxError> {
-        self.fd_table().read().get_location(fd)
+        self.get_fd_entry(fd)?
+            .object
+            .location()
+            .ok_or(axerrno::LinuxError::EBADF)
     }
 
-    pub fn for_each_fd_entry<F>(&self, f: F)
-    where
-        F: FnMut(&crate::fd_table::FdEntry),
-    {
-        self.fd_table().read().for_each_entry(f);
+    pub fn fd_entries_snapshot(&self) -> alloc::vec::Vec<crate::fd_table::FdEntry> {
+        self.fd_table().read().entries_snapshot()
     }
 
     pub fn is_user_range(&self, addr: usize, len: usize) -> bool {

@@ -56,13 +56,20 @@ fn parse_shebang_line(file_data: &[u8]) -> AxResult<Option<(String, Option<Strin
 }
 
 fn check_txt_busy(loc: &axfs_ng_vfs::Location) -> AxResult<()> {
-    let meta = axtask::future::block_on(loc.metadata()).map_err(|_| AxError::InvalidData)?;
-    let device = meta.device;
-    let inode = meta.inode;
+    let target = (loc.mountpoint().device(), loc.inode());
     let procs = super::processes_snapshot();
     for proc in procs {
-        if proc.fd_table().read().is_file_write_open_by_meta(device, inode) {
-            return Err(axerrno::LinuxError::ETXTBSY.into());
+        for entry in proc.fd_entries_snapshot() {
+            if !entry.object.is_write_open() {
+                continue;
+            }
+            let matches = entry.object.fifo_device_inode() == Some(target)
+                || entry.object.location().is_some_and(|open_loc| {
+                    (open_loc.mountpoint().device(), open_loc.inode()) == target
+                });
+            if matches {
+                return Err(axerrno::LinuxError::ETXTBSY.into());
+            }
         }
     }
     Ok(())
