@@ -345,6 +345,8 @@ impl Process {
 
         axtask::set_current_page_table_root(new_pt_root, new_asid);
         self.activate();
+        // A vfork child must stop sharing its parent's heap state before waking it.
+        self.reset_heap_top(USER_HEAP_BASE + USER_HEAP_SIZE);
         let old_exec_access = self.replace_exec_access(load_info.exec_access);
         drop(old_aspace);
         drop(old_exec_access);
@@ -371,7 +373,6 @@ impl Process {
         };
         self.release_posix_locks_for_entries(&cloexec_entries);
         drop(cloexec_entries);
-        self.heap_top.store(USER_HEAP_BASE + USER_HEAP_SIZE, Ordering::Release);
         self.stack_top.store(load_info.user_sp, Ordering::Release);
         self.entry.store(load_info.entry, Ordering::Release);
         self.set_signal_trampoline(load_info.signal_trampoline);
