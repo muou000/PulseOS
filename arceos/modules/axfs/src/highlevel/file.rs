@@ -480,6 +480,8 @@ impl Default for OpenOptions {
 const PAGE_SIZE: usize = 4096;
 const MAX_WRITEBACK_PAGES: usize = 256;
 const READ_AHEAD_PAGES: usize = 16;
+const MMAP_READ_AHEAD_PAGES: usize = 4;
+const PAGE_CACHE_GROWTH_HEADROOM: usize = 256;
 
 #[derive(Debug)]
 pub struct PageCache {
@@ -972,6 +974,7 @@ pub struct CachedFile {
     shared: Arc<CachedFileShared>,
     in_memory: bool,
     read_hint: Arc<AtomicU64>,
+    fault_hint: Arc<AtomicU64>,
 }
 
 impl Drop for CachedFile {
@@ -1025,6 +1028,7 @@ impl CachedFile {
             shared,
             in_memory,
             read_hint: Arc::new(AtomicU64::new(u64::MAX)),
+            fault_hint: Arc::new(AtomicU64::new(u64::MAX)),
         }
     }
 
@@ -1224,28 +1228,42 @@ impl CachedFile {
 
             let mut evicted_pages = Vec::new();
             let mut cache = self.shared.page_cache.lock();
+            let incoming = new_pages
+                .iter()
+                .filter(|(page_num, _)| !cache.contains(page_num))
+                .count();
+            let capacity = cache.cap().get();
+            let required = cache.len().saturating_add(incoming);
+            if required > capacity {
+                let needed = required - capacity;
+                let evictable = cache
+                    .iter()
+                    .rev()
+                    .filter_map(|(&pn, cached)| {
+                        (!cached.has_user_mapping() && !cached.dirty).then_some(pn)
+                    })
+                    .take(needed)
+                    .collect::<Vec<_>>();
+                for evict_pn in evictable {
+                    if let Some(evicted) = cache.pop(&evict_pn) {
+                        evicted_pages.push((evict_pn, evicted));
+                    }
+                }
+
+                let remaining = needed.saturating_sub(evicted_pages.len());
+                if remaining != 0 {
+                    let growth = remaining.max(PAGE_CACHE_GROWTH_HEADROOM);
+                    let capacity = capacity
+                        .checked_add(growth)
+                        .and_then(NonZeroUsize::new)
+                        .ok_or(VfsError::StorageFull)?;
+                    cache.resize(capacity);
+                }
+            }
+
             for (page_num, page) in new_pages {
                 if cache.contains(&page_num) {
                     continue;
-                }
-
-                if cache.len() == cache.cap().get() {
-                    let clean_evictable = cache.iter().rev().find_map(|(&pn, cached)| {
-                        (!cached.has_user_mapping() && !cached.dirty).then_some(pn)
-                    });
-                    if let Some(evict_pn) = clean_evictable {
-                        if let Some(evicted) = cache.pop(&evict_pn) {
-                            evicted_pages.push((evict_pn, evicted));
-                        }
-                    } else {
-                        let capacity = cache
-                            .cap()
-                            .get()
-                            .checked_add(1)
-                            .and_then(NonZeroUsize::new)
-                            .ok_or(VfsError::StorageFull)?;
-                        cache.resize(capacity);
-                    }
                 }
                 cache.put(page_num, page);
             }
@@ -1470,6 +1488,18 @@ impl CachedFile {
     pub fn ensure_page_resident(&self, pn: u32) -> VfsResult<()> {
         let file = self.inner.entry().as_file()?;
         axtask::future::block_on(self.ensure_pages_async(file, pn, 1))
+    }
+
+    /// Faults in the requested page and a bounded run of following pages.
+    pub fn ensure_page_resident_readahead(&self, pn: u32) -> VfsResult<()> {
+        let file = self.inner.entry().as_file()?;
+        let previous = self.fault_hint.swap(pn as u64, Ordering::AcqRel);
+        let pages = if previous.checked_add(1) == Some(pn as u64) {
+            MMAP_READ_AHEAD_PAGES
+        } else {
+            1
+        };
+        axtask::future::block_on(self.ensure_pages_async(file, pn, pages))
     }
 
     /// Pins a resident page for a user mapping without performing I/O.
@@ -1907,10 +1937,11 @@ impl File {
 impl Drop for File {
     fn drop(&mut self) {
         #[cfg(feature = "times")]
-        if self.access_flags.load(Ordering::Acquire) == 0 {
-            return;
+        if self.access_flags.load(Ordering::Acquire) != 0 {
+            // Closing a file should publish deferred timestamps, but it must not
+            // turn an ordinary close into fsync and a device-wide flush.
+            let _ = axtask::future::block_on(self.take_timestamp_updates());
         }
-        let _ = axtask::future::block_on(self.sync(false));
     }
 }
 
