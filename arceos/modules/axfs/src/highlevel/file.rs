@@ -61,11 +61,29 @@ fn prune_file_shared_states(registry: &mut BTreeMap<FileCacheKey, Weak<CachedFil
 
 pub fn invalidate_file_cache(fs_id: usize, inode: u64) {
     let key = FileCacheKey { fs_id, inode };
-    FILE_SHARED_STATES.lock().remove(&key);
+    let state = FILE_SHARED_STATES
+        .lock()
+        .remove(&key)
+        .and_then(|state| state.upgrade());
+    if let Some(state) = state {
+        let removed = {
+            let mut caches = ACTIVE_DISK_FILE_CACHES.lock();
+            caches
+                .iter()
+                .position(|cached| Arc::ptr_eq(cached, &state))
+                .map(|index| caches.swap_remove(index))
+        };
+        drop(removed);
+    }
 }
 
 static FILE_SHARED_STATES: Lazy<SpinMutex<BTreeMap<FileCacheKey, Weak<CachedFileShared>>>> =
     Lazy::new(|| SpinMutex::new(BTreeMap::new()));
+
+// Disk caches survive descriptor close and are released after explicit global
+// writeback. Stage 2 adds bounded retention and memory-pressure reclaim.
+static ACTIVE_DISK_FILE_CACHES: Lazy<SpinMutex<Vec<Arc<CachedFileShared>>>> =
+    Lazy::new(|| SpinMutex::new(Vec::new()));
 
 struct InodeAccessState {
     count: AtomicIsize,
@@ -547,7 +565,7 @@ struct EvictListener {
 struct CachedFileShared {
     page_cache: Mutex<LruCache<u32, PageCache>>,
     evict_listeners: Mutex<Vec<Arc<EvictListener>>>,
-    backing: Option<Weak<dyn axfs_ng_vfs::FileNodeOps>>,
+    backing: Option<FileNode>,
     io_lock: RwLock<()>,
     size: SpinMutex<u64>,
     cache_generation: AtomicU64,
@@ -557,7 +575,7 @@ impl CachedFileShared {
     fn new(
         in_memory: bool,
         size: u64,
-        backing: Option<Weak<dyn axfs_ng_vfs::FileNodeOps>>,
+        backing: Option<FileNode>,
     ) -> Self {
         Self {
             page_cache: if in_memory {
@@ -863,18 +881,13 @@ impl Drop for CachedFileShared {
 }
 
 pub(crate) fn flush_all_file_caches() -> VfsResult<()> {
-    let states = {
-        let mut registry = FILE_SHARED_STATES.lock();
-        prune_file_shared_states(&mut registry);
-        registry.values().filter_map(Weak::upgrade).collect::<Vec<_>>()
-    };
+    let states = ACTIVE_DISK_FILE_CACHES.lock().clone();
 
     let mut first_error = None;
     for state in states {
-        let Some(file) = state.backing.as_ref().and_then(Weak::upgrade) else {
+        let Some(file) = state.backing.as_ref() else {
             continue;
         };
-        let file = FileNode::new(file);
         let result = {
             let _guard = state.io_lock.write();
             let cached_size = *state.size.lock();
@@ -882,7 +895,7 @@ pub(crate) fn flush_all_file_caches() -> VfsResult<()> {
                 if axtask::future::block_on(file.len())? != cached_size {
                     axtask::future::block_on(file.set_len(cached_size))?;
                 }
-                state.flush_dirty_pages(&file)
+                state.flush_dirty_pages(file)
             })()
         };
         if let Err(err) = result {
@@ -891,6 +904,25 @@ pub(crate) fn flush_all_file_caches() -> VfsResult<()> {
                 first_error = Some(err);
             }
         }
+    }
+
+    if first_error.is_none() {
+        // Dropping a backing inode can invalidate this registry, so move all
+        // released entries out before the global lock is dropped.
+        let removed = {
+            let mut caches = ACTIVE_DISK_FILE_CACHES.lock();
+            let mut removed = Vec::new();
+            let mut index = 0;
+            while index < caches.len() {
+                if Arc::strong_count(&caches[index]) == 1 {
+                    removed.push(caches.swap_remove(index));
+                } else {
+                    index += 1;
+                }
+            }
+            removed
+        };
+        drop(removed);
     }
 
     first_error.map_or(Ok(()), Err)
@@ -911,20 +943,22 @@ fn shared_file_state(location: &Location) -> Arc<CachedFileShared> {
     let backing = if in_memory {
         None
     } else {
-        location
-            .entry()
-            .as_file()
-            .ok()
-            .map(|file| Arc::downgrade(file.inner()))
+        location.entry().as_file().ok().cloned()
     };
     let state = Arc::new(CachedFileShared::new(in_memory, size, backing));
 
     let mut registry = FILE_SHARED_STATES.lock();
     if let Some(existing_state) = registry.get(&key).and_then(Weak::upgrade) {
+        drop(registry);
+        drop(state);
         return existing_state;
     }
     prune_file_shared_states(&mut registry);
     registry.insert(key, Arc::downgrade(&state));
+    drop(registry);
+    if !in_memory {
+        ACTIVE_DISK_FILE_CACHES.lock().push(state.clone());
+    }
     state
 }
 
@@ -944,15 +978,13 @@ pub fn cached_file_size(location: &Location) -> VfsResult<u64> {
 }
 
 enum FileUserData {
-    Weak(Weak<CachedFileShared>),
     Strong(Arc<CachedFileShared>),
 }
 
 impl FileUserData {
-    fn get(&self) -> Option<Arc<CachedFileShared>> {
+    fn get(&self) -> Arc<CachedFileShared> {
         match self {
-            FileUserData::Weak(weak) => weak.upgrade(),
-            FileUserData::Strong(strong) => Some(strong.clone()),
+            FileUserData::Strong(strong) => strong.clone(),
         }
     }
 }
@@ -966,38 +998,15 @@ pub struct CachedFile {
     fault_hint: Arc<AtomicU64>,
 }
 
-impl Drop for CachedFile {
-    fn drop(&mut self) {
-        if Arc::strong_count(&self.shared) == 1 {
-            if let Ok(file) = self.inner.entry().as_file() {
-                let cached_size = *self.shared.size.lock();
-                if let Ok(current_size) = axtask::future::block_on(file.len()) {
-                    if cached_size != current_size {
-                        let _ = axtask::future::block_on(file.set_len(cached_size));
-                    }
-                }
-                if let Err(err) = self.flush_dirty_pages(file) {
-                    error!("CachedFile drop: failed to flush dirty pages: {:?}", err);
-                }
-            }
-        }
-    }
-}
-
 impl CachedFile {
     pub fn get_or_create(location: Location) -> Self {
         let in_memory = location.filesystem().name() == "tmpfs";
         let mut guard = location.user_data();
-        let shared = if let Some(shared) = guard.get::<FileUserData>().and_then(|it| it.get()) {
-            shared
+        let shared = if let Some(user_data) = guard.get::<FileUserData>() {
+            user_data.get()
         } else {
             let shared = shared_file_state(&location);
-            let user_data = if in_memory {
-                FileUserData::Strong(shared.clone())
-            } else {
-                FileUserData::Weak(Arc::downgrade(&shared))
-            };
-            guard.insert(user_data);
+            guard.insert(FileUserData::Strong(shared.clone()));
             shared
         };
         drop(guard);
