@@ -2,7 +2,7 @@ use alloc::sync::Arc;
 
 use axfs::{CachedFile, FileFlags};
 use axhal::paging::MappingFlags;
-use linux_raw_sys::general::{MCL_CURRENT, MCL_FUTURE, MCL_ONFAULT};
+use linux_raw_sys::general::{MCL_CURRENT, MCL_FUTURE, MCL_ONFAULT, RLIMIT_DATA};
 use memory_addr::VirtAddr;
 use pulse_core::fd_table::FdObject;
 
@@ -16,6 +16,11 @@ const PAGE_SIZE: usize = 0x1000;
 const MS_ASYNC: usize = 1;
 const MS_SYNC: usize = 2;
 const MS_INVALIDATE: usize = 4;
+
+fn page_align_up(addr: usize) -> Option<usize> {
+    addr.checked_add(PAGE_SIZE - 1)
+        .map(|value| value & !(PAGE_SIZE - 1))
+}
 
 fn get_fd_object(fd: usize) -> Result<Arc<dyn FdObject>, LinuxError> {
     let proc = pulse_core::task::current_process()?;
@@ -46,18 +51,34 @@ pub fn sys_brk(addr: usize) -> isize {
         Err(e) => return -e.code() as isize,
     };
 
-    let _brk_lock = proc.brk_lock.lock();
-    let old_heap_top = proc.get_heap_top();
+    let brk_state_handle = proc.brk_state_handle();
+    let mut brk_state = brk_state_handle.lock();
+    let old_heap_top = brk_state.current();
 
     if addr == 0 {
         return old_heap_top as isize;
     }
 
-    if !(pulse_core::config::USER_HEAP_BASE
-        ..=pulse_core::config::USER_HEAP_BASE + pulse_core::config::USER_HEAP_SIZE_MAX)
-        .contains(&addr)
-    {
-        axlog::warn!("sys_brk: invalid addr {:#x}", addr);
+    let user_space_end = pulse_core::config::USER_SPACE_BASE
+        .checked_add(pulse_core::config::USER_SPACE_SIZE)
+        .expect("user address-space range must not overflow");
+    if addr < brk_state.start() || addr > user_space_end {
+        axlog::debug!("sys_brk: rejected out-of-range addr {:#x}", addr);
+        return old_heap_top as isize;
+    }
+
+    let data_limit = proc
+        .get_rlimit(RLIMIT_DATA)
+        .map(|limit| limit.rlim_cur)
+        .unwrap_or(u64::MAX);
+    let requested_data_size =
+        (addr - brk_state.start()) as u128 + brk_state.data_segment_size() as u128;
+    if data_limit != u64::MAX && requested_data_size > data_limit as u128 {
+        axlog::debug!(
+            "sys_brk: addr {:#x} exceeds RLIMIT_DATA {:#x}",
+            addr,
+            data_limit
+        );
         return old_heap_top as isize;
     }
 
@@ -76,8 +97,12 @@ pub fn sys_brk(addr: usize) -> isize {
     {
         let mut aspace = aspace_handle.write();
         if new_heap_top > old_heap_top {
-            let start = (old_heap_top + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
-            let end = (new_heap_top + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
+            let Some(start) = page_align_up(old_heap_top) else {
+                return old_heap_top as isize;
+            };
+            let Some(end) = page_align_up(new_heap_top) else {
+                return old_heap_top as isize;
+            };
 
             if end > start {
                 let flags = MappingFlags::READ | MappingFlags::WRITE | MappingFlags::USER;
@@ -90,8 +115,12 @@ pub fn sys_brk(addr: usize) -> isize {
                 map_len = end - start;
             }
         } else if new_heap_top < old_heap_top {
-            let start = (new_heap_top + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
-            let end = (old_heap_top + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
+            let Some(start) = page_align_up(new_heap_top) else {
+                return old_heap_top as isize;
+            };
+            let Some(end) = page_align_up(old_heap_top) else {
+                return old_heap_top as isize;
+            };
 
             if end > start {
                 let (unmap_result, shootdown) = aspace
@@ -121,7 +150,7 @@ pub fn sys_brk(addr: usize) -> isize {
     }
 
     if need_map {
-        if let Err(e) = proc.maybe_lock_future_range(map_start, map_len) {
+        if proc.maybe_lock_future_range(map_start, map_len).is_err() {
             let rollback = {
                 let mut aspace = aspace_handle.write();
                 aspace.unmap(VirtAddr::from(map_start), map_len)
@@ -134,7 +163,7 @@ pub fn sys_brk(addr: usize) -> isize {
                     unmap_e
                 );
             }
-            return -e.code() as isize;
+            return old_heap_top as isize;
         }
     }
 
@@ -142,7 +171,7 @@ pub fn sys_brk(addr: usize) -> isize {
         let _ = proc.memlock_unlock_range(unmap_start, unmap_len);
     }
 
-    proc.set_heap_top(new_heap_top);
+    brk_state.set_current(new_heap_top);
     axlog::debug!("sys_brk: updated heap_top to {:#x}", new_heap_top);
     new_heap_top as isize
 }

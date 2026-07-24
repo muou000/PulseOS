@@ -180,12 +180,6 @@ impl Process {
             MappingFlags::READ | MappingFlags::WRITE | MappingFlags::USER,
             false,
         )?;
-        new_aspace.map_alloc(
-            va!(USER_HEAP_BASE),
-            USER_HEAP_SIZE,
-            MappingFlags::READ | MappingFlags::WRITE | MappingFlags::USER,
-            false,
-        )?;
         let load_info = crate::mm::load_user_app(
             &mut new_aspace,
             &fs_ctx,
@@ -200,6 +194,12 @@ impl Process {
         let new_asid = new_aspace_handle.read().asid();
         let old_aspace = self.replace_aspace_handle(new_aspace_handle);
         axtask::set_current_page_table_root(new_pt_root, new_asid);
+        self.reset_brk_state(
+            load_info.start_brk,
+            load_info.start_brk,
+            load_info.start_data,
+            load_info.end_data,
+        );
         let old_exec_access = self.replace_exec_access(load_info.exec_access);
         drop(old_aspace);
         drop(old_exec_access);
@@ -291,13 +291,6 @@ impl Process {
             MappingFlags::READ | MappingFlags::WRITE | MappingFlags::USER,
             false,
         )?;
-        new_aspace.map_alloc(
-            va!(USER_HEAP_BASE),
-            USER_HEAP_SIZE,
-            MappingFlags::READ | MappingFlags::WRITE | MappingFlags::USER,
-            false,
-        )?;
-
         let load_info = crate::mm::load_user_app(
             &mut new_aspace,
             &fs_ctx,
@@ -345,8 +338,13 @@ impl Process {
 
         axtask::set_current_page_table_root(new_pt_root, new_asid);
         self.activate();
-        // A vfork child must stop sharing its parent's heap state before waking it.
-        self.reset_heap_top(USER_HEAP_BASE + USER_HEAP_SIZE);
+        // A vfork child must stop sharing its parent's break state before waking it.
+        self.reset_brk_state(
+            load_info.start_brk,
+            load_info.start_brk,
+            load_info.start_data,
+            load_info.end_data,
+        );
         let old_exec_access = self.replace_exec_access(load_info.exec_access);
         drop(old_aspace);
         drop(old_exec_access);
