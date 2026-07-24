@@ -25,16 +25,7 @@ pub fn sys_execve(_tf: &TrapFrame, pathname: usize, argv: usize, envp: usize) ->
 
     let path_str = match read_user_cstring(&process, pathname) {
         Ok(path) => {
-            let allocator = axalloc::global_allocator();
-            axlog::info!(
-                "sys_execve: path={:?}, mem=[used_pages={}, free_pages={}, used_bytes={}, \
-                 free_bytes={}]",
-                path,
-                allocator.used_pages(),
-                allocator.available_pages(),
-                allocator.used_bytes(),
-                allocator.available_bytes()
-            );
+            axlog::info!("sys_execve: path={:?}", path);
             path
         }
         Err(e) => return e,
@@ -134,16 +125,7 @@ pub fn sys_execveat(
     let path_str = match loc.absolute_path() {
         Ok(p) => {
             let path = p.to_string();
-            let allocator = axalloc::global_allocator();
-            axlog::info!(
-                "sys_execveat: path={:?}, mem=[used_pages={}, free_pages={}, used_bytes={}, \
-                 free_bytes={}]",
-                path,
-                allocator.used_pages(),
-                allocator.available_pages(),
-                allocator.used_bytes(),
-                allocator.available_bytes()
-            );
+            axlog::info!("sys_execveat: path={:?}", path);
             path
         }
         Err(e) => {
