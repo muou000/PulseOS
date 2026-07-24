@@ -17,8 +17,8 @@ use axtask::{AxTaskRef, TaskInner, WaitQueue};
 use kernel_guard::NoPreemptIrqSave;
 use kspin::SpinNoIrq;
 use linux_raw_sys::general::{
-    RLIMIT_CORE, RLIMIT_MEMLOCK, RLIMIT_NOFILE, RLIMIT_STACK, SIGCHLD, itimerspec, rlimit64,
-    sigevent,
+    RLIMIT_CORE, RLIMIT_DATA, RLIMIT_MEMLOCK, RLIMIT_NOFILE, RLIMIT_STACK, SIGCHLD, itimerspec,
+    rlimit64, sigevent,
 };
 use memory_addr::{MemoryAddr, PhysAddr, VirtAddr, va};
 use spin::{Lazy, Mutex, RwLock};
@@ -135,6 +135,8 @@ pub struct RlimitState {
     nofile_hard: u64,
     core_soft: u64,
     core_hard: u64,
+    data_soft: u64,
+    data_hard: u64,
 }
 
 impl Default for RlimitState {
@@ -146,7 +148,44 @@ impl Default for RlimitState {
             nofile_hard: DEFAULT_NOFILE_LIMIT,
             core_soft: 0,
             core_hard: u64::MAX,
+            data_soft: u64::MAX,
+            data_hard: u64::MAX,
         }
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct BrkState {
+    start: usize,
+    current: usize,
+    start_data: usize,
+    end_data: usize,
+}
+
+impl BrkState {
+    fn new(start: usize, current: usize, start_data: usize, end_data: usize) -> Self {
+        Self {
+            start,
+            current,
+            start_data,
+            end_data,
+        }
+    }
+
+    pub fn start(&self) -> usize {
+        self.start
+    }
+
+    pub fn current(&self) -> usize {
+        self.current
+    }
+
+    pub fn set_current(&mut self, current: usize) {
+        self.current = current;
+    }
+
+    pub fn data_segment_size(&self) -> usize {
+        self.end_data.saturating_sub(self.start_data)
     }
 }
 
@@ -411,10 +450,8 @@ pub struct Process {
     parent: RwLock<Option<Weak<Process>>>,
     /// 虚拟地址空间
     aspace: RwLock<Arc<AddressSpaceLock>>,
-    /// 堆顶指针
-    heap_top: RwLock<Arc<AtomicUsize>>,
-    /// brk 扩展排他锁
-    pub brk_lock: Mutex<()>,
+    /// Program-break state, shared by processes that share the address space.
+    brk_state: RwLock<Arc<Mutex<BrkState>>>,
     /// 文件系统根目录与当前工作目录上下文
     fs_context: RwLock<Arc<Mutex<FsContext>>>,
     /// 文件描述符表
@@ -1018,6 +1055,10 @@ impl Process {
                 rlim_cur: res.rlimit_state.core_soft,
                 rlim_max: res.rlimit_state.core_hard,
             }),
+            RLIMIT_DATA => Some(rlimit64 {
+                rlim_cur: res.rlimit_state.data_soft,
+                rlim_max: res.rlimit_state.data_hard,
+            }),
             RLIMIT_MEMLOCK => Some(rlimit64 {
                 rlim_cur: res.memlock_state.soft_limit,
                 rlim_max: res.memlock_state.hard_limit,
@@ -1051,6 +1092,11 @@ impl Process {
             RLIMIT_CORE => {
                 res.rlimit_state.core_soft = limit.rlim_cur;
                 res.rlimit_state.core_hard = limit.rlim_max;
+                Ok(())
+            }
+            RLIMIT_DATA => {
+                res.rlimit_state.data_soft = limit.rlim_cur;
+                res.rlimit_state.data_hard = limit.rlim_max;
                 Ok(())
             }
             RLIMIT_MEMLOCK => {
@@ -1119,16 +1165,24 @@ impl Process {
         res.memlock_state.mlock_future = false;
     }
 
+    pub fn brk_state_handle(&self) -> Arc<Mutex<BrkState>> {
+        self.brk_state.read().clone()
+    }
+
     pub fn get_heap_top(&self) -> usize {
-        self.heap_top.read().load(Ordering::Acquire)
+        self.brk_state_handle().lock().current()
     }
 
-    pub fn set_heap_top(&self, top: usize) {
-        self.heap_top.read().store(top, Ordering::Release);
-    }
-
-    pub fn reset_heap_top(&self, top: usize) {
-        *self.heap_top.write() = Arc::new(AtomicUsize::new(top));
+    pub fn reset_brk_state(
+        &self,
+        start: usize,
+        current: usize,
+        start_data: usize,
+        end_data: usize,
+    ) {
+        *self.brk_state.write() = Arc::new(Mutex::new(BrkState::new(
+            start, current, start_data, end_data,
+        )));
     }
 
     pub fn try_fault_in_user_range(
@@ -1492,12 +1546,6 @@ impl Process {
             MappingFlags::READ | MappingFlags::WRITE | MappingFlags::USER,
             false,
         )?;
-        aspace.map_alloc(
-            va!(USER_HEAP_BASE),
-            USER_HEAP_SIZE,
-            MappingFlags::READ | MappingFlags::WRITE | MappingFlags::USER,
-            false,
-        )?;
         let fs_context = axfs::ROOT_FS_CONTEXT
             .get()
             .expect("root fs context not initialized")
@@ -1546,10 +1594,12 @@ impl Process {
             group_exit_code: AtomicI32::new(0),
             futex_table: FutexTable::new(),
             vfork_context: None,
-            heap_top: RwLock::new(Arc::new(AtomicUsize::new(
-                USER_HEAP_BASE + USER_HEAP_SIZE,
-            ))),
-            brk_lock: Mutex::new(()),
+            brk_state: RwLock::new(Arc::new(Mutex::new(BrkState::new(
+                USER_HEAP_BASE,
+                USER_HEAP_BASE,
+                0,
+                0,
+            )))),
             credentials: RwLock::new(Arc::new(Credentials::new(
                 0,
                 0,
@@ -1595,6 +1645,7 @@ impl Process {
         pid: u64,
         parent: Arc<Process>,
         aspace: Arc<AddressSpaceLock>,
+        brk_state: Arc<Mutex<BrkState>>,
         share_vm: bool,
         is_vfork: bool,
         share_fs: bool,
@@ -1604,11 +1655,6 @@ impl Process {
     ) -> AxResult<Arc<Self>> {
         let parent_arc = parent;
         let parent = parent_arc.as_ref();
-        let heap_top = if share_vm {
-            parent.heap_top.read().clone()
-        } else {
-            Arc::new(AtomicUsize::new(parent.get_heap_top()))
-        };
         let shared_memory = if share_vm {
             parent.ipc.shared_memory.clone()
         } else {
@@ -1688,8 +1734,7 @@ impl Process {
             parent_pid: AtomicU64::new(parent.pid()),
             parent: RwLock::new(Some(Arc::downgrade(&parent_arc))),
             aspace: RwLock::new(aspace),
-            heap_top: RwLock::new(heap_top),
-            brk_lock: Mutex::new(()),
+            brk_state: RwLock::new(brk_state),
             fs_context,
             fd_table,
             start_mono_ns: axhal::time::monotonic_time_nanos() as u64,
@@ -1893,7 +1938,7 @@ impl Process {
             self.activate();
         }
         drop(old_handle);
-        self.reset_heap_top(USER_HEAP_BASE);
+        self.reset_brk_state(USER_HEAP_BASE, USER_HEAP_BASE, 0, 0);
         self.stack_top.store(USER_STACK_TOP, Ordering::Release);
         self.entry.store(0, Ordering::Release);
 
@@ -3121,8 +3166,12 @@ impl Process {
             child_uctx.set_sp(sp);
         }
 
+        let parent_brk_state = self.brk_state_handle();
+        let parent_brk_state_guard = parent_brk_state.lock();
         let parent_aspace_handle = self.aspace_handle();
         let clone_result = parent_aspace_handle.write().try_clone();
+        let child_brk_state = Arc::new(Mutex::new(*parent_brk_state_guard));
+        drop(parent_brk_state_guard);
         let new_aspace = clone_result.complete_after_unlock()?;
         let _guard = NoPreemptIrqSave::new();
 
@@ -3150,6 +3199,7 @@ impl Process {
             child_tid,
             self.clone(),
             new_aspace_arc,
+            child_brk_state,
             false,
             params.is_vfork,
             params.share_fs,
@@ -3225,10 +3275,12 @@ impl Process {
             self.clone()
         } else {
             let parent_aspace_handle = self.aspace_handle();
+            let brk_state = self.brk_state_handle();
             let proc = Self::new_child_process(
                 child_tid,
                 self.clone(),
                 parent_aspace_handle.clone(),
+                brk_state,
                 true,
                 params.is_vfork,
                 params.share_fs,

@@ -17,7 +17,7 @@ use xmas_elf::{
     program::Type,
 };
 
-use crate::config::{USER_INTERP_BASE, USER_STACK_TOP};
+use crate::config::{USER_HEAP_BASE, USER_INTERP_BASE, USER_STACK_TOP};
 
 const USER_DYN_BASE: usize = 0x20_0000;
 const ELF_MACHINE_LOONGARCH: u16 = 0x102;
@@ -40,8 +40,18 @@ static ELF_FILE_CACHE: spin::Mutex<Vec<(String, Arc<CachedElfImage>)>> =
 pub struct UserAppLoadInfo {
     pub entry: usize,
     pub user_sp: usize,
+    pub start_brk: usize,
+    pub start_data: usize,
+    pub end_data: usize,
     pub signal_trampoline: usize,
     pub exec_access: Vec<ExecAccessGuard>,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+struct ElfLoadLayout {
+    brk: usize,
+    start_data: usize,
+    end_data: usize,
 }
 
 fn validate_machine(elf: &ElfFile<'_>, path: &str) -> AxResult {
@@ -176,7 +186,8 @@ fn load_segments(
     elf: &ElfFile<'_>,
     elf_file: &CachedFile,
     bias: usize,
-) -> AxResult {
+) -> AxResult<ElfLoadLayout> {
+    let mut layout = ElfLoadLayout::default();
     for ph in elf.program_iter() {
         if ph.get_type() != Ok(Type::Load) {
             continue;
@@ -203,6 +214,9 @@ fn load_segments(
         let file_start_page = p_offset.align_down_4k();
         let seg_end = p_vaddr.checked_add(p_memsz).ok_or(AxError::OutOfRange)?;
         let file_backed_end = p_vaddr.checked_add(p_filesz).ok_or(AxError::OutOfRange)?;
+        layout.start_data = layout.start_data.max(p_vaddr.as_usize());
+        layout.end_data = layout.end_data.max(file_backed_end.as_usize());
+        layout.brk = layout.brk.max(seg_end.as_usize());
         let file_backed_end_page = file_backed_end.align_up_4k();
         let seg_end_page = seg_end.align_up_4k();
         let flags = segment_flags(&ph);
@@ -244,7 +258,7 @@ fn load_segments(
             }
         }
     }
-    Ok(())
+    Ok(layout)
 }
 
 fn write_user_region(aspace: &mut AddrSpace, start: VirtAddr, bytes: &[u8]) -> AxResult<()> {
@@ -511,7 +525,7 @@ pub fn load_user_app(
         ElfType::SharedObject => compute_load_bias(&main_elf, USER_DYN_BASE)?,
         _ => return Err(AxError::InvalidExecutable),
     };
-    load_segments(aspace, &main_elf, &main_image.file, main_bias)?;
+    let main_layout = load_segments(aspace, &main_elf, &main_image.file, main_bias)?;
     let main_entry = VirtAddr::from(main_elf.header.pt2.entry_point() as usize)
         .checked_add(main_bias)
         .ok_or(AxError::OutOfRange)?;
@@ -542,7 +556,7 @@ pub fn load_user_app(
             ElfType::SharedObject => compute_load_bias(&interp_elf, USER_INTERP_BASE)?,
             _ => return Err(AxError::InvalidExecutable),
         };
-        load_segments(aspace, &interp_elf, &interp_image.file, bias)?;
+        let _ = load_segments(aspace, &interp_elf, &interp_image.file, bias)?;
         interp_base = Some(bias);
         dispatch_entry = VirtAddr::from(interp_elf.header.pt2.entry_point() as usize)
             .checked_add(bias)
@@ -581,9 +595,16 @@ pub fn load_user_app(
         .checked_sub(stack_region.len())
         .ok_or(AxError::OutOfRange)?;
     write_user_region(aspace, user_sp, &stack_region)?;
+    let start_brk = VirtAddr::from(main_layout.brk)
+        .align_up_4k()
+        .as_usize()
+        .max(USER_HEAP_BASE);
     Ok(UserAppLoadInfo {
         entry: dispatch_entry.as_usize(),
         user_sp: user_sp.as_usize(),
+        start_brk,
+        start_data: main_layout.start_data,
+        end_data: main_layout.end_data,
         signal_trampoline: vdso_trampoline,
         exec_access,
     })
