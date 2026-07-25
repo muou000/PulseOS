@@ -1991,13 +1991,29 @@ impl ExtentTree {
                     written_in_run
                 }
                 None => {
-                    let needed_blocks = blocks_needed_for_bytes(
+                    let mut needed_blocks = blocks_needed_for_bytes(
                         start_offset_in_block,
                         bytes_remaining,
                         block_size_usize,
                     )?;
                     if needed_blocks == 0 {
                         return Err(CorruptKind::InvalidBlockSize.into());
+                    }
+
+                    // A write can start in a hole and continue into an extent
+                    // that was allocated by an earlier out-of-order write.
+                    // Allocate only up to that extent; the next loop iteration
+                    // will write through the existing mapping.
+                    let (_, next_extent) = self.find_prev_next(current_block).await?;
+                    if let Some(next_extent) = next_extent {
+                        let hole_blocks = next_extent
+                            .block_within_file
+                            .checked_sub(current_block)
+                            .ok_or(CorruptKind::ExtentBlock(inode.index))?;
+                        if hole_blocks == 0 {
+                            return Err(CorruptKind::ExtentBlock(inode.index).into());
+                        }
+                        needed_blocks = needed_blocks.min(usize_from_u32(hole_blocks));
                     }
 
                     let to_try = match u16::try_from(needed_blocks) {
@@ -2013,7 +2029,12 @@ impl ExtentTree {
                     .await?;
                     let tried_blocks = new_extent.num_blocks;
                     let metadata_before = self.metadata_block_count().await?;
-                    self.insert_extent(new_extent).await?;
+                    if let Err(err) = self.insert_extent(new_extent).await {
+                        let blocks = NonZeroU32::new(u32::from(tried_blocks))
+                            .ok_or(Ext4Error::NoSpace)?;
+                        let _ = ext4.free_blocks(new_extent.start_block, blocks).await;
+                        return Err(err);
+                    }
                     let data_delta = i64::from(tried_blocks);
                     let want_bytes = bytes_for_blocks(
                         usize::from(tried_blocks),
@@ -2791,6 +2812,55 @@ mod tests {
             panic!("expected leaf");
         };
         assert_eq!(extents.len(), 2);
+    }
+
+    #[maybe_async::test(
+        feature = "sync",
+        async(not(feature = "sync"), tokio::test)
+    )]
+    async fn write_across_hole_stops_at_existing_extent() {
+        let fs = load_test_disk1_rw_no_fsck().await;
+        let mut inode = fs
+            .create_inode(InodeCreationOptions {
+                file_type: FileType::Regular,
+                mode: InodeMode::S_IFREG
+                    | InodeMode::S_IRUSR
+                    | InodeMode::S_IWUSR,
+                uid: 0,
+                gid: 0,
+                time: Default::default(),
+                flags: InodeFlags::empty(),
+            })
+            .await
+            .unwrap();
+        let mut tree = ExtentTree::from_inode(&inode, fs.clone()).unwrap();
+        let block_size = fs.0.superblock.block_size();
+        let block_size_u64 = block_size.to_u64();
+
+        let later_block = vec![0x22; block_size.to_usize()];
+        tree.write_at(
+            &mut inode,
+            &later_block,
+            2u64.checked_mul(block_size_u64).unwrap(),
+        )
+        .await
+        .unwrap();
+
+        let spanning_write = vec![0x11; 3 * block_size.to_usize()];
+        assert_eq!(
+            tree.write_at(&mut inode, &spanning_write, 0).await.unwrap(),
+            spanning_write.len()
+        );
+
+        for file_block in 0..3 {
+            assert!(tree.find_extent(file_block).await.unwrap().is_some());
+        }
+        let block = tree.get_block(2).await.unwrap();
+        let mut data = vec![0; block_size.to_usize()];
+        fs.read_from_block(block, 0, &mut data).await.unwrap();
+        assert_eq!(data, vec![0x11; block_size.to_usize()]);
+
+        tree.free_all().await.unwrap();
     }
 
     #[maybe_async::test(
