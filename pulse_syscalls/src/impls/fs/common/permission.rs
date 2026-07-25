@@ -1,5 +1,5 @@
 use axerrno::LinuxError;
-use axfs_ng_vfs::{Location, NodePermission, NodeType};
+use axfs_ng_vfs::{Location, Metadata, NodePermission, NodeType};
 use linux_raw_sys::general::*;
 
 pub(crate) fn permission_mask_from_bits(
@@ -70,11 +70,38 @@ pub(crate) fn check_faccess_permission(
         return Err(LinuxError::EROFS);
     }
 
+    if uid == 0 && (mode & X_OK as usize) == 0 {
+        return Ok(());
+    }
+
     let meta = axtask::future::block_on(location.metadata())
         .map_err(|e| LinuxError::from(e.canonicalize()))?;
 
+    check_faccess_permission_with_metadata(location, &meta, mode, uid, gid)
+}
+
+pub(crate) fn check_faccess_permission_with_metadata(
+    location: &Location,
+    meta: &Metadata,
+    mode: usize,
+    uid: u32,
+    gid: u32,
+) -> Result<(), LinuxError> {
+    if mode == 0 {
+        return Ok(());
+    }
+
+    if (mode & W_OK as usize) != 0 && is_location_readonly(location) {
+        return Err(LinuxError::EROFS);
+    }
+
+    if uid == 0 && (mode & X_OK as usize) == 0 {
+        return Ok(());
+    }
+
     axlog::debug!(
-        "check_faccess_permission: location={:?}, mode={:#o}, uid={}, gid={}, meta.mode={:#o}, meta.uid={}, meta.gid={}",
+        "check_faccess_permission: location={:?}, mode={:#o}, uid={}, gid={}, meta.mode={:#o}, \
+         meta.uid={}, meta.gid={}",
         location,
         mode,
         uid,
@@ -85,9 +112,6 @@ pub(crate) fn check_faccess_permission(
     );
 
     if uid == 0 {
-        if (mode & X_OK as usize) == 0 {
-            return Ok(());
-        }
         if meta.node_type != NodeType::RegularFile {
             return Ok(());
         }
