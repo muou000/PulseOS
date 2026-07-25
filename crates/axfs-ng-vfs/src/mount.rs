@@ -768,9 +768,8 @@ impl Location {
     }
 
     pub async fn open_file(&self, name: &str, options: &OpenOptions) -> VfsResult<Location> {
-        self.entry
-            .as_dir()?
-            .open_file(name, options)
+        let dir = self.entry.as_dir()?;
+        dir.open_file(name, options)
             .await
             .map(|entry| self.wrap(entry).resolve_mounted_location())
     }

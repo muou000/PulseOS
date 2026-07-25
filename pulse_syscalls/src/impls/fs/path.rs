@@ -260,43 +260,8 @@ pub fn sys_openat(dirfd: i32, pathname: usize, flags: usize, mode: usize) -> isi
         Err(e) => return -e.code() as isize,
     };
 
-    // Check for read-only filesystem before opening with write/create intent
-    {
-        let write_requested = (flags & (O_ACCMODE as usize) == O_WRONLY as usize)
-            || (flags & (O_ACCMODE as usize) == O_RDWR as usize)
-            || (flags & O_TRUNC as usize) != 0;
-        let create_requested = (flags & O_CREAT as usize) != 0;
-        if write_requested || create_requested {
-            let is_ro = match axtask::future::block_on(ctx.resolve_no_follow(path)) {
-                Ok(loc) => {
-                    let ro = crate::impls::fs::common::is_location_readonly(&loc);
-                    // For O_CREAT-only (no write), allow opening an existing file.
-                    if !write_requested && ro {
-                        // file exists on ro fs but we only want O_CREAT; allow open (no creation needed)
-                        false
-                    } else {
-                        ro
-                    }
-                }
-                Err(_) => {
-                    // File doesn't exist; if create or write requested on ro fs → EROFS
-                    if let Ok((parent_loc, _)) =
-                        axtask::future::block_on(ctx.resolve_parent(axfs_ng_vfs::path::Path::new(path)))
-                    {
-                        crate::impls::fs::common::is_location_readonly(&parent_loc)
-                    } else {
-                        false
-                    }
-                }
-            };
-            if is_ro {
-                return -LinuxError::EROFS.code() as isize;
-            }
-        }
-    }
-
     let options = flags_to_options(flags, mode);
-    let opened = match axtask::future::block_on(options.open(&ctx, path)) {
+    let (opened, metadata) = match axtask::future::block_on(options.open_with_metadata(&ctx, path)) {
         Ok(opened) => opened,
         Err(e) => {
             let err = LinuxError::from(e.canonicalize());
@@ -304,27 +269,22 @@ pub fn sys_openat(dirfd: i32, pathname: usize, flags: usize, mode: usize) -> isi
         }
     };
 
-    let metadata = match &opened {
-        axfs::OpenResult::File(file) => axtask::future::block_on(file.location().metadata()),
-        axfs::OpenResult::Dir(dir) => axtask::future::block_on(dir.metadata()),
-    };
-    if let Ok(ref meta) = metadata {
-        // O_NOATIME permission check
-        if (flags & (O_NOATIME as usize)) != 0 {
-            let current_uid = pulse_core::task::current_process()
-                .map(|process| process.fsuid())
-                .unwrap_or(0);
-            if current_uid != 0 && current_uid != meta.uid {
-                return -LinuxError::EPERM.code() as isize;
-            }
+    let (uid, gid) = pulse_core::task::current_process()
+        .map(|process| (process.fsuid(), process.fsgid()))
+        .unwrap_or((0, 0));
+
+    // O_NOATIME permission check
+    if (flags & (O_NOATIME as usize)) != 0 {
+        if uid != 0 && uid != metadata.uid {
+            return -LinuxError::EPERM.code() as isize;
         }
-        // O_NOFOLLOW symlink check
-        if (flags & (O_NOFOLLOW as usize)) != 0
-            && (flags & (O_PATH as usize)) == 0
-            && meta.node_type == NodeType::Symlink
-        {
-            return -LinuxError::ELOOP.code() as isize;
-        }
+    }
+    // O_NOFOLLOW symlink check
+    if (flags & (O_NOFOLLOW as usize)) != 0
+        && (flags & (O_PATH as usize)) == 0
+        && metadata.node_type == NodeType::Symlink
+    {
+        return -LinuxError::ELOOP.code() as isize;
     }
 
     if (flags & O_PATH as usize) == 0 {
@@ -345,31 +305,26 @@ pub fn sys_openat(dirfd: i32, pathname: usize, flags: usize, mode: usize) -> isi
             axfs::OpenResult::Dir(dir) => dir,
         };
 
-        let (uid, gid) = pulse_core::task::current_process()
-            .map(|process| (process.fsuid(), process.fsgid()))
-            .unwrap_or((0, 0));
-
-        if let Err(err) =
-            crate::impls::fs::common::check_faccess_permission(location, required_mode, uid, gid)
-        {
+        if let Err(err) = crate::impls::fs::common::check_faccess_permission_with_metadata(
+            location,
+            &metadata,
+            required_mode,
+            uid,
+            gid,
+        ) {
             return -err.code() as isize;
         }
     }
 
-    let is_fifo = if let Ok(ref meta) = metadata {
-        meta.node_type == NodeType::Fifo
-    } else {
-        false
-    };
+    let is_fifo = metadata.node_type == NodeType::Fifo;
 
     let entry = if is_fifo {
-        let meta = metadata.unwrap();
         let access_mode = flags & (O_ACCMODE as usize);
         let readable = access_mode == O_RDONLY as usize || access_mode == O_RDWR as usize;
         let writable = access_mode == O_WRONLY as usize || access_mode == O_RDWR as usize;
         match pulse_core::fd_table::create_fifo_entry(
-            meta.device,
-            meta.inode,
+            metadata.device,
+            metadata.inode,
             readable,
             writable,
             open_fd_flags(flags),
