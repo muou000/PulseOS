@@ -103,9 +103,13 @@ fn handle_user_return(tf: &mut TrapFrame) {
     axtask::check_preempt_pending();
 }
 
-/// Page fault处理程序
 #[register_trap_handler(PAGE_FAULT)]
-fn handle_page_fault(vaddr: VirtAddr, access_flags: MappingFlags, is_user: bool) -> bool {
+fn handle_page_fault(
+    tf: &mut TrapFrame,
+    vaddr: VirtAddr,
+    access_flags: MappingFlags,
+    is_user: bool,
+) -> bool {
     axlog::debug!(
         "Page fault @ VA:{:#x}, flags:{:?}, user={}",
         vaddr,
@@ -118,6 +122,9 @@ fn handle_page_fault(vaddr: VirtAddr, access_flags: MappingFlags, is_user: bool)
 
     if thread_result.is_err() || (!is_user && is_kernel_address) {
         if !is_user {
+            if tf.fixup_exception() {
+                return true;
+            }
             panic!("Page fault in kernel space: vaddr={:#x}", vaddr);
         } else {
             panic!("user page fault without Thread context: vaddr={:#x}", vaddr);
@@ -125,101 +132,108 @@ fn handle_page_fault(vaddr: VirtAddr, access_flags: MappingFlags, is_user: bool)
     }
 
     let thread = thread_result.unwrap();
-    thread.exit_if_exec_requested();
-
-    if !is_user {
-        let proc = thread.process();
-        const SIGSEGV: i32 = 11;
-        proc.set_exit_signal(SIGSEGV, true);
-        proc.begin_group_exit(SIGSEGV);
-        thread.exit_current(proc.group_exit_code());
-    }
     let proc = thread.process();
     let enter_ns = axhal::time::monotonic_time_nanos() as u64;
-    proc.on_kernel_entry_from_user(enter_ns);
-    if proc.group_exiting() {
-        thread.exit_current(proc.group_exit_code());
+
+    if is_user {
+        thread.exit_if_exec_requested();
+        proc.on_kernel_entry_from_user(enter_ns);
+        if proc.group_exiting() {
+            thread.exit_current(proc.group_exit_code());
+        }
     }
 
     if proc.handle_page_fault(vaddr, access_flags) {
         axhal::asm::flush_tlb(Some(vaddr));
-        let leave_ns = axhal::time::monotonic_time_nanos() as u64;
-        proc.add_sys_time_ns(leave_ns.saturating_sub(enter_ns));
-        if proc.group_exiting() {
-            thread.exit_current(proc.group_exit_code());
+        if is_user {
+            let leave_ns = axhal::time::monotonic_time_nanos() as u64;
+            proc.add_sys_time_ns(leave_ns.saturating_sub(enter_ns));
+            if proc.group_exiting() {
+                thread.exit_current(proc.group_exit_code());
+            }
+            proc.mark_user_resume_at(leave_ns);
         }
-        proc.mark_user_resume();
         axlog::debug!("Page fault handled successfully");
-        true
-    } else {
-        let leave_ns = axhal::time::monotonic_time_nanos() as u64;
-        proc.add_sys_time_ns(leave_ns.saturating_sub(enter_ns));
-        axlog::warn!(
-            "Failed to handle page fault! pid={} exe={:?}",
-            proc.pid(),
-            proc.exec_path()
-        );
-        axlog::warn!("  vaddr={:#x}, flags={:?}", vaddr, access_flags);
-
-        let mut signo = 11; // Default to SIGSEGV
-        let mut fault_area = None;
-        let mut previous_area = None;
-        let mut next_area = None;
-        let aspace_handle = proc.aspace_handle();
-        let aspace = aspace_handle.read();
-        aspace.for_each_area_with_backend(|start, end, flags, backend| {
-            if end <= vaddr {
-                previous_area = Some((start, end, flags));
-            } else if start > vaddr && next_area.is_none() {
-                next_area = Some((start, end, flags));
-            }
-            if vaddr >= start && vaddr < end {
-                fault_area = Some((start, end, flags));
-                let mut curr_backend = backend.clone();
-                while let axmm::Backend::Cow(cow) = &curr_backend {
-                    curr_backend = cow.inner().clone();
-                }
-                if let axmm::Backend::File(mapping) = curr_backend {
-                    let current_file_bytes = mapping.file_bytes();
-                    let relative = vaddr.as_usize().saturating_sub(start.as_usize());
-                    if relative >= current_file_bytes {
-                        signo = 7; // SIGBUS for out-of-bounds file mapping
-                    }
-                }
-            }
-        });
-        drop(aspace);
-
-        let signal = thread.signal();
-        let blocked_mask = signal.blocked_mask();
-        let signal_bit = 1u64 << (signo - 1);
-        let action = crate::task::resolve_action(&signal.shared(), signo as usize);
-        axlog::warn!(
-            "  heap_top={:#x}, area={:?}, previous_area={:?}, next_area={:?}",
-            proc.get_heap_top(),
-            fault_area,
-            previous_area,
-            next_area
-        );
-        axlog::warn!(
-            "  synchronous signal: signo={}, action={:?}, blocked={}, blocked_mask={:#x}, \
-             in_handler={}",
-            signo,
-            action,
-            (blocked_mask & signal_bit) != 0,
-            blocked_mask,
-            signal.is_in_handler()
-        );
-        let newly_queued = crate::task::force_signal_to_thread(thread.as_ref(), signo as usize);
-        axlog::warn!(
-            "  synchronous signal newly_queued={}, pending_mask={:#x}",
-            newly_queued,
-            signal.pending_mask()
-        );
-        proc.mark_user_resume();
-        true
+        return true;
     }
+
+    if !is_user {
+        if tf.fixup_exception() {
+            axlog::debug!("Kernel page fault fixup applied for vaddr={:#x}", vaddr);
+            return true;
+        }
+        panic!("Unhandled page fault in kernel space: vaddr={:#x}", vaddr);
+    }
+    let leave_ns = axhal::time::monotonic_time_nanos() as u64;
+    proc.add_sys_time_ns(leave_ns.saturating_sub(enter_ns));
+    axlog::warn!(
+        "Failed to handle page fault! pid={} exe={:?}",
+        proc.pid(),
+        proc.exec_path()
+    );
+    axlog::warn!("  vaddr={:#x}, flags={:?}", vaddr, access_flags);
+
+    let mut signo = 11; // Default to SIGSEGV
+    let mut fault_area = None;
+    let mut previous_area = None;
+    let mut next_area = None;
+    let aspace_handle = proc.aspace_handle();
+    let aspace = aspace_handle.read();
+    aspace.for_each_area_with_backend(|start, end, flags, backend| {
+        if end <= vaddr {
+            previous_area = Some((start, end, flags));
+        } else if start > vaddr && next_area.is_none() {
+            next_area = Some((start, end, flags));
+        }
+        if vaddr >= start && vaddr < end {
+            fault_area = Some((start, end, flags));
+            let mut curr_backend = backend.clone();
+            while let axmm::Backend::Cow(cow) = &curr_backend {
+                curr_backend = cow.inner().clone();
+            }
+            if let axmm::Backend::File(mapping) = curr_backend {
+                let current_file_bytes = mapping.file_bytes();
+                let relative = vaddr.as_usize().saturating_sub(start.as_usize());
+                if relative >= current_file_bytes {
+                    signo = 7; // SIGBUS for out-of-bounds file mapping
+                }
+            }
+        }
+    });
+    drop(aspace);
+
+    let signal = thread.signal();
+    let blocked_mask = signal.blocked_mask();
+    let signal_bit = 1u64 << (signo - 1);
+    let action = crate::task::resolve_action(&signal.shared(), signo as usize);
+    axlog::warn!(
+        "  heap_top={:#x}, area={:?}, previous_area={:?}, next_area={:?}",
+        proc.get_heap_top(),
+        fault_area,
+        previous_area,
+        next_area
+    );
+    axlog::warn!(
+        "  synchronous signal: signo={}, action={:?}, blocked={}, blocked_mask={:#x}, \
+         in_handler={}",
+        signo,
+        action,
+        (blocked_mask & signal_bit) != 0,
+        blocked_mask,
+        signal.is_in_handler()
+    );
+    let newly_queued = crate::task::force_signal_to_thread(thread.as_ref(), signo as usize);
+    axlog::warn!(
+        "  synchronous signal newly_queued={}, pending_mask={:#x}",
+        newly_queued,
+        signal.pending_mask()
+    );
+    proc.mark_user_resume_at(leave_ns);
+    true
 }
 
-/// Ensure the module is linked.
-pub fn init() {}
+/// Ensure the module is linked and register memory reclaim callbacks.
+pub fn init() {
+    axalloc::register_page_reclaim_fn(axfs::page_cache_reclaim);
+    axlog::info!("page cache reclaim function registered");
+}

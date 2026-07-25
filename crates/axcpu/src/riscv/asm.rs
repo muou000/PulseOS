@@ -16,6 +16,24 @@ pub fn enable_irqs() {
     unsafe { sstatus::set_sie() }
 }
 
+/// Enable user memory access in supervisor mode (SUM).
+#[inline]
+pub fn enable_user_access() {
+    unsafe { sstatus::set_sum() }
+}
+
+/// Disable supervisor access to user memory (SUM).
+#[inline]
+pub fn disable_user_access() {
+    unsafe { sstatus::clear_sum() }
+}
+
+/// Returns whether supervisor access to user memory is enabled.
+#[inline]
+pub fn user_access_enabled() -> bool {
+    sstatus::read().sum()
+}
+
 /// Makes the current CPU to ignore interrupts.
 #[inline]
 pub fn disable_irqs() {

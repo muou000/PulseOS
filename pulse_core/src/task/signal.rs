@@ -138,10 +138,12 @@ impl SignalShared {
     pub fn reset_dispositions_on_exec(&self) {
         let mut actions = self.handlers.actions.lock();
         for sig in 1..=NSIG {
-            let h = actions[sig].handler;
-            if h != SIG_IGN {
-                actions[sig] = SigAction::dfl();
-            }
+            let handler = if actions[sig].handler == SIG_IGN {
+                SIG_IGN
+            } else {
+                SIG_DFL
+            };
+            actions[sig] = SigAction::from_parts(handler, 0, 0);
         }
     }
 
@@ -686,6 +688,34 @@ mod tests {
         assert_eq!(
             signal.dequeue_waitset_with_info(1 << 2),
             Some((3, Some([3; 128])))
+        );
+    }
+
+    #[test]
+    fn clear_sighand_resets_only_the_private_child_actions() {
+        let parent = SignalShared::new();
+        parent.set_action(10, SigAction::from_parts(0x1234, 7, 0x55));
+        parent.set_action(12, SigAction::from_parts(SIG_IGN, 9, 0xaa));
+
+        let child = SignalShared::clone_actions_only(&parent);
+        child.reset_dispositions_on_exec();
+
+        assert_eq!(parent.action(10).handler, 0x1234);
+        let parent_ignored = parent.action(12);
+        assert_eq!(
+            (
+                parent_ignored.handler,
+                parent_ignored.flags,
+                parent_ignored.mask
+            ),
+            (SIG_IGN, 9, 0xaa)
+        );
+        let reset = child.action(10);
+        assert_eq!((reset.handler, reset.flags, reset.mask), (SIG_DFL, 0, 0));
+        let ignored = child.action(12);
+        assert_eq!(
+            (ignored.handler, ignored.flags, ignored.mask),
+            (SIG_IGN, 0, 0)
         );
     }
 

@@ -14,6 +14,7 @@ use core::fmt::Write;
 
 use axerrno::{LinuxError, LinuxResult};
 use hashbrown::HashMap;
+use kernel_guard::NoPreemptIrqSave;
 use kspin::SpinNoIrq;
 pub use aspace_lock::AddressSpaceLock;
 pub use process::{CloneParams, ForkParams, Process, WaitidStatusType, MAX_POSIX_TIMER_COUNT};
@@ -24,11 +25,55 @@ pub use signal::{
     queue_signal_to_process, queue_signal_to_process_with_info, queue_signal_to_thread,
     queue_signal_to_thread_with_info, resolve_action,
 };
-use spin::Lazy;
+use spin::{Lazy, RwLock};
 pub use thread::{Thread, ThreadHandle};
 
-static PROCESS_REGISTRY: Lazy<SpinNoIrq<HashMap<u64, Arc<Process>>>> =
-    Lazy::new(|| SpinNoIrq::new(HashMap::new()));
+/// An IRQ-safe map with concurrent readers and exclusive writers.
+///
+/// Disabling preemption and local interrupts prevents an IRQ reader from
+/// deadlocking on a writer interrupted on the same CPU.
+struct IrqSafeRwMap<K, V> {
+    inner: RwLock<HashMap<K, V>>,
+}
+
+impl<K, V> IrqSafeRwMap<K, V>
+where
+    K: Eq + core::hash::Hash,
+{
+    fn new() -> Self {
+        Self {
+            inner: RwLock::new(HashMap::new()),
+        }
+    }
+
+    fn get(&self, key: &K) -> Option<V>
+    where
+        V: Clone,
+    {
+        let _guard = NoPreemptIrqSave::new();
+        self.inner.read().get(key).cloned()
+    }
+
+    fn snapshot_values(&self) -> Vec<V>
+    where
+        V: Clone,
+    {
+        let _guard = NoPreemptIrqSave::new();
+        self.inner.read().values().cloned().collect()
+    }
+
+    fn insert(&self, key: K, value: V) {
+        let _guard = NoPreemptIrqSave::new();
+        self.inner.write().insert(key, value);
+    }
+
+    fn remove(&self, key: &K) -> Option<V> {
+        let _guard = NoPreemptIrqSave::new();
+        self.inner.write().remove(key)
+    }
+}
+
+static PROCESS_REGISTRY: Lazy<IrqSafeRwMap<u64, Arc<Process>>> = Lazy::new(IrqSafeRwMap::new);
 
 const THREAD_REGISTRY_SHARDS: usize = 16;
 
@@ -39,11 +84,11 @@ static INIT_PROCESS: spin::Once<Arc<Process>> = spin::Once::new();
 
 pub fn register_process(pid: u64, process: Arc<Process>) {
     INIT_PROCESS.call_once(|| process.clone());
-    PROCESS_REGISTRY.lock().insert(pid, process);
+    PROCESS_REGISTRY.insert(pid, process);
 }
 
 pub fn unregister_process(pid: u64) {
-    PROCESS_REGISTRY.lock().remove(&pid);
+    PROCESS_REGISTRY.remove(&pid);
 }
 
 pub fn init_process() -> Option<Arc<Process>> {
@@ -109,6 +154,12 @@ pub(super) fn thread_handle_from_task(task: &axtask::TaskInner) -> Option<&Threa
     Some(unsafe { &*(task_ext_ptr as *const ThreadHandle) })
 }
 
+pub fn thread_ref_from_task(task: &axtask::TaskInner) -> LinuxResult<&Thread> {
+    thread_handle_from_task(task)
+        .map(|handle| &**handle)
+        .ok_or(LinuxError::ESRCH)
+}
+
 pub fn current_thread() -> LinuxResult<Arc<Thread>> {
     let task = axtask::current();
     if let Some(handle) = thread_handle_from_task(&task) {
@@ -123,13 +174,11 @@ pub fn current_thread() -> LinuxResult<Arc<Thread>> {
 pub const ERESTARTSYS: i32 = 512;
 
 pub fn process_by_pid(pid: u64) -> Option<Arc<Process>> {
-    let registry = PROCESS_REGISTRY.lock();
-    registry.get(&pid).cloned()
+    PROCESS_REGISTRY.get(&pid)
 }
 
 pub fn processes_snapshot() -> Vec<Arc<Process>> {
-    let registry = PROCESS_REGISTRY.lock();
-    let mut procs: Vec<_> = registry.values().cloned().collect();
+    let mut procs = PROCESS_REGISTRY.snapshot_values();
     procs.sort_by_key(|p| p.pid());
     procs
 }

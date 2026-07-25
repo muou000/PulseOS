@@ -23,7 +23,6 @@ pub struct Thread {
     pub user_time_ns: AtomicU64,
     pub sys_time_ns: AtomicU64,
     pub last_user_enter_ns: AtomicU64,
-    pub in_user_mode: AtomicBool,
     io_buffer: Mutex<alloc::vec::Vec<u8>>,
     pub sched_policy: AtomicU32,
     pub sched_flags: AtomicU64,
@@ -32,6 +31,8 @@ pub struct Thread {
     pub sched_deadline: AtomicU64,
     pub sched_period: AtomicU64,
 }
+
+const NOT_IN_USER_MODE: u64 = u64::MAX;
 
 pub struct ThreadHandle(Arc<Thread>);
 def_task_ext!(ThreadHandle);
@@ -67,8 +68,7 @@ impl Thread {
             task_ref: Mutex::new(None),
             user_time_ns: AtomicU64::new(0),
             sys_time_ns: AtomicU64::new(0),
-            last_user_enter_ns: AtomicU64::new(0),
-            in_user_mode: AtomicBool::new(false),
+            last_user_enter_ns: AtomicU64::new(NOT_IN_USER_MODE),
             io_buffer: Mutex::new(alloc::vec::Vec::new()),
             sched_policy: AtomicU32::new(2), // DEFAULT_SCHED_POLICY = SCHED_RR
             sched_flags: AtomicU64::new(0),
@@ -245,15 +245,20 @@ impl Thread {
         Ok(())
     }
 
+    pub fn mark_user_resume_at(&self, now_ns: u64) {
+        self.last_user_enter_ns.store(now_ns, Ordering::Release);
+    }
+
     pub fn mark_user_resume(&self) {
         let now_ns = axhal::time::monotonic_time_nanos() as u64;
-        self.last_user_enter_ns.store(now_ns, Ordering::Relaxed);
-        self.in_user_mode.store(true, Ordering::Release);
+        self.mark_user_resume_at(now_ns);
     }
 
     pub fn on_kernel_entry_from_user(&self, now_ns: u64) {
-        if self.in_user_mode.swap(false, Ordering::AcqRel) {
-            let last = self.last_user_enter_ns.load(Ordering::Relaxed);
+        let last = self
+            .last_user_enter_ns
+            .swap(NOT_IN_USER_MODE, Ordering::AcqRel);
+        if last != NOT_IN_USER_MODE {
             let delta = now_ns.saturating_sub(last);
             self.user_time_ns.fetch_add(delta, Ordering::Relaxed);
         }
@@ -266,8 +271,8 @@ impl Thread {
     pub fn snapshot_cpu_time_ns(&self, now_ns: u64) -> (u64, u64) {
         let mut user = self.user_time_ns.load(Ordering::Relaxed);
         let sys = self.sys_time_ns.load(Ordering::Relaxed);
-        if self.in_user_mode.load(Ordering::Acquire) {
-            let last = self.last_user_enter_ns.load(Ordering::Relaxed);
+        let last = self.last_user_enter_ns.load(Ordering::Acquire);
+        if last != NOT_IN_USER_MODE {
             user = user.saturating_add(now_ns.saturating_sub(last));
         }
         (user, sys)

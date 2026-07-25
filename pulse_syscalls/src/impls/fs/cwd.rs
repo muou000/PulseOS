@@ -14,8 +14,13 @@ pub fn sys_getcwd(buf: usize, size: usize) -> isize {
     if size == 0 {
         return -LinuxError::ERANGE.code() as isize;
     }
-    let cwd = match with_process(|process| process.fs_context_handle().lock().current_dir().absolute_path())
-    {
+    let cwd = match with_process(|process| {
+        process
+            .fs_context_handle()
+            .lock()
+            .current_dir()
+            .absolute_path()
+    }) {
         Ok(Ok(path)) => path,
         Ok(Err(e)) => return -LinuxError::from(e.canonicalize()).code() as isize,
         Err(e) => return -e.code() as isize,
@@ -48,8 +53,21 @@ pub fn sys_chdir(path: usize) -> isize {
     match with_process(|process| -> Result<(), LinuxError> {
         let dir = {
             let fs = process.fs_context_handle().lock().clone();
-            axtask::future::block_on(fs.resolve(path))
-                .map_err(|e| LinuxError::from(e.canonicalize()))?
+            match axtask::future::block_on(fs.resolve(path)) {
+                Ok(dir) => dir,
+                Err(e) => {
+                    let errno = LinuxError::from(e.canonicalize());
+                    if errno == LinuxError::EFAULT {
+                        axlog::warn!(
+                            "sys_chdir: resolve returned EFAULT: pid={}, path={:?}, err={:?}",
+                            process.pid(),
+                            path,
+                            e
+                        );
+                    }
+                    return Err(errno);
+                }
+            }
         };
         dir.check_is_dir()
             .map_err(|e| LinuxError::from(e.canonicalize()))?;

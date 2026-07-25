@@ -1,6 +1,7 @@
 use core::arch::naked_asm;
 #[cfg(feature = "fp-simd")]
 use core::mem::offset_of;
+
 use memory_addr::VirtAddr;
 
 /// General registers of Loongarch64.
@@ -84,6 +85,14 @@ pub struct TrapFrame {
 }
 
 impl TrapFrame {
+    pub fn ip(&self) -> usize {
+        self.era
+    }
+
+    pub fn set_ip(&mut self, new_ip: usize) {
+        self.era = new_ip;
+    }
+
     /// Gets the 0th syscall argument.
     pub const fn arg0(&self) -> usize {
         self.regs.a0 as _

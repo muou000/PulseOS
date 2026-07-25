@@ -17,6 +17,11 @@
     mv      gp, t0
     mv      tp, t1
 .endif
+
+    // Keep SUM scoped to the interrupted user-copy context. RESTORE_REGS
+    // restores the saved value when that context resumes.
+    li      t0, (1 << 18)
+    csrc    sstatus, t0
 .endm
 
 .macro RESTORE_REGS, from_user

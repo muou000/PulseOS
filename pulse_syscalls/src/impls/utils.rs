@@ -1,4 +1,4 @@
-use alloc::{ffi::CString, vec::Vec, sync::Arc};
+use alloc::{ffi::CString, sync::Arc, vec::Vec};
 use core::time::Duration;
 
 use axerrno::LinuxError;
@@ -17,6 +17,14 @@ pub(crate) fn with_process<R>(
 
 pub(crate) fn read_user_bytes(user_addr: usize, bytes: &mut [u8]) -> Result<(), LinuxError> {
     with_process(|process| process.read_user_bytes(user_addr, bytes))?
+        .map_err(|e| LinuxError::from(e.canonicalize()))
+}
+
+pub(crate) fn read_user_bytes_partial(
+    user_addr: usize,
+    bytes: &mut [u8],
+) -> Result<usize, LinuxError> {
+    with_process(|process| process.read_user_bytes_partial(user_addr, bytes))?
         .map_err(|e| LinuxError::from(e.canonicalize()))
 }
 
@@ -93,7 +101,10 @@ impl Drop for ScratchBuffer {
     }
 }
 
-pub(crate) fn alloc_zeroed_bytes(len: usize, _site: &'static str) -> Result<ScratchBuffer, LinuxError> {
+pub(crate) fn alloc_zeroed_bytes(
+    len: usize,
+    _site: &'static str,
+) -> Result<ScratchBuffer, LinuxError> {
     if len <= 4096 {
         Ok(ScratchBuffer::Stack {
             buf: [0; 4096],
@@ -127,7 +138,10 @@ pub(crate) fn alloc_zeroed_bytes(len: usize, _site: &'static str) -> Result<Scra
     }
 }
 
-pub(crate) fn alloc_uninit_bytes(len: usize, _site: &'static str) -> Result<ScratchBuffer, LinuxError> {
+pub(crate) fn alloc_uninit_bytes(
+    len: usize,
+    _site: &'static str,
+) -> Result<ScratchBuffer, LinuxError> {
     if len <= 4096 {
         Ok(ScratchBuffer::Stack {
             buf: [0; 4096],
@@ -208,37 +222,55 @@ pub(crate) fn query_user_page_slice(
     write: bool,
 ) -> Option<*mut [u8]> {
     let process = pulse_core::task::current_process().ok()?;
-    
+    if max_len == 0 {
+        return None;
+    }
+    let first_chunk_len = core::cmp::min(max_len, 4096 - (user_addr & 4095));
+    process
+        .validate_user_range(user_addr, first_chunk_len)
+        .ok()?;
+
     let required_flags = if write {
         axhal::paging::MappingFlags::WRITE | axhal::paging::MappingFlags::USER
     } else {
         axhal::paging::MappingFlags::READ | axhal::paging::MappingFlags::USER
     };
-    
-    let _ = process.try_fault_in_user_range(user_addr, max_len, required_flags);
-    
+
+    if let Some(slice) =
+        query_resident_user_page_slice(process.as_ref(), user_addr, max_len, required_flags)
+    {
+        return Some(slice);
+    }
+
+    process
+        .try_fault_in_user_range(user_addr, first_chunk_len, required_flags)
+        .ok()?;
+    query_resident_user_page_slice(process.as_ref(), user_addr, max_len, required_flags)
+}
+
+fn query_resident_user_page_slice(
+    process: &pulse_core::task::Process,
+    user_addr: usize,
+    max_len: usize,
+    required_flags: axhal::paging::MappingFlags,
+) -> Option<*mut [u8]> {
     let aspace_handle = process.aspace_handle();
     let aspace = aspace_handle.read();
-    
+
     let vaddr = memory_addr::VirtAddr::from(user_addr);
     let start_page = vaddr.align_down_4k();
     let offset = vaddr.align_offset_4k();
-    
-    let all_accessible = aspace.can_access_range(vaddr, max_len, required_flags);
+
     let first_chunk_len = core::cmp::min(max_len, 4096 - offset);
-    if !all_accessible && !aspace.can_access_range(vaddr, first_chunk_len, required_flags) {
-        return None;
-    }
-    
     let (start_paddr, flags, _) = aspace.query_vaddr(start_page).ok()?;
     if start_paddr.as_usize() == 0 || !flags.contains(required_flags) {
         return None;
     }
-    
+
     let mut total_len = first_chunk_len;
     let mut current_page = start_page;
     let mut expected_paddr = start_paddr;
-    
+
     while total_len < max_len {
         let next_page = match current_page.checked_add(4096) {
             Some(addr) => addr,
@@ -248,14 +280,10 @@ pub(crate) fn query_user_page_slice(
             Some(addr) => addr,
             None => break,
         };
-        
+
         let remaining = max_len - total_len;
         let chunk = core::cmp::min(remaining, 4096);
-        
-        if !all_accessible && !aspace.can_access_range(next_page, chunk, required_flags) {
-            break;
-        }
-        
+
         if let Ok((paddr, flags, _)) = aspace.query_vaddr(next_page) {
             if paddr == next_expected_paddr && flags.contains(required_flags) {
                 total_len += chunk;
@@ -268,12 +296,14 @@ pub(crate) fn query_user_page_slice(
             break;
         }
     }
-    
+
     let kvaddr = axhal::mem::phys_to_virt(start_paddr) + offset;
     let ptr = kvaddr.as_mut_ptr();
     axlog::debug!(
         "query_user_page_slice: user_addr={:#x}, max_len={}, total_len={}",
-        user_addr, max_len, total_len
+        user_addr,
+        max_len,
+        total_len
     );
     Some(core::ptr::slice_from_raw_parts_mut(ptr, total_len))
 }

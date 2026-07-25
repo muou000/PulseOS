@@ -8,10 +8,10 @@ use crate::*;
 #[register_trap_handler(SYSCALL)]
 pub fn syscall_handler(tf: &mut TrapFrame, syscall_num: usize) -> isize {
     let syscall_enter_ns = axhal::time::monotonic_time_nanos() as u64;
-    let thread = match pulse_core::task::current_thread() {
+    let task = axtask::current();
+    let thread = match pulse_core::task::thread_ref_from_task(&task) {
         Ok(thread) => thread,
         Err(_) => {
-            let task = axtask::current();
             let task_ext_ptr = unsafe { task.task_ext_ptr() };
             panic!(
                 "syscall without Thread context: syscall={}, task={} {:?}, task_ext_ptr={:p}",
@@ -89,10 +89,10 @@ pub fn syscall_handler(tf: &mut TrapFrame, syscall_num: usize) -> isize {
 
     // Consume the interrupt that ended this syscall before checking signals.
     // A signal arriving during or after the check must remain latched.
-    axtask::current().clear_interrupt();
+    task.clear_interrupt();
 
     if thread.signal().has_pending_or_skip_once() {
-        if let Some(delivery) = pulse_core::task::check_signals_and_deliver(thread.as_ref(), tf) {
+        if let Some(delivery) = pulse_core::task::check_signals_and_deliver(thread, tf) {
             use pulse_core::task::{DefaultSignalAction, SignalAction};
             match delivery.action {
                 SignalAction::Default(DefaultSignalAction::Terminate) => {
@@ -115,7 +115,7 @@ pub fn syscall_handler(tf: &mut TrapFrame, syscall_num: usize) -> isize {
     if process.group_exiting() {
         thread.exit_current(process.group_exit_code());
     }
-    thread.mark_user_resume();
+    thread.mark_user_resume_at(syscall_leave_ns);
 
     syscall_ret(tf)
 }
