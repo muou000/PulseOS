@@ -47,7 +47,7 @@ fn main() {
             let shell_args_base: &[&str] = if cfg!(feature = "pre-testcode") {
                 &["sh", "/testcode.sh"]
             } else if cfg!(feature = "final-testcode") {
-                &["sh", "-c", "cd /glibc && ./cagent_testcode.sh"]
+                &["sh", "-c", "cd /glibc && ./cagent_testcode.sh && ./buildstorm_testcode.sh"]
             } else {
                 &["sh"]
             };
