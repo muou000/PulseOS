@@ -1012,11 +1012,24 @@ impl AddrSpace {
     }
 
     fn clear_unpublished(&mut self) {
-        let mut reclaim = DeferredReclaims::default();
-        if let Err(error) = self.areas.clear(&mut self.pt, &mut reclaim) {
-            error!("failed to clear unpublished address space: {error:?}");
+        let chunk_size = DeferredReclaims::retirement_capacity() * PAGE_SIZE_4K;
+        loop {
+            let next = self
+                .areas
+                .iter()
+                .next()
+                .map(|area| (area.start(), area.size().min(chunk_size)));
+            let Some((start, size)) = next else {
+                break;
+            };
+            let mut reclaim = DeferredReclaims::for_retirement();
+            let result = self.areas.unmap(start, size, &mut self.pt, &mut reclaim);
+            reclaim.reclaim();
+            if let Err(error) = result {
+                error!("failed to clear unpublished address space: {error:?}");
+                break;
+            }
         }
-        reclaim.reclaim();
     }
 
     /// Checks whether an access to the specified memory region is valid.
@@ -1731,18 +1744,38 @@ static ASID_ALLOCATOR: spin::Mutex<AsidAllocator> = spin::Mutex::new(AsidAllocat
 impl Drop for AddrSpace {
     fn drop(&mut self) {
         let asid = self.asid;
-        let (clear_result, shootdown) = self.clear().into_parts();
-        if let Err(error) = clear_result {
-            error!("failed to retire address-space mappings: {error:?}");
+        let chunk_size = DeferredReclaims::retirement_capacity() * PAGE_SIZE_4K;
+        // Drop has unique ownership and every caller switches away from this
+        // page table before releasing its final handle. Retire the ASID before
+        // taking a CPU-local reclaim buffer so its lease is never held while
+        // waiting for a remote TLB IPI.
+        let mut retirement_completed = self.areas.is_empty()
+            || TlbShootdown::without_reclaims(asid)
+                .complete_after_unlock()
+                .is_ok();
+
+        while retirement_completed {
+            let next = self
+                .areas
+                .iter()
+                .next()
+                .map(|area| (area.start(), area.size().min(chunk_size)));
+            let Some((start, size)) = next else {
+                break;
+            };
+            let mut reclaim = DeferredReclaims::for_retirement();
+            let result = self.areas.unmap(start, size, &mut self.pt, &mut reclaim);
+            reclaim.reclaim();
+            if let Err(error) = result {
+                error!("failed to retire address-space mappings: {error:?}");
+                retirement_completed = false;
+            }
         }
-        let shootdown_completed = shootdown
-            .map(TlbShootdown::complete_after_unlock)
-            .unwrap_or(Ok(()))
-            .is_ok();
-        if shootdown_completed {
+
+        if retirement_completed {
             ASID_ALLOCATOR.lock().free(asid);
         } else {
-            error!("failed to flush retired address space; ASID {asid} will not be reused");
+            error!("failed to retire address space; ASID {asid} will not be reused");
         }
     }
 }

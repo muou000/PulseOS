@@ -7,7 +7,7 @@ use alloc::{
 #[cfg(feature = "times")]
 use core::sync::atomic::AtomicU8;
 use core::{
-    sync::atomic::{AtomicBool, AtomicIsize, AtomicU64, AtomicUsize, Ordering},
+    sync::atomic::{AtomicIsize, AtomicU64, AtomicUsize, Ordering},
     task::Context,
 };
 
@@ -534,6 +534,7 @@ const PAGE_CACHE_GROWTH_HEADROOM: usize = 256;
 const PAGE_CACHE_EVICTION_BATCH: usize = 256;
 const PAGE_CACHE_SCAN_MULTIPLIER: usize = 4;
 const PAGE_CACHE_MIN_SCAN: usize = 64;
+const PAGE_CACHE_RECLAIM_LOG_INTERVAL: usize = 4096;
 const PAGE_FILL_LOCK_STRIPES: usize = 256;
 
 static PAGE_FILL_LOCKS: Lazy<Vec<async_lock::Mutex<()>>> = Lazy::new(|| {
@@ -1077,14 +1078,18 @@ pub(crate) fn flush_all_file_caches() -> VfsResult<()> {
     first_error.map_or(Ok(()), Err)
 }
 
+const NO_RECLAIM_OWNER: usize = usize::MAX;
+
 struct ReclaimGuard;
 impl Drop for ReclaimGuard {
     fn drop(&mut self) {
-        RECLAIM_IN_PROGRESS.store(false, Ordering::Release);
+        PAGE_CACHE_RECLAIM_OWNER.store(NO_RECLAIM_OWNER, Ordering::Release);
     }
 }
 
-static RECLAIM_IN_PROGRESS: AtomicBool = AtomicBool::new(false);
+static PAGE_CACHE_RECLAIM_OWNER: AtomicUsize = AtomicUsize::new(NO_RECLAIM_OWNER);
+static PAGE_CACHE_RECLAIMED_TOTAL: AtomicUsize = AtomicUsize::new(0);
+static PAGE_CACHE_RECLAIM_ZERO_STREAK: AtomicUsize = AtomicUsize::new(0);
 static PAGE_CACHE_RECLAIM_CURSOR: AtomicUsize = AtomicUsize::new(0);
 
 fn page_cache_reclaim_inner(num_pages: usize) -> usize {
@@ -1125,27 +1130,30 @@ fn page_cache_reclaim_inner(num_pages: usize) -> usize {
 }
 
 fn prune_inactive_disk_file_caches() {
-    let removed = {
-        let Some(mut caches) = ACTIVE_DISK_FILE_CACHES.try_lock() else {
+    loop {
+        let removed = {
+            let Some(mut caches) = ACTIVE_DISK_FILE_CACHES.try_lock() else {
+                return;
+            };
+            caches
+                .iter()
+                .position(|cached| {
+                    Arc::strong_count(cached) == 1
+                        && cached
+                            .page_cache
+                            .try_lock()
+                            .map(|cache| cache.is_empty())
+                            .unwrap_or(false)
+                })
+                .map(|index| caches.swap_remove(index))
+        };
+        let Some(removed) = removed else {
             return;
         };
-        let mut removed = Vec::new();
-        let mut index = 0;
-        while index < caches.len() {
-            let cache_empty = caches[index]
-                .page_cache
-                .try_lock()
-                .map(|cache| cache.is_empty())
-                .unwrap_or(false);
-            if Arc::strong_count(&caches[index]) == 1 && cache_empty {
-                removed.push(caches.swap_remove(index));
-            } else {
-                index += 1;
-            }
-        }
-        removed
-    };
-    drop(removed);
+        // Drop after releasing the registry lock: the backing inode teardown
+        // may re-enter filesystem registries.
+        drop(removed);
+    }
 }
 
 /// Reclaim clean, unmapped page-cache pages after a physical allocation failure.
@@ -1153,11 +1161,62 @@ fn prune_inactive_disk_file_caches() {
 /// This path deliberately never writes dirty pages back. File I/O and allocator
 /// pressure must not turn into synchronous filesystem writeback.
 pub fn page_cache_reclaim(num_pages: usize) -> usize {
-    if num_pages == 0 || RECLAIM_IN_PROGRESS.swap(true, Ordering::AcqRel) {
+    if num_pages == 0 {
         return 0;
     }
+
+    let cpu_id = axhal::percpu::this_cpu_id();
+    let reclaimed_before = PAGE_CACHE_RECLAIMED_TOTAL.load(Ordering::Acquire);
+    match PAGE_CACHE_RECLAIM_OWNER.compare_exchange(
+        NO_RECLAIM_OWNER,
+        cpu_id,
+        Ordering::AcqRel,
+        Ordering::Acquire,
+    ) {
+        Ok(_) => {}
+        // Re-entry on the owner CPU must not spin waiting for itself.
+        Err(owner) if owner == cpu_id => return 0,
+        Err(_) => {
+            while PAGE_CACHE_RECLAIM_OWNER.load(Ordering::Acquire) != NO_RECLAIM_OWNER {
+                core::hint::spin_loop();
+            }
+            return PAGE_CACHE_RECLAIMED_TOTAL
+                .load(Ordering::Acquire)
+                .wrapping_sub(reclaimed_before);
+        }
+    }
+
     let _guard = ReclaimGuard;
     let reclaimed = page_cache_reclaim_inner(num_pages);
+    if reclaimed > 0 {
+        PAGE_CACHE_RECLAIM_ZERO_STREAK.store(0, Ordering::Relaxed);
+        let previous = PAGE_CACHE_RECLAIMED_TOTAL.fetch_add(reclaimed, Ordering::Release);
+        let total = previous.wrapping_add(reclaimed);
+        if previous == 0
+            || previous / PAGE_CACHE_RECLAIM_LOG_INTERVAL
+                != total / PAGE_CACHE_RECLAIM_LOG_INTERVAL
+        {
+            info!(
+                "page_cache_reclaim_progress: total_pages={} last_pages={} requested_pages={}",
+                total, reclaimed, num_pages
+            );
+        }
+    } else {
+        let streak = PAGE_CACHE_RECLAIM_ZERO_STREAK.fetch_add(1, Ordering::Relaxed) + 1;
+        if streak <= 4 || streak.is_power_of_two() {
+            let active_caches = ACTIVE_DISK_FILE_CACHES
+                .try_lock()
+                .map(|caches| caches.len())
+                .unwrap_or(usize::MAX);
+            warn!(
+                "page_cache_reclaim_stalled: streak={} requested_pages={} active_caches={} available_pages={}",
+                streak,
+                num_pages,
+                active_caches,
+                global_allocator().available_pages()
+            );
+        }
+    }
     prune_inactive_disk_file_caches();
     reclaimed
 }

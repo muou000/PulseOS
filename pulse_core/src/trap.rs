@@ -1,5 +1,6 @@
 //! Trap 处理模块 - 处理 page fault 和其他异常
 
+use axerrno::AxError;
 use axhal::{
     context::TrapFrame,
     paging::MappingFlags,
@@ -143,19 +144,26 @@ fn handle_page_fault(
         }
     }
 
-    if proc.handle_page_fault(vaddr, access_flags) {
-        axhal::asm::flush_tlb(Some(vaddr));
-        if is_user {
-            let leave_ns = axhal::time::monotonic_time_nanos() as u64;
-            proc.add_sys_time_ns(leave_ns.saturating_sub(enter_ns));
-            if proc.group_exiting() {
-                thread.exit_current(proc.group_exit_code());
+    let fault_error = match proc.handle_page_fault(vaddr, access_flags) {
+        Ok(true) => {
+            axhal::asm::flush_tlb(Some(vaddr));
+            if is_user {
+                let leave_ns = axhal::time::monotonic_time_nanos() as u64;
+                proc.add_sys_time_ns(leave_ns.saturating_sub(enter_ns));
+                if proc.group_exiting() {
+                    thread.exit_current(proc.group_exit_code());
+                }
+                proc.mark_user_resume_at(leave_ns);
             }
-            proc.mark_user_resume_at(leave_ns);
+            axlog::debug!("Page fault handled successfully");
+            return true;
         }
-        axlog::debug!("Page fault handled successfully");
-        return true;
-    }
+        Ok(false) => None,
+        Err(error) => {
+            axlog::error!("page fault resolution failed: {error:?}");
+            Some(error)
+        }
+    };
 
     if !is_user {
         if tf.fixup_exception() {
@@ -173,7 +181,8 @@ fn handle_page_fault(
     );
     axlog::warn!("  vaddr={:#x}, flags={:?}", vaddr, access_flags);
 
-    let mut signo = 11; // Default to SIGSEGV
+    let out_of_memory = fault_error == Some(AxError::NoMemory);
+    let mut signo = if out_of_memory { 9 } else { 11 }; // SIGKILL or SIGSEGV
     let mut fault_area = None;
     let mut previous_area = None;
     let mut next_area = None;
@@ -191,7 +200,7 @@ fn handle_page_fault(
             while let axmm::Backend::Cow(cow) = &curr_backend {
                 curr_backend = cow.inner().clone();
             }
-            if let axmm::Backend::File(mapping) = curr_backend {
+            if !out_of_memory && let axmm::Backend::File(mapping) = curr_backend {
                 let current_file_bytes = mapping.file_bytes();
                 let relative = vaddr.as_usize().saturating_sub(start.as_usize());
                 if relative >= current_file_bytes {

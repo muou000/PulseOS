@@ -1,5 +1,10 @@
 //! Memory mapping backends.
 
+use core::{
+    cell::UnsafeCell,
+    sync::atomic::{AtomicBool, Ordering},
+};
+
 use axhal::paging::{MappingFlags, PageSize};
 use memory_addr::{PhysAddr, VirtAddr};
 use memory_set::MappingBackend;
@@ -71,20 +76,47 @@ pub enum Backend {
     Cow(CowMapping),
 }
 
-enum DeferredReclaim {
-    Frame(PhysAddr),
-    Backend(Backend),
+const RETIREMENT_RECLAIM_CAPACITY: usize = 4096;
+
+#[repr(align(64))]
+struct RetirementFrameBuffer {
+    in_use: AtomicBool,
+    frames: UnsafeCell<[usize; RETIREMENT_RECLAIM_CAPACITY]>,
+}
+
+impl RetirementFrameBuffer {
+    const fn new() -> Self {
+        Self {
+            in_use: AtomicBool::new(false),
+            frames: UnsafeCell::new([0; RETIREMENT_RECLAIM_CAPACITY]),
+        }
+    }
+}
+
+// Access to each CPU slot is serialized by its in_use lease.
+unsafe impl Sync for RetirementFrameBuffer {}
+
+static RETIREMENT_RECLAIM_BUFFERS: [RetirementFrameBuffer; axconfig::plat::MAX_CPU_NUM] =
+    [const { RetirementFrameBuffer::new() }; axconfig::plat::MAX_CPU_NUM];
+
+enum DeferredFrames {
+    Dynamic(Vec<PhysAddr>),
+    Retirement { cpu_id: usize, len: usize },
 }
 
 /// Mapping references kept alive until a remote TLB shootdown has completed.
 pub struct DeferredReclaims {
-    actions: Option<Vec<DeferredReclaim>>,
+    frames: Option<DeferredFrames>,
+    backend: Option<Backend>,
+    additional_backends: Option<Vec<Backend>>,
 }
 
 impl Default for DeferredReclaims {
     fn default() -> Self {
         Self {
-            actions: Some(Vec::new()),
+            frames: Some(DeferredFrames::Dynamic(Vec::new())),
+            backend: None,
+            additional_backends: Some(Vec::new()),
         }
     }
 }
@@ -92,60 +124,165 @@ impl Default for DeferredReclaims {
 impl DeferredReclaims {
     pub(crate) fn with_capacity(capacity: usize) -> Self {
         Self {
-            actions: Some(Vec::with_capacity(capacity)),
+            frames: Some(DeferredFrames::Dynamic(Vec::with_capacity(capacity))),
+            backend: None,
+            additional_backends: Some(Vec::new()),
         }
+    }
+
+    pub(crate) fn for_retirement() -> Self {
+        let cpu_id = axhal::percpu::this_cpu_id();
+        let buffer = &RETIREMENT_RECLAIM_BUFFERS[cpu_id];
+        while buffer
+            .in_use
+            .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
+            .is_err()
+        {
+            #[cfg(feature = "ipi")]
+            axipi::service_tlb_shootdown();
+            core::hint::spin_loop();
+        }
+        Self {
+            frames: Some(DeferredFrames::Retirement { cpu_id, len: 0 }),
+            backend: None,
+            additional_backends: Some(Vec::new()),
+        }
+    }
+
+    pub(crate) const fn retirement_capacity() -> usize {
+        RETIREMENT_RECLAIM_CAPACITY
     }
 
     pub(crate) fn defer_frame(&mut self, frame: PhysAddr) {
-        if frame.as_usize() != 0 {
-            self.actions
-                .as_mut()
-                .unwrap()
-                .push(DeferredReclaim::Frame(frame));
+        if frame.as_usize() == 0 {
+            return;
         }
-    }
-
-    fn defer_backend(&mut self, backend: Backend) {
-        self.actions
-            .as_mut()
-            .unwrap()
-            .push(DeferredReclaim::Backend(backend));
-    }
-
-    pub(crate) fn is_empty(&self) -> bool {
-        self.actions.as_ref().unwrap().is_empty()
-    }
-
-    pub(crate) fn append(&mut self, other: Self) {
-        let mut actions = other.into_actions();
-        self.actions.as_mut().unwrap().append(&mut actions);
-    }
-
-    pub(crate) fn reclaim(self) {
-        for action in self.into_actions() {
-            match action {
-                DeferredReclaim::Frame(frame) => self::alloc::dealloc_frame(frame),
-                DeferredReclaim::Backend(backend) => drop(backend),
+        match self.frames.as_mut().unwrap() {
+            DeferredFrames::Dynamic(frames) => frames.push(frame),
+            DeferredFrames::Retirement { cpu_id, len } => {
+                assert!(*len < RETIREMENT_RECLAIM_CAPACITY);
+                // SAFETY: this object holds the selected CPU buffer's lease.
+                unsafe {
+                    (*RETIREMENT_RECLAIM_BUFFERS[*cpu_id].frames.get())[*len] = frame.as_usize();
+                }
+                *len += 1;
             }
         }
     }
 
-    fn into_actions(mut self) -> Vec<DeferredReclaim> {
-        self.actions.take().unwrap()
+    fn defer_backend(&mut self, backend: Backend) {
+        if self.backend.is_none() {
+            self.backend = Some(backend);
+        } else {
+            self.additional_backends.as_mut().unwrap().push(backend);
+        }
     }
+
+    pub(crate) fn is_empty(&self) -> bool {
+        let frames_empty = match self.frames.as_ref().unwrap() {
+            DeferredFrames::Dynamic(frames) => frames.is_empty(),
+            DeferredFrames::Retirement { len, .. } => *len == 0,
+        };
+        frames_empty
+            && self.backend.is_none()
+            && self.additional_backends.as_ref().unwrap().is_empty()
+    }
+
+    pub(crate) fn append(&mut self, other: Self) {
+        let (other_frames, backend, additional_backends) = other.into_parts();
+        match other_frames {
+            DeferredFrames::Dynamic(mut frames) => match self.frames.as_mut().unwrap() {
+                DeferredFrames::Dynamic(own_frames) => own_frames.append(&mut frames),
+                DeferredFrames::Retirement { .. } => {
+                    for frame in frames {
+                        self.defer_frame(frame);
+                    }
+                }
+            },
+            DeferredFrames::Retirement { cpu_id, len } => {
+                for index in 0..len {
+                    self.defer_frame(retirement_frame(cpu_id, index));
+                }
+                release_retirement_buffer(cpu_id);
+            }
+        }
+        if let Some(backend) = backend {
+            self.defer_backend(backend);
+        }
+        for backend in additional_backends {
+            self.defer_backend(backend);
+        }
+    }
+
+    pub(crate) fn reclaim(self) {
+        let (frames, backend, additional_backends) = self.into_parts();
+        match frames {
+            DeferredFrames::Dynamic(frames) => {
+                for frame in frames {
+                    self::alloc::dealloc_frame(frame);
+                }
+            }
+            DeferredFrames::Retirement { cpu_id, len } => {
+                for index in 0..len {
+                    self::alloc::dealloc_frame(retirement_frame(cpu_id, index));
+                }
+                release_retirement_buffer(cpu_id);
+            }
+        }
+        drop(backend);
+        drop(additional_backends);
+    }
+
+    fn into_parts(mut self) -> (DeferredFrames, Option<Backend>, Vec<Backend>) {
+        (
+            self.frames.take().unwrap(),
+            self.backend.take(),
+            self.additional_backends.take().unwrap(),
+        )
+    }
+}
+
+fn retirement_frame(cpu_id: usize, index: usize) -> PhysAddr {
+    // SAFETY: a live Retirement DeferredFrames owns this CPU slot's lease,
+    // and callers only read initialized indices below its recorded length.
+    PhysAddr::from(unsafe { (*RETIREMENT_RECLAIM_BUFFERS[cpu_id].frames.get())[index] })
+}
+
+fn release_retirement_buffer(cpu_id: usize) {
+    RETIREMENT_RECLAIM_BUFFERS[cpu_id]
+        .in_use
+        .store(false, Ordering::Release);
 }
 
 impl Drop for DeferredReclaims {
     fn drop(&mut self) {
-        let Some(actions) = self.actions.take() else {
+        let Some(frames) = self.frames.take() else {
             return;
         };
-        if !actions.is_empty() {
+        let frame_count = match &frames {
+            DeferredFrames::Dynamic(frames) => frames.len(),
+            DeferredFrames::Retirement { len, .. } => *len,
+        };
+        let backend_count = usize::from(self.backend.is_some())
+            + self.additional_backends.as_ref().unwrap().len();
+        if frame_count + backend_count > 0 {
             error!(
                 "leaking {} deferred mapping references after incomplete TLB shootdown",
-                actions.len()
+                frame_count + backend_count
             );
-            core::mem::forget(actions);
+        }
+        match frames {
+            DeferredFrames::Dynamic(frames) if !frames.is_empty() => core::mem::forget(frames),
+            DeferredFrames::Dynamic(_) => {}
+            DeferredFrames::Retirement { cpu_id, .. } => release_retirement_buffer(cpu_id),
+        }
+        if let Some(backend) = self.backend.take() {
+            core::mem::forget(backend);
+        }
+        if let Some(backends) = self.additional_backends.take() {
+            if !backends.is_empty() {
+                core::mem::forget(backends);
+            }
         }
     }
 }
