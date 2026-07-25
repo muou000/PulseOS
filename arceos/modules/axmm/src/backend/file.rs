@@ -28,7 +28,12 @@ fn sync_executable_mapping(flags: MappingFlags) {
 }
 
 #[allow(dead_code)]
-fn read_file_page(mapping: &FileMapping, dst: &mut [u8], file_offset: u64, read_len: usize) -> bool {
+fn read_file_page(
+    mapping: &FileMapping,
+    dst: &mut [u8],
+    file_offset: u64,
+    read_len: usize,
+) -> bool {
     let mut filled = 0;
     while filled < read_len {
         match mapping
@@ -52,9 +57,7 @@ fn writeback_phys_page(mapping: &FileMapping, page_addr: VirtAddr, frame_paddr: 
     if write_len == 0 {
         return true;
     }
-    let src = unsafe {
-        core::slice::from_raw_parts(phys_to_virt(frame_paddr).as_ptr(), write_len)
-    };
+    let src = unsafe { core::slice::from_raw_parts(phys_to_virt(frame_paddr).as_ptr(), write_len) };
     match mapping.file.write_at(src, file_offset) {
         Ok(written) => written == write_len,
         Err(_) => false,
@@ -115,25 +118,15 @@ impl core::fmt::Debug for FilePageLoad {
 
 impl FilePageLoad {
     pub fn prepare(self) -> AxResult<FilePagePrepared> {
-        loop {
-            self.file
-                .ensure_page_resident_readahead(self.page_number)
-                .map_err(|_| AxError::Io)?;
-            match self
-                .file
-                .try_pin_shared_page_paddr(self.page_number, self.may_write)
-                .map_err(|_| AxError::Io)?
-            {
-                Some(frame) => {
-                    return Ok(FilePagePrepared {
-                        file: self.file,
-                        page_number: self.page_number,
-                        frame: Some(frame),
-                    });
-                }
-                None => continue,
-            }
-        }
+        let frame = self
+            .file
+            .get_shared_page_paddr_readahead(self.page_number, self.may_write)
+            .map_err(|_| AxError::Io)?;
+        Ok(FilePagePrepared {
+            file: self.file,
+            page_number: self.page_number,
+            frame: Some(frame),
+        })
     }
 }
 
@@ -208,7 +201,9 @@ impl FileMapping {
     }
 
     pub fn file_bytes(&self) -> usize {
-        axfs::cached_file_size(self.file.location()).map(|len| len as usize).unwrap_or(self.file_bytes)
+        axfs::cached_file_size(self.file.location())
+            .map(|len| len as usize)
+            .unwrap_or(self.file_bytes)
     }
 
     fn page_read_window(&self, page_addr: VirtAddr) -> Option<(u64, usize)> {
@@ -240,7 +235,7 @@ impl FileMapping {
         if pt
             .read_for_addr(page_addr)
             .query(page_addr)
-            .is_ok_and(|(frame, _, _)| frame.as_usize() != 0)
+            .is_ok_and(|(frame, ..)| frame.as_usize() != 0)
         {
             return None;
         }
@@ -395,7 +390,9 @@ impl Backend {
 
         let page_addr = vaddr.align_down_4k();
         let current_file_bytes = mapping.file_bytes();
-        let relative = page_addr.as_usize().saturating_sub(mapping.start.as_usize());
+        let relative = page_addr
+            .as_usize()
+            .saturating_sub(mapping.start.as_usize());
         if relative >= (current_file_bytes + PAGE_SIZE_4K - 1) & !(PAGE_SIZE_4K - 1) {
             return false;
         }
@@ -493,7 +490,7 @@ impl Backend {
         let mut pt_guard = pt.lock_for_addr(page_addr);
         if pt_guard
             .query(page_addr)
-            .is_ok_and(|(current, _, _)| current.as_usize() != 0)
+            .is_ok_and(|(current, ..)| current.as_usize() != 0)
         {
             return true;
         }

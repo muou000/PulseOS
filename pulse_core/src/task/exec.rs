@@ -3,14 +3,13 @@ use alloc::{
     sync::Arc,
     vec::Vec,
 };
+use core::sync::atomic::Ordering;
 
 use axerrno::{AxError, AxResult};
 use axfs::FsContext;
 use axfs_ng_vfs::{Location, NodePermission, NodeType};
 use axhal::paging::MappingFlags;
 use memory_addr::va;
-
-use core::sync::atomic::Ordering;
 
 use super::{AddressSpaceLock, Process, Thread};
 use crate::config::*;
@@ -63,7 +62,7 @@ fn parse_shebang_line(file_data: &[u8]) -> AxResult<Option<(String, Option<Strin
 }
 
 fn read_exec_prefix(location: &Location) -> AxResult<Vec<u8>> {
-    let file = axfs::CachedFile::get_or_create(location.clone());
+    let file = axfs::CachedFile::get_or_create(location.clone())?;
     let mut prefix = alloc::vec![0u8; SHEBANG_PROBE_LEN];
     let read = file.read_at(&mut prefix[..], 0)?;
     prefix.truncate(read);
@@ -338,6 +337,12 @@ impl Process {
 
         axtask::set_current_page_table_root(new_pt_root, new_asid);
         self.activate();
+        unsafe {
+            #[cfg(target_arch = "riscv64")]
+            core::arch::asm!("fence.i", options(nostack, preserves_flags));
+            #[cfg(target_arch = "loongarch64")]
+            core::arch::asm!("dbar 0; ibar 0", options(nostack, preserves_flags));
+        }
         // A vfork child must stop sharing its parent's break state before waking it.
         self.reset_brk_state(
             load_info.start_brk,
@@ -348,15 +353,6 @@ impl Process {
         let old_exec_access = self.replace_exec_access(load_info.exec_access);
         drop(old_aspace);
         drop(old_exec_access);
-
-        // Flush TLB and instruction cache after loading is complete
-        self.activate();
-        unsafe {
-            #[cfg(target_arch = "riscv64")]
-            core::arch::asm!("fence.i", options(nostack, preserves_flags));
-            #[cfg(target_arch = "loongarch64")]
-            core::arch::asm!("dbar 0; ibar 0", options(nostack, preserves_flags));
-        }
 
         self.complete_vfork();
 

@@ -181,6 +181,18 @@ pub fn prefault_range(
     Ok(())
 }
 
+fn anonymous_segment_start(
+    seg_start_page: VirtAddr,
+    file_backed_end_page: VirtAddr,
+    file_size: usize,
+) -> VirtAddr {
+    if file_size == 0 {
+        seg_start_page
+    } else {
+        file_backed_end_page
+    }
+}
+
 fn load_segments(
     aspace: &mut AddrSpace,
     elf: &ElfFile<'_>,
@@ -214,48 +226,59 @@ fn load_segments(
         let file_start_page = p_offset.align_down_4k();
         let seg_end = p_vaddr.checked_add(p_memsz).ok_or(AxError::OutOfRange)?;
         let file_backed_end = p_vaddr.checked_add(p_filesz).ok_or(AxError::OutOfRange)?;
-        layout.start_data = layout.start_data.max(p_vaddr.as_usize());
-        layout.end_data = layout.end_data.max(file_backed_end.as_usize());
+
+        if ph.flags().is_write() {
+            if layout.start_data == 0 || p_vaddr.as_usize() < layout.start_data {
+                layout.start_data = p_vaddr.as_usize();
+            }
+            layout.end_data = layout.end_data.max(file_backed_end.as_usize());
+        }
         layout.brk = layout.brk.max(seg_end.as_usize());
         let file_backed_end_page = file_backed_end.align_up_4k();
         let seg_end_page = seg_end.align_up_4k();
         let flags = segment_flags(&ph);
 
-        if ph.flags().is_write() {
-            let seg_len = seg_end_page - seg_start_page;
-            aspace.map_alloc(seg_start_page, seg_len, flags, true)?;
-            if p_filesz > 0 {
-                let file_buf = read_elf_range(elf_file, p_offset as u64, p_filesz)?;
-                write_user_region(aspace, p_vaddr, &file_buf)?;
-            }
-        } else {
-            if p_filesz > 0 {
-                let file_bytes = file_backed_end.sub_addr(seg_start_page);
-                let map_len = file_backed_end_page - seg_start_page;
-                aspace.map_file(
-                    seg_start_page,
-                    map_len,
-                    flags,
-                    elf_file.clone(),
-                    file_flags_for_segment(&ph),
-                    file_start_page,
-                    file_bytes,
-                    false, // ELF segments are private mappings
-                    None,
-                )?;
-                prefault_range(aspace, seg_start_page, map_len, flags)?;
-            }
+        if p_filesz > 0 {
+            let file_bytes = file_backed_end.sub_addr(seg_start_page);
+            let map_len = file_backed_end_page - seg_start_page;
+            let zero_len = file_backed_end_page.as_usize() - file_backed_end.as_usize();
+            let zero_file_tail = zero_len > 0 && seg_end > file_backed_end;
+            let load_flags = if zero_file_tail {
+                flags | MappingFlags::WRITE
+            } else {
+                flags
+            };
+            aspace.map_file(
+                seg_start_page,
+                map_len,
+                load_flags,
+                elf_file.clone(),
+                file_flags_for_segment(&ph),
+                file_start_page,
+                file_bytes,
+                false, // ELF segments are private mappings
+                None,
+            )?;
+            // Populate from the shared file cache without eagerly taking a
+            // private COW copy of every writable page.
+            prefault_range(aspace, seg_start_page, map_len, MappingFlags::USER)?;
 
-            if seg_end_page > file_backed_end_page {
-                let map_len = seg_end_page - file_backed_end_page;
-                aspace.map_alloc(
-                    file_backed_end_page,
-                    map_len,
-                    flags,
-                    false,
-                )?;
-                prefault_range(aspace, file_backed_end_page, map_len, flags)?;
+            if zero_file_tail {
+                let zeros = [0u8; PAGE_SIZE_4K];
+                write_user_region(aspace, file_backed_end, &zeros[..zero_len])?;
+                if load_flags != flags {
+                    aspace
+                        .protect(seg_start_page, map_len, flags)
+                        .complete_after_unlock()?;
+                }
             }
+        }
+
+        let anon_start = anonymous_segment_start(seg_start_page, file_backed_end_page, p_filesz);
+        if seg_end_page > anon_start {
+            let map_len = seg_end_page - anon_start;
+            aspace.map_alloc(anon_start, map_len, flags, false)?;
+            prefault_range(aspace, anon_start, map_len, flags)?;
         }
     }
     Ok(layout)
@@ -352,10 +375,7 @@ fn same_file(left: &axfs_ng_vfs::Location, right: &axfs_ng_vfs::Location) -> boo
     left_fs == right_fs && left.inode() == right.inode()
 }
 
-fn get_from_cache(
-    path: &str,
-    location: &axfs_ng_vfs::Location,
-) -> Option<Arc<CachedElfImage>> {
+fn get_from_cache(path: &str, location: &axfs_ng_vfs::Location) -> Option<Arc<CachedElfImage>> {
     ELF_FILE_CACHE
         .lock()
         .iter()
@@ -424,10 +444,7 @@ fn read_prefix(file: &CachedFile, limit: usize) -> AxResult<Vec<u8>> {
     Ok(prefix)
 }
 
-fn read_elf_file_at(
-    path: &str,
-    location: axfs_ng_vfs::Location,
-) -> AxResult<Arc<CachedElfImage>> {
+fn read_elf_file_at(path: &str, location: axfs_ng_vfs::Location) -> AxResult<Arc<CachedElfImage>> {
     if let Some(image) = get_from_cache(path, &location) {
         if validate_cached_image(path, &image) {
             return Ok(image);
@@ -435,7 +452,7 @@ fn read_elf_file_at(
     }
     invalidate_cache(path);
 
-    let file = CachedFile::get_or_create(location);
+    let file = CachedFile::get_or_create(location)?;
     let mut prefix = read_prefix(&file, PAGE_SIZE_4K)?;
     let mut needed = compute_needed_prefix_len(&prefix)?;
     if needed > prefix.len() {
@@ -446,10 +463,7 @@ fn read_elf_file_at(
         return Err(AxError::InvalidExecutable);
     }
 
-    let image = Arc::new(CachedElfImage {
-        prefix,
-        file,
-    });
+    let image = Arc::new(CachedElfImage { prefix, file });
 
     if !validate_cached_image(path, &image) {
         return Err(AxError::InvalidExecutable);
@@ -466,17 +480,6 @@ fn read_elf_file(path: &str) -> AxResult<Arc<CachedElfImage>> {
     };
     let location = axtask::future::block_on(fs_ctx.resolve(path)).map_err(|_| AxError::NotFound)?;
     read_elf_file_at(path, location)
-}
-
-fn read_elf_range(file: &CachedFile, offset: u64, len: usize) -> AxResult<Vec<u8>> {
-    let mut buf = vec![0u8; len];
-    let read = file
-        .read_at(&mut buf[..], offset)
-        .map_err(|_| AxError::InvalidExecutable)?;
-    if read == len {
-        return Ok(buf);
-    }
-    Err(AxError::InvalidExecutable)
 }
 
 pub fn check_elf_header(path: &str) -> AxResult<()> {
