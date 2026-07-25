@@ -1,7 +1,11 @@
-use crate::{GenericPTE, PagingHandler, PagingMetaData};
-use crate::{MappingFlags, PageSize, PagingError, PagingResult, TlbFlush, TlbFlushAll};
 use core::marker::PhantomData;
+
 use memory_addr::{MemoryAddr, PAGE_SIZE_4K, PhysAddr};
+
+use crate::{
+    GenericPTE, MappingFlags, PageSize, PagingError, PagingHandler, PagingMetaData, PagingResult,
+    TlbFlush, TlbFlushAll,
+};
 
 const ENTRY_COUNT: usize = 512;
 
@@ -206,11 +210,14 @@ impl<M: PagingMetaData, PTE: GenericPTE, H: PagingHandler> PageTable64<M, PTE, H
     }
 
     /// Queries the mapping at `vaddr`.
-    /// 
+    ///
     /// If the mapping is present, returns `Ok((paddr, flags, page_size))`.
     /// If the mapping is not present, returns `Err(skip_size)` which indicates
     /// the block size of the level that was found to be unmapped.
-    pub fn query_skip(&self, vaddr: M::VirtAddr) -> Result<(PhysAddr, MappingFlags, PageSize), usize> {
+    pub fn query_skip(
+        &self,
+        vaddr: M::VirtAddr,
+    ) -> Result<(PhysAddr, MappingFlags, PageSize), usize> {
         let vaddr_usize: usize = vaddr.into();
         let p3 = if M::LEVELS == 3 {
             self.table_of(self.root_paddr())
@@ -318,9 +325,6 @@ impl<M: PagingMetaData, PTE: GenericPTE, H: PagingHandler> PageTable64<M, PTE, H
             let tlb = self.map(vaddr, paddr, page_size, flags).inspect_err(|e| {
                 error!("failed to map page: {vaddr_usize:#x?}({page_size:?}) -> {paddr:#x?}, {e:?}")
             })?;
-            if flush_tlb_by_page {
-                M::flush_tlb(Some(vaddr));
-            }
             if flush_tlb_by_page {
                 tlb.flush();
             } else {

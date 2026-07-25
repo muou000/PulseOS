@@ -11,20 +11,42 @@
 extern crate log;
 extern crate alloc;
 
-mod page;
 mod frameinfo;
+mod page;
+pub mod percpu_cache;
 
-pub use frameinfo::{frame_table, init_frame_table, FrameTable};
+use core::{
+    alloc::{GlobalAlloc, Layout},
+    ptr::NonNull,
+};
 
 use allocator::{AllocResult, BaseAllocator, BitmapPageAllocator, ByteAllocator, PageAllocator};
-use core::alloc::{GlobalAlloc, Layout};
-use core::ptr::NonNull;
+pub use frameinfo::{FrameTable, frame_table, init_frame_table};
 use kspin::SpinNoIrq;
 
 const PAGE_SIZE: usize = 0x1000;
 const MIN_HEAP_SIZE: usize = 0x200000; // 2 MB
 
 pub use page::GlobalPage;
+
+/// A function that tries to reclaim physical pages (e.g. by evicting
+/// clean file-backed page cache pages). Returns the number of pages freed.
+pub type PageReclaimFn = fn(num_pages: usize) -> usize;
+
+static PAGE_RECLAIM_FN: SpinNoIrq<Option<PageReclaimFn>> = SpinNoIrq::new(None);
+
+/// Register a callback that the allocator will invoke when a page allocation
+/// cannot be satisfied.
+pub fn register_page_reclaim_fn(f: PageReclaimFn) {
+    *PAGE_RECLAIM_FN.lock() = Some(f);
+}
+
+/// Try to reclaim physical pages by invoking the registered callback.
+/// Returns the number of pages actually freed.
+pub fn try_page_reclaim(num_pages: usize) -> usize {
+    let reclaim_fn = { *PAGE_RECLAIM_FN.lock() };
+    reclaim_fn.map_or(0, |f| f(num_pages))
+}
 
 cfg_if::cfg_if! {
     if #[cfg(feature = "slab")] {
@@ -90,6 +112,7 @@ impl GlobalAllocator {
             .alloc_pages(init_heap_size / PAGE_SIZE, PAGE_SIZE)
             .unwrap();
         self.balloc.lock().init(heap_ptr, init_heap_size);
+        percpu_cache::enable_percpu_cache();
     }
 
     /// Add the given region to the allocator.
@@ -99,41 +122,97 @@ impl GlobalAllocator {
         self.balloc.lock().add_memory(start_vaddr, size)
     }
 
+    fn expand_heap(&self, layout: Layout) -> AllocResult {
+        let old_size = self.balloc.lock().total_bytes();
+        let mut target_expand_size = old_size
+            .max(layout.size())
+            .next_power_of_two()
+            .max(PAGE_SIZE);
+
+        const MAX_EXPAND_SIZE: usize = 8 * 1024 * 1024; // 8 MB
+        if target_expand_size > MAX_EXPAND_SIZE {
+            let required_size = layout.size().saturating_mul(2).next_power_of_two();
+            target_expand_size = required_size.max(MAX_EXPAND_SIZE);
+        }
+
+        let min_expand_size = layout.size().next_power_of_two().max(PAGE_SIZE);
+        let mut expand_size = target_expand_size;
+        let mut heap_ptr_res = Err(allocator::AllocError::NoMemory);
+
+        while expand_size >= min_expand_size {
+            match self.alloc_pages(expand_size / PAGE_SIZE, PAGE_SIZE) {
+                Ok(ptr) => {
+                    heap_ptr_res = Ok((ptr, expand_size));
+                    break;
+                }
+                Err(_) => {
+                    if expand_size == min_expand_size {
+                        break;
+                    }
+                    expand_size = (expand_size / 2).max(min_expand_size);
+                }
+            }
+        }
+
+        let (heap_ptr, actual_expand_size) = heap_ptr_res?;
+        debug!(
+            "expand heap memory: [{:#x}, {:#x})",
+            heap_ptr,
+            heap_ptr + actual_expand_size
+        );
+        let result = self.balloc.lock().add_memory(heap_ptr, actual_expand_size);
+        if result.is_err() {
+            self.dealloc_pages(heap_ptr, actual_expand_size / PAGE_SIZE);
+        }
+        result
+    }
+
     /// Allocate arbitrary number of bytes. Returns the left bound of the
     /// allocated region.
     ///
-    /// It firstly tries to allocate from the byte allocator. If there is no
-    /// memory, it asks the page allocator for more memory and adds it to the
-    /// byte allocator.
+    /// It firstly tries to allocate from the per-CPU magazine cache (if eligible),
+    /// then from the byte allocator. If there is no memory, it asks the page
+    /// allocator for more memory and adds it to the byte allocator.
     pub fn alloc(&self, layout: Layout) -> AllocResult<NonNull<u8>> {
-        // simple two-level allocator: if no heap memory, allocate from the page allocator.
-        let mut balloc = self.balloc.lock();
+        // Keep heap expansion outside the IRQ-disabled magazine critical
+        // section so reclaim callbacks can never re-enter the same cache.
         loop {
-            if let Ok(ptr) = balloc.alloc(layout) {
-                return Ok(ptr);
-            } else {
-                let old_size = balloc.total_bytes();
-                let mut expand_size = old_size
-                    .max(layout.size())
-                    .next_power_of_two()
-                    .max(PAGE_SIZE);
-
-                // Cap the maximum expansion size to prevent allocating too many contiguous pages,
-                // but scale it if the requested layout size itself is large to prevent infinite loops.
-                const MAX_EXPAND_SIZE: usize = 8 * 1024 * 1024; // 8 MB
-                if expand_size > MAX_EXPAND_SIZE {
-                    let required_size = layout.size().saturating_mul(2).next_power_of_two();
-                    expand_size = required_size.max(MAX_EXPAND_SIZE);
+            match percpu_cache::try_alloc(&layout, |sc_idx, mag| {
+                let sc_bytes = percpu_cache::size_class_bytes(sc_idx);
+                let fill_layout = Layout::from_size_align(sc_bytes, sc_bytes).unwrap();
+                let mut balloc = self.balloc.lock();
+                let first_ptr = balloc.alloc(fill_layout)?;
+                for _ in 1..percpu_cache::BATCH_SIZE {
+                    if let Ok(extra_ptr) = balloc.alloc(fill_layout) {
+                        if !mag.push(extra_ptr) {
+                            balloc.dealloc(extra_ptr, fill_layout);
+                            break;
+                        }
+                    } else {
+                        break;
+                    }
                 }
-
-                let heap_ptr = self.alloc_pages(expand_size / PAGE_SIZE, PAGE_SIZE)?;
-                debug!(
-                    "expand heap memory: [{:#x}, {:#x})",
-                    heap_ptr,
-                    heap_ptr + expand_size
-                );
-                balloc.add_memory(heap_ptr, expand_size)?;
+                Ok(first_ptr)
+            }) {
+                Ok(Some(ptr)) => return Ok(ptr),
+                Ok(None) => break,
+                Err(err) => {
+                    let Some(sc_idx) = percpu_cache::get_size_class_index(&layout) else {
+                        return Err(err);
+                    };
+                    let sc_bytes = percpu_cache::size_class_bytes(sc_idx);
+                    let fill_layout = Layout::from_size_align(sc_bytes, sc_bytes).unwrap();
+                    self.expand_heap(fill_layout)?;
+                }
             }
+        }
+
+        // Slow-path: allocate directly from the byte allocator
+        loop {
+            if let Ok(ptr) = self.balloc.lock().alloc(layout) {
+                return Ok(ptr);
+            }
+            self.expand_heap(layout)?;
         }
     }
 
@@ -145,7 +224,24 @@ impl GlobalAllocator {
     ///
     /// [`alloc`]: GlobalAllocator::alloc
     pub fn dealloc(&self, pos: NonNull<u8>, layout: Layout) {
-        self.balloc.lock().dealloc(pos, layout)
+        // Fast-path: try per-CPU local magazine cache
+        if percpu_cache::try_dealloc(pos, &layout, |sc_idx, mag| {
+            let sc_bytes = percpu_cache::size_class_bytes(sc_idx);
+            let drain_layout = Layout::from_size_align(sc_bytes, sc_bytes).unwrap();
+            let mut balloc = self.balloc.lock();
+
+            for _ in 0..percpu_cache::BATCH_SIZE {
+                if let Some(obj_ptr) = mag.pop() {
+                    balloc.dealloc(obj_ptr, drain_layout);
+                } else {
+                    break;
+                }
+            }
+        }) {
+            return;
+        }
+
+        self.balloc.lock().dealloc(pos, layout);
     }
 
     /// Allocates contiguous pages.
@@ -155,7 +251,17 @@ impl GlobalAllocator {
     /// `align_pow2` must be a power of 2, and the returned region bound will be
     /// aligned to it.
     pub fn alloc_pages(&self, num_pages: usize, align_pow2: usize) -> AllocResult<usize> {
-        self.palloc.lock().alloc_pages(num_pages, align_pow2)
+        let mut result = self.palloc.lock().alloc_pages(num_pages, align_pow2);
+        if result.is_err() {
+            for _ in 0..4 {
+                let reclaimed = try_page_reclaim(num_pages.max(16));
+                result = self.palloc.lock().alloc_pages(num_pages, align_pow2);
+                if result.is_ok() || reclaimed == 0 {
+                    break;
+                }
+            }
+        }
+        result
     }
 
     /// Allocates independent 4K pages while holding the page allocator lock once.
@@ -188,9 +294,23 @@ impl GlobalAllocator {
         num_pages: usize,
         align_pow2: usize,
     ) -> AllocResult<usize> {
-        self.palloc
+        let mut result = self
+            .palloc
             .lock()
-            .alloc_pages_at(start, num_pages, align_pow2)
+            .alloc_pages_at(start, num_pages, align_pow2);
+        if result.is_err() {
+            for _ in 0..4 {
+                let reclaimed = try_page_reclaim(num_pages.max(16));
+                result = self
+                    .palloc
+                    .lock()
+                    .alloc_pages_at(start, num_pages, align_pow2);
+                if result.is_ok() || reclaimed == 0 {
+                    break;
+                }
+            }
+        }
+        result
     }
 
     /// Gives back the allocated pages starts from `pos` to the page allocator.

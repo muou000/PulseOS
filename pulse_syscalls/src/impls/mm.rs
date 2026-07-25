@@ -223,9 +223,22 @@ pub fn sys_mmap(
     const MAP_SYNC: usize = 0x80000;
     const MAP_FIXED_NOREPLACE: usize = 0x100000;
 
-    let supported_mask = MAP_SHARED | MAP_PRIVATE | MAP_SHARED_VALIDATE | MAP_FIXED | MAP_ANONYMOUS |
-                         MAP_DENYWRITE | MAP_EXECUTABLE | MAP_LOCKED | MAP_NORESERVE | MAP_POPULATE |
-                         MAP_NONBLOCK | MAP_STACK | MAP_HUGETLB | MAP_SYNC | MAP_FIXED_NOREPLACE | MAP_GROWSDOWN;
+    let supported_mask = MAP_SHARED
+        | MAP_PRIVATE
+        | MAP_SHARED_VALIDATE
+        | MAP_FIXED
+        | MAP_ANONYMOUS
+        | MAP_DENYWRITE
+        | MAP_EXECUTABLE
+        | MAP_LOCKED
+        | MAP_NORESERVE
+        | MAP_POPULATE
+        | MAP_NONBLOCK
+        | MAP_STACK
+        | MAP_HUGETLB
+        | MAP_SYNC
+        | MAP_FIXED_NOREPLACE
+        | MAP_GROWSDOWN;
 
     if map_type == MAP_SHARED_VALIDATE && (flags & !supported_mask) != 0 {
         return -LinuxError::EOPNOTSUPP.code() as isize;
@@ -308,7 +321,11 @@ pub fn sys_mmap(
             } else {
                 None
             };
-            Some((CachedFile::get_or_create(location), file_flags, write_access))
+            let cached = match CachedFile::get_or_create(location) {
+                Ok(cached) => cached,
+                Err(_) => return -LinuxError::ENODEV.code() as isize,
+            };
+            Some((cached, file_flags, write_access))
         }
     } else {
         None
@@ -392,8 +409,14 @@ pub fn sys_mmap(
     let map_result = if is_zero_device {
         if is_shared {
             use axhal::paging::PageSize;
-            if let Some(backend) = axmm::Backend::new_shared(aligned_length, true, PageSize::Size4K) {
-                aspace.map_with_backend(VirtAddr::from(map_addr), aligned_length, map_flags, backend)
+            if let Some(backend) = axmm::Backend::new_shared(aligned_length, true, PageSize::Size4K)
+            {
+                aspace.map_with_backend(
+                    VirtAddr::from(map_addr),
+                    aligned_length,
+                    map_flags,
+                    backend,
+                )
             } else {
                 Err(axerrno::AxError::NoMemory)
             }
@@ -472,8 +495,18 @@ pub fn sys_mmap(
             map_addr as isize
         }
         Err(e) => {
-            axlog::debug!("sys_mmap: failed to map at {:#x}: {:?}", map_addr, e);
-            -LinuxError::from(e).code() as isize
+            let errno = LinuxError::from(e);
+            if errno == LinuxError::EFAULT {
+                axlog::warn!(
+                    "sys_mmap: mapping returned EFAULT at {:#x}, len={:#x}: {:?}",
+                    map_addr,
+                    aligned_length,
+                    e
+                );
+            } else {
+                axlog::debug!("sys_mmap: failed to map at {:#x}: {:?}", map_addr, e);
+            }
+            -errno.code() as isize
         }
     }
 }
@@ -500,11 +533,7 @@ pub fn sys_munmap(addr: usize, length: usize) -> isize {
     let preparation = axmm::AddrSpaceUnmapPreparation::new(aligned_length);
     let aspace_handle = proc.aspace_handle();
     let mut aspace = aspace_handle.write();
-    let mutation = aspace.unmap_prepared(
-        VirtAddr::from(aligned_addr),
-        aligned_length,
-        preparation,
-    );
+    let mutation = aspace.unmap_prepared(VirtAddr::from(aligned_addr), aligned_length, preparation);
     drop(aspace);
     match mutation.complete_after_unlock() {
         Ok(_) => {
@@ -531,7 +560,8 @@ pub fn sys_mremap(
     new_address: usize,
 ) -> isize {
     axlog::debug!(
-        "sys_mremap: old_address={:#x}, old_size={:#x}, new_size={:#x}, flags={:#x}, new_address={:#x}",
+        "sys_mremap: old_address={:#x}, old_size={:#x}, new_size={:#x}, flags={:#x}, \
+         new_address={:#x}",
         old_address,
         old_size,
         new_size,
@@ -560,7 +590,8 @@ pub fn sys_mremap(
     if (flags & MREMAP_FIXED) != 0 && old_address != new_address {
         let aligned_old_size = (old_size + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
         let aligned_new_size = (new_size + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
-        let overlaps = !(new_address + aligned_new_size <= old_address || new_address >= old_address + aligned_old_size);
+        let overlaps = !(new_address + aligned_new_size <= old_address
+            || new_address >= old_address + aligned_old_size);
         if overlaps {
             return -LinuxError::EINVAL.code() as isize;
         }
