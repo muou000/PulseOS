@@ -404,13 +404,32 @@ pub fn sys_rt_sigprocmask(_how: usize, _set: usize, _oldset: usize, _sigsetsize:
     };
     let process = thread.process();
     let old_mask = thread.signal_blocked_mask();
-    if oldset != 0 && process.write_user_usize(oldset, old_mask as usize).is_err() {
+    if oldset != 0
+        && let Err(e) = process.write_user_usize(oldset, old_mask as usize)
+    {
+        axlog::warn!(
+            "sys_rt_sigprocmask: failed to write old mask: pid={}, tid={}, oldset={:#x}, err={:?}",
+            process.pid(),
+            thread.tid(),
+            oldset,
+            e
+        );
         return -LinuxError::EFAULT.code() as isize;
     }
     if set != 0 {
         let new_bits = match process.read_user_usize(set) {
             Ok(v) => v as u64,
-            Err(_) => return -LinuxError::EFAULT.code() as isize,
+            Err(e) => {
+                axlog::warn!(
+                    "sys_rt_sigprocmask: failed to read new mask: pid={}, tid={}, set={:#x}, \
+                     err={:?}",
+                    process.pid(),
+                    thread.tid(),
+                    set,
+                    e
+                );
+                return -LinuxError::EFAULT.code() as isize;
+            }
         };
         let current = old_mask;
         let mask = match how as u32 {
@@ -447,22 +466,39 @@ pub fn sys_rt_sigaction(_signum: usize, _act: usize, _oldact: usize, _sigsetsize
         raw.sa_handler = unsafe { core::mem::transmute(old.handler) };
         raw.sa_flags = old.flags as _;
         raw.sa_mask.sig = [old.mask as _];
-        if process
-            .write_user_bytes(oldact, unsafe {
-                core::slice::from_raw_parts(
-                    (&raw as *const sigaction).cast::<u8>(),
-                    core::mem::size_of::<sigaction>(),
-                )
-            })
-            .is_err()
-        {
+        if let Err(e) = process.write_user_bytes(oldact, unsafe {
+            core::slice::from_raw_parts(
+                (&raw as *const sigaction).cast::<u8>(),
+                core::mem::size_of::<sigaction>(),
+            )
+        }) {
+            axlog::warn!(
+                "sys_rt_sigaction: failed to write old action: pid={}, tid={}, signum={}, \
+                 oldact={:#x}, err={:?}",
+                process.pid(),
+                thread.tid(),
+                signum,
+                oldact,
+                e
+            );
             return -LinuxError::EFAULT.code() as isize;
         }
     }
     if act != 0 {
         let new_act: sigaction = match uaccess::read_user_plain(&process, act) {
             Ok(v) => v,
-            Err(_) => return -LinuxError::EFAULT.code() as isize,
+            Err(e) => {
+                axlog::warn!(
+                    "sys_rt_sigaction: failed to read new action: pid={}, tid={}, signum={}, \
+                     act={:#x}, err={:?}",
+                    process.pid(),
+                    thread.tid(),
+                    signum,
+                    act,
+                    e
+                );
+                return -LinuxError::EFAULT.code() as isize;
+            }
         };
         let handler = unsafe { core::mem::transmute::<_, usize>(new_act.sa_handler) };
         let flags = new_act.sa_flags as usize;

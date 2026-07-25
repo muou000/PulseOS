@@ -5,6 +5,7 @@ use pulse_core::task::{
 };
 
 const NSIG: isize = 64;
+const PIDFD_NONBLOCK: usize = 0x800;
 
 fn is_valid_signal(sig: isize) -> bool {
     sig == 0 || (1..=NSIG).contains(&sig)
@@ -306,8 +307,7 @@ pub fn sys_prctl(option: i32, arg2: usize, _arg3: usize, _arg4: usize, _arg5: us
 pub fn sys_pidfd_open(pid: isize, flags: usize) -> isize {
     axlog::debug!("sys_pidfd_open: pid={}, flags={}", pid, flags);
 
-    // We only support flags being 0 or PIDFD_NONBLOCK (0x800 / O_NONBLOCK).
-    if (flags & !0x800) != 0 {
+    if (flags & !PIDFD_NONBLOCK) != 0 {
         return -LinuxError::EINVAL.code() as isize;
     }
 
@@ -325,10 +325,14 @@ pub fn sys_pidfd_open(pid: isize, flags: usize) -> isize {
         return -LinuxError::ESRCH.code() as isize;
     };
 
-    // Allocate a new fd for PidfdObject
+    let mut fd_flags = pulse_core::fd_table::FdFlags::CLOEXEC;
+    if flags & PIDFD_NONBLOCK != 0 {
+        fd_flags.insert(pulse_core::fd_table::FdFlags::NONBLOCK);
+    }
+
     let entry = pulse_core::fd_table::FdEntry::new(
-        alloc::sync::Arc::new(pulse_core::fd_table::PidfdObject { pid: pid as u64 }),
-        pulse_core::fd_table::FdFlags::empty(),
+        alloc::sync::Arc::new(pulse_core::fd_table::PidfdObject::new(pid as u64)),
+        fd_flags,
     );
 
     match caller.insert_fd_entry(entry) {
@@ -375,7 +379,7 @@ pub fn sys_pidfd_send_signal(pidfd: isize, sig: isize, info_ptr: usize, flags: u
         None => return -LinuxError::EBADF.code() as isize,
     };
 
-    let Some(target) = process_by_pid(pidfd_obj.pid) else {
+    let Some(target) = process_by_pid(pidfd_obj.pid()) else {
         return -LinuxError::ESRCH.code() as isize;
     };
 

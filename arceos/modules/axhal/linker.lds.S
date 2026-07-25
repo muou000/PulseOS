@@ -27,6 +27,10 @@ SECTIONS
         *(.rodata .rodata.*)
         *(.srodata .srodata.*)
         *(.sdata2 .sdata2.*)
+        . = ALIGN(4);
+        _ex_table_start = .;
+        KEEP(*(__ex_table))
+        _ex_table_end = .;
     }
 
     .init_array ALIGN(0x10) : AT(ADDR(.init_array) - PHYS_VIRT_OFFSET) {

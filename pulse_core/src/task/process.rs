@@ -542,6 +542,7 @@ pub struct ForkParams {
     pub child_set_tid: Option<usize>,
     pub child_clear_tid: Option<usize>,
     pub share_sighand: bool,
+    pub clear_sighand: bool,
     pub share_uts: bool,
     pub exit_signal: Option<i32>,
 }
@@ -557,6 +558,7 @@ pub struct CloneParams {
     pub child_set_tid: Option<usize>,
     pub child_clear_tid: Option<usize>,
     pub share_sighand: bool,
+    pub clear_sighand: bool,
     pub share_uts: bool,
     pub exit_signal: Option<i32>,
 }
@@ -791,10 +793,7 @@ impl Process {
     }
 
     fn has_exec_siblings(&self, caller_tid: u64) -> bool {
-        self.threads
-            .lock()
-            .keys()
-            .any(|tid| *tid != caller_tid)
+        self.threads.lock().keys().any(|tid| *tid != caller_tid)
     }
 
     pub(super) fn terminate_exec_siblings(&self, caller_tid: u64) {
@@ -831,12 +830,7 @@ impl Process {
         }
     }
 
-    pub(super) fn rebind_exec_thread(
-        &self,
-        thread: &Arc<Thread>,
-        old_tid: u64,
-        new_tid: u64,
-    ) {
+    pub(super) fn rebind_exec_thread(&self, thread: &Arc<Thread>, old_tid: u64, new_tid: u64) {
         if old_tid == new_tid {
             return;
         }
@@ -1223,38 +1217,56 @@ impl Process {
     }
 
     pub fn read_user_bytes(&self, user_addr: usize, bytes: &mut [u8]) -> AxResult<()> {
-        self.validate_user_range(user_addr, bytes.len())?;
-        let start = VirtAddr::from(user_addr);
-        let aspace_handle = self.aspace_handle();
+        if self.read_user_bytes_partial(user_addr, bytes)? == bytes.len() {
+            Ok(())
+        } else {
+            Err(AxError::BadAddress)
+        }
+    }
 
-        // Try fast path first without faulting
-        if let Ok(()) = aspace_handle.read().read(start, bytes) {
-            return Ok(());
+    pub fn write_user_bytes(&self, user_addr: usize, bytes: &[u8]) -> AxResult<()> {
+        if self.write_user_bytes_partial(user_addr, bytes)? == bytes.len() {
+            Ok(())
+        } else {
+            Err(AxError::BadAddress)
+        }
+    }
+
+    pub fn read_user_bytes_partial(&self, user_addr: usize, bytes: &mut [u8]) -> AxResult<usize> {
+        self.validate_user_range(user_addr, bytes.len())?;
+        if super::current_process().is_ok_and(|current| core::ptr::eq(current.as_ref(), self)) {
+            return super::uaccess::copy_from_user_partial(bytes, user_addr);
         }
 
-        // If it fails, fault-in the pages and retry once
+        let start = VirtAddr::from(user_addr);
+        let aspace_handle = self.aspace_handle();
+        if aspace_handle.read().read(start, bytes).is_ok() {
+            return Ok(bytes.len());
+        }
         self.try_fault_in_user_range(user_addr, bytes.len(), MappingFlags::READ)?;
         aspace_handle
             .read()
             .read(start, bytes)
+            .map(|()| bytes.len())
             .map_err(AxError::from)
     }
 
-    pub fn write_user_bytes(&self, user_addr: usize, bytes: &[u8]) -> AxResult<()> {
+    pub fn write_user_bytes_partial(&self, user_addr: usize, bytes: &[u8]) -> AxResult<usize> {
         self.validate_user_range(user_addr, bytes.len())?;
-        let start = VirtAddr::from(user_addr);
-        let aspace_handle = self.aspace_handle();
-
-        // Most kernel writes target resident writable pages. Keep that path
-        // shared; only page faults and COW resolution need exclusive access.
-        if let Ok(()) = aspace_handle.read().write(start, bytes) {
-            return Ok(());
+        if super::current_process().is_ok_and(|current| core::ptr::eq(current.as_ref(), self)) {
+            return super::uaccess::copy_to_user_partial(user_addr, bytes);
         }
 
+        let start = VirtAddr::from(user_addr);
+        let aspace_handle = self.aspace_handle();
+        if aspace_handle.read().write(start, bytes).is_ok() {
+            return Ok(bytes.len());
+        }
         self.try_fault_in_user_range(user_addr, bytes.len(), MappingFlags::WRITE)?;
         aspace_handle
             .read()
             .write(start, bytes)
+            .map(|()| bytes.len())
             .map_err(AxError::from)
     }
 
@@ -1651,6 +1663,7 @@ impl Process {
         share_fs: bool,
         share_files: bool,
         share_sighand: bool,
+        clear_sighand: bool,
         share_uts: bool,
     ) -> AxResult<Arc<Self>> {
         let parent_arc = parent;
@@ -1708,6 +1721,9 @@ impl Process {
         } else {
             SignalShared::clone_actions_only(&parent.signal_shared)
         };
+        if clear_sighand {
+            signal_shared.reset_dispositions_on_exec();
+        }
         let signal_trampoline = parent.signal_trampoline.load(Ordering::Acquire);
         let exec_path = parent.exec_path();
         let exec_access = parent.exec_access.read().clone();
@@ -2516,6 +2532,12 @@ impl Process {
         Ok(())
     }
 
+    pub fn mark_user_resume_at(&self, now_ns: u64) {
+        if let Ok(thread) = super::current_thread() {
+            thread.mark_user_resume_at(now_ns);
+        }
+    }
+
     pub fn mark_user_resume(&self) {
         if let Ok(thread) = super::current_thread() {
             thread.mark_user_resume();
@@ -2769,11 +2791,8 @@ impl Process {
         if is_private {
             (addr, true)
         } else {
-            let _ = self.try_fault_in_user_range(
-                addr,
-                core::mem::size_of::<u32>(),
-                MappingFlags::READ,
-            );
+            let _ =
+                self.try_fault_in_user_range(addr, core::mem::size_of::<u32>(), MappingFlags::READ);
             let aspace_handle = self.aspace_handle();
             let aspace = aspace_handle.read();
             let vaddr = VirtAddr::from(addr);
@@ -3205,6 +3224,7 @@ impl Process {
             params.share_fs,
             params.share_files,
             params.share_sighand,
+            params.clear_sighand,
             params.share_uts,
         )?;
 
@@ -3286,6 +3306,7 @@ impl Process {
                 params.share_fs,
                 params.share_files,
                 params.share_sighand,
+                params.clear_sighand,
                 params.share_uts,
             )?;
             if let Some(sig) = params.exit_signal {

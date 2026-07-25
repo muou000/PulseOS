@@ -1,8 +1,12 @@
-use riscv::interrupt::supervisor::{Exception as E, Interrupt as I};
-use riscv::interrupt::Trap;
 #[cfg(feature = "fp-simd")]
 use riscv::register::sstatus;
-use riscv::register::{scause, stval};
+use riscv::{
+    interrupt::{
+        Trap,
+        supervisor::{Exception as E, Interrupt as I},
+    },
+    register::{scause, stval},
+};
 
 use super::TrapFrame;
 use crate::trap::PageFaultFlags;
@@ -18,12 +22,12 @@ fn handle_breakpoint(sepc: &mut usize) {
     *sepc += 2
 }
 
-fn handle_page_fault(tf: &TrapFrame, mut access_flags: PageFaultFlags, is_user: bool) {
+fn handle_page_fault(tf: &mut TrapFrame, mut access_flags: PageFaultFlags, is_user: bool) {
     if is_user {
         access_flags |= PageFaultFlags::USER;
     }
     let vaddr = va!(stval::read());
-    if !handle_trap!(PAGE_FAULT, vaddr, access_flags, is_user) {
+    if !handle_trap!(PAGE_FAULT, tf, vaddr, access_flags, is_user) {
         panic!(
             "Unhandled {} Page Fault @ {:#x}, fault_vaddr={:#x} ({:?}):\n{:#x?}",
             if is_user { "User" } else { "Supervisor" },

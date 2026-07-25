@@ -1,7 +1,7 @@
 #[cfg(target_arch = "riscv32")]
 macro_rules! __asm_macros {
     () => {
-        r"
+        r#"
         .ifndef XLENB
         .equ XLENB, 4
 
@@ -12,14 +12,22 @@ macro_rules! __asm_macros {
             sw \rs2, \off*XLENB(\rs1)
         .endm
 
-        .endif"
+        .macro _asm_extable, from, to
+            .pushsection __ex_table, "a"
+            .balign 4
+            .word   \from - _ex_table_start
+            .word   \to - _ex_table_start
+            .popsection
+        .endm
+
+        .endif"#
     };
 }
 
 #[cfg(target_arch = "riscv64")]
 macro_rules! __asm_macros {
     () => {
-        r"
+        r#"
         .ifndef XLENB
         .equ XLENB, 8
 
@@ -30,7 +38,15 @@ macro_rules! __asm_macros {
             sd \rs2, \off*XLENB(\rs1)
         .endm
 
-        .endif"
+        .macro _asm_extable, from, to
+            .pushsection __ex_table, "a"
+            .balign 4
+            .word   \from - _ex_table_start
+            .word   \to - _ex_table_start
+            .popsection
+        .endm
+
+        .endif"#
     };
 }
 

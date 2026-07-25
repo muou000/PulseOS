@@ -1,5 +1,5 @@
 use axerrno::LinuxError;
-use pulse_core::task::{current_thread, WaitidStatusType};
+use pulse_core::task::{WaitidStatusType, current_thread};
 
 use super::common::write_user_i32;
 
@@ -30,7 +30,6 @@ pub fn sys_wait4(pid: isize, status: usize, options: i32, rusage: usize) -> isiz
             let _exit_code = child_proc.exit_code();
             let now_ns = axhal::time::monotonic_time_nanos() as u64;
             let (child_utime_ns, child_stime_ns) = child_proc.snapshot_cpu_time_ns(now_ns);
-            process.add_child_time_ns(child_utime_ns, child_stime_ns);
             child_proc.wait_task_refs_exited();
 
             if status != 0 {
@@ -45,6 +44,7 @@ pub fn sys_wait4(pid: isize, status: usize, options: i32, rusage: usize) -> isiz
                     return write_result;
                 }
             }
+            process.add_child_time_ns(child_utime_ns, child_stime_ns);
             if rusage != 0 {
                 // Not supported yet: simply ignore or zero out
             }
@@ -85,10 +85,6 @@ pub fn sys_waitid(idtype: usize, id: usize, infop: usize, options: i32) -> isize
         return -LinuxError::EINVAL.code() as isize;
     }
 
-    if infop == 0 {
-        return -LinuxError::EFAULT.code() as isize;
-    }
-
     let thread = match current_thread() {
         Ok(thread) => thread,
         Err(e) => return -e.code() as isize,
@@ -98,20 +94,8 @@ pub fn sys_waitid(idtype: usize, id: usize, infop: usize, options: i32) -> isize
     loop {
         match process.waitid_find_and_reap(idtype, id, options) {
             Ok(Some((child, status_type))) => {
-                let was_zombie_and_reaped = matches!(status_type, WaitidStatusType::Exited { .. }) && (options & 0x01000000) == 0;
-                if was_zombie_and_reaped {
-                    let exited_pid = child.pid() as isize;
-                    let now_ns = axhal::time::monotonic_time_nanos() as u64;
-                    let (child_utime_ns, child_stime_ns) = child.snapshot_cpu_time_ns(now_ns);
-                    process.add_child_time_ns(child_utime_ns, child_stime_ns);
-                    child.wait_task_refs_exited();
-                    let _ = child.take_task_ref_by_tid(exited_pid as u64);
-                    if let Err(e) = child.shrink_reaped_resources() {
-                        axlog::warn!("failed to shrink reaped child resources: {:?}", e);
-                    }
-                    child.release_task_refs();
-                    pulse_core::task::unregister_process(exited_pid as u64);
-                }
+                let was_zombie_and_reaped = matches!(status_type, WaitidStatusType::Exited { .. })
+                    && (options & 0x01000000) == 0;
 
                 let mut raw: linux_raw_sys::general::siginfo = unsafe { core::mem::zeroed() };
                 unsafe {
@@ -120,7 +104,10 @@ pub fn sys_waitid(idtype: usize, id: usize, infop: usize, options: i32) -> isize
                     anon1.si_errno = 0;
 
                     match status_type {
-                        WaitidStatusType::Exited { exit_code, exit_signal } => {
+                        WaitidStatusType::Exited {
+                            exit_code,
+                            exit_signal,
+                        } => {
                             if exit_signal == 0 {
                                 anon1.si_code = 1; // CLD_EXITED
                                 anon1._sifields._sigchld._status = exit_code;
@@ -144,25 +131,55 @@ pub fn sys_waitid(idtype: usize, id: usize, infop: usize, options: i32) -> isize
                     anon1._sifields._sigchld._uid = child.ruid();
                 }
 
-                if let Err(_) = pulse_core::task::uaccess::write_user_plain(&process, infop, &raw) {
-                    if was_zombie_and_reaped {
-                        process.add_child(child);
+                if infop != 0
+                    && pulse_core::task::uaccess::write_user_plain(&process, infop, &raw).is_err()
+                {
+                    if (options & 0x01000000) == 0 {
+                        match status_type {
+                            WaitidStatusType::Exited { .. } => process.add_child(child.clone()),
+                            WaitidStatusType::Stopped { signo } => child
+                                .stopped_signal_pending
+                                .store(signo, core::sync::atomic::Ordering::Release),
+                            WaitidStatusType::Continued => child
+                                .continued_signal_pending
+                                .store(true, core::sync::atomic::Ordering::Release),
+                        }
                     }
                     return -LinuxError::EFAULT.code() as isize;
+                }
+
+                if was_zombie_and_reaped {
+                    let exited_pid = child.pid() as isize;
+                    let now_ns = axhal::time::monotonic_time_nanos() as u64;
+                    let (child_utime_ns, child_stime_ns) = child.snapshot_cpu_time_ns(now_ns);
+                    process.add_child_time_ns(child_utime_ns, child_stime_ns);
+                    child.wait_task_refs_exited();
+                    let _ = child.take_task_ref_by_tid(exited_pid as u64);
+                    if let Err(e) = child.shrink_reaped_resources() {
+                        axlog::warn!("failed to shrink reaped child resources: {:?}", e);
+                    }
+                    child.release_task_refs();
+                    pulse_core::task::unregister_process(exited_pid as u64);
                 }
 
                 return 0;
             }
             Ok(None) => {
                 if (options & 1) != 0 {
-                    let raw: linux_raw_sys::general::siginfo = unsafe { core::mem::zeroed() };
-                    if let Err(_) = pulse_core::task::uaccess::write_user_plain(&process, infop, &raw) {
-                        return -LinuxError::EFAULT.code() as isize;
+                    if infop != 0 {
+                        let raw: linux_raw_sys::general::siginfo = unsafe { core::mem::zeroed() };
+                        if pulse_core::task::uaccess::write_user_plain(&process, infop, &raw)
+                            .is_err()
+                        {
+                            return -LinuxError::EFAULT.code() as isize;
+                        }
                     }
                     return 0;
                 }
 
-                if let Err(e) = process.wait_for_child_state_change_interruptible(idtype, id, options) {
+                if let Err(e) =
+                    process.wait_for_child_state_change_interruptible(idtype, id, options)
+                {
                     return -e as isize;
                 }
             }

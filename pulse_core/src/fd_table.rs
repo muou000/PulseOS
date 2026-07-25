@@ -252,7 +252,7 @@ fn metadata_to_stat(metadata: &Metadata) -> stat {
 
 pub fn location_to_stat(location: &Location) -> LinuxResult<stat> {
     let mut st = metadata_to_stat(&axtask::future::block_on(location.metadata())?);
-    if let Ok(size) = axfs::cached_file_size(location) {
+    if let Some(size) = axfs::cached_file_size_if_present(location) {
         st.st_size = size as _;
     }
     Ok(st)
@@ -854,7 +854,28 @@ impl FdObject for NsFdObject {
 }
 
 pub struct PidfdObject {
-    pub pid: u64,
+    pid: AtomicU64,
+    bind_wait_queue: axtask::WaitQueue,
+}
+
+impl PidfdObject {
+    pub fn new(pid: u64) -> Self {
+        Self {
+            pid: AtomicU64::new(pid),
+            bind_wait_queue: axtask::WaitQueue::new(),
+        }
+    }
+
+    pub fn pid(&self) -> u64 {
+        self.pid.load(Ordering::Acquire)
+    }
+
+    pub fn bind_pid(&self, pid: u64) {
+        debug_assert_ne!(pid, 0);
+        let previous = self.pid.swap(pid, Ordering::AcqRel);
+        debug_assert_eq!(previous, 0);
+        self.bind_wait_queue.notify_all(true);
+    }
 }
 
 impl FdObject for PidfdObject {
@@ -863,8 +884,9 @@ impl FdObject for PidfdObject {
     }
 
     fn stat(&self) -> LinuxResult<stat> {
+        let pid = self.pid();
         Ok(stat {
-            st_ino: (20000 + self.pid) as _,
+            st_ino: (20000 + pid) as _,
             st_nlink: 1,
             st_mode: S_IFREG | 0o600,
             st_uid: 0,
@@ -875,9 +897,11 @@ impl FdObject for PidfdObject {
     }
 
     fn poll(&self) -> LinuxResult<PollState> {
-        let is_zombie = crate::task::process_by_pid(self.pid)
-            .map(|p| p.is_zombie())
-            .unwrap_or(true);
+        let pid = self.pid();
+        let is_zombie = pid != 0
+            && crate::task::process_by_pid(pid)
+                .map(|p| p.is_zombie())
+                .unwrap_or(true);
         Ok(PollState {
             readable: is_zombie,
             writable: false,
@@ -899,11 +923,33 @@ impl FdObject for PidfdObject {
         _events: axpoll::IoEvents,
         registrations: &mut Vec<PollRegistration>,
     ) -> LinuxResult {
-        if let Some(process) = crate::task::process_by_pid(self.pid) {
+        let mut pid = self.pid();
+        if pid == 0 {
+            let registration = self.bind_wait_queue.register_owned_waker(cx.waker());
+            let object = self.clone();
+            registrations.push(PollRegistration::new(move || {
+                object.bind_wait_queue.unregister_waker(registration);
+            }));
+            pid = self.pid();
+            if pid == 0 {
+                return Ok(());
+            }
+            // Binding raced with registration. Ensure the poll future checks
+            // readiness again even if the bind notification happened first.
+            cx.waker().wake_by_ref();
+        }
+
+        if let Some(process) = crate::task::process_by_pid(pid) {
             let registration = process.pid_exit_event.register_owned_waker(cx.waker());
+            let exited = process.is_zombie();
             registrations.push(PollRegistration::new(move || {
                 process.pid_exit_event.unregister_waker(registration);
             }));
+            if exited {
+                cx.waker().wake_by_ref();
+            }
+        } else {
+            cx.waker().wake_by_ref();
         }
         Ok(())
     }
