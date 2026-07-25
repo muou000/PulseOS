@@ -10,3 +10,5 @@ kernel-*
 *.txt
 !vendor/**/*.txt
 .antigravitycli/
+*.log
+*.folded
