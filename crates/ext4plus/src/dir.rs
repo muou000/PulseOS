@@ -128,14 +128,6 @@ pub(crate) async fn add_dir_entry(
             .await;
     }
 
-    // Fail if name already exists.
-    if get_dir_entry_inode_by_name(fs, dir_inode, name)
-        .await
-        .is_ok()
-    {
-        return Err(Ext4Error::AlreadyExists);
-    }
-
     let block_size = fs.0.superblock.block_size().to_usize();
     let mut file_blocks = FileBlocks::new(fs.clone(), dir_inode)?;
 
@@ -149,14 +141,30 @@ pub(crate) async fn add_dir_entry(
         0usize
     };
     let usable_limit = checked_sub_usize(block_size, tail_size, dir_inode.index)?;
+    let mut insertion = None;
 
     while let Some(block_index_res) = file_blocks.next().await {
         let block_index = block_index_res?;
-        fs.read_from_block(block_index, 0, &mut block_buf).await?;
+        let dir_block = DirBlock {
+            fs,
+            block_index,
+            is_first,
+            dir_inode: dir_inode.index,
+            has_htree: false,
+            checksum_base: dir_inode.checksum_base().clone(),
+        };
+        dir_block.read(&mut block_buf).await?;
 
-        // Walk entries in this block looking for usable slack space.
+        // Check names and remember the first usable slot in one validated
+        // directory pass. We cannot insert immediately because a duplicate
+        // may live in a later block.
         let mut off = 0usize;
         while off < usable_limit {
+            let header_end = checked_add_usize(off, 8, dir_inode.index)?;
+            if header_end > usable_limit {
+                return Err(dir_entry_error(dir_inode.index));
+            }
+
             let inode_field = read_u32le(&block_buf, off);
             let rec_len_offset = checked_add_usize(off, 4, dir_inode.index)?;
             let rec_len = read_u16le(&block_buf, rec_len_offset);
@@ -164,85 +172,111 @@ pub(crate) async fn add_dir_entry(
             let rec_end =
                 checked_add_usize(off, rec_len_usize, dir_inode.index)?;
 
-            if rec_len_usize < 8 || rec_end > block_size {
+            if rec_len_usize < 8 || rec_end > usable_limit {
                 return Err(dir_entry_error(dir_inode.index));
             }
 
-            // `inode == 0` indicates "special" entry or unused; treat it as fully free.
             let used = if inode_field == 0 {
                 0usize
             } else {
                 let name_len_offset =
                     checked_add_usize(off, 6, dir_inode.index)?;
                 let name_len = usize::from(block_buf[name_len_offset]);
-                dir_entry_min_size(name_len, dir_inode.index)?
+                let name_start = checked_add_usize(off, 8, dir_inode.index)?;
+                let name_end =
+                    checked_add_usize(name_start, name_len, dir_inode.index)?;
+                if name_end > rec_end {
+                    return Err(dir_entry_error(dir_inode.index));
+                }
+                let stored_name = &block_buf[name_start..name_end];
+                let file_type_offset = checked_add_usize(off, 7, dir_inode.index)?;
+                let stored_file_type = block_buf[file_type_offset];
+                FileType::from_dir_entry(stored_file_type).map_err(|_| {
+                    CorruptKind::DirEntryInvalidFileType(
+                        dir_inode.index,
+                        stored_file_type,
+                    )
+                })?;
+                DirEntryName::try_from(stored_name).map_err(|error| {
+                    CorruptKind::DirEntryInvalidName(dir_inode.index, error)
+                })?;
+                if stored_name == name.as_ref() {
+                    return Err(Ext4Error::AlreadyExists);
+                }
+                let used = dir_entry_min_size(name_len, dir_inode.index)?;
+                if used > rec_len_usize {
+                    return Err(dir_entry_error(dir_inode.index));
+                }
+                used
             };
 
             let required = checked_add_usize(used, need, dir_inode.index)?;
-            if rec_len_usize >= required {
-                // Shrink current entry to its minimal size (or keep 0 if unused),
-                // and place the new entry in the leftover space.
-                let new_rec_len_for_curr =
-                    if inode_field == 0 { 0usize } else { used };
-                let free_start = checked_add_usize(
-                    off,
-                    new_rec_len_for_curr,
-                    dir_inode.index,
-                )?;
-                let free_len = checked_sub_usize(
-                    rec_len_usize,
-                    new_rec_len_for_curr,
-                    dir_inode.index,
-                )?;
-
-                if free_len < need {
-                    // Shouldn't happen due to earlier check, but keep safe.
-                    off = rec_end;
-                    continue;
-                }
-
-                let rec_len_to_write = if inode_field != 0 {
-                    new_rec_len_for_curr
-                } else {
-                    rec_len_usize
-                };
-                write_u16le(
-                    &mut block_buf,
-                    rec_len_offset,
-                    u16::try_from(rec_len_to_write)
-                        .map_err(|_| dir_entry_error(dir_inode.index))?,
-                );
-
-                // Write the new entry.
-                write_dir_entry_bytes(
-                    &mut block_buf,
-                    free_start,
-                    free_len,
-                    inode,
-                    name,
-                    file_type,
-                )?;
-
-                // If metadata checksums are enabled, update the directory block checksum tail.
-                DirBlock {
-                    fs,
+            if insertion.is_none() && rec_len_usize >= required {
+                insertion = Some((
                     block_index,
                     is_first,
-                    dir_inode: dir_inode.index,
-                    has_htree: false,
-                    checksum_base: dir_inode.checksum_base().clone(),
-                }
-                .update_checksum(&mut block_buf)?;
-
-                // Write the block back.
-                fs.write_to_block(block_index, 0, &block_buf).await?;
-                return Ok(());
+                    block_buf.clone(),
+                    off,
+                    inode_field,
+                    rec_len_usize,
+                    used,
+                ));
             }
 
             off = rec_end;
         }
 
         is_first = false;
+    }
+
+    if let Some((
+        block_index,
+        is_first,
+        mut block_buf,
+        off,
+        inode_field,
+        rec_len_usize,
+        used,
+    )) = insertion
+    {
+        let rec_len_offset = checked_add_usize(off, 4, dir_inode.index)?;
+        let new_rec_len_for_curr = if inode_field == 0 { 0usize } else { used };
+        let free_start = checked_add_usize(off, new_rec_len_for_curr, dir_inode.index)?;
+        let free_len = checked_sub_usize(
+            rec_len_usize,
+            new_rec_len_for_curr,
+            dir_inode.index,
+        )?;
+        let rec_len_to_write = if inode_field != 0 {
+            new_rec_len_for_curr
+        } else {
+            rec_len_usize
+        };
+        write_u16le(
+            &mut block_buf,
+            rec_len_offset,
+            u16::try_from(rec_len_to_write)
+                .map_err(|_| dir_entry_error(dir_inode.index))?,
+        );
+        write_dir_entry_bytes(
+            &mut block_buf,
+            free_start,
+            free_len,
+            inode,
+            name,
+            file_type,
+        )?;
+        DirBlock {
+            fs,
+            block_index,
+            is_first,
+            dir_inode: dir_inode.index,
+            has_htree: false,
+            checksum_base: dir_inode.checksum_base().clone(),
+        }
+        .update_checksum(&mut block_buf)?;
+        fs.write_to_block(block_index, 0, &block_buf).await?;
+        return Ok(());
     }
 
     let mut new_block_buf = vec![0u8; block_size];
@@ -1463,4 +1497,3 @@ mod tests {
         }
     }
 }
-

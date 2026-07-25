@@ -16,6 +16,30 @@ struct CacheBlock {
     data: Vec<u8>,
     dirty: bool,
     flushing: bool,
+    reused: bool,
+}
+
+const CACHE_EVICTION_SCAN_LIMIT: usize = 64;
+
+fn pop_cache_victim(
+    cache: &mut LruCache<usize, CacheBlock>,
+) -> Option<(usize, CacheBlock)> {
+    let scan_limit = cache.len().min(CACHE_EVICTION_SCAN_LIMIT);
+    for _ in 0..scan_limit {
+        let (&offset, block) = cache.peek_lru()?;
+        if !block.flushing && !block.reused {
+            return cache.pop_lru();
+        }
+        cache.promote(&offset);
+    }
+    for _ in 0..scan_limit {
+        let (&offset, block) = cache.peek_lru()?;
+        if !block.flushing {
+            return cache.pop_lru();
+        }
+        cache.promote(&offset);
+    }
+    None
 }
 
 pub(crate) struct Ext4Disk<D: BlockDriverOps> {
@@ -122,26 +146,38 @@ impl<D: BlockDriverOps + 'static> Ext4Disk<D> {
         disk
     }
 
-    fn evict_if_full(&self, cache: &mut LruCache<usize, CacheBlock>, to_write: &mut Vec<(usize, Vec<u8>)>) {
-        let mut limit = 32;
-        while cache.len() >= cache.cap().get() && limit > 0 {
-            let peeked = cache.peek_lru().map(|(&k, v)| (k, v.flushing));
-            if let Some((key, flushing)) = peeked {
-                if flushing {
-                    cache.promote(&key);
-                    limit -= 1;
-                } else {
-                    if let Some((ev_offset, ev_block)) = cache.pop_lru() {
-                        if ev_block.dirty {
-                            to_write.push((ev_offset, ev_block.data.clone()));
-                            self.flushing_evicted.lock().insert(ev_offset, ev_block.data);
-                        }
-                    }
-                    break;
-                }
-            } else {
-                break;
-            }
+    fn evict_if_full(
+        &self,
+        cache: &mut LruCache<usize, CacheBlock>,
+        to_write: &mut Vec<(usize, Vec<u8>)>,
+    ) -> bool {
+        if cache.len() < cache.cap().get() {
+            return true;
+        }
+        let Some((ev_offset, ev_block)) = pop_cache_victim(cache) else {
+            return false;
+        };
+        if ev_block.dirty {
+            to_write.push((ev_offset, ev_block.data.clone()));
+            self.flushing_evicted
+                .lock()
+                .insert(ev_offset, ev_block.data);
+        }
+        true
+    }
+
+    fn insert_cache_block(
+        &self,
+        cache: &mut LruCache<usize, CacheBlock>,
+        to_write: &mut Vec<(usize, Vec<u8>)>,
+        offset: usize,
+        block: CacheBlock,
+    ) {
+        if self.evict_if_full(cache, to_write) {
+            cache.put(offset, block);
+        } else if block.dirty {
+            to_write.push((offset, block.data.clone()));
+            self.flushing_evicted.lock().insert(offset, block.data);
         }
     }
 
@@ -263,7 +299,8 @@ impl<D: BlockDriverOps + 'static> Ext4Disk<D> {
             // Check cache hit
             let hit = {
                 let mut cache = self.block_cache.lock();
-                if let Some(block) = cache.get(&current_block_offset) {
+                if let Some(block) = cache.get_mut(&current_block_offset) {
+                    block.reused = true;
                     let start = core::cmp::max(offset, current_block_offset);
                     let end = core::cmp::min(offset + buf.len(), current_block_offset + block_size);
                     let overlap_len = end - start;
@@ -320,7 +357,7 @@ impl<D: BlockDriverOps + 'static> Ext4Disk<D> {
                     let mut cache = self.block_cache.lock();
                     for b in 0..consecutive_misses {
                         let b_offset = current_block_offset + b * block_size;
-                        let b_data = run_data[b * block_size..(b + 1) * block_size].to_vec();
+                        let b_data = &run_data[b * block_size..(b + 1) * block_size];
 
                         let start = core::cmp::max(offset, b_offset);
                         let end = core::cmp::min(offset + buf.len(), b_offset + block_size);
@@ -328,7 +365,8 @@ impl<D: BlockDriverOps + 'static> Ext4Disk<D> {
                         let buf_start = start - offset;
                         let block_start = start - b_offset;
 
-                        if let Some(existing) = cache.get(&b_offset) {
+                        if let Some(existing) = cache.get_mut(&b_offset) {
+                            existing.reused = true;
                             buf[buf_start..buf_start + overlap_len]
                                 .copy_from_slice(&existing.data[block_start..block_start + overlap_len]);
                         } else {
@@ -338,9 +376,18 @@ impl<D: BlockDriverOps + 'static> Ext4Disk<D> {
                                     .copy_from_slice(&flushing_data[block_start..block_start + overlap_len]);
                             } else {
                                 buf[buf_start..buf_start + overlap_len].copy_from_slice(&b_data[block_start..block_start + overlap_len]);
-                                let block = CacheBlock { data: b_data, dirty: false, flushing: false };
-                                self.evict_if_full(&mut cache, &mut to_write);
-                                cache.put(b_offset, block);
+                                let block = CacheBlock {
+                                    data: b_data.to_vec(),
+                                    dirty: false,
+                                    flushing: false,
+                                    reused: false,
+                                };
+                                self.insert_cache_block(
+                                    &mut cache,
+                                    &mut to_write,
+                                    b_offset,
+                                    block,
+                                );
                             }
                         }
                     }
@@ -412,6 +459,7 @@ impl<D: BlockDriverOps + 'static> Ext4Disk<D> {
                         .copy_from_slice(&data[data_start..data_start + overlap_len]);
                     block.dirty = true;
                     block.flushing = false;
+                    block.reused = true;
                     true
                 } else {
                     false
@@ -474,26 +522,45 @@ impl<D: BlockDriverOps + 'static> Ext4Disk<D> {
                         let data_start = start - offset;
                         let block_start = start - b_offset;
 
-                        if let Some(existing) = cache.get_mut(&b_offset) {
+                            if let Some(existing) = cache.get_mut(&b_offset) {
                             existing.data[block_start..block_start + overlap_len]
                                 .copy_from_slice(&data[data_start..data_start + overlap_len]);
-                            existing.dirty = true;
-                            existing.flushing = false;
+                                existing.dirty = true;
+                                existing.flushing = false;
+                                existing.reused = true;
                         } else {
                             let flushing_data = self.flushing_evicted.lock().remove(&b_offset);
                             if let Some(flushing_data) = flushing_data {
                                 let mut b_data = flushing_data;
                                 b_data[block_start..block_start + overlap_len]
                                     .copy_from_slice(&data[data_start..data_start + overlap_len]);
-                                let block = CacheBlock { data: b_data, dirty: true, flushing: false };
-                                self.evict_if_full(&mut cache, &mut to_write);
-                                cache.put(b_offset, block);
+                                let block = CacheBlock {
+                                    data: b_data,
+                                    dirty: true,
+                                    flushing: false,
+                                    reused: true,
+                                };
+                                self.insert_cache_block(
+                                    &mut cache,
+                                    &mut to_write,
+                                    b_offset,
+                                    block,
+                                );
                             } else {
                                 b_data[block_start..block_start + overlap_len]
                                     .copy_from_slice(&data[data_start..data_start + overlap_len]);
-                                let block = CacheBlock { data: b_data, dirty: true, flushing: false };
-                                self.evict_if_full(&mut cache, &mut to_write);
-                                cache.put(b_offset, block);
+                                let block = CacheBlock {
+                                    data: b_data,
+                                    dirty: true,
+                                    flushing: false,
+                                    reused: true,
+                                };
+                                self.insert_cache_block(
+                                    &mut cache,
+                                    &mut to_write,
+                                    b_offset,
+                                    block,
+                                );
                             }
                         }
                     }

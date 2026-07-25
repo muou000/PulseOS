@@ -11,10 +11,13 @@ use axfs_ng_vfs::{
     path::MAX_NAME_LEN,
 };
 use ext4plus::{Ext4, prelude::Ext4Error};
+use lru::LruCache;
 use axsync::Mutex;
 use async_trait::async_trait;
 use axdriver::prelude::AsyncBlockDriverOps;
-use super::{Ext4Disk, Ext4DiskWrapper, Inode, cleanup_dir_cache_registry};
+use super::{
+    Ext4Disk, Ext4DiskWrapper, Inode, MetadataCacheState, cleanup_dir_cache_registry,
+};
 
 const ROOT_INODE: u32 = 2;
 
@@ -23,6 +26,7 @@ pub struct Ext4Filesystem {
     disk_flusher: Arc<dyn crate::disk::DiskFlushable>,
     root_dir: OnceCell<WeakDirEntry>,
     pub(super) active_inodes: Mutex<BTreeMap<u32, Vec<Weak<Inode>>>>,
+    pub(super) metadata_caches: Mutex<LruCache<u32, Arc<MetadataCacheState>>>,
     pub(crate) block_size: usize,
     pending_deletions: Mutex<Vec<u32>>,
     deletion_generation: AtomicU64,
@@ -81,6 +85,7 @@ impl Ext4Filesystem {
             disk_flusher,
             root_dir: OnceCell::new(),
             active_inodes: Mutex::new(BTreeMap::new()),
+            metadata_caches: Mutex::new(LruCache::unbounded()),
             block_size,
             pending_deletions: Mutex::new(Vec::new()),
             deletion_generation: AtomicU64::new(0),
