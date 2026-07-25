@@ -190,10 +190,12 @@ dependencies = [
  "allocator",
  "axerrno",
  "cfg-if",
+ "kernel_guard",
  "kspin",
  "lazyinit",
  "log",
  "memory_addr",
+ "percpu",
 ]
 
 [[package]]
@@ -1450,6 +1452,7 @@ version = "0.1.0"
 dependencies = [
  "axalloc",
  "axconfig",
+ "axcpu",
  "axerrno",
  "axfs",
  "axfs-ng-vfs",
