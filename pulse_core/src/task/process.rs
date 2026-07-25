@@ -1836,15 +1836,13 @@ impl Process {
         self.signal_shared.clone()
     }
 
-    pub fn handle_page_fault(&self, vaddr: VirtAddr, flags: axhal::trap::PageFaultFlags) -> bool {
+    pub fn handle_page_fault(
+        &self,
+        vaddr: VirtAddr,
+        flags: axhal::trap::PageFaultFlags,
+    ) -> AxResult<bool> {
         let aspace_handle = self.aspace_handle();
-        match self.resolve_page_fault(&aspace_handle, vaddr, flags) {
-            Ok(handled) => handled,
-            Err(error) => {
-                axlog::error!("page fault resolution failed: {error:?}");
-                false
-            }
-        }
+        self.resolve_page_fault(&aspace_handle, vaddr, flags)
     }
 
     fn resolve_page_fault(

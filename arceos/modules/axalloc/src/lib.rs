@@ -26,6 +26,7 @@ use kspin::SpinNoIrq;
 
 const PAGE_SIZE: usize = 0x1000;
 const MIN_HEAP_SIZE: usize = 0x200000; // 2 MB
+const MIN_PAGE_RECLAIM_BATCH: usize = 256;
 
 pub use page::GlobalPage;
 
@@ -254,9 +255,9 @@ impl GlobalAllocator {
         let mut result = self.palloc.lock().alloc_pages(num_pages, align_pow2);
         if result.is_err() {
             for _ in 0..4 {
-                let reclaimed = try_page_reclaim(num_pages.max(16));
+                try_page_reclaim(num_pages.max(MIN_PAGE_RECLAIM_BATCH));
                 result = self.palloc.lock().alloc_pages(num_pages, align_pow2);
-                if result.is_ok() || reclaimed == 0 {
+                if result.is_ok() {
                     break;
                 }
             }
@@ -269,14 +270,41 @@ impl GlobalAllocator {
     /// Returns the number of initialized entries in `pages`. A short allocation
     /// indicates that the allocator ran out of pages.
     pub fn alloc_page_batch(&self, pages: &mut [usize]) -> usize {
-        let mut palloc = self.palloc.lock();
-        let mut allocated = 0;
-        for page in pages {
-            let Ok(pos) = palloc.alloc_pages(1, PAGE_SIZE) else {
-                break;
+        if pages.is_empty() {
+            return 0;
+        }
+
+        let mut allocated = {
+            let mut palloc = self.palloc.lock();
+            let mut allocated = 0;
+            for page in pages.iter_mut() {
+                let Ok(pos) = palloc.alloc_pages(1, PAGE_SIZE) else {
+                    break;
+                };
+                *page = pos;
+                allocated += 1;
+            }
+            allocated
+        };
+
+        // The batched fast path must not bypass the allocator's reclaim hook.
+        // Allocate one page through alloc_pages() to trigger reclaim, then fill
+        // the rest while holding the page-allocator lock only once again.
+        if allocated == 0 {
+            let Ok(pos) = self.alloc_pages(1, PAGE_SIZE) else {
+                return 0;
             };
-            *page = pos;
-            allocated += 1;
+            pages[0] = pos;
+            allocated = 1;
+
+            let mut palloc = self.palloc.lock();
+            for page in &mut pages[1..] {
+                let Ok(pos) = palloc.alloc_pages(1, PAGE_SIZE) else {
+                    break;
+                };
+                *page = pos;
+                allocated += 1;
+            }
         }
         allocated
     }
