@@ -6,7 +6,8 @@ use axhal::context::TrapFrame;
 use axtask::WaitQueue;
 use kspin::SpinNoIrq;
 use linux_raw_sys::general::{
-    SA_NODEFER, SA_RESETHAND, SIGCHLD, SIGCONT, SIGKILL, SIGSTOP, SIGURG, SIGWINCH,
+    SA_NODEFER, SA_ONSTACK, SA_RESETHAND, SIGCHLD, SIGCONT, SIGKILL, SIGSEGV, SIGSTOP, SIGURG,
+    SIGWINCH, SS_DISABLE, SS_ONSTACK,
 };
 use spin::Mutex;
 
@@ -80,11 +81,35 @@ pub struct SignalAltStack {
     pub flags: usize,
 }
 
+impl SignalAltStack {
+    const fn disabled() -> Self {
+        Self {
+            sp: 0,
+            size: 0,
+            flags: SS_DISABLE as usize,
+        }
+    }
+
+    fn is_disabled(self) -> bool {
+        (self.flags & SS_DISABLE as usize) != 0
+    }
+
+    fn is_active(self) -> bool {
+        (self.flags & SS_ONSTACK as usize) != 0
+    }
+
+    fn without_runtime_flags(mut self) -> Self {
+        self.flags &= !(SS_ONSTACK as usize);
+        self
+    }
+}
+
 #[derive(Clone, Copy, Debug)]
 struct SavedSignalContext {
     tf: TrapFrame,
     old_mask: u64,
     user_ucontext: Option<usize>,
+    used_altstack: bool,
 }
 
 pub struct SignalHandlers {
@@ -230,11 +255,7 @@ impl ThreadSignal {
             skip_once: AtomicBool::new(false),
             signal_wait: WaitQueue::new(),
             saved_ctx: Mutex::new(None),
-            altstack: Mutex::new(SignalAltStack {
-                sp: 0,
-                size: 0,
-                flags: 0,
-            }),
+            altstack: Mutex::new(SignalAltStack::disabled()),
             sigsuspend_restore: Mutex::new(None),
             pending_siginfo: Mutex::new(BTreeMap::new()),
         })
@@ -278,19 +299,26 @@ impl ThreadSignal {
         self.skip_once.store(false, Ordering::Release);
         *self.saved_ctx.lock() = None;
         *self.sigsuspend_restore.lock() = None;
-        *self.altstack.lock() = SignalAltStack {
-            sp: 0,
-            size: 0,
-            flags: 0,
-        };
+        *self.altstack.lock() = SignalAltStack::disabled();
     }
 
     pub fn set_altstack(&self, ss: SignalAltStack) {
-        *self.altstack.lock() = ss;
+        *self.altstack.lock() = ss.without_runtime_flags();
     }
 
     pub fn altstack(&self) -> SignalAltStack {
         *self.altstack.lock()
+    }
+
+    fn enter_altstack(&self) {
+        let mut altstack = self.altstack.lock();
+        if !altstack.is_disabled() {
+            altstack.flags |= SS_ONSTACK as usize;
+        }
+    }
+
+    fn leave_altstack(&self) {
+        self.altstack.lock().flags &= !(SS_ONSTACK as usize);
     }
 
     pub fn begin_sigsuspend(&self, new_mask: u64) {
@@ -562,6 +590,9 @@ impl ThreadSignal {
         }
         self.blocked
             .store(sanitize_mask(restored_mask), Ordering::Release);
+        if saved.used_altstack {
+            self.leave_altstack();
+        }
         self.in_handler.store(false, Ordering::Release);
         self.skip_once.store(true, Ordering::Release);
         axlog::debug!(
@@ -620,11 +651,18 @@ impl ThreadSignal {
         (None, None)
     }
 
-    fn save_context(&self, tf: &TrapFrame, old_mask: u64, user_ucontext: Option<usize>) {
+    fn save_context(
+        &self,
+        tf: &TrapFrame,
+        old_mask: u64,
+        user_ucontext: Option<usize>,
+        used_altstack: bool,
+    ) {
         *self.saved_ctx.lock() = Some(SavedSignalContext {
             tf: *tf,
             old_mask,
             user_ucontext,
+            used_altstack,
         });
     }
 }
@@ -680,7 +718,10 @@ mod tests {
         assert!(!signal.skip_once.load(Ordering::Acquire));
         assert!(signal.sigsuspend_restore.lock().is_none());
         let altstack = signal.altstack();
-        assert_eq!((altstack.sp, altstack.size, altstack.flags), (0, 0, 0));
+        assert_eq!(
+            (altstack.sp, altstack.size, altstack.flags),
+            (0, 0, SS_DISABLE as usize)
+        );
         assert_eq!(
             signal.dequeue_waitset_with_info(1),
             Some((1, Some([1; 128])))
@@ -769,6 +810,63 @@ mod tests {
             resolve_action(&shared, SIGSEGV),
             SignalAction::Default(DefaultSignalAction::CoreDump)
         ));
+    }
+
+    #[test]
+    fn alternate_signal_stack_tracks_active_delivery() {
+        let signal = ThreadSignal::new(SignalShared::new());
+        signal.set_altstack(SignalAltStack {
+            sp: 0x10_000,
+            size: 0x4_000,
+            flags: SS_ONSTACK as usize,
+        });
+
+        assert!(!signal.altstack().is_active());
+        signal.enter_altstack();
+        assert!(signal.altstack().is_active());
+        signal.leave_altstack();
+        assert!(!signal.altstack().is_active());
+    }
+
+    #[test]
+    fn signal_frame_uses_enabled_alternate_stack() {
+        let altstack = SignalAltStack {
+            sp: 0x10_000,
+            size: 0x4_000,
+            flags: 0,
+        };
+
+        let (frame_base, used_altstack) =
+            signal_frame_base(0x80_000, SA_ONSTACK as usize, altstack, 0x480).unwrap();
+
+        assert_eq!(frame_base, 0x13_b80);
+        assert!(used_altstack);
+    }
+
+    #[test]
+    fn signal_frame_stays_on_an_active_alternate_stack() {
+        let altstack = SignalAltStack {
+            sp: 0x10_000,
+            size: 0x4_000,
+            flags: SS_ONSTACK as usize,
+        };
+
+        let (frame_base, used_altstack) =
+            signal_frame_base(0x13_c00, SA_ONSTACK as usize, altstack, 0x480).unwrap();
+
+        assert_eq!(frame_base, 0x13_780);
+        assert!(!used_altstack);
+    }
+
+    #[test]
+    fn signal_frame_rejects_an_undersized_alternate_stack() {
+        let altstack = SignalAltStack {
+            sp: 0x10_000,
+            size: 0x100,
+            flags: 0,
+        };
+
+        assert!(signal_frame_base(0x80_000, SA_ONSTACK as usize, altstack, 0x480).is_err());
     }
 }
 
@@ -918,14 +1016,47 @@ const UCONTEXT_FRAME_SIZE: usize = 1024;
 const UCONTEXT_SIGMASK_OFFSET: usize = 40;
 const UCONTEXT_PC_OFFSET: usize = 176;
 
+fn signal_frame_base(
+    current_sp: usize,
+    action_flags: usize,
+    altstack: SignalAltStack,
+    frame_size: usize,
+) -> AxResult<(usize, bool)> {
+    let use_altstack = (action_flags & SA_ONSTACK as usize) != 0
+        && !altstack.is_disabled()
+        && !altstack.is_active();
+    let stack_top = if use_altstack {
+        altstack
+            .sp
+            .checked_add(altstack.size)
+            .ok_or(AxError::BadAddress)?
+    } else {
+        current_sp
+    };
+    let frame_base = stack_top
+        .checked_sub(frame_size)
+        .ok_or(AxError::BadAddress)?
+        & !15;
+    if use_altstack && frame_base < altstack.sp {
+        return Err(AxError::BadAddress);
+    }
+    Ok((frame_base, use_altstack))
+}
+
 fn write_user_signal_frame(
     thread: &Thread,
     tf: &TrapFrame,
     old_mask: u64,
     siginfo: Option<[u8; 128]>,
-) -> AxResult<(usize, usize)> {
+    action_flags: usize,
+) -> AxResult<(usize, usize, bool)> {
     let frame_size = SIGINFO_FRAME_SIZE + UCONTEXT_FRAME_SIZE;
-    let frame_base = current_sp(tf).saturating_sub(frame_size) & !15;
+    let (frame_base, used_altstack) = signal_frame_base(
+        current_sp(tf),
+        action_flags,
+        thread.signal_altstack(),
+        frame_size,
+    )?;
     let siginfo_addr = frame_base;
     let ucontext_addr = frame_base + SIGINFO_FRAME_SIZE;
 
@@ -964,7 +1095,7 @@ fn write_user_signal_frame(
         let _ = thread.process().write_user_bytes(gregs_addr, gregs_bytes);
     }
 
-    Ok((siginfo_addr, ucontext_addr))
+    Ok((siginfo_addr, ucontext_addr, used_altstack))
 }
 
 fn read_user_signal_pc(process: &Process, user_ucontext: usize) -> AxResult<usize> {
@@ -1114,16 +1245,23 @@ pub fn check_signals_and_deliver(thread: &Thread, tf: &mut TrapFrame) -> Option<
                 new_mask |= bit;
             }
             new_mask = sanitize_mask(new_mask);
-            match write_user_signal_frame(thread, tf, old_mask, siginfo) {
-                Ok((siginfo_addr, ucontext_addr)) => {
-                    sig_state.save_context(tf, old_mask, Some(ucontext_addr));
+            match write_user_signal_frame(thread, tf, old_mask, siginfo, act.flags) {
+                Ok((siginfo_addr, ucontext_addr, used_altstack)) => {
+                    sig_state.save_context(tf, old_mask, Some(ucontext_addr), used_altstack);
+                    if used_altstack {
+                        sig_state.enter_altstack();
+                    }
                     set_arg1(tf, siginfo_addr);
                     set_arg2(tf, ucontext_addr);
                     set_sp(tf, siginfo_addr);
                 }
                 Err(e) => {
                     axlog::warn!("failed to build signal frame for sig {}: {:?}", sig, e);
-                    sig_state.save_context(tf, old_mask, None);
+                    sig_state.maybe_restore_sigsuspend_mask();
+                    return Some(SignalDelivery {
+                        sig: SIGSEGV as usize,
+                        action: SignalAction::Default(DefaultSignalAction::CoreDump),
+                    });
                 }
             }
             sig_state.set_blocked_mask(new_mask);

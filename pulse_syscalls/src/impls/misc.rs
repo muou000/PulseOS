@@ -9,10 +9,11 @@ use axalloc::global_allocator;
 use axfs::FS_CONTEXT;
 use axhal::context::TrapFrame;
 use linux_raw_sys::general::{
-    GRND_INSECURE, GRND_NONBLOCK, GRND_RANDOM, RLIMIT_AS, RLIMIT_CORE, RLIMIT_CPU, RLIMIT_DATA,
-    RLIMIT_FSIZE, RLIMIT_MEMLOCK, RLIMIT_MSGQUEUE, RLIMIT_NICE, RLIMIT_NOFILE, RLIMIT_NPROC,
-    RLIMIT_RSS, RLIMIT_RTPRIO, RLIMIT_RTTIME, RLIMIT_SIGPENDING, RLIMIT_STACK, SIG_BLOCK,
-    SIG_SETMASK, SIG_UNBLOCK, SIGKILL, SIGSTOP, rlimit64, sigaction, siginfo, timespec,
+    GRND_INSECURE, GRND_NONBLOCK, GRND_RANDOM, MINSIGSTKSZ, RLIMIT_AS, RLIMIT_CORE, RLIMIT_CPU,
+    RLIMIT_DATA, RLIMIT_FSIZE, RLIMIT_MEMLOCK, RLIMIT_MSGQUEUE, RLIMIT_NICE, RLIMIT_NOFILE,
+    RLIMIT_NPROC, RLIMIT_RSS, RLIMIT_RTPRIO, RLIMIT_RTTIME, RLIMIT_SIGPENDING, RLIMIT_STACK,
+    SIG_BLOCK, SIG_SETMASK, SIG_UNBLOCK, SIGKILL, SIGSTOP, SS_DISABLE, SS_FLAG_BITS, SS_ONSTACK,
+    rlimit64, sigaction, siginfo, timespec,
 };
 use pulse_core::task::{NSIG, SigAction, uaccess};
 
@@ -994,29 +995,30 @@ pub fn sys_sigaltstack(ss: usize, oss: usize) -> isize {
             Err(_) => return -LinuxError::EFAULT.code() as isize,
         };
 
-        const SS_DISABLE: i32 = 2;
-        const SS_ONSTACK: i32 = 1;
-
         let current_altstack = thread.signal_altstack();
-        if current_altstack.flags & (SS_ONSTACK as usize) != 0 {
+        if current_altstack.flags & SS_ONSTACK as usize != 0 {
             return -LinuxError::EPERM.code() as isize;
         }
 
-        if raw_ss.ss_flags & SS_DISABLE != 0 {
+        let raw_flags = raw_ss.ss_flags as u32;
+        if raw_flags & !(SS_DISABLE | SS_ONSTACK | SS_FLAG_BITS) != 0 {
+            return -LinuxError::EINVAL.code() as isize;
+        }
+
+        if raw_flags & SS_DISABLE != 0 {
             thread.set_signal_altstack(pulse_core::task::SignalAltStack {
                 sp: 0,
                 size: 0,
                 flags: SS_DISABLE as usize,
             });
         } else {
-            const MINSIGSTKSZ: usize = 2048;
-            if raw_ss.ss_size < MINSIGSTKSZ {
+            if raw_ss.ss_size < MINSIGSTKSZ as usize {
                 return -LinuxError::ENOMEM.code() as isize;
             }
             thread.set_signal_altstack(pulse_core::task::SignalAltStack {
                 sp: raw_ss.ss_sp,
                 size: raw_ss.ss_size,
-                flags: raw_ss.ss_flags as usize,
+                flags: raw_flags as usize,
             });
         }
     }
