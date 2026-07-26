@@ -39,7 +39,7 @@ pub(super) fn read_user_string_array(
     process: &Process,
     array_addr: usize,
 ) -> Result<Vec<String>, isize> {
-    const ARG_MAX_COUNT: usize = 256;
+    const ARG_MAX_COUNT: usize = 4096;
     let mut out = Vec::new();
     if array_addr == 0 {
         return Ok(out);
