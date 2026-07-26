@@ -1,7 +1,8 @@
 use axerrno::LinuxError;
+use linux_raw_sys::general::{SI_TKILL, SI_USER, siginfo};
 use pulse_core::task::{
-    can_signal, current_process, process_by_pid, processes_snapshot, queue_signal_to_process,
-    queue_signal_to_thread,
+    can_signal, current_process, process_by_pid, processes_snapshot,
+    queue_signal_to_process_with_info, queue_signal_to_thread_with_info,
 };
 
 const NSIG: isize = 64;
@@ -9,6 +10,19 @@ const PIDFD_NONBLOCK: usize = 0x800;
 
 fn is_valid_signal(sig: isize) -> bool {
     sig == 0 || (1..=NSIG).contains(&sig)
+}
+
+fn make_user_signal_info(sig: isize, code: i32, pid: u64, uid: u32) -> [u8; 128] {
+    let mut info: siginfo = unsafe { core::mem::zeroed() };
+    unsafe {
+        let header = &mut info.__bindgen_anon_1.__bindgen_anon_1;
+        header.si_signo = sig as linux_raw_sys::ctypes::c_int;
+        header.si_errno = 0;
+        header.si_code = code;
+        header._sifields._kill._pid = pid as _;
+        header._sifields._kill._uid = uid as _;
+    }
+    unsafe { core::mem::transmute::<siginfo, [u8; 128]>(info) }
 }
 
 pub fn sys_getpid() -> isize {
@@ -131,11 +145,12 @@ pub fn sys_kill(pid: isize, sig: isize) -> isize {
         return 0;
     }
 
+    let info = make_user_signal_info(sig, SI_USER as i32, caller.pid(), caller.ruid());
     for target in targets {
         if !can_signal(&caller, &target) {
             continue;
         }
-        let _ = queue_signal_to_process(target.as_ref(), sig as usize);
+        let _ = queue_signal_to_process_with_info(target.as_ref(), sig as usize, Some(info));
     }
     0
 }
@@ -158,7 +173,8 @@ pub fn sys_tkill(tid: isize, sig: isize) -> isize {
     if sig == 0 {
         return 0;
     }
-    let _ = queue_signal_to_thread(target_thread.as_ref(), sig as usize);
+    let info = make_user_signal_info(sig, SI_TKILL, caller.pid(), caller.ruid());
+    let _ = queue_signal_to_thread_with_info(target_thread.as_ref(), sig as usize, Some(info));
     0
 }
 
@@ -183,7 +199,8 @@ pub fn sys_tgkill(tgid: isize, tid: isize, sig: isize) -> isize {
     if sig == 0 {
         return 0;
     }
-    let _ = queue_signal_to_thread(target_thread.as_ref(), sig as usize);
+    let info = make_user_signal_info(sig, SI_TKILL, caller.pid(), caller.ruid());
+    let _ = queue_signal_to_thread_with_info(target_thread.as_ref(), sig as usize, Some(info));
     0
 }
 
