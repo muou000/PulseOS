@@ -8,8 +8,8 @@ pub const USER_SPACE_SIZE: usize = 0x3f_ffff_f000;
 
 /// The highest address of the user stack.
 pub const USER_STACK_TOP: usize = 0x4_0000_0000;
-/// The size of the user stack.
-pub const USER_STACK_SIZE: usize = 0x8_0000;
+/// The size of the user stack (8 MiB, matching the usual Linux default limit).
+pub const USER_STACK_SIZE: usize = 0x80_0000;
 
 /// The minimum address selected for a process's initial program break.
 pub const USER_HEAP_BASE: usize = 0x4000_0000;
