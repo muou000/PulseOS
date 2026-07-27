@@ -12,7 +12,7 @@ use lazyinit::LazyInit;
 use crate::{
     AxCpuMask, AxTaskRef, Scheduler, TaskInner, WaitQueue,
     task::{CurrentTask, TaskState},
-    wait_queue::WaitQueueGuard,
+    wait_queue::{WaitContext, WaitQueueGuard, WaitReason, WakeContext},
 };
 
 macro_rules! percpu_static {
@@ -248,9 +248,7 @@ pub(crate) fn select_run_queue<G: BaseGuard>(task: &AxTaskRef) -> AxRunQueueRef<
 /// across a `block_on` suspension. If affinity excludes that CPU, the CPU
 /// performing the wakeup is preferred before falling back to normal placement.
 #[inline]
-pub(crate) fn select_wake_run_queue<G: BaseGuard>(
-    task: &AxTaskRef,
-) -> AxRunQueueRef<'static, G> {
+pub(crate) fn select_wake_run_queue<G: BaseGuard>(task: &AxTaskRef) -> AxRunQueueRef<'static, G> {
     let irq_state = G::acquire();
     #[cfg(not(feature = "smp"))]
     {
@@ -360,6 +358,16 @@ impl<G: BaseGuard> AxRunQueueRef<'_, G> {
     /// This function does nothing if the task is not in [`TaskState::Blocked`],
     /// which means the task is already unblocked by other cores.
     pub fn unblock_task(&mut self, task: AxTaskRef, resched: bool) {
+        self.unblock_task_with_context(task, resched, WakeContext::unknown());
+    }
+
+    /// Unblocks one task and records the semantic source of the wakeup.
+    pub(crate) fn unblock_task_with_context(
+        &mut self,
+        task: AxTaskRef,
+        resched: bool,
+        context: WakeContext,
+    ) {
         let task_id_name = if log_enabled!(log::Level::Trace) {
             Some(task.id_name())
         } else {
@@ -372,7 +380,7 @@ impl<G: BaseGuard> AxRunQueueRef<'_, G> {
         // target task can not be insert into the run queue until it finishes its scheduling process.
         if self
             .inner
-            .put_task_with_state(task, TaskState::Blocked, resched)
+            .put_task_with_state(task, TaskState::Blocked, resched, context)
         {
             // Since now, the task to be unblocked is in the `Ready` state.
             let cpu_id = self.inner.cpu_id;
@@ -442,8 +450,12 @@ impl<G: BaseGuard> CurrentRunQueueRef<'_, G> {
         trace!("task yield: {}", curr.id_name());
         assert!(curr.is_running());
 
-        self.inner
-            .put_task_with_state(curr.clone(), TaskState::Running, false);
+        self.inner.put_task_with_state(
+            curr.clone(),
+            TaskState::Running,
+            false,
+            WakeContext::unknown(),
+        );
 
         self.resched();
     }
@@ -497,8 +509,12 @@ impl<G: BaseGuard> CurrentRunQueueRef<'_, G> {
             can_preempt
         );
         if can_preempt {
-            self.inner
-                .put_task_with_state(curr.clone(), TaskState::Running, true);
+            self.inner.put_task_with_state(
+                curr.clone(),
+                TaskState::Running,
+                true,
+                WakeContext::unknown(),
+            );
             self.resched();
         } else {
             curr.set_preempt_pending(true);
@@ -520,6 +536,8 @@ impl<G: BaseGuard> CurrentRunQueueRef<'_, G> {
             axhal::power::system_off();
         } else {
             curr.set_state(TaskState::Exited);
+            #[cfg(feature = "qperf-trace")]
+            crate::qperf_trace::task_exit(curr);
 
             // Notify the joiner task.
             curr.notify_exit(exit_code);
@@ -530,7 +548,9 @@ impl<G: BaseGuard> CurrentRunQueueRef<'_, G> {
                 // Push current task to the `EXITED_TASKS` list, which will be consumed by the GC task.
                 EXITED_TASKS.current_ref_mut_raw().push_back(curr.clone());
                 // Wake up the GC task to drop the exited tasks.
-                WAIT_FOR_EXIT.current_ref_mut_raw().notify_one(false);
+                WAIT_FOR_EXIT
+                    .current_ref_mut_raw()
+                    .notify_one_with_context(false, WakeContext::task());
             }
 
             // The GC task is woken through WAIT_FOR_EXIT and must be selected
@@ -548,7 +568,7 @@ impl<G: BaseGuard> CurrentRunQueueRef<'_, G> {
     ///     2. The caller must ensure that the current task is in the running state.
     ///     3. The caller must ensure that the current task is not the idle task.
     ///     4. The lock of the wait queue will be released explicitly after current task is pushed into it.
-    pub fn blocked_resched(&mut self, mut wq_guard: WaitQueueGuard) {
+    pub fn blocked_resched(&mut self, mut wq_guard: WaitQueueGuard, context: WaitContext) {
         let curr = self.current_task.clone();
         assert!(curr.is_running());
         assert!(!curr.is_idle());
@@ -558,12 +578,17 @@ impl<G: BaseGuard> CurrentRunQueueRef<'_, G> {
         #[cfg(feature = "preempt")]
         assert!(curr.can_preempt(2));
 
+        #[cfg(feature = "qperf-trace")]
+        let qperf_sequence = curr.next_qperf_block_sequence();
+
         // Mark the task as blocked, this has to be done before adding it to the wait queue
         // while holding the lock of the wait queue.
         curr.set_state(TaskState::Blocked);
         curr.set_in_wait_queue(true);
 
         wq_guard.push_back(curr.clone());
+        #[cfg(feature = "qperf-trace")]
+        crate::qperf_trace::task_block(&curr, qperf_sequence, context);
         // Drop the lock of wait queue explictly.
         drop(wq_guard);
 
@@ -586,8 +611,20 @@ impl<G: BaseGuard> CurrentRunQueueRef<'_, G> {
         #[cfg(feature = "preempt")]
         assert!(curr.can_preempt(2));
 
+        #[cfg(feature = "qperf-trace")]
+        let qperf_sequence = curr.next_qperf_block_sequence();
         curr.set_state(TaskState::Blocked);
         *woke = false;
+        #[cfg(feature = "qperf-trace")]
+        crate::qperf_trace::task_block(
+            &curr,
+            qperf_sequence,
+            WaitContext::new(
+                WaitReason::Future,
+                (&*woke as *const bool) as usize as u64,
+                0,
+            ),
+        );
         drop(woke);
 
         trace!("task block woke: {}", curr.id_name());
@@ -598,12 +635,20 @@ impl<G: BaseGuard> CurrentRunQueueRef<'_, G> {
     /// This is used for multi-queue waiting where locks cannot be held.
     /// Note: The caller MUST ensure the task is already set to `Blocked` and `in_wait_queue` = true,
     /// and that proper condition checks have been performed.
-    pub(crate) fn resched_blocked(&mut self) {
+    pub(crate) fn resched_blocked(
+        &mut self,
+        #[cfg(feature = "qperf-trace")] qperf_sequence: u64,
+        context: WaitContext,
+    ) {
         let curr = self.current_task.clone();
         assert!(!curr.is_idle());
         #[cfg(feature = "preempt")]
         assert!(curr.can_preempt(1)); // 1 for `NoPreemptIrqSave`
 
+        #[cfg(feature = "qperf-trace")]
+        if curr.state() == TaskState::Blocked {
+            crate::qperf_trace::task_block(&curr, qperf_sequence, context);
+        }
         trace!("task block multi: {}", curr.id_name());
         self.resched();
     }
@@ -617,9 +662,21 @@ impl<G: BaseGuard> CurrentRunQueueRef<'_, G> {
 
         let now = axhal::time::monotonic_time();
         if now < deadline {
+            #[cfg(feature = "qperf-trace")]
+            let qperf_sequence = curr.next_qperf_block_sequence();
             let _keep_alive = curr.clone();
             crate::timers::set_alarm_wakeup(deadline, curr.clone());
             curr.set_state(TaskState::Blocked);
+            #[cfg(feature = "qperf-trace")]
+            crate::qperf_trace::task_block(
+                &curr,
+                qperf_sequence,
+                WaitContext::new(
+                    WaitReason::Sleep,
+                    deadline.as_nanos().min(u64::MAX as u128) as u64,
+                    0,
+                ),
+            );
             self.resched();
             curr.timer_ticket_expired();
         }
@@ -682,10 +739,15 @@ impl AxRunQueue {
         task: AxTaskRef,
         current_state: TaskState,
         preempt: bool,
+        wake_context: WakeContext,
     ) -> bool {
         // If the task's state matches `current_state`, set its state to `Ready` and
         // put it back to the run queue (except idle task).
         if task.transition_state(current_state, TaskState::Ready) && !task.is_idle() {
+            #[cfg(feature = "qperf-trace")]
+            if current_state == TaskState::Blocked {
+                crate::qperf_trace::task_wake(&task, wake_context);
+            }
             #[cfg(feature = "smp")]
             let waking_current_task = current_state == TaskState::Blocked
                 && self.cpu_id == this_cpu_id()
@@ -717,8 +779,6 @@ impl AxRunQueue {
             false
         }
     }
-
-
 
     fn switch_to(&mut self, prev_task: CurrentTask, next_task: AxTaskRef) {
         // Make sure that IRQs are disabled by kernel guard or other means.
@@ -764,6 +824,8 @@ impl AxRunQueue {
             assert!(Arc::strong_count(prev_task.as_task_ref()) > 1);
             assert!(Arc::strong_count(&next_task) >= 1);
 
+            #[cfg(feature = "qperf-trace")]
+            crate::qperf_trace::sched_switch(&prev_task, &next_task, prev_task.state() as u8);
             CurrentTask::set_current(prev_task, next_task);
 
             (*prev_ctx_ptr).switch_to(&*next_ctx_ptr);
@@ -796,8 +858,14 @@ fn gc_entry() {
         // Note: we cannot block current task with preemption disabled,
         // use `current_ref_raw` to get the `WAIT_FOR_EXIT`'s reference here to avoid the use of `NoPreemptGuard`.
         // Since gc task is pinned to the current CPU, there is no affection if the gc task is preempted during the process.
-        let _ = unsafe { WAIT_FOR_EXIT.current_ref_raw() }
-            .wait_timeout(core::time::Duration::from_millis(100));
+        let wait_queue = unsafe { WAIT_FOR_EXIT.current_ref_raw() };
+        let period = core::time::Duration::from_millis(100);
+        let context = WaitContext::new(
+            WaitReason::Gc,
+            wait_queue as *const WaitQueue as usize as u64,
+            period.as_nanos() as u64,
+        );
+        let _ = wait_queue.wait_timeout_with_context(context, period);
     }
 }
 

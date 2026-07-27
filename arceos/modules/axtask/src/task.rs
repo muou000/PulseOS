@@ -57,6 +57,8 @@ pub struct TaskInner {
 
     entry: SpinNoIrq<Option<Box<dyn FnOnce() + Send>>>,
     state: AtomicU8,
+    #[cfg(feature = "qperf-trace")]
+    qperf_block_sequence: AtomicU64,
 
     /// CPU affinity mask.
     cpumask: SpinNoIrq<AxCpuMask>,
@@ -156,12 +158,24 @@ impl TaskInner {
         if *t.name.lock() == "idle" {
             t.is_idle = true;
         }
+        #[cfg(feature = "qperf-trace")]
+        crate::qperf_trace::task_metadata(t.id().as_u64(), 0, 0, t.name().as_bytes());
         Ok(t)
     }
 
     /// Gets the ID of the task.
     pub const fn id(&self) -> TaskId {
         self.id
+    }
+
+    #[cfg(feature = "qperf-trace")]
+    pub(crate) fn next_qperf_block_sequence(&self) -> u64 {
+        self.qperf_block_sequence.fetch_add(1, Ordering::Relaxed) + 1
+    }
+
+    #[cfg(feature = "qperf-trace")]
+    pub(crate) fn qperf_block_sequence(&self) -> u64 {
+        self.qperf_block_sequence.load(Ordering::Relaxed)
     }
 
     /// Gets the name of the task.
@@ -294,6 +308,8 @@ impl TaskInner {
             is_init: false,
             entry: SpinNoIrq::new(None),
             state: AtomicU8::new(TaskState::Ready as u8),
+            #[cfg(feature = "qperf-trace")]
+            qperf_block_sequence: AtomicU64::new(0),
             // By default, the task is allowed to run on all CPUs.
             cpumask: SpinNoIrq::new(cpumask),
             in_wait_queue: AtomicBool::new(false),
@@ -337,6 +353,8 @@ impl TaskInner {
         if *t.name.lock() == "idle" {
             t.is_idle = true;
         }
+        #[cfg(feature = "qperf-trace")]
+        crate::qperf_trace::task_metadata(t.id().as_u64(), 0, 0, t.name().as_bytes());
         t
     }
 

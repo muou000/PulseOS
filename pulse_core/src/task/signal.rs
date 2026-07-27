@@ -3,7 +3,7 @@ use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use axerrno::{AxError, AxResult};
 use axhal::context::TrapFrame;
-use axtask::WaitQueue;
+use axtask::{WaitQueue, WakeContext, WakeSource};
 use kspin::SpinNoIrq;
 use linux_raw_sys::general::{
     SA_NODEFER, SA_ONSTACK, SA_RESETHAND, SIGCHLD, SIGCONT, SIGKILL, SIGSEGV, SIGSTOP, SIGURG,
@@ -1122,7 +1122,9 @@ pub fn queue_signal_to_process(process: &Process, sig: usize) -> bool {
             .continued_signal_pending
             .store(false, Ordering::Release);
         if let Some(parent) = process.parent_process() {
-            parent.child_exit_event.notify_all(false);
+            parent
+                .child_exit_event
+                .notify_all_with_context(false, WakeContext::new(WakeSource::Signal, sig as u64));
         }
     } else if sig == SIGCONT as usize {
         process
@@ -1130,15 +1132,16 @@ pub fn queue_signal_to_process(process: &Process, sig: usize) -> bool {
             .store(true, Ordering::Release);
         process.stopped_signal_pending.store(0, Ordering::Release);
         if let Some(parent) = process.parent_process() {
-            parent.child_exit_event.notify_all(false);
+            parent
+                .child_exit_event
+                .notify_all_with_context(false, WakeContext::new(WakeSource::Signal, sig as u64));
         }
     }
 
     let queued = process.signal_shared().queue_process_signal(sig);
-    // Always notify even if already queued, to ensure blocked tasks re-check signals
+    // Always notify even if already queued, to ensure blocked tasks re-check signals.
     for thread in list_threads_for_signal(process) {
-        thread.signal_wait_queue().notify_all(true);
-        thread.notify_signal_pending();
+        thread.notify_signal_pending(sig);
     }
     queued
 }
@@ -1153,7 +1156,9 @@ pub fn queue_signal_to_thread(thread: &Thread, sig: usize) -> bool {
             .continued_signal_pending
             .store(false, Ordering::Release);
         if let Some(parent) = process.parent_process() {
-            parent.child_exit_event.notify_all(false);
+            parent
+                .child_exit_event
+                .notify_all_with_context(false, WakeContext::new(WakeSource::Signal, sig as u64));
         }
     } else if sig == SIGCONT as usize {
         process
@@ -1161,13 +1166,15 @@ pub fn queue_signal_to_thread(thread: &Thread, sig: usize) -> bool {
             .store(true, Ordering::Release);
         process.stopped_signal_pending.store(0, Ordering::Release);
         if let Some(parent) = process.parent_process() {
-            parent.child_exit_event.notify_all(false);
+            parent
+                .child_exit_event
+                .notify_all_with_context(false, WakeContext::new(WakeSource::Signal, sig as u64));
         }
     }
 
     let queued = thread.signal().queue_thread_signal(sig);
     // Always notify even if already queued
-    thread.notify_signal_pending();
+    thread.notify_signal_pending(sig);
     queued
 }
 

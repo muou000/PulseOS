@@ -13,7 +13,7 @@ use axhal::{
     context::{TrapFrame, UspaceContext},
     paging::MappingFlags,
 };
-use axtask::{AxTaskRef, TaskInner, WaitQueue};
+use axtask::{AxTaskRef, TaskInner, WaitContext, WaitQueue, WaitReason, WakeContext, WakeSource};
 use kernel_guard::NoPreemptIrqSave;
 use kspin::SpinNoIrq;
 use linux_raw_sys::general::{
@@ -214,7 +214,8 @@ impl FutexTable {
         };
 
         let mut woken = 0;
-        while woken < count && queue.notify_one(true) {
+        let context = WakeContext::new(WakeSource::Futex, addr as u64);
+        while woken < count && queue.notify_one_with_context(true, context) {
             woken += 1;
         }
         drop(queue);
@@ -232,7 +233,8 @@ impl FutexTable {
         };
 
         let mut woken = 0;
-        while woken < count && queue.notify_one(false) {
+        let context = WakeContext::new(WakeSource::Futex, addr as u64);
+        while woken < count && queue.notify_one_with_context(false, context) {
             woken += 1;
         }
         drop(queue);
@@ -257,7 +259,8 @@ impl FutexTable {
 
         let mut moved = 0;
         let mut woken = 0;
-        while woken < wake_count && source_queue.notify_one(true) {
+        let context = WakeContext::new(WakeSource::Futex, addr as u64);
+        while woken < wake_count && source_queue.notify_one_with_context(true, context) {
             woken += 1;
         }
 
@@ -272,10 +275,13 @@ impl FutexTable {
     fn wake_all(&self) {
         let queues = {
             let queues = self.queues.lock();
-            queues.values().cloned().collect::<Vec<_>>()
+            queues
+                .iter()
+                .map(|(key, queue)| (*key, queue.clone()))
+                .collect::<Vec<_>>()
         };
-        for queue in queues {
-            queue.notify_all(false);
+        for (key, queue) in queues {
+            queue.notify_all_with_context(false, WakeContext::new(WakeSource::Futex, key as u64));
         }
     }
 
@@ -2277,7 +2283,8 @@ impl Process {
 
                             if child.is_zombie() {
                                 let _ = queue_signal_to_process(init.as_ref(), SIGCHLD as usize);
-                                init.child_exit_event.notify_all(false);
+                                init.child_exit_event
+                                    .notify_all_with_context(false, WakeContext::task());
                             }
                         }
                     }
@@ -2296,7 +2303,9 @@ impl Process {
                 // The exiting task is still on its own kernel stack here.
                 // Wake waiters without forcing an immediate reschedule from inside
                 // the teardown path.
-                parent.child_exit_event.notify_all(false);
+                parent
+                    .child_exit_event
+                    .notify_all_with_context(false, WakeContext::task());
             }
         }
     }
@@ -2450,8 +2459,20 @@ impl Process {
             false
         };
 
+        let selector = match idtype {
+            0 => -1,
+            1 => i64::try_from(id).unwrap_or(i64::MAX),
+            2 => {
+                let pgid = if id == 0 { self.pgid() } else { id as u64 };
+                i64::try_from(pgid).unwrap_or(i64::MAX).saturating_neg()
+            }
+            _ => 0,
+        };
+        let wait_context = WaitContext::new(WaitReason::ChildWait, self.pid(), selector as u64);
         self.child_exit_event
-            .wait_until(|| check_state() || thread.has_pending_signal() || self.group_exiting());
+            .wait_until_with_context(wait_context, || {
+                check_state() || thread.has_pending_signal() || self.group_exiting()
+            });
 
         if check_state() {
             return Ok(());
@@ -2491,12 +2512,14 @@ impl Process {
     }
 
     pub fn wait_for_child_exit(&self, pid: isize) {
-        self.child_exit_event.wait_until(|| {
-            self.children
-                .lock()
-                .iter()
-                .any(|child| self.child_matches(child, pid) && child.is_zombie())
-        });
+        let wait_context = WaitContext::new(WaitReason::ChildWait, self.pid(), pid as i64 as u64);
+        self.child_exit_event
+            .wait_until_with_context(wait_context, || {
+                self.children
+                    .lock()
+                    .iter()
+                    .any(|child| self.child_matches(child, pid) && child.is_zombie())
+            });
     }
 
     pub fn wait_for_child_exit_interruptible(&self, pid: isize) -> Result<(), i32> {
@@ -2505,13 +2528,15 @@ impl Process {
             Err(e) => return Err(e.code()),
         };
         // wait_until 会在持有 WaitQueue 锁的同时执行闭包
-        self.child_exit_event.wait_until(|| {
-            self.children
-                .lock()
-                .iter()
-                .any(|child| self.child_matches(child, pid) && child.is_zombie())
-                || thread.has_pending_signal()
-        });
+        let wait_context = WaitContext::new(WaitReason::ChildWait, self.pid(), pid as i64 as u64);
+        self.child_exit_event
+            .wait_until_with_context(wait_context, || {
+                self.children
+                    .lock()
+                    .iter()
+                    .any(|child| self.child_matches(child, pid) && child.is_zombie())
+                    || thread.has_pending_signal()
+            });
 
         // 优先检查是否有子进程已经退出，如果有，即使有挂起信号也返回 Ok(())
         // 这样 sys_wait4 的 loop 会在下一次调用 reap_zombie_child 时成功。
@@ -2762,7 +2787,8 @@ impl Process {
             if !ctx.done.swap(true, Ordering::AcqRel) {
                 // Keep vfork completion notification side-effect free with respect
                 // to scheduling while the child is still unwinding its exit path.
-                ctx.event.notify_all(false);
+                ctx.event
+                    .notify_all_with_context(false, WakeContext::task());
             }
         }
     }
@@ -2773,7 +2799,8 @@ impl Process {
                 return;
             }
             let current_thread = super::current_thread().ok();
-            ctx.event.wait_until(|| {
+            let wait_context = WaitContext::new(WaitReason::Vfork, self.pid(), 0);
+            ctx.event.wait_until_with_context(wait_context, || {
                 ctx.done.load(Ordering::Acquire)
                     || current_thread
                         .as_ref()
@@ -2897,9 +2924,11 @@ impl Process {
 
         let mut mismatch = false;
 
-        let res = axtask::WaitQueue::wait_multiple_timeout_until(
+        let resource_id = queue_keys.first().map(|(key, _)| *key as u64).unwrap_or(0);
+        let res = axtask::WaitQueue::wait_multiple_timeout_until_with_context(
             &q_refs,
             timeout_ns.map(core::time::Duration::from_nanos),
+            WaitContext::new(WaitReason::FutexWaitV, resource_id, nr_futexes as u64),
             || {
                 if self.group_exiting() || signal_pending() {
                     return true;
@@ -3011,39 +3040,48 @@ impl Process {
 
         let timed_out = if let Some(timeout_ns) = timeout_ns {
             let dur = core::time::Duration::from_nanos(timeout_ns);
-            queue.wait_timeout_until(dur, || {
-                if first_time.get() {
-                    first_time.set(false);
-                    if self.group_exiting() || signal_pending() {
-                        return true;
+            queue.wait_timeout_until_with_context(
+                WaitContext::new(WaitReason::Futex, key as u64, expected as u64),
+                dur,
+                || {
+                    if first_time.get() {
+                        first_time.set(false);
+                        if self.group_exiting() || signal_pending() {
+                            return true;
+                        }
+                        let val =
+                            unsafe { core::ptr::read_volatile(kvaddr.as_usize() as *const u32) };
+                        if val != expected {
+                            mismatch.store(true, core::sync::atomic::Ordering::Relaxed);
+                            return true;
+                        }
+                        false
+                    } else {
+                        true
                     }
-                    let val = unsafe { core::ptr::read_volatile(kvaddr.as_usize() as *const u32) };
-                    if val != expected {
-                        mismatch.store(true, core::sync::atomic::Ordering::Relaxed);
-                        return true;
-                    }
-                    false
-                } else {
-                    true
-                }
-            })
+                },
+            )
         } else {
-            queue.wait_until(|| {
-                if first_time.get() {
-                    first_time.set(false);
-                    if self.group_exiting() || signal_pending() {
-                        return true;
+            queue.wait_until_with_context(
+                WaitContext::new(WaitReason::Futex, key as u64, expected as u64),
+                || {
+                    if first_time.get() {
+                        first_time.set(false);
+                        if self.group_exiting() || signal_pending() {
+                            return true;
+                        }
+                        let val =
+                            unsafe { core::ptr::read_volatile(kvaddr.as_usize() as *const u32) };
+                        if val != expected {
+                            mismatch.store(true, core::sync::atomic::Ordering::Relaxed);
+                            return true;
+                        }
+                        false
+                    } else {
+                        true
                     }
-                    let val = unsafe { core::ptr::read_volatile(kvaddr.as_usize() as *const u32) };
-                    if val != expected {
-                        mismatch.store(true, core::sync::atomic::Ordering::Relaxed);
-                        return true;
-                    }
-                    false
-                } else {
-                    true
-                }
-            });
+                },
+            );
             false
         };
 
@@ -3250,6 +3288,8 @@ impl Process {
         let asid = child_proc.asid();
         inner.ctx_mut().set_page_table_root(pt_root, asid);
         super::register_process(child_proc.pid(), child_proc.clone());
+        #[cfg(feature = "qperf-trace")]
+        super::emit_qperf_task_metadata(&inner, child_proc.pid(), child_tid);
         inner.init_task_ext(super::ThreadHandle::new(child_thread));
 
         self.add_child(child_proc.clone());
@@ -3338,6 +3378,8 @@ impl Process {
             // Thread clones reuse the existing PROCESS_REGISTRY entry for this pid.
             super::register_process(child_proc.pid(), child_proc.clone());
         }
+        #[cfg(feature = "qperf-trace")]
+        super::emit_qperf_task_metadata(&inner, child_proc.pid(), child_tid);
         inner.init_task_ext(super::ThreadHandle::new(child_thread));
 
         if !params.is_thread_clone {

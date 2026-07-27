@@ -555,7 +555,10 @@ pub fn sys_rt_sigsuspend(mask: usize, sigsetsize: usize) -> isize {
     };
     thread.begin_sigsuspend(new_mask);
     let signal_wait = thread.signal_wait_queue();
-    signal_wait.wait_until(|| thread.has_pending_signal() || thread.process().group_exiting());
+    let wait_context = axtask::WaitContext::new(axtask::WaitReason::Signal, thread.tid(), new_mask);
+    signal_wait.wait_until_with_context(wait_context, || {
+        thread.has_pending_signal() || thread.process().group_exiting()
+    });
     -LinuxError::EINTR.code() as isize
 }
 
@@ -578,6 +581,7 @@ pub fn sys_rt_sigtimedwait(set: usize, info: usize, timeout: usize, sigsetsize: 
         Err(_) => return -LinuxError::EFAULT.code() as isize,
     };
     let signal_wait = thread.signal_wait_queue();
+    let wait_context = axtask::WaitContext::new(axtask::WaitReason::Signal, thread.tid(), waitset);
 
     let deadline_ns = if timeout == 0 {
         None
@@ -626,12 +630,13 @@ pub fn sys_rt_sigtimedwait(set: usize, info: usize, timeout: usize, sigsetsize: 
                         return -LinuxError::EAGAIN.code() as isize;
                     }
                     let remain = Duration::from_nanos(deadline_ns - now_ns);
-                    let timed_out = signal_wait.wait_timeout_until(remain, || {
-                        thread.has_waitset_signal(waitset)
-                            || thread.has_pending_unblocked_signal_not_in_set(waitset)
-                            || thread.exec_exit_requested()
-                            || thread.process().group_exiting()
-                    });
+                    let timed_out =
+                        signal_wait.wait_timeout_until_with_context(wait_context, remain, || {
+                            thread.has_waitset_signal(waitset)
+                                || thread.has_pending_unblocked_signal_not_in_set(waitset)
+                                || thread.exec_exit_requested()
+                                || thread.process().group_exiting()
+                        });
                     if timed_out
                         && !thread.has_waitset_signal(waitset)
                         && !thread.has_pending_unblocked_signal_not_in_set(waitset)
@@ -650,7 +655,7 @@ pub fn sys_rt_sigtimedwait(set: usize, info: usize, timeout: usize, sigsetsize: 
                 }
             }
             None => {
-                signal_wait.wait_until(|| {
+                signal_wait.wait_until_with_context(wait_context, || {
                     thread.has_waitset_signal(waitset)
                         || thread.has_pending_unblocked_signal_not_in_set(waitset)
                         || thread.exec_exit_requested()

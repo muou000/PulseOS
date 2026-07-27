@@ -1,12 +1,11 @@
 use core::sync::atomic::{AtomicU64, Ordering};
 
+use axhal::time::monotonic_time;
 use kernel_guard::{NoOp, NoPreemptIrqSave};
 use lazyinit::LazyInit;
 use timer_list::{TimeValue, TimerEvent, TimerList};
 
-use axhal::time::monotonic_time;
-
-use crate::{AxTaskRef, AxTaskWeak, select_wake_run_queue};
+use crate::{AxTaskRef, AxTaskWeak, WakeContext, WakeSource, select_wake_run_queue};
 
 static TIMER_TICKET_ID: AtomicU64 = AtomicU64::new(1);
 
@@ -34,7 +33,11 @@ impl TimerEvent for AxTimerEvent {
                     if task.timer_ticket() != ticket_id {
                         return;
                     }
-                    select_wake_run_queue::<NoOp>(&task).unblock_task(task, true);
+                    select_wake_run_queue::<NoOp>(&task).unblock_task_with_context(
+                        task,
+                        true,
+                        WakeContext::new(WakeSource::Timer, ticket_id),
+                    );
                 }
             }
             Self::Generic { callback } => {
@@ -80,10 +83,7 @@ fn reprogram_timer_internal(from_tick: bool) {
         }
     };
     let future_deadline = crate::future::next_timer_deadline();
-    for event_deadline in [task_event_deadline, future_deadline]
-        .into_iter()
-        .flatten()
-    {
+    for event_deadline in [task_event_deadline, future_deadline].into_iter().flatten() {
         let event_mono_ns = event_deadline.as_nanos().min(u64::MAX as u128) as u64;
         if event_mono_ns < final_deadline {
             final_deadline = event_mono_ns;
@@ -130,7 +130,10 @@ pub fn set_alarm_wakeup(deadline: TimeValue, task: AxTaskRef) {
     reprogram_timer();
 }
 
-pub fn set_generic_timer(deadline: TimeValue, callback: alloc::boxed::Box<dyn FnOnce(TimeValue) + Send + Sync>) {
+pub fn set_generic_timer(
+    deadline: TimeValue,
+    callback: alloc::boxed::Box<dyn FnOnce(TimeValue) + Send + Sync>,
+) {
     let _guard = NoPreemptIrqSave::new();
     TIMER_LIST.with_current(|timer_list| {
         timer_list.set(deadline, AxTimerEvent::Generic { callback });
@@ -158,6 +161,7 @@ pub fn init() {
     TIMER_LIST.with_current(|timer_list| {
         timer_list.init_once(TimerList::new());
     });
-    let first_deadline = axhal::time::monotonic_time_nanos() + axhal::time::NANOS_PER_SEC / axconfig::TICKS_PER_SEC as u64;
+    let first_deadline = axhal::time::monotonic_time_nanos()
+        + axhal::time::NANOS_PER_SEC / axconfig::TICKS_PER_SEC as u64;
     unsafe { NEXT_TICK_DEADLINE.write_current_raw(first_deadline) };
 }

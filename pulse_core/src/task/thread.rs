@@ -6,7 +6,9 @@ use core::{
 
 use axerrno::{AxError, AxResult};
 use axhal::context::TrapFrame;
-use axtask::{AxTaskRef, AxTaskWeak, TaskExtSwitch, WaitQueue, def_task_ext};
+use axtask::{
+    AxTaskRef, AxTaskWeak, TaskExtSwitch, WaitQueue, WakeContext, WakeSource, def_task_ext,
+};
 use spin::Mutex;
 
 use super::{Process, SignalAltStack, ThreadSignal};
@@ -128,13 +130,16 @@ impl Thread {
         *self.task_ref.lock() = Some(Arc::downgrade(&task));
     }
 
-    pub fn notify_signal_pending(&self) {
-        self.signal.notify_waiters();
+    pub fn notify_signal_pending(&self, sig: usize) {
+        let wake_context = WakeContext::new(WakeSource::Signal, sig as u64);
+        self.signal
+            .wait_queue()
+            .notify_all_with_context(true, wake_context);
         if self.signal.has_deliverable_pending_signal()
             && let Some(weak_task) = self.task_ref.lock().as_ref()
         {
             if let Some(task) = weak_task.upgrade() {
-                axtask::interrupt_task(task, true);
+                axtask::interrupt_task_with_context(task, true, wake_context);
             }
         }
     }

@@ -1,6 +1,8 @@
 use alloc::{collections::VecDeque, sync::Arc, vec::Vec};
-use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use core::task::Waker;
+use core::{
+    sync::atomic::{AtomicBool, AtomicU64, Ordering},
+    task::Waker,
+};
 
 use kernel_guard::{NoOp, NoPreemptIrqSave};
 use kspin::{SpinNoIrq, SpinNoIrqGuard};
@@ -12,8 +14,9 @@ use crate::{AxTaskRef, CurrentTask, current_run_queue, select_wake_run_queue};
 /// # Examples
 ///
 /// ```
-/// use axtask::WaitQueue;
 /// use core::sync::atomic::{AtomicU32, Ordering};
+///
+/// use axtask::WaitQueue;
 ///
 /// static VALUE: AtomicU32 = AtomicU32::new(0);
 /// static WQ: WaitQueue = WaitQueue::new();
@@ -55,6 +58,129 @@ pub struct WakerRegistration(u64);
 
 pub(crate) type WaitQueueGuard<'a> = SpinNoIrqGuard<'a, VecDeque<AxTaskRef>>;
 
+/// Semantic reason for a task entering an off-CPU wait interval.
+///
+/// Values are part of the PulseOS qperf marker ABI. Append new variants instead
+/// of renumbering existing ones.
+#[repr(u64)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WaitReason {
+    WaitQueue      = 1,
+    Future         = 2,
+    MultiWait      = 3,
+    Sleep          = 4,
+    Mutex          = 5,
+    RwLockRead     = 6,
+    RwLockWrite    = 7,
+    Futex          = 8,
+    FutexWaitV     = 9,
+    VirtioBlkRead  = 10,
+    VirtioBlkWrite = 11,
+    Gc             = 12,
+    ChildWait      = 13,
+    Vfork          = 14,
+    Signal         = 15,
+    NetworkPoll    = 16,
+}
+
+/// Typed context retained with a blocked task interval.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WaitContext {
+    #[cfg(feature = "qperf-trace")]
+    reason: WaitReason,
+    #[cfg(feature = "qperf-trace")]
+    resource_id: u64,
+    #[cfg(feature = "qperf-trace")]
+    resource_detail: u64,
+}
+
+impl WaitContext {
+    pub const fn new(reason: WaitReason, resource_id: u64, resource_detail: u64) -> Self {
+        #[cfg(not(feature = "qperf-trace"))]
+        let _ = (reason, resource_id, resource_detail);
+        Self {
+            #[cfg(feature = "qperf-trace")]
+            reason,
+            #[cfg(feature = "qperf-trace")]
+            resource_id,
+            #[cfg(feature = "qperf-trace")]
+            resource_detail,
+        }
+    }
+
+    #[cfg(feature = "qperf-trace")]
+    pub(crate) const fn reason(self) -> WaitReason {
+        self.reason
+    }
+
+    #[cfg(feature = "qperf-trace")]
+    pub(crate) const fn resource_id(self) -> u64 {
+        self.resource_id
+    }
+
+    #[cfg(feature = "qperf-trace")]
+    pub(crate) const fn resource_detail(self) -> u64 {
+        self.resource_detail
+    }
+}
+
+/// Semantic origin of a blocked-to-ready transition.
+///
+/// The source is separate from the task executing the wake path because device
+/// and timer callbacks often run in the context of an interrupted task.
+#[repr(u64)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WakeSource {
+    Unknown   = 0,
+    Task      = 1,
+    Timer     = 2,
+    Future    = 3,
+    Futex     = 4,
+    Device    = 5,
+    Signal    = 6,
+    Interrupt = 7,
+}
+
+/// Typed context retained with a task wake event.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WakeContext {
+    #[cfg(feature = "qperf-trace")]
+    source: WakeSource,
+    #[cfg(feature = "qperf-trace")]
+    source_id: u64,
+}
+
+impl WakeContext {
+    pub const fn new(source: WakeSource, source_id: u64) -> Self {
+        #[cfg(not(feature = "qperf-trace"))]
+        let _ = (source, source_id);
+        Self {
+            #[cfg(feature = "qperf-trace")]
+            source,
+            #[cfg(feature = "qperf-trace")]
+            source_id,
+        }
+    }
+
+    pub const fn unknown() -> Self {
+        Self::new(WakeSource::Unknown, 0)
+    }
+
+    pub const fn task() -> Self {
+        Self::new(WakeSource::Task, 0)
+    }
+
+    #[cfg(feature = "qperf-trace")]
+    pub(crate) const fn source(self) -> WakeSource {
+        self.source
+    }
+
+    #[cfg(feature = "qperf-trace")]
+    pub(crate) const fn source_id(self) -> u64 {
+        self.source_id
+    }
+}
+
 impl WaitQueue {
     /// Creates an empty wait queue.
     pub const fn new() -> Self {
@@ -70,6 +196,15 @@ impl WaitQueue {
             queue: SpinNoIrq::new(VecDeque::with_capacity(capacity)),
             wakers: SpinNoIrq::new(VecDeque::with_capacity(capacity)),
         }
+    }
+
+    #[inline]
+    fn wait_context(&self) -> WaitContext {
+        WaitContext::new(
+            WaitReason::WaitQueue,
+            self as *const Self as usize as u64,
+            0,
+        )
     }
 
     /// Cancel events by removing the task from the wait queue.
@@ -106,9 +241,14 @@ impl WaitQueue {
     /// Blocks the current task and put it into the wait queue, until other task
     /// notifies it.
     pub fn wait(&self) {
+        self.wait_with_context(self.wait_context());
+    }
+
+    /// Blocks the current task with an explicitly typed wait context.
+    pub fn wait_with_context(&self, context: WaitContext) {
         let curr = crate::current();
         let mut rq = current_run_queue::<NoPreemptIrqSave>();
-        rq.blocked_resched(self.queue.lock());
+        rq.blocked_resched(self.queue.lock(), context);
         self.cancel_events(&curr, false);
     }
 
@@ -121,6 +261,14 @@ impl WaitQueue {
     where
         F: Fn() -> bool,
     {
+        self.wait_until_with_context(self.wait_context(), condition);
+    }
+
+    /// Blocks until `condition` becomes true and records an explicitly typed wait context.
+    pub fn wait_until_with_context<F>(&self, context: WaitContext, condition: F)
+    where
+        F: Fn() -> bool,
+    {
         let curr = crate::current();
         loop {
             let mut rq = current_run_queue::<NoPreemptIrqSave>();
@@ -128,7 +276,7 @@ impl WaitQueue {
             if condition() {
                 break;
             }
-            rq.blocked_resched(wq);
+            rq.blocked_resched(wq, context);
             // Preemption may occur here.
         }
         self.cancel_events(&curr, false);
@@ -138,6 +286,16 @@ impl WaitQueue {
     /// notify it, or the given duration has elapsed.
     #[cfg(feature = "irq")]
     pub fn wait_timeout(&self, dur: core::time::Duration) -> bool {
+        self.wait_timeout_with_context(self.wait_context(), dur)
+    }
+
+    /// Blocks until notification or timeout and records an explicitly typed wait context.
+    #[cfg(feature = "irq")]
+    pub fn wait_timeout_with_context(
+        &self,
+        context: WaitContext,
+        dur: core::time::Duration,
+    ) -> bool {
         let mut rq = current_run_queue::<NoPreemptIrqSave>();
         let curr = crate::current();
         let deadline = axhal::time::monotonic_time() + dur;
@@ -148,7 +306,7 @@ impl WaitQueue {
         );
         crate::timers::set_alarm_wakeup(deadline, curr.clone());
 
-        rq.blocked_resched(self.queue.lock());
+        rq.blocked_resched(self.queue.lock(), context);
 
         let timeout = self
             .queue
@@ -168,6 +326,20 @@ impl WaitQueue {
     /// the above conditions are met.
     #[cfg(feature = "irq")]
     pub fn wait_timeout_until<F>(&self, dur: core::time::Duration, condition: F) -> bool
+    where
+        F: Fn() -> bool,
+    {
+        self.wait_timeout_until_with_context(self.wait_context(), dur, condition)
+    }
+
+    /// Blocks until `condition` or timeout and records an explicitly typed wait context.
+    #[cfg(feature = "irq")]
+    pub fn wait_timeout_until_with_context<F>(
+        &self,
+        context: WaitContext,
+        dur: core::time::Duration,
+        condition: F,
+    ) -> bool
     where
         F: Fn() -> bool,
     {
@@ -192,7 +364,7 @@ impl WaitQueue {
                 break;
             }
 
-            rq.blocked_resched(wq);
+            rq.blocked_resched(wq, context);
             // Preemption may occur here.
         }
         // Always try to remove the task from the timer list.
@@ -210,6 +382,29 @@ impl WaitQueue {
     pub fn wait_multiple_timeout_until<F>(
         queues: &[&WaitQueue],
         dur: Option<core::time::Duration>,
+        condition: F,
+    ) -> Result<usize, bool>
+    where
+        F: FnMut() -> bool,
+    {
+        let resource_id = queues
+            .first()
+            .map(|queue| *queue as *const WaitQueue as usize as u64)
+            .unwrap_or(0);
+        Self::wait_multiple_timeout_until_with_context(
+            queues,
+            dur,
+            WaitContext::new(WaitReason::MultiWait, resource_id, queues.len() as u64),
+            condition,
+        )
+    }
+
+    /// Waits on multiple queues with an explicitly typed wait context.
+    #[cfg(feature = "irq")]
+    pub fn wait_multiple_timeout_until_with_context<F>(
+        queues: &[&WaitQueue],
+        dur: Option<core::time::Duration>,
+        context: WaitContext,
         mut condition: F,
     ) -> Result<usize, bool>
     where
@@ -258,6 +453,8 @@ impl WaitQueue {
             }
 
             let mut rq = crate::run_queue::current_run_queue::<NoPreemptIrqSave>();
+            #[cfg(feature = "qperf-trace")]
+            let qperf_sequence = curr.next_qperf_block_sequence();
             curr.set_state(crate::task::TaskState::Blocked);
 
             // A notifier may have consumed an entry while the task was still
@@ -272,7 +469,11 @@ impl WaitQueue {
             if consumed_while_running {
                 drop(rq);
             } else {
-                rq.resched_blocked();
+                rq.resched_blocked(
+                    #[cfg(feature = "qperf-trace")]
+                    qperf_sequence,
+                    context,
+                );
             }
 
             for (i, q) in queues.iter().enumerate() {
@@ -308,6 +509,11 @@ impl WaitQueue {
     ///
     /// If `resched` is true, the current task will yield the CPU.
     pub fn notify_one(&self, resched: bool) -> bool {
+        self.notify_one_with_context(resched, WakeContext::unknown())
+    }
+
+    /// Wakes one waiter and records an explicitly typed wake source.
+    pub fn notify_one_with_context(&self, resched: bool, context: WakeContext) -> bool {
         let mut wq = self.queue.lock();
         let mut target = None;
         let mut consumed_running = false;
@@ -335,7 +541,7 @@ impl WaitQueue {
         drop(wq);
 
         if let Some(task) = target {
-            unblock_one_task(task, resched);
+            unblock_one_task(task, resched, context);
             true
         } else if consumed_running {
             true
@@ -368,6 +574,11 @@ impl WaitQueue {
     /// If `resched` is true, the current task will be preempted when the
     /// preemption is enabled.
     pub fn notify_all(&self, resched: bool) {
+        self.notify_all_with_context(resched, WakeContext::unknown());
+    }
+
+    /// Wakes all waiters and records an explicitly typed wake source.
+    pub fn notify_all_with_context(&self, resched: bool, context: WakeContext) {
         let tasks = {
             let mut wq = self.queue.lock();
             core::mem::take(&mut *wq)
@@ -377,7 +588,7 @@ impl WaitQueue {
             let _guard = NoPreemptIrqSave::new();
             for task in tasks {
                 if task.state() == crate::task::TaskState::Blocked {
-                    unblock_one_task_locked(task, resched);
+                    unblock_one_task_locked(task, resched, context);
                 } else {
                     task.set_in_wait_queue(false);
                 }
@@ -401,6 +612,16 @@ impl WaitQueue {
     /// If `resched` is true, the current task will be preempted when the
     /// preemption is enabled.
     pub fn notify_task(&mut self, resched: bool, task: &AxTaskRef) -> bool {
+        self.notify_task_with_context(resched, task, WakeContext::unknown())
+    }
+
+    /// Wakes a selected waiter and records an explicitly typed wake source.
+    pub fn notify_task_with_context(
+        &mut self,
+        resched: bool,
+        task: &AxTaskRef,
+        context: WakeContext,
+    ) -> bool {
         let task = {
             let mut wq = self.queue.lock();
             if let Some(index) = wq.iter().position(|t| Arc::ptr_eq(t, task)) {
@@ -411,7 +632,7 @@ impl WaitQueue {
         };
 
         if let Some(task) = task {
-            unblock_one_task(task, resched);
+            unblock_one_task(task, resched, context);
             true
         } else {
             false
@@ -453,7 +674,9 @@ impl WaitQueue {
 
     /// Remove all exited tasks from the wait queue.
     pub fn prune_exited(&self) {
-        self.queue.lock().retain(|t| t.state() != crate::task::TaskState::Exited);
+        self.queue
+            .lock()
+            .retain(|t| t.state() != crate::task::TaskState::Exited);
     }
 
     /// Registers a waker to the wait queue.
@@ -477,10 +700,7 @@ impl WaitQueue {
     ///
     /// The returned handle owns exactly one queue entry and must eventually
     /// be passed to [`WaitQueue::unregister_waker`].
-    pub fn register_owned_waker(
-        &self,
-        waker: &core::task::Waker,
-    ) -> WakerRegistration {
+    pub fn register_owned_waker(&self, waker: &core::task::Waker) -> WakerRegistration {
         WakerRegistration(self.register_waker_inner(waker, false).0)
     }
 
@@ -549,16 +769,16 @@ impl WaitQueue {
     }
 }
 
-fn unblock_one_task(task: AxTaskRef, resched: bool) {
+fn unblock_one_task(task: AxTaskRef, resched: bool, context: WakeContext) {
     let _guard = NoPreemptIrqSave::new();
-    unblock_one_task_locked(task, resched);
+    unblock_one_task_locked(task, resched, context);
 }
 
-fn unblock_one_task_locked(task: AxTaskRef, resched: bool) {
+fn unblock_one_task_locked(task: AxTaskRef, resched: bool, context: WakeContext) {
     // Mark task as not in wait queue.
     task.set_in_wait_queue(false);
     // Select run queue by the CPU set of the task.
     // Use `NoOp` kernel guard here because the function is called with holding the
     // lock of wait queue, or an explicit `NoPreemptIrqSave` guard.
-    select_wake_run_queue::<NoOp>(&task).unblock_task(task, resched)
+    select_wake_run_queue::<NoOp>(&task).unblock_task_with_context(task, resched, context)
 }
