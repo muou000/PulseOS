@@ -1,4 +1,4 @@
-use alloc::vec::Vec;
+use alloc::{sync::Arc, vec::Vec};
 
 use axerrno::{AxError, AxResult};
 use axfs::{CachedFile, FileFlags};
@@ -7,6 +7,7 @@ use axhal::{
     paging::{MappingFlags, PageSize, PageTable},
 };
 use memory_addr::{MemoryAddr, PAGE_SIZE_4K, PageIter4K, PhysAddr, VirtAddr};
+use spin::Mutex;
 
 use super::{
     Backend,
@@ -64,6 +65,39 @@ fn writeback_phys_page(mapping: &FileMapping, page_addr: VirtAddr, frame_paddr: 
     }
 }
 
+const FILE_FAULT_AROUND_PAGES: usize = 4;
+
+#[derive(Debug, Default)]
+struct FileReadAheadState {
+    next_page: Option<u32>,
+}
+
+impl FileReadAheadState {
+    fn plan(&mut self, page_number: u32, max_pages: usize) -> usize {
+        let max_pages = max_pages.max(1);
+        let page_count = if self.next_page == Some(page_number) {
+            max_pages
+        } else {
+            1
+        };
+        self.next_page = u32::try_from(page_count)
+            .ok()
+            .and_then(|count| page_number.checked_add(count));
+        page_count
+    }
+
+    fn finish(&mut self, page_number: u32, requested: usize, actual: usize) {
+        let requested_end = u32::try_from(requested)
+            .ok()
+            .and_then(|count| page_number.checked_add(count));
+        if self.next_page == requested_end {
+            self.next_page = u32::try_from(actual)
+                .ok()
+                .and_then(|count| page_number.checked_add(count));
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct FileMapping {
     start: VirtAddr,
@@ -72,6 +106,7 @@ pub struct FileMapping {
     file_offset: usize,
     file_bytes: usize,
     shared: bool,
+    read_ahead: Arc<Mutex<FileReadAheadState>>,
     _write_access: Option<axfs::WriteAccessGuard>,
 }
 
@@ -79,13 +114,20 @@ pub struct FileMapping {
 pub struct FilePageLoad {
     file: CachedFile,
     page_number: u32,
+    page_count: usize,
     may_write: bool,
+    read_ahead: Arc<Mutex<FileReadAheadState>>,
+}
+
+struct PreparedFilePage {
+    page_number: u32,
+    frame: Option<PhysAddr>,
 }
 
 pub struct FilePagePrepared {
     file: CachedFile,
-    page_number: u32,
-    frame: Option<PhysAddr>,
+    requested_page: u32,
+    pages: Vec<PreparedFilePage>,
 }
 
 pub(super) struct FileWriteback {
@@ -118,14 +160,23 @@ impl core::fmt::Debug for FilePageLoad {
 
 impl FilePageLoad {
     pub fn prepare(self) -> AxResult<FilePagePrepared> {
-        let frame = self
+        let frames = self
             .file
-            .get_shared_page_paddr_readahead(self.page_number, self.may_write)
+            .get_shared_page_paddrs(self.page_number, self.page_count, self.may_write)
             .map_err(|_| AxError::Io)?;
+        self.read_ahead
+            .lock()
+            .finish(self.page_number, self.page_count, frames.len());
         Ok(FilePagePrepared {
             file: self.file,
-            page_number: self.page_number,
-            frame: Some(frame),
+            requested_page: self.page_number,
+            pages: frames
+                .into_iter()
+                .map(|(page_number, frame)| PreparedFilePage {
+                    page_number,
+                    frame: Some(frame),
+                })
+                .collect(),
         })
     }
 }
@@ -133,31 +184,34 @@ impl FilePageLoad {
 impl core::fmt::Debug for FilePagePrepared {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("FilePagePrepared")
-            .field("page_number", &self.page_number)
-            .field("frame", &self.frame)
+            .field("requested_page", &self.requested_page)
+            .field("page_count", &self.pages.len())
             .finish_non_exhaustive()
     }
 }
 
 impl Drop for FilePagePrepared {
     fn drop(&mut self) {
-        if let Some(frame) = self.frame.take() {
-            dealloc_frame(frame);
+        for page in &mut self.pages {
+            if let Some(frame) = page.frame.take() {
+                dealloc_frame(frame);
+            }
         }
     }
 }
 
 impl FilePagePrepared {
     fn matches(&self, file: &CachedFile, page_number: u32) -> bool {
-        self.page_number == page_number && self.file.shares_page_cache_with(file)
+        self.requested_page == page_number && self.file.shares_page_cache_with(file)
     }
 
-    fn frame(&self) -> Option<PhysAddr> {
-        self.frame
+    fn page(&self, index: usize) -> Option<(u32, PhysAddr)> {
+        let page = self.pages.get(index)?;
+        Some((page.page_number, page.frame?))
     }
 
-    fn take_frame(&mut self) -> Option<PhysAddr> {
-        self.frame.take()
+    fn take_frame(&mut self, index: usize) -> Option<PhysAddr> {
+        self.pages.get_mut(index)?.frame.take()
     }
 }
 
@@ -223,6 +277,7 @@ impl FileMapping {
     pub(crate) fn page_load_request(
         &self,
         vaddr: VirtAddr,
+        area_end: VirtAddr,
         orig_flags: MappingFlags,
         pt: &crate::PageTableLockManager,
     ) -> Option<FilePageLoad> {
@@ -241,10 +296,21 @@ impl FileMapping {
         }
 
         let page_number = u32::try_from(file_offset / PAGE_SIZE_4K as u64).ok()?;
+        let mut max_pages = 0;
+        while max_pages < FILE_FAULT_AROUND_PAGES {
+            let candidate = page_addr.checked_add(max_pages * PAGE_SIZE_4K)?;
+            if candidate >= area_end || self.page_read_window(candidate).is_none() {
+                break;
+            }
+            max_pages += 1;
+        }
+        let page_count = self.read_ahead.lock().plan(page_number, max_pages);
         Some(FilePageLoad {
             file: self.file.clone(),
             page_number,
+            page_count,
             may_write: self.shared && self.file_flags.contains(FileFlags::WRITE),
+            read_ahead: self.read_ahead.clone(),
         })
     }
 }
@@ -266,6 +332,7 @@ impl Backend {
             file_offset,
             file_bytes,
             shared,
+            read_ahead: Arc::new(Mutex::new(FileReadAheadState::default())),
             _write_access: write_access,
         })
     }
@@ -465,6 +532,7 @@ impl Backend {
     pub(crate) fn handle_prepared_page_fault_file(
         &self,
         vaddr: VirtAddr,
+        area_end: VirtAddr,
         orig_flags: MappingFlags,
         pt: &crate::PageTableLockManager,
         mapping: &FileMapping,
@@ -479,72 +547,127 @@ impl Backend {
         let Some((file_offset, _)) = mapping.page_read_window(page_addr) else {
             return false;
         };
-        let page_number = (file_offset / PAGE_SIZE_4K as u64) as u32;
+        let Ok(page_number) = u32::try_from(file_offset / PAGE_SIZE_4K as u64) else {
+            return false;
+        };
         if !prepared.matches(&mapping.file, page_number) {
             return false;
         }
-        let Some(frame) = prepared.frame() else {
+
+        let mut candidates = Vec::with_capacity(prepared.pages.len());
+        for index in 0..prepared.pages.len() {
+            let Some((candidate_page_number, _)) = prepared.page(index) else {
+                break;
+            };
+            let Some(delta) = candidate_page_number.checked_sub(page_number) else {
+                break;
+            };
+            let Some(byte_delta) = (delta as usize).checked_mul(PAGE_SIZE_4K) else {
+                break;
+            };
+            let Some(candidate_addr) = page_addr.checked_add(byte_delta) else {
+                break;
+            };
+            if candidate_addr >= area_end {
+                break;
+            }
+            let Some((candidate_offset, _)) = mapping.page_read_window(candidate_addr) else {
+                break;
+            };
+            if candidate_offset / PAGE_SIZE_4K as u64 != candidate_page_number as u64 {
+                break;
+            }
+            candidates.push((index, candidate_addr));
+        }
+        let Some((_, last_addr)) = candidates.last().copied() else {
             return false;
         };
 
-        let mut pt_guard = pt.lock_for_addr(page_addr);
-        if pt_guard
-            .query(page_addr)
-            .is_ok_and(|(current, ..)| current.as_usize() != 0)
-        {
-            return true;
-        }
-
-        if mapping.shared {
-            let mapped = pt_guard
-                .map(page_addr, frame, PageSize::Size4K, orig_flags)
-                .map(|tlb| {
-                    tlb.flush();
-                    sync_executable_mapping(orig_flags);
-                })
-                .is_ok();
-            if mapped {
-                prepared.take_frame();
-            }
-            return mapped;
-        }
-
-        if orig_flags.contains(MappingFlags::WRITE) && access_flags.contains(MappingFlags::WRITE) {
-            let Some(new_frame) = alloc_frame(false) else {
+        let private_write = !mapping.shared
+            && orig_flags.contains(MappingFlags::WRITE)
+            && access_flags.contains(MappingFlags::WRITE);
+        let requested_index = candidates[0].0;
+        let Some((_, requested_frame)) = prepared.page(requested_index) else {
+            return false;
+        };
+        let mut private_frame = if private_write {
+            let Some(frame) = alloc_frame(false) else {
                 return false;
             };
             unsafe {
                 core::ptr::copy_nonoverlapping(
-                    phys_to_virt(frame).as_ptr(),
-                    phys_to_virt(new_frame).as_mut_ptr(),
+                    phys_to_virt(requested_frame).as_ptr(),
+                    phys_to_virt(frame).as_mut_ptr(),
                     PAGE_SIZE_4K,
                 );
             }
-            let mapped = pt_guard
-                .map(page_addr, new_frame, PageSize::Size4K, orig_flags)
-                .map(|tlb| {
-                    tlb.flush();
-                    sync_executable_mapping(orig_flags);
-                })
-                .is_ok();
-            if !mapped {
-                dealloc_frame(new_frame);
-            }
-            return mapped;
-        }
+            Some(frame)
+        } else {
+            None
+        };
 
-        let map_flags = orig_flags & !MappingFlags::WRITE;
-        let mapped = pt_guard
-            .map(page_addr, frame, PageSize::Size4K, map_flags)
-            .map(|tlb| {
-                tlb.flush();
-                sync_executable_mapping(map_flags);
-            })
-            .is_ok();
-        if mapped {
-            prepared.take_frame();
+        let range_size = last_addr
+            .checked_add(PAGE_SIZE_4K)
+            .map(|end| end - page_addr)
+            .unwrap_or(PAGE_SIZE_4K);
+        let mut pt_guard = pt.lock_for_range(page_addr, range_size);
+        let mut requested_handled = false;
+        let mut mapped_executable = false;
+        for (index, candidate_addr) in candidates {
+            let requested = candidate_addr == page_addr;
+            if let Ok((current, current_flags, _)) = pt_guard.query(candidate_addr)
+                && current.as_usize() != 0
+            {
+                if requested {
+                    requested_handled = !access_flags.contains(MappingFlags::WRITE)
+                        || current_flags.contains(MappingFlags::WRITE);
+                }
+                continue;
+            }
+
+            let Some((_, cache_frame)) = prepared.page(index) else {
+                continue;
+            };
+            let use_private_frame = requested && private_write;
+            let frame = if use_private_frame {
+                private_frame.unwrap()
+            } else {
+                cache_frame
+            };
+            let map_flags = if mapping.shared || use_private_frame {
+                orig_flags
+            } else {
+                orig_flags & !MappingFlags::WRITE
+            };
+            let mapped = match pt_guard.query(candidate_addr) {
+                Ok((current, ..)) if current.as_usize() == 0 => pt_guard
+                    .remap(candidate_addr, frame, map_flags)
+                    .map(|(_, tlb)| tlb),
+                Err(_) => pt_guard.map(candidate_addr, frame, PageSize::Size4K, map_flags),
+                _ => continue,
+            };
+            let Ok(tlb) = mapped else {
+                continue;
+            };
+            tlb.flush();
+            mapped_executable |= map_flags.contains(MappingFlags::EXECUTE);
+            if use_private_frame {
+                private_frame.take();
+            } else {
+                prepared.take_frame(index);
+            }
+            if requested {
+                requested_handled = true;
+            }
         }
-        mapped
+        drop(pt_guard);
+        if let Some(frame) = private_frame {
+            dealloc_frame(frame);
+        }
+        if mapped_executable {
+            sync_executable_mapping(orig_flags);
+        }
+        requested_handled
     }
 
     pub(crate) fn protect_file(
@@ -597,5 +720,44 @@ impl Backend {
             }
         }
         true
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::FileReadAheadState;
+
+    #[test]
+    fn readahead_advances_over_fault_around_window() {
+        let mut state = FileReadAheadState::default();
+        assert_eq!(state.plan(10, 4), 1);
+        state.finish(10, 1, 1);
+        assert_eq!(state.plan(11, 4), 4);
+        state.finish(11, 4, 4);
+        assert_eq!(state.plan(15, 4), 4);
+    }
+
+    #[test]
+    fn readahead_resets_after_nonsequential_fault() {
+        let mut state = FileReadAheadState::default();
+        assert_eq!(state.plan(3, 4), 1);
+        assert_eq!(state.plan(20, 4), 1);
+        assert_eq!(state.plan(21, 4), 4);
+    }
+
+    #[test]
+    fn readahead_tracks_short_result_at_mapping_end() {
+        let mut state = FileReadAheadState::default();
+        assert_eq!(state.plan(7, 2), 1);
+        assert_eq!(state.plan(8, 2), 2);
+        state.finish(8, 2, 1);
+        assert_eq!(state.plan(9, 4), 4);
+    }
+
+    #[test]
+    fn readahead_overflow_disables_sequential_hint() {
+        let mut state = FileReadAheadState::default();
+        assert_eq!(state.plan(u32::MAX, 4), 1);
+        assert_eq!(state.plan(0, 4), 1);
     }
 }

@@ -528,7 +528,6 @@ impl Default for OpenOptions {
 const PAGE_SIZE: usize = 4096;
 const MAX_WRITEBACK_PAGES: usize = 256;
 const READ_AHEAD_PAGES: usize = 16;
-const MMAP_READ_AHEAD_PAGES: usize = 4;
 const DISK_FILE_CACHE_SOFT_LIMIT: usize = 1024;
 const PAGE_CACHE_GROWTH_HEADROOM: usize = 256;
 const PAGE_CACHE_EVICTION_BATCH: usize = 256;
@@ -675,9 +674,21 @@ impl CachedFileShared {
         }
     }
 
-    fn page_fill_lock(&self, pn: u32) -> &'static async_lock::Mutex<()> {
+    fn page_fill_lock_index(&self, pn: u32) -> usize {
         let file_hash = (self as *const Self as usize).rotate_right(6);
-        &PAGE_FILL_LOCKS[(file_hash ^ pn as usize) % PAGE_FILL_LOCK_STRIPES]
+        (file_hash ^ pn as usize) % PAGE_FILL_LOCK_STRIPES
+    }
+
+    fn page_fill_lock_indices(&self, pn: u32, page_count: usize) -> VfsResult<Vec<usize>> {
+        let mut indices = Vec::with_capacity(page_count);
+        for offset in 0..page_count {
+            let offset = u32::try_from(offset).map_err(|_| VfsError::StorageFull)?;
+            let page_num = pn.checked_add(offset).ok_or(VfsError::StorageFull)?;
+            indices.push(self.page_fill_lock_index(page_num));
+        }
+        indices.sort_unstable();
+        indices.dedup();
+        Ok(indices)
     }
 
     fn pop_clean_lru_pages(
@@ -1294,7 +1305,6 @@ pub struct CachedFile {
     shared: Arc<CachedFileShared>,
     in_memory: bool,
     read_hint: Arc<AtomicU64>,
-    fault_hint: Arc<AtomicU64>,
 }
 
 impl CachedFile {
@@ -1319,7 +1329,6 @@ impl CachedFile {
             shared,
             in_memory,
             read_hint: Arc::new(AtomicU64::new(u64::MAX)),
-            fault_hint: Arc::new(AtomicU64::new(u64::MAX)),
         })
     }
 
@@ -1462,16 +1471,51 @@ impl CachedFile {
         Ok((cache.get_mut(&pn).unwrap(), evicted))
     }
 
-    fn resident_page(&self, pn: u32, pin: Option<bool>) -> VfsResult<Option<Option<PhysAddr>>> {
+    fn pin_cached_pages(
+        cache: &mut LruCache<u32, PageCache>,
+        pn: u32,
+        page_count: usize,
+        may_write: bool,
+    ) -> VfsResult<Option<Vec<(u32, PhysAddr)>>> {
+        let mut page_numbers = Vec::with_capacity(page_count);
+        for offset in 0..page_count {
+            let offset = u32::try_from(offset).map_err(|_| VfsError::StorageFull)?;
+            let page_num = pn.checked_add(offset).ok_or(VfsError::StorageFull)?;
+            if !cache.contains(&page_num) {
+                return Ok(None);
+            }
+            page_numbers.push(page_num);
+        }
+
+        let mut pinned = Vec::with_capacity(page_count);
+        for page_num in page_numbers {
+            let result = cache
+                .get_mut(&page_num)
+                .ok_or(VfsError::BadState)
+                .and_then(|page| page.pin_for_mapping(may_write));
+            match result {
+                Ok(paddr) => pinned.push((page_num, paddr)),
+                Err(err) => {
+                    for (_, paddr) in pinned.drain(..) {
+                        let refs = axalloc::frame_table().dec_ref(paddr);
+                        debug_assert_ne!(refs, 0);
+                    }
+                    return Err(err);
+                }
+            }
+        }
+        Ok(Some(pinned))
+    }
+
+    fn pin_resident_pages(
+        &self,
+        pn: u32,
+        page_count: usize,
+        may_write: bool,
+    ) -> VfsResult<Option<Vec<(u32, PhysAddr)>>> {
         let _io_guard = self.shared.io_lock.read();
         let mut cache = self.shared.page_cache.lock();
-        let Some(page) = cache.get_mut(&pn) else {
-            return Ok(None);
-        };
-        let paddr = pin
-            .map(|may_write| page.pin_for_mapping(may_write))
-            .transpose()?;
-        Ok(Some(paddr))
+        Self::pin_cached_pages(&mut cache, pn, page_count, may_write)
     }
 
     async fn load_pages_async(
@@ -1525,47 +1569,72 @@ impl CachedFile {
         Ok(pages)
     }
 
-    async fn ensure_pages_inner_async(
+    async fn ensure_pages_loaded_async(
         &self,
         file: &FileNode,
         pn: u32,
         requested_pages: usize,
         pin: Option<bool>,
-    ) -> VfsResult<Option<PhysAddr>> {
-        if let Some(paddr) = self.resident_page(pn, pin)? {
-            return Ok(paddr);
+    ) -> VfsResult<(usize, Option<Vec<(u32, PhysAddr)>>)> {
+        let requested_pages = requested_pages.max(1);
+        let lock_indices = self.shared.page_fill_lock_indices(pn, requested_pages)?;
+        let mut fill_guards = Vec::with_capacity(lock_indices.len());
+        for index in lock_indices {
+            fill_guards.push(PAGE_FILL_LOCKS[index].lock().await);
         }
 
-        let fill_lock = self.shared.page_fill_lock(pn);
-        let _fill_guard = fill_lock.lock().await;
         loop {
-            let (generation, file_len) = {
+            let (generation, file_len, page_count, first_missing, resident_pins) = {
                 let _io_guard = self.shared.io_lock.read();
                 let mut cache = self.shared.page_cache.lock();
-                if let Some(page) = cache.get_mut(&pn) {
-                    let paddr = pin
-                        .map(|may_write| page.pin_for_mapping(may_write))
-                        .transpose()?;
-                    return Ok(paddr);
+                let file_len = *self.shared.size.lock();
+                let page_start = pn as u64 * PAGE_SIZE as u64;
+                let bytes_available = file_len.saturating_sub(page_start);
+                let pages_available = bytes_available.div_ceil(PAGE_SIZE as u64) as usize;
+                let page_count = requested_pages.min(pages_available.max(1));
+                let mut first_missing = None;
+                for offset in 0..page_count {
+                    let offset_u32 = u32::try_from(offset).map_err(|_| VfsError::StorageFull)?;
+                    let page_num = pn.checked_add(offset_u32).ok_or(VfsError::StorageFull)?;
+                    if !cache.contains(&page_num) {
+                        first_missing = Some((offset, page_num));
+                        break;
+                    }
                 }
+                let resident_pins = if first_missing.is_none() {
+                    pin.map(|may_write| {
+                        Self::pin_cached_pages(&mut cache, pn, page_count, may_write)?
+                            .ok_or(VfsError::BadState)
+                    })
+                    .transpose()?
+                } else {
+                    None
+                };
                 (
                     self.shared.cache_generation.load(Ordering::Acquire),
-                    *self.shared.size.lock(),
+                    file_len,
+                    page_count,
+                    first_missing,
+                    resident_pins,
                 )
             };
 
-            let page_start = pn as u64 * PAGE_SIZE as u64;
-            let bytes_available = file_len.saturating_sub(page_start);
-            let pages_available = bytes_available.div_ceil(PAGE_SIZE as u64) as usize;
-            let page_count = requested_pages.max(1).min(pages_available.max(1));
-            let new_pages = self
-                .load_pages_async(file, pn, page_count, file_len)
+            let Some((first_missing_offset, first_missing_page)) = first_missing else {
+                return Ok((page_count, resident_pins));
+            };
+            let mut new_pages = self
+                .load_pages_async(
+                    file,
+                    first_missing_page,
+                    page_count - first_missing_offset,
+                    file_len,
+                )
                 .await?;
 
             // Direct writes hold the exclusive side while changing the backend
             // and invalidating the cache. Validate and publish under the shared
             // side so a stale fill can never be inserted after that invalidation.
-            let io_guard = self.shared.io_lock.write();
+            let io_guard = self.shared.io_lock.read();
             if self.shared.cache_generation.load(Ordering::Acquire) != generation {
                 continue;
             }
@@ -1578,6 +1647,20 @@ impl CachedFile {
                 .count();
             let required = cache.len().saturating_add(incoming);
             let cache_soft_limit = self.shared.cache_soft_limit.load(Ordering::Acquire);
+            let pinned_pages = if let Some(may_write) = pin {
+                for (page_num, page) in new_pages.drain(..) {
+                    if cache.contains(&page_num) {
+                        continue;
+                    }
+                    cache.put(page_num, page);
+                }
+                Some(
+                    Self::pin_cached_pages(&mut cache, pn, page_count, may_write)?
+                        .ok_or(VfsError::BadState)?,
+                )
+            } else {
+                None
+            };
             if !self.in_memory && required > cache_soft_limit {
                 let needed = required - cache_soft_limit;
                 evicted_pages = CachedFileShared::pop_clean_lru_pages(&mut cache, needed);
@@ -1596,14 +1679,6 @@ impl CachedFile {
                 }
                 cache.put(page_num, page);
             }
-            let paddr = pin
-                .map(|may_write| {
-                    cache
-                        .get_mut(&pn)
-                        .ok_or(VfsError::BadState)?
-                        .pin_for_mapping(may_write)
-                })
-                .transpose()?;
             drop(cache);
             drop(io_guard);
 
@@ -1615,8 +1690,46 @@ impl CachedFile {
                 }
             }
             drop(evicted_pages);
-            return Ok(paddr);
+            return Ok((page_count, pinned_pages));
         }
+    }
+
+    async fn pin_pages_inner_async(
+        &self,
+        file: &FileNode,
+        pn: u32,
+        requested_pages: usize,
+        may_write: bool,
+    ) -> VfsResult<Vec<(u32, PhysAddr)>> {
+        if let Some(pages) = self.pin_resident_pages(pn, requested_pages.max(1), may_write)? {
+            return Ok(pages);
+        }
+        self.ensure_pages_loaded_async(file, pn, requested_pages, Some(may_write))
+            .await?
+            .1
+            .ok_or(VfsError::BadState)
+    }
+
+    async fn ensure_pages_inner_async(
+        &self,
+        file: &FileNode,
+        pn: u32,
+        requested_pages: usize,
+        pin: Option<bool>,
+    ) -> VfsResult<Option<PhysAddr>> {
+        if let Some(may_write) = pin {
+            return self
+                .pin_pages_inner_async(file, pn, 1, may_write)
+                .await?
+                .into_iter()
+                .next()
+                .map(|(_, paddr)| paddr)
+                .ok_or(VfsError::BadState)
+                .map(Some);
+        }
+        self.ensure_pages_loaded_async(file, pn, requested_pages, None)
+            .await
+            .map(|_| None)
     }
 
     async fn ensure_pages_async(
@@ -1851,18 +1964,6 @@ impl CachedFile {
         axtask::future::block_on(self.ensure_pages_async(file, pn, 1))
     }
 
-    /// Faults in the requested page and a bounded run of following pages.
-    pub fn ensure_page_resident_readahead(&self, pn: u32) -> VfsResult<()> {
-        let file = self.inner.entry().as_file()?;
-        let previous = self.fault_hint.swap(pn as u64, Ordering::AcqRel);
-        let pages = if previous.checked_add(1) == Some(pn as u64) {
-            MMAP_READ_AHEAD_PAGES
-        } else {
-            1
-        };
-        axtask::future::block_on(self.ensure_pages_async(file, pn, pages))
-    }
-
     /// Pins a resident page for a user mapping without performing I/O.
     pub fn try_pin_shared_page_paddr(
         &self,
@@ -1886,17 +1987,15 @@ impl CachedFile {
             .ok_or(VfsError::BadState)
     }
 
-    /// Faults in and pins a page while publishing it under the cache lock.
-    pub fn get_shared_page_paddr_readahead(&self, pn: u32, may_write: bool) -> VfsResult<PhysAddr> {
+    /// Faults in and pins a bounded run of pages for a user mapping.
+    pub fn get_shared_page_paddrs(
+        &self,
+        pn: u32,
+        page_count: usize,
+        may_write: bool,
+    ) -> VfsResult<Vec<(u32, PhysAddr)>> {
         let file = self.inner.entry().as_file()?;
-        let previous = self.fault_hint.swap(pn as u64, Ordering::AcqRel);
-        let pages = if previous.checked_add(1) == Some(pn as u64) {
-            MMAP_READ_AHEAD_PAGES
-        } else {
-            1
-        };
-        axtask::future::block_on(self.ensure_pages_inner_async(file, pn, pages, Some(may_write)))?
-            .ok_or(VfsError::BadState)
+        axtask::future::block_on(self.pin_pages_inner_async(file, pn, page_count.max(1), may_write))
     }
 
     /// Returns a resident page's physical address without adding a mapping pin.
