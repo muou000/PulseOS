@@ -397,14 +397,17 @@ impl Backend {
     pub(crate) fn page_fault_load_request(
         &self,
         vaddr: VirtAddr,
+        area_end: VirtAddr,
         orig_flags: MappingFlags,
         page_table: &crate::PageTableLockManager,
     ) -> Option<FilePageLoad> {
         match self {
-            Self::File(mapping) => mapping.page_load_request(vaddr, orig_flags, page_table),
+            Self::File(mapping) => {
+                mapping.page_load_request(vaddr, area_end, orig_flags, page_table)
+            }
             Self::Cow(cow) => {
                 cow.inner()
-                    .page_fault_load_request(vaddr, orig_flags, page_table)
+                    .page_fault_load_request(vaddr, area_end, orig_flags, page_table)
             }
             _ => None,
         }
@@ -457,6 +460,7 @@ impl Backend {
     pub(crate) fn handle_prepared_file_page(
         &self,
         vaddr: VirtAddr,
+        area_end: VirtAddr,
         orig_flags: MappingFlags,
         page_table: &crate::PageTableLockManager,
         access_flags: MappingFlags,
@@ -465,6 +469,7 @@ impl Backend {
         match self {
             Self::File(mapping) => self.handle_prepared_page_fault_file(
                 vaddr,
+                area_end,
                 orig_flags,
                 page_table,
                 mapping,
@@ -473,6 +478,7 @@ impl Backend {
             ),
             Self::Cow(cow) => cow.inner().handle_prepared_file_page(
                 vaddr,
+                area_end,
                 orig_flags,
                 page_table,
                 access_flags,

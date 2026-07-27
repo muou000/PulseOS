@@ -259,9 +259,6 @@ fn load_segments(
                 false, // ELF segments are private mappings
                 None,
             )?;
-            // Populate from the shared file cache without eagerly taking a
-            // private COW copy of every writable page.
-            prefault_range(aspace, seg_start_page, map_len, MappingFlags::USER)?;
 
             if zero_file_tail {
                 let zeros = [0u8; PAGE_SIZE_4K];
@@ -278,7 +275,6 @@ fn load_segments(
         if seg_end_page > anon_start {
             let map_len = seg_end_page - anon_start;
             aspace.map_alloc(anon_start, map_len, flags, false)?;
-            prefault_range(aspace, anon_start, map_len, flags)?;
         }
     }
     Ok(layout)
@@ -571,6 +567,16 @@ pub fn load_user_app(
             dispatch_entry.as_usize()
         );
     }
+
+    // Resolve the entry page while exec can still report an I/O failure, but
+    // leave the rest of each PT_LOAD segment demand-paged. File-tail fixups and
+    // the initial stack are populated separately only where the loader writes.
+    prefault_range(
+        aspace,
+        dispatch_entry,
+        1,
+        MappingFlags::USER | MappingFlags::EXECUTE,
+    )?;
 
     let mut auxv = build_auxv(main_data, main_bias, interp_base)?;
     let mut vdso_data = starry_vdso::vdso::load_vdso_data(&mut auxv)?;

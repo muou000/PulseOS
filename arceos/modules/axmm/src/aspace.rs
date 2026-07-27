@@ -401,6 +401,17 @@ impl PageTableLockManager {
             })
         }
     }
+
+    pub(crate) fn lock_for_range(&self, start: VirtAddr, size: usize) -> PageTableGuard {
+        let Some(end) = size.checked_sub(1).and_then(|last| start.checked_add(last)) else {
+            return PageTableGuard(PageTableWriteLock::Whole(self.pt.write()));
+        };
+        if Self::subtree_id(start) == Self::subtree_id(end) {
+            self.lock_for_addr(start)
+        } else {
+            PageTableGuard(PageTableWriteLock::Whole(self.pt.write()))
+        }
+    }
 }
 
 /// The virtual memory address space.
@@ -1343,6 +1354,7 @@ impl AddrSpace {
             if orig_flags.contains(access_flags) {
                 if let Some(load) = area.backend().page_fault_load_request(
                     vaddr,
+                    area.end(),
                     orig_flags,
                     &self.pt,
                 ) {
@@ -1372,6 +1384,7 @@ impl AddrSpace {
                 if !handled {
                     if let Some(load) = area.backend().page_fault_load_request(
                         vaddr,
+                        area.end(),
                         orig_flags,
                         &self.pt,
                     ) {
@@ -1465,6 +1478,7 @@ impl AddrSpace {
 
         if area.backend().handle_prepared_file_page(
             vaddr,
+            area.end(),
             orig_flags,
             &self.pt,
             access_flags,
