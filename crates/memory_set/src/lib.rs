@@ -11,7 +11,7 @@ mod set;
 mod tests;
 
 pub use self::area::MemoryArea;
-pub use self::backend::MappingBackend;
+pub use self::backend::{MappingBackend, MappingMutation};
 pub use self::set::MemorySet;
 
 /// Error type for memory mapping operations.

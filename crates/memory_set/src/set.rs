@@ -1,11 +1,11 @@
 use alloc::collections::BTreeMap;
 #[allow(unused_imports)] // this is a weird false alarm
 use alloc::vec::Vec;
-use core::fmt;
+use core::{fmt, ops::Bound::Excluded};
 
 use memory_addr::{AddrRange, MemoryAddr};
 
-use crate::{MappingBackend, MappingError, MappingResult, MemoryArea};
+use crate::{MappingBackend, MappingError, MappingMutation, MappingResult, MemoryArea};
 
 /// A container that maintains memory mappings ([`MemoryArea`]).
 pub struct MemorySet<B: MappingBackend> {
@@ -196,6 +196,18 @@ impl<B: MappingBackend> MemorySet<B> {
         page_table: &mut B::PageTable,
         reclaim: &mut B::Reclaim,
     ) -> MappingResult {
+        self.unmap_tracked(start, size, page_table, reclaim, &mut ())
+    }
+
+    /// Removes mappings and records page-table entries that actually changed.
+    pub fn unmap_tracked<M: MappingMutation<B::Addr>>(
+        &mut self,
+        start: B::Addr,
+        size: usize,
+        page_table: &mut B::PageTable,
+        reclaim: &mut B::Reclaim,
+        mutation: &mut M,
+    ) -> MappingResult {
         let range =
             AddrRange::try_from_start_size(start, size).ok_or(MappingError::InvalidParam)?;
         if range.is_empty() {
@@ -204,21 +216,36 @@ impl<B: MappingBackend> MemorySet<B> {
 
         let end = range.end;
 
-        // Unmap entire areas that are contained by the range.
+        // Unmap entire areas that are contained by the range. Advance one key
+        // at a time so failed areas stay in place without collecting all keys.
         let mut unmap_error = None;
-        self.areas.retain(|_, area| {
-            if area.va_range().contained_in(range) {
-                match area.unmap_area(page_table, reclaim) {
-                    Ok(()) => false,
-                    Err(error) => {
-                        unmap_error.get_or_insert(error);
-                        true
-                    }
+        let first = self.first_overlapping_key(range);
+        let mut next_key = self
+            .areas
+            .range(first..end)
+            .find(|(_, area)| area.va_range().contained_in(range))
+            .map(|(&key, _)| key);
+        while let Some(key) = next_key {
+            next_key = self
+                .areas
+                .range((Excluded(key), Excluded(end)))
+                .find(|(_, area)| area.va_range().contained_in(range))
+                .map(|(&key, _)| key);
+
+            match self
+                .areas
+                .get(&key)
+                .unwrap()
+                .unmap_area_tracked(page_table, reclaim, mutation)
+            {
+                Ok(()) => {
+                    assert!(self.areas.remove(&key).is_some());
                 }
-            } else {
-                true
+                Err(error) => {
+                    unmap_error.get_or_insert(error);
+                }
             }
-        });
+        }
         if let Some(error) = unmap_error {
             return Err(error);
         }
@@ -229,7 +256,12 @@ impl<B: MappingBackend> MemorySet<B> {
             if before_end > start {
                 if before_end <= end {
                     // the unmapped area is at the end of `before`.
-                    before.shrink_right(start.sub_addr(before_start), page_table, reclaim)?;
+                    before.shrink_right(
+                        start.sub_addr(before_start),
+                        page_table,
+                        reclaim,
+                        mutation,
+                    )?;
                 } else {
                     // the unmapped area is in the middle `before`, need to split.
                     let middle_part = MemoryArea::new(
@@ -238,7 +270,7 @@ impl<B: MappingBackend> MemorySet<B> {
                         before.flags(),
                         before.backend().clone(),
                     );
-                    middle_part.unmap_area(page_table, reclaim)?;
+                    middle_part.unmap_area_tracked(page_table, reclaim, mutation)?;
                     let right_part = before.split(end).unwrap();
                     before.set_end(start);
                     assert_eq!(right_part.start().into(), Into::<usize>::into(end));
@@ -258,7 +290,7 @@ impl<B: MappingBackend> MemorySet<B> {
                     after.flags(),
                     after.backend().clone(),
                 );
-                prefix.unmap_area(page_table, reclaim)?;
+                prefix.unmap_area_tracked(page_table, reclaim, mutation)?;
                 let right_part = after.split(end).unwrap();
                 self.areas.remove(&after_start).unwrap();
                 assert_eq!(right_part.end().into(), Into::<usize>::into(after_end));
@@ -275,9 +307,19 @@ impl<B: MappingBackend> MemorySet<B> {
         page_table: &mut B::PageTable,
         reclaim: &mut B::Reclaim,
     ) -> MappingResult {
+        self.clear_tracked(page_table, reclaim, &mut ())
+    }
+
+    /// Removes all areas and records page-table entries that actually changed.
+    pub fn clear_tracked<M: MappingMutation<B::Addr>>(
+        &mut self,
+        page_table: &mut B::PageTable,
+        reclaim: &mut B::Reclaim,
+        mutation: &mut M,
+    ) -> MappingResult {
         let mut unmap_error = None;
         for (_, area) in self.areas.iter() {
-            if let Err(error) = area.unmap_area(page_table, reclaim) {
+            if let Err(error) = area.unmap_area_tracked(page_table, reclaim, mutation) {
                 unmap_error.get_or_insert(error);
             }
         }
@@ -301,6 +343,18 @@ impl<B: MappingBackend> MemorySet<B> {
         update_flags: impl Fn(B::Flags) -> Option<B::Flags>,
         page_table: &mut B::PageTable,
     ) -> MappingResult {
+        self.protect_tracked(start, size, update_flags, page_table, &mut ())
+    }
+
+    /// Changes mapping flags and records page-table entries that actually changed.
+    pub fn protect_tracked<M: MappingMutation<B::Addr>>(
+        &mut self,
+        start: B::Addr,
+        size: usize,
+        update_flags: impl Fn(B::Flags) -> Option<B::Flags>,
+        page_table: &mut B::PageTable,
+        mutation: &mut M,
+    ) -> MappingResult {
         let end = start.checked_add(size).ok_or(MappingError::InvalidParam)?;
         let range = AddrRange::new(start, end);
         let mut to_insert = Vec::new();
@@ -316,14 +370,14 @@ impl<B: MappingBackend> MemorySet<B> {
                 if area_start >= start && area_end <= end {
                     // [   prot   ]
                     //   [ area ]
-                    area.protect_area(new_flags, page_table)?;
+                    area.protect_area_tracked(new_flags, page_table, mutation)?;
                     area.set_flags(new_flags);
                 } else if area_start < start && area_end > end {
                     //        [ prot ]
                     // [ left | area | right ]
                     let mut middle_part =
                         MemoryArea::new(start, size, area.flags(), area.backend().clone());
-                    middle_part.protect_area(new_flags, page_table)?;
+                    middle_part.protect_area_tracked(new_flags, page_table, mutation)?;
                     middle_part.set_flags(new_flags);
 
                     let right_part = area.split(end).unwrap();
@@ -339,7 +393,7 @@ impl<B: MappingBackend> MemorySet<B> {
                         area.flags(),
                         area.backend().clone(),
                     );
-                    protected_part.protect_area(new_flags, page_table)?;
+                    protected_part.protect_area_tracked(new_flags, page_table, mutation)?;
                     let right_part = area.split(end).unwrap();
                     area.set_flags(new_flags);
 
@@ -353,7 +407,7 @@ impl<B: MappingBackend> MemorySet<B> {
                         area.flags(),
                         area.backend().clone(),
                     );
-                    protected_part.protect_area(new_flags, page_table)?;
+                    protected_part.protect_area_tracked(new_flags, page_table, mutation)?;
                     let mut right_part = area.split(start).unwrap();
                     right_part.set_flags(new_flags);
 
