@@ -375,7 +375,13 @@ cfg_if! {
                     #[cfg(feature = "multitask")]
                     {
                         axlog::debug!("virtio-blk interrupt handler: notifying wait queue");
-                        w.wait_queue.notify_all(true);
+                        w.wait_queue.notify_all_with_context(
+                            true,
+                            axtask::WakeContext::new(
+                                axtask::WakeSource::Device,
+                                w as *const _ as usize as u64,
+                            ),
+                        );
                     }
                 }
                 let irq_registration = Arc::new(register_virtio_interrupt(
@@ -394,12 +400,14 @@ cfg_if! {
             VirtIoBlkDevWrapper<H, T> {
             #[cfg(all(feature = "multitask", feature = "irq"))]
             fn wait_for_used(&self, token: u16, operation: &str) {
+                let context = self.wait_context(token, operation);
                 let irq_count_before = self
                     .inner
                     .completion_irq_count
                     .load(Ordering::Relaxed);
                 loop {
-                    let timed_out = self.inner.wait_queue.wait_timeout_until(
+                    let timed_out = self.inner.wait_queue.wait_timeout_until_with_context(
+                        context,
                         core::time::Duration::from_millis(100),
                         || self.inner.inner.lock().inner.peek_used() == Some(token),
                     );
@@ -419,6 +427,20 @@ cfg_if! {
                         break;
                     }
                 }
+            }
+
+            #[cfg(feature = "multitask")]
+            fn wait_context(&self, token: u16, operation: &str) -> axtask::WaitContext {
+                let reason = match operation {
+                    "read" => axtask::WaitReason::VirtioBlkRead,
+                    "write" => axtask::WaitReason::VirtioBlkWrite,
+                    _ => axtask::WaitReason::WaitQueue,
+                };
+                axtask::WaitContext::new(
+                    reason,
+                    Arc::as_ptr(&self.inner) as usize as u64,
+                    token as u64,
+                )
             }
         }
 
@@ -454,9 +476,10 @@ cfg_if! {
                         #[cfg(feature = "irq")]
                         self.wait_for_used(token, "read");
                         #[cfg(not(feature = "irq"))]
-                        self.inner.wait_queue.wait_until(|| {
-                            self.inner.inner.lock().inner.peek_used() == Some(token)
-                        });
+                        self.inner.wait_queue.wait_until_with_context(
+                            self.wait_context(token, "read"),
+                            || self.inner.inner.lock().inner.peek_used() == Some(token),
+                        );
                         axlog::debug!("virtio::read_block: wait_queue finished");
                     } else {
                         axlog::debug!("virtio::read_block: irqs_disabled, spinning");
@@ -482,7 +505,13 @@ cfg_if! {
                 // One interrupt may cover several used entries. Once the head
                 // is popped, wake every waiter so the new head can be claimed.
                 #[cfg(feature = "multitask")]
-                self.inner.wait_queue.notify_all(false);
+                self.inner.wait_queue.notify_all_with_context(
+                    false,
+                    axtask::WakeContext::new(
+                        axtask::WakeSource::Device,
+                        Arc::as_ptr(&self.inner) as usize as u64,
+                    ),
+                );
                 result?;
                 axlog::debug!("virtio::read_block: completed successfully");
                 Ok(())
@@ -504,9 +533,10 @@ cfg_if! {
                         #[cfg(feature = "irq")]
                         self.wait_for_used(token, "write");
                         #[cfg(not(feature = "irq"))]
-                        self.inner.wait_queue.wait_until(|| {
-                            self.inner.inner.lock().inner.peek_used() == Some(token)
-                        });
+                        self.inner.wait_queue.wait_until_with_context(
+                            self.wait_context(token, "write"),
+                            || self.inner.inner.lock().inner.peek_used() == Some(token),
+                        );
                         axlog::debug!("virtio::write_block: wait_queue finished");
                     } else {
                         axlog::debug!("virtio::write_block: irqs_disabled, spinning");
@@ -532,7 +562,13 @@ cfg_if! {
                 // Handoff is required even when the device response reports an
                 // error, because complete_write_blocks may already have popped.
                 #[cfg(feature = "multitask")]
-                self.inner.wait_queue.notify_all(false);
+                self.inner.wait_queue.notify_all_with_context(
+                    false,
+                    axtask::WakeContext::new(
+                        axtask::WakeSource::Device,
+                        Arc::as_ptr(&self.inner) as usize as u64,
+                    ),
+                );
                 result?;
                 axlog::debug!("virtio::write_block: completed successfully");
                 Ok(())

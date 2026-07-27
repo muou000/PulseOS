@@ -1,6 +1,9 @@
 //! Task APIs for multi-task configuration.
 
-use alloc::{string::String, sync::{Arc, Weak}};
+use alloc::{
+    string::String,
+    sync::{Arc, Weak},
+};
 use core::sync::atomic::{AtomicPtr, Ordering};
 
 use kernel_guard::NoPreemptIrqSave;
@@ -20,20 +23,22 @@ pub fn register_timer_hook(hook: fn()) {
 
 /// Sets a generic oneshot timer that fires at the specified deadline.
 #[cfg(feature = "irq")]
-pub fn set_generic_timer(deadline_ns: u64, callback: alloc::boxed::Box<dyn FnOnce(timer_list::TimeValue) + Send + Sync>) {
+pub fn set_generic_timer(
+    deadline_ns: u64,
+    callback: alloc::boxed::Box<dyn FnOnce(timer_list::TimeValue) + Send + Sync>,
+) {
     crate::timers::set_generic_timer(timer_list::TimeValue::from_nanos(deadline_ns), callback);
 }
 
 pub(crate) use crate::run_queue::{
     current_run_queue, select_run_queue, select_wake_run_queue, yield_current,
 };
-
 #[doc(cfg(feature = "multitask"))]
 pub use crate::task::{CurrentTask, TaskId, TaskInner};
 #[doc(cfg(feature = "multitask"))]
 pub use crate::task_ext::{TaskExtMut, TaskExtRef, TaskExtSwitch};
 #[doc(cfg(feature = "multitask"))]
-pub use crate::wait_queue::WaitQueue;
+pub use crate::wait_queue::{WaitContext, WaitQueue, WaitReason, WakeContext, WakeSource};
 
 /// The reference type of a task.
 pub type AxTaskRef = Arc<AxTask>;
@@ -274,9 +279,15 @@ pub fn wake_task(task: AxTaskRef, resched: bool) {
 
 /// Interrupts a task blocked in an interruptible future or wait operation.
 pub fn interrupt_task(task: AxTaskRef, resched: bool) {
+    interrupt_task_with_context(task, resched, WakeContext::new(WakeSource::Interrupt, 0));
+}
+
+/// Interrupts a blocked task and records the semantic source of the interruption.
+pub fn interrupt_task_with_context(task: AxTaskRef, resched: bool, context: WakeContext) {
     task.interrupt();
     if task.state() == crate::task::TaskState::Blocked {
-        select_wake_run_queue::<NoPreemptIrqSave>(&task).unblock_task(task, resched);
+        select_wake_run_queue::<NoPreemptIrqSave>(&task)
+            .unblock_task_with_context(task, resched, context);
     }
 }
 

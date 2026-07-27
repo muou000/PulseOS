@@ -170,6 +170,20 @@ pub fn current_thread() -> LinuxResult<Arc<Thread>> {
     Err(LinuxError::ESRCH)
 }
 
+#[cfg(feature = "qperf-trace")]
+pub fn emit_qperf_task_metadata(task: &axtask::TaskInner, pid: u64, tid: u64) {
+    let name = task.name();
+    axtask::qperf_trace::task_metadata(task.id().as_u64(), pid, tid, name.as_bytes());
+}
+
+#[cfg(feature = "qperf-trace")]
+pub fn emit_current_qperf_task_metadata() {
+    let task = axtask::current();
+    if let Ok(thread) = current_thread() {
+        emit_qperf_task_metadata(&task, thread.process().pid(), thread.tid());
+    }
+}
+
 /// Internal Linux error code for system call restarts.
 pub const ERESTARTSYS: i32 = 512;
 

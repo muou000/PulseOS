@@ -1,7 +1,10 @@
-use axtask::WaitQueue;
-use core::sync::atomic::{AtomicI32, Ordering};
-use core::cell::UnsafeCell;
-use core::ops::{Deref, DerefMut};
+use core::{
+    cell::UnsafeCell,
+    ops::{Deref, DerefMut},
+    sync::atomic::{AtomicI32, Ordering},
+};
+
+use axtask::{WaitContext, WaitQueue, WaitReason, WakeContext};
 
 /// A reader-writer lock based on sleeping/yielding tasks.
 pub struct RwLock<T: ?Sized> {
@@ -33,19 +36,30 @@ impl<T: ?Sized> RwLock<T> {
             let current_state = self.state.load(Ordering::Acquire);
             let waiting = self.waiting_writers.load(Ordering::Relaxed);
             if current_state >= 0 && waiting == 0 {
-                if self.state.compare_exchange_weak(
-                    current_state,
-                    current_state + 1,
-                    Ordering::SeqCst,
-                    Ordering::Relaxed,
-                ).is_ok() {
+                if self
+                    .state
+                    .compare_exchange_weak(
+                        current_state,
+                        current_state + 1,
+                        Ordering::SeqCst,
+                        Ordering::Relaxed,
+                    )
+                    .is_ok()
+                {
                     break;
                 }
             } else {
-                self.wq.wait_until(|| {
-                    self.state.load(Ordering::Relaxed) >= 0 &&
-                    self.waiting_writers.load(Ordering::Relaxed) == 0
-                });
+                self.wq.wait_until_with_context(
+                    WaitContext::new(
+                        WaitReason::RwLockRead,
+                        self as *const Self as *const () as usize as u64,
+                        current_state as i64 as u64,
+                    ),
+                    || {
+                        self.state.load(Ordering::Relaxed) >= 0
+                            && self.waiting_writers.load(Ordering::Relaxed) == 0
+                    },
+                );
             }
         }
         RwLockReadGuard { lock: self }
@@ -53,25 +67,31 @@ impl<T: ?Sized> RwLock<T> {
 
     /// Acquires an exclusive write lock, blocking the current task until unlocked.
     pub fn write(&self) -> RwLockWriteGuard<'_, T> {
-        if self.state.compare_exchange(
-            0,
-            -1,
-            Ordering::SeqCst,
-            Ordering::Relaxed,
-        ).is_ok() {
+        if self
+            .state
+            .compare_exchange(0, -1, Ordering::SeqCst, Ordering::Relaxed)
+            .is_ok()
+        {
             return RwLockWriteGuard { lock: self };
         }
         self.waiting_writers.fetch_add(1, Ordering::SeqCst);
         loop {
-            if self.state.compare_exchange_weak(
-                0,
-                -1,
-                Ordering::SeqCst,
-                Ordering::Relaxed,
-            ).is_ok() {
+            if self
+                .state
+                .compare_exchange_weak(0, -1, Ordering::SeqCst, Ordering::Relaxed)
+                .is_ok()
+            {
                 break;
             }
-            self.wq.wait_until(|| self.state.load(Ordering::Relaxed) == 0);
+            let blocking_state = self.state.load(Ordering::Relaxed);
+            self.wq.wait_until_with_context(
+                WaitContext::new(
+                    WaitReason::RwLockWrite,
+                    self as *const Self as *const () as usize as u64,
+                    blocking_state as i64 as u64,
+                ),
+                || self.state.load(Ordering::Relaxed) == 0,
+            );
         }
         self.waiting_writers.fetch_sub(1, Ordering::SeqCst);
         RwLockWriteGuard { lock: self }
@@ -82,12 +102,16 @@ impl<T: ?Sized> RwLock<T> {
         let current_state = self.state.load(Ordering::Acquire);
         let waiting = self.waiting_writers.load(Ordering::Relaxed);
         if current_state >= 0 && waiting == 0 {
-            if self.state.compare_exchange(
-                current_state,
-                current_state + 1,
-                Ordering::SeqCst,
-                Ordering::Relaxed,
-            ).is_ok() {
+            if self
+                .state
+                .compare_exchange(
+                    current_state,
+                    current_state + 1,
+                    Ordering::SeqCst,
+                    Ordering::Relaxed,
+                )
+                .is_ok()
+            {
                 return Some(RwLockReadGuard { lock: self });
             }
         }
@@ -96,12 +120,11 @@ impl<T: ?Sized> RwLock<T> {
 
     /// Attempts to acquire this lock with exclusive write access.
     pub fn try_write(&self) -> Option<RwLockWriteGuard<'_, T>> {
-        if self.state.compare_exchange(
-            0,
-            -1,
-            Ordering::SeqCst,
-            Ordering::Relaxed,
-        ).is_ok() {
+        if self
+            .state
+            .compare_exchange(0, -1, Ordering::SeqCst, Ordering::Relaxed)
+            .is_ok()
+        {
             Some(RwLockWriteGuard { lock: self })
         } else {
             None
@@ -131,7 +154,9 @@ impl<'a, T: ?Sized> Drop for RwLockReadGuard<'a, T> {
     fn drop(&mut self) {
         let prev = self.lock.state.fetch_sub(1, Ordering::SeqCst);
         if prev == 1 {
-            self.lock.wq.notify_all(true);
+            self.lock
+                .wq
+                .notify_all_with_context(true, WakeContext::task());
         }
     }
 }
@@ -157,6 +182,8 @@ impl<'a, T: ?Sized> DerefMut for RwLockWriteGuard<'a, T> {
 impl<'a, T: ?Sized> Drop for RwLockWriteGuard<'a, T> {
     fn drop(&mut self) {
         self.lock.state.store(0, Ordering::Release);
-        self.lock.wq.notify_all(true);
+        self.lock
+            .wq
+            .notify_all_with_context(true, WakeContext::task());
     }
 }

@@ -100,6 +100,8 @@ fn main() {
 
             let init_proc = init_thread.process_arc();
             pulse_core::task::register_process(init_proc.pid(), init_proc.clone());
+            #[cfg(feature = "qperf-trace")]
+            pulse_core::task::emit_qperf_task_metadata(&inner, init_proc.pid(), init_tid);
             inner.init_task_ext(pulse_core::task::ThreadHandle::new(init_thread.clone()));
             let init_task = axtask::spawn_task(inner);
             init_thread.process().register_task_ref(init_task.clone());

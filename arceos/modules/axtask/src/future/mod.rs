@@ -1,18 +1,20 @@
 use alloc::sync::Arc;
-use core::fmt;
-use core::future::{Future, IntoFuture, poll_fn};
-use core::pin::pin;
-use core::sync::atomic::{AtomicBool, Ordering};
-use core::task::{Context, Poll, Waker};
+use core::{
+    fmt,
+    future::{Future, IntoFuture, poll_fn},
+    pin::pin,
+    sync::atomic::{AtomicBool, Ordering},
+    task::{Context, Poll, Waker},
+};
+
 use kspin::SpinNoIrq;
 
-use crate::{AxTaskRef, AxTaskWeak, current};
+use crate::{AxTaskRef, AxTaskWeak, WakeContext, WakeSource, current};
 
 mod poll;
 mod time;
 
-pub use self::poll::*;
-pub use self::time::*;
+pub use self::{poll::*, time::*};
 
 /// A waker that wakes up the associated task.
 pub struct AxWaker {
@@ -53,8 +55,7 @@ impl alloc::task::Wake for AxWaker {
 
     fn wake_by_ref(self: &Arc<Self>) {
         if let Some(task) = self.task.upgrade() {
-            let mut rq =
-                crate::api::select_wake_run_queue::<kernel_guard::NoPreemptIrqSave>(&task);
+            let mut rq = crate::api::select_wake_run_queue::<kernel_guard::NoPreemptIrqSave>(&task);
             // Keep this guard until unblock_task has completed. This pairs
             // with deactivate so a wake either finishes within this
             // block_on lifetime or observes the inactive state.
@@ -63,7 +64,7 @@ impl alloc::task::Wake for AxWaker {
                 return;
             }
             *woke = true;
-            rq.unblock_task(task, true);
+            rq.unblock_task_with_context(task, true, WakeContext::new(WakeSource::Future, 0));
         }
     }
 }

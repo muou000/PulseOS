@@ -2,7 +2,7 @@
 
 use core::sync::atomic::{AtomicU64, Ordering};
 
-use axtask::{WaitQueue, current};
+use axtask::{WaitContext, WaitQueue, WaitReason, WakeContext, current};
 
 /// A [`lock_api::RawMutex`] implementation.
 ///
@@ -56,7 +56,14 @@ unsafe impl lock_api::RawMutex for RawMutex {
                         current().id_name()
                     );
                     // Wait until the lock looks unlocked before retrying
-                    self.wq.wait_until(|| !self.is_locked());
+                    self.wq.wait_until_with_context(
+                        WaitContext::new(
+                            WaitReason::Mutex,
+                            self as *const Self as usize as u64,
+                            owner_id,
+                        ),
+                        || !self.is_locked(),
+                    );
                 }
             }
         }
@@ -81,7 +88,7 @@ unsafe impl lock_api::RawMutex for RawMutex {
             "{} tried to release mutex it doesn't own",
             current().id_name()
         );
-        self.wq.notify_one(true);
+        self.wq.notify_one_with_context(true, WakeContext::task());
     }
 
     #[inline(always)]
@@ -97,9 +104,11 @@ pub type MutexGuard<'a, T> = lock_api::MutexGuard<'a, RawMutex, T>;
 
 #[cfg(test)]
 mod tests {
-    use crate::Mutex;
-    use axtask as thread;
     use std::sync::Once;
+
+    use axtask as thread;
+
+    use crate::Mutex;
 
     static INIT: Once = Once::new();
 
