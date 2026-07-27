@@ -10,12 +10,12 @@ use axhal::{
 use memory_addr::{
     MemoryAddr, PAGE_SIZE_4K, PageIter4K, VirtAddr, VirtAddrRange, is_aligned_4k,
 };
-use memory_set::{MappingBackend, MemoryArea, MemorySet};
+use memory_set::{MappingBackend, MappingMutation, MemoryArea, MemorySet};
 
 use crate::{
     backend::{
         AnonPageLoad, AnonPagePrepared, Backend, DeferredReclaims, FilePageLoad,
-        FilePagePrepared, FileWritebacks,
+        FilePagePrepared, FileWritebacks, TlbInvalidationTracker,
     },
     mapping_err_to_ax_err,
 };
@@ -23,16 +23,72 @@ use crate::{
 /// A TLB shootdown that must run after releasing the address-space lock.
 #[must_use = "a TLB shootdown must be completed after releasing the address-space lock"]
 pub struct TlbShootdown {
-    primary_asid: usize,
-    additional_asids: alloc::vec::Vec<usize>,
+    primary: Option<(usize, TlbInvalidation)>,
+    additional: alloc::vec::Vec<(usize, TlbInvalidation)>,
     reclaims: DeferredReclaims,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum TlbInvalidation {
+    Range {
+        start: VirtAddr,
+        end: VirtAddr,
+        changed_pages: usize,
+    },
+    FullAsid,
+}
+
+impl TlbInvalidation {
+    fn from_tracker(tracker: TlbInvalidationTracker) -> Option<Self> {
+        Some(Self::Range {
+            start: tracker.start()?,
+            end: tracker.end()?,
+            changed_pages: tracker.changed_pages(),
+        })
+    }
+
+    fn merge(&mut self, other: Self) {
+        match (*self, other) {
+            (Self::FullAsid, _) | (_, Self::FullAsid) => *self = Self::FullAsid,
+            (
+                Self::Range {
+                    start,
+                    end,
+                    changed_pages,
+                },
+                Self::Range {
+                    start: other_start,
+                    end: other_end,
+                    changed_pages: other_changed_pages,
+                },
+            ) => {
+                *self = Self::Range {
+                    start: start.min(other_start),
+                    end: end.max(other_end),
+                    changed_pages: changed_pages.saturating_add(other_changed_pages),
+                };
+            }
+        }
+    }
 }
 
 impl TlbShootdown {
     fn new(asid: usize, reclaims: DeferredReclaims) -> Self {
         Self {
-            primary_asid: asid,
-            additional_asids: alloc::vec::Vec::new(),
+            primary: Some((asid, TlbInvalidation::FullAsid)),
+            additional: alloc::vec::Vec::new(),
+            reclaims,
+        }
+    }
+
+    fn from_tracker(
+        asid: usize,
+        tracker: TlbInvalidationTracker,
+        reclaims: DeferredReclaims,
+    ) -> Self {
+        Self {
+            primary: TlbInvalidation::from_tracker(tracker).map(|invalidation| (asid, invalidation)),
+            additional: alloc::vec::Vec::new(),
             reclaims,
         }
     }
@@ -41,34 +97,90 @@ impl TlbShootdown {
         Self::new(asid, DeferredReclaims::default())
     }
 
+    fn for_range(
+        asid: usize,
+        start: VirtAddr,
+        size: usize,
+        reclaims: DeferredReclaims,
+    ) -> Self {
+        let end = start
+            .checked_add(size)
+            .expect("TLB invalidation range overflow");
+        Self {
+            primary: Some((
+                asid,
+                TlbInvalidation::Range {
+                    start,
+                    end,
+                    changed_pages: size.saturating_add(PAGE_SIZE_4K - 1) / PAGE_SIZE_4K,
+                },
+            )),
+            additional: alloc::vec::Vec::new(),
+            reclaims,
+        }
+    }
+
     /// Merges another deferred shootdown into this batch.
     pub fn merge(&mut self, other: Self) {
         let Self {
-            primary_asid,
-            additional_asids,
+            primary,
+            additional,
             reclaims,
         } = other;
-        for asid in core::iter::once(primary_asid).chain(additional_asids) {
-            if asid != self.primary_asid && !self.additional_asids.contains(&asid) {
-                self.additional_asids.push(asid);
-            }
+        for (asid, invalidation) in primary.into_iter().chain(additional) {
+            self.merge_invalidation(asid, invalidation);
         }
         self.reclaims.append(reclaims);
+    }
+
+    fn merge_invalidation(&mut self, asid: usize, invalidation: TlbInvalidation) {
+        if let Some((primary_asid, primary_invalidation)) = self.primary.as_mut() {
+            if *primary_asid == asid {
+                primary_invalidation.merge(invalidation);
+                return;
+            }
+        } else {
+            self.primary = Some((asid, invalidation));
+            return;
+        }
+        if let Some((_, existing)) = self
+            .additional
+            .iter_mut()
+            .find(|(existing_asid, _)| *existing_asid == asid)
+        {
+            existing.merge(invalidation);
+        } else {
+            self.additional.push((asid, invalidation));
+        }
     }
 
     /// Completes the shootdown without holding an address-space lock.
     pub fn complete_after_unlock(self) -> AxResult {
         let Self {
-            primary_asid,
-            additional_asids,
+            primary,
+            additional,
             reclaims,
         } = self;
 
         #[cfg(feature = "ipi")]
         {
-            for asid in core::iter::once(primary_asid).chain(additional_asids) {
-                let target_mask = axipi::asid_active_cpu_mask(asid);
-                if let Err(shootdown_error) = axipi::flush_tlb_asid_cpus(asid, target_mask) {
+            for (asid, invalidation) in primary.into_iter().chain(additional) {
+                let flush_result = match invalidation {
+                    TlbInvalidation::Range {
+                        start,
+                        end,
+                        changed_pages,
+                    } => {
+                        axipi::flush_tlb_asid_range_cpus(
+                            asid,
+                            start.as_usize(),
+                            end - start,
+                            changed_pages,
+                        )
+                    }
+                    TlbInvalidation::FullAsid => axipi::flush_tlb_asid_cpus(asid),
+                };
+                if let Err(shootdown_error) = flush_result {
                     if shootdown_error.completion_guaranteed() {
                         warn!("{shootdown_error}");
                     } else {
@@ -86,8 +198,8 @@ impl TlbShootdown {
 
         #[cfg(not(feature = "ipi"))]
         {
-            for asid in core::iter::once(primary_asid).chain(additional_asids) {
-                unsafe { flush_tlb_asid(asid) };
+            for (asid, invalidation) in primary.into_iter().chain(additional) {
+                unsafe { flush_tlb_invalidation(asid, invalidation) };
             }
             reclaims.reclaim();
             Ok(())
@@ -98,8 +210,8 @@ impl TlbShootdown {
 impl fmt::Debug for TlbShootdown {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("TlbShootdown")
-            .field("primary_asid", &self.primary_asid)
-            .field("additional_asids", &self.additional_asids)
+            .field("primary", &self.primary)
+            .field("additional", &self.additional)
             .field("has_reclaims", &!self.reclaims.is_empty())
             .finish()
     }
@@ -205,14 +317,16 @@ impl PageFaultResult {
 /// The result of cloning an address space, including the parent TLB update.
 pub struct AddrSpaceCloneResult {
     result: AxResult<AddrSpace>,
-    shootdown: TlbShootdown,
+    shootdown: Option<TlbShootdown>,
 }
 
 impl AddrSpaceCloneResult {
     /// Completes the parent TLB shootdown and returns the cloned address space.
     pub fn complete_after_unlock(self) -> AxResult<AddrSpace> {
         let Self { result, shootdown } = self;
-        shootdown.complete_after_unlock()?;
+        if let Some(shootdown) = shootdown {
+            shootdown.complete_after_unlock()?;
+        }
         result
     }
 }
@@ -769,7 +883,7 @@ impl AddrSpace {
         preparation: AddrSpaceUnmapPreparation,
     ) -> AddrSpaceMutation<()> {
         let mut reclaim = preparation.reclaims;
-        let mut attempted = false;
+        let mut invalidation = TlbInvalidationTracker::default();
         let result = (|| -> AxResult {
             if !self.contains_range(start, size) {
                 return ax_err!(InvalidInput, "address out of range");
@@ -781,13 +895,13 @@ impl AddrSpace {
                 return Ok(());
             }
 
-            attempted = true;
             self.areas
-                .unmap(start, size, &mut self.pt, &mut reclaim)
+                .unmap_tracked(start, size, &mut self.pt, &mut reclaim, &mut invalidation)
                 .map_err(mapping_err_to_ax_err)
         })();
-        let shootdown = if attempted {
-            Some(TlbShootdown::new(self.asid, reclaim))
+        let needs_completion = !invalidation.is_empty() || !reclaim.is_empty();
+        let shootdown = if needs_completion {
+            Some(TlbShootdown::from_tracker(self.asid, invalidation, reclaim))
         } else {
             reclaim.reclaim();
             None
@@ -895,7 +1009,7 @@ impl AddrSpace {
     /// Returns an error if the address range is out of the address space or not
     /// aligned.
     pub fn protect(&mut self, start: VirtAddr, size: usize, flags: MappingFlags) -> AddrSpaceMutation<()> {
-        let mut attempted = false;
+        let mut invalidation = TlbInvalidationTracker::default();
         let result = (|| -> AxResult {
             if size == 0 {
                 return Ok(());
@@ -910,15 +1024,20 @@ impl AddrSpace {
                 return ax_err!(BadAddress, "address not mapped");
             }
 
-            attempted = true;
             self.areas
-                .protect(start, size, |_| Some(flags), &mut self.pt)
+                .protect_tracked(
+                    start,
+                    size,
+                    |old_flags| (old_flags != flags).then_some(flags),
+                    &mut self.pt,
+                    &mut invalidation,
+                )
                 .map_err(mapping_err_to_ax_err)
         })();
-        AddrSpaceMutation::new(
-            result,
-            attempted.then(|| TlbShootdown::without_reclaims(self.asid)),
-        )
+        let shootdown = (!invalidation.is_empty()).then(|| {
+            TlbShootdown::from_tracker(self.asid, invalidation, DeferredReclaims::default())
+        });
+        AddrSpaceMutation::new(result, shootdown)
     }
 
     /// Updates only page-table permissions within the specified range.
@@ -930,7 +1049,7 @@ impl AddrSpace {
         size: usize,
         flags: MappingFlags,
     ) -> AddrSpaceMutation<()> {
-        let mut attempted = false;
+        let mut invalidation = TlbInvalidationTracker::default();
         let result = (|| -> AxResult {
             if size == 0 {
                 return Ok(());
@@ -945,18 +1064,20 @@ impl AddrSpace {
                 return ax_err!(BadAddress, "address not mapped");
             }
 
-            attempted = true;
-            self.pt
-                .get_mut()
-                .protect_region(start, size, flags, false)
-                .map_err(|_| AxError::BadState)?
-                .ignore();
-            Ok(())
+            crate::backend::protect_populated_range(
+                start,
+                size,
+                flags,
+                self.pt.get_mut(),
+                &mut invalidation,
+            )
+            .then_some(())
+            .ok_or(AxError::BadState)
         })();
-        AddrSpaceMutation::new(
-            result,
-            attempted.then(|| TlbShootdown::without_reclaims(self.asid)),
-        )
+        let shootdown = (!invalidation.is_empty()).then(|| {
+            TlbShootdown::from_tracker(self.asid, invalidation, DeferredReclaims::default())
+        });
+        AddrSpaceMutation::new(result, shootdown)
     }
 
     /// Remap a single 4K page to a specified physical frame.
@@ -997,7 +1118,12 @@ impl AddrSpace {
         })();
         let needs_shootdown = changed_existing || !reclaim.is_empty();
         let shootdown = if needs_shootdown {
-            Some(TlbShootdown::new(self.asid, reclaim))
+            Some(TlbShootdown::for_range(
+                self.asid,
+                vaddr,
+                PAGE_SIZE_4K,
+                reclaim,
+            ))
         } else {
             reclaim.reclaim();
             None
@@ -1007,14 +1133,15 @@ impl AddrSpace {
 
     /// Removes all mappings in the address space.
     pub fn clear(&mut self) -> AddrSpaceMutation<()> {
-        let had_mappings = !self.areas.is_empty();
         let mut reclaim = DeferredReclaims::default();
+        let mut invalidation = TlbInvalidationTracker::default();
         let result = self
             .areas
-            .clear(&mut self.pt, &mut reclaim)
+            .clear_tracked(&mut self.pt, &mut reclaim, &mut invalidation)
             .map_err(mapping_err_to_ax_err);
-        let shootdown = if had_mappings {
-            Some(TlbShootdown::new(self.asid, reclaim))
+        let needs_completion = !invalidation.is_empty() || !reclaim.is_empty();
+        let shootdown = if needs_completion {
+            Some(TlbShootdown::from_tracker(self.asid, invalidation, reclaim))
         } else {
             reclaim.reclaim();
             None
@@ -1096,8 +1223,8 @@ impl AddrSpace {
         new_addr: Option<VirtAddr>,
     ) -> AddrSpaceMutation<VirtAddr> {
         let mut reclaim = DeferredReclaims::default();
-        let mut tlb_shootdown = TlbShootdown::without_reclaims(self.asid);
-        let mut attempted_shootdown = false;
+        let mut invalidation = TlbInvalidationTracker::default();
+        let mut tlb_shootdown: Option<TlbShootdown> = None;
 
         const MREMAP_MAYMOVE: usize = 1;
         const MREMAP_FIXED: usize = 2;
@@ -1184,9 +1311,12 @@ impl AddrSpace {
                     // Unmap any overlapping regions at destination
                     let (unmap_res, shootdown) = self.unmap(dest_addr, new_size).into_parts();
                     if let Some(sd) = shootdown {
-                        tlb_shootdown.merge(sd);
+                        if let Some(existing) = &mut tlb_shootdown {
+                            existing.merge(sd);
+                        } else {
+                            tlb_shootdown = Some(sd);
+                        }
                     }
-                    attempted_shootdown = true;
                     if let Err(e) = unmap_res {
                         self.areas.insert(old_addr, middle_area);
                         return Err(e);
@@ -1209,6 +1339,9 @@ impl AddrSpace {
                 for page in PageIter4K::new(old_addr, old_addr + old_size).unwrap() {
                     let rel_offset = page.as_usize() - old_addr.as_usize();
                     if let Ok((frame, page_size, tlb)) = self.pt.get_mut().unmap(page) {
+                        if frame.as_usize() != 0 {
+                            invalidation.record(page, page_size as usize);
+                        }
                         if page_size.is_huge() {
                             // Re-insert middle_area and rollback (though this shouldn't happen for user pages)
                             self.areas.insert(old_addr, middle_area);
@@ -1220,8 +1353,6 @@ impl AddrSpace {
                         tlb.ignore(); // we will flush all together
                     }
                 }
-                tlb_shootdown.merge(TlbShootdown::without_reclaims(self.asid));
-                attempted_shootdown = true;
 
                 // Update backend address
                 let mut bk = middle_area.backend().clone();
@@ -1253,10 +1384,15 @@ impl AddrSpace {
                     // In-place shrink: unmap tail
                     let cut_start = old_addr + new_size;
                     let cut_size = old_size - new_size;
-                    middle_area.backend().unmap(cut_start, cut_size, &mut self.pt, &mut reclaim);
+                    middle_area.backend().unmap_tracked(
+                        cut_start,
+                        cut_size,
+                        &mut self.pt,
+                        &mut reclaim,
+                        &mut invalidation,
+                    );
                     middle_area.set_end(old_addr + new_size);
                     self.areas.insert(old_addr, middle_area);
-                    attempted_shootdown = true;
                     Ok(old_addr)
                 } else if new_size > old_size {
                     // In-place expand
@@ -1277,15 +1413,19 @@ impl AddrSpace {
             }
         })();
 
-        let shootdown = if attempted_shootdown || !reclaim.is_empty() {
-            tlb_shootdown.merge(TlbShootdown::new(self.asid, reclaim));
-            Some(tlb_shootdown)
+        let local_needs_completion = !invalidation.is_empty() || !reclaim.is_empty();
+        if local_needs_completion {
+            let local = TlbShootdown::from_tracker(self.asid, invalidation, reclaim);
+            if let Some(existing) = &mut tlb_shootdown {
+                existing.merge(local);
+            } else {
+                tlb_shootdown = Some(local);
+            }
         } else {
             reclaim.reclaim();
-            None
-        };
+        }
 
-        AddrSpaceMutation::new(result, shootdown)
+        AddrSpaceMutation::new(result, tlb_shootdown)
     }
 
     /// Visits all mapped virtual memory areas tracked by this address space.
@@ -1328,12 +1468,12 @@ impl AddrSpace {
             return PageFaultResult::Handled(false);
         }
         if let Some((frame, flags)) = pte_before {
-            if access_flags.contains(PageFaultFlags::WRITE) && flags.contains(MappingFlags::WRITE) {
-                let mut pt_guard = self.pt.lock_for_addr(page);
-                if let Ok((_, tlb)) = pt_guard.remap(page, frame, flags) {
-                    tlb.flush();
-                    return PageFaultResult::Handled(true);
-                }
+            if frame.as_usize() != 0 && flags.contains(access_flags) {
+                #[cfg(any(target_arch = "riscv64", target_arch = "loongarch64"))]
+                axhal::asm::flush_tlb_asid_vaddr(self.asid, page);
+                #[cfg(not(any(target_arch = "riscv64", target_arch = "loongarch64")))]
+                axhal::asm::flush_tlb(Some(page));
+                return PageFaultResult::Handled(true);
             }
         }
         if let Some(area) = self.areas.find(vaddr) {
@@ -1408,7 +1548,12 @@ impl AddrSpace {
                     // deadlock with a concurrent writer such as mprotect.
                     return PageFaultResult::HandledWithShootdown {
                         handled,
-                        shootdown: TlbShootdown::new(self.asid, reclaim),
+                        shootdown: TlbShootdown::for_range(
+                            self.asid,
+                            page,
+                            PAGE_SIZE_4K,
+                            reclaim,
+                        ),
                     };
                 }
                 reclaim.reclaim();
@@ -1572,12 +1717,15 @@ impl AddrSpace {
 
     /// Attempts to clone the current address space into a new one.
     pub fn try_clone(&mut self) -> AddrSpaceCloneResult {
-        let shootdown = TlbShootdown::without_reclaims(self.asid);
-        let result = self.try_clone_inner();
+        let mut invalidation = TlbInvalidationTracker::default();
+        let result = self.try_clone_inner(&mut invalidation);
+        let shootdown = (!invalidation.is_empty()).then(|| {
+            TlbShootdown::from_tracker(self.asid, invalidation, DeferredReclaims::default())
+        });
         AddrSpaceCloneResult { result, shootdown }
     }
 
-    fn try_clone_inner(&mut self) -> AxResult<Self> {
+    fn try_clone_inner(&mut self, invalidation: &mut TlbInvalidationTracker) -> AxResult<Self> {
         let mut new_aspace = Self::new_empty(self.va_range.start, self.va_range.size())?;
         let last_alloc = self.last_alloc_addr.load(core::sync::atomic::Ordering::Acquire);
         new_aspace.last_alloc_addr.store(last_alloc, core::sync::atomic::Ordering::Release);
@@ -1660,12 +1808,14 @@ impl AddrSpace {
                 let inc_ref = |paddr| {
                     crate::cow_inc_frame_ref(paddr);
                 };
+                let record_src_change = |start, size| invalidation.record(start, size);
                 if new_aspace.pt.get_mut().copy_cow_range(
                     self.pt.get_mut(),
                     area.start(),
                     area.size(),
                     is_cow,
                     inc_ref,
+                    record_src_change,
                 ).is_err() {
                     error!("try_clone: failed to copy user page table");
                     new_aspace.clear_unpublished();
@@ -1691,6 +1841,29 @@ impl fmt::Debug for AddrSpace {
             .field("page_table_root", &self.pt.lock().root_paddr())
             .field("areas", &self.areas)
             .finish()
+    }
+}
+
+#[cfg(not(feature = "ipi"))]
+unsafe fn flush_tlb_invalidation(asid: usize, invalidation: TlbInvalidation) {
+    const RANGE_PAGE_LIMIT: usize = 32;
+
+    match invalidation {
+        TlbInvalidation::FullAsid => unsafe { flush_tlb_asid(asid) },
+        TlbInvalidation::Range { start, end, .. }
+            if (end - start) / PAGE_SIZE_4K <= RANGE_PAGE_LIMIT =>
+        {
+            for page in PageIter4K::new(start, end).unwrap() {
+                #[cfg(any(target_arch = "riscv64", target_arch = "loongarch64"))]
+                axhal::asm::flush_tlb_asid_vaddr(asid, page);
+                #[cfg(not(any(target_arch = "riscv64", target_arch = "loongarch64")))]
+                {
+                    let _ = asid;
+                    axhal::asm::flush_tlb(Some(page));
+                }
+            }
+        }
+        TlbInvalidation::Range { .. } => unsafe { flush_tlb_asid(asid) },
     }
 }
 

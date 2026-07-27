@@ -480,6 +480,7 @@ impl<M: PagingMetaData, PTE: GenericPTE, H: PagingHandler> PageTable64<M, PTE, H
         size: usize,
         is_cow: bool,
         mut inc_ref: impl FnMut(PhysAddr),
+        mut record_src_change: impl FnMut(M::VirtAddr, usize),
     ) -> PagingResult {
         if size == 0 {
             return Ok(());
@@ -496,6 +497,7 @@ impl<M: PagingMetaData, PTE: GenericPTE, H: PagingHandler> PageTable64<M, PTE, H
             end_vaddr,
             is_cow,
             &mut inc_ref,
+            &mut record_src_change,
         )
     }
 
@@ -511,6 +513,7 @@ impl<M: PagingMetaData, PTE: GenericPTE, H: PagingHandler> PageTable64<M, PTE, H
         end_vaddr: usize,
         is_cow: bool,
         inc_ref: &mut impl FnMut(PhysAddr),
+        record_src_change: &mut impl FnMut(M::VirtAddr, usize),
     ) -> PagingResult {
         let step = 1usize << (12 + (M::LEVELS - 1 - level) * 9);
         let index_fn = if level == 0 {
@@ -593,6 +596,7 @@ impl<M: PagingMetaData, PTE: GenericPTE, H: PagingHandler> PageTable64<M, PTE, H
                         let cow_flags = flags & !MappingFlags::WRITE;
                         if flags.contains(MappingFlags::WRITE) {
                             src_entry.set_flags(cow_flags, page_size.is_huge());
+                            record_src_change(M::VirtAddr::from(entry_start), page_size as usize);
                         }
                         cow_flags
                     } else {
@@ -624,6 +628,7 @@ impl<M: PagingMetaData, PTE: GenericPTE, H: PagingHandler> PageTable64<M, PTE, H
                     overlap_end,
                     is_cow,
                     inc_ref,
+                    record_src_change,
                 )?;
             }
         }

@@ -1,5 +1,6 @@
 use axhal::paging::{MappingFlags, PageTable};
 use memory_addr::{PhysAddr, VirtAddr};
+use memory_set::MappingMutation;
 
 use super::Backend;
 
@@ -37,10 +38,9 @@ impl Backend {
         size: usize,
         pt: &mut PageTable,
         _pa_va_offset: usize,
+        mutation: &mut impl MappingMutation<VirtAddr>,
     ) -> bool {
         debug!("unmap_linear: [{:#x}, {:#x})", start, start + size);
-        pt.unmap_region(start, size, false)
-            .map(|tlb| tlb.ignore()) // The owning AddrSpace flushes the ASID after unlocking.
-            .is_ok()
+        super::unmap_populated_range(start, size, pt, mutation)
     }
 }

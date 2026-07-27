@@ -3,6 +3,7 @@ use axerrno::{AxError, AxResult};
 use axhal::mem::{phys_to_virt, virt_to_phys};
 use axhal::paging::{MappingFlags, PageSize, PageTable};
 use memory_addr::{MemoryAddr, PAGE_SIZE_4K, PageIter4K, PhysAddr, VirtAddr};
+use memory_set::MappingMutation;
 
 use super::Backend;
 use axalloc::frame_table;
@@ -113,12 +114,13 @@ pub(crate) fn protect_pages<P>(
     allow_missing: bool,
     allow_placeholder: bool,
     pt: &mut P,
+    mutation: &mut impl MappingMutation<VirtAddr>,
 ) -> bool
 where
     P: ProtectPageTable,
 {
     for page in PageIter4K::new(start, start + size).unwrap() {
-        let Some((frame, _old_flags)) = pt.query_page(page) else {
+        let Some((frame, old_flags)) = pt.query_page(page) else {
             if allow_missing {
                 continue;
             }
@@ -140,6 +142,10 @@ where
             return false;
         }
 
+        if old_flags == super::effective_pte_flags(new_flags) {
+            continue;
+        }
+
         if !pt.protect_page(page, new_flags) {
             error!(
                 "protect_pages: failed to protect page: {:#x}, {:?}",
@@ -147,6 +153,7 @@ where
             );
             return false;
         }
+        mutation.record(page, PAGE_SIZE_4K);
     }
 
     true
@@ -233,6 +240,7 @@ impl Backend {
                             pt,
                             true,
                             &mut reclaim,
+                            &mut (),
                         );
                         reclaim.reclaim();
                     }
@@ -251,6 +259,7 @@ impl Backend {
                             pt,
                             true,
                             &mut reclaim,
+                            &mut (),
                         );
                         reclaim.reclaim();
                     }
@@ -275,16 +284,20 @@ impl Backend {
         pt: &mut PageTable,
         _populate: bool,
         reclaim: &mut super::DeferredReclaims,
+        mutation: &mut impl MappingMutation<VirtAddr>,
     ) -> bool {
         debug!("unmap_alloc: [{:#x}, {:#x})", start, start + size);
         for addr in PageIter4K::new(start, start + size).unwrap() {
             if let Ok((frame, page_size, tlb)) = pt.unmap(addr) {
-                if page_size.is_huge() {
-                    return false;
-                }
                 // The owning AddrSpace batches the ASID shootdown after its
                 // write lock is released.
                 tlb.ignore();
+                if frame.as_usize() != 0 {
+                    mutation.record(addr, page_size as usize);
+                }
+                if page_size.is_huge() {
+                    return false;
+                }
                 reclaim.defer_frame(frame);
             }
         }
@@ -469,13 +482,13 @@ impl Backend {
             if let Ok((curr_frame, curr_flags, _)) = pt_guard.query(page) {
                 if curr_frame == old_frame {
                     let new_flags = curr_flags | orig_flags;
-                    if pt_guard
-                        .remap(page, old_frame, new_flags)
-                        .map(|(_, tlb)| tlb.flush())
-                        .is_ok()
-                    {
+                    if new_flags == curr_flags {
                         return true;
                     }
+                    return pt_guard
+                        .remap(page, old_frame, new_flags)
+                        .map(|(_, tlb)| tlb.ignore())
+                        .is_ok();
                 }
             }
             false
@@ -535,6 +548,7 @@ impl Backend {
         new_flags: MappingFlags,
         pt: &mut PageTable,
         populate: bool,
+        mutation: &mut impl MappingMutation<VirtAddr>,
     ) -> bool {
         debug!(
             "protect_alloc: [{:#x}, {:#x}) {:?} (populate={})",
@@ -543,7 +557,15 @@ impl Backend {
             new_flags,
             populate
         );
-        protect_pages(start, size, new_flags, !populate, !populate, pt)
+        protect_pages(
+            start,
+            size,
+            new_flags,
+            !populate,
+            !populate,
+            pt,
+            mutation,
+        )
     }
 }
 

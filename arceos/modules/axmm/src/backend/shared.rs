@@ -4,6 +4,7 @@ use axalloc::global_allocator;
 use axhal::mem::virt_to_phys;
 use axhal::paging::{MappingFlags, PageSize, PageTable};
 use memory_addr::{MemoryAddr, PAGE_SIZE_4K, VirtAddr};
+use memory_set::MappingMutation;
 
 pub struct SharedFrame {
     pub vaddr: usize,
@@ -62,10 +63,13 @@ impl Backend {
             .is_ok()
     }
 
-    pub(crate) fn unmap_shared(start_va: VirtAddr, size: usize, pt: &mut PageTable) -> bool {
+    pub(crate) fn unmap_shared<M: MappingMutation<VirtAddr>>(
+        start_va: VirtAddr,
+        size: usize,
+        pt: &mut PageTable,
+        mutation: &mut M,
+    ) -> bool {
         debug!("unmap_shared: [{:#x}, {:#x})", start_va, start_va + size);
-        pt.unmap_region(start_va, size, false)
-            .map(|tlb| tlb.ignore())
-            .is_ok()
+        super::unmap_populated_range(start_va, size, pt, mutation)
     }
 }
