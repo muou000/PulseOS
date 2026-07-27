@@ -7,6 +7,7 @@ use axhal::{
     paging::{MappingFlags, PageSize, PageTable},
 };
 use memory_addr::{MemoryAddr, PAGE_SIZE_4K, PageIter4K, PhysAddr, VirtAddr};
+use memory_set::MappingMutation;
 use spin::Mutex;
 
 use super::{
@@ -367,6 +368,7 @@ impl Backend {
         size: usize,
         pt: &mut PageTable,
         reclaim: &mut super::DeferredReclaims,
+        mutation: &mut impl MappingMutation<VirtAddr>,
     ) -> bool {
         debug!("unmap_file: [{:#x}, {:#x})", start, start + size);
         if size == 0 {
@@ -382,13 +384,14 @@ impl Backend {
         };
         for addr in pages {
             if let Ok((frame, page_size, tlb)) = pt.unmap(addr) {
-                if page_size != PageSize::Size4K {
-                    return false;
-                }
                 // The owning AddrSpace batches the ASID shootdown after its
                 // write lock is released.
                 tlb.ignore();
                 if frame.as_usize() != 0 {
+                    mutation.record(addr, page_size as usize);
+                    if page_size != PageSize::Size4K {
+                        return false;
+                    }
                     if mapping.shared {
                         if let Some((file_offset, _)) = mapping.page_read_window(addr) {
                             let pn = (file_offset / PAGE_SIZE_4K as u64) as u32;
@@ -396,6 +399,8 @@ impl Backend {
                         }
                     }
                     reclaim.defer_frame(frame);
+                } else if page_size != PageSize::Size4K {
+                    return false;
                 }
             }
         }
@@ -487,7 +492,7 @@ impl Backend {
                     if let Ok((curr_frame, curr_flags, _)) = pt_guard.query(page_addr) {
                         if curr_frame == old_frame && !curr_flags.contains(MappingFlags::WRITE) {
                             if let Ok((_, tlb)) = pt_guard.remap(page_addr, new_frame, orig_flags) {
-                                tlb.flush();
+                                tlb.ignore();
                                 drop(pt_guard);
                                 reclaim.defer_frame(old_frame);
                                 sync_executable_mapping(orig_flags);
@@ -515,7 +520,7 @@ impl Backend {
                         return pt_guard
                             .remap(page_addr, old_frame, new_flags)
                             .map(|(_, tlb)| {
-                                tlb.flush();
+                                tlb.ignore();
                                 sync_executable_mapping(new_flags);
                             })
                             .is_ok();
@@ -677,6 +682,7 @@ impl Backend {
         new_flags: MappingFlags,
         pt: &mut PageTable,
         mapping: &FileMapping,
+        mutation: &mut impl MappingMutation<VirtAddr>,
     ) -> bool {
         debug!(
             "protect_file: [{:#x}, {:#x}) {:?} offset={:#x} bytes={:#x}",
@@ -692,7 +698,7 @@ impl Backend {
         }
 
         for page in PageIter4K::new(start, start + size).unwrap() {
-            let Some((frame, _old_flags, _)) = pt.query(page).ok() else {
+            let Some((frame, old_flags, _)) = pt.query(page).ok() else {
                 continue; // allow missing
             };
 
@@ -711,13 +717,18 @@ impl Backend {
                 new_flags & !MappingFlags::WRITE
             };
 
-            if pt.protect(page, flags).map(|(_, tlb)| tlb.flush()).is_err() {
+            if old_flags == super::effective_pte_flags(flags) {
+                continue;
+            }
+
+            if pt.protect(page, flags).map(|(_, tlb)| tlb.ignore()).is_err() {
                 error!(
                     "protect_file: failed to protect page: {:#x}, {:?}",
                     page, flags
                 );
                 return false;
             }
+            mutation.record(page, PAGE_SIZE_4K);
         }
         true
     }

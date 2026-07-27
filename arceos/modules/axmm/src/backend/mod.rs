@@ -6,8 +6,8 @@ use core::{
 };
 
 use axhal::paging::{MappingFlags, PageSize};
-use memory_addr::{PhysAddr, VirtAddr};
-use memory_set::MappingBackend;
+use memory_addr::{MemoryAddr, PhysAddr, VirtAddr, PAGE_SIZE_4K};
+use memory_set::{MappingBackend, MappingMutation as MappingMutationTracker};
 use ::alloc::{sync::Arc, vec::Vec};
 
 mod alloc;
@@ -21,6 +21,126 @@ pub(crate) use alloc::{cow_dec_frame_ref, cow_inc_frame_ref};
 pub use alloc::{AnonPageLoad, AnonPagePrepared};
 pub use self::cow::CowMapping;
 pub use self::file::{FilePageLoad, FilePagePrepared};
+
+/// The resident page-table entries changed by one address-space operation.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) struct TlbInvalidationTracker {
+    start: Option<VirtAddr>,
+    end: Option<VirtAddr>,
+    changed_pages: usize,
+}
+
+impl TlbInvalidationTracker {
+    pub(crate) const fn is_empty(&self) -> bool {
+        self.changed_pages == 0
+    }
+
+    pub(crate) const fn start(&self) -> Option<VirtAddr> {
+        self.start
+    }
+
+    pub(crate) const fn end(&self) -> Option<VirtAddr> {
+        self.end
+    }
+
+    pub(crate) const fn changed_pages(&self) -> usize {
+        self.changed_pages
+    }
+}
+
+impl MappingMutationTracker<VirtAddr> for TlbInvalidationTracker {
+    fn record(&mut self, start: VirtAddr, size: usize) {
+        if size == 0 {
+            return;
+        }
+        let Some(end) = start.checked_add(size) else {
+            return;
+        };
+        self.start = Some(self.start.map_or(start, |current| current.min(start)));
+        self.end = Some(self.end.map_or(end, |current| current.max(end)));
+        self.changed_pages = self
+            .changed_pages
+            .saturating_add(size.saturating_add(PAGE_SIZE_4K - 1) / PAGE_SIZE_4K);
+    }
+}
+
+pub(super) fn effective_pte_flags(flags: MappingFlags) -> MappingFlags {
+    #[cfg(any(target_arch = "riscv32", target_arch = "riscv64"))]
+    {
+        let mut flags = flags;
+        if flags.contains(MappingFlags::WRITE) {
+            flags |= MappingFlags::READ;
+        }
+        flags
+    }
+    #[cfg(not(any(target_arch = "riscv32", target_arch = "riscv64")))]
+    {
+        flags
+    }
+}
+
+pub(super) fn unmap_populated_range<M: MappingMutationTracker<VirtAddr>>(
+    start: VirtAddr,
+    size: usize,
+    pt: &mut axhal::paging::PageTable,
+    mutation: &mut M,
+) -> bool {
+    let Some(end) = start.checked_add(size) else {
+        return false;
+    };
+    let mut page = start;
+    while page < end {
+        let Ok((_, _, page_size)) = pt.query(page) else {
+            return false;
+        };
+        let mapped_size = page_size as usize;
+        if mapped_size > end - page {
+            return false;
+        }
+        let Ok((frame, page_size, tlb)) = pt.unmap(page) else {
+            return false;
+        };
+        debug_assert_eq!(page_size as usize, mapped_size);
+        tlb.ignore();
+        if frame.as_usize() != 0 {
+            mutation.record(page, mapped_size);
+        }
+        page += mapped_size;
+    }
+    true
+}
+
+pub(crate) fn protect_populated_range<M: MappingMutationTracker<VirtAddr>>(
+    start: VirtAddr,
+    size: usize,
+    new_flags: MappingFlags,
+    pt: &mut axhal::paging::PageTable,
+    mutation: &mut M,
+) -> bool {
+    let Some(end) = start.checked_add(size) else {
+        return false;
+    };
+    let effective_flags = effective_pte_flags(new_flags);
+    let mut page = start;
+    while page < end {
+        let Ok((frame, old_flags, page_size)) = pt.query(page) else {
+            return false;
+        };
+        let mapped_size = page_size as usize;
+        if mapped_size > end - page {
+            return false;
+        }
+        if frame.as_usize() != 0 && old_flags != effective_flags {
+            let Ok((protected_size, tlb)) = pt.protect(page, new_flags) else {
+                return false;
+            };
+            tlb.ignore();
+            mutation.record(page, protected_size as usize);
+        }
+        page += mapped_size;
+    }
+    true
+}
 
 #[derive(Default)]
 pub struct FileWritebacks(Vec<file::FileWriteback>);
@@ -319,23 +439,38 @@ impl MappingBackend for Backend {
         pt: &mut Self::PageTable,
         reclaim: &mut Self::Reclaim,
     ) -> bool {
+        self.unmap_tracked(start, size, pt, reclaim, &mut ())
+    }
+
+    fn unmap_tracked<M: MappingMutationTracker<Self::Addr>>(
+        &self,
+        start: VirtAddr,
+        size: usize,
+        pt: &mut Self::PageTable,
+        reclaim: &mut Self::Reclaim,
+        mutation: &mut M,
+    ) -> bool {
         let pt_mut = pt.get_mut();
         match self {
             Self::Shared { .. } => {
                 reclaim.defer_backend(self.clone());
-                Self::unmap_shared(start, size, pt_mut)
+                Self::unmap_shared(start, size, pt_mut, mutation)
             }
-            Self::Linear { pa_va_offset } => self.unmap_linear(start, size, pt_mut, *pa_va_offset),
+            Self::Linear { pa_va_offset } => {
+                self.unmap_linear(start, size, pt_mut, *pa_va_offset, mutation)
+            }
             Self::Alloc { populate, .. } => {
-                self.unmap_alloc(start, size, pt_mut, *populate, reclaim)
+                self.unmap_alloc(start, size, pt_mut, *populate, reclaim, mutation)
             }
             Self::File(_) => {
                 // Keep the CachedFile alive until after the address-space lock
                 // is released; dropping its final reference may perform I/O.
                 reclaim.defer_backend(self.clone());
-                self.unmap_file(start, size, pt_mut, reclaim)
+                self.unmap_file(start, size, pt_mut, reclaim, mutation)
             }
-            Self::Cow(cow) => cow.inner.unmap(start, size, pt, reclaim),
+            Self::Cow(cow) => cow
+                .inner
+                .unmap_tracked(start, size, pt, reclaim, mutation),
         }
     }
 
@@ -346,19 +481,31 @@ impl MappingBackend for Backend {
         new_flags: Self::Flags,
         page_table: &mut Self::PageTable,
     ) -> bool {
+        self.protect_tracked(start, size, new_flags, page_table, &mut ())
+    }
+
+    fn protect_tracked<M: MappingMutationTracker<Self::Addr>>(
+        &self,
+        start: Self::Addr,
+        size: usize,
+        new_flags: Self::Flags,
+        page_table: &mut Self::PageTable,
+        mutation: &mut M,
+    ) -> bool {
         let pt_mut = page_table.get_mut();
         match self {
-            Self::Shared { .. } | Self::Linear { .. } => pt_mut
-                .protect_region(start, size, new_flags, true)
-                .map(|tlb| tlb.ignore())
-                .is_ok(),
+            Self::Shared { .. } | Self::Linear { .. } => {
+                protect_populated_range(start, size, new_flags, pt_mut, mutation)
+            }
             Self::Alloc { populate, .. } => {
-                self.protect_alloc(start, size, new_flags, pt_mut, *populate)
+                self.protect_alloc(start, size, new_flags, pt_mut, *populate, mutation)
             }
             Self::File(mapping) => {
-                self.protect_file(start, size, new_flags, pt_mut, mapping)
+                self.protect_file(start, size, new_flags, pt_mut, mapping, mutation)
             }
-            Self::Cow(cow) => cow.inner.protect(start, size, new_flags, page_table),
+            Self::Cow(cow) => cow
+                .inner
+                .protect_tracked(start, size, new_flags, page_table, mutation),
         }
     }
 }

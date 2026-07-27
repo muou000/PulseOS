@@ -84,6 +84,14 @@ pub fn read_user_page_table() -> PhysAddr {
     pa!(satp::read().ppn() << 12)
 }
 
+/// Returns the address-space ID currently installed in `satp`.
+#[inline]
+pub fn read_current_asid() -> usize {
+    let satp_value: usize;
+    unsafe { core::arch::asm!("csrr {}, satp", out(reg) satp_value) };
+    (satp_value >> 44) & 0xffff
+}
+
 /// Reads the current page table root register for kernel space (`satp`).
 ///
 /// RISC-V does not have a separate page table root register for user and
@@ -152,6 +160,12 @@ pub fn flush_tlb(vaddr: Option<VirtAddr>) {
 #[inline]
 pub fn flush_tlb_asid(asid: usize) {
     asm::sfence_vma(asid, 0);
+}
+
+/// Flushes one virtual-address translation belonging to the given ASID.
+#[inline]
+pub fn flush_tlb_asid_vaddr(asid: usize, vaddr: VirtAddr) {
+    asm::sfence_vma(asid, vaddr.as_usize());
 }
 
 /// Writes the Supervisor Trap Vector Base Address register (`stvec`).

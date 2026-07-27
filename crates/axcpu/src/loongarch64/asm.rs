@@ -46,6 +46,12 @@ pub fn read_user_page_table() -> PhysAddr {
     PhysAddr::from(pgdl::read().base())
 }
 
+/// Returns the address-space ID currently installed in the ASID CSR.
+#[inline]
+pub fn read_current_asid() -> usize {
+    asid::read().asid()
+}
+
 /// Reads the current page table root register for kernel space (`PGDH`).
 ///
 /// Returns the physical address of the page table root.
@@ -127,6 +133,18 @@ pub fn flush_tlb_asid(asid: usize) {
         asm!(
             "dbar 0; invtlb 0x04, {asid}, $r0; dbar 0; ibar 0",
             asid = in(reg) asid
+        );
+    }
+}
+
+/// Flushes one virtual-address translation belonging to the given ASID.
+#[inline]
+pub fn flush_tlb_asid_vaddr(asid: usize, vaddr: VirtAddr) {
+    unsafe {
+        asm!(
+            "dbar 0; invtlb 0x05, {asid}, {addr}; dbar 0; ibar 0",
+            asid = in(reg) asid,
+            addr = in(reg) vaddr.as_usize(),
         );
     }
 }

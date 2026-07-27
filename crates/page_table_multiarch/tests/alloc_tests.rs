@@ -101,6 +101,56 @@ fn test_dealloc_x86() -> PagingResult<()> {
 }
 
 #[test]
+#[cfg(any(target_arch = "x86_64", docsrs))]
+fn copy_cow_range_reports_only_writable_source_changes() -> PagingResult<()> {
+    type Meta = page_table_multiarch::x86_64::X64PagingMetaData;
+    type Pte = page_table_entry::x86_64::X64PTE;
+    type Table = PageTable64<Meta, Pte, TrackPagingHandler<Meta>>;
+
+    ALLOCATED.with_borrow_mut(|it| it.clear());
+    let mut src = Table::try_new()?;
+    let mut dst = Table::try_new()?;
+    let writable = VirtAddr::from_usize(0x1000);
+    let readonly = VirtAddr::from_usize(0x2000);
+    src.map(
+        writable,
+        PhysAddr::from_usize(0x10_0000),
+        PageSize::Size4K,
+        MappingFlags::READ | MappingFlags::WRITE,
+    )?
+    .ignore();
+    src.map(
+        readonly,
+        PhysAddr::from_usize(0x20_0000),
+        PageSize::Size4K,
+        MappingFlags::READ,
+    )?
+    .ignore();
+
+    let mut referenced = 0;
+    let mut changes = Vec::new();
+    dst.copy_cow_range(
+        &mut src,
+        writable,
+        3 * 4096,
+        true,
+        |_| referenced += 1,
+        |start, size| changes.push((start, size)),
+    )?;
+
+    assert_eq!(referenced, 2);
+    assert_eq!(changes, vec![(writable, 4096)]);
+    assert!(!src.query(writable)?.1.contains(MappingFlags::WRITE));
+    assert!(!dst.query(writable)?.1.contains(MappingFlags::WRITE));
+    assert_eq!(src.query(readonly)?.1, MappingFlags::READ);
+
+    drop(dst);
+    drop(src);
+    assert_eq!(ALLOCATED.with_borrow(|it| it.len()), 0);
+    Ok(())
+}
+
+#[test]
 #[cfg(any(target_arch = "riscv32", target_arch = "riscv64", docsrs))]
 fn test_dealloc_riscv() -> PagingResult<()> {
     run_test_for::<

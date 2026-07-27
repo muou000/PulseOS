@@ -146,7 +146,6 @@ fn handle_page_fault(
 
     let fault_error = match proc.handle_page_fault(vaddr, access_flags) {
         Ok(true) => {
-            axhal::asm::flush_tlb(Some(vaddr));
             if is_user {
                 let leave_ns = axhal::time::monotonic_time_nanos() as u64;
                 proc.add_sys_time_ns(leave_ns.saturating_sub(enter_ns));

@@ -54,7 +54,7 @@ impl CowMapping {
                                 let new_flags = curr_flags | MappingFlags::WRITE;
                                 return pt_guard.remap(page, old_frame, new_flags)
                                     .map(|(_, tlb)| {
-                                        tlb.flush();
+                                        tlb.ignore();
                                         self.sync_executable_if_needed(new_flags);
                                     })
                                     .is_ok();
@@ -81,7 +81,7 @@ impl CowMapping {
                                 let new_flags = curr_flags | MappingFlags::WRITE;
                                 let success = pt_guard.remap(page, new_frame, new_flags)
                                     .map(|(_, tlb)| {
-                                        tlb.flush();
+                                        tlb.ignore();
                                         self.sync_executable_if_needed(new_flags);
                                     })
                                     .is_ok();
