@@ -10,7 +10,7 @@ use axfs::{CachedFile, ExecAccessGuard, FileFlags, FsContext};
 use axhal::{mem::MemRegionFlags, paging::MappingFlags};
 use axmm::AddrSpace;
 use kernel_elf_parser::{AuxEntry, AuxType, ELFHeadersBuilder, ELFParser, app_stack_region};
-use memory_addr::{MemoryAddr, PAGE_SIZE_4K, VirtAddr};
+use memory_addr::{MemoryAddr, PAGE_SIZE_4K, VirtAddr, VirtAddrRange};
 use xmas_elf::{
     ElfFile,
     header::{Machine, Type as ElfType},
@@ -54,6 +54,88 @@ struct ElfLoadLayout {
     end_data: usize,
 }
 
+#[derive(Clone, Copy, Debug)]
+struct ElfLoadRequirements {
+    min_page: usize,
+    span: usize,
+    max_align: usize,
+}
+
+impl ElfLoadRequirements {
+    fn from_elf(elf: &ElfFile<'_>) -> AxResult<Self> {
+        let mut min_page = usize::MAX;
+        let mut max_page = 0;
+        let mut max_align = PAGE_SIZE_4K;
+        let mut has_load_segment = false;
+
+        for ph in elf.program_iter() {
+            if ph.get_type() != Ok(Type::Load) {
+                continue;
+            }
+
+            let p_offset = usize::try_from(ph.offset()).map_err(|_| AxError::InvalidExecutable)?;
+            let p_vaddr =
+                usize::try_from(ph.virtual_addr()).map_err(|_| AxError::InvalidExecutable)?;
+            let p_filesz =
+                usize::try_from(ph.file_size()).map_err(|_| AxError::InvalidExecutable)?;
+            let p_memsz = usize::try_from(ph.mem_size()).map_err(|_| AxError::InvalidExecutable)?;
+            let p_align = usize::try_from(ph.align()).map_err(|_| AxError::InvalidExecutable)?;
+
+            if p_filesz > p_memsz {
+                return Err(AxError::InvalidExecutable);
+            }
+            p_offset
+                .checked_add(p_filesz)
+                .ok_or(AxError::InvalidExecutable)?;
+            let seg_end = p_vaddr
+                .checked_add(p_memsz)
+                .ok_or(AxError::InvalidExecutable)?;
+
+            if p_align > 1 {
+                if !p_align.is_power_of_two() || p_offset % p_align != p_vaddr % p_align {
+                    return Err(AxError::InvalidExecutable);
+                }
+            }
+            if p_offset % PAGE_SIZE_4K != p_vaddr % PAGE_SIZE_4K {
+                return Err(AxError::InvalidExecutable);
+            }
+            if p_memsz == 0 {
+                continue;
+            }
+            if p_align > 1 {
+                max_align = max_align.max(p_align);
+            }
+
+            let seg_start_page = p_vaddr & !(PAGE_SIZE_4K - 1);
+            let seg_end_page =
+                checked_align_up(seg_end, PAGE_SIZE_4K).ok_or(AxError::InvalidExecutable)?;
+            min_page = min_page.min(seg_start_page);
+            max_page = max_page.max(seg_end_page);
+            has_load_segment = true;
+        }
+
+        if !has_load_segment {
+            return Err(AxError::InvalidExecutable);
+        }
+        let span = max_page
+            .checked_sub(min_page)
+            .filter(|span| *span != 0)
+            .ok_or(AxError::InvalidExecutable)?;
+        Ok(Self {
+            min_page,
+            span,
+            max_align,
+        })
+    }
+}
+
+fn checked_align_up(value: usize, align: usize) -> Option<usize> {
+    debug_assert!(align.is_power_of_two());
+    value
+        .checked_add(align.checked_sub(1)?)
+        .map(|value| value & !(align - 1))
+}
+
 fn validate_machine(elf: &ElfFile<'_>, path: &str) -> AxResult {
     let machine = elf.header.pt2.machine().as_machine();
     let ok = match machine {
@@ -73,17 +155,51 @@ fn validate_machine(elf: &ElfFile<'_>, path: &str) -> AxResult {
     }
 }
 
-fn compute_load_bias(elf: &ElfFile<'_>, desired_base: usize) -> AxResult<usize> {
-    let min_page = elf
-        .program_iter()
-        .filter(|ph| ph.get_type() == Ok(Type::Load) && ph.mem_size() != 0)
-        .map(|ph| VirtAddr::from(ph.virtual_addr() as usize).align_down_4k())
-        .min()
-        .ok_or(AxError::InvalidExecutable)?
-        .as_usize();
-    desired_base
-        .checked_sub(min_page)
-        .ok_or(AxError::InvalidExecutable)
+fn compute_load_bias(requirements: ElfLoadRequirements, desired_base: usize) -> AxResult<usize> {
+    let bias = desired_base
+        .checked_sub(requirements.min_page)
+        .ok_or(AxError::InvalidExecutable)?;
+    if bias % requirements.max_align != 0 || desired_base.checked_add(requirements.span).is_none() {
+        return Err(AxError::InvalidExecutable);
+    }
+    Ok(bias)
+}
+
+fn find_interpreter_load_bias(
+    aspace: &AddrSpace,
+    requirements: ElfLoadRequirements,
+) -> AxResult<usize> {
+    let limit = VirtAddrRange::new(
+        VirtAddr::from(USER_INTERP_BASE),
+        VirtAddr::from(USER_HEAP_BASE),
+    );
+    let mut hint = USER_INTERP_BASE.max(requirements.min_page);
+
+    loop {
+        if !hint
+            .checked_add(requirements.span)
+            .is_some_and(|end| end <= USER_HEAP_BASE)
+        {
+            return Err(AxError::NoMemory);
+        }
+        let mapping_start = aspace
+            .find_free_area(VirtAddr::from(hint), requirements.span, limit)
+            .ok_or(AxError::NoMemory)?
+            .as_usize();
+        let bias = mapping_start
+            .checked_sub(requirements.min_page)
+            .ok_or(AxError::NoMemory)?;
+        let misalignment = bias % requirements.max_align;
+        if misalignment == 0 {
+            return Ok(bias);
+        }
+
+        // The lower layer searches at page granularity. Advance within the
+        // free range until the ELF load bias also satisfies p_align.
+        hint = mapping_start
+            .checked_add(requirements.max_align - misalignment)
+            .ok_or(AxError::NoMemory)?;
+    }
 }
 
 fn segment_flags(ph: &xmas_elf::program::ProgramHeader<'_>) -> MappingFlags {
@@ -487,6 +603,7 @@ pub fn check_elf_header(path: &str) -> AxResult<()> {
     }
     let main_elf = ElfFile::new(main_data).map_err(|_| AxError::InvalidExecutable)?;
     validate_machine(&main_elf, path)?;
+    let _ = ElfLoadRequirements::from_elf(&main_elf)?;
 
     // Check interpreter if present
     if let Some(interp_path) = read_interp_path(&main_elf, main_data)? {
@@ -497,6 +614,7 @@ pub fn check_elf_header(path: &str) -> AxResult<()> {
         }
         let interp_elf = ElfFile::new(interp_data).map_err(|_| AxError::InvalidExecutable)?;
         validate_machine(&interp_elf, &interp_path)?;
+        let _ = ElfLoadRequirements::from_elf(&interp_elf)?;
     }
     Ok(())
 }
@@ -518,10 +636,11 @@ pub fn load_user_app(
     }
     let main_elf = ElfFile::new(main_data).map_err(|_| AxError::InvalidExecutable)?;
     validate_machine(&main_elf, path)?;
+    let main_requirements = ElfLoadRequirements::from_elf(&main_elf)?;
 
     let main_bias = match main_elf.header.pt2.type_().as_type() {
         ElfType::Executable => 0,
-        ElfType::SharedObject => compute_load_bias(&main_elf, USER_DYN_BASE)?,
+        ElfType::SharedObject => compute_load_bias(main_requirements, USER_DYN_BASE)?,
         _ => return Err(AxError::InvalidExecutable),
     };
     let main_layout = load_segments(aspace, &main_elf, &main_image.file, main_bias)?;
@@ -549,10 +668,11 @@ pub fn load_user_app(
         }
         let interp_elf = ElfFile::new(interp_data).map_err(|_| AxError::InvalidExecutable)?;
         validate_machine(&interp_elf, &interp_path)?;
+        let interp_requirements = ElfLoadRequirements::from_elf(&interp_elf)?;
 
         let bias = match interp_elf.header.pt2.type_().as_type() {
             ElfType::Executable => 0,
-            ElfType::SharedObject => compute_load_bias(&interp_elf, USER_INTERP_BASE)?,
+            ElfType::SharedObject => find_interpreter_load_bias(aspace, interp_requirements)?,
             _ => return Err(AxError::InvalidExecutable),
         };
         let _ = load_segments(aspace, &interp_elf, &interp_image.file, bias)?;
@@ -560,10 +680,20 @@ pub fn load_user_app(
         dispatch_entry = VirtAddr::from(interp_elf.header.pt2.entry_point() as usize)
             .checked_add(bias)
             .ok_or(AxError::OutOfRange)?;
+        let mapping_start = interp_requirements
+            .min_page
+            .checked_add(bias)
+            .ok_or(AxError::OutOfRange)?;
+        let mapping_end = mapping_start
+            .checked_add(interp_requirements.span)
+            .ok_or(AxError::OutOfRange)?;
         axlog::debug!(
-            "Loaded interpreter {} at bias={:#x}, entry={:#x}",
+            "Loaded interpreter {} in [{:#x}, {:#x}), bias={:#x}, align={:#x}, entry={:#x}",
             interp_path,
+            mapping_start,
+            mapping_end,
             bias,
+            interp_requirements.max_align,
             dispatch_entry.as_usize()
         );
     }
