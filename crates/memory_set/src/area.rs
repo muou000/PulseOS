@@ -2,7 +2,7 @@ use core::fmt;
 
 use memory_addr::{AddrRange, MemoryAddr};
 
-use crate::{MappingBackend, MappingError, MappingResult};
+use crate::{MappingBackend, MappingError, MappingMutation, MappingResult};
 
 /// A memory area represents a continuous range of virtual memory with the same
 /// flags.
@@ -85,25 +85,27 @@ impl<B: MappingBackend> MemoryArea<B> {
     }
 
     /// Unmaps the whole memory area in the page table.
-    pub(crate) fn unmap_area(
+    pub(crate) fn unmap_area_tracked<M: MappingMutation<B::Addr>>(
         &self,
         page_table: &mut B::PageTable,
         reclaim: &mut B::Reclaim,
+        mutation: &mut M,
     ) -> MappingResult {
         self.backend
-            .unmap(self.start(), self.size(), page_table, reclaim)
+            .unmap_tracked(self.start(), self.size(), page_table, reclaim, mutation)
             .then_some(())
             .ok_or(MappingError::BadState)
     }
 
     /// Changes the flags in the page table.
-    pub(crate) fn protect_area(
+    pub(crate) fn protect_area_tracked<M: MappingMutation<B::Addr>>(
         &mut self,
         new_flags: B::Flags,
         page_table: &mut B::PageTable,
+        mutation: &mut M,
     ) -> MappingResult {
         self.backend
-            .protect(self.start(), self.size(), new_flags, page_table)
+            .protect_tracked(self.start(), self.size(), new_flags, page_table, mutation)
             .then_some(())
             .ok_or(MappingError::BadState)
     }
@@ -119,6 +121,7 @@ impl<B: MappingBackend> MemoryArea<B> {
         new_size: usize,
         page_table: &mut B::PageTable,
         reclaim: &mut B::Reclaim,
+        mutation: &mut impl MappingMutation<B::Addr>,
     ) -> MappingResult {
         assert!(new_size > 0 && new_size < self.size());
         let old_size = self.size();
@@ -130,7 +133,7 @@ impl<B: MappingBackend> MemoryArea<B> {
 
         if !self
             .backend
-            .unmap(unmap_start, unmap_size, page_table, reclaim)
+            .unmap_tracked(unmap_start, unmap_size, page_table, reclaim, mutation)
         {
             return Err(MappingError::BadState);
         }

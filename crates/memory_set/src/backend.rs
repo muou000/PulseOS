@@ -1,5 +1,18 @@
 use memory_addr::MemoryAddr;
 
+/// Accumulates page-table entries changed by a mapping operation.
+///
+/// Backends that can partially mutate a mapping before returning failure should
+/// record each completed change as it happens.
+pub trait MappingMutation<A: MemoryAddr> {
+    /// Records a changed virtual-address range.
+    fn record(&mut self, start: A, size: usize);
+}
+
+impl<A: MemoryAddr> MappingMutation<A> for () {
+    fn record(&mut self, _start: A, _size: usize) {}
+}
+
 /// Underlying operations to do when manipulating mappings within the specific
 /// [`MemoryArea`](crate::MemoryArea).
 ///
@@ -38,6 +51,26 @@ pub trait MappingBackend: Clone {
         reclaim: &mut Self::Reclaim,
     ) -> bool;
 
+    /// What to do when unmapping while reporting changed page-table entries.
+    ///
+    /// The default implementation conservatively reports the full range after
+    /// a successful unmap. Backends that support sparse mappings or partial
+    /// failure should override this method.
+    fn unmap_tracked<M: MappingMutation<Self::Addr>>(
+        &self,
+        start: Self::Addr,
+        size: usize,
+        page_table: &mut Self::PageTable,
+        reclaim: &mut Self::Reclaim,
+        mutation: &mut M,
+    ) -> bool {
+        let success = self.unmap(start, size, page_table, reclaim);
+        if success {
+            mutation.record(start, size);
+        }
+        success
+    }
+
     /// What to do when changing access flags.
     fn protect(
         &self,
@@ -46,4 +79,23 @@ pub trait MappingBackend: Clone {
         new_flags: Self::Flags,
         page_table: &mut Self::PageTable,
     ) -> bool;
+
+    /// What to do when changing access flags while reporting changed entries.
+    ///
+    /// The default implementation conservatively reports the full range after
+    /// a successful protection change. Sparse backends should override it.
+    fn protect_tracked<M: MappingMutation<Self::Addr>>(
+        &self,
+        start: Self::Addr,
+        size: usize,
+        new_flags: Self::Flags,
+        page_table: &mut Self::PageTable,
+        mutation: &mut M,
+    ) -> bool {
+        let success = self.protect(start, size, new_flags, page_table);
+        if success {
+            mutation.record(start, size);
+        }
+        success
+    }
 }
