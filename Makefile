@@ -14,6 +14,10 @@ export BLK := y
 export SMP ?= 8
 export MEM := 8G
 export ARCH ?= riscv64
+ALL_RISCV64_SMP := 8
+ALL_RISCV64_MEM := 16G
+ALL_LOONGARCH64_SMP := 12
+ALL_LOONGARCH64_MEM := 36G
 export LOG ?= info
 
 EXTRA_RUSTFLAGS := -C debuginfo=2 -C force-frame-pointers=yes -C strip=none
@@ -29,22 +33,12 @@ prepare-tools:
 	@echo "[tools] Using prebuilt tools from $(A)/bin"
 
 all: prepare-tools
-	@ARCH=riscv64 APP_FEATURES=$(APP_FEATURES) LOG=off $(MAKE) defconfig
-	@ARCH=riscv64 APP_FEATURES=$(APP_FEATURES) LOG=off BUS=mmio OUT_DIR=$(BUILD_OUT_DIR) $(MAKE) -C arceos build
-	@if [ "$(QPERF_TRACE)" = "y" ]; then \
-		cp $(BUILD_OUT_DIR)/$(NAME)_riscv64-qemu-virt.bin kernel-rv-qperf; \
-		cp $(BUILD_OUT_DIR)/$(NAME)_riscv64-qemu-virt.elf $(NAME)_riscv64-qemu-virt-qperf.elf; \
-	else \
-		cp $(BUILD_OUT_DIR)/$(NAME)_riscv64-qemu-virt.bin kernel-rv; \
-	fi
-	@ARCH=loongarch64 APP_FEATURES=$(APP_FEATURES) LOG=off FEATURES=bus-pci $(MAKE) defconfig
-	@ARCH=loongarch64 APP_FEATURES=$(APP_FEATURES) LOG=off BUS=pci FEATURES=bus-pci OUT_DIR=$(BUILD_OUT_DIR) $(MAKE) -C arceos build
-	@if [ "$(QPERF_TRACE)" = "y" ]; then \
-		cp $(BUILD_OUT_DIR)/$(NAME)_loongarch64-qemu-virt.elf kernel-la-qperf; \
-		cp $(BUILD_OUT_DIR)/$(NAME)_loongarch64-qemu-virt.elf $(NAME)_loongarch64-qemu-virt-qperf.elf; \
-	else \
-		cp $(BUILD_OUT_DIR)/$(NAME)_loongarch64-qemu-virt.elf kernel-la; \
-	fi
+	@$(MAKE) ARCH=riscv64 SMP=$(ALL_RISCV64_SMP) MEM=$(ALL_RISCV64_MEM) APP_FEATURES=qemu,$(FEATURE) LOG=off defconfig
+	@$(MAKE) -C arceos ARCH=riscv64 SMP=$(ALL_RISCV64_SMP) MEM=$(ALL_RISCV64_MEM) APP_FEATURES=qemu,$(FEATURE) LOG=off BUS=mmio OUT_DIR=$(A) build
+	@cp $(NAME)_riscv64-qemu-virt.bin kernel-rv
+	@$(MAKE) ARCH=loongarch64 SMP=$(ALL_LOONGARCH64_SMP) MEM=$(ALL_LOONGARCH64_MEM) APP_FEATURES=qemu,$(FEATURE) LOG=off FEATURES=bus-pci defconfig
+	@$(MAKE) -C arceos ARCH=loongarch64 SMP=$(ALL_LOONGARCH64_SMP) MEM=$(ALL_LOONGARCH64_MEM) APP_FEATURES=qemu,$(FEATURE) LOG=off BUS=pci FEATURES=bus-pci OUT_DIR=$(A) build
+	@cp $(NAME)_loongarch64-qemu-virt.elf kernel-la
 	@if [ "$(FEATURE)" = "pre-testcode" ]; then $(MAKE) img_all; fi
 
 test: prepare-tools
@@ -68,14 +62,6 @@ test: prepare-tools
 
 qperf-test: QPERF_TRACE := y
 qperf-test: test
-
-debug: prepare-tools
-	@ARCH=riscv64 APP_FEATURES=qemu LOG=$(LOG) $(MAKE) defconfig
-	@ARCH=riscv64 APP_FEATURES=qemu LOG=$(LOG) BUS=mmio $(MAKE) -C arceos build
-	@cp $(NAME)_riscv64-qemu-virt.bin kernel-rv
-	@ARCH=loongarch64 APP_FEATURES=qemu LOG=$(LOG) FEATURES=bus-pci $(MAKE) defconfig
-	@ARCH=loongarch64 APP_FEATURES=qemu LOG=$(LOG) BUS=pci FEATURES=bus-pci $(MAKE) -C arceos build
-	@cp $(NAME)_loongarch64-qemu-virt.elf kernel-la
 
 build: prepare-tools defconfig
 	@$(MAKE) -C arceos A=$(A) ARCH=$(ARCH) $@
@@ -103,4 +89,4 @@ img_all:
 	@cp disk.img arceos/disk.img
 	@cp disk-la.img arceos/disk-la.img
 
-.PHONY: all test qperf-test debug build run justrun clean defconfig img_all la prepare-tools
+.PHONY: all test qperf-test build run justrun clean defconfig img_all la prepare-tools
