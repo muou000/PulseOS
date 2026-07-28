@@ -34,6 +34,7 @@ qperf-trace = ["multitask"]
 sched-fifo = ["multitask"]
 sched-rr = ["multitask", "preempt"]
 sched-cfs = ["multitask", "preempt"]
+sched-load-balance = ["multitask"]
 
 test = ["percpu?/sp-naive"]
 

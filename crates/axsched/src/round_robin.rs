@@ -1,6 +1,8 @@
 use alloc::sync::Arc;
-use core::ops::Deref;
-use core::sync::atomic::{AtomicIsize, Ordering};
+use core::{
+    ops::Deref,
+    sync::atomic::{AtomicIsize, Ordering},
+};
 
 use linked_list_r4l::{GetLinks, Links, List};
 
@@ -94,6 +96,28 @@ impl<T, const S: usize> RRScheduler<T, S> {
     /// get the name of scheduler
     pub fn scheduler_name() -> &'static str {
         "Round-robin with RT priority"
+    }
+
+    /// Returns the number of normal-priority tasks waiting in this scheduler.
+    pub fn normal_task_count(&self) -> usize {
+        self.normal_queue.iter().count()
+    }
+
+    /// Detaches the first normal-priority task accepted by `predicate`.
+    ///
+    /// Real-time queues are intentionally excluded from cross-CPU balancing.
+    pub fn detach_normal_task(
+        &mut self,
+        mut predicate: impl FnMut(&RRTask<T, S>) -> bool,
+    ) -> Option<Arc<RRTask<T, S>>> {
+        let mut cursor = self.normal_queue.cursor_front_mut();
+        while let Some(task) = cursor.current() {
+            if predicate(task) {
+                return cursor.remove_current();
+            }
+            cursor.move_next();
+        }
+        None
     }
 }
 
