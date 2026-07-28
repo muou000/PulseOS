@@ -20,6 +20,14 @@ struct CacheBlock {
 }
 
 const CACHE_EVICTION_SCAN_LIMIT: usize = 64;
+const DEVICE_READ_MAX_ATTEMPTS: usize = 2;
+
+fn retryable_device_read_error(error: &axdriver::prelude::DevError) -> bool {
+    matches!(
+        error,
+        axdriver::prelude::DevError::Again | axdriver::prelude::DevError::Io
+    )
+}
 
 fn pop_cache_victim(
     cache: &mut LruCache<usize, CacheBlock>,
@@ -249,15 +257,57 @@ impl<D: BlockDriverOps + 'static> Ext4Disk<D> {
             return Err(axdriver::prelude::DevError::InvalidParam);
         }
         if inner_offset == 0 && dest.len() == blocks * self.sector_size {
-            dev.read_block_async(first_block, dest).await
+            Self::read_device_blocks(&mut dev, first_block, dest).await
         } else {
             let mut raw = vec![0; blocks * self.sector_size];
-            dev.read_block_async(first_block, &mut raw).await?;
+            Self::read_device_blocks(&mut dev, first_block, &mut raw).await?;
             dest.copy_from_slice(
                 &raw[inner_offset..inner_offset + num_blocks * block_size],
             );
             Ok(())
         }
+    }
+
+    async fn read_device_blocks(
+        dev: &mut D,
+        first_block: u64,
+        dest: &mut [u8],
+    ) -> axdriver::prelude::DevResult<()>
+    where
+        D: AsyncBlockDriverOps,
+    {
+        for attempt in 1..=DEVICE_READ_MAX_ATTEMPTS {
+            match dev.read_block_async(first_block, dest).await {
+                Ok(()) => return Ok(()),
+                Err(error)
+                    if attempt < DEVICE_READ_MAX_ATTEMPTS
+                        && retryable_device_read_error(&error) =>
+                {
+                    log::warn!(
+                        "ext4 device read failed; retrying: first_block={}, len={}, \
+                         attempt={}/{}, error={:?}",
+                        first_block,
+                        dest.len(),
+                        attempt,
+                        DEVICE_READ_MAX_ATTEMPTS,
+                        error
+                    );
+                }
+                Err(error) => {
+                    log::error!(
+                        "ext4 device read failed: first_block={}, len={}, attempt={}/{}, \
+                         error={:?}",
+                        first_block,
+                        dest.len(),
+                        attempt,
+                        DEVICE_READ_MAX_ATTEMPTS,
+                        error
+                    );
+                    return Err(error);
+                }
+            }
+        }
+        unreachable!("ext4 device read attempt loop exhausted")
     }
 
     pub async fn read_offset(&self, offset: usize, buf: &mut [u8]) -> axdriver::prelude::DevResult<()>
@@ -609,6 +659,24 @@ impl<D: BlockDriverOps> Clone for Ext4DiskWrapper<D> {
 #[derive(Debug)]
 struct Ext4DevError(axdriver::prelude::DevError);
 
+impl Ext4DevError {
+    fn to_vfs_error(&self) -> axfs_ng_vfs::VfsError {
+        use axdriver::prelude::DevError;
+        use axfs_ng_vfs::VfsError;
+
+        match &self.0 {
+            DevError::AlreadyExists => VfsError::AlreadyExists,
+            DevError::Again => VfsError::WouldBlock,
+            DevError::BadState => VfsError::BadState,
+            DevError::InvalidParam => VfsError::InvalidInput,
+            DevError::Io => VfsError::Io,
+            DevError::NoMemory => VfsError::NoMemory,
+            DevError::ResourceBusy => VfsError::ResourceBusy,
+            DevError::Unsupported => VfsError::OperationNotSupported,
+        }
+    }
+}
+
 impl core::fmt::Display for Ext4DevError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         write!(f, "Device error: {:?}", self.0)
@@ -629,5 +697,20 @@ impl<D: AsyncBlockDriverOps + Clone + 'static> ext4plus::Ext4Read for Ext4DiskWr
 impl<D: AsyncBlockDriverOps + Clone + 'static> ext4plus::Ext4Write for Ext4DiskWrapper<D> {
     async fn write(&self, start_byte: u64, src: &[u8]) -> Result<(), alloc::boxed::Box<dyn core::error::Error + Send + Sync + 'static>> {
         self.0.write_offset(start_byte as usize, src).await.map_err(|err| alloc::boxed::Box::new(Ext4DevError(err)) as _)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use axdriver::prelude::DevError;
+
+    use super::retryable_device_read_error;
+
+    #[test]
+    fn only_transient_device_read_errors_are_retried() {
+        assert!(retryable_device_read_error(&DevError::Again));
+        assert!(retryable_device_read_error(&DevError::Io));
+        assert!(!retryable_device_read_error(&DevError::BadState));
+        assert!(!retryable_device_read_error(&DevError::NoMemory));
     }
 }

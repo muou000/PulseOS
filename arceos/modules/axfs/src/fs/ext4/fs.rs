@@ -1,23 +1,25 @@
-use alloc::sync::Arc;
-use alloc::boxed::Box;
-use alloc::collections::BTreeMap;
-use alloc::sync::Weak;
-use alloc::vec::Vec;
-use core::cell::OnceCell;
-use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use alloc::{
+    boxed::Box,
+    collections::BTreeMap,
+    sync::{Arc, Weak},
+    vec::Vec,
+};
+use core::{
+    cell::OnceCell,
+    sync::atomic::{AtomicBool, AtomicU64, Ordering},
+};
 
+use async_trait::async_trait;
+use axdriver::prelude::AsyncBlockDriverOps;
 use axfs_ng_vfs::{
     DirEntry, DirNode, Filesystem, FilesystemOps, Reference, StatFs, VfsResult, WeakDirEntry,
     path::MAX_NAME_LEN,
 };
+use axsync::Mutex;
 use ext4plus::{Ext4, prelude::Ext4Error};
 use lru::LruCache;
-use axsync::Mutex;
-use async_trait::async_trait;
-use axdriver::prelude::AsyncBlockDriverOps;
-use super::{
-    Ext4Disk, Ext4DiskWrapper, Inode, MetadataCacheState, cleanup_dir_cache_registry,
-};
+
+use super::{Ext4Disk, Ext4DiskWrapper, Inode, MetadataCacheState, cleanup_dir_cache_registry};
 
 const ROOT_INODE: u32 = 2;
 
@@ -44,7 +46,12 @@ impl Ext4Filesystem {
         const LOG_BLOCK_SIZE_OFFSET: usize = 24;
 
         let mut log_block_size_buf = [0u8; 4];
-        disk.read_offset(EXT4_SUPERBLOCK_OFFSET + LOG_BLOCK_SIZE_OFFSET, &mut log_block_size_buf).await.map_err(|e| {
+        disk.read_offset(
+            EXT4_SUPERBLOCK_OFFSET + LOG_BLOCK_SIZE_OFFSET,
+            &mut log_block_size_buf,
+        )
+        .await
+        .map_err(|e| {
             log::error!("Failed to read block size: {:?}", e);
             axfs_ng_vfs::VfsError::Io
         })?;
@@ -59,18 +66,22 @@ impl Ext4Filesystem {
         let ext4 = match Ext4::load_with_writer(
             Box::new(Ext4DiskWrapper(disk.clone())),
             Some(Box::new(Ext4DiskWrapper(disk.clone()))),
-        ).await {
+        )
+        .await
+        {
             Ok(val) => val,
             Err(e) => {
                 if matches!(e, ext4plus::prelude::Ext4Error::Readonly) {
-                    log::info!("Ext4 filesystem has write-incompatible features, falling back to read-only mount.");
-                    Ext4::load_with_writer(
-                        Box::new(Ext4DiskWrapper(disk.clone())),
-                        None,
-                    ).await.map_err(|e| {
-                        log::error!("Failed to load ext4 filesystem in RO mode: {:?}", e);
-                        axfs_ng_vfs::VfsError::Io
-                    })?
+                    log::info!(
+                        "Ext4 filesystem has write-incompatible features, falling back to \
+                         read-only mount."
+                    );
+                    Ext4::load_with_writer(Box::new(Ext4DiskWrapper(disk.clone())), None)
+                        .await
+                        .map_err(|e| {
+                            log::error!("Failed to load ext4 filesystem in RO mode: {:?}", e);
+                            axfs_ng_vfs::VfsError::Io
+                        })?
                 } else {
                     log::error!("Failed to load ext4 filesystem: {:?}", e);
                     return Err(axfs_ng_vfs::VfsError::Io);
@@ -183,12 +194,19 @@ impl Ext4Filesystem {
                             if !has_other_active {
                                 log::debug!("ext4: deferred deleting unlinked file (ino {})", ino);
                                 if let Err(e) = self.inner.delete_file(inode).await {
-                                    log::error!("ext4: failed to delete unlinked file (ino {}): {:?}", ino, e);
+                                    log::error!(
+                                        "ext4: failed to delete unlinked file (ino {}): {:?}",
+                                        ino,
+                                        e
+                                    );
                                     if !matches!(e, Ext4Error::Corrupt(_) | Ext4Error::NotFound) {
                                         failed.push(ino);
                                     }
                                 } else {
-                                    crate::invalidate_file_cache(self as *const Self as usize, ino as u64);
+                                    crate::invalidate_file_cache(
+                                        self as *const Self as usize,
+                                        ino as u64,
+                                    );
                                 }
                             }
                         }

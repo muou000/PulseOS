@@ -3,11 +3,18 @@ use ext4plus::error::Ext4Error;
 use ext4plus::FileType;
 
 pub fn into_vfs_err(err: Ext4Error) -> VfsError {
-    let vfs_err = match err {
+    let vfs_err = match &err {
         Ext4Error::NotFound => VfsError::NotFound,
         Ext4Error::NotADirectory => VfsError::NotADirectory,
         Ext4Error::IsADirectory => VfsError::IsADirectory,
-        Ext4Error::Io(_) => VfsError::Io,
+        Ext4Error::Io(error) => {
+            log::error!("ext4plus I/O error: {error}");
+            error
+                .as_ref()
+                .downcast_ref::<super::Ext4DevError>()
+                .map(super::Ext4DevError::to_vfs_error)
+                .unwrap_or(VfsError::Io)
+        }
         Ext4Error::Incompatible(_) => VfsError::Unsupported,
         Ext4Error::UnsupportedOperation(_) => VfsError::Unsupported,
         Ext4Error::Readonly => VfsError::ReadOnlyFilesystem,
@@ -46,3 +53,34 @@ pub fn into_ext4_file_type(ty: NodeType) -> Result<FileType, VfsError> {
     })
 }
 
+#[cfg(test)]
+mod tests {
+    use alloc::boxed::Box;
+
+    use axdriver::prelude::DevError;
+    use axfs_ng_vfs::VfsError;
+    use ext4plus::error::Ext4Error;
+
+    use super::into_vfs_err;
+
+    fn device_error(error: DevError) -> Ext4Error {
+        Ext4Error::Io(Box::new(super::super::Ext4DevError(error)))
+    }
+
+    #[test]
+    fn ext4_device_errors_preserve_actionable_kinds() {
+        assert_eq!(
+            into_vfs_err(device_error(DevError::NoMemory)),
+            VfsError::NoMemory
+        );
+        assert_eq!(
+            into_vfs_err(device_error(DevError::BadState)),
+            VfsError::BadState
+        );
+        assert_eq!(
+            into_vfs_err(device_error(DevError::Again)),
+            VfsError::WouldBlock
+        );
+        assert_eq!(into_vfs_err(device_error(DevError::Io)), VfsError::Io);
+    }
+}
