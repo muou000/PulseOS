@@ -1962,6 +1962,10 @@ impl Process {
         self.stack_top.store(USER_STACK_TOP, Ordering::Release);
         self.entry.store(0, Ordering::Release);
 
+        // Linux completes vfork from mm_release(): the child must stop using
+        // the shared address space before its parent is allowed to resume.
+        self.complete_vfork();
+
         self.detach_all_shared_memory();
 
         {
@@ -2209,12 +2213,6 @@ impl Process {
             exit_code
         };
         self.exit_code.store(final_code, Ordering::Release);
-        self.zombie.store(true, Ordering::Release);
-        // 唤醒所有通过 `PidfdObject::register_poll` 在 `pid_exit_event` 上挂起的
-        // 观察者（例如 epoll_wait、poll）。必须在任何资源释放或 reparent 之前
-        // 完成，否则观察者可能在状态尚可读时收到唤醒但已被回收。
-        self.pid_exit_event.notify_all(false);
-        self.complete_vfork();
         if let Err(e) = self.release_zombie_resources(true) {
             axlog::warn!(
                 "finish_thread_exit: failed to release zombie resources for pid={}: {:?}",
@@ -2223,12 +2221,65 @@ impl Process {
             );
         }
 
+        // Linux performs child reparenting in exit_notify() before publishing
+        // EXIT_ZOMBIE. Keep the same ordering so waiters cannot reap this
+        // process while its child relationships are still being updated.
+        if let Some(init) = super::init_process() {
+            if self.pid() != init.pid() {
+                let children_to_reparent = core::mem::take(&mut *self.children.lock());
+                for child in children_to_reparent {
+                    if child.is_zombie() {
+                        // Reap zombie child immediately instead of reparenting it
+                        let exited_pid = child.pid();
+                        child.wait_task_refs_exited();
+                        let _ = child.take_task_ref_by_tid(exited_pid);
+                        if let Err(e) = child.shrink_reaped_resources() {
+                            axlog::warn!("failed to shrink reaped child resources: {:?}", e);
+                        }
+                        child.release_task_refs();
+                        super::unregister_process(exited_pid);
+                    } else {
+                        child.parent_pid.store(init.pid(), Ordering::Release);
+                        child.reparented.store(true, Ordering::Release);
+                        child
+                            .parent_exit_signal
+                            .store(SIGCHLD as i32, Ordering::Release);
+                        *child.parent.write() = Some(Arc::downgrade(&init));
+                        init.add_child(child.clone());
+
+                        let pdeath_sig = child.pdeath_sig();
+                        if pdeath_sig != 0 {
+                            let _ = queue_signal_to_process(child.as_ref(), pdeath_sig as usize);
+                        }
+
+                        if child.is_zombie() {
+                            let _ = queue_signal_to_process(init.as_ref(), SIGCHLD as usize);
+                            init.child_exit_event
+                                .notify_all_with_context(false, WakeContext::task());
+                        }
+                    }
+                }
+            } else {
+                self.children.lock().clear();
+            }
+        } else {
+            self.children.lock().clear();
+        }
+
         let is_reparented = self.reparented.load(Ordering::Acquire);
         let parent = self
             .parent
             .read()
             .as_ref()
             .and_then(|parent| parent.upgrade());
+
+        // Match Linux do_exit(): exit_files() and the rest of resource
+        // teardown happen before exit_notify() exposes EXIT_ZOMBIE. The
+        // release store makes all cleanup visible to wait4/waitid and pidfd
+        // observers that acquire-load the zombie state.
+        debug_assert!(self.user_resources_released.load(Ordering::Acquire));
+        self.zombie.store(true, Ordering::Release);
+        self.pid_exit_event.notify_all(false);
 
         if is_reparented {
             // Reap it immediately from the parent (which is init)!
@@ -2251,50 +2302,6 @@ impl Process {
             self.release_task_refs();
             super::unregister_process(self.pid());
         } else {
-            // Re-parent all children of this process to the init process
-            if let Some(init) = super::init_process() {
-                if self.pid() != init.pid() {
-                    let children_to_reparent = core::mem::take(&mut *self.children.lock());
-                    for child in children_to_reparent {
-                        if child.is_zombie() {
-                            // Reap zombie child immediately instead of reparenting it
-                            let exited_pid = child.pid();
-                            child.wait_task_refs_exited();
-                            let _ = child.take_task_ref_by_tid(exited_pid);
-                            if let Err(e) = child.shrink_reaped_resources() {
-                                axlog::warn!("failed to shrink reaped child resources: {:?}", e);
-                            }
-                            child.release_task_refs();
-                            super::unregister_process(exited_pid);
-                        } else {
-                            child.parent_pid.store(init.pid(), Ordering::Release);
-                            child.reparented.store(true, Ordering::Release);
-                            child
-                                .parent_exit_signal
-                                .store(SIGCHLD as i32, Ordering::Release);
-                            *child.parent.write() = Some(Arc::downgrade(&init));
-                            init.add_child(child.clone());
-
-                            let pdeath_sig = child.pdeath_sig();
-                            if pdeath_sig != 0 {
-                                let _ =
-                                    queue_signal_to_process(child.as_ref(), pdeath_sig as usize);
-                            }
-
-                            if child.is_zombie() {
-                                let _ = queue_signal_to_process(init.as_ref(), SIGCHLD as usize);
-                                init.child_exit_event
-                                    .notify_all_with_context(false, WakeContext::task());
-                            }
-                        }
-                    }
-                } else {
-                    self.children.lock().clear();
-                }
-            } else {
-                self.children.lock().clear();
-            }
-
             if let Some(parent) = parent {
                 let sig = self.parent_exit_signal();
                 if sig > 0 {
