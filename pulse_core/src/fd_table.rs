@@ -911,8 +911,8 @@ impl FdObject for PidfdObject {
     /// 将当前 waker 注册到目标进程自身的 `pid_exit_event` 等待队列上。
     ///
     /// `pidfd` 只关心目标进程进入僵尸态这一事件；只要目标进程在生命周期内，
-    /// `Process::finish_thread_exit` 会在写入 `zombie = true` 之后立即
-    /// `notify_all(false)`，从而唤醒 epoll/poll 等待者。
+    /// `Process::finish_thread_exit` 会在完成退出资源清理并写入 `zombie = true`
+    /// 之后立即通知，从而唤醒 epoll/poll 等待者。
     ///
     /// 如果目标进程已不存在（已被 reap 并从全局表中注销），`poll()` 视为
     /// 始终可读，调用方不会走到这里；为防御性目的，进程已消失时直接返回
