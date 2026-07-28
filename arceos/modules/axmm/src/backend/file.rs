@@ -164,7 +164,13 @@ impl FilePageLoad {
         let frames = self
             .file
             .get_shared_page_paddrs(self.page_number, self.page_count, self.may_write)
-            .map_err(|_| AxError::Io)?;
+            .inspect_err(|error| {
+                error!(
+                    "file-backed page load failed: page_number={}, page_count={}, may_write={}, \
+                     error={:?}",
+                    self.page_number, self.page_count, self.may_write, error
+                );
+            })?;
         self.read_ahead
             .lock()
             .finish(self.page_number, self.page_count, frames.len());
