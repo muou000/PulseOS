@@ -1,8 +1,9 @@
 macro_rules! def_test_sched {
-    ($name: ident, $scheduler: ty, $task: ty) => {
+    ($name:ident, $scheduler:ty, $task:ty) => {
         mod $name {
-            use crate::*;
             use alloc::sync::Arc;
+
+            use crate::*;
 
             #[test]
             fn test_sched() {
@@ -82,3 +83,61 @@ macro_rules! def_test_sched {
 def_test_sched!(fifo, FifoScheduler::<usize>, FifoTask::<usize>);
 def_test_sched!(rr, RRScheduler::<usize, 5>, RRTask::<usize, 5>);
 def_test_sched!(cfs, CFScheduler::<usize>, CFSTask::<usize>);
+
+mod rr_load_balance {
+    use alloc::sync::Arc;
+
+    use crate::{BaseScheduler, RRScheduler, RRTask};
+
+    type TestTask = RRTask<usize, 5>;
+    type TestScheduler = RRScheduler<usize, 5>;
+
+    fn task(id: usize) -> Arc<TestTask> {
+        Arc::new(TestTask::new(id))
+    }
+
+    #[test]
+    fn detach_normal_task_preserves_order_and_rt_priority() {
+        let mut scheduler = TestScheduler::new();
+        let rt = task(99);
+        rt.set_priority(99);
+
+        scheduler.add_task(task(0));
+        scheduler.add_task(task(1));
+        scheduler.add_task(rt.clone());
+        scheduler.add_task(task(2));
+        scheduler.add_task(task(3));
+
+        assert_eq!(scheduler.normal_task_count(), 4);
+        let detached = scheduler
+            .detach_normal_task(|candidate| *candidate.inner() == 2)
+            .expect("normal task should be detachable");
+        assert_eq!(*detached.inner(), 2);
+        assert_eq!(scheduler.normal_task_count(), 3);
+
+        assert!(Arc::ptr_eq(&scheduler.pick_next_task().unwrap(), &rt));
+        for expected in [0, 1, 3] {
+            assert_eq!(*scheduler.pick_next_task().unwrap().inner(), expected);
+        }
+        assert!(scheduler.pick_next_task().is_none());
+    }
+
+    #[test]
+    fn detach_normal_task_respects_predicate_and_never_takes_rt() {
+        let mut scheduler = TestScheduler::new();
+        let rt = task(10);
+        rt.set_priority(10);
+        scheduler.add_task(rt.clone());
+        scheduler.add_task(task(20));
+
+        assert!(scheduler.detach_normal_task(|_| false).is_none());
+        assert!(
+            scheduler
+                .detach_normal_task(|candidate| candidate.priority() == 10)
+                .is_none()
+        );
+        assert_eq!(scheduler.normal_task_count(), 1);
+        assert!(Arc::ptr_eq(&scheduler.pick_next_task().unwrap(), &rt));
+        assert_eq!(*scheduler.pick_next_task().unwrap().inner(), 20);
+    }
+}

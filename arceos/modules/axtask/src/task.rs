@@ -22,7 +22,6 @@ use memory_addr::{MemoryAddr, PAGE_SIZE_4K, VirtAddr, align_up_4k};
 
 use crate::{AxCpuMask, AxTask, AxTaskRef, WaitQueue, task_ext::AxTaskExt};
 
-
 /// A unique identifier for a thread.
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub struct TaskId(u64);
@@ -144,7 +143,9 @@ impl TaskInner {
     where
         F: FnOnce() + Send + 'static,
     {
-        let mut t = Self::new_common(TaskId::new(), name);        debug!("new task: {}", t.id_name());        let kstack = TaskStack::try_alloc(align_up_4k(stack_size))?;
+        let mut t = Self::new_common(TaskId::new(), name);
+        debug!("new task: {}", t.id_name());
+        let kstack = TaskStack::try_alloc(align_up_4k(stack_size))?;
 
         #[cfg(feature = "tls")]
         let tls = VirtAddr::from(t.tls.tls_ptr() as usize);
@@ -537,6 +538,13 @@ impl TaskInner {
             "task has an unconsumed deferred wake"
         );
         state.on_cpu = true;
+    }
+
+    /// Returns whether a CPU still owns this task's execution context.
+    #[cfg(feature = "smp")]
+    #[inline]
+    pub(crate) fn is_on_cpu(&self) -> bool {
+        self.switch_state.lock().on_cpu
     }
 
     /// Records a wake that raced context switch-out.

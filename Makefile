@@ -5,10 +5,13 @@ export NO_AXSTD := y
 export AX_LIB := axfeat
 FEATURE ?= final-testcode
 QPERF_TRACE ?= n
+SCHED_LOAD_BALANCE ?= y
 comma := ,
 QPERF_APP_FEATURE = $(if $(filter y,$(QPERF_TRACE)),$(comma)qperf-trace)
+SCHED_LOAD_BALANCE_APP_FEATURE = $(if $(filter y,$(SCHED_LOAD_BALANCE)),$(comma)sched-load-balance)
 BUILD_OUT_DIR = $(if $(filter y,$(QPERF_TRACE)),$(A)/target/qperf-artifacts,$(A))
-export APP_FEATURES = qemu,$(FEATURE)$(QPERF_APP_FEATURE)
+export APP_FEATURES = qemu,$(FEATURE)$(QPERF_APP_FEATURE)$(SCHED_LOAD_BALANCE_APP_FEATURE)
+ALL_APP_FEATURES = qemu,$(FEATURE)$(SCHED_LOAD_BALANCE_APP_FEATURE)
 export BLK := y
 
 export SMP ?= 8
@@ -33,11 +36,11 @@ prepare-tools:
 	@echo "[tools] Using prebuilt tools from $(A)/bin"
 
 all: prepare-tools
-	@$(MAKE) ARCH=riscv64 SMP=$(ALL_RISCV64_SMP) MEM=$(ALL_RISCV64_MEM) APP_FEATURES=qemu,$(FEATURE) LOG=off defconfig
-	@$(MAKE) -C arceos ARCH=riscv64 SMP=$(ALL_RISCV64_SMP) MEM=$(ALL_RISCV64_MEM) APP_FEATURES=qemu,$(FEATURE) LOG=off BUS=mmio OUT_DIR=$(A) build
+	@$(MAKE) ARCH=riscv64 SMP=$(ALL_RISCV64_SMP) MEM=$(ALL_RISCV64_MEM) APP_FEATURES=$(ALL_APP_FEATURES) LOG=off defconfig
+	@$(MAKE) -C arceos ARCH=riscv64 SMP=$(ALL_RISCV64_SMP) MEM=$(ALL_RISCV64_MEM) APP_FEATURES=$(ALL_APP_FEATURES) LOG=off BUS=mmio OUT_DIR=$(A) build
 	@cp $(NAME)_riscv64-qemu-virt.bin kernel-rv
-	@$(MAKE) ARCH=loongarch64 SMP=$(ALL_LOONGARCH64_SMP) MEM=$(ALL_LOONGARCH64_MEM) APP_FEATURES=qemu,$(FEATURE) LOG=off FEATURES=bus-pci defconfig
-	@$(MAKE) -C arceos ARCH=loongarch64 SMP=$(ALL_LOONGARCH64_SMP) MEM=$(ALL_LOONGARCH64_MEM) APP_FEATURES=qemu,$(FEATURE) LOG=off BUS=pci FEATURES=bus-pci OUT_DIR=$(A) build
+	@$(MAKE) ARCH=loongarch64 SMP=$(ALL_LOONGARCH64_SMP) MEM=$(ALL_LOONGARCH64_MEM) APP_FEATURES=$(ALL_APP_FEATURES) LOG=off FEATURES=bus-pci defconfig
+	@$(MAKE) -C arceos ARCH=loongarch64 SMP=$(ALL_LOONGARCH64_SMP) MEM=$(ALL_LOONGARCH64_MEM) APP_FEATURES=$(ALL_APP_FEATURES) LOG=off BUS=pci FEATURES=bus-pci OUT_DIR=$(A) build
 	@cp $(NAME)_loongarch64-qemu-virt.elf kernel-la
 	@if [ "$(FEATURE)" = "pre-testcode" ]; then $(MAKE) img_all; fi
 

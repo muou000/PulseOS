@@ -9,6 +9,19 @@ const SCHED_SWITCH: u64 = 2;
 const TASK_BLOCK: u64 = 3;
 const TASK_WAKE: u64 = 4;
 const TASK_EXIT: u64 = 5;
+const TASK_ENQUEUE: u64 = 6;
+
+#[derive(Clone, Copy)]
+pub(crate) enum EnqueueReason {
+    Spawn             = 1,
+    Wake              = 2,
+    Preempt           = 3,
+    Yield             = 4,
+    AffinityMigration = 5,
+    DeferredWake      = 6,
+    #[allow(dead_code)] // Unused when scheduler load balancing is disabled.
+    WorkSteal         = 7,
+}
 
 /// Stable marker entry recognized by qperf when the `qperf-trace` feature is enabled.
 ///
@@ -79,4 +92,21 @@ pub(crate) fn task_wake(task: &TaskInner, context: WakeContext) {
 
 pub(crate) fn task_exit(task: &TaskInner) {
     emit(TASK_EXIT, task.id().as_u64(), 0, 0, 0, 0);
+}
+
+pub(crate) fn task_enqueue(
+    task: &TaskInner,
+    enqueue_cpu: usize,
+    target_cpu: usize,
+    queue_depth: usize,
+    reason: EnqueueReason,
+) {
+    emit(
+        TASK_ENQUEUE,
+        task.id().as_u64(),
+        enqueue_cpu as u64,
+        target_cpu as u64,
+        queue_depth as u64,
+        reason as u64,
+    );
 }
