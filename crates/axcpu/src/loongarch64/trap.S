@@ -11,7 +11,8 @@
 .else
     addi.d  $sp,  $sp, -{trapframe_size}
     STD     $tp,  $sp, 2
-    STD     $r21, $sp, 21
+    // $r21 is the per-CPU base in kernel mode. Keep the destination CPU's
+    // live value if this interrupted context is resumed on another CPU.
 .endif
 
     STD     $t0,  $sp, 3
@@ -31,7 +32,7 @@
     LDD     $r21, $sp, 21
 .else
     LDD     $tp,  $sp, 2
-    LDD     $r21, $sp, 21
+    // Do not restore a source CPU's per-CPU base after task migration.
 .endif
 
     LDD     $t1,  $sp, 33       // era
