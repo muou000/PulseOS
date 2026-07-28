@@ -200,6 +200,29 @@ mod tests {
         );
         interrupts.remove(&irq);
     }
+
+    #[cfg(block_dev = "virtio-blk")]
+    #[test]
+    fn virtio_block_errors_keep_their_driver_semantics() {
+        use virtio_drivers::Error;
+
+        assert!(matches!(
+            virtio_err_to_dev(Error::NotReady),
+            DevError::Again
+        ));
+        assert!(matches!(
+            virtio_err_to_dev(Error::WrongToken),
+            DevError::BadState
+        ));
+        assert!(matches!(
+            virtio_err_to_dev(Error::DmaError),
+            DevError::NoMemory
+        ));
+        assert!(matches!(
+            virtio_err_to_dev(Error::Unsupported),
+            DevError::Unsupported
+        ));
+    }
 }
 
 cfg_if! {
@@ -312,9 +335,15 @@ cfg_if! {
         fn virtio_err_to_dev(e: virtio_drivers::Error) -> axdriver_base::DevError {
             use virtio_drivers::Error::*;
             match e {
-                QueueFull => axdriver_base::DevError::BadState,
-                InvalidParam => axdriver_base::DevError::InvalidParam,
-                _ => axdriver_base::DevError::Io,
+                QueueFull => DevError::BadState,
+                NotReady => DevError::Again,
+                WrongToken => DevError::BadState,
+                AlreadyUsed => DevError::AlreadyExists,
+                InvalidParam => DevError::InvalidParam,
+                DmaError => DevError::NoMemory,
+                IoError => DevError::Io,
+                Unsupported => DevError::Unsupported,
+                ConfigSpaceTooSmall | ConfigSpaceMissing | SocketDeviceError(_) => DevError::BadState,
             }
         }
 
@@ -467,7 +496,15 @@ cfg_if! {
                 let token = unsafe {
                     self.inner.inner.lock().inner
                         .read_blocks_nb(block_id as usize, &mut req, buf, &mut resp)
-                }.map_err(virtio_err_to_dev)?;
+                }.map_err(|error| {
+                    axlog::error!(
+                        "virtio-blk read submission failed: block_id={}, len={}, error={:?}",
+                        block_id,
+                        buf.len(),
+                        error
+                    );
+                    virtio_err_to_dev(error)
+                })?;
                 axlog::debug!("virtio::read_block: read_blocks_nb initiated, token={}", token);
                 #[cfg(feature = "multitask")]
                 {
@@ -501,7 +538,7 @@ cfg_if! {
                 let result = unsafe {
                     self.inner.inner.lock().inner
                         .complete_read_blocks(token, &req, buf, &mut resp)
-                }.map_err(virtio_err_to_dev);
+                };
                 // One interrupt may cover several used entries. Once the head
                 // is popped, wake every waiter so the new head can be claimed.
                 #[cfg(feature = "multitask")]
@@ -512,7 +549,17 @@ cfg_if! {
                         Arc::as_ptr(&self.inner) as usize as u64,
                     ),
                 );
-                result?;
+                if let Err(error) = result {
+                    axlog::error!(
+                        "virtio-blk read completion failed: block_id={}, len={}, token={}, status={:?}, error={:?}",
+                        block_id,
+                        buf.len(),
+                        token,
+                        resp.status(),
+                        error
+                    );
+                    return Err(virtio_err_to_dev(error));
+                }
                 axlog::debug!("virtio::read_block: completed successfully");
                 Ok(())
             }
