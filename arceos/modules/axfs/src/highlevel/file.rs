@@ -26,6 +26,17 @@ use spin::{Lazy, Mutex as SpinMutex};
 
 use super::FsContext;
 
+pub const SHARED_PAGE_BATCH_CAPACITY: usize = 4;
+pub type SharedPagePaddrs = heapless::Vec<(u32, PhysAddr), SHARED_PAGE_BATCH_CAPACITY>;
+
+fn checked_shared_page_count(page_count: usize) -> VfsResult<usize> {
+    let page_count = page_count.max(1);
+    if page_count > SHARED_PAGE_BATCH_CAPACITY {
+        return Err(VfsError::StorageFull);
+    }
+    Ok(page_count)
+}
+
 bitflags::bitflags! {
     #[derive(Debug, Clone, Copy)]
     pub struct FileFlags: u8 {
@@ -1464,27 +1475,38 @@ impl CachedFile {
         pn: u32,
         page_count: usize,
         may_write: bool,
-    ) -> VfsResult<Option<Vec<(u32, PhysAddr)>>> {
-        let mut page_numbers = Vec::with_capacity(page_count);
+    ) -> VfsResult<Option<SharedPagePaddrs>> {
+        let page_count = checked_shared_page_count(page_count)?;
         for offset in 0..page_count {
             let offset = u32::try_from(offset).map_err(|_| VfsError::StorageFull)?;
             let page_num = pn.checked_add(offset).ok_or(VfsError::StorageFull)?;
             if !cache.contains(&page_num) {
                 return Ok(None);
             }
-            page_numbers.push(page_num);
         }
 
-        let mut pinned = Vec::with_capacity(page_count);
-        for page_num in page_numbers {
+        let mut pinned = SharedPagePaddrs::new();
+        for offset in 0..page_count {
+            let offset = u32::try_from(offset).map_err(|_| VfsError::StorageFull)?;
+            let page_num = pn.checked_add(offset).ok_or(VfsError::StorageFull)?;
             let result = cache
                 .get_mut(&page_num)
                 .ok_or(VfsError::BadState)
                 .and_then(|page| page.pin_for_mapping(may_write));
             match result {
-                Ok(paddr) => pinned.push((page_num, paddr)),
+                Ok(paddr) => {
+                    if let Err((_, paddr)) = pinned.push((page_num, paddr)) {
+                        let refs = axalloc::frame_table().dec_ref(paddr);
+                        debug_assert_ne!(refs, 0);
+                        while let Some((_, paddr)) = pinned.pop() {
+                            let refs = axalloc::frame_table().dec_ref(paddr);
+                            debug_assert_ne!(refs, 0);
+                        }
+                        return Err(VfsError::StorageFull);
+                    }
+                }
                 Err(err) => {
-                    for (_, paddr) in pinned.drain(..) {
+                    while let Some((_, paddr)) = pinned.pop() {
                         let refs = axalloc::frame_table().dec_ref(paddr);
                         debug_assert_ne!(refs, 0);
                     }
@@ -1500,7 +1522,7 @@ impl CachedFile {
         pn: u32,
         page_count: usize,
         may_write: bool,
-    ) -> VfsResult<Option<Vec<(u32, PhysAddr)>>> {
+    ) -> VfsResult<Option<SharedPagePaddrs>> {
         let _io_guard = self.shared.io_lock.read();
         let mut cache = self.shared.page_cache.lock();
         Self::pin_cached_pages(&mut cache, pn, page_count, may_write)
@@ -1563,7 +1585,7 @@ impl CachedFile {
         pn: u32,
         requested_pages: usize,
         pin: Option<bool>,
-    ) -> VfsResult<(usize, Option<Vec<(u32, PhysAddr)>>)> {
+    ) -> VfsResult<(usize, Option<SharedPagePaddrs>)> {
         let requested_pages = requested_pages.max(1);
         let lock_indices = self.shared.page_fill_lock_indices(pn, requested_pages)?;
         let mut fill_guards = Vec::with_capacity(lock_indices.len());
@@ -1688,8 +1710,9 @@ impl CachedFile {
         pn: u32,
         requested_pages: usize,
         may_write: bool,
-    ) -> VfsResult<Vec<(u32, PhysAddr)>> {
-        if let Some(pages) = self.pin_resident_pages(pn, requested_pages.max(1), may_write)? {
+    ) -> VfsResult<SharedPagePaddrs> {
+        let requested_pages = checked_shared_page_count(requested_pages)?;
+        if let Some(pages) = self.pin_resident_pages(pn, requested_pages, may_write)? {
             return Ok(pages);
         }
         self.ensure_pages_loaded_async(file, pn, requested_pages, Some(may_write))
@@ -1980,9 +2003,9 @@ impl CachedFile {
         pn: u32,
         page_count: usize,
         may_write: bool,
-    ) -> VfsResult<Vec<(u32, PhysAddr)>> {
+    ) -> VfsResult<SharedPagePaddrs> {
         let file = self.inner.entry().as_file()?;
-        axtask::future::block_on(self.pin_pages_inner_async(file, pn, page_count.max(1), may_write))
+        axtask::future::block_on(self.pin_pages_inner_async(file, pn, page_count, may_write))
     }
 
     /// Returns a resident page's physical address without adding a mapping pin.
@@ -2454,5 +2477,25 @@ impl Pollable for File {
 
     fn register(&self, context: &mut Context<'_>, events: IoEvents) {
         self.inner.location().register(context, events)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use axfs_ng_vfs::VfsError;
+
+    use super::{SHARED_PAGE_BATCH_CAPACITY, checked_shared_page_count};
+
+    #[test]
+    fn shared_page_batch_count_is_bounded_before_pinning() {
+        assert_eq!(checked_shared_page_count(0), Ok(1));
+        assert_eq!(
+            checked_shared_page_count(SHARED_PAGE_BATCH_CAPACITY),
+            Ok(SHARED_PAGE_BATCH_CAPACITY)
+        );
+        assert_eq!(
+            checked_shared_page_count(SHARED_PAGE_BATCH_CAPACITY + 1),
+            Err(VfsError::StorageFull)
+        );
     }
 }
