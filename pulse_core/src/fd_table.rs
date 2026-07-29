@@ -2651,32 +2651,49 @@ pub fn create_fifo_entry(
     Ok(FdEntry::new(object, flags))
 }
 
-pub struct FdTable {
+#[derive(Clone, Default)]
+struct FdTableStorage {
     entries: alloc::vec::Vec<Option<FdEntry>>,
     open_fds: alloc::vec::Vec<u64>,
     count: usize,
 }
 
+pub struct FdTable {
+    storage: Arc<FdTableStorage>,
+}
+
+/// Owns detached descriptor storage so its objects are released outside the table lock.
+#[must_use = "drained fd entries must be dropped after releasing the fd-table lock"]
+pub struct DrainedFdEntries {
+    _storage: Arc<FdTableStorage>,
+}
+
 impl FdTable {
     pub fn new() -> Self {
         Self {
-            entries: alloc::vec::Vec::new(),
-            open_fds: alloc::vec::Vec::new(),
-            count: 0,
+            storage: Arc::new(FdTableStorage::default()),
         }
     }
 
-    pub fn clone_for_fork(&self) -> LinuxResult<Self> {
-        Ok(Self {
-            entries: self.entries.clone(),
-            open_fds: self.open_fds.clone(),
-            count: self.count,
-        })
+    pub fn clone_for_fork(&self) -> Self {
+        Self {
+            storage: self.storage.clone(),
+        }
     }
 
     pub fn take_cloexec_on_exec(&mut self) -> alloc::vec::Vec<FdEntry> {
         let mut removed = alloc::vec::Vec::new();
-        for (fd, slot) in self.entries.iter_mut().enumerate() {
+        if !self
+            .storage
+            .entries
+            .iter()
+            .any(|slot| slot.as_ref().is_some_and(|entry| entry.flags.contains(FdFlags::CLOEXEC)))
+        {
+            return removed;
+        }
+
+        let storage = Arc::make_mut(&mut self.storage);
+        for (fd, slot) in storage.entries.iter_mut().enumerate() {
             if let Some(entry) = slot {
                 if entry.flags.contains(FdFlags::CLOEXEC) {
                     axlog::debug!(
@@ -2688,12 +2705,12 @@ impl FdTable {
                     );
                     if let Some(taken) = slot.take() {
                         removed.push(taken);
-                        self.count = self.count.saturating_sub(1);
+                        storage.count = storage.count.saturating_sub(1);
 
                         let word_idx = fd / 64;
                         let bit_idx = fd % 64;
-                        if word_idx < self.open_fds.len() {
-                            self.open_fds[word_idx] &= !(1 << bit_idx);
+                        if word_idx < storage.open_fds.len() {
+                            storage.open_fds[word_idx] &= !(1 << bit_idx);
                         }
                     }
                 }
@@ -2702,24 +2719,20 @@ impl FdTable {
         removed
     }
 
-    pub fn drain_all(&mut self) -> alloc::vec::Vec<FdEntry> {
-        let mut removed = alloc::vec::Vec::new();
-        for slot in self.entries.iter_mut() {
-            if let Some(entry) = slot.take() {
-                removed.push(entry);
-            }
-        }
-        self.open_fds.fill(0);
-        self.count = 0;
-        removed
+    pub fn drain_all(&mut self) -> DrainedFdEntries {
+        let storage = core::mem::replace(
+            &mut self.storage,
+            Arc::new(FdTableStorage::default()),
+        );
+        DrainedFdEntries { _storage: storage }
     }
 
     pub fn entries_snapshot(&self) -> alloc::vec::Vec<FdEntry> {
-        self.entries.iter().flatten().cloned().collect()
+        self.storage.entries.iter().flatten().cloned().collect()
     }
 
     pub fn get(&self, fd: usize) -> Option<&FdEntry> {
-        self.entries.get(fd).and_then(|slot| slot.as_ref())
+        self.storage.entries.get(fd).and_then(|slot| slot.as_ref())
     }
 
     pub fn get_entry_cloned(&self, fd: usize) -> LinuxResult<FdEntry> {
@@ -2731,15 +2744,20 @@ impl FdTable {
     }
 
     pub fn get_mut(&mut self, fd: usize) -> Option<&mut FdEntry> {
-        self.entries.get_mut(fd).and_then(|slot| slot.as_mut())
+        self.storage.entries.get(fd)?.as_ref()?;
+        Arc::make_mut(&mut self.storage)
+            .entries
+            .get_mut(fd)
+            .and_then(|slot| slot.as_mut())
     }
 
     pub fn insert_at(&mut self, fd: usize, entry: FdEntry) -> LinuxResult {
         if fd >= FD_LIMIT {
             return Err(LinuxError::EBADF);
         }
-        if fd >= self.entries.len() {
-            let mut new_len = core::cmp::max(16, self.entries.len());
+        let storage = Arc::make_mut(&mut self.storage);
+        if fd >= storage.entries.len() {
+            let mut new_len = core::cmp::max(16, storage.entries.len());
             while new_len <= fd {
                 new_len = new_len.saturating_mul(2);
             }
@@ -2747,18 +2765,18 @@ impl FdTable {
             if fd >= new_len {
                 return Err(LinuxError::EMFILE);
             }
-            self.entries.resize_with(new_len, || None);
+            storage.entries.resize_with(new_len, || None);
 
             let new_bitmap_words = (new_len + 63) / 64;
-            self.open_fds.resize(new_bitmap_words, 0);
+            storage.open_fds.resize(new_bitmap_words, 0);
         }
-        if self.entries[fd].is_none() {
-            self.count = self.count.saturating_add(1);
+        if storage.entries[fd].is_none() {
+            storage.count = storage.count.saturating_add(1);
             let word_idx = fd / 64;
             let bit_idx = fd % 64;
-            self.open_fds[word_idx] |= 1 << bit_idx;
+            storage.open_fds[word_idx] |= 1 << bit_idx;
         }
-        self.entries[fd] = Some(entry);
+        storage.entries[fd] = Some(entry);
         Ok(())
     }
 
@@ -2766,9 +2784,9 @@ impl FdTable {
         let mut found_fd = None;
         let min_word = min_fd / 64;
 
-        if min_word < self.open_fds.len() {
-            for word_idx in min_word..self.open_fds.len() {
-                let mut word = self.open_fds[word_idx];
+        if min_word < self.storage.open_fds.len() {
+            for word_idx in min_word..self.storage.open_fds.len() {
+                let mut word = self.storage.open_fds[word_idx];
 
                 if word_idx == min_word {
                     let min_bit = min_fd % 64;
@@ -2790,7 +2808,7 @@ impl FdTable {
         let fd = match found_fd {
             Some(fd) => fd,
             None => {
-                let next_fd = core::cmp::max(min_fd, self.entries.len());
+                let next_fd = core::cmp::max(min_fd, self.storage.entries.len());
                 if next_fd >= FD_LIMIT {
                     return Err(LinuxError::EMFILE);
                 }
@@ -2798,8 +2816,9 @@ impl FdTable {
             }
         };
 
-        if fd >= self.entries.len() {
-            let mut new_len = core::cmp::max(16, self.entries.len());
+        let storage = Arc::make_mut(&mut self.storage);
+        if fd >= storage.entries.len() {
+            let mut new_len = core::cmp::max(16, storage.entries.len());
             while new_len <= fd {
                 new_len = new_len.saturating_mul(2);
             }
@@ -2807,19 +2826,19 @@ impl FdTable {
             if fd >= new_len {
                 return Err(LinuxError::EMFILE);
             }
-            self.entries.resize_with(new_len, || None);
+            storage.entries.resize_with(new_len, || None);
 
             let new_bitmap_words = (new_len + 63) / 64;
-            self.open_fds.resize(new_bitmap_words, 0);
+            storage.open_fds.resize(new_bitmap_words, 0);
         }
 
-        if self.entries[fd].is_none() {
-            self.count = self.count.saturating_add(1);
+        if storage.entries[fd].is_none() {
+            storage.count = storage.count.saturating_add(1);
             let word_idx = fd / 64;
             let bit_idx = fd % 64;
-            self.open_fds[word_idx] |= 1 << bit_idx;
+            storage.open_fds[word_idx] |= 1 << bit_idx;
         }
-        self.entries[fd] = Some(entry);
+        storage.entries[fd] = Some(entry);
         Ok(fd)
     }
 
@@ -2828,20 +2847,21 @@ impl FdTable {
     }
 
     pub fn remove(&mut self, fd: usize) -> Option<FdEntry> {
-        if fd < self.entries.len() {
-            let res = self.entries[fd].take();
-            if res.is_some() {
-                self.count = self.count.saturating_sub(1);
-                let word_idx = fd / 64;
-                let bit_idx = fd % 64;
-                if word_idx < self.open_fds.len() {
-                    self.open_fds[word_idx] &= !(1 << bit_idx);
-                }
-            }
-            res
-        } else {
-            None
+        if fd >= self.storage.entries.len() || self.storage.entries[fd].is_none() {
+            return None;
         }
+
+        let storage = Arc::make_mut(&mut self.storage);
+        let res = storage.entries[fd].take();
+        if res.is_some() {
+            storage.count = storage.count.saturating_sub(1);
+            let word_idx = fd / 64;
+            let bit_idx = fd % 64;
+            if word_idx < storage.open_fds.len() {
+                storage.open_fds[word_idx] &= !(1 << bit_idx);
+            }
+        }
+        res
     }
 
     pub fn remove_or_err(&mut self, fd: usize) -> LinuxResult<FdEntry> {
@@ -2849,11 +2869,11 @@ impl FdTable {
     }
 
     pub fn len(&self) -> usize {
-        self.count
+        self.storage.count
     }
 
     pub fn is_empty(&self) -> bool {
-        self.count == 0
+        self.storage.count == 0
     }
 }
 
