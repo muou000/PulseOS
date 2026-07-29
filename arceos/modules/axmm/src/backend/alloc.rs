@@ -287,21 +287,14 @@ impl Backend {
         mutation: &mut impl MappingMutation<VirtAddr>,
     ) -> bool {
         debug!("unmap_alloc: [{:#x}, {:#x})", start, start + size);
-        for addr in PageIter4K::new(start, start + size).unwrap() {
-            if let Ok((frame, page_size, tlb)) = pt.unmap(addr) {
-                // The owning AddrSpace batches the ASID shootdown after its
-                // write lock is released.
-                tlb.ignore();
-                if frame.as_usize() != 0 {
-                    mutation.record(addr, page_size as usize);
-                }
-                if page_size.is_huge() {
-                    return false;
-                }
+        let result = pt.unmap_present_range(start, size, false, |addr, frame, page_size| {
+            debug_assert_eq!(page_size, PageSize::Size4K);
+            if frame.as_usize() != 0 {
+                mutation.record(addr, PAGE_SIZE_4K);
                 reclaim.defer_frame(frame);
             }
-        }
-        true
+        });
+        result.is_ok()
     }
 
     pub(crate) fn page_fault_alloc_request(
