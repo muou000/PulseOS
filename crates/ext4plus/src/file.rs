@@ -276,36 +276,11 @@ pub(crate) async fn read_at_inner(
         let offset_within_block = offset_in_block_u32(current_offset, block_size_u64)?;
 
         let start_lblock = file_block_from_offset(current_offset, block_size_u64)?;
-        let start_pblock = file_blocks.get_block(start_lblock).await?;
-
-        let mut run_blocks = 1usize;
-        let max_blocks_needed = (buf.len() - bytes_read + offset_within_block as usize).div_ceil(block_size_usize);
-
-        if start_pblock == 0 {
-            while run_blocks < max_blocks_needed {
-                if let Ok(next_lblock) = FileBlockIndex::try_from(start_lblock as u64 + run_blocks as u64) {
-                    if let Ok(next_pblock) = file_blocks.get_block(next_lblock).await {
-                        if next_pblock == 0 {
-                            run_blocks += 1;
-                            continue;
-                        }
-                    }
-                }
-                break;
-            }
-        } else {
-            while run_blocks < max_blocks_needed {
-                if let Ok(next_lblock) = FileBlockIndex::try_from(start_lblock as u64 + run_blocks as u64) {
-                    if let Ok(next_pblock) = file_blocks.get_block(next_lblock).await {
-                        if next_pblock == start_pblock.checked_add(run_blocks as u64).unwrap_or(0) {
-                            run_blocks += 1;
-                            continue;
-                        }
-                    }
-                }
-                break;
-            }
-        }
+        let max_blocks_needed = (buf.len() - bytes_read + offset_within_block as usize)
+            .div_ceil(block_size_usize);
+        let (start_pblock, run_blocks) = file_blocks
+            .get_block_run(start_lblock, max_blocks_needed)
+            .await?;
 
         let first_block_capacity = block_size_usize - offset_within_block as usize;
         let run_bytes_capacity = first_block_capacity + (run_blocks - 1) * block_size_usize;

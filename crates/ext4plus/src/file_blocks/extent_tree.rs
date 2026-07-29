@@ -837,17 +837,48 @@ impl ExtentTree {
         &self,
         block_index: FileBlockIndex,
     ) -> Result<FsBlockIndex, Ext4Error> {
-        if let Some(extent) = self.find_extent(block_index).await? {
-            let offset_within_extent = block_index
-                .checked_sub(extent.block_within_file)
-                .ok_or(CorruptKind::ExtentBlock(self.inode))?;
-            extent
-                .start_block
-                .checked_add(FsBlockIndex::from(offset_within_extent))
-                .ok_or(CorruptKind::ExtentBlock(self.inode).into())
-        } else {
-            Ok(0)
+        self.get_block_run(block_index, 1)
+            .await
+            .map(|(block, _)| block)
+    }
+
+    /// Resolve a file block and the remainder of its containing extent.
+    ///
+    /// A zero physical block denotes a hole or an uninitialized extent. Holes
+    /// are deliberately reported one block at a time because the next extent
+    /// may live in a sibling leaf that was not visited by this lookup.
+    #[maybe_async::maybe_async]
+    pub(crate) async fn get_block_run(
+        &self,
+        block_index: FileBlockIndex,
+        max_blocks: usize,
+    ) -> Result<(FsBlockIndex, usize), Ext4Error> {
+        if max_blocks == 0 {
+            return Ok((0, 0));
         }
+
+        let Some(extent) = self.find_extent(block_index).await? else {
+            return Ok((0, 1));
+        };
+        let offset_within_extent = block_index
+            .checked_sub(extent.block_within_file)
+            .ok_or(CorruptKind::ExtentBlock(self.inode))?;
+        let remaining_blocks = u32::from(extent.num_blocks)
+            .checked_sub(offset_within_extent)
+            .ok_or(CorruptKind::ExtentBlock(self.inode))?;
+        let run_blocks = usize::try_from(remaining_blocks)
+            .map_err(|_| Ext4Error::FileTooLarge)?
+            .min(max_blocks);
+
+        if !extent.is_initialized {
+            return Ok((0, run_blocks));
+        }
+
+        let physical_block = extent
+            .start_block
+            .checked_add(FsBlockIndex::from(offset_within_extent))
+            .ok_or(CorruptKind::ExtentBlock(self.inode))?;
+        Ok((physical_block, run_blocks))
     }
 
     #[maybe_async::maybe_async]
@@ -2592,8 +2623,11 @@ mod tests {
             assert_eq!(block, 100);
             let block = tree.get_block(1).await.unwrap();
             assert_eq!(block, 101);
+            assert_eq!(tree.get_block_run(0, 8).await.unwrap(), (100, 2));
+            assert_eq!(tree.get_block_run(1, 8).await.unwrap(), (101, 1));
             let extent = tree.find_extent(2).await;
             assert_eq!(extent.unwrap(), None);
+            assert_eq!(tree.get_block_run(2, 8).await.unwrap(), (0, 1));
 
             // Hole before leaf1.
             let extent = tree.find_extent(9).await.unwrap();
@@ -2606,6 +2640,8 @@ mod tests {
             assert_eq!(block, 200);
             let block = tree.get_block(11).await.unwrap();
             assert_eq!(block, 201);
+            assert_eq!(tree.get_block_run(10, 1).await.unwrap(), (200, 1));
+            assert_eq!(tree.get_block_run(10, 8).await.unwrap(), (200, 2));
             let extent = tree.find_extent(12).await.unwrap();
             assert_eq!(extent, None);
 
@@ -2613,6 +2649,38 @@ mod tests {
             // so free them before the fsck-on-drop wrapper validates the image.
             tree.free_metadata_blocks().await.unwrap();
         }
+    }
+
+    #[maybe_async::test(
+        feature = "sync",
+        async(not(feature = "sync"), tokio::test)
+    )]
+    async fn test_extent_tree_uninitialized_extent_returns_hole_run() {
+        let fs = load_test_disk1_rw().await;
+        let inode = root_inode_as_extent_tree(&fs).await;
+        let tree = ExtentTree {
+            ext4: fs.0.clone(),
+            inode: inode.index,
+            node: ExtentNode {
+                block: None,
+                header: NodeHeader {
+                    num_entries: 1,
+                    max_entries: 4,
+                    depth: 0,
+                    generation: 0,
+                },
+                entries: ExtentNodeEntries::Leaf(vec![Extent {
+                    block_within_file: 4,
+                    start_block: 300,
+                    num_blocks: 4,
+                    is_initialized: false,
+                }]),
+            },
+            checksum_base: inode.checksum_base().clone(),
+        };
+
+        assert_eq!(tree.get_block(4).await.unwrap(), 0);
+        assert_eq!(tree.get_block_run(5, 8).await.unwrap(), (0, 3));
     }
 
     #[maybe_async::test(
