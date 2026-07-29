@@ -43,6 +43,7 @@ pub struct Inode {
 pub(super) struct MetadataCacheState {
     generation: AtomicU64,
     cached: Mutex<Option<(u64, Metadata)>>,
+    inode: Mutex<Option<(u64, ext4plus::inode::Inode)>>,
 }
 
 impl MetadataCacheState {
@@ -50,6 +51,7 @@ impl MetadataCacheState {
         Self {
             generation: AtomicU64::new(0),
             cached: Mutex::new(None),
+            inode: Mutex::new(None),
         }
     }
 
@@ -70,6 +72,20 @@ impl MetadataCacheState {
         self.generation.load(Ordering::Acquire)
     }
 
+    fn get_inode(&self) -> Option<(u64, ext4plus::inode::Inode)> {
+        let generation = self.generation.load(Ordering::Acquire);
+        let inode = self
+            .inode
+            .lock()
+            .as_ref()
+            .filter(|(cached_generation, _)| *cached_generation == generation)
+            .map(|(_, inode)| inode.clone());
+        if self.generation.load(Ordering::Acquire) != generation {
+            return None;
+        }
+        inode.map(|inode| (generation, inode))
+    }
+
     fn publish(&self, generation: u64, metadata: Metadata) -> bool {
         let mut cached = self.cached.lock();
         if self.generation.load(Ordering::Acquire) != generation {
@@ -79,9 +95,19 @@ impl MetadataCacheState {
         true
     }
 
+    fn publish_inode(&self, generation: u64, inode: ext4plus::inode::Inode) -> bool {
+        let mut cached = self.inode.lock();
+        if self.generation.load(Ordering::Acquire) != generation {
+            return false;
+        }
+        *cached = Some((generation, inode));
+        true
+    }
+
     fn invalidate(&self) {
         self.generation.fetch_add(1, Ordering::AcqRel);
         *self.cached.lock() = None;
+        *self.inode.lock() = None;
     }
 }
 
@@ -104,40 +130,42 @@ struct CachedLookupEntry {
 const DIR_LOOKUP_CACHE_MAX_ENTRIES: usize = 256;
 
 struct DirCacheState {
-    generation: AtomicU64,
+    snapshot_generation: AtomicU64,
+    lookup_generation: AtomicU64,
     snapshot: Mutex<Option<(u64, Arc<DirSnapshot>)>>,
-    lookup: Mutex<LruCache<String, (u64, Option<CachedLookupEntry>)>>,
+    lookup: Mutex<LruCache<String, Option<CachedLookupEntry>>>,
 }
 
 impl DirCacheState {
     fn new() -> Self {
         Self {
-            generation: AtomicU64::new(0),
+            snapshot_generation: AtomicU64::new(0),
+            lookup_generation: AtomicU64::new(0),
             snapshot: Mutex::new(None),
             lookup: Mutex::new(LruCache::unbounded()),
         }
     }
 
     fn get(&self) -> Option<Arc<DirSnapshot>> {
-        let generation = self.generation.load(Ordering::Acquire);
+        let generation = self.snapshot_generation.load(Ordering::Acquire);
         let snapshot = self
             .snapshot
             .lock()
             .as_ref()
             .filter(|(snapshot_generation, _)| *snapshot_generation == generation)
             .map(|(_, snapshot)| snapshot.clone());
-        (self.generation.load(Ordering::Acquire) == generation)
+        (self.snapshot_generation.load(Ordering::Acquire) == generation)
             .then_some(snapshot)
             .flatten()
     }
 
     fn generation(&self) -> u64 {
-        self.generation.load(Ordering::Acquire)
+        self.snapshot_generation.load(Ordering::Acquire)
     }
 
     fn publish(&self, generation: u64, snapshot: Arc<DirSnapshot>) -> bool {
         let mut cached = self.snapshot.lock();
-        if self.generation.load(Ordering::Acquire) != generation {
+        if self.snapshot_generation.load(Ordering::Acquire) != generation {
             return false;
         }
         *cached = Some((generation, snapshot));
@@ -145,16 +173,15 @@ impl DirCacheState {
     }
 
     fn get_lookup(&self, name: &str) -> Option<Option<CachedLookupEntry>> {
-        let generation = self.generation.load(Ordering::Acquire);
-        let entry = self
-            .lookup
-            .lock()
-            .get(name)
-            .filter(|(entry_generation, _)| *entry_generation == generation)
-            .map(|(_, entry)| *entry);
-        (self.generation.load(Ordering::Acquire) == generation)
+        let generation = self.lookup_generation.load(Ordering::Acquire);
+        let entry = self.lookup.lock().get(name).copied();
+        (self.lookup_generation.load(Ordering::Acquire) == generation)
             .then_some(entry)
             .flatten()
+    }
+
+    fn lookup_generation(&self) -> u64 {
+        self.lookup_generation.load(Ordering::Acquire)
     }
 
     fn publish_lookup(
@@ -164,20 +191,38 @@ impl DirCacheState {
         entry: Option<CachedLookupEntry>,
     ) -> bool {
         let mut lookup = self.lookup.lock();
-        if self.generation.load(Ordering::Acquire) != generation {
+        if self.lookup_generation.load(Ordering::Acquire) != generation {
             return false;
         }
-        lookup.put(name, (generation, entry));
+        lookup.put(name, entry);
         while lookup.len() > DIR_LOOKUP_CACHE_MAX_ENTRIES {
             lookup.pop_lru();
         }
         true
     }
 
+    fn update_lookup(&self, name: String, entry: Option<CachedLookupEntry>) {
+        let mut lookup = self.lookup.lock();
+        self.lookup_generation.fetch_add(1, Ordering::AcqRel);
+        lookup.put(name, entry);
+        while lookup.len() > DIR_LOOKUP_CACHE_MAX_ENTRIES {
+            lookup.pop_lru();
+        }
+    }
+
+    fn invalidate_snapshot(&self) {
+        let mut snapshot = self.snapshot.lock();
+        self.snapshot_generation.fetch_add(1, Ordering::AcqRel);
+        *snapshot = None;
+    }
+
     fn invalidate(&self) {
-        self.generation.fetch_add(1, Ordering::AcqRel);
-        *self.snapshot.lock() = None;
-        self.lookup.lock().clear();
+        let mut snapshot = self.snapshot.lock();
+        let mut lookup = self.lookup.lock();
+        self.snapshot_generation.fetch_add(1, Ordering::AcqRel);
+        self.lookup_generation.fetch_add(1, Ordering::AcqRel);
+        *snapshot = None;
+        lookup.clear();
     }
 }
 
@@ -219,6 +264,13 @@ fn invalidate_dir_cache(fs: &Arc<Ext4Filesystem>, ino: u32) {
     let key = dir_cache_key(fs, ino);
     if let Some(state) = DIR_CACHE_REGISTRY.lock().get(&key).and_then(Weak::upgrade) {
         state.invalidate();
+    }
+}
+
+fn invalidate_dir_snapshot(fs: &Arc<Ext4Filesystem>, ino: u32) {
+    let key = dir_cache_key(fs, ino);
+    if let Some(state) = DIR_CACHE_REGISTRY.lock().get(&key).and_then(Weak::upgrade) {
+        state.invalidate_snapshot();
     }
 }
 
@@ -324,9 +376,9 @@ impl Inode {
 
     fn invalidate_snapshot(&self, dir_ino: u32) {
         if dir_ino == self.ino {
-            self.dir_cache.invalidate();
+            self.dir_cache.invalidate_snapshot();
         } else {
-            invalidate_dir_cache(&self.fs, dir_ino);
+            invalidate_dir_snapshot(&self.fs, dir_ino);
         }
     }
 
@@ -343,10 +395,7 @@ impl Inode {
         let total_inodes = fs.superblock().num_block_groups() as u64
             * fs.superblock().inodes_per_block_group().get() as u64;
 
-        let dir_idx = core::num::NonZeroU32::new(dir_ino).ok_or(VfsError::InvalidData)?;
-        let dir_inode = ext4plus::inode::Inode::read(fs, dir_idx)
-            .await
-            .map_err(into_vfs_err)?;
+        let (_, dir_inode) = self.read_inode_cached(fs, dir_ino).await?;
         let dir = ext4plus::dir::Dir::open_inode(fs, dir_inode).map_err(into_vfs_err)?;
         let read_dir = dir.read_dir().map_err(into_vfs_err)?;
 
@@ -369,11 +418,9 @@ impl Inode {
             let de_type = match entry.file_type() {
                 Ok(t) => t,
                 Err(_) => {
-                    let idx = core::num::NonZeroU32::new(entry.inode.get())
-                        .ok_or(VfsError::InvalidData)?;
-                    ext4plus::inode::Inode::read(fs, idx)
-                        .await
-                        .map_err(into_vfs_err)?
+                    self.read_inode_cached(fs, entry.inode.get())
+                        .await?
+                        .1
                         .file_type()
                 }
             };
@@ -425,6 +472,34 @@ impl Inode {
         Ok(())
     }
 
+    async fn read_inode_cached(
+        &self,
+        fs: &Ext4,
+        inode_num: u32,
+    ) -> VfsResult<(u64, ext4plus::inode::Inode)> {
+        self.validate_inode_num(fs, inode_num)?;
+        let cache = if inode_num == self.ino {
+            self.metadata_cache.clone()
+        } else {
+            metadata_cache_state(&self.fs, inode_num)
+        };
+
+        loop {
+            if let Some(inode) = cache.get_inode() {
+                return Ok(inode);
+            }
+
+            let generation = cache.generation();
+            let index = core::num::NonZeroU32::new(inode_num).ok_or(VfsError::InvalidData)?;
+            let inode = ext4plus::inode::Inode::read(fs, index)
+                .await
+                .map_err(into_vfs_err)?;
+            if cache.publish_inode(generation, inode.clone()) {
+                return Ok((generation, inode));
+            }
+        }
+    }
+
     async fn dir_has_children(&self, fs: &Ext4, dir_ino: u32) -> VfsResult<bool> {
         let snapshot = self.build_dir_snapshot(fs, dir_ino).await?;
         Ok(snapshot
@@ -452,12 +527,7 @@ impl NodeOps for Inode {
             }
 
             let fs = &self.fs.inner;
-            self.validate_inode_num(fs, self.ino)?;
-            let generation = self.metadata_cache.generation();
-            let idx = core::num::NonZeroU32::new(self.ino).ok_or(VfsError::InvalidData)?;
-            let inode = ext4plus::inode::Inode::read(fs, idx)
-                .await
-                .map_err(into_vfs_err)?;
+            let (generation, inode) = self.read_inode_cached(fs, self.ino).await?;
             let file_type = inode.file_type();
             let perm = inode.mode().bits() & 0x0fff;
             let metadata = Metadata {
@@ -484,11 +554,7 @@ impl NodeOps for Inode {
 
     async fn len(&self) -> VfsResult<u64> {
         let fs = &self.fs.inner;
-        self.validate_inode_num(&fs, self.ino)?;
-        let idx = core::num::NonZeroU32::new(self.ino).ok_or(VfsError::InvalidData)?;
-        let inode = ext4plus::inode::Inode::read(&fs, idx)
-            .await
-            .map_err(into_vfs_err)?;
+        let (_, inode) = self.read_inode_cached(fs, self.ino).await?;
         Ok(inode.size_in_bytes())
     }
 
@@ -521,8 +587,9 @@ impl NodeOps for Inode {
         if cfg!(feature = "times") {
             inode.set_ctime(axhal::time::wall_time());
         }
-        inode.write(&fs).await.map_err(into_vfs_err)?;
-        Ok(())
+        let result = inode.write(&fs).await.map_err(into_vfs_err);
+        self.invalidate_metadata();
+        result
     }
 
     fn filesystem(&self) -> &dyn FilesystemOps {
@@ -546,11 +613,7 @@ impl NodeOps for Inode {
 impl FileNodeOps for Inode {
     async fn read_at(&self, buf: &mut [u8], offset: u64) -> VfsResult<usize> {
         let fs = &self.fs.inner;
-        self.validate_inode_num(&fs, self.ino)?;
-        let idx = core::num::NonZeroU32::new(self.ino).ok_or(VfsError::InvalidData)?;
-        let inode = ext4plus::inode::Inode::read(&fs, idx)
-            .await
-            .map_err(into_vfs_err)?;
+        let (_, inode) = self.read_inode_cached(fs, self.ino).await?;
         if inode.file_type().is_symlink() && inode.blocks() == 0 {
             let target_path = inode.symlink_target(&fs).await.map_err(into_vfs_err)?;
             let target_bytes = target_path.as_ref();
@@ -581,7 +644,9 @@ impl FileNodeOps for Inode {
             .map_err(into_vfs_err)?;
         let written = ext4plus::file::write_at(&fs, &mut inode, buf, offset)
             .await
-            .map_err(into_vfs_err)?;
+            .map_err(into_vfs_err);
+        self.invalidate_metadata();
+        let written = written?;
         log::debug!("ext4 inode::write_at done: written={}", written);
         Ok(written)
     }
@@ -598,7 +663,9 @@ impl FileNodeOps for Inode {
         let length = inode.size_in_bytes();
         let written = ext4plus::file::write_at(&fs, &mut inode, buf, length)
             .await
-            .map_err(into_vfs_err)?;
+            .map_err(into_vfs_err);
+        self.invalidate_metadata();
+        let written = written?;
         Ok((written, length + written as u64))
     }
 
@@ -615,10 +682,11 @@ impl FileNodeOps for Inode {
         if len == old_len {
             return Ok(());
         }
-        ext4plus::file::truncate(&fs, &mut inode, len)
+        let result = ext4plus::file::truncate(&fs, &mut inode, len)
             .await
-            .map_err(into_vfs_err)?;
-        Ok(())
+            .map_err(into_vfs_err);
+        self.invalidate_metadata();
+        result
     }
 
     async fn set_symlink(&self, target: &str) -> VfsResult<()> {
@@ -631,12 +699,17 @@ impl FileNodeOps for Inode {
             .await
             .map_err(into_vfs_err)?;
         let bytes = target.as_bytes();
-        ext4plus::file::truncate(&fs, &mut inode, 0)
-            .await
-            .map_err(into_vfs_err)?;
-        let written = ext4plus::file::write_at(&fs, &mut inode, bytes, 0)
-            .await
-            .map_err(into_vfs_err)?;
+        let written = async {
+            ext4plus::file::truncate(&fs, &mut inode, 0)
+                .await
+                .map_err(into_vfs_err)?;
+            ext4plus::file::write_at(&fs, &mut inode, bytes, 0)
+                .await
+                .map_err(into_vfs_err)
+        }
+        .await;
+        self.invalidate_metadata();
+        let written = written?;
         if written != bytes.len() {
             return Err(VfsError::StorageFull);
         }
@@ -698,12 +771,9 @@ impl DirNodeOps for Inode {
                 None => Err(VfsError::NotFound),
             };
         }
-        let generation = self.dir_cache.generation();
+        let generation = self.dir_cache.lookup_generation();
 
-        let dir_idx = core::num::NonZeroU32::new(self.ino).ok_or(VfsError::InvalidData)?;
-        let dir_inode = ext4plus::inode::Inode::read(&fs, dir_idx)
-            .await
-            .map_err(into_vfs_err)?;
+        let (_, dir_inode) = self.read_inode_cached(fs, self.ino).await?;
         let dir = ext4plus::dir::Dir::open_inode(&fs, dir_inode).map_err(into_vfs_err)?;
         match dir.get_entry(name_ref).await {
             Ok(target_inode) => {
@@ -746,11 +816,8 @@ impl DirNodeOps for Inode {
             Some(Some(_)) => return Err(VfsError::AlreadyExists),
             Some(None) => {}
             None => {
-                let generation = self.dir_cache.generation();
-                let dir_idx = core::num::NonZeroU32::new(self.ino).ok_or(VfsError::InvalidData)?;
-                let dir_inode = ext4plus::inode::Inode::read(&fs, dir_idx)
-                    .await
-                    .map_err(into_vfs_err)?;
+                let generation = self.dir_cache.lookup_generation();
+                let (_, dir_inode) = self.read_inode_cached(fs, self.ino).await?;
                 let dir = ext4plus::dir::Dir::open_inode(&fs, dir_inode).map_err(into_vfs_err)?;
                 match dir.get_entry(name_ref).await {
                     Ok(target) => {
@@ -805,13 +872,25 @@ impl DirNodeOps for Inode {
             let name_ref =
                 ext4plus::DirEntryName::try_from(name).map_err(|_| VfsError::InvalidInput)?;
             self.invalidate_metadata();
-            dir.link(name_ref, &mut new_inode)
+            let link_result = dir
+                .link(name_ref, &mut new_inode)
                 .await
-                .map_err(into_vfs_err)?;
+                .map_err(into_vfs_err);
             self.invalidate_metadata();
             invalidate_inode_metadata_cache(&self.fs, new_inode.index.get());
+            if link_result.is_err() {
+                self.dir_cache.invalidate();
+            }
+            link_result?;
 
             self.invalidate_snapshot(self.ino);
+            self.dir_cache.update_lookup(
+                String::from(name),
+                Some(CachedLookupEntry {
+                    inode_num: new_inode.index.get(),
+                    node_type,
+                }),
+            );
             Ok(self.create_entry(
                 new_inode.index.get(),
                 node_type,
@@ -856,16 +935,27 @@ impl DirNodeOps for Inode {
             ext4plus::DirEntryName::try_from(name).map_err(|_| VfsError::InvalidInput)?;
         self.invalidate_metadata();
         invalidate_inode_metadata_cache(&self.fs, child_inode.index.get());
-        dir.link(name_ref, &mut child_inode)
+        let link_result = dir
+            .link(name_ref, &mut child_inode)
             .await
-            .map_err(into_vfs_err)?;
+            .map_err(into_vfs_err);
         self.invalidate_metadata();
         invalidate_inode_metadata_cache(&self.fs, child_inode.index.get());
+        if link_result.is_err() {
+            self.dir_cache.invalidate();
+        }
+        link_result?;
 
         self.invalidate_snapshot(self.ino);
+        let cached = CachedLookupEntry {
+            inode_num: child_inode.index.get(),
+            node_type: into_vfs_type(child_inode.file_type()),
+        };
+        self.dir_cache
+            .update_lookup(String::from(name), Some(cached));
         Ok(self.create_entry(
-            child_inode.index.get(),
-            into_vfs_type(child_inode.file_type()),
+            cached.inode_num,
+            cached.node_type,
             child_inode.file_type() == ext4plus::FileType::Directory,
             name,
         ))
@@ -899,12 +989,17 @@ impl DirNodeOps for Inode {
         let child_inode = dir
             .unlink(name_ref, child_inode)
             .await
-            .map_err(into_vfs_err)?;
+            .map_err(into_vfs_err);
         self.invalidate_metadata();
         invalidate_inode_metadata_cache(&self.fs, child_ino);
+        if child_inode.is_err() {
+            self.dir_cache.invalidate();
+        }
+        let child_inode = child_inode?;
         self.invalidate_snapshot(self.ino);
+        self.dir_cache.update_lookup(String::from(name), None);
         if is_dir {
-            self.invalidate_snapshot(child_ino);
+            invalidate_dir_cache(&self.fs, child_ino);
         }
         if child_inode.links_count() == 0 {
             let has_other_active = {
@@ -1008,12 +1103,19 @@ impl DirNodeOps for Inode {
             let dst_inode = dst_dir_obj
                 .unlink(dst_name_ref, dst_inode)
                 .await
-                .map_err(into_vfs_err)?;
+                .map_err(into_vfs_err);
             dst_dir.invalidate_metadata();
             invalidate_inode_metadata_cache(&dst_dir.fs, dst_inode_ino);
+            if dst_inode.is_err() {
+                dst_dir.dir_cache.invalidate();
+            }
+            let dst_inode = dst_inode?;
             dst_dir.invalidate_snapshot(dst_dir.ino);
+            dst_dir
+                .dir_cache
+                .update_lookup(String::from(dst_name), None);
             if dst_is_dir {
-                dst_dir.invalidate_snapshot(dst_inode_ino);
+                invalidate_dir_cache(&dst_dir.fs, dst_inode_ino);
             }
             if dst_inode.links_count() == 0 {
                 let has_other_active = {
@@ -1058,20 +1160,37 @@ impl DirNodeOps for Inode {
             dst_dir.invalidate_metadata();
         }
         invalidate_inode_metadata_cache(&self.fs, src_inode_ino);
-        dst_dir_obj
+        let link_result = dst_dir_obj
             .link(dst_name_ref, &mut src_inode)
             .await
-            .map_err(into_vfs_err)?;
+            .map_err(into_vfs_err);
         dst_dir.invalidate_metadata();
         invalidate_inode_metadata_cache(&self.fs, src_inode_ino);
+        if link_result.is_err() {
+            dst_dir.dir_cache.invalidate();
+        }
+        link_result?;
         dst_dir.invalidate_snapshot(dst_dir.ino);
-        src_dir
+        dst_dir.dir_cache.update_lookup(
+            String::from(dst_name),
+            Some(CachedLookupEntry {
+                inode_num: src_inode_ino,
+                node_type: into_vfs_type(src_inode.file_type()),
+            }),
+        );
+        self.invalidate_metadata();
+        let unlink_result = src_dir
             .unlink(src_name_ref, src_inode)
             .await
-            .map_err(into_vfs_err)?;
+            .map_err(into_vfs_err);
         self.invalidate_metadata();
         invalidate_inode_metadata_cache(&self.fs, src_inode_ino);
+        if unlink_result.is_err() {
+            self.dir_cache.invalidate();
+        }
+        unlink_result?;
         self.invalidate_snapshot(self.ino);
+        self.dir_cache.update_lookup(String::from(src_name), None);
         Ok(())
     }
 }
@@ -1178,7 +1297,7 @@ mod tests {
     #[test]
     fn directory_lookup_cache_handles_negative_entries_and_invalidation() {
         let state = DirCacheState::new();
-        let generation = state.generation();
+        let generation = state.lookup_generation();
         let found = CachedLookupEntry {
             inode_num: 23,
             node_type: NodeType::RegularFile,
@@ -1190,9 +1309,23 @@ mod tests {
         assert!(state.publish_lookup(generation, String::from("missing"), None));
         assert_eq!(state.get_lookup("missing"), Some(None));
 
+        state.invalidate_snapshot();
+        assert_eq!(state.get_lookup("found"), Some(Some(found)));
+        assert_eq!(state.get_lookup("missing"), Some(None));
+
+        state.update_lookup(
+            String::from("changed"),
+            Some(CachedLookupEntry {
+                inode_num: 24,
+                node_type: NodeType::Directory,
+            }),
+        );
+        assert_eq!(state.get_lookup("found"), Some(Some(found)));
+        assert_eq!(state.get_lookup("missing"), Some(None));
+        assert!(!state.publish_lookup(generation, String::from("stale"), None));
+
         state.invalidate();
         assert_eq!(state.get_lookup("found"), None);
         assert_eq!(state.get_lookup("missing"), None);
-        assert!(!state.publish_lookup(generation, String::from("stale"), None));
     }
 }
