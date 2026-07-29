@@ -115,6 +115,17 @@ impl PageTable {
         self.inner.unmap_region(vaddr, size, flush_tlb_by_page)
     }
 
+    pub fn unmap_present_range(
+        &mut self,
+        vaddr: VirtAddr,
+        size: usize,
+        allow_huge: bool,
+        on_unmapped: impl FnMut(VirtAddr, PhysAddr, PageSize),
+    ) -> PagingResult {
+        self.inner
+            .unmap_present_range(vaddr, size, allow_huge, on_unmapped)
+    }
+
     pub fn map(
         &mut self,
         vaddr: VirtAddr,

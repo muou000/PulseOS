@@ -377,6 +377,51 @@ impl<M: PagingMetaData, PTE: GenericPTE, H: PagingHandler> PageTable64<M, PTE, H
         Ok(TlbFlushAll::new())
     }
 
+    /// Unmaps every present mapping in a virtual address range.
+    ///
+    /// Unlike [`PageTable64::unmap_region`], holes are allowed. Empty page-table
+    /// subtrees are skipped without walking each 4K address. `on_unmapped` is
+    /// called once for every cleared leaf entry; the caller remains responsible
+    /// for TLB invalidation and mapped-frame reclamation.
+    ///
+    /// A partially covered huge page is rejected and left mapped. When
+    /// `allow_huge` is false, fully covered huge pages are also rejected.
+    pub fn unmap_present_range(
+        &mut self,
+        vaddr: M::VirtAddr,
+        size: usize,
+        allow_huge: bool,
+        mut on_unmapped: impl FnMut(M::VirtAddr, PhysAddr, PageSize),
+    ) -> PagingResult {
+        let start: usize = vaddr.into();
+        if size == 0 {
+            return Ok(());
+        }
+        let end = start.checked_add(size).ok_or(PagingError::NotAligned)?;
+        if !PageSize::Size4K.is_aligned(start) || !PageSize::Size4K.is_aligned(size) {
+            return Err(PagingError::NotAligned);
+        }
+
+        let root_span_shift = 12 + M::LEVELS * 9;
+        let root_span = 1usize
+            .checked_shl(root_span_shift as u32)
+            .ok_or(PagingError::NotAligned)?;
+        let root_start = start & !(root_span - 1);
+        if (end - 1) & !(root_span - 1) != root_start {
+            return Err(PagingError::NotAligned);
+        }
+
+        self.unmap_present_range_recursive(
+            self.root_paddr,
+            0,
+            root_start,
+            start,
+            end,
+            allow_huge,
+            &mut on_unmapped,
+        )
+    }
+
     /// Updates mapping flags of a contiguous virtual memory region.
     ///
     /// The region must be mapped before using [`PageTable64::map_region`], or
@@ -688,6 +733,84 @@ impl<M: PagingMetaData, PTE: GenericPTE, H: PagingHandler> PageTable64<M, PTE, H
         } else {
             self.next_table_mut(entry)
         }
+    }
+
+    fn unmap_present_range_recursive(
+        &self,
+        table_paddr: PhysAddr,
+        level: usize,
+        table_start: usize,
+        start: usize,
+        end: usize,
+        allow_huge: bool,
+        on_unmapped: &mut impl FnMut(M::VirtAddr, PhysAddr, PageSize),
+    ) -> PagingResult {
+        let entry_shift = 12 + (M::LEVELS - 1 - level) * 9;
+        let entry_span = 1usize << entry_shift;
+        let first = (start - table_start) / entry_span;
+        let last = (end - 1 - table_start) / entry_span;
+        debug_assert!(first < ENTRY_COUNT);
+        debug_assert!(last < ENTRY_COUNT);
+
+        let table = self.table_of_mut(table_paddr);
+        for index in first..=last {
+            #[cfg(feature = "copy-from")]
+            if level == 0 && self.borrowed_entries.get(index) {
+                continue;
+            }
+
+            let entry = &mut table[index];
+            if entry.is_unused() {
+                continue;
+            }
+
+            let entry_start = table_start + index * entry_span;
+            let entry_end = entry_start + entry_span;
+            let overlap_start = start.max(entry_start);
+            let overlap_end = end.min(entry_end);
+            if overlap_start >= overlap_end {
+                continue;
+            }
+
+            if entry.is_huge() || level == M::LEVELS - 1 {
+                if !entry.is_present() {
+                    entry.clear();
+                    continue;
+                }
+                let page_size = if level == M::LEVELS - 1 {
+                    PageSize::Size4K
+                } else if level == M::LEVELS - 2 {
+                    PageSize::Size2M
+                } else {
+                    PageSize::Size1G
+                };
+                if overlap_start != entry_start || overlap_end != entry_end {
+                    return Err(PagingError::MappedToHugePage);
+                }
+                if page_size.is_huge() && !allow_huge {
+                    return Err(PagingError::MappedToHugePage);
+                }
+
+                let paddr = entry.paddr();
+                entry.clear();
+                on_unmapped(entry_start.into(), paddr, page_size);
+            } else {
+                let next_paddr = entry.paddr();
+                if next_paddr.as_usize() == 0 {
+                    return Err(PagingError::NotMapped);
+                }
+                self.unmap_present_range_recursive(
+                    next_paddr,
+                    level + 1,
+                    entry_start,
+                    overlap_start,
+                    overlap_end,
+                    allow_huge,
+                    on_unmapped,
+                )?;
+            }
+        }
+        Ok(())
     }
 
     fn get_entry(&self, vaddr: M::VirtAddr) -> PagingResult<(&PTE, PageSize)> {
