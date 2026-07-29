@@ -716,7 +716,7 @@ impl Process {
         let new_fd_table = {
             let binding = self.fd_table();
             let table = binding.read();
-            table.clone_for_fork()?
+            table.clone_for_fork()
         };
         let mut slot = self.fd_table.write();
         *slot = Arc::new(RwLock::new(new_fd_table));
@@ -1694,7 +1694,7 @@ impl Process {
             RwLock::new(parent.fd_table())
         } else {
             RwLock::new(Arc::new(RwLock::new(
-                parent.fd_table().read().clone_for_fork()?,
+                parent.fd_table().read().clone_for_fork(),
             )))
         };
         let parent_creds = parent.credentials.read();
@@ -1922,7 +1922,7 @@ impl Process {
 
     pub fn close_all_files(&self) {
         crate::record_lock::release_posix_owner(self.pid());
-        let _entries = {
+        let _drained = {
             let binding = self.fd_table();
             let mut table = binding.write();
             table.drain_all()
