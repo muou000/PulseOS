@@ -1890,18 +1890,17 @@ impl PipeObject {
         let mut paddrs = alloc::vec::Vec::with_capacity(num_pages);
         for i in 0..num_pages {
             let page_vaddr = VirtAddr::from(writer_vaddr + i * 4096);
-            let (paddr, flags, _) = aspace_guard.query_vaddr(page_vaddr)
-                .map_err(|_| LinuxError::EFAULT)?;
-            if paddr.as_usize() == 0 || !flags.contains(MappingFlags::READ | MappingFlags::USER) {
-                return Err(LinuxError::EFAULT);
+            match aspace_guard.pin_user_frame(page_vaddr, MappingFlags::READ) {
+                Ok(paddr) => paddrs.push(paddr),
+                Err(_) => {
+                    for paddr in paddrs {
+                        dealloc_physical_frame(paddr);
+                    }
+                    return Err(LinuxError::EFAULT);
+                }
             }
-            paddrs.push(paddr);
         }
         drop(aspace_guard);
-
-        for &paddr in &paddrs {
-            axmm::cow_inc_frame_ref(paddr);
-        }
 
         let mut zc = self.shared.zc_pages.lock();
         for paddr in paddrs {
