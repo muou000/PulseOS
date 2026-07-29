@@ -41,8 +41,9 @@ impl CowMapping {
                     && access_flags.contains(MappingFlags::WRITE)
                     && !old_flags.contains(MappingFlags::WRITE)
                 {
-                    let ref_count = if frame_table().contains(old_frame) {
-                        frame_table().get_ref(old_frame)
+                    let frame_table = frame_table();
+                    let ref_count = if frame_table.contains(old_frame) {
+                        frame_table.get_ref(old_frame)
                     } else {
                         2 // Treat unknown frames as shared (ref_count > 1) to reject exclusive upgrade
                     };

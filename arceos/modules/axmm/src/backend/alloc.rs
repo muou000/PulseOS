@@ -67,27 +67,26 @@ impl Drop for AnonPagePrepared {
 }
 
 pub(crate) fn cow_inc_frame_ref(frame: PhysAddr) {
-    if frame_table().contains(frame) {
-        frame_table().inc_ref(frame);
+    let table = frame_table();
+    if table.contains(frame) {
+        table.inc_ref(frame);
     }
 }
 
 pub(crate) fn cow_dec_frame_ref(frame: PhysAddr) -> bool {
-    if frame_table().contains(frame) {
-        drop_frame_mapping_ref(frame)
+    let table = frame_table();
+    if table.contains(frame) {
+        table.dec_ref(frame) == 0
     } else {
         false
     }
 }
 
 pub(crate) fn cow_mark_frame_used(frame: PhysAddr) {
-    if frame_table().contains(frame) {
-        frame_table().mark_used(frame);
+    let table = frame_table();
+    if table.contains(frame) {
+        table.mark_used(frame);
     }
-}
-
-fn drop_frame_mapping_ref(frame: PhysAddr) -> bool {
-    frame_table().dec_ref(frame) == 0
 }
 
 pub(crate) trait ProtectPageTable {

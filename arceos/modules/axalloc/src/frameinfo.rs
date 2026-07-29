@@ -1,5 +1,5 @@
 use alloc::boxed::Box;
-use core::sync::atomic::{AtomicU32, Ordering};
+use core::sync::atomic::{AtomicU32, Ordering, fence};
 
 use lazyinit::LazyInit;
 use memory_addr::PhysAddr;
@@ -50,43 +50,47 @@ impl FrameTable {
     }
 
     pub fn inc_ref(&self, paddr: PhysAddr) {
-        self.info(paddr).ref_count.fetch_add(1, Ordering::SeqCst);
+        // The caller already owns a live reference. Creating another owner
+        // does not publish frame contents, so no cross-location ordering is
+        // required here.
+        self.info(paddr).ref_count.fetch_add(1, Ordering::Relaxed);
     }
 
     pub fn dec_ref(&self, paddr: PhysAddr) -> usize {
-        let old_ref = self.info(paddr).ref_count.fetch_sub(1, Ordering::SeqCst);
+        let old_ref = self.info(paddr).ref_count.fetch_sub(1, Ordering::Release);
         if old_ref == 0 {
             panic!(
                 "FrameTable: dec_ref on frame with 0 references at {:#x}",
                 paddr
             );
         }
-        (old_ref - 1) as usize
+        let remaining = old_ref - 1;
+        if remaining == 0 {
+            // Pair with releases from all previous owners before the caller
+            // returns the frame to the allocator for reuse.
+            fence(Ordering::Acquire);
+        }
+        remaining as usize
     }
 
     pub fn mark_used(&self, paddr: PhysAddr) {
         let info = self.info(paddr);
-        if info.ref_count.load(Ordering::SeqCst) == 0 {
-            info.ref_count.store(1, Ordering::SeqCst);
-        }
+        // First-owner establishment is serialized by the page allocator or
+        // the page-cache lock. Use a CAS so it cannot overwrite a concurrent
+        // reference increment if that invariant is violated.
+        let _ = info
+            .ref_count
+            .compare_exchange(0, 1, Ordering::Relaxed, Ordering::Relaxed);
     }
 
     pub fn get_ref(&self, paddr: PhysAddr) -> usize {
-        self.info(paddr).ref_count.load(Ordering::SeqCst) as usize
+        self.info(paddr).ref_count.load(Ordering::Relaxed) as usize
     }
 
     pub fn try_get_ref(&self, paddr: PhysAddr) -> Option<usize> {
         let offset = paddr.as_usize().checked_sub(self.base_paddr.as_usize())?;
         let info = self.data.get(offset >> FRAME_SHIFT)?;
-        Some(info.ref_count.load(Ordering::SeqCst) as usize)
-    }
-
-    #[allow(dead_code)]
-    pub fn total_refs(&self) -> usize {
-        self.data
-            .iter()
-            .map(|info| info.ref_count.load(Ordering::SeqCst) as usize)
-            .sum()
+        Some(info.ref_count.load(Ordering::Relaxed) as usize)
     }
 
     pub fn contains(&self, paddr: PhysAddr) -> bool {
