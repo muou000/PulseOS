@@ -151,6 +151,100 @@ fn copy_cow_range_reports_only_writable_source_changes() -> PagingResult<()> {
 }
 
 #[test]
+#[cfg(any(target_arch = "x86_64", docsrs))]
+fn unmap_present_range_clears_sparse_pages_and_placeholders() -> PagingResult<()> {
+    type Meta = page_table_multiarch::x86_64::X64PagingMetaData;
+    type Pte = page_table_entry::x86_64::X64PTE;
+    type Table = PageTable64<Meta, Pte, TrackPagingHandler<Meta>>;
+
+    ALLOCATED.with_borrow_mut(|it| it.clear());
+    let mut table = Table::try_new()?;
+    let first = VirtAddr::from_usize(0x1000);
+    let second = VirtAddr::from_usize(0x20_3000);
+    let placeholder = VirtAddr::from_usize(0x4000_1000);
+    let outside = VirtAddr::from_usize(0x8000_0000);
+    for (vaddr, paddr) in [
+        (first, PhysAddr::from_usize(0x10_0000)),
+        (second, PhysAddr::from_usize(0x20_0000)),
+        (placeholder, PhysAddr::from_usize(0)),
+        (outside, PhysAddr::from_usize(0x30_0000)),
+    ] {
+        table
+            .map(vaddr, paddr, PageSize::Size4K, MappingFlags::READ)?
+            .ignore();
+    }
+
+    let mut unmapped = Vec::new();
+    table.unmap_present_range(
+        VirtAddr::from_usize(0),
+        0x8000_0000,
+        false,
+        |vaddr, paddr, page_size| unmapped.push((vaddr, paddr, page_size)),
+    )?;
+
+    assert_eq!(
+        unmapped,
+        vec![
+            (first, PhysAddr::from_usize(0x10_0000), PageSize::Size4K),
+            (second, PhysAddr::from_usize(0x20_0000), PageSize::Size4K),
+            (placeholder, PhysAddr::from_usize(0), PageSize::Size4K),
+        ]
+    );
+    assert!(table.query(first).is_err());
+    assert!(table.query(second).is_err());
+    assert!(table.query(placeholder).is_err());
+    assert!(table.query(outside).is_ok());
+
+    drop(table);
+    assert_eq!(ALLOCATED.with_borrow(|it| it.len()), 0);
+    Ok(())
+}
+
+#[test]
+#[cfg(any(target_arch = "x86_64", docsrs))]
+fn unmap_present_range_preserves_partial_huge_page() -> PagingResult<()> {
+    type Meta = page_table_multiarch::x86_64::X64PagingMetaData;
+    type Pte = page_table_entry::x86_64::X64PTE;
+    type Table = PageTable64<Meta, Pte, TrackPagingHandler<Meta>>;
+
+    ALLOCATED.with_borrow_mut(|it| it.clear());
+    let mut table = Table::try_new()?;
+    let huge = VirtAddr::from_usize(PageSize::Size2M as usize);
+    let frame = PhysAddr::from_usize(0x20_0000);
+    table
+        .map(huge, frame, PageSize::Size2M, MappingFlags::READ)?
+        .ignore();
+
+    assert_eq!(
+        table.unmap_present_range(huge + 0x1000, 0x1000, true, |_, _, _| {}),
+        Err(page_table_multiarch::PagingError::MappedToHugePage)
+    );
+    assert_eq!(table.query(huge)?.0, frame);
+
+    assert_eq!(
+        table.unmap_present_range(huge, PageSize::Size2M as usize, false, |_, _, _| {}),
+        Err(page_table_multiarch::PagingError::MappedToHugePage)
+    );
+    assert_eq!(table.query(huge)?.0, frame);
+
+    let mut unmapped = Vec::new();
+    table.unmap_present_range(
+        huge,
+        PageSize::Size2M as usize,
+        true,
+        |vaddr, paddr, size| {
+            unmapped.push((vaddr, paddr, size));
+        },
+    )?;
+    assert_eq!(unmapped, vec![(huge, frame, PageSize::Size2M)]);
+    assert!(table.query(huge).is_err());
+
+    drop(table);
+    assert_eq!(ALLOCATED.with_borrow(|it| it.len()), 0);
+    Ok(())
+}
+
+#[test]
 #[cfg(any(target_arch = "riscv32", target_arch = "riscv64", docsrs))]
 fn test_dealloc_riscv() -> PagingResult<()> {
     run_test_for::<
