@@ -16,8 +16,7 @@ pulse_core = { path = "pulse_core" }
 pulse_syscalls = { path = "pulse_syscalls" }
 
 axfeat = { path = "arceos/api/axfeat", features = [
-    "alloc-tlsf",
-    "page-alloc-64g",
+    "alloc-slab",
     "multitask",
     "sched-rr",
     "fs",
@@ -32,7 +31,7 @@ axhal = { path = "arceos/modules/axhal", features = ["uspace", "fp-simd"] }
 axlog = { path = "arceos/modules/axlog" }
 axruntime = { path = "arceos/modules/axruntime" }
 axnet = { path = "arceos/modules/axnet", features = ["monolithic"] }
-axalloc = { path = "arceos/modules/axalloc" }
+axalloc = { path = "arceos/modules/axalloc", default-features = false }
 axtask = { path = "arceos/modules/axtask" }
 axfs = { path = "arceos/modules/axfs", features = ["times"] }
 axmm = { path = "arceos/modules/axmm" }

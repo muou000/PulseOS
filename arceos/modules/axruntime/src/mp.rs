@@ -55,6 +55,8 @@ pub fn start_secondary_cpus(primary_cpu_id: usize) {
 #[axplat::secondary_main]
 pub fn rust_main_secondary(cpu_id: usize) -> ! {
     axhal::init_percpu_secondary(cpu_id);
+    #[cfg(feature = "alloc")]
+    axalloc::init_percpu_slab(cpu_id);
     axhal::init_early_secondary(cpu_id);
 
     ENTERED_CPU_MASK.fetch_or(1usize << cpu_id, Ordering::Release);
