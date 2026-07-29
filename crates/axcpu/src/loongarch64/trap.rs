@@ -63,7 +63,7 @@ fn loongarch64_trap_handler(tf: &mut TrapFrame, from_user: bool) {
         | Trap::Exception(Exception::MemoryAccessAddressError)
         | Trap::Exception(Exception::AddressNotAligned) => {
             let handled = if from_user {
-                handle_trap!(ADDRESS_ERROR, tf, tf.era, from_user)
+                handle_trap!(ADDRESS_ERROR, tf, badv::read().raw(), from_user)
             } else {
                 false
             };

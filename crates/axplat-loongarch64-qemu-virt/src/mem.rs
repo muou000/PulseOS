@@ -1,4 +1,4 @@
-use axplat::mem::{MemIf, PhysAddr, RawRange, VirtAddr, pa, va};
+use axplat::mem::{MemIf, PAGE_SIZE_4K, PhysAddr, RawRange, VirtAddr, pa, va};
 
 use crate::config::devices::MMIO_RANGES;
 use crate::config::plat::{PHYS_MEMORY_BASE, PHYS_MEMORY_SIZE, PHYS_VIRT_OFFSET};
@@ -8,6 +8,7 @@ pub(crate) const RAM_RANGES: [RawRange; 2] = [
     (0, LOW_MEMORY_SIZE),
     (PHYS_MEMORY_BASE, PHYS_MEMORY_SIZE - LOW_MEMORY_SIZE),
 ];
+const RESERVED_RAM_RANGES: [RawRange; 1] = [(0, PAGE_SIZE_4K)];
 
 struct MemIfImpl;
 
@@ -36,7 +37,10 @@ impl MemIf for MemIfImpl {
     /// Note that the ranges returned should not include the range where the
     /// kernel is loaded.
     fn reserved_phys_ram_ranges() -> &'static [RawRange] {
-        &[]
+        // Empty LoongArch directory entries contain physical address zero.
+        // The branchless TLB-refill walk therefore uses PA 0 as its shared
+        // invalid lower-level table; it must remain zero and unallocatable.
+        &RESERVED_RAM_RANGES
     }
 
     /// Returns all device memory (MMIO) ranges on the platform.
