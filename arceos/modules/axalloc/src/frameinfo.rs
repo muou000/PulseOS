@@ -1,5 +1,5 @@
 use alloc::boxed::Box;
-use core::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicU32, Ordering};
 
 use lazyinit::LazyInit;
 use memory_addr::PhysAddr;
@@ -23,7 +23,6 @@ impl Default for FrameInfo {
 pub struct FrameTable {
     base_paddr: PhysAddr,
     data: Box<[FrameInfo]>,
-    total_refs: AtomicUsize,
 }
 
 impl FrameTable {
@@ -34,11 +33,7 @@ impl FrameTable {
             data[i].write(FrameInfo::default());
         }
         let data = unsafe { data.assume_init() };
-        Self {
-            base_paddr,
-            data,
-            total_refs: AtomicUsize::new(0),
-        }
+        Self { base_paddr, data }
     }
 
     fn info(&self, paddr: PhysAddr) -> &FrameInfo {
@@ -56,7 +51,6 @@ impl FrameTable {
 
     pub fn inc_ref(&self, paddr: PhysAddr) {
         self.info(paddr).ref_count.fetch_add(1, Ordering::SeqCst);
-        self.total_refs.fetch_add(1, Ordering::SeqCst);
     }
 
     pub fn dec_ref(&self, paddr: PhysAddr) -> usize {
@@ -67,7 +61,6 @@ impl FrameTable {
                 paddr
             );
         }
-        self.total_refs.fetch_sub(1, Ordering::SeqCst);
         (old_ref - 1) as usize
     }
 
@@ -75,7 +68,6 @@ impl FrameTable {
         let info = self.info(paddr);
         if info.ref_count.load(Ordering::SeqCst) == 0 {
             info.ref_count.store(1, Ordering::SeqCst);
-            self.total_refs.fetch_add(1, Ordering::SeqCst);
         }
     }
 
@@ -91,7 +83,10 @@ impl FrameTable {
 
     #[allow(dead_code)]
     pub fn total_refs(&self) -> usize {
-        self.total_refs.load(Ordering::SeqCst)
+        self.data
+            .iter()
+            .map(|info| info.ref_count.load(Ordering::SeqCst) as usize)
+            .sum()
     }
 
     pub fn contains(&self, paddr: PhysAddr) -> bool {
