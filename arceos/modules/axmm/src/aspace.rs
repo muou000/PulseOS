@@ -1,5 +1,6 @@
 use core::fmt;
 
+use axalloc::frame_table;
 use axerrno::{AxError, AxResult, ax_err};
 use axfs::{CachedFile, FileFlags};
 use axhal::{
@@ -574,6 +575,25 @@ impl AddrSpace {
     /// Query a virtual address mapping from the inner page table under lock.
     pub fn query_vaddr(&self, vaddr: VirtAddr) -> PagingResult<(PhysAddr, MappingFlags, PageSize)> {
         self.pt.read_for_addr(vaddr).query(vaddr)
+    }
+
+    /// Pins a mapped user frame while holding the leaf page-table read lock.
+    pub fn pin_user_frame(
+        &self,
+        vaddr: VirtAddr,
+        required_flags: MappingFlags,
+    ) -> AxResult<PhysAddr> {
+        let pt = self.pt.read_for_addr(vaddr);
+        let (frame, flags, _) = pt.query(vaddr).map_err(|_| AxError::BadAddress)?;
+        if frame.as_usize() == 0 || !flags.contains(required_flags | MappingFlags::USER) {
+            return Err(AxError::BadAddress);
+        }
+
+        let frame_table = frame_table();
+        if frame_table.contains(frame) {
+            frame_table.inc_ref(frame);
+        }
+        Ok(frame)
     }
 
     /// Returns the root physical address of the inner page table.
@@ -1727,6 +1747,7 @@ impl AddrSpace {
 
     fn try_clone_inner(&mut self, invalidation: &mut TlbInvalidationTracker) -> AxResult<Self> {
         let mut new_aspace = Self::new_empty(self.va_range.start, self.va_range.size())?;
+        let frame_table = frame_table();
         let last_alloc = self.last_alloc_addr.load(core::sync::atomic::Ordering::Acquire);
         new_aspace.last_alloc_addr.store(last_alloc, core::sync::atomic::Ordering::Release);
 
@@ -1806,7 +1827,9 @@ impl AddrSpace {
 
             if should_copy {
                 let inc_ref = |paddr| {
-                    crate::cow_inc_frame_ref(paddr);
+                    if frame_table.contains(paddr) {
+                        frame_table.inc_ref(paddr);
+                    }
                 };
                 let record_src_change = |start, size| invalidation.record(start, size);
                 if new_aspace.pt.get_mut().copy_cow_range(

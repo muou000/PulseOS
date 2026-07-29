@@ -9,7 +9,7 @@ extern crate alloc;
 mod aspace;
 mod backend;
 
-use axalloc::{frame_table, init_frame_table};
+use axalloc::init_frame_table;
 use axerrno::{AxError, AxResult};
 use axhal::{
     mem::{MemRegionFlags, phys_to_virt},
@@ -106,18 +106,13 @@ pub fn kernel_page_table_root() -> PhysAddr {
 }
 
 /// Increase mapping refcount for a shared frame used by fork COW.
-/// Increase mapping refcount for a shared frame used by fork COW.
 pub fn cow_inc_frame_ref(frame: PhysAddr) {
-    if frame_table().contains(frame) {
-        backend::cow_inc_frame_ref(frame);
-    }
+    backend::cow_inc_frame_ref(frame);
 }
 
 /// Decrease mapping refcount for a shared frame used by fork COW.
 pub fn cow_dec_frame_ref(frame: PhysAddr) {
-    if frame_table().contains(frame) {
-        backend::cow_dec_frame_ref(frame);
-    }
+    backend::cow_dec_frame_ref(frame);
 }
 
 /// Initializes virtual memory management.
