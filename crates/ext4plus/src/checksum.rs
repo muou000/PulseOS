@@ -27,7 +27,7 @@ use core::fmt::{self, Debug, Formatter};
 /// initial UUID.
 #[derive(Clone)]
 pub(crate) struct Checksum {
-    digest: crc::Digest<'static, u32>,
+    digest: crc::Digest<'static, u32, crc::Table<16>>,
 }
 
 impl Checksum {
@@ -41,8 +41,8 @@ impl Checksum {
 
     /// Create a `Checksum` with the given `seed`.
     pub(crate) fn with_seed(seed: u32) -> Self {
-        const CRC32C: crc::Crc<u32> =
-            crc::Crc::<u32>::new(&Checksum::ALGORITHM);
+        const CRC32C: crc::Crc<u32, crc::Table<16>> =
+            crc::Crc::<u32, crc::Table<16>>::new(&Checksum::ALGORITHM);
 
         Self {
             digest: CRC32C.digest_with_initial(seed.reverse_bits()),

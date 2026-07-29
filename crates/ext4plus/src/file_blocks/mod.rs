@@ -50,18 +50,53 @@ impl FileBlocks {
         &self,
         block_index: FileBlockIndex,
     ) -> Result<FsBlockIndex, Ext4Error> {
+        self.get_block_run(block_index, 1)
+            .await
+            .map(|(block, _)| block)
+    }
+
+    #[maybe_async::maybe_async]
+    pub(crate) async fn get_block_run(
+        &self,
+        block_index: FileBlockIndex,
+        max_blocks: usize,
+    ) -> Result<(FsBlockIndex, usize), Ext4Error> {
+        if max_blocks == 0 {
+            return Ok((0, 0));
+        }
+
         match self {
             Self::ExtentTree(extent_tree) => {
-                let Some(extent) = extent_tree.find_extent(block_index).await?
-                else {
-                    return Ok(0);
-                };
-                if !extent.is_initialized {
-                    return Ok(0);
-                }
-                extent_tree.get_block(block_index).await
+                extent_tree.get_block_run(block_index, max_blocks).await
             }
-            Self::BlockMap(block_map) => block_map.get_block(block_index).await,
+            Self::BlockMap(block_map) => {
+                let start_block = block_map.get_block(block_index).await?;
+                let mut run_blocks = 1usize;
+                while run_blocks < max_blocks {
+                    let Ok(block_offset) = FileBlockIndex::try_from(run_blocks) else {
+                        break;
+                    };
+                    let Some(next_index) = block_index.checked_add(block_offset) else {
+                        break;
+                    };
+                    let Ok(next_block) = block_map.get_block(next_index).await else {
+                        break;
+                    };
+
+                    let is_contiguous = if start_block == 0 {
+                        next_block == 0
+                    } else {
+                        start_block
+                            .checked_add(FsBlockIndex::from(block_offset))
+                            == Some(next_block)
+                    };
+                    if !is_contiguous {
+                        break;
+                    }
+                    run_blocks += 1;
+                }
+                Ok((start_block, run_blocks))
+            }
         }
     }
 
