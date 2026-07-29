@@ -1,4 +1,4 @@
-use axplat::mem::{Aligned4K, PhysAddr, pa};
+use axplat::mem::{Aligned4K, PAGE_SIZE_4K, PhysAddr, pa};
 use page_table_entry::{GenericPTE, MappingFlags, loongarch64::LA64PTE};
 
 use crate::{
@@ -26,6 +26,12 @@ static mut BOOT_PT_L1: Aligned4K<[LA64PTE; 512]> = Aligned4K::new([LA64PTE::empt
 
 unsafe fn init_boot_page_table() {
     unsafe {
+        // Empty dynamic page-table entries point at PA 0 during the branchless
+        // LDDIR/LDPTE refill walk. DMW1 is active here, so initialize the
+        // platform-reserved invalid table through its cached direct mapping.
+        core::ptr::write_bytes(DMW_CACHED_BASE as *mut u8, 0, PAGE_SIZE_4K);
+        core::arch::asm!("dbar 0");
+
         let l1_paddr = boot_paddr(&raw const BOOT_PT_L1);
         // 0x0000_0000_0000 ~ 0x0080_0000_0000, table
         BOOT_PT_L0[0] = LA64PTE::new_table(l1_paddr);
