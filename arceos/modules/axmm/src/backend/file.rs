@@ -1,7 +1,7 @@
 use alloc::{sync::Arc, vec::Vec};
 
 use axerrno::{AxError, AxResult};
-use axfs::{CachedFile, FileFlags};
+use axfs::{CachedFile, FileFlags, SHARED_PAGE_BATCH_CAPACITY, SharedPagePaddrs};
 use axhal::{
     mem::phys_to_virt,
     paging::{MappingFlags, PageSize, PageTable},
@@ -66,7 +66,8 @@ fn writeback_phys_page(mapping: &FileMapping, page_addr: VirtAddr, frame_paddr: 
     }
 }
 
-const FILE_FAULT_AROUND_PAGES: usize = 4;
+const FILE_FAULT_AROUND_PAGES: usize = SHARED_PAGE_BATCH_CAPACITY;
+const _: () = assert!(FILE_FAULT_AROUND_PAGES > 0 && FILE_FAULT_AROUND_PAGES <= u8::BITS as usize);
 
 fn file_page_read_window(
     mapping_start: VirtAddr,
@@ -143,7 +144,7 @@ pub struct FilePageLoad {
 pub struct FilePagePrepared {
     file: CachedFile,
     requested_page: u32,
-    pages: Vec<(u32, PhysAddr)>,
+    pages: SharedPagePaddrs,
     mapped_mask: u8,
 }
 
@@ -588,7 +589,8 @@ impl Backend {
             return false;
         }
 
-        let mut candidates = Vec::with_capacity(prepared.pages.len());
+        let mut candidates = [None; FILE_FAULT_AROUND_PAGES];
+        let mut candidate_count = 0;
         for index in 0..prepared.pages.len() {
             let Some((candidate_page_number, _)) = prepared.page(index) else {
                 break;
@@ -613,16 +615,25 @@ impl Backend {
             if candidate_offset / PAGE_SIZE_4K as u64 != candidate_page_number as u64 {
                 break;
             }
-            candidates.push((index, candidate_addr));
+            let Some(slot) = candidates.get_mut(candidate_count) else {
+                break;
+            };
+            *slot = Some((index, candidate_addr));
+            candidate_count += 1;
         }
-        let Some((_, last_addr)) = candidates.last().copied() else {
+        let Some((_, last_addr)) = candidate_count
+            .checked_sub(1)
+            .and_then(|index| candidates[index])
+        else {
             return false;
         };
 
         let private_write = !mapping.shared
             && orig_flags.contains(MappingFlags::WRITE)
             && access_flags.contains(MappingFlags::WRITE);
-        let requested_index = candidates[0].0;
+        let Some((requested_index, _)) = candidates[0] else {
+            return false;
+        };
         let Some((_, requested_frame)) = prepared.page(requested_index) else {
             return false;
         };
@@ -649,7 +660,7 @@ impl Backend {
         let mut pt_guard = pt.lock_for_range(page_addr, range_size);
         let mut requested_handled = false;
         let mut mapped_executable = false;
-        for (index, candidate_addr) in candidates {
+        for (index, candidate_addr) in candidates[..candidate_count].iter().flatten().copied() {
             let requested = candidate_addr == page_addr;
             if let Ok((current, current_flags, _)) = pt_guard.query(candidate_addr)
                 && current.as_usize() != 0
