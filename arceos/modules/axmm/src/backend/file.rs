@@ -68,6 +68,26 @@ fn writeback_phys_page(mapping: &FileMapping, page_addr: VirtAddr, frame_paddr: 
 
 const FILE_FAULT_AROUND_PAGES: usize = 4;
 
+fn file_page_read_window(
+    mapping_start: VirtAddr,
+    file_offset: usize,
+    mapped_bytes: usize,
+    file_size: usize,
+    page_addr: VirtAddr,
+) -> Option<(u64, usize)> {
+    let relative = page_addr.as_usize().checked_sub(mapping_start.as_usize())?;
+    let mapping_end = file_offset.checked_add(mapped_bytes)?;
+    let limit_offset = mapping_end.min(file_size);
+    let file_offset = file_offset.checked_add(relative)?;
+
+    if file_offset >= limit_offset {
+        return None;
+    }
+
+    let read_len = (limit_offset - file_offset).min(PAGE_SIZE_4K);
+    Some((file_offset as u64, read_len))
+}
+
 #[derive(Debug, Default)]
 struct FileReadAheadState {
     next_page: Option<u32>,
@@ -120,15 +140,11 @@ pub struct FilePageLoad {
     read_ahead: Arc<Mutex<FileReadAheadState>>,
 }
 
-struct PreparedFilePage {
-    page_number: u32,
-    frame: Option<PhysAddr>,
-}
-
 pub struct FilePagePrepared {
     file: CachedFile,
     requested_page: u32,
-    pages: Vec<PreparedFilePage>,
+    pages: Vec<(u32, PhysAddr)>,
+    mapped_mask: u8,
 }
 
 pub(super) struct FileWriteback {
@@ -177,13 +193,8 @@ impl FilePageLoad {
         Ok(FilePagePrepared {
             file: self.file,
             requested_page: self.page_number,
-            pages: frames
-                .into_iter()
-                .map(|(page_number, frame)| PreparedFilePage {
-                    page_number,
-                    frame: Some(frame),
-                })
-                .collect(),
+            pages: frames,
+            mapped_mask: 0,
         })
     }
 }
@@ -199,9 +210,12 @@ impl core::fmt::Debug for FilePagePrepared {
 
 impl Drop for FilePagePrepared {
     fn drop(&mut self) {
-        for page in &mut self.pages {
-            if let Some(frame) = page.frame.take() {
-                dealloc_frame(frame);
+        for (index, (_, frame)) in self.pages.iter().enumerate() {
+            let mapped = 1u8
+                .checked_shl(index as u32)
+                .is_some_and(|bit| self.mapped_mask & bit != 0);
+            if !mapped {
+                dealloc_frame(*frame);
             }
         }
     }
@@ -213,12 +227,19 @@ impl FilePagePrepared {
     }
 
     fn page(&self, index: usize) -> Option<(u32, PhysAddr)> {
-        let page = self.pages.get(index)?;
-        Some((page.page_number, page.frame?))
+        let page = *self.pages.get(index)?;
+        let bit = 1u8.checked_shl(index as u32)?;
+        (self.mapped_mask & bit == 0).then_some(page)
     }
 
     fn take_frame(&mut self, index: usize) -> Option<PhysAddr> {
-        self.pages.get_mut(index)?.frame.take()
+        let (_, frame) = *self.pages.get(index)?;
+        let bit = 1u8.checked_shl(index as u32)?;
+        if self.mapped_mask & bit != 0 {
+            return None;
+        }
+        self.mapped_mask |= bit;
+        Some(frame)
     }
 }
 
@@ -262,23 +283,25 @@ impl FileMapping {
     }
 
     pub fn file_bytes(&self) -> usize {
-        axfs::cached_file_size(self.file.location())
-            .map(|len| len as usize)
-            .unwrap_or(self.file_bytes)
+        self.file.size() as usize
+    }
+
+    fn page_read_window_at_size(
+        &self,
+        page_addr: VirtAddr,
+        file_size: usize,
+    ) -> Option<(u64, usize)> {
+        file_page_read_window(
+            self.start,
+            self.file_offset,
+            self.file_bytes,
+            file_size,
+            page_addr,
+        )
     }
 
     fn page_read_window(&self, page_addr: VirtAddr) -> Option<(u64, usize)> {
-        let relative = page_addr.as_usize().checked_sub(self.start.as_usize())?;
-        let file_size_on_disk = self.file_bytes();
-        let limit_offset = (self.file_offset + self.file_bytes).min(file_size_on_disk);
-        let file_offset = self.file_offset.checked_add(relative)?;
-
-        if file_offset >= limit_offset {
-            return None;
-        }
-
-        let read_len = (limit_offset - file_offset).min(PAGE_SIZE_4K);
-        Some((file_offset as u64, read_len))
+        self.page_read_window_at_size(page_addr, self.file_bytes())
     }
 
     pub(crate) fn page_load_request(
@@ -293,7 +316,8 @@ impl FileMapping {
         }
 
         let page_addr = vaddr.align_down_4k();
-        let (file_offset, _) = self.page_read_window(page_addr)?;
+        let file_size = self.file_bytes();
+        let (file_offset, _) = self.page_read_window_at_size(page_addr, file_size)?;
         if pt
             .read_for_addr(page_addr)
             .query(page_addr)
@@ -306,7 +330,11 @@ impl FileMapping {
         let mut max_pages = 0;
         while max_pages < FILE_FAULT_AROUND_PAGES {
             let candidate = page_addr.checked_add(max_pages * PAGE_SIZE_4K)?;
-            if candidate >= area_end || self.page_read_window(candidate).is_none() {
+            if candidate >= area_end
+                || self
+                    .page_read_window_at_size(candidate, file_size)
+                    .is_none()
+            {
                 break;
             }
             max_pages += 1;
@@ -380,37 +408,31 @@ impl Backend {
         if size == 0 {
             return true;
         }
-        let Some(pages) = PageIter4K::new(start, start + size) else {
+        if start.checked_add(size).is_none() {
             return false;
-        };
+        }
         // If this is a shared mapping, writeback dirty pages before unmapping.
         let mapping = match self {
             Backend::File(m) => m,
             _ => return false,
         };
-        for addr in pages {
-            if let Ok((frame, page_size, tlb)) = pt.unmap(addr) {
-                // The owning AddrSpace batches the ASID shootdown after its
-                // write lock is released.
-                tlb.ignore();
-                if frame.as_usize() != 0 {
-                    mutation.record(addr, page_size as usize);
-                    if page_size != PageSize::Size4K {
-                        return false;
+        let file_size = mapping.file_bytes();
+        let result = pt.unmap_present_range(start, size, false, |addr, frame, page_size| {
+            debug_assert_eq!(page_size, PageSize::Size4K);
+            if frame.as_usize() != 0 {
+                mutation.record(addr, PAGE_SIZE_4K);
+                if mapping.shared {
+                    if let Some((file_offset, _)) =
+                        mapping.page_read_window_at_size(addr, file_size)
+                    {
+                        let pn = (file_offset / PAGE_SIZE_4K as u64) as u32;
+                        let _ = mapping.file.mark_page_dirty(pn);
                     }
-                    if mapping.shared {
-                        if let Some((file_offset, _)) = mapping.page_read_window(addr) {
-                            let pn = (file_offset / PAGE_SIZE_4K as u64) as u32;
-                            let _ = mapping.file.mark_page_dirty(pn);
-                        }
-                    }
-                    reclaim.defer_frame(frame);
-                } else if page_size != PageSize::Size4K {
-                    return false;
                 }
+                reclaim.defer_frame(frame);
             }
-        }
-        true
+        });
+        result.is_ok()
     }
 
     /// Write back all resident pages in the given range to the underlying file.
@@ -555,7 +577,8 @@ impl Backend {
         }
 
         let page_addr = vaddr.align_down_4k();
-        let Some((file_offset, _)) = mapping.page_read_window(page_addr) else {
+        let file_size = mapping.file_bytes();
+        let Some((file_offset, _)) = mapping.page_read_window_at_size(page_addr, file_size) else {
             return false;
         };
         let Ok(page_number) = u32::try_from(file_offset / PAGE_SIZE_4K as u64) else {
@@ -582,7 +605,9 @@ impl Backend {
             if candidate_addr >= area_end {
                 break;
             }
-            let Some((candidate_offset, _)) = mapping.page_read_window(candidate_addr) else {
+            let Some((candidate_offset, _)) =
+                mapping.page_read_window_at_size(candidate_addr, file_size)
+            else {
                 break;
             };
             if candidate_offset / PAGE_SIZE_4K as u64 != candidate_page_number as u64 {
@@ -742,7 +767,56 @@ impl Backend {
 
 #[cfg(test)]
 mod tests {
-    use super::FileReadAheadState;
+    use memory_addr::{PAGE_SIZE_4K, VirtAddr};
+
+    use super::{FileReadAheadState, file_page_read_window};
+
+    #[test]
+    fn page_window_tracks_truncate_and_extend_without_exceeding_mapping() {
+        let start = VirtAddr::from(0x10_0000);
+        let page = PAGE_SIZE_4K;
+
+        assert_eq!(
+            file_page_read_window(start, 0, 4 * page, page + 123, start + page),
+            Some((page as u64, 123))
+        );
+        assert_eq!(
+            file_page_read_window(start, 0, 4 * page, page + 123, start + 2 * page),
+            None
+        );
+
+        assert_eq!(
+            file_page_read_window(start, 0, 4 * page, 3 * page + 17, start + 3 * page),
+            Some(((3 * page) as u64, 17))
+        );
+        assert_eq!(
+            file_page_read_window(start, 0, 4 * page, 8 * page, start + 4 * page),
+            None
+        );
+    }
+
+    #[test]
+    fn page_window_respects_file_offset_and_checked_bounds() {
+        let start = VirtAddr::from(0x20_0000);
+        let page = PAGE_SIZE_4K;
+
+        assert_eq!(
+            file_page_read_window(start, page, 2 * page, 3 * page, start),
+            Some((page as u64, page))
+        );
+        assert_eq!(
+            file_page_read_window(start, page, 2 * page, page, start),
+            None
+        );
+        assert_eq!(
+            file_page_read_window(start, usize::MAX, page, usize::MAX, start),
+            None
+        );
+        assert_eq!(
+            file_page_read_window(start, 0, page, page, start - page),
+            None
+        );
+    }
 
     #[test]
     fn readahead_advances_over_fault_around_window() {
