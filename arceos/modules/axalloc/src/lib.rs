@@ -11,22 +11,32 @@
 extern crate log;
 extern crate alloc;
 
+#[cfg(feature = "slab")]
+mod buddy_slab;
 mod frameinfo;
 mod page;
+#[cfg(not(feature = "slab"))]
 pub mod percpu_cache;
 
+#[cfg(not(feature = "slab"))]
 use core::{
     alloc::{GlobalAlloc, Layout},
     ptr::NonNull,
 };
 
+#[cfg(not(feature = "slab"))]
 use allocator::{AllocResult, BaseAllocator, BitmapPageAllocator, ByteAllocator, PageAllocator};
+#[cfg(feature = "slab")]
+pub use buddy_slab::{
+    GlobalAllocator, global_add_memory, global_allocator, global_init, init_percpu_slab,
+};
 pub use frameinfo::{FrameTable, frame_table, init_frame_table};
 use kspin::SpinNoIrq;
 
-const PAGE_SIZE: usize = 0x1000;
+pub(crate) const PAGE_SIZE: usize = 0x1000;
+#[cfg(not(feature = "slab"))]
 const MIN_HEAP_SIZE: usize = 0x200000; // 2 MB
-const MIN_PAGE_RECLAIM_BATCH: usize = 256;
+pub(crate) const MIN_PAGE_RECLAIM_BATCH: usize = 256;
 
 pub use page::GlobalPage;
 
@@ -49,11 +59,9 @@ pub fn try_page_reclaim(num_pages: usize) -> usize {
     reclaim_fn.map_or(0, |f| f(num_pages))
 }
 
+#[cfg(not(feature = "slab"))]
 cfg_if::cfg_if! {
-    if #[cfg(feature = "slab")] {
-        /// The default byte allocator.
-        pub type DefaultByteAllocator = allocator::SlabByteAllocator;
-    } else if #[cfg(feature = "buddy")] {
+    if #[cfg(feature = "buddy")] {
         /// The default byte allocator.
         pub type DefaultByteAllocator = allocator::BuddyByteAllocator;
     } else if #[cfg(feature = "tlsf")] {
@@ -69,15 +77,14 @@ cfg_if::cfg_if! {
 /// there is no memory, asks the page allocator for more memory and adds it to
 /// the byte allocator.
 ///
-/// Currently, [`TlsfByteAllocator`] is used as the byte allocator, while
-/// [`BitmapPageAllocator`] is used as the page allocator.
-///
-/// [`TlsfByteAllocator`]: allocator::TlsfByteAllocator
+/// The concrete byte and page backends are selected through Cargo features.
+#[cfg(not(feature = "slab"))]
 pub struct GlobalAllocator {
     balloc: SpinNoIrq<DefaultByteAllocator>,
     palloc: SpinNoIrq<BitmapPageAllocator<PAGE_SIZE>>,
 }
 
+#[cfg(not(feature = "slab"))]
 impl GlobalAllocator {
     /// Creates an empty [`GlobalAllocator`].
     pub const fn new() -> Self {
@@ -90,9 +97,7 @@ impl GlobalAllocator {
     /// Returns the name of the allocator.
     pub const fn name(&self) -> &'static str {
         cfg_if::cfg_if! {
-            if #[cfg(feature = "slab")] {
-                "slab"
-            } else if #[cfg(feature = "buddy")] {
+            if #[cfg(feature = "buddy")] {
                 "buddy"
             } else if #[cfg(feature = "tlsf")] {
                 "TLSF"
@@ -373,6 +378,7 @@ impl GlobalAllocator {
     }
 }
 
+#[cfg(not(feature = "slab"))]
 unsafe impl GlobalAlloc for GlobalAllocator {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
         if let Ok(ptr) = GlobalAllocator::alloc(self, layout) {
@@ -388,21 +394,22 @@ unsafe impl GlobalAlloc for GlobalAllocator {
 }
 
 #[cfg_attr(all(target_os = "none", not(test)), global_allocator)]
+#[cfg(not(feature = "slab"))]
 static GLOBAL_ALLOCATOR: GlobalAllocator = GlobalAllocator::new();
 
 /// Returns the reference to the global allocator.
+#[cfg(not(feature = "slab"))]
 pub fn global_allocator() -> &'static GlobalAllocator {
     &GLOBAL_ALLOCATOR
 }
 
 /// Initializes the global allocator with the given memory region.
 ///
-/// Note that the memory region bounds are just numbers, and the allocator
-/// does not actually access the region. Users should ensure that the region
-/// is valid and not being used by others, so that the allocated memory is also
-/// valid.
+/// The page allocator may store intrusive metadata in free pages. The region
+/// must therefore be mapped, writable, and unused by any other subsystem.
 ///
 /// This function should be called only once, and before any allocation.
+#[cfg(not(feature = "slab"))]
 pub fn global_init(start_vaddr: usize, size: usize) {
     debug!(
         "initialize global allocator at: [{:#x}, {:#x})",
@@ -418,6 +425,7 @@ pub fn global_init(start_vaddr: usize, size: usize) {
 /// so that the allocated memory is also valid.
 ///
 /// It's similar to [`global_init`], but can be called multiple times.
+#[cfg(not(feature = "slab"))]
 pub fn global_add_memory(start_vaddr: usize, size: usize) -> AllocResult {
     debug!(
         "add a memory region to global allocator: [{:#x}, {:#x})",
@@ -426,3 +434,7 @@ pub fn global_add_memory(start_vaddr: usize, size: usize) -> AllocResult {
     );
     GLOBAL_ALLOCATOR.add_memory(start_vaddr, size)
 }
+
+/// No per-CPU allocator state is required by legacy byte allocators.
+#[cfg(not(feature = "slab"))]
+pub fn init_percpu_slab(_cpu_id: usize) {}

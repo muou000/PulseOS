@@ -51,7 +51,7 @@ arceos_api = { path = "api/arceos_api" }
 arceos_posix_api = { path = "api/arceos_posix_api" }
 axfeat = { path = "api/axfeat" }
 
-axalloc = { path = "modules/axalloc" }
+axalloc = { path = "modules/axalloc", default-features = false }
 axconfig = { path = "modules/axconfig" }
 axdisplay = { path = "modules/axdisplay" }
 axdma = { path = "modules/axdma" }
@@ -76,9 +76,10 @@ axdriver_pci = { path = "../crates/axdriver_pci" }
 axdriver_virtio = { path = "../crates/axdriver_virtio" }
 
 aarch64-cpu = "10.0"
-allocator = { git = "https://github.com/arceos-org/allocator.git", tag = "v0.1.1" }
+allocator = { git = "https://github.com/arceos-org/allocator.git", tag = "v0.1.1", default-features = false }
 async-lock = { version = "3.4", default-features = false }
 async-trait = "0.1"
+buddy-slab-allocator = { path = "../crates/buddy-slab-allocator" }
 axconfig-macros = "0.2"
 axcpu = "0.2"
 axfs-ng-vfs = "0.1"

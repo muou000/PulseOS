@@ -10,20 +10,24 @@ repository = "https://github.com/arceos-org/arceos/tree/main/modules/axalloc"
 documentation = "https://arceos-org.github.io/arceos/axalloc/index.html"
 
 [features]
-default = ["tlsf", "allocator/page-alloc-64g"]
-tlsf = ["allocator/tlsf"]
-slab = ["allocator/slab"]
-buddy = ["allocator/buddy"]
+default = ["tlsf", "page-alloc-64g"]
+tlsf = ["allocator/tlsf", "allocator/bitmap"]
+slab = ["dep:buddy-slab-allocator", "dep:axplat"]
+buddy = ["allocator/buddy", "allocator/bitmap"]
+smp = ["buddy-slab-allocator?/smp"]
 page-alloc-64g = ["allocator/page-alloc-64g"] # Support up to 64G memory capacity
 page-alloc-4g = ["allocator/page-alloc-4g"] # Support up to 4G memory capacity
 
 [dependencies]
 log.workspace = true
 cfg-if.workspace = true
+crate_interface.workspace = true
 kspin.workspace = true
 memory_addr.workspace = true
 percpu.workspace = true
 kernel_guard.workspace = true
 axerrno.workspace = true
 lazyinit.workspace = true
-allocator = { workspace = true, features = ["bitmap", "page-alloc-64g"] }
+allocator.workspace = true
+axplat = { workspace = true, optional = true }
+buddy-slab-allocator = { workspace = true, optional = true }

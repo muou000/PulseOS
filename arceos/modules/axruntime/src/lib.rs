@@ -125,6 +125,8 @@ fn is_init_ok() -> bool {
 pub fn rust_main(cpu_id: usize, arg: usize) -> ! {
     unsafe { axhal::mem::clear_bss() };
     axhal::init_percpu(cpu_id);
+    #[cfg(feature = "alloc")]
+    axalloc::init_percpu_slab(cpu_id);
     #[cfg(feature = "smp")]
     BOOTED_CPU_MASK.store(1usize << cpu_id, Ordering::Release);
     axhal::init_early(cpu_id, arg);
