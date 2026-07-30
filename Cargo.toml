@@ -109,6 +109,7 @@ repository.workspace = true
 default = []
 qemu = []
 smp = ["axfeat/smp", "axfeat/ipi"]
+sched-eevdf = ["axfeat/sched-eevdf"]
 sched-load-balance = ["axfeat/sched-load-balance"]
 qperf-trace = ["axtask/qperf-trace", "pulse_core/qperf-trace"]
 pre-testcode = ["pulse_core/pre-testcode"]

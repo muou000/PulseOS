@@ -27,6 +27,7 @@
 //!     - `sched-fifo`: Use the FIFO cooperative scheduler.
 //!     - `sched-rr`: Use the Round-robin preemptive scheduler.
 //!     - `sched-cfs`: Use the Completely Fair Scheduler (CFS) preemptive scheduler.
+//!     - `sched-eevdf`: Use the Earliest Eligible Virtual Deadline First preemptive scheduler.
 //! - Upperlayer stacks
 //!     - `fs`: Enable file system support.
 //!     - `myfs`: Allow users to define their custom filesystems to override the default.

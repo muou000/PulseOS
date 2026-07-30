@@ -305,12 +305,15 @@ pub fn sys_sched_setattr(pid: usize, attr: usize, flags: usize) -> isize {
             if user_attr.sched_runtime > user_attr.sched_deadline || user_attr.sched_deadline > user_attr.sched_period {
                 return -LinuxError::EINVAL.code() as isize;
             }
+            // PulseOS records SCHED_DEADLINE metadata but does not implement
+            // CBS/EDF scheduling; keep it in the ordinary EEVDF class.
+            axtask::set_priority(-100);
         } else {
             if priority < 1 || priority > 99 {
                 return -LinuxError::EINVAL.code() as isize;
             }
+            axtask::set_priority(priority as isize);
         }
-        axtask::set_priority(priority as isize);
     } else {
         if priority != 0 {
             return -LinuxError::EINVAL.code() as isize;
@@ -318,7 +321,7 @@ pub fn sys_sched_setattr(pid: usize, attr: usize, flags: usize) -> isize {
         if user_attr.sched_nice < -20 || user_attr.sched_nice > 19 {
             return -LinuxError::EINVAL.code() as isize;
         }
-        axtask::set_priority(-100);
+        axtask::set_priority(user_attr.sched_nice as isize - 100);
     }
 
     let thread = match current_thread() {

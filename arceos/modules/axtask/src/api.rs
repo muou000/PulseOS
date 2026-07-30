@@ -50,7 +50,11 @@ pub type AxTaskWeak = Weak<AxTask>;
 pub type AxCpuMask = cpumask::CpuMask<{ axconfig::plat::MAX_CPU_NUM }>;
 
 cfg_if::cfg_if! {
-    if #[cfg(feature = "sched-rr")] {
+    if #[cfg(feature = "sched-eevdf")] {
+        const EEVDF_BASE_SLICE_NS: u64 = 4_000_000;
+        pub(crate) type AxTask = axsched::EEVDFTask<TaskInner>;
+        pub(crate) type Scheduler = axsched::EEVDFScheduler<TaskInner, EEVDF_BASE_SLICE_NS>;
+    } else if #[cfg(feature = "sched-rr")] {
         const MAX_TIME_SLICE: usize = 5;
         pub(crate) type AxTask = axsched::RRTask<TaskInner, MAX_TIME_SLICE>;
         pub(crate) type Scheduler = axsched::RRScheduler<TaskInner, MAX_TIME_SLICE>;
@@ -217,13 +221,11 @@ where
 
 /// Set the priority for current task.
 ///
-/// The range of the priority is dependent on the underlying scheduler. For
-/// example, in the [CFS] scheduler, the priority is the nice value, ranging from
-/// -20 to 19.
+/// The range of the priority is dependent on the underlying scheduler. EEVDF
+/// uses 1 through 99 for real-time priorities and -120 through -81 for ordinary
+/// nice values -20 through 19.
 ///
 /// Returns `true` if the priority is set successfully.
-///
-/// [CFS]: https://en.wikipedia.org/wiki/Completely_Fair_Scheduler
 pub fn set_priority(prio: isize) -> bool {
     current_run_queue::<NoPreemptIrqSave>().set_current_priority(prio)
 }

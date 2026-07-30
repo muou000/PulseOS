@@ -361,10 +361,10 @@ impl TaskInner {
 
     pub fn into_arc(self) -> AxTaskRef {
         let task_ref = Arc::new(AxTask::new(self));
-        #[cfg(feature = "sched-rr")]
+        #[cfg(any(feature = "sched-rr", feature = "sched-eevdf"))]
         if let Some(curr) = crate::current_may_uninit() {
             let prio = curr.as_task_ref().priority();
-            task_ref.set_priority(prio);
+            let _ = task_ref.set_priority(prio);
         }
         task_ref
     }

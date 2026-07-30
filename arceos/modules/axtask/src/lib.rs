@@ -20,10 +20,13 @@
 //!   the `multitask` and `preempt` features if it is enabled.
 //! - `sched-cfs`: Use the [Completely Fair Scheduler][3]. It also enables the
 //!   the `multitask` and `preempt` features if it is enabled.
+//! - `sched-eevdf`: Use the [Earliest Eligible Virtual Deadline First
+//!   scheduler][4]. It also enables the `multitask` and `preempt` features.
 //!
 //! [1]: axsched::FifoScheduler
 //! [2]: axsched::RRScheduler
 //! [3]: axsched::CFScheduler
+//! [4]: axsched::EEVDFScheduler
 
 #![cfg_attr(not(test), no_std)]
 #![feature(doc_cfg)]

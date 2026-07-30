@@ -52,14 +52,18 @@ percpu_static! {
 }
 
 pub fn reprogram_timer() {
-    reprogram_timer_internal(false);
+    reprogram_timer_internal(false, None);
+}
+
+pub(crate) fn reprogram_timer_for_task(task: &AxTaskRef) {
+    reprogram_timer_internal(false, Some(task));
 }
 
 pub(crate) fn reprogram_timer_from_tick() {
-    reprogram_timer_internal(true);
+    reprogram_timer_internal(true, None);
 }
 
-fn reprogram_timer_internal(from_tick: bool) {
+fn reprogram_timer_internal(from_tick: bool, scheduler_task: Option<&AxTaskRef>) {
     let now_ns = axhal::time::monotonic_time_nanos();
     let mut tick_deadline = unsafe { NEXT_TICK_DEADLINE.read_current_raw() };
     let periodic_interval_nanos = axhal::time::NANOS_PER_SEC / axconfig::TICKS_PER_SEC as u64;
@@ -90,6 +94,14 @@ fn reprogram_timer_internal(from_tick: bool) {
         }
     }
 
+    let scheduler_deadline = scheduler_task.map_or_else(
+        || crate::run_queue::scheduler_preemption_deadline(now_ns),
+        |task| crate::run_queue::scheduler_preemption_deadline_for(task, now_ns),
+    );
+    if let Some(scheduler_deadline) = scheduler_deadline {
+        final_deadline = final_deadline.min(scheduler_deadline);
+    }
+
     if final_deadline != u64::MAX {
         if final_deadline < now_ns {
             final_deadline = now_ns;
@@ -107,7 +119,15 @@ pub fn next_deadline() -> Option<TimeValue> {
             None
         }
     };
-    match (task_event_deadline, crate::future::next_timer_deadline()) {
+    let event_deadline = match (task_event_deadline, crate::future::next_timer_deadline()) {
+        (Some(a), Some(b)) => Some(core::cmp::min(a, b)),
+        (Some(deadline), None) | (None, Some(deadline)) => Some(deadline),
+        (None, None) => None,
+    };
+    let scheduler_deadline =
+        crate::run_queue::scheduler_preemption_deadline(axhal::time::monotonic_time_nanos())
+            .map(TimeValue::from_nanos);
+    match (event_deadline, scheduler_deadline) {
         (Some(a), Some(b)) => Some(core::cmp::min(a, b)),
         (Some(deadline), None) | (None, Some(deadline)) => Some(deadline),
         (None, None) => None,
