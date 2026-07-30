@@ -62,6 +62,90 @@ static RUN_QUEUE_READY: [AtomicBool; axconfig::plat::MAX_CPU_NUM] =
 static REMOTE_RESCHEDULE_PENDING: [AtomicBool; axconfig::plat::MAX_CPU_NUM] =
     [const { AtomicBool::new(false) }; axconfig::plat::MAX_CPU_NUM];
 
+#[cfg(feature = "smp")]
+#[inline]
+fn run_queue_is_eligible(cpu_id: usize, cpu_num: usize, cpumask: &AxCpuMask) -> bool {
+    cpu_id < cpu_num
+        && cpumask.get(cpu_id)
+        && axhal::is_cpu_online(cpu_id)
+        && RUN_QUEUE_READY[cpu_id].load(Ordering::Acquire)
+}
+
+#[cfg(all(
+    feature = "smp",
+    feature = "sched-load-balance",
+    any(feature = "sched-rr", feature = "sched-eevdf")
+))]
+fn least_loaded_run_queue(
+    cpumask: &AxCpuMask,
+    cpu_num: usize,
+    start: usize,
+) -> Option<(usize, usize)> {
+    let mut least_loaded = None;
+    for offset in 0..cpu_num {
+        let cpu_id = (start + offset) % cpu_num;
+        if run_queue_is_eligible(cpu_id, cpu_num, cpumask) {
+            let load = get_run_queue(cpu_id).placement_load();
+            if least_loaded.is_none_or(|(_, best_load)| load < best_load) {
+                least_loaded = Some((cpu_id, load));
+            }
+        }
+    }
+    least_loaded
+}
+
+#[cfg(all(
+    feature = "smp",
+    feature = "sched-load-balance",
+    any(feature = "sched-rr", feature = "sched-eevdf")
+))]
+#[inline]
+fn task_is_real_time(task: &AxTaskRef) -> bool {
+    (1..=99).contains(&task.priority())
+}
+
+// `sched-eevdf` takes precedence over `sched-rr` when both features are set.
+// Keep this wake policy restricted to the scheduler that is actually selected.
+#[cfg(all(
+    feature = "smp",
+    feature = "sched-load-balance",
+    feature = "sched-rr",
+    not(feature = "sched-eevdf")
+))]
+#[inline]
+fn rr_should_rebalance_wake(previous_load: usize, best_load: usize) -> bool {
+    const BUSY_LOAD_TOLERANCE: usize = 1;
+
+    (best_load == 0 && previous_load != 0)
+        || best_load.saturating_add(BUSY_LOAD_TOLERANCE) < previous_load
+}
+
+#[cfg(all(
+    test,
+    feature = "smp",
+    feature = "sched-load-balance",
+    feature = "sched-rr",
+    not(feature = "sched-eevdf")
+))]
+mod rr_wake_policy_tests {
+    use super::rr_should_rebalance_wake;
+
+    #[test]
+    fn idle_cpu_is_preferred_for_a_busy_previous_cpu() {
+        assert!(!rr_should_rebalance_wake(0, 0));
+        assert!(rr_should_rebalance_wake(1, 0));
+        assert!(rr_should_rebalance_wake(usize::MAX, 0));
+    }
+
+    #[test]
+    fn busy_cpus_tolerate_a_single_task_load_difference() {
+        assert!(!rr_should_rebalance_wake(1, 1));
+        assert!(!rr_should_rebalance_wake(2, 1));
+        assert!(rr_should_rebalance_wake(3, 1));
+        assert!(!rr_should_rebalance_wake(usize::MAX, usize::MAX));
+    }
+}
+
 /// Returns a reference to the current run queue in [`CurrentRunQueueRef`].
 ///
 /// ## Safety
@@ -153,36 +237,18 @@ fn select_run_queue_index(cpumask: AxCpuMask) -> usize {
         feature = "sched-load-balance",
         any(feature = "sched-rr", feature = "sched-eevdf")
     ))]
-    let mut least_loaded = None;
-    for offset in 0..cpu_num {
-        let index = (start + offset) % cpu_num;
-        if cpumask.get(index)
-            && axhal::is_cpu_online(index)
-            && RUN_QUEUE_READY[index].load(Ordering::Acquire)
-        {
-            #[cfg(all(
-                feature = "sched-load-balance",
-                any(feature = "sched-rr", feature = "sched-eevdf")
-            ))]
-            {
-                let load = get_run_queue(index).ready_depth.load(Ordering::Relaxed);
-                if least_loaded.is_none_or(|(_, best_load)| load < best_load) {
-                    least_loaded = Some((index, load));
-                }
-            }
-            #[cfg(not(all(
-                feature = "sched-load-balance",
-                any(feature = "sched-rr", feature = "sched-eevdf")
-            )))]
-            return index;
-        }
+    if let Some((cpu_id, _)) = least_loaded_run_queue(&cpumask, cpu_num, start) {
+        return cpu_id;
     }
-    #[cfg(all(
+    #[cfg(not(all(
         feature = "sched-load-balance",
         any(feature = "sched-rr", feature = "sched-eevdf")
-    ))]
-    if let Some((index, _)) = least_loaded {
-        return index;
+    )))]
+    for offset in 0..cpu_num {
+        let cpu_id = (start + offset) % cpu_num;
+        if run_queue_is_eligible(cpu_id, cpu_num, &cpumask) {
+            return cpu_id;
+        }
     }
     panic!("no online CPU matches task affinity");
 }
@@ -291,10 +357,11 @@ pub(crate) fn select_run_queue<G: BaseGuard>(task: &AxTaskRef) -> AxRunQueueRef<
 
 /// Selects a run queue for waking a blocked task.
 ///
-/// Wakeups prefer the task's previous CPU. Besides preserving cache locality,
-/// this keeps per-CPU timer registrations and other CPU-local wait state valid
-/// across a `block_on` suspension. If affinity excludes that CPU, the CPU
-/// performing the wakeup is preferred before falling back to normal placement.
+/// Wakeups generally prefer the task's previous CPU for cache locality. With
+/// RR load balancing, an idle CPU or a sufficiently less loaded busy CPU may
+/// receive an ordinary task instead. RT tasks and EEVDF stay wake-affine; EEVDF
+/// wake placement depends on run-queue-local virtual time. If affinity excludes
+/// the previous CPU, the waking CPU is preferred before normal placement.
 #[inline]
 pub(crate) fn select_wake_run_queue<G: BaseGuard>(task: &AxTaskRef) -> AxRunQueueRef<'static, G> {
     let irq_state = G::acquire();
@@ -313,17 +380,40 @@ pub(crate) fn select_wake_run_queue<G: BaseGuard>(task: &AxTaskRef) -> AxRunQueu
         let previous_cpu = task.cpu_id() as usize;
         let cpu_num = axhal::cpu_num();
         let cpumask = task.cpumask();
-        let index = if previous_cpu < cpu_num
-            && cpumask.get(previous_cpu)
-            && axhal::is_cpu_online(previous_cpu)
-            && RUN_QUEUE_READY[previous_cpu].load(Ordering::Acquire)
-        {
+        let previous_is_eligible = run_queue_is_eligible(previous_cpu, cpu_num, &cpumask);
+
+        #[cfg(all(
+            feature = "sched-load-balance",
+            feature = "sched-rr",
+            not(feature = "sched-eevdf")
+        ))]
+        let index = if previous_is_eligible {
+            if task_is_real_time(task) {
+                previous_cpu
+            } else {
+                let previous_load = get_run_queue(previous_cpu).placement_load();
+                let (best_cpu, best_load) = least_loaded_run_queue(&cpumask, cpu_num, current_cpu)
+                    .expect("an eligible previous CPU guarantees a wake target");
+                if best_cpu != previous_cpu && rr_should_rebalance_wake(previous_load, best_load) {
+                    best_cpu
+                } else {
+                    previous_cpu
+                }
+            }
+        } else if run_queue_is_eligible(current_cpu, cpu_num, &cpumask) {
+            current_cpu
+        } else {
+            select_run_queue_index(cpumask)
+        };
+
+        #[cfg(not(all(
+            feature = "sched-load-balance",
+            feature = "sched-rr",
+            not(feature = "sched-eevdf")
+        )))]
+        let index = if previous_is_eligible {
             previous_cpu
-        } else if current_cpu < cpu_num
-            && cpumask.get(current_cpu)
-            && axhal::is_cpu_online(current_cpu)
-            && RUN_QUEUE_READY[current_cpu].load(Ordering::Acquire)
-        {
+        } else if run_queue_is_eligible(current_cpu, cpu_num, &cpumask) {
             current_cpu
         } else {
             select_run_queue_index(cpumask)
@@ -354,6 +444,13 @@ pub(crate) struct AxRunQueue {
         )
     ))]
     ready_depth: AtomicUsize,
+    /// Approximate indication that this CPU currently runs a non-idle task.
+    #[cfg(all(
+        feature = "smp",
+        feature = "sched-load-balance",
+        any(feature = "sched-rr", feature = "sched-eevdf")
+    ))]
+    current_non_idle: AtomicBool,
     /// Ordinary tasks that idle CPUs may pull from this queue.
     #[cfg(all(
         feature = "smp",
@@ -361,6 +458,13 @@ pub(crate) struct AxRunQueue {
         any(feature = "sched-rr", feature = "sched-eevdf")
     ))]
     stealable_depth: AtomicUsize,
+    /// Per-CPU rotating start for remote idle-pull scans.
+    #[cfg(all(
+        feature = "smp",
+        feature = "sched-load-balance",
+        any(feature = "sched-rr", feature = "sched-eevdf")
+    ))]
+    idle_pull_index: AtomicUsize,
     /// Bounds remote scans while LoongArch64 uses a busy idle loop.
     #[cfg(all(
         target_arch = "loongarch64",
@@ -877,7 +981,21 @@ impl AxRunQueue {
                 feature = "sched-load-balance",
                 any(feature = "sched-rr", feature = "sched-eevdf")
             ))]
+            current_non_idle: AtomicBool::new(
+                crate::current_may_uninit().is_some_and(|current| !current.is_idle()),
+            ),
+            #[cfg(all(
+                feature = "smp",
+                feature = "sched-load-balance",
+                any(feature = "sched-rr", feature = "sched-eevdf")
+            ))]
             stealable_depth: AtomicUsize::new(0),
+            #[cfg(all(
+                feature = "smp",
+                feature = "sched-load-balance",
+                any(feature = "sched-rr", feature = "sched-eevdf")
+            ))]
+            idle_pull_index: AtomicUsize::new(cpu_id.wrapping_add(1)),
             #[cfg(all(
                 target_arch = "loongarch64",
                 feature = "smp",
@@ -895,6 +1013,18 @@ impl AxRunQueue {
             crate::qperf_trace::EnqueueReason::Spawn,
         );
         run_queue
+    }
+
+    #[cfg(all(
+        feature = "smp",
+        feature = "sched-load-balance",
+        any(feature = "sched-rr", feature = "sched-eevdf")
+    ))]
+    #[inline]
+    fn placement_load(&self) -> usize {
+        self.ready_depth
+            .load(Ordering::Relaxed)
+            .saturating_add(usize::from(self.current_non_idle.load(Ordering::Relaxed)))
     }
 
     #[inline]
@@ -987,8 +1117,7 @@ impl AxRunQueue {
     ))]
     #[inline]
     fn is_stealable(task: &AxTaskRef) -> bool {
-        let priority = task.priority();
-        !task.is_idle() && !(1..=99).contains(&priority) && task.cpumask().len() > 1
+        !task.is_idle() && !task_is_real_time(task) && task.cpumask().len() > 1
     }
 
     #[cfg(all(
@@ -997,11 +1126,9 @@ impl AxRunQueue {
         any(feature = "sched-rr", feature = "sched-eevdf")
     ))]
     fn pull_next_task(&self) -> Option<AxTaskRef> {
-        static IDLE_PULL_INDEX: AtomicUsize = AtomicUsize::new(0);
-
         let target_cpu = self.cpu_id;
         let cpu_num = axhal::cpu_num();
-        let start = IDLE_PULL_INDEX.fetch_add(1, Ordering::Relaxed) % cpu_num;
+        let start = self.idle_pull_index.fetch_add(1, Ordering::Relaxed) % cpu_num;
         let mut attempted = [false; axconfig::plat::MAX_CPU_NUM];
 
         for _ in 0..cpu_num.saturating_sub(1) {
@@ -1183,6 +1310,13 @@ impl AxRunQueue {
         }
         #[cfg(feature = "preempt")]
         next_task.set_preempt_pending(false);
+        #[cfg(all(
+            feature = "smp",
+            feature = "sched-load-balance",
+            any(feature = "sched-rr", feature = "sched-eevdf")
+        ))]
+        self.current_non_idle
+            .store(!next_task.is_idle(), Ordering::Release);
         next_task.set_state(TaskState::Running);
         if prev_task.ptr_eq(&next_task) {
             #[cfg(feature = "irq")]
