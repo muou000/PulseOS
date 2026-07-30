@@ -11,10 +11,13 @@ Currently supported algorithms:
 - [`FifoScheduler`]: FIFO (First-In-First-Out) scheduler (cooperative).
 - [`RRScheduler`]: Round-robin scheduler (preemptive).
 - [`CFScheduler`]: Completely Fair Scheduler (preemptive).
+- [`EEVDFScheduler`]: Earliest Eligible Virtual Deadline First scheduler
+  (preemptive, with strict real-time priority queues).
 
 [`FifoScheduler`]: https://docs.rs/axsched/latest/axsched/struct.FifoScheduler.html
 [`RRScheduler`]: https://docs.rs/axsched/latest/axsched/struct.RRScheduler.html
 [`CFScheduler`]: https://docs.rs/axsched/latest/axsched/struct.CFScheduler.html
+[`EEVDFScheduler`]: https://docs.rs/axsched/latest/axsched/struct.EEVDFScheduler.html
 
 ## Example
 
