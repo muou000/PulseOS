@@ -1,7 +1,11 @@
 use alloc::{collections::VecDeque, sync::Arc};
 #[cfg(any(
     feature = "qperf-trace",
-    all(feature = "smp", feature = "sched-load-balance", feature = "sched-rr")
+    all(
+        feature = "smp",
+        feature = "sched-load-balance",
+        any(feature = "sched-rr", feature = "sched-eevdf")
+    )
 ))]
 use core::sync::atomic::AtomicUsize;
 #[cfg(any(feature = "smp", feature = "qperf-trace"))]
@@ -10,7 +14,7 @@ use core::sync::atomic::Ordering;
 use core::sync::atomic::{AtomicBool, AtomicPtr};
 
 use axhal::percpu::this_cpu_id;
-use axsched::BaseScheduler;
+use axsched::{BaseScheduler, SchedEnqueueReason};
 use kernel_guard::{BaseGuard, NoPreemptIrqSave};
 use kspin::{SpinNoIrqGuard, SpinRaw};
 use lazyinit::LazyInit;
@@ -81,6 +85,24 @@ pub(crate) fn current_run_queue<G: BaseGuard>() -> CurrentRunQueueRef<'static, G
     }
 }
 
+#[cfg(feature = "irq")]
+pub(crate) fn scheduler_preemption_deadline(now_ns: u64) -> Option<u64> {
+    let current = crate::current_may_uninit()?;
+    scheduler_preemption_deadline_for(current.as_task_ref(), now_ns)
+}
+
+#[cfg(feature = "irq")]
+pub(crate) fn scheduler_preemption_deadline_for(current: &AxTaskRef, now_ns: u64) -> Option<u64> {
+    let run_queue = unsafe { RUN_QUEUE.current_ref_raw() }.get()?;
+    if current.is_idle() {
+        return None;
+    }
+    run_queue
+        .scheduler
+        .lock()
+        .next_preemption_deadline(current, now_ns)
+}
+
 /// Yields the current task after avoiding the task lookup when no peer is ready.
 pub(crate) fn yield_current() {
     let irq_state = NoPreemptIrqSave::acquire();
@@ -127,7 +149,10 @@ fn select_run_queue_index(cpumask: AxCpuMask) -> usize {
 
     let cpu_num = axhal::cpu_num();
     let start = RUN_QUEUE_INDEX.fetch_add(1, Ordering::Relaxed) % cpu_num;
-    #[cfg(all(feature = "sched-load-balance", feature = "sched-rr"))]
+    #[cfg(all(
+        feature = "sched-load-balance",
+        any(feature = "sched-rr", feature = "sched-eevdf")
+    ))]
     let mut least_loaded = None;
     for offset in 0..cpu_num {
         let index = (start + offset) % cpu_num;
@@ -135,18 +160,27 @@ fn select_run_queue_index(cpumask: AxCpuMask) -> usize {
             && axhal::is_cpu_online(index)
             && RUN_QUEUE_READY[index].load(Ordering::Acquire)
         {
-            #[cfg(all(feature = "sched-load-balance", feature = "sched-rr"))]
+            #[cfg(all(
+                feature = "sched-load-balance",
+                any(feature = "sched-rr", feature = "sched-eevdf")
+            ))]
             {
                 let load = get_run_queue(index).ready_depth.load(Ordering::Relaxed);
                 if least_loaded.is_none_or(|(_, best_load)| load < best_load) {
                     least_loaded = Some((index, load));
                 }
             }
-            #[cfg(not(all(feature = "sched-load-balance", feature = "sched-rr")))]
+            #[cfg(not(all(
+                feature = "sched-load-balance",
+                any(feature = "sched-rr", feature = "sched-eevdf")
+            )))]
             return index;
         }
     }
-    #[cfg(all(feature = "sched-load-balance", feature = "sched-rr"))]
+    #[cfg(all(
+        feature = "sched-load-balance",
+        any(feature = "sched-rr", feature = "sched-eevdf")
+    ))]
     if let Some((index, _)) = least_loaded {
         return index;
     }
@@ -313,18 +347,26 @@ pub(crate) struct AxRunQueue {
     /// Approximate number of ready tasks, used for placement and qperf tracing.
     #[cfg(any(
         feature = "qperf-trace",
-        all(feature = "smp", feature = "sched-load-balance", feature = "sched-rr")
+        all(
+            feature = "smp",
+            feature = "sched-load-balance",
+            any(feature = "sched-rr", feature = "sched-eevdf")
+        )
     ))]
     ready_depth: AtomicUsize,
-    /// RR normal tasks that idle CPUs may pull from this queue.
-    #[cfg(all(feature = "smp", feature = "sched-load-balance", feature = "sched-rr"))]
+    /// Ordinary tasks that idle CPUs may pull from this queue.
+    #[cfg(all(
+        feature = "smp",
+        feature = "sched-load-balance",
+        any(feature = "sched-rr", feature = "sched-eevdf")
+    ))]
     stealable_depth: AtomicUsize,
     /// Bounds remote scans while LoongArch64 uses a busy idle loop.
     #[cfg(all(
         target_arch = "loongarch64",
         feature = "smp",
         feature = "sched-load-balance",
-        feature = "sched-rr"
+        any(feature = "sched-rr", feature = "sched-eevdf")
     ))]
     idle_pull_backoff: AtomicUsize,
 }
@@ -377,15 +419,28 @@ impl<G: BaseGuard> AxRunQueueRef<'_, G> {
         assert!(task.is_ready());
         #[cfg(feature = "smp")]
         task.set_cpu_id(cpu_id as _);
-        {
+        let scheduler_preempts = {
             let mut scheduler = self.inner.scheduler.lock();
             self.inner.account_enqueue(
                 &task,
                 #[cfg(feature = "qperf-trace")]
                 crate::qperf_trace::EnqueueReason::Spawn,
             );
-            scheduler.add_task(task);
+            let now_ns = axhal::time::monotonic_time_nanos();
+            scheduler.enqueue_task(task.clone(), SchedEnqueueReason::Spawn, now_ns);
+            cpu_id == this_cpu_id()
+                && crate::current_may_uninit().is_some_and(|current| {
+                    !current.is_idle()
+                        && !current.ptr_eq(&task)
+                        && scheduler.should_preempt(current.as_task_ref(), &task, now_ns)
+                })
+        };
+        #[cfg(feature = "preempt")]
+        if scheduler_preempts {
+            crate::current().set_preempt_pending(true);
         }
+        #[cfg(not(feature = "preempt"))]
+        let _ = scheduler_preempts;
         #[cfg(all(feature = "smp", feature = "ipi"))]
         kick_remote_cpu(cpu_id);
         #[cfg(feature = "irq")]
@@ -426,8 +481,9 @@ impl<G: BaseGuard> AxRunQueueRef<'_, G> {
             if let Some(id_name) = task_id_name {
                 trace!("task unblock: {} on run_queue {}", id_name, cpu_id);
             }
-            // Note: when the task is unblocked on another CPU's run queue,
-            // we just ingiore the `resched` flag.
+            // Legacy schedulers honor `resched` only on the local run queue.
+            // EEVDF derives wakeup preemption from eligibility and deadline.
+            #[cfg(not(feature = "sched-eevdf"))]
             if resched && cpu_id == this_cpu_id() {
                 #[cfg(feature = "preempt")]
                 crate::current().set_preempt_pending(true);
@@ -445,7 +501,11 @@ impl<G: BaseGuard> CurrentRunQueueRef<'_, G> {
     /// Waits efficiently when the current task is idle, or schedules ready work.
     pub fn idle_wait(&mut self) {
         if self.inner.scheduler.lock().is_empty() {
-            #[cfg(all(feature = "smp", feature = "sched-load-balance", feature = "sched-rr"))]
+            #[cfg(all(
+                feature = "smp",
+                feature = "sched-load-balance",
+                any(feature = "sched-rr", feature = "sched-eevdf")
+            ))]
             {
                 #[cfg(target_arch = "loongarch64")]
                 let should_pull =
@@ -482,7 +542,7 @@ impl<G: BaseGuard> CurrentRunQueueRef<'_, G> {
             if curr.is_idle() {
                 !scheduler.is_empty()
             } else {
-                scheduler.task_tick(curr.as_task_ref())
+                scheduler.task_tick_at(curr.as_task_ref(), axhal::time::monotonic_time_nanos())
             }
         };
         if need_resched {
@@ -738,10 +798,18 @@ impl<G: BaseGuard> CurrentRunQueueRef<'_, G> {
     }
 
     pub fn set_current_priority(&mut self, prio: isize) -> bool {
-        self.inner
-            .scheduler
-            .lock()
-            .set_priority(self.current_task.as_task_ref(), prio)
+        let updated = {
+            self.inner.scheduler.lock().set_priority_at(
+                self.current_task.as_task_ref(),
+                prio,
+                axhal::time::monotonic_time_nanos(),
+            )
+        };
+        #[cfg(feature = "irq")]
+        if updated {
+            crate::timers::reprogram_timer_for_task(self.current_task.as_task_ref());
+        }
+        updated
     }
 
     /// Core reschedule subroutine.
@@ -749,7 +817,11 @@ impl<G: BaseGuard> CurrentRunQueueRef<'_, G> {
     fn resched(&mut self) {
         let next = {
             let mut scheduler = self.inner.scheduler.lock();
-            let next = scheduler.pick_next_task();
+            let now_ns = axhal::time::monotonic_time_nanos();
+            if !self.current_task.is_idle() {
+                scheduler.task_stopped(self.current_task.as_task_ref(), now_ns);
+            }
+            let next = scheduler.pick_next_task_at(now_ns);
             if let Some(task) = &next {
                 self.inner.account_dequeue(task);
             }
@@ -765,7 +837,8 @@ impl<G: BaseGuard> CurrentRunQueueRef<'_, G> {
             next.id_name(),
             next.state()
         );
-        self.inner.switch_to(crate::current(), next);
+        self.inner
+            .switch_to_after_prev_stopped(crate::current(), next);
     }
 }
 
@@ -780,22 +853,36 @@ impl AxRunQueue {
         let mut scheduler = Scheduler::new();
         #[cfg(feature = "qperf-trace")]
         let traced_gc_task = gc_task.clone();
-        scheduler.add_task(gc_task);
+        let now_ns = axhal::time::monotonic_time_nanos();
+        scheduler.enqueue_task(gc_task, SchedEnqueueReason::Spawn, now_ns);
+        if let Some(current) = crate::current_may_uninit()
+            && !current.is_idle()
+        {
+            scheduler.task_started(current.as_task_ref(), now_ns);
+        }
         let run_queue = Self {
             cpu_id,
             scheduler: SpinRaw::new(scheduler),
             #[cfg(any(
                 feature = "qperf-trace",
-                all(feature = "smp", feature = "sched-load-balance", feature = "sched-rr")
+                all(
+                    feature = "smp",
+                    feature = "sched-load-balance",
+                    any(feature = "sched-rr", feature = "sched-eevdf")
+                )
             ))]
             ready_depth: AtomicUsize::new(1),
-            #[cfg(all(feature = "smp", feature = "sched-load-balance", feature = "sched-rr"))]
+            #[cfg(all(
+                feature = "smp",
+                feature = "sched-load-balance",
+                any(feature = "sched-rr", feature = "sched-eevdf")
+            ))]
             stealable_depth: AtomicUsize::new(0),
             #[cfg(all(
                 target_arch = "loongarch64",
                 feature = "smp",
                 feature = "sched-load-balance",
-                feature = "sched-rr"
+                any(feature = "sched-rr", feature = "sched-eevdf")
             ))]
             idle_pull_backoff: AtomicUsize::new(0),
         };
@@ -818,11 +905,19 @@ impl AxRunQueue {
     ) {
         #[cfg(any(
             feature = "qperf-trace",
-            all(feature = "smp", feature = "sched-load-balance", feature = "sched-rr")
+            all(
+                feature = "smp",
+                feature = "sched-load-balance",
+                any(feature = "sched-rr", feature = "sched-eevdf")
+            )
         ))]
         let _queue_depth = self.ready_depth.fetch_add(1, Ordering::Relaxed) + 1;
 
-        #[cfg(all(feature = "smp", feature = "sched-load-balance", feature = "sched-rr"))]
+        #[cfg(all(
+            feature = "smp",
+            feature = "sched-load-balance",
+            any(feature = "sched-rr", feature = "sched-eevdf")
+        ))]
         if Self::is_stealable(task) {
             self.stealable_depth.fetch_add(1, Ordering::Relaxed);
         }
@@ -832,7 +927,11 @@ impl AxRunQueue {
 
         #[cfg(not(any(
             feature = "qperf-trace",
-            all(feature = "smp", feature = "sched-load-balance", feature = "sched-rr")
+            all(
+                feature = "smp",
+                feature = "sched-load-balance",
+                any(feature = "sched-rr", feature = "sched-eevdf")
+            )
         )))]
         let _ = task;
     }
@@ -841,7 +940,11 @@ impl AxRunQueue {
     fn account_dequeue(&self, task: &AxTaskRef) {
         #[cfg(any(
             feature = "qperf-trace",
-            all(feature = "smp", feature = "sched-load-balance", feature = "sched-rr")
+            all(
+                feature = "smp",
+                feature = "sched-load-balance",
+                any(feature = "sched-rr", feature = "sched-eevdf")
+            )
         ))]
         {
             let result =
@@ -852,7 +955,11 @@ impl AxRunQueue {
             debug_assert!(result.is_ok(), "run-queue ready depth underflow");
         }
 
-        #[cfg(all(feature = "smp", feature = "sched-load-balance", feature = "sched-rr"))]
+        #[cfg(all(
+            feature = "smp",
+            feature = "sched-load-balance",
+            any(feature = "sched-rr", feature = "sched-eevdf")
+        ))]
         if Self::is_stealable(task) {
             let result =
                 self.stealable_depth
@@ -864,19 +971,31 @@ impl AxRunQueue {
 
         #[cfg(not(any(
             feature = "qperf-trace",
-            all(feature = "smp", feature = "sched-load-balance", feature = "sched-rr")
+            all(
+                feature = "smp",
+                feature = "sched-load-balance",
+                any(feature = "sched-rr", feature = "sched-eevdf")
+            )
         )))]
         let _ = task;
     }
 
-    #[cfg(all(feature = "smp", feature = "sched-load-balance", feature = "sched-rr"))]
+    #[cfg(all(
+        feature = "smp",
+        feature = "sched-load-balance",
+        any(feature = "sched-rr", feature = "sched-eevdf")
+    ))]
     #[inline]
     fn is_stealable(task: &AxTaskRef) -> bool {
         let priority = task.priority();
         !task.is_idle() && !(1..=99).contains(&priority) && task.cpumask().len() > 1
     }
 
-    #[cfg(all(feature = "smp", feature = "sched-load-balance", feature = "sched-rr"))]
+    #[cfg(all(
+        feature = "smp",
+        feature = "sched-load-balance",
+        any(feature = "sched-rr", feature = "sched-eevdf")
+    ))]
     fn pull_next_task(&self) -> Option<AxTaskRef> {
         static IDLE_PULL_INDEX: AtomicUsize = AtomicUsize::new(0);
 
@@ -940,9 +1059,10 @@ impl AxRunQueue {
                     #[cfg(feature = "qperf-trace")]
                     crate::qperf_trace::EnqueueReason::WorkSteal,
                 );
-                scheduler.add_task(task);
+                let now_ns = axhal::time::monotonic_time_nanos();
+                scheduler.enqueue_task(task, SchedEnqueueReason::Migration, now_ns);
                 let next = scheduler
-                    .pick_next_task()
+                    .pick_next_task_at(now_ns)
                     .expect("pulled task must make the target queue runnable");
                 self.account_dequeue(&next);
                 return Some(next);
@@ -992,10 +1112,12 @@ impl AxRunQueue {
             // TODO: priority
             #[cfg(feature = "smp")]
             task.set_cpu_id(self.cpu_id as _);
-            let is_preempt = if current_state == TaskState::Blocked {
-                false
+            let sched_reason = if current_state == TaskState::Blocked {
+                SchedEnqueueReason::Wake
+            } else if preempt {
+                SchedEnqueueReason::Preempt
             } else {
-                preempt
+                SchedEnqueueReason::Yield
             };
             #[cfg(feature = "qperf-trace")]
             let enqueue_reason = if current_state == TaskState::Blocked {
@@ -1005,15 +1127,29 @@ impl AxRunQueue {
             } else {
                 crate::qperf_trace::EnqueueReason::Yield
             };
-            {
+            let scheduler_preempts = {
                 let mut scheduler = self.scheduler.lock();
                 self.account_enqueue(
                     &task,
                     #[cfg(feature = "qperf-trace")]
                     enqueue_reason,
                 );
-                scheduler.put_prev_task(task, is_preempt);
+                let now_ns = axhal::time::monotonic_time_nanos();
+                scheduler.enqueue_task(task.clone(), sched_reason, now_ns);
+                current_state == TaskState::Blocked
+                    && self.cpu_id == this_cpu_id()
+                    && crate::current_may_uninit().is_some_and(|current| {
+                        !current.is_idle()
+                            && !current.ptr_eq(&task)
+                            && scheduler.should_preempt(current.as_task_ref(), &task, now_ns)
+                    })
+            };
+            #[cfg(feature = "preempt")]
+            if scheduler_preempts {
+                crate::current().set_preempt_pending(true);
             }
+            #[cfg(not(feature = "preempt"))]
+            let _ = scheduler_preempts;
             true
         } else {
             false
@@ -1021,16 +1157,36 @@ impl AxRunQueue {
     }
 
     fn switch_to(&self, prev_task: CurrentTask, next_task: AxTaskRef) {
+        self.switch_to_inner(prev_task, next_task, true);
+    }
+
+    fn switch_to_after_prev_stopped(&self, prev_task: CurrentTask, next_task: AxTaskRef) {
+        self.switch_to_inner(prev_task, next_task, false);
+    }
+
+    fn switch_to_inner(&self, prev_task: CurrentTask, next_task: AxTaskRef, stop_prev: bool) {
         // Make sure that IRQs are disabled by kernel guard or other means.
         #[cfg(all(not(test), feature = "irq"))] // Note: irq is faked under unit tests.
         assert!(
             !axhal::asm::irqs_enabled(),
             "IRQs must be disabled during scheduling"
         );
+        let now_ns = axhal::time::monotonic_time_nanos();
+        {
+            let mut scheduler = self.scheduler.lock();
+            if stop_prev && !prev_task.is_idle() {
+                scheduler.task_stopped(prev_task.as_task_ref(), now_ns);
+            }
+            if !next_task.is_idle() {
+                scheduler.task_started(&next_task, now_ns);
+            }
+        }
         #[cfg(feature = "preempt")]
         next_task.set_preempt_pending(false);
         next_task.set_state(TaskState::Running);
         if prev_task.ptr_eq(&next_task) {
+            #[cfg(feature = "irq")]
+            crate::timers::reprogram_timer_for_task(&next_task);
             return;
         }
 
@@ -1066,6 +1222,8 @@ impl AxRunQueue {
 
             #[cfg(feature = "qperf-trace")]
             crate::qperf_trace::sched_switch(&prev_task, &next_task, prev_task.state() as u8);
+            #[cfg(feature = "irq")]
+            crate::timers::reprogram_timer_for_task(&next_task);
             CurrentTask::set_current(prev_task, next_task);
 
             (*prev_ctx_ptr).switch_to(&*next_ctx_ptr);
@@ -1125,7 +1283,11 @@ pub(crate) fn migrate_entry(migrated_task: AxTaskRef) {
             #[cfg(feature = "qperf-trace")]
             crate::qperf_trace::EnqueueReason::AffinityMigration,
         );
-        scheduler.put_prev_task(migrated_task, false);
+        scheduler.enqueue_task(
+            migrated_task,
+            SchedEnqueueReason::Migration,
+            axhal::time::monotonic_time_nanos(),
+        );
     }
     #[cfg(feature = "ipi")]
     force_kick_remote_cpu(cpu_id);
@@ -1149,7 +1311,11 @@ pub(crate) unsafe fn clear_prev_task_on_cpu() {
                 #[cfg(feature = "qperf-trace")]
                 crate::qperf_trace::EnqueueReason::DeferredWake,
             );
-            scheduler.put_prev_task(task, false);
+            scheduler.enqueue_task(
+                task,
+                SchedEnqueueReason::Wake,
+                axhal::time::monotonic_time_nanos(),
+            );
         }
         if target != this_cpu_id() {
             #[cfg(feature = "ipi")]
