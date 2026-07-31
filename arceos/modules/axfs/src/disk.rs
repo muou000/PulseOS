@@ -6,8 +6,8 @@ use alloc::{
 };
 use core::mem;
 
+use async_trait::async_trait;
 use axdriver::{AxBlockDevice, prelude::*};
-use axsync::Mutex as DeviceMutex;
 use spin::Mutex;
 
 fn take<'a>(buf: &mut &'a [u8], cnt: usize) -> &'a [u8] {
@@ -25,65 +25,39 @@ fn take_mut<'a>(buf: &mut &'a mut [u8], cnt: usize) -> &'a mut [u8] {
 
 /// A cheaply-cloneable handle around an async-capable block device.
 ///
-/// # Why `Arc<Mutex<dyn DynAsyncBlockDriverOps + Send + Sync + 'static>>`
-/// instead of `Box<...>` or `Arc<dyn ...>` without a Mutex?
-///
-/// 1. The previous `Mutex<Box<dyn BlockDriverOps>>` design (introduced by
-///    commit `4e357ea4`) failed to compile with `E0599`: `Box<dyn
-///    BlockDriverOps>` is not `Clone`, so `self.dev.lock().clone()` could
-///    not produce a handle that could move into an async future.
-/// 2. The naïve fix — `Arc<dyn DynAsyncBlockDriverOps + Send + Sync>` — fails
-///    for the synchronous surface: Rust's `Arc` does **not** implement
-///    `DerefMut`, so `&mut *arc` cannot grant `&mut dyn …` from a shared
-///    `Arc`. (`E0596`.)
-/// 3. The right shape retains an outer task-aware `Mutex` for `&mut`-granting —
-///    the
-///    fix is **what we put inside the Mutex**: `Arc::new(Box<dyn … as
-///    DynAsyncBlockDriverOps + Send + Sync + 'static>>)`. The outer `Arc`
-///    is cheaply cloneable across the async boundary; the inner `Mutex`
-///    serialises accesses as before.
-///
-/// # Async semantics
-///
-/// The async future clones only the outer `Arc`, so it does not require
-/// `Box<dyn …>` to be `Clone`. Inside the future we briefly take the
-/// `MutexGuard` and dispatch to the driver's `read_block`/`write_block` sync
-/// entry point. VirtIO may suspend the task while that call waits for an IRQ,
-/// so this mutex must put competing tasks to sleep rather than spin until the
-/// operation completes.
+/// Async operations use shared receivers, so independent requests can reach
+/// the driver's queue concurrently. The synchronous trait surface remains as
+/// a compatibility bridge and blocks only the calling task on the same future.
 #[derive(Clone)]
 pub struct SharedBlockDevice {
     name: String,
-    // Retain the original `Arc<Mutex<AxBlockDevice>>` shape; only the lock is
-    // task-aware so a driver may sleep while it owns the mutable device. The
-    // inner `AxBlockDevice` type alias changed (now `Box<dyn
-    // DynAsyncBlockDriverOps + Send + Sync>`), keeping the mutex payload sized.
-    dev: Arc<DeviceMutex<AxBlockDevice>>,
+    dev: Arc<dyn DynAsyncBlockDriverOps + Send + Sync>,
 }
 
 impl SharedBlockDevice {
     /// Wraps a block device so the same underlying driver can be reused.
     pub fn new(dev: AxBlockDevice) -> Self {
         let name = dev.device_name().to_string();
-        Self { name, dev: Arc::new(DeviceMutex::new(dev)) }
+        let dev: Arc<dyn DynAsyncBlockDriverOps + Send + Sync> = Arc::from(dev);
+        Self { name, dev }
     }
 
-    /// Builds a `SharedBlockDevice` from a pre-existing task-aware mutex handle.
-    pub fn from_arc(dev: Arc<DeviceMutex<AxBlockDevice>>) -> Self {
-        let name = dev.lock().device_name().to_string();
+    /// Builds a `SharedBlockDevice` from a pre-existing shared driver handle.
+    pub fn from_arc(dev: Arc<dyn DynAsyncBlockDriverOps + Send + Sync>) -> Self {
+        let name = dev.device_name().to_string();
         Self { name, dev }
     }
 
     /// Returns the total size of the device in bytes.
     pub fn size(&self) -> u64 {
-        let dev = self.dev.lock();
-        dev.num_blocks().saturating_mul(dev.block_size() as u64)
+        self.dev
+            .num_blocks()
+            .saturating_mul(self.dev.block_size() as u64)
     }
 
     /// Returns the device block size.
     pub fn block_size(&self) -> usize {
-        let dev = self.dev.lock();
-        dev.block_size()
+        self.dev.block_size()
     }
 }
 
@@ -99,26 +73,23 @@ impl BaseDriverOps for SharedBlockDevice {
 
 impl BlockDriverOps for SharedBlockDevice {
     fn num_blocks(&self) -> u64 {
-        self.dev.lock().num_blocks()
+        self.dev.num_blocks()
     }
 
     fn block_size(&self) -> usize {
-        self.dev.lock().block_size()
+        self.dev.block_size()
     }
 
     fn read_block(&mut self, block_id: u64, buf: &mut [u8]) -> DevResult {
-        let mut dev = self.dev.lock();
-        dev.read_block(block_id, buf)
+        axtask::future::block_on(self.dev.read_block_async_dyn(block_id, buf))
     }
 
     fn write_block(&mut self, block_id: u64, buf: &[u8]) -> DevResult {
-        let mut dev = self.dev.lock();
-        dev.write_block(block_id, buf)
+        axtask::future::block_on(self.dev.write_block_async_dyn(block_id, buf))
     }
 
     fn flush(&mut self) -> DevResult {
-        let mut dev = self.dev.lock();
-        dev.flush()
+        axtask::future::block_on(self.dev.flush_async_dyn())
     }
 }
 
@@ -131,41 +102,21 @@ impl AsyncBlockDriverOps for SharedBlockDevice {
         = core::pin::Pin<Box<dyn core::future::Future<Output = DevResult> + Send + 'a>>
     where
         Self: 'a;
+    type FlushFuture<'a>
+        = core::pin::Pin<Box<dyn core::future::Future<Output = DevResult> + Send + 'a>>
+    where
+        Self: 'a;
 
-    fn read_block_async<'a>(
-        &'a mut self,
-        block_id: u64,
-        buf: &'a mut [u8],
-    ) -> Self::ReadFuture<'a> {
-        // Clone the cheap outer `Arc<Mutex<…>>` handle (NOT the trait object).
-        // This is what fixes `E0599` — `MutexGuard::clone()` no longer needs
-        // to clone the inner `Box<dyn …>`; we keep the guard only inside the
-        // async block to dispatch to the synchronous entry point.
-        let arc = self.dev.clone();
-        Box::pin(async move {
-            // The task-aware mutex lets another caller sleep if this driver's
-            // synchronous completion path waits for an interrupt.
-            let res = {
-                let mut g = arc.lock();
-                g.read_block(block_id, buf)
-            };
-            res
-        })
+    fn read_block_async<'a>(&'a self, block_id: u64, buf: &'a mut [u8]) -> Self::ReadFuture<'a> {
+        self.dev.read_block_async_dyn(block_id, buf)
     }
 
-    fn write_block_async<'a>(
-        &'a mut self,
-        block_id: u64,
-        buf: &'a [u8],
-    ) -> Self::WriteFuture<'a> {
-        let arc = self.dev.clone();
-        Box::pin(async move {
-            let res = {
-                let mut g = arc.lock();
-                g.write_block(block_id, buf)
-            };
-            res
-        })
+    fn write_block_async<'a>(&'a self, block_id: u64, buf: &'a [u8]) -> Self::WriteFuture<'a> {
+        self.dev.write_block_async_dyn(block_id, buf)
+    }
+
+    fn flush_async(&self) -> Self::FlushFuture<'_> {
+        self.dev.flush_async_dyn()
     }
 }
 
@@ -179,26 +130,117 @@ pub struct SeekableDiskInner {
 }
 
 /// A trait for objects that can be flushed.
+#[async_trait]
 pub trait DiskFlushable: Send + Sync {
-    fn flush_disk(&self) -> DevResult<()>;
+    async fn flush_disk(&self) -> DevResult<()>;
+
+    async fn flush_owner(&self, _owner: u64) -> DevResult<()> {
+        self.flush_disk().await
+    }
+
+    fn begin_write_scope(&self, _owners: &[u64]) -> u64 {
+        0
+    }
+
+    fn enter_write_scope(&self, _scope_id: u64) {}
+
+    fn include_write_owner(&self, _scope_id: u64, _owner: u64) {}
+
+    fn leave_write_scope(&self, _scope_id: u64) {}
+
+    fn end_write_scope(&self, _scope_id: u64) {}
+}
+
+pub(crate) struct DiskWriteScope<'a> {
+    disk: &'a dyn DiskFlushable,
+    scope_id: u64,
+}
+
+#[derive(Clone, Copy)]
+pub(crate) struct DiskWriteScopeHandle<'a> {
+    disk: &'a dyn DiskFlushable,
+    scope_id: u64,
+}
+
+struct DiskWritePollGuard<'a> {
+    disk: &'a dyn DiskFlushable,
+    scope_id: u64,
+}
+
+impl Drop for DiskWritePollGuard<'_> {
+    fn drop(&mut self) {
+        self.disk.leave_write_scope(self.scope_id);
+    }
+}
+
+impl<'a> DiskWriteScope<'a> {
+    pub(crate) fn new(disk: &'a dyn DiskFlushable, owners: &[u64]) -> Self {
+        let scope_id = disk.begin_write_scope(owners);
+        Self { disk, scope_id }
+    }
+
+    pub(crate) fn handle(&self) -> DiskWriteScopeHandle<'a> {
+        DiskWriteScopeHandle {
+            disk: self.disk,
+            scope_id: self.scope_id,
+        }
+    }
+
+    pub(crate) async fn run<F: core::future::Future>(&mut self, future: F) -> F::Output {
+        let mut future = core::pin::pin!(future);
+        core::future::poll_fn(|cx| {
+            self.disk.enter_write_scope(self.scope_id);
+            let _poll_guard = DiskWritePollGuard {
+                disk: self.disk,
+                scope_id: self.scope_id,
+            };
+            core::future::Future::poll(future.as_mut(), cx)
+        })
+        .await
+    }
+}
+
+impl DiskWriteScopeHandle<'_> {
+    pub(crate) fn include_owner(&self, owner: u64) {
+        self.disk.include_write_owner(self.scope_id, owner);
+    }
+}
+
+impl Drop for DiskWriteScope<'_> {
+    fn drop(&mut self) {
+        self.disk.end_write_scope(self.scope_id);
+    }
 }
 
 /// Flusher for a specific disk device.
 pub struct DiskFlusher<D: BlockDriverOps> {
     dev: Arc<Mutex<D>>,
     inner: Arc<Mutex<SeekableDiskInner>>,
+    flush_lock: async_lock::Mutex<()>,
 }
 
-impl<D: BlockDriverOps> DiskFlushable for DiskFlusher<D> {
-    fn flush_disk(&self) -> DevResult<()> {
-        let mut inner = self.inner.lock();
-        let mut dev = self.dev.lock();
-        if inner.write_buffer_dirty {
-            dev.write_block(inner.block_id, &inner.write_buffer)?;
-            inner.write_buffer_dirty = false;
+#[async_trait]
+impl<D: AsyncBlockDriverOps + Clone + 'static> DiskFlushable for DiskFlusher<D> {
+    async fn flush_disk(&self) -> DevResult<()> {
+        let _flush_guard = self.flush_lock.lock().await;
+        let pending = {
+            let inner = self.inner.lock();
+            inner
+                .write_buffer_dirty
+                .then(|| (inner.block_id, inner.write_buffer.to_vec()))
+        };
+        let dev = self.dev.lock().clone();
+        if let Some((block_id, data)) = pending {
+            dev.write_block_async(block_id, &data).await?;
+            let mut inner = self.inner.lock();
+            if inner.write_buffer_dirty
+                && inner.block_id == block_id
+                && inner.write_buffer.as_ref() == data.as_slice()
+            {
+                inner.write_buffer_dirty = false;
+            }
         }
-        dev.flush()?;
-        Ok(())
+        dev.flush_async().await
     }
 }
 
@@ -210,6 +252,11 @@ pub static FLUSHING_TASKS: spin::Lazy<Mutex<alloc::collections::BTreeSet<u64>>> 
 
 /// Flushes all registered disks.
 pub fn flush_all_disks() -> DevResult<()> {
+    axtask::future::block_on(flush_all_disks_async())
+}
+
+/// Asynchronously flushes all registered disks.
+pub async fn flush_all_disks_async() -> DevResult<()> {
     let task_id = axtask::current().id().as_u64();
     {
         let mut guard = FLUSHING_TASKS.lock();
@@ -233,7 +280,7 @@ pub fn flush_all_disks() -> DevResult<()> {
     };
     let mut ret = Ok(());
     for flusher in flushers {
-        if let Err(e) = flusher.flush_disk() {
+        if let Err(e) = flusher.flush_disk().await {
             log::error!("Failed to flush disk: {:?}", e);
             ret = Err(e);
         }
@@ -251,7 +298,7 @@ pub struct SeekableDisk<D: BlockDriverOps = SharedBlockDevice> {
     block_size_log2: u8,
 }
 
-impl<D: BlockDriverOps + 'static> SeekableDisk<D> {
+impl<D: AsyncBlockDriverOps + Clone + 'static> SeekableDisk<D> {
     /// Create a new disk.
     pub fn new(dev: D) -> Self {
         assert!(dev.block_size().is_power_of_two());
@@ -269,6 +316,7 @@ impl<D: BlockDriverOps + 'static> SeekableDisk<D> {
         let flusher = Arc::new(DiskFlusher {
             dev: dev_arc.clone(),
             inner: inner.clone(),
+            flush_lock: async_lock::Mutex::new(()),
         });
 
         DISK_FLUSHERS.lock().push(Arc::downgrade(&flusher) as _);
@@ -302,7 +350,7 @@ impl<D: BlockDriverOps + 'static> SeekableDisk<D> {
 
     /// Write all pending changes to the disk.
     pub fn flush(&mut self) -> DevResult<()> {
-        self.flusher.flush_disk()
+        axtask::future::block_on(self.flusher.flush_disk())
     }
 
     pub fn device(&self) -> Arc<Mutex<D>> {
@@ -311,8 +359,16 @@ impl<D: BlockDriverOps + 'static> SeekableDisk<D> {
 
     fn read_partial(&mut self, buf: &mut &mut [u8]) -> DevResult<usize> {
         self.flush()?;
+        let (block_id, mut read_buffer) = {
+            let mut inner = self.inner.lock();
+            (inner.block_id, mem::take(&mut inner.read_buffer))
+        };
+        let mut dev = self.dev.lock().clone();
+        let read_result = dev.read_block(block_id, &mut read_buffer);
         let mut inner = self.inner.lock();
-        self.dev.lock().read_block(inner.block_id, &mut inner.read_buffer)?;
+        inner.read_buffer = read_buffer;
+        read_result?;
+        debug_assert_eq!(inner.block_id, block_id);
 
         let offset = inner.offset;
         let data = &inner.read_buffer[offset..];
@@ -338,8 +394,12 @@ impl<D: BlockDriverOps + 'static> SeekableDisk<D> {
         if buf.len() >= self.block_size() {
             let blocks = buf.len() >> self.block_size_log2;
             let length = blocks << self.block_size_log2;
+            let block_id = self.inner.lock().block_id;
+            let data = take_mut(&mut buf, length);
+            let mut dev = self.dev.lock().clone();
+            dev.read_block(block_id, data)?;
             let mut inner = self.inner.lock();
-            self.dev.lock().read_block(inner.block_id, take_mut(&mut buf, length))?;
+            debug_assert_eq!(inner.block_id, block_id);
             inner.block_id += blocks as u64;
             read += length;
         }
@@ -351,12 +411,22 @@ impl<D: BlockDriverOps + 'static> SeekableDisk<D> {
     }
 
     fn write_partial(&mut self, buf: &mut &[u8]) -> DevResult<usize> {
-        let mut inner = self.inner.lock();
-        if !inner.write_buffer_dirty {
-            self.dev.lock().read_block(inner.block_id, &mut inner.write_buffer)?;
+        let pending_read = {
+            let mut inner = self.inner.lock();
+            (!inner.write_buffer_dirty)
+                .then(|| (inner.block_id, mem::take(&mut inner.write_buffer)))
+        };
+        if let Some((block_id, mut write_buffer)) = pending_read {
+            let mut dev = self.dev.lock().clone();
+            let read_result = dev.read_block(block_id, &mut write_buffer);
+            let mut inner = self.inner.lock();
+            inner.write_buffer = write_buffer;
+            read_result?;
+            debug_assert_eq!(inner.block_id, block_id);
             inner.write_buffer_dirty = true;
         }
 
+        let mut inner = self.inner.lock();
         let offset = inner.offset;
         let data = &mut inner.write_buffer[offset..];
         let length = buf.len().min(data.len());
@@ -384,8 +454,12 @@ impl<D: BlockDriverOps + 'static> SeekableDisk<D> {
         if buf.len() >= self.block_size() {
             let blocks = buf.len() >> self.block_size_log2;
             let length = blocks << self.block_size_log2;
+            let block_id = self.inner.lock().block_id;
+            let data = take(&mut buf, length);
+            let mut dev = self.dev.lock().clone();
+            dev.write_block(block_id, data)?;
             let mut inner = self.inner.lock();
-            self.dev.lock().write_block(inner.block_id, take(&mut buf, length))?;
+            debug_assert_eq!(inner.block_id, block_id);
             inner.block_id += blocks as u64;
             written += length;
         }

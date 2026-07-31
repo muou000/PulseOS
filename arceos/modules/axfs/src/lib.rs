@@ -19,16 +19,29 @@ use axdriver::prelude::{BaseDriverOps, BlockDriverOps};
 use axdriver::{AxBlockDevice, AxDeviceContainer};
 use axfs_ng_vfs::NodePermission;
 pub use axfs_ng_vfs::NodeType;
+use futures_util::{StreamExt, stream::FuturesUnordered};
 use spin::{Lazy, Mutex};
 
 mod disk;
 pub mod fs;
 
-pub use disk::flush_all_disks;
+pub use disk::{flush_all_disks, flush_all_disks_async};
 pub use fs::{new_tmpfs, new_procfs, new_default, devfs::DevNode, TtyCallbacks, register_tty_callbacks};
 
 pub fn flush_all_filesystems() -> axfs_ng_vfs::VfsResult<()> {
-    let mut first_error = highlevel::flush_all_file_caches().err();
+    axtask::future::block_on(flush_all_filesystems_async())
+}
+
+async fn flush_filesystem_root(
+    root: axfs_ng_vfs::Location,
+) -> (String, axfs_ng_vfs::VfsResult<()>) {
+    let name = root.filesystem().name().to_string();
+    let result = root.filesystem().flush().await;
+    (name, result)
+}
+
+pub async fn flush_all_filesystems_async() -> axfs_ng_vfs::VfsResult<()> {
+    let mut first_error = highlevel::flush_all_file_caches_async().await.err();
     let mut roots = BTreeMap::new();
     if let Some(cx) = ROOT_FS_CONTEXT.get() {
         let root = cx.root_dir().clone();
@@ -42,12 +55,33 @@ pub fn flush_all_filesystems() -> axfs_ng_vfs::VfsResult<()> {
         let root = mp.root_location();
         roots.entry(filesystem_id(root.filesystem())).or_insert(root);
     }
-    for root in roots.into_values() {
-        if let Err(err) = axtask::future::block_on(root.filesystem().flush()) {
-            error!("Failed to flush {} filesystem: {:?}", root.filesystem().name(), err);
+    const FILESYSTEM_FLUSH_CONCURRENCY: usize = 4;
+    let mut roots = roots.into_values();
+    let mut pending = FuturesUnordered::new();
+    loop {
+        while pending.len() < FILESYSTEM_FLUSH_CONCURRENCY {
+            let Some(root) = roots.next() else {
+                break;
+            };
+            pending.push(flush_filesystem_root(root));
+        }
+        let Some((name, result)) = pending.next().await else {
+            break;
+        };
+        if let Err(err) = result {
+            error!("Failed to flush {} filesystem: {:?}", name, err);
             if first_error.is_none() {
                 first_error = Some(err);
             }
+        }
+    }
+    // Filesystem flushes cover mounted data. The disk registry additionally
+    // owns seekable raw-block write buffers; generation checks make the ext4
+    // entries reached here a cheap no-op after their filesystem checkpoint.
+    if let Err(err) = disk::flush_all_disks_async().await {
+        error!("Failed to flush registered disks: {:?}", err);
+        if first_error.is_none() {
+            first_error = Some(axfs_ng_vfs::VfsError::Io);
         }
     }
     first_error.map_or(Ok(()), Err)
@@ -237,7 +271,9 @@ pub fn set_loop_flags(id: usize, flags: u32) -> axfs_ng_vfs::VfsResult<()> {
     if id >= 8 {
         return Err(axfs_ng_vfs::VfsError::InvalidInput);
     }
-    fs::loop_dev::LOOP_DEVICES[id].flags.store(flags, core::sync::atomic::Ordering::Release);
+    fs::loop_dev::LOOP_DEVICES[id]
+        .flags
+        .store(flags, core::sync::atomic::Ordering::Release);
     Ok(())
 }
 

@@ -10,7 +10,9 @@ use log::info;
 use zerocopy::{AsBytes, FromBytes, FromZeroes};
 
 const QUEUE: u16 = 0;
-const QUEUE_SIZE: u16 = 16;
+/// Number of descriptor heads available to the VirtIO block request queue.
+pub const VIRTIO_BLK_QUEUE_SIZE: usize = 16;
+const QUEUE_SIZE: u16 = VIRTIO_BLK_QUEUE_SIZE as u16;
 const SUPPORTED_FEATURES: BlkFeature = BlkFeature::RO
     .union(BlkFeature::FLUSH)
     .union(BlkFeature::RING_INDIRECT_DESC)
@@ -151,6 +153,51 @@ impl<H: Hal, T: Transport> VirtIOBlk<H, T> {
         } else {
             Ok(())
         }
+    }
+
+    /// Submits a flush request without waiting for completion.
+    ///
+    /// Returns `None` when the device does not advertise `VIRTIO_BLK_F_FLUSH`.
+    /// In that case there is no request to complete.
+    ///
+    /// # Safety
+    ///
+    /// `req` and `resp` remain borrowed by the device until
+    /// [`complete_flush`](Self::complete_flush) is called with the returned
+    /// token and the same buffers.
+    pub unsafe fn flush_nb(&mut self, req: &mut BlkReq, resp: &mut BlkResp) -> Result<Option<u16>> {
+        if !self.negotiated_features.contains(BlkFeature::FLUSH) {
+            return Ok(None);
+        }
+        *req = BlkReq {
+            type_: ReqType::Flush,
+            ..Default::default()
+        };
+        let token = self
+            .queue
+            .add(&[req.as_bytes()], &mut [resp.as_bytes_mut()])?;
+        if self.queue.should_notify() {
+            self.transport.notify(QUEUE);
+        }
+        Ok(Some(token))
+    }
+
+    /// Completes a flush request previously submitted by
+    /// [`flush_nb`](Self::flush_nb).
+    ///
+    /// # Safety
+    ///
+    /// `req` and `resp` must be the same buffers used for the request denoted
+    /// by `token`.
+    pub unsafe fn complete_flush(
+        &mut self,
+        token: u16,
+        req: &BlkReq,
+        resp: &mut BlkResp,
+    ) -> Result<()> {
+        self.queue
+            .pop_used(token, &[req.as_bytes()], &mut [resp.as_bytes_mut()])?;
+        resp.status.into()
     }
 
     /// Gets the device ID.
@@ -595,10 +642,11 @@ mod tests {
 
         assert_eq!(blk.capacity(), 0x02_0000_0042);
         assert_eq!(blk.readonly(), true);
+        assert_eq!(blk.virt_queue_size() as usize, VIRTIO_BLK_QUEUE_SIZE);
     }
 
     #[test]
-    fn read() {
+    fn nonblocking_reads_can_be_in_flight_together() {
         let mut config_space = BlkConfig {
             capacity_low: Volatile::new(66),
             capacity_high: Volatile::new(0),
@@ -626,12 +674,21 @@ mod tests {
         };
         let mut blk = VirtIOBlk::<FakeHal, FakeTransport<BlkConfig>>::new(transport).unwrap();
 
-        // Start a thread to simulate the device waiting for a read request.
-        let handle = thread::spawn(move || {
-            println!("Device waiting for a request.");
-            State::wait_until_queue_notified(&state, QUEUE);
-            println!("Transmit queue was notified.");
+        let mut request_a = BlkReq::default();
+        let mut response_a = BlkResp::default();
+        let mut buffer_a = [0; SECTOR_SIZE];
+        let mut request_b = BlkReq::default();
+        let mut response_b = BlkResp::default();
+        let mut buffer_b = [0; SECTOR_SIZE];
+        let token_a =
+            unsafe { blk.read_blocks_nb(41, &mut request_a, &mut buffer_a, &mut response_a) }
+                .unwrap();
+        let token_b =
+            unsafe { blk.read_blocks_nb(42, &mut request_b, &mut buffer_b, &mut response_b) }
+                .unwrap();
+        assert_ne!(token_a, token_b);
 
+        for (sector, marker) in [(41, b'A'), (42, b'B')] {
             state
                 .lock()
                 .unwrap()
@@ -641,30 +698,33 @@ mod tests {
                         BlkReq {
                             type_: ReqType::In,
                             reserved: 0,
-                            sector: 42
+                            sector,
                         }
                         .as_bytes()
                     );
-
-                    let mut response = vec![0; SECTOR_SIZE];
-                    response[0..9].copy_from_slice(b"Test data");
+                    let mut response = vec![marker; SECTOR_SIZE];
                     response.extend_from_slice(
                         BlkResp {
                             status: RespStatus::OK,
                         }
                         .as_bytes(),
                     );
-
                     response
                 });
-        });
+        }
 
-        // Read a block from the device.
-        let mut buffer = [0; 512];
-        blk.read_blocks(42, &mut buffer).unwrap();
-        assert_eq!(&buffer[0..9], b"Test data");
-
-        handle.join().unwrap();
+        assert_eq!(blk.peek_used(), Some(token_a));
+        unsafe {
+            blk.complete_read_blocks(token_a, &request_a, &mut buffer_a, &mut response_a)
+                .unwrap();
+        }
+        assert_eq!(blk.peek_used(), Some(token_b));
+        unsafe {
+            blk.complete_read_blocks(token_b, &request_b, &mut buffer_b, &mut response_b)
+                .unwrap();
+        }
+        assert_eq!(buffer_a, [b'A'; SECTOR_SIZE]);
+        assert_eq!(buffer_b, [b'B'; SECTOR_SIZE]);
     }
 
     #[test]
@@ -736,8 +796,14 @@ mod tests {
         buffer[0..9].copy_from_slice(b"Test data");
         blk.write_blocks(42, &mut buffer).unwrap();
 
-        // Request to flush should be ignored as the device doesn't support it.
-        blk.flush().unwrap();
+        // A non-blocking flush completes immediately when the feature was not
+        // negotiated and must not consume a queue descriptor.
+        let mut request = BlkReq::default();
+        let mut response = BlkResp::default();
+        assert_eq!(
+            unsafe { blk.flush_nb(&mut request, &mut response) }.unwrap(),
+            None
+        );
 
         handle.join().unwrap();
     }
@@ -803,8 +869,20 @@ mod tests {
                 });
         });
 
-        // Request to flush.
-        blk.flush().unwrap();
+        // Submit and complete a non-blocking flush request. The request and
+        // response stay alive until the descriptor chain is reclaimed.
+        let mut request = BlkReq::default();
+        let mut response = BlkResp::default();
+        let token = unsafe { blk.flush_nb(&mut request, &mut response) }
+            .unwrap()
+            .expect("FLUSH feature was negotiated");
+        while blk.peek_used() != Some(token) {
+            thread::yield_now();
+        }
+        unsafe {
+            blk.complete_flush(token, &mut request, &mut response)
+                .unwrap();
+        }
 
         handle.join().unwrap();
     }
