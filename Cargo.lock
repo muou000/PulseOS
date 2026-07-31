@@ -357,6 +357,7 @@ dependencies = [
  "cfg-if",
  "chrono",
  "ext4plus",
+ "futures-util",
  "heapless 0.9.3",
  "intrusive-collections",
  "kspin",

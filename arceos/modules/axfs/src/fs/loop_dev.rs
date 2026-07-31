@@ -1,7 +1,10 @@
 use alloc::{boxed::Box, sync::Arc};
 use core::sync::atomic::{AtomicU64, Ordering};
+
+use axdriver::prelude::{
+    AsyncBlockDriverOps, BaseDriverOps, BlockDriverOps, DevError, DevResult, DeviceType,
+};
 use spin::Mutex;
-use axdriver::prelude::{AsyncBlockDriverOps, BaseDriverOps, BlockDriverOps, DeviceType, DevResult, DevError};
 
 pub struct LoopDeviceState {
     pub backing: Mutex<Option<Arc<crate::highlevel::File>>>,
@@ -20,8 +23,14 @@ impl LoopDeviceState {
 }
 
 pub static LOOP_DEVICES: [LoopDeviceState; 8] = [
-    LoopDeviceState::new(), LoopDeviceState::new(), LoopDeviceState::new(), LoopDeviceState::new(),
-    LoopDeviceState::new(), LoopDeviceState::new(), LoopDeviceState::new(), LoopDeviceState::new(),
+    LoopDeviceState::new(),
+    LoopDeviceState::new(),
+    LoopDeviceState::new(),
+    LoopDeviceState::new(),
+    LoopDeviceState::new(),
+    LoopDeviceState::new(),
+    LoopDeviceState::new(),
+    LoopDeviceState::new(),
 ];
 
 pub struct LoopBlockDevice {
@@ -89,12 +98,8 @@ impl BlockDriverOps for LoopBlockDevice {
     }
 }
 
-/// `LoopBlockDevice` has no real DMA/interrupt path — its I/O goes through
-/// `axfs::highlevel::File::read_at` / `write_at` which already use
-/// `axtask::future::block_on`. We provide the trait so the unified
-/// `dyn DynAsyncBlockDriverOps + Send + Sync` handle accepts loop devices
-/// alongside `VirtIoBlkDevWrapper`. The returned future is **immediately
-/// ready**, matching the wrapper's semantics in `SharedBlockDevice`.
+/// Loop I/O delegates to the backing file future directly. This preserves the
+/// same suspension points as a regular VFS request without nesting `block_on`.
 impl AsyncBlockDriverOps for LoopBlockDevice {
     type ReadFuture<'a>
         = core::pin::Pin<Box<dyn core::future::Future<Output = DevResult> + Send + 'a>>
@@ -104,20 +109,42 @@ impl AsyncBlockDriverOps for LoopBlockDevice {
         = core::pin::Pin<Box<dyn core::future::Future<Output = DevResult> + Send + 'a>>
     where
         Self: 'a;
+    type FlushFuture<'a>
+        = core::pin::Pin<Box<dyn core::future::Future<Output = DevResult> + Send + 'a>>
+    where
+        Self: 'a;
 
-    fn read_block_async<'a>(
-        &'a mut self,
-        block_id: u64,
-        buf: &'a mut [u8],
-    ) -> Self::ReadFuture<'a> {
-        Box::pin(async move { self.read_block(block_id, buf) })
+    fn read_block_async<'a>(&'a self, block_id: u64, buf: &'a mut [u8]) -> Self::ReadFuture<'a> {
+        Box::pin(async move {
+            let file = LOOP_DEVICES[self.id].backing.lock().as_ref().cloned();
+            let Some(file) = file else {
+                return Err(DevError::BadState);
+            };
+            let offset = block_id * self.block_size() as u64;
+            file.read_at(buf, offset).await.map_err(|_| DevError::Io)?;
+            Ok(())
+        })
     }
 
-    fn write_block_async<'a>(
-        &'a mut self,
-        block_id: u64,
-        buf: &'a [u8],
-    ) -> Self::WriteFuture<'a> {
-        Box::pin(async move { self.write_block(block_id, buf) })
+    fn write_block_async<'a>(&'a self, block_id: u64, buf: &'a [u8]) -> Self::WriteFuture<'a> {
+        Box::pin(async move {
+            let file = LOOP_DEVICES[self.id].backing.lock().as_ref().cloned();
+            let Some(file) = file else {
+                return Err(DevError::BadState);
+            };
+            let offset = block_id * self.block_size() as u64;
+            file.write_at(buf, offset).await.map_err(|_| DevError::Io)?;
+            Ok(())
+        })
+    }
+
+    fn flush_async(&self) -> Self::FlushFuture<'_> {
+        Box::pin(async move {
+            let file = LOOP_DEVICES[self.id].backing.lock().as_ref().cloned();
+            if let Some(file) = file {
+                file.sync(false).await.map_err(|_| DevError::Io)?;
+            }
+            Ok(())
+        })
     }
 }
