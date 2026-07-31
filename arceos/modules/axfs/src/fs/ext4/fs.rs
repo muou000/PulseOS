@@ -34,7 +34,6 @@ pub struct Ext4Filesystem {
     deletion_generation: AtomicU64,
     deletion_worker_running: AtomicBool,
     deletion_processing: async_lock::Mutex<()>,
-    pub(super) directory_mutation: async_lock::Mutex<()>,
 }
 
 impl Ext4Filesystem {
@@ -61,7 +60,7 @@ impl Ext4Filesystem {
             return Err(axfs_ng_vfs::VfsError::InvalidInput);
         }
         let block_size = 1024usize << log_block_size;
-        disk.set_block_size(block_size);
+        disk.set_block_size(block_size).await;
 
         let ext4 = match Ext4::load_with_writer(
             Box::new(Ext4DiskWrapper(disk.clone())),
@@ -102,7 +101,6 @@ impl Ext4Filesystem {
             deletion_generation: AtomicU64::new(0),
             deletion_worker_running: AtomicBool::new(false),
             deletion_processing: async_lock::Mutex::new(()),
-            directory_mutation: async_lock::Mutex::new(()),
         });
         let root_dir = DirEntry::new_dir(
             |this| DirNode::new(Inode::new(fs.clone(), ROOT_INODE, Some(this))),
@@ -112,10 +110,24 @@ impl Ext4Filesystem {
         Ok(Filesystem::new(fs))
     }
 
-    pub(super) fn flush_storage(&self) -> VfsResult<()> {
+    pub(super) async fn flush_storage(&self) -> VfsResult<()> {
         self.disk_flusher
             .flush_disk()
+            .await
             .map_err(|_| axfs_ng_vfs::VfsError::Io)
+    }
+
+    pub(super) async fn flush_inode(&self, ino: u32) -> VfsResult<()> {
+        // Owner-scoped writeback also includes unowned blocks, covering direct
+        // write_offset callers which do not run inside an inode write scope.
+        self.disk_flusher
+            .flush_owner(ino as u64)
+            .await
+            .map_err(|_| axfs_ng_vfs::VfsError::Io)
+    }
+
+    pub(super) fn write_scope(&self, owners: &[u64]) -> crate::disk::DiskWriteScope<'_> {
+        crate::disk::DiskWriteScope::new(self.disk_flusher.as_ref(), owners)
     }
 
     pub(super) fn queue_deletion(self: &Arc<Self>, ino: u32) {
@@ -192,8 +204,10 @@ impl Ext4Filesystem {
                                 still_active
                             };
                             if !has_other_active {
+                                let mut write_scope = self.write_scope(&[ino as u64]);
                                 log::debug!("ext4: deferred deleting unlinked file (ino {})", ino);
-                                if let Err(e) = self.inner.delete_file(inode).await {
+                                if let Err(e) = write_scope.run(self.inner.delete_file(inode)).await
+                                {
                                     log::error!(
                                         "ext4: failed to delete unlinked file (ino {}): {:?}",
                                         ino,
@@ -273,6 +287,6 @@ impl FilesystemOps for Ext4Filesystem {
 
     async fn flush(&self) -> VfsResult<()> {
         self.process_pending_deletions().await;
-        self.flush_storage()
+        self.flush_storage().await
     }
 }

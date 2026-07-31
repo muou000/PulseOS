@@ -51,7 +51,10 @@ pub fn syscall_handler(tf: &mut TrapFrame, syscall_num: usize) -> isize {
         args[4],
         args[5]
     );
-    let ret = syscall_dispatcher(tf, syscall_num, args, process.as_ref());
+    let ret = {
+        let _irq_guard = pulse_core::trap::TrapIrqEnableGuard::new();
+        syscall_dispatcher(tf, syscall_num, args, process.as_ref())
+    };
     thread.exit_if_exec_requested();
     axlog::debug!(
         "Syscall ret: pid={} exe={} tid={} id={} ret={}",

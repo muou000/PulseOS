@@ -1760,26 +1760,11 @@ pub fn sys_fsync(fd: usize) -> isize {
 
 pub fn sys_sync() -> isize {
     axlog::debug!("sys_sync: global flush");
-    let procs = pulse_core::task::processes_snapshot();
-
-    let mut unique_objects = alloc::collections::BTreeMap::new();
-
-    for proc in procs {
-        for entry in proc.fd_entries_snapshot() {
-            let ptr = alloc::sync::Arc::as_ptr(&entry.object) as *const () as usize;
-            unique_objects
-                .entry(ptr)
-                .or_insert_with(|| entry.object.clone());
-        }
-    }
-
-    for object in unique_objects.into_values() {
-        let _ = object.flush();
-    }
-
+    // The filesystem registry already owns every dirty file cache and flushes
+    // each mounted filesystem exactly once. Walking every process descriptor
+    // first caused repeated inode-wide and disk-wide flushes, while the final
+    // disk registry pass repeated the same ext4 checkpoint again.
     let _ = axfs::flush_all_filesystems();
-    let _ = axfs::flush_all_disks();
-
     0
 }
 

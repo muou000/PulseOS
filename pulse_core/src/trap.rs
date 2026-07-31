@@ -8,6 +8,35 @@ use axhal::{
 };
 use memory_addr::VirtAddr;
 
+/// Restores interrupt delivery while a user-originated trap runs a sleepable
+/// slow path, then returns to the IRQ-disabled trap-exit contract.
+#[must_use]
+pub struct TrapIrqEnableGuard {
+    restore_disabled: bool,
+    _not_send_or_sync: core::marker::PhantomData<*mut ()>,
+}
+
+impl TrapIrqEnableGuard {
+    pub fn new() -> Self {
+        let restore_disabled = !axhal::asm::irqs_enabled();
+        if restore_disabled {
+            axhal::asm::enable_irqs();
+        }
+        Self {
+            restore_disabled,
+            _not_send_or_sync: core::marker::PhantomData,
+        }
+    }
+}
+
+impl Drop for TrapIrqEnableGuard {
+    fn drop(&mut self) {
+        if self.restore_disabled {
+            axhal::asm::disable_irqs();
+        }
+    }
+}
+
 #[register_trap_handler(ILLEGAL_INSTRUCTION)]
 fn handle_illegal_instruction(tf: &mut TrapFrame, _vaddr: usize, is_user: bool) -> bool {
     if is_user {
@@ -144,7 +173,11 @@ fn handle_page_fault(
         }
     }
 
-    let fault_error = match proc.handle_page_fault(vaddr, access_flags) {
+    let fault_result = {
+        let _irq_guard = is_user.then(TrapIrqEnableGuard::new);
+        proc.handle_page_fault(vaddr, access_flags)
+    };
+    let fault_error = match fault_result {
         Ok(true) => {
             if is_user {
                 let leave_ns = axhal::time::monotonic_time_nanos() as u64;
