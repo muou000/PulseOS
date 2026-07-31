@@ -852,6 +852,13 @@ mod tests {
     }
 
     #[test]
+    fn cold_fault_is_capped_below_the_sequential_window() {
+        let mut state = FileReadAheadState::default();
+        assert_eq!(state.plan(3, 8), COLD_FILE_FAULT_AROUND_PAGES);
+        assert_eq!(state.plan(3 + COLD_FILE_FAULT_AROUND_PAGES as u32, 8), 8);
+    }
+
+    #[test]
     fn readahead_tracks_short_result_at_mapping_end() {
         let mut state = FileReadAheadState::default();
         assert_eq!(state.plan(7, 2), 2);

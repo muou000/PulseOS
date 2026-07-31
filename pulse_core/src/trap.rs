@@ -13,6 +13,7 @@ use memory_addr::VirtAddr;
 #[must_use]
 pub struct TrapIrqEnableGuard {
     restore_disabled: bool,
+    _not_send_or_sync: core::marker::PhantomData<*mut ()>,
 }
 
 impl TrapIrqEnableGuard {
@@ -21,7 +22,10 @@ impl TrapIrqEnableGuard {
         if restore_disabled {
             axhal::asm::enable_irqs();
         }
-        Self { restore_disabled }
+        Self {
+            restore_disabled,
+            _not_send_or_sync: core::marker::PhantomData,
+        }
     }
 }
 

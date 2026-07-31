@@ -119,17 +119,16 @@ struct FlushingGuard<'a, D: BlockDriverOps> {
 }
 
 enum ReadRangeGuards<'a> {
-    One(async_lock::RwLockReadGuard<'a, ()>),
+    One {
+        _guard: async_lock::RwLockReadGuard<'a, ()>,
+    },
     Many(Vec<async_lock::RwLockReadGuard<'a, ()>>),
 }
 
 impl ReadRangeGuards<'_> {
     fn len(&self) -> usize {
         match self {
-            Self::One(guard) => {
-                let _ = &**guard;
-                1
-            }
+            Self::One { .. } => 1,
             Self::Many(guards) => guards.len(),
         }
     }
@@ -167,7 +166,8 @@ impl<D: AsyncBlockDriverOps + Clone + 'static> crate::disk::DiskFlushable for Ex
 
         let first_error = self.flush_batches(batches).await;
 
-        let flush_result = self.dev.lock().clone().flush_async().await;
+        let dev = self.dev.lock().clone();
+        let flush_result = dev.flush_async().await;
         if first_error.is_none() && flush_result.is_ok() {
             self.flushed_generation
                 .store(target_generation, Ordering::Release);
@@ -200,7 +200,8 @@ impl<D: AsyncBlockDriverOps + Clone + 'static> crate::disk::DiskFlushable for Ex
         };
 
         let first_error = self.flush_batches(batches).await;
-        let flush_result = self.dev.lock().clone().flush_async().await;
+        let dev = self.dev.lock().clone();
+        let flush_result = dev.flush_async().await;
         if first_error.is_none() && flush_result.is_ok() {
             let mut dirty_owners = self.dirty_owners.lock();
             for (offset, sequence) in owner_snapshot {
@@ -398,7 +399,7 @@ impl<D: AsyncBlockDriverOps + Clone + 'static> Ext4Disk<D> {
             } else {
                 lock.read().await
             };
-            return ReadRangeGuards::One(guard);
+            return ReadRangeGuards::One { _guard: guard };
         }
 
         let indices = self.stripe_indices(offset, len);
@@ -511,9 +512,7 @@ impl<D: AsyncBlockDriverOps + Clone + 'static> Ext4Disk<D> {
             .lock()
             .iter()
             .filter_map(|(&offset, state)| {
-                state
-                    .owners
-                    .contains(&owner)
+                (state.owners.is_empty() || state.owners.contains(&owner))
                     .then_some((offset, state.sequence))
             })
             .collect()
@@ -1101,9 +1100,19 @@ impl<D: AsyncBlockDriverOps + Clone + 'static> Ext4Disk<D> {
 
     pub async fn set_block_size(&self, size: usize) {
         let _io_guards = self.lock_all_write_stripes().await;
+        let mut cache = self.block_cache.lock();
+        assert!(
+            cache.iter().all(|(_, block)| !block.dirty),
+            "set_block_size must not discard dirty blocks"
+        );
+        assert!(
+            self.flushing_evicted.lock().is_empty(),
+            "set_block_size must not discard evicted writes"
+        );
+        cache.clear();
+        self.dirty_owners.lock().clear();
         self.block_size
             .store(size, core::sync::atomic::Ordering::Relaxed);
-        self.block_cache.lock().clear();
     }
 }
 

@@ -156,6 +156,12 @@ pub(crate) struct DiskWriteScope<'a> {
     scope_id: u64,
 }
 
+#[derive(Clone, Copy)]
+pub(crate) struct DiskWriteScopeHandle<'a> {
+    disk: &'a dyn DiskFlushable,
+    scope_id: u64,
+}
+
 struct DiskWritePollGuard<'a> {
     disk: &'a dyn DiskFlushable,
     scope_id: u64,
@@ -173,11 +179,14 @@ impl<'a> DiskWriteScope<'a> {
         Self { disk, scope_id }
     }
 
-    pub(crate) fn include_owner(&self, owner: u64) {
-        self.disk.include_write_owner(self.scope_id, owner);
+    pub(crate) fn handle(&self) -> DiskWriteScopeHandle<'a> {
+        DiskWriteScopeHandle {
+            disk: self.disk,
+            scope_id: self.scope_id,
+        }
     }
 
-    pub(crate) async fn run<F: core::future::Future>(&self, future: F) -> F::Output {
+    pub(crate) async fn run<F: core::future::Future>(&mut self, future: F) -> F::Output {
         let mut future = core::pin::pin!(future);
         core::future::poll_fn(|cx| {
             self.disk.enter_write_scope(self.scope_id);
@@ -188,6 +197,12 @@ impl<'a> DiskWriteScope<'a> {
             core::future::Future::poll(future.as_mut(), cx)
         })
         .await
+    }
+}
+
+impl DiskWriteScopeHandle<'_> {
+    pub(crate) fn include_owner(&self, owner: u64) {
+        self.disk.include_write_owner(self.scope_id, owner);
     }
 }
 
@@ -344,10 +359,16 @@ impl<D: AsyncBlockDriverOps + Clone + 'static> SeekableDisk<D> {
 
     fn read_partial(&mut self, buf: &mut &mut [u8]) -> DevResult<usize> {
         self.flush()?;
+        let (block_id, mut read_buffer) = {
+            let mut inner = self.inner.lock();
+            (inner.block_id, mem::take(&mut inner.read_buffer))
+        };
+        let mut dev = self.dev.lock().clone();
+        let read_result = dev.read_block(block_id, &mut read_buffer);
         let mut inner = self.inner.lock();
-        self.dev
-            .lock()
-            .read_block(inner.block_id, &mut inner.read_buffer)?;
+        inner.read_buffer = read_buffer;
+        read_result?;
+        debug_assert_eq!(inner.block_id, block_id);
 
         let offset = inner.offset;
         let data = &inner.read_buffer[offset..];
@@ -373,10 +394,12 @@ impl<D: AsyncBlockDriverOps + Clone + 'static> SeekableDisk<D> {
         if buf.len() >= self.block_size() {
             let blocks = buf.len() >> self.block_size_log2;
             let length = blocks << self.block_size_log2;
+            let block_id = self.inner.lock().block_id;
+            let data = take_mut(&mut buf, length);
+            let mut dev = self.dev.lock().clone();
+            dev.read_block(block_id, data)?;
             let mut inner = self.inner.lock();
-            self.dev
-                .lock()
-                .read_block(inner.block_id, take_mut(&mut buf, length))?;
+            debug_assert_eq!(inner.block_id, block_id);
             inner.block_id += blocks as u64;
             read += length;
         }
@@ -388,14 +411,22 @@ impl<D: AsyncBlockDriverOps + Clone + 'static> SeekableDisk<D> {
     }
 
     fn write_partial(&mut self, buf: &mut &[u8]) -> DevResult<usize> {
-        let mut inner = self.inner.lock();
-        if !inner.write_buffer_dirty {
-            self.dev
-                .lock()
-                .read_block(inner.block_id, &mut inner.write_buffer)?;
+        let pending_read = {
+            let mut inner = self.inner.lock();
+            (!inner.write_buffer_dirty)
+                .then(|| (inner.block_id, mem::take(&mut inner.write_buffer)))
+        };
+        if let Some((block_id, mut write_buffer)) = pending_read {
+            let mut dev = self.dev.lock().clone();
+            let read_result = dev.read_block(block_id, &mut write_buffer);
+            let mut inner = self.inner.lock();
+            inner.write_buffer = write_buffer;
+            read_result?;
+            debug_assert_eq!(inner.block_id, block_id);
             inner.write_buffer_dirty = true;
         }
 
+        let mut inner = self.inner.lock();
         let offset = inner.offset;
         let data = &mut inner.write_buffer[offset..];
         let length = buf.len().min(data.len());
@@ -423,10 +454,12 @@ impl<D: AsyncBlockDriverOps + Clone + 'static> SeekableDisk<D> {
         if buf.len() >= self.block_size() {
             let blocks = buf.len() >> self.block_size_log2;
             let length = blocks << self.block_size_log2;
+            let block_id = self.inner.lock().block_id;
+            let data = take(&mut buf, length);
+            let mut dev = self.dev.lock().clone();
+            dev.write_block(block_id, data)?;
             let mut inner = self.inner.lock();
-            self.dev
-                .lock()
-                .write_block(inner.block_id, take(&mut buf, length))?;
+            debug_assert_eq!(inner.block_id, block_id);
             inner.block_id += blocks as u64;
             written += length;
         }

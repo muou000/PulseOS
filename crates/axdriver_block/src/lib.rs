@@ -11,7 +11,7 @@ pub mod ramdisk;
 #[cfg(feature = "bcm2835-sdhci")]
 pub mod bcm2835sdhci;
 
-use alloc::{boxed::Box, sync::Arc, vec::Vec};
+use alloc::{boxed::Box, collections::BTreeMap, sync::Arc};
 use core::{
     any::Any,
     ptr::NonNull,
@@ -36,7 +36,8 @@ struct OwnedReadBufferRange {
     _owner: Arc<dyn Any + Send + Sync>,
 }
 
-static OWNED_READ_BUFFERS: Mutex<Vec<OwnedReadBufferEntry>> = Mutex::new(Vec::new());
+static OWNED_READ_BUFFERS: Mutex<BTreeMap<usize, OwnedReadBufferEntry>> =
+    Mutex::new(BTreeMap::new());
 static OWNED_READ_BUFFER_COUNT: AtomicUsize = AtomicUsize::new(0);
 static NEXT_OWNED_READ_BUFFER_ID: AtomicU64 = AtomicU64::new(1);
 
@@ -49,13 +50,17 @@ static NEXT_OWNED_READ_BUFFER_ID: AtomicU64 = AtomicU64::new(1);
 /// backing allocation early.
 pub struct OwnedReadBufferRegistration {
     id: u64,
+    start: usize,
 }
 
 impl Drop for OwnedReadBufferRegistration {
     fn drop(&mut self) {
         let mut buffers = OWNED_READ_BUFFERS.lock();
-        if let Some(index) = buffers.iter().position(|entry| entry.id == self.id) {
-            buffers.swap_remove(index);
+        if buffers
+            .get(&self.start)
+            .is_some_and(|entry| entry.id == self.id)
+        {
+            buffers.remove(&self.start);
             OWNED_READ_BUFFER_COUNT.fetch_sub(1, Ordering::Release);
         }
     }
@@ -140,29 +145,37 @@ where
     let start = start.as_ptr() as usize;
     let end = start.checked_add(len).ok_or(DevError::InvalidParam)?;
     let mut buffers = OWNED_READ_BUFFERS.lock();
-    if buffers
-        .iter()
-        .any(|entry| start < entry.range.end && entry.range.start < end)
-    {
+    let overlaps_predecessor = buffers
+        .range(..=start)
+        .next_back()
+        .is_some_and(|(_, entry)| start < entry.range.end);
+    let overlaps_successor = buffers
+        .range(start..)
+        .next()
+        .is_some_and(|(_, entry)| entry.range.start < end);
+    if overlaps_predecessor || overlaps_successor {
         return Err(DevError::ResourceBusy);
     }
     let id = NEXT_OWNED_READ_BUFFER_ID.fetch_add(1, Ordering::Relaxed);
     if id == 0 {
         return Err(DevError::BadState);
     }
-    buffers.push(OwnedReadBufferEntry {
-        id,
-        range: Arc::new(OwnedReadBufferRange {
-            start,
-            end,
-            claim_start: AtomicUsize::new(0),
-            claim_len: AtomicUsize::new(0),
-            claimed: AtomicBool::new(false),
-            _owner: owner,
-        }),
-    });
+    buffers.insert(
+        start,
+        OwnedReadBufferEntry {
+            id,
+            range: Arc::new(OwnedReadBufferRange {
+                start,
+                end,
+                claim_start: AtomicUsize::new(0),
+                claim_len: AtomicUsize::new(0),
+                claimed: AtomicBool::new(false),
+                _owner: owner,
+            }),
+        },
+    );
     OWNED_READ_BUFFER_COUNT.fetch_add(1, Ordering::Release);
-    Ok(OwnedReadBufferRegistration { id })
+    Ok(OwnedReadBufferRegistration { id, start })
 }
 
 /// Claims a registered range for one direct block read.
@@ -181,8 +194,10 @@ pub fn claim_owned_read_buffer(buffer: NonNull<[u8]>) -> Option<OwnedReadBufferL
     let end = start.checked_add(len)?;
     let buffers = OWNED_READ_BUFFERS.lock();
     let entry = buffers
-        .iter()
-        .find(|entry| entry.range.start <= start && end <= entry.range.end)?;
+        .range(..=start)
+        .next_back()
+        .map(|(_, entry)| entry)
+        .filter(|entry| end <= entry.range.end)?;
     if entry
         .range
         .claimed
@@ -430,6 +445,26 @@ mod tests {
             Err(DevError::ResourceBusy)
         ));
         drop(registration);
+    }
+
+    #[test]
+    fn ordered_registry_checks_successors_and_allows_adjacent_ranges() {
+        let (owner, ptr, _) = test_owner(192);
+        let upper = NonNull::new(unsafe { ptr.as_ptr().add(128) }).unwrap();
+        let upper_registration = unsafe {
+            register_owned_read_buffer(upper, 64, owner.clone()).expect("registration failed")
+        };
+        let overlaps_successor = NonNull::new(unsafe { ptr.as_ptr().add(96) }).unwrap();
+        assert!(matches!(
+            unsafe { register_owned_read_buffer(overlaps_successor, 64, owner.clone()) },
+            Err(DevError::ResourceBusy)
+        ));
+
+        let lower_registration = unsafe {
+            register_owned_read_buffer(ptr, 128, owner).expect("adjacent registration failed")
+        };
+        drop(lower_registration);
+        drop(upper_registration);
     }
 
     #[test]

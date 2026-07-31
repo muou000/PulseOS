@@ -118,6 +118,8 @@ impl Ext4Filesystem {
     }
 
     pub(super) async fn flush_inode(&self, ino: u32) -> VfsResult<()> {
+        // Owner-scoped writeback also includes unowned blocks, covering direct
+        // write_offset callers which do not run inside an inode write scope.
         self.disk_flusher
             .flush_owner(ino as u64)
             .await
@@ -202,7 +204,7 @@ impl Ext4Filesystem {
                                 still_active
                             };
                             if !has_other_active {
-                                let write_scope = self.write_scope(&[ino as u64]);
+                                let mut write_scope = self.write_scope(&[ino as u64]);
                                 log::debug!("ext4: deferred deleting unlinked file (ino {})", ino);
                                 if let Err(e) = write_scope.run(self.inner.delete_file(inode)).await
                                 {

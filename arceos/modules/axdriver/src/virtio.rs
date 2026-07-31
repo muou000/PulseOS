@@ -815,12 +815,10 @@ cfg_if! {
             ) -> Option<CompletionWake<H>> {
                 let token = self.device.inner.peek_used()?;
                 let Some(slot) = self.pending.get_mut(token as usize) else {
-                    axlog::error!("virtio-blk completed out-of-range token {}", token);
-                    return None;
+                    panic!("virtio-blk completed out-of-range token {}", token);
                 };
                 let Some((request_id, mut request)) = slot.take() else {
-                    axlog::error!("virtio-blk completed unknown token {}", token);
-                    return None;
+                    panic!("virtio-blk completed unknown token {}", token);
                 };
                 let direct_read = self.pending_direct_reads[token as usize].as_mut();
                 request.result = Some(request.complete(&mut self.device, token, direct_read));

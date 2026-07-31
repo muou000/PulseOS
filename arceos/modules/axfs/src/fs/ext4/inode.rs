@@ -424,26 +424,39 @@ impl Inode {
         }
     }
 
-    async fn lock_directory_pair<'a>(
-        &'a self,
-        other: &'a Self,
-    ) -> (
-        async_lock::MutexGuard<'a, ()>,
-        Option<async_lock::MutexGuard<'a, ()>>,
-    ) {
-        if self.ino == other.ino {
-            return (self.mutation_lock.lock().await, None);
-        }
+    async fn lock_mutation_set<'a>(inodes: &[&'a Self]) -> Vec<async_lock::MutexGuard<'a, ()>> {
+        let mut ordered = inodes.to_vec();
+        ordered.sort_unstable_by_key(|inode| (inode.ino, *inode as *const Self as usize));
+        ordered.dedup_by(|left, right| core::ptr::eq(*left, *right));
 
-        if self.ino < other.ino {
-            let first = self.mutation_lock.lock().await;
-            let second = other.mutation_lock.lock().await;
-            (first, Some(second))
-        } else {
-            let first = other.mutation_lock.lock().await;
-            let second = self.mutation_lock.lock().await;
-            (first, Some(second))
+        let mut guards = Vec::with_capacity(ordered.len());
+        for inode in ordered {
+            guards.push(inode.mutation_lock.lock().await);
         }
+        guards
+    }
+
+    fn mark_unlinked_and_has_external_refs(local: &Arc<Self>) -> bool {
+        let mut active = local.fs.active_inodes.lock();
+        let mut has_external = false;
+        if let Some(list) = active.get_mut(&local.ino) {
+            list.retain(|weak| weak.strong_count() > 0);
+            for weak in list.iter() {
+                let Some(inode) = weak.upgrade() else {
+                    continue;
+                };
+                let is_local = Arc::ptr_eq(&inode, local);
+                let is_external = !is_local || Arc::strong_count(&inode) > 2;
+                if is_external {
+                    inode.is_unlinked.store(true, Ordering::Relaxed);
+                    has_external = true;
+                }
+            }
+        }
+        if !has_external {
+            active.remove(&local.ino);
+        }
+        has_external
     }
 
     fn entry_from_cached_lookup(
@@ -655,7 +668,7 @@ impl NodeOps for Inode {
         self.validate_inode_num(&fs, self.ino)?;
         let idx = core::num::NonZeroU32::new(self.ino).ok_or(VfsError::InvalidData)?;
         let _mutation_guard = self.mutation_lock.lock().await;
-        let write_scope = self.fs.write_scope(&[self.ino as u64]);
+        let mut write_scope = self.fs.write_scope(&[self.ino as u64]);
         write_scope
             .run(async {
                 self.invalidate_metadata();
@@ -735,7 +748,7 @@ impl FileNodeOps for Inode {
         self.validate_inode_num(&fs, self.ino)?;
         let idx = core::num::NonZeroU32::new(self.ino).ok_or(VfsError::InvalidData)?;
         let _mutation_guard = self.mutation_lock.lock().await;
-        let write_scope = self.fs.write_scope(&[self.ino as u64]);
+        let mut write_scope = self.fs.write_scope(&[self.ino as u64]);
         write_scope
             .run(async {
                 self.invalidate_metadata();
@@ -758,7 +771,7 @@ impl FileNodeOps for Inode {
         self.validate_inode_num(&fs, self.ino)?;
         let idx = core::num::NonZeroU32::new(self.ino).ok_or(VfsError::InvalidData)?;
         let _mutation_guard = self.mutation_lock.lock().await;
-        let write_scope = self.fs.write_scope(&[self.ino as u64]);
+        let mut write_scope = self.fs.write_scope(&[self.ino as u64]);
         write_scope
             .run(async {
                 self.invalidate_metadata();
@@ -781,7 +794,7 @@ impl FileNodeOps for Inode {
         self.validate_inode_num(&fs, self.ino)?;
         let idx = core::num::NonZeroU32::new(self.ino).ok_or(VfsError::InvalidData)?;
         let _mutation_guard = self.mutation_lock.lock().await;
-        let write_scope = self.fs.write_scope(&[self.ino as u64]);
+        let mut write_scope = self.fs.write_scope(&[self.ino as u64]);
         write_scope
             .run(async {
                 self.invalidate_metadata();
@@ -806,7 +819,7 @@ impl FileNodeOps for Inode {
         self.validate_inode_num(&fs, self.ino)?;
         let idx = core::num::NonZeroU32::new(self.ino).ok_or(VfsError::InvalidData)?;
         let _mutation_guard = self.mutation_lock.lock().await;
-        let write_scope = self.fs.write_scope(&[self.ino as u64]);
+        let mut write_scope = self.fs.write_scope(&[self.ino as u64]);
         write_scope
             .run(async {
                 self.invalidate_metadata();
@@ -880,28 +893,22 @@ impl DirNodeOps for Inode {
         if let Some(cached) = self.dir_cache.get_lookup(name) {
             return self.entry_from_cached_lookup(name, cached);
         }
+        let generation = self.dir_cache.lookup_generation();
 
         if let Some(snapshot) = self.dir_cache.get() {
             let cached = snapshot.lookup(name);
-            self.dir_cache.publish_lookup(
-                self.dir_cache.lookup_generation(),
-                String::from(name),
-                cached,
-            );
+            self.dir_cache
+                .publish_lookup(generation, String::from(name), cached);
             return self.entry_from_cached_lookup(name, cached);
         }
 
         if self.dir_cache.note_uncached_lookup() {
             let snapshot = self.dir_snapshot(fs).await?;
             let cached = snapshot.lookup(name);
-            self.dir_cache.publish_lookup(
-                self.dir_cache.lookup_generation(),
-                String::from(name),
-                cached,
-            );
+            self.dir_cache
+                .publish_lookup(generation, String::from(name), cached);
             return self.entry_from_cached_lookup(name, cached);
         }
-        let generation = self.dir_cache.lookup_generation();
 
         let (_, dir_inode) = self.read_inode_cached(fs, self.ino).await?;
         let dir = ext4plus::dir::Dir::open_inode(&fs, dir_inode).map_err(into_vfs_err)?;
@@ -976,12 +983,13 @@ impl DirNodeOps for Inode {
             flags: ext4plus::inode::InodeFlags::empty(),
         };
 
-        let write_scope = self.fs.write_scope(&[self.ino as u64]);
+        let mut write_scope = self.fs.write_scope(&[self.ino as u64]);
+        let write_scope_handle = write_scope.handle();
         write_scope
             .run(async {
                 let mut new_inode = fs.create_inode(options).await.map_err(into_vfs_err)?;
                 let new_inode_idx = new_inode.index;
-                write_scope.include_owner(new_inode_idx.get() as u64);
+                write_scope_handle.include_owner(new_inode_idx.get() as u64);
 
                 let entry_res = async {
                     let dir_idx =
@@ -1050,13 +1058,9 @@ impl DirNodeOps for Inode {
         if !Arc::ptr_eq(&self.fs, &child.fs) {
             return Err(VfsError::CrossesDevices);
         }
-        let _directory_guard = self.mutation_lock.lock().await;
-        let _child_guard = if core::ptr::eq(self, child.as_ref()) {
-            None
-        } else {
-            Some(child.mutation_lock.lock().await)
-        };
-        let write_scope = self.fs.write_scope(&[self.ino as u64, child.ino as u64]);
+        let mutation_nodes = [self, child.as_ref()];
+        let _mutation_guards = Self::lock_mutation_set(&mutation_nodes).await;
+        let mut write_scope = self.fs.write_scope(&[self.ino as u64, child.ino as u64]);
         write_scope
             .run(async {
                 let dir_idx = core::num::NonZeroU32::new(self.ino).ok_or(VfsError::InvalidData)?;
@@ -1111,90 +1115,87 @@ impl DirNodeOps for Inode {
     async fn unlink(&self, name: &str) -> VfsResult<()> {
         let fs = &self.fs.inner;
         self.validate_inode_num(&fs, self.ino)?;
-        let _directory_guard = self.mutation_lock.lock().await;
-
         let dir_idx = core::num::NonZeroU32::new(self.ino).ok_or(VfsError::InvalidData)?;
-        let dir_inode = ext4plus::inode::Inode::read(&fs, dir_idx)
-            .await
-            .map_err(into_vfs_err)?;
-        let mut dir = ext4plus::dir::Dir::open_inode(&fs, dir_inode).map_err(into_vfs_err)?;
+        loop {
+            let observation_nodes = [self];
+            let observation_guards = Self::lock_mutation_set(&observation_nodes).await;
+            let observed_dir_inode = ext4plus::inode::Inode::read(&fs, dir_idx)
+                .await
+                .map_err(into_vfs_err)?;
+            let observed_dir =
+                ext4plus::dir::Dir::open_inode(&fs, observed_dir_inode).map_err(into_vfs_err)?;
+            let observed_name =
+                ext4plus::DirEntryName::try_from(name).map_err(|_| VfsError::InvalidInput)?;
+            let observed_child = observed_dir
+                .get_entry(observed_name)
+                .await
+                .map_err(into_vfs_err)?;
+            let observed_child_ino = observed_child.index.get();
+            drop(observation_guards);
 
-        let name_ref =
-            ext4plus::DirEntryName::try_from(name).map_err(|_| VfsError::InvalidInput)?;
-        let child_inode = dir.get_entry(name_ref).await.map_err(into_vfs_err)?;
+            let child = Inode::new(self.fs.clone(), observed_child_ino, None);
+            let mutation_nodes = [self, child.as_ref()];
+            let _mutation_guards = Self::lock_mutation_set(&mutation_nodes).await;
 
-        if child_inode.file_type() == ext4plus::FileType::Directory
-            && self.dir_has_children(&fs, child_inode.index.get()).await?
-        {
-            return Err(VfsError::DirectoryNotEmpty);
-        }
+            let dir_inode = ext4plus::inode::Inode::read(&fs, dir_idx)
+                .await
+                .map_err(into_vfs_err)?;
+            let mut dir = ext4plus::dir::Dir::open_inode(&fs, dir_inode).map_err(into_vfs_err)?;
+            let name_ref =
+                ext4plus::DirEntryName::try_from(name).map_err(|_| VfsError::InvalidInput)?;
+            let child_inode = dir.get_entry(name_ref).await.map_err(into_vfs_err)?;
+            let child_ino = child_inode.index.get();
+            if child_ino != observed_child_ino {
+                continue;
+            }
+            if child_inode.file_type() == ext4plus::FileType::Directory
+                && self.dir_has_children(&fs, child_ino).await?
+            {
+                return Err(VfsError::DirectoryNotEmpty);
+            }
 
-        let child_ino = child_inode.index.get();
-        let is_dir = child_inode.file_type() == ext4plus::FileType::Directory;
-        let child = Inode::new(self.fs.clone(), child_ino, None);
-        let _child_guard = if core::ptr::eq(self, child.as_ref()) {
-            None
-        } else {
-            Some(child.mutation_lock.lock().await)
-        };
-        let write_scope = self.fs.write_scope(&[self.ino as u64, child_ino as u64]);
-        write_scope
-            .run(async {
-                self.invalidate_metadata();
-                invalidate_inode_metadata_cache(&self.fs, child_ino);
-                let child_inode = dir
-                    .unlink(name_ref, child_inode)
-                    .await
-                    .map_err(into_vfs_err);
-                self.invalidate_metadata();
-                invalidate_inode_metadata_cache(&self.fs, child_ino);
-                if child_inode.is_err() {
-                    self.dir_cache.invalidate();
-                }
-                let child_inode = child_inode?;
-                self.invalidate_snapshot(self.ino);
-                self.dir_cache.update_lookup(String::from(name), None);
-                if is_dir {
-                    invalidate_dir_cache(&self.fs, child_ino);
-                }
-                if child_inode.links_count() == 0 {
-                    let has_other_active = {
-                        let mut active = self.fs.active_inodes.lock();
-                        let mut still_active = false;
-                        if let Some(list) = active.get_mut(&child_ino) {
-                            list.retain(|w| w.strong_count() > 0);
-                            for w in list.iter() {
-                                if let Some(inode) = w.upgrade() {
-                                    inode
-                                        .is_unlinked
-                                        .store(true, core::sync::atomic::Ordering::Relaxed);
-                                }
-                            }
-                            if !list.is_empty() {
-                                still_active = true;
-                            }
-                        }
-                        if !still_active {
-                            active.remove(&child_ino);
-                        }
-                        still_active
-                    };
-                    if !has_other_active {
-                        log::debug!(
-                            "ext4: unlink deleting unlinked file (ino {}) immediately because no \
-                             active references",
-                            child_ino
-                        );
-                        fs.delete_file(child_inode).await.map_err(into_vfs_err)?;
-                        crate::invalidate_file_cache(
-                            Arc::as_ptr(&self.fs) as usize,
-                            child_ino as u64,
-                        );
+            let is_dir = child_inode.file_type() == ext4plus::FileType::Directory;
+            let mut write_scope = self.fs.write_scope(&[self.ino as u64, child_ino as u64]);
+            return write_scope
+                .run(async {
+                    self.invalidate_metadata();
+                    invalidate_inode_metadata_cache(&self.fs, child_ino);
+                    let child_inode = dir
+                        .unlink(name_ref, child_inode)
+                        .await
+                        .map_err(into_vfs_err);
+                    self.invalidate_metadata();
+                    invalidate_inode_metadata_cache(&self.fs, child_ino);
+                    if child_inode.is_err() {
+                        self.dir_cache.invalidate();
                     }
-                }
-                Ok(())
-            })
-            .await
+                    let child_inode = child_inode?;
+                    self.invalidate_snapshot(self.ino);
+                    self.dir_cache.update_lookup(String::from(name), None);
+                    if is_dir {
+                        invalidate_dir_cache(&self.fs, child_ino);
+                    }
+                    if child_inode.links_count() == 0 {
+                        let has_other_active = Self::mark_unlinked_and_has_external_refs(&child);
+                        if !has_other_active {
+                            log::debug!(
+                                "ext4: unlink deleting unlinked file (ino {}) immediately because \
+                                 no active references",
+                                child_ino
+                            );
+                            child.is_unlinked.store(true, Ordering::Relaxed);
+                            fs.delete_file(child_inode).await.map_err(into_vfs_err)?;
+                            child.is_unlinked.store(false, Ordering::Relaxed);
+                            crate::invalidate_file_cache(
+                                Arc::as_ptr(&self.fs) as usize,
+                                child_ino as u64,
+                            );
+                        }
+                    }
+                    Ok(())
+                })
+                .await;
+        }
     }
 
     async fn rename(&self, src_name: &str, dst_dir: &DirNode, dst_name: &str) -> VfsResult<()> {
@@ -1205,182 +1206,198 @@ impl DirNodeOps for Inode {
         let fs = &self.fs.inner;
         self.validate_inode_num(&fs, self.ino)?;
         self.validate_inode_num(&fs, dst_dir.ino)?;
-        let (_first_directory_guard, _second_directory_guard) =
-            self.lock_directory_pair(&dst_dir).await;
-
         let src_dir_idx = core::num::NonZeroU32::new(self.ino).ok_or(VfsError::InvalidData)?;
-        let src_dir_inode = ext4plus::inode::Inode::read(&fs, src_dir_idx)
-            .await
-            .map_err(into_vfs_err)?;
-        let mut src_dir =
-            ext4plus::dir::Dir::open_inode(&fs, src_dir_inode).map_err(into_vfs_err)?;
-
-        let src_name_ref =
-            ext4plus::DirEntryName::try_from(src_name).map_err(|_| VfsError::InvalidInput)?;
-        let mut src_inode = src_dir
-            .get_entry(src_name_ref)
-            .await
-            .map_err(into_vfs_err)?;
-
-        if src_inode.file_type() == ext4plus::FileType::Directory && self.ino != dst_dir.ino {
-            return Err(VfsError::OperationNotSupported);
-        }
-
         let dst_dir_idx = core::num::NonZeroU32::new(dst_dir.ino).ok_or(VfsError::InvalidData)?;
-        let dst_dir_inode = ext4plus::inode::Inode::read(&fs, dst_dir_idx)
-            .await
-            .map_err(into_vfs_err)?;
-        let mut dst_dir_obj =
-            ext4plus::dir::Dir::open_inode(&fs, dst_dir_inode).map_err(into_vfs_err)?;
-        let dst_name_ref =
-            ext4plus::DirEntryName::try_from(dst_name).map_err(|_| VfsError::InvalidInput)?;
+        loop {
+            let observation_nodes = [self, dst_dir.as_ref()];
+            let observation_guards = Self::lock_mutation_set(&observation_nodes).await;
+            let observed_src_dir_inode = ext4plus::inode::Inode::read(&fs, src_dir_idx)
+                .await
+                .map_err(into_vfs_err)?;
+            let observed_src_dir = ext4plus::dir::Dir::open_inode(&fs, observed_src_dir_inode)
+                .map_err(into_vfs_err)?;
+            let observed_src_name =
+                ext4plus::DirEntryName::try_from(src_name).map_err(|_| VfsError::InvalidInput)?;
+            let observed_src_inode = observed_src_dir
+                .get_entry(observed_src_name)
+                .await
+                .map_err(into_vfs_err)?;
+            let observed_src_ino = observed_src_inode.index.get();
 
-        let dst_inode = match dst_dir_obj.get_entry(dst_name_ref).await {
-            Ok(inode) => Some(inode),
-            Err(Ext4Error::NotFound) => None,
-            Err(e) => return Err(into_vfs_err(e)),
-        };
-        if dst_inode
-            .as_ref()
-            .is_some_and(|dst_inode| dst_inode.index == src_inode.index)
-        {
-            return Ok(());
-        }
-        let src_node = Inode::new(self.fs.clone(), src_inode.index.get(), None);
-        let dst_node = dst_inode
-            .as_ref()
-            .map(|inode| Inode::new(self.fs.clone(), inode.index.get(), None));
-        let (_first_child_guard, _second_child_guard) = if let Some(dst_node) = dst_node.as_ref() {
-            src_node.lock_directory_pair(dst_node).await
-        } else {
-            (src_node.mutation_lock.lock().await, None)
-        };
-        let mut write_owners = vec![
-            self.ino as u64,
-            dst_dir.ino as u64,
-            src_inode.index.get() as u64,
-        ];
-        if let Some(dst_inode) = dst_inode.as_ref() {
-            write_owners.push(dst_inode.index.get() as u64);
-        }
-        let write_scope = self.fs.write_scope(&write_owners);
-        write_scope
-            .run(async {
-                if let Some(dst_inode) = dst_inode {
-                    let src_is_dir = src_inode.file_type() == ext4plus::FileType::Directory;
-                    let dst_is_dir = dst_inode.file_type() == ext4plus::FileType::Directory;
-                    if src_is_dir != dst_is_dir {
+            let observed_dst_dir_inode = ext4plus::inode::Inode::read(&fs, dst_dir_idx)
+                .await
+                .map_err(into_vfs_err)?;
+            let observed_dst_dir = ext4plus::dir::Dir::open_inode(&fs, observed_dst_dir_inode)
+                .map_err(into_vfs_err)?;
+            let observed_dst_name =
+                ext4plus::DirEntryName::try_from(dst_name).map_err(|_| VfsError::InvalidInput)?;
+            let observed_dst_ino = match observed_dst_dir.get_entry(observed_dst_name).await {
+                Ok(inode) => Some(inode.index.get()),
+                Err(Ext4Error::NotFound) => None,
+                Err(error) => return Err(into_vfs_err(error)),
+            };
+            drop(observation_guards);
+
+            let src_node = Inode::new(self.fs.clone(), observed_src_ino, None);
+            let dst_node = observed_dst_ino.map(|ino| Inode::new(self.fs.clone(), ino, None));
+            let mut mutation_nodes = vec![self, dst_dir.as_ref(), src_node.as_ref()];
+            if let Some(dst_node) = dst_node.as_ref() {
+                mutation_nodes.push(dst_node.as_ref());
+            }
+            let _mutation_guards = Self::lock_mutation_set(&mutation_nodes).await;
+
+            let src_dir_inode = ext4plus::inode::Inode::read(&fs, src_dir_idx)
+                .await
+                .map_err(into_vfs_err)?;
+            let mut src_dir =
+                ext4plus::dir::Dir::open_inode(&fs, src_dir_inode).map_err(into_vfs_err)?;
+            let src_name_ref =
+                ext4plus::DirEntryName::try_from(src_name).map_err(|_| VfsError::InvalidInput)?;
+            let mut src_inode = src_dir
+                .get_entry(src_name_ref)
+                .await
+                .map_err(into_vfs_err)?;
+
+            let dst_dir_inode = ext4plus::inode::Inode::read(&fs, dst_dir_idx)
+                .await
+                .map_err(into_vfs_err)?;
+            let mut dst_dir_obj =
+                ext4plus::dir::Dir::open_inode(&fs, dst_dir_inode).map_err(into_vfs_err)?;
+            let dst_name_ref =
+                ext4plus::DirEntryName::try_from(dst_name).map_err(|_| VfsError::InvalidInput)?;
+            let dst_inode = match dst_dir_obj.get_entry(dst_name_ref).await {
+                Ok(inode) => Some(inode),
+                Err(Ext4Error::NotFound) => None,
+                Err(error) => return Err(into_vfs_err(error)),
+            };
+            if src_inode.index.get() != observed_src_ino
+                || dst_inode.as_ref().map(|inode| inode.index.get()) != observed_dst_ino
+            {
+                continue;
+            }
+            if dst_inode
+                .as_ref()
+                .is_some_and(|dst_inode| dst_inode.index == src_inode.index)
+            {
+                return Ok(());
+            }
+            if src_inode.file_type() == ext4plus::FileType::Directory && self.ino != dst_dir.ino {
+                return Err(VfsError::OperationNotSupported);
+            }
+
+            let mut write_owners = vec![
+                self.ino as u64,
+                dst_dir.ino as u64,
+                src_inode.index.get() as u64,
+            ];
+            if let Some(dst_inode) = dst_inode.as_ref() {
+                write_owners.push(dst_inode.index.get() as u64);
+            }
+            let mut write_scope = self.fs.write_scope(&write_owners);
+            return write_scope
+                .run(async {
+                    if let Some(dst_inode) = dst_inode {
+                        let src_is_dir = src_inode.file_type() == ext4plus::FileType::Directory;
+                        let dst_is_dir = dst_inode.file_type() == ext4plus::FileType::Directory;
+                        if src_is_dir != dst_is_dir {
+                            if dst_is_dir {
+                                return Err(VfsError::IsADirectory);
+                            } else {
+                                return Err(VfsError::NotADirectory);
+                            }
+                        }
+
+                        if dst_inode.file_type() == ext4plus::FileType::Directory
+                            && self.dir_has_children(&fs, dst_inode.index.get()).await?
+                        {
+                            return Err(VfsError::DirectoryNotEmpty);
+                        }
+
+                        let dst_inode_ino = dst_inode.index.get();
+                        let dst_is_dir = dst_inode.file_type() == ext4plus::FileType::Directory;
+                        dst_dir.invalidate_metadata();
+                        invalidate_inode_metadata_cache(&dst_dir.fs, dst_inode_ino);
+                        let dst_inode = dst_dir_obj
+                            .unlink(dst_name_ref, dst_inode)
+                            .await
+                            .map_err(into_vfs_err);
+                        dst_dir.invalidate_metadata();
+                        invalidate_inode_metadata_cache(&dst_dir.fs, dst_inode_ino);
+                        if dst_inode.is_err() {
+                            dst_dir.dir_cache.invalidate();
+                        }
+                        let dst_inode = dst_inode?;
+                        dst_dir.invalidate_snapshot(dst_dir.ino);
+                        dst_dir
+                            .dir_cache
+                            .update_lookup(String::from(dst_name), None);
                         if dst_is_dir {
-                            return Err(VfsError::IsADirectory);
-                        } else {
-                            return Err(VfsError::NotADirectory);
+                            invalidate_dir_cache(&dst_dir.fs, dst_inode_ino);
+                        }
+                        if dst_inode.links_count() == 0 {
+                            let local_dst = dst_node
+                                .as_ref()
+                                .expect("rename destination lock target disappeared");
+                            let has_other_active =
+                                Self::mark_unlinked_and_has_external_refs(local_dst);
+                            if !has_other_active {
+                                log::debug!(
+                                    "ext4: rename deleting unlinked dst file (ino {}) immediately \
+                                     because no active references",
+                                    dst_inode_ino
+                                );
+                                local_dst.is_unlinked.store(true, Ordering::Relaxed);
+                                fs.delete_file(dst_inode).await.map_err(into_vfs_err)?;
+                                local_dst.is_unlinked.store(false, Ordering::Relaxed);
+                                crate::invalidate_file_cache(
+                                    Arc::as_ptr(&dst_dir.fs) as usize,
+                                    dst_inode_ino as u64,
+                                );
+                            }
                         }
                     }
 
-                    if dst_inode.file_type() == ext4plus::FileType::Directory
-                        && self.dir_has_children(&fs, dst_inode.index.get()).await?
-                    {
-                        return Err(VfsError::DirectoryNotEmpty);
+                    let src_inode_ino = src_inode.index.get();
+                    self.invalidate_metadata();
+                    if dst_dir.ino != self.ino {
+                        dst_dir.invalidate_metadata();
                     }
-
-                    let dst_inode_ino = dst_inode.index.get();
-                    let dst_is_dir = dst_inode.file_type() == ext4plus::FileType::Directory;
-                    dst_dir.invalidate_metadata();
-                    invalidate_inode_metadata_cache(&dst_dir.fs, dst_inode_ino);
-                    let dst_inode = dst_dir_obj
-                        .unlink(dst_name_ref, dst_inode)
+                    invalidate_inode_metadata_cache(&self.fs, src_inode_ino);
+                    let link_result = dst_dir_obj
+                        .link(dst_name_ref, &mut src_inode)
                         .await
                         .map_err(into_vfs_err);
                     dst_dir.invalidate_metadata();
-                    invalidate_inode_metadata_cache(&dst_dir.fs, dst_inode_ino);
-                    if dst_inode.is_err() {
+                    invalidate_inode_metadata_cache(&self.fs, src_inode_ino);
+                    if link_result.is_err() {
                         dst_dir.dir_cache.invalidate();
                     }
-                    let dst_inode = dst_inode?;
+                    link_result?;
                     dst_dir.invalidate_snapshot(dst_dir.ino);
-                    dst_dir
-                        .dir_cache
-                        .update_lookup(String::from(dst_name), None);
-                    if dst_is_dir {
-                        invalidate_dir_cache(&dst_dir.fs, dst_inode_ino);
+                    dst_dir.dir_cache.update_lookup(
+                        String::from(dst_name),
+                        Some(CachedLookupEntry {
+                            inode_num: src_inode_ino,
+                            node_type: into_vfs_type(src_inode.file_type()),
+                        }),
+                    );
+                    self.invalidate_metadata();
+                    let unlink_result = src_dir
+                        .unlink(src_name_ref, src_inode)
+                        .await
+                        .map_err(into_vfs_err);
+                    self.invalidate_metadata();
+                    invalidate_inode_metadata_cache(&self.fs, src_inode_ino);
+                    if unlink_result.is_err() {
+                        self.dir_cache.invalidate();
                     }
-                    if dst_inode.links_count() == 0 {
-                        let has_other_active = {
-                            let mut active = dst_dir.fs.active_inodes.lock();
-                            let mut still_active = false;
-                            if let Some(list) = active.get_mut(&dst_inode_ino) {
-                                list.retain(|w| w.strong_count() > 0);
-                                for w in list.iter() {
-                                    if let Some(inode) = w.upgrade() {
-                                        inode
-                                            .is_unlinked
-                                            .store(true, core::sync::atomic::Ordering::Relaxed);
-                                    }
-                                }
-                                if !list.is_empty() {
-                                    still_active = true;
-                                }
-                            }
-                            if !still_active {
-                                active.remove(&dst_inode_ino);
-                            }
-                            still_active
-                        };
-                        if !has_other_active {
-                            log::debug!(
-                                "ext4: rename deleting unlinked dst file (ino {}) immediately \
-                                 because no active references",
-                                dst_inode_ino
-                            );
-                            fs.delete_file(dst_inode).await.map_err(into_vfs_err)?;
-                            crate::invalidate_file_cache(
-                                Arc::as_ptr(&dst_dir.fs) as usize,
-                                dst_inode_ino as u64,
-                            );
-                        }
-                    }
-                }
-
-                let src_inode_ino = src_inode.index.get();
-                self.invalidate_metadata();
-                if dst_dir.ino != self.ino {
-                    dst_dir.invalidate_metadata();
-                }
-                invalidate_inode_metadata_cache(&self.fs, src_inode_ino);
-                let link_result = dst_dir_obj
-                    .link(dst_name_ref, &mut src_inode)
-                    .await
-                    .map_err(into_vfs_err);
-                dst_dir.invalidate_metadata();
-                invalidate_inode_metadata_cache(&self.fs, src_inode_ino);
-                if link_result.is_err() {
-                    dst_dir.dir_cache.invalidate();
-                }
-                link_result?;
-                dst_dir.invalidate_snapshot(dst_dir.ino);
-                dst_dir.dir_cache.update_lookup(
-                    String::from(dst_name),
-                    Some(CachedLookupEntry {
-                        inode_num: src_inode_ino,
-                        node_type: into_vfs_type(src_inode.file_type()),
-                    }),
-                );
-                self.invalidate_metadata();
-                let unlink_result = src_dir
-                    .unlink(src_name_ref, src_inode)
-                    .await
-                    .map_err(into_vfs_err);
-                self.invalidate_metadata();
-                invalidate_inode_metadata_cache(&self.fs, src_inode_ino);
-                if unlink_result.is_err() {
-                    self.dir_cache.invalidate();
-                }
-                unlink_result?;
-                self.invalidate_snapshot(self.ino);
-                self.dir_cache.update_lookup(String::from(src_name), None);
-                Ok(())
-            })
-            .await
+                    unlink_result?;
+                    self.invalidate_snapshot(self.ino);
+                    self.dir_cache.update_lookup(String::from(src_name), None);
+                    Ok(())
+                })
+                .await;
+        }
     }
 }
 

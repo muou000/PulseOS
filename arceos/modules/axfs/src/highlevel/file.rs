@@ -887,6 +887,11 @@ impl CachedFileShared {
     }
 
     fn page_fill_lock_indices(&self, pn: u32, page_count: usize) -> VfsResult<Vec<usize>> {
+        if page_count >= PAGE_ACCESS_LOCK_STRIPES {
+            let last_offset = u32::try_from(page_count - 1).map_err(|_| VfsError::StorageFull)?;
+            pn.checked_add(last_offset).ok_or(VfsError::StorageFull)?;
+            return Ok((0..PAGE_ACCESS_LOCK_STRIPES).collect());
+        }
         let mut indices = Vec::with_capacity(page_count);
         for offset in 0..page_count {
             let offset = u32::try_from(offset).map_err(|_| VfsError::StorageFull)?;
@@ -1078,14 +1083,22 @@ impl CachedFileShared {
         let mut first_error = None;
         let mut pending = FuturesUnordered::new();
         loop {
-            while next_batch < page_batches.len() && pending.len() < WRITEBACK_CONCURRENCY {
+            while first_error.is_none()
+                && next_batch < page_batches.len()
+                && pending.len() < WRITEBACK_CONCURRENCY
+            {
                 let pages = &page_batches[next_batch];
                 let page_start = pages[0] as u64 * PAGE_SIZE as u64;
                 let data = {
                     let mut cache = self.page_cache.lock();
                     let mut data = Vec::new();
                     for &pn in pages {
-                        let page = cache.get_mut(&pn).ok_or(VfsError::Io)?;
+                        let Some(page) = cache.get_mut(&pn) else {
+                            if first_error.is_none() {
+                                first_error = Some(VfsError::Io);
+                            }
+                            break;
+                        };
                         let current_start = pn as u64 * PAGE_SIZE as u64;
                         let len =
                             file_len.saturating_sub(current_start).min(PAGE_SIZE as u64) as usize;
@@ -1093,6 +1106,9 @@ impl CachedFileShared {
                     }
                     data
                 };
+                if first_error.is_some() {
+                    break;
+                }
                 pending.push(submit_writeback_batch(
                     file,
                     WritebackBatch {
@@ -2872,5 +2888,9 @@ mod tests {
             .unwrap();
         assert_eq!(indices.len(), PAGE_ACCESS_LOCK_STRIPES);
         assert!(indices.windows(2).all(|pair| pair[0] < pair[1]));
+        assert_eq!(
+            shared.page_fill_lock_indices(u32::MAX - 1, PAGE_ACCESS_LOCK_STRIPES),
+            Err(VfsError::StorageFull)
+        );
     }
 }
