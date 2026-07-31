@@ -265,10 +265,8 @@ impl Superblock {
     }
 
     pub(crate) fn read_only(&self) -> bool {
-        self.incompatible_features()
-            .contains(IncompatibleFeatures::RECOVERY)
-            || self.read_only_compatible_features()
-                .contains(ReadOnlyCompatibleFeatures::READ_ONLY)
+        self.read_only_compatible_features()
+            .contains(ReadOnlyCompatibleFeatures::READ_ONLY)
             || !check_read_only_compat_features(
                 self.read_only_compatible_features().bits(),
             )
