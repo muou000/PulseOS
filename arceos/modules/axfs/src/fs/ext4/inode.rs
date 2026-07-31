@@ -436,6 +436,11 @@ impl Inode {
         guards
     }
 
+    /// Marks active inode instances outside the caller's local handle as unlinked.
+    ///
+    /// Callers must hold exactly one strong reference in `local`: `unlink` uses `child`,
+    /// while `rename` uses `dst_node`. `weak.upgrade()` creates the second reference, so
+    /// a strong count greater than two is the signal for another active local handle.
     fn mark_unlinked_and_has_external_refs(local: &Arc<Self>) -> bool {
         let mut active = local.fs.active_inodes.lock();
         let mut has_external = false;
@@ -1117,21 +1122,28 @@ impl DirNodeOps for Inode {
         self.validate_inode_num(&fs, self.ino)?;
         let dir_idx = core::num::NonZeroU32::new(self.ino).ok_or(VfsError::InvalidData)?;
         loop {
-            let observation_nodes = [self];
-            let observation_guards = Self::lock_mutation_set(&observation_nodes).await;
-            let observed_dir_inode = ext4plus::inode::Inode::read(&fs, dir_idx)
-                .await
-                .map_err(into_vfs_err)?;
-            let observed_dir =
-                ext4plus::dir::Dir::open_inode(&fs, observed_dir_inode).map_err(into_vfs_err)?;
-            let observed_name =
-                ext4plus::DirEntryName::try_from(name).map_err(|_| VfsError::InvalidInput)?;
-            let observed_child = observed_dir
-                .get_entry(observed_name)
-                .await
-                .map_err(into_vfs_err)?;
-            let observed_child_ino = observed_child.index.get();
-            drop(observation_guards);
+            let observed_child_ino = match self.dir_cache.get_lookup(name) {
+                Some(Some(cached)) => cached.inode_num,
+                Some(None) => return Err(VfsError::NotFound),
+                None => {
+                    let observation_nodes = [self];
+                    let observation_guards = Self::lock_mutation_set(&observation_nodes).await;
+                    let observed_dir_inode = ext4plus::inode::Inode::read(&fs, dir_idx)
+                        .await
+                        .map_err(into_vfs_err)?;
+                    let observed_dir = ext4plus::dir::Dir::open_inode(&fs, observed_dir_inode)
+                        .map_err(into_vfs_err)?;
+                    let observed_name = ext4plus::DirEntryName::try_from(name)
+                        .map_err(|_| VfsError::InvalidInput)?;
+                    let observed_child = observed_dir
+                        .get_entry(observed_name)
+                        .await
+                        .map_err(into_vfs_err)?;
+                    let ino = observed_child.index.get();
+                    drop(observation_guards);
+                    ino
+                }
+            };
 
             let child = Inode::new(self.fs.clone(), observed_child_ino, None);
             let mutation_nodes = [self, child.as_ref()];
@@ -1146,6 +1158,13 @@ impl DirNodeOps for Inode {
             let child_inode = dir.get_entry(name_ref).await.map_err(into_vfs_err)?;
             let child_ino = child_inode.index.get();
             if child_ino != observed_child_ino {
+                self.dir_cache.update_lookup(
+                    String::from(name),
+                    Some(CachedLookupEntry {
+                        inode_num: child_ino,
+                        node_type: into_vfs_type(child_inode.file_type()),
+                    }),
+                );
                 continue;
             }
             if child_inode.file_type() == ext4plus::FileType::Directory
@@ -1296,7 +1315,7 @@ impl DirNodeOps for Inode {
             let mut write_scope = self.fs.write_scope(&write_owners);
             return write_scope
                 .run(async {
-                    if let Some(dst_inode) = dst_inode {
+                    if let (Some(dst_inode), Some(local_dst)) = (dst_inode, dst_node.as_ref()) {
                         let src_is_dir = src_inode.file_type() == ext4plus::FileType::Directory;
                         let dst_is_dir = dst_inode.file_type() == ext4plus::FileType::Directory;
                         if src_is_dir != dst_is_dir {
@@ -1335,9 +1354,6 @@ impl DirNodeOps for Inode {
                             invalidate_dir_cache(&dst_dir.fs, dst_inode_ino);
                         }
                         if dst_inode.links_count() == 0 {
-                            let local_dst = dst_node
-                                .as_ref()
-                                .expect("rename destination lock target disappeared");
                             let has_other_active =
                                 Self::mark_unlinked_and_has_external_refs(local_dst);
                             if !has_other_active {
@@ -1381,6 +1397,7 @@ impl DirNodeOps for Inode {
                             node_type: into_vfs_type(src_inode.file_type()),
                         }),
                     );
+                    let rollback_inode = src_inode.clone();
                     self.invalidate_metadata();
                     let unlink_result = src_dir
                         .unlink(src_name_ref, src_inode)
@@ -1388,10 +1405,60 @@ impl DirNodeOps for Inode {
                         .map_err(into_vfs_err);
                     self.invalidate_metadata();
                     invalidate_inode_metadata_cache(&self.fs, src_inode_ino);
-                    if unlink_result.is_err() {
+                    if let Err(unlink_error) = unlink_result {
                         self.dir_cache.invalidate();
+                        dst_dir.invalidate_metadata();
+                        invalidate_inode_metadata_cache(&self.fs, src_inode_ino);
+                        let source_still_linked = match src_dir.get_entry(src_name_ref).await {
+                            Ok(inode) if inode.index.get() == src_inode_ino => true,
+                            Ok(inode) => {
+                                log::error!(
+                                    "ext4: rename source entry '{}' changed from inode {} to {} \
+                                     while mutation locks were held",
+                                    src_name,
+                                    src_inode_ino,
+                                    inode.index.get()
+                                );
+                                false
+                            }
+                            Err(Ext4Error::NotFound) => false,
+                            Err(error) => {
+                                log::error!(
+                                    "ext4: rename could not verify source entry '{}' for inode {} \
+                                     before rollback: {}",
+                                    src_name,
+                                    src_inode_ino,
+                                    error
+                                );
+                                false
+                            }
+                        };
+                        if source_still_linked {
+                            if let Err(rollback_error) =
+                                dst_dir_obj.unlink(dst_name_ref, rollback_inode).await
+                            {
+                                log::error!(
+                                    "ext4: rename failed to roll back destination entry '{}' for \
+                                     inode {}: {}",
+                                    dst_name,
+                                    src_inode_ino,
+                                    rollback_error
+                                );
+                            }
+                        } else {
+                            log::error!(
+                                "ext4: rename preserved destination entry '{}' for inode {} \
+                                 because the failed source unlink may have removed '{}'",
+                                dst_name,
+                                src_inode_ino,
+                                src_name
+                            );
+                        }
+                        dst_dir.invalidate_metadata();
+                        invalidate_inode_metadata_cache(&self.fs, src_inode_ino);
+                        dst_dir.dir_cache.invalidate();
+                        return Err(unlink_error);
                     }
-                    unlink_result?;
                     self.invalidate_snapshot(self.ino);
                     self.dir_cache.update_lookup(String::from(src_name), None);
                     Ok(())
