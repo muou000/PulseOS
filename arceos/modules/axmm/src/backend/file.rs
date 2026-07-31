@@ -67,7 +67,11 @@ fn writeback_phys_page(mapping: &FileMapping, page_addr: VirtAddr, frame_paddr: 
 }
 
 const FILE_FAULT_AROUND_PAGES: usize = SHARED_PAGE_BATCH_CAPACITY;
-const _: () = assert!(FILE_FAULT_AROUND_PAGES > 0 && FILE_FAULT_AROUND_PAGES <= u8::BITS as usize);
+const COLD_FILE_FAULT_AROUND_PAGES: usize = 4;
+const _: () = assert!(FILE_FAULT_AROUND_PAGES > 0 && FILE_FAULT_AROUND_PAGES <= u16::BITS as usize);
+const _: () = assert!(
+    COLD_FILE_FAULT_AROUND_PAGES > 0 && COLD_FILE_FAULT_AROUND_PAGES <= FILE_FAULT_AROUND_PAGES
+);
 
 fn file_page_read_window(
     mapping_start: VirtAddr,
@@ -100,7 +104,7 @@ impl FileReadAheadState {
         let page_count = if self.next_page == Some(page_number) {
             max_pages
         } else {
-            1
+            max_pages.min(COLD_FILE_FAULT_AROUND_PAGES)
         };
         self.next_page = u32::try_from(page_count)
             .ok()
@@ -145,7 +149,7 @@ pub struct FilePagePrepared {
     file: CachedFile,
     requested_page: u32,
     pages: SharedPagePaddrs,
-    mapped_mask: u8,
+    mapped_mask: u16,
 }
 
 pub(super) struct FileWriteback {
@@ -212,7 +216,7 @@ impl core::fmt::Debug for FilePagePrepared {
 impl Drop for FilePagePrepared {
     fn drop(&mut self) {
         for (index, (_, frame)) in self.pages.iter().enumerate() {
-            let mapped = 1u8
+            let mapped = 1u16
                 .checked_shl(index as u32)
                 .is_some_and(|bit| self.mapped_mask & bit != 0);
             if !mapped {
@@ -229,13 +233,13 @@ impl FilePagePrepared {
 
     fn page(&self, index: usize) -> Option<(u32, PhysAddr)> {
         let page = *self.pages.get(index)?;
-        let bit = 1u8.checked_shl(index as u32)?;
+        let bit = 1u16.checked_shl(index as u32)?;
         (self.mapped_mask & bit == 0).then_some(page)
     }
 
     fn take_frame(&mut self, index: usize) -> Option<PhysAddr> {
         let (_, frame) = *self.pages.get(index)?;
-        let bit = 1u8.checked_shl(index as u32)?;
+        let bit = 1u16.checked_shl(index as u32)?;
         if self.mapped_mask & bit != 0 {
             return None;
         }
@@ -832,34 +836,33 @@ mod tests {
     #[test]
     fn readahead_advances_over_fault_around_window() {
         let mut state = FileReadAheadState::default();
-        assert_eq!(state.plan(10, 4), 1);
-        state.finish(10, 1, 1);
-        assert_eq!(state.plan(11, 4), 4);
-        state.finish(11, 4, 4);
-        assert_eq!(state.plan(15, 4), 4);
+        assert_eq!(state.plan(10, 4), 4);
+        state.finish(10, 4, 4);
+        assert_eq!(state.plan(14, 4), 4);
+        state.finish(14, 4, 4);
+        assert_eq!(state.plan(18, 4), 4);
     }
 
     #[test]
     fn readahead_resets_after_nonsequential_fault() {
         let mut state = FileReadAheadState::default();
-        assert_eq!(state.plan(3, 4), 1);
-        assert_eq!(state.plan(20, 4), 1);
-        assert_eq!(state.plan(21, 4), 4);
+        assert_eq!(state.plan(3, 4), 4);
+        assert_eq!(state.plan(20, 4), 4);
+        assert_eq!(state.plan(24, 4), 4);
     }
 
     #[test]
     fn readahead_tracks_short_result_at_mapping_end() {
         let mut state = FileReadAheadState::default();
-        assert_eq!(state.plan(7, 2), 1);
-        assert_eq!(state.plan(8, 2), 2);
-        state.finish(8, 2, 1);
-        assert_eq!(state.plan(9, 4), 4);
+        assert_eq!(state.plan(7, 2), 2);
+        state.finish(7, 2, 1);
+        assert_eq!(state.plan(8, 4), 4);
     }
 
     #[test]
     fn readahead_overflow_disables_sequential_hint() {
         let mut state = FileReadAheadState::default();
-        assert_eq!(state.plan(u32::MAX, 4), 1);
-        assert_eq!(state.plan(0, 4), 1);
+        assert_eq!(state.plan(u32::MAX, 4), 4);
+        assert_eq!(state.plan(0, 4), 4);
     }
 }
