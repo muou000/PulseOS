@@ -50,6 +50,11 @@ path = "src/lib.rs"
 [dependencies]
 log = "0.4"
 
+[dependencies.spin]
+version = "0.10"
+features = ["mutex", "spin_mutex"]
+default-features = false
+
 [dependencies.axdriver_base]
 version = "0.1"
 path = "../axdriver_base"

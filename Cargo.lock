@@ -281,6 +281,7 @@ version = "0.1.2"
 dependencies = [
  "axdriver_base",
  "log",
+ "spin 0.10.0",
 ]
 
 [[package]]

@@ -65,6 +65,6 @@ impl<H: Hal, T: Transport> BlockDriverOps for VirtIoBlkDev<H, T> {
     }
 
     fn flush(&mut self) -> DevResult {
-        Ok(())
+        self.inner.flush().map_err(as_dev_err)
     }
 }
