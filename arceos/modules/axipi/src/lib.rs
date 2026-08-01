@@ -326,12 +326,12 @@ pub fn wait_for_all_cpus_ready() {
 /// up with one local ASID flush before publishing itself as active.
 pub fn mark_current_cpu_asid_active(asid: usize) {
     let Some(generation) = ASID_GENERATIONS.get(asid) else {
-        CPU_ACTIVE_ASIDS[this_cpu_id()].store(NO_ACTIVE_ASID, Ordering::SeqCst);
+        CPU_ACTIVE_ASIDS[this_cpu_id()].store(NO_ACTIVE_ASID, Ordering::Release);
         return;
     };
     let cpu_id = this_cpu_id();
     loop {
-        let expected = generation.load(Ordering::SeqCst);
+        let expected = generation.load(Ordering::Acquire);
         let seen = CPU_ASID_GENERATIONS[cpu_id][asid].load(Ordering::Acquire);
         if seen != expected {
             axhal::asm::flush_tlb_asid(asid);
@@ -340,11 +340,11 @@ pub fn mark_current_cpu_asid_active(asid: usize) {
                 .lazy_asid_flushes
                 .fetch_add(1, Ordering::Relaxed);
         }
-        CPU_ACTIVE_ASIDS[cpu_id].store(asid, Ordering::SeqCst);
-        if generation.load(Ordering::SeqCst) == expected {
+        CPU_ACTIVE_ASIDS[cpu_id].store(asid, Ordering::Release);
+        if generation.load(Ordering::Acquire) == expected {
             return;
         }
-        CPU_ACTIVE_ASIDS[cpu_id].store(NO_ACTIVE_ASID, Ordering::SeqCst);
+        CPU_ACTIVE_ASIDS[cpu_id].store(NO_ACTIVE_ASID, Ordering::Release);
     }
 }
 
@@ -357,7 +357,7 @@ pub fn asid_active_cpu_mask(asid: usize) -> usize {
         }
         let mut mask = 0usize;
         for cpu_id in 0..axhal::cpu_num() {
-            if CPU_ACTIVE_ASIDS[cpu_id].load(Ordering::SeqCst) == asid {
+            if CPU_ACTIVE_ASIDS[cpu_id].load(Ordering::Acquire) == asid {
                 mask |= 1usize << cpu_id;
             }
         }
@@ -376,7 +376,7 @@ pub fn asid_active_cpu_mask(asid: usize) -> usize {
 /// previous owner force a local flush on the next activation.
 pub fn reset_asid_active_cpu_mask(asid: usize) {
     if let Some(generation) = ASID_GENERATIONS.get(asid) {
-        generation.fetch_add(1, Ordering::SeqCst);
+        generation.fetch_add(1, Ordering::AcqRel);
     }
 }
 
@@ -478,7 +478,7 @@ fn flush_asid_request(
     request: TlbFlushRequest,
 ) -> Result<(), TlbShootdownError> {
     let generation = ASID_GENERATIONS[asid]
-        .fetch_add(1, Ordering::SeqCst)
+        .fetch_add(1, Ordering::AcqRel)
         .wrapping_add(1);
     let mut target_mask = asid_active_cpu_mask(asid);
     #[cfg(any(target_arch = "riscv64", target_arch = "loongarch64"))]
