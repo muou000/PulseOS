@@ -56,7 +56,7 @@ version = "1.15"
 
 [dependencies.spin]
 version = "0.10"
-features = ["mutex"]
+features = ["mutex", "rwlock"]
 default-features = false
 
 [dependencies.async-trait]

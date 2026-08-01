@@ -37,5 +37,6 @@ hashbrown.workspace = true
 
 [features]
 qperf-trace = ["axtask/qperf-trace"]
+buildstorm-stats = ["axfs/buildstorm-stats"]
 pre-testcode = ["axfs/pre-testcode"]
 final-testcode = ["axfs/final-testcode"]

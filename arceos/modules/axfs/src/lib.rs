@@ -25,8 +25,41 @@ use spin::{Lazy, Mutex};
 mod disk;
 pub mod fs;
 
+#[cfg(feature = "buildstorm-stats")]
+pub mod buildstorm_stats;
+
+#[cfg(feature = "buildstorm-stats")]
+#[macro_export]
+macro_rules! buildstorm_stat_inc {
+    ($counter:ident) => {
+        $crate::buildstorm_stats::add(&$crate::buildstorm_stats::$counter, 1)
+    };
+}
+
+#[cfg(feature = "buildstorm-stats")]
+#[macro_export]
+macro_rules! buildstorm_stat_add {
+    ($counter:ident, $value:expr) => {
+        $crate::buildstorm_stats::add(&$crate::buildstorm_stats::$counter, $value as u64)
+    };
+}
+
+#[cfg(not(feature = "buildstorm-stats"))]
+#[macro_export]
+macro_rules! buildstorm_stat_inc {
+    ($counter:ident) => {{}};
+}
+
+#[cfg(not(feature = "buildstorm-stats"))]
+#[macro_export]
+macro_rules! buildstorm_stat_add {
+    ($counter:ident, $value:expr) => {{}};
+}
+
 pub use disk::{flush_all_disks, flush_all_disks_async};
-pub use fs::{new_tmpfs, new_procfs, new_default, devfs::DevNode, TtyCallbacks, register_tty_callbacks};
+pub use fs::{
+    TtyCallbacks, devfs::DevNode, new_default, new_procfs, new_tmpfs, register_tty_callbacks,
+};
 
 pub fn flush_all_filesystems() -> axfs_ng_vfs::VfsResult<()> {
     axtask::future::block_on(flush_all_filesystems_async())
@@ -53,7 +86,9 @@ pub async fn flush_all_filesystems_async() -> axfs_ng_vfs::VfsResult<()> {
     };
     for mp in mps {
         let root = mp.root_location();
-        roots.entry(filesystem_id(root.filesystem())).or_insert(root);
+        roots
+            .entry(filesystem_id(root.filesystem()))
+            .or_insert(root);
     }
     const FILESYSTEM_FLUSH_CONCURRENCY: usize = 4;
     let mut roots = roots.into_values();
@@ -189,7 +224,9 @@ pub fn list_mounts() -> Vec<MountRecord> {
 }
 
 pub fn register_mountable_filesystem(source: &str, fs: &axfs_ng_vfs::Filesystem) {
-    MOUNTABLE_FILESYSTEMS.lock().insert(source.to_string(), fs.clone());
+    MOUNTABLE_FILESYSTEMS
+        .lock()
+        .insert(source.to_string(), fs.clone());
 }
 
 pub fn lookup_mountable_filesystem(source: &str) -> Option<axfs_ng_vfs::Filesystem> {
@@ -197,12 +234,18 @@ pub fn lookup_mountable_filesystem(source: &str) -> Option<axfs_ng_vfs::Filesyst
 }
 
 pub fn register_mounted_mountpoint(target: &str, mountpoint: Arc<axfs_ng_vfs::Mountpoint>) {
-    MOUNTED_MOUNTPOINTS.lock().push((normalize_target(target), mountpoint));
+    MOUNTED_MOUNTPOINTS
+        .lock()
+        .push((normalize_target(target), mountpoint));
 }
 
 pub fn lookup_mounted_mountpoint(target: &str) -> Option<Arc<axfs_ng_vfs::Mountpoint>> {
     let target = normalize_target(target);
-    MOUNTED_MOUNTPOINTS.lock().iter().rfind(|(t, _)| t == &target).map(|(_, m)| m.clone())
+    MOUNTED_MOUNTPOINTS
+        .lock()
+        .iter()
+        .rfind(|(t, _)| t == &target)
+        .map(|(_, m)| m.clone())
 }
 
 pub fn find_free_loop_device() -> Option<usize> {
@@ -264,7 +307,11 @@ pub fn get_loop_flags(id: usize) -> Option<u32> {
     if id >= 8 {
         return None;
     }
-    Some(fs::loop_dev::LOOP_DEVICES[id].flags.load(core::sync::atomic::Ordering::Acquire))
+    Some(
+        fs::loop_dev::LOOP_DEVICES[id]
+            .flags
+            .load(core::sync::atomic::Ordering::Acquire),
+    )
 }
 
 pub fn set_loop_flags(id: usize, flags: u32) -> axfs_ng_vfs::VfsResult<()> {
@@ -278,7 +325,8 @@ pub fn set_loop_flags(id: usize, flags: u32) -> axfs_ng_vfs::VfsResult<()> {
 }
 
 pub fn lookup_location(path: &str) -> axfs_ng_vfs::VfsResult<axfs_ng_vfs::Location> {
-    axtask::future::block_on(FS_CONTEXT.lock().resolve(path))
+    let context = FS_CONTEXT.lock().clone();
+    axtask::future::block_on(context.resolve(path))
 }
 
 pub fn probe_block_device(
@@ -333,8 +381,7 @@ pub fn rename_mount_registry(old_prefix: &str, new_prefix: &str) {
         for (target, _mp) in mps.iter_mut() {
             if target == &old_prefix {
                 *target = new_prefix.clone();
-            } else if target.starts_with(&old_prefix)
-                && target[old_prefix.len()..].starts_with('/')
+            } else if target.starts_with(&old_prefix) && target[old_prefix.len()..].starts_with('/')
             {
                 target.replace_range(..old_prefix.len(), &new_prefix);
             }
@@ -436,9 +483,20 @@ pub fn init_filesystems(mut block_devs: AxDeviceContainer<AxBlockDevice>) {
             }
         };
 
-        info!("  filesystem on device {}: {} (size={} KiB)", disk_idx, fs.name(), disk_size / 1024,);
+        info!(
+            "  filesystem on device {}: {} (size={} KiB)",
+            disk_idx,
+            fs.name(),
+            disk_size / 1024,
+        );
 
-        candidates.push(FsCandidate { disk_idx, disk_size, dev_name, shared_dev, fs });
+        candidates.push(FsCandidate {
+            disk_idx,
+            disk_size,
+            dev_name,
+            shared_dev,
+            fs,
+        });
         disk_idx += 1;
     }
 
@@ -467,7 +525,12 @@ pub fn init_filesystems(mut block_devs: AxDeviceContainer<AxBlockDevice>) {
 
     let root_mp = axfs_ng_vfs::Mountpoint::new_root(&root.fs);
     let cx = FsContext::new(root_mp.root_location());
-    register_mount(&format!("device{}", root.disk_idx), "/", root.fs.name(), "rw,relatime");
+    register_mount(
+        &format!("device{}", root.disk_idx),
+        "/",
+        root.fs.name(),
+        "rw,relatime",
+    );
     register_mountable_device(
         &format!("device{}", root.disk_idx),
         &disk_node_name(root.disk_idx),
@@ -508,12 +571,24 @@ pub fn init_filesystems(mut block_devs: AxDeviceContainer<AxBlockDevice>) {
     }
 
     let proc_fs = fs::new_procfs();
-    mount_builtin_fs(&cx, "/proc", &proc_fs, "proc", "rw,nosuid,nodev,noexec,relatime");
+    mount_builtin_fs(
+        &cx,
+        "/proc",
+        &proc_fs,
+        "proc",
+        "rw,nosuid,nodev,noexec,relatime",
+    );
     let dev_fs = fs::new_devfs(dev_nodes);
     mount_builtin_fs(&cx, "/dev", &dev_fs, "devtmpfs", "rw,nosuid,relatime");
 
     let shm_fs = fs::new_tmpfs();
-    mount_builtin_fs(&cx, "/dev/shm", &shm_fs, "tmpfs", "rw,nosuid,nodev,noexec,relatime");
+    mount_builtin_fs(
+        &cx,
+        "/dev/shm",
+        &shm_fs,
+        "tmpfs",
+        "rw,nosuid,nodev,noexec,relatime",
+    );
     let tmp_fs = fs::new_tmpfs();
     mount_builtin_fs(&cx, "/tmp", &tmp_fs, "tmpfs", "rw,nosuid,nodev,relatime");
 
