@@ -8,6 +8,9 @@ use pulse_core::task::uaccess;
 
 const MAX_USER_IOVCNT: usize = 1024;
 
+/// Linux PATH_MAX, including the trailing NUL in a user C string.
+pub(crate) const USER_PATH_MAX: usize = uaccess::DEFAULT_USER_CSTRING_MAX;
+
 pub(crate) fn with_process<R>(
     f: impl FnOnce(&pulse_core::task::Process) -> R,
 ) -> Result<R, LinuxError> {
@@ -75,7 +78,7 @@ pub(crate) fn with_user_path_str<R>(
     if user_addr == 0 {
         return Err(LinuxError::EFAULT);
     }
-    let mut stack_buf = [0u8; uaccess::DEFAULT_USER_CSTRING_MAX];
+    let mut stack_buf = [0u8; USER_PATH_MAX];
     let len = read_user_cstring_to_slice(user_addr, &mut stack_buf)?;
     let path_str = core::str::from_utf8(&stack_buf[..len]).map_err(|_| LinuxError::EINVAL)?;
     f(path_str)

@@ -11,7 +11,7 @@ use crate::impls::{
         check_faccess_permission, get_fd_entry, resolve_location_at_ptr,
     },
     utils::{
-        read_user_timespec, timespec_to_update_time, with_process, write_user_bytes,
+        USER_PATH_MAX, read_user_timespec, timespec_to_update_time, with_process, write_user_bytes,
     },
 };
 
@@ -230,7 +230,7 @@ pub fn sys_statx(
     // 对于 stdin/stdout/pipe/socket 等没有文件系统路径的匿名 FD，
     // resolve_location_at_ptr 会因为 location() 返回 None 而报 EBADF。
     // 此时应直接通过 FD object 的 stat() 方法获取信息。
-    let mut buf = [0u8; 4096];
+    let mut buf = [0u8; USER_PATH_MAX];
     let path_len = if pathname == 0 {
         None
     } else {
@@ -441,7 +441,7 @@ pub fn sys_faccessat(dirfd: i32, pathname: usize, mode: usize, flags: usize) -> 
 /// 以满足 LTP 等测试框架的 setup 阶段需求。
 pub fn sys_fchmodat(dirfd: i32, pathname: usize, mode: usize, flags: usize) -> isize {
     // 尝试读取路径字符串用于日志
-    let mut path_buf = [0u8; 4096];
+    let mut path_buf = [0u8; USER_PATH_MAX];
     let path_str = if pathname != 0 {
         crate::impls::utils::read_user_cstring_to_slice(pathname, &mut path_buf)
             .ok()
@@ -632,7 +632,7 @@ pub fn sys_fchmod(fd: usize, mode: usize) -> isize {
 ///
 /// PulseOS 不强制执行文件所有权，此 stub 仅验证路径存在性后返回成功。
 pub fn sys_fchownat(dirfd: i32, pathname: usize, uid: usize, gid: usize, flags: usize) -> isize {
-    let mut path_buf = [0u8; 4096];
+    let mut path_buf = [0u8; USER_PATH_MAX];
     let path_str = if pathname != 0 {
         crate::impls::utils::read_user_cstring_to_slice(pathname, &mut path_buf)
             .ok()
