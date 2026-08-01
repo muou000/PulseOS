@@ -1,6 +1,5 @@
 use axfs_ng_vfs::{NodeType, VfsError};
-use ext4plus::error::Ext4Error;
-use ext4plus::FileType;
+use ext4plus::{FileType, error::Ext4Error};
 
 pub fn into_vfs_err(err: Ext4Error) -> VfsError {
     let vfs_err = match &err {
