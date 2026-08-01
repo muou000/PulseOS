@@ -4,7 +4,7 @@ use axerrno::{LinuxError, LinuxResult};
 use kspin::SpinNoIrq;
 use spin::Lazy;
 
-use crate::flock::LockTarget;
+use crate::flock::{LOCK_TABLE_SHARDS, LockTarget, lock_target_shard};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum RecordLockType {
@@ -119,8 +119,8 @@ impl RecordLockState {
     }
 }
 
-static RECORD_LOCKS: Lazy<SpinNoIrq<BTreeMap<LockTarget, RecordLockState>>> =
-    Lazy::new(|| SpinNoIrq::new(BTreeMap::new()));
+static RECORD_LOCKS: Lazy<[SpinNoIrq<BTreeMap<LockTarget, RecordLockState>>; LOCK_TABLE_SHARDS]> =
+    Lazy::new(|| core::array::from_fn(|_| SpinNoIrq::new(BTreeMap::new())));
 
 fn ranges_overlap(a_start: i64, a_end: i64, b_start: i64, b_end: i64) -> bool {
     a_start < b_end && b_start < a_end
@@ -166,7 +166,7 @@ pub fn set_posix_lock(
     end: i64,
     lock_type: RecordLockType,
 ) -> LinuxResult<isize> {
-    let mut locks = RECORD_LOCKS.lock();
+    let mut locks = RECORD_LOCKS[lock_target_shard(target)].lock();
     locks
         .entry(target)
         .or_default()
@@ -181,7 +181,7 @@ pub fn unlock_posix_lock(
     end: i64,
 ) -> LinuxResult<isize> {
     validate_range(start, end)?;
-    let mut locks = RECORD_LOCKS.lock();
+    let mut locks = RECORD_LOCKS[lock_target_shard(target)].lock();
     let remove_target = locks.get_mut(&target).is_some_and(|state| {
         state.clear_owner_range(owner, start, end);
         state.entries.is_empty()
@@ -193,7 +193,7 @@ pub fn unlock_posix_lock(
 }
 
 pub fn release_posix_owner_target(owner: u64, target: LockTarget) {
-    let mut locks = RECORD_LOCKS.lock();
+    let mut locks = RECORD_LOCKS[lock_target_shard(target)].lock();
     let remove_target = locks.get_mut(&target).is_some_and(|state| {
         state.release_owner(owner);
         state.entries.is_empty()
@@ -204,10 +204,12 @@ pub fn release_posix_owner_target(owner: u64, target: LockTarget) {
 }
 
 pub fn release_posix_owner(owner: u64) {
-    RECORD_LOCKS.lock().retain(|_, state| {
-        state.release_owner(owner);
-        !state.entries.is_empty()
-    });
+    for shard in RECORD_LOCKS.iter() {
+        shard.lock().retain(|_, state| {
+            state.release_owner(owner);
+            !state.entries.is_empty()
+        });
+    }
 }
 
 #[cfg(test)]

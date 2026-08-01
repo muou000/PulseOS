@@ -1,7 +1,8 @@
-use alloc::collections::BTreeMap;
-use alloc::sync::Arc;
-use spin::{Lazy, Mutex};
+use alloc::{collections::BTreeMap, sync::Arc};
+
 use axerrno::{LinuxError, LinuxResult};
+use spin::{Lazy, Mutex};
+
 use crate::fd_table::FdObject;
 
 pub const LOCK_SH: i32 = 1;
@@ -39,8 +40,20 @@ struct LockState {
     wait_queue: Arc<axtask::WaitQueue>,
 }
 
-static FLOCK_MAP: Lazy<Mutex<BTreeMap<LockTarget, LockState>>> =
-    Lazy::new(|| Mutex::new(BTreeMap::new()));
+pub(crate) const LOCK_TABLE_SHARDS: usize = 32;
+
+pub(crate) fn lock_target_shard(target: LockTarget) -> usize {
+    let hash = match target {
+        LockTarget::Location { fs_id, inode } => {
+            fs_id.rotate_left(13) ^ (inode as usize).rotate_right(7)
+        }
+        LockTarget::FdObject(address) => address.rotate_right(4),
+    };
+    hash % LOCK_TABLE_SHARDS
+}
+
+static FLOCK_MAPS: Lazy<[Mutex<BTreeMap<LockTarget, LockState>>; LOCK_TABLE_SHARDS]> =
+    Lazy::new(|| core::array::from_fn(|_| Mutex::new(BTreeMap::new())));
 
 fn current_has_pending_signal() -> bool {
     crate::task::current_thread()
@@ -77,7 +90,7 @@ pub fn do_flock(owner: usize, target: LockTarget, operation: i32) -> LinuxResult
 
     // First check if we need to convert/release an existing lock of a different type
     {
-        let mut map = FLOCK_MAP.lock();
+        let mut map = FLOCK_MAPS[lock_target_shard(target)].lock();
         if let Some(state) = map.get_mut(&target) {
             if state.owners.contains(&owner) {
                 if state.lock_type == lock_type {
@@ -99,7 +112,7 @@ pub fn do_flock(owner: usize, target: LockTarget, operation: i32) -> LinuxResult
     }
 
     loop {
-        let mut map = FLOCK_MAP.lock();
+        let mut map = FLOCK_MAPS[lock_target_shard(target)].lock();
         if let Some(state) = map.get_mut(&target) {
             let holds_already = state.owners.contains(&owner);
             let can_acquire = match lock_type {
@@ -136,7 +149,7 @@ pub fn do_flock(owner: usize, target: LockTarget, operation: i32) -> LinuxResult
             }
 
             wq.wait_until(|| {
-                let map = FLOCK_MAP.lock();
+                let map = FLOCK_MAPS[lock_target_shard(target)].lock();
                 if let Some(state) = map.get(&target) {
                     let holds_already = state.owners.contains(&owner);
                     let can_acquire = match lock_type {
@@ -174,7 +187,7 @@ pub fn do_flock(owner: usize, target: LockTarget, operation: i32) -> LinuxResult
 }
 
 pub fn flock_release_target_owner(owner: usize, target: LockTarget) {
-    let mut map = FLOCK_MAP.lock();
+    let mut map = FLOCK_MAPS[lock_target_shard(target)].lock();
     if let Some(state) = map.get_mut(&target) {
         if let Some(pos) = state.owners.iter().position(|&x| x == owner) {
             state.owners.remove(pos);
@@ -190,21 +203,23 @@ pub fn flock_release_target_owner(owner: usize, target: LockTarget) {
 }
 
 pub fn flock_release_owner(owner: usize) {
-    let mut map = FLOCK_MAP.lock();
-    let mut to_remove = alloc::vec::Vec::new();
-    for (target, state) in map.iter_mut() {
-        if let Some(pos) = state.owners.iter().position(|&x| x == owner) {
-            state.owners.remove(pos);
-            if state.owners.is_empty() {
-                to_remove.push(*target);
-            } else {
-                state.wait_queue.notify_all(true);
+    for shard in FLOCK_MAPS.iter() {
+        let mut map = shard.lock();
+        let mut to_remove = alloc::vec::Vec::new();
+        for (target, state) in map.iter_mut() {
+            if let Some(pos) = state.owners.iter().position(|&x| x == owner) {
+                state.owners.remove(pos);
+                if state.owners.is_empty() {
+                    to_remove.push(*target);
+                } else {
+                    state.wait_queue.notify_all(true);
+                }
             }
         }
-    }
-    for target in to_remove {
-        if let Some(state) = map.remove(&target) {
-            state.wait_queue.notify_all(true);
+        for target in to_remove {
+            if let Some(state) = map.remove(&target) {
+                state.wait_queue.notify_all(true);
+            }
         }
     }
 }
