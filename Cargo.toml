@@ -111,7 +111,11 @@ qemu = []
 smp = ["axfeat/smp", "axfeat/ipi"]
 sched-eevdf = ["axfeat/sched-eevdf"]
 sched-load-balance = ["axfeat/sched-load-balance"]
-qperf-trace = ["axtask/qperf-trace", "pulse_core/qperf-trace"]
+qperf-trace = [
+    "axtask/qperf-trace",
+    "pulse_core/qperf-trace",
+    "pulse_syscalls/qperf-trace",
+]
 pre-testcode = ["pulse_core/pre-testcode"]
 final-testcode = ["pulse_core/final-testcode"]
 

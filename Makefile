@@ -44,7 +44,16 @@ all: prepare-tools
 	@cp $(NAME)_loongarch64-qemu-virt.elf kernel-la
 	@if [ "$(FEATURE)" = "pre-testcode" ]; then $(MAKE) img_all; fi
 
-test: prepare-tools
+test: override QPERF_TRACE := n
+test: override APP_FEATURES = qemu,$(FEATURE)$(SCHED_LOAD_BALANCE_APP_FEATURE)
+test: test-artifacts
+
+qperf-test: override QPERF_TRACE := y
+qperf-test: override APP_FEATURES = qemu,$(FEATURE),qperf-trace$(SCHED_LOAD_BALANCE_APP_FEATURE)
+qperf-test: override LOG := off
+qperf-test: test-artifacts
+
+test-artifacts: prepare-tools
 	@ARCH=riscv64 APP_FEATURES=$(APP_FEATURES) LOG=$(LOG) $(MAKE) defconfig
 	@ARCH=riscv64 APP_FEATURES=$(APP_FEATURES) LOG=$(LOG) BUS=mmio OUT_DIR=$(BUILD_OUT_DIR) $(MAKE) -C arceos build  EXTRA_RUSTFLAGS="$(EXTRA_RUSTFLAGS)"
 	@if [ "$(QPERF_TRACE)" = "y" ]; then \
@@ -62,9 +71,16 @@ test: prepare-tools
 		cp $(BUILD_OUT_DIR)/$(NAME)_loongarch64-qemu-virt.elf kernel-la; \
 	fi
 	@if [ "$(FEATURE)" = "pre-testcode" -a "$(IMG)" = "y" ]; then $(MAKE) img_all; fi
-
-qperf-test: QPERF_TRACE := y
-qperf-test: test
+	@if [ "$(QPERF_TRACE)" != "y" ]; then \
+		for elf in \
+			$(A)/$(NAME)_riscv64-qemu-virt.elf \
+			$(A)/$(NAME)_loongarch64-qemu-virt.elf; do \
+			if nm -n "$$elf" | grep -q ' __pulse_qperf_trace_v1$$'; then \
+				echo "Error: ordinary artifact contains qperf trace marker: $$elf"; \
+				exit 1; \
+			fi; \
+		done; \
+	fi
 
 build: prepare-tools defconfig
 	@$(MAKE) -C arceos A=$(A) ARCH=$(ARCH) $@
@@ -92,4 +108,4 @@ img_all:
 	@cp disk.img arceos/disk.img
 	@cp disk-la.img arceos/disk-la.img
 
-.PHONY: all test qperf-test build run justrun clean defconfig img_all la prepare-tools
+.PHONY: all test qperf-test test-artifacts build run justrun clean defconfig img_all la prepare-tools
