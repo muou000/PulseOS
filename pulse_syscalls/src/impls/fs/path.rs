@@ -13,6 +13,7 @@ use pulse_core::fd_table::open_result_to_entry;
 use crate::impls::fs::common::{
     context_for_dirfd, insert_fd_entry, open_fd_flags, resolve_location_at_ptr,
 };
+use crate::impls::utils::USER_PATH_MAX;
 
 static MOUNT_FLAGS_WARNED: AtomicBool = AtomicBool::new(false);
 static UMOUNT_FLAGS_WARNED: AtomicBool = AtomicBool::new(false);
@@ -543,7 +544,7 @@ pub fn sys_mount(
         return -LinuxError::EFAULT.code() as isize;
     }
 
-    let mut target_buf = [0u8; 4096];
+    let mut target_buf = [0u8; USER_PATH_MAX];
     let target_len = match crate::impls::utils::read_user_cstring_to_slice(target, &mut target_buf) {
         Ok(l) => l,
         Err(e) => return -e.code() as isize,
@@ -833,7 +834,7 @@ pub fn sys_umount2(target: usize, flags: usize) -> isize {
         return -LinuxError::EFAULT.code() as isize;
     }
 
-    let mut target_buf = [0u8; 4096];
+    let mut target_buf = [0u8; USER_PATH_MAX];
     let target_len = match crate::impls::utils::read_user_cstring_to_slice(target, &mut target_buf) {
         Ok(l) => l,
         Err(e) => return -e.code() as isize,
@@ -1110,7 +1111,7 @@ pub fn sys_symlinkat(target: usize, newdirfd: i32, linkpath: usize) -> isize {
     if target == 0 || linkpath == 0 {
         return -LinuxError::EFAULT.code() as isize;
     }
-    let mut target_buf = [0u8; 4096];
+    let mut target_buf = [0u8; USER_PATH_MAX];
     let target_len = match crate::impls::utils::read_user_cstring_to_slice(target, &mut target_buf) {
         Ok(l) => l,
         Err(e) => return -e.code() as isize,
@@ -1123,7 +1124,7 @@ pub fn sys_symlinkat(target: usize, newdirfd: i32, linkpath: usize) -> isize {
         return -LinuxError::ENOENT.code() as isize;
     }
 
-    let mut link_buf = [0u8; 4096];
+    let mut link_buf = [0u8; USER_PATH_MAX];
     let link_len = match crate::impls::utils::read_user_cstring_to_slice(linkpath, &mut link_buf) {
         Ok(l) => l,
         Err(e) => return -e.code() as isize,
@@ -1178,7 +1179,7 @@ pub fn sys_mknodat(dirfd: i32, pathname: usize, mode: usize, _dev: usize) -> isi
     if pathname == 0 {
         return -LinuxError::EFAULT.code() as isize;
     }
-    let mut buf = [0u8; 4096];
+    let mut buf = [0u8; USER_PATH_MAX];
     let len = match crate::impls::utils::read_user_cstring_to_slice(pathname, &mut buf) {
         Ok(l) => l,
         Err(e) => return -e.code() as isize,
@@ -1298,7 +1299,7 @@ pub fn sys_linkat(
         return -LinuxError::EINVAL.code() as isize;
     }
 
-    let mut old_buf = [0u8; 4096];
+    let mut old_buf = [0u8; USER_PATH_MAX];
     let old_len = match crate::impls::utils::read_user_cstring_to_slice(oldpath, &mut old_buf) {
         Ok(l) => l,
         Err(e) => return -e.code() as isize,
@@ -1308,7 +1309,7 @@ pub fn sys_linkat(
         Err(_) => return -LinuxError::EINVAL.code() as isize,
     };
 
-    let mut new_buf = [0u8; 4096];
+    let mut new_buf = [0u8; USER_PATH_MAX];
     let new_len = match crate::impls::utils::read_user_cstring_to_slice(newpath, &mut new_buf) {
         Ok(l) => l,
         Err(e) => return -e.code() as isize,
