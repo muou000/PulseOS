@@ -8,6 +8,7 @@ use core::mem;
 
 use async_trait::async_trait;
 use axdriver::{AxBlockDevice, prelude::*};
+use futures_util::{StreamExt, stream::FuturesUnordered};
 use spin::Mutex;
 
 fn take<'a>(buf: &mut &'a [u8], cnt: usize) -> &'a [u8] {
@@ -250,6 +251,16 @@ pub static DISK_FLUSHERS: spin::Lazy<Mutex<alloc::vec::Vec<alloc::sync::Weak<dyn
 pub static FLUSHING_TASKS: spin::Lazy<Mutex<alloc::collections::BTreeSet<u64>>> =
     spin::Lazy::new(|| Mutex::new(alloc::collections::BTreeSet::new()));
 
+struct FlushingTaskGuard {
+    task_id: u64,
+}
+
+impl Drop for FlushingTaskGuard {
+    fn drop(&mut self) {
+        FLUSHING_TASKS.lock().remove(&self.task_id);
+    }
+}
+
 /// Flushes all registered disks.
 pub fn flush_all_disks() -> DevResult<()> {
     axtask::future::block_on(flush_all_disks_async())
@@ -264,6 +275,7 @@ pub async fn flush_all_disks_async() -> DevResult<()> {
             return Ok(());
         }
     }
+    let _flushing_task = FlushingTaskGuard { task_id };
 
     let flushers: alloc::vec::Vec<Arc<dyn DiskFlushable>> = {
         let mut guard = DISK_FLUSHERS.lock();
@@ -279,14 +291,25 @@ pub async fn flush_all_disks_async() -> DevResult<()> {
         active
     };
     let mut ret = Ok(());
-    for flusher in flushers {
-        if let Err(e) = flusher.flush_disk().await {
+    const DISK_FLUSH_CONCURRENCY: usize = 4;
+    let mut flushers = flushers.into_iter();
+    let mut pending = FuturesUnordered::new();
+    loop {
+        while pending.len() < DISK_FLUSH_CONCURRENCY {
+            let Some(flusher) = flushers.next() else {
+                break;
+            };
+            pending.push(async move { flusher.flush_disk().await });
+        }
+        let Some(result) = pending.next().await else {
+            break;
+        };
+        if let Err(e) = result {
             log::error!("Failed to flush disk: {:?}", e);
             ret = Err(e);
         }
     }
 
-    FLUSHING_TASKS.lock().remove(&task_id);
     ret
 }
 
