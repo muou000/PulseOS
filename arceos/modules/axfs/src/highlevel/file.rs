@@ -933,7 +933,7 @@ impl ContiguousPageGroup {
 #[derive(Debug)]
 enum PageCacheFrameBacking {
     Standalone,
-    Group(Arc<ContiguousPageGroup>),
+    Group { _owner: Arc<ContiguousPageGroup> },
 }
 
 #[derive(Debug)]
@@ -944,7 +944,7 @@ struct PageCacheFrame {
 
 impl PageCacheFrame {
     fn is_group_backed(&self) -> bool {
-        matches!(self.backing, PageCacheFrameBacking::Group(_))
+        matches!(self.backing, PageCacheFrameBacking::Group { .. })
     }
 }
 
@@ -1003,7 +1003,7 @@ impl PageCache {
         Ok(Self {
             frame: Arc::new(PageCacheFrame {
                 addr: group.page_addr(index)?,
-                backing: PageCacheFrameBacking::Group(group),
+                backing: PageCacheFrameBacking::Group { _owner: group },
             }),
             dirty: false,
             may_write_mapping: false,
