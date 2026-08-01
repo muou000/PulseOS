@@ -31,6 +31,94 @@ use super::FsContext;
 pub const SHARED_PAGE_BATCH_CAPACITY: usize = 16;
 pub type SharedPagePaddrs = heapless::Vec<(u32, PhysAddr), SHARED_PAGE_BATCH_CAPACITY>;
 
+const WEAK_STATE_SWEEP_BUDGET: usize = 8;
+
+struct WeakStateRegistry<K: Ord + Copy, V> {
+    states: BTreeMap<K, Weak<V>>,
+    sweep_cursor: Option<K>,
+}
+
+impl<K: Ord + Copy, V> Default for WeakStateRegistry<K, V> {
+    fn default() -> Self {
+        Self {
+            states: BTreeMap::new(),
+            sweep_cursor: None,
+        }
+    }
+}
+
+impl<K: Ord + Copy, V> WeakStateRegistry<K, V> {
+    fn get(&self, key: &K) -> Option<Arc<V>> {
+        self.states.get(key).and_then(Weak::upgrade)
+    }
+
+    fn insert(&mut self, key: K, state: &Arc<V>) {
+        self.states.insert(key, Arc::downgrade(state));
+    }
+
+    fn remove(&mut self, key: &K) -> Option<Arc<V>> {
+        self.states.remove(key).and_then(|state| state.upgrade())
+    }
+
+    fn sweep_dead(&mut self) {
+        if self.states.is_empty() {
+            self.sweep_cursor = None;
+            return;
+        }
+
+        let previous_cursor = self.sweep_cursor;
+        let mut keys = [None; WEAK_STATE_SWEEP_BUDGET];
+        let mut count = 0;
+        if let Some(cursor) = previous_cursor {
+            for key in self
+                .states
+                .range((
+                    core::ops::Bound::Excluded(cursor),
+                    core::ops::Bound::Unbounded,
+                ))
+                .map(|(key, _)| *key)
+                .take(WEAK_STATE_SWEEP_BUDGET)
+            {
+                keys[count] = Some(key);
+                count += 1;
+            }
+        } else {
+            for key in self.states.keys().copied().take(WEAK_STATE_SWEEP_BUDGET) {
+                keys[count] = Some(key);
+                count += 1;
+            }
+        }
+
+        if count < WEAK_STATE_SWEEP_BUDGET
+            && let Some(cursor) = previous_cursor
+        {
+            for key in self
+                .states
+                .range(..=cursor)
+                .map(|(key, _)| *key)
+                .take(WEAK_STATE_SWEEP_BUDGET - count)
+            {
+                keys[count] = Some(key);
+                count += 1;
+            }
+        }
+
+        self.sweep_cursor = count.checked_sub(1).and_then(|index| keys[index]);
+        for key in keys[..count].iter().flatten() {
+            if self
+                .states
+                .get(key)
+                .is_some_and(|state| state.strong_count() == 0)
+            {
+                self.states.remove(key);
+            }
+        }
+        if self.states.is_empty() {
+            self.sweep_cursor = None;
+        }
+    }
+}
+
 fn checked_shared_page_count(page_count: usize) -> VfsResult<usize> {
     let page_count = page_count.max(1);
     if page_count > SHARED_PAGE_BATCH_CAPACITY {
@@ -71,16 +159,9 @@ fn node_allows_page_cache(flags: NodeFlags) -> bool {
     !flags.contains(NodeFlags::NON_CACHEABLE)
 }
 
-fn prune_file_shared_states(registry: &mut BTreeMap<FileCacheKey, Weak<CachedFileShared>>) {
-    registry.retain(|_, state| state.strong_count() > 0);
-}
-
 pub fn invalidate_file_cache(fs_id: usize, inode: u64) {
     let key = FileCacheKey { fs_id, inode };
-    let state = FILE_SHARED_STATES
-        .lock()
-        .remove(&key)
-        .and_then(|state| state.upgrade());
+    let state = FILE_SHARED_STATES.lock().remove(&key);
     if let Some(state) = state {
         let removed = {
             let mut caches = ACTIVE_DISK_FILE_CACHES.lock();
@@ -93,8 +174,8 @@ pub fn invalidate_file_cache(fs_id: usize, inode: u64) {
     }
 }
 
-static FILE_SHARED_STATES: Lazy<SpinMutex<BTreeMap<FileCacheKey, Weak<CachedFileShared>>>> =
-    Lazy::new(|| SpinMutex::new(BTreeMap::new()));
+static FILE_SHARED_STATES: Lazy<SpinMutex<WeakStateRegistry<FileCacheKey, CachedFileShared>>> =
+    Lazy::new(|| SpinMutex::new(WeakStateRegistry::default()));
 
 // Disk caches survive descriptor close and are released after explicit global
 // writeback. Stage 2 adds bounded retention and memory-pressure reclaim.
@@ -191,18 +272,18 @@ pub struct ExecAccessGuard {
     _lease: Arc<ExecAccessLease>,
 }
 
-static INODE_ACCESS_STATES: Lazy<SpinMutex<BTreeMap<FileCacheKey, Weak<InodeAccessState>>>> =
-    Lazy::new(|| SpinMutex::new(BTreeMap::new()));
+static INODE_ACCESS_STATES: Lazy<SpinMutex<WeakStateRegistry<FileCacheKey, InodeAccessState>>> =
+    Lazy::new(|| SpinMutex::new(WeakStateRegistry::default()));
 
 fn inode_access_state(location: &Location) -> Arc<InodeAccessState> {
     let key = file_cache_key(location);
     let mut registry = INODE_ACCESS_STATES.lock();
-    if let Some(state) = registry.get(&key).and_then(Weak::upgrade) {
+    if let Some(state) = registry.get(&key) {
         return state;
     }
-    registry.retain(|_, state| state.strong_count() > 0);
+    registry.sweep_dead();
     let state = Arc::new(InodeAccessState::new());
-    registry.insert(key, Arc::downgrade(&state));
+    registry.insert(key, &state);
     state
 }
 
@@ -480,10 +561,7 @@ impl OpenOptions {
                         parent.open_file(&name, &create_options).await?
                     };
                 if !self.no_follow {
-                    loc = context
-                        .with_current_dir(parent)?
-                        .try_resolve_symlink(loc, &mut 0)
-                        .await?;
+                    loc = context.try_resolve_symlink(loc, &mut 0).await?;
                 }
                 loc
             }
@@ -796,12 +874,9 @@ impl ContiguousReadBuffer {
             return Err(VfsError::InvalidInput);
         }
         let pages = len.div_ceil(PAGE_SIZE);
-        let allocation_len = pages.checked_mul(PAGE_SIZE).ok_or(VfsError::StorageFull)?;
         let addr = global_allocator()
             .alloc_pages(pages, PAGE_SIZE)
             .map_err(|_| VfsError::NoMemory)?;
-        // Preserve the previous `vec![0; len]` behavior for the EOF tail.
-        unsafe { core::ptr::write_bytes(addr as *mut u8, 0, allocation_len) };
         Ok(Self {
             allocation: Arc::new(ContiguousReadAllocation {
                 addr: addr.into(),
@@ -1440,7 +1515,7 @@ async fn shared_file_state_async(location: &Location) -> VfsResult<Arc<CachedFil
 
     {
         let registry = FILE_SHARED_STATES.lock();
-        if let Some(state) = registry.get(&key).and_then(Weak::upgrade) {
+        if let Some(state) = registry.get(&key) {
             return Ok(state);
         }
     }
@@ -1454,13 +1529,13 @@ async fn shared_file_state_async(location: &Location) -> VfsResult<Arc<CachedFil
     let state = Arc::new(CachedFileShared::new(in_memory, size, backing));
 
     let mut registry = FILE_SHARED_STATES.lock();
-    if let Some(existing_state) = registry.get(&key).and_then(Weak::upgrade) {
+    if let Some(existing_state) = registry.get(&key) {
         drop(registry);
         drop(state);
         return Ok(existing_state);
     }
-    prune_file_shared_states(&mut registry);
-    registry.insert(key, Arc::downgrade(&state));
+    registry.sweep_dead();
+    registry.insert(key, &state);
     drop(registry);
     if !in_memory {
         ACTIVE_DISK_FILE_CACHES.lock().push(state.clone());
@@ -1481,7 +1556,6 @@ pub fn cached_file_size_if_present(location: &Location) -> Option<u64> {
     FILE_SHARED_STATES
         .lock()
         .get(&key)
-        .and_then(Weak::upgrade)
         .map(|state| state.size())
 }
 
@@ -1743,13 +1817,16 @@ impl CachedFile {
                 }
                 page.data()[read..].fill(0);
             }
-            return Ok(alloc::vec![(pn, page)]);
+            let mut pages = Vec::with_capacity(1);
+            pages.push((pn, page));
+            return Ok(pages);
         }
 
         let buffer_len = page_count
             .checked_mul(PAGE_SIZE)
             .ok_or(VfsError::StorageFull)?;
         let mut data = ContiguousReadBuffer::new(buffer_len)?;
+        let mut initialized = 0;
         if !self.in_memory && bytes_available != 0 {
             let wanted = bytes_available.min(buffer_len as u64) as usize;
             let registration = data.register_direct_read(wanted)?;
@@ -1759,6 +1836,10 @@ impl CachedFile {
             if read > wanted {
                 return Err(VfsError::Io);
             }
+            initialized = read;
+        }
+        if initialized < buffer_len {
+            data.data()[initialized..].fill(0);
         }
 
         let mut pages = Vec::with_capacity(page_count);
@@ -2851,11 +2932,13 @@ impl Pollable for File {
 
 #[cfg(test)]
 mod tests {
+    use alloc::sync::Arc;
+
     use axfs_ng_vfs::VfsError;
 
     use super::{
         CachedFileShared, PAGE_ACCESS_LOCK_STRIPES, SHARED_PAGE_BATCH_CAPACITY,
-        checked_shared_page_count,
+        WEAK_STATE_SWEEP_BUDGET, WeakStateRegistry, checked_shared_page_count,
     };
 
     #[test]
@@ -2892,5 +2975,19 @@ mod tests {
             shared.page_fill_lock_indices(u32::MAX - 1, PAGE_ACCESS_LOCK_STRIPES),
             Err(VfsError::StorageFull)
         );
+    }
+
+    #[test]
+    fn weak_state_registry_sweep_has_a_fixed_budget() {
+        let mut registry = WeakStateRegistry::<u32, usize>::default();
+        for key in 0..(WEAK_STATE_SWEEP_BUDGET as u32 + 2) {
+            let state = Arc::new(key as usize);
+            registry.insert(key, &state);
+        }
+
+        registry.sweep_dead();
+        assert_eq!(registry.states.len(), 2);
+        registry.sweep_dead();
+        assert!(registry.states.is_empty());
     }
 }
