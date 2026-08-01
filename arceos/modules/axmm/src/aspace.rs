@@ -165,7 +165,21 @@ impl TlbShootdown {
 
         #[cfg(feature = "ipi")]
         {
+            let mut merged_shootdown = Self {
+                primary: None,
+                additional: alloc::vec::Vec::new(),
+                reclaims: DeferredReclaims::default(),
+            };
             for (asid, invalidation) in primary.into_iter().chain(additional) {
+                merged_shootdown.merge_invalidation(asid, invalidation);
+            }
+            let Self {
+                primary: merged_primary,
+                additional: merged_additional,
+                ..
+            } = merged_shootdown;
+
+            for (asid, invalidation) in merged_primary.into_iter().chain(merged_additional) {
                 let flush_result = match invalidation {
                     TlbInvalidation::Range {
                         start,
