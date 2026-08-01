@@ -10,6 +10,14 @@ const TASK_BLOCK: u64 = 3;
 const TASK_WAKE: u64 = 4;
 const TASK_EXIT: u64 = 5;
 const TASK_ENQUEUE: u64 = 6;
+const PHASE_MARKER: u64 = 7;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u64)]
+pub enum PhaseBoundary {
+    Begin = 1,
+    End   = 2,
+}
 
 #[derive(Clone, Copy)]
 pub(crate) enum EnqueueReason {
@@ -109,4 +117,16 @@ pub(crate) fn task_enqueue(
         queue_depth as u64,
         reason as u64,
     );
+}
+
+pub fn phase_marker(boundary: PhaseBoundary, phase: &[u8]) {
+    let mut encoded = [0_u8; 16];
+    let len = phase.len().min(encoded.len());
+    encoded[..len].copy_from_slice(&phase[..len]);
+    let phase0 = u64::from_le_bytes(encoded[..8].try_into().unwrap());
+    let phase1 = u64::from_le_bytes(encoded[8..].try_into().unwrap());
+    let task_id = crate::CurrentTask::try_get()
+        .map(|current| current.id().as_u64())
+        .unwrap_or(0);
+    emit(PHASE_MARKER, boundary as u64, task_id, phase0, phase1, 0);
 }
