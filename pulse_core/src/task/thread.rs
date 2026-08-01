@@ -131,7 +131,7 @@ impl Thread {
     }
 
     pub fn notify_signal_pending(&self, sig: usize) {
-        let wake_context = WakeContext::new(WakeSource::Signal, sig as u64);
+        let wake_context = WakeContext::new(|| (WakeSource::Signal, sig as u64));
         self.signal
             .wait_queue()
             .notify_all_with_context(true, wake_context);

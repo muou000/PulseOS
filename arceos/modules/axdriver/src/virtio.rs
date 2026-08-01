@@ -1063,6 +1063,41 @@ cfg_if! {
                 }
             }
 
+            #[cfg(feature = "multitask")]
+            fn record_request_wait(&self, token: u16) {
+                let context = axtask::WaitContext::new_optional(|| {
+                    let reason = match self.buffer {
+                        FutureBuffer::Read(_) => axtask::WaitReason::VirtioBlkRead,
+                        FutureBuffer::Write(_) => axtask::WaitReason::VirtioBlkWrite,
+                        FutureBuffer::Flush(_) => return None,
+                    };
+                    Some((
+                        reason,
+                        Arc::as_ptr(&self.inner) as usize as u64,
+                        u64::from(token),
+                    ))
+                });
+                if let Some(context) = context {
+                    axtask::future::set_current_wait_context(context);
+                }
+            }
+
+            #[cfg(feature = "multitask")]
+            fn record_queue_full_wait(&self) {
+                axtask::future::set_current_wait_context(axtask::WaitContext::new(|| {
+                    let operation = match self.buffer {
+                        FutureBuffer::Read(_) => 1,
+                        FutureBuffer::Write(_) => 2,
+                        FutureBuffer::Flush(_) => 3,
+                    };
+                    (
+                        axtask::WaitReason::VirtioBlkQueueFull,
+                        Arc::as_ptr(&self.inner) as usize as u64,
+                        operation,
+                    )
+                }));
+            }
+
             fn can_suspend() -> bool {
                 #[cfg(all(feature = "multitask", feature = "irq"))]
                 {
@@ -1168,6 +1203,8 @@ cfg_if! {
                             // timer rechecks the ring and wakes the registered
                             // request if a PCI interrupt is lost.
                             this.inner.arm_completion_recheck();
+                            #[cfg(feature = "multitask")]
+                            this.record_request_wait(token);
                             return Poll::Pending;
                         }
                         core::hint::spin_loop();
@@ -1268,6 +1305,8 @@ cfg_if! {
                             this.request = Some(request);
                             if can_suspend {
                                 this.inner.arm_completion_recheck();
+                                #[cfg(feature = "multitask")]
+                                this.record_queue_full_wait();
                                 return Poll::Pending;
                             }
                             core::hint::spin_loop();

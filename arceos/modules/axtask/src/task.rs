@@ -58,6 +58,8 @@ pub struct TaskInner {
     state: AtomicU8,
     #[cfg(feature = "qperf-trace")]
     qperf_block_sequence: AtomicU64,
+    #[cfg(feature = "qperf-trace")]
+    qperf_pending_wait_context: SpinNoIrq<Option<crate::wait_queue::WaitContext>>,
 
     /// CPU affinity mask.
     cpumask: SpinNoIrq<AxCpuMask>,
@@ -177,6 +179,21 @@ impl TaskInner {
     #[cfg(feature = "qperf-trace")]
     pub(crate) fn qperf_block_sequence(&self) -> u64 {
         self.qperf_block_sequence.load(Ordering::Relaxed)
+    }
+
+    #[cfg(feature = "qperf-trace")]
+    pub(crate) fn clear_qperf_pending_wait_context(&self) {
+        *self.qperf_pending_wait_context.lock() = None;
+    }
+
+    #[cfg(feature = "qperf-trace")]
+    pub(crate) fn set_qperf_pending_wait_context(&self, context: crate::wait_queue::WaitContext) {
+        *self.qperf_pending_wait_context.lock() = Some(context);
+    }
+
+    #[cfg(feature = "qperf-trace")]
+    pub(crate) fn take_qperf_pending_wait_context(&self) -> Option<crate::wait_queue::WaitContext> {
+        self.qperf_pending_wait_context.lock().take()
     }
 
     /// Gets the name of the task.
@@ -311,6 +328,8 @@ impl TaskInner {
             state: AtomicU8::new(TaskState::Ready as u8),
             #[cfg(feature = "qperf-trace")]
             qperf_block_sequence: AtomicU64::new(0),
+            #[cfg(feature = "qperf-trace")]
+            qperf_pending_wait_context: SpinNoIrq::new(None),
             // By default, the task is allowed to run on all CPUs.
             cpumask: SpinNoIrq::new(cpumask),
             in_wait_queue: AtomicBool::new(false),

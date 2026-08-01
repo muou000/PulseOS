@@ -50,11 +50,13 @@ impl<T: ?Sized> RwLock<T> {
                 }
             } else {
                 self.wq.wait_until_with_context(
-                    WaitContext::new(
-                        WaitReason::RwLockRead,
-                        self as *const Self as *const () as usize as u64,
-                        current_state as i64 as u64,
-                    ),
+                    WaitContext::new(|| {
+                        (
+                            WaitReason::RwLockRead,
+                            self as *const Self as *const () as usize as u64,
+                            current_state as i64 as u64,
+                        )
+                    }),
                     || {
                         self.state.load(Ordering::Relaxed) >= 0
                             && self.waiting_writers.load(Ordering::Relaxed) == 0
@@ -83,13 +85,14 @@ impl<T: ?Sized> RwLock<T> {
             {
                 break;
             }
-            let blocking_state = self.state.load(Ordering::Relaxed);
             self.wq.wait_until_with_context(
-                WaitContext::new(
-                    WaitReason::RwLockWrite,
-                    self as *const Self as *const () as usize as u64,
-                    blocking_state as i64 as u64,
-                ),
+                WaitContext::new(|| {
+                    (
+                        WaitReason::RwLockWrite,
+                        self as *const Self as *const () as usize as u64,
+                        self.state.load(Ordering::Relaxed) as i64 as u64,
+                    )
+                }),
                 || self.state.load(Ordering::Relaxed) == 0,
             );
         }

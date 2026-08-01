@@ -57,11 +57,13 @@ unsafe impl lock_api::RawMutex for RawMutex {
                     );
                     // Wait until the lock looks unlocked before retrying
                     self.wq.wait_until_with_context(
-                        WaitContext::new(
-                            WaitReason::Mutex,
-                            self as *const Self as usize as u64,
-                            owner_id,
-                        ),
+                        WaitContext::new(|| {
+                            (
+                                WaitReason::Mutex,
+                                self as *const Self as usize as u64,
+                                owner_id,
+                            )
+                        }),
                         || !self.is_locked(),
                     );
                 }

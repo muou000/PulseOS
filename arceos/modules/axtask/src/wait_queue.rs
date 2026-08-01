@@ -65,22 +65,23 @@ pub(crate) type WaitQueueGuard<'a> = SpinNoIrqGuard<'a, VecDeque<AxTaskRef>>;
 #[repr(u64)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WaitReason {
-    WaitQueue      = 1,
-    Future         = 2,
-    MultiWait      = 3,
-    Sleep          = 4,
-    Mutex          = 5,
-    RwLockRead     = 6,
-    RwLockWrite    = 7,
-    Futex          = 8,
-    FutexWaitV     = 9,
-    VirtioBlkRead  = 10,
-    VirtioBlkWrite = 11,
-    Gc             = 12,
-    ChildWait      = 13,
-    Vfork          = 14,
-    Signal         = 15,
-    NetworkPoll    = 16,
+    WaitQueue          = 1,
+    Future             = 2,
+    MultiWait          = 3,
+    Sleep              = 4,
+    Mutex              = 5,
+    RwLockRead         = 6,
+    RwLockWrite        = 7,
+    Futex              = 8,
+    FutexWaitV         = 9,
+    VirtioBlkRead      = 10,
+    VirtioBlkWrite     = 11,
+    Gc                 = 12,
+    ChildWait          = 13,
+    Vfork              = 14,
+    Signal             = 15,
+    NetworkPoll        = 16,
+    VirtioBlkQueueFull = 17,
 }
 
 /// Typed context retained with a blocked task interval.
@@ -95,16 +96,38 @@ pub struct WaitContext {
 }
 
 impl WaitContext {
-    pub const fn new(reason: WaitReason, resource_id: u64, resource_detail: u64) -> Self {
+    #[inline(always)]
+    pub fn new(context: impl FnOnce() -> (WaitReason, u64, u64)) -> Self {
+        #[cfg(feature = "qperf-trace")]
+        {
+            let (reason, resource_id, resource_detail) = context();
+            Self {
+                reason,
+                resource_id,
+                resource_detail,
+            }
+        }
         #[cfg(not(feature = "qperf-trace"))]
-        let _ = (reason, resource_id, resource_detail);
-        Self {
-            #[cfg(feature = "qperf-trace")]
-            reason,
-            #[cfg(feature = "qperf-trace")]
-            resource_id,
-            #[cfg(feature = "qperf-trace")]
-            resource_detail,
+        {
+            let _ = context;
+            Self {}
+        }
+    }
+
+    #[inline(always)]
+    pub fn new_optional(context: impl FnOnce() -> Option<(WaitReason, u64, u64)>) -> Option<Self> {
+        #[cfg(feature = "qperf-trace")]
+        {
+            context().map(|(reason, resource_id, resource_detail)| Self {
+                reason,
+                resource_id,
+                resource_detail,
+            })
+        }
+        #[cfg(not(feature = "qperf-trace"))]
+        {
+            let _ = context;
+            None
         }
     }
 
@@ -151,23 +174,36 @@ pub struct WakeContext {
 }
 
 impl WakeContext {
-    pub const fn new(source: WakeSource, source_id: u64) -> Self {
+    #[inline(always)]
+    pub fn new(context: impl FnOnce() -> (WakeSource, u64)) -> Self {
+        #[cfg(feature = "qperf-trace")]
+        {
+            let (source, source_id) = context();
+            Self { source, source_id }
+        }
         #[cfg(not(feature = "qperf-trace"))]
-        let _ = (source, source_id);
-        Self {
-            #[cfg(feature = "qperf-trace")]
-            source,
-            #[cfg(feature = "qperf-trace")]
-            source_id,
+        {
+            let _ = context;
+            Self {}
         }
     }
 
     pub const fn unknown() -> Self {
-        Self::new(WakeSource::Unknown, 0)
+        Self {
+            #[cfg(feature = "qperf-trace")]
+            source: WakeSource::Unknown,
+            #[cfg(feature = "qperf-trace")]
+            source_id: 0,
+        }
     }
 
     pub const fn task() -> Self {
-        Self::new(WakeSource::Task, 0)
+        Self {
+            #[cfg(feature = "qperf-trace")]
+            source: WakeSource::Task,
+            #[cfg(feature = "qperf-trace")]
+            source_id: 0,
+        }
     }
 
     #[cfg(feature = "qperf-trace")]
@@ -180,6 +216,12 @@ impl WakeContext {
         self.source_id
     }
 }
+
+#[cfg(not(feature = "qperf-trace"))]
+const _: () = {
+    assert!(core::mem::size_of::<WaitContext>() == 0);
+    assert!(core::mem::size_of::<WakeContext>() == 0);
+};
 
 impl WaitQueue {
     /// Creates an empty wait queue.
@@ -200,11 +242,13 @@ impl WaitQueue {
 
     #[inline]
     fn wait_context(&self) -> WaitContext {
-        WaitContext::new(
-            WaitReason::WaitQueue,
-            self as *const Self as usize as u64,
-            0,
-        )
+        WaitContext::new(|| {
+            (
+                WaitReason::WaitQueue,
+                self as *const Self as usize as u64,
+                0,
+            )
+        })
     }
 
     /// Cancel events by removing the task from the wait queue.
@@ -394,7 +438,7 @@ impl WaitQueue {
         Self::wait_multiple_timeout_until_with_context(
             queues,
             dur,
-            WaitContext::new(WaitReason::MultiWait, resource_id, queues.len() as u64),
+            WaitContext::new(|| (WaitReason::MultiWait, resource_id, queues.len() as u64)),
             condition,
         )
     }

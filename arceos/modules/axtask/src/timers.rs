@@ -36,7 +36,7 @@ impl TimerEvent for AxTimerEvent {
                     select_wake_run_queue::<NoOp>(&task).unblock_task_with_context(
                         task,
                         true,
-                        WakeContext::new(WakeSource::Timer, ticket_id),
+                        WakeContext::new(|| (WakeSource::Timer, ticket_id)),
                     );
                 }
             }
