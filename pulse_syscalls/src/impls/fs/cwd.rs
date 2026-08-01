@@ -3,7 +3,7 @@ use linux_raw_sys::general::{CAP_SYS_CHROOT, X_OK};
 
 use crate::impls::{
     fs::common::{check_faccess_permission, get_fd_entry, resolve_location_at_ptr},
-    utils::{alloc_zeroed_bytes, read_user_cstring, with_process, write_user_bytes},
+    utils::{alloc_zeroed_bytes, with_process, write_user_bytes},
 };
 
 pub fn sys_getcwd(buf: usize, size: usize) -> isize {
@@ -42,11 +42,12 @@ pub fn sys_getcwd(buf: usize, size: usize) -> isize {
 
 pub fn sys_chdir(path: usize) -> isize {
     axlog::debug!("sys_chdir: path={:#x}", path);
-    let path = match read_user_cstring(path) {
-        Ok(path) => path,
+    let mut buf = [0u8; 4096];
+    let len = match crate::impls::utils::read_user_cstring_to_slice(path, &mut buf) {
+        Ok(l) => l,
         Err(e) => return -e.code() as isize,
     };
-    let path = match path.to_str() {
+    let path = match core::str::from_utf8(&buf[..len]) {
         Ok(path) => path,
         Err(_) => return -LinuxError::EINVAL.code() as isize,
     };
