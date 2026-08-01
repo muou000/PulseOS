@@ -32,6 +32,7 @@ pub const SHARED_PAGE_BATCH_CAPACITY: usize = 16;
 pub type SharedPagePaddrs = heapless::Vec<(u32, PhysAddr), SHARED_PAGE_BATCH_CAPACITY>;
 
 const WEAK_STATE_SWEEP_BUDGET: usize = 8;
+const FILE_STATE_REGISTRY_SHARDS: usize = 32;
 
 struct WeakStateRegistry<K: Ord + Copy, V> {
     states: BTreeMap<K, Weak<V>>,
@@ -155,13 +156,20 @@ fn file_cache_key(loc: &Location) -> FileCacheKey {
     }
 }
 
+fn file_state_registry_shard(key: FileCacheKey) -> usize {
+    let inode = key.inode as usize ^ (key.inode >> 32) as usize;
+    (key.fs_id.rotate_left(13) ^ inode.rotate_right(7)) % FILE_STATE_REGISTRY_SHARDS
+}
+
 fn node_allows_page_cache(flags: NodeFlags) -> bool {
     !flags.contains(NodeFlags::NON_CACHEABLE)
 }
 
 pub fn invalidate_file_cache(fs_id: usize, inode: u64) {
     let key = FileCacheKey { fs_id, inode };
-    let state = FILE_SHARED_STATES.lock().remove(&key);
+    let state = FILE_SHARED_STATES[file_state_registry_shard(key)]
+        .lock()
+        .remove(&key);
     if let Some(state) = state {
         let removed = {
             let mut caches = ACTIVE_DISK_FILE_CACHES.lock();
@@ -174,8 +182,9 @@ pub fn invalidate_file_cache(fs_id: usize, inode: u64) {
     }
 }
 
-static FILE_SHARED_STATES: Lazy<SpinMutex<WeakStateRegistry<FileCacheKey, CachedFileShared>>> =
-    Lazy::new(|| SpinMutex::new(WeakStateRegistry::default()));
+static FILE_SHARED_STATES: Lazy<
+    [SpinMutex<WeakStateRegistry<FileCacheKey, CachedFileShared>>; FILE_STATE_REGISTRY_SHARDS],
+> = Lazy::new(|| core::array::from_fn(|_| SpinMutex::new(WeakStateRegistry::default())));
 
 // Disk caches survive descriptor close and are released after explicit global
 // writeback. Stage 2 adds bounded retention and memory-pressure reclaim.
@@ -272,12 +281,13 @@ pub struct ExecAccessGuard {
     _lease: Arc<ExecAccessLease>,
 }
 
-static INODE_ACCESS_STATES: Lazy<SpinMutex<WeakStateRegistry<FileCacheKey, InodeAccessState>>> =
-    Lazy::new(|| SpinMutex::new(WeakStateRegistry::default()));
+static INODE_ACCESS_STATES: Lazy<
+    [SpinMutex<WeakStateRegistry<FileCacheKey, InodeAccessState>>; FILE_STATE_REGISTRY_SHARDS],
+> = Lazy::new(|| core::array::from_fn(|_| SpinMutex::new(WeakStateRegistry::default())));
 
 fn inode_access_state(location: &Location) -> Arc<InodeAccessState> {
     let key = file_cache_key(location);
-    let mut registry = INODE_ACCESS_STATES.lock();
+    let mut registry = INODE_ACCESS_STATES[file_state_registry_shard(key)].lock();
     if let Some(state) = registry.get(&key) {
         return state;
     }
@@ -625,14 +635,115 @@ const PAGE_CACHE_EVICTION_BATCH: usize = 256;
 const PAGE_CACHE_SCAN_MULTIPLIER: usize = 4;
 const PAGE_CACHE_MIN_SCAN: usize = 64;
 const PAGE_CACHE_RECLAIM_LOG_INTERVAL: usize = 4096;
-const PAGE_ACCESS_LOCK_STRIPES: usize = 256;
+const WRITE_STAGING_SIZE: usize = 64 * 1024;
+const MAX_WRITE_ACCESS_PAGES: usize = WRITE_STAGING_SIZE / PAGE_SIZE + 1;
 const WRITEBACK_CONCURRENCY: usize = 4;
+// Read-ahead covers 16 pages and the largest staged write touches 17 pages.
+// Thirty-two per-file stripes keep those windows collision-free without
+// retaining hundreds of async locks for every disk file cache.
+const PAGE_ACCESS_LOCK_STRIPES: usize = 32;
 
-static PAGE_ACCESS_LOCKS: Lazy<Vec<async_lock::RwLock<()>>> = Lazy::new(|| {
-    (0..PAGE_ACCESS_LOCK_STRIPES)
-        .map(|_| async_lock::RwLock::new(()))
-        .collect()
-});
+type PageAccessLockIndices = heapless::Vec<usize, PAGE_ACCESS_LOCK_STRIPES>;
+
+struct PageAccessDomain {
+    // These locks are scoped to one cached file. They serialize cache fills
+    // and writes without allocating a lock or touching a BTreeMap for every
+    // page-cache access. Resident reads only need the page-cache mutex.
+    locks: [async_lock::Mutex<()>; PAGE_ACCESS_LOCK_STRIPES],
+}
+
+impl Default for PageAccessDomain {
+    fn default() -> Self {
+        Self {
+            locks: core::array::from_fn(|_| async_lock::Mutex::new(())),
+        }
+    }
+}
+
+impl PageAccessDomain {
+    #[inline]
+    fn lock_for_page(&self, pn: u32) -> &async_lock::Mutex<()> {
+        crate::buildstorm_stat_inc!(PAGE_ACCESS_LOCK_LOOKUPS);
+        &self.locks[pn as usize % PAGE_ACCESS_LOCK_STRIPES]
+    }
+
+    #[inline]
+    fn lock_by_index(&self, index: usize) -> &async_lock::Mutex<()> {
+        debug_assert!(index < PAGE_ACCESS_LOCK_STRIPES);
+        &self.locks[index]
+    }
+
+    async fn acquire_for_page(&self, pn: u32) -> async_lock::MutexGuard<'_, ()> {
+        let lock = self.lock_for_page(pn);
+        #[cfg(feature = "buildstorm-stats")]
+        {
+            if let Some(guard) = lock.try_lock() {
+                crate::buildstorm_stat_inc!(PAGE_ACCESS_LOCK_FAST);
+                return guard;
+            }
+            crate::buildstorm_stat_inc!(PAGE_ACCESS_LOCK_WAIT);
+        }
+        lock.lock().await
+    }
+
+    async fn acquire_by_index(&self, index: usize) -> async_lock::MutexGuard<'_, ()> {
+        let lock = self.lock_by_index(index);
+        #[cfg(feature = "buildstorm-stats")]
+        {
+            if let Some(guard) = lock.try_lock() {
+                crate::buildstorm_stat_inc!(PAGE_ACCESS_LOCK_FAST);
+                return guard;
+            }
+            crate::buildstorm_stat_inc!(PAGE_ACCESS_LOCK_WAIT);
+        }
+        lock.lock().await
+    }
+
+    fn locks_for_range(&self, pn: u32, page_count: usize) -> VfsResult<PageAccessLockIndices> {
+        let page_count = page_count.max(1);
+        crate::buildstorm_stat_add!(PAGE_ACCESS_LOCK_LOOKUPS, page_count);
+        let last_offset = u32::try_from(page_count - 1).map_err(|_| VfsError::StorageFull)?;
+        pn.checked_add(last_offset).ok_or(VfsError::StorageFull)?;
+
+        let mut indices = PageAccessLockIndices::new();
+        if page_count >= PAGE_ACCESS_LOCK_STRIPES {
+            for index in 0..PAGE_ACCESS_LOCK_STRIPES {
+                indices.push(index).map_err(|_| VfsError::StorageFull)?;
+            }
+        } else {
+            for offset in 0..page_count {
+                let page_num = pn
+                    .checked_add(u32::try_from(offset).map_err(|_| VfsError::StorageFull)?)
+                    .ok_or(VfsError::StorageFull)?;
+                let index = page_num as usize % PAGE_ACCESS_LOCK_STRIPES;
+                if !indices.contains(&index) {
+                    indices.push(index).map_err(|_| VfsError::StorageFull)?;
+                }
+            }
+            indices.sort_unstable();
+        }
+        crate::buildstorm_stat_add!(PAGE_ACCESS_STRIPES_LOCKED, indices.len());
+        Ok(indices)
+    }
+}
+
+fn checked_page_span(offset: u64, len: usize) -> VfsResult<(u32, usize)> {
+    if len == 0 {
+        return Err(VfsError::InvalidInput);
+    }
+    let end = offset
+        .checked_add(len as u64)
+        .ok_or(VfsError::InvalidInput)?;
+    let start_page = u32::try_from(offset / PAGE_SIZE as u64).map_err(|_| VfsError::StorageFull)?;
+    let end_page = end.div_ceil(PAGE_SIZE as u64);
+    let page_count = usize::try_from(end_page.saturating_sub(start_page as u64))
+        .map_err(|_| VfsError::StorageFull)?;
+    let last_offset = u32::try_from(page_count - 1).map_err(|_| VfsError::StorageFull)?;
+    start_page
+        .checked_add(last_offset)
+        .ok_or(VfsError::StorageFull)?;
+    Ok((start_page, page_count))
+}
 
 fn write_all_at(
     mut write: impl FnMut(&[u8], u64) -> VfsResult<usize>,
@@ -750,12 +861,98 @@ async fn append_source_async<R: Read + IoBuf>(
 }
 
 #[derive(Debug)]
+struct ContiguousPageGroup {
+    addr: VirtAddr,
+    pages: usize,
+}
+
+impl Drop for ContiguousPageGroup {
+    fn drop(&mut self) {
+        global_allocator().dealloc_pages(self.addr.as_usize(), self.pages);
+    }
+}
+
+impl ContiguousPageGroup {
+    fn new(pages: usize) -> VfsResult<Arc<Self>> {
+        if pages == 0 {
+            return Err(VfsError::InvalidInput);
+        }
+        let addr = global_allocator()
+            .alloc_pages(pages, PAGE_SIZE)
+            .map_err(|_| VfsError::NoMemory)?;
+        Ok(Arc::new(Self {
+            addr: addr.into(),
+            pages,
+        }))
+    }
+
+    fn len(&self) -> VfsResult<usize> {
+        self.pages
+            .checked_mul(PAGE_SIZE)
+            .ok_or(VfsError::StorageFull)
+    }
+
+    fn page_addr(&self, index: usize) -> VfsResult<VirtAddr> {
+        if index >= self.pages {
+            return Err(VfsError::InvalidInput);
+        }
+        let offset = index.checked_mul(PAGE_SIZE).ok_or(VfsError::StorageFull)?;
+        self.addr
+            .as_usize()
+            .checked_add(offset)
+            .map(Into::into)
+            .ok_or(VfsError::StorageFull)
+    }
+
+    /// The group is private until every direct read has completed and it is
+    /// published as page-cache entries. Callers must preserve that exclusivity.
+    unsafe fn bytes_mut(&self, len: usize) -> VfsResult<&mut [u8]> {
+        if len > self.len()? {
+            return Err(VfsError::InvalidInput);
+        }
+        // SAFETY: upheld by the caller as documented above.
+        Ok(unsafe { core::slice::from_raw_parts_mut(self.addr.as_mut_ptr(), len) })
+    }
+
+    fn register_direct_read(
+        self: &Arc<Self>,
+        len: usize,
+    ) -> VfsResult<axdriver::prelude::OwnedReadBufferRegistration> {
+        if len == 0 || len > self.len()? {
+            return Err(VfsError::InvalidInput);
+        }
+        let ptr = NonNull::new(self.addr.as_mut_ptr()).ok_or(VfsError::BadState)?;
+        // SAFETY: the group is one contiguous allocation and remains private
+        // until the direct read completes. The cloned owner also survives a
+        // cancelled read until the block driver's lease is released.
+        unsafe { axdriver::prelude::register_owned_read_buffer(ptr, len, self.clone()) }
+            .map_err(|_| VfsError::BadState)
+    }
+}
+
+#[derive(Debug)]
+enum PageCacheFrameBacking {
+    Standalone,
+    Group(Arc<ContiguousPageGroup>),
+}
+
+#[derive(Debug)]
 struct PageCacheFrame {
     addr: VirtAddr,
+    backing: PageCacheFrameBacking,
+}
+
+impl PageCacheFrame {
+    fn is_group_backed(&self) -> bool {
+        matches!(self.backing, PageCacheFrameBacking::Group(_))
+    }
 }
 
 impl Drop for PageCacheFrame {
     fn drop(&mut self) {
+        if !matches!(self.backing, PageCacheFrameBacking::Standalone) {
+            return;
+        }
         let paddr = virt_to_phys(self.addr);
         if let Some(ref_count) = axalloc::frame_table().try_get_ref(paddr) {
             if ref_count == 0 {
@@ -778,6 +975,15 @@ pub struct PageCache {
 
 impl PageCache {
     fn new(skip_zero: bool) -> VfsResult<Self> {
+        let frame = Self::new_standalone_frame(skip_zero)?;
+        Ok(Self {
+            frame,
+            dirty: false,
+            may_write_mapping: false,
+        })
+    }
+
+    fn new_standalone_frame(skip_zero: bool) -> VfsResult<Arc<PageCacheFrame>> {
         let addr = global_allocator()
             .alloc_pages(1, PAGE_SIZE)
             .inspect_err(|err| {
@@ -787,11 +993,38 @@ impl PageCache {
         if !skip_zero {
             unsafe { core::ptr::write_bytes(addr as *mut u8, 0, PAGE_SIZE) };
         }
+        Ok(Arc::new(PageCacheFrame {
+            addr: addr.into(),
+            backing: PageCacheFrameBacking::Standalone,
+        }))
+    }
+
+    fn new_grouped(group: Arc<ContiguousPageGroup>, index: usize) -> VfsResult<Self> {
         Ok(Self {
-            frame: Arc::new(PageCacheFrame { addr: addr.into() }),
+            frame: Arc::new(PageCacheFrame {
+                addr: group.page_addr(index)?,
+                backing: PageCacheFrameBacking::Group(group),
+            }),
             dirty: false,
             may_write_mapping: false,
         })
+    }
+
+    fn detach_group_frame(&mut self) -> VfsResult<()> {
+        if !self.frame.is_group_backed() {
+            return Ok(());
+        }
+        let source = self.frame.addr;
+        let frame = Self::new_standalone_frame(true)?;
+        // SAFETY: the page is protected by the page-cache mutex while this
+        // transition runs. The grouped page is no longer in direct I/O, and
+        // the new standalone page does not overlap it.
+        unsafe {
+            core::ptr::copy_nonoverlapping(source.as_ptr(), frame.addr.as_mut_ptr(), PAGE_SIZE);
+        }
+        self.frame = frame;
+        crate::buildstorm_stat_inc!(PAGE_FILL_MAPPING_DETACHES);
+        Ok(())
     }
 
     pub fn paddr(&self) -> PhysAddr {
@@ -803,12 +1036,16 @@ impl PageCache {
     }
 
     fn has_user_mapping(&self) -> bool {
+        if self.frame.is_group_backed() {
+            return false;
+        }
         axalloc::frame_table()
             .try_get_ref(self.paddr())
             .is_some_and(|ref_count| ref_count > 1)
     }
 
     fn pin_for_mapping(&mut self, may_write: bool) -> VfsResult<PhysAddr> {
+        self.detach_group_frame()?;
         let paddr = self.paddr();
         let ref_count = axalloc::frame_table()
             .try_get_ref(paddr)
@@ -852,68 +1089,15 @@ impl Drop for PageCache {
     }
 }
 
-struct ContiguousReadAllocation {
-    addr: VirtAddr,
-    pages: usize,
-}
-
-impl Drop for ContiguousReadAllocation {
-    fn drop(&mut self) {
-        global_allocator().dealloc_pages(self.addr.as_usize(), self.pages);
-    }
-}
-
-struct ContiguousReadBuffer {
-    allocation: Arc<ContiguousReadAllocation>,
-    len: usize,
-}
-
-impl ContiguousReadBuffer {
-    fn new(len: usize) -> VfsResult<Self> {
-        if len == 0 {
-            return Err(VfsError::InvalidInput);
-        }
-        let pages = len.div_ceil(PAGE_SIZE);
-        let addr = global_allocator()
-            .alloc_pages(pages, PAGE_SIZE)
-            .map_err(|_| VfsError::NoMemory)?;
-        Ok(Self {
-            allocation: Arc::new(ContiguousReadAllocation {
-                addr: addr.into(),
-                pages,
-            }),
-            len,
-        })
-    }
-
-    fn data(&mut self) -> &mut [u8] {
-        // The allocation owner has no byte-access API. During an awaited read,
-        // the only other reference is the driver's direct-read lease.
-        unsafe { core::slice::from_raw_parts_mut(self.allocation.addr.as_mut_ptr(), self.len) }
-    }
-
-    fn register_direct_read(
-        &self,
-        len: usize,
-    ) -> VfsResult<axdriver::prelude::OwnedReadBufferRegistration> {
-        if len == 0 || len > self.len {
-            return Err(VfsError::InvalidInput);
-        }
-        let ptr = NonNull::new(self.allocation.addr.as_mut_ptr()).ok_or(VfsError::BadState)?;
-        // SAFETY: `alloc_pages` returned one physically contiguous allocation.
-        // This private buffer is inaccessible outside the fill operation, and
-        // the cloned owner extends its lifetime across request cancellation.
-        unsafe { axdriver::prelude::register_owned_read_buffer(ptr, len, self.allocation.clone()) }
-            .map_err(|_| VfsError::BadState)
-    }
-}
-
 struct EvictListener {
     listener: Box<dyn Fn(u32, &PageCache) + Send + Sync>,
 }
 
 struct CachedFileShared {
+    // Page stripes protect fill/write coherence; inline entries keep the hot
+    // cache-hit path to one cache lock without per-page Arc/Mutex overhead.
     page_cache: Mutex<LruCache<u32, PageCache>>,
+    page_access: PageAccessDomain,
     cache_soft_limit: AtomicUsize,
     evict_listeners: Mutex<Vec<Arc<EvictListener>>>,
     backing: Option<FileNode>,
@@ -922,12 +1106,19 @@ struct CachedFileShared {
     cache_generation: AtomicU64,
 }
 
+#[derive(Clone, Copy)]
+enum CachedWriteAccess {
+    PageRange,
+    ExclusiveFileHeld,
+}
+
 impl CachedFileShared {
     fn new(in_memory: bool, size: u64, backing: Option<FileNode>) -> Self {
         Self {
             // The LRU's own capacity eagerly reserves hash-table metadata.
             // Keep storage lazy and enforce the disk limit during admission.
             page_cache: Mutex::new(LruCache::unbounded()),
+            page_access: PageAccessDomain::default(),
             cache_soft_limit: AtomicUsize::new(if in_memory {
                 usize::MAX
             } else {
@@ -956,28 +1147,6 @@ impl CachedFileShared {
         self.size.fetch_max(size, Ordering::AcqRel);
     }
 
-    fn page_fill_lock_index(&self, pn: u32) -> usize {
-        let file_hash = (self as *const Self as usize).rotate_right(6);
-        (file_hash ^ pn as usize) % PAGE_ACCESS_LOCK_STRIPES
-    }
-
-    fn page_fill_lock_indices(&self, pn: u32, page_count: usize) -> VfsResult<Vec<usize>> {
-        if page_count >= PAGE_ACCESS_LOCK_STRIPES {
-            let last_offset = u32::try_from(page_count - 1).map_err(|_| VfsError::StorageFull)?;
-            pn.checked_add(last_offset).ok_or(VfsError::StorageFull)?;
-            return Ok((0..PAGE_ACCESS_LOCK_STRIPES).collect());
-        }
-        let mut indices = Vec::with_capacity(page_count);
-        for offset in 0..page_count {
-            let offset = u32::try_from(offset).map_err(|_| VfsError::StorageFull)?;
-            let page_num = pn.checked_add(offset).ok_or(VfsError::StorageFull)?;
-            indices.push(self.page_fill_lock_index(page_num));
-        }
-        indices.sort_unstable();
-        indices.dedup();
-        Ok(indices)
-    }
-
     fn pop_clean_lru_pages(
         cache: &mut LruCache<u32, PageCache>,
         max: usize,
@@ -993,12 +1162,13 @@ impl CachedFileShared {
             let Some((&pn, page)) = cache.peek_lru() else {
                 break;
             };
-            if !page.dirty && !page.has_user_mapping() {
-                if let Some(entry) = cache.pop_lru() {
-                    evicted.push(entry);
-                }
-            } else {
+            if page.dirty || page.has_user_mapping() {
                 cache.promote(&pn);
+                scanned += 1;
+                continue;
+            }
+            if let Some(entry) = cache.pop_lru() {
+                evicted.push(entry);
             }
             scanned += 1;
         }
@@ -1011,6 +1181,9 @@ impl CachedFileShared {
 
     fn try_evict_clean_pages(&self, max: usize) -> usize {
         let limit = max.min(PAGE_CACHE_EVICTION_BATCH);
+        let Some(_io_guard) = self.io_lock.try_read() else {
+            return 0;
+        };
         let Some(listeners) = self.evict_listeners.try_lock() else {
             return 0;
         };
@@ -1020,26 +1193,11 @@ impl CachedFileShared {
         let Some(mut cache) = self.page_cache.try_lock() else {
             return 0;
         };
-        let scan_limit = cache.len().min(
-            limit
-                .saturating_mul(PAGE_CACHE_SCAN_MULTIPLIER)
-                .max(PAGE_CACHE_MIN_SCAN),
-        );
-        let mut evicted = 0;
-        let mut scanned = 0;
-        while evicted < limit && scanned < scan_limit {
-            let Some((&pn, page)) = cache.peek_lru() else {
-                break;
-            };
-            if !page.dirty && !page.has_user_mapping() {
-                let page = cache.pop_lru().unwrap().1;
-                drop(page);
-                evicted += 1;
-            } else {
-                cache.promote(&pn);
-            }
-            scanned += 1;
-        }
+        let evicted_pages = Self::pop_clean_lru_pages(&mut cache, limit);
+        let evicted = evicted_pages.len();
+        drop(cache);
+        drop(listeners);
+        drop(evicted_pages);
         evicted
     }
 
@@ -1362,16 +1520,17 @@ pub(crate) async fn flush_all_file_caches_async() -> VfsResult<()> {
     first_error.map_or(Ok(()), Err)
 }
 
-const NO_RECLAIM_OWNER: usize = usize::MAX;
+struct ReclaimGuard {
+    slot_mask: usize,
+}
 
-struct ReclaimGuard;
 impl Drop for ReclaimGuard {
     fn drop(&mut self) {
-        PAGE_CACHE_RECLAIM_OWNER.store(NO_RECLAIM_OWNER, Ordering::Release);
+        PAGE_CACHE_RECLAIM_ACTIVE_CPUS.fetch_and(!self.slot_mask, Ordering::Release);
     }
 }
 
-static PAGE_CACHE_RECLAIM_OWNER: AtomicUsize = AtomicUsize::new(NO_RECLAIM_OWNER);
+static PAGE_CACHE_RECLAIM_ACTIVE_CPUS: AtomicUsize = AtomicUsize::new(0);
 static PAGE_CACHE_RECLAIMED_TOTAL: AtomicUsize = AtomicUsize::new(0);
 static PAGE_CACHE_RECLAIM_ZERO_STREAK: AtomicUsize = AtomicUsize::new(0);
 static PAGE_CACHE_RECLAIM_CURSOR: AtomicUsize = AtomicUsize::new(0);
@@ -1384,17 +1543,24 @@ fn page_cache_reclaim_inner(num_pages: usize) -> usize {
     let mut reclaimed = 0;
     let mut file_count = 0;
 
-    let Some(caches) = ACTIVE_DISK_FILE_CACHES.try_lock() else {
-        return 0;
-    };
-
-    let cache_count = caches.len();
+    let cache_count = ACTIVE_DISK_FILE_CACHES
+        .try_lock()
+        .map(|caches| caches.len())
+        .unwrap_or(0);
     if cache_count == 0 {
         return 0;
     }
     let start = PAGE_CACHE_RECLAIM_CURSOR.fetch_add(1, Ordering::Relaxed) % cache_count;
     for offset in 0..cache_count {
-        let file = &caches[(start + offset) % cache_count];
+        let file = {
+            let Some(caches) = ACTIVE_DISK_FILE_CACHES.try_lock() else {
+                break;
+            };
+            if caches.is_empty() {
+                break;
+            }
+            caches[(start + offset) % caches.len()].clone()
+        };
         let freed = file.try_evict_clean_pages(num_pages.saturating_sub(reclaimed));
         reclaimed += freed;
         file_count += 1;
@@ -1450,27 +1616,16 @@ pub fn page_cache_reclaim(num_pages: usize) -> usize {
     }
 
     let cpu_id = axhal::percpu::this_cpu_id();
-    let reclaimed_before = PAGE_CACHE_RECLAIMED_TOTAL.load(Ordering::Acquire);
-    match PAGE_CACHE_RECLAIM_OWNER.compare_exchange(
-        NO_RECLAIM_OWNER,
-        cpu_id,
-        Ordering::AcqRel,
-        Ordering::Acquire,
-    ) {
-        Ok(_) => {}
-        // Re-entry on the owner CPU must not spin waiting for itself.
-        Err(owner) if owner == cpu_id => return 0,
-        Err(_) => {
-            while PAGE_CACHE_RECLAIM_OWNER.load(Ordering::Acquire) != NO_RECLAIM_OWNER {
-                core::hint::spin_loop();
-            }
-            return PAGE_CACHE_RECLAIMED_TOTAL
-                .load(Ordering::Acquire)
-                .wrapping_sub(reclaimed_before);
-        }
+    let slot = cpu_id % usize::BITS as usize;
+    let slot_mask = 1usize << slot;
+    if PAGE_CACHE_RECLAIM_ACTIVE_CPUS.fetch_or(slot_mask, Ordering::AcqRel) & slot_mask != 0 {
+        // Allocation failure can re-enter reclaim while dropping cache state.
+        // Only suppress recursion on the same CPU slot; other CPUs may scan
+        // independent file caches concurrently.
+        return 0;
     }
 
-    let _guard = ReclaimGuard;
+    let _guard = ReclaimGuard { slot_mask };
     let reclaimed = page_cache_reclaim_inner(num_pages);
     if reclaimed > 0 {
         PAGE_CACHE_RECLAIM_ZERO_STREAK.store(0, Ordering::Relaxed);
@@ -1511,10 +1666,11 @@ async fn shared_file_state_async(location: &Location) -> VfsResult<Arc<CachedFil
     }
 
     let key = file_cache_key(location);
+    let registry_shard = file_state_registry_shard(key);
     let in_memory = location.filesystem().name() == "tmpfs";
 
     {
-        let registry = FILE_SHARED_STATES.lock();
+        let registry = FILE_SHARED_STATES[registry_shard].lock();
         if let Some(state) = registry.get(&key) {
             return Ok(state);
         }
@@ -1528,7 +1684,7 @@ async fn shared_file_state_async(location: &Location) -> VfsResult<Arc<CachedFil
     };
     let state = Arc::new(CachedFileShared::new(in_memory, size, backing));
 
-    let mut registry = FILE_SHARED_STATES.lock();
+    let mut registry = FILE_SHARED_STATES[registry_shard].lock();
     if let Some(existing_state) = registry.get(&key) {
         drop(registry);
         drop(state);
@@ -1536,6 +1692,7 @@ async fn shared_file_state_async(location: &Location) -> VfsResult<Arc<CachedFil
     }
     registry.sweep_dead();
     registry.insert(key, &state);
+    crate::buildstorm_stat_inc!(FILE_CACHE_STATES_CREATED);
     drop(registry);
     if !in_memory {
         ACTIVE_DISK_FILE_CACHES.lock().push(state.clone());
@@ -1553,7 +1710,7 @@ pub fn cached_file_size(location: &Location) -> VfsResult<u64> {
 
 pub fn cached_file_size_if_present(location: &Location) -> Option<u64> {
     let key = file_cache_key(location);
-    FILE_SHARED_STATES
+    FILE_SHARED_STATES[file_state_registry_shard(key)]
         .lock()
         .get(&key)
         .map(|state| state.size())
@@ -1669,18 +1826,16 @@ impl CachedFile {
         Ok(())
     }
 
-    fn page_or_insert<'a>(
+    fn page_or_insert(
         &self,
         file: &FileNode,
-        cache: &'a mut LruCache<u32, PageCache>,
+        cache: &mut LruCache<u32, PageCache>,
         pn: u32,
         mut skip_read: bool,
         file_len: u64,
-    ) -> VfsResult<(&'a mut PageCache, Option<(u32, PageCache)>)> {
-        // TODO: Matching the result of `get_mut` confuses compiler. See
-        // https://users.rust-lang.org/t/return-do-not-release-mutable-borrow/55757.
+    ) -> VfsResult<Option<(u32, PageCache)>> {
         if cache.contains(&pn) {
-            return Ok((cache.get_mut(&pn).unwrap(), None));
+            return Ok(None);
         }
         let mut evicted = None;
         let cache_soft_limit = self.shared.cache_soft_limit.load(Ordering::Acquire);
@@ -1730,7 +1885,7 @@ impl CachedFile {
             }
         }
         cache.put(pn, page);
-        Ok((cache.get_mut(&pn).unwrap(), evicted))
+        Ok(evicted)
     }
 
     fn pin_cached_pages(
@@ -1800,14 +1955,18 @@ impl CachedFile {
     ) -> VfsResult<Vec<(u32, PageCache)>> {
         let page_start = pn as u64 * PAGE_SIZE as u64;
         let bytes_available = file_len.saturating_sub(page_start);
+        crate::buildstorm_stat_inc!(PAGE_FILL_CALLS);
+        crate::buildstorm_stat_add!(PAGE_FILL_PAGES, page_count);
 
         if page_count == 1 {
             // A single-page fault can read directly into its final page. This
             // avoids allocating, zeroing, and copying through a temporary Vec.
             let will_read = !self.in_memory && bytes_available != 0;
+            crate::buildstorm_stat_inc!(PAGE_FILL_DIRECT_PAGES);
             let mut page = PageCache::new(will_read)?;
             if will_read {
                 let wanted = bytes_available.min(PAGE_SIZE as u64) as usize;
+                crate::buildstorm_stat_add!(PAGE_FILL_DEVICE_BYTES, wanted);
                 let registration = page.register_direct_read(wanted)?;
                 let read_result = file.read_at(&mut page.data()[..wanted], page_start).await;
                 drop(registration);
@@ -1825,12 +1984,21 @@ impl CachedFile {
         let buffer_len = page_count
             .checked_mul(PAGE_SIZE)
             .ok_or(VfsError::StorageFull)?;
-        let mut data = ContiguousReadBuffer::new(buffer_len)?;
+        crate::buildstorm_stat_add!(PAGE_FILL_CONTIGUOUS_PAGES, page_count);
+        let group = ContiguousPageGroup::new(page_count)?;
         let mut initialized = 0;
         if !self.in_memory && bytes_available != 0 {
             let wanted = bytes_available.min(buffer_len as u64) as usize;
-            let registration = data.register_direct_read(wanted)?;
-            let read_result = file.read_at(&mut data.data()[..wanted], page_start).await;
+            crate::buildstorm_stat_add!(PAGE_FILL_DIRECT_PAGES, page_count);
+            crate::buildstorm_stat_add!(PAGE_FILL_DEVICE_BYTES, wanted);
+            let registration = group.register_direct_read(wanted)?;
+            let read_result = {
+                // SAFETY: `group` is not visible outside this fill operation
+                // until the direct read has completed and its registration is
+                // dropped below.
+                let data = unsafe { group.bytes_mut(wanted)? };
+                file.read_at(data, page_start).await
+            };
             drop(registration);
             let read = read_result?;
             if read > wanted {
@@ -1839,7 +2007,10 @@ impl CachedFile {
             initialized = read;
         }
         if initialized < buffer_len {
-            data.data()[initialized..].fill(0);
+            // SAFETY: no direct read is in flight after the registration above
+            // was dropped, and the group is still private to this fill.
+            let data = unsafe { group.bytes_mut(buffer_len)? };
+            data[initialized..].fill(0);
         }
 
         let mut pages = Vec::with_capacity(page_count);
@@ -1847,11 +2018,10 @@ impl CachedFile {
             let page_num = pn
                 .checked_add(u32::try_from(page_offset).map_err(|_| VfsError::StorageFull)?)
                 .ok_or(VfsError::StorageFull)?;
-            let mut page = PageCache::new(true)?;
-            let start = page_offset * PAGE_SIZE;
-            page.data()
-                .copy_from_slice(&data.data()[start..start + PAGE_SIZE]);
-            pages.push((page_num, page));
+            pages.push((
+                page_num,
+                PageCache::new_grouped(group.clone(), page_offset)?,
+            ));
         }
         Ok(pages)
     }
@@ -1944,10 +2114,15 @@ impl CachedFile {
         pin: Option<bool>,
     ) -> VfsResult<(usize, Option<SharedPagePaddrs>)> {
         let requested_pages = requested_pages.max(1);
-        let lock_indices = self.shared.page_fill_lock_indices(pn, requested_pages)?;
-        let mut fill_guards = Vec::with_capacity(lock_indices.len());
-        for index in lock_indices {
-            fill_guards.push(PAGE_ACCESS_LOCKS[index].write().await);
+        let page_locks = self
+            .shared
+            .page_access
+            .locks_for_range(pn, requested_pages)?;
+        let mut fill_guards = heapless::Vec::<_, PAGE_ACCESS_LOCK_STRIPES>::new();
+        for &index in &page_locks {
+            fill_guards
+                .push(self.shared.page_access.acquire_by_index(index).await)
+                .map_err(|_| VfsError::StorageFull)?;
         }
 
         loop {
@@ -2053,6 +2228,7 @@ impl CachedFile {
 
             let listeners =
                 (!evicted_pages.is_empty()).then(|| self.shared.evict_listeners_snapshot());
+            crate::buildstorm_stat_add!(PAGE_EVICTIONS, evicted_pages.len());
             for (evicted_pn, page) in &evicted_pages {
                 for listener in listeners.as_ref().unwrap().iter() {
                     (listener.listener)(*evicted_pn, page);
@@ -2120,10 +2296,10 @@ impl CachedFile {
     }
 
     pub fn with_page<R>(&self, pn: u32, f: impl FnOnce(Option<&mut PageCache>) -> R) -> R {
-        let access_index = self.shared.page_fill_lock_index(pn);
-        let _page_guard = axtask::future::block_on(PAGE_ACCESS_LOCKS[access_index].write());
+        let _page_guard = axtask::future::block_on(self.shared.page_access.acquire_for_page(pn));
         let _guard = axtask::future::block_on(self.shared.io_lock.read());
-        f(self.shared.page_cache.lock().get_mut(&pn))
+        let mut cache = self.shared.page_cache.lock();
+        f(cache.get_mut(&pn))
     }
 
     pub fn with_page_or_insert<R>(
@@ -2134,13 +2310,14 @@ impl CachedFile {
         let io_guard = axtask::future::block_on(self.shared.io_lock.write());
         let file_len = self.shared.size();
         let mut guard = self.shared.page_cache.lock();
-        let (page, evicted) = self.page_or_insert(
+        let evicted = self.page_or_insert(
             self.inner.entry().as_file()?,
             &mut guard,
             pn,
             false,
             file_len,
         )?;
+        let page = guard.get_mut(&pn).ok_or(VfsError::BadState)?;
         let result = f(page, evicted);
         drop(guard);
         drop(io_guard);
@@ -2164,8 +2341,9 @@ impl CachedFile {
             let page_end = (end - page_start).min(PAGE_SIZE as u64) as usize;
             loop {
                 let hit = {
-                    let access_index = self.shared.page_fill_lock_index(pn);
-                    let _page_guard = PAGE_ACCESS_LOCKS[access_index].read().await;
+                    // A resident page is stable while `page_cache` is held.
+                    // Cache fills and writes take page-access locks, and direct
+                    // I/O invalidation takes the exclusive `io_lock`.
                     let _io_guard = self.shared.io_lock.read().await;
                     let mut cache = self.shared.page_cache.lock();
                     if let Some(page) = cache.get_mut(&pn) {
@@ -2178,8 +2356,10 @@ impl CachedFile {
                     }
                 };
                 if hit {
+                    crate::buildstorm_stat_inc!(PAGE_READ_HITS);
                     break;
                 }
+                crate::buildstorm_stat_inc!(PAGE_READ_MISSES);
 
                 // The page can be invalidated after a fill returns but before
                 // this task reacquires the read lock, so retry the lookup.
@@ -2221,6 +2401,7 @@ impl CachedFile {
             let page = cache.get_mut(&pn).ok_or(VfsError::Io)?;
             page.data()[page_offset..page_offset + len]
                 .copy_from_slice(&data[copied..copied + len]);
+            crate::buildstorm_stat_add!(PAGE_WRITE_BYTES, len);
             if !self.in_memory {
                 page.dirty = true;
             }
@@ -2240,17 +2421,16 @@ impl CachedFile {
         &self,
         mut buf: impl Read + IoBuf,
         offset: u64,
+        access: CachedWriteAccess,
     ) -> VfsResult<usize> {
         let file = self.inner.entry().as_file()?;
         let total = buf.remaining();
-        offset
-            .checked_add(total as u64)
-            .ok_or(VfsError::InvalidInput)?;
         if total == 0 {
             return Ok(0);
         }
+        checked_page_span(offset, total)?;
 
-        let mut staging = alloc::vec![0; total.min(64 * 1024)];
+        let mut staging = alloc::vec![0; total.min(WRITE_STAGING_SIZE)];
         let mut written = 0usize;
         while written < total {
             let wanted = (total - written).min(staging.len());
@@ -2266,10 +2446,35 @@ impl CachedFile {
             let current_offset = offset
                 .checked_add(written as u64)
                 .ok_or(VfsError::InvalidInput)?;
-            match self
-                .write_slice_at_locked_async(file, &staging[..read], current_offset)
-                .await
-            {
+            let result = match access {
+                CachedWriteAccess::PageRange => {
+                    let (start_page, page_count) = checked_page_span(current_offset, read)?;
+                    debug_assert!(page_count <= MAX_WRITE_ACCESS_PAGES);
+                    let page_locks = self
+                        .shared
+                        .page_access
+                        .locks_for_range(start_page, page_count)?;
+                    let mut page_guards = heapless::Vec::<_, PAGE_ACCESS_LOCK_STRIPES>::new();
+                    for &index in &page_locks {
+                        page_guards
+                            .push(self.shared.page_access.acquire_by_index(index).await)
+                            .map_err(|_| VfsError::StorageFull)?;
+                    }
+                    // Preserve the lock order: page access precedes the
+                    // shared side of `io_lock`. Each chunk releases both before
+                    // acquiring the next page range.
+                    let _io_guard = self.shared.io_lock.read().await;
+                    self.write_slice_at_locked_async(file, &staging[..read], current_offset)
+                        .await
+                }
+                // Atomic append already owns the exclusive side of `io_lock`,
+                // so no page-access lock is needed or safe to acquire here.
+                CachedWriteAccess::ExclusiveFileHeld => {
+                    self.write_slice_at_locked_async(file, &staging[..read], current_offset)
+                        .await
+                }
+            };
+            match result {
                 Ok(count) => written += count,
                 Err(err) if written == 0 => return Err(err),
                 Err(_) => break,
@@ -2279,36 +2484,16 @@ impl CachedFile {
     }
 
     pub async fn write_at_async(&self, buf: impl Read + IoBuf, offset: u64) -> VfsResult<usize> {
-        let total = buf.remaining();
-        if total == 0 {
-            return Ok(0);
-        }
-        let end = offset
-            .checked_add(total as u64)
-            .ok_or(VfsError::InvalidInput)?;
-        let start_page =
-            u32::try_from(offset / PAGE_SIZE as u64).map_err(|_| VfsError::StorageFull)?;
-        let end_page = end.div_ceil(PAGE_SIZE as u64);
-        let page_count = usize::try_from(end_page.saturating_sub(start_page as u64))
-            .map_err(|_| VfsError::StorageFull)?;
-        let indices = self
-            .shared
-            .page_fill_lock_indices(start_page, page_count.max(1))?;
-        let mut page_guards = Vec::with_capacity(indices.len());
-        for index in indices {
-            page_guards.push(PAGE_ACCESS_LOCKS[index].write().await);
-        }
-        // Truncate, append reservation and sync take the exclusive side. The
-        // shared side allows writes to disjoint page ranges to progress while
-        // the page guards preserve overlapping-write and read coherence.
-        let _guard = self.shared.io_lock.read().await;
-        self.write_at_locked_async(buf, offset).await
+        self.write_at_locked_async(buf, offset, CachedWriteAccess::PageRange)
+            .await
     }
 
     pub async fn append_async(&self, buf: impl Read + IoBuf) -> VfsResult<(usize, u64)> {
         let _guard = self.shared.io_lock.write().await;
         let len = self.shared.size();
-        let written = self.write_at_locked_async(buf, len).await?;
+        let written = self
+            .write_at_locked_async(buf, len, CachedWriteAccess::ExclusiveFileHeld)
+            .await?;
         let end = len
             .checked_add(written as u64)
             .ok_or(VfsError::InvalidInput)?;
@@ -2937,8 +3122,9 @@ mod tests {
     use axfs_ng_vfs::VfsError;
 
     use super::{
-        CachedFileShared, PAGE_ACCESS_LOCK_STRIPES, SHARED_PAGE_BATCH_CAPACITY,
-        WEAK_STATE_SWEEP_BUDGET, WeakStateRegistry, checked_shared_page_count,
+        CachedFileShared, MAX_WRITE_ACCESS_PAGES, PAGE_ACCESS_LOCK_STRIPES, PAGE_SIZE,
+        PageAccessDomain, SHARED_PAGE_BATCH_CAPACITY, WEAK_STATE_SWEEP_BUDGET, WRITE_STAGING_SIZE,
+        WeakStateRegistry, checked_page_span, checked_shared_page_count,
     };
 
     #[test]
@@ -2964,15 +3150,50 @@ mod tests {
     }
 
     #[test]
-    fn large_page_ranges_lock_each_access_stripe_once() {
-        let shared = CachedFileShared::new(true, 0, None);
-        let indices = shared
-            .page_fill_lock_indices(7, PAGE_ACCESS_LOCK_STRIPES + 3)
-            .unwrap();
-        assert_eq!(indices.len(), PAGE_ACCESS_LOCK_STRIPES);
-        assert!(indices.windows(2).all(|pair| pair[0] < pair[1]));
+    fn page_access_locks_are_file_scoped_and_striped() {
+        let first_file = PageAccessDomain::default();
+        let same_page = first_file.lock_for_page(7);
+        let same_page_again = first_file.lock_for_page(7);
+        assert!(core::ptr::eq(same_page, same_page_again));
+
+        let same_page_guard = same_page.try_lock().unwrap();
+        assert!(same_page_again.try_lock().is_none());
+
+        let different_page = first_file.lock_for_page(8);
+        assert!(!core::ptr::eq(same_page, different_page));
+        let different_page_guard = different_page.try_lock().unwrap();
+
+        let second_file = PageAccessDomain::default();
+        let second_file_same_page = second_file.lock_for_page(7);
+        assert!(!core::ptr::eq(same_page, second_file_same_page));
+        let second_file_guard = second_file_same_page.try_lock().unwrap();
+
+        drop((same_page_guard, different_page_guard, second_file_guard));
+        assert!(same_page_again.try_lock().is_some());
+    }
+
+    #[test]
+    fn write_page_lock_windows_are_bounded_and_validate_overflow() {
         assert_eq!(
-            shared.page_fill_lock_indices(u32::MAX - 1, PAGE_ACCESS_LOCK_STRIPES),
+            checked_page_span(0, WRITE_STAGING_SIZE),
+            Ok((0, WRITE_STAGING_SIZE / PAGE_SIZE))
+        );
+        assert_eq!(
+            checked_page_span((PAGE_SIZE - 1) as u64, WRITE_STAGING_SIZE),
+            Ok((0, MAX_WRITE_ACCESS_PAGES))
+        );
+
+        let domain = PageAccessDomain::default();
+        let locks = domain.locks_for_range(7, MAX_WRITE_ACCESS_PAGES).unwrap();
+        assert_eq!(locks.len(), MAX_WRITE_ACCESS_PAGES);
+        assert!(locks.windows(2).all(|pair| pair[0] < pair[1]));
+        let all_stripes = domain
+            .locks_for_range(7, PAGE_ACCESS_LOCK_STRIPES + 3)
+            .unwrap();
+        assert_eq!(all_stripes.len(), PAGE_ACCESS_LOCK_STRIPES);
+        assert!(all_stripes.windows(2).all(|pair| pair[0] < pair[1]));
+        assert_eq!(
+            domain.locks_for_range(u32::MAX - 1, 3).map(drop),
             Err(VfsError::StorageFull)
         );
     }
