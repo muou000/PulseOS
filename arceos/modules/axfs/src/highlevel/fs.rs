@@ -146,29 +146,42 @@ impl FsContext {
         if loc.node_type() != NodeType::Symlink {
             return Ok(loc);
         }
-        if *follow_count >= SYMLINKS_MAX {
-            return Err(VfsError::FilesystemLoop);
-        }
-        *follow_count += 1;
-        let target = loc.read_link().await?;
-        if target.is_empty() {
-            return Err(VfsError::NotFound);
-        }
-        let parent = loc.parent().unwrap_or_else(|| self.root_dir.clone());
-        self.resolve_components_at(parent, PathBuf::from(target).components(), follow_count).await
+        self.resolve_symlink(loc, follow_count).await
     }
 
-    fn lookup<'a>(
+    fn resolve_symlink<'a>(
         &'a self,
-        dir: &'a Location,
-        name: &'a str,
+        loc: Location,
         follow_count: &'a mut usize,
-    ) -> core::pin::Pin<alloc::boxed::Box<dyn core::future::Future<Output = VfsResult<Location>> + Send + 'a>> {
+    ) -> core::pin::Pin<
+        alloc::boxed::Box<dyn core::future::Future<Output = VfsResult<Location>> + Send + 'a>,
+    > {
         alloc::boxed::Box::pin(async move {
-            let loc = dir.lookup_no_follow(name).await?;
-            self.with_current_dir(dir.clone())?
-                .try_resolve_symlink(loc, follow_count).await
+            if *follow_count >= SYMLINKS_MAX {
+                return Err(VfsError::FilesystemLoop);
+            }
+            *follow_count += 1;
+            let target = loc.read_link().await?;
+            if target.is_empty() {
+                return Err(VfsError::NotFound);
+            }
+            let parent = loc.parent().unwrap_or_else(|| self.root_dir.clone());
+            self.resolve_components_at(parent, PathBuf::from(target).components(), follow_count)
+                .await
         })
+    }
+
+    async fn lookup(
+        &self,
+        dir: &Location,
+        name: &str,
+        follow_count: &mut usize,
+    ) -> VfsResult<Location> {
+        let loc = dir.lookup_no_follow(name).await?;
+        if loc.node_type() != NodeType::Symlink {
+            return Ok(loc);
+        }
+        self.resolve_symlink(loc, follow_count).await
     }
 
     async fn resolve_components_at(
@@ -188,7 +201,9 @@ impl FsContext {
                     }
                 }
                 Component::RootDir => {
-                    dir = self.root_dir.clone();
+                    if dir != self.root_dir {
+                        dir = self.root_dir.clone();
+                    }
                 }
                 Component::Normal(name) => {
                     self.check_traverse_permission(&dir).await?;
@@ -197,14 +212,6 @@ impl FsContext {
             }
         }
         Ok(dir)
-    }
-
-    async fn resolve_components(
-        &self,
-        components: Components<'_>,
-        follow_count: &mut usize,
-    ) -> VfsResult<Location> {
-        self.resolve_components_at(self.current_dir.clone(), components, follow_count).await
     }
 
     async fn resolve_inner<'a>(
@@ -217,7 +224,14 @@ impl FsContext {
         if entry_name.is_some() {
             components.next_back();
         }
-        let dir = self.resolve_components(components, follow_count).await?;
+        let start = if path.is_absolute() {
+            self.root_dir.clone()
+        } else {
+            self.current_dir.clone()
+        };
+        let dir = self
+            .resolve_components_at(start, components, follow_count)
+            .await?;
         dir.check_is_dir()?;
         Ok((dir, entry_name))
     }

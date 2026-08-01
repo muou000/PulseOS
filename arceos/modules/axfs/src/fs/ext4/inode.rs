@@ -8,6 +8,7 @@ use alloc::{
 };
 use core::{
     any::Any,
+    ops::Bound::{Excluded, Unbounded},
     sync::atomic::{AtomicU64, AtomicUsize, Ordering},
     task::Context,
 };
@@ -44,7 +45,7 @@ pub struct Inode {
 pub(super) struct MetadataCacheState {
     generation: AtomicU64,
     cached: Mutex<Option<(u64, Metadata)>>,
-    inode: Mutex<Option<(u64, ext4plus::inode::Inode)>>,
+    inode: Mutex<Option<(u64, Arc<ext4plus::inode::Inode>)>>,
 }
 
 impl MetadataCacheState {
@@ -73,14 +74,14 @@ impl MetadataCacheState {
         self.generation.load(Ordering::Acquire)
     }
 
-    fn get_inode(&self) -> Option<(u64, ext4plus::inode::Inode)> {
+    fn get_inode(&self) -> Option<(u64, Arc<ext4plus::inode::Inode>)> {
         let generation = self.generation.load(Ordering::Acquire);
         let inode = self
             .inode
             .lock()
             .as_ref()
             .filter(|(cached_generation, _)| *cached_generation == generation)
-            .map(|(_, inode)| inode.clone());
+            .map(|(_, inode)| Arc::clone(inode));
         if self.generation.load(Ordering::Acquire) != generation {
             return None;
         }
@@ -96,7 +97,7 @@ impl MetadataCacheState {
         true
     }
 
-    fn publish_inode(&self, generation: u64, inode: ext4plus::inode::Inode) -> bool {
+    fn publish_inode(&self, generation: u64, inode: Arc<ext4plus::inode::Inode>) -> bool {
         let mut cached = self.inode.lock();
         if self.generation.load(Ordering::Acquire) != generation {
             return false;
@@ -160,6 +161,7 @@ struct CachedLookupEntry {
 
 const DIR_LOOKUP_CACHE_MAX_ENTRIES: usize = 256;
 const DIR_SNAPSHOT_PROMOTION_LOOKUPS: usize = 8;
+const DIR_CACHE_REGISTRY_SWEEP_BUDGET: usize = 8;
 
 struct DirCacheState {
     snapshot_generation: AtomicU64,
@@ -282,8 +284,94 @@ struct DirCacheKey {
     ino: u32,
 }
 
-static DIR_CACHE_REGISTRY: Lazy<Mutex<BTreeMap<DirCacheKey, Weak<DirCacheState>>>> =
-    Lazy::new(|| Mutex::new(BTreeMap::new()));
+#[derive(Default)]
+struct DirCacheRegistry {
+    states: BTreeMap<DirCacheKey, Weak<DirCacheState>>,
+    sweep_cursor: Option<DirCacheKey>,
+}
+
+impl DirCacheRegistry {
+    fn get(&self, key: &DirCacheKey) -> Option<Arc<DirCacheState>> {
+        self.states.get(key).and_then(Weak::upgrade)
+    }
+
+    fn insert(&mut self, key: DirCacheKey, state: &Arc<DirCacheState>) {
+        self.states.insert(key, Arc::downgrade(state));
+    }
+
+    fn remove(&mut self, key: &DirCacheKey) {
+        self.states.remove(key);
+    }
+
+    fn sweep_dead(&mut self) {
+        if self.states.is_empty() {
+            self.sweep_cursor = None;
+            return;
+        }
+
+        let previous_cursor = self.sweep_cursor;
+        let mut keys = [None; DIR_CACHE_REGISTRY_SWEEP_BUDGET];
+        let mut count = 0;
+        if let Some(cursor) = previous_cursor {
+            for key in self
+                .states
+                .range((Excluded(cursor), Unbounded))
+                .map(|(key, _)| *key)
+                .take(DIR_CACHE_REGISTRY_SWEEP_BUDGET)
+            {
+                keys[count] = Some(key);
+                count += 1;
+            }
+        } else {
+            for key in self
+                .states
+                .keys()
+                .copied()
+                .take(DIR_CACHE_REGISTRY_SWEEP_BUDGET)
+            {
+                keys[count] = Some(key);
+                count += 1;
+            }
+        }
+
+        if count < DIR_CACHE_REGISTRY_SWEEP_BUDGET
+            && let Some(cursor) = previous_cursor
+        {
+            for key in self
+                .states
+                .range(..=cursor)
+                .map(|(key, _)| *key)
+                .take(DIR_CACHE_REGISTRY_SWEEP_BUDGET - count)
+            {
+                keys[count] = Some(key);
+                count += 1;
+            }
+        }
+
+        self.sweep_cursor = count.checked_sub(1).and_then(|index| keys[index]);
+        for key in keys[..count].iter().flatten() {
+            if self
+                .states
+                .get(key)
+                .is_some_and(|state| state.strong_count() == 0)
+            {
+                self.states.remove(key);
+            }
+        }
+        if self.states.is_empty() {
+            self.sweep_cursor = None;
+        }
+    }
+
+    fn cleanup_fs(&mut self, fs_id: usize) {
+        self.states
+            .retain(|key, state| key.fs_id != fs_id && state.strong_count() > 0);
+        self.sweep_cursor = None;
+    }
+}
+
+static DIR_CACHE_REGISTRY: Lazy<Mutex<DirCacheRegistry>> =
+    Lazy::new(|| Mutex::new(DirCacheRegistry::default()));
 
 fn dir_cache_key(fs: &Arc<Ext4Filesystem>, ino: u32) -> DirCacheKey {
     DirCacheKey {
@@ -295,31 +383,31 @@ fn dir_cache_key(fs: &Arc<Ext4Filesystem>, ino: u32) -> DirCacheKey {
 fn dir_cache_state(fs: &Arc<Ext4Filesystem>, ino: u32) -> Arc<DirCacheState> {
     let key = dir_cache_key(fs, ino);
     let mut registry = DIR_CACHE_REGISTRY.lock();
-    registry.retain(|_, state| state.strong_count() > 0);
-    if let Some(state) = registry.get(&key).and_then(Weak::upgrade) {
+    if let Some(state) = registry.get(&key) {
         return state;
     }
 
+    registry.remove(&key);
+    registry.sweep_dead();
     let state = Arc::new(DirCacheState::new());
-    registry.insert(key, Arc::downgrade(&state));
+    registry.insert(key, &state);
     state
 }
 
 pub(crate) fn cleanup_dir_cache_registry(fs_id: usize) {
-    let mut registry = DIR_CACHE_REGISTRY.lock();
-    registry.retain(|key, state| key.fs_id != fs_id && state.strong_count() > 0);
+    DIR_CACHE_REGISTRY.lock().cleanup_fs(fs_id);
 }
 
 fn invalidate_dir_cache(fs: &Arc<Ext4Filesystem>, ino: u32) {
     let key = dir_cache_key(fs, ino);
-    if let Some(state) = DIR_CACHE_REGISTRY.lock().get(&key).and_then(Weak::upgrade) {
+    if let Some(state) = DIR_CACHE_REGISTRY.lock().get(&key) {
         state.invalidate();
     }
 }
 
 fn invalidate_dir_snapshot(fs: &Arc<Ext4Filesystem>, ino: u32) {
     let key = dir_cache_key(fs, ino);
-    if let Some(state) = DIR_CACHE_REGISTRY.lock().get(&key).and_then(Weak::upgrade) {
+    if let Some(state) = DIR_CACHE_REGISTRY.lock().get(&key) {
         state.invalidate_snapshot();
     }
 }
@@ -502,7 +590,7 @@ impl Inode {
             * fs.superblock().inodes_per_block_group().get() as u64;
 
         let (_, dir_inode) = self.read_inode_cached(fs, dir_ino).await?;
-        let dir = ext4plus::dir::Dir::open_inode(fs, dir_inode).map_err(into_vfs_err)?;
+        let dir = ext4plus::dir::Dir::open_shared_inode(fs, dir_inode).map_err(into_vfs_err)?;
         let read_dir = dir.read_dir().map_err(into_vfs_err)?;
 
         let mut read_dir = read_dir;
@@ -586,7 +674,7 @@ impl Inode {
         &self,
         fs: &Ext4,
         inode_num: u32,
-    ) -> VfsResult<(u64, ext4plus::inode::Inode)> {
+    ) -> VfsResult<(u64, Arc<ext4plus::inode::Inode>)> {
         self.validate_inode_num(fs, inode_num)?;
         let cache = if inode_num == self.ino {
             self.metadata_cache.clone()
@@ -601,10 +689,12 @@ impl Inode {
 
             let generation = cache.generation();
             let index = core::num::NonZeroU32::new(inode_num).ok_or(VfsError::InvalidData)?;
-            let inode = ext4plus::inode::Inode::read(fs, index)
-                .await
-                .map_err(into_vfs_err)?;
-            if cache.publish_inode(generation, inode.clone()) {
+            let inode = Arc::new(
+                ext4plus::inode::Inode::read(fs, index)
+                    .await
+                    .map_err(into_vfs_err)?,
+            );
+            if cache.publish_inode(generation, Arc::clone(&inode)) {
                 return Ok((generation, inode));
             }
         }
@@ -742,7 +832,7 @@ impl FileNodeOps for Inode {
             buf[..len].copy_from_slice(&target_bytes[offset..offset + len]);
             return Ok(len);
         }
-        ext4plus::file::read_at(&fs, &inode, buf, offset)
+        ext4plus::file::read_at(&fs, inode.as_ref(), buf, offset)
             .await
             .map_err(into_vfs_err)
     }
@@ -916,7 +1006,7 @@ impl DirNodeOps for Inode {
         }
 
         let (_, dir_inode) = self.read_inode_cached(fs, self.ino).await?;
-        let dir = ext4plus::dir::Dir::open_inode(&fs, dir_inode).map_err(into_vfs_err)?;
+        let dir = ext4plus::dir::Dir::open_shared_inode(&fs, dir_inode).map_err(into_vfs_err)?;
         match dir.get_entry(name_ref).await {
             Ok(target_inode) => {
                 let target_type = target_inode.file_type();
@@ -955,7 +1045,8 @@ impl DirNodeOps for Inode {
             None => {
                 let generation = self.dir_cache.lookup_generation();
                 let (_, dir_inode) = self.read_inode_cached(fs, self.ino).await?;
-                let dir = ext4plus::dir::Dir::open_inode(&fs, dir_inode).map_err(into_vfs_err)?;
+                let dir =
+                    ext4plus::dir::Dir::open_shared_inode(&fs, dir_inode).map_err(into_vfs_err)?;
                 match dir.get_entry(name_ref).await {
                     Ok(target) => {
                         let cached = CachedLookupEntry {
@@ -1516,8 +1607,9 @@ mod tests {
     use axfs_ng_vfs::{DeviceId, Metadata, NodePermission, NodeType};
 
     use super::{
-        CachedDirEntry, CachedLookupEntry, DIR_SNAPSHOT_PROMOTION_LOOKUPS, DirCacheState,
-        DirSnapshot, MetadataCacheState,
+        CachedDirEntry, CachedLookupEntry, DIR_CACHE_REGISTRY_SWEEP_BUDGET,
+        DIR_SNAPSHOT_PROMOTION_LOOKUPS, DirCacheKey, DirCacheRegistry, DirCacheState, DirSnapshot,
+        MetadataCacheState,
     };
 
     fn metadata_with_size(size: u64) -> Metadata {
@@ -1643,5 +1735,57 @@ mod tests {
         state.invalidate();
         assert_eq!(state.get_lookup("found"), None);
         assert_eq!(state.get_lookup("missing"), None);
+    }
+
+    #[test]
+    fn directory_cache_registry_sweeps_dead_states_with_fixed_budget() {
+        let mut registry = DirCacheRegistry::default();
+        for ino in 0..DIR_CACHE_REGISTRY_SWEEP_BUDGET * 2 {
+            let state = Arc::new(DirCacheState::new());
+            registry.insert(
+                DirCacheKey {
+                    fs_id: 1,
+                    ino: ino as u32,
+                },
+                &state,
+            );
+        }
+        let live_key = DirCacheKey {
+            fs_id: 1,
+            ino: u32::MAX,
+        };
+        let live = Arc::new(DirCacheState::new());
+        registry.insert(live_key, &live);
+
+        assert_eq!(
+            registry.states.len(),
+            DIR_CACHE_REGISTRY_SWEEP_BUDGET * 2 + 1
+        );
+        registry.sweep_dead();
+        assert_eq!(registry.states.len(), DIR_CACHE_REGISTRY_SWEEP_BUDGET + 1);
+        assert!(Arc::ptr_eq(&registry.get(&live_key).unwrap(), &live));
+
+        registry.sweep_dead();
+        assert_eq!(registry.states.len(), 1);
+        assert!(Arc::ptr_eq(&registry.get(&live_key).unwrap(), &live));
+    }
+
+    #[test]
+    fn directory_cache_registry_cleanup_is_scoped_to_filesystem() {
+        let mut registry = DirCacheRegistry::default();
+        let removed_key = DirCacheKey { fs_id: 1, ino: 7 };
+        let retained_key = DirCacheKey { fs_id: 2, ino: 7 };
+        let removed = Arc::new(DirCacheState::new());
+        let retained = Arc::new(DirCacheState::new());
+        registry.insert(removed_key, &removed);
+        registry.insert(retained_key, &retained);
+
+        registry.cleanup_fs(1);
+
+        assert!(registry.get(&removed_key).is_none());
+        assert!(Arc::ptr_eq(
+            &registry.get(&retained_key).unwrap(),
+            &retained
+        ));
     }
 }

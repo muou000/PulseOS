@@ -27,6 +27,7 @@ use crate::path::PathBuf;
 use crate::sync::PtrPrimitive;
 use crate::util::write_u32le;
 use crate::util::{read_u16le, read_u32le, write_u16le};
+use alloc::sync::Arc;
 use alloc::vec;
 use alloc::vec::Vec;
 
@@ -667,7 +668,7 @@ fn write_dir_entry_bytes(
 /// This provides methods for reading and modifying the directory's entries.
 pub struct Dir {
     fs: Ext4,
-    inode: Inode,
+    inode: Arc<Inode>,
 }
 
 impl Dir {
@@ -681,12 +682,17 @@ impl Dir {
         init_directory(&fs, &mut dir_inode, parent_inode_index).await?;
         Ok(Self {
             fs,
-            inode: dir_inode,
+            inode: Arc::new(dir_inode),
         })
     }
 
     /// Open a directory by inode.
     pub fn open_inode(fs: &Ext4, inode: Inode) -> Result<Self, Ext4Error> {
+        Self::open_shared_inode(fs, Arc::new(inode))
+    }
+
+    /// Open a directory from an immutable shared inode snapshot.
+    pub fn open_shared_inode(fs: &Ext4, inode: Arc<Inode>) -> Result<Self, Ext4Error> {
         if !inode.file_type().is_dir() {
             return Err(Ext4Error::NotADirectory);
         }
@@ -744,7 +750,7 @@ impl Dir {
 
         add_dir_entry(
             &self.fs,
-            &mut self.inode,
+            Arc::make_mut(&mut self.inode),
             name,
             target_inode.index,
             target_inode.file_type(),
@@ -755,8 +761,9 @@ impl Dir {
         target_inode.write(&self.fs).await?;
 
         if let Some(p_new) = parent_new {
-            self.inode.set_links_count(p_new);
-            self.inode.write(&self.fs).await?;
+            let inode = Arc::make_mut(&mut self.inode);
+            inode.set_links_count(p_new);
+            inode.write(&self.fs).await?;
         }
 
         Ok(())
@@ -799,14 +806,15 @@ impl Dir {
             None
         };
 
-        remove_dir_entry(&self.fs, &mut self.inode, name).await?;
+        remove_dir_entry(&self.fs, Arc::make_mut(&mut self.inode), name).await?;
 
         inode.set_links_count(new);
         inode.write(&self.fs).await?;
 
         if let Some(p_new) = parent_new {
-            self.inode.set_links_count(p_new);
-            self.inode.write(&self.fs).await?;
+            let inode = Arc::make_mut(&mut self.inode);
+            inode.set_links_count(p_new);
+            inode.write(&self.fs).await?;
         }
 
         Ok(inode)
@@ -821,7 +829,7 @@ impl Dir {
     /// Return a mutable reference to the inode for this directory.
     #[must_use]
     pub fn inode_mut(&mut self) -> &mut Inode {
-        &mut self.inode
+        Arc::make_mut(&mut self.inode)
     }
 }
 
