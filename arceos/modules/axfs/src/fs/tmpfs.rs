@@ -1,22 +1,39 @@
-use alloc::{borrow::ToOwned, string::String, sync::{Arc, Weak}, boxed::Box};
-use core::{any::Any, task::Context, time::Duration, cell::OnceCell};
-use async_trait::async_trait;
-
-use axpoll::{IoEvents, Pollable};
-use slab::Slab;
-use spin::Mutex;
-
-use axfs_ng_vfs::{
-    DeviceId, DirEntry, DirEntrySink, DirNode, DirNodeOps, FileNode, FileNodeOps, Filesystem,
-    FilesystemOps, Metadata, MetadataUpdate, NodeFlags, NodeOps, NodePermission, NodeType,
-    Reference, StatFs, VfsError, VfsResult, WeakDirEntry, path::MAX_NAME_LEN,
-    InMemDir, InMemInode, update_metadata_impl, read_dir_impl,
+use alloc::{
+    borrow::ToOwned,
+    boxed::Box,
+    collections::BTreeMap,
+    string::String,
+    sync::{Arc, Weak},
+};
+use core::{
+    any::Any,
+    cell::OnceCell,
+    sync::atomic::{AtomicU64, AtomicUsize, Ordering},
+    task::Context,
+    time::Duration,
 };
 
+use async_trait::async_trait;
+use axfs_ng_vfs::{
+    DeviceId, DirEntry, DirEntrySink, DirNode, DirNodeOps, FileNode, FileNodeOps, Filesystem,
+    FilesystemOps, InMemDir, InMemInode, Metadata, MetadataUpdate, NodeFlags, NodeOps,
+    NodePermission, NodeType, Reference, StatFs, VfsError, VfsResult, WeakDirEntry,
+    path::MAX_NAME_LEN, read_dir_impl, update_metadata_impl,
+};
+use axpoll::{IoEvents, Pollable};
+use spin::Mutex;
+
 const TMPFS_MAGIC: u64 = 0x0102_1994;
+const TMPFS_INODE_SHARDS: usize = 32;
+
+fn inode_shard(ino: u64) -> usize {
+    ino as usize % TMPFS_INODE_SHARDS
+}
 
 pub struct TmpFilesystem {
-    inodes: Mutex<Slab<Arc<Inode>>>,
+    inodes: [Mutex<BTreeMap<u64, Arc<Inode>>>; TMPFS_INODE_SHARDS],
+    next_ino: AtomicU64,
+    inode_count: AtomicUsize,
     root: OnceCell<DirEntry>,
 }
 
@@ -24,7 +41,9 @@ impl TmpFilesystem {
     #[allow(clippy::new_ret_no_self)]
     pub fn new() -> Filesystem {
         let fs = Arc::new(Self {
-            inodes: Mutex::new(Slab::new()),
+            inodes: core::array::from_fn(|_| Mutex::new(BTreeMap::new())),
+            next_ino: AtomicU64::new(1),
+            inode_count: AtomicUsize::new(0),
             root: OnceCell::new(),
         });
         let root_ino = new_inode(
@@ -42,7 +61,11 @@ impl TmpFilesystem {
     }
 
     fn get(&self, ino: u64) -> Arc<Inode> {
-        self.inodes.lock()[ino as usize - 1].clone()
+        self.inodes[inode_shard(ino)]
+            .lock()
+            .get(&ino)
+            .cloned()
+            .expect("tmpfs inode reference outlived its inode table entry")
     }
 }
 
@@ -69,7 +92,7 @@ impl FilesystemOps for TmpFilesystem {
             blocks: 0,
             blocks_free: 0,
             blocks_available: 0,
-            file_count: self.inodes.lock().len() as u64,
+            file_count: self.inode_count.load(Ordering::Acquire) as u64,
             free_file_count: 0,
             name_length: MAX_NAME_LEN as u32,
             fragment_size: 4096,
@@ -79,11 +102,15 @@ impl FilesystemOps for TmpFilesystem {
 }
 
 fn release_inode(fs: &TmpFilesystem, inode: &Arc<Inode>, nlink: u64) {
-    let mut inodes = fs.inodes.lock();
+    let mut inodes = fs.inodes[inode_shard(inode.ino)].lock();
     let mut metadata = inode.metadata.lock();
     metadata.nlink -= nlink;
     if metadata.nlink == 0 && Arc::strong_count(inode) == 2 {
-        inodes.remove(metadata.inode as usize - 1);
+        let ino = metadata.inode;
+        drop(metadata);
+        if inodes.remove(&ino).is_some() {
+            fs.inode_count.fetch_sub(1, Ordering::AcqRel);
+        }
     }
 }
 
@@ -108,9 +135,12 @@ fn new_inode(
     node_type: NodeType,
     permission: NodePermission,
 ) -> Arc<Inode> {
-    let mut inodes = fs.inodes.lock();
-    let entry = inodes.vacant_entry();
-    let ino = entry.key() as u64 + 1;
+    let ino = fs
+        .next_ino
+        .fetch_update(Ordering::AcqRel, Ordering::Acquire, |ino| {
+            ino.checked_add(1)
+        })
+        .expect("tmpfs inode number exhausted");
     let metadata = Metadata {
         device: 0,
         inode: ino,
@@ -131,16 +161,15 @@ fn new_inode(
         NodeType::Directory => NodeContent::Dir(DirContent::new()),
         _ => NodeContent::File(FileContent::default()),
     };
-    let result = Arc::new(InMemInode::new(
-        ino,
-        metadata,
-        content,
-    ));
-    entry.insert(result.clone());
-    drop(inodes);
+    let result = Arc::new(InMemInode::new(ino, metadata, content));
+    let previous = fs.inodes[inode_shard(ino)]
+        .lock()
+        .insert(ino, result.clone());
+    debug_assert!(previous.is_none());
+    fs.inode_count.fetch_add(1, Ordering::Release);
 
     if let NodeContent::Dir(dir) = &result.content {
-        let mut entries = dir.entries.lock();
+        let mut entries = dir.entries.write();
         entries.insert(".".into(), InodeRef::new(fs.clone(), ino));
         entries.insert(
             "..".into(),
@@ -208,10 +237,7 @@ impl TmpNode {
 
     fn new_entry(&self, name: &str, node_type: NodeType, inode: Arc<Inode>) -> VfsResult<DirEntry> {
         let fs = self.fs.clone();
-        let reference = Reference::new(
-            self.this.clone(),
-            name.to_owned(),
-        );
+        let reference = Reference::new(self.this.clone(), name.to_owned());
         Ok(if node_type == NodeType::Directory {
             DirEntry::new_dir(
                 |this| DirNode::new(TmpNode::new(fs, inode, Some(this))),
@@ -240,7 +266,7 @@ impl NodeOps for TmpNode {
                 metadata.size = *content.length.lock();
             }
             NodeContent::Dir(dir) => {
-                metadata.size = dir.entries.lock().len() as u64;
+                metadata.size = dir.entries.read().len() as u64;
             }
         }
         Ok(metadata)
@@ -312,7 +338,11 @@ impl Pollable for TmpNode {
 
 #[async_trait]
 impl DirNodeOps for TmpNode {
-    async fn read_dir(&self, offset: u64, sink: &mut (dyn DirEntrySink + Send)) -> VfsResult<usize> {
+    async fn read_dir(
+        &self,
+        offset: u64,
+        sink: &mut (dyn DirEntrySink + Send),
+    ) -> VfsResult<usize> {
         let dir = inode_as_dir(&self.inode)?;
         read_dir_impl(&dir.entries, offset, sink, |entry| {
             (entry.ino, entry.get().metadata.lock().node_type)
@@ -321,7 +351,7 @@ impl DirNodeOps for TmpNode {
 
     async fn lookup(&self, name: &str) -> VfsResult<DirEntry> {
         let dir = inode_as_dir(&self.inode)?;
-        let entries = dir.entries.lock();
+        let entries = dir.entries.read();
 
         let entry = entries.get(name).ok_or(VfsError::NotFound)?;
         let inode = entry.get();
@@ -336,7 +366,7 @@ impl DirNodeOps for TmpNode {
         permission: NodePermission,
     ) -> VfsResult<DirEntry> {
         let dir = inode_as_dir(&self.inode)?;
-        let mut entries = dir.entries.lock();
+        let mut entries = dir.entries.write();
 
         if entries.contains_key(name) {
             return Err(VfsError::AlreadyExists);
@@ -347,16 +377,16 @@ impl DirNodeOps for TmpNode {
     }
 
     async fn link(&self, name: &str, target: &DirEntry) -> VfsResult<DirEntry> {
-        let dir = inode_as_dir(&self.inode)?;
-        let mut entries = dir.entries.lock();
-
         let target = target.downcast::<Self>()?;
+        let inode = target.inode.clone();
+        let node_type = target.metadata().await?.node_type;
+
+        let dir = inode_as_dir(&self.inode)?;
+        let mut entries = dir.entries.write();
 
         if entries.contains_key(name) {
             return Err(VfsError::AlreadyExists);
         }
-        let inode = target.inode.clone();
-        let node_type = target.metadata().await?.node_type;
         entries.insert(name.into(), InodeRef::new(self.fs.clone(), inode.ino));
         self.new_entry(name, node_type, inode)
     }
@@ -366,13 +396,13 @@ impl DirNodeOps for TmpNode {
             return Err(VfsError::InvalidInput);
         }
         let dir = inode_as_dir(&self.inode)?;
-        let mut entries = dir.entries.lock();
+        let mut entries = dir.entries.write();
 
         let Some(entry) = entries.get(name) else {
             return Err(VfsError::NotFound);
         };
         if let NodeContent::Dir(dir_content) = &entry.get().content {
-            let mut sub_entries = dir_content.entries.lock();
+            let mut sub_entries = dir_content.entries.write();
             if sub_entries.len() > 2 {
                 return Err(VfsError::DirectoryNotEmpty);
             }
@@ -395,7 +425,7 @@ impl DirNodeOps for TmpNode {
         }
 
         let src_entry_ino = {
-            let entries = inode_as_dir(&self.inode)?.entries.lock();
+            let entries = inode_as_dir(&self.inode)?.entries.read();
             let Some(entry) = entries.get(src_name) else {
                 return Err(VfsError::NotFound);
             };
@@ -413,7 +443,7 @@ impl DirNodeOps for TmpNode {
                 let NodeContent::Dir(dir_content) = &curr_node.content else {
                     break;
                 };
-                let entries = dir_content.entries.lock();
+                let entries = dir_content.entries.read();
                 let Some(parent_ref) = entries.get("..") else {
                     break;
                 };
@@ -426,7 +456,7 @@ impl DirNodeOps for TmpNode {
         }
 
         if self.inode.ino == dst_node.inode.ino {
-            let mut entries = inode_as_dir(&self.inode)?.entries.lock();
+            let mut entries = inode_as_dir(&self.inode)?.entries.write();
             if !entries.contains_key(src_name) {
                 return Err(VfsError::NotFound);
             }
@@ -445,7 +475,7 @@ impl DirNodeOps for TmpNode {
                     (false, true) => return Err(VfsError::IsADirectory),
                     (true, true) => {
                         if let NodeContent::Dir(dir_content) = &old_entry.get().content {
-                            let mut sub_entries = dir_content.entries.lock();
+                            let mut sub_entries = dir_content.entries.write();
                             if sub_entries.len() > 2 {
                                 return Err(VfsError::DirectoryNotEmpty);
                             }
@@ -458,11 +488,11 @@ impl DirNodeOps for TmpNode {
             let src_entry = entries.remove(src_name).unwrap();
             entries.insert(dst_name.into(), src_entry);
         } else if self.inode.ino < dst_node.inode.ino {
-            let mut src_entries = inode_as_dir(&self.inode)?.entries.lock();
+            let mut src_entries = inode_as_dir(&self.inode)?.entries.write();
             if !src_entries.contains_key(src_name) {
                 return Err(VfsError::NotFound);
             }
-            let mut dst_entries = inode_as_dir(&dst_node.inode)?.entries.lock();
+            let mut dst_entries = inode_as_dir(&dst_node.inode)?.entries.write();
             if let Some(old_entry) = dst_entries.get(dst_name) {
                 let src_ref = src_entries.get(src_name).unwrap();
                 let is_src_dir = match &src_ref.get().content {
@@ -478,7 +508,7 @@ impl DirNodeOps for TmpNode {
                     (false, true) => return Err(VfsError::IsADirectory),
                     (true, true) => {
                         if let NodeContent::Dir(dir_content) = &old_entry.get().content {
-                            let mut sub_entries = dir_content.entries.lock();
+                            let mut sub_entries = dir_content.entries.write();
                             if sub_entries.len() > 2 {
                                 return Err(VfsError::DirectoryNotEmpty);
                             }
@@ -490,13 +520,16 @@ impl DirNodeOps for TmpNode {
             }
             let src_entry = src_entries.remove(src_name).unwrap();
             if let NodeContent::Dir(dir_content) = &src_entry.get().content {
-                let mut sub_entries = dir_content.entries.lock();
-                sub_entries.insert("..".into(), InodeRef::new(self.fs.clone(), dst_node.inode.ino));
+                let mut sub_entries = dir_content.entries.write();
+                sub_entries.insert(
+                    "..".into(),
+                    InodeRef::new(self.fs.clone(), dst_node.inode.ino),
+                );
             }
             dst_entries.insert(dst_name.into(), src_entry);
         } else {
-            let mut dst_entries = inode_as_dir(&dst_node.inode)?.entries.lock();
-            let mut src_entries = inode_as_dir(&self.inode)?.entries.lock();
+            let mut dst_entries = inode_as_dir(&dst_node.inode)?.entries.write();
+            let mut src_entries = inode_as_dir(&self.inode)?.entries.write();
             if !src_entries.contains_key(src_name) {
                 return Err(VfsError::NotFound);
             }
@@ -515,7 +548,7 @@ impl DirNodeOps for TmpNode {
                     (false, true) => return Err(VfsError::IsADirectory),
                     (true, true) => {
                         if let NodeContent::Dir(dir_content) = &old_entry.get().content {
-                            let mut sub_entries = dir_content.entries.lock();
+                            let mut sub_entries = dir_content.entries.write();
                             if sub_entries.len() > 2 {
                                 return Err(VfsError::DirectoryNotEmpty);
                             }
@@ -527,8 +560,11 @@ impl DirNodeOps for TmpNode {
             }
             let src_entry = src_entries.remove(src_name).unwrap();
             if let NodeContent::Dir(dir_content) = &src_entry.get().content {
-                let mut sub_entries = dir_content.entries.lock();
-                sub_entries.insert("..".into(), InodeRef::new(self.fs.clone(), dst_node.inode.ino));
+                let mut sub_entries = dir_content.entries.write();
+                sub_entries.insert(
+                    "..".into(),
+                    InodeRef::new(self.fs.clone(), dst_node.inode.ino),
+                );
             }
             dst_entries.insert(dst_name.into(), src_entry);
         }
@@ -541,4 +577,3 @@ impl Drop for TmpNode {
         release_inode(&self.fs, &self.inode, 0);
     }
 }
-

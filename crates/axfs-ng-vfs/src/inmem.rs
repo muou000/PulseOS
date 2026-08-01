@@ -1,9 +1,9 @@
 use alloc::{collections::BTreeMap, string::String};
-use core::cmp::Ordering;
-use core::borrow::Borrow;
-use spin::Mutex;
+use core::{borrow::Borrow, cmp::Ordering};
 
-use crate::{DirEntrySink, NodeType, Metadata, MetadataUpdate, VfsResult};
+use spin::{Mutex, RwLock};
+
+use crate::{DirEntrySink, Metadata, MetadataUpdate, NodeType, VfsResult};
 
 /// A file name wrapper that sorts '.' first, then '..', and then alphabetically.
 #[derive(PartialEq, Eq, Hash, Clone, Debug)]
@@ -48,18 +48,16 @@ impl Borrow<str> for FileName {
     }
 }
 
-
-
 /// A generic in-memory directory container holding child entry maps.
 #[derive(Default)]
 pub struct InMemDir<E> {
-    pub entries: Mutex<BTreeMap<FileName, E>>,
+    pub entries: RwLock<BTreeMap<FileName, E>>,
 }
 
 impl<E> InMemDir<E> {
     pub fn new() -> Self {
         Self {
-            entries: Mutex::new(BTreeMap::new()),
+            entries: RwLock::new(BTreeMap::new()),
         }
     }
 }
@@ -83,7 +81,7 @@ impl<C> InMemInode<C> {
 
 /// Standard helper to perform a directory read (for `read_dir`) from a locked entries map.
 pub fn read_dir_impl<E, F>(
-    entries: &Mutex<BTreeMap<FileName, E>>,
+    entries: &RwLock<BTreeMap<FileName, E>>,
     offset: u64,
     sink: &mut dyn DirEntrySink,
     mut get_info: F,
@@ -91,7 +89,7 @@ pub fn read_dir_impl<E, F>(
 where
     F: FnMut(&E) -> (u64, NodeType),
 {
-    let entries_lock = entries.lock();
+    let entries_lock = entries.read();
     let mut count = 0;
     for (idx, (name, entry)) in entries_lock.iter().enumerate().skip(offset as usize) {
         let (ino, node_type) = get_info(entry);
