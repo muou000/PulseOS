@@ -10,9 +10,8 @@ use axfs_ng_vfs::{MetadataUpdate, NodePermission, NodeType, VfsError, path::Path
 use linux_raw_sys::general::*;
 use pulse_core::fd_table::open_result_to_entry;
 
-use crate::impls::{
-    fs::common::{context_for_dirfd, insert_fd_entry, open_fd_flags, resolve_location_at_ptr},
-    utils::read_user_cstring,
+use crate::impls::fs::common::{
+    context_for_dirfd, insert_fd_entry, open_fd_flags, resolve_location_at_ptr,
 };
 
 static MOUNT_FLAGS_WARNED: AtomicBool = AtomicBool::new(false);
@@ -65,28 +64,26 @@ fn flags_to_options(flags: usize, mode: usize) -> OpenOptions {
 }
 
 fn read_user_nonempty_path(pathname: usize) -> Result<String, LinuxError> {
-    if pathname == 0 {
-        return Err(LinuxError::EFAULT);
-    }
-    let path = read_user_cstring(pathname)?;
-    let path = path.to_str().map_err(|_| LinuxError::EINVAL)?;
-    if path.is_empty() {
-        return Err(LinuxError::EINVAL);
-    }
-    Ok(path.to_string())
+    crate::impls::utils::with_user_path_str(pathname, |path| {
+        if path.is_empty() {
+            Err(LinuxError::EINVAL)
+        } else {
+            Ok(path.to_string())
+        }
+    })
 }
 
 fn read_user_optional_path(pathname: usize) -> Result<Option<String>, LinuxError> {
     if pathname == 0 {
         return Ok(None);
     }
-    let path = read_user_cstring(pathname)?;
-    let path = path.to_str().map_err(|_| LinuxError::EINVAL)?;
-    if path.is_empty() {
-        Ok(None)
-    } else {
-        Ok(Some(path.to_string()))
-    }
+    crate::impls::utils::with_user_path_str(pathname, |path| {
+        if path.is_empty() {
+            Ok(None)
+        } else {
+            Ok(Some(path.to_string()))
+        }
+    })
 }
 
 fn mkdir_mode(mode: usize) -> NodePermission {
@@ -237,179 +234,155 @@ fn rename_at(olddirfd: i32, oldpath: &str, newdirfd: i32, newpath: &str) -> Resu
 }
 
 pub fn sys_openat(dirfd: i32, pathname: usize, flags: usize, mode: usize) -> isize {
-    if pathname == 0 {
-        return -LinuxError::EFAULT.code() as isize;
-    }
-    let path_c = match read_user_cstring(pathname) {
-        Ok(path) => path,
-        Err(e) => return -e.code() as isize,
-    };
+    let result = crate::impls::utils::with_user_path_str(pathname, |path| {
+        let resolved_dirfd = if path.starts_with('/') {
+            AT_FDCWD as i32
+        } else {
+            dirfd
+        };
+        let ctx = context_for_dirfd(resolved_dirfd)?;
 
-    let path = match path_c.to_str() {
-        Ok(path) => path,
-        Err(_) => return -LinuxError::EINVAL.code() as isize,
-    };
-
-    let resolved_dirfd = if path.starts_with('/') {
-        AT_FDCWD as i32
-    } else {
-        dirfd
-    };
-    let ctx = match context_for_dirfd(resolved_dirfd) {
-        Ok(ctx) => ctx,
-        Err(e) => return -e.code() as isize,
-    };
-
-    let options = flags_to_options(flags, mode);
-    let (opened, metadata) = match axtask::future::block_on(options.open_with_metadata(&ctx, path)) {
-        Ok(opened) => opened,
-        Err(e) => {
-            let err = LinuxError::from(e.canonicalize());
-            return -err.code() as isize;
-        }
-    };
-
-    let (uid, gid) = pulse_core::task::current_process()
-        .map(|process| (process.fsuid(), process.fsgid()))
-        .unwrap_or((0, 0));
-
-    // O_NOATIME permission check
-    if (flags & (O_NOATIME as usize)) != 0 {
-        if uid != 0 && uid != metadata.uid {
-            return -LinuxError::EPERM.code() as isize;
-        }
-    }
-    // O_NOFOLLOW symlink check
-    if (flags & (O_NOFOLLOW as usize)) != 0
-        && (flags & (O_PATH as usize)) == 0
-        && metadata.node_type == NodeType::Symlink
-    {
-        return -LinuxError::ELOOP.code() as isize;
-    }
-
-    if (flags & O_PATH as usize) == 0 {
-        let access_mode = flags & (O_ACCMODE as usize);
-        let mut required_mode = 0usize;
-        if access_mode == O_RDONLY as usize || access_mode == O_RDWR as usize {
-            required_mode |= R_OK as usize;
-        }
-        if access_mode == O_WRONLY as usize || access_mode == O_RDWR as usize {
-            required_mode |= W_OK as usize;
-        }
-        if (flags & O_TRUNC as usize) != 0 {
-            required_mode |= W_OK as usize;
-        }
-
-        let location = match &opened {
-            axfs::OpenResult::File(file) => file.location(),
-            axfs::OpenResult::Dir(dir) => dir,
+        let options = flags_to_options(flags, mode);
+        let (opened, metadata) = match axtask::future::block_on(options.open_with_metadata(&ctx, path)) {
+            Ok(opened) => opened,
+            Err(e) => {
+                let err = LinuxError::from(e.canonicalize());
+                return Err(err);
+            }
         };
 
-        if let Err(err) = crate::impls::fs::common::check_faccess_permission_with_metadata(
-            location,
-            &metadata,
-            required_mode,
-            uid,
-            gid,
-        ) {
-            return -err.code() as isize;
+        let (uid, gid) = pulse_core::task::current_process()
+            .map(|process| (process.fsuid(), process.fsgid()))
+            .unwrap_or((0, 0));
+
+        // O_NOATIME permission check
+        if (flags & (O_NOATIME as usize)) != 0 {
+            if uid != 0 && uid != metadata.uid {
+                return Err(LinuxError::EPERM);
+            }
         }
-    }
-
-    let is_fifo = metadata.node_type == NodeType::Fifo;
-
-    let entry = if is_fifo {
-        let access_mode = flags & (O_ACCMODE as usize);
-        let readable = access_mode == O_RDONLY as usize || access_mode == O_RDWR as usize;
-        let writable = access_mode == O_WRONLY as usize || access_mode == O_RDWR as usize;
-        match pulse_core::fd_table::create_fifo_entry(
-            metadata.device,
-            metadata.inode,
-            readable,
-            writable,
-            open_fd_flags(flags),
-        ) {
-            Ok(entry) => entry,
-            Err(e) => return -e.code() as isize,
+        // O_NOFOLLOW symlink check
+        if (flags & (O_NOFOLLOW as usize)) != 0
+            && (flags & (O_PATH as usize)) == 0
+            && metadata.node_type == NodeType::Symlink
+        {
+            return Err(LinuxError::ELOOP);
         }
-    } else {
-        open_result_to_entry(opened, open_fd_flags(flags))
-    };
 
-    match insert_fd_entry(entry) {
+        if (flags & O_PATH as usize) == 0 {
+            let access_mode = flags & (O_ACCMODE as usize);
+            let mut required_mode = 0usize;
+            if access_mode == O_RDONLY as usize || access_mode == O_RDWR as usize {
+                required_mode |= R_OK as usize;
+            }
+            if access_mode == O_WRONLY as usize || access_mode == O_RDWR as usize {
+                required_mode |= W_OK as usize;
+            }
+            if (flags & O_TRUNC as usize) != 0 {
+                required_mode |= W_OK as usize;
+            }
+
+            let location = match &opened {
+                axfs::OpenResult::File(file) => file.location(),
+                axfs::OpenResult::Dir(dir) => dir,
+            };
+
+            if let Err(err) = crate::impls::fs::common::check_faccess_permission_with_metadata(
+                location,
+                &metadata,
+                required_mode,
+                uid,
+                gid,
+            ) {
+                return Err(err);
+            }
+        }
+
+        let is_fifo = metadata.node_type == NodeType::Fifo;
+
+        let entry = if is_fifo {
+            let access_mode = flags & (O_ACCMODE as usize);
+            let readable = access_mode == O_RDONLY as usize || access_mode == O_RDWR as usize;
+            let writable = access_mode == O_WRONLY as usize || access_mode == O_RDWR as usize;
+            pulse_core::fd_table::create_fifo_entry(
+                metadata.device,
+                metadata.inode,
+                readable,
+                writable,
+                open_fd_flags(flags),
+            )?
+        } else {
+            open_result_to_entry(opened, open_fd_flags(flags))
+        };
+
+        insert_fd_entry(entry)
+    });
+
+    match result {
         Ok(fd) => fd as isize,
         Err(e) => -e.code() as isize,
     }
 }
 
 pub fn sys_mkdirat(dirfd: i32, pathname: usize, mode: usize) -> isize {
-    if pathname == 0 {
-        return -LinuxError::EFAULT.code() as isize;
-    }
-    let path_c = match read_user_cstring(pathname) {
-        Ok(path) => path,
-        Err(e) => return -e.code() as isize,
-    };
-    let path = match path_c.to_str() {
-        Ok(path) => path,
-        Err(_) => return -LinuxError::EINVAL.code() as isize,
-    };
+    let res = crate::impls::utils::with_user_path_str(pathname, |path| {
+        axlog::debug!(
+            "sys_mkdirat: dirfd={}, path='{}', mode={:#o}",
+            dirfd,
+            path,
+            mode
+        );
 
-    axlog::debug!(
-        "sys_mkdirat: dirfd={}, path='{}', mode={:#o}",
-        dirfd,
-        path,
-        mode
-    );
-
-    let resolved_dirfd = if path.starts_with('/') {
-        AT_FDCWD as i32
-    } else {
-        dirfd
-    };
-    let ctx = match context_for_dirfd(resolved_dirfd) {
-        Ok(ctx) => ctx,
-        Err(e) => return -e.code() as isize,
-    };
-    // Check for read-only filesystem: resolve parent dir if path doesn't exist yet
-    {
-        let is_ro = match axtask::future::block_on(ctx.resolve_no_follow(path)) {
-            Ok(loc) => crate::impls::fs::common::is_location_readonly(&loc),
-            Err(_) => {
-                if let Ok((parent_loc, _)) = axtask::future::block_on(ctx.resolve_parent(axfs_ng_vfs::path::Path::new(path)))
-                {
-                    crate::impls::fs::common::is_location_readonly(&parent_loc)
-                } else {
-                    false
-                }
-            }
+        let resolved_dirfd = if path.starts_with('/') {
+            AT_FDCWD as i32
+        } else {
+            dirfd
         };
-        if is_ro {
-            return -LinuxError::EROFS.code() as isize;
+        let ctx = context_for_dirfd(resolved_dirfd)?;
+        // Check for read-only filesystem: resolve parent dir if path doesn't exist yet
+        {
+            let is_ro = match axtask::future::block_on(ctx.resolve_no_follow(path)) {
+                Ok(loc) => crate::impls::fs::common::is_location_readonly(&loc),
+                Err(_) => {
+                    if let Ok((parent_loc, _)) = axtask::future::block_on(ctx.resolve_parent(axfs_ng_vfs::path::Path::new(path)))
+                    {
+                        crate::impls::fs::common::is_location_readonly(&parent_loc)
+                    } else {
+                        false
+                    }
+                }
+            };
+            if is_ro {
+                return Err(LinuxError::EROFS);
+            }
         }
-    }
-    match axtask::future::block_on(ctx.resolve_no_follow(path)) {
-        Ok(_) => {
-            axlog::debug!("sys_mkdirat: path '{}' already exists", path);
-            return -LinuxError::EEXIST.code() as isize;
+        match axtask::future::block_on(ctx.resolve_no_follow(path)) {
+            Ok(_) => {
+                axlog::debug!("sys_mkdirat: path '{}' already exists", path);
+                return Err(LinuxError::EEXIST);
+            }
+            Err(VfsError::NotFound) => {}
+            Err(e) => return Err(LinuxError::from(e.canonicalize())),
         }
-        Err(VfsError::NotFound) => {}
-        Err(e) => return -LinuxError::from(e.canonicalize()).code() as isize,
-    }
-    axlog::debug!("sys_mkdirat: creating directory '{}'", path);
-    match axtask::future::block_on(ctx.create_dir(path, mkdir_mode(mode))) {
-        Ok(_) => {
-            axlog::debug!("sys_mkdirat: directory '{}' created successfully", path);
-            0
+        axlog::debug!("sys_mkdirat: creating directory '{}'", path);
+        match axtask::future::block_on(ctx.create_dir(path, mkdir_mode(mode))) {
+            Ok(_) => {
+                axlog::debug!("sys_mkdirat: directory '{}' created successfully", path);
+                Ok(0isize)
+            }
+            Err(e) => {
+                axlog::debug!(
+                    "sys_mkdirat: failed to create directory '{}': {:?}",
+                    path,
+                    e
+                );
+                Err(LinuxError::from(e.canonicalize()))
+            }
         }
-        Err(e) => {
-            axlog::debug!(
-                "sys_mkdirat: failed to create directory '{}': {:?}",
-                path,
-                e
-            );
-            -LinuxError::from(e.canonicalize()).code() as isize
-        }
+    });
+    match res {
+        Ok(code) => code,
+        Err(e) => -e.code() as isize,
     }
 }
 
@@ -570,11 +543,12 @@ pub fn sys_mount(
         return -LinuxError::EFAULT.code() as isize;
     }
 
-    let target = match read_user_cstring(target) {
-        Ok(target) => target,
+    let mut target_buf = [0u8; 4096];
+    let target_len = match crate::impls::utils::read_user_cstring_to_slice(target, &mut target_buf) {
+        Ok(l) => l,
         Err(e) => return -e.code() as isize,
     };
-    let target_path_str = match target.to_str() {
+    let target_path_str = match core::str::from_utf8(&target_buf[..target_len]) {
         Ok(s) if !s.is_empty() => s,
         Ok(_) => return -LinuxError::EINVAL.code() as isize,
         Err(_) => return -LinuxError::EINVAL.code() as isize,
@@ -859,11 +833,12 @@ pub fn sys_umount2(target: usize, flags: usize) -> isize {
         return -LinuxError::EFAULT.code() as isize;
     }
 
-    let target = match read_user_cstring(target) {
-        Ok(target) => target,
+    let mut target_buf = [0u8; 4096];
+    let target_len = match crate::impls::utils::read_user_cstring_to_slice(target, &mut target_buf) {
+        Ok(l) => l,
         Err(e) => return -e.code() as isize,
     };
-    let target_path_raw = match target.to_str() {
+    let target_path_raw = match core::str::from_utf8(&target_buf[..target_len]) {
         Ok(s) if !s.is_empty() => s,
         Ok(_) => return -LinuxError::EINVAL.code() as isize,
         Err(_) => return -LinuxError::EINVAL.code() as isize,
@@ -956,109 +931,78 @@ pub fn sys_unlinkat(dirfd: i32, pathname: usize, flags: usize) -> isize {
         return -LinuxError::EINVAL.code() as isize;
     }
 
-    let path = match read_user_cstring(pathname) {
-        Ok(path) => path,
-        Err(e) => return -e.code() as isize,
-    };
-    let path = match path.to_str() {
-        Ok(s) if !s.is_empty() => s,
-        Ok(_) => return -LinuxError::EINVAL.code() as isize,
-        Err(_) => return -LinuxError::EINVAL.code() as isize,
-    };
-    let resolved_dirfd = if path.starts_with('/') {
-        AT_FDCWD as i32
-    } else {
-        dirfd
-    };
-    let ctx = match context_for_dirfd(resolved_dirfd) {
-        Ok(ctx) => ctx,
-        Err(e) => return -e.code() as isize,
-    };
+    let res = crate::impls::utils::with_user_path_str(pathname, |path| {
+        if path.is_empty() {
+            return Err(LinuxError::EINVAL);
+        }
+        let resolved_dirfd = if path.starts_with('/') {
+            AT_FDCWD as i32
+        } else {
+            dirfd
+        };
+        let ctx = context_for_dirfd(resolved_dirfd)?;
 
-    // Check for read-only filesystem
-    {
-        let is_ro = match axtask::future::block_on(ctx.resolve_no_follow(path)) {
-            Ok(loc) => crate::impls::fs::common::is_location_readonly(&loc),
-            Err(_) => {
-                if let Ok((parent_loc, _)) = axtask::future::block_on(ctx.resolve_parent(axfs_ng_vfs::path::Path::new(path)))
-                {
-                    crate::impls::fs::common::is_location_readonly(&parent_loc)
-                } else {
-                    false
+        // Check for read-only filesystem
+        {
+            let is_ro = match axtask::future::block_on(ctx.resolve_no_follow(path)) {
+                Ok(loc) => crate::impls::fs::common::is_location_readonly(&loc),
+                Err(_) => {
+                    if let Ok((parent_loc, _)) = axtask::future::block_on(ctx.resolve_parent(axfs_ng_vfs::path::Path::new(path)))
+                    {
+                        crate::impls::fs::common::is_location_readonly(&parent_loc)
+                    } else {
+                        false
+                    }
                 }
+            };
+            if is_ro {
+                return Err(LinuxError::EROFS);
             }
-        };
-        if is_ro {
-            return -LinuxError::EROFS.code() as isize;
         }
-    }
 
-    // 1. Resolve parent directory and child entry name
-    let (parent_loc, entry_name) = match axtask::future::block_on(ctx.resolve_parent(Path::new(path))) {
-        Ok(res) => res,
-        Err(e) => return -LinuxError::from(e.canonicalize()).code() as isize,
-    };
+        // 1. Resolve parent directory and child entry name
+        let (parent_loc, entry_name) = axtask::future::block_on(ctx.resolve_parent(Path::new(path)))
+            .map_err(|e| LinuxError::from(e.canonicalize()))?;
 
-    // Get process credentials
-    let (uid, gid) = pulse_core::task::current_process()
-        .map(|process| (process.fsuid(), process.fsgid()))
-        .unwrap_or((0, 0));
+        // Get process credentials
+        let (uid, gid) = pulse_core::task::current_process()
+            .map(|process| (process.fsuid(), process.fsgid()))
+            .unwrap_or((0, 0));
 
-    // 2. Enforce execute/search permission check on parent directory
-    if let Err(err) =
-        crate::impls::fs::common::check_faccess_permission(&parent_loc, X_OK as usize, uid, gid)
-    {
-        return -err.code() as isize;
-    }
+        // 2. Enforce execute/search permission check on parent directory
+        crate::impls::fs::common::check_faccess_permission(&parent_loc, X_OK as usize, uid, gid)?;
 
-    // 3. Lookup the child entry to ensure it exists (ENOENT if not found)
-    let child_loc = match axtask::future::block_on(parent_loc.lookup_no_follow(entry_name.as_ref())) {
-        Ok(loc) => loc,
-        Err(e) => return -LinuxError::from(e.canonicalize()).code() as isize,
-    };
+        // 3. Lookup the child entry to ensure it exists (ENOENT if not found)
+        let child_loc = axtask::future::block_on(parent_loc.lookup_no_follow(entry_name.as_ref()))
+            .map_err(|e| LinuxError::from(e.canonicalize()))?;
 
-    // 4. Enforce write permission check on parent directory
-    if let Err(err) =
-        crate::impls::fs::common::check_faccess_permission(&parent_loc, W_OK as usize, uid, gid)
-    {
-        return -err.code() as isize;
-    }
+        // 4. Enforce write permission check on parent directory
+        crate::impls::fs::common::check_faccess_permission(&parent_loc, W_OK as usize, uid, gid)?;
 
-    // 5. Enforce sticky bit rules if parent has STICKY bit set
-    let parent_meta = match axtask::future::block_on(parent_loc.metadata()) {
-        Ok(meta) => meta,
-        Err(e) => return -LinuxError::from(e.canonicalize()).code() as isize,
-    };
-    if parent_meta.mode.contains(NodePermission::STICKY) {
-        let child_meta = match axtask::future::block_on(child_loc.metadata()) {
-            Ok(meta) => meta,
-            Err(e) => return -LinuxError::from(e.canonicalize()).code() as isize,
-        };
-        if uid != 0 && uid != parent_meta.uid && uid != child_meta.uid {
-            return -LinuxError::EACCES.code() as isize;
-        }
-    }
-
-    if (flags & AT_REMOVEDIR as usize) != 0 {
-        return match axtask::future::block_on(ctx.remove_dir(Path::new(path))) {
-            Ok(()) => {
-                0
+        // 5. Enforce sticky bit rules if parent has STICKY bit set
+        let parent_meta = axtask::future::block_on(parent_loc.metadata())
+            .map_err(|e| LinuxError::from(e.canonicalize()))?;
+        if parent_meta.mode.contains(NodePermission::STICKY) {
+            let child_meta = axtask::future::block_on(child_loc.metadata())
+                .map_err(|e| LinuxError::from(e.canonicalize()))?;
+            if uid != 0 && uid != parent_meta.uid && uid != child_meta.uid {
+                return Err(LinuxError::EACCES);
             }
-            Err(e) => {
-                let errno = LinuxError::from(e.canonicalize());
-                -errno.code() as isize
-            }
-        };
-    }
+        }
 
-    match axtask::future::block_on(ctx.remove_file(Path::new(path))) {
-        Ok(()) => {
-            0
+        if (flags & AT_REMOVEDIR as usize) != 0 {
+            axtask::future::block_on(ctx.remove_dir(Path::new(path)))
+                .map_err(|e| LinuxError::from(e.canonicalize()))?;
+            return Ok(0isize);
         }
-        Err(e) => {
-            let errno = LinuxError::from(e.canonicalize());
-            -errno.code() as isize
-        }
+
+        axtask::future::block_on(ctx.remove_file(Path::new(path)))
+            .map_err(|e| LinuxError::from(e.canonicalize()))?;
+        Ok(0isize)
+    });
+    match res {
+        Ok(code) => code,
+        Err(e) => -e.code() as isize,
     }
 }
 
@@ -1166,11 +1110,12 @@ pub fn sys_symlinkat(target: usize, newdirfd: i32, linkpath: usize) -> isize {
     if target == 0 || linkpath == 0 {
         return -LinuxError::EFAULT.code() as isize;
     }
-    let target_c = match read_user_cstring(target) {
-        Ok(path) => path,
+    let mut target_buf = [0u8; 4096];
+    let target_len = match crate::impls::utils::read_user_cstring_to_slice(target, &mut target_buf) {
+        Ok(l) => l,
         Err(e) => return -e.code() as isize,
     };
-    let target_str = match target_c.to_str() {
+    let target_str = match core::str::from_utf8(&target_buf[..target_len]) {
         Ok(s) => s,
         Err(_) => return -LinuxError::EINVAL.code() as isize,
     };
@@ -1178,11 +1123,12 @@ pub fn sys_symlinkat(target: usize, newdirfd: i32, linkpath: usize) -> isize {
         return -LinuxError::ENOENT.code() as isize;
     }
 
-    let link_c = match read_user_cstring(linkpath) {
-        Ok(path) => path,
+    let mut link_buf = [0u8; 4096];
+    let link_len = match crate::impls::utils::read_user_cstring_to_slice(linkpath, &mut link_buf) {
+        Ok(l) => l,
         Err(e) => return -e.code() as isize,
     };
-    let link_str = match link_c.to_str() {
+    let link_str = match core::str::from_utf8(&link_buf[..link_len]) {
         Ok(s) => s,
         Err(_) => return -LinuxError::EINVAL.code() as isize,
     };
@@ -1232,11 +1178,12 @@ pub fn sys_mknodat(dirfd: i32, pathname: usize, mode: usize, _dev: usize) -> isi
     if pathname == 0 {
         return -LinuxError::EFAULT.code() as isize;
     }
-    let path_c = match read_user_cstring(pathname) {
-        Ok(path) => path,
+    let mut buf = [0u8; 4096];
+    let len = match crate::impls::utils::read_user_cstring_to_slice(pathname, &mut buf) {
+        Ok(l) => l,
         Err(e) => return -e.code() as isize,
     };
-    let path = match path_c.to_str() {
+    let path = match core::str::from_utf8(&buf[..len]) {
         Ok(path) => path,
         Err(_) => return -LinuxError::EINVAL.code() as isize,
     };
@@ -1351,20 +1298,22 @@ pub fn sys_linkat(
         return -LinuxError::EINVAL.code() as isize;
     }
 
-    let oldpath_c = match read_user_cstring(oldpath) {
-        Ok(path) => path,
+    let mut old_buf = [0u8; 4096];
+    let old_len = match crate::impls::utils::read_user_cstring_to_slice(oldpath, &mut old_buf) {
+        Ok(l) => l,
         Err(e) => return -e.code() as isize,
     };
-    let oldpath_str = match oldpath_c.to_str() {
+    let oldpath_str = match core::str::from_utf8(&old_buf[..old_len]) {
         Ok(s) => s,
         Err(_) => return -LinuxError::EINVAL.code() as isize,
     };
 
-    let newpath_c = match read_user_cstring(newpath) {
-        Ok(path) => path,
+    let mut new_buf = [0u8; 4096];
+    let new_len = match crate::impls::utils::read_user_cstring_to_slice(newpath, &mut new_buf) {
+        Ok(l) => l,
         Err(e) => return -e.code() as isize,
     };
-    let newpath_str = match newpath_c.to_str() {
+    let newpath_str = match core::str::from_utf8(&new_buf[..new_len]) {
         Ok(s) => s,
         Err(_) => return -LinuxError::EINVAL.code() as isize,
     };

@@ -1,9 +1,11 @@
+use core::ffi::CStr;
+
 use axerrno::LinuxError;
 use axfs::FsContext;
 use axfs_ng_vfs::Location;
 use linux_raw_sys::general::*;
 
-use crate::impls::utils::{read_user_cstring, with_process};
+use crate::impls::utils::with_process;
 
 pub(crate) fn context_for_dirfd(dirfd: i32) -> Result<FsContext, LinuxError> {
     let base = with_process(|process| {
@@ -31,28 +33,43 @@ pub(crate) fn resolve_location_at_ptr(
     pathname: usize,
     flags: usize,
 ) -> Result<Location, LinuxError> {
-    if (flags & AT_EMPTY_PATH as usize) != 0 {
-        if pathname == 0 {
-            if dirfd < 0 {
-                return Err(LinuxError::EBADF);
-            }
-            return with_process(|process| process.get_fd_location(dirfd as usize))?;
-        }
-        let path = read_user_cstring(pathname)?;
-        if path.as_bytes().is_empty() {
-            if dirfd < 0 {
-                return Err(LinuxError::EBADF);
-            }
-            return with_process(|process| process.get_fd_location(dirfd as usize))?;
-        }
-    }
-
     if pathname == 0 {
+        if (flags & AT_EMPTY_PATH as usize) != 0 {
+            if dirfd < 0 {
+                return Err(LinuxError::EBADF);
+            }
+            return with_process(|process| process.get_fd_location(dirfd as usize))?;
+        }
         return Err(LinuxError::EFAULT);
     }
-    let path = read_user_cstring(pathname)?;
-    let path = path.as_c_str().to_string_lossy();
+
+    crate::impls::utils::with_user_path_str(pathname, |path_str| {
+        resolve_location_at_str(dirfd, path_str, flags)
+    })
+}
+
+#[allow(dead_code)]
+pub(crate) fn resolve_location_at_cstr(
+    dirfd: i32,
+    path: &CStr,
+    flags: usize,
+) -> Result<Location, LinuxError> {
+    let path_str = path.to_str().map_err(|_| LinuxError::EINVAL)?;
+    resolve_location_at_str(dirfd, path_str, flags)
+}
+
+pub(crate) fn resolve_location_at_str(
+    dirfd: i32,
+    path: &str,
+    flags: usize,
+) -> Result<Location, LinuxError> {
     if path.is_empty() {
+        if (flags & AT_EMPTY_PATH as usize) != 0 {
+            if dirfd < 0 {
+                return Err(LinuxError::EBADF);
+            }
+            return with_process(|process| process.get_fd_location(dirfd as usize))?;
+        }
         if dirfd == AT_FDCWD as i32 {
             return Err(LinuxError::ENOENT);
         }
@@ -61,6 +78,7 @@ pub(crate) fn resolve_location_at_ptr(
         }
         return with_process(|process| process.get_fd_location(dirfd as usize))?;
     }
+
     let is_absolute = path.starts_with('/');
     let dirfd = if is_absolute { AT_FDCWD as i32 } else { dirfd };
     axlog::debug!(
@@ -69,7 +87,7 @@ pub(crate) fn resolve_location_at_ptr(
         path,
         flags
     );
-    if let Some(result) = try_resolve_location_fast(dirfd, path.as_ref(), flags) {
+    if let Some(result) = try_resolve_location_fast(dirfd, path, flags) {
         match &result {
             Ok(_loc) => axlog::debug!(
                 "resolve_location_at_ptr: fast path resolved OK for \"{}\"",
@@ -85,10 +103,10 @@ pub(crate) fn resolve_location_at_ptr(
     }
     let ctx = context_for_dirfd(dirfd)?;
     let result = if (flags & AT_SYMLINK_NOFOLLOW as usize) != 0 {
-        axtask::future::block_on(ctx.resolve_no_follow(path.as_ref()))
+        axtask::future::block_on(ctx.resolve_no_follow(path))
             .map_err(|e| LinuxError::from(e.canonicalize()))
     } else {
-        axtask::future::block_on(ctx.resolve(path.as_ref()))
+        axtask::future::block_on(ctx.resolve(path))
             .map_err(|e| LinuxError::from(e.canonicalize()))
     };
     match &result {

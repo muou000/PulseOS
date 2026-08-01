@@ -1,4 +1,4 @@
-use alloc::{ffi::CString, sync::Arc, vec::Vec};
+use alloc::{sync::Arc, vec::Vec};
 use core::time::Duration;
 
 use axerrno::LinuxError;
@@ -33,15 +33,52 @@ pub(crate) fn write_user_bytes(user_addr: usize, bytes: &[u8]) -> Result<(), Lin
         .map_err(|e| LinuxError::from(e.canonicalize()))
 }
 
-pub(crate) fn read_user_cstring(user_addr: usize) -> Result<CString, LinuxError> {
-    let (bytes, terminated) = with_process(|process| {
-        uaccess::read_user_cstring_bytes(process, user_addr, uaccess::DEFAULT_USER_CSTRING_MAX)
-    })?
-    .map_err(|e| LinuxError::from(e.canonicalize()))?;
-    if !terminated {
-        return Err(LinuxError::ENAMETOOLONG);
+pub(crate) fn read_user_cstring_to_slice(
+    user_addr: usize,
+    dst: &mut [u8],
+) -> Result<usize, LinuxError> {
+    if user_addr == 0 {
+        return Err(LinuxError::EFAULT);
     }
-    CString::new(bytes).map_err(|_| LinuxError::EINVAL)
+    let max_len = dst.len();
+    let mut len = 0;
+    while len < max_len {
+        let chunk_addr = user_addr.checked_add(len).ok_or(LinuxError::EFAULT)?;
+        let page_remaining = 4096 - (chunk_addr & 4095);
+        let chunk_len = core::cmp::min(128, core::cmp::min(max_len - len, page_remaining));
+
+        let read_len = match read_user_bytes_partial(chunk_addr, &mut dst[len..len + chunk_len]) {
+            Ok(n) if n > 0 => n,
+            _ => {
+                let mut byte = [0u8; 1];
+                read_user_bytes(chunk_addr, &mut byte)?;
+                if byte[0] == 0 {
+                    return Ok(len);
+                }
+                dst[len] = byte[0];
+                1
+            }
+        };
+
+        if let Some(nul_pos) = dst[len..len + read_len].iter().position(|&b| b == 0) {
+            return Ok(len + nul_pos);
+        }
+        len += read_len;
+    }
+    Err(LinuxError::ENAMETOOLONG)
+}
+
+pub(crate) fn with_user_path_str<R>(
+    user_addr: usize,
+    f: impl FnOnce(&str) -> Result<R, LinuxError>,
+) -> Result<R, LinuxError> {
+    if user_addr == 0 {
+        return Err(LinuxError::EFAULT);
+    }
+    let mut stack_buf = [0u8; uaccess::DEFAULT_USER_CSTRING_MAX];
+    let len = read_user_cstring_to_slice(user_addr, &mut stack_buf)?;
+    let path_str = core::str::from_utf8(&stack_buf[..len]).map_err(|_| LinuxError::EINVAL)?;
+    f(path_str)
 }
 
 pub(crate) fn read_user_iovec_array(

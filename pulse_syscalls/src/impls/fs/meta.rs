@@ -7,10 +7,11 @@ use linux_raw_sys::general::{
 use pulse_core::fd_table::location_to_stat;
 
 use crate::impls::{
-    fs::common::{check_faccess_permission, get_fd_entry, resolve_location_at_ptr},
+    fs::common::{
+        check_faccess_permission, get_fd_entry, resolve_location_at_ptr,
+    },
     utils::{
-        read_user_cstring, read_user_timespec, timespec_to_update_time, with_process,
-        write_user_bytes,
+        read_user_timespec, timespec_to_update_time, with_process, write_user_bytes,
     },
 };
 
@@ -229,11 +230,17 @@ pub fn sys_statx(
     // 对于 stdin/stdout/pipe/socket 等没有文件系统路径的匿名 FD，
     // resolve_location_at_ptr 会因为 location() 返回 None 而报 EBADF。
     // 此时应直接通过 FD object 的 stat() 方法获取信息。
+    let mut buf = [0u8; 4096];
+    let path_len = if pathname == 0 {
+        None
+    } else {
+        match crate::impls::utils::read_user_cstring_to_slice(pathname, &mut buf) {
+            Ok(len) => Some(len),
+            Err(e) => return -e.code() as isize,
+        }
+    };
     let is_empty_path = (flags & AT_EMPTY_PATH as usize) != 0
-        && (pathname == 0
-            || read_user_cstring(pathname)
-                .map(|s| s.as_bytes().is_empty())
-                .unwrap_or(false));
+        && path_len.map_or(pathname == 0, |len| len == 0);
 
     let stat = if is_empty_path && dirfd >= 0 && dirfd != AT_FDCWD as i32 {
         // AT_EMPTY_PATH + 合法 FD：优先直接通过 FD object 获取 stat，
@@ -434,12 +441,14 @@ pub fn sys_faccessat(dirfd: i32, pathname: usize, mode: usize, flags: usize) -> 
 /// 以满足 LTP 等测试框架的 setup 阶段需求。
 pub fn sys_fchmodat(dirfd: i32, pathname: usize, mode: usize, flags: usize) -> isize {
     // 尝试读取路径字符串用于日志
+    let mut path_buf = [0u8; 4096];
     let path_str = if pathname != 0 {
-        crate::impls::utils::read_user_cstring(pathname)
-            .map(|c| alloc::string::String::from_utf8_lossy(c.as_bytes()).into_owned())
-            .unwrap_or_else(|_| "<unreadable>".into())
+        crate::impls::utils::read_user_cstring_to_slice(pathname, &mut path_buf)
+            .ok()
+            .and_then(|len| core::str::from_utf8(&path_buf[..len]).ok())
+            .unwrap_or("<unreadable>")
     } else {
-        "<null>".into()
+        "<null>"
     };
     axlog::debug!(
         "sys_fchmodat: dirfd={}, pathname={:#x} (\"{}\"), mode={:#o}, flags={:#x}",
@@ -623,12 +632,14 @@ pub fn sys_fchmod(fd: usize, mode: usize) -> isize {
 ///
 /// PulseOS 不强制执行文件所有权，此 stub 仅验证路径存在性后返回成功。
 pub fn sys_fchownat(dirfd: i32, pathname: usize, uid: usize, gid: usize, flags: usize) -> isize {
+    let mut path_buf = [0u8; 4096];
     let path_str = if pathname != 0 {
-        crate::impls::utils::read_user_cstring(pathname)
-            .map(|c| alloc::string::String::from_utf8_lossy(c.as_bytes()).into_owned())
-            .unwrap_or_else(|_| "<unreadable>".into())
+        crate::impls::utils::read_user_cstring_to_slice(pathname, &mut path_buf)
+            .ok()
+            .and_then(|len| core::str::from_utf8(&path_buf[..len]).ok())
+            .unwrap_or("<unreadable>")
     } else {
-        "<null>".into()
+        "<null>"
     };
     axlog::debug!(
         "sys_fchownat: dirfd={}, path=\"{}\", uid={}, gid={}, flags={:#x}",
