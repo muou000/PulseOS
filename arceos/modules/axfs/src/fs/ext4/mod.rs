@@ -39,19 +39,51 @@ struct WriteScopeState {
     dirty_offsets: BTreeSet<usize>,
 }
 
-#[derive(Default)]
 struct WriteScopeRegistry {
-    scopes: BTreeMap<u64, WriteScopeState>,
-    active_by_task: BTreeMap<u64, Vec<u64>>,
+    scopes: [Mutex<BTreeMap<u64, Arc<Mutex<WriteScopeState>>>>; WRITE_SCOPE_SHARDS],
+    active_by_task: [Mutex<BTreeMap<u64, Vec<u64>>>; WRITE_SCOPE_SHARDS],
+}
+
+impl Default for WriteScopeRegistry {
+    fn default() -> Self {
+        Self {
+            scopes: core::array::from_fn(|_| Mutex::new(BTreeMap::new())),
+            active_by_task: core::array::from_fn(|_| Mutex::new(BTreeMap::new())),
+        }
+    }
+}
+
+impl WriteScopeRegistry {
+    fn scope(&self, scope_id: u64) -> Option<Arc<Mutex<WriteScopeState>>> {
+        self.scopes[write_scope_shard(scope_id)]
+            .lock()
+            .get(&scope_id)
+            .cloned()
+    }
+
+    fn active_scopes(&self, task_id: u64) -> Vec<u64> {
+        self.active_by_task[write_scope_shard(task_id)]
+            .lock()
+            .get(&task_id)
+            .cloned()
+            .unwrap_or_default()
+    }
 }
 
 const BLOCK_CACHE_STRIPES: usize = 16;
+const DIRTY_OWNER_SHARDS: usize = BLOCK_CACHE_STRIPES;
+const WRITE_SCOPE_SHARDS: usize = 32;
 const CACHE_CAPACITY_PER_STRIPE: usize = 32;
 const CACHE_EVICTION_SCAN_LIMIT: usize = 64;
 const DEVICE_READ_MAX_ATTEMPTS: usize = 2;
-const IO_LOCK_STRIPES: usize = 64;
 const FLUSH_BATCH_BLOCKS: usize = 32;
 const FLUSH_WRITE_CONCURRENCY: usize = 4;
+const IO_RANGE_LOCK_BUCKETS: usize = 128;
+const IO_RANGE_LOCK_BUCKET_BLOCKS: usize = 64;
+
+fn write_scope_shard(id: u64) -> usize {
+    (id as usize ^ (id >> 32) as usize) % WRITE_SCOPE_SHARDS
+}
 
 struct CacheStripeInner {
     cache: LruCache<usize, CacheBlock>,
@@ -90,6 +122,231 @@ impl CacheStripeInner {
 
 struct CacheStripe {
     inner: Mutex<CacheStripeInner>,
+}
+
+enum IoRangeLockIndices {
+    One(usize),
+    Two([usize; 2]),
+    Many(Vec<usize>),
+}
+
+impl IoRangeLockIndices {
+    fn len(&self) -> usize {
+        match self {
+            Self::One(_) => 1,
+            Self::Two(_) => 2,
+            Self::Many(indices) => indices.len(),
+        }
+    }
+
+    fn get(&self, index: usize) -> usize {
+        match self {
+            Self::One(value) => {
+                debug_assert_eq!(index, 0);
+                *value
+            }
+            Self::Two(values) => values[index],
+            Self::Many(values) => values[index],
+        }
+    }
+
+    #[cfg(test)]
+    fn contains(&self, target: usize) -> bool {
+        (0..self.len()).any(|index| self.get(index) == target)
+    }
+}
+
+enum IoReadRangeGuards<'a> {
+    One {
+        _guard: async_lock::RwLockReadGuard<'a, ()>,
+    },
+    Many(Vec<async_lock::RwLockReadGuard<'a, ()>>),
+}
+
+impl IoReadRangeGuards<'_> {
+    fn len(&self) -> usize {
+        match self {
+            Self::One { .. } => 1,
+            Self::Many(guards) => guards.len(),
+        }
+    }
+}
+
+enum IoWriteRangeGuards<'a> {
+    One {
+        _guard: async_lock::RwLockWriteGuard<'a, ()>,
+    },
+    Many(Vec<async_lock::RwLockWriteGuard<'a, ()>>),
+}
+
+impl IoWriteRangeGuards<'_> {
+    fn len(&self) -> usize {
+        match self {
+            Self::One { .. } => 1,
+            Self::Many(guards) => guards.len(),
+        }
+    }
+}
+
+struct IoRangeLocks {
+    buckets: [async_lock::RwLock<()>; IO_RANGE_LOCK_BUCKETS],
+}
+
+impl IoRangeLocks {
+    fn new() -> Self {
+        Self {
+            buckets: core::array::from_fn(|_| async_lock::RwLock::new(())),
+        }
+    }
+
+    async fn read(
+        &self,
+        offset: usize,
+        len: usize,
+        block_size: usize,
+    ) -> axdriver::prelude::DevResult<IoReadRangeGuards<'_>> {
+        let indices = io_range_lock_indices(offset, len, block_size)?;
+        crate::buildstorm_stat_add!(EXT4_RANGE_BUCKETS_LOCKED, indices.len());
+
+        if indices.len() == 1 {
+            let lock = &self.buckets[indices.get(0)];
+            if let Some(guard) = lock.try_read() {
+                crate::buildstorm_stat_inc!(EXT4_RANGE_READ_FAST);
+                return Ok(IoReadRangeGuards::One { _guard: guard });
+            }
+            crate::buildstorm_stat_inc!(EXT4_RANGE_READ_WAIT);
+            return Ok(IoReadRangeGuards::One {
+                _guard: lock.read().await,
+            });
+        }
+
+        let mut waited = false;
+        let mut guards = Vec::with_capacity(indices.len());
+        for slot in 0..indices.len() {
+            let index = indices.get(slot);
+            let lock = &self.buckets[index];
+            if let Some(guard) = lock.try_read() {
+                guards.push(guard);
+            } else {
+                waited = true;
+                guards.push(lock.read().await);
+            }
+        }
+        if waited {
+            crate::buildstorm_stat_inc!(EXT4_RANGE_READ_WAIT);
+        } else {
+            crate::buildstorm_stat_inc!(EXT4_RANGE_READ_FAST);
+        }
+        Ok(IoReadRangeGuards::Many(guards))
+    }
+
+    async fn write(
+        &self,
+        offset: usize,
+        len: usize,
+        block_size: usize,
+    ) -> axdriver::prelude::DevResult<IoWriteRangeGuards<'_>> {
+        let indices = io_range_lock_indices(offset, len, block_size)?;
+        crate::buildstorm_stat_add!(EXT4_RANGE_BUCKETS_LOCKED, indices.len());
+
+        if indices.len() == 1 {
+            let lock = &self.buckets[indices.get(0)];
+            if let Some(guard) = lock.try_write() {
+                crate::buildstorm_stat_inc!(EXT4_RANGE_WRITE_FAST);
+                return Ok(IoWriteRangeGuards::One { _guard: guard });
+            }
+            crate::buildstorm_stat_inc!(EXT4_RANGE_WRITE_WAIT);
+            return Ok(IoWriteRangeGuards::One {
+                _guard: lock.write().await,
+            });
+        }
+
+        let mut waited = false;
+        let mut guards = Vec::with_capacity(indices.len());
+        for slot in 0..indices.len() {
+            let index = indices.get(slot);
+            let lock = &self.buckets[index];
+            if let Some(guard) = lock.try_write() {
+                guards.push(guard);
+            } else {
+                waited = true;
+                guards.push(lock.write().await);
+            }
+        }
+        if waited {
+            crate::buildstorm_stat_inc!(EXT4_RANGE_WRITE_WAIT);
+        } else {
+            crate::buildstorm_stat_inc!(EXT4_RANGE_WRITE_FAST);
+        }
+        Ok(IoWriteRangeGuards::Many(guards))
+    }
+
+    async fn write_all(&self) -> IoWriteRangeGuards<'_> {
+        let mut guards = Vec::with_capacity(IO_RANGE_LOCK_BUCKETS);
+        for lock in &self.buckets {
+            guards.push(lock.write().await);
+        }
+        IoWriteRangeGuards::Many(guards)
+    }
+}
+
+fn io_range_lock_indices(
+    offset: usize,
+    len: usize,
+    block_size: usize,
+) -> axdriver::prelude::DevResult<IoRangeLockIndices> {
+    let (first_block, end_block) = checked_io_block_range(offset, len, block_size)?;
+    let first_bucket = first_block / IO_RANGE_LOCK_BUCKET_BLOCKS;
+    let last_bucket = (end_block - 1) / IO_RANGE_LOCK_BUCKET_BLOCKS;
+    let bucket_count = last_bucket - first_bucket + 1;
+    if bucket_count == 1 {
+        return Ok(IoRangeLockIndices::One(
+            first_bucket % IO_RANGE_LOCK_BUCKETS,
+        ));
+    }
+    if bucket_count == 2 {
+        let first = first_bucket % IO_RANGE_LOCK_BUCKETS;
+        let second = last_bucket % IO_RANGE_LOCK_BUCKETS;
+        return Ok(IoRangeLockIndices::Two(if first < second {
+            [first, second]
+        } else {
+            [second, first]
+        }));
+    }
+
+    if bucket_count >= IO_RANGE_LOCK_BUCKETS {
+        return Ok(IoRangeLockIndices::Many(
+            (0..IO_RANGE_LOCK_BUCKETS).collect(),
+        ));
+    }
+
+    // An overlapping pair shares at least one logical block, hence the same
+    // bucket. Modulo mapping may add false conflicts but never loses one.
+    let mut present = [false; IO_RANGE_LOCK_BUCKETS];
+    for bucket in first_bucket..=last_bucket {
+        present[bucket % IO_RANGE_LOCK_BUCKETS] = true;
+    }
+    Ok(IoRangeLockIndices::Many(
+        present
+            .iter()
+            .enumerate()
+            .filter_map(|(index, present)| (*present).then_some(index))
+            .collect(),
+    ))
+}
+
+fn checked_io_block_range(
+    offset: usize,
+    len: usize,
+    block_size: usize,
+) -> axdriver::prelude::DevResult<(usize, usize)> {
+    if len == 0 || block_size == 0 {
+        return Err(axdriver::prelude::DevError::InvalidParam);
+    }
+    let end = offset
+        .checked_add(len)
+        .ok_or(axdriver::prelude::DevError::InvalidParam)?;
+    Ok((offset / block_size, end.div_ceil(block_size)))
 }
 
 fn bypass_block_cache(offset: usize, len: usize, block_size: usize) -> bool {
@@ -143,14 +400,14 @@ pub(crate) struct Ext4Disk<D: BlockDriverOps> {
     sector_size: usize,
     block_cache_stripes: [CacheStripe; BLOCK_CACHE_STRIPES],
     block_size: AtomicUsize,
-    io_locks: [async_lock::RwLock<()>; IO_LOCK_STRIPES],
+    io_ranges: IoRangeLocks,
     checkpoint_lock: async_lock::RwLock<()>,
-    flush_lock: async_lock::Mutex<()>,
+    device_flush_lock: async_lock::Mutex<()>,
     write_generation: AtomicU64,
     flushed_generation: AtomicU64,
-    dirty_owners: Mutex<BTreeMap<usize, DirtyOwnerState>>,
+    dirty_owners: [Mutex<BTreeMap<usize, DirtyOwnerState>>; DIRTY_OWNER_SHARDS],
     next_write_scope_id: AtomicU64,
-    write_scopes: Mutex<WriteScopeRegistry>,
+    write_scopes: WriteScopeRegistry,
 }
 
 impl<D: BlockDriverOps> Ext4Disk<D> {
@@ -163,22 +420,6 @@ impl<D: BlockDriverOps> Ext4Disk<D> {
 struct FlushingGuard<'a, D: BlockDriverOps> {
     disk: &'a Ext4Disk<D>,
     offsets: Vec<usize>,
-}
-
-enum ReadRangeGuards<'a> {
-    One {
-        _guard: async_lock::RwLockReadGuard<'a, ()>,
-    },
-    Many(Vec<async_lock::RwLockReadGuard<'a, ()>>),
-}
-
-impl ReadRangeGuards<'_> {
-    fn len(&self) -> usize {
-        match self {
-            Self::One { .. } => 1,
-            Self::Many(guards) => guards.len(),
-        }
-    }
 }
 
 impl<'a, D: BlockDriverOps> Drop for FlushingGuard<'a, D> {
@@ -196,13 +437,12 @@ impl<'a, D: BlockDriverOps> Drop for FlushingGuard<'a, D> {
 #[async_trait]
 impl<D: AsyncBlockDriverOps + Clone + 'static> crate::disk::DiskFlushable for Ext4Disk<D> {
     async fn flush_disk(&self) -> axdriver::prelude::DevResult<()> {
-        let _flush_guard = self.flush_lock.lock().await;
         let (target_generation, batches) = {
             // Wait only for writes which started before this checkpoint. New
             // writes may continue while the selected ranges are written back.
             let _checkpoint = self.checkpoint_lock.write().await;
             let target_generation = self.write_generation.load(Ordering::Acquire);
-            if self.flushed_generation.load(Ordering::Acquire) == target_generation {
+            if self.flushed_generation.load(Ordering::Acquire) >= target_generation {
                 return Ok(());
             }
             let offsets = self.dirty_offsets();
@@ -214,20 +454,27 @@ impl<D: AsyncBlockDriverOps + Clone + 'static> crate::disk::DiskFlushable for Ex
 
         let first_error = self.flush_batches(batches).await;
 
-        let dev = self.dev.lock().clone();
-        let flush_result = dev.flush_async().await;
+        let flush_result = {
+            let _device_flush = self.device_flush_lock.lock().await;
+            let dev = self.dev.lock().clone();
+            crate::buildstorm_stat_inc!(EXT4_DEVICE_FLUSHES);
+            #[cfg(feature = "buildstorm-stats")]
+            let _device_io = crate::buildstorm_stats::begin_device_io();
+            dev.flush_async().await
+        };
         if first_error.is_none() && flush_result.is_ok() {
             self.flushed_generation
-                .store(target_generation, Ordering::Release);
-            self.dirty_owners
-                .lock()
-                .retain(|_, state| state.sequence > target_generation);
+                .fetch_max(target_generation, Ordering::AcqRel);
+            for owners in &self.dirty_owners {
+                owners
+                    .lock()
+                    .retain(|_, state| state.sequence > target_generation);
+            }
         }
         first_error.map_or(flush_result, Err)
     }
 
     async fn flush_owner(&self, owner: u64) -> axdriver::prelude::DevResult<()> {
-        let _flush_guard = self.flush_lock.lock().await;
         let (owner_snapshot, batches) = {
             let _checkpoint = self.checkpoint_lock.write().await;
             let owner_snapshot = self.owner_snapshot(owner);
@@ -248,11 +495,17 @@ impl<D: AsyncBlockDriverOps + Clone + 'static> crate::disk::DiskFlushable for Ex
         };
 
         let first_error = self.flush_batches(batches).await;
-        let dev = self.dev.lock().clone();
-        let flush_result = dev.flush_async().await;
+        let flush_result = {
+            let _device_flush = self.device_flush_lock.lock().await;
+            let dev = self.dev.lock().clone();
+            crate::buildstorm_stat_inc!(EXT4_DEVICE_FLUSHES);
+            #[cfg(feature = "buildstorm-stats")]
+            let _device_io = crate::buildstorm_stats::begin_device_io();
+            dev.flush_async().await
+        };
         if first_error.is_none() && flush_result.is_ok() {
-            let mut dirty_owners = self.dirty_owners.lock();
             for (offset, sequence) in owner_snapshot {
+                let mut dirty_owners = self.dirty_owners[self.stripe_index(offset)].lock();
                 if dirty_owners.get(&offset).map(|state| state.sequence) == Some(sequence) {
                     dirty_owners.remove(&offset);
                 }
@@ -269,13 +522,15 @@ impl<D: AsyncBlockDriverOps + Clone + 'static> crate::disk::DiskFlushable for Ex
         let mut owners = owners.to_vec();
         owners.sort_unstable();
         owners.dedup();
-        let previous = self.write_scopes.lock().scopes.insert(
-            scope_id,
-            WriteScopeState {
-                owners,
-                dirty_offsets: BTreeSet::new(),
-            },
-        );
+        let previous = self.write_scopes.scopes[write_scope_shard(scope_id)]
+            .lock()
+            .insert(
+                scope_id,
+                Arc::new(Mutex::new(WriteScopeState {
+                    owners,
+                    dirty_offsets: BTreeSet::new(),
+                })),
+            );
         debug_assert!(previous.is_none());
         scope_id
     }
@@ -284,10 +539,9 @@ impl<D: AsyncBlockDriverOps + Clone + 'static> crate::disk::DiskFlushable for Ex
         let Some(task_id) = axtask::current_may_uninit().map(|task| task.id().as_u64()) else {
             return;
         };
-        let mut registry = self.write_scopes.lock();
-        debug_assert!(registry.scopes.contains_key(&scope_id));
-        registry
-            .active_by_task
+        debug_assert!(self.write_scopes.scope(scope_id).is_some());
+        self.write_scopes.active_by_task[write_scope_shard(task_id)]
+            .lock()
             .entry(task_id)
             .or_default()
             .push(scope_id);
@@ -295,18 +549,18 @@ impl<D: AsyncBlockDriverOps + Clone + 'static> crate::disk::DiskFlushable for Ex
 
     fn include_write_owner(&self, scope_id: u64, owner: u64) {
         let dirty_offsets = {
-            let mut registry = self.write_scopes.lock();
-            let Some(scope) = registry.scopes.get_mut(&scope_id) else {
+            let Some(scope) = self.write_scopes.scope(scope_id) else {
                 return;
             };
+            let mut scope = scope.lock();
             if !scope.owners.contains(&owner) {
                 scope.owners.push(owner);
                 scope.owners.sort_unstable();
             }
             scope.dirty_offsets.clone()
         };
-        let mut dirty_owners = self.dirty_owners.lock();
         for offset in dirty_offsets {
+            let mut dirty_owners = self.dirty_owners[self.stripe_index(offset)].lock();
             if let Some(state) = dirty_owners.get_mut(&offset) {
                 state.owners.insert(owner);
             }
@@ -317,28 +571,30 @@ impl<D: AsyncBlockDriverOps + Clone + 'static> crate::disk::DiskFlushable for Ex
         let Some(task_id) = axtask::current_may_uninit().map(|task| task.id().as_u64()) else {
             return;
         };
-        let mut registry = self.write_scopes.lock();
-        if let Some(stack) = registry.active_by_task.get_mut(&task_id) {
+        let mut active_by_task =
+            self.write_scopes.active_by_task[write_scope_shard(task_id)].lock();
+        if let Some(stack) = active_by_task.get_mut(&task_id) {
             let position = stack.iter().rposition(|id| *id == scope_id);
             debug_assert_eq!(position, stack.len().checked_sub(1));
             if let Some(position) = position {
                 stack.remove(position);
             }
             if stack.is_empty() {
-                registry.active_by_task.remove(&task_id);
+                active_by_task.remove(&task_id);
             }
         }
     }
 
     fn end_write_scope(&self, scope_id: u64) {
-        let mut registry = self.write_scopes.lock();
-        debug_assert!(
-            registry
-                .active_by_task
+        debug_assert!(self.write_scopes.active_by_task.iter().all(|tasks| {
+            tasks
+                .lock()
                 .values()
                 .all(|stack| !stack.contains(&scope_id))
-        );
-        registry.scopes.remove(&scope_id);
+        }));
+        self.write_scopes.scopes[write_scope_shard(scope_id)]
+            .lock()
+            .remove(&scope_id);
     }
 }
 
@@ -355,14 +611,14 @@ impl<D: AsyncBlockDriverOps + Clone + 'static> Ext4Disk<D> {
                 }),
             }),
             block_size: AtomicUsize::new(4096),
-            io_locks: core::array::from_fn(|_| async_lock::RwLock::new(())),
+            io_ranges: IoRangeLocks::new(),
             checkpoint_lock: async_lock::RwLock::new(()),
-            flush_lock: async_lock::Mutex::new(()),
+            device_flush_lock: async_lock::Mutex::new(()),
             write_generation: AtomicU64::new(0),
             flushed_generation: AtomicU64::new(0),
-            dirty_owners: Mutex::new(BTreeMap::new()),
+            dirty_owners: core::array::from_fn(|_| Mutex::new(BTreeMap::new())),
             next_write_scope_id: AtomicU64::new(1),
-            write_scopes: Mutex::new(WriteScopeRegistry::default()),
+            write_scopes: WriteScopeRegistry::default(),
         });
         crate::disk::DISK_FLUSHERS
             .lock()
@@ -378,78 +634,29 @@ impl<D: AsyncBlockDriverOps + Clone + 'static> Ext4Disk<D> {
         (first_block, inner_offset, blocks)
     }
 
-    fn stripe_indices(&self, offset: usize, len: usize) -> Vec<usize> {
-        if len == 0 {
-            return Vec::new();
-        }
-
-        let block_size = self.block_size();
-        let first_block = offset / block_size;
-        let last_block = offset
-            .saturating_add(len.saturating_sub(1))
-            .saturating_div(block_size);
-        let block_count = last_block.saturating_sub(first_block).saturating_add(1);
-        if block_count >= IO_LOCK_STRIPES {
-            return (0..IO_LOCK_STRIPES).collect();
-        }
-
-        let mut present = [false; IO_LOCK_STRIPES];
-        for block in first_block..=last_block {
-            present[block % IO_LOCK_STRIPES] = true;
-        }
-        present
-            .iter()
-            .enumerate()
-            .filter_map(|(index, present)| present.then_some(index))
-            .collect()
-    }
-
-    async fn lock_read_range<'a>(&'a self, offset: usize, len: usize) -> ReadRangeGuards<'a> {
-        debug_assert!(len > 0);
-        let block_size = self.block_size();
-        let first_block = offset / block_size;
-        let last_block = offset.saturating_add(len - 1).saturating_div(block_size);
-        if first_block == last_block {
-            let lock = &self.io_locks[first_block % IO_LOCK_STRIPES];
-            let guard = if let Some(guard) = lock.try_read() {
-                guard
-            } else {
-                lock.read().await
-            };
-            return ReadRangeGuards::One { _guard: guard };
-        }
-
-        let indices = self.stripe_indices(offset, len);
-        let mut guards = Vec::with_capacity(indices.len());
-        for index in indices {
-            let lock = &self.io_locks[index];
-            guards.push(if let Some(guard) = lock.try_read() {
-                guard
-            } else {
-                lock.read().await
-            });
-        }
-        ReadRangeGuards::Many(guards)
-    }
-
-    async fn lock_write_range<'a>(
-        &'a self,
+    async fn lock_read_range(
+        &self,
         offset: usize,
         len: usize,
-    ) -> Vec<async_lock::RwLockWriteGuard<'a, ()>> {
-        let indices = self.stripe_indices(offset, len);
-        let mut guards = Vec::with_capacity(indices.len());
-        for index in indices {
-            guards.push(self.io_locks[index].write().await);
-        }
-        guards
+    ) -> axdriver::prelude::DevResult<IoReadRangeGuards<'_>> {
+        let guards = self.io_ranges.read(offset, len, self.block_size()).await?;
+        debug_assert!(guards.len() > 0);
+        Ok(guards)
     }
 
-    async fn lock_all_write_stripes(&self) -> Vec<async_lock::RwLockWriteGuard<'_, ()>> {
-        let mut guards = Vec::with_capacity(IO_LOCK_STRIPES);
-        for lock in &self.io_locks {
-            guards.push(lock.write().await);
-        }
+    async fn lock_write_range(
+        &self,
+        offset: usize,
+        len: usize,
+    ) -> axdriver::prelude::DevResult<IoWriteRangeGuards<'_>> {
+        let guards = self.io_ranges.write(offset, len, self.block_size()).await?;
+        debug_assert!(guards.len() > 0);
+        Ok(guards)
+    }
+
+    async fn lock_all_io(&self) -> IoWriteRangeGuards<'_> {
+        let guards = self.io_ranges.write_all().await;
+        debug_assert_eq!(guards.len(), IO_RANGE_LOCK_BUCKETS);
         guards
     }
 
@@ -474,22 +681,22 @@ impl<D: AsyncBlockDriverOps + Clone + 'static> Ext4Disk<D> {
         let Some(task_id) = axtask::current_may_uninit().map(|task| task.id().as_u64()) else {
             return Vec::new();
         };
-        let registry = self.write_scopes.lock();
-        let mut owners = registry
-            .active_by_task
-            .get(&task_id)
-            .into_iter()
-            .flat_map(|stack| stack.iter().filter_map(|id| registry.scopes.get(id)))
-            .flat_map(|scope| scope.owners.iter().copied())
-            .collect::<Vec<_>>();
+        let active_scope_ids = self.write_scopes.active_scopes(task_id);
+        let mut owners = Vec::new();
+        for scope_id in active_scope_ids {
+            if let Some(scope) = self.write_scopes.scope(scope_id) {
+                owners.extend(scope.lock().owners.iter().copied());
+            }
+        }
         owners.sort_unstable();
         owners.dedup();
         owners
     }
 
     fn mark_dirty_block(&self, offset: usize, sequence: u64, owners: &[u64]) {
+        crate::buildstorm_stat_inc!(EXT4_DIRTY_BLOCKS);
         {
-            let mut dirty_owners = self.dirty_owners.lock();
+            let mut dirty_owners = self.dirty_owners[self.stripe_index(offset)].lock();
             let state = dirty_owners
                 .entry(offset)
                 .or_insert_with(|| DirtyOwnerState {
@@ -503,15 +710,10 @@ impl<D: AsyncBlockDriverOps + Clone + 'static> Ext4Disk<D> {
         let Some(task_id) = axtask::current_may_uninit().map(|task| task.id().as_u64()) else {
             return;
         };
-        let mut registry = self.write_scopes.lock();
-        let active_scope_ids = registry
-            .active_by_task
-            .get(&task_id)
-            .cloned()
-            .unwrap_or_default();
+        let active_scope_ids = self.write_scopes.active_scopes(task_id);
         for scope_id in active_scope_ids {
-            if let Some(scope) = registry.scopes.get_mut(&scope_id) {
-                scope.dirty_offsets.insert(offset);
+            if let Some(scope) = self.write_scopes.scope(scope_id) {
+                scope.lock().dirty_offsets.insert(offset);
             }
         }
     }
@@ -519,26 +721,26 @@ impl<D: AsyncBlockDriverOps + Clone + 'static> Ext4Disk<D> {
     fn forget_submitted_offset(&self, offset: usize) {
         let stripe_idx = self.stripe_index(offset);
         let stripe = self.block_cache_stripes[stripe_idx].inner.lock();
-        let still_dirty = stripe
-            .cache
-            .peek(&offset)
-            .is_some_and(|block| block.dirty)
+        let still_dirty = stripe.cache.peek(&offset).is_some_and(|block| block.dirty)
             || stripe.flushing_evicted.contains_key(&offset);
         drop(stripe);
         if !still_dirty {
-            self.dirty_owners.lock().remove(&offset);
+            self.dirty_owners[self.stripe_index(offset)]
+                .lock()
+                .remove(&offset);
         }
     }
 
     fn owner_snapshot(&self, owner: u64) -> Vec<(usize, u64)> {
-        self.dirty_owners
-            .lock()
-            .iter()
-            .filter_map(|(&offset, state)| {
+        let mut snapshot = Vec::new();
+        for owners in &self.dirty_owners {
+            snapshot.extend(owners.lock().iter().filter_map(|(&offset, state)| {
                 (state.owners.is_empty() || state.owners.contains(&owner))
                     .then_some((offset, state.sequence))
-            })
-            .collect()
+            }));
+        }
+        snapshot.sort_unstable_by_key(|(offset, _)| *offset);
+        snapshot
     }
 
     async fn flush_batches(&self, batches: Vec<Vec<usize>>) -> Option<axdriver::prelude::DevError> {
@@ -573,7 +775,7 @@ impl<D: AsyncBlockDriverOps + Clone + 'static> Ext4Disk<D> {
             .checked_sub(first_offset)
             .and_then(|span| span.checked_add(block_size))
             .ok_or(axdriver::prelude::DevError::InvalidParam)?;
-        let _io_guards = self.lock_write_range(first_offset, span).await;
+        let _io_guard = self.lock_write_range(first_offset, span).await?;
 
         let (blocks, flushing_offsets) = {
             let mut blocks = Vec::with_capacity(offsets.len());
@@ -599,6 +801,8 @@ impl<D: AsyncBlockDriverOps + Clone + 'static> Ext4Disk<D> {
             disk: self,
             offsets: flushing_offsets,
         };
+        crate::buildstorm_stat_inc!(EXT4_FLUSH_BATCHES);
+        crate::buildstorm_stat_add!(EXT4_FLUSH_BLOCKS, blocks.len());
 
         let mut start = 0;
         while start < blocks.len() {
@@ -644,7 +848,7 @@ impl<D: AsyncBlockDriverOps + Clone + 'static> Ext4Disk<D> {
         D: AsyncBlockDriverOps + Clone,
     {
         for (offset, data) in blocks {
-            let _guard = self.lock_write_range(offset, data.len()).await;
+            let _guard = self.lock_write_range(offset, data.len()).await?;
             let stripe_idx = self.stripe_index(offset);
             {
                 let stripe = self.block_cache_stripes[stripe_idx].inner.lock();
@@ -675,6 +879,10 @@ impl<D: AsyncBlockDriverOps + Clone + 'static> Ext4Disk<D> {
     {
         let (first_block, ..) = self.byte_range(block_offset, data.len());
         let dev = self.dev.lock().clone();
+        crate::buildstorm_stat_inc!(EXT4_DEVICE_WRITE_OPS);
+        crate::buildstorm_stat_add!(EXT4_DEVICE_WRITE_BYTES, data.len());
+        #[cfg(feature = "buildstorm-stats")]
+        let _device_io = crate::buildstorm_stats::begin_device_io();
         dev.write_block_async(first_block, data)
             .await
             .map_err(|err| {
@@ -732,6 +940,10 @@ impl<D: AsyncBlockDriverOps + Clone + 'static> Ext4Disk<D> {
         D: AsyncBlockDriverOps,
     {
         for attempt in 1..=DEVICE_READ_MAX_ATTEMPTS {
+            crate::buildstorm_stat_inc!(EXT4_DEVICE_READ_OPS);
+            crate::buildstorm_stat_add!(EXT4_DEVICE_READ_BYTES, dest.len());
+            #[cfg(feature = "buildstorm-stats")]
+            let _device_io = crate::buildstorm_stats::begin_device_io();
             match dev.read_block_async(first_block, dest).await {
                 Ok(()) => return Ok(()),
                 Err(error)
@@ -776,8 +988,7 @@ impl<D: AsyncBlockDriverOps + Clone + 'static> Ext4Disk<D> {
         if buf.is_empty() {
             return Ok(());
         }
-        let io_guards = self.lock_read_range(offset, buf.len()).await;
-        debug_assert!(io_guards.len() > 0);
+        let io_guard = self.lock_read_range(offset, buf.len()).await?;
         let mut deferred_writes = Vec::new();
         log::debug!("ext4 read_offset: offset={}, len={}", offset, buf.len());
         let block_size = self.block_size();
@@ -796,7 +1007,9 @@ impl<D: AsyncBlockDriverOps + Clone + 'static> Ext4Disk<D> {
                 while current <= end_block_offset {
                     let stripe_idx = self.stripe_index(current);
                     let stripe = self.block_cache_stripes[stripe_idx].inner.lock();
-                    if stripe.cache.contains(&current) || stripe.flushing_evicted.contains_key(&current) {
+                    if stripe.cache.contains(&current)
+                        || stripe.flushing_evicted.contains_key(&current)
+                    {
                         found = true;
                         break;
                     }
@@ -805,6 +1018,7 @@ impl<D: AsyncBlockDriverOps + Clone + 'static> Ext4Disk<D> {
                 found
             };
             if !has_any_cache {
+                crate::buildstorm_stat_inc!(EXT4_BYPASS_READS);
                 return self
                     .read_blocks_from_disk_async(offset, buf.len() / block_size, buf)
                     .await;
@@ -829,8 +1043,7 @@ impl<D: AsyncBlockDriverOps + Clone + 'static> Ext4Disk<D> {
                     true
                 } else if let Some(data) = stripe.flushing_evicted.get(&current_block_offset) {
                     let start = core::cmp::max(offset, current_block_offset);
-                    let end =
-                        core::cmp::min(offset + buf.len(), current_block_offset + block_size);
+                    let end = core::cmp::min(offset + buf.len(), current_block_offset + block_size);
                     let overlap_len = end - start;
                     let buf_start = start - offset;
                     let block_start = start - current_block_offset;
@@ -843,6 +1056,7 @@ impl<D: AsyncBlockDriverOps + Clone + 'static> Ext4Disk<D> {
             };
 
             if hit {
+                crate::buildstorm_stat_inc!(EXT4_BLOCK_CACHE_HITS);
                 current_block_offset += block_size;
             } else {
                 // Cache miss. Find consecutive cache misses.
@@ -862,6 +1076,7 @@ impl<D: AsyncBlockDriverOps + Clone + 'static> Ext4Disk<D> {
                         consecutive_misses += 1;
                     }
                 }
+                crate::buildstorm_stat_add!(EXT4_BLOCK_CACHE_MISSES, consecutive_misses);
 
                 // Read all consecutive misses from disk in one go
                 let mut run_data = vec![0u8; consecutive_misses * block_size];
@@ -887,25 +1102,21 @@ impl<D: AsyncBlockDriverOps + Clone + 'static> Ext4Disk<D> {
                             buf[buf_start..buf_start + overlap_len].copy_from_slice(
                                 &existing.data[block_start..block_start + overlap_len],
                             );
-                        } else if let Some(data) = stripe.flushing_evicted.get(&current_block_offset) {
-                            buf[buf_start..buf_start + overlap_len].copy_from_slice(
-                                &data[block_start..block_start + overlap_len],
-                            );
+                        } else if let Some(data) =
+                            stripe.flushing_evicted.get(&current_block_offset)
+                        {
+                            buf[buf_start..buf_start + overlap_len]
+                                .copy_from_slice(&data[block_start..block_start + overlap_len]);
                         } else {
-                            buf[buf_start..buf_start + overlap_len].copy_from_slice(
-                                &run_data[block_start..block_start + overlap_len],
-                            );
+                            buf[buf_start..buf_start + overlap_len]
+                                .copy_from_slice(&run_data[block_start..block_start + overlap_len]);
                             let block = CacheBlock {
                                 data: run_data,
                                 dirty: false,
                                 flushing: false,
                                 reused: false,
                             };
-                            stripe.insert_cache_block(
-                                &mut to_write,
-                                current_block_offset,
-                                block,
-                            );
+                            stripe.insert_cache_block(&mut to_write, current_block_offset, block);
                         }
                     }
                     deferred_writes.extend(to_write);
@@ -933,13 +1144,11 @@ impl<D: AsyncBlockDriverOps + Clone + 'static> Ext4Disk<D> {
                             &existing.data[block_start..block_start + overlap_len],
                         );
                     } else if let Some(data) = stripe.flushing_evicted.get(&b_offset) {
-                        buf[buf_start..buf_start + overlap_len].copy_from_slice(
-                            &data[block_start..block_start + overlap_len],
-                        );
+                        buf[buf_start..buf_start + overlap_len]
+                            .copy_from_slice(&data[block_start..block_start + overlap_len]);
                     } else {
-                        buf[buf_start..buf_start + overlap_len].copy_from_slice(
-                            &b_data[block_start..block_start + overlap_len],
-                        );
+                        buf[buf_start..buf_start + overlap_len]
+                            .copy_from_slice(&b_data[block_start..block_start + overlap_len]);
                         let block = CacheBlock {
                             data: b_data.to_vec(),
                             dirty: false,
@@ -955,7 +1164,7 @@ impl<D: AsyncBlockDriverOps + Clone + 'static> Ext4Disk<D> {
                 current_block_offset += consecutive_misses * block_size;
             }
         }
-        drop(io_guards);
+        drop(io_guard);
         self.flush_evicted_blocks(deferred_writes).await?;
         log::debug!("ext4 read_offset done: offset={}", offset);
         Ok(())
@@ -977,7 +1186,7 @@ impl<D: AsyncBlockDriverOps + Clone + 'static> Ext4Disk<D> {
             .fetch_add(1, Ordering::AcqRel)
             .wrapping_add(1);
         let owners = self.current_write_owners();
-        let io_guards = self.lock_write_range(offset, data.len()).await;
+        let io_guard = self.lock_write_range(offset, data.len()).await?;
         let mut deferred_writes = Vec::new();
         log::debug!("ext4 write_offset: offset={}, len={}", offset, data.len());
         let block_size = self.block_size();
@@ -986,6 +1195,7 @@ impl<D: AsyncBlockDriverOps + Clone + 'static> Ext4Disk<D> {
         let end_block_offset = ((offset + data.len() - 1) / block_size) * block_size;
 
         if bypass_block_cache(offset, data.len(), block_size) {
+            crate::buildstorm_stat_inc!(EXT4_BYPASS_WRITES);
             self.write_block_to_disk_async(offset, data).await?;
             {
                 let mut current = start_block_offset;
@@ -1030,6 +1240,7 @@ impl<D: AsyncBlockDriverOps + Clone + 'static> Ext4Disk<D> {
             };
 
             if has_cache {
+                crate::buildstorm_stat_inc!(EXT4_BLOCK_CACHE_HITS);
                 self.mark_dirty_block(current_block_offset, sequence, &owners);
                 current_block_offset += block_size;
                 continue;
@@ -1039,6 +1250,7 @@ impl<D: AsyncBlockDriverOps + Clone + 'static> Ext4Disk<D> {
             // the cache so repeated metadata updates collapse into one later
             // writeback instead of one VirtIO completion per update.
             if block_start == 0 && overlap_len == block_size {
+                crate::buildstorm_stat_inc!(EXT4_BLOCK_CACHE_MISSES);
                 let block = CacheBlock {
                     data: data[data_start..data_start + block_size].to_vec(),
                     dirty: true,
@@ -1049,11 +1261,7 @@ impl<D: AsyncBlockDriverOps + Clone + 'static> Ext4Disk<D> {
                     let stripe_idx = self.stripe_index(current_block_offset);
                     let mut stripe = self.block_cache_stripes[stripe_idx].inner.lock();
                     stripe.flushing_evicted.remove(&current_block_offset);
-                    stripe.insert_cache_block(
-                        &mut deferred_writes,
-                        current_block_offset,
-                        block,
-                    );
+                    stripe.insert_cache_block(&mut deferred_writes, current_block_offset, block);
                 }
                 self.mark_dirty_block(current_block_offset, sequence, &owners);
                 current_block_offset += block_size;
@@ -1082,6 +1290,7 @@ impl<D: AsyncBlockDriverOps + Clone + 'static> Ext4Disk<D> {
                         consecutive_misses += 1;
                     }
                 }
+                crate::buildstorm_stat_add!(EXT4_BLOCK_CACHE_MISSES, consecutive_misses);
 
                 // Pre-read consecutive partial miss blocks from disk in one go
                 let mut run_data = vec![0u8; consecutive_misses * block_size];
@@ -1149,7 +1358,7 @@ impl<D: AsyncBlockDriverOps + Clone + 'static> Ext4Disk<D> {
                 current_block_offset += consecutive_misses * block_size;
             }
         }
-        drop(io_guards);
+        drop(io_guard);
         self.flush_evicted_blocks(deferred_writes).await?;
         log::debug!("ext4 write_offset done: offset={}", offset);
         Ok(())
@@ -1160,7 +1369,7 @@ impl<D: AsyncBlockDriverOps + Clone + 'static> Ext4Disk<D> {
     }
 
     pub async fn set_block_size(&self, size: usize) {
-        let _io_guards = self.lock_all_write_stripes().await;
+        let _io_guard = self.lock_all_io().await;
         for stripe in &self.block_cache_stripes {
             let mut stripe = stripe.inner.lock();
             assert!(
@@ -1173,7 +1382,9 @@ impl<D: AsyncBlockDriverOps + Clone + 'static> Ext4Disk<D> {
             );
             stripe.cache.clear();
         }
-        self.dirty_owners.lock().clear();
+        for owners in &self.dirty_owners {
+            owners.lock().clear();
+        }
         self.block_size
             .store(size, core::sync::atomic::Ordering::Relaxed);
     }
@@ -1251,7 +1462,9 @@ mod tests {
     use axdriver::prelude::DevError;
 
     use super::{
-        FLUSH_BATCH_BLOCKS, bypass_block_cache, group_flush_offsets, retryable_device_read_error,
+        FLUSH_BATCH_BLOCKS, IO_RANGE_LOCK_BUCKET_BLOCKS, IO_RANGE_LOCK_BUCKETS, bypass_block_cache,
+        checked_io_block_range, group_flush_offsets, io_range_lock_indices,
+        retryable_device_read_error,
     };
 
     #[test]
@@ -1287,6 +1500,70 @@ mod tests {
         assert_eq!(
             batches[2],
             alloc::vec![(FLUSH_BATCH_BLOCKS + 2) * block_size]
+        );
+    }
+
+    #[test]
+    fn io_range_buckets_cover_half_open_ranges_and_reject_overflow() {
+        const BLOCK_SIZE: usize = 4096;
+
+        assert_eq!(
+            checked_io_block_range(0, BLOCK_SIZE, BLOCK_SIZE),
+            Ok((0, 1))
+        );
+        assert_eq!(
+            checked_io_block_range(BLOCK_SIZE - 1, 2, BLOCK_SIZE),
+            Ok((0, 2))
+        );
+        let one_bucket = io_range_lock_indices(0, BLOCK_SIZE, BLOCK_SIZE).unwrap();
+        assert_eq!(one_bucket.len(), 1);
+        assert_eq!(one_bucket.get(0), 0);
+        let two_buckets = io_range_lock_indices(
+            (IO_RANGE_LOCK_BUCKET_BLOCKS - 1) * BLOCK_SIZE,
+            2 * BLOCK_SIZE,
+            BLOCK_SIZE,
+        )
+        .unwrap();
+        assert_eq!(two_buckets.len(), 2);
+        assert_eq!([two_buckets.get(0), two_buckets.get(1)], [0, 1]);
+        let modulo_crossing = io_range_lock_indices(
+            (IO_RANGE_LOCK_BUCKETS * IO_RANGE_LOCK_BUCKET_BLOCKS - 1) * BLOCK_SIZE,
+            2 * BLOCK_SIZE,
+            BLOCK_SIZE,
+        )
+        .unwrap();
+        assert_eq!(
+            [modulo_crossing.get(0), modulo_crossing.get(1)],
+            [0, IO_RANGE_LOCK_BUCKETS - 1]
+        );
+        let left = io_range_lock_indices(
+            (IO_RANGE_LOCK_BUCKETS * IO_RANGE_LOCK_BUCKET_BLOCKS - 1) * BLOCK_SIZE,
+            BLOCK_SIZE,
+            BLOCK_SIZE,
+        )
+        .unwrap();
+        let right = io_range_lock_indices(
+            IO_RANGE_LOCK_BUCKETS * IO_RANGE_LOCK_BUCKET_BLOCKS * BLOCK_SIZE,
+            BLOCK_SIZE,
+            BLOCK_SIZE,
+        )
+        .unwrap();
+        assert!(modulo_crossing.contains(left.get(0)));
+        assert!(modulo_crossing.contains(right.get(0)));
+        let all_buckets = io_range_lock_indices(
+            0,
+            IO_RANGE_LOCK_BUCKETS * IO_RANGE_LOCK_BUCKET_BLOCKS * BLOCK_SIZE,
+            BLOCK_SIZE,
+        )
+        .unwrap();
+        assert_eq!(all_buckets.len(), IO_RANGE_LOCK_BUCKETS);
+        assert!(
+            (1..all_buckets.len())
+                .all(|index| { all_buckets.get(index - 1) < all_buckets.get(index) })
+        );
+        assert_eq!(
+            checked_io_block_range(usize::MAX, 1, BLOCK_SIZE),
+            Err(DevError::InvalidParam)
         );
     }
 }

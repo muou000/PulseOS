@@ -28,7 +28,7 @@ use lru::LruCache;
 use spin::{Lazy, Mutex};
 
 use super::{
-    Ext4Filesystem,
+    Ext4Filesystem, INODE_STATE_SHARDS, inode_state_shard,
     util::{into_ext4_file_type, into_vfs_err, into_vfs_type},
 };
 
@@ -162,6 +162,7 @@ struct CachedLookupEntry {
 const DIR_LOOKUP_CACHE_MAX_ENTRIES: usize = 256;
 const DIR_SNAPSHOT_PROMOTION_LOOKUPS: usize = 8;
 const DIR_CACHE_REGISTRY_SWEEP_BUDGET: usize = 8;
+const DIR_CACHE_REGISTRY_SHARDS: usize = 32;
 
 struct DirCacheState {
     snapshot_generation: AtomicU64,
@@ -370,8 +371,8 @@ impl DirCacheRegistry {
     }
 }
 
-static DIR_CACHE_REGISTRY: Lazy<Mutex<DirCacheRegistry>> =
-    Lazy::new(|| Mutex::new(DirCacheRegistry::default()));
+static DIR_CACHE_REGISTRY: Lazy<[Mutex<DirCacheRegistry>; DIR_CACHE_REGISTRY_SHARDS]> =
+    Lazy::new(|| core::array::from_fn(|_| Mutex::new(DirCacheRegistry::default())));
 
 fn dir_cache_key(fs: &Arc<Ext4Filesystem>, ino: u32) -> DirCacheKey {
     DirCacheKey {
@@ -380,9 +381,13 @@ fn dir_cache_key(fs: &Arc<Ext4Filesystem>, ino: u32) -> DirCacheKey {
     }
 }
 
+fn dir_cache_registry_shard(key: &DirCacheKey) -> usize {
+    (key.fs_id.rotate_right(6) ^ key.ino as usize) % DIR_CACHE_REGISTRY_SHARDS
+}
+
 fn dir_cache_state(fs: &Arc<Ext4Filesystem>, ino: u32) -> Arc<DirCacheState> {
     let key = dir_cache_key(fs, ino);
-    let mut registry = DIR_CACHE_REGISTRY.lock();
+    let mut registry = DIR_CACHE_REGISTRY[dir_cache_registry_shard(&key)].lock();
     if let Some(state) = registry.get(&key) {
         return state;
     }
@@ -395,19 +400,27 @@ fn dir_cache_state(fs: &Arc<Ext4Filesystem>, ino: u32) -> Arc<DirCacheState> {
 }
 
 pub(crate) fn cleanup_dir_cache_registry(fs_id: usize) {
-    DIR_CACHE_REGISTRY.lock().cleanup_fs(fs_id);
+    for registry in DIR_CACHE_REGISTRY.iter() {
+        registry.lock().cleanup_fs(fs_id);
+    }
 }
 
 fn invalidate_dir_cache(fs: &Arc<Ext4Filesystem>, ino: u32) {
     let key = dir_cache_key(fs, ino);
-    if let Some(state) = DIR_CACHE_REGISTRY.lock().get(&key) {
+    let state = DIR_CACHE_REGISTRY[dir_cache_registry_shard(&key)]
+        .lock()
+        .get(&key);
+    if let Some(state) = state {
         state.invalidate();
     }
 }
 
 fn invalidate_dir_snapshot(fs: &Arc<Ext4Filesystem>, ino: u32) {
     let key = dir_cache_key(fs, ino);
-    if let Some(state) = DIR_CACHE_REGISTRY.lock().get(&key) {
+    let state = DIR_CACHE_REGISTRY[dir_cache_registry_shard(&key)]
+        .lock()
+        .get(&key);
+    if let Some(state) = state {
         state.invalidate_snapshot();
     }
 }
@@ -415,7 +428,7 @@ fn invalidate_dir_snapshot(fs: &Arc<Ext4Filesystem>, ino: u32) {
 fn invalidate_inode_metadata_cache(fs: &Arc<Ext4Filesystem>, ino: u32) {
     let mut states = Vec::new();
     {
-        let mut active = fs.active_inodes.lock();
+        let mut active = fs.active_inodes[inode_state_shard(ino)].lock();
         if let Some(inodes) = active.get_mut(&ino) {
             inodes.retain(|inode| inode.strong_count() > 0);
             states.extend(
@@ -426,7 +439,10 @@ fn invalidate_inode_metadata_cache(fs: &Arc<Ext4Filesystem>, ino: u32) {
             );
         }
     }
-    if let Some(cached) = fs.metadata_caches.lock().get(&ino).cloned()
+    if let Some(cached) = fs.metadata_caches[inode_state_shard(ino)]
+        .lock()
+        .get(&ino)
+        .cloned()
         && !states.iter().any(|state| Arc::ptr_eq(state, &cached))
     {
         states.push(cached);
@@ -437,16 +453,16 @@ fn invalidate_inode_metadata_cache(fs: &Arc<Ext4Filesystem>, ino: u32) {
 }
 
 fn metadata_cache_state(fs: &Arc<Ext4Filesystem>, ino: u32) -> Arc<MetadataCacheState> {
-    const MAX_ENTRIES: usize = 4096;
+    const MAX_ENTRIES_PER_SHARD: usize = (4096 + INODE_STATE_SHARDS - 1) / INODE_STATE_SHARDS;
 
-    let mut caches = fs.metadata_caches.lock();
+    let mut caches = fs.metadata_caches[inode_state_shard(ino)].lock();
     if let Some(cached) = caches.get(&ino) {
         return cached.clone();
     }
 
     let cached = Arc::new(MetadataCacheState::new());
     caches.put(ino, cached.clone());
-    while caches.len() > MAX_ENTRIES {
+    while caches.len() > MAX_ENTRIES_PER_SHARD {
         caches.pop_lru();
     }
     cached
@@ -454,7 +470,7 @@ fn metadata_cache_state(fs: &Arc<Ext4Filesystem>, ino: u32) -> Arc<MetadataCache
 
 impl Inode {
     pub(crate) fn new(fs: Arc<Ext4Filesystem>, ino: u32, this: Option<WeakDirEntry>) -> Arc<Self> {
-        let mut active = fs.active_inodes.lock();
+        let mut active = fs.active_inodes[inode_state_shard(ino)].lock();
         if let Some(list) = active.get_mut(&ino) {
             list.retain(|w| w.strong_count() > 0);
             for w in list.iter() {
@@ -530,7 +546,7 @@ impl Inode {
     /// while `rename` uses `dst_node`. `weak.upgrade()` creates the second reference, so
     /// a strong count greater than two is the signal for another active local handle.
     fn mark_unlinked_and_has_external_refs(local: &Arc<Self>) -> bool {
-        let mut active = local.fs.active_inodes.lock();
+        let mut active = local.fs.active_inodes[inode_state_shard(local.ino)].lock();
         let mut has_external = false;
         if let Some(list) = active.get_mut(&local.ino) {
             list.retain(|weak| weak.strong_count() > 0);
@@ -1562,7 +1578,7 @@ impl DirNodeOps for Inode {
 impl Drop for Inode {
     fn drop(&mut self) {
         let is_unlinked = self.is_unlinked.load(core::sync::atomic::Ordering::Relaxed);
-        let mut active = self.fs.active_inodes.lock();
+        let mut active = self.fs.active_inodes[inode_state_shard(self.ino)].lock();
         let mut still_active = false;
         if let Some(list) = active.get_mut(&self.ino) {
             list.retain(|w| w.strong_count() > 0);

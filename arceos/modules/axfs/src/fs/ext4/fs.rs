@@ -22,13 +22,18 @@ use lru::LruCache;
 use super::{Ext4Disk, Ext4DiskWrapper, Inode, MetadataCacheState, cleanup_dir_cache_registry};
 
 const ROOT_INODE: u32 = 2;
+pub(super) const INODE_STATE_SHARDS: usize = 32;
+
+pub(super) fn inode_state_shard(ino: u32) -> usize {
+    ino as usize % INODE_STATE_SHARDS
+}
 
 pub struct Ext4Filesystem {
     pub(crate) inner: Ext4,
     disk_flusher: Arc<dyn crate::disk::DiskFlushable>,
     root_dir: OnceCell<WeakDirEntry>,
-    pub(super) active_inodes: Mutex<BTreeMap<u32, Vec<Weak<Inode>>>>,
-    pub(super) metadata_caches: Mutex<LruCache<u32, Arc<MetadataCacheState>>>,
+    pub(super) active_inodes: [Mutex<BTreeMap<u32, Vec<Weak<Inode>>>>; INODE_STATE_SHARDS],
+    pub(super) metadata_caches: [Mutex<LruCache<u32, Arc<MetadataCacheState>>>; INODE_STATE_SHARDS],
     pub(crate) block_size: usize,
     pending_deletions: Mutex<Vec<u32>>,
     deletion_generation: AtomicU64,
@@ -94,8 +99,8 @@ impl Ext4Filesystem {
             inner: ext4,
             disk_flusher,
             root_dir: OnceCell::new(),
-            active_inodes: Mutex::new(BTreeMap::new()),
-            metadata_caches: Mutex::new(LruCache::unbounded()),
+            active_inodes: core::array::from_fn(|_| Mutex::new(BTreeMap::new())),
+            metadata_caches: core::array::from_fn(|_| Mutex::new(LruCache::unbounded())),
             block_size,
             pending_deletions: Mutex::new(Vec::new()),
             deletion_generation: AtomicU64::new(0),
@@ -190,7 +195,7 @@ impl Ext4Filesystem {
                     Ok(inode) => {
                         if inode.links_count() == 0 {
                             let has_other_active = {
-                                let mut active = self.active_inodes.lock();
+                                let mut active = self.active_inodes[inode_state_shard(ino)].lock();
                                 let mut still_active = false;
                                 if let Some(list) = active.get_mut(&ino) {
                                     list.retain(|w| w.strong_count() > 0);
