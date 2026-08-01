@@ -45,11 +45,52 @@ struct WriteScopeRegistry {
     active_by_task: BTreeMap<u64, Vec<u64>>,
 }
 
+const BLOCK_CACHE_STRIPES: usize = 16;
+const CACHE_CAPACITY_PER_STRIPE: usize = 32;
 const CACHE_EVICTION_SCAN_LIMIT: usize = 64;
 const DEVICE_READ_MAX_ATTEMPTS: usize = 2;
 const IO_LOCK_STRIPES: usize = 64;
 const FLUSH_BATCH_BLOCKS: usize = 32;
 const FLUSH_WRITE_CONCURRENCY: usize = 4;
+
+struct CacheStripeInner {
+    cache: LruCache<usize, CacheBlock>,
+    flushing_evicted: BTreeMap<usize, Vec<u8>>,
+}
+
+impl CacheStripeInner {
+    fn evict_if_full(&mut self, to_write: &mut Vec<(usize, Vec<u8>)>) -> bool {
+        if self.cache.len() < self.cache.cap().get() {
+            return true;
+        }
+        let Some((ev_offset, ev_block)) = pop_cache_victim(&mut self.cache) else {
+            return false;
+        };
+        if ev_block.dirty {
+            to_write.push((ev_offset, ev_block.data.clone()));
+            self.flushing_evicted.insert(ev_offset, ev_block.data);
+        }
+        true
+    }
+
+    fn insert_cache_block(
+        &mut self,
+        to_write: &mut Vec<(usize, Vec<u8>)>,
+        offset: usize,
+        block: CacheBlock,
+    ) {
+        if self.evict_if_full(to_write) {
+            self.cache.put(offset, block);
+        } else if block.dirty {
+            to_write.push((offset, block.data.clone()));
+            self.flushing_evicted.insert(offset, block.data);
+        }
+    }
+}
+
+struct CacheStripe {
+    inner: Mutex<CacheStripeInner>,
+}
 
 fn bypass_block_cache(offset: usize, len: usize, block_size: usize) -> bool {
     len > block_size && offset % block_size == 0 && len % block_size == 0
@@ -100,9 +141,8 @@ fn pop_cache_victim(cache: &mut LruCache<usize, CacheBlock>) -> Option<(usize, C
 pub(crate) struct Ext4Disk<D: BlockDriverOps> {
     dev: Mutex<D>,
     sector_size: usize,
-    block_cache: Mutex<LruCache<usize, CacheBlock>>,
+    block_cache_stripes: [CacheStripe; BLOCK_CACHE_STRIPES],
     block_size: AtomicUsize,
-    flushing_evicted: Mutex<BTreeMap<usize, Vec<u8>>>,
     io_locks: [async_lock::RwLock<()>; IO_LOCK_STRIPES],
     checkpoint_lock: async_lock::RwLock<()>,
     flush_lock: async_lock::Mutex<()>,
@@ -111,6 +151,13 @@ pub(crate) struct Ext4Disk<D: BlockDriverOps> {
     dirty_owners: Mutex<BTreeMap<usize, DirtyOwnerState>>,
     next_write_scope_id: AtomicU64,
     write_scopes: Mutex<WriteScopeRegistry>,
+}
+
+impl<D: BlockDriverOps> Ext4Disk<D> {
+    fn stripe_index(&self, offset: usize) -> usize {
+        let block_size = self.block_size.load(Ordering::Relaxed);
+        (offset / block_size) % BLOCK_CACHE_STRIPES
+    }
 }
 
 struct FlushingGuard<'a, D: BlockDriverOps> {
@@ -136,9 +183,10 @@ impl ReadRangeGuards<'_> {
 
 impl<'a, D: BlockDriverOps> Drop for FlushingGuard<'a, D> {
     fn drop(&mut self) {
-        let mut cache = self.disk.block_cache.lock();
-        for offset in &self.offsets {
-            if let Some(block) = cache.get_mut(offset) {
+        for &offset in &self.offsets {
+            let stripe_idx = self.disk.stripe_index(offset);
+            let mut stripe = self.disk.block_cache_stripes[stripe_idx].inner.lock();
+            if let Some(block) = stripe.cache.get_mut(&offset) {
                 block.flushing = false;
             }
         }
@@ -300,9 +348,13 @@ impl<D: AsyncBlockDriverOps + Clone + 'static> Ext4Disk<D> {
         let disk = Arc::new(Self {
             dev: Mutex::new(dev),
             sector_size,
-            block_cache: Mutex::new(LruCache::new(NonZeroUsize::new(512).unwrap())),
+            block_cache_stripes: core::array::from_fn(|_| CacheStripe {
+                inner: Mutex::new(CacheStripeInner {
+                    cache: LruCache::new(NonZeroUsize::new(CACHE_CAPACITY_PER_STRIPE).unwrap()),
+                    flushing_evicted: BTreeMap::new(),
+                }),
+            }),
             block_size: AtomicUsize::new(4096),
-            flushing_evicted: Mutex::new(BTreeMap::new()),
             io_locks: core::array::from_fn(|_| async_lock::RwLock::new(())),
             checkpoint_lock: async_lock::RwLock::new(()),
             flush_lock: async_lock::Mutex::new(()),
@@ -316,41 +368,6 @@ impl<D: AsyncBlockDriverOps + Clone + 'static> Ext4Disk<D> {
             .lock()
             .push(Arc::downgrade(&disk) as _);
         disk
-    }
-
-    fn evict_if_full(
-        &self,
-        cache: &mut LruCache<usize, CacheBlock>,
-        to_write: &mut Vec<(usize, Vec<u8>)>,
-    ) -> bool {
-        if cache.len() < cache.cap().get() {
-            return true;
-        }
-        let Some((ev_offset, ev_block)) = pop_cache_victim(cache) else {
-            return false;
-        };
-        if ev_block.dirty {
-            to_write.push((ev_offset, ev_block.data.clone()));
-            self.flushing_evicted
-                .lock()
-                .insert(ev_offset, ev_block.data);
-        }
-        true
-    }
-
-    fn insert_cache_block(
-        &self,
-        cache: &mut LruCache<usize, CacheBlock>,
-        to_write: &mut Vec<(usize, Vec<u8>)>,
-        offset: usize,
-        block: CacheBlock,
-    ) {
-        if self.evict_if_full(cache, to_write) {
-            cache.put(offset, block);
-        } else if block.dirty {
-            to_write.push((offset, block.data.clone()));
-            self.flushing_evicted.lock().insert(offset, block.data);
-        }
     }
 
     fn byte_range(&self, offset: usize, len: usize) -> (u64, usize, usize) {
@@ -437,13 +454,17 @@ impl<D: AsyncBlockDriverOps + Clone + 'static> Ext4Disk<D> {
     }
 
     fn dirty_offsets(&self) -> Vec<usize> {
-        let cache = self.block_cache.lock();
-        let evicted = self.flushing_evicted.lock();
-        let mut offsets = cache
-            .iter()
-            .filter_map(|(&offset, block)| block.dirty.then_some(offset))
-            .chain(evicted.keys().copied())
-            .collect::<Vec<_>>();
+        let mut offsets = Vec::new();
+        for stripe in &self.block_cache_stripes {
+            let stripe = stripe.inner.lock();
+            offsets.extend(
+                stripe
+                    .cache
+                    .iter()
+                    .filter_map(|(&offset, block)| block.dirty.then_some(offset))
+                    .chain(stripe.flushing_evicted.keys().copied()),
+            );
+        }
         offsets.sort_unstable();
         offsets.dedup();
         offsets
@@ -496,12 +517,14 @@ impl<D: AsyncBlockDriverOps + Clone + 'static> Ext4Disk<D> {
     }
 
     fn forget_submitted_offset(&self, offset: usize) {
-        let still_dirty = self
-            .block_cache
-            .lock()
+        let stripe_idx = self.stripe_index(offset);
+        let stripe = self.block_cache_stripes[stripe_idx].inner.lock();
+        let still_dirty = stripe
+            .cache
             .peek(&offset)
             .is_some_and(|block| block.dirty)
-            || self.flushing_evicted.lock().contains_key(&offset);
+            || stripe.flushing_evicted.contains_key(&offset);
+        drop(stripe);
         if !still_dirty {
             self.dirty_owners.lock().remove(&offset);
         }
@@ -553,12 +576,12 @@ impl<D: AsyncBlockDriverOps + Clone + 'static> Ext4Disk<D> {
         let _io_guards = self.lock_write_range(first_offset, span).await;
 
         let (blocks, flushing_offsets) = {
-            let mut cache = self.block_cache.lock();
-            let evicted = self.flushing_evicted.lock();
             let mut blocks = Vec::with_capacity(offsets.len());
             let mut flushing_offsets = Vec::new();
             for offset in offsets {
-                if let Some(block) = cache.get_mut(&offset)
+                let stripe_idx = self.stripe_index(offset);
+                let mut stripe = self.block_cache_stripes[stripe_idx].inner.lock();
+                if let Some(block) = stripe.cache.get_mut(&offset)
                     && block.dirty
                 {
                     block.flushing = true;
@@ -566,7 +589,7 @@ impl<D: AsyncBlockDriverOps + Clone + 'static> Ext4Disk<D> {
                     flushing_offsets.push(offset);
                     continue;
                 }
-                if let Some(data) = evicted.get(&offset) {
+                if let Some(data) = stripe.flushing_evicted.get(&offset) {
                     blocks.push((offset, data.clone()));
                 }
             }
@@ -594,18 +617,18 @@ impl<D: AsyncBlockDriverOps + Clone + 'static> Ext4Disk<D> {
             self.write_block_to_disk_async(blocks[start].0, &merged)
                 .await?;
 
-            let mut cache = self.block_cache.lock();
-            let mut evicted = self.flushing_evicted.lock();
             for (offset, written_data) in &blocks[start..end] {
-                if let Some(block) = cache.get_mut(offset)
+                let stripe_idx = self.stripe_index(*offset);
+                let mut stripe = self.block_cache_stripes[stripe_idx].inner.lock();
+                if let Some(block) = stripe.cache.get_mut(offset)
                     && block.flushing
                     && block.data == *written_data
                 {
                     block.dirty = false;
                     block.flushing = false;
                 }
-                if evicted.get(offset) == Some(written_data) {
-                    evicted.remove(offset);
+                if stripe.flushing_evicted.get(offset) == Some(written_data) {
+                    stripe.flushing_evicted.remove(offset);
                 }
             }
             start = end;
@@ -622,16 +645,21 @@ impl<D: AsyncBlockDriverOps + Clone + 'static> Ext4Disk<D> {
     {
         for (offset, data) in blocks {
             let _guard = self.lock_write_range(offset, data.len()).await;
-            if self.flushing_evicted.lock().get(&offset) != Some(&data) {
-                continue;
+            let stripe_idx = self.stripe_index(offset);
+            {
+                let stripe = self.block_cache_stripes[stripe_idx].inner.lock();
+                if stripe.flushing_evicted.get(&offset) != Some(&data) {
+                    continue;
+                }
             }
 
             self.write_block_to_disk_async(offset, &data).await?;
-            let mut flushing = self.flushing_evicted.lock();
-            if flushing.get(&offset) == Some(&data) {
-                flushing.remove(&offset);
+            {
+                let mut stripe = self.block_cache_stripes[stripe_idx].inner.lock();
+                if stripe.flushing_evicted.get(&offset) == Some(&data) {
+                    stripe.flushing_evicted.remove(&offset);
+                }
             }
-            drop(flushing);
             self.forget_submitted_offset(offset);
         }
         Ok(())
@@ -763,12 +791,12 @@ impl<D: AsyncBlockDriverOps + Clone + 'static> Ext4Disk<D> {
         // the cache to avoid copying and cache pollution.
         if bypass_block_cache(offset, buf.len(), block_size) {
             let has_any_cache = {
-                let cache = self.block_cache.lock();
-                let flushing = self.flushing_evicted.lock();
                 let mut current = start_block_offset;
                 let mut found = false;
                 while current <= end_block_offset {
-                    if cache.contains(&current) || flushing.contains_key(&current) {
+                    let stripe_idx = self.stripe_index(current);
+                    let stripe = self.block_cache_stripes[stripe_idx].inner.lock();
+                    if stripe.cache.contains(&current) || stripe.flushing_evicted.contains_key(&current) {
                         found = true;
                         break;
                     }
@@ -787,8 +815,9 @@ impl<D: AsyncBlockDriverOps + Clone + 'static> Ext4Disk<D> {
         while current_block_offset <= end_block_offset {
             // Check cache hit
             let hit = {
-                let mut cache = self.block_cache.lock();
-                if let Some(block) = cache.get_mut(&current_block_offset) {
+                let stripe_idx = self.stripe_index(current_block_offset);
+                let mut stripe = self.block_cache_stripes[stripe_idx].inner.lock();
+                if let Some(block) = stripe.cache.get_mut(&current_block_offset) {
                     block.reused = true;
                     let start = core::cmp::max(offset, current_block_offset);
                     let end = core::cmp::min(offset + buf.len(), current_block_offset + block_size);
@@ -798,21 +827,18 @@ impl<D: AsyncBlockDriverOps + Clone + 'static> Ext4Disk<D> {
                     buf[buf_start..buf_start + overlap_len]
                         .copy_from_slice(&block.data[block_start..block_start + overlap_len]);
                     true
+                } else if let Some(data) = stripe.flushing_evicted.get(&current_block_offset) {
+                    let start = core::cmp::max(offset, current_block_offset);
+                    let end =
+                        core::cmp::min(offset + buf.len(), current_block_offset + block_size);
+                    let overlap_len = end - start;
+                    let buf_start = start - offset;
+                    let block_start = start - current_block_offset;
+                    buf[buf_start..buf_start + overlap_len]
+                        .copy_from_slice(&data[block_start..block_start + overlap_len]);
+                    true
                 } else {
-                    let flushing = self.flushing_evicted.lock();
-                    if let Some(data) = flushing.get(&current_block_offset) {
-                        let start = core::cmp::max(offset, current_block_offset);
-                        let end =
-                            core::cmp::min(offset + buf.len(), current_block_offset + block_size);
-                        let overlap_len = end - start;
-                        let buf_start = start - offset;
-                        let block_start = start - current_block_offset;
-                        buf[buf_start..buf_start + overlap_len]
-                            .copy_from_slice(&data[block_start..block_start + overlap_len]);
-                        true
-                    } else {
-                        false
-                    }
+                    false
                 }
             };
 
@@ -822,14 +848,14 @@ impl<D: AsyncBlockDriverOps + Clone + 'static> Ext4Disk<D> {
                 // Cache miss. Find consecutive cache misses.
                 let mut consecutive_misses = 1;
                 {
-                    let cache = self.block_cache.lock();
-                    let flushing = self.flushing_evicted.lock();
                     while current_block_offset + consecutive_misses * block_size <= end_block_offset
                     {
                         let next_block_offset =
                             current_block_offset + consecutive_misses * block_size;
-                        if cache.contains(&next_block_offset)
-                            || flushing.contains_key(&next_block_offset)
+                        let stripe_idx = self.stripe_index(next_block_offset);
+                        let stripe = self.block_cache_stripes[stripe_idx].inner.lock();
+                        if stripe.cache.contains(&next_block_offset)
+                            || stripe.flushing_evicted.contains_key(&next_block_offset)
                         {
                             break;
                         }
@@ -846,45 +872,81 @@ impl<D: AsyncBlockDriverOps + Clone + 'static> Ext4Disk<D> {
                 )
                 .await?;
 
-                // Populate cache and copy to buf
-                let mut to_write = Vec::new();
-                {
-                    let mut cache = self.block_cache.lock();
-                    for b in 0..consecutive_misses {
-                        let b_offset = current_block_offset + b * block_size;
-                        let b_data = &run_data[b * block_size..(b + 1) * block_size];
-
-                        let start = core::cmp::max(offset, b_offset);
-                        let end = core::cmp::min(offset + buf.len(), b_offset + block_size);
-                        let overlap_len = end - start;
-                        let buf_start = start - offset;
-                        let block_start = start - b_offset;
-
-                        if let Some(existing) = cache.get_mut(&b_offset) {
+                if consecutive_misses == 1 {
+                    let start = core::cmp::max(offset, current_block_offset);
+                    let end = core::cmp::min(offset + buf.len(), current_block_offset + block_size);
+                    let overlap_len = end - start;
+                    let buf_start = start - offset;
+                    let block_start = start - current_block_offset;
+                    let mut to_write = Vec::new();
+                    {
+                        let stripe_idx = self.stripe_index(current_block_offset);
+                        let mut stripe = self.block_cache_stripes[stripe_idx].inner.lock();
+                        if let Some(existing) = stripe.cache.get_mut(&current_block_offset) {
                             existing.reused = true;
                             buf[buf_start..buf_start + overlap_len].copy_from_slice(
                                 &existing.data[block_start..block_start + overlap_len],
                             );
+                        } else if let Some(data) = stripe.flushing_evicted.get(&current_block_offset) {
+                            buf[buf_start..buf_start + overlap_len].copy_from_slice(
+                                &data[block_start..block_start + overlap_len],
+                            );
                         } else {
-                            let flushing_data =
-                                self.flushing_evicted.lock().get(&b_offset).cloned();
-                            if let Some(flushing_data) = flushing_data {
-                                buf[buf_start..buf_start + overlap_len].copy_from_slice(
-                                    &flushing_data[block_start..block_start + overlap_len],
-                                );
-                            } else {
-                                buf[buf_start..buf_start + overlap_len].copy_from_slice(
-                                    &b_data[block_start..block_start + overlap_len],
-                                );
-                                let block = CacheBlock {
-                                    data: b_data.to_vec(),
-                                    dirty: false,
-                                    flushing: false,
-                                    reused: false,
-                                };
-                                self.insert_cache_block(&mut cache, &mut to_write, b_offset, block);
-                            }
+                            buf[buf_start..buf_start + overlap_len].copy_from_slice(
+                                &run_data[block_start..block_start + overlap_len],
+                            );
+                            let block = CacheBlock {
+                                data: run_data,
+                                dirty: false,
+                                flushing: false,
+                                reused: false,
+                            };
+                            stripe.insert_cache_block(
+                                &mut to_write,
+                                current_block_offset,
+                                block,
+                            );
                         }
+                    }
+                    deferred_writes.extend(to_write);
+                    current_block_offset += block_size;
+                    continue;
+                }
+
+                // Populate cache and copy to buf
+                let mut to_write = Vec::new();
+                for b in 0..consecutive_misses {
+                    let b_offset = current_block_offset + b * block_size;
+                    let b_data = &run_data[b * block_size..(b + 1) * block_size];
+
+                    let start = core::cmp::max(offset, b_offset);
+                    let end = core::cmp::min(offset + buf.len(), b_offset + block_size);
+                    let overlap_len = end - start;
+                    let buf_start = start - offset;
+                    let block_start = start - b_offset;
+
+                    let stripe_idx = self.stripe_index(b_offset);
+                    let mut stripe = self.block_cache_stripes[stripe_idx].inner.lock();
+                    if let Some(existing) = stripe.cache.get_mut(&b_offset) {
+                        existing.reused = true;
+                        buf[buf_start..buf_start + overlap_len].copy_from_slice(
+                            &existing.data[block_start..block_start + overlap_len],
+                        );
+                    } else if let Some(data) = stripe.flushing_evicted.get(&b_offset) {
+                        buf[buf_start..buf_start + overlap_len].copy_from_slice(
+                            &data[block_start..block_start + overlap_len],
+                        );
+                    } else {
+                        buf[buf_start..buf_start + overlap_len].copy_from_slice(
+                            &b_data[block_start..block_start + overlap_len],
+                        );
+                        let block = CacheBlock {
+                            data: b_data.to_vec(),
+                            dirty: false,
+                            flushing: false,
+                            reused: false,
+                        };
+                        stripe.insert_cache_block(&mut to_write, b_offset, block);
                     }
                 }
 
@@ -926,12 +988,12 @@ impl<D: AsyncBlockDriverOps + Clone + 'static> Ext4Disk<D> {
         if bypass_block_cache(offset, data.len(), block_size) {
             self.write_block_to_disk_async(offset, data).await?;
             {
-                let mut cache = self.block_cache.lock();
-                let mut flushing = self.flushing_evicted.lock();
                 let mut current = start_block_offset;
                 while current <= end_block_offset {
-                    cache.pop(&current);
-                    flushing.remove(&current);
+                    let stripe_idx = self.stripe_index(current);
+                    let mut stripe = self.block_cache_stripes[stripe_idx].inner.lock();
+                    stripe.cache.pop(&current);
+                    stripe.flushing_evicted.remove(&current);
                     current += block_size;
                 }
             }
@@ -953,8 +1015,9 @@ impl<D: AsyncBlockDriverOps + Clone + 'static> Ext4Disk<D> {
 
             // Check cache hit
             let has_cache = {
-                let mut cache = self.block_cache.lock();
-                if let Some(block) = cache.get_mut(&current_block_offset) {
+                let stripe_idx = self.stripe_index(current_block_offset);
+                let mut stripe = self.block_cache_stripes[stripe_idx].inner.lock();
+                if let Some(block) = stripe.cache.get_mut(&current_block_offset) {
                     block.data[block_start..block_start + overlap_len]
                         .copy_from_slice(&data[data_start..data_start + overlap_len]);
                     block.dirty = true;
@@ -983,10 +1046,10 @@ impl<D: AsyncBlockDriverOps + Clone + 'static> Ext4Disk<D> {
                     reused: true,
                 };
                 {
-                    let mut cache = self.block_cache.lock();
-                    self.flushing_evicted.lock().remove(&current_block_offset);
-                    self.insert_cache_block(
-                        &mut cache,
+                    let stripe_idx = self.stripe_index(current_block_offset);
+                    let mut stripe = self.block_cache_stripes[stripe_idx].inner.lock();
+                    stripe.flushing_evicted.remove(&current_block_offset);
+                    stripe.insert_cache_block(
                         &mut deferred_writes,
                         current_block_offset,
                         block,
@@ -998,14 +1061,14 @@ impl<D: AsyncBlockDriverOps + Clone + 'static> Ext4Disk<D> {
                 // Partial block write with cache miss. Find consecutive cache misses that need partial write.
                 let mut consecutive_misses = 1;
                 {
-                    let cache = self.block_cache.lock();
-                    let flushing = self.flushing_evicted.lock();
                     while current_block_offset + consecutive_misses * block_size <= end_block_offset
                     {
                         let next_block_offset =
                             current_block_offset + consecutive_misses * block_size;
-                        if cache.contains(&next_block_offset)
-                            || flushing.contains_key(&next_block_offset)
+                        let stripe_idx = self.stripe_index(next_block_offset);
+                        let stripe = self.block_cache_stripes[stripe_idx].inner.lock();
+                        if stripe.cache.contains(&next_block_offset)
+                            || stripe.flushing_evicted.contains_key(&next_block_offset)
                         {
                             break;
                         }
@@ -1032,51 +1095,49 @@ impl<D: AsyncBlockDriverOps + Clone + 'static> Ext4Disk<D> {
                 // Populate cache, apply writes, and copy
                 let mut to_write = Vec::new();
                 let mut marked_offsets = Vec::with_capacity(consecutive_misses);
-                {
-                    let mut cache = self.block_cache.lock();
-                    for b in 0..consecutive_misses {
-                        let b_offset = current_block_offset + b * block_size;
-                        let mut b_data = run_data[b * block_size..(b + 1) * block_size].to_vec();
+                for b in 0..consecutive_misses {
+                    let b_offset = current_block_offset + b * block_size;
+                    let mut b_data = run_data[b * block_size..(b + 1) * block_size].to_vec();
 
-                        let start = core::cmp::max(offset, b_offset);
-                        let end = core::cmp::min(offset + data.len(), b_offset + block_size);
-                        let overlap_len = end - start;
-                        let data_start = start - offset;
-                        let block_start = start - b_offset;
+                    let start = core::cmp::max(offset, b_offset);
+                    let end = core::cmp::min(offset + data.len(), b_offset + block_size);
+                    let overlap_len = end - start;
+                    let data_start = start - offset;
+                    let block_start = start - b_offset;
 
-                        if let Some(existing) = cache.get_mut(&b_offset) {
-                            existing.data[block_start..block_start + overlap_len]
+                    let stripe_idx = self.stripe_index(b_offset);
+                    let mut stripe = self.block_cache_stripes[stripe_idx].inner.lock();
+                    if let Some(existing) = stripe.cache.get_mut(&b_offset) {
+                        existing.data[block_start..block_start + overlap_len]
+                            .copy_from_slice(&data[data_start..data_start + overlap_len]);
+                        existing.dirty = true;
+                        existing.flushing = false;
+                        existing.reused = true;
+                    } else {
+                        let flushing_data = stripe.flushing_evicted.remove(&b_offset);
+                        if let Some(mut flushing_data) = flushing_data {
+                            flushing_data[block_start..block_start + overlap_len]
                                 .copy_from_slice(&data[data_start..data_start + overlap_len]);
-                            existing.dirty = true;
-                            existing.flushing = false;
-                            existing.reused = true;
+                            let block = CacheBlock {
+                                data: flushing_data,
+                                dirty: true,
+                                flushing: false,
+                                reused: true,
+                            };
+                            stripe.insert_cache_block(&mut to_write, b_offset, block);
                         } else {
-                            let flushing_data = self.flushing_evicted.lock().remove(&b_offset);
-                            if let Some(flushing_data) = flushing_data {
-                                let mut b_data = flushing_data;
-                                b_data[block_start..block_start + overlap_len]
-                                    .copy_from_slice(&data[data_start..data_start + overlap_len]);
-                                let block = CacheBlock {
-                                    data: b_data,
-                                    dirty: true,
-                                    flushing: false,
-                                    reused: true,
-                                };
-                                self.insert_cache_block(&mut cache, &mut to_write, b_offset, block);
-                            } else {
-                                b_data[block_start..block_start + overlap_len]
-                                    .copy_from_slice(&data[data_start..data_start + overlap_len]);
-                                let block = CacheBlock {
-                                    data: b_data,
-                                    dirty: true,
-                                    flushing: false,
-                                    reused: true,
-                                };
-                                self.insert_cache_block(&mut cache, &mut to_write, b_offset, block);
-                            }
+                            b_data[block_start..block_start + overlap_len]
+                                .copy_from_slice(&data[data_start..data_start + overlap_len]);
+                            let block = CacheBlock {
+                                data: b_data,
+                                dirty: true,
+                                flushing: false,
+                                reused: true,
+                            };
+                            stripe.insert_cache_block(&mut to_write, b_offset, block);
                         }
-                        marked_offsets.push(b_offset);
                     }
+                    marked_offsets.push(b_offset);
                 }
 
                 for offset in marked_offsets {
@@ -1100,16 +1161,18 @@ impl<D: AsyncBlockDriverOps + Clone + 'static> Ext4Disk<D> {
 
     pub async fn set_block_size(&self, size: usize) {
         let _io_guards = self.lock_all_write_stripes().await;
-        let mut cache = self.block_cache.lock();
-        assert!(
-            cache.iter().all(|(_, block)| !block.dirty),
-            "set_block_size must not discard dirty blocks"
-        );
-        assert!(
-            self.flushing_evicted.lock().is_empty(),
-            "set_block_size must not discard evicted writes"
-        );
-        cache.clear();
+        for stripe in &self.block_cache_stripes {
+            let mut stripe = stripe.inner.lock();
+            assert!(
+                stripe.cache.iter().all(|(_, block)| !block.dirty),
+                "set_block_size must not discard dirty blocks"
+            );
+            assert!(
+                stripe.flushing_evicted.is_empty(),
+                "set_block_size must not discard evicted writes"
+            );
+            stripe.cache.clear();
+        }
         self.dirty_owners.lock().clear();
         self.block_size
             .store(size, core::sync::atomic::Ordering::Relaxed);
