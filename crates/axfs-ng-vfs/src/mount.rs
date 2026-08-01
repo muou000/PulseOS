@@ -75,16 +75,26 @@ impl PropagationMode {
 // peer_group_id -> list of weak refs to all Mountpoints in that group
 // ---------------------------------------------------------------------------
 
-static PEER_GROUPS: Mutex<Option<HashMap<u64, Vec<Weak<Mountpoint>>>>> = Mutex::new(None);
+static PEER_GROUPS: spin::RwLock<Option<HashMap<u64, Vec<Weak<Mountpoint>>>>> = spin::RwLock::new(None);
 
-fn with_peer_groups<R>(f: impl FnOnce(&mut HashMap<u64, Vec<Weak<Mountpoint>>>) -> R) -> R {
-    let mut guard = PEER_GROUPS.lock();
+fn with_peer_groups_read<R>(f: impl FnOnce(&HashMap<u64, Vec<Weak<Mountpoint>>>) -> R) -> R {
+    let guard = PEER_GROUPS.read();
+    if let Some(map) = guard.as_ref() {
+        f(map)
+    } else {
+        let empty = HashMap::new();
+        f(&empty)
+    }
+}
+
+fn with_peer_groups_write<R>(f: impl FnOnce(&mut HashMap<u64, Vec<Weak<Mountpoint>>>) -> R) -> R {
+    let mut guard = PEER_GROUPS.write();
     let map = guard.get_or_insert_with(HashMap::new);
     f(map)
 }
 
 fn peer_group_add(peer_group: u64, mp: &Arc<Mountpoint>) {
-    with_peer_groups(|groups| {
+    with_peer_groups_write(|groups| {
         let list = groups.entry(peer_group).or_default();
         if !list.iter().any(|w| w.upgrade().map_or(false, |m| Arc::ptr_eq(&m, mp))) {
             list.push(Arc::downgrade(mp));
@@ -93,7 +103,7 @@ fn peer_group_add(peer_group: u64, mp: &Arc<Mountpoint>) {
 }
 
 fn peer_group_remove(peer_group: u64, mp: &Arc<Mountpoint>) {
-    with_peer_groups(|groups| {
+    with_peer_groups_write(|groups| {
         if let Some(members) = groups.get_mut(&peer_group) {
             members.retain(|w| {
                 w.upgrade()
@@ -144,7 +154,7 @@ fn remove_from_registry(mp: &Arc<Mountpoint>, mode: PropagationMode) {
 
 /// Collect all live Mountpoints in a peer group (excluding `exclude`).
 fn peer_group_members(peer_group: u64, exclude: &Arc<Mountpoint>) -> Vec<Arc<Mountpoint>> {
-    with_peer_groups(|groups| {
+    with_peer_groups_read(|groups| {
         groups
             .get(&peer_group)
             .map(|members| {
@@ -192,7 +202,7 @@ fn collect_slaves_of_group_rec(
 /// All slave Mountpoints whose master_group == `peer_group` (including transitive slaves).
 fn slaves_of_group(peer_group: u64) -> Vec<Arc<Mountpoint>> {
     let mut result = Vec::new();
-    with_peer_groups(|groups| {
+    with_peer_groups_read(|groups| {
         collect_slaves_of_group_rec(groups, peer_group, &mut result);
     });
     result
@@ -207,7 +217,7 @@ fn peer_group_master(groups: &HashMap<u64, Vec<Weak<Mountpoint>>>, pg: u64) -> O
 }
 
 fn is_slave_of(peer_mp: &Arc<Mountpoint>, parent_pg: u64) -> bool {
-    with_peer_groups(|groups| {
+    with_peer_groups_read(|groups| {
         let mut cur_master = peer_mp.propagation().master_group();
         let mut visited = Vec::new();
         while let Some(m_pg) = cur_master {
@@ -235,7 +245,9 @@ pub struct Mountpoint {
     /// Location in the parent mountpoint.
     location: core::cell::UnsafeCell<Option<Location>>,
     /// Children of the mountpoint. (inode, fs_ptr) -> Mountpoint
-    children: Mutex<HashMap<(u64, usize), Weak<Self>>>,
+    children: spin::RwLock<HashMap<(u64, usize), Weak<Self>>>,
+    /// Fast-path flag indicating whether any children exist.
+    pub(crate) has_children: AtomicBool,
     /// Device ID
     device: u64,
     /// Unique mount ID (used for propagation bookkeeping)
@@ -257,7 +269,8 @@ impl Mountpoint {
         Arc::new(Self {
             root,
             location: core::cell::UnsafeCell::new(location_in_parent),
-            children: Mutex::default(),
+            children: spin::RwLock::default(),
+            has_children: AtomicBool::new(false),
             device: DEVICE_COUNTER.fetch_add(1, Ordering::Relaxed),
             id: MOUNT_ID_COUNTER.fetch_add(1, Ordering::Relaxed),
             propagation: Mutex::new(PropagationMode::Private),
@@ -277,7 +290,8 @@ impl Mountpoint {
         Arc::new(Self {
             root,
             location: core::cell::UnsafeCell::new(location_in_parent),
-            children: Mutex::default(),
+            children: spin::RwLock::default(),
+            has_children: AtomicBool::new(false),
             device: source.mountpoint().device(),
             id: MOUNT_ID_COUNTER.fetch_add(1, Ordering::Relaxed),
             propagation: Mutex::new(PropagationMode::Private),
@@ -327,9 +341,11 @@ impl Mountpoint {
         let mut current = self.clone();
         let mut visited = vec![self.id];
         loop {
-            let next = {
-                let children = current.children.lock();
+            let next = if current.has_children.load(Ordering::Relaxed) {
+                let children = current.children.read();
                 children.get(&Location::entry_key(&current.root)).and_then(Weak::upgrade)
+            } else {
+                None
             };
             if let Some(mount) = next {
                 if visited.contains(&mount.id) {
@@ -439,7 +455,7 @@ impl Mountpoint {
         self.make_shared();
         let children: Vec<_> = self
             .children
-            .lock()
+            .read()
             .values()
             .filter_map(Weak::upgrade)
             .collect();
@@ -453,7 +469,7 @@ impl Mountpoint {
         self.make_slave();
         let children: Vec<_> = self
             .children
-            .lock()
+            .read()
             .values()
             .filter_map(Weak::upgrade)
             .collect();
@@ -467,7 +483,7 @@ impl Mountpoint {
         self.make_private();
         let children: Vec<_> = self
             .children
-            .lock()
+            .read()
             .values()
             .filter_map(Weak::upgrade)
             .collect();
@@ -481,7 +497,7 @@ impl Mountpoint {
         self.make_unbindable();
         let children: Vec<_> = self
             .children
-            .lock()
+            .read()
             .values()
             .filter_map(Weak::upgrade)
             .collect();
@@ -685,9 +701,12 @@ impl Location {
     }
 
     pub fn is_mountpoint(&self) -> bool {
+        if !self.mountpoint.has_children.load(Ordering::Relaxed) {
+            return false;
+        }
         self.mountpoint
             .children
-            .lock()
+            .read()
             .contains_key(&Self::entry_key(&self.entry))
     }
 
@@ -697,10 +716,13 @@ impl Location {
     }
 
     fn resolve_mounted_child(&self, entry: &DirEntry) -> Option<Self> {
+        if !self.mountpoint.has_children.load(Ordering::Relaxed) {
+            return None;
+        }
         let mountpoint = self
             .mountpoint
             .children
-            .lock()
+            .read()
             .get(&Self::entry_key(entry))
             .and_then(Weak::upgrade)?;
         let mountpoint = mountpoint.effective_mountpoint();
@@ -786,7 +808,7 @@ impl Location {
     pub fn mount(&self, fs: &Filesystem) -> VfsResult<Arc<Mountpoint>> {
         self.entry.as_dir()?;
         let entry_key = Self::entry_key(&self.entry);
-        let mut children = self.mountpoint.children.lock();
+        let mut children = self.mountpoint.children.write();
         if let Some(weak) = children.get(&entry_key) {
             if weak.upgrade().is_some() {
                 return Err(VfsError::ResourceBusy);
@@ -802,6 +824,7 @@ impl Location {
         }
 
         children.insert(entry_key, Arc::downgrade(&result));
+        self.mountpoint.has_children.store(true, Ordering::Release);
         Ok(result)
     }
 
@@ -865,7 +888,7 @@ impl Location {
         };
 
         let entry_key = Self::entry_key(&self.entry);
-        let mut children = self.mountpoint.children.lock();
+        let mut children = self.mountpoint.children.write();
         if let Some(weak) = children.get(&entry_key) {
             if weak.upgrade().is_some() {
                 return Err(VfsError::ResourceBusy);
@@ -877,6 +900,7 @@ impl Location {
         result.change_propagation(final_prop);
 
         children.insert(entry_key, Arc::downgrade(&result));
+        self.mountpoint.has_children.store(true, Ordering::Release);
         Ok(result)
     }
 
@@ -884,7 +908,7 @@ impl Location {
         if !self.is_root_of_mount() {
             return Err(VfsError::InvalidInput);
         }
-        let children = self.mountpoint.children.lock();
+        let children = self.mountpoint.children.read();
         if !children.is_empty() {
             log::warn!("unmount: mount ID {} at {:?} is busy. Children keys: {:?}", self.mountpoint.id, self.entry, children.keys());
             return Err(VfsError::ResourceBusy);
@@ -896,11 +920,11 @@ impl Location {
             remove_from_registry(&self.mountpoint, prop);
         }
         if let Some(parent_loc) = self.mountpoint.location() {
-            parent_loc
-                .mountpoint
-                .children
-                .lock()
-                .remove(&Self::entry_key(&parent_loc.entry));
+            let mut parent_children = parent_loc.mountpoint.children.write();
+            parent_children.remove(&Self::entry_key(&parent_loc.entry));
+            if parent_children.is_empty() {
+                parent_loc.mountpoint.has_children.store(false, Ordering::Release);
+            }
         }
         Ok(())
     }
@@ -909,7 +933,8 @@ impl Location {
         if !self.is_root_of_mount() {
             return Err(VfsError::InvalidInput);
         }
-        let children = mem::take(&mut *self.mountpoint.children.lock());
+        let children = mem::take(&mut *self.mountpoint.children.write());
+        self.mountpoint.has_children.store(false, Ordering::Release);
         for (_, child) in children {
             if let Some(child) = child.upgrade() {
                 child.root_location().unmount_all()?;
@@ -934,7 +959,7 @@ impl Location {
         // Check target is not already a mount
         let new_entry_key = Self::entry_key(&new_parent.entry);
         {
-            let new_parent_children = new_parent.mountpoint.children.lock();
+            let new_parent_children = new_parent.mountpoint.children.read();
             if let Some(weak) = new_parent_children.get(&new_entry_key) {
                 if weak.upgrade().is_some() {
                     return Err(VfsError::ResourceBusy);
@@ -944,11 +969,11 @@ impl Location {
 
         // Detach from old parent.
         if let Some(old_parent_loc) = mp.location() {
-            old_parent_loc
-                .mountpoint
-                .children
-                .lock()
-                .remove(&Self::entry_key(&old_parent_loc.entry));
+            let mut old_children = old_parent_loc.mountpoint.children.write();
+            old_children.remove(&Self::entry_key(&old_parent_loc.entry));
+            if old_children.is_empty() {
+                old_parent_loc.mountpoint.has_children.store(false, Ordering::Release);
+            }
         }
 
         // Update location of the original mountpoint in-place.
@@ -957,11 +982,9 @@ impl Location {
         }
 
         // Attach to new parent.
-        new_parent
-            .mountpoint
-            .children
-            .lock()
-            .insert(new_entry_key, Arc::downgrade(mp));
+        let mut new_children = new_parent.mountpoint.children.write();
+        new_children.insert(new_entry_key, Arc::downgrade(mp));
+        new_parent.mountpoint.has_children.store(true, Ordering::Release);
 
         // Update propagation mode after move.
         let dst_parent_prop = *new_parent.mountpoint.propagation.lock();
@@ -1046,7 +1069,7 @@ fn collect_propagate_unmount_rec(
 
     for peer_parent_mp in targets {
         let peer_child = {
-            let children = peer_parent_mp.children.lock();
+            let children = peer_parent_mp.children.read();
             children.get(entry_key).and_then(Weak::upgrade)
         };
         if let Some(peer_child_mp) = peer_child {
@@ -1167,7 +1190,7 @@ pub fn propagate_subtree(
     collected: &mut Vec<(Arc<Mountpoint>, Arc<Mountpoint>)>,
 ) {
     let children: Vec<((u64, usize), Arc<Mountpoint>)> = {
-        let guard = src_mp.children.lock();
+        let guard = src_mp.children.read();
         guard
             .iter()
             .filter_map(|(key, weak)| weak.upgrade().map(|mp| (*key, mp)))
@@ -1319,7 +1342,7 @@ impl Location {
     /// Like `mount_bind` but skips the unbindable check (for internal propagation).
     fn mount_bind_silent(&self, source: Location) -> VfsResult<Arc<Mountpoint>> {
         let entry_key = Self::entry_key(&self.entry);
-        let mut children = self.mountpoint.children.lock();
+        let mut children = self.mountpoint.children.write();
         if let Some(weak) = children.get(&entry_key) {
             if let Some(existing) = weak.upgrade() {
                 return Ok(existing);
@@ -1374,6 +1397,7 @@ impl Location {
         result.change_propagation(final_prop);
 
         children.insert(entry_key, Arc::downgrade(&result));
+        self.mountpoint.has_children.store(true, Ordering::Release);
         Ok(result)
     }
 }
