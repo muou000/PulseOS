@@ -4,9 +4,6 @@ use alloc::{
     sync::{Arc, Weak},
     vec::Vec,
 };
-use memory_addr::{PhysAddr, VirtAddr};
-use axhal::paging::MappingFlags;
-
 use core::{
     any::Any,
     sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
@@ -16,9 +13,11 @@ use core::{
 use axerrno::{LinuxError, LinuxResult};
 use axfs::{File, FileFlags as AxFileFlags, OpenResult};
 use axfs_ng_vfs::{Location, Metadata, NodeType};
+use axhal::paging::MappingFlags;
 use axio::{PollState, Read, Seek, SeekFrom, Write};
 use kspin::SpinNoIrq;
 use linux_raw_sys::general::*;
+use memory_addr::{PhysAddr, VirtAddr};
 use spin::{Lazy, Mutex, RwLock};
 
 use crate::cpu_dma_latency::{CpuDmaLatencyRequest, effective_latency_us};
@@ -360,8 +359,7 @@ impl Write for StdoutRaw {
     }
 }
 
-static STDIN_READER: Lazy<Mutex<StdinRaw>> =
-    Lazy::new(|| Mutex::new(StdinRaw));
+static STDIN_READER: Lazy<Mutex<StdinRaw>> = Lazy::new(|| Mutex::new(StdinRaw));
 static STDOUT_WRITER: Lazy<Mutex<StdoutRaw>> = Lazy::new(|| Mutex::new(StdoutRaw));
 
 static TTY_TERMIOS: Lazy<SpinNoIrq<termios2>> = Lazy::new(|| {
@@ -372,9 +370,7 @@ static TTY_TERMIOS: Lazy<SpinNoIrq<termios2>> = Lazy::new(|| {
         c_lflag: 0x8a3b,
         c_line: 0,
         c_cc: [
-            3, 28, 127, 21, 4, 0, 1, 0,
-            17, 19, 26, 0, 18, 15, 23, 22,
-            0, 0, 0
+            3, 28, 127, 21, 4, 0, 1, 0, 17, 19, 26, 0, 18, 15, 23, 22, 0, 0, 0,
         ],
         c_ispeed: 9600,
         c_ospeed: 9600,
@@ -419,7 +415,7 @@ pub fn write_tty_termios(user_addr: usize) -> LinuxResult {
         )
     };
     process.read_user_bytes(user_addr, bytes)?;
-    
+
     let mut t = TTY_TERMIOS.lock();
     t.c_iflag = term.c_iflag;
     t.c_oflag = term.c_oflag;
@@ -1284,51 +1280,52 @@ impl FdObject for DirObject {
         let mut offset = self.offset.lock();
         let mut written = 0usize;
         let mut break_out = false;
-        let res = axtask::future::block_on(self.inner.read_dir(*offset, &mut |name: &str,
-                                                     ino: u64,
-                                                     node_type: NodeType,
-                                                     next_off: u64|
-         -> bool {
-            if break_out {
-                return false;
-            }
-            let name_bytes = name.as_bytes();
-            let name_len = name_bytes.len();
-            let unpadded_len = core::mem::size_of::<LinuxDirent64>() + name_len + 1;
-            let reclen = (unpadded_len + 7) & !7;
-            if written + reclen > dirp.len() {
-                break_out = true;
-                return false;
-            }
-            let dirent = LinuxDirent64 {
-                d_ino: ino,
-                d_off: next_off as i64,
-                d_reclen: reclen as u16,
-                d_type: node_type as u8,
-            };
-            axlog::debug!(
-                "read_dirents64: emit name={}, ino={}, type={:?}, next_off={}, reclen={}",
-                name,
-                ino,
-                node_type,
-                next_off,
-                reclen
-            );
-            unsafe {
-                let dst = dirp.as_mut_ptr().add(written);
-                core::ptr::write_unaligned(dst.cast::<LinuxDirent64>(), dirent);
-                let name_dst = dst.add(core::mem::size_of::<LinuxDirent64>());
-                core::ptr::copy_nonoverlapping(name_bytes.as_ptr(), name_dst, name_len);
-                core::ptr::write_bytes(
-                    name_dst.add(name_len),
-                    0,
-                    reclen - core::mem::size_of::<LinuxDirent64>() - name_len,
+        let res =
+            axtask::future::block_on(self.inner.read_dir(*offset, &mut |name: &str,
+                                                                        ino: u64,
+                                                                        node_type: NodeType,
+                                                                        next_off: u64|
+             -> bool {
+                if break_out {
+                    return false;
+                }
+                let name_bytes = name.as_bytes();
+                let name_len = name_bytes.len();
+                let unpadded_len = core::mem::size_of::<LinuxDirent64>() + name_len + 1;
+                let reclen = (unpadded_len + 7) & !7;
+                if written + reclen > dirp.len() {
+                    break_out = true;
+                    return false;
+                }
+                let dirent = LinuxDirent64 {
+                    d_ino: ino,
+                    d_off: next_off as i64,
+                    d_reclen: reclen as u16,
+                    d_type: node_type as u8,
+                };
+                axlog::debug!(
+                    "read_dirents64: emit name={}, ino={}, type={:?}, next_off={}, reclen={}",
+                    name,
+                    ino,
+                    node_type,
+                    next_off,
+                    reclen
                 );
-            }
-            written += reclen;
-            *offset = next_off;
-            true
-        }));
+                unsafe {
+                    let dst = dirp.as_mut_ptr().add(written);
+                    core::ptr::write_unaligned(dst.cast::<LinuxDirent64>(), dirent);
+                    let name_dst = dst.add(core::mem::size_of::<LinuxDirent64>());
+                    core::ptr::copy_nonoverlapping(name_bytes.as_ptr(), name_dst, name_len);
+                    core::ptr::write_bytes(
+                        name_dst.add(name_len),
+                        0,
+                        reclen - core::mem::size_of::<LinuxDirent64>() - name_len,
+                    );
+                }
+                written += reclen;
+                *offset = next_off;
+                true
+            }));
         if written == 0 {
             res?;
         }
@@ -1460,7 +1457,8 @@ pub struct ZeroCopyPage {
 fn dealloc_physical_frame(frame: PhysAddr) {
     if axalloc::frame_table().contains(frame) {
         if axalloc::frame_table().dec_ref(frame) == 0 {
-            axalloc::global_allocator().dealloc_pages(axhal::mem::phys_to_virt(frame).as_usize(), 1);
+            axalloc::global_allocator()
+                .dealloc_pages(axhal::mem::phys_to_virt(frame).as_usize(), 1);
         }
     }
 }
@@ -1502,8 +1500,7 @@ impl EventFdObject {
 
     fn ready_for(&self, wait_for_read: bool, wait_for_write: bool) -> bool {
         let counter = self.counter.load(Ordering::Acquire);
-        (wait_for_read && counter > 0)
-            || (wait_for_write && counter < EVENTFD_COUNTER_MAX)
+        (wait_for_read && counter > 0) || (wait_for_write && counter < EVENTFD_COUNTER_MAX)
     }
 
     fn wait_for_ready(
@@ -1513,10 +1510,8 @@ impl EventFdObject {
         wait_for_write: bool,
         deadline: Option<Duration>,
     ) -> LinuxResult<bool> {
-        let condition = || {
-            self.ready_for(wait_for_read, wait_for_write)
-                || Self::current_has_pending_signal()
-        };
+        let condition =
+            || self.ready_for(wait_for_read, wait_for_write) || Self::current_has_pending_signal();
 
         match deadline {
             Some(deadline) => {
@@ -1561,8 +1556,7 @@ impl FdObject for EventFdObject {
                     return Err(LinuxError::EAGAIN);
                 }
                 self.read_wait_queue.wait_until(|| {
-                    self.counter.load(Ordering::Acquire) > 0
-                        || Self::current_has_pending_signal()
+                    self.counter.load(Ordering::Acquire) > 0 || Self::current_has_pending_signal()
                 });
                 if Self::current_has_pending_signal() {
                     return Err(LinuxError::EINTR);
@@ -1680,12 +1674,7 @@ impl FdObject for EventFdObject {
         } else {
             &self.write_wait_queue
         };
-        self.wait_for_ready(
-            wait_queue,
-            wait_for_read,
-            wait_for_write,
-            deadline,
-        )
+        self.wait_for_ready(wait_queue, wait_for_read, wait_for_write, deadline)
     }
 
     fn get_wait_queues<'a>(
@@ -2358,14 +2347,20 @@ impl FdObject for PipeObject {
     ) -> LinuxResult {
         if self.readable && events.intersects(axpoll::IoEvents::IN | axpoll::IoEvents::RDHUP) {
             let owner = self.clone();
-            let registration = owner.shared.read_wait_queue.register_owned_waker(cx.waker());
+            let registration = owner
+                .shared
+                .read_wait_queue
+                .register_owned_waker(cx.waker());
             registrations.push(PollRegistration::new(move || {
                 owner.shared.read_wait_queue.unregister_waker(registration);
             }));
         }
         if self.writable && events.contains(axpoll::IoEvents::OUT) {
             let owner = self.clone();
-            let registration = owner.shared.write_wait_queue.register_owned_waker(cx.waker());
+            let registration = owner
+                .shared
+                .write_wait_queue
+                .register_owned_waker(cx.waker());
             registrations.push(PollRegistration::new(move || {
                 owner.shared.write_wait_queue.unregister_waker(registration);
             }));
@@ -2482,9 +2477,15 @@ impl FdObject for EpollObject {
             for (&fd, ev) in monitored.iter() {
                 if let Ok(entry) = crate::task::current_process()?.get_fd_entry(fd) {
                     let mut target_events = axpoll::IoEvents::empty();
-                    if ev.event.events & EPOLLIN != 0 { target_events |= axpoll::IoEvents::IN; }
-                    if ev.event.events & EPOLLOUT != 0 { target_events |= axpoll::IoEvents::OUT; }
-                    if ev.event.events & EPOLLRDHUP != 0 { target_events |= axpoll::IoEvents::RDHUP; }
+                    if ev.event.events & EPOLLIN != 0 {
+                        target_events |= axpoll::IoEvents::IN;
+                    }
+                    if ev.event.events & EPOLLOUT != 0 {
+                        target_events |= axpoll::IoEvents::OUT;
+                    }
+                    if ev.event.events & EPOLLRDHUP != 0 {
+                        target_events |= axpoll::IoEvents::RDHUP;
+                    }
 
                     if !target_events.is_empty() {
                         list.push((entry.object.clone(), target_events));
@@ -2574,11 +2575,17 @@ pub fn eventfd_entry(initval: u32, semaphore: bool, flags: FdFlags) -> FdEntry {
     FdEntry::new(object, flags)
 }
 
-static FIFO_REGISTRY: Lazy<Mutex<BTreeMap<(u64, u64), Weak<PipeShared>>>> =
-    Lazy::new(|| Mutex::new(BTreeMap::new()));
+const FIFO_REGISTRY_SHARDS: usize = 32;
+
+fn fifo_registry_shard(device: u64, inode: u64) -> usize {
+    ((device as usize).rotate_left(13) ^ (inode as usize).rotate_right(7)) % FIFO_REGISTRY_SHARDS
+}
+
+static FIFO_REGISTRY: Lazy<[Mutex<BTreeMap<(u64, u64), Weak<PipeShared>>>; FIFO_REGISTRY_SHARDS]> =
+    Lazy::new(|| core::array::from_fn(|_| Mutex::new(BTreeMap::new())));
 
 pub fn get_or_create_fifo_shared(device: u64, inode: u64) -> Arc<PipeShared> {
-    let mut registry = FIFO_REGISTRY.lock();
+    let mut registry = FIFO_REGISTRY[fifo_registry_shard(device, inode)].lock();
     registry.retain(|_, w| w.strong_count() > 0);
     let key = (device, inode);
     if let Some(shared) = registry.get(&key).and_then(|w| w.upgrade()) {
@@ -2600,11 +2607,7 @@ pub fn create_fifo_entry(
     let shared = get_or_create_fifo_shared(device, inode);
     let nonblock = flags.contains(FdFlags::NONBLOCK);
 
-    if writable
-        && !readable
-        && nonblock
-        && shared.reader_count.load(Ordering::Acquire) == 0
-    {
+    if writable && !readable && nonblock && shared.reader_count.load(Ordering::Acquire) == 0 {
         return Err(LinuxError::ENXIO);
     }
 
@@ -2701,7 +2704,8 @@ impl FdTable {
         let has_cloexec = self.storage.chunks.iter().any(|chunk_opt| {
             chunk_opt.as_ref().is_some_and(|chunk| {
                 chunk.entries.iter().any(|slot| {
-                    slot.as_ref().is_some_and(|entry| entry.flags.contains(FdFlags::CLOEXEC))
+                    slot.as_ref()
+                        .is_some_and(|entry| entry.flags.contains(FdFlags::CLOEXEC))
                 })
             })
         });
@@ -2713,7 +2717,8 @@ impl FdTable {
         for chunk_idx in 0..storage.chunks.len() {
             let chunk_has_cloexec = storage.chunks[chunk_idx].as_ref().is_some_and(|chunk| {
                 chunk.entries.iter().any(|slot| {
-                    slot.as_ref().is_some_and(|entry| entry.flags.contains(FdFlags::CLOEXEC))
+                    slot.as_ref()
+                        .is_some_and(|entry| entry.flags.contains(FdFlags::CLOEXEC))
                 })
             });
             if !chunk_has_cloexec {
@@ -2748,10 +2753,7 @@ impl FdTable {
     }
 
     pub fn drain_all(&mut self) -> DrainedFdEntries {
-        let storage = core::mem::replace(
-            &mut self.storage,
-            Arc::new(FdTableStorage::default()),
-        );
+        let storage = core::mem::replace(&mut self.storage, Arc::new(FdTableStorage::default()));
         DrainedFdEntries { _storage: storage }
     }
 
