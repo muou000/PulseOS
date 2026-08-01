@@ -5,12 +5,14 @@ export NO_AXSTD := y
 export AX_LIB := axfeat
 FEATURE ?= final-testcode
 QPERF_TRACE ?= n
+BUILDSTORM_STATS ?= n
 SCHED_LOAD_BALANCE ?= y
 comma := ,
 QPERF_APP_FEATURE = $(if $(filter y,$(QPERF_TRACE)),$(comma)qperf-trace)
+BUILDSTORM_STATS_APP_FEATURE = $(if $(filter y,$(BUILDSTORM_STATS)),$(comma)buildstorm-stats)
 SCHED_LOAD_BALANCE_APP_FEATURE = $(if $(filter y,$(SCHED_LOAD_BALANCE)),$(comma)sched-load-balance)
-BUILD_OUT_DIR = $(if $(filter y,$(QPERF_TRACE)),$(A)/target/qperf-artifacts,$(A))
-export APP_FEATURES = qemu,$(FEATURE)$(QPERF_APP_FEATURE)$(SCHED_LOAD_BALANCE_APP_FEATURE)
+BUILD_OUT_DIR = $(if $(filter y,$(QPERF_TRACE)),$(A)/target/qperf-artifacts,$(if $(filter y,$(BUILDSTORM_STATS)),$(A)/target/buildstorm-stats-artifacts,$(A)))
+export APP_FEATURES = qemu,$(FEATURE)$(QPERF_APP_FEATURE)$(BUILDSTORM_STATS_APP_FEATURE)$(SCHED_LOAD_BALANCE_APP_FEATURE)
 ALL_APP_FEATURES = qemu,$(FEATURE)$(SCHED_LOAD_BALANCE_APP_FEATURE)
 export BLK := y
 
@@ -45,6 +47,7 @@ all: prepare-tools
 	@if [ "$(FEATURE)" = "pre-testcode" ]; then $(MAKE) img_all; fi
 
 test: override QPERF_TRACE := n
+test: override BUILDSTORM_STATS := n
 test: override APP_FEATURES = qemu,$(FEATURE)$(SCHED_LOAD_BALANCE_APP_FEATURE)
 test: test-artifacts
 
@@ -53,12 +56,21 @@ qperf-test: override APP_FEATURES = qemu,$(FEATURE),qperf-trace$(SCHED_LOAD_BALA
 qperf-test: override LOG := off
 qperf-test: test-artifacts
 
+buildstorm-stats-test: override QPERF_TRACE := n
+buildstorm-stats-test: override BUILDSTORM_STATS := y
+buildstorm-stats-test: override APP_FEATURES = qemu,$(FEATURE),buildstorm-stats$(SCHED_LOAD_BALANCE_APP_FEATURE)
+buildstorm-stats-test: override LOG := info
+buildstorm-stats-test: test-artifacts
+
 test-artifacts: prepare-tools
 	@ARCH=riscv64 APP_FEATURES=$(APP_FEATURES) LOG=$(LOG) $(MAKE) defconfig
 	@ARCH=riscv64 APP_FEATURES=$(APP_FEATURES) LOG=$(LOG) BUS=mmio OUT_DIR=$(BUILD_OUT_DIR) $(MAKE) -C arceos build  EXTRA_RUSTFLAGS="$(EXTRA_RUSTFLAGS)"
 	@if [ "$(QPERF_TRACE)" = "y" ]; then \
 		cp $(BUILD_OUT_DIR)/$(NAME)_riscv64-qemu-virt.bin kernel-rv-qperf; \
 		cp $(BUILD_OUT_DIR)/$(NAME)_riscv64-qemu-virt.elf $(NAME)_riscv64-qemu-virt-qperf.elf; \
+	elif [ "$(BUILDSTORM_STATS)" = "y" ]; then \
+		cp $(BUILD_OUT_DIR)/$(NAME)_riscv64-qemu-virt.bin kernel-rv-buildstorm-stats; \
+		cp $(BUILD_OUT_DIR)/$(NAME)_riscv64-qemu-virt.elf $(NAME)_riscv64-qemu-virt-buildstorm-stats.elf; \
 	else \
 		cp $(BUILD_OUT_DIR)/$(NAME)_riscv64-qemu-virt.bin kernel-rv; \
 	fi
@@ -67,6 +79,9 @@ test-artifacts: prepare-tools
 	@if [ "$(QPERF_TRACE)" = "y" ]; then \
 		cp $(BUILD_OUT_DIR)/$(NAME)_loongarch64-qemu-virt.elf kernel-la-qperf; \
 		cp $(BUILD_OUT_DIR)/$(NAME)_loongarch64-qemu-virt.elf $(NAME)_loongarch64-qemu-virt-qperf.elf; \
+	elif [ "$(BUILDSTORM_STATS)" = "y" ]; then \
+		cp $(BUILD_OUT_DIR)/$(NAME)_loongarch64-qemu-virt.elf kernel-la-buildstorm-stats; \
+		cp $(BUILD_OUT_DIR)/$(NAME)_loongarch64-qemu-virt.elf $(NAME)_loongarch64-qemu-virt-buildstorm-stats.elf; \
 	else \
 		cp $(BUILD_OUT_DIR)/$(NAME)_loongarch64-qemu-virt.elf kernel-la; \
 	fi
@@ -90,9 +105,11 @@ clean:
 	@rm -f .axconfig.toml
 	@rm -f kernel-rv kernel-la
 	@rm -f kernel-rv-qperf kernel-la-qperf
+	@rm -f kernel-rv-buildstorm-stats kernel-la-buildstorm-stats
 	@rm -f PulseOS_riscv64-qemu-virt.elf PulseOS_riscv64-qemu-virt.bin
 	@rm -f PulseOS_loongarch64-qemu-virt.elf PulseOS_loongarch64-qemu-virt.bin
 	@rm -f PulseOS_riscv64-qemu-virt-qperf.elf PulseOS_loongarch64-qemu-virt-qperf.elf
+	@rm -f PulseOS_riscv64-qemu-virt-buildstorm-stats.elf PulseOS_loongarch64-qemu-virt-buildstorm-stats.elf
 	@rm -f disk.img disk-la.img
 	@rm -f rootfs-riscv64.img rootfs-loongarch64.img
 	@rm -f arceos/disk.img arceos/disk-la.img

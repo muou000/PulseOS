@@ -16,9 +16,11 @@ times = []
 std = []
 pre-testcode = []
 final-testcode = []
+buildstorm-stats = []
 
 [dependencies]
 axalloc.workspace = true
+axconfig.workspace = true
 axtask.workspace = true
 axdriver = { workspace = true, features = ["block", "async"] }
 axerrno.workspace = true

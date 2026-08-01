@@ -345,6 +345,7 @@ dependencies = [
  "async-lock",
  "async-trait",
  "axalloc",
+ "axconfig",
  "axdriver",
  "axerrno",
  "axfs-ng-vfs",
