@@ -5,6 +5,7 @@ mod exit;
 mod process;
 /// Task related syscalls.
 mod schedule;
+mod signal;
 mod user;
 mod wait;
 
@@ -14,5 +15,6 @@ pub use exec::*;
 pub use exit::*;
 pub use process::*;
 pub use schedule::*;
+pub use signal::*;
 pub use user::*;
 pub use wait::*;
