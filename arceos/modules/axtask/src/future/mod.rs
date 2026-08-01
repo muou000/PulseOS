@@ -9,7 +9,9 @@ use core::{
 
 use kspin::SpinNoIrq;
 
-use crate::{AxTaskRef, AxTaskWeak, WakeContext, WakeSource, current};
+#[cfg(feature = "qperf-trace")]
+use crate::current_may_uninit;
+use crate::{AxTaskRef, AxTaskWeak, WaitContext, WaitReason, WakeContext, WakeSource, current};
 
 mod poll;
 mod time;
@@ -64,8 +66,21 @@ impl alloc::task::Wake for AxWaker {
                 return;
             }
             *woke = true;
-            rq.unblock_task_with_context(task, true, WakeContext::new(WakeSource::Future, 0));
+            rq.unblock_task_with_context(task, true, WakeContext::new(|| (WakeSource::Future, 0)));
         }
+    }
+}
+
+/// Overrides the qperf reason for the next suspension of the current `block_on` poll.
+///
+/// Nested futures should call this only when they are about to return `Pending`.
+/// The context is cleared before every poll, so a completed or cancelled future
+/// cannot leak its reason into a later suspension.
+#[inline(always)]
+pub fn set_current_wait_context(_context: WaitContext) {
+    #[cfg(feature = "qperf-trace")]
+    if let Some(task) = current_may_uninit() {
+        task.set_qperf_pending_wait_context(_context);
     }
 }
 
@@ -86,12 +101,32 @@ pub fn block_on<F: IntoFuture>(f: F) -> F::Output {
 
     let output = loop {
         *waker_arc.woke.lock() = false;
+        #[cfg(feature = "qperf-trace")]
+        curr.clear_qperf_pending_wait_context();
         match fut.as_mut().poll(&mut cx) {
             Poll::Pending => {
+                let context = {
+                    #[cfg(feature = "qperf-trace")]
+                    {
+                        curr.take_qperf_pending_wait_context().unwrap_or_else(|| {
+                            WaitContext::new(|| {
+                                (
+                                    WaitReason::Future,
+                                    Arc::as_ptr(&waker_arc) as usize as u64,
+                                    0,
+                                )
+                            })
+                        })
+                    }
+                    #[cfg(not(feature = "qperf-trace"))]
+                    {
+                        WaitContext::new(|| (WaitReason::Future, 0, 0))
+                    }
+                };
                 let mut rq = crate::api::current_run_queue::<kernel_guard::NoPreemptIrqSave>();
                 let woke_guard = waker_arc.woke.lock();
                 if !*woke_guard {
-                    rq.blocked_resched_woke(woke_guard);
+                    rq.blocked_resched_woke(woke_guard, context);
                 } else {
                     drop(woke_guard);
                 }

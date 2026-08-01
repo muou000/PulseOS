@@ -1122,9 +1122,10 @@ pub fn queue_signal_to_process(process: &Process, sig: usize) -> bool {
             .continued_signal_pending
             .store(false, Ordering::Release);
         if let Some(parent) = process.parent_process() {
-            parent
-                .child_exit_event
-                .notify_all_with_context(false, WakeContext::new(WakeSource::Signal, sig as u64));
+            parent.child_exit_event.notify_all_with_context(
+                false,
+                WakeContext::new(|| (WakeSource::Signal, sig as u64)),
+            );
         }
     } else if sig == SIGCONT as usize {
         process
@@ -1132,9 +1133,10 @@ pub fn queue_signal_to_process(process: &Process, sig: usize) -> bool {
             .store(true, Ordering::Release);
         process.stopped_signal_pending.store(0, Ordering::Release);
         if let Some(parent) = process.parent_process() {
-            parent
-                .child_exit_event
-                .notify_all_with_context(false, WakeContext::new(WakeSource::Signal, sig as u64));
+            parent.child_exit_event.notify_all_with_context(
+                false,
+                WakeContext::new(|| (WakeSource::Signal, sig as u64)),
+            );
         }
     }
 
@@ -1156,9 +1158,10 @@ pub fn queue_signal_to_thread(thread: &Thread, sig: usize) -> bool {
             .continued_signal_pending
             .store(false, Ordering::Release);
         if let Some(parent) = process.parent_process() {
-            parent
-                .child_exit_event
-                .notify_all_with_context(false, WakeContext::new(WakeSource::Signal, sig as u64));
+            parent.child_exit_event.notify_all_with_context(
+                false,
+                WakeContext::new(|| (WakeSource::Signal, sig as u64)),
+            );
         }
     } else if sig == SIGCONT as usize {
         process
@@ -1166,9 +1169,10 @@ pub fn queue_signal_to_thread(thread: &Thread, sig: usize) -> bool {
             .store(true, Ordering::Release);
         process.stopped_signal_pending.store(0, Ordering::Release);
         if let Some(parent) = process.parent_process() {
-            parent
-                .child_exit_event
-                .notify_all_with_context(false, WakeContext::new(WakeSource::Signal, sig as u64));
+            parent.child_exit_event.notify_all_with_context(
+                false,
+                WakeContext::new(|| (WakeSource::Signal, sig as u64)),
+            );
         }
     }
 

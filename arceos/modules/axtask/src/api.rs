@@ -281,7 +281,11 @@ pub fn wake_task(task: AxTaskRef, resched: bool) {
 
 /// Interrupts a task blocked in an interruptible future or wait operation.
 pub fn interrupt_task(task: AxTaskRef, resched: bool) {
-    interrupt_task_with_context(task, resched, WakeContext::new(WakeSource::Interrupt, 0));
+    interrupt_task_with_context(
+        task,
+        resched,
+        WakeContext::new(|| (WakeSource::Interrupt, 0)),
+    );
 }
 
 /// Interrupts a blocked task and records the semantic source of the interruption.

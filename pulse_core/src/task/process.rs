@@ -214,7 +214,7 @@ impl FutexTable {
         };
 
         let mut woken = 0;
-        let context = WakeContext::new(WakeSource::Futex, addr as u64);
+        let context = WakeContext::new(|| (WakeSource::Futex, addr as u64));
         while woken < count && queue.notify_one_with_context(true, context) {
             woken += 1;
         }
@@ -233,7 +233,7 @@ impl FutexTable {
         };
 
         let mut woken = 0;
-        let context = WakeContext::new(WakeSource::Futex, addr as u64);
+        let context = WakeContext::new(|| (WakeSource::Futex, addr as u64));
         while woken < count && queue.notify_one_with_context(false, context) {
             woken += 1;
         }
@@ -259,7 +259,7 @@ impl FutexTable {
 
         let mut moved = 0;
         let mut woken = 0;
-        let context = WakeContext::new(WakeSource::Futex, addr as u64);
+        let context = WakeContext::new(|| (WakeSource::Futex, addr as u64));
         while woken < wake_count && source_queue.notify_one_with_context(true, context) {
             woken += 1;
         }
@@ -281,7 +281,10 @@ impl FutexTable {
                 .collect::<Vec<_>>()
         };
         for (key, queue) in queues {
-            queue.notify_all_with_context(false, WakeContext::new(WakeSource::Futex, key as u64));
+            queue.notify_all_with_context(
+                false,
+                WakeContext::new(|| (WakeSource::Futex, key as u64)),
+            );
         }
     }
 
@@ -2475,7 +2478,8 @@ impl Process {
             }
             _ => 0,
         };
-        let wait_context = WaitContext::new(WaitReason::ChildWait, self.pid(), selector as u64);
+        let wait_context =
+            WaitContext::new(|| (WaitReason::ChildWait, self.pid(), selector as u64));
         self.child_exit_event
             .wait_until_with_context(wait_context, || {
                 check_state() || thread.has_pending_signal() || self.group_exiting()
@@ -2519,7 +2523,8 @@ impl Process {
     }
 
     pub fn wait_for_child_exit(&self, pid: isize) {
-        let wait_context = WaitContext::new(WaitReason::ChildWait, self.pid(), pid as i64 as u64);
+        let wait_context =
+            WaitContext::new(|| (WaitReason::ChildWait, self.pid(), pid as i64 as u64));
         self.child_exit_event
             .wait_until_with_context(wait_context, || {
                 self.children
@@ -2535,7 +2540,8 @@ impl Process {
             Err(e) => return Err(e.code()),
         };
         // wait_until 会在持有 WaitQueue 锁的同时执行闭包
-        let wait_context = WaitContext::new(WaitReason::ChildWait, self.pid(), pid as i64 as u64);
+        let wait_context =
+            WaitContext::new(|| (WaitReason::ChildWait, self.pid(), pid as i64 as u64));
         self.child_exit_event
             .wait_until_with_context(wait_context, || {
                 self.children
@@ -2806,7 +2812,7 @@ impl Process {
                 return;
             }
             let current_thread = super::current_thread().ok();
-            let wait_context = WaitContext::new(WaitReason::Vfork, self.pid(), 0);
+            let wait_context = WaitContext::new(|| (WaitReason::Vfork, self.pid(), 0));
             ctx.event.wait_until_with_context(wait_context, || {
                 ctx.done.load(Ordering::Acquire)
                     || current_thread
@@ -2935,7 +2941,7 @@ impl Process {
         let res = axtask::WaitQueue::wait_multiple_timeout_until_with_context(
             &q_refs,
             timeout_ns.map(core::time::Duration::from_nanos),
-            WaitContext::new(WaitReason::FutexWaitV, resource_id, nr_futexes as u64),
+            WaitContext::new(|| (WaitReason::FutexWaitV, resource_id, nr_futexes as u64)),
             || {
                 if self.group_exiting() || signal_pending() {
                     return true;
@@ -3048,7 +3054,7 @@ impl Process {
         let timed_out = if let Some(timeout_ns) = timeout_ns {
             let dur = core::time::Duration::from_nanos(timeout_ns);
             queue.wait_timeout_until_with_context(
-                WaitContext::new(WaitReason::Futex, key as u64, expected as u64),
+                WaitContext::new(|| (WaitReason::Futex, key as u64, expected as u64)),
                 dur,
                 || {
                     if first_time.get() {
@@ -3070,7 +3076,7 @@ impl Process {
             )
         } else {
             queue.wait_until_with_context(
-                WaitContext::new(WaitReason::Futex, key as u64, expected as u64),
+                WaitContext::new(|| (WaitReason::Futex, key as u64, expected as u64)),
                 || {
                     if first_time.get() {
                         first_time.set(false);

@@ -612,11 +612,13 @@ pub(crate) fn init(_net_dev: AxNetDevice) {
             poll_interfaces();
 
             let delay = poll_delay();
-            let wait_context = axtask::WaitContext::new(
-                axtask::WaitReason::NetworkPoll,
-                &NET_POLL_WAIT_QUEUE as *const axtask::WaitQueue as usize as u64,
-                0,
-            );
+            let wait_context = axtask::WaitContext::new(|| {
+                (
+                    axtask::WaitReason::NetworkPoll,
+                    &NET_POLL_WAIT_QUEUE as *const axtask::WaitQueue as usize as u64,
+                    0,
+                )
+            });
             if let Some(d) = delay {
                 let duration = core::time::Duration::from_micros(d.total_micros());
                 NET_POLL_WAIT_QUEUE.wait_timeout_until_with_context(wait_context, duration, || {

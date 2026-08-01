@@ -823,7 +823,11 @@ impl<G: BaseGuard> CurrentRunQueueRef<'_, G> {
     ///
     /// The caller must ensure the "woke" flag is protected by a lock that
     /// is also held when waking the task.
-    pub fn blocked_resched_woke(&mut self, mut woke: SpinNoIrqGuard<'_, bool>) {
+    pub fn blocked_resched_woke(
+        &mut self,
+        mut woke: SpinNoIrqGuard<'_, bool>,
+        _context: WaitContext,
+    ) {
         let curr = self.current_task.clone();
         assert!(curr.is_running());
         assert!(!curr.is_idle());
@@ -835,15 +839,7 @@ impl<G: BaseGuard> CurrentRunQueueRef<'_, G> {
         curr.set_state(TaskState::Blocked);
         *woke = false;
         #[cfg(feature = "qperf-trace")]
-        crate::qperf_trace::task_block(
-            &curr,
-            qperf_sequence,
-            WaitContext::new(
-                WaitReason::Future,
-                (&*woke as *const bool) as usize as u64,
-                0,
-            ),
-        );
+        crate::qperf_trace::task_block(&curr, qperf_sequence, _context);
         drop(woke);
 
         trace!("task block woke: {}", curr.id_name());
@@ -890,11 +886,13 @@ impl<G: BaseGuard> CurrentRunQueueRef<'_, G> {
             crate::qperf_trace::task_block(
                 &curr,
                 qperf_sequence,
-                WaitContext::new(
-                    WaitReason::Sleep,
-                    deadline.as_nanos().min(u64::MAX as u128) as u64,
-                    0,
-                ),
+                WaitContext::new(|| {
+                    (
+                        WaitReason::Sleep,
+                        deadline.as_nanos().min(u64::MAX as u128) as u64,
+                        0,
+                    )
+                }),
             );
             self.resched();
             curr.timer_ticket_expired();
@@ -1392,11 +1390,13 @@ fn gc_entry() {
         // Since gc task is pinned to the current CPU, there is no affection if the gc task is preempted during the process.
         let wait_queue = unsafe { WAIT_FOR_EXIT.current_ref_raw() };
         let period = core::time::Duration::from_millis(100);
-        let context = WaitContext::new(
-            WaitReason::Gc,
-            wait_queue as *const WaitQueue as usize as u64,
-            period.as_nanos() as u64,
-        );
+        let context = WaitContext::new(|| {
+            (
+                WaitReason::Gc,
+                wait_queue as *const WaitQueue as usize as u64,
+                period.as_nanos() as u64,
+            )
+        });
         let _ = wait_queue.wait_timeout_with_context(context, period);
     }
 }

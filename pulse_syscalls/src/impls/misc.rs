@@ -555,7 +555,8 @@ pub fn sys_rt_sigsuspend(mask: usize, sigsetsize: usize) -> isize {
     };
     thread.begin_sigsuspend(new_mask);
     let signal_wait = thread.signal_wait_queue();
-    let wait_context = axtask::WaitContext::new(axtask::WaitReason::Signal, thread.tid(), new_mask);
+    let wait_context =
+        axtask::WaitContext::new(|| (axtask::WaitReason::Signal, thread.tid(), new_mask));
     signal_wait.wait_until_with_context(wait_context, || {
         thread.has_pending_signal() || thread.process().group_exiting()
     });
@@ -581,7 +582,8 @@ pub fn sys_rt_sigtimedwait(set: usize, info: usize, timeout: usize, sigsetsize: 
         Err(_) => return -LinuxError::EFAULT.code() as isize,
     };
     let signal_wait = thread.signal_wait_queue();
-    let wait_context = axtask::WaitContext::new(axtask::WaitReason::Signal, thread.tid(), waitset);
+    let wait_context =
+        axtask::WaitContext::new(|| (axtask::WaitReason::Signal, thread.tid(), waitset));
 
     let deadline_ns = if timeout == 0 {
         None
