@@ -1,21 +1,25 @@
 use alloc::sync::Arc;
+use core::sync::atomic::Ordering;
 
 use axerrno::LinuxError;
 use axlog::*;
 use axnet::{TcpSocket, UdpSocket};
 use linux_raw_sys::{
     general::{O_CLOEXEC, O_NONBLOCK},
-    net::{AF_INET, AF_INET6, AF_UNIX, SOCK_RAW, IPPROTO_TCP, IPPROTO_UDP, SHUT_RD, SHUT_RDWR, SHUT_WR},
+    net::{
+        AF_INET, AF_INET6, AF_UNIX, IPPROTO_TCP, IPPROTO_UDP, SHUT_RD, SHUT_RDWR, SHUT_WR, SOCK_RAW,
+    },
 };
-use pulse_core::fd_table::{FdEntry, FdFlags};
+use pulse_core::{
+    fd_table::{FdEntry, FdFlags},
+    net::{LocalSocket, Socket, SocketInner, UNIX_REGISTRY},
+};
 
 use super::{
     addr::{NetSocketAddr, read_unix_path, write_unix_addr},
     get_socket,
 };
 use crate::impls::fs::common::{insert_fd_entry, remove_fd_entry};
-use pulse_core::net::{Socket, LocalSocket, SocketInner, UNIX_REGISTRY};
-use core::sync::atomic::Ordering;
 
 fn read_family(addr: usize, addrlen: u32) -> Result<u16, LinuxError> {
     if addrlen > 128 {
@@ -30,7 +34,6 @@ fn read_family(addr: usize, addrlen: u32) -> Result<u16, LinuxError> {
     let family = read_user_plain::<u16>(addr)?;
     Ok(family)
 }
-
 
 /// Helper: insert a socket into the fd table.
 fn insert_socket(socket: Socket, flags: FdFlags) -> Result<usize, LinuxError> {
@@ -84,20 +87,26 @@ pub fn sys_socket(domain: usize, raw_ty: usize, proto: usize) -> isize {
         (AF_INET | AF_INET6, d) if d == SOCK_RAW => {
             return -(LinuxError::EPROTONOSUPPORT.code() as isize);
         }
-        (AF_UNIX, d) if d == linux_raw_sys::net::SOCK_STREAM || d == linux_raw_sys::net::SOCK_SEQPACKET => {
+        (AF_UNIX, d)
+            if d == linux_raw_sys::net::SOCK_STREAM || d == linux_raw_sys::net::SOCK_SEQPACKET =>
+        {
             Socket::new(domain, SocketInner::Tcp(TcpSocket::new()))
         }
         (AF_UNIX, d) if d == linux_raw_sys::net::SOCK_DGRAM => {
             Socket::new(domain, SocketInner::Udp(UdpSocket::new()))
         }
-        (17, d) if d == linux_raw_sys::net::SOCK_DGRAM || d == SOCK_RAW => {
-            Socket::new(domain, SocketInner::Packet(pulse_core::net::PacketSocket::new()))
-        }
+        (17, d) if d == linux_raw_sys::net::SOCK_DGRAM || d == SOCK_RAW => Socket::new(
+            domain,
+            SocketInner::Packet(pulse_core::net::PacketSocket::new()),
+        ),
         (16, d) if d == SOCK_RAW => {
             if proto != 0 {
                 return -(LinuxError::EPROTONOSUPPORT.code() as isize);
             }
-            Socket::new(domain, SocketInner::Netlink(pulse_core::net::NetlinkSocket::new()))
+            Socket::new(
+                domain,
+                SocketInner::Netlink(pulse_core::net::NetlinkSocket::new()),
+            )
         }
         (AF_INET | AF_INET6 | AF_UNIX | 17 | 16, _) => {
             warn!("Unsupported socket type: domain={domain}, ty={ty}");
@@ -146,7 +155,8 @@ pub fn sys_bind(fd: usize, addr: usize, addrlen: usize) -> isize {
         }
     }
 
-    if family == 16 || family == 17 { // AF_NETLINK or AF_PACKET
+    if family == 16 || family == 17 {
+        // AF_NETLINK or AF_PACKET
         return 0;
     }
 
@@ -162,7 +172,7 @@ pub fn sys_bind(fd: usize, addr: usize, addrlen: usize) -> isize {
             // Check parent directory component
             let parent_res = crate::impls::utils::with_process(|process| {
                 let binding = process.fs_context_handle();
-                let fs = binding.lock();
+                let fs = binding.lock().clone();
                 axtask::future::block_on(fs.resolve_parent(axfs_ng_vfs::path::Path::new(&path)))
             });
             match parent_res {
@@ -179,9 +189,10 @@ pub fn sys_bind(fd: usize, addr: usize, addrlen: usize) -> isize {
             // Check if file already exists in filesystem
             let exists = crate::impls::utils::with_process(|process| {
                 let binding = process.fs_context_handle();
-                let fs = binding.lock();
+                let fs = binding.lock().clone();
                 axtask::future::block_on(fs.resolve(axfs_ng_vfs::path::Path::new(&path))).is_ok()
-            }).unwrap_or(false);
+            })
+            .unwrap_or(false);
 
             if exists {
                 return -(LinuxError::EADDRINUSE.code() as isize);
@@ -201,10 +212,17 @@ pub fn sys_bind(fd: usize, addr: usize, addrlen: usize) -> isize {
         }
 
         // Bind the degraded TCP/UDP socket to loopback (127.0.0.1:0)
-        let bind_addr = core::net::SocketAddr::new(core::net::IpAddr::V4(core::net::Ipv4Addr::new(127, 0, 0, 1)), 0);
+        let bind_addr = core::net::SocketAddr::new(
+            core::net::IpAddr::V4(core::net::Ipv4Addr::new(127, 0, 0, 1)),
+            0,
+        );
         let res = match &socket.inner {
-            SocketInner::Tcp(s) => s.bind(bind_addr).map_err(|e| LinuxError::from(e.canonicalize())),
-            SocketInner::Udp(s) => s.bind(bind_addr).map_err(|e| LinuxError::from(e.canonicalize())),
+            SocketInner::Tcp(s) => s
+                .bind(bind_addr)
+                .map_err(|e| LinuxError::from(e.canonicalize())),
+            SocketInner::Udp(s) => s
+                .bind(bind_addr)
+                .map_err(|e| LinuxError::from(e.canonicalize())),
             SocketInner::Local(_) => Err(LinuxError::EINVAL),
             SocketInner::Packet(_) => Err(LinuxError::EINVAL),
             SocketInner::Netlink(_) => Err(LinuxError::EINVAL),
@@ -224,7 +242,7 @@ pub fn sys_bind(fd: usize, addr: usize, addrlen: usize) -> isize {
         if !is_abstract {
             let create_res = crate::impls::utils::with_process(|process| {
                 let binding = process.fs_context_handle();
-                let fs = binding.lock();
+                let fs = binding.lock().clone();
                 axtask::future::block_on(fs.write(axfs_ng_vfs::path::Path::new(&path), []))
             });
             match create_res {
@@ -300,7 +318,9 @@ pub fn sys_connect(fd: usize, addr: usize, addrlen: usize) -> isize {
         Err(e) => return -(e.code() as isize),
     };
 
-    if family == 0 /* AF_UNSPEC */ {
+    if family == 0
+    // AF_UNSPEC
+    {
         match &socket.inner {
             SocketInner::Tcp(s) => {
                 let _ = s.shutdown();
@@ -320,7 +340,8 @@ pub fn sys_connect(fd: usize, addr: usize, addrlen: usize) -> isize {
         }
     }
 
-    if family == 16 || family == 17 { // AF_NETLINK or AF_PACKET
+    if family == 16 || family == 17 {
+        // AF_NETLINK or AF_PACKET
         return 0;
     }
 
@@ -336,9 +357,10 @@ pub fn sys_connect(fd: usize, addr: usize, addrlen: usize) -> isize {
             // Check if file exists in VFS
             let exists = crate::impls::utils::with_process(|process| {
                 let binding = process.fs_context_handle();
-                let fs = binding.lock();
+                let fs = binding.lock().clone();
                 axtask::future::block_on(fs.resolve(axfs_ng_vfs::path::Path::new(&path))).is_ok()
-            }).unwrap_or(false);
+            })
+            .unwrap_or(false);
 
             if !exists {
                 return -(LinuxError::ENOENT.code() as isize);
@@ -373,7 +395,9 @@ pub fn sys_connect(fd: usize, addr: usize, addrlen: usize) -> isize {
                     le
                 }
             }),
-            SocketInner::Udp(s) => s.connect(target_addr).map_err(|e| LinuxError::from(e.canonicalize())),
+            SocketInner::Udp(s) => s
+                .connect(target_addr)
+                .map_err(|e| LinuxError::from(e.canonicalize())),
             SocketInner::Local(_) => Err(LinuxError::EISCONN),
             SocketInner::Packet(_) => Err(LinuxError::EOPNOTSUPP),
             SocketInner::Netlink(_) => Err(LinuxError::EOPNOTSUPP),
@@ -473,7 +497,10 @@ pub fn sys_accept4(fd: usize, addr: usize, addrlen: usize, flags: usize) -> isiz
 
     let remote_addr = new_tcp.peer_addr().ok();
 
-    let new_socket = Socket::new(socket.domain.load(Ordering::Acquire), SocketInner::Tcp(new_tcp));
+    let new_socket = Socket::new(
+        socket.domain.load(Ordering::Acquire),
+        SocketInner::Tcp(new_tcp),
+    );
     if flags & O_NONBLOCK != 0 {
         new_socket.set_nonblocking_inner(true);
     }
@@ -498,13 +525,9 @@ pub fn sys_accept4(fd: usize, addr: usize, addrlen: usize, flags: usize) -> isiz
             let peer_addr = remote_addr;
             let path = peer_addr.and_then(|pa| {
                 let registry = UNIX_REGISTRY.lock();
-                registry.iter().find_map(|(k, v)| {
-                    if v.0 == pa {
-                        Some(k.clone())
-                    } else {
-                        None
-                    }
-                })
+                registry
+                    .iter()
+                    .find_map(|(k, v)| if v.0 == pa { Some(k.clone()) } else { None })
             });
             let _ = write_unix_addr(path, addr, addrlen);
         } else if let Some(remote) = remote_addr {
@@ -654,20 +677,21 @@ pub fn sys_socketpair(domain: usize, raw_ty: usize, proto: usize, fds: usize) ->
     let socket2 = Socket::new(domain, SocketInner::Local(s2));
 
     // 5. Insert sockets into the current process's FD table
-    let new_fds = match crate::impls::utils::with_process(|process| -> Result<[i32; 2], LinuxError> {
-        let fd1 = process.insert_fd_entry(FdEntry::new(Arc::new(socket1), flags))?;
-        let fd2 = match process.insert_fd_entry(FdEntry::new(Arc::new(socket2), flags)) {
-            Ok(fd) => fd,
-            Err(e) => {
-                let _ = process.remove_fd_entry(fd1);
-                return Err(e);
-            }
+    let new_fds =
+        match crate::impls::utils::with_process(|process| -> Result<[i32; 2], LinuxError> {
+            let fd1 = process.insert_fd_entry(FdEntry::new(Arc::new(socket1), flags))?;
+            let fd2 = match process.insert_fd_entry(FdEntry::new(Arc::new(socket2), flags)) {
+                Ok(fd) => fd,
+                Err(e) => {
+                    let _ = process.remove_fd_entry(fd1);
+                    return Err(e);
+                }
+            };
+            Ok([fd1 as i32, fd2 as i32])
+        }) {
+            Ok(Ok(fds)) => fds,
+            Ok(Err(e)) | Err(e) => return -(e.code() as isize),
         };
-        Ok([fd1 as i32, fd2 as i32])
-    }) {
-        Ok(Ok(fds)) => fds,
-        Ok(Err(e)) | Err(e) => return -(e.code() as isize),
-    };
 
     // 6. Write fds back to user space
     if let Err(e) = write_user_plain(fds, &new_fds) {

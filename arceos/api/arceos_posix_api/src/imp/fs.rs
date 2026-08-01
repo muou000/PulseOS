@@ -249,7 +249,8 @@ pub fn sys_open(filename: *const c_char, flags: c_int, mode: ctypes::mode_t) -> 
     syscall_body!(sys_open, {
         let options = flags_to_options(flags, mode);
         let filename = filename?;
-        let result = options.open(&axfs::FS_CONTEXT.lock(), filename)?;
+        let fs = axfs::FS_CONTEXT.lock().clone();
+        let result = options.open(&fs, filename)?;
         let f: Arc<dyn FileLike> = match result {
             axfs::OpenResult::File(file) => Arc::new(File::new(file)),
             dir_res @ axfs::OpenResult::Dir(_) => Arc::new(DirFile::new(dir_res)),
@@ -301,7 +302,8 @@ pub unsafe fn sys_stat(path: *const c_char, buf: *mut ctypes::stat) -> c_int {
         let path = path?;
         let mut options = OpenOptions::new();
         options.read(true);
-        let opened = options.open(&axfs::FS_CONTEXT.lock(), path)?;
+        let fs = axfs::FS_CONTEXT.lock().clone();
+        let opened = options.open(&fs, path)?;
         let st = match opened {
             axfs::OpenResult::File(file) => File::new(file).stat()?,
             axfs::OpenResult::Dir(dir) => DirFile::new(axfs::OpenResult::Dir(dir)).stat()?,
@@ -368,9 +370,9 @@ pub fn sys_chdir(path: *const c_char) -> c_int {
     debug!("sys_chdir <= {:?}", path);
     syscall_body!(sys_chdir, {
         let path = path?;
-        let mut fs = axfs::FS_CONTEXT.lock();
+        let fs = axfs::FS_CONTEXT.lock().clone();
         let dir = fs.resolve(path)?;
-        fs.set_current_dir(dir)?;
+        axfs::FS_CONTEXT.lock().set_current_dir(dir)?;
         Ok(0)
     })
 }
@@ -381,7 +383,7 @@ pub fn sys_mkdir(path: *const c_char, _mode: ctypes::mode_t) -> c_int {
     debug!("sys_mkdir <= {:?}", path);
     syscall_body!(sys_mkdir, {
         let path = path?;
-        let fs = axfs::FS_CONTEXT.lock();
+        let fs = axfs::FS_CONTEXT.lock().clone();
         if fs.resolve(path).is_ok() {
             return Err(LinuxError::EEXIST);
         }
@@ -406,7 +408,8 @@ pub fn sys_rename(old: *const c_char, new: *const c_char) -> c_int {
         let old_path = char_ptr_to_str(old)?;
         let new_path = char_ptr_to_str(new)?;
         debug!("sys_rename <= old: {:?}, new: {:?}", old_path, new_path);
-        axfs::FS_CONTEXT.lock().rename(old_path, new_path)?;
+        let fs = axfs::FS_CONTEXT.lock().clone();
+        fs.rename(old_path, new_path)?;
         Ok(0)
     })
 }
