@@ -33,6 +33,7 @@ axruntime = { path = "arceos/modules/axruntime" }
 axnet = { path = "arceos/modules/axnet", features = ["monolithic"] }
 axalloc = { path = "arceos/modules/axalloc", default-features = false }
 axtask = { path = "arceos/modules/axtask" }
+axsync = { path = "arceos/modules/axsync" }
 axfs = { path = "arceos/modules/axfs", features = ["times"] }
 axmm = { path = "arceos/modules/axmm" }
 axerrno = "0.2"
