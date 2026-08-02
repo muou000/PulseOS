@@ -7,11 +7,10 @@ use linux_raw_sys::general::{
 use pulse_core::fd_table::location_to_stat;
 
 use crate::impls::{
-    fs::common::{
-        check_faccess_permission, get_fd_entry, resolve_location_at_ptr,
-    },
+    fs::common::{check_faccess_permission, get_fd_entry, resolve_location_at_ptr},
     utils::{
-        USER_PATH_MAX, read_user_timespec, timespec_to_update_time, with_process, write_user_bytes,
+        USER_PATH_MAX, read_user_bytes, read_user_timespec, timespec_to_update_time, with_process,
+        write_user_bytes,
     },
 };
 
@@ -230,17 +229,21 @@ pub fn sys_statx(
     // 对于 stdin/stdout/pipe/socket 等没有文件系统路径的匿名 FD，
     // resolve_location_at_ptr 会因为 location() 返回 None 而报 EBADF。
     // 此时应直接通过 FD object 的 stat() 方法获取信息。
-    let mut buf = [0u8; USER_PATH_MAX];
-    let path_len = if pathname == 0 {
-        None
+    // For the AT_EMPTY_PATH special case, only the first byte matters. The
+    // ordinary path is read by resolve_location_at_ptr below, so eagerly
+    // decoding a complete PATH_MAX string here made every statx pay a second
+    // user copy and a 4 KiB stack initialization.
+    let is_empty_path = if (flags & AT_EMPTY_PATH as usize) == 0 {
+        false
+    } else if pathname == 0 {
+        true
     } else {
-        match crate::impls::utils::read_user_cstring_to_slice(pathname, &mut buf) {
-            Ok(len) => Some(len),
+        let mut first_byte = [0u8; 1];
+        match read_user_bytes(pathname, &mut first_byte) {
+            Ok(()) => first_byte[0] == 0,
             Err(e) => return -e.code() as isize,
         }
     };
-    let is_empty_path = (flags & AT_EMPTY_PATH as usize) != 0
-        && path_len.map_or(pathname == 0, |len| len == 0);
 
     let stat = if is_empty_path && dirfd >= 0 && dirfd != AT_FDCWD as i32 {
         // AT_EMPTY_PATH + 合法 FD：优先直接通过 FD object 获取 stat，
