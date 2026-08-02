@@ -114,6 +114,20 @@ pub struct ZeroCopyPage {
     pub len: usize,
 }
 
+const PIPE_PAGE_SIZE: usize = 4096;
+const DEFAULT_PIPE_CAPACITY: usize = 64 * 1024;
+const MAX_PIPE_CAPACITY: usize = 1024 * 1024;
+
+fn zero_copy_bytes(pages: &alloc::collections::VecDeque<ZeroCopyPage>) -> usize {
+    pages
+        .iter()
+        .fold(0usize, |total, page| total.saturating_add(page.len))
+}
+
+fn pipe_available_write_bytes(capacity: usize, ring_bytes: usize, zero_copy_bytes: usize) -> usize {
+    capacity.saturating_sub(ring_bytes.saturating_add(zero_copy_bytes))
+}
+
 fn dealloc_physical_frame(frame: PhysAddr) {
     if axalloc::frame_table().contains(frame) {
         if axalloc::frame_table().dec_ref(frame) == 0 {
@@ -390,7 +404,7 @@ pub struct PipeShared {
 impl PipeShared {
     fn new() -> Self {
         Self {
-            buffer: Mutex::new(PipeRingBuffer::new(65536)),
+            buffer: Mutex::new(PipeRingBuffer::new(DEFAULT_PIPE_CAPACITY)),
             read_wait_queue: axtask::WaitQueue::new(),
             write_wait_queue: axtask::WaitQueue::new(),
             reader_count: AtomicUsize::new(1),
@@ -401,7 +415,7 @@ impl PipeShared {
 
     fn new_fifo() -> Self {
         Self {
-            buffer: Mutex::new(PipeRingBuffer::new(65536)),
+            buffer: Mutex::new(PipeRingBuffer::new(DEFAULT_PIPE_CAPACITY)),
             read_wait_queue: axtask::WaitQueue::new(),
             write_wait_queue: axtask::WaitQueue::new(),
             reader_count: AtomicUsize::new(0),
@@ -476,12 +490,24 @@ impl PipeObject {
         self.shared.reader_count.load(Ordering::Acquire) == 0
     }
 
-    fn ready_for(&self, wait_for_read: bool, wait_for_write: bool) -> bool {
-        let zc_len = self.shared.zc_pages.lock().len() * 4096;
+    fn available_pipe_write(&self) -> usize {
+        let zc = self.shared.zc_pages.lock();
         let buffer = self.shared.buffer.lock();
-        let limit = core::cmp::min(4096, buffer.capacity());
-        let avail_read = buffer.available_read() + zc_len;
-        let avail_write = buffer.capacity().saturating_sub(avail_read);
+        pipe_available_write_bytes(
+            buffer.capacity(),
+            buffer.available_read(),
+            zero_copy_bytes(&zc),
+        )
+    }
+
+    fn ready_for(&self, wait_for_read: bool, wait_for_write: bool) -> bool {
+        let zc = self.shared.zc_pages.lock();
+        let buffer = self.shared.buffer.lock();
+        let zc_len = zero_copy_bytes(&zc);
+        let limit = core::cmp::min(PIPE_PAGE_SIZE, buffer.capacity());
+        let avail_read = buffer.available_read().saturating_add(zc_len);
+        let avail_write =
+            pipe_available_write_bytes(buffer.capacity(), buffer.available_read(), zc_len);
         (wait_for_read && (avail_read > 0 || self.write_end_closed()))
             || (wait_for_write && (avail_write >= limit || self.read_end_closed()))
     }
@@ -499,70 +525,112 @@ impl PipeObject {
         if count == 0 {
             return Ok(0);
         }
-
-        loop {
-            let zc_len = self.shared.zc_pages.lock().len() * 4096;
-            let rb_len = self.shared.buffer.lock().available_read();
-            let cap = self.shared.buffer.lock().capacity();
-            if zc_len + rb_len < cap {
-                break;
-            }
-
-            if self.read_end_closed() {
-                return Err(LinuxError::EPIPE);
-            }
-            if self.nonblocking.load(Ordering::Acquire) {
-                return Err(LinuxError::EAGAIN);
-            }
-            self.shared.write_wait_queue.wait_until(|| {
-                let zc_len = self.shared.zc_pages.lock().len() * 4096;
-                let rb_len = self.shared.buffer.lock().available_read();
-                let cap = self.shared.buffer.lock().capacity();
-                zc_len + rb_len < cap
-                    || self.read_end_closed()
-                    || Self::current_has_pending_signal()
-            });
-            if Self::current_has_pending_signal() {
-                return Err(LinuxError::EINTR);
-            }
+        if writer_vaddr % PIPE_PAGE_SIZE != 0 || count % PIPE_PAGE_SIZE != 0 {
+            return Err(LinuxError::EINVAL);
         }
-
-        if self.read_end_closed() {
-            return Err(LinuxError::EPIPE);
+        if writer_vaddr.checked_add(count).is_none() {
+            return Err(LinuxError::EFAULT);
         }
 
         let process = crate::task::current_process()?;
         let aspace = process.aspace_handle();
-        let aspace_guard = aspace.read();
+        let mut write_size = 0usize;
 
-        let num_pages = count / 4096;
-        let mut paddrs = alloc::vec::Vec::with_capacity(num_pages);
-        for i in 0..num_pages {
-            let page_vaddr = VirtAddr::from(writer_vaddr + i * 4096);
-            match aspace_guard.pin_user_frame(page_vaddr, MappingFlags::READ) {
-                Ok(paddr) => paddrs.push(paddr),
-                Err(_) => {
-                    for paddr in paddrs {
-                        dealloc_physical_frame(paddr);
+        while write_size < count {
+            if self.read_end_closed() {
+                return if write_size > 0 {
+                    Ok(write_size)
+                } else {
+                    Err(LinuxError::EPIPE)
+                };
+            }
+
+            let available_pages = self.available_pipe_write() / PIPE_PAGE_SIZE;
+            if available_pages == 0 {
+                if self.nonblocking.load(Ordering::Acquire) {
+                    return if write_size > 0 {
+                        Ok(write_size)
+                    } else {
+                        Err(LinuxError::EAGAIN)
+                    };
+                }
+                self.shared.write_wait_queue.wait_until(|| {
+                    self.available_pipe_write() >= PIPE_PAGE_SIZE
+                        || self.read_end_closed()
+                        || Self::current_has_pending_signal()
+                });
+                if Self::current_has_pending_signal() {
+                    return if write_size > 0 {
+                        Ok(write_size)
+                    } else {
+                        Err(LinuxError::EINTR)
+                    };
+                }
+                continue;
+            }
+
+            let remaining_pages = (count - write_size) / PIPE_PAGE_SIZE;
+            let pages_to_pin = core::cmp::min(available_pages, remaining_pages);
+            let mut paddrs = alloc::vec::Vec::with_capacity(pages_to_pin);
+            let aspace_guard = aspace.read();
+            for i in 0..pages_to_pin {
+                let page_offset = write_size + i * PIPE_PAGE_SIZE;
+                let page_vaddr = VirtAddr::from(writer_vaddr + page_offset);
+                match aspace_guard.pin_user_frame(page_vaddr, MappingFlags::READ) {
+                    Ok(paddr) => paddrs.push(paddr),
+                    Err(_) => {
+                        drop(aspace_guard);
+                        for paddr in paddrs {
+                            dealloc_physical_frame(paddr);
+                        }
+                        return if write_size > 0 {
+                            Ok(write_size)
+                        } else {
+                            Err(LinuxError::EFAULT)
+                        };
                     }
-                    return Err(LinuxError::EFAULT);
                 }
             }
-        }
-        drop(aspace_guard);
+            drop(aspace_guard);
 
-        let mut zc = self.shared.zc_pages.lock();
-        for paddr in paddrs {
-            zc.push_back(ZeroCopyPage {
-                paddr,
-                offset: 0,
-                len: 4096,
-            });
+            let accepted = {
+                let mut zc = self.shared.zc_pages.lock();
+                let accepted = {
+                    let buffer = self.shared.buffer.lock();
+                    let available_pages = pipe_available_write_bytes(
+                        buffer.capacity(),
+                        buffer.available_read(),
+                        zero_copy_bytes(&zc),
+                    ) / PIPE_PAGE_SIZE;
+                    if self.read_end_closed() {
+                        0
+                    } else {
+                        core::cmp::min(available_pages, paddrs.len())
+                    }
+                };
+                for paddr in paddrs.drain(..accepted) {
+                    zc.push_back(ZeroCopyPage {
+                        paddr,
+                        offset: 0,
+                        len: PIPE_PAGE_SIZE,
+                    });
+                }
+                accepted
+            };
+            for paddr in paddrs {
+                dealloc_physical_frame(paddr);
+            }
+
+            if accepted == 0 {
+                continue;
+            }
+
+            write_size += accepted * PIPE_PAGE_SIZE;
+            self.shared.read_wait_queue.notify_all(false);
         }
-        drop(zc);
 
         self.shared.read_wait_queue.notify_all(true);
-        Ok(count)
+        Ok(write_size)
     }
 
     pub fn read_zerocopy(&self, reader_vaddr: usize, count: usize) -> LinuxResult<usize> {
@@ -600,12 +668,12 @@ impl PipeObject {
         let process = crate::task::current_process()?;
         let aspace = process.aspace_handle();
 
-        let num_pages = count / 4096;
+        let num_pages = count / PIPE_PAGE_SIZE;
         let mut read_pages = 0;
         let mut pending_shootdown: Option<axmm::TlbShootdown> = None;
 
         for i in 0..num_pages {
-            let page_vaddr = VirtAddr::from(reader_vaddr + i * 4096);
+            let page_vaddr = VirtAddr::from(reader_vaddr + i * PIPE_PAGE_SIZE);
             let mut zc = self.shared.zc_pages.lock();
             let can_remap = if let Some(page) = zc.front() {
                 page.offset == 0 && page.len == 4096
@@ -654,7 +722,7 @@ impl PipeObject {
 
         if read_pages > 0 {
             self.shared.write_wait_queue.notify_all(true);
-            return Ok(read_pages * 4096);
+            return Ok(read_pages * PIPE_PAGE_SIZE);
         }
 
         let mut buf = alloc::vec![0u8; count];
@@ -686,7 +754,11 @@ impl FdObject for PipeObject {
     fn ioctl(&self, cmd: u32, arg: usize) -> LinuxResult<isize> {
         match cmd {
             FIONREAD => {
-                let n = self.shared.buffer.lock().available_read() as i32;
+                let n = {
+                    let zc = self.shared.zc_pages.lock();
+                    let buffer = self.shared.buffer.lock();
+                    buffer.available_read().saturating_add(zero_copy_bytes(&zc)) as i32
+                };
                 let process = crate::task::current_process()?;
                 process.write_user_bytes(arg, &n.to_ne_bytes())?;
                 Ok(0)
@@ -705,23 +777,31 @@ impl FdObject for PipeObject {
         if size > (1 << 30) {
             return Err(LinuxError::EINVAL);
         }
-        if size > 1048576 {
+        if size > MAX_PIPE_CAPACITY {
             return Err(LinuxError::EPERM);
         }
         let mut new_capacity = size;
         if new_capacity == 0 {
-            new_capacity = 4096;
+            new_capacity = PIPE_PAGE_SIZE;
         }
-        new_capacity = (new_capacity + 4095) & !4095;
+        new_capacity = (new_capacity + PIPE_PAGE_SIZE - 1) & !(PIPE_PAGE_SIZE - 1);
 
-        let mut buffer = self.shared.buffer.lock();
-        buffer.resize(new_capacity)?;
+        let capacity = {
+            let zc = self.shared.zc_pages.lock();
+            let mut buffer = self.shared.buffer.lock();
+            let used = buffer.available_read().saturating_add(zero_copy_bytes(&zc));
+            if new_capacity < used {
+                return Err(LinuxError::EBUSY);
+            }
+            buffer.resize(new_capacity)?;
+            buffer.capacity()
+        };
 
         // Waking up any waiting writers since buffer expanded, and readers as well
         self.shared.write_wait_queue.notify_all(true);
         self.shared.read_wait_queue.notify_all(true);
 
-        Ok(buffer.capacity())
+        Ok(capacity)
     }
 
     fn get_pipe_size(&self) -> LinuxResult<usize> {
@@ -838,9 +918,13 @@ impl FdObject for PipeObject {
                     Err(LinuxError::EPIPE)
                 };
             }
-            let zc_len = self.shared.zc_pages.lock().len() * 4096;
+            let zc = self.shared.zc_pages.lock();
             let mut ring_buffer = self.shared.buffer.lock();
-            let available = ring_buffer.available_write().saturating_sub(zc_len);
+            let available = pipe_available_write_bytes(
+                ring_buffer.capacity(),
+                ring_buffer.available_read(),
+                zero_copy_bytes(&zc),
+            );
             if available == 0 {
                 if self.nonblocking.load(Ordering::Acquire) {
                     return if write_size > 0 {
@@ -860,10 +944,9 @@ impl FdObject for PipeObject {
                     buf.len()
                 );
                 drop(ring_buffer);
+                drop(zc);
                 self.shared.write_wait_queue.wait_until(|| {
-                    let zc_len = self.shared.zc_pages.lock().len() * 4096;
-                    let buffer = self.shared.buffer.lock();
-                    buffer.available_write() > zc_len
+                    self.available_pipe_write() > 0
                         || self.read_end_closed()
                         || Self::current_has_pending_signal()
                 });
@@ -901,6 +984,7 @@ impl FdObject for PipeObject {
             }
 
             drop(ring_buffer);
+            drop(zc);
             self.shared.read_wait_queue.notify_all(false);
         }
         self.shared.read_wait_queue.notify_all(true);
@@ -914,17 +998,19 @@ impl FdObject for PipeObject {
             st_mode: 0o10000 | 0o600u32,
             st_uid: 1000,
             st_gid: 1000,
-            st_blksize: 4096,
+            st_blksize: PIPE_PAGE_SIZE as _,
             ..empty_stat()
         })
     }
 
     fn poll(&self) -> LinuxResult<PollState> {
-        let zc_len = self.shared.zc_pages.lock().len() * 4096;
+        let zc = self.shared.zc_pages.lock();
         let buffer = self.shared.buffer.lock();
-        let limit = core::cmp::min(4096, buffer.capacity());
-        let avail_read = buffer.available_read() + zc_len;
-        let avail_write = buffer.capacity().saturating_sub(avail_read);
+        let zc_len = zero_copy_bytes(&zc);
+        let limit = core::cmp::min(PIPE_PAGE_SIZE, buffer.capacity());
+        let avail_read = buffer.available_read().saturating_add(zc_len);
+        let avail_write =
+            pipe_available_write_bytes(buffer.capacity(), buffer.available_read(), zc_len);
         Ok(PollState {
             readable: self.readable && (avail_read > 0 || self.write_end_closed()),
             writable: self.writable() && (avail_write >= limit || self.read_end_closed()),
@@ -1147,4 +1233,27 @@ pub fn create_fifo_entry(
         let _ = object.set_nonblocking(true);
     }
     Ok(FdEntry::new(object, flags))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{PIPE_PAGE_SIZE, pipe_available_write_bytes};
+
+    #[test]
+    fn zero_copy_pages_cannot_bypass_pipe_capacity() {
+        let capacity = 64 * 1024;
+        assert_eq!(pipe_available_write_bytes(capacity, 0, 0), capacity);
+        let trailing_bytes =
+            pipe_available_write_bytes(capacity, 15 * PIPE_PAGE_SIZE, PIPE_PAGE_SIZE - 1);
+        assert_eq!(trailing_bytes, 1);
+        assert_eq!(trailing_bytes / PIPE_PAGE_SIZE, 0);
+        assert_eq!(
+            pipe_available_write_bytes(capacity, 0, 15 * PIPE_PAGE_SIZE) / PIPE_PAGE_SIZE,
+            1
+        );
+        assert_eq!(
+            pipe_available_write_bytes(capacity, 0, 16 * PIPE_PAGE_SIZE),
+            0
+        );
+    }
 }
