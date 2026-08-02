@@ -28,6 +28,7 @@ struct ResolvedExec {
     location: Location,
     exec_access: axfs::ExecAccessGuard,
     path: String,
+    execfn_path: String,
     argv: Vec<String>,
 }
 
@@ -74,6 +75,9 @@ fn resolve_exec_target_and_args(
     path: &str,
     args: &[&str],
 ) -> AxResult<ResolvedExec> {
+    // Keep the pathname supplied to execve separately from a shebang's final
+    // interpreter. Linux exposes the former through AT_EXECFN.
+    let execfn_path = path.to_string();
     let normalize_path = |candidate: &str| -> AxResult<(Location, String)> {
         let loc = axtask::future::block_on(fs.resolve(candidate))?;
         let path = loc.absolute_path()?;
@@ -130,6 +134,7 @@ fn resolve_exec_target_and_args(
                 location: current_location,
                 exec_access,
                 path: current_path,
+                execfn_path,
                 argv: current_args,
             });
         };
@@ -167,9 +172,19 @@ impl Process {
             location,
             exec_access,
             path,
+            execfn_path,
             argv,
         } = resolve_exec_target_and_args(&fs_ctx, path, args)?;
         let argv_refs: Vec<&str> = argv.iter().map(|s| s.as_str()).collect();
+        let exec_credentials = {
+            let credentials = self.credentials.read();
+            crate::mm::ExecCredentials::new(
+                credentials.ruid,
+                credentials.euid,
+                credentials.rgid,
+                credentials.egid,
+            )
+        };
 
         let mut new_aspace = axmm::new_user_aspace(va!(USER_SPACE_BASE), USER_SPACE_SIZE)?;
         let stack_bottom = USER_STACK_TOP - USER_STACK_SIZE;
@@ -182,9 +197,11 @@ impl Process {
         let load_info = crate::mm::load_user_app(
             &mut new_aspace,
             &fs_ctx,
+            exec_credentials,
             location,
             exec_access,
             &path,
+            &execfn_path,
             &argv_refs,
             envs,
         )?;
@@ -278,9 +295,19 @@ impl Process {
             location,
             exec_access,
             path,
+            execfn_path,
             argv,
         } = resolve_exec_target_and_args(&fs_ctx, path, args)?;
         let argv_refs: Vec<&str> = argv.iter().map(|s| s.as_str()).collect();
+        let exec_credentials = {
+            let credentials = self.credentials.read();
+            crate::mm::ExecCredentials::new(
+                credentials.ruid,
+                credentials.euid,
+                credentials.rgid,
+                credentials.egid,
+            )
+        };
 
         // Complete every fallible load step before changing the old image or
         // terminating sibling threads.
@@ -295,9 +322,11 @@ impl Process {
         let load_info = crate::mm::load_user_app(
             &mut new_aspace,
             &fs_ctx,
+            exec_credentials,
             location,
             exec_access,
             &path,
+            &execfn_path,
             &argv_refs,
             envs,
         )?;

@@ -20,7 +20,7 @@ use axfs_ng_vfs::{
 use axpoll::{IoEvents, Pollable};
 use rand_core::{Rng, SeedableRng};
 use rand_pcg::Pcg64Mcg;
-use spin::Mutex;
+use spin::{Lazy, Mutex};
 
 use super::super::disk::{SeekableDisk, SharedBlockDevice};
 
@@ -41,7 +41,10 @@ const TTYS0_INO: u64 = 13;
 const NEXT_DYNAMIC_INO: u64 = TTYS0_INO + 1;
 const DEVFS_INODE_SHARDS: usize = 32;
 
-const RANDOM_SEED: u64 = 0x0123_4567_89ab_cdef;
+const RANDOM_SEED_STEP: u64 = 0x9e37_79b9_7f4a_7c15;
+
+static RANDOM_SEED_COUNTER: AtomicU64 = AtomicU64::new(0xa076_1d64_78bd_642f);
+static KERNEL_RANDOM: Lazy<RandomDevice> = Lazy::new(|| RandomDevice::new(0x6b65_726e_656c_726e));
 
 fn inode_shard(ino: u64) -> usize {
     ino as usize % DEVFS_INODE_SHARDS
@@ -86,10 +89,7 @@ impl RandomDevice {
     fn new(device_stream: u64) -> Self {
         Self {
             rng: core::array::from_fn(|cpu_id| {
-                let cpu_stream = (cpu_id as u64).wrapping_mul(0x9e37_79b9_7f4a_7c15);
-                Mutex::new(Pcg64Mcg::seed_from_u64(
-                    RANDOM_SEED ^ device_stream.rotate_left(29) ^ cpu_stream,
-                ))
+                Mutex::new(Pcg64Mcg::seed_from_u64(random_seed(device_stream, cpu_id)))
             }),
         }
     }
@@ -98,6 +98,26 @@ impl RandomDevice {
         let cpu_id = axhal::percpu::this_cpu_id() % axconfig::plat::MAX_CPU_NUM;
         self.rng[cpu_id].lock().fill_bytes(buf);
     }
+}
+
+pub(crate) fn fill_random_bytes(buf: &mut [u8]) {
+    KERNEL_RANDOM.fill_bytes(buf);
+}
+
+fn random_seed(device_stream: u64, cpu_id: usize) -> u64 {
+    let counter = RANDOM_SEED_COUNTER.fetch_add(RANDOM_SEED_STEP, Ordering::Relaxed);
+    let stack_addr = &counter as *const u64 as usize as u64;
+    let time = axhal::time::monotonic_time_nanos() ^ axhal::time::wall_time_nanos().rotate_left(29);
+    let cpu_stream = (cpu_id as u64).wrapping_mul(RANDOM_SEED_STEP);
+    splitmix64(
+        time ^ counter ^ stack_addr.rotate_left(17) ^ device_stream.rotate_left(41) ^ cpu_stream,
+    )
+}
+
+fn splitmix64(mut value: u64) -> u64 {
+    value = (value ^ (value >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+    value = (value ^ (value >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+    value ^ (value >> 31)
 }
 
 struct BlockDeviceKind {
