@@ -113,6 +113,7 @@ impl MetadataCacheState {
     }
 }
 
+#[derive(Clone)]
 struct CachedDirEntry {
     name: String,
     inode_num: u32,
@@ -151,6 +152,45 @@ impl DirSnapshot {
                 }
             })
     }
+
+    fn contains_name(&self, name: &str) -> bool {
+        self.lookup_order
+            .binary_search_by(|index| self.entries[*index].name.as_str().cmp(name))
+            .is_ok()
+    }
+
+    fn merged_entries(
+        &self,
+        overlay: &BTreeMap<String, Option<CachedLookupEntry>>,
+        overlay_order: &[String],
+    ) -> Vec<CachedDirEntry> {
+        let mut entries =
+            Vec::with_capacity(self.entries.len().saturating_add(overlay_order.len()));
+        for entry in &self.entries {
+            match overlay.get(&entry.name) {
+                Some(Some(updated)) => entries.push(CachedDirEntry {
+                    name: entry.name.clone(),
+                    inode_num: updated.inode_num,
+                    node_type: updated.node_type,
+                }),
+                Some(None) => {}
+                None => entries.push(entry.clone()),
+            }
+        }
+        for name in overlay_order {
+            if self.contains_name(name) {
+                continue;
+            }
+            if let Some(Some(entry)) = overlay.get(name) {
+                entries.push(CachedDirEntry {
+                    name: name.clone(),
+                    inode_num: entry.inode_num,
+                    node_type: entry.node_type,
+                });
+            }
+        }
+        entries
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -161,14 +201,36 @@ struct CachedLookupEntry {
 
 const DIR_LOOKUP_CACHE_MAX_ENTRIES: usize = 256;
 const DIR_SNAPSHOT_PROMOTION_LOOKUPS: usize = 8;
+const DIR_SNAPSHOT_OVERLAY_MAX_ENTRIES: usize = 1024;
 const DIR_CACHE_REGISTRY_SWEEP_BUDGET: usize = 8;
 const DIR_CACHE_REGISTRY_SHARDS: usize = 32;
+
+#[derive(Default)]
+struct DirSnapshotCache {
+    snapshot: Option<(u64, Arc<DirSnapshot>)>,
+    overlay: BTreeMap<String, Option<CachedLookupEntry>>,
+    overlay_order: Vec<String>,
+}
+
+enum DirSnapshotEntries {
+    Snapshot(Arc<DirSnapshot>),
+    Merged(Vec<CachedDirEntry>),
+}
+
+impl DirSnapshotEntries {
+    fn entries(&self) -> &[CachedDirEntry] {
+        match self {
+            Self::Snapshot(snapshot) => &snapshot.entries,
+            Self::Merged(entries) => entries,
+        }
+    }
+}
 
 struct DirCacheState {
     snapshot_generation: AtomicU64,
     lookup_generation: AtomicU64,
     uncached_lookups: AtomicUsize,
-    snapshot: Mutex<Option<(u64, Arc<DirSnapshot>)>>,
+    snapshot: Mutex<DirSnapshotCache>,
     snapshot_build: async_lock::Mutex<()>,
     lookup: Mutex<LruCache<String, Option<CachedLookupEntry>>>,
 }
@@ -179,7 +241,7 @@ impl DirCacheState {
             snapshot_generation: AtomicU64::new(0),
             lookup_generation: AtomicU64::new(0),
             uncached_lookups: AtomicUsize::new(0),
-            snapshot: Mutex::new(None),
+            snapshot: Mutex::new(DirSnapshotCache::default()),
             snapshot_build: async_lock::Mutex::new(()),
             lookup: Mutex::new(LruCache::unbounded()),
         }
@@ -190,12 +252,51 @@ impl DirCacheState {
         let snapshot = self
             .snapshot
             .lock()
+            .snapshot
             .as_ref()
             .filter(|(snapshot_generation, _)| *snapshot_generation == generation)
             .map(|(_, snapshot)| snapshot.clone());
         (self.snapshot_generation.load(Ordering::Acquire) == generation)
             .then_some(snapshot)
             .flatten()
+    }
+
+    fn get_snapshot_lookup(&self, name: &str) -> Option<Option<CachedLookupEntry>> {
+        let generation = self.snapshot_generation.load(Ordering::Acquire);
+        let entry = {
+            let snapshot = self.snapshot.lock();
+            if let Some(entry) = snapshot.overlay.get(name) {
+                Some(*entry)
+            } else {
+                snapshot
+                    .snapshot
+                    .as_ref()
+                    .filter(|(snapshot_generation, _)| *snapshot_generation == generation)
+                    .map(|(_, snapshot)| snapshot.lookup(name))
+            }
+        };
+        (self.snapshot_generation.load(Ordering::Acquire) == generation)
+            .then_some(entry)
+            .flatten()
+    }
+
+    fn snapshot_entries(&self) -> Option<DirSnapshotEntries> {
+        let generation = self.snapshot_generation.load(Ordering::Acquire);
+        let entries = {
+            let snapshot = self.snapshot.lock();
+            let (_, base) = snapshot
+                .snapshot
+                .as_ref()
+                .filter(|(snapshot_generation, _)| *snapshot_generation == generation)?;
+            if snapshot.overlay.is_empty() {
+                DirSnapshotEntries::Snapshot(Arc::clone(base))
+            } else {
+                DirSnapshotEntries::Merged(
+                    base.merged_entries(&snapshot.overlay, &snapshot.overlay_order),
+                )
+            }
+        };
+        (self.snapshot_generation.load(Ordering::Acquire) == generation).then_some(entries)
     }
 
     fn generation(&self) -> u64 {
@@ -207,7 +308,7 @@ impl DirCacheState {
         if self.snapshot_generation.load(Ordering::Acquire) != generation {
             return false;
         }
-        *cached = Some((generation, snapshot));
+        cached.snapshot = Some((generation, snapshot));
         self.uncached_lookups
             .store(DIR_SNAPSHOT_PROMOTION_LOOKUPS, Ordering::Relaxed);
         true
@@ -252,29 +353,79 @@ impl DirCacheState {
         true
     }
 
-    fn update_lookup(&self, name: String, entry: Option<CachedLookupEntry>) {
+    fn invalidate_snapshot_locked(&self, snapshot: &mut DirSnapshotCache) {
+        self.snapshot_generation.fetch_add(1, Ordering::AcqRel);
+        snapshot.snapshot = None;
+        snapshot.overlay.clear();
+        snapshot.overlay_order.clear();
+        self.uncached_lookups.store(0, Ordering::Relaxed);
+    }
+
+    /// Records successful directory mutations without discarding the base
+    /// snapshot. The overlay remains bounded; a full invalidation is used
+    /// once it can no longer represent the mutation history cheaply.
+    fn apply_mutations(&self, mutations: &[(String, Option<CachedLookupEntry>)]) {
+        if mutations.is_empty() {
+            return;
+        }
+
+        // Readers validate lookup_generation around this lock. Holding it
+        // while the overlay changes prevents a stale LRU hit from bypassing a
+        // just-committed directory mutation.
         let mut lookup = self.lookup.lock();
         self.lookup_generation.fetch_add(1, Ordering::AcqRel);
-        lookup.put(name, entry);
+        let mut snapshot = self.snapshot.lock();
+        let generation = self.snapshot_generation.load(Ordering::Acquire);
+        let base = snapshot
+            .snapshot
+            .as_ref()
+            .filter(|(snapshot_generation, _)| *snapshot_generation == generation)
+            .map(|(_, snapshot)| Arc::clone(snapshot));
+
+        if let Some(base) = base {
+            let mut overflow = false;
+            for (name, entry) in mutations {
+                if !snapshot.overlay.contains_key(name)
+                    && snapshot.overlay.len() >= DIR_SNAPSHOT_OVERLAY_MAX_ENTRIES
+                {
+                    overflow = true;
+                    break;
+                }
+                let base_has_name = base.contains_name(name);
+                snapshot.overlay.insert(name.clone(), *entry);
+                if entry.is_some()
+                    && !base_has_name
+                    && !snapshot
+                        .overlay_order
+                        .iter()
+                        .any(|existing| existing == name)
+                {
+                    snapshot.overlay_order.push(name.clone());
+                }
+            }
+            if overflow {
+                self.invalidate_snapshot_locked(&mut snapshot);
+            }
+        } else {
+            // A builder may be reading the directory while no base snapshot
+            // has been published. Reject that stale publication and let the
+            // next lookup build from the post-mutation directory image.
+            self.invalidate_snapshot_locked(&mut snapshot);
+        }
+
+        for (name, entry) in mutations {
+            lookup.put(name.clone(), *entry);
+        }
         while lookup.len() > DIR_LOOKUP_CACHE_MAX_ENTRIES {
             lookup.pop_lru();
         }
     }
 
-    fn invalidate_snapshot(&self) {
-        let mut snapshot = self.snapshot.lock();
-        self.snapshot_generation.fetch_add(1, Ordering::AcqRel);
-        *snapshot = None;
-        self.uncached_lookups.store(0, Ordering::Relaxed);
-    }
-
     fn invalidate(&self) {
-        let mut snapshot = self.snapshot.lock();
         let mut lookup = self.lookup.lock();
-        self.snapshot_generation.fetch_add(1, Ordering::AcqRel);
         self.lookup_generation.fetch_add(1, Ordering::AcqRel);
-        *snapshot = None;
-        self.uncached_lookups.store(0, Ordering::Relaxed);
+        let mut snapshot = self.snapshot.lock();
+        self.invalidate_snapshot_locked(&mut snapshot);
         lookup.clear();
     }
 }
@@ -412,16 +563,6 @@ fn invalidate_dir_cache(fs: &Arc<Ext4Filesystem>, ino: u32) {
         .get(&key);
     if let Some(state) = state {
         state.invalidate();
-    }
-}
-
-fn invalidate_dir_snapshot(fs: &Arc<Ext4Filesystem>, ino: u32) {
-    let key = dir_cache_key(fs, ino);
-    let state = DIR_CACHE_REGISTRY[dir_cache_registry_shard(&key)]
-        .lock()
-        .get(&key);
-    if let Some(state) = state {
-        state.invalidate_snapshot();
     }
 }
 
@@ -584,14 +725,6 @@ impl Inode {
         }
     }
 
-    fn invalidate_snapshot(&self, dir_ino: u32) {
-        if dir_ino == self.ino {
-            self.dir_cache.invalidate_snapshot();
-        } else {
-            invalidate_dir_snapshot(&self.fs, dir_ino);
-        }
-    }
-
     fn invalidate_metadata(&self) {
         self.metadata_cache.invalidate();
     }
@@ -663,11 +796,12 @@ impl Inode {
         }
     }
 
-    async fn build_dir_snapshot(&self, fs: &Ext4, dir_ino: u32) -> VfsResult<Arc<DirSnapshot>> {
-        if dir_ino == self.ino {
-            self.dir_snapshot(fs).await
-        } else {
-            self.build_dir_snapshot_uncached(fs, dir_ino).await
+    async fn dir_entries(&self, fs: &Ext4) -> VfsResult<DirSnapshotEntries> {
+        loop {
+            self.dir_snapshot(fs).await?;
+            if let Some(entries) = self.dir_cache.snapshot_entries() {
+                return Ok(entries);
+            }
         }
     }
 
@@ -717,9 +851,13 @@ impl Inode {
     }
 
     async fn dir_has_children(&self, fs: &Ext4, dir_ino: u32) -> VfsResult<bool> {
-        let snapshot = self.build_dir_snapshot(fs, dir_ino).await?;
-        Ok(snapshot
-            .entries
+        let entries = if dir_ino == self.ino {
+            self.dir_entries(fs).await?
+        } else {
+            DirSnapshotEntries::Snapshot(self.build_dir_snapshot_uncached(fs, dir_ino).await?)
+        };
+        Ok(entries
+            .entries()
             .iter()
             .any(|entry| entry.name != "." && entry.name != ".."))
     }
@@ -979,9 +1117,9 @@ impl DirNodeOps for Inode {
     ) -> VfsResult<usize> {
         let fs = &self.fs.inner;
         self.validate_inode_num(&fs, self.ino)?;
-        let snapshot = self.dir_snapshot(&fs).await?;
+        let entries = self.dir_entries(&fs).await?;
         let mut count = 0usize;
-        for (index, entry) in snapshot.entries.iter().enumerate().skip(offset as usize) {
+        for (index, entry) in entries.entries().iter().enumerate().skip(offset as usize) {
             if !sink.accept(
                 &entry.name,
                 entry.inode_num as u64,
@@ -1006,19 +1144,19 @@ impl DirNodeOps for Inode {
         }
         let generation = self.dir_cache.lookup_generation();
 
-        if let Some(snapshot) = self.dir_cache.get() {
-            let cached = snapshot.lookup(name);
+        if let Some(cached) = self.dir_cache.get_snapshot_lookup(name) {
             self.dir_cache
                 .publish_lookup(generation, String::from(name), cached);
             return self.entry_from_cached_lookup(name, cached);
         }
 
         if self.dir_cache.note_uncached_lookup() {
-            let snapshot = self.dir_snapshot(fs).await?;
-            let cached = snapshot.lookup(name);
-            self.dir_cache
-                .publish_lookup(generation, String::from(name), cached);
-            return self.entry_from_cached_lookup(name, cached);
+            self.dir_snapshot(fs).await?;
+            if let Some(cached) = self.dir_cache.get_snapshot_lookup(name) {
+                self.dir_cache
+                    .publish_lookup(generation, String::from(name), cached);
+                return self.entry_from_cached_lookup(name, cached);
+            }
         }
 
         let (_, dir_inode) = self.read_inode_cached(fs, self.ino).await?;
@@ -1051,9 +1189,12 @@ impl DirNodeOps for Inode {
     ) -> VfsResult<DirEntry> {
         let fs = &self.fs.inner;
         self.validate_inode_num(&fs, self.ino)?;
-        let _directory_guard = self.mutation_lock.lock().await;
         let name_ref =
             ext4plus::DirEntryName::try_from(name).map_err(|_| VfsError::InvalidInput)?;
+        if matches!(self.dir_cache.get_lookup(name), Some(Some(_))) {
+            return Err(VfsError::AlreadyExists);
+        }
+        let _directory_guard = self.mutation_lock.lock().await;
 
         match self.dir_cache.get_lookup(name) {
             Some(Some(_)) => return Err(VfsError::AlreadyExists),
@@ -1133,14 +1274,13 @@ impl DirNodeOps for Inode {
                     }
                     link_result?;
 
-                    self.invalidate_snapshot(self.ino);
-                    self.dir_cache.update_lookup(
+                    self.dir_cache.apply_mutations(&[(
                         String::from(name),
                         Some(CachedLookupEntry {
                             inode_num: new_inode.index.get(),
                             node_type,
                         }),
-                    );
+                    )]);
                     Ok(self.create_entry(
                         new_inode.index.get(),
                         node_type,
@@ -1169,6 +1309,11 @@ impl DirNodeOps for Inode {
         let child: Arc<Self> = node.downcast().map_err(|_| VfsError::InvalidInput)?;
         if !Arc::ptr_eq(&self.fs, &child.fs) {
             return Err(VfsError::CrossesDevices);
+        }
+        let _name_ref =
+            ext4plus::DirEntryName::try_from(name).map_err(|_| VfsError::InvalidInput)?;
+        if matches!(self.dir_cache.get_lookup(name), Some(Some(_))) {
+            return Err(VfsError::AlreadyExists);
         }
         let mutation_nodes = [self, child.as_ref()];
         let _mutation_guards = Self::lock_mutation_set(&mutation_nodes).await;
@@ -1207,13 +1352,12 @@ impl DirNodeOps for Inode {
                 }
                 link_result?;
 
-                self.invalidate_snapshot(self.ino);
                 let cached = CachedLookupEntry {
                     inode_num: child_inode.index.get(),
                     node_type: into_vfs_type(child_inode.file_type()),
                 };
                 self.dir_cache
-                    .update_lookup(String::from(name), Some(cached));
+                    .apply_mutations(&[(String::from(name), Some(cached))]);
                 Ok(self.create_entry(
                     cached.inode_num,
                     cached.node_type,
@@ -1265,13 +1409,13 @@ impl DirNodeOps for Inode {
             let child_inode = dir.get_entry(name_ref).await.map_err(into_vfs_err)?;
             let child_ino = child_inode.index.get();
             if child_ino != observed_child_ino {
-                self.dir_cache.update_lookup(
+                self.dir_cache.apply_mutations(&[(
                     String::from(name),
                     Some(CachedLookupEntry {
                         inode_num: child_ino,
                         node_type: into_vfs_type(child_inode.file_type()),
                     }),
-                );
+                )]);
                 continue;
             }
             if child_inode.file_type() == ext4plus::FileType::Directory
@@ -1296,8 +1440,8 @@ impl DirNodeOps for Inode {
                         self.dir_cache.invalidate();
                     }
                     let child_inode = child_inode?;
-                    self.invalidate_snapshot(self.ino);
-                    self.dir_cache.update_lookup(String::from(name), None);
+                    self.dir_cache
+                        .apply_mutations(&[(String::from(name), None)]);
                     if is_dir {
                         invalidate_dir_cache(&self.fs, child_ino);
                     }
@@ -1453,10 +1597,6 @@ impl DirNodeOps for Inode {
                             dst_dir.dir_cache.invalidate();
                         }
                         let dst_inode = dst_inode?;
-                        dst_dir.invalidate_snapshot(dst_dir.ino);
-                        dst_dir
-                            .dir_cache
-                            .update_lookup(String::from(dst_name), None);
                         if dst_is_dir {
                             invalidate_dir_cache(&dst_dir.fs, dst_inode_ino);
                         }
@@ -1481,6 +1621,10 @@ impl DirNodeOps for Inode {
                     }
 
                     let src_inode_ino = src_inode.index.get();
+                    let destination_cache_entry = CachedLookupEntry {
+                        inode_num: src_inode_ino,
+                        node_type: into_vfs_type(src_inode.file_type()),
+                    };
                     self.invalidate_metadata();
                     if dst_dir.ino != self.ino {
                         dst_dir.invalidate_metadata();
@@ -1496,14 +1640,6 @@ impl DirNodeOps for Inode {
                         dst_dir.dir_cache.invalidate();
                     }
                     link_result?;
-                    dst_dir.invalidate_snapshot(dst_dir.ino);
-                    dst_dir.dir_cache.update_lookup(
-                        String::from(dst_name),
-                        Some(CachedLookupEntry {
-                            inode_num: src_inode_ino,
-                            node_type: into_vfs_type(src_inode.file_type()),
-                        }),
-                    );
                     let rollback_inode = src_inode.clone();
                     self.invalidate_metadata();
                     let unlink_result = src_dir
@@ -1566,8 +1702,19 @@ impl DirNodeOps for Inode {
                         dst_dir.dir_cache.invalidate();
                         return Err(unlink_error);
                     }
-                    self.invalidate_snapshot(self.ino);
-                    self.dir_cache.update_lookup(String::from(src_name), None);
+                    if self.ino == dst_dir.ino {
+                        self.dir_cache.apply_mutations(&[
+                            (String::from(src_name), None),
+                            (String::from(dst_name), Some(destination_cache_entry)),
+                        ]);
+                    } else {
+                        self.dir_cache
+                            .apply_mutations(&[(String::from(src_name), None)]);
+                        dst_dir.dir_cache.apply_mutations(&[(
+                            String::from(dst_name),
+                            Some(destination_cache_entry),
+                        )]);
+                    }
                     Ok(())
                 })
                 .await;
@@ -1624,8 +1771,8 @@ mod tests {
 
     use super::{
         CachedDirEntry, CachedLookupEntry, DIR_CACHE_REGISTRY_SWEEP_BUDGET,
-        DIR_SNAPSHOT_PROMOTION_LOOKUPS, DirCacheKey, DirCacheRegistry, DirCacheState, DirSnapshot,
-        MetadataCacheState,
+        DIR_SNAPSHOT_OVERLAY_MAX_ENTRIES, DIR_SNAPSHOT_PROMOTION_LOOKUPS, DirCacheKey,
+        DirCacheRegistry, DirCacheState, DirSnapshot, MetadataCacheState,
     };
 
     fn metadata_with_size(size: u64) -> Metadata {
@@ -1714,7 +1861,7 @@ mod tests {
         }
         assert!(state.note_uncached_lookup());
 
-        state.invalidate_snapshot();
+        state.invalidate();
         assert!(!state.note_uncached_lookup());
     }
 
@@ -1733,24 +1880,106 @@ mod tests {
         assert!(state.publish_lookup(generation, String::from("missing"), None));
         assert_eq!(state.get_lookup("missing"), Some(None));
 
-        state.invalidate_snapshot();
-        assert_eq!(state.get_lookup("found"), Some(Some(found)));
-        assert_eq!(state.get_lookup("missing"), Some(None));
-
-        state.update_lookup(
+        state.apply_mutations(&[(
             String::from("changed"),
             Some(CachedLookupEntry {
                 inode_num: 24,
                 node_type: NodeType::Directory,
             }),
-        );
+        )]);
         assert_eq!(state.get_lookup("found"), Some(Some(found)));
         assert_eq!(state.get_lookup("missing"), Some(None));
+        assert_eq!(
+            state.get_lookup("changed"),
+            Some(Some(CachedLookupEntry {
+                inode_num: 24,
+                node_type: NodeType::Directory,
+            }))
+        );
         assert!(!state.publish_lookup(generation, String::from("stale"), None));
 
         state.invalidate();
         assert_eq!(state.get_lookup("found"), None);
         assert_eq!(state.get_lookup("missing"), None);
+    }
+
+    #[test]
+    fn directory_snapshot_overlay_updates_lookup_and_iteration() {
+        let state = DirCacheState::new();
+        let snapshot = Arc::new(DirSnapshot::new(vec![
+            CachedDirEntry {
+                name: String::from("alpha"),
+                inode_num: 11,
+                node_type: NodeType::RegularFile,
+            },
+            CachedDirEntry {
+                name: String::from("beta"),
+                inode_num: 12,
+                node_type: NodeType::Directory,
+            },
+        ]));
+        assert!(state.publish(state.generation(), snapshot));
+
+        state.apply_mutations(&[
+            (String::from("beta"), None),
+            (
+                String::from("gamma"),
+                Some(CachedLookupEntry {
+                    inode_num: 13,
+                    node_type: NodeType::RegularFile,
+                }),
+            ),
+        ]);
+
+        assert_eq!(
+            state.get_snapshot_lookup("alpha"),
+            Some(Some(CachedLookupEntry {
+                inode_num: 11,
+                node_type: NodeType::RegularFile,
+            }))
+        );
+        assert_eq!(state.get_snapshot_lookup("beta"), Some(None));
+        assert_eq!(
+            state.get_snapshot_lookup("gamma"),
+            Some(Some(CachedLookupEntry {
+                inode_num: 13,
+                node_type: NodeType::RegularFile,
+            }))
+        );
+
+        let entries = state.snapshot_entries().unwrap();
+        let names = entries
+            .entries()
+            .iter()
+            .map(|entry| entry.name.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(names, ["alpha", "gamma"]);
+    }
+
+    #[test]
+    fn directory_snapshot_overlay_falls_back_after_its_bound() {
+        let state = DirCacheState::new();
+        assert!(state.publish(state.generation(), Arc::new(DirSnapshot::new(Vec::new()))));
+
+        for index in 0..DIR_SNAPSHOT_OVERLAY_MAX_ENTRIES {
+            state.apply_mutations(&[(
+                alloc::format!("entry-{index}"),
+                Some(CachedLookupEntry {
+                    inode_num: index as u32 + 1,
+                    node_type: NodeType::RegularFile,
+                }),
+            )]);
+        }
+        assert!(state.get().is_some());
+
+        state.apply_mutations(&[(
+            String::from("overflow"),
+            Some(CachedLookupEntry {
+                inode_num: u32::MAX,
+                node_type: NodeType::RegularFile,
+            }),
+        )]);
+        assert!(state.get().is_none());
     }
 
     #[test]
