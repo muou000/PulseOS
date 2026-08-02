@@ -34,6 +34,8 @@ pub struct Thread {
     pub sched_period: AtomicU64,
 }
 
+const IO_BUFFER_CACHE_MAX_CAPACITY: usize = 64 * 1024;
+
 const NOT_IN_USER_MODE: u64 = u64::MAX;
 
 pub struct ThreadHandle(Arc<Thread>);
@@ -86,7 +88,14 @@ impl Thread {
         core::mem::take(&mut *guard)
     }
 
-    pub fn put_io_buffer(&self, buf: alloc::vec::Vec<u8>) {
+    pub fn put_io_buffer(&self, mut buf: alloc::vec::Vec<u8>) {
+        // Large network requests may use this temporary buffer, but retaining
+        // one on every thread after a single request would turn it into an
+        // unbounded per-thread cache. Normal syscall I/O is chunked at 64 KiB.
+        if buf.capacity() > IO_BUFFER_CACHE_MAX_CAPACITY {
+            return;
+        }
+        buf.clear();
         let mut guard = self.io_buffer.lock();
         *guard = buf;
     }
