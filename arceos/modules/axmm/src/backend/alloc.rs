@@ -484,16 +484,9 @@ impl Backend {
                 }
             }
             false
-        } else if populate {
-            error!(
-                "handle_page_fault_alloc: reject=query_miss_in_populated_mapping vaddr={:#x} page={:#x} fault_flags={:?} backend_populate={}",
-                vaddr,
-                page,
-                orig_flags,
-                populate
-            );
-            false
         } else if let Some(frame) = alloc_frame(true) {
+            // MADV_DONTNEED may evict a page from an eagerly populated
+            // anonymous mapping. It must still fault back to a zeroed frame.
             // Allocate a physical frame lazily and map it to the fault address.
             // `vaddr` does not need to be aligned. `pt.map()` will create the
             // intermediate page-table levels on demand for true lazy mappings.

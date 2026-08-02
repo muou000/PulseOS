@@ -898,6 +898,64 @@ impl AddrSpace {
         self.unmap_prepared(start, size, AddrSpaceUnmapPreparation::default())
     }
 
+    /// Discards resident anonymous pages within `[start, start + size)` while
+    /// retaining the virtual memory areas that describe the range.
+    ///
+    /// File, shared, and linear mappings are left intact. A later access to a
+    /// discarded anonymous page faults it back in as a fresh zeroed page.
+    pub fn discard_range(&mut self, start: VirtAddr, size: usize) -> AddrSpaceMutation<()> {
+        let mut reclaim = DeferredReclaims::default();
+        let mut invalidation = TlbInvalidationTracker::default();
+        let result = (|| -> AxResult {
+            if size == 0 {
+                return Ok(());
+            }
+            if !self.contains_range(start, size) {
+                return ax_err!(InvalidInput, "address out of range");
+            }
+            if !start.is_aligned_4k() || !is_aligned_4k(size) {
+                return ax_err!(InvalidInput, "address not aligned");
+            }
+
+            let end = start + size;
+            for area in self.areas.iter() {
+                if area.end() <= start {
+                    continue;
+                }
+                if area.start() >= end {
+                    break;
+                }
+                if !area.backend().is_discardable() {
+                    continue;
+                }
+
+                let overlap_start = area.start().max(start);
+                let overlap_end = area.end().min(end);
+                if overlap_start < overlap_end
+                    && !area.backend().unmap_tracked(
+                        overlap_start,
+                        overlap_end - overlap_start,
+                        &mut self.pt,
+                        &mut reclaim,
+                        &mut invalidation,
+                    )
+                {
+                    return Err(AxError::BadState);
+                }
+            }
+            Ok(())
+        })();
+
+        let needs_completion = !invalidation.is_empty() || !reclaim.is_empty();
+        let shootdown = if needs_completion {
+            Some(TlbShootdown::from_tracker(self.asid, invalidation, reclaim))
+        } else {
+            reclaim.reclaim();
+            None
+        };
+        AddrSpaceMutation::new(result, shootdown)
+    }
+
     /// Removes mappings using reclaim storage prepared before taking the
     /// address-space write lock.
     pub fn unmap_prepared(

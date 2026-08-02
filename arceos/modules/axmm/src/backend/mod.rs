@@ -541,6 +541,16 @@ impl Backend {
         }
     }
 
+    /// Returns whether resident pages can be discarded and later faulted back
+    /// as zero-filled anonymous pages.
+    pub fn is_discardable(&self) -> bool {
+        match self {
+            Self::Alloc { .. } => true,
+            Self::Cow(cow) => cow.inner.is_discardable(),
+            _ => false,
+        }
+    }
+
     pub(crate) fn page_fault_load_request(
         &self,
         vaddr: VirtAddr,
@@ -686,5 +696,20 @@ impl Backend {
                 .prepare_file_writeback_range(start, size, sync, pt, writebacks),
             _ => true, // Non-file backends have nothing to write back.
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use ::alloc::boxed::Box;
+
+    use super::{Backend, CowMapping};
+
+    #[test]
+    fn only_anonymous_backends_are_discardable() {
+        assert!(Backend::new_alloc(false).is_discardable());
+        assert!(Backend::new_alloc(true).is_discardable());
+        assert!(Backend::Cow(CowMapping::new(Box::new(Backend::new_alloc(false)))).is_discardable());
+        assert!(!Backend::Linear { pa_va_offset: 0 }.is_discardable());
     }
 }

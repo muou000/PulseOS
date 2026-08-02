@@ -2,7 +2,10 @@ use alloc::sync::Arc;
 
 use axfs::{CachedFile, FileFlags};
 use axhal::paging::MappingFlags;
-use linux_raw_sys::general::{MCL_CURRENT, MCL_FUTURE, MCL_ONFAULT, RLIMIT_DATA};
+use linux_raw_sys::general::{
+    MADV_DONTNEED, MADV_FREE, MADV_NORMAL, MADV_RANDOM, MADV_SEQUENTIAL, MADV_WILLNEED,
+    MCL_CURRENT, MCL_FUTURE, MCL_ONFAULT, RLIMIT_DATA,
+};
 use memory_addr::VirtAddr;
 use pulse_core::fd_table::FdObject;
 
@@ -548,6 +551,70 @@ pub fn sys_munmap(addr: usize, length: usize) -> isize {
         Err(e) => {
             axlog::debug!("sys_munmap: failed: {:?}", e);
             -LinuxError::from(e).code() as isize
+        }
+    }
+}
+
+pub fn sys_madvise(addr: usize, length: usize, advice: i32) -> isize {
+    axlog::debug!(
+        "sys_madvise: addr={:#x}, length={:#x}, advice={}",
+        addr,
+        length,
+        advice
+    );
+
+    if (addr & (PAGE_SIZE - 1)) != 0 {
+        return -LinuxError::EINVAL.code() as isize;
+    }
+    if length == 0 {
+        return 0;
+    }
+    let Some(aligned_length) = page_align_up(length) else {
+        return -LinuxError::EINVAL.code() as isize;
+    };
+
+    let discard = match advice as u32 {
+        MADV_DONTNEED | MADV_FREE => true,
+        MADV_NORMAL | MADV_RANDOM | MADV_SEQUENTIAL | MADV_WILLNEED => false,
+        _ => return -LinuxError::EINVAL.code() as isize,
+    };
+
+    let proc = match pulse_core::task::current_process() {
+        Ok(proc) => proc,
+        Err(e) => return -e.code() as isize,
+    };
+    if !proc.is_user_range(addr, aligned_length) {
+        return -LinuxError::ENOMEM.code() as isize;
+    }
+
+    let aspace_handle = proc.aspace_handle();
+    if !discard {
+        return if aspace_handle
+            .read()
+            .can_access_range(VirtAddr::from(addr), aligned_length, MappingFlags::empty())
+        {
+            0
+        } else {
+            -LinuxError::ENOMEM.code() as isize
+        };
+    }
+
+    let mutation = {
+        let mut aspace = aspace_handle.write();
+        if !aspace.can_access_range(VirtAddr::from(addr), aligned_length, MappingFlags::empty()) {
+            return -LinuxError::ENOMEM.code() as isize;
+        }
+        aspace.discard_range(VirtAddr::from(addr), aligned_length)
+    };
+    match mutation.complete_after_unlock() {
+        Ok(()) => 0,
+        Err(error) => {
+            axlog::error!(
+                "sys_madvise: discard failed at {:#x}, len={:#x}: {error:?}",
+                addr,
+                aligned_length
+            );
+            -LinuxError::EIO.code() as isize
         }
     }
 }
