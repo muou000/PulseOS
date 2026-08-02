@@ -4,7 +4,7 @@ pub use axdriver_base::{BaseDriverOps, DevError, DevResult, DeviceType};
 #[cfg(all(feature = "block", feature = "async"))]
 pub use axdriver_block::{
     AsyncBlockDriverOps, DynAsyncBlockDriverOps, OwnedReadBufferRegistration,
-    register_owned_read_buffer,
+    OwnedWriteBufferRegistration, register_owned_read_buffer, register_owned_write_buffer,
 };
 #[cfg(feature = "block")]
 pub use {crate::structs::AxBlockDevice, axdriver_block::BlockDriverOps};

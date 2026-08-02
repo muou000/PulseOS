@@ -361,10 +361,19 @@ cfg_if! {
             Dma,
         };
 
-        // axfs fills up to 16 page-cache pages (64 KiB) per sequential read.
-        // Keep those fallback bounce buffers reusable while direct reads use
-        // their registered final page-cache buffer for the data descriptor.
-        const DMA_POOL_MAX_DATA_LEN: usize = 64 * 1024;
+        // axfs fills up to 16 page-cache pages (64 KiB) per sequential read,
+        // while ext4 coalesces up to 32 common 4 KiB metadata blocks (128 KiB)
+        // for one asynchronous flush. Retain both request shapes: otherwise
+        // every coalesced metadata flush bypasses this pool and churns a large
+        // DMA allocation. Keep the previous total retention budget below.
+        const DMA_POOL_RETAINED_DATA_LEN: usize = 64 * 1024;
+        const DMA_POOL_MAX_DATA_LEN: usize = 128 * 1024;
+        const DMA_POOL_RETAINED_REQUEST_PAGES: usize = (core::mem::size_of::<BlkReq>()
+            + DMA_POOL_RETAINED_DATA_LEN
+            + core::mem::size_of::<BlkResp>()
+            + virtio_drivers::PAGE_SIZE
+            - 1)
+            / virtio_drivers::PAGE_SIZE;
         const DMA_POOL_MAX_REQUEST_PAGES: usize = (core::mem::size_of::<BlkReq>()
             + DMA_POOL_MAX_DATA_LEN
             + core::mem::size_of::<BlkResp>()
@@ -372,7 +381,7 @@ cfg_if! {
             - 1)
             / virtio_drivers::PAGE_SIZE;
         const DMA_POOL_MAX_PAGES: usize =
-            VIRTIO_BLK_QUEUE_SIZE * DMA_POOL_MAX_REQUEST_PAGES;
+            VIRTIO_BLK_QUEUE_SIZE * DMA_POOL_RETAINED_REQUEST_PAGES;
         const COMPLETION_RECHECK_INTERVAL_NS: u64 = 1_000_000;
         fn push_unique_completion_waker<const N: usize>(
             wakers: &mut [Option<Waker>; N],
@@ -415,6 +424,8 @@ cfg_if! {
             pending: [Option<(u64, PendingBlockRequest<H>)>; VIRTIO_BLK_QUEUE_SIZE],
             pending_direct_reads:
                 [Option<axdriver_block::OwnedReadBufferLease>; VIRTIO_BLK_QUEUE_SIZE],
+            pending_direct_writes:
+                [Option<axdriver_block::OwnedWriteBufferLease>; VIRTIO_BLK_QUEUE_SIZE],
             completed: Vec<(u64, PendingBlockRequest<H>)>,
             dma_pool: Vec<DmaBlockRequest<H>>,
             dma_pool_pages: usize,
@@ -458,6 +469,7 @@ cfg_if! {
                         device: dev,
                         pending: core::array::from_fn(|_| None),
                         pending_direct_reads: core::array::from_fn(|_| None),
+                        pending_direct_writes: core::array::from_fn(|_| None),
                         completed: Vec::with_capacity(VIRTIO_BLK_QUEUE_SIZE),
                         dma_pool: Vec::with_capacity(VIRTIO_BLK_QUEUE_SIZE),
                         dma_pool_pages: 0,
@@ -616,11 +628,11 @@ cfg_if! {
             fn new(
                 op: BlockRequestOp,
                 data_len: usize,
-                direct_read: bool,
+                direct_data: bool,
                 mut dma: DmaBlockRequest<H>,
             ) -> Self {
-                debug_assert!(!direct_read || op == BlockRequestOp::Read);
-                dma.prepare(if direct_read { 0 } else { data_len });
+                debug_assert!(!direct_data || op != BlockRequestOp::Flush);
+                dma.prepare(if direct_data { 0 } else { data_len });
                 Self {
                     op,
                     dma,
@@ -638,7 +650,11 @@ cfg_if! {
                 self.op == BlockRequestOp::Read && self.dma.data_len == 0
             }
 
-            fn parts_mut<'a>(
+            fn uses_direct_write(&self) -> bool {
+                self.op == BlockRequestOp::Write && self.dma.data_len == 0
+            }
+
+            fn read_parts_mut<'a>(
                 &'a mut self,
                 direct_read: Option<&'a mut axdriver_block::OwnedReadBufferLease>,
             ) -> (&'a mut BlkReq, &'a mut [u8], &'a mut BlkResp) {
@@ -656,33 +672,60 @@ cfg_if! {
                 (request, data, response)
             }
 
+            fn write_parts_mut<'a>(
+                &'a mut self,
+                direct_write: Option<&'a axdriver_block::OwnedWriteBufferLease>,
+            ) -> (&'a mut BlkReq, &'a [u8], &'a mut BlkResp) {
+                debug_assert_eq!(self.uses_direct_write(), direct_write.is_some());
+                let dma = &mut self.dma;
+                let (request, bounce_data, response) = dma.parts_mut();
+                let data = if let Some(direct_write) = direct_write {
+                    // SAFETY: The registration contract keeps the immutable
+                    // source stable, and the pending request owns its lease
+                    // until the descriptor chain is reclaimed.
+                    unsafe { direct_write.as_slice() }
+                } else {
+                    bounce_data
+                };
+                (request, data, response)
+            }
+
             fn submit<T: virtio_drivers::transport::Transport>(
                 &mut self,
                 device: &mut axdriver_virtio::VirtIoBlkDev<H, T>,
                 block_id: u64,
                 direct_read: Option<&mut axdriver_block::OwnedReadBufferLease>,
+                direct_write: Option<&axdriver_block::OwnedWriteBufferLease>,
             ) -> virtio_drivers::Result<SubmitOutcome> {
                 let block_id = usize::try_from(block_id)
                     .map_err(|_| virtio_drivers::Error::InvalidParam)?;
                 let op = self.op;
-                let (request, data, response) = self.parts_mut(direct_read);
                 // SAFETY: Request/response storage is owned by `self.dma` and
                 // data is either in the same allocation or covered by a direct
-                // read lease. All buffers remain stable until completion.
+                // lease. All buffers remain stable until completion.
                 unsafe {
                     match op {
-                        BlockRequestOp::Read => device
-                            .inner
-                            .read_blocks_nb(block_id, request, data, response)
-                            .map(SubmitOutcome::Queued),
-                        BlockRequestOp::Write => device
-                            .inner
-                            .write_blocks_nb(block_id, request, data, response)
-                            .map(SubmitOutcome::Queued),
-                        BlockRequestOp::Flush => device
-                            .inner
-                            .flush_nb(request, response)
-                            .map(|token| token.map_or(SubmitOutcome::Complete, SubmitOutcome::Queued)),
+                        BlockRequestOp::Read => {
+                            let (request, data, response) = self.read_parts_mut(direct_read);
+                            device
+                                .inner
+                                .read_blocks_nb(block_id, request, data, response)
+                                .map(SubmitOutcome::Queued)
+                        }
+                        BlockRequestOp::Write => {
+                            let (request, data, response) = self.write_parts_mut(direct_write);
+                            device
+                                .inner
+                                .write_blocks_nb(block_id, request, data, response)
+                                .map(SubmitOutcome::Queued)
+                        }
+                        BlockRequestOp::Flush => {
+                            let (request, _, response) = self.dma.parts_mut();
+                            device
+                                .inner
+                                .flush_nb(request, response)
+                                .map(|token| token.map_or(SubmitOutcome::Complete, SubmitOutcome::Queued))
+                        }
                     }
                 }
             }
@@ -692,21 +735,28 @@ cfg_if! {
                 device: &mut axdriver_virtio::VirtIoBlkDev<H, T>,
                 token: u16,
                 direct_read: Option<&mut axdriver_block::OwnedReadBufferLease>,
+                direct_write: Option<&axdriver_block::OwnedWriteBufferLease>,
             ) -> DevResult {
                 let op = self.op;
-                let (request, data, response) = self.parts_mut(direct_read);
                 // SAFETY: `token` identifies the descriptor chain submitted
                 // with these exact DMA-backed buffers, and `peek_used` proved
                 // that the device no longer owns the chain.
                 unsafe {
                     match op {
-                        BlockRequestOp::Read => device
-                            .inner
-                            .complete_read_blocks(token, request, data, response),
-                        BlockRequestOp::Write => device
-                            .inner
-                            .complete_write_blocks(token, request, data, response),
+                        BlockRequestOp::Read => {
+                            let (request, data, response) = self.read_parts_mut(direct_read);
+                            device
+                                .inner
+                                .complete_read_blocks(token, request, data, response)
+                        }
+                        BlockRequestOp::Write => {
+                            let (request, data, response) = self.write_parts_mut(direct_write);
+                            device
+                                .inner
+                                .complete_write_blocks(token, request, data, response)
+                        }
                         BlockRequestOp::Flush => {
+                            let (request, _, response) = self.dma.parts_mut();
                             device.inner.complete_flush(token, request, response)
                         }
                     }
@@ -821,10 +871,17 @@ cfg_if! {
                     panic!("virtio-blk completed unknown token {}", token);
                 };
                 let direct_read = self.pending_direct_reads[token as usize].as_mut();
-                request.result = Some(request.complete(&mut self.device, token, direct_read));
+                let direct_write = self.pending_direct_writes[token as usize].as_ref();
+                request.result = Some(request.complete(
+                    &mut self.device,
+                    token,
+                    direct_read,
+                    direct_write,
+                ));
                 // `complete` reclaimed the descriptor chain, so the device can
-                // no longer access the registered destination.
+                // no longer access either registered source or destination.
                 self.pending_direct_reads[token as usize].take();
+                self.pending_direct_writes[token as usize].take();
                 let request_waker = request.waker.take();
                 let extracted = if request.detached {
                     self.recycle_request(request);
@@ -855,16 +912,16 @@ cfg_if! {
                 &self,
                 op: BlockRequestOp,
                 data_len: usize,
-                direct_read: bool,
+                direct_data: bool,
             ) -> virtio_drivers::Result<PendingBlockRequest<H>> {
-                let dma_data_len = if direct_read { 0 } else { data_len };
+                let dma_data_len = if direct_data { 0 } else { data_len };
                 let dma = self
                     .inner
                     .lock()
                     .take_dma(dma_data_len)
                     .map(Ok)
                     .unwrap_or_else(|| DmaBlockRequest::<H>::new(dma_data_len))?;
-                Ok(PendingBlockRequest::new(op, data_len, direct_read, dma))
+                Ok(PendingBlockRequest::new(op, data_len, direct_data, dma))
             }
 
             fn recycle_request(&self, request: PendingBlockRequest<H>) {
@@ -1007,6 +1064,7 @@ cfg_if! {
             buffer: FutureBuffer<'a>,
             request: Option<PendingBlockRequest<H>>,
             direct_read: Option<axdriver_block::OwnedReadBufferLease>,
+            direct_write: Option<axdriver_block::OwnedWriteBufferLease>,
             token: Option<u16>,
             request_id: Option<u64>,
         }
@@ -1026,6 +1084,7 @@ cfg_if! {
                     buffer: FutureBuffer::Read(buf),
                     request: None,
                     direct_read: None,
+                    direct_write: None,
                     token: None,
                     request_id: None,
                 }
@@ -1038,6 +1097,7 @@ cfg_if! {
                     buffer: FutureBuffer::Write(buf),
                     request: None,
                     direct_read: None,
+                    direct_write: None,
                     token: None,
                     request_id: None,
                 }
@@ -1050,6 +1110,7 @@ cfg_if! {
                     buffer: FutureBuffer::Flush(PhantomData),
                     request: None,
                     direct_read: None,
+                    direct_write: None,
                     token: None,
                     request_id: None,
                 }
@@ -1230,14 +1291,30 @@ cfg_if! {
                         } else {
                             None
                         };
+                        this.direct_write = if op == BlockRequestOp::Write {
+                            match &this.buffer {
+                                FutureBuffer::Write(buf) => {
+                                    axdriver_block::claim_owned_write_buffer(NonNull::from(&**buf))
+                                }
+                                _ => None,
+                            }
+                        } else {
+                            None
+                        };
                         let mut request = match this
                             .inner
-                            .new_request(op, len, this.direct_read.is_some())
+                            .new_request(
+                                op,
+                                len,
+                                this.direct_read.is_some() || this.direct_write.is_some(),
+                            )
                         {
                             Ok(request) => request,
                             Err(error) => return Poll::Ready(Err(virtio_err_to_dev(error))),
                         };
-                        if let FutureBuffer::Write(buf) = &this.buffer {
+                        if this.direct_write.is_none()
+                            && let FutureBuffer::Write(buf) = &this.buffer
+                        {
                             request.dma.data_mut().copy_from_slice(buf);
                         }
                         request
@@ -1249,6 +1326,7 @@ cfg_if! {
                             &mut state.device,
                             this.block_id,
                             this.direct_read.as_mut(),
+                            this.direct_write.as_ref(),
                         ) {
                             Ok(SubmitOutcome::Queued(token)) => {
                                 // Install the waker only if the one-shot completion
@@ -1272,7 +1350,12 @@ cfg_if! {
                                     state.pending_direct_reads[token_index].is_none(),
                                     "virtio-blk reused an in-flight direct-read token"
                                 );
+                                assert!(
+                                    state.pending_direct_writes[token_index].is_none(),
+                                    "virtio-blk reused an in-flight direct-write token"
+                                );
                                 state.pending_direct_reads[token_index] = this.direct_read.take();
+                                state.pending_direct_writes[token_index] = this.direct_write.take();
                                 state.pending[token_index] = Some((request_id, request));
                                 Ok(Some((token, request_id)))
                             }

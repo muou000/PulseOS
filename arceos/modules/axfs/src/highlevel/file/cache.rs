@@ -28,6 +28,10 @@ static ACTIVE_DISK_FILE_CACHES: Lazy<SpinMutex<Vec<Arc<CachedFileShared>>>> =
 const PAGE_SIZE: usize = 4096;
 const MAX_WRITEBACK_PAGES: usize = 256;
 const READ_AHEAD_PAGES: usize = 16;
+// Copy at most one readahead window while holding the cache locks. This
+// removes per-page lock churn for resident sequential reads without making a
+// direct-I/O invalidation wait behind an unbounded cache hit stream.
+const READ_COPY_BATCH_PAGES: usize = READ_AHEAD_PAGES;
 const DISK_FILE_CACHE_SOFT_LIMIT: usize = 1024;
 const PAGE_CACHE_GROWTH_HEADROOM: usize = 256;
 const PAGE_CACHE_EVICTION_BATCH: usize = 256;
@@ -144,6 +148,20 @@ fn checked_page_span(offset: u64, len: usize) -> VfsResult<(u32, usize)> {
     Ok((start_page, page_count))
 }
 
+fn checked_dirty_page_range(offset: u64, len: usize) -> VfsResult<(u32, u32)> {
+    if len == 0 {
+        return Err(VfsError::InvalidInput);
+    }
+    let end = offset
+        .checked_add(len as u64)
+        .ok_or(VfsError::InvalidInput)?;
+    let first_page = u32::try_from(offset / PAGE_SIZE as u64).map_err(|_| VfsError::StorageFull)?;
+    let end_page =
+        u32::try_from(end.div_ceil(PAGE_SIZE as u64)).map_err(|_| VfsError::StorageFull)?;
+    debug_assert!(first_page < end_page);
+    Ok((first_page, end_page))
+}
+
 fn write_all_at(
     mut write: impl FnMut(&[u8], u64) -> VfsResult<usize>,
     data: &[u8],
@@ -178,10 +196,54 @@ async fn write_all_at_async(file: &FileNode, data: &[u8], offset: u64) -> VfsRes
     Ok(())
 }
 
-struct WritebackBatch {
-    pages: Vec<u32>,
+pub(super) async fn write_slice_source_at_async(
+    file: &FileNode,
+    data: &[u8],
     offset: u64,
-    data: Vec<u8>,
+) -> VfsResult<usize> {
+    offset
+        .checked_add(data.len() as u64)
+        .ok_or(VfsError::InvalidInput)?;
+    if data.is_empty() {
+        return Ok(0);
+    }
+    write_all_at_async(file, data, offset).await?;
+    Ok(data.len())
+}
+
+pub(super) async fn append_slice_source_async(
+    file: &FileNode,
+    data: &[u8],
+) -> VfsResult<(usize, u64)> {
+    if data.is_empty() {
+        return Ok((0, file.len().await?));
+    }
+
+    let mut written = 0usize;
+    let mut end = 0;
+    while written < data.len() {
+        let (count, new_end) = file.append(&data[written..]).await?;
+        if count == 0 || count > data.len() - written {
+            return Err(VfsError::Io);
+        }
+        written += count;
+        end = new_end;
+    }
+    Ok((written, end))
+}
+
+struct WritebackPage {
+    page_num: u32,
+    len: usize,
+    content_generation: u64,
+    writable_mapping_generation: u64,
+    compare_contents: bool,
+}
+
+struct WritebackBatch {
+    pages: Vec<WritebackPage>,
+    offset: u64,
+    data: WritebackData,
 }
 
 async fn submit_writeback_batch(
@@ -191,7 +253,10 @@ async fn submit_writeback_batch(
     let result = if batch.data.is_empty() {
         Ok(())
     } else {
-        write_all_at_async(file, &batch.data, batch.offset).await
+        match batch.data.bytes() {
+            Ok(data) => write_all_at_async(file, data, batch.offset).await,
+            Err(err) => Err(err),
+        }
     };
     (batch, result)
 }
@@ -313,6 +378,15 @@ impl ContiguousPageGroup {
         Ok(unsafe { core::slice::from_raw_parts_mut(self.addr.as_mut_ptr(), len) })
     }
 
+    fn bytes(&self, len: usize) -> VfsResult<&[u8]> {
+        if len > self.len()? {
+            return Err(VfsError::InvalidInput);
+        }
+        // The writeback owner publishes this immutable view only after it has
+        // finished building the snapshot and registered the DMA source.
+        Ok(unsafe { core::slice::from_raw_parts(self.addr.as_ptr(), len) })
+    }
+
     fn register_direct_read(
         self: &Arc<Self>,
         len: usize,
@@ -326,6 +400,86 @@ impl ContiguousPageGroup {
         // cancelled read until the block driver's lease is released.
         unsafe { axdriver::prelude::register_owned_read_buffer(ptr, len, self.clone()) }
             .map_err(|_| VfsError::BadState)
+    }
+
+    fn register_direct_write(
+        self: &Arc<Self>,
+        len: usize,
+    ) -> VfsResult<axdriver::prelude::OwnedWriteBufferRegistration> {
+        if len == 0 || len > self.len()? {
+            return Err(VfsError::InvalidInput);
+        }
+        let ptr = NonNull::new(self.addr.as_mut_ptr()).ok_or(VfsError::BadState)?;
+        // SAFETY: the group is physically contiguous, immutable after the
+        // snapshot is built, and its cloned owner outlives a detached request.
+        unsafe { axdriver::prelude::register_owned_write_buffer(ptr, len, self.clone()) }
+            .map_err(|_| VfsError::BadState)
+    }
+}
+
+/// A writeback snapshot uses contiguous pages when possible so VirtIO can
+/// claim it as an owned DMA source. A normal `Vec` remains a safe fallback
+/// when the page allocator cannot provide one contiguous group.
+enum WritebackData {
+    Direct {
+        group: Arc<ContiguousPageGroup>,
+        len: usize,
+        _registration: Option<axdriver::prelude::OwnedWriteBufferRegistration>,
+    },
+    Bounce(Vec<u8>),
+}
+
+impl WritebackData {
+    fn new(page_count: usize, expected_len: usize) -> Self {
+        match ContiguousPageGroup::new(page_count) {
+            Ok(group) => Self::Direct {
+                group,
+                len: 0,
+                _registration: None,
+            },
+            Err(_) => Self::Bounce(Vec::with_capacity(expected_len)),
+        }
+    }
+
+    fn push_from_slice(&mut self, bytes: &[u8]) -> VfsResult<()> {
+        match self {
+            Self::Direct { group, len, .. } => {
+                let end = len.checked_add(bytes.len()).ok_or(VfsError::StorageFull)?;
+                let data = unsafe { group.bytes_mut(end)? };
+                data[*len..end].copy_from_slice(bytes);
+                *len = end;
+            }
+            Self::Bounce(data) => data.extend_from_slice(bytes),
+        }
+        Ok(())
+    }
+
+    fn finish_snapshot(&mut self) {
+        if let Self::Direct {
+            group,
+            len,
+            _registration,
+        } = self
+            && *len != 0
+        {
+            // Registration failure only disables the direct path. The group is
+            // still a valid immutable source for the driver's bounce fallback.
+            *_registration = group.register_direct_write(*len).ok();
+        }
+    }
+
+    fn is_empty(&self) -> bool {
+        match self {
+            Self::Direct { len, .. } => *len == 0,
+            Self::Bounce(data) => data.is_empty(),
+        }
+    }
+
+    fn bytes(&self) -> VfsResult<&[u8]> {
+        match self {
+            Self::Direct { group, len, .. } => group.bytes(*len),
+            Self::Bounce(data) => Ok(data),
+        }
     }
 }
 
@@ -370,6 +524,8 @@ pub struct PageCache {
     frame: Arc<PageCacheFrame>,
     dirty: bool,
     may_write_mapping: bool,
+    content_generation: u64,
+    writable_mapping_generation: u64,
 }
 
 impl PageCache {
@@ -379,6 +535,8 @@ impl PageCache {
             frame,
             dirty: false,
             may_write_mapping: false,
+            content_generation: 0,
+            writable_mapping_generation: 0,
         })
     }
 
@@ -406,6 +564,8 @@ impl PageCache {
             }),
             dirty: false,
             may_write_mapping: false,
+            content_generation: 0,
+            writable_mapping_generation: 0,
         })
     }
 
@@ -432,6 +592,11 @@ impl PageCache {
 
     pub fn mark_dirty(&mut self) {
         self.dirty = true;
+        self.content_generation = self.content_generation.wrapping_add(1);
+    }
+
+    fn mark_mapping_dirty(&mut self) {
+        self.dirty = true;
     }
 
     fn has_user_mapping(&self) -> bool {
@@ -451,6 +616,9 @@ impl PageCache {
             .ok_or(VfsError::BadState)?;
         if ref_count <= 1 {
             self.may_write_mapping = false;
+        }
+        if may_write {
+            self.writable_mapping_generation = self.writable_mapping_generation.wrapping_add(1);
         }
         self.may_write_mapping |= may_write;
         if ref_count == 0 {
@@ -607,7 +775,7 @@ impl CachedFileShared {
     ) -> VfsResult<()> {
         for (_, page) in guard.iter_mut() {
             if page.may_write_mapping && page.has_user_mapping() {
-                page.mark_dirty();
+                page.mark_mapping_dirty();
             }
         }
         let mut dirty_pns: Vec<u32> = guard
@@ -641,12 +809,21 @@ impl CachedFileShared {
             if last_len > 0 {
                 let total_len = (pn_end - pn_start) as usize * PAGE_SIZE + last_len;
                 let mut merged_buf = alloc::vec::Vec::with_capacity(total_len);
+                let mut snapshots = Vec::with_capacity(j - i + 1);
                 for k in i..=j {
                     let pn_curr = dirty_pns[k];
                     if let Some(page) = guard.get_mut(&pn_curr) {
                         let curr_page_start = pn_curr as u64 * PAGE_SIZE as u64;
                         let curr_len = (file_len.saturating_sub(curr_page_start))
                             .min(PAGE_SIZE as u64) as usize;
+                        let compare_contents = page.may_write_mapping && page.has_user_mapping();
+                        snapshots.push(WritebackPage {
+                            page_num: pn_curr,
+                            len: curr_len,
+                            content_generation: page.content_generation,
+                            writable_mapping_generation: page.writable_mapping_generation,
+                            compare_contents,
+                        });
                         merged_buf.extend_from_slice(&page.data()[..curr_len]);
                     }
                 }
@@ -656,10 +833,19 @@ impl CachedFileShared {
                     &merged_buf,
                     page_start,
                 )?;
-                for k in i..=j {
-                    if let Some(page) = guard.get_mut(&dirty_pns[k]) {
+                let mut data_offset = 0;
+                for snapshot in snapshots {
+                    let end = data_offset + snapshot.len;
+                    if let Some(page) = guard.get_mut(&snapshot.page_num)
+                        && page.dirty
+                        && page.content_generation == snapshot.content_generation
+                        && page.writable_mapping_generation == snapshot.writable_mapping_generation
+                        && (!snapshot.compare_contents
+                            || page.data()[..snapshot.len] == merged_buf[data_offset..end])
+                    {
                         page.dirty = false;
                     }
+                    data_offset = end;
                 }
             } else {
                 for k in i..=j {
@@ -676,6 +862,33 @@ impl CachedFileShared {
     }
 
     pub(super) async fn flush_dirty_pages_async(&self, file: &FileNode) -> VfsResult<()> {
+        self.flush_dirty_pages_in_range_async(file, None).await
+    }
+
+    /// Flushes dirty cache pages that overlap one direct-I/O request.
+    ///
+    /// A direct read must observe buffered writes in its range. A direct write
+    /// must first persist only the pages it can overwrite, then invalidate that
+    /// same range after the device I/O completes. Unrelated dirty pages remain
+    /// cache-resident and must not be discarded without writeback.
+    pub(super) async fn flush_dirty_range_async(
+        &self,
+        file: &FileNode,
+        offset: u64,
+        len: usize,
+    ) -> VfsResult<()> {
+        if len == 0 {
+            return Ok(());
+        }
+        self.flush_dirty_pages_in_range_async(file, Some(checked_dirty_page_range(offset, len)?))
+            .await
+    }
+
+    async fn flush_dirty_pages_in_range_async(
+        &self,
+        file: &FileNode,
+        page_range: Option<(u32, u32)>,
+    ) -> VfsResult<()> {
         let file_len = self.size();
         if file.len().await? < file_len {
             file.set_len(file_len).await?;
@@ -685,12 +898,14 @@ impl CachedFileShared {
             let mut cache = self.page_cache.lock();
             for (_, page) in cache.iter_mut() {
                 if page.may_write_mapping && page.has_user_mapping() {
-                    page.mark_dirty();
+                    page.mark_mapping_dirty();
                 }
             }
             let mut dirty = cache
                 .iter()
-                .filter(|(_, page)| page.dirty)
+                .filter(|(pn, page)| {
+                    page.dirty && page_range.is_none_or(|(first, end)| **pn >= first && **pn < end)
+                })
                 .map(|(pn, _)| *pn)
                 .collect::<Vec<_>>();
             dirty.sort_unstable();
@@ -721,9 +936,14 @@ impl CachedFileShared {
             {
                 let pages = &page_batches[next_batch];
                 let page_start = pages[0] as u64 * PAGE_SIZE as u64;
-                let data = {
+                let expected_len = pages
+                    .len()
+                    .checked_mul(PAGE_SIZE)
+                    .ok_or(VfsError::StorageFull)?;
+                let (mut data, snapshots) = {
                     let mut cache = self.page_cache.lock();
-                    let mut data = Vec::new();
+                    let mut data = WritebackData::new(pages.len(), expected_len);
+                    let mut snapshots = Vec::with_capacity(pages.len());
                     for &pn in pages {
                         let Some(page) = cache.get_mut(&pn) else {
                             if first_error.is_none() {
@@ -734,17 +954,26 @@ impl CachedFileShared {
                         let current_start = pn as u64 * PAGE_SIZE as u64;
                         let len =
                             file_len.saturating_sub(current_start).min(PAGE_SIZE as u64) as usize;
-                        data.extend_from_slice(&page.data()[..len]);
+                        let compare_contents = page.may_write_mapping && page.has_user_mapping();
+                        snapshots.push(WritebackPage {
+                            page_num: pn,
+                            len,
+                            content_generation: page.content_generation,
+                            writable_mapping_generation: page.writable_mapping_generation,
+                            compare_contents,
+                        });
+                        data.push_from_slice(&page.data()[..len])?;
                     }
-                    data
+                    (data, snapshots)
                 };
                 if first_error.is_some() {
                     break;
                 }
+                data.finish_snapshot();
                 pending.push(submit_writeback_batch(
                     file,
                     WritebackBatch {
-                        pages: pages.clone(),
+                        pages: snapshots,
                         offset: page_start,
                         data,
                     },
@@ -763,16 +992,20 @@ impl CachedFileShared {
             }
 
             let mut cache = self.page_cache.lock();
+            let data = batch.data.bytes()?;
             let mut data_offset = 0;
-            for pn in batch.pages {
-                let current_start = pn as u64 * PAGE_SIZE as u64;
-                let len = file_len.saturating_sub(current_start).min(PAGE_SIZE as u64) as usize;
-                if let Some(page) = cache.get_mut(&pn)
-                    && page.data()[..len] == batch.data[data_offset..data_offset + len]
+            for snapshot in batch.pages {
+                let end = data_offset + snapshot.len;
+                if let Some(page) = cache.get_mut(&snapshot.page_num)
+                    && page.dirty
+                    && page.content_generation == snapshot.content_generation
+                    && page.writable_mapping_generation == snapshot.writable_mapping_generation
+                    && (!snapshot.compare_contents
+                        || page.data()[..snapshot.len] == data[data_offset..end])
                 {
                     page.dirty = false;
                 }
-                data_offset += len;
+                data_offset = end;
             }
         }
 
@@ -825,6 +1058,33 @@ impl CachedFileShared {
             }
         }
         Ok(())
+    }
+
+    /// Invalidates cached pages changed by one direct write without writing
+    /// unrelated dirty pages back first.
+    ///
+    /// The caller holds `io_lock.write()` and has already flushed dirty pages
+    /// in this range. Bumping the generation rejects fills that started before
+    /// the direct write and would otherwise publish stale data afterwards.
+    pub(super) async fn discard_direct_write_range_without_writeback_async(
+        &self,
+        file: &FileNode,
+        offset: u64,
+        len: usize,
+    ) -> VfsResult<()> {
+        if len == 0 {
+            return Ok(());
+        }
+        let (first_page, end_page) = checked_dirty_page_range(offset, len)?;
+        self.cache_generation.fetch_add(1, Ordering::AcqRel);
+        let keys = self
+            .page_cache
+            .lock()
+            .iter()
+            .filter(|(pn, _)| **pn >= first_page && **pn < end_page)
+            .map(|(pn, _)| *pn)
+            .collect::<Vec<_>>();
+        self.discard_pages_without_writeback_async(file, keys).await
     }
 
     pub(super) async fn discard_all_pages_without_writeback_async(
@@ -1398,7 +1658,7 @@ impl CachedFile {
             let registration = group.register_direct_read(wanted)?;
             let read_result = {
                 // SAFETY: `group` is not visible outside this fill operation
-                // until the direct read has completed and its registration is
+                // until the direct read completes and its registration is
                 // dropped below.
                 let data = unsafe { group.bytes_mut(wanted)? };
                 file.read_at(data, page_start).await
@@ -1742,39 +2002,48 @@ impl CachedFile {
         let start_page = (offset / PAGE_SIZE as u64) as u32;
         let end_page = end.div_ceil(PAGE_SIZE as u64) as u32;
         let mut page_offset = (offset % PAGE_SIZE as u64) as usize;
-        let mut read = 0;
+        let mut read = 0usize;
         let sequential = self.read_hint.load(Ordering::Acquire) == offset;
-        for pn in start_page..end_page {
-            let page_start = pn as u64 * PAGE_SIZE as u64;
-            let page_end = (end - page_start).min(PAGE_SIZE as u64) as usize;
-            loop {
-                let hit = {
-                    // A resident page is stable while `page_cache` is held.
-                    // Cache fills and writes take page-access locks, and direct
-                    // I/O invalidation takes the exclusive `io_lock`.
-                    let _io_guard = self.shared.io_lock.read().await;
-                    let mut cache = self.shared.page_cache.lock();
-                    if let Some(page) = cache.get_mut(&pn) {
-                        let copied = page_end - page_offset;
-                        dst.write(&page.data()[page_offset..page_end])?;
-                        read += copied;
-                        true
-                    } else {
-                        false
+        let mut pn = start_page;
+        while pn < end_page {
+            let hit_pages = {
+                // A resident page is stable while `page_cache` is held. Keep
+                // the shared lock only for a bounded copy batch; cache fills
+                // and device waits happen after both guards are dropped.
+                let _io_guard = self.shared.io_lock.read().await;
+                let mut cache = self.shared.page_cache.lock();
+                let mut hit_pages = 0usize;
+                while pn < end_page && hit_pages < READ_COPY_BATCH_PAGES {
+                    let page_start = pn as u64 * PAGE_SIZE as u64;
+                    let page_end = (end - page_start).min(PAGE_SIZE as u64) as usize;
+                    let Some(page) = cache.get_mut(&pn) else {
+                        break;
+                    };
+                    let copied = page_end
+                        .checked_sub(page_offset)
+                        .ok_or(VfsError::BadState)?;
+                    let written = dst.write(&page.data()[page_offset..page_end])?;
+                    if written != copied {
+                        return Err(VfsError::Io);
                     }
-                };
-                if hit {
-                    crate::buildstorm_stat_inc!(PAGE_READ_HITS);
-                    break;
+                    read = read.checked_add(copied).ok_or(VfsError::Io)?;
+                    pn = pn.checked_add(1).ok_or(VfsError::StorageFull)?;
+                    page_offset = 0;
+                    hit_pages += 1;
                 }
-                crate::buildstorm_stat_inc!(PAGE_READ_MISSES);
-
-                // The page can be invalidated after a fill returns but before
-                // this task reacquires the read lock, so retry the lookup.
-                self.ensure_pages_async(file, pn, if sequential { READ_AHEAD_PAGES } else { 1 })
-                    .await?;
+                hit_pages
+            };
+            if hit_pages != 0 {
+                crate::buildstorm_stat_add!(PAGE_READ_HITS, hit_pages);
+                continue;
             }
-            page_offset = 0;
+
+            crate::buildstorm_stat_inc!(PAGE_READ_MISSES);
+            // The page can be invalidated after a fill returns but before this
+            // task reacquires the read lock, so retry this lookup on the next
+            // iteration rather than carrying a page reference across await.
+            self.ensure_pages_async(file, pn, if sequential { READ_AHEAD_PAGES } else { 1 })
+                .await?;
         }
         self.read_hint.store(end, Ordering::Release);
         Ok(read)
@@ -1811,7 +2080,7 @@ impl CachedFile {
                 .copy_from_slice(&data[copied..copied + len]);
             crate::buildstorm_stat_add!(PAGE_WRITE_BYTES, len);
             if !self.in_memory {
-                page.dirty = true;
+                page.mark_dirty();
             }
             drop(cache);
 
@@ -1823,6 +2092,75 @@ impl CachedFile {
         }
 
         Ok(copied)
+    }
+
+    async fn write_slice_chunk_with_access_async(
+        &self,
+        file: &FileNode,
+        data: &[u8],
+        offset: u64,
+        access: CachedWriteAccess,
+    ) -> VfsResult<usize> {
+        match access {
+            CachedWriteAccess::PageRange => {
+                let (start_page, page_count) = checked_page_span(offset, data.len())?;
+                debug_assert!(page_count <= MAX_WRITE_ACCESS_PAGES);
+                let page_locks = self
+                    .shared
+                    .page_access
+                    .locks_for_range(start_page, page_count)?;
+                let mut page_guards = heapless::Vec::<_, PAGE_ACCESS_LOCK_STRIPES>::new();
+                for &index in &page_locks {
+                    page_guards
+                        .push(self.shared.page_access.acquire_by_index(index).await)
+                        .map_err(|_| VfsError::StorageFull)?;
+                }
+                // Preserve the lock order: page access precedes the shared
+                // side of io_lock. Each chunk releases both before the next
+                // page range is acquired.
+                let _io_guard = self.shared.io_lock.read().await;
+                self.write_slice_at_locked_async(file, data, offset).await
+            }
+            // Atomic append already owns the exclusive side of io_lock, so no
+            // page-access lock is needed or safe to acquire here.
+            CachedWriteAccess::ExclusiveFileHeld => {
+                self.write_slice_at_locked_async(file, data, offset).await
+            }
+        }
+    }
+
+    async fn write_slice_locked_async(
+        &self,
+        data: &[u8],
+        offset: u64,
+        access: CachedWriteAccess,
+    ) -> VfsResult<usize> {
+        if data.is_empty() {
+            return Ok(0);
+        }
+        checked_page_span(offset, data.len())?;
+        let file = self.inner.entry().as_file()?;
+        let mut written = 0usize;
+        while written < data.len() {
+            let chunk_len = (data.len() - written).min(WRITE_STAGING_SIZE);
+            let current_offset = offset
+                .checked_add(written as u64)
+                .ok_or(VfsError::InvalidInput)?;
+            let result = self
+                .write_slice_chunk_with_access_async(
+                    file,
+                    &data[written..written + chunk_len],
+                    current_offset,
+                    access,
+                )
+                .await;
+            match result {
+                Ok(count) => written += count,
+                Err(err) if written == 0 => return Err(err),
+                Err(_) => break,
+            }
+        }
+        Ok(written)
     }
 
     async fn write_at_locked_async(
@@ -1854,34 +2192,9 @@ impl CachedFile {
             let current_offset = offset
                 .checked_add(written as u64)
                 .ok_or(VfsError::InvalidInput)?;
-            let result = match access {
-                CachedWriteAccess::PageRange => {
-                    let (start_page, page_count) = checked_page_span(current_offset, read)?;
-                    debug_assert!(page_count <= MAX_WRITE_ACCESS_PAGES);
-                    let page_locks = self
-                        .shared
-                        .page_access
-                        .locks_for_range(start_page, page_count)?;
-                    let mut page_guards = heapless::Vec::<_, PAGE_ACCESS_LOCK_STRIPES>::new();
-                    for &index in &page_locks {
-                        page_guards
-                            .push(self.shared.page_access.acquire_by_index(index).await)
-                            .map_err(|_| VfsError::StorageFull)?;
-                    }
-                    // Preserve the lock order: page access precedes the
-                    // shared side of `io_lock`. Each chunk releases both before
-                    // acquiring the next page range.
-                    let _io_guard = self.shared.io_lock.read().await;
-                    self.write_slice_at_locked_async(file, &staging[..read], current_offset)
-                        .await
-                }
-                // Atomic append already owns the exclusive side of `io_lock`,
-                // so no page-access lock is needed or safe to acquire here.
-                CachedWriteAccess::ExclusiveFileHeld => {
-                    self.write_slice_at_locked_async(file, &staging[..read], current_offset)
-                        .await
-                }
-            };
+            let result = self
+                .write_slice_chunk_with_access_async(file, &staging[..read], current_offset, access)
+                .await;
             match result {
                 Ok(count) => written += count,
                 Err(err) if written == 0 => return Err(err),
@@ -1896,11 +2209,28 @@ impl CachedFile {
             .await
     }
 
+    pub async fn write_at_slice_async(&self, data: &[u8], offset: u64) -> VfsResult<usize> {
+        self.write_slice_locked_async(data, offset, CachedWriteAccess::PageRange)
+            .await
+    }
+
     pub async fn append_async(&self, buf: impl Read + IoBuf) -> VfsResult<(usize, u64)> {
         let _guard = self.shared.io_lock.write().await;
         let len = self.shared.size();
         let written = self
             .write_at_locked_async(buf, len, CachedWriteAccess::ExclusiveFileHeld)
+            .await?;
+        let end = len
+            .checked_add(written as u64)
+            .ok_or(VfsError::InvalidInput)?;
+        Ok((written, end))
+    }
+
+    pub async fn append_slice_async(&self, data: &[u8]) -> VfsResult<(usize, u64)> {
+        let _guard = self.shared.io_lock.write().await;
+        let len = self.shared.size();
+        let written = self
+            .write_slice_locked_async(data, len, CachedWriteAccess::ExclusiveFileHeld)
             .await?;
         let end = len
             .checked_add(written as u64)
@@ -2049,6 +2379,7 @@ impl CachedFile {
             if page.paddr() != paddr || !page.has_user_mapping() {
                 return Err(VfsError::BadState);
             }
+            page.writable_mapping_generation = page.writable_mapping_generation.wrapping_add(1);
             page.may_write_mapping = true;
             Ok(())
         })
@@ -2080,7 +2411,7 @@ mod tests {
             checked_shared_page_count,
         },
         CachedFileShared, MAX_WRITE_ACCESS_PAGES, PAGE_ACCESS_LOCK_STRIPES, PAGE_SIZE,
-        PageAccessDomain, WRITE_STAGING_SIZE, checked_page_span,
+        PageAccessDomain, WRITE_STAGING_SIZE, checked_dirty_page_range, checked_page_span,
     };
 
     #[test]
@@ -2151,6 +2482,19 @@ mod tests {
         assert_eq!(
             domain.locks_for_range(u32::MAX - 1, 3).map(drop),
             Err(VfsError::StorageFull)
+        );
+    }
+
+    #[test]
+    fn direct_read_dirty_ranges_cover_each_overlapping_page() {
+        assert_eq!(checked_dirty_page_range(0, PAGE_SIZE), Ok((0, 1)));
+        assert_eq!(
+            checked_dirty_page_range((PAGE_SIZE - 1) as u64, 2),
+            Ok((0, 2))
+        );
+        assert_eq!(
+            checked_dirty_page_range(u64::MAX, 1),
+            Err(VfsError::InvalidInput)
         );
     }
 
