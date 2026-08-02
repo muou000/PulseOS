@@ -73,13 +73,21 @@ impl WriteScopeRegistry {
 const BLOCK_CACHE_STRIPES: usize = 16;
 const DIRTY_OWNER_SHARDS: usize = BLOCK_CACHE_STRIPES;
 const WRITE_SCOPE_SHARDS: usize = 32;
-const CACHE_CAPACITY_PER_STRIPE: usize = 32;
+// Keep a bounded 4 MiB metadata/block cache for the common 4 KiB ext4 layout.
+// Thirty-two entries per stripe evicted inode tables, bitmaps, and directory
+// blocks too aggressively during metadata-heavy builds; doubling this remains
+// small relative to the guest memory budget and avoids dirty-eviction copies.
+const CACHE_CAPACITY_PER_STRIPE: usize = 64;
 const CACHE_EVICTION_SCAN_LIMIT: usize = 64;
 const DEVICE_READ_MAX_ATTEMPTS: usize = 2;
 const FLUSH_BATCH_BLOCKS: usize = 32;
 const FLUSH_WRITE_CONCURRENCY: usize = 4;
-const IO_RANGE_LOCK_BUCKETS: usize = 128;
-const IO_RANGE_LOCK_BUCKET_BLOCKS: usize = 64;
+// One range-lock bucket covers one maximum coalesced metadata flush. This lets
+// adjacent non-overlapping flush batches use the configured concurrency rather
+// than serializing every pair in the same 64-block bucket. Doubling the table
+// preserves the previous 8192-block modulo coverage for distant I/O ranges.
+const IO_RANGE_LOCK_BUCKETS: usize = 256;
+const IO_RANGE_LOCK_BUCKET_BLOCKS: usize = FLUSH_BATCH_BLOCKS;
 
 fn write_scope_shard(id: u64) -> usize {
     (id as usize ^ (id >> 32) as usize) % WRITE_SCOPE_SHARDS
@@ -1501,6 +1509,18 @@ mod tests {
             batches[2],
             alloc::vec![(FLUSH_BATCH_BLOCKS + 2) * block_size]
         );
+    }
+
+    #[test]
+    fn adjacent_flush_batches_use_independent_range_locks() {
+        const BLOCK_SIZE: usize = 4096;
+        let batch_len = FLUSH_BATCH_BLOCKS * BLOCK_SIZE;
+        let first = io_range_lock_indices(0, batch_len, BLOCK_SIZE).unwrap();
+        let second = io_range_lock_indices(batch_len, batch_len, BLOCK_SIZE).unwrap();
+
+        assert_eq!(first.len(), 1);
+        assert_eq!(second.len(), 1);
+        assert_ne!(first.get(0), second.get(0));
     }
 
     #[test]
