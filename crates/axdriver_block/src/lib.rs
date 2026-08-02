@@ -22,12 +22,19 @@ use core::{
 pub use axdriver_base::{BaseDriverOps, DevError, DevResult, DeviceType};
 use spin::Mutex;
 
-struct OwnedReadBufferEntry {
-    id: u64,
-    range: Arc<OwnedReadBufferRange>,
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum OwnedBufferDirection {
+    Read,
+    Write,
 }
 
-struct OwnedReadBufferRange {
+struct OwnedBufferEntry {
+    id: u64,
+    direction: OwnedBufferDirection,
+    range: Arc<OwnedBufferRange>,
+}
+
+struct OwnedBufferRange {
     start: usize,
     end: usize,
     claim_start: AtomicUsize,
@@ -36,10 +43,100 @@ struct OwnedReadBufferRange {
     _owner: Arc<dyn Any + Send + Sync>,
 }
 
-static OWNED_READ_BUFFERS: Mutex<BTreeMap<usize, OwnedReadBufferEntry>> =
-    Mutex::new(BTreeMap::new());
-static OWNED_READ_BUFFER_COUNT: AtomicUsize = AtomicUsize::new(0);
-static NEXT_OWNED_READ_BUFFER_ID: AtomicU64 = AtomicU64::new(1);
+// Both directions share one range registry so a source cannot accidentally be
+// registered for a device read and write at the same time.
+static OWNED_DMA_BUFFERS: Mutex<BTreeMap<usize, OwnedBufferEntry>> = Mutex::new(BTreeMap::new());
+static OWNED_DMA_BUFFER_COUNT: AtomicUsize = AtomicUsize::new(0);
+static NEXT_OWNED_DMA_BUFFER_ID: AtomicU64 = AtomicU64::new(1);
+
+fn unregister_owned_buffer(id: u64, start: usize) {
+    let mut buffers = OWNED_DMA_BUFFERS.lock();
+    if buffers.get(&start).is_some_and(|entry| entry.id == id) {
+        buffers.remove(&start);
+        OWNED_DMA_BUFFER_COUNT.fetch_sub(1, Ordering::Release);
+    }
+}
+
+fn register_owned_buffer<T>(
+    direction: OwnedBufferDirection,
+    start: NonNull<u8>,
+    len: usize,
+    owner: Arc<T>,
+) -> DevResult<(u64, usize)>
+where
+    T: Any + Send + Sync,
+{
+    if len == 0 {
+        return Err(DevError::InvalidParam);
+    }
+    let start = start.as_ptr() as usize;
+    let end = start.checked_add(len).ok_or(DevError::InvalidParam)?;
+    let mut buffers = OWNED_DMA_BUFFERS.lock();
+    let overlaps_predecessor = buffers
+        .range(..=start)
+        .next_back()
+        .is_some_and(|(_, entry)| start < entry.range.end);
+    let overlaps_successor = buffers
+        .range(start..)
+        .next()
+        .is_some_and(|(_, entry)| entry.range.start < end);
+    if overlaps_predecessor || overlaps_successor {
+        return Err(DevError::ResourceBusy);
+    }
+    let id = NEXT_OWNED_DMA_BUFFER_ID.fetch_add(1, Ordering::Relaxed);
+    if id == 0 {
+        return Err(DevError::BadState);
+    }
+    buffers.insert(
+        start,
+        OwnedBufferEntry {
+            id,
+            direction,
+            range: Arc::new(OwnedBufferRange {
+                start,
+                end,
+                claim_start: AtomicUsize::new(0),
+                claim_len: AtomicUsize::new(0),
+                claimed: AtomicBool::new(false),
+                _owner: owner,
+            }),
+        },
+    );
+    OWNED_DMA_BUFFER_COUNT.fetch_add(1, Ordering::Release);
+    Ok((id, start))
+}
+
+fn claim_owned_buffer(
+    direction: OwnedBufferDirection,
+    buffer: NonNull<[u8]>,
+) -> Option<Arc<OwnedBufferRange>> {
+    if OWNED_DMA_BUFFER_COUNT.load(Ordering::Acquire) == 0 {
+        return None;
+    }
+    let len = buffer.len();
+    if len == 0 {
+        return None;
+    }
+    let start = buffer.as_ptr() as *mut u8 as usize;
+    let end = start.checked_add(len)?;
+    let buffers = OWNED_DMA_BUFFERS.lock();
+    let entry = buffers
+        .range(..=start)
+        .next_back()
+        .map(|(_, entry)| entry)
+        .filter(|entry| entry.direction == direction && end <= entry.range.end)?;
+    if entry
+        .range
+        .claimed
+        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+        .is_err()
+    {
+        return None;
+    }
+    entry.range.claim_start.store(start, Ordering::Relaxed);
+    entry.range.claim_len.store(len, Ordering::Release);
+    Some(entry.range.clone())
+}
 
 /// Keeps a registered DMA-readable destination alive until its registration is
 /// dropped.
@@ -55,14 +152,24 @@ pub struct OwnedReadBufferRegistration {
 
 impl Drop for OwnedReadBufferRegistration {
     fn drop(&mut self) {
-        let mut buffers = OWNED_READ_BUFFERS.lock();
-        if buffers
-            .get(&self.start)
-            .is_some_and(|entry| entry.id == self.id)
-        {
-            buffers.remove(&self.start);
-            OWNED_READ_BUFFER_COUNT.fetch_sub(1, Ordering::Release);
-        }
+        unregister_owned_buffer(self.id, self.start);
+    }
+}
+
+/// Keeps a registered DMA-readable source alive until its registration is
+/// dropped.
+///
+/// The block driver turns a matching source into an [`OwnedWriteBufferLease`]
+/// before it submits the descriptor chain. The lease owns a clone of the
+/// backing allocation through normal completion or cancellation.
+pub struct OwnedWriteBufferRegistration {
+    id: u64,
+    start: usize,
+}
+
+impl Drop for OwnedWriteBufferRegistration {
+    fn drop(&mut self) {
+        unregister_owned_buffer(self.id, self.start);
     }
 }
 
@@ -72,7 +179,7 @@ impl Drop for OwnedReadBufferRegistration {
 /// device has stopped accessing the buffer, including when the waiting future
 /// is cancelled.
 pub struct OwnedReadBufferLease {
-    range: Arc<OwnedReadBufferRange>,
+    range: Arc<OwnedBufferRange>,
 }
 
 // SAFETY: Registration requires the owner to keep this stable memory range
@@ -114,6 +221,52 @@ impl Drop for OwnedReadBufferLease {
     }
 }
 
+/// A request-owned reference to a registered direct-write source.
+///
+/// The driver retains this lease in its pending-request table until the device
+/// has finished reading the source bytes, including when the waiting future is
+/// cancelled.
+pub struct OwnedWriteBufferLease {
+    range: Arc<OwnedBufferRange>,
+}
+
+// SAFETY: Registration requires an immutable, stable source range. The lease
+// only exposes a shared slice and retains the owner until DMA completion.
+unsafe impl Send for OwnedWriteBufferLease {}
+unsafe impl Sync for OwnedWriteBufferLease {}
+
+impl OwnedWriteBufferLease {
+    /// Returns the registered subrange length.
+    pub fn len(&self) -> usize {
+        self.range.claim_len.load(Ordering::Acquire)
+    }
+
+    /// Returns whether the registered subrange is empty.
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// Exposes the immutable source while the request owns its DMA lifetime.
+    ///
+    /// # Safety
+    ///
+    /// No mutable access to the source may occur while the device can still
+    /// read it. Registration and the lease ownership contract enforce that for
+    /// the direct-write call sites.
+    pub unsafe fn as_slice(&self) -> &[u8] {
+        let len = self.range.claim_len.load(Ordering::Acquire);
+        let start = self.range.claim_start.load(Ordering::Relaxed);
+        // SAFETY: Guaranteed by the registration and caller contracts.
+        unsafe { core::slice::from_raw_parts(start as *const u8, len) }
+    }
+}
+
+impl Drop for OwnedWriteBufferLease {
+    fn drop(&mut self) {
+        self.range.claimed.store(false, Ordering::Release);
+    }
+}
+
 /// Registers a physically contiguous destination for cancellation-safe direct
 /// block reads.
 ///
@@ -139,42 +292,7 @@ pub unsafe fn register_owned_read_buffer<T>(
 where
     T: Any + Send + Sync,
 {
-    if len == 0 {
-        return Err(DevError::InvalidParam);
-    }
-    let start = start.as_ptr() as usize;
-    let end = start.checked_add(len).ok_or(DevError::InvalidParam)?;
-    let mut buffers = OWNED_READ_BUFFERS.lock();
-    let overlaps_predecessor = buffers
-        .range(..=start)
-        .next_back()
-        .is_some_and(|(_, entry)| start < entry.range.end);
-    let overlaps_successor = buffers
-        .range(start..)
-        .next()
-        .is_some_and(|(_, entry)| entry.range.start < end);
-    if overlaps_predecessor || overlaps_successor {
-        return Err(DevError::ResourceBusy);
-    }
-    let id = NEXT_OWNED_READ_BUFFER_ID.fetch_add(1, Ordering::Relaxed);
-    if id == 0 {
-        return Err(DevError::BadState);
-    }
-    buffers.insert(
-        start,
-        OwnedReadBufferEntry {
-            id,
-            range: Arc::new(OwnedReadBufferRange {
-                start,
-                end,
-                claim_start: AtomicUsize::new(0),
-                claim_len: AtomicUsize::new(0),
-                claimed: AtomicBool::new(false),
-                _owner: owner,
-            }),
-        },
-    );
-    OWNED_READ_BUFFER_COUNT.fetch_add(1, Ordering::Release);
+    let (id, start) = register_owned_buffer(OwnedBufferDirection::Read, start, len, owner)?;
     Ok(OwnedReadBufferRegistration { id, start })
 }
 
@@ -183,34 +301,44 @@ where
 /// Returns `None` for ordinary borrowed buffers, which keeps the existing
 /// request-owned bounce-buffer path as the safe fallback.
 pub fn claim_owned_read_buffer(buffer: NonNull<[u8]>) -> Option<OwnedReadBufferLease> {
-    if OWNED_READ_BUFFER_COUNT.load(Ordering::Acquire) == 0 {
-        return None;
-    }
-    let len = buffer.len();
-    if len == 0 {
-        return None;
-    }
-    let start = buffer.as_ptr() as *mut u8 as usize;
-    let end = start.checked_add(len)?;
-    let buffers = OWNED_READ_BUFFERS.lock();
-    let entry = buffers
-        .range(..=start)
-        .next_back()
-        .map(|(_, entry)| entry)
-        .filter(|entry| end <= entry.range.end)?;
-    if entry
-        .range
-        .claimed
-        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-        .is_err()
-    {
-        return None;
-    }
-    entry.range.claim_start.store(start, Ordering::Relaxed);
-    entry.range.claim_len.store(len, Ordering::Release);
-    Some(OwnedReadBufferLease {
-        range: entry.range.clone(),
-    })
+    claim_owned_buffer(OwnedBufferDirection::Read, buffer)
+        .map(|range| OwnedReadBufferLease { range })
+}
+
+/// Registers a physically contiguous immutable source for cancellation-safe
+/// direct block writes.
+///
+/// The registered range may be claimed in smaller subranges. Claims clone the
+/// owner, extending allocation lifetime independently of the registration.
+///
+/// # Safety
+///
+/// - `start..start + len` must remain valid, readable, and stable until both
+///   the registration and all driver leases are dropped.
+/// - The range must be physically contiguous because the current VirtIO queue
+///   describes it with one data descriptor.
+/// - Safe code must not mutate the range while a write using this registration
+///   may be in flight, including after the waiting future is cancelled.
+/// - The allocation represented by `owner` must cover the entire range.
+pub unsafe fn register_owned_write_buffer<T>(
+    start: NonNull<u8>,
+    len: usize,
+    owner: Arc<T>,
+) -> DevResult<OwnedWriteBufferRegistration>
+where
+    T: Any + Send + Sync,
+{
+    let (id, start) = register_owned_buffer(OwnedBufferDirection::Write, start, len, owner)?;
+    Ok(OwnedWriteBufferRegistration { id, start })
+}
+
+/// Claims a registered range for one direct block write.
+///
+/// Ordinary borrowed sources return `None` and continue through the driver's
+/// request-owned bounce-buffer path.
+pub fn claim_owned_write_buffer(buffer: NonNull<[u8]>) -> Option<OwnedWriteBufferLease> {
+    claim_owned_buffer(OwnedBufferDirection::Write, buffer)
+        .map(|range| OwnedWriteBufferLease { range })
 }
 
 /// Operations that require a block storage device driver to implement.
@@ -434,6 +562,32 @@ mod tests {
     }
 
     #[test]
+    fn registered_write_subrange_keeps_owner_alive_after_guard_drop() {
+        assert_eq!(
+            core::mem::size_of::<OwnedWriteBufferLease>(),
+            core::mem::size_of::<usize>()
+        );
+        let (owner, ptr, drops) = test_owner(128);
+        let registration = unsafe {
+            register_owned_write_buffer(ptr, 128, owner.clone()).expect("registration failed")
+        };
+        let subrange = NonNull::slice_from_raw_parts(
+            NonNull::new(unsafe { ptr.as_ptr().add(32) }).unwrap(),
+            64,
+        );
+        let lease = claim_owned_write_buffer(subrange).expect("registered subrange not claimed");
+        assert!(claim_owned_write_buffer(subrange).is_none());
+
+        drop(registration);
+        drop(owner);
+        assert_eq!(drops.load(Ordering::Relaxed), 0);
+        assert!(unsafe { lease.as_slice() }.iter().all(|byte| *byte == 0));
+        drop(lease);
+        assert_eq!(drops.load(Ordering::Relaxed), 1);
+        assert!(claim_owned_write_buffer(subrange).is_none());
+    }
+
+    #[test]
     fn overlapping_registration_is_rejected() {
         let (owner, ptr, _) = test_owner(64);
         let registration = unsafe {
@@ -442,6 +596,19 @@ mod tests {
         let overlap = NonNull::new(unsafe { ptr.as_ptr().add(16) }).unwrap();
         assert!(matches!(
             unsafe { register_owned_read_buffer(overlap, 16, owner) },
+            Err(DevError::ResourceBusy)
+        ));
+        drop(registration);
+    }
+
+    #[test]
+    fn read_and_write_registrations_cannot_overlap() {
+        let (owner, ptr, _) = test_owner(64);
+        let registration = unsafe {
+            register_owned_read_buffer(ptr, 64, owner.clone()).expect("registration failed")
+        };
+        assert!(matches!(
+            unsafe { register_owned_write_buffer(ptr, 64, owner) },
             Err(DevError::ResourceBusy)
         ));
         drop(registration);
