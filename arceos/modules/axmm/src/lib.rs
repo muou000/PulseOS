@@ -12,7 +12,7 @@ mod backend;
 use axalloc::init_frame_table;
 use axerrno::{AxError, AxResult};
 use axhal::{
-    mem::{MemRegionFlags, phys_to_virt},
+    mem::{MemRegionFlags, PhysMemRegion, phys_to_virt},
     paging::MappingFlags,
 };
 use kspin::SpinNoIrq;
@@ -115,6 +115,33 @@ pub fn cow_dec_frame_ref(frame: PhysAddr) {
     backend::cow_dec_frame_ref(frame);
 }
 
+fn frame_table_bounds(
+    regions: impl IntoIterator<Item = PhysMemRegion>,
+) -> Option<(PhysAddr, PhysAddr)> {
+    let mut max_paddr = PhysAddr::from(0);
+    let mut min_paddr = PhysAddr::from(usize::MAX);
+
+    for region in regions {
+        // The allocator can return every FREE region, including RAM below a
+        // platform's main high-memory window. Keep reference counts for all
+        // such frames so COW and pinned mappings can release them correctly.
+        if !region.flags.contains(MemRegionFlags::FREE) {
+            continue;
+        }
+
+        let start = region.paddr.align_down_4k();
+        let end = (region.paddr + region.size).align_up_4k();
+        if start < min_paddr {
+            min_paddr = start;
+        }
+        if end > max_paddr {
+            max_paddr = end;
+        }
+    }
+
+    (max_paddr > min_paddr).then_some((min_paddr, max_paddr))
+}
+
 /// Initializes virtual memory management.
 ///
 /// It mainly sets up the kernel virtual memory address space and recreate a
@@ -122,46 +149,19 @@ pub fn cow_dec_frame_ref(frame: PhysAddr) {
 pub fn init_memory_management() {
     info!("Initialize virtual memory management...");
 
-    let mut max_paddr = PhysAddr::from(0);
-    let mut min_paddr = PhysAddr::from(usize::MAX);
-    
-    // Only include regions that are part of the main RAM.
-    // We use PHYS_MEMORY_BASE and SIZE as a guide to filter out MMIO.
-    let ram_start = PhysAddr::from(axconfig::plat::PHYS_MEMORY_BASE);
-    let ram_end = ram_start + axconfig::plat::PHYS_MEMORY_SIZE;
+    let (min_paddr, max_paddr) =
+        frame_table_bounds(axhal::mem::memory_regions()).unwrap_or_else(|| {
+            let start = PhysAddr::from(axconfig::plat::PHYS_MEMORY_BASE);
+            (start, start + axconfig::plat::PHYS_MEMORY_SIZE)
+        });
 
-    for r in axhal::mem::memory_regions() {
-        let start = r.paddr;
-        let end = r.paddr + r.size;
-        
-        // Filter: only include regions that overlap with RAM.
-        if end <= ram_start || start >= ram_end {
-            continue;
-        }
-        
-        let intersect_start = if start < ram_start { ram_start } else { start };
-        let intersect_end = if end > ram_end { ram_end } else { end };
-
-        if intersect_start < min_paddr {
-            min_paddr = intersect_start;
-        }
-        if intersect_end > max_paddr {
-            max_paddr = intersect_end;
-        }
-    }
-    
-    if max_paddr <= min_paddr {
-        // Fallback if no regions found
-        min_paddr = ram_start;
-        max_paddr = ram_end;
-    }
-    
     let total_memory_size = max_paddr.as_usize() - min_paddr.as_usize();
-    info!("FrameTable: range [{:#x}, {:#x}), size {:#x}", min_paddr, max_paddr, total_memory_size);
+    info!(
+        "FrameTable: range [{:#x}, {:#x}), size {:#x}",
+        min_paddr, max_paddr, total_memory_size
+    );
 
     init_frame_table(min_paddr, total_memory_size);
-
-
 
     let kernel_aspace = new_kernel_aspace().expect("failed to initialize kernel address space");
     debug!("kernel address space init OK: {:#x?}", kernel_aspace);
@@ -169,6 +169,25 @@ pub fn init_memory_management() {
     unsafe {
         axhal::asm::write_kernel_page_table(kernel_page_table_root());
         axhal::asm::flush_tlb(None);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use axhal::mem::PhysMemRegion;
+    use memory_addr::PhysAddr;
+
+    use super::frame_table_bounds;
+
+    #[test]
+    fn frame_table_bounds_include_discontiguous_free_ram() {
+        let low = PhysMemRegion::new_ram(0x1_000, 0x0fff_f000, "low RAM");
+        let reserved = PhysMemRegion::new_reserved(0x1000_0000, 0x1000, "mmio hole");
+        let high = PhysMemRegion::new_ram(0x8000_0000, 0x1000_0000, "high RAM");
+
+        let (start, end) = frame_table_bounds([low, reserved, high]).unwrap();
+        assert_eq!(start, PhysAddr::from(0x1_000));
+        assert_eq!(end, PhysAddr::from(0x9000_0000));
     }
 }
 
