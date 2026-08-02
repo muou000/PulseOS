@@ -625,12 +625,9 @@ impl Backend {
             *slot = Some((index, candidate_addr));
             candidate_count += 1;
         }
-        let Some((_, last_addr)) = candidate_count
-            .checked_sub(1)
-            .and_then(|index| candidates[index])
-        else {
+        if candidate_count == 0 {
             return false;
-        };
+        }
 
         let private_write = !mapping.shared
             && orig_flags.contains(MappingFlags::WRITE)
@@ -657,15 +654,11 @@ impl Backend {
             None
         };
 
-        let range_size = last_addr
-            .checked_add(PAGE_SIZE_4K)
-            .map(|end| end - page_addr)
-            .unwrap_or(PAGE_SIZE_4K);
-        let mut pt_guard = pt.lock_for_range(page_addr, range_size);
         let mut requested_handled = false;
         let mut mapped_executable = false;
         for (index, candidate_addr) in candidates[..candidate_count].iter().flatten().copied() {
             let requested = candidate_addr == page_addr;
+            let mut pt_guard = pt.lock_for_addr(candidate_addr);
             if let Ok((current, current_flags, _)) = pt_guard.query(candidate_addr)
                 && current.as_usize() != 0
             {
@@ -701,6 +694,7 @@ impl Backend {
                 continue;
             };
             tlb.flush();
+            drop(pt_guard);
             mapped_executable |= map_flags.contains(MappingFlags::EXECUTE);
             if use_private_frame {
                 private_frame.take();
@@ -711,7 +705,6 @@ impl Backend {
                 requested_handled = true;
             }
         }
-        drop(pt_guard);
         if let Some(frame) = private_frame {
             dealloc_frame(frame);
         }
