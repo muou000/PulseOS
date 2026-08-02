@@ -10,6 +10,24 @@ use super::{
     get_socket,
 };
 
+const MMSGHDR_SIZE: usize = core::mem::size_of::<linux_raw_sys::net::mmsghdr>();
+const MMSGHDR_MSG_LEN_OFFSET: usize = core::mem::offset_of!(linux_raw_sys::net::mmsghdr, msg_len);
+const MAX_MMSG_VLEN: usize = linux_raw_sys::general::UIO_MAXIOV as usize;
+
+fn reserve_additional(buffer: &mut Vec<u8>, additional: usize) -> Result<(), LinuxError> {
+    buffer
+        .try_reserve(additional)
+        .map_err(|_| LinuxError::ENOMEM)
+}
+
+fn mmsghdr_addr(msgvec: usize, index: usize) -> Result<usize, LinuxError> {
+    let offset = index.checked_mul(MMSGHDR_SIZE).ok_or(LinuxError::EFAULT)?;
+    let addr = msgvec.checked_add(offset).ok_or(LinuxError::EFAULT)?;
+    addr.checked_add(MMSGHDR_SIZE - 1)
+        .ok_or(LinuxError::EFAULT)?;
+    Ok(addr)
+}
+
 fn read_user_plain<T: Copy>(user_addr: usize) -> Result<T, LinuxError> {
     crate::impls::utils::with_process(|process| {
         pulse_core::task::uaccess::read_user_plain(process, user_addr)
@@ -95,7 +113,8 @@ pub fn sys_sendto(
     impl<'a> Drop for TemporaryNonblocking<'a> {
         fn drop(&mut self) {
             if self.active {
-                self.socket.set_nonblocking_inner(self.originally_nonblocking);
+                self.socket
+                    .set_nonblocking_inner(self.originally_nonblocking);
             }
         }
     }
@@ -128,11 +147,19 @@ pub fn sys_sendto(
                     let mut std_addr = core::net::SocketAddr::from(net_addr);
                     if let core::net::SocketAddr::V4(v4) = &mut std_addr {
                         if v4.ip().is_unspecified() {
-                            *v4 = core::net::SocketAddrV4::new(core::net::Ipv4Addr::new(127, 0, 0, 1), v4.port());
+                            *v4 = core::net::SocketAddrV4::new(
+                                core::net::Ipv4Addr::new(127, 0, 0, 1),
+                                v4.port(),
+                            );
                         }
                     } else if let core::net::SocketAddr::V6(v6) = &mut std_addr {
                         if v6.ip().is_unspecified() {
-                            *v6 = core::net::SocketAddrV6::new(core::net::Ipv6Addr::new(0, 0, 0, 0, 0, 0, 0, 1), v6.port(), v6.flowinfo(), v6.scope_id());
+                            *v6 = core::net::SocketAddrV6::new(
+                                core::net::Ipv6Addr::new(0, 0, 0, 0, 0, 0, 0, 1),
+                                v6.port(),
+                                v6.flowinfo(),
+                                v6.scope_id(),
+                            );
                         }
                     }
                     dest_addr = Some(std_addr);
@@ -145,7 +172,11 @@ pub fn sys_sendto(
     // Handle MSG_MORE (0x8000)
     let msg_more = (flags & 0x8000) != 0;
     if msg_more {
-        socket.pending_send.lock().extend_from_slice(&tmp);
+        let mut pending = socket.pending_send.lock();
+        if let Err(e) = reserve_additional(&mut pending, tmp.len()) {
+            return -(e.code() as isize);
+        }
+        pending.extend_from_slice(&tmp);
         if let Some(daddr) = dest_addr {
             *socket.pending_addr.lock() = Some(daddr);
         }
@@ -158,6 +189,9 @@ pub fn sys_sendto(
     let data: &[u8] = if pending.is_empty() {
         &tmp
     } else {
+        if let Err(e) = reserve_additional(&mut pending, tmp.len()) {
+            return -(e.code() as isize);
+        }
         combined_data = core::mem::take(&mut *pending);
         combined_data.extend_from_slice(&tmp);
         &combined_data
@@ -167,9 +201,7 @@ pub fn sys_sendto(
     let final_dest_addr = dest_addr.or_else(|| socket.pending_addr.lock().take());
 
     let result = match &socket.inner {
-        SocketInner::Tcp(s) => s
-            .send(data)
-            .map_err(|e| LinuxError::from(e.canonicalize())),
+        SocketInner::Tcp(s) => s.send(data).map_err(|e| LinuxError::from(e.canonicalize())),
         SocketInner::Udp(s) => {
             if (flags & 1) != 0 {
                 // MSG_OOB
@@ -180,8 +212,7 @@ pub fn sys_sendto(
                 s.send_to(data, daddr)
                     .map_err(|e| LinuxError::from(e.canonicalize()))
             } else {
-                s.send(data)
-                    .map_err(|e| LinuxError::from(e.canonicalize()))
+                s.send(data).map_err(|e| LinuxError::from(e.canonicalize()))
             }
         }
         SocketInner::Local(s) => s.write(data),
@@ -258,7 +289,8 @@ pub fn sys_recvfrom(
     impl<'a> Drop for TemporaryNonblocking<'a> {
         fn drop(&mut self) {
             if self.active {
-                self.socket.set_nonblocking_inner(self.originally_nonblocking);
+                self.socket
+                    .set_nonblocking_inner(self.originally_nonblocking);
             }
         }
     }
@@ -310,7 +342,8 @@ pub fn sys_recvfrom(
                         let mut nladdr = [0u8; 12];
                         nladdr[0..2].copy_from_slice(&16u16.to_ne_bytes()); // nl_family = 16 (AF_NETLINK)
                         let to_write = core::cmp::min(current_len as usize, 12);
-                        if crate::impls::utils::write_user_bytes(addr, &nladdr[..to_write]).is_ok() {
+                        if crate::impls::utils::write_user_bytes(addr, &nladdr[..to_write]).is_ok()
+                        {
                             let _ = write_user_plain(addrlen, &(to_write as u32));
                         }
                     }
@@ -335,11 +368,7 @@ struct MsgHdr {
     msg_flags: u32,
 }
 
-fn do_sendmsg_core(
-    socket: &Socket,
-    msg: usize,
-    flags: usize,
-) -> Result<usize, LinuxError> {
+fn do_sendmsg_core(socket: &Socket, msg: usize, flags: usize) -> Result<usize, LinuxError> {
     if msg == 0 {
         return Err(LinuxError::EFAULT);
     }
@@ -358,11 +387,18 @@ fn do_sendmsg_core(
         warn!("sys_sendmsg: ancillary data (cmsg) is not supported, ignoring");
     }
 
-    let iovecs = crate::impls::utils::read_user_iovec_array(msg_hdr.msg_iov as usize, msg_hdr.msg_iovlen)?;
+    let iovecs =
+        crate::impls::utils::read_user_iovec_array(msg_hdr.msg_iov as usize, msg_hdr.msg_iovlen)?;
 
-    // Flatten iov segments.
-    let total_len: usize = iovecs.iter().map(|iov| iov.iov_len as usize).sum();
-    let mut flat: Vec<u8> = Vec::with_capacity(total_len);
+    // Flatten iov segments without allowing the user supplied lengths to wrap
+    // or force an infallible allocation.
+    let mut total_len = 0usize;
+    for iov in &iovecs {
+        let iov_len = usize::try_from(iov.iov_len).map_err(|_| LinuxError::EINVAL)?;
+        total_len = total_len.checked_add(iov_len).ok_or(LinuxError::EINVAL)?;
+    }
+    let mut flat = Vec::new();
+    reserve_additional(&mut flat, total_len)?;
     for iov in iovecs {
         let iov_len = match usize::try_from(iov.iov_len) {
             Ok(l) => l,
@@ -392,11 +428,19 @@ fn do_sendmsg_core(
             let mut std_addr = core::net::SocketAddr::from(net_addr);
             if let core::net::SocketAddr::V4(v4) = &mut std_addr {
                 if v4.ip().is_unspecified() {
-                    *v4 = core::net::SocketAddrV4::new(core::net::Ipv4Addr::new(127, 0, 0, 1), v4.port());
+                    *v4 = core::net::SocketAddrV4::new(
+                        core::net::Ipv4Addr::new(127, 0, 0, 1),
+                        v4.port(),
+                    );
                 }
             } else if let core::net::SocketAddr::V6(v6) = &mut std_addr {
                 if v6.ip().is_unspecified() {
-                    *v6 = core::net::SocketAddrV6::new(core::net::Ipv6Addr::new(0, 0, 0, 0, 0, 0, 0, 1), v6.port(), v6.flowinfo(), v6.scope_id());
+                    *v6 = core::net::SocketAddrV6::new(
+                        core::net::Ipv6Addr::new(0, 0, 0, 0, 0, 0, 0, 1),
+                        v6.port(),
+                        v6.flowinfo(),
+                        v6.scope_id(),
+                    );
                 }
             }
             resolved_addr = Some(std_addr);
@@ -407,7 +451,9 @@ fn do_sendmsg_core(
     let flat_len = flat.len();
     let msg_more = (flags & 0x8000) != 0;
     if msg_more {
-        socket.pending_send.lock().extend_from_slice(&flat);
+        let mut pending = socket.pending_send.lock();
+        reserve_additional(&mut pending, flat.len())?;
+        pending.extend_from_slice(&flat);
         if let Some(daddr) = resolved_addr {
             *socket.pending_addr.lock() = Some(daddr);
         }
@@ -420,6 +466,7 @@ fn do_sendmsg_core(
         if pending.is_empty() {
             combined_data = flat;
         } else {
+            reserve_additional(&mut pending, flat.len())?;
             combined_data = core::mem::take(&mut *pending);
             combined_data.extend_from_slice(&flat);
         }
@@ -481,7 +528,8 @@ pub fn sys_sendmsg(fd: usize, msg: usize, flags: usize) -> isize {
     impl<'a> Drop for TemporaryNonblocking<'a> {
         fn drop(&mut self) {
             if self.active {
-                self.socket.set_nonblocking_inner(self.originally_nonblocking);
+                self.socket
+                    .set_nonblocking_inner(self.originally_nonblocking);
             }
         }
     }
@@ -500,16 +548,14 @@ pub fn sys_sendmsg(fd: usize, msg: usize, flags: usize) -> isize {
     }
 }
 
-pub fn sys_sendmmsg(
-    fd: usize,
-    msgvec: usize,
-    vlen: usize,
-    flags: usize,
-) -> isize {
+pub fn sys_sendmmsg(fd: usize, msgvec: usize, vlen: usize, flags: usize) -> isize {
     debug!("sys_sendmmsg <= fd: {fd}, msgvec: {msgvec:#x}, vlen: {vlen}, flags: {flags}");
 
     if vlen == 0 {
         return 0;
+    }
+    if vlen > MAX_MMSG_VLEN {
+        return -(LinuxError::EINVAL.code() as isize);
     }
 
     let socket = match get_socket(fd) {
@@ -520,11 +566,20 @@ pub fn sys_sendmmsg(
     let mut sent_count = 0;
 
     while sent_count < vlen {
-        let msg_addr = msgvec + sent_count * 64; // sizeof(MMsgHdr) = 64
+        let msg_addr = match mmsghdr_addr(msgvec, sent_count) {
+            Ok(addr) => addr,
+            Err(e) => {
+                return if sent_count > 0 {
+                    sent_count as isize
+                } else {
+                    -(e.code() as isize)
+                };
+            }
+        };
 
         match do_sendmsg_core(&socket, msg_addr, flags) {
             Ok(bytes_sent) => {
-                let msg_len_addr = msg_addr + 56; // offset of msg_len = 56
+                let msg_len_addr = msg_addr + MMSGHDR_MSG_LEN_OFFSET;
                 let bytes_u32 = bytes_sent as u32;
                 if let Err(e) = write_user_plain(msg_len_addr, &bytes_u32) {
                     if sent_count > 0 {
@@ -577,7 +632,8 @@ fn do_recvmsg_core(socket: &Socket, msg: usize, flags: usize) -> Result<usize, L
         msg_hdr.msg_controllen = 0;
     }
 
-    let iovecs = crate::impls::utils::read_user_iovec_array(msg_hdr.msg_iov as usize, msg_hdr.msg_iovlen)?;
+    let iovecs =
+        crate::impls::utils::read_user_iovec_array(msg_hdr.msg_iov as usize, msg_hdr.msg_iovlen)?;
 
     // Compute total capacity.
     let mut total_len: usize = 0;
@@ -625,7 +681,8 @@ fn do_recvmsg_core(socket: &Socket, msg: usize, flags: usize) -> Result<usize, L
                     let mut nladdr = [0u8; 12];
                     nladdr[0..2].copy_from_slice(&16u16.to_ne_bytes()); // nl_family = 16 (AF_NETLINK)
                     let to_write = core::cmp::min(msg_hdr.msg_namelen as usize, 12);
-                    if crate::impls::utils::write_user_bytes(name_ptr, &nladdr[..to_write]).is_ok() {
+                    if crate::impls::utils::write_user_bytes(name_ptr, &nladdr[..to_write]).is_ok()
+                    {
                         msg_hdr.msg_namelen = to_write as u32;
                     }
                 }
@@ -679,7 +736,8 @@ pub fn sys_recvmsg(fd: usize, msg: usize, flags: usize) -> isize {
     impl<'a> Drop for TemporaryNonblocking<'a> {
         fn drop(&mut self) {
             if self.active {
-                self.socket.set_nonblocking_inner(self.originally_nonblocking);
+                self.socket
+                    .set_nonblocking_inner(self.originally_nonblocking);
             }
         }
     }
@@ -698,26 +756,17 @@ pub fn sys_recvmsg(fd: usize, msg: usize, flags: usize) -> isize {
     }
 }
 
-#[allow(dead_code)]
-#[derive(Copy, Clone)]
-#[repr(C)]
-struct MMsgHdr {
-    msg_hdr: MsgHdr,
-    msg_len: u32,
-    _pad: u32,
-}
-
-pub fn sys_recvmmsg(
-    fd: usize,
-    msgvec: usize,
-    vlen: usize,
-    flags: usize,
-    timeout: usize,
-) -> isize {
-    debug!("sys_recvmmsg <= fd: {fd}, msgvec: {msgvec:#x}, vlen: {vlen}, flags: {flags}, timeout: {timeout:#x}");
+pub fn sys_recvmmsg(fd: usize, msgvec: usize, vlen: usize, flags: usize, timeout: usize) -> isize {
+    debug!(
+        "sys_recvmmsg <= fd: {fd}, msgvec: {msgvec:#x}, vlen: {vlen}, flags: {flags}, timeout: \
+         {timeout:#x}"
+    );
 
     if vlen == 0 {
         return 0;
+    }
+    if vlen > MAX_MMSG_VLEN {
+        return -(LinuxError::EINVAL.code() as isize);
     }
 
     let socket = match get_socket(fd) {
@@ -752,7 +801,8 @@ pub fn sys_recvmmsg(
 
     impl<'a> Drop for TemporaryNonblocking<'a> {
         fn drop(&mut self) {
-            self.socket.set_nonblocking_inner(self.originally_nonblocking);
+            self.socket
+                .set_nonblocking_inner(self.originally_nonblocking);
         }
     }
 
@@ -770,7 +820,16 @@ pub fn sys_recvmmsg(
     let mut received_count = 0;
 
     while received_count < vlen {
-        let msg_addr = msgvec + received_count * 64; // sizeof(MMsgHdr) = 64
+        let msg_addr = match mmsghdr_addr(msgvec, received_count) {
+            Ok(addr) => addr,
+            Err(e) => {
+                return if received_count > 0 {
+                    received_count as isize
+                } else {
+                    -(e.code() as isize)
+                };
+            }
+        };
 
         let current_flags = if received_count > 0 && (flags & MSG_WAITFORONE) != 0 {
             flags | MSG_DONTWAIT
@@ -780,7 +839,7 @@ pub fn sys_recvmmsg(
 
         match do_recvmsg_core(&socket, msg_addr, current_flags) {
             Ok(bytes_received) => {
-                let msg_len_addr = msg_addr + 56; // offset of msg_len = 56
+                let msg_len_addr = msg_addr + MMSGHDR_MSG_LEN_OFFSET;
                 let bytes_u32 = bytes_received as u32;
                 if let Err(e) = write_user_plain(msg_len_addr, &bytes_u32) {
                     if received_count > 0 {
