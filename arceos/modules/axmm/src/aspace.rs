@@ -531,16 +531,6 @@ impl PageTableLockManager {
         }
     }
 
-    pub(crate) fn lock_for_range(&self, start: VirtAddr, size: usize) -> PageTableGuard {
-        let Some(end) = size.checked_sub(1).and_then(|last| start.checked_add(last)) else {
-            return PageTableGuard(PageTableWriteLock::Whole(self.pt.write()));
-        };
-        if Self::subtree_id(start) == Self::subtree_id(end) {
-            self.lock_for_addr(start)
-        } else {
-            PageTableGuard(PageTableWriteLock::Whole(self.pt.write()))
-        }
-    }
 }
 
 /// The virtual memory address space.
@@ -1283,7 +1273,7 @@ impl AddrSpace {
             };
 
             // Remove the old area to perform splitting and modifications
-            let old_area = self.areas.remove(old_area_start).unwrap();
+            self.areas.remove(old_area_start).unwrap();
 
             // Re-insert left split if any
             if old_addr > old_area_start_val {
@@ -1305,13 +1295,11 @@ impl AddrSpace {
 
             // Check if we need to move
             let mut should_move = false;
-            let mut target_addr = old_addr;
 
             if let Some(fixed_addr) = new_addr {
                 if (flags & MREMAP_FIXED) != 0 {
                     if fixed_addr != old_addr {
                         should_move = true;
-                        target_addr = fixed_addr;
                     }
                 }
             }
@@ -1332,7 +1320,7 @@ impl AddrSpace {
             }
 
             if should_move {
-                if (flags & MREMAP_FIXED) != 0 {
+                let target_addr = if (flags & MREMAP_FIXED) != 0 {
                     let dest_addr = new_addr.ok_or(AxError::InvalidInput)?;
                     if !dest_addr.is_aligned_4k() {
                         self.areas.insert(old_addr, middle_area);
@@ -1355,18 +1343,18 @@ impl AddrSpace {
                         self.areas.insert(old_addr, middle_area);
                         return Err(e);
                     }
-                    target_addr = dest_addr;
+                    dest_addr
                 } else {
                     // MREMAP_MAYMOVE: find a free area
                     let limit = self.va_range;
-                    target_addr = match self.find_free_area(VirtAddr::from(old_addr), new_size, limit) {
+                    match self.find_free_area(VirtAddr::from(old_addr), new_size, limit) {
                         Some(addr) => addr,
                         None => {
                             self.areas.insert(old_addr, middle_area);
                             return Err(AxError::NoMemory);
                         }
-                    };
-                }
+                    }
+                };
 
                 // Move physical pages: unmap from old address, but keep frames
                 let mut phys_pages = alloc::vec::Vec::new();
@@ -1391,9 +1379,9 @@ impl AddrSpace {
                 // Update backend address
                 let mut bk = middle_area.backend().clone();
                 bk.update_address(old_addr, target_addr, old_size, new_size);
-                
+
                 // Create new MemoryArea at target
-                let mut new_area = MemoryArea::new(target_addr, new_size, old_flags, bk);
+                let new_area = MemoryArea::new(target_addr, new_size, old_flags, bk);
                 self.areas.insert(target_addr, new_area);
 
                 // Map physical pages at new address

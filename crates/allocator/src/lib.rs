@@ -130,16 +130,19 @@ pub trait IdAllocator: BaseAllocator {
     fn available(&self) -> usize;
 }
 
+#[cfg(feature = "bitmap")]
 #[inline]
 const fn align_down(pos: usize, align: usize) -> usize {
     pos & !(align - 1)
 }
 
+#[cfg(feature = "bitmap")]
 #[inline]
 const fn align_up(pos: usize, align: usize) -> usize {
     (pos + align - 1) & !(align - 1)
 }
 
+#[cfg(feature = "bitmap")]
 /// Checks whether the address has the demanded alignment.
 ///
 /// Equivalent to `addr % align == 0`, but the alignment must be a power of two.

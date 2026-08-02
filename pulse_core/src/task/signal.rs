@@ -1282,35 +1282,12 @@ pub fn check_signals_and_deliver(thread: &Thread, tf: &mut TrapFrame) -> Option<
                 sig_state.shared().set_action(sig, SigAction::dfl());
             }
 
-            let resume_ip = current_ip(tf);
             set_arg0(tf, sig);
             set_ra(tf, thread.process().signal_trampoline());
             set_ip(tf, act.handler);
-
-            // Keep resume IP in the saved frame. We only adjust return address here.
-            let _ = resume_ip;
             Some(SignalDelivery { sig, action })
         }
     }
-}
-
-#[allow(dead_code)]
-pub fn pick_thread_for_process_signal(process: &Process) -> Option<u64> {
-    let tids = process.thread_ids_snapshot();
-    if tids.is_empty() {
-        return None;
-    }
-
-    for tid in &tids {
-        if process.task_ref_by_tid(*tid).is_some()
-            && let Some(thread) = super::thread_by_tid(process, *tid)
-            && !thread.signal().has_pending_unblocked()
-        {
-            return Some(*tid);
-        }
-    }
-
-    tids.first().copied()
 }
 
 pub fn pending_mask(thread: &Thread) -> u64 {
@@ -1326,8 +1303,7 @@ pub fn blocked_mask(thread: &Thread) -> u64 {
     thread.signal().blocked_mask()
 }
 
-#[allow(dead_code)]
-pub fn list_threads_for_signal(process: &Process) -> Vec<Arc<Thread>> {
+fn list_threads_for_signal(process: &Process) -> Vec<Arc<Thread>> {
     let mut out = Vec::new();
     for tid in process.thread_ids_snapshot() {
         if let Some(t) = super::thread_by_tid(process, tid) {

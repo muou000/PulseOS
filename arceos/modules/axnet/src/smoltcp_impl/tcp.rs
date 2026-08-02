@@ -184,34 +184,6 @@ impl TcpSocket {
         self.rcv_timeout.store(timeout, Ordering::Release);
     }
 
-    /// To get the address pair of the socket.
-    ///
-    /// Returns the local and remote endpoint pair.
-    // fn get_endpoint_pair(
-    //     &self,
-    //     remote_addr: SocketAddr,
-    // ) -> Result<(IpListenEndpoint, IpEndpoint), AxError> {
-    //     // TODO: check remote addr unreachable
-    //     #[allow(unused_mut)]
-    //     let mut remote_endpoint = from_core_sockaddr(remote_addr);
-    //     #[allow(unused_mut)]
-    //     let mut bound_endpoint = self.bound_endpoint()?;
-    //     // #[cfg(feature = "ip")]
-    //     if bound_endpoint.addr.is_none() && remote_endpoint.addr.as_bytes()[0] == 127 {
-    //         // If the remote addr is unspecified, we should copy the local addr.
-    //         // If the local addr is unspecified too, we should use the loopback interface.
-    //         if remote_endpoint.addr.is_unspecified() {
-    //             remote_endpoint.addr =
-    //                 smoltcp::wire::IpAddress::Ipv4(smoltcp::wire::Ipv4Address::new(127, 0, 0, 1));
-    //         }
-    //         bound_endpoint.addr = Some(remote_endpoint.addr);
-    //     }
-    //     Ok((bound_endpoint, remote_endpoint))
-    // }
-
-    /// Connects to the given address and port.
-    ///
-    /// The local port is generated automatically.
     /// Connects to the given address and port.
     ///
     /// The local port is generated automatically.
@@ -241,8 +213,6 @@ impl TcpSocket {
             // SAFETY: no other threads can read or write these fields.
             let handle = unsafe { self.handle.get().read().unwrap() };
 
-            // // TODO: check remote addr unreachable
-            // let (bound_endpoint, remote_endpoint) = self.get_endpoint_pair(remote_addr)?;
             let remote_endpoint = from_core_sockaddr(remote_addr);
             let mut bound_endpoint = self.bound_endpoint()?;
             let iface = if remote_endpoint.addr.as_bytes()[0] == 127 {

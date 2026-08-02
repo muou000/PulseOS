@@ -29,43 +29,6 @@ fn sync_executable_mapping(flags: MappingFlags) {
     }
 }
 
-#[allow(dead_code)]
-fn read_file_page(
-    mapping: &FileMapping,
-    dst: &mut [u8],
-    file_offset: u64,
-    read_len: usize,
-) -> bool {
-    let mut filled = 0;
-    while filled < read_len {
-        match mapping
-            .file
-            .read_at(&mut dst[filled..read_len], file_offset + filled as u64)
-        {
-            Ok(0) => return false,
-            Ok(bytes) => filled += bytes,
-            Err(_) => return false,
-        }
-    }
-    true
-}
-
-/// Write a page's content (from physical frame) back to the CachedFile.
-#[allow(dead_code)]
-fn writeback_phys_page(mapping: &FileMapping, page_addr: VirtAddr, frame_paddr: PhysAddr) -> bool {
-    let Some((file_offset, write_len)) = mapping.page_read_window(page_addr) else {
-        return true;
-    };
-    if write_len == 0 {
-        return true;
-    }
-    let src = unsafe { core::slice::from_raw_parts(phys_to_virt(frame_paddr).as_ptr(), write_len) };
-    match mapping.file.write_at(src, file_offset) {
-        Ok(written) => written == write_len,
-        Err(_) => false,
-    }
-}
-
 const FILE_FAULT_AROUND_PAGES: usize = SHARED_PAGE_BATCH_CAPACITY;
 const COLD_FILE_FAULT_AROUND_PAGES: usize = 4;
 const _: () = assert!(FILE_FAULT_AROUND_PAGES > 0 && FILE_FAULT_AROUND_PAGES <= u16::BITS as usize);
@@ -760,7 +723,11 @@ impl Backend {
                 continue;
             }
 
-            if pt.protect(page, flags).map(|(_, tlb)| tlb.ignore()).is_err() {
+            if pt
+                .protect(page, flags)
+                .map(|(_, tlb)| tlb.ignore())
+                .is_err()
+            {
                 error!(
                     "protect_file: failed to protect page: {:#x}, {:?}",
                     page, flags

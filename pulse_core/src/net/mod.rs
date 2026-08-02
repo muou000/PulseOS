@@ -559,7 +559,6 @@ impl Socket {
         }
     }
 
-    #[allow(dead_code)]
     pub fn is_nonblocking(&self) -> bool {
         match &self.inner {
             SocketInner::Tcp(s) => s.is_nonblocking(),

@@ -38,37 +38,6 @@ impl PipeRingBuffer {
         }
     }
 
-    fn available_write(&self) -> usize {
-        if matches!(self.status, RingBufferStatus::Full) {
-            0
-        } else {
-            self.capacity() - self.available_read()
-        }
-    }
-
-    #[allow(dead_code)]
-    fn write_byte(&mut self, byte: u8) {
-        let cap = self.capacity();
-        self.status = RingBufferStatus::Normal;
-        self.arr[self.tail] = byte;
-        self.tail = (self.tail + 1) % cap;
-        if self.tail == self.head {
-            self.status = RingBufferStatus::Full;
-        }
-    }
-
-    #[allow(dead_code)]
-    fn read_byte(&mut self) -> u8 {
-        let cap = self.capacity();
-        self.status = RingBufferStatus::Normal;
-        let byte = self.arr[self.head];
-        self.head = (self.head + 1) % cap;
-        if self.head == self.tail {
-            self.status = RingBufferStatus::Empty;
-        }
-        byte
-    }
-
     fn resize(&mut self, new_capacity: usize) -> LinuxResult {
         let current_unread = self.available_read();
         if new_capacity < current_unread {

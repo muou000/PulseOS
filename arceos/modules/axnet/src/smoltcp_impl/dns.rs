@@ -24,17 +24,8 @@ impl DnsSocket {
         Self { handle }
     }
 
-    #[allow(dead_code)]
-    /// Update the list of DNS servers, will replace all existing servers.
-    pub fn update_servers(self, servers: &[smoltcp::wire::IpAddress]) {
-        SOCKET_SET.with_socket_mut::<dns::Socket, _, _>(self.handle.unwrap(), |socket| {
-            socket.update_servers(servers)
-        });
-    }
-
     /// Query a address with given DNS query type.
     pub fn query(&self, name: &str, query_type: DnsQueryType) -> AxResult<Vec<IpAddr>> {
-        // let local_addr = self.local_addr.unwrap_or_else(f);
         let handle = self.handle.ok_or_else(|| ax_err_type!(InvalidInput))?;
 
         // Keep the same lock order as network polling: interface first, then

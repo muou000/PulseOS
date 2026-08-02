@@ -36,7 +36,6 @@ impl Ord for CaseInsensitiveString {
 }
 
 pub fn dos_to_unix(date: fatfs::DateTime) -> Duration {
-    // let date: NaiveDateTime = date.into();
     let date = NaiveDate::from_ymd_opt(
         date.date.year as _,
         date.date.month as _,

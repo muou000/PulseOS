@@ -11,26 +11,6 @@ struct UtsName {
     domainname: [u8; 65],
 }
 
-#[repr(C)]
-#[derive(Clone, Copy, Default)]
-#[allow(dead_code)]
-struct Sysinfo {
-    uptime: i64,
-    loads: [u64; 3],
-    totalram: u64,
-    freeram: u64,
-    sharedram: u64,
-    bufferram: u64,
-    totalswap: u64,
-    freeswap: u64,
-    procs: u16,
-    pad: u16,
-    totalhigh: u64,
-    freehigh: u64,
-    mem_unit: u32,
-    _f: [i8; 0],
-}
-
 const SYSLOG_ACTION_CLOSE: usize = 0;
 const SYSLOG_ACTION_OPEN: usize = 1;
 const SYSLOG_ACTION_READ: usize = 2;
@@ -50,29 +30,6 @@ fn write_cstr_field(dst: &mut [u8], s: &str) {
     let len = bytes.len().min(dst.len().saturating_sub(1));
     dst[..len].copy_from_slice(&bytes[..len]);
     dst[len] = 0;
-}
-
-#[allow(dead_code)]
-fn rlimit_for(resource: usize) -> Option<rlimit64> {
-    const INF: u64 = u64::MAX;
-    let rlim = match resource as u32 {
-        RLIMIT_CPU | RLIMIT_FSIZE | RLIMIT_DATA | RLIMIT_CORE | RLIMIT_RSS | RLIMIT_NPROC
-        | RLIMIT_MEMLOCK | RLIMIT_AS | RLIMIT_MSGQUEUE | RLIMIT_RTPRIO | RLIMIT_RTTIME
-        | RLIMIT_SIGPENDING | RLIMIT_NICE => rlimit64 {
-            rlim_cur: INF,
-            rlim_max: INF,
-        },
-        RLIMIT_STACK => rlimit64 {
-            rlim_cur: pulse_core::config::USER_STACK_SIZE as u64,
-            rlim_max: pulse_core::config::USER_STACK_SIZE as u64,
-        },
-        RLIMIT_NOFILE => rlimit64 {
-            rlim_cur: pulse_core::fd_table::FD_LIMIT as u64,
-            rlim_max: pulse_core::fd_table::FD_LIMIT as u64,
-        },
-        _ => return None,
-    };
-    Some(rlim)
 }
 
 /// sys_uname - 获取系统信息
