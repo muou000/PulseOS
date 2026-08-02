@@ -39,6 +39,7 @@ scope-local.workspace = true
 rand_core.workspace = true
 rand_pcg.workspace = true
 chrono.workspace = true
+heapless = "0.9"
 
 [target.'cfg(target_arch = "riscv64")'.dependencies]
 syscalls = { workspace = true, features = ["riscv64"] }

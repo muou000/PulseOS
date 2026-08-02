@@ -1,12 +1,60 @@
 use alloc::{sync::Arc, vec::Vec};
-use core::time::Duration;
+use core::{ptr::NonNull, time::Duration};
 
+use axalloc::{frame_table, global_allocator};
 use axerrno::LinuxError;
+use axhal::mem::phys_to_virt;
 use linux_raw_sys::general::{UTIME_NOW, UTIME_OMIT, iovec, timespec, timeval};
-use memory_addr::MemoryAddr;
+use memory_addr::{MemoryAddr, PhysAddr, VirtAddr};
 use pulse_core::task::uaccess;
 
 const MAX_USER_IOVCNT: usize = 1024;
+// Syscall I/O submits at most 64 KiB at once. An unaligned 64 KiB run spans
+// no more than 17 base pages, so frame ownership stays on the kernel stack.
+const PINNED_USER_IO_MAX_PAGES: usize = 17;
+
+/// A physically contiguous user-memory slice whose backing frames remain
+/// alive until the guard is dropped.
+///
+/// A syscall may suspend after handing either a source or destination slice to
+/// an `FdObject`. Returning a raw pointer from `query_user_page_slice` is not
+/// sufficient in that case because another thread can unmap the user range.
+pub(crate) struct PinnedUserSlice {
+    ptr: NonNull<u8>,
+    len: usize,
+    frames: heapless::Vec<PhysAddr, PINNED_USER_IO_MAX_PAGES>,
+}
+
+impl PinnedUserSlice {
+    #[inline]
+    pub(crate) fn as_slice(&self) -> &[u8] {
+        // SAFETY: frames owns one reference for every covered page until this
+        // guard is dropped. The constructor only exposes a contiguous range.
+        unsafe { core::slice::from_raw_parts(self.ptr.as_ptr(), self.len) }
+    }
+
+    #[inline]
+    pub(crate) fn as_mut_slice(&mut self) -> &mut [u8] {
+        // SAFETY: see as_slice. The write pin constructor additionally checked
+        // that every page has a writable user mapping.
+        unsafe { core::slice::from_raw_parts_mut(self.ptr.as_ptr(), self.len) }
+    }
+}
+
+impl Drop for PinnedUserSlice {
+    fn drop(&mut self) {
+        while let Some(frame) = self.frames.pop() {
+            release_pinned_user_frame(frame);
+        }
+    }
+}
+
+fn release_pinned_user_frame(frame: PhysAddr) {
+    let table = frame_table();
+    if table.contains(frame) && table.dec_ref(frame) == 0 {
+        global_allocator().dealloc_pages(phys_to_virt(frame).as_usize(), 1);
+    }
+}
 
 /// Linux PATH_MAX, including the trailing NUL in a user C string.
 pub(crate) const USER_PATH_MAX: usize = uaccess::DEFAULT_USER_CSTRING_MAX;
@@ -33,6 +81,14 @@ pub(crate) fn read_user_bytes_partial(
 
 pub(crate) fn write_user_bytes(user_addr: usize, bytes: &[u8]) -> Result<(), LinuxError> {
     with_process(|process| process.write_user_bytes(user_addr, bytes))?
+        .map_err(|e| LinuxError::from(e.canonicalize()))
+}
+
+pub(crate) fn write_user_bytes_partial(
+    user_addr: usize,
+    bytes: &[u8],
+) -> Result<usize, LinuxError> {
+    with_process(|process| process.write_user_bytes_partial(user_addr, bytes))?
         .map_err(|e| LinuxError::from(e.canonicalize()))
 }
 
@@ -256,94 +312,91 @@ pub(crate) fn timespec_to_update_time(
     Ok(Some(Duration::new(ts.tv_sec as u64, ts.tv_nsec as u32)))
 }
 
-pub(crate) fn query_user_page_slice(
+fn pin_user_slice(
     user_addr: usize,
     max_len: usize,
-    write: bool,
-) -> Option<*mut [u8]> {
+    required_flags: axhal::paging::MappingFlags,
+) -> Option<PinnedUserSlice> {
     let process = pulse_core::task::current_process().ok()?;
     if max_len == 0 {
         return None;
     }
+
     let first_chunk_len = core::cmp::min(max_len, 4096 - (user_addr & 4095));
     process
         .validate_user_range(user_addr, first_chunk_len)
         .ok()?;
-
-    let required_flags = if write {
-        axhal::paging::MappingFlags::WRITE | axhal::paging::MappingFlags::USER
-    } else {
-        axhal::paging::MappingFlags::READ | axhal::paging::MappingFlags::USER
-    };
-
-    if let Some(slice) =
-        query_resident_user_page_slice(process.as_ref(), user_addr, max_len, required_flags)
-    {
-        return Some(slice);
-    }
-
     process
         .try_fault_in_user_range(user_addr, first_chunk_len, required_flags)
         .ok()?;
-    query_resident_user_page_slice(process.as_ref(), user_addr, max_len, required_flags)
-}
 
-fn query_resident_user_page_slice(
-    process: &pulse_core::task::Process,
-    user_addr: usize,
-    max_len: usize,
-    required_flags: axhal::paging::MappingFlags,
-) -> Option<*mut [u8]> {
     let aspace_handle = process.aspace_handle();
     let aspace = aspace_handle.read();
-
-    let vaddr = memory_addr::VirtAddr::from(user_addr);
-    let start_page = vaddr.align_down_4k();
-    let offset = vaddr.align_offset_4k();
-
-    let first_chunk_len = core::cmp::min(max_len, 4096 - offset);
-    let (start_paddr, flags, _) = aspace.query_vaddr(start_page).ok()?;
-    if start_paddr.as_usize() == 0 || !flags.contains(required_flags) {
-        return None;
-    }
-
-    let mut total_len = first_chunk_len;
-    let mut current_page = start_page;
-    let mut expected_paddr = start_paddr;
+    let mut current_page = VirtAddr::from(user_addr).align_down_4k();
+    let mut page_offset = user_addr & 4095;
+    let mut expected_paddr = None;
+    let mut total_len = 0usize;
+    let mut frames = heapless::Vec::new();
 
     while total_len < max_len {
-        let next_page = match current_page.checked_add(4096) {
-            Some(addr) => addr,
-            None => break,
+        let paddr = match aspace.pin_user_frame(current_page, required_flags) {
+            Ok(paddr) => paddr,
+            Err(_) if frames.is_empty() => return None,
+            Err(_) => break,
         };
-        let next_expected_paddr = match expected_paddr.checked_add(4096) {
-            Some(addr) => addr,
-            None => break,
-        };
-
-        let remaining = max_len - total_len;
-        let chunk = core::cmp::min(remaining, 4096);
-
-        if let Ok((paddr, flags, _)) = aspace.query_vaddr(next_page) {
-            if paddr == next_expected_paddr && flags.contains(required_flags) {
-                total_len += chunk;
-                current_page = next_page;
-                expected_paddr = next_expected_paddr;
-            } else {
-                break;
-            }
-        } else {
+        if expected_paddr.is_some_and(|expected| expected != paddr) {
+            release_pinned_user_frame(paddr);
             break;
         }
-    }
 
-    let kvaddr = axhal::mem::phys_to_virt(start_paddr) + offset;
-    let ptr = kvaddr.as_mut_ptr();
-    axlog::debug!(
-        "query_user_page_slice: user_addr={:#x}, max_len={}, total_len={}",
-        user_addr,
-        max_len,
-        total_len
-    );
-    Some(core::ptr::slice_from_raw_parts_mut(ptr, total_len))
+        let chunk = core::cmp::min(max_len - total_len, 4096 - page_offset);
+        if let Err(paddr) = frames.push(paddr) {
+            release_pinned_user_frame(paddr);
+            break;
+        }
+        total_len += chunk;
+        if total_len == max_len {
+            break;
+        }
+
+        let Some(next_page) = current_page.checked_add(4096) else {
+            break;
+        };
+        let Some(next_paddr) = paddr.checked_add(4096) else {
+            break;
+        };
+        current_page = next_page;
+        expected_paddr = Some(next_paddr);
+        page_offset = 0;
+    }
+    drop(aspace);
+
+    let first = *frames.first()?;
+    let ptr = match NonNull::new((phys_to_virt(first) + (user_addr & 4095)).as_mut_ptr()) {
+        Some(ptr) => ptr,
+        None => {
+            while let Some(frame) = frames.pop() {
+                release_pinned_user_frame(frame);
+            }
+            return None;
+        }
+    };
+    Some(PinnedUserSlice {
+        ptr,
+        len: total_len,
+        frames,
+    })
+}
+
+/// Pins a physically contiguous user-readable run for an operation that can
+/// suspend. The returned slice is bounded by the caller and may be shorter
+/// when the next virtual page is not resident or physically adjacent.
+pub(crate) fn pin_user_read_slice(user_addr: usize, max_len: usize) -> Option<PinnedUserSlice> {
+    pin_user_slice(user_addr, max_len, axhal::paging::MappingFlags::READ)
+}
+
+/// Pins a physically contiguous user-writable run for an operation that can
+/// suspend while producing bytes into user memory.
+pub(crate) fn pin_user_write_slice(user_addr: usize, max_len: usize) -> Option<PinnedUserSlice> {
+    pin_user_slice(user_addr, max_len, axhal::paging::MappingFlags::WRITE)
 }

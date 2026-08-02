@@ -26,6 +26,25 @@ impl FileObject {
     pub fn inner(&self) -> &File {
         &self.inner
     }
+
+    /// Writes a slice whose backing storage remains valid until this method
+    /// returns. Syscall callers use a user-frame pin guard before selecting
+    /// this path.
+    pub fn write_slice(&self, buf: &[u8]) -> LinuxResult<usize> {
+        Ok(axtask::future::block_on(self.inner.write_slice(buf))?)
+    }
+
+    /// Positional counterpart of the stable-slice write path.
+    pub fn write_at_slice(&self, buf: &[u8], offset: u64) -> LinuxResult<usize> {
+        let file = &self.inner;
+        if file.flags().contains(AxFileFlags::APPEND) {
+            let backend = file.backend()?;
+            let (written, _) = axtask::future::block_on(backend.append_slice(buf))?;
+            Ok(written)
+        } else {
+            Ok(axtask::future::block_on(file.write_at_slice(buf, offset))?)
+        }
+    }
 }
 
 pub struct NsFdObject {

@@ -1482,6 +1482,7 @@ dependencies = [
  "axtask",
  "bitflags 2.11.1",
  "chrono",
+ "heapless 0.9.3",
  "kernel_guard",
  "linkme",
  "linux-raw-sys",
