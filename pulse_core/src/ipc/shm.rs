@@ -288,11 +288,6 @@ impl<K: Ord + Clone, V: Ord + Clone> BiBTreeMap<K, V> {
         self.forward.get(key)
     }
 
-    #[allow(dead_code)]
-    fn get_by_value(&self, value: &V) -> Option<&K> {
-        self.reverse.get(value)
-    }
-
     fn remove_by_value(&mut self, value: &V) {
         if let Some(key) = self.reverse.remove(value) {
             self.forward.remove(&key);

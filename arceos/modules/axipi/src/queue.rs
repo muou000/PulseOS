@@ -18,13 +18,6 @@ impl IpiEventQueue {
         }
     }
 
-    /// Whether there is no event.
-    #[allow(dead_code)]
-    #[inline]
-    pub fn is_empty(&self) -> bool {
-        self.events.is_empty()
-    }
-
     /// Push a new event into the queue.
     pub fn push(&mut self, src_cpu_id: usize, callback: Callback) {
         self.events.push_back(IpiEvent {

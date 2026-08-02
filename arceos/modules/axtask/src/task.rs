@@ -434,7 +434,6 @@ impl TaskInner {
     }
 
     #[inline]
-    #[allow(dead_code)]
     pub(crate) fn in_wait_queue(&self) -> bool {
         self.in_wait_queue.load(Ordering::Acquire)
     }
@@ -658,18 +657,9 @@ struct TaskStack {
 }
 
 impl TaskStack {
-    #[allow(dead_code)]
-    pub fn alloc(size: usize) -> Self {
-        Self::try_alloc(size).unwrap_or_else(|_| {
-            alloc::alloc::handle_alloc_error(
-                core::alloc::Layout::from_size_align(size, PAGE_SIZE_4K).unwrap(),
-            )
-        })
-    }
-
     pub fn try_alloc(size: usize) -> AxResult<Self> {
         debug!(
-            "TaskStack::alloc: size={:#x}, used_pages={}, available_pages={}",
+            "TaskStack::try_alloc: size={:#x}, used_pages={}, available_pages={}",
             size,
             global_allocator().used_pages(),
             global_allocator().available_pages()

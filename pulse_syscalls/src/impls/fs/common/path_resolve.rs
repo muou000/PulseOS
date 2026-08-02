@@ -1,5 +1,3 @@
-use core::ffi::CStr;
-
 use axerrno::LinuxError;
 use axfs::FsContext;
 use axfs_ng_vfs::Location;
@@ -46,16 +44,6 @@ pub(crate) fn resolve_location_at_ptr(
     crate::impls::utils::with_user_path_str(pathname, |path_str| {
         resolve_location_at_str(dirfd, path_str, flags)
     })
-}
-
-#[allow(dead_code)]
-pub(crate) fn resolve_location_at_cstr(
-    dirfd: i32,
-    path: &CStr,
-    flags: usize,
-) -> Result<Location, LinuxError> {
-    let path_str = path.to_str().map_err(|_| LinuxError::EINVAL)?;
-    resolve_location_at_str(dirfd, path_str, flags)
 }
 
 pub(crate) fn resolve_location_at_str(

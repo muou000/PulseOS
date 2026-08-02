@@ -12,7 +12,6 @@ const RESERVED_RAM_RANGES: [RawRange; 1] = [(0, PAGE_SIZE_4K)];
 
 struct MemIfImpl;
 
-#[allow(dead_code)]
 pub const fn phys_to_virt(paddr: PhysAddr) -> VirtAddr {
     va!(paddr.as_usize() + PHYS_VIRT_OFFSET)
 }
