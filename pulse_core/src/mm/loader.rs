@@ -1,15 +1,17 @@
 use alloc::{
+    collections::VecDeque,
     string::{String, ToString},
     sync::Arc,
     vec,
     vec::Vec,
 };
+use core::mem::size_of;
 
 use axerrno::{AxError, AxResult};
 use axfs::{CachedFile, ExecAccessGuard, FileFlags, FsContext};
 use axhal::{mem::MemRegionFlags, paging::MappingFlags};
 use axmm::AddrSpace;
-use kernel_elf_parser::{AuxEntry, AuxType, ELFHeadersBuilder, ELFParser, app_stack_region};
+use kernel_elf_parser::{AuxEntry, AuxType, ELFHeadersBuilder, ELFParser};
 use memory_addr::{MemoryAddr, PAGE_SIZE_4K, VirtAddr, VirtAddrRange};
 use xmas_elf::{
     ElfFile,
@@ -17,11 +19,14 @@ use xmas_elf::{
     program::Type,
 };
 
-use crate::config::{USER_HEAP_BASE, USER_INTERP_BASE, USER_STACK_TOP};
+use crate::config::{USER_HEAP_BASE, USER_INTERP_BASE, USER_STACK_SIZE, USER_STACK_TOP};
 
 const USER_DYN_BASE: usize = 0x20_0000;
 const ELF_MACHINE_LOONGARCH: u16 = 0x102;
 const ELF_CACHE_MAX_ENTRIES: usize = 16;
+const PT_GNU_STACK: u32 = 0x6474_e551;
+const AT_RANDOM_BYTES: usize = 16;
+const USER_STACK_ALIGNMENT: usize = 16;
 
 struct CachedElfImage {
     prefix: Vec<u8>,
@@ -45,6 +50,26 @@ pub struct UserAppLoadInfo {
     pub end_data: usize,
     pub signal_trampoline: usize,
     pub exec_access: Vec<ExecAccessGuard>,
+}
+
+/// Process identity exposed to a freshly executed program through auxv.
+#[derive(Clone, Copy, Debug)]
+pub struct ExecCredentials {
+    pub ruid: u32,
+    pub euid: u32,
+    pub rgid: u32,
+    pub egid: u32,
+}
+
+impl ExecCredentials {
+    pub const fn new(ruid: u32, euid: u32, rgid: u32, egid: u32) -> Self {
+        Self {
+            ruid,
+            euid,
+            rgid,
+            egid,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -155,30 +180,42 @@ fn validate_machine(elf: &ElfFile<'_>, path: &str) -> AxResult {
     }
 }
 
-fn compute_load_bias(requirements: ElfLoadRequirements, desired_base: usize) -> AxResult<usize> {
-    let bias = desired_base
+fn compute_load_bias(requirements: ElfLoadRequirements, mapping_start: usize) -> AxResult<usize> {
+    let bias = mapping_start
         .checked_sub(requirements.min_page)
         .ok_or(AxError::InvalidExecutable)?;
-    if bias % requirements.max_align != 0 || desired_base.checked_add(requirements.span).is_none() {
+    if bias % requirements.max_align != 0 || mapping_start.checked_add(requirements.span).is_none()
+    {
         return Err(AxError::InvalidExecutable);
     }
     Ok(bias)
 }
 
-fn find_interpreter_load_bias(
+fn first_aligned_mapping_start(requirements: ElfLoadRequirements, hint: usize) -> AxResult<usize> {
+    let hint = hint.max(requirements.min_page);
+    let bias = hint
+        .checked_sub(requirements.min_page)
+        .ok_or(AxError::NoMemory)?;
+    let aligned_bias = checked_align_up(bias, requirements.max_align).ok_or(AxError::NoMemory)?;
+    requirements
+        .min_page
+        .checked_add(aligned_bias)
+        .ok_or(AxError::NoMemory)
+}
+
+fn find_load_bias(
     aspace: &AddrSpace,
     requirements: ElfLoadRequirements,
+    search_start: usize,
+    search_end: usize,
 ) -> AxResult<usize> {
-    let limit = VirtAddrRange::new(
-        VirtAddr::from(USER_INTERP_BASE),
-        VirtAddr::from(USER_HEAP_BASE),
-    );
-    let mut hint = USER_INTERP_BASE.max(requirements.min_page);
+    let limit = VirtAddrRange::new(VirtAddr::from(search_start), VirtAddr::from(search_end));
+    let mut hint = first_aligned_mapping_start(requirements, search_start)?;
 
     loop {
         if !hint
             .checked_add(requirements.span)
-            .is_some_and(|end| end <= USER_HEAP_BASE)
+            .is_some_and(|end| end <= search_end)
         {
             return Err(AxError::NoMemory);
         }
@@ -186,20 +223,26 @@ fn find_interpreter_load_bias(
             .find_free_area(VirtAddr::from(hint), requirements.span, limit)
             .ok_or(AxError::NoMemory)?
             .as_usize();
-        let bias = mapping_start
-            .checked_sub(requirements.min_page)
-            .ok_or(AxError::NoMemory)?;
-        let misalignment = bias % requirements.max_align;
-        if misalignment == 0 {
-            return Ok(bias);
+        let aligned_start = first_aligned_mapping_start(requirements, mapping_start)?;
+        if aligned_start == mapping_start {
+            return compute_load_bias(requirements, mapping_start);
         }
 
         // The lower layer searches at page granularity. Advance within the
         // free range until the ELF load bias also satisfies p_align.
-        hint = mapping_start
-            .checked_add(requirements.max_align - misalignment)
-            .ok_or(AxError::NoMemory)?;
+        hint = aligned_start;
     }
+}
+
+fn find_main_load_bias(aspace: &AddrSpace, requirements: ElfLoadRequirements) -> AxResult<usize> {
+    find_load_bias(aspace, requirements, USER_DYN_BASE, USER_INTERP_BASE)
+}
+
+fn find_interpreter_load_bias(
+    aspace: &AddrSpace,
+    requirements: ElfLoadRequirements,
+) -> AxResult<usize> {
+    find_load_bias(aspace, requirements, USER_INTERP_BASE, USER_HEAP_BASE)
 }
 
 fn segment_flags(ph: &xmas_elf::program::ProgramHeader<'_>) -> MappingFlags {
@@ -453,6 +496,7 @@ fn build_auxv(
     main_elf_data: &[u8],
     main_bias: usize,
     interp_base: Option<usize>,
+    credentials: ExecCredentials,
 ) -> AxResult<Vec<AuxEntry>> {
     let hdr_builder =
         ELFHeadersBuilder::new(main_elf_data).map_err(|_| AxError::InvalidExecutable)?;
@@ -478,7 +522,176 @@ fn build_auxv(
         AuxType::HWCAP,
         (1 << 0) | (1 << 2) | (1 << 3) | (1 << 5) | (1 << 6) | (1 << 8) | (1 << 12),
     ));
+    append_process_auxv(&mut auxv, credentials);
     Ok(auxv)
+}
+
+fn append_process_auxv(auxv: &mut Vec<AuxEntry>, credentials: ExecCredentials) {
+    auxv.push(AuxEntry::new(AuxType::UID, credentials.ruid as usize));
+    auxv.push(AuxEntry::new(AuxType::EUID, credentials.euid as usize));
+    auxv.push(AuxEntry::new(AuxType::GID, credentials.rgid as usize));
+    auxv.push(AuxEntry::new(AuxType::EGID, credentials.egid as usize));
+
+    // PulseOS currently has no set-id or file-capability transition during
+    // exec, so a successful exec never enters Linux's secure-execution mode.
+    auxv.push(AuxEntry::new(AuxType::SECURE, 0));
+}
+
+fn initial_stack_mapping_flags(elf: &ElfFile<'_>) -> MappingFlags {
+    let executable = elf
+        .program_iter()
+        .any(|ph| ph.get_type() == Ok(Type::OsSpecific(PT_GNU_STACK)) && ph.flags().is_execute());
+    stack_mapping_flags(executable)
+}
+
+fn stack_mapping_flags(executable: bool) -> MappingFlags {
+    let mut flags = MappingFlags::READ | MappingFlags::WRITE | MappingFlags::USER;
+    if executable {
+        flags |= MappingFlags::EXECUTE;
+    }
+    flags
+}
+
+struct InitialStackBuilder {
+    data: VecDeque<u8>,
+    stack_top: usize,
+    stack_size: usize,
+}
+
+impl InitialStackBuilder {
+    fn new(stack_top: usize, stack_size: usize) -> Self {
+        Self {
+            data: VecDeque::new(),
+            stack_top,
+            stack_size,
+        }
+    }
+
+    fn current_sp(&self) -> usize {
+        self.stack_top - self.data.len()
+    }
+
+    fn push_bytes(&mut self, bytes: &[u8]) -> AxResult<usize> {
+        let new_len = self
+            .data
+            .len()
+            .checked_add(bytes.len())
+            .ok_or(AxError::NoMemory)?;
+        if new_len > self.stack_size || new_len > self.stack_top {
+            return Err(AxError::NoMemory);
+        }
+        for byte in bytes.iter().rev() {
+            self.data.push_front(*byte);
+        }
+        Ok(self.current_sp())
+    }
+
+    fn push_c_string(&mut self, value: &str) -> AxResult<usize> {
+        if value.as_bytes().contains(&0) {
+            return Err(AxError::InvalidInput);
+        }
+        self.push_bytes(&[0])?;
+        self.push_bytes(value.as_bytes())
+    }
+
+    fn push_word(&mut self, value: usize) -> AxResult<usize> {
+        self.push_bytes(&value.to_ne_bytes())
+    }
+
+    fn push_auxv_entry(&mut self, entry: AuxEntry) -> AxResult<()> {
+        self.push_word(entry.value())?;
+        self.push_word(entry.get_type() as usize)?;
+        Ok(())
+    }
+
+    fn into_vec(self) -> Vec<u8> {
+        let mut result = Vec::with_capacity(self.data.len());
+        let (first, second) = self.data.as_slices();
+        result.extend_from_slice(first);
+        result.extend_from_slice(second);
+        result
+    }
+}
+
+fn build_initial_stack(
+    args: &[String],
+    envs: &[String],
+    auxv: &[AuxEntry],
+    exec_path: &str,
+    random_bytes: [u8; AT_RANDOM_BYTES],
+    stack_top: usize,
+    stack_size: usize,
+) -> AxResult<Vec<u8>> {
+    let mut stack = InitialStackBuilder::new(stack_top, stack_size);
+    let random_ptr = stack.push_bytes(&random_bytes)?;
+    let execfn_ptr = stack.push_c_string(exec_path)?;
+
+    let mut env_ptrs = Vec::with_capacity(envs.len());
+    for env in envs {
+        env_ptrs.push(stack.push_c_string(env)?);
+    }
+    let mut argv_ptrs = Vec::with_capacity(args.len());
+    for arg in args {
+        argv_ptrs.push(stack.push_c_string(arg)?);
+    }
+
+    let mut stack_auxv = Vec::with_capacity(auxv.len().checked_add(3).ok_or(AxError::NoMemory)?);
+    for entry in auxv {
+        match entry.get_type() {
+            AuxType::NULL | AuxType::RANDOM | AuxType::EXECFN => {}
+            _ => stack_auxv.push(*entry),
+        }
+    }
+    stack_auxv.push(AuxEntry::new(AuxType::RANDOM, random_ptr));
+    stack_auxv.push(AuxEntry::new(AuxType::EXECFN, execfn_ptr));
+    stack_auxv.push(AuxEntry::new(AuxType::NULL, 0));
+
+    let control_words = argv_ptrs
+        .len()
+        .checked_add(env_ptrs.len())
+        .and_then(|words| words.checked_add(3))
+        .and_then(|words| {
+            stack_auxv
+                .len()
+                .checked_mul(2)
+                .and_then(|auxv_words| words.checked_add(auxv_words))
+        })
+        .ok_or(AxError::NoMemory)?;
+    let control_bytes = control_words
+        .checked_mul(size_of::<usize>())
+        .ok_or(AxError::NoMemory)?;
+    let unaligned_sp = stack
+        .current_sp()
+        .checked_sub(control_bytes)
+        .ok_or(AxError::NoMemory)?;
+    let padding = unaligned_sp % USER_STACK_ALIGNMENT;
+    if padding != 0 {
+        stack.push_bytes(&[0; USER_STACK_ALIGNMENT][..padding])?;
+    }
+
+    for entry in stack_auxv.iter().rev() {
+        stack.push_auxv_entry(*entry)?;
+    }
+    stack.push_word(0)?;
+    for ptr in env_ptrs.iter().rev() {
+        stack.push_word(*ptr)?;
+    }
+    stack.push_word(0)?;
+    for ptr in argv_ptrs.iter().rev() {
+        stack.push_word(*ptr)?;
+    }
+    stack.push_word(argv_ptrs.len())?;
+
+    if stack.current_sp() % USER_STACK_ALIGNMENT != 0 {
+        return Err(AxError::BadState);
+    }
+    Ok(stack.into_vec())
+}
+
+fn read_at_random() -> [u8; AT_RANDOM_BYTES] {
+    let mut random = [0; AT_RANDOM_BYTES];
+    axfs::fill_random_bytes(&mut random);
+    random
 }
 
 fn same_file(left: &axfs_ng_vfs::Location, right: &axfs_ng_vfs::Location) -> bool {
@@ -622,9 +835,11 @@ pub fn check_elf_header(path: &str) -> AxResult<()> {
 pub fn load_user_app(
     aspace: &mut AddrSpace,
     fs: &FsContext,
+    credentials: ExecCredentials,
     main_location: axfs_ng_vfs::Location,
     main_exec_access: ExecAccessGuard,
     path: &str,
+    execfn_path: &str,
     args: &[&str],
     envs: &[&str],
 ) -> AxResult<UserAppLoadInfo> {
@@ -640,7 +855,7 @@ pub fn load_user_app(
 
     let main_bias = match main_elf.header.pt2.type_().as_type() {
         ElfType::Executable => 0,
-        ElfType::SharedObject => compute_load_bias(main_requirements, USER_DYN_BASE)?,
+        ElfType::SharedObject => find_main_load_bias(aspace, main_requirements)?,
         _ => return Err(AxError::InvalidExecutable),
     };
     let main_layout = load_segments(aspace, &main_elf, &main_image.file, main_bias)?;
@@ -649,10 +864,10 @@ pub fn load_user_app(
         .ok_or(AxError::OutOfRange)?;
 
     let interp_path = read_interp_path(&main_elf, main_data)?;
-    if main_elf.header.pt2.type_().as_type() == ElfType::SharedObject && interp_path.is_none() {
-        axlog::warn!("ET_DYN executable {} has no PT_INTERP", path);
-        return Err(AxError::Unsupported);
-    }
+    // Linux permits an ET_DYN image to be executed directly. In particular,
+    // `ld-linux-*.so.* --library-path ... program` has no PT_INTERP of its
+    // own: the mapped main image remains the dispatch entry and AT_BASE is
+    // intentionally absent from its auxiliary vector.
 
     let mut interp_base = None;
     let mut dispatch_entry = main_entry;
@@ -708,7 +923,7 @@ pub fn load_user_app(
         MappingFlags::USER | MappingFlags::EXECUTE,
     )?;
 
-    let mut auxv = build_auxv(main_data, main_bias, interp_base)?;
+    let mut auxv = build_auxv(main_data, main_bias, interp_base, credentials)?;
     let mut vdso_data = starry_vdso::vdso::load_vdso_data(&mut auxv)?;
     for mapping in &vdso_data.mappings {
         aspace.map_linear(
@@ -721,7 +936,6 @@ pub fn load_user_app(
     vdso_data.disarm();
     let vdso_trampoline =
         starry_vdso::vdso::get_trampoline_addr(&auxv).ok_or(AxError::InvalidExecutable)?;
-    auxv.push(AuxEntry::new(AuxType::NULL, 0));
     let argv: Vec<String> = if args.is_empty() {
         alloc::vec![path.to_string()]
     } else {
@@ -729,11 +943,26 @@ pub fn load_user_app(
     };
     let envs_vec: Vec<String> = envs.iter().map(|e| (*e).to_string()).collect();
 
-    let stack_region = app_stack_region(&argv, &envs_vec, &auxv, USER_STACK_TOP);
+    let stack_region = build_initial_stack(
+        &argv,
+        &envs_vec,
+        &auxv,
+        execfn_path,
+        read_at_random(),
+        USER_STACK_TOP,
+        USER_STACK_SIZE,
+    )?;
     let user_sp = VirtAddr::from(USER_STACK_TOP)
         .checked_sub(stack_region.len())
         .ok_or(AxError::OutOfRange)?;
     write_user_region(aspace, user_sp, &stack_region)?;
+    aspace
+        .protect(
+            VirtAddr::from(USER_STACK_TOP - USER_STACK_SIZE),
+            USER_STACK_SIZE,
+            initial_stack_mapping_flags(&main_elf),
+        )
+        .complete_after_unlock()?;
     let start_brk = VirtAddr::from(main_layout.brk)
         .align_up_4k()
         .as_usize()
@@ -747,4 +976,132 @@ pub fn load_user_app(
         signal_trampoline: vdso_trampoline,
         exec_access,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn read_word(bytes: &[u8], offset: &mut usize) -> usize {
+        let end = *offset + size_of::<usize>();
+        let mut word = [0; size_of::<usize>()];
+        word.copy_from_slice(&bytes[*offset..end]);
+        *offset = end;
+        usize::from_ne_bytes(word)
+    }
+
+    fn bytes_at(bytes: &[u8], stack_top: usize, pointer: usize) -> &[u8] {
+        let stack_base = stack_top - bytes.len();
+        &bytes[pointer - stack_base..]
+    }
+
+    #[test]
+    fn main_pie_alignment_search_handles_nonzero_min_page() {
+        let requirements = ElfLoadRequirements {
+            min_page: PAGE_SIZE_4K,
+            span: PAGE_SIZE_4K,
+            max_align: 0x20_0000,
+        };
+
+        let mapping_start = first_aligned_mapping_start(requirements, USER_DYN_BASE).unwrap();
+        assert_eq!(mapping_start, USER_DYN_BASE + PAGE_SIZE_4K);
+        assert_eq!(
+            compute_load_bias(requirements, mapping_start).unwrap(),
+            USER_DYN_BASE
+        );
+    }
+
+    #[test]
+    fn initial_stack_uses_real_exec_path_and_random_bytes() {
+        let args = vec![String::from("argv0"), String::from("arg")];
+        let envs = vec![String::from("KEY=value")];
+        let auxv = vec![
+            AuxEntry::new(AuxType::PAGESZ, PAGE_SIZE_4K),
+            AuxEntry::new(AuxType::RANDOM, 0xdead_beef),
+            AuxEntry::new(AuxType::EXECFN, 0xcafe_babe),
+            AuxEntry::new(AuxType::NULL, 0),
+        ];
+        let random = *b"0123456789abcdef";
+        let stack_top = 0x10_0000;
+        let stack = build_initial_stack(
+            &args,
+            &envs,
+            &auxv,
+            "/bin/actual-program",
+            random,
+            stack_top,
+            stack_top,
+        )
+        .unwrap();
+        let stack_base = stack_top - stack.len();
+        assert_eq!(stack_base % USER_STACK_ALIGNMENT, 0);
+
+        let mut offset = 0;
+        assert_eq!(read_word(&stack, &mut offset), args.len());
+        let argv0 = read_word(&stack, &mut offset);
+        let argv1 = read_word(&stack, &mut offset);
+        assert_eq!(read_word(&stack, &mut offset), 0);
+        assert_eq!(&bytes_at(&stack, stack_top, argv0)[..6], b"argv0\0");
+        assert_eq!(&bytes_at(&stack, stack_top, argv1)[..4], b"arg\0");
+
+        let env0 = read_word(&stack, &mut offset);
+        assert_eq!(read_word(&stack, &mut offset), 0);
+        assert_eq!(&bytes_at(&stack, stack_top, env0)[..10], b"KEY=value\0");
+
+        let mut random_ptr = None;
+        let mut execfn_ptr = None;
+        let mut random_count = 0;
+        let mut execfn_count = 0;
+        loop {
+            let aux_type = read_word(&stack, &mut offset);
+            let value = read_word(&stack, &mut offset);
+            if aux_type == AuxType::RANDOM as usize {
+                random_ptr = Some(value);
+                random_count += 1;
+            }
+            if aux_type == AuxType::EXECFN as usize {
+                execfn_ptr = Some(value);
+                execfn_count += 1;
+            }
+            if aux_type == AuxType::NULL as usize {
+                break;
+            }
+        }
+
+        assert_eq!(random_count, 1);
+        assert_eq!(execfn_count, 1);
+        assert_eq!(
+            &bytes_at(&stack, stack_top, random_ptr.unwrap())[..AT_RANDOM_BYTES],
+            random.as_slice()
+        );
+        assert_eq!(
+            &bytes_at(&stack, stack_top, execfn_ptr.unwrap())[..20],
+            b"/bin/actual-program\0"
+        );
+    }
+
+    #[test]
+    fn process_identity_auxv_is_complete() {
+        let credentials = ExecCredentials::new(1000, 1001, 1002, 1003);
+        let mut auxv = Vec::new();
+        append_process_auxv(&mut auxv, credentials);
+
+        let value = |aux_type| {
+            auxv.iter()
+                .find(|entry| entry.get_type() == aux_type)
+                .unwrap()
+                .value()
+        };
+        assert_eq!(value(AuxType::UID), 1000);
+        assert_eq!(value(AuxType::EUID), 1001);
+        assert_eq!(value(AuxType::GID), 1002);
+        assert_eq!(value(AuxType::EGID), 1003);
+        assert_eq!(value(AuxType::SECURE), 0);
+    }
+
+    #[test]
+    fn stack_mapping_defaults_to_nx_and_honors_gnu_stack_execute() {
+        assert!(!stack_mapping_flags(false).contains(MappingFlags::EXECUTE));
+        assert!(stack_mapping_flags(true).contains(MappingFlags::EXECUTE));
+    }
 }

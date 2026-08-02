@@ -61,6 +61,11 @@ pub use fs::{
     TtyCallbacks, devfs::DevNode, new_default, new_procfs, new_tmpfs, register_tty_callbacks,
 };
 
+/// Fills `buf` with bytes from the kernel random stream.
+pub fn fill_random_bytes(buf: &mut [u8]) {
+    fs::devfs::fill_random_bytes(buf);
+}
+
 pub fn flush_all_filesystems() -> axfs_ng_vfs::VfsResult<()> {
     axtask::future::block_on(flush_all_filesystems_async())
 }
