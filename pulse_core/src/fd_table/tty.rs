@@ -104,6 +104,15 @@ impl Write for StdoutRaw {
 
 static STDIN_READER: Lazy<Mutex<StdinRaw>> = Lazy::new(|| Mutex::new(StdinRaw));
 static STDOUT_WRITER: Lazy<Mutex<StdoutRaw>> = Lazy::new(|| Mutex::new(StdoutRaw));
+static TTY_WRITE_TRANSACTION: axsync::Mutex<()> = axsync::Mutex::new(());
+
+/// Serializes all fragments of one user TTY write transaction.
+///
+/// Raw console access remains protected by `STDOUT_WRITER` per fragment, so
+/// this sleeping lock is never used from interrupt or early-console paths.
+pub fn lock_tty_write_transaction() -> axsync::MutexGuard<'static, ()> {
+    TTY_WRITE_TRANSACTION.lock()
+}
 
 static TTY_TERMIOS: Lazy<SpinNoIrq<termios2>> = Lazy::new(|| {
     SpinNoIrq::new(termios2 {
@@ -477,6 +486,10 @@ impl FdObject for StdoutObject {
 
     fn write(&self, buf: &[u8]) -> LinuxResult<usize> {
         Ok(STDOUT_WRITER.lock().write(buf)?)
+    }
+
+    fn is_tty_output(&self) -> bool {
+        true
     }
 
     fn stat(&self) -> LinuxResult<stat> {

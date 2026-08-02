@@ -36,6 +36,9 @@ pub fn sys_writev(fd: usize, iov: usize, iovcnt: usize) -> isize {
             }
         }
     }
+    let _tty_write_transaction = (iovecs.iter().any(|io_vec| io_vec.iov_len != 0)
+        && object.is_tty_output())
+    .then(pulse_core::fd_table::lock_tty_write_transaction);
     let mut total = 0isize;
     #[cfg(any(feature = "qperf-trace", feature = "buildstorm-stats"))]
     let mut marker_scanner = OutputMarkerScanner::new(fd);

@@ -224,6 +224,15 @@ impl FdObject for FileObject {
         Ok(axtask::future::block_on(file.write(buf))?)
     }
 
+    fn is_tty_output(&self) -> bool {
+        self.inner
+            .location()
+            .entry()
+            .downcast::<axfs::DevNode>()
+            .map(|node| node.is_tty())
+            .unwrap_or(false)
+    }
+
     fn stat(&self) -> LinuxResult<stat> {
         location_to_stat(self.inner.location())
     }

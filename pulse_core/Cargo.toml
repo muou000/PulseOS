@@ -14,6 +14,7 @@ axlog = { workspace = true }
 axconfig = { workspace = true }
 axalloc.workspace = true
 axtask = { workspace = true, features = ["multitask"] }
+axsync = { workspace = true, features = ["multitask"] }
 axfs.workspace = true
 axfs-ng-vfs.workspace = true
 axpoll.workspace = true

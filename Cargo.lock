@@ -1449,6 +1449,7 @@ dependencies = [
  "axmm",
  "axnet",
  "axpoll",
+ "axsync",
  "axtask",
  "bitflags 2.11.1",
  "hashbrown 0.16.1",

@@ -126,6 +126,9 @@ pub fn sys_write(fd: usize, buf: usize, count: usize) -> isize {
             }
         }
     }
+    let _tty_write_transaction = object
+        .is_tty_output()
+        .then(pulse_core::fd_table::lock_tty_write_transaction);
     let mut total = 0usize;
     let mut fallback_buf = None;
     #[cfg(any(feature = "qperf-trace", feature = "buildstorm-stats"))]

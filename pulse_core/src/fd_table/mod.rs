@@ -88,6 +88,11 @@ pub trait FdObject: Send + Sync {
         Err(LinuxError::EBADF)
     }
 
+    /// Whether writes to this object must participate in TTY output ordering.
+    fn is_tty_output(&self) -> bool {
+        false
+    }
+
     fn stat(&self) -> LinuxResult<stat>;
 
     fn poll(&self) -> LinuxResult<PollState>;
