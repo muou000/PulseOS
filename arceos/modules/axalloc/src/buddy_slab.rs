@@ -254,6 +254,14 @@ impl GlobalAllocator {
         self.inner.dealloc_pages(pos, num_pages);
     }
 
+    /// Splits a contiguous allocation into independently releasable pages.
+    pub fn split_allocated_pages(&self, pos: usize, num_pages: usize) -> AllocResult {
+        let _guard = NoPreemptIrqSave::new();
+        self.inner
+            .split_allocated_pages(pos, num_pages)
+            .map_err(map_error)
+    }
+
     /// Returns backend page occupancy in bytes, including cached slab pages.
     pub fn used_bytes(&self) -> usize {
         let _guard = NoPreemptIrqSave::new();

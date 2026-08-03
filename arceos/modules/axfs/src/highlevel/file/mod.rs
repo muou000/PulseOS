@@ -8,7 +8,7 @@ use alloc::{
 use core::sync::atomic::AtomicU8;
 use core::{
     ptr::NonNull,
-    sync::atomic::{AtomicIsize, AtomicU64, AtomicUsize, Ordering},
+    sync::atomic::{AtomicBool, AtomicIsize, AtomicU64, AtomicUsize, Ordering},
     task::Context,
 };
 

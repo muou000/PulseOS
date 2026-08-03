@@ -939,6 +939,46 @@ impl<const PAGE_SIZE: usize> BuddyAllocator<PAGE_SIZE> {
         Self::dealloc_exact_range(section, start_pfn, count);
     }
 
+    /// Converts one exact contiguous allocation into independently owned pages.
+    ///
+    /// `addr` and `count` must describe ranges previously returned by
+    /// [`Self::alloc_pages`]. The physical layout is unchanged; only allocator
+    /// metadata is split so every page may subsequently be released with
+    /// `dealloc_pages(page, 1)` in any order.
+    pub fn split_allocated_pages(&mut self, addr: usize, count: usize) -> AllocResult {
+        if count == 0 || !is_aligned(addr, PAGE_SIZE) {
+            return Err(AllocError::InvalidParam);
+        }
+        let section = self
+            .find_section_by_addr_mut(addr)
+            .ok_or(AllocError::NotFound)?;
+        let start_pfn = (addr - section.heap_start) / PAGE_SIZE;
+        let end_pfn = start_pfn
+            .checked_add(count)
+            .filter(|end| *end <= section.max_pages)
+            .ok_or(AllocError::InvalidParam)?;
+
+        let mut pfn = start_pfn;
+        while pfn < end_pfn {
+            let meta = unsafe { &*section.meta.add(pfn) };
+            if meta.flags != PageFlags::Allocated {
+                return Err(AllocError::NotAllocated);
+            }
+            let block_pages = 1usize << meta.order;
+            if pfn + block_pages > end_pfn {
+                return Err(AllocError::InvalidParam);
+            }
+            pfn += block_pages;
+        }
+
+        for pfn in start_pfn..end_pfn {
+            let meta = unsafe { &mut *section.meta.add(pfn) };
+            meta.flags = PageFlags::Allocated;
+            meta.order = 0;
+        }
+        Ok(())
+    }
+
     /// Mark the page at `addr` with the given flags (used by slab to tag pages).
     ///
     /// # Safety

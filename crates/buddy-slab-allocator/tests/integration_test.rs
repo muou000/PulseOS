@@ -79,6 +79,22 @@ fn buddy_basic_alloc_dealloc() {
 }
 
 #[test]
+fn buddy_split_contiguous_allocation_into_independent_pages() {
+    let mut region = HostRegion::new(buddy_region_size(TEST_HEAP_SIZE), PAGE_SIZE);
+    let mut buddy = BuddyAllocator::<PAGE_SIZE>::new();
+    let _section = init_buddy(&mut buddy, &mut region);
+    let free_before = buddy.free_pages();
+
+    let addr = buddy.alloc_pages(5, PAGE_SIZE).unwrap();
+    buddy.split_allocated_pages(addr, 5).unwrap();
+    for index in [2, 0, 4, 1, 3] {
+        buddy.dealloc_pages(addr + index * PAGE_SIZE, 1);
+    }
+
+    assert_eq!(buddy.free_pages(), free_before);
+}
+
+#[test]
 fn buddy_alignment() {
     // Heap must be aligned to the highest alignment we test (PAGE_SIZE * 4)
     let mut region = HostRegion::new(
