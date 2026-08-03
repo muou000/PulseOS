@@ -13,6 +13,3 @@ pub const USER_STACK_SIZE: usize = 0x80_0000;
 
 /// The minimum address selected for a process's initial program break.
 pub const USER_HEAP_BASE: usize = 0x4000_0000;
-
-/// The preferred search start for the user interpreter.
-pub const USER_INTERP_BASE: usize = 0x400_0000;
