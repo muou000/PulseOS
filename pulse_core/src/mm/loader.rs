@@ -19,7 +19,7 @@ use xmas_elf::{
     program::Type,
 };
 
-use crate::config::{USER_HEAP_BASE, USER_INTERP_BASE, USER_STACK_SIZE, USER_STACK_TOP};
+use crate::config::{USER_HEAP_BASE, USER_STACK_SIZE, USER_STACK_TOP};
 
 const USER_DYN_BASE: usize = 0x20_0000;
 const ELF_MACHINE_LOONGARCH: u16 = 0x102;
@@ -210,6 +210,19 @@ fn find_load_bias(
     search_end: usize,
 ) -> AxResult<usize> {
     let limit = VirtAddrRange::new(VirtAddr::from(search_start), VirtAddr::from(search_end));
+    find_load_bias_in_window(requirements, search_start, search_end, |hint, size| {
+        aspace
+            .find_free_area(VirtAddr::from(hint), size, limit)
+            .map(|start| start.as_usize())
+    })
+}
+
+fn find_load_bias_in_window(
+    requirements: ElfLoadRequirements,
+    search_start: usize,
+    search_end: usize,
+    mut find_free_area: impl FnMut(usize, usize) -> Option<usize>,
+) -> AxResult<usize> {
     let mut hint = first_aligned_mapping_start(requirements, search_start)?;
 
     loop {
@@ -219,10 +232,7 @@ fn find_load_bias(
         {
             return Err(AxError::NoMemory);
         }
-        let mapping_start = aspace
-            .find_free_area(VirtAddr::from(hint), requirements.span, limit)
-            .ok_or(AxError::NoMemory)?
-            .as_usize();
+        let mapping_start = find_free_area(hint, requirements.span).ok_or(AxError::NoMemory)?;
         let aligned_start = first_aligned_mapping_start(requirements, mapping_start)?;
         if aligned_start == mapping_start {
             return compute_load_bias(requirements, mapping_start);
@@ -234,15 +244,16 @@ fn find_load_bias(
     }
 }
 
-fn find_main_load_bias(aspace: &AddrSpace, requirements: ElfLoadRequirements) -> AxResult<usize> {
-    find_load_bias(aspace, requirements, USER_DYN_BASE, USER_INTERP_BASE)
+fn dynamic_load_window() -> (usize, usize) {
+    (USER_DYN_BASE, USER_HEAP_BASE)
 }
 
-fn find_interpreter_load_bias(
+fn find_dynamic_load_bias(
     aspace: &AddrSpace,
     requirements: ElfLoadRequirements,
 ) -> AxResult<usize> {
-    find_load_bias(aspace, requirements, USER_INTERP_BASE, USER_HEAP_BASE)
+    let (search_start, search_end) = dynamic_load_window();
+    find_load_bias(aspace, requirements, search_start, search_end)
 }
 
 fn segment_flags(ph: &xmas_elf::program::ProgramHeader<'_>) -> MappingFlags {
@@ -855,7 +866,7 @@ pub fn load_user_app(
 
     let main_bias = match main_elf.header.pt2.type_().as_type() {
         ElfType::Executable => 0,
-        ElfType::SharedObject => find_main_load_bias(aspace, main_requirements)?,
+        ElfType::SharedObject => find_dynamic_load_bias(aspace, main_requirements)?,
         _ => return Err(AxError::InvalidExecutable),
     };
     let main_layout = load_segments(aspace, &main_elf, &main_image.file, main_bias)?;
@@ -887,7 +898,9 @@ pub fn load_user_app(
 
         let bias = match interp_elf.header.pt2.type_().as_type() {
             ElfType::Executable => 0,
-            ElfType::SharedObject => find_interpreter_load_bias(aspace, interp_requirements)?,
+            // Main segments are already mapped, so the shared search window
+            // selects a remaining non-overlapping hole for the interpreter.
+            ElfType::SharedObject => find_dynamic_load_bias(aspace, interp_requirements)?,
             _ => return Err(AxError::InvalidExecutable),
         };
         let _ = load_segments(aspace, &interp_elf, &interp_image.file, bias)?;
@@ -1009,6 +1022,63 @@ mod tests {
             compute_load_bias(requirements, mapping_start).unwrap(),
             USER_DYN_BASE
         );
+    }
+
+    #[test]
+    fn loongarch_rust_lld_span_fits_dynamic_load_window() {
+        let main_requirements = ElfLoadRequirements {
+            min_page: 0,
+            span: 0x932_a000,
+            max_align: 0x10_000,
+        };
+        let (search_start, search_end) = dynamic_load_window();
+        assert!(matches!(
+            find_load_bias_in_window(main_requirements, USER_DYN_BASE, 0x400_0000, |hint, _| {
+                Some(hint)
+            }),
+            Err(AxError::NoMemory)
+        ));
+        let main_bias =
+            find_load_bias_in_window(main_requirements, search_start, search_end, |hint, _| {
+                Some(hint)
+            })
+            .unwrap();
+        let main_start = main_requirements.min_page.checked_add(main_bias).unwrap();
+        let main_end = main_start.checked_add(main_requirements.span).unwrap();
+
+        let interpreter_requirements = ElfLoadRequirements {
+            min_page: 0,
+            span: 0x42_000,
+            max_align: 0x10_000,
+        };
+        let interpreter_bias = find_load_bias_in_window(
+            interpreter_requirements,
+            search_start,
+            search_end,
+            |hint, size| {
+                let candidate = hint.max(main_end);
+                candidate
+                    .checked_add(size)
+                    .filter(|end| *end <= search_end)
+                    .map(|_| candidate)
+            },
+        )
+        .unwrap();
+        let interpreter_start = interpreter_requirements
+            .min_page
+            .checked_add(interpreter_bias)
+            .unwrap();
+        let interpreter_end = interpreter_start
+            .checked_add(interpreter_requirements.span)
+            .unwrap();
+
+        assert_eq!((search_start, search_end), (USER_DYN_BASE, USER_HEAP_BASE));
+        assert_eq!(main_start, USER_DYN_BASE);
+        assert_eq!(main_end, 0x952_a000);
+        assert!(main_end > 0x400_0000);
+        assert_eq!(interpreter_start, 0x953_0000);
+        assert!(main_end <= interpreter_start);
+        assert!(interpreter_end <= search_end);
     }
 
     #[test]
