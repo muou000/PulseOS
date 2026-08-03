@@ -234,11 +234,37 @@ pub trait FdObject: Send + Sync {
 pub struct FdEntry {
     pub object: Arc<dyn FdObject>,
     pub flags: FdFlags,
+    open_file_description: Arc<OpenFileDescription>,
+}
+
+struct OpenFileDescription;
+
+impl Drop for OpenFileDescription {
+    fn drop(&mut self) {
+        let owner = self as *const OpenFileDescription as usize;
+        crate::record_lock::release_ofd_owner(owner);
+    }
 }
 
 impl FdEntry {
     pub fn new(object: Arc<dyn FdObject>, flags: FdFlags) -> Self {
-        Self { object, flags }
+        Self {
+            object,
+            flags,
+            open_file_description: Arc::new(OpenFileDescription),
+        }
+    }
+
+    pub fn duplicate(&self, flags: FdFlags) -> Self {
+        Self {
+            object: self.object.clone(),
+            flags,
+            open_file_description: self.open_file_description.clone(),
+        }
+    }
+
+    pub fn ofd_owner(&self) -> usize {
+        Arc::as_ptr(&self.open_file_description) as usize
     }
 }
 
