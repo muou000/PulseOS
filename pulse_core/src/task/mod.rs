@@ -19,7 +19,7 @@ use kspin::SpinNoIrq;
 pub use aspace_lock::AddressSpaceLock;
 pub use process::{CloneParams, ForkParams, Process, WaitidStatusType, MAX_POSIX_TIMER_COUNT};
 pub use signal::{
-    DefaultSignalAction, NSIG, SIG_DFL, SIG_IGN, SigAction, SignalAction, SignalAltStack,
+    DefaultSignalAction, SIG_DFL, SIG_IGN, SigAction, SignalAction, SignalAltStack,
     SignalDelivery, SignalShared, ThreadSignal, blocked_mask as thread_blocked_mask, can_signal,
     check_signals_and_deliver, force_signal_to_thread, pending_mask as thread_pending_mask,
     queue_signal_to_process, queue_signal_to_process_with_info, queue_signal_to_thread,

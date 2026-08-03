@@ -1,11 +1,8 @@
 use crate::{LinuxError, impls::utils::read_user_timespec};
-
-const FUTEX_WAIT: i32 = 0;
-const FUTEX_WAKE: i32 = 1;
-const FUTEX_REQUEUE: i32 = 3;
-const FUTEX_CMP_REQUEUE: i32 = 4;
-const FUTEX_WAIT_BITSET: i32 = 9;
-const FUTEX_CMD_MASK: i32 = 0x7f;
+use linux_raw_sys::general::{
+    FUTEX_CLOCK_REALTIME, FUTEX_CMD_MASK, FUTEX_CMP_REQUEUE, FUTEX_PRIVATE_FLAG, FUTEX_REQUEUE,
+    FUTEX_WAIT, FUTEX_WAIT_BITSET, FUTEX_WAKE,
+};
 
 fn read_absolute_timeout_ns(timeout: usize, clock_realtime: bool) -> Result<Option<u64>, LinuxError> {
     if timeout == 0 {
@@ -73,9 +70,9 @@ pub fn sys_futex(
         Ok(process) => process,
         Err(e) => return -e.code() as isize,
     };
-    let cmd = op & FUTEX_CMD_MASK;
-    let is_private = (op & 0x80) != 0;
-    let clock_realtime = (op & 0x100) != 0;
+    let cmd = (op & FUTEX_CMD_MASK) as u32;
+    let is_private = (op & (FUTEX_PRIVATE_FLAG as i32)) != 0;
+    let clock_realtime = (op & (FUTEX_CLOCK_REALTIME as i32)) != 0;
 
     match cmd {
         FUTEX_WAIT | FUTEX_WAIT_BITSET => {

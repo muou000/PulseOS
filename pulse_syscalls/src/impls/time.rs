@@ -4,9 +4,10 @@ use core::{
 };
 
 use linux_raw_sys::general::{
-    CLOCK_BOOTTIME, CLOCK_MONOTONIC, CLOCK_MONOTONIC_COARSE, CLOCK_MONOTONIC_RAW,
-    CLOCK_PROCESS_CPUTIME_ID, CLOCK_REALTIME, CLOCK_REALTIME_COARSE, CLOCK_THREAD_CPUTIME_ID,
-    TIMER_ABSTIME, timespec, timeval, itimerspec,
+    CAP_SYS_TIME, CLOCK_BOOTTIME, CLOCK_MONOTONIC, CLOCK_MONOTONIC_COARSE,
+    CLOCK_MONOTONIC_RAW, CLOCK_PROCESS_CPUTIME_ID, CLOCK_REALTIME, CLOCK_REALTIME_COARSE,
+    CLOCK_THREAD_CPUTIME_ID, ITIMER_PROF, ITIMER_REAL, ITIMER_VIRTUAL, TIMER_ABSTIME, itimerspec,
+    timespec, timeval,
 };
 use pulse_core::task::uaccess;
 
@@ -340,7 +341,6 @@ pub fn sys_clock_settime(clockid: i32, tp: usize) -> isize {
         Ok(proc) => proc,
         Err(e) => return -e.code() as isize,
     };
-    const CAP_SYS_TIME: u32 = 25;
     if !process.has_capability(CAP_SYS_TIME) {
         return -LinuxError::EPERM.code() as isize;
     }
@@ -428,7 +428,6 @@ pub fn sys_settimeofday(tv: usize, tz: usize) -> isize {
         Ok(proc) => proc,
         Err(e) => return -e.code() as isize,
     };
-    const CAP_SYS_TIME: u32 = 25;
     if !process.has_capability(CAP_SYS_TIME) {
         return -LinuxError::EPERM.code() as isize;
     }
@@ -509,10 +508,6 @@ pub fn sys_times(tbuf: usize) -> isize {
     ticks as isize
 }
 
-const ITIMER_REAL: usize = 0;
-const ITIMER_VIRTUAL: usize = 1;
-const ITIMER_PROF: usize = 2;
-
 #[repr(C)]
 #[derive(Clone, Copy)]
 struct Itimerval {
@@ -577,7 +572,7 @@ pub fn sys_setitimer(which: usize, new_value: usize, old_value: usize) -> isize 
         old_value
     );
 
-    if which > ITIMER_PROF {
+    if which > (ITIMER_PROF as usize) {
         return -LinuxError::EINVAL.code() as isize;
     }
 
@@ -617,7 +612,7 @@ pub fn sys_setitimer(which: usize, new_value: usize, old_value: usize) -> isize 
         u64::MAX // sentinel: don't change
     };
 
-    match which {
+    match which as u32 {
         ITIMER_REAL => {
             let (old_remaining, old_interval) = if new_value != 0 {
                 proc.set_itimer_real(new_value_ns, new_interval_ns)
@@ -683,7 +678,7 @@ pub fn sys_getitimer(which: usize, curr_value: usize) -> isize {
         curr_value
     );
 
-    if which > ITIMER_PROF {
+    if which > (ITIMER_PROF as usize) {
         return -LinuxError::EINVAL.code() as isize;
     }
     if curr_value == 0 {
@@ -695,7 +690,7 @@ pub fn sys_getitimer(which: usize, curr_value: usize) -> isize {
         Err(e) => return -e.code() as isize,
     };
 
-    let (remaining, interval) = match which {
+    let (remaining, interval) = match which as u32 {
         ITIMER_REAL => proc.get_itimer_real(),
         ITIMER_VIRTUAL => proc.get_itimer_virt(),
         ITIMER_PROF => proc.get_itimer_prof(),
@@ -807,7 +802,6 @@ pub fn sys_clock_adjtime(clockid: i32, buf: usize) -> isize {
     let modes = tmx.modes;
 
     if modes != 0 && modes != ADJ_OFFSET_SS_READ {
-        const CAP_SYS_TIME: u32 = 25;
         if !proc.has_capability(CAP_SYS_TIME) {
             return -LinuxError::EPERM.code() as isize;
         }

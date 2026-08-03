@@ -7,19 +7,18 @@ use axtask::{WaitQueue, WakeContext, WakeSource};
 use kspin::SpinNoIrq;
 use linux_raw_sys::general::{
     SA_NODEFER, SA_ONSTACK, SA_RESETHAND, SIGCHLD, SIGCONT, SIGKILL, SIGSEGV, SIGSTOP, SIGURG,
-    SIGWINCH, SS_DISABLE, SS_ONSTACK,
+    SIGWINCH, SS_DISABLE, SS_ONSTACK, _NSIG,
 };
 use spin::Mutex;
 
 use super::{Process, Thread};
 
-pub const NSIG: usize = 64;
 pub const SIG_DFL: usize = 0;
 pub const SIG_IGN: usize = 1;
 
 #[inline]
 fn sig_bit(sig: usize) -> Option<u64> {
-    if (1..=NSIG).contains(&sig) {
+    if (1..=(_NSIG as usize)).contains(&sig) {
         Some(1u64 << (sig - 1))
     } else {
         None
@@ -113,7 +112,7 @@ struct SavedSignalContext {
 }
 
 pub struct SignalHandlers {
-    actions: SpinNoIrq<[SigAction; NSIG + 1]>,
+    actions: SpinNoIrq<[SigAction; (_NSIG as usize) + 1]>,
 }
 
 pub struct SignalShared {
@@ -126,7 +125,7 @@ impl SignalShared {
     pub fn new() -> Arc<Self> {
         Arc::new(Self {
             handlers: Arc::new(SignalHandlers {
-                actions: SpinNoIrq::new([SigAction::dfl(); NSIG + 1]),
+                actions: SpinNoIrq::new([SigAction::dfl(); (_NSIG as usize) + 1]),
             }),
             process_pending: AtomicU64::new(0),
             pending_siginfo: Mutex::new(BTreeMap::new()),
@@ -162,7 +161,7 @@ impl SignalShared {
 
     pub fn reset_dispositions_on_exec(&self) {
         let mut actions = self.handlers.actions.lock();
-        for sig in 1..=NSIG {
+        for sig in 1..=(_NSIG as usize) {
             let handler = if actions[sig].handler == SIG_IGN {
                 SIG_IGN
             } else {

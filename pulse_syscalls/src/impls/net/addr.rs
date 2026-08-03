@@ -12,9 +12,8 @@ use core::{
 use axerrno::LinuxError;
 use linux_raw_sys::net::*;
 
-const UNIX_PATH_MAX: usize = 108;
 const UNIX_FAMILY_LEN: usize = size_of::<__kernel_sa_family_t>();
-const UNIX_ADDR_MAX: usize = UNIX_FAMILY_LEN + UNIX_PATH_MAX;
+const UNIX_ADDR_MAX: usize = UNIX_FAMILY_LEN + (UNIX_PATH_MAX as usize);
 
 fn read_user_plain<T: Copy>(user_addr: usize) -> Result<T, LinuxError> {
     crate::impls::utils::with_process(|process| {
@@ -56,7 +55,7 @@ pub(super) fn read_unix_path(addr: usize, addrlen: usize) -> Result<String, Linu
     }
 
     let path_len = addrlen - UNIX_FAMILY_LEN;
-    let mut path_buf = [0u8; UNIX_PATH_MAX];
+    let mut path_buf = [0u8; UNIX_PATH_MAX as usize];
     crate::impls::utils::read_user_bytes(addr + UNIX_FAMILY_LEN, &mut path_buf[..path_len])?;
 
     let path_bytes = if path_buf[0] == 0 {
@@ -217,12 +216,12 @@ pub fn write_unix_addr(
     
     if let Some(path) = path_opt {
         let path_bytes = path.as_bytes();
-        if path_bytes.len() > UNIX_PATH_MAX {
+        if path_bytes.len() > (UNIX_PATH_MAX as usize) {
             return Err(LinuxError::ENAMETOOLONG);
         }
         bytes[len..len + path_bytes.len()].copy_from_slice(path_bytes);
         len += path_bytes.len();
-        if !path.starts_with('\0') && path_bytes.len() < UNIX_PATH_MAX {
+        if !path.starts_with('\0') && path_bytes.len() < (UNIX_PATH_MAX as usize) {
             bytes[len] = 0;
             len += 1;
         }

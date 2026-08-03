@@ -16,7 +16,10 @@ use axfs_ng_vfs::{Location, Metadata, NodeType};
 use axhal::paging::MappingFlags;
 use axio::{PollState, Read, Seek, SeekFrom, Write};
 use kspin::SpinNoIrq;
-use linux_raw_sys::general::*;
+use linux_raw_sys::{
+    general::*,
+    ioctl::{FIONBIO, FIONREAD},
+};
 use memory_addr::{PhysAddr, VirtAddr};
 use spin::{Lazy, Mutex, RwLock};
 
@@ -24,10 +27,6 @@ use crate::cpu_dma_latency::{CpuDmaLatencyRequest, effective_latency_us};
 
 pub const FD_RESERVED: usize = 3;
 pub const FD_LIMIT: usize = 1048576;
-
-// ioctl commands shared by multiple file-like descriptor objects.
-const FIONREAD: u32 = 0x541B;
-const FIONBIO: u32 = 0x5421;
 
 bitflags::bitflags! {
     #[derive(Clone, Copy, Debug, Eq, PartialEq)]

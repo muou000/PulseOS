@@ -12,6 +12,7 @@ use axfs::{CachedFile, ExecAccessGuard, FileFlags, FsContext};
 use axhal::{mem::MemRegionFlags, paging::MappingFlags};
 use axmm::AddrSpace;
 use kernel_elf_parser::{AuxEntry, AuxType, ELFHeadersBuilder, ELFParser};
+use linux_raw_sys::elf_uapi::{EM_LOONGARCH, PT_GNU_STACK};
 use memory_addr::{MemoryAddr, PAGE_SIZE_4K, VirtAddr, VirtAddrRange};
 use xmas_elf::{
     ElfFile,
@@ -22,9 +23,7 @@ use xmas_elf::{
 use crate::config::{USER_HEAP_BASE, USER_STACK_SIZE, USER_STACK_TOP};
 
 const USER_DYN_BASE: usize = 0x20_0000;
-const ELF_MACHINE_LOONGARCH: u16 = 0x102;
 const ELF_CACHE_MAX_ENTRIES: usize = 16;
-const PT_GNU_STACK: u32 = 0x6474_e551;
 const AT_RANDOM_BYTES: usize = 16;
 const USER_STACK_ALIGNMENT: usize = 16;
 
@@ -165,7 +164,7 @@ fn validate_machine(elf: &ElfFile<'_>, path: &str) -> AxResult {
     let machine = elf.header.pt2.machine().as_machine();
     let ok = match machine {
         Machine::RISC_V => cfg!(target_arch = "riscv64"),
-        Machine::Other(v) if v == ELF_MACHINE_LOONGARCH => cfg!(target_arch = "loongarch64"),
+        Machine::Other(v) if v == (EM_LOONGARCH as u16) => cfg!(target_arch = "loongarch64"),
         _ => false,
     };
     if ok {

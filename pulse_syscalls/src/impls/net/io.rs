@@ -814,7 +814,6 @@ pub fn sys_recvmmsg(fd: usize, msgvec: usize, vlen: usize, flags: usize, timeout
     // Temporarily set socket to nonblocking so that we handle yield/timeouts here at syscall level.
     socket.set_nonblocking_inner(true);
 
-    const MSG_DONTWAIT: usize = 0x40;
     const MSG_WAITFORONE: usize = 0x10000;
 
     let mut received_count = 0;
@@ -832,7 +831,7 @@ pub fn sys_recvmmsg(fd: usize, msgvec: usize, vlen: usize, flags: usize, timeout
         };
 
         let current_flags = if received_count > 0 && (flags & MSG_WAITFORONE) != 0 {
-            flags | MSG_DONTWAIT
+            flags | (linux_raw_sys::net::MSG_DONTWAIT as usize)
         } else {
             flags
         };
@@ -855,7 +854,7 @@ pub fn sys_recvmmsg(fd: usize, msgvec: usize, vlen: usize, flags: usize, timeout
                     break;
                 }
 
-                if originally_nonblocking || (flags & MSG_DONTWAIT) != 0 {
+                if originally_nonblocking || (flags & (linux_raw_sys::net::MSG_DONTWAIT as usize)) != 0 {
                     if received_count > 0 {
                         break;
                     } else {

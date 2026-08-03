@@ -1,4 +1,7 @@
 use axerrno::LinuxError;
+use linux_raw_sys::general::{
+    _LINUX_CAPABILITY_VERSION_1, _LINUX_CAPABILITY_VERSION_2, _LINUX_CAPABILITY_VERSION_3,
+};
 use pulse_core::task::current_process;
 
 fn parse_id_arg(raw: usize) -> u32 {
@@ -380,10 +383,6 @@ struct CapUserData {
     inheritable: u32,
 }
 
-const CAP_VERSION_1: u32 = 0x19980330;
-const CAP_VERSION_2: u32 = 0x20071026;
-const CAP_VERSION_3: u32 = 0x20080522;
-
 /// capget(2): 查询进程 capability
 pub fn sys_capget(hdrp: usize, datap: usize) -> isize {
     if hdrp == 0 {
@@ -402,8 +401,11 @@ pub fn sys_capget(hdrp: usize, datap: usize) -> isize {
         }
     };
 
-    if header.version != CAP_VERSION_1 && header.version != CAP_VERSION_2 && header.version != CAP_VERSION_3 {
-        header.version = CAP_VERSION_3;
+    if header.version != _LINUX_CAPABILITY_VERSION_1
+        && header.version != _LINUX_CAPABILITY_VERSION_2
+        && header.version != _LINUX_CAPABILITY_VERSION_3
+    {
+        header.version = _LINUX_CAPABILITY_VERSION_3;
         let _ = pulse_core::task::uaccess::write_user_plain(process.as_ref(), hdrp, &header);
         return -LinuxError::EINVAL.code() as isize;
     }
@@ -433,7 +435,9 @@ pub fn sys_capget(hdrp: usize, datap: usize) -> isize {
         return -errno.code() as isize;
     }
 
-    if header.version == CAP_VERSION_2 || header.version == CAP_VERSION_3 {
+    if header.version == _LINUX_CAPABILITY_VERSION_2
+        || header.version == _LINUX_CAPABILITY_VERSION_3
+    {
         let data1 = CapUserData {
             effective: (cap_e >> 32) as u32,
             permitted: (cap_p >> 32) as u32,
@@ -466,8 +470,11 @@ pub fn sys_capset(hdrp: usize, datap: usize) -> isize {
         }
     };
 
-    if header.version != CAP_VERSION_1 && header.version != CAP_VERSION_2 && header.version != CAP_VERSION_3 {
-        header.version = CAP_VERSION_3;
+    if header.version != _LINUX_CAPABILITY_VERSION_1
+        && header.version != _LINUX_CAPABILITY_VERSION_2
+        && header.version != _LINUX_CAPABILITY_VERSION_3
+    {
+        header.version = _LINUX_CAPABILITY_VERSION_3;
         let _ = pulse_core::task::uaccess::write_user_plain(process.as_ref(), hdrp, &header);
         return -LinuxError::EINVAL.code() as isize;
     }
@@ -494,7 +501,9 @@ pub fn sys_capset(hdrp: usize, datap: usize) -> isize {
 
     let (mut cap_p, mut cap_e, mut cap_i) = (data0.permitted as u64, data0.effective as u64, data0.inheritable as u64);
 
-    if header.version == CAP_VERSION_2 || header.version == CAP_VERSION_3 {
+    if header.version == _LINUX_CAPABILITY_VERSION_2
+        || header.version == _LINUX_CAPABILITY_VERSION_3
+    {
         let data1: CapUserData = match pulse_core::task::uaccess::read_user_plain(process.as_ref(), datap + core::mem::size_of::<CapUserData>()) {
             Ok(d) => d,
             Err(e) => {
@@ -519,4 +528,3 @@ pub fn sys_capset(hdrp: usize, datap: usize) -> isize {
     process.set_capabilities(cap_p, cap_e, cap_i);
     0
 }
-

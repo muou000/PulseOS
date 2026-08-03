@@ -1,8 +1,9 @@
 use axerrno::LinuxError;
 use axfs_ng_vfs::{Location, MetadataUpdate};
 use linux_raw_sys::general::{
-    AT_EACCESS, AT_EMPTY_PATH, AT_FDCWD, AT_SYMLINK_NOFOLLOW, CAP_CHOWN, CAP_FOWNER, R_OK,
-    STATX_BASIC_STATS, STATX_MNT_ID, W_OK, X_OK, statfs, statx, statx_timestamp, timespec,
+    AT_EACCESS, AT_EMPTY_PATH, AT_FDCWD, AT_SYMLINK_NOFOLLOW, CAP_CHOWN, CAP_FOWNER,
+    MS_NOSYMFOLLOW, R_OK, STATX_BASIC_STATS, STATX_MNT_ID, W_OK, X_OK, statfs, statx,
+    statx_timestamp, timespec,
 };
 use pulse_core::fd_table::location_to_stat;
 
@@ -79,9 +80,8 @@ fn vfs_statfs_to_linux(location: &Location) -> Result<statfs, LinuxError> {
     }
 
     // Map mismatched flag: MS_NOSYMFOLLOW (256) -> ST_NOSYMFOLLOW (8192 / 0x2000)
-    const MS_NOSYMFOLLOW: usize = 256;
     const ST_NOSYMFOLLOW: usize = 0x2000;
-    if (mount_flags & MS_NOSYMFOLLOW) != 0 {
+    if (mount_flags & MS_NOSYMFOLLOW as usize) != 0 {
         statfs_flags |= ST_NOSYMFOLLOW;
     }
 

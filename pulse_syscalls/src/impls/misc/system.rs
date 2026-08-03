@@ -137,13 +137,12 @@ struct Rusage {
     ru_nivcsw: i64,
 }
 
-const RUSAGE_SELF: i32 = 0;
-const RUSAGE_CHILDREN: i32 = -1;
-const RUSAGE_THREAD: i32 = 1;
-
 pub fn sys_getrusage(who: i32, addr: usize) -> isize {
     axlog::debug!("sys_getrusage: who={}, addr={:#x}", who, addr);
-    if who != RUSAGE_SELF && who != RUSAGE_CHILDREN && who != RUSAGE_THREAD {
+    if who != (linux_raw_sys::general::RUSAGE_SELF as i32)
+        && who != linux_raw_sys::general::RUSAGE_CHILDREN
+        && who != (linux_raw_sys::general::RUSAGE_THREAD as i32)
+    {
         return -LinuxError::EINVAL.code() as isize;
     }
 
@@ -153,11 +152,15 @@ pub fn sys_getrusage(who: i32, addr: usize) -> isize {
     };
 
     let (utime_ns, stime_ns) = match who {
-        RUSAGE_SELF | RUSAGE_THREAD => {
+        who if who == (linux_raw_sys::general::RUSAGE_SELF as i32)
+            || who == (linux_raw_sys::general::RUSAGE_THREAD as i32) =>
+        {
             let now_ns = axhal::time::monotonic_time_nanos() as u64;
             process.snapshot_cpu_time_ns(now_ns)
         }
-        RUSAGE_CHILDREN => process.snapshot_children_cpu_time_ns(),
+        who if who == linux_raw_sys::general::RUSAGE_CHILDREN => {
+            process.snapshot_children_cpu_time_ns()
+        }
         _ => unreachable!(),
     };
 

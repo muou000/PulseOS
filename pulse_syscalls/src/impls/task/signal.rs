@@ -3,9 +3,9 @@ use core::time::Duration;
 use axhal::context::TrapFrame;
 use linux_raw_sys::general::{
     MINSIGSTKSZ, SIG_BLOCK, SIG_SETMASK, SIG_UNBLOCK, SIGKILL, SIGSTOP, SS_DISABLE, SS_FLAG_BITS,
-    SS_ONSTACK, sigaction, siginfo, timespec,
+    SS_ONSTACK, _NSIG, sigaction, siginfo, timespec,
 };
-use pulse_core::task::{NSIG, SigAction, uaccess};
+use pulse_core::task::{SigAction, uaccess};
 
 use crate::{LinuxError, impls::utils::read_user_timespec};
 
@@ -77,7 +77,11 @@ pub fn sys_rt_sigaction(_signum: usize, _act: usize, _oldact: usize, _sigsetsize
     if sigsetsize != 0 && sigsetsize != core::mem::size_of::<u64>() {
         return -LinuxError::EINVAL.code() as isize;
     }
-    if signum == 0 || signum > NSIG || signum == SIGKILL as usize || signum == SIGSTOP as usize {
+    if signum == 0
+        || signum > (_NSIG as usize)
+        || signum == SIGKILL as usize
+        || signum == SIGSTOP as usize
+    {
         return -LinuxError::EINVAL.code() as isize;
     }
     let thread = match pulse_core::task::current_thread() {
