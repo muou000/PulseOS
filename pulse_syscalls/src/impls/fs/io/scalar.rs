@@ -34,7 +34,8 @@ pub fn sys_read(fd: usize, buf: usize, count: usize) -> isize {
             }
         }
     }
-    if let Some(file_obj) = object.as_any().downcast_ref::<FileObject>() {
+    let file_obj = object.as_any().downcast_ref::<FileObject>();
+    if let Some(file_obj) = file_obj {
         if file_obj.inner().is_direct_regular_file() {
             let block_size = file_obj.inner().block_size() as usize;
             let offset = match file_obj.seek(SeekFrom::Current(0)) {
@@ -57,7 +58,9 @@ pub fn sys_read(fd: usize, buf: usize, count: usize) -> isize {
         let requested = (count - total).min(MAX_IO_CHUNK);
         let (ret, submitted) =
             match read_into_user(user_buf, requested, &mut fallback_buf, |slice| {
-                object.read(slice)
+                object
+                    .try_read_resident(slice)
+                    .unwrap_or_else(|| object.read(slice))
             }) {
                 Ok(result) => result,
                 Err(e) => {
@@ -200,7 +203,8 @@ pub fn sys_pread64(fd: usize, buf: usize, count: usize, offset: usize) -> isize 
         return -LinuxError::EBADF.code() as isize;
     }
     let object = entry.object;
-    if let Some(file_obj) = object.as_any().downcast_ref::<FileObject>() {
+    let file_obj = object.as_any().downcast_ref::<FileObject>();
+    if let Some(file_obj) = file_obj {
         if file_obj.inner().is_direct_regular_file() {
             let block_size = file_obj.inner().block_size() as usize;
             if buf % block_size != 0
@@ -226,7 +230,9 @@ pub fn sys_pread64(fd: usize, buf: usize, count: usize, offset: usize) -> isize 
 
         let (ret, submitted) =
             match read_into_user(user_buf, requested, &mut fallback_buf, |slice| {
-                object.read_at(slice, current_offset)
+                object
+                    .try_read_at_resident(slice, current_offset)
+                    .unwrap_or_else(|| object.read_at(slice, current_offset))
             }) {
                 Ok(result) => result,
                 Err(e) => {

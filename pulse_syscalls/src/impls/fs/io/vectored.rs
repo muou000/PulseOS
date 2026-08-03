@@ -154,7 +154,9 @@ pub fn sys_readv(fd: usize, iov: usize, iovcnt: usize) -> isize {
 
             let (ret, submitted) =
                 match read_into_user(user_buf, chunk, &mut fallback_buf, |slice| {
-                    object.read(slice)
+                    object
+                        .try_read_resident(slice)
+                        .unwrap_or_else(|| object.read(slice))
                 }) {
                     Ok((ret, submitted)) => (ret as isize, submitted),
                     Err(e) => return if total > 0 { total } else { -e.code() as isize },
@@ -261,7 +263,9 @@ pub fn sys_preadv(fd: usize, iov: usize, iovcnt: usize, pos_l: usize, pos_h: usi
 
             let (ret, submitted) =
                 match read_into_user(user_buf, chunk, &mut fallback_buf, |slice| {
-                    object.read_at(slice, file_offset)
+                    object
+                        .try_read_at_resident(slice, file_offset)
+                        .unwrap_or_else(|| object.read_at(slice, file_offset))
                 }) {
                     Ok((ret, submitted)) => (ret as isize, submitted),
                     Err(e) => return if total > 0 { total } else { -e.code() as isize },

@@ -8,6 +8,57 @@ use super::{
 
 const DIRECT_IO_STAGING_SIZE: usize = 64 * 1024;
 
+/// A file position lock that leaves queued async operations ahead of the
+/// resident-read fast path. The async mutex alone cannot expose its waiter
+/// state to `try_lock` callers.
+struct FilePosition {
+    value: async_lock::Mutex<u64>,
+    waiters: AtomicUsize,
+}
+
+struct PositionWaiter<'a>(&'a AtomicUsize);
+
+impl Drop for PositionWaiter<'_> {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::AcqRel);
+    }
+}
+
+impl FilePosition {
+    fn new(value: u64) -> Self {
+        Self {
+            value: async_lock::Mutex::new(value),
+            waiters: AtomicUsize::new(0),
+        }
+    }
+
+    fn try_lock(&self) -> Option<async_lock::MutexGuard<'_, u64>> {
+        if self.waiters.load(Ordering::Acquire) != 0 {
+            return None;
+        }
+        let guard = self.value.try_lock()?;
+        if self.waiters.load(Ordering::Acquire) != 0 {
+            drop(guard);
+            return None;
+        }
+        Some(guard)
+    }
+
+    async fn lock(&self) -> async_lock::MutexGuard<'_, u64> {
+        if let Some(guard) = self.try_lock() {
+            return guard;
+        }
+
+        self.waiters.fetch_add(1, Ordering::AcqRel);
+        // The RAII token also decrements the count if an enclosing file future
+        // is cancelled while this mutex acquisition is pending.
+        let waiter = PositionWaiter(&self.waiters);
+        let guard = self.value.lock().await;
+        drop(waiter);
+        guard
+    }
+}
+
 async fn extend_backend_to_cached_size(file: &FileNode, cached_size: u64) -> VfsResult<()> {
     if file.len().await? < cached_size {
         file.set_len(cached_size).await?;
@@ -92,6 +143,19 @@ impl FileBackend {
                 }
                 read_source_at_async(file, &mut dst, offset).await
             }
+        }
+    }
+
+    /// Tries to serve a read without suspending. `None` preserves the normal
+    /// async path for direct I/O, cache misses, and contended cache state.
+    pub fn try_read_at_resident(
+        &self,
+        dst: impl Write + IoBufMut,
+        offset: u64,
+    ) -> Option<VfsResult<usize>> {
+        match self {
+            Self::Cached(cached) => cached.try_read_at_resident(dst, offset),
+            Self::Direct(_) => None,
         }
     }
 
@@ -314,7 +378,7 @@ impl FileBackend {
 pub struct File {
     inner: FileBackend,
     flags: FileFlags,
-    position: Option<async_lock::Mutex<u64>>,
+    position: Option<FilePosition>,
     _write_access: Option<WriteAccessGuard>,
     #[cfg(feature = "times")]
     access_flags: AtomicU8,
@@ -330,13 +394,11 @@ impl File {
         let position = if inner.location().flags().contains(NodeFlags::STREAM) {
             None
         } else {
-            Some(async_lock::Mutex::new(
-                if flags.contains(FileFlags::APPEND) {
-                    append_position
-                } else {
-                    0
-                },
-            ))
+            Some(FilePosition::new(if flags.contains(FileFlags::APPEND) {
+                append_position
+            } else {
+                0
+            }))
         };
         Self {
             inner,
@@ -452,6 +514,27 @@ impl File {
         result
     }
 
+    /// Tries to read fully resident cache pages without constructing a future.
+    /// A `None` result must be retried through [`Self::read_at`].
+    pub fn try_read_at_resident(
+        &self,
+        dst: impl Write + IoBufMut,
+        offset: u64,
+    ) -> Option<VfsResult<usize>> {
+        let backend = match self.access(FileFlags::READ) {
+            Ok(backend) => backend,
+            Err(err) => return Some(Err(err)),
+        };
+        let result = backend.try_read_at_resident(dst, offset);
+        #[cfg(feature = "times")]
+        if let Some(Ok(read)) = result.as_ref()
+            && *read != 0
+        {
+            self.access_flags.fetch_or(1, Ordering::AcqRel);
+        }
+        result
+    }
+
     /// Writes a number of bytes starting from a given offset.
     pub async fn write_at(&self, src: impl Read + IoBuf, offset: u64) -> VfsResult<usize> {
         let result = self.access(FileFlags::WRITE)?.write_at(src, offset).await;
@@ -504,6 +587,21 @@ impl File {
             })
         } else {
             self.read_at(dst, 0).await
+        }
+    }
+
+    /// Tries to read from resident cache pages while preserving the shared file
+    /// offset update as one non-suspending critical section.
+    pub fn try_read_resident(&self, dst: impl Write + IoBufMut) -> Option<axio::Result<usize>> {
+        if let Some(pos) = self.position.as_ref() {
+            let mut pos = pos.try_lock()?;
+            let result = self.try_read_at_resident(dst, *pos)?;
+            if let Ok(read) = result.as_ref() {
+                *pos += *read as u64;
+            }
+            Some(result)
+        } else {
+            self.try_read_at_resident(dst, 0)
         }
     }
 
@@ -562,9 +660,12 @@ impl File {
     }
 
     pub fn position(&self) -> Option<u64> {
-        self.position
-            .as_ref()
-            .map(|pos| *axtask::future::block_on(pos.lock()))
+        self.position.as_ref().map(|pos| {
+            let pos = pos
+                .try_lock()
+                .unwrap_or_else(|| axtask::future::block_on(pos.lock()));
+            *pos
+        })
     }
 
     #[cfg(feature = "times")]
@@ -623,7 +724,9 @@ impl Seek for &File {
         self.access(FileFlags::empty())?;
 
         if let Some(guard) = self.position.as_ref() {
-            let mut guard = axtask::future::block_on(guard.lock());
+            let mut guard = guard
+                .try_lock()
+                .unwrap_or_else(|| axtask::future::block_on(guard.lock()));
             let new_pos = match pos {
                 SeekFrom::Start(pos) => pos,
                 SeekFrom::End(off) => {
