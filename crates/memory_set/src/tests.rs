@@ -141,6 +141,11 @@ struct ConditionalUnmapBackend {
     reject: bool,
 }
 
+#[derive(Clone)]
+struct RejectUnmapAtBackend {
+    reject_at: usize,
+}
+
 impl MappingBackend for ConditionalUnmapBackend {
     type Addr = VirtAddr;
     type Flags = MockFlags;
@@ -173,7 +178,39 @@ impl MappingBackend for ConditionalUnmapBackend {
     }
 }
 
+impl MappingBackend for RejectUnmapAtBackend {
+    type Addr = VirtAddr;
+    type Flags = MockFlags;
+    type PageTable = MockPageTable;
+    type Reclaim = Vec<(usize, usize)>;
+
+    fn map(&self, start: VirtAddr, size: usize, flags: MockFlags, pt: &mut MockPageTable) -> bool {
+        MockBackend.map(start, size, flags, pt)
+    }
+
+    fn unmap(
+        &self,
+        start: VirtAddr,
+        size: usize,
+        pt: &mut MockPageTable,
+        reclaim: &mut Self::Reclaim,
+    ) -> bool {
+        start.as_usize() != self.reject_at && MockBackend.unmap(start, size, pt, reclaim)
+    }
+
+    fn protect(
+        &self,
+        start: VirtAddr,
+        size: usize,
+        new_flags: MockFlags,
+        pt: &mut MockPageTable,
+    ) -> bool {
+        MockBackend.protect(start, size, new_flags, pt)
+    }
+}
+
 static ADDRESS_COMPARISONS: AtomicUsize = AtomicUsize::new(0);
+static ADDRESS_COMPARISON_TESTS: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct CountingAddr(usize);
@@ -631,6 +668,7 @@ fn test_unmap_continues_contained_areas_before_returning_failure() {
 
 #[test]
 fn test_narrow_unmap_is_bounded_with_many_unrelated_areas() {
+    let _comparison_lock = ADDRESS_COMPARISON_TESTS.lock().unwrap();
     const AREA_COUNT: usize = 512;
     const AREA_SIZE: usize = 0x10;
     const AREA_STRIDE: usize = 0x20;
@@ -667,6 +705,71 @@ fn test_narrow_unmap_is_bounded_with_many_unrelated_areas() {
             (unmap_start + 4, area_start + AREA_SIZE)
         ]
     );
+}
+
+#[test]
+fn test_first_area_drain_keeps_chunking_outside_the_tree() {
+    let _comparison_lock = ADDRESS_COMPARISON_TESTS.lock().unwrap();
+    let mut set = MemorySet::<CountingBackend>::new();
+    let mut pt = [0; MAX_ADDR];
+    let mut reclaim = Vec::new();
+    for (start, size) in core::iter::once((0x1000, 0x3000))
+        .chain((0..256).map(|index| (0x5000 + index * 0x20, 0x10)))
+    {
+        assert_ok!(set.map(
+            MemoryArea::new(start.into(), size, 1, CountingBackend),
+            &mut pt,
+            false,
+            &mut reclaim,
+        ));
+    }
+
+    let mut drain = set.drain_first_area().unwrap();
+    ADDRESS_COMPARISONS.store(0, AtomicOrdering::Relaxed);
+    while !drain.is_empty() {
+        assert_ok!(drain.unmap_prefix(0x1000, &mut pt, &mut reclaim));
+    }
+    let comparisons = ADDRESS_COMPARISONS.load(AtomicOrdering::Relaxed);
+    assert!(
+        comparisons <= 8,
+        "detached chunk drain made {comparisons} address comparisons"
+    );
+    drop(drain);
+
+    assert_eq!(set.len(), 256);
+    assert_eq!(mapped_ranges(&set)[0], (0x5000, 0x5010));
+    assert_eq!(
+        reclaim,
+        [(0x1000, 0x1000), (0x2000, 0x1000), (0x3000, 0x1000)]
+    );
+}
+
+#[test]
+fn test_first_area_drain_restores_remainder_after_failure() {
+    let mut set = MemorySet::<RejectUnmapAtBackend>::new();
+    let mut pt = [0; MAX_ADDR];
+    let mut reclaim = Vec::new();
+    assert_ok!(set.map(
+        MemoryArea::new(
+            0x1000.into(),
+            0x3000,
+            1,
+            RejectUnmapAtBackend { reject_at: 0x2000 },
+        ),
+        &mut pt,
+        false,
+        &mut reclaim,
+    ));
+
+    let mut drain = set.drain_first_area().unwrap();
+    assert_ok!(drain.unmap_prefix(0x1000, &mut pt, &mut reclaim));
+    assert_err!(drain.unmap_prefix(0x1000, &mut pt, &mut reclaim), BadState);
+    drop(drain);
+
+    assert_eq!(mapped_ranges(&set), [(0x2000, 0x4000)]);
+    assert!(pt[0x1000..0x2000].iter().all(|&entry| entry == 0));
+    assert!(pt[0x2000..0x4000].iter().all(|&entry| entry == 1));
+    assert_eq!(reclaim, [(0x1000, 0x1000)]);
 }
 
 #[test]

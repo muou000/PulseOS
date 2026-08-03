@@ -12,6 +12,46 @@ pub struct MemorySet<B: MappingBackend> {
     areas: BTreeMap<B::Addr, MemoryArea<B>>,
 }
 
+/// Owns the first memory area outside the set while a lifecycle teardown
+/// consumes it. Dropping an incomplete drain restores the remaining range.
+pub struct MemoryAreaDrain<'a, B: MappingBackend> {
+    set: &'a mut MemorySet<B>,
+    area: Option<MemoryArea<B>>,
+}
+
+impl<B: MappingBackend> MemoryAreaDrain<'_, B> {
+    /// Returns whether the detached area has been consumed completely.
+    pub fn is_empty(&self) -> bool {
+        self.area
+            .as_ref()
+            .is_none_or(|area| area.va_range().is_empty())
+    }
+
+    /// Unmaps at most `max_size` bytes from the start of the detached area.
+    pub fn unmap_prefix(
+        &mut self,
+        max_size: usize,
+        page_table: &mut B::PageTable,
+        reclaim: &mut B::Reclaim,
+    ) -> MappingResult {
+        self.area
+            .as_mut()
+            .ok_or(MappingError::InvalidParam)?
+            .unmap_prefix(max_size, page_table, reclaim)
+    }
+}
+
+impl<B: MappingBackend> Drop for MemoryAreaDrain<'_, B> {
+    fn drop(&mut self) {
+        let Some(area) = self.area.take() else {
+            return;
+        };
+        if !area.va_range().is_empty() {
+            assert!(self.set.areas.insert(area.start(), area).is_none());
+        }
+    }
+}
+
 impl<B: MappingBackend> MemorySet<B> {
     /// Creates a new memory set.
     pub const fn new() -> Self {
@@ -33,6 +73,16 @@ impl<B: MappingBackend> MemorySet<B> {
     /// Returns the iterator over all memory areas.
     pub fn iter(&self) -> impl Iterator<Item = &MemoryArea<B>> {
         self.areas.values()
+    }
+
+    /// Detaches the first area so a teardown path can consume it in bounded
+    /// chunks without searching or re-keying the mapping tree for every chunk.
+    pub fn drain_first_area(&mut self) -> Option<MemoryAreaDrain<'_, B>> {
+        let (_, area) = self.areas.pop_first()?;
+        Some(MemoryAreaDrain {
+            set: self,
+            area: Some(area),
+        })
     }
 
     fn first_overlapping_key(&self, range: AddrRange<B::Addr>) -> B::Addr {

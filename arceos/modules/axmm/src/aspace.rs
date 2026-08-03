@@ -1233,21 +1233,15 @@ impl AddrSpace {
 
     fn clear_unpublished(&mut self) {
         let chunk_size = DeferredReclaims::retirement_capacity() * PAGE_SIZE_4K;
-        loop {
-            let next = self
-                .areas
-                .iter()
-                .next()
-                .map(|area| (area.start(), area.size().min(chunk_size)));
-            let Some((start, size)) = next else {
-                break;
-            };
-            let mut reclaim = DeferredReclaims::for_retirement();
-            let result = self.areas.unmap(start, size, &mut self.pt, &mut reclaim);
-            reclaim.reclaim();
-            if let Err(error) = result {
-                error!("failed to clear unpublished address space: {error:?}");
-                break;
+        'areas: while let Some(mut area) = self.areas.drain_first_area() {
+            while !area.is_empty() {
+                let mut reclaim = DeferredReclaims::for_retirement();
+                let result = area.unmap_prefix(chunk_size, &mut self.pt, &mut reclaim);
+                reclaim.reclaim();
+                if let Err(error) = result {
+                    error!("failed to clear unpublished address space: {error:?}");
+                    break 'areas;
+                }
             }
         }
     }
@@ -2024,21 +2018,19 @@ impl Drop for AddrSpace {
                 .complete_after_unlock()
                 .is_ok();
 
-        while retirement_completed {
-            let next = self
-                .areas
-                .iter()
-                .next()
-                .map(|area| (area.start(), area.size().min(chunk_size)));
-            let Some((start, size)) = next else {
+        'areas: while retirement_completed {
+            let Some(mut area) = self.areas.drain_first_area() else {
                 break;
             };
-            let mut reclaim = DeferredReclaims::for_retirement();
-            let result = self.areas.unmap(start, size, &mut self.pt, &mut reclaim);
-            reclaim.reclaim();
-            if let Err(error) = result {
-                error!("failed to retire address-space mappings: {error:?}");
-                retirement_completed = false;
+            while !area.is_empty() {
+                let mut reclaim = DeferredReclaims::for_retirement();
+                let result = area.unmap_prefix(chunk_size, &mut self.pt, &mut reclaim);
+                reclaim.reclaim();
+                if let Err(error) = result {
+                    error!("failed to retire address-space mappings: {error:?}");
+                    retirement_completed = false;
+                    break 'areas;
+                }
             }
         }
 

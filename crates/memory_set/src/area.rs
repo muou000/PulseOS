@@ -97,6 +97,23 @@ impl<B: MappingBackend> MemoryArea<B> {
             .ok_or(MappingError::BadState)
     }
 
+    pub(crate) fn unmap_prefix(
+        &mut self,
+        max_size: usize,
+        page_table: &mut B::PageTable,
+        reclaim: &mut B::Reclaim,
+    ) -> MappingResult {
+        if max_size == 0 || self.va_range.is_empty() {
+            return Err(MappingError::InvalidParam);
+        }
+        let size = self.size().min(max_size);
+        if !self.backend.unmap(self.start(), size, page_table, reclaim) {
+            return Err(MappingError::BadState);
+        }
+        self.va_range.start = self.va_range.start.wrapping_add(size);
+        Ok(())
+    }
+
     /// Changes the flags in the page table.
     pub(crate) fn protect_area_tracked<M: MappingMutation<B::Addr>>(
         &mut self,
