@@ -178,6 +178,32 @@ fn test_async_task() {
 }
 
 #[test]
+fn test_block_on_waker_reuse_quarantines_retained_wakers() {
+    use crate::future::AxWaker;
+
+    let _lock = SERIAL.lock();
+    INIT.call_once(axtask::init_scheduler);
+
+    let task = current().as_task_ref().clone();
+    let first = AxWaker::acquire(&task);
+    let first_ptr = Arc::as_ptr(&first);
+    AxWaker::release(first, &task);
+
+    let reused = AxWaker::acquire(&task);
+    assert_eq!(Arc::as_ptr(&reused), first_ptr);
+    assert!(reused.is_active_for_test());
+
+    let retained = reused.clone();
+    AxWaker::release(reused, &task);
+    assert!(!retained.is_active_for_test());
+
+    let replacement = AxWaker::acquire(&task);
+    assert!(!Arc::ptr_eq(&retained, &replacement));
+    assert!(replacement.is_active_for_test());
+    AxWaker::release(replacement, &task);
+}
+
+#[test]
 fn test_poll_io_registers_before_recheck() {
     struct RegisterMakesReady {
         ready: AtomicBool,

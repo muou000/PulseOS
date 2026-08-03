@@ -35,6 +35,33 @@ impl AxWaker {
         })
     }
 
+    pub(crate) fn acquire(task: &AxTaskRef) -> Arc<Self> {
+        if let Some(waker) = task.take_block_on_waker() {
+            debug_assert_eq!(Arc::strong_count(&waker), 1);
+            let mut woke = waker.woke.lock();
+            *woke = false;
+            waker.active.store(true, Ordering::Release);
+            drop(woke);
+            waker
+        } else {
+            Self::new(task)
+        }
+    }
+
+    pub(crate) fn release(waker: Arc<Self>, task: &AxTaskRef) {
+        waker.deactivate();
+        if Arc::strong_count(&waker) != 1 {
+            return;
+        }
+
+        let _ = task.cache_block_on_waker(waker);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn is_active_for_test(&self) -> bool {
+        self.active.load(Ordering::Acquire)
+    }
+
     /// Returns the task associated with this waker.
     pub fn task(&self) -> AxTaskWeak {
         self.task.clone()
@@ -95,46 +122,48 @@ pub fn block_on<F: IntoFuture>(f: F) -> F::Output {
     // to prevent it from being dropped while blocking.
     let task = curr.as_task_ref().clone();
 
-    let waker_arc = AxWaker::new(&task);
-    let waker = Waker::from(waker_arc.clone());
-    let mut cx = Context::from_waker(&waker);
+    let waker_arc = AxWaker::acquire(&task);
+    let output = {
+        let waker = Waker::from(waker_arc.clone());
+        let mut cx = Context::from_waker(&waker);
 
-    let output = loop {
-        *waker_arc.woke.lock() = false;
-        #[cfg(feature = "qperf-trace")]
-        curr.clear_qperf_pending_wait_context();
-        match fut.as_mut().poll(&mut cx) {
-            Poll::Pending => {
-                let context = {
-                    #[cfg(feature = "qperf-trace")]
-                    {
-                        curr.take_qperf_pending_wait_context().unwrap_or_else(|| {
-                            WaitContext::new(|| {
-                                (
-                                    WaitReason::Future,
-                                    Arc::as_ptr(&waker_arc) as usize as u64,
-                                    0,
-                                )
+        loop {
+            *waker_arc.woke.lock() = false;
+            #[cfg(feature = "qperf-trace")]
+            curr.clear_qperf_pending_wait_context();
+            match fut.as_mut().poll(&mut cx) {
+                Poll::Pending => {
+                    let context = {
+                        #[cfg(feature = "qperf-trace")]
+                        {
+                            curr.take_qperf_pending_wait_context().unwrap_or_else(|| {
+                                WaitContext::new(|| {
+                                    (
+                                        WaitReason::Future,
+                                        Arc::as_ptr(&waker_arc) as usize as u64,
+                                        0,
+                                    )
+                                })
                             })
-                        })
+                        }
+                        #[cfg(not(feature = "qperf-trace"))]
+                        {
+                            WaitContext::new(|| (WaitReason::Future, 0, 0))
+                        }
+                    };
+                    let mut rq = crate::api::current_run_queue::<kernel_guard::NoPreemptIrqSave>();
+                    let woke_guard = waker_arc.woke.lock();
+                    if !*woke_guard {
+                        rq.blocked_resched_woke(woke_guard, context);
+                    } else {
+                        drop(woke_guard);
                     }
-                    #[cfg(not(feature = "qperf-trace"))]
-                    {
-                        WaitContext::new(|| (WaitReason::Future, 0, 0))
-                    }
-                };
-                let mut rq = crate::api::current_run_queue::<kernel_guard::NoPreemptIrqSave>();
-                let woke_guard = waker_arc.woke.lock();
-                if !*woke_guard {
-                    rq.blocked_resched_woke(woke_guard, context);
-                } else {
-                    drop(woke_guard);
                 }
+                Poll::Ready(output) => break output,
             }
-            Poll::Ready(output) => break output,
         }
     };
-    waker_arc.deactivate();
+    AxWaker::release(waker_arc, &task);
     output
 }
 
