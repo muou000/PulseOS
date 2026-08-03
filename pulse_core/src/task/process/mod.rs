@@ -17,8 +17,8 @@ use axtask::{AxTaskRef, TaskInner, WaitContext, WaitQueue, WaitReason, WakeConte
 use kernel_guard::NoPreemptIrqSave;
 use kspin::SpinNoIrq;
 use linux_raw_sys::general::{
-    RLIMIT_CORE, RLIMIT_DATA, RLIMIT_MEMLOCK, RLIMIT_NOFILE, RLIMIT_STACK, SIGCHLD, itimerspec,
-    rlimit64, sigevent,
+    RLIMIT_CORE, RLIMIT_DATA, RLIMIT_MEMLOCK, RLIMIT_NOFILE, RLIMIT_SIGPENDING, RLIMIT_STACK,
+    SIGCHLD, itimerspec, rlimit64, sigevent,
 };
 use memory_addr::{MemoryAddr, PhysAddr, VirtAddr, va};
 use spin::{Lazy, Mutex, RwLock};
@@ -137,6 +137,8 @@ pub struct RlimitState {
     core_hard: u64,
     data_soft: u64,
     data_hard: u64,
+    sigpending_soft: u64,
+    sigpending_hard: u64,
 }
 
 impl Default for RlimitState {
@@ -150,6 +152,8 @@ impl Default for RlimitState {
             core_hard: u64::MAX,
             data_soft: u64::MAX,
             data_hard: u64::MAX,
+            sigpending_soft: u64::MAX,
+            sigpending_hard: u64::MAX,
         }
     }
 }
@@ -478,6 +482,9 @@ pub struct Process {
     /// Serializes exec and identifies the thread performing irreversible teardown.
     exec_lock: Mutex<()>,
     exec_teardown_owner: AtomicU64,
+    /// Set after this process has successfully installed a new executable image.
+    /// Parents use it to enforce setpgid(2)'s post-exec EACCES rule.
+    has_execed: AtomicBool,
     thread_exit_event: WaitQueue,
     /// 子进程列表，使用自旋锁保护
     children: SpinNoIrq<Vec<Arc<Process>>>,
@@ -524,8 +531,15 @@ pub struct Process {
     pub stopped_signal_pending: AtomicI32,
     /// 进程是否收到 SIGCONT 信号并继续运行的标志
     pub continued_signal_pending: AtomicBool,
+    /// 当前的作业控制停止状态。它独立于 waitid 的一次性状态报告，避免
+    /// 父进程消费 WSTOPPED 后错误地让子进程继续执行。
+    job_control_stop_signal: AtomicI32,
+    /// 被停止的组内线程在此等待 SIGCONT、致命信号或组退出。
+    job_control_event: WaitQueue,
     /// 进程组标识符 (PGID)
     pgid: AtomicU64,
+    /// 会话标识符 (SID)
+    sid: AtomicU64,
     /// 进程死亡时的死亡信号标志 (pdeath_sig)
     pub pdeath_sig: AtomicI32,
     /// 进程是否允许 Core Dump 的标志位 (Dumpable)

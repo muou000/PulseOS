@@ -125,6 +125,10 @@ impl Process {
                 rlim_cur: res.rlimit_state.data_soft,
                 rlim_max: res.rlimit_state.data_hard,
             }),
+            RLIMIT_SIGPENDING => Some(rlimit64 {
+                rlim_cur: res.rlimit_state.sigpending_soft,
+                rlim_max: res.rlimit_state.sigpending_hard,
+            }),
             RLIMIT_MEMLOCK => Some(rlimit64 {
                 rlim_cur: res.memlock_state.soft_limit,
                 rlim_max: res.memlock_state.hard_limit,
@@ -165,6 +169,11 @@ impl Process {
                 res.rlimit_state.data_hard = limit.rlim_max;
                 Ok(())
             }
+            RLIMIT_SIGPENDING => {
+                res.rlimit_state.sigpending_soft = limit.rlim_cur;
+                res.rlimit_state.sigpending_hard = limit.rlim_max;
+                Ok(())
+            }
             RLIMIT_MEMLOCK => {
                 res.memlock_state.soft_limit = limit.rlim_cur;
                 res.memlock_state.hard_limit = limit.rlim_max;
@@ -172,6 +181,13 @@ impl Process {
             }
             _ => Err(AxError::InvalidInput),
         }
+    }
+
+    /// The queue allocator consults the target's current soft limit while
+    /// charging records to its real UID, matching Linux's signal accounting
+    /// boundary.
+    pub fn sigpending_limit(&self) -> u64 {
+        self.resources.lock().rlimit_state.sigpending_soft
     }
 
     pub fn memlock_locked_bytes(&self) -> usize {

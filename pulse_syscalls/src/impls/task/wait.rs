@@ -1,7 +1,48 @@
+use alloc::sync::Arc;
+
 use axerrno::LinuxError;
-use pulse_core::task::{WaitidStatusType, current_thread};
+use linux_raw_sys::general::{
+    CLD_CONTINUED, CLD_DUMPED, CLD_EXITED, CLD_KILLED, CLD_STOPPED, P_ALL, P_PGID, P_PID,
+    SIGCONT, WCONTINUED, WEXITED, WNOHANG, WNOWAIT, WUNTRACED,
+};
+use pulse_core::task::{Process, WaitidStatusType, current_thread, signal_info_for_child};
 
 use super::common::write_user_i32;
+
+fn wait4_selector(pid: isize) -> (usize, usize) {
+    match pid {
+        -1 => (P_ALL as usize, 0),
+        0 => (P_PGID as usize, 0),
+        pid if pid > 0 => (P_PID as usize, pid as usize),
+        pid => (P_PGID as usize, pid.unsigned_abs()),
+    }
+}
+
+fn job_control_wait4_status_word(status_type: WaitidStatusType) -> Option<i32> {
+    match status_type {
+        WaitidStatusType::Exited { .. } => None,
+        WaitidStatusType::Stopped { signo } => Some(((signo & 0xff) << 8) | 0x7f),
+        WaitidStatusType::Continued => Some(0xffff),
+    }
+}
+
+fn wait4_status_word(child: &Process, status_type: WaitidStatusType) -> i32 {
+    job_control_wait4_status_word(status_type).unwrap_or_else(|| child.wait_status_word())
+}
+
+fn finish_reaped_child(parent: &Process, child: Arc<Process>) {
+    let exited_pid = child.pid() as isize;
+    let now_ns = axhal::time::monotonic_time_nanos() as u64;
+    let (child_utime_ns, child_stime_ns) = child.snapshot_cpu_time_ns(now_ns);
+    parent.add_child_time_ns(child_utime_ns, child_stime_ns);
+    child.wait_task_refs_exited();
+    let _ = child.take_task_ref_by_tid(exited_pid as u64);
+    if let Err(e) = child.shrink_reaped_resources() {
+        axlog::warn!("failed to shrink reaped child resources: {:?}", e);
+    }
+    child.release_task_refs();
+    pulse_core::task::unregister_process(exited_pid as u64);
+}
 
 pub fn sys_wait4(pid: isize, status: usize, options: i32, rusage: usize) -> isize {
     axlog::debug!(
@@ -19,54 +60,46 @@ pub fn sys_wait4(pid: isize, status: usize, options: i32, rusage: usize) -> isiz
         Err(e) => return -e.code() as isize,
     };
     let process = thread.process();
+    let (idtype, id) = wait4_selector(pid);
+    let wait_options =
+        WEXITED as i32 | (options & (WNOHANG | WUNTRACED | WCONTINUED) as i32);
 
     loop {
-        if !process.has_matching_child(pid) {
-            return -LinuxError::ECHILD.code() as isize;
-        }
+        match process.waitid_find_and_reap(idtype, id, wait_options) {
+            Ok(Some((child, status_type))) => {
+                let waited_pid = child.pid() as isize;
+                let reaped = matches!(status_type, WaitidStatusType::Exited { .. });
 
-        if let Some(child_proc) = process.reap_zombie_child(pid) {
-            let exited_pid = child_proc.pid() as isize;
-            let _exit_code = child_proc.exit_code();
-            let now_ns = axhal::time::monotonic_time_nanos() as u64;
-            let (child_utime_ns, child_stime_ns) = child_proc.snapshot_cpu_time_ns(now_ns);
-            child_proc.wait_task_refs_exited();
+                if status != 0 {
+                    let wait_status = wait4_status_word(child.as_ref(), status_type);
+                    let write_result = write_user_i32(&process, status, wait_status);
+                    if write_result < 0 {
+                        if reaped {
+                            finish_reaped_child(process.as_ref(), child);
+                        }
+                        return write_result;
+                    }
+                }
 
-            if status != 0 {
-                // 使用 Process 统一计算 wait status word，正确区分：
-                //   正常退出: (exit_code & 0xff) << 8  → WIFEXITED 为真
-                //   信号终止: signo & 0x7f             → WIFSIGNALED 为真
-                //   信号终止+core dump: signo | 0x80   → WCOREDUMP 也为真
-                let wait_status = child_proc.wait_status_word();
-                let write_result = write_user_i32(&process, status, wait_status);
-                if write_result < 0 {
-                    process.add_child(child_proc);
-                    return write_result;
+                if reaped {
+                    finish_reaped_child(process.as_ref(), child);
+                }
+                if rusage != 0 {
+                    // Not supported yet: simply ignore or zero out.
+                }
+                return waited_pid;
+            }
+            Ok(None) => {
+                if (options & WNOHANG as i32) != 0 {
+                    return 0;
+                }
+                if let Err(e) =
+                    process.wait_for_child_state_change_interruptible(idtype, id, wait_options)
+                {
+                    return -e as isize;
                 }
             }
-            process.add_child_time_ns(child_utime_ns, child_stime_ns);
-            if rusage != 0 {
-                // Not supported yet: simply ignore or zero out
-            }
-            let _ = child_proc.take_task_ref_by_tid(exited_pid as u64);
-            // Release heavy user resources before the final Arc drops so the
-            // zombie no longer pins a large address space or fd table.
-            if let Err(e) = child_proc.shrink_reaped_resources() {
-                axlog::warn!("failed to shrink reaped child resources: {:?}", e);
-            }
-            child_proc.release_task_refs();
-            pulse_core::task::unregister_process(exited_pid as u64);
-            return exited_pid;
-        }
-
-        // No matching child has exited yet.
-        // options & WNOHANG == 1
-        if (options & 1) != 0 {
-            return 0; // WNOHANG
-        }
-
-        if let Err(e) = process.wait_for_child_exit_interruptible(pid) {
-            return -(e as isize);
+            Err(err_code) => return err_code,
         }
     }
 }
@@ -80,7 +113,7 @@ pub fn sys_waitid(idtype: usize, id: usize, infop: usize, options: i32) -> isize
         options
     );
 
-    let wait_flags = 4 | 2 | 8; // WEXITED | WSTOPPED | WCONTINUED
+    let wait_flags = (WEXITED | WUNTRACED | WCONTINUED) as i32;
     if (options & wait_flags) == 0 {
         return -LinuxError::EINVAL.code() as isize;
     }
@@ -95,77 +128,43 @@ pub fn sys_waitid(idtype: usize, id: usize, infop: usize, options: i32) -> isize
         match process.waitid_find_and_reap(idtype, id, options) {
             Ok(Some((child, status_type))) => {
                 let was_zombie_and_reaped = matches!(status_type, WaitidStatusType::Exited { .. })
-                    && (options & 0x01000000) == 0;
+                    && (options & WNOWAIT as i32) == 0;
 
-                let mut raw: linux_raw_sys::general::siginfo = unsafe { core::mem::zeroed() };
-                unsafe {
-                    let anon1 = &mut raw.__bindgen_anon_1.__bindgen_anon_1;
-                    anon1.si_signo = 17; // SIGCHLD
-                    anon1.si_errno = 0;
-
-                    match status_type {
-                        WaitidStatusType::Exited {
-                            exit_code,
-                            exit_signal,
-                        } => {
-                            if exit_signal == 0 {
-                                anon1.si_code = 1; // CLD_EXITED
-                                anon1._sifields._sigchld._status = exit_code;
-                            } else {
-                                let is_coredump = (exit_signal & 0x100) != 0;
-                                anon1.si_code = if is_coredump { 3 } else { 2 }; // CLD_DUMPED or CLD_KILLED
-                                anon1._sifields._sigchld._status = exit_signal & 0x7f;
-                            }
-                        }
-                        WaitidStatusType::Stopped { signo } => {
-                            anon1.si_code = 5; // CLD_STOPPED
-                            anon1._sifields._sigchld._status = signo;
-                        }
-                        WaitidStatusType::Continued => {
-                            anon1.si_code = 6; // CLD_CONTINUED
-                            anon1._sifields._sigchld._status = 18; // SIGCONT
-                        }
-                    }
-
-                    anon1._sifields._sigchld._pid = child.pid() as i32;
-                    anon1._sifields._sigchld._uid = child.ruid();
-                }
+                let (code, status) = match status_type {
+                    WaitidStatusType::Exited {
+                        exit_code,
+                        exit_signal,
+                    } if exit_signal == 0 => (CLD_EXITED as i32, exit_code & 0xff),
+                    WaitidStatusType::Exited { exit_signal, .. } => (
+                        if (exit_signal & 0x100) != 0 {
+                            CLD_DUMPED as i32
+                        } else {
+                            CLD_KILLED as i32
+                        },
+                        exit_signal & 0x7f,
+                    ),
+                    WaitidStatusType::Stopped { signo } => (CLD_STOPPED as i32, signo),
+                    WaitidStatusType::Continued => (CLD_CONTINUED as i32, SIGCONT as i32),
+                };
+                let raw = signal_info_for_child(child.pid(), child.ruid(), code, status);
 
                 if infop != 0
-                    && pulse_core::task::uaccess::write_user_plain(&process, infop, &raw).is_err()
+                    && process.write_user_bytes(infop, &raw).is_err()
                 {
-                    if (options & 0x01000000) == 0 {
-                        match status_type {
-                            WaitidStatusType::Exited { .. } => process.add_child(child.clone()),
-                            WaitidStatusType::Stopped { signo } => child
-                                .stopped_signal_pending
-                                .store(signo, core::sync::atomic::Ordering::Release),
-                            WaitidStatusType::Continued => child
-                                .continued_signal_pending
-                                .store(true, core::sync::atomic::Ordering::Release),
-                        }
+                    if was_zombie_and_reaped {
+                        finish_reaped_child(process.as_ref(), child);
                     }
                     return -LinuxError::EFAULT.code() as isize;
                 }
 
                 if was_zombie_and_reaped {
-                    let exited_pid = child.pid() as isize;
-                    let now_ns = axhal::time::monotonic_time_nanos() as u64;
-                    let (child_utime_ns, child_stime_ns) = child.snapshot_cpu_time_ns(now_ns);
-                    process.add_child_time_ns(child_utime_ns, child_stime_ns);
-                    child.wait_task_refs_exited();
-                    let _ = child.take_task_ref_by_tid(exited_pid as u64);
-                    if let Err(e) = child.shrink_reaped_resources() {
-                        axlog::warn!("failed to shrink reaped child resources: {:?}", e);
-                    }
-                    child.release_task_refs();
-                    pulse_core::task::unregister_process(exited_pid as u64);
+                    finish_reaped_child(process.as_ref(), child);
                 }
 
                 return 0;
             }
             Ok(None) => {
-                if (options & 1) != 0 {
+                if (options & WNOHANG as i32) != 0 {
                     if infop != 0 {
                         let raw: linux_raw_sys::general::siginfo = unsafe { core::mem::zeroed() };
                         if pulse_core::task::uaccess::write_user_plain(&process, infop, &raw)
@@ -187,5 +186,30 @@ pub fn sys_waitid(idtype: usize, id: usize, infop: usize, options: i32) -> isize
                 return err_code;
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn wait4_status_words_match_linux_job_control_encoding() {
+        assert_eq!(
+            job_control_wait4_status_word(WaitidStatusType::Stopped { signo: 19 }),
+            Some(0x137f),
+        );
+        assert_eq!(
+            job_control_wait4_status_word(WaitidStatusType::Continued),
+            Some(0xffff),
+        );
+    }
+
+    #[test]
+    fn wait4_pid_selector_preserves_pid_and_process_group_rules() {
+        assert_eq!(wait4_selector(-1), (P_ALL as usize, 0));
+        assert_eq!(wait4_selector(0), (P_PGID as usize, 0));
+        assert_eq!(wait4_selector(42), (P_PID as usize, 42));
+        assert_eq!(wait4_selector(-42), (P_PGID as usize, 42));
     }
 }

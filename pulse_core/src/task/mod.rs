@@ -20,13 +20,17 @@ pub use aspace_lock::AddressSpaceLock;
 pub use process::{CloneParams, ForkParams, Process, WaitidStatusType, MAX_POSIX_TIMER_COUNT};
 pub use signal::{
     DefaultSignalAction, SIG_DFL, SIG_IGN, SigAction, SignalAction, SignalAltStack,
-    SignalDelivery, SignalShared, ThreadSignal, blocked_mask as thread_blocked_mask, can_signal,
-    check_signals_and_deliver, force_signal_to_thread, pending_mask as thread_pending_mask,
+    SignalDelivery, SignalQueueError, SignalShared, SIGRTMIN, ThreadSignal,
+    blocked_mask as thread_blocked_mask, can_signal,
+    check_signals_and_deliver, discard_pending_if_ignored, force_signal_to_thread,
+    force_signal_to_thread_with_info, signal_info_for_child, signal_info_for_fault,
+    pending_mask as thread_pending_mask,
     queue_signal_to_process, queue_signal_to_process_with_info, queue_signal_to_thread,
-    queue_signal_to_thread_with_info, resolve_action,
+    queue_signal_to_process_with_info_strict, queue_signal_to_thread_with_info,
+    queue_signal_to_thread_with_info_strict, resolve_action,
 };
 use spin::{Lazy, RwLock};
-pub use thread::{Thread, ThreadHandle};
+pub use thread::{SignalMaskGuard, Thread, ThreadHandle};
 
 /// An IRQ-safe map with concurrent readers and exclusive writers.
 ///
@@ -75,6 +79,13 @@ where
 
 static PROCESS_REGISTRY: Lazy<IrqSafeRwMap<u64, Arc<Process>>> = Lazy::new(IrqSafeRwMap::new);
 
+/// Serializes session/PGID mutations with a child's transition through exec.
+///
+/// The process registry owns object lifetime, while this lock protects the
+/// cross-process job-control invariants that cannot be represented by one
+/// process's atomics alone.
+static JOB_CONTROL_LOCK: Lazy<SpinNoIrq<()>> = Lazy::new(|| SpinNoIrq::new(()));
+
 const THREAD_REGISTRY_SHARDS: usize = 16;
 
 static THREAD_REGISTRY: Lazy<[SpinNoIrq<HashMap<u64, Weak<Thread>>>; THREAD_REGISTRY_SHARDS]> =
@@ -89,6 +100,13 @@ pub fn register_process(pid: u64, process: Arc<Process>) {
 
 pub fn unregister_process(pid: u64) {
     PROCESS_REGISTRY.remove(&pid);
+}
+
+/// Runs one nonblocking job-control state transition atomically with respect
+/// to `setsid`, `setpgid`, and a child's successful exec transition.
+pub fn with_job_control_lock<T>(f: impl FnOnce() -> T) -> T {
+    let _guard = JOB_CONTROL_LOCK.lock();
+    f()
 }
 
 pub fn init_process() -> Option<Arc<Process>> {

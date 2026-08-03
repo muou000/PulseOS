@@ -7,12 +7,61 @@ use linux_raw_sys::{
     },
 };
 use pulse_core::task::{
-    can_signal, current_process, process_by_pid, processes_snapshot,
-    queue_signal_to_process_with_info, queue_signal_to_thread_with_info,
+    can_signal, current_process, current_thread, process_by_pid, processes_snapshot,
+    queue_signal_to_process_with_info, queue_signal_to_process_with_info_strict,
+    queue_signal_to_thread_with_info, queue_signal_to_thread_with_info_strict, Process, SIGRTMIN,
 };
+
+const SIGINFO_SIZE: usize = 128;
+const _: [(); SIGINFO_SIZE] = [(); core::mem::size_of::<siginfo>()];
 
 fn is_valid_signal(sig: isize) -> bool {
     sig == 0 || (1..=(_NSIG as isize)).contains(&sig)
+}
+
+fn read_user_siginfo(process: &Process, addr: usize) -> Result<siginfo, LinuxError> {
+    if addr == 0 {
+        return Err(LinuxError::EFAULT);
+    }
+
+    let mut bytes = [0u8; SIGINFO_SIZE];
+    process
+        .read_user_bytes(addr, &mut bytes)
+        .map_err(|_| LinuxError::EFAULT)?;
+    Ok(unsafe { core::mem::transmute::<[u8; SIGINFO_SIZE], siginfo>(bytes) })
+}
+
+fn siginfo_bytes(info: siginfo) -> [u8; SIGINFO_SIZE] {
+    unsafe { core::mem::transmute::<siginfo, [u8; SIGINFO_SIZE]>(info) }
+}
+
+fn siginfo_code(info: &siginfo) -> i32 {
+    unsafe { info.__bindgen_anon_1.__bindgen_anon_1.si_code }
+}
+
+fn set_siginfo_signo(info: &mut siginfo, sig: isize) {
+    info.__bindgen_anon_1.__bindgen_anon_1.si_signo = sig as linux_raw_sys::ctypes::c_int;
+}
+
+fn siginfo_signo(info: &siginfo) -> i32 {
+    unsafe { info.__bindgen_anon_1.__bindgen_anon_1.si_signo }
+}
+
+/// Linux reserves `EAGAIN` for real-time signals whose detailed sigqueue
+/// record was requested by a non-`SI_USER` sender. `kill(2)` remains
+/// best-effort and may fall back to a pending bit without the supplied info.
+fn needs_realtime_queue_slot(sig: isize, si_code: i32) -> bool {
+    sig >= SIGRTMIN as isize && si_code != SI_USER as i32
+}
+
+/// User space may supply arbitrary queued-signal data only when the ABI target
+/// is the calling thread. In particular, privileged callers must not fabricate
+/// kernel or kill-family signal origins for a different task.
+fn may_supply_siginfo_to_target(info: &siginfo, sender_tid: u64, target_id: u64) -> bool {
+    sender_tid == target_id || {
+        let code = siginfo_code(info);
+        code < 0 && code != SI_TKILL
+    }
 }
 
 fn make_user_signal_info(sig: isize, code: i32, pid: u64, uid: u32) -> [u8; 128] {
@@ -25,7 +74,7 @@ fn make_user_signal_info(sig: isize, code: i32, pid: u64, uid: u32) -> [u8; 128]
         header._sifields._kill._pid = pid as _;
         header._sifields._kill._uid = uid as _;
     }
-    unsafe { core::mem::transmute::<siginfo, [u8; 128]>(info) }
+    siginfo_bytes(info)
 }
 
 pub fn sys_getpid() -> isize {
@@ -116,10 +165,7 @@ pub fn sys_kill(pid: isize, sig: isize) -> isize {
         }
         -1 => {
             for proc in processes_snapshot() {
-                if proc.pid() == 1 {
-                    continue;
-                }
-                if proc.pid() == caller.pid() {
+                if proc.pid() == 1 || proc.pid() == caller.pid() {
                     continue;
                 }
                 targets.push(proc);
@@ -140,7 +186,10 @@ pub fn sys_kill(pid: isize, sig: isize) -> isize {
         return -LinuxError::ESRCH.code() as isize;
     }
 
-    if !targets.iter().any(|target| can_signal(&caller, target)) {
+    if !targets
+        .iter()
+        .any(|target| can_signal(&caller, target, sig as usize))
+    {
         return -LinuxError::EPERM.code() as isize;
     }
 
@@ -150,7 +199,7 @@ pub fn sys_kill(pid: isize, sig: isize) -> isize {
 
     let info = make_user_signal_info(sig, SI_USER as i32, caller.pid(), caller.ruid());
     for target in targets {
-        if !can_signal(&caller, &target) {
+        if !can_signal(&caller, &target, sig as usize) {
             continue;
         }
         let _ = queue_signal_to_process_with_info(target.as_ref(), sig as usize, Some(info));
@@ -170,14 +219,22 @@ pub fn sys_tkill(tid: isize, sig: isize) -> isize {
         return -LinuxError::ESRCH.code() as isize;
     };
     let target_proc = target_thread.process_arc();
-    if !can_signal(&caller, target_proc.as_ref()) {
+    if !can_signal(&caller, target_proc.as_ref(), sig as usize) {
         return -LinuxError::EPERM.code() as isize;
     }
     if sig == 0 {
         return 0;
     }
     let info = make_user_signal_info(sig, SI_TKILL, caller.pid(), caller.ruid());
-    let _ = queue_signal_to_thread_with_info(target_thread.as_ref(), sig as usize, Some(info));
+    if needs_realtime_queue_slot(sig, SI_TKILL)
+        && queue_signal_to_thread_with_info_strict(target_thread.as_ref(), sig as usize, Some(info))
+            .is_err()
+    {
+        return -LinuxError::EAGAIN.code() as isize;
+    }
+    if !needs_realtime_queue_slot(sig, SI_TKILL) {
+        let _ = queue_signal_to_thread_with_info(target_thread.as_ref(), sig as usize, Some(info));
+    }
     0
 }
 
@@ -196,14 +253,130 @@ pub fn sys_tgkill(tgid: isize, tid: isize, sig: isize) -> isize {
     if target_proc.pid() != tgid as u64 {
         return -LinuxError::ESRCH.code() as isize;
     }
-    if !can_signal(&caller, target_proc.as_ref()) {
+    if !can_signal(&caller, target_proc.as_ref(), sig as usize) {
         return -LinuxError::EPERM.code() as isize;
     }
     if sig == 0 {
         return 0;
     }
     let info = make_user_signal_info(sig, SI_TKILL, caller.pid(), caller.ruid());
-    let _ = queue_signal_to_thread_with_info(target_thread.as_ref(), sig as usize, Some(info));
+    if needs_realtime_queue_slot(sig, SI_TKILL)
+        && queue_signal_to_thread_with_info_strict(target_thread.as_ref(), sig as usize, Some(info))
+            .is_err()
+    {
+        return -LinuxError::EAGAIN.code() as isize;
+    }
+    if !needs_realtime_queue_slot(sig, SI_TKILL) {
+        let _ = queue_signal_to_thread_with_info(target_thread.as_ref(), sig as usize, Some(info));
+    }
+    0
+}
+
+pub fn sys_rt_sigqueueinfo(pid: isize, sig: isize, info_ptr: usize) -> isize {
+    let caller = match current_process() {
+        Ok(process) => process,
+        Err(e) => return -e.code() as isize,
+    };
+    let caller_tid = match current_thread() {
+        Ok(thread) => thread.tid(),
+        Err(e) => return -e.code() as isize,
+    };
+    let mut info = match read_user_siginfo(&caller, info_ptr) {
+        Ok(info) => info,
+        Err(e) => return -e.code() as isize,
+    };
+
+    // Linux copies the ABI payload before do_rt_sigqueueinfo() validates the
+    // target and signal number, so an invalid user pointer wins over EINVAL.
+    if pid <= 0 || !is_valid_signal(sig) {
+        return -LinuxError::EINVAL.code() as isize;
+    }
+
+    if !may_supply_siginfo_to_target(&info, caller_tid, pid as u64) {
+        return -LinuxError::EPERM.code() as isize;
+    }
+
+    let Some(target) = process_by_pid(pid as u64) else {
+        return -LinuxError::ESRCH.code() as isize;
+    };
+    if !can_signal(&caller, target.as_ref(), sig as usize) {
+        return -LinuxError::EPERM.code() as isize;
+    }
+
+    // Unlike pidfd_send_signal, the rt_sigqueueinfo ABI overwrites the user
+    // supplied signo with the syscall argument before queueing it.
+    set_siginfo_signo(&mut info, sig);
+    if sig != 0 {
+        let info_code = siginfo_code(&info);
+        let info = siginfo_bytes(info);
+        if needs_realtime_queue_slot(sig, info_code)
+            && queue_signal_to_process_with_info_strict(
+                target.as_ref(),
+                sig as usize,
+                Some(info),
+            )
+            .is_err()
+        {
+            return -LinuxError::EAGAIN.code() as isize;
+        }
+        if !needs_realtime_queue_slot(sig, info_code) {
+            let _ = queue_signal_to_process_with_info(target.as_ref(), sig as usize, Some(info));
+        }
+    }
+    0
+}
+
+pub fn sys_rt_tgsigqueueinfo(tgid: isize, tid: isize, sig: isize, info_ptr: usize) -> isize {
+    let caller = match current_process() {
+        Ok(process) => process,
+        Err(e) => return -e.code() as isize,
+    };
+    let caller_tid = match current_thread() {
+        Ok(thread) => thread.tid(),
+        Err(e) => return -e.code() as isize,
+    };
+    let mut info = match read_user_siginfo(&caller, info_ptr) {
+        Ok(info) => info,
+        Err(e) => return -e.code() as isize,
+    };
+
+    if tgid <= 0 || tid <= 0 || !is_valid_signal(sig) {
+        return -LinuxError::EINVAL.code() as isize;
+    }
+
+    if !may_supply_siginfo_to_target(&info, caller_tid, tid as u64) {
+        return -LinuxError::EPERM.code() as isize;
+    }
+
+    let Some(target_thread) = pulse_core::task::thread_by_tid_global(tid as u64) else {
+        return -LinuxError::ESRCH.code() as isize;
+    };
+    let target_process = target_thread.process_arc();
+    if target_process.pid() != tgid as u64 {
+        return -LinuxError::ESRCH.code() as isize;
+    }
+    if !can_signal(&caller, target_process.as_ref(), sig as usize) {
+        return -LinuxError::EPERM.code() as isize;
+    }
+
+    set_siginfo_signo(&mut info, sig);
+    if sig != 0 {
+        let info_code = siginfo_code(&info);
+        let info = siginfo_bytes(info);
+        if needs_realtime_queue_slot(sig, info_code)
+            && queue_signal_to_thread_with_info_strict(
+                target_thread.as_ref(),
+                sig as usize,
+                Some(info),
+            )
+            .is_err()
+        {
+            return -LinuxError::EAGAIN.code() as isize;
+        }
+        if !needs_realtime_queue_slot(sig, info_code) {
+            let _ = queue_signal_to_thread_with_info(target_thread.as_ref(), sig as usize, Some(info));
+        }
+    }
     0
 }
 
@@ -332,7 +505,6 @@ pub fn sys_pidfd_open(pid: isize, flags: usize) -> isize {
         Ok(process) => process,
         Err(e) => return -e.code() as isize,
     };
-
     // Check if target process exists
     let Some(_) = process_by_pid(pid as u64) else {
         return -LinuxError::ESRCH.code() as isize;
@@ -375,6 +547,10 @@ pub fn sys_pidfd_send_signal(pidfd: isize, sig: isize, info_ptr: usize, flags: u
         Ok(process) => process,
         Err(e) => return -e.code() as isize,
     };
+    let caller_tid = match current_thread() {
+        Ok(thread) => thread.tid(),
+        Err(e) => return -e.code() as isize,
+    };
 
     // Retrieve the fd entry
     let fd_entry = match caller.get_fd_entry(pidfd as usize) {
@@ -392,31 +568,90 @@ pub fn sys_pidfd_send_signal(pidfd: isize, sig: isize, info_ptr: usize, flags: u
         None => return -LinuxError::EBADF.code() as isize,
     };
 
-    let Some(target) = process_by_pid(pidfd_obj.pid()) else {
-        return -LinuxError::ESRCH.code() as isize;
+    let target_pid = pidfd_obj.pid();
+    let (info, info_code) = if info_ptr != 0 {
+        let info = match read_user_siginfo(&caller, info_ptr) {
+            Ok(info) => info,
+            Err(e) => return -e.code() as isize,
+        };
+        if siginfo_signo(&info) != sig as linux_raw_sys::ctypes::c_int {
+            return -LinuxError::EINVAL.code() as isize;
+        }
+        if !may_supply_siginfo_to_target(&info, caller_tid, target_pid) {
+            return -LinuxError::EPERM.code() as isize;
+        }
+        let info_code = siginfo_code(&info);
+        (siginfo_bytes(info), info_code)
+    } else {
+        (
+            make_user_signal_info(sig, SI_USER as i32, caller.pid(), caller.ruid()),
+            SI_USER as i32,
+        )
     };
 
-    if !can_signal(&caller, target.as_ref()) {
+    let Some(target) = process_by_pid(target_pid) else {
+        return -LinuxError::ESRCH.code() as isize;
+    };
+    if !can_signal(&caller, target.as_ref(), sig as usize) {
         return -LinuxError::EPERM.code() as isize;
     }
 
-    if sig == 0 {
-        return 0;
+    if sig != 0 {
+        if needs_realtime_queue_slot(sig, info_code)
+            && queue_signal_to_process_with_info_strict(target.as_ref(), sig as usize, Some(info))
+                .is_err()
+        {
+            return -LinuxError::EAGAIN.code() as isize;
+        }
+        if !needs_realtime_queue_slot(sig, info_code) {
+            let _ = queue_signal_to_process_with_info(target.as_ref(), sig as usize, Some(info));
+        }
+    }
+    0
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use linux_raw_sys::general::SI_QUEUE;
+
+    fn test_siginfo(signo: i32, code: i32) -> siginfo {
+        let mut info: siginfo = unsafe { core::mem::zeroed() };
+        unsafe {
+            let header = &mut info.__bindgen_anon_1.__bindgen_anon_1;
+            header.si_signo = signo;
+            header.si_code = code;
+        }
+        info
     }
 
-    // Read siginfo if provided
-    let info = if info_ptr != 0 {
-        let mut info_bytes = [0u8; 128];
-        if let Err(e) = caller.read_user_bytes(info_ptr, &mut info_bytes) {
-            return -e.code() as isize;
-        }
-        Some(info_bytes)
-    } else {
-        None
-    };
+    #[test]
+    fn rt_sigqueueinfo_rewrites_the_queued_signal_number() {
+        let mut info = test_siginfo(1, SI_QUEUE);
+        set_siginfo_signo(&mut info, 42);
+        assert_eq!(siginfo_signo(&info), 42);
+    }
 
-    // Deliver signal to process
-    let _ =
-        pulse_core::task::queue_signal_to_process_with_info(target.as_ref(), sig as usize, info);
-    0
+    #[test]
+    fn arbitrary_siginfo_is_limited_to_the_sending_thread() {
+        let user_info = test_siginfo(10, SI_USER as i32);
+        let queued_info = test_siginfo(10, SI_QUEUE);
+        let tkill_info = test_siginfo(10, SI_TKILL);
+
+        assert!(!may_supply_siginfo_to_target(&user_info, 1, 2));
+        assert!(!may_supply_siginfo_to_target(&tkill_info, 1, 2));
+        assert!(may_supply_siginfo_to_target(&queued_info, 1, 2));
+        // The low-level ABI compares against task_pid_vnr(current), not the
+        // caller's thread-group ID.
+        assert!(may_supply_siginfo_to_target(&user_info, 1, 1));
+        assert!(!may_supply_siginfo_to_target(&user_info, 2, 1));
+    }
+
+    #[test]
+    fn eagain_is_reserved_for_non_user_realtime_queue_records() {
+        assert!(!needs_realtime_queue_slot(SIGRTMIN as isize - 1, SI_QUEUE));
+        assert!(!needs_realtime_queue_slot(SIGRTMIN as isize, SI_USER as i32));
+        assert!(needs_realtime_queue_slot(SIGRTMIN as isize, SI_QUEUE));
+        assert!(needs_realtime_queue_slot(SIGRTMIN as isize, SI_TKILL));
+    }
 }

@@ -41,6 +41,31 @@ const NOT_IN_USER_MODE: u64 = u64::MAX;
 pub struct ThreadHandle(Arc<Thread>);
 def_task_ext!(ThreadHandle);
 
+/// Restores a thread's signal mask when a blocking syscall completes.
+///
+/// `pselect6`, `ppoll`, and `epoll_pwait*` replace the mask only for the
+/// duration of their wait.  Keeping the restore in the task layer prevents
+/// each syscall implementation from open-coding a subtly different drop path.
+pub struct SignalMaskGuard {
+    thread: Arc<Thread>,
+    old_mask: Option<u64>,
+}
+
+impl SignalMaskGuard {
+    pub fn install(thread: Arc<Thread>, new_mask: Option<u64>) -> Self {
+        let old_mask = new_mask.map(|mask| thread.set_signal_blocked_mask(mask));
+        Self { thread, old_mask }
+    }
+}
+
+impl Drop for SignalMaskGuard {
+    fn drop(&mut self) {
+        if let Some(old_mask) = self.old_mask {
+            self.thread.set_signal_blocked_mask(old_mask);
+        }
+    }
+}
+
 impl ThreadHandle {
     pub fn new(thread: Arc<Thread>) -> Self {
         Self(thread)
@@ -161,8 +186,8 @@ impl Thread {
         self.signal.blocked_mask()
     }
 
-    pub fn set_signal_blocked_mask(&self, mask: u64) {
-        self.signal.set_blocked_mask(mask);
+    pub fn set_signal_blocked_mask(&self, mask: u64) -> u64 {
+        self.signal.set_blocked_mask(mask)
     }
 
     pub fn set_signal_altstack(&self, ss: SignalAltStack) {
@@ -178,7 +203,13 @@ impl Thread {
     }
 
     pub fn has_pending_signal(&self) -> bool {
-        self.exec_exit_requested() || self.signal.has_deliverable_pending_signal()
+        // A group stop is task work just like a pending signal: an
+        // interruptible operation must return to the user-return path so the
+        // thread can join the process-wide stop.  Linux includes job-control
+        // work in its pending-signal test for the same reason.
+        self.exec_exit_requested()
+            || self.process().group_stopped()
+            || self.signal.has_deliverable_pending_signal()
     }
 
     pub fn has_pending_unblocked_signal_not_in_set(&self, set: u64) -> bool {

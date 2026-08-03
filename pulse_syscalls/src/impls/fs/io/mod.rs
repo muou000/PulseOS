@@ -7,7 +7,7 @@ use linux_raw_sys::general::{
     pollfd,
 };
 use pulse_core::{
-    fd_table::{EventFdObject, FD_LIMIT, FdObject, FileObject, pipe_entries},
+    fd_table::{EventFdObject, FD_LIMIT, FdObject, FileObject, SignalFdObject, pipe_entries},
     task::uaccess,
 };
 
