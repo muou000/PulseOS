@@ -67,6 +67,42 @@ pub fn sys_get_robust_list(pid: usize, head_ptr: usize, len_ptr: usize) -> isize
         .map(|_| 0)
         .unwrap_or_else(|_| -LinuxError::EFAULT.code() as isize)
 }
+
+fn process_group_id_in_use(mut groups: impl Iterator<Item = u64>, pgid: u64) -> bool {
+    groups.any(|group| group == pgid)
+}
+
+fn process_group_exists_in_session(
+    mut groups: impl Iterator<Item = (u64, u64)>,
+    pgid: u64,
+    sid: u64,
+) -> bool {
+    groups.any(|(group, session)| group == pgid && session == sid)
+}
+
+pub fn sys_setsid() -> isize {
+    let process = match pulse_core::task::current_process() {
+        Ok(process) => process,
+        Err(e) => return -e.code() as isize,
+    };
+
+    pulse_core::task::with_job_control_lock(|| {
+        // Linux rejects setsid when the caller's PID already names any
+        // process group, not only when the caller itself is its leader.
+        if process_group_id_in_use(
+            pulse_core::task::processes_snapshot()
+                .into_iter()
+                .map(|process| process.pgid()),
+            process.pid(),
+        ) {
+            return -LinuxError::EPERM.code() as isize;
+        }
+
+        process.set_session_and_group(process.pid(), process.pid());
+        process.pid() as isize
+    })
+}
+
 pub fn sys_setpgid(pid: isize, pgid: isize) -> isize {
     axlog::debug!("sys_setpgid: pid={}, pgid={}", pid, pgid);
     if pid < 0 || pgid < 0 {
@@ -77,28 +113,53 @@ pub fn sys_setpgid(pid: isize, pgid: isize) -> isize {
         Err(e) => return -e.code() as isize,
     };
 
-    let target_proc = if pid == 0 {
-        caller.clone()
-    } else {
-        match pulse_core::task::process_by_pid(pid as u64) {
-            Some(p) => {
-                if p.pid() != caller.pid() && p.parent_pid() != caller.pid() {
-                    return -LinuxError::ESRCH.code() as isize;
+    pulse_core::task::with_job_control_lock(|| {
+        let target_proc = if pid == 0 {
+            caller.clone()
+        } else {
+            match pulse_core::task::process_by_pid(pid as u64) {
+                Some(p) => {
+                    if p.pid() != caller.pid() && p.parent_pid() != caller.pid() {
+                        return -LinuxError::ESRCH.code() as isize;
+                    }
+                    p
                 }
-                p
+                None => return -LinuxError::ESRCH.code() as isize,
             }
-            None => return -LinuxError::ESRCH.code() as isize,
+        };
+
+        let target_is_child = target_proc.pid() != caller.pid();
+        if target_is_child && target_proc.has_execed() {
+            return -LinuxError::EACCES.code() as isize;
         }
-    };
+        if target_proc.sid() != caller.sid() || target_proc.sid() == target_proc.pid() {
+            return -LinuxError::EPERM.code() as isize;
+        }
 
-    let target_pgid = if pgid == 0 {
-        target_proc.pid()
-    } else {
-        pgid as u64
-    };
+        let target_pgid = if pgid == 0 {
+            target_proc.pid()
+        } else {
+            pgid as u64
+        };
 
-    target_proc.set_pgid(target_pgid);
-    0
+        // Joining a group is valid only when the group exists in the target
+        // process's session. A zero pgid (and pgid == pid) instead creates a
+        // group led by the target process itself.
+        if target_pgid != target_proc.pid()
+            && !process_group_exists_in_session(
+                pulse_core::task::processes_snapshot()
+                    .into_iter()
+                    .map(|process| (process.pgid(), process.sid())),
+                target_pgid,
+                target_proc.sid(),
+            )
+        {
+            return -LinuxError::EPERM.code() as isize;
+        }
+
+        target_proc.set_pgid(target_pgid);
+        0
+    })
 }
 
 pub fn sys_getpgid(pid: isize) -> isize {
@@ -142,7 +203,25 @@ pub fn sys_getsid(pid: isize) -> isize {
         }
     };
 
-    // Since we don't fully track sessions yet and setsid returns 1 as a stub,
-    // we return the pgid as a fallback for getsid.
-    target_proc.pgid() as isize
+    target_proc.sid() as isize
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn setsid_rejects_a_pid_that_is_already_a_process_group_id() {
+        assert!(process_group_id_in_use([7, 42, 99].into_iter(), 42));
+        assert!(!process_group_id_in_use([7, 42, 99].into_iter(), 100));
+    }
+
+    #[test]
+    fn setpgid_requires_an_existing_group_in_the_target_session() {
+        let groups = [(10, 1), (20, 2), (30, 2)];
+
+        assert!(process_group_exists_in_session(groups.into_iter(), 20, 2));
+        assert!(!process_group_exists_in_session(groups.into_iter(), 20, 1));
+        assert!(!process_group_exists_in_session(groups.into_iter(), 99, 2));
+    }
 }

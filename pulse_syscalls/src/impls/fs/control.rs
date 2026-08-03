@@ -15,7 +15,7 @@ use linux_raw_sys::{
 };
 use pulse_core::fd_table::FdEntry;
 
-use crate::impls::utils::{read_user_bytes, write_user_bytes};
+use crate::impls::utils::write_user_bytes;
 
 static TTY_IOCTL_STUB_WARNED: AtomicBool = AtomicBool::new(false);
 
@@ -344,31 +344,33 @@ pub fn sys_ioctl(fd: usize, cmd: usize, arg: usize) -> isize {
         }
         TIOCGPGRP => {
             warn_tty_ioctl_stub_once(fd, cmd32);
-            if arg != 0 {
-                let mut pgid = pulse_core::fd_table::get_foreground_pgid();
-                if pgid == 0 {
-                    if let Ok(process) = pulse_core::task::current_process() {
-                        pgid = process.pgid();
-                    } else {
-                        pgid = 1;
-                    }
-                }
-                let value = (pgid as i32).to_ne_bytes();
-                if let Err(e) = write_user_bytes(arg, &value) {
-                    return -e.code() as isize;
-                }
+            if arg == 0 {
+                return -LinuxError::EFAULT.code() as isize;
+            }
+            let pgid = match pulse_core::fd_table::tty_foreground_pgid(process.as_ref()) {
+                Ok(pgid) => pgid,
+                Err(e) => return -e.code() as isize,
+            };
+            let value = (pgid as i32).to_ne_bytes();
+            if let Err(e) = process.write_user_bytes(arg, &value) {
+                return -e.code() as isize;
             }
             0
         }
         TIOCSPGRP => {
             warn_tty_ioctl_stub_once(fd, cmd32);
-            if arg != 0 {
-                let mut bytes = [0u8; 4];
-                if let Err(e) = read_user_bytes(arg, &mut bytes) {
-                    return -e.code() as isize;
-                }
-                let pgid = i32::from_ne_bytes(bytes) as u64;
-                pulse_core::fd_table::set_foreground_pgid(pgid);
+            if arg == 0 {
+                return -LinuxError::EFAULT.code() as isize;
+            }
+            let mut bytes = [0u8; core::mem::size_of::<i32>()];
+            if let Err(e) = process.read_user_bytes(arg, &mut bytes) {
+                return -e.code() as isize;
+            }
+            if let Err(e) = pulse_core::fd_table::set_tty_foreground_pgid(
+                process.as_ref(),
+                i32::from_ne_bytes(bytes),
+            ) {
+                return -e.code() as isize;
             }
             0
         }
