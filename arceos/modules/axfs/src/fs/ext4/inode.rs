@@ -729,6 +729,20 @@ impl Inode {
         self.metadata_cache.invalidate();
     }
 
+    async fn take_inode_for_mutation(&self, fs: &Ext4) -> VfsResult<Arc<ext4plus::inode::Inode>> {
+        let (_, inode) = self.read_inode_cached(fs, self.ino).await?;
+        // The caller holds mutation_lock. Clearing the cache makes lock-free
+        // metadata readers join that lock until the updated inode is published.
+        self.invalidate_metadata();
+        Ok(inode)
+    }
+
+    fn publish_mutated_inode(&self, inode: Arc<ext4plus::inode::Inode>) {
+        let generation = self.metadata_cache.generation();
+        let published = self.metadata_cache.publish_inode(generation, inode);
+        debug_assert!(published, "mutation lock must serialize inode publication");
+    }
+
     async fn build_dir_snapshot_uncached(
         &self,
         fs: &Ext4,
@@ -915,37 +929,38 @@ impl NodeOps for Inode {
     async fn update_metadata(&self, update: MetadataUpdate) -> VfsResult<()> {
         let fs = &self.fs.inner;
         self.validate_inode_num(&fs, self.ino)?;
-        let idx = core::num::NonZeroU32::new(self.ino).ok_or(VfsError::InvalidData)?;
         let _mutation_guard = self.mutation_lock.lock().await;
         let mut write_scope = self.fs.write_scope(&[self.ino as u64]);
         write_scope
             .run(async {
-                self.invalidate_metadata();
-                let mut inode = ext4plus::inode::Inode::read(&fs, idx)
-                    .await
-                    .map_err(into_vfs_err)?;
-                if let Some(mode) = update.mode {
-                    let perm = mode.bits() & 0x0fff;
-                    let kind = inode.mode().bits() & 0xf000;
-                    inode
-                        .set_mode(ext4plus::inode::InodeMode::from_bits_truncate(kind | perm))
-                        .map_err(into_vfs_err)?;
+                let mut inode = self.take_inode_for_mutation(fs).await?;
+                let result = {
+                    let inode = Arc::make_mut(&mut inode);
+                    if let Some(mode) = update.mode {
+                        let perm = mode.bits() & 0x0fff;
+                        let kind = inode.mode().bits() & 0xf000;
+                        inode
+                            .set_mode(ext4plus::inode::InodeMode::from_bits_truncate(kind | perm))
+                            .map_err(into_vfs_err)?;
+                    }
+                    if let Some((uid, gid)) = update.owner {
+                        inode.set_uid(uid);
+                        inode.set_gid(gid);
+                    }
+                    if let Some(atime) = update.atime {
+                        inode.set_atime(atime);
+                    }
+                    if let Some(mtime) = update.mtime {
+                        inode.set_mtime(mtime);
+                    }
+                    if cfg!(feature = "times") {
+                        inode.set_ctime(axhal::time::wall_time());
+                    }
+                    inode.write(fs).await.map_err(into_vfs_err)
+                };
+                if result.is_ok() {
+                    self.publish_mutated_inode(inode);
                 }
-                if let Some((uid, gid)) = update.owner {
-                    inode.set_uid(uid);
-                    inode.set_gid(gid);
-                }
-                if let Some(atime) = update.atime {
-                    inode.set_atime(atime);
-                }
-                if let Some(mtime) = update.mtime {
-                    inode.set_mtime(mtime);
-                }
-                if cfg!(feature = "times") {
-                    inode.set_ctime(axhal::time::wall_time());
-                }
-                let result = inode.write(&fs).await.map_err(into_vfs_err);
-                self.invalidate_metadata();
                 result
             })
             .await
@@ -995,19 +1010,17 @@ impl FileNodeOps for Inode {
         log::debug!("ext4 inode::write_at: offset={}, len={}", offset, buf.len());
         let fs = &self.fs.inner;
         self.validate_inode_num(&fs, self.ino)?;
-        let idx = core::num::NonZeroU32::new(self.ino).ok_or(VfsError::InvalidData)?;
         let _mutation_guard = self.mutation_lock.lock().await;
         let mut write_scope = self.fs.write_scope(&[self.ino as u64]);
         write_scope
             .run(async {
-                self.invalidate_metadata();
-                let mut inode = ext4plus::inode::Inode::read(&fs, idx)
-                    .await
-                    .map_err(into_vfs_err)?;
-                let written = ext4plus::file::write_at(&fs, &mut inode, buf, offset)
+                let mut inode = self.take_inode_for_mutation(fs).await?;
+                let written = ext4plus::file::write_at(fs, Arc::make_mut(&mut inode), buf, offset)
                     .await
                     .map_err(into_vfs_err);
-                self.invalidate_metadata();
+                if written.is_ok() {
+                    self.publish_mutated_inode(inode);
+                }
                 let written = written?;
                 log::debug!("ext4 inode::write_at done: written={}", written);
                 Ok(written)
@@ -1018,20 +1031,18 @@ impl FileNodeOps for Inode {
     async fn append(&self, buf: &[u8]) -> VfsResult<(usize, u64)> {
         let fs = &self.fs.inner;
         self.validate_inode_num(&fs, self.ino)?;
-        let idx = core::num::NonZeroU32::new(self.ino).ok_or(VfsError::InvalidData)?;
         let _mutation_guard = self.mutation_lock.lock().await;
         let mut write_scope = self.fs.write_scope(&[self.ino as u64]);
         write_scope
             .run(async {
-                self.invalidate_metadata();
-                let mut inode = ext4plus::inode::Inode::read(&fs, idx)
-                    .await
-                    .map_err(into_vfs_err)?;
+                let mut inode = self.take_inode_for_mutation(fs).await?;
                 let length = inode.size_in_bytes();
-                let written = ext4plus::file::write_at(&fs, &mut inode, buf, length)
+                let written = ext4plus::file::write_at(fs, Arc::make_mut(&mut inode), buf, length)
                     .await
                     .map_err(into_vfs_err);
-                self.invalidate_metadata();
+                if written.is_ok() {
+                    self.publish_mutated_inode(inode);
+                }
                 let written = written?;
                 Ok((written, length + written as u64))
             })
@@ -1041,23 +1052,22 @@ impl FileNodeOps for Inode {
     async fn set_len(&self, len: u64) -> VfsResult<()> {
         let fs = &self.fs.inner;
         self.validate_inode_num(&fs, self.ino)?;
-        let idx = core::num::NonZeroU32::new(self.ino).ok_or(VfsError::InvalidData)?;
         let _mutation_guard = self.mutation_lock.lock().await;
         let mut write_scope = self.fs.write_scope(&[self.ino as u64]);
         write_scope
             .run(async {
-                self.invalidate_metadata();
-                let mut inode = ext4plus::inode::Inode::read(&fs, idx)
-                    .await
-                    .map_err(into_vfs_err)?;
+                let mut inode = self.take_inode_for_mutation(fs).await?;
                 let old_len = inode.size_in_bytes();
                 if len == old_len {
+                    self.publish_mutated_inode(inode);
                     return Ok(());
                 }
-                let result = ext4plus::file::truncate(&fs, &mut inode, len)
+                let result = ext4plus::file::truncate(fs, Arc::make_mut(&mut inode), len)
                     .await
                     .map_err(into_vfs_err);
-                self.invalidate_metadata();
+                if result.is_ok() {
+                    self.publish_mutated_inode(inode);
+                }
                 result
             })
             .await
@@ -1066,26 +1076,24 @@ impl FileNodeOps for Inode {
     async fn set_symlink(&self, target: &str) -> VfsResult<()> {
         let fs = &self.fs.inner;
         self.validate_inode_num(&fs, self.ino)?;
-        let idx = core::num::NonZeroU32::new(self.ino).ok_or(VfsError::InvalidData)?;
         let _mutation_guard = self.mutation_lock.lock().await;
         let mut write_scope = self.fs.write_scope(&[self.ino as u64]);
         write_scope
             .run(async {
-                self.invalidate_metadata();
-                let mut inode = ext4plus::inode::Inode::read(&fs, idx)
-                    .await
-                    .map_err(into_vfs_err)?;
+                let mut inode = self.take_inode_for_mutation(fs).await?;
                 let bytes = target.as_bytes();
                 let written = async {
-                    ext4plus::file::truncate(&fs, &mut inode, 0)
+                    ext4plus::file::truncate(fs, Arc::make_mut(&mut inode), 0)
                         .await
                         .map_err(into_vfs_err)?;
-                    ext4plus::file::write_at(&fs, &mut inode, bytes, 0)
+                    ext4plus::file::write_at(fs, Arc::make_mut(&mut inode), bytes, 0)
                         .await
                         .map_err(into_vfs_err)
                 }
                 .await;
-                self.invalidate_metadata();
+                if written.is_ok() {
+                    self.publish_mutated_inode(inode);
+                }
                 let written = written?;
                 if written != bytes.len() {
                     return Err(VfsError::StorageFull);
