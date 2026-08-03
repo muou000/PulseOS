@@ -357,6 +357,16 @@ impl GlobalAllocator {
         self.palloc.lock().dealloc_pages(pos, num_pages)
     }
 
+    /// Bitmap allocations already track each page independently, so converting
+    /// a contiguous range requires no metadata update.
+    pub fn split_allocated_pages(&self, pos: usize, num_pages: usize) -> AllocResult {
+        if num_pages == 0 || pos % PAGE_SIZE != 0 {
+            Err(allocator::AllocError::InvalidParam)
+        } else {
+            Ok(())
+        }
+    }
+
     /// Returns the number of allocated bytes in the byte allocator.
     pub fn used_bytes(&self) -> usize {
         self.balloc.lock().used_bytes()

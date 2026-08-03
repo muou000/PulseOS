@@ -328,11 +328,14 @@ pub(super) async fn append_source_async<R: Read + IoBuf>(
 struct ContiguousPageGroup {
     addr: VirtAddr,
     pages: usize,
+    owns_allocation: AtomicBool,
 }
 
 impl Drop for ContiguousPageGroup {
     fn drop(&mut self) {
-        global_allocator().dealloc_pages(self.addr.as_usize(), self.pages);
+        if self.owns_allocation.load(Ordering::Acquire) {
+            global_allocator().dealloc_pages(self.addr.as_usize(), self.pages);
+        }
     }
 }
 
@@ -347,6 +350,7 @@ impl ContiguousPageGroup {
         Ok(Arc::new(Self {
             addr: addr.into(),
             pages,
+            owns_allocation: AtomicBool::new(true),
         }))
     }
 
@@ -366,6 +370,17 @@ impl ContiguousPageGroup {
             .checked_add(offset)
             .map(Into::into)
             .ok_or(VfsError::StorageFull)
+    }
+
+    fn split_for_page_cache(self: &Arc<Self>) -> VfsResult<()> {
+        if Arc::strong_count(self) != 1 || !self.owns_allocation.load(Ordering::Acquire) {
+            return Err(VfsError::BadState);
+        }
+        global_allocator()
+            .split_allocated_pages(self.addr.as_usize(), self.pages)
+            .map_err(|_| VfsError::BadState)?;
+        self.owns_allocation.store(false, Ordering::Release);
+        Ok(())
     }
 
     /// The group is private until every direct read has completed and it is
@@ -484,28 +499,12 @@ impl WritebackData {
 }
 
 #[derive(Debug)]
-enum PageCacheFrameBacking {
-    Standalone,
-    Group { _owner: Arc<ContiguousPageGroup> },
-}
-
-#[derive(Debug)]
 struct PageCacheFrame {
     addr: VirtAddr,
-    backing: PageCacheFrameBacking,
-}
-
-impl PageCacheFrame {
-    fn is_group_backed(&self) -> bool {
-        matches!(self.backing, PageCacheFrameBacking::Group { .. })
-    }
 }
 
 impl Drop for PageCacheFrame {
     fn drop(&mut self) {
-        if !matches!(self.backing, PageCacheFrameBacking::Standalone) {
-            return;
-        }
         let paddr = virt_to_phys(self.addr);
         if let Some(ref_count) = axalloc::frame_table().try_get_ref(paddr) {
             if ref_count == 0 {
@@ -550,40 +549,17 @@ impl PageCache {
         if !skip_zero {
             unsafe { core::ptr::write_bytes(addr as *mut u8, 0, PAGE_SIZE) };
         }
-        Ok(Arc::new(PageCacheFrame {
-            addr: addr.into(),
-            backing: PageCacheFrameBacking::Standalone,
-        }))
+        Ok(Arc::new(PageCacheFrame { addr: addr.into() }))
     }
 
-    fn new_grouped(group: Arc<ContiguousPageGroup>, index: usize) -> VfsResult<Self> {
-        Ok(Self {
-            frame: Arc::new(PageCacheFrame {
-                addr: group.page_addr(index)?,
-                backing: PageCacheFrameBacking::Group { _owner: group },
-            }),
+    fn from_independent_frame(addr: VirtAddr) -> Self {
+        Self {
+            frame: Arc::new(PageCacheFrame { addr }),
             dirty: false,
             may_write_mapping: false,
             content_generation: 0,
             writable_mapping_generation: 0,
-        })
-    }
-
-    fn detach_group_frame(&mut self) -> VfsResult<()> {
-        if !self.frame.is_group_backed() {
-            return Ok(());
         }
-        let source = self.frame.addr;
-        let frame = Self::new_standalone_frame(true)?;
-        // SAFETY: the page is protected by the page-cache mutex while this
-        // transition runs. The grouped page is no longer in direct I/O, and
-        // the new standalone page does not overlap it.
-        unsafe {
-            core::ptr::copy_nonoverlapping(source.as_ptr(), frame.addr.as_mut_ptr(), PAGE_SIZE);
-        }
-        self.frame = frame;
-        crate::buildstorm_stat_inc!(PAGE_FILL_MAPPING_DETACHES);
-        Ok(())
     }
 
     pub fn paddr(&self) -> PhysAddr {
@@ -600,16 +576,12 @@ impl PageCache {
     }
 
     fn has_user_mapping(&self) -> bool {
-        if self.frame.is_group_backed() {
-            return false;
-        }
         axalloc::frame_table()
             .try_get_ref(self.paddr())
             .is_some_and(|ref_count| ref_count > 1)
     }
 
     fn pin_for_mapping(&mut self, may_write: bool) -> VfsResult<PhysAddr> {
-        self.detach_group_frame()?;
         let paddr = self.paddr();
         let ref_count = axalloc::frame_table()
             .try_get_ref(paddr)
@@ -1677,6 +1649,15 @@ impl CachedFile {
             data[initialized..].fill(0);
         }
 
+        // Validate every derived address before changing allocator ownership.
+        // Once split, each page is released independently by PageCacheFrame.
+        let _ = group.page_addr(page_count - 1)?;
+        let last_page_offset = u32::try_from(page_count - 1).map_err(|_| VfsError::StorageFull)?;
+        let _ = pn
+            .checked_add(last_page_offset)
+            .ok_or(VfsError::StorageFull)?;
+        group.split_for_page_cache()?;
+
         let mut pages = Vec::with_capacity(page_count);
         for page_offset in 0..page_count {
             let page_num = pn
@@ -1684,7 +1665,7 @@ impl CachedFile {
                 .ok_or(VfsError::StorageFull)?;
             pages.push((
                 page_num,
-                PageCache::new_grouped(group.clone(), page_offset)?,
+                PageCache::from_independent_frame(group.page_addr(page_offset)?),
             ));
         }
         Ok(pages)

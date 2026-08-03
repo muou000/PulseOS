@@ -218,6 +218,11 @@ impl<const PAGE_SIZE: usize> GlobalAllocator<PAGE_SIZE> {
         self.buddy.lock().dealloc_pages(addr, count);
     }
 
+    /// Splits a contiguous page allocation into independently releasable pages.
+    pub fn split_allocated_pages(&self, addr: usize, count: usize) -> AllocResult {
+        self.buddy.lock().split_allocated_pages(addr, count)
+    }
+
     /// Allocate pages with physical address below 4 GiB.
     pub fn alloc_pages_lowmem(&self, count: usize, align: usize) -> AllocResult<usize> {
         self.buddy.lock().alloc_pages_lowmem(count, align)
