@@ -75,6 +75,9 @@ pub struct TaskInner {
 
     interrupted: AtomicBool,
     interrupt_waker: AtomicWaker,
+    /// Reuses the allocation behind completed `block_on` invocations. A waker
+    /// is cached only after every external registration has released it.
+    block_on_waker: SpinNoIrq<Option<Arc<crate::future::AxWaker>>>,
 
     /// A ticket ID used to identify the timer event.
     /// Set by `set_timer_ticket()` when creating a timer event in `set_alarm_wakeup()`,
@@ -194,6 +197,23 @@ impl TaskInner {
     #[cfg(feature = "qperf-trace")]
     pub(crate) fn take_qperf_pending_wait_context(&self) -> Option<crate::wait_queue::WaitContext> {
         self.qperf_pending_wait_context.lock().take()
+    }
+
+    pub(crate) fn take_block_on_waker(&self) -> Option<Arc<crate::future::AxWaker>> {
+        self.block_on_waker.lock().take()
+    }
+
+    pub(crate) fn cache_block_on_waker(
+        &self,
+        waker: Arc<crate::future::AxWaker>,
+    ) -> Result<(), Arc<crate::future::AxWaker>> {
+        let mut cached = self.block_on_waker.lock();
+        if cached.is_some() {
+            Err(waker)
+        } else {
+            *cached = Some(waker);
+            Ok(())
+        }
     }
 
     /// Gets the name of the task.
@@ -343,6 +363,7 @@ impl TaskInner {
             }),
             interrupted: AtomicBool::new(false),
             interrupt_waker: AtomicWaker::new(),
+            block_on_waker: SpinNoIrq::new(None),
             #[cfg(feature = "preempt")]
             need_resched: AtomicBool::new(false),
             #[cfg(feature = "preempt")]
