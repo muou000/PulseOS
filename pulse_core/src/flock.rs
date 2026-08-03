@@ -1,14 +1,10 @@
 use alloc::{collections::BTreeMap, sync::Arc};
 
 use axerrno::{LinuxError, LinuxResult};
+use linux_raw_sys::general::{LOCK_EX, LOCK_NB, LOCK_SH, LOCK_UN};
 use spin::{Lazy, Mutex};
 
 use crate::fd_table::FdObject;
-
-pub const LOCK_SH: i32 = 1;
-pub const LOCK_EX: i32 = 2;
-pub const LOCK_NB: i32 = 4;
-pub const LOCK_UN: i32 = 8;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum LockTarget {
@@ -62,17 +58,17 @@ fn current_has_pending_signal() -> bool {
 }
 
 pub fn do_flock(owner: usize, target: LockTarget, operation: i32) -> LinuxResult<isize> {
-    let is_sh = (operation & LOCK_SH) != 0;
-    let is_ex = (operation & LOCK_EX) != 0;
-    let is_un = (operation & LOCK_UN) != 0;
-    let is_nb = (operation & LOCK_NB) != 0;
+    let is_sh = (operation & (LOCK_SH as i32)) != 0;
+    let is_ex = (operation & (LOCK_EX as i32)) != 0;
+    let is_un = (operation & (LOCK_UN as i32)) != 0;
+    let is_nb = (operation & (LOCK_NB as i32)) != 0;
 
     let mode_count = (is_sh as i32) + (is_ex as i32) + (is_un as i32);
     if mode_count != 1 {
         return Err(LinuxError::EINVAL);
     }
 
-    let allowed_flags = LOCK_SH | LOCK_EX | LOCK_NB | LOCK_UN;
+    let allowed_flags = (LOCK_SH | LOCK_EX | LOCK_NB | LOCK_UN) as i32;
     if (operation & !allowed_flags) != 0 {
         return Err(LinuxError::EINVAL);
     }

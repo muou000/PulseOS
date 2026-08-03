@@ -4,21 +4,18 @@ use axfs::{CachedFile, FileFlags};
 use axhal::paging::MappingFlags;
 use linux_raw_sys::general::{
     MADV_DONTNEED, MADV_FREE, MADV_NORMAL, MADV_RANDOM, MADV_SEQUENTIAL, MADV_WILLNEED,
-    MCL_CURRENT, MCL_FUTURE, MCL_ONFAULT, RLIMIT_DATA,
+    MAP_ANONYMOUS, MAP_DENYWRITE, MAP_EXECUTABLE, MAP_FIXED, MAP_FIXED_NOREPLACE,
+    MAP_GROWSDOWN, MAP_HUGETLB, MAP_LOCKED, MAP_NONBLOCK, MAP_NORESERVE, MAP_POPULATE,
+    MAP_PRIVATE, MAP_SHARED, MAP_SHARED_VALIDATE, MAP_STACK, MAP_SYNC, MCL_CURRENT, MCL_FUTURE,
+    MCL_ONFAULT, MREMAP_DONTUNMAP, MREMAP_FIXED, MREMAP_MAYMOVE, MS_ASYNC, MS_INVALIDATE,
+    MS_SYNC, PROT_EXEC, PROT_READ, PROT_WRITE, RLIMIT_DATA,
 };
 use memory_addr::VirtAddr;
 use pulse_core::fd_table::FdObject;
 
 use crate::LinuxError;
 
-const PROT_READ: usize = 0x1;
-const PROT_WRITE: usize = 0x2;
-const PROT_EXEC: usize = 0x4;
-const MAP_ANONYMOUS: usize = 0x20;
 const PAGE_SIZE: usize = 0x1000;
-const MS_ASYNC: usize = 1;
-const MS_SYNC: usize = 2;
-const MS_INVALIDATE: usize = 4;
 
 fn page_align_up(addr: usize) -> Option<usize> {
     addr.checked_add(PAGE_SIZE - 1)
@@ -202,31 +199,17 @@ pub fn sys_mmap(
         Err(e) => return -e.code() as isize,
     };
 
-    let file_backed = (flags & MAP_ANONYMOUS) == 0;
+    let file_backed = (flags & (MAP_ANONYMOUS as usize)) == 0;
 
     let map_type = flags & 0x0f;
-    const MAP_SHARED: usize = 0x01;
-    const MAP_PRIVATE: usize = 0x02;
-    const MAP_SHARED_VALIDATE: usize = 0x03;
-
-    if map_type != MAP_SHARED && map_type != MAP_PRIVATE && map_type != MAP_SHARED_VALIDATE {
+    if map_type != (MAP_SHARED as usize)
+        && map_type != (MAP_PRIVATE as usize)
+        && map_type != (MAP_SHARED_VALIDATE as usize)
+    {
         return -LinuxError::EINVAL.code() as isize;
     }
 
-    const MAP_FIXED: usize = 0x10;
-    const MAP_GROWSDOWN: usize = 0x0100;
-    const MAP_DENYWRITE: usize = 0x0800;
-    const MAP_EXECUTABLE: usize = 0x1000;
-    const MAP_LOCKED: usize = 0x2000;
-    const MAP_NORESERVE: usize = 0x4000;
-    const MAP_POPULATE: usize = 0x8000;
-    const MAP_NONBLOCK: usize = 0x10000;
-    const MAP_STACK: usize = 0x20000;
-    const MAP_HUGETLB: usize = 0x40000;
-    const MAP_SYNC: usize = 0x80000;
-    const MAP_FIXED_NOREPLACE: usize = 0x100000;
-
-    let supported_mask = MAP_SHARED
+    let supported_mask = (MAP_SHARED
         | MAP_PRIVATE
         | MAP_SHARED_VALIDATE
         | MAP_FIXED
@@ -241,13 +224,13 @@ pub fn sys_mmap(
         | MAP_HUGETLB
         | MAP_SYNC
         | MAP_FIXED_NOREPLACE
-        | MAP_GROWSDOWN;
+        | MAP_GROWSDOWN) as usize;
 
-    if map_type == MAP_SHARED_VALIDATE && (flags & !supported_mask) != 0 {
+    if map_type == (MAP_SHARED_VALIDATE as usize) && (flags & !supported_mask) != 0 {
         return -LinuxError::EOPNOTSUPP.code() as isize;
     }
 
-    let is_shared = map_type == MAP_SHARED || map_type == MAP_SHARED_VALIDATE;
+    let is_shared = map_type == (MAP_SHARED as usize) || map_type == (MAP_SHARED_VALIDATE as usize);
 
     if file_backed && fd < 0 {
         return -LinuxError::EBADF.code() as isize;
@@ -262,13 +245,13 @@ pub fn sys_mmap(
     };
 
     let mut map_flags = MappingFlags::USER;
-    if (prot & PROT_READ) != 0 {
+    if (prot & (PROT_READ as usize)) != 0 {
         map_flags |= MappingFlags::READ;
     }
-    if (prot & PROT_WRITE) != 0 {
+    if (prot & (PROT_WRITE as usize)) != 0 {
         map_flags |= MappingFlags::WRITE;
     }
-    if (prot & PROT_EXEC) != 0 {
+    if (prot & (PROT_EXEC as usize)) != 0 {
         map_flags |= MappingFlags::EXECUTE;
     }
 
@@ -339,7 +322,7 @@ pub fn sys_mmap(
     let mut pending_shootdown = None;
 
     let aligned_addr = addr & !(PAGE_SIZE - 1);
-    let map_addr = if (flags & MAP_FIXED) != 0 {
+    let map_addr = if (flags & (MAP_FIXED as usize)) != 0 {
         aligned_addr
     } else {
         let limit = memory_addr::VirtAddrRange::from_start_size(
@@ -383,7 +366,7 @@ pub fn sys_mmap(
         return -LinuxError::EINVAL.code() as isize;
     }
 
-    if (flags & MAP_FIXED_NOREPLACE) != 0 {
+    if (flags & (MAP_FIXED_NOREPLACE as usize)) != 0 {
         if addr == 0 || (addr & (PAGE_SIZE - 1)) != 0 {
             return -LinuxError::EINVAL.code() as isize;
         }
@@ -392,7 +375,7 @@ pub fn sys_mmap(
         }
     }
 
-    if (flags & MAP_FIXED) != 0 {
+    if (flags & (MAP_FIXED as usize)) != 0 {
         let (unmap_result, shootdown) = aspace
             .unmap(VirtAddr::from(map_addr), aligned_length)
             .into_parts();
@@ -445,7 +428,7 @@ pub fn sys_mmap(
         } else {
             Err(axerrno::AxError::NoMemory)
         }
-    } else if (flags & MAP_GROWSDOWN) != 0 {
+    } else if (flags & (MAP_GROWSDOWN as usize)) != 0 {
         let backend = axmm::Backend::new_alloc_grows_down(false, true);
         aspace.map_with_backend(VirtAddr::from(map_addr), aligned_length, map_flags, backend)
     } else {
@@ -479,7 +462,7 @@ pub fn sys_mmap(
                 return -e.code() as isize;
             }
 
-            if (flags & MAP_POPULATE) != 0 {
+            if (flags & (MAP_POPULATE as usize)) != 0 {
                 if let Err(e) = proc.prefault_user_range(map_addr, aligned_length) {
                     axlog::warn!(
                         "sys_mmap: MAP_POPULATE prefault failed at {:#x}, len={:#x}, err={:?}",
@@ -641,20 +624,16 @@ pub fn sys_mremap(
         Err(e) => return -e.code() as isize,
     };
 
-    const MREMAP_MAYMOVE: usize = 1;
-    const MREMAP_FIXED: usize = 2;
-    const MREMAP_DONTUNMAP: usize = 4;
-
-    if (flags & MREMAP_FIXED) != 0 && (flags & MREMAP_MAYMOVE) == 0 {
+    if (flags & (MREMAP_FIXED as usize)) != 0 && (flags & (MREMAP_MAYMOVE as usize)) == 0 {
         return -LinuxError::EINVAL.code() as isize;
     }
-    if (flags & MREMAP_DONTUNMAP) != 0 && (flags & MREMAP_MAYMOVE) == 0 {
+    if (flags & (MREMAP_DONTUNMAP as usize)) != 0 && (flags & (MREMAP_MAYMOVE as usize)) == 0 {
         return -LinuxError::EINVAL.code() as isize;
     }
-    if (flags & MREMAP_DONTUNMAP) != 0 && old_size != new_size {
+    if (flags & (MREMAP_DONTUNMAP as usize)) != 0 && old_size != new_size {
         return -LinuxError::EINVAL.code() as isize;
     }
-    if (flags & MREMAP_FIXED) != 0 && old_address != new_address {
+    if (flags & (MREMAP_FIXED as usize)) != 0 && old_address != new_address {
         let aligned_old_size = (old_size + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
         let aligned_new_size = (new_size + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
         let overlaps = !(new_address + aligned_new_size <= old_address
@@ -663,10 +642,10 @@ pub fn sys_mremap(
             return -LinuxError::EINVAL.code() as isize;
         }
     }
-    if (flags & MREMAP_DONTUNMAP) != 0 {
+    if (flags & (MREMAP_DONTUNMAP as usize)) != 0 {
         return -LinuxError::ENOSYS.code() as isize;
     }
-    let supported_flags = MREMAP_MAYMOVE | MREMAP_FIXED | MREMAP_DONTUNMAP;
+    let supported_flags = (MREMAP_MAYMOVE | MREMAP_FIXED | MREMAP_DONTUNMAP) as usize;
     if (flags & !supported_flags) != 0 {
         return -LinuxError::EINVAL.code() as isize;
     }
@@ -674,7 +653,7 @@ pub fn sys_mremap(
     if old_address & (PAGE_SIZE - 1) != 0 {
         return -LinuxError::EINVAL.code() as isize;
     }
-    if (flags & MREMAP_FIXED) != 0 && new_address & (PAGE_SIZE - 1) != 0 {
+    if (flags & (MREMAP_FIXED as usize)) != 0 && new_address & (PAGE_SIZE - 1) != 0 {
         return -LinuxError::EINVAL.code() as isize;
     }
     if old_size == 0 || new_size == 0 {
@@ -687,14 +666,14 @@ pub fn sys_mremap(
     if !proc.is_user_range(old_address, aligned_old_size) {
         return -LinuxError::EFAULT.code() as isize;
     }
-    if (flags & MREMAP_FIXED) != 0 && !proc.is_user_range(new_address, aligned_new_size) {
+    if (flags & (MREMAP_FIXED as usize)) != 0 && !proc.is_user_range(new_address, aligned_new_size) {
         return -LinuxError::EFAULT.code() as isize;
     }
 
     let aspace_handle = proc.aspace_handle();
     let mut aspace = aspace_handle.write();
 
-    let new_addr_opt = if (flags & MREMAP_FIXED) != 0 {
+    let new_addr_opt = if (flags & (MREMAP_FIXED as usize)) != 0 {
         Some(VirtAddr::from(new_address))
     } else {
         None
@@ -775,7 +754,7 @@ pub fn sys_mprotect(addr: usize, length: usize, prot: usize) -> isize {
         return -LinuxError::EINVAL.code() as isize;
     }
 
-    let allowed = PROT_READ | PROT_WRITE | PROT_EXEC;
+    let allowed = (PROT_READ | PROT_WRITE | PROT_EXEC) as usize;
     if (prot & !allowed) != 0 {
         return -LinuxError::EINVAL.code() as isize;
     }
@@ -792,13 +771,13 @@ pub fn sys_mprotect(addr: usize, length: usize, prot: usize) -> isize {
     }
 
     let mut map_flags = MappingFlags::USER;
-    if (prot & PROT_READ) != 0 {
+    if (prot & (PROT_READ as usize)) != 0 {
         map_flags |= MappingFlags::READ;
     }
-    if (prot & PROT_WRITE) != 0 {
+    if (prot & (PROT_WRITE as usize)) != 0 {
         map_flags |= MappingFlags::WRITE;
     }
-    if (prot & PROT_EXEC) != 0 {
+    if (prot & (PROT_EXEC as usize)) != 0 {
         map_flags |= MappingFlags::EXECUTE;
     }
 
@@ -865,16 +844,16 @@ pub fn sys_msync(addr: usize, length: usize, flags: usize) -> isize {
     );
 
     // Validate flags: MS_ASYNC and MS_SYNC are mutually exclusive.
-    let has_async = (flags & MS_ASYNC) != 0;
-    let has_sync = (flags & MS_SYNC) != 0;
+    let has_async = (flags & (MS_ASYNC as usize)) != 0;
+    let has_sync = (flags & (MS_SYNC as usize)) != 0;
     if has_async && has_sync {
         return -LinuxError::EINVAL.code() as isize;
     }
-    if !has_async && !has_sync && (flags & MS_INVALIDATE) == 0 {
+    if !has_async && !has_sync && (flags & (MS_INVALIDATE as usize)) == 0 {
         return -LinuxError::EINVAL.code() as isize;
     }
     // Reject unknown bits.
-    if (flags & !(MS_ASYNC | MS_SYNC | MS_INVALIDATE)) != 0 {
+    if (flags & !((MS_ASYNC | MS_SYNC | MS_INVALIDATE) as usize)) != 0 {
         return -LinuxError::EINVAL.code() as isize;
     }
 

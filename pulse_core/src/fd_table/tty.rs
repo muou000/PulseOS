@@ -1,4 +1,8 @@
 use super::*;
+use linux_raw_sys::ioctl::{
+    TCGETS, TCGETS2, TCSETS, TCSETS2, TCSETSF, TCSETSF2, TCSETSW, TCSETSW2, TIOCGPGRP,
+    TIOCGWINSZ, TIOCSPGRP,
+};
 
 struct StdinRaw;
 struct StdoutRaw;
@@ -213,18 +217,6 @@ pub fn write_tty_termios2(user_addr: usize) -> LinuxResult {
     *TTY_TERMIOS.lock() = termios_data;
     Ok(())
 }
-
-const TCGETS: u32 = 0x5401;
-const TCSETS: u32 = 0x5402;
-const TCSETSW: u32 = 0x5403;
-const TCSETSF: u32 = 0x5404;
-const TCGETS2: u32 = 0x802c542a;
-const TCSETS2: u32 = 0x402c542b;
-const TCSETSW2: u32 = 0x402c542c;
-const TCSETSF2: u32 = 0x402c542d;
-const TIOCGPGRP: u32 = 0x540F;
-const TIOCSPGRP: u32 = 0x5410;
-const TIOCGWINSZ: u32 = 0x5413;
 
 #[repr(C)]
 struct WinSize {

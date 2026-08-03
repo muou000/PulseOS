@@ -1,15 +1,18 @@
 use axerrno::LinuxError;
-use linux_raw_sys::general::{SI_TKILL, SI_USER, siginfo};
+use linux_raw_sys::{
+    general::{O_NONBLOCK, SI_TKILL, SI_USER, _NSIG, siginfo},
+    prctl::{
+        PR_GET_DUMPABLE, PR_GET_NAME, PR_GET_PDEATHSIG, PR_SET_DUMPABLE, PR_SET_NAME,
+        PR_SET_PDEATHSIG,
+    },
+};
 use pulse_core::task::{
     can_signal, current_process, process_by_pid, processes_snapshot,
     queue_signal_to_process_with_info, queue_signal_to_thread_with_info,
 };
 
-const NSIG: isize = 64;
-const PIDFD_NONBLOCK: usize = 0x800;
-
 fn is_valid_signal(sig: isize) -> bool {
-    sig == 0 || (1..=NSIG).contains(&sig)
+    sig == 0 || (1..=(_NSIG as isize)).contains(&sig)
 }
 
 fn make_user_signal_info(sig: isize, code: i32, pid: u64, uid: u32) -> [u8; 128] {
@@ -259,19 +262,12 @@ pub fn sys_getresgid(rgid_ptr: usize, egid_ptr: usize, sgid_ptr: usize) -> isize
 }
 
 pub fn sys_prctl(option: i32, arg2: usize, _arg3: usize, _arg4: usize, _arg5: usize) -> isize {
-    const PR_SET_PDEATHSIG: i32 = 1;
-    const PR_GET_PDEATHSIG: i32 = 2;
-    const PR_GET_DUMPABLE: i32 = 3;
-    const PR_SET_DUMPABLE: i32 = 4;
-    const PR_SET_NAME: i32 = 15;
-    const PR_GET_NAME: i32 = 16;
-
     let process = match current_process() {
         Ok(p) => p,
         Err(e) => return -e.code() as isize,
     };
 
-    match option {
+    match option as u32 {
         PR_SET_NAME => match super::common::read_user_cstring(&process, arg2) {
             Ok(name) => {
                 let name = if name.len() > 15 { &name[..15] } else { &name };
@@ -324,7 +320,7 @@ pub fn sys_prctl(option: i32, arg2: usize, _arg3: usize, _arg4: usize, _arg5: us
 pub fn sys_pidfd_open(pid: isize, flags: usize) -> isize {
     axlog::debug!("sys_pidfd_open: pid={}, flags={}", pid, flags);
 
-    if (flags & !PIDFD_NONBLOCK) != 0 {
+    if (flags & !(O_NONBLOCK as usize)) != 0 {
         return -LinuxError::EINVAL.code() as isize;
     }
 
@@ -343,7 +339,7 @@ pub fn sys_pidfd_open(pid: isize, flags: usize) -> isize {
     };
 
     let mut fd_flags = pulse_core::fd_table::FdFlags::CLOEXEC;
-    if flags & PIDFD_NONBLOCK != 0 {
+    if (flags & (O_NONBLOCK as usize)) != 0 {
         fd_flags.insert(pulse_core::fd_table::FdFlags::NONBLOCK);
     }
 

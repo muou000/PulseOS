@@ -352,8 +352,7 @@ pub fn sys_mount(
     }
 
     // MS_MOVE: move an existing mountpoint.
-    const MS_MOVE_FLAG: usize = 0x2000;
-    if (_flags & MS_MOVE_FLAG) != 0 {
+    if (_flags & (MS_MOVE as usize)) != 0 {
         return sys_mount_move(source, &target_path);
     }
 

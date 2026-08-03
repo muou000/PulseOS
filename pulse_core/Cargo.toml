@@ -23,7 +23,7 @@ axerrno.workspace = true
 axio.workspace = true
 axnet.workspace = true
 
-linux-raw-sys.workspace = true
+linux-raw-sys = { workspace = true, features = ["elf_uapi"] }
 linkme.workspace = true
 kernel-elf-parser.workspace = true
 xmas-elf.workspace = true
