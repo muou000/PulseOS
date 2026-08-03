@@ -1,4 +1,4 @@
-use alloc::{collections::BTreeMap, vec::Vec};
+use alloc::{collections::BTreeMap, sync::Arc, vec::Vec};
 
 use axerrno::{LinuxError, LinuxResult};
 use kspin::SpinNoIrq;
@@ -12,37 +12,66 @@ pub enum RecordLockType {
     Write,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum RecordLockOwner {
+    Posix(u64),
+    Ofd(usize),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RecordLockConflict {
+    pub owner: RecordLockOwner,
+    pub start: i64,
+    pub end: i64,
+    pub lock_type: RecordLockType,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct RecordLock {
-    owner: u64,
+    owner: RecordLockOwner,
     start: i64,
     end: i64,
     lock_type: RecordLockType,
 }
 
-#[derive(Default)]
 struct RecordLockState {
     entries: Vec<RecordLock>,
+    wait_queue: Arc<axtask::WaitQueue>,
+    waiters: usize,
+}
+
+impl Default for RecordLockState {
+    fn default() -> Self {
+        Self {
+            entries: Vec::new(),
+            wait_queue: Arc::new(axtask::WaitQueue::new()),
+            waiters: 0,
+        }
+    }
 }
 
 impl RecordLockState {
     fn conflict(
         &self,
-        owner: u64,
+        owner: RecordLockOwner,
         start: i64,
         end: i64,
         lock_type: RecordLockType,
     ) -> Option<RecordLock> {
-        self.entries.iter().copied().find(|entry| {
-            entry.owner != owner
-                && ranges_overlap(entry.start, entry.end, start, end)
-                && lock_types_conflict(entry.lock_type, lock_type)
-        })
+        self.entries
+            .iter()
+            .copied()
+            .filter(|entry| {
+                entry.owner != owner
+                    && ranges_overlap(entry.start, entry.end, start, end)
+                    && lock_types_conflict(entry.lock_type, lock_type)
+            })
+            .min_by_key(|entry| (entry.start, entry.end, entry.owner))
     }
 
     fn set(
         &mut self,
-        owner: u64,
+        owner: RecordLockOwner,
         start: i64,
         end: i64,
         lock_type: RecordLockType,
@@ -63,7 +92,7 @@ impl RecordLockState {
         Ok(())
     }
 
-    fn clear_owner_range(&mut self, owner: u64, start: i64, end: i64) -> bool {
+    fn clear_owner_range(&mut self, owner: RecordLockOwner, start: i64, end: i64) -> bool {
         let mut changed = false;
         let mut index = 0;
         while index < self.entries.len() {
@@ -91,8 +120,10 @@ impl RecordLockState {
         changed
     }
 
-    fn release_owner(&mut self, owner: u64) {
+    fn release_owner(&mut self, owner: RecordLockOwner) -> bool {
+        let old_len = self.entries.len();
         self.entries.retain(|entry| entry.owner != owner);
+        self.entries.len() != old_len
     }
 
     fn coalesce(&mut self) {
@@ -137,6 +168,12 @@ fn validate_range(start: i64, end: i64) -> LinuxResult<()> {
     Ok(())
 }
 
+fn current_has_pending_signal() -> bool {
+    crate::task::current_thread()
+        .map(|thread| thread.has_pending_signal())
+        .unwrap_or(false)
+}
+
 pub fn resolve_range(base: i64, relative_start: i64, len: i64) -> LinuxResult<(i64, i64)> {
     let resolved_start = base.checked_add(relative_start).ok_or(LinuxError::EINVAL)?;
     if len == 0 {
@@ -159,6 +196,164 @@ pub fn resolve_range(base: i64, relative_start: i64, len: i64) -> LinuxResult<(i
     Ok((start, end))
 }
 
+pub fn get_lock(
+    owner: RecordLockOwner,
+    target: LockTarget,
+    start: i64,
+    end: i64,
+    lock_type: RecordLockType,
+) -> LinuxResult<Option<RecordLockConflict>> {
+    validate_range(start, end)?;
+    let locks = RECORD_LOCKS[lock_target_shard(target)].lock();
+    Ok(locks.get(&target).and_then(|state| {
+        state
+            .conflict(owner, start, end, lock_type)
+            .map(|entry| RecordLockConflict {
+                owner: entry.owner,
+                start: entry.start,
+                end: entry.end,
+                lock_type: entry.lock_type,
+            })
+    }))
+}
+
+pub fn set_lock(
+    owner: RecordLockOwner,
+    target: LockTarget,
+    start: i64,
+    end: i64,
+    lock_type: RecordLockType,
+    blocking: bool,
+) -> LinuxResult<isize> {
+    validate_range(start, end)?;
+
+    loop {
+        let wait_queue = {
+            let mut locks = RECORD_LOCKS[lock_target_shard(target)].lock();
+            let state = locks.entry(target).or_default();
+            if state.conflict(owner, start, end, lock_type).is_none() {
+                state.set(owner, start, end, lock_type)?;
+                let wait_queue = state.wait_queue.clone();
+                drop(locks);
+                wait_queue.notify_all(true);
+                return Ok(0);
+            }
+            if !blocking {
+                return Err(LinuxError::EAGAIN);
+            }
+            state.waiters += 1;
+            state.wait_queue.clone()
+        };
+
+        if current_has_pending_signal() {
+            finish_wait(target);
+            return Err(LinuxError::EINTR);
+        }
+
+        wait_queue.wait_until(|| {
+            if current_has_pending_signal() {
+                return true;
+            }
+            let locks = RECORD_LOCKS[lock_target_shard(target)].lock();
+            locks
+                .get(&target)
+                .is_none_or(|state| state.conflict(owner, start, end, lock_type).is_none())
+        });
+        finish_wait(target);
+
+        if current_has_pending_signal() {
+            return Err(LinuxError::EINTR);
+        }
+    }
+}
+
+fn finish_wait(target: LockTarget) {
+    let mut locks = RECORD_LOCKS[lock_target_shard(target)].lock();
+    let remove_target = locks.get_mut(&target).is_some_and(|state| {
+        debug_assert!(state.waiters > 0);
+        state.waiters = state.waiters.saturating_sub(1);
+        state.entries.is_empty() && state.waiters == 0
+    });
+    if remove_target {
+        locks.remove(&target);
+    }
+}
+
+pub fn unlock_lock(
+    owner: RecordLockOwner,
+    target: LockTarget,
+    start: i64,
+    end: i64,
+) -> LinuxResult<isize> {
+    validate_range(start, end)?;
+    let wait_queue = {
+        let mut locks = RECORD_LOCKS[lock_target_shard(target)].lock();
+        let mut wait_queue = None;
+        let remove_target = locks.get_mut(&target).is_some_and(|state| {
+            if state.clear_owner_range(owner, start, end) {
+                wait_queue = Some(state.wait_queue.clone());
+            }
+            state.entries.is_empty() && state.waiters == 0
+        });
+        if remove_target {
+            locks.remove(&target);
+        }
+        wait_queue
+    };
+    if let Some(wait_queue) = wait_queue {
+        wait_queue.notify_all(true);
+    }
+    Ok(0)
+}
+
+pub fn release_posix_owner_target(owner: u64, target: LockTarget) {
+    release_owner_target(RecordLockOwner::Posix(owner), target);
+}
+
+fn release_owner_target(owner: RecordLockOwner, target: LockTarget) {
+    let wait_queue = {
+        let mut locks = RECORD_LOCKS[lock_target_shard(target)].lock();
+        let mut wait_queue = None;
+        let remove_target = locks.get_mut(&target).is_some_and(|state| {
+            if state.release_owner(owner) {
+                wait_queue = Some(state.wait_queue.clone());
+            }
+            state.entries.is_empty() && state.waiters == 0
+        });
+        if remove_target {
+            locks.remove(&target);
+        }
+        wait_queue
+    };
+    if let Some(wait_queue) = wait_queue {
+        wait_queue.notify_all(true);
+    }
+}
+
+pub fn release_posix_owner(owner: u64) {
+    release_owner(RecordLockOwner::Posix(owner));
+}
+
+pub fn release_ofd_owner(owner: usize) {
+    release_owner(RecordLockOwner::Ofd(owner));
+}
+
+fn release_owner(owner: RecordLockOwner) {
+    let mut wait_queues = Vec::new();
+    for shard in RECORD_LOCKS.iter() {
+        let mut locks = shard.lock();
+        for state in locks.values_mut() {
+            if state.release_owner(owner) {
+                wait_queues.push(state.wait_queue.clone());
+            }
+        }
+        locks.retain(|_, state| !state.entries.is_empty() || state.waiters != 0);
+    }
+    for wait_queue in wait_queues {
+        wait_queue.notify_all(true);
+    }
+}
+
 pub fn set_posix_lock(
     owner: u64,
     target: LockTarget,
@@ -166,12 +361,14 @@ pub fn set_posix_lock(
     end: i64,
     lock_type: RecordLockType,
 ) -> LinuxResult<isize> {
-    let mut locks = RECORD_LOCKS[lock_target_shard(target)].lock();
-    locks
-        .entry(target)
-        .or_default()
-        .set(owner, start, end, lock_type)?;
-    Ok(0)
+    set_lock(
+        RecordLockOwner::Posix(owner),
+        target,
+        start,
+        end,
+        lock_type,
+        false,
+    )
 }
 
 pub fn unlock_posix_lock(
@@ -180,50 +377,25 @@ pub fn unlock_posix_lock(
     start: i64,
     end: i64,
 ) -> LinuxResult<isize> {
-    validate_range(start, end)?;
-    let mut locks = RECORD_LOCKS[lock_target_shard(target)].lock();
-    let remove_target = locks.get_mut(&target).is_some_and(|state| {
-        state.clear_owner_range(owner, start, end);
-        state.entries.is_empty()
-    });
-    if remove_target {
-        locks.remove(&target);
-    }
-    Ok(0)
-}
-
-pub fn release_posix_owner_target(owner: u64, target: LockTarget) {
-    let mut locks = RECORD_LOCKS[lock_target_shard(target)].lock();
-    let remove_target = locks.get_mut(&target).is_some_and(|state| {
-        state.release_owner(owner);
-        state.entries.is_empty()
-    });
-    if remove_target {
-        locks.remove(&target);
-    }
-}
-
-pub fn release_posix_owner(owner: u64) {
-    for shard in RECORD_LOCKS.iter() {
-        shard.lock().retain(|_, state| {
-            state.release_owner(owner);
-            !state.entries.is_empty()
-        });
-    }
+    unlock_lock(RecordLockOwner::Posix(owner), target, start, end)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    const fn posix(pid: u64) -> RecordLockOwner {
+        RecordLockOwner::Posix(pid)
+    }
+
     #[test]
     fn conflicting_locks_from_different_owners_fail() {
         let mut state = RecordLockState::default();
-        state.set(1, 0, 100, RecordLockType::Read).unwrap();
-        state.set(2, 0, 100, RecordLockType::Read).unwrap();
+        state.set(posix(1), 0, 100, RecordLockType::Read).unwrap();
+        state.set(posix(2), 0, 100, RecordLockType::Read).unwrap();
 
         assert!(matches!(
-            state.set(3, 50, 60, RecordLockType::Write),
+            state.set(posix(3), 50, 60, RecordLockType::Write),
             Err(LinuxError::EAGAIN)
         ));
         assert_eq!(state.entries.len(), 2);
@@ -232,24 +404,71 @@ mod tests {
     #[test]
     fn same_owner_can_replace_part_of_a_lock() {
         let mut state = RecordLockState::default();
-        state.set(1, 0, 100, RecordLockType::Write).unwrap();
-        state.set(1, 25, 75, RecordLockType::Read).unwrap();
+        state.set(posix(1), 0, 100, RecordLockType::Write).unwrap();
+        state.set(posix(1), 25, 75, RecordLockType::Read).unwrap();
 
-        assert!(state.conflict(2, 10, 20, RecordLockType::Read).is_some());
-        assert!(state.conflict(2, 30, 40, RecordLockType::Read).is_none());
-        assert!(state.conflict(2, 30, 40, RecordLockType::Write).is_some());
+        assert!(
+            state
+                .conflict(posix(2), 10, 20, RecordLockType::Read)
+                .is_some()
+        );
+        assert!(
+            state
+                .conflict(posix(2), 30, 40, RecordLockType::Read)
+                .is_none()
+        );
+        assert!(
+            state
+                .conflict(posix(2), 30, 40, RecordLockType::Write)
+                .is_some()
+        );
         assert_eq!(state.entries.len(), 3);
     }
 
     #[test]
     fn partial_unlock_splits_an_existing_lock() {
         let mut state = RecordLockState::default();
-        state.set(1, 0, 100, RecordLockType::Write).unwrap();
-        state.clear_owner_range(1, 20, 80);
+        state.set(posix(1), 0, 100, RecordLockType::Write).unwrap();
+        state.clear_owner_range(posix(1), 20, 80);
 
-        assert!(state.conflict(2, 10, 11, RecordLockType::Write).is_some());
-        assert!(state.conflict(2, 50, 51, RecordLockType::Write).is_none());
-        assert!(state.conflict(2, 90, 91, RecordLockType::Write).is_some());
+        assert!(
+            state
+                .conflict(posix(2), 10, 11, RecordLockType::Write)
+                .is_some()
+        );
+        assert!(
+            state
+                .conflict(posix(2), 50, 51, RecordLockType::Write)
+                .is_none()
+        );
+        assert!(
+            state
+                .conflict(posix(2), 90, 91, RecordLockType::Write)
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn posix_and_ofd_owners_conflict_even_with_the_same_numeric_id() {
+        let mut state = RecordLockState::default();
+        state.set(posix(7), 0, 100, RecordLockType::Write).unwrap();
+
+        let conflict = state
+            .conflict(RecordLockOwner::Ofd(7), 0, 100, RecordLockType::Write)
+            .unwrap();
+        assert_eq!(conflict.owner, posix(7));
+    }
+
+    #[test]
+    fn conflict_query_returns_lowest_starting_lock() {
+        let mut state = RecordLockState::default();
+        state.set(posix(2), 40, 50, RecordLockType::Write).unwrap();
+        state.set(posix(1), 10, 20, RecordLockType::Write).unwrap();
+
+        let conflict = state
+            .conflict(posix(3), 0, 100, RecordLockType::Write)
+            .unwrap();
+        assert_eq!((conflict.start, conflict.end), (10, 20));
     }
 
     #[test]
