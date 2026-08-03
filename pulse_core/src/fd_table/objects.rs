@@ -219,6 +219,12 @@ impl FdObject for FileObject {
         Ok(axtask::future::block_on(file.read(buf))?)
     }
 
+    fn try_read_resident(&self, buf: &mut [u8]) -> Option<LinuxResult<usize>> {
+        self.inner
+            .try_read_resident(buf)
+            .map(|result| result.map_err(Into::into))
+    }
+
     fn write(&self, buf: &[u8]) -> LinuxResult<usize> {
         let file = &self.inner;
         Ok(axtask::future::block_on(file.write(buf))?)
@@ -269,6 +275,12 @@ impl FdObject for FileObject {
 
     fn read_at(&self, buf: &mut [u8], offset: u64) -> LinuxResult<usize> {
         Ok(axtask::future::block_on(self.inner.read_at(buf, offset))?)
+    }
+
+    fn try_read_at_resident(&self, buf: &mut [u8], offset: u64) -> Option<LinuxResult<usize>> {
+        self.inner
+            .try_read_at_resident(buf, offset)
+            .map(|result| result.map_err(Into::into))
     }
 
     fn write_at(&self, buf: &[u8], offset: u64) -> LinuxResult<usize> {

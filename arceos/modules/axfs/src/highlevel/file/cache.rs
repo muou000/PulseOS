@@ -1988,6 +1988,66 @@ impl CachedFile {
         result
     }
 
+    /// Tries to satisfy a read entirely from resident cache pages without
+    /// waiting. A lock conflict or cache miss returns `None` so the caller can
+    /// retain the normal asynchronous read path.
+    pub(super) fn try_read_at_resident(
+        &self,
+        mut dst: impl Write + IoBufMut,
+        offset: u64,
+    ) -> Option<VfsResult<usize>> {
+        // Match the regular read lock order. The shared side prevents a direct
+        // write or truncate from invalidating pages while they are copied.
+        let _io_guard = self.shared.io_lock.try_read()?;
+        let len = self.shared.size();
+        let remaining = dst.remaining_mut();
+        if remaining == 0 || offset >= len {
+            return Some(Ok(0));
+        }
+
+        // Calculate from the available range rather than `offset + remaining`
+        // so an oversized caller buffer cannot wrap the file offset.
+        let read_len = (len - offset).min(remaining as u64) as usize;
+        let end = offset + read_len as u64;
+        let start_page = (offset / PAGE_SIZE as u64) as u32;
+        let end_page = end.div_ceil(PAGE_SIZE as u64) as u32;
+
+        let mut cache = self.shared.page_cache.try_lock()?;
+        if !(start_page..end_page).all(|pn| cache.contains(&pn)) {
+            return None;
+        }
+
+        let mut page_offset = (offset % PAGE_SIZE as u64) as usize;
+        let mut read = 0usize;
+        for pn in start_page..end_page {
+            let page_start = pn as u64 * PAGE_SIZE as u64;
+            let page_end = (end - page_start).min(PAGE_SIZE as u64) as usize;
+            let copied = match page_end.checked_sub(page_offset) {
+                Some(copied) => copied,
+                None => return Some(Err(VfsError::BadState)),
+            };
+            let page = cache
+                .get_mut(&pn)
+                .expect("resident cache page disappeared while locked");
+            let written = match dst.write(&page.data()[page_offset..page_end]) {
+                Ok(written) => written,
+                Err(err) => return Some(Err(err.into())),
+            };
+            if written != copied {
+                return Some(Err(VfsError::Io));
+            }
+            read = match read.checked_add(copied) {
+                Some(read) => read,
+                None => return Some(Err(VfsError::Io)),
+            };
+            page_offset = 0;
+        }
+
+        crate::buildstorm_stat_add!(PAGE_READ_HITS, end_page - start_page);
+        self.read_hint.store(end, Ordering::Release);
+        Some(Ok(read))
+    }
+
     pub(super) async fn read_at_async(
         &self,
         mut dst: impl Write + IoBufMut,

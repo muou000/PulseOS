@@ -84,6 +84,14 @@ pub trait FdObject: Send + Sync {
         Err(LinuxError::EBADF)
     }
 
+    /// Tries to satisfy a read without suspending.
+    ///
+    /// `None` means the caller must use [`Self::read`] for the regular path;
+    /// `Some` contains the exact read result, including errors.
+    fn try_read_resident(&self, _buf: &mut [u8]) -> Option<LinuxResult<usize>> {
+        None
+    }
+
     fn write(&self, _buf: &[u8]) -> LinuxResult<usize> {
         Err(LinuxError::EBADF)
     }
@@ -154,6 +162,11 @@ pub trait FdObject: Send + Sync {
 
     fn read_at(&self, _buf: &mut [u8], _offset: u64) -> LinuxResult<usize> {
         Err(LinuxError::ESPIPE)
+    }
+
+    /// Positional counterpart of [`Self::try_read_resident`].
+    fn try_read_at_resident(&self, _buf: &mut [u8], _offset: u64) -> Option<LinuxResult<usize>> {
+        None
     }
 
     fn write_at(&self, _buf: &[u8], _offset: u64) -> LinuxResult<usize> {

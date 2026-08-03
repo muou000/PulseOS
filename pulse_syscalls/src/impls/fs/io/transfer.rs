@@ -62,7 +62,10 @@ pub fn sys_sendfile(out_fd: usize, in_fd: usize, offset: usize, count: usize) ->
     while total < count {
         let chunk_len = core::cmp::min(buf.len(), count - total);
         let read_len = if use_explicit_offset {
-            match input.read_at(&mut buf[..chunk_len], file_offset) {
+            match input
+                .try_read_at_resident(&mut buf[..chunk_len], file_offset)
+                .unwrap_or_else(|| input.read_at(&mut buf[..chunk_len], file_offset))
+            {
                 Ok(len) => len,
                 Err(e) => {
                     return if total > 0 {
@@ -73,7 +76,10 @@ pub fn sys_sendfile(out_fd: usize, in_fd: usize, offset: usize, count: usize) ->
                 }
             }
         } else {
-            match input.read(&mut buf[..chunk_len]) {
+            match input
+                .try_read_resident(&mut buf[..chunk_len])
+                .unwrap_or_else(|| input.read(&mut buf[..chunk_len]))
+            {
                 Ok(len) => len,
                 Err(e) => {
                     return if total > 0 {
@@ -247,9 +253,13 @@ pub fn sys_copy_file_range(
         while total < len {
             let chunk_len = core::cmp::min(buf.len(), len - total);
             let read_len = if explicit_in {
-                input.read_at(&mut buf[..chunk_len], input_pos)
+                input
+                    .try_read_at_resident(&mut buf[..chunk_len], input_pos)
+                    .unwrap_or_else(|| input.read_at(&mut buf[..chunk_len], input_pos))
             } else {
-                input.read(&mut buf[..chunk_len])
+                input
+                    .try_read_resident(&mut buf[..chunk_len])
+                    .unwrap_or_else(|| input.read(&mut buf[..chunk_len]))
             };
             let read_len = match read_len {
                 Ok(0) => break,
