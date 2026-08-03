@@ -330,8 +330,11 @@ struct PendingSignals {
     mask: u64,
     synchronous_mask: u64,
     fallback_mask: u64,
-    standard: [Option<PendingSignal>; SIGRTMIN],
-    synchronous: [Option<PendingSignal>; SIGRTMIN],
+    // Standard signals need at most one record per number. Keep those records
+    // in small, lazily allocated queues rather than reserving a siginfo-sized
+    // slot for every signal in every thread and process.
+    standard: VecDeque<PendingSignal>,
+    synchronous: VecDeque<PendingSignal>,
     realtime: [VecDeque<PendingSignal>; REALTIME_SIGNAL_COUNT],
 }
 
@@ -341,14 +344,39 @@ impl Default for PendingSignals {
             mask: 0,
             synchronous_mask: 0,
             fallback_mask: 0,
-            standard: [None; SIGRTMIN],
-            synchronous: [None; SIGRTMIN],
+            standard: VecDeque::new(),
+            synchronous: VecDeque::new(),
             realtime: array::from_fn(|_| VecDeque::new()),
         }
     }
 }
 
 impl PendingSignals {
+    fn contains_standard(queue: &VecDeque<PendingSignal>, sig: usize) -> bool {
+        queue.iter().any(|pending| pending.sig == sig)
+    }
+
+    fn take_standard(queue: &mut VecDeque<PendingSignal>, sig: usize) -> Option<PendingSignal> {
+        let index = queue.iter().position(|pending| pending.sig == sig)?;
+        queue.remove(index)
+    }
+
+    fn push_standard(
+        queue: &mut VecDeque<PendingSignal>,
+        sig: usize,
+        info: Option<[u8; SIGINFO_FRAME_SIZE]>,
+        mut reservation: Option<PendingSignalReservation>,
+    ) -> Result<(), ()> {
+        if queue.try_reserve(1).is_err() {
+            if let Some(reservation) = reservation.take() {
+                reservation.release();
+            }
+            return Err(());
+        }
+        queue.push_back(PendingSignal::new(sig, info, reservation));
+        Ok(())
+    }
+
     fn put(&mut self, sig: usize, info: Option<[u8; SIGINFO_FRAME_SIZE]>) -> bool {
         self.put_with_admission(sig, info, QueueAdmission::Untracked)
             .is_pending()
@@ -384,21 +412,30 @@ impl PendingSignals {
 
         if sig <= STANDARD_SIGNAL_MAX {
             if synchronous && is_synchronous_fault_signal(sig) {
-                if self.synchronous[sig].is_some() {
+                if Self::contains_standard(&self.synchronous, sig) {
                     return QueuePutResult::Coalesced;
                 }
                 let reservation = match admission.reserve(sig) {
                     Ok(reservation) => reservation,
                     Err(result) => return self.record_fallback(bit, result),
                 };
-                self.synchronous[sig] = Some(PendingSignal::new(sig, info, reservation));
+                if Self::push_standard(
+                    &mut self.synchronous,
+                    sig,
+                    info,
+                    reservation,
+                )
+                .is_err()
+                {
+                    return self.record_fallback(bit, admission.exhaustion_result());
+                }
                 self.synchronous_mask |= bit;
                 self.mask |= bit;
                 return QueuePutResult::Queued;
             }
 
-            if self.standard[sig].is_some()
-                || self.synchronous[sig].is_some()
+            if Self::contains_standard(&self.standard, sig)
+                || Self::contains_standard(&self.synchronous, sig)
                 || (self.fallback_mask & bit) != 0
             {
                 // Linux coalesces ordinary standard signals and preserves
@@ -409,7 +446,16 @@ impl PendingSignals {
                 Ok(reservation) => reservation,
                 Err(result) => return self.record_fallback(bit, result),
             };
-            self.standard[sig] = Some(PendingSignal::new(sig, info, reservation));
+            if Self::push_standard(
+                &mut self.standard,
+                sig,
+                info,
+                reservation,
+            )
+            .is_err()
+            {
+                return self.record_fallback(bit, admission.exhaustion_result());
+            }
             self.mask |= bit;
             return QueuePutResult::Queued;
         }
@@ -465,25 +511,29 @@ impl PendingSignals {
 
         if sig <= STANDARD_SIGNAL_MAX {
             if (self.synchronous_mask & bit) != 0 {
-                let mut pending = self.synchronous[sig].take()?;
+                let mut pending = Self::take_standard(&mut self.synchronous, sig)?;
                 pending.release_reservation();
                 self.synchronous_mask &= !bit;
-                if self.standard[sig].is_none() && (self.fallback_mask & bit) == 0 {
+                if !Self::contains_standard(&self.standard, sig)
+                    && (self.fallback_mask & bit) == 0
+                {
                     self.mask &= !bit;
                 }
                 return Some(pending);
             }
 
-            if let Some(mut pending) = self.standard[sig].take() {
+            if let Some(mut pending) = Self::take_standard(&mut self.standard, sig) {
                 pending.release_reservation();
-                if self.synchronous[sig].is_none() && (self.fallback_mask & bit) == 0 {
+                if !Self::contains_standard(&self.synchronous, sig)
+                    && (self.fallback_mask & bit) == 0
+                {
                     self.mask &= !bit;
                 }
                 return Some(pending);
             }
             if (self.fallback_mask & bit) != 0 {
                 self.fallback_mask &= !bit;
-                if self.synchronous[sig].is_none() {
+                if !Self::contains_standard(&self.synchronous, sig) {
                     self.mask &= !bit;
                 }
                 return Some(PendingSignal::fallback(sig));
@@ -521,10 +571,10 @@ impl PendingSignals {
             return;
         };
         if sig <= STANDARD_SIGNAL_MAX {
-            if let Some(mut pending) = self.standard[sig].take() {
+            while let Some(mut pending) = Self::take_standard(&mut self.standard, sig) {
                 pending.release_reservation();
             }
-            if let Some(mut pending) = self.synchronous[sig].take() {
+            while let Some(mut pending) = Self::take_standard(&mut self.synchronous, sig) {
                 pending.release_reservation();
             }
         } else {
