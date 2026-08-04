@@ -72,14 +72,6 @@ fn process_group_id_in_use(mut groups: impl Iterator<Item = u64>, pgid: u64) -> 
     groups.any(|group| group == pgid)
 }
 
-fn process_group_exists_in_session(
-    mut groups: impl Iterator<Item = (u64, u64)>,
-    pgid: u64,
-    sid: u64,
-) -> bool {
-    groups.any(|(group, session)| group == pgid && session == sid)
-}
-
 pub fn sys_setsid() -> isize {
     let process = match pulse_core::task::current_process() {
         Ok(process) => process,
@@ -146,7 +138,7 @@ pub fn sys_setpgid(pid: isize, pgid: isize) -> isize {
         // process's session. A zero pgid (and pgid == pid) instead creates a
         // group led by the target process itself.
         if target_pgid != target_proc.pid()
-            && !process_group_exists_in_session(
+            && !pulse_core::task::process_group_exists_in_session(
                 pulse_core::task::processes_snapshot()
                     .into_iter()
                     .map(|process| (process.pgid(), process.sid())),
@@ -220,8 +212,8 @@ mod tests {
     fn setpgid_requires_an_existing_group_in_the_target_session() {
         let groups = [(10, 1), (20, 2), (30, 2)];
 
-        assert!(process_group_exists_in_session(groups.into_iter(), 20, 2));
-        assert!(!process_group_exists_in_session(groups.into_iter(), 20, 1));
-        assert!(!process_group_exists_in_session(groups.into_iter(), 99, 2));
+        assert!(pulse_core::task::process_group_exists_in_session(groups.into_iter(), 20, 2));
+        assert!(!pulse_core::task::process_group_exists_in_session(groups.into_iter(), 20, 1));
+        assert!(!pulse_core::task::process_group_exists_in_session(groups.into_iter(), 99, 2));
     }
 }

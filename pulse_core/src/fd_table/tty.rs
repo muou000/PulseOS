@@ -51,14 +51,6 @@ fn initial_foreground_process_group(caller: &Process) -> ForegroundProcessGroup 
         })
 }
 
-fn process_group_exists_in_session(
-    mut groups: impl Iterator<Item = (u64, u64)>,
-    pgid: u64,
-    session_id: u64,
-) -> bool {
-    groups.any(|(group, session)| group == pgid && session == session_id)
-}
-
 /// Returns the foreground group only when this console is the caller's
 /// controlling terminal. PulseOS models one console TTY, whose association is
 /// fixed to the init session until a full controlling-terminal implementation
@@ -91,7 +83,7 @@ pub fn set_tty_foreground_pgid(process: &Process, pgid: i32) -> LinuxResult<()> 
             .into_iter()
             .filter(|candidate| !candidate.is_zombie())
             .map(|candidate| (candidate.pgid(), candidate.sid()));
-        if !process_group_exists_in_session(groups, pgid, session_id) {
+        if !crate::task::process_group_exists_in_session(groups, pgid, session_id) {
             return Err(LinuxError::EPERM);
         }
 
@@ -105,6 +97,34 @@ pub fn set_tty_foreground_pgid(process: &Process, pgid: i32) -> LinuxResult<()> 
         foreground.pgid = pgid;
         Ok(())
     })
+}
+
+/// Handles the foreground-process-group ioctls shared by all console TTY
+/// objects and the devfs compatibility path.
+pub fn tty_pgrp_ioctl(cmd: u32, arg: usize) -> Option<LinuxResult<isize>> {
+    let result = match cmd {
+        TIOCGPGRP => (|| {
+            if arg == 0 {
+                return Err(LinuxError::EFAULT);
+            }
+            let process = crate::task::current_process()?;
+            let pgid = tty_foreground_pgid(process.as_ref())?;
+            process.write_user_bytes(arg, &(pgid as i32).to_ne_bytes())?;
+            Ok(0)
+        })(),
+        TIOCSPGRP => (|| {
+            if arg == 0 {
+                return Err(LinuxError::EFAULT);
+            }
+            let process = crate::task::current_process()?;
+            let mut bytes = [0u8; core::mem::size_of::<i32>()];
+            process.read_user_bytes(arg, &mut bytes)?;
+            set_tty_foreground_pgid(process.as_ref(), i32::from_ne_bytes(bytes))?;
+            Ok(0)
+        })(),
+        _ => return None,
+    };
+    Some(result)
 }
 
 fn deliver_ctrl_c_signal() {
@@ -314,6 +334,9 @@ impl FdObject for StdinObject {
     }
 
     fn ioctl(&self, cmd: u32, arg: usize) -> LinuxResult<isize> {
+        if let Some(result) = tty_pgrp_ioctl(cmd, arg) {
+            return result;
+        }
         match cmd {
             TCGETS => {
                 if arg != 0 {
@@ -337,26 +360,6 @@ impl FdObject for StdinObject {
                 if arg != 0 {
                     write_tty_termios2(arg)?;
                 }
-                Ok(0)
-            }
-            TIOCGPGRP => {
-                if arg == 0 {
-                    return Err(LinuxError::EFAULT);
-                }
-                let process = crate::task::current_process()?;
-                let pgid = tty_foreground_pgid(process.as_ref())?;
-                let value = (pgid as i32).to_ne_bytes();
-                process.write_user_bytes(arg, &value)?;
-                Ok(0)
-            }
-            TIOCSPGRP => {
-                if arg == 0 {
-                    return Err(LinuxError::EFAULT);
-                }
-                let process = crate::task::current_process()?;
-                let mut bytes = [0u8; core::mem::size_of::<i32>()];
-                process.read_user_bytes(arg, &mut bytes)?;
-                set_tty_foreground_pgid(process.as_ref(), i32::from_ne_bytes(bytes))?;
                 Ok(0)
             }
             TIOCGWINSZ => {
@@ -476,6 +479,9 @@ impl FdObject for StdoutObject {
     }
 
     fn ioctl(&self, cmd: u32, arg: usize) -> LinuxResult<isize> {
+        if let Some(result) = tty_pgrp_ioctl(cmd, arg) {
+            return result;
+        }
         match cmd {
             TCGETS => {
                 if arg != 0 {
@@ -499,26 +505,6 @@ impl FdObject for StdoutObject {
                 if arg != 0 {
                     write_tty_termios2(arg)?;
                 }
-                Ok(0)
-            }
-            TIOCGPGRP => {
-                if arg == 0 {
-                    return Err(LinuxError::EFAULT);
-                }
-                let process = crate::task::current_process()?;
-                let pgid = tty_foreground_pgid(process.as_ref())?;
-                let value = (pgid as i32).to_ne_bytes();
-                process.write_user_bytes(arg, &value)?;
-                Ok(0)
-            }
-            TIOCSPGRP => {
-                if arg == 0 {
-                    return Err(LinuxError::EFAULT);
-                }
-                let process = crate::task::current_process()?;
-                let mut bytes = [0u8; core::mem::size_of::<i32>()];
-                process.read_user_bytes(arg, &mut bytes)?;
-                set_tty_foreground_pgid(process.as_ref(), i32::from_ne_bytes(bytes))?;
                 Ok(0)
             }
             TIOCGWINSZ => {
@@ -662,8 +648,8 @@ mod tests {
     fn foreground_group_must_belong_to_the_callers_session() {
         let groups = [(10, 1), (20, 2)];
 
-        assert!(process_group_exists_in_session(groups.into_iter(), 10, 1));
-        assert!(!process_group_exists_in_session(groups.into_iter(), 10, 2));
-        assert!(!process_group_exists_in_session(groups.into_iter(), 30, 1));
+        assert!(crate::task::process_group_exists_in_session(groups.into_iter(), 10, 1));
+        assert!(!crate::task::process_group_exists_in_session(groups.into_iter(), 10, 2));
+        assert!(!crate::task::process_group_exists_in_session(groups.into_iter(), 30, 1));
     }
 }

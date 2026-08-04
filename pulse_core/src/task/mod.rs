@@ -84,7 +84,7 @@ static PROCESS_REGISTRY: Lazy<IrqSafeRwMap<u64, Arc<Process>>> = Lazy::new(IrqSa
 /// The process registry owns object lifetime, while this lock protects the
 /// cross-process job-control invariants that cannot be represented by one
 /// process's atomics alone.
-static JOB_CONTROL_LOCK: Lazy<SpinNoIrq<()>> = Lazy::new(|| SpinNoIrq::new(()));
+static JOB_CONTROL_LOCK: SpinNoIrq<()> = SpinNoIrq::new(());
 
 const THREAD_REGISTRY_SHARDS: usize = 16;
 
@@ -107,6 +107,15 @@ pub fn unregister_process(pid: u64) {
 pub fn with_job_control_lock<T>(f: impl FnOnce() -> T) -> T {
     let _guard = JOB_CONTROL_LOCK.lock();
     f()
+}
+
+/// Returns whether `pgid` names a process group in `session_id`.
+pub fn process_group_exists_in_session(
+    mut groups: impl Iterator<Item = (u64, u64)>,
+    pgid: u64,
+    session_id: u64,
+) -> bool {
+    groups.any(|(group, session)| group == pgid && session == session_id)
 }
 
 pub fn init_process() -> Option<Arc<Process>> {

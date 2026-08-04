@@ -342,37 +342,13 @@ pub fn sys_ioctl(fd: usize, cmd: usize, arg: usize) -> isize {
             }
             0
         }
-        TIOCGPGRP => {
+        TIOCGPGRP | TIOCSPGRP => {
             warn_tty_ioctl_stub_once(fd, cmd32);
-            if arg == 0 {
-                return -LinuxError::EFAULT.code() as isize;
+            match pulse_core::fd_table::tty_pgrp_ioctl(cmd32, arg) {
+                Some(Ok(result)) => result,
+                Some(Err(e)) => -e.code() as isize,
+                None => unreachable!(),
             }
-            let pgid = match pulse_core::fd_table::tty_foreground_pgid(process.as_ref()) {
-                Ok(pgid) => pgid,
-                Err(e) => return -e.code() as isize,
-            };
-            let value = (pgid as i32).to_ne_bytes();
-            if let Err(e) = process.write_user_bytes(arg, &value) {
-                return -e.code() as isize;
-            }
-            0
-        }
-        TIOCSPGRP => {
-            warn_tty_ioctl_stub_once(fd, cmd32);
-            if arg == 0 {
-                return -LinuxError::EFAULT.code() as isize;
-            }
-            let mut bytes = [0u8; core::mem::size_of::<i32>()];
-            if let Err(e) = process.read_user_bytes(arg, &mut bytes) {
-                return -e.code() as isize;
-            }
-            if let Err(e) = pulse_core::fd_table::set_tty_foreground_pgid(
-                process.as_ref(),
-                i32::from_ne_bytes(bytes),
-            ) {
-                return -e.code() as isize;
-            }
-            0
         }
         TIOCGWINSZ => {
             warn_tty_ioctl_stub_once(fd, cmd32);
