@@ -8,6 +8,16 @@ pub use page_table_entry::MappingFlags as PageFaultFlags;
 
 pub use crate::TrapFrame;
 
+/// The architectural class of an address exception.
+///
+/// Keep this distinction through the generic trap dispatch so user-space can
+/// observe the Linux-compatible SIGBUS subcode for the underlying fault.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AddressError {
+    BadAddress,
+    Misaligned,
+}
+
 /// A slice of IRQ handler functions.
 #[def_trap_handler]
 pub static IRQ: [fn(usize) -> bool];
@@ -24,7 +34,7 @@ pub static ILLEGAL_INSTRUCTION: [fn(&mut TrapFrame, usize, bool) -> bool];
 /// A slice of address error handler functions.
 #[cfg(feature = "uspace")]
 #[def_trap_handler]
-pub static ADDRESS_ERROR: [fn(&mut TrapFrame, usize, bool) -> bool];
+pub static ADDRESS_ERROR: [fn(&mut TrapFrame, usize, AddressError, bool) -> bool];
 
 /// A slice of syscall handler functions.
 #[cfg(feature = "uspace")]

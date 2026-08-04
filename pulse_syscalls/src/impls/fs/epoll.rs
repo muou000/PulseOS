@@ -12,7 +12,7 @@ use linux_raw_sys::general::{
 };
 use pulse_core::fd_table::{
     EpollObject, EpollRegistration, EventFdObject, FdEntry, FdFlags, FdObject, PidfdObject,
-    PipeObject, PollRegistration, StdinObject, StdoutObject,
+    PipeObject, PollRegistration, SignalFdObject, StdinObject, StdoutObject,
 };
 
 use crate::impls::{
@@ -99,6 +99,7 @@ pub fn sys_epoll_ctl(
         || target_obj.as_any().is::<StdoutObject>()
         || target_obj.as_any().is::<PidfdObject>()
         || target_obj.as_any().is::<EventFdObject>()
+        || target_obj.as_any().is::<SignalFdObject>()
         || target_obj.as_any().is::<pulse_core::net::Socket>();
 
     if !is_pollable {
@@ -365,7 +366,7 @@ fn sys_epoll_pwait_inner(
     if events == 0 {
         return -LinuxError::EFAULT.code() as isize;
     }
-    if sigmask != 0 && sigsetsize != 0 && sigsetsize != core::mem::size_of::<u64>() {
+    if sigmask != 0 && sigsetsize != core::mem::size_of::<u64>() {
         return -LinuxError::EINVAL.code() as isize;
     }
 
@@ -375,37 +376,16 @@ fn sys_epoll_pwait_inner(
     };
     let process = thread.process();
 
-    let old_mask = thread.signal_blocked_mask();
-    let mut changed = false;
-
-    if sigmask != 0 {
+    let temporary_mask = if sigmask != 0 {
         let new_mask = match process.read_user_usize(sigmask) {
             Ok(v) => v as u64,
             Err(_) => return -LinuxError::EFAULT.code() as isize,
         };
-        thread.set_signal_blocked_mask(new_mask);
-        changed = true;
-    }
-
-    struct SigmaskGuard {
-        thread: Arc<pulse_core::task::Thread>,
-        old_mask: u64,
-        changed: bool,
-    }
-
-    impl Drop for SigmaskGuard {
-        fn drop(&mut self) {
-            if self.changed {
-                self.thread.set_signal_blocked_mask(self.old_mask);
-            }
-        }
-    }
-
-    let _guard = SigmaskGuard {
-        thread: thread.clone(),
-        old_mask,
-        changed,
+        Some(new_mask)
+    } else {
+        None
     };
+    let _mask_guard = pulse_core::task::SignalMaskGuard::install(thread.clone(), temporary_mask);
 
     let epoll_entry = match get_fd_entry(epfd) {
         Ok(entry) => entry,

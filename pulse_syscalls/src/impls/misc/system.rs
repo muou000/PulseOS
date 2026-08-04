@@ -195,6 +195,7 @@ pub fn sys_prlimit64(pid: i32, resource: usize, new_limit: usize, old_limit: usi
         && resource != RLIMIT_MEMLOCK
         && resource != RLIMIT_CORE
         && resource != RLIMIT_DATA
+        && resource != RLIMIT_SIGPENDING
     {
         return -LinuxError::EINVAL.code() as isize;
     }

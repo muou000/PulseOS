@@ -6,7 +6,10 @@ pub fn sys_read(fd: usize, buf: usize, count: usize) -> isize {
         return -LinuxError::EFAULT.code() as isize;
     }
     if count == 0 {
-        if get_fd_entry(fd).is_ok_and(|entry| entry.object.as_any().is::<EventFdObject>()) {
+        if get_fd_entry(fd).is_ok_and(|entry| {
+            entry.object.as_any().is::<EventFdObject>()
+                || entry.object.as_any().is::<SignalFdObject>()
+        }) {
             return -LinuxError::EINVAL.code() as isize;
         }
         return 0;
@@ -88,7 +91,10 @@ pub fn sys_write(fd: usize, buf: usize, count: usize) -> isize {
         return -LinuxError::EFAULT.code() as isize;
     }
     if count == 0 {
-        if get_fd_entry(fd).is_ok_and(|entry| entry.object.as_any().is::<EventFdObject>()) {
+        if get_fd_entry(fd).is_ok_and(|entry| {
+            entry.object.as_any().is::<EventFdObject>()
+                || entry.object.as_any().is::<SignalFdObject>()
+        }) {
             return -LinuxError::EINVAL.code() as isize;
         }
         return 0;

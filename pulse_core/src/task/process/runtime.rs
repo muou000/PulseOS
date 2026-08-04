@@ -1,5 +1,12 @@
 use super::*;
-use crate::task;
+use crate::task::{
+    self, SIG_IGN, queue_signal_to_process, queue_signal_to_process_with_info,
+    signal_info_for_child,
+};
+use linux_raw_sys::general::{
+    CLD_CONTINUED, CLD_DUMPED, CLD_EXITED, CLD_KILLED, CLD_STOPPED, SA_NOCLDSTOP, SA_NOCLDWAIT,
+    SIGCHLD, SIGCONT, WCONTINUED, WEXITED, WNOWAIT, WUNTRACED,
+};
 
 impl Process {
     pub fn pgid(&self) -> u64 {
@@ -8,6 +15,29 @@ impl Process {
 
     pub fn set_pgid(&self, pgid: u64) {
         self.pgid.store(pgid, Ordering::Release);
+    }
+
+    pub fn sid(&self) -> u64 {
+        self.sid.load(Ordering::Acquire)
+    }
+
+    /// Changes the two process identifiers that must move together when a
+    /// process creates a new session. Callers hold the job-control lock.
+    pub fn set_session_and_group(&self, sid: u64, pgid: u64) {
+        self.sid.store(sid, Ordering::Release);
+        self.pgid.store(pgid, Ordering::Release);
+    }
+
+    pub fn has_execed(&self) -> bool {
+        self.has_execed.load(Ordering::Acquire)
+    }
+
+    /// Marks a successful exec transition while excluding a parent's
+    /// concurrent setpgid(2) operation.
+    pub fn mark_execed(&self) {
+        crate::task::with_job_control_lock(|| {
+            self.has_execed.store(true, Ordering::Release);
+        });
     }
 
     pub fn pdeath_sig(&self) -> i32 {
@@ -312,8 +342,12 @@ impl Process {
     }
 
     pub fn begin_group_exit(&self, exit_code: i32) {
-        self.group_exit_code.store(exit_code, Ordering::Release);
-        self.group_exiting.store(true, Ordering::Release);
+        crate::task::with_job_control_lock(|| {
+            self.group_exit_code.store(exit_code, Ordering::Release);
+            self.group_exiting.store(true, Ordering::Release);
+            self.job_control_stop_signal.store(0, Ordering::Release);
+        });
+        self.job_control_event.notify_all(false);
         self.futex_table.wake_all();
 
         let tasks = {
@@ -342,6 +376,129 @@ impl Process {
 
     pub fn group_exit_code(&self) -> i32 {
         self.group_exit_code.load(Ordering::Acquire)
+    }
+
+    /// Returns whether this thread group is stopped by a job-control signal.
+    pub fn group_stopped(&self) -> bool {
+        self.job_control_stop_signal.load(Ordering::Acquire) != 0
+    }
+
+    /// Enters a job-control stop exactly once for a running thread group.
+    /// The separate pending marker is solely for the parent's next WSTOPPED.
+    pub fn enter_group_stop(&self, signo: i32) -> bool {
+        let entered = crate::task::with_job_control_lock(|| {
+            if signo <= 0 || self.group_exiting() {
+                return false;
+            }
+            if self
+                .job_control_stop_signal
+                .compare_exchange(0, signo, Ordering::AcqRel, Ordering::Acquire)
+                .is_err()
+            {
+                return false;
+            }
+
+            // Keep the running/stopped state and the parent's one-shot
+            // wait-status markers coherent with SIGCONT.
+            self.stopped_signal_pending.store(signo, Ordering::Release);
+            self.continued_signal_pending.store(false, Ordering::Release);
+            true
+        });
+        if !entered {
+            return false;
+        }
+
+        self.wake_group_for_stop(signo);
+        self.notify_parent_job_control(CLD_STOPPED as i32, signo);
+        true
+    }
+
+    /// Makes every live thread leave interruptible work so it can observe the
+    /// shared group-stop state at the next user-return boundary.  This matters
+    /// for thread-directed stop signals: only one thread dequeues the signal,
+    /// but all members of the thread group must stop.
+    fn wake_group_for_stop(&self, signo: i32) {
+        let tasks = {
+            let registry = self.threads.lock();
+            registry
+                .values()
+                .filter_map(|state| match state {
+                    ThreadState::Active(task) => Some(task.clone()),
+                    ThreadState::Pending => None,
+                })
+                .collect::<Vec<_>>()
+        };
+
+        let wake_context = WakeContext::new(|| (WakeSource::Signal, signo as u64));
+        for task in tasks {
+            if let Some(handle) = thread_handle_from_task(&task) {
+                handle
+                    .signal_wait_queue()
+                    .notify_all_with_context(true, wake_context);
+            }
+            axtask::interrupt_task_with_context(task, true, wake_context);
+        }
+    }
+
+    /// SIGCONT resumes a stopped group irrespective of its disposition or
+    /// current signal mask.  The SIGCONT itself may still remain pending for a
+    /// user handler, but execution must resume immediately.
+    pub fn continue_group(&self) -> bool {
+        let continued = crate::task::with_job_control_lock(|| {
+            let stopped = self.job_control_stop_signal.swap(0, Ordering::AcqRel);
+            if stopped == 0 {
+                return false;
+            }
+
+            self.continued_signal_pending.store(true, Ordering::Release);
+            // SIGCONT supersedes an unconsumed WSTOPPED report for this group.
+            self.stopped_signal_pending.store(0, Ordering::Release);
+            true
+        });
+        if !continued {
+            return false;
+        }
+
+        self.job_control_event.notify_all_with_context(
+            true,
+            WakeContext::new(|| (WakeSource::Signal, SIGCONT as u64)),
+        );
+        self.notify_parent_job_control(CLD_CONTINUED as i32, SIGCONT as i32);
+        true
+    }
+
+    /// Sleeps the current group member while the process is job-control
+    /// stopped.  A pending deliverable signal is also a wake condition so a
+    /// fatal signal can be consumed before the task is parked again.
+    pub fn wait_while_group_stopped(&self, thread: &Thread) {
+        if !self.group_stopped() {
+            return;
+        }
+        let wait_context = WaitContext::new(|| (WaitReason::Signal, self.pid(), 0));
+        self.job_control_event.wait_until_with_context(wait_context, || {
+            !self.group_stopped()
+                || self.group_exiting()
+                || thread.exec_exit_requested()
+                || thread.signal().has_deliverable_pending_signal()
+        });
+    }
+
+    fn notify_parent_job_control(&self, code: i32, status: i32) {
+        if let Some(parent) = self.parent_process() {
+            let action = parent.signal_shared().action(SIGCHLD as usize);
+            if action.handler != SIG_IGN && (action.flags & SA_NOCLDSTOP as usize) == 0 {
+                let info = signal_info_for_child(self.pid(), self.ruid(), code, status);
+                let _ = queue_signal_to_process_with_info(
+                    parent.as_ref(),
+                    SIGCHLD as usize,
+                    Some(info),
+                );
+            }
+            parent.child_exit_event.notify_all_with_context(
+                false,
+                WakeContext::new(|| (WakeSource::Signal, status as u64)),
+            );
+        }
     }
 
     pub fn is_zombie(&self) -> bool {
@@ -374,6 +531,47 @@ impl Process {
             let coredump = if (sig_val & 0x100) != 0 { 0x80i32 } else { 0 };
             signo | coredump
         }
+    }
+
+    pub fn exit_siginfo_status(exit_code: i32, exit_signal: i32) -> (i32, i32) {
+        if exit_signal == 0 {
+            (CLD_EXITED as i32, exit_code & 0xff)
+        } else if (exit_signal & 0x100) != 0 {
+            (CLD_DUMPED as i32, exit_signal & 0x7f)
+        } else {
+            (CLD_KILLED as i32, exit_signal & 0x7f)
+        }
+    }
+
+    fn child_exit_siginfo_status(&self) -> (i32, i32) {
+        Self::exit_siginfo_status(
+            self.exit_code(),
+            self.exit_signal.load(Ordering::Acquire),
+        )
+    }
+
+    /// Publishes the terminal child state to its parent and returns whether
+    /// the child must be reaped immediately by the exiting task.
+    fn notify_parent_exit(&self, parent: &Process) -> bool {
+        let sig = self.parent_exit_signal();
+        if sig <= 0 {
+            return false;
+        }
+        if sig != SIGCHLD as i32 {
+            let _ = queue_signal_to_process(parent, sig as usize);
+            return false;
+        }
+
+        let action = parent.signal_shared().action(SIGCHLD as usize);
+        let auto_reap = action.handler == SIG_IGN || (action.flags & SA_NOCLDWAIT as usize) != 0;
+        // Linux still generates SIGCHLD for SA_NOCLDWAIT, but not when the
+        // parent explicitly ignores SIGCHLD.
+        if action.handler != SIG_IGN {
+            let (code, status) = self.child_exit_siginfo_status();
+            let info = signal_info_for_child(self.pid(), self.ruid(), code, status);
+            let _ = queue_signal_to_process_with_info(parent, SIGCHLD as usize, Some(info));
+        }
+        auto_reap
     }
 
     pub fn finish_thread_exit(&self, tid: u64, exit_code: i32) {
@@ -499,16 +697,25 @@ impl Process {
             task::unregister_process(self.pid());
         } else {
             if let Some(parent) = parent {
-                let sig = self.parent_exit_signal();
-                if sig > 0 {
-                    let _ = queue_signal_to_process(parent.as_ref(), sig as usize);
-                }
+                let auto_reap = self.notify_parent_exit(parent.as_ref());
                 // The exiting task is still on its own kernel stack here.
                 // Wake waiters without forcing an immediate reschedule from inside
                 // the teardown path.
                 parent
                     .child_exit_event
                     .notify_all_with_context(false, WakeContext::task());
+
+                if auto_reap && parent.reap_zombie_child(self.pid() as isize).is_some() {
+                    let now_ns = axhal::time::monotonic_time_nanos() as u64;
+                    let (child_utime_ns, child_stime_ns) = self.snapshot_cpu_time_ns(now_ns);
+                    parent.add_child_time_ns(child_utime_ns, child_stime_ns);
+                    self.wait_task_refs_exited();
+                    if let Err(e) = self.shrink_reaped_resources() {
+                        axlog::warn!("failed to shrink automatically reaped child resources: {:?}", e);
+                    }
+                    self.release_task_refs();
+                    task::unregister_process(self.pid());
+                }
             }
         }
     }
@@ -549,8 +756,23 @@ impl Process {
             if is_match(child) {
                 has_matching_child = true;
 
+                // Linux gives a requested zombie exit priority over stale
+                // stopped/continued reports for the same child.  If WEXITED
+                // is absent, fall through and allow those one-shot reports.
+                if (options & WEXITED as i32) != 0 && child.is_zombie() {
+                    let wnowait = (options & WNOWAIT as i32) != 0;
+                    found_idx = Some((idx, !wnowait));
+                    let exit_code = child.exit_code.load(Ordering::Acquire);
+                    let exit_signal = child.exit_signal.load(Ordering::Acquire);
+                    found_status = Some(WaitidStatusType::Exited {
+                        exit_code,
+                        exit_signal,
+                    });
+                    break;
+                }
+
                 // 1. Check STOPPED
-                if (options & 2) != 0 {
+                if (options & WUNTRACED as i32) != 0 {
                     // WSTOPPED
                     let stop_sig = child.stopped_signal_pending.load(Ordering::Acquire);
                     if stop_sig != 0 {
@@ -560,26 +782,11 @@ impl Process {
                     }
                 }
                 // 2. Check CONTINUED
-                if (options & 8) != 0 {
+                if (options & WCONTINUED as i32) != 0 {
                     // WCONTINUED
                     if child.continued_signal_pending.load(Ordering::Acquire) {
                         found_idx = Some((idx, false));
                         found_status = Some(WaitidStatusType::Continued);
-                        break;
-                    }
-                }
-                // 3. Check EXITED (Zombie)
-                if (options & 4) != 0 {
-                    // WEXITED
-                    if child.is_zombie() {
-                        let wnowait = (options & 0x01000000) != 0;
-                        found_idx = Some((idx, !wnowait));
-                        let exit_code = child.exit_code.load(Ordering::Acquire);
-                        let exit_signal = child.exit_signal.load(Ordering::Acquire);
-                        found_status = Some(WaitidStatusType::Exited {
-                            exit_code,
-                            exit_signal,
-                        });
                         break;
                     }
                 }
@@ -597,7 +804,7 @@ impl Process {
                 children[idx].clone()
             };
 
-            let wnowait = (options & 0x01000000) != 0;
+            let wnowait = (options & WNOWAIT as i32) != 0;
             if !wnowait {
                 match found_status.as_ref().unwrap() {
                     WaitidStatusType::Stopped { .. } => {
@@ -645,16 +852,17 @@ impl Process {
             let children = self.children.lock();
             for child in children.iter() {
                 if is_match(child) {
-                    if (options & 2) != 0
+                    if (options & WUNTRACED as i32) != 0
                         && child.stopped_signal_pending.load(Ordering::Acquire) != 0
                     {
                         return true;
                     }
-                    if (options & 8) != 0 && child.continued_signal_pending.load(Ordering::Acquire)
+                    if (options & WCONTINUED as i32) != 0
+                        && child.continued_signal_pending.load(Ordering::Acquire)
                     {
                         return true;
                     }
-                    if (options & 4) != 0 && child.is_zombie() {
+                    if (options & WEXITED as i32) != 0 && child.is_zombie() {
                         return true;
                     }
                 }
@@ -759,5 +967,23 @@ impl Process {
             return Err(task::ERESTARTSYS);
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn exit_siginfo_status_matches_waitid_encoding() {
+        assert_eq!(Process::exit_siginfo_status(0x1ff, 0), (CLD_EXITED as i32, 0xff));
+        assert_eq!(
+            Process::exit_siginfo_status(0, SIGCONT as i32),
+            (CLD_KILLED as i32, SIGCONT as i32)
+        );
+        assert_eq!(
+            Process::exit_siginfo_status(0, 0x100 | SIGCONT as i32),
+            (CLD_DUMPED as i32, SIGCONT as i32)
+        );
     }
 }
