@@ -4,7 +4,14 @@ use axerrno::AxError;
 use axhal::{
     context::TrapFrame,
     paging::MappingFlags,
-    trap::{ADDRESS_ERROR, ILLEGAL_INSTRUCTION, PAGE_FAULT, USER_RETURN, register_trap_handler},
+    trap::{
+        ADDRESS_ERROR, AddressError, ILLEGAL_INSTRUCTION, PAGE_FAULT, USER_RETURN,
+        register_trap_handler,
+    },
+};
+use linux_raw_sys::general::{
+    BUS_ADRALN, BUS_ADRERR, ILL_ILLOPC, SEGV_ACCERR, SEGV_MAPERR, SIGBUS, SIGILL, SIGKILL,
+    SIGSEGV,
 };
 use memory_addr::VirtAddr;
 
@@ -52,7 +59,11 @@ fn handle_illegal_instruction(tf: &mut TrapFrame, _vaddr: usize, is_user: bool) 
                 thread.process().exec_path(),
                 pc
             );
-            crate::task::force_signal_to_thread(thread.as_ref(), 4); // SIGILL
+            crate::task::force_signal_to_thread_with_info(
+                thread.as_ref(),
+                SIGILL as usize,
+                crate::task::signal_info_for_fault(SIGILL as usize, ILL_ILLOPC as i32, pc),
+            );
             return true;
         }
     }
@@ -60,7 +71,12 @@ fn handle_illegal_instruction(tf: &mut TrapFrame, _vaddr: usize, is_user: bool) 
 }
 
 #[register_trap_handler(ADDRESS_ERROR)]
-fn handle_address_error(tf: &mut TrapFrame, vaddr: usize, is_user: bool) -> bool {
+fn handle_address_error(
+    tf: &mut TrapFrame,
+    vaddr: usize,
+    error: AddressError,
+    is_user: bool,
+) -> bool {
     if is_user {
         if let Ok(thread) = crate::task::current_thread() {
             #[cfg(target_arch = "riscv64")]
@@ -69,14 +85,32 @@ fn handle_address_error(tf: &mut TrapFrame, vaddr: usize, is_user: bool) -> bool
             let pc = tf.era;
 
             axlog::warn!(
-                "Address error! pid={} exe={:?} ip={:#x} vaddr={:#x}",
+                "Address error! pid={} exe={:?} ip={:#x} vaddr={:#x} kind={error:?}",
                 thread.process().pid(),
                 thread.process().exec_path(),
                 pc,
                 vaddr
             );
-            // Usually SIGSEGV, sometimes SIGBUS. We use SIGSEGV as default.
-            crate::task::force_signal_to_thread(thread.as_ref(), 11); // SIGSEGV
+            let (signo, code, fault_addr) = match error {
+                AddressError::BadAddress => (SIGBUS, BUS_ADRERR, vaddr),
+                AddressError::Misaligned => {
+                    #[cfg(target_arch = "riscv64")]
+                    {
+                        // Linux reports the instruction address for a RISC-V
+                        // misalignment trap, rather than stval's memory address.
+                        (SIGBUS, BUS_ADRALN, pc)
+                    }
+                    #[cfg(target_arch = "loongarch64")]
+                    {
+                        (SIGBUS, BUS_ADRALN, vaddr)
+                    }
+                }
+            };
+            crate::task::force_signal_to_thread_with_info(
+                thread.as_ref(),
+                signo as usize,
+                crate::task::signal_info_for_fault(signo as usize, code as i32, fault_addr),
+            );
             return true;
         }
     }
@@ -117,9 +151,13 @@ fn deliver_pending_signal(tf: &mut TrapFrame) {
                     process.begin_group_exit(delivery.sig as i32);
                     thread.exit_current(process.group_exit_code());
                 }
-                SignalAction::Default(DefaultSignalAction::Stop)
-                | SignalAction::Default(DefaultSignalAction::Continue)
-                | SignalAction::Default(DefaultSignalAction::Ignore)
+                SignalAction::Default(DefaultSignalAction::Stop) => {
+                    process.enter_group_stop(delivery.sig as i32);
+                }
+                SignalAction::Default(DefaultSignalAction::Continue) => {
+                    process.continue_group();
+                }
+                SignalAction::Default(DefaultSignalAction::Ignore)
                 | SignalAction::Ignore
                 | SignalAction::Handler(_) => {}
             }
@@ -129,7 +167,24 @@ fn deliver_pending_signal(tf: &mut TrapFrame) {
 
 #[register_trap_handler(USER_RETURN)]
 fn handle_user_return(tf: &mut TrapFrame) {
-    deliver_pending_signal(tf);
+    loop {
+        deliver_pending_signal(tf);
+        let Ok(thread) = crate::task::current_thread() else {
+            break;
+        };
+        let process = thread.process();
+        if process.group_exiting() {
+            thread.exit_current(process.group_exit_code());
+        }
+        if !process.group_stopped() {
+            break;
+        }
+
+        // SIGCONT wakes this wait even when it is blocked or ignored.  Other
+        // deliverable signals wake it so fatal actions can be processed before
+        // the group is parked again.
+        process.wait_while_group_stopped(thread.as_ref());
+    }
     axtask::check_preempt_pending();
 }
 
@@ -214,7 +269,7 @@ fn handle_page_fault(
     axlog::warn!("  vaddr={:#x}, flags={:?}", vaddr, access_flags);
 
     let out_of_memory = fault_error == Some(AxError::NoMemory);
-    let mut signo = if out_of_memory { 9 } else { 11 }; // SIGKILL or SIGSEGV
+    let mut signo = if out_of_memory { SIGKILL } else { SIGSEGV };
     let mut fault_area = None;
     let mut previous_area = None;
     let mut next_area = None;
@@ -236,7 +291,7 @@ fn handle_page_fault(
                 let current_file_bytes = mapping.file_bytes();
                 let relative = vaddr.as_usize().saturating_sub(start.as_usize());
                 if relative >= current_file_bytes {
-                    signo = 7; // SIGBUS for out-of-bounds file mapping
+                    signo = SIGBUS;
                 }
             }
         }
@@ -263,7 +318,29 @@ fn handle_page_fault(
         blocked_mask,
         signal.is_in_handler()
     );
-    let newly_queued = crate::task::force_signal_to_thread(thread.as_ref(), signo as usize);
+    let fault_info = match signo {
+        SIGSEGV => Some(crate::task::signal_info_for_fault(
+            signo as usize,
+            if fault_area.is_some() {
+                SEGV_ACCERR as i32
+            } else {
+                SEGV_MAPERR as i32
+            },
+            vaddr.as_usize(),
+        )),
+        SIGBUS => Some(crate::task::signal_info_for_fault(
+            signo as usize,
+            BUS_ADRERR as i32,
+            vaddr.as_usize(),
+        )),
+        _ => None,
+    };
+    let newly_queued = match fault_info {
+        Some(info) => {
+            crate::task::force_signal_to_thread_with_info(thread.as_ref(), signo as usize, info)
+        }
+        None => crate::task::force_signal_to_thread(thread.as_ref(), signo as usize),
+    };
     axlog::warn!(
         "  synchronous signal newly_queued={}, pending_mask={:#x}",
         newly_queued,

@@ -307,11 +307,13 @@ pub fn location_to_stat(location: &Location) -> LinuxResult<stat> {
 mod epoll;
 mod objects;
 mod pipe;
+mod signalfd;
 mod table;
 mod tty;
 
 pub use epoll::*;
 pub use objects::*;
 pub use pipe::*;
+pub use signalfd::*;
 pub use table::*;
 pub use tty::*;

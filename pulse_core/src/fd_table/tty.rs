@@ -1,4 +1,5 @@
 use super::*;
+use crate::task::Process;
 use linux_raw_sys::ioctl::{
     TCGETS, TCGETS2, TCSETS, TCSETS2, TCSETSF, TCSETSF2, TCSETSW, TCSETSW2, TIOCGPGRP,
     TIOCGWINSZ, TIOCSPGRP,
@@ -25,14 +26,105 @@ fn console_write_bytes(buf: &[u8]) -> axio::Result<usize> {
 static STDIN_BUFFER: Lazy<SpinNoIrq<VecDeque<u8>>> = Lazy::new(|| SpinNoIrq::new(VecDeque::new()));
 pub static STDIN_WAIT_QUEUE: axtask::WaitQueue = axtask::WaitQueue::new();
 
-static FOREGROUND_PGID: AtomicU64 = AtomicU64::new(0);
-
-pub fn get_foreground_pgid() -> u64 {
-    FOREGROUND_PGID.load(Ordering::Acquire)
+#[derive(Clone, Copy, Default)]
+struct ForegroundProcessGroup {
+    session_id: u64,
+    pgid: u64,
 }
 
-pub fn set_foreground_pgid(pgid: u64) {
-    FOREGROUND_PGID.store(pgid, Ordering::Release);
+static FOREGROUND_PROCESS_GROUP: Lazy<SpinNoIrq<ForegroundProcessGroup>> =
+    Lazy::new(|| SpinNoIrq::new(ForegroundProcessGroup::default()));
+
+pub fn get_foreground_pgid() -> u64 {
+    FOREGROUND_PROCESS_GROUP.lock().pgid
+}
+
+fn initial_foreground_process_group(caller: &Process) -> ForegroundProcessGroup {
+    crate::task::init_process()
+        .map(|init| ForegroundProcessGroup {
+            session_id: init.sid(),
+            pgid: init.pgid(),
+        })
+        .unwrap_or(ForegroundProcessGroup {
+            session_id: caller.sid(),
+            pgid: caller.pgid(),
+        })
+}
+
+/// Returns the foreground group only when this console is the caller's
+/// controlling terminal. PulseOS models one console TTY, whose association is
+/// fixed to the init session until a full controlling-terminal implementation
+/// exists.
+pub fn tty_foreground_pgid(process: &Process) -> LinuxResult<u64> {
+    crate::task::with_job_control_lock(|| {
+        let mut foreground = FOREGROUND_PROCESS_GROUP.lock();
+        if foreground.session_id == 0 {
+            *foreground = initial_foreground_process_group(process);
+        }
+        if foreground.session_id != process.sid() {
+            return Err(LinuxError::ENOTTY);
+        }
+        Ok(foreground.pgid)
+    })
+}
+
+/// Implements the session and nonempty-group checks shared by `TIOCSPGRP` and
+/// `tcsetpgrp(3)`. Background-group `SIGTTOU` handling remains a separate
+/// terminal line-discipline concern.
+pub fn set_tty_foreground_pgid(process: &Process, pgid: i32) -> LinuxResult<()> {
+    if pgid <= 0 {
+        return Err(LinuxError::EINVAL);
+    }
+    let pgid = pgid as u64;
+
+    crate::task::with_job_control_lock(|| {
+        let session_id = process.sid();
+        let groups = crate::task::processes_snapshot()
+            .into_iter()
+            .filter(|candidate| !candidate.is_zombie())
+            .map(|candidate| (candidate.pgid(), candidate.sid()));
+        if !crate::task::process_group_exists_in_session(groups, pgid, session_id) {
+            return Err(LinuxError::EPERM);
+        }
+
+        let mut foreground = FOREGROUND_PROCESS_GROUP.lock();
+        if foreground.session_id == 0 {
+            *foreground = initial_foreground_process_group(process);
+        }
+        if foreground.session_id != session_id {
+            return Err(LinuxError::ENOTTY);
+        }
+        foreground.pgid = pgid;
+        Ok(())
+    })
+}
+
+/// Handles the foreground-process-group ioctls shared by all console TTY
+/// objects and the devfs compatibility path.
+pub fn tty_pgrp_ioctl(cmd: u32, arg: usize) -> Option<LinuxResult<isize>> {
+    let result = match cmd {
+        TIOCGPGRP => (|| {
+            if arg == 0 {
+                return Err(LinuxError::EFAULT);
+            }
+            let process = crate::task::current_process()?;
+            let pgid = tty_foreground_pgid(process.as_ref())?;
+            process.write_user_bytes(arg, &(pgid as i32).to_ne_bytes())?;
+            Ok(0)
+        })(),
+        TIOCSPGRP => (|| {
+            if arg == 0 {
+                return Err(LinuxError::EFAULT);
+            }
+            let process = crate::task::current_process()?;
+            let mut bytes = [0u8; core::mem::size_of::<i32>()];
+            process.read_user_bytes(arg, &mut bytes)?;
+            set_tty_foreground_pgid(process.as_ref(), i32::from_ne_bytes(bytes))?;
+            Ok(0)
+        })(),
+        _ => return None,
+    };
+    Some(result)
 }
 
 fn deliver_ctrl_c_signal() {
@@ -242,6 +334,9 @@ impl FdObject for StdinObject {
     }
 
     fn ioctl(&self, cmd: u32, arg: usize) -> LinuxResult<isize> {
+        if let Some(result) = tty_pgrp_ioctl(cmd, arg) {
+            return result;
+        }
         match cmd {
             TCGETS => {
                 if arg != 0 {
@@ -264,24 +359,6 @@ impl FdObject for StdinObject {
             TCSETS2 | TCSETSW2 | TCSETSF2 => {
                 if arg != 0 {
                     write_tty_termios2(arg)?;
-                }
-                Ok(0)
-            }
-            TIOCGPGRP => {
-                if arg != 0 {
-                    let mut pgid = get_foreground_pgid();
-                    if pgid == 0 {
-                        pgid = crate::task::current_process()?.pgid();
-                    }
-                    let value = (pgid as i32).to_ne_bytes();
-                    crate::task::current_process()?.write_user_bytes(arg, &value)?;
-                }
-                Ok(0)
-            }
-            TIOCSPGRP => {
-                if arg != 0 {
-                    let pgid = crate::task::current_process()?.read_user_u32(arg)? as u64;
-                    set_foreground_pgid(pgid);
                 }
                 Ok(0)
             }
@@ -402,6 +479,9 @@ impl FdObject for StdoutObject {
     }
 
     fn ioctl(&self, cmd: u32, arg: usize) -> LinuxResult<isize> {
+        if let Some(result) = tty_pgrp_ioctl(cmd, arg) {
+            return result;
+        }
         match cmd {
             TCGETS => {
                 if arg != 0 {
@@ -424,24 +504,6 @@ impl FdObject for StdoutObject {
             TCSETS2 | TCSETSW2 | TCSETSF2 => {
                 if arg != 0 {
                     write_tty_termios2(arg)?;
-                }
-                Ok(0)
-            }
-            TIOCGPGRP => {
-                if arg != 0 {
-                    let mut pgid = get_foreground_pgid();
-                    if pgid == 0 {
-                        pgid = crate::task::current_process()?.pgid();
-                    }
-                    let value = (pgid as i32).to_ne_bytes();
-                    crate::task::current_process()?.write_user_bytes(arg, &value)?;
-                }
-                Ok(0)
-            }
-            TIOCSPGRP => {
-                if arg != 0 {
-                    let pgid = crate::task::current_process()?.read_user_u32(arg)? as u64;
-                    set_foreground_pgid(pgid);
                 }
                 Ok(0)
             }
@@ -576,4 +638,18 @@ pub fn init_tty_callbacks() {
         }
     }
     axfs::register_tty_callbacks(Arc::new(TtyCallbacksImpl));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn foreground_group_must_belong_to_the_callers_session() {
+        let groups = [(10, 1), (20, 2)];
+
+        assert!(crate::task::process_group_exists_in_session(groups.into_iter(), 10, 1));
+        assert!(!crate::task::process_group_exists_in_session(groups.into_iter(), 10, 2));
+        assert!(!crate::task::process_group_exists_in_session(groups.into_iter(), 30, 1));
+    }
 }

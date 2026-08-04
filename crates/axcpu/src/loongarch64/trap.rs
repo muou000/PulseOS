@@ -4,7 +4,7 @@ use loongArch64::register::{
 };
 
 use super::context::TrapFrame;
-use crate::trap::PageFaultFlags;
+use crate::trap::{AddressError, PageFaultFlags};
 
 core::arch::global_asm!(
     include_asm_macros!(),
@@ -60,15 +60,34 @@ fn loongarch64_trap_handler(tf: &mut TrapFrame, from_user: bool) {
             }
         }
         Trap::Exception(Exception::FetchInstructionAddressError)
-        | Trap::Exception(Exception::MemoryAccessAddressError)
-        | Trap::Exception(Exception::AddressNotAligned) => {
+        | Trap::Exception(Exception::MemoryAccessAddressError) => {
             let handled = if from_user {
-                handle_trap!(ADDRESS_ERROR, tf, badv::read().raw(), from_user)
+                handle_trap!(ADDRESS_ERROR, tf, badv::read().raw(), AddressError::BadAddress, from_user)
             } else {
                 false
             };
             if !handled {
-                panic!("Address error in kernel at {:#x}:\n{:#x?}", tf.era, tf);
+                panic!(
+                    "Bad address error in kernel at era={:#x}, badv={:#x}:\n{:#x?}",
+                    tf.era,
+                    badv::read().raw(),
+                    tf
+                );
+            }
+        }
+        Trap::Exception(Exception::AddressNotAligned) => {
+            let handled = if from_user {
+                handle_trap!(ADDRESS_ERROR, tf, badv::read().raw(), AddressError::Misaligned, from_user)
+            } else {
+                false
+            };
+            if !handled {
+                panic!(
+                    "Misaligned address error in kernel at era={:#x}, badv={:#x}:\n{:#x?}",
+                    tf.era,
+                    badv::read().raw(),
+                    tf
+                );
             }
         }
         Trap::Exception(Exception::StorePageFault)

@@ -1,22 +1,131 @@
 use super::*;
 
+const KERNEL_SIGSET_SIZE: usize = core::mem::size_of::<u64>();
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct Pselect6Sigmask {
+    sigmask: usize,
+    sigsetsize: usize,
+}
+
+fn read_temporary_signal_mask(
+    process: &pulse_core::task::Process,
+    sigmask: usize,
+    sigsetsize: usize,
+) -> Result<Option<u64>, LinuxError> {
+    if sigmask == 0 {
+        return Ok(None);
+    }
+    if sigsetsize != KERNEL_SIGSET_SIZE {
+        return Err(LinuxError::EINVAL);
+    }
+    process
+        .read_user_usize(sigmask)
+        .map(|mask| Some(mask as u64))
+        .map_err(|_| LinuxError::EFAULT)
+}
+
+fn read_pselect6_signal_mask(
+    process: &pulse_core::task::Process,
+    sigmask_arg: usize,
+) -> Result<Option<u64>, LinuxError> {
+    if sigmask_arg == 0 {
+        return Ok(None);
+    }
+    let arg = uaccess::read_user_plain::<Pselect6Sigmask>(process, sigmask_arg)
+        .map_err(|_| LinuxError::EFAULT)?;
+    read_temporary_signal_mask(process, arg.sigmask, arg.sigsetsize)
+}
+
+/// Waits for an unblocked signal or the supplied timeout.  A zero timeout is
+/// still interrupted by an already-pending signal, as Linux's poll/select
+/// paths test for signals after their nonblocking readiness scan.
+fn wait_for_signal_or_timeout(
+    thread: &pulse_core::task::Thread,
+    timeout: Option<Duration>,
+) -> bool {
+    if thread.has_pending_signal() {
+        return true;
+    }
+
+    match timeout {
+        Some(timeout) if timeout > Duration::ZERO => {
+            thread
+                .signal_wait_queue()
+                .wait_timeout_until(timeout, || thread.has_pending_signal());
+            thread.has_pending_signal()
+        }
+        Some(_) => false,
+        None => {
+            thread
+                .signal_wait_queue()
+                .wait_until(|| thread.has_pending_signal());
+            true
+        }
+    }
+}
+
+fn poll_fds_once(pollfds: &mut [pollfd]) -> usize {
+    let mut ready = 0usize;
+    for pfd in pollfds {
+        pfd.revents = 0;
+        if pfd.fd < 0 {
+            continue;
+        }
+
+        let fd = pfd.fd as usize;
+        match get_fd_entry(fd) {
+            Ok(entry) => match entry.object.poll() {
+                Ok(state) => {
+                    pfd.revents = requested_poll_revents(pfd.events, state);
+                    if pfd.revents != 0 {
+                        ready += 1;
+                    }
+                }
+                Err(_) => {
+                    pfd.revents = POLLERR as i16;
+                    ready += 1;
+                }
+            },
+            Err(_) => {
+                pfd.revents = POLLNVAL as i16;
+                ready += 1;
+            }
+        }
+    }
+    ready
+}
+
 pub fn sys_ppoll(
     fds: usize,
     nfds: usize,
     timeout: usize,
-    _sigmask: usize,
-    _sigsetsize: usize,
+    sigmask: usize,
+    sigsetsize: usize,
 ) -> isize {
     let timeout_dur = match read_ppoll_timeout(timeout) {
         Ok(timeout_dur) => timeout_dur,
         Err(e) => return -e.code() as isize,
     };
 
+    let thread = match pulse_core::task::current_thread() {
+        Ok(thread) => thread,
+        Err(e) => return -e.code() as isize,
+    };
+    let temporary_mask = match read_temporary_signal_mask(
+        thread.process().as_ref(),
+        sigmask,
+        sigsetsize,
+    ) {
+        Ok(mask) => mask,
+        Err(e) => return -e.code() as isize,
+    };
+    let _mask_guard = pulse_core::task::SignalMaskGuard::install(thread.clone(), temporary_mask);
+
     if nfds == 0 {
-        if let Some(timeout_dur) = timeout_dur {
-            if timeout_dur > Duration::ZERO {
-                axtask::sleep(timeout_dur);
-            }
+        if wait_for_signal_or_timeout(thread.as_ref(), timeout_dur) {
+            return -LinuxError::EINTR.code() as isize;
         }
         return 0;
     }
@@ -52,65 +161,12 @@ pub fn sys_ppoll(
             .unwrap_or_else(|_| -LinuxError::EFAULT.code() as isize)
     };
 
-    if nfds == 1 {
-        pollfds[0].revents = 0;
-        if pollfds[0].fd < 0 {
-            return write_back(&pollfds, 0);
-        }
-
-        let fd = pollfds[0].fd as usize;
-        let entry = match get_fd_entry(fd) {
-            Ok(entry) => entry,
-            Err(_) => {
-                pollfds[0].revents = POLLNVAL as i16;
-                return write_back(&pollfds, 1);
-            }
-        };
-
-        match entry.object.poll() {
-            Ok(state) => {
-                pollfds[0].revents = requested_poll_revents(pollfds[0].events, state);
-                if pollfds[0].revents != 0 {
-                    return write_back(&pollfds, 1);
-                }
-            }
-            Err(_) => {
-                pollfds[0].revents = POLLERR as i16;
-                return write_back(&pollfds, 1);
-            }
-        }
-
-        if pollfds[0].events != 0 {
-            loop {
-                match entry.object.wait_ready(pollfds[0].events, deadline) {
-                    Ok(false) => return write_back(&pollfds, 0),
-                    Ok(true) => {
-                        pollfds[0].revents = 0;
-                        match entry.object.poll() {
-                            Ok(state) => {
-                                pollfds[0].revents =
-                                    requested_poll_revents(pollfds[0].events, state);
-                                if pollfds[0].revents != 0 {
-                                    return write_back(&pollfds, 1);
-                                }
-                            }
-                            Err(_) => {
-                                pollfds[0].revents = POLLERR as i16;
-                                return write_back(&pollfds, 1);
-                            }
-                        }
-                        if deadline.is_some_and(|ddl| axhal::time::monotonic_time() >= ddl) {
-                            return write_back(&pollfds, 0);
-                        }
-                    }
-                    Err(LinuxError::EOPNOTSUPP) => break,
-                    Err(_) => {
-                        pollfds[0].revents = POLLERR as i16;
-                        return write_back(&pollfds, 1);
-                    }
-                }
-            }
-        }
+    // Linux poll reports an invalid descriptor in-band through POLLNVAL.  Do
+    // this scan before gathering wait queues so the blocking path never turns
+    // that per-entry result into an EBADF syscall failure.
+    let ready = poll_fds_once(&mut pollfds);
+    if ready > 0 {
+        return write_back(&pollfds, ready as isize);
     }
 
     // Try to retrieve wait queues for all monitored file descriptors.
@@ -136,54 +192,30 @@ pub fn sys_ppoll(
                     }
                 }
             }
-            Err(_) => {
-                return -LinuxError::EBADF.code() as isize;
-            }
+            Err(_) => all_wqs_supported = false,
         }
     }
 
     if all_wqs_supported && !objects.is_empty() {
-        let mut wqs = alloc::vec::Vec::with_capacity(objects.len().min(128));
+        let mut wqs = alloc::vec::Vec::with_capacity(objects.len().saturating_add(1).min(128));
         for (obj, events) in &objects {
             let _ = obj.get_wait_queues(*events, &mut wqs);
         }
-        // Fast-path poll
-        let mut ready = 0usize;
-        for pfd in pollfds.iter_mut() {
-            pfd.revents = 0;
-            if pfd.fd < 0 {
-                continue;
-            }
-            let fd = pfd.fd as usize;
-            if let Ok(entry) = get_fd_entry(fd) {
-                if let Ok(state) = entry.object.poll() {
-                    pfd.revents = requested_poll_revents(pfd.events, state);
-                    if pfd.revents != 0 {
-                        ready += 1;
-                    }
-                }
-            }
-        }
-        if ready > 0 {
-            return write_back(&pollfds, ready as isize);
-        }
+        wqs.push(thread.signal_wait_queue());
 
         // Wait until one or more monitored objects become ready, a signal is pending,
         // or the timeout is reached.
         let check_ready = || {
-            if let Ok(thread) = pulse_core::task::current_thread() {
-                if thread.has_pending_signal() {
-                    return true;
-                }
-            }
             for (obj, events) in &objects {
                 if let Ok(state) = obj.poll() {
                     if requested_poll_revents(*events, state) != 0 {
                         return true;
                     }
+                } else {
+                    return true;
                 }
             }
-            false
+            thread.has_pending_signal()
         };
 
         // Hybrid active-yield strategy for event-driven path:
@@ -236,30 +268,15 @@ pub fn sys_ppoll(
             }
         }
 
-        if let Ok(thread) = pulse_core::task::current_thread() {
-            if thread.has_pending_signal() {
-                return -LinuxError::EINTR.code() as isize;
-            }
+        // Poll readiness takes precedence over a concurrently pending signal.
+        let ready = poll_fds_once(&mut pollfds);
+        if ready > 0 {
+            return write_back(&pollfds, ready as isize);
         }
-
-        // Final poll pass
-        let mut ready = 0usize;
-        for pfd in pollfds.iter_mut() {
-            pfd.revents = 0;
-            if pfd.fd < 0 {
-                continue;
-            }
-            let fd = pfd.fd as usize;
-            if let Ok(entry) = get_fd_entry(fd) {
-                if let Ok(state) = entry.object.poll() {
-                    pfd.revents = requested_poll_revents(pfd.events, state);
-                    if pfd.revents != 0 {
-                        ready += 1;
-                    }
-                }
-            }
+        if thread.has_pending_signal() {
+            return write_back(&pollfds, -LinuxError::EINTR.code() as isize);
         }
-        return write_back(&pollfds, ready as isize);
+        return write_back(&pollfds, 0);
     }
 
     // Hybrid wait strategy:
@@ -270,41 +287,14 @@ pub fn sys_ppoll(
     let mut idle_rounds: usize = 0;
 
     loop {
-        let mut ready = 0usize;
-        for pfd in pollfds.iter_mut() {
-            pfd.revents = 0;
-            if pfd.fd < 0 {
-                continue;
-            }
-            let fd = pfd.fd as usize;
-            let entry = match get_fd_entry(fd) {
-                Ok(entry) => entry,
-                Err(_) => {
-                    return -LinuxError::EBADF.code() as isize;
-                }
-            };
-            match entry.object.poll() {
-                Ok(state) => {
-                    pfd.revents = requested_poll_revents(pfd.events, state);
-                    if pfd.revents != 0 {
-                        ready += 1;
-                    }
-                }
-                Err(_) => {
-                    pfd.revents = POLLERR as i16;
-                    ready += 1;
-                }
-            }
-        }
+        let ready = poll_fds_once(&mut pollfds);
 
         if ready > 0 {
             return write_back(&pollfds, ready as isize);
         }
 
-        if let Ok(thread) = pulse_core::task::current_thread() {
-            if thread.has_pending_signal() {
-                return -LinuxError::EINTR.code() as isize;
-            }
+        if thread.has_pending_signal() {
+            return write_back(&pollfds, -LinuxError::EINTR.code() as isize);
         }
 
         if let Some(deadline) = deadline {
@@ -318,7 +308,9 @@ pub fn sys_ppoll(
             } else {
                 let sleep_dur = core::cmp::min(deadline - now, POLL_SLEEP_QUANTUM);
                 if sleep_dur > Duration::ZERO {
-                    axtask::sleep(sleep_dur);
+                    thread
+                        .signal_wait_queue()
+                        .wait_timeout_until(sleep_dur, || thread.has_pending_signal());
                 } else {
                     axtask::yield_now();
                 }
@@ -328,7 +320,9 @@ pub fn sys_ppoll(
             if idle_rounds <= POLL_ACTIVE_YIELD_ROUNDS {
                 axtask::yield_now();
             } else {
-                axtask::sleep(POLL_SLEEP_QUANTUM);
+                thread
+                    .signal_wait_queue()
+                    .wait_timeout_until(POLL_SLEEP_QUANTUM, || thread.has_pending_signal());
             }
         }
     }
@@ -370,7 +364,7 @@ pub fn sys_pselect6(
     writefds: usize,
     exceptfds: usize,
     timeout: usize,
-    _sigmask: usize,
+    sigmask: usize,
 ) -> isize {
     axlog::debug!(
         "sys_pselect6 <= nfds: {nfds}, readfds: {readfds:#x}, writefds: {writefds:#x}, exceptfds: \
@@ -381,10 +375,30 @@ pub fn sys_pselect6(
         return -LinuxError::EINVAL.code() as isize;
     }
 
-    let process = match pulse_core::task::current_process() {
-        Ok(p) => p,
+    let thread = match pulse_core::task::current_thread() {
+        Ok(thread) => thread,
         Err(e) => return -e.code() as isize,
     };
+    let process = thread.process();
+
+    let timeout_dur = if timeout != 0 {
+        let ts = match read_user_timespec(timeout) {
+            Ok(ts) => ts,
+            Err(e) => return -e.code() as isize,
+        };
+        if ts.tv_sec < 0 || !(0..1_000_000_000).contains(&ts.tv_nsec) {
+            return -LinuxError::EINVAL.code() as isize;
+        }
+        Some(Duration::new(ts.tv_sec as u64, ts.tv_nsec as u32))
+    } else {
+        None
+    };
+
+    let temporary_mask = match read_pselect6_signal_mask(process.as_ref(), sigmask) {
+        Ok(mask) => mask,
+        Err(e) => return -e.code() as isize,
+    };
+    let _mask_guard = pulse_core::task::SignalMaskGuard::install(thread.clone(), temporary_mask);
 
     let mut in_read = FdSet::zero();
     let mut in_write = FdSet::zero();
@@ -436,19 +450,6 @@ pub fn sys_pselect6(
         );
     }
 
-    let timeout_dur = if timeout != 0 {
-        let ts = match read_user_timespec(timeout) {
-            Ok(ts) => ts,
-            Err(e) => return -e.code() as isize,
-        };
-        if ts.tv_sec < 0 || !(0..1_000_000_000).contains(&ts.tv_nsec) {
-            return -LinuxError::EINVAL.code() as isize;
-        }
-        Some(Duration::new(ts.tv_sec as u64, ts.tv_nsec as u32))
-    } else {
-        None
-    };
-
     let mut pollfds = alloc::vec::Vec::with_capacity(nfds.min(1024));
     for fd in 0..nfds.min(1024) {
         let mut events = 0i16;
@@ -481,10 +482,8 @@ pub fn sys_pselect6(
     }
 
     if pollfds.is_empty() {
-        if let Some(timeout_dur) = timeout_dur {
-            if timeout_dur > Duration::ZERO {
-                axtask::sleep(timeout_dur);
-            }
+        if wait_for_signal_or_timeout(thread.as_ref(), timeout_dur) {
+            return -LinuxError::EINTR.code() as isize;
         }
         axlog::debug!("sys_pselect6 => empty pollfds, returning 0");
         return 0;
@@ -538,11 +537,9 @@ pub fn sys_pselect6(
             break;
         }
 
-        if let Ok(thread) = pulse_core::task::current_thread() {
-            if thread.has_pending_signal() {
-                axlog::debug!("sys_pselect6 => interrupted by signal");
-                return -LinuxError::EINTR.code() as isize;
-            }
+        if thread.has_pending_signal() {
+            axlog::debug!("sys_pselect6 => interrupted by signal");
+            return -LinuxError::EINTR.code() as isize;
         }
 
         if let Some(deadline) = deadline {
@@ -557,7 +554,9 @@ pub fn sys_pselect6(
             } else {
                 let sleep_dur = core::cmp::min(deadline - now, POLL_SLEEP_QUANTUM);
                 if sleep_dur > Duration::ZERO {
-                    axtask::sleep(sleep_dur);
+                    thread
+                        .signal_wait_queue()
+                        .wait_timeout_until(sleep_dur, || thread.has_pending_signal());
                 } else {
                     axtask::yield_now();
                 }
@@ -567,7 +566,9 @@ pub fn sys_pselect6(
             if idle_rounds <= POLL_ACTIVE_YIELD_ROUNDS {
                 axtask::yield_now();
             } else {
-                axtask::sleep(POLL_SLEEP_QUANTUM);
+                thread
+                    .signal_wait_queue()
+                    .wait_timeout_until(POLL_SLEEP_QUANTUM, || thread.has_pending_signal());
             }
         }
     }

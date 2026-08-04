@@ -72,7 +72,7 @@ pub fn syscall_handler(tf: &mut TrapFrame, syscall_num: usize) -> isize {
         let mut should_restart = true;
 
         // Peek to see if the next signal handler has SA_RESTART set.
-        if let Some(sig) = sig_state.peek_unblocked() {
+        if let Some(sig) = sig_state.peek_unblocked_deliverable() {
             let action = pulse_core::task::resolve_action(&sig_state.shared(), sig);
             if let pulse_core::task::SignalAction::Handler(act) = action {
                 if (act.flags & (linux_raw_sys::general::SA_RESTART as usize)) == 0 {
@@ -105,6 +105,12 @@ pub fn syscall_handler(tf: &mut TrapFrame, syscall_num: usize) -> isize {
                 SignalAction::Default(DefaultSignalAction::CoreDump) => {
                     process.set_exit_signal(delivery.sig as i32, true);
                     process.begin_group_exit(delivery.sig as i32);
+                }
+                SignalAction::Default(DefaultSignalAction::Stop) => {
+                    process.enter_group_stop(delivery.sig as i32);
+                }
+                SignalAction::Default(DefaultSignalAction::Continue) => {
+                    process.continue_group();
                 }
                 _ => {}
             }
@@ -333,6 +339,15 @@ fn syscall_dispatcher(
         Sysno::kill => impls::sys_kill(args[0] as isize, args[1] as isize),
         Sysno::tkill => impls::sys_tkill(args[0] as isize, args[1] as isize),
         Sysno::tgkill => impls::sys_tgkill(args[0] as isize, args[1] as isize, args[2] as isize),
+        Sysno::rt_sigqueueinfo => {
+            impls::sys_rt_sigqueueinfo(args[0] as isize, args[1] as isize, args[2])
+        }
+        Sysno::rt_tgsigqueueinfo => impls::sys_rt_tgsigqueueinfo(
+            args[0] as isize,
+            args[1] as isize,
+            args[2] as isize,
+            args[3],
+        ),
         Sysno::getgid => impls::sys_getgid(),
         Sysno::getegid => impls::sys_getegid(),
         Sysno::setuid => impls::sys_setuid(args[0]),
@@ -364,6 +379,9 @@ fn syscall_dispatcher(
         Sysno::dup3 => impls::sys_dup3(args[0], args[1], args[2]),
         Sysno::pipe2 => impls::sys_pipe2(args[0], args[1]),
         Sysno::eventfd2 => impls::sys_eventfd2(args[0] as u32, args[1] as u32),
+        Sysno::signalfd4 => {
+            impls::sys_signalfd4(args[0] as isize, args[1], args[2], args[3])
+        }
         Sysno::socket => impls::sys_socket(args[0], args[1], args[2]),
         Sysno::socketpair => impls::sys_socketpair(args[0], args[1], args[2], args[3]),
         Sysno::bind => impls::sys_bind(args[0], args[1], args[2]),

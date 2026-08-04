@@ -270,11 +270,6 @@ pub fn sys_setresgid(raw_rgid: usize, raw_egid: usize, raw_sgid: usize) -> isize
 }
 
 
-pub fn sys_setsid() -> isize {
-    axlog::warn!("sys_setsid (stub): returning success");
-    1
-}
-
 pub fn sys_getgroups(size: isize, list: usize) -> isize {
     let process = match current_process() {
         Ok(p) => p,

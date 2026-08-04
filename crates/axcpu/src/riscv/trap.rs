@@ -9,7 +9,7 @@ use riscv::{
 };
 
 use super::TrapFrame;
-use crate::trap::PageFaultFlags;
+use crate::trap::{AddressError, PageFaultFlags};
 
 core::arch::global_asm!(
     include_asm_macros!(),
@@ -68,7 +68,7 @@ fn riscv_trap_handler(tf: &mut TrapFrame, from_user: bool) {
             Trap::Exception(E::InstructionMisaligned)
             | Trap::Exception(E::LoadMisaligned)
             | Trap::Exception(E::StoreMisaligned) => {
-                if !handle_trap!(ADDRESS_ERROR, tf, stval::read(), from_user) {
+                if !handle_trap!(ADDRESS_ERROR, tf, stval::read(), AddressError::Misaligned, from_user) {
                     panic!("Unhandled Address Error @ {:#x}", tf.sepc);
                 }
             }
