@@ -142,8 +142,7 @@ pub fn sys_rt_sigaction(_signum: usize, _act: usize, _oldact: usize, _sigsetsize
 
     if signum == 0
         || signum > (_NSIG as usize)
-        || signum == SIGKILL as usize
-        || signum == SIGSTOP as usize
+        || (new_action.is_some() && (signum == SIGKILL as usize || signum == SIGSTOP as usize))
     {
         return -LinuxError::EINVAL.code() as isize;
     }

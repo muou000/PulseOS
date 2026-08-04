@@ -439,6 +439,8 @@ impl Process {
         }
 
         self.continued_signal_pending.store(true, Ordering::Release);
+        // SIGCONT supersedes an unconsumed WSTOPPED report for this group.
+        self.stopped_signal_pending.store(0, Ordering::Release);
         self.job_control_event.notify_all_with_context(
             true,
             WakeContext::new(|| (WakeSource::Signal, SIGCONT as u64)),
@@ -513,15 +515,21 @@ impl Process {
         }
     }
 
-    fn child_exit_siginfo_status(&self) -> (i32, i32) {
-        let exit_signal = self.exit_signal.load(Ordering::Acquire);
+    pub fn exit_siginfo_status(exit_code: i32, exit_signal: i32) -> (i32, i32) {
         if exit_signal == 0 {
-            (CLD_EXITED as i32, self.exit_code() & 0xff)
+            (CLD_EXITED as i32, exit_code & 0xff)
         } else if (exit_signal & 0x100) != 0 {
             (CLD_DUMPED as i32, exit_signal & 0x7f)
         } else {
             (CLD_KILLED as i32, exit_signal & 0x7f)
         }
+    }
+
+    fn child_exit_siginfo_status(&self) -> (i32, i32) {
+        Self::exit_siginfo_status(
+            self.exit_code(),
+            self.exit_signal.load(Ordering::Acquire),
+        )
     }
 
     /// Publishes the terminal child state to its parent and returns whether
@@ -941,5 +949,23 @@ impl Process {
             return Err(task::ERESTARTSYS);
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn exit_siginfo_status_matches_waitid_encoding() {
+        assert_eq!(Process::exit_siginfo_status(0x1ff, 0), (CLD_EXITED as i32, 0xff));
+        assert_eq!(
+            Process::exit_siginfo_status(0, SIGCONT as i32),
+            (CLD_KILLED as i32, SIGCONT as i32)
+        );
+        assert_eq!(
+            Process::exit_siginfo_status(0, 0x100 | SIGCONT as i32),
+            (CLD_DUMPED as i32, SIGCONT as i32)
+        );
     }
 }

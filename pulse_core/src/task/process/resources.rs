@@ -170,6 +170,9 @@ impl Process {
                 Ok(())
             }
             RLIMIT_SIGPENDING => {
+                if limit.rlim_max > MAX_SIGPENDING_LIMIT {
+                    return Err(AxError::InvalidInput);
+                }
                 res.rlimit_state.sigpending_soft = limit.rlim_cur;
                 res.rlimit_state.sigpending_hard = limit.rlim_max;
                 Ok(())

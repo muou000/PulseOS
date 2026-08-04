@@ -226,13 +226,13 @@ pub fn sys_tkill(tid: isize, sig: isize) -> isize {
         return 0;
     }
     let info = make_user_signal_info(sig, SI_TKILL, caller.pid(), caller.ruid());
-    if needs_realtime_queue_slot(sig, SI_TKILL)
-        && queue_signal_to_thread_with_info_strict(target_thread.as_ref(), sig as usize, Some(info))
+    if needs_realtime_queue_slot(sig, SI_TKILL) {
+        if queue_signal_to_thread_with_info_strict(target_thread.as_ref(), sig as usize, Some(info))
             .is_err()
-    {
-        return -LinuxError::EAGAIN.code() as isize;
-    }
-    if !needs_realtime_queue_slot(sig, SI_TKILL) {
+        {
+            return -LinuxError::EAGAIN.code() as isize;
+        }
+    } else {
         let _ = queue_signal_to_thread_with_info(target_thread.as_ref(), sig as usize, Some(info));
     }
     0
@@ -260,13 +260,13 @@ pub fn sys_tgkill(tgid: isize, tid: isize, sig: isize) -> isize {
         return 0;
     }
     let info = make_user_signal_info(sig, SI_TKILL, caller.pid(), caller.ruid());
-    if needs_realtime_queue_slot(sig, SI_TKILL)
-        && queue_signal_to_thread_with_info_strict(target_thread.as_ref(), sig as usize, Some(info))
+    if needs_realtime_queue_slot(sig, SI_TKILL) {
+        if queue_signal_to_thread_with_info_strict(target_thread.as_ref(), sig as usize, Some(info))
             .is_err()
-    {
-        return -LinuxError::EAGAIN.code() as isize;
-    }
-    if !needs_realtime_queue_slot(sig, SI_TKILL) {
+        {
+            return -LinuxError::EAGAIN.code() as isize;
+        }
+    } else {
         let _ = queue_signal_to_thread_with_info(target_thread.as_ref(), sig as usize, Some(info));
     }
     0
@@ -309,17 +309,17 @@ pub fn sys_rt_sigqueueinfo(pid: isize, sig: isize, info_ptr: usize) -> isize {
     if sig != 0 {
         let info_code = siginfo_code(&info);
         let info = siginfo_bytes(info);
-        if needs_realtime_queue_slot(sig, info_code)
-            && queue_signal_to_process_with_info_strict(
+        if needs_realtime_queue_slot(sig, info_code) {
+            if queue_signal_to_process_with_info_strict(
                 target.as_ref(),
                 sig as usize,
                 Some(info),
             )
             .is_err()
-        {
-            return -LinuxError::EAGAIN.code() as isize;
-        }
-        if !needs_realtime_queue_slot(sig, info_code) {
+            {
+                return -LinuxError::EAGAIN.code() as isize;
+            }
+        } else {
             let _ = queue_signal_to_process_with_info(target.as_ref(), sig as usize, Some(info));
         }
     }
@@ -363,17 +363,17 @@ pub fn sys_rt_tgsigqueueinfo(tgid: isize, tid: isize, sig: isize, info_ptr: usiz
     if sig != 0 {
         let info_code = siginfo_code(&info);
         let info = siginfo_bytes(info);
-        if needs_realtime_queue_slot(sig, info_code)
-            && queue_signal_to_thread_with_info_strict(
+        if needs_realtime_queue_slot(sig, info_code) {
+            if queue_signal_to_thread_with_info_strict(
                 target_thread.as_ref(),
                 sig as usize,
                 Some(info),
             )
             .is_err()
-        {
-            return -LinuxError::EAGAIN.code() as isize;
-        }
-        if !needs_realtime_queue_slot(sig, info_code) {
+            {
+                return -LinuxError::EAGAIN.code() as isize;
+            }
+        } else {
             let _ = queue_signal_to_thread_with_info(target_thread.as_ref(), sig as usize, Some(info));
         }
     }
@@ -597,13 +597,13 @@ pub fn sys_pidfd_send_signal(pidfd: isize, sig: isize, info_ptr: usize, flags: u
     }
 
     if sig != 0 {
-        if needs_realtime_queue_slot(sig, info_code)
-            && queue_signal_to_process_with_info_strict(target.as_ref(), sig as usize, Some(info))
+        if needs_realtime_queue_slot(sig, info_code) {
+            if queue_signal_to_process_with_info_strict(target.as_ref(), sig as usize, Some(info))
                 .is_err()
-        {
-            return -LinuxError::EAGAIN.code() as isize;
-        }
-        if !needs_realtime_queue_slot(sig, info_code) {
+            {
+                return -LinuxError::EAGAIN.code() as isize;
+            }
+        } else {
             let _ = queue_signal_to_process_with_info(target.as_ref(), sig as usize, Some(info));
         }
     }

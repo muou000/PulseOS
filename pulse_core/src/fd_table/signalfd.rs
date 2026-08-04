@@ -341,6 +341,10 @@ mod tests {
     use super::*;
     use linux_raw_sys::general::SI_QUEUE;
 
+    fn converted_siginfo(info: siginfo) -> SignalFdSigInfo {
+        unsafe { core::mem::transmute(signalfd_info_bytes(core::mem::transmute(info))) }
+    }
+
     #[test]
     fn signalfd_siginfo_has_the_linux_abi_size() {
         assert_eq!(core::mem::size_of::<SignalFdSigInfo>(), SIGNALFD_SIGINFO_SIZE);
@@ -358,14 +362,116 @@ mod tests {
             header._sifields._rt._sigval.sival_int = 789;
         }
 
-        let converted: SignalFdSigInfo = unsafe {
-            core::mem::transmute(signalfd_info_bytes(core::mem::transmute(info)))
-        };
+        let converted = converted_siginfo(info);
         assert_eq!(converted.ssi_signo, 42);
         assert_eq!(converted.ssi_code, SI_QUEUE);
         assert_eq!(converted.ssi_pid, 123);
         assert_eq!(converted.ssi_uid, 456);
         assert_eq!(converted.ssi_int, 789);
+    }
+
+    #[test]
+    fn timer_signal_payload_uses_the_timer_fields() {
+        let mut info: siginfo = unsafe { core::mem::zeroed() };
+        unsafe {
+            let header = &mut info.__bindgen_anon_1.__bindgen_anon_1;
+            header.si_signo = 14;
+            header.si_code = SI_TIMER;
+            header._sifields._timer._tid = 123;
+            header._sifields._timer._overrun = 456;
+            header._sifields._timer._sigval.sival_int = 789;
+        }
+
+        let converted = converted_siginfo(info);
+        assert_eq!(converted.ssi_tid, 123);
+        assert_eq!(converted.ssi_overrun, 456);
+        assert_eq!(converted.ssi_int, 789);
+    }
+
+    #[test]
+    fn sigio_payload_uses_the_poll_fields() {
+        let mut info: siginfo = unsafe { core::mem::zeroed() };
+        unsafe {
+            let header = &mut info.__bindgen_anon_1.__bindgen_anon_1;
+            header.si_signo = 29;
+            header.si_code = SI_SIGIO;
+            header._sifields._sigpoll._band = 0x1234;
+            header._sifields._sigpoll._fd = 56;
+        }
+
+        let converted = converted_siginfo(info);
+        assert_eq!(converted.ssi_band, 0x1234);
+        assert_eq!(converted.ssi_fd, 56);
+    }
+
+    #[test]
+    fn user_signal_payload_uses_the_kill_fields() {
+        let mut info: siginfo = unsafe { core::mem::zeroed() };
+        unsafe {
+            let header = &mut info.__bindgen_anon_1.__bindgen_anon_1;
+            header.si_signo = 10;
+            header.si_code = SI_USER as i32;
+            header._sifields._kill._pid = 123;
+            header._sifields._kill._uid = 456;
+        }
+
+        let converted = converted_siginfo(info);
+        assert_eq!(converted.ssi_pid, 123);
+        assert_eq!(converted.ssi_uid, 456);
+    }
+
+    #[test]
+    fn child_signal_payload_uses_the_sigchld_fields() {
+        let mut info: siginfo = unsafe { core::mem::zeroed() };
+        unsafe {
+            let header = &mut info.__bindgen_anon_1.__bindgen_anon_1;
+            header.si_signo = SIGCHLD as i32;
+            header.si_code = 1;
+            header._sifields._sigchld._pid = 123;
+            header._sifields._sigchld._uid = 456;
+            header._sifields._sigchld._status = 78;
+            header._sifields._sigchld._utime = 90;
+            header._sifields._sigchld._stime = 12;
+        }
+
+        let converted = converted_siginfo(info);
+        assert_eq!(converted.ssi_pid, 123);
+        assert_eq!(converted.ssi_uid, 456);
+        assert_eq!(converted.ssi_status, 78);
+        assert_eq!(converted.ssi_utime, 90);
+        assert_eq!(converted.ssi_stime, 12);
+    }
+
+    #[test]
+    fn sigsys_payload_uses_the_sigsys_fields() {
+        let mut info: siginfo = unsafe { core::mem::zeroed() };
+        unsafe {
+            let header = &mut info.__bindgen_anon_1.__bindgen_anon_1;
+            header.si_signo = SIGSYS as i32;
+            header.si_code = 1;
+            header._sifields._sigsys._call_addr = 0xfeedusize as *mut core::ffi::c_void;
+            header._sifields._sigsys._syscall = 123;
+            header._sifields._sigsys._arch = 456;
+        }
+
+        let converted = converted_siginfo(info);
+        assert_eq!(converted.ssi_call_addr, 0xfeed);
+        assert_eq!(converted.ssi_syscall, 123);
+        assert_eq!(converted.ssi_arch, 456);
+    }
+
+    #[test]
+    fn fault_signal_payload_uses_the_fault_address() {
+        let mut info: siginfo = unsafe { core::mem::zeroed() };
+        unsafe {
+            let header = &mut info.__bindgen_anon_1.__bindgen_anon_1;
+            header.si_signo = SIGSEGV as i32;
+            header.si_code = 1;
+            header._sifields._sigfault._addr = 0xfaceusize as *mut core::ffi::c_void;
+        }
+
+        let converted = converted_siginfo(info);
+        assert_eq!(converted.ssi_addr, 0xface);
     }
 
     #[test]

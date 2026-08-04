@@ -2,8 +2,8 @@ use alloc::sync::Arc;
 
 use axerrno::LinuxError;
 use linux_raw_sys::general::{
-    CLD_CONTINUED, CLD_DUMPED, CLD_EXITED, CLD_KILLED, CLD_STOPPED, P_ALL, P_PGID, P_PID,
-    SIGCONT, WCONTINUED, WEXITED, WNOHANG, WNOWAIT, WUNTRACED,
+    CLD_CONTINUED, CLD_STOPPED, P_ALL, P_PGID, P_PID, SIGCONT, WCONTINUED, WEXITED, WNOHANG,
+    WNOWAIT, WUNTRACED,
 };
 use pulse_core::task::{Process, WaitidStatusType, current_thread, signal_info_for_child};
 
@@ -93,6 +93,9 @@ pub fn sys_wait4(pid: isize, status: usize, options: i32, rusage: usize) -> isiz
                 if (options & WNOHANG as i32) != 0 {
                     return 0;
                 }
+                if process.group_exiting() {
+                    return -LinuxError::EINTR.code() as isize;
+                }
                 if let Err(e) =
                     process.wait_for_child_state_change_interruptible(idtype, id, wait_options)
                 {
@@ -134,15 +137,7 @@ pub fn sys_waitid(idtype: usize, id: usize, infop: usize, options: i32) -> isize
                     WaitidStatusType::Exited {
                         exit_code,
                         exit_signal,
-                    } if exit_signal == 0 => (CLD_EXITED as i32, exit_code & 0xff),
-                    WaitidStatusType::Exited { exit_signal, .. } => (
-                        if (exit_signal & 0x100) != 0 {
-                            CLD_DUMPED as i32
-                        } else {
-                            CLD_KILLED as i32
-                        },
-                        exit_signal & 0x7f,
-                    ),
+                    } => Process::exit_siginfo_status(exit_code, exit_signal),
                     WaitidStatusType::Stopped { signo } => (CLD_STOPPED as i32, signo),
                     WaitidStatusType::Continued => (CLD_CONTINUED as i32, SIGCONT as i32),
                 };
@@ -174,6 +169,9 @@ pub fn sys_waitid(idtype: usize, id: usize, infop: usize, options: i32) -> isize
                         }
                     }
                     return 0;
+                }
+                if process.group_exiting() {
+                    return -LinuxError::EINTR.code() as isize;
                 }
 
                 if let Err(e) =

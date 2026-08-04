@@ -24,7 +24,7 @@ pub const SIGRTMIN: usize = 32;
 const STANDARD_SIGNAL_MAX: usize = SIGRTMIN - 1;
 const REALTIME_SIGNAL_COUNT: usize = (_NSIG as usize) - SIGRTMIN + 1;
 
-const _: [(); SIGINFO_FRAME_SIZE] = [(); core::mem::size_of::<siginfo>()];
+const _: () = assert!(SIGINFO_FRAME_SIZE == core::mem::size_of::<siginfo>());
 
 #[inline]
 fn sig_bit(sig: usize) -> Option<u64> {
@@ -165,7 +165,7 @@ struct SavedSignalContext {
 static SIGPENDING_COUNTS: Lazy<SpinNoIrq<HashMap<u32, u64>>> =
     Lazy::new(|| SpinNoIrq::new(HashMap::new()));
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Debug)]
 struct PendingSignalReservation {
     ruid: u32,
 }
@@ -287,7 +287,7 @@ pub enum SignalQueueError {
 /// with that delivery.  Keeping this object in the same queue as its signal
 /// bit avoids the old bitmap/map race and preserves Linux's first-info rule
 /// for standard signals.
-#[derive(Clone, Copy, Debug)]
+#[derive(Debug)]
 struct PendingSignal {
     sig: usize,
     info: [u8; SIGINFO_FRAME_SIZE],
@@ -604,9 +604,9 @@ fn is_synchronous_fault_signal(sig: usize) -> bool {
 }
 
 fn default_siginfo(sig: usize) -> [u8; SIGINFO_FRAME_SIZE] {
-    let mut info = [0u8; SIGINFO_FRAME_SIZE];
-    info[..core::mem::size_of::<i32>()].copy_from_slice(&(sig as i32).to_ne_bytes());
-    info
+    let mut info: siginfo = unsafe { core::mem::zeroed() };
+    info.__bindgen_anon_1.__bindgen_anon_1.si_signo = sig as linux_raw_sys::ctypes::c_int;
+    unsafe { core::mem::transmute(info) }
 }
 
 fn forced_siginfo(sig: usize) -> [u8; SIGINFO_FRAME_SIZE] {
@@ -995,10 +995,10 @@ impl ThreadSignal {
         waitset: u64,
     ) -> Option<(usize, Option<[u8; SIGINFO_FRAME_SIZE]>)> {
         let waitset = sanitize_mask(waitset);
-        let pending = self
-            .thread_pending
-            .lock()
-            .dequeue(waitset)
+        // Never hold the thread and process pending-queue locks together.
+        // Dequeue the thread-directed record first, then inspect the shared
+        // queue only after its guard has been dropped.
+        let pending = { self.thread_pending.lock().dequeue(waitset) }
             .or_else(|| self.shared.dequeue_process_from_mask(waitset))?;
         Some((pending.sig, Some(pending.info)))
     }
@@ -1109,10 +1109,7 @@ impl ThreadSignal {
     ) -> Option<(usize, [u8; SIGINFO_FRAME_SIZE], SignalAction)> {
         loop {
             let blocked = self.blocked_mask();
-            let pending = self
-                .thread_pending
-                .lock()
-                .dequeue(!blocked)
+            let pending = { self.thread_pending.lock().dequeue(!blocked) }
                 .or_else(|| self.shared.dequeue_process_unblocked(blocked))?;
             let action = resolve_action(&self.shared, pending.sig);
             if !is_ignored_action(action) {
@@ -1960,8 +1957,9 @@ const UCONTEXT_STACK_SIZE_OFFSET: usize = UCONTEXT_STACK_OFFSET + 2 * core::mem:
 const UCONTEXT_SIGMASK_OFFSET: usize = 40;
 const UCONTEXT_PC_OFFSET: usize = 176;
 
-// The fixed ucontext header reserves 128 bytes for sigset_t. Both supported
-// 64-bit ABIs align uc_mcontext at offset 176 after that header.
+// The fixed ucontext header reserves 128 bytes for sigset_t at offset 40,
+// ending at offset 168. Both supported 64-bit ABIs insert eight bytes of
+// alignment padding before uc_mcontext begins at offset 176.
 #[cfg(target_arch = "riscv64")]
 const RISCV_D_FPU_OFFSET: usize = UCONTEXT_PC_OFFSET + 32 * core::mem::size_of::<u64>();
 #[cfg(target_arch = "riscv64")]

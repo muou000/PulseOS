@@ -44,6 +44,8 @@ const DEFAULT_STACK_LIMIT_BYTES: u64 = USER_STACK_SIZE as u64;
 const MAX_STACK_LIMIT_BYTES: u64 = USER_STACK_SIZE as u64;
 const DEFAULT_NOFILE_LIMIT: u64 = 1024;
 const MAX_NOFILE_LIMIT: u64 = FD_LIMIT as u64;
+const DEFAULT_SIGPENDING_LIMIT: u64 = 4096;
+const MAX_SIGPENDING_LIMIT: u64 = DEFAULT_SIGPENDING_LIMIT;
 
 pub const MAX_POSIX_TIMER_COUNT: usize = 16;
 
@@ -152,8 +154,8 @@ impl Default for RlimitState {
             core_hard: u64::MAX,
             data_soft: u64::MAX,
             data_hard: u64::MAX,
-            sigpending_soft: u64::MAX,
-            sigpending_hard: u64::MAX,
+            sigpending_soft: DEFAULT_SIGPENDING_LIMIT,
+            sigpending_hard: DEFAULT_SIGPENDING_LIMIT,
         }
     }
 }
