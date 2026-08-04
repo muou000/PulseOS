@@ -79,7 +79,8 @@ where
 
 static PROCESS_REGISTRY: Lazy<IrqSafeRwMap<u64, Arc<Process>>> = Lazy::new(IrqSafeRwMap::new);
 
-/// Serializes session/PGID mutations with a child's transition through exec.
+/// Serializes job-control state that must agree across session/PGID mutations,
+/// process lifecycle transitions, and a child's transition through exec.
 ///
 /// The process registry owns object lifetime, while this lock protects the
 /// cross-process job-control invariants that cannot be represented by one
@@ -102,8 +103,7 @@ pub fn unregister_process(pid: u64) {
     PROCESS_REGISTRY.remove(&pid);
 }
 
-/// Runs one nonblocking job-control state transition atomically with respect
-/// to `setsid`, `setpgid`, and a child's successful exec transition.
+/// Runs one short, nonblocking job-control state transition atomically.
 pub fn with_job_control_lock<T>(f: impl FnOnce() -> T) -> T {
     let _guard = JOB_CONTROL_LOCK.lock();
     f()

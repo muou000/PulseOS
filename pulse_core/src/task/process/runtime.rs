@@ -342,9 +342,11 @@ impl Process {
     }
 
     pub fn begin_group_exit(&self, exit_code: i32) {
-        self.group_exit_code.store(exit_code, Ordering::Release);
-        self.group_exiting.store(true, Ordering::Release);
-        self.job_control_stop_signal.store(0, Ordering::Release);
+        crate::task::with_job_control_lock(|| {
+            self.group_exit_code.store(exit_code, Ordering::Release);
+            self.group_exiting.store(true, Ordering::Release);
+            self.job_control_stop_signal.store(0, Ordering::Release);
+        });
         self.job_control_event.notify_all(false);
         self.futex_table.wake_all();
 
@@ -384,19 +386,28 @@ impl Process {
     /// Enters a job-control stop exactly once for a running thread group.
     /// The separate pending marker is solely for the parent's next WSTOPPED.
     pub fn enter_group_stop(&self, signo: i32) -> bool {
-        if signo <= 0 || self.group_exiting() {
-            return false;
-        }
-        if self
-            .job_control_stop_signal
-            .compare_exchange(0, signo, Ordering::AcqRel, Ordering::Acquire)
-            .is_err()
-        {
+        let entered = crate::task::with_job_control_lock(|| {
+            if signo <= 0 || self.group_exiting() {
+                return false;
+            }
+            if self
+                .job_control_stop_signal
+                .compare_exchange(0, signo, Ordering::AcqRel, Ordering::Acquire)
+                .is_err()
+            {
+                return false;
+            }
+
+            // Keep the running/stopped state and the parent's one-shot
+            // wait-status markers coherent with SIGCONT.
+            self.stopped_signal_pending.store(signo, Ordering::Release);
+            self.continued_signal_pending.store(false, Ordering::Release);
+            true
+        });
+        if !entered {
             return false;
         }
 
-        self.stopped_signal_pending.store(signo, Ordering::Release);
-        self.continued_signal_pending.store(false, Ordering::Release);
         self.wake_group_for_stop(signo);
         self.notify_parent_job_control(CLD_STOPPED as i32, signo);
         true
@@ -433,14 +444,21 @@ impl Process {
     /// current signal mask.  The SIGCONT itself may still remain pending for a
     /// user handler, but execution must resume immediately.
     pub fn continue_group(&self) -> bool {
-        let stopped = self.job_control_stop_signal.swap(0, Ordering::AcqRel);
-        if stopped == 0 {
+        let continued = crate::task::with_job_control_lock(|| {
+            let stopped = self.job_control_stop_signal.swap(0, Ordering::AcqRel);
+            if stopped == 0 {
+                return false;
+            }
+
+            self.continued_signal_pending.store(true, Ordering::Release);
+            // SIGCONT supersedes an unconsumed WSTOPPED report for this group.
+            self.stopped_signal_pending.store(0, Ordering::Release);
+            true
+        });
+        if !continued {
             return false;
         }
 
-        self.continued_signal_pending.store(true, Ordering::Release);
-        // SIGCONT supersedes an unconsumed WSTOPPED report for this group.
-        self.stopped_signal_pending.store(0, Ordering::Release);
         self.job_control_event.notify_all_with_context(
             true,
             WakeContext::new(|| (WakeSource::Signal, SIGCONT as u64)),
