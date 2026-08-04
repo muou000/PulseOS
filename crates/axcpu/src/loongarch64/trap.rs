@@ -67,7 +67,12 @@ fn loongarch64_trap_handler(tf: &mut TrapFrame, from_user: bool) {
                 false
             };
             if !handled {
-                panic!("Address error in kernel at {:#x}:\n{:#x?}", tf.era, tf);
+                panic!(
+                    "Bad address error in kernel at era={:#x}, badv={:#x}:\n{:#x?}",
+                    tf.era,
+                    badv::read().raw(),
+                    tf
+                );
             }
         }
         Trap::Exception(Exception::AddressNotAligned) => {
@@ -77,7 +82,12 @@ fn loongarch64_trap_handler(tf: &mut TrapFrame, from_user: bool) {
                 false
             };
             if !handled {
-                panic!("Address error in kernel at {:#x}:\n{:#x?}", tf.era, tf);
+                panic!(
+                    "Misaligned address error in kernel at era={:#x}, badv={:#x}:\n{:#x?}",
+                    tf.era,
+                    badv::read().raw(),
+                    tf
+                );
             }
         }
         Trap::Exception(Exception::StorePageFault)
