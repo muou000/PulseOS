@@ -222,13 +222,15 @@ pub fn sys_symlinkat(target: usize, newdirfd: i32, linkpath: usize) -> isize {
     if target == 0 || linkpath == 0 {
         return -LinuxError::EFAULT.code() as isize;
     }
-    let mut target_buf = [0u8; USER_PATH_MAX];
+    let mut target_buf = [core::mem::MaybeUninit::<u8>::uninit(); USER_PATH_MAX];
     let target_len = match crate::impls::utils::read_user_cstring_to_slice(target, &mut target_buf)
     {
         Ok(l) => l,
         Err(e) => return -e.code() as isize,
     };
-    let target_str = match core::str::from_utf8(&target_buf[..target_len]) {
+    let target_str = match core::str::from_utf8(unsafe {
+        core::slice::from_raw_parts(target_buf.as_ptr().cast::<u8>(), target_len)
+    }) {
         Ok(s) => s,
         Err(_) => return -LinuxError::EINVAL.code() as isize,
     };
@@ -236,12 +238,14 @@ pub fn sys_symlinkat(target: usize, newdirfd: i32, linkpath: usize) -> isize {
         return -LinuxError::ENOENT.code() as isize;
     }
 
-    let mut link_buf = [0u8; USER_PATH_MAX];
+    let mut link_buf = [core::mem::MaybeUninit::<u8>::uninit(); USER_PATH_MAX];
     let link_len = match crate::impls::utils::read_user_cstring_to_slice(linkpath, &mut link_buf) {
         Ok(l) => l,
         Err(e) => return -e.code() as isize,
     };
-    let link_str = match core::str::from_utf8(&link_buf[..link_len]) {
+    let link_str = match core::str::from_utf8(unsafe {
+        core::slice::from_raw_parts(link_buf.as_ptr().cast::<u8>(), link_len)
+    }) {
         Ok(s) => s,
         Err(_) => return -LinuxError::EINVAL.code() as isize,
     };
@@ -291,12 +295,14 @@ pub fn sys_mknodat(dirfd: i32, pathname: usize, mode: usize, _dev: usize) -> isi
     if pathname == 0 {
         return -LinuxError::EFAULT.code() as isize;
     }
-    let mut buf = [0u8; USER_PATH_MAX];
+    let mut buf = [core::mem::MaybeUninit::<u8>::uninit(); USER_PATH_MAX];
     let len = match crate::impls::utils::read_user_cstring_to_slice(pathname, &mut buf) {
         Ok(l) => l,
         Err(e) => return -e.code() as isize,
     };
-    let path = match core::str::from_utf8(&buf[..len]) {
+    let path = match core::str::from_utf8(unsafe {
+        core::slice::from_raw_parts(buf.as_ptr().cast::<u8>(), len)
+    }) {
         Ok(path) => path,
         Err(_) => return -LinuxError::EINVAL.code() as isize,
     };
@@ -412,22 +418,26 @@ pub fn sys_linkat(
         return -LinuxError::EINVAL.code() as isize;
     }
 
-    let mut old_buf = [0u8; USER_PATH_MAX];
+    let mut old_buf = [core::mem::MaybeUninit::<u8>::uninit(); USER_PATH_MAX];
     let old_len = match crate::impls::utils::read_user_cstring_to_slice(oldpath, &mut old_buf) {
         Ok(l) => l,
         Err(e) => return -e.code() as isize,
     };
-    let oldpath_str = match core::str::from_utf8(&old_buf[..old_len]) {
+    let oldpath_str = match core::str::from_utf8(unsafe {
+        core::slice::from_raw_parts(old_buf.as_ptr().cast::<u8>(), old_len)
+    }) {
         Ok(s) => s,
         Err(_) => return -LinuxError::EINVAL.code() as isize,
     };
 
-    let mut new_buf = [0u8; USER_PATH_MAX];
+    let mut new_buf = [core::mem::MaybeUninit::<u8>::uninit(); USER_PATH_MAX];
     let new_len = match crate::impls::utils::read_user_cstring_to_slice(newpath, &mut new_buf) {
         Ok(l) => l,
         Err(e) => return -e.code() as isize,
     };
-    let newpath_str = match core::str::from_utf8(&new_buf[..new_len]) {
+    let newpath_str = match core::str::from_utf8(unsafe {
+        core::slice::from_raw_parts(new_buf.as_ptr().cast::<u8>(), new_len)
+    }) {
         Ok(s) => s,
         Err(_) => return -LinuxError::EINVAL.code() as isize,
     };

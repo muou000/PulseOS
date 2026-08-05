@@ -444,11 +444,14 @@ pub fn sys_faccessat(dirfd: i32, pathname: usize, mode: usize, flags: usize) -> 
 /// 以满足 LTP 等测试框架的 setup 阶段需求。
 pub fn sys_fchmodat(dirfd: i32, pathname: usize, mode: usize, flags: usize) -> isize {
     // 尝试读取路径字符串用于日志
-    let mut path_buf = [0u8; USER_PATH_MAX];
+    let mut path_buf = [core::mem::MaybeUninit::<u8>::uninit(); USER_PATH_MAX];
     let path_str = if pathname != 0 {
         crate::impls::utils::read_user_cstring_to_slice(pathname, &mut path_buf)
             .ok()
-            .and_then(|len| core::str::from_utf8(&path_buf[..len]).ok())
+            .and_then(|len| {
+                let slice = unsafe { core::slice::from_raw_parts(path_buf.as_ptr().cast::<u8>(), len) };
+                core::str::from_utf8(slice).ok()
+            })
             .unwrap_or("<unreadable>")
     } else {
         "<null>"
@@ -635,11 +638,14 @@ pub fn sys_fchmod(fd: usize, mode: usize) -> isize {
 ///
 /// PulseOS 不强制执行文件所有权，此 stub 仅验证路径存在性后返回成功。
 pub fn sys_fchownat(dirfd: i32, pathname: usize, uid: usize, gid: usize, flags: usize) -> isize {
-    let mut path_buf = [0u8; USER_PATH_MAX];
+    let mut path_buf = [core::mem::MaybeUninit::<u8>::uninit(); USER_PATH_MAX];
     let path_str = if pathname != 0 {
         crate::impls::utils::read_user_cstring_to_slice(pathname, &mut path_buf)
             .ok()
-            .and_then(|len| core::str::from_utf8(&path_buf[..len]).ok())
+            .and_then(|len| {
+                let slice = unsafe { core::slice::from_raw_parts(path_buf.as_ptr().cast::<u8>(), len) };
+                core::str::from_utf8(slice).ok()
+            })
             .unwrap_or("<unreadable>")
     } else {
         "<null>"

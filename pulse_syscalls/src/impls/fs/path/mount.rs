@@ -269,13 +269,15 @@ pub fn sys_mount(
         return -LinuxError::EFAULT.code() as isize;
     }
 
-    let mut target_buf = [0u8; USER_PATH_MAX];
+    let mut target_buf = [core::mem::MaybeUninit::<u8>::uninit(); USER_PATH_MAX];
     let target_len = match crate::impls::utils::read_user_cstring_to_slice(target, &mut target_buf)
     {
         Ok(l) => l,
         Err(e) => return -e.code() as isize,
     };
-    let target_path_str = match core::str::from_utf8(&target_buf[..target_len]) {
+    let target_path_str = match core::str::from_utf8(unsafe {
+        core::slice::from_raw_parts(target_buf.as_ptr().cast::<u8>(), target_len)
+    }) {
         Ok(s) if !s.is_empty() => s,
         Ok(_) => return -LinuxError::EINVAL.code() as isize,
         Err(_) => return -LinuxError::EINVAL.code() as isize,
@@ -559,13 +561,15 @@ pub fn sys_umount2(target: usize, flags: usize) -> isize {
         return -LinuxError::EFAULT.code() as isize;
     }
 
-    let mut target_buf = [0u8; USER_PATH_MAX];
+    let mut target_buf = [core::mem::MaybeUninit::<u8>::uninit(); USER_PATH_MAX];
     let target_len = match crate::impls::utils::read_user_cstring_to_slice(target, &mut target_buf)
     {
         Ok(l) => l,
         Err(e) => return -e.code() as isize,
     };
-    let target_path_raw = match core::str::from_utf8(&target_buf[..target_len]) {
+    let target_path_raw = match core::str::from_utf8(unsafe {
+        core::slice::from_raw_parts(target_buf.as_ptr().cast::<u8>(), target_len)
+    }) {
         Ok(s) if !s.is_empty() => s,
         Ok(_) => return -LinuxError::EINVAL.code() as isize,
         Err(_) => return -LinuxError::EINVAL.code() as isize,
