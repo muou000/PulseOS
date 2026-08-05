@@ -140,7 +140,7 @@ pub fn sys_write(fd: usize, buf: usize, count: usize) -> isize {
         .then(pulse_core::fd_table::lock_tty_write_transaction);
     let mut total = 0usize;
     let mut fallback_buf = None;
-    #[cfg(any(feature = "qperf-trace", feature = "buildstorm-stats"))]
+    #[cfg(feature = "qperf-trace")]
     let mut marker_scanner = OutputMarkerScanner::new(fd);
 
     while total < count {
@@ -158,7 +158,7 @@ pub fn sys_write(fd: usize, buf: usize, count: usize) -> isize {
                 if written > slice.len() {
                     return Err(LinuxError::EIO);
                 }
-                #[cfg(any(feature = "qperf-trace", feature = "buildstorm-stats"))]
+                #[cfg(feature = "qperf-trace")]
                 if written > 0 {
                     marker_scanner.push(&slice[..written]);
                 }

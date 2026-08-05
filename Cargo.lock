@@ -351,6 +351,7 @@ dependencies = [
  "axfs-ng-vfs",
  "axhal",
  "axio",
+ "axlog",
  "axpoll",
  "axsync",
  "axtask",

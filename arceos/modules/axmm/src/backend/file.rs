@@ -56,6 +56,43 @@ fn file_page_read_window(
     Some((file_offset as u64, read_len))
 }
 
+fn file_prefetch_range(
+    mapping_start: VirtAddr,
+    file_offset: usize,
+    mapped_bytes: usize,
+    file_size: usize,
+    first_page: VirtAddr,
+    area_end: VirtAddr,
+) -> Option<(u32, usize)> {
+    let (first_offset, _) = file_page_read_window(
+        mapping_start,
+        file_offset,
+        mapped_bytes,
+        file_size,
+        first_page,
+    )?;
+    let page_number = u32::try_from(first_offset / PAGE_SIZE_4K as u64).ok()?;
+    let mut page_count = 0;
+    while page_count < FILE_FAULT_AROUND_PAGES {
+        let byte_offset = page_count.checked_mul(PAGE_SIZE_4K)?;
+        let candidate = first_page.checked_add(byte_offset)?;
+        if candidate >= area_end
+            || file_page_read_window(
+                mapping_start,
+                file_offset,
+                mapped_bytes,
+                file_size,
+                candidate,
+            )
+            .is_none()
+        {
+            break;
+        }
+        page_count += 1;
+    }
+    (page_count != 0).then_some((page_number, page_count))
+}
+
 #[derive(Debug, Default)]
 struct FileReadAheadState {
     next_page: Option<u32>,
@@ -302,6 +339,20 @@ impl FileMapping {
 
     fn page_read_window(&self, page_addr: VirtAddr) -> Option<(u64, usize)> {
         self.page_read_window_at_size(page_addr, self.file_bytes())
+    }
+
+    fn prefetch_after(&self, first_page: VirtAddr, area_end: VirtAddr, file_size: usize) {
+        let Some((page_number, page_count)) = file_prefetch_range(
+            self.start,
+            self.file_offset,
+            self.file_bytes,
+            file_size,
+            first_page,
+            area_end,
+        ) else {
+            return;
+        };
+        self.file.prefetch_pages(page_number, page_count);
     }
 
     pub(crate) fn page_load_request(
@@ -674,16 +725,20 @@ impl Backend {
                 }
                 let requested = candidate_addr == page_addr;
                 axfs::buildstorm_stat_inc!(MM_FILE_FAULT_PTE_WRITE_LOCKS);
-                if let Ok((current, current_flags, _)) = pt_guard.query(candidate_addr)
-                    && current.as_usize() != 0
-                {
-                    if requested {
-                        requested_handled = !access_flags.contains(MappingFlags::WRITE)
-                            || current_flags.contains(MappingFlags::WRITE);
+                // This guard serializes the PTE for `candidate_addr`, so retain
+                // the query result for the map/remap decision below.
+                let remap_empty = match pt_guard.query(candidate_addr) {
+                    Ok((current, current_flags, _)) if current.as_usize() != 0 => {
+                        if requested {
+                            requested_handled = !access_flags.contains(MappingFlags::WRITE)
+                                || current_flags.contains(MappingFlags::WRITE);
+                        }
+                        candidate_cursor += 1;
+                        continue;
                     }
-                    candidate_cursor += 1;
-                    continue;
-                }
+                    Ok(_) => true,
+                    Err(_) => false,
+                };
 
                 let Some((_, cache_frame)) = prepared.page(index) else {
                     candidate_cursor += 1;
@@ -700,15 +755,12 @@ impl Backend {
                 } else {
                     orig_flags & !MappingFlags::WRITE
                 };
-                let mapped = match pt_guard.query(candidate_addr) {
-                    Ok((current, ..)) if current.as_usize() == 0 => pt_guard
+                let mapped = if remap_empty {
+                    pt_guard
                         .remap(candidate_addr, frame, map_flags)
-                        .map(|(_, tlb)| tlb),
-                    Err(_) => pt_guard.map(candidate_addr, frame, PageSize::Size4K, map_flags),
-                    _ => {
-                        candidate_cursor += 1;
-                        continue;
-                    }
+                        .map(|(_, tlb)| tlb)
+                } else {
+                    pt_guard.map(candidate_addr, frame, PageSize::Size4K, map_flags)
                 };
                 let Ok(tlb) = mapped else {
                     candidate_cursor += 1;
@@ -741,7 +793,15 @@ impl Backend {
         } else {
             axfs::buildstorm_stat_add!(MM_FILE_FAULT_COLD_MAPPED_PAGES, mapped_pages);
         }
-        let _ = mapped_pages;
+        if requested_handled
+            && mapped_pages != 0
+            && prepared.sequential
+            && let Some(next_page) = page_addr.checked_add(candidate_count * PAGE_SIZE_4K)
+        {
+            // Submit only after the current batch is visible in the page table;
+            // the task itself uses the existing cache single-flight protocol.
+            mapping.prefetch_after(next_page, area_end, file_size);
+        }
         requested_handled
     }
 
@@ -814,7 +874,7 @@ mod tests {
 
     use super::{
         COLD_FILE_FAULT_AROUND_PAGES, FILE_FAULT_AROUND_PAGES, FileReadAheadState,
-        file_page_read_window,
+        file_page_read_window, file_prefetch_range,
     };
 
     #[test]
@@ -861,6 +921,46 @@ mod tests {
         assert_eq!(
             file_page_read_window(start, 0, page, page, start - page),
             None
+        );
+    }
+
+    #[test]
+    fn prefetch_range_is_bounded_by_mapping_and_file_end() {
+        let start = VirtAddr::from(0x30_0000);
+        let page = PAGE_SIZE_4K;
+
+        assert_eq!(
+            file_prefetch_range(
+                start,
+                0,
+                32 * page,
+                64 * page,
+                start + 16 * page,
+                start + 40 * page
+            ),
+            Some((16, FILE_FAULT_AROUND_PAGES))
+        );
+        assert_eq!(
+            file_prefetch_range(
+                start,
+                0,
+                20 * page,
+                64 * page,
+                start + 16 * page,
+                start + 40 * page
+            ),
+            Some((16, 4))
+        );
+        assert_eq!(
+            file_prefetch_range(
+                start,
+                0,
+                32 * page,
+                18 * page,
+                start + 16 * page,
+                start + 40 * page
+            ),
+            Some((16, 2))
         );
     }
 

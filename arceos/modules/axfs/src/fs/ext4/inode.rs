@@ -50,13 +50,13 @@ enum MutationLockRole {
 
 struct MutationLockGuard<'a> {
     _guard: async_lock::MutexGuard<'a, ()>,
-    #[cfg(feature = "buildstorm-stats")]
+    #[cfg(feature = "qperf-trace")]
     directory_acquired_at_ns: Option<u64>,
 }
 
 impl Drop for MutationLockGuard<'_> {
     fn drop(&mut self) {
-        #[cfg(feature = "buildstorm-stats")]
+        #[cfg(feature = "qperf-trace")]
         if let Some(acquired_at_ns) = self.directory_acquired_at_ns {
             // These are cumulative per-lock durations and can overlap across tasks.
             let held_ns =
@@ -700,7 +700,7 @@ impl Inode {
         }
     }
 
-    #[cfg(feature = "buildstorm-stats")]
+    #[cfg(feature = "qperf-trace")]
     async fn lock_mutation(&self, role: MutationLockRole) -> MutationLockGuard<'_> {
         let track_directory =
             role == MutationLockRole::Directory && crate::buildstorm_stats::is_active();
@@ -733,7 +733,7 @@ impl Inode {
         }
     }
 
-    #[cfg(not(feature = "buildstorm-stats"))]
+    #[cfg(not(feature = "qperf-trace"))]
     async fn lock_mutation(&self, _role: MutationLockRole) -> MutationLockGuard<'_> {
         MutationLockGuard {
             _guard: self.mutation_lock.lock().await,

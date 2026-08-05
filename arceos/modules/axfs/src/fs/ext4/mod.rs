@@ -466,7 +466,7 @@ impl<D: AsyncBlockDriverOps + Clone + 'static> crate::disk::DiskFlushable for Ex
             let _device_flush = self.device_flush_lock.lock().await;
             let dev = self.dev.lock().clone();
             crate::buildstorm_stat_inc!(EXT4_DEVICE_FLUSHES);
-            #[cfg(feature = "buildstorm-stats")]
+            #[cfg(feature = "qperf-trace")]
             let _device_io = crate::buildstorm_stats::begin_device_io();
             dev.flush_async().await
         };
@@ -507,7 +507,7 @@ impl<D: AsyncBlockDriverOps + Clone + 'static> crate::disk::DiskFlushable for Ex
             let _device_flush = self.device_flush_lock.lock().await;
             let dev = self.dev.lock().clone();
             crate::buildstorm_stat_inc!(EXT4_DEVICE_FLUSHES);
-            #[cfg(feature = "buildstorm-stats")]
+            #[cfg(feature = "qperf-trace")]
             let _device_io = crate::buildstorm_stats::begin_device_io();
             dev.flush_async().await
         };
@@ -889,7 +889,7 @@ impl<D: AsyncBlockDriverOps + Clone + 'static> Ext4Disk<D> {
         let dev = self.dev.lock().clone();
         crate::buildstorm_stat_inc!(EXT4_DEVICE_WRITE_OPS);
         crate::buildstorm_stat_add!(EXT4_DEVICE_WRITE_BYTES, data.len());
-        #[cfg(feature = "buildstorm-stats")]
+        #[cfg(feature = "qperf-trace")]
         let _device_io = crate::buildstorm_stats::begin_device_io();
         dev.write_block_async(first_block, data)
             .await
@@ -950,7 +950,7 @@ impl<D: AsyncBlockDriverOps + Clone + 'static> Ext4Disk<D> {
         for attempt in 1..=DEVICE_READ_MAX_ATTEMPTS {
             crate::buildstorm_stat_inc!(EXT4_DEVICE_READ_OPS);
             crate::buildstorm_stat_add!(EXT4_DEVICE_READ_BYTES, dest.len());
-            #[cfg(feature = "buildstorm-stats")]
+            #[cfg(feature = "qperf-trace")]
             let _device_io = crate::buildstorm_stats::begin_device_io();
             match dev.read_block_async(first_block, dest).await {
                 Ok(()) => return Ok(()),

@@ -40,7 +40,7 @@ pub fn sys_writev(fd: usize, iov: usize, iovcnt: usize) -> isize {
         && object.is_tty_output())
     .then(pulse_core::fd_table::lock_tty_write_transaction);
     let mut total = 0isize;
-    #[cfg(any(feature = "qperf-trace", feature = "buildstorm-stats"))]
+    #[cfg(feature = "qperf-trace")]
     let mut marker_scanner = OutputMarkerScanner::new(fd);
     // Most iovecs use pinned user pages. A fragmented run reuses this one
     // 64 KiB buffer for the rest of the syscall.
@@ -68,7 +68,7 @@ pub fn sys_writev(fd: usize, iov: usize, iovcnt: usize) -> isize {
                     if written > slice.len() {
                         return Err(LinuxError::EIO);
                     }
-                    #[cfg(any(feature = "qperf-trace", feature = "buildstorm-stats"))]
+                    #[cfg(feature = "qperf-trace")]
                     if written > 0 {
                         marker_scanner.push(&slice[..written]);
                     }
