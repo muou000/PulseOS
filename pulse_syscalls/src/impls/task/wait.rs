@@ -65,6 +65,9 @@ pub fn sys_wait4(pid: isize, status: usize, options: i32, rusage: usize) -> isiz
         WEXITED as i32 | (options & (WNOHANG | WUNTRACED | WCONTINUED) as i32);
 
     loop {
+        // Snapshot before scanning so a child-state publication between the
+        // scan and WaitQueue enrollment cannot be missed.
+        let observed_child_state_epoch = process.child_state_epoch();
         match process.waitid_find_and_reap(idtype, id, wait_options) {
             Ok(Some((child, status_type))) => {
                 let waited_pid = child.pid() as isize;
@@ -96,8 +99,11 @@ pub fn sys_wait4(pid: isize, status: usize, options: i32, rusage: usize) -> isiz
                 if process.group_exiting() {
                     return -LinuxError::EINTR.code() as isize;
                 }
-                if let Err(e) =
-                    process.wait_for_child_state_change_interruptible(idtype, id, wait_options)
+                if let Err(e) = process.wait_for_child_state_change_interruptible(
+                    idtype,
+                    id,
+                    observed_child_state_epoch,
+                )
                 {
                     return -e as isize;
                 }
@@ -128,6 +134,9 @@ pub fn sys_waitid(idtype: usize, id: usize, infop: usize, options: i32) -> isize
     let process = thread.process();
 
     loop {
+        // Snapshot before scanning so a child-state publication between the
+        // scan and WaitQueue enrollment cannot be missed.
+        let observed_child_state_epoch = process.child_state_epoch();
         match process.waitid_find_and_reap(idtype, id, options) {
             Ok(Some((child, status_type))) => {
                 let was_zombie_and_reaped = matches!(status_type, WaitidStatusType::Exited { .. })
@@ -174,8 +183,11 @@ pub fn sys_waitid(idtype: usize, id: usize, infop: usize, options: i32) -> isize
                     return -LinuxError::EINTR.code() as isize;
                 }
 
-                if let Err(e) =
-                    process.wait_for_child_state_change_interruptible(idtype, id, options)
+                if let Err(e) = process.wait_for_child_state_change_interruptible(
+                    idtype,
+                    id,
+                    observed_child_state_epoch,
+                )
                 {
                     return -e as isize;
                 }

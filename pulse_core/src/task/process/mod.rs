@@ -490,6 +490,10 @@ pub struct Process {
     thread_exit_event: WaitQueue,
     /// 子进程列表，使用自旋锁保护
     children: SpinNoIrq<Vec<Arc<Process>>>,
+    /// 子进程可等待状态变更的单调代次。
+    ///
+    /// 这不是僵尸子进程数量的镜像；`children` 仍是子进程存在性和状态的唯一事实来源。
+    child_state_epoch: AtomicU64,
     /// 子进程退出等待事件队列
     pub child_exit_event: WaitQueue,
     /// 进程自身进入僵尸态时唤醒等待本进程 pidfd 的观察者。
