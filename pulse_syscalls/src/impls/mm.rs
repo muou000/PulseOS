@@ -22,6 +22,16 @@ fn page_align_up(addr: usize) -> Option<usize> {
         .map(|value| value & !(PAGE_SIZE - 1))
 }
 
+#[inline]
+fn is_page_aligned(addr: usize) -> bool {
+    addr & (PAGE_SIZE - 1) == 0
+}
+
+#[inline]
+fn mmap_offset_is_valid(file_backed: bool, offset: usize) -> bool {
+    !file_backed || is_page_aligned(offset)
+}
+
 fn get_fd_object(fd: usize) -> Result<Arc<dyn FdObject>, LinuxError> {
     let proc = pulse_core::task::current_process()?;
     proc.get_fd_entry(fd)
@@ -235,6 +245,9 @@ pub fn sys_mmap(
     if file_backed && fd < 0 {
         return -LinuxError::EBADF.code() as isize;
     }
+    if !mmap_offset_is_valid(file_backed, offset) {
+        return -LinuxError::EINVAL.code() as isize;
+    }
     let file = if file_backed {
         match get_fd_object(fd as usize) {
             Ok(file) => Some(file),
@@ -283,7 +296,9 @@ pub fn sys_mmap(
         return -LinuxError::ENODEV.code() as isize;
     }
 
-    let aligned_length = (length + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
+    let Some(aligned_length) = page_align_up(length) else {
+        return -LinuxError::EINVAL.code() as isize;
+    };
 
     // Creating the first CachedFile for an inode may read its length. Prepare
     // it before taking the non-sleepable address-space lock.
@@ -510,7 +525,9 @@ pub fn sys_munmap(addr: usize, length: usize) -> isize {
     }
 
     let aligned_addr = addr & !(PAGE_SIZE - 1);
-    let aligned_length = (length + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
+    let Some(aligned_length) = page_align_up(length) else {
+        return -LinuxError::EINVAL.code() as isize;
+    };
 
     if !proc.is_user_range(aligned_addr, aligned_length) {
         return -LinuxError::EINVAL.code() as isize;
@@ -633,15 +650,6 @@ pub fn sys_mremap(
     if (flags & (MREMAP_DONTUNMAP as usize)) != 0 && old_size != new_size {
         return -LinuxError::EINVAL.code() as isize;
     }
-    if (flags & (MREMAP_FIXED as usize)) != 0 && old_address != new_address {
-        let aligned_old_size = (old_size + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
-        let aligned_new_size = (new_size + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
-        let overlaps = !(new_address + aligned_new_size <= old_address
-            || new_address >= old_address + aligned_old_size);
-        if overlaps {
-            return -LinuxError::EINVAL.code() as isize;
-        }
-    }
     if (flags & (MREMAP_DONTUNMAP as usize)) != 0 {
         return -LinuxError::ENOSYS.code() as isize;
     }
@@ -660,8 +668,23 @@ pub fn sys_mremap(
         return -LinuxError::EINVAL.code() as isize;
     }
 
-    let aligned_old_size = (old_size + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
-    let aligned_new_size = (new_size + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
+    let (Some(aligned_old_size), Some(aligned_new_size)) =
+        (page_align_up(old_size), page_align_up(new_size))
+    else {
+        return -LinuxError::EINVAL.code() as isize;
+    };
+    if (flags & (MREMAP_FIXED as usize)) != 0 && old_address != new_address {
+        let (Some(old_end), Some(new_end)) = (
+            old_address.checked_add(aligned_old_size),
+            new_address.checked_add(aligned_new_size),
+        ) else {
+            return -LinuxError::EINVAL.code() as isize;
+        };
+        let overlaps = !(new_end <= old_address || new_address >= old_end);
+        if overlaps {
+            return -LinuxError::EINVAL.code() as isize;
+        }
+    }
 
     if !proc.is_user_range(old_address, aligned_old_size) {
         return -LinuxError::EFAULT.code() as isize;
@@ -759,7 +782,9 @@ pub fn sys_mprotect(addr: usize, length: usize, prot: usize) -> isize {
         return -LinuxError::EINVAL.code() as isize;
     }
 
-    let aligned_length = (length + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
+    let Some(aligned_length) = page_align_up(length) else {
+        return -LinuxError::ENOMEM.code() as isize;
+    };
 
     let proc = match pulse_core::task::current_process() {
         Ok(proc) => proc,
@@ -792,7 +817,7 @@ pub fn sys_mprotect(addr: usize, length: usize, prot: usize) -> isize {
             axlog::debug!(
                 "sys_mprotect: failed to protect [{:#x}, {:#x}): {:?}",
                 addr,
-                addr + aligned_length,
+                addr.saturating_add(aligned_length),
                 e
             );
             -LinuxError::ENOMEM.code() as isize
@@ -871,11 +896,14 @@ pub fn sys_msync(addr: usize, length: usize, flags: usize) -> isize {
         Err(e) => return -e.code() as isize,
     };
 
-    if !proc.is_user_range(addr, length) {
+    let Some(aligned_length) = page_align_up(length) else {
+        return -LinuxError::ENOMEM.code() as isize;
+    };
+
+    if !proc.is_user_range(addr, aligned_length) {
         return -LinuxError::ENOMEM.code() as isize;
     }
 
-    let aligned_length = (length + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
     let aspace_handle = proc.aspace_handle();
     let writebacks = {
         let aspace = aspace_handle.read();
@@ -885,5 +913,22 @@ pub fn sys_msync(addr: usize, length: usize, flags: usize) -> isize {
     match writebacks.and_then(axmm::FileWritebacks::complete) {
         Ok(()) => 0,
         Err(e) => -LinuxError::from(e).code() as isize,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{PAGE_SIZE, is_page_aligned, mmap_offset_is_valid, page_align_up};
+
+    #[test]
+    fn page_alignment_helpers_reject_overflow_and_unaligned_file_offsets() {
+        assert!(is_page_aligned(0));
+        assert!(is_page_aligned(PAGE_SIZE));
+        assert!(!is_page_aligned(PAGE_SIZE - 1));
+        assert!(mmap_offset_is_valid(false, PAGE_SIZE - 1));
+        assert!(mmap_offset_is_valid(true, PAGE_SIZE));
+        assert!(!mmap_offset_is_valid(true, PAGE_SIZE - 1));
+        assert_eq!(page_align_up(PAGE_SIZE + 1), Some(2 * PAGE_SIZE));
+        assert_eq!(page_align_up(usize::MAX), None);
     }
 }
