@@ -1,5 +1,5 @@
-pub mod exec;
 mod aspace_lock;
+pub mod exec;
 mod process;
 mod signal;
 mod thread;
@@ -12,22 +12,22 @@ use alloc::{
 };
 use core::fmt::Write;
 
+pub use aspace_lock::AddressSpaceLock;
 use axerrno::{LinuxError, LinuxResult};
 use hashbrown::HashMap;
 use kernel_guard::NoPreemptIrqSave;
 use kspin::SpinNoIrq;
-pub use aspace_lock::AddressSpaceLock;
-pub use process::{CloneParams, ForkParams, Process, WaitidStatusType, MAX_POSIX_TIMER_COUNT};
+pub use process::{CloneParams, ForkParams, MAX_POSIX_TIMER_COUNT, Process, WaitidStatusType};
 pub use signal::{
-    DefaultSignalAction, SIG_DFL, SIG_IGN, SigAction, SignalAction, SignalAltStack,
-    SignalDelivery, SignalQueueError, SignalShared, SIGRTMIN, ThreadSignal,
-    blocked_mask as thread_blocked_mask, can_signal,
-    check_signals_and_deliver, discard_pending_if_ignored, force_signal_to_thread,
-    force_signal_to_thread_with_info, signal_info_for_child, signal_info_for_fault,
-    pending_mask as thread_pending_mask,
-    queue_signal_to_process, queue_signal_to_process_with_info, queue_signal_to_thread,
-    queue_signal_to_process_with_info_strict, queue_signal_to_thread_with_info,
-    queue_signal_to_thread_with_info_strict, resolve_action,
+    DefaultSignalAction, SIG_DFL, SIG_IGN, SIGRTMIN, SigAction, SignalAction, SignalAltStack,
+    SignalDelivery, SignalQueueError, SignalShared, ThreadSignal,
+    blocked_mask as thread_blocked_mask, can_signal, check_signals_and_deliver,
+    discard_pending_if_ignored, force_signal_to_thread, force_signal_to_thread_with_info,
+    pending_mask as thread_pending_mask, queue_signal_to_process,
+    queue_signal_to_process_with_info, queue_signal_to_process_with_info_strict,
+    queue_signal_to_thread, queue_signal_to_thread_with_info,
+    queue_signal_to_thread_with_info_strict, resolve_action, signal_info_for_child,
+    signal_info_for_fault,
 };
 use spin::{Lazy, RwLock};
 pub use thread::{SignalMaskGuard, Thread, ThreadHandle};
@@ -241,7 +241,6 @@ pub fn spawn_task_with_thread(
 /// Internal Linux error code for system call restarts.
 pub const ERESTARTSYS: i32 = 512;
 
-
 pub fn process_by_pid(pid: u64) -> Option<Arc<Process>> {
     PROCESS_REGISTRY.get(&pid)
 }
@@ -324,62 +323,74 @@ fn itimer_tick_hook() {
 }
 
 pub fn schedule_itimer_event(pid: u64, deadline: u64) {
-    axtask::set_generic_timer(deadline, alloc::boxed::Box::new(move |_now| {
-        if let Some(proc) = process_by_pid(pid) {
-            if !proc.is_zombie() {
-                let current_deadline = proc.time_context.itimer_real_deadline_ns.load(core::sync::atomic::Ordering::Acquire);
-                if current_deadline == deadline {
-                    let _ = queue_signal_to_process(&proc, 14 /* SIGALRM */);
-                    let interval = proc.time_context.itimer_real_interval_ns.load(core::sync::atomic::Ordering::Acquire);
-                    if interval > 0 {
-                        let new_deadline = deadline.saturating_add(interval);
-                        proc.time_context.itimer_real_deadline_ns.store(new_deadline, core::sync::atomic::Ordering::Release);
-                        schedule_itimer_event(pid, new_deadline);
-                    } else {
-                        proc.time_context.itimer_real_deadline_ns.store(0, core::sync::atomic::Ordering::Release);
+    axtask::set_generic_timer(
+        deadline,
+        alloc::boxed::Box::new(move |_now| {
+            if let Some(proc) = process_by_pid(pid) {
+                if !proc.is_zombie() {
+                    let current_deadline = proc
+                        .time_context
+                        .itimer_real_deadline_ns
+                        .load(core::sync::atomic::Ordering::Acquire);
+                    if current_deadline == deadline {
+                        let _ = queue_signal_to_process(&proc, 14 /* SIGALRM */);
+                        let interval = proc
+                            .time_context
+                            .itimer_real_interval_ns
+                            .load(core::sync::atomic::Ordering::Acquire);
+                        if interval > 0 {
+                            let new_deadline = deadline.saturating_add(interval);
+                            proc.time_context
+                                .itimer_real_deadline_ns
+                                .store(new_deadline, core::sync::atomic::Ordering::Release);
+                            schedule_itimer_event(pid, new_deadline);
+                        } else {
+                            proc.time_context
+                                .itimer_real_deadline_ns
+                                .store(0, core::sync::atomic::Ordering::Release);
+                        }
                     }
                 }
             }
-        }
-    }));
+        }),
+    );
 }
 
-pub fn schedule_posix_timer_event(
-    pid: u64,
-    timer_id: usize,
-    deadline: u64,
-    generation: u64,
-) {
-    axtask::set_generic_timer(deadline, alloc::boxed::Box::new(move |_now| {
-        if let Some(proc) = process_by_pid(pid) {
-            if !proc.is_zombie() {
-                let mut timers = proc.posix_timers.lock();
-                if let Some(timer) = &mut timers[timer_id] {
-                    if timer.generation == generation && timer.next_deadline_ns == deadline {
-                        let sig = timer.event.sigev_signo as usize;
-                        let notify = timer.event.sigev_notify;
-                        if notify == 0 { // SIGEV_SIGNAL
-                            let _ = queue_signal_to_process(&proc, sig);
-                        }
-                        timer.first_expired = true;
-                        if timer.interval_ns > 0 {
-                            let mut next = deadline.saturating_add(timer.interval_ns);
-                            let now_ns = axhal::time::monotonic_time_nanos() as u64;
-                            while next <= now_ns {
-                                timer.overrun = timer.overrun.saturating_add(1);
-                                next = next.saturating_add(timer.interval_ns);
+pub fn schedule_posix_timer_event(pid: u64, timer_id: usize, deadline: u64, generation: u64) {
+    axtask::set_generic_timer(
+        deadline,
+        alloc::boxed::Box::new(move |_now| {
+            if let Some(proc) = process_by_pid(pid) {
+                if !proc.is_zombie() {
+                    let mut timers = proc.posix_timers.lock();
+                    if let Some(timer) = &mut timers[timer_id] {
+                        if timer.generation == generation && timer.next_deadline_ns == deadline {
+                            let sig = timer.event.sigev_signo as usize;
+                            let notify = timer.event.sigev_notify;
+                            if notify == 0 {
+                                // SIGEV_SIGNAL
+                                let _ = queue_signal_to_process(&proc, sig);
                             }
-                            timer.next_deadline_ns = next;
-                            drop(timers);
-                            schedule_posix_timer_event(pid, timer_id, next, generation);
-                        } else {
-                            timer.next_deadline_ns = 0;
+                            timer.first_expired = true;
+                            if timer.interval_ns > 0 {
+                                let mut next = deadline.saturating_add(timer.interval_ns);
+                                let now_ns = axhal::time::monotonic_time_nanos() as u64;
+                                while next <= now_ns {
+                                    timer.overrun = timer.overrun.saturating_add(1);
+                                    next = next.saturating_add(timer.interval_ns);
+                                }
+                                timer.next_deadline_ns = next;
+                                drop(timers);
+                                schedule_posix_timer_event(pid, timer_id, next, generation);
+                            } else {
+                                timer.next_deadline_ns = 0;
+                            }
                         }
                     }
                 }
             }
-        }
-    }));
+        }),
+    );
 }
 
 pub fn adjust_absolute_timers() {
@@ -394,10 +405,17 @@ pub fn adjust_absolute_timers() {
             let mut timers = proc.posix_timers.lock();
             for timer_opt in timers.iter_mut() {
                 if let Some(timer) = timer_opt {
-                    if timer.clock_id == 0 && timer.is_absolute && !timer.first_expired && timer.next_deadline_ns > 0 {
+                    if timer.clock_id == 0
+                        && timer.is_absolute
+                        && !timer.first_expired
+                        && timer.next_deadline_ns > 0
+                    {
                         let sec = timer.itimer_spec.it_value.tv_sec as u64;
                         let nsec = timer.itimer_spec.it_value.tv_nsec as u64;
-                        if let Some(req_ns) = sec.checked_mul(1_000_000_000).and_then(|s| s.checked_add(nsec)) {
+                        if let Some(req_ns) = sec
+                            .checked_mul(1_000_000_000)
+                            .and_then(|s| s.checked_add(nsec))
+                        {
                             let new_deadline = req_ns.saturating_sub(new_offset);
                             timer.next_deadline_ns = new_deadline;
                             to_schedule.push((timer.id, new_deadline, timer.generation));

@@ -113,14 +113,11 @@ pub fn sys_ppoll(
         Ok(thread) => thread,
         Err(e) => return -e.code() as isize,
     };
-    let temporary_mask = match read_temporary_signal_mask(
-        thread.process().as_ref(),
-        sigmask,
-        sigsetsize,
-    ) {
-        Ok(mask) => mask,
-        Err(e) => return -e.code() as isize,
-    };
+    let temporary_mask =
+        match read_temporary_signal_mask(thread.process().as_ref(), sigmask, sigsetsize) {
+            Ok(mask) => mask,
+            Err(e) => return -e.code() as isize,
+        };
     let _mask_guard = pulse_core::task::SignalMaskGuard::install(thread.clone(), temporary_mask);
 
     if nfds == 0 {

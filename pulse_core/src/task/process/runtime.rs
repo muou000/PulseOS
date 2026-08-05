@@ -1,11 +1,12 @@
+use linux_raw_sys::general::{
+    CLD_CONTINUED, CLD_DUMPED, CLD_EXITED, CLD_KILLED, CLD_STOPPED, SA_NOCLDSTOP, SA_NOCLDWAIT,
+    SIGCHLD, SIGCONT, WCONTINUED, WEXITED, WNOWAIT, WUNTRACED,
+};
+
 use super::*;
 use crate::task::{
     self, SIG_IGN, queue_signal_to_process, queue_signal_to_process_with_info,
     signal_info_for_child,
-};
-use linux_raw_sys::general::{
-    CLD_CONTINUED, CLD_DUMPED, CLD_EXITED, CLD_KILLED, CLD_STOPPED, SA_NOCLDSTOP, SA_NOCLDWAIT,
-    SIGCHLD, SIGCONT, WCONTINUED, WEXITED, WNOWAIT, WUNTRACED,
 };
 
 impl Process {
@@ -401,7 +402,8 @@ impl Process {
             // Keep the running/stopped state and the parent's one-shot
             // wait-status markers coherent with SIGCONT.
             self.stopped_signal_pending.store(signo, Ordering::Release);
-            self.continued_signal_pending.store(false, Ordering::Release);
+            self.continued_signal_pending
+                .store(false, Ordering::Release);
             true
         });
         if !entered {
@@ -475,12 +477,13 @@ impl Process {
             return;
         }
         let wait_context = WaitContext::new(|| (WaitReason::Signal, self.pid(), 0));
-        self.job_control_event.wait_until_with_context(wait_context, || {
-            !self.group_stopped()
-                || self.group_exiting()
-                || thread.exec_exit_requested()
-                || thread.signal().has_deliverable_pending_signal()
-        });
+        self.job_control_event
+            .wait_until_with_context(wait_context, || {
+                !self.group_stopped()
+                    || self.group_exiting()
+                    || thread.exec_exit_requested()
+                    || thread.signal().has_deliverable_pending_signal()
+            });
     }
 
     fn notify_parent_job_control(&self, code: i32, status: i32) {
@@ -494,9 +497,9 @@ impl Process {
                     Some(info),
                 );
             }
-            parent.notify_child_state_change(
-                WakeContext::new(|| (WakeSource::Signal, status as u64)),
-            );
+            parent.notify_child_state_change(WakeContext::new(|| {
+                (WakeSource::Signal, status as u64)
+            }));
         }
     }
 
@@ -558,10 +561,7 @@ impl Process {
     }
 
     fn child_exit_siginfo_status(&self) -> (i32, i32) {
-        Self::exit_siginfo_status(
-            self.exit_code(),
-            self.exit_signal.load(Ordering::Acquire),
-        )
+        Self::exit_siginfo_status(self.exit_code(), self.exit_signal.load(Ordering::Acquire))
     }
 
     /// Publishes the terminal child state to its parent and returns whether
@@ -722,7 +722,10 @@ impl Process {
                     parent.add_child_time_ns(child_utime_ns, child_stime_ns);
                     self.wait_task_refs_exited();
                     if let Err(e) = self.shrink_reaped_resources() {
-                        axlog::warn!("failed to shrink automatically reaped child resources: {:?}", e);
+                        axlog::warn!(
+                            "failed to shrink automatically reaped child resources: {:?}",
+                            e
+                        );
                     }
                     self.release_task_refs();
                     task::unregister_process(self.pid());
@@ -954,7 +957,10 @@ mod tests {
 
     #[test]
     fn exit_siginfo_status_matches_waitid_encoding() {
-        assert_eq!(Process::exit_siginfo_status(0x1ff, 0), (CLD_EXITED as i32, 0xff));
+        assert_eq!(
+            Process::exit_siginfo_status(0x1ff, 0),
+            (CLD_EXITED as i32, 0xff)
+        );
         assert_eq!(
             Process::exit_siginfo_status(0, SIGCONT as i32),
             (CLD_KILLED as i32, SIGCONT as i32)
