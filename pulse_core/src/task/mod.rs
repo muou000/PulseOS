@@ -211,8 +211,36 @@ pub fn emit_current_qperf_task_metadata() {
     }
 }
 
+/// Binds hardware/software context (`page_table_root`, `TaskExt`, `PROCESS_REGISTRY`)
+/// to a `TaskInner` before publishing it to the scheduler queue.
+pub fn spawn_task_with_thread(
+    mut inner: axtask::TaskInner,
+    thread: Arc<Thread>,
+    register_proc: bool,
+) -> axtask::AxTaskRef {
+    let proc = thread.process();
+    let pt_root = proc.page_table_root();
+    let asid = proc.asid();
+    inner.ctx_mut().set_page_table_root(pt_root, asid);
+
+    if register_proc {
+        register_process(proc.pid(), proc.clone());
+    }
+
+    #[cfg(feature = "qperf-trace")]
+    emit_qperf_task_metadata(&inner, proc.pid(), thread.tid());
+
+    inner.init_task_ext(ThreadHandle::new(thread));
+
+    let task = inner.into_arc();
+    proc.register_task_ref(task.clone());
+    axtask::spawn_task_ref(task.clone());
+    task
+}
+
 /// Internal Linux error code for system call restarts.
 pub const ERESTARTSYS: i32 = 512;
+
 
 pub fn process_by_pid(pid: u64) -> Option<Arc<Process>> {
     PROCESS_REGISTRY.get(&pid)
