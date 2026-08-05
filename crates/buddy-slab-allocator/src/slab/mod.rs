@@ -19,6 +19,8 @@ pub use size_class::SizeClass;
 
 use crate::error::{AllocError, AllocResult};
 
+const SLAB_FREE_BATCH_CAPACITY: usize = 16;
+
 /// Result of a slab allocation attempt.
 pub enum SlabAllocResult {
     /// Object successfully allocated.
@@ -29,12 +31,62 @@ pub enum SlabAllocResult {
     NeedsSlab { size_class: SizeClass, pages: usize },
 }
 
+/// A fixed-capacity list of slab pages reclaimed by one local free operation.
+///
+/// The list is stack-only so a deallocation never needs another allocation to
+/// return pages to the buddy allocator.
+#[derive(Clone, Copy)]
+pub struct SlabFreeBatch {
+    entries: [(usize, usize); SLAB_FREE_BATCH_CAPACITY],
+    len: usize,
+}
+
+impl SlabFreeBatch {
+    /// Maximum number of slab pages reclaimed by one local batch flush.
+    pub const CAPACITY: usize = SLAB_FREE_BATCH_CAPACITY;
+
+    /// Create an empty reclaim batch.
+    pub const fn new() -> Self {
+        Self {
+            entries: [(0, 0); Self::CAPACITY],
+            len: 0,
+        }
+    }
+
+    /// Add one slab page range to this batch.
+    pub fn push(&mut self, base: usize, pages: usize) {
+        assert!(self.len < Self::CAPACITY, "slab reclaim batch overflow");
+        self.entries[self.len] = (base, pages);
+        self.len += 1;
+    }
+
+    /// Append every range from another batch.
+    pub fn extend_from(&mut self, other: &Self) {
+        for &(base, pages) in other.as_slice() {
+            self.push(base, pages);
+        }
+    }
+
+    /// Return the reclaimed slab ranges.
+    pub fn as_slice(&self) -> &[(usize, usize)] {
+        &self.entries[..self.len]
+    }
+}
+
+impl Default for SlabFreeBatch {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// Result of a slab deallocation.
 pub enum SlabDeallocResult {
     /// Object freed, nothing else to do.
     Done,
     /// The slab page at `base` became empty and should be returned to the buddy.
     FreeSlab { base: usize, pages: usize },
+    /// Multiple slab pages became empty and should be returned to the buddy.
+    FreeSlabs(SlabFreeBatch),
 }
 
 /// Result of a pool-mediated slab deallocation.
@@ -45,6 +97,8 @@ pub enum SlabPoolDeallocResult {
     RemoteQueued,
     /// The slab page at `base` became empty and should be returned to the buddy.
     FreeSlab { base: usize, pages: usize },
+    /// Multiple slab pages became empty and should be returned to the buddy.
+    FreeSlabs(SlabFreeBatch),
 }
 
 /// Object-safe slab interface used by [`crate::GlobalAllocator`] EII hooks.
@@ -102,6 +156,7 @@ pub trait SlabPoolTrait: Sync {
                 SlabDeallocResult::FreeSlab { base, pages } => {
                     SlabPoolDeallocResult::FreeSlab { base, pages }
                 }
+                SlabDeallocResult::FreeSlabs(batch) => SlabPoolDeallocResult::FreeSlabs(batch),
             }
         } else {
             self.owner_slab(owner_cpu).dealloc_remote(ptr);

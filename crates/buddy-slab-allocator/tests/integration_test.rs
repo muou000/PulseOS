@@ -532,6 +532,7 @@ fn slab_basic() {
     match slab.dealloc(ptr, layout) {
         SlabDeallocResult::Done => {}
         SlabDeallocResult::FreeSlab { .. } => {} // also valid
+        SlabDeallocResult::FreeSlabs(_) => {}    // also valid
     }
 }
 

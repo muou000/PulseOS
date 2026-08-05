@@ -295,6 +295,12 @@ impl<const PAGE_SIZE: usize> GlobalAllocator<PAGE_SIZE> {
                 crate::SlabPoolDeallocResult::FreeSlab { base, pages } => {
                     self.buddy.lock().dealloc_pages(base, pages);
                 }
+                crate::SlabPoolDeallocResult::FreeSlabs(batch) => {
+                    let mut buddy = self.buddy.lock();
+                    for &(base, pages) in batch.as_slice() {
+                        buddy.dealloc_pages(base, pages);
+                    }
+                }
             }
         }
     }

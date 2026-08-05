@@ -48,17 +48,20 @@ impl SizeClass {
     /// Select the smallest size class that can satisfy `layout`.
     ///
     /// Returns `None` if the requested size or alignment exceeds the slab's capability.
+    #[inline]
     pub fn from_layout(layout: Layout) -> Option<SizeClass> {
         let size = layout.size().max(layout.align());
         if size > SLAB_MAX_SIZE {
             return None;
         }
-        for (i, &class_size) in CLASS_SIZES.iter().enumerate() {
-            if size <= class_size {
-                return Some(SizeClass::ALL[i]);
-            }
+        let req = size.max(8);
+        let pow2 = req.next_power_of_two();
+        let idx = (pow2.trailing_zeros() - 3) as usize;
+        if idx < SIZE_CLASS_COUNT {
+            Some(SizeClass::ALL[idx])
+        } else {
+            None
         }
-        None
     }
 
     /// Object size in bytes.
