@@ -18,7 +18,7 @@ pub use buddy::{BuddyAllocator, ManagedSection};
 
 pub mod slab;
 pub use slab::{
-    PerCpuSlab, SizeClass, SlabAllocResult, SlabAllocator, SlabDeallocResult,
+    PerCpuSlab, SizeClass, SlabAllocResult, SlabAllocator, SlabDeallocResult, SlabFreeBatch,
     SlabPoolDeallocResult, SlabPoolTrait, SlabTrait, StaticSlabPool,
 };
 

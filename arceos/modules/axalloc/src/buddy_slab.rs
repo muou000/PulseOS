@@ -7,7 +7,7 @@ use core::{
 use allocator::{AllocError, AllocResult};
 use buddy_slab_allocator::{
     AllocError as SlubAllocError, GlobalAllocator as InnerAllocator, SizeClass, SlabAllocResult,
-    SlabAllocator, SlabDeallocResult, SlabPoolTrait, SlabTrait, eii::AllocatorIf,
+    SlabAllocator, SlabDeallocResult, SlabFreeBatch, SlabPoolTrait, SlabTrait, eii::AllocatorIf,
 };
 use kernel_guard::NoPreemptIrqSave;
 use kspin::SpinRaw;
@@ -19,15 +19,58 @@ static PERCPU_SLAB: PerCpuSlab<PAGE_SIZE> = PerCpuSlab::new_uninit();
 
 static SLAB_POOL: SlabPool = SlabPool;
 
+const MAGAZINE_CAP: usize = 32;
+const BATCH_SIZE: usize = SlabFreeBatch::CAPACITY;
+const NUM_SIZE_CLASSES: usize = SizeClass::COUNT;
+
+#[derive(Copy, Clone)]
+struct SizeClassMagazine {
+    objects: [usize; MAGAZINE_CAP],
+    count: usize,
+}
+
+impl SizeClassMagazine {
+    const fn new() -> Self {
+        Self {
+            objects: [0; MAGAZINE_CAP],
+            count: 0,
+        }
+    }
+}
+
 struct PerCpuSlab<const PAGE_SIZE: usize> {
     cpu_id: Option<u16>,
+    magazines: core::cell::UnsafeCell<[SizeClassMagazine; NUM_SIZE_CLASSES]>,
     inner: SpinRaw<SlabAllocator<PAGE_SIZE>>,
+}
+
+// SAFETY: PerCpuSlab is per-CPU and protected against re-entrancy by NoPreemptIrqSave.
+unsafe impl<const PAGE_SIZE: usize> Sync for PerCpuSlab<PAGE_SIZE> {}
+
+fn collect_slab_reclaim(reclaims: &mut SlabFreeBatch, result: SlabDeallocResult) {
+    match result {
+        SlabDeallocResult::Done => {}
+        SlabDeallocResult::FreeSlab { base, pages } => reclaims.push(base, pages),
+        SlabDeallocResult::FreeSlabs(batch) => reclaims.extend_from(&batch),
+    }
+}
+
+fn finish_slab_reclaims(reclaims: SlabFreeBatch) -> SlabDeallocResult {
+    match reclaims.as_slice() {
+        [] => SlabDeallocResult::Done,
+        [(base, pages)] => SlabDeallocResult::FreeSlab {
+            base: *base,
+            pages: *pages,
+        },
+        _ => SlabDeallocResult::FreeSlabs(reclaims),
+    }
 }
 
 impl<const PAGE_SIZE: usize> PerCpuSlab<PAGE_SIZE> {
     const fn new_uninit() -> Self {
         Self {
             cpu_id: None,
+            magazines: core::cell::UnsafeCell::new([SizeClassMagazine::new(); NUM_SIZE_CLASSES]),
             inner: SpinRaw::new(SlabAllocator::new()),
         }
     }
@@ -36,6 +79,7 @@ impl<const PAGE_SIZE: usize> PerCpuSlab<PAGE_SIZE> {
         let cpu_id = u16::try_from(cpu_id).expect("CPU id exceeds SLUB owner range");
         assert!(self.cpu_id.is_none(), "per-CPU SLUB is already initialized");
         self.cpu_id = Some(cpu_id);
+        self.magazines = core::cell::UnsafeCell::new([SizeClassMagazine::new(); NUM_SIZE_CLASSES]);
         *self.inner.get_mut() = SlabAllocator::new();
     }
 
@@ -55,7 +99,41 @@ impl<const PAGE_SIZE: usize> SlabTrait for PerCpuSlab<PAGE_SIZE> {
     }
 
     fn alloc(&self, layout: Layout) -> buddy_slab_allocator::AllocResult<SlabAllocResult> {
-        self.inner.lock().alloc(layout)
+        let Some(sc) = SizeClass::from_layout(layout) else {
+            return Err(buddy_slab_allocator::AllocError::InvalidParam);
+        };
+        let sc_idx = sc.index();
+        // SAFETY: NoPreemptIrqSave protects this per-CPU access against concurrent execution on the same core.
+        let mag = unsafe { &mut (*self.magazines.get())[sc_idx] };
+
+        if mag.count > 0 {
+            mag.count -= 1;
+            let addr = mag.objects[mag.count];
+            let ptr = unsafe { NonNull::new_unchecked(addr as *mut u8) };
+            return Ok(SlabAllocResult::Allocated(ptr));
+        }
+
+        let mut inner = self.inner.lock();
+        let mut first_ptr = None;
+        for i in 0..BATCH_SIZE {
+            match inner.alloc(layout)? {
+                SlabAllocResult::Allocated(ptr) => {
+                    if i == 0 {
+                        first_ptr = Some(ptr);
+                    } else {
+                        mag.objects[mag.count] = ptr.as_ptr() as usize;
+                        mag.count += 1;
+                    }
+                }
+                SlabAllocResult::NeedsSlab { size_class, pages } => {
+                    if first_ptr.is_none() {
+                        return Ok(SlabAllocResult::NeedsSlab { size_class, pages });
+                    }
+                    break;
+                }
+            }
+        }
+        Ok(SlabAllocResult::Allocated(first_ptr.unwrap()))
     }
 
     fn add_slab(&self, size_class: SizeClass, base: usize, bytes: usize) {
@@ -65,7 +143,29 @@ impl<const PAGE_SIZE: usize> SlabTrait for PerCpuSlab<PAGE_SIZE> {
     }
 
     fn dealloc_local(&self, ptr: NonNull<u8>, layout: Layout) -> SlabDeallocResult {
-        self.inner.lock().dealloc(ptr, layout)
+        let Some(sc) = SizeClass::from_layout(layout) else {
+            return SlabDeallocResult::Done;
+        };
+        let sc_idx = sc.index();
+        // SAFETY: NoPreemptIrqSave protects this per-CPU access against concurrent execution on the same core.
+        let mag = unsafe { &mut (*self.magazines.get())[sc_idx] };
+
+        if mag.count < MAGAZINE_CAP {
+            mag.objects[mag.count] = ptr.as_ptr() as usize;
+            mag.count += 1;
+            return SlabDeallocResult::Done;
+        }
+
+        let mut inner = self.inner.lock();
+        let mut reclaims = SlabFreeBatch::new();
+        for _ in 0..BATCH_SIZE {
+            mag.count -= 1;
+            let p = unsafe { NonNull::new_unchecked(mag.objects[mag.count] as *mut u8) };
+            collect_slab_reclaim(&mut reclaims, inner.dealloc(p, layout));
+        }
+        mag.objects[mag.count] = ptr.as_ptr() as usize;
+        mag.count += 1;
+        finish_slab_reclaims(reclaims)
     }
 }
 
@@ -336,4 +436,35 @@ pub fn global_add_memory(start_vaddr: usize, size: usize) -> AllocResult {
         start_vaddr + size
     );
     GLOBAL_ALLOCATOR.add_memory(start_vaddr, size)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{SlabDeallocResult, SlabFreeBatch, collect_slab_reclaim, finish_slab_reclaims};
+
+    #[test]
+    fn batch_flush_preserves_every_reclaimed_slab() {
+        let mut reclaims = SlabFreeBatch::new();
+        collect_slab_reclaim(
+            &mut reclaims,
+            SlabDeallocResult::FreeSlab {
+                base: 0x1000,
+                pages: 1,
+            },
+        );
+        collect_slab_reclaim(
+            &mut reclaims,
+            SlabDeallocResult::FreeSlab {
+                base: 0x4000,
+                pages: 2,
+            },
+        );
+
+        match finish_slab_reclaims(reclaims) {
+            SlabDeallocResult::FreeSlabs(batch) => {
+                assert_eq!(batch.as_slice(), &[(0x1000, 1), (0x4000, 2)]);
+            }
+            _ => panic!("multiple reclaimed slabs must not be collapsed to one"),
+        }
+    }
 }
