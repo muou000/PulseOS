@@ -157,20 +157,19 @@ impl LocalSocket {
             if n > 0 {
                 read_size += n;
                 drop(ring);
-                self.rx.write_wait_queue.notify_all(true);
                 continue;
             }
             if self.peer_closed.load(Ordering::Acquire) {
-                return Ok(read_size);
+                break;
             }
             if read_size > 0 {
-                return Ok(read_size);
+                break;
             }
             if self.nonblocking.load(Ordering::Acquire) {
                 return Err(LinuxError::EAGAIN);
             }
             drop(ring);
-            
+
             self.rx.read_wait_queue.wait_until(|| {
                 let ring = self.rx.buffer.lock();
                 ring.available_read() > 0
@@ -178,7 +177,16 @@ impl LocalSocket {
                     || self.current_has_pending_signal()
             });
             if self.current_has_pending_signal() {
+                if read_size > 0 {
+                    break;
+                }
                 return Err(LinuxError::EINTR);
+            }
+        }
+        if read_size > 0 {
+            self.rx.write_wait_queue.notify_one(true);
+            if self.rx.buffer.lock().available_read() > 0 {
+                self.rx.read_wait_queue.notify_one(false);
             }
         }
         Ok(read_size)
@@ -191,28 +199,26 @@ impl LocalSocket {
         let mut write_size = 0usize;
         while write_size < buf.len() {
             if self.peer_closed.load(Ordering::Acquire) {
-                return if write_size > 0 {
-                    Ok(write_size)
-                } else {
-                    Err(LinuxError::EPIPE)
-                };
+                if write_size > 0 {
+                    break;
+                }
+                return Err(LinuxError::EPIPE);
             }
             let mut ring = self.tx.buffer.lock();
             let n = ring.write(&buf[write_size..]);
             if n > 0 {
                 write_size += n;
                 drop(ring);
-                self.tx.read_wait_queue.notify_all(true);
                 continue;
             }
             if write_size > 0 {
-                return Ok(write_size);
+                break;
             }
             if self.nonblocking.load(Ordering::Acquire) {
                 return Err(LinuxError::EAGAIN);
             }
             drop(ring);
-            
+
             self.tx.write_wait_queue.wait_until(|| {
                 let ring = self.tx.buffer.lock();
                 ring.available_write() > 0
@@ -220,11 +226,16 @@ impl LocalSocket {
                     || self.current_has_pending_signal()
             });
             if self.current_has_pending_signal() {
-                return if write_size > 0 {
-                    Ok(write_size)
-                } else {
-                    Err(LinuxError::EINTR)
-                };
+                if write_size > 0 {
+                    break;
+                }
+                return Err(LinuxError::EINTR);
+            }
+        }
+        if write_size > 0 {
+            self.tx.read_wait_queue.notify_one(true);
+            if self.tx.buffer.lock().available_write() > 0 {
+                self.tx.write_wait_queue.notify_one(false);
             }
         }
         Ok(write_size)

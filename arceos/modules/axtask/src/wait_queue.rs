@@ -711,9 +711,15 @@ impl WaitQueue {
         self.queue.lock().len()
     }
 
-    /// Returns true if the wait queue is empty.
+    /// Returns true when no task or registered waker is waiting.
+    ///
+    /// Registered wakers are used by poll/epoll futures. Callers that use this
+    /// as a notification fast path must not skip those listeners.
     pub fn is_empty(&self) -> bool {
-        self.queue.lock().is_empty()
+        if !self.queue.lock().is_empty() {
+            return false;
+        }
+        self.wakers.lock().is_empty()
     }
 
     /// Remove all exited tasks from the wait queue.
