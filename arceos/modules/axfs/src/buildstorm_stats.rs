@@ -49,14 +49,51 @@ define_counters!(
     EXT4_FLUSH_BATCHES,
     EXT4_FLUSH_BLOCKS,
     EXT4_DEVICE_FLUSHES,
+    EXT4_DIR_MUTATION_LOCK_FAST,
+    EXT4_DIR_MUTATION_LOCK_WAIT,
+    EXT4_DIR_MUTATION_LOCK_WAIT_NS,
+    EXT4_DIR_MUTATION_LOCK_HOLD_NS,
     DEVICE_INFLIGHT,
     DEVICE_INFLIGHT_PEAK,
     SYSCALL_IOV_DIRECT_WRITE_BYTES,
     SYSCALL_IOV_SCRATCH_COPY_BYTES,
     SYSCALL_IOV_SCRATCH_ALLOCS,
+    MM_ANON_FAULT_BATCHES,
+    MM_ANON_FAULT_FULL_BATCHES,
+    MM_ANON_FAULT_EMPTY_REQUESTS,
+    MM_ANON_FAULT_REQUESTED_PAGES,
+    MM_ANON_FAULT_PREPARED_PAGES,
+    MM_ANON_FAULT_SHORT_PREPARES,
+    MM_ANON_FAULT_MAPPED_PAGES,
+    MM_ANON_FAULT_PTE_READ_PROBES,
+    MM_ANON_FAULT_PTE_WRITE_LOCKS,
+    MM_ANON_FAULT_PTE_WRITE_GUARD_ACQUIRES,
+    MM_ANON_FAULT_LOCAL_TLB_FLUSHES,
+    MM_FILE_FAULT_COLD_BATCHES,
+    MM_FILE_FAULT_COLD_FULL_BATCHES,
+    MM_FILE_FAULT_COLD_REQUESTED_PAGES,
+    MM_FILE_FAULT_COLD_PREPARED_PAGES,
+    MM_FILE_FAULT_COLD_MAPPED_PAGES,
+    MM_FILE_FAULT_SEQUENTIAL_BATCHES,
+    MM_FILE_FAULT_SEQUENTIAL_FULL_BATCHES,
+    MM_FILE_FAULT_SEQUENTIAL_REQUESTED_PAGES,
+    MM_FILE_FAULT_SEQUENTIAL_PREPARED_PAGES,
+    MM_FILE_FAULT_SEQUENTIAL_MAPPED_PAGES,
+    MM_FILE_FAULT_PREPARED_PAGES,
+    MM_FILE_FAULT_SHORT_PREPARES,
+    MM_FILE_FAULT_MAPPED_PAGES,
+    MM_FILE_FAULT_PTE_READ_PROBES,
+    MM_FILE_FAULT_PTE_WRITE_LOCKS,
+    MM_FILE_FAULT_PTE_WRITE_GUARD_ACQUIRES,
+    MM_FILE_FAULT_LOCAL_TLB_FLUSHES,
 );
 
 static ACTIVE: AtomicBool = AtomicBool::new(false);
+
+#[inline]
+pub fn is_active() -> bool {
+    ACTIVE.load(Ordering::Acquire)
+}
 
 #[inline]
 pub fn add(counter: &AtomicU64, value: u64) {
@@ -136,11 +173,23 @@ pub fn finish() {
         load(&PAGE_EVICTIONS),
         load(&PAGE_WRITE_BYTES),
     );
+    // These are per-acquisition totals. Concurrent tasks can overlap, so the
+    // time totals are not a fraction of BuildStorm wall-clock time.
+    let dir_mutation_lock_fast = load(&EXT4_DIR_MUTATION_LOCK_FAST);
+    let dir_mutation_lock_wait = load(&EXT4_DIR_MUTATION_LOCK_WAIT);
+    let dir_mutation_lock_attempts = dir_mutation_lock_fast.saturating_add(dir_mutation_lock_wait);
+    let dir_mutation_lock_wait_pct_x10000 = if dir_mutation_lock_attempts == 0 {
+        0
+    } else {
+        dir_mutation_lock_wait.saturating_mul(10_000) / dir_mutation_lock_attempts
+    };
     log::info!(
         "BUILDSTORM_FS_STATS ext4 range_read_fast={} range_read_wait={} range_write_fast={} \
          range_write_wait={} range_buckets_locked={} block_cache_hits={} block_cache_misses={} \
          bypass_reads={} bypass_writes={} dirty_blocks={} flush_batches={} flush_blocks={} \
-         device_flushes={}",
+         device_flushes={} dir_mutation_lock_fast={} dir_mutation_lock_wait={} \
+         dir_mutation_lock_wait_pct_x10000={} dir_mutation_lock_wait_ns={} \
+         dir_mutation_lock_hold_ns={}",
         load(&EXT4_RANGE_READ_FAST),
         load(&EXT4_RANGE_READ_WAIT),
         load(&EXT4_RANGE_WRITE_FAST),
@@ -154,6 +203,11 @@ pub fn finish() {
         load(&EXT4_FLUSH_BATCHES),
         load(&EXT4_FLUSH_BLOCKS),
         load(&EXT4_DEVICE_FLUSHES),
+        dir_mutation_lock_fast,
+        dir_mutation_lock_wait,
+        dir_mutation_lock_wait_pct_x10000,
+        load(&EXT4_DIR_MUTATION_LOCK_WAIT_NS),
+        load(&EXT4_DIR_MUTATION_LOCK_HOLD_NS),
     );
     log::info!(
         "BUILDSTORM_FS_STATS device read_ops={} read_bytes={} write_ops={} write_bytes={} \
@@ -170,5 +224,47 @@ pub fn finish() {
         load(&SYSCALL_IOV_DIRECT_WRITE_BYTES),
         load(&SYSCALL_IOV_SCRATCH_COPY_BYTES),
         load(&SYSCALL_IOV_SCRATCH_ALLOCS),
+    );
+    log::info!(
+        "BUILDSTORM_MM_STATS anon batches={} full_batches={} empty_requests={} \
+         requested_pages={} prepared_pages={} short_prepares={} mapped_pages={} \
+         pte_read_probes={} pte_write_attempts={} pte_write_guard_acquires={} \
+         local_tlb_flushes={}",
+        load(&MM_ANON_FAULT_BATCHES),
+        load(&MM_ANON_FAULT_FULL_BATCHES),
+        load(&MM_ANON_FAULT_EMPTY_REQUESTS),
+        load(&MM_ANON_FAULT_REQUESTED_PAGES),
+        load(&MM_ANON_FAULT_PREPARED_PAGES),
+        load(&MM_ANON_FAULT_SHORT_PREPARES),
+        load(&MM_ANON_FAULT_MAPPED_PAGES),
+        load(&MM_ANON_FAULT_PTE_READ_PROBES),
+        load(&MM_ANON_FAULT_PTE_WRITE_LOCKS),
+        load(&MM_ANON_FAULT_PTE_WRITE_GUARD_ACQUIRES),
+        load(&MM_ANON_FAULT_LOCAL_TLB_FLUSHES),
+    );
+    log::info!(
+        "BUILDSTORM_MM_STATS file cold_batches={} cold_full_batches={} cold_requested_pages={} \
+         cold_prepared_pages={} cold_mapped_pages={} sequential_batches={} \
+         sequential_full_batches={} sequential_requested_pages={} sequential_prepared_pages={} \
+         sequential_mapped_pages={} prepared_pages={} short_prepares={} mapped_pages={} \
+         pte_read_probes={} pte_write_attempts={} pte_write_guard_acquires={} \
+         local_tlb_flushes={}",
+        load(&MM_FILE_FAULT_COLD_BATCHES),
+        load(&MM_FILE_FAULT_COLD_FULL_BATCHES),
+        load(&MM_FILE_FAULT_COLD_REQUESTED_PAGES),
+        load(&MM_FILE_FAULT_COLD_PREPARED_PAGES),
+        load(&MM_FILE_FAULT_COLD_MAPPED_PAGES),
+        load(&MM_FILE_FAULT_SEQUENTIAL_BATCHES),
+        load(&MM_FILE_FAULT_SEQUENTIAL_FULL_BATCHES),
+        load(&MM_FILE_FAULT_SEQUENTIAL_REQUESTED_PAGES),
+        load(&MM_FILE_FAULT_SEQUENTIAL_PREPARED_PAGES),
+        load(&MM_FILE_FAULT_SEQUENTIAL_MAPPED_PAGES),
+        load(&MM_FILE_FAULT_PREPARED_PAGES),
+        load(&MM_FILE_FAULT_SHORT_PREPARES),
+        load(&MM_FILE_FAULT_MAPPED_PAGES),
+        load(&MM_FILE_FAULT_PTE_READ_PROBES),
+        load(&MM_FILE_FAULT_PTE_WRITE_LOCKS),
+        load(&MM_FILE_FAULT_PTE_WRITE_GUARD_ACQUIRES),
+        load(&MM_FILE_FAULT_LOCAL_TLB_FLUSHES),
     );
 }
