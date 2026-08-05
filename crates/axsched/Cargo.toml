@@ -37,3 +37,8 @@ path = "src/lib.rs"
 
 [dependencies.linked_list_r4l]
 version = "0.3"
+
+[dependencies.intrusive-collections]
+version = "0.9.7"
+default-features = false
+features = ["alloc"]
