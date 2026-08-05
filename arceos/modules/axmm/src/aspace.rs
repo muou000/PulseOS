@@ -406,10 +406,18 @@ impl<'a> core::ops::Deref for PageTableGuard<'a> {
 
 impl PageTableReadGuard<'_> {
     #[inline]
-    fn assert_covers(&self, vaddr: VirtAddr) {
-        if let PageTableReadLock::Subtree { subtree_id, .. } = &self.0 {
-            debug_assert_eq!(*subtree_id, vaddr.as_usize() >> PAGE_TABLE_SUBTREE_SHIFT);
+    pub(crate) fn covers(&self, vaddr: VirtAddr) -> bool {
+        match &self.0 {
+            PageTableReadLock::Whole(_) => true,
+            PageTableReadLock::Subtree { subtree_id, .. } => {
+                *subtree_id == vaddr.as_usize() >> PAGE_TABLE_SUBTREE_SHIFT
+            }
         }
+    }
+
+    #[inline]
+    fn assert_covers(&self, vaddr: VirtAddr) {
+        debug_assert!(self.covers(vaddr));
     }
 
     pub fn query(&self, vaddr: VirtAddr) -> PagingResult<(PhysAddr, MappingFlags, PageSize)> {
