@@ -1,5 +1,5 @@
 use alloc::{sync::Arc, vec::Vec};
-use core::{ptr::NonNull, time::Duration};
+use core::{mem::MaybeUninit, ptr::NonNull, time::Duration};
 
 use axalloc::{frame_table, global_allocator};
 use axerrno::LinuxError;
@@ -94,7 +94,7 @@ pub(crate) fn write_user_bytes_partial(
 
 pub(crate) fn read_user_cstring_to_slice(
     user_addr: usize,
-    dst: &mut [u8],
+    dst: &mut [MaybeUninit<u8>],
 ) -> Result<usize, LinuxError> {
     if user_addr == 0 {
         return Err(LinuxError::EFAULT);
@@ -106,20 +106,28 @@ pub(crate) fn read_user_cstring_to_slice(
         let page_remaining = 4096 - (chunk_addr & 4095);
         let chunk_len = core::cmp::min(128, core::cmp::min(max_len - len, page_remaining));
 
-        let read_len = match read_user_bytes_partial(chunk_addr, &mut dst[len..len + chunk_len]) {
+        let dst_bytes = unsafe {
+            core::slice::from_raw_parts_mut(
+                dst[len..len + chunk_len].as_mut_ptr().cast::<u8>(),
+                chunk_len,
+            )
+        };
+
+        let read_len = match read_user_bytes_partial(chunk_addr, dst_bytes) {
             Ok(n) if n > 0 => n,
             _ => {
                 let mut byte = [0u8; 1];
                 read_user_bytes(chunk_addr, &mut byte)?;
                 if byte[0] == 0 {
+                    dst[len].write(0);
                     return Ok(len);
                 }
-                dst[len] = byte[0];
+                dst[len].write(byte[0]);
                 1
             }
         };
 
-        if let Some(nul_pos) = dst[len..len + read_len].iter().position(|&b| b == 0) {
+        if let Some(nul_pos) = dst_bytes[..read_len].iter().position(|&b| b == 0) {
             return Ok(len + nul_pos);
         }
         len += read_len;
@@ -134,9 +142,13 @@ pub(crate) fn with_user_path_str<R>(
     if user_addr == 0 {
         return Err(LinuxError::EFAULT);
     }
-    let mut stack_buf = [0u8; USER_PATH_MAX];
+    let mut stack_buf = [MaybeUninit::<u8>::uninit(); USER_PATH_MAX];
     let len = read_user_cstring_to_slice(user_addr, &mut stack_buf)?;
-    let path_str = core::str::from_utf8(&stack_buf[..len]).map_err(|_| LinuxError::EINVAL)?;
+    // SAFETY: read_user_cstring_to_slice returns Ok(len) only after initializing len bytes.
+    let path_slice = unsafe {
+        core::slice::from_raw_parts(stack_buf.as_ptr().cast::<u8>(), len)
+    };
+    let path_str = core::str::from_utf8(path_slice).map_err(|_| LinuxError::EINVAL)?;
     f(path_str)
 }
 

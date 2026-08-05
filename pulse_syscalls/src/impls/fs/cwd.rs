@@ -3,7 +3,7 @@ use linux_raw_sys::general::{CAP_SYS_CHROOT, X_OK};
 
 use crate::impls::{
     fs::common::{check_faccess_permission, get_fd_entry, resolve_location_at_ptr},
-    utils::{USER_PATH_MAX, alloc_zeroed_bytes, with_process, write_user_bytes},
+    utils::{alloc_zeroed_bytes, with_process, write_user_bytes},
 };
 
 pub fn sys_getcwd(buf: usize, size: usize) -> isize {
@@ -42,49 +42,43 @@ pub fn sys_getcwd(buf: usize, size: usize) -> isize {
 
 pub fn sys_chdir(path: usize) -> isize {
     axlog::debug!("sys_chdir: path={:#x}", path);
-    let mut buf = [0u8; USER_PATH_MAX];
-    let len = match crate::impls::utils::read_user_cstring_to_slice(path, &mut buf) {
-        Ok(l) => l,
-        Err(e) => return -e.code() as isize,
-    };
-    let path = match core::str::from_utf8(&buf[..len]) {
-        Ok(path) => path,
-        Err(_) => return -LinuxError::EINVAL.code() as isize,
-    };
-    match with_process(|process| -> Result<(), LinuxError> {
-        let dir = {
-            let fs = process.fs_context_handle().lock().clone();
-            match axtask::future::block_on(fs.resolve(path)) {
-                Ok(dir) => dir,
-                Err(e) => {
-                    let errno = LinuxError::from(e.canonicalize());
-                    if errno == LinuxError::EFAULT {
-                        axlog::warn!(
-                            "sys_chdir: resolve returned EFAULT: pid={}, path={:?}, err={:?}",
-                            process.pid(),
-                            path,
-                            e
-                        );
+    let res = crate::impls::utils::with_user_path_str(path, |path| {
+        with_process(|process| -> Result<(), LinuxError> {
+            let dir = {
+                let fs = process.fs_context_handle().lock().clone();
+                match axtask::future::block_on(fs.resolve(path)) {
+                    Ok(dir) => dir,
+                    Err(e) => {
+                        let errno = LinuxError::from(e.canonicalize());
+                        if errno == LinuxError::EFAULT {
+                            axlog::warn!(
+                                "sys_chdir: resolve returned EFAULT: pid={}, path={:?}, err={:?}",
+                                process.pid(),
+                                path,
+                                e
+                            );
+                        }
+                        return Err(errno);
                     }
-                    return Err(errno);
                 }
-            }
-        };
-        dir.check_is_dir()
-            .map_err(|e| LinuxError::from(e.canonicalize()))?;
-        let uid = process.fsuid();
-        let gid = process.fsgid();
-        check_faccess_permission(&dir, X_OK as usize, uid, gid)?;
-        process
-            .fs_context_handle()
-            .lock()
-            .set_current_dir(dir)
-            .map_err(|e| LinuxError::from(e.canonicalize()))?;
-        process.sync_fs_context();
-        Ok(())
-    }) {
-        Ok(Ok(())) => 0,
-        Ok(Err(e)) | Err(e) => -e.code() as isize,
+            };
+            dir.check_is_dir()
+                .map_err(|e| LinuxError::from(e.canonicalize()))?;
+            let uid = process.fsuid();
+            let gid = process.fsgid();
+            check_faccess_permission(&dir, X_OK as usize, uid, gid)?;
+            process
+                .fs_context_handle()
+                .lock()
+                .set_current_dir(dir)
+                .map_err(|e| LinuxError::from(e.canonicalize()))?;
+            process.sync_fs_context();
+            Ok(())
+        })?
+    });
+    match res {
+        Ok(()) => 0,
+        Err(e) => -e.code() as isize,
     }
 }
 
