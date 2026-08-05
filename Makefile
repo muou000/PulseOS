@@ -6,14 +6,12 @@ export AX_LIB := axfeat
 FEATURE ?= final-testcode
 QPERF_TRACE ?= n
 BUILDSTORM_STATS ?= n
-SCHED_LOAD_BALANCE ?= y
 comma := ,
 QPERF_APP_FEATURE = $(if $(filter y,$(QPERF_TRACE)),$(comma)qperf-trace)
 BUILDSTORM_STATS_APP_FEATURE = $(if $(filter y,$(BUILDSTORM_STATS)),$(comma)buildstorm-stats)
-SCHED_LOAD_BALANCE_APP_FEATURE = $(if $(filter y,$(SCHED_LOAD_BALANCE)),$(comma)sched-load-balance)
 BUILD_OUT_DIR = $(if $(filter y,$(QPERF_TRACE)),$(A)/target/qperf-artifacts,$(if $(filter y,$(BUILDSTORM_STATS)),$(A)/target/buildstorm-stats-artifacts,$(A)))
-export APP_FEATURES = qemu,$(FEATURE)$(QPERF_APP_FEATURE)$(BUILDSTORM_STATS_APP_FEATURE)$(SCHED_LOAD_BALANCE_APP_FEATURE)
-ALL_APP_FEATURES = qemu,$(FEATURE)$(SCHED_LOAD_BALANCE_APP_FEATURE)
+export APP_FEATURES = qemu,$(FEATURE)$(QPERF_APP_FEATURE)$(BUILDSTORM_STATS_APP_FEATURE)
+ALL_APP_FEATURES = qemu,$(FEATURE)
 export BLK := y
 
 export SMP ?= 8
@@ -48,17 +46,17 @@ all: prepare-tools
 
 test: override QPERF_TRACE := n
 test: override BUILDSTORM_STATS := n
-test: override APP_FEATURES = qemu,$(FEATURE)$(SCHED_LOAD_BALANCE_APP_FEATURE)
+test: override APP_FEATURES = qemu,$(FEATURE)
 test: test-artifacts
 
 qperf-test: override QPERF_TRACE := y
-qperf-test: override APP_FEATURES = qemu,$(FEATURE),qperf-trace$(SCHED_LOAD_BALANCE_APP_FEATURE)
+qperf-test: override APP_FEATURES = qemu,$(FEATURE),qperf-trace
 qperf-test: override LOG := off
 qperf-test: test-artifacts
 
 buildstorm-stats-test: override QPERF_TRACE := n
 buildstorm-stats-test: override BUILDSTORM_STATS := y
-buildstorm-stats-test: override APP_FEATURES = qemu,$(FEATURE),buildstorm-stats$(SCHED_LOAD_BALANCE_APP_FEATURE)
+buildstorm-stats-test: override APP_FEATURES = qemu,$(FEATURE),buildstorm-stats
 buildstorm-stats-test: override LOG := info
 buildstorm-stats-test: test-artifacts
 

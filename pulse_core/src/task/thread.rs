@@ -9,6 +9,7 @@ use axhal::context::TrapFrame;
 use axtask::{
     AxTaskRef, AxTaskWeak, TaskExtSwitch, WaitQueue, WakeContext, WakeSource, def_task_ext,
 };
+use linux_raw_sys::general::SCHED_NORMAL;
 use spin::Mutex;
 
 use super::{Process, SignalAltStack, ThreadSignal};
@@ -99,13 +100,41 @@ impl Thread {
             sys_time_ns: AtomicU64::new(0),
             last_user_enter_ns: AtomicU64::new(NOT_IN_USER_MODE),
             io_buffer: Mutex::new(alloc::vec::Vec::new()),
-            sched_policy: AtomicU32::new(2), // DEFAULT_SCHED_POLICY = SCHED_RR
+            // New user threads start in the ordinary scheduling class, which
+            // Linux exposes as SCHED_OTHER/SCHED_NORMAL rather than SCHED_RR.
+            sched_policy: AtomicU32::new(SCHED_NORMAL),
             sched_flags: AtomicU64::new(0),
             sched_nice: AtomicI32::new(0),
             sched_runtime: AtomicU64::new(0),
             sched_deadline: AtomicU64::new(0),
             sched_period: AtomicU64::new(0),
         })
+    }
+
+    /// Copies scheduler attributes when a child thread is created.
+    pub fn inherit_scheduler_from(&self, parent: &Self) {
+        self.sched_policy.store(
+            parent.sched_policy.load(Ordering::Acquire),
+            Ordering::Release,
+        );
+        self.sched_flags.store(
+            parent.sched_flags.load(Ordering::Acquire),
+            Ordering::Release,
+        );
+        self.sched_nice
+            .store(parent.sched_nice.load(Ordering::Acquire), Ordering::Release);
+        self.sched_runtime.store(
+            parent.sched_runtime.load(Ordering::Acquire),
+            Ordering::Release,
+        );
+        self.sched_deadline.store(
+            parent.sched_deadline.load(Ordering::Acquire),
+            Ordering::Release,
+        );
+        self.sched_period.store(
+            parent.sched_period.load(Ordering::Acquire),
+            Ordering::Release,
+        );
     }
 
     pub fn take_io_buffer(&self) -> alloc::vec::Vec<u8> {

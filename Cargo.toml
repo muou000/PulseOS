@@ -18,7 +18,8 @@ pulse_syscalls = { path = "pulse_syscalls" }
 axfeat = { path = "arceos/api/axfeat", features = [
     "alloc-slab",
     "multitask",
-    "sched-rr",
+    "sched-eevdf",
+    "sched-load-balance",
     "fs",
     "rtc",
     "paging",
