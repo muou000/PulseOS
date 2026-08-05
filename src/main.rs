@@ -38,7 +38,7 @@ fn main() {
 
     use axtask::TaskInner;
 
-    let mut inner = TaskInner::new(
+    let inner = TaskInner::new(
         || {
             let thread =
                 pulse_core::task::current_thread().expect("init task entered without Thread");
@@ -92,19 +92,9 @@ fn main() {
             pulse_core::task::register_thread_global(init_tid, init_thread.clone());
             info!("Created initial user process");
 
-            let pt_root = init_thread.process().page_table_root();
-            let asid = init_thread.process().asid();
-            inner.ctx_mut().set_page_table_root(pt_root, asid);
-
             init_thread.process().sync_fs_context();
 
-            let init_proc = init_thread.process_arc();
-            pulse_core::task::register_process(init_proc.pid(), init_proc.clone());
-            #[cfg(feature = "qperf-trace")]
-            pulse_core::task::emit_qperf_task_metadata(&inner, init_proc.pid(), init_tid);
-            inner.init_task_ext(pulse_core::task::ThreadHandle::new(init_thread.clone()));
-            let init_task = axtask::spawn_task(inner);
-            init_thread.process().register_task_ref(init_task.clone());
+            let init_task = pulse_core::task::spawn_task_with_thread(inner, init_thread.clone(), true);
 
             if cfg!(any(feature = "pre-testcode", feature = "final-testcode")) {
                 match init_task.join() {

@@ -22,7 +22,7 @@ impl Process {
         let new_aspace = clone_result.complete_after_unlock()?;
         let _guard = NoPreemptIrqSave::new();
 
-        let mut inner = TaskInner::try_new(
+        let inner = TaskInner::try_new(
             move || {
                 let thread = task::current_thread().expect("fork child without Thread context");
                 if let Err(e) = thread.prepare_for_user_entry() {
@@ -77,18 +77,8 @@ impl Process {
             child_thread.set_clear_child_tid(addr);
         }
 
-        let pt_root = child_proc.page_table_root();
-        let asid = child_proc.asid();
-        inner.ctx_mut().set_page_table_root(pt_root, asid);
-        task::register_process(child_proc.pid(), child_proc.clone());
-        #[cfg(feature = "qperf-trace")]
-        task::emit_qperf_task_metadata(&inner, child_proc.pid(), child_tid);
-        inner.init_task_ext(task::ThreadHandle::new(child_thread));
-
         self.add_child(child_proc.clone());
-        let task_ref = inner.into_arc();
-        child_proc.register_task_ref(task_ref.clone());
-        axtask::spawn_task_ref(task_ref);
+        task::spawn_task_with_thread(inner, child_thread, true);
         Ok(child_proc)
     }
 
@@ -103,7 +93,7 @@ impl Process {
             child_uctx.set_sp(sp);
         }
 
-        let mut inner = TaskInner::try_new(
+        let inner = TaskInner::try_new(
             move || {
                 let thread = task::current_thread().expect("clone child without Thread context");
                 if let Err(e) = thread.prepare_for_user_entry() {
@@ -165,27 +155,10 @@ impl Process {
             child_thread.set_clear_child_tid(addr);
         }
 
-        let pt_root = child_proc.page_table_root();
-        let asid = child_proc.asid();
-        inner.ctx_mut().set_page_table_root(pt_root, asid);
-        if !params.is_thread_clone {
-            // Thread clones reuse the existing PROCESS_REGISTRY entry for this pid.
-            task::register_process(child_proc.pid(), child_proc.clone());
-        }
-        #[cfg(feature = "qperf-trace")]
-        task::emit_qperf_task_metadata(&inner, child_proc.pid(), child_tid);
-        inner.init_task_ext(task::ThreadHandle::new(child_thread));
-
         if !params.is_thread_clone {
             self.add_child(child_proc.clone());
         }
-        // Publish the task in the process registry before another CPU can run
-        // it. An empty thread may otherwise exit between spawn_task() and
-        // register_task_ref(), leaving a stale exited entry reinserted after
-        // finish_thread_exit() removed the Pending slot.
-        let task = inner.into_arc();
-        child_proc.register_task_ref(task.clone());
-        axtask::spawn_task_ref(task.clone());
+        task::spawn_task_with_thread(inner, child_thread, !params.is_thread_clone);
         Ok((child_tid, (!params.is_thread_clone).then_some(child_proc)))
     }
 }
