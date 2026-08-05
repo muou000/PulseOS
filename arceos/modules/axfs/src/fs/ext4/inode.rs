@@ -42,6 +42,37 @@ pub struct Inode {
     pub(super) is_unlinked: core::sync::atomic::AtomicBool,
 }
 
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum MutationLockRole {
+    Directory,
+    Other,
+}
+
+struct MutationLockGuard<'a> {
+    _guard: async_lock::MutexGuard<'a, ()>,
+    #[cfg(feature = "buildstorm-stats")]
+    directory_acquired_at_ns: Option<u64>,
+}
+
+impl Drop for MutationLockGuard<'_> {
+    fn drop(&mut self) {
+        #[cfg(feature = "buildstorm-stats")]
+        if let Some(acquired_at_ns) = self.directory_acquired_at_ns {
+            // These are cumulative per-lock durations and can overlap across tasks.
+            let held_ns =
+                (axhal::time::monotonic_time_nanos() as u64).saturating_sub(acquired_at_ns);
+            crate::buildstorm_stat_add!(EXT4_DIR_MUTATION_LOCK_HOLD_NS, held_ns);
+        }
+    }
+}
+
+type MutationLockOrderKey = (u32, usize);
+
+fn sort_and_dedup_mutation_set<T>(entries: &mut Vec<(MutationLockOrderKey, T)>) {
+    entries.sort_unstable_by_key(|(key, _)| *key);
+    entries.dedup_by(|left, right| left.0 == right.0);
+}
+
 pub(super) struct MetadataCacheState {
     generation: AtomicU64,
     cached: Mutex<Option<(u64, Metadata)>>,
@@ -669,14 +700,68 @@ impl Inode {
         }
     }
 
-    async fn lock_mutation_set<'a>(inodes: &[&'a Self]) -> Vec<async_lock::MutexGuard<'a, ()>> {
-        let mut ordered = inodes.to_vec();
-        ordered.sort_unstable_by_key(|inode| (inode.ino, *inode as *const Self as usize));
-        ordered.dedup_by(|left, right| core::ptr::eq(*left, *right));
+    #[cfg(feature = "buildstorm-stats")]
+    async fn lock_mutation(&self, role: MutationLockRole) -> MutationLockGuard<'_> {
+        let track_directory =
+            role == MutationLockRole::Directory && crate::buildstorm_stats::is_active();
+        if track_directory {
+            if let Some(guard) = self.mutation_lock.try_lock() {
+                crate::buildstorm_stat_inc!(EXT4_DIR_MUTATION_LOCK_FAST);
+                return MutationLockGuard {
+                    _guard: guard,
+                    directory_acquired_at_ns: Some(axhal::time::monotonic_time_nanos() as u64),
+                };
+            }
+
+            let wait_started_ns = axhal::time::monotonic_time_nanos() as u64;
+            let guard = self.mutation_lock.lock().await;
+            let acquired_at_ns = axhal::time::monotonic_time_nanos() as u64;
+            crate::buildstorm_stat_inc!(EXT4_DIR_MUTATION_LOCK_WAIT);
+            crate::buildstorm_stat_add!(
+                EXT4_DIR_MUTATION_LOCK_WAIT_NS,
+                acquired_at_ns.saturating_sub(wait_started_ns)
+            );
+            return MutationLockGuard {
+                _guard: guard,
+                directory_acquired_at_ns: Some(acquired_at_ns),
+            };
+        }
+
+        MutationLockGuard {
+            _guard: self.mutation_lock.lock().await,
+            directory_acquired_at_ns: None,
+        }
+    }
+
+    #[cfg(not(feature = "buildstorm-stats"))]
+    async fn lock_mutation(&self, _role: MutationLockRole) -> MutationLockGuard<'_> {
+        MutationLockGuard {
+            _guard: self.mutation_lock.lock().await,
+        }
+    }
+
+    async fn lock_mutation_set<'a>(
+        inodes: &[&'a Self],
+        directory_inodes: &[&'a Self],
+    ) -> Vec<MutationLockGuard<'a>> {
+        let mut ordered = inodes
+            .iter()
+            .copied()
+            .map(|inode| ((inode.ino, inode as *const Self as usize), inode))
+            .collect::<Vec<_>>();
+        sort_and_dedup_mutation_set(&mut ordered);
 
         let mut guards = Vec::with_capacity(ordered.len());
-        for inode in ordered {
-            guards.push(inode.mutation_lock.lock().await);
+        for (_, inode) in ordered {
+            let role = if directory_inodes
+                .iter()
+                .any(|directory| core::ptr::eq(*directory, inode))
+            {
+                MutationLockRole::Directory
+            } else {
+                MutationLockRole::Other
+            };
+            guards.push(inode.lock_mutation(role).await);
         }
         guards
     }
@@ -889,7 +974,7 @@ impl NodeOps for Inode {
                 return Ok(metadata);
             }
 
-            let _mutation_guard = self.mutation_lock.lock().await;
+            let _mutation_guard = self.lock_mutation(MutationLockRole::Other).await;
             if let Some(metadata) = self.metadata_cache.get() {
                 return Ok(metadata);
             }
@@ -929,7 +1014,7 @@ impl NodeOps for Inode {
     async fn update_metadata(&self, update: MetadataUpdate) -> VfsResult<()> {
         let fs = &self.fs.inner;
         self.validate_inode_num(&fs, self.ino)?;
-        let _mutation_guard = self.mutation_lock.lock().await;
+        let _mutation_guard = self.lock_mutation(MutationLockRole::Other).await;
         let mut write_scope = self.fs.write_scope(&[self.ino as u64]);
         write_scope
             .run(async {
@@ -1010,7 +1095,7 @@ impl FileNodeOps for Inode {
         log::debug!("ext4 inode::write_at: offset={}, len={}", offset, buf.len());
         let fs = &self.fs.inner;
         self.validate_inode_num(&fs, self.ino)?;
-        let _mutation_guard = self.mutation_lock.lock().await;
+        let _mutation_guard = self.lock_mutation(MutationLockRole::Other).await;
         let mut write_scope = self.fs.write_scope(&[self.ino as u64]);
         write_scope
             .run(async {
@@ -1031,7 +1116,7 @@ impl FileNodeOps for Inode {
     async fn append(&self, buf: &[u8]) -> VfsResult<(usize, u64)> {
         let fs = &self.fs.inner;
         self.validate_inode_num(&fs, self.ino)?;
-        let _mutation_guard = self.mutation_lock.lock().await;
+        let _mutation_guard = self.lock_mutation(MutationLockRole::Other).await;
         let mut write_scope = self.fs.write_scope(&[self.ino as u64]);
         write_scope
             .run(async {
@@ -1052,7 +1137,7 @@ impl FileNodeOps for Inode {
     async fn set_len(&self, len: u64) -> VfsResult<()> {
         let fs = &self.fs.inner;
         self.validate_inode_num(&fs, self.ino)?;
-        let _mutation_guard = self.mutation_lock.lock().await;
+        let _mutation_guard = self.lock_mutation(MutationLockRole::Other).await;
         let mut write_scope = self.fs.write_scope(&[self.ino as u64]);
         write_scope
             .run(async {
@@ -1076,7 +1161,7 @@ impl FileNodeOps for Inode {
     async fn set_symlink(&self, target: &str) -> VfsResult<()> {
         let fs = &self.fs.inner;
         self.validate_inode_num(&fs, self.ino)?;
-        let _mutation_guard = self.mutation_lock.lock().await;
+        let _mutation_guard = self.lock_mutation(MutationLockRole::Other).await;
         let mut write_scope = self.fs.write_scope(&[self.ino as u64]);
         write_scope
             .run(async {
@@ -1202,7 +1287,7 @@ impl DirNodeOps for Inode {
         if matches!(self.dir_cache.get_lookup(name), Some(Some(_))) {
             return Err(VfsError::AlreadyExists);
         }
-        let _directory_guard = self.mutation_lock.lock().await;
+        let _directory_guard = self.lock_mutation(MutationLockRole::Directory).await;
 
         match self.dir_cache.get_lookup(name) {
             Some(Some(_)) => return Err(VfsError::AlreadyExists),
@@ -1324,7 +1409,8 @@ impl DirNodeOps for Inode {
             return Err(VfsError::AlreadyExists);
         }
         let mutation_nodes = [self, child.as_ref()];
-        let _mutation_guards = Self::lock_mutation_set(&mutation_nodes).await;
+        let directory_nodes = [self];
+        let _mutation_guards = Self::lock_mutation_set(&mutation_nodes, &directory_nodes).await;
         let mut write_scope = self.fs.write_scope(&[self.ino as u64, child.ino as u64]);
         write_scope
             .run(async {
@@ -1386,7 +1472,8 @@ impl DirNodeOps for Inode {
                 Some(None) => return Err(VfsError::NotFound),
                 None => {
                     let observation_nodes = [self];
-                    let observation_guards = Self::lock_mutation_set(&observation_nodes).await;
+                    let observation_guards =
+                        Self::lock_mutation_set(&observation_nodes, &observation_nodes).await;
                     let observed_dir_inode = ext4plus::inode::Inode::read(&fs, dir_idx)
                         .await
                         .map_err(into_vfs_err)?;
@@ -1406,7 +1493,8 @@ impl DirNodeOps for Inode {
 
             let child = Inode::new(self.fs.clone(), observed_child_ino, None);
             let mutation_nodes = [self, child.as_ref()];
-            let _mutation_guards = Self::lock_mutation_set(&mutation_nodes).await;
+            let directory_nodes = [self];
+            let _mutation_guards = Self::lock_mutation_set(&mutation_nodes, &directory_nodes).await;
 
             let dir_inode = ext4plus::inode::Inode::read(&fs, dir_idx)
                 .await
@@ -1488,7 +1576,8 @@ impl DirNodeOps for Inode {
         let dst_dir_idx = core::num::NonZeroU32::new(dst_dir.ino).ok_or(VfsError::InvalidData)?;
         loop {
             let observation_nodes = [self, dst_dir.as_ref()];
-            let observation_guards = Self::lock_mutation_set(&observation_nodes).await;
+            let observation_guards =
+                Self::lock_mutation_set(&observation_nodes, &observation_nodes).await;
             let observed_src_dir_inode = ext4plus::inode::Inode::read(&fs, src_dir_idx)
                 .await
                 .map_err(into_vfs_err)?;
@@ -1522,7 +1611,8 @@ impl DirNodeOps for Inode {
             if let Some(dst_node) = dst_node.as_ref() {
                 mutation_nodes.push(dst_node.as_ref());
             }
-            let _mutation_guards = Self::lock_mutation_set(&mutation_nodes).await;
+            let directory_nodes = [self, dst_dir.as_ref()];
+            let _mutation_guards = Self::lock_mutation_set(&mutation_nodes, &directory_nodes).await;
 
             let src_dir_inode = ext4plus::inode::Inode::read(&fs, src_dir_idx)
                 .await
@@ -1781,6 +1871,7 @@ mod tests {
         CachedDirEntry, CachedLookupEntry, DIR_CACHE_REGISTRY_SWEEP_BUDGET,
         DIR_SNAPSHOT_OVERLAY_MAX_ENTRIES, DIR_SNAPSHOT_PROMOTION_LOOKUPS, DirCacheKey,
         DirCacheRegistry, DirCacheState, DirSnapshot, MetadataCacheState,
+        sort_and_dedup_mutation_set,
     };
 
     fn metadata_with_size(size: u64) -> Metadata {
@@ -1816,6 +1907,24 @@ mod tests {
         let current_generation = state.generation();
         assert!(state.publish(current_generation, metadata_with_size(64)));
         assert_eq!(state.get().unwrap().size, 64);
+    }
+
+    #[test]
+    fn mutation_lock_order_is_total_and_deduplicated() {
+        let mut entries: Vec<((u32, usize), u8)> = vec![
+            ((11, 0x200), 1),
+            ((4, 0x300), 2),
+            ((11, 0x100), 3),
+            ((11, 0x200), 4),
+            ((4, 0x100), 5),
+        ];
+
+        sort_and_dedup_mutation_set(&mut entries);
+
+        assert_eq!(
+            entries.iter().map(|(key, _)| *key).collect::<Vec<_>>(),
+            vec![(4, 0x100), (4, 0x300), (11, 0x100), (11, 0x200)],
+        );
     }
 
     #[test]
