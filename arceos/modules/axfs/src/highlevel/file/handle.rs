@@ -8,6 +8,17 @@ use super::{
 
 const DIRECT_IO_STAGING_SIZE: usize = 64 * 1024;
 
+#[cfg(feature = "times")]
+const ACCESS_FLAG_ATIME: u8 = 1;
+#[cfg(feature = "times")]
+const ACCESS_FLAG_MTIME: u8 = 2;
+
+#[cfg(feature = "times")]
+#[inline]
+fn has_pending_timestamp_updates(flags: u8) -> bool {
+    flags != 0
+}
+
 /// A file position lock that leaves queued async operations ahead of the
 /// resident-read fast path. The async mutex alone cannot expose its waiter
 /// state to `try_lock` callers.
@@ -509,7 +520,8 @@ impl File {
         let result = self.access(FileFlags::READ)?.read_at(dst, offset).await;
         #[cfg(feature = "times")]
         if result.as_ref().is_ok_and(|read| *read != 0) {
-            self.access_flags.fetch_or(1, Ordering::AcqRel);
+            self.access_flags
+                .fetch_or(ACCESS_FLAG_ATIME, Ordering::AcqRel);
         }
         result
     }
@@ -530,7 +542,8 @@ impl File {
         if let Some(Ok(read)) = result.as_ref()
             && *read != 0
         {
-            self.access_flags.fetch_or(1, Ordering::AcqRel);
+            self.access_flags
+                .fetch_or(ACCESS_FLAG_ATIME, Ordering::AcqRel);
         }
         result
     }
@@ -540,7 +553,8 @@ impl File {
         let result = self.access(FileFlags::WRITE)?.write_at(src, offset).await;
         #[cfg(feature = "times")]
         if result.as_ref().is_ok_and(|written| *written != 0) {
-            self.access_flags.fetch_or(2, Ordering::AcqRel);
+            self.access_flags
+                .fetch_or(ACCESS_FLAG_MTIME, Ordering::AcqRel);
         }
         result
     }
@@ -556,7 +570,8 @@ impl File {
             .await;
         #[cfg(feature = "times")]
         if result.as_ref().is_ok_and(|written| *written != 0) {
-            self.access_flags.fetch_or(2, Ordering::AcqRel);
+            self.access_flags
+                .fetch_or(ACCESS_FLAG_MTIME, Ordering::AcqRel);
         }
         result
     }
@@ -623,7 +638,8 @@ impl File {
         };
         #[cfg(feature = "times")]
         if result.as_ref().is_ok_and(|written| *written != 0) {
-            self.access_flags.fetch_or(2, Ordering::AcqRel);
+            self.access_flags
+                .fetch_or(ACCESS_FLAG_MTIME, Ordering::AcqRel);
         }
         result
     }
@@ -650,7 +666,8 @@ impl File {
         };
         #[cfg(feature = "times")]
         if result.as_ref().is_ok_and(|written| *written != 0) {
-            self.access_flags.fetch_or(2, Ordering::AcqRel);
+            self.access_flags
+                .fetch_or(ACCESS_FLAG_MTIME, Ordering::AcqRel);
         }
         result
     }
@@ -677,10 +694,10 @@ impl File {
 
         let now = axhal::time::wall_time();
         let mut update = axfs_ng_vfs::MetadataUpdate::default();
-        if flags & 1 != 0 {
+        if flags & ACCESS_FLAG_ATIME != 0 {
             update.atime = Some(now);
         }
-        if flags & 2 != 0 {
+        if flags & ACCESS_FLAG_MTIME != 0 {
             update.mtime = Some(now);
         }
 
@@ -695,11 +712,26 @@ impl File {
 impl Drop for File {
     fn drop(&mut self) {
         #[cfg(feature = "times")]
-        if self.access_flags.load(Ordering::Acquire) != 0 {
-            // Closing a file should publish deferred timestamps, but it must not
-            // turn an ordinary close into fsync and a device-wide flush.
+        if has_pending_timestamp_updates(self.access_flags.load(Ordering::Acquire)) {
+            // Closing a file publishes every deferred timestamp, including atime
+            // set by a successful read.
             let _ = axtask::future::block_on(self.take_timestamp_updates());
         }
+    }
+}
+
+#[cfg(all(test, feature = "times"))]
+mod timestamp_tests {
+    use super::{ACCESS_FLAG_ATIME, ACCESS_FLAG_MTIME, has_pending_timestamp_updates};
+
+    #[test]
+    fn read_only_access_requires_a_deferred_timestamp_update() {
+        assert!(!has_pending_timestamp_updates(0));
+        assert!(has_pending_timestamp_updates(ACCESS_FLAG_ATIME));
+        assert!(has_pending_timestamp_updates(ACCESS_FLAG_MTIME));
+        assert!(has_pending_timestamp_updates(
+            ACCESS_FLAG_ATIME | ACCESS_FLAG_MTIME
+        ));
     }
 }
 
