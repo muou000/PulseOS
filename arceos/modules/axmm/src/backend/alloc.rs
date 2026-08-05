@@ -18,8 +18,13 @@ pub struct AnonPageLoad {
 
 impl AnonPageLoad {
     pub fn prepare(self) -> AxResult<AnonPagePrepared> {
+        let requested_pages = self.page_count;
         let (frames, page_count) =
-            alloc_frame_batch(self.page_count, true).ok_or(AxError::NoMemory)?;
+            alloc_frame_batch(requested_pages, true).ok_or(AxError::NoMemory)?;
+        axfs::buildstorm_stat_add!(MM_ANON_FAULT_PREPARED_PAGES, page_count);
+        if page_count < requested_pages {
+            axfs::buildstorm_stat_inc!(MM_ANON_FAULT_SHORT_PREPARES);
+        }
         Ok(AnonPagePrepared {
             page: self.page,
             frames,
@@ -314,6 +319,7 @@ impl Backend {
         let mut page_count = 0;
         let mut check_page = page;
         while page_count < MAX_FAULT_BATCH_PAGES && check_page < area_end {
+            axfs::buildstorm_stat_inc!(MM_ANON_FAULT_PTE_READ_PROBES);
             let needs_mapping = match pt.read_for_addr(check_page).query(check_page) {
                 Err(_) => true,
                 Ok((frame, _, _)) => frame.as_usize() == 0,
@@ -325,7 +331,16 @@ impl Backend {
             check_page += PAGE_SIZE_4K;
         }
 
-        (page_count != 0).then_some(AnonPageLoad { page, page_count })
+        if page_count == 0 {
+            axfs::buildstorm_stat_inc!(MM_ANON_FAULT_EMPTY_REQUESTS);
+            return None;
+        }
+        axfs::buildstorm_stat_inc!(MM_ANON_FAULT_BATCHES);
+        if page_count == MAX_FAULT_BATCH_PAGES {
+            axfs::buildstorm_stat_inc!(MM_ANON_FAULT_FULL_BATCHES);
+        }
+        axfs::buildstorm_stat_add!(MM_ANON_FAULT_REQUESTED_PAGES, page_count);
+        Some(AnonPageLoad { page, page_count })
     }
 
     pub(crate) fn handle_prepared_page_fault_alloc(
@@ -342,23 +357,34 @@ impl Backend {
         }
 
         let mut handled_any = false;
+        let mut mapped_pages = 0usize;
         let mut keep_mapping = true;
-        for index in 0..prepared.page_count() {
+        let mut index = 0;
+        while index < prepared.page_count() && keep_mapping {
             let current_page = page + index * PAGE_SIZE_4K;
             if current_page >= area_end {
                 break;
             }
-            let frame = prepared.frame(index);
-            let mut mapped_successfully = false;
-            let mut already_mapped = false;
+            axfs::buildstorm_stat_inc!(MM_ANON_FAULT_PTE_WRITE_GUARD_ACQUIRES);
+            let mut pt_guard = pt.lock_for_addr(current_page);
 
-            if keep_mapping {
-                let mut pt_guard = pt.lock_for_addr(current_page);
+            while index < prepared.page_count() {
+                let current_page = page + index * PAGE_SIZE_4K;
+                if current_page >= area_end || !pt_guard.covers(current_page) {
+                    break;
+                }
+                let frame = prepared.frame(index);
+                let mut mapped_successfully = false;
+                let mut already_mapped = false;
+                axfs::buildstorm_stat_inc!(MM_ANON_FAULT_PTE_WRITE_LOCKS);
                 match pt_guard.query(current_page) {
                     Err(_) => {
                         if pt_guard
                             .map(current_page, frame, PageSize::Size4K, orig_flags)
-                            .map(|tlb| tlb.flush())
+                            .map(|tlb| {
+                                tlb.flush();
+                                axfs::buildstorm_stat_inc!(MM_ANON_FAULT_LOCAL_TLB_FLUSHES);
+                            })
                             .is_ok()
                         {
                             mapped_successfully = true;
@@ -368,7 +394,10 @@ impl Backend {
                     Ok((current_frame, _, _)) if current_frame.as_usize() == 0 => {
                         if pt_guard
                             .remap(current_page, frame, orig_flags)
-                            .map(|(_, tlb)| tlb.flush())
+                            .map(|(_, tlb)| {
+                                tlb.flush();
+                                axfs::buildstorm_stat_inc!(MM_ANON_FAULT_LOCAL_TLB_FLUSHES);
+                            })
                             .is_ok()
                         {
                             mapped_successfully = true;
@@ -383,14 +412,19 @@ impl Backend {
                     }
                     _ => {}
                 }
-            }
 
-            if mapped_successfully {
-                prepared.mark_mapped(index);
-            } else if !already_mapped {
-                keep_mapping = false;
+                if mapped_successfully {
+                    prepared.mark_mapped(index);
+                    mapped_pages += 1;
+                } else if !already_mapped {
+                    keep_mapping = false;
+                    break;
+                }
+                index += 1;
             }
         }
+        axfs::buildstorm_stat_add!(MM_ANON_FAULT_MAPPED_PAGES, mapped_pages);
+        let _ = mapped_pages;
         handled_any
     }
 

@@ -62,13 +62,31 @@ struct FileReadAheadState {
 }
 
 impl FileReadAheadState {
+    fn is_sequential(&self, page_number: u32) -> bool {
+        self.next_page == Some(page_number)
+    }
+
     fn plan(&mut self, page_number: u32, max_pages: usize) -> usize {
         let max_pages = max_pages.max(1);
-        let page_count = if self.next_page == Some(page_number) {
+        let sequential = self.is_sequential(page_number);
+        let page_count = if sequential {
             max_pages
         } else {
             max_pages.min(COLD_FILE_FAULT_AROUND_PAGES)
         };
+        if sequential {
+            axfs::buildstorm_stat_inc!(MM_FILE_FAULT_SEQUENTIAL_BATCHES);
+            if page_count == FILE_FAULT_AROUND_PAGES {
+                axfs::buildstorm_stat_inc!(MM_FILE_FAULT_SEQUENTIAL_FULL_BATCHES);
+            }
+            axfs::buildstorm_stat_add!(MM_FILE_FAULT_SEQUENTIAL_REQUESTED_PAGES, page_count);
+        } else {
+            axfs::buildstorm_stat_inc!(MM_FILE_FAULT_COLD_BATCHES);
+            if page_count == COLD_FILE_FAULT_AROUND_PAGES {
+                axfs::buildstorm_stat_inc!(MM_FILE_FAULT_COLD_FULL_BATCHES);
+            }
+            axfs::buildstorm_stat_add!(MM_FILE_FAULT_COLD_REQUESTED_PAGES, page_count);
+        }
         self.next_page = u32::try_from(page_count)
             .ok()
             .and_then(|count| page_number.checked_add(count));
@@ -104,6 +122,7 @@ pub struct FilePageLoad {
     file: CachedFile,
     page_number: u32,
     page_count: usize,
+    sequential: bool,
     may_write: bool,
     read_ahead: Arc<Mutex<FileReadAheadState>>,
 }
@@ -111,6 +130,7 @@ pub struct FilePageLoad {
 pub struct FilePagePrepared {
     file: CachedFile,
     requested_page: u32,
+    sequential: bool,
     pages: SharedPagePaddrs,
     mapped_mask: u16,
 }
@@ -145,22 +165,34 @@ impl core::fmt::Debug for FilePageLoad {
 
 impl FilePageLoad {
     pub fn prepare(self) -> AxResult<FilePagePrepared> {
+        let requested_pages = self.page_count;
         let frames = self
             .file
-            .get_shared_page_paddrs(self.page_number, self.page_count, self.may_write)
+            .get_shared_page_paddrs(self.page_number, requested_pages, self.may_write)
             .inspect_err(|error| {
                 error!(
                     "file-backed page load failed: page_number={}, page_count={}, may_write={}, \
                      error={:?}",
-                    self.page_number, self.page_count, self.may_write, error
+                    self.page_number, requested_pages, self.may_write, error
                 );
             })?;
+        let prepared_pages = frames.len();
+        axfs::buildstorm_stat_add!(MM_FILE_FAULT_PREPARED_PAGES, prepared_pages);
+        if self.sequential {
+            axfs::buildstorm_stat_add!(MM_FILE_FAULT_SEQUENTIAL_PREPARED_PAGES, prepared_pages);
+        } else {
+            axfs::buildstorm_stat_add!(MM_FILE_FAULT_COLD_PREPARED_PAGES, prepared_pages);
+        }
+        if prepared_pages < requested_pages {
+            axfs::buildstorm_stat_inc!(MM_FILE_FAULT_SHORT_PREPARES);
+        }
         self.read_ahead
             .lock()
-            .finish(self.page_number, self.page_count, frames.len());
+            .finish(self.page_number, requested_pages, prepared_pages);
         Ok(FilePagePrepared {
             file: self.file,
             requested_page: self.page_number,
+            sequential: self.sequential,
             pages: frames,
             mapped_mask: 0,
         })
@@ -286,6 +318,7 @@ impl FileMapping {
         let page_addr = vaddr.align_down_4k();
         let file_size = self.file_bytes();
         let (file_offset, _) = self.page_read_window_at_size(page_addr, file_size)?;
+        axfs::buildstorm_stat_inc!(MM_FILE_FAULT_PTE_READ_PROBES);
         if pt
             .read_for_addr(page_addr)
             .query(page_addr)
@@ -307,11 +340,15 @@ impl FileMapping {
             }
             max_pages += 1;
         }
-        let page_count = self.read_ahead.lock().plan(page_number, max_pages);
+        let mut read_ahead = self.read_ahead.lock();
+        let sequential = read_ahead.is_sequential(page_number);
+        let page_count = read_ahead.plan(page_number, max_pages);
+        drop(read_ahead);
         Some(FilePageLoad {
             file: self.file.clone(),
             page_number,
             page_count,
+            sequential,
             may_write: self.shared && self.file_flags.contains(FileFlags::WRITE),
             read_ahead: self.read_ahead.clone(),
         })
@@ -619,53 +656,77 @@ impl Backend {
 
         let mut requested_handled = false;
         let mut mapped_executable = false;
-        for (index, candidate_addr) in candidates[..candidate_count].iter().flatten().copied() {
-            let requested = candidate_addr == page_addr;
-            let mut pt_guard = pt.lock_for_addr(candidate_addr);
-            if let Ok((current, current_flags, _)) = pt_guard.query(candidate_addr)
-                && current.as_usize() != 0
-            {
-                if requested {
-                    requested_handled = !access_flags.contains(MappingFlags::WRITE)
-                        || current_flags.contains(MappingFlags::WRITE);
-                }
-                continue;
-            }
+        let mut mapped_pages = 0usize;
+        let mut candidate_cursor = 0;
+        while candidate_cursor < candidate_count {
+            let Some((_, first_addr)) = candidates[candidate_cursor] else {
+                return false;
+            };
+            axfs::buildstorm_stat_inc!(MM_FILE_FAULT_PTE_WRITE_GUARD_ACQUIRES);
+            let mut pt_guard = pt.lock_for_addr(first_addr);
 
-            let Some((_, cache_frame)) = prepared.page(index) else {
-                continue;
-            };
-            let use_private_frame = requested && private_write;
-            let frame = if use_private_frame {
-                private_frame.unwrap()
-            } else {
-                cache_frame
-            };
-            let map_flags = if mapping.shared || use_private_frame {
-                orig_flags
-            } else {
-                orig_flags & !MappingFlags::WRITE
-            };
-            let mapped = match pt_guard.query(candidate_addr) {
-                Ok((current, ..)) if current.as_usize() == 0 => pt_guard
-                    .remap(candidate_addr, frame, map_flags)
-                    .map(|(_, tlb)| tlb),
-                Err(_) => pt_guard.map(candidate_addr, frame, PageSize::Size4K, map_flags),
-                _ => continue,
-            };
-            let Ok(tlb) = mapped else {
-                continue;
-            };
-            tlb.flush();
-            drop(pt_guard);
-            mapped_executable |= map_flags.contains(MappingFlags::EXECUTE);
-            if use_private_frame {
-                private_frame.take();
-            } else {
-                prepared.take_frame(index);
-            }
-            if requested {
-                requested_handled = true;
+            while candidate_cursor < candidate_count {
+                let Some((index, candidate_addr)) = candidates[candidate_cursor] else {
+                    return false;
+                };
+                if !pt_guard.covers(candidate_addr) {
+                    break;
+                }
+                let requested = candidate_addr == page_addr;
+                axfs::buildstorm_stat_inc!(MM_FILE_FAULT_PTE_WRITE_LOCKS);
+                if let Ok((current, current_flags, _)) = pt_guard.query(candidate_addr)
+                    && current.as_usize() != 0
+                {
+                    if requested {
+                        requested_handled = !access_flags.contains(MappingFlags::WRITE)
+                            || current_flags.contains(MappingFlags::WRITE);
+                    }
+                    candidate_cursor += 1;
+                    continue;
+                }
+
+                let Some((_, cache_frame)) = prepared.page(index) else {
+                    candidate_cursor += 1;
+                    continue;
+                };
+                let use_private_frame = requested && private_write;
+                let frame = if use_private_frame {
+                    private_frame.unwrap()
+                } else {
+                    cache_frame
+                };
+                let map_flags = if mapping.shared || use_private_frame {
+                    orig_flags
+                } else {
+                    orig_flags & !MappingFlags::WRITE
+                };
+                let mapped = match pt_guard.query(candidate_addr) {
+                    Ok((current, ..)) if current.as_usize() == 0 => pt_guard
+                        .remap(candidate_addr, frame, map_flags)
+                        .map(|(_, tlb)| tlb),
+                    Err(_) => pt_guard.map(candidate_addr, frame, PageSize::Size4K, map_flags),
+                    _ => {
+                        candidate_cursor += 1;
+                        continue;
+                    }
+                };
+                let Ok(tlb) = mapped else {
+                    candidate_cursor += 1;
+                    continue;
+                };
+                tlb.flush();
+                axfs::buildstorm_stat_inc!(MM_FILE_FAULT_LOCAL_TLB_FLUSHES);
+                mapped_executable |= map_flags.contains(MappingFlags::EXECUTE);
+                mapped_pages += 1;
+                if use_private_frame {
+                    private_frame.take();
+                } else {
+                    prepared.take_frame(index);
+                }
+                if requested {
+                    requested_handled = true;
+                }
+                candidate_cursor += 1;
             }
         }
         if let Some(frame) = private_frame {
@@ -674,6 +735,13 @@ impl Backend {
         if mapped_executable {
             sync_executable_mapping(orig_flags);
         }
+        axfs::buildstorm_stat_add!(MM_FILE_FAULT_MAPPED_PAGES, mapped_pages);
+        if prepared.sequential {
+            axfs::buildstorm_stat_add!(MM_FILE_FAULT_SEQUENTIAL_MAPPED_PAGES, mapped_pages);
+        } else {
+            axfs::buildstorm_stat_add!(MM_FILE_FAULT_COLD_MAPPED_PAGES, mapped_pages);
+        }
+        let _ = mapped_pages;
         requested_handled
     }
 
@@ -744,7 +812,10 @@ impl Backend {
 mod tests {
     use memory_addr::{PAGE_SIZE_4K, VirtAddr};
 
-    use super::{FileReadAheadState, file_page_read_window};
+    use super::{
+        COLD_FILE_FAULT_AROUND_PAGES, FILE_FAULT_AROUND_PAGES, FileReadAheadState,
+        file_page_read_window,
+    };
 
     #[test]
     fn page_window_tracks_truncate_and_extend_without_exceeding_mapping() {
@@ -814,8 +885,17 @@ mod tests {
     #[test]
     fn cold_fault_is_capped_below_the_sequential_window() {
         let mut state = FileReadAheadState::default();
-        assert_eq!(state.plan(3, 8), COLD_FILE_FAULT_AROUND_PAGES);
-        assert_eq!(state.plan(3 + COLD_FILE_FAULT_AROUND_PAGES as u32, 8), 8);
+        assert_eq!(
+            state.plan(3, FILE_FAULT_AROUND_PAGES),
+            COLD_FILE_FAULT_AROUND_PAGES
+        );
+        assert_eq!(
+            state.plan(
+                3 + COLD_FILE_FAULT_AROUND_PAGES as u32,
+                FILE_FAULT_AROUND_PAGES
+            ),
+            FILE_FAULT_AROUND_PAGES
+        );
     }
 
     #[test]
