@@ -1,5 +1,8 @@
 use alloc::{collections::VecDeque, sync::Arc, vec::Vec};
-use core::{array, sync::atomic::{AtomicBool, AtomicU64, Ordering}};
+use core::{
+    array,
+    sync::atomic::{AtomicBool, AtomicU64, Ordering},
+};
 
 use axerrno::{AxError, AxResult};
 use axhal::context::TrapFrame;
@@ -7,10 +10,9 @@ use axtask::WaitQueue;
 use hashbrown::HashMap;
 use kspin::SpinNoIrq;
 use linux_raw_sys::general::{
-    CAP_KILL, MINSIGSTKSZ, SA_NODEFER, SA_ONSTACK, SA_RESETHAND, SIGBUS, SIGCHLD, SIGCONT,
-    SIGFPE, SIGILL, SIGKILL, SIGSEGV, SIGSTOP, SIGSYS, SIGTRAP, SIGTTIN, SIGTTOU, SIGTSTP,
-    SIGURG, SIGWINCH, SI_KERNEL, SS_AUTODISARM, SS_DISABLE, SS_FLAG_BITS, SS_ONSTACK, _NSIG,
-    siginfo,
+    _NSIG, CAP_KILL, MINSIGSTKSZ, SA_NODEFER, SA_ONSTACK, SA_RESETHAND, SI_KERNEL, SIGBUS, SIGCHLD,
+    SIGCONT, SIGFPE, SIGILL, SIGKILL, SIGSEGV, SIGSTOP, SIGSYS, SIGTRAP, SIGTSTP, SIGTTIN, SIGTTOU,
+    SIGURG, SIGWINCH, SS_AUTODISARM, SS_DISABLE, SS_FLAG_BITS, SS_ONSTACK, siginfo,
 };
 use spin::{Lazy, Mutex};
 
@@ -211,11 +213,7 @@ impl PendingSignalReservation {
 
 #[cfg(test)]
 fn sigpending_count(ruid: u32) -> u64 {
-    SIGPENDING_COUNTS
-        .lock()
-        .get(&ruid)
-        .copied()
-        .unwrap_or(0)
+    SIGPENDING_COUNTS.lock().get(&ruid).copied().unwrap_or(0)
 }
 
 #[derive(Clone, Copy)]
@@ -419,14 +417,7 @@ impl PendingSignals {
                     Ok(reservation) => reservation,
                     Err(result) => return self.record_fallback(bit, result),
                 };
-                if Self::push_standard(
-                    &mut self.synchronous,
-                    sig,
-                    info,
-                    reservation,
-                )
-                .is_err()
-                {
+                if Self::push_standard(&mut self.synchronous, sig, info, reservation).is_err() {
                     return self.record_fallback(bit, admission.exhaustion_result());
                 }
                 self.synchronous_mask |= bit;
@@ -446,14 +437,7 @@ impl PendingSignals {
                 Ok(reservation) => reservation,
                 Err(result) => return self.record_fallback(bit, result),
             };
-            if Self::push_standard(
-                &mut self.standard,
-                sig,
-                info,
-                reservation,
-            )
-            .is_err()
-            {
+            if Self::push_standard(&mut self.standard, sig, info, reservation).is_err() {
                 return self.record_fallback(bit, admission.exhaustion_result());
             }
             self.mask |= bit;
@@ -502,7 +486,10 @@ impl PendingSignals {
     /// lock, which avoids inverting the pending/sighand lock order.
     fn delivery_masks(&self, eligible: u64) -> [u64; 2] {
         let ready = self.mask & eligible;
-        [ready & self.synchronous_mask, ready & !self.synchronous_mask]
+        [
+            ready & self.synchronous_mask,
+            ready & !self.synchronous_mask,
+        ]
     }
 
     fn dequeue(&mut self, eligible: u64) -> Option<PendingSignal> {
@@ -514,8 +501,7 @@ impl PendingSignals {
                 let mut pending = Self::take_standard(&mut self.synchronous, sig)?;
                 pending.release_reservation();
                 self.synchronous_mask &= !bit;
-                if !Self::contains_standard(&self.standard, sig)
-                    && (self.fallback_mask & bit) == 0
+                if !Self::contains_standard(&self.standard, sig) && (self.fallback_mask & bit) == 0
                 {
                     self.mask &= !bit;
                 }
@@ -636,12 +622,7 @@ pub fn signal_info_for_fault(sig: usize, code: i32, fault_addr: usize) -> [u8; 1
 }
 
 /// Constructs the `SIGCHLD` payload for a child state transition.
-pub fn signal_info_for_child(
-    child_pid: u64,
-    child_uid: u32,
-    code: i32,
-    status: i32,
-) -> [u8; 128] {
+pub fn signal_info_for_child(child_pid: u64, child_uid: u32, code: i32, status: i32) -> [u8; 128] {
     let mut info: siginfo = unsafe { core::mem::zeroed() };
     unsafe {
         let header = &mut info.__bindgen_anon_1.__bindgen_anon_1;
@@ -1118,12 +1099,7 @@ impl ThreadSignal {
         }
     }
 
-    fn save_context(
-        &self,
-        tf: &TrapFrame,
-        old_mask: u64,
-        user_ucontext: Option<usize>,
-    ) {
+    fn save_context(&self, tf: &TrapFrame, old_mask: u64, user_ucontext: Option<usize>) {
         self.saved_ctx.lock().push(SavedSignalContext {
             tf: *tf,
             old_mask,
@@ -1172,7 +1148,10 @@ fn restore_user_signal_context(
         let gregs_addr = user_ucontext.checked_add(176).ok_or(AxError::BadAddress)?;
         let mut gregs = [0u64; 32];
         process.read_user_bytes(gregs_addr, unsafe {
-            core::slice::from_raw_parts_mut(gregs.as_mut_ptr().cast::<u8>(), core::mem::size_of_val(&gregs))
+            core::slice::from_raw_parts_mut(
+                gregs.as_mut_ptr().cast::<u8>(),
+                core::mem::size_of_val(&gregs),
+            )
         })?;
         tf.regs.ra = gregs[1] as usize;
         tf.regs.sp = gregs[2] as usize;
@@ -1211,7 +1190,10 @@ fn restore_user_signal_context(
         let gregs_addr = user_ucontext.checked_add(184).ok_or(AxError::BadAddress)?;
         let mut gregs = [0u64; 32];
         process.read_user_bytes(gregs_addr, unsafe {
-            core::slice::from_raw_parts_mut(gregs.as_mut_ptr().cast::<u8>(), core::mem::size_of_val(&gregs))
+            core::slice::from_raw_parts_mut(
+                gregs.as_mut_ptr().cast::<u8>(),
+                core::mem::size_of_val(&gregs),
+            )
         })?;
         tf.regs.ra = gregs[1] as usize;
         tf.regs.tp = gregs[2] as usize;
@@ -1327,7 +1309,10 @@ mod tests {
         assert!(pending.put_synchronous(SIGSEGV as usize, Some([0x22; SIGINFO_FRAME_SIZE])));
 
         let first = pending.dequeue(u64::MAX).unwrap();
-        assert_eq!((first.sig, first.info), (SIGSEGV as usize, [0x22; SIGINFO_FRAME_SIZE]));
+        assert_eq!(
+            (first.sig, first.info),
+            (SIGSEGV as usize, [0x22; SIGINFO_FRAME_SIZE])
+        );
         let second = pending.dequeue(u64::MAX).unwrap();
         assert_eq!((second.sig, second.info), (2, [0x11; SIGINFO_FRAME_SIZE]));
     }
@@ -1341,10 +1326,16 @@ mod tests {
         assert!(pending.put_synchronous(signal, Some([0x22; SIGINFO_FRAME_SIZE])));
 
         let first = pending.dequeue(u64::MAX).unwrap();
-        assert_eq!((first.sig, first.info), (signal, [0x22; SIGINFO_FRAME_SIZE]));
+        assert_eq!(
+            (first.sig, first.info),
+            (signal, [0x22; SIGINFO_FRAME_SIZE])
+        );
         assert_eq!(pending.mask(), sig_bit(signal).unwrap());
         let second = pending.dequeue(u64::MAX).unwrap();
-        assert_eq!((second.sig, second.info), (signal, [0x11; SIGINFO_FRAME_SIZE]));
+        assert_eq!(
+            (second.sig, second.info),
+            (signal, [0x11; SIGINFO_FRAME_SIZE])
+        );
         assert_eq!(pending.mask(), 0);
     }
 
@@ -1446,11 +1437,20 @@ mod tests {
         assert!(pending.put(first_rt, Some([0x22; SIGINFO_FRAME_SIZE])));
 
         let first = pending.dequeue(u64::MAX).unwrap();
-        assert_eq!((first.sig, first.info), (first_rt, [0x11; SIGINFO_FRAME_SIZE]));
+        assert_eq!(
+            (first.sig, first.info),
+            (first_rt, [0x11; SIGINFO_FRAME_SIZE])
+        );
         let second = pending.dequeue(u64::MAX).unwrap();
-        assert_eq!((second.sig, second.info), (first_rt, [0x22; SIGINFO_FRAME_SIZE]));
+        assert_eq!(
+            (second.sig, second.info),
+            (first_rt, [0x22; SIGINFO_FRAME_SIZE])
+        );
         let third = pending.dequeue(u64::MAX).unwrap();
-        assert_eq!((third.sig, third.info), (second_rt, [0x33; SIGINFO_FRAME_SIZE]));
+        assert_eq!(
+            (third.sig, third.info),
+            (second_rt, [0x33; SIGINFO_FRAME_SIZE])
+        );
         assert_eq!(pending.mask(), 0);
     }
 
@@ -1466,34 +1466,25 @@ mod tests {
 
         assert_eq!(sigpending_count(RUID), 0);
         assert_eq!(
-            first_queue.put_with_admission(
-                SIGRTMIN,
-                Some([0x11; SIGINFO_FRAME_SIZE]),
-                admission,
-            ),
+            first_queue.put_with_admission(SIGRTMIN, Some([0x11; SIGINFO_FRAME_SIZE]), admission,),
             QueuePutResult::Queued
         );
         assert_eq!(sigpending_count(RUID), 1);
         assert_eq!(
-            second_queue.put_with_admission(
-                SIGRTMIN,
-                Some([0x22; SIGINFO_FRAME_SIZE]),
-                admission,
-            ),
+            second_queue.put_with_admission(SIGRTMIN, Some([0x22; SIGINFO_FRAME_SIZE]), admission,),
             QueuePutResult::LimitExceeded
         );
         assert_eq!(sigpending_count(RUID), 1);
 
         let delivered = first_queue.dequeue(u64::MAX).unwrap();
-        assert_eq!((delivered.sig, delivered.info), (SIGRTMIN, [0x11; SIGINFO_FRAME_SIZE]));
+        assert_eq!(
+            (delivered.sig, delivered.info),
+            (SIGRTMIN, [0x11; SIGINFO_FRAME_SIZE])
+        );
         assert_eq!(sigpending_count(RUID), 0);
 
         assert_eq!(
-            second_queue.put_with_admission(
-                SIGRTMIN,
-                Some([0x22; SIGINFO_FRAME_SIZE]),
-                admission,
-            ),
+            second_queue.put_with_admission(SIGRTMIN, Some([0x22; SIGINFO_FRAME_SIZE]), admission,),
             QueuePutResult::Queued
         );
         assert_eq!(sigpending_count(RUID), 1);
@@ -1521,7 +1512,10 @@ mod tests {
         assert_eq!(pending.mask(), sig_bit(SIGRTMIN).unwrap());
 
         let delivered = pending.dequeue(u64::MAX).unwrap();
-        assert_eq!((delivered.sig, delivered.info), (SIGRTMIN, default_siginfo(SIGRTMIN)));
+        assert_eq!(
+            (delivered.sig, delivered.info),
+            (SIGRTMIN, default_siginfo(SIGRTMIN))
+        );
         assert_eq!(pending.mask(), 0);
     }
 
@@ -1555,7 +1549,10 @@ mod tests {
         assert_eq!(sigpending_count(RUID), 1);
 
         let delivered = pending.dequeue(u64::MAX).unwrap();
-        assert_eq!((delivered.sig, delivered.info), (SIGRTMIN, [0x22; SIGINFO_FRAME_SIZE]));
+        assert_eq!(
+            (delivered.sig, delivered.info),
+            (SIGRTMIN, [0x22; SIGINFO_FRAME_SIZE])
+        );
         assert_eq!(sigpending_count(RUID), 0);
         assert!(pending.dequeue(u64::MAX).is_none());
     }
@@ -1705,26 +1702,15 @@ mod tests {
 
     #[test]
     fn altstack_accepts_linux_compatible_flag_combinations() {
-        let stack = SignalAltStack::from_user_parts(
-            0x10_000,
-            0x4_000,
-            SS_ONSTACK | SS_AUTODISARM,
-        )
-        .unwrap();
+        let stack =
+            SignalAltStack::from_user_parts(0x10_000, 0x4_000, SS_ONSTACK | SS_AUTODISARM).unwrap();
         assert_eq!(stack.flags, SS_AUTODISARM as usize);
 
-        let disabled = SignalAltStack::from_user_parts(
-            0x10_000,
-            0x4_000,
-            SS_DISABLE | SS_AUTODISARM,
-        )
-        .unwrap();
+        let disabled =
+            SignalAltStack::from_user_parts(0x10_000, 0x4_000, SS_DISABLE | SS_AUTODISARM).unwrap();
         assert_eq!(disabled.sp, 0);
         assert_eq!(disabled.size, 0);
-        assert_eq!(
-            disabled.flags,
-            (SS_DISABLE | SS_AUTODISARM) as usize
-        );
+        assert_eq!(disabled.flags, (SS_DISABLE | SS_AUTODISARM) as usize);
 
         assert!(SignalAltStack::from_user_parts(0, 0, SS_DISABLE | SS_ONSTACK).is_none());
         assert!(SignalAltStack::from_user_parts(0, 0, 0x4000_0000).is_none());
@@ -1733,12 +1719,7 @@ mod tests {
     #[test]
     fn autodisarm_disables_during_handler_and_restores_from_signal_frame() {
         let signal = ThreadSignal::new(SignalShared::new());
-        let stack = SignalAltStack::from_user_parts(
-            0x10_000,
-            0x4_000,
-            SS_AUTODISARM,
-        )
-        .unwrap();
+        let stack = SignalAltStack::from_user_parts(0x10_000, 0x4_000, SS_AUTODISARM).unwrap();
         signal.set_altstack(stack);
 
         signal.enter_altstack();
@@ -1989,22 +1970,19 @@ const LOONGARCH_LSX_FCC_OFFSET: usize =
 #[cfg(target_arch = "loongarch64")]
 const LOONGARCH_LSX_FCSR_OFFSET: usize = LOONGARCH_LSX_FCC_OFFSET + 8;
 #[cfg(target_arch = "loongarch64")]
-const LOONGARCH_LSX_FRAME_SIZE: usize =
-    LOONGARCH_SCTX_INFO_SIZE + LOONGARCH_LSX_CONTEXT_SIZE;
+const LOONGARCH_LSX_FRAME_SIZE: usize = LOONGARCH_SCTX_INFO_SIZE + LOONGARCH_LSX_CONTEXT_SIZE;
 #[cfg(target_arch = "loongarch64")]
-const LOONGARCH_LSX_END_OFFSET: usize =
-    LOONGARCH_SC_EXTCONTEXT_OFFSET + LOONGARCH_LSX_FRAME_SIZE;
+const LOONGARCH_LSX_END_OFFSET: usize = LOONGARCH_SC_EXTCONTEXT_OFFSET + LOONGARCH_LSX_FRAME_SIZE;
 #[cfg(target_arch = "loongarch64")]
 const LOONGARCH_SC_USED_FP: u32 = 1;
 #[cfg(target_arch = "loongarch64")]
 const LOONGARCH_LSX_CTX_MAGIC: u32 = 0x5358_0001;
 
 #[cfg(target_arch = "riscv64")]
-const _: () = assert!(RISCV_EXT_HEADER_OFFSET + 2 * core::mem::size_of::<u32>() <= UCONTEXT_FRAME_SIZE);
+const _: () =
+    assert!(RISCV_EXT_HEADER_OFFSET + 2 * core::mem::size_of::<u32>() <= UCONTEXT_FRAME_SIZE);
 #[cfg(target_arch = "loongarch64")]
-const _: () = assert!(
-    LOONGARCH_LSX_END_OFFSET + LOONGARCH_SCTX_INFO_SIZE <= UCONTEXT_FRAME_SIZE
-);
+const _: () = assert!(LOONGARCH_LSX_END_OFFSET + LOONGARCH_SCTX_INFO_SIZE <= UCONTEXT_FRAME_SIZE);
 
 fn signal_frame_base(
     current_sp: usize,
@@ -2043,12 +2021,8 @@ fn write_user_signal_frame(
 ) -> AxResult<(usize, usize, bool)> {
     let frame_size = SIGINFO_FRAME_SIZE + UCONTEXT_FRAME_SIZE;
     let altstack = thread.signal_altstack();
-    let (frame_base, used_altstack) = signal_frame_base(
-        current_sp(tf),
-        action_flags,
-        altstack,
-        frame_size,
-    )?;
+    let (frame_base, used_altstack) =
+        signal_frame_base(current_sp(tf), action_flags, altstack, frame_size)?;
     let siginfo_addr = frame_base;
     let ucontext_addr = frame_base + SIGINFO_FRAME_SIZE;
 
@@ -2120,9 +2094,7 @@ fn read_user_signal_mask(process: &Process, user_ucontext: usize) -> AxResult<u6
     let addr = user_ucontext
         .checked_add(UCONTEXT_SIGMASK_OFFSET)
         .ok_or(AxError::BadAddress)?;
-    process
-        .read_user_usize(addr)
-        .map(|mask| mask as u64)
+    process.read_user_usize(addr).map(|mask| mask as u64)
 }
 
 fn read_user_signal_altstack(
@@ -2163,12 +2135,12 @@ fn read_user_signal_u32(process: &Process, addr: usize) -> AxResult<u32> {
 fn write_user_signal_fp_state(process: &Process, user_ucontext: usize) -> AxResult<()> {
     let fp = capture_signal_fp_state();
     let fp_bytes = unsafe {
-        core::slice::from_raw_parts(
-            fp.fp.as_ptr().cast::<u8>(),
-            core::mem::size_of_val(&fp.fp),
-        )
+        core::slice::from_raw_parts(fp.fp.as_ptr().cast::<u8>(), core::mem::size_of_val(&fp.fp))
     };
-    process.write_user_bytes(signal_context_addr(user_ucontext, RISCV_D_FPU_OFFSET)?, fp_bytes)?;
+    process.write_user_bytes(
+        signal_context_addr(user_ucontext, RISCV_D_FPU_OFFSET)?,
+        fp_bytes,
+    )?;
     process.write_user_bytes(
         signal_context_addr(user_ucontext, RISCV_D_FCSR_OFFSET)?,
         &(fp.fcsr as u32).to_ne_bytes(),
@@ -2186,10 +2158,7 @@ fn write_user_signal_fp_state(process: &Process, user_ucontext: usize) -> AxResu
 fn write_user_signal_fp_state(process: &Process, user_ucontext: usize) -> AxResult<()> {
     let fp = capture_signal_fp_state();
     let fp_bytes = unsafe {
-        core::slice::from_raw_parts(
-            fp.fp.as_ptr().cast::<u8>(),
-            core::mem::size_of_val(&fp.fp),
-        )
+        core::slice::from_raw_parts(fp.fp.as_ptr().cast::<u8>(), core::mem::size_of_val(&fp.fp))
     };
     let extcontext = signal_context_addr(user_ucontext, LOONGARCH_SC_EXTCONTEXT_OFFSET)?;
     let lsx_context = signal_context_addr(user_ucontext, LOONGARCH_LSX_CONTEXT_OFFSET)?;
@@ -2294,15 +2263,12 @@ fn restore_user_signal_fp_state(
 
     let mut fp = saved.fp;
     let lsx_context = signal_context_addr(user_ucontext, LOONGARCH_LSX_CONTEXT_OFFSET)?;
-    process.read_user_bytes(
-        lsx_context,
-        unsafe {
-            core::slice::from_raw_parts_mut(
-                fp.fp.as_mut_ptr().cast::<u8>(),
-                core::mem::size_of_val(&fp.fp),
-            )
-        },
-    )?;
+    process.read_user_bytes(lsx_context, unsafe {
+        core::slice::from_raw_parts_mut(
+            fp.fp.as_mut_ptr().cast::<u8>(),
+            core::mem::size_of_val(&fp.fp),
+        )
+    })?;
     process.read_user_bytes(
         signal_context_addr(user_ucontext, LOONGARCH_LSX_FCC_OFFSET)?,
         &mut fp.fcc,
@@ -2366,11 +2332,7 @@ pub fn force_signal_to_thread(thread: &Thread, sig: usize) -> bool {
 /// A blocked or ignored synchronous fault cannot remain pending while the
 /// faulting instruction is retried. Match Linux force-signal behavior by
 /// restoring the default disposition and unblocking it before queuing.
-pub fn force_signal_to_thread_with_info(
-    thread: &Thread,
-    sig: usize,
-    info: [u8; 128],
-) -> bool {
+pub fn force_signal_to_thread_with_info(thread: &Thread, sig: usize, info: [u8; 128]) -> bool {
     if !thread.signal().prepare_for_forced_signal(sig) {
         return false;
     }
@@ -2501,10 +2463,7 @@ fn is_ignored_unblocked(action: SignalAction, blocked: u64, sig: usize) -> bool 
 }
 
 fn is_job_control_stop_signal(sig: usize) -> bool {
-    matches!(
-        sig as u32,
-        SIGSTOP | SIGTSTP | SIGTTIN | SIGTTOU
-    )
+    matches!(sig as u32, SIGSTOP | SIGTSTP | SIGTTIN | SIGTTOU)
 }
 
 /// Arrival of SIGCONT discards pending stop signals and resumes a stopped
