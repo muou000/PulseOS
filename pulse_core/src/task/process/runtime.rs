@@ -494,11 +494,25 @@ impl Process {
                     Some(info),
                 );
             }
-            parent.child_exit_event.notify_all_with_context(
-                false,
+            parent.notify_child_state_change(
                 WakeContext::new(|| (WakeSource::Signal, status as u64)),
             );
         }
+    }
+
+    #[inline]
+    pub fn child_state_epoch(&self) -> u64 {
+        self.child_state_epoch.load(Ordering::Acquire)
+    }
+
+    /// Publishes a child state transition after its state stores are visible.
+    /// The epoch closes the scan-to-sleep race; waiters still inspect
+    /// `children` when deciding whether a child is reportable.
+    #[inline]
+    fn notify_child_state_change(&self, context: WakeContext) {
+        self.child_state_epoch.fetch_add(1, Ordering::Release);
+        self.child_exit_event
+            .notify_all_with_context(false, context);
     }
 
     pub fn is_zombie(&self) -> bool {
@@ -648,8 +662,7 @@ impl Process {
 
                         if child.is_zombie() {
                             let _ = queue_signal_to_process(init.as_ref(), SIGCHLD as usize);
-                            init.child_exit_event
-                                .notify_all_with_context(false, WakeContext::task());
+                            init.notify_child_state_change(WakeContext::task());
                         }
                     }
                 }
@@ -701,9 +714,7 @@ impl Process {
                 // The exiting task is still on its own kernel stack here.
                 // Wake waiters without forcing an immediate reschedule from inside
                 // the teardown path.
-                parent
-                    .child_exit_event
-                    .notify_all_with_context(false, WakeContext::task());
+                parent.notify_child_state_change(WakeContext::task());
 
                 if auto_reap && parent.reap_zombie_child(self.pid() as isize).is_some() {
                     let now_ns = axhal::time::monotonic_time_nanos() as u64;
@@ -825,49 +836,18 @@ impl Process {
         }
     }
 
+    /// Waits for a child-state publication newer than `observed_epoch`.
+    /// Callers must sample the epoch before scanning with
+    /// `waitid_find_and_reap` to close the scan-to-sleep window.
     pub fn wait_for_child_state_change_interruptible(
         &self,
         idtype: usize,
         id: usize,
-        options: i32,
+        observed_epoch: u64,
     ) -> Result<(), i32> {
         let thread = match current_thread() {
             Ok(t) => t,
             Err(e) => return Err(e.code()),
-        };
-
-        let is_match = |child: &Process| -> bool {
-            match idtype {
-                0 => true,
-                1 => child.pid() == id as u64,
-                2 => {
-                    let target_pgid = if id == 0 { self.pgid() } else { id as u64 };
-                    child.pgid() == target_pgid
-                }
-                _ => false,
-            }
-        };
-
-        let check_state = || -> bool {
-            let children = self.children.lock();
-            for child in children.iter() {
-                if is_match(child) {
-                    if (options & WUNTRACED as i32) != 0
-                        && child.stopped_signal_pending.load(Ordering::Acquire) != 0
-                    {
-                        return true;
-                    }
-                    if (options & WCONTINUED as i32) != 0
-                        && child.continued_signal_pending.load(Ordering::Acquire)
-                    {
-                        return true;
-                    }
-                    if (options & WEXITED as i32) != 0 && child.is_zombie() {
-                        return true;
-                    }
-                }
-            }
-            false
         };
 
         let selector = match idtype {
@@ -883,12 +863,10 @@ impl Process {
             WaitContext::new(|| (WaitReason::ChildWait, self.pid(), selector as u64));
         self.child_exit_event
             .wait_until_with_context(wait_context, || {
-                check_state() || thread.has_pending_signal() || self.group_exiting()
+                self.child_state_epoch() != observed_epoch
+                    || thread.has_pending_signal()
+                    || self.group_exiting()
             });
-
-        if check_state() {
-            return Ok(());
-        }
 
         if thread.has_pending_signal() {
             return Err(task::ERESTARTSYS);
