@@ -318,17 +318,26 @@ impl Backend {
         let page = vaddr.align_down_4k();
         let mut page_count = 0;
         let mut check_page = page;
-        while page_count < MAX_FAULT_BATCH_PAGES && check_page < area_end {
-            axfs::buildstorm_stat_inc!(MM_ANON_FAULT_PTE_READ_PROBES);
-            let needs_mapping = match pt.read_for_addr(check_page).query(check_page) {
-                Err(_) => true,
-                Ok((frame, _, _)) => frame.as_usize() == 0,
-            };
-            if !needs_mapping {
-                break;
+        'probe: while page_count < MAX_FAULT_BATCH_PAGES && check_page < area_end {
+            // A read guard spans one 2 MiB page-table subtree. Keep it while
+            // probing the contiguous fault batch, then reacquire only if the
+            // batch crosses that boundary.
+            let pt_guard = pt.read_for_addr(check_page);
+            while page_count < MAX_FAULT_BATCH_PAGES
+                && check_page < area_end
+                && pt_guard.covers(check_page)
+            {
+                axfs::buildstorm_stat_inc!(MM_ANON_FAULT_PTE_READ_PROBES);
+                let needs_mapping = match pt_guard.query(check_page) {
+                    Err(_) => true,
+                    Ok((frame, _, _)) => frame.as_usize() == 0,
+                };
+                if !needs_mapping {
+                    break 'probe;
+                }
+                page_count += 1;
+                check_page += PAGE_SIZE_4K;
             }
-            page_count += 1;
-            check_page += PAGE_SIZE_4K;
         }
 
         if page_count == 0 {
