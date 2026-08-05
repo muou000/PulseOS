@@ -30,7 +30,7 @@ mod vectored;
 
 pub use descriptor::sys_sync;
 pub(crate) use descriptor::{sys_fdatasync, sys_fsync, sys_getdents64, sys_lseek, sys_pipe2};
-#[cfg(any(feature = "qperf-trace", feature = "buildstorm-stats"))]
+#[cfg(feature = "qperf-trace")]
 use markers::OutputMarkerScanner;
 pub(crate) use readiness::*;
 pub(crate) use scalar::*;

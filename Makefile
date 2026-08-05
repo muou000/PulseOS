@@ -7,10 +7,11 @@ FEATURE ?= final-testcode
 QPERF_TRACE ?= n
 BUILDSTORM_STATS ?= n
 comma := ,
-QPERF_APP_FEATURE = $(if $(filter y,$(QPERF_TRACE)),$(comma)qperf-trace)
-BUILDSTORM_STATS_APP_FEATURE = $(if $(filter y,$(BUILDSTORM_STATS)),$(comma)buildstorm-stats)
-BUILD_OUT_DIR = $(if $(filter y,$(QPERF_TRACE)),$(A)/target/qperf-artifacts,$(if $(filter y,$(BUILDSTORM_STATS)),$(A)/target/buildstorm-stats-artifacts,$(A)))
-export APP_FEATURES = qemu,$(FEATURE)$(QPERF_APP_FEATURE)$(BUILDSTORM_STATS_APP_FEATURE)
+# BuildStorm diagnostics use the established qperf-trace feature so marker,
+# task and filesystem instrumentation are emitted by one configuration.
+QPERF_APP_FEATURE = $(if $(filter y,$(QPERF_TRACE) $(BUILDSTORM_STATS)),$(comma)qperf-trace)
+BUILD_OUT_DIR = $(if $(filter y,$(QPERF_TRACE) $(BUILDSTORM_STATS)),$(A)/target/qperf-artifacts,$(A))
+export APP_FEATURES = qemu,$(FEATURE)$(QPERF_APP_FEATURE)
 ALL_APP_FEATURES = qemu,$(FEATURE)
 export BLK := y
 
@@ -50,36 +51,37 @@ test: override APP_FEATURES = qemu,$(FEATURE)
 test: test-artifacts
 
 qperf-test: override QPERF_TRACE := y
+qperf-test: override BUILDSTORM_STATS := n
 qperf-test: override APP_FEATURES = qemu,$(FEATURE),qperf-trace
 qperf-test: override LOG := off
 qperf-test: test-artifacts
 
-buildstorm-stats-test: override QPERF_TRACE := n
+buildstorm-stats-test: override QPERF_TRACE := y
 buildstorm-stats-test: override BUILDSTORM_STATS := y
-buildstorm-stats-test: override APP_FEATURES = qemu,$(FEATURE),buildstorm-stats
+buildstorm-stats-test: override APP_FEATURES = qemu,$(FEATURE),qperf-trace
 buildstorm-stats-test: override LOG := info
 buildstorm-stats-test: test-artifacts
 
 test-artifacts: prepare-tools
 	@ARCH=riscv64 APP_FEATURES=$(APP_FEATURES) LOG=$(LOG) $(MAKE) defconfig
 	@ARCH=riscv64 APP_FEATURES=$(APP_FEATURES) LOG=$(LOG) BUS=mmio OUT_DIR=$(BUILD_OUT_DIR) $(MAKE) -C arceos build  EXTRA_RUSTFLAGS="$(EXTRA_RUSTFLAGS)"
-	@if [ "$(QPERF_TRACE)" = "y" ]; then \
-		cp $(BUILD_OUT_DIR)/$(NAME)_riscv64-qemu-virt.bin kernel-rv-qperf; \
-		cp $(BUILD_OUT_DIR)/$(NAME)_riscv64-qemu-virt.elf $(NAME)_riscv64-qemu-virt-qperf.elf; \
-	elif [ "$(BUILDSTORM_STATS)" = "y" ]; then \
+	@if [ "$(BUILDSTORM_STATS)" = "y" ]; then \
 		cp $(BUILD_OUT_DIR)/$(NAME)_riscv64-qemu-virt.bin kernel-rv-buildstorm-stats; \
 		cp $(BUILD_OUT_DIR)/$(NAME)_riscv64-qemu-virt.elf $(NAME)_riscv64-qemu-virt-buildstorm-stats.elf; \
+	elif [ "$(QPERF_TRACE)" = "y" ]; then \
+		cp $(BUILD_OUT_DIR)/$(NAME)_riscv64-qemu-virt.bin kernel-rv-qperf; \
+		cp $(BUILD_OUT_DIR)/$(NAME)_riscv64-qemu-virt.elf $(NAME)_riscv64-qemu-virt-qperf.elf; \
 	else \
 		cp $(BUILD_OUT_DIR)/$(NAME)_riscv64-qemu-virt.bin kernel-rv; \
 	fi
 	@ARCH=loongarch64 APP_FEATURES=$(APP_FEATURES) LOG=$(LOG) FEATURES=bus-pci $(MAKE) defconfig
 	@ARCH=loongarch64 APP_FEATURES=$(APP_FEATURES) LOG=$(LOG) BUS=pci FEATURES=bus-pci OUT_DIR=$(BUILD_OUT_DIR) $(MAKE) -C arceos build  EXTRA_RUSTFLAGS="$(EXTRA_RUSTFLAGS)"
-	@if [ "$(QPERF_TRACE)" = "y" ]; then \
-		cp $(BUILD_OUT_DIR)/$(NAME)_loongarch64-qemu-virt.elf kernel-la-qperf; \
-		cp $(BUILD_OUT_DIR)/$(NAME)_loongarch64-qemu-virt.elf $(NAME)_loongarch64-qemu-virt-qperf.elf; \
-	elif [ "$(BUILDSTORM_STATS)" = "y" ]; then \
+	@if [ "$(BUILDSTORM_STATS)" = "y" ]; then \
 		cp $(BUILD_OUT_DIR)/$(NAME)_loongarch64-qemu-virt.elf kernel-la-buildstorm-stats; \
 		cp $(BUILD_OUT_DIR)/$(NAME)_loongarch64-qemu-virt.elf $(NAME)_loongarch64-qemu-virt-buildstorm-stats.elf; \
+	elif [ "$(QPERF_TRACE)" = "y" ]; then \
+		cp $(BUILD_OUT_DIR)/$(NAME)_loongarch64-qemu-virt.elf kernel-la-qperf; \
+		cp $(BUILD_OUT_DIR)/$(NAME)_loongarch64-qemu-virt.elf $(NAME)_loongarch64-qemu-virt-qperf.elf; \
 	else \
 		cp $(BUILD_OUT_DIR)/$(NAME)_loongarch64-qemu-virt.elf kernel-la; \
 	fi

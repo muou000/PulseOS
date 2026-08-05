@@ -11,8 +11,7 @@ repository.workspace = true
 default = ["irq", "ext4"]
 irq = ["axtask/irq"]
 ext4 = ["axfs/ext4"]
-qperf-trace = ["axtask/qperf-trace"]
-buildstorm-stats = ["axfs/buildstorm-stats"]
+qperf-trace = ["axtask/qperf-trace", "axfs/qperf-trace"]
 
 [dependencies]
 axalloc.workspace = true

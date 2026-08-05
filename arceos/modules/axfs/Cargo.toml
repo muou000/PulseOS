@@ -16,7 +16,7 @@ times = []
 std = []
 pre-testcode = []
 final-testcode = []
-buildstorm-stats = []
+qperf-trace = []
 
 [dependencies]
 axalloc.workspace = true
@@ -27,6 +27,7 @@ axerrno.workspace = true
 axfs-ng-vfs.workspace = true
 axhal.workspace = true
 axio = { workspace = true, features = ["alloc"] }
+axlog.workspace = true
 axpoll.workspace = true
 axsync.workspace = true
 bitflags.workspace = true

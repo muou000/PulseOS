@@ -25,10 +25,10 @@ use spin::{Lazy, Mutex};
 mod disk;
 pub mod fs;
 
-#[cfg(feature = "buildstorm-stats")]
+#[cfg(feature = "qperf-trace")]
 pub mod buildstorm_stats;
 
-#[cfg(feature = "buildstorm-stats")]
+#[cfg(feature = "qperf-trace")]
 #[macro_export]
 macro_rules! buildstorm_stat_inc {
     ($counter:ident) => {
@@ -36,7 +36,7 @@ macro_rules! buildstorm_stat_inc {
     };
 }
 
-#[cfg(feature = "buildstorm-stats")]
+#[cfg(feature = "qperf-trace")]
 #[macro_export]
 macro_rules! buildstorm_stat_add {
     ($counter:ident, $value:expr) => {
@@ -44,13 +44,13 @@ macro_rules! buildstorm_stat_add {
     };
 }
 
-#[cfg(not(feature = "buildstorm-stats"))]
+#[cfg(not(feature = "qperf-trace"))]
 #[macro_export]
 macro_rules! buildstorm_stat_inc {
     ($counter:ident) => {{}};
 }
 
-#[cfg(not(feature = "buildstorm-stats"))]
+#[cfg(not(feature = "qperf-trace"))]
 #[macro_export]
 macro_rules! buildstorm_stat_add {
     ($counter:ident, $value:expr) => {{}};
