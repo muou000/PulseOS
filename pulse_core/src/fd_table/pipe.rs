@@ -1,3 +1,5 @@
+use core::mem::MaybeUninit;
+
 use super::*;
 
 #[derive(Copy, Clone, Eq, PartialEq)]
@@ -8,7 +10,9 @@ enum RingBufferStatus {
 }
 
 struct PipeRingBuffer {
-    arr: alloc::vec::Vec<u8>,
+    // Slots outside the unread range are intentionally left uninitialized.
+    // Every read goes through `read_into`, which only copies published bytes.
+    arr: alloc::vec::Vec<MaybeUninit<u8>>,
     head: usize,
     tail: usize,
     status: RingBufferStatus,
@@ -17,7 +21,7 @@ struct PipeRingBuffer {
 impl PipeRingBuffer {
     fn new(capacity: usize) -> Self {
         Self {
-            arr: alloc::vec![0u8; capacity],
+            arr: alloc::vec![MaybeUninit::uninit(); capacity],
             head: 0,
             tail: 0,
             status: RingBufferStatus::Empty,
@@ -43,17 +47,38 @@ impl PipeRingBuffer {
         if new_capacity < current_unread {
             return Err(LinuxError::EBUSY);
         }
+        if new_capacity == self.capacity() {
+            return Ok(());
+        }
 
-        let mut new_arr = alloc::vec![0u8; new_capacity];
+        let mut new_arr = alloc::vec![MaybeUninit::uninit(); new_capacity];
         let cap = self.capacity();
 
         if current_unread > 0 {
             if self.tail > self.head {
-                new_arr[..current_unread].copy_from_slice(&self.arr[self.head..self.tail]);
+                // SAFETY: the unread range is initialized by `write_from`.
+                unsafe {
+                    core::ptr::copy_nonoverlapping(
+                        self.arr.as_ptr().add(self.head).cast::<u8>(),
+                        new_arr.as_mut_ptr().cast::<u8>(),
+                        current_unread,
+                    );
+                }
             } else {
                 let first_part = cap - self.head;
-                new_arr[..first_part].copy_from_slice(&self.arr[self.head..]);
-                new_arr[first_part..current_unread].copy_from_slice(&self.arr[..self.tail]);
+                // SAFETY: both source ranges are part of the unread initialized data.
+                unsafe {
+                    core::ptr::copy_nonoverlapping(
+                        self.arr.as_ptr().add(self.head).cast::<u8>(),
+                        new_arr.as_mut_ptr().cast::<u8>(),
+                        first_part,
+                    );
+                    core::ptr::copy_nonoverlapping(
+                        self.arr.as_ptr().cast::<u8>(),
+                        new_arr.as_mut_ptr().add(first_part).cast::<u8>(),
+                        current_unread - first_part,
+                    );
+                }
             }
         }
 
@@ -74,6 +99,87 @@ impl PipeRingBuffer {
 
         Ok(())
     }
+
+    fn read_into(&mut self, dst: &mut [u8]) -> usize {
+        let read_len = core::cmp::min(self.available_read(), dst.len());
+        if read_len == 0 {
+            return 0;
+        }
+
+        let cap = self.capacity();
+        let first_part = core::cmp::min(read_len, cap - self.head);
+        // SAFETY: `read_len` is bounded by `available_read`, so both source
+        // ranges contain bytes previously initialized by `write_from`.
+        unsafe {
+            core::ptr::copy_nonoverlapping(
+                self.arr.as_ptr().add(self.head).cast::<u8>(),
+                dst.as_mut_ptr(),
+                first_part,
+            );
+        }
+        self.head = (self.head + first_part) % cap;
+
+        let second_part = read_len - first_part;
+        if second_part > 0 {
+            // SAFETY: the wrapped range is also within the unread initialized data.
+            unsafe {
+                core::ptr::copy_nonoverlapping(
+                    self.arr.as_ptr().cast::<u8>(),
+                    dst.as_mut_ptr().add(first_part),
+                    second_part,
+                );
+            }
+            self.head = second_part;
+        }
+
+        self.status = if self.head == self.tail {
+            RingBufferStatus::Empty
+        } else {
+            RingBufferStatus::Normal
+        };
+        read_len
+    }
+
+    fn write_from(&mut self, src: &[u8]) -> usize {
+        let available = self.capacity() - self.available_read();
+        let write_len = core::cmp::min(available, src.len());
+        if write_len == 0 {
+            return 0;
+        }
+
+        let cap = self.capacity();
+        let first_part = core::cmp::min(write_len, cap - self.tail);
+        // SAFETY: the destination slots are within this vector allocation and
+        // become initialized before the new bytes are made readable.
+        unsafe {
+            core::ptr::copy_nonoverlapping(
+                src.as_ptr(),
+                self.arr.as_mut_ptr().add(self.tail).cast::<u8>(),
+                first_part,
+            );
+        }
+        self.tail = (self.tail + first_part) % cap;
+
+        let second_part = write_len - first_part;
+        if second_part > 0 {
+            // SAFETY: this is the wrapped free range in the same allocation.
+            unsafe {
+                core::ptr::copy_nonoverlapping(
+                    src.as_ptr().add(first_part),
+                    self.arr.as_mut_ptr().cast::<u8>(),
+                    second_part,
+                );
+            }
+            self.tail = second_part;
+        }
+
+        self.status = if self.tail == self.head {
+            RingBufferStatus::Full
+        } else {
+            RingBufferStatus::Normal
+        };
+        write_len
+    }
 }
 
 #[derive(Debug)]
@@ -84,7 +190,7 @@ pub struct ZeroCopyPage {
 }
 
 const PIPE_PAGE_SIZE: usize = 4096;
-const DEFAULT_PIPE_CAPACITY: usize = 64 * 1024;
+const DEFAULT_PIPE_CAPACITY: usize = 256 * 1024;
 const MAX_PIPE_CAPACITY: usize = 1024 * 1024;
 
 fn zero_copy_bytes(pages: &alloc::collections::VecDeque<ZeroCopyPage>) -> usize {
@@ -220,7 +326,9 @@ impl FdObject for EventFdObject {
             {
                 buf[..core::mem::size_of::<u64>()].copy_from_slice(&value.to_ne_bytes());
                 self.writable_sequence.fetch_add(1, Ordering::Release);
-                self.write_wait_queue.notify_all(true);
+                if !self.write_wait_queue.is_empty() {
+                    self.write_wait_queue.notify_all(true);
+                }
                 return Ok(core::mem::size_of::<u64>());
             }
         }
@@ -262,7 +370,9 @@ impl FdObject for EventFdObject {
                 .is_ok()
             {
                 self.readable_sequence.fetch_add(1, Ordering::Release);
-                self.read_wait_queue.notify_all(true);
+                if !self.read_wait_queue.is_empty() {
+                    self.read_wait_queue.notify_all(true);
+                }
                 return Ok(core::mem::size_of::<u64>());
             }
         }
@@ -595,10 +705,15 @@ impl PipeObject {
             }
 
             write_size += accepted * PIPE_PAGE_SIZE;
+            // Readers must be able to drain this batch before a later iteration
+            // waits for capacity again. Do not rely on WaitQueue::is_empty here:
+            // poll registrations are independent from queued tasks.
             self.shared.read_wait_queue.notify_all(false);
         }
 
-        self.shared.read_wait_queue.notify_all(true);
+        if write_size > 0 {
+            self.shared.read_wait_queue.notify_all(true);
+        }
         Ok(write_size)
     }
 
@@ -690,7 +805,9 @@ impl PipeObject {
         }
 
         if read_pages > 0 {
-            self.shared.write_wait_queue.notify_all(true);
+            if !self.shared.write_wait_queue.is_empty() {
+                self.shared.write_wait_queue.notify_all(true);
+            }
             return Ok(read_pages * PIPE_PAGE_SIZE);
         }
 
@@ -803,7 +920,6 @@ impl FdObject for PipeObject {
                     dealloc_physical_frame(popped.paddr);
                 }
                 drop(zc);
-                self.shared.write_wait_queue.notify_all(false);
                 continue;
             }
             drop(zc);
@@ -812,7 +928,9 @@ impl FdObject for PipeObject {
             let available = ring_buffer.available_read();
             if available == 0 {
                 if read_size > 0 {
-                    self.shared.write_wait_queue.notify_all(true);
+                    if !self.shared.write_wait_queue.is_empty() {
+                        self.shared.write_wait_queue.notify_all(true);
+                    }
                     return Ok(read_size);
                 }
                 if self.write_end_closed() {
@@ -845,32 +963,18 @@ impl FdObject for PipeObject {
             }
 
             let chunk_limit = core::cmp::min(available, buf.len() - read_size);
-            let cap = ring_buffer.capacity();
-            let head = ring_buffer.head;
-            let first_part = core::cmp::min(chunk_limit, cap - head);
-            buf[read_size..read_size + first_part]
-                .copy_from_slice(&ring_buffer.arr[head..head + first_part]);
-            ring_buffer.head = (head + first_part) % cap;
-
-            let second_part = chunk_limit - first_part;
-            if second_part > 0 {
-                buf[read_size + first_part..read_size + chunk_limit]
-                    .copy_from_slice(&ring_buffer.arr[..second_part]);
-                ring_buffer.head = second_part;
-            }
-
-            read_size += chunk_limit;
-
-            if ring_buffer.head == ring_buffer.tail {
-                ring_buffer.status = RingBufferStatus::Empty;
-            } else {
-                ring_buffer.status = RingBufferStatus::Normal;
-            }
+            let read = ring_buffer.read_into(&mut buf[read_size..read_size + chunk_limit]);
+            debug_assert_eq!(read, chunk_limit);
+            read_size += read;
 
             drop(ring_buffer);
-            self.shared.write_wait_queue.notify_all(false);
         }
-        self.shared.write_wait_queue.notify_all(true);
+
+        if read_size > 0 {
+            if !self.shared.write_wait_queue.is_empty() {
+                self.shared.write_wait_queue.notify_all(true);
+            }
+        }
         Ok(read_size)
     }
 
@@ -896,6 +1000,11 @@ impl FdObject for PipeObject {
             );
             if available == 0 {
                 if self.nonblocking.load(Ordering::Acquire) {
+                    if write_size > 0 {
+                        if !self.shared.read_wait_queue.is_empty() {
+                            self.shared.read_wait_queue.notify_all(true);
+                        }
+                    }
                     return if write_size > 0 {
                         Ok(write_size)
                     } else {
@@ -914,6 +1023,11 @@ impl FdObject for PipeObject {
                 );
                 drop(ring_buffer);
                 drop(zc);
+                if write_size > 0 {
+                    if !self.shared.read_wait_queue.is_empty() {
+                        self.shared.read_wait_queue.notify_all(true);
+                    }
+                }
                 self.shared.write_wait_queue.wait_until(|| {
                     self.available_pipe_write() > 0
                         || self.read_end_closed()
@@ -930,33 +1044,19 @@ impl FdObject for PipeObject {
             }
 
             let chunk_limit = core::cmp::min(available, buf.len() - write_size);
-            let cap = ring_buffer.capacity();
-            let tail = ring_buffer.tail;
-            let first_part = core::cmp::min(chunk_limit, cap - tail);
-            ring_buffer.arr[tail..tail + first_part]
-                .copy_from_slice(&buf[write_size..write_size + first_part]);
-            ring_buffer.tail = (tail + first_part) % cap;
-
-            let second_part = chunk_limit - first_part;
-            if second_part > 0 {
-                ring_buffer.arr[..second_part]
-                    .copy_from_slice(&buf[write_size + first_part..write_size + chunk_limit]);
-                ring_buffer.tail = second_part;
-            }
-
-            write_size += chunk_limit;
-
-            if ring_buffer.tail == ring_buffer.head {
-                ring_buffer.status = RingBufferStatus::Full;
-            } else {
-                ring_buffer.status = RingBufferStatus::Normal;
-            }
+            let written = ring_buffer.write_from(&buf[write_size..write_size + chunk_limit]);
+            debug_assert_eq!(written, chunk_limit);
+            write_size += written;
 
             drop(ring_buffer);
             drop(zc);
-            self.shared.read_wait_queue.notify_all(false);
         }
-        self.shared.read_wait_queue.notify_all(true);
+
+        if write_size > 0 {
+            if !self.shared.read_wait_queue.is_empty() {
+                self.shared.read_wait_queue.notify_all(true);
+            }
+        }
         Ok(write_size)
     }
 
@@ -1206,7 +1306,7 @@ pub fn create_fifo_entry(
 
 #[cfg(test)]
 mod tests {
-    use super::{PIPE_PAGE_SIZE, pipe_available_write_bytes};
+    use super::{PIPE_PAGE_SIZE, PipeRingBuffer, pipe_available_write_bytes};
 
     #[test]
     fn zero_copy_pages_cannot_bypass_pipe_capacity() {
@@ -1224,5 +1324,49 @@ mod tests {
             pipe_available_write_bytes(capacity, 0, 16 * PIPE_PAGE_SIZE),
             0
         );
+    }
+
+    #[test]
+    fn ring_buffer_wraps_without_exposing_uninitialized_slots() {
+        let mut ring = PipeRingBuffer::new(8);
+        assert_eq!(ring.write_from(b"abcdef"), 6);
+
+        let mut first = [0u8; 4];
+        assert_eq!(ring.read_into(&mut first), 4);
+        assert_eq!(&first, b"abcd");
+
+        assert_eq!(ring.write_from(b"WXYZ"), 4);
+        let mut remaining = [0u8; 6];
+        assert_eq!(ring.read_into(&mut remaining), 6);
+        assert_eq!(&remaining, b"efWXYZ");
+        assert_eq!(ring.available_read(), 0);
+    }
+
+    #[test]
+    fn same_size_resize_keeps_the_existing_backing_allocation() {
+        let mut ring = PipeRingBuffer::new(8);
+        assert_eq!(ring.write_from(b"abcdef"), 6);
+        let backing = ring.arr.as_ptr();
+
+        ring.resize(8).unwrap();
+        assert_eq!(ring.arr.as_ptr(), backing);
+
+        let mut data = [0u8; 6];
+        assert_eq!(ring.read_into(&mut data), 6);
+        assert_eq!(&data, b"abcdef");
+    }
+
+    #[test]
+    fn resize_preserves_unread_bytes_across_wraparound() {
+        let mut ring = PipeRingBuffer::new(8);
+        assert_eq!(ring.write_from(b"abcdef"), 6);
+        let mut first = [0u8; 4];
+        assert_eq!(ring.read_into(&mut first), 4);
+        assert_eq!(ring.write_from(b"WXYZ"), 4);
+
+        ring.resize(16).unwrap();
+        let mut remaining = [0u8; 6];
+        assert_eq!(ring.read_into(&mut remaining), 6);
+        assert_eq!(&remaining, b"efWXYZ");
     }
 }

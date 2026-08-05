@@ -278,6 +278,33 @@ fn test_notify_one_consumes_one_running_waiter() {
 }
 
 #[test]
+fn test_wait_queue_is_not_empty_with_registered_waker() {
+    use core::task::Waker;
+    use std::task::Wake;
+
+    struct CountWake(AtomicUsize);
+
+    impl Wake for CountWake {
+        fn wake(self: Arc<Self>) {
+            self.0.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    let _lock = SERIAL.lock();
+    INIT.call_once(axtask::init_scheduler);
+
+    let queue = WaitQueue::new();
+    let wake = Arc::new(CountWake(AtomicUsize::new(0)));
+    let waker = Waker::from(wake.clone());
+    let _registration = queue.register_owned_waker(&waker);
+
+    assert!(!queue.is_empty());
+    queue.notify_all(false);
+    assert_eq!(wake.0.load(Ordering::Relaxed), 1);
+    assert!(queue.is_empty());
+}
+
+#[test]
 fn test_wait_future_refreshes_and_cancels_waker() {
     use core::{
         future::Future,
