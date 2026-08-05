@@ -68,6 +68,7 @@ impl Process {
         task::register_thread_global(child_tid, child_thread.clone());
         if let Ok(parent_thread) = current_thread() {
             child_thread.set_signal_blocked_mask(parent_thread.signal_blocked_mask());
+            child_thread.inherit_scheduler_from(&parent_thread);
         }
         if let Some(addr) = params.child_set_tid {
             child_thread.set_child_tid_addr(addr);
@@ -155,6 +156,7 @@ impl Process {
         task::register_thread_global(child_tid, child_thread.clone());
         if let Ok(parent_thread) = current_thread() {
             child_thread.set_signal_blocked_mask(parent_thread.signal_blocked_mask());
+            child_thread.inherit_scheduler_from(&parent_thread);
         }
         if let Some(addr) = params.child_set_tid {
             child_thread.set_child_tid_addr(addr);

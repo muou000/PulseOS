@@ -30,6 +30,8 @@ pub fn set_generic_timer(
     crate::timers::set_generic_timer(timer_list::TimeValue::from_nanos(deadline_ns), callback);
 }
 
+pub use axsched::RtPolicy;
+
 pub(crate) use crate::run_queue::{
     current_run_queue, select_run_queue, select_wake_run_queue, yield_current,
 };
@@ -228,6 +230,29 @@ where
 /// Returns `true` if the priority is set successfully.
 pub fn set_priority(prio: isize) -> bool {
     current_run_queue::<NoPreemptIrqSave>().set_current_priority(prio)
+}
+
+/// Sets the current task's real-time policy.
+///
+/// EEVDF distinguishes FIFO and round-robin behavior for tasks with an RT
+/// priority. Other scheduler implementations retain their existing behavior.
+pub fn set_current_rt_policy(policy: RtPolicy) {
+    #[cfg(feature = "sched-eevdf")]
+    current_run_queue::<NoPreemptIrqSave>().set_current_rt_policy(policy);
+    #[cfg(not(feature = "sched-eevdf"))]
+    let _ = policy;
+}
+
+/// Returns the real-time round-robin time slice exposed to user space.
+pub const fn rt_time_slice_ns() -> u64 {
+    #[cfg(feature = "sched-eevdf")]
+    {
+        axsched::EEVDFTask::<TaskInner>::rt_time_slice_ns()
+    }
+    #[cfg(not(feature = "sched-eevdf"))]
+    {
+        10_000_000
+    }
 }
 
 /// Set the affinity for the current task.

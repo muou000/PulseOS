@@ -10,6 +10,15 @@ const RT_PRIORITY_MIN: isize = 1;
 const RT_PRIORITY_MAX: isize = 99;
 const SCHED_ATTR_SIZE: u32 = core::mem::size_of::<SchedAttr>() as u32;
 
+fn apply_rt_policy(policy: u32) {
+    let policy = match policy {
+        SCHED_FIFO => axtask::RtPolicy::Fifo,
+        SCHED_RR => axtask::RtPolicy::RoundRobin,
+        _ => return,
+    };
+    axtask::set_current_rt_policy(policy);
+}
+
 #[repr(C)]
 #[derive(Clone, Copy)]
 struct SchedAttr {
@@ -123,7 +132,9 @@ pub fn sys_sched_getscheduler(pid: usize) -> isize {
         Ok(t) => t,
         Err(e) => return -e.code() as isize,
     };
-    thread.sched_policy.load(core::sync::atomic::Ordering::Relaxed) as isize
+    thread
+        .sched_policy
+        .load(core::sync::atomic::Ordering::Relaxed) as isize
 }
 
 pub fn sys_sched_setparam(pid: usize, param_ptr: usize) -> isize {
@@ -188,6 +199,7 @@ pub fn sys_sched_setscheduler(pid: usize, policy: usize, param_ptr: usize) -> is
         if sched_priority < 1 || sched_priority > 99 {
             return -LinuxError::EINVAL.code() as isize;
         }
+        apply_rt_policy(policy as u32);
         axtask::set_priority(sched_priority as isize);
     } else {
         if sched_priority != 0 {
@@ -200,7 +212,9 @@ pub fn sys_sched_setscheduler(pid: usize, policy: usize, param_ptr: usize) -> is
         Ok(t) => t,
         Err(e) => return -e.code() as isize,
     };
-    thread.sched_policy.store(policy as u32, core::sync::atomic::Ordering::Relaxed);
+    thread
+        .sched_policy
+        .store(policy as u32, core::sync::atomic::Ordering::Relaxed);
     0
 }
 
@@ -243,8 +257,8 @@ pub fn sys_sched_rr_get_interval(pid: usize, interval: usize) -> isize {
         return -e.code() as isize;
     }
     let ts = timespec {
-        tv_sec: 0,
-        tv_nsec: 10_000_000,
+        tv_sec: (axtask::rt_time_slice_ns() / 1_000_000_000) as _,
+        tv_nsec: (axtask::rt_time_slice_ns() % 1_000_000_000) as _,
     };
     write_plain(interval, &ts)
         .map(|_| 0)
@@ -252,7 +266,12 @@ pub fn sys_sched_rr_get_interval(pid: usize, interval: usize) -> isize {
 }
 
 pub fn sys_sched_setattr(pid: usize, attr: usize, flags: usize) -> isize {
-    axlog::debug!("sys_sched_setattr: pid={}, attr={:#x}, flags={:#x}", pid, attr, flags);
+    axlog::debug!(
+        "sys_sched_setattr: pid={}, attr={:#x}, flags={:#x}",
+        pid,
+        attr,
+        flags
+    );
     if flags != 0 {
         return -LinuxError::EINVAL.code() as isize;
     }
@@ -299,10 +318,15 @@ pub fn sys_sched_setattr(pid: usize, attr: usize, flags: usize) -> isize {
             if priority != 0 {
                 return -LinuxError::EINVAL.code() as isize;
             }
-            if user_attr.sched_runtime == 0 || user_attr.sched_deadline == 0 || user_attr.sched_period == 0 {
+            if user_attr.sched_runtime == 0
+                || user_attr.sched_deadline == 0
+                || user_attr.sched_period == 0
+            {
                 return -LinuxError::EINVAL.code() as isize;
             }
-            if user_attr.sched_runtime > user_attr.sched_deadline || user_attr.sched_deadline > user_attr.sched_period {
+            if user_attr.sched_runtime > user_attr.sched_deadline
+                || user_attr.sched_deadline > user_attr.sched_period
+            {
                 return -LinuxError::EINVAL.code() as isize;
             }
             // PulseOS records SCHED_DEADLINE metadata but does not implement
@@ -312,6 +336,7 @@ pub fn sys_sched_setattr(pid: usize, attr: usize, flags: usize) -> isize {
             if priority < 1 || priority > 99 {
                 return -LinuxError::EINVAL.code() as isize;
             }
+            apply_rt_policy(policy);
             axtask::set_priority(priority as isize);
         }
     } else {
@@ -328,12 +353,27 @@ pub fn sys_sched_setattr(pid: usize, attr: usize, flags: usize) -> isize {
         Ok(t) => t,
         Err(e) => return -e.code() as isize,
     };
-    thread.sched_policy.store(policy, core::sync::atomic::Ordering::Relaxed);
-    thread.sched_flags.store(user_attr.sched_flags, core::sync::atomic::Ordering::Relaxed);
-    thread.sched_nice.store(user_attr.sched_nice, core::sync::atomic::Ordering::Relaxed);
-    thread.sched_runtime.store(user_attr.sched_runtime, core::sync::atomic::Ordering::Relaxed);
-    thread.sched_deadline.store(user_attr.sched_deadline, core::sync::atomic::Ordering::Relaxed);
-    thread.sched_period.store(user_attr.sched_period, core::sync::atomic::Ordering::Relaxed);
+    thread
+        .sched_policy
+        .store(policy, core::sync::atomic::Ordering::Relaxed);
+    thread
+        .sched_flags
+        .store(user_attr.sched_flags, core::sync::atomic::Ordering::Relaxed);
+    thread
+        .sched_nice
+        .store(user_attr.sched_nice, core::sync::atomic::Ordering::Relaxed);
+    thread.sched_runtime.store(
+        user_attr.sched_runtime,
+        core::sync::atomic::Ordering::Relaxed,
+    );
+    thread.sched_deadline.store(
+        user_attr.sched_deadline,
+        core::sync::atomic::Ordering::Relaxed,
+    );
+    thread.sched_period.store(
+        user_attr.sched_period,
+        core::sync::atomic::Ordering::Relaxed,
+    );
 
     0
 }
@@ -367,13 +407,25 @@ pub fn sys_sched_getattr(pid: usize, attr: usize, size: usize, flags: usize) -> 
 
     let sched_attr = SchedAttr {
         size: SCHED_ATTR_SIZE,
-        sched_policy: thread.sched_policy.load(core::sync::atomic::Ordering::Relaxed),
-        sched_flags: thread.sched_flags.load(core::sync::atomic::Ordering::Relaxed),
-        sched_nice: thread.sched_nice.load(core::sync::atomic::Ordering::Relaxed),
+        sched_policy: thread
+            .sched_policy
+            .load(core::sync::atomic::Ordering::Relaxed),
+        sched_flags: thread
+            .sched_flags
+            .load(core::sync::atomic::Ordering::Relaxed),
+        sched_nice: thread
+            .sched_nice
+            .load(core::sync::atomic::Ordering::Relaxed),
         sched_priority: rt_prio,
-        sched_runtime: thread.sched_runtime.load(core::sync::atomic::Ordering::Relaxed),
-        sched_deadline: thread.sched_deadline.load(core::sync::atomic::Ordering::Relaxed),
-        sched_period: thread.sched_period.load(core::sync::atomic::Ordering::Relaxed),
+        sched_runtime: thread
+            .sched_runtime
+            .load(core::sync::atomic::Ordering::Relaxed),
+        sched_deadline: thread
+            .sched_deadline
+            .load(core::sync::atomic::Ordering::Relaxed),
+        sched_period: thread
+            .sched_period
+            .load(core::sync::atomic::Ordering::Relaxed),
     };
     write_plain(attr, &sched_attr)
         .map(|_| 0)

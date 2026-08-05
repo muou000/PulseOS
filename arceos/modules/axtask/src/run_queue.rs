@@ -104,6 +104,20 @@ fn task_is_real_time(task: &AxTaskRef) -> bool {
     (1..=99).contains(&task.priority())
 }
 
+#[cfg(all(
+    feature = "smp",
+    feature = "sched-load-balance",
+    feature = "sched-eevdf"
+))]
+#[inline]
+fn eevdf_placement_weight(task: &AxTaskRef) -> usize {
+    if task.is_idle() {
+        0
+    } else {
+        task.placement_weight()
+    }
+}
+
 // `sched-eevdf` takes precedence over `sched-rr` when both features are set.
 // Keep this wake policy restricted to the scheduler that is actually selected.
 #[cfg(all(
@@ -181,10 +195,8 @@ pub(crate) fn scheduler_preemption_deadline_for(current: &AxTaskRef, now_ns: u64
     if current.is_idle() {
         return None;
     }
-    run_queue
-        .scheduler
-        .lock()
-        .next_preemption_deadline(current, now_ns)
+    let scheduler = run_queue.scheduler.lock();
+    scheduler.next_preemption_deadline(current, now_ns)
 }
 
 /// Yields the current task after avoiding the task lookup when no peer is ready.
@@ -434,7 +446,7 @@ pub(crate) struct AxRunQueue {
     /// Since irq and preempt are preserved by the kernel guard hold by `AxRunQueueRef`,
     /// we just use a simple raw spin lock here.
     scheduler: SpinRaw<Scheduler>,
-    /// Approximate number of ready tasks, used for placement and qperf tracing.
+    /// Approximate number of ready tasks, used for RR placement and qperf tracing.
     #[cfg(any(
         feature = "qperf-trace",
         all(
@@ -444,18 +456,37 @@ pub(crate) struct AxRunQueue {
         )
     ))]
     ready_depth: AtomicUsize,
-    /// Approximate indication that this CPU currently runs a non-idle task.
+    /// EEVDF total runnable weight, used as one atomic placement snapshot.
+    ///
+    /// It includes both ready and current entities so a least-loaded scan does
+    /// not have to combine independently changing counters.
     #[cfg(all(
         feature = "smp",
         feature = "sched-load-balance",
-        any(feature = "sched-rr", feature = "sched-eevdf")
+        feature = "sched-eevdf"
+    ))]
+    placement_load_weight: AtomicUsize,
+    /// Approximate indication that this CPU currently runs a non-idle RR task.
+    #[cfg(all(
+        feature = "smp",
+        feature = "sched-load-balance",
+        feature = "sched-rr",
+        not(feature = "sched-eevdf")
     ))]
     current_non_idle: AtomicBool,
-    /// Ordinary tasks that idle CPUs may pull from this queue.
+    /// EEVDF weight of ordinary tasks that idle CPUs may pull from this queue.
     #[cfg(all(
         feature = "smp",
         feature = "sched-load-balance",
-        any(feature = "sched-rr", feature = "sched-eevdf")
+        feature = "sched-eevdf"
+    ))]
+    stealable_placement_weight: AtomicUsize,
+    /// Ordinary RR tasks that idle CPUs may pull from this queue.
+    #[cfg(all(
+        feature = "smp",
+        feature = "sched-load-balance",
+        feature = "sched-rr",
+        not(feature = "sched-eevdf")
     ))]
     stealable_depth: AtomicUsize,
     /// Per-CPU rotating start for remote idle-pull scans.
@@ -900,6 +931,12 @@ impl<G: BaseGuard> CurrentRunQueueRef<'_, G> {
     }
 
     pub fn set_current_priority(&mut self, prio: isize) -> bool {
+        #[cfg(all(
+            feature = "smp",
+            feature = "sched-load-balance",
+            feature = "sched-eevdf"
+        ))]
+        let previous_weight = eevdf_placement_weight(self.current_task.as_task_ref());
         let updated = {
             self.inner.scheduler.lock().set_priority_at(
                 self.current_task.as_task_ref(),
@@ -907,11 +944,34 @@ impl<G: BaseGuard> CurrentRunQueueRef<'_, G> {
                 axhal::time::monotonic_time_nanos(),
             )
         };
+        #[cfg(all(
+            feature = "smp",
+            feature = "sched-load-balance",
+            feature = "sched-eevdf"
+        ))]
+        if updated {
+            self.inner.replace_current_placement_weight(
+                previous_weight,
+                eevdf_placement_weight(self.current_task.as_task_ref()),
+            );
+        }
         #[cfg(feature = "irq")]
         if updated {
             crate::timers::reprogram_timer_for_task(self.current_task.as_task_ref());
         }
         updated
+    }
+
+    #[cfg(feature = "sched-eevdf")]
+    pub fn set_current_rt_policy(&mut self, policy: axsched::RtPolicy) {
+        let now_ns = axhal::time::monotonic_time_nanos();
+        self.inner.scheduler.lock().set_rt_policy_at(
+            self.current_task.as_task_ref(),
+            policy,
+            now_ns,
+        );
+        #[cfg(feature = "irq")]
+        crate::timers::reprogram_timer_for_task(self.current_task.as_task_ref());
     }
 
     /// Core reschedule subroutine.
@@ -955,6 +1015,19 @@ impl AxRunQueue {
         let mut scheduler = Scheduler::new();
         #[cfg(feature = "qperf-trace")]
         let traced_gc_task = gc_task.clone();
+        #[cfg(all(
+            feature = "smp",
+            feature = "sched-load-balance",
+            feature = "sched-eevdf"
+        ))]
+        let gc_task_weight = eevdf_placement_weight(&gc_task);
+        #[cfg(all(
+            feature = "smp",
+            feature = "sched-load-balance",
+            feature = "sched-eevdf"
+        ))]
+        let current_task_weight = crate::current_may_uninit()
+            .map_or(0, |current| eevdf_placement_weight(current.as_task_ref()));
         let now_ns = axhal::time::monotonic_time_nanos();
         scheduler.enqueue_task(gc_task, SchedEnqueueReason::Spawn, now_ns);
         if let Some(current) = crate::current_may_uninit()
@@ -977,7 +1050,16 @@ impl AxRunQueue {
             #[cfg(all(
                 feature = "smp",
                 feature = "sched-load-balance",
-                any(feature = "sched-rr", feature = "sched-eevdf")
+                feature = "sched-eevdf"
+            ))]
+            placement_load_weight: AtomicUsize::new(
+                gc_task_weight.saturating_add(current_task_weight),
+            ),
+            #[cfg(all(
+                feature = "smp",
+                feature = "sched-load-balance",
+                feature = "sched-rr",
+                not(feature = "sched-eevdf")
             ))]
             current_non_idle: AtomicBool::new(
                 crate::current_may_uninit().is_some_and(|current| !current.is_idle()),
@@ -985,7 +1067,14 @@ impl AxRunQueue {
             #[cfg(all(
                 feature = "smp",
                 feature = "sched-load-balance",
-                any(feature = "sched-rr", feature = "sched-eevdf")
+                feature = "sched-eevdf"
+            ))]
+            stealable_placement_weight: AtomicUsize::new(0),
+            #[cfg(all(
+                feature = "smp",
+                feature = "sched-load-balance",
+                feature = "sched-rr",
+                not(feature = "sched-eevdf")
             ))]
             stealable_depth: AtomicUsize::new(0),
             #[cfg(all(
@@ -1016,13 +1105,93 @@ impl AxRunQueue {
     #[cfg(all(
         feature = "smp",
         feature = "sched-load-balance",
-        any(feature = "sched-rr", feature = "sched-eevdf")
+        feature = "sched-eevdf"
+    ))]
+    #[inline]
+    fn placement_load(&self) -> usize {
+        self.placement_load_weight.load(Ordering::Relaxed)
+    }
+
+    #[cfg(all(
+        feature = "smp",
+        feature = "sched-load-balance",
+        feature = "sched-eevdf"
+    ))]
+    #[inline]
+    fn add_eevdf_placement_weight(counter: &AtomicUsize, weight: usize) {
+        let previous = counter.fetch_add(weight, Ordering::Relaxed);
+        debug_assert!(
+            previous.checked_add(weight).is_some(),
+            "run-queue EEVDF placement weight overflow"
+        );
+    }
+
+    #[cfg(all(
+        feature = "smp",
+        feature = "sched-load-balance",
+        feature = "sched-eevdf"
+    ))]
+    #[inline]
+    fn remove_eevdf_placement_weight(counter: &AtomicUsize, weight: usize) {
+        let previous = counter.fetch_sub(weight, Ordering::Relaxed);
+        debug_assert!(
+            previous >= weight,
+            "run-queue EEVDF placement weight underflow"
+        );
+    }
+
+    #[cfg(all(
+        feature = "smp",
+        feature = "sched-load-balance",
+        feature = "sched-eevdf"
+    ))]
+    #[inline]
+    fn replace_current_placement_weight(&self, previous_weight: usize, next_weight: usize) {
+        if next_weight > previous_weight {
+            Self::add_eevdf_placement_weight(
+                &self.placement_load_weight,
+                next_weight - previous_weight,
+            );
+        } else if previous_weight > next_weight {
+            Self::remove_eevdf_placement_weight(
+                &self.placement_load_weight,
+                previous_weight - next_weight,
+            );
+        }
+    }
+
+    #[cfg(all(
+        feature = "smp",
+        feature = "sched-load-balance",
+        feature = "sched-rr",
+        not(feature = "sched-eevdf")
     ))]
     #[inline]
     fn placement_load(&self) -> usize {
         self.ready_depth
             .load(Ordering::Relaxed)
             .saturating_add(usize::from(self.current_non_idle.load(Ordering::Relaxed)))
+    }
+
+    #[cfg(all(
+        feature = "smp",
+        feature = "sched-load-balance",
+        feature = "sched-eevdf"
+    ))]
+    #[inline]
+    fn stealable_load(&self) -> usize {
+        self.stealable_placement_weight.load(Ordering::Relaxed)
+    }
+
+    #[cfg(all(
+        feature = "smp",
+        feature = "sched-load-balance",
+        feature = "sched-rr",
+        not(feature = "sched-eevdf")
+    ))]
+    #[inline]
+    fn stealable_load(&self) -> usize {
+        self.stealable_depth.load(Ordering::Relaxed)
     }
 
     #[inline]
@@ -1044,7 +1213,31 @@ impl AxRunQueue {
         #[cfg(all(
             feature = "smp",
             feature = "sched-load-balance",
-            any(feature = "sched-rr", feature = "sched-eevdf")
+            feature = "sched-eevdf"
+        ))]
+        let placement_weight = eevdf_placement_weight(task);
+
+        #[cfg(all(
+            feature = "smp",
+            feature = "sched-load-balance",
+            feature = "sched-eevdf"
+        ))]
+        Self::add_eevdf_placement_weight(&self.placement_load_weight, placement_weight);
+
+        #[cfg(all(
+            feature = "smp",
+            feature = "sched-load-balance",
+            feature = "sched-eevdf"
+        ))]
+        if Self::is_stealable(task) {
+            Self::add_eevdf_placement_weight(&self.stealable_placement_weight, placement_weight);
+        }
+
+        #[cfg(all(
+            feature = "smp",
+            feature = "sched-load-balance",
+            feature = "sched-rr",
+            not(feature = "sched-eevdf")
         ))]
         if Self::is_stealable(task) {
             self.stealable_depth.fetch_add(1, Ordering::Relaxed);
@@ -1086,7 +1279,31 @@ impl AxRunQueue {
         #[cfg(all(
             feature = "smp",
             feature = "sched-load-balance",
-            any(feature = "sched-rr", feature = "sched-eevdf")
+            feature = "sched-eevdf"
+        ))]
+        let placement_weight = eevdf_placement_weight(task);
+
+        #[cfg(all(
+            feature = "smp",
+            feature = "sched-load-balance",
+            feature = "sched-eevdf"
+        ))]
+        Self::remove_eevdf_placement_weight(&self.placement_load_weight, placement_weight);
+
+        #[cfg(all(
+            feature = "smp",
+            feature = "sched-load-balance",
+            feature = "sched-eevdf"
+        ))]
+        if Self::is_stealable(task) {
+            Self::remove_eevdf_placement_weight(&self.stealable_placement_weight, placement_weight);
+        }
+
+        #[cfg(all(
+            feature = "smp",
+            feature = "sched-load-balance",
+            feature = "sched-rr",
+            not(feature = "sched-eevdf")
         ))]
         if Self::is_stealable(task) {
             let result =
@@ -1140,10 +1357,8 @@ impl AxRunQueue {
                 {
                     continue;
                 }
-                let load = get_run_queue(cpu_id)
-                    .stealable_depth
-                    .load(Ordering::Relaxed);
-                if load != 0 && source.is_none_or(|(_, best_load)| load > best_load) {
+                let load = get_run_queue(cpu_id).stealable_load();
+                if load != 0 && source.map_or(true, |(_, best_load)| load > best_load) {
                     source = Some((cpu_id, load));
                 }
             }
@@ -1311,7 +1526,17 @@ impl AxRunQueue {
         #[cfg(all(
             feature = "smp",
             feature = "sched-load-balance",
-            any(feature = "sched-rr", feature = "sched-eevdf")
+            feature = "sched-eevdf"
+        ))]
+        self.replace_current_placement_weight(
+            eevdf_placement_weight(prev_task.as_task_ref()),
+            eevdf_placement_weight(&next_task),
+        );
+        #[cfg(all(
+            feature = "smp",
+            feature = "sched-load-balance",
+            feature = "sched-rr",
+            not(feature = "sched-eevdf")
         ))]
         self.current_non_idle
             .store(!next_task.is_idle(), Ordering::Release);

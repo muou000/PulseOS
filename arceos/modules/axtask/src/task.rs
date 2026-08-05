@@ -405,6 +405,8 @@ impl TaskInner {
         if let Some(curr) = crate::current_may_uninit() {
             let prio = curr.as_task_ref().priority();
             let _ = task_ref.set_priority(prio);
+            #[cfg(feature = "sched-eevdf")]
+            task_ref.set_rt_policy(curr.as_task_ref().rt_policy());
         }
         task_ref
     }
