@@ -146,6 +146,18 @@ pub(crate) fn protect_populated_range<M: MappingMutationTracker<VirtAddr>>(
 pub struct FileWritebacks(Vec<file::FileWriteback>);
 
 impl FileWritebacks {
+    fn push(&mut self, writeback: file::FileWriteback) {
+        self.0.push(writeback);
+    }
+
+    fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    fn append(&mut self, mut other: Self) {
+        self.0.append(&mut other.0);
+    }
+
     pub fn complete(self) -> axerrno::AxResult {
         for writeback in self.0 {
             writeback.complete()?;
@@ -229,6 +241,7 @@ pub struct DeferredReclaims {
     frames: Option<DeferredFrames>,
     backend: Option<Backend>,
     additional_backends: Option<Vec<Backend>>,
+    file_writebacks: FileWritebacks,
 }
 
 impl Default for DeferredReclaims {
@@ -237,6 +250,7 @@ impl Default for DeferredReclaims {
             frames: Some(DeferredFrames::Dynamic(Vec::new())),
             backend: None,
             additional_backends: Some(Vec::new()),
+            file_writebacks: FileWritebacks::default(),
         }
     }
 }
@@ -247,6 +261,7 @@ impl DeferredReclaims {
             frames: Some(DeferredFrames::Dynamic(Vec::with_capacity(capacity))),
             backend: None,
             additional_backends: Some(Vec::new()),
+            file_writebacks: FileWritebacks::default(),
         }
     }
 
@@ -266,6 +281,7 @@ impl DeferredReclaims {
             frames: Some(DeferredFrames::Retirement { cpu_id, len: 0 }),
             backend: None,
             additional_backends: Some(Vec::new()),
+            file_writebacks: FileWritebacks::default(),
         }
     }
 
@@ -298,6 +314,10 @@ impl DeferredReclaims {
         }
     }
 
+    pub(crate) fn defer_file_writeback(&mut self, writeback: file::FileWriteback) {
+        self.file_writebacks.push(writeback);
+    }
+
     pub(crate) fn is_empty(&self) -> bool {
         let frames_empty = match self.frames.as_ref().unwrap() {
             DeferredFrames::Dynamic(frames) => frames.is_empty(),
@@ -306,10 +326,11 @@ impl DeferredReclaims {
         frames_empty
             && self.backend.is_none()
             && self.additional_backends.as_ref().unwrap().is_empty()
+            && self.file_writebacks.is_empty()
     }
 
     pub(crate) fn append(&mut self, other: Self) {
-        let (other_frames, backend, additional_backends) = other.into_parts();
+        let (other_frames, backend, additional_backends, file_writebacks) = other.into_parts();
         match other_frames {
             DeferredFrames::Dynamic(mut frames) => match self.frames.as_mut().unwrap() {
                 DeferredFrames::Dynamic(own_frames) => own_frames.append(&mut frames),
@@ -332,10 +353,15 @@ impl DeferredReclaims {
         for backend in additional_backends {
             self.defer_backend(backend);
         }
+        self.file_writebacks.append(file_writebacks);
     }
 
     pub(crate) fn reclaim(self) {
-        let (frames, backend, additional_backends) = self.into_parts();
+        let (frames, backend, additional_backends, file_writebacks) = self.into_parts();
+        // File-backed MAP_SHARED pages must be marked dirty only after the
+        // PTE invalidation is visible to every CPU. `reclaim()` is reached
+        // after that completion for published address spaces.
+        let _ = file_writebacks.complete();
         match frames {
             DeferredFrames::Dynamic(frames) => {
                 for frame in frames {
@@ -353,11 +379,12 @@ impl DeferredReclaims {
         drop(additional_backends);
     }
 
-    fn into_parts(mut self) -> (DeferredFrames, Option<Backend>, Vec<Backend>) {
+    fn into_parts(mut self) -> (DeferredFrames, Option<Backend>, Vec<Backend>, FileWritebacks) {
         (
             self.frames.take().unwrap(),
             self.backend.take(),
             self.additional_backends.take().unwrap(),
+            core::mem::take(&mut self.file_writebacks),
         )
     }
 }
@@ -385,10 +412,11 @@ impl Drop for DeferredReclaims {
         };
         let backend_count = usize::from(self.backend.is_some())
             + self.additional_backends.as_ref().unwrap().len();
-        if frame_count + backend_count > 0 {
+        let writeback_count = usize::from(!self.file_writebacks.is_empty());
+        if frame_count + backend_count + writeback_count > 0 {
             error!(
                 "leaking {} deferred mapping references after incomplete TLB shootdown",
-                frame_count + backend_count
+                frame_count + backend_count + writeback_count
             );
         }
         match frames {
@@ -403,6 +431,9 @@ impl Drop for DeferredReclaims {
             if !backends.is_empty() {
                 core::mem::forget(backends);
             }
+        }
+        if !self.file_writebacks.is_empty() {
+            core::mem::forget(core::mem::take(&mut self.file_writebacks));
         }
     }
 }
