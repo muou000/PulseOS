@@ -179,6 +179,22 @@ pub(super) struct FileWriteback {
 }
 
 impl FileWriteback {
+    pub(super) fn for_unmap(file: CachedFile) -> Self {
+        Self {
+            file,
+            page_numbers: Vec::new(),
+            sync: false,
+        }
+    }
+
+    pub(super) fn push_page(&mut self, page_number: u32) {
+        self.page_numbers.push(page_number);
+    }
+
+    pub(super) fn is_empty(&self) -> bool {
+        self.page_numbers.is_empty()
+    }
+
     pub(super) fn complete(self) -> AxResult {
         for page_number in self.page_numbers {
             self.file
@@ -473,21 +489,28 @@ impl Backend {
             _ => return false,
         };
         let file_size = mapping.file_bytes();
+        let mut writeback = None;
         let result = pt.unmap_present_range(start, size, false, |addr, frame, page_size| {
             debug_assert_eq!(page_size, PageSize::Size4K);
             if frame.as_usize() != 0 {
                 mutation.record(addr, PAGE_SIZE_4K);
-                if mapping.shared {
-                    if let Some((file_offset, _)) =
+                if mapping.shared
+                    && let Some((file_offset, _)) =
                         mapping.page_read_window_at_size(addr, file_size)
-                    {
-                        let pn = (file_offset / PAGE_SIZE_4K as u64) as u32;
-                        let _ = mapping.file.mark_page_dirty(pn);
-                    }
+                {
+                    let pn = (file_offset / PAGE_SIZE_4K as u64) as u32;
+                    writeback
+                        .get_or_insert_with(|| FileWriteback::for_unmap(mapping.file.clone()))
+                        .push_page(pn);
                 }
                 reclaim.defer_frame(frame);
             }
         });
+        if let Some(writeback) = writeback
+            && !writeback.is_empty()
+        {
+            reclaim.defer_file_writeback(writeback);
+        }
         result.is_ok()
     }
 
