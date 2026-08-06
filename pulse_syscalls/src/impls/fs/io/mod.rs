@@ -12,7 +12,7 @@ use pulse_core::{
 };
 
 use crate::impls::{
-    fs::common::{get_fd_entry, open_fd_flags, remove_fd_entry},
+    fs::common::{get_fd_entry, get_fd_objects, open_fd_flags, remove_fd_entry},
     utils::{
         ScratchBuffer, alloc_uninit_bytes, pin_user_read_slice, pin_user_write_slice,
         read_user_bytes_partial, read_user_i64, read_user_iovec_array, read_user_timespec,

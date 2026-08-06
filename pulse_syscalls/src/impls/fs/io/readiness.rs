@@ -66,17 +66,24 @@ fn wait_for_signal_or_timeout(
     }
 }
 
-fn poll_fds_once(pollfds: &mut [pollfd]) -> usize {
+type PollObject = alloc::sync::Arc<dyn FdObject>;
+
+fn snapshot_poll_objects(
+    pollfds: &[pollfd],
+) -> Result<alloc::vec::Vec<Option<PollObject>>, LinuxError> {
+    get_fd_objects(pollfds.iter().map(|pfd| pfd.fd as usize))
+}
+
+fn poll_fds_once(pollfds: &mut [pollfd], objects: &[Option<PollObject>]) -> usize {
     let mut ready = 0usize;
-    for pfd in pollfds {
+    for (index, pfd) in pollfds.iter_mut().enumerate() {
         pfd.revents = 0;
         if pfd.fd < 0 {
             continue;
         }
 
-        let fd = pfd.fd as usize;
-        match get_fd_entry(fd) {
-            Ok(entry) => match entry.object.poll() {
+        match objects.get(index).and_then(Option::as_ref) {
+            Some(object) => match object.poll() {
                 Ok(state) => {
                     pfd.revents = requested_poll_revents(pfd.events, state);
                     if pfd.revents != 0 {
@@ -88,7 +95,7 @@ fn poll_fds_once(pollfds: &mut [pollfd]) -> usize {
                     ready += 1;
                 }
             },
-            Err(_) => {
+            None => {
                 pfd.revents = POLLNVAL as i16;
                 ready += 1;
             }
@@ -158,44 +165,49 @@ pub fn sys_ppoll(
             .unwrap_or_else(|_| -LinuxError::EFAULT.code() as isize)
     };
 
+    let objects = match snapshot_poll_objects(&pollfds) {
+        Ok(objects) => objects,
+        Err(e) => return -e.code() as isize,
+    };
+
     // Linux poll reports an invalid descriptor in-band through POLLNVAL.  Do
     // this scan before gathering wait queues so the blocking path never turns
     // that per-entry result into an EBADF syscall failure.
-    let ready = poll_fds_once(&mut pollfds);
+    let ready = poll_fds_once(&mut pollfds, &objects);
     if ready > 0 {
         return write_back(&pollfds, ready as isize);
     }
 
     // Try to retrieve wait queues for all monitored file descriptors.
     // If all monitored fds support wait queues, we can block on them event-driven.
-    let mut objects = alloc::vec::Vec::with_capacity(nfds.min(128));
+    let mut wait_objects = alloc::vec::Vec::with_capacity(nfds.min(128));
     let mut all_wqs_supported = true;
-    for pfd in &pollfds {
+    for (pfd, object) in pollfds.iter().zip(objects.iter()) {
         if pfd.fd < 0 {
             continue;
         }
-        let fd = pfd.fd as usize;
-        match get_fd_entry(fd) {
-            Ok(entry) => {
-                if all_wqs_supported {
-                    let mut dummy = alloc::vec::Vec::new();
-                    match entry.object.get_wait_queues(pfd.events, &mut dummy) {
-                        Ok(true) => {
-                            objects.push((entry.object.clone(), pfd.events));
-                        }
-                        _ => {
-                            all_wqs_supported = false;
-                        }
+        if all_wqs_supported {
+            if let Some(object) = object {
+                let mut dummy = alloc::vec::Vec::new();
+                match object.get_wait_queues(pfd.events, &mut dummy) {
+                    Ok(true) => {
+                        // Keep the same object reference for the wait and
+                        // every readiness recheck in this syscall.
+                        wait_objects.push((object.clone(), pfd.events));
+                    }
+                    _ => {
+                        all_wqs_supported = false;
                     }
                 }
+            } else {
+                all_wqs_supported = false;
             }
-            Err(_) => all_wqs_supported = false,
         }
     }
 
-    if all_wqs_supported && !objects.is_empty() {
-        let mut wqs = alloc::vec::Vec::with_capacity(objects.len().saturating_add(1).min(128));
-        for (obj, events) in &objects {
+    if all_wqs_supported && !wait_objects.is_empty() {
+        let mut wqs = alloc::vec::Vec::with_capacity(wait_objects.len().saturating_add(1).min(128));
+        for (obj, events) in &wait_objects {
             let _ = obj.get_wait_queues(*events, &mut wqs);
         }
         wqs.push(thread.signal_wait_queue());
@@ -203,7 +215,7 @@ pub fn sys_ppoll(
         // Wait until one or more monitored objects become ready, a signal is pending,
         // or the timeout is reached.
         let check_ready = || {
-            for (obj, events) in &objects {
+            for (obj, events) in &wait_objects {
                 if let Ok(state) = obj.poll() {
                     if requested_poll_revents(*events, state) != 0 {
                         return true;
@@ -266,7 +278,7 @@ pub fn sys_ppoll(
         }
 
         // Poll readiness takes precedence over a concurrently pending signal.
-        let ready = poll_fds_once(&mut pollfds);
+        let ready = poll_fds_once(&mut pollfds, &objects);
         if ready > 0 {
             return write_back(&pollfds, ready as isize);
         }
@@ -284,7 +296,7 @@ pub fn sys_ppoll(
     let mut idle_rounds: usize = 0;
 
     loop {
-        let ready = poll_fds_once(&mut pollfds);
+        let ready = poll_fds_once(&mut pollfds, &objects);
 
         if ready > 0 {
             return write_back(&pollfds, ready as isize);
@@ -353,6 +365,29 @@ impl FdSet {
     fn zero() -> Self {
         Self { fds_bits: [0; 16] }
     }
+}
+
+#[inline]
+fn pselect_events_for_fd(
+    fd: usize,
+    has_read: bool,
+    in_read: &FdSet,
+    has_write: bool,
+    in_write: &FdSet,
+    has_except: bool,
+    in_except: &FdSet,
+) -> i16 {
+    let mut events = 0i16;
+    if has_read && in_read.is_set(fd) {
+        events |= POLLIN as i16;
+    }
+    if has_write && in_write.is_set(fd) {
+        events |= POLLOUT as i16;
+    }
+    if has_except && in_except.is_set(fd) {
+        events |= linux_raw_sys::general::POLLPRI as i16;
+    }
+    events
 }
 
 pub fn sys_pselect6(
@@ -447,24 +482,37 @@ pub fn sys_pselect6(
         );
     }
 
-    let mut pollfds = alloc::vec::Vec::with_capacity(nfds.min(1024));
-    for fd in 0..nfds.min(1024) {
-        let mut events = 0i16;
-        if has_read && in_read.is_set(fd) {
-            events |= POLLIN as i16;
+    let limit = nfds.min(1024);
+    let mut pollfds = alloc::vec::Vec::with_capacity(limit);
+    let word_count = limit.saturating_add(63) / 64;
+    for word_idx in 0..word_count {
+        let mut bits = 0u64;
+        if has_read {
+            bits |= in_read.fds_bits[word_idx];
         }
-        if has_write && in_write.is_set(fd) {
-            events |= POLLOUT as i16;
+        if has_write {
+            bits |= in_write.fds_bits[word_idx];
         }
-        if has_except && in_except.is_set(fd) {
-            events |= linux_raw_sys::general::POLLPRI as i16;
+        if has_except {
+            bits |= in_except.fds_bits[word_idx];
         }
-        if events != 0 {
-            pollfds.push(pollfd {
-                fd: fd as i32,
-                events,
-                revents: 0,
-            });
+        if word_idx + 1 == word_count && limit % 64 != 0 {
+            bits &= (1u64 << (limit % 64)) - 1;
+        }
+        while bits != 0 {
+            let bit = bits.trailing_zeros() as usize;
+            let fd = word_idx * 64 + bit;
+            let events = pselect_events_for_fd(
+                fd, has_read, &in_read, has_write, &in_write, has_except, &in_except,
+            );
+            if events != 0 {
+                pollfds.push(pollfd {
+                    fd: fd as i32,
+                    events,
+                    revents: 0,
+                });
+            }
+            bits &= bits - 1;
         }
     }
 
@@ -486,6 +534,14 @@ pub fn sys_pselect6(
         return 0;
     }
 
+    let objects = match get_fd_objects(pollfds.iter().map(|pfd| pfd.fd as usize)) {
+        Ok(objects) => objects,
+        Err(e) => return -e.code() as isize,
+    };
+    if objects.iter().any(Option::is_none) {
+        return -LinuxError::EBADF.code() as isize;
+    }
+
     let deadline = timeout_dur.map(|timeout_dur| axhal::time::monotonic_time() + timeout_dur);
 
     const POLL_ACTIVE_YIELD_ROUNDS: usize = 64;
@@ -494,19 +550,15 @@ pub fn sys_pselect6(
 
     loop {
         let mut ready = 0usize;
-        for pfd in pollfds.iter_mut() {
+        for (pfd, object) in pollfds.iter_mut().zip(objects.iter()) {
             pfd.revents = 0;
             if pfd.fd < 0 {
                 continue;
             }
-            let fd = pfd.fd as usize;
-            let entry = match get_fd_entry(fd) {
-                Ok(entry) => entry,
-                Err(_) => {
-                    return -LinuxError::EBADF.code() as isize;
-                }
+            let Some(object) = object.as_ref() else {
+                return -LinuxError::EBADF.code() as isize;
             };
-            match entry.object.poll() {
+            match object.poll() {
                 Ok(state) => {
                     pfd.revents = requested_poll_revents(pfd.events, state);
                     if pfd.revents != 0 {

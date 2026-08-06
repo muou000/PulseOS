@@ -1,12 +1,22 @@
 use axerrno::LinuxError;
 use linux_raw_sys::general::*;
 use pulse_core::{
-    fd_table::{FdEntry, FdFlags},
+    fd_table::{FdEntry, FdFlags, FdObject},
     task::with_current_process,
 };
 
 pub(crate) fn get_fd_entry(fd: usize) -> Result<FdEntry, LinuxError> {
     with_current_process(|process| process.get_fd_entry(fd))?
+}
+
+pub(crate) fn get_fd_object(fd: usize) -> Result<alloc::sync::Arc<dyn FdObject>, LinuxError> {
+    with_current_process(|process| process.get_fd_object(fd))?
+}
+
+pub(crate) fn get_fd_objects(
+    fds: impl Iterator<Item = usize>,
+) -> Result<alloc::vec::Vec<Option<alloc::sync::Arc<dyn FdObject>>>, LinuxError> {
+    with_current_process(|process| process.get_fd_objects(fds))?
 }
 
 pub(crate) fn insert_fd_entry(entry: FdEntry) -> Result<usize, LinuxError> {
