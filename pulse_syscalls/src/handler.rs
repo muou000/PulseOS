@@ -429,7 +429,7 @@ fn syscall_dispatcher(tf: &mut TrapFrame, syscall_id: usize, args: [usize; 6]) -
         Sysno::flock => impls::sys_flock(args[0], args[1]),
         Sysno::getcpu => impls::sys_getcpu(args[0], args[1], args[2]),
         Sysno::madvise => impls::sys_madvise(args[0], args[1], args[2] as i32),
-        Sysno::fadvise64 => 0,
+        Sysno::fadvise64 => impls::sys_fadvise64(args[0], args[1], args[2], args[3]),
         Sysno::pidfd_open => impls::sys_pidfd_open(args[0] as isize, args[1]),
         Sysno::pidfd_send_signal => {
             impls::sys_pidfd_send_signal(args[0] as isize, args[1] as isize, args[2], args[3])
