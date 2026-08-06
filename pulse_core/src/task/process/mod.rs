@@ -797,6 +797,25 @@ impl Process {
         self.threads.lock().keys().copied().collect()
     }
 
+    /// Collects active thread objects while holding the registry once.
+    ///
+    /// Process-directed signal delivery needs thread state and signal masks;
+    /// taking IDs first and resolving every ID through the registry turns that
+    /// into N additional lock acquisitions. The returned references keep the
+    /// task extensions alive after the registry guard is released.
+    pub(crate) fn active_threads_snapshot(&self) -> Vec<Arc<Thread>> {
+        let registry = self.threads.lock();
+        registry
+            .values()
+            .filter_map(|state| match state {
+                ThreadState::Active(task) => {
+                    thread_handle_from_task(task).map(|handle| handle.thread_arc())
+                }
+                ThreadState::Pending => None,
+            })
+            .collect()
+    }
+
     pub fn children_pids_snapshot(&self) -> Vec<u64> {
         self.children.lock().iter().map(|c| c.pid()).collect()
     }

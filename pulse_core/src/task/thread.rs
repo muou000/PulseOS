@@ -193,18 +193,20 @@ impl Thread {
         *self.task_ref.lock() = Some(Arc::downgrade(&task));
     }
 
-    pub fn notify_signal_pending(&self, sig: usize) {
+    /// Wakes listeners for a newly pending signal and returns whether this
+    /// thread can currently deliver any unblocked, non-ignored signal.
+    pub fn notify_signal_pending(&self, sig: usize) -> bool {
         let wake_context = WakeContext::new(|| (WakeSource::Signal, sig as u64));
         self.signal
             .wait_queue()
             .notify_all_with_context(true, wake_context);
-        if self.signal.has_deliverable_pending_signal()
-            && let Some(weak_task) = self.task_ref.lock().as_ref()
-        {
+        let deliverable = self.signal.has_deliverable_pending_signal();
+        if deliverable && let Some(weak_task) = self.task_ref.lock().as_ref() {
             if let Some(task) = weak_task.upgrade() {
                 axtask::interrupt_task_with_context(task, true, wake_context);
             }
         }
+        deliverable
     }
 
     pub fn signal(&self) -> &ThreadSignal {
