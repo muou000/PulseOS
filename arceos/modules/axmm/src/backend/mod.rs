@@ -314,7 +314,7 @@ impl DeferredReclaims {
         }
     }
 
-    pub(crate) fn defer_file_writeback(&mut self, writeback: file::FileWriteback) {
+    fn defer_file_writeback(&mut self, writeback: file::FileWriteback) {
         self.file_writebacks.push(writeback);
     }
 
