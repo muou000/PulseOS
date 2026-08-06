@@ -22,6 +22,18 @@ define_counters!(
     PAGE_ACCESS_STRIPES_LOCKED,
     PAGE_ACCESS_LOCK_FAST,
     PAGE_ACCESS_LOCK_WAIT,
+    PAGE_ACCESS_DEMAND_LOCK_FAST,
+    PAGE_ACCESS_DEMAND_LOCK_WAIT,
+    PAGE_ACCESS_DEMAND_LOCK_WAIT_NS,
+    PAGE_ACCESS_DEMAND_LOCK_WAIT_MAX_NS,
+    PAGE_ACCESS_DEMAND_LOCK_HOLD_NS,
+    PAGE_ACCESS_DEMAND_LOCK_HOLD_MAX_NS,
+    PAGE_ACCESS_PREFETCH_LOCK_FAST,
+    PAGE_ACCESS_PREFETCH_LOCK_WAIT,
+    PAGE_ACCESS_PREFETCH_LOCK_WAIT_NS,
+    PAGE_ACCESS_PREFETCH_LOCK_WAIT_MAX_NS,
+    PAGE_ACCESS_PREFETCH_LOCK_HOLD_NS,
+    PAGE_ACCESS_PREFETCH_LOCK_HOLD_MAX_NS,
     PAGE_READ_HITS,
     PAGE_READ_MISSES,
     PAGE_FILL_CALLS,
@@ -49,6 +61,7 @@ define_counters!(
     MMAP_PREFETCH_REQUESTED_PAGES,
     MMAP_PREFETCH_SKIPPED_PER_FILE,
     MMAP_PREFETCH_SKIPPED_GLOBAL,
+    MMAP_PREFETCH_SKIPPED_PAGE_LOCK,
     MMAP_PREFETCH_COMPLETIONS,
     MMAP_PREFETCH_FAILURES,
     PAGE_WRITE_BYTES,
@@ -148,6 +161,111 @@ pub fn observe_max(counter: &AtomicU64, value: u64) {
             Ok(_) => break,
             Err(observed) => current = observed,
         }
+    }
+}
+
+/// Identifies the owner of a page-access stripe range. A demand-owned fill can
+/// include a small read-ahead tail, but its locks are acquired on behalf of a
+/// synchronous caller; a prefetch-owned fill has no synchronous consumer.
+#[derive(Clone, Copy)]
+pub enum PageAccessClass {
+    Demand,
+    Prefetch,
+}
+
+/// Records one page-access stripe acquisition. `wait_ns` is present only when
+/// the caller entered the wait while the active BuildStorm window was open.
+pub fn record_page_access_lock(class: PageAccessClass, wait_ns: Option<u64>) {
+    if !is_active() {
+        return;
+    }
+
+    match (class, wait_ns) {
+        (PageAccessClass::Demand, Some(wait_ns)) => {
+            add(&PAGE_ACCESS_LOCK_WAIT, 1);
+            add(&PAGE_ACCESS_DEMAND_LOCK_WAIT, 1);
+            add(&PAGE_ACCESS_DEMAND_LOCK_WAIT_NS, wait_ns);
+            observe_max(&PAGE_ACCESS_DEMAND_LOCK_WAIT_MAX_NS, wait_ns);
+        }
+        (PageAccessClass::Prefetch, Some(wait_ns)) => {
+            add(&PAGE_ACCESS_LOCK_WAIT, 1);
+            add(&PAGE_ACCESS_PREFETCH_LOCK_WAIT, 1);
+            add(&PAGE_ACCESS_PREFETCH_LOCK_WAIT_NS, wait_ns);
+            observe_max(&PAGE_ACCESS_PREFETCH_LOCK_WAIT_MAX_NS, wait_ns);
+        }
+        (PageAccessClass::Demand, None) => {
+            add(&PAGE_ACCESS_LOCK_FAST, 1);
+            add(&PAGE_ACCESS_DEMAND_LOCK_FAST, 1);
+        }
+        (PageAccessClass::Prefetch, None) => {
+            add(&PAGE_ACCESS_LOCK_FAST, 1);
+            add(&PAGE_ACCESS_PREFETCH_LOCK_FAST, 1);
+        }
+    }
+}
+
+fn record_page_access_hold(class: PageAccessClass, hold_ns: u64) {
+    if !is_active() {
+        return;
+    }
+
+    match class {
+        PageAccessClass::Demand => {
+            add(&PAGE_ACCESS_DEMAND_LOCK_HOLD_NS, hold_ns);
+            observe_max(&PAGE_ACCESS_DEMAND_LOCK_HOLD_MAX_NS, hold_ns);
+        }
+        PageAccessClass::Prefetch => {
+            add(&PAGE_ACCESS_PREFETCH_LOCK_HOLD_NS, hold_ns);
+            observe_max(&PAGE_ACCESS_PREFETCH_LOCK_HOLD_MAX_NS, hold_ns);
+        }
+    }
+}
+
+/// Times the lifetime of a page-access stripe range after its first stripe is
+/// acquired. The range deliberately stays locked across backing I/O, so this
+/// measures the blocking exposure seen by overlapping fills, not CPU time.
+pub struct PageAccessHoldGuard {
+    class: PageAccessClass,
+    generation: u64,
+    acquired_at_ns: Option<u64>,
+}
+
+impl PageAccessHoldGuard {
+    /// Disarms timing when a range acquired only a prefix of its stripes and
+    /// is abandoned before the fill can begin.
+    pub fn cancel(&mut self) {
+        self.acquired_at_ns = None;
+    }
+}
+
+pub fn begin_page_access_hold(class: PageAccessClass) -> PageAccessHoldGuard {
+    let Some(generation) = active_window() else {
+        return PageAccessHoldGuard {
+            class,
+            generation: 0,
+            acquired_at_ns: None,
+        };
+    };
+
+    PageAccessHoldGuard {
+        class,
+        generation,
+        acquired_at_ns: Some(axhal::time::monotonic_time_nanos()),
+    }
+}
+
+impl Drop for PageAccessHoldGuard {
+    fn drop(&mut self) {
+        let Some(acquired_at_ns) = self.acquired_at_ns else {
+            return;
+        };
+        // An older fill can outlive the window that measured it. Do not fold
+        // its final duration into a later invocation after counters reset.
+        if WINDOW_GENERATION.load(Ordering::Acquire) != self.generation {
+            return;
+        }
+        let hold_ns = axhal::time::monotonic_time_nanos().saturating_sub(acquired_at_ns);
+        record_page_access_hold(self.class, hold_ns);
     }
 }
 
@@ -266,6 +384,28 @@ pub fn finish() {
         load(&PAGE_EVICTIONS),
         load(&PAGE_WRITE_BYTES),
     );
+    axlog::ax_println!(
+        "BUILDSTORM_FS_STATS page_access_demand_lock_fast={} page_access_demand_lock_wait={} \
+         page_access_demand_lock_wait_ns={} page_access_demand_lock_wait_max_ns={} \
+         page_access_demand_lock_hold_ns={} page_access_demand_lock_hold_max_ns={}",
+        load(&PAGE_ACCESS_DEMAND_LOCK_FAST),
+        load(&PAGE_ACCESS_DEMAND_LOCK_WAIT),
+        load(&PAGE_ACCESS_DEMAND_LOCK_WAIT_NS),
+        load(&PAGE_ACCESS_DEMAND_LOCK_WAIT_MAX_NS),
+        load(&PAGE_ACCESS_DEMAND_LOCK_HOLD_NS),
+        load(&PAGE_ACCESS_DEMAND_LOCK_HOLD_MAX_NS),
+    );
+    axlog::ax_println!(
+        "BUILDSTORM_FS_STATS page_access_prefetch_lock_fast={} page_access_prefetch_lock_wait={} \
+         page_access_prefetch_lock_wait_ns={} page_access_prefetch_lock_wait_max_ns={} \
+         page_access_prefetch_lock_hold_ns={} page_access_prefetch_lock_hold_max_ns={}",
+        load(&PAGE_ACCESS_PREFETCH_LOCK_FAST),
+        load(&PAGE_ACCESS_PREFETCH_LOCK_WAIT),
+        load(&PAGE_ACCESS_PREFETCH_LOCK_WAIT_NS),
+        load(&PAGE_ACCESS_PREFETCH_LOCK_WAIT_MAX_NS),
+        load(&PAGE_ACCESS_PREFETCH_LOCK_HOLD_NS),
+        load(&PAGE_ACCESS_PREFETCH_LOCK_HOLD_MAX_NS),
+    );
     let prefetch_hits = load(&PAGE_PREFETCH_HITS);
     let prefetch_unused_evictions = load(&PAGE_PREFETCH_UNUSED_EVICTIONS);
     let prefetch_settled_pages = prefetch_hits.saturating_add(prefetch_unused_evictions);
@@ -283,7 +423,7 @@ pub fn finish() {
          per_file_parallel_submissions={} generation_retries={} generation_retry_pages={} \
          mmap_prefetch_submissions={} mmap_prefetch_requested_pages={} \
          mmap_prefetch_skipped_per_file={} mmap_prefetch_skipped_global={} \
-         mmap_prefetch_completions={} mmap_prefetch_failures={}",
+         mmap_prefetch_skipped_page_lock={} mmap_prefetch_completions={} mmap_prefetch_failures={}",
         load(&PAGE_PREFETCH_PAGES),
         prefetch_hits,
         prefetch_unused_evictions,
@@ -303,6 +443,7 @@ pub fn finish() {
         load(&MMAP_PREFETCH_REQUESTED_PAGES),
         load(&MMAP_PREFETCH_SKIPPED_PER_FILE),
         load(&MMAP_PREFETCH_SKIPPED_GLOBAL),
+        load(&MMAP_PREFETCH_SKIPPED_PAGE_LOCK),
         load(&MMAP_PREFETCH_COMPLETIONS),
         load(&MMAP_PREFETCH_FAILURES),
     );
