@@ -150,22 +150,34 @@ impl SignalAltStack {
     }
 }
 
+#[cfg(target_arch = "riscv64")]
+type SignalFpState = axcpu::FpState;
+#[cfg(target_arch = "loongarch64")]
+type SignalFpState = axcpu::FpuState;
+
 #[derive(Clone, Copy, Debug)]
 struct SavedSignalContext {
     tf: TrapFrame,
     old_mask: u64,
     user_ucontext: Option<usize>,
-    #[cfg(target_arch = "riscv64")]
-    fp: axcpu::FpState,
-    #[cfg(target_arch = "loongarch64")]
-    fp: axcpu::FpuState,
+    fp: SignalFpState,
 }
 
 /// The Linux limit is a per-real-UID count, while each queued record keeps the
-/// UID it charged.  Keeping the UID in the record means a later credential
+/// UID it charged. Keeping the UID in the record means a later credential
 /// change cannot release the wrong account.
-static SIGPENDING_COUNTS: Lazy<SpinNoIrq<HashMap<u32, u64>>> =
-    Lazy::new(|| SpinNoIrq::new(HashMap::new()));
+///
+/// The counter is sharded because unrelated UIDs must not serialize real-time
+/// signal admission on one global spin lock. A single UID still maps to one
+/// shard, which preserves the required per-UID limit.
+const SIGPENDING_COUNT_SHARDS: usize = 16;
+static SIGPENDING_COUNTS: Lazy<[SpinNoIrq<HashMap<u32, u64>>; SIGPENDING_COUNT_SHARDS]> =
+    Lazy::new(|| array::from_fn(|_| SpinNoIrq::new(HashMap::new())));
+
+#[inline]
+fn sigpending_count_shard(ruid: u32) -> &'static SpinNoIrq<HashMap<u32, u64>> {
+    &SIGPENDING_COUNTS[ruid as usize % SIGPENDING_COUNT_SHARDS]
+}
 
 #[derive(Debug)]
 struct PendingSignalReservation {
@@ -174,7 +186,7 @@ struct PendingSignalReservation {
 
 impl PendingSignalReservation {
     fn try_acquire(ruid: u32, limit: u64) -> Option<Self> {
-        let mut counts = SIGPENDING_COUNTS.lock();
+        let mut counts = sigpending_count_shard(ruid).lock();
         match counts.get_mut(&ruid) {
             Some(count) => {
                 if *count >= limit || *count == u64::MAX {
@@ -193,7 +205,7 @@ impl PendingSignalReservation {
     }
 
     fn release(self) {
-        let mut counts = SIGPENDING_COUNTS.lock();
+        let mut counts = sigpending_count_shard(self.ruid).lock();
         let remove = match counts.get_mut(&self.ruid) {
             Some(count) => {
                 debug_assert!(*count != 0, "signal pending count underflow");
@@ -213,7 +225,11 @@ impl PendingSignalReservation {
 
 #[cfg(test)]
 fn sigpending_count(ruid: u32) -> u64 {
-    SIGPENDING_COUNTS.lock().get(&ruid).copied().unwrap_or(0)
+    sigpending_count_shard(ruid)
+        .lock()
+        .get(&ruid)
+        .copied()
+        .unwrap_or(0)
 }
 
 #[derive(Clone, Copy)]
@@ -572,10 +588,21 @@ impl PendingSignals {
         self.synchronous_mask &= !bit;
         self.fallback_mask &= !bit;
     }
+
+    fn clear_mask(&mut self, mut mask: u64) {
+        while mask != 0 {
+            let sig = mask.trailing_zeros() as usize + 1;
+            mask &= mask - 1;
+            self.clear(sig);
+        }
+    }
 }
 
 impl Drop for PendingSignals {
     fn drop(&mut self) {
+        if self.mask == 0 {
+            return;
+        }
         for sig in 1..=(_NSIG as usize) {
             self.clear(sig);
         }
@@ -639,11 +666,18 @@ pub fn signal_info_for_child(child_pid: u64, child_uid: u32, code: i32, status: 
 
 pub struct SignalHandlers {
     actions: SpinNoIrq<[SigAction; (_NSIG as usize) + 1]>,
+    /// Mirrors dispositions that discard a pending signal. This is maintained
+    /// under `actions` so hot pending predicates can skip a per-signal sighand
+    /// lock without risking a false negative during a disposition change.
+    ignored_mask: AtomicU64,
 }
 
 pub struct SignalShared {
     handlers: Arc<SignalHandlers>,
     process_pending: SpinNoIrq<PendingSignals>,
+    /// Lock-free mirror of `process_pending.mask`. It is an advisory snapshot:
+    /// a stale set bit merely makes a later exact dequeue recheck the queue.
+    pending_bits: AtomicU64,
 }
 
 impl SignalShared {
@@ -651,8 +685,10 @@ impl SignalShared {
         Arc::new(Self {
             handlers: Arc::new(SignalHandlers {
                 actions: SpinNoIrq::new([SigAction::dfl(); (_NSIG as usize) + 1]),
+                ignored_mask: AtomicU64::new(default_ignored_mask()),
             }),
             process_pending: SpinNoIrq::new(PendingSignals::default()),
+            pending_bits: AtomicU64::new(0),
         })
     }
 
@@ -660,6 +696,7 @@ impl SignalShared {
         Arc::new(Self {
             handlers: from.handlers.clone(),
             process_pending: SpinNoIrq::new(PendingSignals::default()),
+            pending_bits: AtomicU64::new(0),
         })
     }
 
@@ -668,8 +705,10 @@ impl SignalShared {
         Arc::new(Self {
             handlers: Arc::new(SignalHandlers {
                 actions: SpinNoIrq::new(actions),
+                ignored_mask: AtomicU64::new(ignored_mask_for_actions(&actions)),
             }),
             process_pending: SpinNoIrq::new(PendingSignals::default()),
+            pending_bits: AtomicU64::new(0),
         })
     }
 
@@ -678,7 +717,24 @@ impl SignalShared {
     }
 
     pub fn set_action(&self, sig: usize, act: SigAction) {
-        self.handlers.actions.lock()[sig] = act;
+        let mut actions = self.handlers.actions.lock();
+        let old = actions[sig];
+        let old_ignored = sigaction_is_ignored(sig, old);
+        let new_ignored = sigaction_is_ignored(sig, act);
+        let bit = sig_bit(sig).unwrap_or(0);
+        if old_ignored && !new_ignored {
+            // Clear before publishing a newly catchable action. A concurrent
+            // predicate can only produce a harmless false positive here.
+            self.handlers
+                .ignored_mask
+                .fetch_and(!bit, Ordering::Release);
+        }
+        actions[sig] = act;
+        if !old_ignored && new_ignored {
+            // Set after publishing an ignored action. A concurrent predicate
+            // can only produce a harmless extra wake before this store.
+            self.handlers.ignored_mask.fetch_or(bit, Ordering::Release);
+        }
     }
 
     /// Returns the previous disposition and, when supplied, installs the new
@@ -689,21 +745,51 @@ impl SignalShared {
         let mut actions = self.handlers.actions.lock();
         let old = actions[sig];
         if let Some(new) = new {
+            let old_ignored = sigaction_is_ignored(sig, old);
+            let new_ignored = sigaction_is_ignored(sig, new);
+            let bit = sig_bit(sig).unwrap_or(0);
+            if old_ignored && !new_ignored {
+                self.handlers
+                    .ignored_mask
+                    .fetch_and(!bit, Ordering::Release);
+            }
             actions[sig] = new;
+            if !old_ignored && new_ignored {
+                self.handlers.ignored_mask.fetch_or(bit, Ordering::Release);
+            }
         }
         old
     }
 
     pub fn reset_dispositions_on_exec(&self) {
         let mut actions = self.handlers.actions.lock();
+        let mut ignored = 0;
         for sig in 1..=(_NSIG as usize) {
+            let old_ignored = sigaction_is_ignored(sig, actions[sig]);
             let handler = if actions[sig].handler == SIG_IGN {
                 SIG_IGN
             } else {
                 SIG_DFL
             };
-            actions[sig] = SigAction::from_parts(handler, 0, 0);
+            let new_action = SigAction::from_parts(handler, 0, 0);
+            let new_ignored = sigaction_is_ignored(sig, new_action);
+            let bit = sig_bit(sig).unwrap_or(0);
+            if old_ignored && !new_ignored {
+                // Keep the hot predicate free of false negatives while the
+                // action table is being reset during exec.
+                self.handlers
+                    .ignored_mask
+                    .fetch_and(!bit, Ordering::Release);
+            }
+            actions[sig] = new_action;
+            if !old_ignored && new_ignored {
+                self.handlers.ignored_mask.fetch_or(bit, Ordering::Release);
+            }
+            if new_ignored {
+                ignored |= sig_bit(sig).unwrap_or(0);
+            }
         }
+        self.handlers.ignored_mask.store(ignored, Ordering::Release);
     }
 
     pub fn queue_process_signal(&self, sig: usize) -> bool {
@@ -715,7 +801,12 @@ impl SignalShared {
         sig: usize,
         info: Option<[u8; SIGINFO_FRAME_SIZE]>,
     ) -> bool {
-        self.process_pending.lock().put(sig, info)
+        let mut pending = self.process_pending.lock();
+        let queued = pending.put(sig, info);
+        if queued {
+            self.pending_bits.store(pending.mask(), Ordering::Release);
+        }
+        queued
     }
 
     fn queue_process_signal_with_info_admission(
@@ -724,17 +815,30 @@ impl SignalShared {
         info: Option<[u8; SIGINFO_FRAME_SIZE]>,
         admission: QueueAdmission,
     ) -> QueuePutResult {
-        self.process_pending
-            .lock()
-            .put_with_admission(sig, info, admission)
+        let mut pending = self.process_pending.lock();
+        let result = pending.put_with_admission(sig, info, admission);
+        if matches!(result, QueuePutResult::Queued | QueuePutResult::Fallback) {
+            self.pending_bits.store(pending.mask(), Ordering::Release);
+        }
+        result
     }
 
     fn dequeue_process_unblocked(&self, blocked: u64) -> Option<PendingSignal> {
-        self.process_pending.lock().dequeue(!blocked)
+        let mut pending = self.process_pending.lock();
+        let result = pending.dequeue(!blocked);
+        if result.is_some() {
+            self.pending_bits.store(pending.mask(), Ordering::Release);
+        }
+        result
     }
 
     fn dequeue_process_from_mask(&self, mask: u64) -> Option<PendingSignal> {
-        self.process_pending.lock().dequeue(mask)
+        let mut pending = self.process_pending.lock();
+        let result = pending.dequeue(mask);
+        if result.is_some() {
+            self.pending_bits.store(pending.mask(), Ordering::Release);
+        }
+        result
     }
 
     fn process_delivery_masks(&self, blocked: u64) -> [u64; 2] {
@@ -742,11 +846,24 @@ impl SignalShared {
     }
 
     fn pending_mask(&self) -> u64 {
-        self.process_pending.lock().mask()
+        self.pending_bits.load(Ordering::Acquire)
     }
 
-    fn clear_pending(&self, sig: usize) {
-        self.process_pending.lock().clear(sig);
+    fn clear_pending_mask(&self, mask: u64) {
+        if mask == 0 {
+            return;
+        }
+        let mut pending = self.process_pending.lock();
+        let old_mask = pending.mask();
+        pending.clear_mask(mask);
+        if pending.mask() != old_mask {
+            self.pending_bits.store(pending.mask(), Ordering::Release);
+        }
+    }
+
+    #[inline]
+    fn ignored_mask(&self) -> u64 {
+        self.handlers.ignored_mask.load(Ordering::Acquire)
     }
 
     pub fn choose_target_tid(
@@ -764,6 +881,8 @@ impl SignalShared {
 pub struct ThreadSignal {
     shared: Arc<SignalShared>,
     thread_pending: SpinNoIrq<PendingSignals>,
+    /// Lock-free mirror of `thread_pending.mask`; see `SignalShared`.
+    pending_bits: AtomicU64,
     blocked: AtomicU64,
     in_handler: AtomicBool,
     skip_once: AtomicBool,
@@ -778,6 +897,7 @@ impl ThreadSignal {
         Arc::new(Self {
             shared,
             thread_pending: SpinNoIrq::new(PendingSignals::default()),
+            pending_bits: AtomicU64::new(0),
             blocked: AtomicU64::new(0),
             in_handler: AtomicBool::new(false),
             skip_once: AtomicBool::new(false),
@@ -810,7 +930,12 @@ impl ThreadSignal {
         sig: usize,
         info: Option<[u8; SIGINFO_FRAME_SIZE]>,
     ) -> bool {
-        self.thread_pending.lock().put(sig, info)
+        let mut pending = self.thread_pending.lock();
+        let queued = pending.put(sig, info);
+        if queued {
+            self.pending_bits.store(pending.mask(), Ordering::Release);
+        }
+        queued
     }
 
     fn queue_thread_signal_with_info_admission(
@@ -819,9 +944,12 @@ impl ThreadSignal {
         info: Option<[u8; SIGINFO_FRAME_SIZE]>,
         admission: QueueAdmission,
     ) -> QueuePutResult {
-        self.thread_pending
-            .lock()
-            .put_with_admission(sig, info, admission)
+        let mut pending = self.thread_pending.lock();
+        let result = pending.put_with_admission(sig, info, admission);
+        if matches!(result, QueuePutResult::Queued | QueuePutResult::Fallback) {
+            self.pending_bits.store(pending.mask(), Ordering::Release);
+        }
+        result
     }
 
     fn queue_synchronous_signal_with_info(
@@ -829,11 +957,33 @@ impl ThreadSignal {
         sig: usize,
         info: Option<[u8; SIGINFO_FRAME_SIZE]>,
     ) -> bool {
-        self.thread_pending.lock().put_synchronous(sig, info)
+        let mut pending = self.thread_pending.lock();
+        let queued = pending.put_synchronous(sig, info);
+        if queued {
+            self.pending_bits.store(pending.mask(), Ordering::Release);
+        }
+        queued
     }
 
-    fn clear_pending(&self, sig: usize) {
-        self.thread_pending.lock().clear(sig);
+    fn clear_pending_mask(&self, mask: u64) {
+        if mask == 0 {
+            return;
+        }
+        let mut pending = self.thread_pending.lock();
+        let old_mask = pending.mask();
+        pending.clear_mask(mask);
+        if pending.mask() != old_mask {
+            self.pending_bits.store(pending.mask(), Ordering::Release);
+        }
+    }
+
+    fn dequeue_thread_with_mask(&self, mask: u64) -> Option<PendingSignal> {
+        let mut pending = self.thread_pending.lock();
+        let result = pending.dequeue(mask);
+        if result.is_some() {
+            self.pending_bits.store(pending.mask(), Ordering::Release);
+        }
+        result
     }
 
     pub fn queue_process_signal(&self, sig: usize) -> bool {
@@ -909,13 +1059,17 @@ impl ThreadSignal {
 
     pub fn has_pending_unblocked(&self) -> bool {
         let blocked = self.blocked_mask();
-        let thread_pending = self.thread_pending.lock().mask();
-        let proc_pending = self.shared.pending_mask();
-        ((thread_pending | proc_pending) & !blocked) != 0
+        (self.pending_mask() & !blocked) != 0
     }
 
     pub fn has_pending_or_skip_once(&self) -> bool {
-        self.has_pending_unblocked() || self.skip_once.load(Ordering::Acquire)
+        if self.skip_once.load(Ordering::Acquire) {
+            return true;
+        }
+        if !self.may_have_pending() {
+            return false;
+        }
+        self.has_pending_unblocked()
     }
 
     pub fn is_in_handler(&self) -> bool {
@@ -944,31 +1098,30 @@ impl ThreadSignal {
     }
 
     pub fn pending_mask(&self) -> u64 {
-        self.thread_pending.lock().mask() | self.shared.pending_mask()
+        self.pending_bits.load(Ordering::Acquire) | self.shared.pending_mask()
     }
 
     pub fn has_pending_unblocked_not_in_set(&self, set: u64) -> bool {
         let set = sanitize_mask(set);
         let blocked = self.blocked_mask();
-        let thread_pending = self.thread_pending.lock().mask() & !blocked;
-        let proc_pending = self.shared.pending_mask() & !blocked;
-        self.pending_mask_has_unblocked_match(thread_pending, set)
-            || self.pending_mask_has_unblocked_match(proc_pending, set)
+        let pending = self.pending_mask() & !blocked & !set;
+        (pending & !self.shared.ignored_mask()) != 0
     }
 
     pub fn has_waitset_signal(&self, waitset: u64) -> bool {
         let waitset = sanitize_mask(waitset);
-        let thread_pending = self.thread_pending.lock().mask();
-        let proc_pending = self.shared.pending_mask();
-        ((thread_pending | proc_pending) & waitset) != 0
+        (self.pending_mask() & waitset) != 0
     }
 
     pub fn has_deliverable_pending_signal(&self) -> bool {
         let blocked = self.blocked_mask();
-        let thread_pending = self.thread_pending.lock().mask() & !blocked;
-        let proc_pending = self.shared.pending_mask() & !blocked;
-        self.pending_mask_has_deliverable_match(thread_pending)
-            || self.pending_mask_has_deliverable_match(proc_pending)
+        let pending = self.pending_mask() & !blocked;
+        (pending & !self.shared.ignored_mask()) != 0
+    }
+
+    #[inline]
+    fn may_have_pending(&self) -> bool {
+        self.pending_mask() != 0
     }
 
     pub fn dequeue_waitset_with_info(
@@ -979,41 +1132,14 @@ impl ThreadSignal {
         // Never hold the thread and process pending-queue locks together.
         // Dequeue the thread-directed record first, then inspect the shared
         // queue only after its guard has been dropped.
-        let pending = { self.thread_pending.lock().dequeue(waitset) }
+        let pending = self
+            .dequeue_thread_with_mask(waitset)
             .or_else(|| self.shared.dequeue_process_from_mask(waitset))?;
         Some((pending.sig, Some(pending.info)))
     }
 
     pub fn clear_skip_once(&self) -> bool {
         self.skip_once.swap(false, Ordering::AcqRel)
-    }
-
-    fn pending_mask_has_unblocked_match(&self, pending: u64, set: u64) -> bool {
-        self.pending_mask_has_match(pending, |sig, action| {
-            (sig_bit(sig).unwrap_or(0) & !set) != 0 && !is_ignored_action(action)
-        })
-    }
-
-    fn pending_mask_has_deliverable_match(&self, pending: u64) -> bool {
-        self.pending_mask_has_match(pending, |_, action| !is_ignored_action(action))
-    }
-
-    fn pending_mask_has_match(
-        &self,
-        mut pending: u64,
-        mut pred: impl FnMut(usize, SignalAction) -> bool,
-    ) -> bool {
-        let shared = self.shared();
-        while pending != 0 {
-            let idx = pending.trailing_zeros() as usize;
-            pending &= pending - 1;
-            let sig = idx + 1;
-            let action = resolve_action(&shared, sig);
-            if pred(sig, action) {
-                return true;
-            }
-        }
-        false
     }
 
     pub fn restore_from_sigreturn(&self, process: &Process, tf: &mut TrapFrame) -> AxResult<usize> {
@@ -1090,7 +1216,7 @@ impl ThreadSignal {
     ) -> Option<(usize, [u8; SIGINFO_FRAME_SIZE], SignalAction)> {
         loop {
             let blocked = self.blocked_mask();
-            let pending = { self.thread_pending.lock().dequeue(!blocked) }
+            let pending = { self.dequeue_thread_with_mask(!blocked) }
                 .or_else(|| self.shared.dequeue_process_unblocked(blocked))?;
             let action = resolve_action(&self.shared, pending.sig);
             if !is_ignored_action(action) {
@@ -1099,37 +1225,43 @@ impl ThreadSignal {
         }
     }
 
-    fn save_context(&self, tf: &TrapFrame, old_mask: u64, user_ucontext: Option<usize>) {
+    fn save_context(
+        &self,
+        tf: &TrapFrame,
+        old_mask: u64,
+        user_ucontext: Option<usize>,
+        fp: SignalFpState,
+    ) {
         self.saved_ctx.lock().push(SavedSignalContext {
             tf: *tf,
             old_mask,
             user_ucontext,
-            fp: capture_signal_fp_state(),
+            fp,
         });
     }
 }
 
 #[cfg(target_arch = "riscv64")]
-fn capture_signal_fp_state() -> axcpu::FpState {
-    let mut fp = axcpu::FpState::default();
+fn capture_signal_fp_state() -> SignalFpState {
+    let mut fp = SignalFpState::default();
     fp.save();
     fp
 }
 
 #[cfg(target_arch = "loongarch64")]
-fn capture_signal_fp_state() -> axcpu::FpuState {
-    let mut fp = axcpu::FpuState::default();
+fn capture_signal_fp_state() -> SignalFpState {
+    let mut fp = SignalFpState::default();
     fp.save();
     fp
 }
 
 #[cfg(target_arch = "riscv64")]
-fn restore_signal_fp_state(fp: &axcpu::FpState) {
+fn restore_signal_fp_state(fp: &SignalFpState) {
     fp.restore();
 }
 
 #[cfg(target_arch = "loongarch64")]
-fn restore_signal_fp_state(fp: &axcpu::FpuState) {
+fn restore_signal_fp_state(fp: &SignalFpState) {
     fp.restore();
 }
 
@@ -1604,6 +1736,62 @@ mod tests {
     }
 
     #[test]
+    fn pending_bit_mirror_preserves_precise_pending_checks() {
+        let shared = SignalShared::new();
+        let signal = ThreadSignal::new(shared.clone());
+        let thread_bit = sig_bit(1).unwrap();
+        let process_bit = sig_bit(2).unwrap();
+
+        assert!(!signal.has_pending_or_skip_once());
+
+        signal.set_blocked_mask(thread_bit);
+        assert!(signal.queue_thread_signal(1));
+        assert!(!signal.has_pending_or_skip_once());
+
+        signal.set_blocked_mask(0);
+        assert!(signal.has_pending_or_skip_once());
+        assert_eq!(
+            signal.dequeue_waitset_with_info(thread_bit),
+            Some((1, Some(default_siginfo(1))))
+        );
+        assert_eq!(signal.pending_bits.load(Ordering::Acquire), 0);
+        assert!(!signal.has_pending_or_skip_once());
+
+        assert!(shared.queue_process_signal(2));
+        assert!(signal.has_pending_or_skip_once());
+        assert_eq!(
+            signal.dequeue_waitset_with_info(process_bit),
+            Some((2, Some(default_siginfo(2))))
+        );
+        assert_eq!(shared.pending_bits.load(Ordering::Acquire), 0);
+        assert!(!signal.has_pending_or_skip_once());
+    }
+
+    #[test]
+    fn ignored_disposition_mask_tracks_shared_sighand_changes() {
+        let shared = SignalShared::new();
+        let signal = ThreadSignal::new(shared.clone());
+
+        // SIGCHLD is default-ignored, while signal 10 is catchable by default.
+        assert!((shared.ignored_mask() & sig_bit(SIGCHLD as usize).unwrap()) != 0);
+        assert!((shared.ignored_mask() & sig_bit(10).unwrap()) == 0);
+
+        shared.queue_process_signal(SIGCHLD as usize);
+        assert!(!signal.has_deliverable_pending_signal());
+        shared.set_action(SIGCHLD as usize, SigAction::from_parts(0x1234, 0, 0));
+        assert!(signal.has_deliverable_pending_signal());
+        assert_eq!(
+            signal.dequeue_waitset_with_info(sig_bit(SIGCHLD as usize).unwrap()),
+            Some((SIGCHLD as usize, Some(default_siginfo(SIGCHLD as usize))))
+        );
+
+        shared.set_action(10, SigAction::from_parts(SIG_IGN, 0, 0));
+        assert!((shared.ignored_mask() & sig_bit(10).unwrap()) != 0);
+        shared.queue_process_signal(10);
+        assert!(!signal.has_deliverable_pending_signal());
+    }
+
+    #[test]
     fn clear_sighand_resets_only_the_private_child_actions() {
         let parent = SignalShared::new();
         parent.set_action(10, SigAction::from_parts(0x1234, 7, 0x55));
@@ -1801,6 +1989,26 @@ fn default_action(sig: usize) -> DefaultSignalAction {
         3 | 4 | 5 | 6 | 7 | 8 | 11 | 24 | 25 | 31 => DefaultSignalAction::CoreDump,
         _ => DefaultSignalAction::Terminate,
     }
+}
+
+fn sigaction_is_ignored(sig: usize, action: SigAction) -> bool {
+    action.handler == SIG_IGN
+        || (action.handler == SIG_DFL && matches!(default_action(sig), DefaultSignalAction::Ignore))
+}
+
+fn ignored_mask_for_actions(actions: &[SigAction; (_NSIG as usize) + 1]) -> u64 {
+    let mut mask = 0;
+    for sig in 1..=(_NSIG as usize) {
+        if sigaction_is_ignored(sig, actions[sig]) {
+            mask |= sig_bit(sig).unwrap_or(0);
+        }
+    }
+    mask
+}
+
+fn default_ignored_mask() -> u64 {
+    let actions = [SigAction::dfl(); (_NSIG as usize) + 1];
+    ignored_mask_for_actions(&actions)
 }
 
 pub fn resolve_action(shared: &SignalShared, sig: usize) -> SignalAction {
@@ -2018,6 +2226,7 @@ fn write_user_signal_frame(
     old_mask: u64,
     siginfo: Option<[u8; 128]>,
     action_flags: usize,
+    fp: &SignalFpState,
 ) -> AxResult<(usize, usize, bool)> {
     let frame_size = SIGINFO_FRAME_SIZE + UCONTEXT_FRAME_SIZE;
     let altstack = thread.signal_altstack();
@@ -2030,17 +2239,14 @@ fn write_user_signal_frame(
     if let Some(info) = siginfo {
         siginfo_bytes.copy_from_slice(&info);
     }
-    thread
-        .process()
-        .write_user_bytes(siginfo_addr, &siginfo_bytes)?;
+    let process = thread.process();
+    process.write_user_bytes(siginfo_addr, &siginfo_bytes)?;
 
     let zeroes = [0u8; UCONTEXT_FRAME_SIZE];
-    thread.process().write_user_bytes(ucontext_addr, &zeroes)?;
+    process.write_user_bytes(ucontext_addr, &zeroes)?;
 
-    write_user_signal_altstack(thread.process().as_ref(), ucontext_addr, altstack)?;
-    thread
-        .process()
-        .write_user_usize(ucontext_addr + UCONTEXT_SIGMASK_OFFSET, old_mask as usize)?;
+    write_user_signal_altstack(process.as_ref(), ucontext_addr, altstack)?;
+    process.write_user_usize(ucontext_addr + UCONTEXT_SIGMASK_OFFSET, old_mask as usize)?;
     #[cfg(target_arch = "riscv64")]
     {
         // `__gregs[0]` is PC in the RISC-V ABI. `TrapFrame::regs` starts
@@ -2049,22 +2255,20 @@ fn write_user_signal_frame(
         let gregs_addr = ucontext_addr + UCONTEXT_PC_OFFSET;
         let gregs_bytes =
             unsafe { core::slice::from_raw_parts(&tf.regs as *const _ as *const u8, 32 * 8) };
-        thread.process().write_user_bytes(gregs_addr, gregs_bytes)?;
+        process.write_user_bytes(gregs_addr, gregs_bytes)?;
     }
 
-    thread
-        .process()
-        .write_user_usize(ucontext_addr + UCONTEXT_PC_OFFSET, current_ip(tf))?;
+    process.write_user_usize(ucontext_addr + UCONTEXT_PC_OFFSET, current_ip(tf))?;
     #[cfg(target_arch = "loongarch64")]
     {
         // On loongarch64, sc_regs starts at offset 184 in ucontext_t.
         let gregs_addr = ucontext_addr + 184;
         let gregs_bytes =
             unsafe { core::slice::from_raw_parts(&tf.regs as *const _ as *const u8, 32 * 8) };
-        thread.process().write_user_bytes(gregs_addr, gregs_bytes)?;
+        process.write_user_bytes(gregs_addr, gregs_bytes)?;
     }
 
-    write_user_signal_fp_state(thread.process().as_ref(), ucontext_addr)?;
+    write_user_signal_fp_state(process.as_ref(), ucontext_addr, fp)?;
 
     Ok((siginfo_addr, ucontext_addr, used_altstack))
 }
@@ -2132,8 +2336,11 @@ fn read_user_signal_u32(process: &Process, addr: usize) -> AxResult<u32> {
 }
 
 #[cfg(target_arch = "riscv64")]
-fn write_user_signal_fp_state(process: &Process, user_ucontext: usize) -> AxResult<()> {
-    let fp = capture_signal_fp_state();
+fn write_user_signal_fp_state(
+    process: &Process,
+    user_ucontext: usize,
+    fp: &SignalFpState,
+) -> AxResult<()> {
     let fp_bytes = unsafe {
         core::slice::from_raw_parts(fp.fp.as_ptr().cast::<u8>(), core::mem::size_of_val(&fp.fp))
     };
@@ -2155,8 +2362,11 @@ fn write_user_signal_fp_state(process: &Process, user_ucontext: usize) -> AxResu
 }
 
 #[cfg(target_arch = "loongarch64")]
-fn write_user_signal_fp_state(process: &Process, user_ucontext: usize) -> AxResult<()> {
-    let fp = capture_signal_fp_state();
+fn write_user_signal_fp_state(
+    process: &Process,
+    user_ucontext: usize,
+    fp: &SignalFpState,
+) -> AxResult<()> {
     let fp_bytes = unsafe {
         core::slice::from_raw_parts(fp.fp.as_ptr().cast::<u8>(), core::mem::size_of_val(&fp.fp))
     };
@@ -2372,21 +2582,60 @@ fn queue_signal_to_process_with_admission(
         return Ok(false);
     }
     prepare_job_control_enqueue(process, sig);
-    if should_discard_ignored_process_signal(process, sig) {
-        return Ok(false);
+    let shared = process.signal_shared();
+    let action = resolve_action(&shared, sig);
+    let mut threads = None;
+    if is_ignored_action(action) {
+        let snapshot = list_threads_for_signal(process);
+        if should_discard_ignored_process_signal(sig, &snapshot) {
+            return Ok(false);
+        }
+        threads = Some(snapshot);
     }
-    let result = process
-        .signal_shared()
-        .queue_process_signal_with_info_admission(sig, info, admission);
-    // Always notify even if a standard signal coalesced, so a thread that
-    // changed its mask concurrently still re-checks delivery.
-    for thread in list_threads_for_signal(process) {
-        thread.notify_signal_pending(sig);
+    let result = shared.queue_process_signal_with_info_admission(sig, info, admission);
+    if matches!(result, QueuePutResult::Queued | QueuePutResult::Fallback) {
+        let threads = threads.unwrap_or_else(|| list_threads_for_signal(process));
+        notify_process_signal_pending(&threads, sig);
     }
     match result {
         QueuePutResult::LimitExceeded => Err(SignalQueueError::Limit),
         result => Ok(result.is_pending()),
     }
+}
+
+fn notify_process_signal_pending(threads: &[Arc<Thread>], sig: usize) {
+    let Some(bit) = sig_bit(sig) else {
+        return;
+    };
+
+    // Process-directed signals have one shared pending record. Interrupt one
+    // thread that can consume it instead of waking every member of a large
+    // thread group. The retry over all currently eligible threads covers a
+    // concurrent mask change between selection and notification.
+    for thread in threads {
+        if (thread.signal_blocked_mask() & bit) == 0 && thread.notify_signal_pending(sig) {
+            return;
+        }
+    }
+
+    // If every member masks the signal, it may be consumed by signalfd or a
+    // synchronous signal wait. Those users register on the per-thread wait
+    // queue, so only inspect the queues in this all-blocked fallback instead
+    // of taking a wait-queue lock on every ordinary process signal.
+    for thread in threads {
+        if !thread.signal_wait_queue().is_empty() {
+            thread.notify_signal_pending(sig);
+        }
+    }
+}
+
+fn should_discard_ignored_process_signal(sig: usize, threads: &[Arc<Thread>]) -> bool {
+    let Some(bit) = sig_bit(sig) else {
+        return false;
+    };
+    threads
+        .iter()
+        .any(|thread| (thread.signal_blocked_mask() & bit) == 0)
 }
 
 pub fn queue_signal_to_thread_with_info(
@@ -2440,19 +2689,13 @@ fn queue_signal_to_thread_with_admission(
     let result = thread
         .signal()
         .queue_thread_signal_with_info_admission(sig, info, admission);
-    thread.notify_signal_pending(sig);
+    if matches!(result, QueuePutResult::Queued | QueuePutResult::Fallback) {
+        thread.notify_signal_pending(sig);
+    }
     match result {
         QueuePutResult::LimitExceeded => Err(SignalQueueError::Limit),
         result => Ok(result.is_pending()),
     }
-}
-
-fn should_discard_ignored_process_signal(process: &Process, sig: usize) -> bool {
-    let shared = process.signal_shared();
-    let action = resolve_action(&shared, sig);
-    list_threads_for_signal(process)
-        .into_iter()
-        .any(|thread| is_ignored_unblocked(action, thread.signal_blocked_mask(), sig))
 }
 
 fn is_ignored_unblocked(action: SignalAction, blocked: u64, sig: usize) -> bool {
@@ -2471,24 +2714,29 @@ fn is_job_control_stop_signal(sig: usize) -> bool {
 /// This is an enqueue-time rule, independent of masks and dispositions.
 fn prepare_job_control_enqueue(process: &Process, sig: usize) {
     if sig == SIGCONT as usize {
-        for stop_sig in [
+        let stop_signals = [
             SIGSTOP as usize,
             SIGTSTP as usize,
             SIGTTIN as usize,
             SIGTTOU as usize,
-        ] {
-            clear_signal_from_all_queues(process, stop_sig);
-        }
+        ];
+        clear_signals_from_all_queues(process, signal_set_mask(&stop_signals));
         process.continue_group();
     } else if is_job_control_stop_signal(sig) {
-        clear_signal_from_all_queues(process, SIGCONT as usize);
+        clear_signals_from_all_queues(process, sig_bit(SIGCONT as usize).unwrap_or(0));
     }
 }
 
-fn clear_signal_from_all_queues(process: &Process, sig: usize) {
-    process.signal_shared().clear_pending(sig);
+fn signal_set_mask(signals: &[usize]) -> u64 {
+    signals
+        .iter()
+        .fold(0, |mask, sig| mask | sig_bit(*sig).unwrap_or(0))
+}
+
+fn clear_signals_from_all_queues(process: &Process, mask: u64) {
+    process.signal_shared().clear_pending_mask(mask);
     for thread in list_threads_for_signal(process) {
-        thread.signal().clear_pending(sig);
+        thread.signal().clear_pending_mask(mask);
     }
 }
 
@@ -2498,17 +2746,13 @@ fn clear_signal_from_all_queues(process: &Process, sig: usize) {
 /// action rather than checking only for `SIG_IGN`.
 pub fn discard_pending_if_ignored(process: &Process, sig: usize) {
     if is_ignored_action(resolve_action(&process.signal_shared(), sig)) {
-        clear_signal_from_all_queues(process, sig);
+        clear_signals_from_all_queues(process, sig_bit(sig).unwrap_or(0));
     }
 }
 
 pub fn check_signals_and_deliver(thread: &Thread, tf: &mut TrapFrame) -> Option<SignalDelivery> {
     let sig_state = thread.signal();
     if sig_state.clear_skip_once() {
-        return None;
-    }
-
-    if !sig_state.has_pending_unblocked() {
         return None;
     }
 
@@ -2539,9 +2783,10 @@ pub fn check_signals_and_deliver(thread: &Thread, tf: &mut TrapFrame) -> Option<
                 new_mask |= bit;
             }
             new_mask = sanitize_mask(new_mask);
-            match write_user_signal_frame(thread, tf, restore_mask, Some(siginfo), act.flags) {
+            let fp = capture_signal_fp_state();
+            match write_user_signal_frame(thread, tf, restore_mask, Some(siginfo), act.flags, &fp) {
                 Ok((siginfo_addr, ucontext_addr, used_altstack)) => {
-                    sig_state.save_context(tf, restore_mask, Some(ucontext_addr));
+                    sig_state.save_context(tf, restore_mask, Some(ucontext_addr), fp);
                     if used_altstack {
                         sig_state.enter_altstack();
                     }
@@ -2582,11 +2827,5 @@ pub fn blocked_mask(thread: &Thread) -> u64 {
 }
 
 fn list_threads_for_signal(process: &Process) -> Vec<Arc<Thread>> {
-    let mut out = Vec::new();
-    for tid in process.thread_ids_snapshot() {
-        if let Some(t) = super::thread_by_tid(process, tid) {
-            out.push(t);
-        }
-    }
-    out
+    process.active_threads_snapshot()
 }
