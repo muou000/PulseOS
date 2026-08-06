@@ -91,7 +91,7 @@ impl LocalSocketRingBuffer {
 }
 
 pub struct LocalSocketBuffer {
-    pub buffer: Mutex<LocalSocketRingBuffer>,
+    pub buffer: axsync::Mutex<LocalSocketRingBuffer>,
     pub read_wait_queue: axtask::WaitQueue,
     pub write_wait_queue: axtask::WaitQueue,
 }
@@ -99,10 +99,17 @@ pub struct LocalSocketBuffer {
 impl LocalSocketBuffer {
     pub fn new() -> Self {
         Self {
-            buffer: Mutex::new(LocalSocketRingBuffer::new()),
+            buffer: axsync::Mutex::new(LocalSocketRingBuffer::new()),
             read_wait_queue: axtask::WaitQueue::new(),
             write_wait_queue: axtask::WaitQueue::new(),
         }
+    }
+
+    // This sleeping lock must only be acquired from ordinary task context.
+    // WaitQueue conditions and poll use `try_lock` instead because they can
+    // hold scheduler or epoll bookkeeping locks.
+    fn lock_buffer(&self) -> axsync::MutexGuard<'_, LocalSocketRingBuffer> {
+        self.buffer.lock()
     }
 }
 
@@ -152,7 +159,7 @@ impl LocalSocket {
         }
         let mut read_size = 0usize;
         while read_size < buf.len() {
-            let mut ring = self.rx.buffer.lock();
+            let mut ring = self.rx.lock_buffer();
             let n = ring.read(&mut buf[read_size..]);
             if n > 0 {
                 read_size += n;
@@ -171,10 +178,11 @@ impl LocalSocket {
             drop(ring);
 
             self.rx.read_wait_queue.wait_until(|| {
-                let ring = self.rx.buffer.lock();
-                ring.available_read() > 0
-                    || self.peer_closed.load(Ordering::Acquire)
-                    || self.current_has_pending_signal()
+                self.rx.buffer.try_lock().map_or(true, |ring| {
+                    ring.available_read() > 0
+                        || self.peer_closed.load(Ordering::Acquire)
+                        || self.current_has_pending_signal()
+                })
             });
             if self.current_has_pending_signal() {
                 if read_size > 0 {
@@ -185,7 +193,7 @@ impl LocalSocket {
         }
         if read_size > 0 {
             self.rx.write_wait_queue.notify_one(true);
-            if self.rx.buffer.lock().available_read() > 0 {
+            if self.rx.lock_buffer().available_read() > 0 {
                 self.rx.read_wait_queue.notify_one(false);
             }
         }
@@ -204,7 +212,7 @@ impl LocalSocket {
                 }
                 return Err(LinuxError::EPIPE);
             }
-            let mut ring = self.tx.buffer.lock();
+            let mut ring = self.tx.lock_buffer();
             let n = ring.write(&buf[write_size..]);
             if n > 0 {
                 write_size += n;
@@ -220,10 +228,11 @@ impl LocalSocket {
             drop(ring);
 
             self.tx.write_wait_queue.wait_until(|| {
-                let ring = self.tx.buffer.lock();
-                ring.available_write() > 0
-                    || self.peer_closed.load(Ordering::Acquire)
-                    || self.current_has_pending_signal()
+                self.tx.buffer.try_lock().map_or(true, |ring| {
+                    ring.available_write() > 0
+                        || self.peer_closed.load(Ordering::Acquire)
+                        || self.current_has_pending_signal()
+                })
             });
             if self.current_has_pending_signal() {
                 if write_size > 0 {
@@ -234,7 +243,7 @@ impl LocalSocket {
         }
         if write_size > 0 {
             self.tx.read_wait_queue.notify_one(true);
-            if self.tx.buffer.lock().available_write() > 0 {
+            if self.tx.lock_buffer().available_write() > 0 {
                 self.tx.write_wait_queue.notify_one(false);
             }
         }
@@ -594,7 +603,7 @@ impl Socket {
         match &self.inner {
             SocketInner::Tcp(s) => s.recv_queue(),
             SocketInner::Udp(s) => s.recv_queue(),
-            SocketInner::Local(s) => s.rx.buffer.lock().available_read(),
+            SocketInner::Local(s) => s.rx.lock_buffer().available_read(),
             SocketInner::Packet(_) => 0,
             SocketInner::Netlink(s) => {
                 let rx = s.rx_data.lock();
@@ -911,11 +920,19 @@ impl FdObject for Socket {
             SocketInner::Tcp(s) => s.poll().map_err(|e| LinuxError::from(e.canonicalize())),
             SocketInner::Udp(s) => s.poll().map_err(|e| LinuxError::from(e.canonicalize())),
             SocketInner::Local(s) => {
-                let rx_ring = s.rx.buffer.lock();
-                let tx_ring = s.tx.buffer.lock();
+                let peer_closed = s.peer_closed.load(Ordering::Acquire);
+                // poll can execute beneath epoll's bookkeeping lock, so a
+                // contended ring is conservatively reported as ready instead
+                // of yielding while that lock is held.
+                let readable = s.rx.buffer.try_lock().map_or(true, |rx_ring| {
+                    rx_ring.available_read() > 0 || peer_closed
+                });
+                let writable = s.tx.buffer.try_lock().map_or(true, |tx_ring| {
+                    tx_ring.available_write() > 0 || peer_closed
+                });
                 Ok(PollState {
-                    readable: rx_ring.available_read() > 0 || s.peer_closed.load(Ordering::Acquire),
-                    writable: tx_ring.available_write() > 0 || s.peer_closed.load(Ordering::Acquire),
+                    readable,
+                    writable,
                 })
             }
             SocketInner::Packet(_) => Ok(PollState { readable: false, writable: true }),
