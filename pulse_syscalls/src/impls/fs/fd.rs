@@ -3,11 +3,11 @@ use axio::SeekFrom;
 use linux_raw_sys::general::{
     F_DUPFD, F_DUPFD_CLOEXEC, F_GETFD, F_GETFL, F_GETLK, F_GETPIPE_SZ, F_OFD_GETLK, F_OFD_SETLK,
     F_OFD_SETLKW, F_RDLCK, F_SETFD, F_SETFL, F_SETLK, F_SETLKW, F_SETPIPE_SZ, F_UNLCK, F_WRLCK,
-    FD_CLOEXEC, O_CLOEXEC, O_NONBLOCK, O_RDONLY, O_RDWR, O_WRONLY, SEEK_CUR, SEEK_END, SEEK_SET,
-    flock,
+    FD_CLOEXEC, O_CLOEXEC, O_NONBLOCK, O_RDONLY, O_RDWR, O_WRONLY, POSIX_FADV_NOREUSE, SEEK_CUR,
+    SEEK_END, SEEK_SET, flock,
 };
 use pulse_core::{
-    fd_table::FdFlags,
+    fd_table::{DirObject, FdFlags, FileObject},
     record_lock::{RecordLockOwner, RecordLockType},
     task::uaccess,
 };
@@ -252,6 +252,40 @@ fn sys_fcntl_record_lock(fd: usize, cmd: u32, arg: usize) -> Result<isize, Linux
         lock_type,
         matches!(cmd, F_SETLKW | F_OFD_SETLKW),
     )
+}
+
+pub fn sys_fadvise64(fd: usize, offset: usize, len: usize, advice: usize) -> isize {
+    axlog::debug!(
+        "sys_fadvise64: fd={}, offset={}, len={}, advice={}",
+        fd,
+        offset as isize,
+        len as isize,
+        advice
+    );
+
+    // Linux resolves the descriptor before validating advice arguments.
+    let entry = match get_fd_entry(fd) {
+        Ok(entry) => entry,
+        Err(e) => return -e.code() as isize,
+    };
+    if entry.flags.contains(FdFlags::PATH) {
+        return -LinuxError::EBADF.code() as isize;
+    }
+
+    if entry.object.as_any().is::<FileObject>() {
+        if let Err(e) = entry.object.seek(SeekFrom::Current(0)) {
+            return -e.code() as isize;
+        }
+    } else if !entry.object.as_any().is::<DirObject>() {
+        return -LinuxError::ESPIPE.code() as isize;
+    }
+
+    if (len as isize) < 0 || advice > POSIX_FADV_NOREUSE as usize {
+        return -LinuxError::EINVAL.code() as isize;
+    }
+
+    // The VFS has no cache-policy hook yet, so valid advice remains a no-op.
+    0
 }
 
 pub fn sys_ftruncate(fd: usize, length: usize) -> isize {
