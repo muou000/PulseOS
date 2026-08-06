@@ -173,7 +173,26 @@ impl FdTable {
     }
 
     pub fn get_object(&self, fd: usize) -> LinuxResult<Arc<dyn FdObject>> {
-        Ok(self.get_entry_cloned(fd)?.object)
+        self.get(fd)
+            .map(|entry| entry.object.clone())
+            .ok_or(LinuxError::EBADF)
+    }
+
+    pub fn objects_snapshot(
+        &self,
+        fds: impl Iterator<Item = usize>,
+    ) -> LinuxResult<Vec<Option<Arc<dyn FdObject>>>> {
+        let mut objects = Vec::new();
+        if let Some(upper) = fds.size_hint().1 {
+            objects.try_reserve(upper).map_err(|_| LinuxError::ENOMEM)?;
+        }
+        for fd in fds {
+            if objects.len() == objects.capacity() {
+                objects.try_reserve(1).map_err(|_| LinuxError::ENOMEM)?;
+            }
+            objects.push(self.get(fd).map(|entry| entry.object.clone()));
+        }
+        Ok(objects)
     }
 
     pub fn get_mut(&mut self, fd: usize) -> Option<&mut FdEntry> {

@@ -8,7 +8,7 @@ use linux_raw_sys::general::{
 use pulse_core::fd_table::location_to_stat;
 
 use crate::impls::{
-    fs::common::{check_faccess_permission, get_fd_entry, resolve_location_at_ptr},
+    fs::common::{check_faccess_permission, get_fd_entry, get_fd_object, resolve_location_at_ptr},
     utils::{
         USER_PATH_MAX, read_user_bytes, read_user_timespec, timespec_to_update_time, with_process,
         write_user_bytes,
@@ -149,7 +149,7 @@ pub fn sys_fstat(fd: usize, statbuf: usize) -> isize {
     if statbuf == 0 {
         return -LinuxError::EFAULT.code() as isize;
     }
-    let stat = match get_fd_entry(fd).and_then(|entry| entry.object.stat()) {
+    let stat = match get_fd_object(fd).and_then(|object| object.stat()) {
         Ok(stat) => stat,
         Err(e) => return -e.code() as isize,
     };

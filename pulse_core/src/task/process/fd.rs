@@ -5,6 +5,23 @@ impl Process {
         self.fd_table().read().get_entry_cloned(fd)
     }
 
+    pub fn get_fd_object(
+        &self,
+        fd: usize,
+    ) -> Result<alloc::sync::Arc<dyn crate::fd_table::FdObject>, axerrno::LinuxError> {
+        self.fd_table().read().get_object(fd)
+    }
+
+    pub fn get_fd_objects(
+        &self,
+        fds: impl Iterator<Item = usize>,
+    ) -> Result<
+        alloc::vec::Vec<Option<alloc::sync::Arc<dyn crate::fd_table::FdObject>>>,
+        axerrno::LinuxError,
+    > {
+        self.fd_table().read().objects_snapshot(fds)
+    }
+
     pub fn insert_fd_entry(
         &self,
         entry: crate::fd_table::FdEntry,
@@ -108,8 +125,7 @@ impl Process {
     }
 
     pub fn get_fd_location(&self, fd: usize) -> Result<axfs_ng_vfs::Location, axerrno::LinuxError> {
-        self.get_fd_entry(fd)?
-            .object
+        self.get_fd_object(fd)?
             .location()
             .ok_or(axerrno::LinuxError::EBADF)
     }
