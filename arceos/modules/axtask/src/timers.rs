@@ -9,6 +9,10 @@ use crate::{AxTaskRef, AxTaskWeak, WakeContext, WakeSource, select_wake_run_queu
 
 static TIMER_TICKET_ID: AtomicU64 = AtomicU64::new(1);
 
+// If deadline selection itself takes longer than the selected deadline,
+// leave a small window for the SBI timer write to become visible.
+const MIN_TIMER_ARM_LEAD_NANOS: u64 = 100_000;
+
 pub enum AxTimerEvent {
     TaskWakeup {
         ticket_id: u64,
@@ -52,28 +56,29 @@ percpu_static! {
 }
 
 pub fn reprogram_timer() {
-    reprogram_timer_internal(false, None);
+    reprogram_timer_internal(None);
 }
 
 pub(crate) fn reprogram_timer_for_task(task: &AxTaskRef) {
-    reprogram_timer_internal(false, Some(task));
+    reprogram_timer_internal(Some(task));
 }
 
 pub(crate) fn reprogram_timer_from_tick() {
-    reprogram_timer_internal(true, None);
+    reprogram_timer_internal(None);
 }
 
-fn reprogram_timer_internal(from_tick: bool, scheduler_task: Option<&AxTaskRef>) {
+fn reprogram_timer_internal(scheduler_task: Option<&AxTaskRef>) {
     let now_ns = axhal::time::monotonic_time_nanos();
     let mut tick_deadline = unsafe { NEXT_TICK_DEADLINE.read_current_raw() };
     let periodic_interval_nanos = axhal::time::NANOS_PER_SEC / axconfig::TICKS_PER_SEC as u64;
 
-    if from_tick {
-        if now_ns >= tick_deadline {
-            let missed_ticks = (now_ns - tick_deadline) / periodic_interval_nanos + 1;
-            tick_deadline += missed_ticks * periodic_interval_nanos;
-            unsafe { NEXT_TICK_DEADLINE.write_current_raw(tick_deadline) };
-        }
+    // A task can enter this path while its local timer IRQ is pending. Do not
+    // arm the already elapsed periodic tick in that case: doing so can replace
+    // a future sleep event with a compare value at (or before) `now`.
+    if now_ns >= tick_deadline {
+        let missed_ticks = (now_ns - tick_deadline) / periodic_interval_nanos + 1;
+        tick_deadline += missed_ticks * periodic_interval_nanos;
+        unsafe { NEXT_TICK_DEADLINE.write_current_raw(tick_deadline) };
     }
 
     let mut final_deadline = tick_deadline;
@@ -99,12 +104,15 @@ fn reprogram_timer_internal(from_tick: bool, scheduler_task: Option<&AxTaskRef>)
         |task| crate::run_queue::scheduler_preemption_deadline_for(task, now_ns),
     );
     if let Some(scheduler_deadline) = scheduler_deadline {
-        final_deadline = final_deadline.min(scheduler_deadline);
+        if scheduler_deadline < final_deadline {
+            final_deadline = scheduler_deadline;
+        }
     }
 
     if final_deadline != u64::MAX {
-        if final_deadline < now_ns {
-            final_deadline = now_ns;
+        let arm_now_ns = axhal::time::monotonic_time_nanos();
+        if final_deadline <= arm_now_ns {
+            final_deadline = arm_now_ns.saturating_add(MIN_TIMER_ARM_LEAD_NANOS);
         }
         axhal::time::set_oneshot_timer(final_deadline);
     }
