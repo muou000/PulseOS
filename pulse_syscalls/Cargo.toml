@@ -31,7 +31,7 @@ memory_addr.workspace = true
 bitflags.workspace = true
 spin.workspace = true
 kernel_guard.workspace = true
-linux-raw-sys = { workspace = true, features = ["system", "prctl"] }
+linux-raw-sys = { workspace = true, features = ["system", "prctl", "mempolicy"] }
 pulse_core.workspace = true
 starry-vdso.workspace = true
 scope-local.workspace = true

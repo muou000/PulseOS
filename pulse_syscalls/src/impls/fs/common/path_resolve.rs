@@ -17,8 +17,8 @@ pub(crate) fn context_for_dirfd(dirfd: i32) -> Result<FsContext, LinuxError> {
     if dirfd < 0 {
         return Err(LinuxError::EBADF);
     }
-    let entry = with_process(|process| process.get_fd_entry(dirfd as usize))??;
-    let location = entry.object.location().ok_or(LinuxError::ENOTDIR)?;
+    let object = with_process(|process| process.get_fd_object(dirfd as usize))??;
+    let location = object.location().ok_or(LinuxError::ENOTDIR)?;
     if !location.is_dir() {
         return Err(LinuxError::ENOTDIR);
     }
