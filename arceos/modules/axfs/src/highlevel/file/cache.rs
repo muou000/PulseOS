@@ -52,6 +52,13 @@ const MMAP_PREFETCH_CONCURRENCY: usize = 2;
 
 type PageAccessLockIndices = heapless::Vec<usize, PAGE_ACCESS_LOCK_STRIPES>;
 
+#[derive(Clone, Copy)]
+enum PageAccessOwner {
+    Unclassified,
+    Demand,
+    Prefetch,
+}
+
 struct MmapPrefetchState {
     active: AtomicBool,
 }
@@ -164,17 +171,64 @@ impl PageAccessDomain {
         lock.lock().await
     }
 
-    async fn acquire_by_index(&self, index: usize) -> async_lock::MutexGuard<'_, ()> {
+    async fn acquire_by_index(
+        &self,
+        index: usize,
+        owner: PageAccessOwner,
+    ) -> async_lock::MutexGuard<'_, ()> {
         let lock = self.lock_by_index(index);
         #[cfg(feature = "qperf-trace")]
         {
+            let class = match owner {
+                PageAccessOwner::Unclassified => None,
+                PageAccessOwner::Demand => Some(crate::buildstorm_stats::PageAccessClass::Demand),
+                PageAccessOwner::Prefetch => {
+                    Some(crate::buildstorm_stats::PageAccessClass::Prefetch)
+                }
+            };
+            if let Some(class) = class {
+                if let Some(guard) = lock.try_lock() {
+                    crate::buildstorm_stats::record_page_access_lock(class, None);
+                    return guard;
+                }
+                let wait_started_at_ns =
+                    crate::buildstorm_stats::is_active().then(axhal::time::monotonic_time_nanos);
+                let guard = lock.lock().await;
+                if let Some(wait_started_at_ns) = wait_started_at_ns {
+                    crate::buildstorm_stats::record_page_access_lock(
+                        class,
+                        Some(
+                            axhal::time::monotonic_time_nanos().saturating_sub(wait_started_at_ns),
+                        ),
+                    );
+                }
+                return guard;
+            }
             if let Some(guard) = lock.try_lock() {
                 crate::buildstorm_stat_inc!(PAGE_ACCESS_LOCK_FAST);
                 return guard;
             }
             crate::buildstorm_stat_inc!(PAGE_ACCESS_LOCK_WAIT);
+            return lock.lock().await;
         }
-        lock.lock().await
+        #[cfg(not(feature = "qperf-trace"))]
+        {
+            let _ = owner;
+            lock.lock().await
+        }
+    }
+
+    fn try_acquire_prefetch_by_index(
+        &self,
+        index: usize,
+    ) -> Option<async_lock::MutexGuard<'_, ()>> {
+        let guard = self.lock_by_index(index).try_lock()?;
+        #[cfg(feature = "qperf-trace")]
+        crate::buildstorm_stats::record_page_access_lock(
+            crate::buildstorm_stats::PageAccessClass::Prefetch,
+            None,
+        );
+        Some(guard)
     }
 
     fn locks_for_range(&self, pn: u32, page_count: usize) -> VfsResult<PageAccessLockIndices> {
@@ -1948,10 +2002,45 @@ impl CachedFile {
             .page_access
             .locks_for_range(pn, requested_pages)?;
         let mut fill_guards = heapless::Vec::<_, PAGE_ACCESS_LOCK_STRIPES>::new();
+        #[cfg(feature = "qperf-trace")]
+        let mut page_access_hold: Option<crate::buildstorm_stats::PageAccessHoldGuard> = None;
+        let page_access_owner = if pin.is_some() || demand_pages != 0 {
+            PageAccessOwner::Demand
+        } else {
+            PageAccessOwner::Prefetch
+        };
         for &index in &page_locks {
-            fill_guards
-                .push(self.shared.page_access.acquire_by_index(index).await)
-                .map_err(|_| VfsError::StorageFull)?;
+            let guard = if matches!(page_access_owner, PageAccessOwner::Prefetch) {
+                let Some(guard) = self.shared.page_access.try_acquire_prefetch_by_index(index)
+                else {
+                    #[cfg(feature = "qperf-trace")]
+                    {
+                        crate::buildstorm_stat_inc!(MMAP_PREFETCH_SKIPPED_PAGE_LOCK);
+                        if let Some(mut hold) = page_access_hold.take() {
+                            hold.cancel();
+                        }
+                    }
+                    // Prefetch is best effort. A busy stripe is a signal to
+                    // let the demand path win and let a later fault retry.
+                    return Ok((0, None));
+                };
+                guard
+            } else {
+                self.shared
+                    .page_access
+                    .acquire_by_index(index, page_access_owner)
+                    .await
+            };
+            #[cfg(feature = "qperf-trace")]
+            if page_access_hold.is_none() {
+                let class = match page_access_owner {
+                    PageAccessOwner::Demand => crate::buildstorm_stats::PageAccessClass::Demand,
+                    PageAccessOwner::Prefetch => crate::buildstorm_stats::PageAccessClass::Prefetch,
+                    PageAccessOwner::Unclassified => unreachable!(),
+                };
+                page_access_hold = Some(crate::buildstorm_stats::begin_page_access_hold(class));
+            }
+            fill_guards.push(guard).map_err(|_| VfsError::StorageFull)?;
         }
 
         loop {
@@ -2389,7 +2478,12 @@ impl CachedFile {
                 let mut page_guards = heapless::Vec::<_, PAGE_ACCESS_LOCK_STRIPES>::new();
                 for &index in &page_locks {
                     page_guards
-                        .push(self.shared.page_access.acquire_by_index(index).await)
+                        .push(
+                            self.shared
+                                .page_access
+                                .acquire_by_index(index, PageAccessOwner::Unclassified)
+                                .await,
+                        )
                         .map_err(|_| VfsError::StorageFull)?;
                 }
                 // Preserve the lock order: page access precedes the shared
@@ -2781,6 +2875,15 @@ mod tests {
 
         drop((same_page_guard, different_page_guard, second_file_guard));
         assert!(same_page_again.try_lock().is_some());
+    }
+
+    #[test]
+    fn mmap_prefetch_drops_a_busy_page_access_stripe() {
+        let domain = PageAccessDomain::default();
+        let held = domain.lock_by_index(5).try_lock().unwrap();
+        assert!(domain.try_acquire_prefetch_by_index(5).is_none());
+        drop(held);
+        assert!(domain.try_acquire_prefetch_by_index(5).is_some());
     }
 
     #[test]
