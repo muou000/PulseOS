@@ -338,66 +338,83 @@ fn pin_user_slice(
     process
         .validate_user_range(user_addr, first_chunk_len)
         .ok()?;
-    process
-        .try_fault_in_user_range(user_addr, first_chunk_len, required_flags)
-        .ok()?;
 
     let aspace_handle = process.aspace_handle();
-    let aspace = aspace_handle.read();
-    let mut current_page = VirtAddr::from(user_addr).align_down_4k();
-    let mut page_offset = user_addr & 4095;
-    let mut expected_paddr = None;
-    let mut total_len = 0usize;
-    let mut frames = heapless::Vec::new();
+    let mut faulted_first_page = false;
 
-    while total_len < max_len {
-        let paddr = match aspace.pin_user_frame(current_page, required_flags) {
-            Ok(paddr) => paddr,
-            Err(_) if frames.is_empty() => return None,
-            Err(_) => break,
-        };
-        if expected_paddr.is_some_and(|expected| expected != paddr) {
-            release_pinned_user_frame(paddr);
-            break;
-        }
+    loop {
+        let mut current_page = VirtAddr::from(user_addr).align_down_4k();
+        let mut page_offset = user_addr & 4095;
+        let mut expected_paddr = None;
+        let mut total_len = 0usize;
+        let mut frames = heapless::Vec::new();
+        let mut retry_after_fault = false;
 
-        let chunk = core::cmp::min(max_len - total_len, 4096 - page_offset);
-        if let Err(paddr) = frames.push(paddr) {
-            release_pinned_user_frame(paddr);
-            break;
-        }
-        total_len += chunk;
-        if total_len == max_len {
-            break;
-        }
+        {
+            let aspace = aspace_handle.read();
+            while total_len < max_len {
+                let paddr = match aspace.pin_user_frame(current_page, required_flags) {
+                    Ok(paddr) => paddr,
+                    Err(_) if frames.is_empty() && !faulted_first_page => {
+                        // The normal case is already resident.  Fault in only
+                        // when the first pin proves that it is missing.
+                        retry_after_fault = true;
+                        break;
+                    }
+                    Err(_) if frames.is_empty() => return None,
+                    Err(_) => break,
+                };
+                if expected_paddr.is_some_and(|expected| expected != paddr) {
+                    release_pinned_user_frame(paddr);
+                    break;
+                }
 
-        let Some(next_page) = current_page.checked_add(4096) else {
-            break;
-        };
-        let Some(next_paddr) = paddr.checked_add(4096) else {
-            break;
-        };
-        current_page = next_page;
-        expected_paddr = Some(next_paddr);
-        page_offset = 0;
-    }
-    drop(aspace);
+                let chunk = core::cmp::min(max_len - total_len, 4096 - page_offset);
+                if let Err(paddr) = frames.push(paddr) {
+                    release_pinned_user_frame(paddr);
+                    break;
+                }
+                total_len += chunk;
+                if total_len == max_len {
+                    break;
+                }
 
-    let first = *frames.first()?;
-    let ptr = match NonNull::new((phys_to_virt(first) + (user_addr & 4095)).as_mut_ptr()) {
-        Some(ptr) => ptr,
-        None => {
-            while let Some(frame) = frames.pop() {
-                release_pinned_user_frame(frame);
+                let Some(next_page) = current_page.checked_add(4096) else {
+                    break;
+                };
+                let Some(next_paddr) = paddr.checked_add(4096) else {
+                    break;
+                };
+                current_page = next_page;
+                expected_paddr = Some(next_paddr);
+                page_offset = 0;
             }
-            return None;
         }
-    };
-    Some(PinnedUserSlice {
-        ptr,
-        len: total_len,
-        frames,
-    })
+
+        if retry_after_fault {
+            process
+                .try_fault_in_user_range(user_addr, first_chunk_len, required_flags)
+                .ok()?;
+            faulted_first_page = true;
+            continue;
+        }
+
+        let first = *frames.first()?;
+        let ptr = match NonNull::new((phys_to_virt(first) + (user_addr & 4095)).as_mut_ptr()) {
+            Some(ptr) => ptr,
+            None => {
+                while let Some(frame) = frames.pop() {
+                    release_pinned_user_frame(frame);
+                }
+                return None;
+            }
+        };
+        return Some(PinnedUserSlice {
+            ptr,
+            len: total_len,
+            frames,
+        });
+    }
 }
 
 /// Pins a physically contiguous user-readable run for an operation that can
