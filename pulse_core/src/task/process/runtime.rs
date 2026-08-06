@@ -264,16 +264,6 @@ impl Process {
         self.release_zombie_resources(false)
     }
 
-    pub fn sync_fs_context(&self) {
-        let mut fs = self.fs_context_handle().lock().clone();
-        fs.credentials = Some((self.fsuid(), self.fsgid()));
-        *axfs::FS_CONTEXT.lock() = fs;
-    }
-
-    pub fn save_fs_context(&self) {
-        *self.fs_context_handle().lock() = axfs::FS_CONTEXT.lock().clone();
-    }
-
     pub fn register_task_ref(&self, task: AxTaskRef) {
         let thread = task::thread_handle_from_task(&task).map(|handle| {
             handle.attach_task_ref(task.clone());

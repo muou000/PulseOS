@@ -53,7 +53,7 @@ pub fn syscall_handler(tf: &mut TrapFrame, syscall_num: usize) -> isize {
     );
     let ret = {
         let _irq_guard = pulse_core::trap::TrapIrqEnableGuard::new();
-        syscall_dispatcher(tf, syscall_num, args, process.as_ref())
+        syscall_dispatcher(tf, syscall_num, args)
     };
     thread.exit_if_exec_requested();
     axlog::debug!(
@@ -159,12 +159,7 @@ fn restart_syscall(tf: &mut TrapFrame) {
     tf.era -= 4;
 }
 
-fn syscall_dispatcher(
-    tf: &mut TrapFrame,
-    syscall_id: usize,
-    args: [usize; 6],
-    process: &pulse_core::task::Process,
-) -> isize {
+fn syscall_dispatcher(tf: &mut TrapFrame, syscall_id: usize, args: [usize; 6]) -> isize {
     let sysno = match Sysno::new(syscall_id) {
         Some(sysno) => sysno,
         None => {
@@ -172,46 +167,6 @@ fn syscall_dispatcher(
             return -LinuxError::ENOSYS.code() as isize;
         }
     };
-
-    let mut is_fs_syscall = matches!(
-        sysno,
-        Sysno::openat
-            | Sysno::mkdirat
-            | Sysno::mknodat
-            | Sysno::mount
-            | Sysno::umount2
-            | Sysno::chroot
-            | Sysno::statfs
-            | Sysno::statx
-            | Sysno::getcwd
-            | Sysno::chdir
-            | Sysno::fchdir
-            | Sysno::unlinkat
-            | Sysno::linkat
-            | Sysno::renameat2
-            | Sysno::utimensat
-            | Sysno::readlinkat
-            | Sysno::symlinkat
-            | Sysno::faccessat
-            | Sysno::faccessat2
-            | Sysno::fchmodat
-            | Sysno::fchownat
-            | Sysno::execve
-            | Sysno::execveat
-            | Sysno::getrandom
-    );
-    #[cfg(target_arch = "loongarch64")]
-    {
-        is_fs_syscall |= matches!(sysno, Sysno::fstatat | Sysno::renameat);
-    }
-    #[cfg(target_arch = "riscv64")]
-    {
-        is_fs_syscall |= matches!(sysno, Sysno::newfstatat);
-    }
-
-    if is_fs_syscall {
-        process.sync_fs_context();
-    }
 
     match sysno {
         Sysno::getpid => impls::sys_getpid(),
@@ -322,12 +277,7 @@ fn syscall_dispatcher(
         Sysno::sysinfo => impls::sys_sysinfo(args[0]),
         Sysno::syslog => impls::sys_syslog(args[0], args[1], args[2]),
         Sysno::rt_sigprocmask => impls::sys_rt_sigprocmask(args[0], args[1], args[2], args[3]),
-        Sysno::get_mempolicy => {
-            axlog::warn!(
-                "sys_get_mempolicy (stub): returning success without NUMA policy semantics"
-            );
-            0
-        }
+        Sysno::get_mempolicy => impls::sys_get_mempolicy(args[0], args[1], args[2], args[3], args[4]),
 
         Sysno::getuid => impls::sys_getuid(),
         Sysno::geteuid => impls::sys_geteuid(),

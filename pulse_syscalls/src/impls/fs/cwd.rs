@@ -2,7 +2,7 @@ use axerrno::LinuxError;
 use linux_raw_sys::general::{CAP_SYS_CHROOT, X_OK};
 
 use crate::impls::{
-    fs::common::{check_faccess_permission, get_fd_entry, resolve_location_at_ptr},
+    fs::common::{check_faccess_permission, get_fd_object, resolve_location_at_ptr},
     utils::{alloc_zeroed_bytes, with_process, write_user_bytes},
 };
 
@@ -72,7 +72,6 @@ pub fn sys_chdir(path: usize) -> isize {
                 .lock()
                 .set_current_dir(dir)
                 .map_err(|e| LinuxError::from(e.canonicalize()))?;
-            process.sync_fs_context();
             Ok(())
         })?
     });
@@ -84,11 +83,11 @@ pub fn sys_chdir(path: usize) -> isize {
 
 pub fn sys_fchdir(fd: usize) -> isize {
     axlog::debug!("sys_fchdir: fd={}", fd);
-    let entry = match get_fd_entry(fd) {
-        Ok(entry) => entry,
+    let object = match get_fd_object(fd) {
+        Ok(object) => object,
         Err(e) => return -e.code() as isize,
     };
-    let dir = match entry.object.location() {
+    let dir = match object.location() {
         Some(loc) => loc,
         None => return -LinuxError::ENOTDIR.code() as isize,
     };
@@ -104,7 +103,6 @@ pub fn sys_fchdir(fd: usize) -> isize {
             .lock()
             .set_current_dir(dir)
             .map_err(|e| LinuxError::from(e.canonicalize()))?;
-        process.sync_fs_context();
         Ok(())
     }) {
         Ok(Ok(())) => 0,
@@ -138,7 +136,6 @@ pub fn sys_chroot(path: usize) -> isize {
             .lock()
             .set_root_dir(dir)
             .map_err(|e| LinuxError::from(e.canonicalize()))?;
-        process.sync_fs_context();
         Ok(())
     }) {
         Ok(Ok(())) => 0,

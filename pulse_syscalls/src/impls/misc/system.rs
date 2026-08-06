@@ -1,4 +1,98 @@
+use linux_raw_sys::{
+    general::AT_FDCWD,
+    mempolicy::{MPOL_DEFAULT, MPOL_F_ADDR, MPOL_F_MEMS_ALLOWED, MPOL_F_NODE},
+};
+
 use super::*;
+use crate::impls::fs::common::context_for_dirfd;
+
+const MPOL_QUERY_FLAGS: usize = (MPOL_F_ADDR | MPOL_F_MEMS_ALLOWED | MPOL_F_NODE) as usize;
+
+fn mempolicy_nodemask_bytes(nodemask: usize, maxnode: usize) -> Result<usize, LinuxError> {
+    if nodemask == 0 {
+        return Ok(0);
+    }
+    if maxnode == 0 {
+        return Err(LinuxError::EINVAL);
+    }
+
+    let word_bits = usize::BITS as usize;
+    let words = maxnode
+        .checked_add(word_bits - 1)
+        .ok_or(LinuxError::EINVAL)?
+        / word_bits;
+    words
+        .checked_mul(core::mem::size_of::<usize>())
+        .ok_or(LinuxError::EINVAL)
+}
+
+pub fn sys_get_mempolicy(
+    mode: usize,
+    nodemask: usize,
+    maxnode: usize,
+    addr: usize,
+    flags: usize,
+) -> isize {
+    axlog::debug!(
+        "sys_get_mempolicy: mode={:#x}, nodemask={:#x}, maxnode={}, addr={:#x}, flags={:#x}",
+        mode,
+        nodemask,
+        maxnode,
+        addr,
+        flags
+    );
+
+    if flags & !MPOL_QUERY_FLAGS != 0 {
+        return -LinuxError::EINVAL.code() as isize;
+    }
+
+    let query_addr = flags & MPOL_F_ADDR as usize != 0;
+    let query_node = flags & MPOL_F_NODE as usize != 0;
+    let mems_allowed = flags & MPOL_F_MEMS_ALLOWED as usize != 0;
+    if (mems_allowed && flags != MPOL_F_MEMS_ALLOWED as usize)
+        || (query_node && !query_addr)
+        || (!mems_allowed && !query_addr && addr != 0)
+    {
+        return -LinuxError::EINVAL.code() as isize;
+    }
+
+    let nodemask_bytes = if query_node {
+        0
+    } else {
+        match mempolicy_nodemask_bytes(nodemask, maxnode) {
+            Ok(bytes) => bytes,
+            Err(e) => return -e.code() as isize,
+        }
+    };
+
+    let process = match pulse_core::task::current_process() {
+        Ok(process) => process,
+        Err(e) => return -e.code() as isize,
+    };
+    if query_addr && (addr == 0 || !process.is_mapped_range(addr, 1)) {
+        return -LinuxError::EFAULT.code() as isize;
+    }
+
+    let mode_value = if query_node { 0 } else { MPOL_DEFAULT as i32 };
+    if mode != 0 && process.write_user_i32(mode, mode_value).is_err() {
+        return -LinuxError::EFAULT.code() as isize;
+    }
+
+    if nodemask_bytes != 0 {
+        let mut output = match alloc_zeroed_bytes(nodemask_bytes, "sys_get_mempolicy.nodemask") {
+            Ok(output) => output,
+            Err(e) => return -e.code() as isize,
+        };
+        if mems_allowed {
+            output[0] = 1;
+        }
+        if process.write_user_bytes(nodemask, &output).is_err() {
+            return -LinuxError::EFAULT.code() as isize;
+        }
+    }
+
+    0
+}
 
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -229,7 +323,9 @@ pub fn sys_prlimit64(pid: i32, resource: usize, new_limit: usize, old_limit: usi
 
 pub fn sys_getrandom(buf: usize, buflen: usize, flags: usize) -> isize {
     let flags = flags as u32;
-    if flags & !(GRND_RANDOM | GRND_NONBLOCK | GRND_INSECURE) != 0 {
+    if flags & !(GRND_RANDOM | GRND_NONBLOCK | GRND_INSECURE) != 0
+        || flags & (GRND_RANDOM | GRND_INSECURE) == (GRND_RANDOM | GRND_INSECURE)
+    {
         return -LinuxError::EINVAL.code() as isize;
     }
     if buflen == 0 {
@@ -244,13 +340,16 @@ pub fn sys_getrandom(buf: usize, buflen: usize, flags: usize) -> isize {
     } else {
         "/dev/urandom"
     };
-    let fs = FS_CONTEXT.lock().clone();
+    let fs = match context_for_dirfd(AT_FDCWD as i32) {
+        Ok(fs) => fs,
+        Err(e) => return -e.code() as isize,
+    };
     let tmp = match axtask::future::block_on(fs.read_prefix(path, buflen)) {
         Ok(buf) => buf,
         Err(e) => return -e.code() as isize,
     };
     match pulse_core::task::with_current_process(|process| process.write_user_bytes(buf, &tmp)) {
-        Ok(Ok(())) => buflen as isize,
+        Ok(Ok(())) => tmp.len() as isize,
         Ok(Err(_)) => -LinuxError::EFAULT.code() as isize,
         Err(e) => -e.code() as isize,
     }

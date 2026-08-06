@@ -92,8 +92,6 @@ fn main() {
             pulse_core::task::register_thread_global(init_tid, init_thread.clone());
             info!("Created initial user process");
 
-            init_thread.process().sync_fs_context();
-
             let init_task = pulse_core::task::spawn_task_with_thread(inner, init_thread.clone(), true);
 
             if cfg!(any(feature = "pre-testcode", feature = "final-testcode")) {

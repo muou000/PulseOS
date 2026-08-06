@@ -1,7 +1,7 @@
 use super::*;
 
-fn resolve_existing_mount_path(path: &str) -> Result<String, LinuxError> {
-    let ctx = context_for_dirfd(AT_FDCWD as i32)?;
+// `FsContext` owns root/cwd/credentials; `Location` shares mount topology through Arc.
+fn resolve_existing_mount_path(ctx: &axfs::FsContext, path: &str) -> Result<String, LinuxError> {
     let loc = axtask::future::block_on(ctx.resolve(Path::new(path)))
         .map_err(|e| LinuxError::from(e.canonicalize()))?;
     loc.check_is_dir()
@@ -12,8 +12,7 @@ fn resolve_existing_mount_path(path: &str) -> Result<String, LinuxError> {
         .to_string())
 }
 
-fn resolve_source_path(source: &str) -> Result<String, LinuxError> {
-    let ctx = context_for_dirfd(AT_FDCWD as i32)?;
+fn resolve_source_path(ctx: &axfs::FsContext, source: &str) -> Result<String, LinuxError> {
     match axtask::future::block_on(ctx.resolve(Path::new(source))) {
         Ok(loc) => Ok(loc
             .absolute_path()
@@ -23,9 +22,12 @@ fn resolve_source_path(source: &str) -> Result<String, LinuxError> {
     }
 }
 
-fn mount_source_candidates(source: &str) -> Result<alloc::vec::Vec<String>, LinuxError> {
+fn mount_source_candidates(
+    ctx: &axfs::FsContext,
+    source: &str,
+) -> Result<alloc::vec::Vec<String>, LinuxError> {
     let mut candidates = alloc::vec::Vec::new();
-    let source_path = resolve_source_path(source)?;
+    let source_path = resolve_source_path(ctx, source)?;
     candidates.push(source_path.clone());
     if source_path != source {
         candidates.push(source.to_string());
@@ -47,7 +49,11 @@ fn mount_source_candidates(source: &str) -> Result<alloc::vec::Vec<String>, Linu
     Ok(candidates)
 }
 
-fn lookup_or_probe_fs(source: &str, fstype: &str) -> Result<axfs_ng_vfs::Filesystem, LinuxError> {
+fn lookup_or_probe_fs(
+    ctx: &axfs::FsContext,
+    source: &str,
+    fstype: &str,
+) -> Result<axfs_ng_vfs::Filesystem, LinuxError> {
     if let Some(fs) = axfs::lookup_mountable_filesystem(source) {
         return Ok(fs);
     }
@@ -61,7 +67,7 @@ fn lookup_or_probe_fs(source: &str, fstype: &str) -> Result<axfs_ng_vfs::Filesys
     }
 
     if source.starts_with("/dev/") {
-        let loc = match axfs::lookup_location(source) {
+        let loc = match axtask::future::block_on(ctx.resolve(Path::new(source))) {
             Ok(loc) => loc,
             Err(e) => {
                 // If the device node itself isn't found, it's ENOENT
@@ -169,27 +175,22 @@ fn sys_mount_propagation(target_path: &str, flags: usize) -> isize {
         }
     }
 
-    let _ = pulse_core::task::current_process().map(|process| process.save_fs_context());
     0
 }
 
 /// Implement `mount --move source target` (MS_MOVE).
-fn sys_mount_move(source_uptr: usize, target_path: &str) -> isize {
+fn sys_mount_move(ctx: &axfs::FsContext, source_uptr: usize, target_path: &str) -> isize {
     let source_path = match read_user_optional_path(source_uptr) {
         Ok(Some(p)) => p,
         Ok(None) => return -LinuxError::EINVAL.code() as isize,
         Err(e) => return -e.code() as isize,
     };
-    let source_path = match resolve_existing_mount_path(&source_path) {
+    let source_path = match resolve_existing_mount_path(ctx, &source_path) {
         Ok(p) => p,
         Err(e) => return -e.code() as isize,
     };
     axlog::debug!("sys_mount_move: '{}' -> '{}'", source_path, target_path);
 
-    let ctx = match context_for_dirfd(AT_FDCWD as i32) {
-        Ok(ctx) => ctx,
-        Err(e) => return -e.code() as isize,
-    };
     // Source must be a mountpoint root.
     let source_loc = match axtask::future::block_on(ctx.resolve(&source_path)) {
         Ok(loc) => loc,
@@ -237,7 +238,6 @@ fn sys_mount_move(source_uptr: usize, target_path: &str) -> isize {
         }
     }
 
-    let _ = pulse_core::task::current_process().map(|process| process.save_fs_context());
     0
 }
 
@@ -344,7 +344,6 @@ pub fn sys_mount(
             peer.set_flags(_flags);
         }
 
-        let _ = pulse_core::task::current_process().map(|process| process.save_fs_context());
         return 0;
     }
 
@@ -355,7 +354,7 @@ pub fn sys_mount(
 
     // MS_MOVE: move an existing mountpoint.
     if (_flags & (MS_MOVE as usize)) != 0 {
-        return sys_mount_move(source, &target_path);
+        return sys_mount_move(&ctx, source, &target_path);
     }
 
     if is_bind {
@@ -434,8 +433,6 @@ pub fn sys_mount(
                     }
                 }
 
-                let _ =
-                    pulse_core::task::current_process().map(|process| process.save_fs_context());
                 return 0;
             }
             Err(e) => {
@@ -467,7 +464,7 @@ pub fn sys_mount(
         fstype_name
     );
 
-    let fs_res = match mount_source_candidates(&source_path) {
+    let fs_res = match mount_source_candidates(&ctx, &source_path) {
         Ok(candidates) => {
             let mut res = Err(LinuxError::ENOENT);
             for cand in candidates {
@@ -476,7 +473,7 @@ pub fn sys_mount(
                     cand,
                     fstype_name
                 );
-                match lookup_or_probe_fs(&cand, &fstype_name) {
+                match lookup_or_probe_fs(&ctx, &cand, &fstype_name) {
                     Ok(fs) => {
                         res = Ok(fs);
                         break;
@@ -493,7 +490,7 @@ pub fn sys_mount(
                     source_path,
                     fstype_name
                 );
-                match lookup_or_probe_fs(&source_path, &fstype_name) {
+                match lookup_or_probe_fs(&ctx, &source_path, &fstype_name) {
                     Ok(fs) => res = Ok(fs),
                     Err(e) => res = Err(e),
                 }
@@ -537,7 +534,6 @@ pub fn sys_mount(
                 "rw,relatime"
             };
             axfs::register_mount(&source_path, &target_path, &fstype_name, options);
-            let _ = pulse_core::task::current_process().map(|process| process.save_fs_context());
             0
         }
         Err(e) => {
@@ -640,7 +636,6 @@ pub fn sys_umount2(target: usize, flags: usize) -> isize {
             // MOUNTED_TARGETS remove removed
             let _ = axfs::unregister_mount(&target_path);
             let _ = axfs::unregister_mounted_mountpoint(&target_path);
-            let _ = pulse_core::task::current_process().map(|process| process.save_fs_context());
             0
         }
         Err(e) => -LinuxError::from(e.canonicalize()).code() as isize,
