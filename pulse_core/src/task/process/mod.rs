@@ -4,7 +4,7 @@ use alloc::{
     sync::{Arc, Weak},
     vec::Vec,
 };
-use core::sync::atomic::{AtomicBool, AtomicI32, AtomicU64, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 
 use axconfig::TASK_STACK_SIZE;
 use axerrno::{AxError, AxErrorKind, AxResult};
@@ -436,6 +436,15 @@ pub struct TimeContext {
     pub itimer_prof_remaining_ns: AtomicU64,
     /// 剖析定时器重载时间间隔
     pub itimer_prof_interval_ns: AtomicU64,
+    /// Expired interval/POSIX timer work recorded from IRQ context. Signal
+    /// enqueue, wakeups, and timer rearming are completed by the timer worker.
+    pub timer_work: AtomicU32,
+    /// Deadline/generation captured by a POSIX timer callback before it sets
+    /// the corresponding `timer_work` bit. These atomics let the worker reject
+    /// a callback left behind by timer replacement without taking a lock in
+    /// the IRQ path.
+    pub posix_timer_work_deadlines: [AtomicU64; MAX_POSIX_TIMER_COUNT],
+    pub posix_timer_work_generations: [AtomicU64; MAX_POSIX_TIMER_COUNT],
 }
 
 impl TimeContext {
@@ -451,6 +460,9 @@ impl TimeContext {
             itimer_virt_interval_ns: AtomicU64::new(0),
             itimer_prof_remaining_ns: AtomicU64::new(0),
             itimer_prof_interval_ns: AtomicU64::new(0),
+            timer_work: AtomicU32::new(0),
+            posix_timer_work_deadlines: core::array::from_fn(|_| AtomicU64::new(0)),
+            posix_timer_work_generations: core::array::from_fn(|_| AtomicU64::new(0)),
         }
     }
 }
