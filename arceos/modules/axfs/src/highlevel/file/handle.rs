@@ -383,6 +383,22 @@ impl FileBackend {
             }
         }
     }
+
+    /// Starts a bounded, best-effort cache fill without changing a file
+    /// handle's current offset.
+    pub fn readahead(&self, offset: u64, len: usize) -> VfsResult<()> {
+        match self {
+            Self::Cached(cached) => cached.prefetch_range(offset, len),
+            Self::Direct(loc) => {
+                if !node_allows_page_cache(loc.flags()) || loc.flags().contains(NodeFlags::STREAM) {
+                    return Ok(());
+                }
+                let cached =
+                    axtask::future::block_on(CachedFile::get_or_create_async(loc.clone()))?;
+                cached.prefetch_range(offset, len)
+            }
+        }
+    }
 }
 
 /// Provides `std::fs::File`-like interface.
@@ -513,6 +529,12 @@ impl File {
         axtask::future::block_on(self.inner.location().metadata())
             .map(|m| m.block_size)
             .unwrap_or(512)
+    }
+
+    /// Starts a bounded, best-effort readahead operation without changing the
+    /// shared file position or recording a read access timestamp.
+    pub fn readahead(&self, offset: u64, len: usize) -> VfsResult<()> {
+        self.access(FileFlags::READ)?.readahead(offset, len)
     }
 
     /// Reads a number of bytes starting from a given offset.

@@ -2749,6 +2749,28 @@ impl CachedFile {
         });
     }
 
+    /// Starts a bounded, best-effort prefetch for a byte range.
+    ///
+    /// This is shared by mmap sequential-fault handling and readahead(2), so
+    /// both users retain the same cache-pressure bound and single-flight rule.
+    pub fn prefetch_range(&self, offset: u64, len: usize) -> VfsResult<()> {
+        if len == 0 {
+            return Ok(());
+        }
+
+        let end = offset
+            .checked_add(len as u64)
+            .ok_or(VfsError::InvalidInput)?;
+        let first_page =
+            u32::try_from(offset / PAGE_SIZE as u64).map_err(|_| VfsError::StorageFull)?;
+        let end_page = end.div_ceil(PAGE_SIZE as u64);
+        let page_count = usize::try_from(end_page.saturating_sub(first_page as u64))
+            .map_err(|_| VfsError::StorageFull)?
+            .min(SHARED_PAGE_BATCH_CAPACITY);
+        self.prefetch_pages(first_page, page_count);
+        Ok(())
+    }
+
     /// Pins a resident page for a user mapping without performing I/O.
     pub fn try_pin_shared_page_paddr(
         &self,
