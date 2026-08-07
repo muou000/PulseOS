@@ -1,13 +1,13 @@
 use axerrno::LinuxError;
 use axio::SeekFrom;
 use linux_raw_sys::general::{
-    F_DUPFD, F_DUPFD_CLOEXEC, F_GETFD, F_GETFL, F_GETLK, F_GETPIPE_SZ, F_OFD_GETLK, F_OFD_SETLK,
-    F_OFD_SETLKW, F_RDLCK, F_SETFD, F_SETFL, F_SETLK, F_SETLKW, F_SETPIPE_SZ, F_UNLCK, F_WRLCK,
-    FD_CLOEXEC, O_CLOEXEC, O_NONBLOCK, O_RDONLY, O_RDWR, O_WRONLY, POSIX_FADV_NOREUSE, SEEK_CUR,
-    SEEK_END, SEEK_SET, flock,
+    AT_FDCWD, F_DUPFD, F_DUPFD_CLOEXEC, F_GETFD, F_GETFL, F_GETLK, F_GETPIPE_SZ, F_OFD_GETLK,
+    F_OFD_SETLK, F_OFD_SETLKW, F_RDLCK, F_SETFD, F_SETFL, F_SETLK, F_SETLKW, F_SETPIPE_SZ, F_UNLCK,
+    F_WRLCK, FD_CLOEXEC, O_CLOEXEC, O_NONBLOCK, O_RDONLY, O_RDWR, O_WRONLY, POSIX_FADV_NOREUSE,
+    RLIMIT_FSIZE, S_IFMT, S_IFREG, SEEK_CUR, SEEK_END, SEEK_SET, flock,
 };
 use pulse_core::{
-    fd_table::{DirObject, FdFlags, FileObject},
+    fd_table::{DirObject, FdFlags, FileObject, PidfdObject},
     record_lock::{RecordLockOwner, RecordLockType},
     task::uaccess,
 };
@@ -318,6 +318,44 @@ pub fn sys_fadvise64(fd: usize, offset: usize, len: usize, advice: usize) -> isi
     0
 }
 
+pub fn sys_readahead(fd: usize, offset: usize, count: usize) -> isize {
+    let offset = offset as isize;
+    if offset < 0 {
+        return -LinuxError::EINVAL.code() as isize;
+    }
+
+    let entry = match get_fd_entry(fd) {
+        Ok(entry) => entry,
+        Err(e) => return -e.code() as isize,
+    };
+    if entry.flags.contains(FdFlags::PATH) {
+        return -LinuxError::EBADF.code() as isize;
+    }
+    // pidfds have no file data to prefetch; Linux accepts this descriptor
+    // class and treats the request as a successful no-op.
+    if entry.object.as_any().is::<PidfdObject>() {
+        return 0;
+    }
+    let stat = match entry.object.stat() {
+        Ok(stat) => stat,
+        Err(e) => return -e.code() as isize,
+    };
+    if stat.st_mode & S_IFMT != S_IFREG {
+        return -LinuxError::EINVAL.code() as isize;
+    }
+    let Some(file) = entry.object.as_any().downcast_ref::<FileObject>() else {
+        return -LinuxError::EINVAL.code() as isize;
+    };
+    if !file.is_read_open() {
+        return -LinuxError::EBADF.code() as isize;
+    }
+
+    match file.readahead(offset as u64, count) {
+        Ok(()) => 0,
+        Err(e) => -e.code() as isize,
+    }
+}
+
 pub fn sys_ftruncate(fd: usize, length: usize) -> isize {
     axlog::debug!("sys_ftruncate: fd={}, length={:#x}", fd, length);
     let entry = match get_fd_entry(fd) {
@@ -332,10 +370,44 @@ pub fn sys_ftruncate(fd: usize, length: usize) -> isize {
     if length < 0 {
         return -LinuxError::EINVAL.code() as isize;
     }
+    if let Ok(process) = pulse_core::task::current_process()
+        && let Some(limit) = process.get_rlimit(RLIMIT_FSIZE)
+        && (length as u64) > limit.rlim_cur
+    {
+        return -LinuxError::EFBIG.code() as isize;
+    }
     match object.truncate(length as u64) {
         Ok(()) => 0,
         Err(e) => -e.code() as isize,
     }
+}
+
+pub fn sys_truncate(pathname: usize, length: usize) -> isize {
+    if (length as isize) < 0 {
+        return -LinuxError::EINVAL.code() as isize;
+    }
+    if let Err(e) = crate::impls::utils::with_user_path_str(pathname, |path| {
+        if path.is_empty() {
+            Err(LinuxError::ENOENT)
+        } else {
+            Ok(())
+        }
+    }) {
+        return -e.code() as isize;
+    }
+
+    let fd = crate::impls::sys_openat(AT_FDCWD as i32, pathname, O_WRONLY as usize, 0);
+    if fd < 0 {
+        return fd;
+    }
+
+    let result = match get_fd_entry(fd as usize) {
+        Ok(entry) if entry.object.as_any().is::<DirObject>() => -LinuxError::EISDIR.code() as isize,
+        Ok(_) => sys_ftruncate(fd as usize, length),
+        Err(e) => -e.code() as isize,
+    };
+    let close_result = sys_close(fd as usize);
+    if result == 0 { close_result } else { result }
 }
 
 pub fn sys_fallocate(fd: usize, mode: usize, offset: usize, len: usize) -> isize {

@@ -79,7 +79,9 @@ fn lookup_or_probe_fs(
         let is_block = entry.node_type() == axfs_ng_vfs::NodeType::BlockDevice;
 
         match fstype {
-            "ext4" => {
+            // ext4plus also accepts compatible ext2/ext3 on-disk formats.  LTP
+            // mounts an ext2 scratch image for readahead coverage.
+            "ext2" | "ext3" | "ext4" => {
                 #[cfg(feature = "ext4")]
                 {
                     if !is_block {
@@ -98,10 +100,6 @@ fn lookup_or_probe_fs(
                 {
                     return Err(LinuxError::ENODEV);
                 }
-            }
-
-            "ext2" | "ext3" => {
-                return Err(LinuxError::ENODEV);
             }
 
             "none" | "" => {
