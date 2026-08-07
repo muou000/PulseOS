@@ -84,6 +84,16 @@ impl Process {
         Ok(entry)
     }
 
+    pub fn close_fd_range(
+        &self,
+        first: usize,
+        last: usize,
+    ) -> alloc::vec::Vec<crate::fd_table::FdEntry> {
+        let entries = self.fd_table().write().remove_range(first, last);
+        self.release_posix_locks_for_entries(&entries);
+        entries
+    }
+
     fn release_posix_locks_for_entry(&self, entry: &crate::fd_table::FdEntry) {
         let target = crate::flock::get_lock_target(&entry.object);
         crate::record_lock::release_posix_owner_target(self.pid(), target);
@@ -104,6 +114,10 @@ impl Process {
         let entry = table.get_mut(fd).ok_or(axerrno::LinuxError::EBADF)?;
         entry.flags.set(crate::fd_table::FdFlags::CLOEXEC, cloexec);
         Ok(())
+    }
+
+    pub fn set_fd_cloexec_range(&self, first: usize, last: usize) {
+        self.fd_table().write().set_cloexec_range(first, last);
     }
 
     pub fn set_fd_nonblocking(
