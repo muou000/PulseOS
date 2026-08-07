@@ -285,10 +285,12 @@ pub fn sys_prlimit64(pid: i32, resource: usize, new_limit: usize, old_limit: usi
     }
     let resource = resource as u32;
     if resource != RLIMIT_STACK
+        && resource != RLIMIT_FSIZE
         && resource != RLIMIT_NOFILE
         && resource != RLIMIT_MEMLOCK
         && resource != RLIMIT_CORE
         && resource != RLIMIT_DATA
+        && resource != RLIMIT_AS
         && resource != RLIMIT_SIGPENDING
     {
         return -LinuxError::EINVAL.code() as isize;

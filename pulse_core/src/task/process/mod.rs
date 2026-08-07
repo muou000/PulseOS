@@ -17,8 +17,8 @@ use axtask::{AxTaskRef, TaskInner, WaitContext, WaitQueue, WaitReason, WakeConte
 use kernel_guard::NoPreemptIrqSave;
 use kspin::SpinNoIrq;
 use linux_raw_sys::general::{
-    RLIMIT_CORE, RLIMIT_DATA, RLIMIT_MEMLOCK, RLIMIT_NOFILE, RLIMIT_SIGPENDING, RLIMIT_STACK,
-    SIGCHLD, itimerspec, rlimit64, sigevent,
+    RLIMIT_AS, RLIMIT_CORE, RLIMIT_DATA, RLIMIT_FSIZE, RLIMIT_MEMLOCK, RLIMIT_NOFILE,
+    RLIMIT_SIGPENDING, RLIMIT_STACK, SIGCHLD, itimerspec, rlimit64, sigevent,
 };
 use memory_addr::{MemoryAddr, PhysAddr, VirtAddr, va};
 use spin::{Lazy, Mutex, RwLock};
@@ -41,7 +41,7 @@ pub enum ThreadState {
 const ROBUST_LIST_LIMIT: usize = 2048;
 const DEFAULT_MEMLOCK_LIMIT_BYTES: u64 = u64::MAX;
 const DEFAULT_STACK_LIMIT_BYTES: u64 = USER_STACK_SIZE as u64;
-const MAX_STACK_LIMIT_BYTES: u64 = USER_STACK_SIZE as u64;
+const DEFAULT_STACK_HARD_LIMIT_BYTES: u64 = u64::MAX;
 const DEFAULT_NOFILE_LIMIT: u64 = 1024;
 const MAX_NOFILE_LIMIT: u64 = FD_LIMIT as u64;
 const DEFAULT_SIGPENDING_LIMIT: u64 = 4096;
@@ -133,12 +133,16 @@ impl MemlockState {
 pub struct RlimitState {
     stack_soft: u64,
     stack_hard: u64,
+    fsize_soft: u64,
+    fsize_hard: u64,
     nofile_soft: u64,
     nofile_hard: u64,
     core_soft: u64,
     core_hard: u64,
     data_soft: u64,
     data_hard: u64,
+    as_soft: u64,
+    as_hard: u64,
     sigpending_soft: u64,
     sigpending_hard: u64,
 }
@@ -147,13 +151,17 @@ impl Default for RlimitState {
     fn default() -> Self {
         Self {
             stack_soft: DEFAULT_STACK_LIMIT_BYTES,
-            stack_hard: DEFAULT_STACK_LIMIT_BYTES,
+            stack_hard: DEFAULT_STACK_HARD_LIMIT_BYTES,
+            fsize_soft: u64::MAX,
+            fsize_hard: u64::MAX,
             nofile_soft: DEFAULT_NOFILE_LIMIT,
             nofile_hard: DEFAULT_NOFILE_LIMIT,
             core_soft: 0,
             core_hard: u64::MAX,
             data_soft: u64::MAX,
             data_hard: u64::MAX,
+            as_soft: u64::MAX,
+            as_hard: u64::MAX,
             sigpending_soft: DEFAULT_SIGPENDING_LIMIT,
             sigpending_hard: DEFAULT_SIGPENDING_LIMIT,
         }
