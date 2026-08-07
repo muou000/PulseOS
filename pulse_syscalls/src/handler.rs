@@ -217,6 +217,7 @@ fn syscall_dispatcher(tf: &mut TrapFrame, syscall_id: usize, args: [usize; 6]) -
         Sysno::chroot => impls::sys_chroot(args[0]),
         Sysno::getdents64 => impls::sys_getdents64(args[0], args[1], args[2]),
         Sysno::close => impls::sys_close(args[0]),
+        Sysno::close_range => impls::sys_close_range(args[0], args[1], args[2]),
         Sysno::fstat => impls::sys_fstat(args[0], args[1]),
         Sysno::statfs => impls::sys_statfs(args[0], args[1]),
         Sysno::fstatfs => impls::sys_fstatfs(args[0], args[1]),
@@ -436,6 +437,14 @@ fn syscall_dispatcher(tf: &mut TrapFrame, syscall_id: usize, args: [usize; 6]) -
         Sysno::madvise => impls::sys_madvise(args[0], args[1], args[2] as i32),
         Sysno::fadvise64 => impls::sys_fadvise64(args[0], args[1], args[2], args[3]),
         Sysno::pidfd_open => impls::sys_pidfd_open(args[0] as isize, args[1]),
+        Sysno::pidfd_getfd => impls::sys_pidfd_getfd(args[0] as isize, args[1] as isize, args[2]),
+        Sysno::kcmp => impls::sys_kcmp(
+            args[0] as isize,
+            args[1] as isize,
+            args[2] as i32,
+            args[3],
+            args[4],
+        ),
         Sysno::pidfd_send_signal => {
             impls::sys_pidfd_send_signal(args[0] as isize, args[1] as isize, args[2], args[3])
         }

@@ -149,11 +149,16 @@ impl Process {
 
     pub fn close_all_files(&self) {
         crate::record_lock::release_posix_owner(self.pid());
-        let _drained = {
-            let binding = self.fd_table();
-            let mut table = binding.write();
-            table.drain_all()
+        // CLONE_FILES processes hold the same SharedFdTable. Detach this
+        // process first; only the last owner may drain the table.
+        let table = {
+            let mut slot = self.fd_table.write();
+            core::mem::replace(&mut *slot, Arc::new(RwLock::new(FdTable::new())))
         };
+        if let Ok(table) = Arc::try_unwrap(table) {
+            let mut table = table.write();
+            let _drained = table.drain_all();
+        }
     }
 
     pub fn detach_all_shared_memory(&self) {

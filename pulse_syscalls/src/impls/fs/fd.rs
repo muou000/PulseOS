@@ -33,6 +33,36 @@ pub fn sys_close(fd: usize) -> isize {
     }
 }
 
+const CLOSE_RANGE_UNSHARE: u32 = 1 << 1;
+const CLOSE_RANGE_CLOEXEC: u32 = 1 << 2;
+
+pub fn sys_close_range(first: usize, last: usize, flags: usize) -> isize {
+    let first = first as u32 as usize;
+    let last = last as u32 as usize;
+    let flags = flags as u32;
+    let allowed = CLOSE_RANGE_UNSHARE | CLOSE_RANGE_CLOEXEC;
+    if first > last || flags & !allowed != 0 {
+        return -LinuxError::EINVAL.code() as isize;
+    }
+
+    let process = match pulse_core::task::current_process() {
+        Ok(process) => process,
+        Err(e) => return -e.code() as isize,
+    };
+    if flags & CLOSE_RANGE_UNSHARE != 0 {
+        if let Err(e) = process.unshare_files() {
+            return -e.code() as isize;
+        }
+    }
+
+    if flags & CLOSE_RANGE_CLOEXEC != 0 {
+        process.set_fd_cloexec_range(first, last);
+    } else {
+        drop(process.close_fd_range(first, last));
+    }
+    0
+}
+
 pub fn sys_dup(fd: usize) -> isize {
     let entry = match get_fd_entry(fd) {
         Ok(entry) => entry,
