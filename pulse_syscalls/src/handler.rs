@@ -242,6 +242,7 @@ fn syscall_dispatcher(tf: &mut TrapFrame, syscall_id: usize, args: [usize; 6]) -
         Sysno::timer_create => impls::sys_timer_create(args[0] as i32, args[1], args[2]),
         Sysno::timer_settime => impls::sys_timer_settime(args[0], args[1], args[2], args[3]),
         Sysno::timer_gettime => impls::sys_timer_gettime(args[0], args[1]),
+        Sysno::timer_getoverrun => impls::sys_timer_getoverrun(args[0]),
         Sysno::timer_delete => impls::sys_timer_delete(args[0]),
         Sysno::nanosleep => impls::sys_nanosleep(args[0], args[1]),
         Sysno::clock_nanosleep => {
@@ -250,6 +251,7 @@ fn syscall_dispatcher(tf: &mut TrapFrame, syscall_id: usize, args: [usize; 6]) -
         Sysno::clock_getres => impls::sys_clock_getres(args[0] as i32, args[1]),
         Sysno::clock_gettime => impls::sys_clock_gettime(args[0] as i32, args[1]),
         Sysno::clock_settime => impls::sys_clock_settime(args[0] as i32, args[1]),
+        Sysno::adjtimex => impls::sys_adjtimex(args[0]),
         Sysno::clock_adjtime => impls::sys_clock_adjtime(args[0] as i32, args[1]),
         Sysno::gettimeofday => impls::sys_gettimeofday(args[0], args[1]),
         Sysno::settimeofday => impls::sys_settimeofday(args[0], args[1]),
@@ -257,6 +259,8 @@ fn syscall_dispatcher(tf: &mut TrapFrame, syscall_id: usize, args: [usize; 6]) -
         Sysno::prlimit64 => impls::sys_prlimit64(args[0] as i32, args[1], args[2], args[3]),
         Sysno::prctl => impls::sys_prctl(args[0] as i32, args[1], args[2], args[3], args[4]),
         Sysno::getrlimit => impls::sys_prlimit64(0, args[0], 0, args[1]),
+        #[cfg(target_arch = "riscv64")]
+        Sysno::setrlimit => impls::sys_setrlimit(args[0], args[1]),
         Sysno::getrandom => impls::sys_getrandom(args[0], args[1], args[2]),
 
         Sysno::set_tid_address => impls::sys_set_tid_address(args[0]),
@@ -388,6 +392,7 @@ fn syscall_dispatcher(tf: &mut TrapFrame, syscall_id: usize, args: [usize; 6]) -
         Sysno::faccessat => impls::sys_faccessat(args[0] as i32, args[1], args[2], 0),
         Sysno::faccessat2 => impls::sys_faccessat(args[0] as i32, args[1], args[2], args[3]),
         Sysno::fchmodat => impls::sys_fchmodat(args[0] as i32, args[1], args[2], 0),
+        Sysno::fchmodat2 => impls::sys_fchmodat(args[0] as i32, args[1], args[2], args[3]),
         Sysno::fchmod => impls::sys_fchmod(args[0], args[1]),
         Sysno::fchownat => impls::sys_fchownat(args[0] as i32, args[1], args[2], args[3], args[4]),
         Sysno::fchown => impls::sys_fchown(args[0], args[1], args[2]),
