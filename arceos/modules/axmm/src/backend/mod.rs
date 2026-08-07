@@ -208,6 +208,16 @@ pub enum Backend {
     Cow(CowMapping),
 }
 
+impl Backend {
+    pub(crate) fn is_file_page_cached(&self, page_addr: VirtAddr) -> bool {
+        match self {
+            Self::File(mapping) => mapping.is_page_cached(page_addr),
+            Self::Cow(mapping) => mapping.inner().is_file_page_cached(page_addr),
+            _ => false,
+        }
+    }
+}
+
 const RETIREMENT_RECLAIM_CAPACITY: usize = 4096;
 
 #[repr(align(64))]

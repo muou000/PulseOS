@@ -236,6 +236,7 @@ fn syscall_dispatcher(tf: &mut TrapFrame, syscall_id: usize, args: [usize; 6]) -
         Sysno::mremap => impls::sys_mremap(args[0], args[1], args[2], args[3], args[4]),
         Sysno::munmap => impls::sys_munmap(args[0], args[1]),
         Sysno::mprotect => impls::sys_mprotect(args[0], args[1], args[2]),
+        Sysno::mincore => impls::sys_mincore(args[0], args[1], args[2]),
         Sysno::mlock => impls::sys_mlock(args[0], args[1]),
         Sysno::munlock => impls::sys_munlock(args[0], args[1]),
         Sysno::mlockall => impls::sys_mlockall(args[0]),

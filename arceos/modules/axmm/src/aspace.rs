@@ -597,6 +597,23 @@ impl AddrSpace {
         self.pt.read_for_addr(vaddr).query(vaddr)
     }
 
+    /// Returns whether a user page is mapped or already resident in a file cache.
+    pub fn page_is_resident(&self, vaddr: VirtAddr) -> bool {
+        if let Ok((frame, ..)) = self.query_vaddr(vaddr)
+            && frame.as_usize() != 0
+        {
+            return true;
+        }
+
+        let mut cached = false;
+        self.for_each_area_with_backend(|start, end, _, backend| {
+            if !cached && start <= vaddr && vaddr < end {
+                cached = backend.is_file_page_cached(vaddr);
+            }
+        });
+        cached
+    }
+
     /// Pins a mapped user frame while holding the leaf page-table read lock.
     pub fn pin_user_frame(
         &self,
