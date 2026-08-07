@@ -44,6 +44,20 @@ pub fn open_result_to_entry(result: OpenResult, flags: FdFlags) -> FdEntry {
 
 const FD_CHUNK_SIZE: usize = 64;
 
+#[inline]
+fn fd_range_mask(first_bit: usize, last_bit: usize) -> u64 {
+    debug_assert!(first_bit <= last_bit);
+    debug_assert!(last_bit < FD_CHUNK_SIZE);
+
+    let from_first = u64::MAX << first_bit;
+    let through_last = if last_bit + 1 == FD_CHUNK_SIZE {
+        u64::MAX
+    } else {
+        (1u64 << (last_bit + 1)) - 1
+    };
+    from_first & through_last
+}
+
 #[derive(Clone)]
 struct FdChunk {
     entries: [Option<FdEntry>; FD_CHUNK_SIZE],
@@ -319,6 +333,159 @@ impl FdTable {
 
     pub fn remove_or_err(&mut self, fd: usize) -> LinuxResult<FdEntry> {
         self.remove(fd).ok_or(LinuxError::EBADF)
+    }
+
+    /// Removes all descriptors in the inclusive range and returns their entries.
+    ///
+    /// The storage and only the affected chunks are copied if this table is
+    /// shared with a forked process. Returned entries must be dropped after
+    /// releasing the table lock so closing an object cannot recurse into it.
+    pub fn remove_range(&mut self, first: usize, last: usize) -> Vec<FdEntry> {
+        if first > last || first >= FD_LIMIT || self.storage.chunks.is_empty() {
+            return Vec::new();
+        }
+
+        let last = last.min(FD_LIMIT - 1);
+        let first_chunk = first / FD_CHUNK_SIZE;
+        if first_chunk >= self.storage.chunks.len() {
+            return Vec::new();
+        }
+        let last_chunk = (last / FD_CHUNK_SIZE).min(self.storage.chunks.len() - 1);
+
+        let has_open_fd = (first_chunk..=last_chunk).any(|chunk_idx| {
+            let first_bit = if chunk_idx == first_chunk {
+                first % FD_CHUNK_SIZE
+            } else {
+                0
+            };
+            let last_bit = if chunk_idx == last_chunk {
+                last % FD_CHUNK_SIZE
+            } else {
+                FD_CHUNK_SIZE - 1
+            };
+            self.storage.open_fds[chunk_idx] & fd_range_mask(first_bit, last_bit) != 0
+        });
+        if !has_open_fd {
+            return Vec::new();
+        }
+
+        let mut removed = Vec::new();
+        let storage = Arc::make_mut(&mut self.storage);
+        for chunk_idx in first_chunk..=last_chunk {
+            let first_bit = if chunk_idx == first_chunk {
+                first % FD_CHUNK_SIZE
+            } else {
+                0
+            };
+            let last_bit = if chunk_idx == last_chunk {
+                last % FD_CHUNK_SIZE
+            } else {
+                FD_CHUNK_SIZE - 1
+            };
+            let mut pending = storage.open_fds[chunk_idx] & fd_range_mask(first_bit, last_bit);
+            if pending == 0 {
+                continue;
+            }
+
+            let mut removed_mask = 0u64;
+            {
+                let Some(chunk_arc) = storage.chunks[chunk_idx].as_mut() else {
+                    continue;
+                };
+                let chunk = Arc::make_mut(chunk_arc);
+                while pending != 0 {
+                    let bit_idx = pending.trailing_zeros() as usize;
+                    let bit = 1u64 << bit_idx;
+                    pending &= !bit;
+                    if let Some(entry) = chunk.entries[bit_idx].take() {
+                        removed.push(entry);
+                        removed_mask |= bit;
+                    }
+                }
+            }
+
+            if removed_mask != 0 {
+                storage.open_fds[chunk_idx] &= !removed_mask;
+                storage.count = storage
+                    .count
+                    .saturating_sub(removed_mask.count_ones() as usize);
+            }
+        }
+        removed
+    }
+
+    /// Sets FD_CLOEXEC on every open descriptor in the inclusive range.
+    pub fn set_cloexec_range(&mut self, first: usize, last: usize) {
+        if first > last || first >= FD_LIMIT || self.storage.chunks.is_empty() {
+            return;
+        }
+
+        let last = last.min(FD_LIMIT - 1);
+        let first_chunk = first / FD_CHUNK_SIZE;
+        if first_chunk >= self.storage.chunks.len() {
+            return;
+        }
+        let last_chunk = (last / FD_CHUNK_SIZE).min(self.storage.chunks.len() - 1);
+
+        let has_change = (first_chunk..=last_chunk).any(|chunk_idx| {
+            let first_bit = if chunk_idx == first_chunk {
+                first % FD_CHUNK_SIZE
+            } else {
+                0
+            };
+            let last_bit = if chunk_idx == last_chunk {
+                last % FD_CHUNK_SIZE
+            } else {
+                FD_CHUNK_SIZE - 1
+            };
+            let mut pending = self.storage.open_fds[chunk_idx] & fd_range_mask(first_bit, last_bit);
+            let Some(chunk) = self.storage.chunks[chunk_idx].as_ref() else {
+                return false;
+            };
+            while pending != 0 {
+                let bit_idx = pending.trailing_zeros() as usize;
+                pending &= !(1u64 << bit_idx);
+                if chunk.entries[bit_idx]
+                    .as_ref()
+                    .is_some_and(|entry| !entry.flags.contains(FdFlags::CLOEXEC))
+                {
+                    return true;
+                }
+            }
+            false
+        });
+        if !has_change {
+            return;
+        }
+
+        let storage = Arc::make_mut(&mut self.storage);
+        for chunk_idx in first_chunk..=last_chunk {
+            let first_bit = if chunk_idx == first_chunk {
+                first % FD_CHUNK_SIZE
+            } else {
+                0
+            };
+            let last_bit = if chunk_idx == last_chunk {
+                last % FD_CHUNK_SIZE
+            } else {
+                FD_CHUNK_SIZE - 1
+            };
+            let mut pending = storage.open_fds[chunk_idx] & fd_range_mask(first_bit, last_bit);
+            if pending == 0 {
+                continue;
+            }
+            let Some(chunk_arc) = storage.chunks[chunk_idx].as_mut() else {
+                continue;
+            };
+            let chunk = Arc::make_mut(chunk_arc);
+            while pending != 0 {
+                let bit_idx = pending.trailing_zeros() as usize;
+                pending &= !(1u64 << bit_idx);
+                if let Some(entry) = chunk.entries[bit_idx].as_mut() {
+                    entry.flags.insert(FdFlags::CLOEXEC);
+                }
+            }
+        }
     }
 
     pub fn len(&self) -> usize {

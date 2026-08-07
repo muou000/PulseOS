@@ -1,6 +1,6 @@
 use axerrno::LinuxError;
 use linux_raw_sys::{
-    general::{O_NONBLOCK, SI_TKILL, SI_USER, _NSIG, siginfo},
+    general::{_NSIG, CAP_SYS_PTRACE, O_NONBLOCK, SI_TKILL, SI_USER, siginfo},
     prctl::{
         PR_GET_DUMPABLE, PR_GET_NAME, PR_GET_PDEATHSIG, PR_SET_DUMPABLE, PR_SET_NAME,
         PR_SET_PDEATHSIG,
@@ -14,6 +14,7 @@ use pulse_core::task::{
 
 const SIGINFO_SIZE: usize = 128;
 const _: [(); SIGINFO_SIZE] = [(); core::mem::size_of::<siginfo>()];
+const KCMP_FILE: i32 = 0;
 
 fn is_valid_signal(sig: isize) -> bool {
     sig == 0 || (1..=(_NSIG as isize)).contains(&sig)
@@ -62,6 +63,29 @@ fn may_supply_siginfo_to_target(info: &siginfo, sender_tid: u64, target_id: u64)
         let code = siginfo_code(info);
         code < 0 && code != SI_TKILL
     }
+}
+
+/// Implements the credential and dumpability portion of
+/// PTRACE_MODE_ATTACH_REALCREDS used by pidfd_getfd(2). PulseOS does not yet
+/// have user namespaces or an LSM hook, so those policy layers are absent.
+fn may_ptrace_attach_realcreds(caller: &Process, target: &Process) -> bool {
+    if caller.has_capability(CAP_SYS_PTRACE) {
+        return true;
+    }
+    if target.dumpable() != 1 {
+        return false;
+    }
+
+    let caller_uid = caller.ruid();
+    let caller_gid = caller.rgid();
+    let (target_ruid, target_euid, target_suid) = target.uid_snapshot();
+    let (target_rgid, target_egid, target_sgid) = target.gid_snapshot();
+    caller_uid == target_ruid
+        && caller_uid == target_euid
+        && caller_uid == target_suid
+        && caller_gid == target_rgid
+        && caller_gid == target_egid
+        && caller_gid == target_sgid
 }
 
 fn make_user_signal_info(sig: isize, code: i32, pid: u64, uid: u32) -> [u8; 128] {
@@ -523,6 +547,87 @@ pub fn sys_pidfd_open(pid: isize, flags: usize) -> isize {
     match caller.insert_fd_entry(entry) {
         Ok(fd) => fd as isize,
         Err(e) => -e.code() as isize,
+    }
+}
+
+pub fn sys_pidfd_getfd(pidfd: isize, targetfd: isize, flags: usize) -> isize {
+    if flags as u32 != 0 {
+        return -LinuxError::EINVAL.code() as isize;
+    }
+    if pidfd < 0 || targetfd < 0 {
+        return -LinuxError::EBADF.code() as isize;
+    }
+
+    let caller = match current_process() {
+        Ok(process) => process,
+        Err(e) => return -e.code() as isize,
+    };
+    let pidfd_entry = match caller.get_fd_entry(pidfd as usize) {
+        Ok(entry) => entry,
+        Err(_) => return -LinuxError::EBADF.code() as isize,
+    };
+    let Some(pidfd_object) = pidfd_entry
+        .object
+        .as_any()
+        .downcast_ref::<pulse_core::fd_table::PidfdObject>()
+    else {
+        return -LinuxError::EBADF.code() as isize;
+    };
+    let Some(target) = process_by_pid(pidfd_object.pid()) else {
+        return -LinuxError::ESRCH.code() as isize;
+    };
+    if !may_ptrace_attach_realcreds(caller.as_ref(), target.as_ref()) {
+        return -LinuxError::EPERM.code() as isize;
+    }
+
+    let target_entry = match target.get_fd_entry(targetfd as usize) {
+        Ok(entry) => entry,
+        Err(_) => return -LinuxError::EBADF.code() as isize,
+    };
+    let mut fd_flags = target_entry.flags;
+    fd_flags.insert(pulse_core::fd_table::FdFlags::CLOEXEC);
+    match caller.insert_fd_entry(target_entry.duplicate(fd_flags)) {
+        Ok(fd) => fd as isize,
+        Err(e) => -e.code() as isize,
+    }
+}
+
+pub fn sys_kcmp(pid1: isize, pid2: isize, comparison_type: i32, idx1: usize, idx2: usize) -> isize {
+    if comparison_type != KCMP_FILE {
+        return -LinuxError::EINVAL.code() as isize;
+    }
+    if pid1 <= 0 || pid2 <= 0 {
+        return -LinuxError::ESRCH.code() as isize;
+    }
+
+    let caller = match current_process() {
+        Ok(process) => process,
+        Err(e) => return -e.code() as isize,
+    };
+    let Some(first) = process_by_pid(pid1 as u64) else {
+        return -LinuxError::ESRCH.code() as isize;
+    };
+    let Some(second) = process_by_pid(pid2 as u64) else {
+        return -LinuxError::ESRCH.code() as isize;
+    };
+    if !may_ptrace_attach_realcreds(caller.as_ref(), first.as_ref())
+        || !may_ptrace_attach_realcreds(caller.as_ref(), second.as_ref())
+    {
+        return -LinuxError::EPERM.code() as isize;
+    }
+
+    let first_entry = match first.get_fd_entry(idx1) {
+        Ok(entry) => entry,
+        Err(e) => return -e.code() as isize,
+    };
+    let second_entry = match second.get_fd_entry(idx2) {
+        Ok(entry) => entry,
+        Err(e) => return -e.code() as isize,
+    };
+    match first_entry.ofd_owner().cmp(&second_entry.ofd_owner()) {
+        core::cmp::Ordering::Less => -1,
+        core::cmp::Ordering::Equal => 0,
+        core::cmp::Ordering::Greater => 1,
     }
 }
 
