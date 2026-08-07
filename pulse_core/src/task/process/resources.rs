@@ -113,6 +113,10 @@ impl Process {
                 rlim_cur: res.rlimit_state.stack_soft,
                 rlim_max: res.rlimit_state.stack_hard,
             }),
+            RLIMIT_FSIZE => Some(rlimit64 {
+                rlim_cur: res.rlimit_state.fsize_soft,
+                rlim_max: res.rlimit_state.fsize_hard,
+            }),
             RLIMIT_NOFILE => Some(rlimit64 {
                 rlim_cur: res.rlimit_state.nofile_soft,
                 rlim_max: res.rlimit_state.nofile_hard,
@@ -124,6 +128,10 @@ impl Process {
             RLIMIT_DATA => Some(rlimit64 {
                 rlim_cur: res.rlimit_state.data_soft,
                 rlim_max: res.rlimit_state.data_hard,
+            }),
+            RLIMIT_AS => Some(rlimit64 {
+                rlim_cur: res.rlimit_state.as_soft,
+                rlim_max: res.rlimit_state.as_hard,
             }),
             RLIMIT_SIGPENDING => Some(rlimit64 {
                 rlim_cur: res.rlimit_state.sigpending_soft,
@@ -144,11 +152,13 @@ impl Process {
         let mut res = self.resources.lock();
         match resource {
             RLIMIT_STACK => {
-                if limit.rlim_max > MAX_STACK_LIMIT_BYTES {
-                    return Err(AxError::InvalidInput);
-                }
                 res.rlimit_state.stack_soft = limit.rlim_cur;
                 res.rlimit_state.stack_hard = limit.rlim_max;
+                Ok(())
+            }
+            RLIMIT_FSIZE => {
+                res.rlimit_state.fsize_soft = limit.rlim_cur;
+                res.rlimit_state.fsize_hard = limit.rlim_max;
                 Ok(())
             }
             RLIMIT_NOFILE => {
@@ -167,6 +177,11 @@ impl Process {
             RLIMIT_DATA => {
                 res.rlimit_state.data_soft = limit.rlim_cur;
                 res.rlimit_state.data_hard = limit.rlim_max;
+                Ok(())
+            }
+            RLIMIT_AS => {
+                res.rlimit_state.as_soft = limit.rlim_cur;
+                res.rlimit_state.as_hard = limit.rlim_max;
                 Ok(())
             }
             RLIMIT_SIGPENDING => {
