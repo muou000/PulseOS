@@ -192,6 +192,10 @@ fn syscall_dispatcher(tf: &mut TrapFrame, syscall_id: usize, args: [usize; 6]) -
         Sysno::sched_rr_get_interval => impls::sys_sched_rr_get_interval(args[0], args[1]),
         Sysno::sched_setattr => impls::sys_sched_setattr(args[0], args[1], args[2]),
         Sysno::sched_getattr => impls::sys_sched_getattr(args[0], args[1], args[2], args[3]),
+        Sysno::setpriority => {
+            impls::sys_setpriority(args[0] as i32, args[1] as i32, args[2] as i32)
+        }
+        Sysno::getpriority => impls::sys_getpriority(args[0] as i32, args[1] as i32),
 
         Sysno::read => impls::sys_read(args[0], args[1], args[2]),
         Sysno::pread64 => impls::sys_pread64(args[0], args[1], args[2], args[3]),
