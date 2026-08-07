@@ -1,8 +1,13 @@
+use alloc::{sync::Arc, vec::Vec};
+
 use axerrno::LinuxError;
 use linux_raw_sys::general::{
-    SCHED_BATCH, SCHED_DEADLINE, SCHED_FIFO, SCHED_IDLE, SCHED_NORMAL, SCHED_RR, timespec,
+    CAP_SYS_NICE, PRIO_PGRP, PRIO_PROCESS, PRIO_USER, SCHED_BATCH, SCHED_DEADLINE, SCHED_FIFO,
+    SCHED_IDLE, SCHED_NORMAL, SCHED_RR, timespec,
 };
-use pulse_core::task::current_thread;
+use pulse_core::task::{
+    Process, Thread, current_process, current_thread, processes_snapshot, thread_by_tid_global,
+};
 
 use crate::impls::utils::{alloc_zeroed_bytes, read_user_bytes, write_user_bytes};
 
@@ -54,6 +59,167 @@ fn write_plain<T: Copy>(user_addr: usize, value: &T) -> Result<(), LinuxError> {
         core::slice::from_raw_parts(value as *const T as *const u8, core::mem::size_of::<T>())
     };
     write_user_bytes(user_addr, bytes)
+}
+
+fn selected_priority_threads(
+    which: i32,
+    who: i32,
+    caller: &Arc<Process>,
+) -> Result<Vec<Arc<Thread>>, LinuxError> {
+    let mut threads = Vec::new();
+    match which as u32 {
+        PRIO_PROCESS => {
+            let tid = if who == 0 {
+                current_thread()?.tid()
+            } else if who > 0 {
+                who as u64
+            } else {
+                return Err(LinuxError::ESRCH);
+            };
+            if let Some(thread) = thread_by_tid_global(tid) {
+                threads.push(thread);
+            }
+        }
+        PRIO_PGRP => {
+            let pgid = if who == 0 {
+                caller.pgid()
+            } else if who > 0 {
+                who as u64
+            } else {
+                return Err(LinuxError::ESRCH);
+            };
+            for process in processes_snapshot() {
+                if process.is_zombie() || process.pgid() != pgid {
+                    continue;
+                }
+                for tid in process.task_tids_snapshot() {
+                    if let Some(thread) = thread_by_tid_global(tid) {
+                        threads.push(thread);
+                    }
+                }
+            }
+        }
+        PRIO_USER => {
+            let uid = if who == 0 {
+                caller.ruid()
+            } else if who > 0 {
+                who as u32
+            } else {
+                return Err(LinuxError::ESRCH);
+            };
+            for process in processes_snapshot() {
+                if process.is_zombie() || process.ruid() != uid {
+                    continue;
+                }
+                for tid in process.task_tids_snapshot() {
+                    if let Some(thread) = thread_by_tid_global(tid) {
+                        threads.push(thread);
+                    }
+                }
+            }
+        }
+        _ => return Err(LinuxError::EINVAL),
+    }
+
+    if threads.is_empty() {
+        Err(LinuxError::ESRCH)
+    } else {
+        Ok(threads)
+    }
+}
+
+fn may_set_priority(caller: &Process, target: &Thread, nice: i32) -> Result<(), LinuxError> {
+    if caller.has_capability(CAP_SYS_NICE) {
+        return Ok(());
+    }
+
+    let target_process = target.process();
+    let caller_euid = caller.euid();
+    if caller_euid != target_process.ruid() && caller_euid != target_process.euid() {
+        return Err(LinuxError::EPERM);
+    }
+    if nice
+        < target
+            .sched_nice
+            .load(core::sync::atomic::Ordering::Acquire)
+    {
+        return Err(LinuxError::EACCES);
+    }
+    Ok(())
+}
+
+fn apply_thread_nice(thread: &Thread, nice: i32) {
+    let priority = nice as isize - 100;
+    let is_current = current_thread()
+        .map(|current| current.tid() == thread.tid())
+        .unwrap_or(false);
+    if is_current {
+        let _ = axtask::set_priority(priority);
+    } else if let Some(task) = thread.process().task_ref_by_tid(thread.tid()) {
+        // A blocked task is not owned by a run queue, so the EEVDF priority
+        // can be updated directly before the next wakeup enqueues it.
+        if !task.is_ready() && !task.is_running() {
+            let _ = task.set_priority(priority);
+        }
+    }
+    thread
+        .sched_nice
+        .store(nice, core::sync::atomic::Ordering::Release);
+}
+
+pub fn sys_setpriority(which: i32, who: i32, priority: i32) -> isize {
+    if !(-20..=19).contains(&priority) {
+        return -LinuxError::EINVAL.code() as isize;
+    }
+    let caller = match current_process() {
+        Ok(process) => process,
+        Err(e) => return -e.code() as isize,
+    };
+    // PID 1 is reserved for the kernel init task, which has no user Thread
+    // entry in the process registry. Preserve Linux's permission result for
+    // an unprivileged attempt to alter that protected target.
+    if which as u32 == PRIO_PROCESS && who == 1 && !caller.has_capability(CAP_SYS_NICE) {
+        return -LinuxError::EPERM.code() as isize;
+    }
+    let threads = match selected_priority_threads(which, who, &caller) {
+        Ok(threads) => threads,
+        Err(e) => return -e.code() as isize,
+    };
+    let nice = priority;
+    for thread in &threads {
+        if let Err(e) = may_set_priority(caller.as_ref(), thread.as_ref(), nice) {
+            return -e.code() as isize;
+        }
+    }
+    for thread in threads {
+        apply_thread_nice(thread.as_ref(), nice);
+    }
+    0
+}
+
+pub fn sys_getpriority(which: i32, who: i32) -> isize {
+    let caller = match current_process() {
+        Ok(process) => process,
+        Err(e) => return -e.code() as isize,
+    };
+    let threads = match selected_priority_threads(which, who, &caller) {
+        Ok(threads) => threads,
+        Err(e) => return -e.code() as isize,
+    };
+    let best_nice = threads
+        .iter()
+        .map(|thread| {
+            thread
+                .sched_nice
+                .load(core::sync::atomic::Ordering::Acquire)
+        })
+        .min()
+        .expect("nonempty priority target set");
+
+    // The raw Linux syscall returns 20 - nice; libc translates this back to
+    // the documented [-20, 19] range and can therefore distinguish success
+    // from a negative errno value.
+    (20 - best_nice) as isize
 }
 
 pub fn sys_sched_getaffinity(pid: usize, cpusetsize: usize, mask: usize) -> isize {
