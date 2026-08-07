@@ -168,6 +168,17 @@ impl Process {
         timeout_ns: Option<u64>,
         is_private: bool,
     ) -> AxResult<()> {
+        self.futex_wait_mask(addr, expected, timeout_ns, is_private, u32::MAX)
+    }
+
+    pub fn futex_wait_mask(
+        &self,
+        addr: usize,
+        expected: u32,
+        timeout_ns: Option<u64>,
+        is_private: bool,
+        bitset: u32,
+    ) -> AxResult<()> {
         self.try_fault_in_user_range(addr, core::mem::size_of::<u32>(), MappingFlags::READ)?;
         let val = self.read_user_u32(addr)?;
         if val != expected {
@@ -210,17 +221,17 @@ impl Process {
         );
 
         let queue = if is_priv {
-            self.futex_table.queue(key)
+            self.futex_table.queue_mask(key, bitset)
         } else {
-            GLOBAL_FUTEX_TABLE.queue(key)
+            GLOBAL_FUTEX_TABLE.queue_mask(key, bitset)
         };
 
         if self.group_exiting() {
             drop(queue);
             if is_priv {
-                self.futex_table.remove_if_empty(key);
+                self.futex_table.remove_mask_if_empty(key, bitset);
             } else {
-                GLOBAL_FUTEX_TABLE.remove_if_empty(key);
+                GLOBAL_FUTEX_TABLE.remove_mask_if_empty(key, bitset);
             }
             return Ok(());
         }
@@ -277,9 +288,9 @@ impl Process {
 
         drop(queue);
         if is_priv {
-            self.futex_table.remove_if_empty(key);
+            self.futex_table.remove_mask_if_empty(key, bitset);
         } else {
-            GLOBAL_FUTEX_TABLE.remove_if_empty(key);
+            GLOBAL_FUTEX_TABLE.remove_mask_if_empty(key, bitset);
         }
 
         if self.group_exiting() {
@@ -298,17 +309,24 @@ impl Process {
         Ok(())
     }
 
-    fn futex_wake_impl(&self, addr: usize, count: usize, resched: bool, is_private: bool) -> usize {
+    fn futex_wake_impl(
+        &self,
+        addr: usize,
+        count: usize,
+        resched: bool,
+        is_private: bool,
+        bitset: u32,
+    ) -> usize {
         let (key, is_priv) = self.futex_key(addr, is_private);
         let woken = if is_priv {
             if resched {
-                self.futex_table.wake(key, count)
+                self.futex_table.wake_mask(key, count, bitset)
             } else {
                 self.futex_table.wake_no_resched(key, count)
             }
         } else {
             if resched {
-                GLOBAL_FUTEX_TABLE.wake(key, count)
+                GLOBAL_FUTEX_TABLE.wake_mask(key, count, bitset)
             } else {
                 GLOBAL_FUTEX_TABLE.wake_no_resched(key, count)
             }
@@ -327,11 +345,21 @@ impl Process {
     }
 
     pub fn futex_wake(&self, addr: usize, count: usize, is_private: bool) -> usize {
-        self.futex_wake_impl(addr, count, true, is_private)
+        self.futex_wake_impl(addr, count, true, is_private, u32::MAX)
+    }
+
+    pub fn futex_wake_mask(
+        &self,
+        addr: usize,
+        count: usize,
+        is_private: bool,
+        bitset: u32,
+    ) -> usize {
+        self.futex_wake_impl(addr, count, true, is_private, bitset)
     }
 
     pub fn futex_wake_no_resched(&self, addr: usize, count: usize, is_private: bool) -> usize {
-        self.futex_wake_impl(addr, count, false, is_private)
+        self.futex_wake_impl(addr, count, false, is_private, u32::MAX)
     }
 
     pub fn futex_requeue(

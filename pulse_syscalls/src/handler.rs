@@ -276,6 +276,20 @@ fn syscall_dispatcher(tf: &mut TrapFrame, syscall_id: usize, args: [usize; 6]) -
             args[3],
             args[4] as u32,
         ),
+        Sysno::futex_wake => {
+            impls::sys_futex_wake(args[0], args[1], args[2] as isize, args[3] as u32)
+        }
+        Sysno::futex_wait => impls::sys_futex_wait(
+            args[0],
+            args[1],
+            args[2],
+            args[3] as u32,
+            args[4],
+            args[5] as i32,
+        ),
+        Sysno::futex_requeue => {
+            impls::sys_futex_requeue(args[0], args[1] as u32, args[2] as isize, args[3] as isize)
+        }
 
         Sysno::uname => impls::sys_uname(args[0]),
         Sysno::sethostname => impls::sys_sethostname(args[0], args[1]),
