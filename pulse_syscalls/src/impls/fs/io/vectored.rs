@@ -10,6 +10,7 @@ pub fn sys_writev(fd: usize, iov: usize, iovcnt: usize) -> isize {
     }
     let object = entry.object;
     let file_obj = object.as_any().downcast_ref::<FileObject>();
+    let sigpipe_writer = is_sigpipe_writer(object.as_ref());
     let iovecs = match read_user_iovec_array(iov, iovcnt) {
         Ok(iovecs) => iovecs,
         Err(e) => return -e.code() as isize,
@@ -75,7 +76,14 @@ pub fn sys_writev(fd: usize, iov: usize, iovcnt: usize) -> isize {
                     Ok(written)
                 }) {
                     Ok(result) => result,
-                    Err(e) => return if total > 0 { total } else { -e.code() as isize },
+                    Err(e) => {
+                        if total > 0 {
+                            return total;
+                        }
+                        let errno = e.code();
+                        queue_sigpipe_on_epipe(sigpipe_writer, errno);
+                        return -errno as isize;
+                    }
                 };
             let ret = ret as isize;
             if source == UserWriteSource::Pinned {

@@ -4,11 +4,14 @@ use axerrno::{AxError, LinuxError};
 use axio::SeekFrom;
 use linux_raw_sys::general::{
     O_CLOEXEC, O_NONBLOCK, POLLERR, POLLHUP, POLLIN, POLLNVAL, POLLOUT, S_IFDIR, S_IFMT, S_IFREG,
-    pollfd,
+    SIGPIPE, pollfd,
 };
 use pulse_core::{
-    fd_table::{EventFdObject, FD_LIMIT, FdObject, FileObject, SignalFdObject, pipe_entries},
-    task::uaccess,
+    fd_table::{
+        EventFdObject, FD_LIMIT, FdObject, FileObject, PipeObject, SignalFdObject, pipe_entries,
+    },
+    net::Socket,
+    task::{current_thread, queue_signal_to_thread, uaccess},
 };
 
 use crate::impls::{
@@ -45,6 +48,19 @@ pub(crate) use vectored::*;
 enum UserWriteSource {
     Pinned,
     Scratch,
+}
+
+fn is_sigpipe_writer(object: &dyn FdObject) -> bool {
+    object.as_any().is::<PipeObject>() || object.as_any().is::<Socket>()
+}
+
+fn queue_sigpipe_on_epipe(is_sigpipe_writer: bool, errno: i32) {
+    if !is_sigpipe_writer || errno != LinuxError::EPIPE.code() {
+        return;
+    }
+    if let Ok(thread) = current_thread() {
+        let _ = queue_signal_to_thread(thread.as_ref(), SIGPIPE as usize);
+    }
 }
 
 /// Invokes a potentially sleepable reader with a stable user destination.
