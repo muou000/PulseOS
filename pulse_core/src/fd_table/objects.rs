@@ -45,6 +45,11 @@ impl FileObject {
             Ok(axtask::future::block_on(file.write_at_slice(buf, offset))?)
         }
     }
+
+    pub fn readahead(&self, offset: u64, len: usize) -> LinuxResult {
+        self.inner.readahead(offset, len)?;
+        Ok(())
+    }
 }
 
 pub struct NsFdObject {
