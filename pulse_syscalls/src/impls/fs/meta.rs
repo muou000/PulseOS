@@ -440,8 +440,8 @@ pub fn sys_faccessat(dirfd: i32, pathname: usize, mode: usize, flags: usize) -> 
 
 /// `fchmodat(dirfd, pathname, mode, flags)` — 设置文件权限位。
 ///
-/// PulseOS 不强制执行文件权限，此 stub 仅验证路径存在性后返回成功，
-/// 以满足 LTP 等测试框架的 setup 阶段需求。
+/// The `fchmodat2` dispatcher uses this implementation as well, so both
+/// interfaces share path, flag, ownership, and metadata error handling.
 pub fn sys_fchmodat(dirfd: i32, pathname: usize, mode: usize, flags: usize) -> isize {
     // 尝试读取路径字符串用于日志
     let mut path_buf = [core::mem::MaybeUninit::<u8>::uninit(); USER_PATH_MAX];
@@ -473,6 +473,13 @@ pub fn sys_fchmodat(dirfd: i32, pathname: usize, mode: usize, flags: usize) -> i
             flags
         );
         return -LinuxError::EINVAL.code() as isize;
+    }
+
+    // An empty pathname names no file unless AT_EMPTY_PATH explicitly asks
+    // for the object referred to by dirfd.  Keep the ordinary fchmodat ABI
+    // from treating a valid file descriptor as an implicit target.
+    if path_str.is_empty() && (flags & AT_EMPTY_PATH as usize) == 0 {
+        return -LinuxError::ENOENT.code() as isize;
     }
 
     match resolve_location_at_ptr(dirfd, pathname, flags) {

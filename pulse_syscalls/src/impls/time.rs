@@ -718,6 +718,15 @@ const ADJ_NANO: u32 = 0x2000;
 const ADJ_TICK: u32 = 0x4000;
 const ADJ_OFFSET_SINGLESHOT: u32 = 0x8001;
 const ADJ_OFFSET_SS_READ: u32 = 0xa001;
+const ADJ_MODE_MASK: u32 = ADJ_OFFSET
+    | ADJ_FREQUENCY
+    | ADJ_MAXERROR
+    | ADJ_ESTERROR
+    | ADJ_STATUS
+    | ADJ_TIMECONST
+    | ADJ_MICRO
+    | ADJ_NANO
+    | ADJ_TICK;
 
 const STA_UNSYNC: i32 = 0x0040;
 const STA_NANO: i32 = 0x2000;
@@ -778,6 +787,13 @@ static GLOBAL_TIMEX: spin::Mutex<timex> = spin::Mutex::new(timex {
     _pad4: [0; 11],
 });
 
+fn valid_adjtimex_modes(modes: u32) -> bool {
+    if modes == ADJ_OFFSET_SINGLESHOT || modes == ADJ_OFFSET_SS_READ {
+        return true;
+    }
+    modes & !ADJ_MODE_MASK == 0 && (modes & (ADJ_MICRO | ADJ_NANO)) != (ADJ_MICRO | ADJ_NANO)
+}
+
 pub fn sys_clock_adjtime(clockid: i32, buf: usize) -> isize {
     axlog::trace!("sys_clock_adjtime: clockid={}, buf={:#x}", clockid, buf);
 
@@ -801,10 +817,11 @@ pub fn sys_clock_adjtime(clockid: i32, buf: usize) -> isize {
 
     let modes = tmx.modes;
 
-    if modes != 0 && modes != ADJ_OFFSET_SS_READ {
-        if !proc.has_capability(CAP_SYS_TIME) {
-            return -LinuxError::EPERM.code() as isize;
-        }
+    // Reject unknown mode bits before touching the shared timex state.  In
+    // particular, this keeps invalid-mode calls from copying kernel data back
+    // to the caller (the CVE-2018-11508 regression test relies on this).
+    if !valid_adjtimex_modes(modes) {
+        return -LinuxError::EINVAL.code() as isize;
     }
 
     if (modes & ADJ_TICK) != 0 {
@@ -815,38 +832,43 @@ pub fn sys_clock_adjtime(clockid: i32, buf: usize) -> isize {
         }
     }
 
+    if modes != 0 && modes != ADJ_OFFSET_SS_READ {
+        if !proc.has_capability(CAP_SYS_TIME) {
+            return -LinuxError::EPERM.code() as isize;
+        }
+    }
+
     let mut g = GLOBAL_TIMEX.lock();
 
-    if (modes & ADJ_NANO) != 0 {
-        g.status |= STA_NANO;
-    }
-    if (modes & ADJ_MICRO) != 0 {
-        g.status &= !STA_NANO;
-    }
+    if modes != ADJ_OFFSET_SS_READ {
+        if (modes & ADJ_NANO) != 0 {
+            g.status |= STA_NANO;
+        }
+        if (modes & ADJ_MICRO) != 0 {
+            g.status &= !STA_NANO;
+        }
 
-    if (modes & ADJ_OFFSET) != 0 {
-        g.offset = tmx.offset;
-    }
-    if (modes & ADJ_FREQUENCY) != 0 {
-        g.freq = tmx.freq;
-    }
-    if (modes & ADJ_MAXERROR) != 0 {
-        g.maxerror = tmx.maxerror;
-    }
-    if (modes & ADJ_ESTERROR) != 0 {
-        g.esterror = tmx.esterror;
-    }
-    if (modes & ADJ_STATUS) != 0 {
-        g.status = tmx.status;
-    }
-    if (modes & ADJ_TIMECONST) != 0 {
-        g.constant = tmx.constant;
-    }
-    if (modes & ADJ_TICK) != 0 {
-        g.tick = tmx.tick;
-    }
-    if (modes & ADJ_OFFSET_SINGLESHOT) != 0 {
-        g.offset = tmx.offset;
+        if (modes & ADJ_OFFSET) != 0 {
+            g.offset = tmx.offset;
+        }
+        if (modes & ADJ_FREQUENCY) != 0 {
+            g.freq = tmx.freq;
+        }
+        if (modes & ADJ_MAXERROR) != 0 {
+            g.maxerror = tmx.maxerror;
+        }
+        if (modes & ADJ_ESTERROR) != 0 {
+            g.esterror = tmx.esterror;
+        }
+        if (modes & ADJ_STATUS) != 0 {
+            g.status = tmx.status;
+        }
+        if (modes & ADJ_TIMECONST) != 0 {
+            g.constant = tmx.constant;
+        }
+        if (modes & ADJ_TICK) != 0 {
+            g.tick = tmx.tick;
+        }
     }
 
     let now = axhal::time::wall_time();
@@ -865,6 +887,10 @@ pub fn sys_clock_adjtime(clockid: i32, buf: usize) -> isize {
         Ok(()) => 0,
         Err(_) => -LinuxError::EFAULT.code() as isize,
     }
+}
+
+pub fn sys_adjtimex(buf: usize) -> isize {
+    sys_clock_adjtime(CLOCK_REALTIME as i32, buf)
 }
 
 pub fn sys_timer_create(clockid: i32, sevp: usize, timerid: usize) -> isize {
@@ -1003,6 +1029,7 @@ pub fn sys_timer_settime(
     timer.generation = generation;
     timer.interval_ns = int_dur.as_nanos() as u64;
     timer.is_absolute = (flags & TIMER_ABSTIME as usize) != 0;
+    timer.overrun = 0;
     timer.first_expired = false;
 
     if val_dur.is_zero() {
@@ -1068,6 +1095,25 @@ pub fn sys_timer_gettime(timerid: usize, curr_value: usize) -> isize {
     match write_user_itimerspec(curr_value, &curr_spec) {
         Ok(()) => 0,
         Err(e) => -e.code() as isize,
+    }
+}
+
+pub fn sys_timer_getoverrun(timerid: usize) -> isize {
+    axlog::debug!("sys_timer_getoverrun: timerid={}", timerid);
+
+    if timerid >= pulse_core::task::MAX_POSIX_TIMER_COUNT {
+        return -LinuxError::EINVAL.code() as isize;
+    }
+
+    let proc = match pulse_core::task::current_process() {
+        Ok(proc) => proc,
+        Err(e) => return -e.code() as isize,
+    };
+
+    let timers = proc.posix_timers.lock();
+    match &timers[timerid] {
+        Some(timer) => timer.overrun as isize,
+        None => -LinuxError::EINVAL.code() as isize,
     }
 }
 
