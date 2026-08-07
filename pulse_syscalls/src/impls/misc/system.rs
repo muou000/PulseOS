@@ -306,6 +306,23 @@ pub fn sys_prlimit64(pid: i32, resource: usize, new_limit: usize, old_limit: usi
         if new_rlim.rlim_cur > new_rlim.rlim_max {
             return -LinuxError::EINVAL.code() as isize;
         }
+
+        // Raising a soft or hard limit requires CAP_SYS_RESOURCE.  The
+        // RLIMIT_NOFILE hard limit is also bounded by the kernel-wide
+        // descriptor limit, including for privileged callers.
+        let has_sys_resource =
+            process.has_capability(linux_raw_sys::general::CAP_SYS_RESOURCE);
+        if !has_sys_resource
+            && (new_rlim.rlim_cur > old_rlim.rlim_cur
+                || new_rlim.rlim_max > old_rlim.rlim_max)
+        {
+            return -LinuxError::EPERM.code() as isize;
+        }
+        if resource == RLIMIT_NOFILE
+            && new_rlim.rlim_max > pulse_core::fd_table::FD_LIMIT as u64
+        {
+            return -LinuxError::EPERM.code() as isize;
+        }
         if process.set_rlimit(resource, new_rlim).is_err() {
             return -LinuxError::EINVAL.code() as isize;
         }
@@ -319,6 +336,13 @@ pub fn sys_prlimit64(pid: i32, resource: usize, new_limit: usize, old_limit: usi
     } else {
         0
     }
+}
+
+/// `setrlimit(resource, new_limit)` is the RISC-V64 ABI entry point backed by
+/// the same per-process resource state as `prlimit64`.
+#[cfg(target_arch = "riscv64")]
+pub fn sys_setrlimit(resource: usize, new_limit: usize) -> isize {
+    sys_prlimit64(0, resource, new_limit, 0)
 }
 
 pub fn sys_getrandom(buf: usize, buflen: usize, flags: usize) -> isize {
