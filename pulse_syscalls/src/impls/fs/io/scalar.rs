@@ -107,6 +107,7 @@ pub fn sys_write(fd: usize, buf: usize, count: usize) -> isize {
         return -LinuxError::EBADF.code() as isize;
     }
     let object = entry.object;
+    let sigpipe_writer = is_sigpipe_writer(object.as_ref());
     if let Some(pipe) = object
         .as_any()
         .downcast_ref::<pulse_core::fd_table::PipeObject>()
@@ -118,7 +119,11 @@ pub fn sys_write(fd: usize, buf: usize, count: usize) -> isize {
         {
             match pipe.write_zerocopy(buf, count) {
                 Ok(ret) => return ret as isize,
-                Err(e) => return -e.code() as isize,
+                Err(e) => {
+                    let errno = e.code();
+                    queue_sigpipe_on_epipe(sigpipe_writer, errno);
+                    return -errno as isize;
+                }
             }
         }
     }
@@ -166,11 +171,12 @@ pub fn sys_write(fd: usize, buf: usize, count: usize) -> isize {
             }) {
                 Ok(result) => result,
                 Err(e) => {
-                    return if total > 0 {
-                        total as isize
-                    } else {
-                        -e.code() as isize
-                    };
+                    if total > 0 {
+                        return total as isize;
+                    }
+                    let errno = e.code();
+                    queue_sigpipe_on_epipe(sigpipe_writer, errno);
+                    return -errno as isize;
                 }
             };
         if ret == 0 {

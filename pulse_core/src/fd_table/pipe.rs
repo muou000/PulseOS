@@ -811,7 +811,8 @@ impl PipeObject {
             return Ok(read_pages * PIPE_PAGE_SIZE);
         }
 
-        let mut buf = alloc::vec![0u8; count];
+        let chunk_size = count.min(65536);
+        let mut buf = alloc::vec![0u8; chunk_size];
         let bytes_read = self.read(&mut buf)?;
         if bytes_read > 0 {
             process.write_user_bytes(reader_vaddr, &buf[..bytes_read])?;
@@ -928,6 +929,7 @@ impl FdObject for PipeObject {
             let available = ring_buffer.available_read();
             if available == 0 {
                 if read_size > 0 {
+                    drop(ring_buffer);
                     if !self.shared.write_wait_queue.is_empty() {
                         self.shared.write_wait_queue.notify_all(true);
                     }
@@ -999,12 +1001,15 @@ impl FdObject for PipeObject {
                 zero_copy_bytes(&zc),
             );
             if available == 0 {
-                if self.nonblocking.load(Ordering::Acquire) {
-                    if write_size > 0 {
-                        if !self.shared.read_wait_queue.is_empty() {
-                            self.shared.read_wait_queue.notify_all(true);
-                        }
+                let nonblocking = self.nonblocking.load(Ordering::Acquire);
+                drop(ring_buffer);
+                drop(zc);
+                if write_size > 0 {
+                    if !self.shared.read_wait_queue.is_empty() {
+                        self.shared.read_wait_queue.notify_all(true);
                     }
+                }
+                if nonblocking {
                     return if write_size > 0 {
                         Ok(write_size)
                     } else {
@@ -1021,13 +1026,6 @@ impl FdObject for PipeObject {
                     write_size,
                     buf.len()
                 );
-                drop(ring_buffer);
-                drop(zc);
-                if write_size > 0 {
-                    if !self.shared.read_wait_queue.is_empty() {
-                        self.shared.read_wait_queue.notify_all(true);
-                    }
-                }
                 self.shared.write_wait_queue.wait_until(|| {
                     self.available_pipe_write() > 0
                         || self.read_end_closed()
