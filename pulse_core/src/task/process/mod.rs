@@ -75,6 +75,7 @@ static ZOMBIE_ASPACE_HANDLE: Lazy<Arc<AddressSpaceLock>> = Lazy::new(|| {
 
 struct FutexTable {
     queues: Mutex<BTreeMap<usize, Arc<WaitQueue>>>,
+    bitset_queues: Mutex<BTreeMap<usize, BTreeMap<u32, Arc<WaitQueue>>>>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -207,6 +208,7 @@ impl FutexTable {
     fn new() -> Self {
         Self {
             queues: Mutex::new(BTreeMap::new()),
+            bitset_queues: Mutex::new(BTreeMap::new()),
         }
     }
 
@@ -216,6 +218,34 @@ impl FutexTable {
             .entry(addr)
             .or_insert_with(|| Arc::new(WaitQueue::new()))
             .clone()
+    }
+
+    fn queue_mask(&self, addr: usize, bitset: u32) -> Arc<WaitQueue> {
+        if bitset == u32::MAX {
+            return self.queue(addr);
+        }
+
+        let mut queues = self.bitset_queues.lock();
+        queues
+            .entry(addr)
+            .or_default()
+            .entry(bitset)
+            .or_insert_with(|| Arc::new(WaitQueue::new()))
+            .clone()
+    }
+
+    fn bitset_queues_for(&self, addr: usize, wake_bitset: u32) -> Vec<(u32, Arc<WaitQueue>)> {
+        let queues = self.bitset_queues.lock();
+        queues
+            .get(&addr)
+            .map(|by_bitset| {
+                by_bitset
+                    .iter()
+                    .filter(|(bitset, _)| **bitset & wake_bitset != 0)
+                    .map(|(bitset, queue)| (*bitset, queue.clone()))
+                    .collect()
+            })
+            .unwrap_or_default()
     }
 
     fn wake(&self, addr: usize, count: usize) -> usize {
@@ -234,6 +264,24 @@ impl FutexTable {
         }
         drop(queue);
         self.remove_if_empty(addr);
+        woken
+    }
+
+    fn wake_mask(&self, addr: usize, count: usize, wake_bitset: u32) -> usize {
+        let mut woken = self.wake(addr, count);
+        if woken < count {
+            let bitset_queues = self.bitset_queues_for(addr, wake_bitset);
+            let context = WakeContext::new(|| (WakeSource::Futex, addr as u64));
+            for (_, queue) in bitset_queues {
+                while woken < count && queue.notify_one_with_context(true, context) {
+                    woken += 1;
+                }
+                if woken == count {
+                    break;
+                }
+            }
+        }
+        self.remove_bitset_if_empty(addr);
         woken
     }
 
@@ -256,19 +304,19 @@ impl FutexTable {
         woken
     }
 
-    fn requeue(
+    fn requeue_primary(
         &self,
         addr: usize,
         wake_count: usize,
         target: usize,
         requeue_count: usize,
-    ) -> usize {
+    ) -> (usize, usize) {
         let source_queue = {
             let queues = self.queues.lock();
             queues.get(&addr).cloned()
         };
         let Some(source_queue) = source_queue else {
-            return 0;
+            return (0, 0);
         };
 
         let mut moved = 0;
@@ -282,7 +330,40 @@ impl FutexTable {
             let target_queue = self.queue(target);
             moved = source_queue.requeue(requeue_count, &target_queue);
         }
+        (woken, moved)
+    }
 
+    fn requeue(
+        &self,
+        addr: usize,
+        wake_count: usize,
+        target: usize,
+        requeue_count: usize,
+    ) -> usize {
+        let (mut woken, mut moved) = self.requeue_primary(addr, wake_count, target, requeue_count);
+
+        {
+            let source_queues = self.bitset_queues_for(addr, u32::MAX);
+            let context = WakeContext::new(|| (WakeSource::Futex, addr as u64));
+            for (bitset, source_queue) in source_queues {
+                while woken < wake_count && source_queue.notify_one_with_context(true, context) {
+                    woken += 1;
+                }
+                if moved < requeue_count {
+                    let target_queue = self.queue_mask(target, bitset);
+                    if !Arc::ptr_eq(&source_queue, &target_queue) {
+                        moved += source_queue.requeue(requeue_count - moved, &target_queue);
+                    }
+                }
+                if woken == wake_count && moved == requeue_count {
+                    break;
+                }
+            }
+        }
+        self.remove_if_empty(addr);
+        self.remove_if_empty(target);
+        self.remove_bitset_if_empty(addr);
+        self.remove_bitset_if_empty(target);
         woken + moved
     }
 
@@ -294,7 +375,23 @@ impl FutexTable {
                 .map(|(key, queue)| (*key, queue.clone()))
                 .collect::<Vec<_>>()
         };
+        let bitset_queues = {
+            let queues = self.bitset_queues.lock();
+            let mut all_queues = Vec::new();
+            for (addr, by_bitset) in queues.iter() {
+                for queue in by_bitset.values() {
+                    all_queues.push((*addr, queue.clone()));
+                }
+            }
+            all_queues
+        };
         for (key, queue) in queues {
+            queue.notify_all_with_context(
+                false,
+                WakeContext::new(|| (WakeSource::Futex, key as u64)),
+            );
+        }
+        for (key, queue) in bitset_queues {
             queue.notify_all_with_context(
                 false,
                 WakeContext::new(|| (WakeSource::Futex, key as u64)),
@@ -305,6 +402,7 @@ impl FutexTable {
     fn clear(&self) {
         self.wake_all();
         self.queues.lock().clear();
+        self.bitset_queues.lock().clear();
     }
 
     fn remove_if_empty(&self, addr: usize) {
@@ -315,6 +413,27 @@ impl FutexTable {
             // before it enrolls in the WaitQueue, so removing at a count of 2
             // can orphan that waiter before a concurrent wake lookup.
             if queue.is_empty() && Arc::strong_count(queue) == 1 {
+                queues.remove(&addr);
+            }
+        }
+    }
+
+    fn remove_mask_if_empty(&self, addr: usize, bitset: u32) {
+        if bitset == u32::MAX {
+            self.remove_if_empty(addr);
+        } else {
+            self.remove_bitset_if_empty(addr);
+        }
+    }
+
+    fn remove_bitset_if_empty(&self, addr: usize) {
+        let mut queues = self.bitset_queues.lock();
+        if let Some(by_bitset) = queues.get_mut(&addr) {
+            by_bitset.retain(|_, queue| {
+                queue.prune_exited();
+                !(queue.is_empty() && Arc::strong_count(queue) == 1)
+            });
+            if by_bitset.is_empty() {
                 queues.remove(&addr);
             }
         }
