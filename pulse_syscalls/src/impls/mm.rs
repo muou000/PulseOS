@@ -1,4 +1,4 @@
-use alloc::sync::Arc;
+use alloc::{sync::Arc, vec::Vec};
 
 use axfs::{CachedFile, FileFlags};
 use axhal::paging::MappingFlags;
@@ -759,6 +759,48 @@ pub fn sys_munlock(addr: usize, len: usize) -> isize {
     match proc.memlock_unlock_range(aligned_addr, aligned_len) {
         Ok(()) => 0,
         Err(_) => -LinuxError::EINVAL.code() as isize,
+    }
+}
+
+pub fn sys_mincore(addr: usize, len: usize, vec_addr: usize) -> isize {
+    if !is_page_aligned(addr) {
+        return -LinuxError::EINVAL.code() as isize;
+    }
+    if len == 0 {
+        return 0;
+    }
+
+    let Some(aligned_len) = page_align_up(len) else {
+        return -LinuxError::ENOMEM.code() as isize;
+    };
+    let proc = match pulse_core::task::current_process() {
+        Ok(proc) => proc,
+        Err(e) => return -e.code() as isize,
+    };
+    if !proc.is_user_range(addr, aligned_len) || !proc.is_mapped_range(addr, aligned_len) {
+        return -LinuxError::ENOMEM.code() as isize;
+    }
+
+    let page_count = aligned_len / PAGE_SIZE;
+    let mut residency = Vec::new();
+    if residency.try_reserve_exact(page_count).is_err() {
+        return -LinuxError::ENOMEM.code() as isize;
+    }
+    residency.resize(page_count, 0);
+
+    let aspace_handle = proc.aspace_handle();
+    let aspace = aspace_handle.read();
+    for (index, value) in residency.iter_mut().enumerate() {
+        let page_addr = addr + index * PAGE_SIZE;
+        if aspace.page_is_resident(VirtAddr::from(page_addr)) {
+            *value = 1;
+        }
+    }
+    drop(aspace);
+
+    match proc.write_user_bytes(vec_addr, &residency) {
+        Ok(()) => 0,
+        Err(_) => -LinuxError::EFAULT.code() as isize,
     }
 }
 

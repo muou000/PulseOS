@@ -339,6 +339,16 @@ impl FileMapping {
         self.file.size() as usize
     }
 
+    pub(crate) fn is_page_cached(&self, page_addr: VirtAddr) -> bool {
+        let Some((file_offset, _)) = self.page_read_window(page_addr) else {
+            return false;
+        };
+        let Ok(page_number) = u32::try_from(file_offset / PAGE_SIZE_4K as u64) else {
+            return false;
+        };
+        self.file.shared_page_paddr(page_number).is_ok()
+    }
+
     fn page_read_window_at_size(
         &self,
         page_addr: VirtAddr,
