@@ -1,6 +1,6 @@
 use alloc::{
     boxed::Box,
-    collections::{BTreeMap, VecDeque},
+    collections::BTreeMap,
     sync::{Arc, Weak},
     vec::Vec,
 };
@@ -14,7 +14,7 @@ use axerrno::{LinuxError, LinuxResult};
 use axfs::{File, FileFlags as AxFileFlags, OpenResult};
 use axfs_ng_vfs::{Location, Metadata, NodeType};
 use axhal::paging::MappingFlags;
-use axio::{PollState, Read, Seek, SeekFrom, Write};
+use axio::{PollState, Seek, SeekFrom, Write};
 use kspin::SpinNoIrq;
 use linux_raw_sys::{
     general::*,

@@ -6,7 +6,7 @@ use chrono::{Datelike, Timelike, Utc};
 use linux_raw_sys::{
     ioctl::{
         BLKGETSIZE64, BLKSSZGET, RTC_RD_TIME, SIOCGIFFLAGS, SIOCGIFINDEX, SIOCSIFFLAGS, TCGETS,
-        TCSETS, TCSETSW, TCSETSF, TCGETS2, TCSETS2, TCSETSW2, TCSETSF2, TIOCGPGRP, TIOCGWINSZ, TIOCSPGRP,
+        TCSETS, TCSETSW, TCSETSF, TCGETS2, TCSETS2, TCSETSW2, TCSETSF2, TIOCGPGRP, TIOCGWINSZ, TIOCSPGRP, TIOCSWINSZ,
     },
     loop_device::{
         LOOP_CLR_FD, LOOP_CTL_GET_FREE, LOOP_GET_STATUS, LOOP_GET_STATUS64, LOOP_SET_FD,
@@ -196,6 +196,7 @@ fn is_tty_ioctl(cmd: u32) -> bool {
             | TIOCGPGRP
             | TIOCSPGRP
             | TIOCGWINSZ
+            | TIOCSWINSZ
     )
 }
 
@@ -208,14 +209,6 @@ fn is_devfs_tty(entry: &FdEntry) -> bool {
         .downcast::<axfs::DevNode>()
         .map(|node| node.is_tty())
         .unwrap_or(false)
-}
-
-#[repr(C)]
-struct WinSize {
-    ws_row: u16,
-    ws_col: u16,
-    ws_xpixel: u16,
-    ws_ypixel: u16,
 }
 
 #[repr(C)]
@@ -352,22 +345,15 @@ pub fn sys_ioctl(fd: usize, cmd: usize, arg: usize) -> isize {
         }
         TIOCGWINSZ => {
             warn_tty_ioctl_stub_once(fd, cmd32);
-            if arg != 0 {
-                let ws = WinSize {
-                    ws_row: 24,
-                    ws_col: 80,
-                    ws_xpixel: 0,
-                    ws_ypixel: 0,
-                };
-                let bytes = unsafe {
-                    core::slice::from_raw_parts(
-                        (&ws as *const WinSize).cast::<u8>(),
-                        core::mem::size_of::<WinSize>(),
-                    )
-                };
-                if let Err(e) = write_user_bytes(arg, bytes) {
-                    return -e.code() as isize;
-                }
+            if let Err(e) = pulse_core::fd_table::read_tty_winsize(arg) {
+                return -e.code() as isize;
+            }
+            0
+        }
+        TIOCSWINSZ => {
+            warn_tty_ioctl_stub_once(fd, cmd32);
+            if let Err(e) = pulse_core::fd_table::write_tty_winsize(arg) {
+                return -e.code() as isize;
             }
             0
         }

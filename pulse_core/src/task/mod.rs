@@ -721,6 +721,10 @@ impl axfs::ProcfsProcessProvider for PulseProcessProvider {
         let entry = proc.get_fd_entry(fd as usize).ok()?;
         if let Some(loc) = entry.object.location() {
             Some(loc.absolute_path().ok()?.as_str().to_string())
+        } else if entry.object.as_any().is::<crate::fd_table::StdinObject>()
+            || entry.object.as_any().is::<crate::fd_table::StdoutObject>()
+        {
+            Some("/dev/tty".to_string())
         } else if let Ok(st) = entry.object.stat() {
             let mode = st.st_mode;
             if (mode & 0o170000) == 0o140000 {
