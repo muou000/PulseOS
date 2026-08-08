@@ -3,8 +3,8 @@ use core::time::Duration;
 
 use linux_raw_sys::{
     general::{
-        ECHO, ECHOE, ECHOK, ECHONL, ICANON, ICRNL, IGNCR, INLCR, ISIG, SIGINT, SIGQUIT, SIGTSTP,
-        SIGWINCH, VEOF, VERASE, VINTR, VKILL, VMIN, VQUIT, VSUSP, VTIME,
+        ECHO, ECHOE, ECHOK, ECHONL, ICANON, ICRNL, IGNCR, INLCR, ISIG, NOFLSH, S_IFCHR, SIGINT,
+        SIGQUIT, SIGTSTP, SIGWINCH, VEOF, VERASE, VINTR, VKILL, VMIN, VQUIT, VSUSP, VTIME,
     },
     ioctl::{
         TCGETS, TCGETS2, TCSETS, TCSETS2, TCSETSF, TCSETSF2, TCSETSW, TCSETSW2, TIOCGPGRP,
@@ -267,6 +267,9 @@ fn accept_input_byte(
             None
         };
         if let Some(signal) = signal {
+            if (termios_data.c_lflag & NOFLSH) == 0 {
+                input.canonical.clear();
+            }
             effects.signals.push(signal);
             return effects;
         }
@@ -423,14 +426,14 @@ pub fn write_tty_termios(user_addr: usize) -> LinuxResult {
     };
     process.read_user_bytes(user_addr, bytes)?;
 
-    let mut updated = *TTY_TERMIOS.lock();
-    updated.c_iflag = term.c_iflag;
-    updated.c_oflag = term.c_oflag;
-    updated.c_cflag = term.c_cflag;
-    updated.c_lflag = term.c_lflag;
-    updated.c_line = term.c_line;
-    updated.c_cc = term.c_cc;
-    update_tty_termios(updated);
+    update_tty_termios(|updated| {
+        updated.c_iflag = term.c_iflag;
+        updated.c_oflag = term.c_oflag;
+        updated.c_cflag = term.c_cflag;
+        updated.c_lflag = term.c_lflag;
+        updated.c_line = term.c_line;
+        updated.c_cc = term.c_cc;
+    });
     Ok(())
 }
 
@@ -466,7 +469,7 @@ pub fn write_tty_termios2(user_addr: usize) -> LinuxResult {
         )
     };
     process.read_user_bytes(user_addr, bytes)?;
-    update_tty_termios(termios_data);
+    update_tty_termios(|updated| *updated = termios_data);
     Ok(())
 }
 
@@ -488,12 +491,12 @@ static TTY_WINSIZE: Lazy<SpinNoIrq<WinSize>> = Lazy::new(|| {
     })
 });
 
-fn update_tty_termios(updated: termios2) {
-    let previous = {
+fn update_tty_termios(update: impl FnOnce(&mut termios2)) {
+    let (previous, updated) = {
         let mut termios_data = TTY_TERMIOS.lock();
         let previous = *termios_data;
-        *termios_data = updated;
-        previous
+        update(&mut *termios_data);
+        (previous, *termios_data)
     };
 
     if (previous.c_lflag & ICANON) != 0 && (updated.c_lflag & ICANON) == 0 {
@@ -670,9 +673,21 @@ fn read_tty_input(buf: &mut [u8]) -> LinuxResult<usize> {
 fn console_tty_stat() -> LinuxResult<stat> {
     // Reuse devfs metadata rather than duplicating its dynamically assigned
     // mount device ID. ttyname(3) compares this identity with /dev entries.
-    let location = axfs::lookup_location("/dev/tty")
-        .map_err(|error| LinuxError::from(error.canonicalize()))?;
-    location_to_stat(&location)
+    match axfs::lookup_location("/dev/tty") {
+        Ok(location) => location_to_stat(&location),
+        Err(_) => Ok(synthetic_console_tty_stat()),
+    }
+}
+
+fn synthetic_console_tty_stat() -> stat {
+    stat {
+        st_ino: 1,
+        st_nlink: 1,
+        st_mode: S_IFCHR | 0o666,
+        st_blksize: 4096,
+        st_rdev: axfs_ng_vfs::DeviceId::new(5, 0).0 as _,
+        ..empty_stat()
+    }
 }
 
 pub struct StdinObject;
