@@ -283,8 +283,9 @@ pub fn sys_statx(
     new_statx.stx_btime = to_statx_timestamp(0, 0);
     new_statx.stx_ctime = to_statx_timestamp(stat.st_ctime as i64, stat.st_ctime_nsec as i64);
     new_statx.stx_mtime = to_statx_timestamp(stat.st_mtime as i64, stat.st_mtime_nsec as i64);
-    new_statx.stx_rdev_major = 0;
-    new_statx.stx_rdev_minor = 0;
+    let rdev = axfs_ng_vfs::DeviceId(stat.st_rdev as u64);
+    new_statx.stx_rdev_major = rdev.major();
+    new_statx.stx_rdev_minor = rdev.minor();
     let dev = axfs_ng_vfs::DeviceId(stat.st_dev as u64);
     new_statx.stx_dev_major = dev.major();
     new_statx.stx_dev_minor = dev.minor();
