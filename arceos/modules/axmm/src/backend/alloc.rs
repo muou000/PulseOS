@@ -1,6 +1,6 @@
 use axalloc::global_allocator;
 use axerrno::{AxError, AxResult};
-use axhal::mem::{phys_to_virt, virt_to_phys};
+use axhal::mem::{flush_dcache_range, phys_to_virt, virt_to_phys};
 use axhal::paging::{MappingFlags, PageSize, PageTable};
 use memory_addr::{MemoryAddr, PAGE_SIZE_4K, PageIter4K, PhysAddr, VirtAddr};
 use memory_set::MappingMutation;
@@ -21,6 +21,9 @@ impl AnonPageLoad {
         let requested_pages = self.page_count;
         let (frames, page_count) =
             alloc_frame_batch(requested_pages, true).ok_or(AxError::NoMemory)?;
+        for frame in frames.iter().take(page_count) {
+            flush_dcache_range(*frame, PAGE_SIZE_4K);
+        }
         axfs::buildstorm_stat_add!(MM_ANON_FAULT_PREPARED_PAGES, page_count);
         if page_count < requested_pages {
             axfs::buildstorm_stat_inc!(MM_ANON_FAULT_SHORT_PREPARES);
@@ -250,6 +253,7 @@ impl Backend {
                     }
                     return false;
                 };
+                flush_dcache_range(frame, PAGE_SIZE_4K);
                 if let Ok(tlb) = pt.map(addr, frame, PageSize::Size4K, flags) {
                     tlb.ignore(); // TLB flush on map is unnecessary, as there are no outdated mappings.
                     mapped_pages += 1;
@@ -483,6 +487,7 @@ impl Backend {
                     return false;
                 }
                 if let Some(frame) = alloc_frame(true) {
+                    flush_dcache_range(frame, PAGE_SIZE_4K);
                     let mut pt_guard = pt.lock_for_addr(page);
                     // Re-verify
                     if let Ok((curr_frame, curr_flags, _)) = pt_guard.query(page) {
@@ -528,6 +533,7 @@ impl Backend {
             }
             false
         } else if let Some(frame) = alloc_frame(true) {
+            flush_dcache_range(frame, PAGE_SIZE_4K);
             // MADV_DONTNEED may evict a page from an eagerly populated
             // anonymous mapping. It must still fault back to a zeroed frame.
             // Allocate a physical frame lazily and map it to the fault address.

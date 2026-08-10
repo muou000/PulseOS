@@ -4,7 +4,7 @@ use axalloc::frame_table;
 use axerrno::{AxError, AxResult, ax_err};
 use axfs::{CachedFile, FileFlags};
 use axhal::{
-    mem::{phys_to_virt, PhysAddr},
+    mem::{flush_dcache_range, phys_to_virt, PhysAddr},
     paging::{MappingFlags, PageSize, PageTable, PagingResult, TlbFlush},
     trap::PageFaultFlags,
 };
@@ -1029,7 +1029,7 @@ impl AddrSpace {
     /// Now it supports reading and writing data in the given interval.
     fn process_area_data<F>(&self, start: VirtAddr, size: usize, mut f: F) -> AxResult
     where
-        F: FnMut(VirtAddr, usize, usize),
+        F: FnMut(PhysAddr, VirtAddr, usize, usize),
     {
         if !self.contains_range(start, size) {
             return ax_err!(InvalidInput, "address out of range");
@@ -1062,7 +1062,7 @@ impl AddrSpace {
                 copy_size = copy_size.min(PAGE_SIZE_4K - align_offset);
                 paddr += align_offset;
             }
-            f(phys_to_virt(paddr), cnt, copy_size);
+            f(paddr, phys_to_virt(paddr), cnt, copy_size);
             cnt += copy_size;
         }
         Ok(())
@@ -1081,7 +1081,8 @@ impl AddrSpace {
         if !self.can_access_range(start, buf.len(), MappingFlags::READ | MappingFlags::USER) {
             return Err(AxError::BadAddress);
         }
-        self.process_area_data(start, buf.len(), |src, offset, read_size| unsafe {
+        self.process_area_data(start, buf.len(), |paddr, src, offset, read_size| unsafe {
+            flush_dcache_range(paddr, read_size);
             core::ptr::copy_nonoverlapping(src.as_ptr(), buf.as_mut_ptr().add(offset), read_size);
         })
     }
@@ -1114,8 +1115,9 @@ impl AddrSpace {
             }
         }
 
-        self.process_area_data(start, buf.len(), |dst, offset, write_size| unsafe {
+        self.process_area_data(start, buf.len(), |paddr, dst, offset, write_size| unsafe {
             core::ptr::copy_nonoverlapping(buf.as_ptr().add(offset), dst.as_mut_ptr(), write_size);
+            flush_dcache_range(paddr, write_size);
         })
     }
 

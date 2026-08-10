@@ -57,6 +57,8 @@ impl MemIf for DummyMem {
         &[]
     }
 
+    fn flush_dcache_range(_paddr: memory_addr::PhysAddr, _size: usize) {}
+
     fn phys_to_virt(_paddr: memory_addr::PhysAddr) -> memory_addr::VirtAddr {
         va!(0)
     }

@@ -142,6 +142,13 @@ pub trait MemIf {
     /// Returns all device memory (MMIO) ranges on the platform.
     fn mmio_ranges() -> &'static [RawRange];
 
+    /// Writes back and invalidates data-cache lines covering a physical range.
+    ///
+    /// This is needed when a page written through a kernel virtual alias is
+    /// subsequently accessed through a different virtual alias. Platforms with
+    /// physically indexed or coherent caches may implement this as a no-op.
+    fn flush_dcache_range(paddr: PhysAddr, size: usize);
+
     /// Translates a physical address to a virtual address.
     ///
     /// It is just an easy way to access physical memory when virtual memory
