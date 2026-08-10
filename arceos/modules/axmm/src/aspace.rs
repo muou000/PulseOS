@@ -5,7 +5,7 @@ use axerrno::{AxError, AxResult, ax_err};
 use axfs::{CachedFile, FileFlags};
 use axhal::{
     mem::{flush_dcache_range, phys_to_virt, PhysAddr},
-    paging::{MappingFlags, PageSize, PageTable, PagingResult, TlbFlush},
+    paging::{MappingFlags, PageSize, PageTable, PagingError, PagingResult, TlbFlush},
     trap::PageFaultFlags,
 };
 use memory_addr::{
@@ -375,7 +375,10 @@ enum PageTableWriteLock<'a> {
 }
 
 pub struct PageTableReadGuard<'a>(PageTableReadLock<'a>);
-pub struct PageTableGuard<'a>(PageTableWriteLock<'a>);
+pub struct PageTableGuard<'a> {
+    lock: PageTableWriteLock<'a>,
+    probe: Option<(VirtAddr, PagingResult<(PhysAddr, MappingFlags, PageSize)>)>,
+}
 
 unsafe impl<'a> Send for PageTableReadGuard<'a> {}
 unsafe impl<'a> Sync for PageTableReadGuard<'a> {}
@@ -397,7 +400,7 @@ impl<'a> core::ops::Deref for PageTableGuard<'a> {
     type Target = PageTable;
     #[inline]
     fn deref(&self) -> &Self::Target {
-        match &self.0 {
+        match &self.lock {
             PageTableWriteLock::Whole(pt) => pt,
             PageTableWriteLock::Subtree { pt, .. } => pt,
         }
@@ -422,6 +425,11 @@ impl PageTableReadGuard<'_> {
 
     pub fn query(&self, vaddr: VirtAddr) -> PagingResult<(PhysAddr, MappingFlags, PageSize)> {
         self.assert_covers(vaddr);
+        if let Some((probe_vaddr, result)) = self.probe
+            && probe_vaddr == vaddr
+        {
+            return result;
+        }
         core::ops::Deref::deref(self).query(vaddr)
     }
 }
@@ -455,7 +463,7 @@ impl PageTableGuard<'_> {
         flags: MappingFlags,
     ) -> PagingResult<TlbFlush> {
         self.assert_covers(vaddr);
-        match &mut self.0 {
+        match &mut self.lock {
             PageTableWriteLock::Whole(pt) => pt.map(vaddr, target, page_size, flags),
             PageTableWriteLock::Subtree { pt, .. } => {
                 debug_assert_ne!(page_size, PageSize::Size1G);
@@ -473,7 +481,7 @@ impl PageTableGuard<'_> {
         flags: MappingFlags,
     ) -> PagingResult<(PageSize, TlbFlush)> {
         self.assert_covers(vaddr);
-        match &mut self.0 {
+        match &mut self.lock {
             PageTableWriteLock::Whole(pt) => pt.remap(vaddr, paddr, flags),
             PageTableWriteLock::Subtree { pt, .. } => {
                 // SAFETY: the subtree lock excludes access to the leaf PTE.
@@ -528,7 +536,8 @@ impl PageTableLockManager {
     pub fn lock_for_addr(&self, vaddr: VirtAddr) -> PageTableGuard {
         let pt = self.pt.read();
         let subtree = self.subtree_lock(vaddr).write();
-        let needs_whole_lock = match pt.query_skip(vaddr) {
+        let probe = pt.query_skip(vaddr);
+        let needs_whole_lock = match probe {
             Ok((_, _, PageSize::Size1G)) => true,
             Err(skip) => skip >= PageSize::Size1G as usize,
             _ => false,
@@ -537,13 +546,19 @@ impl PageTableLockManager {
         if needs_whole_lock {
             drop(subtree);
             drop(pt);
-            PageTableGuard(PageTableWriteLock::Whole(self.pt.write()))
+            PageTableGuard {
+                lock: PageTableWriteLock::Whole(self.pt.write()),
+                probe: None,
+            }
         } else {
-            PageTableGuard(PageTableWriteLock::Subtree {
-                pt,
-                _subtree: subtree,
-                subtree_id: Self::subtree_id(vaddr),
-            })
+            PageTableGuard {
+                lock: PageTableWriteLock::Subtree {
+                    pt,
+                    _subtree: subtree,
+                    subtree_id: Self::subtree_id(vaddr),
+                },
+                probe: Some((vaddr, probe.map_err(|_| PagingError::NotMapped))),
+            }
         }
     }
 
