@@ -1,6 +1,12 @@
 use super::*;
 
-fn rename_at(olddirfd: i32, oldpath: &str, newdirfd: i32, newpath: &str) -> Result<(), LinuxError> {
+fn rename_at(
+    olddirfd: i32,
+    oldpath: &str,
+    newdirfd: i32,
+    newpath: &str,
+    flags: usize,
+) -> Result<(), LinuxError> {
     let olddirfd = if oldpath.starts_with('/') {
         AT_FDCWD as i32
     } else {
@@ -18,6 +24,20 @@ fn rename_at(olddirfd: i32, oldpath: &str, newdirfd: i32, newpath: &str) -> Resu
         .map_err(|e| LinuxError::from(e.canonicalize()))?;
     let (dst_dir, dst_name) = axtask::future::block_on(new_ctx.resolve_parent(Path::new(newpath)))
         .map_err(|e| LinuxError::from(e.canonicalize()))?;
+
+    if (flags & RENAME_NOREPLACE as usize) != 0 {
+        match axtask::future::block_on(dst_dir.lookup_no_follow(dst_name.as_ref())) {
+            Ok(_) => return Err(LinuxError::EEXIST),
+            Err(e) if e.canonicalize() == VfsError::NotFound => {}
+            Err(e) => return Err(LinuxError::from(e.canonicalize())),
+        }
+    }
+
+    if crate::impls::fs::common::is_location_readonly(&src_dir)
+        || crate::impls::fs::common::is_location_readonly(&dst_dir)
+    {
+        return Err(LinuxError::EROFS);
+    }
 
     axtask::future::block_on(old_ctx.check_write_permission(&src_dir))?;
     axtask::future::block_on(new_ctx.check_write_permission(&dst_dir))?;
@@ -52,29 +72,14 @@ pub fn sys_unlinkat(dirfd: i32, pathname: usize, flags: usize) -> isize {
         };
         let ctx = context_for_dirfd(resolved_dirfd)?;
 
-        // Check for read-only filesystem
-        {
-            let is_ro = match axtask::future::block_on(ctx.resolve_no_follow(path)) {
-                Ok(loc) => crate::impls::fs::common::is_location_readonly(&loc),
-                Err(_) => {
-                    if let Ok((parent_loc, _)) = axtask::future::block_on(
-                        ctx.resolve_parent(axfs_ng_vfs::path::Path::new(path)),
-                    ) {
-                        crate::impls::fs::common::is_location_readonly(&parent_loc)
-                    } else {
-                        false
-                    }
-                }
-            };
-            if is_ro {
-                return Err(LinuxError::EROFS);
-            }
-        }
-
         // 1. Resolve parent directory and child entry name
         let (parent_loc, entry_name) =
             axtask::future::block_on(ctx.resolve_parent(Path::new(path)))
                 .map_err(|e| LinuxError::from(e.canonicalize()))?;
+
+        if crate::impls::fs::common::is_location_readonly(&parent_loc) {
+            return Err(LinuxError::EROFS);
+        }
 
         // Get process credentials
         let (uid, gid) = pulse_core::task::current_process()
@@ -87,6 +92,10 @@ pub fn sys_unlinkat(dirfd: i32, pathname: usize, flags: usize) -> isize {
         // 3. Lookup the child entry to ensure it exists (ENOENT if not found)
         let child_loc = axtask::future::block_on(parent_loc.lookup_no_follow(entry_name.as_ref()))
             .map_err(|e| LinuxError::from(e.canonicalize()))?;
+
+        if crate::impls::fs::common::is_location_readonly(&child_loc) {
+            return Err(LinuxError::EROFS);
+        }
 
         // 4. Enforce write permission check on parent directory
         crate::impls::fs::common::check_faccess_permission(&parent_loc, W_OK as usize, uid, gid)?;
@@ -103,12 +112,12 @@ pub fn sys_unlinkat(dirfd: i32, pathname: usize, flags: usize) -> isize {
         }
 
         if (flags & AT_REMOVEDIR as usize) != 0 {
-            axtask::future::block_on(ctx.remove_dir(Path::new(path)))
+            axtask::future::block_on(parent_loc.unlink(entry_name.as_ref(), true))
                 .map_err(|e| LinuxError::from(e.canonicalize()))?;
             return Ok(0isize);
         }
 
-        axtask::future::block_on(ctx.remove_file(Path::new(path)))
+        axtask::future::block_on(parent_loc.unlink(entry_name.as_ref(), false))
             .map_err(|e| LinuxError::from(e.canonicalize()))?;
         Ok(0isize)
     });
@@ -150,69 +159,7 @@ pub fn sys_renameat2(
         Err(e) => return -e.code() as isize,
     };
 
-    if (flags & RENAME_NOREPLACE as usize) != 0 {
-        let resolved_newdirfd = if newpath.starts_with('/') {
-            AT_FDCWD as i32
-        } else {
-            newdirfd
-        };
-        let new_ctx = match context_for_dirfd(resolved_newdirfd) {
-            Ok(ctx) => ctx,
-            Err(e) => return -e.code() as isize,
-        };
-        match axtask::future::block_on(new_ctx.resolve_no_follow(newpath.as_str())) {
-            Ok(_) => return -LinuxError::EEXIST.code() as isize,
-            Err(e) => {
-                let errno = LinuxError::from(e.canonicalize());
-                if errno != LinuxError::ENOENT {
-                    return -errno.code() as isize;
-                }
-            }
-        }
-    }
-
-    // Check for read-only filesystem on old or new path
-    {
-        let resolved_olddirfd = if oldpath.starts_with('/') {
-            AT_FDCWD as i32
-        } else {
-            olddirfd
-        };
-        let resolved_newdirfd2 = if newpath.starts_with('/') {
-            AT_FDCWD as i32
-        } else {
-            newdirfd
-        };
-        let old_ro = if let Ok(old_ctx) = context_for_dirfd(resolved_olddirfd) {
-            match axtask::future::block_on(old_ctx.resolve_no_follow(oldpath.as_str())) {
-                Ok(loc) => crate::impls::fs::common::is_location_readonly(&loc),
-                Err(_) => false,
-            }
-        } else {
-            false
-        };
-        let new_ro = if let Ok(new_ctx2) = context_for_dirfd(resolved_newdirfd2) {
-            match axtask::future::block_on(new_ctx2.resolve_no_follow(newpath.as_str())) {
-                Ok(loc) => crate::impls::fs::common::is_location_readonly(&loc),
-                Err(_) => {
-                    if let Ok((parent_loc, _)) = axtask::future::block_on(
-                        new_ctx2.resolve_parent(axfs_ng_vfs::path::Path::new(newpath.as_str())),
-                    ) {
-                        crate::impls::fs::common::is_location_readonly(&parent_loc)
-                    } else {
-                        false
-                    }
-                }
-            }
-        } else {
-            false
-        };
-        if old_ro || new_ro {
-            return -LinuxError::EROFS.code() as isize;
-        }
-    }
-
-    match rename_at(olddirfd, oldpath.as_str(), newdirfd, newpath.as_str()) {
+    match rename_at(olddirfd, oldpath.as_str(), newdirfd, newpath.as_str(), flags) {
         Ok(()) => 0,
         Err(e) => -e.code() as isize,
     }

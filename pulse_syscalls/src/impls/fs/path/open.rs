@@ -160,34 +160,17 @@ pub fn sys_mkdirat(dirfd: i32, pathname: usize, mode: usize) -> isize {
             dirfd
         };
         let ctx = context_for_dirfd(resolved_dirfd)?;
-        // Check for read-only filesystem: resolve parent dir if path doesn't exist yet
-        {
-            let is_ro = match axtask::future::block_on(ctx.resolve_no_follow(path)) {
-                Ok(loc) => crate::impls::fs::common::is_location_readonly(&loc),
-                Err(_) => {
-                    if let Ok((parent_loc, _)) = axtask::future::block_on(
-                        ctx.resolve_parent(axfs_ng_vfs::path::Path::new(path)),
-                    ) {
-                        crate::impls::fs::common::is_location_readonly(&parent_loc)
-                    } else {
-                        false
-                    }
-                }
-            };
-            if is_ro {
-                return Err(LinuxError::EROFS);
-            }
-        }
-        match axtask::future::block_on(ctx.resolve_no_follow(path)) {
-            Ok(_) => {
-                axlog::debug!("sys_mkdirat: path '{}' already exists", path);
-                return Err(LinuxError::EEXIST);
-            }
-            Err(VfsError::NotFound) => {}
-            Err(e) => return Err(LinuxError::from(e.canonicalize())),
+        let (parent_loc, entry_name) = axtask::future::block_on(
+            ctx.resolve_nonexistent(axfs_ng_vfs::path::Path::new(path)),
+        )
+        .map_err(|e| LinuxError::from(e.canonicalize()))?;
+        if crate::impls::fs::common::is_location_readonly(&parent_loc) {
+            return Err(LinuxError::EROFS);
         }
         axlog::debug!("sys_mkdirat: creating directory '{}'", path);
-        match axtask::future::block_on(ctx.create_dir(path, mkdir_mode(mode))) {
+        match axtask::future::block_on(
+            ctx.create_dir_at(parent_loc, entry_name.as_ref(), mkdir_mode(mode)),
+        ) {
             Ok(_) => {
                 axlog::debug!("sys_mkdirat: directory '{}' created successfully", path);
                 Ok(0isize)
