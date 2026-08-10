@@ -1050,17 +1050,17 @@ impl CachedFileShared {
 
         let dirty_pns = {
             let mut cache = self.page_cache.lock();
-            for (_, page) in cache.iter_mut() {
-                if page.may_write_mapping && page.has_user_mapping() {
-                    page.mark_mapping_dirty();
-                }
-            }
             let mut dirty = cache
-                .iter()
-                .filter(|(pn, page)| {
-                    page.dirty && page_range.is_none_or(|(first, end)| **pn >= first && **pn < end)
+                .iter_mut()
+                .filter_map(|(pn, page)| {
+                    if !page_range.is_none_or(|(first, end)| *pn >= first && *pn < end) {
+                        return None;
+                    }
+                    if page.may_write_mapping && page.has_user_mapping() {
+                        page.mark_mapping_dirty();
+                    }
+                    page.dirty.then_some(*pn)
                 })
-                .map(|(pn, _)| *pn)
                 .collect::<Vec<_>>();
             dirty.sort_unstable();
             dirty
