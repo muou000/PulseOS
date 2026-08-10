@@ -120,7 +120,7 @@ impl PageTable {
         vaddr: VirtAddr,
         size: usize,
         allow_huge: bool,
-        on_unmapped: impl FnMut(VirtAddr, PhysAddr, PageSize),
+        on_unmapped: impl FnMut(VirtAddr, PhysAddr, MappingFlags, PageSize),
     ) -> PagingResult {
         self.inner
             .unmap_present_range(vaddr, size, allow_huge, on_unmapped)

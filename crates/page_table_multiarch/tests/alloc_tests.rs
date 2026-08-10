@@ -179,7 +179,7 @@ fn unmap_present_range_clears_sparse_pages_and_placeholders() -> PagingResult<()
         VirtAddr::from_usize(0),
         0x8000_0000,
         false,
-        |vaddr, paddr, page_size| unmapped.push((vaddr, paddr, page_size)),
+        |vaddr, paddr, _flags, page_size| unmapped.push((vaddr, paddr, page_size)),
     )?;
 
     assert_eq!(
@@ -216,13 +216,13 @@ fn unmap_present_range_preserves_partial_huge_page() -> PagingResult<()> {
         .ignore();
 
     assert_eq!(
-        table.unmap_present_range(huge + 0x1000, 0x1000, true, |_, _, _| {}),
+        table.unmap_present_range(huge + 0x1000, 0x1000, true, |_, _, _, _| {}),
         Err(page_table_multiarch::PagingError::MappedToHugePage)
     );
     assert_eq!(table.query(huge)?.0, frame);
 
     assert_eq!(
-        table.unmap_present_range(huge, PageSize::Size2M as usize, false, |_, _, _| {}),
+        table.unmap_present_range(huge, PageSize::Size2M as usize, false, |_, _, _, _| {}),
         Err(page_table_multiarch::PagingError::MappedToHugePage)
     );
     assert_eq!(table.query(huge)?.0, frame);
@@ -232,7 +232,7 @@ fn unmap_present_range_preserves_partial_huge_page() -> PagingResult<()> {
         huge,
         PageSize::Size2M as usize,
         true,
-        |vaddr, paddr, size| {
+        |vaddr, paddr, _flags, size| {
             unmapped.push((vaddr, paddr, size));
         },
     )?;

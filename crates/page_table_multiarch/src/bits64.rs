@@ -381,8 +381,9 @@ impl<M: PagingMetaData, PTE: GenericPTE, H: PagingHandler> PageTable64<M, PTE, H
     ///
     /// Unlike [`PageTable64::unmap_region`], holes are allowed. Empty page-table
     /// subtrees are skipped without walking each 4K address. `on_unmapped` is
-    /// called once for every cleared leaf entry; the caller remains responsible
-    /// for TLB invalidation and mapped-frame reclamation.
+    /// called once for every cleared leaf entry and receives its flags; the
+    /// caller remains responsible for TLB invalidation and mapped-frame
+    /// reclamation.
     ///
     /// A partially covered huge page is rejected and left mapped. When
     /// `allow_huge` is false, fully covered huge pages are also rejected.
@@ -391,7 +392,7 @@ impl<M: PagingMetaData, PTE: GenericPTE, H: PagingHandler> PageTable64<M, PTE, H
         vaddr: M::VirtAddr,
         size: usize,
         allow_huge: bool,
-        mut on_unmapped: impl FnMut(M::VirtAddr, PhysAddr, PageSize),
+        mut on_unmapped: impl FnMut(M::VirtAddr, PhysAddr, MappingFlags, PageSize),
     ) -> PagingResult {
         let start: usize = vaddr.into();
         if size == 0 {
@@ -743,7 +744,7 @@ impl<M: PagingMetaData, PTE: GenericPTE, H: PagingHandler> PageTable64<M, PTE, H
         start: usize,
         end: usize,
         allow_huge: bool,
-        on_unmapped: &mut impl FnMut(M::VirtAddr, PhysAddr, PageSize),
+        on_unmapped: &mut impl FnMut(M::VirtAddr, PhysAddr, MappingFlags, PageSize),
     ) -> PagingResult {
         let entry_shift = 12 + (M::LEVELS - 1 - level) * 9;
         let entry_span = 1usize << entry_shift;
@@ -792,8 +793,9 @@ impl<M: PagingMetaData, PTE: GenericPTE, H: PagingHandler> PageTable64<M, PTE, H
                 }
 
                 let paddr = entry.paddr();
+                let flags = entry.flags();
                 entry.clear();
-                on_unmapped(entry_start.into(), paddr, page_size);
+                on_unmapped(entry_start.into(), paddr, flags, page_size);
             } else {
                 let next_paddr = entry.paddr();
                 if next_paddr.as_usize() == 0 {

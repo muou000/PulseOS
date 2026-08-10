@@ -295,13 +295,14 @@ impl Backend {
         mutation: &mut impl MappingMutation<VirtAddr>,
     ) -> bool {
         debug!("unmap_alloc: [{:#x}, {:#x})", start, start + size);
-        let result = pt.unmap_present_range(start, size, false, |addr, frame, page_size| {
-            debug_assert_eq!(page_size, PageSize::Size4K);
-            if frame.as_usize() != 0 {
-                mutation.record(addr, PAGE_SIZE_4K);
-                reclaim.defer_frame(frame);
-            }
-        });
+        let result =
+            pt.unmap_present_range(start, size, false, |addr, frame, _flags, page_size| {
+                debug_assert_eq!(page_size, PageSize::Size4K);
+                if frame.as_usize() != 0 {
+                    mutation.record(addr, PAGE_SIZE_4K);
+                    reclaim.defer_frame(frame);
+                }
+            });
         result.is_ok()
     }
 
