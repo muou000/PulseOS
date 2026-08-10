@@ -503,11 +503,12 @@ impl Backend {
         };
         let file_size = mapping.file_bytes();
         let mut writeback = None;
-        let result = pt.unmap_present_range(start, size, false, |addr, frame, page_size| {
+        let result = pt.unmap_present_range(start, size, false, |addr, frame, flags, page_size| {
             debug_assert_eq!(page_size, PageSize::Size4K);
             if frame.as_usize() != 0 {
                 mutation.record(addr, PAGE_SIZE_4K);
                 if mapping.shared
+                    && flags.contains(MappingFlags::WRITE)
                     && let Some((file_offset, _)) =
                         mapping.page_read_window_at_size(addr, file_size)
                 {
@@ -549,7 +550,9 @@ impl Backend {
         let pages = PageIter4K::new(start, start + size).ok_or(())?;
         let mut page_numbers = Vec::new();
         for addr in pages {
-            if let Ok((frame, _flags, _)) = pt.read_for_addr(addr).query(addr) {
+            if let Ok((frame, flags, _)) = pt.read_for_addr(addr).query(addr)
+                && flags.contains(MappingFlags::WRITE)
+            {
                 if frame.as_usize() != 0 {
                     let Some((file_offset, _)) = mapping.page_read_window(addr) else {
                         continue;
