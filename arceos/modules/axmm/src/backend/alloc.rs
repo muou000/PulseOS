@@ -1,3 +1,4 @@
+use alloc::vec::Vec;
 use axalloc::global_allocator;
 use axerrno::{AxError, AxResult};
 use axhal::mem::{flush_dcache_range, phys_to_virt, virt_to_phys};
@@ -180,6 +181,60 @@ pub(super) fn dealloc_frame(frame: PhysAddr) {
         return;
     }
     global_allocator().dealloc_pages(phys_to_virt(frame).as_usize(), 1);
+}
+
+fn dealloc_frame_runs(frames: &mut [PhysAddr]) {
+    if frames.is_empty() {
+        return;
+    }
+    frames.sort_unstable_by_key(|frame| frame.as_usize());
+    let allocator = global_allocator();
+    let mut run_start = frames[0].as_usize();
+    let mut run_len = 1;
+    for frame in frames.iter().skip(1) {
+        let paddr = frame.as_usize();
+        if paddr == run_start.saturating_add(run_len * PAGE_SIZE_4K) {
+            run_len += 1;
+        } else {
+            allocator.dealloc_pages(phys_to_virt(PhysAddr::from(run_start)).as_usize(), run_len);
+            run_start = paddr;
+            run_len = 1;
+        }
+    }
+    allocator.dealloc_pages(phys_to_virt(PhysAddr::from(run_start)).as_usize(), run_len);
+}
+
+pub(super) fn dealloc_frames(mut frames: Vec<PhysAddr>) {
+    frames.retain(|frame| cow_dec_frame_ref(*frame));
+    dealloc_frame_runs(&mut frames);
+}
+
+pub(super) fn dealloc_frame_values(frames: &mut [usize]) {
+    let mut count = 0;
+    for index in 0..frames.len() {
+        let frame = PhysAddr::from(frames[index]);
+        if cow_dec_frame_ref(frame) {
+            frames[count] = frame.as_usize();
+            count += 1;
+        }
+    }
+    frames[..count].sort_unstable();
+    if count == 0 {
+        return;
+    }
+    let allocator = global_allocator();
+    let mut run_start = frames[0];
+    let mut run_len = 1;
+    for &paddr in &frames[1..count] {
+        if paddr == run_start.saturating_add(run_len * PAGE_SIZE_4K) {
+            run_len += 1;
+        } else {
+            allocator.dealloc_pages(phys_to_virt(PhysAddr::from(run_start)).as_usize(), run_len);
+            run_start = paddr;
+            run_len = 1;
+        }
+    }
+    allocator.dealloc_pages(phys_to_virt(PhysAddr::from(run_start)).as_usize(), run_len);
 }
 
 fn alloc_frame_batch(
