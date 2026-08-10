@@ -1008,7 +1008,8 @@ impl<D: AsyncBlockDriverOps + Clone + 'static> Ext4Disk<D> {
         // requests makes every directory, bitmap, and inode access pay an IRQ
         // completion plus task block/wake; multi-block transfers still bypass
         // the cache to avoid copying and cache pollution.
-        if bypass_block_cache(offset, buf.len(), block_size) {
+        let direct_block_io = bypass_block_cache(offset, buf.len(), block_size);
+        if direct_block_io {
             let has_any_cache = {
                 let mut current = start_block_offset;
                 let mut found = false;
@@ -1085,6 +1086,23 @@ impl<D: AsyncBlockDriverOps + Clone + 'static> Ext4Disk<D> {
                     }
                 }
                 crate::buildstorm_stat_add!(EXT4_BLOCK_CACHE_MISSES, consecutive_misses);
+
+                // For an aligned multi-block data request, a mixed cache hit
+                // should not force an uncached run through a temporary buffer
+                // and then duplicate every block into the metadata cache.
+                if direct_block_io && consecutive_misses > 1 {
+                    let buf_start = current_block_offset - offset;
+                    let run_len = consecutive_misses * block_size;
+                    crate::buildstorm_stat_inc!(EXT4_BYPASS_READS);
+                    self.read_blocks_from_disk_async(
+                        current_block_offset,
+                        consecutive_misses,
+                        &mut buf[buf_start..buf_start + run_len],
+                    )
+                    .await?;
+                    current_block_offset += run_len;
+                    continue;
+                }
 
                 // Read all consecutive misses from disk in one go
                 let mut run_data = vec![0u8; consecutive_misses * block_size];
