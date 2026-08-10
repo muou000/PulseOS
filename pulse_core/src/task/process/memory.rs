@@ -68,7 +68,7 @@ impl Process {
                     if !already_resident {
                         break;
                     }
-                    page += PAGE_SIZE_4K;
+                    page += memory_addr::PAGE_SIZE_4K;
                 }
             }
 
@@ -78,7 +78,7 @@ impl Process {
             if !self.resolve_page_fault(&aspace_handle, page, access)? {
                 return Err(AxError::BadAddress);
             }
-            page += PAGE_SIZE_4K;
+            page += memory_addr::PAGE_SIZE_4K;
         }
         Ok(())
     }
