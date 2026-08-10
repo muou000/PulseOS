@@ -1,7 +1,7 @@
 use alloc::boxed::Box;
 use axhal::paging::MappingFlags;
 use memory_addr::{VirtAddr, PAGE_SIZE_4K, MemoryAddr};
-use axhal::mem::phys_to_virt;
+use axhal::mem::{flush_dcache_range, phys_to_virt};
 use super::Backend;
 use super::alloc::{alloc_frame, dealloc_frame};
 use axalloc::frame_table;
@@ -67,12 +67,13 @@ impl CowMapping {
                         let Some(new_frame) = alloc_frame(false) else {
                             return false;
                         };
-
+                        flush_dcache_range(old_frame, PAGE_SIZE_4K);
                         let src = phys_to_virt(old_frame).as_ptr();
                         let dst = phys_to_virt(new_frame).as_mut_ptr();
                         unsafe {
                             core::ptr::copy_nonoverlapping(src, dst, PAGE_SIZE_4K);
                         }
+                        flush_dcache_range(new_frame, PAGE_SIZE_4K);
 
                         // Map new frame with WRITE permission
                         let mut pt_guard = pt.lock_for_addr(page);

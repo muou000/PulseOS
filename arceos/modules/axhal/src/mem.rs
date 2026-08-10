@@ -12,6 +12,19 @@ pub use axplat::mem::{
 };
 pub use memory_addr::{PAGE_SIZE_4K, PhysAddr, PhysAddrRange, VirtAddr, VirtAddrRange, pa, va};
 
+/// Flushes data-cache lines only on platforms that need alias maintenance.
+///
+/// `axconfig::PLATFORM` is generated for each kernel build, so QEMU's coherent
+/// memory path is folded away by the compiler while custom cache-coherent
+/// platforms retain the platform hook.
+#[inline(always)]
+pub fn flush_dcache_range(paddr: PhysAddr, size: usize) {
+    if matches!(axconfig::PLATFORM, "riscv64-qemu-virt" | "loongarch64-qemu-virt") {
+        return;
+    }
+    axplat::mem::flush_dcache_range(paddr, size);
+}
+
 const MAX_REGIONS: usize = 128;
 
 static ALL_MEM_REGIONS: LazyInit<Vec<PhysMemRegion, MAX_REGIONS>> = LazyInit::new();

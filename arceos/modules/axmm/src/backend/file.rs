@@ -3,7 +3,7 @@ use alloc::{sync::Arc, vec::Vec};
 use axerrno::{AxError, AxResult};
 use axfs::{CachedFile, FileFlags, SHARED_PAGE_BATCH_CAPACITY, SharedPagePaddrs};
 use axhal::{
-    mem::phys_to_virt,
+    mem::{flush_dcache_range, phys_to_virt},
     paging::{MappingFlags, PageSize, PageTable},
 };
 use memory_addr::{MemoryAddr, PAGE_SIZE_4K, PageIter4K, PhysAddr, VirtAddr};
@@ -229,6 +229,9 @@ impl FilePageLoad {
                     self.page_number, requested_pages, self.may_write, error
                 );
             })?;
+        for (_, frame) in frames.iter() {
+            flush_dcache_range(*frame, PAGE_SIZE_4K);
+        }
         let prepared_pages = frames.len();
         axfs::buildstorm_stat_add!(MM_FILE_FAULT_PREPARED_PAGES, prepared_pages);
         if self.sequential {
@@ -599,11 +602,13 @@ impl Backend {
                     let Some(new_frame) = alloc_frame(false) else {
                         return false;
                     };
+                    flush_dcache_range(old_frame, PAGE_SIZE_4K);
                     let src = phys_to_virt(old_frame).as_ptr();
                     let dst = phys_to_virt(new_frame).as_mut_ptr();
                     unsafe {
                         core::ptr::copy_nonoverlapping(src, dst, PAGE_SIZE_4K);
                     }
+                    flush_dcache_range(new_frame, PAGE_SIZE_4K);
 
                     let mut pt_guard = pt.lock_for_addr(page_addr);
                     if let Ok((curr_frame, curr_flags, _)) = pt_guard.query(page_addr) {
@@ -726,6 +731,7 @@ impl Backend {
             let Some(frame) = alloc_frame(false) else {
                 return false;
             };
+            flush_dcache_range(requested_frame, PAGE_SIZE_4K);
             unsafe {
                 core::ptr::copy_nonoverlapping(
                     phys_to_virt(requested_frame).as_ptr(),
@@ -733,6 +739,7 @@ impl Backend {
                     PAGE_SIZE_4K,
                 );
             }
+            flush_dcache_range(frame, PAGE_SIZE_4K);
             Some(frame)
         } else {
             None

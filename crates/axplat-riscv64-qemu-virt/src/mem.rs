@@ -46,6 +46,8 @@ impl MemIf for MemIfImpl {
         &MMIO_RANGES
     }
 
+    fn flush_dcache_range(_paddr: PhysAddr, _size: usize) {}
+
     /// Translates a physical address to a virtual address.
     fn phys_to_virt(paddr: PhysAddr) -> VirtAddr {
         va!(paddr.as_usize() + PHYS_VIRT_OFFSET)
