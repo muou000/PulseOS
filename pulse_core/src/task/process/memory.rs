@@ -55,23 +55,30 @@ impl Process {
         let access = access | MappingFlags::USER;
 
         let aspace_handle = self.aspace_handle();
-        let pages =
-            memory_addr::PageIter4K::new(start_page, end_page).ok_or(AxError::BadAddress)?;
-        for page in pages {
-            let already_resident = {
+        let mut page = start_page;
+        while page < end_page {
+            {
                 let aspace = aspace_handle.read();
-                if let Ok((paddr, flags, _)) = aspace.query_vaddr(page) {
-                    paddr.as_usize() != 0 && flags.contains(access)
-                } else {
-                    false
+                while page < end_page {
+                    let already_resident = aspace
+                        .query_vaddr(page)
+                        .is_ok_and(|(paddr, flags, _)| {
+                            paddr.as_usize() != 0 && flags.contains(access)
+                        });
+                    if !already_resident {
+                        break;
+                    }
+                    page += PAGE_SIZE_4K;
                 }
-            };
-            if already_resident {
-                continue;
+            }
+
+            if page >= end_page {
+                break;
             }
             if !self.resolve_page_fault(&aspace_handle, page, access)? {
                 return Err(AxError::BadAddress);
             }
+            page += PAGE_SIZE_4K;
         }
         Ok(())
     }
