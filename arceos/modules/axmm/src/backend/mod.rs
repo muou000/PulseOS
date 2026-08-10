@@ -380,7 +380,7 @@ impl DeferredReclaims {
                 // SAFETY: this reclaim owns the CPU buffer lease until it is
                 // released below, so the initialized prefix is exclusive.
                 let frames = unsafe {
-                    &mut (*RETIREMENT_RECLAIM_BUFFERS[cpu_id].frames.get())[..len]
+                    &mut (&mut *RETIREMENT_RECLAIM_BUFFERS[cpu_id].frames.get())[..len]
                 };
                 self::alloc::dealloc_frame_values(frames);
                 release_retirement_buffer(cpu_id);
