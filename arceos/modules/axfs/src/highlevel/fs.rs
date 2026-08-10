@@ -374,6 +374,16 @@ impl FsContext {
     /// Creates a new, empty directory at the provided path.
     pub async fn create_dir(&self, path: impl AsRef<Path>, mode: NodePermission) -> VfsResult<Location> {
         let (dir, name) = self.resolve_nonexistent(path.as_ref()).await?;
+        self.create_dir_at(dir, name, mode).await
+    }
+
+    /// Creates a directory from an already resolved parent and entry name.
+    pub async fn create_dir_at(
+        &self,
+        dir: Location,
+        name: &str,
+        mode: NodePermission,
+    ) -> VfsResult<Location> {
         self.check_write_permission(&dir).await?;
         let mut final_mode = mode;
         let mut final_credentials = self.credentials;
