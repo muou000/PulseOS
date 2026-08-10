@@ -620,13 +620,9 @@ impl AddrSpace {
             return true;
         }
 
-        let mut cached = false;
-        self.for_each_area_with_backend(|start, end, _, backend| {
-            if !cached && start <= vaddr && vaddr < end {
-                cached = backend.is_file_page_cached(vaddr);
-            }
-        });
-        cached
+        self.areas
+            .find(vaddr)
+            .is_some_and(|area| area.backend().is_file_page_cached(vaddr))
     }
 
     /// Pins a mapped user frame while holding the leaf page-table read lock.
@@ -850,17 +846,12 @@ impl AddrSpace {
             return ax_err!(InvalidInput, "address not aligned");
         }
 
-        let end = start + size;
+        let range = VirtAddrRange::try_from_start_size(start, size)
+            .ok_or(AxError::InvalidInput)?;
         let mut writebacks = FileWritebacks::default();
-        for area in self.areas.iter() {
-            if area.end() <= start {
-                continue;
-            }
-            if area.start() >= end {
-                break;
-            }
-            let overlap_start = if area.start() > start { area.start() } else { start };
-            let overlap_end = if area.end() < end { area.end() } else { end };
+        for area in self.areas.iter_overlapping(range) {
+            let overlap_start = area.start().max(range.start);
+            let overlap_end = area.end().min(range.end);
             if overlap_start < overlap_end {
                 if !area.backend().prepare_file_writeback_range(
                     overlap_start,
@@ -965,20 +956,15 @@ impl AddrSpace {
                 return ax_err!(InvalidInput, "address not aligned");
             }
 
-            let end = start + size;
-            for area in self.areas.iter() {
-                if area.end() <= start {
-                    continue;
-                }
-                if area.start() >= end {
-                    break;
-                }
+            let range = VirtAddrRange::try_from_start_size(start, size)
+                .ok_or(AxError::InvalidInput)?;
+            for area in self.areas.iter_overlapping(range) {
                 if !area.backend().is_discardable() {
                     continue;
                 }
 
-                let overlap_start = area.start().max(start);
-                let overlap_end = area.end().min(end);
+                let overlap_start = area.start().max(range.start);
+                let overlap_end = area.end().min(range.end);
                 if overlap_start < overlap_end
                     && !area.backend().unmap_tracked(
                         overlap_start,
@@ -1363,19 +1349,17 @@ impl AddrSpace {
                 return Err(AxError::InvalidInput);
             }
 
-            // Find the area containing [old_addr, old_addr + old_size)
-            let old_area_start = self.areas.iter().find(|area| {
-                area.start() <= old_addr && area.end() >= old_addr + old_size
-            }).map(|area| area.start()).ok_or(AxError::BadAddress)?;
-
-            // Extract area attributes
             let (old_area_start_val, old_area_end, old_flags, old_backend) = {
-                let area = self.areas.find(old_area_start).unwrap();
+                let area = self
+                    .areas
+                    .find(old_addr)
+                    .filter(|area| area.end() >= old_addr + old_size)
+                    .ok_or(AxError::BadAddress)?;
                 (area.start(), area.end(), area.flags(), area.backend().clone())
             };
 
             // Remove the old area to perform splitting and modifications
-            self.areas.remove(old_area_start).unwrap();
+            self.areas.remove(old_area_start_val).unwrap();
 
             // Re-insert left split if any
             if old_addr > old_area_start_val {
