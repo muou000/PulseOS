@@ -425,11 +425,6 @@ impl PageTableReadGuard<'_> {
 
     pub fn query(&self, vaddr: VirtAddr) -> PagingResult<(PhysAddr, MappingFlags, PageSize)> {
         self.assert_covers(vaddr);
-        if let Some((probe_vaddr, result)) = self.probe
-            && probe_vaddr == vaddr
-        {
-            return result;
-        }
         core::ops::Deref::deref(self).query(vaddr)
     }
 }
@@ -437,7 +432,7 @@ impl PageTableReadGuard<'_> {
 impl PageTableGuard<'_> {
     #[inline]
     pub(crate) fn covers(&self, vaddr: VirtAddr) -> bool {
-        match &self.0 {
+        match &self.lock {
             PageTableWriteLock::Whole(_) => true,
             PageTableWriteLock::Subtree { subtree_id, .. } => {
                 *subtree_id == vaddr.as_usize() >> PAGE_TABLE_SUBTREE_SHIFT
@@ -452,6 +447,11 @@ impl PageTableGuard<'_> {
 
     pub fn query(&self, vaddr: VirtAddr) -> PagingResult<(PhysAddr, MappingFlags, PageSize)> {
         self.assert_covers(vaddr);
+        if let Some((probe_vaddr, result)) = self.probe
+            && probe_vaddr == vaddr
+        {
+            return result;
+        }
         core::ops::Deref::deref(self).query(vaddr)
     }
 
