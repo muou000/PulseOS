@@ -473,6 +473,7 @@ impl<H: DmaOps> Jh7110Dwmac<H> {
             DMA_RX_PBL_16 | ((DMA_BUFFER_SIZE as u32) << DMA_RX_BUFFER_SIZE_SHIFT),
         );
         self.write(DMA_CH0_INT_ENABLE, 0);
+        self.write(DMA_CH0_TX_TAIL, self.tx_desc_paddr(0) as u32);
         self.write(DMA_CH0_RX_TAIL, self.rx_desc_paddr(1) as u32);
     }
 
@@ -1099,6 +1100,10 @@ mod tests {
             DMA_MODE_DESCRIPTOR_CACHE_ENABLE
         );
         assert_eq!(test.device.read(DMA_SYS_BUS_MODE), 0x0f0f_00f1);
+        assert_eq!(
+            test.device.read(DMA_CH0_TX_TAIL),
+            test.device.tx_desc_paddr(0) as u32
+        );
 
         let diagnostics = test.device.diagnostics();
         assert_eq!(
