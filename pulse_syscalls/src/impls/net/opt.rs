@@ -97,6 +97,7 @@ pub fn sys_getsockopt(
                 let reuse = match &socket.inner {
                     SocketInner::Tcp(s) => s.is_reuse_addr(),
                     SocketInner::Udp(s) => s.is_reuse_addr(),
+                    SocketInner::Icmp(_) => false,
                     SocketInner::Local(_) => false,
                     SocketInner::Packet(_) => false,
                     SocketInner::Netlink(_) => false,
@@ -223,7 +224,7 @@ pub fn sys_getsockopt(
                             0
                         }
                     }
-                    SocketInner::Udp(_) | SocketInner::Local(_) | SocketInner::Packet(_) | SocketInner::Netlink(_) => return -(LinuxError::EOPNOTSUPP.code() as isize),
+                    SocketInner::Udp(_) | SocketInner::Icmp(_) | SocketInner::Local(_) | SocketInner::Packet(_) | SocketInner::Netlink(_) => return -(LinuxError::EOPNOTSUPP.code() as isize),
                 };
                 if let Err(e) = write_user_plain(optval, &val) {
                     return -(e.code() as isize);
@@ -316,6 +317,13 @@ pub fn sys_getsockopt(
                         }
                     }
                     SocketInner::Udp(s) => {
+                        if optname == 20 {
+                            s.rcv_timeout()
+                        } else {
+                            s.snd_timeout()
+                        }
+                    }
+                    SocketInner::Icmp(s) => {
                         if optname == 20 {
                             s.rcv_timeout()
                         } else {
@@ -477,6 +485,7 @@ pub fn sys_setsockopt(
                 match &socket.inner {
                     SocketInner::Tcp(s) => s.set_reuse_addr(reuse),
                     SocketInner::Udp(s) => s.set_reuse_addr(reuse),
+                    SocketInner::Icmp(_) => {}
                     SocketInner::Local(_) => {}
                     SocketInner::Packet(_) => {}
                     SocketInner::Netlink(_) => {}
@@ -508,6 +517,13 @@ pub fn sys_setsockopt(
                         }
                     }
                     SocketInner::Udp(s) => {
+                        if optname == 20 {
+                            s.set_rcv_timeout(ticks);
+                        } else {
+                            s.set_snd_timeout(ticks);
+                        }
+                    }
+                    SocketInner::Icmp(s) => {
                         if optname == 20 {
                             s.set_rcv_timeout(ticks);
                         } else {
@@ -550,7 +566,7 @@ pub fn sys_setsockopt(
                             return -(LinuxError::from(e.canonicalize()).code() as isize);
                         }
                     }
-                    SocketInner::Udp(_) | SocketInner::Local(_) | SocketInner::Packet(_) | SocketInner::Netlink(_) => return -(LinuxError::EOPNOTSUPP.code() as isize),
+                    SocketInner::Udp(_) | SocketInner::Icmp(_) | SocketInner::Local(_) | SocketInner::Packet(_) | SocketInner::Netlink(_) => return -(LinuxError::EOPNOTSUPP.code() as isize),
                 }
                 return 0;
             }
@@ -613,8 +629,29 @@ pub fn sys_setsockopt(
                             }
                         }
                     }
-                    SocketInner::Local(_) | SocketInner::Packet(_) | SocketInner::Netlink(_) => return -(LinuxError::EOPNOTSUPP.code() as isize),
+                    SocketInner::Icmp(_) | SocketInner::Local(_) | SocketInner::Packet(_) | SocketInner::Netlink(_) => return -(LinuxError::EOPNOTSUPP.code() as isize),
                 }
+            }
+            2 => {
+                // IP_TTL
+                if optlen < 4 {
+                    return -(LinuxError::EINVAL.code() as isize);
+                }
+                let ttl: i32 = match read_user_plain(optval) {
+                    Ok(value) => value,
+                    Err(e) => return -(e.code() as isize),
+                };
+                if !(1..=255).contains(&ttl) {
+                    return -(LinuxError::EINVAL.code() as isize);
+                }
+                match &socket.inner {
+                    SocketInner::Udp(s) => s.set_socket_ttl(ttl as u8),
+                    SocketInner::Icmp(s) => s.set_socket_ttl(ttl as u8),
+                    SocketInner::Tcp(_) | SocketInner::Local(_) | SocketInner::Packet(_) | SocketInner::Netlink(_) => {
+                        return -(LinuxError::EOPNOTSUPP.code() as isize);
+                    }
+                }
+                return 0;
             }
             1 | 10 | 11 => {
                 // IP_TOS (1), IP_MTU_DISCOVER (10), IP_RECVERR (11)
