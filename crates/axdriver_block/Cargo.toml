@@ -42,6 +42,13 @@ async = []
 bcm2835-sdhci = ["dep:bcm2835-sdhci"]
 default = []
 ramdisk = []
+starfive-jh7110-sdmmc = [
+    "dep:axhal",
+    "dep:dwmmc-host",
+    "dep:sdio-host2",
+    "dep:sdmmc-protocol",
+    "dep:starfive-jh7110-dwmmc",
+]
 
 [lib]
 name = "axdriver_block"
@@ -62,4 +69,30 @@ path = "../axdriver_base"
 [dependencies.bcm2835-sdhci]
 git = "https://github.com/lhw2002426/bcm2835-sdhci.git"
 rev = "e974f16"
+optional = true
+
+[dependencies.axhal]
+path = "../../arceos/modules/axhal"
+optional = true
+
+# Keep the last tgoskits polling/FIFO generation together. dwmmc-host 0.3.4
+# intentionally removed PIO in favor of an IRQ-driven IDMAC-only contract.
+[dependencies.dwmmc-host]
+version = "=0.3.3"
+default-features = false
+optional = true
+
+[dependencies.sdio-host2]
+version = "=0.1.4"
+optional = true
+
+[dependencies.sdmmc-protocol]
+version = "=0.4.2"
+default-features = false
+features = ["sdio"]
+optional = true
+
+[dependencies.starfive-jh7110-dwmmc]
+version = "=0.1.3"
+default-features = false
 optional = true
