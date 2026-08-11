@@ -59,9 +59,19 @@ macro_rules! for_each_drivers {
             type $drv_type = crate::drivers::BcmSdhciDriver;
             $code
         }
+        #[cfg(block_dev = "starfive-jh7110-sdmmc")]
+        {
+            type $drv_type = crate::drivers::StarfiveJh7110SdMmcDriver;
+            $code
+        }
         #[cfg(net_dev = "ixgbe")]
         {
             type $drv_type = crate::drivers::IxgbeDriver;
+            $code
+        }
+        #[cfg(net_dev = "starfive-jh7110-dwmac")]
+        {
+            type $drv_type = crate::drivers::StarfiveJh7110DwmacDriver;
             $code
         }
         #[cfg(net_dev = "fxmac")]

@@ -527,6 +527,24 @@ pub fn poll_delay() -> Option<smoltcp::time::Duration> {
     }
 }
 
+fn next_poll_delay() -> Option<core::time::Duration> {
+    let protocol_delay =
+        poll_delay().map(|delay| core::time::Duration::from_micros(delay.total_micros()));
+    let device_interval = if ETH0.is_inited() {
+        let dev = ETH0.dev.lock();
+        let inner = dev.inner.borrow();
+        inner.poll_interval()
+    } else {
+        None
+    };
+
+    match (protocol_delay, device_interval) {
+        (Some(protocol), Some(device)) => Some(protocol.min(device)),
+        (Some(delay), None) | (None, Some(delay)) => Some(delay),
+        (None, None) => None,
+    }
+}
+
 /// Benchmark raw socket transmit bandwidth.
 pub fn bench_transmit() {
     ETH0.dev.lock().bench_transmit_bandwidth();
@@ -611,7 +629,7 @@ pub(crate) fn init(_net_dev: AxNetDevice) {
 
             poll_interfaces();
 
-            let delay = poll_delay();
+            let delay = next_poll_delay();
             let wait_context = axtask::WaitContext::new(|| {
                 (
                     axtask::WaitReason::NetworkPoll,
@@ -619,8 +637,7 @@ pub(crate) fn init(_net_dev: AxNetDevice) {
                     0,
                 )
             });
-            if let Some(d) = delay {
-                let duration = core::time::Duration::from_micros(d.total_micros());
+            if let Some(duration) = delay {
                 NET_POLL_WAIT_QUEUE.wait_timeout_until_with_context(wait_context, duration, || {
                     NET_POLL_EPOCH.load(Ordering::Acquire) != observed_epoch
                 });
