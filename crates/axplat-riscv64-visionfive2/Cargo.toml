@@ -1,0 +1,40 @@
+[package]
+name = "axplat-riscv64-visionfive2"
+version = "0.3.0"
+edition = "2024"
+authors = ["PulseOS contributors"]
+description = "PulseOS axplat implementation for the StarFive VisionFive 2."
+homepage = "https://github.com/muou000/PulseOS"
+repository = "https://github.com/muou000/PulseOS"
+keywords = ["arceos", "os", "hal", "riscv", "visionfive2"]
+categories = ["embedded", "no-std", "hardware-support", "os"]
+license = "GPL-3.0-or-later OR Apache-2.0 OR MulanPSL-2.0"
+build = "build.rs"
+
+[features]
+fp-simd = ["axcpu/fp-simd"]
+irq = ["axplat/irq"]
+smp = ["axplat/smp"]
+
+[lib]
+name = "axplat_riscv64_visionfive2"
+path = "src/lib.rs"
+
+[dependencies]
+axconfig-macros = "0.2"
+axcpu = "0.2"
+axplat = "0.3.0"
+fdt-raw = "0.3"
+kspin = "0.1"
+log = "0.4"
+riscv = "0.14"
+sbi-rt = { version = "0.0.3", features = ["legacy"] }
+
+[package.metadata.axplat]
+platform = "riscv64-visionfive2"
+arch = "riscv64"
+config = "axconfig.toml"
+crate = "axplat_riscv64_visionfive2"
+
+[package.metadata.docs.rs]
+targets = ["riscv64gc-unknown-none-elf"]

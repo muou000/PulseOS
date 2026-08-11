@@ -5,6 +5,8 @@
 extern crate axlog;
 extern crate alloc;
 extern crate axhal;
+#[cfg(all(target_arch = "riscv64", feature = "visionfive2"))]
+extern crate axplat_riscv64_visionfive2;
 extern crate axruntime;
 extern crate pulse_core;
 extern crate pulse_syscalls;

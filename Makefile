@@ -26,6 +26,18 @@ export LOG ?= info
 
 EXTRA_RUSTFLAGS := -C debuginfo=2 -C force-frame-pointers=yes -C strip=none
 
+VF2_PLATFORM_CONFIG := $(A)/crates/axplat-riscv64-visionfive2/axconfig.toml
+VF2_OUT_DIR := $(A)/target/visionfive2
+VF2_AXCONFIG := $(VF2_OUT_DIR)/axconfig.toml
+VF2_ELF := $(VF2_OUT_DIR)/$(NAME)_riscv64-visionfive2.elf
+VF2_BIN := $(VF2_OUT_DIR)/$(NAME)_riscv64-visionfive2.bin
+VF2_UIMAGE := $(VF2_OUT_DIR)/$(NAME)_riscv64-visionfive2.uimg
+VF2_APP_FEATURES := visionfive2,$(QPERF_APP_FEATURE)
+VF2_SMP ?= 4
+VF2_IP ?= 169.254.141.28
+VF2_GW ?= 169.254.141.27
+VF2_BUILD_EPOCH ?= $(shell date +%s)
+
 IMG ?= n
 
 prepare-tools:
@@ -100,14 +112,40 @@ test-artifacts: prepare-tools
 build: prepare-tools defconfig
 	@$(MAKE) -C arceos A=$(A) ARCH=$(ARCH) $@
 
+visionfive2: prepare-tools
+	@command -v mkimage >/dev/null || (echo "Error: VisionFive 2 U-Boot image generation requires mkimage (install u-boot-tools)."; exit 1)
+	@mkdir -p $(VF2_OUT_DIR)
+	@rm -f $(VF2_AXCONFIG)
+	@ARCH=riscv64 MYPLAT=axplat-riscv64-visionfive2 SMP=$(VF2_SMP) APP_FEATURES=$(VF2_APP_FEATURES) LOG=$(LOG) BUS=mmio IP=$(VF2_IP) GW=$(VF2_GW) PULSE_BUILD_EPOCH=$(VF2_BUILD_EPOCH) \
+		PLAT_CONFIG=$(VF2_PLATFORM_CONFIG) OUT_CONFIG=$(VF2_AXCONFIG) \
+		OUT_DIR=$(VF2_OUT_DIR) UIMAGE=y $(MAKE) -C arceos build \
+		EXTRA_RUSTFLAGS="$(EXTRA_RUSTFLAGS)"
+	@cp $(VF2_ELF) $(NAME)_riscv64-visionfive2.elf
+	@cp $(VF2_BIN) kernel-vf2
+	@cp $(VF2_UIMAGE) kernel-vf2.uimg
+	@echo "Built kernel-vf2.uimg for U-Boot bootm at 0x40200000."
+
+visionfive2-elf: prepare-tools
+	@mkdir -p $(VF2_OUT_DIR)
+	@rm -f $(VF2_AXCONFIG)
+	@ARCH=riscv64 MYPLAT=axplat-riscv64-visionfive2 SMP=$(VF2_SMP) APP_FEATURES=$(VF2_APP_FEATURES) LOG=$(LOG) BUS=mmio IP=$(VF2_IP) GW=$(VF2_GW) PULSE_BUILD_EPOCH=$(VF2_BUILD_EPOCH) \
+		PLAT_CONFIG=$(VF2_PLATFORM_CONFIG) OUT_CONFIG=$(VF2_AXCONFIG) \
+		OUT_DIR=$(VF2_OUT_DIR) $(MAKE) -C arceos build \
+		EXTRA_RUSTFLAGS="$(EXTRA_RUSTFLAGS)"
+	@cp $(VF2_ELF) $(NAME)_riscv64-visionfive2.elf
+	@cp $(VF2_BIN) kernel-vf2
+	@echo "Built kernel-vf2 and $(NAME)_riscv64-visionfive2.elf."
+
 clean:
 	@$(MAKE) -C arceos A=$(A) $@
 	@rm -f .axconfig.toml
 	@rm -f kernel-rv kernel-la
 	@rm -f kernel-rv-qperf kernel-la-qperf
 	@rm -f kernel-rv-buildstorm-stats kernel-la-buildstorm-stats
+	@rm -f kernel-vf2 kernel-vf2.uimg
 	@rm -f PulseOS_riscv64-qemu-virt.elf PulseOS_riscv64-qemu-virt.bin
 	@rm -f PulseOS_loongarch64-qemu-virt.elf PulseOS_loongarch64-qemu-virt.bin
+	@rm -f PulseOS_riscv64-visionfive2.elf
 	@rm -f PulseOS_riscv64-qemu-virt-qperf.elf PulseOS_loongarch64-qemu-virt-qperf.elf
 	@rm -f PulseOS_riscv64-qemu-virt-buildstorm-stats.elf PulseOS_loongarch64-qemu-virt-buildstorm-stats.elf
 	@rm -f disk.img disk-la.img
@@ -125,4 +163,4 @@ img_all:
 	@cp disk.img arceos/disk.img
 	@cp disk-la.img arceos/disk-la.img
 
-.PHONY: all test qperf-test test-artifacts build run justrun clean defconfig img_all la prepare-tools
+.PHONY: all test qperf-test test-artifacts build visionfive2 visionfive2-elf run justrun clean defconfig img_all la prepare-tools
