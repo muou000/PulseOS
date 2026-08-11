@@ -34,8 +34,8 @@ VF2_BIN := $(VF2_OUT_DIR)/$(NAME)_riscv64-visionfive2.bin
 VF2_UIMAGE := $(VF2_OUT_DIR)/$(NAME)_riscv64-visionfive2.uimg
 VF2_APP_FEATURES := visionfive2,$(QPERF_APP_FEATURE)
 VF2_SMP ?= 4
-VF2_IP ?= 169.254.141.28
-VF2_GW ?= 169.254.141.27
+VF2_IP ?= 192.168.137.2
+VF2_GW ?= 192.168.137.1
 VF2_BUILD_EPOCH ?= $(shell date +%s)
 
 IMG ?= n
