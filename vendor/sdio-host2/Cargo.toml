@@ -1,0 +1,22 @@
+[dependencies.dma-api]
+version = "0.9.3"
+
+[lib]
+path = "src/lib.rs"
+
+[package]
+authors = ["RCore Team <yuchen@tsinghua.edu.cn>"]
+autobenches = false
+autobins = false
+autoexamples = false
+autolib = false
+autotests = false
+categories = ["os", "no-std"]
+description = "no_std SD/SDIO/MMC host bus transaction traits and types"
+edition = "2024"
+keywords = ["arceos", "kernel"]
+license = "Apache-2.0"
+name = "sdio-host2"
+readme = false
+repository = "https://github.com/rcore-os/tgoskits"
+version = "0.1.4"

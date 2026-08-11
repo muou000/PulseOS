@@ -1,0 +1,32 @@
+[dependencies.ax-kspin]
+version = "0.3.15"
+
+[dependencies.dma-api]
+version = "0.9.3"
+
+[dependencies.rdif-base]
+version = "0.8.3"
+
+[dependencies.thiserror]
+default-features = false
+version = "2"
+
+[lib]
+path = "src/lib.rs"
+
+[package]
+authors = ["周睿 <zrufo747@outlook.com>"]
+autobenches = false
+autobins = false
+autoexamples = false
+autolib = false
+autotests = false
+categories = ["embedded", "no-std"]
+description = "Driver Interface block definition."
+edition = "2024"
+keywords = ["os", "driver"]
+license = "MIT"
+name = "rdif-block"
+readme = false
+repository = "https://github.com/rcore-os/tgoskits"
+version = "0.11.2"

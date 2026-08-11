@@ -1,0 +1,25 @@
+[dependencies.aarch64-cpu]
+version = "10"
+
+[dependencies.tock-registers]
+version = "0.10"
+
+[lib]
+path = "src/lib.rs"
+
+[package]
+authors = ["zrufo747@outlook.com"]
+autobenches = false
+autobins = false
+autoexamples = false
+autolib = false
+autotests = false
+categories = ["embedded", "hardware-support", "no-std"]
+description = "Extended AArch64 CPU utilities and cache management operations"
+edition = "2024"
+keywords = ["aarch64", "arm64", "cache", "cpu", "no-std"]
+license = "MIT OR Apache-2.0"
+name = "aarch64-cpu-ext"
+readme = "README.md"
+repository = "https://github.com/drivercraft/aarch64-cpu-ext"
+version = "0.1.4"

@@ -1,27 +1,40 @@
-[dependencies]
+[dependencies.volatile-macro]
+optional = true
+version = "=0.6.0"
+
+[dev-dependencies.rand]
+version = "0.8.3"
 
 [features]
+derive = ["dep:volatile-macro"]
 unstable = []
+very_unstable = ["unstable"]
 
 [lib]
 path = "src/lib.rs"
 
 [package]
 authors = ["Philipp Oppermann <dev@phil-opp.com>"]
-description = "A simple volatile wrapper type"
+autobenches = false
+autobins = false
+autoexamples = false
+autotests = false
+categories = ["no-std", "no-std::no-alloc"]
+description = "Volatile wrapper types for raw pointers"
 documentation = "https://docs.rs/volatile"
+edition = "2021"
 keywords = ["volatile"]
 license = "MIT OR Apache-2.0"
 name = "volatile"
 readme = "README.md"
 repository = "https://github.com/rust-osdev/volatile"
-version = "0.4.6"
+version = "0.6.1"
 
 [package.metadata.docs.rs]
-features = ["unstable"]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
 
 [package.metadata.release]
-dev-version = false
 pre-release-commit-message = "Release version {{version}}"
 
 [[package.metadata.release.pre-release-replacements]]

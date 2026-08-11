@@ -12,7 +12,7 @@
 [package]
 edition = "2024"
 name = "ax-kspin"
-version = "0.3.9"
+version = "0.3.15"
 authors = ["Yuekai Jia <equation618@gmail.com>"]
 build = false
 autolib = false
@@ -37,6 +37,7 @@ repository = "https://github.com/rcore-os/tgoskits"
 
 [features]
 default = []
+host-test = ["ax-kernel-guard/host-test"]
 lock_api = ["dep:lock_api"]
 lockdep = ["dep:ax-lockdep"]
 smp = []
@@ -46,10 +47,10 @@ name = "ax_kspin"
 path = "src/lib.rs"
 
 [dependencies.ax-kernel-guard]
-version = "0.3.10"
+version = "0.3.11"
 
 [dependencies.ax-lockdep]
-version = "0.1.1"
+version = "0.2.0"
 optional = true
 
 [dependencies.cfg-if]
