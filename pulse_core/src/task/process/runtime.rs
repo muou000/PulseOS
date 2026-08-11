@@ -131,7 +131,7 @@ impl Process {
             #[cfg(target_arch = "riscv64")]
             {
                 axhal::asm::write_user_page_table(pt_root, asid);
-                axhal::asm::flush_tlb(None);
+                axhal::asm::flush_tlb_after_satp_write();
             }
             #[cfg(target_arch = "loongarch64")]
             {

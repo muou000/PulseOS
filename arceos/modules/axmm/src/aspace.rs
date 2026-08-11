@@ -1960,7 +1960,7 @@ unsafe fn flush_tlb_invalidation(asid: usize, invalidation: TlbInvalidation) {
     const RANGE_PAGE_LIMIT: usize = 32;
 
     match invalidation {
-        TlbInvalidation::FullAsid => unsafe { flush_tlb_asid(asid) },
+        TlbInvalidation::FullAsid => axhal::asm::flush_tlb_asid(asid),
         TlbInvalidation::Range { start, end, .. }
             if (end - start) / PAGE_SIZE_4K <= RANGE_PAGE_LIMIT =>
         {
@@ -1974,26 +1974,8 @@ unsafe fn flush_tlb_invalidation(asid: usize, invalidation: TlbInvalidation) {
                 }
             }
         }
-        TlbInvalidation::Range { .. } => unsafe { flush_tlb_asid(asid) },
+        TlbInvalidation::Range { .. } => axhal::asm::flush_tlb_asid(asid),
     }
-}
-
-#[cfg(all(not(feature = "ipi"), target_arch = "riscv64"))]
-unsafe fn flush_tlb_asid(asid: usize) {
-    unsafe { core::arch::asm!("sfence.vma x0, {}", in(reg) asid) };
-}
-
-#[cfg(all(not(feature = "ipi"), target_arch = "loongarch64"))]
-unsafe fn flush_tlb_asid(asid: usize) {
-    unsafe { core::arch::asm!("dbar 0; invtlb 0x04, {}, $r0; dbar 0; ibar 0", in(reg) asid) };
-}
-
-#[cfg(all(
-    not(feature = "ipi"),
-    not(any(target_arch = "riscv64", target_arch = "loongarch64"))
-))]
-unsafe fn flush_tlb_asid(_asid: usize) {
-    axhal::asm::flush_tlb(None);
 }
 
 struct AsidAllocator {

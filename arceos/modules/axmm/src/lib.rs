@@ -170,6 +170,16 @@ pub fn init_memory_management() {
         axhal::asm::write_kernel_page_table(kernel_page_table_root());
         axhal::asm::flush_tlb(None);
     }
+    #[cfg(target_arch = "riscv64")]
+    {
+        let hardware_asid_mask = axhal::asm::hardware_asid_mask();
+        debug!(
+            "RISC-V hardware ASID: {} bits (mask {:#x}), global sfence: {}",
+            hardware_asid_mask.count_ones(),
+            hardware_asid_mask,
+            axhal::asm::global_sfence_required()
+        );
+    }
 }
 
 #[cfg(test)]

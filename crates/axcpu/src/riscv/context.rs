@@ -272,6 +272,7 @@ impl TaskContext {
         #[cfg(feature = "uspace")]
         if self.satp != next_ctx.satp || self.asid != next_ctx.asid {
             unsafe { crate::asm::write_user_page_table(next_ctx.satp, next_ctx.asid) };
+            crate::asm::flush_tlb_after_satp_write();
         }
         #[cfg(feature = "fp-simd")]
         {
