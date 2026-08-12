@@ -19,49 +19,47 @@ PulseOS 的整体软件栈包含用户空间、Trap 异常分发、内核服务�
 ```
 .
 ├── Cargo.toml
-├── Makefile
-├── README.md
-├── arceos                     # ArceOS 组件化操作系统内核底座
-│   ├── api                    # 对外暴露的内核 API (axfeat等)
-│   ├── configs                # 构建配置参数
-│   ├── modules                # ArceOS 原生内核组件 (内存分配、同步、驱动等)
-│   │   ├── axalloc            # 动态内存分配器
-│   │   ├── axdriver           # 外设驱动框架
-│   │   ├── axfs               # 虚拟文件系统与设备挂载
-│   │   ├── axhal              # 硬件抽象层
-│   │   ├── axmm               # 虚拟内存管理与页表映射
-│   │   ├── axruntime          # 内核启动与运行期环境
-│   │   └── axtask             # 底层执行任务控制与调度
-│   └── scripts                # 编译和配置生成辅助脚本
-├── crates                     # 第三方定制化依赖及平台组件
-│   ├── axplat-loongarch64-qemu-virt # 龙芯 64 平台适配层
-│   ├── axplat-riscv64-qemu-virt    # RISC-V 64 平台适配层
-│   ├── ext4plus               # 纯 Rust 实现的 ext4 文件系统库
-│   └── starry-vdso            # vDSO 机制加速系统调用
-├── pulse_core                 # PulseOS 核心库与内核具体功能实现
+├── Cargo.lock
+├── Makefile                   #
+├── build_img.sh               # 生成 RISC-V 64/LoongArch 64 根文件系统镜像
+├── add_apk_to_rootfs.sh
+├── src
+│   └── main.rs                 # 内核启动与初始用户进程加载
+├── arceos                     # ArceOS 内核主体与基础组件
+│   ├── api                    # 对外 API（包括 axfeat）
+│   ├── configs                # 应用和平台构建配置
+│   ├── modules                # 内存、驱动、文件系统、网络和任务等组件
+│   ├── examples               # ArceOS 示例程序
+│   └── scripts                # ArceOS 构建辅助脚本
+├── crates                     # PulseOS 维护或定制的 Rust crate
+│   ├── axplat-*               # RISC-V、VisionFive 2 和 LoongArch 平台适配
+│   ├── axdriver-*、virtio-drivers # 块设备、网络和 VirtIO 驱动
+│   ├── axcpu、axpoll、axsched  # CPU、轮询和调度支持
+│   ├── memory_*、page_table_*  # 地址、页表和内存集合管理
+│   ├── axfs-ng-vfs、ext4plus    # VFS 与 ext4 文件系统支持
+│   ├── axio、smoltcp            # I/O 与网络协议支持
+│   └── starry-vdso              # vDSO 支持
+├── pulse_core                 # PulseOS 核心内核功能
 │   └── src
-│       ├── cpu_dma_latency.rs # 处理器 DMA 延迟控制
-│       ├── fd_table.rs        # 虚拟文件描述符表与 FdObject 抽象 (VFS)
-│       ├── flock.rs           # 文件锁机制实现
-│       ├── trap.rs            # 中断异常处理分发
-│       ├── ipc                # 进程间通信 (IPC) 模块
-│       ├── mm                 # 内存管理扩展
-│       ├── net                # 套接字抽象与 TCP/UDP/Netlink 状态机
-│       └── task               # 任务控制与管理
-├── pulse_syscalls             # 系统调用接口与分派实现
+│       ├── fd_table            # 文件描述符表与 FdObject
+│       ├── ipc、mm、net、task  # IPC、内存、网络和任务管理
+│       ├── trap.rs             # Trap 与异常分发
+│       └── config.rs、flock.rs、record_lock.rs # 核心辅助模块
+├── pulse_syscalls             # 系统调用接口与分派
 │   └── src
-│       ├── handler.rs         # 系统调用统一派发入口
-│       └── impls              # 具体系统调用的分类实现
-│           ├── fs             # 文件与目录相关系统调用
-│           ├── ipc            # 信号量和共享内存系统调用
-│           ├── net            # 网络套接字系统调用
-│           ├── task           # 进程/线程控制与信号处理系统调用
-│           ├── mm.rs          # 内存分配与映射系统调用
-│           └── time.rs        # 定时器与时间相关系统调用
-├── rootfs                     # 根文件系统内容与覆盖层 (用于生成磁盘镜像)
-├── src                        # 仓库根层入口
-│   └── main.rs                # 内核主入口
-└── records                    # 开发日志、AI 交互记录和过程性产物
+│       ├── handler.rs         # 系统调用统一入口
+│       └── impls              # fs、ipc、mm、net、task、time 等实现
+├── rootfs                    # 根文件系统构建输入
+│   ├── base                   # Alpine minirootfs 基础包
+│   ├── extras                 # 测试和工具扩展包
+│   └── overlay                # 通用及按架构覆盖文件
+├── docs                      # 设计文档、图片和平台移植记录
+│   ├── pre、final              # 初赛和决赛设计文档源文件
+│   └── visionfive2*.md        # VisionFive 2 相关记录
+├── vendor                    # Cargo vendored 依赖
+├── bin                       # 本地构建辅助工具
+├── .cargo                    # Cargo 构建配置
+└── records                   # 开发日志、性能分析和过程性产物
 ```
 
 ---
@@ -111,6 +109,7 @@ make test #构建带日志的可参与测评的镜像
 make run #构建并运行进入shell环境的Riscv PulseOS
 make la #快速构建并运行进入shell环境的Loongarch64 PulseOS
 make img_all #构建两种架构的rootfs镜像
+make visionfive2 #构建用于VisionFive 2 U-Boot/TFTP启动的镜像
 ```
 
 ## 注
