@@ -472,34 +472,34 @@ impl FdObject for EventFdObject {
 }
 
 pub struct PipeShared {
-    buffer: Mutex<PipeRingBuffer>,
+    buffer: SpinNoPreempt<PipeRingBuffer>,
     read_wait_queue: axtask::WaitQueue,
     write_wait_queue: axtask::WaitQueue,
     reader_count: AtomicUsize,
     writer_count: AtomicUsize,
-    pub zc_pages: Mutex<alloc::collections::VecDeque<ZeroCopyPage>>,
+    pub zc_pages: SpinNoPreempt<alloc::collections::VecDeque<ZeroCopyPage>>,
 }
 
 impl PipeShared {
     fn new() -> Self {
         Self {
-            buffer: Mutex::new(PipeRingBuffer::new(DEFAULT_PIPE_CAPACITY)),
+            buffer: SpinNoPreempt::new(PipeRingBuffer::new(DEFAULT_PIPE_CAPACITY)),
             read_wait_queue: axtask::WaitQueue::new(),
             write_wait_queue: axtask::WaitQueue::new(),
             reader_count: AtomicUsize::new(1),
             writer_count: AtomicUsize::new(1),
-            zc_pages: Mutex::new(alloc::collections::VecDeque::new()),
+            zc_pages: SpinNoPreempt::new(alloc::collections::VecDeque::new()),
         }
     }
 
     fn new_fifo() -> Self {
         Self {
-            buffer: Mutex::new(PipeRingBuffer::new(DEFAULT_PIPE_CAPACITY)),
+            buffer: SpinNoPreempt::new(PipeRingBuffer::new(DEFAULT_PIPE_CAPACITY)),
             read_wait_queue: axtask::WaitQueue::new(),
             write_wait_queue: axtask::WaitQueue::new(),
             reader_count: AtomicUsize::new(0),
             writer_count: AtomicUsize::new(0),
-            zc_pages: Mutex::new(alloc::collections::VecDeque::new()),
+            zc_pages: SpinNoPreempt::new(alloc::collections::VecDeque::new()),
         }
     }
 }
