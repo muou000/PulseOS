@@ -15,7 +15,7 @@ use axfs::{File, FileFlags as AxFileFlags, OpenResult};
 use axfs_ng_vfs::{Location, Metadata, NodeType};
 use axhal::paging::MappingFlags;
 use axio::{PollState, Seek, SeekFrom, Write};
-use kspin::SpinNoIrq;
+use kspin::{SpinNoIrq, SpinNoPreempt};
 use linux_raw_sys::{
     general::*,
     ioctl::{FIONBIO, FIONREAD},
