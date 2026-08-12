@@ -10,12 +10,14 @@ use axplat::irq::{IpiError, IpiTarget, IrqHandler, IrqIf};
 use axplat::mem::{MemIf, RawRange};
 use axplat::power::PowerIf;
 use axplat::time::TimeIf;
+use axplat::tlb::TlbIf;
 
 struct DummyInit;
 struct DummyConsole;
 struct DummyMem;
 struct DummyTime;
 struct DummyPower;
+struct DummyTlb;
 #[cfg(feature = "irq")]
 struct DummyIrq;
 
@@ -106,6 +108,13 @@ impl PowerIf for DummyPower {
 
     fn cpu_num() -> usize {
         1
+    }
+}
+
+#[impl_plat_interface]
+impl TlbIf for DummyTlb {
+    fn requires_global_sfence() -> bool {
+        false
     }
 }
 

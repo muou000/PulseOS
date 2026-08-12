@@ -1,0 +1,48 @@
+# StarFive VisionFive 2 (JH7110) configuration for PulseOS.
+arch = "riscv64" # str
+platform = "riscv64-visionfive2" # str
+package = "axplat-riscv64-visionfive2" # str
+
+[plat]
+# U74 application harts are hardware harts 1 through 4. The runtime topology
+# parser explicitly excludes the S7 at hart 0 because U-Boot's control DTB can
+# mark that management hart as available.
+max-cpu-num = 4 # uint
+phys-memory-base = 0x4000_0000 # uint
+# This is an upper bound for all shipping DRAM variants. The actual RAM ranges
+# are read from the U-Boot-provided DTB before the allocator is initialized.
+phys-memory-size = 0x2_0000_0000 # uint
+kernel-base-paddr = 0x4020_0000 # uint
+kernel-base-vaddr = "0xffff_ffc0_4020_0000" # uint
+phys-virt-offset = "0xffff_ffc0_0000_0000" # uint
+phys-bus-offset = 0 # uint
+kernel-aspace-base = "0xffff_ffc0_0000_0000" # uint
+kernel-aspace-size = "0x0000_003f_ffff_f000" # uint
+boot-stack-size = 0x40000 # uint
+
+[devices]
+# JH7110 core ranges needed by early interrupt dispatch and board drivers.
+# UART0 output reuses the register setup left by U-Boot.
+mmio-ranges = [
+    [0x0200_0000, 0x1_0000], # CLINT
+    [0x0201_0000, 0x4_000], # cache flush controller
+    [0x0c00_0000, 0x400_0000], # PLIC
+    [0x1000_0000, 0x1_0000], # UART0
+    [0x1302_0000, 0x1_0000], # System CRG (GMAC0 GTX/PTP clocks)
+    [0x1602_0000, 0x1_0000], # SD/MMC1
+    [0x1603_0000, 0x1_0000], # GMAC0 (DWMAC 5.20)
+    [0x1700_0000, 0x1_0000], # AON CRG (GMAC0 clocks/resets)
+    [0x1701_0000, 0x1_000], # AON syscon (GMAC0 PHY interface select)
+    [0x1704_0000, 0x1_0000], # RTC
+] # [(uint, uint)]
+virtio-mmio-ranges = [] # [(uint, uint)]
+pci-ecam-base = 0
+pci-bus-end = 0
+pci-ranges = [] # [(uint, uint)]
+timer-frequency = 4_000_000 # uint
+timer-irq = "0x8000_0000_0000_0005" # uint
+ipi-irq = "0x8000_0000_0000_0001" # uint
+# Fallback for firmware DTBs without an RTC node; runtime DTB data takes priority.
+rtc-paddr = 0x1704_0000 # uint
+# SDIO1 is wired to the removable microSD slot on VisionFive 2.
+sdmmc-paddr = 0x1602_0000 # uint

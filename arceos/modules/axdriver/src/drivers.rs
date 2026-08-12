@@ -82,6 +82,48 @@ cfg_if::cfg_if! {
 }
 
 cfg_if::cfg_if! {
+    if #[cfg(block_dev = "starfive-jh7110-sdmmc")] {
+        pub struct StarfiveJh7110SdMmcDriver;
+        register_block_driver!(
+            StarfiveJh7110SdMmcDriver,
+            axdriver_block::starfive_jh7110::Jh7110SdMmc
+        );
+
+        impl DriverProbe for StarfiveJh7110SdMmcDriver {
+            fn probe_global() -> Option<AxDeviceEnum> {
+                let base: usize = axhal::mem::phys_to_virt(
+                    axconfig::devices::SDMMC_PADDR.into(),
+                )
+                .into();
+                debug!(
+                    "probing StarFive JH7110 SD/MMC at PA {:#x}",
+                    axconfig::devices::SDMMC_PADDR
+                );
+                unsafe { axdriver_block::starfive_jh7110::Jh7110SdMmc::try_new(base) }
+                    .ok()
+                    .map(AxDeviceEnum::from_block)
+            }
+        }
+    }
+}
+
+cfg_if::cfg_if! {
+    if #[cfg(net_dev = "starfive-jh7110-dwmac")] {
+        pub struct StarfiveJh7110DwmacDriver;
+        register_net_driver!(
+            StarfiveJh7110DwmacDriver,
+            crate::starfive_jh7110::Jh7110DwmacDevice
+        );
+
+        impl DriverProbe for StarfiveJh7110DwmacDriver {
+            fn probe_global() -> Option<AxDeviceEnum> {
+                crate::starfive_jh7110::probe().map(AxDeviceEnum::from_net)
+            }
+        }
+    }
+}
+
+cfg_if::cfg_if! {
     if #[cfg(net_dev = "ixgbe")] {
         use crate::ixgbe::IxgbeHalImpl;
         use axhal::mem::phys_to_virt;

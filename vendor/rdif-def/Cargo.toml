@@ -1,0 +1,35 @@
+[dependencies.axtest]
+optional = true
+version = "0.5.13"
+
+[dependencies.thiserror]
+default-features = false
+version = "2"
+
+[features]
+axtest = ["dep:axtest"]
+
+[lib]
+path = "src/lib.rs"
+
+[lints.rust.unexpected_cfgs]
+check-cfg = ["cfg(axtest)"]
+level = "warn"
+priority = 0
+
+[package]
+authors = ["周睿 <zrufo747@outlook.com>"]
+autobenches = false
+autobins = false
+autoexamples = false
+autolib = false
+autotests = false
+categories = ["embedded", "no-std"]
+description = "Driver Interface base definition."
+edition = "2024"
+keywords = ["os", "driver"]
+license = "MIT"
+name = "rdif-def"
+readme = false
+repository = "https://github.com/rcore-os/tgoskits"
+version = "0.3.1"

@@ -1,0 +1,24 @@
+[dependencies]
+
+[features]
+
+[lib]
+path = "src/lib.rs"
+
+[package]
+autobenches = false
+autobins = false
+autoexamples = false
+autolib = false
+autotests = false
+categories = ["no-std", "rust-patterns"]
+description = "provide the AsAny trait"
+edition = "2018"
+license = "MIT OR Apache-2.0"
+name = "as-any"
+readme = "README.md"
+repository = "https://codeberg.org/fogti/as-any"
+version = "0.3.2"
+
+[package.metadata.docs.rs]
+all-features = true

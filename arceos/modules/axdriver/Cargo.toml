@@ -38,6 +38,19 @@ virtio-net = ["net", "virtio", "axdriver_virtio/net"]
 virtio-gpu = ["display", "virtio", "axdriver_virtio/gpu"]
 ramdisk = ["block", "axdriver_block/ramdisk"]
 bcm2835-sdhci = ["block", "axdriver_block/bcm2835-sdhci"]
+starfive-jh7110-sdmmc = [
+    "block",
+    "axdriver_block/starfive-jh7110-sdmmc",
+    "dep:axhal",
+    "dep:axconfig",
+]
+starfive-jh7110-dwmac = [
+    "net",
+    "axdriver_net/starfive-jh7110-dwmac",
+    "dep:axalloc",
+    "dep:axhal",
+    "dep:fdt-raw",
+]
 ixgbe = ["net", "axdriver_net/ixgbe", "dep:axalloc", "dep:axhal", "dep:axdma"]
 fxmac = ["net", "axdriver_net/fxmac", "dep:axalloc", "dep:axhal", "dep:axdma"]
 # more devices example: e1000 = ["net", "axdriver_net/e1000"]
@@ -63,3 +76,4 @@ axconfig = { workspace = true, optional = true }
 axdma = { workspace = true, optional = true }
 axtask = { workspace = true }
 axlog = { workspace = true }
+fdt-raw = { version = "0.3", optional = true }

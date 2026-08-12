@@ -1,0 +1,23 @@
+[features]
+default = ["smp"]
+smp = []
+
+[lib]
+path = "src/lib.rs"
+
+[package]
+authors = ["zrufo747@outlook.com"]
+autobenches = false
+autobins = false
+autoexamples = false
+autolib = false
+autotests = false
+categories = ["concurrency", "no-std"]
+description = "Cross-platform memory barrier implementations for Rust, inspired by Linux kernel"
+edition = "2024"
+keywords = ["memory", "barrier", "sync", "atomic", "kernel"]
+license = "MIT OR Apache-2.0"
+name = "mbarrier"
+readme = "README.md"
+repository = "https://github.com/drivercraft/mbarrier"
+version = "0.1.3"

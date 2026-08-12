@@ -5,12 +5,30 @@ use spin::Mutex;
 
 use axerrno::LinuxError;
 use axio::PollState;
-use axnet::{TcpSocket, UdpSocket};
+use axnet::{IcmpSocket, TcpSocket, UdpSocket};
 use linux_raw_sys::general::{S_IFSOCK, stat};
 use linux_raw_sys::ioctl::{SIOCATMARK, SIOCGIFCONF};
 use crate::fd_table::{FdObject, PollRegistration};
 
 const RING_BUFFER_SIZE: usize = 65536;
+
+fn eth0_ipv4_config() -> ([u8; 4], u8) {
+    axnet::interface_ipv4_address()
+}
+
+fn ipv4_netmask(prefix_len: u8) -> [u8; 4] {
+    let prefix_len = prefix_len.min(32);
+    if prefix_len == 0 {
+        [0; 4]
+    } else {
+        (u32::MAX << (32 - u32::from(prefix_len))).to_be_bytes()
+    }
+}
+
+fn ipv4_broadcast(address: [u8; 4], prefix_len: u8) -> [u8; 4] {
+    let mask = ipv4_netmask(prefix_len);
+    core::array::from_fn(|index| address[index] | !mask[index])
+}
 
 pub static UNIX_REGISTRY: spin::Mutex<alloc::collections::BTreeMap<alloc::string::String, (core::net::SocketAddr, alloc::sync::Weak<Socket>)>> = spin::Mutex::new(alloc::collections::BTreeMap::new());
 
@@ -377,6 +395,7 @@ impl NetlinkSocket {
 
     fn handle_rtm_getlink(seq: u32, pid: u32) -> alloc::vec::Vec<u8> {
         let mut resp = alloc::vec::Vec::new();
+        let eth_mac = axnet::interface_mac_address();
 
         // 1. "lo" link
         let mut lo_msg = alloc::vec::Vec::new();
@@ -431,7 +450,7 @@ impl NetlinkSocket {
         }
         eth_rta.extend_from_slice(&10u16.to_ne_bytes()); // rta_len (4 + 6)
         eth_rta.extend_from_slice(&1u16.to_ne_bytes());  // rta_type = IFLA_ADDRESS (1)
-        eth_rta.extend_from_slice(&[0x52, 0x54, 0x00, 0x12, 0x34, 0x56]);
+        eth_rta.extend_from_slice(&eth_mac);
         while eth_rta.len() % 4 != 0 {
             eth_rta.push(0);
         }
@@ -461,6 +480,7 @@ impl NetlinkSocket {
 
     fn handle_rtm_getaddr(seq: u32, pid: u32) -> alloc::vec::Vec<u8> {
         let mut resp = alloc::vec::Vec::new();
+        let (eth_address, eth_prefix_len) = eth0_ipv4_config();
 
         // 1. "lo" address
         let mut lo_msg = alloc::vec::Vec::new();
@@ -499,7 +519,7 @@ impl NetlinkSocket {
         // 2. "eth0" address
         let mut eth_msg = alloc::vec::Vec::new();
         eth_msg.push(2); // ifa_family = AF_INET (2)
-        eth_msg.push(24); // ifa_prefixlen = 24
+        eth_msg.push(eth_prefix_len); // ifa_prefixlen
         eth_msg.push(0); // ifa_flags
         eth_msg.push(0); // ifa_scope = RT_SCOPE_UNIVERSE (0)
         eth_msg.extend_from_slice(&2u32.to_ne_bytes()); // ifa_index = 2
@@ -507,7 +527,7 @@ impl NetlinkSocket {
         // IFA_ADDRESS (1)
         eth_msg.extend_from_slice(&8u16.to_ne_bytes()); // rta_len
         eth_msg.extend_from_slice(&1u16.to_ne_bytes()); // rta_type
-        eth_msg.extend_from_slice(&[10, 0, 2, 15]);
+        eth_msg.extend_from_slice(&eth_address);
 
         // IFA_LABEL (3)
         let mut eth_label = alloc::vec::Vec::new();
@@ -545,6 +565,7 @@ impl NetlinkSocket {
 pub enum SocketInner {
     Tcp(TcpSocket),
     Udp(UdpSocket),
+    Icmp(IcmpSocket),
     Local(LocalSocket),
     Packet(PacketSocket),
     Netlink(NetlinkSocket),
@@ -559,6 +580,7 @@ impl Socket {
             SocketInner::Udp(s) => s
                 .local_addr()
                 .map_err(|e| LinuxError::from(e.canonicalize())),
+            SocketInner::Icmp(_) => Err(LinuxError::EOPNOTSUPP),
             SocketInner::Local(_) => Err(LinuxError::EOPNOTSUPP),
             SocketInner::Packet(_) => Err(LinuxError::EOPNOTSUPP),
             SocketInner::Netlink(_) => Err(LinuxError::EOPNOTSUPP),
@@ -573,6 +595,7 @@ impl Socket {
             SocketInner::Udp(s) => s
                 .peer_addr()
                 .map_err(|e| LinuxError::from(e.canonicalize())),
+            SocketInner::Icmp(_) => Err(LinuxError::EOPNOTSUPP),
             SocketInner::Local(_) => Err(LinuxError::EOPNOTSUPP),
             SocketInner::Packet(_) => Err(LinuxError::EOPNOTSUPP),
             SocketInner::Netlink(_) => Err(LinuxError::EOPNOTSUPP),
@@ -583,6 +606,7 @@ impl Socket {
         match &self.inner {
             SocketInner::Tcp(s) => s.is_nonblocking(),
             SocketInner::Udp(s) => s.is_nonblocking(),
+            SocketInner::Icmp(s) => s.is_nonblocking(),
             SocketInner::Local(s) => s.nonblocking.load(Ordering::Acquire),
             SocketInner::Packet(s) => s.nonblocking.load(Ordering::Acquire),
             SocketInner::Netlink(s) => s.nonblocking.load(Ordering::Acquire),
@@ -593,6 +617,7 @@ impl Socket {
         match &self.inner {
             SocketInner::Tcp(s) => s.set_nonblocking(nonblocking),
             SocketInner::Udp(s) => s.set_nonblocking(nonblocking),
+            SocketInner::Icmp(s) => s.set_nonblocking(nonblocking),
             SocketInner::Local(s) => s.nonblocking.store(nonblocking, Ordering::Release),
             SocketInner::Packet(s) => s.nonblocking.store(nonblocking, Ordering::Release),
             SocketInner::Netlink(s) => s.nonblocking.store(nonblocking, Ordering::Release),
@@ -603,6 +628,7 @@ impl Socket {
         match &self.inner {
             SocketInner::Tcp(s) => s.recv_queue(),
             SocketInner::Udp(s) => s.recv_queue(),
+            SocketInner::Icmp(s) => s.recv_queue(),
             SocketInner::Local(s) => s.rx.lock_buffer().available_read(),
             SocketInner::Packet(_) => 0,
             SocketInner::Netlink(s) => {
@@ -679,7 +705,7 @@ impl FdObject for Socket {
             let mut eth_ifr = [0u8; 40];
             eth_ifr[..4].copy_from_slice(b"eth0");
             eth_ifr[16..18].copy_from_slice(&family_inet.to_ne_bytes());
-            eth_ifr[20..24].copy_from_slice(&[10, 0, 2, 15]);
+            eth_ifr[20..24].copy_from_slice(&eth0_ipv4_config().0);
             
             if ifc_buf == 0 {
                 let needed_len = 80i32;
@@ -751,7 +777,7 @@ impl FdObject for Socket {
                 if name.starts_with("lo") {
                     // Loopback MAC is all zeros
                 } else {
-                    hwaddr[2..8].copy_from_slice(&[0x52, 0x54, 0x00, 0x12, 0x34, 0x56]); // Dummy MAC
+                    hwaddr[2..8].copy_from_slice(&axnet::interface_mac_address());
                 }
                 process.write_user_bytes(arg + 16, &hwaddr)?;
                 return Ok(0);
@@ -821,7 +847,7 @@ impl FdObject for Socket {
                 if name.starts_with("lo") {
                     addr[4..8].copy_from_slice(&[127, 0, 0, 1]);
                 } else {
-                    addr[4..8].copy_from_slice(&[10, 0, 2, 15]);
+                    addr[4..8].copy_from_slice(&eth0_ipv4_config().0);
                 }
                 process.write_user_bytes(arg + 16, &addr)?;
                 return Ok(0);
@@ -842,7 +868,7 @@ impl FdObject for Socket {
                 if name.starts_with("lo") {
                     mask[4..8].copy_from_slice(&[255, 0, 0, 0]);
                 } else {
-                    mask[4..8].copy_from_slice(&[255, 255, 255, 0]);
+                    mask[4..8].copy_from_slice(&ipv4_netmask(eth0_ipv4_config().1));
                 }
                 process.write_user_bytes(arg + 16, &mask)?;
                 return Ok(0);
@@ -863,7 +889,8 @@ impl FdObject for Socket {
                 if name.starts_with("lo") {
                     brd[4..8].copy_from_slice(&[127, 255, 255, 255]);
                 } else {
-                    brd[4..8].copy_from_slice(&[10, 0, 2, 255]);
+                    let (address, prefix_len) = eth0_ipv4_config();
+                    brd[4..8].copy_from_slice(&ipv4_broadcast(address, prefix_len));
                 }
                 process.write_user_bytes(arg + 16, &brd)?;
                 return Ok(0);
@@ -886,6 +913,10 @@ impl FdObject for Socket {
                 .recv_from(buf)
                 .map(|(n, _)| n)
                 .map_err(|e| LinuxError::from(e.canonicalize())),
+            SocketInner::Icmp(s) => s
+                .recv_from(buf)
+                .map(|(n, _)| n)
+                .map_err(|e| LinuxError::from(e.canonicalize())),
             SocketInner::Local(s) => s.read(buf),
             SocketInner::Packet(_) => Ok(0),
             SocketInner::Netlink(s) => s.read(buf),
@@ -899,6 +930,7 @@ impl FdObject for Socket {
         match &self.inner {
             SocketInner::Tcp(s) => s.send(buf).map_err(|e| LinuxError::from(e.canonicalize())),
             SocketInner::Udp(s) => s.send(buf).map_err(|e| LinuxError::from(e.canonicalize())),
+            SocketInner::Icmp(_) => Err(LinuxError::EDESTADDRREQ),
             SocketInner::Local(s) => s.write(buf),
             SocketInner::Packet(_) => Ok(buf.len()),
             SocketInner::Netlink(s) => s.write(buf),
@@ -919,6 +951,7 @@ impl FdObject for Socket {
         let mut state = match &self.inner {
             SocketInner::Tcp(s) => s.poll().map_err(|e| LinuxError::from(e.canonicalize())),
             SocketInner::Udp(s) => s.poll().map_err(|e| LinuxError::from(e.canonicalize())),
+            SocketInner::Icmp(s) => s.poll().map_err(|e| LinuxError::from(e.canonicalize())),
             SocketInner::Local(s) => {
                 let peer_closed = s.peer_closed.load(Ordering::Acquire);
                 // poll can execute beneath epoll's bookkeeping lock, so a
@@ -972,7 +1005,7 @@ impl FdObject for Socket {
                 }
                 Ok(supported || events == 0)
             }
-            SocketInner::Tcp(_) | SocketInner::Udp(_) => {
+            SocketInner::Tcp(_) | SocketInner::Udp(_) | SocketInner::Icmp(_) => {
                 wqs.push(&axnet::NET_WAIT_QUEUE);
                 Ok(true)
             }
@@ -1003,7 +1036,7 @@ impl FdObject for Socket {
                     }));
                 }
             }
-            SocketInner::Tcp(_) | SocketInner::Udp(_) => {
+            SocketInner::Tcp(_) | SocketInner::Udp(_) | SocketInner::Icmp(_) => {
                 let registration = axnet::NET_WAIT_QUEUE.register_owned_waker(cx.waker());
                 registrations.push(PollRegistration::new(move || {
                     axnet::NET_WAIT_QUEUE.unregister_waker(registration);

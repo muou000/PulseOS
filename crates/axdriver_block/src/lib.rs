@@ -11,6 +11,9 @@ pub mod ramdisk;
 #[cfg(feature = "bcm2835-sdhci")]
 pub mod bcm2835sdhci;
 
+#[cfg(feature = "starfive-jh7110-sdmmc")]
+pub mod starfive_jh7110;
+
 use alloc::{boxed::Box, collections::BTreeMap, sync::Arc};
 use core::{
     any::Any,

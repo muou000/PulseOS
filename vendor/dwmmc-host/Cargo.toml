@@ -1,0 +1,51 @@
+[dependencies.bitfield-struct]
+version = "0.11"
+
+[dependencies.dma-api]
+version = "0.9.3"
+
+[dependencies.embedded-hal]
+version = "1"
+
+[dependencies.log]
+version = "0.4"
+
+[dependencies.mmio-api]
+version = "0.2.2"
+
+[dependencies.rdif-block]
+version = "0.11.2"
+
+[dependencies.sdio-host2]
+version = "0.1.4"
+
+[dependencies.sdmmc-protocol]
+default-features = false
+features = ["sdio", "rdif"]
+version = "0.4.2"
+
+[dependencies.volatile]
+features = ["derive"]
+version = "0.6"
+
+[features]
+default = []
+
+[lib]
+path = "src/lib.rs"
+
+[package]
+autobenches = false
+autobins = false
+autoexamples = false
+autolib = false
+autotests = false
+categories = ["embedded", "no-std", "hardware-support"]
+description = "Synopsys DesignWare Mobile Storage Host Controller backend for sdmmc-protocol (no_std, FIFO/IDMAC)"
+edition = "2024"
+keywords = ["sd", "mmc", "dwmmc", "embedded", "no_std"]
+license = "Apache-2.0"
+name = "dwmmc-host"
+readme = "README.md"
+repository = "https://github.com/rcore-os/tgoskits"
+version = "0.3.3"

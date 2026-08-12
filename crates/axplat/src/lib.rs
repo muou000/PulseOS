@@ -12,6 +12,7 @@ pub mod irq;
 pub mod mem;
 pub mod power;
 pub mod time;
+pub mod tlb;
 
 pub use axplat_macros::main;
 pub use crate_interface::impl_interface as impl_plat_interface;

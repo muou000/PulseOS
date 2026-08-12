@@ -1,10 +1,32 @@
 //! RISC-V specific page table structures.
 
-use crate::{PageTable64, PagingMetaData};
+use core::sync::atomic::{AtomicBool, Ordering};
+
 use page_table_entry::riscv::Rv64PTE;
+
+use crate::{PageTable64, PagingMetaData};
+
+static GLOBAL_SFENCE_REQUIRED: AtomicBool = AtomicBool::new(false);
+
+/// Installs the platform TLB invalidation policy.
+///
+/// The generic page-table crate cannot depend on a platform crate, so the
+/// architecture-specific policy is configured by the owning HAL at boot.
+#[inline]
+pub fn set_global_sfence_required(required: bool) {
+    GLOBAL_SFENCE_REQUIRED.store(required, Ordering::Release);
+}
 
 #[inline]
 fn riscv_flush_tlb(vaddr: Option<memory_addr::VirtAddr>) {
+    if GLOBAL_SFENCE_REQUIRED.load(Ordering::Acquire) {
+        let _ = vaddr;
+        unsafe {
+            core::arch::asm!("sfence.vma x0, x0");
+        }
+        return;
+    }
+
     let mut satp_val: usize;
     unsafe {
         core::arch::asm!("csrr {}, satp", out(reg) satp_val);

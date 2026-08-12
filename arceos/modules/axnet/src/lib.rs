@@ -1,6 +1,6 @@
 //! [ArceOS](https://github.com/rcore-os/arceos) network module.
 //!
-//! It provides unified networking primitives for TCP/UDP communication
+//! It provides unified networking primitives for TCP/UDP/ICMP communication
 //! using various underlying network stacks. Currently, only [smoltcp] is
 //! supported.
 //!
@@ -8,6 +8,7 @@
 //!
 //! - [`TcpSocket`]: A TCP socket that provides POSIX-like APIs.
 //! - [`UdpSocket`]: A UDP socket that provides POSIX-like APIs.
+//! - [`IcmpSocket`]: An IPv4 ICMP raw socket.
 //! - [`dns_query`]: Function for DNS query.
 //!
 //! # Cargo Features
@@ -32,9 +33,10 @@ cfg_if::cfg_if! {
 
 pub use self::net_impl::TcpSocket;
 pub use self::net_impl::UdpSocket;
+pub use self::net_impl::IcmpSocket;
 pub use self::net_impl::{
-    add_membership, dns_query, from_core_sockaddr, into_core_sockaddr, poll_interfaces,
-    is_local_ip, NET_WAIT_QUEUE,
+    NET_WAIT_QUEUE, add_membership, dns_query, from_core_sockaddr, interface_ipv4_address,
+    interface_mac_address, into_core_sockaddr, is_local_ip, poll_interfaces,
 };
 pub use self::net_impl::{bench_receive, bench_transmit};
 pub use smoltcp::time::Duration;

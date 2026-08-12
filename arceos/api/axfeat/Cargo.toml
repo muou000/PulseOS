@@ -64,7 +64,7 @@ fs = [
 myfs = ["axfs?/myfs"]
 
 # Networking
-net = ["alloc", "paging", "axdriver/virtio-net", "dep:axnet", "axruntime/net"]
+net = ["alloc", "paging", "axdriver/net", "dep:axnet", "axruntime/net"]
 
 # Display
 display = [
@@ -84,7 +84,10 @@ bus-pci = ["axdriver?/bus-pci"]
 driver-ramdisk = ["axdriver?/ramdisk", "axfs?/use-ramdisk"]
 driver-ixgbe = ["axdriver?/ixgbe"]
 driver-fxmac = ["axdriver?/fxmac"]                          # fxmac ethernet driver for PhytiumPi
+driver-virtio-net = ["axdriver?/virtio-net"]
+driver-starfive-jh7110-dwmac = ["axdriver?/starfive-jh7110-dwmac"]
 driver-bcm2835-sdhci = ["axdriver?/bcm2835-sdhci"]
+driver-starfive-jh7110-sdmmc = ["axdriver?/starfive-jh7110-sdmmc"]
 
 # Logging
 log-level-off = ["axlog/log-level-off"]

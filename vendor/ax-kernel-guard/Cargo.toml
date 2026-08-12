@@ -12,7 +12,7 @@
 [package]
 edition = "2024"
 name = "ax-kernel-guard"
-version = "0.3.10"
+version = "0.3.12"
 authors = ["Yuekai Jia <equation618@gmail.com>"]
 build = false
 autolib = false
@@ -35,7 +35,9 @@ license = "Apache-2.0"
 repository = "https://github.com/rcore-os/tgoskits"
 
 [features]
+axtest = ["dep:axtest"]
 default = []
+host-test = []
 preempt = []
 
 [lib]
@@ -43,7 +45,16 @@ name = "ax_kernel_guard"
 path = "src/lib.rs"
 
 [dependencies.ax-crate-interface]
-version = "0.5.5"
+version = "0.5.7"
+
+[dependencies.axtest]
+version = "0.5.13"
+optional = true
 
 [dependencies.cfg-if]
 version = "1.0"
+
+[lints.rust.unexpected_cfgs]
+level = "warn"
+priority = 0
+check-cfg = ["cfg(axtest)"]

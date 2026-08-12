@@ -324,4 +324,19 @@ mod test {
             Some(ADDR_2A.into())
         );
     }
+
+    #[cfg(feature = "proto-ipv4")]
+    #[test]
+    fn test_default_ipv4_route_lookup() {
+        let mut routes = Routes::new();
+        let gateway = Ipv4Address::new(169, 254, 141, 27);
+        let public_addr = IpAddress::v4(1, 1, 1, 1);
+
+        assert_eq!(routes.lookup(&public_addr, Instant::from_millis(0)), None);
+        assert!(matches!(routes.add_default_ipv4_route(gateway), Ok(None)));
+        assert_eq!(
+            routes.lookup(&public_addr, Instant::from_millis(0)),
+            Some(gateway.into())
+        );
+    }
 }

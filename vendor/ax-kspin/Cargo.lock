@@ -15,9 +15,9 @@ dependencies = [
 
 [[package]]
 name = "ax-kernel-guard"
-version = "0.3.10"
+version = "0.3.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "60ddafa7d7ee6414cfcd1eb249d535bf829561bd9473ff9592084909c479606b"
+checksum = "fcdd992ed9aa73efc8240b84bb973e3a960c1f62504d3fc21aaabcdbbe6ddd2d"
 dependencies = [
  "ax-crate-interface",
  "cfg-if",
@@ -25,7 +25,7 @@ dependencies = [
 
 [[package]]
 name = "ax-kspin"
-version = "0.3.9"
+version = "0.3.15"
 dependencies = [
  "ax-kernel-guard",
  "ax-lockdep",
@@ -35,13 +35,20 @@ dependencies = [
 
 [[package]]
 name = "ax-lockdep"
-version = "0.1.1"
+version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "82ea17ee72c894f6fce3d078879a4ed7a1682a1b8c955efc6944a1470150e866"
+checksum = "233de4bdef397240d6c09f2603300a4a792820659fbf2fd2cf5ae26994b92a3f"
 dependencies = [
  "ax-crate-interface",
+ "ax-kernel-guard",
  "sbi-rt",
 ]
+
+[[package]]
+name = "bitflags"
+version = "2.13.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b4388bee8683e3d04af747c73422af53102d2bd24d9eadb6cbc100baef4b43f8"
 
 [[package]]
 name = "cfg-if"
@@ -69,27 +76,30 @@ dependencies = [
 
 [[package]]
 name = "quote"
-version = "1.0.45"
+version = "1.0.46"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "41f2619966050689382d2b44f664f4bc593e129785a36d6ee376ddf37259b924"
+checksum = "dfbc457d0c7a0759a614551b11a6409e5951f6c7537be1f1b7682b9ae9230368"
 dependencies = [
  "proc-macro2",
 ]
 
 [[package]]
 name = "sbi-rt"
-version = "0.0.3"
+version = "0.0.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7fbaa69be1eedc61c426e6d489b2260482e928b465360576900d52d496a58bd0"
+checksum = "48f7bf85822c8b453d7e3fca7de39684032f5c06c1ed338ad8d47f4a79c1d49a"
 dependencies = [
  "sbi-spec",
 ]
 
 [[package]]
 name = "sbi-spec"
-version = "0.0.7"
+version = "0.0.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e6e36312fb5ddc10d08ecdc65187402baba4ac34585cb9d1b78522ae2358d890"
+checksum = "785b91fcc41c7426fc07510be49ed1db44f002b45d45c175ec7f155c3cd447a9"
+dependencies = [
+ "bitflags",
+]
 
 [[package]]
 name = "scopeguard"
@@ -99,9 +109,9 @@ checksum = "94143f37725109f92c262ed2cf5e59bce7498c01bcc1502d7b9afe439a4e9f49"
 
 [[package]]
 name = "syn"
-version = "2.0.117"
+version = "2.0.118"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e665b8803e7b1d2a727f4023456bbbbe74da67099c585258af0ad9c5013b9b99"
+checksum = "1b9ae57f904213ebb649ce6895b8a66c66f0203b9319718f69a5612a065b1422"
 dependencies = [
  "proc-macro2",
  "quote",

@@ -3,7 +3,7 @@ use core::sync::atomic::Ordering;
 
 use axerrno::LinuxError;
 use axlog::*;
-use axnet::{TcpSocket, UdpSocket};
+use axnet::{IcmpSocket, TcpSocket, UdpSocket};
 use linux_raw_sys::{
     general::{O_CLOEXEC, O_NONBLOCK},
     net::{
@@ -84,7 +84,13 @@ pub fn sys_socket(domain: usize, raw_ty: usize, proto: usize) -> isize {
             }
             Socket::new(domain, SocketInner::Udp(UdpSocket::new()))
         }
-        (AF_INET | AF_INET6, d) if d == SOCK_RAW => {
+        (AF_INET, d) if d == SOCK_RAW => {
+            if proto != 1 {
+                return -(LinuxError::EPROTONOSUPPORT.code() as isize);
+            }
+            Socket::new(domain, SocketInner::Icmp(IcmpSocket::new()))
+        }
+        (AF_INET6, d) if d == SOCK_RAW => {
             return -(LinuxError::EPROTONOSUPPORT.code() as isize);
         }
         (AF_UNIX, d)
@@ -223,6 +229,7 @@ pub fn sys_bind(fd: usize, addr: usize, addrlen: usize) -> isize {
             SocketInner::Udp(s) => s
                 .bind(bind_addr)
                 .map_err(|e| LinuxError::from(e.canonicalize())),
+            SocketInner::Icmp(_) => Err(LinuxError::EOPNOTSUPP),
             SocketInner::Local(_) => Err(LinuxError::EINVAL),
             SocketInner::Packet(_) => Err(LinuxError::EINVAL),
             SocketInner::Netlink(_) => Err(LinuxError::EINVAL),
@@ -296,6 +303,7 @@ pub fn sys_bind(fd: usize, addr: usize, addrlen: usize) -> isize {
         (SocketInner::Udp(s), std_addr) => s
             .bind(std_addr)
             .map_err(|e| LinuxError::from(e.canonicalize())),
+        (SocketInner::Icmp(_), _) => Err(LinuxError::EOPNOTSUPP),
         (SocketInner::Local(_), _) => Err(LinuxError::EINVAL),
         (SocketInner::Packet(_), _) => Err(LinuxError::EINVAL),
         (SocketInner::Netlink(_), _) => Err(LinuxError::EINVAL),
@@ -398,6 +406,7 @@ pub fn sys_connect(fd: usize, addr: usize, addrlen: usize) -> isize {
             SocketInner::Udp(s) => s
                 .connect(target_addr)
                 .map_err(|e| LinuxError::from(e.canonicalize())),
+            SocketInner::Icmp(_) => Err(LinuxError::EOPNOTSUPP),
             SocketInner::Local(_) => Err(LinuxError::EISCONN),
             SocketInner::Packet(_) => Err(LinuxError::EOPNOTSUPP),
             SocketInner::Netlink(_) => Err(LinuxError::EOPNOTSUPP),
@@ -443,6 +452,7 @@ pub fn sys_connect(fd: usize, addr: usize, addrlen: usize) -> isize {
         SocketInner::Udp(s) => s
             .connect(std_addr)
             .map_err(|e| LinuxError::from(e.canonicalize())),
+        SocketInner::Icmp(_) => Err(LinuxError::EOPNOTSUPP),
         SocketInner::Local(_) => Err(LinuxError::EISCONN),
         SocketInner::Packet(_) => Err(LinuxError::EOPNOTSUPP),
         SocketInner::Netlink(_) => Err(LinuxError::EOPNOTSUPP),
@@ -465,6 +475,7 @@ pub fn sys_listen(fd: usize, _backlog: usize) -> isize {
             Err(e) => -(e.code() as isize),
         },
         SocketInner::Udp(_) => -(LinuxError::EOPNOTSUPP.code() as isize),
+        SocketInner::Icmp(_) => -(LinuxError::EOPNOTSUPP.code() as isize),
         SocketInner::Local(_) => -(LinuxError::EINVAL.code() as isize),
         SocketInner::Packet(_) => -(LinuxError::EOPNOTSUPP.code() as isize),
         SocketInner::Netlink(_) => -(LinuxError::EOPNOTSUPP.code() as isize),
@@ -490,6 +501,7 @@ pub fn sys_accept4(fd: usize, addr: usize, addrlen: usize, flags: usize) -> isiz
             Err(e) => return -(e.code() as isize),
         },
         SocketInner::Udp(_) => return -(LinuxError::EOPNOTSUPP.code() as isize),
+        SocketInner::Icmp(_) => return -(LinuxError::EOPNOTSUPP.code() as isize),
         SocketInner::Local(_) => return -(LinuxError::EINVAL.code() as isize),
         SocketInner::Packet(_) => return -(LinuxError::EOPNOTSUPP.code() as isize),
         SocketInner::Netlink(_) => return -(LinuxError::EOPNOTSUPP.code() as isize),
@@ -578,6 +590,10 @@ pub fn sys_shutdown(fd: usize, how: usize) -> isize {
             _ => Err(LinuxError::EINVAL),
         },
         SocketInner::Udp(s) => s.shutdown().map_err(|e| LinuxError::from(e.canonicalize())),
+        SocketInner::Icmp(s) => {
+            s.shutdown();
+            Ok(())
+        }
         SocketInner::Local(s) => match how {
             SHUT_RD => {
                 s.rx.write_wait_queue.notify_all(false);

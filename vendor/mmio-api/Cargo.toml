@@ -1,0 +1,40 @@
+[dependencies.axtest]
+optional = true
+version = "0.5.13"
+
+[dependencies.derive_more]
+default-features = false
+features = ["full"]
+version = "2.1"
+
+[dependencies.thiserror]
+default-features = false
+version = "2"
+
+[features]
+axtest = ["dep:axtest"]
+
+[lib]
+path = "src/lib.rs"
+
+[lints.rust.unexpected_cfgs]
+check-cfg = ["cfg(axtest)"]
+level = "warn"
+priority = 0
+
+[package]
+authors = ["周睿 <zrufo747@outlook.com>"]
+autobenches = false
+autobins = false
+autoexamples = false
+autolib = false
+autotests = false
+categories = ["os", "no-std"]
+description = "Memory-mapped I/O abstraction API for OS kernel development."
+edition = "2024"
+keywords = ["arceos", "kernel"]
+license = "Apache-2.0"
+name = "mmio-api"
+readme = false
+repository = "https://github.com/rcore-os/tgoskits"
+version = "0.2.3"

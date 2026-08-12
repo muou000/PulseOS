@@ -46,7 +46,7 @@ fn shared_socket_set_routes_udp_to_eligible_interface() {
         .unwrap();
 
     let mut sockets = SocketSet::new(vec![]);
-    sockets.add(socket);
+    let handle = sockets.add(socket);
 
     loopback.poll(Instant::ZERO, &mut loopback_device, &mut sockets);
     assert!(loopback_device.queue.is_empty());
@@ -54,6 +54,106 @@ fn shared_socket_set_routes_udp_to_eligible_interface() {
 
     ethernet.poll(Instant::ZERO, &mut ethernet_device, &mut sockets);
     assert!(!ethernet_device.queue.is_empty());
+
+    sockets.remove(handle);
+    ethernet_device.queue.clear();
+    ethernet
+        .routes_mut()
+        .add_default_ipv4_route(Ipv4Address::new(10, 0, 2, 2))
+        .unwrap();
+    let rx_buffer = udp::PacketBuffer::new(vec![udp::PacketMetadata::EMPTY], vec![0; 64]);
+    let tx_buffer = udp::PacketBuffer::new(vec![udp::PacketMetadata::EMPTY], vec![0; 64]);
+    let mut socket = udp::Socket::new(rx_buffer, tx_buffer);
+    socket.bind(49153).unwrap();
+    socket
+        .send_slice(
+            b"public",
+            IpEndpoint::new(IpAddress::v4(1, 1, 1, 1), 53),
+        )
+        .unwrap();
+    sockets.add(socket);
+
+    let after_neighbor_silence = Instant::from_millis(1_001);
+    loopback.poll(after_neighbor_silence, &mut loopback_device, &mut sockets);
+    assert!(loopback_device.queue.is_empty());
+
+    ethernet.poll(after_neighbor_silence, &mut ethernet_device, &mut sockets);
+    assert!(!ethernet_device.queue.is_empty());
+}
+
+#[test]
+#[cfg(all(
+    feature = "alloc",
+    feature = "medium-ip",
+    feature = "medium-ethernet",
+    feature = "socket-tcp"
+))]
+fn shared_socket_set_routes_tcp_via_default_gateway() {
+    use crate::socket::tcp;
+    use crate::tests::TestingDevice;
+
+    let mut loopback_device = TestingDevice::new(Medium::Ip);
+    let mut loopback = Interface::new(
+        Config::new(HardwareAddress::Ip),
+        &mut loopback_device,
+        Instant::ZERO,
+    );
+    loopback.update_ip_addrs(|addrs| {
+        addrs
+            .push(IpCidr::new(IpAddress::v4(127, 0, 0, 1), 8))
+            .unwrap();
+    });
+
+    let local_mac = EthernetAddress::from_bytes(&[0x02, 0x02, 0x02, 0x02, 0x02, 0x02]);
+    let gateway_mac = EthernetAddress::from_bytes(&[0x02, 0x02, 0x02, 0x02, 0x02, 0x01]);
+    let gateway_ip = Ipv4Address::new(10, 0, 2, 2);
+    let remote_ip = IpAddress::v4(1, 1, 1, 1);
+    let mut ethernet_device = TestingDevice::new(Medium::Ethernet);
+    let mut ethernet = Interface::new(
+        Config::new(HardwareAddress::Ethernet(local_mac)),
+        &mut ethernet_device,
+        Instant::ZERO,
+    );
+    ethernet.update_ip_addrs(|addrs| {
+        addrs
+            .push(IpCidr::new(IpAddress::v4(10, 0, 2, 15), 24))
+            .unwrap();
+    });
+    ethernet
+        .routes_mut()
+        .add_default_ipv4_route(gateway_ip)
+        .unwrap();
+    ethernet.inner.neighbor_cache.fill(
+        gateway_ip.into(),
+        HardwareAddress::Ethernet(gateway_mac),
+        Instant::ZERO,
+    );
+
+    let rx_buffer = tcp::SocketBuffer::new(vec![0; 128]);
+    let tx_buffer = tcp::SocketBuffer::new(vec![0; 128]);
+    let mut socket = tcp::Socket::new(rx_buffer, tx_buffer);
+    socket
+        .connect(ethernet.context(), (remote_ip, 80), 49152)
+        .unwrap();
+    let mut sockets = SocketSet::new(vec![]);
+    sockets.add(socket);
+
+    loopback.poll(Instant::ZERO, &mut loopback_device, &mut sockets);
+    assert!(loopback_device.queue.is_empty());
+    assert_eq!(loopback.poll_delay(Instant::ZERO, &sockets), None);
+
+    assert!(ethernet.socket_egress(&mut ethernet_device, &mut sockets));
+    let frame = ethernet_device
+        .queue
+        .front()
+        .expect("missing TCP SYN frame");
+    let ethernet_frame = EthernetFrame::new_checked(frame.as_slice()).unwrap();
+    assert_eq!(ethernet_frame.dst_addr(), gateway_mac);
+    assert_eq!(ethernet_frame.ethertype(), EthernetProtocol::Ipv4);
+    let ipv4_packet = Ipv4Packet::new_checked(ethernet_frame.payload()).unwrap();
+    assert_eq!(ipv4_packet.dst_addr(), Ipv4Address::new(1, 1, 1, 1));
+    let tcp_packet = TcpPacket::new_checked(ipv4_packet.payload()).unwrap();
+    assert!(tcp_packet.syn());
 }
 
 #[rstest]

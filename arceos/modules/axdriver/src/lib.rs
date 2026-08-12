@@ -64,7 +64,7 @@
 extern crate log;
 extern crate axlog;
 
-#[cfg(feature = "dyn")]
+#[cfg(any(feature = "dyn", feature = "starfive-jh7110-dwmac"))]
 extern crate alloc;
 
 #[macro_use]
@@ -80,6 +80,9 @@ mod virtio;
 
 #[cfg(feature = "ixgbe")]
 mod ixgbe;
+
+#[cfg(feature = "starfive-jh7110-dwmac")]
+mod starfive_jh7110;
 
 pub mod prelude;
 

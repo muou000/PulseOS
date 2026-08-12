@@ -1,0 +1,42 @@
+[dependencies.dma-api]
+version = "0.9.3"
+
+[dependencies.dwmmc-host]
+default-features = false
+version = "0.3.3"
+
+[dependencies.log]
+version = "0.4"
+
+[dependencies.rdif-block]
+version = "0.11.2"
+
+[dependencies.sdio-host2]
+version = "0.1.4"
+
+[dependencies.sdmmc-protocol]
+default-features = false
+features = ["sdio", "rdif"]
+version = "0.4.2"
+
+[features]
+default = []
+
+[lib]
+path = "src/lib.rs"
+
+[package]
+autobenches = false
+autobins = false
+autoexamples = false
+autolib = false
+autotests = false
+categories = ["embedded", "no-std", "hardware-support"]
+description = "StarFive JH7110 DWMMC host wrapper for sdmmc-protocol"
+edition = "2024"
+keywords = ["starfive", "jh7110", "dwmmc", "sdmmc", "no_std"]
+license = "Apache-2.0"
+name = "starfive-jh7110-dwmmc"
+readme = false
+repository = "https://github.com/rcore-os/tgoskits"
+version = "0.1.3"

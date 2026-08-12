@@ -350,6 +350,14 @@ pub fn mark_current_cpu_asid_active(asid: usize) {
 
 /// Returns online CPUs currently published as running `asid`.
 pub fn asid_active_cpu_mask(asid: usize) -> usize {
+    #[cfg(target_arch = "riscv64")]
+    {
+        if !axhal::asm::has_hardware_asids() {
+            let _ = asid;
+            return axhal::online_cpu_mask();
+        }
+    }
+
     #[cfg(any(target_arch = "riscv64", target_arch = "loongarch64"))]
     {
         if asid >= TRACKED_ASID_COUNT {

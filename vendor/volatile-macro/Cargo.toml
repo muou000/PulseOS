@@ -1,0 +1,32 @@
+[dependencies.proc-macro2]
+version = "1"
+
+[dependencies.quote]
+version = "1"
+
+[dependencies.syn]
+features = ["full"]
+version = "2"
+
+[dev-dependencies.volatile]
+features = ["derive"]
+version = "=0.6.0"
+
+[lib]
+path = "src/lib.rs"
+
+[package]
+authors = ["Martin Kröning <mkroening@posteo.net>"]
+autobenches = false
+autobins = false
+autoexamples = false
+autotests = false
+categories = ["no-std", "no-std::no-alloc"]
+description = "Procedural macros for the volatile crate."
+edition = "2021"
+keywords = ["volatile"]
+license = "MIT OR Apache-2.0"
+name = "volatile-macro"
+readme = false
+repository = "https://github.com/rust-osdev/volatile"
+version = "0.6.0"

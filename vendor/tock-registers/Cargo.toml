@@ -5,8 +5,140 @@ register_types = []
 [lib]
 path = "src/lib.rs"
 
+[lints.clippy]
+borrow_as_ptr = "allow"
+branches_sharing_code = "allow"
+cargo_common_metadata = "allow"
+cast-possible-wrap = "allow"
+cast_lossless = "allow"
+cast_possible_truncation = "allow"
+cast_precision_loss = "allow"
+cast_ptr_alignment = "allow"
+cast_sign_loss = "allow"
+checked_conversions = "allow"
+cognitive_complexity = "allow"
+collapsible_else_if = "allow"
+collapsible_if = "allow"
+comparison_chain = "allow"
+derive_partial_eq_without_eq = "allow"
+doc_lazy_continuation = "allow"
+doc_markdown = "allow"
+empty_line_after_doc_comments = "allow"
+enum-variant-names = "allow"
+equatable_if_let = "allow"
+explicit_iter_loop = "allow"
+fn_params_excessive_bools = "allow"
+get_first = "allow"
+identity-op = "allow"
+if_not_else = "allow"
+if_same_then_else = "allow"
+inline_always = "allow"
+items_after_statements = "allow"
+iter_without_into_iter = "allow"
+large-enum-variant = "allow"
+large_types_passed_by_value = "allow"
+len_without_is_empty = "allow"
+len_zero = "allow"
+manual-flatten = "allow"
+manual-map = "allow"
+manual-range-patterns = "allow"
+manual_assert = "allow"
+manual_let_else = "allow"
+manual_range_contains = "allow"
+match_bool = "allow"
+match_like_matches_macro = "allow"
+match_same_arms = "allow"
+match_wildcard_for_single_variants = "allow"
+missing_const_for_fn = "allow"
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
+missing_safety_doc = "allow"
+module_inception = "allow"
+module_name_repetitions = "allow"
+must_use_candidate = "allow"
+mut_mut = "allow"
+needless-range-loop = "allow"
+needless_continue = "allow"
+needless_pass_by_value = "allow"
+negative-feature-names = "allow"
+new_without_default = "allow"
+no_effect_underscore_binding = "allow"
+no_mangle_with_rust_abi = "allow"
+nonminimal_bool = "allow"
+option_if_let_else = "allow"
+option_map_unit_fn = "allow"
+or_fun_call = "allow"
+ptr_as_ptr = "allow"
+ptr_cast_constness = "allow"
+range_plus_one = "allow"
+redundant_closure_for_method_calls = "allow"
+redundant_else = "allow"
+redundant_pub_crate = "allow"
+ref_option_ref = "allow"
+result_unit_err = "allow"
+return_self_not_must_use = "allow"
+semicolon_if_nothing_returned = "allow"
+similar_names = "allow"
+single_match_else = "allow"
+struct_excessive_bools = "allow"
+struct_field_names = "allow"
+too_many_arguments = "allow"
+too_many_lines = "allow"
+trait_duplication_in_bounds = "allow"
+transmute_ptr_to_ptr = "allow"
+trivially_copy_pass_by_ref = "allow"
+tuple_array_conversions = "allow"
+type_complexity = "allow"
+uninlined_format_args = "allow"
+unnecessary_wraps = "allow"
+unnested-or-patterns = "allow"
+unreadable_literal = "allow"
+unused_peekable = "allow"
+unused_result_ok = "deny"
+unused_self = "allow"
+unusual-byte-groupings = "allow"
+upper_case_acronyms = "allow"
+use_self = "allow"
+used_underscore_binding = "allow"
+useless_let_if_seq = "allow"
+verbose_bit_mask = "allow"
+zero_prefixed_literal = "allow"
+
+[lints.clippy.cargo]
+level = "deny"
+priority = -1
+
+[lints.clippy.complexity]
+level = "deny"
+priority = -1
+
+[lints.clippy.nursery]
+level = "deny"
+priority = -1
+
+[lints.clippy.pedantic]
+level = "deny"
+priority = -1
+
+[lints.clippy.perf]
+level = "deny"
+priority = -1
+
+[lints.clippy.restriction]
+level = "allow"
+priority = -1
+
+[lints.clippy.style]
+level = "deny"
+priority = -1
+
 [package]
-authors = ["Tock Project Developers <tock-dev@googlegroups.com>"]
+authors = ["Tock Project Developers <devel@lists.tockos.org>"]
+autobenches = false
+autobins = false
+autoexamples = false
+autolib = false
+autotests = false
 categories = ["data-structures", "embedded", "no-std"]
 description = "Memory-Mapped I/O and register interface developed for Tock."
 edition = "2021"
@@ -15,5 +147,5 @@ keywords = ["tock", "embedded", "registers", "mmio", "bare-metal"]
 license = "MIT/Apache-2.0"
 name = "tock-registers"
 readme = "README.md"
-repository = "https://github.com/tock/tock/tree/master/libraries/tock-register-interface"
-version = "0.9.0"
+repository = "https://github.com/tock/tock-registers"
+version = "0.10.1"

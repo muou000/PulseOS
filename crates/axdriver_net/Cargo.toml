@@ -44,6 +44,7 @@ repository = "https://github.com/arceos-org/axdriver_crates"
 default = []
 fxmac = ["dep:fxmac_rs"]
 ixgbe = ["dep:ixgbe-driver"]
+starfive-jh7110-dwmac = []
 
 [lib]
 name = "axdriver_net"

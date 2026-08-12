@@ -215,6 +215,16 @@ pub fn sys_sendto(
                 s.send(data).map_err(|e| LinuxError::from(e.canonicalize()))
             }
         }
+        SocketInner::Icmp(s) => {
+            if (flags & 1) != 0 {
+                Err(LinuxError::EOPNOTSUPP)
+            } else if let Some(destination) = final_dest_addr {
+                s.send_to(data, destination)
+                    .map_err(|e| LinuxError::from(e.canonicalize()))
+            } else {
+                Err(LinuxError::EDESTADDRREQ)
+            }
+        }
         SocketInner::Local(s) => s.write(data),
         SocketInner::Packet(_) => Ok(data.len()),
         SocketInner::Netlink(s) => s.write(data),
@@ -309,6 +319,10 @@ pub fn sys_recvfrom(
             .map(|n| (n, None))
             .map_err(|e| LinuxError::from(e.canonicalize())),
         SocketInner::Udp(s) => s
+            .recv_from(&mut tmp)
+            .map(|(n, src)| (n, Some(src)))
+            .map_err(|e| LinuxError::from(e.canonicalize())),
+        SocketInner::Icmp(s) => s
             .recv_from(&mut tmp)
             .map(|(n, src)| (n, Some(src)))
             .map_err(|e| LinuxError::from(e.canonicalize())),
@@ -491,6 +505,16 @@ fn do_sendmsg_core(socket: &Socket, msg: usize, flags: usize) -> Result<usize, L
                     .map_err(|e| LinuxError::from(e.canonicalize()))
             }
         }
+        SocketInner::Icmp(s) => {
+            if (flags & 1) != 0 {
+                Err(LinuxError::EOPNOTSUPP)
+            } else if let Some(destination) = final_dest_addr {
+                s.send_to(&combined_data, destination)
+                    .map_err(|e| LinuxError::from(e.canonicalize()))
+            } else {
+                Err(LinuxError::EDESTADDRREQ)
+            }
+        }
         SocketInner::Local(s) => s.write(&combined_data),
         SocketInner::Packet(_) => Ok(combined_data.len()),
         SocketInner::Netlink(s) => s.write(&combined_data),
@@ -656,6 +680,10 @@ fn do_recvmsg_core(socket: &Socket, msg: usize, flags: usize) -> Result<usize, L
             .map(|n| (n, None))
             .map_err(|e| LinuxError::from(e.canonicalize())),
         SocketInner::Udp(s) => s
+            .recv_from(&mut flat)
+            .map(|(n, src)| (n, Some(src)))
+            .map_err(|e| LinuxError::from(e.canonicalize())),
+        SocketInner::Icmp(s) => s
             .recv_from(&mut flat)
             .map(|(n, src)| (n, Some(src)))
             .map_err(|e| LinuxError::from(e.canonicalize())),
