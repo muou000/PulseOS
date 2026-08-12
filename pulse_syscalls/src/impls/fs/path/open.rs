@@ -53,6 +53,11 @@ fn mkdir_mode(mode: usize) -> NodePermission {
     let mode = ((mode as u32) & !umask) & 0o7777;
     NodePermission::from_bits_truncate(mode as _)
 }
+
+fn is_root_path(path: &str) -> bool {
+    !path.is_empty() && path.bytes().all(|byte| byte == b'/')
+}
+
 pub fn sys_openat(dirfd: i32, pathname: usize, flags: usize, mode: usize) -> isize {
     let result = crate::impls::utils::with_user_path_str(pathname, |path| {
         let resolved_dirfd = if path.starts_with('/') {
@@ -154,6 +159,12 @@ pub fn sys_mkdirat(dirfd: i32, pathname: usize, mode: usize) -> isize {
             mode
         );
 
+        // The root already exists. Returning EEXIST lets `mkdir -p` verify
+        // that it is a directory and continue with the remaining components.
+        if is_root_path(path) {
+            return Err(LinuxError::EEXIST);
+        }
+
         let resolved_dirfd = if path.starts_with('/') {
             AT_FDCWD as i32
         } else {
@@ -188,5 +199,18 @@ pub fn sys_mkdirat(dirfd: i32, pathname: usize, mode: usize) -> isize {
     match res {
         Ok(code) => code,
         Err(e) => -e.code() as isize,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_root_path;
+
+    #[test]
+    fn recognizes_root_only_paths() {
+        assert!(is_root_path("/"));
+        assert!(is_root_path("///"));
+        assert!(!is_root_path(""));
+        assert!(!is_root_path("/var"));
     }
 }
