@@ -33,13 +33,11 @@ prepare-tools:
 	@echo "[tools] Using prebuilt tools from $(A)/bin"
 
 # Build quiet kernels for the online submission images. Each architecture's
-# image independently chooses its feature and compile-time CPU count.
+# image independently chooses its feature and compile-time CPU count. For a
+# local checkout without either contest image, use the host CPU count to select
+# the preliminary (1 CPU) or final (8/12 CPU) test configuration.
 all:
 	@set -e; \
-	if ! command -v debugfs >/dev/null 2>&1; then \
-		echo "Error: make all requires debugfs to identify contest images."; \
-		exit 1; \
-	fi; \
 	detect_feature() { \
 		image="$$1"; arch="$$2"; \
 		if [ ! -r "$$image" ]; then \
@@ -55,8 +53,28 @@ all:
 			return 1; \
 		fi; \
 	}; \
-	riscv_feature="$$(detect_feature "$(SDCARD_RV_IMAGE)" riscv64)" || exit 1; \
-	loongarch_feature="$$(detect_feature "$(SDCARD_LA_IMAGE)" loongarch64)" || exit 1; \
+	if [ ! -f "$(SDCARD_RV_IMAGE)" ] || [ ! -f "$(SDCARD_LA_IMAGE)" ]; then \
+		if ! command -v nproc >/dev/null 2>&1; then \
+			echo "Error: make all requires nproc when contest images are missing." >&2; \
+			exit 1; \
+		fi; \
+		cpu_count="$$(nproc)"; \
+		case "$$cpu_count" in \
+			1) local_feature=pre-testcode;; \
+			8|12) local_feature=final-testcode;; \
+			*) echo "Warning: unsupported host CPU count $$cpu_count; using final-testcode." >&2; local_feature=final-testcode;; \
+		esac; \
+		riscv_feature="$$local_feature"; \
+		loongarch_feature="$$local_feature"; \
+		echo "[submission] contest images missing; host CPUs=$$cpu_count -> $$local_feature"; \
+	else \
+		if ! command -v debugfs >/dev/null 2>&1; then \
+			echo "Error: make all requires debugfs to identify contest images." >&2; \
+			exit 1; \
+		fi; \
+		riscv_feature="$$(detect_feature "$(SDCARD_RV_IMAGE)" riscv64)" || exit 1; \
+		loongarch_feature="$$(detect_feature "$(SDCARD_LA_IMAGE)" loongarch64)" || exit 1; \
+	fi; \
 	case "$$riscv_feature" in final-testcode) riscv_smp=8;; pre-testcode) riscv_smp=1;; esac; \
 	case "$$loongarch_feature" in final-testcode) loongarch_smp=12;; pre-testcode) loongarch_smp=1;; esac; \
 	echo "[submission] $(SDCARD_RV_IMAGE): $$riscv_feature (riscv64=$$riscv_smp)"; \
