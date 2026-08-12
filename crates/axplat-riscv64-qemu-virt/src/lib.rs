@@ -15,6 +15,7 @@ mod mem;
 mod power;
 mod plic;
 mod time;
+mod tlb;
 mod topology;
 
 pub mod config {

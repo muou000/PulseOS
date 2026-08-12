@@ -34,6 +34,13 @@ const STATE_CONNECTING: u8 = 2;
 const STATE_CONNECTED: u8 = 3;
 const STATE_LISTENING: u8 = 4;
 
+const fn local_addr_is_available(state: u8) -> bool {
+    matches!(
+        state,
+        STATE_CLOSED | STATE_CONNECTING | STATE_CONNECTED | STATE_LISTENING
+    )
+}
+
 /// A TCP socket that provides POSIX-like APIs.
 ///
 /// - [`connect`] is for TCP clients.
@@ -100,16 +107,16 @@ impl TcpSocket {
         }
     }
 
-    /// Returns the local address and port, or
-    /// [`Err(NotConnected)`](AxError::NotConnected) if not connected.
+    /// Returns the bound or automatically assigned local address and port.
+    ///
+    /// The address remains queryable while a nonblocking connection is in
+    /// progress because `connect` has already assigned its local endpoint.
     #[inline]
     pub fn local_addr(&self) -> AxResult<SocketAddr> {
-        // 为了通过测例，已经`bind`但未`listen`的socket也可以返回地址
-        match self.get_state() {
-            STATE_CONNECTED | STATE_LISTENING | STATE_CLOSED => {
-                Ok(into_core_sockaddr(unsafe { self.local_addr.get().read() }))
-            }
-            _ => Err(AxError::NotConnected),
+        if local_addr_is_available(self.get_state()) {
+            Ok(into_core_sockaddr(unsafe { self.local_addr.get().read() }))
+        } else {
+            Err(AxError::NotConnected)
         }
     }
 
@@ -908,4 +915,21 @@ fn get_ephemeral_port() -> AxResult<u16> {
         tries += 1;
     }
     ax_err!(AddrInUse, "no avaliable ports!")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        STATE_BUSY, STATE_CLOSED, STATE_CONNECTED, STATE_CONNECTING, STATE_LISTENING,
+        local_addr_is_available,
+    };
+
+    #[test]
+    fn local_address_is_visible_after_connect_assigns_an_endpoint() {
+        assert!(local_addr_is_available(STATE_CLOSED));
+        assert!(local_addr_is_available(STATE_CONNECTING));
+        assert!(local_addr_is_available(STATE_CONNECTED));
+        assert!(local_addr_is_available(STATE_LISTENING));
+        assert!(!local_addr_is_available(STATE_BUSY));
+    }
 }

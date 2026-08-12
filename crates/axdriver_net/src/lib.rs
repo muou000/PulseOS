@@ -10,8 +10,11 @@ pub mod fxmac;
 /// ixgbe NIC device driver.
 pub mod ixgbe;
 mod net_buf;
+#[cfg(feature = "starfive-jh7110-dwmac")]
+/// Synopsys DWMAC 5.20 controller used by the StarFive JH7110.
+pub mod starfive_jh7110;
 
-use core::ptr::NonNull;
+use core::{ptr::NonNull, time::Duration};
 
 #[doc(no_inline)]
 pub use axdriver_base::{BaseDriverOps, DevError, DevResult, DeviceType};
@@ -68,6 +71,14 @@ pub trait NetDriverOps: BaseDriverOps {
 
     /// Returns the poll set of the device, if supported.
     fn poll_set(&self) -> Option<&axpoll::PollSet> {
+        None
+    }
+
+    /// Returns a fallback interval for polling device completion state.
+    ///
+    /// Interrupt-driven devices should keep the default. A driver may request
+    /// bounded polling when the platform cannot guarantee completion wakeups.
+    fn poll_interval(&self) -> Option<Duration> {
         None
     }
 }

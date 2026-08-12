@@ -9,6 +9,7 @@ use axalloc::global_allocator;
 use axdriver_base::{BaseDriverOps, DevError, DevResult, DeviceType};
 use axdriver_virtio::{BufferDirection, PhysAddr, VirtIoHal};
 use axhal::mem::{phys_to_virt, virt_to_phys};
+#[cfg(net_dev = "virtio-net")]
 use axpoll::PollSet;
 use cfg_if::cfg_if;
 use kspin::SpinNoIrq;

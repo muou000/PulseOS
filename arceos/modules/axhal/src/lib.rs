@@ -107,7 +107,7 @@ pub mod context {
 
 pub use axcpu::asm;
 #[cfg(feature = "smp")]
-pub use axplat::init::{init_early_secondary, init_later_secondary};
+pub use axplat::init::init_later_secondary;
 #[cfg(feature = "smp")]
 use core::sync::atomic::{AtomicUsize, Ordering};
 
@@ -132,7 +132,25 @@ pub fn init_percpu_secondary(cpu_id: usize) {
 /// This function should be called as early as possible.
 pub fn init_early(cpu_id: usize, arg: usize) {
     BOOT_ARG.init_once(arg);
+    init_tlb_policy();
     axplat::init::init_early(cpu_id, arg);
+}
+
+#[cfg(feature = "smp")]
+pub fn init_early_secondary(cpu_id: usize) {
+    init_tlb_policy();
+    axplat::init::init_early_secondary(cpu_id);
+}
+
+#[inline]
+fn init_tlb_policy() {
+    #[cfg(target_arch = "riscv64")]
+    {
+        let requires_global = axplat::tlb::requires_global_sfence();
+        axcpu::asm::set_global_sfence_required(requires_global);
+        #[cfg(feature = "paging")]
+        page_table_multiarch::riscv::set_global_sfence_required(requires_global);
+    }
 }
 
 /// Initializes the platform later stage.

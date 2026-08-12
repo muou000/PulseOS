@@ -3,6 +3,7 @@ mod bench;
 mod dns;
 mod listen_table;
 
+mod icmp;
 mod tcp;
 mod udp;
 use alloc::collections::BTreeMap;
@@ -35,6 +36,7 @@ use smoltcp::wire::{EthernetAddress, HardwareAddress, IpAddress, IpCidr};
 use self::listen_table::ListenTable;
 
 pub use self::dns::dns_query;
+pub use self::icmp::IcmpSocket;
 pub use self::tcp::TcpSocket;
 pub use self::udp::UdpSocket;
 pub use addr::{from_core_sockaddr, into_core_sockaddr};
@@ -56,6 +58,9 @@ const TCP_RX_BUF_LEN: usize = 256 * 1024;
 const TCP_TX_BUF_LEN: usize = 256 * 1024;
 const UDP_RX_BUF_LEN: usize = 4 * 1024 * 1024;
 const UDP_TX_BUF_LEN: usize = 4 * 1024 * 1024;
+const ICMP_RX_BUF_LEN: usize = 64 * 1024;
+const ICMP_TX_BUF_LEN: usize = 64 * 1024;
+const ICMP_PACKET_QUEUE_LEN: usize = 64;
 const LISTEN_QUEUE_SIZE: usize = 512;
 
 static LISTEN_TABLE: LazyInit<ListenTable> = LazyInit::new();
@@ -170,6 +175,18 @@ impl<'a> SocketSetWrapper<'a> {
             vec![0; UDP_TX_BUF_LEN],
         );
         socket::udp::Socket::new(udp_rx_buffer, udp_tx_buffer)
+    }
+
+    pub fn new_icmp_socket() -> socket::icmp::Socket<'a> {
+        let rx_buffer = socket::icmp::PacketBuffer::new(
+            vec![socket::icmp::PacketMetadata::EMPTY; ICMP_PACKET_QUEUE_LEN],
+            vec![0; ICMP_RX_BUF_LEN],
+        );
+        let tx_buffer = socket::icmp::PacketBuffer::new(
+            vec![socket::icmp::PacketMetadata::EMPTY; ICMP_PACKET_QUEUE_LEN],
+            vec![0; ICMP_TX_BUF_LEN],
+        );
+        socket::icmp::Socket::new(rx_buffer, tx_buffer)
     }
 
     pub fn new_dns_socket() -> socket::dns::Socket<'a> {
@@ -290,6 +307,16 @@ impl<'a> SocketSetWrapper<'a> {
                                 events |= IoEvents::IN;
                             }
                             if s.can_send() {
+                                events |= IoEvents::OUT;
+                            }
+                            events
+                        }
+                        (Socket::Icmp(s), SocketWaitKind::Normal) => {
+                            let mut events = IoEvents::empty();
+                            if s.can_recv() {
+                                events |= IoEvents::IN;
+                            }
+                            if s.is_open() && s.can_send() {
                                 events |= IoEvents::OUT;
                             }
                             events
@@ -527,6 +554,24 @@ pub fn poll_delay() -> Option<smoltcp::time::Duration> {
     }
 }
 
+fn next_poll_delay() -> Option<core::time::Duration> {
+    let protocol_delay =
+        poll_delay().map(|delay| core::time::Duration::from_micros(delay.total_micros()));
+    let device_interval = if ETH0.is_inited() {
+        let dev = ETH0.dev.lock();
+        let inner = dev.inner.borrow();
+        inner.poll_interval()
+    } else {
+        None
+    };
+
+    match (protocol_delay, device_interval) {
+        (Some(protocol), Some(device)) => Some(protocol.min(device)),
+        (Some(delay), None) | (None, Some(delay)) => Some(delay),
+        (None, None) => None,
+    }
+}
+
 /// Benchmark raw socket transmit bandwidth.
 pub fn bench_transmit() {
     ETH0.dev.lock().bench_transmit_bandwidth();
@@ -611,7 +656,7 @@ pub(crate) fn init(_net_dev: AxNetDevice) {
 
             poll_interfaces();
 
-            let delay = poll_delay();
+            let delay = next_poll_delay();
             let wait_context = axtask::WaitContext::new(|| {
                 (
                     axtask::WaitReason::NetworkPoll,
@@ -619,8 +664,7 @@ pub(crate) fn init(_net_dev: AxNetDevice) {
                     0,
                 )
             });
-            if let Some(d) = delay {
-                let duration = core::time::Duration::from_micros(d.total_micros());
+            if let Some(duration) = delay {
                 NET_POLL_WAIT_QUEUE.wait_timeout_until_with_context(wait_context, duration, || {
                     NET_POLL_EPOCH.load(Ordering::Acquire) != observed_epoch
                 });
@@ -738,4 +782,22 @@ pub fn is_local_ip(ip: &core::net::IpAddr) -> bool {
         }
     }
     false
+}
+
+/// Returns the configured IPv4 address and prefix length of `eth0`.
+pub fn interface_ipv4_address() -> ([u8; 4], u8) {
+    let iface = ETH0.iface.lock();
+    iface
+        .ip_addrs()
+        .iter()
+        .find_map(|cidr| match cidr.address() {
+            IpAddress::Ipv4(address) => Some((address.0, cidr.prefix_len())),
+            IpAddress::Ipv6(_) => None,
+        })
+        .expect("eth0 has no configured IPv4 address")
+}
+
+/// Returns the hardware address of `eth0`.
+pub fn interface_mac_address() -> [u8; 6] {
+    ETH0.ethernet_address().0
 }

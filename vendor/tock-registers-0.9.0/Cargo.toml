@@ -1,0 +1,19 @@
+[features]
+default = ["register_types"]
+register_types = []
+
+[lib]
+path = "src/lib.rs"
+
+[package]
+authors = ["Tock Project Developers <tock-dev@googlegroups.com>"]
+categories = ["data-structures", "embedded", "no-std"]
+description = "Memory-Mapped I/O and register interface developed for Tock."
+edition = "2021"
+homepage = "https://www.tockos.org/"
+keywords = ["tock", "embedded", "registers", "mmio", "bare-metal"]
+license = "MIT/Apache-2.0"
+name = "tock-registers"
+readme = "README.md"
+repository = "https://github.com/tock/tock/tree/master/libraries/tock-register-interface"
+version = "0.9.0"

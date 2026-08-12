@@ -24,7 +24,6 @@ axfeat = { path = "arceos/api/axfeat", features = [
     "rtc",
     "paging",
     "irq",
-    "net",
 ] }
 
 axconfig = { path = "arceos/modules/axconfig" }
@@ -47,6 +46,7 @@ axdriver_pci = { path = "crates/axdriver_pci" }
 axdriver_virtio = { path = "crates/axdriver_virtio" }
 
 axplat-riscv64-qemu-virt = "0.3.0"
+axplat-riscv64-visionfive2 = "0.3.0"
 axplat-loongarch64-qemu-virt = "0.3.0"
 
 syscalls = { version = "0.8", default-features = false }
@@ -88,6 +88,7 @@ axfs-ng-vfs = { path = "crates/axfs-ng-vfs" }
 axcpu = { path = "crates/axcpu" }
 axplat-loongarch64-qemu-virt = { path = "crates/axplat-loongarch64-qemu-virt" }
 axplat-riscv64-qemu-virt = { path = "crates/axplat-riscv64-qemu-virt" }
+axplat-riscv64-visionfive2 = { path = "crates/axplat-riscv64-visionfive2" }
 axio = { path = "crates/axio" }
 axpoll = { path = "crates/axpoll" }
 virtio-drivers = { path = "crates/virtio-drivers" }
@@ -109,8 +110,19 @@ repository.workspace = true
 
 [features]
 default = []
-qemu = []
-smp = ["axfeat/smp", "axfeat/ipi"]
+net = ["axfeat/net"]
+qemu = ["dep:axplat-riscv64-qemu-virt", "net", "axfeat/driver-virtio-net"]
+visionfive2 = [
+    "dep:axplat-riscv64-visionfive2",
+    "net",
+    "axfeat/driver-starfive-jh7110-dwmac",
+    "axfeat/driver-starfive-jh7110-sdmmc",
+]
+smp = [
+    "axfeat/smp",
+    "axfeat/ipi",
+    "axplat-riscv64-visionfive2?/smp",
+]
 sched-eevdf = ["axfeat/sched-eevdf"]
 sched-load-balance = ["axfeat/sched-load-balance"]
 qperf-trace = [
@@ -132,7 +144,8 @@ pulse_core.workspace = true
 starry-vdso.workspace = true
 
 [target.'cfg(target_arch = "riscv64")'.dependencies]
-axplat-riscv64-qemu-virt.workspace = true
+axplat-riscv64-qemu-virt = { workspace = true, optional = true }
+axplat-riscv64-visionfive2 = { workspace = true, optional = true, features = ["fp-simd", "irq"] }
 
 [target.'cfg(target_arch = "loongarch64")'.dependencies]
 axplat-loongarch64-qemu-virt.workspace = true

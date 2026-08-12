@@ -1,0 +1,86 @@
+[badges.github]
+repository = "JelteF/derive_more"
+workflow = "CI"
+
+[build-dependencies.rustc_version]
+version = "0.4"
+
+[dependencies.convert_case]
+optional = true
+version = "0.10"
+
+[dependencies.proc-macro2]
+version = "1.0"
+
+[dependencies.quote]
+version = "1.0"
+
+[dependencies.syn]
+version = "2.0.45"
+
+[dependencies.unicode-xid]
+optional = true
+version = "0.2.2"
+
+[dev-dependencies.itertools]
+version = "0.14.0"
+
+[features]
+add = ["syn/extra-traits", "syn/visit"]
+add_assign = ["syn/extra-traits", "syn/visit"]
+as_ref = ["syn/extra-traits", "syn/visit"]
+constructor = []
+debug = ["syn/extra-traits", "dep:unicode-xid"]
+default = []
+deref = []
+deref_mut = []
+display = ["syn/extra-traits", "dep:unicode-xid", "dep:convert_case"]
+eq = ["syn/extra-traits", "syn/visit"]
+error = ["syn/extra-traits"]
+from = ["syn/extra-traits"]
+from_str = ["syn/full", "syn/visit", "dep:convert_case"]
+full = ["add", "add_assign", "as_ref", "constructor", "debug", "deref", "deref_mut", "display", "eq", "error", "from", "from_str", "index", "index_mut", "into", "into_iterator", "is_variant", "mul", "mul_assign", "not", "sum", "try_from", "try_into", "try_unwrap", "unwrap"]
+index = []
+index_mut = []
+into = ["syn/extra-traits", "syn/visit-mut"]
+into_iterator = []
+is_variant = ["dep:convert_case"]
+mul = ["syn/extra-traits", "syn/visit"]
+mul_assign = ["syn/extra-traits", "syn/visit"]
+not = ["syn/extra-traits"]
+sum = []
+testing-helpers = ["syn/full"]
+try_from = []
+try_into = ["syn/extra-traits", "syn/full", "syn/visit-mut"]
+try_unwrap = ["dep:convert_case"]
+unwrap = ["dep:convert_case"]
+
+[lib]
+path = "src/lib.rs"
+
+[lints.rust.unexpected_cfgs]
+check-cfg = ["cfg(ci)", "cfg(error_generic_member_access)", "cfg(nightly)"]
+level = "warn"
+priority = 0
+
+[package]
+authors = ["Jelte Fennema <github-tech@jeltef.nl>"]
+autobenches = false
+autobins = false
+autoexamples = false
+autolib = false
+autotests = false
+description = "Internal implementation of `derive_more` crate"
+documentation = "https://docs.rs/derive_more"
+edition = "2021"
+include = ["src/**/*.rs", "doc/**/*.md", "Cargo.toml", "README.md", "LICENSE"]
+license = "MIT"
+name = "derive_more-impl"
+readme = "README.md"
+repository = "https://github.com/JelteF/derive_more"
+rust-version = "1.81.0"
+version = "2.1.1"
+
+[package.metadata.docs.rs]
+features = ["full"]
+rustdoc-args = ["--cfg", "docsrs"]

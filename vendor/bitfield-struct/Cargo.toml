@@ -1,0 +1,38 @@
+[dependencies.proc-macro2]
+version = "1.0"
+
+[dependencies.quote]
+version = "1.0"
+
+[dependencies.syn]
+features = ["full", "extra-traits"]
+version = "2.0"
+
+[dev-dependencies.defmt]
+version = "1.0"
+
+[dev-dependencies.endian-num]
+features = ["linux-types"]
+version = "0.2"
+
+[lib]
+path = "src/lib.rs"
+
+[package]
+authors = ["Lars Wrenger <lars@wrenger.net>"]
+autobenches = false
+autobins = false
+autoexamples = false
+autolib = false
+autotests = false
+categories = ["data-structures", "no-std"]
+description = "Struct-like procedural macro for bitfields."
+documentation = "https://docs.rs/bitfield-struct"
+edition = "2021"
+keywords = ["bitfields", "bits", "proc-macro"]
+license = "MIT"
+name = "bitfield-struct"
+readme = "README.md"
+repository = "https://github.com/wrenger/bitfield-struct-rs.git"
+rust-version = "1.83.0"
+version = "0.11.0"
