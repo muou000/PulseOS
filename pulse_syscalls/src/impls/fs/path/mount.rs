@@ -230,8 +230,14 @@ fn sys_mount_move(ctx: &axfs::FsContext, source_uptr: usize, target_path: &str) 
                 let p = abs.to_string();
                 axlog::debug!("sys_mount_move: propagated shadow mount at '{}'", p);
                 // MOUNTED_TARGETS insert removed
-                axfs::register_mounted_mountpoint(&p, shadow_mp);
-                axfs::register_mount(&source_path, &p, "none", "rw,bind,relatime");
+                axfs::register_mounted_mountpoint(&p, shadow_mp.clone());
+                axfs::register_mount_for_mountpoint(
+                    &source_path,
+                    &p,
+                    "none",
+                    "rw,bind,relatime",
+                    shadow_mp,
+                );
             }
         }
     }
@@ -331,7 +337,13 @@ pub fn sys_mount(
             "rw,relatime"
         };
         axlog::debug!("sys_mount: remount '{}' as {}", target_path, options);
-        axfs::register_mount(&source_path, &target_path, &fstype_name, options);
+        axfs::register_mount_for_mountpoint(
+            &source_path,
+            &target_path,
+            &fstype_name,
+            options,
+            target_mp.clone(),
+        );
 
         // Update readonly status on the mountpoint and all its peer/slave propagation mounts!
         target_mp.set_readonly(is_rdonly);
@@ -393,7 +405,13 @@ pub fn sys_mount(
                 } else {
                     "rw,bind,relatime"
                 };
-                axfs::register_mount(&source_path, &target_path, "none", options);
+                axfs::register_mount_for_mountpoint(
+                    &source_path,
+                    &target_path,
+                    "none",
+                    options,
+                    mountpoint.clone(),
+                );
 
                 // Clone the existing subtree from source_loc to the new mountpoint
                 let mut self_shadows = Vec::new();
@@ -407,8 +425,14 @@ pub fn sys_mount(
                         if let Ok(abs) = loc.absolute_path() {
                             let p = abs.to_string();
                             axlog::debug!("sys_mount: propagated local shadow mount at '{}'", p);
-                            axfs::register_mounted_mountpoint(&p, shadow_mp);
-                            axfs::register_mount(&source_path, &p, "none", options);
+                            axfs::register_mounted_mountpoint(&p, shadow_mp.clone());
+                            axfs::register_mount_for_mountpoint(
+                                &source_path,
+                                &p,
+                                "none",
+                                options,
+                                shadow_mp.clone(),
+                            );
                         }
                     }
                 }
@@ -425,8 +449,14 @@ pub fn sys_mount(
                         if let Ok(abs) = loc.absolute_path() {
                             let p = abs.to_string();
                             axlog::debug!("sys_mount: propagated shadow mount at '{}'", p);
-                            axfs::register_mounted_mountpoint(&p, shadow_mp);
-                            axfs::register_mount(&source_path, &p, "none", options);
+                            axfs::register_mounted_mountpoint(&p, shadow_mp.clone());
+                            axfs::register_mount_for_mountpoint(
+                                &source_path,
+                                &p,
+                                "none",
+                                options,
+                                shadow_mp.clone(),
+                            );
                         }
                     }
                 }
@@ -525,13 +555,19 @@ pub fn sys_mount(
             mountpoint.set_readonly(is_rdonly);
             mountpoint.set_flags(_flags);
 
-            axfs::register_mounted_mountpoint(&target_path, mountpoint);
+            axfs::register_mounted_mountpoint(&target_path, mountpoint.clone());
             let options = if is_rdonly {
                 "ro,relatime"
             } else {
                 "rw,relatime"
             };
-            axfs::register_mount(&source_path, &target_path, &fstype_name, options);
+            axfs::register_mount_for_mountpoint(
+                &source_path,
+                &target_path,
+                &fstype_name,
+                options,
+                mountpoint.clone(),
+            );
             0
         }
         Err(e) => {
@@ -608,9 +644,7 @@ pub fn sys_umount2(target: usize, flags: usize) -> isize {
             };
             match res {
                 Ok(()) => {
-                    // MOUNTED_TARGETS remove removed
-                    let _ = axfs::unregister_mount(&peer_path);
-                    let _ = axfs::unregister_mounted_mountpoint(&peer_path);
+                    let _ = axfs::unregister_mounted_mountpoint_exact(&peer_path, &peer_mp);
                 }
                 Err(e) => {
                     axlog::warn!(
@@ -631,9 +665,7 @@ pub fn sys_umount2(target: usize, flags: usize) -> isize {
 
     match result {
         Ok(()) => {
-            // MOUNTED_TARGETS remove removed
-            let _ = axfs::unregister_mount(&target_path);
-            let _ = axfs::unregister_mounted_mountpoint(&target_path);
+            let _ = axfs::unregister_mounted_mountpoint_exact(&target_path, &target_mp);
             0
         }
         Err(e) => -LinuxError::from(e.canonicalize()).code() as isize,
