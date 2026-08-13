@@ -214,8 +214,10 @@ fn send_ipi_to_cpu(cpu_id: usize) -> Result<(), IpiError> {
     if ONLINE_CPUS.load(Ordering::Acquire) & (1usize << cpu_id) == 0 {
         return Err(IpiError::CpuOffline);
     }
-    let cpu_id = u32::try_from(cpu_id).map_err(|_| IpiError::InvalidTarget)?;
-    let value = cpu_id << IOCSR_IPI_SEND_CPU_SHIFT | IOCSR_IPI_SEND_BLOCKING | IPI_VECTOR;
+    let ipi_cpu_id = crate::topology::ipi_cpu_id(cpu_id)
+        .ok_or(IpiError::InvalidTarget)
+        .and_then(|id| u32::try_from(id).map_err(|_| IpiError::InvalidTarget))?;
+    let value = ipi_cpu_id << IOCSR_IPI_SEND_CPU_SHIFT | IOCSR_IPI_SEND_BLOCKING | IPI_VECTOR;
     iocsr_write_w(IOCSR_IPI_SEND, value);
     Ok(())
 }

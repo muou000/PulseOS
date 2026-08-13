@@ -24,14 +24,15 @@ pub mod config {
 mod boot;
 mod boot_common;
 mod console;
+mod cpu_topology;
 mod init;
 #[cfg(feature = "irq")]
 mod irq;
 mod mem;
 #[cfg(feature = "smp")]
 mod mp;
-#[cfg(feature = "smp")]
 mod mp_common;
 mod power;
 mod time;
 mod time_common;
+mod topology;

@@ -13,9 +13,11 @@ pub fn start_secondary_cpu(cpu_id: usize, stack_top: PhysAddr) -> Result<(), Cpu
     if cpu_id == 0 || cpu_id >= MAX_CPU_NUM {
         return Err(CpuBootError::InvalidParameter);
     }
+    let target_cpu_id =
+        crate::topology::ipi_cpu_id(cpu_id).ok_or(CpuBootError::InvalidParameter)?;
 
     let stack_top = stack_top.as_usize();
-    if !crate::mem::RAM_RANGES
+    if !crate::mem::ram_ranges()
         .iter()
         .any(|&(base, size)| valid_stack_top(stack_top, base, size))
     {
@@ -32,8 +34,8 @@ pub fn start_secondary_cpu(cpu_id: usize, stack_top: PhysAddr) -> Result<(), Cpu
     unsafe {
         core::arch::asm!("dbar 0", options(nostack));
     }
-    csr_mail_send(stack_top as u64, cpu_id, 1);
-    csr_mail_send(entry as u64, cpu_id, 0);
-    send_ipi_single(cpu_id, ACTION_BOOT_CPU);
+    csr_mail_send(stack_top as u64, target_cpu_id, 1);
+    csr_mail_send(entry as u64, target_cpu_id, 0);
+    send_ipi_single(target_cpu_id, ACTION_BOOT_CPU);
     Ok(())
 }
