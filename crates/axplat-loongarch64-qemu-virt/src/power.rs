@@ -1,7 +1,6 @@
-use axplat::{
-    mem::pa,
-    power::{CpuBootError, PowerIf},
-};
+#[cfg(feature = "smp")]
+use axplat::power::CpuBootError;
+use axplat::{mem::pa, power::PowerIf};
 
 struct PowerImpl;
 
@@ -33,6 +32,6 @@ impl PowerIf for PowerImpl {
 
     /// Get the number of CPU cores available on this platform.
     fn cpu_num() -> usize {
-        crate::config::plat::MAX_CPU_NUM
+        crate::topology::cpu_count()
     }
 }

@@ -1,4 +1,8 @@
 pub const L1_BLOCK_SIZE: usize = 0x4000_0000;
+/// QEMU direct kernel boot maps its command line and system tables here.
+pub const QEMU_BOOT_INFO_SIZE: usize = 0x0010_0000;
+/// QEMU reserves this fixed-size slot for the `virt` machine's live FDT.
+pub const QEMU_FDT_MAX_SIZE: usize = 0x0010_0000;
 pub const QEMU_LOW_MEMORY_SIZE: usize = 0x1000_0000;
 
 pub const fn l1_block_index(paddr: usize) -> usize {

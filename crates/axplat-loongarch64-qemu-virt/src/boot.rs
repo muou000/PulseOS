@@ -126,7 +126,8 @@ unsafe extern "C" fn _start() -> ! {
 
     3:
         csrrd       $a0, 0x20           # cpuid
-        li.d        $a1, 0              # TODO: parse dtb
+        bl          {init_topology}      # map firmware CPU ID to a logical ID
+        li.d        $a1, {qemu_fdt_paddr}
         la.pcrel    $t0, {entry}
         jirl        $zero, $t0, 0",
         dmw_virt_mask = const DMW_VIRT_MASK,
@@ -137,6 +138,8 @@ unsafe extern "C" fn _start() -> ! {
         enable_fp_simd = sym enable_fp_simd,
         init_boot_page_table = sym init_boot_page_table,
         init_mmu = sym init_mmu,
+        init_topology = sym crate::topology::init_from_dtb,
+        qemu_fdt_paddr = const crate::topology::QEMU_FDT_PADDR,
         entry = sym axplat::call_main,
     )
 }
@@ -180,6 +183,7 @@ pub(crate) unsafe extern "C" fn _start_secondary() -> ! {
 
     3:
         csrrd        $a0, 0x20                  # cpuid
+        bl           {logical_cpu_id}            # map firmware CPU ID to a logical ID
         la.pcrel     $t0, {entry}
         jirl         $zero, $t0, 0",
         dmw_virt_mask = const DMW_VIRT_MASK,
@@ -188,6 +192,7 @@ pub(crate) unsafe extern "C" fn _start_secondary() -> ! {
         phys_virt_offset = const PHYS_VIRT_OFFSET,
         enable_fp_simd = sym enable_fp_simd,
         init_mmu = sym init_mmu,
+        logical_cpu_id = sym crate::topology::logical_cpu_id,
         entry = sym axplat::call_secondary_main,
     )
 }
