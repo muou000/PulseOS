@@ -142,6 +142,7 @@ pub struct MountRecord {
     pub target: String,
     pub fs_type: String,
     pub options: String,
+    mountpoint: Option<Arc<axfs_ng_vfs::Mountpoint>>,
 }
 
 static MOUNT_RECORDS: Lazy<Mutex<Vec<MountRecord>>> = Lazy::new(|| Mutex::new(Vec::new()));
@@ -195,6 +196,16 @@ fn pin_mountpoint(mountpoint: Arc<axfs_ng_vfs::Mountpoint>) {
 }
 
 pub fn register_mount(source: &str, target: &str, fs_type: &str, options: &str) {
+    register_mount_record(source, target, fs_type, options, None);
+}
+
+fn register_mount_record(
+    source: &str,
+    target: &str,
+    fs_type: &str,
+    options: &str,
+    mountpoint: Option<Arc<axfs_ng_vfs::Mountpoint>>,
+) {
     let target = normalize_target(target);
     let mut mounts = MOUNT_RECORDS.lock();
     mounts.push(MountRecord {
@@ -202,6 +213,42 @@ pub fn register_mount(source: &str, target: &str, fs_type: &str, options: &str) 
         target,
         fs_type: fs_type.to_string(),
         options: options.to_string(),
+        mountpoint,
+    });
+}
+
+/// Register a mount record owned by a concrete VFS mountpoint.
+///
+/// Remounts update the existing record for that mountpoint. This keeps the
+/// mount-record stack aligned with the VFS mount stack while still allowing
+/// legitimate stacked mounts at the same pathname.
+pub fn register_mount_for_mountpoint(
+    source: &str,
+    target: &str,
+    fs_type: &str,
+    options: &str,
+    mountpoint: Arc<axfs_ng_vfs::Mountpoint>,
+) {
+    let target = normalize_target(target);
+    let mut mounts = MOUNT_RECORDS.lock();
+    if let Some(record) = mounts.iter_mut().rfind(|record| {
+        record.target == target
+            && record
+                .mountpoint
+                .as_ref()
+                .is_some_and(|existing| Arc::ptr_eq(existing, &mountpoint))
+    }) {
+        record.source = source.to_string();
+        record.fs_type = fs_type.to_string();
+        record.options = options.to_string();
+        return;
+    }
+    mounts.push(MountRecord {
+        source: source.to_string(),
+        target,
+        fs_type: fs_type.to_string(),
+        options: options.to_string(),
+        mountpoint: Some(mountpoint),
     });
 }
 
@@ -239,9 +286,17 @@ pub fn lookup_mountable_filesystem(source: &str) -> Option<axfs_ng_vfs::Filesyst
 }
 
 pub fn register_mounted_mountpoint(target: &str, mountpoint: Arc<axfs_ng_vfs::Mountpoint>) {
-    MOUNTED_MOUNTPOINTS
-        .lock()
-        .push((normalize_target(target), mountpoint));
+    let target = normalize_target(target);
+    let mut mps = MOUNTED_MOUNTPOINTS.lock();
+    if mps
+        .iter()
+        .any(|(existing_target, existing)| {
+            existing_target == &target && Arc::ptr_eq(existing, &mountpoint)
+        })
+    {
+        return;
+    }
+    mps.push((target, mountpoint));
 }
 
 pub fn lookup_mounted_mountpoint(target: &str) -> Option<Arc<axfs_ng_vfs::Mountpoint>> {
@@ -362,6 +417,45 @@ pub fn unregister_mounted_mountpoint(target: &str) -> bool {
     }
 }
 
+/// Remove the registry entry for the exact VFS mountpoint that was unmounted.
+///
+/// A propagated bind mount can share its pathname with another stacked mount.
+/// Removing by pathname alone can therefore pop the wrong registry entry and
+/// leave `/proc/mounts` pointing at a mount that no longer exists.
+pub fn unregister_mounted_mountpoint_exact(
+    target: &str,
+    mountpoint: &Arc<axfs_ng_vfs::Mountpoint>,
+) -> bool {
+    let target = normalize_target(target);
+    let mut mps = MOUNTED_MOUNTPOINTS.lock();
+    let removed_mountpoint = if let Some(index) = mps
+        .iter()
+        .rposition(|(t, mp)| t == &target && Arc::ptr_eq(mp, mountpoint))
+    {
+        mps.remove(index);
+        true
+    } else {
+        false
+    };
+    drop(mps);
+
+    let mut mounts = MOUNT_RECORDS.lock();
+    let removed_record = if let Some(index) = mounts.iter().rposition(|record| {
+        record.target == target
+            && record
+                .mountpoint
+                .as_ref()
+                .is_some_and(|existing| Arc::ptr_eq(existing, mountpoint))
+    }) {
+        mounts.remove(index);
+        true
+    } else {
+        false
+    };
+
+    removed_mountpoint || removed_record
+}
+
 pub fn rename_mount_registry(old_prefix: &str, new_prefix: &str) {
     let old_prefix = normalize_target(old_prefix);
     let new_prefix = normalize_target(new_prefix);
@@ -441,7 +535,7 @@ fn mount_builtin_fs(
         Ok(mountpoint) => {
             pin_mountpoint(mountpoint.clone());
             register_mounted_mountpoint(path, mountpoint.clone());
-            register_mount(source, path, fs.name(), options);
+            register_mount_for_mountpoint(source, path, fs.name(), options, mountpoint.clone());
             info!("  mounted {} at {}", fs.name(), path);
             Some(mountpoint)
         }
