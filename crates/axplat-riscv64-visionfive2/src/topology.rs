@@ -39,7 +39,6 @@ pub(super) fn init_from_dtb(boot_hart_id: usize, dtb_paddr: usize) -> usize {
 pub(super) fn init_platform_from_dtb(dtb_paddr: usize) {
     let fdt = fdt_from_phys(dtb_paddr)
         .unwrap_or_else(|| panic!("invalid or unavailable VisionFive 2 DTB at {dtb_paddr:#x}"));
-    unsafe { crate::console::early_putchar(b'F') };
 
     #[cfg(feature = "smp")]
     {
@@ -48,21 +47,14 @@ pub(super) fn init_platform_from_dtb(dtb_paddr: usize) {
         let topology = parse_cpu_topology_from_fdt(boot_hart_id, &fdt)
             .unwrap_or_else(|| panic!("VisionFive 2 runtime DTB has no boot U74 hart"));
         publish_topology(&topology);
-        unsafe { crate::console::early_putchar(b'Y') };
     }
 
-    unsafe { crate::console::early_putchar(b'M') };
     crate::mem::init_from_fdt(&fdt, dtb_paddr);
-    unsafe { crate::console::early_putchar(b'N') };
     let plic_ok = parse_plic_topology(&fdt);
-    if !plic_ok {
-        unsafe { crate::console::early_putchar(b'!') };
-    }
     assert!(
         plic_ok,
         "VisionFive 2 DTB has no complete S-mode PLIC topology"
     );
-    unsafe { crate::console::early_putchar(b'L') };
 }
 
 pub(super) fn logical_cpu_id(hart_id: usize) -> usize {
@@ -158,7 +150,6 @@ fn parse_cpu_topology_from_fdt(
 }
 
 fn parse_plic_topology(fdt: &Fdt<'_>) -> bool {
-    unsafe { crate::console::early_putchar(b'p') };
     let Some(plic) = fdt.all_nodes().find(|node| {
         is_available(node)
             && node.compatibles().any(|value| {
@@ -169,7 +160,6 @@ fn parse_plic_topology(fdt: &Fdt<'_>) -> bool {
     }) else {
         return false;
     };
-    unsafe { crate::console::early_putchar(b'q') };
     let Some(reg) = plic.reg().and_then(|mut values| values.next()) else {
         return false;
     };
@@ -187,7 +177,6 @@ fn parse_plic_topology(fdt: &Fdt<'_>) -> bool {
     else {
         return false;
     };
-    unsafe { crate::console::early_putchar(b'r') };
 
     let mut interrupt_phandles = [INVALID_ID; MAX_CPU_NUM];
     for node in fdt.find_children_by_path("/cpus") {
@@ -211,7 +200,6 @@ fn parse_plic_topology(fdt: &Fdt<'_>) -> bool {
             .map(|value| value as usize)
             .unwrap_or(INVALID_ID);
     }
-    unsafe { crate::console::early_putchar(b's') };
 
     let Some(interrupts) = plic.find_property("interrupts-extended") else {
         return false;
@@ -233,7 +221,6 @@ fn parse_plic_topology(fdt: &Fdt<'_>) -> bool {
         }
         context_id += 1;
     }
-    unsafe { crate::console::early_putchar(b't') };
 
     let contexts = &mut contexts[..cpu_count()];
     if contexts.iter().any(|context| *context == INVALID_ID)
@@ -241,16 +228,13 @@ fn parse_plic_topology(fdt: &Fdt<'_>) -> bool {
         && ndev == VF2_PLIC_NDEV
     {
         fill_missing_jh7110_contexts(contexts);
-        unsafe { crate::console::early_putchar(b'w') };
     }
     if contexts.iter().any(|context| *context == INVALID_ID) {
         return false;
     }
-    unsafe { crate::console::early_putchar(b'u') };
     if !plic_mmio_fits(size, ndev, contexts) {
         return false;
     }
-    unsafe { crate::console::early_putchar(b'x') };
 
     PLIC_BASE.store(base, Ordering::Release);
     PLIC_SIZE.store(size, Ordering::Release);
@@ -258,7 +242,6 @@ fn parse_plic_topology(fdt: &Fdt<'_>) -> bool {
     for (cpu_id, context) in contexts.iter().copied().enumerate() {
         PLIC_CONTEXTS[cpu_id].store(context, Ordering::Release);
     }
-    unsafe { crate::console::early_putchar(b'v') };
     true
 }
 
