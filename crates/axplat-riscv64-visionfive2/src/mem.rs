@@ -88,7 +88,6 @@ impl MemIf for MemIfImpl {
 }
 
 pub(super) fn init_from_fdt(fdt: &Fdt<'_>, dtb_paddr: usize) {
-    unsafe { crate::console::early_putchar(b'a') };
     let mut ram = RangeList::<MAX_RAM_RANGES>::new();
     let configured_end = PHYS_MEMORY_BASE.saturating_add(PHYS_MEMORY_SIZE);
     for memory in fdt
@@ -111,13 +110,11 @@ pub(super) fn init_from_fdt(fdt: &Fdt<'_>, dtb_paddr: usize) {
             }
         }
     }
-    unsafe { crate::console::early_putchar(b'b') };
     ram.normalize();
     assert!(
         !ram.is_empty(),
         "VisionFive 2 DTB contains no usable RAM after the kernel image"
     );
-    unsafe { crate::console::early_putchar(b'c') };
 
     let mut candidates = RangeList::<MAX_RESERVED_RANGES>::new();
     // Keep the live DTB ahead of firmware-provided entries so fixed capacity
@@ -126,14 +123,12 @@ pub(super) fn init_from_fdt(fdt: &Fdt<'_>, dtb_paddr: usize) {
         candidates.push((dtb_paddr, fdt.header().totalsize as usize)),
         "DTB reserved-memory range capacity exhausted"
     );
-    unsafe { crate::console::early_putchar(b'd') };
     for reservation in fdt.memory_reservations() {
         assert!(
             push_u64_range(&mut candidates, reservation.address, reservation.size),
             "invalid or excessive DTB memreserve entries"
         );
     }
-    unsafe { crate::console::early_putchar(b'e') };
     for node in fdt.reserved_memory() {
         if let Some(regions) = node.reg() {
             for region in regions {
@@ -146,7 +141,6 @@ pub(super) fn init_from_fdt(fdt: &Fdt<'_>, dtb_paddr: usize) {
             }
         }
     }
-    unsafe { crate::console::early_putchar(b'f') };
     let mut reserved = RangeList::<MAX_RESERVED_RANGES>::new();
     for candidate in candidates.as_slice() {
         let aligned = align_reserved(*candidate).expect("invalid DTB reserved-memory range");
@@ -159,10 +153,8 @@ pub(super) fn init_from_fdt(fdt: &Fdt<'_>, dtb_paddr: usize) {
             }
         }
     }
-    unsafe { crate::console::early_putchar(b'g') };
     reserved.normalize();
     publish_memory_layout(ram, reserved);
-    unsafe { crate::console::early_putchar(b'h') };
 }
 
 fn publish_memory_layout(

@@ -8,18 +8,10 @@ impl InitIf for InitIfImpl {
     /// and performed earliest platform configuration and initialization (e.g.,
     /// early console, clocking).
     fn init_early(_cpu_id: usize, mbi: usize) {
-        unsafe { crate::console::early_putchar(b'I') };
         crate::console::init_early();
         crate::topology::init_platform_from_dtb(mbi);
-        unsafe { crate::console::early_putchar(b'D') };
         axcpu::init::init_trap();
-        unsafe { crate::console::early_putchar(b'R') };
         crate::time::init_early(mbi);
-        unsafe {
-            crate::console::early_putchar(b'E');
-            crate::console::early_putchar(b'\r');
-            crate::console::early_putchar(b'\n');
-        }
     }
 
     /// Initializes the platform at the early stage for secondary cores.

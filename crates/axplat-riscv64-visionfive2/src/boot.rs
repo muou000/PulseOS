@@ -100,19 +100,8 @@ unsafe extern "C" fn _start() -> ! {
         li      t0, {boot_stack_size}
         add     sp, sp, t0              // setup boot stack
 
-        li      a0, '\r'
-        call    {early_putchar}
-        li      a0, '\n'
-        call    {early_putchar}
-        li      a0, 'B'                 // entered at the U-Boot load address
-        call    {early_putchar}
-
         call    {init_boot_page_table}
-        li      a0, 'P'                 // temporary page table is populated
-        call    {early_putchar}
         call    {init_mmu}              // setup boot page table and enabel MMU
-        li      a0, 'M'                 // Sv39 is enabled, identity mapping remains live
-        call    {early_putchar}
         la      t0, {early_trap_vector}
         csrw    stvec, t0               // report faults until axcpu installs its trap vector
 
@@ -120,20 +109,10 @@ unsafe extern "C" fn _start() -> ! {
         mv      a1, s1
         call    {init_topology}          // map the boot hart to a logical CPU ID
         mv      s0, a0
-        li      a0, 'T'                 // firmware DTB yielded a logical boot CPU
-        call    {early_putchar}
 
         li      s2, {phys_virt_offset}  // fix up virtual high address
         add     sp, sp, s2
 
-        mv      a0, s0
-        mv      a1, s1
-        li      a0, 'K'                 // transfer to axplat::call_main follows
-        call    {early_putchar}
-        li      a0, '\r'
-        call    {early_putchar}
-        li      a0, '\n'
-        call    {early_putchar}
         mv      a0, s0
         mv      a1, s1
         la      a2, {entry}
@@ -147,7 +126,6 @@ unsafe extern "C" fn _start() -> ! {
         init_mmu = sym init_mmu,
         early_trap_vector = sym early_trap_vector,
         init_topology = sym crate::topology::init_from_dtb,
-        early_putchar = sym crate::console::early_putchar,
         entry = sym axplat::call_main,
     )
 }
