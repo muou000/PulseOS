@@ -85,6 +85,13 @@ pub struct TrapFrame {
 }
 
 impl TrapFrame {
+    /// Returns the instruction recorded by the hardware for the current
+    /// synchronous exception.
+    #[inline]
+    pub fn bad_instruction(&self) -> u32 {
+        loongArch64::register::badi::read().inst()
+    }
+
     pub fn ip(&self) -> usize {
         self.era
     }

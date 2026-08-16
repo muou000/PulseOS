@@ -9,6 +9,7 @@ dependencies = [
  "axfeat",
  "axhal",
  "axlog",
+ "axplat-loongarch64-ls2k1000",
  "axplat-loongarch64-qemu-virt",
  "axplat-riscv64-qemu-virt",
  "axplat-riscv64-visionfive2",
@@ -303,6 +304,7 @@ dependencies = [
  "log",
  "sdio-host2",
  "sdmmc-protocol",
+ "simple-ahci",
  "spin 0.10.0",
  "starfive-jh7110-dwmmc",
 ]
@@ -554,6 +556,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "axplat-loongarch64-ls2k1000"
+version = "0.3.0"
+dependencies = [
+ "axconfig-macros",
+ "axcpu",
+ "axplat",
+ "fdt-raw",
+ "kspin",
+ "lazyinit",
+ "log",
+ "loongArch64",
+ "ns16550a",
+ "page_table_entry",
+]
+
+[[package]]
 name = "axplat-loongarch64-qemu-virt"
 version = "0.3.0"
 dependencies = [
@@ -561,6 +579,7 @@ dependencies = [
  "axcpu",
  "axplat",
  "chrono",
+ "fdt-raw",
  "kspin",
  "lazyinit",
  "log",
@@ -1814,6 +1833,18 @@ name = "semver"
 version = "1.0.28"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8a7852d02fc848982e0c167ef163aaff9cd91dc640ba85e263cb1ce46fae51cd"
+
+[[package]]
+name = "simple-ahci"
+version = "0.1.1-preview.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e202ff0a10a30a13384768edcda5b00eeeafd7dda1784234662f43dba170e9b2"
+dependencies = [
+ "bitfield-struct",
+ "log",
+ "thiserror",
+ "volatile 0.6.1",
+]
 
 [[package]]
 name = "slab"

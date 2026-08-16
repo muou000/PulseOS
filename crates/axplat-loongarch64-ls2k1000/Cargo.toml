@@ -1,0 +1,43 @@
+[package]
+name = "axplat-loongarch64-ls2k1000"
+version = "0.3.0"
+edition = "2024"
+authors = ["PulseOS contributors"]
+description = "PulseOS axplat implementation for the Loongson 2K1000 board."
+homepage = "https://github.com/muou000/PulseOS"
+repository = "https://github.com/muou000/PulseOS"
+keywords = ["arceos", "os", "hal", "loongarch", "ls2k1000"]
+categories = ["embedded", "no-std", "hardware-support", "os"]
+license = "GPL-3.0-or-later OR Apache-2.0 OR MulanPSL-2.0"
+build = "build.rs"
+
+[features]
+default = []
+fp-simd = ["axcpu/fp-simd"]
+irq = ["axplat/irq"]
+smp = ["axplat/smp", "kspin/smp"]
+
+[lib]
+name = "axplat_loongarch64_ls2k1000"
+path = "src/lib.rs"
+
+[dependencies]
+axconfig-macros = "0.2"
+axcpu = "0.2"
+axplat = "0.3.0"
+fdt-raw = "0.3"
+kspin = "0.1"
+lazyinit = "0.2"
+log = "0.4"
+loongArch64 = "0.2.4"
+ns16550a = "0.5.0"
+page_table_entry = "0.5"
+
+[package.metadata.axplat]
+platform = "loongarch64-ls2k1000"
+arch = "loongarch64"
+config = "axconfig.toml"
+crate = "axplat_loongarch64_ls2k1000"
+
+[package.metadata.docs.rs]
+targets = ["loongarch64-unknown-none-softfloat"]

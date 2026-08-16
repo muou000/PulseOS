@@ -108,6 +108,32 @@ cfg_if::cfg_if! {
 }
 
 cfg_if::cfg_if! {
+    if #[cfg(block_dev = "ls2k1000-ahci")] {
+        pub struct Ls2k1000AhciDriver;
+        register_block_driver!(
+            Ls2k1000AhciDriver,
+            axdriver_block::ls2k1000_ahci::Ls2k1000Ahci
+        );
+
+        impl DriverProbe for Ls2k1000AhciDriver {
+            fn probe_global() -> Option<AxDeviceEnum> {
+                let base: usize = axhal::mem::phys_to_virt(
+                    axconfig::devices::AHCI_PADDR.into(),
+                )
+                .into();
+                debug!(
+                    "probing LS2K1000 AHCI at PA {:#x}",
+                    axconfig::devices::AHCI_PADDR
+                );
+                unsafe { axdriver_block::ls2k1000_ahci::Ls2k1000Ahci::try_new(base) }
+                    .ok()
+                    .map(AxDeviceEnum::from_block)
+            }
+        }
+    }
+}
+
+cfg_if::cfg_if! {
     if #[cfg(net_dev = "starfive-jh7110-dwmac")] {
         pub struct StarfiveJh7110DwmacDriver;
         register_net_driver!(

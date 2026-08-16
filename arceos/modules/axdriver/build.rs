@@ -8,6 +8,7 @@ const BLOCK_DEV_FEATURES: &[&str] = &[
     "ramdisk",
     "bcm2835-sdhci",
     "starfive-jh7110-sdmmc",
+    "ls2k1000-ahci",
     "virtio-blk",
 ];
 const DISPLAY_DEV_FEATURES: &[&str] = &["virtio-gpu"];

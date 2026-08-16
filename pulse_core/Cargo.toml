@@ -37,6 +37,7 @@ kspin.workspace = true
 hashbrown.workspace = true
 
 [features]
+ls2k1000 = ["axcpu/ls2k1000"]
 qperf-trace = ["axtask/qperf-trace", "axfs/qperf-trace"]
 pre-testcode = ["axfs/pre-testcode"]
 final-testcode = ["axfs/final-testcode"]

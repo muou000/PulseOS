@@ -1,3 +1,5 @@
+#[cfg(feature = "ls2k1000")]
+use loongArch64::register::badi;
 use loongArch64::register::{
     badv,
     estat::{self, Exception, Trap},
@@ -10,6 +12,7 @@ core::arch::global_asm!(
     include_asm_macros!(),
     include_str!("trap.S"),
     trapframe_size = const (core::mem::size_of::<TrapFrame>()),
+    ls2k1000 = const if cfg!(feature = "ls2k1000") { 1 } else { 0 },
 );
 
 fn handle_breakpoint(era: &mut usize) {
@@ -17,11 +20,15 @@ fn handle_breakpoint(era: &mut usize) {
     *era += 4;
 }
 
-fn handle_page_fault(tf: &mut TrapFrame, mut access_flags: PageFaultFlags, is_user: bool) {
+fn handle_page_fault_at(
+    tf: &mut TrapFrame,
+    mut access_flags: PageFaultFlags,
+    is_user: bool,
+    vaddr: memory_addr::VirtAddr,
+) {
     if is_user {
         access_flags |= PageFaultFlags::USER;
     }
-    let vaddr = va!(badv::read().raw());
     if !handle_trap!(PAGE_FAULT, tf, vaddr, access_flags, is_user) {
         panic!(
             "Unhandled {} Page Fault @ {:#x}, fault_vaddr={:#x} ({:?}):\n{:#x?}",
@@ -32,6 +39,41 @@ fn handle_page_fault(tf: &mut TrapFrame, mut access_flags: PageFaultFlags, is_us
             tf,
         );
     }
+}
+
+fn handle_page_fault(tf: &mut TrapFrame, access_flags: PageFaultFlags, is_user: bool) {
+    handle_page_fault_at(tf, access_flags, is_user, va!(badv::read().raw()));
+}
+
+/// LS2K1000 may report an instruction-fetch PPI with BADV left at zero. Only
+/// the LS2K1000 build enables this hardware workaround.
+#[cfg(feature = "ls2k1000")]
+#[inline]
+fn ppi_is_instruction_fetch(badi: u32) -> bool {
+    matches!(badi >> 22, 0x0a | 0x0b) // addi.w / addi.d
+}
+
+#[cfg(feature = "ls2k1000")]
+#[inline]
+fn handle_user_page_privilege_illegal(tf: &mut TrapFrame) {
+    let badv_addr = va!(badv::read().raw());
+    let bad_instruction = badi::read().inst();
+    if badv_addr.as_usize() == 0 && ppi_is_instruction_fetch(bad_instruction) {
+        let fetch_addr = memory_addr::VirtAddr::from(tf.era);
+        crate::asm::flush_tlb(Some(fetch_addr));
+        handle_page_fault_at(tf, PageFaultFlags::EXECUTE, true, fetch_addr);
+    } else {
+        crate::asm::flush_tlb(Some(badv_addr));
+        handle_page_fault_at(tf, PageFaultFlags::USER, true, badv_addr);
+    }
+}
+
+#[cfg(not(feature = "ls2k1000"))]
+#[inline]
+fn handle_user_page_privilege_illegal(tf: &mut TrapFrame) {
+    let badv_addr = va!(badv::read().raw());
+    crate::asm::flush_tlb(Some(badv_addr));
+    handle_page_fault_at(tf, PageFaultFlags::USER, true, badv_addr);
 }
 
 #[unsafe(no_mangle)]
@@ -62,7 +104,13 @@ fn loongarch64_trap_handler(tf: &mut TrapFrame, from_user: bool) {
         Trap::Exception(Exception::FetchInstructionAddressError)
         | Trap::Exception(Exception::MemoryAccessAddressError) => {
             let handled = if from_user {
-                handle_trap!(ADDRESS_ERROR, tf, badv::read().raw(), AddressError::BadAddress, from_user)
+                handle_trap!(
+                    ADDRESS_ERROR,
+                    tf,
+                    badv::read().raw(),
+                    AddressError::BadAddress,
+                    from_user
+                )
             } else {
                 false
             };
@@ -76,10 +124,24 @@ fn loongarch64_trap_handler(tf: &mut TrapFrame, from_user: bool) {
             }
         }
         Trap::Exception(Exception::AddressNotAligned) => {
+            let fault_address = badv::read().raw();
             let handled = if from_user {
-                handle_trap!(ADDRESS_ERROR, tf, badv::read().raw(), AddressError::Misaligned, from_user)
+                handle_trap!(
+                    ADDRESS_ERROR,
+                    tf,
+                    fault_address,
+                    AddressError::Misaligned,
+                    from_user
+                )
             } else {
-                false
+                #[cfg(feature = "ls2k1000")]
+                {
+                    unsafe { tf.emulate_unaligned_at(fault_address as u64) }.is_ok()
+                }
+                #[cfg(not(feature = "ls2k1000"))]
+                {
+                    false
+                }
             };
             if !handled {
                 panic!(
@@ -99,7 +161,7 @@ fn loongarch64_trap_handler(tf: &mut TrapFrame, from_user: bool) {
             handle_page_fault(tf, PageFaultFlags::EXECUTE, from_user);
         }
         Trap::Exception(Exception::PagePrivilegeIllegal) if from_user => {
-            handle_page_fault(tf, PageFaultFlags::USER, from_user);
+            handle_user_page_privilege_illegal(tf);
         }
         Trap::Exception(Exception::Breakpoint) => handle_breakpoint(&mut tf.era),
         Trap::Interrupt(_) => {

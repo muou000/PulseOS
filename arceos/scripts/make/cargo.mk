@@ -21,13 +21,30 @@ RUSTFLAGS := -A unsafe_op_in_unsafe_fn
 RUSTFLAGS_LINK_ARGS := -C link-arg=-T$(LD_SCRIPT) -C link-arg=-no-pie -C link-arg=-znostart-stop-gc
 RUSTDOCFLAGS := -Z unstable-options --enable-index-page -D rustdoc::broken_intra_doc_links
 
+# The Rust bare-metal LoongArch target enables `ual` by default. LS2K1000
+# raises ALE for such accesses, so rebuild core/alloc and this platform's
+# kernel with strict alignment. The sysroot dependency set is larger than the
+# repository's application vendor set. The LS2K1000 command runs Cargo from
+# the workspace parent so only that build resolves the locked sysroot crates
+# from crates.io; all other builds keep using the repository-local vendor.
+ifneq ($(findstring ls2k1000,$(APP_FEATURES)),)
+  build_args += -Z build-std=core,alloc
+  RUSTFLAGS += -C target-feature=-ual
+endif
+
 ifeq ($(MAKECMDGOALS), doc_check_missing)
   RUSTDOCFLAGS += -D missing-docs
 endif
 
-define cargo_build
-  $(call run_cmd,cargo -C $(1) build,$(build_args) --features "$(strip $(2))")
-endef
+ifneq ($(findstring ls2k1000,$(APP_FEATURES)),)
+  define cargo_build
+    $(call run_cmd,cargo -C $(dir $(1)) build,--manifest-path $(1)/Cargo.toml $(build_args) --features "$(strip $(2))")
+  endef
+else
+  define cargo_build
+    $(call run_cmd,cargo -C $(1) build,$(build_args) --features "$(strip $(2))")
+  endef
+endif
 
 clippy_args := -A clippy::new_without_default -A unsafe_op_in_unsafe_fn
 

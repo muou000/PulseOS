@@ -23,6 +23,7 @@ VF2_PLATFORM_CONFIG := $(A)/crates/axplat-riscv64-visionfive2/axconfig.toml
 VF2_IP ?= 192.168.137.2
 VF2_GW ?= 192.168.137.1
 VF2_BUILD_EPOCH ?= $(shell date +%s)
+LS2K1000_PLATFORM_CONFIG := $(A)/crates/axplat-loongarch64-ls2k1000/axconfig.toml
 
 prepare-tools:
 	@if [ -d cargo ] && [ ! -d .cargo ]; then mv cargo .cargo; fi
@@ -144,6 +145,17 @@ vf2: prepare-tools
 	@cp $(NAME)_riscv64-visionfive2.uimg kernel-vf2.uimg
 	@echo "Built kernel-vf2.uimg for U-Boot bootm at 0x40200000."
 
+# Build a raw image for the Loongson 2K1000 U-Boot `go` handoff. The board
+# copies its live FDT and passes it as the second `go` argument; the platform
+# crate parses that ABI before allocator and IRQ initialization.
+ls2k1000: prepare-tools
+	@rm -f $(A)/.axconfig.toml
+	@ARCH=loongarch64 MYPLAT=axplat-loongarch64-ls2k1000 SMP=2 APP_FEATURES=ls2k1000 LOG=$(LOG) BUS=mmio PLAT_CONFIG=$(LS2K1000_PLATFORM_CONFIG) OUT_DIR=$(A) $(MAKE) -C arceos defconfig
+	@ARCH=loongarch64 MYPLAT=axplat-loongarch64-ls2k1000 SMP=2 APP_FEATURES=ls2k1000 LOG=$(LOG) BUS=mmio PLAT_CONFIG=$(LS2K1000_PLATFORM_CONFIG) OUT_DIR=$(A) $(MAKE) -C arceos build
+	@cp $(NAME)_loongarch64-ls2k1000.bin kernel-ls2k1000
+	@cp $(NAME)_loongarch64-ls2k1000.elf kernel-ls2k1000.elf
+	@echo "Built kernel-ls2k1000 for U-Boot go at cached load address 0x9000000098000000."
+
 build: prepare-tools defconfig
 	@$(MAKE) -C arceos A=$(A) ARCH=$(ARCH) build
 
@@ -154,10 +166,12 @@ clean:
 	@rm -f kernel-rv-qperf kernel-la-qperf
 	@rm -f kernel-rv-debug kernel-la-debug
 	@rm -f kernel-vf2 kernel-vf2.uimg
+	@rm -f kernel-ls2k1000 kernel-ls2k1000.elf
 	@rm -f PulseOS_riscv64-qemu-virt.elf PulseOS_riscv64-qemu-virt.bin
 	@rm -f PulseOS_loongarch64-qemu-virt.elf PulseOS_loongarch64-qemu-virt.bin
 	@rm -f PulseOS_riscv64-qemu-virt-debug.elf PulseOS_loongarch64-qemu-virt-debug.elf
 	@rm -f PulseOS_riscv64-visionfive2.elf
+	@rm -f PulseOS_loongarch64-ls2k1000.elf PulseOS_loongarch64-ls2k1000.bin
 	@rm -f PulseOS_riscv64-qemu-virt-qperf.elf PulseOS_loongarch64-qemu-virt-qperf.elf
 	@rm -f disk.img disk-la.img
 	@rm -f rootfs-riscv64.img rootfs-loongarch64.img
@@ -176,4 +190,4 @@ img_all:
 	@cp disk.img arceos/disk.img
 	@cp disk-la.img arceos/disk-la.img
 
-.PHONY: all submission-build test qperf debug vf2 build clean defconfig img_all prepare-tools
+.PHONY: all submission-build test qperf debug vf2 ls2k1000 build clean defconfig img_all prepare-tools
