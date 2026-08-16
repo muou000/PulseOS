@@ -10,8 +10,7 @@ use axhal::{
     },
 };
 use linux_raw_sys::general::{
-    BUS_ADRALN, BUS_ADRERR, ILL_ILLOPC, SEGV_ACCERR, SEGV_MAPERR, SIGBUS, SIGILL, SIGKILL,
-    SIGSEGV,
+    BUS_ADRALN, BUS_ADRERR, ILL_ILLOPC, SEGV_ACCERR, SEGV_MAPERR, SIGBUS, SIGILL, SIGKILL, SIGSEGV,
 };
 use memory_addr::VirtAddr;
 
@@ -42,6 +41,45 @@ impl Drop for TrapIrqEnableGuard {
             axhal::asm::disable_irqs();
         }
     }
+}
+
+#[cfg(all(target_arch = "loongarch64", feature = "ls2k1000"))]
+fn emulate_user_unaligned(
+    tf: &mut TrapFrame,
+    fault_address: usize,
+    process: &crate::task::Process,
+) -> Result<(), ()> {
+    let access = unsafe { tf.decode_unaligned_access_at(fault_address as u64) }.map_err(|_| ())?;
+    let address = usize::try_from(access.address()).map_err(|_| ())?;
+    let mapping_flags = match access.access_type() {
+        axcpu::UnalignedAccessType::Read => MappingFlags::READ,
+        axcpu::UnalignedAccessType::Write => MappingFlags::WRITE,
+    };
+
+    process
+        .validate_user_range(address, access.size())
+        .map_err(|_| ())?;
+    {
+        let _irq_guard = TrapIrqEnableGuard::new();
+        process
+            .try_fault_in_user_range(address, access.size(), mapping_flags)
+            .map_err(|_| ())?;
+    }
+
+    // Keep mappings and permissions stable through the byte accesses. This is
+    // especially important for stores, where a concurrent munmap must not leave
+    // a partially committed operation.
+    let aspace_handle = process.aspace_handle();
+    let aspace = aspace_handle.read();
+    if !aspace.can_access_range(
+        VirtAddr::from(address),
+        access.size(),
+        mapping_flags | MappingFlags::USER,
+    ) {
+        return Err(());
+    }
+
+    unsafe { tf.emulate_unaligned_access(access) }.map_err(|_| ())
 }
 
 #[register_trap_handler(ILLEGAL_INSTRUCTION)]
@@ -83,6 +121,18 @@ fn handle_address_error(
             let pc = tf.sepc;
             #[cfg(target_arch = "loongarch64")]
             let pc = tf.era;
+
+            #[cfg(all(target_arch = "loongarch64", feature = "ls2k1000"))]
+            if error == AddressError::Misaligned {
+                let process = thread.process();
+                thread.exit_if_exec_requested();
+                if process.group_exiting() {
+                    thread.exit_current(process.group_exit_code());
+                }
+                if emulate_user_unaligned(tf, vaddr, process.as_ref()).is_ok() {
+                    return true;
+                }
+            }
 
             axlog::warn!(
                 "Address error! pid={} exe={:?} ip={:#x} vaddr={:#x} kind={error:?}",
@@ -267,6 +317,18 @@ fn handle_page_fault(
         proc.exec_path()
     );
     axlog::warn!("  vaddr={:#x}, flags={:?}", vaddr, access_flags);
+    #[cfg(target_arch = "loongarch64")]
+    axlog::warn!(
+        "  era={:#x}, badi={:#010x}, ra={:#x}, sp={:#x}, tp={:#x}, a0={:#x}, a1={:#x}, a2={:#x}",
+        tf.era,
+        tf.bad_instruction(),
+        tf.regs.ra,
+        tf.regs.sp,
+        tf.regs.tp,
+        tf.regs.a0,
+        tf.regs.a1,
+        tf.regs.a2
+    );
 
     let out_of_memory = fault_error == Some(AxError::NoMemory);
     let mut signo = if out_of_memory { SIGKILL } else { SIGSEGV };

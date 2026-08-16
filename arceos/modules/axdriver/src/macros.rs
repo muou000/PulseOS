@@ -64,6 +64,11 @@ macro_rules! for_each_drivers {
             type $drv_type = crate::drivers::StarfiveJh7110SdMmcDriver;
             $code
         }
+        #[cfg(block_dev = "ls2k1000-ahci")]
+        {
+            type $drv_type = crate::drivers::Ls2k1000AhciDriver;
+            $code
+        }
         #[cfg(net_dev = "ixgbe")]
         {
             type $drv_type = crate::drivers::IxgbeDriver;

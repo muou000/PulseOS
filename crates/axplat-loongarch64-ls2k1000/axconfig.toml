@@ -1,0 +1,47 @@
+# Loongson 2K1000 development board configuration for PulseOS.
+arch = "loongarch64" # str
+platform = "loongarch64-ls2k1000" # str
+package = "axplat-loongarch64-ls2k1000" # str
+
+[plat]
+# The board DTB describes two cores. SMP is an upper bound, not a promise that
+# firmware has released CPU1 successfully.
+max-cpu-num = 2 # uint
+# The 2K1000 DTB describes discontiguous RAM. These values are only an address
+# envelope for generic configuration; the allocator consumes the DTB ranges.
+phys-memory-base = 0x0020_0000 # uint
+phys-memory-size = 0xbfe0_0000 # uint
+# U-Boot loads the raw PulseOS image at this physical address through DMW1.
+kernel-base-paddr = 0x9800_0000 # uint
+# LS2K1000 implements a 40-bit VA.  Keep the kernel in the canonical upper
+# 4 GiB window: 0xffff_8000_xxxx_xxxx is a valid 48-bit address but causes an
+# address-error exception on this CPU before a page-table walk.
+kernel-base-vaddr = "0xffff_ffff_9800_0000" # uint
+phys-virt-offset = "0xffff_ffff_0000_0000" # uint
+phys-bus-offset = 0 # uint
+# The board's RAM and MMIO envelope ends below physical 0xc000_0000. Keep the
+# virtual range below 2^64 so address-space range arithmetic cannot overflow.
+kernel-aspace-base = "0xffff_ffff_0000_0000" # uint
+kernel-aspace-size = "0x0000_0000_c000_0000" # uint
+boot-stack-size = 0x40000 # uint
+
+[devices]
+# LIOINTC, UART, and RTC live below 0x1ff0_0000; AHCI and GMAC live in the
+# 0x4000_0000 window. The initial port owns UART, LIOINTC, and AHCI only.
+mmio-ranges = [
+    [0x1fe0_0000, 0x0010_0000],
+    [0x4000_0000, 0x0010_0000],
+] # [(uint, uint)]
+virtio-mmio-ranges = [] # [(uint, uint)]
+pci-ecam-base = 0 # uint
+pci-bus-end = 0 # uint
+pci-ranges = [] # [(uint, uint)]
+uart-paddr = 0x1fe2_0000 # uint
+ahci-paddr = 0x400e_0000 # uint
+liointc-paddr = 0x1fe0_1400 # uint
+liointc-isr-paddr = 0x1fe0_1040 # uint
+# CPU HWI1 (raw interrupt 3) is the cascade in the reference board DTB.
+liointc-cascade-irq = 3 # uint
+timer-frequency = 100_000_000 # uint
+timer-irq = "0x8000_0000_0000_000b" # uint
+ipi-irq = "0x8000_0000_0000_000c" # uint

@@ -44,6 +44,13 @@ starfive-jh7110-sdmmc = [
     "dep:axhal",
     "dep:axconfig",
 ]
+ls2k1000-ahci = [
+    "block",
+    "async",
+    "axdriver_block/ls2k1000-ahci",
+    "dep:axhal",
+    "dep:axconfig",
+]
 starfive-jh7110-dwmac = [
     "net",
     "axdriver_net/starfive-jh7110-dwmac",

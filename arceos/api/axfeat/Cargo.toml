@@ -88,6 +88,7 @@ driver-virtio-net = ["axdriver?/virtio-net"]
 driver-starfive-jh7110-dwmac = ["axdriver?/starfive-jh7110-dwmac"]
 driver-bcm2835-sdhci = ["axdriver?/bcm2835-sdhci"]
 driver-starfive-jh7110-sdmmc = ["axdriver?/starfive-jh7110-sdmmc"]
+driver-ls2k1000-ahci = ["axdriver?/ls2k1000-ahci"]
 
 # Logging
 log-level-off = ["axlog/log-level-off"]

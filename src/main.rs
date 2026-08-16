@@ -5,6 +5,8 @@
 extern crate axlog;
 extern crate alloc;
 extern crate axhal;
+#[cfg(all(target_arch = "loongarch64", feature = "ls2k1000"))]
+extern crate axplat_loongarch64_ls2k1000;
 #[cfg(all(target_arch = "riscv64", feature = "visionfive2"))]
 extern crate axplat_riscv64_visionfive2;
 extern crate axruntime;

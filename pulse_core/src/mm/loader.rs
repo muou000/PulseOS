@@ -362,6 +362,45 @@ fn anonymous_segment_start(
     }
 }
 
+/// Return the end of the file bytes needed by the ELF's PT_TLS image.
+///
+/// GNU ld and lld normally place the TLS initialization image immediately
+/// after the last PT_LOAD file range.  It is nevertheless legal for that
+/// image to extend beyond the last PT_LOAD's p_filesz, so a demand-paged
+/// loader must keep those bytes visible to the dynamic linker.  The mapping
+/// itself is still bounded by the PT_LOAD p_memsz below.
+fn tls_file_end_offset(elf: &ElfFile<'_>) -> AxResult<Option<usize>> {
+    let mut max_end = None;
+    for ph in elf.program_iter() {
+        if ph.get_type() != Ok(Type::Tls) {
+            continue;
+        }
+        let file_size = usize::try_from(ph.file_size()).map_err(|_| AxError::InvalidExecutable)?;
+        let memory_size = usize::try_from(ph.mem_size()).map_err(|_| AxError::InvalidExecutable)?;
+        if file_size > memory_size {
+            return Err(AxError::InvalidExecutable);
+        }
+        let offset = usize::try_from(ph.offset()).map_err(|_| AxError::InvalidExecutable)?;
+        let end = offset
+            .checked_add(file_size)
+            .ok_or(AxError::InvalidExecutable)?;
+        max_end = Some(max_end.map_or(end, |current: usize| current.max(end)));
+    }
+    Ok(max_end)
+}
+
+fn effective_load_file_end(
+    is_last_load: bool,
+    load_file_end: usize,
+    tls_file_end: Option<usize>,
+) -> usize {
+    if is_last_load {
+        load_file_end.max(tls_file_end.unwrap_or(load_file_end))
+    } else {
+        load_file_end
+    }
+}
+
 fn load_segments(
     aspace: &mut AddrSpace,
     elf: &ElfFile<'_>,
@@ -369,6 +408,12 @@ fn load_segments(
     bias: usize,
 ) -> AxResult<ElfLoadLayout> {
     let mut layout = ElfLoadLayout::default();
+    let load_count = elf
+        .program_iter()
+        .filter(|ph| ph.get_type() == Ok(Type::Load))
+        .count();
+    let tls_file_end = tls_file_end_offset(elf)?;
+    let mut load_index = 0;
     for ph in elf.program_iter() {
         if ph.get_type() != Ok(Type::Load) {
             continue;
@@ -394,20 +439,34 @@ fn load_segments(
         let seg_start_page = p_vaddr.align_down_4k();
         let file_start_page = p_offset.align_down_4k();
         let seg_end = p_vaddr.checked_add(p_memsz).ok_or(AxError::OutOfRange)?;
-        let file_backed_end = p_vaddr.checked_add(p_filesz).ok_or(AxError::OutOfRange)?;
+        let load_file_end = p_offset
+            .checked_add(p_filesz)
+            .ok_or(AxError::InvalidExecutable)?;
+        let effective_file_end =
+            effective_load_file_end(load_index + 1 == load_count, load_file_end, tls_file_end);
+        let effective_file_size = effective_file_end
+            .checked_sub(p_offset)
+            .ok_or(AxError::InvalidExecutable)?;
+        let file_backed_end = p_vaddr
+            .checked_add(effective_file_size)
+            .ok_or(AxError::OutOfRange)?;
+        if file_backed_end > seg_end {
+            return Err(AxError::InvalidExecutable);
+        }
+        let original_file_backed_end = p_vaddr.checked_add(p_filesz).ok_or(AxError::OutOfRange)?;
 
         if ph.flags().is_write() {
             if layout.start_data == 0 || p_vaddr.as_usize() < layout.start_data {
                 layout.start_data = p_vaddr.as_usize();
             }
-            layout.end_data = layout.end_data.max(file_backed_end.as_usize());
+            layout.end_data = layout.end_data.max(original_file_backed_end.as_usize());
         }
         layout.brk = layout.brk.max(seg_end.as_usize());
         let file_backed_end_page = file_backed_end.align_up_4k();
         let seg_end_page = seg_end.align_up_4k();
         let flags = segment_flags(&ph);
 
-        if p_filesz > 0 {
+        if effective_file_size > 0 {
             let file_bytes = file_backed_end.sub_addr(seg_start_page);
             let map_len = file_backed_end_page - seg_start_page;
             let zero_len = file_backed_end_page.as_usize() - file_backed_end.as_usize();
@@ -440,11 +499,13 @@ fn load_segments(
             }
         }
 
-        let anon_start = anonymous_segment_start(seg_start_page, file_backed_end_page, p_filesz);
+        let anon_start =
+            anonymous_segment_start(seg_start_page, file_backed_end_page, effective_file_size);
         if seg_end_page > anon_start {
             let map_len = seg_end_page - anon_start;
             aspace.map_alloc(anon_start, map_len, flags, false)?;
         }
+        load_index += 1;
     }
     Ok(layout)
 }
@@ -1021,6 +1082,14 @@ mod tests {
             compute_load_bias(requirements, mapping_start).unwrap(),
             USER_DYN_BASE
         );
+    }
+
+    #[test]
+    fn tls_file_image_extends_only_the_last_load_segment() {
+        assert_eq!(effective_load_file_end(false, 0x2000, Some(0x3000)), 0x2000);
+        assert_eq!(effective_load_file_end(true, 0x2000, Some(0x3000)), 0x3000);
+        assert_eq!(effective_load_file_end(true, 0x3000, Some(0x2000)), 0x3000);
+        assert_eq!(effective_load_file_end(true, 0x2000, None), 0x2000);
     }
 
     #[test]

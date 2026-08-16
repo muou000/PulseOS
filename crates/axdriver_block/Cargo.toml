@@ -41,6 +41,7 @@ repository = "https://github.com/arceos-org/axdriver_crates"
 async = []
 bcm2835-sdhci = ["dep:bcm2835-sdhci"]
 default = []
+ls2k1000-ahci = ["dep:axhal", "dep:simple-ahci"]
 ramdisk = []
 starfive-jh7110-sdmmc = [
     "dep:axhal",
@@ -73,6 +74,10 @@ optional = true
 
 [dependencies.axhal]
 path = "../../arceos/modules/axhal"
+optional = true
+
+[dependencies.simple-ahci]
+version = "0.1.1-preview.1"
 optional = true
 
 # Keep the last tgoskits polling/FIFO generation together. dwmmc-host 0.3.4

@@ -64,6 +64,7 @@ default = []
 fp-simd = []
 tls = []
 uspace = []
+ls2k1000 = []
 
 [lib]
 name = "axcpu"
