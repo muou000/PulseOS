@@ -40,9 +40,12 @@ ramdisk = ["block", "axdriver_block/ramdisk"]
 bcm2835-sdhci = ["block", "axdriver_block/bcm2835-sdhci"]
 starfive-jh7110-sdmmc = [
     "block",
+    "async",
     "axdriver_block/starfive-jh7110-sdmmc",
+    "dep:axalloc",
     "dep:axhal",
     "dep:axconfig",
+    "dep:fdt-raw",
 ]
 ls2k1000-ahci = [
     "block",

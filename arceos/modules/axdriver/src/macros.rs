@@ -1,26 +1,40 @@
 //! TODO: generate registered drivers in `for_each_drivers!` automatically.
 
-#![allow(unused_macros)]
-
+#[cfg(any(
+    net_dev = "virtio-net",
+    net_dev = "ixgbe",
+    net_dev = "starfive-jh7110-dwmac",
+    net_dev = "fxmac",
+    net_dev = "dummy",
+))]
 macro_rules! register_net_driver {
-    ($driver_type:ty, $device_type:ty) => {
+    ($device_type:ty) => {
         /// The unified type of the NIC devices.
         #[cfg(not(feature = "dyn"))]
         pub type AxNetDevice = $device_type;
     };
 }
 
+#[cfg(any(
+    block_dev = "virtio-blk",
+    block_dev = "ramdisk",
+    block_dev = "bcm2835-sdhci",
+    block_dev = "starfive-jh7110-sdmmc",
+    block_dev = "ls2k1000-ahci",
+    block_dev = "dummy",
+))]
 macro_rules! register_block_driver {
-    ($driver_type:ty, $device_type:ty) => {
-        /// The unified type of the NIC devices.
+    ($device_type:ty) => {
+        /// The unified type of the block devices.
         #[cfg(not(feature = "dyn"))]
         pub type AxBlockDevice = $device_type;
     };
 }
 
+#[cfg(any(display_dev = "virtio-gpu", display_dev = "dummy"))]
 macro_rules! register_display_driver {
-    ($driver_type:ty, $device_type:ty) => {
-        /// The unified type of the NIC devices.
+    ($device_type:ty) => {
+        /// The unified type of the display devices.
         #[cfg(not(feature = "dyn"))]
         pub type AxDisplayDevice = $device_type;
     };

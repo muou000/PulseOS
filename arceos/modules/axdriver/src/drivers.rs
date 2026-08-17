@@ -1,17 +1,11 @@
 //! Defines types and probe methods of all supported devices.
 
-#![allow(unused_imports, dead_code)]
-
-use crate::AxDeviceEnum;
-use axdriver_base::DeviceType;
-
-#[cfg(feature = "virtio")]
-use crate::virtio::{self, VirtIoDevMeta};
-
-#[cfg(feature = "bus-pci")]
+#[cfg(bus = "pci")]
 use axdriver_pci::{DeviceFunction, DeviceFunctionInfo, PciRoot};
 
+#[cfg(any(net_dev = "dummy", block_dev = "dummy", display_dev = "dummy",))]
 pub use super::dummy::*;
+use crate::AxDeviceEnum;
 
 pub trait DriverProbe {
     fn probe_global() -> Option<AxDeviceEnum> {
@@ -34,27 +28,18 @@ pub trait DriverProbe {
 }
 
 #[cfg(net_dev = "virtio-net")]
-register_net_driver!(
-    <virtio::VirtIoNet as VirtIoDevMeta>::Driver,
-    <virtio::VirtIoNet as VirtIoDevMeta>::Device
-);
+register_net_driver!(<crate::virtio::VirtIoNet as crate::virtio::VirtIoDevMeta>::Device);
 
 #[cfg(block_dev = "virtio-blk")]
-register_block_driver!(
-    <virtio::VirtIoBlk as VirtIoDevMeta>::Driver,
-    <virtio::VirtIoBlk as VirtIoDevMeta>::Device
-);
+register_block_driver!(<crate::virtio::VirtIoBlk as crate::virtio::VirtIoDevMeta>::Device);
 
 #[cfg(display_dev = "virtio-gpu")]
-register_display_driver!(
-    <virtio::VirtIoGpu as VirtIoDevMeta>::Driver,
-    <virtio::VirtIoGpu as VirtIoDevMeta>::Device
-);
+register_display_driver!(<crate::virtio::VirtIoGpu as crate::virtio::VirtIoDevMeta>::Device);
 
 cfg_if::cfg_if! {
     if #[cfg(block_dev = "ramdisk")] {
         pub struct RamDiskDriver;
-        register_block_driver!(RamDiskDriver, axdriver_block::ramdisk::RamDisk);
+        register_block_driver!(axdriver_block::ramdisk::RamDisk);
 
         impl DriverProbe for RamDiskDriver {
             fn probe_global() -> Option<AxDeviceEnum> {
@@ -70,7 +55,7 @@ cfg_if::cfg_if! {
 cfg_if::cfg_if! {
     if #[cfg(block_dev = "bcm2835-sdhci")]{
         pub struct BcmSdhciDriver;
-        register_block_driver!(MmckDriver, axdriver_block::bcm2835sdhci::SDHCIDriver);
+        register_block_driver!(axdriver_block::bcm2835sdhci::SDHCIDriver);
 
         impl DriverProbe for BcmSdhciDriver {
             fn probe_global() -> Option<AxDeviceEnum> {
@@ -85,22 +70,12 @@ cfg_if::cfg_if! {
     if #[cfg(block_dev = "starfive-jh7110-sdmmc")] {
         pub struct StarfiveJh7110SdMmcDriver;
         register_block_driver!(
-            StarfiveJh7110SdMmcDriver,
-            axdriver_block::starfive_jh7110::Jh7110SdMmc
+            crate::starfive_jh7110_sdmmc::Jh7110SdMmcDevice
         );
 
         impl DriverProbe for StarfiveJh7110SdMmcDriver {
             fn probe_global() -> Option<AxDeviceEnum> {
-                let base: usize = axhal::mem::phys_to_virt(
-                    axconfig::devices::SDMMC_PADDR.into(),
-                )
-                .into();
-                debug!(
-                    "probing StarFive JH7110 SD/MMC at PA {:#x}",
-                    axconfig::devices::SDMMC_PADDR
-                );
-                unsafe { axdriver_block::starfive_jh7110::Jh7110SdMmc::try_new(base) }
-                    .ok()
+                crate::starfive_jh7110_sdmmc::probe()
                     .map(AxDeviceEnum::from_block)
             }
         }
@@ -111,7 +86,6 @@ cfg_if::cfg_if! {
     if #[cfg(block_dev = "ls2k1000-ahci")] {
         pub struct Ls2k1000AhciDriver;
         register_block_driver!(
-            Ls2k1000AhciDriver,
             axdriver_block::ls2k1000_ahci::Ls2k1000Ahci
         );
 
@@ -137,7 +111,6 @@ cfg_if::cfg_if! {
     if #[cfg(net_dev = "starfive-jh7110-dwmac")] {
         pub struct StarfiveJh7110DwmacDriver;
         register_net_driver!(
-            StarfiveJh7110DwmacDriver,
             crate::starfive_jh7110::Jh7110DwmacDevice
         );
 
@@ -154,7 +127,7 @@ cfg_if::cfg_if! {
         use crate::ixgbe::IxgbeHalImpl;
         use axhal::mem::phys_to_virt;
         pub struct IxgbeDriver;
-        register_net_driver!(IxgbeDriver, axdriver_net::ixgbe::IxgbeNic<IxgbeHalImpl, 1024, 1>);
+        register_net_driver!(axdriver_net::ixgbe::IxgbeNic<IxgbeHalImpl, 1024, 1>);
         impl DriverProbe for IxgbeDriver {
             #[cfg(bus = "pci")]
             fn probe_pci(
@@ -231,7 +204,7 @@ cfg_if::cfg_if! {
             }
         }
 
-        register_net_driver!(FXmacDriver, axdriver_net::fxmac::FXmacNic);
+        register_net_driver!(axdriver_net::fxmac::FXmacNic);
 
         pub struct FXmacDriver;
         impl DriverProbe for FXmacDriver {

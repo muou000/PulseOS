@@ -1,18 +1,16 @@
 //! Dummy types used if no device of a certain category is selected.
 
-#![allow(unused_imports)]
-#![allow(dead_code)]
-
-use super::prelude::*;
 use cfg_if::cfg_if;
+
+#[cfg(any(net_dev = "dummy", block_dev = "dummy", display_dev = "dummy"))]
+use super::prelude::*;
 
 cfg_if! {
     if #[cfg(net_dev = "dummy")] {
         use axdriver_net::{EthernetAddress, NetBuf, NetBufBox, NetBufPool, NetBufPtr};
 
         pub struct DummyNetDev;
-        pub struct DummyNetDrvier;
-        register_net_driver!(DummyNetDriver, DummyNetDev);
+        register_net_driver!(DummyNetDev);
 
         impl BaseDriverOps for DummyNetDev {
             fn device_type(&self) -> DeviceType { DeviceType::Net }
@@ -37,8 +35,7 @@ cfg_if! {
 cfg_if! {
     if #[cfg(block_dev = "dummy")] {
         pub struct DummyBlockDev;
-        pub struct DummyBlockDriver;
-        register_block_driver!(DummyBlockDriver, DummyBlockDev);
+        register_block_driver!(DummyBlockDev);
 
         impl BaseDriverOps for DummyBlockDev {
             fn device_type(&self) -> DeviceType {
@@ -72,8 +69,7 @@ cfg_if! {
 cfg_if! {
     if #[cfg(display_dev = "dummy")] {
         pub struct DummyDisplayDev;
-        pub struct DummyDisplayDriver;
-        register_display_driver!(DummyDisplayDriver, DummyDisplayDev);
+        register_display_driver!(DummyDisplayDev);
 
         impl BaseDriverOps for DummyDisplayDev {
             fn device_type(&self) -> DeviceType {

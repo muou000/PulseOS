@@ -28,7 +28,8 @@ mmio-ranges = [
     [0x0201_0000, 0x4_000], # cache flush controller
     [0x0c00_0000, 0x400_0000], # PLIC
     [0x1000_0000, 0x1_0000], # UART0
-    [0x1302_0000, 0x1_0000], # System CRG (GMAC0 GTX/PTP clocks)
+    [0x1302_0000, 0x1_0000], # System CRG (SDIO1/IOMUX/GMAC0 clocks and resets)
+    [0x1304_0000, 0x1_0000], # System pinctrl (SDIO1 GPIO7/8/9/10/11/12)
     [0x1602_0000, 0x1_0000], # SD/MMC1
     [0x1603_0000, 0x1_0000], # GMAC0 (DWMAC 5.20)
     [0x1700_0000, 0x1_0000], # AON CRG (GMAC0 clocks/resets)
