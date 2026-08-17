@@ -45,7 +45,9 @@ ls2k1000-ahci = ["dep:axhal", "dep:simple-ahci"]
 ramdisk = []
 starfive-jh7110-sdmmc = [
     "dep:axhal",
+    "dep:axpoll",
     "dep:dwmmc-host",
+    "dep:rdif-block",
     "dep:sdio-host2",
     "dep:sdmmc-protocol",
     "dep:starfive-jh7110-dwmmc",
@@ -76,6 +78,10 @@ optional = true
 path = "../../arceos/modules/axhal"
 optional = true
 
+[dependencies.axpoll]
+path = "../axpoll"
+optional = true
+
 [dependencies.simple-ahci]
 version = "0.1.1-preview.1"
 optional = true
@@ -85,6 +91,10 @@ optional = true
 [dependencies.dwmmc-host]
 version = "=0.3.3"
 default-features = false
+optional = true
+
+[dependencies.rdif-block]
+version = "=0.11.2"
 optional = true
 
 [dependencies.sdio-host2]
