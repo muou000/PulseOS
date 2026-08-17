@@ -125,8 +125,7 @@ impl TimeIf for TimeIfImpl {
         let ticks_now = Self::current_ticks();
         let ticks_deadline = Self::nanos_to_ticks(deadline_ns);
         let timer_bits = prcfg1::read().timer_bits();
-        let init_value =
-            crate::time_common::oneshot_delta_ticks(ticks_now, ticks_deadline, timer_bits);
+        let init_value = axplat::time::oneshot_delta_ticks(ticks_now, ticks_deadline, timer_bits);
         let init_value =
             usize::try_from(init_value).expect("LoongArch64 timer interval must fit in usize");
 
