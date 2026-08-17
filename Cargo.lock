@@ -1059,8 +1059,6 @@ dependencies = [
 [[package]]
 name = "dwmmc-host"
 version = "0.3.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "77f42b4f7d679eb42980132ce0647c481eb0b7b6bbc06ca8e969acd090f684ad"
 dependencies = [
  "bitfield-struct",
  "dma-api",
@@ -1826,8 +1824,6 @@ dependencies = [
 [[package]]
 name = "sdmmc-protocol"
 version = "0.4.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ff5c9124c7f421a290fd71c914cec4e8fde20d3048d234b1ff7e7487ebe75b84"
 dependencies = [
  "bitflags 2.11.1",
  "dma-api",

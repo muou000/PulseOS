@@ -223,6 +223,10 @@ pub struct DwMmc {
     pub(crate) command_state: CommandState,
     pub(crate) data_blocks_remaining: u32,
     pub(crate) data_cmd_index: u8,
+    // The DWMMC controller's DTO and the IDMAC completion interrupt are
+    // independent. A request is complete only after both have arrived.
+    pub(crate) controller_data_complete: bool,
+    pub(crate) idmac_data_complete: bool,
     pub(crate) dma: Option<DeviceDma>,
     pub(crate) dma_mask: u64,
     pub(crate) dma_poisoned: bool,
@@ -267,6 +271,8 @@ impl DwMmc {
             command_state: CommandState::Idle,
             data_blocks_remaining: 0,
             data_cmd_index: 0,
+            controller_data_complete: false,
+            idmac_data_complete: false,
             dma: None,
             dma_mask: u32::MAX as u64,
             dma_poisoned: false,
@@ -440,6 +446,8 @@ impl DwMmc {
         self.clear_all_int_status();
         self.irq.state.clear(u32::MAX);
         self.completion_irq_enabled.store(false, Ordering::Release);
+        self.controller_data_complete = false;
+        self.idmac_data_complete = false;
         self.program_linux_init_baseline();
 
         // Default to 1-bit bus until the protocol layer asks for wider.
