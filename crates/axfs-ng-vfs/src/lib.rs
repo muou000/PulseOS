@@ -15,7 +15,8 @@ pub use node::*;
 pub use types::*;
 pub use inmem::*;
 
+// Keep the historical public lock aliases available to downstream users.
+pub use spin::{Mutex, MutexGuard};
+
 pub type VfsError = axerrno::AxError;
 pub type VfsResult<T> = Result<T, VfsError>;
-
-use spin::{Mutex, MutexGuard};
