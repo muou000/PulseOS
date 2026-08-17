@@ -51,10 +51,9 @@
 
 extern crate alloc;
 
-use memory_addr::align_up;
+use core::{alloc::Layout, ptr::NonNull};
 
-use core::alloc::Layout;
-use core::ptr::NonNull;
+use memory_addr::align_up;
 
 const TLS_ALIGN: usize = 0x10;
 
@@ -106,6 +105,9 @@ impl TlsArea {
     pub fn alloc() -> Self {
         let layout = Layout::from_size_align(tls_area_size(), TLS_ALIGN).unwrap();
         let area_base = unsafe { alloc::alloc::alloc_zeroed(layout) };
+        if area_base.is_null() {
+            alloc::alloc::handle_alloc_error(layout);
+        }
 
         let tls_load_base = _stdata as *mut u8;
         let tls_load_size = _etbss as usize - _stdata as usize;

@@ -22,6 +22,55 @@ static SLAB_POOL: SlabPool = SlabPool;
 const MAGAZINE_CAP: usize = 32;
 const BATCH_SIZE: usize = SlabFreeBatch::CAPACITY;
 const NUM_SIZE_CLASSES: usize = SizeClass::COUNT;
+// A normal kernel allocation should never approach this size in the hot path.
+// Keep a caller-PC diagnostic above this threshold so an on-board allocation
+// failure can be tied back to its source without logging or adding work to
+// ordinary allocations.
+const LARGE_ALLOCATION_DIAGNOSTIC_THRESHOLD: usize = 64 * 1024 * 1024;
+
+/// Returns the caller PC inherited from Rust's `__rust_alloc` shim.
+///
+/// The shim tail-calls `GlobalAlloc::alloc`, so on the supported kernel
+/// architectures the return-address register still identifies the allocation
+/// site rather than the shim. This is intentionally used only for anomalously
+/// large requests before the allocator performs any calls which could clobber
+/// that register.
+#[inline(always)]
+fn allocation_callsite() -> usize {
+    #[cfg(target_arch = "riscv64")]
+    {
+        let callsite: usize;
+        // SAFETY: reading the architectural return-address register has no
+        // memory effect and does not change machine state.
+        unsafe {
+            core::arch::asm!(
+                "mv {callsite}, ra",
+                callsite = out(reg) callsite,
+                options(nomem, nostack, preserves_flags),
+            );
+        }
+        callsite
+    }
+
+    #[cfg(target_arch = "loongarch64")]
+    {
+        let callsite: usize;
+        // SAFETY: see the RISC-V branch above.
+        unsafe {
+            core::arch::asm!(
+                "move {callsite}, $ra",
+                callsite = out(reg) callsite,
+                options(nomem, nostack, preserves_flags),
+            );
+        }
+        callsite
+    }
+
+    #[cfg(not(any(target_arch = "riscv64", target_arch = "loongarch64")))]
+    {
+        0
+    }
+}
 
 #[derive(Copy, Clone)]
 struct SizeClassMagazine {
@@ -411,9 +460,104 @@ impl GlobalAllocator {
 
 unsafe impl GlobalAlloc for GlobalAllocator {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+        if layout.size() >= LARGE_ALLOCATION_DIAGNOSTIC_THRESHOLD {
+            // Capture and emit the return address before `GlobalAllocator::alloc`
+            // can enter reclaim or take any locks. `addr2line` against the
+            // matching kernel ELF resolves this address to the allocation site.
+            warn!(
+                "large_kernel_allocation_request: size={} align={} caller_ra={:#x}",
+                layout.size(),
+                layout.align(),
+                allocation_callsite(),
+            );
+        }
         match GlobalAllocator::alloc(self, layout) {
             Ok(ptr) => ptr.as_ptr(),
-            Err(_) => alloc::alloc::handle_alloc_error(layout),
+            Err(_) => {
+                // This path is reached only after the registered page-cache
+                // reclaim hook has already run. Keep the allocator state in
+                // the message so an on-board OOM can distinguish a genuinely
+                // exhausted Buddy from an unexpectedly large transient
+                // allocation.
+                error!(
+                    "SLUB+Buddy allocation failed after reclaim: size={} align={} \
+                     requested_pages={} free_pages={} used_bytes={}",
+                    layout.size(),
+                    layout.align(),
+                    layout.size().div_ceil(PAGE_SIZE),
+                    self.available_pages(),
+                    self.used_bytes(),
+                );
+
+                // GlobalAlloc is required to return null on allocation
+                // failure. Infallible callers still invoke
+                // `handle_alloc_error`, while fallible users such as
+                // `Vec::try_reserve_exact` can return an error instead of
+                // turning a recoverable I/O allocation failure into a kernel
+                // panic.
+                core::ptr::null_mut()
+            }
+        }
+    }
+
+    unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
+        // This must be captured before Layout validation (or any other call):
+        // `ra` is caller-saved on both supported architectures, so reading it
+        // after a helper call would report that helper's return site instead of
+        // the Vec/String growth site that entered `__rust_realloc`.
+        let caller_ra = if new_size >= LARGE_ALLOCATION_DIAGNOSTIC_THRESHOLD {
+            allocation_callsite()
+        } else {
+            0
+        };
+        let Ok(new_layout) = Layout::from_size_align(new_size, layout.align()) else {
+            return core::ptr::null_mut();
+        };
+
+        if caller_ra != 0 {
+            // Implementing this trait method explicitly makes Rust's
+            // `__rust_realloc` shim tail-call it. Consequently `ra` remains
+            // the original Vec/String growth caller, rather than an address
+            // inside the compiler-generated realloc shim.
+            warn!(
+                "large_kernel_reallocation_request: old_size={} new_size={} align={} \
+                 caller_ra={:#x}",
+                layout.size(),
+                new_size,
+                layout.align(),
+                caller_ra,
+            );
+        }
+
+        match GlobalAllocator::alloc(self, new_layout) {
+            Ok(new_ptr) => {
+                let new_ptr = new_ptr.as_ptr();
+                let copy_size = layout.size().min(new_size);
+                if copy_size != 0 {
+                    // SAFETY: GlobalAlloc::realloc receives a valid old block;
+                    // the replacement is allocated before the old block is
+                    // released, so the two ranges cannot overlap.
+                    unsafe { core::ptr::copy_nonoverlapping(ptr, new_ptr, copy_size) };
+                }
+                if let Some(old_ptr) = NonNull::new(ptr) {
+                    GlobalAllocator::dealloc(self, old_ptr, layout);
+                }
+                new_ptr
+            }
+            Err(_) => {
+                error!(
+                    "SLUB+Buddy reallocation failed after reclaim: old_size={} new_size={} \
+                     align={} requested_pages={} free_pages={} used_bytes={}",
+                    layout.size(),
+                    new_size,
+                    layout.align(),
+                    new_size.div_ceil(PAGE_SIZE),
+                    self.available_pages(),
+                    self.used_bytes(),
+                );
+                // realloc must leave the old allocation live on failure.
+                core::ptr::null_mut()
+            }
         }
     }
 
