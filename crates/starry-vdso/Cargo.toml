@@ -29,6 +29,7 @@ path = "src/lib.rs"
 axerrno = "0.2"
 axplat = "0.3"
 cfg-if = "1.0"
+kernel_guard.workspace = true
 log = "0.4"
 memory_addr = "0.4"
 xmas-elf = "0.9"

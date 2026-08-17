@@ -156,8 +156,15 @@ impl Process {
             core::mem::replace(&mut *slot, Arc::new(RwLock::new(FdTable::new())))
         };
         if let Ok(table) = Arc::try_unwrap(table) {
-            let mut table = table.write();
-            let _drained = table.drain_all();
+            // Keep descriptor destruction outside the fd-table write lock.
+            // Object drops may notify waiters or otherwise enter blocking
+            // paths; retaining the lock until they finish can deadlock a
+            // single-CPU system when another task needs the table.
+            let drained = {
+                let mut table = table.write();
+                table.drain_all()
+            };
+            drop(drained);
         }
     }
 

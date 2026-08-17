@@ -9,6 +9,7 @@ use axhal::context::TrapFrame;
 use axtask::{
     AxTaskRef, AxTaskWeak, TaskExtSwitch, WaitQueue, WakeContext, WakeSource, def_task_ext,
 };
+use kspin::SpinNoIrq;
 use linux_raw_sys::general::SCHED_NORMAL;
 use spin::Mutex;
 
@@ -22,7 +23,9 @@ pub struct Thread {
     clear_child_tid: AtomicUsize,
     set_child_tid: AtomicUsize,
     robust_list_head: AtomicUsize,
-    task_ref: Mutex<Option<AxTaskWeak>>,
+    // Signal notification can run while another task is registering this
+    // thread. Keep this short pointer handoff non-preemptible and IRQ-safe.
+    task_ref: SpinNoIrq<Option<AxTaskWeak>>,
     pub user_time_ns: AtomicU64,
     pub sys_time_ns: AtomicU64,
     pub last_user_enter_ns: AtomicU64,
@@ -95,7 +98,7 @@ impl Thread {
             clear_child_tid: AtomicUsize::new(0),
             set_child_tid: AtomicUsize::new(0),
             robust_list_head: AtomicUsize::new(0),
-            task_ref: Mutex::new(None),
+            task_ref: SpinNoIrq::new(None),
             user_time_ns: AtomicU64::new(0),
             sys_time_ns: AtomicU64::new(0),
             last_user_enter_ns: AtomicU64::new(NOT_IN_USER_MODE),
@@ -201,10 +204,14 @@ impl Thread {
             .wait_queue()
             .notify_all_with_context(true, wake_context);
         let deliverable = self.signal.has_deliverable_pending_signal();
-        if deliverable && let Some(weak_task) = self.task_ref.lock().as_ref() {
-            if let Some(task) = weak_task.upgrade() {
-                axtask::interrupt_task_with_context(task, true, wake_context);
-            }
+        let target_task = if deliverable {
+            let task_ref = self.task_ref.lock();
+            task_ref.as_ref().and_then(Weak::upgrade)
+        } else {
+            None
+        };
+        if let Some(task) = target_task {
+            axtask::interrupt_task_with_context(task, true, wake_context);
         }
         deliverable
     }
