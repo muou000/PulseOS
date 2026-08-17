@@ -257,6 +257,10 @@ pub fn sys_mmap(
         None
     };
 
+    if length == 0 {
+        return -LinuxError::EINVAL.code() as isize;
+    }
+
     let mut map_flags = MappingFlags::USER;
     if (prot & (PROT_READ as usize)) != 0 {
         map_flags |= MappingFlags::READ;
@@ -270,27 +274,19 @@ pub fn sys_mmap(
 
     if let Some(file) = file.as_ref() {
         if let Some(file_flags) = file.mmap_file_flags() {
-            if map_flags.contains(MappingFlags::READ) && !file_flags.contains(FileFlags::READ) {
+            if map_flags
+                .intersects(MappingFlags::READ | MappingFlags::WRITE | MappingFlags::EXECUTE)
+                && !file_flags.contains(FileFlags::READ)
+            {
                 return -LinuxError::EACCES.code() as isize;
             }
-            if map_flags.contains(MappingFlags::WRITE) {
-                if is_shared {
-                    if !file_flags.contains(FileFlags::WRITE) {
-                        return -LinuxError::EACCES.code() as isize;
-                    }
-                } else {
-                    if !file_flags.contains(FileFlags::READ) {
-                        return -LinuxError::EACCES.code() as isize;
-                    }
-                }
-            }
-            if map_flags.contains(MappingFlags::EXECUTE) && !file_flags.contains(FileFlags::READ) {
+            if is_shared
+                && map_flags.contains(MappingFlags::WRITE)
+                && !file_flags.contains(FileFlags::WRITE)
+            {
                 return -LinuxError::EACCES.code() as isize;
             }
         }
-    }
-    if length == 0 {
-        return -LinuxError::EINVAL.code() as isize;
     }
     if file_backed && file.as_ref().and_then(|file| file.location()).is_none() {
         return -LinuxError::ENODEV.code() as isize;
@@ -337,7 +333,8 @@ pub fn sys_mmap(
     let mut pending_shootdown = None;
 
     let aligned_addr = addr & !(PAGE_SIZE - 1);
-    let map_addr = if (flags & (MAP_FIXED as usize)) != 0 {
+    let fixed_addr = (flags & ((MAP_FIXED | MAP_FIXED_NOREPLACE) as usize)) != 0;
+    let map_addr = if fixed_addr {
         aligned_addr
     } else {
         let limit = memory_addr::VirtAddrRange::from_start_size(
