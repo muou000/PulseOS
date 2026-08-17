@@ -1,15 +1,12 @@
 //! Physical memory management.
 
+pub use axplat::mem::{
+    MemRegionFlags, PhysMemRegion, mmio_ranges, phys_ram_ranges, phys_to_virt,
+    reserved_phys_ram_ranges, total_ram_size, virt_to_phys,
+};
+use axplat::mem::{check_sorted_ranges_overlap, ranges_difference};
 use heapless::Vec;
 use lazyinit::LazyInit;
-
-use axplat::mem::{check_sorted_ranges_overlap, ranges_difference};
-
-pub use axplat::mem::{MemRegionFlags, PhysMemRegion};
-pub use axplat::mem::{
-    mmio_ranges, phys_ram_ranges, phys_to_virt, reserved_phys_ram_ranges, total_ram_size,
-    virt_to_phys,
-};
 pub use memory_addr::{PAGE_SIZE_4K, PhysAddr, PhysAddrRange, VirtAddr, VirtAddrRange, pa, va};
 
 /// Flushes data-cache lines only on platforms that need alias maintenance.
@@ -19,7 +16,10 @@ pub use memory_addr::{PAGE_SIZE_4K, PhysAddr, PhysAddrRange, VirtAddr, VirtAddrR
 /// platforms retain the platform hook.
 #[inline(always)]
 pub fn flush_dcache_range(paddr: PhysAddr, size: usize) {
-    if matches!(axconfig::PLATFORM, "riscv64-qemu-virt" | "loongarch64-qemu-virt") {
+    if matches!(
+        axconfig::PLATFORM,
+        "riscv64-qemu-virt" | "loongarch64-qemu-virt"
+    ) {
         return;
     }
     axplat::mem::flush_dcache_range(paddr, size);
@@ -43,8 +43,11 @@ pub fn memory_regions() -> impl Iterator<Item = PhysMemRegion> {
 /// This function is unsafe because it writes `.bss` section directly.
 pub unsafe fn clear_bss() {
     unsafe {
-        core::slice::from_raw_parts_mut(_sbss as *const () as usize as *mut u8, _ebss as *const () as usize - _sbss as *const () as usize)
-            .fill(0);
+        core::slice::from_raw_parts_mut(
+            _sbss as *const () as usize as *mut u8,
+            _ebss as *const () as usize - _sbss as *const () as usize,
+        )
+        .fill(0);
     }
 }
 

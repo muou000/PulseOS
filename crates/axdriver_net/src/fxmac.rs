@@ -1,15 +1,12 @@
-use alloc::boxed::Box;
-use alloc::collections::VecDeque;
-use alloc::vec::Vec;
+use alloc::{boxed::Box, collections::VecDeque, vec::Vec};
 use core::ptr::NonNull;
 
 use axdriver_base::{BaseDriverOps, DevError, DevResult, DeviceType};
-use fxmac_rs::{self, xmac_init, FXmac, FXmacGetMacAddress, FXmacLwipPortTx, FXmacRecvHandler};
+pub use fxmac_rs::KernelFunc;
+use fxmac_rs::{self, FXmac, FXmacGetMacAddress, FXmacLwipPortTx, FXmacRecvHandler, xmac_init};
 use log::*;
 
 use crate::{EthernetAddress, NetBufPtr, NetDriverOps};
-
-pub use fxmac_rs::KernelFunc;
 
 extern crate alloc;
 

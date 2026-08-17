@@ -7,9 +7,9 @@ mod fat;
 pub mod ext4;
 
 pub(crate) mod devfs;
+pub mod loop_dev;
 pub mod procfs;
 mod tmpfs;
-pub mod loop_dev;
 
 use axdriver::prelude::AsyncBlockDriverOps;
 use axfs_ng_vfs::{Filesystem, VfsResult};
@@ -17,7 +17,9 @@ use cfg_if::cfg_if;
 pub(crate) use devfs::BlockDeviceSpec;
 pub use devfs::{TtyCallbacks, register_tty_callbacks};
 
-pub async fn new_default<D: AsyncBlockDriverOps + Clone + 'static>(dev: D) -> VfsResult<Filesystem> {
+pub async fn new_default<D: AsyncBlockDriverOps + Clone + 'static>(
+    dev: D,
+) -> VfsResult<Filesystem> {
     cfg_if! {
         if #[cfg(feature = "ext4")] {
             ext4::Ext4Filesystem::new(dev).await

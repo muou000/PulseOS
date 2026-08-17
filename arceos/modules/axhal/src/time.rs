@@ -6,8 +6,8 @@ use core::sync::atomic::{AtomicU64, Ordering};
 pub use axplat::time::set_oneshot_timer;
 pub use axplat::time::{
     Duration, MICROS_PER_SEC, MILLIS_PER_SEC, NANOS_PER_MICROS, NANOS_PER_MILLIS, NANOS_PER_SEC,
-    TimeValue, current_ticks, epochoffset_nanos, monotonic_time,
-    monotonic_time_nanos, nanos_to_ticks, ticks_to_nanos,
+    TimeValue, current_ticks, epochoffset_nanos, monotonic_time, monotonic_time_nanos,
+    nanos_to_ticks, ticks_to_nanos,
 };
 
 static REALTIME_OFFSET_NANOS: AtomicU64 = AtomicU64::new(u64::MAX);

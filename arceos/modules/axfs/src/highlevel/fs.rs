@@ -8,7 +8,7 @@ use alloc::{
 };
 
 use axfs_ng_vfs::{
-    Location, Metadata, NodePermission, NodeType, VfsError, VfsResult, MetadataUpdate,
+    Location, Metadata, MetadataUpdate, NodePermission, NodeType, VfsError, VfsResult,
     path::{Component, Components, Path, PathBuf},
 };
 use axio::{Read, Write};
@@ -91,7 +91,8 @@ impl FsContext {
             }
             let meta = dir.metadata().await?;
             log::debug!(
-                "check_traverse_permission: credentials={:?}, dir={:?}, meta.uid={}, meta.gid={}, meta.mode={:#o}",
+                "check_traverse_permission: credentials={:?}, dir={:?}, meta.uid={}, meta.gid={}, \
+                 meta.mode={:#o}",
                 self.credentials,
                 dir,
                 meta.uid,
@@ -372,7 +373,11 @@ impl FsContext {
     }
 
     /// Creates a new, empty directory at the provided path.
-    pub async fn create_dir(&self, path: impl AsRef<Path>, mode: NodePermission) -> VfsResult<Location> {
+    pub async fn create_dir(
+        &self,
+        path: impl AsRef<Path>,
+        mode: NodePermission,
+    ) -> VfsResult<Location> {
         let (dir, name) = self.resolve_nonexistent(path.as_ref()).await?;
         self.create_dir_at(dir, name, mode).await
     }
@@ -397,10 +402,12 @@ impl FsContext {
         }
         let loc = dir.create(name, NodeType::Directory, final_mode).await?;
         if let Some((uid, gid)) = final_credentials {
-            let _ = loc.update_metadata(MetadataUpdate {
-                owner: Some((uid, gid)),
-                ..Default::default()
-            }).await;
+            let _ = loc
+                .update_metadata(MetadataUpdate {
+                    owner: Some((uid, gid)),
+                    ..Default::default()
+                })
+                .await;
         }
         Ok(loc)
     }
@@ -436,13 +443,21 @@ impl FsContext {
                 }
             }
         }
-        let symlink = dir.create(name, NodeType::Symlink, NodePermission::default()).await?;
-        symlink.entry().as_file()?.set_symlink(target.as_ref()).await?;
+        let symlink = dir
+            .create(name, NodeType::Symlink, NodePermission::default())
+            .await?;
+        symlink
+            .entry()
+            .as_file()?
+            .set_symlink(target.as_ref())
+            .await?;
         if let Some((uid, gid)) = final_credentials {
-            let _ = symlink.update_metadata(MetadataUpdate {
-                owner: Some((uid, gid)),
-                ..Default::default()
-            }).await;
+            let _ = symlink
+                .update_metadata(MetadataUpdate {
+                    owner: Some((uid, gid)),
+                    ..Default::default()
+                })
+                .await;
         }
         Ok(symlink)
     }

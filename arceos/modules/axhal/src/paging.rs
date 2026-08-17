@@ -3,11 +3,10 @@
 use axalloc::global_allocator;
 use memory_addr::{PAGE_SIZE_4K, PhysAddr, VirtAddr};
 use page_table_multiarch::PagingHandler;
-
-use crate::mem::{phys_to_virt, virt_to_phys};
-
 #[doc(no_inline)]
 pub use page_table_multiarch::{MappingFlags, PageSize, PagingError, PagingResult};
+
+use crate::mem::{phys_to_virt, virt_to_phys};
 
 pub struct PagingHandlerImpl;
 
@@ -111,7 +110,12 @@ impl PageTable {
         unsafe { self.inner.unmap_with_external_lock(vaddr) }
     }
 
-    pub fn unmap_region(&mut self, vaddr: VirtAddr, size: usize, flush_tlb_by_page: bool) -> PagingResult<TlbFlushAll> {
+    pub fn unmap_region(
+        &mut self,
+        vaddr: VirtAddr,
+        size: usize,
+        flush_tlb_by_page: bool,
+    ) -> PagingResult<TlbFlushAll> {
         self.inner.unmap_region(vaddr, size, flush_tlb_by_page)
     }
 
@@ -182,7 +186,11 @@ impl PageTable {
         unsafe { self.inner.remap_with_external_lock(vaddr, paddr, flags) }
     }
 
-    pub fn protect(&mut self, vaddr: VirtAddr, flags: MappingFlags) -> PagingResult<(PageSize, TlbFlush)> {
+    pub fn protect(
+        &mut self,
+        vaddr: VirtAddr,
+        flags: MappingFlags,
+    ) -> PagingResult<(PageSize, TlbFlush)> {
         let flags = Self::adjust_flags(flags);
         self.inner.protect(vaddr, flags)
     }
@@ -211,7 +219,8 @@ impl PageTable {
         flush_tlb_by_page: bool,
     ) -> PagingResult<TlbFlushAll> {
         let flags = Self::adjust_flags(flags);
-        self.inner.map_region(vaddr, get_paddr, size, flags, allow_huge, flush_tlb_by_page)
+        self.inner
+            .map_region(vaddr, get_paddr, size, flags, allow_huge, flush_tlb_by_page)
     }
 
     pub fn protect_region(
@@ -222,7 +231,8 @@ impl PageTable {
         flush_tlb_by_page: bool,
     ) -> PagingResult<TlbFlushAll> {
         let flags = Self::adjust_flags(flags);
-        self.inner.protect_region(vaddr, size, flags, flush_tlb_by_page)
+        self.inner
+            .protect_region(vaddr, size, flags, flush_tlb_by_page)
     }
 
     fn adjust_flags(flags: MappingFlags) -> MappingFlags {
