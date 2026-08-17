@@ -469,6 +469,9 @@ impl<D: AsyncBlockDriverOps + Clone + 'static> SeekableDisk<D> {
 
     /// Write to the disk, returns the number of bytes written.
     pub fn write(&mut self, mut buf: &[u8]) -> DevResult<usize> {
+        if !buf.is_empty() {
+            crate::request_writeback();
+        }
         let mut written = 0;
         let offset = self.inner.lock().offset;
         if offset != 0 {

@@ -2,21 +2,137 @@ use kspin::SpinNoPreempt;
 
 use super::*;
 
-pub fn invalidate_file_cache(fs_id: usize, inode: u64) {
+/// Prevents the background writer from selecting an inode which has lost its
+/// final directory link and is waiting for ext4's deferred-delete worker.
+///
+/// This function is deliberately synchronous so `Inode::drop` can close the
+/// small window between the final close and scheduling that worker. The worker
+/// later takes the cache's exclusive I/O lock before freeing the ext4 inode.
+pub fn mark_file_cache_unlinked(fs_id: usize, inode: u64) {
     let key = FileCacheKey { fs_id, inode };
     let state = FILE_SHARED_STATES[file_state_registry_shard(key)]
         .lock()
-        .remove(&key);
+        .get(&key);
     if let Some(state) = state {
-        let removed = {
-            let mut caches = ACTIVE_DISK_FILE_CACHES.lock();
-            caches
-                .iter()
-                .position(|cached| Arc::ptr_eq(cached, &state))
-                .map(|index| caches.swap_remove(index))
-        };
-        drop(removed);
+        state.mark_unlinked();
     }
+}
+
+fn detach_file_cache_state(key: FileCacheKey) -> Option<Arc<CachedFileShared>> {
+    let state = FILE_SHARED_STATES[file_state_registry_shard(key)]
+        .lock()
+        .remove(&key)?;
+    let removed = {
+        let mut caches = ACTIVE_DISK_FILE_CACHES.lock();
+        caches
+            .iter()
+            .position(|cached| Arc::ptr_eq(cached, &state))
+            .map(|index| caches.swap_remove(index))
+    };
+    drop(removed);
+    Some(state)
+}
+
+fn restore_file_cache_state(key: FileCacheKey, state: &Arc<CachedFileShared>) {
+    state.clear_unlinked();
+
+    let registry_shard = file_state_registry_shard(key);
+    let registry_has_same_state = {
+        let mut registry = FILE_SHARED_STATES[registry_shard].lock();
+        match registry.get(&key) {
+            Some(existing) => Arc::ptr_eq(&existing, state),
+            None => {
+                registry.insert(key, state);
+                true
+            }
+        }
+    };
+    if !registry_has_same_state {
+        // An unlinked inode should have no path through which a distinct cache
+        // can be created. Keep this state active for writeback instead of
+        // dropping dirty pages if that invariant is ever violated.
+        error!(
+            "file cache restore found a different state for unlinked inode {}",
+            key.inode
+        );
+    }
+
+    let mut caches = ACTIVE_DISK_FILE_CACHES.lock();
+    if !caches.iter().any(|cached| Arc::ptr_eq(cached, state)) {
+        caches.push(state.clone());
+    }
+}
+
+/// Owns a detached unlinked cache while ext4 deletes its inode.
+///
+/// Dropping an unfinished lease restores the cache to the regular writeback
+/// registries, which keeps cancellation and delete errors from becoming a
+/// dirty-page loss path.
+struct UnlinkedFileCacheLease {
+    key: FileCacheKey,
+    state: Option<Arc<CachedFileShared>>,
+    committed: bool,
+}
+
+impl UnlinkedFileCacheLease {
+    fn new(key: FileCacheKey) -> Self {
+        let state = detach_file_cache_state(key);
+        if let Some(state) = state.as_ref() {
+            state.mark_unlinked();
+        }
+        Self {
+            key,
+            state,
+            committed: false,
+        }
+    }
+
+    fn commit(&mut self) {
+        self.committed = true;
+    }
+}
+
+impl Drop for UnlinkedFileCacheLease {
+    fn drop(&mut self) {
+        if !self.committed {
+            if let Some(state) = self.state.as_ref() {
+                restore_file_cache_state(self.key, state);
+            }
+        }
+    }
+}
+
+/// Executes an ext4 inode deletion while its page cache is detached from all
+/// writeback registries. A pre-existing writeback is allowed to finish before
+/// the deletion; a later one observes the unlinked state and is skipped.
+///
+/// On success, dirty cache pages are intentionally discarded because the inode
+/// has no remaining directory link or active file reference. On error or
+/// cancellation, the cache is restored dirty so normal writeback can retry.
+pub async fn discard_unlinked_file_cache_after<T, E, F>(
+    fs_id: usize,
+    inode: u64,
+    operation: F,
+) -> Result<T, E>
+where
+    F: core::future::Future<Output = Result<T, E>>,
+{
+    let mut lease = UnlinkedFileCacheLease::new(FileCacheKey { fs_id, inode });
+    let Some(state) = lease.state.as_ref() else {
+        return operation.await;
+    };
+
+    let io_guard = state.io_lock.write().await;
+    let result = operation.await;
+    let succeeded = result.is_ok();
+    if succeeded {
+        state.discard_pages_after_unlink();
+    }
+    drop(io_guard);
+    if succeeded {
+        lease.commit();
+    }
+    result
 }
 
 static FILE_SHARED_STATES: Lazy<
@@ -43,6 +159,13 @@ const PAGE_CACHE_RECLAIM_LOG_INTERVAL: usize = 4096;
 const WRITE_STAGING_SIZE: usize = 64 * 1024;
 const MAX_WRITE_ACCESS_PAGES: usize = WRITE_STAGING_SIZE / PAGE_SIZE + 1;
 const WRITEBACK_CONCURRENCY: usize = 4;
+// Background writeback must remain bounded even after a workload has opened a
+// very large number of short-lived disk files.  The scan can skip clean
+// states cheaply, while the fixed batch prevents a once-per-second task from
+// allocating a registry-sized temporary Vec.
+const BACKGROUND_WRITEBACK_SCAN_STATES: usize = 256;
+const BACKGROUND_WRITEBACK_BATCH_STATES: usize = 64;
+const BACKGROUND_CACHE_RELEASE_SCAN_STATES: usize = 256;
 // Read-ahead covers 16 pages and the largest staged write touches 17 pages.
 // Thirty-two per-file stripes keep those windows collision-free without
 // retaining hundreds of async locks for every disk file cache.
@@ -51,6 +174,9 @@ const PAGE_ACCESS_LOCK_STRIPES: usize = 32;
 // depth so speculative I/O cannot consume all device progress slots needed by
 // demand faults. The per-file state below prevents duplicate task buildup.
 const MMAP_PREFETCH_CONCURRENCY: usize = 2;
+
+static BACKGROUND_WRITEBACK_CURSOR: AtomicUsize = AtomicUsize::new(0);
+static DISK_FILE_CACHE_RELEASE_CURSOR: AtomicUsize = AtomicUsize::new(0);
 
 type PageAccessLockIndices = heapless::Vec<usize, PAGE_ACCESS_LOCK_STRIPES>;
 
@@ -807,6 +933,18 @@ pub(super) struct CachedFileShared {
     pub(super) io_lock: async_lock::RwLock<()>,
     size: AtomicU64,
     cache_generation: AtomicU64,
+    // A per-file generation keeps the background task from taking every
+    // active cache's I/O lock. A newer generation observed after writeback
+    // remains pending, so a writer racing a checkpoint cannot be lost.
+    writeback_generation: AtomicU64,
+    completed_writeback_generation: AtomicU64,
+    // Writable mappings can modify a page without going through write_at.
+    // Keep those files selected until their mapping pins disappear.
+    writable_mapping_watch: AtomicBool,
+    // A file whose final directory link has gone away must not be selected by
+    // background writeback while ext4 is about to free its inode. The deletion
+    // path owns `io_lock.write()` across that transition.
+    unlinked: AtomicBool,
     mmap_prefetch: MmapPrefetchState,
     #[cfg(feature = "qperf-trace")]
     fill_inflight: AtomicU64,
@@ -847,6 +985,10 @@ impl CachedFileShared {
             io_lock: async_lock::RwLock::new(()),
             size: AtomicU64::new(size),
             cache_generation: AtomicU64::new(0),
+            writeback_generation: AtomicU64::new(0),
+            completed_writeback_generation: AtomicU64::new(0),
+            writable_mapping_watch: AtomicBool::new(false),
+            unlinked: AtomicBool::new(false),
             mmap_prefetch: MmapPrefetchState::new(),
             #[cfg(feature = "qperf-trace")]
             fill_inflight: AtomicU64::new(0),
@@ -866,6 +1008,112 @@ impl CachedFileShared {
     #[inline]
     fn extend_size(&self, size: u64) {
         self.size.fetch_max(size, Ordering::AcqRel);
+    }
+
+    #[inline]
+    fn request_background_writeback(&self) {
+        self.writeback_generation.fetch_add(1, Ordering::AcqRel);
+    }
+
+    #[inline]
+    fn watch_writable_mapping(&self) {
+        self.writable_mapping_watch.store(true, Ordering::Release);
+        self.request_background_writeback();
+    }
+
+    #[inline]
+    fn mark_unlinked(&self) {
+        self.unlinked.store(true, Ordering::Release);
+    }
+
+    #[inline]
+    fn clear_unlinked(&self) {
+        self.unlinked.store(false, Ordering::Release);
+    }
+
+    #[inline]
+    fn is_unlinked(&self) -> bool {
+        self.unlinked.load(Ordering::Acquire)
+    }
+
+    #[inline]
+    fn has_pending_background_writeback(&self) -> bool {
+        !self.is_unlinked()
+            && (self.writable_mapping_watch.load(Ordering::Acquire)
+                || self.writeback_generation.load(Ordering::Acquire)
+                    != self.completed_writeback_generation.load(Ordering::Acquire))
+    }
+
+    /// Returns whether this state can disappear from the global retention
+    /// registry without either writeback or losing a mapped page. Callers use
+    /// a strong-reference count to make this snapshot stable before dropping.
+    fn is_releasable_without_writeback(&self) -> bool {
+        !self.is_unlinked()
+            && !self.has_pending_background_writeback()
+            && self
+                .page_cache
+                .lock()
+                .iter()
+                .all(|(_, page)| !page.dirty && !page.has_user_mapping())
+    }
+
+    /// Non-blocking counterpart for allocator reclaim. Returning `None`
+    /// means the page-cache lock is busy, so reclaim leaves this state alone.
+    fn try_is_releasable_without_writeback(&self, require_empty: bool) -> Option<bool> {
+        if self.is_unlinked() || self.has_pending_background_writeback() {
+            return Some(false);
+        }
+        self.page_cache.try_lock().map(|cache| {
+            (!require_empty || cache.is_empty())
+                && cache
+                    .iter()
+                    .all(|(_, page)| !page.dirty && !page.has_user_mapping())
+        })
+    }
+
+    /// Drains a cache after ext4 has successfully deleted the inode. This is
+    /// intentionally distinct from generic cache drop: unlinked data is no
+    /// longer reachable, while a dirty page reaching ordinary `Drop` remains a
+    /// correctness error.
+    fn discard_pages_after_unlink(&self) {
+        let mut cache = self.page_cache.lock();
+        let mut discarded_dirty = 0;
+        while let Some((_pn, mut page)) = cache.pop_lru() {
+            if page.dirty {
+                discarded_dirty += 1;
+                page.dirty = false;
+            }
+            debug_assert!(
+                !page.has_user_mapping(),
+                "unlinked file cache still has a mapped page"
+            );
+            page.may_write_mapping = false;
+            drop(page);
+        }
+        self.writable_mapping_watch.store(false, Ordering::Release);
+        if discarded_dirty != 0 {
+            debug!(
+                "discarded {} dirty page(s) after successful unlink",
+                discarded_dirty
+            );
+        }
+    }
+
+    fn complete_background_writeback(&self, target_generation: u64) {
+        self.completed_writeback_generation
+            .fetch_max(target_generation, Ordering::AcqRel);
+
+        // A writable mapping may have changed after the pages were copied for
+        // this checkpoint. Keep polling only this cache while such a mapping
+        // remains, matching the conservative mmap durability behavior without
+        // scanning unrelated clean caches.
+        let writable_mapping_active = self
+            .page_cache
+            .lock()
+            .iter()
+            .any(|(_, page)| page.may_write_mapping && page.has_user_mapping());
+        self.writable_mapping_watch
+            .store(writable_mapping_active, Ordering::Release);
     }
 
     fn pop_clean_lru_pages(
@@ -1294,20 +1542,41 @@ impl Drop for CachedFileShared {
 
 async fn flush_file_cache_state(state: Arc<CachedFileShared>) -> Option<(u64, VfsResult<()>)> {
     let file = state.backing.as_ref()?;
-    let inode = file.inode();
-    let result = async {
-        let _guard = state.io_lock.write().await;
-        let cached_size = state.size();
-        if file.len().await? != cached_size {
-            file.set_len(cached_size).await?;
-        }
-        state.flush_dirty_pages_async(file).await
+    if state.is_unlinked() {
+        return None;
     }
-    .await;
+    let inode = file.inode();
+    let target_generation = state.writeback_generation.load(Ordering::Acquire);
+    let result = {
+        let _guard = state.io_lock.write().await;
+        // A deletion can detach this state after it was selected in the
+        // registry snapshot. Never access an ext4 inode after that point.
+        if state.is_unlinked() {
+            None
+        } else {
+            Some(
+                async {
+                    let cached_size = state.size();
+                    if file.len().await? != cached_size {
+                        file.set_len(cached_size).await?;
+                    }
+                    state.flush_dirty_pages_async(file).await
+                }
+                .await,
+            )
+        }
+    };
+    let result = result?;
+    if result.is_ok() {
+        state.complete_background_writeback(target_generation);
+    }
     Some((inode, result))
 }
 
-async fn flush_file_cache_states(states: Vec<Arc<CachedFileShared>>) -> VfsResult<()> {
+async fn flush_file_cache_states<I>(states: I) -> VfsResult<()>
+where
+    I: IntoIterator<Item = Arc<CachedFileShared>>,
+{
     let mut first_error = None;
     let mut states = states.into_iter();
     let mut pending = FuturesUnordered::new();
@@ -1332,30 +1601,128 @@ async fn flush_file_cache_states(states: Vec<Arc<CachedFileShared>>) -> VfsResul
     first_error.map_or(Ok(()), Err)
 }
 
+fn release_unreferenced_disk_file_caches(scan_limit: usize) {
+    // Keep one candidate reference while inspecting every state. Taking the
+    // per-inode registry lock before the active-cache lock prevents a new open
+    // from resurrecting a state between the final reference-count check and
+    // removal. Background writeback takes an active-cache reference, so it is
+    // covered by that same check.  Unlike a full registry clone, this makes
+    // retention release bounded and allocation-free.
+    let scans = ACTIVE_DISK_FILE_CACHES.lock().len().min(scan_limit);
+    for _ in 0..scans {
+        let state = {
+            let caches = ACTIVE_DISK_FILE_CACHES.lock();
+            if caches.is_empty() {
+                return;
+            }
+            let index =
+                DISK_FILE_CACHE_RELEASE_CURSOR.fetch_add(1, Ordering::Relaxed) % caches.len();
+            caches[index].clone()
+        };
+        if !state.is_releasable_without_writeback() {
+            continue;
+        }
+        let Some(file) = state.backing.as_ref() else {
+            continue;
+        };
+        let key = FileCacheKey {
+            fs_id: state.fs_id,
+            inode: file.inode(),
+        };
+        let removed_state = {
+            let mut registry = FILE_SHARED_STATES[file_state_registry_shard(key)].lock();
+            let Some(registered) = registry.get(&key) else {
+                continue;
+            };
+            if !Arc::ptr_eq(&registered, &state) {
+                continue;
+            }
+
+            let mut caches = ACTIVE_DISK_FILE_CACHES.lock();
+            let Some(index) = caches.iter().position(|cached| Arc::ptr_eq(cached, &state)) else {
+                continue;
+            };
+
+            // `state` is the snapshot reference, `registered` is the
+            // registry probe, and `caches[index]` is the active registry
+            // reference. Any handle, mapping, or writeback in flight makes
+            // this count larger and leaves the cache retained.
+            if Arc::strong_count(&state) != 3
+                || state.is_unlinked()
+                || state.has_pending_background_writeback()
+            {
+                continue;
+            }
+
+            let removed_state = caches.swap_remove(index);
+            let removed_registry_state = registry.remove(&key);
+            debug_assert!(
+                removed_registry_state
+                    .as_ref()
+                    .is_some_and(|cached| Arc::ptr_eq(cached, &state)),
+                "active file cache was missing from its weak registry"
+            );
+            drop(removed_registry_state);
+            removed_state
+        };
+        // Dropping a backing inode can invalidate filesystem registries, so
+        // release this state only after all cache and weak-registry locks have
+        // been released. `state` is the final candidate reference and falls
+        // out of scope at the end of this iteration for the same reason.
+        drop(removed_state);
+    }
+}
+
+fn active_disk_file_cache_snapshot() -> VfsResult<Vec<Arc<CachedFileShared>>> {
+    let caches = ACTIVE_DISK_FILE_CACHES.lock();
+    let mut states = Vec::new();
+    states
+        .try_reserve_exact(caches.len())
+        .map_err(|_| VfsError::NoMemory)?;
+    states.extend(caches.iter().cloned());
+    Ok(states)
+}
+
 pub(crate) async fn flush_all_file_caches_async() -> VfsResult<()> {
-    let states = ACTIVE_DISK_FILE_CACHES.lock().clone();
+    let states = active_disk_file_cache_snapshot()?;
     let result = flush_file_cache_states(states).await;
 
     if result.is_ok() {
-        // Dropping a backing inode can invalidate this registry, so move all
-        // released entries out before the global lock is dropped.
-        let removed = {
-            let mut caches = ACTIVE_DISK_FILE_CACHES.lock();
-            let mut removed = Vec::new();
-            let mut index = 0;
-            while index < caches.len() {
-                if Arc::strong_count(&caches[index]) == 1 {
-                    removed.push(caches.swap_remove(index));
-                } else {
-                    index += 1;
-                }
-            }
-            removed
-        };
-        drop(removed);
+        release_unreferenced_disk_file_caches(usize::MAX);
     }
 
     result
+}
+
+/// Flushes only a bounded batch of file caches that changed since their last
+/// completed checkpoint. The cursor makes every active state eventually
+/// eligible, while clean caches no longer acquire their per-file async I/O
+/// locks every second.
+pub(crate) async fn flush_pending_file_caches_async() -> VfsResult<bool> {
+    let mut states =
+        heapless::Vec::<Arc<CachedFileShared>, BACKGROUND_WRITEBACK_BATCH_STATES>::new();
+    {
+        let caches = ACTIVE_DISK_FILE_CACHES.lock();
+        if !caches.is_empty() {
+            let start = BACKGROUND_WRITEBACK_CURSOR
+                .fetch_add(BACKGROUND_WRITEBACK_SCAN_STATES, Ordering::Relaxed)
+                % caches.len();
+            for offset in 0..caches.len().min(BACKGROUND_WRITEBACK_SCAN_STATES) {
+                let state = &caches[(start + offset) % caches.len()];
+                if state.has_pending_background_writeback() && states.push(state.clone()).is_err() {
+                    break;
+                }
+            }
+        }
+    }
+    let had_pending = !states.is_empty();
+    let result = flush_file_cache_states(states).await;
+
+    if result.is_ok() {
+        release_unreferenced_disk_file_caches(BACKGROUND_CACHE_RELEASE_SCAN_STATES);
+    }
+
+    result.map(|()| had_pending)
 }
 
 /// Checkpoints cached file data owned by a filesystem that is about to be
@@ -1366,12 +1733,15 @@ pub(crate) async fn flush_file_caches_for_filesystem_async(
     filesystem: &dyn axfs_ng_vfs::FilesystemOps,
 ) -> VfsResult<()> {
     let fs_id = filesystem_id(filesystem);
-    let states = ACTIVE_DISK_FILE_CACHES
-        .lock()
-        .iter()
-        .filter(|state| state.fs_id == fs_id)
-        .cloned()
-        .collect();
+    let states = {
+        let caches = ACTIVE_DISK_FILE_CACHES.lock();
+        let mut states = Vec::new();
+        states
+            .try_reserve_exact(caches.len())
+            .map_err(|_| VfsError::NoMemory)?;
+        states.extend(caches.iter().filter(|state| state.fs_id == fs_id).cloned());
+        states
+    };
     flush_file_cache_states(states).await
 }
 
@@ -1436,21 +1806,63 @@ fn page_cache_reclaim_inner(num_pages: usize) -> usize {
 
 fn prune_inactive_disk_file_caches() {
     loop {
+        let candidate = {
+            let Some(caches) = ACTIVE_DISK_FILE_CACHES.try_lock() else {
+                return;
+            };
+            caches.iter().find_map(|state| {
+                (state.try_is_releasable_without_writeback(true) == Some(true))
+                    .then(|| state.clone())
+            })
+        };
+        let Some(state) = candidate else {
+            return;
+        };
+        let Some(file) = state.backing.as_ref() else {
+            return;
+        };
+        let key = FileCacheKey {
+            fs_id: state.fs_id,
+            inode: file.inode(),
+        };
+
+        // `try_lock` keeps allocator reclaim non-blocking, while taking the
+        // weak registry before the active list closes the race where a new
+        // open could otherwise obtain this state just as it is detached.
         let removed = {
+            let Some(mut registry) = FILE_SHARED_STATES[file_state_registry_shard(key)].try_lock()
+            else {
+                return;
+            };
+            let Some(registered) = registry.get(&key) else {
+                continue;
+            };
+            if !Arc::ptr_eq(&registered, &state) {
+                continue;
+            }
             let Some(mut caches) = ACTIVE_DISK_FILE_CACHES.try_lock() else {
                 return;
             };
-            caches
-                .iter()
-                .position(|cached| {
-                    Arc::strong_count(cached) == 1
-                        && cached
-                            .page_cache
-                            .try_lock()
-                            .map(|cache| cache.is_empty())
-                            .unwrap_or(false)
-                })
-                .map(|index| caches.swap_remove(index))
+            let Some(index) = caches.iter().position(|cached| Arc::ptr_eq(cached, &state)) else {
+                continue;
+            };
+
+            if Arc::strong_count(&state) != 3
+                || state.try_is_releasable_without_writeback(true) != Some(true)
+            {
+                return;
+            }
+
+            let removed_state = caches.swap_remove(index);
+            let removed_registry_state = registry.remove(&key);
+            debug_assert!(
+                removed_registry_state
+                    .as_ref()
+                    .is_some_and(|cached| Arc::ptr_eq(cached, &state)),
+                "inactive file cache was missing from its weak registry"
+            );
+            drop(removed_registry_state);
+            Some(removed_state)
         };
         let Some(removed) = removed else {
             return;
@@ -2468,6 +2880,7 @@ impl CachedFile {
         let original_len = self.shared.size();
         let mut current = offset;
         let mut copied = 0;
+        let mut writeback_requested = false;
 
         while current < end {
             let pn = (current / PAGE_SIZE as u64) as u32;
@@ -2486,6 +2899,10 @@ impl CachedFile {
             crate::buildstorm_stat_add!(PAGE_WRITE_BYTES, len);
             if !self.in_memory {
                 page.mark_dirty();
+                if !writeback_requested {
+                    self.shared.request_background_writeback();
+                    writeback_requested = true;
+                }
             }
             drop(cache);
 
@@ -2657,6 +3074,9 @@ impl CachedFile {
         }
 
         file.set_len(len).await?;
+        if !self.in_memory {
+            self.shared.request_background_writeback();
+        }
         self.shared.cache_generation.fetch_add(1, Ordering::AcqRel);
         self.shared.set_size(len);
 
@@ -2816,12 +3236,16 @@ impl CachedFile {
         pn: u32,
         may_write: bool,
     ) -> VfsResult<Option<PhysAddr>> {
-        self.with_page(pn, |page| {
+        let result = self.with_page(pn, |page| {
             let Some(page) = page else {
                 return Ok(None);
             };
             page.pin_for_mapping(may_write).map(Some)
-        })
+        });
+        if may_write && matches!(&result, Ok(Some(_))) {
+            self.shared.watch_writable_mapping();
+        }
+        result
     }
 
     /// Returns the physical address of the page at the given page index.
@@ -2829,8 +3253,13 @@ impl CachedFile {
     /// If the page is not in the cache, it will be read from the file.
     pub fn get_shared_page_paddr(&self, pn: u32, may_write: bool) -> VfsResult<PhysAddr> {
         let file = self.inner.entry().as_file()?;
-        axtask::future::block_on(self.ensure_pages_inner_async(file, pn, 1, Some(may_write)))?
-            .ok_or(VfsError::BadState)
+        let result =
+            axtask::future::block_on(self.ensure_pages_inner_async(file, pn, 1, Some(may_write)))?
+                .ok_or(VfsError::BadState);
+        if may_write && result.is_ok() {
+            self.shared.watch_writable_mapping();
+        }
+        result
     }
 
     /// Faults in and pins a bounded run of pages for a user mapping.
@@ -2841,7 +3270,12 @@ impl CachedFile {
         may_write: bool,
     ) -> VfsResult<SharedPagePaddrs> {
         let file = self.inner.entry().as_file()?;
-        axtask::future::block_on(self.pin_pages_inner_async(file, pn, page_count, may_write))
+        let result =
+            axtask::future::block_on(self.pin_pages_inner_async(file, pn, page_count, may_write));
+        if may_write && result.is_ok() {
+            self.shared.watch_writable_mapping();
+        }
+        result
     }
 
     /// Returns a resident page's physical address without adding a mapping pin.
@@ -2852,7 +3286,7 @@ impl CachedFile {
     }
 
     pub fn mark_shared_page_writable(&self, pn: u32, paddr: PhysAddr) -> VfsResult<()> {
-        self.with_page(pn, |page| {
+        let result = self.with_page(pn, |page| {
             let page = page.ok_or(VfsError::BadState)?;
             if page.paddr() != paddr || !page.has_user_mapping() {
                 return Err(VfsError::BadState);
@@ -2860,12 +3294,16 @@ impl CachedFile {
             page.writable_mapping_generation = page.writable_mapping_generation.wrapping_add(1);
             page.may_write_mapping = true;
             Ok(())
-        })
+        });
+        if result.is_ok() {
+            self.shared.watch_writable_mapping();
+        }
+        result
     }
 
     /// Marks the page at the given page index as dirty.
     pub fn mark_page_dirty(&self, pn: u32) -> VfsResult<()> {
-        self.with_page(pn, |page| match page {
+        let result = self.with_page(pn, |page| match page {
             Some(page) => {
                 if !self.in_memory {
                     page.mark_dirty();
@@ -2873,7 +3311,11 @@ impl CachedFile {
                 Ok(())
             }
             None => Err(VfsError::BadState),
-        })
+        });
+        if !self.in_memory && result.is_ok() {
+            self.shared.request_background_writeback();
+        }
+        result
     }
 }
 
@@ -2913,6 +3355,45 @@ mod tests {
         assert_eq!(shared.size(), 8192);
         shared.extend_size(16_384);
         assert_eq!(shared.size(), 16_384);
+    }
+
+    #[test]
+    fn newer_writeback_generation_survives_an_older_checkpoint() {
+        let shared = CachedFileShared::new(0, true, 0, None);
+        shared.request_background_writeback();
+        let first_generation = shared
+            .writeback_generation
+            .load(core::sync::atomic::Ordering::Acquire);
+        shared.request_background_writeback();
+
+        shared.complete_background_writeback(first_generation);
+        assert!(shared.has_pending_background_writeback());
+
+        let second_generation = shared
+            .writeback_generation
+            .load(core::sync::atomic::Ordering::Acquire);
+        shared.complete_background_writeback(second_generation);
+        assert!(!shared.has_pending_background_writeback());
+    }
+
+    #[test]
+    fn unlinked_cache_is_excluded_from_background_writeback_and_reclaim() {
+        let shared = CachedFileShared::new(0, true, 0, None);
+        shared.request_background_writeback();
+        assert!(shared.has_pending_background_writeback());
+
+        shared.mark_unlinked();
+        assert!(!shared.has_pending_background_writeback());
+        assert!(!shared.is_releasable_without_writeback());
+        assert_eq!(
+            shared.try_is_releasable_without_writeback(true),
+            Some(false)
+        );
+
+        // A failed physical deletion restores the original dirty state for a
+        // later checkpoint/retry instead of silently discarding it.
+        shared.clear_unlinked();
+        assert!(shared.has_pending_background_writeback());
     }
 
     #[test]
