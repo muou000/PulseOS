@@ -17,6 +17,23 @@ extern crate starry_vdso;
 use alloc::vec::Vec;
 use pulse_core::task::exec::resolve_exec_path_and_args;
 
+/// The test-runner exit path bypasses `reboot(2)`, so it must uphold the same
+/// durability rule itself: never hand control to firmware after a failed
+/// global writeback checkpoint.
+fn power_off_after_writeback() -> ! {
+    let result = pulse_syscalls::sys_sync();
+    if result != 0 {
+        error!(
+            "refusing test-runner power-off because filesystem writeback failed: {}",
+            result
+        );
+        loop {
+            axtask::yield_now();
+        }
+    }
+    axhal::power::system_off()
+}
+
 #[unsafe(no_mangle)]
 fn main() {
     starry_vdso::vdso::init_vdso_data();
@@ -108,8 +125,7 @@ fn main() {
                 let _ = init_thread.process().take_task_ref_by_tid(init_tid);
                 init_thread.process().release_task_refs();
 
-                pulse_syscalls::sys_sync();
-                axhal::power::system_off();
+                power_off_after_writeback();
             } else {
                 loop {
                     axtask::yield_now();
@@ -119,8 +135,7 @@ fn main() {
         Err(e) => {
             error!("Failed to create user process: {:?}", e);
             if cfg!(any(feature = "pre-testcode", feature = "final-testcode")) {
-                pulse_syscalls::sys_sync();
-                axhal::power::system_off();
+                power_off_after_writeback();
             } else {
                 loop {
                     axtask::yield_now();

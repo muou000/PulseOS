@@ -32,7 +32,9 @@ mod transfer;
 mod vectored;
 
 pub use descriptor::sys_sync;
-pub(crate) use descriptor::{sys_fdatasync, sys_fsync, sys_getdents64, sys_lseek, sys_pipe2};
+pub(crate) use descriptor::{
+    flush_filesystems_for_shutdown, sys_fdatasync, sys_fsync, sys_getdents64, sys_lseek, sys_pipe2,
+};
 #[cfg(feature = "qperf-trace")]
 use markers::OutputMarkerScanner;
 pub(crate) use readiness::*;

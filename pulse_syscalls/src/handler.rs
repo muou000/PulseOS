@@ -300,6 +300,7 @@ fn syscall_dispatcher(tf: &mut TrapFrame, syscall_id: usize, args: [usize; 6]) -
         Sysno::sethostname => impls::sys_sethostname(args[0], args[1]),
         Sysno::sysinfo => impls::sys_sysinfo(args[0]),
         Sysno::syslog => impls::sys_syslog(args[0], args[1], args[2]),
+        Sysno::reboot => impls::sys_reboot(args[0], args[1], args[2], args[3]),
         Sysno::rt_sigprocmask => impls::sys_rt_sigprocmask(args[0], args[1], args[2], args[3]),
         Sysno::get_mempolicy => impls::sys_get_mempolicy(args[0], args[1], args[2], args[3], args[4]),
 
