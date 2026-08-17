@@ -87,12 +87,23 @@ const DEVICE_READ_MAX_ATTEMPTS: usize = 2;
 const DEVICE_IO_TIMEOUT: Duration = Duration::from_secs(5);
 const FLUSH_BATCH_BLOCKS: usize = 32;
 const FLUSH_WRITE_CONCURRENCY: usize = 4;
+// A cache miss used to coalesce the whole remaining caller range into one
+// temporary Vec.  Besides making a mixed cached/direct I/O request consume a
+// second full-sized buffer, a malformed or unexpectedly large request could
+// turn that Vec into a multi-hundred-MiB kernel allocation.  Keep the scratch
+// buffer aligned with the normal metadata flush batch instead.
+const CACHE_MISS_BATCH_BLOCKS: usize = FLUSH_BATCH_BLOCKS;
 // One range-lock bucket covers one maximum coalesced metadata flush. This lets
 // adjacent non-overlapping flush batches use the configured concurrency rather
 // than serializing every pair in the same 64-block bucket. Doubling the table
 // preserves the previous 8192-block modulo coverage for distant I/O ranges.
 const IO_RANGE_LOCK_BUCKETS: usize = 256;
 const IO_RANGE_LOCK_BUCKET_BLOCKS: usize = FLUSH_BATCH_BLOCKS;
+
+#[inline]
+fn bounded_cached_miss_blocks(blocks: usize) -> usize {
+    blocks.min(CACHE_MISS_BATCH_BLOCKS)
+}
 
 fn write_scope_shard(id: u64) -> usize {
     (id as usize ^ (id >> 32) as usize) % WRITE_SCOPE_SHARDS
@@ -476,10 +487,7 @@ impl<D: AsyncBlockDriverOps + Clone + 'static> crate::disk::DiskFlushable for Ex
             match axtask::future::timeout(Some(DEVICE_IO_TIMEOUT), dev.flush_async()).await {
                 Ok(result) => result,
                 Err(_) => {
-                    log::error!(
-                        "ext4 device flush timed out after {:?}",
-                        DEVICE_IO_TIMEOUT
-                    );
+                    log::error!("ext4 device flush timed out after {:?}", DEVICE_IO_TIMEOUT);
                     Err(DevError::Io)
                 }
             }
@@ -648,12 +656,29 @@ impl<D: AsyncBlockDriverOps + Clone + 'static> Ext4Disk<D> {
         disk
     }
 
-    fn byte_range(&self, offset: usize, len: usize) -> (u64, usize, usize) {
+    fn byte_range(
+        &self,
+        offset: usize,
+        len: usize,
+    ) -> axdriver::prelude::DevResult<(u64, usize, usize)> {
         let first_block = (offset / self.sector_size) as u64;
         let inner_offset = offset % self.sector_size;
-        let touched = inner_offset + len;
+        let touched = inner_offset
+            .checked_add(len)
+            .ok_or(axdriver::prelude::DevError::InvalidParam)?;
         let blocks = touched.div_ceil(self.sector_size);
-        (first_block, inner_offset, blocks)
+        Ok((first_block, inner_offset, blocks))
+    }
+
+    fn zeroed_io_buffer(len: usize) -> axdriver::prelude::DevResult<Vec<u8>> {
+        let mut data = Vec::new();
+        // `vec![0; len]` is an infallible allocation path and would panic on
+        // allocation failure. Propagate that failure as a device NoMemory
+        // error instead; all callers already return DevResult.
+        data.try_reserve_exact(len)
+            .map_err(|_| axdriver::prelude::DevError::NoMemory)?;
+        data.resize(len, 0);
+        Ok(data)
     }
 
     async fn lock_read_range(
@@ -899,7 +924,7 @@ impl<D: AsyncBlockDriverOps + Clone + 'static> Ext4Disk<D> {
     where
         D: AsyncBlockDriverOps + Clone,
     {
-        let (first_block, ..) = self.byte_range(block_offset, data.len());
+        let (first_block, ..) = self.byte_range(block_offset, data.len())?;
         let dev = self.dev.lock().clone();
         crate::buildstorm_stat_inc!(EXT4_DEVICE_WRITE_OPS);
         crate::buildstorm_stat_add!(EXT4_DEVICE_WRITE_BYTES, data.len());
@@ -922,7 +947,8 @@ impl<D: AsyncBlockDriverOps + Clone + 'static> Ext4Disk<D> {
             }
             Err(_) => {
                 log::error!(
-                    "ext4 async write timed out: block_offset={}, first_block={}, len={}, timeout={:?}",
+                    "ext4 async write timed out: block_offset={}, first_block={}, len={}, \
+                     timeout={:?}",
                     block_offset,
                     first_block,
                     data.len(),
@@ -943,8 +969,16 @@ impl<D: AsyncBlockDriverOps + Clone + 'static> Ext4Disk<D> {
         D: AsyncBlockDriverOps + Clone,
     {
         let block_size = self.block_size();
-        let (first_block, inner_offset, blocks) =
-            self.byte_range(block_offset, num_blocks * block_size);
+        let requested_len = num_blocks
+            .checked_mul(block_size)
+            .ok_or(axdriver::prelude::DevError::InvalidParam)?;
+        if dest.len() != requested_len {
+            return Err(axdriver::prelude::DevError::InvalidParam);
+        }
+        let (first_block, inner_offset, blocks) = self.byte_range(block_offset, requested_len)?;
+        let raw_len = blocks
+            .checked_mul(self.sector_size)
+            .ok_or(axdriver::prelude::DevError::InvalidParam)?;
         let dev = self.dev.lock().clone();
         let total_blocks = dev.num_blocks();
         if first_block + blocks as u64 > total_blocks {
@@ -959,12 +993,15 @@ impl<D: AsyncBlockDriverOps + Clone + 'static> Ext4Disk<D> {
             );
             return Err(axdriver::prelude::DevError::InvalidParam);
         }
-        if inner_offset == 0 && dest.len() == blocks * self.sector_size {
+        if inner_offset == 0 && dest.len() == raw_len {
             Self::read_device_blocks(&dev, first_block, dest).await
         } else {
-            let mut raw = vec![0; blocks * self.sector_size];
+            let mut raw = Self::zeroed_io_buffer(raw_len)?;
             Self::read_device_blocks(&dev, first_block, &mut raw).await?;
-            dest.copy_from_slice(&raw[inner_offset..inner_offset + num_blocks * block_size]);
+            let end = inner_offset
+                .checked_add(requested_len)
+                .ok_or(axdriver::prelude::DevError::InvalidParam)?;
+            dest.copy_from_slice(&raw[inner_offset..end]);
             Ok(())
         }
     }
@@ -991,7 +1028,8 @@ impl<D: AsyncBlockDriverOps + Clone + 'static> Ext4Disk<D> {
                 Ok(result) => result,
                 Err(_) => {
                     log::error!(
-                        "ext4 device read timed out: first_block={}, len={}, attempt={}/{}, timeout={:?}",
+                        "ext4 device read timed out: first_block={}, len={}, attempt={}/{}, \
+                         timeout={:?}",
                         first_block,
                         dest.len(),
                         attempt,
@@ -1050,8 +1088,15 @@ impl<D: AsyncBlockDriverOps + Clone + 'static> Ext4Disk<D> {
         log::debug!("ext4 read_offset: offset={}, len={}", offset, buf.len());
         let block_size = self.block_size();
 
+        if block_size == 0 {
+            return Err(axdriver::prelude::DevError::InvalidParam);
+        }
+        let request_end = offset
+            .checked_add(buf.len())
+            .ok_or(axdriver::prelude::DevError::InvalidParam)?;
+
         let start_block_offset = (offset / block_size) * block_size;
-        let end_block_offset = ((offset + buf.len() - 1) / block_size) * block_size;
+        let end_block_offset = ((request_end - 1) / block_size) * block_size;
 
         // Keep one-block metadata I/O in the cache. Directly forwarding those
         // requests makes every directory, bitmap, and inode access pay an IRQ
@@ -1092,7 +1137,7 @@ impl<D: AsyncBlockDriverOps + Clone + 'static> Ext4Disk<D> {
                 if let Some(block) = stripe.cache.get_mut(&current_block_offset) {
                     block.reused = true;
                     let start = core::cmp::max(offset, current_block_offset);
-                    let end = core::cmp::min(offset + buf.len(), current_block_offset + block_size);
+                    let end = core::cmp::min(request_end, current_block_offset + block_size);
                     let overlap_len = end - start;
                     let buf_start = start - offset;
                     let block_start = start - current_block_offset;
@@ -1101,7 +1146,7 @@ impl<D: AsyncBlockDriverOps + Clone + 'static> Ext4Disk<D> {
                     true
                 } else if let Some(data) = stripe.flushing_evicted.get(&current_block_offset) {
                     let start = core::cmp::max(offset, current_block_offset);
-                    let end = core::cmp::min(offset + buf.len(), current_block_offset + block_size);
+                    let end = core::cmp::min(request_end, current_block_offset + block_size);
                     let overlap_len = end - start;
                     let buf_start = start - offset;
                     let block_start = start - current_block_offset;
@@ -1118,12 +1163,26 @@ impl<D: AsyncBlockDriverOps + Clone + 'static> Ext4Disk<D> {
                 current_block_offset += block_size;
             } else {
                 // Cache miss. Find consecutive cache misses.
+                let remaining_blocks = end_block_offset
+                    .checked_sub(current_block_offset)
+                    .ok_or(axdriver::prelude::DevError::InvalidParam)?
+                    .checked_div(block_size)
+                    .and_then(|blocks| blocks.checked_add(1))
+                    .ok_or(axdriver::prelude::DevError::InvalidParam)?;
+                let batch_limit = bounded_cached_miss_blocks(remaining_blocks);
                 let mut consecutive_misses = 1;
                 {
-                    while current_block_offset + consecutive_misses * block_size <= end_block_offset
-                    {
-                        let next_block_offset =
-                            current_block_offset + consecutive_misses * block_size;
+                    while consecutive_misses < batch_limit {
+                        let next_block_offset = current_block_offset
+                            .checked_add(
+                                consecutive_misses
+                                    .checked_mul(block_size)
+                                    .ok_or(axdriver::prelude::DevError::InvalidParam)?,
+                            )
+                            .ok_or(axdriver::prelude::DevError::InvalidParam)?;
+                        if next_block_offset > end_block_offset {
+                            break;
+                        }
                         let stripe_idx = self.stripe_index(next_block_offset);
                         let stripe = self.block_cache_stripes[stripe_idx].inner.lock();
                         if stripe.cache.contains(&next_block_offset)
@@ -1141,7 +1200,9 @@ impl<D: AsyncBlockDriverOps + Clone + 'static> Ext4Disk<D> {
                 // and then duplicate every block into the metadata cache.
                 if direct_block_io && consecutive_misses > 1 {
                     let buf_start = current_block_offset - offset;
-                    let run_len = consecutive_misses * block_size;
+                    let run_len = consecutive_misses
+                        .checked_mul(block_size)
+                        .ok_or(axdriver::prelude::DevError::InvalidParam)?;
                     crate::buildstorm_stat_inc!(EXT4_BYPASS_READS);
                     self.read_blocks_from_disk_async(
                         current_block_offset,
@@ -1154,7 +1215,10 @@ impl<D: AsyncBlockDriverOps + Clone + 'static> Ext4Disk<D> {
                 }
 
                 // Read all consecutive misses from disk in one go
-                let mut run_data = vec![0u8; consecutive_misses * block_size];
+                let run_len = consecutive_misses
+                    .checked_mul(block_size)
+                    .ok_or(axdriver::prelude::DevError::InvalidParam)?;
+                let mut run_data = Self::zeroed_io_buffer(run_len)?;
                 self.read_blocks_from_disk_async(
                     current_block_offset,
                     consecutive_misses,
@@ -1164,7 +1228,7 @@ impl<D: AsyncBlockDriverOps + Clone + 'static> Ext4Disk<D> {
 
                 if consecutive_misses == 1 {
                     let start = core::cmp::max(offset, current_block_offset);
-                    let end = core::cmp::min(offset + buf.len(), current_block_offset + block_size);
+                    let end = core::cmp::min(request_end, current_block_offset + block_size);
                     let overlap_len = end - start;
                     let buf_start = start - offset;
                     let block_start = start - current_block_offset;
@@ -1206,7 +1270,7 @@ impl<D: AsyncBlockDriverOps + Clone + 'static> Ext4Disk<D> {
                     let b_data = &run_data[b * block_size..(b + 1) * block_size];
 
                     let start = core::cmp::max(offset, b_offset);
-                    let end = core::cmp::min(offset + buf.len(), b_offset + block_size);
+                    let end = core::cmp::min(request_end, b_offset + block_size);
                     let overlap_len = end - start;
                     let buf_start = start - offset;
                     let block_start = start - b_offset;
@@ -1236,7 +1300,9 @@ impl<D: AsyncBlockDriverOps + Clone + 'static> Ext4Disk<D> {
 
                 deferred_writes.extend(to_write);
 
-                current_block_offset += consecutive_misses * block_size;
+                current_block_offset = current_block_offset
+                    .checked_add(run_len)
+                    .ok_or(axdriver::prelude::DevError::InvalidParam)?;
             }
         }
         drop(io_guard);
@@ -1252,6 +1318,7 @@ impl<D: AsyncBlockDriverOps + Clone + 'static> Ext4Disk<D> {
         if data.is_empty() {
             return Ok(());
         }
+        crate::request_writeback();
         // A flush checkpoint briefly takes the exclusive side to include every
         // write that started before it. Writes otherwise share this lock and
         // retain range-level concurrency.
@@ -1266,8 +1333,15 @@ impl<D: AsyncBlockDriverOps + Clone + 'static> Ext4Disk<D> {
         log::debug!("ext4 write_offset: offset={}, len={}", offset, data.len());
         let block_size = self.block_size();
 
+        if block_size == 0 {
+            return Err(axdriver::prelude::DevError::InvalidParam);
+        }
+        let request_end = offset
+            .checked_add(data.len())
+            .ok_or(axdriver::prelude::DevError::InvalidParam)?;
+
         let start_block_offset = (offset / block_size) * block_size;
-        let end_block_offset = ((offset + data.len() - 1) / block_size) * block_size;
+        let end_block_offset = ((request_end - 1) / block_size) * block_size;
 
         if bypass_block_cache(offset, data.len(), block_size) {
             crate::buildstorm_stat_inc!(EXT4_BYPASS_WRITES);
@@ -1293,7 +1367,7 @@ impl<D: AsyncBlockDriverOps + Clone + 'static> Ext4Disk<D> {
         let mut current_block_offset = start_block_offset;
         while current_block_offset <= end_block_offset {
             let start = core::cmp::max(offset, current_block_offset);
-            let end = core::cmp::min(offset + data.len(), current_block_offset + block_size);
+            let end = core::cmp::min(request_end, current_block_offset + block_size);
             let overlap_len = end - start;
             let data_start = start - offset;
             let block_start = start - current_block_offset;
@@ -1342,12 +1416,26 @@ impl<D: AsyncBlockDriverOps + Clone + 'static> Ext4Disk<D> {
                 current_block_offset += block_size;
             } else {
                 // Partial block write with cache miss. Find consecutive cache misses that need partial write.
+                let remaining_blocks = end_block_offset
+                    .checked_sub(current_block_offset)
+                    .ok_or(axdriver::prelude::DevError::InvalidParam)?
+                    .checked_div(block_size)
+                    .and_then(|blocks| blocks.checked_add(1))
+                    .ok_or(axdriver::prelude::DevError::InvalidParam)?;
+                let batch_limit = bounded_cached_miss_blocks(remaining_blocks);
                 let mut consecutive_misses = 1;
                 {
-                    while current_block_offset + consecutive_misses * block_size <= end_block_offset
-                    {
-                        let next_block_offset =
-                            current_block_offset + consecutive_misses * block_size;
+                    while consecutive_misses < batch_limit {
+                        let next_block_offset = current_block_offset
+                            .checked_add(
+                                consecutive_misses
+                                    .checked_mul(block_size)
+                                    .ok_or(axdriver::prelude::DevError::InvalidParam)?,
+                            )
+                            .ok_or(axdriver::prelude::DevError::InvalidParam)?;
+                        if next_block_offset > end_block_offset {
+                            break;
+                        }
                         let stripe_idx = self.stripe_index(next_block_offset);
                         let stripe = self.block_cache_stripes[stripe_idx].inner.lock();
                         if stripe.cache.contains(&next_block_offset)
@@ -1356,8 +1444,7 @@ impl<D: AsyncBlockDriverOps + Clone + 'static> Ext4Disk<D> {
                             break;
                         }
                         let next_start = core::cmp::max(offset, next_block_offset);
-                        let next_end =
-                            core::cmp::min(offset + data.len(), next_block_offset + block_size);
+                        let next_end = core::cmp::min(request_end, next_block_offset + block_size);
                         let next_overlap = next_end - next_start;
                         if next_overlap == block_size {
                             break;
@@ -1368,7 +1455,10 @@ impl<D: AsyncBlockDriverOps + Clone + 'static> Ext4Disk<D> {
                 crate::buildstorm_stat_add!(EXT4_BLOCK_CACHE_MISSES, consecutive_misses);
 
                 // Pre-read consecutive partial miss blocks from disk in one go
-                let mut run_data = vec![0u8; consecutive_misses * block_size];
+                let run_len = consecutive_misses
+                    .checked_mul(block_size)
+                    .ok_or(axdriver::prelude::DevError::InvalidParam)?;
+                let mut run_data = Self::zeroed_io_buffer(run_len)?;
                 self.read_blocks_from_disk_async(
                     current_block_offset,
                     consecutive_misses,
@@ -1384,7 +1474,7 @@ impl<D: AsyncBlockDriverOps + Clone + 'static> Ext4Disk<D> {
                     let mut b_data = run_data[b * block_size..(b + 1) * block_size].to_vec();
 
                     let start = core::cmp::max(offset, b_offset);
-                    let end = core::cmp::min(offset + data.len(), b_offset + block_size);
+                    let end = core::cmp::min(request_end, b_offset + block_size);
                     let overlap_len = end - start;
                     let data_start = start - offset;
                     let block_start = start - b_offset;
@@ -1430,7 +1520,9 @@ impl<D: AsyncBlockDriverOps + Clone + 'static> Ext4Disk<D> {
 
                 deferred_writes.extend(to_write);
 
-                current_block_offset += consecutive_misses * block_size;
+                current_block_offset = current_block_offset
+                    .checked_add(run_len)
+                    .ok_or(axdriver::prelude::DevError::InvalidParam)?;
             }
         }
         drop(io_guard);
@@ -1537,7 +1629,8 @@ mod tests {
     use axdriver::prelude::DevError;
 
     use super::{
-        FLUSH_BATCH_BLOCKS, IO_RANGE_LOCK_BUCKET_BLOCKS, IO_RANGE_LOCK_BUCKETS, bypass_block_cache,
+        CACHE_MISS_BATCH_BLOCKS, FLUSH_BATCH_BLOCKS, IO_RANGE_LOCK_BUCKET_BLOCKS,
+        IO_RANGE_LOCK_BUCKETS, bounded_cached_miss_blocks, bypass_block_cache,
         checked_io_block_range, group_flush_offsets, io_range_lock_indices,
         retryable_device_read_error,
     };
@@ -1576,6 +1669,14 @@ mod tests {
             batches[2],
             alloc::vec![(FLUSH_BATCH_BLOCKS + 2) * block_size]
         );
+    }
+
+    #[test]
+    fn cached_miss_scratch_buffer_is_bounded() {
+        // 163840 ext4 4 KiB blocks equal the 640 MiB allocation seen on the
+        // board. It must now be split before a temporary I/O Vec is created.
+        assert_eq!(bounded_cached_miss_blocks(163_840), CACHE_MISS_BATCH_BLOCKS);
+        assert_eq!(bounded_cached_miss_blocks(1), 1);
     }
 
     #[test]

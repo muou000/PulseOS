@@ -211,8 +211,13 @@ impl Ext4Filesystem {
                             if !has_other_active {
                                 let mut write_scope = self.write_scope(&[ino as u64]);
                                 log::debug!("ext4: deferred deleting unlinked file (ino {})", ino);
-                                if let Err(e) = write_scope.run(self.inner.delete_file(inode)).await
-                                {
+                                let delete_result = crate::discard_unlinked_file_cache_after(
+                                    self as *const Self as usize,
+                                    ino as u64,
+                                    write_scope.run(self.inner.delete_file(inode)),
+                                )
+                                .await;
+                                if let Err(e) = delete_result {
                                     log::error!(
                                         "ext4: failed to delete unlinked file (ino {}): {:?}",
                                         ino,
@@ -221,11 +226,6 @@ impl Ext4Filesystem {
                                     if !matches!(e, Ext4Error::Corrupt(_) | Ext4Error::NotFound) {
                                         failed.push(ino);
                                     }
-                                } else {
-                                    crate::invalidate_file_cache(
-                                        self as *const Self as usize,
-                                        ino as u64,
-                                    );
                                 }
                             }
                         }

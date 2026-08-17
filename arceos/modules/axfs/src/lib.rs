@@ -13,10 +13,12 @@ use alloc::{
     sync::Arc,
     vec::Vec,
 };
+use core::{
+    sync::atomic::{AtomicBool, Ordering},
+    time::Duration,
+};
 
-#[allow(unused_imports)]
-use axdriver::prelude::{BaseDriverOps, BlockDriverOps};
-use axdriver::{AxBlockDevice, AxDeviceContainer};
+use axdriver::{AxBlockDevice, AxDeviceContainer, prelude::BaseDriverOps};
 use axfs_ng_vfs::NodePermission;
 pub use axfs_ng_vfs::NodeType;
 use futures_util::{StreamExt, stream::FuturesUnordered};
@@ -67,6 +69,51 @@ pub fn fill_random_bytes(buf: &mut [u8]) {
     fs::devfs::fill_random_bytes(buf);
 }
 
+// Dirty data is flushed by a kernel task instead of relying on descriptor
+// close (which is intentionally only a cache-lifetime operation). A short
+// polling interval gives ordinary writes bounded writeback latency. File
+// caches keep their own dirty generations, so the task only takes their I/O
+// locks when they actually changed; this flag is reserved for direct/raw disk
+// writes that have no file-cache state to inspect.
+const WRITEBACK_INTERVAL: Duration = Duration::from_secs(1);
+static WRITEBACK_DAEMON_STARTED: AtomicBool = AtomicBool::new(false);
+static WRITEBACK_REQUESTED: AtomicBool = AtomicBool::new(false);
+
+/// Marks direct filesystem or raw-block state for background writeback.
+///
+/// Cached-file writes use their own per-file generations instead. Keep this
+/// store rather than a lossy load/CAS fast path: a writer racing the daemon's
+/// `swap(false)` must always leave a later checkpoint pending.
+pub(crate) fn request_writeback() {
+    WRITEBACK_REQUESTED.store(true, Ordering::Release);
+}
+
+fn take_writeback_request() -> bool {
+    WRITEBACK_REQUESTED.swap(false, Ordering::AcqRel)
+}
+
+fn start_writeback_daemon() {
+    if WRITEBACK_DAEMON_STARTED
+        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+        .is_err()
+    {
+        return;
+    }
+
+    axtask::spawn_async(async {
+        loop {
+            axtask::future::sleep(WRITEBACK_INTERVAL).await;
+            if let Err(error) = flush_background_writeback_async().await {
+                // Keep the request armed so a transient SD/MMC error gets a
+                // later retry. Shutdown still performs its own bounded,
+                // non-interruptible flush and reports failure to the caller.
+                request_writeback();
+                error!("background filesystem writeback failed: {:?}", error);
+            }
+        }
+    });
+}
+
 pub fn flush_all_filesystems() -> axfs_ng_vfs::VfsResult<()> {
     axtask::future::block_on(flush_all_filesystems_async())
 }
@@ -94,8 +141,9 @@ async fn flush_filesystem_root(
     (name, result)
 }
 
-pub async fn flush_all_filesystems_async() -> axfs_ng_vfs::VfsResult<()> {
-    let mut first_error = highlevel::flush_all_file_caches_async().await.err();
+async fn flush_registered_filesystems_and_disks(
+    mut first_error: Option<axfs_ng_vfs::VfsError>,
+) -> axfs_ng_vfs::VfsResult<()> {
     let mut roots = BTreeMap::new();
     if let Some(cx) = ROOT_FS_CONTEXT.get() {
         let root = cx.root_dir().clone();
@@ -141,6 +189,29 @@ pub async fn flush_all_filesystems_async() -> axfs_ng_vfs::VfsResult<()> {
         }
     }
     first_error.map_or(Ok(()), Err)
+}
+
+/// Performs one background checkpoint without acquiring every cached file's
+/// I/O lock. Explicit `sync`, unmount, and shutdown still use the complete
+/// cache walk below as their stronger semantic boundary.
+async fn flush_background_writeback_async() -> axfs_ng_vfs::VfsResult<()> {
+    let (first_error, dirty_file_caches) = match highlevel::flush_pending_file_caches_async().await
+    {
+        Ok(dirty_file_caches) => (None, dirty_file_caches),
+        Err(err) => (Some(err), true),
+    };
+    let direct_writeback = take_writeback_request();
+
+    if dirty_file_caches || direct_writeback {
+        return flush_registered_filesystems_and_disks(first_error).await;
+    }
+
+    first_error.map_or(Ok(()), Err)
+}
+
+pub async fn flush_all_filesystems_async() -> axfs_ng_vfs::VfsResult<()> {
+    let first_error = highlevel::flush_all_file_caches_async().await.err();
+    flush_registered_filesystems_and_disks(first_error).await
 }
 
 fn filesystem_id(fs: &dyn axfs_ng_vfs::FilesystemOps) -> usize {
@@ -319,12 +390,9 @@ pub fn lookup_mountable_filesystem(source: &str) -> Option<axfs_ng_vfs::Filesyst
 pub fn register_mounted_mountpoint(target: &str, mountpoint: Arc<axfs_ng_vfs::Mountpoint>) {
     let target = normalize_target(target);
     let mut mps = MOUNTED_MOUNTPOINTS.lock();
-    if mps
-        .iter()
-        .any(|(existing_target, existing)| {
-            existing_target == &target && Arc::ptr_eq(existing, &mountpoint)
-        })
-    {
+    if mps.iter().any(|(existing_target, existing)| {
+        existing_target == &target && Arc::ptr_eq(existing, &mountpoint)
+    }) {
         return;
     }
     mps.push((target, mountpoint));
@@ -495,9 +563,7 @@ pub fn unregister_mounted_mountpoint_exact(
 /// cleanup loop then keeps retrying those rows forever.  The vectors are
 /// detached before filtering so dropping mount records never happens while a
 /// registry spin lock is held.
-pub fn unregister_mountpoint_records(
-    mountpoint: &Arc<axfs_ng_vfs::Mountpoint>,
-) -> usize {
+pub fn unregister_mountpoint_records(mountpoint: &Arc<axfs_ng_vfs::Mountpoint>) -> usize {
     let mut removed_mps = Vec::new();
     {
         let mut guard = MOUNTED_MOUNTPOINTS.lock();
@@ -775,6 +841,7 @@ pub fn init_filesystems(mut block_devs: AxDeviceContainer<AxBlockDevice>) {
 
     ROOT_FS_CONTEXT.call_once(|| cx.clone());
     *FS_CONTEXT.lock() = cx;
+    start_writeback_daemon();
 }
 
 pub use fs::{ProcfsProcessProvider, register_process_provider};

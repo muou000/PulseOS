@@ -1553,12 +1553,20 @@ impl DirNodeOps for Inode {
                                 child_ino
                             );
                             child.is_unlinked.store(true, Ordering::Relaxed);
-                            fs.delete_file(child_inode).await.map_err(into_vfs_err)?;
-                            child.is_unlinked.store(false, Ordering::Relaxed);
-                            crate::invalidate_file_cache(
+                            let delete_result = crate::discard_unlinked_file_cache_after(
                                 Arc::as_ptr(&self.fs) as usize,
                                 child_ino as u64,
-                            );
+                                fs.delete_file(child_inode),
+                            )
+                            .await;
+                            // A failed physical deletion still leaves the inode
+                            // unlinked. Keep this marker armed so `Drop` queues
+                            // the deferred-delete worker instead of leaking the
+                            // inode (and its restored dirty cache) forever.
+                            if delete_result.is_ok() {
+                                child.is_unlinked.store(false, Ordering::Relaxed);
+                            }
+                            delete_result.map_err(into_vfs_err)?;
                         }
                     }
                     Ok(())
@@ -1711,12 +1719,18 @@ impl DirNodeOps for Inode {
                                     dst_inode_ino
                                 );
                                 local_dst.is_unlinked.store(true, Ordering::Relaxed);
-                                fs.delete_file(dst_inode).await.map_err(into_vfs_err)?;
-                                local_dst.is_unlinked.store(false, Ordering::Relaxed);
-                                crate::invalidate_file_cache(
+                                let delete_result = crate::discard_unlinked_file_cache_after(
                                     Arc::as_ptr(&dst_dir.fs) as usize,
                                     dst_inode_ino as u64,
-                                );
+                                    fs.delete_file(dst_inode),
+                                )
+                                .await;
+                                // See unlink above: only a completed deletion
+                                // clears the marker which drives deferred retry.
+                                if delete_result.is_ok() {
+                                    local_dst.is_unlinked.store(false, Ordering::Relaxed);
+                                }
+                                delete_result.map_err(into_vfs_err)?;
                             }
                         }
                     }
@@ -1839,7 +1853,7 @@ impl Drop for Inode {
             active.remove(&self.ino);
             if is_unlinked {
                 drop(active);
-                crate::invalidate_file_cache(Arc::as_ptr(&self.fs) as usize, self.ino as u64);
+                crate::mark_file_cache_unlinked(Arc::as_ptr(&self.fs) as usize, self.ino as u64);
                 self.fs.queue_deletion(self.ino);
             }
         }
