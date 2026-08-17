@@ -1,6 +1,10 @@
 use super::*;
 
 const KERNEL_SIGSET_SIZE: usize = core::mem::size_of::<u64>();
+// Some POSIX software uses select(0, ..., 1us) as a cooperative barrier
+// poll.  Programming a task timer for such a duration costs substantially
+// more than the requested delay and can flood the per-CPU timer heap.
+const SHORT_TIMEOUT_YIELD_LIMIT: Duration = Duration::from_micros(10);
 
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -50,6 +54,22 @@ fn wait_for_signal_or_timeout(
     }
 
     match timeout {
+        Some(timeout) if timeout > Duration::ZERO && timeout <= SHORT_TIMEOUT_YIELD_LIMIT => {
+            let deadline = axhal::time::monotonic_time() + timeout;
+
+            // Keep the wait cooperative without creating a timer entry.  A
+            // scheduler handoff normally exceeds this tiny interval; the
+            // bounded busy wait only preserves the timeout lower bound when
+            // it returns unusually early.
+            axtask::yield_now();
+            if thread.has_pending_signal() {
+                return true;
+            }
+            if axhal::time::monotonic_time() < deadline {
+                axhal::time::busy_wait_until(deadline);
+            }
+            thread.has_pending_signal()
+        }
         Some(timeout) if timeout > Duration::ZERO => {
             thread
                 .signal_wait_queue()
