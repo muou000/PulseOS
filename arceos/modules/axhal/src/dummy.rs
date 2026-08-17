@@ -106,6 +106,10 @@ impl PowerIf for DummyPower {
         unimplemented!()
     }
 
+    fn system_reset() -> axplat::power::SystemResetResult {
+        Err(axplat::power::SystemResetError::NotSupported)
+    }
+
     fn cpu_num() -> usize {
         1
     }

@@ -1,6 +1,9 @@
 #[cfg(feature = "smp")]
 use axplat::power::CpuBootError;
-use axplat::{mem::pa, power::PowerIf};
+use axplat::{
+    mem::pa,
+    power::{PowerIf, SystemResetResult},
+};
 
 struct PowerImpl;
 
@@ -25,6 +28,24 @@ impl PowerIf for PowerImpl {
         unsafe { HALT_ADDR.write_volatile(0x34) };
         axcpu::asm::halt();
         warn!("It should shutdown!");
+        loop {
+            axcpu::asm::halt();
+        }
+    }
+
+    /// Reset the QEMU virt machine through its ACPI GED reset register.
+    fn system_reset() -> SystemResetResult {
+        const GED_RESET_OFFSET: usize = 2;
+        const GED_RESET_VALUE: u8 = 0x42;
+        const GED_ADDR: *mut u8 =
+            crate::mem::phys_to_virt(pa!(crate::config::devices::GED_PADDR)).as_mut_ptr();
+
+        info!("Rebooting...");
+        unsafe {
+            GED_ADDR
+                .add(GED_RESET_OFFSET)
+                .write_volatile(GED_RESET_VALUE)
+        };
         loop {
             axcpu::asm::halt();
         }
