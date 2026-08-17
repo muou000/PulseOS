@@ -339,9 +339,17 @@ impl<'a> SocketSetWrapper<'a> {
         self.0.lock().remove(handle);
         debug!("socket {}: destroyed", handle);
     }
+
+    /// Removes a socket and its readiness registration under the same lock
+    /// order used by `poll_interfaces`.
+    pub fn remove_and_unregister(&self, handle: SocketHandle) {
+        let mut sockets = self.0.lock();
+        sockets.remove(handle);
+        SOCKET_WAIT_QUEUES.lock().remove(&handle);
+        debug!("socket {}: destroyed", handle);
+    }
 }
 
-#[allow(unused)]
 impl InterfaceWrapper {
     fn new(name: &'static str, dev: AxNetDevice, ether_addr: EthernetAddress) -> Self {
         let mut config = Config::new(HardwareAddress::Ethernet(ether_addr));
@@ -699,6 +707,8 @@ pub(crate) fn register_listener_wait_queue(handle: SocketHandle, queues: Arc<Soc
 }
 
 pub(crate) fn unregister_wait_queue(handle: SocketHandle) {
+    // This is for state transitions where the socket stays alive. Destruction
+    // paths use `remove_and_unregister` to avoid a handle-reuse window.
     SOCKET_WAIT_QUEUES.lock().remove(&handle);
 }
 

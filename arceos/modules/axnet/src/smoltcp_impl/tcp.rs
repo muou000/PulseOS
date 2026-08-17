@@ -884,8 +884,7 @@ impl Drop for TcpSocket {
         self.shutdown().ok();
         // Safe because we have mut reference to `self`.
         if let Some(handle) = unsafe { self.handle.get().read() } {
-            unregister_wait_queue(handle);
-            SOCKET_SET.remove(handle);
+            SOCKET_SET.remove_and_unregister(handle);
         }
     }
 }
