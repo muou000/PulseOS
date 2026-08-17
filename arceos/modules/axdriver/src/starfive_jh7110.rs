@@ -9,12 +9,15 @@ use axalloc::global_allocator;
 use axdriver_base::{BaseDriverOps, DevError, DevResult, DeviceType};
 use axdriver_net::{
     EthernetAddress, NetBufPtr, NetDriverOps,
-    starfive_jh7110::{DmaOps, Jh7110AxiConfig, Jh7110Config, Jh7110Dwmac, Jh7110InterruptStatus},
+    starfive_jh7110::{
+        DmaOps, Jh7110AxiConfig, Jh7110Config, Jh7110Dwmac, Jh7110InterruptEndpoint,
+        Jh7110InterruptStatus,
+    },
 };
 use axhal::mem::{PAGE_SIZE_4K, flush_dcache_range, phys_to_virt, virt_to_phys};
 use axpoll::PollSet;
 use fdt_raw::{Fdt, Node};
-use kspin::SpinNoIrq;
+use kspin::{SpinNoIrq, SpinNoPreempt};
 
 const GMAC0_PADDR: usize = 0x1603_0000;
 const GMAC_MIN_SIZE: usize = 0x2000;
@@ -119,8 +122,11 @@ unsafe impl DmaOps for Jh7110Dma {
 type Dwmac = Jh7110Dwmac<Jh7110Dma>;
 
 struct Jh7110DwmacInner {
-    device: SpinNoIrq<Dwmac>,
+    device: SpinNoPreempt<Dwmac>,
+    irq_endpoint: Jh7110InterruptEndpoint,
     poll_set: PollSet,
+    pending_irq_dma: AtomicU32,
+    pending_irq_mac: AtomicU32,
     completion_logged: AtomicBool,
     abnormal_logged: AtomicBool,
     rx_packet_logged: AtomicBool,
@@ -204,9 +210,13 @@ pub(crate) fn probe() -> Option<Jh7110DwmacDevice> {
     let phy_extended_status = device.phy_extended_status();
     let next_phy_poll_ns =
         axhal::time::monotonic_time_nanos().saturating_add(PHY_POLL_INTERVAL_NANOS);
+    let irq_endpoint = device.irq_endpoint();
     let inner = Arc::new(Jh7110DwmacInner {
-        device: SpinNoIrq::new(device),
+        device: SpinNoPreempt::new(device),
+        irq_endpoint,
         poll_set: PollSet::new(),
+        pending_irq_dma: AtomicU32::new(0),
+        pending_irq_mac: AtomicU32::new(0),
         completion_logged: AtomicBool::new(false),
         abnormal_logged: AtomicBool::new(false),
         rx_packet_logged: AtomicBool::new(false),
@@ -771,6 +781,25 @@ fn record_dma_status(
     }
 }
 
+fn defer_irq_status(inner: &Jh7110DwmacInner, status: Jh7110InterruptStatus) {
+    inner
+        .pending_irq_dma
+        .fetch_or(status.dma, Ordering::Release);
+    inner
+        .pending_irq_mac
+        .fetch_or(status.mac, Ordering::Release);
+}
+
+fn take_deferred_irq_status(
+    inner: &Jh7110DwmacInner,
+    current: Jh7110InterruptStatus,
+) -> Jh7110InterruptStatus {
+    Jh7110InterruptStatus {
+        dma: current.dma | inner.pending_irq_dma.swap(0, Ordering::AcqRel),
+        mac: current.mac | inner.pending_irq_mac.swap(0, Ordering::AcqRel),
+    }
+}
+
 fn phy_link_speed_duplex(status: u16) -> Option<(u16, bool)> {
     if status & ((1 << 11) | (1 << 10)) != (1 << 11) | (1 << 10) {
         return None;
@@ -840,10 +869,8 @@ fn dwmac_irq_handler(irq: usize) {
         .map(|(_, device)| device.clone())
         .and_then(|device| device.upgrade());
     if let Some(device) = device {
-        let dwmac = device.device.lock();
-        let status = dwmac.handle_interrupt();
-        record_dma_status(&device, &dwmac, status, "IRQ");
-        drop(dwmac);
+        let status = device.irq_endpoint.handle_interrupt();
+        defer_irq_status(&device, status);
         if status.has_work() {
             device.poll_set.wake();
         }
@@ -867,8 +894,7 @@ impl NetDriverOps for Jh7110DwmacDevice {
 
     fn can_transmit(&self) -> bool {
         let device = self.inner.device.lock();
-        refresh_phy_link(&self.inner, &device);
-        let status = device.handle_interrupt();
+        let status = take_deferred_irq_status(&self.inner, device.handle_interrupt());
         record_dma_status(&self.inner, &device, status, "poll");
         let ready = device.can_transmit();
         drop(device);
@@ -880,8 +906,7 @@ impl NetDriverOps for Jh7110DwmacDevice {
 
     fn can_receive(&self) -> bool {
         let device = self.inner.device.lock();
-        refresh_phy_link(&self.inner, &device);
-        let status = device.handle_interrupt();
+        let status = take_deferred_irq_status(&self.inner, device.handle_interrupt());
         record_dma_status(&self.inner, &device, status, "poll");
         let ready = device.can_receive();
         drop(device);
@@ -961,6 +986,17 @@ impl NetDriverOps for Jh7110DwmacDevice {
 
     fn alloc_tx_buffer(&mut self, size: usize) -> DevResult<NetBufPtr> {
         self.inner.device.lock().alloc_tx_buffer(size)
+    }
+
+    fn poll_device(&self) {
+        let device = self.inner.device.lock();
+        refresh_phy_link(&self.inner, &device);
+        let status = take_deferred_irq_status(&self.inner, device.handle_interrupt());
+        record_dma_status(&self.inner, &device, status, "maintenance");
+        drop(device);
+        if status.has_work() {
+            self.inner.poll_set.wake();
+        }
     }
 
     fn poll_set(&self) -> Option<&PollSet> {

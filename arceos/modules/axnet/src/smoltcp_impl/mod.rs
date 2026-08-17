@@ -386,6 +386,7 @@ impl InterfaceWrapper {
 
     pub fn poll(&self, sockets: &Mutex<SocketSet>) -> bool {
         let mut dev = self.dev.lock();
+        dev.inner.borrow().poll_device();
         let mut iface = self.iface.lock();
         let mut sockets = sockets.lock();
         let timestamp = Self::current_time();
