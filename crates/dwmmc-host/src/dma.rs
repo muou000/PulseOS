@@ -2,7 +2,7 @@ use alloc::boxed::Box;
 use core::{num::NonZeroUsize, ptr::NonNull};
 
 use dma_api::{
-    CoherentArray, CompletedDma, CpuDmaBuffer, DeviceDma, DmaDirection, InFlightDma, PreparedDma,
+    CompletedDma, ContiguousArray, CpuDmaBuffer, DeviceDma, DmaDirection, InFlightDma, PreparedDma,
 };
 use log::warn;
 use sdmmc_protocol::{
@@ -36,6 +36,7 @@ const IDMAC_INT_DU: u32 = 1 << 4;
 const IDMAC_INT_CES: u32 = 1 << 5;
 const IDMAC_INT_NI: u32 = 1 << 8;
 const IDMAC_INT_AI: u32 = 1 << 9;
+const IDMAC_INT_ERROR: u32 = IDMAC_INT_FBE | IDMAC_INT_DU | IDMAC_INT_CES | IDMAC_INT_AI;
 const IDMAC_INT_CLR: u32 = IDMAC_INT_AI
     | IDMAC_INT_NI
     | IDMAC_INT_CES
@@ -43,7 +44,7 @@ const IDMAC_INT_CLR: u32 = IDMAC_INT_AI
     | IDMAC_INT_FBE
     | IDMAC_INT_RI
     | IDMAC_INT_TI;
-const IDMAC_INT_ENABLE: u32 = IDMAC_INT_NI | IDMAC_INT_RI | IDMAC_INT_TI;
+const IDMAC_INT_ENABLE: u32 = IDMAC_INT_NI | IDMAC_INT_RI | IDMAC_INT_TI | IDMAC_INT_ERROR;
 
 const DMA_POLL_LIMIT: u32 = 8_000_000;
 pub const IDMAC_DESC_ALIGN: usize = 16;
@@ -160,7 +161,7 @@ enum BlockRequestKind {
     Read {
         id: RequestId,
         buffer: DmaRequestBuffer,
-        _desc: CoherentArray<IdmacDesc>,
+        _desc: ContiguousArray<IdmacDesc>,
         cmd_index: u8,
         phase: Phase,
         stage: BlockRequestStage,
@@ -170,7 +171,7 @@ enum BlockRequestKind {
     Write {
         id: RequestId,
         buffer: DmaRequestBuffer,
-        _desc: CoherentArray<IdmacDesc>,
+        _desc: ContiguousArray<IdmacDesc>,
         cmd_index: u8,
         phase: Phase,
         stage: BlockRequestStage,
@@ -549,7 +550,11 @@ impl DwMmc {
         let dma_addr = backing.dma_addr().as_u64();
         let in_flight = unsafe { backing.prepare_for_device().into_in_flight() };
         let mut desc = dma
-            .coherent_array_zero_with_align::<IdmacDesc>(block_count as usize, IDMAC_DESC_ALIGN)
+            .contiguous_array_zero_with_align::<IdmacDesc>(
+                block_count as usize,
+                IDMAC_DESC_ALIGN,
+                DmaDirection::Bidirectional,
+            )
             .map_err(|err| map_dma_error(err, Phase::DataRead))?;
         let cmd = if block_count == 1 {
             cmd17(start_block)
@@ -591,7 +596,11 @@ impl DwMmc {
         let dma_addr = backing.dma_addr().as_u64();
         let in_flight = unsafe { backing.prepare_for_device().into_in_flight() };
         let mut desc = dma
-            .coherent_array_zero_with_align::<IdmacDesc>(block_count as usize, IDMAC_DESC_ALIGN)
+            .contiguous_array_zero_with_align::<IdmacDesc>(
+                block_count as usize,
+                IDMAC_DESC_ALIGN,
+                DmaDirection::Bidirectional,
+            )
             .map_err(|err| map_dma_error(err, Phase::DataWrite))?;
         let cmd = if block_count == 1 {
             cmd24(start_block)
@@ -630,9 +639,11 @@ impl DwMmc {
             Ok(block_count) => block_count,
             Err(err) => return Err(PreparedDmaSubmitError::new(err, buffer)),
         };
-        let mut desc = match dma
-            .coherent_array_zero_with_align::<IdmacDesc>(block_count as usize, IDMAC_DESC_ALIGN)
-        {
+        let mut desc = match dma.contiguous_array_zero_with_align::<IdmacDesc>(
+            block_count as usize,
+            IDMAC_DESC_ALIGN,
+            DmaDirection::Bidirectional,
+        ) {
             Ok(desc) => desc,
             Err(err) => {
                 return Err(PreparedDmaSubmitError::new(
@@ -684,9 +695,11 @@ impl DwMmc {
             Ok(block_count) => block_count,
             Err(err) => return Err(PreparedDmaSubmitError::new(err, buffer)),
         };
-        let mut desc = match dma
-            .coherent_array_zero_with_align::<IdmacDesc>(block_count as usize, IDMAC_DESC_ALIGN)
-        {
+        let mut desc = match dma.contiguous_array_zero_with_align::<IdmacDesc>(
+            block_count as usize,
+            IDMAC_DESC_ALIGN,
+            DmaDirection::Bidirectional,
+        ) {
             Ok(desc) => desc,
             Err(err) => {
                 return Err(PreparedDmaSubmitError::new(
@@ -884,7 +897,7 @@ impl DwMmc {
         cmd: &Command,
         block_count: u32,
         buffer_dma: u64,
-        desc: &mut CoherentArray<IdmacDesc>,
+        desc: &mut ContiguousArray<IdmacDesc>,
     ) -> Result<(), Error> {
         if block_count == 0 {
             return Err(Error::InvalidArgument);
@@ -933,10 +946,15 @@ impl DwMmc {
                 );
             }
         });
+        // Publish the complete descriptor chain before handing DBADDR to a
+        // non-coherent controller such as JH7110's DWMMC IDMAC.
+        desc.sync_for_device(0, desc_bytes);
 
         self.clear_all_int_status();
         self.regs.idsts().write(IDMAC_INT_CLR);
         self.irq.state.clear(u32::MAX);
+        self.controller_data_complete = false;
+        self.idmac_data_complete = false;
         self.program_data_phase(BLOCK_SIZE as u32, block_count);
         self.reset_dma_for_phase(phase)?;
 
@@ -985,6 +1003,8 @@ impl DwMmc {
             self.pending_data = None;
             self.data_blocks_remaining = 0;
             self.data_cmd_index = 0;
+            self.controller_data_complete = false;
+            self.idmac_data_complete = false;
             self.irq.state.end_request();
             return Ok(None);
         }
@@ -1004,6 +1024,8 @@ impl DwMmc {
                 self.pending_data = None;
                 self.data_blocks_remaining = 0;
                 self.data_cmd_index = 0;
+                self.controller_data_complete = false;
+                self.idmac_data_complete = false;
                 if quiesced {
                     buffer.complete(true)
                 } else {
@@ -1019,6 +1041,8 @@ impl DwMmc {
                 self.pending_data = None;
                 self.data_blocks_remaining = 0;
                 self.data_cmd_index = 0;
+                self.controller_data_complete = false;
+                self.idmac_data_complete = false;
                 if quiesced {
                     buffer.complete(false)
                 } else {
@@ -1259,6 +1283,8 @@ impl DwMmc {
         self.pending_data = None;
         self.data_blocks_remaining = 0;
         self.data_cmd_index = 0;
+        self.controller_data_complete = false;
+        self.idmac_data_complete = false;
         self.command_state = crate::command::CommandState::Idle;
         slot.complete(id)?;
         recovery
@@ -1294,6 +1320,8 @@ impl DwMmc {
         self.pending_data = None;
         self.data_blocks_remaining = 0;
         self.data_cmd_index = 0;
+        self.controller_data_complete = false;
+        self.idmac_data_complete = false;
         self.command_state = crate::command::CommandState::Idle;
         match (fifo, dma) {
             (Ok(()), Ok(())) => Ok(()),
@@ -1328,11 +1356,16 @@ impl DwMmc {
 
     fn poll_dma_complete(&mut self, cmd_index: u8, phase: Phase) -> Result<BlockPoll, Error> {
         let raw_status = self.take_data_irq_status();
+        if raw_status & crate::DWMMC_LATCH_IDMAC_ERROR != 0 {
+            return Err(Error::BusError(ErrorContext::for_cmd(phase, cmd_index)));
+        }
         let rintsts = crate::regs::RIntSts::from_bits(raw_status);
         if rintsts.error() {
             return Err(self.translate_int_error(rintsts, phase, cmd_index));
         }
-        if rintsts.data_transfer_over() {
+        self.controller_data_complete |= rintsts.data_transfer_over();
+        self.idmac_data_complete |= raw_status & crate::DWMMC_LATCH_IDMAC_COMPLETE != 0;
+        if self.controller_data_complete && self.idmac_data_complete {
             return Ok(BlockPoll::Complete);
         }
         Ok(BlockPoll::Pending)
@@ -1341,6 +1374,8 @@ impl DwMmc {
     fn take_data_irq_status(&mut self) -> u32 {
         let consume = crate::DWMMC_INT_DATA_TRANSFER_OVER
             | crate::DWMMC_INT_COMMAND_DONE
+            | crate::DWMMC_LATCH_IDMAC_COMPLETE
+            | crate::DWMMC_LATCH_IDMAC_ERROR
             | crate::DWMMC_INT_RXDR
             | crate::DWMMC_INT_TXDR
             | crate::DWMMC_INT_ERROR_MASK;
@@ -1451,6 +1486,7 @@ fn dma_write_block_count(size: NonZeroUsize) -> Result<u32, Error> {
 }
 
 fn map_dma_error(err: dma_api::DmaError, phase: Phase) -> Error {
+    #[allow(unreachable_patterns)]
     match err {
         dma_api::DmaError::NoMemory => Error::BusError(ErrorContext::new(phase)),
         dma_api::DmaError::LayoutError(_)
@@ -1460,6 +1496,8 @@ fn map_dma_error(err: dma_api::DmaError, phase: Phase) -> Error {
         | dma_api::DmaError::BoundaryCross { .. }
         | dma_api::DmaError::NullPointer
         | dma_api::DmaError::ZeroSizedBuffer => Error::InvalidArgument,
+        // dma-api 0.9 may grow device-side failure variants in patch releases.
+        _ => Error::BusError(ErrorContext::new(phase)),
     }
 }
 
@@ -1567,6 +1605,35 @@ mod tests {
 
         let cleared = unsafe { mmio.as_ptr().add(RINTSTS_WORD).read_volatile() };
         assert_eq!(cleared, raw);
+    }
+
+    #[test]
+    fn idmac_completion_requires_controller_dto() {
+        let mut mmio = [0u32; 256];
+        let base = NonNull::new(mmio.as_mut_ptr().cast()).unwrap();
+        let mut host = unsafe { DwMmc::new(base) };
+
+        host.enable_completion_irq();
+        host.irq.state.begin_request();
+        let generation = host.irq.state.generation();
+        host.irq
+            .state
+            .cache_if_current(generation, crate::DWMMC_LATCH_IDMAC_COMPLETE);
+
+        assert!(matches!(
+            host.poll_dma_complete(17, Phase::DataRead),
+            Ok(BlockPoll::Pending)
+        ));
+        assert!(host.idmac_data_complete);
+        assert!(!host.controller_data_complete);
+
+        host.irq
+            .state
+            .cache_if_current(generation, crate::DWMMC_INT_DATA_TRANSFER_OVER);
+        assert!(matches!(
+            host.poll_dma_complete(17, Phase::DataRead),
+            Ok(BlockPoll::Complete)
+        ));
     }
 
     #[test]

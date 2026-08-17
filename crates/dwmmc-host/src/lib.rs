@@ -239,7 +239,24 @@ pub(crate) const DWMMC_INT_FIFO_UNDER_OVER_RUN: u32 = 1 << 11;
 pub(crate) const DWMMC_INT_HARDWARE_LOCKED_WRITE: u32 = 1 << 12;
 const DWMMC_IDMAC_INT_TI: u32 = 1 << 0;
 const DWMMC_IDMAC_INT_RI: u32 = 1 << 1;
+const DWMMC_IDMAC_INT_FBE: u32 = 1 << 2;
+const DWMMC_IDMAC_INT_DU: u32 = 1 << 4;
+const DWMMC_IDMAC_INT_CES: u32 = 1 << 5;
 const DWMMC_IDMAC_INT_NI: u32 = 1 << 8;
+const DWMMC_IDMAC_INT_AI: u32 = 1 << 9;
+const DWMMC_IDMAC_INT_ERROR: u32 =
+    DWMMC_IDMAC_INT_FBE | DWMMC_IDMAC_INT_DU | DWMMC_IDMAC_INT_CES | DWMMC_IDMAC_INT_AI;
+const DWMMC_IDMAC_INT_CLR: u32 = DWMMC_IDMAC_INT_AI
+    | DWMMC_IDMAC_INT_NI
+    | DWMMC_IDMAC_INT_CES
+    | DWMMC_IDMAC_INT_DU
+    | DWMMC_IDMAC_INT_FBE
+    | DWMMC_IDMAC_INT_RI
+    | DWMMC_IDMAC_INT_TI;
+// These are software-only status bits carried through IrqState. They keep
+// IDMAC completion distinct from the controller's hardware DTO bit.
+pub(crate) const DWMMC_LATCH_IDMAC_COMPLETE: u32 = 1 << 30;
+pub(crate) const DWMMC_LATCH_IDMAC_ERROR: u32 = 1 << 31;
 pub(crate) const DWMMC_INT_START_BIT_ERROR: u32 = 1 << 13;
 pub(crate) const DWMMC_INT_END_BIT_ERROR: u32 = 1 << 15;
 pub(crate) const DWMMC_INT_ERROR_MASK: u32 = DWMMC_INT_RESPONSE_ERROR
@@ -1250,6 +1267,8 @@ pub(crate) fn event_from_raw_status(raw_status: u32) -> Event {
     let status = crate::regs::RIntSts::from_bits(raw_status);
     if raw_status == 0 {
         Event::None
+    } else if raw_status & DWMMC_LATCH_IDMAC_ERROR != 0 {
+        Event::Error { raw_status }
     } else if status.error() {
         Event::Error { raw_status }
     } else if status.command_done() {
@@ -1349,12 +1368,16 @@ fn handle_irq_core(irq: &host::IrqCore) -> Event {
         irq.regs.intmask().write(mask & !fifo_ready);
     }
     let idmac_status = irq.regs.idsts().read();
-    if idmac_status & (DWMMC_IDMAC_INT_TI | DWMMC_IDMAC_INT_RI) != 0 {
-        irq.regs
-            .idsts()
-            .write(DWMMC_IDMAC_INT_TI | DWMMC_IDMAC_INT_RI);
-        irq.regs.idsts().write(DWMMC_IDMAC_INT_NI);
-        raw_status |= crate::DWMMC_INT_DATA_TRANSFER_OVER;
+    let idmac_ack = idmac_status & DWMMC_IDMAC_INT_CLR;
+    if idmac_ack != 0 {
+        irq.regs.idsts().write(idmac_ack);
+    }
+    let enabled_idmac_status = idmac_status & irq.regs.idinten().read();
+    if enabled_idmac_status & (DWMMC_IDMAC_INT_TI | DWMMC_IDMAC_INT_RI) != 0 {
+        raw_status |= DWMMC_LATCH_IDMAC_COMPLETE;
+    }
+    if enabled_idmac_status & DWMMC_IDMAC_INT_ERROR != 0 {
+        raw_status |= DWMMC_LATCH_IDMAC_ERROR;
     }
     irq.state.cache_if_current(generation, raw_status);
     event_from_raw_status(raw_status)
@@ -1541,13 +1564,17 @@ mod tests {
     }
 
     #[test]
-    fn idmac_irq_completion_is_cached_as_data_completion() {
+    fn idmac_irq_completion_is_latched_separately_from_controller_dto() {
         let mut mmio = [0u32; 256];
         let base = NonNull::new(mmio.as_mut_ptr().cast()).unwrap();
         let mut host = unsafe { DwMmc::new(base) };
         const IDSTS_WORD: usize = 35;
+        const IDINTEN_WORD: usize = 36;
         host.irq.state.begin_request();
         unsafe {
+            mmio.as_mut_ptr()
+                .add(IDINTEN_WORD)
+                .write_volatile(DWMMC_IDMAC_INT_TI);
             mmio.as_mut_ptr()
                 .add(IDSTS_WORD)
                 .write_volatile(DWMMC_IDMAC_INT_TI);
@@ -1555,10 +1582,15 @@ mod tests {
 
         let mut irq = host.irq_endpoint();
 
-        assert_eq!(irq.handle_irq(), Event::TransferComplete);
-        assert_eq!(host.irq.state.pending(), DWMMC_INT_DATA_TRANSFER_OVER);
+        assert_eq!(
+            irq.handle_irq(),
+            Event::Other {
+                raw_status: DWMMC_LATCH_IDMAC_COMPLETE
+            }
+        );
+        assert_eq!(host.irq.state.pending(), DWMMC_LATCH_IDMAC_COMPLETE);
         let cleared = unsafe { mmio.as_ptr().add(IDSTS_WORD).read_volatile() };
-        assert_eq!(cleared, DWMMC_IDMAC_INT_NI);
+        assert_eq!(cleared, DWMMC_IDMAC_INT_TI);
     }
 
     #[test]
