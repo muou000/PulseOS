@@ -69,6 +69,13 @@ pub trait NetDriverOps: BaseDriverOps {
     /// returns [`DevResult`]
     fn alloc_tx_buffer(&mut self, size: usize) -> DevResult<NetBufPtr>;
 
+    /// Runs infrequent device maintenance from the network poll task.
+    ///
+    /// Readiness methods should remain short because smoltcp may invoke them
+    /// several times per protocol poll. Drivers can use this hook for PHY
+    /// state refresh or other bounded control-plane work.
+    fn poll_device(&self) {}
+
     /// Returns the poll set of the device, if supported.
     fn poll_set(&self) -> Option<&axpoll::PollSet> {
         None

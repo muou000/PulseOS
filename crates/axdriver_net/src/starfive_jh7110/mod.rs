@@ -167,6 +167,52 @@ impl Jh7110InterruptStatus {
     }
 }
 
+struct Jh7110InterruptInner {
+    mmio: NonNull<u8>,
+    rx_ready: AtomicBool,
+    tx_busy: AtomicBool,
+}
+
+// SAFETY: MMIO ownership remains with the parent device. The endpoint only
+// touches interrupt status plus atomic queue-ready flags, and can outlive no
+// parent because both hold the same Arc.
+unsafe impl Send for Jh7110InterruptInner {}
+unsafe impl Sync for Jh7110InterruptInner {}
+
+/// Cloneable endpoint used to acknowledge DWMAC events without taking the
+/// task-side device lock.
+#[derive(Clone)]
+pub struct Jh7110InterruptEndpoint(Arc<Jh7110InterruptInner>);
+
+impl Jh7110InterruptEndpoint {
+    /// Acknowledges channel events and publishes RX/TX readiness.
+    pub fn handle_interrupt(&self) -> Jh7110InterruptStatus {
+        let status = self.read(DMA_CH0_STATUS);
+        let handled = status & (DMA_STATUS_RX | DMA_STATUS_TX | DMA_STATUS_COMMON);
+        if status & DMA_STATUS_RX_INTERRUPT != 0 {
+            self.0.rx_ready.store(true, Ordering::Release);
+        }
+        if status & DMA_STATUS_TX_INTERRUPT != 0 {
+            self.0.tx_busy.store(false, Ordering::Release);
+        }
+        if handled != 0 {
+            self.write(DMA_CH0_STATUS, handled);
+        }
+        Jh7110InterruptStatus {
+            dma: status,
+            mac: self.read(GMAC_INT_STATUS),
+        }
+    }
+
+    fn read(&self, offset: usize) -> u32 {
+        unsafe { core::ptr::read_volatile(self.0.mmio.as_ptr().add(offset).cast::<u32>()) }
+    }
+
+    fn write(&self, offset: usize, value: u32) {
+        unsafe { core::ptr::write_volatile(self.0.mmio.as_ptr().add(offset).cast::<u32>(), value) };
+    }
+}
+
 /// Minimal live state used to diagnose board-level DMA bring-up.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct Jh7110Diagnostics {
@@ -317,8 +363,7 @@ pub struct Jh7110Dwmac<H: DmaOps> {
     promiscuous_mode: bool,
     rx_index: usize,
     tx_index: usize,
-    rx_ready: AtomicBool,
-    tx_busy: AtomicBool,
+    interrupt: Jh7110InterruptEndpoint,
 }
 
 unsafe impl<H: DmaOps> Send for Jh7110Dwmac<H> {}
@@ -349,8 +394,11 @@ impl<H: DmaOps> Jh7110Dwmac<H> {
             promiscuous_mode: config.promiscuous_mode,
             rx_index: 0,
             tx_index: 0,
-            rx_ready: AtomicBool::new(false),
-            tx_busy: AtomicBool::new(false),
+            interrupt: Jh7110InterruptEndpoint(Arc::new(Jh7110InterruptInner {
+                mmio,
+                rx_ready: AtomicBool::new(false),
+                tx_busy: AtomicBool::new(false),
+            })),
         };
 
         let controller_mac = this.read_mac_address();
@@ -658,22 +706,12 @@ impl<H: DmaOps> Jh7110Dwmac<H> {
 
     /// Acknowledges channel interrupts and returns the raw pre-acknowledgement status.
     pub fn handle_interrupt(&self) -> Jh7110InterruptStatus {
-        let status = self.read(DMA_CH0_STATUS);
-        let handled = status & (DMA_STATUS_RX | DMA_STATUS_TX | DMA_STATUS_COMMON);
-        if status & DMA_STATUS_RX_INTERRUPT != 0 {
-            self.rx_ready.store(true, Ordering::Release);
-        }
-        if status & DMA_STATUS_TX_INTERRUPT != 0 {
-            self.tx_busy.store(false, Ordering::Release);
-        }
-        if handled != 0 {
-            self.write(DMA_CH0_STATUS, handled);
-        }
-        let mac_status = self.read(GMAC_INT_STATUS);
-        Jh7110InterruptStatus {
-            dma: status,
-            mac: mac_status,
-        }
+        self.interrupt.handle_interrupt()
+    }
+
+    /// Returns an IRQ endpoint independent of the task-side device lock.
+    pub fn irq_endpoint(&self) -> Jh7110InterruptEndpoint {
+        self.interrupt.clone()
     }
 
     /// Enables completion and error interrupts after the kernel handler exists.
@@ -768,7 +806,7 @@ impl<H: DmaOps> NetDriverOps for Jh7110Dwmac<H> {
     }
 
     fn can_transmit(&self) -> bool {
-        if !self.tx_busy.load(Ordering::Acquire) {
+        if !self.interrupt.0.tx_busy.load(Ordering::Acquire) {
             return true;
         }
 
@@ -779,13 +817,13 @@ impl<H: DmaOps> NetDriverOps for Jh7110Dwmac<H> {
         if desc.owned_by_dma() {
             false
         } else {
-            self.tx_busy.store(false, Ordering::Release);
+            self.interrupt.0.tx_busy.store(false, Ordering::Release);
             true
         }
     }
 
     fn can_receive(&self) -> bool {
-        if self.rx_ready.load(Ordering::Acquire) {
+        if self.interrupt.0.rx_ready.load(Ordering::Acquire) {
             return true;
         }
 
@@ -795,7 +833,7 @@ impl<H: DmaOps> NetDriverOps for Jh7110Dwmac<H> {
         if desc.owned_by_dma() {
             false
         } else {
-            self.rx_ready.store(true, Ordering::Release);
+            self.interrupt.0.rx_ready.store(true, Ordering::Release);
             true
         }
     }
@@ -843,7 +881,7 @@ impl<H: DmaOps> NetDriverOps for Jh7110Dwmac<H> {
         unsafe { DmaDesc::tx(buffer_paddr, packet_len).write(self.tx_desc_ptr(index)) };
         fence(Ordering::Release);
         H::dma_sync(self.tx_desc_paddr(index), DESC_SIZE);
-        self.tx_busy.store(true, Ordering::Release);
+        self.interrupt.0.tx_busy.store(true, Ordering::Release);
 
         self.tx_index = (index + 1) % TX_DESC_COUNT;
         self.write(DMA_CH0_TX_TAIL, self.tx_desc_paddr(self.tx_index) as u32);
@@ -860,7 +898,7 @@ impl<H: DmaOps> NetDriverOps for Jh7110Dwmac<H> {
         fence(Ordering::Acquire);
         let desc = unsafe { DmaDesc::read(self.rx_desc_ptr(index)) };
         if desc.owned_by_dma() {
-            self.rx_ready.store(false, Ordering::Release);
+            self.interrupt.0.rx_ready.store(false, Ordering::Release);
             return Err(DevError::Again);
         }
 
@@ -894,7 +932,7 @@ impl<H: DmaOps> NetDriverOps for Jh7110Dwmac<H> {
         fence(Ordering::Release);
         H::dma_sync(self.rx_desc_paddr(next_index), DESC_SIZE);
         self.rx_index = next_index;
-        self.rx_ready.store(false, Ordering::Release);
+        self.interrupt.0.rx_ready.store(false, Ordering::Release);
         let tail_index = (next_index + 1) % RX_DESC_COUNT;
         self.write(DMA_CH0_RX_TAIL, self.rx_desc_paddr(tail_index) as u32);
         result
@@ -1042,8 +1080,11 @@ mod tests {
             promiscuous_mode: false,
             rx_index: 0,
             tx_index: 0,
-            rx_ready: AtomicBool::new(false),
-            tx_busy: AtomicBool::new(false),
+            interrupt: Jh7110InterruptEndpoint(Arc::new(Jh7110InterruptInner {
+                mmio: mmio_ptr,
+                rx_ready: AtomicBool::new(false),
+                tx_busy: AtomicBool::new(false),
+            })),
         };
         TestDevice {
             device,
@@ -1254,7 +1295,7 @@ mod tests {
 
         unsafe { DmaDesc::empty().write(test.device.rx_desc_ptr(0)) };
         assert!(test.device.can_receive());
-        assert!(test.device.rx_ready.load(Ordering::Acquire));
+        assert!(test.device.interrupt.0.rx_ready.load(Ordering::Acquire));
         assert_eq!(test.device.poll_interval(), Some(FALLBACK_POLL_INTERVAL));
     }
 
@@ -1265,12 +1306,16 @@ mod tests {
             DmaDesc::tx(test.device.tx_buffer_paddr(0), 64).write(test.device.tx_desc_ptr(0))
         };
         test.device.tx_index = 1;
-        test.device.tx_busy.store(true, Ordering::Release);
+        test.device
+            .interrupt
+            .0
+            .tx_busy
+            .store(true, Ordering::Release);
         assert!(!test.device.can_transmit());
 
         unsafe { DmaDesc::empty().write(test.device.tx_desc_ptr(0)) };
         assert!(test.device.can_transmit());
-        assert!(!test.device.tx_busy.load(Ordering::Acquire));
+        assert!(!test.device.interrupt.0.tx_busy.load(Ordering::Acquire));
     }
 
     #[test]
@@ -1290,7 +1335,7 @@ mod tests {
         let packet = test.device.receive().unwrap();
         assert_eq!(packet.packet(), &payload);
         assert_eq!(test.device.rx_index, 1);
-        assert!(!test.device.rx_ready.load(Ordering::Acquire));
+        assert!(!test.device.interrupt.0.rx_ready.load(Ordering::Acquire));
         let next_desc = unsafe { DmaDesc::read(test.device.rx_desc_ptr(1)) };
         assert!(next_desc.owned_by_dma());
         assert_eq!(
@@ -1317,7 +1362,7 @@ mod tests {
         assert!(desc.owned_by_dma());
         assert_eq!(desc.words()[2] & 0x3fff, payload.len() as u32);
         assert_eq!(desc.words()[3] & 0x7fff, payload.len() as u32);
-        assert!(test.device.tx_busy.load(Ordering::Acquire));
+        assert!(test.device.interrupt.0.tx_busy.load(Ordering::Acquire));
         assert_eq!(test.device.tx_index, 1);
         assert_eq!(
             test.device.read(DMA_CH0_TX_TAIL),
