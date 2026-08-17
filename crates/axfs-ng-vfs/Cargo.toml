@@ -59,6 +59,9 @@ version = "0.10"
 features = ["mutex", "rwlock"]
 default-features = false
 
+[dependencies.kspin]
+workspace = true
+
 [dependencies.async-trait]
 version = "0.1"
 

@@ -1,7 +1,7 @@
 use alloc::{collections::BTreeMap, string::String};
 use core::{borrow::Borrow, cmp::Ordering};
 
-use spin::{Mutex, RwLock};
+use kspin::{SpinNoPreempt, SpinNoPreemptGuard};
 
 use crate::{DirEntrySink, Metadata, MetadataUpdate, NodeType, VfsResult};
 
@@ -48,16 +48,45 @@ impl Borrow<str> for FileName {
     }
 }
 
+/// Exclusive, preemption-safe access to an in-memory directory's entries.
+///
+/// The old implementation exposed `spin::RwLock`, but directory operations
+/// run in task context and can be preempted while a reader/writer is held.
+/// On a one-CPU guest that lets the lock owner sleep while its successor spins
+/// forever.  Keep the old `read`/`write` call sites source-compatible while
+/// making both operations use the short, non-preemptible critical section.
+pub struct InMemEntries<E>(SpinNoPreempt<BTreeMap<FileName, E>>);
+
+impl<E> InMemEntries<E> {
+    pub fn new() -> Self {
+        Self(SpinNoPreempt::new(BTreeMap::new()))
+    }
+
+    pub fn read(&self) -> SpinNoPreemptGuard<'_, BTreeMap<FileName, E>> {
+        self.0.lock()
+    }
+
+    pub fn write(&self) -> SpinNoPreemptGuard<'_, BTreeMap<FileName, E>> {
+        self.0.lock()
+    }
+}
+
+impl<E> Default for InMemEntries<E> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// A generic in-memory directory container holding child entry maps.
 #[derive(Default)]
 pub struct InMemDir<E> {
-    pub entries: RwLock<BTreeMap<FileName, E>>,
+    pub entries: InMemEntries<E>,
 }
 
 impl<E> InMemDir<E> {
     pub fn new() -> Self {
         Self {
-            entries: RwLock::new(BTreeMap::new()),
+            entries: InMemEntries::new(),
         }
     }
 }
@@ -65,7 +94,7 @@ impl<E> InMemDir<E> {
 /// A generic in-memory inode representation containing metadata and dynamic node content.
 pub struct InMemInode<C> {
     pub ino: u64,
-    pub metadata: Mutex<Metadata>,
+    pub metadata: SpinNoPreempt<Metadata>,
     pub content: C,
 }
 
@@ -73,7 +102,7 @@ impl<C> InMemInode<C> {
     pub fn new(ino: u64, metadata: Metadata, content: C) -> Self {
         Self {
             ino,
-            metadata: Mutex::new(metadata),
+            metadata: SpinNoPreempt::new(metadata),
             content,
         }
     }
@@ -81,7 +110,7 @@ impl<C> InMemInode<C> {
 
 /// Standard helper to perform a directory read (for `read_dir`) from a locked entries map.
 pub fn read_dir_impl<E, F>(
-    entries: &RwLock<BTreeMap<FileName, E>>,
+    entries: &InMemEntries<E>,
     offset: u64,
     sink: &mut dyn DirEntrySink,
     mut get_info: F,

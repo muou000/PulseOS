@@ -18,13 +18,14 @@ use core::{
 };
 use smallvec::SmallVec;
 use async_trait::async_trait;
+use kspin::{SpinNoPreempt, SpinNoPreemptGuard};
 
 use axpoll::{IoEvents, Pollable};
 pub use dir::*;
 pub use file::*;
 
 use crate::{
-    FilesystemOps, Metadata, MetadataUpdate, Mutex, MutexGuard, NodeType, VfsError, VfsResult,
+    FilesystemOps, Metadata, MetadataUpdate, NodeType, VfsError, VfsResult,
     path::PathBuf,
 };
 
@@ -196,7 +197,9 @@ struct Inner {
     node: Node,
     node_type: NodeType,
     reference: Reference,
-    user_data: Mutex<TypeMap>,
+    // Synchronous file-cache metadata must not use a preemptible raw spin
+    // lock: a same-CPU waiter would otherwise spin indefinitely.
+    user_data: SpinNoPreempt<TypeMap>,
 }
 
 impl fmt::Debug for Inner {
@@ -271,7 +274,7 @@ impl DirEntry {
             node: Node::File(node),
             node_type,
             reference,
-            user_data: Mutex::default(),
+            user_data: SpinNoPreempt::default(),
         }))
     }
 
@@ -280,7 +283,7 @@ impl DirEntry {
             node: Node::Dir(node_fn(WeakDirEntry(this.clone()))),
             node_type: NodeType::Directory,
             reference,
-            user_data: Mutex::default(),
+            user_data: SpinNoPreempt::default(),
         }))
     }
 
@@ -407,7 +410,7 @@ impl DirEntry {
         }
     }
 
-    pub fn user_data(&self) -> MutexGuard<'_, TypeMap> {
+    pub fn user_data(&self) -> SpinNoPreemptGuard<'_, TypeMap> {
         self.0.user_data.lock()
     }
 }
