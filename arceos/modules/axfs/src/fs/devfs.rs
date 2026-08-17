@@ -18,6 +18,7 @@ use axfs_ng_vfs::{
     path::MAX_NAME_LEN, read_dir_impl, update_metadata_impl,
 };
 use axpoll::{IoEvents, Pollable};
+use kspin::SpinNoPreempt;
 use rand_core::{Rng, SeedableRng};
 use rand_pcg::Pcg64Mcg;
 use spin::{Lazy, Mutex};
@@ -82,14 +83,14 @@ enum DevDeviceKind {
 }
 
 struct RandomDevice {
-    rng: [Mutex<Pcg64Mcg>; axconfig::plat::MAX_CPU_NUM],
+    rng: [SpinNoPreempt<Pcg64Mcg>; axconfig::plat::MAX_CPU_NUM],
 }
 
 impl RandomDevice {
     fn new(device_stream: u64) -> Self {
         Self {
             rng: core::array::from_fn(|cpu_id| {
-                Mutex::new(Pcg64Mcg::seed_from_u64(random_seed(device_stream, cpu_id)))
+                SpinNoPreempt::new(Pcg64Mcg::seed_from_u64(random_seed(device_stream, cpu_id)))
             }),
         }
     }
@@ -128,7 +129,7 @@ type DirContent = InMemDir<InodeRef>;
 
 #[derive(Default)]
 struct FileContent {
-    length: Mutex<u64>,
+    length: SpinNoPreempt<u64>,
 }
 
 enum NodeContent {
@@ -294,8 +295,8 @@ fn inode_as_file(inode: &Inode) -> VfsResult<&FileContent> {
 }
 
 pub struct DevFilesystem {
-    root_dir: Mutex<Option<DirEntry>>,
-    inodes: [Mutex<BTreeMap<u64, Arc<Inode>>>; DEVFS_INODE_SHARDS],
+    root_dir: SpinNoPreempt<Option<DirEntry>>,
+    inodes: [SpinNoPreempt<BTreeMap<u64, Arc<Inode>>>; DEVFS_INODE_SHARDS],
     next_ino: AtomicU64,
     inode_count: AtomicUsize,
 }
@@ -303,8 +304,8 @@ pub struct DevFilesystem {
 impl DevFilesystem {
     pub fn new(block_devices: Vec<BlockDeviceSpec>) -> Filesystem {
         let fs = Arc::new(Self {
-            root_dir: Mutex::new(None),
-            inodes: core::array::from_fn(|_| Mutex::new(BTreeMap::new())),
+            root_dir: SpinNoPreempt::new(None),
+            inodes: core::array::from_fn(|_| SpinNoPreempt::new(BTreeMap::new())),
             next_ino: AtomicU64::new(NEXT_DYNAMIC_INO),
             inode_count: AtomicUsize::new(0),
         });

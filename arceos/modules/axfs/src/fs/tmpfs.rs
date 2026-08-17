@@ -21,7 +21,7 @@ use axfs_ng_vfs::{
     path::MAX_NAME_LEN, read_dir_impl, update_metadata_impl,
 };
 use axpoll::{IoEvents, Pollable};
-use spin::Mutex;
+use kspin::SpinNoPreempt;
 
 const TMPFS_MAGIC: u64 = 0x0102_1994;
 const TMPFS_INODE_SHARDS: usize = 32;
@@ -31,7 +31,7 @@ fn inode_shard(ino: u64) -> usize {
 }
 
 pub struct TmpFilesystem {
-    inodes: [Mutex<BTreeMap<u64, Arc<Inode>>>; TMPFS_INODE_SHARDS],
+    inodes: [SpinNoPreempt<BTreeMap<u64, Arc<Inode>>>; TMPFS_INODE_SHARDS],
     next_ino: AtomicU64,
     inode_count: AtomicUsize,
     root: OnceCell<DirEntry>,
@@ -41,7 +41,7 @@ impl TmpFilesystem {
     #[allow(clippy::new_ret_no_self)]
     pub fn new() -> Filesystem {
         let fs = Arc::new(Self {
-            inodes: core::array::from_fn(|_| Mutex::new(BTreeMap::new())),
+            inodes: core::array::from_fn(|_| SpinNoPreempt::new(BTreeMap::new())),
             next_ino: AtomicU64::new(1),
             inode_count: AtomicUsize::new(0),
             root: OnceCell::new(),
@@ -116,8 +116,8 @@ fn release_inode(fs: &TmpFilesystem, inode: &Arc<Inode>, nlink: u64) {
 
 #[derive(Default)]
 struct FileContent {
-    length: Mutex<u64>,
-    symlink: Mutex<Option<String>>,
+    length: SpinNoPreempt<u64>,
+    symlink: SpinNoPreempt<Option<String>>,
 }
 
 type DirContent = InMemDir<InodeRef>;

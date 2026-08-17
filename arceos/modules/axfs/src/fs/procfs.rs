@@ -25,7 +25,7 @@ use axfs_ng_vfs::{
     path::MAX_NAME_LEN, update_metadata_impl,
 };
 use axpoll::{IoEvents, Pollable};
-use spin::Mutex;
+use kspin::SpinNoPreempt;
 
 static PID_MAX: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(32768);
 
@@ -171,7 +171,7 @@ type DirContent = InMemDir<InodeRef>;
 
 #[derive(Default)]
 struct FileContent {
-    data: Mutex<Vec<u8>>,
+    data: SpinNoPreempt<Vec<u8>>,
 }
 
 enum NodeContent {
@@ -309,13 +309,13 @@ fn inode_live_kind(inode: &Inode) -> Option<ProcLiveFileKind> {
 }
 
 struct PidStringMap {
-    shards: [Mutex<BTreeMap<u64, String>>; PROCFS_PID_MAP_SHARDS],
+    shards: [SpinNoPreempt<BTreeMap<u64, String>>; PROCFS_PID_MAP_SHARDS],
 }
 
 impl PidStringMap {
     fn new() -> Self {
         Self {
-            shards: core::array::from_fn(|_| Mutex::new(BTreeMap::new())),
+            shards: core::array::from_fn(|_| SpinNoPreempt::new(BTreeMap::new())),
         }
     }
 
@@ -329,8 +329,8 @@ impl PidStringMap {
 }
 
 pub struct ProcFilesystem {
-    root_dir: Mutex<Option<DirEntry>>,
-    inodes: [Mutex<BTreeMap<u64, Arc<Inode>>>; PROCFS_INODE_SHARDS],
+    root_dir: SpinNoPreempt<Option<DirEntry>>,
+    inodes: [SpinNoPreempt<BTreeMap<u64, Arc<Inode>>>; PROCFS_INODE_SHARDS],
     next_ino: AtomicU64,
     inode_count: AtomicUsize,
     setgroups_map: PidStringMap,
@@ -341,8 +341,8 @@ pub struct ProcFilesystem {
 impl ProcFilesystem {
     pub fn new() -> Filesystem {
         let fs = Arc::new(Self {
-            root_dir: Mutex::new(None),
-            inodes: core::array::from_fn(|_| Mutex::new(BTreeMap::new())),
+            root_dir: SpinNoPreempt::new(None),
+            inodes: core::array::from_fn(|_| SpinNoPreempt::new(BTreeMap::new())),
             next_ino: AtomicU64::new(NEXT_DYNAMIC_INO),
             inode_count: AtomicUsize::new(0),
             setgroups_map: PidStringMap::new(),
@@ -1034,11 +1034,20 @@ struct ProcNode {
     fs: Arc<ProcFilesystem>,
     ino: u64,
     this: Option<WeakDirEntry>,
+    // `/proc/mounts` is consumed as a stream by LTP cleanup. Keep one stable
+    // view for the lifetime of an opened node so a concurrent mount update
+    // cannot move EOF while the reader advances its offset.
+    mounts_snapshot: SpinNoPreempt<Option<Arc<[u8]>>>,
 }
 
 impl ProcNode {
     fn new_dir(fs: Arc<ProcFilesystem>, ino: u64, this: Option<WeakDirEntry>) -> DirNode {
-        DirNode::new(Arc::new(Self { fs, ino, this }))
+        DirNode::new(Arc::new(Self {
+            fs,
+            ino,
+            this,
+            mounts_snapshot: SpinNoPreempt::new(None),
+        }))
     }
 
     fn new_file(fs: Arc<ProcFilesystem>, ino: u64) -> FileNode {
@@ -1046,11 +1055,22 @@ impl ProcNode {
             fs,
             ino,
             this: None,
+            mounts_snapshot: SpinNoPreempt::new(None),
         }))
     }
 
     fn inode_ref(&self) -> VfsResult<Arc<Inode>> {
         self.fs.get_inode(self.ino)
+    }
+
+    fn mounts_snapshot(&self) -> Arc<[u8]> {
+        if let Some(snapshot) = self.mounts_snapshot.lock().as_ref().cloned() {
+            return snapshot;
+        }
+
+        let rendered = Arc::<[u8]>::from(render_mounts().into_bytes());
+        let mut snapshot = self.mounts_snapshot.lock();
+        snapshot.get_or_insert_with(|| rendered.clone()).clone()
     }
 
     fn build_entry(&self, name: &str, target_ino: u64) -> VfsResult<DirEntry> {
@@ -1714,8 +1734,12 @@ impl FileNodeOps for ProcNode {
                 return Err(VfsError::NotFound);
             }
 
-            let content = render_proc_file(&self.fs, kind);
-            let bytes = content.as_bytes();
+            let content = if matches!(kind, ProcLiveFileKind::Mounts) {
+                self.mounts_snapshot()
+            } else {
+                Arc::<[u8]>::from(render_proc_file(&self.fs, kind).into_bytes())
+            };
+            let bytes = content.as_ref();
             let start = offset as usize;
             if start >= bytes.len() {
                 return Ok(0);

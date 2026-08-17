@@ -23,8 +23,9 @@ use axio::{SeekFrom, prelude::*};
 use axpoll::{IoEvents, Pollable};
 use axsync::Mutex;
 use futures_util::{StreamExt, stream::FuturesUnordered};
+use kspin::SpinNoPreempt;
 use lru::LruCache;
-use spin::{Lazy, Mutex as SpinMutex};
+use spin::Lazy;
 
 use super::FsContext;
 
@@ -145,13 +146,13 @@ struct FileCacheKey {
     inode: u64,
 }
 
-fn filesystem_id(loc: &Location) -> usize {
-    loc.filesystem() as *const dyn axfs_ng_vfs::FilesystemOps as *const () as usize
+pub(super) fn filesystem_id(filesystem: &dyn axfs_ng_vfs::FilesystemOps) -> usize {
+    filesystem as *const dyn axfs_ng_vfs::FilesystemOps as *const () as usize
 }
 
 fn file_cache_key(loc: &Location) -> FileCacheKey {
     FileCacheKey {
-        fs_id: filesystem_id(loc),
+        fs_id: filesystem_id(loc.filesystem()),
         inode: loc.inode(),
     }
 }
@@ -262,8 +263,8 @@ pub struct ExecAccessGuard {
 }
 
 static INODE_ACCESS_STATES: Lazy<
-    [SpinMutex<WeakStateRegistry<FileCacheKey, InodeAccessState>>; FILE_STATE_REGISTRY_SHARDS],
-> = Lazy::new(|| core::array::from_fn(|_| SpinMutex::new(WeakStateRegistry::default())));
+    [SpinNoPreempt<WeakStateRegistry<FileCacheKey, InodeAccessState>>; FILE_STATE_REGISTRY_SHARDS],
+> = Lazy::new(|| core::array::from_fn(|_| SpinNoPreempt::new(WeakStateRegistry::default())));
 
 fn inode_access_state(location: &Location) -> Arc<InodeAccessState> {
     let key = file_cache_key(location);

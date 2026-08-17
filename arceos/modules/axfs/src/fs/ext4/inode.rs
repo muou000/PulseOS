@@ -24,8 +24,9 @@ use ext4plus::{
     Ext4,
     prelude::{AsyncIterator, Ext4Error},
 };
+use kspin::SpinNoPreempt;
 use lru::LruCache;
-use spin::{Lazy, Mutex};
+use spin::Lazy;
 
 use super::{
     Ext4Filesystem, INODE_STATE_SHARDS, inode_state_shard,
@@ -35,7 +36,9 @@ use super::{
 pub struct Inode {
     fs: Arc<Ext4Filesystem>,
     ino: u32,
-    this: Mutex<Option<WeakDirEntry>>,
+    // Synchronous reference/cache state must not strand a same-CPU waiter
+    // while the current task is preempted in the critical section.
+    this: SpinNoPreempt<Option<WeakDirEntry>>,
     mutation_lock: async_lock::Mutex<()>,
     metadata_cache: Arc<MetadataCacheState>,
     dir_cache: Arc<DirCacheState>,
@@ -75,16 +78,16 @@ fn sort_and_dedup_mutation_set<T>(entries: &mut Vec<(MutationLockOrderKey, T)>) 
 
 pub(super) struct MetadataCacheState {
     generation: AtomicU64,
-    cached: Mutex<Option<(u64, Metadata)>>,
-    inode: Mutex<Option<(u64, Arc<ext4plus::inode::Inode>)>>,
+    cached: SpinNoPreempt<Option<(u64, Metadata)>>,
+    inode: SpinNoPreempt<Option<(u64, Arc<ext4plus::inode::Inode>)>>,
 }
 
 impl MetadataCacheState {
     fn new() -> Self {
         Self {
             generation: AtomicU64::new(0),
-            cached: Mutex::new(None),
-            inode: Mutex::new(None),
+            cached: SpinNoPreempt::new(None),
+            inode: SpinNoPreempt::new(None),
         }
     }
 
@@ -261,9 +264,9 @@ struct DirCacheState {
     snapshot_generation: AtomicU64,
     lookup_generation: AtomicU64,
     uncached_lookups: AtomicUsize,
-    snapshot: Mutex<DirSnapshotCache>,
+    snapshot: SpinNoPreempt<DirSnapshotCache>,
     snapshot_build: async_lock::Mutex<()>,
-    lookup: Mutex<LruCache<String, Option<CachedLookupEntry>>>,
+    lookup: SpinNoPreempt<LruCache<String, Option<CachedLookupEntry>>>,
 }
 
 impl DirCacheState {
@@ -272,9 +275,9 @@ impl DirCacheState {
             snapshot_generation: AtomicU64::new(0),
             lookup_generation: AtomicU64::new(0),
             uncached_lookups: AtomicUsize::new(0),
-            snapshot: Mutex::new(DirSnapshotCache::default()),
+            snapshot: SpinNoPreempt::new(DirSnapshotCache::default()),
             snapshot_build: async_lock::Mutex::new(()),
-            lookup: Mutex::new(LruCache::unbounded()),
+            lookup: SpinNoPreempt::new(LruCache::unbounded()),
         }
     }
 
@@ -553,8 +556,8 @@ impl DirCacheRegistry {
     }
 }
 
-static DIR_CACHE_REGISTRY: Lazy<[Mutex<DirCacheRegistry>; DIR_CACHE_REGISTRY_SHARDS]> =
-    Lazy::new(|| core::array::from_fn(|_| Mutex::new(DirCacheRegistry::default())));
+static DIR_CACHE_REGISTRY: Lazy<[SpinNoPreempt<DirCacheRegistry>; DIR_CACHE_REGISTRY_SHARDS]> =
+    Lazy::new(|| core::array::from_fn(|_| SpinNoPreempt::new(DirCacheRegistry::default())));
 
 fn dir_cache_key(fs: &Arc<Ext4Filesystem>, ino: u32) -> DirCacheKey {
     DirCacheKey {
@@ -668,7 +671,7 @@ impl Inode {
         let inode = Arc::new(Self {
             fs: fs.clone(),
             ino,
-            this: Mutex::new(this),
+            this: SpinNoPreempt::new(this),
             mutation_lock: async_lock::Mutex::new(()),
             metadata_cache,
             dir_cache,

@@ -331,10 +331,14 @@ pub fn sys_mount(
             Ok(None) => "none".to_string(),
             Err(e) => return -e.code() as isize,
         };
-        let options = if is_rdonly {
-            "ro,relatime"
-        } else {
-            "rw,relatime"
+        // A remount of a bind mount replaces its record. Preserve the bind
+        // identity so unmount does not mistake it for a real filesystem mount.
+        let is_bind_mount = is_bind || axfs::mountpoint_is_bind(&target_mp);
+        let options = match (is_rdonly, is_bind_mount) {
+            (true, true) => "ro,bind,relatime",
+            (false, true) => "rw,bind,relatime",
+            (true, false) => "ro,relatime",
+            (false, false) => "rw,relatime",
         };
         axlog::debug!("sys_mount: remount '{}' as {}", target_path, options);
         axfs::register_mount_for_mountpoint(
@@ -629,11 +633,26 @@ pub fn sys_umount2(target: usize, flags: usize) -> isize {
     let is_detach = (flags & MNT_DETACH as usize) != 0;
 
     let target_mp = target_loc.mountpoint().clone();
+    // Bind mounts share a filesystem which remains reachable through their
+    // source mount, so flushing them here would turn the fs_bind matrix into
+    // repeated whole-filesystem checkpoints. A real mount may be followed by
+    // LOOP_CLR_FD, and must drain its retained cache before that can happen.
+    if !axfs::mountpoint_is_bind(&target_mp)
+        && let Err(error) =
+            axtask::future::block_on(axfs::flush_mountpoint_before_unmount(&target_mp))
+    {
+        return -LinuxError::from(error.canonicalize()).code() as isize;
+    }
     let peer_mps = axfs_ng_vfs::collect_propagate_unmount(&target_mp);
 
     // Unmount all propagated peer mountpoints
     for peer_mp in peer_mps {
         let root_loc = peer_mp.root_location();
+        let detached_subtree = if is_detach {
+            peer_mp.collect_subtree()
+        } else {
+            Vec::new()
+        };
         if let Ok(abs_path) = root_loc.absolute_path() {
             let peer_path = abs_path.to_string();
             axlog::debug!("sys_umount2: propagating unmount to peer '{}'", peer_path);
@@ -644,7 +663,13 @@ pub fn sys_umount2(target: usize, flags: usize) -> isize {
             };
             match res {
                 Ok(()) => {
-                    let _ = axfs::unregister_mounted_mountpoint_exact(&peer_path, &peer_mp);
+                    if is_detach {
+                        for detached_mp in detached_subtree {
+                            axfs::unregister_mountpoint_records(&detached_mp);
+                        }
+                    } else {
+                        axfs::unregister_mountpoint_records(&peer_mp);
+                    }
                 }
                 Err(e) => {
                     axlog::warn!(
@@ -657,6 +682,11 @@ pub fn sys_umount2(target: usize, flags: usize) -> isize {
         }
     }
 
+    let detached_subtree = if is_detach {
+        target_mp.collect_subtree()
+    } else {
+        Vec::new()
+    };
     let result = if is_detach {
         target_loc.unmount_all()
     } else {
@@ -665,7 +695,13 @@ pub fn sys_umount2(target: usize, flags: usize) -> isize {
 
     match result {
         Ok(()) => {
-            let _ = axfs::unregister_mounted_mountpoint_exact(&target_path, &target_mp);
+            if is_detach {
+                for detached_mp in detached_subtree {
+                    axfs::unregister_mountpoint_records(&detached_mp);
+                }
+            } else {
+                axfs::unregister_mountpoint_records(&target_mp);
+            }
             0
         }
         Err(e) => -LinuxError::from(e.canonicalize()).code() as isize,

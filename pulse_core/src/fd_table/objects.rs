@@ -476,7 +476,10 @@ struct LinuxDirent64 {
 
 pub struct DirObject {
     inner: Location,
-    offset: Mutex<u64>,
+    // Directory enumeration can suspend while the VFS fetches entries.  A
+    // spin lock here can strand the only runnable CPU if a forked task reads
+    // the same directory description while that fetch is in progress.
+    offset: axsync::Mutex<u64>,
     nonblocking: AtomicBool,
 }
 
@@ -484,7 +487,7 @@ impl DirObject {
     pub fn new(inner: Location) -> Self {
         Self {
             inner,
-            offset: Mutex::new(0),
+            offset: axsync::Mutex::new(0),
             nonblocking: AtomicBool::new(false),
         }
     }
