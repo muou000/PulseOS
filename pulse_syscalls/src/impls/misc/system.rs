@@ -1,12 +1,149 @@
+use core::mem::MaybeUninit;
+
 use linux_raw_sys::{
-    general::AT_FDCWD,
+    general::{
+        AT_FDCWD, CAP_SYS_BOOT, LINUX_REBOOT_CMD_CAD_OFF, LINUX_REBOOT_CMD_CAD_ON,
+        LINUX_REBOOT_CMD_HALT, LINUX_REBOOT_CMD_POWER_OFF, LINUX_REBOOT_CMD_RESTART,
+        LINUX_REBOOT_CMD_RESTART2, LINUX_REBOOT_MAGIC1, LINUX_REBOOT_MAGIC2, LINUX_REBOOT_MAGIC2A,
+        LINUX_REBOOT_MAGIC2B, LINUX_REBOOT_MAGIC2C,
+    },
     mempolicy::{MPOL_DEFAULT, MPOL_F_ADDR, MPOL_F_MEMS_ALLOWED, MPOL_F_NODE},
 };
 
 use super::*;
 use crate::impls::fs::common::context_for_dirfd;
+use crate::impls::flush_filesystems_for_shutdown;
 
 const MPOL_QUERY_FLAGS: usize = (MPOL_F_ADDR | MPOL_F_MEMS_ALLOWED | MPOL_F_NODE) as usize;
+const REBOOT_RESTART2_ARG_MAX: usize = 256;
+
+static CAD_ENABLED: AtomicBool = AtomicBool::new(false);
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum RebootAction {
+    Restart,
+    Restart2,
+    Halt,
+    PowerOff,
+    SetCad(bool),
+}
+
+/// A reset or power transition must not bypass dirty filesystem state.
+///
+/// CAD toggles only change the automatic-reboot policy and therefore do not
+/// need to enter the writeback barrier.
+fn reboot_action_requires_filesystem_flush(action: RebootAction) -> bool {
+    matches!(
+        action,
+        RebootAction::Restart
+            | RebootAction::Restart2
+            | RebootAction::Halt
+            | RebootAction::PowerOff
+    )
+}
+
+fn decode_reboot_action(
+    magic1: usize,
+    magic2: usize,
+    cmd: usize,
+) -> Result<RebootAction, LinuxError> {
+    let valid_magic2 = matches!(
+        magic2 as u32,
+        LINUX_REBOOT_MAGIC2 | LINUX_REBOOT_MAGIC2A | LINUX_REBOOT_MAGIC2B | LINUX_REBOOT_MAGIC2C
+    );
+    if magic1 as u32 != LINUX_REBOOT_MAGIC1 || !valid_magic2 {
+        return Err(LinuxError::EINVAL);
+    }
+
+    match cmd as u32 {
+        LINUX_REBOOT_CMD_RESTART => Ok(RebootAction::Restart),
+        LINUX_REBOOT_CMD_RESTART2 => Ok(RebootAction::Restart2),
+        LINUX_REBOOT_CMD_HALT => Ok(RebootAction::Halt),
+        LINUX_REBOOT_CMD_POWER_OFF => Ok(RebootAction::PowerOff),
+        LINUX_REBOOT_CMD_CAD_ON => Ok(RebootAction::SetCad(true)),
+        LINUX_REBOOT_CMD_CAD_OFF => Ok(RebootAction::SetCad(false)),
+        _ => Err(LinuxError::EINVAL),
+    }
+}
+
+fn validate_restart2_arg(arg: usize) -> Result<(), LinuxError> {
+    // Linux accepts a reboot command string of up to 255 bytes and truncates
+    // longer strings. PulseOS has no boot-command handoff yet, but still
+    // validates the user pointer so restart2 preserves Linux's EFAULT rule.
+    let mut command = [MaybeUninit::<u8>::uninit(); REBOOT_RESTART2_ARG_MAX];
+    match crate::impls::utils::read_user_cstring_to_slice(arg, &mut command) {
+        Ok(_) | Err(LinuxError::ENAMETOOLONG) => Ok(()),
+        Err(_) => Err(LinuxError::EFAULT),
+    }
+}
+
+fn reset_system() -> isize {
+    match axhal::power::system_reset() {
+        Ok(never) => match never {},
+        Err(axhal::power::SystemResetError::NotSupported) => -LinuxError::ENOSYS.code() as isize,
+        Err(axhal::power::SystemResetError::Firmware(error)) => {
+            axlog::error!("sys_reboot: platform reset failed with firmware error {error}");
+            -LinuxError::EIO.code() as isize
+        }
+    }
+}
+
+fn flush_before_power_transition() -> Result<(), isize> {
+    flush_filesystems_for_shutdown().map_err(|error| -error.code() as isize)
+}
+
+/// Implements Linux `reboot(2)` for the shared RISC-V64/LoongArch64 syscall ABI.
+pub fn sys_reboot(magic1: usize, magic2: usize, cmd: usize, arg: usize) -> isize {
+    axlog::debug!(
+        "sys_reboot: magic1={:#x}, magic2={:#x}, cmd={:#x}, arg={:#x}",
+        magic1,
+        magic2,
+        cmd,
+        arg
+    );
+
+    let process = match pulse_core::task::current_process() {
+        Ok(process) => process,
+        Err(error) => return -error.code() as isize,
+    };
+    // Linux checks CAP_SYS_BOOT, not merely euid == 0. This keeps a process
+    // that has dropped its effective capabilities from resetting the machine.
+    if !process.has_capability(CAP_SYS_BOOT) {
+        return -LinuxError::EPERM.code() as isize;
+    }
+
+    let action = match decode_reboot_action(magic1, magic2, cmd) {
+        Ok(action) => action,
+        Err(error) => return -error.code() as isize,
+    };
+
+    // Validate restart2's user pointer before doing any irreversible work.
+    if matches!(action, RebootAction::Restart2)
+        && let Err(error) = validate_restart2_arg(arg)
+    {
+        return -error.code() as isize;
+    }
+
+    if reboot_action_requires_filesystem_flush(action) {
+        if let Err(error) = flush_before_power_transition() {
+            axlog::error!(
+                "sys_reboot: refusing power transition because filesystem writeback failed: {}",
+                error
+            );
+            return error;
+        }
+    }
+
+    match action {
+        RebootAction::Restart => reset_system(),
+        RebootAction::Restart2 => reset_system(),
+        RebootAction::Halt | RebootAction::PowerOff => axhal::power::system_off(),
+        RebootAction::SetCad(enabled) => {
+            CAD_ENABLED.store(enabled, Ordering::Release);
+            0
+        }
+    }
+}
 
 fn mempolicy_nodemask_bytes(nodemask: usize, maxnode: usize) -> Result<usize, LinuxError> {
     if nodemask == 0 {
@@ -671,5 +808,86 @@ pub fn sys_membarrier(cmd: i32, flags: i32, _cpu_id: i32) -> isize {
         }
 
         _ => -LinuxError::EINVAL.code() as isize,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn reboot_accepts_every_linux_magic2_value() {
+        for magic2 in [
+            LINUX_REBOOT_MAGIC2,
+            LINUX_REBOOT_MAGIC2A,
+            LINUX_REBOOT_MAGIC2B,
+            LINUX_REBOOT_MAGIC2C,
+        ] {
+            assert_eq!(
+                decode_reboot_action(
+                    LINUX_REBOOT_MAGIC1 as usize,
+                    magic2 as usize,
+                    LINUX_REBOOT_CMD_RESTART as usize,
+                ),
+                Ok(RebootAction::Restart)
+            );
+        }
+    }
+
+    #[test]
+    fn reboot_rejects_bad_magic_and_unsupported_commands() {
+        assert_eq!(
+            decode_reboot_action(
+                (LINUX_REBOOT_MAGIC1 ^ 1) as usize,
+                LINUX_REBOOT_MAGIC2 as usize,
+                LINUX_REBOOT_CMD_RESTART as usize,
+            ),
+            Err(LinuxError::EINVAL)
+        );
+        assert_eq!(
+            decode_reboot_action(
+                LINUX_REBOOT_MAGIC1 as usize,
+                LINUX_REBOOT_MAGIC2 as usize,
+                linux_raw_sys::general::LINUX_REBOOT_CMD_KEXEC as usize,
+            ),
+            Err(LinuxError::EINVAL)
+        );
+    }
+
+    #[test]
+    fn reboot_decodes_supported_actions() {
+        let magic1 = LINUX_REBOOT_MAGIC1 as usize;
+        let magic2 = LINUX_REBOOT_MAGIC2 as usize;
+
+        assert_eq!(
+            decode_reboot_action(magic1, magic2, LINUX_REBOOT_CMD_RESTART2 as usize),
+            Ok(RebootAction::Restart2)
+        );
+        assert_eq!(
+            decode_reboot_action(magic1, magic2, LINUX_REBOOT_CMD_HALT as usize),
+            Ok(RebootAction::Halt)
+        );
+        assert_eq!(
+            decode_reboot_action(magic1, magic2, LINUX_REBOOT_CMD_POWER_OFF as usize),
+            Ok(RebootAction::PowerOff)
+        );
+        assert_eq!(
+            decode_reboot_action(magic1, magic2, LINUX_REBOOT_CMD_CAD_ON as usize),
+            Ok(RebootAction::SetCad(true))
+        );
+        assert_eq!(
+            decode_reboot_action(magic1, magic2, LINUX_REBOOT_CMD_CAD_OFF as usize),
+            Ok(RebootAction::SetCad(false))
+        );
+    }
+
+    #[test]
+    fn reboot_power_transitions_require_writeback_barrier() {
+        assert!(reboot_action_requires_filesystem_flush(RebootAction::Restart));
+        assert!(reboot_action_requires_filesystem_flush(RebootAction::Restart2));
+        assert!(reboot_action_requires_filesystem_flush(RebootAction::Halt));
+        assert!(reboot_action_requires_filesystem_flush(RebootAction::PowerOff));
+        assert!(!reboot_action_requires_filesystem_flush(RebootAction::SetCad(true)));
+        assert!(!reboot_action_requires_filesystem_flush(RebootAction::SetCad(false)));
     }
 }

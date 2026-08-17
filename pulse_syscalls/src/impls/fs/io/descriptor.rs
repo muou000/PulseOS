@@ -155,6 +155,36 @@ pub fn sys_fsync(fd: usize) -> isize {
     }
 }
 
+/// Flushes every mounted filesystem for a power transition.
+///
+/// Unlike [`sys_sync`], this path is deliberately not interruptible: once a
+/// reset or power-off has been requested, accepting a signal and proceeding
+/// to firmware would reintroduce the exact dirty-cache loss this barrier is
+/// meant to prevent. The finite timeout still prevents a broken device from
+/// hanging shutdown forever.
+pub(crate) fn flush_filesystems_for_shutdown() -> Result<(), LinuxError> {
+    match axtask::future::block_on(axtask::future::timeout(
+        Some(SYNC_TIMEOUT),
+        axfs::flush_all_filesystems_async(),
+    )) {
+        Ok(Ok(())) => Ok(()),
+        Err(_) => {
+            axlog::error!(
+                "shutdown writeback timed out after {:?}; power transition cancelled",
+                SYNC_TIMEOUT
+            );
+            Err(LinuxError::ETIMEDOUT)
+        }
+        Ok(Err(error)) => {
+            axlog::error!(
+                "shutdown filesystem writeback failed: {:?}; power transition cancelled",
+                error
+            );
+            Err(LinuxError::EIO)
+        }
+    }
+}
+
 pub fn sys_sync() -> isize {
     axlog::debug!("sys_sync: global flush");
     // The filesystem registry already owns every dirty file cache and flushes
