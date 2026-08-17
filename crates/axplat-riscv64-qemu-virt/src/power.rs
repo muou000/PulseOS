@@ -1,4 +1,4 @@
-use axplat::power::{CpuBootError, PowerIf};
+use axplat::power::{CpuBootError, PowerIf, SystemResetError, SystemResetResult};
 
 struct PowerImpl;
 
@@ -34,6 +34,26 @@ impl PowerIf for PowerImpl {
         warn!("It should shutdown!");
         loop {
             axcpu::asm::halt();
+        }
+    }
+
+    /// Reset the whole system through SBI SRST.
+    fn system_reset() -> SystemResetResult {
+        info!("Rebooting...");
+        let result = sbi_rt::system_reset(sbi_rt::ColdReboot, sbi_rt::NoReason);
+        if result.error == sbi_rt::SbiRet::success(0).error {
+            // SBI specifies that a successful reset never returns. If a
+            // virtual firmware acknowledges it before processing the request,
+            // stay halted until the reset takes effect.
+            warn!("SBI reset returned success unexpectedly; waiting for reset");
+            loop {
+                axcpu::asm::halt();
+            }
+        }
+        if result.error == sbi_rt::SbiRet::not_supported().error {
+            Err(SystemResetError::NotSupported)
+        } else {
+            Err(SystemResetError::Firmware(result.error as isize))
         }
     }
 

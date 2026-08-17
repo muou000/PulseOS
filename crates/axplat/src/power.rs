@@ -1,6 +1,6 @@
 //! Power management.
 
-use core::fmt;
+use core::{convert::Infallible, fmt};
 
 /// Error returned when a secondary CPU cannot be started.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -31,6 +31,33 @@ impl fmt::Display for CpuBootError {
 
 impl core::error::Error for CpuBootError {}
 
+/// Error returned when a platform cannot reset the whole system.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SystemResetError {
+    /// The platform has no usable system reset mechanism.
+    NotSupported,
+    /// Firmware rejected the reset request with an implementation-defined code.
+    Firmware(isize),
+}
+
+impl fmt::Display for SystemResetError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::NotSupported => f.write_str("system reset is not supported"),
+            Self::Firmware(error) => write!(f, "firmware system reset error {error}"),
+        }
+    }
+}
+
+impl core::error::Error for SystemResetError {}
+
+/// Result of requesting a platform reset.
+///
+/// A successful system reset does not return to the caller.  The uninhabited
+/// success type encodes that contract while allowing a platform to report an
+/// unsupported or rejected reset request.
+pub type SystemResetResult = Result<Infallible, SystemResetError>;
+
 /// Power management interface.
 #[def_plat_interface]
 pub trait PowerIf {
@@ -49,6 +76,13 @@ pub trait PowerIf {
 
     /// Shutdown the whole system.
     fn system_off() -> !;
+
+    /// Reset the whole system.
+    ///
+    /// A successful reset does not return. Implementations must return an
+    /// error when the platform cannot issue the request instead of silently
+    /// turning it into a power-off or CPU halt.
+    fn system_reset() -> SystemResetResult;
 
     /// Get the number of CPU cores available on this platform.
     ///

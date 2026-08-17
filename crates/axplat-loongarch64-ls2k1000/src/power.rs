@@ -1,6 +1,9 @@
 #[cfg(feature = "smp")]
 use axplat::power::CpuBootError;
-use axplat::{mem::pa, power::PowerIf};
+use axplat::{
+    mem::pa,
+    power::{PowerIf, SystemResetResult},
+};
 
 struct PowerImpl;
 
@@ -12,9 +15,26 @@ impl PowerIf for PowerImpl {
     }
 
     fn system_off() -> ! {
-        // The reference 2K1000 DTB has no standard poweroff controller. Do
-        // not issue QEMU's GED write on physical hardware.
-        info!("LS2K1000 shutdown requested; halting CPUs");
+        // The LS2K1000 PMC is exposed as a syscon-poweroff controller in the
+        // reference DTB: PMC + 0x14, written with 0x3c00.
+        const PMC_POWEROFF_ADDR: *mut u32 =
+            crate::mem::phys_to_virt(pa!(0x1fe2_7014)).as_mut_ptr().cast();
+
+        info!("Powering off...");
+        unsafe { PMC_POWEROFF_ADDR.write_volatile(0x3c00) };
+        loop {
+            axcpu::asm::halt();
+        }
+    }
+
+    fn system_reset() -> SystemResetResult {
+        // The LS2K1000 PMC is exposed as a syscon-reboot controller in the
+        // reference DTB: PMC + 0x30, written with bit 0 set.
+        const PMC_REBOOT_ADDR: *mut u32 =
+            crate::mem::phys_to_virt(pa!(0x1fe2_7030)).as_mut_ptr().cast();
+
+        info!("Rebooting...");
+        unsafe { PMC_REBOOT_ADDR.write_volatile(1) };
         loop {
             axcpu::asm::halt();
         }
