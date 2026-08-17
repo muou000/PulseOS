@@ -270,6 +270,16 @@ impl GlobalAllocator {
         result
     }
 
+    /// Allocates contiguous pages for a DMA32 device.
+    ///
+    /// The bitmap/page allocator configuration has no low-memory zone. The
+    /// DMA API still validates the returned physical range against the
+    /// device mask and releases an out-of-mask allocation, so this fallback
+    /// remains memory-safe for configurations with <=4 GiB RAM.
+    pub fn alloc_pages_lowmem(&self, num_pages: usize, align_pow2: usize) -> AllocResult<usize> {
+        self.alloc_pages(num_pages, align_pow2)
+    }
+
     /// Allocates independent 4K pages while holding the page allocator lock once.
     ///
     /// Returns the number of initialized entries in `pages`. A short allocation
