@@ -1,9 +1,11 @@
 extern crate alloc;
 
-use crate::{DevError, DevResult, NetBufPtr};
 use alloc::{boxed::Box, sync::Arc, vec, vec::Vec};
 use core::ptr::NonNull;
+
 use spin::Mutex;
+
+use crate::{DevError, DevResult, NetBufPtr};
 
 const MIN_BUFFER_LEN: usize = 1526;
 const MAX_BUFFER_LEN: usize = 65535;

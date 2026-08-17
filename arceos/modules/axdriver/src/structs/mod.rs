@@ -3,7 +3,6 @@
 mod imp;
 
 use axdriver_base::{BaseDriverOps, DeviceType};
-
 pub use imp::*;
 
 /// A unified enum that represents different categories of devices.

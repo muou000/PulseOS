@@ -1,14 +1,11 @@
 //! Interrupt management.
 
-use axcpu::trap::{IRQ, register_trap_handler};
-
-pub use axplat::irq::{handle, register, set_enable, unregister};
-
-#[cfg(feature = "ipi")]
-pub use axplat::irq::{IpiError, IpiTarget, send_ipi};
-
 #[cfg(feature = "ipi")]
 pub use axconfig::devices::IPI_IRQ;
+use axcpu::trap::{IRQ, register_trap_handler};
+#[cfg(feature = "ipi")]
+pub use axplat::irq::{IpiError, IpiTarget, send_ipi};
+pub use axplat::irq::{handle, register, set_enable, unregister};
 
 /// IRQ handler.
 ///

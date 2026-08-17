@@ -41,11 +41,19 @@ impl FatFilesystem {
             _pinned: PhantomPinned,
         };
         let root_inode = inner.alloc_inode();
-        let result = Arc::new(Self { inner: Mutex::new(inner), root_dir: Mutex::default() });
+        let result = Arc::new(Self {
+            inner: Mutex::new(inner),
+            root_dir: Mutex::default(),
+        });
 
         let root_dir = DirEntry::new_dir(
             |this| {
-                FatDirNode::new(result.clone(), result.lock().inner.root_dir(), root_inode, this)
+                FatDirNode::new(
+                    result.clone(),
+                    result.lock().inner.root_dir(),
+                    root_inode,
+                    this,
+                )
             },
             Reference::root(),
         );

@@ -1,10 +1,9 @@
-use core::convert::From;
-use core::{mem::ManuallyDrop, ptr::NonNull};
-
 use alloc::{collections::VecDeque, sync::Arc};
+use core::{convert::From, mem::ManuallyDrop, ptr::NonNull};
+
 use axdriver_base::{BaseDriverOps, DevError, DevResult, DeviceType};
+pub use ixgbe_driver::{INTEL_82599, INTEL_VEND, IxgbeHal, PhysAddr};
 use ixgbe_driver::{IxgbeDevice, IxgbeError, IxgbeNetBuf, MemPool, NicDevice};
-pub use ixgbe_driver::{IxgbeHal, PhysAddr, INTEL_82599, INTEL_VEND};
 
 use crate::{EthernetAddress, NetBufPtr, NetDriverOps};
 
