@@ -2,7 +2,7 @@
 name = "axplat-loongarch64-ls2k1000"
 version = "0.3.0"
 edition = "2024"
-authors = ["PulseOS contributors"]
+authors = ["muou000 <muou000@outlook.com>"]
 description = "PulseOS axplat implementation for the Loongson 2K1000 board."
 homepage = "https://github.com/muou000/PulseOS"
 repository = "https://github.com/muou000/PulseOS"
