@@ -78,7 +78,7 @@ const fn as_dev_type(t: VirtIoDevType) -> Option<DeviceType> {
     }
 }
 
-#[allow(dead_code)]
+#[cfg(any(feature = "block", feature = "gpu", feature = "net"))]
 const fn as_dev_err(e: virtio_drivers::Error) -> DevError {
     use virtio_drivers::Error::*;
     match e {

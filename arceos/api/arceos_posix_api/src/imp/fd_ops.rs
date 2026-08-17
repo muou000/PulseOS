@@ -12,7 +12,6 @@ use crate::imp::stdio::{stdin, stdout};
 
 pub const AX_FILE_LIMIT: usize = 1024;
 
-#[allow(dead_code)]
 pub trait FileLike: Send + Sync {
     fn read(&self, buf: &mut [u8]) -> LinuxResult<usize>;
     fn write(&self, buf: &[u8]) -> LinuxResult<usize>;

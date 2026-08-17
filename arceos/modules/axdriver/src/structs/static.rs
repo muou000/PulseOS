@@ -53,7 +53,6 @@ impl<D> AxDeviceContainer<D> {
     }
 
     /// Adds one device into the container.
-    #[allow(dead_code)]
     pub(crate) fn push(&mut self, dev: D) {
         if self.0.is_none() {
             self.0 = Some(dev);

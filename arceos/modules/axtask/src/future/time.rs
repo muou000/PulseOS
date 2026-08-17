@@ -96,7 +96,7 @@ percpu_static! {
     TIMER_RUNTIME: SpinNoIrq<TimerRuntime> = SpinNoIrq::new(TimerRuntime::new()),
 }
 
-#[allow(dead_code)]
+#[cfg(feature = "irq")]
 pub(crate) fn check_timer_events() {
     let now = monotonic_time();
     loop {

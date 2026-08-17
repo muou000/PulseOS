@@ -10,7 +10,6 @@ use sbi_rt::HartMask;
 pub(super) const INTC_IRQ_BASE: usize = 1 << (usize::BITS - 1);
 
 /// Supervisor software interrupt in `scause`
-#[allow(unused)]
 pub(super) const S_SOFT: usize = INTC_IRQ_BASE + 1;
 
 /// Supervisor timer interrupt in `scause`
