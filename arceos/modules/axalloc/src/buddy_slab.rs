@@ -297,6 +297,28 @@ impl GlobalAllocator {
         result.map_err(map_error)
     }
 
+    /// Allocates contiguous pages whose physical address range stays below
+    /// the 4 GiB DMA32 limit.
+    pub fn alloc_pages_lowmem(&self, num_pages: usize, align_pow2: usize) -> AllocResult<usize> {
+        let mut result = {
+            let _guard = NoPreemptIrqSave::new();
+            self.inner.alloc_pages_lowmem(num_pages, align_pow2)
+        };
+        if matches!(result, Err(SlubAllocError::NoMemory)) {
+            for _ in 0..4 {
+                let reclaimed = try_page_reclaim(num_pages.max(MIN_PAGE_RECLAIM_BATCH));
+                result = {
+                    let _guard = NoPreemptIrqSave::new();
+                    self.inner.alloc_pages_lowmem(num_pages, align_pow2)
+                };
+                if result.is_ok() || reclaimed == 0 {
+                    break;
+                }
+            }
+        }
+        result.map_err(map_error)
+    }
+
     /// Allocates independent pages while acquiring the Buddy lock once.
     pub fn alloc_page_batch(&self, pages: &mut [usize]) -> usize {
         if pages.is_empty() {
