@@ -1,0 +1,11 @@
+eevdf-scheduler
+Copyright (c) PulseOS contributors
+
+The EEVDF implementation was developed in PulseOS. Its original contribution
+history starts at PulseOS commits 42ac831d0ee955dda98e5bf6ad01085352ad04c0
+and 0e21c892a409dd3353643897963cfd199124de27.
+
+PulseOS integrates this algorithm through a BaseScheduler adapter. That common
+scheduler interface originated in the ArceOS axsched crate and is intentionally
+kept outside this algorithm crate:
+https://github.com/arceos-org/axsched

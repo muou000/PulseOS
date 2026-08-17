@@ -688,6 +688,7 @@ dependencies = [
 name = "axsched"
 version = "0.3.1"
 dependencies = [
+ "eevdf-scheduler",
  "intrusive-collections",
  "linked_list_r4l",
 ]
@@ -1070,6 +1071,14 @@ dependencies = [
  "sdio-host2",
  "sdmmc-protocol",
  "volatile 0.6.1",
+]
+
+[[package]]
+name = "eevdf-scheduler"
+version = "0.1.0"
+dependencies = [
+ "intrusive-collections",
+ "linked_list_r4l",
 ]
 
 [[package]]

@@ -1,0 +1,21 @@
+[package]
+name = "eevdf-scheduler"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.76"
+authors = ["PulseOS contributors"]
+description = "A no_std EEVDF scheduler with real-time FIFO and round-robin priority queues"
+license = "GPL-3.0-or-later OR Apache-2.0 OR MulanPSL-2.0"
+repository = "https://github.com/muou000/eevdf-scheduler"
+documentation = "https://docs.rs/eevdf-scheduler"
+readme = "README.md"
+keywords = ["eevdf", "scheduler", "kernel", "no-std"]
+categories = ["algorithms", "no-std"]
+
+[dependencies]
+linked_list_r4l = "0.3"
+intrusive-collections = { version = "0.9.7", default-features = false, features = ["alloc"] }
+
+# Keep this crate independently testable even when it is checked out below a
+# larger Cargo workspace such as PulseOS.
+[workspace]

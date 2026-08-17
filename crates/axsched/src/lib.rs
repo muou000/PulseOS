@@ -12,7 +12,7 @@ mod tests;
 extern crate alloc;
 
 pub use cfs::{CFSTask, CFScheduler};
-pub use eevdf::{EEVDFScheduler, EEVDFTask, RtPolicy};
+pub use eevdf_scheduler::{EEVDFScheduler, EEVDFTask, RtPolicy};
 pub use fifo::{FifoScheduler, FifoTask};
 pub use round_robin::{RRScheduler, RRTask};
 
@@ -33,7 +33,7 @@ pub enum SchedEnqueueReason {
 
 /// The base scheduler trait that all schedulers should implement.
 ///
-/// All tasks in the scheduler are considered runnable. If a task is go to
+/// All tasks in the scheduler are considered runnable. If a task goes to
 /// sleep, it should be removed from the scheduler.
 pub trait BaseScheduler {
     /// Type of scheduled entities. Often a task struct.
@@ -59,17 +59,15 @@ pub trait BaseScheduler {
         }
     }
 
-    /// Removes a task by its reference from the scheduler. Returns the owned
-    /// removed task with ownership if it exists.
+    /// Removes a task by its reference from the scheduler, returning ownership
+    /// when it exists.
     ///
     /// # Safety
     ///
-    /// The caller should ensure that the task is in the scheduler, otherwise
-    /// the behavior is undefined.
+    /// The caller should ensure that the task belongs to this scheduler.
     fn remove_task(&mut self, task: &Self::SchedItem) -> Option<Self::SchedItem>;
 
-    /// Picks the next task to run, it will be removed from the scheduler.
-    /// Returns [`None`] if there is not runnable task.
+    /// Picks and removes the next runnable task.
     fn pick_next_task(&mut self) -> Option<Self::SchedItem>;
 
     /// Picks the next task at the given monotonic timestamp.
@@ -77,13 +75,7 @@ pub trait BaseScheduler {
         self.pick_next_task()
     }
 
-    /// Puts the previous task back to the scheduler. The previous task is
-    /// usually placed at the end of the ready queue, making it less likely
-    /// to be re-scheduled.
-    ///
-    /// `preempt` indicates whether the previous task is preempted by the next
-    /// task. In this case, the previous task may be placed at the front of the
-    /// ready queue.
+    /// Returns a previous task to the scheduler.
     fn put_prev_task(&mut self, prev: Self::SchedItem, preempt: bool);
 
     /// Records that a task started executing at `now_ns`.
@@ -92,10 +84,8 @@ pub trait BaseScheduler {
     /// Accounts a task's final execution interval before it stops running.
     fn task_stopped(&mut self, _task: &Self::SchedItem, _now_ns: u64) {}
 
-    /// Advances the scheduler state at each timer tick. Returns `true` if
-    /// re-scheduling is required.
-    ///
-    /// `current` is the current running task.
+    /// Advances scheduler state at a timer tick and requests rescheduling when
+    /// it returns `true`.
     fn task_tick(&mut self, current: &Self::SchedItem) -> bool;
 
     /// Advances scheduler state using a monotonic nanosecond timestamp.
@@ -103,7 +93,7 @@ pub trait BaseScheduler {
         self.task_tick(current)
     }
 
-    /// Returns whether `candidate` should preempt `current` immediately.
+    /// Returns whether `candidate` should immediately preempt `current`.
     fn should_preempt(
         &mut self,
         _current: &Self::SchedItem,
@@ -118,14 +108,14 @@ pub trait BaseScheduler {
         None
     }
 
-    /// set priority for a task
-    fn set_priority(&mut self, task: &Self::SchedItem, prio: isize) -> bool;
+    /// Sets the scheduler priority of a task.
+    fn set_priority(&mut self, task: &Self::SchedItem, priority: isize) -> bool;
 
     /// Sets task priority after accounting execution through `now_ns`.
-    fn set_priority_at(&mut self, task: &Self::SchedItem, prio: isize, _now_ns: u64) -> bool {
-        self.set_priority(task, prio)
+    fn set_priority_at(&mut self, task: &Self::SchedItem, priority: isize, _now_ns: u64) -> bool {
+        self.set_priority(task, priority)
     }
 
-    /// Returns `true` if there are no tasks in the scheduler's ready queue.
+    /// Returns `true` when the ready queue is empty.
     fn is_empty(&self) -> bool;
 }
