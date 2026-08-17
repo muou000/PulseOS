@@ -1,3 +1,5 @@
+use kspin::SpinNoPreempt;
+
 use super::*;
 
 pub fn invalidate_file_cache(fs_id: usize, inode: u64) {
@@ -18,13 +20,13 @@ pub fn invalidate_file_cache(fs_id: usize, inode: u64) {
 }
 
 static FILE_SHARED_STATES: Lazy<
-    [SpinMutex<WeakStateRegistry<FileCacheKey, CachedFileShared>>; FILE_STATE_REGISTRY_SHARDS],
-> = Lazy::new(|| core::array::from_fn(|_| SpinMutex::new(WeakStateRegistry::default())));
+    [SpinNoPreempt<WeakStateRegistry<FileCacheKey, CachedFileShared>>; FILE_STATE_REGISTRY_SHARDS],
+> = Lazy::new(|| core::array::from_fn(|_| SpinNoPreempt::new(WeakStateRegistry::default())));
 
 // Disk caches survive descriptor close and are released after explicit global
 // writeback. Stage 2 adds bounded retention and memory-pressure reclaim.
-static ACTIVE_DISK_FILE_CACHES: Lazy<SpinMutex<Vec<Arc<CachedFileShared>>>> =
-    Lazy::new(|| SpinMutex::new(Vec::new()));
+static ACTIVE_DISK_FILE_CACHES: Lazy<SpinNoPreempt<Vec<Arc<CachedFileShared>>>> =
+    Lazy::new(|| SpinNoPreempt::new(Vec::new()));
 const PAGE_SIZE: usize = 4096;
 const MAX_WRITEBACK_PAGES: usize = 256;
 const READ_AHEAD_PAGES: usize = 16;
@@ -794,6 +796,7 @@ struct EvictListener {
 }
 
 pub(super) struct CachedFileShared {
+    fs_id: usize,
     // Page stripes protect fill/write coherence; inline entries keep the hot
     // cache-hit path to one cache lock without per-page Arc/Mutex overhead.
     page_cache: Mutex<LruCache<u32, PageCache>>,
@@ -827,8 +830,9 @@ enum CachedWriteAccess {
 }
 
 impl CachedFileShared {
-    fn new(in_memory: bool, size: u64, backing: Option<FileNode>) -> Self {
+    fn new(fs_id: usize, in_memory: bool, size: u64, backing: Option<FileNode>) -> Self {
         Self {
+            fs_id,
             // The LRU's own capacity eagerly reserves hash-table metadata.
             // Keep storage lazy and enforce the disk limit during admission.
             page_cache: Mutex::new(LruCache::unbounded()),
@@ -1171,6 +1175,7 @@ impl CachedFileShared {
         file: &FileNode,
         keys: Vec<u32>,
     ) -> VfsResult<()> {
+        let read_backing = self.backing.is_some();
         for pn in keys {
             let mapped_paddr = {
                 let mut cache = self.page_cache.lock();
@@ -1194,6 +1199,18 @@ impl CachedFileShared {
             let Some(paddr) = mapped_paddr else {
                 continue;
             };
+            // In-memory files have no source node to refill a mapped page
+            // from. A discarded tmpfs page is defined to read as zero.
+            if !read_backing {
+                let mut cache = self.page_cache.lock();
+                if let Some(page) = cache.get_mut(&pn)
+                    && page.paddr() == paddr
+                {
+                    page.data().fill(0);
+                    page.dirty = false;
+                }
+                continue;
+            }
             let mut data = alloc::vec![0; PAGE_SIZE];
             let read = file
                 .read_at(&mut data, pn as u64 * PAGE_SIZE as u64)
@@ -1290,9 +1307,7 @@ async fn flush_file_cache_state(state: Arc<CachedFileShared>) -> Option<(u64, Vf
     Some((inode, result))
 }
 
-pub(crate) async fn flush_all_file_caches_async() -> VfsResult<()> {
-    let states = ACTIVE_DISK_FILE_CACHES.lock().clone();
-
+async fn flush_file_cache_states(states: Vec<Arc<CachedFileShared>>) -> VfsResult<()> {
     let mut first_error = None;
     let mut states = states.into_iter();
     let mut pending = FuturesUnordered::new();
@@ -1314,7 +1329,14 @@ pub(crate) async fn flush_all_file_caches_async() -> VfsResult<()> {
         }
     }
 
-    if first_error.is_none() {
+    first_error.map_or(Ok(()), Err)
+}
+
+pub(crate) async fn flush_all_file_caches_async() -> VfsResult<()> {
+    let states = ACTIVE_DISK_FILE_CACHES.lock().clone();
+    let result = flush_file_cache_states(states).await;
+
+    if result.is_ok() {
         // Dropping a backing inode can invalidate this registry, so move all
         // released entries out before the global lock is dropped.
         let removed = {
@@ -1333,7 +1355,24 @@ pub(crate) async fn flush_all_file_caches_async() -> VfsResult<()> {
         drop(removed);
     }
 
-    first_error.map_or(Ok(()), Err)
+    result
+}
+
+/// Checkpoints cached file data owned by a filesystem that is about to be
+/// unmounted.  Retention remains unchanged: tmpfs and disk file cache state
+/// may still be referenced by stable VFS entries, but no dirty page may reach
+/// a loop device after its backing has been detached.
+pub(crate) async fn flush_file_caches_for_filesystem_async(
+    filesystem: &dyn axfs_ng_vfs::FilesystemOps,
+) -> VfsResult<()> {
+    let fs_id = filesystem_id(filesystem);
+    let states = ACTIVE_DISK_FILE_CACHES
+        .lock()
+        .iter()
+        .filter(|state| state.fs_id == fs_id)
+        .cloned()
+        .collect();
+    flush_file_cache_states(states).await
 }
 
 struct ReclaimGuard {
@@ -1500,7 +1539,7 @@ pub(super) async fn shared_file_state_async(
     } else {
         location.entry().as_file().ok().cloned()
     };
-    let state = Arc::new(CachedFileShared::new(in_memory, size, backing));
+    let state = Arc::new(CachedFileShared::new(key.fs_id, in_memory, size, backing));
 
     let mut registry = FILE_SHARED_STATES[registry_shard].lock();
     if let Some(existing_state) = registry.get(&key) {
@@ -2869,7 +2908,7 @@ mod tests {
 
     #[test]
     fn concurrent_write_size_updates_never_shrink_the_cached_length() {
-        let shared = CachedFileShared::new(true, 8192, None);
+        let shared = CachedFileShared::new(0, true, 8192, None);
         shared.extend_size(4096);
         assert_eq!(shared.size(), 8192);
         shared.extend_size(16_384);

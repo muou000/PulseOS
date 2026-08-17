@@ -12,10 +12,11 @@ use alloc::{
 use core::{
     num::NonZeroUsize,
     sync::atomic::{AtomicU64, AtomicUsize, Ordering},
+    time::Duration,
 };
 
 use async_trait::async_trait;
-use axdriver::prelude::{AsyncBlockDriverOps, BlockDriverOps};
+use axdriver::prelude::{AsyncBlockDriverOps, BlockDriverOps, DevError};
 use axsync::Mutex;
 pub use fs::*;
 use futures_util::{StreamExt, stream::FuturesUnordered};
@@ -80,6 +81,10 @@ const WRITE_SCOPE_SHARDS: usize = 32;
 const CACHE_CAPACITY_PER_STRIPE: usize = 64;
 const CACHE_EVICTION_SCAN_LIMIT: usize = 64;
 const DEVICE_READ_MAX_ATTEMPTS: usize = 2;
+// A missing SD/MMC completion interrupt must become an I/O error instead of
+// keeping the filesystem task blocked forever. Normal JH7110 transfers are
+// well below this bound even at the conservative board clock.
+const DEVICE_IO_TIMEOUT: Duration = Duration::from_secs(5);
 const FLUSH_BATCH_BLOCKS: usize = 32;
 const FLUSH_WRITE_CONCURRENCY: usize = 4;
 // One range-lock bucket covers one maximum coalesced metadata flush. This lets
@@ -468,7 +473,16 @@ impl<D: AsyncBlockDriverOps + Clone + 'static> crate::disk::DiskFlushable for Ex
             crate::buildstorm_stat_inc!(EXT4_DEVICE_FLUSHES);
             #[cfg(feature = "qperf-trace")]
             let _device_io = crate::buildstorm_stats::begin_device_io();
-            dev.flush_async().await
+            match axtask::future::timeout(Some(DEVICE_IO_TIMEOUT), dev.flush_async()).await {
+                Ok(result) => result,
+                Err(_) => {
+                    log::error!(
+                        "ext4 device flush timed out after {:?}",
+                        DEVICE_IO_TIMEOUT
+                    );
+                    Err(DevError::Io)
+                }
+            }
         };
         if first_error.is_none() && flush_result.is_ok() {
             self.flushed_generation
@@ -891,16 +905,32 @@ impl<D: AsyncBlockDriverOps + Clone + 'static> Ext4Disk<D> {
         crate::buildstorm_stat_add!(EXT4_DEVICE_WRITE_BYTES, data.len());
         #[cfg(feature = "qperf-trace")]
         let _device_io = crate::buildstorm_stats::begin_device_io();
-        dev.write_block_async(first_block, data)
-            .await
-            .map_err(|err| {
+        match axtask::future::timeout(
+            Some(DEVICE_IO_TIMEOUT),
+            dev.write_block_async(first_block, data),
+        )
+        .await
+        {
+            Ok(Ok(())) => Ok(()),
+            Ok(Err(err)) => {
                 log::error!(
                     "ext4 async write failed: block_offset={}, err={:?}",
                     block_offset,
                     err
                 );
-                err
-            })
+                Err(err)
+            }
+            Err(_) => {
+                log::error!(
+                    "ext4 async write timed out: block_offset={}, first_block={}, len={}, timeout={:?}",
+                    block_offset,
+                    first_block,
+                    data.len(),
+                    DEVICE_IO_TIMEOUT
+                );
+                Err(DevError::Io)
+            }
+        }
     }
 
     async fn read_blocks_from_disk_async(
@@ -952,7 +982,26 @@ impl<D: AsyncBlockDriverOps + Clone + 'static> Ext4Disk<D> {
             crate::buildstorm_stat_add!(EXT4_DEVICE_READ_BYTES, dest.len());
             #[cfg(feature = "qperf-trace")]
             let _device_io = crate::buildstorm_stats::begin_device_io();
-            match dev.read_block_async(first_block, dest).await {
+            let read_result = match axtask::future::timeout(
+                Some(DEVICE_IO_TIMEOUT),
+                dev.read_block_async(first_block, dest),
+            )
+            .await
+            {
+                Ok(result) => result,
+                Err(_) => {
+                    log::error!(
+                        "ext4 device read timed out: first_block={}, len={}, attempt={}/{}, timeout={:?}",
+                        first_block,
+                        dest.len(),
+                        attempt,
+                        DEVICE_READ_MAX_ATTEMPTS,
+                        DEVICE_IO_TIMEOUT
+                    );
+                    Err(DevError::Io)
+                }
+            };
+            match read_result {
                 Ok(()) => return Ok(()),
                 Err(error)
                     if attempt < DEVICE_READ_MAX_ATTEMPTS

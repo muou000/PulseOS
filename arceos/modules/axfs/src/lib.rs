@@ -20,7 +20,8 @@ use axdriver::{AxBlockDevice, AxDeviceContainer};
 use axfs_ng_vfs::NodePermission;
 pub use axfs_ng_vfs::NodeType;
 use futures_util::{StreamExt, stream::FuturesUnordered};
-use spin::{Lazy, Mutex};
+use kspin::SpinNoPreempt;
+use spin::Lazy;
 
 mod disk;
 pub mod fs;
@@ -68,6 +69,21 @@ pub fn fill_random_bytes(buf: &mut [u8]) {
 
 pub fn flush_all_filesystems() -> axfs_ng_vfs::VfsResult<()> {
     axtask::future::block_on(flush_all_filesystems_async())
+}
+
+/// Drains writeback owned by a mount before detaching it from the VFS tree.
+///
+/// A loop device can be detached immediately after `umount(2)` returns. Its
+/// file-cache and filesystem metadata must therefore be checkpointed before
+/// the mount is detached; otherwise a later global sync can write to a loop
+/// device whose backing file has already been cleared.
+pub async fn flush_mountpoint_before_unmount(
+    mountpoint: &Arc<axfs_ng_vfs::Mountpoint>,
+) -> axfs_ng_vfs::VfsResult<()> {
+    let root = mountpoint.root_location();
+    let filesystem = root.filesystem();
+    highlevel::flush_file_caches_for_filesystem_async(filesystem).await?;
+    filesystem.flush().await
 }
 
 async fn flush_filesystem_root(
@@ -145,13 +161,17 @@ pub struct MountRecord {
     mountpoint: Option<Arc<axfs_ng_vfs::Mountpoint>>,
 }
 
-static MOUNT_RECORDS: Lazy<Mutex<Vec<MountRecord>>> = Lazy::new(|| Mutex::new(Vec::new()));
-static MOUNTABLE_FILESYSTEMS: Lazy<Mutex<BTreeMap<String, axfs_ng_vfs::Filesystem>>> =
-    Lazy::new(|| Mutex::new(BTreeMap::new()));
-static MOUNTED_MOUNTPOINTS: Lazy<Mutex<Vec<(String, Arc<axfs_ng_vfs::Mountpoint>)>>> =
-    Lazy::new(|| Mutex::new(Vec::new()));
-static PINNED_MOUNTPOINTS: Lazy<Mutex<Vec<Arc<axfs_ng_vfs::Mountpoint>>>> =
-    Lazy::new(|| Mutex::new(Vec::new()));
+// These registries are inspected from syscall/task context.  A preemptible
+// raw spin lock can strand its owner on a single CPU while a cleanup task
+// spins, so keep the short bookkeeping sections preemption-safe.
+static MOUNT_RECORDS: Lazy<SpinNoPreempt<Vec<MountRecord>>> =
+    Lazy::new(|| SpinNoPreempt::new(Vec::new()));
+static MOUNTABLE_FILESYSTEMS: Lazy<SpinNoPreempt<BTreeMap<String, axfs_ng_vfs::Filesystem>>> =
+    Lazy::new(|| SpinNoPreempt::new(BTreeMap::new()));
+static MOUNTED_MOUNTPOINTS: Lazy<SpinNoPreempt<Vec<(String, Arc<axfs_ng_vfs::Mountpoint>)>>> =
+    Lazy::new(|| SpinNoPreempt::new(Vec::new()));
+static PINNED_MOUNTPOINTS: Lazy<SpinNoPreempt<Vec<Arc<axfs_ng_vfs::Mountpoint>>>> =
+    Lazy::new(|| SpinNoPreempt::new(Vec::new()));
 
 fn normalize_target(target: &str) -> String {
     if target.is_empty() || target == "/" {
@@ -273,6 +293,17 @@ pub fn is_mount_registered(target: &str) -> bool {
 
 pub fn list_mounts() -> Vec<MountRecord> {
     MOUNT_RECORDS.lock().clone()
+}
+
+/// Returns whether this mountpoint was created as a bind mount.
+pub fn mountpoint_is_bind(mountpoint: &Arc<axfs_ng_vfs::Mountpoint>) -> bool {
+    MOUNT_RECORDS.lock().iter().any(|record| {
+        record
+            .mountpoint
+            .as_ref()
+            .is_some_and(|existing| Arc::ptr_eq(existing, mountpoint))
+            && record.options.split(',').any(|option| option == "bind")
+    })
 }
 
 pub fn register_mountable_filesystem(source: &str, fs: &axfs_ng_vfs::Filesystem) {
@@ -454,6 +485,57 @@ pub fn unregister_mounted_mountpoint_exact(
     };
 
     removed_mountpoint || removed_record
+}
+
+/// Remove every bookkeeping entry owned by a VFS mountpoint.
+///
+/// A propagated bind mount can be registered under more than one visible
+/// path, and a lazy unmount removes a whole subtree at once.  Cleaning by one
+/// `(path, Arc)` pair leaves stale `/proc/mounts` rows in either case; the LTP
+/// cleanup loop then keeps retrying those rows forever.  The vectors are
+/// detached before filtering so dropping mount records never happens while a
+/// registry spin lock is held.
+pub fn unregister_mountpoint_records(
+    mountpoint: &Arc<axfs_ng_vfs::Mountpoint>,
+) -> usize {
+    let mut removed_mps = Vec::new();
+    {
+        let mut guard = MOUNTED_MOUNTPOINTS.lock();
+        let entries = core::mem::take(&mut *guard);
+        let mut kept = Vec::with_capacity(entries.len());
+        for entry in entries {
+            if Arc::ptr_eq(&entry.1, mountpoint) {
+                removed_mps.push(entry);
+            } else {
+                kept.push(entry);
+            }
+        }
+        *guard = kept;
+    }
+
+    let mut removed_records = Vec::new();
+    {
+        let mut guard = MOUNT_RECORDS.lock();
+        let records = core::mem::take(&mut *guard);
+        let mut kept = Vec::with_capacity(records.len());
+        for record in records {
+            let owned = record
+                .mountpoint
+                .as_ref()
+                .is_some_and(|existing| Arc::ptr_eq(existing, mountpoint));
+            if owned {
+                removed_records.push(record);
+            } else {
+                kept.push(record);
+            }
+        }
+        *guard = kept;
+    }
+
+    let removed = removed_mps.len() + removed_records.len();
+    drop(removed_mps);
+    drop(removed_records);
+    removed
 }
 
 pub fn rename_mount_registry(old_prefix: &str, new_prefix: &str) {

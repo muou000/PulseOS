@@ -1,5 +1,7 @@
 use super::*;
 
+const SYNC_TIMEOUT: Duration = Duration::from_secs(30);
+
 pub fn sys_getdents64(fd: usize, dirp: usize, count: usize) -> isize {
     let entry = match get_fd_entry(fd) {
         Ok(entry) => entry,
@@ -159,6 +161,27 @@ pub fn sys_sync() -> isize {
     // each mounted filesystem exactly once. Walking every process descriptor
     // first caused repeated inode-wide and disk-wide flushes, while the final
     // disk registry pass repeated the same ext4 checkpoint again.
-    let _ = axfs::flush_all_filesystems();
-    0
+    // Keep the syscall interruptible: a lost SD/MMC completion must not make
+    // Ctrl-C unable to return the terminal to its shell. The timeout is a
+    // second line of defense for signals or timer delivery that arrive late.
+    match axtask::future::block_on(axtask::future::interruptible(
+        axtask::future::timeout(
+            Some(SYNC_TIMEOUT),
+            axfs::flush_all_filesystems_async(),
+        ),
+    )) {
+        Ok(Ok(Ok(()))) => 0,
+        Err(_) => {
+            axlog::warn!("sys_sync: interrupted while flushing filesystems");
+            -LinuxError::EINTR.code() as isize
+        }
+        Ok(Err(_)) => {
+            axlog::error!("sys_sync: filesystem flush timed out after {:?}", SYNC_TIMEOUT);
+            -LinuxError::ETIMEDOUT.code() as isize
+        }
+        Ok(Ok(Err(error))) => {
+            axlog::error!("sys_sync: filesystem flush failed: {:?}", error);
+            -LinuxError::EIO.code() as isize
+        }
+    }
 }
