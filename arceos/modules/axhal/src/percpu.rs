@@ -107,7 +107,6 @@ pub unsafe fn set_current_task_ptr<T>(ptr: *const T) {
     }
 }
 
-#[allow(dead_code)]
 pub(crate) fn init_primary(cpu_id: usize) {
     percpu::init();
     percpu::init_percpu_reg(cpu_id);
@@ -117,7 +116,7 @@ pub(crate) fn init_primary(cpu_id: usize) {
     }
 }
 
-#[allow(dead_code)]
+#[cfg(feature = "smp")]
 pub(crate) fn init_secondary(cpu_id: usize) {
     percpu::init_percpu_reg(cpu_id);
     unsafe {

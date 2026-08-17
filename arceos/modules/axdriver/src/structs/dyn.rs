@@ -1,7 +1,13 @@
-#![allow(unused_imports)]
-
-use crate::prelude::*;
 use alloc::{boxed::Box, vec, vec::Vec};
+
+#[cfg(feature = "block")]
+use crate::prelude::BlockDriverOps;
+#[cfg(all(feature = "block", feature = "async"))]
+use crate::prelude::{AsyncBlockDriverOps, DynAsyncBlockDriverOps};
+#[cfg(feature = "display")]
+use crate::prelude::DisplayDriverOps;
+#[cfg(feature = "net")]
+use crate::prelude::NetDriverOps;
 
 /// The unified type of the NIC devices.
 #[cfg(feature = "net")]
@@ -82,7 +88,6 @@ impl<D> AxDeviceContainer<D> {
     }
 
     /// Adds one device into the container.
-    #[allow(dead_code)]
     pub(crate) fn push(&mut self, dev: D) {
         self.0.push(dev);
     }

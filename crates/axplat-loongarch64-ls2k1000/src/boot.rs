@@ -18,7 +18,6 @@ const BOOT_HIGH_LOW_DIR2_INDEX: usize = (PHYS_VIRT_OFFSET >> 30) & 0x1ff;
 const BOOT_HIGH_DEVICE_DIR2_INDEX: usize =
     (PHYS_VIRT_OFFSET.wrapping_add(L1_BLOCK_SIZE) >> 30) & 0x1ff;
 const BOOT_HIGH_DIR2_INDEX: usize = (crate::config::plat::KERNEL_BASE_VADDR >> 30) & 0x1ff;
-const BOOT_HIGH_DIR1_INDEX: usize = (crate::config::plat::KERNEL_BASE_VADDR >> 21) & 0x1ff;
 const L2_BLOCK_SIZE: usize = 0x20_0000;
 const L2_ENTRIES: usize = L1_BLOCK_SIZE / L2_BLOCK_SIZE;
 
@@ -29,7 +28,7 @@ const _: () = assert!(BOOT_HIGH_PGD_INDEX == 0x1ff);
 const _: () = assert!(BOOT_HIGH_LOW_DIR2_INDEX == 0x1fc);
 const _: () = assert!(BOOT_HIGH_DEVICE_DIR2_INDEX == 0x1fd);
 const _: () = assert!(BOOT_HIGH_DIR2_INDEX == 0x1fe);
-const _: () = assert!(BOOT_HIGH_DIR1_INDEX == 0xc0);
+const _: () = assert!(((crate::config::plat::KERNEL_BASE_VADDR >> 21) & 0x1ff) == 0xc0);
 const _: () = assert!(L2_ENTRIES == 512);
 
 #[unsafe(link_section = ".bss.stack")]

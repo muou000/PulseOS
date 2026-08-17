@@ -6,41 +6,37 @@ mod listen_table;
 mod icmp;
 mod tcp;
 mod udp;
-use alloc::collections::BTreeMap;
-use alloc::sync::Arc;
-use alloc::vec;
-use alloc::vec::Vec;
-use axerrno::{AxError, AxResult};
-use core::cell::RefCell;
-use core::future::{Future, poll_fn};
-use core::ops::DerefMut;
-use core::pin::pin;
-use core::sync::atomic::{AtomicU64, Ordering};
-use core::task::Poll;
+use alloc::{collections::BTreeMap, sync::Arc, vec, vec::Vec};
+use core::{
+    cell::RefCell,
+    future::{Future, poll_fn},
+    ops::DerefMut,
+    pin::pin,
+    sync::atomic::{AtomicU64, Ordering},
+    task::Poll,
+};
 
+pub use addr::{from_core_sockaddr, into_core_sockaddr};
 use axdriver::prelude::*;
+use axdriver_net::{DevError, NetBufPtr};
+use axerrno::{AxError, AxResult};
 use axhal::time::{
     NANOS_PER_MICROS, TimeValue, monotonic_time, monotonic_time_nanos as current_time_nanos,
     ticks_to_nanos,
 };
 use axpoll::IoEvents;
 use axsync::Mutex;
-use axdriver_net::{DevError, NetBufPtr};
 use lazyinit::LazyInit;
-use smoltcp::iface::{Config, Interface, SocketHandle, SocketSet};
-use smoltcp::phy::{Device, DeviceCapabilities, Medium, RxToken, TxToken};
-use smoltcp::socket::{self, AnySocket, Socket};
-use smoltcp::time::Instant;
-use smoltcp::wire::{EthernetAddress, HardwareAddress, IpAddress, IpCidr};
+use smoltcp::{
+    iface::{Config, Interface, SocketHandle, SocketSet},
+    phy::{Device, DeviceCapabilities, Medium, RxToken, TxToken},
+    socket::{self, AnySocket, Socket},
+    time::Instant,
+    wire::{EthernetAddress, HardwareAddress, IpAddress, IpCidr},
+};
 
 use self::listen_table::ListenTable;
-
-pub use self::dns::dns_query;
-pub use self::icmp::IcmpSocket;
-pub use self::tcp::TcpSocket;
-pub use self::udp::UdpSocket;
-pub use addr::{from_core_sockaddr, into_core_sockaddr};
-#[allow(unused)]
+pub use self::{dns::dns_query, icmp::IcmpSocket, tcp::TcpSocket, udp::UdpSocket};
 macro_rules! env_or_default {
     ($key:literal) => {
         match option_env!($key) {
@@ -144,7 +140,7 @@ static ETH0: LazyInit<InterfaceWrapper> = LazyInit::new();
 struct SocketSetWrapper<'a>(Mutex<SocketSet<'a>>);
 
 struct DeviceWrapper {
-    inner: RefCell<AxNetDevice>, // use `RefCell` is enough since it's wrapped in `Mutex` in `InterfaceWrapper`.
+    inner: RefCell<AxNetDevice>, /* use `RefCell` is enough since it's wrapped in `Mutex` in `InterfaceWrapper`. */
 }
 
 struct InterfaceWrapper {
@@ -218,7 +214,12 @@ impl<'a> SocketSetWrapper<'a> {
         f(socket)
     }
 
-    pub fn bind_check(&self, addr: IpAddress, port: u16, self_handle: Option<SocketHandle>) -> AxResult {
+    pub fn bind_check(
+        &self,
+        addr: IpAddress,
+        port: u16,
+        self_handle: Option<SocketHandle>,
+    ) -> AxResult {
         let mut sockets = self.0.lock();
         for item in sockets.iter_mut() {
             if Some(item.0) == self_handle {
@@ -411,8 +412,14 @@ impl DeviceWrapper {
 }
 
 impl Device for DeviceWrapper {
-    type RxToken<'a> = AxNetRxToken<'a> where Self: 'a;
-    type TxToken<'a> = AxNetTxToken<'a> where Self: 'a;
+    type RxToken<'a>
+        = AxNetRxToken<'a>
+    where
+        Self: 'a;
+    type TxToken<'a>
+        = AxNetTxToken<'a>
+    where
+        Self: 'a;
 
     fn receive(&mut self, _timestamp: Instant) -> Option<(Self::RxToken<'_>, Self::TxToken<'_>)> {
         let mut dev = self.inner.borrow_mut();
@@ -529,7 +536,8 @@ pub(crate) fn schedule_poll() {
 }
 
 /// Returns the delay until the next timer expires.
-pub fn poll_delay() -> Option<smoltcp::time::Duration> {
+#[cfg(feature = "multitask")]
+pub(crate) fn poll_delay() -> Option<smoltcp::time::Duration> {
     let timestamp = Instant::from_micros_const((current_time_nanos() / NANOS_PER_MICROS) as i64);
 
     #[cfg(feature = "monolithic")]
@@ -563,6 +571,7 @@ pub fn poll_delay() -> Option<smoltcp::time::Duration> {
     }
 }
 
+#[cfg(feature = "multitask")]
 fn next_poll_delay() -> Option<core::time::Duration> {
     let protocol_delay =
         poll_delay().map(|delay| core::time::Duration::from_micros(delay.total_micros()));

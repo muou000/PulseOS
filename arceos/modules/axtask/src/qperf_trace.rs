@@ -27,7 +27,7 @@ pub(crate) enum EnqueueReason {
     Yield             = 4,
     AffinityMigration = 5,
     DeferredWake      = 6,
-    #[allow(dead_code)] // Unused when scheduler load balancing is disabled.
+    #[cfg(feature = "sched-load-balance")]
     WorkSteal         = 7,
 }
 
