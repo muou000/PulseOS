@@ -2,7 +2,7 @@
 name = "axplat-riscv64-visionfive2"
 version = "0.3.0"
 edition = "2024"
-authors = ["PulseOS contributors"]
+authors = ["muou000 <muou000@outlook.com>"]
 description = "PulseOS axplat implementation for the StarFive VisionFive 2."
 homepage = "https://github.com/muou000/PulseOS"
 repository = "https://github.com/muou000/PulseOS"
