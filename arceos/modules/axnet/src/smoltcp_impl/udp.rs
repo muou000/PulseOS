@@ -19,7 +19,6 @@ use super::{
     SOCKET_SET, SocketSetWrapper, SocketWaitQueues,
     addr::{UNSPECIFIED_ENDPOINT, from_core_sockaddr, into_core_sockaddr, is_unspecified},
     block_on_socket_io, deadline_from_ticks, register_wait_queue, schedule_poll, socket_deadline,
-    unregister_wait_queue,
 };
 
 /// A UDP socket that provides POSIX-like APIs.
@@ -471,8 +470,7 @@ impl Write for UdpSocket {
 impl Drop for UdpSocket {
     fn drop(&mut self) {
         self.shutdown().ok();
-        unregister_wait_queue(self.handle);
-        SOCKET_SET.remove(self.handle);
+        SOCKET_SET.remove_and_unregister(self.handle);
     }
 }
 

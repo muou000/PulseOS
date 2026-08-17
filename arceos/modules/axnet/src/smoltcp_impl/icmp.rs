@@ -16,7 +16,7 @@ use smoltcp::{
 
 use super::{
     SOCKET_SET, SocketSetWrapper, SocketWaitQueues, block_on_socket_io, interface_ipv4_address,
-    register_wait_queue, schedule_poll, socket_deadline, unregister_wait_queue,
+    register_wait_queue, schedule_poll, socket_deadline,
 };
 
 const IPV4_HEADER_LEN: usize = 20;
@@ -256,8 +256,7 @@ impl Pollable for IcmpSocket {
 
 impl Drop for IcmpSocket {
     fn drop(&mut self) {
-        unregister_wait_queue(self.handle);
-        SOCKET_SET.remove(self.handle);
+        SOCKET_SET.remove_and_unregister(self.handle);
     }
 }
 

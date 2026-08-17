@@ -10,8 +10,7 @@ use smoltcp::{
 };
 
 use super::{
-    LISTEN_QUEUE_SIZE, SOCKET_SET, SocketSetWrapper, SocketWaitQueues,
-    register_listener_wait_queue, unregister_wait_queue,
+    LISTEN_QUEUE_SIZE, SOCKET_SET, SocketSetWrapper, SocketWaitQueues, register_listener_wait_queue,
 };
 
 const PORT_NUM: usize = 65536;
@@ -43,8 +42,7 @@ impl ListenTableEntry {
 impl Drop for ListenTableEntry {
     fn drop(&mut self) {
         for &handle in &self.syn_queue {
-            unregister_wait_queue(handle);
-            SOCKET_SET.remove(handle);
+            SOCKET_SET.remove_and_unregister(handle);
         }
     }
 }
@@ -137,8 +135,7 @@ impl ListenTable {
                     let handle = syn_queue.swap_remove_front(actual_idx).unwrap();
                     drop(entry_guard);
                     if is_closed(handle) {
-                        unregister_wait_queue(handle);
-                        SOCKET_SET.remove(handle);
+                        SOCKET_SET.remove_and_unregister(handle);
                         return ax_err!(
                             ConnectionReset,
                             "socket accept() failed: connection reset"
