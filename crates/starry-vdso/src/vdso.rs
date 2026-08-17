@@ -25,6 +25,8 @@ pub fn init_vdso_data() {
 
 use core::sync::atomic::{AtomicBool, Ordering};
 
+use kernel_guard::NoPreemptIrqSave;
+
 static VDSO_UPDATE_LOCK: AtomicBool = AtomicBool::new(false);
 
 /// Set the vDSO epoch offset.
@@ -34,6 +36,13 @@ pub fn set_vdso_epoch_offset(offset: u64) {
 
 /// Update vDSO data
 pub fn update_vdso_data() {
+    // This path runs both from syscall context and from the local timer IRQ.
+    // Keeping local IRQs enabled while the update lock is held would let the
+    // timer handler re-enter here and spin on a lock owned by the interrupted
+    // context. Disable local IRQs before taking the lock so its owner always
+    // gets a chance to publish the new vDSO data and release it.
+    let _irq_guard = NoPreemptIrqSave::new();
+
     while VDSO_UPDATE_LOCK
         .compare_exchange_weak(false, true, Ordering::Acquire, Ordering::Relaxed)
         .is_err()
