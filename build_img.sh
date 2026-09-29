@@ -75,9 +75,9 @@ find_base_tar() {
 
     # Preferred fixed names.
     candidates+=(
-        "${BASE_DIR}/alpine-minirootfs-${arch}.tar.gz"
-        "${BASE_DIR}/alpine-minirootfs-${arch}.tar.xz"
-        "${BASE_DIR}/alpine-minirootfs-${arch}.tar.zst"
+        "${BASE_DIR}/base-rootfs-${arch}.tar.gz"
+        "${BASE_DIR}/base-rootfs-${arch}.tar.xz"
+        "${BASE_DIR}/base-rootfs-${arch}.tar.zst"
     )
 
     local f
@@ -88,8 +88,8 @@ find_base_tar() {
     # Compatible with official versioned naming.
     shopt -s nullglob
     local matches=(
-        "${BASE_DIR}"/alpine-minirootfs-*-${arch}.tar.*
-        "${BASE_DIR}/${arch}"/alpine-minirootfs*.tar.*
+        "${BASE_DIR}"/base-rootfs-*-${arch}.tar.*
+        "${BASE_DIR}/${arch}"/base-rootfs*.tar.*
     )
     shopt -u nullglob
 
@@ -177,7 +177,7 @@ build_one_arch() {
     local base_tar
     base_tar="$(find_base_tar "${arch}" || true)"
 
-    [[ -n "${base_tar}" ]] || die "Missing base tar for ${arch}. Put alpine-minirootfs under ${BASE_DIR}."
+    [[ -n "${base_tar}" ]] || die "Missing base tar for ${arch}. Put base-rootfs under ${BASE_DIR}."
 
     local tmpdir
     tmpdir="$(mktemp -d "${TMPDIR:-/tmp}/pulseos-rootfs-${arch}-XXXXXX")"
