@@ -134,7 +134,7 @@ debug: prepare-tools
 	@$(MAKE) -C arceos A=$(A) ARCH=loongarch64 SMP=$(SMP) APP_FEATURES=qemu LOG=$(LOG) BUS=pci FEATURES=bus-pci OUT_DIR=$(A) build
 	@cp $(NAME)_loongarch64-qemu-virt.elf kernel-la-debug
 	@cp $(NAME)_loongarch64-qemu-virt.elf $(NAME)_loongarch64-qemu-virt-debug.elf
-	@./build_img.sh all
+	@./scripts/build_img.sh all
 
 # Build the VisionFive 2 U-Boot uImage without QEMU or tracing features.
 vf2: prepare-tools
@@ -184,7 +184,8 @@ defconfig: prepare-tools
 # This target produces the rootfs images used only by preliminary-test flows.
 # `all` invokes it automatically only after detecting a preliminary image.
 img_all:
-	@./build_img.sh all
+	@if [ ! -f rootfs/base/base-rootfs-riscv64.tar.gz ] || [ ! -f rootfs/base/base-rootfs-loongarch64.tar.xz ]; then ./scripts/fetch-rootfs.sh; fi
+	@./scripts/build_img.sh all
 	@cp rootfs-riscv64.img disk.img
 	@cp rootfs-loongarch64.img disk-la.img
 	@cp disk.img arceos/disk.img

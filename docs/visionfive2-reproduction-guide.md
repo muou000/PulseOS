@@ -215,12 +215,12 @@ Windows/WSL 环境更适合在 Windows 中使用 Rufus、balenaEtcher 或同类 
 以下命令已经在当前源码验证，生成的 ext4 包含 `1.1.1.1` 和 `8.8.8.8`：
 
 ```bash
-OUTPUT_DIR=target/vf2-rootfs IMG_SIZE=128M ./build_img.sh riscv64
+OUTPUT_DIR=target/vf2-rootfs IMG_SIZE=128M ./scripts/build_img.sh riscv64
 debugfs -R 'cat /etc/resolv.conf' \
   target/vf2-rootfs/rootfs-riscv64.img
 ```
 
-但当前 `rootfs/base`、`overlay` 和 `extras` 组合生成的最小镜像没有 `/usr/bin/git`。
+但当前 `rootfs/base` 底包生成的最小镜像没有 `/usr/bin/git`。
 它适合验证 SD/ext4 启动，不足以完成 GitHub clone。除非已经把 Git、remote-https、其动态库
 依赖和 CA bundle 纳入 rootfs 输入，否则不要用它替代 `sdcard-rv-pub.img` 的 Git 验收。
 

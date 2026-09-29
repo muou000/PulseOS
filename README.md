@@ -21,8 +21,9 @@ PulseOS 的整体软件栈包含用户空间、Trap 异常分发、内核服务�
 ├── Cargo.toml
 ├── Cargo.lock
 ├── Makefile                   #
-├── build_img.sh               # 生成 RISC-V 64/LoongArch 64 根文件系统镜像
-├── add_apk_to_rootfs.sh
+├── scripts                    # 根文件系统镜像辅助脚本
+│   ├── build_img.sh           # 生成 RISC-V 64/LoongArch 64 根文件系统镜像
+│   └── fetch-rootfs.sh        # 从 GitHub Release 下载 rootfs 底包并校验
 ├── src
 │   └── main.rs                 # 内核启动与初始用户进程加载
 ├── arceos                     # ArceOS 内核主体与基础组件
@@ -49,10 +50,8 @@ PulseOS 的整体软件栈包含用户空间、Trap 异常分发、内核服务�
 │   └── src
 │       ├── handler.rs         # 系统调用统一入口
 │       └── impls              # fs、ipc、mm、net、task、time 等实现
-├── rootfs                    # 根文件系统构建输入
-│   ├── base                   # Alpine minirootfs 基础包
-│   ├── extras                 # 测试和工具扩展包
-│   └── overlay                # 通用及按架构覆盖文件
+├── rootfs                    # 根文件系统底包缓存（脚本下载，不入库）
+│   └── base                  # base-rootfs-<arch>.tar 底包
 ├── docs                      # 设计文档、图片和平台移植记录
 │   ├── pre、final              # 初赛和决赛设计文档源文件
 │   └── visionfive2*.md        # VisionFive 2 相关记录
@@ -114,4 +113,4 @@ make visionfive2 #构建用于VisionFive 2 U-Boot/TFTP启动的镜像
 
 ## 注
 
-对于loongarch64 musl对于cyclictest中进程调度相关syscalls的实现不完整，直接在build_img.sh中添加了对应的patch修补libc，使其能调用对应syscalls（由ai实现，详见 [records/ai-logs/Coder/2026-05-02-cyclictest-musl-scheduler.md](records/ai-logs/Coder/2026-05-02-cyclictest-musl-scheduler.md)）
+对于loongarch64 musl对于cyclictest中进程调度相关syscalls的实现不完整，直接在scripts/build_img.sh中添加了对应的patch修补libc，使其能调用对应syscalls（由ai实现，详见 [records/ai-logs/Coder/2026-05-02-cyclictest-musl-scheduler.md](records/ai-logs/Coder/2026-05-02-cyclictest-musl-scheduler.md)）
