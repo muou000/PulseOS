@@ -13,3 +13,5 @@ kernel-*
 *.log
 *.folded
 vendor/**/target/
+rootfs/base/*.tar.xz
+rootfs/base/*.tar.gz
