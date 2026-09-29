@@ -12,3 +12,4 @@ kernel-*
 .antigravitycli/
 *.log
 *.folded
+vendor/**/target/
