@@ -751,13 +751,7 @@ pub fn init_filesystems(mut block_devs: AxDeviceContainer<AxBlockDevice>) {
 
     // Use block device as the root filesystem. The remaining devices are
     // registered for user-initiated mount.
-    let root_disk_idx = if cfg!(feature = "pre-testcode") {
-        1
-    } else if cfg!(feature = "final-testcode") {
-        0
-    } else {
-        0
-    };
+    let root_disk_idx = 0;
     let root_pos = candidates
         .iter()
         .position(|cand| cand.disk_idx == root_disk_idx)

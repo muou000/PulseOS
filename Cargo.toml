@@ -146,8 +146,6 @@ qperf-trace = [
     "pulse_core/qperf-trace",
     "pulse_syscalls/qperf-trace",
 ]
-pre-testcode = ["pulse_core/pre-testcode"]
-final-testcode = ["pulse_core/final-testcode"]
 
 [dependencies]
 axhal.workspace = true

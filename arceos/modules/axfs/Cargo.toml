@@ -14,8 +14,6 @@ fat = ["dep:fatfs"]
 ext4 = ["dep:ext4plus"]
 times = []
 std = []
-pre-testcode = []
-final-testcode = []
 qperf-trace = []
 
 [dependencies]

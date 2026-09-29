@@ -42,11 +42,6 @@ fn main() {
     pulse_core::task::init_itimer_hook();
     info!("itimer hook registered");
 
-    if cfg!(any(feature = "pre-testcode", feature = "final-testcode")) {
-        pulse_core::task::set_stdin_polling_enabled(false);
-        info!("testcode feature active: stdin polling disabled");
-    }
-
     pulse_core::task::init_procfs_provider();
     info!("procfs provider registered");
 
@@ -65,13 +60,7 @@ fn main() {
                 pulse_core::task::current_thread().expect("init task entered without Thread");
             let proc = thread.process();
 
-            let shell_args_base: &[&str] = if cfg!(feature = "pre-testcode") {
-                &["sh", "/testcode.sh"]
-            } else if cfg!(feature = "final-testcode") {
-                &["sh", "-c", "cd /glibc && ./cagent_testcode.sh && ./buildstorm_testcode.sh"]
-            } else {
-                &["sh"]
-            };
+            let shell_args_base: &[&str] = &["sh"];
             let shell_envs: &[&str] = &["PATH=/usr/sbin:/usr/bin:/sbin:/bin"];
 
             let fs_handle = proc.fs_context_handle();
@@ -114,32 +103,14 @@ fn main() {
             info!("Created initial user process");
 
             let init_task = pulse_core::task::spawn_task_with_thread(inner, init_thread.clone(), true);
-
-            if cfg!(any(feature = "pre-testcode", feature = "final-testcode")) {
-                match init_task.join() {
-                    Some(0) => info!("Init task exited normally"),
-                    Some(exit_code) => error!("Init task exited with failure code {}", exit_code),
-                    None => error!("Init task join returned no exit code"),
-                }
-                pulse_core::task::unregister_thread_global(init_tid);
-                let _ = init_thread.process().take_task_ref_by_tid(init_tid);
-                init_thread.process().release_task_refs();
-
-                power_off_after_writeback();
-            } else {
-                loop {
-                    axtask::yield_now();
-                }
+            loop {
+                axtask::yield_now();
             }
         }
         Err(e) => {
             error!("Failed to create user process: {:?}", e);
-            if cfg!(any(feature = "pre-testcode", feature = "final-testcode")) {
-                power_off_after_writeback();
-            } else {
-                loop {
-                    axtask::yield_now();
-                }
+            loop {
+                axtask::yield_now();
             }
         }
     }

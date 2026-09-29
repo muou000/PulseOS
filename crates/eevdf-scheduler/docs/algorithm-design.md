@@ -842,7 +842,7 @@ make test 2>&1 | tail -30
 
 ```bash
 set -o pipefail
-make test FEATURE=final-testcode,sched-eevdf,sched-load-balance 2>&1 | tail -30
+make test FEATURE=sched-eevdf,sched-load-balance 2>&1 | tail -30
 ```
 
 构建通过只能证明源码和双架构配置可编译。调度公平性、尾延迟或吞吐提升需要单独的

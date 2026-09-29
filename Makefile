@@ -1,6 +1,5 @@
 export A := $(PWD)
 export NAME := $(notdir $(A))
-export PATH := $(A)/bin:$(PATH)
 export NO_AXSTD := y
 export AX_LIB := axfeat
 
@@ -9,10 +8,8 @@ export AX_LIB := axfeat
 APP_FEATURES ?= qemu
 export APP_FEATURES
 
-BLK ?= y
-export BLK
-NET ?= n
-export NET
+export BLK ?= y
+export NET ?= n
 
 SMP ?= 8
 MEM ?= 8G
