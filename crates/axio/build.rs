@@ -6,6 +6,7 @@ fn main() {
     autocfg::emit_possibility("borrowedbuf_init");
     let code = r#"
         #![no_std]
+        #![feature(core_io)]
         #![feature(core_io_borrowed_buf)]
         pub fn probe() {
             let _ = core::io::BorrowedBuf::init_len;

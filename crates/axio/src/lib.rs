@@ -1,5 +1,6 @@
 #![doc = include_str!("../README.md")]
 #![cfg_attr(not(doc), no_std)]
+#![feature(core_io)]
 #![feature(core_io_borrowed_buf)]
 #![feature(min_specialization)]
 #![feature(maybe_uninit_fill)]
