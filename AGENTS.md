@@ -131,3 +131,17 @@ timeout --signal=INT --kill-after=20s 120s \
 - 如果遇到权限问题，必须立即停止任务，并提示用户先修复权限后再继续。
 - 一旦出现权限不足、只读文件系统、无法写入产物目录等情况，不要尝试绕过限制或改用破坏性手段。
 - 制订计划时必须先考虑制订功能的测试
+
+## Agent skills
+
+### Issue tracker
+
+GitHub Issues via `gh`; see `docs/agents/issue-tracker.md`.
+
+### Triage labels
+
+Default canonical triage labels; see `docs/agents/triage-labels.md`.
+
+### Domain docs
+
+Single-context layout; see `docs/agents/domain.md`.
