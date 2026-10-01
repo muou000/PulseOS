@@ -127,67 +127,35 @@ pub fn sys_write(fd: usize, buf: usize, count: usize) -> isize {
             }
         }
     }
+
     let file_obj = object.as_any().downcast_ref::<FileObject>();
-    if let Some(file_obj) = file_obj {
-        if file_obj.inner().is_direct_regular_file() {
-            let block_size = file_obj.inner().block_size() as usize;
-            let offset = match file_obj.seek(SeekFrom::Current(0)) {
-                Ok(off) => off as usize,
-                Err(e) => return -e.code() as isize,
-            };
-            if buf % block_size != 0 || offset % block_size != 0 || count % block_size != 0 {
-                return -LinuxError::EINVAL.code() as isize;
-            }
-        }
+    let segments = [UserIoSegment {
+        addr: buf,
+        len: count,
+    }];
+    if let Err(e) = prepare_write(file_obj, &segments, WriteOffset::Shared) {
+        return -e.code() as isize;
     }
+
     let _tty_write_transaction = object
         .is_tty_output()
         .then(pulse_core::fd_table::lock_tty_write_transaction);
-    let mut total = 0usize;
     let mut fallback_buf = None;
     #[cfg(feature = "qperf-trace")]
     let mut marker_scanner = OutputMarkerScanner::new(fd);
 
-    while total < count {
-        let user_buf = match buf.checked_add(total) {
-            Some(addr) => addr,
-            None => return -LinuxError::EINVAL.code() as isize,
-        };
-        let requested = (count - total).min(MAX_IO_CHUNK);
-        let (ret, submitted, _) =
-            match write_from_user(user_buf, requested, &mut fallback_buf, |slice| {
-                let written = match file_obj {
-                    Some(file_obj) => file_obj.write_slice(slice),
-                    None => object.write(slice),
-                }?;
-                if written > slice.len() {
-                    return Err(LinuxError::EIO);
-                }
-                #[cfg(feature = "qperf-trace")]
-                if written > 0 {
-                    marker_scanner.push(&slice[..written]);
-                }
-                Ok(written)
-            }) {
-                Ok(result) => result,
-                Err(e) => {
-                    if total > 0 {
-                        return total as isize;
-                    }
-                    let errno = e.code();
-                    queue_sigpipe_on_epipe(sigpipe_writer, errno);
-                    return -errno as isize;
-                }
-            };
-        if ret == 0 {
-            break;
-        }
-        total += ret;
-        if ret < submitted {
-            break;
-        }
-    }
-    total as isize
+    execute_user_write(
+        object.as_ref(),
+        file_obj,
+        &segments,
+        WriteOffset::Shared,
+        &mut fallback_buf,
+        |bytes| {
+            #[cfg(feature = "qperf-trace")]
+            marker_scanner.push(bytes);
+        },
+        |_| {},
+    )
 }
 pub fn sys_pread64(fd: usize, buf: usize, count: usize, offset: usize) -> isize {
     axlog::trace!(
@@ -293,56 +261,23 @@ pub fn sys_pwrite64(fd: usize, buf: usize, count: usize, offset: usize) -> isize
     }
     let object = entry.object;
     let file_obj = object.as_any().downcast_ref::<FileObject>();
-    if let Some(file_obj) = file_obj {
-        if file_obj.inner().is_direct_regular_file() {
-            let block_size = file_obj.inner().block_size() as usize;
-            if buf % block_size != 0
-                || (offset as usize) % block_size != 0
-                || count % block_size != 0
-            {
-                return -LinuxError::EINVAL.code() as isize;
-            }
-        }
+    let segments = [UserIoSegment {
+        addr: buf,
+        len: count,
+    }];
+    let offset = offset as u64;
+    if let Err(e) = prepare_write(file_obj, &segments, WriteOffset::Positional(offset)) {
+        return -e.code() as isize;
     }
-    let mut total = 0usize;
+
     let mut fallback_buf = None;
-
-    while total < count {
-        let user_buf = match buf.checked_add(total) {
-            Some(addr) => addr,
-            None => return -LinuxError::EINVAL.code() as isize,
-        };
-        let requested = (count - total).min(MAX_IO_CHUNK);
-        let current_offset = match (offset as u64).checked_add(total as u64) {
-            Some(off) => off,
-            None => return -LinuxError::EINVAL.code() as isize,
-        };
-
-        let (ret, submitted, _) = match write_from_user(
-            user_buf,
-            requested,
-            &mut fallback_buf,
-            |slice| match file_obj {
-                Some(file_obj) => file_obj.write_at_slice(slice, current_offset),
-                None => object.write_at(slice, current_offset),
-            },
-        ) {
-            Ok(result) => result,
-            Err(e) => {
-                return if total > 0 {
-                    total as isize
-                } else {
-                    -e.code() as isize
-                };
-            }
-        };
-        if ret == 0 {
-            break;
-        }
-        total += ret;
-        if ret < submitted {
-            break;
-        }
-    }
-    total as isize
+    execute_user_write(
+        object.as_ref(),
+        file_obj,
+        &segments,
+        WriteOffset::Positional(offset),
+        &mut fallback_buf,
+        |_| {},
+        |_| {},
+    )
 }

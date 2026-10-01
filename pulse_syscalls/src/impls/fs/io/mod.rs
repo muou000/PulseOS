@@ -14,13 +14,16 @@ use pulse_core::{
     task::{current_thread, queue_signal_to_thread, uaccess},
 };
 
-use crate::impls::{
-    fs::common::{get_fd_entry, get_fd_objects, open_fd_flags, remove_fd_entry},
-    utils::{
-        ScratchBuffer, alloc_uninit_bytes, pin_user_read_slice, pin_user_write_slice,
-        read_user_bytes_partial, read_user_i64, read_user_iovec_array, read_user_timespec,
-        with_process, write_user_bytes, write_user_bytes_partial, write_user_i64,
+use crate::{
+    impls::{
+        fs::common::{get_fd_entry, get_fd_objects, open_fd_flags, remove_fd_entry},
+        utils::{
+            ScratchBuffer, alloc_uninit_bytes, pin_user_read_slice, pin_user_write_slice,
+            read_user_bytes_partial, read_user_i64, read_user_iovec_array, read_user_timespec,
+            with_process, write_user_bytes, write_user_bytes_partial, write_user_i64,
+        },
     },
+    validation::io::UserIoSegment,
 };
 
 mod descriptor;
@@ -30,6 +33,7 @@ mod scalar;
 mod support;
 mod transfer;
 mod vectored;
+mod write_path;
 
 pub use descriptor::sys_sync;
 pub(crate) use descriptor::{
@@ -45,9 +49,12 @@ use support::{
 };
 pub(crate) use transfer::*;
 pub(crate) use vectored::*;
+pub(crate) use write_path::{
+    WriteOffset, WriteTransfer, execute_user_write, normalize_iovecs, prepare_write,
+};
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum UserWriteSource {
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum UserWriteSource {
     Pinned,
     Scratch,
 }
