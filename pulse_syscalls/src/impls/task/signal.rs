@@ -2,51 +2,32 @@ use core::time::Duration;
 
 use axhal::context::TrapFrame;
 use linux_raw_sys::general::{
-    MINSIGSTKSZ, O_CLOEXEC, O_NONBLOCK, SA_NOCLDSTOP, SA_NOCLDWAIT, SA_NODEFER, SA_ONSTACK,
-    SA_RESETHAND, SA_RESTART, SA_SIGINFO, SIG_BLOCK, SIG_SETMASK, SIG_UNBLOCK, SIGKILL, SIGSEGV,
-    SIGSTOP, SS_DISABLE, SS_ONSTACK, _NSIG, sigaction, siginfo, timespec,
+    MINSIGSTKSZ, O_CLOEXEC, O_NONBLOCK, SIGSEGV, SS_DISABLE, SS_ONSTACK, sigaction, siginfo,
 };
 use pulse_core::{
     fd_table::{FdEntry, FdFlags, SignalFdObject},
     task::{SigAction, uaccess},
 };
 
-use crate::{LinuxError, impls::utils::read_user_timespec};
-
-fn timespec_to_duration(ts: timespec) -> Result<Duration, LinuxError> {
-    if ts.tv_sec < 0 || ts.tv_nsec < 0 || ts.tv_nsec > 999_999_999 {
-        return Err(LinuxError::EINVAL);
-    }
-    Ok(Duration::new(ts.tv_sec as u64, ts.tv_nsec as u32))
-}
-
-fn duration_to_nanos_saturating(duration: Duration) -> u64 {
-    duration
-        .as_secs()
-        .saturating_mul(1_000_000_000)
-        .saturating_add(duration.subsec_nanos() as u64)
-}
-
-const SUPPORTED_SIGACTION_FLAGS: usize = SA_NOCLDSTOP as usize
-    | SA_NOCLDWAIT as usize
-    | SA_SIGINFO as usize
-    | SA_ONSTACK as usize
-    | SA_RESTART as usize
-    | SA_NODEFER as usize
-    | SA_RESETHAND as usize;
-
-fn sanitize_signal_mask(mask: u64) -> u64 {
-    let unmaskable = (1u64 << (SIGKILL as usize - 1)) | (1u64 << (SIGSTOP as usize - 1));
-    mask & !unmaskable
-}
+use crate::{
+    LinuxError,
+    impls::utils::read_user_timespec,
+    validation::{
+        signal::{
+            SUPPORTED_SIGACTION_FLAGS, sanitize_signal_mask, update_signal_mask,
+            validate_sigaction_signum, validate_sigset_size,
+        },
+        time::{duration_to_nanos_saturating, timespec_to_duration},
+    },
+};
 
 pub fn sys_rt_sigprocmask(_how: usize, _set: usize, _oldset: usize, _sigsetsize: usize) -> isize {
     let how = _how;
     let set = _set;
     let oldset = _oldset;
     let sigsetsize = _sigsetsize;
-    if sigsetsize != core::mem::size_of::<u64>() {
-        return -LinuxError::EINVAL.code() as isize;
+    if let Err(e) = validate_sigset_size(sigsetsize) {
+        return -e.code() as isize;
     }
     let thread = match pulse_core::task::current_thread() {
         Ok(t) => t,
@@ -70,12 +51,9 @@ pub fn sys_rt_sigprocmask(_how: usize, _set: usize, _oldset: usize, _sigsetsize:
                 return -LinuxError::EFAULT.code() as isize;
             }
         };
-        let current = old_mask;
-        let mask = match how as u32 {
-            SIG_BLOCK => current | new_bits,
-            SIG_UNBLOCK => current & !new_bits,
-            SIG_SETMASK => new_bits,
-            _ => return -LinuxError::EINVAL.code() as isize,
+        let mask = match update_signal_mask(old_mask, new_bits, how) {
+            Ok(mask) => mask,
+            Err(e) => return -e.code() as isize,
         };
         thread.set_signal_blocked_mask(mask);
     }
@@ -100,8 +78,8 @@ pub fn sys_rt_sigaction(_signum: usize, _act: usize, _oldact: usize, _sigsetsize
     let act = _act;
     let oldact = _oldact;
     let sigsetsize = _sigsetsize;
-    if sigsetsize != core::mem::size_of::<u64>() {
-        return -LinuxError::EINVAL.code() as isize;
+    if let Err(e) = validate_sigset_size(sigsetsize) {
+        return -e.code() as isize;
     }
     let thread = match pulse_core::task::current_thread() {
         Ok(t) => t,
@@ -140,11 +118,8 @@ pub fn sys_rt_sigaction(_signum: usize, _act: usize, _oldact: usize, _sigsetsize
         None
     };
 
-    if signum == 0
-        || signum > (_NSIG as usize)
-        || (new_action.is_some() && (signum == SIGKILL as usize || signum == SIGSTOP as usize))
-    {
-        return -LinuxError::EINVAL.code() as isize;
+    if let Err(e) = validate_sigaction_signum(signum, new_action.is_some()) {
+        return -e.code() as isize;
     }
 
     // This is one sighand transaction.  If copying oldact faults below, Linux
@@ -228,8 +203,8 @@ pub fn sys_rt_sigreturn(tf: &mut TrapFrame) -> isize {
 }
 
 pub fn sys_rt_sigsuspend(mask: usize, sigsetsize: usize) -> isize {
-    if sigsetsize != core::mem::size_of::<u64>() {
-        return -LinuxError::EINVAL.code() as isize;
+    if let Err(e) = validate_sigset_size(sigsetsize) {
+        return -e.code() as isize;
     }
     let thread = match pulse_core::task::current_thread() {
         Ok(t) => t,
@@ -254,8 +229,8 @@ pub fn sys_rt_sigtimedwait(set: usize, info: usize, timeout: usize, sigsetsize: 
     if set == 0 {
         return -LinuxError::EFAULT.code() as isize;
     }
-    if sigsetsize != core::mem::size_of::<u64>() {
-        return -LinuxError::EINVAL.code() as isize;
+    if let Err(e) = validate_sigset_size(sigsetsize) {
+        return -e.code() as isize;
     }
 
     let thread = match pulse_core::task::current_thread() {
@@ -406,9 +381,7 @@ pub fn sys_sigaltstack(ss: usize, oss: usize) -> isize {
             Some(altstack) => altstack,
             None => return -LinuxError::EINVAL.code() as isize,
         };
-        if (altstack.flags & SS_DISABLE as usize) == 0
-            && raw_ss.ss_size < MINSIGSTKSZ as usize
-        {
+        if (altstack.flags & SS_DISABLE as usize) == 0 && raw_ss.ss_size < MINSIGSTKSZ as usize {
             return -LinuxError::ENOMEM.code() as isize;
         }
         Some(altstack)
@@ -437,8 +410,8 @@ pub fn sys_sigaltstack(ss: usize, oss: usize) -> isize {
 }
 
 pub fn sys_signalfd4(ufd: isize, mask: usize, sigsetsize: usize, flags: usize) -> isize {
-    if sigsetsize != core::mem::size_of::<u64>() {
-        return -LinuxError::EINVAL.code() as isize;
+    if let Err(e) = validate_sigset_size(sigsetsize) {
+        return -e.code() as isize;
     }
 
     let thread = match pulse_core::task::current_thread() {
@@ -494,22 +467,21 @@ pub fn sys_signalfd4(ufd: isize, mask: usize, sigsetsize: usize, flags: usize) -
 
 #[cfg(test)]
 mod tests {
+    use linux_raw_sys::general::{SA_NODEFER, SA_RESTART, SA_UNSUPPORTED, SIGKILL, SIGSTOP};
+
     use super::*;
-    use linux_raw_sys::general::SA_UNSUPPORTED;
 
     #[test]
     fn signal_masks_cannot_contain_kill_or_stop() {
-        let mask = (1u64 << (SIGKILL as usize - 1))
-            | (1u64 << (SIGSTOP as usize - 1))
-            | (1u64 << 9);
+        let mask =
+            (1u64 << (SIGKILL as usize - 1)) | (1u64 << (SIGSTOP as usize - 1)) | (1u64 << 9);
         assert_eq!(sanitize_signal_mask(mask), 1u64 << 9);
     }
 
     #[test]
     fn sigtimedwait_set_ignores_kill_and_stop() {
-        let waitset = (1u64 << (SIGKILL as usize - 1))
-            | (1u64 << (SIGSTOP as usize - 1))
-            | (1u64 << 9);
+        let waitset =
+            (1u64 << (SIGKILL as usize - 1)) | (1u64 << (SIGSTOP as usize - 1)) | (1u64 << 9);
         assert_eq!(sanitize_signal_mask(waitset), 1u64 << 9);
     }
 
@@ -529,7 +501,10 @@ mod tests {
             shared.replace_action(10, Some(first)).handler,
             pulse_core::task::SIG_DFL
         );
-        assert_eq!(shared.replace_action(10, Some(second)).handler, first.handler);
+        assert_eq!(
+            shared.replace_action(10, Some(second)).handler,
+            first.handler
+        );
         assert_eq!(shared.action(10).handler, second.handler);
     }
 

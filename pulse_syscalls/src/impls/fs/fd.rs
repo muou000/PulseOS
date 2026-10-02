@@ -33,17 +33,13 @@ pub fn sys_close(fd: usize) -> isize {
     }
 }
 
-const CLOSE_RANGE_UNSHARE: u32 = 1 << 1;
-const CLOSE_RANGE_CLOEXEC: u32 = 1 << 2;
+use crate::validation::fd::{CLOSE_RANGE_CLOEXEC, CLOSE_RANGE_UNSHARE, parse_close_range};
 
 pub fn sys_close_range(first: usize, last: usize, flags: usize) -> isize {
-    let first = first as u32 as usize;
-    let last = last as u32 as usize;
-    let flags = flags as u32;
-    let allowed = CLOSE_RANGE_UNSHARE | CLOSE_RANGE_CLOEXEC;
-    if first > last || flags & !allowed != 0 {
-        return -LinuxError::EINVAL.code() as isize;
-    }
+    let (first, last, flags) = match parse_close_range(first, last, flags) {
+        Ok(args) => args,
+        Err(e) => return -e.code() as isize,
+    };
 
     let process = match pulse_core::task::current_process() {
         Ok(process) => process,

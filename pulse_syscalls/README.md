@@ -57,6 +57,33 @@ futex2 word 对齐/flags/mask/count、绝对 deadline 的过期计算、mmap 文
 长度上界、SIGKILL/SIGSTOP mask 清除、signal number 与 kernel sigset size 边界。
 这些测试不会把 futex2 的 word 校验误称为 `futex_waitv` 中逐项检查已被覆盖。
 
+## 第二批 LTP 对照
+
+本批新增 25 个共享校验测试，其中 9 个保留具体 LTP 编号；加上已有的 I/O
+边界测试，当前宿主共 72 个测试，31 个匹配 `ltp_` 过滤器。新增的生产共享
+校验位于 `validation/system.rs`、`validation/resource.rs`、`validation/credential.rs`、
+`validation/wait.rs` 和 `validation/timer.rs`。
+
+| LTP 来源 | Rust 测试模块 | 保留断言 | 仍需要 guest 环境的行为 |
+| --- | --- | --- | --- |
+| `getrandom/getrandom01.c` | `validation/system.rs` | 非零长度 NULL buffer 为 `EFAULT`；额外回归检查零长度 NULL buffer 被接受 | 随机字节、熵状态和用户内存写回 |
+| `getrandom/getrandom05.c` | `validation/system.rs` | 未知 flags 与 RANDOM/INSECURE 冲突为 `EINVAL` | libc 指针 fault、设备读取 |
+| `reboot/reboot01.c` | `validation/system.rs` | CAD_ON/CAD_OFF 命令解码 | CAP_SYS_BOOT、reset/poweroff 和实际写回 |
+| `membarrier/membarrier01.c` | `validation/system.rs` | command/flags 矩阵与 registration command 映射 | 原子注册状态、跨线程 memory fence |
+| `adjtimex/adjtimex02.c` | `validation/timer.rs` | tick 超过上下界时返回 `EINVAL` | CAP_SYS_TIME、共享 timex、时钟调整 |
+| `wait4/wait403.c` | `validation/wait.rs` | INT_MIN 返回 `ESRCH`；PID selector 和 status word 编码 | child lookup、reap、WNOHANG 和信号 |
+| `waitid/waitid02.c` | `validation/wait.rs` | 没有 WEXITED/WUNTRACED/WCONTINUED 时为 `EINVAL` | siginfo 写回、子进程状态 |
+| `getrlimit/getrlimit02.c` | `validation/resource.rs` | 非法 resource 为 `EINVAL`；支持资源集合 | rlimit 指针和持久化进程状态 |
+| `setrlimit/setrlimit03.c` | `validation/resource.rs` | soft > hard 为 `EINVAL`；提升限制需要权限；NOFILE ceiling | CAP_SYS_RESOURCE 和实际 limit 修改 |
+
+额外的 PulseOS 回归覆盖 reboot magic 和写回屏障分类、timeval 负值/微秒边界、
+adjtimex mode 互斥、UID/GID 的 32 位截断和 optional sentinel；这些没有对应的
+上表 LTP 断言，因此不使用 `ltp_` 前缀。`membarrier` 测试只覆盖命令解析，
+不证明注册状态或跨线程屏障效果；QUERY 当前仍保留原实现的 `EINVAL` 行为。
+
+这些测试只保留能脱离真实 guest 资源执行的参数/ABI 断言。`sys_getrandom`、
+`sys_reboot`、`sys_membarrier`、`sys_wait4`、`sys_waitid` 和 `sys_prlimit64` 的实际
+资源、指针、能力和调度行为仍由裸机实现处理并需要 guest 测试。
 ## I/O 写入策略
 
 `sys_write`、`sys_writev`、`sys_pwrite64` 和 `sys_pwritev` 共享同一个用户段执行器。
