@@ -51,12 +51,8 @@ pub fn sys_fdatasync(fd: usize) -> isize {
 }
 pub fn sys_pipe2(fds: usize, flags: usize) -> isize {
     axlog::debug!("sys_pipe2: fds={:#x}, flags={:#x}", fds, flags);
-    if fds == 0 {
-        return -LinuxError::EFAULT.code() as isize;
-    }
-    let allowed = O_NONBLOCK as usize | O_CLOEXEC as usize;
-    if (flags & !allowed) != 0 {
-        return -LinuxError::EINVAL.code() as isize;
+    if let Err(e) = crate::validation::fd::validate_pipe2(fds, flags) {
+        return -e.code() as isize;
     }
     let (read_entry, write_entry) = pipe_entries(open_fd_flags(flags));
     let new_fds = match with_process(|process| -> Result<[i32; 2], LinuxError> {
@@ -194,19 +190,20 @@ pub fn sys_sync() -> isize {
     // Keep the syscall interruptible: a lost SD/MMC completion must not make
     // Ctrl-C unable to return the terminal to its shell. The timeout is a
     // second line of defense for signals or timer delivery that arrive late.
-    match axtask::future::block_on(axtask::future::interruptible(
-        axtask::future::timeout(
-            Some(SYNC_TIMEOUT),
-            axfs::flush_all_filesystems_async(),
-        ),
-    )) {
+    match axtask::future::block_on(axtask::future::interruptible(axtask::future::timeout(
+        Some(SYNC_TIMEOUT),
+        axfs::flush_all_filesystems_async(),
+    ))) {
         Ok(Ok(Ok(()))) => 0,
         Err(_) => {
             axlog::warn!("sys_sync: interrupted while flushing filesystems");
             -LinuxError::EINTR.code() as isize
         }
         Ok(Err(_)) => {
-            axlog::error!("sys_sync: filesystem flush timed out after {:?}", SYNC_TIMEOUT);
+            axlog::error!(
+                "sys_sync: filesystem flush timed out after {:?}",
+                SYNC_TIMEOUT
+            );
             -LinuxError::ETIMEDOUT.code() as isize
         }
         Ok(Ok(Err(error))) => {

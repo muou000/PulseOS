@@ -1,40 +1,27 @@
-use core::{
-    ffi::c_long,
-    time::Duration,
-};
+use core::{ffi::c_long, time::Duration};
 
 use linux_raw_sys::general::{
-    CAP_SYS_TIME, CLOCK_BOOTTIME, CLOCK_MONOTONIC, CLOCK_MONOTONIC_COARSE,
-    CLOCK_MONOTONIC_RAW, CLOCK_PROCESS_CPUTIME_ID, CLOCK_REALTIME, CLOCK_REALTIME_COARSE,
-    CLOCK_THREAD_CPUTIME_ID, ITIMER_PROF, ITIMER_REAL, ITIMER_VIRTUAL, TIMER_ABSTIME, itimerspec,
-    timespec, timeval,
+    CAP_SYS_TIME, CLOCK_BOOTTIME, CLOCK_MONOTONIC, CLOCK_REALTIME, ITIMER_PROF, ITIMER_REAL,
+    ITIMER_VIRTUAL, TIMER_ABSTIME, itimerspec, timespec, timeval,
 };
 use pulse_core::task::uaccess;
 
 use crate::{
     LinuxError,
     impls::utils::{read_user_timespec, read_user_timeval, write_user_bytes},
+    validation::{
+        time::{
+            ClockSource, duration_to_timespec, parse_clock, timespec_to_duration,
+            validate_clock_nanosleep,
+        },
+        timer::{
+            ns_to_clk_ticks, ns_to_timespec, ns_to_timeval, timeval_to_ns, valid_adjtimex_modes,
+            validate_adjtimex_tick,
+        },
+    },
 };
 
 const CLK_TCK: u64 = 100;
-
-fn timespec_to_duration(ts: timespec) -> Result<Duration, LinuxError> {
-    if ts.tv_sec < 0 || ts.tv_nsec < 0 || ts.tv_nsec > 999_999_999 {
-        return Err(LinuxError::EINVAL);
-    }
-    Ok(Duration::new(ts.tv_sec as u64, ts.tv_nsec as u32))
-}
-
-fn duration_to_timespec(dur: Duration) -> timespec {
-    timespec {
-        tv_sec: dur.as_secs() as _,
-        tv_nsec: dur.subsec_nanos() as _,
-    }
-}
-
-fn ns_to_clk_ticks(ns: u64) -> u64 {
-    ns.saturating_mul(CLK_TCK) / 1_000_000_000
-}
 
 fn write_user_timespec(user_addr: usize, value: timespec) -> Result<(), LinuxError> {
     let bytes = unsafe {
@@ -56,40 +43,23 @@ fn write_zero_timespec(user_addr: usize) -> Result<(), LinuxError> {
     )
 }
 
-fn is_supported_clock(clockid: i32) -> bool {
-    matches!(
-        clockid as u32,
-        CLOCK_MONOTONIC
-            | CLOCK_REALTIME
-            | CLOCK_MONOTONIC_RAW
-            | CLOCK_REALTIME_COARSE
-            | CLOCK_MONOTONIC_COARSE
-            | CLOCK_BOOTTIME
-            | CLOCK_PROCESS_CPUTIME_ID
-            | CLOCK_THREAD_CPUTIME_ID
-    )
-}
-
 fn clock_now(clockid: i32) -> Result<Duration, LinuxError> {
-    match clockid as u32 {
-        CLOCK_REALTIME | CLOCK_REALTIME_COARSE => Ok(axhal::time::wall_time()),
-        CLOCK_MONOTONIC | CLOCK_MONOTONIC_RAW | CLOCK_MONOTONIC_COARSE | CLOCK_BOOTTIME => {
-            Ok(axhal::time::monotonic_time())
-        }
-        CLOCK_PROCESS_CPUTIME_ID => {
-            let thread = pulse_core::task::current_thread().map_err(|e| LinuxError::from(e))?;
+    match parse_clock(clockid)? {
+        ClockSource::Realtime => Ok(axhal::time::wall_time()),
+        ClockSource::Monotonic => Ok(axhal::time::monotonic_time()),
+        ClockSource::ProcessCpu => {
+            let thread = pulse_core::task::current_thread().map_err(LinuxError::from)?;
             let process = thread.process();
             let now_ns = axhal::time::monotonic_time_nanos() as u64;
             let (utime_ns, stime_ns) = process.snapshot_cpu_time_ns(now_ns);
             Ok(Duration::from_nanos(utime_ns.saturating_add(stime_ns)))
         }
-        CLOCK_THREAD_CPUTIME_ID => {
-            let thread = pulse_core::task::current_thread().map_err(|e| LinuxError::from(e))?;
+        ClockSource::ThreadCpu => {
+            let thread = pulse_core::task::current_thread().map_err(LinuxError::from)?;
             let now_ns = axhal::time::monotonic_time_nanos() as u64;
             let (utime_ns, stime_ns) = thread.snapshot_cpu_time_ns(now_ns);
             Ok(Duration::from_nanos(utime_ns.saturating_add(stime_ns)))
         }
-        _ => Err(LinuxError::EINVAL),
     }
 }
 
@@ -132,7 +102,8 @@ fn sleep_for_duration_interruptible(dur: Duration) -> Result<Duration, LinuxErro
     }
 }
 
-static REALTIME_SLEEPERS: spin::Mutex<alloc::vec::Vec<axtask::AxTaskRef>> = spin::Mutex::new(alloc::vec::Vec::new());
+static REALTIME_SLEEPERS: spin::Mutex<alloc::vec::Vec<axtask::AxTaskRef>> =
+    spin::Mutex::new(alloc::vec::Vec::new());
 
 fn sleep_until_clock_interruptible(clockid: i32, target: Duration) -> Result<Duration, LinuxError> {
     match clockid as u32 {
@@ -167,7 +138,10 @@ fn sleep_until_clock_interruptible(clockid: i32, target: Duration) -> Result<Dur
         if clockid as u32 == CLOCK_REALTIME {
             let current_task = axtask::current().as_task_ref().clone();
             let mut guard = REALTIME_SLEEPERS.lock();
-            if let Some(pos) = guard.iter().position(|t| alloc::sync::Arc::ptr_eq(t, &current_task)) {
+            if let Some(pos) = guard
+                .iter()
+                .position(|t| alloc::sync::Arc::ptr_eq(t, &current_task))
+            {
                 guard.swap_remove(pos);
             }
         }
@@ -224,7 +198,6 @@ pub fn sys_nanosleep(req: usize, rem: usize) -> isize {
 }
 
 pub fn sys_clock_nanosleep(clockid: i32, flags: usize, req: usize, rem: usize) -> isize {
-
     if req == 0 {
         return -LinuxError::EFAULT.code() as isize;
     }
@@ -234,23 +207,8 @@ pub fn sys_clock_nanosleep(clockid: i32, flags: usize, req: usize, rem: usize) -
         Err(e) => return -e.code() as isize,
     };
 
-    // CPU-time clocks (CLOCK_PROCESS_CPUTIME_ID and CLOCK_THREAD_CPUTIME_ID)
-    // are valid clock IDs but do not support sleeping, returning EOPNOTSUPP.
-    if matches!(
-        clockid as u32,
-        CLOCK_PROCESS_CPUTIME_ID | CLOCK_THREAD_CPUTIME_ID
-    ) {
-        return -LinuxError::EOPNOTSUPP.code() as isize;
-    }
-
-    if !is_supported_clock(clockid) {
-        return -LinuxError::EINVAL.code() as isize;
-    }
-    if !matches!(clockid as u32, CLOCK_REALTIME | CLOCK_MONOTONIC | CLOCK_BOOTTIME) {
-        return -LinuxError::EINVAL.code() as isize;
-    }
-    if flags != 0 && flags != TIMER_ABSTIME as usize {
-        return -LinuxError::EINVAL.code() as isize;
+    if let Err(e) = validate_clock_nanosleep(clockid, flags) {
+        return -e.code() as isize;
     }
 
     let result = if flags == TIMER_ABSTIME as usize {
@@ -281,7 +239,7 @@ pub fn sys_clock_nanosleep(clockid: i32, flags: usize, req: usize, rem: usize) -
 }
 
 pub fn sys_clock_getres(clockid: i32, res: usize) -> isize {
-    if !is_supported_clock(clockid) {
+    if parse_clock(clockid).is_err() {
         return -LinuxError::EINVAL.code() as isize;
     }
 
@@ -415,7 +373,11 @@ pub fn sys_settimeofday(tv: usize, tz: usize) -> isize {
     let req_tv = match read_user_timeval(tv) {
         Ok(t) => t,
         Err(e) => {
-            axlog::warn!("sys_settimeofday: read user timeval failed: addr={:#x}, err={:?}", tv, e);
+            axlog::warn!(
+                "sys_settimeofday: read user timeval failed: addr={:#x}, err={:?}",
+                tv,
+                e
+            );
             return -e.code() as isize;
         }
     };
@@ -527,22 +489,6 @@ impl Default for Itimerval {
                 tv_usec: 0,
             },
         }
-    }
-}
-
-fn timeval_to_ns(tv: &timeval) -> Option<u64> {
-    if tv.tv_sec < 0 || tv.tv_usec < 0 || tv.tv_usec >= 1_000_000 {
-        return None;
-    }
-    let sec_ns = (tv.tv_sec as u64).checked_mul(1_000_000_000)?;
-    let usec_ns = (tv.tv_usec as u64).checked_mul(1_000)?;
-    sec_ns.checked_add(usec_ns)
-}
-
-fn ns_to_timeval(ns: u64) -> timeval {
-    timeval {
-        tv_sec: (ns / 1_000_000_000) as _,
-        tv_usec: ((ns % 1_000_000_000) / 1_000) as _,
     }
 }
 
@@ -716,17 +662,7 @@ const ADJ_TIMECONST: u32 = 0x0020;
 const ADJ_MICRO: u32 = 0x1000;
 const ADJ_NANO: u32 = 0x2000;
 const ADJ_TICK: u32 = 0x4000;
-const ADJ_OFFSET_SINGLESHOT: u32 = 0x8001;
 const ADJ_OFFSET_SS_READ: u32 = 0xa001;
-const ADJ_MODE_MASK: u32 = ADJ_OFFSET
-    | ADJ_FREQUENCY
-    | ADJ_MAXERROR
-    | ADJ_ESTERROR
-    | ADJ_STATUS
-    | ADJ_TIMECONST
-    | ADJ_MICRO
-    | ADJ_NANO
-    | ADJ_TICK;
 
 const STA_UNSYNC: i32 = 0x0040;
 const STA_NANO: i32 = 0x2000;
@@ -772,7 +708,10 @@ static GLOBAL_TIMEX: spin::Mutex<timex> = spin::Mutex::new(timex {
     constant: 0,
     precision: 1,
     tolerance: 32768000,
-    time: timeval { tv_sec: 0, tv_usec: 0 },
+    time: timeval {
+        tv_sec: 0,
+        tv_usec: 0,
+    },
     tick: 10000,
     ppsfreq: 0,
     jitter: 0,
@@ -786,13 +725,6 @@ static GLOBAL_TIMEX: spin::Mutex<timex> = spin::Mutex::new(timex {
     tai: 0,
     _pad4: [0; 11],
 });
-
-fn valid_adjtimex_modes(modes: u32) -> bool {
-    if modes == ADJ_OFFSET_SINGLESHOT || modes == ADJ_OFFSET_SS_READ {
-        return true;
-    }
-    modes & !ADJ_MODE_MASK == 0 && (modes & (ADJ_MICRO | ADJ_NANO)) != (ADJ_MICRO | ADJ_NANO)
-}
 
 pub fn sys_clock_adjtime(clockid: i32, buf: usize) -> isize {
     axlog::trace!("sys_clock_adjtime: clockid={}, buf={:#x}", clockid, buf);
@@ -825,10 +757,8 @@ pub fn sys_clock_adjtime(clockid: i32, buf: usize) -> isize {
     }
 
     if (modes & ADJ_TICK) != 0 {
-        let tick_min = 900000 / CLK_TCK;
-        let tick_max = 1100000 / CLK_TCK;
-        if tmx.tick < tick_min as c_long || tmx.tick > tick_max as c_long {
-            return -LinuxError::EINVAL.code() as isize;
+        if let Err(e) = validate_adjtimex_tick(tmx.tick as i64) {
+            return -e.code() as isize;
         }
     }
 
@@ -922,12 +852,10 @@ pub fn sys_timer_create(clockid: i32, sevp: usize, timerid: usize) -> isize {
     }
 
     match proc.alloc_posix_timer(clockid, event) {
-        Ok(id) => {
-            match uaccess::write_user_plain(proc.as_ref(), timerid, &id) {
-                Ok(()) => 0,
-                Err(_) => -LinuxError::EFAULT.code() as isize,
-            }
-        }
+        Ok(id) => match uaccess::write_user_plain(proc.as_ref(), timerid, &id) {
+            Ok(()) => 0,
+            Err(_) => -LinuxError::EFAULT.code() as isize,
+        },
         Err(e) => -e.code() as isize,
     }
 }
@@ -948,13 +876,6 @@ fn write_user_itimerspec(addr: usize, val: &itimerspec) -> Result<(), LinuxError
     }
     let proc = pulse_core::task::current_process()?;
     uaccess::write_user_plain(proc.as_ref(), addr, val).map_err(|_| LinuxError::EFAULT)
-}
-
-fn ns_to_timespec(ns: u64) -> timespec {
-    timespec {
-        tv_sec: (ns / 1_000_000_000) as _,
-        tv_nsec: (ns % 1_000_000_000) as _,
-    }
 }
 
 pub fn sys_timer_settime(
@@ -1048,19 +969,18 @@ pub fn sys_timer_settime(
             now_ns.saturating_add(val_dur.as_nanos() as u64)
         };
         timer.next_deadline_ns = deadline;
-        pulse_core::task::schedule_posix_timer_event(
-            proc.pid(),
-            timerid,
-            deadline,
-            generation,
-        );
+        pulse_core::task::schedule_posix_timer_event(proc.pid(), timerid, deadline, generation);
     }
 
     0
 }
 
 pub fn sys_timer_gettime(timerid: usize, curr_value: usize) -> isize {
-    axlog::debug!("sys_timer_gettime: timerid={}, curr_value={:#x}", timerid, curr_value);
+    axlog::debug!(
+        "sys_timer_gettime: timerid={}, curr_value={:#x}",
+        timerid,
+        curr_value
+    );
 
     if timerid >= pulse_core::task::MAX_POSIX_TIMER_COUNT {
         return -LinuxError::EINVAL.code() as isize;

@@ -4,14 +4,7 @@ use linux_raw_sys::general::{
 };
 use pulse_core::task::current_process;
 
-fn parse_id_arg(raw: usize) -> u32 {
-    raw as u32
-}
-
-fn parse_optional_id_arg(raw: usize) -> Option<u32> {
-    let id = parse_id_arg(raw);
-    if id == u32::MAX { None } else { Some(id) }
-}
+use crate::validation::credential::{parse_id_arg, parse_optional_id_arg};
 
 pub fn sys_setuid(raw_uid: usize) -> isize {
     let uid = parse_id_arg(raw_uid);
@@ -269,7 +262,6 @@ pub fn sys_setresgid(raw_rgid: usize, raw_egid: usize, raw_sgid: usize) -> isize
     0
 }
 
-
 pub fn sys_getgroups(size: isize, list: usize) -> isize {
     let process = match current_process() {
         Ok(p) => p,
@@ -289,7 +281,9 @@ pub fn sys_getgroups(size: isize, list: usize) -> isize {
     if list == 0 {
         return -LinuxError::EFAULT.code() as isize;
     }
-    if let Err(e) = pulse_core::task::uaccess::write_user_plain_array(process.as_ref(), list, &groups) {
+    if let Err(e) =
+        pulse_core::task::uaccess::write_user_plain_array(process.as_ref(), list, &groups)
+    {
         let errno: LinuxError = e.into();
         return -errno.code() as isize;
     }
@@ -313,7 +307,8 @@ pub fn sys_setgroups(size: usize, list: usize) -> isize {
         if list == 0 {
             return -LinuxError::EFAULT.code() as isize;
         }
-        match pulse_core::task::uaccess::read_user_plain_array::<u32>(process.as_ref(), list, size) {
+        match pulse_core::task::uaccess::read_user_plain_array::<u32>(process.as_ref(), list, size)
+        {
             Ok(g) => g,
             Err(e) => {
                 let errno: LinuxError = e.into();
@@ -336,9 +331,13 @@ pub fn sys_setfsuid(raw_fsuid: usize) -> isize {
     let old_fsuid = process.fsuid();
     // root 可设置任意值；否则只能设置为 ruid/euid/suid/old_fsuid 之一
     // 且 u32::MAX (-1) 或 0xFFFF (16-bit -1) 始终被忽略（用于查询）
-    let allowed = new_fsuid != 0xFFFFFFFF && new_fsuid != 0xFFFF && (
-        euid == 0 || new_fsuid == ruid || new_fsuid == euid || new_fsuid == suid || new_fsuid == old_fsuid
-    );
+    let allowed = new_fsuid != 0xFFFFFFFF
+        && new_fsuid != 0xFFFF
+        && (euid == 0
+            || new_fsuid == ruid
+            || new_fsuid == euid
+            || new_fsuid == suid
+            || new_fsuid == old_fsuid);
     if allowed {
         process.set_fsuid(new_fsuid);
     }
@@ -354,9 +353,13 @@ pub fn sys_setfsgid(raw_fsgid: usize) -> isize {
     };
     let (rgid, egid, sgid) = process.gid_snapshot();
     let old_fsgid = process.fsgid();
-    let allowed = new_fsgid != 0xFFFFFFFF && new_fsgid != 0xFFFF && (
-        process.euid() == 0 || new_fsgid == rgid || new_fsgid == egid || new_fsgid == sgid || new_fsgid == old_fsgid
-    );
+    let allowed = new_fsgid != 0xFFFFFFFF
+        && new_fsgid != 0xFFFF
+        && (process.euid() == 0
+            || new_fsgid == rgid
+            || new_fsgid == egid
+            || new_fsgid == sgid
+            || new_fsgid == old_fsgid);
     if allowed {
         process.set_fsgid(new_fsgid);
     }
@@ -388,13 +391,14 @@ pub fn sys_capget(hdrp: usize, datap: usize) -> isize {
         Err(e) => return -e.code() as isize,
     };
 
-    let mut header: CapUserHeader = match pulse_core::task::uaccess::read_user_plain(process.as_ref(), hdrp) {
-        Ok(h) => h,
-        Err(e) => {
-            let errno: LinuxError = e.into();
-            return -errno.code() as isize;
-        }
-    };
+    let mut header: CapUserHeader =
+        match pulse_core::task::uaccess::read_user_plain(process.as_ref(), hdrp) {
+            Ok(h) => h,
+            Err(e) => {
+                let errno: LinuxError = e.into();
+                return -errno.code() as isize;
+            }
+        };
 
     if header.version != _LINUX_CAPABILITY_VERSION_1
         && header.version != _LINUX_CAPABILITY_VERSION_2
@@ -410,7 +414,10 @@ pub fn sys_capget(hdrp: usize, datap: usize) -> isize {
     }
 
     if header.pid != 0 && header.pid != process.pid() as i32 {
-        axlog::warn!("capget: lookup for pid {} not fully implemented, returning ESRCH", header.pid);
+        axlog::warn!(
+            "capget: lookup for pid {} not fully implemented, returning ESRCH",
+            header.pid
+        );
         return -LinuxError::ESRCH.code() as isize;
     }
 
@@ -438,7 +445,11 @@ pub fn sys_capget(hdrp: usize, datap: usize) -> isize {
             permitted: (cap_p >> 32) as u32,
             inheritable: (cap_i >> 32) as u32,
         };
-        if let Err(e) = pulse_core::task::uaccess::write_user_plain(process.as_ref(), datap + core::mem::size_of::<CapUserData>(), &data1) {
+        if let Err(e) = pulse_core::task::uaccess::write_user_plain(
+            process.as_ref(),
+            datap + core::mem::size_of::<CapUserData>(),
+            &data1,
+        ) {
             let errno: LinuxError = e.into();
             return -errno.code() as isize;
         }
@@ -457,13 +468,14 @@ pub fn sys_capset(hdrp: usize, datap: usize) -> isize {
         Err(e) => return -e.code() as isize,
     };
 
-    let mut header: CapUserHeader = match pulse_core::task::uaccess::read_user_plain(process.as_ref(), hdrp) {
-        Ok(h) => h,
-        Err(e) => {
-            let errno: LinuxError = e.into();
-            return -errno.code() as isize;
-        }
-    };
+    let mut header: CapUserHeader =
+        match pulse_core::task::uaccess::read_user_plain(process.as_ref(), hdrp) {
+            Ok(h) => h,
+            Err(e) => {
+                let errno: LinuxError = e.into();
+                return -errno.code() as isize;
+            }
+        };
 
     if header.version != _LINUX_CAPABILITY_VERSION_1
         && header.version != _LINUX_CAPABILITY_VERSION_2
@@ -486,20 +498,28 @@ pub fn sys_capset(hdrp: usize, datap: usize) -> isize {
         return 0;
     }
 
-    let data0: CapUserData = match pulse_core::task::uaccess::read_user_plain(process.as_ref(), datap) {
-        Ok(d) => d,
-        Err(e) => {
-            let errno: LinuxError = e.into();
-            return -errno.code() as isize;
-        }
-    };
+    let data0: CapUserData =
+        match pulse_core::task::uaccess::read_user_plain(process.as_ref(), datap) {
+            Ok(d) => d,
+            Err(e) => {
+                let errno: LinuxError = e.into();
+                return -errno.code() as isize;
+            }
+        };
 
-    let (mut cap_p, mut cap_e, mut cap_i) = (data0.permitted as u64, data0.effective as u64, data0.inheritable as u64);
+    let (mut cap_p, mut cap_e, mut cap_i) = (
+        data0.permitted as u64,
+        data0.effective as u64,
+        data0.inheritable as u64,
+    );
 
     if header.version == _LINUX_CAPABILITY_VERSION_2
         || header.version == _LINUX_CAPABILITY_VERSION_3
     {
-        let data1: CapUserData = match pulse_core::task::uaccess::read_user_plain(process.as_ref(), datap + core::mem::size_of::<CapUserData>()) {
+        let data1: CapUserData = match pulse_core::task::uaccess::read_user_plain(
+            process.as_ref(),
+            datap + core::mem::size_of::<CapUserData>(),
+        ) {
             Ok(d) => d,
             Err(e) => {
                 let errno: LinuxError = e.into();
