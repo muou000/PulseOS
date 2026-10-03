@@ -208,9 +208,11 @@ pub fn sys_mmap(
         Ok(proc) => proc,
         Err(e) => return -e.code() as isize,
     };
-    let file_backed = (flags & (MAP_ANONYMOUS as usize)) == 0;
+    let file_backed = (flags & MAP_ANONYMOUS as usize) == 0;
     let map_type = flags & 0x0f;
-    if !matches!(map_type, x if x == MAP_SHARED as usize || x == MAP_PRIVATE as usize || x == MAP_SHARED_VALIDATE as usize)
+    if map_type != MAP_SHARED as usize
+        && map_type != MAP_PRIVATE as usize
+        && map_type != MAP_SHARED_VALIDATE as usize
     {
         return -LinuxError::EINVAL.code() as isize;
     }
@@ -351,7 +353,9 @@ pub fn sys_mmap(
         Ok(address) => address.as_usize(),
         Err(error) => return -LinuxError::from(error).code() as isize,
     };
-    let _ = proc.memlock_unlock_range(map_addr, aligned_length);
+    if matches!(placement, axmm::MappingPlacement::Fixed(_)) {
+        let _ = proc.memlock_unlock_range(map_addr, aligned_length);
+    }
     if let Err(error) = proc.maybe_lock_future_range(map_addr, aligned_length) {
         if let Err(unmap_error) = aspace.unmap(VirtAddr::from(map_addr), aligned_length) {
             axlog::warn!(

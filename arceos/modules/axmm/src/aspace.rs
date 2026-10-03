@@ -283,6 +283,12 @@ impl<T> AddrSpaceMutation<T> {
         (self.result, self.shootdown)
     }
 
+    pub fn complete_after_unlock_parts(self) -> (AxResult<T>, AxResult) {
+        let (result, shootdown) = self.into_parts();
+        let visibility = shootdown.map_or(Ok(()), |shootdown| shootdown.complete_after_unlock());
+        (result, visibility)
+    }
+
     /// Completes the deferred shootdown and then returns the operation result.
     pub fn complete_after_unlock(self) -> AxResult<T> {
         let (result, shootdown) = self.into_parts();
