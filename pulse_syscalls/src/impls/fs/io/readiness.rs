@@ -1,6 +1,7 @@
 use super::*;
 
 const KERNEL_SIGSET_SIZE: usize = core::mem::size_of::<u64>();
+const USER_SIGSET_SIZE: usize = core::mem::size_of::<u64>() * 2;
 // Some POSIX software uses select(0, ..., 1us) as a cooperative barrier
 // poll.  Programming a task timer for such a duration costs substantially
 // more than the requested delay and can flood the per-CPU timer heap.
@@ -21,7 +22,7 @@ fn read_temporary_signal_mask(
     if sigmask == 0 {
         return Ok(None);
     }
-    if sigsetsize != KERNEL_SIGSET_SIZE {
+    if sigsetsize != KERNEL_SIGSET_SIZE && sigsetsize != USER_SIGSET_SIZE {
         return Err(LinuxError::EINVAL);
     }
     process
