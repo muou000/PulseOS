@@ -8,24 +8,18 @@ use linux_raw_sys::general::{
 use pulse_core::task::{Process, WaitidStatusType, current_thread, signal_info_for_child};
 
 use super::common::write_user_i32;
-
-fn wait4_selector(pid: isize) -> (usize, usize) {
-    match pid {
-        -1 => (P_ALL as usize, 0),
-        0 => (P_PGID as usize, 0),
-        pid if pid > 0 => (P_PID as usize, pid as usize),
-        pid => (P_PGID as usize, pid.unsigned_abs()),
-    }
-}
+use crate::validation::wait::{
+    validate_wait4_pid, validate_waitid_options, wait_status_continued, wait_status_stopped,
+    wait4_selector,
+};
 
 fn job_control_wait4_status_word(status_type: WaitidStatusType) -> Option<i32> {
     match status_type {
         WaitidStatusType::Exited { .. } => None,
-        WaitidStatusType::Stopped { signo } => Some(((signo & 0xff) << 8) | 0x7f),
-        WaitidStatusType::Continued => Some(0xffff),
+        WaitidStatusType::Stopped { signo } => Some(wait_status_stopped(signo)),
+        WaitidStatusType::Continued => Some(wait_status_continued()),
     }
 }
-
 fn wait4_status_word(child: &Process, status_type: WaitidStatusType) -> i32 {
     job_control_wait4_status_word(status_type).unwrap_or_else(|| child.wait_status_word())
 }
@@ -52,8 +46,8 @@ pub fn sys_wait4(pid: isize, status: usize, options: i32, rusage: usize) -> isiz
         options,
         rusage
     );
-    if pid as i32 == i32::MIN {
-        return -LinuxError::ESRCH.code() as isize;
+    if let Err(e) = validate_wait4_pid(pid) {
+        return -e.code() as isize;
     }
     let thread = match current_thread() {
         Ok(thread) => thread,
@@ -61,8 +55,7 @@ pub fn sys_wait4(pid: isize, status: usize, options: i32, rusage: usize) -> isiz
     };
     let process = thread.process();
     let (idtype, id) = wait4_selector(pid);
-    let wait_options =
-        WEXITED as i32 | (options & (WNOHANG | WUNTRACED | WCONTINUED) as i32);
+    let wait_options = WEXITED as i32 | (options & (WNOHANG | WUNTRACED | WCONTINUED) as i32);
 
     loop {
         // Snapshot before scanning so a child-state publication between the
@@ -103,8 +96,7 @@ pub fn sys_wait4(pid: isize, status: usize, options: i32, rusage: usize) -> isiz
                     idtype,
                     id,
                     observed_child_state_epoch,
-                )
-                {
+                ) {
                     return -e as isize;
                 }
             }
@@ -122,9 +114,8 @@ pub fn sys_waitid(idtype: usize, id: usize, infop: usize, options: i32) -> isize
         options
     );
 
-    let wait_flags = (WEXITED | WUNTRACED | WCONTINUED) as i32;
-    if (options & wait_flags) == 0 {
-        return -LinuxError::EINVAL.code() as isize;
+    if let Err(e) = validate_waitid_options(options) {
+        return -e.code() as isize;
     }
 
     let thread = match current_thread() {
@@ -152,9 +143,7 @@ pub fn sys_waitid(idtype: usize, id: usize, infop: usize, options: i32) -> isize
                 };
                 let raw = signal_info_for_child(child.pid(), child.ruid(), code, status);
 
-                if infop != 0
-                    && process.write_user_bytes(infop, &raw).is_err()
-                {
+                if infop != 0 && process.write_user_bytes(infop, &raw).is_err() {
                     if was_zombie_and_reaped {
                         finish_reaped_child(process.as_ref(), child);
                     }
@@ -187,8 +176,7 @@ pub fn sys_waitid(idtype: usize, id: usize, infop: usize, options: i32) -> isize
                     idtype,
                     id,
                     observed_child_state_epoch,
-                )
-                {
+                ) {
                     return -e as isize;
                 }
             }

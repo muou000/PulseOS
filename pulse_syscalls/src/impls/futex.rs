@@ -1,12 +1,19 @@
 use linux_raw_sys::general::{
-    CLOCK_MONOTONIC, CLOCK_REALTIME, FUTEX_32, FUTEX_CLOCK_REALTIME, FUTEX_CMD_MASK,
-    FUTEX_CMP_REQUEUE, FUTEX_PRIVATE_FLAG, FUTEX_REQUEUE, FUTEX_WAIT, FUTEX_WAIT_BITSET,
-    FUTEX_WAKE, FUTEX2_PRIVATE, FUTEX2_SIZE_MASK,
+    FUTEX_CLOCK_REALTIME, FUTEX_CMD_MASK, FUTEX_CMP_REQUEUE, FUTEX_PRIVATE_FLAG, FUTEX_REQUEUE,
+    FUTEX_WAIT, FUTEX_WAIT_BITSET, FUTEX_WAKE,
 };
 
-use crate::{LinuxError, impls::utils::read_user_timespec};
-
-const FUTEX2_SUPPORTED_FLAGS: u32 = FUTEX_32 | FUTEX2_PRIVATE;
+use crate::{
+    LinuxError,
+    impls::utils::read_user_timespec,
+    validation::{
+        futex::{
+            futex_deadline_remaining_ns, parse_futex_clock, parse_futex2_count, parse_futex2_flags,
+            parse_futex2_mask, validate_futex_waitv, validate_futex2_addr,
+        },
+        time::{duration_to_nanos_saturating, timespec_to_duration},
+    },
+};
 
 #[repr(C)]
 #[derive(Clone, Copy, Default)]
@@ -23,46 +30,11 @@ struct ParsedFutex2Waiter {
     is_private: bool,
 }
 
-fn parse_futex2_flags(flags: u32) -> Result<bool, LinuxError> {
-    if flags & !FUTEX2_SUPPORTED_FLAGS != 0 || flags & FUTEX2_SIZE_MASK != FUTEX_32 {
-        return Err(LinuxError::EINVAL);
-    }
-    Ok(flags & FUTEX2_PRIVATE != 0)
-}
-
-fn validate_futex2_addr(addr: usize) -> Result<(), LinuxError> {
-    if addr == 0 {
-        return Err(LinuxError::EFAULT);
-    }
-    if addr & (core::mem::size_of::<u32>() - 1) != 0 {
-        return Err(LinuxError::EINVAL);
-    }
-    Ok(())
-}
-
-fn parse_futex2_mask(mask: usize) -> Result<u32, LinuxError> {
-    if mask == 0 || mask > u32::MAX as usize {
-        return Err(LinuxError::EINVAL);
-    }
-    Ok(mask as u32)
-}
-
-fn parse_futex2_count(count: isize) -> Result<usize, LinuxError> {
-    if count < 0 {
-        return Err(LinuxError::EINVAL);
-    }
-    Ok(count as usize)
-}
-
 fn read_futex2_timeout_ns(timeout: usize, clockid: i32) -> Result<Option<u64>, LinuxError> {
     if timeout == 0 {
         return Ok(None);
     }
-    let clock_realtime = match clockid as u32 {
-        CLOCK_REALTIME => true,
-        CLOCK_MONOTONIC => false,
-        _ => return Err(LinuxError::EINVAL),
-    };
+    let clock_realtime = parse_futex_clock(clockid as u32)?;
     read_absolute_timeout_ns(timeout, clock_realtime)
 }
 
@@ -102,25 +74,15 @@ fn read_absolute_timeout_ns(
         return Ok(None);
     }
 
-    let ts = read_user_timespec(timeout)?;
-    if ts.tv_sec < 0 || ts.tv_nsec < 0 || ts.tv_nsec >= 1_000_000_000 {
-        return Err(LinuxError::EINVAL);
-    }
-
-    let target_ns = (ts.tv_sec as u64)
-        .saturating_mul(1_000_000_000)
-        .saturating_add(ts.tv_nsec as u64);
+    let target = timespec_to_duration(read_user_timespec(timeout)?)?;
+    let target_ns = duration_to_nanos_saturating(target);
 
     let now_ns = if clock_realtime {
         axhal::time::wall_time().as_nanos() as u64
     } else {
         axhal::time::monotonic_time_nanos() as u64
     };
-    if target_ns <= now_ns {
-        return Err(LinuxError::ETIMEDOUT);
-    }
-
-    Ok(Some(target_ns - now_ns))
+    futex_deadline_remaining_ns(target_ns, now_ns).map(Some)
 }
 
 fn read_timeout_ns(timeout: usize) -> Result<Option<u64>, LinuxError> {
@@ -128,14 +90,8 @@ fn read_timeout_ns(timeout: usize) -> Result<Option<u64>, LinuxError> {
         return Ok(None);
     }
 
-    let ts = read_user_timespec(timeout)?;
-    if ts.tv_sec < 0 || ts.tv_nsec < 0 || ts.tv_nsec >= 1_000_000_000 {
-        return Err(LinuxError::EINVAL);
-    }
-
-    let sec = (ts.tv_sec as u64).saturating_mul(1_000_000_000);
-    let nsec = ts.tv_nsec as u64;
-    Ok(Some(sec.saturating_add(nsec)))
+    let duration = timespec_to_duration(read_user_timespec(timeout)?)?;
+    Ok(Some(duration_to_nanos_saturating(duration)))
 }
 
 pub fn sys_futex(
@@ -240,26 +196,9 @@ pub fn sys_futex_waitv(
         clockid
     );
 
-    if flags != 0 {
-        return -LinuxError::EINVAL.code() as isize;
-    }
-
-    if nr_futexes == 0 || nr_futexes > 128 {
-        return -LinuxError::EINVAL.code() as isize;
-    }
-
-    if waiters == 0 {
-        return -LinuxError::EINVAL.code() as isize;
-    }
-
-    if waiters % 8 != 0 {
-        return -LinuxError::EINVAL.code() as isize;
-    }
-
-    let clock_realtime = match clockid {
-        0 => true,  // CLOCK_REALTIME
-        1 => false, // CLOCK_MONOTONIC
-        _ => return -LinuxError::EINVAL.code() as isize,
+    let clock_realtime = match validate_futex_waitv(waiters, nr_futexes, flags, clockid) {
+        Ok(clock_realtime) => clock_realtime,
+        Err(e) => return -e.code() as isize,
     };
 
     let timeout_ns = match read_absolute_timeout_ns(timeout, clock_realtime) {

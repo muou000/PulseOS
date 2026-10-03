@@ -4,33 +4,20 @@ use axfs::{CachedFile, FileFlags};
 use axhal::paging::MappingFlags;
 use linux_raw_sys::general::{
     MADV_DONTNEED, MADV_FREE, MADV_NORMAL, MADV_RANDOM, MADV_SEQUENTIAL, MADV_WILLNEED,
-    MAP_ANONYMOUS, MAP_DENYWRITE, MAP_EXECUTABLE, MAP_FIXED, MAP_FIXED_NOREPLACE,
-    MAP_GROWSDOWN, MAP_HUGETLB, MAP_LOCKED, MAP_NONBLOCK, MAP_NORESERVE, MAP_POPULATE,
-    MAP_PRIVATE, MAP_SHARED, MAP_SHARED_VALIDATE, MAP_STACK, MAP_SYNC, MCL_CURRENT, MCL_FUTURE,
-    MCL_ONFAULT, MREMAP_DONTUNMAP, MREMAP_FIXED, MREMAP_MAYMOVE, MS_ASYNC, MS_INVALIDATE,
-    MS_SYNC, PROT_EXEC, PROT_READ, PROT_WRITE, RLIMIT_DATA,
+    MAP_ANONYMOUS, MAP_FIXED, MAP_FIXED_NOREPLACE, MAP_GROWSDOWN, MAP_POPULATE, MCL_CURRENT,
+    MCL_FUTURE, MCL_ONFAULT, MREMAP_DONTUNMAP, MREMAP_FIXED, MREMAP_MAYMOVE, MS_ASYNC,
+    MS_INVALIDATE, MS_SYNC, PROT_EXEC, PROT_READ, PROT_WRITE, RLIMIT_DATA,
 };
 use memory_addr::VirtAddr;
 use pulse_core::fd_table::FdObject;
 
-use crate::LinuxError;
-
-const PAGE_SIZE: usize = 0x1000;
-
-fn page_align_up(addr: usize) -> Option<usize> {
-    addr.checked_add(PAGE_SIZE - 1)
-        .map(|value| value & !(PAGE_SIZE - 1))
-}
-
-#[inline]
-fn is_page_aligned(addr: usize) -> bool {
-    addr & (PAGE_SIZE - 1) == 0
-}
-
-#[inline]
-fn mmap_offset_is_valid(file_backed: bool, offset: usize) -> bool {
-    !file_backed || is_page_aligned(offset)
-}
+use crate::{
+    LinuxError,
+    validation::mm::{
+        PAGE_SIZE, is_page_aligned, mprotect_aligned_length, page_align_up, parse_mmap_flags,
+        validate_mmap_fd_offset, validate_mmap_length,
+    },
+};
 
 fn get_fd_object(fd: usize) -> Result<Arc<dyn FdObject>, LinuxError> {
     let proc = pulse_core::task::current_process()?;
@@ -211,42 +198,12 @@ pub fn sys_mmap(
 
     let file_backed = (flags & (MAP_ANONYMOUS as usize)) == 0;
 
-    let map_type = flags & 0x0f;
-    if map_type != (MAP_SHARED as usize)
-        && map_type != (MAP_PRIVATE as usize)
-        && map_type != (MAP_SHARED_VALIDATE as usize)
-    {
-        return -LinuxError::EINVAL.code() as isize;
-    }
-
-    let supported_mask = (MAP_SHARED
-        | MAP_PRIVATE
-        | MAP_SHARED_VALIDATE
-        | MAP_FIXED
-        | MAP_ANONYMOUS
-        | MAP_DENYWRITE
-        | MAP_EXECUTABLE
-        | MAP_LOCKED
-        | MAP_NORESERVE
-        | MAP_POPULATE
-        | MAP_NONBLOCK
-        | MAP_STACK
-        | MAP_HUGETLB
-        | MAP_SYNC
-        | MAP_FIXED_NOREPLACE
-        | MAP_GROWSDOWN) as usize;
-
-    if map_type == (MAP_SHARED_VALIDATE as usize) && (flags & !supported_mask) != 0 {
-        return -LinuxError::EOPNOTSUPP.code() as isize;
-    }
-
-    let is_shared = map_type == (MAP_SHARED as usize) || map_type == (MAP_SHARED_VALIDATE as usize);
-
-    if file_backed && fd < 0 {
-        return -LinuxError::EBADF.code() as isize;
-    }
-    if !mmap_offset_is_valid(file_backed, offset) {
-        return -LinuxError::EINVAL.code() as isize;
+    let is_shared = match parse_mmap_flags(flags) {
+        Ok(is_shared) => is_shared,
+        Err(e) => return -e.code() as isize,
+    };
+    if let Err(e) = validate_mmap_fd_offset(file_backed, fd, offset) {
+        return -e.code() as isize;
     }
     let file = if file_backed {
         match get_fd_object(fd as usize) {
@@ -257,8 +214,8 @@ pub fn sys_mmap(
         None
     };
 
-    if length == 0 {
-        return -LinuxError::EINVAL.code() as isize;
+    if let Err(e) = validate_mmap_length(length) {
+        return -e.code() as isize;
     }
 
     let mut map_flags = MappingFlags::USER;
@@ -586,10 +543,11 @@ pub fn sys_madvise(addr: usize, length: usize, advice: i32) -> isize {
 
     let aspace_handle = proc.aspace_handle();
     if !discard {
-        return if aspace_handle
-            .read()
-            .can_access_range(VirtAddr::from(addr), aligned_length, MappingFlags::empty())
-        {
+        return if aspace_handle.read().can_access_range(
+            VirtAddr::from(addr),
+            aligned_length,
+            MappingFlags::empty(),
+        ) {
             0
         } else {
             -LinuxError::ENOMEM.code() as isize
@@ -686,7 +644,8 @@ pub fn sys_mremap(
     if !proc.is_user_range(old_address, aligned_old_size) {
         return -LinuxError::EFAULT.code() as isize;
     }
-    if (flags & (MREMAP_FIXED as usize)) != 0 && !proc.is_user_range(new_address, aligned_new_size) {
+    if (flags & (MREMAP_FIXED as usize)) != 0 && !proc.is_user_range(new_address, aligned_new_size)
+    {
         return -LinuxError::EFAULT.code() as isize;
     }
 
@@ -809,20 +768,10 @@ pub fn sys_mprotect(addr: usize, length: usize, prot: usize) -> isize {
         prot
     );
 
-    if length == 0 {
-        return 0;
-    }
-    if (addr & (PAGE_SIZE - 1)) != 0 {
-        return -LinuxError::EINVAL.code() as isize;
-    }
-
-    let allowed = (PROT_READ | PROT_WRITE | PROT_EXEC) as usize;
-    if (prot & !allowed) != 0 {
-        return -LinuxError::EINVAL.code() as isize;
-    }
-
-    let Some(aligned_length) = page_align_up(length) else {
-        return -LinuxError::ENOMEM.code() as isize;
+    let aligned_length = match mprotect_aligned_length(addr, length, prot) {
+        Ok(0) => return 0,
+        Ok(length) => length,
+        Err(e) => return -e.code() as isize,
     };
 
     let proc = match pulse_core::task::current_process() {
@@ -952,22 +901,5 @@ pub fn sys_msync(addr: usize, length: usize, flags: usize) -> isize {
     match writebacks.and_then(axmm::FileWritebacks::complete) {
         Ok(()) => 0,
         Err(e) => -LinuxError::from(e).code() as isize,
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::{PAGE_SIZE, is_page_aligned, mmap_offset_is_valid, page_align_up};
-
-    #[test]
-    fn page_alignment_helpers_reject_overflow_and_unaligned_file_offsets() {
-        assert!(is_page_aligned(0));
-        assert!(is_page_aligned(PAGE_SIZE));
-        assert!(!is_page_aligned(PAGE_SIZE - 1));
-        assert!(mmap_offset_is_valid(false, PAGE_SIZE - 1));
-        assert!(mmap_offset_is_valid(true, PAGE_SIZE));
-        assert!(!mmap_offset_is_valid(true, PAGE_SIZE - 1));
-        assert_eq!(page_align_up(PAGE_SIZE + 1), Some(2 * PAGE_SIZE));
-        assert_eq!(page_align_up(usize::MAX), None);
     }
 }

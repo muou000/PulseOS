@@ -11,60 +11,24 @@ use linux_raw_sys::{
 };
 
 use super::*;
-use crate::impls::fs::common::context_for_dirfd;
-use crate::impls::flush_filesystems_for_shutdown;
+use crate::{
+    impls::{flush_filesystems_for_shutdown, fs::common::context_for_dirfd},
+    validation::{
+        resource::{
+            validate_limit_order, validate_limit_raise, validate_nofile_ceiling,
+            validate_prlimit_pid, validate_resource,
+        },
+        system::{
+            MembarrierCommand, RebootAction, decode_reboot_action, parse_membarrier_command,
+            reboot_action_requires_filesystem_flush, validate_getrandom,
+        },
+    },
+};
 
 const MPOL_QUERY_FLAGS: usize = (MPOL_F_ADDR | MPOL_F_MEMS_ALLOWED | MPOL_F_NODE) as usize;
 const REBOOT_RESTART2_ARG_MAX: usize = 256;
 
 static CAD_ENABLED: AtomicBool = AtomicBool::new(false);
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum RebootAction {
-    Restart,
-    Restart2,
-    Halt,
-    PowerOff,
-    SetCad(bool),
-}
-
-/// A reset or power transition must not bypass dirty filesystem state.
-///
-/// CAD toggles only change the automatic-reboot policy and therefore do not
-/// need to enter the writeback barrier.
-fn reboot_action_requires_filesystem_flush(action: RebootAction) -> bool {
-    matches!(
-        action,
-        RebootAction::Restart
-            | RebootAction::Restart2
-            | RebootAction::Halt
-            | RebootAction::PowerOff
-    )
-}
-
-fn decode_reboot_action(
-    magic1: usize,
-    magic2: usize,
-    cmd: usize,
-) -> Result<RebootAction, LinuxError> {
-    let valid_magic2 = matches!(
-        magic2 as u32,
-        LINUX_REBOOT_MAGIC2 | LINUX_REBOOT_MAGIC2A | LINUX_REBOOT_MAGIC2B | LINUX_REBOOT_MAGIC2C
-    );
-    if magic1 as u32 != LINUX_REBOOT_MAGIC1 || !valid_magic2 {
-        return Err(LinuxError::EINVAL);
-    }
-
-    match cmd as u32 {
-        LINUX_REBOOT_CMD_RESTART => Ok(RebootAction::Restart),
-        LINUX_REBOOT_CMD_RESTART2 => Ok(RebootAction::Restart2),
-        LINUX_REBOOT_CMD_HALT => Ok(RebootAction::Halt),
-        LINUX_REBOOT_CMD_POWER_OFF => Ok(RebootAction::PowerOff),
-        LINUX_REBOOT_CMD_CAD_ON => Ok(RebootAction::SetCad(true)),
-        LINUX_REBOOT_CMD_CAD_OFF => Ok(RebootAction::SetCad(false)),
-        _ => Err(LinuxError::EINVAL),
-    }
-}
 
 fn validate_restart2_arg(arg: usize) -> Result<(), LinuxError> {
     // Linux accepts a reboot command string of up to 255 bytes and truncates
@@ -417,21 +381,13 @@ pub fn sys_prlimit64(pid: i32, resource: usize, new_limit: usize, old_limit: usi
         Ok(process) => process,
         Err(e) => return -e.code() as isize,
     };
-    if pid != 0 && pid != process.pid() as i32 {
-        return -LinuxError::ESRCH.code() as isize;
+    if let Err(e) = validate_prlimit_pid(pid, process.pid() as i32) {
+        return -e.code() as isize;
     }
-    let resource = resource as u32;
-    if resource != RLIMIT_STACK
-        && resource != RLIMIT_FSIZE
-        && resource != RLIMIT_NOFILE
-        && resource != RLIMIT_MEMLOCK
-        && resource != RLIMIT_CORE
-        && resource != RLIMIT_DATA
-        && resource != RLIMIT_AS
-        && resource != RLIMIT_SIGPENDING
-    {
-        return -LinuxError::EINVAL.code() as isize;
-    }
+    let resource = match validate_resource(resource) {
+        Ok(resource) => resource,
+        Err(e) => return -e.code() as isize,
+    };
 
     let Some(old_rlim) = process.get_rlimit(resource) else {
         return -LinuxError::EINVAL.code() as isize;
@@ -442,25 +398,21 @@ pub fn sys_prlimit64(pid: i32, resource: usize, new_limit: usize, old_limit: usi
             Ok(v) => v,
             Err(_) => return -LinuxError::EFAULT.code() as isize,
         };
-        if new_rlim.rlim_cur > new_rlim.rlim_max {
-            return -LinuxError::EINVAL.code() as isize;
+        if let Err(e) = validate_limit_raise(
+            old_rlim.rlim_cur,
+            old_rlim.rlim_max,
+            new_rlim.rlim_cur,
+            new_rlim.rlim_max,
+            process.has_capability(linux_raw_sys::general::CAP_SYS_RESOURCE),
+        ) {
+            return -e.code() as isize;
         }
-
-        // Raising a soft or hard limit requires CAP_SYS_RESOURCE.  The
-        // RLIMIT_NOFILE hard limit is also bounded by the kernel-wide
-        // descriptor limit, including for privileged callers.
-        let has_sys_resource =
-            process.has_capability(linux_raw_sys::general::CAP_SYS_RESOURCE);
-        if !has_sys_resource
-            && (new_rlim.rlim_cur > old_rlim.rlim_cur
-                || new_rlim.rlim_max > old_rlim.rlim_max)
-        {
-            return -LinuxError::EPERM.code() as isize;
-        }
-        if resource == RLIMIT_NOFILE
-            && new_rlim.rlim_max > pulse_core::fd_table::FD_LIMIT as u64
-        {
-            return -LinuxError::EPERM.code() as isize;
+        if let Err(e) = validate_nofile_ceiling(
+            resource,
+            new_rlim.rlim_max,
+            pulse_core::fd_table::FD_LIMIT as u64,
+        ) {
+            return -e.code() as isize;
         }
         if process.set_rlimit(resource, new_rlim).is_err() {
             return -LinuxError::EINVAL.code() as isize;
@@ -485,17 +437,12 @@ pub fn sys_setrlimit(resource: usize, new_limit: usize) -> isize {
 }
 
 pub fn sys_getrandom(buf: usize, buflen: usize, flags: usize) -> isize {
-    let flags = flags as u32;
-    if flags & !(GRND_RANDOM | GRND_NONBLOCK | GRND_INSECURE) != 0
-        || flags & (GRND_RANDOM | GRND_INSECURE) == (GRND_RANDOM | GRND_INSECURE)
-    {
-        return -LinuxError::EINVAL.code() as isize;
-    }
+    let flags = match validate_getrandom(buf, buflen, flags) {
+        Ok(flags) => flags,
+        Err(e) => return -e.code() as isize,
+    };
     if buflen == 0 {
         return 0;
-    }
-    if buf == 0 {
-        return -LinuxError::EFAULT.code() as isize;
     }
 
     let path = if flags & GRND_RANDOM != 0 {
@@ -746,29 +693,19 @@ static REGISTERED_GLOBAL_EXPEDITED: core::sync::atomic::AtomicBool =
 
 pub fn sys_membarrier(cmd: i32, flags: i32, _cpu_id: i32) -> isize {
     axlog::debug!("sys_membarrier: cmd={}, flags={}", cmd, flags);
-    if flags != 0 {
-        return -LinuxError::EINVAL.code() as isize;
-    }
-
-    let cmd_enum = match cmd {
-        0 => MEMBARRIER_CMD_QUERY,
-        1 => MEMBARRIER_CMD_GLOBAL,
-        2 => MEMBARRIER_CMD_GLOBAL_EXPEDITED,
-        4 => MEMBARRIER_CMD_REGISTER_GLOBAL_EXPEDITED,
-        8 => MEMBARRIER_CMD_PRIVATE_EXPEDITED,
-        16 => MEMBARRIER_CMD_REGISTER_PRIVATE_EXPEDITED,
-        32 => MEMBARRIER_CMD_PRIVATE_EXPEDITED_SYNC_CORE,
-        64 => MEMBARRIER_CMD_REGISTER_PRIVATE_EXPEDITED_SYNC_CORE,
-        _ => return -LinuxError::EINVAL.code() as isize,
+    let cmd_enum = match parse_membarrier_command(cmd, flags) {
+        Ok(command) => command,
+        Err(e) => return -e.code() as isize,
     };
 
     match cmd_enum {
-        MEMBARRIER_CMD_GLOBAL => {
+        MembarrierCommand::Query => -LinuxError::EINVAL.code() as isize,
+        MembarrierCommand::Global => {
             core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
             0
         }
 
-        MEMBARRIER_CMD_PRIVATE_EXPEDITED => {
+        MembarrierCommand::PrivateExpedited => {
             if REGISTERED_PRIVATE_EXPEDITED.load(core::sync::atomic::Ordering::Acquire) {
                 core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
                 0
@@ -777,12 +714,12 @@ pub fn sys_membarrier(cmd: i32, flags: i32, _cpu_id: i32) -> isize {
             }
         }
 
-        MEMBARRIER_CMD_REGISTER_PRIVATE_EXPEDITED => {
+        MembarrierCommand::RegisterPrivateExpedited => {
             REGISTERED_PRIVATE_EXPEDITED.store(true, core::sync::atomic::Ordering::Release);
             0
         }
 
-        MEMBARRIER_CMD_PRIVATE_EXPEDITED_SYNC_CORE => {
+        MembarrierCommand::PrivateExpeditedSyncCore => {
             if REGISTERED_PRIVATE_EXPEDITED_SYNC_CORE.load(core::sync::atomic::Ordering::Acquire) {
                 core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
                 0
@@ -791,18 +728,18 @@ pub fn sys_membarrier(cmd: i32, flags: i32, _cpu_id: i32) -> isize {
             }
         }
 
-        MEMBARRIER_CMD_REGISTER_PRIVATE_EXPEDITED_SYNC_CORE => {
+        MembarrierCommand::RegisterPrivateExpeditedSyncCore => {
             REGISTERED_PRIVATE_EXPEDITED_SYNC_CORE
                 .store(true, core::sync::atomic::Ordering::Release);
             0
         }
 
-        MEMBARRIER_CMD_GLOBAL_EXPEDITED => {
+        MembarrierCommand::GlobalExpedited => {
             core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
             0
         }
 
-        MEMBARRIER_CMD_REGISTER_GLOBAL_EXPEDITED => {
+        MembarrierCommand::RegisterGlobalExpedited => {
             REGISTERED_GLOBAL_EXPEDITED.store(true, core::sync::atomic::Ordering::Release);
             0
         }
@@ -883,11 +820,21 @@ mod tests {
 
     #[test]
     fn reboot_power_transitions_require_writeback_barrier() {
-        assert!(reboot_action_requires_filesystem_flush(RebootAction::Restart));
-        assert!(reboot_action_requires_filesystem_flush(RebootAction::Restart2));
+        assert!(reboot_action_requires_filesystem_flush(
+            RebootAction::Restart
+        ));
+        assert!(reboot_action_requires_filesystem_flush(
+            RebootAction::Restart2
+        ));
         assert!(reboot_action_requires_filesystem_flush(RebootAction::Halt));
-        assert!(reboot_action_requires_filesystem_flush(RebootAction::PowerOff));
-        assert!(!reboot_action_requires_filesystem_flush(RebootAction::SetCad(true)));
-        assert!(!reboot_action_requires_filesystem_flush(RebootAction::SetCad(false)));
+        assert!(reboot_action_requires_filesystem_flush(
+            RebootAction::PowerOff
+        ));
+        assert!(!reboot_action_requires_filesystem_flush(
+            RebootAction::SetCad(true)
+        ));
+        assert!(!reboot_action_requires_filesystem_flush(
+            RebootAction::SetCad(false)
+        ));
     }
 }
