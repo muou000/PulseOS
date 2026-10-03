@@ -1,4 +1,6 @@
 mod loader;
+#[cfg(feature = "mapping-lifecycle-test")]
+pub mod lifecycle_checks;
 
 use axerrno::AxResult;
 use axmm::AddrSpace;

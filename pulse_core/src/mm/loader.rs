@@ -288,35 +288,30 @@ fn resolve_page_fault(
     page: VirtAddr,
     flags: axhal::trap::PageFaultFlags,
 ) -> AxResult<bool> {
-    let mut outcome = aspace
-        .handle_page_fault(page, flags)
-        .complete_after_unlock()?;
-    loop {
-        outcome = match outcome {
-            axmm::PageFaultOutcome::Handled(handled) => return Ok(handled),
-            axmm::PageFaultOutcome::LoadFilePage(load) => {
-                let mut prepared = load.prepare()?;
-                aspace
-                    .handle_prepared_file_page(page, flags, &mut prepared)
-                    .complete_after_unlock()?
+    let initial = aspace.handle_page_fault(page, flags);
+    axmm::drive_page_fault(initial, |work| match work {
+        axmm::PageFaultWork::Retry => aspace.handle_page_fault(page, flags),
+        axmm::PageFaultWork::Completion(wait) => {
+            while wait.is_pending() {
+                axtask::yield_now();
             }
-            axmm::PageFaultOutcome::PrepareAnonPage(load) => {
-                let mut prepared = load.prepare()?;
-                aspace
-                    .handle_prepared_anon_page(page, flags, &mut prepared)
-                    .complete_after_unlock()?
+            if wait.result().is_err() {
+                axmm::PageFaultResult::Handled(false)
+            } else {
+                aspace.handle_page_fault(page, flags)
             }
-            axmm::PageFaultOutcome::RetryWithWriteLock => {
-                let outcome = aspace
-                    .handle_page_fault_write(page, flags)
-                    .complete_after_unlock()?;
-                if matches!(outcome, axmm::PageFaultOutcome::RetryWithWriteLock) {
-                    return Err(AxError::BadState);
-                }
-                outcome
-            }
-        };
-    }
+        }
+        axmm::PageFaultWork::File(prepared) => {
+            aspace.handle_prepared_file_page(page, flags, prepared)
+        }
+        axmm::PageFaultWork::Anon(prepared) => {
+            aspace.handle_prepared_anon_page(page, flags, prepared)
+        }
+        axmm::PageFaultWork::Cow(prepared) => {
+            aspace.handle_prepared_cow_page(page, flags, prepared)
+        }
+        axmm::PageFaultWork::WriteLock => aspace.handle_page_fault_write(page, flags),
+    })
 }
 
 pub fn prefault_range(

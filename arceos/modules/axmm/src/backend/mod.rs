@@ -5,10 +5,10 @@ use core::{
     sync::atomic::{AtomicBool, Ordering},
 };
 
-use axhal::paging::{MappingFlags, PageSize};
-use memory_addr::{MemoryAddr, PhysAddr, VirtAddr, PAGE_SIZE_4K};
-use memory_set::{MappingBackend, MappingMutation as MappingMutationTracker};
 use ::alloc::{sync::Arc, vec::Vec};
+use axhal::paging::{MappingFlags, PageSize};
+use memory_addr::{MemoryAddr, PAGE_SIZE_4K, PhysAddr, VirtAddr};
+use memory_set::{MappingBackend, MappingMutation as MappingMutationTracker};
 
 mod alloc;
 mod cow;
@@ -16,11 +16,14 @@ mod file;
 mod linear;
 mod shared;
 
-pub use self::shared::SharedFrame;
-pub(crate) use alloc::{cow_dec_frame_ref, cow_inc_frame_ref};
 pub use alloc::{AnonPageLoad, AnonPagePrepared};
-pub use self::cow::CowMapping;
-pub use self::file::{FilePageLoad, FilePagePrepared};
+pub(crate) use alloc::{alloc_frame, cow_dec_frame_ref, cow_inc_frame_ref, dealloc_frame};
+
+pub use self::{
+    cow::CowMapping,
+    file::{FilePageLoad, FilePagePrepared},
+    shared::SharedFrame,
+};
 
 /// The resident page-table entries changed by one address-space operation.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -143,26 +146,125 @@ pub(crate) fn protect_populated_range<M: MappingMutationTracker<VirtAddr>>(
 }
 
 #[derive(Default)]
-pub struct FileWritebacks(Vec<file::FileWriteback>);
+pub struct FileWritebacks {
+    pages: Vec<file::DirtyFilePage>,
+    files: Vec<axfs::CachedFile>,
+}
+
+// Failed publications retain both the cache and the extra physical-frame pin.
+// Take the queue before doing cache work so no queue lock is held across I/O.
+static FAILED_FILE_PAGES: spin::Mutex<Vec<file::DirtyFilePage>> = spin::Mutex::new(Vec::new());
+
+fn range_page_capacity(size: usize) -> usize {
+    size / PAGE_SIZE_4K + usize::from(size % PAGE_SIZE_4K != 0)
+}
+
+/// Publish every record, retaining only failures, then sync every requested file
+/// if all publications succeeded. The closures also provide a test seam for
+/// ownership and error handling without a physical allocator or filesystem.
+fn complete_writeback_records<Page, File>(
+    pages: &mut Vec<Page>,
+    files: &[File],
+    mut publish: impl FnMut(&Page) -> axerrno::AxResult,
+    mut sync: impl FnMut(&File) -> axerrno::AxResult,
+) -> axerrno::AxResult {
+    let mut first_error = None;
+    pages.retain(|page| match publish(page) {
+        Ok(()) => false,
+        Err(error) => {
+            first_error.get_or_insert(error);
+            true
+        }
+    });
+    if let Some(error) = first_error {
+        return Err(error);
+    }
+    for file in files {
+        if let Err(error) = sync(file) {
+            first_error.get_or_insert(error);
+        }
+    }
+    first_error.map_or(Ok(()), Err)
+}
 
 impl FileWritebacks {
-    fn push(&mut self, writeback: file::FileWriteback) {
-        self.0.push(writeback);
+    fn with_capacity(capacity: usize) -> Self {
+        Self {
+            pages: Vec::with_capacity(capacity),
+            files: Vec::new(),
+        }
+    }
+
+    /// Reserve the maximum page records and, when requested, sync-file records
+    /// for a byte range before acquiring the address-space lock.
+    pub fn try_prepare(size: usize, sync: bool) -> axerrno::AxResult<Self> {
+        let capacity = range_page_capacity(size);
+        let mut writebacks = Self::default();
+        writebacks
+            .pages
+            .try_reserve_exact(capacity)
+            .map_err(|_| axerrno::AxError::NoMemory)?;
+        if sync {
+            writebacks
+                .files
+                .try_reserve_exact(capacity)
+                .map_err(|_| axerrno::AxError::NoMemory)?;
+        }
+        Ok(writebacks)
+    }
+
+    /// Pin a live mapping frame while its PTE guard or mapping reference is
+    /// still held. Legacy callers may grow the vector; prepared batches have
+    /// enough capacity for the full operation.
+    pub(crate) fn record_page(
+        &mut self,
+        file: &axfs::CachedFile,
+        page_number: u32,
+        frame: PhysAddr,
+    ) -> axerrno::AxResult {
+        self.pages
+            .push(file::DirtyFilePage::new(file, page_number, frame)?);
+        Ok(())
+    }
+
+    /// Request a sync even if a shared mapping has no resident or writable PTEs.
+    pub(crate) fn record_file(&mut self, file: &axfs::CachedFile) {
+        if !self
+            .files
+            .iter()
+            .any(|recorded| recorded.shares_page_cache_with(file))
+        {
+            self.files.push(file.clone());
+        }
     }
 
     fn is_empty(&self) -> bool {
-        self.0.is_empty()
+        self.pages.is_empty() && self.files.is_empty()
     }
 
     fn append(&mut self, mut other: Self) {
-        self.0.append(&mut other.0);
+        self.pages.append(&mut other.pages);
+        for file in &other.files {
+            self.record_file(file);
+        }
     }
 
-    pub fn complete(self) -> axerrno::AxResult {
-        for writeback in self.0 {
-            writeback.complete()?;
+    /// Retry previously failed publications once, publish the entire new batch,
+    /// and release every successful record's extra pin. Storage errors leave
+    /// dirty ownership in axfs rather than retaining physical-frame pins here.
+    pub fn complete(mut self) -> axerrno::AxResult {
+        let mut pages = core::mem::take(&mut *FAILED_FILE_PAGES.lock());
+        pages.append(&mut self.pages);
+        let result = complete_writeback_records(
+            &mut pages,
+            &self.files,
+            file::DirtyFilePage::publish,
+            |file| file.sync(false).map_err(|_| axerrno::AxError::Io),
+        );
+        if !pages.is_empty() {
+            FAILED_FILE_PAGES.lock().append(&mut pages);
         }
-        Ok(())
+        result
     }
 }
 
@@ -209,6 +311,14 @@ pub enum Backend {
 }
 
 impl Backend {
+    pub(crate) fn requires_private_copy(&self) -> bool {
+        match self {
+            Self::Cow(_) => true,
+            Self::File(mapping) => !mapping.is_shared(),
+            _ => false,
+        }
+    }
+
     pub(crate) fn is_file_page_cached(&self, page_addr: VirtAddr) -> bool {
         match self {
             Self::File(mapping) => mapping.is_page_cached(page_addr),
@@ -271,8 +381,27 @@ impl DeferredReclaims {
             frames: Some(DeferredFrames::Dynamic(Vec::with_capacity(capacity))),
             backend: None,
             additional_backends: Some(Vec::new()),
-            file_writebacks: FileWritebacks::default(),
+            file_writebacks: FileWritebacks::with_capacity(capacity),
         }
+    }
+
+    /// Reserve all retirement records for a byte range outside the mapping lock.
+    pub fn try_prepare(size: usize) -> axerrno::AxResult<Self> {
+        let capacity = range_page_capacity(size);
+        let mut frames = Vec::new();
+        frames
+            .try_reserve_exact(capacity)
+            .map_err(|_| axerrno::AxError::NoMemory)?;
+        let mut backends = Vec::new();
+        backends
+            .try_reserve_exact(capacity)
+            .map_err(|_| axerrno::AxError::NoMemory)?;
+        Ok(Self {
+            frames: Some(DeferredFrames::Dynamic(frames)),
+            backend: None,
+            additional_backends: Some(backends),
+            file_writebacks: FileWritebacks::try_prepare(size, false)?,
+        })
     }
 
     pub(crate) fn for_retirement() -> Self {
@@ -324,8 +453,13 @@ impl DeferredReclaims {
         }
     }
 
-    fn defer_file_writeback(&mut self, writeback: file::FileWriteback) {
-        self.file_writebacks.push(writeback);
+    pub(crate) fn defer_file_page(
+        &mut self,
+        file: &axfs::CachedFile,
+        page_number: u32,
+        frame: PhysAddr,
+    ) -> axerrno::AxResult {
+        self.file_writebacks.record_page(file, page_number, frame)
     }
 
     pub(crate) fn is_empty(&self) -> bool {
@@ -366,12 +500,15 @@ impl DeferredReclaims {
         self.file_writebacks.append(file_writebacks);
     }
 
-    pub(crate) fn reclaim(self) {
+    pub(crate) fn reclaim(self) -> axerrno::AxResult {
         let (frames, backend, additional_backends, file_writebacks) = self.into_parts();
         // File-backed MAP_SHARED pages must be marked dirty only after the
         // PTE invalidation is visible to every CPU. `reclaim()` is reached
         // after that completion for published address spaces.
-        let _ = file_writebacks.complete();
+        let writeback_result = file_writebacks.complete();
+        // Failed publications now own independent pins in FAILED_FILE_PAGES.
+        // Mapping references and retirement leases can always be released once
+        // the TLB shootdown has completed, regardless of publication or I/O errors.
         match frames {
             DeferredFrames::Dynamic(frames) => {
                 self::alloc::dealloc_frames(frames);
@@ -379,18 +516,25 @@ impl DeferredReclaims {
             DeferredFrames::Retirement { cpu_id, len } => {
                 // SAFETY: this reclaim owns the CPU buffer lease until it is
                 // released below, so the initialized prefix is exclusive.
-                let frames = unsafe {
-                    &mut (&mut *RETIREMENT_RECLAIM_BUFFERS[cpu_id].frames.get())[..len]
-                };
+                let frames =
+                    unsafe { &mut (&mut *RETIREMENT_RECLAIM_BUFFERS[cpu_id].frames.get())[..len] };
                 self::alloc::dealloc_frame_values(frames);
                 release_retirement_buffer(cpu_id);
             }
         }
         drop(backend);
         drop(additional_backends);
+        writeback_result
     }
 
-    fn into_parts(mut self) -> (DeferredFrames, Option<Backend>, Vec<Backend>, FileWritebacks) {
+    fn into_parts(
+        mut self,
+    ) -> (
+        DeferredFrames,
+        Option<Backend>,
+        Vec<Backend>,
+        FileWritebacks,
+    ) {
         (
             self.frames.take().unwrap(),
             self.backend.take(),
@@ -421,8 +565,8 @@ impl Drop for DeferredReclaims {
             DeferredFrames::Dynamic(frames) => frames.len(),
             DeferredFrames::Retirement { len, .. } => *len,
         };
-        let backend_count = usize::from(self.backend.is_some())
-            + self.additional_backends.as_ref().unwrap().len();
+        let backend_count =
+            usize::from(self.backend.is_some()) + self.additional_backends.as_ref().unwrap().len();
         let writeback_count = usize::from(!self.file_writebacks.is_empty());
         if frame_count + backend_count + writeback_count > 0 {
             error!(
@@ -454,7 +598,13 @@ impl MappingBackend for Backend {
     type Flags = MappingFlags;
     type PageTable = crate::PageTableLockManager;
     type Reclaim = DeferredReclaims;
-    fn map(&self, start: VirtAddr, size: usize, flags: MappingFlags, pt: &mut Self::PageTable) -> bool {
+    fn map(
+        &self,
+        start: VirtAddr,
+        size: usize,
+        flags: MappingFlags,
+        pt: &mut Self::PageTable,
+    ) -> bool {
         let pt = pt.get_mut();
         match self {
             Self::Shared { shared_frame, .. } => {
@@ -510,9 +660,7 @@ impl MappingBackend for Backend {
                 reclaim.defer_backend(self.clone());
                 self.unmap_file(start, size, pt_mut, reclaim, mutation)
             }
-            Self::Cow(cow) => cow
-                .inner
-                .unmap_tracked(start, size, pt, reclaim, mutation),
+            Self::Cow(cow) => cow.inner.unmap_tracked(start, size, pt, reclaim, mutation),
         }
     }
 
@@ -553,6 +701,15 @@ impl MappingBackend for Backend {
 }
 
 impl Backend {
+    /// Place a prepared mapping without expanding its original file byte window.
+    pub(crate) fn relocate_prepared(&mut self, start: VirtAddr) {
+        match self {
+            Self::File(mapping) => mapping.relocate(start),
+            Self::Cow(cow) => cow.inner.relocate_prepared(start),
+            _ => {}
+        }
+    }
+
     pub(crate) fn update_address(
         &mut self,
         old_start: VirtAddr,
@@ -565,7 +722,8 @@ impl Backend {
                 mapping.update_address(new_start, new_size);
             }
             Self::Cow(cow) => {
-                cow.inner.update_address(old_start, new_start, old_size, new_size);
+                cow.inner
+                    .update_address(old_start, new_start, old_size, new_size);
             }
             Self::Linear { pa_va_offset } => {
                 let diff = new_start.as_usize() as isize - old_start.as_usize() as isize;
@@ -604,10 +762,9 @@ impl Backend {
             Self::File(mapping) => {
                 mapping.page_load_request(vaddr, area_end, orig_flags, page_table)
             }
-            Self::Cow(cow) => {
-                cow.inner()
-                    .page_fault_load_request(vaddr, area_end, orig_flags, page_table)
-            }
+            Self::Cow(cow) => cow
+                .inner()
+                .page_fault_load_request(vaddr, area_end, orig_flags, page_table),
             _ => None,
         }
     }
@@ -696,20 +853,14 @@ impl Backend {
         prepared: &mut AnonPagePrepared,
     ) -> bool {
         match self {
-            Self::Alloc { populate: false, .. } => self.handle_prepared_page_fault_alloc(
-                vaddr,
-                area_end,
-                orig_flags,
-                page_table,
-                prepared,
+            Self::Alloc {
+                populate: false, ..
+            } => self.handle_prepared_page_fault_alloc(
+                vaddr, area_end, orig_flags, page_table, prepared,
             ),
-            Self::Cow(cow) => cow.inner().handle_prepared_anon_page(
-                vaddr,
-                area_end,
-                orig_flags,
-                page_table,
-                prepared,
-            ),
+            Self::Cow(cow) => cow
+                .inner()
+                .handle_prepared_anon_page(vaddr, area_end, orig_flags, page_table, prepared),
             _ => false,
         }
     }
@@ -725,14 +876,9 @@ impl Backend {
         writebacks: &mut FileWritebacks,
     ) -> bool {
         match self {
-            Self::File(_) => match self.prepare_file_writeback_range_impl(start, size, sync, pt) {
-                Ok(Some(writeback)) => {
-                    writebacks.0.push(writeback);
-                    true
-                }
-                Ok(None) => true,
-                Err(()) => false,
-            },
+            Self::File(_) => self
+                .prepare_file_writeback_range_impl(start, size, sync, pt, writebacks)
+                .is_ok(),
             Self::Cow(cow) => cow
                 .inner
                 .prepare_file_writeback_range(start, size, sync, pt, writebacks),
@@ -743,15 +889,207 @@ impl Backend {
 
 #[cfg(test)]
 mod tests {
-    use ::alloc::boxed::Box;
+    use core::cell::Cell;
 
-    use super::{Backend, CowMapping};
+    use ::alloc::{boxed::Box, rc::Rc, vec, vec::Vec};
+    use axerrno::AxError;
+
+    use super::{Backend, CowMapping, complete_writeback_records, range_page_capacity};
+
+    struct TestDirtyPage {
+        page_number: usize,
+        file: Rc<()>,
+        frame_pin: Rc<()>,
+        drops: Rc<Cell<usize>>,
+    }
+
+    impl TestDirtyPage {
+        fn new(page_number: usize, drops: &Rc<Cell<usize>>) -> Self {
+            Self {
+                page_number,
+                file: Rc::new(()),
+                frame_pin: Rc::new(()),
+                drops: drops.clone(),
+            }
+        }
+    }
+
+    impl Drop for TestDirtyPage {
+        fn drop(&mut self) {
+            self.drops.set(self.drops.get() + 1);
+        }
+    }
+
+    #[test]
+    fn publication_error_processes_the_entire_batch_and_retains_only_failures() {
+        let drops = Rc::new(Cell::new(0));
+        let mut pages: Vec<_> = (0..4).map(|pn| TestDirtyPage::new(pn, &drops)).collect();
+        let mut visited = Vec::new();
+        let mut syncs = 0;
+        let result = complete_writeback_records(
+            &mut pages,
+            &[0, 1],
+            |page| {
+                visited.push(page.page_number);
+                match page.page_number {
+                    0 => Err(AxError::Io),
+                    2 => Err(AxError::BadState),
+                    _ => Ok(()),
+                }
+            },
+            |_| {
+                syncs += 1;
+                Ok(())
+            },
+        );
+        assert_eq!(result, Err(AxError::Io));
+        assert_eq!(visited, vec![0, 1, 2, 3]);
+        assert_eq!(
+            pages
+                .iter()
+                .map(|page| page.page_number)
+                .collect::<Vec<_>>(),
+            vec![0, 2]
+        );
+        assert_eq!(drops.get(), 2);
+        assert_eq!(syncs, 0);
+    }
+
+    #[test]
+    fn failed_publication_owns_file_and_pin_until_the_next_completion() {
+        let drops = Rc::new(Cell::new(0));
+        let failed_page = TestDirtyPage::new(7, &drops);
+        let file = Rc::downgrade(&failed_page.file);
+        let pin = Rc::downgrade(&failed_page.frame_pin);
+        let mut pages = vec![failed_page];
+        assert_eq!(
+            complete_writeback_records(
+                &mut pages,
+                &[] as &[usize],
+                |_| Err(AxError::Io),
+                |_| Ok(())
+            ),
+            Err(AxError::Io)
+        );
+        assert_eq!(drops.get(), 0);
+        assert_eq!(file.strong_count(), 1);
+        assert_eq!(pin.strong_count(), 1);
+
+        // Moving into the retry queue keeps the complete failed record alive.
+        let mut retry_queue = Vec::new();
+        retry_queue.append(&mut pages);
+        let mut next_batch = core::mem::take(&mut retry_queue);
+        next_batch.push(TestDirtyPage::new(8, &drops));
+        let mut visited = Vec::new();
+        assert_eq!(
+            complete_writeback_records(
+                &mut next_batch,
+                &[] as &[usize],
+                |page| {
+                    visited.push(page.page_number);
+                    Ok(())
+                },
+                |_| Ok(())
+            ),
+            Ok(())
+        );
+        assert_eq!(visited, vec![7, 8]);
+        assert!(next_batch.is_empty());
+        assert_eq!(drops.get(), 2);
+        assert!(file.upgrade().is_none());
+        assert!(pin.upgrade().is_none());
+    }
+
+    #[test]
+    fn repeated_publication_failure_retries_each_record_only_once_per_completion() {
+        let drops = Rc::new(Cell::new(0));
+        let mut pages = vec![TestDirtyPage::new(0, &drops), TestDirtyPage::new(1, &drops)];
+        for _ in 0..2 {
+            let mut visited = Vec::new();
+            assert_eq!(
+                complete_writeback_records(
+                    &mut pages,
+                    &[] as &[usize],
+                    |page| {
+                        visited.push(page.page_number);
+                        Err(AxError::Io)
+                    },
+                    |_| Ok(())
+                ),
+                Err(AxError::Io)
+            );
+            assert_eq!(visited, vec![0, 1]);
+            assert_eq!(pages.len(), 2);
+            assert_eq!(drops.get(), 0);
+        }
+    }
+
+    #[test]
+    fn storage_failure_syncs_every_file_without_retaining_physical_pins() {
+        let drops = Rc::new(Cell::new(0));
+        let mut pages = vec![TestDirtyPage::new(0, &drops)];
+        let mut synced = Vec::new();
+        assert_eq!(
+            complete_writeback_records(
+                &mut pages,
+                &[10, 11, 12],
+                |_| Ok(()),
+                |file| {
+                    synced.push(*file);
+                    if *file == 10 {
+                        Err(AxError::Io)
+                    } else if *file == 12 {
+                        Err(AxError::BadState)
+                    } else {
+                        Ok(())
+                    }
+                }
+            ),
+            Err(AxError::Io)
+        );
+        assert_eq!(synced, vec![10, 11, 12]);
+        assert!(pages.is_empty());
+        assert_eq!(drops.get(), 1);
+    }
+
+    #[test]
+    fn sync_without_resident_pages_still_processes_all_requested_files() {
+        let mut pages = Vec::<TestDirtyPage>::new();
+        let mut synced = Vec::new();
+        assert_eq!(
+            complete_writeback_records(
+                &mut pages,
+                &[10, 11],
+                |_| panic!("an empty batch must not publish a page"),
+                |file| {
+                    synced.push(*file);
+                    Ok(())
+                }
+            ),
+            Ok(())
+        );
+        assert_eq!(synced, vec![10, 11]);
+    }
+
+    #[test]
+    fn range_capacity_rounds_up_without_overflow() {
+        assert_eq!(range_page_capacity(0), 0);
+        assert_eq!(range_page_capacity(1), 1);
+        assert_eq!(range_page_capacity(memory_addr::PAGE_SIZE_4K), 1);
+        assert_eq!(range_page_capacity(memory_addr::PAGE_SIZE_4K + 1), 2);
+        assert_eq!(
+            range_page_capacity(usize::MAX),
+            usize::MAX / memory_addr::PAGE_SIZE_4K + 1
+        );
+    }
 
     #[test]
     fn only_anonymous_backends_are_discardable() {
         assert!(Backend::new_alloc(false).is_discardable());
         assert!(Backend::new_alloc(true).is_discardable());
-        assert!(Backend::Cow(CowMapping::new(Box::new(Backend::new_alloc(false)))).is_discardable());
+        assert!(
+            Backend::Cow(CowMapping::new(Box::new(Backend::new_alloc(false)))).is_discardable()
+        );
         assert!(!Backend::Linear { pa_va_offset: 0 }.is_discardable());
     }
 }

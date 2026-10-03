@@ -60,6 +60,14 @@ fn main() {
                 pulse_core::task::current_thread().expect("init task entered without Thread");
             let proc = thread.process();
 
+            #[cfg(feature = "mapping-lifecycle-test")]
+            {
+                pulse_core::mm::lifecycle_checks::run().expect("mapping lifecycle kernel checks failed");
+                axfs::run_mapping_lifecycle_checks().expect("mapping cache kernel checks failed");
+                pulse_syscalls::run_mapping_shutdown_checks().expect("mapping shutdown kernel checks failed");
+                info!("MLC_KERNEL RESULT PASS");
+            }
+
             let shell_args_base: &[&str] = &["sh"];
             let shell_envs: &[&str] = &["PATH=/usr/sbin:/usr/bin:/sbin:/bin"];
 
