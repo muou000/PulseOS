@@ -2,6 +2,23 @@ use kspin::SpinNoPreempt;
 
 use super::*;
 
+#[cfg(feature = "mapping-lifecycle-test")]
+#[path = "cache_lifecycle_checks.rs"]
+mod lifecycle_checks;
+
+/// Runs opt-in cache lifecycle checks after the kernel allocator and task are ready.
+#[cfg(feature = "mapping-lifecycle-test")]
+pub fn run_mapping_lifecycle_checks() -> VfsResult<()> {
+    lifecycle_checks::run()
+}
+
+/// Returns an injected storage sync error after verifying and cleaning up its cache.
+/// The shutdown barrier check can use this actual cache failure without resetting.
+#[cfg(feature = "mapping-lifecycle-test")]
+pub fn mapping_lifecycle_failed_sync() -> VfsResult<()> {
+    lifecycle_checks::failed_sync()
+}
+
 /// Prevents the background writer from selecting an inode which has lost its
 /// final directory link and is waiting for ext4's deferred-delete worker.
 ///
@@ -491,10 +508,24 @@ pub(super) async fn append_slice_source_async(
 
 struct WritebackPage {
     page_num: u32,
+    frame: Arc<PageCacheFrame>,
     len: usize,
     content_generation: u64,
     writable_mapping_generation: u64,
     compare_contents: bool,
+}
+
+impl WritebackPage {
+    fn complete(&self, page: &mut PageCache, data: &[u8]) {
+        if Arc::ptr_eq(&page.frame, &self.frame)
+            && page.dirty
+            && page.content_generation == self.content_generation
+            && page.writable_mapping_generation == self.writable_mapping_generation
+            && (!self.compare_contents || page.data()[..self.len] == *data)
+        {
+            page.dirty = false;
+        }
+    }
 }
 
 struct WritebackBatch {
@@ -844,6 +875,10 @@ impl PageCache {
             .is_some_and(|ref_count| ref_count > 1)
     }
 
+    fn has_retained_frame(&self) -> bool {
+        Arc::strong_count(&self.frame) > 1
+    }
+
     fn pin_for_mapping(&mut self, may_write: bool) -> VfsResult<PhysAddr> {
         let paddr = self.paddr();
         let ref_count = axalloc::frame_table()
@@ -950,6 +985,31 @@ pub(super) struct CachedFileShared {
     fill_inflight: AtomicU64,
 }
 
+struct SyncDirtyPages<'a> {
+    shared: &'a CachedFileShared,
+    pages: Vec<(u32, Arc<PageCacheFrame>)>,
+    completed: bool,
+}
+
+impl Drop for SyncDirtyPages<'_> {
+    fn drop(&mut self) {
+        if self.completed {
+            return;
+        }
+        // A write may have succeeded before sync failed or was cancelled.
+        // Restore only the same frames; a later checkpoint must retry them.
+        let mut cache = self.shared.page_cache.lock();
+        for (pn, frame) in &self.pages {
+            if let Some(page) = cache.get_mut(pn)
+                && Arc::ptr_eq(&page.frame, frame)
+            {
+                page.mark_dirty();
+            }
+        }
+        self.shared.request_background_writeback();
+    }
+}
+
 struct MmapPrefetchTaskGuard {
     shared: Arc<CachedFileShared>,
     _slot: MmapPrefetchSlot<'static>,
@@ -1050,11 +1110,9 @@ impl CachedFileShared {
     fn is_releasable_without_writeback(&self) -> bool {
         !self.is_unlinked()
             && !self.has_pending_background_writeback()
-            && self
-                .page_cache
-                .lock()
-                .iter()
-                .all(|(_, page)| !page.dirty && !page.has_user_mapping())
+            && self.page_cache.lock().iter().all(|(_, page)| {
+                !page.dirty && !page.has_user_mapping() && !page.has_retained_frame()
+            })
     }
 
     /// Non-blocking counterpart for allocator reclaim. Returning `None`
@@ -1065,9 +1123,9 @@ impl CachedFileShared {
         }
         self.page_cache.try_lock().map(|cache| {
             (!require_empty || cache.is_empty())
-                && cache
-                    .iter()
-                    .all(|(_, page)| !page.dirty && !page.has_user_mapping())
+                && cache.iter().all(|(_, page)| {
+                    !page.dirty && !page.has_user_mapping() && !page.has_retained_frame()
+                })
         })
     }
 
@@ -1131,7 +1189,7 @@ impl CachedFileShared {
             let Some((&pn, page)) = cache.peek_lru() else {
                 break;
             };
-            if page.dirty || page.has_user_mapping() {
+            if page.dirty || page.has_user_mapping() || page.has_retained_frame() {
                 cache.promote(&pn);
                 scanned += 1;
                 continue;
@@ -1225,6 +1283,7 @@ impl CachedFileShared {
                         let compare_contents = page.may_write_mapping && page.has_user_mapping();
                         snapshots.push(WritebackPage {
                             page_num: pn_curr,
+                            frame: page.frame.clone(),
                             len: curr_len,
                             content_generation: page.content_generation,
                             writable_mapping_generation: page.writable_mapping_generation,
@@ -1242,14 +1301,8 @@ impl CachedFileShared {
                 let mut data_offset = 0;
                 for snapshot in snapshots {
                     let end = data_offset + snapshot.len;
-                    if let Some(page) = guard.get_mut(&snapshot.page_num)
-                        && page.dirty
-                        && page.content_generation == snapshot.content_generation
-                        && page.writable_mapping_generation == snapshot.writable_mapping_generation
-                        && (!snapshot.compare_contents
-                            || page.data()[..snapshot.len] == merged_buf[data_offset..end])
-                    {
-                        page.dirty = false;
+                    if let Some(page) = guard.get_mut(&snapshot.page_num) {
+                        snapshot.complete(page, &merged_buf[data_offset..end]);
                     }
                     data_offset = end;
                 }
@@ -1267,8 +1320,68 @@ impl CachedFileShared {
         Ok(())
     }
 
+    fn retain_shared_page_if_paddr(
+        self: &Arc<Self>,
+        pn: u32,
+        paddr: PhysAddr,
+    ) -> VfsResult<MappedPageIdentity> {
+        let mut cache = self.page_cache.lock();
+        let page = cache.get_mut(&pn).ok_or(VfsError::BadState)?;
+        if page.paddr() != paddr {
+            return Err(VfsError::BadState);
+        }
+        Ok(MappedPageIdentity {
+            shared: self.clone(),
+            _frame: page.frame.clone(),
+            page_num: pn,
+            paddr,
+            generation: self.cache_generation.load(Ordering::Acquire),
+        })
+    }
+
+    fn mark_page_dirty_if_paddr(&self, pn: u32, paddr: PhysAddr, in_memory: bool) -> VfsResult<()> {
+        let mut cache = self.page_cache.lock();
+        let page = cache.get_mut(&pn).ok_or(VfsError::BadState)?;
+        if page.paddr() != paddr {
+            return Err(VfsError::BadState);
+        }
+        if !in_memory {
+            page.mark_dirty();
+            // Publish the request before releasing the matching page, so
+            // checkpoint completion cannot miss this dirty generation.
+            self.request_background_writeback();
+        }
+        Ok(())
+    }
+
     pub(super) async fn flush_dirty_pages_async(&self, file: &FileNode) -> VfsResult<()> {
         self.flush_dirty_pages_in_range_async(file, None).await
+    }
+
+    /// The caller holds `io_lock.write()` through this durability checkpoint.
+    /// Keep frame identities until sync succeeds; failures and cancellation
+    /// re-dirty these pages without overwriting a newer generation or frame.
+    async fn sync_dirty_pages_async(&self, file: &FileNode, data_only: bool) -> VfsResult<()> {
+        let pages = self
+            .page_cache
+            .lock()
+            .iter()
+            .filter(|(_, page)| page.dirty || (page.may_write_mapping && page.has_user_mapping()))
+            .map(|(pn, page)| (*pn, page.frame.clone()))
+            .collect();
+        let mut dirty_pages = SyncDirtyPages {
+            shared: self,
+            pages,
+            completed: false,
+        };
+        let cached_size = self.size();
+        if file.len().await? != cached_size {
+            file.set_len(cached_size).await?;
+        }
+        self.flush_dirty_pages_async(file).await?;
+        file.sync(data_only).await?;
+        dirty_pages.completed = true;
+        Ok(())
     }
 
     /// Flushes dirty cache pages that overlap one direct-I/O request.
@@ -1363,6 +1476,7 @@ impl CachedFileShared {
                         let compare_contents = page.may_write_mapping && page.has_user_mapping();
                         snapshots.push(WritebackPage {
                             page_num: pn,
+                            frame: page.frame.clone(),
                             len,
                             content_generation: page.content_generation,
                             writable_mapping_generation: page.writable_mapping_generation,
@@ -1402,14 +1516,8 @@ impl CachedFileShared {
             let mut data_offset = 0;
             for snapshot in batch.pages {
                 let end = data_offset + snapshot.len;
-                if let Some(page) = cache.get_mut(&snapshot.page_num)
-                    && page.dirty
-                    && page.content_generation == snapshot.content_generation
-                    && page.writable_mapping_generation == snapshot.writable_mapping_generation
-                    && (!snapshot.compare_contents
-                        || page.data()[..snapshot.len] == data[data_offset..end])
-                {
-                    page.dirty = false;
+                if let Some(page) = cache.get_mut(&snapshot.page_num) {
+                    snapshot.complete(page, &data[data_offset..end]);
                 }
                 data_offset = end;
             }
@@ -1994,6 +2102,47 @@ impl FileUserData {
         match self {
             FileUserData::Strong(strong) => strong.clone(),
         }
+    }
+}
+
+/// A resident cache frame retained for publication into a prepared mapping.
+///
+/// Capture this outside address-space locks. Identity and generation checks
+/// take no cache locks, so a prepared fault can reject an invalidation before
+/// publishing its PTE. The caller retains its physical mapping pin separately;
+/// this token retains cache ownership, not an extra frame-table reference.
+/// Drop the token outside address-space locks as well.
+#[derive(Clone)]
+pub struct MappedPageIdentity {
+    shared: Arc<CachedFileShared>,
+    _frame: Arc<PageCacheFrame>,
+    page_num: u32,
+    paddr: PhysAddr,
+    generation: u64,
+}
+
+impl MappedPageIdentity {
+    pub fn page_num(&self) -> u32 {
+        self.page_num
+    }
+
+    pub fn paddr(&self) -> PhysAddr {
+        self.paddr
+    }
+
+    /// Lock-free check against direct-I/O, truncate and unlink invalidation.
+    pub fn is_current(&self) -> bool {
+        !self.shared.is_unlinked()
+            && self.shared.cache_generation.load(Ordering::Acquire) == self.generation
+    }
+
+    /// Verifies the file cache, file page, retained frame and invalidation epoch.
+    /// This does not validate VMA permissions or transfer a physical pin.
+    pub fn matches(&self, file: &CachedFile, pn: u32, paddr: PhysAddr) -> bool {
+        Arc::ptr_eq(&self.shared, &file.shared)
+            && self.page_num == pn
+            && self.paddr == paddr
+            && self.is_current()
     }
 }
 
@@ -3122,12 +3271,7 @@ impl CachedFile {
         }
         let _guard = self.shared.io_lock.write().await;
         let file = self.inner.entry().as_file()?;
-        let cached_size = self.shared.size();
-        if file.len().await? != cached_size {
-            file.set_len(cached_size).await?;
-        }
-        self.shared.flush_dirty_pages_async(file).await?;
-        file.sync(data_only).await
+        self.shared.sync_dirty_pages_async(file, data_only).await
     }
 
     pub fn write_at(&self, buf: impl Read + IoBuf, offset: u64) -> VfsResult<usize> {
@@ -3278,6 +3422,29 @@ impl CachedFile {
         result
     }
 
+    /// Returns the lock-free invalidation epoch for prepared mapped-page fills.
+    ///
+    /// Snapshot before `get_shared_page_paddrs` and compare immediately before
+    /// PTE publication. Physical pins and mapping identity must also be checked;
+    /// this epoch alone never proves ownership from a file page number.
+    pub fn mapping_generation(&self) -> u64 {
+        self.shared.cache_generation.load(Ordering::Acquire)
+    }
+
+    /// Retains the expected resident cache frame without reading or filling it.
+    ///
+    /// Call outside address-space locks, with the expected physical frame still
+    /// pinned. A missing or different frame returns `BadState`. Invalidation
+    /// leaves this owner alive but makes its lock-free `is_current` check false.
+    pub fn retain_shared_page_if_paddr(
+        &self,
+        pn: u32,
+        paddr: PhysAddr,
+    ) -> VfsResult<MappedPageIdentity> {
+        let _guard = axtask::future::block_on(self.shared.io_lock.read());
+        self.shared.retain_shared_page_if_paddr(pn, paddr)
+    }
+
     /// Returns a resident page's physical address without adding a mapping pin.
     pub fn shared_page_paddr(&self, pn: u32) -> VfsResult<PhysAddr> {
         self.with_page(pn, |page| {
@@ -3301,6 +3468,20 @@ impl CachedFile {
         result
     }
 
+    /// Marks a resident page dirty only if it still refers to the expected
+    /// physical frame, and requests a later background checkpoint.
+    ///
+    /// Call outside address-space locks and retain a live physical frame pin
+    /// until this returns. That pin prevents address reuse; a file page number
+    /// alone never proves cache ownership. Success publishes dirtiness, not
+    /// storage durability (use `sync` for that).
+    pub fn mark_page_dirty_if_paddr(&self, pn: u32, paddr: PhysAddr) -> VfsResult<()> {
+        let _page_guard = axtask::future::block_on(self.shared.page_access.acquire_for_page(pn));
+        let _guard = axtask::future::block_on(self.shared.io_lock.read());
+        self.shared
+            .mark_page_dirty_if_paddr(pn, paddr, self.in_memory)
+    }
+
     /// Marks the page at the given page index as dirty.
     pub fn mark_page_dirty(&self, pn: u32) -> VfsResult<()> {
         let result = self.with_page(pn, |page| match page {
@@ -3321,9 +3502,21 @@ impl CachedFile {
 
 #[cfg(test)]
 mod tests {
-    use alloc::sync::Arc;
+    use alloc::{boxed::Box, sync::Arc, vec::Vec};
+    use core::{
+        any::Any,
+        future::Future,
+        pin::Pin,
+        sync::atomic::{AtomicBool, AtomicUsize, Ordering},
+        task::{Context, Poll, Waker},
+    };
+    use std::{sync::Once, task::Wake};
 
-    use axfs_ng_vfs::VfsError;
+    use axfs_ng_vfs::{
+        FileNode, FileNodeOps, FilesystemOps, Metadata, MetadataUpdate, NodeOps, VfsError,
+        VfsResult,
+    };
+    use axpoll::{IoEvents, Pollable};
 
     use super::{
         super::{
@@ -3331,9 +3524,407 @@ mod tests {
             checked_shared_page_count,
         },
         CachedFileShared, MAX_WRITE_ACCESS_PAGES, MmapPrefetchSlots, MmapPrefetchState,
-        PAGE_ACCESS_LOCK_STRIPES, PAGE_SIZE, PageAccessDomain, WRITE_STAGING_SIZE,
-        checked_dirty_page_range, checked_page_span,
+        PAGE_ACCESS_LOCK_STRIPES, PAGE_SIZE, PageAccessDomain, PageCache, WRITE_STAGING_SIZE,
+        WritebackPage, checked_dirty_page_range, checked_page_span,
     };
+
+    struct NoopWake;
+
+    impl Wake for NoopWake {
+        fn wake(self: Arc<Self>) {}
+    }
+
+    fn poll_once<F: Future>(future: Pin<&mut F>) -> Poll<F::Output> {
+        let waker = Waker::from(Arc::new(NoopWake));
+        future.poll(&mut Context::from_waker(&waker))
+    }
+
+    fn block_on<F: Future>(future: F) -> F::Output {
+        let mut future = core::pin::pin!(future);
+        loop {
+            if let Poll::Ready(output) = poll_once(future.as_mut()) {
+                return output;
+            }
+            core::hint::spin_loop();
+        }
+    }
+
+    fn new_test_page() -> PageCache {
+        static INIT: Once = Once::new();
+        INIT.call_once(|| {
+            // Native tests use std for heap ownership and a separate region for
+            // the real cache page allocator. axhal's dummy maps these frames to
+            // physical zero; these tests do not claim hardware mapping coverage.
+            let layout = std::alloc::Layout::from_size_align(8 * 1024 * 1024, PAGE_SIZE).unwrap();
+            let memory = unsafe { std::alloc::alloc_zeroed(layout) };
+            assert!(!memory.is_null());
+            axalloc::global_init(memory as usize, layout.size());
+            axalloc::init_frame_table(0.into(), PAGE_SIZE);
+        });
+        PageCache::new(false).unwrap()
+    }
+
+    struct TestFile {
+        data: std::sync::Mutex<Vec<u8>>,
+        fail_write: AtomicBool,
+        fail_sync: AtomicBool,
+        pause_write: AtomicBool,
+        pause_sync: AtomicBool,
+        writes: AtomicUsize,
+        syncs: AtomicUsize,
+    }
+
+    impl TestFile {
+        fn new() -> Arc<Self> {
+            Arc::new(Self {
+                data: std::sync::Mutex::new(alloc::vec![0; PAGE_SIZE]),
+                fail_write: AtomicBool::new(false),
+                fail_sync: AtomicBool::new(false),
+                pause_write: AtomicBool::new(false),
+                pause_sync: AtomicBool::new(false),
+                writes: AtomicUsize::new(0),
+                syncs: AtomicUsize::new(0),
+            })
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl NodeOps for TestFile {
+        fn inode(&self) -> u64 {
+            67
+        }
+
+        async fn metadata(&self) -> VfsResult<Metadata> {
+            Err(VfsError::Unsupported)
+        }
+
+        async fn len(&self) -> VfsResult<u64> {
+            Ok(self.data.lock().unwrap().len() as u64)
+        }
+
+        async fn update_metadata(&self, _update: MetadataUpdate) -> VfsResult<()> {
+            Err(VfsError::Unsupported)
+        }
+
+        fn filesystem(&self) -> &dyn FilesystemOps {
+            panic!("cache tests do not query a filesystem")
+        }
+
+        async fn sync(&self, _data_only: bool) -> VfsResult<()> {
+            self.syncs.fetch_add(1, Ordering::Relaxed);
+            core::future::poll_fn(|cx| {
+                if self.pause_sync.load(Ordering::Acquire) {
+                    cx.waker().wake_by_ref();
+                    Poll::Pending
+                } else if self.fail_sync.load(Ordering::Acquire) {
+                    Poll::Ready(Err(VfsError::Io))
+                } else {
+                    Poll::Ready(Ok(()))
+                }
+            })
+            .await
+        }
+
+        fn into_any(self: Arc<Self>) -> Arc<dyn Any + Send + Sync> {
+            self
+        }
+    }
+
+    impl Pollable for TestFile {
+        fn poll(&self) -> IoEvents {
+            IoEvents::IN | IoEvents::OUT
+        }
+
+        fn register(&self, _context: &mut Context<'_>, _events: IoEvents) {}
+    }
+
+    #[async_trait::async_trait]
+    impl FileNodeOps for TestFile {
+        async fn read_at(&self, buf: &mut [u8], offset: u64) -> VfsResult<usize> {
+            let data = self.data.lock().unwrap();
+            let offset = usize::try_from(offset).map_err(|_| VfsError::InvalidInput)?;
+            let count = buf.len().min(data.len().saturating_sub(offset));
+            if count != 0 {
+                buf[..count].copy_from_slice(&data[offset..offset + count]);
+            }
+            Ok(count)
+        }
+
+        async fn write_at(&self, buf: &[u8], offset: u64) -> VfsResult<usize> {
+            self.writes.fetch_add(1, Ordering::Relaxed);
+            core::future::poll_fn(|cx| {
+                if self.pause_write.load(Ordering::Acquire) {
+                    cx.waker().wake_by_ref();
+                    return Poll::Pending;
+                }
+                if self.fail_write.load(Ordering::Acquire) {
+                    return Poll::Ready(Err(VfsError::Io));
+                }
+                let offset = match usize::try_from(offset) {
+                    Ok(offset) => offset,
+                    Err(_) => return Poll::Ready(Err(VfsError::InvalidInput)),
+                };
+                let Some(end) = offset.checked_add(buf.len()) else {
+                    return Poll::Ready(Err(VfsError::InvalidInput));
+                };
+                let mut data = self.data.lock().unwrap();
+                if end > data.len() {
+                    data.resize(end, 0);
+                }
+                data[offset..end].copy_from_slice(buf);
+                Poll::Ready(Ok(buf.len()))
+            })
+            .await
+        }
+
+        async fn append(&self, _buf: &[u8]) -> VfsResult<(usize, u64)> {
+            Err(VfsError::Unsupported)
+        }
+
+        async fn set_len(&self, len: u64) -> VfsResult<()> {
+            let len = usize::try_from(len).map_err(|_| VfsError::InvalidInput)?;
+            self.data.lock().unwrap().resize(len, 0);
+            Ok(())
+        }
+
+        async fn set_symlink(&self, _target: &str) -> VfsResult<()> {
+            Err(VfsError::Unsupported)
+        }
+    }
+
+    fn dirty_test_cache() -> (Arc<CachedFileShared>, Arc<TestFile>, FileNode) {
+        let backend = TestFile::new();
+        let file = FileNode::new(backend.clone());
+        let shared = Arc::new(CachedFileShared::new(
+            0,
+            false,
+            PAGE_SIZE as u64,
+            Some(file.clone()),
+        ));
+        let mut page = new_test_page();
+        page.data().fill(0x67);
+        let paddr = page.paddr();
+        shared.page_cache.lock().put(0, page);
+        shared.mark_page_dirty_if_paddr(0, paddr, false).unwrap();
+        (shared, backend, file)
+    }
+
+    fn snapshot(page: &PageCache, compare_contents: bool) -> WritebackPage {
+        WritebackPage {
+            page_num: 0,
+            frame: page.frame.clone(),
+            len: PAGE_SIZE,
+            content_generation: page.content_generation,
+            writable_mapping_generation: page.writable_mapping_generation,
+            compare_contents,
+        }
+    }
+
+    #[test]
+    fn mapped_identity_rejects_mismatch_and_retains_until_invalidation() {
+        let (shared, _backend, file) = dirty_test_cache();
+        let paddr = shared.page_cache.lock().get(&0).unwrap().paddr();
+        assert!(matches!(
+            shared.retain_shared_page_if_paddr(0, paddr + PAGE_SIZE),
+            Err(VfsError::BadState)
+        ));
+        assert!(matches!(
+            shared.retain_shared_page_if_paddr(1, paddr),
+            Err(VfsError::BadState)
+        ));
+        block_on(shared.flush_dirty_pages_async(&file)).unwrap();
+        let identity = shared.retain_shared_page_if_paddr(0, paddr).unwrap();
+        assert_eq!(identity.page_num(), 0);
+        assert_eq!(identity.paddr(), paddr);
+        let mut cache = shared.page_cache.lock();
+        assert!(CachedFileShared::pop_clean_lru_pages(&mut cache, 1).is_empty());
+        // The current-generation check works while the cache mutex is held.
+        assert!(identity.is_current());
+        drop(cache);
+        let generation = shared.cache_generation.load(Ordering::Acquire);
+        block_on(async {
+            let _guard = shared.io_lock.write().await;
+            shared
+                .discard_direct_write_range_without_writeback_async(&file, 0, PAGE_SIZE)
+                .await
+        })
+        .unwrap();
+        assert_ne!(shared.cache_generation.load(Ordering::Acquire), generation);
+        assert!(!identity.is_current());
+        assert!(shared.page_cache.lock().is_empty());
+    }
+
+    #[test]
+    fn dirty_publication_rejects_wrong_frame_without_requesting_writeback() {
+        let (shared, backend, file) = dirty_test_cache();
+        block_on(super::flush_file_cache_state(shared.clone()))
+            .unwrap()
+            .1
+            .unwrap();
+        let paddr = shared.page_cache.lock().get(&0).unwrap().paddr();
+        let generation = shared.writeback_generation.load(Ordering::Acquire);
+        let writes = backend.writes.load(Ordering::Acquire);
+        assert_eq!(
+            shared.mark_page_dirty_if_paddr(0, paddr + PAGE_SIZE, false),
+            Err(VfsError::BadState)
+        );
+        assert!(!shared.page_cache.lock().get(&0).unwrap().dirty);
+        assert_eq!(
+            shared.writeback_generation.load(Ordering::Acquire),
+            generation
+        );
+        assert!(!shared.has_pending_background_writeback());
+        shared.mark_page_dirty_if_paddr(0, paddr, false).unwrap();
+        assert!(shared.page_cache.lock().get(&0).unwrap().dirty);
+        assert!(shared.has_pending_background_writeback());
+        // Publication alone has not performed either a device write or sync.
+        assert_eq!(backend.writes.load(Ordering::Acquire), writes);
+        assert_eq!(backend.syncs.load(Ordering::Acquire), 0);
+        assert_eq!(
+            shared
+                .completed_writeback_generation
+                .load(Ordering::Acquire),
+            generation
+        );
+        block_on(shared.flush_dirty_pages_async(&file)).unwrap();
+    }
+
+    #[test]
+    fn storage_write_error_retains_dirty_generation_until_retry() {
+        let (shared, backend, _file) = dirty_test_cache();
+        backend.fail_write.store(true, Ordering::Release);
+        assert_eq!(
+            block_on(super::flush_file_cache_state(shared.clone()))
+                .unwrap()
+                .1,
+            Err(VfsError::Io)
+        );
+        assert!(shared.page_cache.lock().get(&0).unwrap().dirty);
+        assert!(shared.has_pending_background_writeback());
+        assert_eq!(
+            shared
+                .completed_writeback_generation
+                .load(Ordering::Acquire),
+            0
+        );
+        assert_eq!(backend.data.lock().unwrap()[0], 0);
+        backend.fail_write.store(false, Ordering::Release);
+        block_on(super::flush_file_cache_state(shared.clone()))
+            .unwrap()
+            .1
+            .unwrap();
+        assert!(!shared.page_cache.lock().get(&0).unwrap().dirty);
+        assert!(!shared.has_pending_background_writeback());
+        assert_eq!(backend.data.lock().unwrap()[0], 0x67);
+        assert_eq!(backend.syncs.load(Ordering::Acquire), 0);
+    }
+
+    #[test]
+    fn redirty_during_async_checkpoint_preserves_newer_page_and_file_generations() {
+        let (shared, backend, _file) = dirty_test_cache();
+        backend.pause_write.store(true, Ordering::Release);
+        let target_generation = shared.writeback_generation.load(Ordering::Acquire);
+        let mut checkpoint = Box::pin(super::flush_file_cache_state(shared.clone()));
+        assert!(poll_once(checkpoint.as_mut()).is_pending());
+        let paddr = {
+            let mut cache = shared.page_cache.lock();
+            let page = cache.get_mut(&0).unwrap();
+            page.data()[0] = 0x68;
+            page.paddr()
+        };
+        // Use the production dirty publication while the snapshot I/O is pending.
+        shared.mark_page_dirty_if_paddr(0, paddr, false).unwrap();
+        backend.pause_write.store(false, Ordering::Release);
+        block_on(checkpoint).unwrap().1.unwrap();
+        assert_eq!(backend.data.lock().unwrap()[0], 0x67);
+        assert_eq!(
+            shared.page_cache.lock().get_mut(&0).unwrap().data()[0],
+            0x68
+        );
+        assert!(shared.page_cache.lock().get(&0).unwrap().dirty);
+        assert!(shared.has_pending_background_writeback());
+        assert_eq!(
+            shared
+                .completed_writeback_generation
+                .load(Ordering::Acquire),
+            target_generation
+        );
+        block_on(super::flush_file_cache_state(shared.clone()))
+            .unwrap()
+            .1
+            .unwrap();
+        assert_eq!(backend.data.lock().unwrap()[0], 0x68);
+        assert!(!shared.has_pending_background_writeback());
+    }
+
+    #[test]
+    fn failed_or_cancelled_durability_sync_restores_dirty_pages_for_retry() {
+        let (shared, backend, file) = dirty_test_cache();
+        backend.fail_sync.store(true, Ordering::Release);
+        assert_eq!(
+            block_on(async {
+                let _guard = shared.io_lock.write().await;
+                shared.sync_dirty_pages_async(&file, false).await
+            }),
+            Err(VfsError::Io)
+        );
+        assert_eq!(backend.data.lock().unwrap()[0], 0x67);
+        assert!(shared.page_cache.lock().get(&0).unwrap().dirty);
+        assert!(shared.has_pending_background_writeback());
+        backend.fail_sync.store(false, Ordering::Release);
+        backend.pause_sync.store(true, Ordering::Release);
+        let mut sync = Box::pin(async {
+            let _guard = shared.io_lock.write().await;
+            shared.sync_dirty_pages_async(&file, false).await
+        });
+        assert!(poll_once(sync.as_mut()).is_pending());
+        assert!(!shared.page_cache.lock().get(&0).unwrap().dirty);
+        drop(sync);
+        assert!(shared.page_cache.lock().get(&0).unwrap().dirty);
+        backend.pause_sync.store(false, Ordering::Release);
+        block_on(async {
+            let _guard = shared.io_lock.write().await;
+            shared.sync_dirty_pages_async(&file, false).await
+        })
+        .unwrap();
+        assert!(!shared.page_cache.lock().get(&0).unwrap().dirty);
+        assert_eq!(backend.syncs.load(Ordering::Acquire), 3);
+    }
+
+    #[test]
+    fn snapshot_completion_preserves_mapping_generation_and_changed_bytes() {
+        let mut page = new_test_page();
+        page.mark_dirty();
+        let bytes = page.data().to_vec();
+        let old_mapping = snapshot(&page, true);
+        page.writable_mapping_generation += 1;
+        old_mapping.complete(&mut page, &bytes);
+        assert!(page.dirty);
+        let old_bytes = snapshot(&page, true);
+        page.data()[0] = 1;
+        old_bytes.complete(&mut page, &bytes);
+        assert!(page.dirty);
+        let current = snapshot(&page, true);
+        let bytes = page.data().to_vec();
+        current.complete(&mut page, &bytes);
+        assert!(!page.dirty);
+    }
+
+    #[test]
+    fn snapshot_completion_never_cleans_a_replacement_frame() {
+        let mut original = new_test_page();
+        original.mark_dirty();
+        let snapshot = snapshot(&original, false);
+        let bytes = original.data().to_vec();
+        let mut replacement = new_test_page();
+        replacement.mark_dirty();
+        assert_eq!(replacement.content_generation, snapshot.content_generation);
+        snapshot.complete(&mut replacement, &bytes);
+        assert!(replacement.dirty);
+        snapshot.complete(&mut original, &bytes);
+        assert!(!original.dirty);
+        replacement.dirty = false;
+    }
 
     #[test]
     fn shared_page_batch_count_is_bounded_before_pinning() {

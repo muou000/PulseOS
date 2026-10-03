@@ -19,6 +19,8 @@ use crate::{
         FilePagePrepared, FileWritebacks, TlbInvalidationTracker,
     },
     mapping_err_to_ax_err,
+    lifecycle::{MappingGeneration, MappingPlacement, MappingReservation, MappingWait, PendingMapping, PreparedMapping},
+    cow_fault::{CowPageLoad, CowPagePrepared},
 };
 
 /// A TLB shootdown that must run after releasing the address-space lock.
@@ -207,7 +209,7 @@ impl TlbShootdown {
                     }
                 }
             }
-            reclaims.reclaim();
+            reclaims.reclaim()?;
             Ok(())
         }
 
@@ -216,7 +218,7 @@ impl TlbShootdown {
             for (asid, invalidation) in primary.into_iter().chain(additional) {
                 unsafe { flush_tlb_invalidation(asid, invalidation) };
             }
-            reclaims.reclaim();
+            reclaims.reclaim()?;
             Ok(())
         }
     }
@@ -240,6 +242,10 @@ pub struct AddrSpaceUnmapPreparation {
 }
 
 impl AddrSpaceUnmapPreparation {
+    pub fn try_prepare(size: usize) -> AxResult<Self> {
+        Ok(Self { reclaims: DeferredReclaims::try_prepare(size)? })
+    }
+
     /// Prepares bounded reclaim storage for an upcoming unmap operation.
     pub fn new(size: usize) -> Self {
         let pages = size.saturating_add(PAGE_SIZE_4K - 1) / PAGE_SIZE_4K;
@@ -277,6 +283,12 @@ impl<T> AddrSpaceMutation<T> {
         (self.result, self.shootdown)
     }
 
+    pub fn complete_after_unlock_parts(self) -> (AxResult<T>, AxResult) {
+        let (result, shootdown) = self.into_parts();
+        let visibility = shootdown.map_or(Ok(()), |shootdown| shootdown.complete_after_unlock());
+        (result, visibility)
+    }
+
     /// Completes the deferred shootdown and then returns the operation result.
     pub fn complete_after_unlock(self) -> AxResult<T> {
         let (result, shootdown) = self.into_parts();
@@ -297,20 +309,25 @@ pub enum PageFaultResult {
         handled: bool,
         shootdown: TlbShootdown,
     },
+    /// A reserved range is waiting for visibility completion.
+    NeedCompletion(MappingWait),
     /// The page fault requires the write lock of the address space (stack grows down).
     NeedWriteLock,
     /// A file-backed page must be loaded after releasing the address-space lock.
     NeedFilePage(FilePageLoad),
     /// Anonymous frames must be allocated and zeroed after releasing the address-space lock.
     NeedAnonPage(AnonPageLoad),
+    NeedCowPage(CowPageLoad),
 }
 
 #[derive(Debug)]
 pub enum PageFaultOutcome {
     Handled(bool),
+    WaitForCompletion(MappingWait),
     RetryWithWriteLock,
     LoadFilePage(FilePageLoad),
     PrepareAnonPage(AnonPageLoad),
+    PrepareCowPage(CowPageLoad),
 }
 
 impl PageFaultResult {
@@ -322,10 +339,63 @@ impl PageFaultResult {
                 shootdown.complete_after_unlock()?;
                 Ok(PageFaultOutcome::Handled(handled))
             }
+            Self::NeedCompletion(wait) => Ok(PageFaultOutcome::WaitForCompletion(wait)),
             Self::NeedWriteLock => Ok(PageFaultOutcome::RetryWithWriteLock),
             Self::NeedFilePage(load) => Ok(PageFaultOutcome::LoadFilePage(load)),
             Self::NeedAnonPage(load) => Ok(PageFaultOutcome::PrepareAnonPage(load)),
+            Self::NeedCowPage(load) => Ok(PageFaultOutcome::PrepareCowPage(load)),
         }
+    }
+}
+
+/// Work that must be committed while the address-space lock is held.
+pub enum PageFaultWork<'a> {
+    Retry,
+    Completion(MappingWait),
+    File(&'a mut FilePagePrepared),
+    Anon(&'a mut AnonPagePrepared),
+    Cow(&'a mut CowPagePrepared),
+    WriteLock,
+}
+
+/// Drives the common prepare, commit, completion, and retry protocol for a
+/// page fault. The callback only acquires address-space locks and attempts the
+/// lock-aware commit; prepared resources remain owned by this function until
+/// the callback publishes them or its prepared-resource guard drops them.
+pub fn drive_page_fault<Commit>(
+    initial: PageFaultResult,
+    mut commit: Commit,
+) -> AxResult<bool>
+where
+    Commit: for<'a> FnMut(PageFaultWork<'a>) -> PageFaultResult,
+{
+    let mut outcome = initial.complete_after_unlock()?;
+    loop {
+        outcome = match outcome {
+            PageFaultOutcome::Handled(handled) => return Ok(handled),
+            PageFaultOutcome::WaitForCompletion(wait) => {
+                commit(PageFaultWork::Completion(wait)).complete_after_unlock()?
+            }
+            PageFaultOutcome::LoadFilePage(load) => {
+                let mut prepared = load.prepare()?;
+                commit(PageFaultWork::File(&mut prepared)).complete_after_unlock()?
+            }
+            PageFaultOutcome::PrepareAnonPage(load) => {
+                let mut prepared = load.prepare()?;
+                commit(PageFaultWork::Anon(&mut prepared)).complete_after_unlock()?
+            }
+            PageFaultOutcome::PrepareCowPage(load) => {
+                let mut prepared = load.prepare()?;
+                commit(PageFaultWork::Cow(&mut prepared)).complete_after_unlock()?
+            }
+            PageFaultOutcome::RetryWithWriteLock => {
+                let outcome = commit(PageFaultWork::WriteLock).complete_after_unlock()?;
+                if matches!(outcome, PageFaultOutcome::RetryWithWriteLock) {
+                    return Err(AxError::BadState);
+                }
+                outcome
+            }
+        };
     }
 }
 
@@ -568,18 +638,122 @@ impl PageTableLockManager {
 pub struct AddrSpace {
     va_range: VirtAddrRange,
     areas: MemorySet<Backend>,
-    pt: PageTableLockManager,
+    pt: core::mem::ManuallyDrop<PageTableLockManager>,
     asid: usize,
     last_alloc_addr: core::sync::atomic::AtomicUsize,
+    generation: MappingGeneration,
+    pending_mappings: alloc::vec::Vec<PendingMapping>,
 }
 
 impl AddrSpace {
     fn map_area(&mut self, area: MemoryArea<Backend>) -> memory_set::MappingResult {
+        if self.pending_mappings.iter().any(|pending| pending.range.overlaps(area.va_range())) {
+            return Err(memory_set::MappingError::AlreadyExists);
+        }
+        self.generation.advance();
         let mut reclaim = DeferredReclaims::default();
         let result = self.areas.map(area, &mut self.pt, false, &mut reclaim);
         debug_assert!(reclaim.is_empty());
-        reclaim.reclaim();
+        let _ = reclaim.reclaim();
         result
+    }
+
+    pub(crate) fn pending_mapping(&self, start: VirtAddr, size: usize) -> Option<MappingWait> {
+        let range = VirtAddrRange::try_from_start_size(start, size)?;
+        self.pending_mappings.iter().find(|pending| pending.range.overlaps(range)).map(|pending| pending.wait.clone())
+    }
+
+    pub fn reserve_mapping(
+        &mut self,
+        prepared: &mut PreparedMapping,
+        placement: MappingPlacement,
+        wait: MappingWait,
+    ) -> AxResult<MappingReservation> {
+        let address = match placement {
+            MappingPlacement::Fixed(address) | MappingPlacement::FixedNoReplace(address) => address,
+            MappingPlacement::Anywhere(hint) => self.find_free_area(hint, prepared.size, self.va_range)
+                .or_else(|| self.find_free_area(self.base(), prepared.size, self.va_range))
+                .ok_or(AxError::NoMemory)?,
+        };
+        if !address.is_aligned_4k() || !self.contains_range(address, prepared.size) {
+            return Err(AxError::InvalidInput);
+        }
+        if !self.pending_mappings.is_empty() {
+            return Err(AxError::WouldBlock);
+        }
+        if !matches!(placement, MappingPlacement::Fixed(_)) && self.has_overlap(address, prepared.size) {
+            return Err(AxError::AlreadyExists);
+        }
+        let range = VirtAddrRange::from_start_size(address, prepared.size);
+        prepared.relocate(address);
+        self.pending_mappings.push(PendingMapping { range, wait: wait.clone() });
+        Ok(MappingReservation { range, wait })
+    }
+
+    pub fn reserve_unmap(&mut self, start: VirtAddr, size: usize, wait: MappingWait) -> AxResult<MappingReservation> {
+        if size == 0 || !start.is_aligned_4k() || size % PAGE_SIZE_4K != 0 || !self.contains_range(start, size) {
+            return Err(AxError::InvalidInput);
+        }
+        if !self.pending_mappings.is_empty() {
+            return Err(AxError::WouldBlock);
+        }
+        let range = VirtAddrRange::from_start_size(start, size);
+        self.pending_mappings.push(PendingMapping { range, wait: wait.clone() });
+        Ok(MappingReservation { range, wait })
+    }
+
+    pub fn unmap_reserved_range(
+        &mut self,
+        reservation: &MappingReservation,
+        preparation: AddrSpaceUnmapPreparation,
+    ) -> AddrSpaceMutation<()> {
+        if !self.pending_mappings.iter().any(|pending| pending.wait.same_operation(&reservation.wait)) {
+            return AddrSpaceMutation::new(Err(AxError::BadState), None);
+        }
+        self.unmap_prepared_inner(reservation.range.start, reservation.range.size(), preparation, true)
+    }
+
+    pub fn any_pending_mapping(&self) -> Option<MappingWait> {
+        self.pending_mappings.first().map(|pending| pending.wait.clone())
+    }
+
+    pub fn unmap_reserved(
+        &mut self,
+        reservation: &MappingReservation,
+        prepared: &mut PreparedMapping,
+    ) -> AddrSpaceMutation<()> {
+        if !self.pending_mappings.iter().any(|pending| pending.wait.same_operation(&reservation.wait)) {
+            return AddrSpaceMutation::new(Err(AxError::BadState), None);
+        }
+        let preparation = AddrSpaceUnmapPreparation {
+            reclaims: prepared.reclaims.take().unwrap_or_default(),
+        };
+        self.unmap_prepared_inner(reservation.range.start, reservation.range.size(), preparation, true)
+    }
+
+    pub fn publish_reserved(
+        &mut self,
+        reservation: &MappingReservation,
+        prepared: &PreparedMapping,
+    ) -> AxResult<()> {
+        let pending = self.pending_mappings.iter().find(|pending| pending.wait.same_operation(&reservation.wait))
+            .ok_or(AxError::BadState)?;
+        if pending.range != reservation.range || self.areas.overlaps(reservation.range) {
+            return Err(AxError::BadState);
+        }
+        let area = MemoryArea::new(reservation.range.start, prepared.size, prepared.flags, prepared.backend.clone());
+        self.generation.advance();
+        let mut reclaim = DeferredReclaims::default();
+        let result = self.areas.map(area, &mut self.pt, false, &mut reclaim).map_err(mapping_err_to_ax_err);
+        let _ = reclaim.reclaim();
+        result
+    }
+
+    pub fn finish_mapping(&mut self, reservation: MappingReservation, completed: bool) {
+        if completed {
+            self.pending_mappings.retain(|pending| !pending.wait.same_operation(&reservation.wait));
+        }
+        reservation.wait.finish(completed);
     }
 
     fn backend_kind(backend: &Backend) -> &'static str {
@@ -671,9 +845,11 @@ impl AddrSpace {
         Ok(Self {
             va_range: VirtAddrRange::from_start_size(base, size),
             areas: MemorySet::new(),
-            pt: PageTableLockManager::new(PageTable::try_new().map_err(|_| AxError::NoMemory)?),
+            pt: core::mem::ManuallyDrop::new(PageTableLockManager::new(PageTable::try_new().map_err(|_| AxError::NoMemory)?)),
             asid,
             last_alloc_addr: core::sync::atomic::AtomicUsize::new(base.as_usize()),
+            generation: MappingGeneration::new(),
+            pending_mappings: alloc::vec::Vec::with_capacity(1),
         })
     }
 
@@ -839,6 +1015,24 @@ impl AddrSpace {
         if size == 0 {
             return Ok(FileWritebacks::default());
         }
+        let mut writebacks = FileWritebacks::try_prepare(size, sync)?;
+        self.collect_file_writeback_range(start, size, sync, &mut writebacks)?;
+        Ok(writebacks)
+    }
+
+    pub fn collect_file_writeback_range(
+        &self,
+        start: VirtAddr,
+        size: usize,
+        sync: bool,
+        writebacks: &mut FileWritebacks,
+    ) -> AxResult<()> {
+        if self.pending_mapping(start, size).is_some() {
+            return Err(AxError::WouldBlock);
+        }
+        if !self.can_access_range(start, size, MappingFlags::empty()) {
+            return Err(AxError::BadAddress);
+        }
         if !self.contains_range(start, size) {
             return ax_err!(InvalidInput, "address out of range");
         }
@@ -848,7 +1042,6 @@ impl AddrSpace {
 
         let range = VirtAddrRange::try_from_start_size(start, size)
             .ok_or(AxError::InvalidInput)?;
-        let mut writebacks = FileWritebacks::default();
         for area in self.areas.iter_overlapping(range) {
             let overlap_start = area.start().max(range.start);
             let overlap_end = area.end().min(range.end);
@@ -858,13 +1051,13 @@ impl AddrSpace {
                     overlap_end - overlap_start,
                     sync,
                     &self.pt,
-                    &mut writebacks,
+                    writebacks,
                 ) {
                     return ax_err!(Io, "writeback failed");
                 }
             }
         }
-        Ok(writebacks)
+        Ok(())
     }
 
     /// Add a new mapping with an existing backend.
@@ -943,6 +1136,10 @@ impl AddrSpace {
     /// File, shared, and linear mappings are left intact. A later access to a
     /// discarded anonymous page faults it back in as a fresh zeroed page.
     pub fn discard_range(&mut self, start: VirtAddr, size: usize) -> AddrSpaceMutation<()> {
+        if self.pending_mapping(start, size).is_some() {
+            return AddrSpaceMutation::new(Err(AxError::WouldBlock), None);
+        }
+        self.generation.advance();
         let mut reclaim = DeferredReclaims::default();
         let mut invalidation = TlbInvalidationTracker::default();
         let result = (|| -> AxResult {
@@ -984,7 +1181,7 @@ impl AddrSpace {
         let shootdown = if needs_completion {
             Some(TlbShootdown::from_tracker(self.asid, invalidation, reclaim))
         } else {
-            reclaim.reclaim();
+            let _ = reclaim.reclaim();
             None
         };
         AddrSpaceMutation::new(result, shootdown)
@@ -998,6 +1195,20 @@ impl AddrSpace {
         size: usize,
         preparation: AddrSpaceUnmapPreparation,
     ) -> AddrSpaceMutation<()> {
+        self.unmap_prepared_inner(start, size, preparation, false)
+    }
+
+    fn unmap_prepared_inner(
+        &mut self,
+        start: VirtAddr,
+        size: usize,
+        preparation: AddrSpaceUnmapPreparation,
+        reserved: bool,
+    ) -> AddrSpaceMutation<()> {
+        if !reserved && self.pending_mapping(start, size).is_some() {
+            return AddrSpaceMutation::new(Err(AxError::WouldBlock), None);
+        }
+        self.generation.advance();
         let mut reclaim = preparation.reclaims;
         let mut invalidation = TlbInvalidationTracker::default();
         let result = (|| -> AxResult {
@@ -1019,7 +1230,7 @@ impl AddrSpace {
         let shootdown = if needs_completion {
             Some(TlbShootdown::from_tracker(self.asid, invalidation, reclaim))
         } else {
-            reclaim.reclaim();
+            let _ = reclaim.reclaim();
             None
         };
         AddrSpaceMutation::new(result, shootdown)
@@ -1127,6 +1338,10 @@ impl AddrSpace {
     /// Returns an error if the address range is out of the address space or not
     /// aligned.
     pub fn protect(&mut self, start: VirtAddr, size: usize, flags: MappingFlags) -> AddrSpaceMutation<()> {
+        if self.pending_mapping(start, size).is_some() {
+            return AddrSpaceMutation::new(Err(AxError::WouldBlock), None);
+        }
+        self.generation.advance();
         let mut invalidation = TlbInvalidationTracker::default();
         let result = (|| -> AxResult {
             if size == 0 {
@@ -1167,6 +1382,10 @@ impl AddrSpace {
         size: usize,
         flags: MappingFlags,
     ) -> AddrSpaceMutation<()> {
+        if self.pending_mapping(start, size).is_some() {
+            return AddrSpaceMutation::new(Err(AxError::WouldBlock), None);
+        }
+        self.generation.advance();
         let mut invalidation = TlbInvalidationTracker::default();
         let result = (|| -> AxResult {
             if size == 0 {
@@ -1205,6 +1424,10 @@ impl AddrSpace {
         paddr: PhysAddr,
         flags: MappingFlags,
     ) -> AddrSpaceMutation<()> {
+        if self.pending_mapping(vaddr, PAGE_SIZE_4K).is_some() {
+            return AddrSpaceMutation::new(Err(AxError::WouldBlock), None);
+        }
+        self.generation.advance();
         let mut reclaim = DeferredReclaims::default();
         let mut changed_existing = false;
         let result = (|| -> AxResult {
@@ -1243,7 +1466,7 @@ impl AddrSpace {
                 reclaim,
             ))
         } else {
-            reclaim.reclaim();
+            let _ = reclaim.reclaim();
             None
         };
         AddrSpaceMutation::new(result, shootdown)
@@ -1251,6 +1474,10 @@ impl AddrSpace {
 
     /// Removes all mappings in the address space.
     pub fn clear(&mut self) -> AddrSpaceMutation<()> {
+        if !self.pending_mappings.is_empty() {
+            return AddrSpaceMutation::new(Err(AxError::WouldBlock), None);
+        }
+        self.generation.advance();
         let mut reclaim = DeferredReclaims::default();
         let mut invalidation = TlbInvalidationTracker::default();
         let result = self
@@ -1261,7 +1488,7 @@ impl AddrSpace {
         let shootdown = if needs_completion {
             Some(TlbShootdown::from_tracker(self.asid, invalidation, reclaim))
         } else {
-            reclaim.reclaim();
+            let _ = reclaim.reclaim();
             None
         };
         AddrSpaceMutation::new(result, shootdown)
@@ -1273,7 +1500,7 @@ impl AddrSpace {
             while !area.is_empty() {
                 let mut reclaim = DeferredReclaims::for_retirement();
                 let result = area.unmap_prefix(chunk_size, &mut self.pt, &mut reclaim);
-                reclaim.reclaim();
+                let _ = reclaim.reclaim();
                 if let Err(error) = result {
                     error!("failed to clear unpublished address space: {error:?}");
                     break 'areas;
@@ -1334,6 +1561,10 @@ impl AddrSpace {
         flags: usize,
         new_addr: Option<VirtAddr>,
     ) -> AddrSpaceMutation<VirtAddr> {
+        if !self.pending_mappings.is_empty() {
+            return AddrSpaceMutation::new(Err(AxError::WouldBlock), None);
+        }
+        self.generation.advance();
         let mut reclaim = DeferredReclaims::default();
         let mut invalidation = TlbInvalidationTracker::default();
         let mut tlb_shootdown: Option<TlbShootdown> = None;
@@ -1530,7 +1761,7 @@ impl AddrSpace {
                 tlb_shootdown = Some(local);
             }
         } else {
-            reclaim.reclaim();
+            let _ = reclaim.reclaim();
         }
 
         AddrSpaceMutation::new(result, tlb_shootdown)
@@ -1561,6 +1792,9 @@ impl AddrSpace {
     /// `access_flags` indicates the access type that caused the page fault.
     pub fn handle_page_fault(&self, vaddr: VirtAddr, access_flags: PageFaultFlags) -> PageFaultResult {
         let page = vaddr.align_down_4k();
+        if let Some(wait) = self.pending_mapping(page, PAGE_SIZE_4K) {
+            return PageFaultResult::NeedCompletion(wait);
+        }
         let pte_before = self
             .pt
             .read_for_addr(page)
@@ -1600,19 +1834,34 @@ impl AddrSpace {
                 pte_before
             );
             if orig_flags.contains(access_flags) {
+                if access_flags.contains(MappingFlags::WRITE) && area.backend().requires_private_copy() {
+                    let pt = self.pt.read_for_addr(page);
+                    if let Ok((frame, flags, _)) = pt.query(page)
+                        && frame.as_usize() != 0 && !flags.contains(MappingFlags::WRITE)
+                    {
+                        let table = frame_table();
+                        if !table.contains(frame) {
+                            return PageFaultResult::Handled(false);
+                        }
+                        table.inc_ref(frame);
+                        return PageFaultResult::NeedCowPage(CowPageLoad {
+                            page, flags: orig_flags, generation: self.generation, original: frame,
+                        });
+                    }
+                }
                 if let Some(load) = area.backend().page_fault_load_request(
                     vaddr,
                     area.end(),
                     orig_flags,
                     &self.pt,
                 ) {
-                    return PageFaultResult::NeedFilePage(load);
+                    return PageFaultResult::NeedFilePage(load.with_generation(self.generation).for_access(access_flags));
                 }
-                if let Some(load) =
-                    area.backend()
-                        .page_fault_anon_request(vaddr, area.end(), &self.pt)
+                if let Some(load) = area
+                    .backend()
+                    .page_fault_anon_request(vaddr, area.end(), &self.pt)
                 {
-                    return PageFaultResult::NeedAnonPage(load);
+                    return PageFaultResult::NeedAnonPage(load.with_generation(self.generation));
                 }
                 let mut reclaim = DeferredReclaims::default();
                 let handled = area.backend().handle_page_fault(
@@ -1636,8 +1885,8 @@ impl AddrSpace {
                         orig_flags,
                         &self.pt,
                     ) {
-                        reclaim.reclaim();
-                        return PageFaultResult::NeedFilePage(load);
+                        let _ = reclaim.reclaim();
+                        return PageFaultResult::NeedFilePage(load.with_generation(self.generation).for_access(access_flags));
                     }
                     error!(
                         "handle_page_fault: reject=backend_not_handled vaddr={:#x} page={:#x} \
@@ -1664,7 +1913,7 @@ impl AddrSpace {
                         ),
                     };
                 }
-                reclaim.reclaim();
+                let _ = reclaim.reclaim();
                 return PageFaultResult::Handled(handled);
             }
             error!(
@@ -1699,6 +1948,46 @@ impl AddrSpace {
         PageFaultResult::Handled(false)
     }
 
+    pub fn handle_prepared_cow_page(&self, address: VirtAddr, flags: PageFaultFlags, prepared: &mut CowPagePrepared) -> PageFaultResult {
+        if let Some(wait) = self.pending_mapping(address.align_down_4k(), PAGE_SIZE_4K) {
+            return PageFaultResult::NeedCompletion(wait);
+        }
+        if prepared.source.generation != self.generation || prepared.source.page != address.align_down_4k() {
+            return self.handle_page_fault(address, flags);
+        }
+        let Some(area) = self.areas.find(address) else {
+            return PageFaultResult::Handled(false);
+        };
+        if area.flags() != prepared.source.flags || !area.flags().contains(flags) {
+            return self.handle_page_fault(address, flags);
+        }
+        let mut pt = self.pt.lock_for_addr(prepared.source.page);
+        let Ok((current, current_flags, _)) = pt.query(prepared.source.page) else {
+            drop(pt);
+            return self.handle_page_fault(address, flags);
+        };
+        if current != prepared.source.original || current_flags.contains(MappingFlags::WRITE) {
+            drop(pt);
+            return self.handle_page_fault(address, flags);
+        }
+        let Some(frame) = prepared.copied else {
+            return PageFaultResult::Handled(false);
+        };
+        if let Ok((_, tlb)) = pt.remap(prepared.source.page, frame, area.flags()) {
+            tlb.ignore();
+            prepared.copied.take();
+            drop(pt);
+            let mut reclaim = prepared.reclaims.take().unwrap_or_default();
+            reclaim.defer_frame(prepared.source.original);
+            PageFaultResult::HandledWithShootdown {
+                handled: true,
+                shootdown: TlbShootdown::for_range(self.asid, prepared.source.page, PAGE_SIZE_4K, reclaim),
+            }
+        } else {
+            PageFaultResult::Handled(false)
+        }
+    }
+
     /// Installs a file page that was loaded and pinned without holding the
     /// address-space lock.
     pub fn handle_prepared_file_page(
@@ -1708,6 +1997,9 @@ impl AddrSpace {
         prepared: &mut FilePagePrepared,
     ) -> PageFaultResult {
         let page = vaddr.align_down_4k();
+        if !prepared.matches_generation(self.generation) {
+            return self.handle_page_fault(vaddr, access_flags);
+        }
         if !self.va_range.contains(vaddr) {
             return PageFaultResult::Handled(false);
         }
@@ -1750,6 +2042,9 @@ impl AddrSpace {
         access_flags: PageFaultFlags,
         prepared: &mut AnonPagePrepared,
     ) -> PageFaultResult {
+        if !prepared.matches_generation(self.generation) {
+            return self.handle_page_fault(vaddr, access_flags);
+        }
         if !self.va_range.contains(vaddr) {
             return PageFaultResult::Handled(false);
         }
@@ -1825,6 +2120,10 @@ impl AddrSpace {
 
     /// Attempts to clone the current address space into a new one.
     pub fn try_clone(&mut self) -> AddrSpaceCloneResult {
+        if !self.pending_mappings.is_empty() {
+            return AddrSpaceCloneResult { result: Err(AxError::WouldBlock), shootdown: None };
+        }
+        self.generation.advance();
         let mut invalidation = TlbInvalidationTracker::default();
         let result = self.try_clone_inner(&mut invalidation);
         let shootdown = (!invalidation.is_empty()).then(|| {
@@ -2029,10 +2328,10 @@ impl Drop for AddrSpace {
         // page table before releasing its final handle. Retire the ASID before
         // taking a CPU-local reclaim buffer so its lease is never held while
         // waiting for a remote TLB IPI.
-        let mut retirement_completed = self.areas.is_empty()
+        let mut retirement_completed = self.pending_mappings.is_empty() && (self.areas.is_empty()
             || TlbShootdown::without_reclaims(asid)
                 .complete_after_unlock()
-                .is_ok();
+                .is_ok());
 
         'areas: while retirement_completed {
             let Some(mut area) = self.areas.drain_first_area() else {
@@ -2041,7 +2340,11 @@ impl Drop for AddrSpace {
             while !area.is_empty() {
                 let mut reclaim = DeferredReclaims::for_retirement();
                 let result = area.unmap_prefix(chunk_size, &mut self.pt, &mut reclaim);
-                reclaim.reclaim();
+                let publication = reclaim.reclaim();
+                if let Err(error) = publication {
+                    error!("failed to publish retired mapping dirty state: {error:?}");
+                    retirement_completed = false;
+                }
                 if let Err(error) = result {
                     error!("failed to retire address-space mappings: {error:?}");
                     retirement_completed = false;
@@ -2051,9 +2354,12 @@ impl Drop for AddrSpace {
         }
 
         if retirement_completed {
+            unsafe { core::mem::ManuallyDrop::drop(&mut self.pt) };
             ASID_ALLOCATOR.lock().free(asid);
         } else {
-            error!("failed to retire address space; ASID {asid} will not be reused");
+            let retained = core::mem::replace(&mut self.areas, MemorySet::new());
+            core::mem::forget(retained);
+            error!("failed to retire address space; ASID {asid} and page table retained");
         }
     }
 }

@@ -7,6 +7,7 @@ name = "Pulse"
 version = "0.1.0"
 dependencies = [
  "axfeat",
+ "axfs",
  "axhal",
  "axlog",
  "axplat-loongarch64-ls2k1000",

@@ -208,6 +208,13 @@ impl Process {
         self.resources.lock().rlimit_state.sigpending_soft
     }
 
+    pub fn memlock_overlaps(&self, start: usize, len: usize) -> bool {
+        let Some(end) = start.checked_add(len) else {
+            return true;
+        };
+        self.resources.lock().memlock_state.ranges.iter().any(|range| range.start < end && start < range.end)
+    }
+
     pub fn memlock_locked_bytes(&self) -> usize {
         self.resources.lock().memlock_state.locked_bytes
     }

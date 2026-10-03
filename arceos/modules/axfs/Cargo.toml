@@ -15,6 +15,7 @@ ext4 = ["dep:ext4plus"]
 times = []
 std = []
 qperf-trace = []
+mapping-lifecycle-test = []
 
 [dependencies]
 axalloc.workspace = true

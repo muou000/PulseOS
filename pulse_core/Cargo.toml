@@ -39,3 +39,4 @@ hashbrown.workspace = true
 [features]
 ls2k1000 = ["axcpu/ls2k1000"]
 qperf-trace = ["axtask/qperf-trace", "axfs/qperf-trace"]
+mapping-lifecycle-test = ["axfs/mapping-lifecycle-test"]

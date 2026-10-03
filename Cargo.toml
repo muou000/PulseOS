@@ -141,6 +141,7 @@ smp = [
 ]
 sched-eevdf = ["axfeat/sched-eevdf"]
 sched-load-balance = ["axfeat/sched-load-balance"]
+mapping-lifecycle-test = ["pulse_core/mapping-lifecycle-test", "pulse_syscalls/mapping-lifecycle-test"]
 qperf-trace = [
     "axtask/qperf-trace",
     "pulse_core/qperf-trace",
@@ -151,6 +152,7 @@ qperf-trace = [
 axhal.workspace = true
 axlog.workspace = true
 axruntime.workspace = true
+axfs.workspace = true
 axfeat.workspace = true
 axtask.workspace = true
 pulse_syscalls.workspace = true

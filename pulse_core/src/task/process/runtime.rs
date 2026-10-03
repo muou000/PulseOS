@@ -84,44 +84,7 @@ impl Process {
         vaddr: VirtAddr,
         flags: axhal::trap::PageFaultFlags,
     ) -> AxResult<bool> {
-        let result = {
-            let aspace = aspace_handle.read();
-            aspace.handle_page_fault(vaddr, flags)
-        };
-        let mut outcome = result.complete_after_unlock()?;
-
-        loop {
-            outcome = match outcome {
-                axmm::PageFaultOutcome::Handled(handled) => return Ok(handled),
-                axmm::PageFaultOutcome::LoadFilePage(load) => {
-                    let mut prepared = load.prepare()?;
-                    let result = {
-                        let aspace = aspace_handle.read();
-                        aspace.handle_prepared_file_page(vaddr, flags, &mut prepared)
-                    };
-                    result.complete_after_unlock()?
-                }
-                axmm::PageFaultOutcome::PrepareAnonPage(load) => {
-                    let mut prepared = load.prepare()?;
-                    let result = {
-                        let aspace = aspace_handle.read();
-                        aspace.handle_prepared_anon_page(vaddr, flags, &mut prepared)
-                    };
-                    result.complete_after_unlock()?
-                }
-                axmm::PageFaultOutcome::RetryWithWriteLock => {
-                    let result = {
-                        let mut aspace = aspace_handle.write();
-                        aspace.handle_page_fault_write(vaddr, flags)
-                    };
-                    let outcome = result.complete_after_unlock()?;
-                    if matches!(outcome, axmm::PageFaultOutcome::RetryWithWriteLock) {
-                        return Err(AxError::BadState);
-                    }
-                    outcome
-                }
-            };
-        }
+        aspace_handle.resolve_page_fault(vaddr, flags)
     }
 
     pub fn activate(&self) {

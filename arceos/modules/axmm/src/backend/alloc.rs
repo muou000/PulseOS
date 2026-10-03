@@ -15,9 +15,15 @@ const MAX_FAULT_BATCH_PAGES: usize = 4;
 pub struct AnonPageLoad {
     page: VirtAddr,
     page_count: usize,
+    generation: Option<crate::lifecycle::MappingGeneration>,
 }
 
 impl AnonPageLoad {
+    pub(crate) fn with_generation(mut self, generation: crate::lifecycle::MappingGeneration) -> Self {
+        self.generation = Some(generation);
+        self
+    }
+
     pub fn prepare(self) -> AxResult<AnonPagePrepared> {
         let requested_pages = self.page_count;
         let (frames, page_count) =
@@ -31,6 +37,7 @@ impl AnonPageLoad {
         }
         Ok(AnonPagePrepared {
             page: self.page,
+            generation: self.generation,
             frames,
             page_count,
             mapped_mask: 0,
@@ -40,12 +47,17 @@ impl AnonPageLoad {
 
 pub struct AnonPagePrepared {
     page: VirtAddr,
+    generation: Option<crate::lifecycle::MappingGeneration>,
     frames: [PhysAddr; MAX_FAULT_BATCH_PAGES],
     page_count: usize,
     mapped_mask: u8,
 }
 
 impl AnonPagePrepared {
+    pub(crate) fn matches_generation(&self, generation: crate::lifecycle::MappingGeneration) -> bool {
+        self.generation == Some(generation)
+    }
+
     fn matches(&self, page: VirtAddr) -> bool {
         self.page == page
     }
@@ -166,7 +178,7 @@ where
 
     true
 }
-pub(super) fn alloc_frame(zeroed: bool) -> Option<PhysAddr> {
+pub(crate) fn alloc_frame(zeroed: bool) -> Option<PhysAddr> {
     let vaddr = VirtAddr::from(global_allocator().alloc_pages(1, PAGE_SIZE_4K).ok()?);
     if zeroed {
         unsafe { core::ptr::write_bytes(vaddr.as_mut_ptr(), 0, PAGE_SIZE_4K) };
@@ -176,7 +188,7 @@ pub(super) fn alloc_frame(zeroed: bool) -> Option<PhysAddr> {
     Some(paddr)
 }
 
-pub(super) fn dealloc_frame(frame: PhysAddr) {
+pub(crate) fn dealloc_frame(frame: PhysAddr) {
     if !cow_dec_frame_ref(frame) {
         return;
     }
@@ -304,7 +316,7 @@ impl Backend {
                             &mut reclaim,
                             &mut (),
                         );
-                        reclaim.reclaim();
+                        let _ = reclaim.reclaim();
                     }
                     return false;
                 };
@@ -324,7 +336,7 @@ impl Backend {
                             &mut reclaim,
                             &mut (),
                         );
-                        reclaim.reclaim();
+                        let _ = reclaim.reclaim();
                     }
                     return false;
                 }
@@ -409,7 +421,7 @@ impl Backend {
             axfs::buildstorm_stat_inc!(MM_ANON_FAULT_FULL_BATCHES);
         }
         axfs::buildstorm_stat_add!(MM_ANON_FAULT_REQUESTED_PAGES, page_count);
-        Some(AnonPageLoad { page, page_count })
+        Some(AnonPageLoad { page, page_count, generation: None })
     }
 
     pub(crate) fn handle_prepared_page_fault_alloc(

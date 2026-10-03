@@ -4,20 +4,33 @@ use axfs::{CachedFile, FileFlags};
 use axhal::paging::MappingFlags;
 use linux_raw_sys::general::{
     MADV_DONTNEED, MADV_FREE, MADV_NORMAL, MADV_RANDOM, MADV_SEQUENTIAL, MADV_WILLNEED,
-    MAP_ANONYMOUS, MAP_FIXED, MAP_FIXED_NOREPLACE, MAP_GROWSDOWN, MAP_POPULATE, MCL_CURRENT,
-    MCL_FUTURE, MCL_ONFAULT, MREMAP_DONTUNMAP, MREMAP_FIXED, MREMAP_MAYMOVE, MS_ASYNC,
-    MS_INVALIDATE, MS_SYNC, PROT_EXEC, PROT_READ, PROT_WRITE, RLIMIT_DATA,
+    MAP_ANONYMOUS, MAP_DENYWRITE, MAP_EXECUTABLE, MAP_FIXED, MAP_FIXED_NOREPLACE, MAP_GROWSDOWN,
+    MAP_HUGETLB, MAP_LOCKED, MAP_NONBLOCK, MAP_NORESERVE, MAP_POPULATE, MAP_PRIVATE, MAP_SHARED,
+    MAP_SHARED_VALIDATE, MAP_STACK, MAP_SYNC, MCL_CURRENT, MCL_FUTURE, MCL_ONFAULT,
+    MREMAP_DONTUNMAP, MREMAP_FIXED, MREMAP_MAYMOVE, MS_ASYNC, MS_INVALIDATE, MS_SYNC, PROT_EXEC,
+    PROT_READ, PROT_WRITE, RLIMIT_DATA,
 };
 use memory_addr::VirtAddr;
 use pulse_core::fd_table::FdObject;
 
-use crate::{
-    LinuxError,
-    validation::mm::{
-        PAGE_SIZE, is_page_aligned, mprotect_aligned_length, page_align_up, parse_mmap_flags,
-        validate_mmap_fd_offset, validate_mmap_length,
-    },
-};
+use crate::LinuxError;
+
+const PAGE_SIZE: usize = 0x1000;
+
+fn page_align_up(addr: usize) -> Option<usize> {
+    addr.checked_add(PAGE_SIZE - 1)
+        .map(|value| value & !(PAGE_SIZE - 1))
+}
+
+#[inline]
+fn is_page_aligned(addr: usize) -> bool {
+    addr & (PAGE_SIZE - 1) == 0
+}
+
+#[inline]
+fn mmap_offset_is_valid(file_backed: bool, offset: usize) -> bool {
+    !file_backed || is_page_aligned(offset)
+}
 
 fn get_fd_object(fd: usize) -> Result<Arc<dyn FdObject>, LinuxError> {
     let proc = pulse_core::task::current_process()?;
@@ -195,15 +208,39 @@ pub fn sys_mmap(
         Ok(proc) => proc,
         Err(e) => return -e.code() as isize,
     };
-
-    let file_backed = (flags & (MAP_ANONYMOUS as usize)) == 0;
-
-    let is_shared = match parse_mmap_flags(flags) {
-        Ok(is_shared) => is_shared,
-        Err(e) => return -e.code() as isize,
-    };
-    if let Err(e) = validate_mmap_fd_offset(file_backed, fd, offset) {
-        return -e.code() as isize;
+    let file_backed = (flags & MAP_ANONYMOUS as usize) == 0;
+    let map_type = flags & 0x0f;
+    if map_type != MAP_SHARED as usize
+        && map_type != MAP_PRIVATE as usize
+        && map_type != MAP_SHARED_VALIDATE as usize
+    {
+        return -LinuxError::EINVAL.code() as isize;
+    }
+    let supported = (MAP_SHARED
+        | MAP_PRIVATE
+        | MAP_SHARED_VALIDATE
+        | MAP_FIXED
+        | MAP_ANONYMOUS
+        | MAP_DENYWRITE
+        | MAP_EXECUTABLE
+        | MAP_LOCKED
+        | MAP_NORESERVE
+        | MAP_POPULATE
+        | MAP_NONBLOCK
+        | MAP_STACK
+        | MAP_HUGETLB
+        | MAP_SYNC
+        | MAP_FIXED_NOREPLACE
+        | MAP_GROWSDOWN) as usize;
+    if map_type == MAP_SHARED_VALIDATE as usize && flags & !supported != 0 {
+        return -LinuxError::EOPNOTSUPP.code() as isize;
+    }
+    let is_shared = map_type == MAP_SHARED as usize || map_type == MAP_SHARED_VALIDATE as usize;
+    if file_backed && fd < 0 {
+        return -LinuxError::EBADF.code() as isize;
+    }
+    if !mmap_offset_is_valid(file_backed, offset) || length == 0 {
+        return -LinuxError::EINVAL.code() as isize;
     }
     let file = if file_backed {
         match get_fd_object(fd as usize) {
@@ -214,21 +251,16 @@ pub fn sys_mmap(
         None
     };
 
-    if let Err(e) = validate_mmap_length(length) {
-        return -e.code() as isize;
-    }
-
     let mut map_flags = MappingFlags::USER;
-    if (prot & (PROT_READ as usize)) != 0 {
+    if prot & PROT_READ as usize != 0 {
         map_flags |= MappingFlags::READ;
     }
-    if (prot & (PROT_WRITE as usize)) != 0 {
+    if prot & PROT_WRITE as usize != 0 {
         map_flags |= MappingFlags::WRITE;
     }
-    if (prot & (PROT_EXEC as usize)) != 0 {
+    if prot & PROT_EXEC as usize != 0 {
         map_flags |= MappingFlags::EXECUTE;
     }
-
     if let Some(file) = file.as_ref() {
         if let Some(file_flags) = file.mmap_file_flags() {
             if map_flags
@@ -248,23 +280,18 @@ pub fn sys_mmap(
     if file_backed && file.as_ref().and_then(|file| file.location()).is_none() {
         return -LinuxError::ENODEV.code() as isize;
     }
-
     let Some(aligned_length) = page_align_up(length) else {
         return -LinuxError::EINVAL.code() as isize;
     };
 
-    // Creating the first CachedFile for an inode may read its length. Prepare
-    // it before taking the non-sleepable address-space lock.
-    let mut is_zero_device = false;
     let file_mapping = if let Some(file) = file.as_ref() {
         let location = file
             .location()
-            .expect("file-backed mmap location checked before address-space mutation");
+            .expect("file-backed mmap location checked before mutation");
         if location
             .absolute_path()
             .is_ok_and(|path| path.as_str() == "/dev/zero")
         {
-            is_zero_device = true;
             None
         } else {
             let file_flags = file
@@ -284,186 +311,73 @@ pub fn sys_mmap(
     } else {
         None
     };
-
-    let aspace_handle = proc.aspace_handle();
-    let mut aspace = aspace_handle.write();
-    let mut pending_shootdown = None;
-
-    let aligned_addr = addr & !(PAGE_SIZE - 1);
-    let fixed_addr = (flags & ((MAP_FIXED | MAP_FIXED_NOREPLACE) as usize)) != 0;
-    let map_addr = if fixed_addr {
-        aligned_addr
-    } else {
-        let limit = memory_addr::VirtAddrRange::from_start_size(
-            VirtAddr::from(pulse_core::config::USER_SPACE_BASE),
-            pulse_core::config::USER_SPACE_SIZE,
-        );
-        let hint = if aligned_addr == 0 {
-            VirtAddr::from(pulse_core::config::USER_SPACE_BASE)
-        } else {
-            VirtAddr::from(aligned_addr)
-        };
-        match aspace.find_free_area(hint, aligned_length, limit) {
-            Some(vaddr) => vaddr.as_usize(),
-            None => {
-                if aligned_addr != 0 {
-                    match aspace.find_free_area(
-                        VirtAddr::from(pulse_core::config::USER_SPACE_BASE),
-                        aligned_length,
-                        limit,
-                    ) {
-                        Some(vaddr) => vaddr.as_usize(),
-                        None => {
-                            axlog::debug!("sys_mmap: no free area found");
-                            return -crate::LinuxError::ENOMEM.code() as isize;
-                        }
-                    }
-                } else {
-                    axlog::debug!("sys_mmap: no free area found");
-                    return -crate::LinuxError::ENOMEM.code() as isize;
-                }
-            }
-        }
-    };
-
-    if !proc.is_user_range(map_addr, aligned_length) {
-        axlog::warn!(
-            "sys_mmap: range out of user space, addr={:#x}, len={:#x}",
-            map_addr,
-            aligned_length
-        );
-        return -LinuxError::EINVAL.code() as isize;
-    }
-
-    if (flags & (MAP_FIXED_NOREPLACE as usize)) != 0 {
-        if addr == 0 || (addr & (PAGE_SIZE - 1)) != 0 {
-            return -LinuxError::EINVAL.code() as isize;
-        }
-        if aspace.has_overlap(VirtAddr::from(map_addr), aligned_length) {
-            return -LinuxError::EEXIST.code() as isize;
-        }
-    }
-
-    if (flags & (MAP_FIXED as usize)) != 0 {
-        let (unmap_result, shootdown) = aspace
-            .unmap(VirtAddr::from(map_addr), aligned_length)
-            .into_parts();
-        pending_shootdown = shootdown;
-        if let Err(e) = unmap_result {
-            axlog::warn!(
-                "sys_mmap: MAP_FIXED pre-unmap failed at {:#x}, len={:#x}, err={:?}",
-                map_addr,
-                aligned_length,
-                e
-            );
-        } else {
-            let _ = proc.memlock_unlock_range(map_addr, aligned_length);
-        }
-    }
-
-    let map_result = if is_zero_device {
-        if is_shared {
-            use axhal::paging::PageSize;
-            if let Some(backend) = axmm::Backend::new_shared(aligned_length, true, PageSize::Size4K)
-            {
-                aspace.map_with_backend(
-                    VirtAddr::from(map_addr),
-                    aligned_length,
-                    map_flags,
-                    backend,
-                )
-            } else {
-                Err(axerrno::AxError::NoMemory)
-            }
-        } else {
-            aspace.map_alloc(VirtAddr::from(map_addr), aligned_length, map_flags, false)
-        }
-    } else if let Some((cached, file_flags, write_access)) = file_mapping.as_ref() {
-        aspace.map_file(
-            VirtAddr::from(map_addr),
+    let prepared = match file_mapping {
+        Some((cached, file_flags, write_access)) => axmm::PreparedMapping::file(
             aligned_length,
             map_flags,
-            cached.clone(),
-            *file_flags,
+            cached,
+            file_flags,
             offset,
             length,
             is_shared,
-            write_access.clone(),
-        )
-    } else if is_shared {
-        use axhal::paging::PageSize;
-        if let Some(backend) = axmm::Backend::new_shared(aligned_length, true, PageSize::Size4K) {
-            aspace.map_with_backend(VirtAddr::from(map_addr), aligned_length, map_flags, backend)
-        } else {
-            Err(axerrno::AxError::NoMemory)
-        }
-    } else if (flags & (MAP_GROWSDOWN as usize)) != 0 {
-        let backend = axmm::Backend::new_alloc_grows_down(false, true);
-        aspace.map_with_backend(VirtAddr::from(map_addr), aligned_length, map_flags, backend)
-    } else {
-        aspace.map_alloc(VirtAddr::from(map_addr), aligned_length, map_flags, false)
+            write_access,
+        ),
+        None => axmm::PreparedMapping::anonymous(
+            aligned_length,
+            map_flags,
+            is_shared,
+            flags & MAP_GROWSDOWN as usize != 0,
+        ),
     };
-
-    drop(aspace);
-    if let Some(shootdown) = pending_shootdown
-        && let Err(error) = shootdown.complete_after_unlock()
-    {
-        axlog::error!("sys_mmap: MAP_FIXED TLB shootdown failed: {error:?}");
-        return -LinuxError::EIO.code() as isize;
+    let prepared = match prepared {
+        Ok(prepared) => prepared,
+        Err(error) => return -LinuxError::from(error).code() as isize,
+    };
+    let aligned_addr = VirtAddr::from(addr & !(PAGE_SIZE - 1));
+    let placement = if flags & MAP_FIXED_NOREPLACE as usize != 0 {
+        if addr == 0 || !is_page_aligned(addr) {
+            return -LinuxError::EINVAL.code() as isize;
+        }
+        axmm::MappingPlacement::FixedNoReplace(aligned_addr)
+    } else if flags & MAP_FIXED as usize != 0 {
+        axmm::MappingPlacement::Fixed(aligned_addr)
+    } else {
+        axmm::MappingPlacement::Anywhere(if addr == 0 {
+            VirtAddr::from(pulse_core::config::USER_SPACE_BASE)
+        } else {
+            aligned_addr
+        })
+    };
+    let aspace = proc.aspace_handle();
+    let map_addr = match aspace.map(prepared, placement) {
+        Ok(address) => address.as_usize(),
+        Err(error) => return -LinuxError::from(error).code() as isize,
+    };
+    if matches!(placement, axmm::MappingPlacement::Fixed(_)) {
+        let _ = proc.memlock_unlock_range(map_addr, aligned_length);
     }
-
-    match map_result {
-        Ok(_) => {
-            if let Err(e) = proc.maybe_lock_future_range(map_addr, aligned_length) {
-                let aspace_handle = proc.aspace_handle();
-                let rollback = {
-                    let mut aspace = aspace_handle.write();
-                    aspace.unmap(VirtAddr::from(map_addr), aligned_length)
-                };
-                if let Err(unmap_e) = rollback.complete_after_unlock() {
-                    axlog::warn!(
-                        "sys_mmap: rollback unmap failed at {:#x}, len={:#x}, err={:?}",
-                        map_addr,
-                        aligned_length,
-                        unmap_e
-                    );
-                }
-                return -e.code() as isize;
-            }
-
-            if (flags & (MAP_POPULATE as usize)) != 0 {
-                if let Err(e) = proc.prefault_user_range(map_addr, aligned_length) {
-                    axlog::warn!(
-                        "sys_mmap: MAP_POPULATE prefault failed at {:#x}, len={:#x}, err={:?}",
-                        map_addr,
-                        aligned_length,
-                        e
-                    );
-                }
-            }
-
-            axlog::debug!(
-                "sys_mmap: mapped at {:#x}, length={:#x}",
+    if let Err(error) = proc.maybe_lock_future_range(map_addr, aligned_length) {
+        if let Err(unmap_error) = aspace.unmap(VirtAddr::from(map_addr), aligned_length) {
+            axlog::warn!(
+                "sys_mmap: rollback failed at {:#x}, len={:#x}: {:?}",
                 map_addr,
-                aligned_length
+                aligned_length,
+                unmap_error
             );
-            map_addr as isize
         }
-        Err(e) => {
-            let errno = LinuxError::from(e);
-            if errno == LinuxError::EFAULT {
-                axlog::warn!(
-                    "sys_mmap: mapping returned EFAULT at {:#x}, len={:#x}: {:?}",
-                    map_addr,
-                    aligned_length,
-                    e
-                );
-            } else {
-                axlog::debug!("sys_mmap: failed to map at {:#x}: {:?}", map_addr, e);
-            }
-            -errno.code() as isize
+        return -error.code() as isize;
+    }
+    if flags & MAP_POPULATE as usize != 0 {
+        if let Err(error) = proc.prefault_user_range(map_addr, aligned_length) {
+            axlog::warn!(
+                "sys_mmap: MAP_POPULATE prefault failed at {:#x}, len={:#x}: {:?}",
+                map_addr,
+                aligned_length,
+                error
+            );
         }
     }
+    map_addr as isize
 }
 
 pub fn sys_munmap(addr: usize, length: usize) -> isize {
@@ -487,12 +401,10 @@ pub fn sys_munmap(addr: usize, length: usize) -> isize {
         return -LinuxError::EINVAL.code() as isize;
     }
 
-    let preparation = axmm::AddrSpaceUnmapPreparation::new(aligned_length);
-    let aspace_handle = proc.aspace_handle();
-    let mut aspace = aspace_handle.write();
-    let mutation = aspace.unmap_prepared(VirtAddr::from(aligned_addr), aligned_length, preparation);
-    drop(aspace);
-    match mutation.complete_after_unlock() {
+    match proc
+        .aspace_handle()
+        .unmap(VirtAddr::from(aligned_addr), aligned_length)
+    {
         Ok(_) => {
             let _ = proc.memlock_unlock_range(aligned_addr, aligned_length);
             axlog::debug!(
@@ -768,10 +680,20 @@ pub fn sys_mprotect(addr: usize, length: usize, prot: usize) -> isize {
         prot
     );
 
-    let aligned_length = match mprotect_aligned_length(addr, length, prot) {
-        Ok(0) => return 0,
-        Ok(length) => length,
-        Err(e) => return -e.code() as isize,
+    if length == 0 {
+        return 0;
+    }
+    if (addr & (PAGE_SIZE - 1)) != 0 {
+        return -LinuxError::EINVAL.code() as isize;
+    }
+
+    let allowed = (PROT_READ | PROT_WRITE | PROT_EXEC) as usize;
+    if (prot & !allowed) != 0 {
+        return -LinuxError::EINVAL.code() as isize;
+    }
+
+    let Some(aligned_length) = page_align_up(length) else {
+        return -LinuxError::ENOMEM.code() as isize;
     };
 
     let proc = match pulse_core::task::current_process() {
@@ -893,13 +815,29 @@ pub fn sys_msync(addr: usize, length: usize, flags: usize) -> isize {
     }
 
     let aspace_handle = proc.aspace_handle();
-    let writebacks = {
-        let aspace = aspace_handle.read();
-        aspace.prepare_file_writeback_range(VirtAddr::from(addr), aligned_length, has_sync)
-    };
-
-    match writebacks.and_then(axmm::FileWritebacks::complete) {
+    if flags & MS_INVALIDATE as usize != 0 && proc.memlock_overlaps(addr, aligned_length) {
+        return -LinuxError::EBUSY.code() as isize;
+    }
+    match aspace_handle.sync_mappings(VirtAddr::from(addr), aligned_length, has_sync) {
         Ok(()) => 0,
+        Err(axerrno::AxError::BadAddress) => -LinuxError::ENOMEM.code() as isize,
         Err(e) => -LinuxError::from(e).code() as isize,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{PAGE_SIZE, is_page_aligned, mmap_offset_is_valid, page_align_up};
+
+    #[test]
+    fn page_alignment_helpers_reject_overflow_and_unaligned_file_offsets() {
+        assert!(is_page_aligned(0));
+        assert!(is_page_aligned(PAGE_SIZE));
+        assert!(!is_page_aligned(PAGE_SIZE - 1));
+        assert!(mmap_offset_is_valid(false, PAGE_SIZE - 1));
+        assert!(mmap_offset_is_valid(true, PAGE_SIZE));
+        assert!(!mmap_offset_is_valid(true, PAGE_SIZE - 1));
+        assert_eq!(page_align_up(PAGE_SIZE + 1), Some(2 * PAGE_SIZE));
+        assert_eq!(page_align_up(usize::MAX), None);
     }
 }

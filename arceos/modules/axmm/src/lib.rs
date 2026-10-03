@@ -8,6 +8,12 @@ extern crate alloc;
 
 mod aspace;
 mod backend;
+mod lifecycle;
+mod cow_fault;
+
+pub use cow_fault::{CowPageLoad, CowPagePrepared};
+
+pub use lifecycle::{MappingPlacement, MappingReservation, MappingWait, PreparedMapping};
 
 use axalloc::init_frame_table;
 use axerrno::{AxError, AxResult};
@@ -22,8 +28,8 @@ use memory_set::MappingError;
 
 pub use self::{
     aspace::{
-        AddrSpace, AddrSpaceCloneResult, AddrSpaceMutation, AddrSpaceUnmapPreparation,
-        PageFaultOutcome, PageFaultResult, PageTableLockManager, TlbShootdown,
+        AddrSpace, AddrSpaceCloneResult, AddrSpaceMutation, AddrSpaceUnmapPreparation, PageFaultOutcome,
+        PageFaultResult, PageFaultWork, PageTableLockManager, TlbShootdown, drive_page_fault,
     },
     backend::{
         AnonPageLoad, AnonPagePrepared, Backend, FilePageLoad, FilePagePrepared, FileWritebacks,
