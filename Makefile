@@ -55,8 +55,8 @@ img:
 	@set -e; \
 	case "$(ARCH)" in \
 		riscv64) \
-			base_a="$(A)/rootfs/base/base-rootfs-riscv64.tar.gz"; \
-			base_b="$(A)/rootfs/base/base-rootfs-riscv64.tar.xz"; \
+			base_a="$(A)/rootfs/base/alpine-minirootfs-riscv64.tar.gz"; \
+			base_b="$(A)/rootfs/base/alpine-minirootfs-riscv64.tar.xz"; \
 			disk="$(A)/disk.img"; \
 			arceos_disk="$(A)/arceos/disk.img"; \
 			;; \

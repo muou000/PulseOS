@@ -27,6 +27,14 @@ const ELF_CACHE_MAX_ENTRIES: usize = 16;
 const AT_RANDOM_BYTES: usize = 16;
 const USER_STACK_ALIGNMENT: usize = 16;
 
+#[cfg(target_arch = "riscv64")]
+const RISCV_HWCAP_ISA_IMAFDC: usize = (1 << 0) // A
+    | (1 << 2) // C
+    | (1 << 3) // D
+    | (1 << 5) // F
+    | (1 << 8) // I
+    | (1 << 12); // M
+
 struct CachedElfImage {
     prefix: Vec<u8>,
     file: CachedFile,
@@ -584,10 +592,7 @@ fn build_auxv(
         (1 << 0) | (1 << 1) | (1 << 2) | (1 << 3),
     ));
     #[cfg(target_arch = "riscv64")]
-    auxv.push(AuxEntry::new(
-        AuxType::HWCAP,
-        (1 << 0) | (1 << 2) | (1 << 3) | (1 << 5) | (1 << 6) | (1 << 8) | (1 << 12),
-    ));
+    auxv.push(AuxEntry::new(AuxType::HWCAP, RISCV_HWCAP_ISA_IMAFDC));
     append_process_auxv(&mut auxv, credentials);
     Ok(auxv)
 }
@@ -1049,6 +1054,13 @@ pub fn load_user_app(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(target_arch = "riscv64")]
+    #[test]
+    fn riscv_hardware_capabilities_match_the_rv64gc_kernel_contract() {
+        assert_eq!(RISCV_HWCAP_ISA_IMAFDC, 0x112d);
+        assert_eq!(RISCV_HWCAP_ISA_IMAFDC & (1 << 21), 0);
+    }
 
     fn read_word(bytes: &[u8], offset: &mut usize) -> usize {
         let end = *offset + size_of::<usize>();

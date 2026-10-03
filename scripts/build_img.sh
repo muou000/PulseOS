@@ -58,7 +58,17 @@ parse_size_to_mib() {
 }
 
 find_base_tar() {
-    local arch="$1" f
+    local arch="$1"
+    if [[ "${arch}" == "riscv64" ]]; then
+        for f in \
+            "${BASE_DIR}/alpine-minirootfs-riscv64.tar.gz" \
+            "${BASE_DIR}/alpine-minirootfs-riscv64.tar.xz"
+        do
+            [[ -f "${f}" ]] && { echo "${f}"; return 0; }
+        done
+        return 1
+    fi
+
     for f in \
         "${BASE_DIR}/base-rootfs-${arch}.tar.xz" \
         "${BASE_DIR}/base-rootfs-${arch}.tar.gz"
@@ -66,6 +76,21 @@ find_base_tar() {
         [[ -f "${f}" ]] && { echo "${f}"; return 0; }
     done
     return 1
+}
+
+validate_riscv_elf_isa() {
+    local stage_dir="$1" elf attributes
+    command -v readelf >/dev/null 2>&1 || die "Missing command: readelf (required for RISC-V ISA validation)"
+    while IFS= read -r -d '' elf; do
+        if ! attributes="$(readelf -A "${elf}" 2>/dev/null)"; then
+            continue
+        fi
+        if printf '%s\n' "${attributes}" \
+            | awk -F'"' '/Tag_RISCV_arch:/ { print $2 }' \
+            | grep -Eq '(^|_)(v[0-9]|zv)'; then
+            die "RISC-V rootfs ELF requires vector state unsupported by PulseOS: ${elf}"
+        fi
+    done < <(find "${stage_dir}" -type f -print0)
 }
 
 patch_loongarch64_musl_sched_stubs() {
@@ -124,6 +149,8 @@ build_one_arch() {
     if [[ "${arch}" == "loongarch64" ]]; then
         patch_loongarch64_musl_sched_stubs "${stage_dir}"
         ensure_loongarch64_gnu_libdir_compat "${stage_dir}"
+    else
+        validate_riscv_elf_isa "${stage_dir}"
     fi
 
     local img_mib
