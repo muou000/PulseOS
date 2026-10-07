@@ -1,6 +1,6 @@
 use linux_raw_sys::general::{
     FUTEX_CLOCK_REALTIME, FUTEX_CMD_MASK, FUTEX_CMP_REQUEUE, FUTEX_PRIVATE_FLAG, FUTEX_REQUEUE,
-    FUTEX_WAIT, FUTEX_WAIT_BITSET, FUTEX_WAKE,
+    FUTEX_WAIT, FUTEX_WAIT_BITSET, FUTEX_WAKE, FUTEX_WAKE_BITSET,
 };
 
 use crate::{
@@ -8,8 +8,9 @@ use crate::{
     impls::utils::read_user_timespec,
     validation::{
         futex::{
-            futex_deadline_remaining_ns, parse_futex_clock, parse_futex2_count, parse_futex2_flags,
-            parse_futex2_mask, validate_futex_waitv, validate_futex2_addr,
+            futex_deadline_remaining_ns, parse_futex_bitset, parse_futex_clock, parse_futex2_count,
+            parse_futex2_flags, parse_futex2_mask, validate_futex_waitv, validate_futex_word_addr,
+            validate_futex2_addr,
         },
         time::{duration_to_nanos_saturating, timespec_to_duration},
     },
@@ -123,11 +124,25 @@ pub fn sys_futex(
     let is_private = (op & (FUTEX_PRIVATE_FLAG as i32)) != 0;
     let clock_realtime = (op & (FUTEX_CLOCK_REALTIME as i32)) != 0;
 
+    if clock_realtime && cmd != FUTEX_WAIT_BITSET {
+        return -LinuxError::ENOSYS.code() as isize;
+    }
+
     match cmd {
         FUTEX_WAIT | FUTEX_WAIT_BITSET => {
-            if cmd == FUTEX_WAIT_BITSET && val3 == 0 {
-                return -LinuxError::EINVAL.code() as isize;
+            if cmd == FUTEX_WAIT_BITSET {
+                if let Err(e) = validate_futex_word_addr(uaddr) {
+                    return -e.code() as isize;
+                }
             }
+            let bitset = if cmd == FUTEX_WAIT_BITSET {
+                match parse_futex_bitset(val3) {
+                    Ok(bitset) => bitset,
+                    Err(e) => return -e.code() as isize,
+                }
+            } else {
+                u32::MAX
+            };
             let timeout_ns = if cmd == FUTEX_WAIT_BITSET {
                 match read_absolute_timeout_ns(timeout_or_val2, clock_realtime) {
                     Ok(timeout) => timeout,
@@ -140,7 +155,7 @@ pub fn sys_futex(
                     Err(e) => return -e.code() as isize,
                 }
             };
-            match process.futex_wait(uaddr, val as u32, timeout_ns, is_private) {
+            match process.futex_wait_mask(uaddr, val as u32, timeout_ns, is_private, bitset) {
                 Ok(()) => 0,
                 Err(e) => {
                     let errno: LinuxError = e.into();
@@ -149,6 +164,19 @@ pub fn sys_futex(
             }
         }
         FUTEX_WAKE => process.futex_wake(uaddr, val, is_private) as isize,
+        FUTEX_WAKE_BITSET => {
+            if let Err(e) = validate_futex_word_addr(uaddr) {
+                return -e.code() as isize;
+            }
+            let bitset = match parse_futex_bitset(val3) {
+                Ok(bitset) => bitset,
+                Err(e) => return -e.code() as isize,
+            };
+            if process.read_user_u32(uaddr).is_err() {
+                return -LinuxError::EFAULT.code() as isize;
+            }
+            process.futex_wake_mask(uaddr, (val as u32) as usize, is_private, bitset) as isize
+        }
         FUTEX_REQUEUE => {
             if (val as isize) < 0 || (timeout_or_val2 as isize) < 0 {
                 return -LinuxError::EINVAL.code() as isize;

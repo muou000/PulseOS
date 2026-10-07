@@ -15,9 +15,12 @@ use pulse_core::fd_table::{
     PipeObject, PollRegistration, SignalFdObject, StdinObject, StdoutObject,
 };
 
-use crate::impls::{
-    fs::common::{get_fd_entry, insert_fd_entry},
-    utils::{read_user_timespec, with_process, write_user_bytes},
+use crate::{
+    impls::{
+        fs::common::{get_fd_entry, insert_fd_entry},
+        utils::{read_user_timespec, with_process, write_user_bytes},
+    },
+    validation::epoll::validate_epoll_maxevents,
 };
 
 fn check_epoll_nesting(
@@ -187,7 +190,7 @@ impl Future for EpollFuture {
         };
         let maxevents = this.maxevents;
         let collect_ready = || {
-            let mut ready_list = Vec::with_capacity(maxevents);
+            let mut ready_list = Vec::new();
             let mut oneshots_to_disable = Vec::new();
 
             let mut monitored = epoll_obj.events.lock();
@@ -360,7 +363,7 @@ fn sys_epoll_pwait_inner(
     sigmask: usize,
     sigsetsize: usize,
 ) -> isize {
-    if maxevents == 0 || maxevents > 4096 {
+    if validate_epoll_maxevents(maxevents).is_err() {
         return -LinuxError::EINVAL.code() as isize;
     }
     if events == 0 {
