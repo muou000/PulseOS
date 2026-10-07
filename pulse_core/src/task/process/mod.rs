@@ -738,6 +738,17 @@ pub enum WaitidStatusType {
     Continued,
 }
 
+/// A child state selected by a wait syscall.
+///
+/// `reaped` is true only when an exited child was removed from its parent's
+/// child list.  Callers must retire such a child after any syscall-specific
+/// user output has been attempted.
+pub struct ChildWaitResult {
+    pub child: Arc<Process>,
+    pub status: WaitidStatusType,
+    pub reaped: bool,
+}
+
 mod fd;
 mod futex;
 mod memory;

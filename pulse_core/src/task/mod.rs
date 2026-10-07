@@ -17,7 +17,9 @@ use axerrno::{LinuxError, LinuxResult};
 use hashbrown::HashMap;
 use kernel_guard::NoPreemptIrqSave;
 use kspin::SpinNoIrq;
-pub use process::{CloneParams, ForkParams, MAX_POSIX_TIMER_COUNT, Process, WaitidStatusType};
+pub use process::{
+    ChildWaitResult, CloneParams, ForkParams, MAX_POSIX_TIMER_COUNT, Process, WaitidStatusType,
+};
 pub use signal::{
     DefaultSignalAction, SIG_DFL, SIG_IGN, SIGRTMIN, SigAction, SignalAction, SignalAltStack,
     SignalDelivery, SignalQueueError, SignalShared, ThreadSignal,
