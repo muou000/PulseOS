@@ -35,6 +35,22 @@ pub(crate) fn parse_futex2_count(count: isize) -> Result<usize, LinuxError> {
     Ok(count as usize)
 }
 
+pub(crate) fn validate_futex_word_addr(addr: usize) -> Result<(), LinuxError> {
+    if addr & (core::mem::size_of::<u32>() - 1) != 0 {
+        return Err(LinuxError::EINVAL);
+    }
+    Ok(())
+}
+
+pub(crate) fn parse_futex_bitset(bitset: usize) -> Result<u32, LinuxError> {
+    // The legacy futex ABI passes val3 as a 32-bit argument.
+    let bitset = bitset as u32;
+    if bitset == 0 {
+        return Err(LinuxError::EINVAL);
+    }
+    Ok(bitset)
+}
+
 pub(crate) fn parse_futex_clock(clockid: u32) -> Result<bool, LinuxError> {
     match clockid {
         CLOCK_REALTIME => Ok(true),
@@ -69,7 +85,7 @@ pub(crate) fn futex_deadline_remaining_ns(target_ns: u64, now_ns: u64) -> Result
 
 #[cfg(test)]
 mod tests {
-    use linux_raw_sys::general::CLOCK_TAI;
+    use linux_raw_sys::general::{CLOCK_TAI, FUTEX_BITSET_MATCH_ANY};
 
     use super::*;
 
@@ -144,12 +160,39 @@ mod tests {
         if usize::BITS > 32 {
             assert_eq!(
                 parse_futex2_mask(u32::MAX as usize + 1),
-                Err(LinuxError::EINVAL),
+                Err(LinuxError::EINVAL)
             );
         }
         assert_eq!(parse_futex2_count(-1), Err(LinuxError::EINVAL));
         assert_eq!(parse_futex2_count(0), Ok(0));
         assert_eq!(parse_futex2_count(isize::MAX), Ok(isize::MAX as usize));
+    }
+
+    #[test]
+    fn legacy_futex_bitsets_require_nonzero_masks() {
+        assert_eq!(parse_futex_bitset(0), Err(LinuxError::EINVAL));
+        assert_eq!(parse_futex_bitset(1), Ok(1));
+        assert_eq!(
+            parse_futex_bitset(FUTEX_BITSET_MATCH_ANY as usize),
+            Ok(FUTEX_BITSET_MATCH_ANY)
+        );
+    }
+
+    #[test]
+    fn legacy_futex_bitsets_truncate_to_u32_before_validation() {
+        if usize::BITS > 32 {
+            let high_bit = u32::MAX as usize + 1;
+            assert_eq!(parse_futex_bitset(high_bit), Err(LinuxError::EINVAL));
+            assert_eq!(parse_futex_bitset(high_bit | 1), Ok(1));
+        }
+    }
+
+    #[test]
+    fn legacy_futex_bitset_addresses_require_word_alignment() {
+        for addr in [1, 2, 3, 0x1001] {
+            assert_eq!(validate_futex_word_addr(addr), Err(LinuxError::EINVAL));
+        }
+        assert_eq!(validate_futex_word_addr(0x1000), Ok(()));
     }
 
     #[test]

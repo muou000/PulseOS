@@ -1,4 +1,5 @@
 pub(crate) mod credential;
+pub(crate) mod epoll;
 pub(crate) mod fd;
 pub(crate) mod futex;
 pub(crate) mod io;
