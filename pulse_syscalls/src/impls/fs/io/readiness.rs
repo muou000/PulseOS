@@ -1,9 +1,12 @@
-use super::*;
+use super::{
+    wait::{ReadinessWaitResult, readiness_scan_once, snapshot_poll_objects, wait_for_readiness},
+    *,
+};
 
 const KERNEL_SIGSET_SIZE: usize = core::mem::size_of::<u64>();
 const USER_SIGSET_SIZE: usize = core::mem::size_of::<u64>() * 2;
 // Some POSIX software uses select(0, ..., 1us) as a cooperative barrier
-// poll.  Programming a task timer for such a duration costs substantially
+// poll. Programming a task timer for such a duration costs substantially
 // more than the requested delay and can flood the per-CPU timer heap.
 const SHORT_TIMEOUT_YIELD_LIMIT: Duration = Duration::from_micros(10);
 
@@ -43,7 +46,7 @@ fn read_pselect6_signal_mask(
     read_temporary_signal_mask(process, arg.sigmask, arg.sigsetsize)
 }
 
-/// Waits for an unblocked signal or the supplied timeout.  A zero timeout is
+/// Waits for an unblocked signal or the supplied timeout. A zero timeout is
 /// still interrupted by an already-pending signal, as Linux's poll/select
 /// paths test for signals after their nonblocking readiness scan.
 fn wait_for_signal_or_timeout(
@@ -57,11 +60,6 @@ fn wait_for_signal_or_timeout(
     match timeout {
         Some(timeout) if timeout > Duration::ZERO && timeout <= SHORT_TIMEOUT_YIELD_LIMIT => {
             let deadline = axhal::time::monotonic_time() + timeout;
-
-            // Keep the wait cooperative without creating a timer entry.  A
-            // scheduler handoff normally exceeds this tiny interval; the
-            // bounded busy wait only preserves the timeout lower bound when
-            // it returns unusually early.
             axtask::yield_now();
             if thread.has_pending_signal() {
                 return true;
@@ -85,44 +83,6 @@ fn wait_for_signal_or_timeout(
             true
         }
     }
-}
-
-type PollObject = alloc::sync::Arc<dyn FdObject>;
-
-fn snapshot_poll_objects(
-    pollfds: &[pollfd],
-) -> Result<alloc::vec::Vec<Option<PollObject>>, LinuxError> {
-    get_fd_objects(pollfds.iter().map(|pfd| pfd.fd as usize))
-}
-
-fn poll_fds_once(pollfds: &mut [pollfd], objects: &[Option<PollObject>]) -> usize {
-    let mut ready = 0usize;
-    for (index, pfd) in pollfds.iter_mut().enumerate() {
-        pfd.revents = 0;
-        if pfd.fd < 0 {
-            continue;
-        }
-
-        match objects.get(index).and_then(Option::as_ref) {
-            Some(object) => match object.poll() {
-                Ok(state) => {
-                    pfd.revents = requested_poll_revents(pfd.events, state);
-                    if pfd.revents != 0 {
-                        ready += 1;
-                    }
-                }
-                Err(_) => {
-                    pfd.revents = POLLERR as i16;
-                    ready += 1;
-                }
-            },
-            None => {
-                pfd.revents = POLLNVAL as i16;
-                ready += 1;
-            }
-        }
-    }
-    ready
 }
 
 pub fn sys_ppoll(
@@ -173,7 +133,6 @@ pub fn sys_ppoll(
     };
 
     let deadline = timeout_dur.map(|timeout_dur| axhal::time::monotonic_time() + timeout_dur);
-
     let write_back = |pollfds: &[pollfd], ready: isize| -> isize {
         let bytes = unsafe {
             core::slice::from_raw_parts(
@@ -191,172 +150,22 @@ pub fn sys_ppoll(
         Err(e) => return -e.code() as isize,
     };
 
-    // Linux poll reports an invalid descriptor in-band through POLLNVAL.  Do
-    // this scan before gathering wait queues so the blocking path never turns
-    // that per-entry result into an EBADF syscall failure.
-    let ready = poll_fds_once(&mut pollfds, &objects);
-    if ready > 0 {
+    // Linux poll reports an invalid descriptor in-band through POLLNVAL. Do
+    // this scan before waiting so the blocking path never turns it into EBADF.
+    if readiness_scan_once(&mut pollfds, &objects) > 0 {
+        let ready = pollfds.iter().filter(|pfd| pfd.revents != 0).count();
         return write_back(&pollfds, ready as isize);
     }
 
-    // Try to retrieve wait queues for all monitored file descriptors.
-    // If all monitored fds support wait queues, we can block on them event-driven.
-    let mut wait_objects = alloc::vec::Vec::with_capacity(nfds.min(128));
-    let mut all_wqs_supported = true;
-    for (pfd, object) in pollfds.iter().zip(objects.iter()) {
-        if pfd.fd < 0 {
-            continue;
+    match wait_for_readiness(thread.as_ref(), &mut pollfds, &objects, deadline) {
+        ReadinessWaitResult::Ready(ready) => write_back(&pollfds, ready as isize),
+        ReadinessWaitResult::Interrupted => {
+            write_back(&pollfds, -LinuxError::EINTR.code() as isize)
         }
-        if all_wqs_supported {
-            if let Some(object) = object {
-                let mut dummy = alloc::vec::Vec::new();
-                match object.get_wait_queues(pfd.events, &mut dummy) {
-                    Ok(true) => {
-                        // Keep the same object reference for the wait and
-                        // every readiness recheck in this syscall.
-                        wait_objects.push((object.clone(), pfd.events));
-                    }
-                    _ => {
-                        all_wqs_supported = false;
-                    }
-                }
-            } else {
-                all_wqs_supported = false;
-            }
-        }
-    }
-
-    if all_wqs_supported && !wait_objects.is_empty() {
-        let mut wqs = alloc::vec::Vec::with_capacity(wait_objects.len().saturating_add(1).min(128));
-        for (obj, events) in &wait_objects {
-            let _ = obj.get_wait_queues(*events, &mut wqs);
-        }
-        wqs.push(thread.signal_wait_queue());
-
-        // Wait until one or more monitored objects become ready, a signal is pending,
-        // or the timeout is reached.
-        let check_ready = || {
-            for (obj, events) in &wait_objects {
-                if let Ok(state) = obj.poll() {
-                    if requested_poll_revents(*events, state) != 0 {
-                        return true;
-                    }
-                } else {
-                    return true;
-                }
-            }
-            thread.has_pending_signal()
-        };
-
-        // Hybrid active-yield strategy for event-driven path:
-        // - For high-frequency IPC, keep a short active-yield phase;
-        // - If ready, we can return immediately without enrolling in any wait queues.
-        const POLL_ACTIVE_YIELD_ROUNDS: usize = 64;
-        let mut yield_success = false;
-        for _ in 0..POLL_ACTIVE_YIELD_ROUNDS {
-            if check_ready() {
-                yield_success = true;
-                break;
-            }
-            if let Some(ddl) = deadline {
-                if axhal::time::monotonic_time() >= ddl {
-                    break;
-                }
-            }
-            axtask::yield_now();
-        }
-
-        if !yield_success {
-            loop {
-                if check_ready() {
-                    break;
-                }
-
-                // Recalculate the remaining duration after every wake. A wait queue
-                // notification only means that readiness may have changed; it is not
-                // itself a reason for ppoll() to return.
-                let remain_dur = deadline.map(|ddl| {
-                    let now = axhal::time::monotonic_time();
-                    if now >= ddl {
-                        Duration::ZERO
-                    } else {
-                        ddl - now
-                    }
-                });
-
-                if let Some(Duration::ZERO) = remain_dur {
-                    break;
-                }
-
-                let wait_result =
-                    axtask::WaitQueue::wait_multiple_timeout_until(&wqs, remain_dur, || {
-                        check_ready()
-                    });
-                if matches!(wait_result, Err(true)) {
-                    break;
-                }
-            }
-        }
-
-        // Poll readiness takes precedence over a concurrently pending signal.
-        let ready = poll_fds_once(&mut pollfds, &objects);
-        if ready > 0 {
-            return write_back(&pollfds, ready as isize);
-        }
-        if thread.has_pending_signal() {
-            return write_back(&pollfds, -LinuxError::EINTR.code() as isize);
-        }
-        return write_back(&pollfds, 0);
-    }
-
-    // Hybrid wait strategy:
-    // - keep a short active-yield phase for high-frequency IPC readiness;
-    // - then fall back to short sleeps to avoid permanent hot spinning.
-    const POLL_ACTIVE_YIELD_ROUNDS: usize = 64;
-    const POLL_SLEEP_QUANTUM: Duration = Duration::from_micros(100);
-    let mut idle_rounds: usize = 0;
-
-    loop {
-        let ready = poll_fds_once(&mut pollfds, &objects);
-
-        if ready > 0 {
-            return write_back(&pollfds, ready as isize);
-        }
-
-        if thread.has_pending_signal() {
-            return write_back(&pollfds, -LinuxError::EINTR.code() as isize);
-        }
-
-        if let Some(deadline) = deadline {
-            let now = axhal::time::monotonic_time();
-            if now >= deadline {
-                return write_back(&pollfds, 0);
-            }
-            idle_rounds = idle_rounds.saturating_add(1);
-            if idle_rounds <= POLL_ACTIVE_YIELD_ROUNDS {
-                axtask::yield_now();
-            } else {
-                let sleep_dur = core::cmp::min(deadline - now, POLL_SLEEP_QUANTUM);
-                if sleep_dur > Duration::ZERO {
-                    thread
-                        .signal_wait_queue()
-                        .wait_timeout_until(sleep_dur, || thread.has_pending_signal());
-                } else {
-                    axtask::yield_now();
-                }
-            }
-        } else {
-            idle_rounds = idle_rounds.saturating_add(1);
-            if idle_rounds <= POLL_ACTIVE_YIELD_ROUNDS {
-                axtask::yield_now();
-            } else {
-                thread
-                    .signal_wait_queue()
-                    .wait_timeout_until(POLL_SLEEP_QUANTUM, || thread.has_pending_signal());
-            }
-        }
+        ReadinessWaitResult::TimedOut => write_back(&pollfds, 0),
     }
 }
+
 // Complete pselect6 implementation.
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -439,10 +248,10 @@ pub fn sys_pselect6(
             Ok(ts) => ts,
             Err(e) => return -e.code() as isize,
         };
-        if ts.tv_sec < 0 || !(0..1_000_000_000).contains(&ts.tv_nsec) {
-            return -LinuxError::EINVAL.code() as isize;
+        match crate::validation::time::timespec_to_duration(ts) {
+            Ok(duration) => Some(duration),
+            Err(e) => return -e.code() as isize,
         }
-        Some(Duration::new(ts.tv_sec as u64, ts.tv_nsec as u32))
     } else {
         None
     };
@@ -555,7 +364,7 @@ pub fn sys_pselect6(
         return 0;
     }
 
-    let objects = match get_fd_objects(pollfds.iter().map(|pfd| pfd.fd as usize)) {
+    let objects = match snapshot_poll_objects(&pollfds) {
         Ok(objects) => objects,
         Err(e) => return -e.code() as isize,
     };
@@ -564,83 +373,21 @@ pub fn sys_pselect6(
     }
 
     let deadline = timeout_dur.map(|timeout_dur| axhal::time::monotonic_time() + timeout_dur);
+    let wait_result = wait_for_readiness(thread.as_ref(), &mut pollfds, &objects, deadline);
+    if matches!(wait_result, ReadinessWaitResult::Interrupted) {
+        axlog::debug!("sys_pselect6 => interrupted by signal");
+        return -LinuxError::EINTR.code() as isize;
+    }
 
-    const POLL_ACTIVE_YIELD_ROUNDS: usize = 64;
-    const POLL_SLEEP_QUANTUM: Duration = Duration::from_micros(100);
-    let mut idle_rounds: usize = 0;
-
-    loop {
-        let mut ready = 0usize;
-        for (pfd, object) in pollfds.iter_mut().zip(objects.iter()) {
-            pfd.revents = 0;
-            if pfd.fd < 0 {
-                continue;
-            }
-            let Some(object) = object.as_ref() else {
-                return -LinuxError::EBADF.code() as isize;
-            };
-            match object.poll() {
-                Ok(state) => {
-                    pfd.revents = requested_poll_revents(pfd.events, state);
-                    if pfd.revents != 0 {
-                        ready += 1;
-                    }
-                }
-                Err(_) => {
-                    pfd.revents = POLLERR as i16;
-                    ready += 1;
-                }
-            }
-        }
-
-        if ready > 0 {
-            if axlog::log_enabled!(axlog::Level::Debug) {
-                axlog::debug!(
-                    "sys_pselect6 => ready fds detected: {:?}",
-                    pollfds
-                        .iter()
-                        .filter(|p| p.revents != 0)
-                        .map(|p| (p.fd, p.revents))
-                        .collect::<alloc::vec::Vec<_>>()
-                );
-            }
-            break;
-        }
-
-        if thread.has_pending_signal() {
-            axlog::debug!("sys_pselect6 => interrupted by signal");
-            return -LinuxError::EINTR.code() as isize;
-        }
-
-        if let Some(deadline) = deadline {
-            let now = axhal::time::monotonic_time();
-            if now >= deadline {
-                axlog::debug!("sys_pselect6 => deadline reached");
-                break;
-            }
-            idle_rounds = idle_rounds.saturating_add(1);
-            if idle_rounds <= POLL_ACTIVE_YIELD_ROUNDS {
-                axtask::yield_now();
-            } else {
-                let sleep_dur = core::cmp::min(deadline - now, POLL_SLEEP_QUANTUM);
-                if sleep_dur > Duration::ZERO {
-                    thread
-                        .signal_wait_queue()
-                        .wait_timeout_until(sleep_dur, || thread.has_pending_signal());
-                } else {
-                    axtask::yield_now();
-                }
-            }
-        } else {
-            idle_rounds = idle_rounds.saturating_add(1);
-            if idle_rounds <= POLL_ACTIVE_YIELD_ROUNDS {
-                axtask::yield_now();
-            } else {
-                thread
-                    .signal_wait_queue()
-                    .wait_timeout_until(POLL_SLEEP_QUANTUM, || thread.has_pending_signal());
-            }
-        }
+    if axlog::log_enabled!(axlog::Level::Debug) {
+        axlog::debug!(
+            "sys_pselect6 => ready fds detected: {:?}",
+            pollfds
+                .iter()
+                .filter(|p| p.revents != 0)
+                .map(|p| (p.fd, p.revents))
+                .collect::<alloc::vec::Vec<_>>()
+        );
     }
 
     let mut ready_count = 0isize;

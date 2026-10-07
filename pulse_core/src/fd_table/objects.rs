@@ -102,24 +102,46 @@ impl FdObject for NsFdObject {
 pub struct PidfdObject {
     pid: AtomicU64,
     bind_wait_queue: axtask::WaitQueue,
+    target_owner: spin::Once<Arc<crate::task::Process>>,
 }
 
 impl PidfdObject {
     pub fn new(pid: u64) -> Self {
-        Self {
+        let object = Self {
             pid: AtomicU64::new(pid),
             bind_wait_queue: axtask::WaitQueue::new(),
+            target_owner: spin::Once::new(),
+        };
+        if pid != 0 {
+            object.install_target(pid);
         }
+        object
     }
 
     pub fn pid(&self) -> u64 {
         self.pid.load(Ordering::Acquire)
     }
 
+    fn install_target(&self, pid: u64) {
+        if self.target_owner.get().is_some() {
+            return;
+        }
+        let Some(process) = crate::task::process_by_pid(pid) else {
+            return;
+        };
+        self.target_owner.call_once(|| process);
+    }
+
+    fn target_process(&self) -> Option<&crate::task::Process> {
+        self.target_owner.get().map(Arc::as_ref)
+    }
+
     pub fn bind_pid(&self, pid: u64) {
         debug_assert_ne!(pid, 0);
-        let previous = self.pid.swap(pid, Ordering::AcqRel);
+        let previous = self.pid.load(Ordering::Acquire);
         debug_assert_eq!(previous, 0);
+        self.install_target(pid);
+        self.pid.store(pid, Ordering::Release);
         self.bind_wait_queue.notify_all(true);
     }
 }
@@ -154,8 +176,25 @@ impl FdObject for PidfdObject {
         })
     }
 
-    /// 将当前 waker 注册到目标进程自身的 `pid_exit_event` 等待队列上。
-    ///
+    fn get_wait_queues<'a>(
+        &'a self,
+        events: i16,
+        wqs: &mut Vec<&'a axtask::WaitQueue>,
+    ) -> LinuxResult<bool> {
+        if (events & POLLIN as i16) == 0 {
+            return Ok(events == 0);
+        }
+        if self.pid() == 0 {
+            wqs.push(&self.bind_wait_queue);
+            return Ok(true);
+        }
+        if let Some(process) = self.target_process() {
+            wqs.push(&process.pid_exit_event);
+            return Ok(true);
+        }
+        Ok(false)
+    }
+
     /// `pidfd` 只关心目标进程进入僵尸态这一事件；只要目标进程在生命周期内，
     /// `Process::finish_thread_exit` 会在完成退出资源清理并写入 `zombie = true`
     /// 之后立即通知，从而唤醒 epoll/poll 等待者。
