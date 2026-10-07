@@ -1,6 +1,6 @@
 use linux_raw_sys::general::{
     CLD_CONTINUED, CLD_DUMPED, CLD_EXITED, CLD_KILLED, CLD_STOPPED, SA_NOCLDSTOP, SA_NOCLDWAIT,
-    SIGCHLD, SIGCONT, WCONTINUED, WEXITED, WNOWAIT, WUNTRACED,
+    SIGCHLD, SIGCONT, WCONTINUED, WEXITED, WNOHANG, WNOWAIT, WUNTRACED,
 };
 
 use super::*;
@@ -237,6 +237,30 @@ impl Process {
 
     pub fn shrink_reaped_resources(&self) -> AxResult<()> {
         self.release_zombie_resources(false)
+    }
+
+    /// Releases the task and process resources of a child that has already
+    /// been removed from its parent's child list.
+    pub fn retire_reaped_resources(&self) {
+        self.wait_task_refs_exited();
+        let _ = self.take_task_ref_by_tid(self.pid());
+        if let Err(e) = self.shrink_reaped_resources() {
+            axlog::warn!(
+                "failed to shrink reaped child resources for pid={}: {:?}",
+                self.pid(),
+                e
+            );
+        }
+        self.release_task_refs();
+        task::unregister_process(self.pid());
+    }
+
+    /// Accounts and retires a child removed by a consuming wait operation.
+    pub fn retire_reaped_child(&self, child: Arc<Process>) {
+        let now_ns = axhal::time::monotonic_time_nanos() as u64;
+        let (child_utime_ns, child_stime_ns) = child.snapshot_cpu_time_ns(now_ns);
+        self.add_child_time_ns(child_utime_ns, child_stime_ns);
+        child.retire_reaped_resources();
     }
 
     pub fn register_task_ref(&self, task: AxTaskRef) {
@@ -603,14 +627,7 @@ impl Process {
                 for child in children_to_reparent {
                     if child.is_zombie() {
                         // Reap zombie child immediately instead of reparenting it
-                        let exited_pid = child.pid();
-                        child.wait_task_refs_exited();
-                        let _ = child.take_task_ref_by_tid(exited_pid);
-                        if let Err(e) = child.shrink_reaped_resources() {
-                            axlog::warn!("failed to shrink reaped child resources: {:?}", e);
-                        }
-                        child.release_task_refs();
-                        task::unregister_process(exited_pid);
+                        child.retire_reaped_resources();
                     } else {
                         child.parent_pid.store(init.pid(), Ordering::Release);
                         child.reparented.store(true, Ordering::Release);
@@ -661,18 +678,7 @@ impl Process {
                     children.remove(idx);
                 }
             }
-            // Ensure all underlying tasks are joined before releasing resources
-            self.wait_task_refs_exited();
-            if let Err(e) = self.shrink_reaped_resources() {
-                axlog::warn!(
-                    "finish_thread_exit (reparented): failed to release zombie resources for \
-                     pid={}: {:?}",
-                    self.pid(),
-                    e
-                );
-            }
-            self.release_task_refs();
-            task::unregister_process(self.pid());
+            self.retire_reaped_resources();
         } else {
             if let Some(parent) = parent {
                 let auto_reap = self.notify_parent_exit(parent.as_ref());
@@ -681,19 +687,10 @@ impl Process {
                 // the teardown path.
                 parent.notify_child_state_change(WakeContext::task());
 
-                if auto_reap && parent.reap_zombie_child(self.pid() as isize).is_some() {
-                    let now_ns = axhal::time::monotonic_time_nanos() as u64;
-                    let (child_utime_ns, child_stime_ns) = self.snapshot_cpu_time_ns(now_ns);
-                    parent.add_child_time_ns(child_utime_ns, child_stime_ns);
-                    self.wait_task_refs_exited();
-                    if let Err(e) = self.shrink_reaped_resources() {
-                        axlog::warn!(
-                            "failed to shrink automatically reaped child resources: {:?}",
-                            e
-                        );
+                if auto_reap {
+                    if let Some(child) = parent.reap_zombie_child(self.pid() as isize) {
+                        parent.retire_reaped_child(child);
                     }
-                    self.release_task_refs();
-                    task::unregister_process(self.pid());
                 }
             }
         }
@@ -801,6 +798,50 @@ impl Process {
             Ok(Some((child, found_status.unwrap())))
         } else {
             Ok(None)
+        }
+    }
+
+    /// Runs the common child-wait transaction for wait4 and waitid.
+    ///
+    /// The epoch is sampled before every scan, so a state publication between
+    /// scanning and wait-queue enrollment forces a retry instead of a missed
+    /// wakeup.  The returned claim owns the child reference and records whether
+    /// a consuming exit wait removed the child from the parent list.
+    pub fn wait_child(
+        &self,
+        idtype: usize,
+        id: usize,
+        options: i32,
+    ) -> Result<Option<ChildWaitResult>, isize> {
+        loop {
+            let observed_child_state_epoch = self.child_state_epoch();
+            match self.waitid_find_and_reap(idtype, id, options) {
+                Ok(Some((child, status))) => {
+                    let reaped = matches!(status, WaitidStatusType::Exited { .. })
+                        && (options & WNOWAIT as i32) == 0;
+                    return Ok(Some(ChildWaitResult {
+                        child,
+                        status,
+                        reaped,
+                    }));
+                }
+                Ok(None) => {
+                    if (options & WNOHANG as i32) != 0 {
+                        return Ok(None);
+                    }
+                    if self.group_exiting() {
+                        return Err(-axerrno::LinuxError::EINTR.code() as isize);
+                    }
+                    if let Err(error) = self.wait_for_child_state_change_interruptible(
+                        idtype,
+                        id,
+                        observed_child_state_epoch,
+                    ) {
+                        return Err(-(error as isize));
+                    }
+                }
+                Err(error) => return Err(error),
+            }
         }
     }
 

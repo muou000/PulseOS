@@ -1,9 +1,7 @@
-use alloc::sync::Arc;
-
 use axerrno::LinuxError;
 use linux_raw_sys::general::{
     CLD_CONTINUED, CLD_STOPPED, P_ALL, P_PGID, P_PID, SIGCONT, WCONTINUED, WEXITED, WNOHANG,
-    WNOWAIT, WUNTRACED,
+    WUNTRACED,
 };
 use pulse_core::task::{Process, WaitidStatusType, current_thread, signal_info_for_child};
 
@@ -22,20 +20,6 @@ fn job_control_wait4_status_word(status_type: WaitidStatusType) -> Option<i32> {
 }
 fn wait4_status_word(child: &Process, status_type: WaitidStatusType) -> i32 {
     job_control_wait4_status_word(status_type).unwrap_or_else(|| child.wait_status_word())
-}
-
-fn finish_reaped_child(parent: &Process, child: Arc<Process>) {
-    let exited_pid = child.pid() as isize;
-    let now_ns = axhal::time::monotonic_time_nanos() as u64;
-    let (child_utime_ns, child_stime_ns) = child.snapshot_cpu_time_ns(now_ns);
-    parent.add_child_time_ns(child_utime_ns, child_stime_ns);
-    child.wait_task_refs_exited();
-    let _ = child.take_task_ref_by_tid(exited_pid as u64);
-    if let Err(e) = child.shrink_reaped_resources() {
-        axlog::warn!("failed to shrink reaped child resources: {:?}", e);
-    }
-    child.release_task_refs();
-    pulse_core::task::unregister_process(exited_pid as u64);
 }
 
 pub fn sys_wait4(pid: isize, status: usize, options: i32, rusage: usize) -> isize {
@@ -57,51 +41,31 @@ pub fn sys_wait4(pid: isize, status: usize, options: i32, rusage: usize) -> isiz
     let (idtype, id) = wait4_selector(pid);
     let wait_options = WEXITED as i32 | (options & (WNOHANG | WUNTRACED | WCONTINUED) as i32);
 
-    loop {
-        // Snapshot before scanning so a child-state publication between the
-        // scan and WaitQueue enrollment cannot be missed.
-        let observed_child_state_epoch = process.child_state_epoch();
-        match process.waitid_find_and_reap(idtype, id, wait_options) {
-            Ok(Some((child, status_type))) => {
-                let waited_pid = child.pid() as isize;
-                let reaped = matches!(status_type, WaitidStatusType::Exited { .. });
+    match process.wait_child(idtype, id, wait_options) {
+        Ok(Some(claim)) => {
+            let waited_pid = claim.child.pid() as isize;
 
-                if status != 0 {
-                    let wait_status = wait4_status_word(child.as_ref(), status_type);
-                    let write_result = write_user_i32(&process, status, wait_status);
-                    if write_result < 0 {
-                        if reaped {
-                            finish_reaped_child(process.as_ref(), child);
-                        }
-                        return write_result;
+            if status != 0 {
+                let wait_status = wait4_status_word(claim.child.as_ref(), claim.status);
+                let write_result = write_user_i32(&process, status, wait_status);
+                if write_result < 0 {
+                    if claim.reaped {
+                        process.retire_reaped_child(claim.child);
                     }
+                    return write_result;
                 }
+            }
 
-                if reaped {
-                    finish_reaped_child(process.as_ref(), child);
-                }
-                if rusage != 0 {
-                    // Not supported yet: simply ignore or zero out.
-                }
-                return waited_pid;
+            if claim.reaped {
+                process.retire_reaped_child(claim.child);
             }
-            Ok(None) => {
-                if (options & WNOHANG as i32) != 0 {
-                    return 0;
-                }
-                if process.group_exiting() {
-                    return -LinuxError::EINTR.code() as isize;
-                }
-                if let Err(e) = process.wait_for_child_state_change_interruptible(
-                    idtype,
-                    id,
-                    observed_child_state_epoch,
-                ) {
-                    return -e as isize;
-                }
+            if rusage != 0 {
+                // Not supported yet: simply ignore or zero out.
             }
-            Err(err_code) => return err_code,
+            waited_pid
         }
+        Ok(None) => 0,
+        Err(err_code) => err_code,
     }
 }
 
@@ -124,66 +88,41 @@ pub fn sys_waitid(idtype: usize, id: usize, infop: usize, options: i32) -> isize
     };
     let process = thread.process();
 
-    loop {
-        // Snapshot before scanning so a child-state publication between the
-        // scan and WaitQueue enrollment cannot be missed.
-        let observed_child_state_epoch = process.child_state_epoch();
-        match process.waitid_find_and_reap(idtype, id, options) {
-            Ok(Some((child, status_type))) => {
-                let was_zombie_and_reaped = matches!(status_type, WaitidStatusType::Exited { .. })
-                    && (options & WNOWAIT as i32) == 0;
+    match process.wait_child(idtype, id, options) {
+        Ok(Some(claim)) => {
+            let (code, status) = match claim.status {
+                WaitidStatusType::Exited {
+                    exit_code,
+                    exit_signal,
+                } => Process::exit_siginfo_status(exit_code, exit_signal),
+                WaitidStatusType::Stopped { signo } => (CLD_STOPPED as i32, signo),
+                WaitidStatusType::Continued => (CLD_CONTINUED as i32, SIGCONT as i32),
+            };
+            let raw = signal_info_for_child(claim.child.pid(), claim.child.ruid(), code, status);
 
-                let (code, status) = match status_type {
-                    WaitidStatusType::Exited {
-                        exit_code,
-                        exit_signal,
-                    } => Process::exit_siginfo_status(exit_code, exit_signal),
-                    WaitidStatusType::Stopped { signo } => (CLD_STOPPED as i32, signo),
-                    WaitidStatusType::Continued => (CLD_CONTINUED as i32, SIGCONT as i32),
-                };
-                let raw = signal_info_for_child(child.pid(), child.ruid(), code, status);
+            if infop != 0 && process.write_user_bytes(infop, &raw).is_err() {
+                if claim.reaped {
+                    process.retire_reaped_child(claim.child);
+                }
+                return -LinuxError::EFAULT.code() as isize;
+            }
 
-                if infop != 0 && process.write_user_bytes(infop, &raw).is_err() {
-                    if was_zombie_and_reaped {
-                        finish_reaped_child(process.as_ref(), child);
-                    }
+            if claim.reaped {
+                process.retire_reaped_child(claim.child);
+            }
+
+            0
+        }
+        Ok(None) => {
+            if infop != 0 {
+                let raw: linux_raw_sys::general::siginfo = unsafe { core::mem::zeroed() };
+                if pulse_core::task::uaccess::write_user_plain(&process, infop, &raw).is_err() {
                     return -LinuxError::EFAULT.code() as isize;
                 }
-
-                if was_zombie_and_reaped {
-                    finish_reaped_child(process.as_ref(), child);
-                }
-
-                return 0;
             }
-            Ok(None) => {
-                if (options & WNOHANG as i32) != 0 {
-                    if infop != 0 {
-                        let raw: linux_raw_sys::general::siginfo = unsafe { core::mem::zeroed() };
-                        if pulse_core::task::uaccess::write_user_plain(&process, infop, &raw)
-                            .is_err()
-                        {
-                            return -LinuxError::EFAULT.code() as isize;
-                        }
-                    }
-                    return 0;
-                }
-                if process.group_exiting() {
-                    return -LinuxError::EINTR.code() as isize;
-                }
-
-                if let Err(e) = process.wait_for_child_state_change_interruptible(
-                    idtype,
-                    id,
-                    observed_child_state_epoch,
-                ) {
-                    return -e as isize;
-                }
-            }
-            Err(err_code) => {
-                return err_code;
-            }
+            0
         }
+        Err(err_code) => err_code,
     }
 }
 
