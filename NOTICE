@@ -1,0 +1,71 @@
+PulseOS
+Copyright 2024-2026 PulseOS Contributors (https://github.com/muou000/PulseOS)
+
+This product is licensed under the Apache License, Version 2.0 (the "License").
+You may obtain a copy of the License at:
+    http://www.apache.org/licenses/LICENSE-2.0
+
+--------------------------------------------------------------------------------
+ArceOS Attribution & Derivative Works Notice
+--------------------------------------------------------------------------------
+PulseOS incorporates and builds upon code originally developed as part of the
+ArceOS componentized operating system project:
+    https://github.com/arceos-org/arceos
+    https://github.com/arceos-org/axdriver_crates
+    https://github.com/arceos-org/axcpu
+    https://github.com/arceos-org/axsched
+    https://github.com/arceos-org/axio
+    https://github.com/arceos-org/axplat_crates
+
+Original Copyright:
+    Copyright (c) ArceOS contributors
+    Copyright (c) Yuekai Jia <equation618@gmail.com>
+    Copyright (c) Youjie Zheng <Azure_stars@126.com>
+    Copyright (c) and other ArceOS developers and maintainers.
+
+Original License:
+    ArceOS modules and platform packages are multi-licensed under:
+    - Apache License, Version 2.0 (Apache-2.0)
+    - GNU General Public License, Version 3.0 or later (GPL-3.0-or-later)
+    - Mulan Permissive Software License, Version 2 (MulanPSL-2.0)
+
+PulseOS exercises the Apache License, Version 2.0 option for these components.
+Extensive architectural modifications, flattening, multi-arch enhancements,
+process/thread lifecycle models, POSIX syscall implementations, and driver
+adaptations have been made by the PulseOS project.
+
+--------------------------------------------------------------------------------
+Starry-OS Attribution
+--------------------------------------------------------------------------------
+PulseOS incorporates components and traits originating from Starry-OS:
+    - axfs-ng-vfs (https://github.com/Starry-OS/axfs-ng-vfs)
+      License: MIT OR Apache-2.0
+      Copyright (c) Mivik <mivikq@gmail.com>, 朝倉水希 <asakuramizu111@gmail.com>
+    - axpoll (https://github.com/Starry-OS/axpoll)
+      License: Apache-2.0
+      Copyright (c) Mivik <mivikq@gmail.com>, 朝倉水希 <asakuramizu111@gmail.com>
+    - starry-vdso (https://github.com/Starry-OS/starry-vdso)
+      License: Apache-2.0 OR MIT
+      Copyright (c) Starry-OS contributors
+    - ext4plus (https://github.com/Starry-OS/ext4plus)
+      License: MIT OR Apache-2.0
+
+--------------------------------------------------------------------------------
+Third-Party Bundled & Vendored Crates (under crates/)
+--------------------------------------------------------------------------------
+The crates/ directory contains standalone crates utilized by PulseOS:
+
+- virtio-drivers (https://github.com/rcore-os/virtio-drivers)
+  License: MIT / Apache-2.0
+- smoltcp (https://github.com/rcore-os/smoltcp)
+  License: 0BSD
+- dwmmc-host, sdmmc-protocol
+  License: Apache-2.0
+- buddy-slab-allocator
+  License: Apache-2.0
+- allocator
+  License: Apache-2.0 OR GPL-3.0-or-later OR MulanPSL-2.0
+- eevdf-scheduler
+  License: Apache-2.0 OR GPL-3.0-or-later OR MulanPSL-2.0
+- memory_addr, memory_set, page_table_multiarch, handler_table
+  License: Apache-2.0 OR GPL-3.0-or-later OR MulanPSL-2.0
