@@ -1,7 +1,20 @@
 # PulseOS Agent Skills
 
-本目录存放 PulseOS 工作区使用的 agent skills。Antigravity、Codex 等兼容 Agent Skills 的
-工具会自动发现 `.agents/skills/<name>/SKILL.md`。
+本目录存放 PulseOS 工作区使用的 agent skills，是所有工具共用的唯一一份 skill 源文件。
+
+## 工具兼容
+
+| 工具 | 项目级 skill 读取路径 | 本仓库的接入方式 |
+| --- | --- | --- |
+| Antigravity | `.agents/skills/` | 直接读取 |
+| Codex | `.agents/skills/` | 直接读取 |
+| Cursor | `.cursor/skills/` | 软链接 `.cursor/skills -> ../.agents/skills`（部分新版虽支持探测 `.agents`，软链接可确保完全兼容） |
+| Claude Code | `.claude/skills/` | 软链接 `.claude/skills -> ../.agents/skills` |
+| ZCode | `.zcode/skills/` | 软链接 `.zcode/skills -> ../.agents/skills` |
+
+- 只在本目录增删或修改 skill，不要往 `.cursor/skills`、`.claude/skills` 或 `.zcode/skills` 里写文件，因为它们只是软链接。
+- 软链接以相对路径提交到 git。在 Windows 上检出时需要开启 `core.symlinks=true` 和开发者模式，否则链接会变成纯文本文件。
+- ZCode 修改 skill 后，需要到「设置 → Skills」点击刷新。
 
 ## 目录约定
 
