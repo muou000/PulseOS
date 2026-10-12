@@ -1,0 +1,6 @@
+interface:
+  display_name: "Review Ticket"
+  short_description: "Review implementation PR as strong tier and merge to main"
+policy:
+  allow_implicit_invocation: false
+

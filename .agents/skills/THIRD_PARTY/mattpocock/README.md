@@ -14,7 +14,7 @@
 `.agents/skills/<name>/`。
 
 - engineering：`ask-matt`、`code-review`、`codebase-design`、`diagnosing-bugs`、
-  `domain-modeling`、`grill-with-docs`、`implement`、`implement-spec`、
+  `domain-modeling`、`grill-with-docs`、`implement`、
   `improve-codebase-architecture`、`pr`、`prototype`、`research`、`retro`、
   `setup-matt-pocock-skills`、`tdd`、`to-spec`、`to-tickets`、`triage`、`wayfinder`、`wizard`
 - productivity：`grill-me`、`grilling`、`handoff`、`teach`、`to-questionnaire`、
@@ -27,10 +27,11 @@
   `AGENTS.md`、`CLAUDE.md`、`GLOSSARY.md`、`SCOPE.md`、`.gitignore`。
 - 删除了 `in-progress`、`misc`、`deprecated` 三个分类，以及各分类的 `README.md`。
 - 目录从 `skills/<分类>/<name>/` 改成 `.agents/skills/<name>/`，方便 agent 发现。
-- 已保留的 skill 文件内容**没有改动**。
-
-> 以后如果修改了某个 skill 的文件内容，请把修改补充到本节。MIT 许可证要求保留
-> 版权声明和许可声明，所以不要删除 `LICENSE`。
+- **删除 `implement-spec`**：移除多 subagent 并发编排技能，统一使用逐票 `implement` + 手动会话模式。
+- **修改 `to-tickets`**：改为强模型专用；拆分工单时要求在工单中包含符号级实施计划（`Implementation plan`）和可检查事实锚点（`Anchors`）；限定发布至 GitHub 并打上 `model:weak` 标签；采用 GitHub 原生阻塞依赖；每票 PR 独立合入 `main`。
+- **修改 `implement`**：适配弱模型；开始前验证票的 anchors；按计划以 TDD 实现并打开合入 `main` 的 PR；实现后对同父 spec 的未关闭兄弟票执行漂移检查（`Drift check`）；遇到阻塞或无法推进时开 `needs-replan` / `needs-strong` 升级工单；支持 `needs-fix` 修复循环。
+- **修改 `ask-matt`**：更新主流程为分层协作模式（强模型 grill/spec/tickets/review/replan + 弱模型 implement/drift check），移除 `implement-spec`，增加 `review-ticket` 与 `replan`。
+- **新增 PulseOS 自建技能**：`replan`（强模型处理重规划与卡住升级）和 `review-ticket`（强模型逐票 PR 双轴评审与合并），详见 `docs/agents/ticket-workflow.md`。
 
 ## 其他署名
 
