@@ -1,7 +1,29 @@
 [workspace]
-resolver = "3"
-exclude = ["arceos", "crates/axconfig-gen", "crates/ext4plus"]
-members = ["pulse_core", "pulse_syscalls", "crates/starry-vdso"]
+resolver = "2"
+exclude = [
+    "crates/ext4plus",
+    "crates/buddy-slab-allocator",
+    "crates/eevdf-scheduler",
+]
+members = [
+    ".",
+    "pulse_core",
+    "pulse_syscalls",
+    "crates/starry-vdso",
+    "modules/axalloc",
+    "modules/axconfig",
+    "modules/axdriver",
+    "modules/axfs",
+    "modules/axhal",
+    "modules/axipi",
+    "modules/axlog",
+    "modules/axmm",
+    "modules/axnet",
+    "modules/axruntime",
+    "modules/axsync",
+    "modules/axtask",
+    "api/axfeat",
+]
 
 [workspace.package]
 version = "0.1.0"
@@ -10,12 +32,15 @@ authors = ["muou000 <muou000@outlook.com>"]
 license = "Apache-2.0"
 homepage = "https://github.com/muou000/PulseOS"
 repository = "https://github.com/muou000/PulseOS"
+documentation = "https://github.com/muou000/PulseOS"
+keywords = ["arceos", "kernel", "pulseos"]
+categories = ["os", "no-std"]
 
 [workspace.dependencies]
 pulse_core = { path = "pulse_core" }
 pulse_syscalls = { path = "pulse_syscalls" }
 
-axfeat = { path = "arceos/api/axfeat", features = [
+axfeat = { path = "api/axfeat", features = [
     "alloc-slab",
     "multitask",
     "sched-eevdf",
@@ -26,21 +51,26 @@ axfeat = { path = "arceos/api/axfeat", features = [
     "irq",
 ] }
 
-axconfig = { path = "arceos/modules/axconfig" }
-axhal = { path = "arceos/modules/axhal", features = ["uspace", "fp-simd"] }
-axlog = { path = "arceos/modules/axlog" }
-axruntime = { path = "arceos/modules/axruntime" }
-axnet = { path = "arceos/modules/axnet", features = ["monolithic"] }
-axalloc = { path = "arceos/modules/axalloc", default-features = false }
-axtask = { path = "arceos/modules/axtask" }
-axsync = { path = "arceos/modules/axsync" }
-axfs = { path = "arceos/modules/axfs", features = ["times"] }
-axmm = { path = "arceos/modules/axmm" }
+axconfig = { path = "modules/axconfig" }
+axhal = { path = "modules/axhal", features = ["uspace", "fp-simd"] }
+axlog = { path = "modules/axlog" }
+axruntime = { path = "modules/axruntime" }
+axnet = { path = "modules/axnet", features = ["monolithic"] }
+axalloc = { path = "modules/axalloc", default-features = false }
+axtask = { path = "modules/axtask" }
+axsync = { path = "modules/axsync" }
+axfs = { path = "modules/axfs", features = ["times"] }
+axmm = { path = "modules/axmm" }
+axdisplay = { path = "modules/axdisplay" }
+axdma = { path = "modules/axdma" }
+axdriver = { path = "modules/axdriver" }
+axipi = { path = "modules/axipi" }
 axerrno = "0.2"
 axpoll = "0.3"
 
 axdriver_base = { path = "crates/axdriver_base" }
 axdriver_block = { path = "crates/axdriver_block" }
+axdriver_display = { git = "https://github.com/arceos-org/axdriver_crates.git", tag = "v0.1.2" }
 axdriver_net = { path = "crates/axdriver_net" }
 axdriver_pci = { path = "crates/axdriver_pci" }
 axdriver_virtio = { path = "crates/axdriver_virtio" }
@@ -49,6 +79,9 @@ axplat-riscv64-qemu-virt = "0.3.0"
 axplat-riscv64-visionfive2 = "0.3.0"
 axplat-loongarch64-qemu-virt = "0.3.0"
 axplat-loongarch64-ls2k1000 = "0.3.0"
+axplat-aarch64-qemu-virt = "0.3"
+axplat-x86-pc = "0.3"
+axplat = "0.3"
 
 syscalls = { version = "0.8", default-features = false }
 linux-raw-sys = { version = "0.12", default-features = false, features = [
@@ -64,6 +97,7 @@ axio = { version = "0.3.0-pre.1", default-features = false, features = [
 axfs-ng-vfs = "0.1.1"
 linkme = "0.3"
 memory_addr = "0.4"
+memory_set = "0.4"
 bitflags = "2.11"
 spin = "0.10"
 kernel-elf-parser = "0.3"
@@ -80,6 +114,40 @@ sbi-rt = "0.0.3"
 scope-local = "0.1"
 
 starry-vdso = { path = "crates/starry-vdso" }
+
+aarch64-cpu = "10.0"
+allocator = { git = "https://github.com/arceos-org/allocator.git", tag = "v0.1.1", default-features = false }
+async-lock = { version = "3.4", default-features = false }
+async-trait = "0.1"
+buddy-slab-allocator = { path = "crates/buddy-slab-allocator" }
+axconfig-macros = "0.2"
+axcpu = "0.2"
+axsched = "0.3"
+cfg-if = "1.0"
+cpumask = "0.1"
+crate_interface = "0.1.4"
+ctor_bare = "0.2"
+env_logger = "0.11.8"
+ext4plus = { path = "crates/ext4plus", default-features = false }
+fatfs = { git = "https://github.com/Starry-OS/rust-fatfs.git", rev = "2685439", default-features = false }
+futures-util = { version = "0.3", default-features = false, features = [
+    "alloc",
+    "async-await-macro",
+] }
+heapless = "0.9"
+intrusive-collections = "0.9.7"
+lazyinit = "0.2"
+lock_api = { version = "0.4", default-features = false }
+log = "=0.4.21"
+lru = "0.16.0"
+page_table_multiarch = { version = "0.5", features = ["copy-from"] }
+slab = { version = "0.4.9", default-features = false }
+smoltcp = { git = "https://github.com/rcore-os/smoltcp.git", rev = "8bf9a9a", default-features = false }
+timer_list = "0.1"
+virtio-drivers = "0.7.4"
+
+[profile.release]
+lto = true
 
 [patch.crates-io]
 axsched = { path = "crates/axsched" }

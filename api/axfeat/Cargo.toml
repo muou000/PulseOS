@@ -60,8 +60,7 @@ fs = [
     "axdriver/dyn",
     "dep:axfs",
     "axruntime/fs",
-] # TODO: try to remove "paging"
-myfs = ["axfs?/myfs"]
+]
 
 # Networking
 net = ["alloc", "paging", "axdriver/net", "dep:axnet", "axruntime/net"]

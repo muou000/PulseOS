@@ -75,7 +75,7 @@ rev = "e974f16"
 optional = true
 
 [dependencies.axhal]
-path = "../../arceos/modules/axhal"
+path = "../../modules/axhal"
 optional = true
 
 [dependencies.axpoll]

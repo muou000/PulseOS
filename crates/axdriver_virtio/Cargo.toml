@@ -60,7 +60,6 @@ optional = true
 
 [dependencies.axdriver_display]
 version = "0.1"
-path = "../axdriver_display"
 optional = true
 
 [dependencies.axdriver_net]
