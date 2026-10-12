@@ -45,4 +45,4 @@ features = ["alloc"]
 
 [dependencies.eevdf-scheduler]
 version = "0.1.0"
-path = "../eevdf-scheduler"
+path = "../../crates/eevdf-scheduler"

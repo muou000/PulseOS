@@ -9,7 +9,7 @@ repository.workspace = true
 
 [dependencies]
 axhal = { workspace = true, features = ["paging", "uspace"] }
-axcpu = { path = "../crates/axcpu" }
+axcpu.workspace = true
 axlog = { workspace = true }
 axconfig = { workspace = true }
 axalloc.workspace = true

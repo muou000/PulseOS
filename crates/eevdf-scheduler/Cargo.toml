@@ -16,6 +16,3 @@ categories = ["algorithms", "no-std"]
 linked_list_r4l = "0.3"
 intrusive-collections = { version = "0.9.7", default-features = false, features = ["alloc"] }
 
-# Keep this crate independently testable even when it is checked out below a
-# larger Cargo workspace such as PulseOS.
-[workspace]

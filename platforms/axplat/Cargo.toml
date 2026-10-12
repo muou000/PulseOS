@@ -45,7 +45,6 @@ categories = [
 ]
 license = "GPL-3.0-or-later OR Apache-2.0 OR MulanPSL-2.0"
 repository = "https://github.com/arceos-org/axplat_crates"
-resolver = "2"
 
 [package.metadata.docs.rs]
 all-features = true

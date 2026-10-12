@@ -12,17 +12,28 @@ members = [
     "crates/starry-vdso",
     "modules/axalloc",
     "modules/axconfig",
+    "modules/axcpu",
     "modules/axdriver",
+    "modules/axdriver_base",
+    "modules/axdriver_block",
+    "modules/axdriver_net",
+    "modules/axdriver_pci",
+    "modules/axdriver_virtio",
     "modules/axfs",
+    "modules/axfs-ng-vfs",
     "modules/axhal",
+    "modules/axio",
     "modules/axipi",
     "modules/axlog",
     "modules/axmm",
     "modules/axnet",
+    "modules/axpoll",
     "modules/axruntime",
+    "modules/axsched",
     "modules/axsync",
     "modules/axtask",
     "api/axfeat",
+    "platforms/axplat",
 ]
 
 [workspace.package]
@@ -66,14 +77,14 @@ axdma = { path = "modules/axdma" }
 axdriver = { path = "modules/axdriver" }
 axipi = { path = "modules/axipi" }
 axerrno = "0.2"
-axpoll = "0.3"
+axpoll = { path = "modules/axpoll" }
 
-axdriver_base = { path = "crates/axdriver_base" }
-axdriver_block = { path = "crates/axdriver_block" }
+axdriver_base = { path = "modules/axdriver_base" }
+axdriver_block = { path = "modules/axdriver_block" }
 axdriver_display = { git = "https://github.com/arceos-org/axdriver_crates.git", tag = "v0.1.2" }
-axdriver_net = { path = "crates/axdriver_net" }
-axdriver_pci = { path = "crates/axdriver_pci" }
-axdriver_virtio = { path = "crates/axdriver_virtio" }
+axdriver_net = { path = "modules/axdriver_net" }
+axdriver_pci = { path = "modules/axdriver_pci" }
+axdriver_virtio = { path = "modules/axdriver_virtio" }
 
 axplat-riscv64-qemu-virt = "0.3.0"
 axplat-riscv64-visionfive2 = "0.3.0"
@@ -81,7 +92,7 @@ axplat-loongarch64-qemu-virt = "0.3.0"
 axplat-loongarch64-ls2k1000 = "0.3.0"
 axplat-aarch64-qemu-virt = "0.3"
 axplat-x86-pc = "0.3"
-axplat = "0.3"
+axplat = { path = "platforms/axplat" }
 
 syscalls = { version = "0.8", default-features = false }
 linux-raw-sys = { version = "0.12", default-features = false, features = [
@@ -91,10 +102,10 @@ linux-raw-sys = { version = "0.12", default-features = false, features = [
     "ioctl",
     "loop_device",
 ] }
-axio = { version = "0.3.0-pre.1", default-features = false, features = [
+axio = { path = "modules/axio", default-features = false, features = [
     "alloc",
 ] }
-axfs-ng-vfs = "0.1.1"
+axfs-ng-vfs = { path = "modules/axfs-ng-vfs" }
 linkme = "0.3"
 memory_addr = "0.4"
 memory_set = "0.4"
@@ -121,8 +132,8 @@ async-lock = { version = "3.4", default-features = false }
 async-trait = "0.1"
 buddy-slab-allocator = { path = "crates/buddy-slab-allocator" }
 axconfig-macros = "0.2"
-axcpu = "0.2"
-axsched = "0.3"
+axcpu = { path = "modules/axcpu" }
+axsched = { path = "modules/axsched" }
 cfg-if = "1.0"
 cpumask = "0.1"
 crate_interface = "0.1.4"
@@ -150,20 +161,20 @@ virtio-drivers = "0.7.4"
 lto = true
 
 [patch.crates-io]
-axsched = { path = "crates/axsched" }
+axsched = { path = "modules/axsched" }
 memory_set = { path = "crates/memory_set" }
 memory_addr = { path = "crates/memory_addr" }
-axfs-ng-vfs = { path = "crates/axfs-ng-vfs" }
-axcpu = { path = "crates/axcpu" }
+axfs-ng-vfs = { path = "modules/axfs-ng-vfs" }
+axcpu = { path = "modules/axcpu" }
 axplat-loongarch64-qemu-virt = { path = "platforms/axplat-loongarch64-qemu-virt" }
 axplat-loongarch64-ls2k1000 = { path = "platforms/axplat-loongarch64-ls2k1000" }
 axplat-riscv64-qemu-virt = { path = "platforms/axplat-riscv64-qemu-virt" }
 axplat-riscv64-visionfive2 = { path = "platforms/axplat-riscv64-visionfive2" }
-axio = { path = "crates/axio" }
-axpoll = { path = "crates/axpoll" }
+axio = { path = "modules/axio" }
+axpoll = { path = "modules/axpoll" }
 virtio-drivers = { path = "crates/virtio-drivers" }
 page_table_multiarch = { path = "crates/page_table_multiarch" }
-axplat = { path = "crates/axplat" }
+axplat = { path = "platforms/axplat" }
 handler_table = { path = "crates/handler_table" }
 dwmmc-host = { path = "crates/dwmmc-host" }
 sdmmc-protocol = { path = "crates/sdmmc-protocol" }
@@ -239,8 +250,8 @@ axplat-loongarch64-ls2k1000 = { workspace = true, optional = true, features = ["
 smoltcp = { path = "crates/smoltcp" }
 
 [patch."https://github.com/arceos-org/axdriver_crates.git"]
-axdriver_base = { path = "crates/axdriver_base" }
-axdriver_block = { path = "crates/axdriver_block" }
-axdriver_net = { path = "crates/axdriver_net" }
-axdriver_pci = { path = "crates/axdriver_pci" }
-axdriver_virtio = { path = "crates/axdriver_virtio" }
+axdriver_base = { path = "modules/axdriver_base" }
+axdriver_block = { path = "modules/axdriver_block" }
+axdriver_net = { path = "modules/axdriver_net" }
+axdriver_pci = { path = "modules/axdriver_pci" }
+axdriver_virtio = { path = "modules/axdriver_virtio" }
