@@ -106,4 +106,9 @@ qperf:
 		fi; \
 	done
 
-.PHONY: rv la run img vf2 ls2k1000 qperf test
+clean:
+	@rm -rf "$(A)/target" "$(A)/arceos/target"
+	@rm -f "$(A)"/*.bin "$(A)"/*.elf "$(A)"/*.uimg "$(A)"/kernel-*
+	@rm -f "$(A)/.axconfig.toml" "$(A)/.axconfig.old.toml"
+
+.PHONY: rv la run img vf2 ls2k1000 qperf test clean
