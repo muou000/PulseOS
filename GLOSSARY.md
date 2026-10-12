@@ -23,3 +23,13 @@ _Avoid_: page-cache wrapper, mapping helper
 **子进程退休**:
 终态 child 被 wait 消费后，完成 accounting、task 引用、资源缩减、描述符影响和全局注销的过程。
 _Avoid_: child cleanup, process deletion
+
+### IPC
+
+**信号量事务**:
+对同一 System V 信号量集的一组操作作为一个状态转换：只有全部操作可满足时才提交，否则保持状态并等待、超时或返回错误。
+_Avoid_: semaphore batch, semaphore helper
+
+**共享内存附着**:
+一个进程将共享内存段映射到自己的地址空间并取得该段的附着 ownership；解除附着同时撤销映射并释放该进程的附着记录。
+_Avoid_: shared memory handle, mapping helper
