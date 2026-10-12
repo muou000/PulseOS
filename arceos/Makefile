@@ -158,11 +158,6 @@ all: build
 include scripts/make/utils.mk
 include scripts/make/build.mk
 include scripts/make/qemu.mk
-ifeq ($(PLAT_NAME), aarch64-raspi4)
-  include scripts/make/raspi4.mk
-else ifeq ($(PLAT_NAME), aarch64-bsta1000b)
-  include scripts/make/bsta1000b-fada.mk
-endif
 
 defconfig:
 	$(call defconfig)

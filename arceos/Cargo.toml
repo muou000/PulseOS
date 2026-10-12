@@ -12,24 +12,12 @@ members = [
     "modules/axlog",
     "modules/axmm",
     "modules/axnet",
-    "modules/axns",
     "modules/axruntime",
     "modules/axsync",
     "modules/axtask",
     "modules/axipi",
 
     "api/axfeat",
-    "api/arceos_api",
-    "api/arceos_posix_api",
-
-    "ulib/axstd",
-    "ulib/axlibc",
-
-    "examples/helloworld",
-    "examples/helloworld-myplat",
-    "examples/httpclient",
-    "examples/httpserver",
-    "examples/shell",
 ]
 
 [workspace.package]
@@ -44,11 +32,6 @@ keywords = ["arceos", "kernel"]
 categories = ["os", "no-std"]
 
 [workspace.dependencies]
-axstd = { path = "ulib/axstd" }
-axlibc = { path = "ulib/axlibc" }
-
-arceos_api = { path = "api/arceos_api" }
-arceos_posix_api = { path = "api/arceos_posix_api" }
 axfeat = { path = "api/axfeat" }
 
 axalloc = { path = "modules/axalloc", default-features = false }
@@ -61,7 +44,6 @@ axhal = { path = "modules/axhal" }
 axlog = { path = "modules/axlog" }
 axmm = { path = "modules/axmm" }
 axnet = { path = "modules/axnet" }
-axns = { path = "modules/axns" }
 axruntime = { path = "modules/axruntime" }
 axsync = { path = "modules/axsync" }
 axtask = { path = "modules/axtask" }
