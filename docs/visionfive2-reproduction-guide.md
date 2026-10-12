@@ -236,17 +236,12 @@ make test 2>&1 | tail -30
 再构建与本文网络拓扑匹配的 VisionFive 2 内核：
 
 ```bash
-SOURCE_DATE_EPOCH=1786453035 \
-make visionfive2 \
+make vf2 \
   VF2_IP=192.168.137.2 \
-  VF2_GW=192.168.137.1 \
-  VF2_SMP=4 \
-  VF2_BUILD_EPOCH=1786453035
+  VF2_GW=192.168.137.1
 ```
 
-`VF2_BUILD_EPOCH` 是 JH7110 RTC 无效时的墙钟下界，不能代替 NTP 精确授时。
-`SOURCE_DATE_EPOCH` 固定 uImage header 时间；即使如此，源码快照、Rust、Cargo、依赖、
-构建路径或工具版本不同仍可能改变二进制，因此不要只追求历史哈希。
+构建系统已全面移除构建时间注入，内核二进制实现确定性可重现构建。JH7110 RTC 若掉电未初始化，系统启动时墙钟从 Unix 纪元 0 开始，板端联网后可通过 NTP 或 `date -s` 授时。
 
 检查产物：
 
@@ -638,7 +633,7 @@ getent hosts github.com
 - `connection timed out; no servers could be reached`：先检查 resolver 和 UDP/53 NAT；
 - 目标为 `127.0.0.1`：旧 rootfs 的 resolver 配置仍未修正；
 - 返回 `198.18.x.x`：进入前述 Mihomo fake-IP 分支；
-- 时间为 1970：重新检查 `VF2_BUILD_EPOCH`，不要关闭公网 TLS 验证绕过它。
+- 时间为 1970：JH7110 掉电后 RTC 未保活，板端联网后使用 NTP 或 `date -s` 校准系统时间，不要关闭公网 TLS 验证绕过它。
 
 ### 11.6 GitHub
 

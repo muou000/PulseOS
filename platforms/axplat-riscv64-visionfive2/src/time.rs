@@ -15,11 +15,9 @@ const RTC_READ_ATTEMPTS: usize = 3;
 const RTC_STATUS_UNAVAILABLE: u8 = 0;
 const RTC_STATUS_INVALID: u8 = 1;
 const RTC_STATUS_UNSTABLE: u8 = 2;
-const RTC_STATUS_STALE: u8 = 3;
-const RTC_STATUS_USED: u8 = 4;
+const RTC_STATUS_USED: u8 = 3;
 const CLOCK_SOURCE_NONE: u8 = 0;
 const CLOCK_SOURCE_RTC: u8 = 1;
-const CLOCK_SOURCE_BUILD: u8 = 2;
 
 static RTC_EPOCHOFFSET_NANOS: AtomicU64 = AtomicU64::new(0);
 static RTC_EPOCH_SECONDS: AtomicU64 = AtomicU64::new(0);
@@ -38,9 +36,6 @@ struct RtcSample {
 }
 
 pub(super) fn init_early(dtb_paddr: usize) {
-    let build_epoch = env!("PULSE_BUILD_EPOCH")
-        .parse::<u64>()
-        .expect("validated PULSE_BUILD_EPOCH");
     let rtc_sample = read_rtc_sample(dtb_paddr);
     let rtc_epoch = rtc_sample.as_ref().and_then(|sample| {
         RTC_MMIO_BASE.store(sample.mmio_base, Ordering::Relaxed);
@@ -56,35 +51,21 @@ pub(super) fn init_early(dtb_paddr: usize) {
             sample.epoch_seconds
         }
     });
-    let (epoch_seconds, use_rtc) = crate::rtc_decode::select_boot_epoch(rtc_epoch, build_epoch);
-    if rtc_epoch.is_some() {
-        RTC_STATUS.store(
-            if use_rtc {
-                RTC_STATUS_USED
-            } else {
-                RTC_STATUS_STALE
-            },
-            Ordering::Relaxed,
-        );
-    }
-    let Some(epoch_nanos) = epoch_seconds.checked_mul(NANOS_PER_SEC) else {
-        return;
-    };
-    let monotonic_nanos = TimeIfImpl::ticks_to_nanos(TimeIfImpl::current_ticks());
-    let Some(epoch_offset) = epoch_nanos.checked_sub(monotonic_nanos) else {
-        return;
-    };
 
-    RTC_EPOCH_SECONDS.store(epoch_seconds, Ordering::Release);
-    RTC_EPOCHOFFSET_NANOS.store(epoch_offset, Ordering::Release);
-    CLOCK_SOURCE.store(
-        if use_rtc {
-            CLOCK_SOURCE_RTC
-        } else {
-            CLOCK_SOURCE_BUILD
-        },
-        Ordering::Release,
-    );
+    if let Some(epoch_seconds) = rtc_epoch {
+        let Some(epoch_nanos) = epoch_seconds.checked_mul(NANOS_PER_SEC) else {
+            return;
+        };
+        let monotonic_nanos = TimeIfImpl::ticks_to_nanos(TimeIfImpl::current_ticks());
+        let Some(epoch_offset) = epoch_nanos.checked_sub(monotonic_nanos) else {
+            return;
+        };
+
+        RTC_STATUS.store(RTC_STATUS_USED, Ordering::Relaxed);
+        RTC_EPOCH_SECONDS.store(epoch_seconds, Ordering::Release);
+        RTC_EPOCHOFFSET_NANOS.store(epoch_offset, Ordering::Release);
+        CLOCK_SOURCE.store(CLOCK_SOURCE_RTC, Ordering::Release);
+    }
 }
 
 pub(super) fn report_init() {
@@ -100,24 +81,19 @@ pub(super) fn report_init() {
             "JH7110 RTC initialized: base={mmio_base:#x}, time={time_reg:#010x}, \
              date={date_reg:#010x}, epoch_seconds={epoch_seconds}"
         ),
-        CLOCK_SOURCE_BUILD => match status {
+        _ => match status {
             RTC_STATUS_INVALID => warn!(
                 "JH7110 RTC has invalid registers: base={mmio_base:#x}, time={time_reg:#010x}, \
-                 date={date_reg:#010x}; wall clock seeded from build epoch {epoch_seconds}"
+                 date={date_reg:#010x}; wall clock starts at epoch"
             ),
             RTC_STATUS_UNSTABLE => warn!(
                 "JH7110 RTC changed during sampling: base={mmio_base:#x}, time={time_reg:#010x}, \
-                 date={date_reg:#010x}; wall clock seeded from build epoch {epoch_seconds}"
-            ),
-            RTC_STATUS_STALE => warn!(
-                "JH7110 RTC predates this image: base={mmio_base:#x}, time={time_reg:#010x}, \
-                 date={date_reg:#010x}; wall clock seeded from build epoch {epoch_seconds}"
+                 date={date_reg:#010x}; wall clock starts at epoch"
             ),
             _ => {
-                warn!("JH7110 RTC unavailable; wall clock seeded from build epoch {epoch_seconds}")
+                warn!("JH7110 RTC unavailable; wall clock starts at epoch")
             }
         },
-        _ => warn!("JH7110 wall clock initialization failed; wall clock starts at epoch"),
     }
 }
 

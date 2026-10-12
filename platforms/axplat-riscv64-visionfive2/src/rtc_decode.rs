@@ -33,13 +33,6 @@ pub(crate) fn decode_rtc_datetime(time_reg: u32, date_reg: u32) -> Option<u64> {
     )
 }
 
-pub(crate) fn select_boot_epoch(rtc_epoch: Option<u64>, build_epoch: u64) -> (u64, bool) {
-    match rtc_epoch {
-        Some(epoch) if epoch >= build_epoch => (epoch, true),
-        _ => (build_epoch, false),
-    }
-}
-
 fn datetime_to_unix_timestamp(
     year: i32,
     month: u32,
@@ -133,21 +126,6 @@ mod tests {
         assert_eq!(
             decode_rtc_datetime(time_reg(0, 0, 0), date_reg(100, 1, 1)),
             None
-        );
-    }
-
-    #[test]
-    fn build_epoch_is_a_lower_bound_for_non_persistent_rtc() {
-        const BUILD_EPOCH: u64 = 1_786_377_600;
-
-        assert_eq!(select_boot_epoch(None, BUILD_EPOCH), (BUILD_EPOCH, false));
-        assert_eq!(
-            select_boot_epoch(Some(978_307_200), BUILD_EPOCH),
-            (BUILD_EPOCH, false)
-        );
-        assert_eq!(
-            select_boot_epoch(Some(BUILD_EPOCH + 60), BUILD_EPOCH),
-            (BUILD_EPOCH + 60, true)
         );
     }
 }

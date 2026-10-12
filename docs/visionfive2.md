@@ -185,12 +185,12 @@ known to be reachable from the board.
 
 JH7110's integrated RTC is not in a separately powered always-on domain, so it
 cannot be treated as a persistent clock across board power loss. PulseOS reads
-and reports the raw RTC time/date registers, but rejects an invalid or stale
-value. In that case the VisionFive 2 build timestamp seeds the wall clock as a
-lower bound; `VF2_BUILD_EPOCH=<unix-seconds>` can make that value explicit for
-reproducible images. This prevents a fresh image from starting at 1970 or the
-RTC's 2001 default, while normal `clock_settime` or NTP can still install a more
-accurate time after networking is available.
+and reports the raw RTC time/date registers. If the RTC registers are valid,
+they initialize the system wall clock. Otherwise, if the RTC registers are
+invalid, unstable, or unavailable, the wall clock starts at the standard Unix
+epoch (0) without baking any build timestamp into the kernel image. Normal
+`clock_settime` or network NTP can install an accurate time after networking is
+available.
 
 HTTPS clients use nonblocking TCP. Once `connect` has selected a local endpoint
 and entered `CONNECTING`, POSIX `getsockname` must expose that address even

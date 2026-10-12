@@ -1,6 +1,6 @@
 # StarFive VisionFive 2 (JH7110) configuration for PulseOS.
 arch = "riscv64" # str
-platform = "riscv64-visionfive2" # str
+platform = "vf2" # str
 package = "axplat-riscv64-visionfive2" # str
 
 [plat]

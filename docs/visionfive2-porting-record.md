@@ -1292,9 +1292,7 @@ ext4 镜像可由 `debugfs` 读回。TFTP 只更新内核，不会修改已写�
 
 该版首次上板后 `date` 仍为 1970，证明“存在解码实现”不能替代实板时间证据。tgoskits 的
 偏移和位域与本实现相同；进一步查阅 StarFive 勘误确认 JH7110 RTC 不在独立常供电域，整板
-掉电后不能持久。现在平台保留并报告 RTC base、原始 time/date 和稳定性；RTC 无效或早于
-本轮镜像时，使用 `VF2_BUILD_EPOCH` 建立启动墙钟下界。该下界解决 1970/2001 导致的 TLS
-证书“尚未生效”，但精确时间仍应在联网后由 `clock_settime` 或 NTP 校准。
+掉电后不能持久。现在平台保留并报告 RTC base、原始 time/date 和稳定性；初期曾用构建时间建立启动墙钟下界以规避 TLS 证书问题，现已全面移除构建时间注入以保证镜像构建确定性（reproducible build），无有效 RTC 时系统从标准 Unix 纪元 0 启动，由板端联网后通过 NTP 或 `clock_settime` 校准。
 
 公网 Git 的另一条失败链与 RTC 无关。`git-remote-https` 发出 SYN 后报告
 `getsockname() failed with errno 107`；此时 smoltcp 已分配本地端点并处于

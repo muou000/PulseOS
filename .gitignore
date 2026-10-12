@@ -4,6 +4,7 @@
 *.elf
 *.bin
 *.img
+*.uimg
 .axconfig.old.toml
 .axconfig.toml
 kernel-*

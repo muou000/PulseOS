@@ -271,8 +271,7 @@ round-trip min/avg/max = 0.150/4.333/12.663 ms
 
 tgoskits 的 JH7110 RTC 偏移和位域与 PulseOS 当前实现一致。实板仍从 1970 启动的原因不是
 解码差异，而是 RTC 寄存器无效或停留在默认时间。StarFive 勘误明确指出该 RTC 不在独立
-常供电域，不能跨整板掉电持久计时。PulseOS 现在记录原始 time/date；RTC 无效或早于当前
-镜像时，以 `VF2_BUILD_EPOCH` 为启动墙钟下界，之后仍允许 `clock_settime`/NTP 校准。
+常供电域，不能跨整板掉电持久计时。PulseOS 现在记录原始 time/date；初期曾用构建时间建立启动墙钟下界以规避 TLS 证书问题，现已全面移除构建时间注入以保证镜像构建确定性，无有效 RTC 时系统从标准 Unix 纪元 0 启动，之后仍允许 `clock_settime`/NTP 校准。
 
 该候选实板启动后，`date` 从此前的 1970 修正为 `Tue Aug 11 12:57:15 UTC 2026`，随后
 `nslookup github.com` 成功。该结果证明 TLS 所需的时间和 resolver 前置条件已经补齐；它不把
