@@ -106,7 +106,7 @@ MYPLAT=axplat-loongarch64-ls2k1000
 SMP=2
 APP_FEATURES=ls2k1000
 BUS=mmio
-PLAT_CONFIG=crates/axplat-loongarch64-ls2k1000/axconfig.toml
+PLAT_CONFIG=platforms/axplat-loongarch64-ls2k1000/axconfig.toml
 ```
 
 输出为：
@@ -121,7 +121,7 @@ PLAT_CONFIG=crates/axplat-loongarch64-ls2k1000/axconfig.toml
 
 | 文件 | 职责 |
 | --- | --- |
-| `crates/axplat-loongarch64-ls2k1000/axconfig.toml` | 40 位高半地址、物理装载地址、MMIO、UART、CPU 数等常量 |
+| `platforms/axplat-loongarch64-ls2k1000/axconfig.toml` | 40 位高半地址、物理装载地址、MMIO、UART、CPU 数等常量 |
 | `src/boot.rs` | DMW、启动页表、MMU、主核/从核入口和高半跳转 |
 | `src/topology.rs` | U-Boot/UHI 参数、FDT、CPU 和 LIOINTC 拓扑 |
 | `src/mem.rs` | RAM、FDT 保留区、memreserve、`/reserved-memory` 和内核段发布 |

@@ -95,7 +95,7 @@ header。用户安装 `mkimage` 后，`make visionfive2` 才能完成 uImage 阶
 
 ### 3.1 PulseOS 的 QEMU RISC-V 平台
 
-`crates/axplat-riscv64-qemu-virt` 是最接近当前 PulseOS `axplat 0.3` 接口的实现，
+`platforms/axplat-riscv64-qemu-virt` 是最接近当前 PulseOS `axplat 0.3` 接口的实现，
 因此它是平台 crate 的直接骨架来源。可以复用的是：
 
 - `axplat` 的 console、memory、time、IRQ、power 接口组织方式；
@@ -220,7 +220,7 @@ PulseOS _start(a0 = boot hart, a1 = DTB physical address)
 因此按照后续要求，新建了：
 
 ```text
-crates/axplat-riscv64-visionfive2/
+platforms/axplat-riscv64-visionfive2/
 ```
 
 该 crate 基于当前 `axplat-riscv64-qemu-virt` 的接口形状修改，同时只吸收 TGOSKits 中
@@ -766,7 +766,7 @@ Starting logical CPU 3 on JH7110 hart 4: entry=..., stack=...
 
 ### 15.1 平台层
 
-`crates/axplat-riscv64-visionfive2/`：
+`platforms/axplat-riscv64-visionfive2/`：
 
 - `axconfig.toml`：板级地址、四核上限、8 GiB 早期 RAM 上界、4 MHz timer、SDIO1。
 - `boot.rs`：临时 Sv39 页表、主核/从核入口、早期 trap 和诊断字符。

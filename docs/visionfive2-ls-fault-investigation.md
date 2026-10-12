@@ -314,7 +314,7 @@ bootm <loadaddr> - <fdtcontroladdr>
 - <code>arceos/modules/axmm/src/aspace.rs:1963</code>：无 IPI 时的 TLB invalidation fallback。
 - <code>arceos/modules/axipi/src/lib.rs:351</code> 和 <code>:482</code>：多核目标集与全局
   shootdown 请求。
-- <code>crates/axplat-riscv64-visionfive2/src/mem.rs:50</code>：JH7110 cache-line flush 实现。
+- <code>platforms/axplat-riscv64-visionfive2/src/mem.rs:50</code>：JH7110 cache-line flush 实现。
 - <code>tmp.txt</code>：本次原始串口证据；其 ANSI 控制字符和多次启动边界需按第 2 节方法处理。
 
 本报告仅新增文档，不包含提交操作，也不会覆盖工作区中与本问题无关的已有修改。

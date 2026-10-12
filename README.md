@@ -32,8 +32,9 @@ PulseOS 的整体软件栈包含用户空间、Trap 异常分发、内核服务�
 │   ├── modules                # 内存、驱动、文件系统、网络和任务等组件
 │   ├── examples               # ArceOS 示例程序
 │   └── scripts                # ArceOS 构建辅助脚本
+├── platforms                  # 平台适配包
+│   └── axplat-*               # RISC-V、VisionFive 2 和 LoongArch 平台适配
 ├── crates                     # PulseOS 维护或定制的 Rust crate
-│   ├── axplat-*               # RISC-V、VisionFive 2 和 LoongArch 平台适配
 │   ├── axdriver-*、virtio-drivers # 块设备、网络和 VirtIO 驱动
 │   ├── axcpu、axpoll、axsched  # CPU、轮询和调度支持
 │   ├── memory_*、page_table_*  # 地址、页表和内存集合管理

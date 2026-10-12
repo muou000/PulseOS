@@ -69,7 +69,7 @@ PulseOS 不使用静态复制的 DTB，因为 MAC 地址、PHY phandle、PLIC co
 
 ### 3.2 平台层
 
-`crates/axplat-riscv64-visionfive2` 提供：
+`platforms/axplat-riscv64-visionfive2` 提供：
 
 - live FDT 解析和动态 RAM/reserved-memory 范围；
 - U74 hart 与 PLIC supervisor context 映射；

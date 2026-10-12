@@ -7,7 +7,7 @@
 - 这是一个基于 ArceOS 组件化内核构建的 PulseOS 仓库，目标是同时支持 RISC-V 64 和 LoongArch64。
 - 仓库的主要结构如下：
   - `arceos/`：ArceOS 内核主体、模块、示例、脚本和平台配置。
-  - `plat/`：本仓库补充的平台实现，目前主要是 `axplat-loongarch64-qemu-virt`。
+  - `platforms/`：本项目的平台实现，目前包括 RISC-V、VisionFive 2 和 LoongArch 平台适配。
   - `pulse_core/`：PulseOS 的核心库或基础封装代码。
   - `pulse_syscalls/`：系统调用相关实现与对外接口。
   - `rootfs/`：根文件系统内容与覆盖层，参与磁盘镜像生成。
@@ -20,7 +20,7 @@
 
 ## 编译方式
 
-- 统一使用 `make test 2>&1 | tail -30` 作为编译入口,除非必要情况下，不要关闭日志。
+- 统一使用 `make rv 2>&1 | tail -30` 作为编译入口,除非必要情况下，不要关闭日志。
 - 不要自行替换成其他构建命令，除非任务明确要求。
 - 若需要清理构建产物，优先使用 `make clean`。
 

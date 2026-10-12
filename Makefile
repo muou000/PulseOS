@@ -18,13 +18,13 @@ LOG ?= info
 
 QPERF_RUSTFLAGS := -C debuginfo=2 -C force-frame-pointers=yes -C strip=none
 
-VF2_PLATFORM_CONFIG := $(A)/crates/axplat-riscv64-visionfive2/axconfig.toml
+VF2_PLATFORM_CONFIG := $(A)/platforms/axplat-riscv64-visionfive2/axconfig.toml
 VF2_IP ?= 192.168.137.2
 VF2_GW ?= 192.168.137.1
 VF2_BUILD_EPOCH ?= $(shell date +%s)
-QEMU_RV_PLATFORM_CONFIG := $(A)/crates/axplat-riscv64-qemu-virt/axconfig.toml
-QEMU_LA_PLATFORM_CONFIG := $(A)/crates/axplat-loongarch64-qemu-virt/axconfig.toml
-LS2K1000_PLATFORM_CONFIG := $(A)/crates/axplat-loongarch64-ls2k1000/axconfig.toml
+QEMU_RV_PLATFORM_CONFIG := $(A)/platforms/axplat-riscv64-qemu-virt/axconfig.toml
+QEMU_LA_PLATFORM_CONFIG := $(A)/platforms/axplat-loongarch64-qemu-virt/axconfig.toml
+LS2K1000_PLATFORM_CONFIG := $(A)/platforms/axplat-loongarch64-ls2k1000/axconfig.toml
 
 .DEFAULT_GOAL := rv
 
@@ -113,4 +113,4 @@ qperf:
 		fi; \
 	done
 
-.PHONY: rv la run img vf2 ls2k1000 qperf
+.PHONY: rv la run img vf2 ls2k1000 qperf test

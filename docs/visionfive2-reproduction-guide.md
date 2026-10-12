@@ -66,7 +66,7 @@ rootfs 哈希只标识写卡前的主机基础镜像。板端修改 `/etc/resolv
 `git add -A`，因为当前工作区还有与 VF2 无关的改动。至少确认以下类别已经进入目标快照：
 
 - 根 `Cargo.toml`、`Cargo.lock`、`Makefile` 和 VisionFive 2 feature；
-- `crates/axplat-riscv64-visionfive2/`；
+- `platforms/axplat-riscv64-visionfive2/`；
 - `crates/axdriver_net/src/starfive_jh7110/`；
 - `arceos/modules/axdriver/src/starfive_jh7110.rs` 及驱动注册；
 - `axnet`/`smoltcp` 的物理接口、ICMP、过滤和 `getsockname` 修复；
