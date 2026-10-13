@@ -39,7 +39,7 @@ pub use descriptor::sys_sync;
 pub(crate) use descriptor::{
     flush_filesystems_for_shutdown, sys_fdatasync, sys_fsync, sys_getdents64, sys_lseek, sys_pipe2,
 };
-#[cfg(feature = "qperf-trace")]
+#[cfg(any(feature = "qperf-trace", feature = "bpf-trace"))]
 use markers::OutputMarkerScanner;
 pub(crate) use readiness::*;
 pub(crate) use scalar::*;

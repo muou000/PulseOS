@@ -1,6 +1,7 @@
 use alloc::{collections::VecDeque, sync::Arc};
 #[cfg(any(
     feature = "qperf-trace",
+    feature = "bpf-trace",
     all(
         feature = "smp",
         feature = "sched-load-balance",
@@ -8,10 +9,15 @@ use alloc::{collections::VecDeque, sync::Arc};
     )
 ))]
 use core::sync::atomic::AtomicUsize;
-#[cfg(any(feature = "smp", feature = "qperf-trace"))]
+#[cfg(any(feature = "smp", feature = "qperf-trace", feature = "bpf-trace"))]
 use core::sync::atomic::Ordering;
 #[cfg(feature = "smp")]
 use core::sync::atomic::{AtomicBool, AtomicPtr};
+
+#[cfg(feature = "qperf-trace")]
+type TraceEnqueueReason = crate::qperf_trace::EnqueueReason;
+#[cfg(all(feature = "bpf-trace", not(feature = "qperf-trace")))]
+type TraceEnqueueReason = crate::bpf_trace::EnqueueReason;
 
 use axhal::percpu::this_cpu_id;
 use axsched::{BaseScheduler, SchedEnqueueReason};
@@ -449,6 +455,7 @@ pub(crate) struct AxRunQueue {
     /// Approximate number of ready tasks, used for RR placement and qperf tracing.
     #[cfg(any(
         feature = "qperf-trace",
+        feature = "bpf-trace",
         all(
             feature = "smp",
             feature = "sched-load-balance",
@@ -558,8 +565,8 @@ impl<G: BaseGuard> AxRunQueueRef<'_, G> {
             let mut scheduler = self.inner.scheduler.lock();
             self.inner.account_enqueue(
                 &task,
-                #[cfg(feature = "qperf-trace")]
-                crate::qperf_trace::EnqueueReason::Spawn,
+                #[cfg(any(feature = "qperf-trace", feature = "bpf-trace"))]
+                TraceEnqueueReason::Spawn,
             );
             let now_ns = axhal::time::monotonic_time_nanos();
             scheduler.enqueue_task(task.clone(), SchedEnqueueReason::Spawn, now_ns);
@@ -788,6 +795,8 @@ impl<G: BaseGuard> CurrentRunQueueRef<'_, G> {
             curr.set_state(TaskState::Exited);
             #[cfg(feature = "qperf-trace")]
             crate::qperf_trace::task_exit(curr);
+            #[cfg(feature = "bpf-trace")]
+            crate::bpf_trace::task_exit(curr);
 
             // Notify the joiner task.
             curr.notify_exit(exit_code);
@@ -828,7 +837,7 @@ impl<G: BaseGuard> CurrentRunQueueRef<'_, G> {
         #[cfg(feature = "preempt")]
         assert!(curr.can_preempt(2));
 
-        #[cfg(feature = "qperf-trace")]
+        #[cfg(any(feature = "qperf-trace", feature = "bpf-trace"))]
         let qperf_sequence = curr.next_qperf_block_sequence();
 
         // Mark the task as blocked, this has to be done before adding it to the wait queue
@@ -839,6 +848,8 @@ impl<G: BaseGuard> CurrentRunQueueRef<'_, G> {
         wq_guard.push_back(curr.clone());
         #[cfg(feature = "qperf-trace")]
         crate::qperf_trace::task_block(&curr, qperf_sequence, _context);
+        #[cfg(feature = "bpf-trace")]
+        crate::bpf_trace::task_block(&curr, qperf_sequence, _context);
         // Drop the lock of wait queue explictly.
         drop(wq_guard);
 
@@ -865,12 +876,14 @@ impl<G: BaseGuard> CurrentRunQueueRef<'_, G> {
         #[cfg(feature = "preempt")]
         assert!(curr.can_preempt(2));
 
-        #[cfg(feature = "qperf-trace")]
+        #[cfg(any(feature = "qperf-trace", feature = "bpf-trace"))]
         let qperf_sequence = curr.next_qperf_block_sequence();
         curr.set_state(TaskState::Blocked);
         *woke = false;
         #[cfg(feature = "qperf-trace")]
         crate::qperf_trace::task_block(&curr, qperf_sequence, _context);
+        #[cfg(feature = "bpf-trace")]
+        crate::bpf_trace::task_block(&curr, qperf_sequence, _context);
         drop(woke);
 
         trace!("task block woke: {}", curr.id_name());
@@ -883,7 +896,7 @@ impl<G: BaseGuard> CurrentRunQueueRef<'_, G> {
     /// and that proper condition checks have been performed.
     pub(crate) fn resched_blocked(
         &mut self,
-        #[cfg(feature = "qperf-trace")] qperf_sequence: u64,
+        #[cfg(any(feature = "qperf-trace", feature = "bpf-trace"))] qperf_sequence: u64,
         _context: WaitContext,
     ) {
         let curr = self.current_task.clone();
@@ -894,6 +907,10 @@ impl<G: BaseGuard> CurrentRunQueueRef<'_, G> {
         #[cfg(feature = "qperf-trace")]
         if curr.state() == TaskState::Blocked {
             crate::qperf_trace::task_block(&curr, qperf_sequence, _context);
+        }
+        #[cfg(feature = "bpf-trace")]
+        if curr.state() == TaskState::Blocked {
+            crate::bpf_trace::task_block(&curr, qperf_sequence, _context);
         }
         trace!("task block multi: {}", curr.id_name());
         self.resched();
@@ -908,22 +925,30 @@ impl<G: BaseGuard> CurrentRunQueueRef<'_, G> {
 
         let now = axhal::time::monotonic_time();
         if now < deadline {
-            #[cfg(feature = "qperf-trace")]
+            #[cfg(any(feature = "qperf-trace", feature = "bpf-trace"))]
             let qperf_sequence = curr.next_qperf_block_sequence();
             let _keep_alive = curr.clone();
             crate::timers::set_alarm_wakeup(deadline, curr.clone());
             curr.set_state(TaskState::Blocked);
+            #[cfg(any(feature = "qperf-trace", feature = "bpf-trace"))]
+            let sleep_ctx = WaitContext::new(|| {
+                (
+                    WaitReason::Sleep,
+                    deadline.as_nanos().min(u64::MAX as u128) as u64,
+                    0,
+                )
+            });
             #[cfg(feature = "qperf-trace")]
             crate::qperf_trace::task_block(
                 &curr,
                 qperf_sequence,
-                WaitContext::new(|| {
-                    (
-                        WaitReason::Sleep,
-                        deadline.as_nanos().min(u64::MAX as u128) as u64,
-                        0,
-                    )
-                }),
+                sleep_ctx,
+            );
+            #[cfg(feature = "bpf-trace")]
+            crate::bpf_trace::task_block(
+                &curr,
+                qperf_sequence,
+                sleep_ctx,
             );
             self.resched();
             curr.timer_ticket_expired();
@@ -1013,7 +1038,7 @@ impl AxRunQueue {
         gc_task.set_cpumask(AxCpuMask::one_shot(cpu_id));
 
         let mut scheduler = Scheduler::new();
-        #[cfg(feature = "qperf-trace")]
+        #[cfg(any(feature = "qperf-trace", feature = "bpf-trace"))]
         let traced_gc_task = gc_task.clone();
         #[cfg(all(
             feature = "smp",
@@ -1040,6 +1065,7 @@ impl AxRunQueue {
             scheduler: SpinRaw::new(scheduler),
             #[cfg(any(
                 feature = "qperf-trace",
+                feature = "bpf-trace",
                 all(
                     feature = "smp",
                     feature = "sched-load-balance",
@@ -1098,6 +1124,14 @@ impl AxRunQueue {
             cpu_id,
             1,
             crate::qperf_trace::EnqueueReason::Spawn,
+        );
+        #[cfg(feature = "bpf-trace")]
+        crate::bpf_trace::task_enqueue(
+            &traced_gc_task,
+            this_cpu_id(),
+            cpu_id,
+            1,
+            crate::bpf_trace::EnqueueReason::Spawn as u32,
         );
         run_queue
     }
@@ -1198,10 +1232,11 @@ impl AxRunQueue {
     fn account_enqueue(
         &self,
         task: &AxTaskRef,
-        #[cfg(feature = "qperf-trace")] reason: crate::qperf_trace::EnqueueReason,
+        #[cfg(any(feature = "qperf-trace", feature = "bpf-trace"))] reason: TraceEnqueueReason,
     ) {
         #[cfg(any(
             feature = "qperf-trace",
+            feature = "bpf-trace",
             all(
                 feature = "smp",
                 feature = "sched-load-balance",
@@ -1246,8 +1281,18 @@ impl AxRunQueue {
         #[cfg(feature = "qperf-trace")]
         crate::qperf_trace::task_enqueue(task, this_cpu_id(), self.cpu_id, _queue_depth, reason);
 
+        #[cfg(feature = "bpf-trace")]
+        crate::bpf_trace::task_enqueue(
+            task,
+            this_cpu_id(),
+            self.cpu_id,
+            _queue_depth,
+            reason as u32,
+        );
+
         #[cfg(not(any(
             feature = "qperf-trace",
+            feature = "bpf-trace",
             all(
                 feature = "smp",
                 feature = "sched-load-balance",
@@ -1261,6 +1306,7 @@ impl AxRunQueue {
     fn account_dequeue(&self, task: &AxTaskRef) {
         #[cfg(any(
             feature = "qperf-trace",
+            feature = "bpf-trace",
             all(
                 feature = "smp",
                 feature = "sched-load-balance",
@@ -1396,8 +1442,8 @@ impl AxRunQueue {
                 debug_assert!(task.cpumask().get(target_cpu));
                 self.account_enqueue(
                     &task,
-                    #[cfg(feature = "qperf-trace")]
-                    crate::qperf_trace::EnqueueReason::WorkSteal,
+                    #[cfg(any(feature = "qperf-trace", feature = "bpf-trace"))]
+                    TraceEnqueueReason::WorkSteal,
                 );
                 let now_ns = axhal::time::monotonic_time_nanos();
                 scheduler.enqueue_task(task, SchedEnqueueReason::Migration, now_ns);
@@ -1432,6 +1478,13 @@ impl AxRunQueue {
             if current_state == TaskState::Blocked {
                 crate::qperf_trace::task_wake(&task, _wake_context);
             }
+            #[cfg(feature = "bpf-trace")]
+            if current_state == TaskState::Blocked {
+                let waker_task_id = crate::current_may_uninit()
+                    .map(|c| c.id().as_u64())
+                    .unwrap_or(0);
+                crate::bpf_trace::task_wake(&task, task.qperf_block_sequence(), waker_task_id, _wake_context);
+            }
             #[cfg(feature = "smp")]
             let waking_current_task = current_state == TaskState::Blocked
                 && self.cpu_id == this_cpu_id()
@@ -1459,19 +1512,19 @@ impl AxRunQueue {
             } else {
                 SchedEnqueueReason::Yield
             };
-            #[cfg(feature = "qperf-trace")]
+            #[cfg(any(feature = "qperf-trace", feature = "bpf-trace"))]
             let enqueue_reason = if current_state == TaskState::Blocked {
-                crate::qperf_trace::EnqueueReason::Wake
+                TraceEnqueueReason::Wake
             } else if preempt {
-                crate::qperf_trace::EnqueueReason::Preempt
+                TraceEnqueueReason::Preempt
             } else {
-                crate::qperf_trace::EnqueueReason::Yield
+                TraceEnqueueReason::Yield
             };
             let scheduler_preempts = {
                 let mut scheduler = self.scheduler.lock();
                 self.account_enqueue(
                     &task,
-                    #[cfg(feature = "qperf-trace")]
+                    #[cfg(any(feature = "qperf-trace", feature = "bpf-trace"))]
                     enqueue_reason,
                 );
                 let now_ns = axhal::time::monotonic_time_nanos();
@@ -1579,6 +1632,8 @@ impl AxRunQueue {
 
             #[cfg(feature = "qperf-trace")]
             crate::qperf_trace::sched_switch(&prev_task, &next_task, prev_task.state() as u8);
+            #[cfg(feature = "bpf-trace")]
+            crate::bpf_trace::sched_switch(&prev_task, &next_task, prev_task.state() as u8);
             #[cfg(feature = "irq")]
             crate::timers::reprogram_timer_for_task(&next_task);
             CurrentTask::set_current(prev_task, next_task);
@@ -1639,8 +1694,8 @@ pub(crate) fn migrate_entry(migrated_task: AxTaskRef) {
         let mut scheduler = run_queue.inner.scheduler.lock();
         run_queue.inner.account_enqueue(
             &migrated_task,
-            #[cfg(feature = "qperf-trace")]
-            crate::qperf_trace::EnqueueReason::AffinityMigration,
+            #[cfg(any(feature = "qperf-trace", feature = "bpf-trace"))]
+            TraceEnqueueReason::AffinityMigration,
         );
         scheduler.enqueue_task(
             migrated_task,
@@ -1667,8 +1722,8 @@ pub(crate) unsafe fn clear_prev_task_on_cpu() {
             let mut scheduler = run_queue.scheduler.lock();
             run_queue.account_enqueue(
                 &task,
-                #[cfg(feature = "qperf-trace")]
-                crate::qperf_trace::EnqueueReason::DeferredWake,
+                #[cfg(any(feature = "qperf-trace", feature = "bpf-trace"))]
+                TraceEnqueueReason::DeferredWake,
             );
             scheduler.enqueue_task(
                 task,

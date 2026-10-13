@@ -56,9 +56,9 @@ pub struct TaskInner {
 
     entry: SpinNoIrq<Option<Box<dyn FnOnce() + Send>>>,
     state: AtomicU8,
-    #[cfg(feature = "qperf-trace")]
+    #[cfg(any(feature = "qperf-trace", feature = "bpf-trace"))]
     qperf_block_sequence: AtomicU64,
-    #[cfg(feature = "qperf-trace")]
+    #[cfg(any(feature = "qperf-trace", feature = "bpf-trace"))]
     qperf_pending_wait_context: SpinNoIrq<Option<crate::wait_queue::WaitContext>>,
 
     /// CPU affinity mask.
@@ -166,6 +166,8 @@ impl TaskInner {
         }
         #[cfg(feature = "qperf-trace")]
         crate::qperf_trace::task_metadata(t.id().as_u64(), 0, 0, t.name().as_bytes());
+        #[cfg(feature = "bpf-trace")]
+        crate::bpf_trace::task_metadata(t.id().as_u64(), 0, 0, t.name().as_bytes());
         Ok(t)
     }
 
@@ -174,27 +176,27 @@ impl TaskInner {
         self.id
     }
 
-    #[cfg(feature = "qperf-trace")]
+    #[cfg(any(feature = "qperf-trace", feature = "bpf-trace"))]
     pub(crate) fn next_qperf_block_sequence(&self) -> u64 {
         self.qperf_block_sequence.fetch_add(1, Ordering::Relaxed) + 1
     }
 
-    #[cfg(feature = "qperf-trace")]
+    #[cfg(any(feature = "qperf-trace", feature = "bpf-trace"))]
     pub(crate) fn qperf_block_sequence(&self) -> u64 {
         self.qperf_block_sequence.load(Ordering::Relaxed)
     }
 
-    #[cfg(feature = "qperf-trace")]
+    #[cfg(any(feature = "qperf-trace", feature = "bpf-trace"))]
     pub(crate) fn clear_qperf_pending_wait_context(&self) {
         *self.qperf_pending_wait_context.lock() = None;
     }
 
-    #[cfg(feature = "qperf-trace")]
+    #[cfg(any(feature = "qperf-trace", feature = "bpf-trace"))]
     pub(crate) fn set_qperf_pending_wait_context(&self, context: crate::wait_queue::WaitContext) {
         *self.qperf_pending_wait_context.lock() = Some(context);
     }
 
-    #[cfg(feature = "qperf-trace")]
+    #[cfg(any(feature = "qperf-trace", feature = "bpf-trace"))]
     pub(crate) fn take_qperf_pending_wait_context(&self) -> Option<crate::wait_queue::WaitContext> {
         self.qperf_pending_wait_context.lock().take()
     }
@@ -346,9 +348,9 @@ impl TaskInner {
             is_init: false,
             entry: SpinNoIrq::new(None),
             state: AtomicU8::new(TaskState::Ready as u8),
-            #[cfg(feature = "qperf-trace")]
+            #[cfg(any(feature = "qperf-trace", feature = "bpf-trace"))]
             qperf_block_sequence: AtomicU64::new(0),
-            #[cfg(feature = "qperf-trace")]
+            #[cfg(any(feature = "qperf-trace", feature = "bpf-trace"))]
             qperf_pending_wait_context: SpinNoIrq::new(None),
             // By default, the task is allowed to run on all CPUs.
             cpumask: SpinNoIrq::new(cpumask),
@@ -396,6 +398,8 @@ impl TaskInner {
         }
         #[cfg(feature = "qperf-trace")]
         crate::qperf_trace::task_metadata(t.id().as_u64(), 0, 0, t.name().as_bytes());
+        #[cfg(feature = "bpf-trace")]
+        crate::bpf_trace::task_metadata(t.id().as_u64(), 0, 0, t.name().as_bytes());
         t
     }
 

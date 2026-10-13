@@ -12,11 +12,13 @@ default = ["irq", "ext4"]
 irq = ["axtask/irq"]
 ext4 = ["axfs/ext4"]
 qperf-trace = ["axtask/qperf-trace", "axfs/qperf-trace"]
+bpf-trace = ["axtask/bpf-trace", "pulse_core/bpf-trace"]
 mapping-lifecycle-test = ["axfs/mapping-lifecycle-test"]
 
 [dependencies]
 axerrno.workspace = true
 linux-raw-sys = { workspace = true, features = ["system", "prctl", "mempolicy"] }
+pulse_bpf_schema = { workspace = true }
 
 [target.'cfg(target_os = "none")'.dependencies]
 axalloc.workspace = true

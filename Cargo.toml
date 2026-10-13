@@ -10,6 +10,7 @@ members = [
     "pulse_core",
     "pulse_syscalls",
     "crates/starry-vdso",
+    "crates/pulse_bpf_schema",
     "modules/axalloc",
     "modules/axconfig",
     "modules/axcpu",
@@ -50,6 +51,7 @@ categories = ["os", "no-std"]
 [workspace.dependencies]
 pulse_core = { path = "pulse_core" }
 pulse_syscalls = { path = "pulse_syscalls" }
+pulse_bpf_schema = { path = "crates/pulse_bpf_schema" }
 
 axfeat = { path = "api/axfeat", features = [
     "alloc-slab",
@@ -225,6 +227,12 @@ qperf-trace = [
     "axtask/qperf-trace",
     "pulse_core/qperf-trace",
     "pulse_syscalls/qperf-trace",
+]
+bpf-trace = [
+    "axfeat/bpf-trace",
+    "axtask/bpf-trace",
+    "pulse_core/bpf-trace",
+    "pulse_syscalls/bpf-trace",
 ]
 
 [dependencies]

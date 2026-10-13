@@ -839,6 +839,7 @@ dependencies = [
  "log",
  "memory_addr",
  "percpu",
+ "pulse_bpf_schema",
  "rand 0.9.5",
  "timer_list",
 ]
@@ -2033,6 +2034,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "pulse_bpf_schema"
+version = "0.1.0"
+
+[[package]]
 name = "pulse_core"
 version = "0.1.0"
 dependencies = [
@@ -2087,6 +2092,7 @@ dependencies = [
  "linkme",
  "linux-raw-sys",
  "memory_addr",
+ "pulse_bpf_schema",
  "pulse_core",
  "rand_core 0.10.1",
  "rand_pcg",
