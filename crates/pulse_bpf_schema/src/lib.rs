@@ -418,3 +418,214 @@ pub fn is_deferred_id(id: u32) -> bool {
 pub fn is_supported_id(id: u32) -> bool {
     TracepointId::from_u32(id).is_ok()
 }
+
+// -----------------------------------------------------------------------------
+// Bounded Event Record and Lock-Free Handoff Buffer
+// -----------------------------------------------------------------------------
+
+/// Maximum serialized context size across all supported tracepoints (TaskWakeContext is 80 bytes).
+pub const MAX_CONTEXT_SIZE: usize = 80;
+
+/// Bounded record representing a captured tracepoint event.
+#[repr(C, align(8))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct EventRecord {
+    pub id: TracepointId,
+    pub len: u32,
+    pub data: [u8; MAX_CONTEXT_SIZE],
+}
+
+impl EventRecord {
+    pub const fn empty() -> Self {
+        Self {
+            id: TracepointId::TaskMetadata,
+            len: 0,
+            data: [0u8; MAX_CONTEXT_SIZE],
+        }
+    }
+
+    pub fn new(id: TracepointId, slice: &[u8]) -> Self {
+        let mut rec = Self::empty();
+        rec.id = id;
+        let copy_len = slice.len().min(MAX_CONTEXT_SIZE);
+        rec.len = copy_len as u32;
+        rec.data[..copy_len].copy_from_slice(&slice[..copy_len]);
+        rec
+    }
+
+    #[inline]
+    pub fn as_bytes(&self) -> &[u8] {
+        &self.data[..self.len as usize]
+    }
+}
+
+/// Reason for dropping an event during nonblocking handoff.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum QueueDropReason {
+    /// Bounded queue was saturated (overflow).
+    Full,
+    /// Recursive or re-entrant tracepoint invocation detected on the same execution context.
+    Recursive,
+}
+
+/// Drop and enqueue accounting statistics for bounded tracepoint delivery.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct DropStats {
+    /// Count of events dropped because the buffer was full.
+    pub dropped_full: u64,
+    /// Count of events dropped because of re-entrant tracepoint execution.
+    pub dropped_recursive: u64,
+    /// Total count of events successfully enqueued.
+    pub total_enqueued: u64,
+}
+
+/// Bounded, allocation-free, lock-free handoff queue for critical tracepoint paths.
+pub struct BoundedTraceQueue<const CAP: usize> {
+    head: core::sync::atomic::AtomicUsize,
+    tail: core::sync::atomic::AtomicUsize,
+    in_trace: core::sync::atomic::AtomicBool,
+    dropped_full: core::sync::atomic::AtomicU64,
+    dropped_recursive: core::sync::atomic::AtomicU64,
+    total_enqueued: core::sync::atomic::AtomicU64,
+    slots: [core::cell::UnsafeCell<EventRecord>; CAP],
+}
+
+unsafe impl<const CAP: usize> Sync for BoundedTraceQueue<CAP> {}
+
+impl<const CAP: usize> BoundedTraceQueue<CAP> {
+    pub const fn new() -> Self {
+        Self {
+            head: core::sync::atomic::AtomicUsize::new(0),
+            tail: core::sync::atomic::AtomicUsize::new(0),
+            in_trace: core::sync::atomic::AtomicBool::new(false),
+            dropped_full: core::sync::atomic::AtomicU64::new(0),
+            dropped_recursive: core::sync::atomic::AtomicU64::new(0),
+            total_enqueued: core::sync::atomic::AtomicU64::new(0),
+            slots: [const { core::cell::UnsafeCell::new(EventRecord::empty()) }; CAP],
+        }
+    }
+
+    /// Enqueue an event in an allocation-free, nonblocking, non-recursive manner.
+    #[inline]
+    pub fn enqueue_bytes(&self, id: TracepointId, slice: &[u8]) -> Result<(), QueueDropReason> {
+        // Reentrancy guard: strictly bounded and non-recursive
+        if self
+            .in_trace
+            .compare_exchange(
+                false,
+                true,
+                core::sync::atomic::Ordering::Acquire,
+                core::sync::atomic::Ordering::Relaxed,
+            )
+            .is_err()
+        {
+            self.dropped_recursive
+                .fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+            return Err(QueueDropReason::Recursive);
+        }
+
+        let head = self.head.load(core::sync::atomic::Ordering::Relaxed);
+        let tail = self.tail.load(core::sync::atomic::Ordering::Acquire);
+
+        let res = if head.wrapping_sub(tail) >= CAP {
+            self.dropped_full
+                .fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+            Err(QueueDropReason::Full)
+        } else {
+            let copy_len = slice.len().min(MAX_CONTEXT_SIZE);
+            let mask = CAP - 1;
+            let slot = &self.slots[head & mask];
+            let record = unsafe { &mut *slot.get() };
+            record.id = id;
+            record.len = copy_len as u32;
+            record.data[..copy_len].copy_from_slice(&slice[..copy_len]);
+            self.head
+                .store(head.wrapping_add(1), core::sync::atomic::Ordering::Release);
+            self.total_enqueued
+                .fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+            Ok(())
+        };
+
+        self.in_trace
+            .store(false, core::sync::atomic::Ordering::Release);
+        res
+    }
+
+    /// Drain up to `max_count` events, invoking `consumer` for each.
+    pub fn drain<F: FnMut(TracepointId, &[u8])>(&self, max_count: usize, mut consumer: F) -> usize {
+        let mut drained = 0;
+        let mut tail = self.tail.load(core::sync::atomic::Ordering::Relaxed);
+        let head = self.head.load(core::sync::atomic::Ordering::Acquire);
+        let mask = CAP - 1;
+
+        while tail != head && drained < max_count {
+            let slot = &self.slots[tail & mask];
+            let record = unsafe { &*slot.get() };
+            consumer(record.id, record.as_bytes());
+            tail = tail.wrapping_add(1);
+            drained += 1;
+        }
+
+        if drained > 0 {
+            self.tail
+                .store(tail, core::sync::atomic::Ordering::Release);
+        }
+        drained
+    }
+
+    /// Query drop and enqueue statistics.
+    pub fn drop_stats(&self) -> DropStats {
+        DropStats {
+            dropped_full: self.dropped_full.load(core::sync::atomic::Ordering::Relaxed),
+            dropped_recursive: self
+                .dropped_recursive
+                .load(core::sync::atomic::Ordering::Relaxed),
+            total_enqueued: self
+                .total_enqueued
+                .load(core::sync::atomic::Ordering::Relaxed),
+        }
+    }
+
+    /// Reset drop statistics.
+    pub fn reset_drop_stats(&self) {
+        self.dropped_full
+            .store(0, core::sync::atomic::Ordering::Relaxed);
+        self.dropped_recursive
+            .store(0, core::sync::atomic::Ordering::Relaxed);
+        self.total_enqueued
+            .store(0, core::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Check if reentrancy flag is currently set (for testing / diagnostics).
+    #[doc(hidden)]
+    pub fn is_in_trace(&self) -> bool {
+        self.in_trace.load(core::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Simulate setting the reentrancy flag (for testing).
+    #[doc(hidden)]
+    pub fn set_in_trace_for_test(&self, val: bool) {
+        self.in_trace
+            .store(val, core::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+// -----------------------------------------------------------------------------
+// Static Assertions for Critical Path Guarantees
+// -----------------------------------------------------------------------------
+
+const _: () = {
+    assert!(core::mem::size_of::<ContextCommon>() == 40);
+    assert!(core::mem::align_of::<ContextCommon>() == 8);
+
+    assert!(core::mem::size_of::<TaskMetadataContext>() <= MAX_CONTEXT_SIZE);
+    assert!(core::mem::size_of::<SchedSwitchContext>() <= MAX_CONTEXT_SIZE);
+    assert!(core::mem::size_of::<TaskBlockContext>() <= MAX_CONTEXT_SIZE);
+    assert!(core::mem::size_of::<TaskWakeContext>() <= MAX_CONTEXT_SIZE);
+    assert!(core::mem::size_of::<TaskExitContext>() <= MAX_CONTEXT_SIZE);
+    assert!(core::mem::size_of::<TaskEnqueueContext>() <= MAX_CONTEXT_SIZE);
+    assert!(core::mem::size_of::<PhaseMarkerContext>() <= MAX_CONTEXT_SIZE);
+
+    assert!(core::mem::size_of::<EventRecord>() == 88);
+    assert!(core::mem::align_of::<EventRecord>() == 8);
+};

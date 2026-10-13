@@ -60,5 +60,50 @@ mod tests {
         assert_eq!(phase_field.size, 16);
         assert_eq!(phase_field.field_type, FieldType::ByteArray(16));
     }
+
+    #[test]
+    fn tracepoint_static_size_and_alignment_guarantees() {
+        use core::mem::{align_of, size_of};
+
+        assert_eq!(align_of::<ContextCommon>(), 8);
+        assert_eq!(size_of::<ContextCommon>(), 40);
+
+        assert_eq!(align_of::<EventRecord>(), 8);
+        assert_eq!(size_of::<EventRecord>(), 88);
+
+        // Every supported context type must fit within MAX_CONTEXT_SIZE (80 bytes)
+        assert!(size_of::<TaskMetadataContext>() <= MAX_CONTEXT_SIZE);
+        assert!(size_of::<SchedSwitchContext>() <= MAX_CONTEXT_SIZE);
+        assert!(size_of::<TaskBlockContext>() <= MAX_CONTEXT_SIZE);
+        assert!(size_of::<TaskWakeContext>() <= MAX_CONTEXT_SIZE);
+        assert!(size_of::<TaskExitContext>() <= MAX_CONTEXT_SIZE);
+        assert!(size_of::<TaskEnqueueContext>() <= MAX_CONTEXT_SIZE);
+        assert!(size_of::<PhaseMarkerContext>() <= MAX_CONTEXT_SIZE);
+    }
+
+    #[test]
+    fn tracepoint_event_record_roundtrip() {
+        let ctx = SchedSwitchContext {
+            common: ContextCommon::new(TracepointId::SchedSwitch, 123456789, 2, 100, 101, 10),
+            prev_task_id: 10,
+            next_task_id: 20,
+            prev_state: 1,
+            prev_prio: 120,
+            next_prio: 120,
+            _pad: 0,
+        };
+
+        let raw_bytes = unsafe {
+            core::slice::from_raw_parts(
+                &ctx as *const SchedSwitchContext as *const u8,
+                core::mem::size_of::<SchedSwitchContext>(),
+            )
+        };
+
+        let rec = EventRecord::new(TracepointId::SchedSwitch, raw_bytes);
+        assert_eq!(rec.id, TracepointId::SchedSwitch);
+        assert_eq!(rec.len as usize, core::mem::size_of::<SchedSwitchContext>());
+        assert_eq!(rec.as_bytes(), raw_bytes);
+    }
 }
 

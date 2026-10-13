@@ -170,3 +170,134 @@ fn test_context_layout_and_offsets() {
     assert_eq!(offset_of!(PhaseMarkerContext, phase_len), 44);
     assert_eq!(offset_of!(PhaseMarkerContext, phase_name), 48);
 }
+
+#[test]
+fn test_event_record_layout_and_bounds() {
+    use core::mem::{align_of, size_of};
+    use pulse_bpf_schema::*;
+
+    assert_eq!(align_of::<EventRecord>(), 8);
+    assert_eq!(size_of::<EventRecord>(), 88);
+
+    // Verify all 7 context types strictly fit in MAX_CONTEXT_SIZE (80 bytes)
+    assert!(size_of::<TaskMetadataContext>() <= MAX_CONTEXT_SIZE);
+    assert!(size_of::<SchedSwitchContext>() <= MAX_CONTEXT_SIZE);
+    assert!(size_of::<TaskBlockContext>() <= MAX_CONTEXT_SIZE);
+    assert!(size_of::<TaskWakeContext>() <= MAX_CONTEXT_SIZE);
+    assert!(size_of::<TaskExitContext>() <= MAX_CONTEXT_SIZE);
+    assert!(size_of::<TaskEnqueueContext>() <= MAX_CONTEXT_SIZE);
+    assert!(size_of::<PhaseMarkerContext>() <= MAX_CONTEXT_SIZE);
+
+    let dummy_data = [42u8; 16];
+    let rec = EventRecord::new(TracepointId::SchedSwitch, &dummy_data);
+    assert_eq!(rec.id, TracepointId::SchedSwitch);
+    assert_eq!(rec.len, 16);
+    assert_eq!(rec.as_bytes(), &dummy_data);
+}
+
+#[test]
+fn test_bounded_queue_fifo_and_drain() {
+    use pulse_bpf_schema::*;
+
+    let queue = BoundedTraceQueue::<16>::new();
+    assert_eq!(queue.drop_stats(), DropStats::default());
+
+    for i in 0..10u8 {
+        let payload = [i, i * 2, i * 3];
+        assert_eq!(queue.enqueue_bytes(TracepointId::TaskBlock, &payload), Ok(()));
+    }
+
+    let stats = queue.drop_stats();
+    assert_eq!(stats.total_enqueued, 10);
+    assert_eq!(stats.dropped_full, 0);
+    assert_eq!(stats.dropped_recursive, 0);
+
+    let mut received = Vec::new();
+    let count = queue.drain(100, |id, data| {
+        assert_eq!(id, TracepointId::TaskBlock);
+        received.push(data.to_vec());
+    });
+
+    assert_eq!(count, 10);
+    assert_eq!(received.len(), 10);
+    for (i, item) in received.iter().enumerate() {
+        let expected = vec![i as u8, (i as u8) * 2, (i as u8) * 3];
+        assert_eq!(item, &expected);
+    }
+
+    // Queue is now empty
+    let count2 = queue.drain(10, |_, _| panic!("queue must be empty"));
+    assert_eq!(count2, 0);
+}
+
+#[test]
+fn test_bounded_queue_overflow_drop_accounting() {
+    use pulse_bpf_schema::*;
+
+    // Capacity 8
+    let queue = BoundedTraceQueue::<8>::new();
+
+    // Fill to capacity
+    for i in 0..8u8 {
+        assert_eq!(queue.enqueue_bytes(TracepointId::SchedSwitch, &[i]), Ok(()));
+    }
+    assert_eq!(queue.drop_stats().total_enqueued, 8);
+    assert_eq!(queue.drop_stats().dropped_full, 0);
+
+    // Enqueue 5 more: all must drop with QueueDropReason::Full
+    for _ in 0..5 {
+        assert_eq!(
+            queue.enqueue_bytes(TracepointId::SchedSwitch, &[99]),
+            Err(QueueDropReason::Full)
+        );
+    }
+
+    let stats = queue.drop_stats();
+    assert_eq!(stats.total_enqueued, 8);
+    assert_eq!(stats.dropped_full, 5);
+    assert_eq!(stats.dropped_recursive, 0);
+
+    // Drain the 8 existing events
+    let mut drained_count = 0;
+    queue.drain(10, |id, data| {
+        assert_eq!(id, TracepointId::SchedSwitch);
+        assert_eq!(data[0], drained_count as u8);
+        drained_count += 1;
+    });
+    assert_eq!(drained_count, 8);
+
+    // After draining, new events can be enqueued again
+    assert_eq!(queue.enqueue_bytes(TracepointId::SchedSwitch, &[100]), Ok(()));
+    assert_eq!(queue.drop_stats().total_enqueued, 9);
+    assert_eq!(queue.drop_stats().dropped_full, 5);
+}
+
+#[test]
+fn test_bounded_queue_reentrancy_rejection() {
+    use pulse_bpf_schema::*;
+
+    let queue = BoundedTraceQueue::<8>::new();
+    assert!(!queue.is_in_trace());
+
+    // Simulate being inside critical section by setting in_trace
+    queue.set_in_trace_for_test(true);
+    assert!(queue.is_in_trace());
+
+    // Reentrant call must fail with Recursive drop reason
+    let res = queue.enqueue_bytes(TracepointId::TaskWake, &[1, 2, 3]);
+    assert_eq!(res, Err(QueueDropReason::Recursive));
+
+    let stats = queue.drop_stats();
+    assert_eq!(stats.dropped_recursive, 1);
+    assert_eq!(stats.total_enqueued, 0);
+    assert_eq!(stats.dropped_full, 0);
+
+    // Unset in_trace
+    queue.set_in_trace_for_test(false);
+    assert_eq!(queue.enqueue_bytes(TracepointId::TaskWake, &[1, 2, 3]), Ok(()));
+    assert_eq!(queue.drop_stats().total_enqueued, 1);
+
+    // Test stats reset
+    queue.reset_drop_stats();
+    assert_eq!(queue.drop_stats(), DropStats::default());
+}
