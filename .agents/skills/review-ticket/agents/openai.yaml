@@ -1,6 +1,0 @@
-interface:
-  display_name: "Review Ticket"
-  short_description: "Audit PR goal alignment as strong tier and merge to main"
-policy:
-  allow_implicit_invocation: false
-

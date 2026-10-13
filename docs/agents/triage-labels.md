@@ -1,8 +1,6 @@
 # Triage Labels
 
-The skills speak in terms of canonical triage roles, model tiers, and PR/escalation workflow states. This file maps those roles to the label strings used in this repo's issue tracker.
-
-## Canonical triage roles
+The skills speak in terms of five canonical triage roles. This file maps those roles to the actual label strings used in this repo's issue tracker.
 
 | Label in mattpocock/skills | Label in our tracker | Meaning                                  |
 | -------------------------- | -------------------- | ---------------------------------------- |
@@ -12,29 +10,6 @@ The skills speak in terms of canonical triage roles, model tiers, and PR/escalat
 | `ready-for-human`          | `ready-for-human`    | Requires human implementation            |
 | `wontfix`                  | `wontfix`            | Will not be actioned                     |
 
-## Model tier labels
+When a skill mentions a role (e.g. "apply the AFK-ready triage label"), use the corresponding label string from this table.
 
-Carried on every issue and PR to indicate which model tier should claim it.
-
-| Label | Meaning |
-| ----- | ------- |
-| `model:strong` | Requires a strong-tier model (e.g. Claude Opus / Gemini Pro) for architecture, planning, goal alignment audit, replanning, or escalation resolution |
-| `model:weak`   | Handled by a weak-tier model (e.g. Flash / Sonnet) for implementation, TDD, routine code review, fixes, and drift checks |
-
-## PR workflow labels
-
-Used on pull requests to manage review handoffs between implementers and reviewers.
-
-| Label | Meaning |
-| ----- | ------- |
-| `needs-review` | PR implementation and routine self-review complete, drift check passed; ready for strong-tier goal audit via `/review-ticket` |
-| `needs-fix`    | PR review requested changes; ready for weak-tier fixes via `/implement` |
-
-## Escalation labels
-
-Used on escalation issues that block affected tickets until resolved.
-
-| Label | Meaning |
-| ----- | ------- |
-| `needs-replan` | An anchor or plan step is invalidated by code drift; blocks affected tickets until replanned via `/replan` |
-| `needs-strong` | Implementer is blocked or verification failed repeatedly (3 attempts); blocks current ticket until resolved via `/replan` |
+Edit the right-hand column to match whatever vocabulary you actually use.

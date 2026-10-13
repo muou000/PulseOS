@@ -56,13 +56,12 @@
 | [domain-modeling](./domain-modeling/SKILL.md) | [mattpocock](./THIRD_PARTY/mattpocock/README.md) | engineering | 模型 |
 | [grill-with-docs](./grill-with-docs/SKILL.md) | [mattpocock](./THIRD_PARTY/mattpocock/README.md) | engineering | 用户 |
 | [implement](./implement/SKILL.md) | [mattpocock](./THIRD_PARTY/mattpocock/README.md) | engineering | 用户 |
+| [implement-spec](./implement-spec/SKILL.md) | [mattpocock](./THIRD_PARTY/mattpocock/README.md) | engineering | 用户 |
 | [improve-codebase-architecture](./improve-codebase-architecture/SKILL.md) | [mattpocock](./THIRD_PARTY/mattpocock/README.md) | engineering | 用户 |
 | [pr](./pr/SKILL.md) | [mattpocock](./THIRD_PARTY/mattpocock/README.md) | engineering | 模型 |
 | [prototype](./prototype/SKILL.md) | [mattpocock](./THIRD_PARTY/mattpocock/README.md) | engineering | 模型 |
-| [replan](./replan/SKILL.md) | PulseOS | engineering | 用户 |
 | [research](./research/SKILL.md) | [mattpocock](./THIRD_PARTY/mattpocock/README.md) | engineering | 模型 |
 | [retro](./retro/SKILL.md) | [mattpocock](./THIRD_PARTY/mattpocock/README.md) | engineering | 用户 |
-| [review-ticket](./review-ticket/SKILL.md) | PulseOS | engineering | 用户 |
 | [setup-matt-pocock-skills](./setup-matt-pocock-skills/SKILL.md) | [mattpocock](./THIRD_PARTY/mattpocock/README.md) | engineering | 用户 |
 | [tdd](./tdd/SKILL.md) | [mattpocock](./THIRD_PARTY/mattpocock/README.md) | engineering | 模型 |
 | [to-spec](./to-spec/SKILL.md) | [mattpocock](./THIRD_PARTY/mattpocock/README.md) | engineering | 用户 |

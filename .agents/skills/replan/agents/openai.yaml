@@ -1,6 +1,0 @@
-interface:
-  display_name: "Replan"
-  short_description: "Resolve needs-replan or needs-strong escalation tickets"
-policy:
-  allow_implicit_invocation: false
-
