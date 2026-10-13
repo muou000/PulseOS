@@ -1,3 +1,4 @@
+pub(crate) mod bpf;
 pub(crate) mod credential;
 pub(crate) mod epoll;
 pub(crate) mod fd;

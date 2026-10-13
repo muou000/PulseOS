@@ -9,7 +9,7 @@ use core::{
 
 use kspin::SpinNoIrq;
 
-#[cfg(feature = "qperf-trace")]
+#[cfg(any(feature = "qperf-trace", feature = "bpf-trace"))]
 use crate::current_may_uninit;
 use crate::{AxTaskRef, AxTaskWeak, WaitContext, WaitReason, WakeContext, WakeSource, current};
 
@@ -105,7 +105,7 @@ impl alloc::task::Wake for AxWaker {
 /// cannot leak its reason into a later suspension.
 #[inline(always)]
 pub fn set_current_wait_context(_context: WaitContext) {
-    #[cfg(feature = "qperf-trace")]
+    #[cfg(any(feature = "qperf-trace", feature = "bpf-trace"))]
     if let Some(task) = current_may_uninit() {
         task.set_qperf_pending_wait_context(_context);
     }
@@ -129,12 +129,12 @@ pub fn block_on<F: IntoFuture>(f: F) -> F::Output {
 
         loop {
             *waker_arc.woke.lock() = false;
-            #[cfg(feature = "qperf-trace")]
+            #[cfg(any(feature = "qperf-trace", feature = "bpf-trace"))]
             curr.clear_qperf_pending_wait_context();
             match fut.as_mut().poll(&mut cx) {
                 Poll::Pending => {
                     let context = {
-                        #[cfg(feature = "qperf-trace")]
+                        #[cfg(any(feature = "qperf-trace", feature = "bpf-trace"))]
                         {
                             curr.take_qperf_pending_wait_context().unwrap_or_else(|| {
                                 WaitContext::new(|| {
@@ -146,7 +146,7 @@ pub fn block_on<F: IntoFuture>(f: F) -> F::Output {
                                 })
                             })
                         }
-                        #[cfg(not(feature = "qperf-trace"))]
+                        #[cfg(not(any(feature = "qperf-trace", feature = "bpf-trace")))]
                         {
                             WaitContext::new(|| (WaitReason::Future, 0, 0))
                         }

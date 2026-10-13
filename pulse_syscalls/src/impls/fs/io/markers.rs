@@ -1,7 +1,12 @@
-#[cfg(feature = "qperf-trace")]
-fn phase_marker_from_line(line: &[u8]) -> Option<(axtask::qperf_trace::PhaseBoundary, &[u8])> {
-    use axtask::qperf_trace::PhaseBoundary;
+#[cfg(any(feature = "qperf-trace", feature = "bpf-trace"))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PhaseBoundary {
+    Begin = 1,
+    End   = 2,
+}
 
+#[cfg(any(feature = "qperf-trace", feature = "bpf-trace"))]
+fn phase_marker_from_line(line: &[u8]) -> Option<(PhaseBoundary, &[u8])> {
     let line = &line[line
         .iter()
         .position(|byte| !byte.is_ascii_whitespace())
@@ -48,7 +53,7 @@ fn phase_marker_from_line(line: &[u8]) -> Option<(axtask::qperf_trace::PhaseBoun
     None
 }
 
-#[cfg(feature = "qperf-trace")]
+#[cfg(any(feature = "qperf-trace", feature = "bpf-trace"))]
 pub(super) struct OutputMarkerScanner {
     fd: usize,
     line: [u8; 64],
@@ -56,7 +61,7 @@ pub(super) struct OutputMarkerScanner {
     emitted: bool,
 }
 
-#[cfg(feature = "qperf-trace")]
+#[cfg(any(feature = "qperf-trace", feature = "bpf-trace"))]
 impl OutputMarkerScanner {
     pub(super) fn new(fd: usize) -> Self {
         Self {
@@ -85,14 +90,24 @@ impl OutputMarkerScanner {
     }
 
     fn emit_marker(&self) {
-        #[cfg(feature = "qperf-trace")]
         if let Some((boundary, phase)) = phase_marker_from_line(&self.line[..self.line_len]) {
-            axtask::qperf_trace::phase_marker(boundary, phase);
-            if phase == b"buildstorm" {
-                match boundary {
-                    axtask::qperf_trace::PhaseBoundary::Begin => axfs::buildstorm_stats::begin(),
-                    axtask::qperf_trace::PhaseBoundary::End => axfs::buildstorm_stats::finish(),
+            #[cfg(feature = "qperf-trace")]
+            {
+                let qperf_boundary = match boundary {
+                    PhaseBoundary::Begin => axtask::qperf_trace::PhaseBoundary::Begin,
+                    PhaseBoundary::End => axtask::qperf_trace::PhaseBoundary::End,
+                };
+                axtask::qperf_trace::phase_marker(qperf_boundary, phase);
+                if phase == b"buildstorm" {
+                    match qperf_boundary {
+                        axtask::qperf_trace::PhaseBoundary::Begin => axfs::buildstorm_stats::begin(),
+                        axtask::qperf_trace::PhaseBoundary::End => axfs::buildstorm_stats::finish(),
+                    }
                 }
+            }
+            #[cfg(feature = "bpf-trace")]
+            {
+                axtask::bpf_trace::phase_marker(boundary as u32, phase);
             }
         }
     }
@@ -106,7 +121,7 @@ impl OutputMarkerScanner {
     }
 }
 
-#[cfg(feature = "qperf-trace")]
+#[cfg(any(feature = "qperf-trace", feature = "bpf-trace"))]
 impl Drop for OutputMarkerScanner {
     fn drop(&mut self) {
         if self.line_len != 0 && !self.emitted {
@@ -115,11 +130,9 @@ impl Drop for OutputMarkerScanner {
     }
 }
 
-#[cfg(all(test, feature = "qperf-trace"))]
+#[cfg(all(test, any(feature = "qperf-trace", feature = "bpf-trace")))]
 mod phase_marker_tests {
-    use axtask::qperf_trace::PhaseBoundary;
-
-    use super::phase_marker_from_line;
+    use super::{PhaseBoundary, phase_marker_from_line};
 
     #[test]
     fn recognizes_buildstorm_and_generic_phase_lines() {

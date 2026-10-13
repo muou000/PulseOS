@@ -213,6 +213,20 @@ pub fn emit_current_qperf_task_metadata() {
     }
 }
 
+#[cfg(feature = "bpf-trace")]
+pub fn emit_bpf_task_metadata(task: &axtask::TaskInner, pid: u64, tid: u64) {
+    let name = task.name();
+    axtask::bpf_trace::task_metadata(task.id().as_u64(), pid, tid, name.as_bytes());
+}
+
+#[cfg(feature = "bpf-trace")]
+pub fn emit_current_bpf_task_metadata() {
+    let task = axtask::current();
+    if let Ok(thread) = current_thread() {
+        emit_bpf_task_metadata(&task, thread.process().pid(), thread.tid());
+    }
+}
+
 /// Binds hardware/software context (`page_table_root`, `TaskExt`, `PROCESS_REGISTRY`)
 /// to a `TaskInner` before publishing it to the scheduler queue.
 pub fn spawn_task_with_thread(
@@ -231,6 +245,8 @@ pub fn spawn_task_with_thread(
 
     #[cfg(feature = "qperf-trace")]
     emit_qperf_task_metadata(&inner, proc.pid(), thread.tid());
+    #[cfg(feature = "bpf-trace")]
+    emit_bpf_task_metadata(&inner, proc.pid(), thread.tid());
 
     inner.init_task_ext(ThreadHandle::new(thread));
 
