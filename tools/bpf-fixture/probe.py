@@ -228,9 +228,9 @@ def _verify_guest_compiler(path: str, arch: str) -> tuple[bool, str, str, str]:
 
     # Verify target architecture
     # 1. Check -dumpmachine
-    code_dm, out_dm, _ = run_cmd([path, "-dumpmachine"])
-    if code_dm == 0 and out_dm.strip():
-        dm_target = out_dm.strip().lower()
+    dm_code, dm_stdout, _ = run_cmd([path, "-dumpmachine"])
+    if dm_code == 0 and dm_stdout.strip():
+        dm_target = dm_stdout.strip().lower()
         if arch in dm_target:
             return True, version, version_line, ""
         else:
@@ -238,12 +238,12 @@ def _verify_guest_compiler(path: str, arch: str) -> tuple[bool, str, str, str]:
                 False,
                 version,
                 version_line,
-                f"Compiler at {path} targets '{out_dm.strip()}', but requested architecture is {arch}.",
+                f"Compiler at {path} targets '{dm_stdout.strip()}', but requested architecture is {arch}.",
             )
 
     # 2. Check -v output for Target: ...
-    code_v, out_v, err_v = run_cmd([path, "-v"])
-    v_combined = (out_v + "\n" + err_v).lower()
+    v_code, v_stdout, v_stderr = run_cmd([path, "-v"])
+    v_combined = (v_stdout + "\n" + v_stderr).lower()
     target_match = re.search(r"(?:target:\s*|--target=)([^\s]+)", v_combined)
     if target_match:
         v_target = target_match.group(1)

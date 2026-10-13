@@ -131,24 +131,27 @@ class TestBpfProbe(unittest.TestCase):
         self.assertTrue(data["llvm_objdump"].get("bpf_inspection_supported"))
 
 
+    def _run_guest_cc_probe(self, cc_path: str, arch: str = "riscv64") -> subprocess.CompletedProcess:
+        return subprocess.run(
+            [
+                sys.executable,
+                str(PROBE_SCRIPT),
+                "--host-only",
+                "--require-guest-cc",
+                arch,
+                f"--{arch}-cc",
+                cc_path,
+                "--json",
+            ],
+            capture_output=True,
+            text=True,
+        )
+
     def test_version_failing_guest_compiler_exits_nonzero(self):
         """When guest compiler candidate fails '--version' (e.g. /usr/bin/false), probe must exit non-zero."""
         false_bin = shutil.which("false")
         if false_bin:
-            result = subprocess.run(
-                [
-                    sys.executable,
-                    str(PROBE_SCRIPT),
-                    "--host-only",
-                    "--require-guest-cc",
-                    "riscv64",
-                    "--riscv64-cc",
-                    false_bin,
-                    "--json",
-                ],
-                capture_output=True,
-                text=True,
-            )
+            result = self._run_guest_cc_probe(false_bin)
             self.assertNotEqual(result.returncode, 0, "Probe must exit non-zero for version-failing /usr/bin/false")
             data = json.loads(result.stdout)
             self.assertFalse(data.get("ok"))
@@ -160,20 +163,7 @@ class TestBpfProbe(unittest.TestCase):
             script_path = f.name
         try:
             os.chmod(script_path, 0o755)
-            result = subprocess.run(
-                [
-                    sys.executable,
-                    str(PROBE_SCRIPT),
-                    "--host-only",
-                    "--require-guest-cc",
-                    "riscv64",
-                    "--riscv64-cc",
-                    script_path,
-                    "--json",
-                ],
-                capture_output=True,
-                text=True,
-            )
+            result = self._run_guest_cc_probe(script_path)
             self.assertNotEqual(result.returncode, 0, "Probe must exit non-zero when --version returns non-zero")
             data = json.loads(result.stdout)
             self.assertFalse(data.get("ok"))
@@ -186,20 +176,7 @@ class TestBpfProbe(unittest.TestCase):
         """When guest compiler candidate does not target the requested architecture (e.g. /usr/bin/true or host gcc), probe must fail."""
         true_bin = shutil.which("true")
         if true_bin:
-            result = subprocess.run(
-                [
-                    sys.executable,
-                    str(PROBE_SCRIPT),
-                    "--host-only",
-                    "--require-guest-cc",
-                    "riscv64",
-                    "--riscv64-cc",
-                    true_bin,
-                    "--json",
-                ],
-                capture_output=True,
-                text=True,
-            )
+            result = self._run_guest_cc_probe(true_bin)
             self.assertNotEqual(result.returncode, 0, "Probe must exit non-zero when guest compiler is /usr/bin/true")
             data = json.loads(result.stdout)
             self.assertFalse(data.get("ok"))
@@ -210,20 +187,7 @@ class TestBpfProbe(unittest.TestCase):
         if gcc_bin:
             proc = subprocess.run([gcc_bin, "-dumpmachine"], capture_output=True, text=True)
             if "riscv64" not in proc.stdout:
-                result = subprocess.run(
-                    [
-                        sys.executable,
-                        str(PROBE_SCRIPT),
-                        "--host-only",
-                        "--require-guest-cc",
-                        "riscv64",
-                        "--riscv64-cc",
-                        gcc_bin,
-                        "--json",
-                    ],
-                    capture_output=True,
-                    text=True,
-                )
+                result = self._run_guest_cc_probe(gcc_bin)
                 self.assertNotEqual(result.returncode, 0, "Probe must exit non-zero when host gcc targets non-riscv64 arch")
                 data = json.loads(result.stdout)
                 self.assertFalse(data.get("ok"))
@@ -239,20 +203,7 @@ class TestBpfProbe(unittest.TestCase):
             script_path = f.name
         try:
             os.chmod(script_path, 0o755)
-            result = subprocess.run(
-                [
-                    sys.executable,
-                    str(PROBE_SCRIPT),
-                    "--host-only",
-                    "--require-guest-cc",
-                    "riscv64",
-                    "--riscv64-cc",
-                    script_path,
-                    "--json",
-                ],
-                capture_output=True,
-                text=True,
-            )
+            result = self._run_guest_cc_probe(script_path)
             self.assertEqual(result.returncode, 0, f"Valid mock compiler must succeed: {result.stdout}")
             data = json.loads(result.stdout)
             self.assertTrue(data.get("ok"))

@@ -82,7 +82,17 @@ def validate_fixture(
                     f"Fixed-layout PulseOS libbpf fixture forbids BTF metadata per ADR #83."
                 )
 
-    # 5. SHA-256 integrity check (drift check)
+    # 5. Validate ELF section manifest against expected sections
+    expected_sections = expected.get("sections")
+    if expected_sections is not None:
+        missing_sections = set(expected_sections) - set(sec_names)
+        if missing_sections:
+            errors.append(f"Missing expected ELF sections: {sorted(missing_sections)}")
+        extra_sections = set(sec_names) - set(expected_sections)
+        if extra_sections:
+            errors.append(f"Unexpected extra ELF sections found: {sorted(extra_sections)}")
+
+    # 6. SHA-256 integrity check (drift check)
     actual_sha = compute_sha256(elf_path)
     expected_sha = expected.get("sha256")
     if actual_sha != expected_sha:
@@ -92,7 +102,7 @@ def validate_fixture(
             f"  Expected: {expected_sha}"
         )
 
-    # 6. Program sections, types, and instruction counts
+    # 7. Program sections, types, and instruction counts
     expected_progs = expected.get("programs", {})
     for prog_sec, p_info in expected_progs.items():
         matched_sec = next((s for s in sections if s["name"] == prog_sec), None)

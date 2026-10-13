@@ -20,6 +20,15 @@ VERSION_FILE = HERE / "VERSION"
 BUILD_SCRIPT = HERE / "build.py"
 
 
+def _patch_section_name(data: bytearray, new_name: bytes) -> None:
+    idx = data.find(b".llvm_addrsig\x00")
+    if idx != -1:
+        data[idx:idx + len(new_name)] = new_name
+    else:
+        idx = data.find(b".text\x00")
+        data[idx:idx + len(new_name)] = new_name
+
+
 class TestBpfChecker(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -76,12 +85,7 @@ class TestBpfChecker(unittest.TestCase):
             shutil.copy(FIXTURE_OBJ, btf_elf)
 
             data = bytearray(btf_elf.read_bytes())
-            idx = data.find(b".llvm_addrsig\x00")
-            if idx != -1:
-                data[idx:idx + 5] = b".BTF\x00"
-            else:
-                idx = data.find(b".text\x00")
-                data[idx:idx + 5] = b".BTF\x00"
+            _patch_section_name(data, b".BTF\x00")
             btf_elf.write_bytes(data)
 
             res = subprocess.run(
@@ -104,12 +108,7 @@ class TestBpfChecker(unittest.TestCase):
             shutil.copy(FIXTURE_OBJ, btf_elf)
 
             data = bytearray(btf_elf.read_bytes())
-            idx = data.find(b".llvm_addrsig\x00")
-            if idx != -1:
-                data[idx:idx + 10] = b".rela.BTF\x00"
-            else:
-                idx = data.find(b".text\x00")
-                data[idx:idx + 10] = b".rela.BTF\x00"
+            _patch_section_name(data, b".rela.BTF\x00")
             btf_elf.write_bytes(data)
 
             res = subprocess.run(
@@ -120,6 +119,23 @@ class TestBpfChecker(unittest.TestCase):
             self.assertNotEqual(res.returncode, 0, "ELF with .rela.BTF section must be rejected")
             output = res.stderr + res.stdout
             self.assertIn(".rela.btf", output.lower())
+
+    def test_sections_manifest_mismatch_rejected(self):
+        """Checker must reject when metadata sections manifest disagrees with ELF sections."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tampered_meta = Path(tmpdir) / "tampered_meta.json"
+            meta_data = json.loads(METADATA_FILE.read_text(encoding="utf-8"))
+            meta_data["sections"] = [s for s in meta_data.get("sections", []) if s != "maps"]
+            tampered_meta.write_text(json.dumps(meta_data), encoding="utf-8")
+
+            res = subprocess.run(
+                [sys.executable, str(CHECK_SCRIPT), "--metadata", str(tampered_meta)],
+                capture_output=True,
+                text=True,
+            )
+            self.assertNotEqual(res.returncode, 0)
+            output = res.stderr + res.stdout
+            self.assertIn("unexpected extra elf sections", output.lower())
 
     def test_schema_version_mismatch_rejected(self):
         """Checker must reject when metadata schema_version disagrees with VERSION file."""
