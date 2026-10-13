@@ -87,7 +87,7 @@ version = "3.0"
 version = "0.2"
 
 [dependencies.axsync]
-path = "../../arceos/modules/axsync"
+path = "../../modules/axsync"
 optional = true
 
 [dev-dependencies.anyhow]

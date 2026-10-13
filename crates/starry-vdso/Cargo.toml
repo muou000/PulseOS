@@ -13,6 +13,10 @@
 edition = "2024"
 name = "starry-vdso"
 version = "0.1.1"
+authors = ["Starry-OS contributors", "PulseOS contributors"]
+description = "vDSO implementation for Starry-OS and PulseOS"
+license = "Apache-2.0 OR MIT"
+repository = "https://github.com/Starry-OS/starry-vdso"
 build = false
 autolib = false
 autobins = false

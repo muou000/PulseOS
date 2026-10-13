@@ -18,48 +18,64 @@ PulseOS 的整体软件栈包含用户空间、Trap 异常分发、内核服务�
 
 ```
 .
-├── Cargo.toml
+├── Cargo.toml                 # 根 Workspace 配置
 ├── Cargo.lock
-├── Makefile                   #
-├── scripts                    # 根文件系统镜像辅助脚本
+├── Makefile                   # 统一自包含 Makefile 构建入口
+├── scripts                    # 构建支撑与镜像生成脚本
+│   ├── make                   # 模块化 Makefile 片段 (cargo.mk, qemu.mk 等)
 │   ├── build_img.sh           # 生成 RISC-V 64/LoongArch 64 根文件系统镜像
 │   └── fetch-rootfs.sh        # 从 GitHub Release 下载 rootfs 底包并校验
 ├── src
-│   └── main.rs                 # 内核启动与初始用户进程加载
-├── arceos                     # ArceOS 内核主体与基础组件
-│   ├── api                    # 对外 API（包括 axfeat）
-│   ├── configs                # 应用和平台构建配置
-│   ├── modules                # 内存、驱动、文件系统、网络和任务等组件
-│   ├── examples               # ArceOS 示例程序
-│   └── scripts                # ArceOS 构建辅助脚本
-├── platforms                  # 平台适配包
-│   └── axplat-*               # RISC-V、VisionFive 2 和 LoongArch 平台适配
-├── crates                     # PulseOS 维护或定制的 Rust crate
-│   ├── axdriver-*、virtio-drivers # 块设备、网络和 VirtIO 驱动
-│   ├── axcpu、axpoll、axsched  # CPU、轮询和调度支持
-│   ├── memory_*、page_table_*  # 地址、页表和内存集合管理
-│   ├── axfs-ng-vfs、ext4plus    # VFS 与 ext4 文件系统支持
-│   ├── axio、smoltcp            # I/O 与网络协议支持
-│   └── starry-vdso              # vDSO 支持
-├── pulse_core                 # PulseOS 核心内核功能
+│   └── main.rs                # 内核启动与初始用户进程加载
+├── api                        # 统一功能特性接口
+│   └── axfeat                 # 特性开关与各子系统功能门控
+├── configs                    # 内核构建配置 (defconfig.toml 等)
+├── modules                    # 摊平的内核核心组件
+│   ├── axalloc                # 内存分配器接口
+│   ├── axconfig               # 系统编译期配置与常量生成
+│   ├── axcpu                  # 架构相关的特权级指令与硬件上下文
+│   ├── axdriver               # 设备驱动管理层
+│   ├── axdriver_*             # 基础、块设备、网络、PCI、VirtIO 驱动模块
+│   ├── axfs                   # 文件系统运行时与挂载
+│   ├── axfs-ng-vfs            # 虚拟文件系统抽象层
+│   ├── axhal                  # 硬件抽象层与页表管理
+│   ├── axio                   # no_std I/O 抽象库
+│   ├── axipi                  # 核间中断处理
+│   ├── axlog                  # 内核日志输出
+│   ├── axmm                   # 虚存管理与映射
+│   ├── axnet                  # 网络协议栈运行时
+│   ├── axpoll                 # I/O 多路复用与等待队列
+│   ├── axruntime              # 内核运行时初始化
+│   ├── axsched                # 调度器集成层
+│   ├── axsync                 # 内核同步原语
+│   └── axtask                 # 内核任务模型与调度
+├── platforms                  # 硬件平台抽象与具体实现
+│   ├── axplat                 # 统一硬件平台抽象接口
+│   ├── axplat-riscv64-qemu-virt
+│   ├── axplat-riscv64-visionfive2
+│   ├── axplat-loongarch64-qemu-virt
+│   └── axplat-loongarch64-ls2k1000
+├── pulse_core                 # PulseOS 宏内核核心实现
 │   └── src
-│       ├── fd_table            # 文件描述符表与 FdObject
-│       ├── ipc、mm、net、task  # IPC、内存、网络和任务管理
-│       ├── trap.rs             # Trap 与异常分发
+│       ├── fd_table           # 文件描述符表与 FdObject
+│       ├── ipc、mm、net、task # 进程/线程管理、内存映射、IPC与网络
+│       ├── trap.rs            # 用户态/内核态 Trap 分发
 │       └── config.rs、flock.rs、record_lock.rs # 核心辅助模块
-├── pulse_syscalls             # 系统调用接口与分派
+├── pulse_syscalls             # Linux 兼容系统调用实现与分派
 │   └── src
 │       ├── handler.rs         # 系统调用统一入口
-│       └── impls              # fs、ipc、mm、net、task、time 等实现
-├── rootfs                    # 根文件系统底包缓存（脚本下载，不入库）
-│   └── base                  # base-rootfs-<arch>.tar 底包
-├── docs                      # 设计文档、图片和平台移植记录
-│   ├── pre、final              # 初赛和决赛设计文档源文件
-│   └── visionfive2*.md        # VisionFive 2 相关记录
-├── vendor                    # Cargo vendored 依赖
-├── bin                       # 本地构建辅助工具
-├── .cargo                    # Cargo 构建配置
-└── records                   # 开发日志、性能分析和过程性产物
+│       └── impls              # fs、ipc、mm、net、task、time 等系统调用实现
+├── crates                     # 独立外部或演进中的第三方支持库
+│   ├── allocator、buddy-slab-allocator # 物理页与堆分配器实现
+│   ├── eevdf-scheduler        # 独立 EEVDF 调度算法库
+│   ├── ext4plus               # 纯 Rust ext4 文件系统实现
+│   ├── smoltcp                # TCP/IP 协议栈
+│   ├── virtio-drivers         # VirtIO 底层协议支持
+│   ├── memory_*、page_table_* # 地址类型与多架构页表
+│   └── starry-vdso            # 用户态 vDSO 支持库
+├── rootfs                     # 根文件系统底包缓存（脚本下载，不入库）
+├── docs                       # 设计文档、ADR 架构决策与移植记录
+└── records                    # 开发日志、性能分析与 qperf 过程产物
 ```
 
 ---
@@ -103,13 +119,29 @@ PulseOS 的整体软件栈包含用户空间、Trap 异常分发、内核服务�
 
 ## 如何开始
 
+### 编译
+
 ```bash
-make all #构建用于参与测评的镜像
-make test #构建带日志的可参与测评的镜像
-make run #构建并运行进入shell环境的Riscv PulseOS
-make la #快速构建并运行进入shell环境的Loongarch64 PulseOS
-make img_all #构建两种架构的rootfs镜像
-make visionfive2 #构建用于VisionFive 2 U-Boot/TFTP启动的镜像
+make rv        # 编译 RISC-V 64 内核 (kernel-rv)
+make la        # 编译 LoongArch64 内核 (kernel-la)
+make vf2       # 编译 VisionFive 2 内核 (PulseOS_riscv64-visionfive2.bin)
+make ls2k1000  # 编译 LS2K1000 内核 (PulseOS_loongarch64-ls2k1000.bin)
+make test      # 编译双架构门禁
+make clean     # 清理编译产物
+```
+
+### 运行测试 (QEMU)
+
+#### RISC-V 64
+
+```bash
+qemu-system-riscv64 -machine virt -kernel kernel-rv -m 8G -nographic -smp 8 -bios default -drive file=disk.img,if=none,format=raw,id=x0,snapshot=on -device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0 -no-reboot -device virtio-net-device,netdev=net -netdev user,id=net -rtc base=utc
+```
+
+#### LoongArch64
+
+```bash
+qemu-system-loongarch64 -machine virt -kernel kernel-la -m 8G -nographic -smp 8 -drive file=disk.img,if=none,format=raw,id=x0,snapshot=on -device virtio-blk-pci,drive=x0 -no-reboot -device virtio-net-pci,netdev=net0 -netdev user,id=net0 -rtc base=utc
 ```
 
 ## 注

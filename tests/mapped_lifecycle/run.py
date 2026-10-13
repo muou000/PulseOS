@@ -542,8 +542,7 @@ def discover() -> int:
     for arch, config in ARCHES.items():
         print(f"\n{arch}:")
         for name in (config["kernel"], config["primary"], config["secondary"],
-                     "sdcard-rv.img" if arch == "riscv64" else "sdcard-la.img",
-                     f"arceos/{config['secondary']}"):
+                     "sdcard-rv.img" if arch == "riscv64" else "sdcard-la.img"):
             path = REPO / name
             print(f"  {'available' if path.is_file() else 'MISSING'} {path}")
         for compiler in config["cc"]:

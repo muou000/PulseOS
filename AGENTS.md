@@ -6,23 +6,27 @@
 
 - 这是一个基于 ArceOS 组件化内核构建的 PulseOS 仓库，目标是同时支持 RISC-V 64 和 LoongArch64。
 - 仓库的主要结构如下：
-  - `arceos/`：ArceOS 内核主体、模块、示例、脚本和平台配置。
-  - `platforms/`：本项目的平台实现，目前包括 RISC-V、VisionFive 2 和 LoongArch 平台适配。
-  - `pulse_core/`：PulseOS 的核心库或基础封装代码。
-  - `pulse_syscalls/`：系统调用相关实现与对外接口。
-  - `rootfs/`：根文件系统内容与覆盖层，参与磁盘镜像生成。
-  - `vendor/`：第三方依赖和 vendored 代码，通常不要随意改动。
-  - `bin/`：本仓库使用的本地工具链或辅助程序。
-  - `cargo/` 和 `.cargo/`：Cargo 配置与构建辅助配置。
+  - `modules/`：内核核心模块（从原 ArceOS 及核心 crates 摊平迁入，包括内存、文件系统、调度、驱动等）。
+  - `api/`：统一功能特性与接口层（`api/axfeat`）。
+  - `configs/`：内核及平台构建配置文件（如 `defconfig.toml`）。
+  - `platforms/`：平台适配实现与 `axplat` 统一抽象层（RISC-V virt, VisionFive 2, LoongArch virt, LS2K1000）。
+  - `pulse_core/`：PulseOS 核心实现（进程/线程管理、内存映射、陷阱与上下文支持）。
+  - `pulse_syscalls/`：Linux 兼容系统调用实现与分发。
+  - `crates/`：独立的外部支持库或待解耦 crates（如 `eevdf-scheduler`, `ext4plus`, `smoltcp`, `virtio-drivers` 等）。
+  - `scripts/`：根 Makefile 构建支撑（`scripts/make/`）与镜像辅助脚本。
+  - `src/`：内核启动与主入口。
   - `records/`：日志、记录和过程性产物，通常不参与正式构建。
-  - `src/`：仓库根层代码入口。
-  - `sdcard-rv.img`和`sdcard-la.img`分别是riscv64和loongarch64架构下的测例镜像。
+  - `sdcard-rv.img` 和 `sdcard-la.img` 分别是 riscv64 和 loongarch64 架构下的测例镜像。
 
 ## 编译方式
 
-- 统一使用 `make rv 2>&1 | tail -30` 作为编译入口,除非必要情况下，不要关闭日志。
-- 不要自行替换成其他构建命令，除非任务明确要求。
-- 若需要清理构建产物，优先使用 `make clean`。
+- 统一编译入口（除非必要不要关闭日志）：
+  - RISC-V 64：`make rv 2>&1 | tail -30`
+  - LoongArch64：`make la 2>&1 | tail -30`
+  - VisionFive 2：`make vf2 2>&1 | tail -30`
+  - LS2K1000：`make ls2k1000 2>&1 | tail -30`
+  - 双架构构建门禁：`make test 2>&1 | tail -30`
+- 若需要清理构建产物，统一使用 `make clean`。
 
 ## 运行测试方式
 
