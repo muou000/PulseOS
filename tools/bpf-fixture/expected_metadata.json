@@ -1,0 +1,77 @@
+{
+  "schema_version": 1,
+  "filename": "fixture.bpf.o",
+  "machine": 247,
+  "machine_name": "EM_BPF",
+  "endianness": "little",
+  "file_size": 1528,
+  "sha256": "f88c8c6ffd7833d79b53a5cb34c410e52dd675cfb97052b0c3c4793f177dd22d",
+  "sections": [
+    ".strtab",
+    ".text",
+    "tracepoint/sched/sched_switch",
+    ".reltracepoint/sched/sched_switch",
+    "perf_event",
+    ".relperf_event",
+    "maps",
+    ".llvm_addrsig",
+    ".symtab"
+  ],
+  "programs": {
+    "tracepoint/sched/sched_switch": {
+      "type": "tracepoint",
+      "size_bytes": 104,
+      "instruction_count": 13
+    },
+    "perf_event": {
+      "type": "perf_event",
+      "size_bytes": 240,
+      "instruction_count": 30
+    }
+  },
+  "maps": {
+    "counters": {
+      "type": 2,
+      "key_size": 4,
+      "value_size": 8,
+      "max_entries": 16,
+      "map_flags": 0
+    },
+    "events": {
+      "type": 4,
+      "key_size": 4,
+      "value_size": 4,
+      "max_entries": 64,
+      "map_flags": 0
+    }
+  },
+  "relocations": [
+    {
+      "section": ".reltracepoint/sched/sched_switch",
+      "offset": 32,
+      "sym_index": 5,
+      "sym_name": "counters",
+      "type": 1
+    },
+    {
+      "section": ".relperf_event",
+      "offset": 40,
+      "sym_index": 5,
+      "sym_name": "counters",
+      "type": 1
+    },
+    {
+      "section": ".relperf_event",
+      "offset": 176,
+      "sym_index": 7,
+      "sym_name": "events",
+      "type": 1
+    }
+  ],
+  "forbidden_sections": [
+    ".BTF",
+    ".BTF.ext",
+    ".rel.BTF",
+    ".rela.BTF"
+  ]
+}

@@ -1,0 +1,4 @@
+fixture.bpf.o
+*.o
+__pycache__/
+*.pyc
