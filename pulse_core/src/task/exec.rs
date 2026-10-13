@@ -230,6 +230,8 @@ impl Process {
         axtask::current().set_name(&self.name());
         #[cfg(feature = "qperf-trace")]
         super::emit_current_qperf_task_metadata();
+        #[cfg(feature = "bpf-trace")]
+        super::emit_current_bpf_task_metadata();
         Ok(())
     }
 
@@ -410,6 +412,8 @@ impl Process {
         axtask::current().set_name(&self.name());
         #[cfg(feature = "qperf-trace")]
         super::emit_current_qperf_task_metadata();
+        #[cfg(feature = "bpf-trace")]
+        super::emit_current_bpf_task_metadata();
         Ok(())
     }
 }

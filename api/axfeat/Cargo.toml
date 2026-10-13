@@ -51,6 +51,7 @@ sched-rr = ["axtask/sched-rr", "irq"]
 sched-cfs = ["axtask/sched-cfs", "irq"]
 sched-eevdf = ["axtask/sched-eevdf", "irq"]
 sched-load-balance = ["axtask/sched-load-balance"]
+bpf-trace = ["axtask?/bpf-trace"]
 
 # File system
 fs = [
