@@ -1,24 +1,30 @@
 ---
 name: review-ticket
-description: "Review a PR as the strong tier: run two-axis code review (Standards + Spec), check plan compliance, and either request changes (needs-fix) or approve and merge to main."
+description: "Audit an implementation PR as the strong tier: check whether the code faithfully implements the originating ticket and spec (missing requirements, scope creep, wrong implementation, and anchor compliance), and either request changes (needs-fix) or approve and merge to main."
 disable-model-invocation: true
 ---
 
 # Review Ticket
 
-Review an implementation PR as the strong tier.
+Audit an implementation PR as the strong tier.
 
 Every implementation PR targets `main`, links its ticket with `Closes #<n>`, and is labelled `needs-review` and `model:strong`. Read [ticket-workflow.md](../../../docs/agents/ticket-workflow.md) and [issue-tracker.md](../../../docs/agents/issue-tracker.md) first.
+
+## Review division
+
+Routine code review belongs to `/implement`: the weak tier is responsible for code cleanliness, conventions, Fowler smells, test suites, and running `code-review`. Do NOT re-run `code-review` or review code details here.
+
+The strong tier's job is strictly to check whether the implementation faithfully implements the originating ticket and spec, or drifts from its goal.
 
 ## Process
 
 ### 1. Load the PR and ticket
 
-Fetch the PR and its metadata:
+Fetch the PR and its context:
 
 ```bash
 gh pr view <pr-number> --comments
-gh pr diff <pr-number>
+gh pr diff <pr-number> --stat
 ```
 
 From the PR body:
@@ -26,40 +32,40 @@ From the PR body:
 - Fetch the ticket and parent spec: `gh issue view <ticket-number> --comments`.
 - Note the verification commands the PR ran and the drift check comment left by the implementer.
 
-### 2. Conduct the review
+### 2. Audit against the ticket and spec
 
-1. **Two-axis review**:
-   Call the Skill tool with `code-review`, fixed point `main`. This evaluates Standards (repo conventions + Fowler smells) and Spec (faithful implementation of the originating ticket and spec).
+Audit the diff against the originating ticket and spec (`gh pr diff <pr-number>`). Report:
 
-2. **Plan and Anchor compliance**:
-   - Check that the PR changes match the symbols and modules named in the ticket's `## Implementation plan`.
-   - Verify that stated `## Anchors` were preserved or satisfied as designed.
-   - Confirm that the PR does not introduce uncoordinated public interface breaks for sibling tickets.
+- **Missing or partial requirements**: requirements the ticket or spec asked for that are missing or partial.
+- **Scope creep / goal drift**: behaviour in the diff that wasn't asked for, or where the implementation drifts from what the ticket requested (`## What to build`).
+- **Wrong implementation**: requirements that look implemented but where the implementation looks wrong.
+- **Acceptance criteria**: whether every criterion in `## Acceptance criteria` holds and was demonstrated by the verification commands.
+- **Anchors & boundaries**: whether public interface changes match the ticket's `## Implementation plan` and `## Anchors`, without uncoordinated public interface breaks for sibling tickets.
+- **Drift verification**: inspect the implementer's drift check comment to ensure sibling tickets were not broken.
 
-3. **Drift verification**:
-   Inspect the implementer's drift check comment. Verify whether any other sibling tickets were affected.
+Do not review code formatting, style, or local refactoring: routine review was resolved by `/implement`.
 
 ### 3. Act on findings
 
 #### Option A: Request changes (needs-fix)
 
-If there are code quality defects, failing tests, convention violations, or missing edge cases:
+If requirements are missing, behaviour drifted, or anchors broke:
 
-1. Submit the review on GitHub:
+1. Submit actionable feedback on GitHub citing the ticket or spec and explaining the deviation:
    ```bash
-   gh pr review <pr-number> --request-changes --body "<detailed actionable feedback>"
+   gh pr review <pr-number> --request-changes --body "<actionable feedback on goal or spec deviation>"
    ```
 2. Swap labels on the PR:
    ```bash
    gh pr edit <pr-number> --remove-label "needs-review" --remove-label "model:strong" --add-label "needs-fix" --add-label "model:weak"
    ```
-3. If the review revealed that subsequent tickets' plans need architectural adjustment beyond this PR, open a `needs-replan` escalation ticket blocking the affected tickets.
+3. If the deviation revealed that subsequent tickets' plans need architectural adjustment beyond this PR, open a `needs-replan` escalation ticket blocking the affected tickets.
 
 The PR is now ready for a weak-tier session to fix via `/implement`.
 
 #### Option B: Approve and merge
 
-If the implementation satisfies the plan, acceptance criteria, standards, and tests:
+If the code faithfully implements the ticket and spec, acceptance criteria hold, anchors are preserved, and tests pass:
 
 1. Submit approval on GitHub:
    ```bash

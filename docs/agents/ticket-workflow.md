@@ -10,8 +10,8 @@ Two **tiers**, carried as a label on every ticket and PR so a developer filters 
 
 | Tier | Label | Work |
 | --- | --- | --- |
-| strong | `model:strong` | `/grill-with-docs`, `/to-spec`, `/to-tickets`, `/review-ticket` on every PR, `/replan` on every escalation ticket |
-| weak | `model:weak` | `/implement` on implementation tickets and `needs-fix` PRs, including the drift check |
+| strong | `model:strong` | `/grill-with-docs`, `/to-spec`, `/to-tickets`, `/review-ticket` (goal alignment & architectural drift audit on PRs), `/replan` on every escalation ticket |
+| weak | `model:weak` | `/implement` on implementation tickets and `needs-fix` PRs (including TDD, routine `code-review`, verification, and drift check) |
 
 A session only does work of its own tier. Work that needs the other tier is handed over through a label or an escalation ticket, never done in place.
 
@@ -109,4 +109,21 @@ stateDiagram-v2
     Fix --> Review: /implement pushes fixes (needs-review, model:strong)
     Review --> [*]: /review-ticket approves and merges
 ```
+
+## Review responsibilities: routine code review vs. goal audit
+
+To prevent review bottlenecks on the strong model and accelerate development without sacrificing quality, review duties are split by tier:
+
+1. **Weak tier (`/implement`) owns routine code review**:
+   - Implements via `tdd` at pre-agreed seams, runs the full test suite, and calls `code-review` once done.
+   - Evaluates both Standards (repo conventions + Fowler smells baseline) and Spec axes.
+   - Fixes hard violations and code-level defects before opening a PR.
+
+2. **Strong tier (`/review-ticket`) audits goal alignment**:
+   - Checks whether the code faithfully implements the originating issue / spec:
+     - Requirements asked for that are missing or partial
+     - Behaviour in the diff that wasn't asked for (scope creep / goal drift)
+     - Requirements that look implemented but where the implementation looks wrong
+   - Verifies `## Acceptance criteria` and `## Anchors` compliance.
+   - Does not review code formatting or style, keeping throughput high and avoiding strong-model bottlenecks.
 

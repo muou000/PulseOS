@@ -18,8 +18,8 @@ Carried on every issue and PR to indicate which model tier should claim it.
 
 | Label | Meaning |
 | ----- | ------- |
-| `model:strong` | Requires a strong-tier model (e.g. Claude Opus / Gemini Pro) for architecture, planning, code review, replanning, or escalation resolution |
-| `model:weak`   | Handled by a weak-tier model (e.g. Flash / Sonnet) for implementation, TDD, fixes, and drift checks |
+| `model:strong` | Requires a strong-tier model (e.g. Claude Opus / Gemini Pro) for architecture, planning, goal alignment audit, replanning, or escalation resolution |
+| `model:weak`   | Handled by a weak-tier model (e.g. Flash / Sonnet) for implementation, TDD, routine code review, fixes, and drift checks |
 
 ## PR workflow labels
 
@@ -27,7 +27,7 @@ Used on pull requests to manage review handoffs between implementers and reviewe
 
 | Label | Meaning |
 | ----- | ------- |
-| `needs-review` | PR implementation complete and drift check passed; ready for strong-tier review via `/review-ticket` |
+| `needs-review` | PR implementation and routine self-review complete, drift check passed; ready for strong-tier goal audit via `/review-ticket` |
 | `needs-fix`    | PR review requested changes; ready for weak-tier fixes via `/implement` |
 
 ## Escalation labels
