@@ -1,5 +1,6 @@
 //! 系统调用实现模块
 
+mod bpf;
 mod fs;
 mod futex;
 mod ipc;
@@ -9,6 +10,8 @@ mod net;
 mod task;
 mod time;
 mod utils;
+
+pub(crate) use bpf::*;
 
 pub(crate) use fs::*;
 pub use fs::sys_sync;
