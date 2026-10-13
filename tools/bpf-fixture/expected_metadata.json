@@ -71,6 +71,7 @@
   "forbidden_sections": [
     ".BTF",
     ".BTF.ext",
-    ".rel.BTF"
+    ".rel.BTF",
+    ".rela.BTF"
   ]
 }

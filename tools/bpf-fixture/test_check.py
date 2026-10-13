@@ -97,6 +97,30 @@ class TestBpfChecker(unittest.TestCase):
                 f"Expected unsupported BTF message in: {output}",
             )
 
+    def test_rela_btf_section_rejected(self):
+        """Checker must reject ELF containing unsupported .rela.BTF section."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            btf_elf = Path(tmpdir) / "with_rela_btf.o"
+            shutil.copy(FIXTURE_OBJ, btf_elf)
+
+            data = bytearray(btf_elf.read_bytes())
+            idx = data.find(b".llvm_addrsig\x00")
+            if idx != -1:
+                data[idx:idx + 10] = b".rela.BTF\x00"
+            else:
+                idx = data.find(b".text\x00")
+                data[idx:idx + 10] = b".rela.BTF\x00"
+            btf_elf.write_bytes(data)
+
+            res = subprocess.run(
+                [sys.executable, str(CHECK_SCRIPT), "--elf", str(btf_elf)],
+                capture_output=True,
+                text=True,
+            )
+            self.assertNotEqual(res.returncode, 0, "ELF with .rela.BTF section must be rejected")
+            output = res.stderr + res.stdout
+            self.assertIn(".rela.btf", output.lower())
+
     def test_schema_version_mismatch_rejected(self):
         """Checker must reject when metadata schema_version disagrees with VERSION file."""
         with tempfile.TemporaryDirectory() as tmpdir:

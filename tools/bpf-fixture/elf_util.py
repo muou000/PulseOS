@@ -9,7 +9,7 @@ EM_BPF = 247
 R_BPF_64_64 = 1
 SHT_RELA = 4
 SHT_REL = 9
-FORBIDDEN_SECTIONS = [".BTF", ".BTF.ext", ".rel.BTF"]
+FORBIDDEN_SECTIONS = [".BTF", ".BTF.ext", ".rel.BTF", ".rela.BTF"]
 
 
 def compute_sha256(path: Path) -> str:
