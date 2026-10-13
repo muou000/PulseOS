@@ -131,5 +131,137 @@ class TestBpfProbe(unittest.TestCase):
         self.assertTrue(data["llvm_objdump"].get("bpf_inspection_supported"))
 
 
+    def test_version_failing_guest_compiler_exits_nonzero(self):
+        """When guest compiler candidate fails '--version' (e.g. /usr/bin/false), probe must exit non-zero."""
+        false_bin = shutil.which("false")
+        if false_bin:
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    str(PROBE_SCRIPT),
+                    "--host-only",
+                    "--require-guest-cc",
+                    "riscv64",
+                    "--riscv64-cc",
+                    false_bin,
+                    "--json",
+                ],
+                capture_output=True,
+                text=True,
+            )
+            self.assertNotEqual(result.returncode, 0, "Probe must exit non-zero for version-failing /usr/bin/false")
+            data = json.loads(result.stdout)
+            self.assertFalse(data.get("ok"))
+            self.assertFalse(data["guest_compilers"]["riscv64"].get("ok"))
+            self.assertIn("failed", data["guest_compilers"]["riscv64"].get("error", "").lower())
+
+        with tempfile.NamedTemporaryFile("w", suffix=".sh", delete=False) as f:
+            f.write("#!/bin/sh\nexit 1\n")
+            script_path = f.name
+        try:
+            os.chmod(script_path, 0o755)
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    str(PROBE_SCRIPT),
+                    "--host-only",
+                    "--require-guest-cc",
+                    "riscv64",
+                    "--riscv64-cc",
+                    script_path,
+                    "--json",
+                ],
+                capture_output=True,
+                text=True,
+            )
+            self.assertNotEqual(result.returncode, 0, "Probe must exit non-zero when --version returns non-zero")
+            data = json.loads(result.stdout)
+            self.assertFalse(data.get("ok"))
+            self.assertFalse(data["guest_compilers"]["riscv64"].get("ok"))
+        finally:
+            if os.path.exists(script_path):
+                os.remove(script_path)
+
+    def test_non_compiler_guest_executable_exits_nonzero(self):
+        """When guest compiler candidate does not target the requested architecture (e.g. /usr/bin/true or host gcc), probe must fail."""
+        true_bin = shutil.which("true")
+        if true_bin:
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    str(PROBE_SCRIPT),
+                    "--host-only",
+                    "--require-guest-cc",
+                    "riscv64",
+                    "--riscv64-cc",
+                    true_bin,
+                    "--json",
+                ],
+                capture_output=True,
+                text=True,
+            )
+            self.assertNotEqual(result.returncode, 0, "Probe must exit non-zero when guest compiler is /usr/bin/true")
+            data = json.loads(result.stdout)
+            self.assertFalse(data.get("ok"))
+            self.assertFalse(data["guest_compilers"]["riscv64"].get("ok"))
+
+        # Also test with host gcc targeting x86_64 when riscv64 is requested
+        gcc_bin = shutil.which("gcc")
+        if gcc_bin:
+            proc = subprocess.run([gcc_bin, "-dumpmachine"], capture_output=True, text=True)
+            if "riscv64" not in proc.stdout:
+                result = subprocess.run(
+                    [
+                        sys.executable,
+                        str(PROBE_SCRIPT),
+                        "--host-only",
+                        "--require-guest-cc",
+                        "riscv64",
+                        "--riscv64-cc",
+                        gcc_bin,
+                        "--json",
+                    ],
+                    capture_output=True,
+                    text=True,
+                )
+                self.assertNotEqual(result.returncode, 0, "Probe must exit non-zero when host gcc targets non-riscv64 arch")
+                data = json.loads(result.stdout)
+                self.assertFalse(data.get("ok"))
+                self.assertFalse(data["guest_compilers"]["riscv64"].get("ok"))
+
+    def test_valid_mock_guest_compiler_succeeds(self):
+        """A valid cross-compiler mock that targets the requested arch passes guest compiler probe."""
+        with tempfile.NamedTemporaryFile("w", suffix=".sh", delete=False) as f:
+            f.write("#!/bin/sh\n"
+                    "if [ \"$1\" = \"--version\" ]; then echo \"riscv64-linux-gnu-gcc (Ubuntu 11.4.0) 11.4.0\"; exit 0; fi\n"
+                    "if [ \"$1\" = \"-dumpmachine\" ]; then echo \"riscv64-linux-gnu\"; exit 0; fi\n"
+                    "exit 0\n")
+            script_path = f.name
+        try:
+            os.chmod(script_path, 0o755)
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    str(PROBE_SCRIPT),
+                    "--host-only",
+                    "--require-guest-cc",
+                    "riscv64",
+                    "--riscv64-cc",
+                    script_path,
+                    "--json",
+                ],
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(result.returncode, 0, f"Valid mock compiler must succeed: {result.stdout}")
+            data = json.loads(result.stdout)
+            self.assertTrue(data.get("ok"))
+            self.assertTrue(data["guest_compilers"]["riscv64"].get("ok"))
+            self.assertEqual(data["guest_compilers"]["riscv64"].get("version"), "11.4.0")
+        finally:
+            if os.path.exists(script_path):
+                os.remove(script_path)
+
+
 if __name__ == "__main__":
     unittest.main()

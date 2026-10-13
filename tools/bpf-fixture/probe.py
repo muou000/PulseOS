@@ -211,38 +211,124 @@ def probe_libbpf(env: Optional[Dict[str, str]] = None) -> Dict[str, Any]:
     }
 
 
-def probe_guest_compiler(arch: str, custom_cc: Optional[str] = None) -> Dict[str, Any]:
-    candidates = [custom_cc] if custom_cc else list(GUEST_COMPILER_CANDIDATES.get(arch, ()))
-    found_path = None
-    for cand in candidates:
-        if cand and (resolved := shutil.which(cand)):
-            found_path = resolved
-            break
+def _verify_guest_compiler(path: str, arch: str) -> tuple[bool, str, str, str]:
+    """Verify that the executable at path is a working compiler targeting arch.
 
-    if not found_path:
-        cand_str = ", ".join(candidates)
-        return {
-            "ok": False,
-            "arch": arch,
-            "path": None,
-            "candidates": candidates,
-            "error": f"Guest compiler for {arch} is missing/unavailable. "
-                     f"Checked candidates: [{cand_str}]. "
-                     f"Please install cross compiler (e.g. 'sudo apt install gcc-{arch}-linux-gnu') "
-                     f"or specify --{arch}-cc.",
-        }
+    Returns:
+        (ok, version, version_line, error_message)
+    """
+    code, stdout, stderr = run_cmd([path, "--version"])
+    if code != 0:
+        err = stderr.strip() or stdout.strip() or f"exit code {code}"
+        return False, "", "", f"Guest compiler candidate at {path} failed '--version' check: {err}"
 
-    code, stdout, stderr = run_cmd([found_path, "--version"])
     version_line = stdout.splitlines()[0] if stdout else (stderr.splitlines()[0] if stderr else "")
     version_match = re.search(r"(\d+\.\d+(\.\d+)?)", version_line)
     version = version_match.group(1) if version_match else "unknown"
 
+    # Verify target architecture
+    # 1. Check -dumpmachine
+    code_dm, out_dm, _ = run_cmd([path, "-dumpmachine"])
+    if code_dm == 0 and out_dm.strip():
+        dm_target = out_dm.strip().lower()
+        if arch in dm_target:
+            return True, version, version_line, ""
+        else:
+            return (
+                False,
+                version,
+                version_line,
+                f"Compiler at {path} targets '{out_dm.strip()}', but requested architecture is {arch}.",
+            )
+
+    # 2. Check -v output for Target: ...
+    code_v, out_v, err_v = run_cmd([path, "-v"])
+    v_combined = (out_v + "\n" + err_v).lower()
+    target_match = re.search(r"(?:target:\s*|--target=)([^\s]+)", v_combined)
+    if target_match:
+        v_target = target_match.group(1)
+        if arch in v_target:
+            return True, version, version_line, ""
+        else:
+            return (
+                False,
+                version,
+                version_line,
+                f"Compiler at {path} targets '{v_target}', but requested architecture is {arch}.",
+            )
+
+    # 3. Check version line / banner as fallback (for mock compilers or wrappers)
+    if arch in version_line.lower() and any(k in version_line.lower() for k in ("gcc", "clang", "compiler")):
+        return True, version, version_line, ""
+
+    return (
+        False,
+        version,
+        version_line,
+        f"Executable at {path} does not appear to be a compiler targeting {arch}.",
+    )
+
+
+def probe_guest_compiler(arch: str, custom_cc: Optional[str] = None) -> Dict[str, Any]:
+    if custom_cc:
+        candidates = [custom_cc]
+        resolved = shutil.which(custom_cc)
+        if not resolved:
+            return {
+                "ok": False,
+                "arch": arch,
+                "path": custom_cc,
+                "candidates": candidates,
+                "error": f"Specified guest compiler for {arch} at '{custom_cc}' was not found.",
+            }
+        ok, version, version_line, err = _verify_guest_compiler(resolved, arch)
+        if not ok:
+            return {
+                "ok": False,
+                "arch": arch,
+                "path": resolved,
+                "candidates": candidates,
+                "error": err,
+            }
+        return {
+            "ok": True,
+            "arch": arch,
+            "path": resolved,
+            "version": version,
+            "version_line": version_line,
+        }
+
+    candidates = list(GUEST_COMPILER_CANDIDATES.get(arch, ()))
+    last_err = None
+    for cand in candidates:
+        if cand and (resolved := shutil.which(cand)):
+            ok, version, version_line, err = _verify_guest_compiler(resolved, arch)
+            if ok:
+                return {
+                    "ok": True,
+                    "arch": arch,
+                    "path": resolved,
+                    "version": version,
+                    "version_line": version_line,
+                }
+            last_err = err
+
+    cand_str = ", ".join(candidates)
+    base_msg = (
+        f"Guest compiler for {arch} is missing/unavailable. "
+        f"Checked candidates: [{cand_str}]. "
+        f"Please install cross compiler (e.g. 'sudo apt install gcc-{arch}-linux-gnu') "
+        f"or specify --{arch}-cc."
+    )
+    if last_err:
+        base_msg += f" Last candidate error: {last_err}"
+
     return {
-        "ok": True,
+        "ok": False,
         "arch": arch,
-        "path": found_path,
-        "version": version,
-        "version_line": version_line,
+        "path": None,
+        "candidates": candidates,
+        "error": base_msg,
     }
 
 
