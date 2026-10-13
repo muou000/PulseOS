@@ -16,4 +16,3 @@ clean:
 	rm -f fixture.bpf.o
 
 .PHONY: all build check test clean
-

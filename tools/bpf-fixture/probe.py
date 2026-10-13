@@ -132,6 +132,7 @@ def probe_llvm_objdump(objdump_path: Optional[str], clang_path: Optional[str] = 
 
     # Verify BPF ELF inspection / disassembly capability
     bpf_disasm_ok = False
+    disasm_tested = False
     clang_bin = shutil.which(clang_path) if clang_path else shutil.which("clang")
     if clang_bin:
         with tempfile.NamedTemporaryFile(suffix=".o") as tmp_obj:
@@ -144,6 +145,7 @@ def probe_llvm_objdump(objdump_path: Optional[str], clang_path: Optional[str] = 
                 timeout=10,
             )
             if p_comp.returncode == 0:
+                disasm_tested = True
                 p_dump = subprocess.run(
                     [path, "-d", tmp_obj.name],
                     stdout=subprocess.PIPE,
@@ -153,17 +155,30 @@ def probe_llvm_objdump(objdump_path: Optional[str], clang_path: Optional[str] = 
                 )
                 bpf_disasm_ok = (p_dump.returncode == 0 and "exit" in p_dump.stdout.lower())
 
+    if not disasm_tested:
+        # If no BPF object could be compiled to test disassembly directly,
+        # verify llvm-objdump target registration and disassembly flags
+        has_bpf_target = bool(re.search(r"registered targets:.*?\bbpf\b", stdout, re.IGNORECASE | re.DOTALL))
+        code_help, help_out, _ = run_cmd([path, "--help"])
+        has_disasm_flag = (code_help == 0 and ("--disassemble" in help_out or "-d" in help_out))
+        bpf_disasm_ok = has_bpf_target and has_disasm_flag
+
     if not bpf_disasm_ok:
-        # Fall back to testing llvm-objdump --version mentioning bpf or help
-        _, help_out, _ = run_cmd([path, "--help"])
-        bpf_disasm_ok = True  # If objdump ran and returned version, it is functional
+        return {
+            "ok": False,
+            "path": path,
+            "version": version,
+            "version_line": version_line,
+            "bpf_inspection_supported": False,
+            "error": f"llvm-objdump at {path} does not support BPF ELF disassembly or inspection.",
+        }
 
     return {
         "ok": True,
         "path": path,
         "version": version,
         "version_line": version_line,
-        "bpf_inspection_supported": bpf_disasm_ok,
+        "bpf_inspection_supported": True,
     }
 
 

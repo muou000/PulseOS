@@ -3,8 +3,10 @@
 
 import json
 import os
+import shutil
 import subprocess
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -75,6 +77,42 @@ class TestBpfProbe(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         output = result.stdout + result.stderr
         self.assertIn("llvm-objdump", output.lower())
+
+    def test_non_disassembling_llvm_objdump_exits_nonzero(self):
+        """When llvm-objdump only reports a version but cannot disassemble BPF, probe must fail."""
+        with tempfile.NamedTemporaryFile("w", suffix=".sh", delete=False) as f:
+            f.write("#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then echo \"mock-objdump version 1.0.0\"; exit 0; fi\nexit 1\n")
+            script_path = f.name
+        try:
+            os.chmod(script_path, 0o755)
+            result = subprocess.run(
+                [sys.executable, str(PROBE_SCRIPT), "--host-only", "--llvm-objdump", script_path, "--json"],
+                capture_output=True,
+                text=True,
+            )
+            self.assertNotEqual(result.returncode, 0, "Probe must exit non-zero for mock non-disassembling executable")
+            data = json.loads(result.stdout)
+            self.assertFalse(data.get("host_ok"))
+            self.assertFalse(data.get("ok"))
+            self.assertFalse(data["llvm_objdump"].get("ok"))
+            self.assertFalse(data["llvm_objdump"].get("bpf_inspection_supported"))
+        finally:
+            if os.path.exists(script_path):
+                os.remove(script_path)
+
+        true_bin = shutil.which("true")
+        if true_bin:
+            result = subprocess.run(
+                [sys.executable, str(PROBE_SCRIPT), "--host-only", "--llvm-objdump", true_bin, "--json"],
+                capture_output=True,
+                text=True,
+            )
+            self.assertNotEqual(result.returncode, 0, "Probe must exit non-zero when llvm-objdump is /usr/bin/true")
+            data = json.loads(result.stdout)
+            self.assertFalse(data.get("host_ok"))
+            self.assertFalse(data.get("ok"))
+            self.assertFalse(data["llvm_objdump"].get("ok"))
+            self.assertFalse(data["llvm_objdump"].get("bpf_inspection_supported"))
 
     def test_host_probe_succeeds_and_reports_versions(self):
         """On a machine with clang, llvm-objdump, and libbpf installed, --host-only exits 0 and reports versions."""
