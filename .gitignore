@@ -16,3 +16,9 @@ kernel-*
 vendor/**/target/
 rootfs/base/*.tar.xz
 rootfs/base/*.tar.gz
+*.o
+*.bpf.o
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
