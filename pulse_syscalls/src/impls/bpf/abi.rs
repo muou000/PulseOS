@@ -163,9 +163,24 @@ impl BpfCmd {
     }
 
     pub fn is_deferred(self) -> bool {
-        // Recognized commands are currently deferred in this ticket.
-        true
+        !matches!(self, Self::MapCreate | Self::ObjGetInfoByFd)
     }
+
+    /// Bytes of `union bpf_attr` consumed by an implemented command, i.e. the
+    /// end of its last field. Linux `CHECK_ATTR` requires the rest to be zero.
+    pub fn attr_used_size(self) -> usize {
+        match self {
+            Self::MapCreate => core::mem::size_of::<BpfMapCreateAttr>(),
+            Self::ObjGetInfoByFd => core::mem::size_of::<BpfObjGetInfoAttr>(),
+            _ => core::mem::size_of::<BpfAttr>(),
+        }
+    }
+}
+
+/// Rejects non-zero bytes after the command's last attribute field with
+/// `EINVAL`, matching Linux `CHECK_ATTR`.
+pub fn check_attr_unused_tail(cmd: BpfCmd, attr: &BpfAttr) -> Result<(), LinuxError> {
+    attr.check_unused_tail(cmd)
 }
 
 #[repr(C, align(8))]
@@ -340,6 +355,20 @@ impl Default for BpfAttr {
     }
 }
 
+impl BpfAttr {
+    /// Rejects non-zero bytes after the command's last attribute field with
+    /// `EINVAL`, matching Linux `CHECK_ATTR`.
+    pub fn check_unused_tail(&self, cmd: BpfCmd) -> Result<(), LinuxError> {
+        // SAFETY: every byte of the union is initialized via `raw`.
+        let raw = unsafe { &self.raw };
+        if raw[cmd.attr_used_size()..].iter().any(|&b| b != 0) {
+            Err(LinuxError::EINVAL)
+        } else {
+            Ok(())
+        }
+    }
+}
+
 const _: () = {
     assert!(core::mem::size_of::<BpfAttr>() == 144);
     assert!(core::mem::align_of::<BpfAttr>() == 8);
@@ -411,6 +440,7 @@ pub fn validate_user_attr_range(attr: usize, size: usize) -> Result<(), LinuxErr
     };
     #[cfg(target_os = "none")]
     {
+        let _ = end;
         pulse_core::task::uaccess::validate_user_range(attr, size)
             .map_err(|_| LinuxError::EFAULT)?;
     }

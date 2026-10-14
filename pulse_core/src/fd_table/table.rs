@@ -257,7 +257,7 @@ impl FdTable {
         Ok(())
     }
 
-    pub fn insert_from(&mut self, min_fd: usize, entry: FdEntry) -> LinuxResult<usize> {
+    pub fn next_available_fd(&self, min_fd: usize) -> LinuxResult<usize> {
         let mut found_fd = None;
         let min_word = min_fd / FD_CHUNK_SIZE;
 
@@ -282,18 +282,21 @@ impl FdTable {
             }
         }
 
-        let fd = match found_fd {
-            Some(fd) => fd,
+        match found_fd {
+            Some(fd) => Ok(fd),
             None => {
                 let current_cap = self.storage.chunks.len() * FD_CHUNK_SIZE;
                 let next_fd = core::cmp::max(min_fd, current_cap);
                 if next_fd >= FD_LIMIT {
                     return Err(LinuxError::EMFILE);
                 }
-                next_fd
+                Ok(next_fd)
             }
-        };
+        }
+    }
 
+    pub fn insert_from(&mut self, min_fd: usize, entry: FdEntry) -> LinuxResult<usize> {
+        let fd = self.next_available_fd(min_fd)?;
         self.insert_at(fd, entry)?;
         Ok(fd)
     }
