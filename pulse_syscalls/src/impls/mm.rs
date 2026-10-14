@@ -277,61 +277,72 @@ pub fn sys_mmap(
             }
         }
     }
-    if file_backed && file.as_ref().and_then(|file| file.location()).is_none() {
-        return -LinuxError::ENODEV.code() as isize;
-    }
     let Some(aligned_length) = page_align_up(length) else {
         return -LinuxError::EINVAL.code() as isize;
     };
 
-    let file_mapping = if let Some(file) = file.as_ref() {
-        let location = file
-            .location()
-            .expect("file-backed mmap location checked before mutation");
-        if location
-            .absolute_path()
-            .is_ok_and(|path| path.as_str() == "/dev/zero")
-        {
-            None
+    let prepared = if file_backed {
+        let file = file.as_ref().unwrap();
+        if let Some(custom_prepared) = file.mmap_prepared(aligned_length, map_flags, offset, is_shared) {
+            match custom_prepared {
+                Ok(p) => p,
+                Err(e) => return -e.code() as isize,
+            }
         } else {
-            let file_flags = file
-                .mmap_file_flags()
-                .unwrap_or_else(|| file_flags_for_mapping(map_flags));
-            let write_access = if is_shared {
-                file.mmap_write_access()
+            let Some(location) = file.location() else {
+                return -LinuxError::ENODEV.code() as isize;
+            };
+            if location
+                .absolute_path()
+                .is_ok_and(|path| path.as_str() == "/dev/zero")
+            {
+                match axmm::PreparedMapping::anonymous(
+                    aligned_length,
+                    map_flags,
+                    is_shared,
+                    flags & MAP_GROWSDOWN as usize != 0,
+                ) {
+                    Ok(p) => p,
+                    Err(error) => return -LinuxError::from(error).code() as isize,
+                }
             } else {
-                None
-            };
-            let cached = match CachedFile::get_or_create(location) {
-                Ok(cached) => cached,
-                Err(_) => return -LinuxError::ENODEV.code() as isize,
-            };
-            Some((cached, file_flags, write_access))
+                let file_flags = file
+                    .mmap_file_flags()
+                    .unwrap_or_else(|| file_flags_for_mapping(map_flags));
+                let write_access = if is_shared {
+                    file.mmap_write_access()
+                } else {
+                    None
+                };
+                let cached = match CachedFile::get_or_create(location) {
+                    Ok(cached) => cached,
+                    Err(_) => return -LinuxError::ENODEV.code() as isize,
+                };
+                match axmm::PreparedMapping::file(
+                    aligned_length,
+                    map_flags,
+                    cached,
+                    file_flags,
+                    offset,
+                    length,
+                    is_shared,
+                    write_access,
+                ) {
+                    Ok(p) => p,
+                    Err(error) => return -LinuxError::from(error).code() as isize,
+                }
+            }
         }
     } else {
-        None
-    };
-    let prepared = match file_mapping {
-        Some((cached, file_flags, write_access)) => axmm::PreparedMapping::file(
-            aligned_length,
-            map_flags,
-            cached,
-            file_flags,
-            offset,
-            length,
-            is_shared,
-            write_access,
-        ),
-        None => axmm::PreparedMapping::anonymous(
+        match axmm::PreparedMapping::anonymous(
             aligned_length,
             map_flags,
             is_shared,
             flags & MAP_GROWSDOWN as usize != 0,
-        ),
-    };
-    let prepared = match prepared {
-        Ok(prepared) => prepared,
-        Err(error) => return -LinuxError::from(error).code() as isize,
+        ) {
+            Ok(p) => p,
+            Err(error) => return -LinuxError::from(error).code() as isize,
+        }
     };
     let aligned_addr = VirtAddr::from(addr & !(PAGE_SIZE - 1));
     let placement = if flags & MAP_FIXED_NOREPLACE as usize != 0 {

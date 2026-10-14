@@ -13,12 +13,14 @@ use pulse_bpf_schema::{PerfEventContext, TracepointId};
 #[cfg(target_os = "none")]
 use super::{
     interpreter::BpfVmError,
+    map::PerfEventOutputSink,
     program::{BpfProgType, BpfProgram},
 };
 
 #[cfg(not(target_os = "none"))]
 use super::{
     core_interpreter::BpfVmError,
+    core_map::PerfEventOutputSink,
     core_program::{BpfProgType, BpfProgram},
 };
 
@@ -31,6 +33,15 @@ pub const PERF_EVENT_IOC_SET_BPF: u32 = 0x40042408;
 
 pub const PERF_COUNT_SW_CPU_CLOCK: u64 = 0;
 pub const PERF_COUNT_SW_TASK_CLOCK: u64 = 1;
+pub const PERF_COUNT_SW_BPF_OUTPUT: u64 = 10;
+
+pub const PERF_RECORD_LOST: u32 = 2;
+pub const PERF_RECORD_SAMPLE: u32 = 9;
+
+pub const PERF_MMAP_PAGE_OFFSET_HEAD: usize = 1024;
+pub const PERF_MMAP_PAGE_OFFSET_TAIL: usize = 1032;
+pub const PERF_MMAP_PAGE_OFFSET_DATA_OFFSET: usize = 1040;
+pub const PERF_MMAP_PAGE_OFFSET_DATA_SIZE: usize = 1048;
 
 pub const PERF_TYPE_SOFTWARE: u32 = 1;
 pub const PERF_TYPE_TRACEPOINT: u32 = 2;
@@ -135,6 +146,7 @@ pub fn is_in_sampling(cpu: usize) -> bool {
 pub enum PerfEventClock {
     CpuClock,
     TaskClock,
+    BpfOutput,
     Tracepoint(TracepointId),
 }
 
@@ -153,6 +165,261 @@ pub struct PerfEventSpec {
     pub cloexec: bool,
 }
 
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PerfEventHeader {
+    pub event_type: u32,
+    pub misc: u16,
+    pub size: u16,
+}
+
+pub struct PerfBuffer {
+    data_size: usize,
+    raw_base: usize,
+    total_size: usize,
+    lost_count: AtomicU64,
+    lock: spin::Mutex<()>,
+    #[cfg(target_os = "none")]
+    shared_frame: Option<Arc<axmm::SharedFrame>>,
+    #[cfg(not(target_os = "none"))]
+    _host_storage: Option<alloc::vec::Vec<u8>>,
+}
+
+impl core::fmt::Debug for PerfBuffer {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("PerfBuffer")
+            .field("data_size", &self.data_size)
+            .field("total_size", &self.total_size)
+            .field("head", &self.data_head())
+            .field("tail", &self.data_tail())
+            .field("lost", &self.lost_count())
+            .finish()
+    }
+}
+
+impl PerfBuffer {
+    #[cfg(target_os = "none")]
+    pub fn new(nr_data_pages: usize) -> Result<Arc<Self>, LinuxError> {
+        if nr_data_pages == 0 || !nr_data_pages.is_power_of_two() {
+            return Err(LinuxError::EINVAL);
+        }
+        let page_count = 1 + nr_data_pages;
+        let vaddr = axalloc::global_allocator()
+            .alloc_pages(page_count, memory_addr::PAGE_SIZE_4K)
+            .map_err(|_| LinuxError::ENOMEM)?;
+        unsafe {
+            core::ptr::write_bytes(vaddr as *mut u8, 0, page_count * 4096);
+        }
+        let shared_frame = Arc::new(axmm::SharedFrame { vaddr, page_count });
+        let buf = Arc::new(Self {
+            data_size: nr_data_pages * 4096,
+            raw_base: vaddr,
+            total_size: page_count * 4096,
+            lost_count: AtomicU64::new(0),
+            lock: spin::Mutex::new(()),
+            shared_frame: Some(shared_frame),
+        });
+        buf.init_header();
+        Ok(buf)
+    }
+
+    #[cfg(not(target_os = "none"))]
+    pub fn new(nr_data_pages: usize) -> Result<Arc<Self>, LinuxError> {
+        if nr_data_pages == 0 || !nr_data_pages.is_power_of_two() {
+            return Err(LinuxError::EINVAL);
+        }
+        let total_size = (1 + nr_data_pages) * 4096;
+        let mut storage = alloc::vec![0u8; total_size];
+        let raw_base = storage.as_mut_ptr() as usize;
+        let buf = Arc::new(Self {
+            data_size: nr_data_pages * 4096,
+            raw_base,
+            total_size,
+            lost_count: AtomicU64::new(0),
+            lock: spin::Mutex::new(()),
+            _host_storage: Some(storage),
+        });
+        buf.init_header();
+        Ok(buf)
+    }
+
+    fn init_header(&self) {
+        unsafe {
+            let base = self.raw_base as *mut u8;
+            *(base as *mut u32) = 1;
+            *(base.add(4) as *mut u32) = 1;
+            *(base.add(72) as *mut u32) = 1024;
+            *((base.add(PERF_MMAP_PAGE_OFFSET_HEAD)) as *mut u64) = 0;
+            *((base.add(PERF_MMAP_PAGE_OFFSET_TAIL)) as *mut u64) = 0;
+            *((base.add(PERF_MMAP_PAGE_OFFSET_DATA_OFFSET)) as *mut u64) = 4096;
+            *((base.add(PERF_MMAP_PAGE_OFFSET_DATA_SIZE)) as *mut u64) = self.data_size as u64;
+        }
+    }
+
+    pub fn data_head(&self) -> u64 {
+        unsafe {
+            let ptr = (self.raw_base + PERF_MMAP_PAGE_OFFSET_HEAD) as *const AtomicU64;
+            (*ptr).load(Ordering::Acquire)
+        }
+    }
+
+    pub fn data_tail(&self) -> u64 {
+        unsafe {
+            let ptr = (self.raw_base + PERF_MMAP_PAGE_OFFSET_TAIL) as *const AtomicU64;
+            (*ptr).load(Ordering::Acquire)
+        }
+    }
+
+    pub fn set_data_head(&self, val: u64) {
+        unsafe {
+            let ptr = (self.raw_base + PERF_MMAP_PAGE_OFFSET_HEAD) as *const AtomicU64;
+            (*ptr).store(val, Ordering::Release);
+        }
+    }
+
+    pub fn set_data_tail(&self, val: u64) {
+        unsafe {
+            let ptr = (self.raw_base + PERF_MMAP_PAGE_OFFSET_TAIL) as *const AtomicU64;
+            (*ptr).store(val, Ordering::Release);
+        }
+    }
+
+    pub fn data_size(&self) -> usize {
+        self.data_size
+    }
+
+    pub fn total_size(&self) -> usize {
+        self.total_size
+    }
+
+    pub fn raw_base(&self) -> usize {
+        self.raw_base
+    }
+
+    pub fn lost_count(&self) -> u64 {
+        self.lost_count.load(Ordering::Relaxed)
+    }
+
+    #[cfg(target_os = "none")]
+    pub fn shared_frame(&self) -> Option<Arc<axmm::SharedFrame>> {
+        self.shared_frame.clone()
+    }
+
+    pub fn write_circular(&self, offset_in_data: usize, bytes: &[u8]) {
+        let data_start = (self.raw_base + 4096) as *mut u8;
+        let space_to_end = self.data_size - offset_in_data;
+        if bytes.len() <= space_to_end {
+            unsafe {
+                core::ptr::copy_nonoverlapping(bytes.as_ptr(), data_start.add(offset_in_data), bytes.len());
+            }
+        } else {
+            unsafe {
+                core::ptr::copy_nonoverlapping(bytes.as_ptr(), data_start.add(offset_in_data), space_to_end);
+                core::ptr::copy_nonoverlapping(
+                    bytes.as_ptr().add(space_to_end),
+                    data_start,
+                    bytes.len() - space_to_end,
+                );
+            }
+        }
+    }
+
+    pub fn read_circular(&self, offset_in_data: usize, buf: &mut [u8]) {
+        let data_start = (self.raw_base + 4096) as *const u8;
+        let space_to_end = self.data_size - offset_in_data;
+        if buf.len() <= space_to_end {
+            unsafe {
+                core::ptr::copy_nonoverlapping(data_start.add(offset_in_data), buf.as_mut_ptr(), buf.len());
+            }
+        } else {
+            unsafe {
+                core::ptr::copy_nonoverlapping(data_start.add(offset_in_data), buf.as_mut_ptr(), space_to_end);
+                core::ptr::copy_nonoverlapping(
+                    data_start,
+                    buf.as_mut_ptr().add(space_to_end),
+                    buf.len() - space_to_end,
+                );
+            }
+        }
+    }
+
+    fn write_sample_record(&self, at_head: u64, data: &[u8], rec_size: usize) {
+        let mut header_buf = [0u8; 12];
+        let header = PerfEventHeader {
+            event_type: PERF_RECORD_SAMPLE,
+            misc: 0,
+            size: rec_size as u16,
+        };
+        header_buf[0..4].copy_from_slice(&header.event_type.to_ne_bytes());
+        header_buf[4..6].copy_from_slice(&header.misc.to_ne_bytes());
+        header_buf[6..8].copy_from_slice(&header.size.to_ne_bytes());
+        header_buf[8..12].copy_from_slice(&(data.len() as u32).to_ne_bytes());
+
+        let mut offset = (at_head % self.data_size as u64) as usize;
+        self.write_circular(offset, &header_buf);
+        offset = (offset + 12) % self.data_size;
+
+        self.write_circular(offset, data);
+        offset = (offset + data.len()) % self.data_size;
+
+        let pad_len = rec_size - (12 + data.len());
+        if pad_len > 0 {
+            let zeroes = [0u8; 8];
+            self.write_circular(offset, &zeroes[..pad_len]);
+        }
+    }
+
+    pub fn output_sample(&self, data: &[u8]) -> Result<(), LinuxError> {
+        let _guard = self.lock.lock();
+        let payload_len = data.len();
+        let sample_rec_size = (8 + 4 + payload_len + 7) & !7;
+        if sample_rec_size > self.data_size {
+            return Err(LinuxError::E2BIG);
+        }
+
+        let head = self.data_head();
+        let tail = self.data_tail();
+        let used = head.wrapping_sub(tail) as usize;
+        if used > self.data_size {
+            return Err(LinuxError::EINVAL);
+        }
+        let available = self.data_size - used;
+
+        let lost_rec_size = 24usize;
+        let pending_lost = self.lost_count.load(Ordering::Relaxed);
+
+        if pending_lost > 0 && available >= lost_rec_size + sample_rec_size {
+            self.lost_count.store(0, Ordering::Relaxed);
+            let mut lost_buf = [0u8; 24];
+            let lost_header = PerfEventHeader {
+                event_type: PERF_RECORD_LOST,
+                misc: 0,
+                size: lost_rec_size as u16,
+            };
+            lost_buf[0..4].copy_from_slice(&lost_header.event_type.to_ne_bytes());
+            lost_buf[4..6].copy_from_slice(&lost_header.misc.to_ne_bytes());
+            lost_buf[6..8].copy_from_slice(&lost_header.size.to_ne_bytes());
+            lost_buf[8..16].copy_from_slice(&0u64.to_ne_bytes());
+            lost_buf[16..24].copy_from_slice(&pending_lost.to_ne_bytes());
+
+            let offset = (head % self.data_size as u64) as usize;
+            self.write_circular(offset, &lost_buf);
+            let next_head = head.wrapping_add(lost_rec_size as u64);
+
+            self.write_sample_record(next_head, data, sample_rec_size);
+            self.set_data_head(next_head.wrapping_add(sample_rec_size as u64));
+            Ok(())
+        } else if available >= sample_rec_size {
+            self.write_sample_record(head, data, sample_rec_size);
+            self.set_data_head(head.wrapping_add(sample_rec_size as u64));
+            Ok(())
+        } else {
+            self.lost_count.fetch_add(1, Ordering::Relaxed);
+            Err(LinuxError::ENOSPC)
+        }
+    }
+}
+
 struct PerfEventState {
     enabled: bool,
     accumulated_ns: u64,
@@ -166,6 +433,7 @@ struct PerfEventState {
 pub struct PerfEvent {
     spec: PerfEventSpec,
     state: spin::Mutex<PerfEventState>,
+    buffer: spin::Mutex<Option<Arc<PerfBuffer>>>,
     delivered_samples: AtomicU64,
     re_entry_drops: AtomicU64,
     helper_failures: AtomicU64,
@@ -187,6 +455,7 @@ impl PerfEvent {
                 last_sample_ns: now_ns,
                 attached_prog: None,
             }),
+            buffer: spin::Mutex::new(None),
             delivered_samples: AtomicU64::new(0),
             re_entry_drops: AtomicU64::new(0),
             helper_failures: AtomicU64::new(0),
@@ -497,6 +766,9 @@ impl PerfEvent {
                     return Err(LinuxError::EINVAL);
                 }
             }
+            PerfEventClock::BpfOutput => {
+                return Err(LinuxError::EINVAL);
+            }
         }
         state.attached_prog = Some(prog);
         if let PerfEventClock::Tracepoint(tp_id) = self.spec.clock {
@@ -521,6 +793,29 @@ impl PerfEvent {
 
     pub fn attached_prog(&self) -> Option<Arc<BpfProgram>> {
         self.state.lock().attached_prog.clone()
+    }
+
+    pub fn set_buffer(&self, buffer: Arc<PerfBuffer>) {
+        *self.buffer.lock() = Some(buffer);
+    }
+
+    pub fn buffer(&self) -> Option<Arc<PerfBuffer>> {
+        self.buffer.lock().clone()
+    }
+
+    pub fn output_sample(&self, data: &[u8]) -> Result<(), LinuxError> {
+        let buf = self.buffer.lock().clone().ok_or(LinuxError::ENOENT)?;
+        buf.output_sample(data)
+    }
+}
+
+impl PerfEventOutputSink for PerfEvent {
+    fn output_sample(&self, data: &[u8]) -> Result<(), LinuxError> {
+        self.output_sample(data)
+    }
+
+    fn as_any(&self) -> &dyn core::any::Any {
+        self
     }
 }
 

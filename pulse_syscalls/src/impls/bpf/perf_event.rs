@@ -158,6 +158,7 @@ pub fn validate_perf_event_attr(
         PERF_TYPE_SOFTWARE => match attr.config {
             PERF_COUNT_SW_CPU_CLOCK => PerfEventClock::CpuClock,
             PERF_COUNT_SW_TASK_CLOCK => PerfEventClock::TaskClock,
+            PERF_COUNT_SW_BPF_OUTPUT => PerfEventClock::BpfOutput,
             _ => return Err(LinuxError::EOPNOTSUPP),
         },
         PERF_TYPE_TRACEPOINT => {
@@ -254,6 +255,7 @@ pub fn validate_perf_event_coupling(
     match (clock, scope) {
         (PerfEventClock::CpuClock, PerfEventScope::PerCpu { .. }) => Ok(()),
         (PerfEventClock::TaskClock, PerfEventScope::Task { .. }) => Ok(()),
+        (PerfEventClock::BpfOutput, PerfEventScope::PerCpu { .. }) => Ok(()),
         (PerfEventClock::Tracepoint(_), _) => Ok(()),
         _ => Err(LinuxError::EINVAL),
     }

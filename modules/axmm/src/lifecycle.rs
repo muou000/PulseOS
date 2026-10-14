@@ -53,6 +53,19 @@ impl PreparedMapping {
         Self::with_backend(size, flags, backend)
     }
 
+    pub fn shared_frame(
+        size: usize,
+        flags: MappingFlags,
+        shared_frame: Arc<crate::backend::SharedFrame>,
+    ) -> AxResult<Self> {
+        Self::validate_size(size)?;
+        let backend = Backend::Shared {
+            shared_frame,
+            align: PageSize::Size4K,
+        };
+        Self::with_backend(size, flags, backend)
+    }
+
     pub fn file(
         size: usize,
         flags: MappingFlags,

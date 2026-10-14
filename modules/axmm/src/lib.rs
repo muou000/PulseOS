@@ -32,7 +32,7 @@ pub use self::{
         PageFaultResult, PageFaultWork, PageTableLockManager, TlbShootdown, drive_page_fault,
     },
     backend::{
-        AnonPageLoad, AnonPagePrepared, Backend, FilePageLoad, FilePagePrepared, FileWritebacks,
+        AnonPageLoad, AnonPagePrepared, Backend, FilePageLoad, FilePagePrepared, FileWritebacks, SharedFrame,
     },
 };
 

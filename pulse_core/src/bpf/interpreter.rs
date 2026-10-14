@@ -598,6 +598,9 @@ pub fn execute(
                                         regs[BPF_REG_0 as usize] = VmValue::Null;
                                     }
                                 }
+                                super::map::BpfMapType::PerfEventArray => {
+                                    regs[BPF_REG_0 as usize] = VmValue::Null;
+                                }
                             }
 
                             regs[1..=5].fill(VmValue::Uninit);
@@ -704,6 +707,81 @@ pub fn execute(
                         BPF_FUNC_GET_SMP_PROCESSOR_ID => {
                             let cpu = env.get_smp_processor_id() as u64;
                             regs[BPF_REG_0 as usize] = VmValue::Scalar(cpu);
+                            regs[1..=5].fill(VmValue::Uninit);
+                            pc += 1;
+                            continue;
+                        }
+
+                        BPF_FUNC_PERF_EVENT_OUTPUT => {
+                            let map_idx = match regs[BPF_REG_2 as usize] {
+                                VmValue::PtrMap { map_idx } => map_idx,
+                                _ => return Err(BpfVmError::InvalidInstruction),
+                            };
+                            let map = maps.get(map_idx).ok_or(BpfVmError::OutOfBoundsAccess)?;
+                            if map.spec().map_type() != super::map::BpfMapType::PerfEventArray {
+                                return Err(BpfVmError::InvalidInstruction);
+                            }
+                            let flags = regs[BPF_REG_3 as usize].as_scalar()?;
+                            let cpu_idx = (flags & BPF_F_INDEX_MASK) as u32;
+                            let current_cpu = env.get_smp_processor_id();
+                            let target_cpu = if cpu_idx == (BPF_F_CURRENT_CPU as u32) {
+                                current_cpu
+                            } else {
+                                cpu_idx
+                            };
+                            if target_cpu >= map.spec().max_entries() || target_cpu != current_cpu {
+                                regs[BPF_REG_0 as usize] = VmValue::Scalar((-(LinuxError::EINVAL.code() as i64)) as u64);
+                                regs[1..=5].fill(VmValue::Uninit);
+                                pc += 1;
+                                continue;
+                            }
+                            let size = regs[BPF_REG_5 as usize].as_scalar()? as usize;
+                            if size > 65535 {
+                                return Err(BpfVmError::OutOfBoundsAccess);
+                            }
+
+                            let mut data_buf = alloc::vec![0u8; size];
+                            match regs[BPF_REG_4 as usize] {
+                                VmValue::PtrStack { offset } => {
+                                    if offset.checked_add(size).map_or(true, |end| end > BPF_STACK_SIZE) {
+                                        return Err(BpfVmError::OutOfBoundsAccess);
+                                    }
+                                    data_buf.copy_from_slice(&stack[offset..offset + size]);
+                                }
+                                VmValue::PtrMapValueArray {
+                                    map_idx: src_map,
+                                    entry_idx,
+                                    offset,
+                                } => {
+                                    let src = maps.get(src_map).ok_or(BpfVmError::OutOfBoundsAccess)?;
+                                    src.read_value_bytes(&entry_idx.to_ne_bytes(), offset, &mut data_buf)
+                                        .map_err(BpfVmError::HelperFailed)?;
+                                }
+                                VmValue::PtrMapValueHash {
+                                    map_idx: src_map,
+                                    lookup_id,
+                                    offset,
+                                } => {
+                                    let src = maps.get(src_map).ok_or(BpfVmError::OutOfBoundsAccess)?;
+                                    let l = lookups.get(lookup_id as usize).ok_or(BpfVmError::OutOfBoundsAccess)?;
+                                    src.read_value_bytes(&l.key[..l.key_len], offset, &mut data_buf)
+                                        .map_err(BpfVmError::HelperFailed)?;
+                                }
+                                VmValue::PtrContext { offset } => {
+                                    if offset.checked_add(size).map_or(true, |end| end > context.len()) {
+                                        return Err(BpfVmError::OutOfBoundsAccess);
+                                    }
+                                    data_buf.copy_from_slice(&context[offset..offset + size]);
+                                }
+                                _ => return Err(BpfVmError::InvalidInstruction),
+                            }
+
+                            let ret = match map.output_perf_event(target_cpu, &data_buf) {
+                                Ok(()) => 0,
+                                Err(e) => (-(e.code() as i64)) as u64,
+                            };
+
+                            regs[BPF_REG_0 as usize] = VmValue::Scalar(ret);
                             regs[1..=5].fill(VmValue::Uninit);
                             pc += 1;
                             continue;

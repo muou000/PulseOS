@@ -8,8 +8,8 @@ use axerrno::LinuxError;
 use super::{
     perf_event::{
         register_active_perf_event, unregister_active_perf_event, PerfEvent, PerfEventClock,
-        PERF_COUNT_SW_CPU_CLOCK, PERF_COUNT_SW_TASK_CLOCK, PERF_TYPE_SOFTWARE,
-        PERF_TYPE_TRACEPOINT,
+        PERF_COUNT_SW_CPU_CLOCK, PERF_COUNT_SW_TASK_CLOCK, PERF_COUNT_SW_BPF_OUTPUT,
+        PERF_TYPE_SOFTWARE, PERF_TYPE_TRACEPOINT,
     },
     program::BpfProgram,
 };
@@ -132,6 +132,11 @@ impl BpfLink {
                 BPF_PERF_EVENT_TRACEPOINT,
                 tp_id.as_u32() as u64,
                 PERF_TYPE_TRACEPOINT,
+            ),
+            PerfEventClock::BpfOutput => (
+                BPF_PERF_EVENT_EVENT,
+                PERF_COUNT_SW_BPF_OUTPUT,
+                PERF_TYPE_SOFTWARE,
             ),
         };
         let mut info = BpfLinkInfo::default();
