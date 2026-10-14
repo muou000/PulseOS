@@ -16,7 +16,11 @@ mod tests {
 
     use super::core_map::*;
     use crate::impls::bpf::{
-        abi::{BpfAttr, BpfCmd, check_attr_unused_tail},
+        abi::{BpfAttr, BpfCmd, BpfMapElemAttr, check_attr_unused_tail},
+        elem::{
+            bpf_map_delete_elem, bpf_map_get_next_key, bpf_map_lookup_elem, bpf_map_update_elem,
+            BpfMapOps,
+        },
         info::copy_obj_info_to_user,
     };
 
@@ -260,15 +264,56 @@ mod tests {
             check_attr_unused_tail(BpfCmd::ObjGetInfoByFd, &attr),
             Err(LinuxError::EINVAL)
         );
+
+        let mut attr = BpfAttr::default();
+        unsafe { attr.raw[15] = 1 };
+        assert_eq!(check_attr_unused_tail(BpfCmd::MapDeleteElem, &attr), Ok(()));
+        unsafe { attr.raw[16] = 1 };
+        assert_eq!(
+            check_attr_unused_tail(BpfCmd::MapDeleteElem, &attr),
+            Err(LinuxError::EINVAL)
+        );
+
+        let mut attr = BpfAttr::default();
+        unsafe { attr.raw[23] = 1 };
+        assert_eq!(check_attr_unused_tail(BpfCmd::MapGetNextKey, &attr), Ok(()));
+        unsafe { attr.raw[24] = 1 };
+        assert_eq!(
+            check_attr_unused_tail(BpfCmd::MapGetNextKey, &attr),
+            Err(LinuxError::EINVAL)
+        );
+
+        let mut attr = BpfAttr::default();
+        unsafe { attr.raw[31] = 1 };
+        assert_eq!(check_attr_unused_tail(BpfCmd::MapLookupElem, &attr), Ok(()));
+        assert_eq!(check_attr_unused_tail(BpfCmd::MapUpdateElem, &attr), Ok(()));
+        unsafe { attr.raw[32] = 1 };
+        assert_eq!(
+            check_attr_unused_tail(BpfCmd::MapLookupElem, &attr),
+            Err(LinuxError::EINVAL)
+        );
+        assert_eq!(
+            check_attr_unused_tail(BpfCmd::MapUpdateElem, &attr),
+            Err(LinuxError::EINVAL)
+        );
     }
 
     #[test]
     fn bpf_commands_implemented_by_map_slice() {
-        assert!(!BpfCmd::MapCreate.is_deferred());
-        assert!(!BpfCmd::ObjGetInfoByFd.is_deferred());
+        let implemented = [
+            BpfCmd::MapCreate,
+            BpfCmd::MapLookupElem,
+            BpfCmd::MapUpdateElem,
+            BpfCmd::MapDeleteElem,
+            BpfCmd::MapGetNextKey,
+            BpfCmd::ObjGetInfoByFd,
+        ];
+        for &cmd in &implemented {
+            assert!(!cmd.is_deferred(), "{cmd:?} must not be deferred");
+        }
         for &cmd in &BpfCmd::ALL {
-            if cmd != BpfCmd::MapCreate && cmd != BpfCmd::ObjGetInfoByFd {
-                assert!(cmd.is_deferred(), "{cmd:?}");
+            if !implemented.contains(&cmd) {
+                assert!(cmd.is_deferred(), "{cmd:?} must be deferred");
             }
         }
     }
@@ -357,6 +402,249 @@ mod tests {
         let mut user = FakeUser::new(0x1000, 256);
         assert_eq!(run_info(&mut user, 0, 88, &kernel), Err(LinuxError::EFAULT));
         assert_eq!(run_info(&mut user, 0x9000, 88, &kernel), Err(LinuxError::EFAULT));
+    }
+
+    impl BpfMapOps for BpfMap {
+        fn key_size(&self) -> usize {
+            self.spec().key_size() as usize
+        }
+
+        fn value_size(&self) -> usize {
+            self.spec().value_size() as usize
+        }
+
+        fn lookup(&self, key: &[u8], val_out: &mut [u8]) -> Result<(), LinuxError> {
+            self.lookup(key, val_out)
+        }
+
+        fn update(&self, key: &[u8], val: &[u8], flags: u64) -> Result<(), LinuxError> {
+            self.update(key, val, flags)
+        }
+
+        fn delete(&self, key: &[u8]) -> Result<(), LinuxError> {
+            self.delete(key)
+        }
+
+        fn get_next_key(&self, key: Option<&[u8]>, next_key_out: &mut [u8]) -> Result<(), LinuxError> {
+            self.get_next_key(key, next_key_out)
+        }
+    }
+
+    #[test]
+    fn bpf_map_elem_control_plane_error_precedence_and_bounded_copy() {
+        let mut req = hash_req();
+        req.key_size = 4;
+        req.value_size = 8;
+        req.max_entries = 2;
+        let map = BpfMap::create(BpfMapSpec::validate(&req).unwrap()).unwrap();
+
+        let mut user = FakeUser::new(0x1000, 0x1000);
+        let key_addr = 0x1100;
+        let val_addr = 0x1200;
+        let next_key_addr = 0x1300;
+        let out_of_bounds_addr = 0x9000;
+
+        // Write key=1 and val=42 into user memory
+        let key1 = 1u32.to_ne_bytes();
+        let val1 = [42u8; 8];
+        user.mem[key_addr - user.base..key_addr - user.base + 4].copy_from_slice(&key1);
+        user.mem[val_addr - user.base..val_addr - user.base + 8].copy_from_slice(&val1);
+
+        let user_cell = core::cell::RefCell::new(user);
+        let mut read = |addr, buf: &mut [u8]| {
+            let u = user_cell.borrow();
+            let r = u.range(addr, buf.len())?;
+            buf.copy_from_slice(&u.mem[r]);
+            Ok(())
+        };
+        let mut write = |addr, buf: &[u8]| {
+            let mut u = user_cell.borrow_mut();
+            let r = u.range(addr, buf.len())?;
+            u.mem[r].copy_from_slice(buf);
+            Ok(())
+        };
+
+        // 1. UPDATE with bad key/value pointer returns EFAULT (even if flags are invalid)
+        let bad_key_and_flag_attr = BpfMapElemAttr {
+            key: 0,
+            value_or_next_key: val_addr as u64,
+            flags: 99,
+            ..Default::default()
+        };
+        assert_eq!(
+            bpf_map_update_elem(&map, &bad_key_and_flag_attr, &mut read),
+            Err(LinuxError::EFAULT)
+        );
+
+        // 2. UPDATE with valid pointers but invalid flags returns EINVAL
+        let bad_flag_attr = BpfMapElemAttr {
+            key: key_addr as u64,
+            value_or_next_key: val_addr as u64,
+            flags: 99,
+            ..Default::default()
+        };
+        assert_eq!(
+            bpf_map_update_elem(&map, &bad_flag_attr, &mut read),
+            Err(LinuxError::EINVAL)
+        );
+
+        // 3. UPDATE with bad value pointer returns EFAULT
+        let bad_val_attr = BpfMapElemAttr {
+            key: key_addr as u64,
+            value_or_next_key: 0,
+            flags: BPF_ANY,
+            ..Default::default()
+        };
+        assert_eq!(
+            bpf_map_update_elem(&map, &bad_val_attr, &mut read),
+            Err(LinuxError::EFAULT)
+        );
+
+        // 4. UPDATE with valid pointers succeeds
+        let valid_update_attr = BpfMapElemAttr {
+            key: key_addr as u64,
+            value_or_next_key: val_addr as u64,
+            flags: BPF_NOEXIST,
+            ..Default::default()
+        };
+        assert_eq!(
+            bpf_map_update_elem(&map, &valid_update_attr, &mut read),
+            Ok(0)
+        );
+
+        // 5. LOOKUP with invalid flags returns EINVAL
+        let bad_lookup_flags = BpfMapElemAttr {
+            key: key_addr as u64,
+            value_or_next_key: val_addr as u64,
+            flags: 1,
+            ..Default::default()
+        };
+        assert_eq!(
+            bpf_map_lookup_elem(&map, &bad_lookup_flags, &mut read, &mut write),
+            Err(LinuxError::EINVAL)
+        );
+
+        // 6. LOOKUP with bad key pointer returns EFAULT
+        let bad_lookup_key = BpfMapElemAttr {
+            key: out_of_bounds_addr as u64,
+            value_or_next_key: val_addr as u64,
+            flags: 0,
+            ..Default::default()
+        };
+        assert_eq!(
+            bpf_map_lookup_elem(&map, &bad_lookup_key, &mut read, &mut write),
+            Err(LinuxError::EFAULT)
+        );
+
+        // 7. LOOKUP with non-existent key returns ENOENT even if value pointer is invalid
+        let missing_key_addr = 0x1400;
+        let missing_key = 99u32.to_ne_bytes();
+        user_cell.borrow_mut().mem[missing_key_addr - 0x1000..missing_key_addr - 0x1000 + 4]
+            .copy_from_slice(&missing_key);
+        let missing_lookup = BpfMapElemAttr {
+            key: missing_key_addr as u64,
+            value_or_next_key: 0, // bad pointer
+            flags: 0,
+            ..Default::default()
+        };
+        assert_eq!(
+            bpf_map_lookup_elem(&map, &missing_lookup, &mut read, &mut write),
+            Err(LinuxError::ENOENT)
+        );
+
+        // 8. LOOKUP on existent key with bad value pointer returns EFAULT
+        let bad_lookup_val = BpfMapElemAttr {
+            key: key_addr as u64,
+            value_or_next_key: 0,
+            flags: 0,
+            ..Default::default()
+        };
+        assert_eq!(
+            bpf_map_lookup_elem(&map, &bad_lookup_val, &mut read, &mut write),
+            Err(LinuxError::EFAULT)
+        );
+
+        // 9. LOOKUP on existent key with valid value pointer succeeds and writes value
+        let out_val_addr = 0x1500;
+        let valid_lookup = BpfMapElemAttr {
+            key: key_addr as u64,
+            value_or_next_key: out_val_addr as u64,
+            flags: 0,
+            ..Default::default()
+        };
+        assert_eq!(
+            bpf_map_lookup_elem(&map, &valid_lookup, &mut read, &mut write),
+            Ok(0)
+        );
+        let mut copied_val = [0u8; 8];
+        copied_val.copy_from_slice(&user_cell.borrow().mem[out_val_addr - 0x1000..out_val_addr - 0x1000 + 8]);
+        assert_eq!(copied_val, val1);
+
+        // 10. GET_NEXT_KEY with NULL key starts from the beginning
+        let null_key_iter = BpfMapElemAttr {
+            key: 0,
+            value_or_next_key: next_key_addr as u64,
+            flags: 0,
+            ..Default::default()
+        };
+        assert_eq!(
+            bpf_map_get_next_key(&map, &null_key_iter, &mut read, &mut write),
+            Ok(0)
+        );
+        let mut copied_key = [0u8; 4];
+        copied_key.copy_from_slice(&user_cell.borrow().mem[next_key_addr - 0x1000..next_key_addr - 0x1000 + 4]);
+        assert_eq!(copied_key, key1);
+
+        // 11. GET_NEXT_KEY at end returns ENOENT
+        let end_iter = BpfMapElemAttr {
+            key: key_addr as u64,
+            value_or_next_key: next_key_addr as u64,
+            flags: 0,
+            ..Default::default()
+        };
+        assert_eq!(
+            bpf_map_get_next_key(&map, &end_iter, &mut read, &mut write),
+            Err(LinuxError::ENOENT)
+        );
+
+        // 12. DELETE with non-zero flags returns EINVAL
+        let bad_del_flags = BpfMapElemAttr {
+            key: key_addr as u64,
+            flags: 1,
+            ..Default::default()
+        };
+        assert_eq!(
+            bpf_map_delete_elem(&map, &bad_del_flags, &mut read),
+            Err(LinuxError::EINVAL)
+        );
+
+        // 13. DELETE with bad key pointer returns EFAULT
+        let bad_del_key = BpfMapElemAttr {
+            key: 0,
+            flags: 0,
+            ..Default::default()
+        };
+        assert_eq!(
+            bpf_map_delete_elem(&map, &bad_del_key, &mut read),
+            Err(LinuxError::EFAULT)
+        );
+
+        // 14. DELETE with valid key succeeds
+        let valid_del = BpfMapElemAttr {
+            key: key_addr as u64,
+            flags: 0,
+            ..Default::default()
+        };
+        assert_eq!(
+            bpf_map_delete_elem(&map, &valid_del, &mut read),
+            Ok(0)
+        );
+
+        // After deletion, lookup returns ENOENT
+        assert_eq!(
+            bpf_map_lookup_elem(&map, &valid_lookup, &mut read, &mut write),
+            Err(LinuxError::ENOENT)
+        );
     }
 
     #[test]
@@ -519,5 +807,219 @@ mod tests {
         assert_eq!(BUDGET.live_maps(), 0);
         assert_eq!(BUDGET.charged_bytes(), 0);
     }
+
+    #[test]
+    fn bpf_map_array_element_lifecycle() {
+        let mut req = array_req();
+        req.key_size = 4;
+        req.value_size = 8;
+        req.max_entries = 4;
+        let spec = BpfMapSpec::validate(&req).unwrap();
+        let map = BpfMap::create(spec).unwrap();
+
+        // 1. Initial lookup on index 0 returns zeroes
+        let mut val = [0xffu8; 8];
+        map.lookup(&0u32.to_ne_bytes(), &mut val).unwrap();
+        assert_eq!(val, [0u8; 8]);
+
+        // 2. Out-of-bounds lookup returns ENOENT
+        assert_eq!(
+            map.lookup(&4u32.to_ne_bytes(), &mut val).unwrap_err(),
+            LinuxError::ENOENT
+        );
+
+        // 3. Update with BPF_NOEXIST returns EEXIST
+        let new_val = [1u8, 2, 3, 4, 5, 6, 7, 8];
+        assert_eq!(
+            map.update(&1u32.to_ne_bytes(), &new_val, BPF_NOEXIST).unwrap_err(),
+            LinuxError::EEXIST
+        );
+
+        // 4. Update with BPF_ANY succeeds
+        map.update(&1u32.to_ne_bytes(), &new_val, BPF_ANY).unwrap();
+        map.lookup(&1u32.to_ne_bytes(), &mut val).unwrap();
+        assert_eq!(val, new_val);
+
+        // 5. Update with BPF_EXIST succeeds
+        let updated_val = [9u8; 8];
+        map.update(&1u32.to_ne_bytes(), &updated_val, BPF_EXIST).unwrap();
+        map.lookup(&1u32.to_ne_bytes(), &mut val).unwrap();
+        assert_eq!(val, updated_val);
+
+        // 6. Update out-of-bounds returns E2BIG
+        assert_eq!(
+            map.update(&4u32.to_ne_bytes(), &new_val, BPF_ANY).unwrap_err(),
+            LinuxError::E2BIG
+        );
+
+        // 7. Update with invalid flags returns EINVAL
+        assert_eq!(
+            map.update(&1u32.to_ne_bytes(), &new_val, 3).unwrap_err(),
+            LinuxError::EINVAL
+        );
+
+        // 8. Array delete returns EINVAL
+        assert_eq!(
+            map.delete(&1u32.to_ne_bytes()).unwrap_err(),
+            LinuxError::EINVAL
+        );
+
+        // 9. Array get_next_key iteration
+        let mut next = [0u8; 4];
+        map.get_next_key(None, &mut next).unwrap();
+        assert_eq!(u32::from_ne_bytes(next), 0);
+
+        map.get_next_key(Some(&0u32.to_ne_bytes()), &mut next).unwrap();
+        assert_eq!(u32::from_ne_bytes(next), 1);
+
+        map.get_next_key(Some(&1u32.to_ne_bytes()), &mut next).unwrap();
+        assert_eq!(u32::from_ne_bytes(next), 2);
+
+        map.get_next_key(Some(&2u32.to_ne_bytes()), &mut next).unwrap();
+        assert_eq!(u32::from_ne_bytes(next), 3);
+
+        assert_eq!(
+            map.get_next_key(Some(&3u32.to_ne_bytes()), &mut next).unwrap_err(),
+            LinuxError::ENOENT
+        );
+
+        // Out-of-bounds key restarts iteration at 0
+        map.get_next_key(Some(&99u32.to_ne_bytes()), &mut next).unwrap();
+        assert_eq!(u32::from_ne_bytes(next), 0);
+    }
+
+    #[test]
+    fn bpf_map_hash_element_lifecycle() {
+        let mut req = hash_req();
+        req.key_size = 4;
+        req.value_size = 8;
+        req.max_entries = 2;
+        let spec = BpfMapSpec::validate(&req).unwrap();
+        let map = BpfMap::create(spec).unwrap();
+
+        let key1 = [1u8, 0, 0, 0];
+        let val1 = [10u8; 8];
+        let mut val_out = [0u8; 8];
+
+        // 1. Empty lookup returns ENOENT
+        assert_eq!(map.lookup(&key1, &mut val_out).unwrap_err(), LinuxError::ENOENT);
+
+        // 2. Update non-existent with BPF_EXIST returns ENOENT
+        assert_eq!(
+            map.update(&key1, &val1, BPF_EXIST).unwrap_err(),
+            LinuxError::ENOENT
+        );
+
+        // 3. Update non-existent with BPF_NOEXIST succeeds
+        map.update(&key1, &val1, BPF_NOEXIST).unwrap();
+        map.lookup(&key1, &mut val_out).unwrap();
+        assert_eq!(val_out, val1);
+
+        // 4. Update existing with BPF_NOEXIST returns EEXIST
+        assert_eq!(
+            map.update(&key1, &val1, BPF_NOEXIST).unwrap_err(),
+            LinuxError::EEXIST
+        );
+
+        // 5. Update existing with BPF_EXIST succeeds
+        let val1_new = [20u8; 8];
+        map.update(&key1, &val1_new, BPF_EXIST).unwrap();
+        map.lookup(&key1, &mut val_out).unwrap();
+        assert_eq!(val_out, val1_new);
+
+        // 6. Fill map up to max_entries (2)
+        let key2 = [2u8, 0, 0, 0];
+        let val2 = [30u8; 8];
+        map.update(&key2, &val2, BPF_ANY).unwrap();
+
+        // 7. Adding 3rd key returns E2BIG
+        let key3 = [3u8, 0, 0, 0];
+        let val3 = [40u8; 8];
+        assert_eq!(
+            map.update(&key3, &val3, BPF_ANY).unwrap_err(),
+            LinuxError::E2BIG
+        );
+
+        // 8. Delete non-existent returns ENOENT
+        assert_eq!(
+            map.delete(&key3).unwrap_err(),
+            LinuxError::ENOENT
+        );
+
+        // 9. Iteration over hash map
+        let mut next_key = [0u8; 4];
+        map.get_next_key(None, &mut next_key).unwrap();
+        assert_eq!(next_key, key1);
+
+        map.get_next_key(Some(&key1), &mut next_key).unwrap();
+        assert_eq!(next_key, key2);
+
+        assert_eq!(
+            map.get_next_key(Some(&key2), &mut next_key).unwrap_err(),
+            LinuxError::ENOENT
+        );
+
+        // Missing key in get_next_key returns first key
+        map.get_next_key(Some(&key3), &mut next_key).unwrap();
+        assert_eq!(next_key, key1);
+
+        // 10. Delete key1 succeeds, free slot allows adding key3
+        map.delete(&key1).unwrap();
+        assert_eq!(map.lookup(&key1, &mut val_out).unwrap_err(), LinuxError::ENOENT);
+        map.update(&key3, &val3, BPF_ANY).unwrap();
+        map.lookup(&key3, &mut val_out).unwrap();
+        assert_eq!(val_out, val3);
+    }
+
+    #[test]
+    fn ltp_bpf_map01_assertions() {
+        // Adapted assertions from ltp/testcases/kernel/syscalls/bpf/bpf_map01.c
+        // 1. Hash map: key_size=8, val_size=1024, max_entries=1
+        let mut hash_create = hash_req();
+        hash_create.key_size = 8;
+        hash_create.value_size = 1024;
+        hash_create.max_entries = 1;
+        let hash_map = BpfMap::create(BpfMapSpec::validate(&hash_create).unwrap()).unwrap();
+
+        let mut key8 = [0u8; 8];
+        key8.copy_from_slice(b"12345678");
+        let mut val_get = [0x55u8; 1024];
+        let mut val_set = [0u8; 1024];
+        for i in 0..1024 {
+            val_set[i] = (i % 256) as u8;
+        }
+
+        // Empty hash map lookup should fail with ENOENT
+        assert_eq!(hash_map.lookup(&key8, &mut val_get).unwrap_err(), LinuxError::ENOENT);
+
+        // Update hash map element with BPF_ANY succeeds
+        hash_map.update(&key8, &val_set, BPF_ANY).unwrap();
+
+        // Hash map lookup returns the updated value
+        hash_map.lookup(&key8, &mut val_get).unwrap();
+        assert_eq!(&val_get[..], &val_set[..]);
+
+        // 2. Array map: key_size=4, val_size=1024, max_entries=1
+        let mut array_create = array_req();
+        array_create.key_size = 4;
+        array_create.value_size = 1024;
+        array_create.max_entries = 1;
+        let array_map = BpfMap::create(BpfMapSpec::validate(&array_create).unwrap()).unwrap();
+
+        let key4 = 0u32.to_ne_bytes();
+        val_get.fill(0x77);
+
+        // Preallocated array map lookup returns all zeroes
+        array_map.lookup(&key4, &mut val_get).unwrap();
+        assert!(val_get.iter().all(|&b| b == 0));
+
+        // Update array map element with BPF_ANY succeeds
+        array_map.update(&key4, &val_set, BPF_ANY).unwrap();
+
+        // Array map lookup returns the updated value
+        array_map.lookup(&key4, &mut val_get).unwrap();
+        assert_eq!(&val_get[..], &val_set[..]);
+    }
 }
+
 

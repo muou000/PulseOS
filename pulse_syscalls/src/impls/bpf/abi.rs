@@ -3,6 +3,10 @@ use axerrno::LinuxError;
 pub const BPF_OBJ_NAME_LEN: usize = 16;
 pub const BPF_MAX_ATTR_SIZE: usize = 4096;
 
+pub const BPF_ANY: u64 = 0;
+pub const BPF_NOEXIST: u64 = 1;
+pub const BPF_EXIST: u64 = 2;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u32)]
 pub enum BpfCmd {
@@ -163,7 +167,15 @@ impl BpfCmd {
     }
 
     pub fn is_deferred(self) -> bool {
-        !matches!(self, Self::MapCreate | Self::ObjGetInfoByFd)
+        !matches!(
+            self,
+            Self::MapCreate
+                | Self::MapLookupElem
+                | Self::MapUpdateElem
+                | Self::MapDeleteElem
+                | Self::MapGetNextKey
+                | Self::ObjGetInfoByFd
+        )
     }
 
     /// Bytes of `union bpf_attr` consumed by an implemented command, i.e. the
@@ -171,6 +183,9 @@ impl BpfCmd {
     pub fn attr_used_size(self) -> usize {
         match self {
             Self::MapCreate => core::mem::size_of::<BpfMapCreateAttr>(),
+            Self::MapLookupElem | Self::MapUpdateElem => core::mem::size_of::<BpfMapElemAttr>(),
+            Self::MapDeleteElem => 16,
+            Self::MapGetNextKey => 24,
             Self::ObjGetInfoByFd => core::mem::size_of::<BpfObjGetInfoAttr>(),
             _ => core::mem::size_of::<BpfAttr>(),
         }

@@ -24,4 +24,4 @@ pub(crate) mod impls {
 #[cfg(target_os = "none")]
 pub use handler::syscall_handler;
 #[cfg(target_os = "none")]
-pub use impls::sys_sync;
+pub use impls::{run_bpf_guest_checks, sys_sync};

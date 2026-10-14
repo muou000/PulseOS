@@ -19,6 +19,7 @@ mapping-lifecycle-test = ["axfs/mapping-lifecycle-test"]
 axerrno.workspace = true
 linux-raw-sys = { workspace = true, features = ["system", "prctl", "mempolicy"] }
 pulse_bpf_schema = { workspace = true }
+spin.workspace = true
 
 [target.'cfg(target_os = "none")'.dependencies]
 axalloc.workspace = true
@@ -35,7 +36,6 @@ axfs-ng-vfs.workspace = true
 linkme.workspace = true
 memory_addr.workspace = true
 bitflags.workspace = true
-spin.workspace = true
 kernel_guard.workspace = true
 pulse_core.workspace = true
 starry-vdso.workspace = true
