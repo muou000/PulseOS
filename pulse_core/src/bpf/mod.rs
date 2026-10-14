@@ -5,9 +5,14 @@
 //! and `close` follow the generic [`crate::fd_table`] lifecycle and the object
 //! is destroyed when its last reference goes away.
 
+mod insn;
 mod map;
 mod object;
+mod program;
+pub mod verifier;
 
+pub use insn::*;
 pub use map::*;
-pub use object::BpfMapObject;
+pub use object::{BpfMapObject, BpfProgramObject};
+pub use program::*;
 

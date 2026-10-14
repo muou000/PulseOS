@@ -175,6 +175,7 @@ impl BpfCmd {
                 | Self::MapDeleteElem
                 | Self::MapGetNextKey
                 | Self::ObjGetInfoByFd
+                | Self::ProgLoad
         )
     }
 
@@ -187,6 +188,7 @@ impl BpfCmd {
             Self::MapDeleteElem => 16,
             Self::MapGetNextKey => 24,
             Self::ObjGetInfoByFd => core::mem::size_of::<BpfObjGetInfoAttr>(),
+            Self::ProgLoad => core::mem::size_of::<BpfProgLoadAttr>(),
             _ => core::mem::size_of::<BpfAttr>(),
         }
     }

@@ -2,7 +2,7 @@ use alloc::sync::Arc;
 
 use axerrno::LinuxError;
 use pulse_core::{
-    bpf::{BpfMap, BpfMapCreateRequest, BpfMapObject, BpfMapSpec},
+    bpf::{BpfMap, BpfMapCreateRequest, BpfMapObject, BpfMapSpec, BpfProgramObject},
     fd_table::{FdEntry, FdFlags},
     task::Process,
 };
@@ -11,6 +11,7 @@ use super::{
     abi::{self, BpfCmd, BpfMapCreateAttr, BpfObjGetInfoAttr, BpfPermissions},
     elem,
     info::copy_obj_info_to_user,
+    prog,
 };
 
 impl From<&BpfMapCreateAttr> for BpfMapCreateRequest {
@@ -114,6 +115,17 @@ pub fn sys_bpf(cmd: i32, attr: usize, size: usize) -> isize {
             )
         }
         BpfCmd::ObjGetInfoByFd => obj_get_info_by_fd(&process, unsafe { &attr_buf.info }, attr),
+        BpfCmd::ProgLoad => {
+            let prog_attr = unsafe { &attr_buf.prog_load };
+            prog::bpf_prog_load(
+                &process,
+                prog_attr,
+                attr,
+                size,
+                |addr, buf| read_user(&process, addr, buf),
+                |addr, buf| write_user(&process, addr, buf),
+            )
+        }
         _ => Err(LinuxError::EOPNOTSUPP),
     });
 
@@ -154,12 +166,21 @@ fn obj_get_info_by_fd(
     attr: &BpfObjGetInfoAttr,
     attr_addr: usize,
 ) -> Result<isize, LinuxError> {
-    let map = get_bpf_map(process, attr.bpf_fd)?;
-    let info = map.info();
+    let object = process.get_fd_object(attr.bpf_fd as usize)?;
+    let info_bytes = if let Some(map_object) = object.as_any().downcast_ref::<BpfMapObject>() {
+        let info = map_object.info();
+        alloc::vec::Vec::from(info.as_bytes())
+    } else if let Some(prog_object) = object.as_any().downcast_ref::<BpfProgramObject>() {
+        let info = prog_object.info();
+        alloc::vec::Vec::from(info.as_bytes())
+    } else {
+        return Err(LinuxError::EINVAL);
+    };
+
     let info_len = copy_obj_info_to_user(
         attr.info as usize,
         attr.info_len,
-        info.as_bytes(),
+        &info_bytes,
         |addr, buf| read_user(process, addr, buf),
         |addr, buf| write_user(process, addr, buf),
     )?;
@@ -246,5 +267,54 @@ pub fn run_bpf_guest_checks() -> Result<(), LinuxError> {
     }
 
     axlog::ax_println!("[BPF_GUEST] BPF_MAP01 assertions: PASS");
+
+    axlog::ax_println!("[BPF_GUEST] Starting BPF Program load and verifier checks...");
+
+    // 1. Valid TRACEPOINT program: r0 = 0; exit
+    let valid_insns = [
+        pulse_core::bpf::BpfInsn::new(
+            pulse_core::bpf::BPF_ALU64 | pulse_core::bpf::BPF_MOV | pulse_core::bpf::BPF_K,
+            pulse_core::bpf::BPF_REG_0,
+            0,
+            0,
+            0,
+        ),
+        pulse_core::bpf::BpfInsn::new(
+            pulse_core::bpf::BPF_JMP | pulse_core::bpf::BPF_EXIT,
+            0,
+            0,
+            0,
+            0,
+        ),
+    ];
+    let config = pulse_core::bpf::verifier::VerifierConfig::new(
+        pulse_core::bpf::BpfProgType::Tracepoint,
+        1,
+    );
+    let mut log = pulse_core::bpf::verifier::VerifierLog::new();
+    let verified = pulse_core::bpf::verifier::verify_program(&config, &valid_insns, None, &mut log)?;
+    if verified.insns.len() != 2 || verified.prog_type != pulse_core::bpf::BpfProgType::Tracepoint {
+        return Err(LinuxError::EINVAL);
+    }
+
+    // 2. Malformed program: missing exit
+    let bad_insns = [
+        pulse_core::bpf::BpfInsn::new(
+            pulse_core::bpf::BPF_ALU64 | pulse_core::bpf::BPF_MOV | pulse_core::bpf::BPF_K,
+            pulse_core::bpf::BPF_REG_0,
+            0,
+            0,
+            0,
+        ),
+    ];
+    let mut bad_log = pulse_core::bpf::verifier::VerifierLog::new();
+    if pulse_core::bpf::verifier::verify_program(&config, &bad_insns, None, &mut bad_log).is_ok() {
+        return Err(LinuxError::EINVAL);
+    }
+    if !bad_log.as_str().contains("0:") {
+        return Err(LinuxError::EINVAL);
+    }
+
+    axlog::ax_println!("[BPF_GUEST] BPF_PROG_LOAD verifier assertions: PASS");
     Ok(())
 }

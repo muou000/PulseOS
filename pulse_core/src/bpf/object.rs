@@ -69,3 +69,59 @@ impl FdObject for BpfMapObject {
     }
 }
 
+/// A BPF Program object FD.
+///
+/// Follows the same object lifecycle and permissions as BpfMapObject.
+pub struct BpfProgramObject {
+    program: Arc<super::BpfProgram>,
+}
+
+impl BpfProgramObject {
+    pub fn new(program: Arc<super::BpfProgram>) -> Self {
+        Self { program }
+    }
+
+    pub fn program(&self) -> &Arc<super::BpfProgram> {
+        &self.program
+    }
+
+    pub fn info(&self) -> super::BpfProgInfo {
+        self.program.info()
+    }
+}
+
+impl FdObject for BpfProgramObject {
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn read(&self, _buf: &mut [u8]) -> LinuxResult<usize> {
+        Err(LinuxError::EINVAL)
+    }
+
+    fn write(&self, _buf: &[u8]) -> LinuxResult<usize> {
+        Err(LinuxError::EINVAL)
+    }
+
+    fn ioctl(&self, _cmd: u32, _arg: usize) -> LinuxResult<isize> {
+        Err(LinuxError::ENOTTY)
+    }
+
+    fn stat(&self) -> LinuxResult<stat> {
+        let mut st: stat = unsafe { core::mem::zeroed() };
+        st.st_ino = 1;
+        st.st_mode = linux_raw_sys::general::S_IFREG | 0o600;
+        st.st_nlink = 1;
+        st.st_blksize = 4096;
+        Ok(st)
+    }
+
+    fn poll(&self) -> LinuxResult<PollState> {
+        Err(LinuxError::EOPNOTSUPP)
+    }
+
+    fn mmap_file_flags(&self) -> Option<axfs::FileFlags> {
+        None
+    }
+}
+
