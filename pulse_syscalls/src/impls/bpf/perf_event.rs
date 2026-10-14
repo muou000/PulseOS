@@ -72,8 +72,40 @@ pub const CAP_PERFMON: u32 = 38;
 pub use pulse_core::bpf::{
     PerfEvent, PerfEventClock, PerfEventScope, PerfEventSpec,
     PERF_EVENT_IOC_ENABLE, PERF_EVENT_IOC_DISABLE, PERF_EVENT_IOC_REFRESH,
-    PERF_EVENT_IOC_RESET, PERF_EVENT_IOC_PERIOD,
+    PERF_EVENT_IOC_RESET, PERF_EVENT_IOC_PERIOD, PERF_EVENT_IOC_SET_BPF,
 };
+
+#[cfg(not(target_os = "none"))]
+#[path = "../../../../pulse_core/src/bpf/insn.rs"]
+pub mod core_insn;
+
+#[cfg(not(target_os = "none"))]
+#[path = "../../../../pulse_core/src/bpf/map.rs"]
+pub mod core_map;
+
+#[cfg(not(target_os = "none"))]
+#[path = "../../../../pulse_core/src/bpf/interpreter.rs"]
+pub mod core_interpreter;
+
+#[cfg(not(target_os = "none"))]
+#[path = "../../../../pulse_core/src/bpf/program.rs"]
+pub mod core_program;
+
+#[cfg(not(target_os = "none"))]
+#[allow(unused_imports)]
+pub use core_insn as insn;
+#[cfg(not(target_os = "none"))]
+#[allow(unused_imports)]
+pub use core_map as map;
+#[cfg(not(target_os = "none"))]
+#[allow(unused_imports)]
+pub use core_interpreter as interpreter;
+#[cfg(not(target_os = "none"))]
+#[allow(unused_imports)]
+pub use core_program as program;
+#[cfg(not(target_os = "none"))]
+#[allow(unused_imports)]
+pub use core_map::BPF_OBJ_NAME_LEN;
 
 #[cfg(not(target_os = "none"))]
 #[path = "../../../../pulse_core/src/bpf/perf_event.rs"]
@@ -128,6 +160,17 @@ pub fn validate_perf_event_attr(
             PERF_COUNT_SW_TASK_CLOCK => PerfEventClock::TaskClock,
             _ => return Err(LinuxError::EOPNOTSUPP),
         },
+        PERF_TYPE_TRACEPOINT => {
+            let tp_id = attr.config as u32;
+            if pulse_bpf_schema::is_deferred_id(tp_id) {
+                return Err(LinuxError::EOPNOTSUPP);
+            }
+            match pulse_bpf_schema::lookup_by_id(tp_id) {
+                Ok(tp) => PerfEventClock::Tracepoint(tp.id),
+                Err(pulse_bpf_schema::TracepointError::DeferredId(_)) => return Err(LinuxError::EOPNOTSUPP),
+                Err(_) => return Err(LinuxError::ENOENT),
+            }
+        }
         PERF_TYPE_HARDWARE | PERF_TYPE_HW_CACHE | PERF_TYPE_RAW | PERF_TYPE_BREAKPOINT => {
             return Err(LinuxError::EOPNOTSUPP);
         }
@@ -211,6 +254,7 @@ pub fn validate_perf_event_coupling(
     match (clock, scope) {
         (PerfEventClock::CpuClock, PerfEventScope::PerCpu { .. }) => Ok(()),
         (PerfEventClock::TaskClock, PerfEventScope::Task { .. }) => Ok(()),
+        (PerfEventClock::Tracepoint(_), _) => Ok(()),
         _ => Err(LinuxError::EINVAL),
     }
 }

@@ -178,6 +178,15 @@ impl FdObject for PerfEventObject {
     }
 
     fn ioctl(&self, cmd: u32, arg: usize) -> LinuxResult<isize> {
+        if cmd == super::PERF_EVENT_IOC_SET_BPF {
+            let process = crate::task::current_process()?;
+            let obj = process.get_fd_object(arg)?;
+            let Some(prog_obj) = obj.as_any().downcast_ref::<BpfProgramObject>() else {
+                return Err(LinuxError::EINVAL);
+            };
+            self.event.attach_program(prog_obj.program().clone())?;
+            return Ok(0);
+        }
         let now_ns = self.current_time_ns();
         self.event.ioctl_at(cmd, arg, now_ns)
     }
@@ -196,6 +205,60 @@ impl FdObject for PerfEventObject {
             readable: true,
             writable: false,
         })
+    }
+
+    fn mmap_file_flags(&self) -> Option<axfs::FileFlags> {
+        None
+    }
+}
+
+/// A BPF Link object FD (#98).
+pub struct BpfLinkObject {
+    link: Arc<super::BpfLink>,
+}
+
+impl BpfLinkObject {
+    pub fn new(link: Arc<super::BpfLink>) -> Self {
+        Self { link }
+    }
+
+    pub fn link(&self) -> &Arc<super::BpfLink> {
+        &self.link
+    }
+
+    pub fn info(&self) -> super::BpfLinkInfo {
+        self.link.info()
+    }
+}
+
+impl FdObject for BpfLinkObject {
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn read(&self, _buf: &mut [u8]) -> LinuxResult<usize> {
+        Err(LinuxError::EINVAL)
+    }
+
+    fn write(&self, _buf: &[u8]) -> LinuxResult<usize> {
+        Err(LinuxError::EINVAL)
+    }
+
+    fn ioctl(&self, _cmd: u32, _arg: usize) -> LinuxResult<isize> {
+        Err(LinuxError::ENOTTY)
+    }
+
+    fn stat(&self) -> LinuxResult<stat> {
+        let mut st: stat = unsafe { core::mem::zeroed() };
+        st.st_ino = 1;
+        st.st_mode = linux_raw_sys::general::S_IFREG | 0o600;
+        st.st_nlink = 1;
+        st.st_blksize = 4096;
+        Ok(st)
+    }
+
+    fn poll(&self) -> LinuxResult<PollState> {
+        Err(LinuxError::EOPNOTSUPP)
     }
 
     fn mmap_file_flags(&self) -> Option<axfs::FileFlags> {

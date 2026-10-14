@@ -6,17 +6,20 @@
 //! is destroyed when its last reference goes away.
 
 mod insn;
+pub mod link;
 mod map;
 mod object;
 pub mod perf_event;
-mod program;
+pub mod program;
 pub mod interpreter;
 pub mod verifier;
 
 pub use insn::*;
 pub use interpreter::{execute, BpfEnv, BpfVmError, DefaultBpfEnv, BPF_MAX_RECURSION_DEPTH, BPF_MAX_STEPS};
+pub use link::*;
 pub use map::*;
-pub use object::{BpfMapObject, BpfProgramObject, PerfEventObject};
+pub use object::{BpfLinkObject, BpfMapObject, BpfProgramObject, PerfEventObject};
 pub use perf_event::*;
 pub use program::*;
+
 

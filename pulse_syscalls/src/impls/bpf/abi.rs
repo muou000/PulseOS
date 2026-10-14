@@ -7,6 +7,8 @@ pub const BPF_ANY: u64 = 0;
 pub const BPF_NOEXIST: u64 = 1;
 pub const BPF_EXIST: u64 = 2;
 
+pub const BPF_PERF_EVENT: u32 = 41;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u32)]
 pub enum BpfCmd {
@@ -176,6 +178,8 @@ impl BpfCmd {
                 | Self::MapGetNextKey
                 | Self::ObjGetInfoByFd
                 | Self::ProgLoad
+                | Self::LinkCreate
+                | Self::LinkDetach
         )
     }
 
@@ -189,6 +193,8 @@ impl BpfCmd {
             Self::MapGetNextKey => 24,
             Self::ObjGetInfoByFd => core::mem::size_of::<BpfObjGetInfoAttr>(),
             Self::ProgLoad => core::mem::size_of::<BpfProgLoadAttr>(),
+            Self::LinkCreate => core::mem::size_of::<BpfLinkCreateAttr>(),
+            Self::LinkDetach => core::mem::size_of::<BpfLinkDetachAttr>(),
             _ => core::mem::size_of::<BpfAttr>(),
         }
     }

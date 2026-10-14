@@ -2,13 +2,19 @@ use alloc::sync::Arc;
 
 use axerrno::LinuxError;
 use pulse_core::{
-    bpf::{BpfMap, BpfMapCreateRequest, BpfMapObject, BpfMapSpec, BpfProgramObject},
+    bpf::{
+        BpfLink, BpfLinkObject, BpfMap, BpfMapCreateRequest, BpfMapObject, BpfMapSpec,
+        BpfProgramObject, PerfEventObject,
+    },
     fd_table::{FdEntry, FdFlags},
     task::Process,
 };
 
 use super::{
-    abi::{self, BpfCmd, BpfMapCreateAttr, BpfObjGetInfoAttr, BpfPermissions},
+    abi::{
+        self, BpfCmd, BpfLinkCreateAttr, BpfLinkDetachAttr, BpfMapCreateAttr, BpfObjGetInfoAttr,
+        BpfPermissions,
+    },
     elem,
     info::copy_obj_info_to_user,
     prog,
@@ -126,6 +132,8 @@ pub fn sys_bpf(cmd: i32, attr: usize, size: usize) -> isize {
                 |addr, buf| write_user(&process, addr, buf),
             )
         }
+        BpfCmd::LinkCreate => link_create(&process, unsafe { &attr_buf.link_create }),
+        BpfCmd::LinkDetach => link_detach(&process, unsafe { &attr_buf.link_detach }),
         _ => Err(LinuxError::EOPNOTSUPP),
     });
 
@@ -173,6 +181,9 @@ fn obj_get_info_by_fd(
     } else if let Some(prog_object) = object.as_any().downcast_ref::<BpfProgramObject>() {
         let info = prog_object.info();
         alloc::vec::Vec::from(info.as_bytes())
+    } else if let Some(link_object) = object.as_any().downcast_ref::<BpfLinkObject>() {
+        let info = link_object.info();
+        alloc::vec::Vec::from(info.as_bytes())
     } else {
         return Err(LinuxError::EINVAL);
     };
@@ -186,6 +197,45 @@ fn obj_get_info_by_fd(
     )?;
     let info_len_addr = attr_addr + core::mem::offset_of!(BpfObjGetInfoAttr, info_len);
     write_user(process, info_len_addr, &info_len.to_ne_bytes())?;
+    Ok(0)
+}
+
+fn link_create(process: &Process, attr: &BpfLinkCreateAttr) -> Result<isize, LinuxError> {
+    process.check_next_fd_limit()?;
+
+    if attr.flags != 0 {
+        return Err(LinuxError::EINVAL);
+    }
+    if attr.attach_type != abi::BPF_PERF_EVENT {
+        return Err(LinuxError::EINVAL);
+    }
+    if attr.target_btf_id_or_cookie != 0 || attr.extra.iter().any(|&b| b != 0) {
+        return Err(LinuxError::EINVAL);
+    }
+
+    let prog_obj = process.get_fd_object(attr.prog_fd as usize)?;
+    let Some(prog_obj) = prog_obj.as_any().downcast_ref::<BpfProgramObject>() else {
+        return Err(LinuxError::EINVAL);
+    };
+    let prog = prog_obj.program().clone();
+
+    let target_obj = process.get_fd_object(attr.target_fd as usize)?;
+    let Some(perf_obj) = target_obj.as_any().downcast_ref::<PerfEventObject>() else {
+        return Err(LinuxError::EINVAL);
+    };
+    let target = perf_obj.event().clone();
+
+    let link = BpfLink::new(prog, target)?;
+    let entry = FdEntry::new(Arc::new(BpfLinkObject::new(link)), FdFlags::CLOEXEC);
+    process.insert_fd_entry(entry).map(|fd| fd as isize)
+}
+
+fn link_detach(process: &Process, attr: &BpfLinkDetachAttr) -> Result<isize, LinuxError> {
+    let link_obj = process.get_fd_object(attr.link_fd as usize)?;
+    let Some(link_obj) = link_obj.as_any().downcast_ref::<BpfLinkObject>() else {
+        return Err(LinuxError::EINVAL);
+    };
+    link_obj.link().detach()?;
     Ok(0)
 }
 
@@ -521,6 +571,136 @@ pub fn run_bpf_guest_checks() -> Result<(), LinuxError> {
     }
 
     axlog::ax_println!("[BPF_GUEST] Perf Event assertions: PASS (cpu_ns={}, task_ns={})", elapsed, task_elapsed);
+
+    axlog::ax_println!("[BPF_GUEST] Starting BPF Link and attach assertions...");
+
+    let link_insns = [
+        pulse_core::bpf::BpfInsn::new(
+            pulse_core::bpf::BPF_ALU64 | pulse_core::bpf::BPF_MOV | pulse_core::bpf::BPF_K,
+            pulse_core::bpf::BPF_REG_0,
+            0,
+            0,
+            0,
+        ),
+        pulse_core::bpf::BpfInsn::new(
+            pulse_core::bpf::BPF_JMP | pulse_core::bpf::BPF_EXIT,
+            0,
+            0,
+            0,
+            0,
+        ),
+    ];
+
+    let tp_cfg = pulse_core::bpf::verifier::VerifierConfig::new(pulse_core::bpf::BpfProgType::Tracepoint, 1);
+    let mut log = pulse_core::bpf::verifier::VerifierLog::new();
+    let tp_verified = pulse_core::bpf::verifier::verify_program(&tp_cfg, &link_insns, None, &mut log)?;
+    let tp_prog = alloc::sync::Arc::new(pulse_core::bpf::BpfProgram::new(
+        tp_verified.prog_type,
+        [0u8; 16],
+        tp_verified.insns,
+        tp_verified.referenced_maps,
+    ));
+
+    let sw_cfg = pulse_core::bpf::verifier::VerifierConfig::new(pulse_core::bpf::BpfProgType::PerfEvent, 1);
+    let sw_verified = pulse_core::bpf::verifier::verify_program(&sw_cfg, &link_insns, None, &mut log)?;
+    let sw_prog = alloc::sync::Arc::new(pulse_core::bpf::BpfProgram::new(
+        sw_verified.prog_type,
+        [0u8; 16],
+        sw_verified.insns,
+        sw_verified.referenced_maps,
+    ));
+
+    // Create tracepoint perf event: SchedSwitch
+    let tp_spec = pulse_core::bpf::PerfEventSpec {
+        clock: pulse_core::bpf::PerfEventClock::Tracepoint(pulse_bpf_schema::TracepointId::SchedSwitch),
+        scope: pulse_core::bpf::PerfEventScope::PerCpu { cpu: 0 },
+        sample_period: 0,
+        disabled: false,
+        cloexec: true,
+    };
+    let tp_now_ns = pulse_core::bpf::PerfEventObject::current_time_ns_for_spec(&tp_spec);
+    let tp_event = alloc::sync::Arc::new(pulse_core::bpf::PerfEvent::new(tp_spec, tp_now_ns));
+
+    // Invalid target/program combination: Tracepoint program cannot attach to CPU clock perf event
+    if pulse_core::bpf::BpfLink::new(tp_prog.clone(), cpu_event.clone()).is_ok() {
+        return Err(LinuxError::EINVAL);
+    }
+
+    // Attach Tracepoint program to SchedSwitch tracepoint event via Link
+    let link = pulse_core::bpf::BpfLink::new(tp_prog.clone(), tp_event.clone())?;
+    if link.link_type() != pulse_core::bpf::BPF_LINK_TYPE_PERF_EVENT {
+        return Err(LinuxError::EINVAL);
+    }
+    if tp_event.attached_prog().is_none() {
+        return Err(LinuxError::EINVAL);
+    }
+    // Subscribed to SchedSwitch
+    #[cfg(feature = "bpf-trace")]
+    if !axtask::bpf_trace::has_subscribers(pulse_bpf_schema::TracepointId::SchedSwitch) {
+        return Err(LinuxError::EINVAL);
+    }
+
+    // Duplicate attach fails with EBUSY
+    if pulse_core::bpf::BpfLink::new(tp_prog.clone(), tp_event.clone()).is_ok() {
+        return Err(LinuxError::EINVAL);
+    }
+
+    // Wrap in BpfLinkObject and verify FD object contract
+    let link_obj = pulse_core::bpf::BpfLinkObject::new(link.clone());
+    let link_st = link_obj.stat()?;
+    if (link_st.st_mode & linux_raw_sys::general::S_IFMT) != linux_raw_sys::general::S_IFREG {
+        return Err(LinuxError::EINVAL);
+    }
+    if link_obj.read(&mut [0u8; 8]).is_ok() {
+        return Err(LinuxError::EINVAL);
+    }
+    if link_obj.write(&[0u8; 8]).is_ok() {
+        return Err(LinuxError::EINVAL);
+    }
+    if link_obj.ioctl(0, 0).is_ok() {
+        return Err(LinuxError::EINVAL);
+    }
+    if link_obj.poll().is_ok() {
+        return Err(LinuxError::EINVAL);
+    }
+
+    let link_info = link_obj.info();
+    if link_info.link_type != pulse_core::bpf::BPF_LINK_TYPE_PERF_EVENT
+        || link_info.prog_id != tp_prog.id()
+        || link_info.perf_event_type != pulse_core::bpf::BPF_PERF_EVENT_TRACEPOINT
+        || link_info.config != pulse_bpf_schema::TracepointId::SchedSwitch.as_u32() as u64
+    {
+        return Err(LinuxError::EINVAL);
+    }
+
+    // Explicit detach
+    link.detach()?;
+    if !link.is_detached() {
+        return Err(LinuxError::EINVAL);
+    }
+    if tp_event.attached_prog().is_some() {
+        return Err(LinuxError::EINVAL);
+    }
+    // Probe unregistered: no events after detach!
+    #[cfg(feature = "bpf-trace")]
+    if axtask::bpf_trace::has_subscribers(pulse_bpf_schema::TracepointId::SchedSwitch) {
+        return Err(LinuxError::EINVAL);
+    }
+
+    // Fallback ioctl attach path on cpu_event
+    cpu_event.attach_program(sw_prog.clone())?;
+    if cpu_event.attached_prog().is_none() {
+        return Err(LinuxError::EINVAL);
+    }
+    if cpu_event.attach_program(sw_prog.clone()).is_ok() {
+        return Err(LinuxError::EINVAL);
+    }
+    cpu_event.detach_program(&sw_prog)?;
+    if cpu_event.attached_prog().is_some() {
+        return Err(LinuxError::EINVAL);
+    }
+
+    axlog::ax_println!("[BPF_GUEST] BPF Link and attach assertions: PASS");
 
     Ok(())
 }

@@ -308,6 +308,8 @@ mod tests {
             BpfCmd::MapGetNextKey,
             BpfCmd::ObjGetInfoByFd,
             BpfCmd::ProgLoad,
+            BpfCmd::LinkCreate,
+            BpfCmd::LinkDetach,
         ];
         for &cmd in &implemented {
             assert!(!cmd.is_deferred(), "{cmd:?} must not be deferred");
