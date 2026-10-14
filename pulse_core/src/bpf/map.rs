@@ -311,6 +311,66 @@ impl BpfMapStorage {
         }
     }
 
+    fn read_value(
+        &self,
+        key: &[u8],
+        offset: usize,
+        val_size: usize,
+        max_entries: usize,
+        out: &mut [u8],
+    ) -> Result<(), LinuxError> {
+        if offset.checked_add(out.len()).map_or(true, |end| end > val_size) {
+            return Err(LinuxError::EINVAL);
+        }
+        match self {
+            Self::Array(values) => {
+                let index = u32::from_ne_bytes(key.try_into().map_err(|_| LinuxError::EINVAL)?) as usize;
+                if index >= max_entries {
+                    return Err(LinuxError::ENOENT);
+                }
+                let start = index * val_size + offset;
+                let end = start + out.len();
+                out.copy_from_slice(&values[start..end]);
+                Ok(())
+            }
+            Self::Hash(map) => {
+                let val = map.get(key).ok_or(LinuxError::ENOENT)?;
+                out.copy_from_slice(&val[offset..offset + out.len()]);
+                Ok(())
+            }
+        }
+    }
+
+    fn write_value(
+        &mut self,
+        key: &[u8],
+        offset: usize,
+        val_size: usize,
+        max_entries: usize,
+        data: &[u8],
+    ) -> Result<(), LinuxError> {
+        if offset.checked_add(data.len()).map_or(true, |end| end > val_size) {
+            return Err(LinuxError::EINVAL);
+        }
+        match self {
+            Self::Array(values) => {
+                let index = u32::from_ne_bytes(key.try_into().map_err(|_| LinuxError::EINVAL)?) as usize;
+                if index >= max_entries {
+                    return Err(LinuxError::ENOENT);
+                }
+                let start = index * val_size + offset;
+                let end = start + data.len();
+                values[start..end].copy_from_slice(data);
+                Ok(())
+            }
+            Self::Hash(map) => {
+                let val = map.get_mut(key).ok_or(LinuxError::ENOENT)?;
+                val[offset..offset + data.len()].copy_from_slice(data);
+                Ok(())
+            }
+        }
+    }
+
     fn update(
         &mut self,
         key: &[u8],
@@ -479,6 +539,32 @@ impl BpfMap {
             self.spec.value_size as usize,
             self.spec.max_entries as usize,
             value_out,
+        )
+    }
+
+    pub fn read_value_bytes(&self, key: &[u8], offset: usize, out: &mut [u8]) -> Result<(), LinuxError> {
+        if key.len() != self.spec.key_size as usize {
+            return Err(LinuxError::EINVAL);
+        }
+        self.storage.read().read_value(
+            key,
+            offset,
+            self.spec.value_size as usize,
+            self.spec.max_entries as usize,
+            out,
+        )
+    }
+
+    pub fn write_value_bytes(&self, key: &[u8], offset: usize, data: &[u8]) -> Result<(), LinuxError> {
+        if key.len() != self.spec.key_size as usize {
+            return Err(LinuxError::EINVAL);
+        }
+        self.storage.write().write_value(
+            key,
+            offset,
+            self.spec.value_size as usize,
+            self.spec.max_entries as usize,
+            data,
         )
     }
 

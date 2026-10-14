@@ -316,5 +316,122 @@ pub fn run_bpf_guest_checks() -> Result<(), LinuxError> {
     }
 
     axlog::ax_println!("[BPF_GUEST] BPF_PROG_LOAD verifier assertions: PASS");
+
+    axlog::ax_println!("[BPF_GUEST] Starting BPF Program execution and Map helper checks...");
+
+    struct GuestMapResolver {
+        map: Arc<BpfMap>,
+    }
+    impl pulse_core::bpf::verifier::MapResolver for GuestMapResolver {
+        fn resolve_map(&self, _fd: u32) -> Result<Arc<BpfMap>, LinuxError> {
+            Ok(self.map.clone())
+        }
+    }
+
+    let arr_req = BpfMapCreateRequest {
+        map_type: pulse_core::bpf::BPF_MAP_TYPE_ARRAY,
+        key_size: 4,
+        value_size: 8,
+        max_entries: 1,
+        ..Default::default()
+    };
+    let arr_map = Arc::new(BpfMap::create(BpfMapSpec::validate(&arr_req)?)?);
+    let resolver = GuestMapResolver { map: arr_map.clone() };
+
+    let prog_insns = [
+        pulse_core::bpf::BpfInsn::new(
+            pulse_core::bpf::BPF_LD | pulse_core::bpf::BPF_IMM | pulse_core::bpf::BPF_DW,
+            pulse_core::bpf::BPF_REG_1,
+            pulse_core::bpf::BPF_PSEUDO_MAP_FD,
+            0,
+            1,
+        ),
+        pulse_core::bpf::BpfInsn::new(0, 0, 0, 0, 0),
+        pulse_core::bpf::BpfInsn::new(
+            pulse_core::bpf::BPF_ALU64 | pulse_core::bpf::BPF_MOV | pulse_core::bpf::BPF_X,
+            pulse_core::bpf::BPF_REG_2,
+            pulse_core::bpf::BPF_REG_10,
+            0,
+            0,
+        ),
+        pulse_core::bpf::BpfInsn::new(
+            pulse_core::bpf::BPF_ALU64 | pulse_core::bpf::BPF_ADD | pulse_core::bpf::BPF_K,
+            pulse_core::bpf::BPF_REG_2,
+            0,
+            0,
+            -8,
+        ),
+        pulse_core::bpf::BpfInsn::new(
+            pulse_core::bpf::BPF_ST | pulse_core::bpf::BPF_MEM | pulse_core::bpf::BPF_DW,
+            pulse_core::bpf::BPF_REG_2,
+            0,
+            0,
+            0,
+        ),
+        pulse_core::bpf::BpfInsn::new(
+            pulse_core::bpf::BPF_JMP | pulse_core::bpf::BPF_CALL,
+            0,
+            0,
+            0,
+            pulse_core::bpf::BPF_FUNC_MAP_LOOKUP_ELEM,
+        ),
+        pulse_core::bpf::BpfInsn::new(
+            pulse_core::bpf::BPF_JMP | pulse_core::bpf::BPF_JEQ | pulse_core::bpf::BPF_K,
+            pulse_core::bpf::BPF_REG_0,
+            0,
+            3,
+            0,
+        ),
+        pulse_core::bpf::BpfInsn::new(
+            pulse_core::bpf::BPF_ALU64 | pulse_core::bpf::BPF_MOV | pulse_core::bpf::BPF_X,
+            pulse_core::bpf::BPF_REG_1,
+            pulse_core::bpf::BPF_REG_0,
+            0,
+            0,
+        ),
+        pulse_core::bpf::BpfInsn::new(
+            pulse_core::bpf::BPF_ST | pulse_core::bpf::BPF_MEM | pulse_core::bpf::BPF_DW,
+            pulse_core::bpf::BPF_REG_1,
+            0,
+            0,
+            12345,
+        ),
+        pulse_core::bpf::BpfInsn::new(
+            pulse_core::bpf::BPF_ALU64 | pulse_core::bpf::BPF_MOV | pulse_core::bpf::BPF_K,
+            pulse_core::bpf::BPF_REG_0,
+            0,
+            0,
+            0,
+        ),
+        pulse_core::bpf::BpfInsn::new(
+            pulse_core::bpf::BPF_JMP | pulse_core::bpf::BPF_EXIT,
+            0,
+            0,
+            0,
+            0,
+        ),
+    ];
+
+    let mut guest_log = pulse_core::bpf::verifier::VerifierLog::new();
+    let guest_verified = pulse_core::bpf::verifier::verify_program(&config, &prog_insns, Some(&resolver), &mut guest_log)?;
+    let guest_prog = pulse_core::bpf::BpfProgram::new(
+        guest_verified.prog_type,
+        [0u8; 16],
+        guest_verified.insns,
+        guest_verified.referenced_maps,
+    );
+
+    let ret = guest_prog.run(&[]).map_err(LinuxError::from)?;
+    if ret != 0 {
+        return Err(LinuxError::EINVAL);
+    }
+
+    let mut out_val = [0u8; 8];
+    arr_map.lookup(&0u32.to_ne_bytes(), &mut out_val)?;
+    if u64::from_ne_bytes(out_val) != 12345 {
+        return Err(LinuxError::EINVAL);
+    }
+
+    axlog::ax_println!("[BPF_GUEST] BPF Program execution assertions: PASS");
     Ok(())
 }

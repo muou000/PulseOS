@@ -291,6 +291,7 @@ pub fn verify_program(
     // Pass 2: Abstract state simulation and safety verification
     // -----------------------------------------------------------------
     let mut referenced_maps: Vec<Arc<BpfMap>> = Vec::new();
+    let mut relocations: Vec<(usize, usize)> = Vec::new();
     let mut worklist: VecDeque<(usize, VerifierState)> = VecDeque::new();
     let mut explored: Vec<(usize, VerifierState)> = Vec::new();
     let mut state_count = 0;
@@ -332,6 +333,9 @@ pub fn verify_program(
                     referenced_maps.push(map);
                     idx
                 };
+                if !relocations.iter().any(|(p, _)| *p == pc) {
+                    relocations.push((pc, map_idx));
+                }
                 state.regs[dst] = RegType::PtrMap { map_idx };
             } else {
                 state.regs[dst] = RegType::Scalar;
@@ -397,6 +401,24 @@ pub fn verify_program(
                                     return Err(LinuxError::EACCES);
                                 }
                                 state.regs[dst] = RegType::Scalar;
+                            }
+                            RegType::PtrMapValue { map_idx, off, null_checked } => {
+                                if !null_checked {
+                                    log.append(pc, "cannot perform arithmetic on unchecked map value pointer");
+                                    return Err(LinuxError::EACCES);
+                                }
+                                if !is_src_imm {
+                                    log.append(pc, "variable pointer arithmetic on map value is not supported");
+                                    return Err(LinuxError::EACCES);
+                                }
+                                let delta = insn.imm as i32;
+                                let new_off = if op == BPF_ADD { off + delta } else { off - delta };
+                                let val_size = referenced_maps[map_idx].spec().value_size() as i32;
+                                if new_off < 0 || new_off > val_size {
+                                    log.append(pc, "map value pointer offset out of bounds");
+                                    return Err(LinuxError::EACCES);
+                                }
+                                state.regs[dst] = RegType::PtrMapValue { map_idx, off: new_off, null_checked: true };
                             }
                             _ => {
                                 log.append(pc, "invalid pointer arithmetic on map pointer");
@@ -564,13 +586,25 @@ pub fn verify_program(
                                     return Err(LinuxError::EACCES);
                                 }
                             };
-                            match key_reg {
-                                RegType::PtrStack { .. } => {}
+                            let key_off = match key_reg {
+                                RegType::PtrStack { off } => off,
                                 _ => {
                                     log.append(pc, "bpf_map_lookup_elem R2 must be a pointer to stack key");
                                     return Err(LinuxError::EACCES);
                                 }
                             };
+                            let key_size = referenced_maps[map_idx].spec().key_size() as usize;
+                            if key_off < -(BPF_STACK_SIZE as i32) || key_off + (key_size as i32) > 0 {
+                                log.append(pc, "key pointer out of stack bounds");
+                                return Err(LinuxError::EACCES);
+                            }
+                            let start_idx = (BPF_STACK_SIZE as i32 + key_off) as usize;
+                            for b in 0..key_size {
+                                if !state.stack_init[start_idx + b] {
+                                    log.append(pc, "read uninitialized key on stack");
+                                    return Err(LinuxError::EACCES);
+                                }
+                            }
 
                             // Clobber caller-saved registers
                             state.regs[BPF_REG_1 as usize] = RegType::NotInit;
@@ -584,6 +618,152 @@ pub fn verify_program(
                                 off: 0,
                                 null_checked: false,
                             };
+                            worklist.push_back((next_pc, state));
+                        }
+                        BPF_FUNC_MAP_UPDATE_ELEM => {
+                            let map_reg = state.regs[BPF_REG_1 as usize];
+                            let key_reg = state.regs[BPF_REG_2 as usize];
+                            let val_reg = state.regs[BPF_REG_3 as usize];
+                            let flags_reg = state.regs[BPF_REG_4 as usize];
+                            let map_idx = match map_reg {
+                                RegType::PtrMap { map_idx } => map_idx,
+                                _ => {
+                                    log.append(pc, "bpf_map_update_elem R1 must be a valid BPF map pointer");
+                                    return Err(LinuxError::EACCES);
+                                }
+                            };
+                            if referenced_maps[map_idx].spec().map_flags() & super::map::BPF_F_RDONLY_PROG != 0 {
+                                log.append(pc, "cannot write to read-only map");
+                                return Err(LinuxError::EACCES);
+                            }
+                            let key_off = match key_reg {
+                                RegType::PtrStack { off } => off,
+                                _ => {
+                                    log.append(pc, "bpf_map_update_elem R2 must be a pointer to stack key");
+                                    return Err(LinuxError::EACCES);
+                                }
+                            };
+                            let key_size = referenced_maps[map_idx].spec().key_size() as usize;
+                            if key_off < -(BPF_STACK_SIZE as i32) || key_off + (key_size as i32) > 0 {
+                                log.append(pc, "key pointer out of stack bounds");
+                                return Err(LinuxError::EACCES);
+                            }
+                            let start_idx = (BPF_STACK_SIZE as i32 + key_off) as usize;
+                            for b in 0..key_size {
+                                if !state.stack_init[start_idx + b] {
+                                    log.append(pc, "read uninitialized key on stack");
+                                    return Err(LinuxError::EACCES);
+                                }
+                            }
+                            match val_reg {
+                                RegType::PtrStack { off } => {
+                                    let val_size = referenced_maps[map_idx].spec().value_size() as usize;
+                                    if off < -(BPF_STACK_SIZE as i32) || off + (val_size as i32) > 0 {
+                                        log.append(pc, "value pointer out of stack bounds");
+                                        return Err(LinuxError::EACCES);
+                                    }
+                                    let v_start = (BPF_STACK_SIZE as i32 + off) as usize;
+                                    for b in 0..val_size {
+                                        if !state.stack_init[v_start + b] {
+                                            log.append(pc, "read uninitialized value on stack");
+                                            return Err(LinuxError::EACCES);
+                                        }
+                                    }
+                                }
+                                RegType::PtrMapValue { null_checked, .. } => {
+                                    if !null_checked {
+                                        log.append(pc, "map value pointer must be null checked before passing to update");
+                                        return Err(LinuxError::EACCES);
+                                    }
+                                }
+                                _ => {
+                                    log.append(pc, "bpf_map_update_elem R3 must be a pointer to value");
+                                    return Err(LinuxError::EACCES);
+                                }
+                            }
+                            if !matches!(flags_reg, RegType::Scalar) {
+                                log.append(pc, "bpf_map_update_elem R4 flags must be a scalar");
+                                return Err(LinuxError::EACCES);
+                            }
+
+                            // Clobber caller-saved registers
+                            state.regs[BPF_REG_1 as usize] = RegType::NotInit;
+                            state.regs[BPF_REG_2 as usize] = RegType::NotInit;
+                            state.regs[BPF_REG_3 as usize] = RegType::NotInit;
+                            state.regs[BPF_REG_4 as usize] = RegType::NotInit;
+                            state.regs[BPF_REG_5 as usize] = RegType::NotInit;
+
+                            state.regs[BPF_REG_0 as usize] = RegType::Scalar;
+                            worklist.push_back((next_pc, state));
+                        }
+                        BPF_FUNC_MAP_DELETE_ELEM => {
+                            let map_reg = state.regs[BPF_REG_1 as usize];
+                            let key_reg = state.regs[BPF_REG_2 as usize];
+                            let map_idx = match map_reg {
+                                RegType::PtrMap { map_idx } => map_idx,
+                                _ => {
+                                    log.append(pc, "bpf_map_delete_elem R1 must be a valid BPF map pointer");
+                                    return Err(LinuxError::EACCES);
+                                }
+                            };
+                            if referenced_maps[map_idx].spec().map_type() == super::map::BpfMapType::Array {
+                                log.append(pc, "cannot delete from array map");
+                                return Err(LinuxError::EINVAL);
+                            }
+                            if referenced_maps[map_idx].spec().map_flags() & super::map::BPF_F_RDONLY_PROG != 0 {
+                                log.append(pc, "cannot delete from read-only map");
+                                return Err(LinuxError::EACCES);
+                            }
+                            let key_off = match key_reg {
+                                RegType::PtrStack { off } => off,
+                                _ => {
+                                    log.append(pc, "bpf_map_delete_elem R2 must be a pointer to stack key");
+                                    return Err(LinuxError::EACCES);
+                                }
+                            };
+                            let key_size = referenced_maps[map_idx].spec().key_size() as usize;
+                            if key_off < -(BPF_STACK_SIZE as i32) || key_off + (key_size as i32) > 0 {
+                                log.append(pc, "key pointer out of stack bounds");
+                                return Err(LinuxError::EACCES);
+                            }
+                            let start_idx = (BPF_STACK_SIZE as i32 + key_off) as usize;
+                            for b in 0..key_size {
+                                if !state.stack_init[start_idx + b] {
+                                    log.append(pc, "read uninitialized key on stack");
+                                    return Err(LinuxError::EACCES);
+                                }
+                            }
+
+                            // Clobber caller-saved registers
+                            state.regs[BPF_REG_1 as usize] = RegType::NotInit;
+                            state.regs[BPF_REG_2 as usize] = RegType::NotInit;
+                            state.regs[BPF_REG_3 as usize] = RegType::NotInit;
+                            state.regs[BPF_REG_4 as usize] = RegType::NotInit;
+                            state.regs[BPF_REG_5 as usize] = RegType::NotInit;
+
+                            state.regs[BPF_REG_0 as usize] = RegType::Scalar;
+                            worklist.push_back((next_pc, state));
+                        }
+                        BPF_FUNC_KTIME_GET_NS => {
+                            // Clobber caller-saved registers
+                            state.regs[BPF_REG_1 as usize] = RegType::NotInit;
+                            state.regs[BPF_REG_2 as usize] = RegType::NotInit;
+                            state.regs[BPF_REG_3 as usize] = RegType::NotInit;
+                            state.regs[BPF_REG_4 as usize] = RegType::NotInit;
+                            state.regs[BPF_REG_5 as usize] = RegType::NotInit;
+
+                            state.regs[BPF_REG_0 as usize] = RegType::Scalar;
+                            worklist.push_back((next_pc, state));
+                        }
+                        BPF_FUNC_GET_SMP_PROCESSOR_ID => {
+                            // Clobber caller-saved registers
+                            state.regs[BPF_REG_1 as usize] = RegType::NotInit;
+                            state.regs[BPF_REG_2 as usize] = RegType::NotInit;
+                            state.regs[BPF_REG_3 as usize] = RegType::NotInit;
+                            state.regs[BPF_REG_4 as usize] = RegType::NotInit;
+                            state.regs[BPF_REG_5 as usize] = RegType::NotInit;
+
+                            state.regs[BPF_REG_0 as usize] = RegType::Scalar;
                             worklist.push_back((next_pc, state));
                         }
                         _ => {
@@ -635,9 +815,14 @@ pub fn verify_program(
         }
     }
 
+    let mut relocated_insns = insns.to_vec();
+    for (pc, map_idx) in relocations {
+        relocated_insns[pc].imm = map_idx as i32;
+    }
+
     Ok(VerifiedProgram {
         prog_type: config.prog_type,
-        insns: Arc::from(insns),
+        insns: Arc::from(relocated_insns),
         referenced_maps,
     })
 }

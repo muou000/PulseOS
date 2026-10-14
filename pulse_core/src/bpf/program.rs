@@ -1,11 +1,16 @@
 //! BPF Program model and immutable instruction storage.
 
 use alloc::{sync::Arc, vec::Vec};
-use core::sync::atomic::{AtomicU32, Ordering};
+use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
 use axerrno::LinuxError;
 
-use super::{insn::BpfInsn, map::BpfMap, BPF_OBJ_NAME_LEN};
+use super::{
+    insn::BpfInsn,
+    interpreter::{self, BpfEnv, BpfVmError, DefaultBpfEnv},
+    map::BpfMap,
+    BPF_OBJ_NAME_LEN,
+};
 
 static NEXT_PROG_ID: AtomicU32 = AtomicU32::new(1);
 
@@ -39,6 +44,8 @@ pub struct BpfProgram {
     name: [u8; BPF_OBJ_NAME_LEN],
     insns: Arc<[BpfInsn]>,
     referenced_maps: Vec<Arc<BpfMap>>,
+    run_cnt: AtomicU64,
+    runtime_errors: AtomicU64,
 }
 
 impl BpfProgram {
@@ -55,6 +62,8 @@ impl BpfProgram {
             name,
             insns,
             referenced_maps,
+            run_cnt: AtomicU64::new(0),
+            runtime_errors: AtomicU64::new(0),
         }
     }
 
@@ -83,6 +92,31 @@ impl BpfProgram {
         &self.referenced_maps
     }
 
+    #[inline(always)]
+    pub fn run_cnt(&self) -> u64 {
+        self.run_cnt.load(Ordering::Relaxed)
+    }
+
+    #[inline(always)]
+    pub fn runtime_errors(&self) -> u64 {
+        self.runtime_errors.load(Ordering::Relaxed)
+    }
+
+    pub fn run(&self, context: &[u8]) -> Result<u64, BpfVmError> {
+        self.run_with_env(context, &DefaultBpfEnv)
+    }
+
+    pub fn run_with_env(&self, context: &[u8], env: &dyn BpfEnv) -> Result<u64, BpfVmError> {
+        self.run_cnt.fetch_add(1, Ordering::Relaxed);
+        match interpreter::execute(&self.insns, &self.referenced_maps, context, env) {
+            Ok(ret) => Ok(ret),
+            Err(e) => {
+                self.runtime_errors.fetch_add(1, Ordering::Relaxed);
+                Err(e)
+            }
+        }
+    }
+
     pub fn info(&self) -> BpfProgInfo {
         let mut info = BpfProgInfo::default();
         info.prog_type = self.prog_type.as_raw();
@@ -90,6 +124,7 @@ impl BpfProgram {
         info.name = self.name;
         info.xlated_prog_len = (self.insns.len() * core::mem::size_of::<BpfInsn>()) as u32;
         info.nr_map_ids = self.referenced_maps.len() as u32;
+        info.run_cnt = self.run_cnt.load(Ordering::Relaxed);
         info
     }
 }
