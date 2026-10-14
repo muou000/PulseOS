@@ -7,8 +7,9 @@ use axerrno::LinuxError;
 
 use super::{
     perf_event::{
-        PerfEvent, PerfEventClock, PERF_COUNT_SW_CPU_CLOCK, PERF_COUNT_SW_TASK_CLOCK,
-        PERF_TYPE_SOFTWARE, PERF_TYPE_TRACEPOINT,
+        register_active_perf_event, unregister_active_perf_event, PerfEvent, PerfEventClock,
+        PERF_COUNT_SW_CPU_CLOCK, PERF_COUNT_SW_TASK_CLOCK, PERF_TYPE_SOFTWARE,
+        PERF_TYPE_TRACEPOINT,
     },
     program::BpfProgram,
 };
@@ -75,6 +76,7 @@ pub struct BpfLink {
 impl BpfLink {
     pub fn new(prog: Arc<BpfProgram>, target: Arc<PerfEvent>) -> Result<Arc<Self>, LinuxError> {
         target.attach_program(prog.clone())?;
+        register_active_perf_event(&target);
         let id = NEXT_LINK_ID.fetch_add(1, Ordering::Relaxed);
         Ok(Arc::new(Self {
             id,
@@ -109,6 +111,7 @@ impl BpfLink {
         if self.detached.swap(true, Ordering::AcqRel) {
             return Err(LinuxError::EINVAL);
         }
+        unregister_active_perf_event(&self.target);
         self.target.detach_program(&self.prog)?;
         Ok(())
     }

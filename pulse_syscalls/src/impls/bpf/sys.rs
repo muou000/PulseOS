@@ -702,5 +702,103 @@ pub fn run_bpf_guest_checks() -> Result<(), LinuxError> {
 
     axlog::ax_println!("[BPF_GUEST] BPF Link and attach assertions: PASS");
 
+    axlog::ax_println!("[BPF_GUEST] Starting PERF_EVENT sampling checks...");
+
+    let sample_map_req = BpfMapCreateRequest {
+        map_type: pulse_core::bpf::BPF_MAP_TYPE_ARRAY,
+        key_size: 4,
+        value_size: 48,
+        max_entries: 1,
+        ..Default::default()
+    };
+    let sample_map = Arc::new(BpfMap::create(BpfMapSpec::validate(&sample_map_req)?)?);
+    let sample_resolver = GuestMapResolver { map: sample_map.clone() };
+
+    let sampling_insns = [
+        pulse_core::bpf::BpfInsn::new(pulse_core::bpf::BPF_ALU64 | pulse_core::bpf::BPF_MOV | pulse_core::bpf::BPF_X, pulse_core::bpf::BPF_REG_6, pulse_core::bpf::BPF_REG_1, 0, 0),
+        pulse_core::bpf::BpfInsn::new(pulse_core::bpf::BPF_ALU | pulse_core::bpf::BPF_MOV | pulse_core::bpf::BPF_K, pulse_core::bpf::BPF_REG_1, 0, 0, 0),
+        pulse_core::bpf::BpfInsn::new(pulse_core::bpf::BPF_ST | pulse_core::bpf::BPF_MEM | pulse_core::bpf::BPF_W, pulse_core::bpf::BPF_REG_10, 0, -4, 0),
+        pulse_core::bpf::BpfInsn::new(pulse_core::bpf::BPF_ALU64 | pulse_core::bpf::BPF_MOV | pulse_core::bpf::BPF_X, pulse_core::bpf::BPF_REG_2, pulse_core::bpf::BPF_REG_10, 0, 0),
+        pulse_core::bpf::BpfInsn::new(pulse_core::bpf::BPF_ALU64 | pulse_core::bpf::BPF_ADD | pulse_core::bpf::BPF_K, pulse_core::bpf::BPF_REG_2, 0, 0, -4),
+        pulse_core::bpf::BpfInsn::new(pulse_core::bpf::BPF_LD | pulse_core::bpf::BPF_IMM | pulse_core::bpf::BPF_DW, pulse_core::bpf::BPF_REG_1, pulse_core::bpf::BPF_PSEUDO_MAP_FD, 0, 0),
+        pulse_core::bpf::BpfInsn::new(0, 0, 0, 0, 0),
+        pulse_core::bpf::BpfInsn::new(pulse_core::bpf::BPF_JMP | pulse_core::bpf::BPF_CALL, 0, 0, 0, pulse_core::bpf::BPF_FUNC_MAP_LOOKUP_ELEM),
+        pulse_core::bpf::BpfInsn::new(pulse_core::bpf::BPF_JMP | pulse_core::bpf::BPF_JEQ | pulse_core::bpf::BPF_K, pulse_core::bpf::BPF_REG_0, 0, 16, 0),
+        pulse_core::bpf::BpfInsn::new(pulse_core::bpf::BPF_ALU64 | pulse_core::bpf::BPF_MOV | pulse_core::bpf::BPF_X, pulse_core::bpf::BPF_REG_7, pulse_core::bpf::BPF_REG_0, 0, 0),
+        pulse_core::bpf::BpfInsn::new(pulse_core::bpf::BPF_LDX | pulse_core::bpf::BPF_MEM | pulse_core::bpf::BPF_DW, pulse_core::bpf::BPF_REG_1, pulse_core::bpf::BPF_REG_6, 0, 0),
+        pulse_core::bpf::BpfInsn::new(pulse_core::bpf::BPF_STX | pulse_core::bpf::BPF_MEM | pulse_core::bpf::BPF_DW, pulse_core::bpf::BPF_REG_7, pulse_core::bpf::BPF_REG_1, 0, 0),
+        pulse_core::bpf::BpfInsn::new(pulse_core::bpf::BPF_LDX | pulse_core::bpf::BPF_MEM | pulse_core::bpf::BPF_DW, pulse_core::bpf::BPF_REG_1, pulse_core::bpf::BPF_REG_6, 8, 0),
+        pulse_core::bpf::BpfInsn::new(pulse_core::bpf::BPF_STX | pulse_core::bpf::BPF_MEM | pulse_core::bpf::BPF_DW, pulse_core::bpf::BPF_REG_7, pulse_core::bpf::BPF_REG_1, 8, 0),
+        pulse_core::bpf::BpfInsn::new(pulse_core::bpf::BPF_LDX | pulse_core::bpf::BPF_MEM | pulse_core::bpf::BPF_DW, pulse_core::bpf::BPF_REG_1, pulse_core::bpf::BPF_REG_6, 16, 0),
+        pulse_core::bpf::BpfInsn::new(pulse_core::bpf::BPF_STX | pulse_core::bpf::BPF_MEM | pulse_core::bpf::BPF_DW, pulse_core::bpf::BPF_REG_7, pulse_core::bpf::BPF_REG_1, 16, 0),
+        pulse_core::bpf::BpfInsn::new(pulse_core::bpf::BPF_LDX | pulse_core::bpf::BPF_MEM | pulse_core::bpf::BPF_W, pulse_core::bpf::BPF_REG_1, pulse_core::bpf::BPF_REG_6, 24, 0),
+        pulse_core::bpf::BpfInsn::new(pulse_core::bpf::BPF_STX | pulse_core::bpf::BPF_MEM | pulse_core::bpf::BPF_W, pulse_core::bpf::BPF_REG_7, pulse_core::bpf::BPF_REG_1, 24, 0),
+        pulse_core::bpf::BpfInsn::new(pulse_core::bpf::BPF_LDX | pulse_core::bpf::BPF_MEM | pulse_core::bpf::BPF_W, pulse_core::bpf::BPF_REG_1, pulse_core::bpf::BPF_REG_6, 28, 0),
+        pulse_core::bpf::BpfInsn::new(pulse_core::bpf::BPF_STX | pulse_core::bpf::BPF_MEM | pulse_core::bpf::BPF_W, pulse_core::bpf::BPF_REG_7, pulse_core::bpf::BPF_REG_1, 28, 0),
+        pulse_core::bpf::BpfInsn::new(pulse_core::bpf::BPF_LDX | pulse_core::bpf::BPF_MEM | pulse_core::bpf::BPF_W, pulse_core::bpf::BPF_REG_1, pulse_core::bpf::BPF_REG_6, 32, 0),
+        pulse_core::bpf::BpfInsn::new(pulse_core::bpf::BPF_STX | pulse_core::bpf::BPF_MEM | pulse_core::bpf::BPF_W, pulse_core::bpf::BPF_REG_7, pulse_core::bpf::BPF_REG_1, 32, 0),
+        pulse_core::bpf::BpfInsn::new(pulse_core::bpf::BPF_LDX | pulse_core::bpf::BPF_MEM | pulse_core::bpf::BPF_DW, pulse_core::bpf::BPF_REG_1, pulse_core::bpf::BPF_REG_6, 40, 0),
+        pulse_core::bpf::BpfInsn::new(pulse_core::bpf::BPF_STX | pulse_core::bpf::BPF_MEM | pulse_core::bpf::BPF_DW, pulse_core::bpf::BPF_REG_7, pulse_core::bpf::BPF_REG_1, 40, 0),
+        pulse_core::bpf::BpfInsn::new(pulse_core::bpf::BPF_ALU64 | pulse_core::bpf::BPF_MOV | pulse_core::bpf::BPF_K, pulse_core::bpf::BPF_REG_0, 0, 0, 0),
+        pulse_core::bpf::BpfInsn::new(pulse_core::bpf::BPF_JMP | pulse_core::bpf::BPF_EXIT, 0, 0, 0, 0),
+    ];
+
+    let sampling_cfg = pulse_core::bpf::verifier::VerifierConfig::new(pulse_core::bpf::BpfProgType::PerfEvent, 1);
+    let mut sampling_log = pulse_core::bpf::verifier::VerifierLog::new();
+    let sampling_verified = pulse_core::bpf::verifier::verify_program(&sampling_cfg, &sampling_insns, Some(&sample_resolver), &mut sampling_log)?;
+    let sampling_prog = alloc::sync::Arc::new(pulse_core::bpf::BpfProgram::new(
+        sampling_verified.prog_type,
+        [0u8; 16],
+        sampling_verified.insns,
+        sampling_verified.referenced_maps,
+    ));
+
+    let sample_period_ns = 50_000u64;
+    let sampling_spec = pulse_core::bpf::PerfEventSpec {
+        clock: pulse_core::bpf::PerfEventClock::CpuClock,
+        scope: pulse_core::bpf::PerfEventScope::PerCpu { cpu: 0 },
+        sample_period: sample_period_ns,
+        disabled: true,
+        cloexec: true,
+    };
+    let sampling_event = alloc::sync::Arc::new(pulse_core::bpf::PerfEvent::new(sampling_spec, 10_000));
+    let sampling_link = pulse_core::bpf::BpfLink::new(sampling_prog.clone(), sampling_event.clone())?;
+
+    sampling_event.enable_at(10_000);
+
+    let triggered = sampling_event.advance_and_maybe_sample(70_000, 0, 100, 100, 1)?;
+    if triggered != 1 {
+        return Err(LinuxError::EINVAL);
+    }
+    let counters = sampling_event.sample_counters();
+    if counters.delivered_samples != 1 || counters.re_entry_drops != 0 || counters.helper_failures != 0 || counters.budget_failures != 0 {
+        return Err(LinuxError::EINVAL);
+    }
+
+    let mut sample_out = [0u8; 48];
+    sample_map.lookup(&0u32.to_ne_bytes(), &mut sample_out)?;
+    let captured_period = u64::from_ne_bytes(sample_out[0..8].try_into().unwrap());
+    let captured_addr = u64::from_ne_bytes(sample_out[8..16].try_into().unwrap());
+    let captured_ts = u64::from_ne_bytes(sample_out[16..24].try_into().unwrap());
+    let captured_cpu = u32::from_ne_bytes(sample_out[24..28].try_into().unwrap());
+    let captured_pid = u32::from_ne_bytes(sample_out[28..32].try_into().unwrap());
+    let captured_tid = u32::from_ne_bytes(sample_out[32..36].try_into().unwrap());
+    let captured_task_id = u64::from_ne_bytes(sample_out[40..48].try_into().unwrap());
+
+    if captured_period != sample_period_ns
+        || captured_addr != 0
+        || captured_ts != 70_000
+        || captured_cpu != 0
+        || captured_pid != 100
+        || captured_tid != 100
+        || captured_task_id != 1
+    {
+        return Err(LinuxError::EINVAL);
+    }
+
+    sampling_link.detach()?;
+
+    axlog::ax_println!("[BPF_GUEST] PERF_EVENT sampling assertions: PASS");
+
     Ok(())
 }

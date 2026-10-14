@@ -212,6 +212,62 @@ pub struct PhaseMarkerContext {
     pub phase_name: [u8; 16],
 }
 
+#[repr(C, align(8))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PerfEventContext {
+    pub sample_period: u64,
+    pub addr: u64,
+    pub timestamp_ns: u64,
+    pub cpu_id: u32,
+    pub pid: u32,
+    pub tid: u32,
+    pub _reserved: u32,
+    pub task_id: u64,
+}
+
+impl PerfEventContext {
+    pub const fn new(
+        sample_period: u64,
+        addr: u64,
+        timestamp_ns: u64,
+        cpu_id: u32,
+        pid: u32,
+        tid: u32,
+        task_id: u64,
+    ) -> Self {
+        Self {
+            sample_period,
+            addr,
+            timestamp_ns,
+            cpu_id,
+            pid,
+            tid,
+            _reserved: 0,
+            task_id,
+        }
+    }
+
+    #[inline]
+    pub fn as_bytes(&self) -> &[u8] {
+        unsafe {
+            core::slice::from_raw_parts(
+                self as *const Self as *const u8,
+                core::mem::size_of::<Self>(),
+            )
+        }
+    }
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct PerfEventSampleCounters {
+    pub delivered_samples: u64,
+    pub re_entry_drops: u64,
+    pub helper_failures: u64,
+    pub budget_failures: u64,
+}
+
+
 // -----------------------------------------------------------------------------
 // Field Metadata Tables
 // -----------------------------------------------------------------------------
@@ -625,6 +681,9 @@ const _: () = {
     assert!(core::mem::size_of::<TaskExitContext>() <= MAX_CONTEXT_SIZE);
     assert!(core::mem::size_of::<TaskEnqueueContext>() <= MAX_CONTEXT_SIZE);
     assert!(core::mem::size_of::<PhaseMarkerContext>() <= MAX_CONTEXT_SIZE);
+    assert!(core::mem::size_of::<PerfEventContext>() == 48);
+    assert!(core::mem::align_of::<PerfEventContext>() == 8);
+    assert!(core::mem::size_of::<PerfEventContext>() <= MAX_CONTEXT_SIZE);
 
     assert!(core::mem::size_of::<EventRecord>() == 88);
     assert!(core::mem::align_of::<EventRecord>() == 8);

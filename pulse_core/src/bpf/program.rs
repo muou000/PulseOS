@@ -46,6 +46,10 @@ pub struct BpfProgram {
     referenced_maps: Vec<Arc<BpfMap>>,
     run_cnt: AtomicU64,
     runtime_errors: AtomicU64,
+    delivered_samples: AtomicU64,
+    re_entry_drops: AtomicU64,
+    helper_failures: AtomicU64,
+    budget_failures: AtomicU64,
 }
 
 impl BpfProgram {
@@ -64,6 +68,10 @@ impl BpfProgram {
             referenced_maps,
             run_cnt: AtomicU64::new(0),
             runtime_errors: AtomicU64::new(0),
+            delivered_samples: AtomicU64::new(0),
+            re_entry_drops: AtomicU64::new(0),
+            helper_failures: AtomicU64::new(0),
+            budget_failures: AtomicU64::new(0),
         }
     }
 
@@ -100,6 +108,36 @@ impl BpfProgram {
     #[inline(always)]
     pub fn runtime_errors(&self) -> u64 {
         self.runtime_errors.load(Ordering::Relaxed)
+    }
+
+    #[inline(always)]
+    pub fn sample_counters(&self) -> pulse_bpf_schema::PerfEventSampleCounters {
+        pulse_bpf_schema::PerfEventSampleCounters {
+            delivered_samples: self.delivered_samples.load(Ordering::Relaxed),
+            re_entry_drops: self.re_entry_drops.load(Ordering::Relaxed),
+            helper_failures: self.helper_failures.load(Ordering::Relaxed),
+            budget_failures: self.budget_failures.load(Ordering::Relaxed),
+        }
+    }
+
+    #[inline(always)]
+    pub fn record_sample_delivered(&self) {
+        self.delivered_samples.fetch_add(1, Ordering::Relaxed);
+    }
+
+    #[inline(always)]
+    pub fn record_re_entry_drop(&self) {
+        self.re_entry_drops.fetch_add(1, Ordering::Relaxed);
+    }
+
+    #[inline(always)]
+    pub fn record_helper_failure(&self) {
+        self.helper_failures.fetch_add(1, Ordering::Relaxed);
+    }
+
+    #[inline(always)]
+    pub fn record_budget_failure(&self) {
+        self.budget_failures.fetch_add(1, Ordering::Relaxed);
     }
 
     pub fn run(&self, context: &[u8]) -> Result<u64, BpfVmError> {

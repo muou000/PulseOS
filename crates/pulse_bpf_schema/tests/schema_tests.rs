@@ -169,6 +169,17 @@ fn test_context_layout_and_offsets() {
     assert_eq!(offset_of!(PhaseMarkerContext, phase_boundary), 40);
     assert_eq!(offset_of!(PhaseMarkerContext, phase_len), 44);
     assert_eq!(offset_of!(PhaseMarkerContext, phase_name), 48);
+
+    assert_eq!(align_of::<PerfEventContext>(), 8);
+    assert_eq!(size_of::<PerfEventContext>(), 48);
+    assert_eq!(offset_of!(PerfEventContext, sample_period), 0);
+    assert_eq!(offset_of!(PerfEventContext, addr), 8);
+    assert_eq!(offset_of!(PerfEventContext, timestamp_ns), 16);
+    assert_eq!(offset_of!(PerfEventContext, cpu_id), 24);
+    assert_eq!(offset_of!(PerfEventContext, pid), 28);
+    assert_eq!(offset_of!(PerfEventContext, tid), 32);
+    assert_eq!(offset_of!(PerfEventContext, _reserved), 36);
+    assert_eq!(offset_of!(PerfEventContext, task_id), 40);
 }
 
 #[test]
@@ -187,6 +198,7 @@ fn test_event_record_layout_and_bounds() {
     assert!(size_of::<TaskExitContext>() <= MAX_CONTEXT_SIZE);
     assert!(size_of::<TaskEnqueueContext>() <= MAX_CONTEXT_SIZE);
     assert!(size_of::<PhaseMarkerContext>() <= MAX_CONTEXT_SIZE);
+    assert!(size_of::<PerfEventContext>() <= MAX_CONTEXT_SIZE);
 
     let dummy_data = [42u8; 16];
     let rec = EventRecord::new(TracepointId::SchedSwitch, &dummy_data);
