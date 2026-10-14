@@ -1,5 +1,6 @@
 pub(crate) mod bpf;
 pub(crate) mod bpf_map;
+pub(crate) mod bpf_perf_event;
 pub(crate) mod bpf_prog;
 pub(crate) mod credential;
 pub(crate) mod epoll;
