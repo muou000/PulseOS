@@ -2064,6 +2064,7 @@ dependencies = [
  "linux-raw-sys",
  "memory_addr",
  "percpu",
+ "pulse_bpf_schema",
  "spin 0.10.0",
  "starry-vdso",
  "xmas-elf",

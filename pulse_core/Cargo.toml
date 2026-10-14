@@ -22,6 +22,7 @@ axmm.workspace = true
 axerrno.workspace = true
 axio.workspace = true
 axnet.workspace = true
+pulse_bpf_schema = { workspace = true }
 
 linux-raw-sys = { workspace = true, features = ["elf_uapi"] }
 linkme.workspace = true

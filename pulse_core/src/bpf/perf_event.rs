@@ -4,18 +4,34 @@
 //! `core`, `alloc`, `spin` and `axerrno`, so `pulse_syscalls` host tests can compile
 //! it directly. Descriptor wrapping (`PerfEventObject: FdObject`) lives in `object.rs`.
 
+use alloc::sync::Arc;
 use axerrno::LinuxError;
+use pulse_bpf_schema::TracepointId;
+
+#[cfg(target_os = "none")]
+use super::program::{BpfProgType, BpfProgram};
+
+#[cfg(not(target_os = "none"))]
+use super::core_program::{BpfProgType, BpfProgram};
 
 pub const PERF_EVENT_IOC_ENABLE: u32 = 0x2400;
 pub const PERF_EVENT_IOC_DISABLE: u32 = 0x2401;
 pub const PERF_EVENT_IOC_REFRESH: u32 = 0x2402;
 pub const PERF_EVENT_IOC_RESET: u32 = 0x2403;
 pub const PERF_EVENT_IOC_PERIOD: u32 = 0x40082404;
+pub const PERF_EVENT_IOC_SET_BPF: u32 = 0x40042408;
+
+pub const PERF_COUNT_SW_CPU_CLOCK: u64 = 0;
+pub const PERF_COUNT_SW_TASK_CLOCK: u64 = 1;
+
+pub const PERF_TYPE_SOFTWARE: u32 = 1;
+pub const PERF_TYPE_TRACEPOINT: u32 = 2;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PerfEventClock {
     CpuClock,
     TaskClock,
+    Tracepoint(TracepointId),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -33,12 +49,12 @@ pub struct PerfEventSpec {
     pub cloexec: bool,
 }
 
-#[derive(Debug)]
 struct PerfEventState {
     enabled: bool,
     accumulated_ns: u64,
     last_enabled_ns: u64,
     sample_period: u64,
+    attached_prog: Option<Arc<BpfProgram>>,
 }
 
 pub struct PerfEvent {
@@ -57,6 +73,7 @@ impl PerfEvent {
                 accumulated_ns: 0,
                 last_enabled_ns,
                 sample_period: spec.sample_period,
+                attached_prog: None,
             }),
         }
     }
@@ -145,3 +162,115 @@ impl PerfEvent {
         }
     }
 }
+
+use core::sync::atomic::{AtomicUsize, Ordering};
+
+static TRACEPOINT_SUBSCRIBER_COUNTS: [AtomicUsize; 32] = [
+    const { AtomicUsize::new(0) },
+    const { AtomicUsize::new(0) },
+    const { AtomicUsize::new(0) },
+    const { AtomicUsize::new(0) },
+    const { AtomicUsize::new(0) },
+    const { AtomicUsize::new(0) },
+    const { AtomicUsize::new(0) },
+    const { AtomicUsize::new(0) },
+    const { AtomicUsize::new(0) },
+    const { AtomicUsize::new(0) },
+    const { AtomicUsize::new(0) },
+    const { AtomicUsize::new(0) },
+    const { AtomicUsize::new(0) },
+    const { AtomicUsize::new(0) },
+    const { AtomicUsize::new(0) },
+    const { AtomicUsize::new(0) },
+    const { AtomicUsize::new(0) },
+    const { AtomicUsize::new(0) },
+    const { AtomicUsize::new(0) },
+    const { AtomicUsize::new(0) },
+    const { AtomicUsize::new(0) },
+    const { AtomicUsize::new(0) },
+    const { AtomicUsize::new(0) },
+    const { AtomicUsize::new(0) },
+    const { AtomicUsize::new(0) },
+    const { AtomicUsize::new(0) },
+    const { AtomicUsize::new(0) },
+    const { AtomicUsize::new(0) },
+    const { AtomicUsize::new(0) },
+    const { AtomicUsize::new(0) },
+    const { AtomicUsize::new(0) },
+    const { AtomicUsize::new(0) },
+];
+
+fn register_tracepoint_probe(tp_id: pulse_bpf_schema::TracepointId) {
+    let idx = tp_id as usize;
+    if idx < TRACEPOINT_SUBSCRIBER_COUNTS.len() {
+        if TRACEPOINT_SUBSCRIBER_COUNTS[idx].fetch_add(1, Ordering::SeqCst) == 0 {
+            #[cfg(all(target_os = "none", feature = "bpf-trace"))]
+            axtask::bpf_trace::register_probe(tp_id);
+        }
+    }
+}
+
+fn unregister_tracepoint_probe(tp_id: pulse_bpf_schema::TracepointId) {
+    let idx = tp_id as usize;
+    if idx < TRACEPOINT_SUBSCRIBER_COUNTS.len() {
+        if TRACEPOINT_SUBSCRIBER_COUNTS[idx].fetch_sub(1, Ordering::SeqCst) == 1 {
+            #[cfg(all(target_os = "none", feature = "bpf-trace"))]
+            axtask::bpf_trace::unregister_probe(tp_id);
+        }
+    }
+}
+
+impl PerfEvent {
+    pub fn attach_program(&self, prog: Arc<BpfProgram>) -> Result<(), LinuxError> {
+        let mut state = self.state.lock();
+        if state.attached_prog.is_some() {
+            return Err(LinuxError::EBUSY);
+        }
+        match self.spec.clock {
+            PerfEventClock::CpuClock | PerfEventClock::TaskClock => {
+                if prog.prog_type() != BpfProgType::PerfEvent {
+                    return Err(LinuxError::EINVAL);
+                }
+            }
+            PerfEventClock::Tracepoint(_) => {
+                if prog.prog_type() != BpfProgType::Tracepoint {
+                    return Err(LinuxError::EINVAL);
+                }
+            }
+        }
+        state.attached_prog = Some(prog);
+        if let PerfEventClock::Tracepoint(tp_id) = self.spec.clock {
+            register_tracepoint_probe(tp_id);
+        }
+        Ok(())
+    }
+
+    pub fn detach_program(&self, prog: &Arc<BpfProgram>) -> Result<(), LinuxError> {
+        let mut state = self.state.lock();
+        if let Some(ref attached) = state.attached_prog {
+            if Arc::ptr_eq(attached, prog) {
+                state.attached_prog = None;
+                if let PerfEventClock::Tracepoint(tp_id) = self.spec.clock {
+                    unregister_tracepoint_probe(tp_id);
+                }
+                return Ok(());
+            }
+        }
+        Err(LinuxError::EINVAL)
+    }
+
+    pub fn attached_prog(&self) -> Option<Arc<BpfProgram>> {
+        self.state.lock().attached_prog.clone()
+    }
+}
+
+impl Drop for PerfEvent {
+    fn drop(&mut self) {
+        if self.state.lock().attached_prog.is_some() {
+            if let PerfEventClock::Tracepoint(tp_id) = self.spec.clock {
+                unregister_tracepoint_probe(tp_id);
+            }
+        }
+    }
+}
+
