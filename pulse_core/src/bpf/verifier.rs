@@ -11,6 +11,14 @@ pub const BPF_MAX_STATES: usize = 65536;
 pub const BPF_STACK_SIZE: usize = 512;
 pub const MAX_CONTEXT_SIZE: usize = 80;
 
+#[inline]
+pub fn max_context_size_for_prog_type(prog_type: BpfProgType) -> usize {
+    match prog_type {
+        BpfProgType::PerfEvent => core::mem::size_of::<pulse_bpf_schema::PerfEventContext>(),
+        _ => MAX_CONTEXT_SIZE,
+    }
+}
+
 #[derive(Clone, Copy, Debug)]
 pub struct VerifierConfig {
     pub prog_type: BpfProgType,
@@ -389,7 +397,8 @@ pub fn verify_program(
                                 }
                                 let delta = insn.imm as i32;
                                 let new_off = if op == BPF_ADD { off + delta } else { off - delta };
-                                if new_off < 0 || new_off > (MAX_CONTEXT_SIZE as i32) {
+                                let max_ctx = max_context_size_for_prog_type(config.prog_type);
+                                if new_off < 0 || new_off > (max_ctx as i32) {
                                     log.append(pc, &alloc::format!("context pointer offset out of bounds: {}", new_off));
                                     return Err(LinuxError::EACCES);
                                 }
@@ -451,7 +460,8 @@ pub fn verify_program(
                 match state.regs[src] {
                     RegType::PtrContext { off: ctx_off } => {
                         let eff_off = ctx_off + (insn.off as i32);
-                        if eff_off < 0 || eff_off + (size_bytes as i32) > (MAX_CONTEXT_SIZE as i32) {
+                        let max_ctx = max_context_size_for_prog_type(config.prog_type);
+                        if eff_off < 0 || eff_off + (size_bytes as i32) > (max_ctx as i32) {
                             log.append(pc, &alloc::format!("invalid context access at offset {} size {}", eff_off, size_bytes));
                             return Err(LinuxError::EACCES);
                         }

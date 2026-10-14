@@ -25,6 +25,10 @@ pub mod core_perf_event;
 pub mod core_link;
 
 #[cfg(test)]
+#[path = "../../../pulse_core/src/bpf/verifier.rs"]
+pub mod core_verifier;
+
+#[cfg(test)]
 pub use core_insn as insn;
 #[cfg(test)]
 pub use core_map as map;
@@ -376,5 +380,351 @@ mod tests {
         // Detaching link2 completes teardown
         assert!(link2.detach().is_ok());
         assert!(event2.attached_prog().is_none());
+    }
+
+    #[test]
+    fn perf_event_sample_invocation_and_counters() {
+        let sw_event = dummy_perf_event(PerfEventClock::CpuClock);
+        let prog = dummy_prog(BpfProgType::PerfEvent);
+        let _link = BpfLink::new(prog.clone(), sw_event.clone()).unwrap();
+
+        let counters = sw_event.sample_counters();
+        assert_eq!(counters.delivered_samples, 0);
+        assert_eq!(counters.re_entry_drops, 0);
+        assert_eq!(counters.helper_failures, 0);
+        assert_eq!(counters.budget_failures, 0);
+
+        // Disabled event does not sample
+        assert_eq!(sw_event.sample_at(1000, 0, 1, 1, 1), Ok(false));
+        assert_eq!(sw_event.sample_counters().delivered_samples, 0);
+
+        // Enable event -> samples delivered
+        sw_event.enable_at(1000);
+        assert_eq!(sw_event.sample_at(2000, 0, 1, 1, 1), Ok(true));
+        assert_eq!(sw_event.sample_counters().delivered_samples, 1);
+    }
+
+    #[test]
+    fn perf_event_sample_context_fields_delivered_to_program() {
+        use super::core_verifier::{VerifierConfig, VerifierLog, verify_program, MapResolver};
+
+        // 1. Create an Array Map (key: u32, value: 48 bytes matching context fields)
+        let map_req = core_map::BpfMapCreateRequest {
+            map_type: core_map::BPF_MAP_TYPE_ARRAY,
+            key_size: 4,
+            value_size: 48,
+            max_entries: 1,
+            ..Default::default()
+        };
+        let map = Arc::new(core_map::BpfMap::create(core_map::BpfMapSpec::validate(&map_req).unwrap()).unwrap());
+
+        struct TestMapResolver {
+            map: Arc<core_map::BpfMap>,
+        }
+        impl MapResolver for TestMapResolver {
+            fn resolve_map(&self, _fd: u32) -> Result<Arc<core_map::BpfMap>, LinuxError> {
+                Ok(self.map.clone())
+            }
+        }
+        let resolver = TestMapResolver { map: map.clone() };
+
+        // 2. Verified BPF program that copies all context fields into the Array Map:
+        //    offset 0: sample_period (u64)
+        //    offset 8: addr (u64)
+        //    offset 16: timestamp_ns (u64)
+        //    offset 24: cpu_id (u32)
+        //    offset 28: pid (u32)
+        //    offset 32: tid (u32)
+        //    offset 40: task_id (u64)
+        let insns = [
+            // Save ctx pointer in r6
+            BpfInsn::new(BPF_ALU64 | BPF_MOV | BPF_X, BPF_REG_6, BPF_REG_1, 0, 0),
+            // Look up map element: key = 0
+            BpfInsn::new(BPF_ALU | BPF_MOV | BPF_K, BPF_REG_1, 0, 0, 0),
+            BpfInsn::new(BPF_ST | BPF_MEM | BPF_W, BPF_REG_10, 0, -4, 0),
+            BpfInsn::new(BPF_ALU64 | BPF_MOV | BPF_X, BPF_REG_2, BPF_REG_10, 0, 0),
+            BpfInsn::new(BPF_ALU64 | BPF_ADD | BPF_K, BPF_REG_2, 0, 0, -4),
+            // ld_imm64 map
+            BpfInsn::new(BPF_LD | BPF_IMM | BPF_DW, BPF_REG_1, BPF_PSEUDO_MAP_FD, 0, 0),
+            BpfInsn::new(0, 0, 0, 0, 0),
+            BpfInsn::new(BPF_JMP | BPF_CALL, 0, 0, 0, BPF_FUNC_MAP_LOOKUP_ELEM),
+            BpfInsn::new(BPF_JMP | BPF_JEQ | BPF_K, BPF_REG_0, 0, 16, 0), // jump to exit if NULL
+            // r7 = map value pointer
+            BpfInsn::new(BPF_ALU64 | BPF_MOV | BPF_X, BPF_REG_7, BPF_REG_0, 0, 0),
+            // Copy sample_period (offset 0, u64)
+            BpfInsn::new(BPF_LDX | BPF_MEM | BPF_DW, BPF_REG_1, BPF_REG_6, 0, 0),
+            BpfInsn::new(BPF_STX | BPF_MEM | BPF_DW, BPF_REG_7, BPF_REG_1, 0, 0),
+            // Copy addr (offset 8, u64)
+            BpfInsn::new(BPF_LDX | BPF_MEM | BPF_DW, BPF_REG_1, BPF_REG_6, 8, 0),
+            BpfInsn::new(BPF_STX | BPF_MEM | BPF_DW, BPF_REG_7, BPF_REG_1, 8, 0),
+            // Copy timestamp_ns (offset 16, u64)
+            BpfInsn::new(BPF_LDX | BPF_MEM | BPF_DW, BPF_REG_1, BPF_REG_6, 16, 0),
+            BpfInsn::new(BPF_STX | BPF_MEM | BPF_DW, BPF_REG_7, BPF_REG_1, 16, 0),
+            // Copy cpu_id (offset 24, u32)
+            BpfInsn::new(BPF_LDX | BPF_MEM | BPF_W, BPF_REG_1, BPF_REG_6, 24, 0),
+            BpfInsn::new(BPF_STX | BPF_MEM | BPF_W, BPF_REG_7, BPF_REG_1, 24, 0),
+            // Copy pid (offset 28, u32)
+            BpfInsn::new(BPF_LDX | BPF_MEM | BPF_W, BPF_REG_1, BPF_REG_6, 28, 0),
+            BpfInsn::new(BPF_STX | BPF_MEM | BPF_W, BPF_REG_7, BPF_REG_1, 28, 0),
+            // Copy tid (offset 32, u32)
+            BpfInsn::new(BPF_LDX | BPF_MEM | BPF_W, BPF_REG_1, BPF_REG_6, 32, 0),
+            BpfInsn::new(BPF_STX | BPF_MEM | BPF_W, BPF_REG_7, BPF_REG_1, 32, 0),
+            // Copy task_id (offset 40, u64)
+            BpfInsn::new(BPF_LDX | BPF_MEM | BPF_DW, BPF_REG_1, BPF_REG_6, 40, 0),
+            BpfInsn::new(BPF_STX | BPF_MEM | BPF_DW, BPF_REG_7, BPF_REG_1, 40, 0),
+            // Exit 0
+            BpfInsn::new(BPF_ALU64 | BPF_MOV | BPF_K, BPF_REG_0, 0, 0, 0),
+            BpfInsn::new(BPF_JMP | BPF_EXIT, 0, 0, 0, 0),
+        ];
+
+        let config = VerifierConfig::new(BpfProgType::PerfEvent, 1);
+        let mut log = VerifierLog::new();
+        let verified = verify_program(&config, &insns, Some(&resolver), &mut log).expect("Program must verify");
+
+        let prog = Arc::new(BpfProgram::new(
+            verified.prog_type,
+            [0u8; 16],
+            verified.insns,
+            verified.referenced_maps,
+        ));
+
+        let spec = PerfEventSpec {
+            clock: PerfEventClock::CpuClock,
+            scope: PerfEventScope::PerCpu { cpu: 5 },
+            sample_period: 42000,
+            disabled: false,
+            cloexec: true,
+        };
+        let event = Arc::new(PerfEvent::new(spec, 1000));
+        let _link = BpfLink::new(prog, event.clone()).unwrap();
+
+        // 3. Deliver sample with distinct, verifiable field values
+        let now_ns = 999_888_777u64;
+        let cpu = 5usize;
+        let pid = 1234u64;
+        let tid = 5678u64;
+        let task_id = 9999u64;
+
+        let delivered = event.sample_at(now_ns, cpu, pid, tid, task_id).expect("Sample execution must succeed");
+        assert!(delivered);
+        assert_eq!(event.sample_counters().delivered_samples, 1);
+
+        // 4. Read back the Array Map value and verify all scalar fields exactly match
+        let mut val = [0u8; 48];
+        map.lookup(&0u32.to_ne_bytes(), &mut val).expect("Map lookup must succeed");
+
+        let recorded_period = u64::from_ne_bytes(val[0..8].try_into().unwrap());
+        let recorded_addr = u64::from_ne_bytes(val[8..16].try_into().unwrap());
+        let recorded_ts = u64::from_ne_bytes(val[16..24].try_into().unwrap());
+        let recorded_cpu = u32::from_ne_bytes(val[24..28].try_into().unwrap());
+        let recorded_pid = u32::from_ne_bytes(val[28..32].try_into().unwrap());
+        let recorded_tid = u32::from_ne_bytes(val[32..36].try_into().unwrap());
+        let recorded_task_id = u64::from_ne_bytes(val[40..48].try_into().unwrap());
+
+        assert_eq!(recorded_period, 42000);
+        assert_eq!(recorded_addr, 0);
+        assert_eq!(recorded_ts, 999_888_777);
+        assert_eq!(recorded_cpu, 5);
+        assert_eq!(recorded_pid, 1234);
+        assert_eq!(recorded_tid, 5678);
+        assert_eq!(recorded_task_id, 9999);
+    }
+
+    #[test]
+    fn perf_event_period_accumulation_and_threshold() {
+        let spec = PerfEventSpec {
+            clock: PerfEventClock::CpuClock,
+            scope: PerfEventScope::PerCpu { cpu: 2 },
+            sample_period: 10_000,
+            disabled: true,
+            cloexec: true,
+        };
+        let event = Arc::new(PerfEvent::new(spec, 1000));
+        let prog = dummy_prog(BpfProgType::PerfEvent);
+        let _link = BpfLink::new(prog, event.clone()).unwrap();
+
+        // When disabled, advance produces 0 samples
+        assert_eq!(event.advance_and_maybe_sample(5000, 2, 1, 1, 1), Ok(0));
+
+        // Enable at t=5000
+        event.enable_at(5000);
+
+        // Advance 4,000 ns (t=9000, delta=4000 < period 10000): 0 samples
+        assert_eq!(event.advance_and_maybe_sample(9000, 2, 1, 1, 1), Ok(0));
+        assert_eq!(event.sample_counters().delivered_samples, 0);
+
+        // Advance 7,000 ns (t=16000, total accumulated = 11000 >= 10000): 1 sample
+        assert_eq!(event.advance_and_maybe_sample(16000, 2, 1, 1, 1), Ok(1));
+        assert_eq!(event.sample_counters().delivered_samples, 1);
+
+        // Advance 25,000 ns (t=41000, accumulated = 1000 + 25000 = 26000 >= 2 * 10000): 2 samples
+        assert_eq!(event.advance_and_maybe_sample(41000, 2, 1, 1, 1), Ok(2));
+        assert_eq!(event.sample_counters().delivered_samples, 3);
+    }
+
+    #[test]
+    fn perf_event_same_cpu_reentrancy_drop_accounting() {
+        let event = dummy_perf_event(PerfEventClock::CpuClock);
+        let prog = dummy_prog(BpfProgType::PerfEvent);
+        let _link = BpfLink::new(prog, event.clone()).unwrap();
+        event.enable_at(1000);
+
+        let test_cpu = 15;
+        let other_cpu = 14;
+
+        assert!(!is_in_sampling(test_cpu));
+
+        // Normal sample on test_cpu succeeds
+        assert_eq!(event.sample_at(2000, test_cpu, 1, 1, 1), Ok(true));
+        assert_eq!(event.sample_counters().delivered_samples, 1);
+        assert_eq!(event.sample_counters().re_entry_drops, 0);
+
+        // Simulate nested re-entrant invocation on test_cpu
+        set_in_sampling_for_test(test_cpu, true);
+        assert!(is_in_sampling(test_cpu));
+
+        // Re-entrant sample on test_cpu must be dropped and counted, returning Ok(false)
+        assert_eq!(event.sample_at(3000, test_cpu, 1, 1, 1), Ok(false));
+        assert_eq!(event.sample_counters().delivered_samples, 1);
+        assert_eq!(event.sample_counters().re_entry_drops, 1);
+
+        // Meanwhile, a concurrent sample on other_cpu is NOT blocked by test_cpu's guard
+        assert_eq!(event.sample_at(3000, other_cpu, 1, 1, 1), Ok(true));
+        assert_eq!(event.sample_counters().delivered_samples, 2);
+        assert_eq!(event.sample_counters().re_entry_drops, 1);
+
+        // Clean up test simulation
+        set_in_sampling_for_test(test_cpu, false);
+        assert!(!is_in_sampling(test_cpu));
+
+        // test_cpu can sample normally again
+        assert_eq!(event.sample_at(4000, test_cpu, 1, 1, 1), Ok(true));
+        assert_eq!(event.sample_counters().delivered_samples, 3);
+        assert_eq!(event.sample_counters().re_entry_drops, 1);
+    }
+
+    #[test]
+    fn perf_event_budget_failure_accounting() {
+        // Construct a program with a backward jump that exceeds the step budget (BPF_MAX_STEPS = 65536)
+        let insns = Arc::new([
+            BpfInsn::new(BPF_ALU64 | BPF_MOV | BPF_K, BPF_REG_0, 0, 0, 1),
+            BpfInsn::new(BPF_JMP | BPF_JA, 0, 0, -1, 0), // jump back to self endlessly
+        ]);
+        let prog = Arc::new(BpfProgram::new(
+            BpfProgType::PerfEvent,
+            [0u8; 16],
+            insns,
+            alloc::vec::Vec::new(),
+        ));
+
+        let event = dummy_perf_event(PerfEventClock::CpuClock);
+        let _link = BpfLink::new(prog, event.clone()).unwrap();
+        event.enable_at(1000);
+
+        // Executing the over-budget program fails cleanly without hanging on CPU 3
+        assert_eq!(event.sample_at(2000, 3, 1, 1, 1), Ok(false));
+        let counters = event.sample_counters();
+        assert_eq!(counters.budget_failures, 1);
+        assert_eq!(counters.delivered_samples, 0);
+        assert_eq!(counters.re_entry_drops, 0);
+    }
+
+    #[test]
+    fn perf_event_helper_failure_accounting() {
+        // Construct a program calling an invalid helper ID
+        let insns = Arc::new([
+            BpfInsn::new(BPF_ALU64 | BPF_MOV | BPF_K, BPF_REG_0, 0, 0, 0),
+            BpfInsn::new(BPF_JMP | BPF_CALL, 0, 0, 0, 9999), // invalid helper
+            BpfInsn::new(BPF_JMP | BPF_EXIT, 0, 0, 0, 0),
+        ]);
+        let prog = Arc::new(BpfProgram::new(
+            BpfProgType::PerfEvent,
+            [0u8; 16],
+            insns,
+            alloc::vec::Vec::new(),
+        ));
+
+        let event = dummy_perf_event(PerfEventClock::CpuClock);
+        let _link = BpfLink::new(prog, event.clone()).unwrap();
+        event.enable_at(1000);
+
+        // Executing the helper-failure program fails cleanly on CPU 4
+        assert_eq!(event.sample_at(2000, 4, 1, 1, 1), Ok(false));
+        let counters = event.sample_counters();
+        assert_eq!(counters.helper_failures, 1);
+        assert_eq!(counters.delivered_samples, 0);
+    }
+
+    #[test]
+    fn perf_event_attach_produces_no_invocation_until_sample() {
+        let sw_event = dummy_perf_event(PerfEventClock::CpuClock);
+        let prog = dummy_prog(BpfProgType::PerfEvent);
+        let _link = BpfLink::new(prog.clone(), sw_event.clone()).unwrap();
+
+        // Attach alone produces 0 sample invocations and 0 runs
+        assert_eq!(sw_event.sample_counters().delivered_samples, 0);
+        assert_eq!(prog.sample_counters().delivered_samples, 0);
+        assert_eq!(prog.run_cnt(), 0);
+
+        // Enabling event also produces no invocations until time advances or sample arrives
+        sw_event.enable_at(1000);
+        assert_eq!(sw_event.sample_counters().delivered_samples, 0);
+        assert_eq!(prog.sample_counters().delivered_samples, 0);
+        assert_eq!(prog.run_cnt(), 0);
+    }
+
+    #[test]
+    fn perf_event_program_sample_counters_track_execution() {
+        let event = dummy_perf_event(PerfEventClock::CpuClock);
+        let prog = dummy_prog(BpfProgType::PerfEvent);
+        let _link = BpfLink::new(prog.clone(), event.clone()).unwrap();
+        event.enable_at(1000);
+
+        let test_cpu = 6;
+        assert_eq!(event.sample_at(2000, test_cpu, 1, 1, 1), Ok(true));
+
+        assert_eq!(event.sample_counters().delivered_samples, 1);
+        assert_eq!(prog.sample_counters().delivered_samples, 1);
+        assert_eq!(prog.run_cnt(), 1);
+    }
+
+    #[test]
+    fn perf_event_task_clock_and_task_scope_sampling() {
+        let spec = PerfEventSpec {
+            clock: PerfEventClock::TaskClock,
+            scope: PerfEventScope::Task { pid: 42 },
+            sample_period: 5_000,
+            disabled: true,
+            cloexec: true,
+        };
+        let event = Arc::new(PerfEvent::new(spec, 1000));
+        let prog = dummy_prog(BpfProgType::PerfEvent);
+        let _link = BpfLink::new(prog.clone(), event.clone()).unwrap();
+
+        event.enable_at(1000);
+
+        // Advance on CPU 7 for task 42
+        assert_eq!(event.advance_and_maybe_sample(7000, 7, 42, 42, 10), Ok(1));
+        assert_eq!(event.sample_counters().delivered_samples, 1);
+        assert_eq!(prog.sample_counters().delivered_samples, 1);
+    }
+
+    #[test]
+    fn perf_event_verifier_rejects_out_of_bounds_context_access() {
+        use super::core_verifier::{verify_program, VerifierConfig, VerifierLog};
+
+        // Attempting to read beyond 48 bytes (e.g. at offset 48, size 8 bytes, which reaches byte 56)
+        let insns = [
+            BpfInsn::new(BPF_LDX | BPF_MEM | BPF_DW, BPF_REG_0, BPF_REG_1, 48, 0),
+            BpfInsn::new(BPF_ALU64 | BPF_MOV | BPF_K, BPF_REG_0, 0, 0, 0),
+            BpfInsn::new(BPF_JMP | BPF_EXIT, 0, 0, 0, 0),
+        ];
+
+        let config = VerifierConfig::new(BpfProgType::PerfEvent, 1);
+        let mut log = VerifierLog::new();
+        let res = verify_program(&config, &insns, None, &mut log);
+
+        assert!(res.is_err(), "Access past PerfEventContext (48 bytes) must be rejected");
+        assert!(log.as_str().contains("invalid context access"));
     }
 }
