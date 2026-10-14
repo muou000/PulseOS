@@ -83,6 +83,8 @@ pub const BPF_PSEUDO_MAP_VALUE: u8 = 2;
 pub const BPF_FUNC_MAP_LOOKUP_ELEM: i32 = 1;
 pub const BPF_FUNC_MAP_UPDATE_ELEM: i32 = 2;
 pub const BPF_FUNC_MAP_DELETE_ELEM: i32 = 3;
+pub const BPF_FUNC_KTIME_GET_NS: i32 = 5;
+pub const BPF_FUNC_GET_SMP_PROCESSOR_ID: i32 = 8;
 
 /// 8-byte eBPF instruction matching `struct bpf_insn`.
 #[repr(C)]

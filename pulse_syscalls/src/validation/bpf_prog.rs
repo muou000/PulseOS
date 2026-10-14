@@ -9,6 +9,10 @@ mod core_insn;
 mod core_map;
 
 #[cfg(test)]
+#[path = "../../../pulse_core/src/bpf/interpreter.rs"]
+mod core_interpreter;
+
+#[cfg(test)]
 #[path = "../../../pulse_core/src/bpf/program.rs"]
 mod core_program;
 
@@ -18,6 +22,8 @@ mod core_verifier;
 
 #[cfg(test)]
 use core_insn as insn;
+#[cfg(test)]
+use core_interpreter as interpreter;
 #[cfg(test)]
 use core_map as map;
 #[cfg(test)]
@@ -30,7 +36,9 @@ mod tests {
     use alloc::{sync::Arc, vec, vec::Vec};
     use axerrno::LinuxError;
 
-    use super::{core_insn::*, core_map::*, core_program::*, core_verifier::*};
+    use super::{
+        core_insn::*, core_interpreter::*, core_map::*, core_program::*, core_verifier::*,
+    };
 
     fn insn(code: u8, dst: u8, src: u8, off: i16, imm: i32) -> BpfInsn {
         BpfInsn::new(code, dst, src, off, imm)
@@ -791,4 +799,603 @@ mod tests {
         full_proc.insert_prog(prog.clone()).unwrap();
         assert_eq!(full_proc.insert_prog(prog.clone()), Err(LinuxError::EMFILE));
     }
+
+    #[test]
+    fn interpreter_runs_arithmetic_and_returns_r0() {
+        // R0 = 10; R1 = 32; R0 += R1; exit()
+        let insns = [
+            mov_imm(BPF_REG_0, 10),
+            mov_imm(BPF_REG_1, 32),
+            insn(BPF_ALU64 | BPF_ADD | BPF_X, BPF_REG_0, BPF_REG_1, 0, 0),
+            exit(),
+        ];
+        let (res, log) = verify(&insns);
+        assert!(res.is_ok(), "Program must verify: {}", log.as_str());
+        let verified = res.unwrap();
+        let prog = BpfProgram::new(
+            verified.prog_type,
+            [0u8; 16],
+            verified.insns,
+            verified.referenced_maps,
+        );
+
+        let ret = prog.run(&[]).expect("Program must run successfully");
+        assert_eq!(ret, 42);
+        assert_eq!(prog.run_cnt(), 1);
+        assert_eq!(prog.runtime_errors(), 0);
+    }
+
+    #[test]
+    fn interpreter_runs_control_flow_and_conditional_jumps() {
+        // 0: R0 = 10
+        // 1: if R0 == 10 goto pc+1 (to 3)
+        // 2: R0 = 999
+        // 3: if R0 != 10 goto pc+1 (to 5)
+        // 4: goto pc+1 (to 6)
+        // 5: R0 = 888
+        // 6: exit()
+        let insns = [
+            mov_imm(BPF_REG_0, 10),
+            insn(BPF_JMP | BPF_JEQ | BPF_K, BPF_REG_0, 0, 1, 10),
+            mov_imm(BPF_REG_0, 999),
+            insn(BPF_JMP | BPF_JNE | BPF_K, BPF_REG_0, 0, 1, 10),
+            insn(BPF_JMP | BPF_JA, 0, 0, 1, 0),
+            mov_imm(BPF_REG_0, 888),
+            exit(),
+        ];
+        let (res, log) = verify(&insns);
+        assert!(res.is_ok(), "Program must verify: {}", log.as_str());
+        let verified = res.unwrap();
+        let prog = BpfProgram::new(
+            verified.prog_type,
+            [0u8; 16],
+            verified.insns,
+            verified.referenced_maps,
+        );
+
+        let ret = prog.run(&[]).expect("Program must run successfully");
+        assert_eq!(ret, 10);
+    }
+
+    #[test]
+    fn interpreter_reads_context_and_modifies_stack() {
+        // 0: R2 = *(u32 *)(R1 + 0)
+        // 1: *(u32 *)(R10 - 4) = R2
+        // 2: R0 = *(u32 *)(R10 - 4)
+        // 3: R0 += 5
+        // 4: exit()
+        let insns = [
+            insn(BPF_LDX | BPF_MEM | BPF_W, BPF_REG_2, BPF_REG_1, 0, 0),
+            insn(BPF_STX | BPF_MEM | BPF_W, BPF_REG_10, BPF_REG_2, -4, 0),
+            insn(BPF_LDX | BPF_MEM | BPF_W, BPF_REG_0, BPF_REG_10, -4, 0),
+            insn(BPF_ALU64 | BPF_ADD | BPF_K, BPF_REG_0, 0, 0, 5),
+            exit(),
+        ];
+        let (res, log) = verify(&insns);
+        assert!(res.is_ok(), "Program must verify: {}", log.as_str());
+        let verified = res.unwrap();
+        let prog = BpfProgram::new(
+            verified.prog_type,
+            [0u8; 16],
+            verified.insns,
+            verified.referenced_maps,
+        );
+
+        let ctx = 37u32.to_ne_bytes();
+        let ret = prog.run(&ctx).expect("Program must run successfully");
+        assert_eq!(ret, 42);
+    }
+
+    #[test]
+    fn interpreter_enforces_65536_step_budget() {
+        // Unverified loop: 0: JA -1 (infinite loop)
+        let loop_insns = [
+            insn(BPF_JMP | BPF_JA, 0, 0, -1, 0),
+        ];
+        let res = execute(&loop_insns, &[], &[], &DefaultBpfEnv);
+        assert_eq!(res, Err(BpfVmError::StepLimitExceeded));
+    }
+
+    #[test]
+    fn interpreter_executes_bpf_prog01_fixture_updating_array_map() {
+        // Derived from LTP bpf_prog01.c:
+        // - Array map: key_size=4, val_size=8, max_entries=1
+        // - Program looks up key 0, checks NULL, writes 1 into map[0], exits 0.
+        let map = create_test_array_map();
+        let resolver = MockMapResolver { map: map.clone() };
+
+        let insns = [
+            insn(BPF_LD | BPF_IMM | BPF_DW, BPF_REG_1, BPF_PSEUDO_MAP_FD, 0, 42),
+            insn(0, 0, 0, 0, 0),
+            insn(BPF_ALU64 | BPF_MOV | BPF_X, BPF_REG_2, BPF_REG_10, 0, 0),
+            insn(BPF_ALU64 | BPF_ADD | BPF_K, BPF_REG_2, 0, 0, -8),
+            insn(BPF_ST | BPF_MEM | BPF_DW, BPF_REG_2, 0, 0, 0),
+            insn(BPF_JMP | BPF_CALL, 0, 0, 0, BPF_FUNC_MAP_LOOKUP_ELEM),
+            insn(BPF_JMP | BPF_JEQ | BPF_K, BPF_REG_0, 0, 3, 0),
+            insn(BPF_ALU64 | BPF_MOV | BPF_X, BPF_REG_1, BPF_REG_0, 0, 0),
+            insn(BPF_ST | BPF_MEM | BPF_DW, BPF_REG_1, 0, 0, 1),
+            mov_imm(BPF_REG_0, 0),
+            exit(),
+        ];
+
+        let config = VerifierConfig::new(BpfProgType::Tracepoint, 1);
+        let mut log = VerifierLog::new();
+        let verified = verify_program(&config, &insns, Some(&resolver), &mut log)
+            .expect("bpf_prog01 fixture must verify");
+
+        let prog = BpfProgram::new(
+            verified.prog_type,
+            [0u8; 16],
+            verified.insns,
+            verified.referenced_maps,
+        );
+
+        let ret = prog.run(&[]).expect("bpf_prog01 fixture must run successfully");
+        assert_eq!(ret, 0);
+
+        // Verify that map[0] was updated to 1
+        let mut val_bytes = [0u8; 8];
+        map.lookup(&0u32.to_ne_bytes(), &mut val_bytes).unwrap();
+        assert_eq!(u64::from_ne_bytes(val_bytes), 1);
+    }
+
+    #[test]
+    fn interpreter_executes_bpf_prog02_fixture_with_64bit_arithmetic_and_lookups() {
+        // Derived from LTP bpf_prog02.c:
+        // - Array map: key_size=4, val_size=8, max_entries=2
+        // - Map[0] = (1 << 60) + 1
+        // - Map[1] = (1 << 60) - 1
+        let req = BpfMapCreateRequest {
+            map_type: BPF_MAP_TYPE_ARRAY,
+            key_size: 4,
+            value_size: 8,
+            max_entries: 2,
+            ..Default::default()
+        };
+        let map = Arc::new(BpfMap::create(BpfMapSpec::validate(&req).unwrap()).unwrap());
+        let resolver = MockMapResolver { map: map.clone() };
+
+        let a64int = 1i64 << 60;
+        let imm_lo = a64int as u32 as i32;
+        let imm_hi = (a64int >> 32) as i32;
+
+        let insns = [
+            // 0: r6 = 1
+            mov_imm(BPF_REG_6, 1),
+            // 1: r1 = map_fd (42)
+            insn(BPF_LD | BPF_IMM | BPF_DW, BPF_REG_1, BPF_PSEUDO_MAP_FD, 0, 42),
+            insn(0, 0, 0, 0, 0),
+            // 3: r2 = fp
+            insn(BPF_ALU64 | BPF_MOV | BPF_X, BPF_REG_2, BPF_REG_10, 0, 0),
+            // 4: r2 = r2 - 4
+            insn(BPF_ALU64 | BPF_ADD | BPF_K, BPF_REG_2, 0, 0, -4),
+            // 5: *r2 = 0
+            insn(BPF_ST | BPF_MEM | BPF_W, BPF_REG_2, 0, 0, 0),
+            // 6: map_lookup_elem
+            insn(BPF_JMP | BPF_CALL, 0, 0, 0, BPF_FUNC_MAP_LOOKUP_ELEM),
+            // 7: if (!r0) goto 25
+            insn(BPF_JMP | BPF_JEQ | BPF_K, BPF_REG_0, 0, 17, 0),
+            // 8: r3 = r0
+            insn(BPF_ALU64 | BPF_MOV | BPF_X, BPF_REG_3, BPF_REG_0, 0, 0),
+            // 9: r4 = 2^60
+            insn(BPF_LD | BPF_IMM | BPF_DW, BPF_REG_4, 0, 0, imm_lo),
+            insn(0, 0, 0, 0, imm_hi),
+            // 11: r4 += r6
+            insn(BPF_ALU64 | BPF_ADD | BPF_X, BPF_REG_4, BPF_REG_6, 0, 0),
+            // 12: *r3 = r4
+            insn(BPF_STX | BPF_MEM | BPF_DW, BPF_REG_3, BPF_REG_4, 0, 0),
+
+            // 13: r1 = map_fd (42)
+            insn(BPF_LD | BPF_IMM | BPF_DW, BPF_REG_1, BPF_PSEUDO_MAP_FD, 0, 42),
+            insn(0, 0, 0, 0, 0),
+            // 15: r2 = fp
+            insn(BPF_ALU64 | BPF_MOV | BPF_X, BPF_REG_2, BPF_REG_10, 0, 0),
+            // 16: r2 = r2 - 4
+            insn(BPF_ALU64 | BPF_ADD | BPF_K, BPF_REG_2, 0, 0, -4),
+            // 17: *r2 = 1
+            insn(BPF_ST | BPF_MEM | BPF_W, BPF_REG_2, 0, 0, 1),
+            // 18: map_lookup_elem
+            insn(BPF_JMP | BPF_CALL, 0, 0, 0, BPF_FUNC_MAP_LOOKUP_ELEM),
+            // 19: if (!r0) goto 25
+            insn(BPF_JMP | BPF_JEQ | BPF_K, BPF_REG_0, 0, 5, 0),
+            // 20: r3 = r0
+            insn(BPF_ALU64 | BPF_MOV | BPF_X, BPF_REG_3, BPF_REG_0, 0, 0),
+            // 21: r4 = 2^60
+            insn(BPF_LD | BPF_IMM | BPF_DW, BPF_REG_4, 0, 0, imm_lo),
+            insn(0, 0, 0, 0, imm_hi),
+            // 23: r4 -= r6
+            insn(BPF_ALU64 | BPF_SUB | BPF_X, BPF_REG_4, BPF_REG_6, 0, 0),
+            // 24: *r3 = r4
+            insn(BPF_STX | BPF_MEM | BPF_DW, BPF_REG_3, BPF_REG_4, 0, 0),
+
+            // 25: r0 = 0
+            mov_imm(BPF_REG_0, 0),
+            // 26: exit
+            exit(),
+        ];
+
+        let config = VerifierConfig::new(BpfProgType::Tracepoint, 1);
+        let mut log = VerifierLog::new();
+        let verified = verify_program(&config, &insns, Some(&resolver), &mut log)
+            .expect("bpf_prog02 fixture must verify");
+
+        let prog = BpfProgram::new(
+            verified.prog_type,
+            [0u8; 16],
+            verified.insns,
+            verified.referenced_maps,
+        );
+
+        let ret = prog.run(&[]).expect("bpf_prog02 fixture must run successfully");
+        assert_eq!(ret, 0);
+
+        // Verify map[0] and map[1]
+        let mut val0 = [0u8; 8];
+        let mut val1 = [0u8; 8];
+        map.lookup(&0u32.to_ne_bytes(), &mut val0).unwrap();
+        map.lookup(&1u32.to_ne_bytes(), &mut val1).unwrap();
+        assert_eq!(u64::from_ne_bytes(val0), (1u64 << 60) + 1);
+        assert_eq!(u64::from_ne_bytes(val1), (1u64 << 60) - 1);
+    }
+
+    #[test]
+    fn interpreter_handles_map_lookup_miss_null_branch() {
+        // Array map max_entries = 1. Lookup for key 10 fails -> returns NULL.
+        let map = create_test_array_map();
+        let resolver = MockMapResolver { map: map.clone() };
+
+        let insns = [
+            insn(BPF_LD | BPF_IMM | BPF_DW, BPF_REG_1, BPF_PSEUDO_MAP_FD, 0, 42),
+            insn(0, 0, 0, 0, 0),
+            insn(BPF_ALU64 | BPF_MOV | BPF_X, BPF_REG_2, BPF_REG_10, 0, 0),
+            insn(BPF_ALU64 | BPF_ADD | BPF_K, BPF_REG_2, 0, 0, -4),
+            insn(BPF_ST | BPF_MEM | BPF_W, BPF_REG_2, 0, 0, 100), // key = 100 (out of bounds for 16-entry map)
+            insn(BPF_JMP | BPF_CALL, 0, 0, 0, BPF_FUNC_MAP_LOOKUP_ELEM),
+            insn(BPF_JMP | BPF_JEQ | BPF_K, BPF_REG_0, 0, 2, 0), // if r0 == 0 goto 9
+            // if non-null: return 1
+            mov_imm(BPF_REG_0, 1),
+            exit(),
+            // null branch: return 99
+            mov_imm(BPF_REG_0, 99),
+            exit(),
+        ];
+
+        let config = VerifierConfig::new(BpfProgType::Tracepoint, 1);
+        let mut log = VerifierLog::new();
+        let verified = verify_program(&config, &insns, Some(&resolver), &mut log)
+            .expect("Program must verify");
+
+        let prog = BpfProgram::new(
+            verified.prog_type,
+            [0u8; 16],
+            verified.insns,
+            verified.referenced_maps,
+        );
+
+        let ret = prog.run(&[]).expect("Program must run successfully");
+        assert_eq!(ret, 99);
+    }
+
+    #[test]
+    fn interpreter_rejects_unsafe_null_dereference_with_counted_error() {
+        // Direct execution of instruction sequence attempting to dereference Null
+        let insns = [
+            mov_imm(BPF_REG_1, 0),
+            insn(BPF_ST | BPF_MEM | BPF_DW, BPF_REG_1, 0, 0, 123),
+            exit(),
+        ];
+
+        let prog = BpfProgram::new(
+            BpfProgType::Tracepoint,
+            [0u8; 16],
+            Arc::from(insns),
+            Vec::new(),
+        );
+
+        let res = prog.run(&[]);
+        assert_eq!(res, Err(BpfVmError::NullPointerDereference));
+        assert_eq!(prog.run_cnt(), 1);
+        assert_eq!(prog.runtime_errors(), 1);
+    }
+
+    #[test]
+    fn interpreter_executes_map_update_and_delete_helpers() {
+        let req = BpfMapCreateRequest {
+            map_type: BPF_MAP_TYPE_HASH,
+            key_size: 4,
+            value_size: 8,
+            max_entries: 10,
+            ..Default::default()
+        };
+        let map = Arc::new(BpfMap::create(BpfMapSpec::validate(&req).unwrap()).unwrap());
+        let resolver = MockMapResolver { map: map.clone() };
+
+        // 1. Update map: key = 5, value = 777, flags = BPF_ANY
+        // 2. Delete map: key = 5
+        let insns = [
+            // key on stack: *(u32 *)(r10 - 4) = 5
+            insn(BPF_ST | BPF_MEM | BPF_W, BPF_REG_10, 0, -4, 5),
+            // val on stack: *(u64 *)(r10 - 16) = 777
+            insn(BPF_ST | BPF_MEM | BPF_DW, BPF_REG_10, 0, -16, 777),
+            // r1 = map
+            insn(BPF_LD | BPF_IMM | BPF_DW, BPF_REG_1, BPF_PSEUDO_MAP_FD, 0, 42),
+            insn(0, 0, 0, 0, 0),
+            // r2 = r10 - 4 (key ptr)
+            insn(BPF_ALU64 | BPF_MOV | BPF_X, BPF_REG_2, BPF_REG_10, 0, 0),
+            insn(BPF_ALU64 | BPF_ADD | BPF_K, BPF_REG_2, 0, 0, -4),
+            // r3 = r10 - 16 (val ptr)
+            insn(BPF_ALU64 | BPF_MOV | BPF_X, BPF_REG_3, BPF_REG_10, 0, 0),
+            insn(BPF_ALU64 | BPF_ADD | BPF_K, BPF_REG_3, 0, 0, -16),
+            // r4 = 0 (BPF_ANY)
+            mov_imm(BPF_REG_4, 0),
+            // call map_update_elem
+            insn(BPF_JMP | BPF_CALL, 0, 0, 0, BPF_FUNC_MAP_UPDATE_ELEM),
+            // check return code r0 == 0
+            insn(BPF_JMP | BPF_JNE | BPF_K, BPF_REG_0, 0, 8, 0),
+
+            // r1 = map
+            insn(BPF_LD | BPF_IMM | BPF_DW, BPF_REG_1, BPF_PSEUDO_MAP_FD, 0, 42),
+            insn(0, 0, 0, 0, 0),
+            // r2 = r10 - 4 (key ptr)
+            insn(BPF_ALU64 | BPF_MOV | BPF_X, BPF_REG_2, BPF_REG_10, 0, 0),
+            insn(BPF_ALU64 | BPF_ADD | BPF_K, BPF_REG_2, 0, 0, -4),
+            // call map_delete_elem
+            insn(BPF_JMP | BPF_CALL, 0, 0, 0, BPF_FUNC_MAP_DELETE_ELEM),
+            // check return code r0 == 0
+            insn(BPF_JMP | BPF_JNE | BPF_K, BPF_REG_0, 0, 2, 0),
+
+            mov_imm(BPF_REG_0, 0),
+            exit(),
+            // failure exit
+            mov_imm(BPF_REG_0, 1),
+            exit(),
+        ];
+
+        let config = VerifierConfig::new(BpfProgType::Tracepoint, 1);
+        let mut log = VerifierLog::new();
+        let verified = verify_program(&config, &insns, Some(&resolver), &mut log)
+            .expect("Program must verify");
+
+        let prog = BpfProgram::new(
+            verified.prog_type,
+            [0u8; 16],
+            verified.insns,
+            verified.referenced_maps,
+        );
+
+        let ret = prog.run(&[]).expect("Program must run successfully");
+        assert_eq!(ret, 0);
+    }
+
+    #[test]
+    fn interpreter_executes_time_and_cpu_helpers() {
+        struct MockEnv;
+        impl BpfEnv for MockEnv {
+            fn ktime_get_ns(&self) -> u64 {
+                123456789
+            }
+            fn get_smp_processor_id(&self) -> u32 {
+                7
+            }
+        }
+
+        let insns = [
+            // call ktime_get_ns
+            insn(BPF_JMP | BPF_CALL, 0, 0, 0, BPF_FUNC_KTIME_GET_NS),
+            // preserve r0 in r6
+            insn(BPF_ALU64 | BPF_MOV | BPF_X, BPF_REG_6, BPF_REG_0, 0, 0),
+            // call get_smp_processor_id
+            insn(BPF_JMP | BPF_CALL, 0, 0, 0, BPF_FUNC_GET_SMP_PROCESSOR_ID),
+            // r0 += r6
+            insn(BPF_ALU64 | BPF_ADD | BPF_X, BPF_REG_0, BPF_REG_6, 0, 0),
+            exit(),
+        ];
+
+        let config = VerifierConfig::new(BpfProgType::Tracepoint, 1);
+        let mut log = VerifierLog::new();
+        let verified = verify_program(&config, &insns, None, &mut log)
+            .expect("Program must verify");
+
+        let prog = BpfProgram::new(
+            verified.prog_type,
+            [0u8; 16],
+            verified.insns,
+            verified.referenced_maps,
+        );
+
+        let ret = prog.run_with_env(&[], &MockEnv).expect("Program must run successfully");
+        assert_eq!(ret, 123456789 + 7);
+    }
+
+    #[test]
+    fn bpf_prog01_rejected_fixture_missing_null_check_rejected_by_verifier() {
+        // Derived from LTP bpf_prog01.c: omitted the null check after map_lookup_elem
+        let map = create_test_array_map();
+        let resolver = MockMapResolver { map: map.clone() };
+
+        let insns = [
+            // 0: Load map FD
+            insn(BPF_LD | BPF_IMM | BPF_DW, BPF_REG_1, BPF_PSEUDO_MAP_FD, 0, 42),
+            insn(0, 0, 0, 0, 0),
+            // 2: r2 = fp
+            insn(BPF_ALU64 | BPF_MOV | BPF_X, BPF_REG_2, BPF_REG_10, 0, 0),
+            // 3: r2 = r2 - 4
+            insn(BPF_ALU64 | BPF_ADD | BPF_K, BPF_REG_2, 0, 0, -4),
+            // 4: *r2 = 0
+            insn(BPF_ST | BPF_MEM | BPF_W, BPF_REG_2, 0, 0, 0),
+            // 5: r0 = map_lookup_elem(r1, r2)
+            insn(BPF_JMP | BPF_CALL, 0, 0, 0, BPF_FUNC_MAP_LOOKUP_ELEM),
+            // 6: OMITTED: if r0 == 0 goto exit
+            // 7: Directly write: *r0 = 1
+            insn(BPF_ST | BPF_MEM | BPF_DW, BPF_REG_0, 0, 0, 1),
+            // 8: exit
+            mov_imm(BPF_REG_0, 0),
+            exit(),
+        ];
+
+        let config = VerifierConfig::new(BpfProgType::Tracepoint, 1);
+        let mut log = VerifierLog::new();
+        let res = verify_program(&config, &insns, Some(&resolver), &mut log);
+        assert_eq!(res.as_ref().err(), Some(&LinuxError::EACCES));
+        assert!(log.as_str().contains("NULL"));
+    }
+
+    #[test]
+    fn bpf_prog01_rejected_fixture_null_deref_runtime_error() {
+        // LTP bpf_prog01 rejected fixture executed directly: lookup returns NULL, dereference fails
+        let map = create_test_array_map();
+        let insns = Arc::from([
+            insn(BPF_LD | BPF_IMM | BPF_DW, BPF_REG_1, BPF_PSEUDO_MAP_FD, 0, 0),
+            insn(0, 0, 0, 0, 0),
+            insn(BPF_ALU64 | BPF_MOV | BPF_X, BPF_REG_2, BPF_REG_10, 0, 0),
+            insn(BPF_ALU64 | BPF_ADD | BPF_K, BPF_REG_2, 0, 0, -4),
+            // Set key = 99 (out of range for 1-entry map -> lookup returns NULL)
+            insn(BPF_ST | BPF_MEM | BPF_W, BPF_REG_2, 0, 0, 99),
+            insn(BPF_JMP | BPF_CALL, 0, 0, 0, BPF_FUNC_MAP_LOOKUP_ELEM),
+            // Unchecked dereference of NULL R0
+            insn(BPF_ST | BPF_MEM | BPF_DW, BPF_REG_0, 0, 0, 1),
+            mov_imm(BPF_REG_0, 0),
+            exit(),
+        ]);
+
+        let prog = BpfProgram::new(
+            BpfProgType::Tracepoint,
+            [0u8; 16],
+            insns,
+            alloc::vec![map],
+        );
+
+        let res = prog.run(&[]);
+        assert_eq!(res, Err(BpfVmError::NullPointerDereference));
+        assert_eq!(prog.runtime_errors(), 1);
+    }
+
+    #[test]
+    fn bpf_prog02_rejected_fixture_out_of_bounds_value_write_rejected_by_verifier() {
+        // Derived from LTP bpf_prog02.c: writes out of value bounds (*(r3 + 8) = r4 on 8-byte map value)
+        let map = create_test_array_map();
+        let resolver = MockMapResolver { map: map.clone() };
+
+        let insns = [
+            insn(BPF_ALU64 | BPF_MOV | BPF_K, BPF_REG_6, 0, 0, 1),
+            insn(BPF_LD | BPF_IMM | BPF_DW, BPF_REG_1, BPF_PSEUDO_MAP_FD, 0, 42),
+            insn(0, 0, 0, 0, 0),
+            insn(BPF_ALU64 | BPF_MOV | BPF_X, BPF_REG_2, BPF_REG_10, 0, 0),
+            insn(BPF_ALU64 | BPF_ADD | BPF_K, BPF_REG_2, 0, 0, -4),
+            insn(BPF_ST | BPF_MEM | BPF_W, BPF_REG_2, 0, 0, 0),
+            insn(BPF_JMP | BPF_CALL, 0, 0, 0, BPF_FUNC_MAP_LOOKUP_ELEM),
+            insn(BPF_JMP | BPF_JEQ | BPF_K, BPF_REG_0, 0, 6, 0),
+            insn(BPF_ALU64 | BPF_MOV | BPF_X, BPF_REG_3, BPF_REG_0, 0, 0),
+            insn(BPF_LD | BPF_IMM | BPF_DW, BPF_REG_4, 0, 0, 1),
+            insn(0, 0, 0, 0, 0),
+            // Out-of-bounds write: offset 8 on 8-byte value (8 + 8 = 16 > 8)
+            insn(BPF_STX | BPF_MEM | BPF_DW, BPF_REG_3, BPF_REG_4, 8, 0),
+            mov_imm(BPF_REG_0, 0),
+            exit(),
+            // Fallback for null
+            mov_imm(BPF_REG_0, 1),
+            exit(),
+        ];
+
+        let config = VerifierConfig::new(BpfProgType::Tracepoint, 1);
+        let mut log = VerifierLog::new();
+        let res = verify_program(&config, &insns, Some(&resolver), &mut log);
+        assert_eq!(res.as_ref().err(), Some(&LinuxError::EACCES));
+        assert!(log.as_str().contains("out of bounds"));
+    }
+
+    #[test]
+    fn bpf_prog02_rejected_fixture_out_of_bounds_runtime_error() {
+        // Direct execution of out-of-bounds map write
+        let map = create_test_array_map();
+        let insns = Arc::from([
+            insn(BPF_LD | BPF_IMM | BPF_DW, BPF_REG_1, BPF_PSEUDO_MAP_FD, 0, 0),
+            insn(0, 0, 0, 0, 0),
+            insn(BPF_ALU64 | BPF_MOV | BPF_X, BPF_REG_2, BPF_REG_10, 0, 0),
+            insn(BPF_ALU64 | BPF_ADD | BPF_K, BPF_REG_2, 0, 0, -4),
+            insn(BPF_ST | BPF_MEM | BPF_W, BPF_REG_2, 0, 0, 0),
+            insn(BPF_JMP | BPF_CALL, 0, 0, 0, BPF_FUNC_MAP_LOOKUP_ELEM),
+            insn(BPF_ALU64 | BPF_MOV | BPF_X, BPF_REG_3, BPF_REG_0, 0, 0),
+            // Out of bounds write on map value (offset 8)
+            insn(BPF_ST | BPF_MEM | BPF_DW, BPF_REG_3, 0, 8, 42),
+            mov_imm(BPF_REG_0, 0),
+            exit(),
+        ]);
+
+        let prog = BpfProgram::new(
+            BpfProgType::Tracepoint,
+            [0u8; 16],
+            insns,
+            alloc::vec![map],
+        );
+
+        let res = prog.run(&[]);
+        assert_eq!(res, Err(BpfVmError::OutOfBoundsAccess));
+        assert_eq!(prog.runtime_errors(), 1);
+    }
+
+    #[test]
+    fn verifier_rejects_invalid_helper_arg_types() {
+        // R1 passed to map_lookup_elem is a Scalar instead of Map pointer
+        let insns_bad_r1 = [
+            mov_imm(BPF_REG_1, 123),
+            insn(BPF_ALU64 | BPF_MOV | BPF_X, BPF_REG_2, BPF_REG_10, 0, 0),
+            insn(BPF_ALU64 | BPF_ADD | BPF_K, BPF_REG_2, 0, 0, -4),
+            insn(BPF_ST | BPF_MEM | BPF_W, BPF_REG_2, 0, 0, 0),
+            insn(BPF_JMP | BPF_CALL, 0, 0, 0, BPF_FUNC_MAP_LOOKUP_ELEM),
+            mov_imm(BPF_REG_0, 0),
+            exit(),
+        ];
+        let (res, log) = verify(&insns_bad_r1);
+        assert_eq!(res.as_ref().err(), Some(&LinuxError::EACCES));
+        assert!(log.as_str().contains("valid BPF map pointer"));
+
+        // R4 passed to map_update_elem is a Stack pointer instead of Scalar flags
+        let map = create_test_array_map();
+        let resolver = MockMapResolver { map: map.clone() };
+        let insns_bad_r4 = [
+            insn(BPF_LD | BPF_IMM | BPF_DW, BPF_REG_1, BPF_PSEUDO_MAP_FD, 0, 42),
+            insn(0, 0, 0, 0, 0),
+            insn(BPF_ALU64 | BPF_MOV | BPF_X, BPF_REG_2, BPF_REG_10, 0, 0),
+            insn(BPF_ALU64 | BPF_ADD | BPF_K, BPF_REG_2, 0, 0, -4),
+            insn(BPF_ST | BPF_MEM | BPF_W, BPF_REG_2, 0, 0, 0),
+            insn(BPF_ALU64 | BPF_MOV | BPF_X, BPF_REG_3, BPF_REG_10, 0, 0),
+            insn(BPF_ALU64 | BPF_ADD | BPF_K, BPF_REG_3, 0, 0, -16),
+            insn(BPF_ST | BPF_MEM | BPF_DW, BPF_REG_3, 0, 0, 999),
+            // R4 is set to a pointer rather than scalar flags
+            insn(BPF_ALU64 | BPF_MOV | BPF_X, BPF_REG_4, BPF_REG_10, 0, 0),
+            insn(BPF_JMP | BPF_CALL, 0, 0, 0, BPF_FUNC_MAP_UPDATE_ELEM),
+            mov_imm(BPF_REG_0, 0),
+            exit(),
+        ];
+        let config = VerifierConfig::new(BpfProgType::Tracepoint, 1);
+        let mut log = VerifierLog::new();
+        let res = verify_program(&config, &insns_bad_r4, Some(&resolver), &mut log);
+        assert_eq!(res.as_ref().err(), Some(&LinuxError::EACCES));
+        assert!(log.as_str().contains("flags must be a scalar"));
+    }
+
+    #[test]
+    fn verifier_rejects_deleting_from_array_map() {
+        let map = create_test_array_map();
+        let resolver = MockMapResolver { map: map.clone() };
+
+        let insns = [
+            insn(BPF_LD | BPF_IMM | BPF_DW, BPF_REG_1, BPF_PSEUDO_MAP_FD, 0, 42),
+            insn(0, 0, 0, 0, 0),
+            insn(BPF_ALU64 | BPF_MOV | BPF_X, BPF_REG_2, BPF_REG_10, 0, 0),
+            insn(BPF_ALU64 | BPF_ADD | BPF_K, BPF_REG_2, 0, 0, -4),
+            insn(BPF_ST | BPF_MEM | BPF_W, BPF_REG_2, 0, 0, 0),
+            insn(BPF_JMP | BPF_CALL, 0, 0, 0, BPF_FUNC_MAP_DELETE_ELEM),
+            mov_imm(BPF_REG_0, 0),
+            exit(),
+        ];
+
+        let config = VerifierConfig::new(BpfProgType::Tracepoint, 1);
+        let mut log = VerifierLog::new();
+        let res = verify_program(&config, &insns, Some(&resolver), &mut log);
+        assert_eq!(res.as_ref().err(), Some(&LinuxError::EINVAL));
+        assert!(log.as_str().contains("cannot delete from array map"));
+    }
 }
+
