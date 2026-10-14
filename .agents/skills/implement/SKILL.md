@@ -14,4 +14,8 @@ Run typechecking regularly, single test files regularly, and the full test suite
 
 Once done, call the Skill tool with "code-review" to review the work.
 
-Commit your work to the current branch.
+Address and fix any valid findings identified during the code review across both Standards and Spec axes, and re-verify tests and build gates.
+
+Commit your work to the branch.
+
+Push the branch to the remote repository and create a Pull Request with the `pr` skill template using `gh pr create`.
