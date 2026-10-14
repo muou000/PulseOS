@@ -138,6 +138,9 @@ la:
 	@$(MAKE) ARCH=loongarch64 SMP="$(SMP)" APP_FEATURES="$(APP_FEATURES)" LOG="$(LOG)" BUS=pci FEATURES=bus-pci BLK="$(BLK)" PLAT_CONFIG="$(QEMU_LA_PLATFORM_CONFIG)" OUT_DIR="$(A)" defconfig
 	@$(MAKE) ARCH=loongarch64 SMP="$(SMP)" APP_FEATURES="$(APP_FEATURES)" LOG="$(LOG)" BUS=pci FEATURES=bus-pci BLK="$(BLK)" PLAT_CONFIG="$(QEMU_LA_PLATFORM_CONFIG)" OUT_DIR="$(A)" build
 
+# Dual-architecture build gate.
+test: rv la
+
 # Build the RISC-V kernel, create its disk image on demand, and start QEMU.
 run: rv
 	@if [ ! -f "$(A)/disk.img" ]; then \
