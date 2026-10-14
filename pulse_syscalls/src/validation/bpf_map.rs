@@ -307,6 +307,7 @@ mod tests {
             BpfCmd::MapDeleteElem,
             BpfCmd::MapGetNextKey,
             BpfCmd::ObjGetInfoByFd,
+            BpfCmd::ProgLoad,
         ];
         for &cmd in &implemented {
             assert!(!cmd.is_deferred(), "{cmd:?} must not be deferred");
