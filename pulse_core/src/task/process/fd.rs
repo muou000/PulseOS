@@ -22,6 +22,17 @@ impl Process {
         self.fd_table().read().objects_snapshot(fds)
     }
 
+    pub fn check_next_fd_limit(&self) -> Result<usize, axerrno::LinuxError> {
+        let limit = self.resources.lock().rlimit_state.nofile_soft as usize;
+        let binding = self.fd_table();
+        let table = binding.read();
+        let next_fd = table.next_available_fd(0)?;
+        if next_fd >= limit {
+            return Err(axerrno::LinuxError::EMFILE);
+        }
+        Ok(next_fd)
+    }
+
     pub fn insert_fd_entry(
         &self,
         entry: crate::fd_table::FdEntry,

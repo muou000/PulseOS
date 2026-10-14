@@ -2,6 +2,7 @@
 
 extern crate alloc;
 
+pub mod bpf;
 pub mod config;
 pub mod cpu_dma_latency;
 pub mod fd_table;

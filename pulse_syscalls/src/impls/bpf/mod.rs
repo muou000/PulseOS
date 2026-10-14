@@ -1,4 +1,5 @@
 pub mod abi;
+pub mod info;
 
 #[cfg(target_os = "none")]
 mod sys;

@@ -1,0 +1,13 @@
+//! BPF object model.
+//!
+//! BPF objects are exposed to user space only through BPF object FDs: each
+//! descriptor holds an `Arc` reference, so `dup`, fork, exec CLOEXEC removal
+//! and `close` follow the generic [`crate::fd_table`] lifecycle and the object
+//! is destroyed when its last reference goes away.
+
+mod map;
+mod object;
+
+pub use map::*;
+pub use object::BpfMapObject;
+

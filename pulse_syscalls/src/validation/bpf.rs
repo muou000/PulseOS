@@ -308,17 +308,11 @@ mod tests {
             Some(LinuxError::E2BIG)
         );
 
-        // 8. Valid call returns Ok((cmd, attr)) with deferred command status.
+        // 8. Valid call returns Ok((cmd, attr)).
         let res = validate_bpf_syscall(root, BpfCmd::MapCreate as i32, 0x2000, 72, &mut read_noop);
         assert!(res.is_ok());
         let (cmd, _) = res.unwrap();
         assert_eq!(cmd, BpfCmd::MapCreate);
-        assert!(cmd.is_deferred());
-
-        // All recognized commands in this ticket are deferred
-        for &cmd in &BpfCmd::ALL {
-            assert!(cmd.is_deferred());
-        }
     }
 }
 
