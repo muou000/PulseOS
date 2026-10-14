@@ -12,6 +12,7 @@ mod time;
 mod utils;
 
 pub(crate) use bpf::*;
+pub use bpf::run_bpf_guest_checks;
 
 pub(crate) use fs::*;
 pub use fs::sys_sync;

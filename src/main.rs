@@ -68,6 +68,8 @@ fn main() {
                 info!("MLC_KERNEL RESULT PASS");
             }
 
+            pulse_syscalls::run_bpf_guest_checks().expect("bpf guest checks failed");
+
             let shell_args_base: &[&str] = &["sh"];
             let shell_envs: &[&str] = &["PATH=/usr/sbin:/usr/bin:/sbin:/bin"];
 

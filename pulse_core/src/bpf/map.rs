@@ -1,13 +1,14 @@
 //! BPF Map metadata, validation and bounded storage.
 //!
 //! This file is the pure part of the BPF object model: it only depends on
-//! `core`, `alloc` and `axerrno`, so `pulse_syscalls` host tests can compile it
+//! `core`, `alloc`, `spin` and `axerrno`, so `pulse_syscalls` host tests can compile it
 //! directly. Kernel-only glue (the descriptor object) lives in `object.rs`.
 
 use alloc::{collections::BTreeMap, vec::Vec};
 use core::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 
 use axerrno::LinuxError;
+use spin::RwLock;
 
 pub const BPF_OBJ_NAME_LEN: usize = 16;
 
@@ -19,6 +20,10 @@ const BPF_MAP_TYPE_LINUX_MAX: u32 = 33;
 pub const BPF_F_NO_PREALLOC: u32 = 1 << 0;
 pub const BPF_F_RDONLY_PROG: u32 = 1 << 7;
 pub const BPF_F_WRONLY_PROG: u32 = 1 << 8;
+
+pub const BPF_ANY: u64 = 0;
+pub const BPF_NOEXIST: u64 = 1;
+pub const BPF_EXIST: u64 = 2;
 
 /// Linux bounds hash keys by the BPF stack size.
 pub const BPF_MAP_MAX_KEY_SIZE: u32 = 512;
@@ -272,13 +277,154 @@ enum BpfMapStorage {
     Hash(BTreeMap<Vec<u8>, Vec<u8>>),
 }
 
+impl BpfMapStorage {
+    fn capacity(&self, val_size: usize, max_entries: usize) -> usize {
+        match self {
+            Self::Array(values) => values.len() / val_size,
+            Self::Hash(_) => max_entries,
+        }
+    }
+
+    fn lookup(
+        &self,
+        key: &[u8],
+        val_size: usize,
+        max_entries: usize,
+        out: &mut [u8],
+    ) -> Result<(), LinuxError> {
+        match self {
+            Self::Array(values) => {
+                let index = u32::from_ne_bytes(key.try_into().map_err(|_| LinuxError::EINVAL)?) as usize;
+                if index >= max_entries {
+                    return Err(LinuxError::ENOENT);
+                }
+                let start = index * val_size;
+                let end = start + val_size;
+                out.copy_from_slice(&values[start..end]);
+                Ok(())
+            }
+            Self::Hash(map) => {
+                let val = map.get(key).ok_or(LinuxError::ENOENT)?;
+                out.copy_from_slice(val);
+                Ok(())
+            }
+        }
+    }
+
+    fn update(
+        &mut self,
+        key: &[u8],
+        value: &[u8],
+        flags: u64,
+        val_size: usize,
+        max_entries: usize,
+    ) -> Result<(), LinuxError> {
+        match self {
+            Self::Array(values) => {
+                let index = u32::from_ne_bytes(key.try_into().map_err(|_| LinuxError::EINVAL)?) as usize;
+                if index >= max_entries {
+                    return Err(LinuxError::E2BIG);
+                }
+                if flags == BPF_NOEXIST {
+                    return Err(LinuxError::EEXIST);
+                }
+                let start = index * val_size;
+                let end = start + val_size;
+                values[start..end].copy_from_slice(value);
+                Ok(())
+            }
+            Self::Hash(map) => match map.get_mut(key) {
+                Some(existing_val) => {
+                    if flags == BPF_NOEXIST {
+                        return Err(LinuxError::EEXIST);
+                    }
+                    existing_val.copy_from_slice(value);
+                    Ok(())
+                }
+                None => {
+                    if flags == BPF_EXIST {
+                        return Err(LinuxError::ENOENT);
+                    }
+                    if map.len() >= max_entries {
+                        return Err(LinuxError::E2BIG);
+                    }
+                    map.insert(key.to_vec(), value.to_vec());
+                    Ok(())
+                }
+            },
+        }
+    }
+
+    fn delete(&mut self, key: &[u8]) -> Result<(), LinuxError> {
+        match self {
+            Self::Array(_) => Err(LinuxError::EINVAL),
+            Self::Hash(map) => map.remove(key).ok_or(LinuxError::ENOENT).map(|_| ()),
+        }
+    }
+
+    fn get_next_key(
+        &self,
+        key: Option<&[u8]>,
+        max_entries: usize,
+        next_key_out: &mut [u8],
+    ) -> Result<(), LinuxError> {
+        match self {
+            Self::Array(_) => {
+                if max_entries == 0 {
+                    return Err(LinuxError::ENOENT);
+                }
+                let next_idx = match key {
+                    None => 0u32,
+                    Some(k) => {
+                        let idx = u32::from_ne_bytes(k.try_into().map_err(|_| LinuxError::EINVAL)?);
+                        if idx >= max_entries as u32 {
+                            0u32
+                        } else if idx >= (max_entries as u32) - 1 {
+                            return Err(LinuxError::ENOENT);
+                        } else {
+                            idx + 1
+                        }
+                    }
+                };
+                next_key_out.copy_from_slice(&next_idx.to_ne_bytes());
+                Ok(())
+            }
+            Self::Hash(map) => {
+                if map.is_empty() {
+                    return Err(LinuxError::ENOENT);
+                }
+                match key {
+                    None => {
+                        let first = map.keys().next().ok_or(LinuxError::ENOENT)?;
+                        next_key_out.copy_from_slice(first);
+                        Ok(())
+                    }
+                    Some(k) => {
+                        if !map.contains_key(k) {
+                            let first = map.keys().next().ok_or(LinuxError::ENOENT)?;
+                            next_key_out.copy_from_slice(first);
+                            Ok(())
+                        } else {
+                            use core::ops::Bound;
+                            let mut range = map.range((Bound::Excluded(k.to_vec()), Bound::Unbounded));
+                            let next = range.next().ok_or(LinuxError::ENOENT)?;
+                            next_key_out.copy_from_slice(next.0);
+                            Ok(())
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
 /// A BPF Map object. Its lifetime is owned by `Arc` references held by
 /// descriptors (and, later, Programs); dropping the last one frees storage
 /// and releases the budget charge.
 pub struct BpfMap {
     id: u32,
     spec: BpfMapSpec,
-    storage: BpfMapStorage,
+    storage: RwLock<BpfMapStorage>,
     // Declared last: storage is freed before the charge is released.
     _charge: BpfMemoryCharge,
 }
@@ -304,7 +450,7 @@ impl BpfMap {
         Ok(Self {
             id: alloc_map_id(),
             spec,
-            storage,
+            storage: RwLock::new(storage),
             _charge: charge,
         })
     }
@@ -319,10 +465,58 @@ impl BpfMap {
 
     /// Number of element slots currently backed by storage.
     pub fn storage_capacity(&self) -> usize {
-        match &self.storage {
-            BpfMapStorage::Array(values) => values.len() / self.spec.value_size as usize,
-            BpfMapStorage::Hash(_) => self.spec.max_entries as usize,
+        self.storage
+            .read()
+            .capacity(self.spec.value_size as usize, self.spec.max_entries as usize)
+    }
+
+    pub fn lookup(&self, key: &[u8], value_out: &mut [u8]) -> Result<(), LinuxError> {
+        if key.len() != self.spec.key_size as usize || value_out.len() != self.spec.value_size as usize {
+            return Err(LinuxError::EINVAL);
         }
+        self.storage.read().lookup(
+            key,
+            self.spec.value_size as usize,
+            self.spec.max_entries as usize,
+            value_out,
+        )
+    }
+
+    pub fn update(&self, key: &[u8], value: &[u8], flags: u64) -> Result<(), LinuxError> {
+        if key.len() != self.spec.key_size as usize || value.len() != self.spec.value_size as usize {
+            return Err(LinuxError::EINVAL);
+        }
+        if flags > BPF_EXIST {
+            return Err(LinuxError::EINVAL);
+        }
+        self.storage.write().update(
+            key,
+            value,
+            flags,
+            self.spec.value_size as usize,
+            self.spec.max_entries as usize,
+        )
+    }
+
+    pub fn delete(&self, key: &[u8]) -> Result<(), LinuxError> {
+        if key.len() != self.spec.key_size as usize {
+            return Err(LinuxError::EINVAL);
+        }
+        self.storage.write().delete(key)
+    }
+
+    pub fn get_next_key(&self, key: Option<&[u8]>, next_key_out: &mut [u8]) -> Result<(), LinuxError> {
+        if next_key_out.len() != self.spec.key_size as usize {
+            return Err(LinuxError::EINVAL);
+        }
+        if let Some(k) = key {
+            if k.len() != self.spec.key_size as usize {
+                return Err(LinuxError::EINVAL);
+            }
+        }
+        self.storage
+            .read()
+            .get_next_key(key, self.spec.max_entries as usize, next_key_out)
     }
 
     pub fn info(&self) -> BpfMapInfo {
