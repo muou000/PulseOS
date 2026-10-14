@@ -471,6 +471,13 @@ fn syscall_dispatcher(tf: &mut TrapFrame, syscall_id: usize, args: [usize; 6]) -
             impls::sys_pidfd_send_signal(args[0] as isize, args[1] as isize, args[2], args[3])
         }
         Sysno::bpf => impls::sys_bpf(args[0] as i32, args[1], args[2]),
+        Sysno::perf_event_open => impls::sys_perf_event_open(
+            args[0],
+            args[1] as i32,
+            args[2] as i32,
+            args[3] as i32,
+            args[4],
+        ),
         _ => {
             axlog::warn!("Unimplemented syscall: {:?} ({})", sysno, syscall_id);
             -LinuxError::ENOSYS.code() as isize

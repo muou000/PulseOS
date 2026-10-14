@@ -433,5 +433,94 @@ pub fn run_bpf_guest_checks() -> Result<(), LinuxError> {
     }
 
     axlog::ax_println!("[BPF_GUEST] BPF Program execution assertions: PASS");
+
+    axlog::ax_println!("[BPF_GUEST] Starting software perf event control checks...");
+
+    // 1. CPU clock event: disabled by default
+    let cpu_spec = pulse_core::bpf::PerfEventSpec {
+        clock: pulse_core::bpf::PerfEventClock::CpuClock,
+        scope: pulse_core::bpf::PerfEventScope::PerCpu { cpu: 0 },
+        sample_period: 0,
+        disabled: true,
+        cloexec: true,
+    };
+    let cpu_now_ns = pulse_core::bpf::PerfEventObject::current_time_ns_for_spec(&cpu_spec);
+    let cpu_event = alloc::sync::Arc::new(pulse_core::bpf::PerfEvent::new(cpu_spec, cpu_now_ns));
+    let cpu_obj = pulse_core::bpf::PerfEventObject::new(cpu_event.clone());
+
+    let mut count_buf = [0u8; 8];
+    // Initial read is 0
+    use pulse_core::fd_table::FdObject;
+    cpu_obj.read(&mut count_buf)?;
+    if u64::from_ne_bytes(count_buf) != 0 {
+        return Err(LinuxError::EINVAL);
+    }
+
+    // Reset via ioctl
+    cpu_obj.ioctl(pulse_core::bpf::PERF_EVENT_IOC_RESET, 0)?;
+
+    // Enable via ioctl
+    cpu_obj.ioctl(pulse_core::bpf::PERF_EVENT_IOC_ENABLE, 0)?;
+    if !cpu_event.is_enabled() {
+        return Err(LinuxError::EINVAL);
+    }
+
+    // Busy work loop to consume CPU clock
+    for i in 0..1000000usize {
+        core::hint::black_box(i);
+    }
+
+    // Disable via ioctl
+    cpu_obj.ioctl(pulse_core::bpf::PERF_EVENT_IOC_DISABLE, 0)?;
+    if cpu_event.is_enabled() {
+        return Err(LinuxError::EINVAL);
+    }
+
+    // Read counter: must have accumulated > 0 nanoseconds
+    cpu_obj.read(&mut count_buf)?;
+    let elapsed = u64::from_ne_bytes(count_buf);
+    if elapsed == 0 {
+        return Err(LinuxError::EINVAL);
+    }
+
+    // Reset via ioctl: must be 0
+    cpu_obj.ioctl(pulse_core::bpf::PERF_EVENT_IOC_RESET, 0)?;
+    cpu_obj.read(&mut count_buf)?;
+    if u64::from_ne_bytes(count_buf) != 0 {
+        return Err(LinuxError::EINVAL);
+    }
+
+    // 2. Task clock event
+    let task_spec = pulse_core::bpf::PerfEventSpec {
+        clock: pulse_core::bpf::PerfEventClock::TaskClock,
+        scope: pulse_core::bpf::PerfEventScope::Task { pid: 1 },
+        sample_period: 0,
+        disabled: true,
+        cloexec: false,
+    };
+    let task_now_ns = pulse_core::bpf::PerfEventObject::current_time_ns_for_spec(&task_spec);
+    let task_event = alloc::sync::Arc::new(pulse_core::bpf::PerfEvent::new(task_spec, task_now_ns));
+    let task_obj = pulse_core::bpf::PerfEventObject::new(task_event.clone());
+
+    task_obj.ioctl(pulse_core::bpf::PERF_EVENT_IOC_RESET, 0)?;
+    task_obj.ioctl(pulse_core::bpf::PERF_EVENT_IOC_ENABLE, 0)?;
+    for i in 0..1000000usize {
+        core::hint::black_box(i);
+    }
+    task_obj.ioctl(pulse_core::bpf::PERF_EVENT_IOC_DISABLE, 0)?;
+    task_obj.read(&mut count_buf)?;
+    let task_elapsed = u64::from_ne_bytes(count_buf);
+    if task_elapsed == 0 {
+        return Err(LinuxError::EINVAL);
+    }
+
+    // Stat anon_inode regular file
+    let st = task_obj.stat()?;
+    if (st.st_mode & linux_raw_sys::general::S_IFMT) != linux_raw_sys::general::S_IFREG {
+        return Err(LinuxError::EINVAL);
+    }
+
+    axlog::ax_println!("[BPF_GUEST] Perf Event assertions: PASS (cpu_ns={}, task_ns={})", elapsed, task_elapsed);
+
     Ok(())
 }
