@@ -1,0 +1,17 @@
+[package]
+name = "bpf-capture"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Transport-neutral normalized BPF capture format and session writer for PulseOS"
+
+[dependencies]
+pulse_bpf_schema = { workspace = true }
+
+[features]
+default = ["std"]
+std = ["alloc"]
+alloc = []
+
