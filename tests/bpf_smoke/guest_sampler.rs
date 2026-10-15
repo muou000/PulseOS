@@ -718,21 +718,21 @@ pub extern "C" fn guest_main() -> ! {
     }
 
     // Check counters map
-    let key0 = 0u32;
-    let mut sched_count = 0u64;
-    let mut lookup0 = BpfMapElemAttr::default();
-    lookup0.map_fd = counters_fd as u32;
-    lookup0.key = &key0 as *const _ as u64;
-    lookup0.value_or_next_key = &mut sched_count as *mut _ as u64;
-    let _ = syscall(SYS_BPF, BPF_MAP_LOOKUP_ELEM as usize, &lookup0 as *const _ as usize, core::mem::size_of::<BpfMapElemAttr>(), 0, 0, 0);
-
-    let key1 = 1u32;
-    let mut perf_count = 0u64;
-    let mut lookup1 = BpfMapElemAttr::default();
-    lookup1.map_fd = counters_fd as u32;
-    lookup1.key = &key1 as *const _ as u64;
-    lookup1.value_or_next_key = &mut perf_count as *mut _ as u64;
-    let _ = syscall(SYS_BPF, BPF_MAP_LOOKUP_ELEM as usize, &lookup1 as *const _ as usize, core::mem::size_of::<BpfMapElemAttr>(), 0, 0, 0);
+    let mut counts = [0u64; 2];
+    for (idx, count) in counts.iter_mut().enumerate() {
+        let key = idx as u32;
+        let mut lookup = BpfMapElemAttr::default();
+        lookup.map_fd = counters_fd as u32;
+        lookup.key = &key as *const _ as u64;
+        lookup.value_or_next_key = count as *mut _ as u64;
+        let _ = syscall(
+            SYS_BPF,
+            BPF_MAP_LOOKUP_ELEM as usize,
+            &lookup as *const _ as usize,
+            core::mem::size_of::<BpfMapElemAttr>(),
+            0, 0, 0,
+        );
+    }
 
     say!("BPF PASS workload_and_consume");
 

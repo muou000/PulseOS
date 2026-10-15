@@ -43,12 +43,6 @@ ARCHES = {
         "secondary": "disk.img",
         "qemu": "qemu-system-riscv64",
         "target": "riscv64gc-unknown-none-elf",
-        "cc": (
-            "riscv64-linux-musl-gcc",
-            "riscv64-unknown-linux-musl-gcc",
-            "riscv64-linux-gnu-gcc",
-            "riscv64-unknown-linux-gnu-gcc",
-        ),
     },
     "loongarch64": {
         "machine": 258,
@@ -57,12 +51,6 @@ ARCHES = {
         "secondary": "disk-la.img",
         "qemu": "qemu-system-loongarch64",
         "target": "loongarch64-unknown-none-softfloat",
-        "cc": (
-            "loongarch64-linux-musl-gcc",
-            "loongarch64-unknown-linux-musl-gcc",
-            "loongarch64-linux-gnu-gcc",
-            "loongarch64-unknown-linux-gnu-gcc",
-        ),
     },
 }
 
@@ -502,10 +490,6 @@ def build_raw(arch: str) -> Path:
 def probe_toolchain(arch: str | None = None) -> dict[str, bool | str]:
     """Probe host tools and guest compiler target capabilities."""
     status: dict[str, bool | str] = {}
-    clang = shutil.which("clang")
-    status["clang"] = bool(clang)
-    llvm_objdump = shutil.which("llvm-objdump")
-    status["llvm_objdump"] = bool(llvm_objdump)
     debugfs_bin = shutil.which("debugfs")
     status["debugfs"] = bool(debugfs_bin)
 
@@ -575,11 +559,11 @@ def guest(args: argparse.Namespace) -> int:
     if digest(kernel_copy) != before["kernel"]:
         raise ValueError("kernel changed while copying")
 
-    pcopy = copy_image(primary, run, "primary.img")
-    scopy = copy_image(secondary, run, "secondary.img")
-    binary, guest_dir = inject(pcopy, payload, run)
+    primary_copy = copy_image(primary, run, "primary.img")
+    secondary_copy = copy_image(secondary, run, "secondary.img")
+    binary, guest_dir = inject(primary_copy, payload, run)
 
-    argv = qemu_command(args.arch, str(qemu), kernel_copy, pcopy, scopy)
+    argv = qemu_command(args.arch, str(qemu), kernel_copy, primary_copy, secondary_copy)
     token = run.name.rsplit("-", 1)[-1]
     shell = (
         f"ulimit -c 0; cd {shlex.quote(guest_dir)} && {binary}; "
