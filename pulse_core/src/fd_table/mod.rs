@@ -180,6 +180,16 @@ pub trait FdObject: Send + Sync {
         None
     }
 
+    fn mmap_prepared(
+        &self,
+        _size: usize,
+        _flags: MappingFlags,
+        _offset: usize,
+        _is_shared: bool,
+    ) -> Option<LinuxResult<axmm::PreparedMapping>> {
+        None
+    }
+
     fn as_ns_fd(&self) -> Option<(u64, u32)> {
         None
     }

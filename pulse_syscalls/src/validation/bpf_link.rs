@@ -134,6 +134,7 @@ mod tests {
                 PerfEventClock::CpuClock => PerfEventScope::PerCpu { cpu: 0 },
                 PerfEventClock::TaskClock => PerfEventScope::Task { pid: 1 },
                 PerfEventClock::Tracepoint(_) => PerfEventScope::PerCpu { cpu: 0 },
+                PerfEventClock::BpfOutput => PerfEventScope::PerCpu { cpu: 0 },
             },
             sample_period: 0,
             disabled: true,

@@ -85,6 +85,10 @@ pub const BPF_FUNC_MAP_UPDATE_ELEM: i32 = 2;
 pub const BPF_FUNC_MAP_DELETE_ELEM: i32 = 3;
 pub const BPF_FUNC_KTIME_GET_NS: i32 = 5;
 pub const BPF_FUNC_GET_SMP_PROCESSOR_ID: i32 = 8;
+pub const BPF_FUNC_PERF_EVENT_OUTPUT: i32 = 25;
+
+pub const BPF_F_INDEX_MASK: u64 = 0xffff_ffff;
+pub const BPF_F_CURRENT_CPU: u64 = BPF_F_INDEX_MASK;
 
 /// 8-byte eBPF instruction matching `struct bpf_insn`.
 #[repr(C)]

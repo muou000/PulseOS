@@ -201,14 +201,67 @@ impl FdObject for PerfEventObject {
     }
 
     fn poll(&self) -> LinuxResult<PollState> {
+        let readable = if let Some(buf) = self.event.buffer() {
+            buf.data_head() > buf.data_tail()
+        } else {
+            false
+        };
         Ok(PollState {
-            readable: true,
+            readable,
             writable: false,
         })
     }
 
     fn mmap_file_flags(&self) -> Option<axfs::FileFlags> {
-        None
+        Some(axfs::FileFlags::READ | axfs::FileFlags::WRITE)
+    }
+
+    fn mmap_prepared(
+        &self,
+        size: usize,
+        flags: axhal::paging::MappingFlags,
+        offset: usize,
+        is_shared: bool,
+    ) -> Option<LinuxResult<axmm::PreparedMapping>> {
+        if !is_shared || offset != 0 {
+            return Some(Err(LinuxError::EINVAL));
+        }
+        if size <= 4096 || size % 4096 != 0 {
+            return Some(Err(LinuxError::EINVAL));
+        }
+        let nr_data_pages = (size / 4096) - 1;
+        if !nr_data_pages.is_power_of_two() {
+            return Some(Err(LinuxError::EINVAL));
+        }
+
+        let buf = if let Some(existing) = self.event.buffer() {
+            if existing.total_size() != size {
+                return Some(Err(LinuxError::EINVAL));
+            }
+            existing
+        } else {
+            match super::perf_event::PerfBuffer::new(nr_data_pages) {
+                Ok(new_buf) => {
+                    self.event.set_buffer(new_buf.clone());
+                    new_buf
+                }
+                Err(e) => return Some(Err(e)),
+            }
+        };
+
+        #[cfg(target_os = "none")]
+        {
+            let Some(shared_frame) = buf.shared_frame() else {
+                return Some(Err(LinuxError::ENOMEM));
+            };
+            Some(axmm::PreparedMapping::shared_frame(size, flags, shared_frame).map_err(LinuxError::from))
+        }
+
+        #[cfg(not(target_os = "none"))]
+        {
+            let _ = buf;
+            Some(Err(LinuxError::EOPNOTSUPP))
+        }
     }
 }
 

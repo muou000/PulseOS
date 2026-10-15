@@ -89,11 +89,30 @@ pub fn sys_bpf(cmd: i32, attr: usize, size: usize) -> isize {
         BpfCmd::MapUpdateElem => {
             let attr = unsafe { &attr_buf.map_elem };
             let map = get_bpf_map(&process, attr.map_fd)?;
-            elem::bpf_map_update_elem(
+            let perf_slot_info = if map.spec().map_type() == pulse_core::bpf::BpfMapType::PerfEventArray {
+                let mut key_bytes = [0u8; 4];
+                read_user(&process, attr.key as usize, &mut key_bytes)?;
+                let cpu = u32::from_ne_bytes(key_bytes);
+                let mut val_bytes = [0u8; 4];
+                read_user(&process, attr.value_or_next_key as usize, &mut val_bytes)?;
+                let perf_fd = u32::from_ne_bytes(val_bytes);
+                let perf_obj = process.get_fd_object(perf_fd as usize)?;
+                let Some(event_obj) = perf_obj.as_any().downcast_ref::<PerfEventObject>() else {
+                    return Err(LinuxError::EINVAL);
+                };
+                Some((cpu, perf_fd, event_obj.event().clone()))
+            } else {
+                None
+            };
+            let ret = elem::bpf_map_update_elem(
                 map.as_ref(),
                 attr,
                 |addr, buf| read_user(&process, addr, buf),
-            )
+            )?;
+            if let Some((cpu, perf_fd, event)) = perf_slot_info {
+                map.set_slot(cpu, Some(perf_fd), Some(event))?;
+            }
+            Ok(ret)
         }
         BpfCmd::MapDeleteElem => {
             let attr = unsafe { &attr_buf.map_elem };

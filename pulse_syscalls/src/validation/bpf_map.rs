@@ -83,7 +83,7 @@ mod tests {
             assert_eq!(err(req), LinuxError::EINVAL, "type {raw}");
         }
         // Known Linux types outside the PulseOS compatibility tier.
-        for raw in [3, 4, 5, 27, 33] {
+        for raw in [3, 5, 27, 33] {
             let mut req = array_req();
             req.map_type = raw;
             assert_eq!(err(req), LinuxError::EOPNOTSUPP, "type {raw}");

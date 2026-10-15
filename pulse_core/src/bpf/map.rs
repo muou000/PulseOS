@@ -4,7 +4,8 @@
 //! `core`, `alloc`, `spin` and `axerrno`, so `pulse_syscalls` host tests can compile it
 //! directly. Kernel-only glue (the descriptor object) lives in `object.rs`.
 
-use alloc::{collections::BTreeMap, vec::Vec};
+use alloc::{collections::BTreeMap, sync::Arc, vec::Vec};
+use core::any::Any;
 use core::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 
 use axerrno::LinuxError;
@@ -14,6 +15,7 @@ pub const BPF_OBJ_NAME_LEN: usize = 16;
 
 pub const BPF_MAP_TYPE_HASH: u32 = 1;
 pub const BPF_MAP_TYPE_ARRAY: u32 = 2;
+pub const BPF_MAP_TYPE_PERF_EVENT_ARRAY: u32 = 4;
 /// Last Linux map type known to this ABI (`BPF_MAP_TYPE_ARENA`).
 const BPF_MAP_TYPE_LINUX_MAX: u32 = 33;
 
@@ -42,6 +44,7 @@ static NEXT_MAP_ID: AtomicU32 = AtomicU32::new(1);
 pub enum BpfMapType {
     Hash,
     Array,
+    PerfEventArray,
 }
 
 impl BpfMapType {
@@ -49,6 +52,7 @@ impl BpfMapType {
         match raw {
             BPF_MAP_TYPE_HASH => Ok(Self::Hash),
             BPF_MAP_TYPE_ARRAY => Ok(Self::Array),
+            BPF_MAP_TYPE_PERF_EVENT_ARRAY => Ok(Self::PerfEventArray),
             0 => Err(LinuxError::EINVAL),
             raw if raw <= BPF_MAP_TYPE_LINUX_MAX => Err(LinuxError::EOPNOTSUPP),
             _ => Err(LinuxError::EINVAL),
@@ -59,6 +63,7 @@ impl BpfMapType {
         match self {
             Self::Hash => BPF_MAP_TYPE_HASH,
             Self::Array => BPF_MAP_TYPE_ARRAY,
+            Self::PerfEventArray => BPF_MAP_TYPE_PERF_EVENT_ARRAY,
         }
     }
 
@@ -66,6 +71,7 @@ impl BpfMapType {
         match self {
             Self::Hash => BPF_F_NO_PREALLOC | BPF_F_RDONLY_PROG | BPF_F_WRONLY_PROG,
             Self::Array => BPF_F_RDONLY_PROG | BPF_F_WRONLY_PROG,
+            Self::PerfEventArray => 0,
         }
     }
 }
@@ -131,10 +137,14 @@ impl BpfMapSpec {
         }
 
         let key_ok = match map_type {
-            BpfMapType::Array => req.key_size == 4,
+            BpfMapType::Array | BpfMapType::PerfEventArray => req.key_size == 4,
             BpfMapType::Hash => req.key_size != 0,
         };
-        if !key_ok || req.value_size == 0 || req.max_entries == 0 {
+        let val_ok = match map_type {
+            BpfMapType::PerfEventArray => req.value_size == 4,
+            _ => req.value_size != 0,
+        };
+        if !key_ok || !val_ok || req.value_size == 0 || req.max_entries == 0 {
             return Err(LinuxError::EINVAL);
         }
         if req.key_size > BPF_MAP_MAX_KEY_SIZE || req.value_size > BPF_MAP_MAX_VALUE_SIZE {
@@ -142,7 +152,7 @@ impl BpfMapSpec {
         }
 
         let entry_bytes = match map_type {
-            BpfMapType::Array => req.value_size as usize,
+            BpfMapType::Array | BpfMapType::PerfEventArray => req.value_size as usize,
             BpfMapType::Hash => req.key_size as usize + req.value_size as usize,
         };
         let storage_bytes = entry_bytes
@@ -268,6 +278,11 @@ impl Drop for BpfMemoryCharge {
     }
 }
 
+pub trait PerfEventOutputSink: Send + Sync {
+    fn output_sample(&self, data: &[u8]) -> Result<(), LinuxError>;
+    fn as_any(&self) -> &dyn Any;
+}
+
 enum BpfMapStorage {
     /// Preallocated, zero-initialized `max_entries * value_size` bytes.
     Array(Vec<u8>),
@@ -275,6 +290,11 @@ enum BpfMapStorage {
     /// Map element control plane.
     #[allow(dead_code)]
     Hash(BTreeMap<Vec<u8>, Vec<u8>>),
+    /// Slots holding CPU -> perf event objects and raw fd descriptors.
+    PerfEventArray {
+        fds: Vec<Option<u32>>,
+        slots: Vec<Option<Arc<dyn PerfEventOutputSink>>>,
+    },
 }
 
 impl BpfMapStorage {
@@ -282,6 +302,7 @@ impl BpfMapStorage {
         match self {
             Self::Array(values) => values.len() / val_size,
             Self::Hash(_) => max_entries,
+            Self::PerfEventArray { slots, .. } => slots.len(),
         }
     }
 
@@ -306,6 +327,15 @@ impl BpfMapStorage {
             Self::Hash(map) => {
                 let val = map.get(key).ok_or(LinuxError::ENOENT)?;
                 out.copy_from_slice(val);
+                Ok(())
+            }
+            Self::PerfEventArray { fds, .. } => {
+                let index = u32::from_ne_bytes(key.try_into().map_err(|_| LinuxError::EINVAL)?) as usize;
+                if index >= max_entries {
+                    return Err(LinuxError::ENOENT);
+                }
+                let fd = fds.get(index).copied().flatten().ok_or(LinuxError::ENOENT)?;
+                out.copy_from_slice(&fd.to_ne_bytes());
                 Ok(())
             }
         }
@@ -338,6 +368,20 @@ impl BpfMapStorage {
                 out.copy_from_slice(&val[offset..offset + out.len()]);
                 Ok(())
             }
+            Self::PerfEventArray { fds, .. } => {
+                let index = u32::from_ne_bytes(key.try_into().map_err(|_| LinuxError::EINVAL)?) as usize;
+                if index >= max_entries {
+                    return Err(LinuxError::ENOENT);
+                }
+                let fd = fds.get(index).copied().flatten().ok_or(LinuxError::ENOENT)?;
+                let fd_bytes = fd.to_ne_bytes();
+                let end = offset.checked_add(out.len()).ok_or(LinuxError::EINVAL)?;
+                if end > fd_bytes.len() {
+                    return Err(LinuxError::EINVAL);
+                }
+                out.copy_from_slice(&fd_bytes[offset..end]);
+                Ok(())
+            }
         }
     }
 
@@ -367,6 +411,19 @@ impl BpfMapStorage {
                 let val = map.get_mut(key).ok_or(LinuxError::ENOENT)?;
                 val[offset..offset + data.len()].copy_from_slice(data);
                 Ok(())
+            }
+            Self::PerfEventArray { fds, .. } => {
+                let index = u32::from_ne_bytes(key.try_into().map_err(|_| LinuxError::EINVAL)?) as usize;
+                if index >= max_entries {
+                    return Err(LinuxError::ENOENT);
+                }
+                if offset == 0 && data.len() == 4 {
+                    let fd = u32::from_ne_bytes(data.try_into().map_err(|_| LinuxError::EINVAL)?);
+                    fds[index] = Some(fd);
+                    Ok(())
+                } else {
+                    Err(LinuxError::EINVAL)
+                }
             }
         }
     }
@@ -412,6 +469,21 @@ impl BpfMapStorage {
                     Ok(())
                 }
             },
+            Self::PerfEventArray { fds, .. } => {
+                let index = u32::from_ne_bytes(key.try_into().map_err(|_| LinuxError::EINVAL)?) as usize;
+                if index >= max_entries {
+                    return Err(LinuxError::E2BIG);
+                }
+                if flags == BPF_NOEXIST && fds[index].is_some() {
+                    return Err(LinuxError::EEXIST);
+                }
+                if flags == BPF_EXIST && fds[index].is_none() {
+                    return Err(LinuxError::ENOENT);
+                }
+                let fd = u32::from_ne_bytes(value.try_into().map_err(|_| LinuxError::EINVAL)?);
+                fds[index] = Some(fd);
+                Ok(())
+            }
         }
     }
 
@@ -419,6 +491,18 @@ impl BpfMapStorage {
         match self {
             Self::Array(_) => Err(LinuxError::EINVAL),
             Self::Hash(map) => map.remove(key).ok_or(LinuxError::ENOENT).map(|_| ()),
+            Self::PerfEventArray { fds, slots } => {
+                let index = u32::from_ne_bytes(key.try_into().map_err(|_| LinuxError::EINVAL)?) as usize;
+                if index >= fds.len() {
+                    return Err(LinuxError::EINVAL);
+                }
+                if fds[index].is_none() {
+                    return Err(LinuxError::ENOENT);
+                }
+                fds[index] = None;
+                slots[index] = None;
+                Ok(())
+            }
         }
     }
 
@@ -429,7 +513,7 @@ impl BpfMapStorage {
         next_key_out: &mut [u8],
     ) -> Result<(), LinuxError> {
         match self {
-            Self::Array(_) => {
+            Self::Array(_) | Self::PerfEventArray { .. } => {
                 if max_entries == 0 {
                     return Err(LinuxError::ENOENT);
                 }
@@ -506,6 +590,13 @@ impl BpfMap {
                 BpfMapStorage::Array(values)
             }
             BpfMapType::Hash => BpfMapStorage::Hash(BTreeMap::new()),
+            BpfMapType::PerfEventArray => {
+                let max = spec.max_entries as usize;
+                BpfMapStorage::PerfEventArray {
+                    fds: alloc::vec![None; max],
+                    slots: alloc::vec![None; max],
+                }
+            }
         };
         Ok(Self {
             id: alloc_map_id(),
@@ -603,6 +694,42 @@ impl BpfMap {
         self.storage
             .read()
             .get_next_key(key, self.spec.max_entries as usize, next_key_out)
+    }
+
+    pub fn output_perf_event(&self, index: u32, data: &[u8]) -> Result<(), LinuxError> {
+        if let BpfMapStorage::PerfEventArray { slots, .. } = &*self.storage.read() {
+            let slot = slots.get(index as usize).and_then(|s| s.as_ref()).ok_or(LinuxError::ENOENT)?;
+            slot.output_sample(data)
+        } else {
+            Err(LinuxError::EINVAL)
+        }
+    }
+
+    pub fn get_slot(&self, index: u32) -> Option<Arc<dyn PerfEventOutputSink>> {
+        if let BpfMapStorage::PerfEventArray { slots, .. } = &*self.storage.read() {
+            slots.get(index as usize).cloned().flatten()
+        } else {
+            None
+        }
+    }
+
+    pub fn set_slot(
+        &self,
+        index: u32,
+        fd: Option<u32>,
+        slot: Option<Arc<dyn PerfEventOutputSink>>,
+    ) -> Result<(), LinuxError> {
+        if let BpfMapStorage::PerfEventArray { slots, fds } = &mut *self.storage.write() {
+            let idx = index as usize;
+            if idx >= self.spec.max_entries as usize {
+                return Err(LinuxError::E2BIG);
+            }
+            fds[idx] = fd;
+            slots[idx] = slot;
+            Ok(())
+        } else {
+            Err(LinuxError::EINVAL)
+        }
     }
 
     pub fn info(&self) -> BpfMapInfo {

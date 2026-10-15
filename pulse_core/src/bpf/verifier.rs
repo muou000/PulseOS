@@ -776,6 +776,68 @@ pub fn verify_program(
                             state.regs[BPF_REG_0 as usize] = RegType::Scalar;
                             worklist.push_back((next_pc, state));
                         }
+                        BPF_FUNC_PERF_EVENT_OUTPUT => {
+                            let ctx_reg = state.regs[BPF_REG_1 as usize];
+                            if !matches!(ctx_reg, RegType::PtrContext { .. }) {
+                                log.append(pc, "bpf_perf_event_output R1 must be context pointer");
+                                return Err(LinuxError::EACCES);
+                            }
+
+                            let map_reg = state.regs[BPF_REG_2 as usize];
+                            let map_idx = match map_reg {
+                                RegType::PtrMap { map_idx } => map_idx,
+                                _ => {
+                                    log.append(pc, "bpf_perf_event_output R2 must be a valid BPF map pointer");
+                                    return Err(LinuxError::EACCES);
+                                }
+                            };
+                            if referenced_maps[map_idx].spec().map_type() != super::map::BpfMapType::PerfEventArray {
+                                log.append(pc, "bpf_perf_event_output R2 must be a PERF_EVENT_ARRAY map");
+                                return Err(LinuxError::EINVAL);
+                            }
+
+                            let flags_reg = state.regs[BPF_REG_3 as usize];
+                            if !matches!(flags_reg, RegType::Scalar) {
+                                log.append(pc, "bpf_perf_event_output R3 flags must be a scalar");
+                                return Err(LinuxError::EACCES);
+                            }
+
+                            let data_reg = state.regs[BPF_REG_4 as usize];
+                            match data_reg {
+                                RegType::PtrStack { off } => {
+                                    if off < -(BPF_STACK_SIZE as i32) || off > 0 {
+                                        log.append(pc, "bpf_perf_event_output R4 data pointer out of stack bounds");
+                                        return Err(LinuxError::EACCES);
+                                    }
+                                }
+                                RegType::PtrMapValue { null_checked, .. } => {
+                                    if !null_checked {
+                                        log.append(pc, "map value pointer must be null checked before passing to output");
+                                        return Err(LinuxError::EACCES);
+                                    }
+                                }
+                                _ => {
+                                    log.append(pc, "bpf_perf_event_output R4 must be pointer to memory");
+                                    return Err(LinuxError::EACCES);
+                                }
+                            }
+
+                            let size_reg = state.regs[BPF_REG_5 as usize];
+                            if !matches!(size_reg, RegType::Scalar) {
+                                log.append(pc, "bpf_perf_event_output R5 size must be a scalar");
+                                return Err(LinuxError::EACCES);
+                            }
+
+                            // Clobber caller-saved registers
+                            state.regs[BPF_REG_1 as usize] = RegType::NotInit;
+                            state.regs[BPF_REG_2 as usize] = RegType::NotInit;
+                            state.regs[BPF_REG_3 as usize] = RegType::NotInit;
+                            state.regs[BPF_REG_4 as usize] = RegType::NotInit;
+                            state.regs[BPF_REG_5 as usize] = RegType::NotInit;
+
+                            state.regs[BPF_REG_0 as usize] = RegType::Scalar;
+                            worklist.push_back((next_pc, state));
+                        }
                         _ => {
                             log.append(pc, &alloc::format!("unsupported helper call ID {}", helper_id));
                             return Err(LinuxError::EINVAL);
