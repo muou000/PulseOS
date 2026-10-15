@@ -906,6 +906,14 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a1d084b0137aaa901caf9f1e8b21daa6aa24d41cd806e111335541eff9683bd6"
 
 [[package]]
+name = "bpf-analyzer"
+version = "0.1.0"
+dependencies = [
+ "bpf-capture",
+ "pulse_bpf_schema",
+]
+
+[[package]]
 name = "bpf-capture"
 version = "0.1.0"
 dependencies = [
