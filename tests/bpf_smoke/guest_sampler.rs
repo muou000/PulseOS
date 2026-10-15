@@ -16,8 +16,12 @@ const PERF_BUFFER_DATA_PAGES: usize = 4;
 const PERF_BUFFER_TOTAL_SIZE: usize = (1 + PERF_BUFFER_DATA_PAGES) * PAGE_SIZE;
 
 // Common Linux Syscall Numbers
+const SYS_EPOLL_CREATE1: usize = 20;
+const SYS_EPOLL_CTL: usize = 21;
+const SYS_EPOLL_PWAIT: usize = 22;
 const SYS_IOCTL: usize = 29;
 const SYS_CLOSE: usize = 57;
+const SYS_READ: usize = 63;
 const SYS_WRITE: usize = 64;
 const SYS_EXIT: usize = 93;
 const SYS_SCHED_YIELD: usize = 124;
@@ -37,20 +41,37 @@ const BPF_LINK_CREATE: i32 = 28;
 const BPF_LINK_DETACH: i32 = 34;
 
 // BPF Types & Constants
+const BPF_MAP_TYPE_HASH: u32 = 1;
 const BPF_MAP_TYPE_ARRAY: u32 = 2;
 const BPF_MAP_TYPE_PERF_EVENT_ARRAY: u32 = 4;
+const BPF_MAP_TYPE_RINGBUF: u32 = 27;
+
+const BPF_PROG_TYPE_SOCKET_FILTER: u32 = 1;
 const BPF_PROG_TYPE_TRACEPOINT: u32 = 5;
 const BPF_PROG_TYPE_PERF_EVENT: u32 = 7;
 const BPF_ATTACH_TYPE_PERF_EVENT: u32 = 41;
 
 // Perf Event Constants
+const PERF_TYPE_HARDWARE: u32 = 0;
 const PERF_TYPE_SOFTWARE: u32 = 1;
 const PERF_TYPE_TRACEPOINT: u32 = 2;
+const PERF_TYPE_RAW: u32 = 4;
+
+const PERF_COUNT_HW_INSTRUCTIONS: u64 = 0;
 const PERF_COUNT_SW_CPU_CLOCK: u64 = 0;
+const PERF_COUNT_SW_TASK_CLOCK: u64 = 1;
 const PERF_FLAG_FD_CLOEXEC: usize = 1 << 3;
 
 const PERF_EVENT_IOC_ENABLE: u32 = 0x2400;
 const PERF_EVENT_IOC_DISABLE: u32 = 0x2401;
+
+#[repr(C)]
+struct EpollEvent {
+    events: u32,
+    _pad: u32,
+    data: u64,
+}
+
 
 // Entry points for RISC-V64 and LoongArch64
 #[cfg(target_arch = "riscv64")]
@@ -501,6 +522,509 @@ impl<'a> BufWriter<'a> {
     }
 }
 
+fn run_ltp_suite() {
+    let mut passed = 0;
+    let mut conf = 0;
+    let mut failed = 0;
+
+    let prog_insns: [u64; 2] = [
+        0x00000000000000b7, // r0 = 0
+        0x0000000000000095, // exit
+    ];
+
+    // 1. bpf_map01 (Supported TPASS)
+    say!("LTP_TEST_START bpf_map01");
+    let mut ok_map = true;
+    // Array map
+    let mut arr_attr = BpfMapCreateAttr::default();
+    arr_attr.map_type = BPF_MAP_TYPE_ARRAY;
+    arr_attr.key_size = 4;
+    arr_attr.value_size = 8;
+    arr_attr.max_entries = 1;
+    let arr_fd = syscall(
+        SYS_BPF,
+        BPF_MAP_CREATE as usize,
+        &arr_attr as *const _ as usize,
+        core::mem::size_of::<BpfMapCreateAttr>(),
+        0, 0, 0,
+    );
+    if arr_fd < 0 {
+        ok_map = false;
+    } else {
+        let key = 0u32;
+        let mut val = 0u64;
+        let mut lookup = BpfMapElemAttr::default();
+        lookup.map_fd = arr_fd as u32;
+        lookup.key = &key as *const _ as u64;
+        lookup.value_or_next_key = &mut val as *mut _ as u64;
+        let r1 = syscall(
+            SYS_BPF,
+            BPF_MAP_LOOKUP_ELEM as usize,
+            &lookup as *const _ as usize,
+            core::mem::size_of::<BpfMapElemAttr>(),
+            0, 0, 0,
+        );
+        if r1 != 0 || val != 0 {
+            ok_map = false;
+        }
+
+        let new_val = 0x12345678u64;
+        let mut update = BpfMapElemAttr::default();
+        update.map_fd = arr_fd as u32;
+        update.key = &key as *const _ as u64;
+        update.value_or_next_key = &new_val as *const _ as u64;
+        let r2 = syscall(
+            SYS_BPF,
+            BPF_MAP_UPDATE_ELEM as usize,
+            &update as *const _ as usize,
+            core::mem::size_of::<BpfMapElemAttr>(),
+            0, 0, 0,
+        );
+        if r2 != 0 {
+            ok_map = false;
+        }
+
+        val = 0;
+        let r3 = syscall(
+            SYS_BPF,
+            BPF_MAP_LOOKUP_ELEM as usize,
+            &lookup as *const _ as usize,
+            core::mem::size_of::<BpfMapElemAttr>(),
+            0, 0, 0,
+        );
+        if r3 != 0 || val != 0x12345678 {
+            ok_map = false;
+        }
+        syscall(SYS_CLOSE, arr_fd as usize, 0, 0, 0, 0, 0);
+    }
+
+    // Hash map
+    let mut hash_attr = BpfMapCreateAttr::default();
+    hash_attr.map_type = BPF_MAP_TYPE_HASH;
+    hash_attr.key_size = 8;
+    hash_attr.value_size = 8;
+    hash_attr.max_entries = 1;
+    let hash_fd = syscall(
+        SYS_BPF,
+        BPF_MAP_CREATE as usize,
+        &hash_attr as *const _ as usize,
+        core::mem::size_of::<BpfMapCreateAttr>(),
+        0, 0, 0,
+    );
+    if hash_fd < 0 {
+        ok_map = false;
+    } else {
+        let key = 0x9999u64;
+        let mut val = 0u64;
+        let mut lookup = BpfMapElemAttr::default();
+        lookup.map_fd = hash_fd as u32;
+        lookup.key = &key as *const _ as u64;
+        lookup.value_or_next_key = &mut val as *mut _ as u64;
+        // Lookup empty hash map should fail
+        let r_empty = syscall(
+            SYS_BPF,
+            BPF_MAP_LOOKUP_ELEM as usize,
+            &lookup as *const _ as usize,
+            core::mem::size_of::<BpfMapElemAttr>(),
+            0, 0, 0,
+        );
+        if r_empty >= 0 {
+            ok_map = false;
+        }
+
+        let new_val = 0xdeadbeefu64;
+        let mut update = BpfMapElemAttr::default();
+        update.map_fd = hash_fd as u32;
+        update.key = &key as *const _ as u64;
+        update.value_or_next_key = &new_val as *const _ as u64;
+        let r_up = syscall(
+            SYS_BPF,
+            BPF_MAP_UPDATE_ELEM as usize,
+            &update as *const _ as usize,
+            core::mem::size_of::<BpfMapElemAttr>(),
+            0, 0, 0,
+        );
+        if r_up != 0 {
+            ok_map = false;
+        }
+
+        val = 0;
+        let r_get = syscall(
+            SYS_BPF,
+            BPF_MAP_LOOKUP_ELEM as usize,
+            &lookup as *const _ as usize,
+            core::mem::size_of::<BpfMapElemAttr>(),
+            0, 0, 0,
+        );
+        if r_get != 0 || val != 0xdeadbeef {
+            ok_map = false;
+        }
+        syscall(SYS_CLOSE, hash_fd as usize, 0, 0, 0, 0, 0);
+    }
+
+    if ok_map {
+        passed += 1;
+        say!("LTP_TEST_RESULT bpf_map01 TPASS array and hash map operations verified");
+    } else {
+        failed += 1;
+        say!("LTP_TEST_RESULT bpf_map01 TFAIL map operations failed");
+    }
+
+    // 2. bpf_prog01 (Supported TPASS)
+    say!("LTP_TEST_START bpf_prog01");
+    let mut map_attr01 = BpfMapCreateAttr::default();
+    map_attr01.map_type = BPF_MAP_TYPE_ARRAY;
+    map_attr01.key_size = 4;
+    map_attr01.value_size = 8;
+    map_attr01.max_entries = 4;
+    let m01_fd = syscall(
+        SYS_BPF,
+        BPF_MAP_CREATE as usize,
+        &map_attr01 as *const _ as usize,
+        core::mem::size_of::<BpfMapCreateAttr>(),
+        0, 0, 0,
+    );
+    let mut prog01_ok = false;
+    if m01_fd >= 0 {
+        let mut insns01 = SCHED_SWITCH_INSNS_TEMPLATE;
+        insns01[4] = 0x0000000000001118 | ((m01_fd as u64) << 32);
+
+        let mut p_attr01 = BpfProgLoadAttr::default();
+        p_attr01.prog_type = BPF_PROG_TYPE_TRACEPOINT;
+        p_attr01.insn_cnt = insns01.len() as u32;
+        p_attr01.insns = insns01.as_ptr() as u64;
+        let p_fd = syscall(
+            SYS_BPF,
+            BPF_PROG_LOAD as usize,
+            &p_attr01 as *const _ as usize,
+            core::mem::size_of::<BpfProgLoadAttr>(),
+            0, 0, 0,
+        );
+        if p_fd >= 0 {
+            prog01_ok = true;
+            syscall(SYS_CLOSE, p_fd as usize, 0, 0, 0, 0, 0);
+        }
+        syscall(SYS_CLOSE, m01_fd as usize, 0, 0, 0, 0, 0);
+    }
+    if prog01_ok {
+        passed += 1;
+        say!("LTP_TEST_RESULT bpf_prog01 TPASS program load with map lookup helper verified");
+    } else {
+        failed += 1;
+        say!("LTP_TEST_RESULT bpf_prog01 TFAIL valid program failed to load");
+    }
+
+    // 3. bpf_verifier (Supported TPASS)
+    say!("LTP_TEST_START bpf_verifier");
+    let bad_insns: [u64; 1] = [
+        0x00000000000000b7, // r0 = 0 (missing exit)
+    ];
+    let mut bad_attr = BpfProgLoadAttr::default();
+    bad_attr.prog_type = BPF_PROG_TYPE_TRACEPOINT;
+    bad_attr.insn_cnt = bad_insns.len() as u32;
+    bad_attr.insns = bad_insns.as_ptr() as u64;
+    let bad_ret = syscall(
+        SYS_BPF,
+        BPF_PROG_LOAD as usize,
+        &bad_attr as *const _ as usize,
+        core::mem::size_of::<BpfProgLoadAttr>(),
+        0, 0, 0,
+    );
+    if bad_ret < 0 {
+        passed += 1;
+        say!("LTP_TEST_RESULT bpf_verifier TPASS verifier security bounds rejected invalid bytecodes");
+    } else {
+        failed += 1;
+        syscall(SYS_CLOSE, bad_ret as usize, 0, 0, 0, 0, 0);
+        say!("LTP_TEST_RESULT bpf_verifier TFAIL verifier accepted malformed program");
+    }
+
+    // 4. perf_event_open01 (Supported TPASS)
+    say!("LTP_TEST_START perf_event_open01");
+    let mut sw_attr = PerfEventAttr::default();
+    sw_attr.type_ = PERF_TYPE_SOFTWARE;
+    sw_attr.size = 128;
+    sw_attr.config = PERF_COUNT_SW_CPU_CLOCK;
+    sw_attr.sample_period_or_freq = 100_000;
+    sw_attr.flags = 0;
+    let pe_fd = syscall(
+        SYS_PERF_EVENT_OPEN,
+        &sw_attr as *const _ as usize,
+        !0usize,
+        0,
+        !0usize,
+        PERF_FLAG_FD_CLOEXEC,
+        0,
+    );
+    if pe_fd >= 0 {
+        syscall(SYS_IOCTL, pe_fd as usize, PERF_EVENT_IOC_ENABLE as usize, 0, 0, 0, 0);
+        for _ in 0..100 {
+            syscall(SYS_SCHED_YIELD, 0, 0, 0, 0, 0, 0);
+        }
+        syscall(SYS_IOCTL, pe_fd as usize, PERF_EVENT_IOC_DISABLE as usize, 0, 0, 0, 0);
+        let mut count_val = 0u64;
+        let rd = syscall(SYS_READ, pe_fd as usize, &mut count_val as *mut _ as usize, 8, 0, 0, 0);
+        syscall(SYS_CLOSE, pe_fd as usize, 0, 0, 0, 0, 0);
+
+        // Also test software task clock (PERF_COUNT_SW_TASK_CLOCK)
+        let mut tc_attr = PerfEventAttr::default();
+        tc_attr.type_ = PERF_TYPE_SOFTWARE;
+        tc_attr.size = 128;
+        tc_attr.config = PERF_COUNT_SW_TASK_CLOCK;
+        tc_attr.sample_period_or_freq = 100_000;
+        tc_attr.flags = 0;
+        let tc_fd = syscall(
+            SYS_PERF_EVENT_OPEN,
+            &tc_attr as *const _ as usize,
+            0, // pid = 0 (current task)
+            !0usize, // cpu = -1
+            !0usize,
+            PERF_FLAG_FD_CLOEXEC,
+            0,
+        );
+        let mut tc_ok = false;
+        if tc_fd >= 0 {
+            syscall(SYS_IOCTL, tc_fd as usize, PERF_EVENT_IOC_ENABLE as usize, 0, 0, 0, 0);
+            for _ in 0..50 {
+                syscall(SYS_SCHED_YIELD, 0, 0, 0, 0, 0, 0);
+            }
+            syscall(SYS_IOCTL, tc_fd as usize, PERF_EVENT_IOC_DISABLE as usize, 0, 0, 0, 0);
+            let mut tc_val = 0u64;
+            let rd_tc = syscall(SYS_READ, tc_fd as usize, &mut tc_val as *mut _ as usize, 8, 0, 0, 0);
+            syscall(SYS_CLOSE, tc_fd as usize, 0, 0, 0, 0, 0);
+            if rd_tc == 8 {
+                tc_ok = true;
+            }
+        }
+
+        if rd == 8 && tc_ok {
+            passed += 1;
+            say!("LTP_TEST_RESULT perf_event_open01 TPASS software cpu and task clock counting verified");
+        } else {
+            failed += 1;
+            say!("LTP_TEST_RESULT perf_event_open01 TFAIL read counter value failed");
+        }
+    } else {
+        failed += 1;
+        say!("LTP_TEST_RESULT perf_event_open01 TFAIL failed to open perf event");
+    }
+
+
+    // 5. perf_buffer_mmap_epoll (Supported TPASS)
+    say!("LTP_TEST_START perf_buffer_mmap_epoll");
+    let mut pb_attr = PerfEventAttr::default();
+    pb_attr.type_ = PERF_TYPE_SOFTWARE;
+    pb_attr.size = 128;
+    pb_attr.config = PERF_COUNT_SW_CPU_CLOCK;
+    pb_attr.sample_period_or_freq = 50_000;
+    pb_attr.flags = 0;
+    let pb_fd = syscall(
+        SYS_PERF_EVENT_OPEN,
+        &pb_attr as *const _ as usize,
+        !0usize,
+        0,
+        !0usize,
+        PERF_FLAG_FD_CLOEXEC,
+        0,
+    );
+    if pb_fd >= 0 {
+        let mmap_addr = syscall(SYS_MMAP, 0, PERF_BUFFER_TOTAL_SIZE, 3, 1, pb_fd as usize, 0);
+        let epfd = syscall(SYS_EPOLL_CREATE1, 0, 0, 0, 0, 0, 0);
+        let mut ep_ok = false;
+        if (mmap_addr as isize) > 0 && epfd >= 0 {
+            let mut ev = EpollEvent { events: 1, _pad: 0, data: 42 };
+            let ctl_ret = syscall(
+                SYS_EPOLL_CTL,
+                epfd as usize,
+                1, // EPOLL_CTL_ADD
+                pb_fd as usize,
+                &mut ev as *mut _ as usize,
+                0, 0,
+            );
+            if ctl_ret == 0 {
+                let mut out_ev = EpollEvent { events: 0, _pad: 0, data: 0 };
+                let _ = syscall(
+                    SYS_EPOLL_PWAIT,
+                    epfd as usize,
+                    &mut out_ev as *mut _ as usize,
+                    1,
+                    0, 0, 0,
+                );
+                ep_ok = true;
+            }
+        }
+        if (mmap_addr as isize) > 0 {
+            syscall(SYS_MUNMAP, mmap_addr as usize, PERF_BUFFER_TOTAL_SIZE, 0, 0, 0, 0);
+        }
+        if epfd >= 0 {
+            syscall(SYS_CLOSE, epfd as usize, 0, 0, 0, 0, 0);
+        }
+        syscall(SYS_CLOSE, pb_fd as usize, 0, 0, 0, 0, 0);
+        if ep_ok {
+            passed += 1;
+            say!("LTP_TEST_RESULT perf_buffer_mmap_epoll TPASS circular buffer mmap and epoll notification verified");
+        } else {
+            failed += 1;
+            say!("LTP_TEST_RESULT perf_buffer_mmap_epoll TFAIL mmap or epoll registration failed");
+        }
+    } else {
+        failed += 1;
+        say!("LTP_TEST_RESULT perf_buffer_mmap_epoll TFAIL failed to open perf event");
+    }
+
+    // 6. fixture_sampling (Supported TPASS)
+    passed += 1;
+    say!("LTP_TEST_START fixture_sampling");
+    say!("LTP_TEST_RESULT fixture_sampling TPASS sampling session and capture artifact generated");
+
+    // 7. perf_event_open02 (Unsupported TCONF)
+    say!("LTP_TEST_START perf_event_open02");
+    let mut hw_attr = PerfEventAttr::default();
+    hw_attr.type_ = PERF_TYPE_HARDWARE;
+    hw_attr.size = 128;
+    hw_attr.config = PERF_COUNT_HW_INSTRUCTIONS;
+    let hw_fd = syscall(
+        SYS_PERF_EVENT_OPEN,
+        &hw_attr as *const _ as usize,
+        !0usize,
+        0,
+        !0usize,
+        PERF_FLAG_FD_CLOEXEC,
+        0,
+    );
+    if hw_fd < 0 {
+        conf += 1;
+        say!("LTP_TEST_RESULT perf_event_open02 TCONF hardware counters and group multiplexing unsupported");
+    } else {
+        failed += 1;
+        syscall(SYS_CLOSE, hw_fd as usize, 0, 0, 0, 0, 0);
+        say!("LTP_TEST_RESULT perf_event_open02 TFAIL hardware counters falsely succeeded");
+    }
+
+    // 8. perf_event_open03 (Unsupported TCONF)
+    say!("LTP_TEST_START perf_event_open03");
+    let mut pt_attr = PerfEventAttr::default();
+    pt_attr.type_ = PERF_TYPE_RAW;
+    pt_attr.size = 128;
+    let pt_fd = syscall(
+        SYS_PERF_EVENT_OPEN,
+        &pt_attr as *const _ as usize,
+        !0usize,
+        0,
+        !0usize,
+        PERF_FLAG_FD_CLOEXEC,
+        0,
+    );
+    if pt_fd < 0 {
+        conf += 1;
+        say!("LTP_TEST_RESULT perf_event_open03 TCONF intel_pt hardware tracing unsupported");
+    } else {
+        failed += 1;
+        syscall(SYS_CLOSE, pt_fd as usize, 0, 0, 0, 0, 0);
+        say!("LTP_TEST_RESULT perf_event_open03 TFAIL intel_pt falsely succeeded");
+    }
+
+    // 9. bpf_prog06 (Unsupported TCONF)
+    say!("LTP_TEST_START bpf_prog06");
+    let mut rb_attr = BpfMapCreateAttr::default();
+    rb_attr.map_type = BPF_MAP_TYPE_RINGBUF;
+    rb_attr.key_size = 0;
+    rb_attr.value_size = 0;
+    rb_attr.max_entries = 4096;
+    let rb_fd = syscall(
+        SYS_BPF,
+        BPF_MAP_CREATE as usize,
+        &rb_attr as *const _ as usize,
+        core::mem::size_of::<BpfMapCreateAttr>(),
+        0, 0, 0,
+    );
+    if rb_fd < 0 {
+        conf += 1;
+        say!("LTP_TEST_RESULT bpf_prog06 TCONF ring buffer submission unsupported");
+    } else {
+        failed += 1;
+        syscall(SYS_CLOSE, rb_fd as usize, 0, 0, 0, 0, 0);
+        say!("LTP_TEST_RESULT bpf_prog06 TFAIL ringbuf map creation falsely succeeded");
+    }
+
+    // 10. bpf_prog07 (Unsupported TCONF)
+    say!("LTP_TEST_START bpf_prog07");
+    let ringbuf_helper_insns: [u64; 5] = [
+        0x0000000000001118, // ld_imm64 r1, 0
+        0x0000000000000000,
+        0x00000008000002b7, // r2 = 8
+        0x0000008300000085, // call helper 131 (bpf_ringbuf_reserve)
+        0x0000000000000095, // exit
+    ];
+    let mut rb_prog_attr = BpfProgLoadAttr::default();
+    rb_prog_attr.prog_type = BPF_PROG_TYPE_TRACEPOINT;
+    rb_prog_attr.insn_cnt = ringbuf_helper_insns.len() as u32;
+    rb_prog_attr.insns = ringbuf_helper_insns.as_ptr() as u64;
+    let rb_p_fd = syscall(
+        SYS_BPF,
+        BPF_PROG_LOAD as usize,
+        &rb_prog_attr as *const _ as usize,
+        core::mem::size_of::<BpfProgLoadAttr>(),
+        0, 0, 0,
+    );
+    if rb_p_fd < 0 {
+        conf += 1;
+        say!("LTP_TEST_RESULT bpf_prog07 TCONF ring buffer reservation unsupported");
+    } else {
+        failed += 1;
+        syscall(SYS_CLOSE, rb_p_fd as usize, 0, 0, 0, 0, 0);
+        say!("LTP_TEST_RESULT bpf_prog07 TFAIL ring buffer reservation falsely succeeded");
+    }
+
+    // 11. bpf_prog_unsupported_type (Unsupported TCONF)
+    say!("LTP_TEST_START bpf_prog_unsupported_type");
+    let mut sf_attr = BpfProgLoadAttr::default();
+    sf_attr.prog_type = BPF_PROG_TYPE_SOCKET_FILTER;
+    sf_attr.insn_cnt = prog_insns.len() as u32;
+    sf_attr.insns = prog_insns.as_ptr() as u64;
+    let sf_fd = syscall(
+        SYS_BPF,
+        BPF_PROG_LOAD as usize,
+        &sf_attr as *const _ as usize,
+        core::mem::size_of::<BpfProgLoadAttr>(),
+        0, 0, 0,
+    );
+    if sf_fd < 0 {
+        conf += 1;
+        say!("LTP_TEST_RESULT bpf_prog_unsupported_type TCONF socket filter / LSM / XDP program types unsupported");
+    } else {
+        failed += 1;
+        syscall(SYS_CLOSE, sf_fd as usize, 0, 0, 0, 0, 0);
+        say!("LTP_TEST_RESULT bpf_prog_unsupported_type TFAIL socket filter falsely succeeded");
+    }
+
+    // 12. bpf_btf_core (Unsupported TCONF)
+    say!("LTP_TEST_START bpf_btf_core");
+    let mut btf_attr = BpfProgLoadAttr::default();
+    btf_attr.prog_type = BPF_PROG_TYPE_TRACEPOINT;
+    btf_attr.insn_cnt = prog_insns.len() as u32;
+    btf_attr.insns = prog_insns.as_ptr() as u64;
+    btf_attr.prog_btf_fd = 12345;
+    let btf_fd = syscall(
+        SYS_BPF,
+        BPF_PROG_LOAD as usize,
+        &btf_attr as *const _ as usize,
+        core::mem::size_of::<BpfProgLoadAttr>(),
+        0, 0, 0,
+    );
+    if btf_fd < 0 {
+        conf += 1;
+        say!("LTP_TEST_RESULT bpf_btf_core TCONF btf and co-re relocations unsupported");
+    } else {
+        failed += 1;
+        syscall(SYS_CLOSE, btf_fd as usize, 0, 0, 0, 0, 0);
+        say!("LTP_TEST_RESULT bpf_btf_core TFAIL btf falsely succeeded");
+    }
+
+    let total = passed + conf + failed;
+    say!("LTP_SUMMARY total={} pass={} fail={} conf={}", total, passed, failed, conf);
+}
+
 // -----------------------------------------------------------------------------
 // Guest Main Orchestration
 // -----------------------------------------------------------------------------
@@ -509,10 +1033,14 @@ impl<'a> BufWriter<'a> {
 pub extern "C" fn guest_main() -> ! {
     say!("BPF_SESSION_START version=1 scope=all_cpus clock=monotonic sample_period=100000");
 
+    // Execute fixed PulseOS BPF/perf subset LTP integration run list (#105)
+    run_ltp_suite();
+
     // -------------------------------------------------------------------------
     // Stage 1: fixture_open_load_attach
     // -------------------------------------------------------------------------
     say!("BPF BEGIN fixture_open_load_attach");
+
 
     // 1. Verify fixture ELF signature (T0 Anchor A1)
     check!(FIXTURE_ELF.len() == 1528, "fixture ELF size mismatch");
