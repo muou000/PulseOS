@@ -1,0 +1,18 @@
+# DESCRIPTION: PulseOS BPF and perf_event subset guest integration run list (#105)
+# Format: <test_name> <command> <expected_class> [description]
+
+# Supported BPF and perf subsystem capabilities
+bpf_map01 bpf_map01 TPASS BPF hash and array map lifecycle
+bpf_prog01 bpf_prog01 TPASS BPF tracepoint and perf_event program execution with map helpers
+bpf_verifier bpf_verifier TPASS BPF verifier security enforcement and error diagnostic logging
+perf_event_open01 perf_event_open01 TPASS Software CPU and task clock counter execution
+perf_buffer_mmap_epoll perf_buffer_mmap_epoll TPASS Circular perf buffer mmap and epoll notification
+fixture_sampling fixture_sampling TPASS Full BPF sampling session lifecycle and capture generation
+
+# Unsupported capabilities classified honestly as TCONF / skip
+perf_event_open02 perf_event_open02 TCONF Hardware counter multiplexing and group FDs unsupported
+perf_event_open03 perf_event_open03 TCONF Intel PT hardware processor tracing unsupported
+bpf_prog06 bpf_prog06 TCONF BPF ring buffer memory submission unsupported
+bpf_prog07 bpf_prog07 TCONF BPF ring buffer memory reservation unsupported
+bpf_prog_unsupported_type bpf_prog_unsupported_type TCONF Socket filter / LSM / XDP program types unsupported
+bpf_btf_core bpf_btf_core TCONF BTF and CO-RE relocations unsupported

@@ -42,12 +42,29 @@ def sample_capture_payload() -> bytes:
     return bytes(header + trailer)
 
 
+def sample_ltp_markers() -> list[str]:
+    runlist = run.load_runlist()
+    lines = []
+    pass_cnt = 0
+    conf_cnt = 0
+    for e in runlist:
+        lines.append(f"LTP_TEST_START {e.name}")
+        lines.append(f"LTP_TEST_RESULT {e.name} {e.expected_class} status=expected")
+        if e.expected_class == "TPASS":
+            pass_cnt += 1
+        elif e.expected_class == "TCONF":
+            conf_cnt += 1
+    lines.append(f"LTP_SUMMARY total={len(runlist)} pass={pass_cnt} fail=0 conf={conf_cnt}")
+    return lines
+
+
 def sample_markers(token="testtoken", status=0, capture_bytes: bytes | None = None) -> str:
     cap = capture_bytes if capture_bytes is not None else sample_capture_payload()
     cap_hex = cap.hex()
     cap_hash = hashlib.sha256(cap).hexdigest()
     lines = [
         "BPF_SESSION_START version=1 scope=all_cpus clock=monotonic sample_period=100000",
+        *sample_ltp_markers(),
         "BPF BEGIN fixture_open_load_attach",
         "BPF PASS fixture_open_load_attach",
         "BPF BEGIN workload_and_consume",
@@ -70,6 +87,7 @@ class LogValidatorTests(unittest.TestCase):
         text = sample_markers()
         errors = run.validate_log(text, shell_token="testtoken")
         self.assertEqual(errors, [])
+
 
     def test_missing_session_start_rejected(self):
         text = sample_markers().replace("BPF_SESSION_START", "WRONG_START")
@@ -174,7 +192,175 @@ class AnalyzerFeedIntegrationTests(unittest.TestCase):
             self.assertIn("Failed to parse BPF capture", report)
 
 
+class Seam1RunlistValidationTests(unittest.TestCase):
+    def test_runlist_file_exists_and_parses_classes(self):
+        entries = run.load_runlist()
+        self.assertGreater(len(entries), 0)
+        expected_supported = {
+            "bpf_map01",
+            "bpf_prog01",
+            "bpf_verifier",
+            "perf_event_open01",
+            "perf_buffer_mmap_epoll",
+            "fixture_sampling",
+        }
+        expected_unsupported = {
+            "perf_event_open02",
+            "perf_event_open03",
+            "bpf_prog06",
+            "bpf_prog07",
+            "bpf_prog_unsupported_type",
+            "bpf_btf_core",
+        }
+        names = {e.name for e in entries}
+        for s in expected_supported:
+            self.assertIn(s, names, f"missing expected supported test {s}")
+        for u in expected_unsupported:
+            self.assertIn(u, names, f"missing expected unsupported test {u}")
+
+        supported_map = {e.name: e.expected_class for e in entries}
+        for s in expected_supported:
+            self.assertEqual(supported_map[s], "TPASS")
+        for u in expected_unsupported:
+            self.assertEqual(supported_map[u], "TCONF")
+
+    def test_validate_ltp_log_honest_classification_passes(self):
+        runlist = run.load_runlist()
+        log_lines = []
+        pass_count = 0
+        conf_count = 0
+        for e in runlist:
+            log_lines.append(f"LTP_TEST_START {e.name}")
+            log_lines.append(f"LTP_TEST_RESULT {e.name} {e.expected_class} status=ok")
+            if e.expected_class == "TPASS":
+                pass_count += 1
+            elif e.expected_class == "TCONF":
+                conf_count += 1
+        log_lines.append(f"LTP_SUMMARY total={len(runlist)} pass={pass_count} fail=0 conf={conf_count}")
+        results, errors = run.validate_ltp_log("\n".join(log_lines), runlist)
+        self.assertEqual(errors, [])
+        self.assertEqual(len(results), len(runlist))
+
+    def test_validate_ltp_log_rejects_unsupported_reported_as_pass(self):
+        runlist = run.load_runlist()
+        log_lines = []
+        for e in runlist:
+            log_lines.append(f"LTP_TEST_START {e.name}")
+            # Falsely report TPASS for everything
+            log_lines.append(f"LTP_TEST_RESULT {e.name} TPASS status=falsified")
+        log_lines.append(f"LTP_SUMMARY total={len(runlist)} pass={len(runlist)} fail=0 conf=0")
+        results, errors = run.validate_ltp_log("\n".join(log_lines), runlist)
+        self.assertTrue(any("unsupported capability falsely reported TPASS" in err for err in errors))
+
+    def test_validate_ltp_log_missing_case_fails(self):
+        runlist = run.load_runlist()
+        log_lines = ["LTP_SUMMARY total=0 pass=0 fail=0 conf=0"]
+        results, errors = run.validate_ltp_log("\n".join(log_lines), runlist)
+        self.assertTrue(any("missing result for" in err for err in errors))
+
+
+class Seam2GuestProtocolTests(unittest.TestCase):
+    def test_guest_sampler_source_defines_all_runlist_cases(self):
+        source_text = run.RAW_SOURCE.read_text()
+        runlist = run.load_runlist()
+        for e in runlist:
+            self.assertIn(
+                f'LTP_TEST_START {e.name}',
+                source_text,
+                f"guest_sampler.rs must implement case: {e.name}"
+            )
+            self.assertIn(
+                f'LTP_TEST_RESULT {e.name} {e.expected_class}',
+                source_text,
+                f"guest_sampler.rs must emit result marker for {e.name} with {e.expected_class}"
+            )
+
+    def test_validate_log_enforces_runlist(self):
+        # A log with missing LTP cases must be rejected by validate_log
+        corrupted = sample_markers().replace("LTP_TEST_RESULT bpf_map01 TPASS", "LTP_TEST_RESULT bpf_map01 TFAIL")
+        errors = run.validate_log(corrupted, shell_token="testtoken")
+        self.assertTrue(any("bpf_map01" in err for err in errors))
+
+
+class Seam3GateEvidenceTests(unittest.TestCase):
+
+    def test_evidence_record_format_contains_required_fields(self):
+        metadata = {
+            "kind": "PulseOS BPF guest smoke",
+            "arch": "riscv64",
+            "qemu_command": ["qemu-system-riscv64"],
+            "guest_command": "payload",
+            "inputs": {
+                "kernel": "/path/to/kernel",
+                "primary": "/path/to/primary.img",
+                "secondary": "/path/to/disk.img",
+            },
+            "input_sha256": {
+                "kernel": "aaaabbbb1111",
+                "primary": "ccccdddd2222",
+                "secondary": "eeeeffff3333",
+            },
+            "source_sha256": "12345678",
+        }
+        test_results = {"bpf_map01": "TPASS", "bpf_prog06": "TCONF"}
+        runlist_summary = {"total": 2, "pass": 1, "fail": 0, "conf": 1}
+        capture_meta = {
+            "sha256": "abcdef123456",
+            "bytes": 1024,
+            "integrity_passed": True,
+        }
+        analyzer_output = "Lost Records: 0\nStatus: Complete\nINTEGRITY CHECK PASSED"
+        errors = []
+
+
+        record = run.build_evidence_record(
+            metadata=metadata,
+            test_results=test_results,
+            runlist_summary=runlist_summary,
+            capture_meta=capture_meta,
+            analyzer_output=analyzer_output,
+            errors=errors,
+            qemu_exit=0,
+            driver_reason="",
+        )
+
+        self.assertEqual(record["arch"], "riscv64")
+        self.assertIn("fixture_sha256", record)
+        self.assertEqual(record["kernel_sha256"], "aaaabbbb1111")
+        self.assertEqual(record["image_sha256"], "ccccdddd2222")
+        self.assertEqual(record["test_results"], test_results)
+        self.assertEqual(record["runlist_summary"], runlist_summary)
+        self.assertEqual(record["capture_sha256"], "abcdef123456")
+        self.assertTrue(record["capture_integrity"])
+        self.assertEqual(record["analyzer_loss_counters"]["lost_records"], 0)
+        self.assertTrue(record["gate_pass"])
+
+    def test_evidence_record_reports_gate_failure_on_errors(self):
+        record = run.build_evidence_record(
+            metadata={"arch": "riscv64", "input_sha256": {}},
+            test_results={},
+            runlist_summary={"total": 0, "pass": 0, "fail": 0, "conf": 0},
+            capture_meta=None,
+            analyzer_output="",
+            errors=["something broke"],
+            qemu_exit=1,
+            driver_reason="timeout",
+        )
+        self.assertFalse(record["gate_pass"])
+        self.assertFalse(record["capture_integrity"])
+        self.assertEqual(record["errors"], ["something broke"])
+
+    def test_gate_parser_registers_gate_subcommand(self):
+        parser = run.build_parser()
+        args = parser.parse_args(["gate", "--arch", "riscv64"])
+        self.assertEqual(args.command, "gate")
+        self.assertEqual(args.arch, "riscv64")
+
+
 if __name__ == "__main__":
+
+
+
     suite = unittest.defaultTestLoader.loadTestsFromModule(sys.modules[__name__])
     result = unittest.TextTestRunner(verbosity=2, failfast=True).run(suite)
     sys.exit(0 if result.wasSuccessful() else 1)

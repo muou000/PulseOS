@@ -28,12 +28,89 @@ BASE = Path(__file__).resolve().parent
 REPO = BASE.parent.parent
 RAW_SOURCE = BASE / "guest_sampler.rs"
 LINK_SCRIPT = BASE / "guest.ld"
+RUNLIST_PATH = BASE / "runtest_pulseos_bpf"
+LTP_RUNLIST_PATH = REPO / "ltp" / "runtest" / "pulseos_bpf"
+
+
+class RunListEntry:
+    def __init__(self, name: str, command: str, expected_class: str, description: str = ""):
+        self.name = name
+        self.command = command
+        self.expected_class = expected_class
+        self.description = description
+
+    def __repr__(self) -> str:
+        return f"RunListEntry({self.name}, {self.command}, {self.expected_class})"
+
+
+def load_runlist(path: Path | None = None) -> list[RunListEntry]:
+    p = path or (RUNLIST_PATH if RUNLIST_PATH.is_file() else LTP_RUNLIST_PATH)
+    if not p.is_file():
+        raise FileNotFoundError(f"Run list file not found at {RUNLIST_PATH} or {LTP_RUNLIST_PATH}")
+
+    entries = []
+    for line in p.read_text().splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        parts = line.split(maxsplit=3)
+        if len(parts) >= 3:
+            name, cmd, exp = parts[0], parts[1], parts[2]
+            desc = parts[3] if len(parts) > 3 else ""
+            entries.append(RunListEntry(name, cmd, exp, desc))
+    return entries
+
+
+def validate_ltp_log(text: str, runlist: list[RunListEntry]) -> tuple[dict[str, str], list[str]]:
+    lines = [
+        re.sub(r"\x1b\[[0-9;]*[A-Za-z]", "", line).strip()
+        for line in text.replace("\r", "").splitlines()
+    ]
+    errors: list[str] = []
+    results: dict[str, str] = {}
+
+    result_pattern = re.compile(r"^LTP_TEST_RESULT\s+(\S+)\s+(TPASS|TFAIL|TCONF|TBROK)(?:\s+(.*))?$")
+    for line in lines:
+        m = result_pattern.match(line)
+        if m:
+            case_name, result_class, _details = m.group(1), m.group(2), m.group(3)
+            results[case_name] = result_class
+
+    for entry in runlist:
+        if entry.name not in results:
+            errors.append(f"missing result for runlist test case: {entry.name}")
+            continue
+        actual = results[entry.name]
+        expected = entry.expected_class
+        if expected == "TCONF":
+            if actual == "TPASS":
+                errors.append(
+                    f"unsupported capability falsely reported TPASS for {entry.name} (must be TCONF)"
+                )
+            elif actual != "TCONF":
+                errors.append(f"expected TCONF for unsupported {entry.name}, got {actual}")
+        elif expected == "TPASS":
+            if actual != "TPASS":
+                errors.append(f"test case {entry.name} failed with {actual}")
+
+    summary_match = re.search(r"LTP_SUMMARY\s+total=(\d+)\s+pass=(\d+)\s+fail=(\d+)\s+conf=(\d+)", text)
+    if summary_match:
+        total = int(summary_match.group(1))
+        failed = int(summary_match.group(3))
+        if total != len(runlist):
+            errors.append(f"LTP_SUMMARY total mismatch: got {total}, expected {len(runlist)}")
+        if failed > 0:
+            errors.append(f"LTP_SUMMARY reports {failed} failure(s)")
+
+    return results, errors
+
 
 LIFECYCLE_STAGES = (
     "fixture_open_load_attach",
     "workload_and_consume",
     "fixture_detach_close",
 )
+
 
 ARCHES = {
     "riscv64": {
@@ -233,13 +310,22 @@ def extract_capture_artifact(text: str) -> tuple[bytes, str] | None:
     return raw_bytes, actual_sha
 
 
-def validate_log(text: str, *, shell_token: str | None = None) -> list[str]:
-    """Validate guest session lifecycle markers, capture framing, and shell status."""
+def validate_log(
+    text: str,
+    *,
+    shell_token: str | None = None,
+    runlist: list[RunListEntry] | None = None,
+) -> list[str]:
+    """Validate guest session lifecycle markers, capture framing, LTP results, and shell status."""
     lines = [
         re.sub(r"\x1b\[[0-9;]*[A-Za-z]", "", line).strip()
         for line in text.replace("\r", "").splitlines()
     ]
     errors = []
+
+    active_runlist = runlist if runlist is not None else load_runlist()
+    _results, ltp_errors = validate_ltp_log(text, active_runlist)
+    errors.extend(ltp_errors)
 
     if sum(line.startswith("BPF_SESSION_START ") for line in lines) != 1:
         errors.append("expected exactly one BPF_SESSION_START marker")
@@ -271,6 +357,7 @@ def validate_log(text: str, *, shell_token: str | None = None) -> list[str]:
         errors.append("kernel panic or fatal trap detected in log")
 
     return errors
+
 
 
 def stop_process(process: subprocess.Popen) -> None:
@@ -509,6 +596,91 @@ def probe_toolchain(arch: str | None = None) -> dict[str, bool | str]:
     return status
 
 
+def parse_analyzer_loss_counters(analyzer_output: str) -> dict[str, int]:
+
+    """Parse loss counters from bpf-analyzer report."""
+    counters: dict[str, int] = {
+        "lost_records": 0,
+        "ringbuf_lost": 0,
+        "discarded_records": 0,
+        "re_entry_drops": 0,
+        "helper_failures": 0,
+        "budget_failures": 0,
+        "verifier_failures": 0,
+        "consumer_corrupt_records": 0,
+        "consumer_out_of_bounds": 0,
+    }
+    m = re.search(r"Lost Records:\s+(\d+)", analyzer_output)
+    if m:
+        counters["lost_records"] = int(m.group(1))
+    for key in counters:
+        m_spec = re.search(rf'"{key}":\s*(\d+)', analyzer_output)
+        if m_spec:
+            counters[key] = int(m_spec.group(1))
+    return counters
+
+
+def build_evidence_record(
+    *,
+    metadata: dict,
+    test_results: dict[str, str],
+    runlist_summary: dict[str, int],
+    capture_meta: dict | None,
+    analyzer_output: str,
+    errors: list[str],
+    qemu_exit: int,
+    driver_reason: str,
+    after_hashes: dict | None = None,
+    input_changes: list[str] | None = None,
+) -> dict:
+    fixture_path = BASE / "fixture_capture.bin"
+    fixture_sha = digest(fixture_path) if fixture_path.is_file() else "embedded_fixture"
+
+    input_hashes = metadata.get("input_sha256", {})
+    kernel_sha = input_hashes.get("kernel", "")
+    image_sha = input_hashes.get("primary", "")
+
+    capture_sha = capture_meta.get("sha256", "") if capture_meta else ""
+    capture_bytes = capture_meta.get("bytes", 0) if capture_meta else 0
+    capture_integrity = bool(
+        capture_meta
+        and capture_meta.get("integrity_passed", False)
+        and "INTEGRITY CHECK PASSED" in analyzer_output
+    )
+
+    loss_counters = parse_analyzer_loss_counters(analyzer_output)
+
+    gate_pass = (
+        len(errors) == 0
+        and qemu_exit == 0
+        and capture_integrity
+        and loss_counters.get("lost_records", 0) == 0
+        and runlist_summary.get("fail", 0) == 0
+        and runlist_summary.get("total", 0) > 0
+    )
+
+    return {
+        **metadata,
+        "arch": metadata.get("arch", ""),
+        "fixture_sha256": fixture_sha,
+        "kernel_sha256": kernel_sha,
+        "image_sha256": image_sha,
+        "test_results": test_results,
+        "runlist_summary": runlist_summary,
+        "capture_sha256": capture_sha,
+        "capture_bytes": capture_bytes,
+        "capture_integrity": capture_integrity,
+        "analyzer_loss_counters": loss_counters,
+        "analyzer_output": analyzer_output,
+        "qemu_exit": qemu_exit,
+        "driver_reason": driver_reason,
+        "errors": errors,
+        "input_sha256_after": after_hashes or {},
+        "original_input_changes": input_changes or [],
+        "gate_pass": gate_pass,
+    }
+
+
 def guest(args: argparse.Namespace) -> int:
     config = ARCHES[args.arch]
     tool_status = probe_toolchain(args.arch)
@@ -593,10 +765,23 @@ def guest(args: argparse.Namespace) -> int:
         args.timeout,
     )
 
-    errors = validate_log(text, shell_token=token)
+    active_runlist = load_runlist()
+    test_results, ltp_errors = validate_ltp_log(text, active_runlist)
+    errors = validate_log(text, shell_token=token, runlist=active_runlist)
     if reason:
         errors.append(reason)
 
+    pass_cnt = sum(1 for v in test_results.values() if v == "TPASS")
+    fail_cnt = sum(1 for v in test_results.values() if v in ("TFAIL", "TBROK"))
+    conf_cnt = sum(1 for v in test_results.values() if v == "TCONF")
+    runlist_summary = {
+        "total": len(active_runlist),
+        "pass": pass_cnt,
+        "fail": fail_cnt,
+        "conf": conf_cnt,
+    }
+
+    capture_meta = None
     capture_result = extract_capture_artifact(text)
     analyzer_output = ""
     if capture_result:
@@ -606,6 +791,12 @@ def guest(args: argparse.Namespace) -> int:
         print(f"Exported BPF capture: {capture_path} ({len(raw_capture)} bytes, sha256={cap_sha})")
         ok, report = feed_analyzer(capture_path)
         analyzer_output = report
+        integrity_ok = ok and "INTEGRITY CHECK PASSED" in report
+        capture_meta = {
+            "sha256": cap_sha,
+            "bytes": len(raw_capture),
+            "integrity_passed": integrity_ok,
+        }
         if not ok:
             errors.append(f"bpf-analyzer validation failed: {report}")
         else:
@@ -619,16 +810,18 @@ def guest(args: argparse.Namespace) -> int:
     if any(name != "kernel" for name in input_changes) or digest(kernel_copy) != before["kernel"]:
         errors.append("non-kernel input hash changed during run or saved kernel hash mismatch")
 
-    result = {
-        **metadata,
-        "qemu_exit": qemu_exit,
-        "driver_reason": reason,
-        "errors": errors,
-        "input_sha256_after": after,
-        "original_input_changes": input_changes,
-        "functional_pass": not errors,
-        "analyzer_output": analyzer_output,
-    }
+    result = build_evidence_record(
+        metadata=metadata,
+        test_results=test_results,
+        runlist_summary=runlist_summary,
+        capture_meta=capture_meta,
+        analyzer_output=analyzer_output,
+        errors=errors,
+        qemu_exit=qemu_exit,
+        driver_reason=reason,
+        after_hashes=after,
+        input_changes=input_changes,
+    )
     (run / "result.json").write_text(json.dumps(result, indent=2) + "\n")
 
     for error in errors:
@@ -637,7 +830,39 @@ def guest(args: argparse.Namespace) -> int:
     return int(bool(errors))
 
 
-def main() -> int:
+def gate(args: argparse.Namespace) -> int:
+    """Dual-architecture CI and local integration gate command (#105)."""
+    arches = [args.arch] if getattr(args, "arch", None) else ["riscv64", "loongarch64"]
+    overall_failures = 0
+
+    for arch in arches:
+        print(f"\n================ Running BPF Guest Integration Gate for {arch} ================")
+        g_args = argparse.Namespace(
+            arch=arch,
+            kernel=getattr(args, "kernel", None),
+            primary=getattr(args, "primary", None),
+            secondary=getattr(args, "secondary", None),
+            payload=getattr(args, "payload", None),
+            qemu=getattr(args, "qemu", None),
+            ready_regex=getattr(args, "ready_regex", r"(?:^|[\r\n])[^\r\n]*[#$] ?$"),
+            boot_timeout=getattr(args, "boot_timeout", 60.0),
+            timeout=getattr(args, "timeout", 90.0),
+        )
+        res = guest(g_args)
+        if res != 0:
+            overall_failures += 1
+
+
+    print("\n================ BPF Integration Gate Summary ================")
+    if overall_failures == 0:
+        print("BPF INTEGRATION GATE PASSED (Dual-architecture LTP subset & capture integrity verified)")
+        return 0
+    else:
+        print(f"BPF INTEGRATION GATE FAILED: {overall_failures} architecture(s) reported errors", file=sys.stderr)
+        return 1
+
+
+def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest="command", required=True)
 
@@ -662,6 +887,22 @@ def main() -> int:
     p_smoke.add_argument("--boot-timeout", type=float, default=60)
     p_smoke.add_argument("--timeout", type=float, default=90)
 
+    p_gate = sub.add_parser("gate", help="Run BPF LTP integration gate (dual-architecture)")
+    p_gate.add_argument("--arch", choices=("riscv64", "loongarch64"), default=None)
+    p_gate.add_argument("--kernel", type=Path)
+    p_gate.add_argument("--primary", type=Path)
+    p_gate.add_argument("--secondary", type=Path)
+    p_gate.add_argument("--payload", type=Path)
+    p_gate.add_argument("--qemu")
+    p_gate.add_argument("--ready-regex", default=r"(?:^|[\r\n])[^\r\n]*[#$] ?$")
+    p_gate.add_argument("--boot-timeout", type=float, default=60)
+    p_gate.add_argument("--timeout", type=float, default=90)
+
+    return parser
+
+
+def main() -> int:
+    parser = build_parser()
     args = parser.parse_args()
 
     if args.command == "probe":
@@ -692,10 +933,13 @@ def main() -> int:
             if res != 0 and res != 77:
                 failures += 1
         return failures
+    elif args.command == "gate":
+        return gate(args)
 
     return 0
 
 
 if __name__ == "__main__":
     sys.exit(main())
+
 
