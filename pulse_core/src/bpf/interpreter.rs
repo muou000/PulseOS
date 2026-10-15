@@ -729,7 +729,7 @@ pub fn execute(
                             } else {
                                 cpu_idx
                             };
-                            if target_cpu >= map.spec().max_entries() || target_cpu != current_cpu {
+                            if target_cpu >= map.spec().max_entries() {
                                 regs[BPF_REG_0 as usize] = VmValue::Scalar((-(LinuxError::EINVAL.code() as i64)) as u64);
                                 regs[1..=5].fill(VmValue::Uninit);
                                 pc += 1;

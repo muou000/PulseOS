@@ -6,7 +6,7 @@ use axio::PollState;
 use linux_raw_sys::general::stat;
 
 use super::BpfMap;
-use crate::fd_table::FdObject;
+use crate::fd_table::{FdObject, PollEventSequence, PollRegistration};
 
 /// A BPF Map object FD.
 ///
@@ -201,15 +201,61 @@ impl FdObject for PerfEventObject {
     }
 
     fn poll(&self) -> LinuxResult<PollState> {
-        let readable = if let Some(buf) = self.event.buffer() {
-            buf.data_head() > buf.data_tail()
-        } else {
-            false
-        };
         Ok(PollState {
-            readable,
+            readable: self.event.is_readable(),
             writable: false,
         })
+    }
+
+    fn poll_event_sequence(&self) -> Option<PollEventSequence> {
+        Some(PollEventSequence {
+            readable: self.event.poll_event_sequence(),
+            writable: 0,
+        })
+    }
+
+    fn register_poll(
+        self: Arc<Self>,
+        cx: &mut core::task::Context<'_>,
+        events: axpoll::IoEvents,
+        registrations: &mut alloc::vec::Vec<PollRegistration>,
+    ) -> LinuxResult {
+        #[cfg(target_os = "none")]
+        {
+            if events.contains(axpoll::IoEvents::IN) {
+                let owner = self.clone();
+                let registration = owner.event.read_wait_queue().register_owned_waker(cx.waker());
+                registrations.push(PollRegistration::new(move || {
+                    owner.event.read_wait_queue().unregister_waker(registration);
+                }));
+            }
+            Ok(())
+        }
+        #[cfg(not(target_os = "none"))]
+        {
+            let _ = (cx, events, registrations);
+            Ok(())
+        }
+    }
+
+    fn get_wait_queues<'a>(
+        &'a self,
+        events: i16,
+        wqs: &mut alloc::vec::Vec<&'a axtask::WaitQueue>,
+    ) -> LinuxResult<bool> {
+        #[cfg(target_os = "none")]
+        {
+            if (events & (linux_raw_sys::general::POLLIN as i16)) != 0 {
+                wqs.push(self.event.read_wait_queue());
+                return Ok(true);
+            }
+            Ok(events == 0)
+        }
+        #[cfg(not(target_os = "none"))]
+        {
+            let _ = (events, wqs);
+            Ok(false)
+        }
     }
 
     fn mmap_file_flags(&self) -> Option<axfs::FileFlags> {
