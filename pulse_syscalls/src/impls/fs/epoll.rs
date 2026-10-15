@@ -103,7 +103,8 @@ pub fn sys_epoll_ctl(
         || target_obj.as_any().is::<PidfdObject>()
         || target_obj.as_any().is::<EventFdObject>()
         || target_obj.as_any().is::<SignalFdObject>()
-        || target_obj.as_any().is::<pulse_core::net::Socket>();
+        || target_obj.as_any().is::<pulse_core::net::Socket>()
+        || target_obj.as_any().is::<pulse_core::bpf::PerfEventObject>();
 
     if !is_pollable {
         return -LinuxError::EPERM.code() as isize;

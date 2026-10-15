@@ -173,11 +173,32 @@ pub struct PerfEventHeader {
     pub size: u16,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum PerfRecord {
+    Sample {
+        raw_len: u32,
+        data: alloc::vec::Vec<u8>,
+    },
+    Lost {
+        id: u64,
+        lost: u64,
+    },
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ConsumerErrorCounters {
+    pub corrupt_records: u64,
+    pub out_of_bounds: u64,
+}
+
 pub struct PerfBuffer {
     data_size: usize,
     raw_base: usize,
     total_size: usize,
     lost_count: AtomicU64,
+    total_lost: AtomicU64,
+    consumer_corrupt_records: AtomicU64,
+    consumer_out_of_bounds: AtomicU64,
     lock: spin::Mutex<()>,
     #[cfg(target_os = "none")]
     shared_frame: Option<Arc<axmm::SharedFrame>>,
@@ -193,6 +214,7 @@ impl core::fmt::Debug for PerfBuffer {
             .field("head", &self.data_head())
             .field("tail", &self.data_tail())
             .field("lost", &self.lost_count())
+            .field("total_lost", &self.total_lost())
             .finish()
     }
 }
@@ -216,6 +238,9 @@ impl PerfBuffer {
             raw_base: vaddr,
             total_size: page_count * 4096,
             lost_count: AtomicU64::new(0),
+            total_lost: AtomicU64::new(0),
+            consumer_corrupt_records: AtomicU64::new(0),
+            consumer_out_of_bounds: AtomicU64::new(0),
             lock: spin::Mutex::new(()),
             shared_frame: Some(shared_frame),
         });
@@ -236,6 +261,9 @@ impl PerfBuffer {
             raw_base,
             total_size,
             lost_count: AtomicU64::new(0),
+            total_lost: AtomicU64::new(0),
+            consumer_corrupt_records: AtomicU64::new(0),
+            consumer_out_of_bounds: AtomicU64::new(0),
             lock: spin::Mutex::new(()),
             _host_storage: Some(storage),
         });
@@ -370,6 +398,10 @@ impl PerfBuffer {
     }
 
     pub fn output_sample(&self, data: &[u8]) -> Result<(), LinuxError> {
+        self.output_sample_with_id(0, data)
+    }
+
+    pub fn output_sample_with_id(&self, id: u64, data: &[u8]) -> Result<(), LinuxError> {
         let _guard = self.lock.lock();
         let payload_len = data.len();
         let sample_rec_size = (8 + 4 + payload_len + 7) & !7;
@@ -399,7 +431,7 @@ impl PerfBuffer {
             lost_buf[0..4].copy_from_slice(&lost_header.event_type.to_ne_bytes());
             lost_buf[4..6].copy_from_slice(&lost_header.misc.to_ne_bytes());
             lost_buf[6..8].copy_from_slice(&lost_header.size.to_ne_bytes());
-            lost_buf[8..16].copy_from_slice(&0u64.to_ne_bytes());
+            lost_buf[8..16].copy_from_slice(&id.to_ne_bytes());
             lost_buf[16..24].copy_from_slice(&pending_lost.to_ne_bytes());
 
             let offset = (head % self.data_size as u64) as usize;
@@ -415,8 +447,74 @@ impl PerfBuffer {
             Ok(())
         } else {
             self.lost_count.fetch_add(1, Ordering::Relaxed);
+            self.total_lost.fetch_add(1, Ordering::Relaxed);
             Err(LinuxError::ENOSPC)
         }
+    }
+
+    pub fn total_lost(&self) -> u64 {
+        self.total_lost.load(Ordering::Relaxed)
+    }
+
+    pub fn consumer_error_counters(&self) -> ConsumerErrorCounters {
+        ConsumerErrorCounters {
+            corrupt_records: self.consumer_corrupt_records.load(Ordering::Relaxed),
+            out_of_bounds: self.consumer_out_of_bounds.load(Ordering::Relaxed),
+        }
+    }
+
+    pub fn parse_records(
+        &self,
+    ) -> Result<(alloc::vec::Vec<PerfRecord>, u64), ConsumerErrorCounters> {
+        let head = self.data_head();
+        let mut tail = self.data_tail();
+
+        let used = head.wrapping_sub(tail);
+        if used as usize > self.data_size {
+            self.consumer_out_of_bounds.fetch_add(1, Ordering::Relaxed);
+            return Err(self.consumer_error_counters());
+        }
+
+        let mut records = alloc::vec::Vec::new();
+        let mut lost_count = 0u64;
+
+        while head.wrapping_sub(tail) > 0 {
+            let offset = (tail % self.data_size as u64) as usize;
+            let mut header_bytes = [0u8; 8];
+            self.read_circular(offset, &mut header_bytes);
+            let event_type = u32::from_ne_bytes(header_bytes[0..4].try_into().unwrap());
+            let _misc = u16::from_ne_bytes(header_bytes[4..6].try_into().unwrap());
+            let rec_size = u16::from_ne_bytes(header_bytes[6..8].try_into().unwrap()) as usize;
+
+            if rec_size < 8 || rec_size > self.data_size || (rec_size as u64) > head.wrapping_sub(tail) {
+                self.consumer_corrupt_records.fetch_add(1, Ordering::Relaxed);
+                return Err(self.consumer_error_counters());
+            }
+
+            if event_type == PERF_RECORD_SAMPLE {
+                let mut raw_len_bytes = [0u8; 4];
+                self.read_circular((offset + 8) % self.data_size, &mut raw_len_bytes);
+                let raw_len = u32::from_ne_bytes(raw_len_bytes);
+                let mut data = alloc::vec![0u8; raw_len as usize];
+                self.read_circular((offset + 12) % self.data_size, &mut data);
+                records.push(PerfRecord::Sample { raw_len, data });
+            } else if event_type == PERF_RECORD_LOST {
+                let mut id_bytes = [0u8; 8];
+                self.read_circular((offset + 8) % self.data_size, &mut id_bytes);
+                let id = u64::from_ne_bytes(id_bytes);
+
+                let mut lost_bytes = [0u8; 8];
+                self.read_circular((offset + 16) % self.data_size, &mut lost_bytes);
+                let lost = u64::from_ne_bytes(lost_bytes);
+                lost_count = lost_count.saturating_add(lost);
+                records.push(PerfRecord::Lost { id, lost });
+            }
+
+            tail = tail.wrapping_add(rec_size as u64);
+            self.set_data_tail(tail);
+        }
+
+        Ok((records, lost_count))
     }
 }
 
@@ -438,6 +536,9 @@ pub struct PerfEvent {
     re_entry_drops: AtomicU64,
     helper_failures: AtomicU64,
     budget_failures: AtomicU64,
+    readable_sequence: AtomicU64,
+    #[cfg(target_os = "none")]
+    read_wait_queue: axtask::WaitQueue,
 }
 
 impl PerfEvent {
@@ -460,6 +561,9 @@ impl PerfEvent {
             re_entry_drops: AtomicU64::new(0),
             helper_failures: AtomicU64::new(0),
             budget_failures: AtomicU64::new(0),
+            readable_sequence: AtomicU64::new(0),
+            #[cfg(target_os = "none")]
+            read_wait_queue: axtask::WaitQueue::new(),
         }
     }
 
@@ -803,9 +907,54 @@ impl PerfEvent {
         self.buffer.lock().clone()
     }
 
+    pub fn is_readable(&self) -> bool {
+        if let Some(buf) = self.buffer() {
+            buf.data_head() > buf.data_tail()
+        } else {
+            false
+        }
+    }
+
+    pub fn poll_event_sequence(&self) -> u64 {
+        self.readable_sequence.load(Ordering::Acquire)
+    }
+
+    pub fn notify_readable(&self) {
+        self.readable_sequence.fetch_add(1, Ordering::Release);
+        #[cfg(target_os = "none")]
+        self.read_wait_queue.notify_all(true);
+    }
+
+    #[cfg(target_os = "none")]
+    pub fn read_wait_queue(&self) -> &axtask::WaitQueue {
+        &self.read_wait_queue
+    }
+
     pub fn output_sample(&self, data: &[u8]) -> Result<(), LinuxError> {
         let buf = self.buffer.lock().clone().ok_or(LinuxError::ENOENT)?;
-        buf.output_sample(data)
+        let id = match self.spec.scope {
+            PerfEventScope::PerCpu { cpu } => cpu as u64,
+            PerfEventScope::Task { pid } => pid,
+        };
+        buf.output_sample_with_id(id, data)?;
+        self.delivered_samples.fetch_add(1, Ordering::Relaxed);
+        self.notify_readable();
+        Ok(())
+    }
+
+    pub fn cpu(&self) -> Option<usize> {
+        match self.spec.scope {
+            PerfEventScope::PerCpu { cpu } => Some(cpu),
+            _ => None,
+        }
+    }
+
+    pub fn total_lost(&self) -> u64 {
+        self.buffer().map(|b| b.total_lost()).unwrap_or(0)
+    }
+
+    pub fn lost_count(&self) -> u64 {
+        self.buffer().map(|b| b.lost_count()).unwrap_or(0)
     }
 }
 
@@ -821,6 +970,8 @@ impl PerfEventOutputSink for PerfEvent {
 
 impl Drop for PerfEvent {
     fn drop(&mut self) {
+        #[cfg(target_os = "none")]
+        self.read_wait_queue.notify_all(true);
         if self.state.lock().attached_prog.is_some() {
             if let PerfEventClock::Tracepoint(tp_id) = self.spec.clock {
                 unregister_tracepoint_probe(tp_id);
