@@ -1,0 +1,16 @@
+[package]
+name = "bpf-analyzer"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Independent host capture analyzer for PulseOS BPF captures"
+
+[dependencies]
+bpf-capture = { workspace = true }
+pulse_bpf_schema = { workspace = true }
+
+[[bin]]
+name = "bpf-analyzer"
+path = "src/main.rs"
