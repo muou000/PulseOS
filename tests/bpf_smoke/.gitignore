@@ -1,0 +1,6 @@
+!schema_registry.bin
+!fixture_capture.bin
+/build/
+/runs/
+/__pycache__/
+*.pyc
