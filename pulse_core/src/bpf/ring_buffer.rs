@@ -206,40 +206,33 @@ impl BpfRingBuf {
         self.read_wait_queue.notify_all(true);
     }
 
+    fn split_circular_ranges(&self, offset: usize, len: usize) -> ((usize, usize), Option<(usize, usize)>) {
+        let space_to_end = self.data_size - offset;
+        if len <= space_to_end {
+            ((offset, len), None)
+        } else {
+            ((offset, space_to_end), Some((0, len - space_to_end)))
+        }
+    }
+
     fn write_circular(&self, offset_in_data: usize, bytes: &[u8]) {
         let data_start = (self.raw_base + BPF_RINGBUF_DATA_OFFSET) as *mut u8;
-        let space_to_end = self.data_size - offset_in_data;
-        if bytes.len() <= space_to_end {
-            unsafe {
-                core::ptr::copy_nonoverlapping(bytes.as_ptr(), data_start.add(offset_in_data), bytes.len());
-            }
-        } else {
-            unsafe {
-                core::ptr::copy_nonoverlapping(bytes.as_ptr(), data_start.add(offset_in_data), space_to_end);
-                core::ptr::copy_nonoverlapping(
-                    bytes.as_ptr().add(space_to_end),
-                    data_start,
-                    bytes.len() - space_to_end,
-                );
+        let ((off1, len1), second) = self.split_circular_ranges(offset_in_data, bytes.len());
+        unsafe {
+            core::ptr::copy_nonoverlapping(bytes.as_ptr(), data_start.add(off1), len1);
+            if let Some((off2, len2)) = second {
+                core::ptr::copy_nonoverlapping(bytes.as_ptr().add(len1), data_start.add(off2), len2);
             }
         }
     }
 
     pub fn read_circular(&self, offset_in_data: usize, buf: &mut [u8]) {
         let data_start = (self.raw_base + BPF_RINGBUF_DATA_OFFSET) as *const u8;
-        let space_to_end = self.data_size - offset_in_data;
-        if buf.len() <= space_to_end {
-            unsafe {
-                core::ptr::copy_nonoverlapping(data_start.add(offset_in_data), buf.as_mut_ptr(), buf.len());
-            }
-        } else {
-            unsafe {
-                core::ptr::copy_nonoverlapping(data_start.add(offset_in_data), buf.as_mut_ptr(), space_to_end);
-                core::ptr::copy_nonoverlapping(
-                    data_start,
-                    buf.as_mut_ptr().add(space_to_end),
-                    buf.len() - space_to_end,
-                );
+        let ((off1, len1), second) = self.split_circular_ranges(offset_in_data, buf.len());
+        unsafe {
+            core::ptr::copy_nonoverlapping(data_start.add(off1), buf.as_mut_ptr(), len1);
+            if let Some((off2, len2)) = second {
+                core::ptr::copy_nonoverlapping(data_start.add(off2), buf.as_mut_ptr().add(len1), len2);
             }
         }
     }
@@ -372,3 +365,4 @@ impl Drop for BpfRingBuf {
         self.read_wait_queue.notify_all(true);
     }
 }
+

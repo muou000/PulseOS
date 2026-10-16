@@ -108,7 +108,7 @@ pub fn sys_epoll_ctl(
         || target_obj
             .as_any()
             .downcast_ref::<pulse_core::bpf::BpfMapObject>()
-            .is_some_and(|m| m.map().spec().map_type() == pulse_core::bpf::BpfMapType::RingBuf);
+            .is_some_and(|m| m.is_ringbuf());
 
     if !is_pollable {
         return -LinuxError::EPERM.code() as isize;

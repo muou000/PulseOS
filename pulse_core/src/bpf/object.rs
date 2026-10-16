@@ -32,6 +32,10 @@ impl BpfMapObject {
     pub fn info(&self) -> super::BpfMapInfo {
         self.map.info()
     }
+
+    pub fn is_ringbuf(&self) -> bool {
+        self.ringbuf.is_some()
+    }
 }
 
 impl FdObject for BpfMapObject {

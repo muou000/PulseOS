@@ -273,21 +273,26 @@ mod tests {
         assert!(rb.is_readable());
         assert_eq!(rb.poll_event_sequence(), 1);
 
-        // 4. Edge-triggered (EPOLLET) readiness scan #1
+        // 4. Edge-triggered (EPOLLET) readiness scan helper
         let mut reported_in = false;
         let mut reported_in_seq: Option<u64> = None;
-        let seq = rb.poll_event_sequence();
-        let ready = rb.is_readable();
-        let mut revents = 0u32;
-        if ready {
-            let seq_changed = reported_in_seq != Some(seq);
-            if !reported_in || seq_changed {
-                revents |= 0x1; // EPOLLIN
-                reported_in = true;
-                reported_in_seq = Some(seq);
+        let mut scan_epollet = |reported_in: &mut bool, reported_in_seq: &mut Option<u64>| -> u32 {
+            let seq = rb.poll_event_sequence();
+            let ready = rb.is_readable();
+            let mut revents = 0u32;
+            if ready {
+                let seq_changed = *reported_in_seq != Some(seq);
+                if !*reported_in || seq_changed {
+                    revents |= 0x1; // EPOLLIN
+                    *reported_in = true;
+                    *reported_in_seq = Some(seq);
+                }
             }
-        }
-        assert_eq!(revents, 0x1, "first scan must report EPOLLIN");
+            revents
+        };
+
+        let revents1 = scan_epollet(&mut reported_in, &mut reported_in_seq);
+        assert_eq!(revents1, 0x1, "first scan must report EPOLLIN");
         assert_eq!(reported_in_seq, Some(1));
 
         // Write record #2 with BPF_RB_NO_WAKEUP (when buffer already non-empty)
@@ -297,16 +302,7 @@ mod tests {
         assert_eq!(rb.poll_event_sequence(), 1);
 
         // Second EPOLLET scan: still readable, but sequence did not change -> no event reported
-        let mut revents2 = 0u32;
-        let seq2 = rb.poll_event_sequence();
-        let ready2 = rb.is_readable();
-        if ready2 {
-            let seq_changed = reported_in_seq != Some(seq2);
-            if !reported_in || seq_changed {
-                revents2 |= 0x1;
-                reported_in_seq = Some(seq2);
-            }
-        }
+        let revents2 = scan_epollet(&mut reported_in, &mut reported_in_seq);
         assert_eq!(revents2, 0, "EPOLLET must suppress reporting when sequence did not advance");
 
         // Write record #3 with BPF_RB_FORCE_WAKEUP: must unconditionally advance sequence
@@ -315,16 +311,7 @@ mod tests {
         assert_eq!(rb.poll_event_sequence(), 2);
 
         // Third EPOLLET scan: sequence advanced -> reports EPOLLIN
-        let mut revents3 = 0u32;
-        let seq3 = rb.poll_event_sequence();
-        let ready3 = rb.is_readable();
-        if ready3 {
-            let seq_changed = reported_in_seq != Some(seq3);
-            if !reported_in || seq_changed {
-                revents3 |= 0x1;
-                reported_in_seq = Some(seq3);
-            }
-        }
+        let revents3 = scan_epollet(&mut reported_in, &mut reported_in_seq);
         assert_eq!(revents3, 0x1, "EPOLLET must fire on sequence change from FORCE_WAKEUP");
         assert_eq!(reported_in_seq, Some(2));
 
