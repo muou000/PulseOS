@@ -13,6 +13,7 @@ pub mod perf_event;
 pub mod program;
 pub mod interpreter;
 pub mod verifier;
+pub mod ring_buffer;
 
 pub use insn::*;
 pub use interpreter::{execute, BpfEnv, BpfVmError, DefaultBpfEnv, BPF_MAX_RECURSION_DEPTH, BPF_MAX_STEPS};
@@ -21,5 +22,6 @@ pub use map::*;
 pub use object::{BpfLinkObject, BpfMapObject, BpfProgramObject, PerfEventObject};
 pub use perf_event::*;
 pub use program::*;
+pub use ring_buffer::*;
 
 

@@ -16,11 +16,13 @@ use crate::fd_table::{FdObject, PollEventSequence, PollRegistration};
 /// `ENOTTY`, and `mmap` fails because the object has no file location.
 pub struct BpfMapObject {
     map: Arc<BpfMap>,
+    ringbuf: Option<Arc<super::BpfRingBuf>>,
 }
 
 impl BpfMapObject {
     pub fn new(map: Arc<BpfMap>) -> Self {
-        Self { map }
+        let ringbuf = map.ringbuf();
+        Self { map, ringbuf }
     }
 
     pub fn map(&self) -> &Arc<BpfMap> {
@@ -29,6 +31,10 @@ impl BpfMapObject {
 
     pub fn info(&self) -> super::BpfMapInfo {
         self.map.info()
+    }
+
+    pub fn is_ringbuf(&self) -> bool {
+        self.ringbuf.is_some()
     }
 }
 
@@ -60,12 +66,115 @@ impl FdObject for BpfMapObject {
     }
 
     fn poll(&self) -> LinuxResult<PollState> {
-        Err(LinuxError::EOPNOTSUPP)
+        if let Some(rb) = &self.ringbuf {
+            Ok(PollState {
+                readable: rb.is_readable(),
+                writable: false,
+            })
+        } else {
+            Err(LinuxError::EOPNOTSUPP)
+        }
     }
 
-    /// Memory mapping is explicitly unsupported for BPF Maps in this slice.
+    fn poll_event_sequence(&self) -> Option<PollEventSequence> {
+        let rb = self.ringbuf.as_ref()?;
+        Some(PollEventSequence {
+            readable: rb.poll_event_sequence(),
+            writable: 0,
+        })
+    }
+
+    fn register_poll(
+        self: Arc<Self>,
+        cx: &mut core::task::Context<'_>,
+        events: axpoll::IoEvents,
+        registrations: &mut alloc::vec::Vec<PollRegistration>,
+    ) -> LinuxResult {
+        if let Some(rb) = &self.ringbuf {
+            #[cfg(target_os = "none")]
+            {
+                if events.contains(axpoll::IoEvents::IN) {
+                    let owner = self.clone();
+                    let registration = rb.read_wait_queue().register_owned_waker(cx.waker());
+                    registrations.push(PollRegistration::new(move || {
+                        if let Some(rb) = &owner.ringbuf {
+                            rb.read_wait_queue().unregister_waker(registration);
+                        }
+                    }));
+                }
+                Ok(())
+            }
+            #[cfg(not(target_os = "none"))]
+            {
+                let _ = (cx, events, registrations);
+                Ok(())
+            }
+        } else {
+            Err(LinuxError::EOPNOTSUPP)
+        }
+    }
+
+    fn get_wait_queues<'a>(
+        &'a self,
+        events: i16,
+        wqs: &mut alloc::vec::Vec<&'a axtask::WaitQueue>,
+    ) -> LinuxResult<bool> {
+        if let Some(rb) = &self.ringbuf {
+            #[cfg(target_os = "none")]
+            {
+                if (events & (linux_raw_sys::general::POLLIN as i16)) != 0 {
+                    wqs.push(rb.read_wait_queue());
+                    return Ok(true);
+                }
+                Ok(events == 0)
+            }
+            #[cfg(not(target_os = "none"))]
+            {
+                let _ = (events, wqs);
+                Ok(false)
+            }
+        } else {
+            Err(LinuxError::EOPNOTSUPP)
+        }
+    }
+
     fn mmap_file_flags(&self) -> Option<axfs::FileFlags> {
-        None
+        if self.ringbuf.is_some() {
+            Some(axfs::FileFlags::READ | axfs::FileFlags::WRITE)
+        } else {
+            None
+        }
+    }
+
+    fn mmap_prepared(
+        &self,
+        size: usize,
+        flags: axhal::paging::MappingFlags,
+        offset: usize,
+        is_shared: bool,
+    ) -> Option<LinuxResult<axmm::PreparedMapping>> {
+        let rb = self.ringbuf.as_ref()?;
+
+        if !is_shared || offset != 0 {
+            return Some(Err(LinuxError::EINVAL));
+        }
+        if size == 0 || size > rb.total_size() || size % 4096 != 0 {
+            return Some(Err(LinuxError::EINVAL));
+        }
+
+        #[cfg(target_os = "none")]
+        {
+            let Some(shared_frame) = rb.shared_frame() else {
+                return Some(Err(LinuxError::ENOMEM));
+            };
+            Some(axmm::PreparedMapping::shared_frame(size, flags, shared_frame).map_err(LinuxError::from))
+        }
+
+        #[cfg(not(target_os = "none"))]
+        {
+            let _ = (flags, size);
+            Some(Err(LinuxError::EOPNOTSUPP))
+        }
     }
 }
 

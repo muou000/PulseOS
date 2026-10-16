@@ -86,6 +86,14 @@ pub const BPF_FUNC_MAP_DELETE_ELEM: i32 = 3;
 pub const BPF_FUNC_KTIME_GET_NS: i32 = 5;
 pub const BPF_FUNC_GET_SMP_PROCESSOR_ID: i32 = 8;
 pub const BPF_FUNC_PERF_EVENT_OUTPUT: i32 = 25;
+pub const BPF_FUNC_RINGBUF_OUTPUT: i32 = 130;
+pub const BPF_FUNC_RINGBUF_RESERVE: i32 = 131;
+pub const BPF_FUNC_RINGBUF_SUBMIT: i32 = 132;
+pub const BPF_FUNC_RINGBUF_DISCARD: i32 = 133;
+pub const BPF_FUNC_RINGBUF_QUERY: i32 = 134;
+
+pub const BPF_RB_NO_WAKEUP: u64 = 1 << 0;
+pub const BPF_RB_FORCE_WAKEUP: u64 = 1 << 1;
 
 pub const BPF_F_INDEX_MASK: u64 = 0xffff_ffff;
 pub const BPF_F_CURRENT_CPU: u64 = BPF_F_INDEX_MASK;
