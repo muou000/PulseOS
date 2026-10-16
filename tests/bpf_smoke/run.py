@@ -922,19 +922,52 @@ def compare_dual_arch_attribution(rv_arch: dict, la_arch: dict) -> dict:
     la_cap = la_arch.get("capture", {})
     rv_loss = rv_arch.get("loss_counters", {})
     la_loss = la_arch.get("loss_counters", {})
+    rv_states = rv_arch.get("states", {})
+    la_states = la_arch.get("states", {})
+    rv_ana = rv_arch.get("analyzer_outputs", {})
+    la_ana = la_arch.get("analyzer_outputs", {})
 
-    rv_complete = bool(rv_cap.get("integrity_passed", False) and rv_cap.get("trailer_complete", False))
-    la_complete = bool(la_cap.get("integrity_passed", False) and la_cap.get("trailer_complete", False))
+    rv_complete = bool(rv_arch and rv_cap.get("integrity_passed", False) and rv_cap.get("trailer_complete", False))
+    la_complete = bool(la_arch and la_cap.get("integrity_passed", False) and la_cap.get("trailer_complete", False))
     both_complete = rv_complete and la_complete
 
-    rv_zero_loss = all(rv_loss.get(k, 0) == 0 for k in LAYERED_LOSS_KEYS)
-    la_zero_loss = all(la_loss.get(k, 0) == 0 for k in LAYERED_LOSS_KEYS)
+    rv_zero_loss = bool(rv_arch) and all(rv_loss.get(k, 0) == 0 for k in LAYERED_LOSS_KEYS)
+    la_zero_loss = bool(la_arch) and all(la_loss.get(k, 0) == 0 for k in LAYERED_LOSS_KEYS)
     zero_loss_both = rv_zero_loss and la_zero_loss
 
-    rv_ltp_ok = rv_arch.get("ltp_gate", {}).get("fail", 0) == 0
-    la_ltp_ok = la_arch.get("ltp_gate", {}).get("fail", 0) == 0
+    rv_ltp_ok = rv_arch.get("ltp_gate", {}).get("fail", 0) == 0 and rv_arch.get("ltp_gate", {}).get("total", 0) > 0
+    la_ltp_ok = la_arch.get("ltp_gate", {}).get("fail", 0) == 0 and la_arch.get("ltp_gate", {}).get("total", 0) > 0
 
-    attribution_consistent = both_complete and zero_loss_both and rv_ltp_ok and la_ltp_ok
+    def _extract_mechanisms(ana_out: dict) -> dict[str, bool]:
+        if not ana_out:
+            return {
+                "task_metadata": False,
+                "sched_switch": False,
+                "task_block": False,
+                "task_wake": False,
+                "perf_sample": False,
+            }
+        table = ana_out.get("event_table", "")
+        oncpu = ana_out.get("oncpu_folded", "")
+        offcpu = ana_out.get("offcpu_folded", "")
+        return {
+            "task_metadata": bool("guest_sampler" in table or "sampler" in table or "guest_sampler" in oncpu),
+            "sched_switch": bool("sched_switch" in table or "sched_switch" in oncpu or "sched_switch" in offcpu),
+            "task_block": bool("task_block" in table or "task_block" in offcpu or "wait_reason" in offcpu),
+            "task_wake": bool("task_wake" in table or "task_wake" in offcpu),
+            "perf_sample": bool("perf_sample" in table or "guest_sampler" in oncpu or "sampler" in oncpu),
+        }
+
+    rv_mech = _extract_mechanisms(rv_ana)
+    la_mech = _extract_mechanisms(la_ana)
+    mech_cross_check_passed = bool(rv_arch and la_arch) and all(rv_mech.values()) and all(la_mech.values())
+
+    attribution_consistent = both_complete and zero_loss_both and rv_ltp_ok and la_ltp_ok and mech_cross_check_passed
+
+    rv_att = rv_states.get("attached_capture", {})
+    la_att = la_states.get("attached_capture", {})
+    rv_base = rv_states.get("baseline", {})
+    la_base = la_states.get("baseline", {})
 
     return {
         "comparison_mode": "mechanism_level_cross_check",
@@ -942,14 +975,33 @@ def compare_dual_arch_attribution(rv_arch: dict, la_arch: dict) -> dict:
         "both_complete": both_complete,
         "zero_loss_both": zero_loss_both,
         "attribution_consistent": attribution_consistent,
+        "mechanism_cross_check": {
+            "riscv64": rv_mech,
+            "loongarch64": la_mech,
+            "passed": mech_cross_check_passed,
+        },
+        "timing_and_throughput": {
+            "riscv64": {
+                "baseline_wall_time_ns": rv_base.get("wall_time_ns", 0),
+                "attached_capture_wall_time_ns": rv_att.get("wall_time_ns", 0),
+                "sample_throughput_per_sec": rv_att.get("sample_throughput_per_sec", 0.0),
+                "event_throughput_per_sec": rv_att.get("event_throughput_per_sec", 0.0),
+            },
+            "loongarch64": {
+                "baseline_wall_time_ns": la_base.get("wall_time_ns", 0),
+                "attached_capture_wall_time_ns": la_att.get("wall_time_ns", 0),
+                "sample_throughput_per_sec": la_att.get("sample_throughput_per_sec", 0.0),
+                "event_throughput_per_sec": la_att.get("event_throughput_per_sec", 0.0),
+            },
+        },
         "riscv64": {
-            "wall_time_ns": rv_arch.get("states", {}).get("attached_capture", {}).get("wall_time_ns", 0),
-            "memory_bytes": rv_arch.get("states", {}).get("attached_capture", {}).get("memory_bytes", 0),
+            "wall_time_ns": rv_att.get("wall_time_ns", 0),
+            "memory_bytes": rv_att.get("memory_bytes", 0),
             "loss_counters": rv_loss,
         },
         "loongarch64": {
-            "wall_time_ns": la_arch.get("states", {}).get("attached_capture", {}).get("wall_time_ns", 0),
-            "memory_bytes": la_arch.get("states", {}).get("attached_capture", {}).get("memory_bytes", 0),
+            "wall_time_ns": la_att.get("wall_time_ns", 0),
+            "memory_bytes": la_att.get("memory_bytes", 0),
             "loss_counters": la_loss,
         },
     }
@@ -1129,11 +1181,17 @@ def _sample_arch_evidence(arch: str) -> dict:
             **{k: 0 for k in LAYERED_LOSS_KEYS},
         },
         "analyzer_outputs": {
-            "loss_report": "Status: Complete\nLost Records: 0\nINTEGRITY CHECK PASSED",
-            "event_table": "TIMESTAMP (ns) CPU PID TID TASK_ID COMM EVENT DETAILS\n1000100000 0 1 1 1 sampler sched_switch prev=1 next=2",
+            "loss_report": "Status: Complete\nLost Records: 0\nINTEGRITY CHECK PASSED\nAttribution Claim: Allowed",
+            "event_table": (
+                "TIMESTAMP (ns) CPU PID TID TASK_ID COMM EVENT DETAILS\n"
+                "1000100000 0 1 1 1 guest_sampler sched_switch prev=1 next=2\n"
+                "1000200000 0 1 1 1 guest_sampler task_block wait_reason=1 res=42\n"
+                "1000300000 0 1 1 1 guest_sampler task_wake target=1 res=42\n"
+                "1000400000 0 1 1 1 guest_sampler perf_sample ip=0x1000 period=100000"
+            ),
             "json_summary": '{"is_complete": true, "status": "Complete", "attribution_claim_allowed": true}',
-            "oncpu_folded": "sampler;pc:0x400000 1\n",
-            "offcpu_folded": "sampler;wait_reason_1;res_42 100000\n",
+            "oncpu_folded": "guest_sampler;main 1\n",
+            "offcpu_folded": "guest_sampler;wait_reason_1;res_42 100000\n",
             "files": {
                 "inputs_json": f"runs/{arch}/inputs.json",
                 "guest_log": f"runs/{arch}/guest.log",
@@ -1191,11 +1249,10 @@ def sample_valid_parity_manifest() -> dict:
             "riscv64": _sample_arch_evidence("riscv64"),
             "loongarch64": _sample_arch_evidence("loongarch64"),
         },
-        "dual_arch_comparison": {
-            "both_complete": True,
-            "zero_loss_both": True,
-            "attribution_consistent": True,
-        },
+        "dual_arch_comparison": compare_dual_arch_attribution(
+            _sample_arch_evidence("riscv64"),
+            _sample_arch_evidence("loongarch64"),
+        ),
     }
     manifest["parity_status"] = classify_parity_status(manifest)
     return manifest
@@ -1259,13 +1316,6 @@ def parity(args: argparse.Namespace) -> int:
     if not out_dir:
         out_dir = Path(tempfile.mkdtemp(prefix="bpf-parity-", dir=scoped(BASE / "runs")))
 
-    if getattr(args, "sample_manifest", False):
-        manifest = sample_valid_parity_manifest()
-        manifest_path, report_path = write_parity_package(manifest, out_dir)
-        print(f"Generated sample parity package at {out_dir}:")
-        print(report_path.read_text())
-        return 0
-
     arches = [args.arch] if getattr(args, "arch", None) else ["riscv64", "loongarch64"]
     manifest_arch_data: dict[str, dict] = {}
     overall_errors: list[str] = []
@@ -1324,10 +1374,28 @@ def parity(args: argparse.Namespace) -> int:
         log_text = (run_dir / "guest.log").read_text() if (run_dir / "guest.log").is_file() else ""
         states = parse_state_metrics(log_text)
         if len(states) < len(PARITY_STATES):
-            states = _sample_arch_evidence(arch)["states"]
-        overhead = compute_state_overhead(states)
+            overall_errors.append(f"{arch}: missing one or more required run states (found {list(states.keys())})")
+            overhead = {
+                "loaded_detached_vs_baseline_ns": 0,
+                "attached_capture_vs_baseline_ns": 0,
+                "loaded_detached_ratio": 1.0,
+                "attached_capture_ratio": 1.0,
+                "memory_delta_loaded_detached_bytes": 0,
+                "memory_delta_attached_capture_bytes": 0,
+            }
+        else:
+            overhead = compute_state_overhead(states)
 
         capture_path = run_dir / "capture.bin"
+        cap_bytes = capture_path.stat().st_size if capture_path.is_file() else 0
+        header_valid = False
+        trailer_complete = False
+        if cap_bytes >= 40:
+            with open(capture_path, "rb") as cf:
+                raw_cap = cf.read()
+            header_valid = raw_cap.startswith(b"BPFCAP1\0")
+            trailer_complete = b"BPFTRL1\0" in raw_cap
+
         analyzer_bin = REPO / "target" / "release" / "bpf-analyzer"
         cmd_base = [str(analyzer_bin)] if analyzer_bin.is_file() else ["cargo", "run", "--quiet", "-p", "bpf-analyzer", "--"]
 
@@ -1346,7 +1414,21 @@ def parity(args: argparse.Namespace) -> int:
         (run_dir / "table.txt").write_text(table_out)
         (run_dir / "summary.json").write_text(json_out)
 
-        loss_counters = parse_analyzer_loss_counters(loss_out)
+        parsed_json = {}
+        try:
+            parsed_json = json.loads(json_out)
+        except Exception:
+            pass
+
+        schema_valid = bool(parsed_json.get("records_count", 0) > 0 and parsed_json.get("arch") == arch)
+        trailer_complete = bool(trailer_complete and (parsed_json.get("status") == "Complete" or "INTEGRITY CHECK PASSED" in loss_out))
+        integrity_passed = bool("INTEGRITY CHECK PASSED" in loss_out and parsed_json.get("is_complete", False))
+        checksum_valid = bool(header_valid and trailer_complete and integrity_passed)
+        attribution_claim_allowed = bool(parsed_json.get("attribution_claim_allowed", False) or "Attribution Claim: Allowed" in loss_out)
+
+        loss_counters = parsed_json.get("loss_counters", {})
+        if not loss_counters:
+            loss_counters = parse_analyzer_loss_counters(loss_out)
 
         manifest_arch_data[arch] = {
             "arch": arch,
@@ -1361,17 +1443,15 @@ def parity(args: argparse.Namespace) -> int:
             "capture": {
                 "path": str(capture_path),
                 "sha256": run_result.get("capture_sha256", ""),
-                "bytes": run_result.get("capture_bytes", 0),
-                "header_valid": True,
-                "schema_valid": True,
-                "trailer_complete": True,
-                "checksum_valid": True,
-                "integrity_passed": "INTEGRITY CHECK PASSED" in loss_out,
-                "attribution_claim_allowed": "Attribution Claim: Allowed" in loss_out,
+                "bytes": cap_bytes,
+                "header_valid": header_valid,
+                "schema_valid": schema_valid,
+                "trailer_complete": trailer_complete,
+                "checksum_valid": checksum_valid,
+                "integrity_passed": integrity_passed,
+                "attribution_claim_allowed": attribution_claim_allowed,
             },
             "loss_counters": {
-                "attempted": 5,
-                "delivered": 5,
                 **loss_counters,
             },
             "analyzer_outputs": {
@@ -1400,8 +1480,8 @@ def parity(args: argparse.Namespace) -> int:
             },
         }
 
-    rv_data = manifest_arch_data.get("riscv64", _sample_arch_evidence("riscv64"))
-    la_data = manifest_arch_data.get("loongarch64", _sample_arch_evidence("loongarch64"))
+    rv_data = manifest_arch_data.get("riscv64", {})
+    la_data = manifest_arch_data.get("loongarch64", {})
     dual_comp = compare_dual_arch_attribution(rv_data, la_data)
 
     manifest = {
@@ -1525,7 +1605,6 @@ def build_parser() -> argparse.ArgumentParser:
     p_parity.add_argument("--ready-regex", default=r"(?:^|[\r\n])[^\r\n]*[#$] ?$")
     p_parity.add_argument("--boot-timeout", type=float, default=60)
     p_parity.add_argument("--timeout", type=float, default=90)
-    p_parity.add_argument("--sample-manifest", action="store_true", help="Generate sample manifest without guest execution")
 
     return parser
 

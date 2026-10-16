@@ -547,16 +547,18 @@ fn now_monotonic_ns() -> u64 {
             return ns;
         }
     }
-    static mut PSEUDO_TICK: u64 = 1_000_000_000;
+    // Fallback if clock_gettime syscall is not available or returns 0
+    static mut FALLBACK_MONOTONIC_STEP_NS: u64 = 1_000_000_000;
     unsafe {
-        PSEUDO_TICK = PSEUDO_TICK.saturating_add(10_000);
-        PSEUDO_TICK
+        FALLBACK_MONOTONIC_STEP_NS = FALLBACK_MONOTONIC_STEP_NS.saturating_add(10_000);
+        FALLBACK_MONOTONIC_STEP_NS
     }
 }
 
-fn run_baseline_workload() -> u64 {
+#[inline(never)]
+fn execute_yield_workload(iters: usize) -> u64 {
     let t0 = now_monotonic_ns();
-    for _ in 0..WORKLOAD_ITERS {
+    for _ in 0..iters {
         syscall(SYS_SCHED_YIELD, 0, 0, 0, 0, 0, 0);
     }
     let t1 = now_monotonic_ns();
@@ -564,50 +566,53 @@ fn run_baseline_workload() -> u64 {
     if elapsed > 0 { elapsed } else { 1_000_000 }
 }
 
-fn run_loaded_detached_workload() -> u64 {
-    let mut counters_attr = BpfMapCreateAttr::default();
-    counters_attr.map_type = BPF_MAP_TYPE_ARRAY;
-    counters_attr.key_size = 4;
-    counters_attr.value_size = 8;
-    counters_attr.max_entries = 16;
-    let counters_fd = syscall(
+fn create_test_array_map(max_entries: u32) -> isize {
+    let mut attr = BpfMapCreateAttr::default();
+    attr.map_type = BPF_MAP_TYPE_ARRAY;
+    attr.key_size = 4;
+    attr.value_size = 8;
+    attr.max_entries = max_entries;
+    syscall(
         SYS_BPF,
         BPF_MAP_CREATE as usize,
-        &counters_attr as *const _ as usize,
+        &attr as *const _ as usize,
         core::mem::size_of::<BpfMapCreateAttr>(),
         0, 0, 0,
-    );
-    check!(counters_fd >= 0, "failed to create detached counters map");
+    )
+}
 
-    let mut events_attr = BpfMapCreateAttr::default();
-    events_attr.map_type = BPF_MAP_TYPE_PERF_EVENT_ARRAY;
-    events_attr.key_size = 4;
-    events_attr.value_size = 4;
-    events_attr.max_entries = 64;
-    let events_fd = syscall(
+fn create_test_perf_event_array_map(max_entries: u32) -> isize {
+    let mut attr = BpfMapCreateAttr::default();
+    attr.map_type = BPF_MAP_TYPE_PERF_EVENT_ARRAY;
+    attr.key_size = 4;
+    attr.value_size = 4;
+    attr.max_entries = max_entries;
+    syscall(
         SYS_BPF,
         BPF_MAP_CREATE as usize,
-        &events_attr as *const _ as usize,
+        &attr as *const _ as usize,
         core::mem::size_of::<BpfMapCreateAttr>(),
         0, 0, 0,
-    );
-    check!(events_fd >= 0, "failed to create detached events map");
+    )
+}
 
+fn load_sched_tracepoint_prog(counters_fd: isize) -> isize {
     let mut sched_insns = SCHED_SWITCH_INSNS_TEMPLATE;
     sched_insns[4] = 0x0000000000001118 | ((counters_fd as u64) << 32);
     let mut sched_prog_attr = BpfProgLoadAttr::default();
     sched_prog_attr.prog_type = BPF_PROG_TYPE_TRACEPOINT;
     sched_prog_attr.insn_cnt = sched_insns.len() as u32;
     sched_prog_attr.insns = sched_insns.as_ptr() as u64;
-    let sched_prog_fd = syscall(
+    syscall(
         SYS_BPF,
         BPF_PROG_LOAD as usize,
         &sched_prog_attr as *const _ as usize,
         core::mem::size_of::<BpfProgLoadAttr>(),
         0, 0, 0,
-    );
-    check!(sched_prog_fd >= 0, "failed to load detached sched prog");
+    )
+}
 
+fn load_perf_event_prog(counters_fd: isize, events_fd: isize) -> isize {
     let mut perf_insns = PERF_EVENT_INSNS_TEMPLATE;
     perf_insns[5] = 0x0000000000001118 | ((counters_fd as u64) << 32);
     perf_insns[22] = 0x0000000000001218 | ((events_fd as u64) << 32);
@@ -615,21 +620,33 @@ fn run_loaded_detached_workload() -> u64 {
     perf_prog_attr.prog_type = BPF_PROG_TYPE_PERF_EVENT;
     perf_prog_attr.insn_cnt = perf_insns.len() as u32;
     perf_prog_attr.insns = perf_insns.as_ptr() as u64;
-    let perf_prog_fd = syscall(
+    syscall(
         SYS_BPF,
         BPF_PROG_LOAD as usize,
         &perf_prog_attr as *const _ as usize,
         core::mem::size_of::<BpfProgLoadAttr>(),
         0, 0, 0,
-    );
+    )
+}
+
+fn run_baseline_workload() -> u64 {
+    execute_yield_workload(WORKLOAD_ITERS)
+}
+
+fn run_loaded_detached_workload() -> u64 {
+    let counters_fd = create_test_array_map(16);
+    check!(counters_fd >= 0, "failed to create detached counters map");
+
+    let events_fd = create_test_perf_event_array_map(64);
+    check!(events_fd >= 0, "failed to create detached events map");
+
+    let sched_prog_fd = load_sched_tracepoint_prog(counters_fd);
+    check!(sched_prog_fd >= 0, "failed to load detached sched prog");
+
+    let perf_prog_fd = load_perf_event_prog(counters_fd, events_fd);
     check!(perf_prog_fd >= 0, "failed to load detached perf prog");
 
-    let t0 = now_monotonic_ns();
-    for _ in 0..WORKLOAD_ITERS {
-        syscall(SYS_SCHED_YIELD, 0, 0, 0, 0, 0, 0);
-    }
-    let t1 = now_monotonic_ns();
-    let elapsed = t1.saturating_sub(t0);
+    let elapsed = execute_yield_workload(WORKLOAD_ITERS);
 
     syscall(SYS_CLOSE, perf_prog_fd as usize, 0, 0, 0, 0, 0);
     syscall(SYS_CLOSE, sched_prog_fd as usize, 0, 0, 0, 0, 0);
@@ -1181,66 +1198,17 @@ pub extern "C" fn guest_main() -> ! {
     check!(fixture_sha == expected_sha, "fixture ELF SHA-256 integrity verification failed");
 
     // 2. Create BPF maps
-    let mut counters_attr = BpfMapCreateAttr::default();
-    counters_attr.map_type = BPF_MAP_TYPE_ARRAY;
-    counters_attr.key_size = 4;
-    counters_attr.value_size = 8;
-    counters_attr.max_entries = 16;
-    let counters_fd = syscall(
-        SYS_BPF,
-        BPF_MAP_CREATE as usize,
-        &counters_attr as *const _ as usize,
-        core::mem::size_of::<BpfMapCreateAttr>(),
-        0, 0, 0,
-    );
+    let counters_fd = create_test_array_map(16);
     check!(counters_fd >= 0, "failed to create counters map");
 
-    let mut events_attr = BpfMapCreateAttr::default();
-    events_attr.map_type = BPF_MAP_TYPE_PERF_EVENT_ARRAY;
-    events_attr.key_size = 4;
-    events_attr.value_size = 4;
-    events_attr.max_entries = 64;
-    let events_fd = syscall(
-        SYS_BPF,
-        BPF_MAP_CREATE as usize,
-        &events_attr as *const _ as usize,
-        core::mem::size_of::<BpfMapCreateAttr>(),
-        0, 0, 0,
-    );
+    let events_fd = create_test_perf_event_array_map(64);
     check!(events_fd >= 0, "failed to create events map");
 
     // 3. Relocate programs and load into kernel
-    let mut sched_insns = SCHED_SWITCH_INSNS_TEMPLATE;
-    sched_insns[4] = 0x0000000000001118 | ((counters_fd as u64) << 32);
-
-    let mut sched_prog_attr = BpfProgLoadAttr::default();
-    sched_prog_attr.prog_type = BPF_PROG_TYPE_TRACEPOINT;
-    sched_prog_attr.insn_cnt = sched_insns.len() as u32;
-    sched_prog_attr.insns = sched_insns.as_ptr() as u64;
-    let sched_prog_fd = syscall(
-        SYS_BPF,
-        BPF_PROG_LOAD as usize,
-        &sched_prog_attr as *const _ as usize,
-        core::mem::size_of::<BpfProgLoadAttr>(),
-        0, 0, 0,
-    );
+    let sched_prog_fd = load_sched_tracepoint_prog(counters_fd);
     check!(sched_prog_fd >= 0, "failed to load sched_switch tracepoint program");
 
-    let mut perf_insns = PERF_EVENT_INSNS_TEMPLATE;
-    perf_insns[5] = 0x0000000000001118 | ((counters_fd as u64) << 32);
-    perf_insns[22] = 0x0000000000001218 | ((events_fd as u64) << 32);
-
-    let mut perf_prog_attr = BpfProgLoadAttr::default();
-    perf_prog_attr.prog_type = BPF_PROG_TYPE_PERF_EVENT;
-    perf_prog_attr.insn_cnt = perf_insns.len() as u32;
-    perf_prog_attr.insns = perf_insns.as_ptr() as u64;
-    let perf_prog_fd = syscall(
-        SYS_BPF,
-        BPF_PROG_LOAD as usize,
-        &perf_prog_attr as *const _ as usize,
-        core::mem::size_of::<BpfProgLoadAttr>(),
-        0, 0, 0,
-    );
+    let perf_prog_fd = load_perf_event_prog(counters_fd, events_fd);
     check!(perf_prog_fd >= 0, "failed to load perf_event program");
 
     // 4. Open perf_event for CPU clock sampling (T7/T10)
@@ -1345,16 +1313,8 @@ pub extern "C" fn guest_main() -> ! {
     // -------------------------------------------------------------------------
     say!("BPF BEGIN workload_and_consume");
 
-    let t0 = now_monotonic_ns();
     // Run scheduling / yield workload (Anchor A3 / #86)
-    for _ in 0..WORKLOAD_ITERS {
-        syscall(SYS_SCHED_YIELD, 0, 0, 0, 0, 0, 0);
-    }
-    let t1 = now_monotonic_ns();
-    let attached_wall_ns = {
-        let diff = t1.saturating_sub(t0);
-        if diff > 0 { diff } else { 1_200_000 }
-    };
+    let attached_wall_ns = execute_yield_workload(WORKLOAD_ITERS);
 
     // Drain circular perf buffer records
     #[allow(unused_assignments, unused_variables)]
