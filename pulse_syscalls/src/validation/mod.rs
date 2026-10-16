@@ -4,6 +4,7 @@ pub(crate) mod bpf_map;
 pub(crate) mod bpf_perf_buffer;
 pub(crate) mod bpf_perf_event;
 pub(crate) mod bpf_prog;
+pub(crate) mod bpf_ring_buffer;
 pub(crate) mod credential;
 pub(crate) mod epoll;
 pub(crate) mod fd;

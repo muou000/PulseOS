@@ -1,6 +1,8 @@
 #![no_std]
 
 extern crate alloc;
+#[cfg(test)]
+extern crate std;
 
 #[cfg(target_os = "none")]
 use axerrno::LinuxError;

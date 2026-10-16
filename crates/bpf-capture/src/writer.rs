@@ -129,6 +129,47 @@ impl CaptureWriter {
         }
     }
 
+    /// Ingest a ring buffer loss counter increment.
+    pub fn ingest_ringbuf_lost(&mut self, count: u64) {
+        self.session.record_ringbuf_lost(count);
+    }
+
+    /// Ingest a normalized raw sample payload originating from Ring Buffer (`bpf_ringbuf_output`).
+    ///
+    /// The payload has the same normalized format (`pulse_bpf_schema`) as Perf Buffer samples.
+    pub fn ingest_ringbuf_sample(&mut self, cpu: u32, raw_sample: &[u8]) -> Result<(), CaptureError> {
+        self.ingest_perf_sample(cpu, raw_sample)
+    }
+
+    /// Ingest a raw Linux Ring Buffer record frame (8-byte header + payload).
+    pub fn ingest_raw_ringbuf_frame(&mut self, cpu: u32, raw_frame: &[u8]) -> Result<(), CaptureError> {
+        if raw_frame.len() < 8 {
+            self.session.record_consumer_corruption();
+            return Err(CaptureError::TruncatedRecord);
+        }
+
+        let raw_hdr = u32::from_ne_bytes(raw_frame[0..4].try_into().unwrap());
+        if (raw_hdr & (1 << 31)) != 0 {
+            // Busy bit set: producer has not finished committing
+            return Err(CaptureError::TruncatedRecord);
+        }
+
+        let is_discard = (raw_hdr & (1 << 30)) != 0;
+        let data_len = (raw_hdr & !((1 << 31) | (1 << 30))) as usize;
+        if raw_frame.len() < 8 + data_len {
+            self.session.record_consumer_corruption();
+            return Err(CaptureError::TruncatedRecord);
+        }
+
+        if is_discard {
+            self.session.record_discarded_record();
+            return Ok(());
+        }
+
+        let payload = &raw_frame[8..8 + data_len];
+        self.ingest_ringbuf_sample(cpu, payload)
+    }
+
     /// Finalize capture, compute checksums, and emit the complete binary capture file.
     pub fn finish(&mut self, stop_ns: u64) -> Result<Vec<u8>, CaptureError> {
         let metadata = self.session.stop(stop_ns)?;

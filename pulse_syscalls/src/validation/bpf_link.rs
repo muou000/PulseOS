@@ -29,6 +29,10 @@ pub mod core_link;
 pub mod core_verifier;
 
 #[cfg(test)]
+#[path = "../../../pulse_core/src/bpf/ring_buffer.rs"]
+pub mod core_ring_buffer;
+
+#[cfg(test)]
 pub use core_insn as insn;
 #[cfg(test)]
 pub use core_map as map;
@@ -38,6 +42,9 @@ pub use core_interpreter as interpreter;
 pub use core_program as program;
 #[cfg(test)]
 pub use core_perf_event as perf_event;
+#[cfg(test)]
+#[allow(unused_imports)]
+pub use core_ring_buffer as ring_buffer;
 #[cfg(test)]
 pub use core_map::BPF_OBJ_NAME_LEN;
 

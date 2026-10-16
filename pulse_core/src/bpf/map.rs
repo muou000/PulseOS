@@ -11,11 +11,22 @@ use core::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 use axerrno::LinuxError;
 use spin::RwLock;
 
+#[cfg(target_os = "none")]
+use super::ring_buffer::BpfRingBuf;
+
+#[cfg(not(target_os = "none"))]
+#[path = "ring_buffer.rs"]
+pub mod ring_buffer;
+
+#[cfg(not(target_os = "none"))]
+use ring_buffer::BpfRingBuf;
+
 pub const BPF_OBJ_NAME_LEN: usize = 16;
 
 pub const BPF_MAP_TYPE_HASH: u32 = 1;
 pub const BPF_MAP_TYPE_ARRAY: u32 = 2;
 pub const BPF_MAP_TYPE_PERF_EVENT_ARRAY: u32 = 4;
+pub const BPF_MAP_TYPE_RINGBUF: u32 = 27;
 /// Last Linux map type known to this ABI (`BPF_MAP_TYPE_ARENA`).
 const BPF_MAP_TYPE_LINUX_MAX: u32 = 33;
 
@@ -45,6 +56,7 @@ pub enum BpfMapType {
     Hash,
     Array,
     PerfEventArray,
+    RingBuf,
 }
 
 impl BpfMapType {
@@ -53,6 +65,7 @@ impl BpfMapType {
             BPF_MAP_TYPE_HASH => Ok(Self::Hash),
             BPF_MAP_TYPE_ARRAY => Ok(Self::Array),
             BPF_MAP_TYPE_PERF_EVENT_ARRAY => Ok(Self::PerfEventArray),
+            BPF_MAP_TYPE_RINGBUF => Ok(Self::RingBuf),
             0 => Err(LinuxError::EINVAL),
             raw if raw <= BPF_MAP_TYPE_LINUX_MAX => Err(LinuxError::EOPNOTSUPP),
             _ => Err(LinuxError::EINVAL),
@@ -64,6 +77,7 @@ impl BpfMapType {
             Self::Hash => BPF_MAP_TYPE_HASH,
             Self::Array => BPF_MAP_TYPE_ARRAY,
             Self::PerfEventArray => BPF_MAP_TYPE_PERF_EVENT_ARRAY,
+            Self::RingBuf => BPF_MAP_TYPE_RINGBUF,
         }
     }
 
@@ -72,6 +86,7 @@ impl BpfMapType {
             Self::Hash => BPF_F_NO_PREALLOC | BPF_F_RDONLY_PROG | BPF_F_WRONLY_PROG,
             Self::Array => BPF_F_RDONLY_PROG | BPF_F_WRONLY_PROG,
             Self::PerfEventArray => 0,
+            Self::RingBuf => 0,
         }
     }
 }
@@ -139,26 +154,48 @@ impl BpfMapSpec {
         let key_ok = match map_type {
             BpfMapType::Array | BpfMapType::PerfEventArray => req.key_size == 4,
             BpfMapType::Hash => req.key_size != 0,
+            BpfMapType::RingBuf => req.key_size == 0,
         };
         let val_ok = match map_type {
             BpfMapType::PerfEventArray => req.value_size == 4,
+            BpfMapType::RingBuf => req.value_size == 0,
             _ => req.value_size != 0,
         };
-        if !key_ok || !val_ok || req.value_size == 0 || req.max_entries == 0 {
+        if !key_ok || !val_ok {
             return Err(LinuxError::EINVAL);
+        }
+        if map_type != BpfMapType::RingBuf && (req.value_size == 0 || req.max_entries == 0) {
+            return Err(LinuxError::EINVAL);
+        }
+        if map_type == BpfMapType::RingBuf {
+            if req.max_entries == 0
+                || req.max_entries % 4096 != 0
+                || !req.max_entries.is_power_of_two()
+            {
+                return Err(LinuxError::EINVAL);
+            }
         }
         if req.key_size > BPF_MAP_MAX_KEY_SIZE || req.value_size > BPF_MAP_MAX_VALUE_SIZE {
             return Err(LinuxError::E2BIG);
         }
 
-        let entry_bytes = match map_type {
-            BpfMapType::Array | BpfMapType::PerfEventArray => req.value_size as usize,
-            BpfMapType::Hash => req.key_size as usize + req.value_size as usize,
+        let storage_bytes = if map_type == BpfMapType::RingBuf {
+            let bytes = req.max_entries as usize;
+            if bytes > BPF_MAP_MAX_BYTES {
+                return Err(LinuxError::E2BIG);
+            }
+            bytes
+        } else {
+            let entry_bytes = match map_type {
+                BpfMapType::Array | BpfMapType::PerfEventArray => req.value_size as usize,
+                BpfMapType::Hash => req.key_size as usize + req.value_size as usize,
+                BpfMapType::RingBuf => unreachable!(),
+            };
+            entry_bytes
+                .checked_mul(req.max_entries as usize)
+                .filter(|&bytes| bytes <= BPF_MAP_MAX_BYTES)
+                .ok_or(LinuxError::E2BIG)?
         };
-        let storage_bytes = entry_bytes
-            .checked_mul(req.max_entries as usize)
-            .filter(|&bytes| bytes <= BPF_MAP_MAX_BYTES)
-            .ok_or(LinuxError::E2BIG)?;
 
         Ok(Self {
             map_type,
@@ -295,6 +332,8 @@ enum BpfMapStorage {
         fds: Vec<Option<u32>>,
         slots: Vec<Option<Arc<dyn PerfEventOutputSink>>>,
     },
+    /// Shared MPSC memory-mapped ring buffer.
+    RingBuf(Arc<BpfRingBuf>),
 }
 
 impl BpfMapStorage {
@@ -303,6 +342,7 @@ impl BpfMapStorage {
             Self::Array(values) => values.len() / val_size,
             Self::Hash(_) => max_entries,
             Self::PerfEventArray { slots, .. } => slots.len(),
+            Self::RingBuf(rb) => rb.data_size(),
         }
     }
 
@@ -338,6 +378,7 @@ impl BpfMapStorage {
                 out.copy_from_slice(&fd.to_ne_bytes());
                 Ok(())
             }
+            Self::RingBuf(_) => Err(LinuxError::EINVAL),
         }
     }
 
@@ -382,6 +423,7 @@ impl BpfMapStorage {
                 out.copy_from_slice(&fd_bytes[offset..end]);
                 Ok(())
             }
+            Self::RingBuf(_) => Err(LinuxError::EINVAL),
         }
     }
 
@@ -425,6 +467,7 @@ impl BpfMapStorage {
                     Err(LinuxError::EINVAL)
                 }
             }
+            Self::RingBuf(_) => Err(LinuxError::EINVAL),
         }
     }
 
@@ -484,6 +527,7 @@ impl BpfMapStorage {
                 fds[index] = Some(fd);
                 Ok(())
             }
+            Self::RingBuf(_) => Err(LinuxError::EINVAL),
         }
     }
 
@@ -503,6 +547,7 @@ impl BpfMapStorage {
                 slots[index] = None;
                 Ok(())
             }
+            Self::RingBuf(_) => Err(LinuxError::EINVAL),
         }
     }
 
@@ -558,6 +603,7 @@ impl BpfMapStorage {
                     }
                 }
             }
+            Self::RingBuf(_) => Err(LinuxError::EINVAL),
         }
     }
 }
@@ -596,6 +642,10 @@ impl BpfMap {
                     fds: alloc::vec![None; max],
                     slots: alloc::vec![None; max],
                 }
+            }
+            BpfMapType::RingBuf => {
+                let rb = BpfRingBuf::new(spec.max_entries as usize)?;
+                BpfMapStorage::RingBuf(rb)
             }
         };
         Ok(Self {
@@ -727,6 +777,22 @@ impl BpfMap {
             fds[idx] = fd;
             slots[idx] = slot;
             Ok(())
+        } else {
+            Err(LinuxError::EINVAL)
+        }
+    }
+
+    pub fn ringbuf(&self) -> Option<Arc<BpfRingBuf>> {
+        if let BpfMapStorage::RingBuf(ref rb) = *self.storage.read() {
+            Some(rb.clone())
+        } else {
+            None
+        }
+    }
+
+    pub fn output_ringbuf(&self, data: &[u8], flags: u64) -> Result<(), LinuxError> {
+        if let BpfMapStorage::RingBuf(ref rb) = *self.storage.read() {
+            rb.output(data, flags)
         } else {
             Err(LinuxError::EINVAL)
         }

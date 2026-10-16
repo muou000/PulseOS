@@ -434,6 +434,15 @@ impl SamplingSession {
         self.counters.record_per_cpu_lost(cpu, count);
     }
 
+    pub fn record_ringbuf_lost(&mut self, count: u64) {
+        self.counters.attempted += count;
+        self.counters.ringbuf_lost = self.counters.ringbuf_lost.saturating_add(count);
+    }
+
+    pub fn record_discarded_record(&mut self) {
+        self.counters.discarded_records += 1;
+    }
+
     pub fn record_consumer_corruption(&mut self) {
         self.counters.consumer_corrupt_records += 1;
     }

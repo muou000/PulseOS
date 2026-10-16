@@ -598,7 +598,8 @@ pub fn execute(
                                         regs[BPF_REG_0 as usize] = VmValue::Null;
                                     }
                                 }
-                                super::map::BpfMapType::PerfEventArray => {
+                                super::map::BpfMapType::PerfEventArray
+                                | super::map::BpfMapType::RingBuf => {
                                     regs[BPF_REG_0 as usize] = VmValue::Null;
                                 }
                             }
@@ -785,6 +786,75 @@ pub fn execute(
                             regs[1..=5].fill(VmValue::Uninit);
                             pc += 1;
                             continue;
+                        }
+
+                        BPF_FUNC_RINGBUF_OUTPUT => {
+                            let map_idx = match regs[BPF_REG_1 as usize] {
+                                VmValue::PtrMap { map_idx } => map_idx,
+                                _ => return Err(BpfVmError::InvalidInstruction),
+                            };
+                            let map = maps.get(map_idx).ok_or(BpfVmError::OutOfBoundsAccess)?;
+                            if map.spec().map_type() != super::map::BpfMapType::RingBuf {
+                                return Err(BpfVmError::InvalidInstruction);
+                            }
+                            let size = regs[BPF_REG_3 as usize].as_scalar()? as usize;
+                            if size > 65535 {
+                                return Err(BpfVmError::OutOfBoundsAccess);
+                            }
+                            let flags = regs[BPF_REG_4 as usize].as_scalar()?;
+
+                            let mut data_buf = alloc::vec![0u8; size];
+                            match regs[BPF_REG_2 as usize] {
+                                VmValue::PtrStack { offset } => {
+                                    if offset.checked_add(size).map_or(true, |end| end > BPF_STACK_SIZE) {
+                                        return Err(BpfVmError::OutOfBoundsAccess);
+                                    }
+                                    data_buf.copy_from_slice(&stack[offset..offset + size]);
+                                }
+                                VmValue::PtrMapValueArray {
+                                    map_idx: src_map,
+                                    entry_idx,
+                                    offset,
+                                } => {
+                                    let src = maps.get(src_map).ok_or(BpfVmError::OutOfBoundsAccess)?;
+                                    src.read_value_bytes(&entry_idx.to_ne_bytes(), offset, &mut data_buf)
+                                        .map_err(BpfVmError::HelperFailed)?;
+                                }
+                                VmValue::PtrMapValueHash {
+                                    map_idx: src_map,
+                                    lookup_id,
+                                    offset,
+                                } => {
+                                    let src = maps.get(src_map).ok_or(BpfVmError::OutOfBoundsAccess)?;
+                                    let l = lookups.get(lookup_id as usize).ok_or(BpfVmError::OutOfBoundsAccess)?;
+                                    src.read_value_bytes(&l.key[..l.key_len], offset, &mut data_buf)
+                                        .map_err(BpfVmError::HelperFailed)?;
+                                }
+                                VmValue::PtrContext { offset } => {
+                                    if offset.checked_add(size).map_or(true, |end| end > context.len()) {
+                                        return Err(BpfVmError::OutOfBoundsAccess);
+                                    }
+                                    data_buf.copy_from_slice(&context[offset..offset + size]);
+                                }
+                                _ => return Err(BpfVmError::InvalidInstruction),
+                            }
+
+                            let ret = match map.output_ringbuf(&data_buf, flags) {
+                                Ok(()) => 0,
+                                Err(e) => (-(e.code() as i64)) as u64,
+                            };
+
+                            regs[BPF_REG_0 as usize] = VmValue::Scalar(ret);
+                            regs[1..=5].fill(VmValue::Uninit);
+                            pc += 1;
+                            continue;
+                        }
+
+                        BPF_FUNC_RINGBUF_RESERVE
+                        | BPF_FUNC_RINGBUF_SUBMIT
+                        | BPF_FUNC_RINGBUF_DISCARD
+                        | BPF_FUNC_RINGBUF_QUERY => {
+                            return Err(BpfVmError::HelperFailed(LinuxError::EOPNOTSUPP));
                         }
 
                         _ => return Err(BpfVmError::InvalidHelperCall(insn.imm)),

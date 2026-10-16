@@ -1060,25 +1060,30 @@ fn run_ltp_suite() {
 
     // 9. bpf_prog06 (Unsupported TCONF)
     say!("LTP_TEST_START bpf_prog06");
-    let mut rb_attr = BpfMapCreateAttr::default();
-    rb_attr.map_type = BPF_MAP_TYPE_RINGBUF;
-    rb_attr.key_size = 0;
-    rb_attr.value_size = 0;
-    rb_attr.max_entries = 4096;
-    let rb_fd = syscall(
+    let ringbuf_submit_insns: [u64; 4] = [
+        0x0000000000001118, // ld_imm64 r1, 0
+        0x0000000000000000,
+        0x0000008400000085, // call helper 132 (bpf_ringbuf_submit)
+        0x0000000000000095, // exit
+    ];
+    let mut rb_submit_attr = BpfProgLoadAttr::default();
+    rb_submit_attr.prog_type = BPF_PROG_TYPE_TRACEPOINT;
+    rb_submit_attr.insn_cnt = ringbuf_submit_insns.len() as u32;
+    rb_submit_attr.insns = ringbuf_submit_insns.as_ptr() as u64;
+    let rb_submit_fd = syscall(
         SYS_BPF,
-        BPF_MAP_CREATE as usize,
-        &rb_attr as *const _ as usize,
-        core::mem::size_of::<BpfMapCreateAttr>(),
+        BPF_PROG_LOAD as usize,
+        &rb_submit_attr as *const _ as usize,
+        core::mem::size_of::<BpfProgLoadAttr>(),
         0, 0, 0,
     );
-    if rb_fd < 0 {
+    if rb_submit_fd < 0 {
         conf += 1;
         say!("LTP_TEST_RESULT bpf_prog06 TCONF ring buffer submission unsupported");
     } else {
         failed += 1;
-        syscall(SYS_CLOSE, rb_fd as usize, 0, 0, 0, 0, 0);
-        say!("LTP_TEST_RESULT bpf_prog06 TFAIL ringbuf map creation falsely succeeded");
+        syscall(SYS_CLOSE, rb_submit_fd as usize, 0, 0, 0, 0, 0);
+        say!("LTP_TEST_RESULT bpf_prog06 TFAIL ring buffer submission falsely succeeded");
     }
 
     // 10. bpf_prog07 (Unsupported TCONF)

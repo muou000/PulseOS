@@ -197,3 +197,92 @@ fn test_capture_corruption_detection() {
     let err = CaptureReader::from_bytes(truncated_trl).unwrap_err();
     assert!(matches!(err, CaptureError::TruncatedTrailer | CaptureError::InvalidTrailerOffset));
 }
+
+#[test]
+fn test_capture_ringbuf_sample_and_loss_ingestion() {
+    let registry = SchemaRegistry::default_pulse_registry();
+    let mut writer = CaptureWriter::new(test_config(), registry);
+    writer.start(1_000_000).unwrap();
+
+    let sched_ctx = SchedSwitchContext {
+        common: ContextCommon::new(TracepointId::SchedSwitch, 1_000_100, 3, 50, 50, 5),
+        prev_task_id: 5,
+        next_task_id: 6,
+        prev_state: 0,
+        prev_prio: 120,
+        next_prio: 120,
+        _pad: 0,
+    };
+    let raw_sched_bytes = unsafe {
+        core::slice::from_raw_parts(&sched_ctx as *const _ as *const u8, core::mem::size_of_val(&sched_ctx))
+    };
+
+    // Ingest ringbuf sample (same normalized format as perf sample)
+    writer.ingest_ringbuf_sample(3, raw_sched_bytes).unwrap();
+
+    // Ingest ringbuf loss (e.g., 12 records dropped due to full ring buffer)
+    writer.ingest_ringbuf_lost(12);
+
+    let file_bytes = writer.finish(2_000_000).unwrap();
+    let capture = CaptureReader::from_bytes(&file_bytes).expect("reader must parse ringbuf capture");
+
+    assert_eq!(capture.metadata.status, SessionStatusCode::IncompleteLoss);
+    assert_eq!(capture.trailer.status_code, SessionStatusCode::IncompleteLoss);
+    assert_eq!(capture.metadata.counters.ringbuf_lost, 12);
+    assert_eq!(capture.metadata.counters.delivered, 1);
+    assert_eq!(capture.metadata.counters.attempted, 13);
+    assert_eq!(capture.records.len(), 1);
+    assert_eq!(capture.records[0].cpu_id, 3);
+}
+
+#[test]
+fn test_ingest_raw_ringbuf_frame_sample_and_discard() {
+    let registry = SchemaRegistry::default_pulse_registry();
+    let mut writer = CaptureWriter::new(test_config(), registry);
+    writer.start(10_000_000).unwrap();
+
+    let sched_ctx = SchedSwitchContext {
+        common: ContextCommon::new(TracepointId::SchedSwitch, 10_000_500, 0, 10, 10, 1),
+        prev_task_id: 1,
+        next_task_id: 2,
+        prev_state: 1,
+        prev_prio: 120,
+        next_prio: 120,
+        _pad: 0,
+    };
+    let raw_sched_bytes = unsafe {
+        core::slice::from_raw_parts(&sched_ctx as *const _ as *const u8, core::mem::size_of_val(&sched_ctx))
+    };
+
+    // 1. Construct raw ringbuf frame: 8-byte header (len: u32, pg_off: u32) + payload
+    let mut valid_frame = Vec::new();
+    let payload_len = raw_sched_bytes.len() as u32;
+    valid_frame.extend_from_slice(&payload_len.to_ne_bytes());
+    valid_frame.extend_from_slice(&0u32.to_ne_bytes()); // pg_off
+    valid_frame.extend_from_slice(raw_sched_bytes);
+    writer.ingest_raw_ringbuf_frame(0, &valid_frame).unwrap();
+
+    // 2. Construct discarded ringbuf frame: DISCARD bit (bit 30) set
+    let mut discard_frame = Vec::new();
+    let discard_len = 16u32 | (1 << 30);
+    discard_frame.extend_from_slice(&discard_len.to_ne_bytes());
+    discard_frame.extend_from_slice(&0u32.to_ne_bytes());
+    discard_frame.extend_from_slice(&[0u8; 16]);
+    writer.ingest_raw_ringbuf_frame(0, &discard_frame).unwrap();
+
+    // 3. Busy frame: BUSY bit (bit 31) set -> should return Err(TruncatedRecord)
+    let mut busy_frame = Vec::new();
+    let busy_len = 16u32 | (1 << 31);
+    busy_frame.extend_from_slice(&busy_len.to_ne_bytes());
+    busy_frame.extend_from_slice(&0u32.to_ne_bytes());
+    busy_frame.extend_from_slice(&[0u8; 16]);
+    assert!(writer.ingest_raw_ringbuf_frame(0, &busy_frame).is_err());
+
+    let file_bytes = writer.finish(20_000_000).unwrap();
+    let capture = CaptureReader::from_bytes(&file_bytes).expect("reader parse");
+
+    assert_eq!(capture.records.len(), 1);
+    assert_eq!(capture.metadata.counters.delivered, 1);
+    assert_eq!(capture.metadata.counters.discarded_records, 1);
+    assert_eq!(capture.metadata.status, SessionStatusCode::IncompleteLoss);
+}

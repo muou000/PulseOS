@@ -5,6 +5,10 @@
 //! self-contained (only `core`, `alloc` and `axerrno`).
 
 #[cfg(test)]
+#[path = "../../../pulse_core/src/bpf/ring_buffer.rs"]
+mod core_ring_buffer;
+
+#[cfg(test)]
 #[path = "../../../pulse_core/src/bpf/map.rs"]
 mod core_map;
 
@@ -83,7 +87,7 @@ mod tests {
             assert_eq!(err(req), LinuxError::EINVAL, "type {raw}");
         }
         // Known Linux types outside the PulseOS compatibility tier.
-        for raw in [3, 5, 27, 33] {
+        for raw in [3, 5, 28, 33] {
             let mut req = array_req();
             req.map_type = raw;
             assert_eq!(err(req), LinuxError::EOPNOTSUPP, "type {raw}");
