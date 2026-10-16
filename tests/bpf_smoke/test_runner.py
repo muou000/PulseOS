@@ -357,10 +357,172 @@ class Seam3GateEvidenceTests(unittest.TestCase):
         self.assertEqual(args.arch, "riscv64")
 
 
+class Seam4ParityManifestValidationTests(unittest.TestCase):
+    def _valid_manifest(self) -> dict:
+        return run.sample_valid_parity_manifest()
+
+    def test_valid_manifest_passes_and_classifies_as_parity_candidate(self):
+        manifest = self._valid_manifest()
+        errors = run.validate_parity_manifest(manifest)
+        self.assertEqual(errors, [])
+        status = run.classify_parity_status(manifest)
+        self.assertEqual(status, "parity_candidate")
+        self.assertNotEqual(status, "replacement")
+        self.assertEqual(
+            manifest["comparison_semantics"]["mode"],
+            "mechanism_level_cross_check",
+        )
+        self.assertFalse(
+            manifest["comparison_semantics"]["raw_sample_equality_required"]
+        )
+
+    def test_missing_architecture_fails_manifest_and_prevents_parity_status(self):
+        manifest = self._valid_manifest()
+        del manifest["architectures"]["loongarch64"]
+        errors = run.validate_parity_manifest(manifest)
+        self.assertTrue(any("loongarch64" in e for e in errors), f"expected arch error in {errors}")
+        self.assertEqual(run.classify_parity_status(manifest), "failed_or_incomplete")
+
+    def test_missing_run_state_fails_manifest(self):
+        for state_name in ("baseline", "loaded_detached", "attached_capture"):
+            manifest = self._valid_manifest()
+            del manifest["architectures"]["riscv64"]["states"][state_name]
+            errors = run.validate_parity_manifest(manifest)
+            self.assertTrue(any(state_name in e for e in errors), f"expected {state_name} error in {errors}")
+            self.assertEqual(run.classify_parity_status(manifest), "failed_or_incomplete")
+
+    def test_incomplete_trailer_or_schema_mismatch_prevents_complete_claim(self):
+        manifest = self._valid_manifest()
+        manifest["architectures"]["riscv64"]["capture"]["trailer_complete"] = False
+        errors = run.validate_parity_manifest(manifest)
+        self.assertTrue(any("trailer" in e.lower() for e in errors))
+        self.assertEqual(run.classify_parity_status(manifest), "failed_or_incomplete")
+
+        manifest2 = self._valid_manifest()
+        manifest2["architectures"]["loongarch64"]["capture"]["schema_valid"] = False
+        errors2 = run.validate_parity_manifest(manifest2)
+        self.assertTrue(any("schema" in e.lower() for e in errors2))
+        self.assertEqual(run.classify_parity_status(manifest2), "failed_or_incomplete")
+
+    def test_missing_or_mismatched_hashes_and_fixture_identity_fail(self):
+        manifest = self._valid_manifest()
+        manifest["architectures"]["riscv64"]["kernel_sha256"] = ""
+        errors = run.validate_parity_manifest(manifest)
+        self.assertTrue(any("kernel_sha256" in e for e in errors))
+        self.assertEqual(run.classify_parity_status(manifest), "failed_or_incomplete")
+
+        manifest2 = self._valid_manifest()
+        manifest2["architectures"]["loongarch64"]["fixture_sha256"] = "0" * 64
+        errors2 = run.validate_parity_manifest(manifest2)
+        self.assertTrue(any("fixture" in e.lower() for e in errors2))
+        self.assertEqual(run.classify_parity_status(manifest2), "failed_or_incomplete")
+
+    def test_nonzero_loss_counter_prevents_parity_claim(self):
+        for counter_key in ("lost_records", "ringbuf_lost", "re_entry_drops", "helper_failures", "consumer_corrupt_records"):
+            manifest = self._valid_manifest()
+            manifest["architectures"]["riscv64"]["loss_counters"][counter_key] = 1
+            errors = run.validate_parity_manifest(manifest)
+            self.assertTrue(any(counter_key in e for e in errors), f"expected {counter_key} error in {errors}")
+            self.assertEqual(run.classify_parity_status(manifest), "failed_or_incomplete")
+
+    def test_missing_analyzer_outputs_fail_manifest(self):
+        for out_key in ("loss_report", "event_table", "json_summary", "oncpu_folded", "offcpu_folded"):
+            manifest = self._valid_manifest()
+            manifest["architectures"]["loongarch64"]["analyzer_outputs"][out_key] = ""
+            errors = run.validate_parity_manifest(manifest)
+            self.assertTrue(any(out_key in e for e in errors), f"expected {out_key} error in {errors}")
+            self.assertEqual(run.classify_parity_status(manifest), "failed_or_incomplete")
+
+    def test_static_only_evidence_classified_as_development_baseline(self):
+        manifest = self._valid_manifest()
+        manifest["execution_mode"] = "static_only"
+        self.assertEqual(run.classify_parity_status(manifest), "development_baseline")
+
+
+class Seam5ThreeStateAndAttributionTests(unittest.TestCase):
+    def test_parse_state_metrics_and_compute_overhead(self):
+        log_text = "\n".join([
+            "BPF_STATE_REPORT state=baseline status=PASS wall_time_ns=1000000 workload_iters=400 memory_bytes=16384 samples=0 events=0 lost=0",
+            "BPF_STATE_REPORT state=loaded_detached status=PASS wall_time_ns=1100000 workload_iters=400 memory_bytes=24576 samples=0 events=0 lost=0",
+            "BPF_STATE_REPORT state=attached_capture status=PASS wall_time_ns=1500000 workload_iters=400 memory_bytes=45056 samples=1 events=5 lost=0",
+        ])
+        states = run.parse_state_metrics(log_text)
+        self.assertEqual(set(states.keys()), {"baseline", "loaded_detached", "attached_capture"})
+        self.assertEqual(states["baseline"]["wall_time_ns"], 1_000_000)
+        self.assertEqual(states["attached_capture"]["events"], 5)
+        self.assertGreater(states["attached_capture"]["event_throughput_per_sec"], 0.0)
+
+        overhead = run.compute_state_overhead(states)
+        self.assertEqual(overhead["loaded_detached_vs_baseline_ns"], 100_000)
+        self.assertEqual(overhead["attached_capture_vs_baseline_ns"], 500_000)
+        self.assertAlmostEqual(overhead["loaded_detached_ratio"], 1.10)
+        self.assertAlmostEqual(overhead["attached_capture_ratio"], 1.50)
+        self.assertEqual(overhead["memory_delta_loaded_detached_bytes"], 8192)
+        self.assertEqual(overhead["memory_delta_attached_capture_bytes"], 28672)
+
+    def test_guest_sampler_source_emits_all_three_states_and_semantic_events(self):
+        source_text = run.RAW_SOURCE.read_text()
+        for st in ("baseline", "loaded_detached", "attached_capture"):
+            self.assertIn(f"BPF_STATE_REPORT state={st}", source_text)
+        # Verify task_metadata (1), sched_switch (2), task_block (3), task_wake (4), perf_sample (0x1000)
+        self.assertIn("guest_sampler", source_text)
+        self.assertIn("0x1000u32", source_text)
+
+    def test_compare_dual_arch_attribution_checks_mechanism_and_detects_mismatch(self):
+        manifest = run.sample_valid_parity_manifest()
+        rv = manifest["architectures"]["riscv64"]
+        la = manifest["architectures"]["loongarch64"]
+        comparison = run.compare_dual_arch_attribution(rv, la)
+        self.assertTrue(comparison["both_complete"])
+        self.assertTrue(comparison["zero_loss_both"])
+        self.assertTrue(comparison["attribution_consistent"])
+        self.assertEqual(comparison["comparison_mode"], "mechanism_level_cross_check")
+        self.assertFalse(comparison["raw_sample_equality_required"])
+
+        # Corrupt loongarch64 loss counter -> zero_loss_both must become False
+        la_bad = dict(la)
+        la_bad["loss_counters"] = {**la["loss_counters"], "lost_records": 2}
+        comp_bad = run.compare_dual_arch_attribution(rv, la_bad)
+        self.assertFalse(comp_bad["zero_loss_both"])
+        self.assertFalse(comp_bad["attribution_consistent"])
+
+
+class Seam6ParityOrchestrationTests(unittest.TestCase):
+    def test_parity_parser_registers_parity_subcommand(self):
+        parser = run.build_parser()
+        args = parser.parse_args(["parity", "--arch", "riscv64"])
+        self.assertEqual(args.command, "parity")
+        self.assertEqual(args.arch, "riscv64")
+
+    def test_qperf_target_preserved_in_makefile(self):
+        makefile = run.REPO / "Makefile"
+        self.assertTrue(makefile.is_file())
+        text = makefile.read_text()
+        self.assertIn("qperf:", text)
+        self.assertIn("kernel-rv-qperf", text)
+        self.assertIn("kernel-la-qperf", text)
+        self.assertIn("__pulse_qperf_trace_v1", text)
+
+    def test_generate_parity_package_creates_retained_artifacts_and_manifest(self):
+        with tempfile.TemporaryDirectory(prefix="parity-pkg-", dir=run.BASE) as tmp_dir:
+            pkg_dir = Path(tmp_dir) / "pkg"
+            pkg_dir.mkdir()
+            manifest = run.sample_valid_parity_manifest()
+            manifest_path, report_path = run.write_parity_package(manifest, pkg_dir)
+            self.assertTrue(manifest_path.is_file())
+            self.assertTrue(report_path.is_file())
+
+            report_text = report_path.read_text()
+            self.assertIn("PARITY STATUS: parity_candidate", report_text)
+            self.assertIn("mechanism_level_cross_check", report_text)
+            self.assertIn("qperf baseline retained: True", report_text)
+            self.assertNotIn("replacement", report_text)
+
+
 if __name__ == "__main__":
-
-
-
     suite = unittest.defaultTestLoader.loadTestsFromModule(sys.modules[__name__])
     result = unittest.TextTestRunner(verbosity=2, failfast=True).run(suite)
     sys.exit(0 if result.wasSuccessful() else 1)
+
+
+
