@@ -73,6 +73,7 @@ display = [
     "axdriver/virtio-gpu",
     "dep:axdisplay",
     "axruntime/display",
+    "axdisplay/smoke-test",
 ]
 
 # Real Time Clock (RTC) Driver.
