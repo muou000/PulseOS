@@ -28,36 +28,6 @@ use spin::Lazy;
 mod disk;
 pub mod fs;
 
-#[cfg(feature = "qperf-trace")]
-pub mod buildstorm_stats;
-
-#[cfg(feature = "qperf-trace")]
-#[macro_export]
-macro_rules! buildstorm_stat_inc {
-    ($counter:ident) => {
-        $crate::buildstorm_stats::add(&$crate::buildstorm_stats::$counter, 1)
-    };
-}
-
-#[cfg(feature = "qperf-trace")]
-#[macro_export]
-macro_rules! buildstorm_stat_add {
-    ($counter:ident, $value:expr) => {
-        $crate::buildstorm_stats::add(&$crate::buildstorm_stats::$counter, $value as u64)
-    };
-}
-
-#[cfg(not(feature = "qperf-trace"))]
-#[macro_export]
-macro_rules! buildstorm_stat_inc {
-    ($counter:ident) => {{}};
-}
-
-#[cfg(not(feature = "qperf-trace"))]
-#[macro_export]
-macro_rules! buildstorm_stat_add {
-    ($counter:ident, $value:expr) => {{}};
-}
 
 pub use disk::{flush_all_disks, flush_all_disks_async};
 pub use fs::{

@@ -230,21 +230,17 @@ impl IoRangeLocks {
         block_size: usize,
     ) -> axdriver::prelude::DevResult<IoReadRangeGuards<'_>> {
         let indices = io_range_lock_indices(offset, len, block_size)?;
-        crate::buildstorm_stat_add!(EXT4_RANGE_BUCKETS_LOCKED, indices.len());
 
         if indices.len() == 1 {
             let lock = &self.buckets[indices.get(0)];
             if let Some(guard) = lock.try_read() {
-                crate::buildstorm_stat_inc!(EXT4_RANGE_READ_FAST);
                 return Ok(IoReadRangeGuards::One { _guard: guard });
             }
-            crate::buildstorm_stat_inc!(EXT4_RANGE_READ_WAIT);
             return Ok(IoReadRangeGuards::One {
                 _guard: lock.read().await,
             });
         }
 
-        let mut waited = false;
         let mut guards = Vec::with_capacity(indices.len());
         for slot in 0..indices.len() {
             let index = indices.get(slot);
@@ -252,14 +248,8 @@ impl IoRangeLocks {
             if let Some(guard) = lock.try_read() {
                 guards.push(guard);
             } else {
-                waited = true;
                 guards.push(lock.read().await);
             }
-        }
-        if waited {
-            crate::buildstorm_stat_inc!(EXT4_RANGE_READ_WAIT);
-        } else {
-            crate::buildstorm_stat_inc!(EXT4_RANGE_READ_FAST);
         }
         Ok(IoReadRangeGuards::Many(guards))
     }
@@ -271,21 +261,17 @@ impl IoRangeLocks {
         block_size: usize,
     ) -> axdriver::prelude::DevResult<IoWriteRangeGuards<'_>> {
         let indices = io_range_lock_indices(offset, len, block_size)?;
-        crate::buildstorm_stat_add!(EXT4_RANGE_BUCKETS_LOCKED, indices.len());
 
         if indices.len() == 1 {
             let lock = &self.buckets[indices.get(0)];
             if let Some(guard) = lock.try_write() {
-                crate::buildstorm_stat_inc!(EXT4_RANGE_WRITE_FAST);
                 return Ok(IoWriteRangeGuards::One { _guard: guard });
             }
-            crate::buildstorm_stat_inc!(EXT4_RANGE_WRITE_WAIT);
             return Ok(IoWriteRangeGuards::One {
                 _guard: lock.write().await,
             });
         }
 
-        let mut waited = false;
         let mut guards = Vec::with_capacity(indices.len());
         for slot in 0..indices.len() {
             let index = indices.get(slot);
@@ -293,14 +279,8 @@ impl IoRangeLocks {
             if let Some(guard) = lock.try_write() {
                 guards.push(guard);
             } else {
-                waited = true;
                 guards.push(lock.write().await);
             }
-        }
-        if waited {
-            crate::buildstorm_stat_inc!(EXT4_RANGE_WRITE_WAIT);
-        } else {
-            crate::buildstorm_stat_inc!(EXT4_RANGE_WRITE_FAST);
         }
         Ok(IoWriteRangeGuards::Many(guards))
     }
@@ -481,9 +461,6 @@ impl<D: AsyncBlockDriverOps + Clone + 'static> crate::disk::DiskFlushable for Ex
         let flush_result = {
             let _device_flush = self.device_flush_lock.lock().await;
             let dev = self.dev.lock().clone();
-            crate::buildstorm_stat_inc!(EXT4_DEVICE_FLUSHES);
-            #[cfg(feature = "qperf-trace")]
-            let _device_io = crate::buildstorm_stats::begin_device_io();
             match axtask::future::timeout(Some(DEVICE_IO_TIMEOUT), dev.flush_async()).await {
                 Ok(result) => result,
                 Err(_) => {
@@ -528,9 +505,6 @@ impl<D: AsyncBlockDriverOps + Clone + 'static> crate::disk::DiskFlushable for Ex
         let flush_result = {
             let _device_flush = self.device_flush_lock.lock().await;
             let dev = self.dev.lock().clone();
-            crate::buildstorm_stat_inc!(EXT4_DEVICE_FLUSHES);
-            #[cfg(feature = "qperf-trace")]
-            let _device_io = crate::buildstorm_stats::begin_device_io();
             dev.flush_async().await
         };
         if first_error.is_none() && flush_result.is_ok() {
@@ -741,7 +715,6 @@ impl<D: AsyncBlockDriverOps + Clone + 'static> Ext4Disk<D> {
     }
 
     fn mark_dirty_block(&self, offset: usize, sequence: u64, owners: &[u64]) {
-        crate::buildstorm_stat_inc!(EXT4_DIRTY_BLOCKS);
         {
             let mut dirty_owners = self.dirty_owners[self.stripe_index(offset)].lock();
             let state = dirty_owners
@@ -848,8 +821,6 @@ impl<D: AsyncBlockDriverOps + Clone + 'static> Ext4Disk<D> {
             disk: self,
             offsets: flushing_offsets,
         };
-        crate::buildstorm_stat_inc!(EXT4_FLUSH_BATCHES);
-        crate::buildstorm_stat_add!(EXT4_FLUSH_BLOCKS, blocks.len());
 
         let mut start = 0;
         while start < blocks.len() {
@@ -926,10 +897,6 @@ impl<D: AsyncBlockDriverOps + Clone + 'static> Ext4Disk<D> {
     {
         let (first_block, ..) = self.byte_range(block_offset, data.len())?;
         let dev = self.dev.lock().clone();
-        crate::buildstorm_stat_inc!(EXT4_DEVICE_WRITE_OPS);
-        crate::buildstorm_stat_add!(EXT4_DEVICE_WRITE_BYTES, data.len());
-        #[cfg(feature = "qperf-trace")]
-        let _device_io = crate::buildstorm_stats::begin_device_io();
         match axtask::future::timeout(
             Some(DEVICE_IO_TIMEOUT),
             dev.write_block_async(first_block, data),
@@ -1015,10 +982,6 @@ impl<D: AsyncBlockDriverOps + Clone + 'static> Ext4Disk<D> {
         D: AsyncBlockDriverOps,
     {
         for attempt in 1..=DEVICE_READ_MAX_ATTEMPTS {
-            crate::buildstorm_stat_inc!(EXT4_DEVICE_READ_OPS);
-            crate::buildstorm_stat_add!(EXT4_DEVICE_READ_BYTES, dest.len());
-            #[cfg(feature = "qperf-trace")]
-            let _device_io = crate::buildstorm_stats::begin_device_io();
             let read_result = match axtask::future::timeout(
                 Some(DEVICE_IO_TIMEOUT),
                 dev.read_block_async(first_block, dest),
@@ -1121,7 +1084,6 @@ impl<D: AsyncBlockDriverOps + Clone + 'static> Ext4Disk<D> {
                 found
             };
             if !has_any_cache {
-                crate::buildstorm_stat_inc!(EXT4_BYPASS_READS);
                 return self
                     .read_blocks_from_disk_async(offset, buf.len() / block_size, buf)
                     .await;
@@ -1159,7 +1121,6 @@ impl<D: AsyncBlockDriverOps + Clone + 'static> Ext4Disk<D> {
             };
 
             if hit {
-                crate::buildstorm_stat_inc!(EXT4_BLOCK_CACHE_HITS);
                 current_block_offset += block_size;
             } else {
                 // Cache miss. Find consecutive cache misses.
@@ -1193,7 +1154,6 @@ impl<D: AsyncBlockDriverOps + Clone + 'static> Ext4Disk<D> {
                         consecutive_misses += 1;
                     }
                 }
-                crate::buildstorm_stat_add!(EXT4_BLOCK_CACHE_MISSES, consecutive_misses);
 
                 // For an aligned multi-block data request, a mixed cache hit
                 // should not force an uncached run through a temporary buffer
@@ -1203,7 +1163,6 @@ impl<D: AsyncBlockDriverOps + Clone + 'static> Ext4Disk<D> {
                     let run_len = consecutive_misses
                         .checked_mul(block_size)
                         .ok_or(axdriver::prelude::DevError::InvalidParam)?;
-                    crate::buildstorm_stat_inc!(EXT4_BYPASS_READS);
                     self.read_blocks_from_disk_async(
                         current_block_offset,
                         consecutive_misses,
@@ -1344,7 +1303,6 @@ impl<D: AsyncBlockDriverOps + Clone + 'static> Ext4Disk<D> {
         let end_block_offset = ((request_end - 1) / block_size) * block_size;
 
         if bypass_block_cache(offset, data.len(), block_size) {
-            crate::buildstorm_stat_inc!(EXT4_BYPASS_WRITES);
             self.write_block_to_disk_async(offset, data).await?;
             {
                 let mut current = start_block_offset;
@@ -1389,7 +1347,6 @@ impl<D: AsyncBlockDriverOps + Clone + 'static> Ext4Disk<D> {
             };
 
             if has_cache {
-                crate::buildstorm_stat_inc!(EXT4_BLOCK_CACHE_HITS);
                 self.mark_dirty_block(current_block_offset, sequence, &owners);
                 current_block_offset += block_size;
                 continue;
@@ -1399,7 +1356,6 @@ impl<D: AsyncBlockDriverOps + Clone + 'static> Ext4Disk<D> {
             // the cache so repeated metadata updates collapse into one later
             // writeback instead of one VirtIO completion per update.
             if block_start == 0 && overlap_len == block_size {
-                crate::buildstorm_stat_inc!(EXT4_BLOCK_CACHE_MISSES);
                 let block = CacheBlock {
                     data: data[data_start..data_start + block_size].to_vec(),
                     dirty: true,
@@ -1452,7 +1408,6 @@ impl<D: AsyncBlockDriverOps + Clone + 'static> Ext4Disk<D> {
                         consecutive_misses += 1;
                     }
                 }
-                crate::buildstorm_stat_add!(EXT4_BLOCK_CACHE_MISSES, consecutive_misses);
 
                 // Pre-read consecutive partial miss blocks from disk in one go
                 let run_len = consecutive_misses

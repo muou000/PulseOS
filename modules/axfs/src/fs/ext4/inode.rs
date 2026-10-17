@@ -53,20 +53,6 @@ enum MutationLockRole {
 
 struct MutationLockGuard<'a> {
     _guard: async_lock::MutexGuard<'a, ()>,
-    #[cfg(feature = "qperf-trace")]
-    directory_acquired_at_ns: Option<u64>,
-}
-
-impl Drop for MutationLockGuard<'_> {
-    fn drop(&mut self) {
-        #[cfg(feature = "qperf-trace")]
-        if let Some(acquired_at_ns) = self.directory_acquired_at_ns {
-            // These are cumulative per-lock durations and can overlap across tasks.
-            let held_ns =
-                (axhal::time::monotonic_time_nanos() as u64).saturating_sub(acquired_at_ns);
-            crate::buildstorm_stat_add!(EXT4_DIR_MUTATION_LOCK_HOLD_NS, held_ns);
-        }
-    }
 }
 
 type MutationLockOrderKey = (u32, usize);
@@ -703,40 +689,6 @@ impl Inode {
         }
     }
 
-    #[cfg(feature = "qperf-trace")]
-    async fn lock_mutation(&self, role: MutationLockRole) -> MutationLockGuard<'_> {
-        let track_directory =
-            role == MutationLockRole::Directory && crate::buildstorm_stats::is_active();
-        if track_directory {
-            if let Some(guard) = self.mutation_lock.try_lock() {
-                crate::buildstorm_stat_inc!(EXT4_DIR_MUTATION_LOCK_FAST);
-                return MutationLockGuard {
-                    _guard: guard,
-                    directory_acquired_at_ns: Some(axhal::time::monotonic_time_nanos() as u64),
-                };
-            }
-
-            let wait_started_ns = axhal::time::monotonic_time_nanos() as u64;
-            let guard = self.mutation_lock.lock().await;
-            let acquired_at_ns = axhal::time::monotonic_time_nanos() as u64;
-            crate::buildstorm_stat_inc!(EXT4_DIR_MUTATION_LOCK_WAIT);
-            crate::buildstorm_stat_add!(
-                EXT4_DIR_MUTATION_LOCK_WAIT_NS,
-                acquired_at_ns.saturating_sub(wait_started_ns)
-            );
-            return MutationLockGuard {
-                _guard: guard,
-                directory_acquired_at_ns: Some(acquired_at_ns),
-            };
-        }
-
-        MutationLockGuard {
-            _guard: self.mutation_lock.lock().await,
-            directory_acquired_at_ns: None,
-        }
-    }
-
-    #[cfg(not(feature = "qperf-trace"))]
     async fn lock_mutation(&self, _role: MutationLockRole) -> MutationLockGuard<'_> {
         MutationLockGuard {
             _guard: self.mutation_lock.lock().await,

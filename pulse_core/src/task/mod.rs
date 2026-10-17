@@ -812,15 +812,16 @@ impl axfs::ProcfsProcessProvider for PulseProcessProvider {
                 axmm::Backend::File(mapping) => {
                     is_shared = mapping.is_shared();
                     offset = mapping.file_offset();
-                    let cached_file = mapping.file();
-                    let loc = cached_file.location();
-                    if let Ok(meta) = axtask::future::block_on(loc.metadata()) {
-                        inode = meta.inode;
-                        dev_major = meta.device >> 8;
-                        dev_minor = meta.device & 0xff;
-                    }
-                    if let Ok(path) = loc.absolute_path() {
-                        path_buf = Some(path);
+                    if let Some(cached_file) = mapping.file().as_any().downcast_ref::<axfs::CachedFile>() {
+                        let loc = cached_file.location();
+                        if let Ok(meta) = axtask::future::block_on(loc.metadata()) {
+                            inode = meta.inode;
+                            dev_major = meta.device >> 8;
+                            dev_minor = meta.device & 0xff;
+                        }
+                        if let Ok(path) = loc.absolute_path() {
+                            path_buf = Some(path);
+                        }
                     }
                 }
                 _ => {}

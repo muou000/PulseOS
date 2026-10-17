@@ -23,7 +23,12 @@ pub(crate) mod impls {
     pub mod bpf;
 }
 
+#[cfg_attr(not(target_os = "none"), allow(dead_code))]
+mod shutdown;
+
 #[cfg(target_os = "none")]
 pub use handler::syscall_handler;
 #[cfg(target_os = "none")]
 pub use impls::{run_bpf_guest_checks, sys_sync};
+#[cfg(all(feature = "mapping-lifecycle-test", target_os = "none"))]
+pub use shutdown::run_mapping_shutdown_checks;

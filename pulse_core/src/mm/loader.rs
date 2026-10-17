@@ -483,8 +483,8 @@ fn load_segments(
                 seg_start_page,
                 map_len,
                 load_flags,
-                elf_file.clone(),
-                file_flags_for_segment(&ph),
+                Arc::new(elf_file.clone()),
+                file_flags_for_segment(&ph).into(),
                 file_start_page,
                 file_bytes,
                 false, // ELF segments are private mappings

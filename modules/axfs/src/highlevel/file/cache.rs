@@ -293,7 +293,6 @@ impl Default for PageAccessDomain {
 impl PageAccessDomain {
     #[inline]
     fn lock_for_page(&self, pn: u32) -> &async_lock::Mutex<()> {
-        crate::buildstorm_stat_inc!(PAGE_ACCESS_LOCK_LOOKUPS);
         &self.locks[pn as usize % PAGE_ACCESS_LOCK_STRIPES]
     }
 
@@ -304,81 +303,26 @@ impl PageAccessDomain {
     }
 
     async fn acquire_for_page(&self, pn: u32) -> async_lock::MutexGuard<'_, ()> {
-        let lock = self.lock_for_page(pn);
-        #[cfg(feature = "qperf-trace")]
-        {
-            if let Some(guard) = lock.try_lock() {
-                crate::buildstorm_stat_inc!(PAGE_ACCESS_LOCK_FAST);
-                return guard;
-            }
-            crate::buildstorm_stat_inc!(PAGE_ACCESS_LOCK_WAIT);
-        }
-        lock.lock().await
+        self.lock_for_page(pn).lock().await
     }
 
     async fn acquire_by_index(
         &self,
         index: usize,
-        owner: PageAccessOwner,
+        _owner: PageAccessOwner,
     ) -> async_lock::MutexGuard<'_, ()> {
-        let lock = self.lock_by_index(index);
-        #[cfg(feature = "qperf-trace")]
-        {
-            let class = match owner {
-                PageAccessOwner::Unclassified => None,
-                PageAccessOwner::Demand => Some(crate::buildstorm_stats::PageAccessClass::Demand),
-                PageAccessOwner::Prefetch => {
-                    Some(crate::buildstorm_stats::PageAccessClass::Prefetch)
-                }
-            };
-            if let Some(class) = class {
-                if let Some(guard) = lock.try_lock() {
-                    crate::buildstorm_stats::record_page_access_lock(class, None);
-                    return guard;
-                }
-                let wait_started_at_ns =
-                    crate::buildstorm_stats::is_active().then(axhal::time::monotonic_time_nanos);
-                let guard = lock.lock().await;
-                if let Some(wait_started_at_ns) = wait_started_at_ns {
-                    crate::buildstorm_stats::record_page_access_lock(
-                        class,
-                        Some(
-                            axhal::time::monotonic_time_nanos().saturating_sub(wait_started_at_ns),
-                        ),
-                    );
-                }
-                return guard;
-            }
-            if let Some(guard) = lock.try_lock() {
-                crate::buildstorm_stat_inc!(PAGE_ACCESS_LOCK_FAST);
-                return guard;
-            }
-            crate::buildstorm_stat_inc!(PAGE_ACCESS_LOCK_WAIT);
-            return lock.lock().await;
-        }
-        #[cfg(not(feature = "qperf-trace"))]
-        {
-            let _ = owner;
-            lock.lock().await
-        }
+        self.lock_by_index(index).lock().await
     }
 
     fn try_acquire_prefetch_by_index(
         &self,
         index: usize,
     ) -> Option<async_lock::MutexGuard<'_, ()>> {
-        let guard = self.lock_by_index(index).try_lock()?;
-        #[cfg(feature = "qperf-trace")]
-        crate::buildstorm_stats::record_page_access_lock(
-            crate::buildstorm_stats::PageAccessClass::Prefetch,
-            None,
-        );
-        Some(guard)
+        self.lock_by_index(index).try_lock()
     }
 
     fn locks_for_range(&self, pn: u32, page_count: usize) -> VfsResult<PageAccessLockIndices> {
         let page_count = page_count.max(1);
-        crate::buildstorm_stat_add!(PAGE_ACCESS_LOCK_LOOKUPS, page_count);
         let last_offset = u32::try_from(page_count - 1).map_err(|_| VfsError::StorageFull)?;
         pn.checked_add(last_offset).ok_or(VfsError::StorageFull)?;
 
@@ -399,7 +343,6 @@ impl PageAccessDomain {
             }
             indices.sort_unstable();
         }
-        crate::buildstorm_stat_add!(PAGE_ACCESS_STRIPES_LOCKED, indices.len());
         Ok(indices)
     }
 }
@@ -813,8 +756,6 @@ pub struct PageCache {
     may_write_mapping: bool,
     content_generation: u64,
     writable_mapping_generation: u64,
-    #[cfg(feature = "qperf-trace")]
-    prefetch_window: u64,
 }
 
 impl PageCache {
@@ -826,8 +767,6 @@ impl PageCache {
             may_write_mapping: false,
             content_generation: 0,
             writable_mapping_generation: 0,
-            #[cfg(feature = "qperf-trace")]
-            prefetch_window: 0,
         })
     }
 
@@ -851,8 +790,6 @@ impl PageCache {
             may_write_mapping: false,
             content_generation: 0,
             writable_mapping_generation: 0,
-            #[cfg(feature = "qperf-trace")]
-            prefetch_window: 0,
         }
     }
 
@@ -884,8 +821,6 @@ impl PageCache {
         let ref_count = axalloc::frame_table()
             .try_get_ref(paddr)
             .ok_or(VfsError::BadState)?;
-        #[cfg(feature = "qperf-trace")]
-        self.mark_demanded();
         if ref_count <= 1 {
             self.may_write_mapping = false;
         }
@@ -902,30 +837,6 @@ impl PageCache {
 
     pub fn data(&mut self) -> &mut [u8] {
         unsafe { core::slice::from_raw_parts_mut(self.frame.addr.as_mut_ptr(), PAGE_SIZE) }
-    }
-
-    #[cfg(feature = "qperf-trace")]
-    fn mark_prefetched(&mut self) {
-        let Some(window) = crate::buildstorm_stats::active_window() else {
-            return;
-        };
-        self.prefetch_window = window;
-        crate::buildstorm_stat_inc!(PAGE_PREFETCH_PAGES);
-    }
-
-    #[cfg(feature = "qperf-trace")]
-    fn mark_demanded(&mut self) {
-        if crate::buildstorm_stats::active_window() == Some(self.prefetch_window) {
-            crate::buildstorm_stat_inc!(PAGE_PREFETCH_HITS);
-        }
-        self.prefetch_window = 0;
-    }
-
-    #[cfg(feature = "qperf-trace")]
-    fn record_unused_prefetch_eviction(&self) {
-        if crate::buildstorm_stats::active_window() == Some(self.prefetch_window) {
-            crate::buildstorm_stat_inc!(PAGE_PREFETCH_UNUSED_EVICTIONS);
-        }
     }
 
     fn register_direct_read(
@@ -981,8 +892,6 @@ pub(super) struct CachedFileShared {
     // path owns `io_lock.write()` across that transition.
     unlinked: AtomicBool,
     mmap_prefetch: MmapPrefetchState,
-    #[cfg(feature = "qperf-trace")]
-    fill_inflight: AtomicU64,
 }
 
 struct SyncDirtyPages<'a> {
@@ -1050,8 +959,6 @@ impl CachedFileShared {
             writable_mapping_watch: AtomicBool::new(false),
             unlinked: AtomicBool::new(false),
             mmap_prefetch: MmapPrefetchState::new(),
-            #[cfg(feature = "qperf-trace")]
-            fill_inflight: AtomicU64::new(0),
         }
     }
 
@@ -1222,10 +1129,6 @@ impl CachedFileShared {
         };
         let evicted_pages = Self::pop_clean_lru_pages(&mut cache, limit);
         let evicted = evicted_pages.len();
-        #[cfg(feature = "qperf-trace")]
-        for (_, page) in &evicted_pages {
-            page.record_unused_prefetch_eviction();
-        }
         drop(cache);
         drop(listeners);
         drop(evicted_pages);
@@ -2069,7 +1972,6 @@ pub(super) async fn shared_file_state_async(
     }
     registry.sweep_dead();
     registry.insert(key, &state);
-    crate::buildstorm_stat_inc!(FILE_CACHE_STATES_CREATED);
     drop(registry);
     if !in_memory {
         ACTIVE_DISK_FILE_CACHES.lock().push(state.clone());
@@ -2274,8 +2176,6 @@ impl CachedFile {
                     cache.put(evict_pn, page);
                     return Err(err);
                 }
-                #[cfg(feature = "qperf-trace")]
-                page.record_unused_prefetch_eviction();
                 evicted = Some((evict_pn, page));
             } else {
                 self.shared.cache_soft_limit.fetch_max(
@@ -2366,70 +2266,25 @@ impl CachedFile {
         Self::pin_cached_pages(&mut cache, pn, page_count, may_write)
     }
 
-    #[cfg(feature = "qperf-trace")]
-    fn begin_page_fill_io_stats(
-        &self,
-        demand_pages: usize,
-    ) -> (Option<u64>, crate::buildstorm_stats::PageFillGuard<'_>) {
-        let demand_submitted_at_ns = if demand_pages != 0 && crate::buildstorm_stats::is_active() {
-            crate::buildstorm_stat_inc!(PAGE_DEMAND_FILL_SUBMISSIONS);
-            Some(axhal::time::monotonic_time_nanos())
-        } else {
-            None
-        };
-        (
-            demand_submitted_at_ns,
-            crate::buildstorm_stats::begin_page_fill(&self.shared.fill_inflight),
-        )
-    }
-
-    #[cfg(feature = "qperf-trace")]
-    fn finish_page_fill_io_stats(&self, demand_submitted_at_ns: Option<u64>) {
-        let Some(demand_submitted_at_ns) = demand_submitted_at_ns else {
-            return;
-        };
-        let wait_ns = axhal::time::monotonic_time_nanos().saturating_sub(demand_submitted_at_ns);
-        crate::buildstorm_stat_inc!(PAGE_DEMAND_FILL_COMPLETIONS);
-        crate::buildstorm_stat_add!(PAGE_DEMAND_FILL_WAIT_NS, wait_ns);
-        crate::buildstorm_stats::observe_max(
-            &crate::buildstorm_stats::PAGE_DEMAND_FILL_WAIT_MAX_NS,
-            wait_ns,
-        );
-    }
-
     async fn load_pages_async(
         &self,
         file: &FileNode,
         pn: u32,
         page_count: usize,
         file_len: u64,
-        demand_pages: usize,
     ) -> VfsResult<Vec<(u32, PageCache)>> {
-        debug_assert!(demand_pages <= page_count);
         let page_start = pn as u64 * PAGE_SIZE as u64;
         let bytes_available = file_len.saturating_sub(page_start);
-        crate::buildstorm_stat_inc!(PAGE_FILL_CALLS);
-        crate::buildstorm_stat_add!(PAGE_FILL_PAGES, page_count);
 
         if page_count == 1 {
             // A single-page fault can read directly into its final page. This
             // avoids allocating, zeroing, and copying through a temporary Vec.
             let will_read = !self.in_memory && bytes_available != 0;
-            crate::buildstorm_stat_inc!(PAGE_FILL_DIRECT_PAGES);
             let mut page = PageCache::new(will_read)?;
             if will_read {
                 let wanted = bytes_available.min(PAGE_SIZE as u64) as usize;
-                crate::buildstorm_stat_add!(PAGE_FILL_DEVICE_BYTES, wanted);
                 let registration = page.register_direct_read(wanted)?;
-                #[cfg(feature = "qperf-trace")]
-                let (demand_submitted_at_ns, fill_guard) =
-                    self.begin_page_fill_io_stats(demand_pages);
                 let read_result = file.read_at(&mut page.data()[..wanted], page_start).await;
-                #[cfg(feature = "qperf-trace")]
-                {
-                    self.finish_page_fill_io_stats(demand_submitted_at_ns);
-                    drop(fill_guard);
-                }
                 drop(registration);
                 let read = read_result?;
                 if read > wanted {
@@ -2445,16 +2300,11 @@ impl CachedFile {
         let buffer_len = page_count
             .checked_mul(PAGE_SIZE)
             .ok_or(VfsError::StorageFull)?;
-        crate::buildstorm_stat_add!(PAGE_FILL_CONTIGUOUS_PAGES, page_count);
         let group = ContiguousPageGroup::new(page_count)?;
         let mut initialized = 0;
         if !self.in_memory && bytes_available != 0 {
             let wanted = bytes_available.min(buffer_len as u64) as usize;
-            crate::buildstorm_stat_add!(PAGE_FILL_DIRECT_PAGES, page_count);
-            crate::buildstorm_stat_add!(PAGE_FILL_DEVICE_BYTES, wanted);
             let registration = group.register_direct_read(wanted)?;
-            #[cfg(feature = "qperf-trace")]
-            let (demand_submitted_at_ns, fill_guard) = self.begin_page_fill_io_stats(demand_pages);
             let read_result = {
                 // SAFETY: `group` is not visible outside this fill operation
                 // until the direct read completes and its registration is
@@ -2462,11 +2312,6 @@ impl CachedFile {
                 let data = unsafe { group.bytes_mut(wanted)? };
                 file.read_at(data, page_start).await
             };
-            #[cfg(feature = "qperf-trace")]
-            {
-                self.finish_page_fill_io_stats(demand_submitted_at_ns);
-                drop(fill_guard);
-            }
             drop(registration);
             let read = read_result?;
             if read > wanted {
@@ -2573,10 +2418,6 @@ impl CachedFile {
         }
 
         if !evicted_pages.is_empty() {
-            #[cfg(feature = "qperf-trace")]
-            for (_, page) in &evicted_pages {
-                page.record_unused_prefetch_eviction();
-            }
             let listeners = self.shared.evict_listeners_snapshot();
             for (evicted_pn, page) in &evicted_pages {
                 for listener in &listeners {
@@ -2602,8 +2443,6 @@ impl CachedFile {
             .page_access
             .locks_for_range(pn, requested_pages)?;
         let mut fill_guards = heapless::Vec::<_, PAGE_ACCESS_LOCK_STRIPES>::new();
-        #[cfg(feature = "qperf-trace")]
-        let mut page_access_hold: Option<crate::buildstorm_stats::PageAccessHoldGuard> = None;
         let page_access_owner = if pin.is_some() || demand_pages != 0 {
             PageAccessOwner::Demand
         } else {
@@ -2613,13 +2452,6 @@ impl CachedFile {
             let guard = if matches!(page_access_owner, PageAccessOwner::Prefetch) {
                 let Some(guard) = self.shared.page_access.try_acquire_prefetch_by_index(index)
                 else {
-                    #[cfg(feature = "qperf-trace")]
-                    {
-                        crate::buildstorm_stat_inc!(MMAP_PREFETCH_SKIPPED_PAGE_LOCK);
-                        if let Some(mut hold) = page_access_hold.take() {
-                            hold.cancel();
-                        }
-                    }
                     // Prefetch is best effort. A busy stripe is a signal to
                     // let the demand path win and let a later fault retry.
                     return Ok((0, None));
@@ -2631,15 +2463,6 @@ impl CachedFile {
                     .acquire_by_index(index, page_access_owner)
                     .await
             };
-            #[cfg(feature = "qperf-trace")]
-            if page_access_hold.is_none() {
-                let class = match page_access_owner {
-                    PageAccessOwner::Demand => crate::buildstorm_stats::PageAccessClass::Demand,
-                    PageAccessOwner::Prefetch => crate::buildstorm_stats::PageAccessClass::Prefetch,
-                    PageAccessOwner::Unclassified => unreachable!(),
-                };
-                page_access_hold = Some(crate::buildstorm_stats::begin_page_access_hold(class));
-            }
             fill_guards.push(guard).map_err(|_| VfsError::StorageFull)?;
         }
 
@@ -2692,31 +2515,15 @@ impl CachedFile {
             } else {
                 (first_missing_page, page_count - first_missing_offset)
             };
-            let demand_pages = if pin.is_some() {
-                fill_count
-            } else {
-                demand_pages.min(fill_count)
-            };
             let mut new_pages = self
-                .load_pages_async(file, fill_page, fill_count, file_len, demand_pages)
+                .load_pages_async(file, fill_page, fill_count, file_len)
                 .await?;
-            #[cfg(feature = "qperf-trace")]
-            let prefetch_start_page = pin
-                .is_none()
-                .then(|| {
-                    u32::try_from(demand_pages)
-                        .ok()
-                        .and_then(|offset| fill_page.checked_add(offset))
-                })
-                .flatten();
 
             // Direct writes hold the exclusive side while changing the backend
             // and invalidating the cache. Validate and publish under the shared
             // side so a stale fill can never be inserted after that invalidation.
             let io_guard = self.shared.io_lock.read().await;
             if self.shared.cache_generation.load(Ordering::Acquire) != generation {
-                crate::buildstorm_stat_inc!(PAGE_FILL_GENERATION_RETRIES);
-                crate::buildstorm_stat_add!(PAGE_FILL_GENERATION_RETRY_PAGES, fill_count);
                 continue;
             }
 
@@ -2755,12 +2562,6 @@ impl CachedFile {
                 if cache.contains(&page_num) {
                     continue;
                 }
-                #[cfg(feature = "qperf-trace")]
-                let mut page = page;
-                #[cfg(feature = "qperf-trace")]
-                if prefetch_start_page.is_some_and(|first_prefetch| page_num >= first_prefetch) {
-                    page.mark_prefetched();
-                }
                 cache.put(page_num, page);
             }
             drop(cache);
@@ -2768,11 +2569,6 @@ impl CachedFile {
 
             let listeners =
                 (!evicted_pages.is_empty()).then(|| self.shared.evict_listeners_snapshot());
-            crate::buildstorm_stat_add!(PAGE_EVICTIONS, evicted_pages.len());
-            #[cfg(feature = "qperf-trace")]
-            for (_, page) in &evicted_pages {
-                page.record_unused_prefetch_eviction();
-            }
             for (evicted_pn, page) in &evicted_pages {
                 for listener in listeners.as_ref().unwrap().iter() {
                     (listener.listener)(*evicted_pn, page);
@@ -2855,12 +2651,6 @@ impl CachedFile {
         let _guard = axtask::future::block_on(self.shared.io_lock.read());
         let mut cache = self.shared.page_cache.lock();
         let page = cache.get_mut(&pn);
-        #[cfg(feature = "qperf-trace")]
-        let mut page = page;
-        #[cfg(feature = "qperf-trace")]
-        if let Some(page) = page.as_deref_mut() {
-            page.mark_demanded();
-        }
         f(page)
     }
 
@@ -2880,8 +2670,6 @@ impl CachedFile {
             file_len,
         )?;
         let page = guard.get_mut(&pn).ok_or(VfsError::BadState)?;
-        #[cfg(feature = "qperf-trace")]
-        page.mark_demanded();
         let result = f(page, evicted);
         drop(guard);
         drop(io_guard);
@@ -2929,8 +2717,6 @@ impl CachedFile {
             let page = cache
                 .get_mut(&pn)
                 .expect("resident cache page disappeared while locked");
-            #[cfg(feature = "qperf-trace")]
-            page.mark_demanded();
             let written = match dst.write(&page.data()[page_offset..page_end]) {
                 Ok(written) => written,
                 Err(err) => return Some(Err(err.into())),
@@ -2945,7 +2731,6 @@ impl CachedFile {
             page_offset = 0;
         }
 
-        crate::buildstorm_stat_add!(PAGE_READ_HITS, end_page - start_page);
         self.read_hint.store(end, Ordering::Release);
         Some(Ok(read))
     }
@@ -2981,8 +2766,6 @@ impl CachedFile {
                     let Some(page) = cache.get_mut(&pn) else {
                         break;
                     };
-                    #[cfg(feature = "qperf-trace")]
-                    page.mark_demanded();
                     let copied = page_end
                         .checked_sub(page_offset)
                         .ok_or(VfsError::BadState)?;
@@ -2998,11 +2781,9 @@ impl CachedFile {
                 hit_pages
             };
             if hit_pages != 0 {
-                crate::buildstorm_stat_add!(PAGE_READ_HITS, hit_pages);
                 continue;
             }
 
-            crate::buildstorm_stat_inc!(PAGE_READ_MISSES);
             // The page can be invalidated after a fill returns but before this
             // task reacquires the read lock, so retry this lookup on the next
             // iteration rather than carrying a page reference across await.
@@ -3041,11 +2822,8 @@ impl CachedFile {
 
             let mut cache = self.shared.page_cache.lock();
             let page = cache.get_mut(&pn).ok_or(VfsError::Io)?;
-            #[cfg(feature = "qperf-trace")]
-            page.mark_demanded();
             page.data()[page_offset..page_offset + len]
                 .copy_from_slice(&data[copied..copied + len]);
-            crate::buildstorm_stat_add!(PAGE_WRITE_BYTES, len);
             if !self.in_memory {
                 page.mark_dirty();
                 if !writeback_requested {
@@ -3322,17 +3100,13 @@ impl CachedFile {
         };
 
         if !self.shared.mmap_prefetch.try_start() {
-            crate::buildstorm_stat_inc!(MMAP_PREFETCH_SKIPPED_PER_FILE);
             return;
         }
         let Some(slot) = MMAP_PREFETCH_SLOTS.try_acquire() else {
             self.shared.mmap_prefetch.finish();
-            crate::buildstorm_stat_inc!(MMAP_PREFETCH_SKIPPED_GLOBAL);
             return;
         };
 
-        crate::buildstorm_stat_inc!(MMAP_PREFETCH_SUBMISSIONS);
-        crate::buildstorm_stat_add!(MMAP_PREFETCH_REQUESTED_PAGES, page_count);
         let cached = self.clone();
         let shared = self.shared.clone();
         axtask::spawn_async(async move {
@@ -3340,15 +3114,7 @@ impl CachedFile {
                 shared,
                 _slot: slot,
             };
-            if cached
-                .prefetch_pages_async(&file, pn, page_count)
-                .await
-                .is_ok()
-            {
-                crate::buildstorm_stat_inc!(MMAP_PREFETCH_COMPLETIONS);
-            } else {
-                crate::buildstorm_stat_inc!(MMAP_PREFETCH_FAILURES);
-            }
+            let _ = cached.prefetch_pages_async(&file, pn, page_count).await;
         });
     }
 
@@ -3497,6 +3263,49 @@ impl CachedFile {
             self.shared.request_background_writeback();
         }
         result
+    }
+}
+
+impl axmm::FileMappingSource for CachedFile {
+    fn mapping_generation(&self) -> u64 {
+        self.mapping_generation()
+    }
+
+    fn get_shared_page_paddrs(
+        &self,
+        page_number: u32,
+        page_count: usize,
+        may_write: bool,
+    ) -> axerrno::AxResult<axmm::FileMappingPageBatch> {
+        self.get_shared_page_paddrs(page_number, page_count, may_write)
+    }
+
+    fn prefetch_pages(&self, page_number: u32, page_count: usize) {
+        self.prefetch_pages(page_number, page_count);
+    }
+
+    fn size(&self) -> u64 {
+        self.size()
+    }
+
+    fn shared_page_paddr(&self, page_number: u32) -> axerrno::AxResult<PhysAddr> {
+        self.shared_page_paddr(page_number)
+    }
+
+    fn mark_page_dirty_if_paddr(&self, page_number: u32, paddr: PhysAddr) -> axerrno::AxResult {
+        self.mark_page_dirty_if_paddr(page_number, paddr)
+    }
+
+    fn sync(&self, data_only: bool) -> axerrno::AxResult {
+        self.sync(data_only)
+    }
+
+    fn page_cache_identity(&self) -> usize {
+        Arc::as_ptr(&self.shared) as usize
+    }
+
+    fn as_any(&self) -> &dyn core::any::Any {
+        self
     }
 }
 

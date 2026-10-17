@@ -98,12 +98,6 @@ impl OutputMarkerScanner {
                     PhaseBoundary::End => axtask::qperf_trace::PhaseBoundary::End,
                 };
                 axtask::qperf_trace::phase_marker(qperf_boundary, phase);
-                if phase == b"buildstorm" {
-                    match qperf_boundary {
-                        axtask::qperf_trace::PhaseBoundary::Begin => axfs::buildstorm_stats::begin(),
-                        axtask::qperf_trace::PhaseBoundary::End => axfs::buildstorm_stats::finish(),
-                    }
-                }
             }
             #[cfg(feature = "bpf-trace")]
             {

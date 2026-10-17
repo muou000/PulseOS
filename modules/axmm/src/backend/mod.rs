@@ -21,7 +21,10 @@ pub(crate) use alloc::{alloc_frame, cow_dec_frame_ref, cow_inc_frame_ref, deallo
 
 pub use self::{
     cow::CowMapping,
-    file::{FilePageLoad, FilePagePrepared},
+    file::{
+        FILE_MAPPING_PAGE_BATCH_CAPACITY, FileMapping, FileMappingFlags, FileMappingPageBatch,
+        FileMappingSource, FileMappingWriteGuard, FilePageLoad, FilePagePrepared,
+    },
     shared::SharedFrame,
 };
 
@@ -148,7 +151,7 @@ pub(crate) fn protect_populated_range<M: MappingMutationTracker<VirtAddr>>(
 #[derive(Default)]
 pub struct FileWritebacks {
     pages: Vec<file::DirtyFilePage>,
-    files: Vec<axfs::CachedFile>,
+    files: Vec<Arc<dyn file::FileMappingSource>>,
 }
 
 // Failed publications retain both the cache and the extra physical-frame pin.
@@ -218,7 +221,7 @@ impl FileWritebacks {
     /// enough capacity for the full operation.
     pub(crate) fn record_page(
         &mut self,
-        file: &axfs::CachedFile,
+        file: &Arc<dyn file::FileMappingSource>,
         page_number: u32,
         frame: PhysAddr,
     ) -> axerrno::AxResult {
@@ -228,11 +231,11 @@ impl FileWritebacks {
     }
 
     /// Request a sync even if a shared mapping has no resident or writable PTEs.
-    pub(crate) fn record_file(&mut self, file: &axfs::CachedFile) {
+    pub(crate) fn record_file(&mut self, file: &Arc<dyn file::FileMappingSource>) {
         if !self
             .files
             .iter()
-            .any(|recorded| recorded.shares_page_cache_with(file))
+            .any(|recorded| recorded.shares_page_cache_with(file.as_ref()))
         {
             self.files.push(file.clone());
         }
@@ -251,7 +254,7 @@ impl FileWritebacks {
 
     /// Retry previously failed publications once, publish the entire new batch,
     /// and release every successful record's extra pin. Storage errors leave
-    /// dirty ownership in axfs rather than retaining physical-frame pins here.
+    /// dirty ownership in the file mapping source rather than retaining physical-frame pins here.
     pub fn complete(mut self) -> axerrno::AxResult {
         let mut pages = core::mem::take(&mut *FAILED_FILE_PAGES.lock());
         pages.append(&mut self.pages);
@@ -455,7 +458,7 @@ impl DeferredReclaims {
 
     pub(crate) fn defer_file_page(
         &mut self,
-        file: &axfs::CachedFile,
+        file: &Arc<dyn file::FileMappingSource>,
         page_number: u32,
         frame: PhysAddr,
     ) -> axerrno::AxResult {
