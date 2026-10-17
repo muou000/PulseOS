@@ -1,3 +1,39 @@
 {
     "rust-analyzer.cargo.target": "riscv64gc-unknown-none-elf",
+    "rust-analyzer.cargo.allTargets": false,
+    "rust-analyzer.cargo.features": [
+        "axfeat/defplat",
+        "axfeat/log-level-info",
+        "axfeat/bus-mmio",
+        "smp",
+        "qemu"
+    ],
+    "rust-analyzer.cargo.extraArgs": [
+        "--exclude",
+        "bpf-analyzer",
+        "--exclude",
+        "bpf-capture"
+    ],
+    "rust-analyzer.cargo.extraEnv": {
+        "AX_CONFIG_PATH": "/home/muou/PulseOS/.axconfig.toml"
+    },
+    "rust-analyzer.check.allTargets": false,
+    "rust-analyzer.check.features": [
+        "axfeat/defplat",
+        "axfeat/log-level-info",
+        "axfeat/bus-mmio",
+        "smp",
+        "qemu"
+    ],
+    "rust-analyzer.check.extraArgs": [
+        "--exclude",
+        "bpf-analyzer",
+        "--exclude",
+        "bpf-capture"
+    ],
+    "rust-analyzer.check.extraEnv": {
+        "AX_CONFIG_PATH": "/home/muou/PulseOS/.axconfig.toml"
+    },
+    "rust-analyzer.procMacro.enable": true,
+    "rust-analyzer.cargo.buildScripts.enable": true
 }
