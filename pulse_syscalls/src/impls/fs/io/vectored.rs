@@ -38,18 +38,7 @@ pub fn sys_writev(fd: usize, iov: usize, iovcnt: usize) -> isize {
             #[cfg(any(feature = "qperf-trace", feature = "bpf-trace"))]
             marker_scanner.push(bytes);
         },
-        |transfer| {
-            if transfer.source == UserWriteSource::Pinned {
-                if transfer.written > 0 {
-                    axfs::buildstorm_stat_add!(SYSCALL_IOV_DIRECT_WRITE_BYTES, transfer.written);
-                }
-            } else {
-                if !transfer.scratch_was_present {
-                    axfs::buildstorm_stat_inc!(SYSCALL_IOV_SCRATCH_ALLOCS);
-                }
-                axfs::buildstorm_stat_add!(SYSCALL_IOV_SCRATCH_COPY_BYTES, transfer.submitted);
-            }
-        },
+        |_| {},
     )
 }
 
@@ -310,18 +299,7 @@ pub fn sys_pwritev(fd: usize, iov: usize, iovcnt: usize, pos_l: usize, pos_h: us
         WriteOffset::Positional(offset),
         &mut fallback_buf,
         |_| {},
-        |transfer| {
-            if transfer.source == UserWriteSource::Pinned {
-                if transfer.written > 0 {
-                    axfs::buildstorm_stat_add!(SYSCALL_IOV_DIRECT_WRITE_BYTES, transfer.written);
-                }
-            } else {
-                if !transfer.scratch_was_present {
-                    axfs::buildstorm_stat_inc!(SYSCALL_IOV_SCRATCH_ALLOCS);
-                }
-                axfs::buildstorm_stat_add!(SYSCALL_IOV_SCRATCH_COPY_BYTES, transfer.submitted);
-            }
-        },
+        |_| {},
     )
 }
 

@@ -2,7 +2,6 @@ use alloc::sync::Arc;
 use core::sync::atomic::{AtomicU64, Ordering};
 
 use axerrno::{AxError, AxResult};
-use axfs::{CachedFile, FileFlags, SHARED_PAGE_BATCH_CAPACITY, SharedPagePaddrs};
 use axhal::{
     mem::{flush_dcache_range, phys_to_virt},
     paging::{MappingFlags, PageSize, PageTable},
@@ -15,6 +14,75 @@ use super::{
     Backend,
     alloc::{alloc_frame, dealloc_frame},
 };
+
+pub const FILE_MAPPING_PAGE_BATCH_CAPACITY: usize = 16;
+pub type FileMappingPageBatch = heapless::Vec<(u32, PhysAddr), FILE_MAPPING_PAGE_BATCH_CAPACITY>;
+
+bitflags::bitflags! {
+    /// Permissions granted by the underlying file for memory mapping.
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    pub struct FileMappingFlags: u32 {
+        const READ = 1 << 0;
+        const WRITE = 1 << 1;
+    }
+}
+
+/// An opaque guard that holds write access on the underlying file for the
+/// lifetime of a writable file mapping.
+#[derive(Clone)]
+pub struct FileMappingWriteGuard(Arc<dyn core::any::Any + Send + Sync>);
+
+impl FileMappingWriteGuard {
+    pub fn new(guard: impl core::any::Any + Send + Sync + 'static) -> Self {
+        Self(Arc::new(guard))
+    }
+}
+
+impl core::fmt::Debug for FileMappingWriteGuard {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("FileMappingWriteGuard").finish_non_exhaustive()
+    }
+}
+
+/// Object-safe contract for file-backed memory mapping.
+pub trait FileMappingSource: Send + Sync + 'static {
+    /// Returns the invalidation epoch for prepared mapped-page fills.
+    fn mapping_generation(&self) -> u64;
+
+    /// Faults in and pins a bounded run of pages for a user mapping.
+    fn get_shared_page_paddrs(
+        &self,
+        page_number: u32,
+        page_count: usize,
+        may_write: bool,
+    ) -> AxResult<FileMappingPageBatch>;
+
+    /// Starts a best-effort prefetch for pages after a sequential fault.
+    fn prefetch_pages(&self, page_number: u32, page_count: usize);
+
+    /// Logical size of the file in bytes.
+    fn size(&self) -> u64;
+
+    /// Returns a resident page's physical address without adding a mapping pin.
+    fn shared_page_paddr(&self, page_number: u32) -> AxResult<PhysAddr>;
+
+    /// Marks a resident page dirty if its physical address matches.
+    fn mark_page_dirty_if_paddr(&self, page_number: u32, paddr: PhysAddr) -> AxResult;
+
+    /// Flushes dirty pages to backing storage.
+    fn sync(&self, data_only: bool) -> AxResult;
+
+    /// Identity token for the page cache (e.g. pointer as usize).
+    fn page_cache_identity(&self) -> usize;
+
+    /// Checks if this source shares page cache with another source.
+    fn shares_page_cache_with(&self, other: &dyn FileMappingSource) -> bool {
+        self.page_cache_identity() == other.page_cache_identity()
+    }
+
+    /// Access to Any for downcasting to concrete file types when needed.
+    fn as_any(&self) -> &dyn core::any::Any;
+}
 
 fn sync_executable_mapping(flags: MappingFlags) {
     if !flags.contains(MappingFlags::EXECUTE) {
@@ -30,7 +98,7 @@ fn sync_executable_mapping(flags: MappingFlags) {
     }
 }
 
-const FILE_FAULT_AROUND_PAGES: usize = SHARED_PAGE_BATCH_CAPACITY;
+const FILE_FAULT_AROUND_PAGES: usize = FILE_MAPPING_PAGE_BATCH_CAPACITY;
 const COLD_FILE_FAULT_AROUND_PAGES: usize = 4;
 const _: () = assert!(FILE_FAULT_AROUND_PAGES > 0 && FILE_FAULT_AROUND_PAGES <= u16::BITS as usize);
 const _: () = assert!(
@@ -162,19 +230,6 @@ impl FileReadAheadState {
         } else {
             max_pages.min(COLD_FILE_FAULT_AROUND_PAGES)
         };
-        if sequential {
-            axfs::buildstorm_stat_inc!(MM_FILE_FAULT_SEQUENTIAL_BATCHES);
-            if page_count == FILE_FAULT_AROUND_PAGES {
-                axfs::buildstorm_stat_inc!(MM_FILE_FAULT_SEQUENTIAL_FULL_BATCHES);
-            }
-            axfs::buildstorm_stat_add!(MM_FILE_FAULT_SEQUENTIAL_REQUESTED_PAGES, page_count);
-        } else {
-            axfs::buildstorm_stat_inc!(MM_FILE_FAULT_COLD_BATCHES);
-            if page_count == COLD_FILE_FAULT_AROUND_PAGES {
-                axfs::buildstorm_stat_inc!(MM_FILE_FAULT_COLD_FULL_BATCHES);
-            }
-            axfs::buildstorm_stat_add!(MM_FILE_FAULT_COLD_REQUESTED_PAGES, page_count);
-        }
         self.next_page = u32::try_from(page_count)
             .ok()
             .and_then(|count| page_number.checked_add(count));
@@ -197,18 +252,18 @@ impl FileReadAheadState {
 pub struct FileMapping {
     id: FileMappingId,
     start: VirtAddr,
-    file: CachedFile,
-    file_flags: FileFlags,
+    file: Arc<dyn FileMappingSource>,
+    file_flags: FileMappingFlags,
     file_offset: usize,
     file_bytes: usize,
     shared: bool,
     read_ahead: Arc<Mutex<FileReadAheadState>>,
-    _write_access: Option<axfs::WriteAccessGuard>,
+    _write_access: Option<FileMappingWriteGuard>,
 }
 
 #[derive(Clone)]
 pub struct FilePageLoad {
-    file: CachedFile,
+    file: Arc<dyn FileMappingSource>,
     mapping_id: FileMappingId,
     mapping_flags: MappingFlags,
     generation: Option<crate::lifecycle::MappingGeneration>,
@@ -222,14 +277,14 @@ pub struct FilePageLoad {
 }
 
 pub struct FilePagePrepared {
-    file: CachedFile,
+    file: Arc<dyn FileMappingSource>,
     mapping_id: FileMappingId,
     mapping_flags: MappingFlags,
     generation: Option<crate::lifecycle::MappingGeneration>,
     cache_generation: u64,
     requested_page: u32,
     sequential: bool,
-    pages: SharedPagePaddrs,
+    pages: FileMappingPageBatch,
     private_frame: Option<OwnedFramePin>,
     mapped_mask: u16,
 }
@@ -266,13 +321,13 @@ impl Drop for OwnedFramePin {
 }
 
 pub(super) struct DirtyFilePage {
-    file: CachedFile,
+    file: Arc<dyn FileMappingSource>,
     page_number: u32,
     frame: OwnedFramePin,
 }
 
 impl DirtyFilePage {
-    pub(super) fn new(file: &CachedFile, page_number: u32, frame: PhysAddr) -> AxResult<Self> {
+    pub(super) fn new(file: &Arc<dyn FileMappingSource>, page_number: u32, frame: PhysAddr) -> AxResult<Self> {
         Ok(Self {
             file: file.clone(),
             page_number,
@@ -329,15 +384,6 @@ impl FilePageLoad {
             flush_dcache_range(*frame, PAGE_SIZE_4K);
         }
         let prepared_pages = frames.len();
-        axfs::buildstorm_stat_add!(MM_FILE_FAULT_PREPARED_PAGES, prepared_pages);
-        if self.sequential {
-            axfs::buildstorm_stat_add!(MM_FILE_FAULT_SEQUENTIAL_PREPARED_PAGES, prepared_pages);
-        } else {
-            axfs::buildstorm_stat_add!(MM_FILE_FAULT_COLD_PREPARED_PAGES, prepared_pages);
-        }
-        if prepared_pages < requested_pages {
-            axfs::buildstorm_stat_inc!(MM_FILE_FAULT_SHORT_PREPARES);
-        }
         self.read_ahead
             .lock()
             .finish(self.page_number, requested_pages, prepared_pages);
@@ -408,7 +454,7 @@ impl FilePagePrepared {
 
     fn matches(
         &self,
-        file: &CachedFile,
+        file: &dyn FileMappingSource,
         mapping_id: FileMappingId,
         mapping_flags: MappingFlags,
         page_number: u32,
@@ -454,21 +500,21 @@ impl FileMapping {
     }
 
     pub(crate) fn permits(&self, flags: MappingFlags) -> bool {
-        if flags.contains(MappingFlags::READ) && !self.file_flags.contains(FileFlags::READ) {
+        if flags.contains(MappingFlags::READ) && !self.file_flags.contains(FileMappingFlags::READ) {
             return false;
         }
         if flags.contains(MappingFlags::WRITE) {
             if self.shared {
-                if !self.file_flags.contains(FileFlags::WRITE) {
+                if !self.file_flags.contains(FileMappingFlags::WRITE) {
                     return false;
                 }
             } else {
-                if !self.file_flags.contains(FileFlags::READ) {
+                if !self.file_flags.contains(FileMappingFlags::READ) {
                     return false;
                 }
             }
         }
-        if flags.contains(MappingFlags::EXECUTE) && !self.file_flags.contains(FileFlags::READ) {
+        if flags.contains(MappingFlags::EXECUTE) && !self.file_flags.contains(FileMappingFlags::READ) {
             return false;
         }
         true
@@ -482,7 +528,7 @@ impl FileMapping {
         self.file_offset
     }
 
-    pub fn file(&self) -> &CachedFile {
+    pub fn file(&self) -> &Arc<dyn FileMappingSource> {
         &self.file
     }
 
@@ -546,7 +592,6 @@ impl FileMapping {
         let page_addr = vaddr.align_down_4k();
         let file_size = self.file_bytes();
         let (file_offset, _) = self.page_read_window_at_size(page_addr, file_size)?;
-        axfs::buildstorm_stat_inc!(MM_FILE_FAULT_PTE_READ_PROBES);
         if pt
             .read_for_addr(page_addr)
             .query(page_addr)
@@ -580,7 +625,7 @@ impl FileMapping {
             page_number,
             page_count,
             sequential,
-            may_write: self.shared && self.file_flags.contains(FileFlags::WRITE),
+            may_write: self.shared && self.file_flags.contains(FileMappingFlags::WRITE),
             shared: self.shared,
             private_write: false,
             read_ahead: self.read_ahead.clone(),
@@ -591,12 +636,12 @@ impl FileMapping {
 impl Backend {
     pub(crate) fn new_file(
         start: VirtAddr,
-        file: CachedFile,
-        file_flags: FileFlags,
+        file: Arc<dyn FileMappingSource>,
+        file_flags: FileMappingFlags,
         file_offset: usize,
         file_bytes: usize,
         shared: bool,
-        write_access: Option<axfs::WriteAccessGuard>,
+        write_access: Option<FileMappingWriteGuard>,
     ) -> Self {
         Self::File(FileMapping {
             id: next_file_mapping_id(),
@@ -825,7 +870,7 @@ impl Backend {
         let Ok(page_number) = u32::try_from(file_offset / PAGE_SIZE_4K as u64) else {
             return false;
         };
-        if !prepared.matches(&mapping.file, mapping.id, orig_flags, page_number) {
+        if !prepared.matches(mapping.file.as_ref(), mapping.id, orig_flags, page_number) {
             return false;
         }
 
@@ -885,7 +930,6 @@ impl Backend {
             let Some((_, first_addr)) = candidates[candidate_cursor] else {
                 return false;
             };
-            axfs::buildstorm_stat_inc!(MM_FILE_FAULT_PTE_WRITE_GUARD_ACQUIRES);
             let mut pt_guard = pt.lock_for_addr(first_addr);
 
             while candidate_cursor < candidate_count {
@@ -896,7 +940,6 @@ impl Backend {
                     break;
                 }
                 let requested = candidate_addr == page_addr;
-                axfs::buildstorm_stat_inc!(MM_FILE_FAULT_PTE_WRITE_LOCKS);
                 // This guard serializes the PTE for `candidate_addr`, so retain
                 // the query result for the map/remap decision below.
                 let remap_empty = match pt_guard.query(candidate_addr) {
@@ -944,7 +987,6 @@ impl Backend {
                     continue;
                 };
                 tlb.flush();
-                axfs::buildstorm_stat_inc!(MM_FILE_FAULT_LOCAL_TLB_FLUSHES);
                 mapped_executable |= map_flags.contains(MappingFlags::EXECUTE);
                 mapped_pages += 1;
                 if use_private_frame {
@@ -962,12 +1004,6 @@ impl Backend {
         }
         if mapped_executable {
             sync_executable_mapping(orig_flags);
-        }
-        axfs::buildstorm_stat_add!(MM_FILE_FAULT_MAPPED_PAGES, mapped_pages);
-        if prepared.sequential {
-            axfs::buildstorm_stat_add!(MM_FILE_FAULT_SEQUENTIAL_MAPPED_PAGES, mapped_pages);
-        } else {
-            axfs::buildstorm_stat_add!(MM_FILE_FAULT_COLD_MAPPED_PAGES, mapped_pages);
         }
         if requested_handled
             && mapped_pages != 0
@@ -1250,5 +1286,97 @@ mod tests {
         let mut state = FileReadAheadState::default();
         assert_eq!(state.plan(u32::MAX, 4), 4);
         assert_eq!(state.plan(0, 4), 4);
+    }
+
+    struct MockSource {
+        identity: usize,
+        size: u64,
+        generation: u64,
+    }
+
+    impl super::FileMappingSource for MockSource {
+        fn mapping_generation(&self) -> u64 {
+            self.generation
+        }
+        fn get_shared_page_paddrs(
+            &self,
+            _page_number: u32,
+            _page_count: usize,
+            _may_write: bool,
+        ) -> axerrno::AxResult<super::FileMappingPageBatch> {
+            Ok(super::FileMappingPageBatch::new())
+        }
+        fn prefetch_pages(&self, _page_number: u32, _page_count: usize) {}
+        fn size(&self) -> u64 {
+            self.size
+        }
+        fn shared_page_paddr(&self, _page_number: u32) -> axerrno::AxResult<memory_addr::PhysAddr> {
+            Err(axerrno::AxError::BadState)
+        }
+        fn mark_page_dirty_if_paddr(&self, _page_number: u32, _paddr: memory_addr::PhysAddr) -> axerrno::AxResult {
+            Ok(())
+        }
+        fn sync(&self, _data_only: bool) -> axerrno::AxResult {
+            Ok(())
+        }
+        fn page_cache_identity(&self) -> usize {
+            self.identity
+        }
+        fn as_any(&self) -> &dyn core::any::Any {
+            self
+        }
+    }
+
+    #[test]
+    fn mock_source_shares_page_cache_by_identity() {
+        use alloc::sync::Arc;
+        use super::FileMappingSource;
+
+        let src1 = Arc::new(MockSource { identity: 42, size: 4096, generation: 1 });
+        let src2 = Arc::new(MockSource { identity: 42, size: 4096, generation: 1 });
+        let src3 = Arc::new(MockSource { identity: 99, size: 4096, generation: 1 });
+
+        assert!(src1.shares_page_cache_with(src2.as_ref()));
+        assert!(!src1.shares_page_cache_with(src3.as_ref()));
+        assert_eq!(src1.as_any().downcast_ref::<MockSource>().unwrap().size, 4096);
+    }
+
+    #[test]
+    fn file_mapping_permits_enforces_read_write_separation() {
+        use alloc::sync::Arc;
+        use super::{FileMapping, FileMappingFlags, FileMappingId, FileMappingWriteGuard};
+
+        let src = Arc::new(MockSource { identity: 1, size: 8192, generation: 1 });
+        let readonly_mapping = FileMapping {
+            id: FileMappingId(1),
+            start: VirtAddr::from(0x1000),
+            file: src.clone(),
+            file_flags: FileMappingFlags::READ,
+            file_offset: 0,
+            file_bytes: 8192,
+            shared: true,
+            read_ahead: Arc::new(spin::Mutex::new(FileReadAheadState::default())),
+            _write_access: None,
+        };
+
+        assert!(readonly_mapping.permits(MappingFlags::READ));
+        assert!(!readonly_mapping.permits(MappingFlags::WRITE));
+        assert!(readonly_mapping.permits(MappingFlags::EXECUTE));
+
+        let writable_mapping = FileMapping {
+            id: FileMappingId(2),
+            start: VirtAddr::from(0x1000),
+            file: src,
+            file_flags: FileMappingFlags::READ | FileMappingFlags::WRITE,
+            file_offset: 0,
+            file_bytes: 8192,
+            shared: true,
+            read_ahead: Arc::new(spin::Mutex::new(FileReadAheadState::default())),
+            _write_access: Some(FileMappingWriteGuard::new(123usize)),
+        };
+
+        assert!(writable_mapping.permits(MappingFlags::READ));
+        assert!(writable_mapping.permits(MappingFlags::WRITE));
+        assert!(writable_mapping._write_access.is_some());
     }
 }

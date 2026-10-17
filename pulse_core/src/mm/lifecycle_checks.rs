@@ -1,6 +1,7 @@
 //! Bounded mapping-lifecycle checks executed in the initialized guest init task.
 //! These use real page tables, cache frames, and fork; they do not test durability.
 
+use alloc::sync::Arc;
 use axerrno::{AxError, AxResult};
 use axfs::{CachedFile, File, OpenOptions, ROOT_FS_CONTEXT};
 use axhal::{paging::MappingFlags, trap::PageFaultFlags};
@@ -183,12 +184,12 @@ impl Fixture {
             PreparedMapping::file(
                 size,
                 flags,
-                self.cached.clone(),
-                self.file.flags(),
+                Arc::new(self.cached.clone()),
+                self.file.flags().into(),
                 offset,
                 size,
                 shared,
-                if shared && writable { self.file.write_access_guard() } else { None },
+                if shared && writable { self.file.write_access_guard().map(Into::into) } else { None },
             ),
         )
     }

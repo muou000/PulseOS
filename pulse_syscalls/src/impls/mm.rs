@@ -321,12 +321,12 @@ pub fn sys_mmap(
                 match axmm::PreparedMapping::file(
                     aligned_length,
                     map_flags,
-                    cached,
-                    file_flags,
+                    alloc::sync::Arc::new(cached),
+                    file_flags.into(),
                     offset,
                     length,
                     is_shared,
-                    write_access,
+                    write_access.map(Into::into),
                 ) {
                     Ok(p) => p,
                     Err(error) => return -LinuxError::from(error).code() as isize,

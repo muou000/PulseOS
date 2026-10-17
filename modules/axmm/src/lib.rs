@@ -32,7 +32,9 @@ pub use self::{
         PageFaultResult, PageFaultWork, PageTableLockManager, TlbShootdown, drive_page_fault,
     },
     backend::{
-        AnonPageLoad, AnonPagePrepared, Backend, FilePageLoad, FilePagePrepared, FileWritebacks, SharedFrame,
+        AnonPageLoad, AnonPagePrepared, Backend, FileMapping, FileMappingFlags, FileMappingPageBatch,
+        FileMappingSource, FileMappingWriteGuard, FilePageLoad, FilePagePrepared, FileWritebacks,
+        SharedFrame, FILE_MAPPING_PAGE_BATCH_CAPACITY,
     },
 };
 

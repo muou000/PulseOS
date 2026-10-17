@@ -16,7 +16,8 @@ ipi = ["dep:axipi"]
 axhal = { workspace = true, features = ["paging"] }
 axalloc = { workspace = true }
 axconfig = { workspace = true }
-axfs = { workspace = true }
+bitflags.workspace = true
+heapless.workspace = true
 axipi = { workspace = true, optional = true }
 
 log.workspace = true

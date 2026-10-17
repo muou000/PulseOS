@@ -20,6 +20,7 @@ mapping-lifecycle-test = []
 [dependencies]
 axalloc.workspace = true
 axconfig.workspace = true
+axmm.workspace = true
 axtask.workspace = true
 axdriver = { workspace = true, features = ["block", "async"] }
 axerrno.workspace = true

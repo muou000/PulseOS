@@ -2,11 +2,13 @@ use alloc::sync::Arc;
 use core::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
 
 use axerrno::{AxError, AxResult};
-use axfs::{CachedFile, FileFlags, WriteAccessGuard};
 use axhal::paging::{MappingFlags, PageSize};
 use memory_addr::{MemoryAddr, VirtAddr, VirtAddrRange, PAGE_SIZE_4K};
 
-use crate::{backend::DeferredReclaims, Backend};
+use crate::{
+    backend::{DeferredReclaims, FileMappingFlags, FileMappingSource, FileMappingWriteGuard},
+    Backend,
+};
 
 static NEXT_ADDRESS_SPACE_ID: AtomicUsize = AtomicUsize::new(1);
 
@@ -69,12 +71,12 @@ impl PreparedMapping {
     pub fn file(
         size: usize,
         flags: MappingFlags,
-        file: CachedFile,
-        file_flags: FileFlags,
+        file: Arc<dyn FileMappingSource>,
+        file_flags: FileMappingFlags,
         offset: usize,
         file_bytes: usize,
         shared: bool,
-        write_access: Option<WriteAccessGuard>,
+        write_access: Option<FileMappingWriteGuard>,
     ) -> AxResult<Self> {
         Self::validate_size(size)?;
         if offset % PAGE_SIZE_4K != 0 || offset.checked_add(file_bytes).is_none() {

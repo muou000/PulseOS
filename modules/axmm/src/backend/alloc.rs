@@ -31,10 +31,6 @@ impl AnonPageLoad {
         for frame in frames.iter().take(page_count) {
             flush_dcache_range(*frame, PAGE_SIZE_4K);
         }
-        axfs::buildstorm_stat_add!(MM_ANON_FAULT_PREPARED_PAGES, page_count);
-        if page_count < requested_pages {
-            axfs::buildstorm_stat_inc!(MM_ANON_FAULT_SHORT_PREPARES);
-        }
         Ok(AnonPagePrepared {
             page: self.page,
             generation: self.generation,
@@ -399,7 +395,6 @@ impl Backend {
                 && check_page < area_end
                 && pt_guard.covers(check_page)
             {
-                axfs::buildstorm_stat_inc!(MM_ANON_FAULT_PTE_READ_PROBES);
                 let needs_mapping = match pt_guard.query(check_page) {
                     Err(_) => true,
                     Ok((frame, _, _)) => frame.as_usize() == 0,
@@ -413,14 +408,8 @@ impl Backend {
         }
 
         if page_count == 0 {
-            axfs::buildstorm_stat_inc!(MM_ANON_FAULT_EMPTY_REQUESTS);
             return None;
         }
-        axfs::buildstorm_stat_inc!(MM_ANON_FAULT_BATCHES);
-        if page_count == MAX_FAULT_BATCH_PAGES {
-            axfs::buildstorm_stat_inc!(MM_ANON_FAULT_FULL_BATCHES);
-        }
-        axfs::buildstorm_stat_add!(MM_ANON_FAULT_REQUESTED_PAGES, page_count);
         Some(AnonPageLoad { page, page_count, generation: None })
     }
 
@@ -438,7 +427,6 @@ impl Backend {
         }
 
         let mut handled_any = false;
-        let mut mapped_pages = 0usize;
         let mut keep_mapping = true;
         let mut index = 0;
         while index < prepared.page_count() && keep_mapping {
@@ -446,7 +434,6 @@ impl Backend {
             if current_page >= area_end {
                 break;
             }
-            axfs::buildstorm_stat_inc!(MM_ANON_FAULT_PTE_WRITE_GUARD_ACQUIRES);
             let mut pt_guard = pt.lock_for_addr(current_page);
 
             while index < prepared.page_count() {
@@ -457,14 +444,12 @@ impl Backend {
                 let frame = prepared.frame(index);
                 let mut mapped_successfully = false;
                 let mut already_mapped = false;
-                axfs::buildstorm_stat_inc!(MM_ANON_FAULT_PTE_WRITE_LOCKS);
                 match pt_guard.query(current_page) {
                     Err(_) => {
                         if pt_guard
                             .map(current_page, frame, PageSize::Size4K, orig_flags)
                             .map(|tlb| {
                                 tlb.flush();
-                                axfs::buildstorm_stat_inc!(MM_ANON_FAULT_LOCAL_TLB_FLUSHES);
                             })
                             .is_ok()
                         {
@@ -477,7 +462,6 @@ impl Backend {
                             .remap(current_page, frame, orig_flags)
                             .map(|(_, tlb)| {
                                 tlb.flush();
-                                axfs::buildstorm_stat_inc!(MM_ANON_FAULT_LOCAL_TLB_FLUSHES);
                             })
                             .is_ok()
                         {
@@ -496,7 +480,6 @@ impl Backend {
 
                 if mapped_successfully {
                     prepared.mark_mapped(index);
-                    mapped_pages += 1;
                 } else if !already_mapped {
                     keep_mapping = false;
                     break;
@@ -504,8 +487,6 @@ impl Backend {
                 index += 1;
             }
         }
-        axfs::buildstorm_stat_add!(MM_ANON_FAULT_MAPPED_PAGES, mapped_pages);
-        let _ = mapped_pages;
         handled_any
     }
 

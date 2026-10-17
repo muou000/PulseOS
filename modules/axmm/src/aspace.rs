@@ -2,7 +2,6 @@ use core::fmt;
 
 use axalloc::frame_table;
 use axerrno::{AxError, AxResult, ax_err};
-use axfs::{CachedFile, FileFlags};
 use axhal::{
     mem::{flush_dcache_range, phys_to_virt, PhysAddr},
     paging::{MappingFlags, PageSize, PageTable, PagingError, PagingResult, TlbFlush},
@@ -15,8 +14,9 @@ use memory_set::{MappingBackend, MappingMutation, MemoryArea, MemorySet};
 
 use crate::{
     backend::{
-        AnonPageLoad, AnonPagePrepared, Backend, DeferredReclaims, FilePageLoad,
-        FilePagePrepared, FileWritebacks, TlbInvalidationTracker,
+        AnonPageLoad, AnonPagePrepared, Backend, DeferredReclaims, FileMappingFlags,
+        FileMappingSource, FileMappingWriteGuard, FilePageLoad, FilePagePrepared,
+        FileWritebacks, TlbInvalidationTracker,
     },
     mapping_err_to_ax_err,
     lifecycle::{MappingGeneration, MappingPlacement, MappingReservation, MappingWait, PendingMapping, PreparedMapping},
@@ -972,12 +972,12 @@ impl AddrSpace {
         start: VirtAddr,
         size: usize,
         flags: MappingFlags,
-        file: CachedFile,
-        file_flags: FileFlags,
+        file: alloc::sync::Arc<dyn FileMappingSource>,
+        file_flags: FileMappingFlags,
         file_offset: usize,
         file_bytes: usize,
         shared: bool,
-        write_access: Option<axfs::WriteAccessGuard>,
+        write_access: Option<FileMappingWriteGuard>,
     ) -> AxResult {
         if !self.contains_range(start, size) {
             return ax_err!(InvalidInput, "address out of range");

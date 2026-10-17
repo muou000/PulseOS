@@ -29,8 +29,10 @@ use spin::Lazy;
 
 use super::FsContext;
 
-pub const SHARED_PAGE_BATCH_CAPACITY: usize = 16;
-pub type SharedPagePaddrs = heapless::Vec<(u32, PhysAddr), SHARED_PAGE_BATCH_CAPACITY>;
+pub use axmm::{
+    FILE_MAPPING_PAGE_BATCH_CAPACITY as SHARED_PAGE_BATCH_CAPACITY,
+    FileMappingPageBatch as SharedPagePaddrs,
+};
 
 const WEAK_STATE_SWEEP_BUDGET: usize = 8;
 const FILE_STATE_REGISTRY_SHARDS: usize = 32;
@@ -140,6 +142,19 @@ bitflags::bitflags! {
     }
 }
 
+impl From<FileFlags> for axmm::FileMappingFlags {
+    fn from(flags: FileFlags) -> Self {
+        let mut mapping_flags = Self::empty();
+        if flags.contains(FileFlags::READ) {
+            mapping_flags |= Self::READ;
+        }
+        if flags.contains(FileFlags::WRITE) {
+            mapping_flags |= Self::WRITE;
+        }
+        mapping_flags
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 struct FileCacheKey {
     fs_id: usize,
@@ -244,6 +259,12 @@ impl Drop for WriteAccessLease {
 #[derive(Clone)]
 pub struct WriteAccessGuard {
     _lease: Arc<WriteAccessLease>,
+}
+
+impl From<WriteAccessGuard> for axmm::FileMappingWriteGuard {
+    fn from(guard: WriteAccessGuard) -> Self {
+        Self::new(guard)
+    }
 }
 
 struct ExecAccessLease {
