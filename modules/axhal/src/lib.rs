@@ -60,6 +60,7 @@ cfg_if::cfg_if! {
 }
 
 pub mod mem;
+pub mod dma;
 pub mod percpu;
 pub mod time;
 

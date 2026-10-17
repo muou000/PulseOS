@@ -79,7 +79,6 @@ axsync = { path = "modules/axsync" }
 axfs = { path = "modules/axfs", features = ["times"] }
 axmm = { path = "modules/axmm" }
 axdisplay = { path = "modules/axdisplay" }
-axdma = { path = "modules/axdma" }
 axdriver = { path = "modules/axdriver" }
 axipi = { path = "modules/axipi" }
 axerrno = "0.2"

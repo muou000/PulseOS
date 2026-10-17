@@ -1,27 +1,24 @@
-use core::{alloc::Layout, ptr::NonNull};
+use core::ptr::NonNull;
 
-use axdma::{BusAddr, DMAInfo, alloc_coherent, dealloc_coherent};
 use axdriver_net::ixgbe::{IxgbeHal, PhysAddr as IxgbePhysAddr};
+use axhal::dma::{alloc_coherent, dealloc_coherent};
 use axhal::mem::{phys_to_virt, virt_to_phys};
 
 pub struct IxgbeHalImpl;
 
 unsafe impl IxgbeHal for IxgbeHalImpl {
     fn dma_alloc(size: usize) -> (IxgbePhysAddr, NonNull<u8>) {
-        let layout = Layout::from_size_align(size, 8).unwrap();
-        match unsafe { alloc_coherent(layout) } {
-            Ok(dma_info) => (dma_info.bus_addr.as_u64() as usize, dma_info.cpu_addr),
+        match alloc_coherent(size) {
+            Ok((vaddr, _paddr, bus_addr)) => {
+                let dev_addr = bus_addr.as_u64() as usize;
+                (dev_addr, vaddr)
+            }
             Err(_) => (0, NonNull::dangling()),
         }
     }
 
-    unsafe fn dma_dealloc(paddr: IxgbePhysAddr, vaddr: NonNull<u8>, size: usize) -> i32 {
-        let layout = Layout::from_size_align(size, 8).unwrap();
-        let dma_info = DMAInfo {
-            cpu_addr: vaddr,
-            bus_addr: BusAddr::from(paddr as u64),
-        };
-        unsafe { dealloc_coherent(dma_info, layout) };
+    unsafe fn dma_dealloc(_paddr: IxgbePhysAddr, vaddr: NonNull<u8>, size: usize) -> i32 {
+        unsafe { dealloc_coherent(vaddr, size) };
         0
     }
 
