@@ -14,10 +14,11 @@ smp = ["axplat-x86-pc?/smp", "axplat-aarch64-qemu-virt?/smp", "axplat-riscv64-qe
 irq = ["linkme", "axplat-x86-pc?/irq", "axplat-aarch64-qemu-virt?/irq", "axplat-riscv64-qemu-virt?/irq", "axplat-loongarch64-qemu-virt?/irq", "axplat/irq"]
 fp-simd = ["axcpu/fp-simd", "axplat-x86-pc?/fp-simd", "axplat-aarch64-qemu-virt?/fp-simd", "axplat-riscv64-qemu-virt?/fp-simd", "axplat-loongarch64-qemu-virt?/fp-simd"]
 rtc = ["axplat-x86-pc?/rtc", "axplat-aarch64-qemu-virt?/rtc", "axplat-riscv64-qemu-virt?/rtc", "axplat-loongarch64-qemu-virt?/rtc"]
-paging = ["axalloc", "page_table_multiarch"]
+paging = ["dma", "page_table_multiarch"]
 tls = ["axcpu/tls"]
 uspace = ["paging", "axcpu/uspace"]
 ls2k1000 = ["axcpu/ls2k1000"]
+dma = ["dep:axalloc"]
 
 # Custom or default platforms
 myplat = []
