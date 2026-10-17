@@ -16,9 +16,11 @@ members = [
     "modules/axalloc",
     "modules/axconfig",
     "modules/axcpu",
+    "modules/axdisplay",
     "modules/axdriver",
     "modules/axdriver_base",
     "modules/axdriver_block",
+    "modules/axdriver_display",
     "modules/axdriver_net",
     "modules/axdriver_pci",
     "modules/axdriver_virtio",
@@ -86,7 +88,7 @@ axpoll = { path = "modules/axpoll" }
 
 axdriver_base = { path = "modules/axdriver_base" }
 axdriver_block = { path = "modules/axdriver_block" }
-axdriver_display = { git = "https://github.com/arceos-org/axdriver_crates.git", tag = "v0.1.2" }
+axdriver_display = { path = "modules/axdriver_display" }
 axdriver_net = { path = "modules/axdriver_net" }
 axdriver_pci = { path = "modules/axdriver_pci" }
 axdriver_virtio = { path = "modules/axdriver_virtio" }
@@ -183,6 +185,8 @@ axplat = { path = "platforms/axplat" }
 handler_table = { path = "crates/handler_table" }
 dwmmc-host = { path = "crates/dwmmc-host" }
 sdmmc-protocol = { path = "crates/sdmmc-protocol" }
+axdriver_base = { path = "modules/axdriver_base" }
+axdriver_display = { path = "modules/axdriver_display" }
 
 [patch."https://github.com/arceos-org/allocator.git"]
 allocator = { path = "crates/allocator" }
@@ -262,6 +266,7 @@ smoltcp = { path = "crates/smoltcp" }
 
 [patch."https://github.com/arceos-org/axdriver_crates.git"]
 axdriver_base = { path = "modules/axdriver_base" }
+axdriver_display = { path = "modules/axdriver_display" }
 axdriver_block = { path = "modules/axdriver_block" }
 axdriver_net = { path = "modules/axdriver_net" }
 axdriver_pci = { path = "modules/axdriver_pci" }

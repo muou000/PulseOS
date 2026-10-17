@@ -129,14 +129,14 @@ justrun:
 # Build the RISC-V QEMU kernel without starting it.
 rv:
 	@rm -f "$(A)/.axconfig.toml"
-	@$(MAKE) ARCH=riscv64 SMP="$(SMP)" APP_FEATURES="$(APP_FEATURES)" LOG="$(LOG)" BUS=mmio BLK="$(BLK)" PLAT_CONFIG="$(QEMU_RV_PLATFORM_CONFIG)" OUT_DIR="$(A)" defconfig
-	@$(MAKE) ARCH=riscv64 SMP="$(SMP)" APP_FEATURES="$(APP_FEATURES)" LOG="$(LOG)" BUS=mmio BLK="$(BLK)" PLAT_CONFIG="$(QEMU_RV_PLATFORM_CONFIG)" OUT_DIR="$(A)" build
+	@$(MAKE) ARCH=riscv64 SMP="$(SMP)" APP_FEATURES="$(APP_FEATURES)" LOG="$(LOG)" BUS=mmio FEATURES="$(FEATURES)" BLK="$(BLK)" PLAT_CONFIG="$(QEMU_RV_PLATFORM_CONFIG)" OUT_DIR="$(A)" defconfig
+	@$(MAKE) ARCH=riscv64 SMP="$(SMP)" APP_FEATURES="$(APP_FEATURES)" LOG="$(LOG)" BUS=mmio FEATURES="$(FEATURES)" BLK="$(BLK)" PLAT_CONFIG="$(QEMU_RV_PLATFORM_CONFIG)" OUT_DIR="$(A)" build
 
 # Build the LoongArch64 QEMU kernel without starting it.
 la:
 	@rm -f "$(A)/.axconfig.toml"
-	@$(MAKE) ARCH=loongarch64 SMP="$(SMP)" APP_FEATURES="$(APP_FEATURES)" LOG="$(LOG)" BUS=pci FEATURES=bus-pci BLK="$(BLK)" PLAT_CONFIG="$(QEMU_LA_PLATFORM_CONFIG)" OUT_DIR="$(A)" defconfig
-	@$(MAKE) ARCH=loongarch64 SMP="$(SMP)" APP_FEATURES="$(APP_FEATURES)" LOG="$(LOG)" BUS=pci FEATURES=bus-pci BLK="$(BLK)" PLAT_CONFIG="$(QEMU_LA_PLATFORM_CONFIG)" OUT_DIR="$(A)" build
+	@$(MAKE) ARCH=loongarch64 SMP="$(SMP)" APP_FEATURES="$(APP_FEATURES)" LOG="$(LOG)" BUS=pci FEATURES="bus-pci $(FEATURES)" BLK="$(BLK)" PLAT_CONFIG="$(QEMU_LA_PLATFORM_CONFIG)" OUT_DIR="$(A)" defconfig
+	@$(MAKE) ARCH=loongarch64 SMP="$(SMP)" APP_FEATURES="$(APP_FEATURES)" LOG="$(LOG)" BUS=pci FEATURES="bus-pci $(FEATURES)" BLK="$(BLK)" PLAT_CONFIG="$(QEMU_LA_PLATFORM_CONFIG)" OUT_DIR="$(A)" build
 
 # Dual-architecture build gate.
 test: rv la
