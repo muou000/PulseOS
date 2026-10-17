@@ -48,9 +48,17 @@ _Avoid_: BPF backend, permanent BPF ABI
 PulseOS 对 Linux BPF 用户态接口和语义的明确支持范围。层级内的接口应保持可观察的 Linux 行为；层级外的能力可以暂不实现，但必须以稳定、可诊断的错误拒绝，而不能暗示完整兼容。
 _Avoid_: full Linux compatibility, private BPF API
 
+**具名工具兼容层级**:
+为固定版本的上游工具建立独立版本化的最小 Linux BPF 能力集，使该工具源码无需 PulseOS 专属修改即可运行；该层级只承诺该工具实际使用的接口，不代表通用 Linux BPF 兼容。
+_Avoid_: full Linux compatibility, tool-specific private API
+
 **libbpf 核心工作流**:
 固定版本范围内，用户态 libbpf 对 BPF ELF 对象执行 open、load、attach、事件消费和 teardown 的可复现路径；它是兼容验收范围，不等于支持全部 libbpf API。
 _Avoid_: full libbpf compatibility, BPF syscall only
+
+**上游采样工具兼容目标**:
+在固定上游版本、可复现构建和明确调用参数下运行的具名 Linux 采样程序；通过该目标只证明其约定工作流可执行并产生真实采样，不代表兼容所有 Linux 工具或全部 BPF API。
+_Avoid_: full Linux BPF compatibility, generic tool support
 
 **BPF ELF 对象**:
 包含 eBPF 程序、Map 定义、section 信息和重定位记录的用户态对象文件，由 libbpf 解析并转换为 Linux BPF 对象模型操作。
