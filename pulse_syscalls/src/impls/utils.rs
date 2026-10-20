@@ -13,8 +13,8 @@ const MAX_USER_IOVCNT: usize = 1024;
 // no more than 17 base pages, so frame ownership stays on the kernel stack.
 const PINNED_USER_IO_MAX_PAGES: usize = 17;
 
-/// A physically contiguous user-memory slice whose backing frames remain
-/// alive until the guard is dropped.
+/// A pinned user-memory slice whose backing frames remain alive until the
+/// guard is dropped and are released in a batch on drop.
 ///
 /// A syscall may suspend after handing either a source or destination slice to
 /// an `FdObject`. Returning a raw pointer from `query_user_page_slice` is not
@@ -43,9 +43,7 @@ impl PinnedUserSlice {
 
 impl Drop for PinnedUserSlice {
     fn drop(&mut self) {
-        while let Some(frame) = self.frames.pop() {
-            release_pinned_user_frame(frame);
-        }
+        release_pinned_user_frames(&self.frames);
     }
 }
 
@@ -54,6 +52,37 @@ fn release_pinned_user_frame(frame: PhysAddr) {
     if table.contains(frame) && table.dec_ref(frame) == 0 {
         global_allocator().dealloc_pages(phys_to_virt(frame).as_usize(), 1);
     }
+}
+
+fn release_pinned_user_frames(frames: &[PhysAddr]) {
+    let table = frame_table();
+    let mut eligible = [PhysAddr::from(0); PINNED_USER_IO_MAX_PAGES];
+    let mut count = 0;
+    for &frame in frames {
+        if table.contains(frame) && table.dec_ref(frame) == 0 {
+            eligible[count] = frame;
+            count += 1;
+        }
+    }
+    if count == 0 {
+        return;
+    }
+    eligible[..count].sort_unstable_by_key(|frame| frame.as_usize());
+    let mut runs: heapless::Vec<(usize, usize), PINNED_USER_IO_MAX_PAGES> = heapless::Vec::new();
+    let mut run_start = eligible[0].as_usize();
+    let mut run_len = 1;
+    for &frame in &eligible[1..count] {
+        let paddr = frame.as_usize();
+        if paddr == run_start.saturating_add(run_len * axhal::mem::PAGE_SIZE_4K) {
+            run_len += 1;
+        } else {
+            let _ = runs.push((phys_to_virt(PhysAddr::from(run_start)).as_usize(), run_len));
+            run_start = paddr;
+            run_len = 1;
+        }
+    }
+    let _ = runs.push((phys_to_virt(PhysAddr::from(run_start)).as_usize(), run_len));
+    global_allocator().dealloc_pages_batch(&runs);
 }
 
 /// Linux PATH_MAX, including the trailing NUL in a user C string.
@@ -403,9 +432,7 @@ fn pin_user_slice(
         let ptr = match NonNull::new((phys_to_virt(first) + (user_addr & 4095)).as_mut_ptr()) {
             Some(ptr) => ptr,
             None => {
-                while let Some(frame) = frames.pop() {
-                    release_pinned_user_frame(frame);
-                }
+                release_pinned_user_frames(&frames);
                 return None;
             }
         };

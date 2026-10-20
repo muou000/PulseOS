@@ -75,10 +75,19 @@ impl AnonPagePrepared {
 
 impl Drop for AnonPagePrepared {
     fn drop(&mut self) {
+        let mut unmapped = [PhysAddr::from(0); MAX_FAULT_BATCH_PAGES];
+        let mut count = 0;
         for index in 0..self.page_count {
             if self.mapped_mask & (1 << index) == 0 {
-                dealloc_frame(self.frame(index));
+                let frame = self.frame(index);
+                if cow_dec_frame_ref(frame) {
+                    unmapped[count] = frame;
+                    count += 1;
+                }
             }
+        }
+        if count > 0 {
+            dealloc_frame_runs(&mut unmapped[..count]);
         }
     }
 }
@@ -196,7 +205,7 @@ fn dealloc_frame_runs(frames: &mut [PhysAddr]) {
         return;
     }
     frames.sort_unstable_by_key(|frame| frame.as_usize());
-    let allocator = global_allocator();
+    let mut runs = Vec::with_capacity(frames.len());
     let mut run_start = frames[0].as_usize();
     let mut run_len = 1;
     for frame in frames.iter().skip(1) {
@@ -204,12 +213,13 @@ fn dealloc_frame_runs(frames: &mut [PhysAddr]) {
         if paddr == run_start.saturating_add(run_len * PAGE_SIZE_4K) {
             run_len += 1;
         } else {
-            allocator.dealloc_pages(phys_to_virt(PhysAddr::from(run_start)).as_usize(), run_len);
+            runs.push((phys_to_virt(PhysAddr::from(run_start)).as_usize(), run_len));
             run_start = paddr;
             run_len = 1;
         }
     }
-    allocator.dealloc_pages(phys_to_virt(PhysAddr::from(run_start)).as_usize(), run_len);
+    runs.push((phys_to_virt(PhysAddr::from(run_start)).as_usize(), run_len));
+    global_allocator().dealloc_pages_batch(&runs);
 }
 
 pub(super) fn dealloc_frames(mut frames: Vec<PhysAddr>) {
@@ -226,23 +236,24 @@ pub(super) fn dealloc_frame_values(frames: &mut [usize]) {
             count += 1;
         }
     }
-    frames[..count].sort_unstable();
     if count == 0 {
         return;
     }
-    let allocator = global_allocator();
+    frames[..count].sort_unstable();
+    let mut runs = Vec::with_capacity(count);
     let mut run_start = frames[0];
     let mut run_len = 1;
     for &paddr in &frames[1..count] {
         if paddr == run_start.saturating_add(run_len * PAGE_SIZE_4K) {
             run_len += 1;
         } else {
-            allocator.dealloc_pages(phys_to_virt(PhysAddr::from(run_start)).as_usize(), run_len);
+            runs.push((phys_to_virt(PhysAddr::from(run_start)).as_usize(), run_len));
             run_start = paddr;
             run_len = 1;
         }
     }
-    allocator.dealloc_pages(phys_to_virt(PhysAddr::from(run_start)).as_usize(), run_len);
+    runs.push((phys_to_virt(PhysAddr::from(run_start)).as_usize(), run_len));
+    global_allocator().dealloc_pages_batch(&runs);
 }
 
 fn alloc_frame_batch(
@@ -672,5 +683,26 @@ mod tests {
 
         assert!(cow_dec_frame_ref(frame)); // 1 -> 0
         assert_eq!(frame_table().get_ref(frame), 0);
+    }
+
+    #[test]
+    fn dealloc_frames_empty_is_noop() {
+        dealloc_frame_runs(&mut []);
+        dealloc_frame_values(&mut []);
+        dealloc_frames(alloc::vec::Vec::new());
+    }
+
+    #[test]
+    fn batch_cow_refcount_filtering() {
+        let frame1 = PhysAddr::from(axconfig::plat::PHYS_MEMORY_BASE);
+        let frame2 = PhysAddr::from(axconfig::plat::PHYS_MEMORY_BASE + PAGE_SIZE_4K);
+
+        cow_inc_frame_ref(frame1);
+        cow_inc_frame_ref(frame2);
+        cow_inc_frame_ref(frame2);
+
+        assert!(cow_dec_frame_ref(frame1));
+        assert!(!cow_dec_frame_ref(frame2));
+        assert!(cow_dec_frame_ref(frame2));
     }
 }

@@ -11,14 +11,22 @@ PulseOS is a multi-architecture kernel whose domain model spans processes, descr
 _Avoid_: readiness polling, generic waiting
 
 **I/O 操作**:
-在用户缓冲区、描述符对象和文件位置之间完成一次或多次读写，并定义部分完成、错误和信号结果。
+在用户缓冲区、描述符对象和文件位置之间完成一次或多次读写，并定义部分完成、错误和信号结果。对支持多段流式读写的对象，单次 I/O 操作可在一次文件位置与缓存锁周期内消费或填充多个缓冲段。
 _Avoid_: read/write helper, transport operation
+
+**钉住用户缓冲段列表**:
+将一段或多段用户虚拟内存范围验证并钉住（持有物理页框生命周期引用）后形成的离散物理页段集合（Scatter-Gather 缓冲），在 I/O 期间保证底层页框不被回收，并在析构时批量归还零引用页框。
+_Avoid_: contiguous pinned slice, raw user pointer list
 
 ### Memory and process lifecycle
 
 **映射页生命周期**:
 文件或匿名页从准备、发布到映射、TLB 完成、脏页发布和退休的全过程。`prepared` 资源尚未发布，只能由其准备对象清理；`published` 映射必须等待 TLB completion 后才能退休。文件 fault 的准备还携带 mapping identity 和权限快照，用于拒绝同一虚拟地址上的陈旧提交。脏页发布只更新 page-cache 状态，storage durability 还需要显式同步。
 _Avoid_: page-cache wrapper, mapping helper
+
+**批量物理页框归还**:
+将延迟退休、页缓存淘汰与钉住缓冲析构中收集到的多个待释放物理页框（含物理不连续的页段），在释放上层业务锁后，通过单次分配器临界区批量归还给底层页分配器或每 CPU 页缓存池的过程。
+_Avoid_: per-page dealloc loop, locked frame free
 
 **子进程退休**:
 终态 child 被 wait 消费后，完成 accounting、task 引用、资源缩减、描述符影响和全局注销的过程。

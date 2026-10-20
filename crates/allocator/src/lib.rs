@@ -88,6 +88,16 @@ pub trait PageAllocator: BaseAllocator {
     /// Deallocate contiguous memory pages with given position and count.
     fn dealloc_pages(&mut self, pos: usize, num_pages: usize);
 
+    /// Deallocate multiple contiguous page ranges in a batch.
+    fn dealloc_pages_batch(&mut self, runs: &[(usize, usize)]) {
+        for &(pos, num_pages) in runs {
+            if num_pages == 0 {
+                continue;
+            }
+            self.dealloc_pages(pos, num_pages);
+        }
+    }
+
     /// Allocate contiguous memory pages with given base address, count and alignment.
     fn alloc_pages_at(
         &mut self,

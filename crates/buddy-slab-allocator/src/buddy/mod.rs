@@ -939,6 +939,18 @@ impl<const PAGE_SIZE: usize> BuddyAllocator<PAGE_SIZE> {
         Self::dealloc_exact_range(section, start_pfn, count);
     }
 
+    /// Free multiple page ranges previously obtained via [`alloc_pages`](Self::alloc_pages).
+    ///
+    /// Empty runs or entries with `count == 0` are safely ignored.
+    pub fn dealloc_pages_batch(&mut self, runs: &[(usize, usize)]) {
+        for &(addr, count) in runs {
+            if count == 0 {
+                continue;
+            }
+            self.dealloc_pages(addr, count);
+        }
+    }
+
     /// Converts one exact contiguous allocation into independently owned pages.
     ///
     /// `addr` and `count` must describe ranges previously returned by

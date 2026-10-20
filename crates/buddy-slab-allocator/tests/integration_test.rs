@@ -1332,3 +1332,76 @@ fn global_allocated_bytes_not_zero_until_cached_empty_slab_released() {
     assert!(allocator.allocated_bytes() <= allocated_after_refill);
     assert!(allocator.allocated_bytes() >= PAGE_SIZE);
 }
+
+#[test]
+fn buddy_dealloc_pages_batch_matches_individual_frees() {
+    let mut region = HostRegion::new(TEST_HEAP_SIZE, PAGE_SIZE * 4);
+    let mut buddy = BuddyAllocator::<PAGE_SIZE>::new();
+    let _section = init_buddy(&mut buddy, &mut region);
+
+    let initial_free = buddy.free_pages();
+    assert_eq!(buddy.allocated_bytes(), 0);
+
+    let a1 = buddy.alloc_pages(1, PAGE_SIZE).unwrap();
+    let a2 = buddy.alloc_pages(2, PAGE_SIZE).unwrap();
+    let a3 = buddy.alloc_pages(1, PAGE_SIZE).unwrap();
+    let a4 = buddy.alloc_pages(4, PAGE_SIZE).unwrap();
+    let a5 = buddy.alloc_pages(3, PAGE_SIZE).unwrap();
+
+    let total_alloc_pages = 1 + 2 + 1 + 4 + 3;
+    assert_eq!(buddy.allocated_bytes(), total_alloc_pages * PAGE_SIZE);
+    assert_eq!(buddy.free_pages(), initial_free - total_alloc_pages);
+
+    // Empty batch should be no-op
+    buddy.dealloc_pages_batch(&[]);
+    buddy.dealloc_pages_batch(&[(a1, 0)]);
+    assert_eq!(buddy.allocated_bytes(), total_alloc_pages * PAGE_SIZE);
+
+    // Free batch of fragmented runs
+    let first_batch = [(a1, 1), (a3, 1), (a5, 3)];
+    buddy.dealloc_pages_batch(&first_batch);
+    let remaining_pages = 2 + 4;
+    assert_eq!(buddy.allocated_bytes(), remaining_pages * PAGE_SIZE);
+    assert_eq!(buddy.free_pages(), initial_free - remaining_pages);
+
+    // Free the remaining runs in a second batch
+    let second_batch = [(a2, 2), (a4, 4)];
+    buddy.dealloc_pages_batch(&second_batch);
+    assert_eq!(buddy.allocated_bytes(), 0);
+    assert_eq!(buddy.free_pages(), initial_free);
+}
+
+#[test]
+fn global_dealloc_pages_batch_matches_individual_frees() {
+    let mut region = HostRegion::new(TEST_HEAP_SIZE, PAGE_SIZE * 4);
+    let allocator = GlobalAllocator::<PAGE_SIZE>::new();
+    let _ctx = init_global(&allocator, &mut region, 1);
+
+    assert_eq!(allocator.allocated_bytes(), 0);
+
+    let mut addrs = [0usize; 8];
+    for addr in &mut addrs {
+        *addr = allocator.alloc_pages(1, PAGE_SIZE).unwrap();
+    }
+    assert_eq!(allocator.allocated_bytes(), 8 * PAGE_SIZE);
+
+    // Deallocate odd pages
+    let odd_batch = [
+        (addrs[1], 1),
+        (addrs[3], 1),
+        (addrs[5], 1),
+        (addrs[7], 1),
+    ];
+    allocator.dealloc_pages_batch(&odd_batch);
+    assert_eq!(allocator.allocated_bytes(), 4 * PAGE_SIZE);
+
+    // Deallocate even pages
+    let even_batch = [
+        (addrs[0], 1),
+        (addrs[2], 1),
+        (addrs[4], 1),
+        (addrs[6], 1),
+    ];
+    allocator.dealloc_pages_batch(&even_batch);
+    assert_eq!(allocator.allocated_bytes(), 0);
+}
