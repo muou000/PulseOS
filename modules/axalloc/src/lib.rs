@@ -367,6 +367,14 @@ impl GlobalAllocator {
         self.palloc.lock().dealloc_pages(pos, num_pages)
     }
 
+    /// Gives back the allocated pages to the page allocator in a batch.
+    pub fn dealloc_pages_batch(&self, runs: &[(usize, usize)]) {
+        if runs.is_empty() {
+            return;
+        }
+        self.palloc.lock().dealloc_pages_batch(runs);
+    }
+
     /// Bitmap allocations already track each page independently, so converting
     /// a contiguous range requires no metadata update.
     pub fn split_allocated_pages(&self, pos: usize, num_pages: usize) -> AllocResult {

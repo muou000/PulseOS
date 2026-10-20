@@ -734,19 +734,61 @@ struct PageCacheFrame {
     addr: VirtAddr,
 }
 
+impl PageCacheFrame {
+    fn should_dealloc_paddr(paddr: PhysAddr) -> bool {
+        if let Some(ref_count) = axalloc::frame_table().try_get_ref(paddr) {
+            if ref_count == 0 {
+                true
+            } else {
+                axalloc::frame_table().dec_ref(paddr) == 0
+            }
+        } else {
+            true
+        }
+    }
+
+    /// Consumes the frame, bypassing its single-page destructor, and returns its
+    /// virtual address if the backing frame should be deallocated.
+    fn into_dealloc_target(self) -> Option<usize> {
+        let vaddr = self.addr.as_usize();
+        let paddr = virt_to_phys(self.addr);
+        core::mem::forget(self);
+        if Self::should_dealloc_paddr(paddr) {
+            Some(vaddr)
+        } else {
+            None
+        }
+    }
+}
+
 impl Drop for PageCacheFrame {
     fn drop(&mut self) {
         let paddr = virt_to_phys(self.addr);
-        if let Some(ref_count) = axalloc::frame_table().try_get_ref(paddr) {
-            if ref_count == 0 {
-                global_allocator().dealloc_pages(self.addr.as_usize(), 1);
-            } else if axalloc::frame_table().dec_ref(paddr) == 0 {
-                global_allocator().dealloc_pages(self.addr.as_usize(), 1);
-            }
-        } else {
+        if Self::should_dealloc_paddr(paddr) {
             global_allocator().dealloc_pages(self.addr.as_usize(), 1);
         }
     }
+}
+
+fn dealloc_page_batch_vaddrs(mut vaddrs: Vec<usize>) {
+    if vaddrs.is_empty() {
+        return;
+    }
+    vaddrs.sort_unstable();
+    let mut runs = Vec::with_capacity(vaddrs.len());
+    let mut run_start = vaddrs[0];
+    let mut run_len = 1;
+    for &vaddr in &vaddrs[1..] {
+        if vaddr == run_start.saturating_add(run_len * PAGE_SIZE) {
+            run_len += 1;
+        } else {
+            runs.push((run_start, run_len));
+            run_start = vaddr;
+            run_len = 1;
+        }
+    }
+    runs.push((run_start, run_len));
+    global_allocator().dealloc_pages_batch(&runs);
 }
 
 #[derive(Debug)]
@@ -852,6 +894,25 @@ impl PageCache {
         // cloned frame owner keeps it allocated if the read future is dropped.
         unsafe { axdriver::prelude::register_owned_read_buffer(ptr, len, self.frame.clone()) }
             .map_err(|_| VfsError::BadState)
+    }
+
+    /// Consumes the page cache entry and extracts its virtual address if eligible
+    /// for deallocation, bypassing single-page deallocation in `PageCacheFrame::drop`.
+    pub(crate) fn into_dealloc_target(self) -> Option<usize> {
+        let mut this = core::mem::ManuallyDrop::new(self);
+        if this.dirty {
+            warn!("dirty page dropped without flushing");
+        }
+        // SAFETY: `this` is wrapped in ManuallyDrop, so its Drop implementation
+        // will not run. We read `this.frame` by value and do not access `this` again.
+        let frame_arc = unsafe { core::ptr::read(&this.frame) };
+        match Arc::try_unwrap(frame_arc) {
+            Ok(frame) => frame.into_dealloc_target(),
+            Err(arc) => {
+                drop(arc);
+                None
+            }
+        }
     }
 }
 
@@ -1041,21 +1102,27 @@ impl CachedFileShared {
     /// longer reachable, while a dirty page reaching ordinary `Drop` remains a
     /// correctness error.
     fn discard_pages_after_unlink(&self) {
-        let mut cache = self.page_cache.lock();
         let mut discarded_dirty = 0;
-        while let Some((_pn, mut page)) = cache.pop_lru() {
-            if page.dirty {
-                discarded_dirty += 1;
-                page.dirty = false;
+        let mut to_dealloc = Vec::new();
+        {
+            let mut cache = self.page_cache.lock();
+            while let Some((_pn, mut page)) = cache.pop_lru() {
+                if page.dirty {
+                    discarded_dirty += 1;
+                    page.dirty = false;
+                }
+                debug_assert!(
+                    !page.has_user_mapping(),
+                    "unlinked file cache still has a mapped page"
+                );
+                page.may_write_mapping = false;
+                if let Some(vaddr) = page.into_dealloc_target() {
+                    to_dealloc.push(vaddr);
+                }
             }
-            debug_assert!(
-                !page.has_user_mapping(),
-                "unlinked file cache still has a mapped page"
-            );
-            page.may_write_mapping = false;
-            drop(page);
         }
         self.writable_mapping_watch.store(false, Ordering::Release);
+        dealloc_page_batch_vaddrs(to_dealloc);
         if discarded_dirty != 0 {
             debug!(
                 "discarded {} dirty page(s) after successful unlink",
@@ -1131,7 +1198,13 @@ impl CachedFileShared {
         let evicted = evicted_pages.len();
         drop(cache);
         drop(listeners);
-        drop(evicted_pages);
+        let mut to_dealloc = Vec::with_capacity(evicted);
+        for (_pn, page) in evicted_pages {
+            if let Some(vaddr) = page.into_dealloc_target() {
+                to_dealloc.push(vaddr);
+            }
+        }
+        dealloc_page_batch_vaddrs(to_dealloc);
         evicted
     }
 
@@ -1534,14 +1607,20 @@ impl CachedFileShared {
 
 impl Drop for CachedFileShared {
     fn drop(&mut self) {
-        let mut guard = self.page_cache.lock();
         let mut dirty_count = 0;
-        while let Some((_pn, page)) = guard.pop_lru() {
-            if page.dirty {
-                dirty_count += 1;
+        let mut to_dealloc = Vec::new();
+        {
+            let mut guard = self.page_cache.lock();
+            while let Some((_pn, page)) = guard.pop_lru() {
+                if page.dirty {
+                    dirty_count += 1;
+                }
+                if let Some(vaddr) = page.into_dealloc_target() {
+                    to_dealloc.push(vaddr);
+                }
             }
-            drop(page);
         }
+        dealloc_page_batch_vaddrs(to_dealloc);
         if dirty_count > 0 {
             error!(
                 "CachedFileShared drop: {} dirty page(s) discarded without flushing!",

@@ -330,4 +330,31 @@ mod tests {
             i += 1;
         }
     }
+
+    #[test]
+    fn test_bitmap_page_allocator_dealloc_batch() {
+        let mut allocator = BitmapPageAllocator::<PAGE_SIZE>::new();
+        allocator.init(PAGE_SIZE, PAGE_SIZE * 16);
+
+        let p1 = allocator.alloc_pages(1, PAGE_SIZE).unwrap();
+        let p2 = allocator.alloc_pages(2, PAGE_SIZE).unwrap();
+        let p3 = allocator.alloc_pages(3, PAGE_SIZE).unwrap();
+
+        assert_eq!(allocator.used_pages(), 6);
+        assert_eq!(allocator.available_pages(), 10);
+
+        // Empty batch and 0-count entries must be safe no-ops
+        allocator.dealloc_pages_batch(&[]);
+        allocator.dealloc_pages_batch(&[(p1, 0)]);
+        assert_eq!(allocator.used_pages(), 6);
+        assert_eq!(allocator.available_pages(), 10);
+
+        allocator.dealloc_pages_batch(&[(p1, 1), (p3, 3)]);
+        assert_eq!(allocator.used_pages(), 2);
+        assert_eq!(allocator.available_pages(), 14);
+
+        allocator.dealloc_pages_batch(&[(p2, 2)]);
+        assert_eq!(allocator.used_pages(), 0);
+        assert_eq!(allocator.available_pages(), 16);
+    }
 }

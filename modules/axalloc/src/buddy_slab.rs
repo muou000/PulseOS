@@ -425,6 +425,16 @@ impl GlobalAllocator {
         self.inner.dealloc_pages(pos, num_pages);
     }
 
+    /// Returns multiple page ranges to Buddy under a single preemption/interrupt
+    /// guard and allocator lock acquisition.
+    pub fn dealloc_pages_batch(&self, runs: &[(usize, usize)]) {
+        if runs.is_empty() {
+            return;
+        }
+        let _guard = NoPreemptIrqSave::new();
+        self.inner.dealloc_pages_batch(runs);
+    }
+
     /// Splits a contiguous allocation into independently releasable pages.
     pub fn split_allocated_pages(&self, pos: usize, num_pages: usize) -> AllocResult {
         let _guard = NoPreemptIrqSave::new();

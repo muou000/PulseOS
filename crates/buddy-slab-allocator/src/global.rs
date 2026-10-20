@@ -218,6 +218,16 @@ impl<const PAGE_SIZE: usize> GlobalAllocator<PAGE_SIZE> {
         self.buddy.lock().dealloc_pages(addr, count);
     }
 
+    /// Free multiple page ranges while acquiring the buddy lock once.
+    ///
+    /// Empty runs or entries with `count == 0` are safely ignored.
+    pub fn dealloc_pages_batch(&self, runs: &[(usize, usize)]) {
+        if runs.is_empty() {
+            return;
+        }
+        self.buddy.lock().dealloc_pages_batch(runs);
+    }
+
     /// Splits a contiguous page allocation into independently releasable pages.
     pub fn split_allocated_pages(&self, addr: usize, count: usize) -> AllocResult {
         self.buddy.lock().split_allocated_pages(addr, count)
@@ -296,10 +306,7 @@ impl<const PAGE_SIZE: usize> GlobalAllocator<PAGE_SIZE> {
                     self.buddy.lock().dealloc_pages(base, pages);
                 }
                 crate::SlabPoolDeallocResult::FreeSlabs(batch) => {
-                    let mut buddy = self.buddy.lock();
-                    for &(base, pages) in batch.as_slice() {
-                        buddy.dealloc_pages(base, pages);
-                    }
+                    self.buddy.lock().dealloc_pages_batch(batch.as_slice());
                 }
             }
         }
