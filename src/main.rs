@@ -69,6 +69,7 @@ fn main() {
             }
 
             pulse_syscalls::run_bpf_guest_checks().expect("bpf guest checks failed");
+            pulse_core::fd_table::run_pipe_guest_checks().expect("pipe guest checks failed");
 
             let shell_args_base: &[&str] = &["sh"];
             let shell_envs: &[&str] = &["PATH=/usr/sbin:/usr/bin:/sbin:/bin"];

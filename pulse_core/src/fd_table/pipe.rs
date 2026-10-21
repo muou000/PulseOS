@@ -212,6 +212,49 @@ fn dealloc_physical_frame(frame: PhysAddr) {
     }
 }
 
+fn dealloc_physical_frames(frames: &[PhysAddr]) {
+    if frames.is_empty() {
+        return;
+    }
+    if frames.len() == 1 {
+        dealloc_physical_frame(frames[0]);
+        return;
+    }
+
+    let table = axalloc::frame_table();
+    let mut eligible = alloc::vec::Vec::with_capacity(frames.len());
+    for &frame in frames {
+        if table.contains(frame) && table.dec_ref(frame) == 0 {
+            eligible.push(frame);
+        }
+    }
+    if eligible.is_empty() {
+        return;
+    }
+    eligible.sort_unstable_by_key(|frame| frame.as_usize());
+    let mut runs = alloc::vec::Vec::with_capacity(eligible.len());
+    let mut run_start = eligible[0].as_usize();
+    let mut run_len = 1;
+    for &frame in &eligible[1..] {
+        let paddr = frame.as_usize();
+        if paddr == run_start.saturating_add(run_len * axhal::mem::PAGE_SIZE_4K) {
+            run_len += 1;
+        } else {
+            runs.push((
+                axhal::mem::phys_to_virt(PhysAddr::from(run_start)).as_usize(),
+                run_len,
+            ));
+            run_start = paddr;
+            run_len = 1;
+        }
+    }
+    runs.push((
+        axhal::mem::phys_to_virt(PhysAddr::from(run_start)).as_usize(),
+        run_len,
+    ));
+    axalloc::global_allocator().dealloc_pages_batch(&runs);
+}
+
 const EVENTFD_COUNTER_MAX: u64 = u64::MAX - 1;
 
 pub struct EventFdObject {
@@ -753,23 +796,30 @@ impl PipeObject {
         let aspace = process.aspace_handle();
 
         let num_pages = count / PIPE_PAGE_SIZE;
+        let mut gathered_pages = alloc::vec::Vec::new();
+        if num_pages > 0 {
+            let mut zc = self.shared.zc_pages.lock();
+            while gathered_pages.len() < num_pages {
+                if let Some(page) = zc.front() {
+                    if page.offset == 0 && page.len == PIPE_PAGE_SIZE {
+                        let page = zc.pop_front().unwrap();
+                        gathered_pages.push(page);
+                        continue;
+                    }
+                }
+                break;
+            }
+        }
+
+        let total_gathered = gathered_pages.len();
         let mut read_pages = 0;
         let mut pending_shootdown: Option<axmm::TlbShootdown> = None;
+        let mut remap_err = None;
 
-        for i in 0..num_pages {
-            let page_vaddr = VirtAddr::from(reader_vaddr + i * PIPE_PAGE_SIZE);
-            let mut zc = self.shared.zc_pages.lock();
-            let can_remap = if let Some(page) = zc.front() {
-                page.offset == 0 && page.len == 4096
-            } else {
-                false
-            };
-
-            if can_remap {
-                let page = zc.pop_front().unwrap();
-                drop(zc);
-
-                let mut aspace_guard = aspace.write();
+        if total_gathered > 0 {
+            let mut aspace_guard = aspace.write();
+            for (i, page) in gathered_pages.iter().enumerate() {
+                let page_vaddr = VirtAddr::from(reader_vaddr + i * PIPE_PAGE_SIZE);
                 let (remap_res, shootdown) = aspace_guard
                     .remap_page(
                         page_vaddr,
@@ -777,7 +827,6 @@ impl PipeObject {
                         MappingFlags::READ | MappingFlags::WRITE | MappingFlags::USER,
                     )
                     .into_parts();
-                drop(aspace_guard);
                 if let Some(shootdown) = shootdown {
                     if let Some(pending) = pending_shootdown.as_mut() {
                         pending.merge(shootdown);
@@ -786,15 +835,32 @@ impl PipeObject {
                     }
                 }
 
-                if remap_res.is_ok() {
-                    read_pages += 1;
-                } else {
-                    self.shared.zc_pages.lock().push_front(page);
-                    break;
+                match remap_res {
+                    Ok(()) => {
+                        read_pages += 1;
+                    }
+                    Err(e) => {
+                        remap_err = Some(e);
+                        break;
+                    }
                 }
-            } else {
-                drop(zc);
-                break;
+            }
+            drop(aspace_guard);
+
+            if read_pages < total_gathered {
+                let unconsumed: alloc::vec::Vec<ZeroCopyPage> =
+                    gathered_pages.drain(read_pages..).collect();
+                let mut zc = self.shared.zc_pages.lock();
+                if self.read_end_closed() {
+                    drop(zc);
+                    let paddrs: alloc::vec::Vec<PhysAddr> =
+                        unconsumed.into_iter().map(|p| p.paddr).collect();
+                    dealloc_physical_frames(&paddrs);
+                } else {
+                    for page in unconsumed.into_iter().rev() {
+                        zc.push_front(page);
+                    }
+                }
             }
         }
 
@@ -809,6 +875,10 @@ impl PipeObject {
                 self.shared.write_wait_queue.notify_all(true);
             }
             return Ok(read_pages * PIPE_PAGE_SIZE);
+        }
+
+        if let Some(err) = remap_err {
+            return Err(LinuxError::from(err));
         }
 
         let chunk_size = count.min(65536);
@@ -901,29 +971,40 @@ impl FdObject for PipeObject {
         }
         let mut read_size = 0usize;
         while read_size < buf.len() {
-            let mut zc = self.shared.zc_pages.lock();
-            if let Some(page) = zc.front_mut() {
-                let chunk_limit = core::cmp::min(page.len, buf.len() - read_size);
-                let src_kvaddr = axhal::mem::phys_to_virt(page.paddr) + page.offset;
-                unsafe {
-                    core::ptr::copy_nonoverlapping(
-                        src_kvaddr.as_ptr(),
-                        buf[read_size..].as_mut_ptr(),
-                        chunk_limit,
-                    );
+            let mut freed_frames = alloc::vec::Vec::new();
+            {
+                let mut zc = self.shared.zc_pages.lock();
+                while read_size < buf.len() {
+                    let Some(page) = zc.front_mut() else {
+                        break;
+                    };
+                    let chunk_limit = core::cmp::min(page.len, buf.len() - read_size);
+                    let src_kvaddr = axhal::mem::phys_to_virt(page.paddr) + page.offset;
+                    unsafe {
+                        core::ptr::copy_nonoverlapping(
+                            src_kvaddr.as_ptr(),
+                            buf[read_size..].as_mut_ptr(),
+                            chunk_limit,
+                        );
+                    }
+                    page.offset += chunk_limit;
+                    page.len -= chunk_limit;
+                    read_size += chunk_limit;
+                    if page.len == 0 {
+                        let popped = zc.pop_front().unwrap();
+                        freed_frames.push(popped.paddr);
+                    } else {
+                        break;
+                    }
                 }
-                page.offset += chunk_limit;
-                page.len -= chunk_limit;
-                read_size += chunk_limit;
-                let page_empty = page.len == 0;
-                if page_empty {
-                    let popped = zc.pop_front().unwrap();
-                    dealloc_physical_frame(popped.paddr);
-                }
-                drop(zc);
-                continue;
             }
-            drop(zc);
+            if !freed_frames.is_empty() {
+                dealloc_physical_frames(&freed_frames);
+            }
+
+            if read_size == buf.len() {
+                break;
+            }
 
             let mut ring_buffer = self.shared.buffer.lock();
             let available = ring_buffer.available_read();
@@ -1302,9 +1383,267 @@ pub fn create_fifo_entry(
     Ok(FdEntry::new(object, flags))
 }
 
+pub fn run_pipe_guest_checks() -> Result<(), LinuxError> {
+    axlog::ax_println!("[PIPE_GUEST] Starting pipe zero-copy and batch dealloc checks...");
+
+    let process = crate::task::current_process()?;
+    let aspace = process.aspace_handle();
+
+    // Helper to allocate and mark a physical frame
+    let alloc_frame = || -> Result<PhysAddr, LinuxError> {
+        let vaddr = axalloc::global_allocator()
+            .alloc_pages(1, axhal::mem::PAGE_SIZE_4K)
+            .map_err(|_| LinuxError::ENOMEM)?;
+        let frame = axhal::mem::virt_to_phys(VirtAddr::from(vaddr));
+        let table = axalloc::frame_table();
+        if table.contains(frame) {
+            table.mark_used(frame);
+        }
+        Ok(frame)
+    };
+
+    // 1. Multi-page zero-copy read batching:
+    // Gather and scatter 3 pages in a single batch.
+    {
+        let (read_end, _write_end) = PipeObject::new_pair();
+        let f0 = alloc_frame()?;
+        let f1 = alloc_frame()?;
+        let f2 = alloc_frame()?;
+
+        unsafe {
+            let p0 = axhal::mem::phys_to_virt(f0).as_mut_ptr();
+            core::ptr::write_bytes(p0, 0x11, PIPE_PAGE_SIZE);
+            let p1 = axhal::mem::phys_to_virt(f1).as_mut_ptr();
+            core::ptr::write_bytes(p1, 0x22, PIPE_PAGE_SIZE);
+            let p2 = axhal::mem::phys_to_virt(f2).as_mut_ptr();
+            core::ptr::write_bytes(p2, 0x33, PIPE_PAGE_SIZE);
+        }
+
+        {
+            let mut zc = read_end.shared.zc_pages.lock();
+            zc.push_back(ZeroCopyPage { paddr: f0, offset: 0, len: PIPE_PAGE_SIZE });
+            zc.push_back(ZeroCopyPage { paddr: f1, offset: 0, len: PIPE_PAGE_SIZE });
+            zc.push_back(ZeroCopyPage { paddr: f2, offset: 0, len: PIPE_PAGE_SIZE });
+        }
+
+        let test_va = 0x2000_0000;
+        let bytes_read = read_end.read_zerocopy(test_va, 3 * PIPE_PAGE_SIZE)?;
+        assert_eq!(bytes_read, 3 * PIPE_PAGE_SIZE, "multi-page read_zerocopy byte count");
+        assert!(read_end.shared.zc_pages.lock().is_empty(), "zc_pages queue should be empty");
+
+        let mut verify_buf = alloc::vec![0u8; PIPE_PAGE_SIZE];
+        process.read_user_bytes(test_va, &mut verify_buf)?;
+        assert_eq!(verify_buf[0], 0x11);
+        assert_eq!(verify_buf[PIPE_PAGE_SIZE - 1], 0x11);
+
+        process.read_user_bytes(test_va + PIPE_PAGE_SIZE, &mut verify_buf)?;
+        assert_eq!(verify_buf[0], 0x22);
+        assert_eq!(verify_buf[PIPE_PAGE_SIZE - 1], 0x22);
+
+        process.read_user_bytes(test_va + 2 * PIPE_PAGE_SIZE, &mut verify_buf)?;
+        assert_eq!(verify_buf[0], 0x33);
+        assert_eq!(verify_buf[PIPE_PAGE_SIZE - 1], 0x33);
+
+        let _ = aspace.write().unmap(VirtAddr::from(test_va), 3 * PIPE_PAGE_SIZE);
+    }
+    axlog::ax_println!("[PIPE_GUEST] Multi-page zero-copy read: PASS");
+
+    // 2. Partial page fallback:
+    {
+        let (read_end, _write_end) = PipeObject::new_pair();
+        let f = alloc_frame()?;
+        unsafe {
+            let p = axhal::mem::phys_to_virt(f).as_mut_ptr();
+            core::ptr::write_bytes(p.add(64), 0x77, 128);
+        }
+        {
+            let mut zc = read_end.shared.zc_pages.lock();
+            zc.push_back(ZeroCopyPage { paddr: f, offset: 64, len: 128 });
+        }
+
+        let test_va = crate::config::USER_STACK_TOP - 0x10000;
+        let bytes_read = read_end.read_zerocopy(test_va, PIPE_PAGE_SIZE)?;
+        assert_eq!(bytes_read, 128, "partial-page fallback byte count");
+        assert!(read_end.shared.zc_pages.lock().is_empty(), "partial page should be consumed");
+
+        let mut verify_buf = [0u8; 128];
+        process.read_user_bytes(test_va, &mut verify_buf)?;
+        assert!(verify_buf.iter().all(|&b| b == 0x77), "partial page content verified");
+    }
+    axlog::ax_println!("[PIPE_GUEST] Partial-page fallback: PASS");
+
+    // 3. Remap failure rollback & FIFO restoration:
+    // 3a. Failure on first page (unaligned user address): returns error, all pages restored in FIFO order
+    {
+        let (read_end, _write_end) = PipeObject::new_pair();
+        let f0 = alloc_frame()?;
+        let f1 = alloc_frame()?;
+        let f2 = alloc_frame()?;
+
+        {
+            let mut zc = read_end.shared.zc_pages.lock();
+            zc.push_back(ZeroCopyPage { paddr: f0, offset: 0, len: PIPE_PAGE_SIZE });
+            zc.push_back(ZeroCopyPage { paddr: f1, offset: 0, len: PIPE_PAGE_SIZE });
+            zc.push_back(ZeroCopyPage { paddr: f2, offset: 0, len: PIPE_PAGE_SIZE });
+        }
+
+        // Unaligned address 0x2200_0001 causes remap_page to fail on page 0
+        let res = read_end.read_zerocopy(0x2200_0001, 3 * PIPE_PAGE_SIZE);
+        assert!(res.is_err(), "unaligned address must return error");
+
+        let zc = read_end.shared.zc_pages.lock();
+        assert_eq!(zc.len(), 3, "all 3 pages restored to queue");
+        assert_eq!(zc[0].paddr, f0, "page 0 in front");
+        assert_eq!(zc[1].paddr, f1, "page 1 in middle");
+        assert_eq!(zc[2].paddr, f2, "page 2 in back");
+        drop(zc);
+
+        // Clean up
+        let mut zc = read_end.shared.zc_pages.lock();
+        let paddrs: alloc::vec::Vec<PhysAddr> = zc.drain(..).map(|p| p.paddr).collect();
+        drop(zc);
+        dealloc_physical_frames(&paddrs);
+    }
+    axlog::ax_println!("[PIPE_GUEST] Remap failure total rollback: PASS");
+
+    // 3b. Failure on subsequent page: short read returned, remaining pages restored in FIFO order
+    {
+        let (read_end, _write_end) = PipeObject::new_pair();
+        let f0 = alloc_frame()?;
+        let f1 = alloc_frame()?;
+        let f2 = alloc_frame()?;
+
+        {
+            let mut zc = read_end.shared.zc_pages.lock();
+            zc.push_back(ZeroCopyPage { paddr: f0, offset: 0, len: PIPE_PAGE_SIZE });
+            zc.push_back(ZeroCopyPage { paddr: f1, offset: 0, len: PIPE_PAGE_SIZE });
+            zc.push_back(ZeroCopyPage { paddr: f2, offset: 0, len: PIPE_PAGE_SIZE });
+        }
+
+        // Address at the end of user space so page 0 succeeds but page 1 is out of range
+        let border_va = crate::config::USER_SPACE_BASE + crate::config::USER_SPACE_SIZE - PIPE_PAGE_SIZE;
+        let bytes_read = read_end.read_zerocopy(border_va, 3 * PIPE_PAGE_SIZE)?;
+        assert_eq!(bytes_read, PIPE_PAGE_SIZE, "short read returns mapped page count");
+
+        let zc = read_end.shared.zc_pages.lock();
+        assert_eq!(zc.len(), 2, "2 unconsumed pages restored to queue");
+        assert_eq!(zc[0].paddr, f1, "page 1 in front");
+        assert_eq!(zc[1].paddr, f2, "page 2 in back");
+        drop(zc);
+
+        // Clean up
+        let mut zc = read_end.shared.zc_pages.lock();
+        let paddrs: alloc::vec::Vec<PhysAddr> = zc.drain(..).map(|p| p.paddr).collect();
+        drop(zc);
+        dealloc_physical_frames(&paddrs);
+
+        let _ = aspace.write().unmap(VirtAddr::from(border_va), PIPE_PAGE_SIZE);
+    }
+    axlog::ax_println!("[PIPE_GUEST] Remap partial failure short read & restoration: PASS");
+
+    // 4. PipeObject::read multi-page consumption & lock-free batch frame deallocation
+    {
+        let (read_end, _write_end) = PipeObject::new_pair();
+        let f0 = alloc_frame()?;
+        let f1 = alloc_frame()?;
+        let f2 = alloc_frame()?;
+        let f3 = alloc_frame()?;
+
+        unsafe {
+            let p0 = axhal::mem::phys_to_virt(f0).as_mut_ptr();
+            core::ptr::write_bytes(p0, 0x41, PIPE_PAGE_SIZE);
+            let p1 = axhal::mem::phys_to_virt(f1).as_mut_ptr();
+            core::ptr::write_bytes(p1, 0x42, PIPE_PAGE_SIZE);
+            let p2 = axhal::mem::phys_to_virt(f2).as_mut_ptr();
+            core::ptr::write_bytes(p2, 0x43, PIPE_PAGE_SIZE);
+            let p3 = axhal::mem::phys_to_virt(f3).as_mut_ptr();
+            core::ptr::write_bytes(p3, 0x44, PIPE_PAGE_SIZE);
+        }
+
+        {
+            let mut zc = read_end.shared.zc_pages.lock();
+            zc.push_back(ZeroCopyPage { paddr: f0, offset: 0, len: PIPE_PAGE_SIZE });
+            zc.push_back(ZeroCopyPage { paddr: f1, offset: 0, len: PIPE_PAGE_SIZE });
+            zc.push_back(ZeroCopyPage { paddr: f2, offset: 0, len: PIPE_PAGE_SIZE });
+            zc.push_back(ZeroCopyPage { paddr: f3, offset: 0, len: PIPE_PAGE_SIZE });
+        }
+
+        let mut read_buf = alloc::vec![0u8; 4 * PIPE_PAGE_SIZE];
+        let bytes_read = read_end.read(&mut read_buf)?;
+        assert_eq!(bytes_read, 4 * PIPE_PAGE_SIZE, "read consumes all 4 pages");
+        assert!(read_end.shared.zc_pages.lock().is_empty(), "zc_pages is empty");
+
+        assert_eq!(read_buf[0], 0x41);
+        assert_eq!(read_buf[PIPE_PAGE_SIZE], 0x42);
+        assert_eq!(read_buf[2 * PIPE_PAGE_SIZE], 0x43);
+        assert_eq!(read_buf[3 * PIPE_PAGE_SIZE], 0x44);
+
+        // Frames were freed; verify refcount dropped to 0
+        let table = axalloc::frame_table();
+        assert_eq!(table.get_ref(f0), 0);
+        assert_eq!(table.get_ref(f1), 0);
+        assert_eq!(table.get_ref(f2), 0);
+        assert_eq!(table.get_ref(f3), 0);
+    }
+    axlog::ax_println!("[PIPE_GUEST] Lock-outside batch dealloc in read: PASS");
+
+    // 5. Closed-pipe unconsumed pages cleanup during rollback:
+    {
+        let (read_end, _write_end) = PipeObject::new_pair();
+        let f0 = alloc_frame()?;
+        let f1 = alloc_frame()?;
+
+        {
+            let mut zc = read_end.shared.zc_pages.lock();
+            zc.push_back(ZeroCopyPage { paddr: f0, offset: 0, len: PIPE_PAGE_SIZE });
+            zc.push_back(ZeroCopyPage { paddr: f1, offset: 0, len: PIPE_PAGE_SIZE });
+        }
+
+        // Simulate closed reader count on this pipe
+        read_end.shared.reader_count.store(0, Ordering::Release);
+        assert!(read_end.read_end_closed());
+
+        // Calling read_zerocopy with an invalid/unaligned address causes remap to fail on page 0
+        let res = read_end.read_zerocopy(0x2200_0001, 2 * PIPE_PAGE_SIZE);
+        assert!(res.is_err(), "must fail remap");
+
+        // Because read_end_closed() was true, rollback directly frees unconsumed pages outside lock
+        assert!(read_end.shared.zc_pages.lock().is_empty(), "zc_pages must be empty");
+
+        let table = axalloc::frame_table();
+        assert_eq!(table.get_ref(f0), 0, "frame 0 freed");
+        assert_eq!(table.get_ref(f1), 0, "frame 1 freed");
+    }
+    axlog::ax_println!("[PIPE_GUEST] Closed-pipe cleanup: PASS");
+
+    axlog::ax_println!("[PIPE_GUEST] All pipe checks PASSED!");
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{PIPE_PAGE_SIZE, PipeRingBuffer, pipe_available_write_bytes};
+    use super::*;
+
+    #[test]
+    fn rollback_order_preserves_fifo_sequence() {
+        let mut queue = alloc::collections::VecDeque::new();
+        let gathered = alloc::vec![
+            ZeroCopyPage { paddr: PhysAddr::from(0x1000), offset: 0, len: 4096 },
+            ZeroCopyPage { paddr: PhysAddr::from(0x2000), offset: 0, len: 4096 },
+            ZeroCopyPage { paddr: PhysAddr::from(0x3000), offset: 0, len: 4096 },
+        ];
+        queue.push_back(ZeroCopyPage { paddr: PhysAddr::from(0x4000), offset: 0, len: 4096 });
+
+        let unconsumed: alloc::vec::Vec<ZeroCopyPage> = gathered.into_iter().skip(1).collect();
+        for page in unconsumed.into_iter().rev() {
+            queue.push_front(page);
+        }
+
+        assert_eq!(queue.len(), 3);
+        assert_eq!(queue[0].paddr, PhysAddr::from(0x2000));
+        assert_eq!(queue[1].paddr, PhysAddr::from(0x3000));
+        assert_eq!(queue[2].paddr, PhysAddr::from(0x4000));
+    }
 
     #[test]
     fn zero_copy_pages_cannot_bypass_pipe_capacity() {
