@@ -22,4 +22,4 @@ __pycache__/
 *.py[cod]
 *$py.class
 .pytest_cache/
-/ltp/
+tests/lmbench/bin/
