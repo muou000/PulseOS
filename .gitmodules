@@ -1,0 +1,9 @@
+[submodule "tests/lmbench"]
+	path = tests/lmbench
+	url = https://github.com/intel/lmbench.git
+[submodule "tests/unixbench"]
+	path = tests/unixbench
+	url = https://github.com/kdlucas/byte-unixbench.git
+[submodule "tests/ltp"]
+	path = tests/ltp
+	url = https://github.com/linux-test-project/ltp.git
