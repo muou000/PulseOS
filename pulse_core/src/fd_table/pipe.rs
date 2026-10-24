@@ -971,35 +971,62 @@ impl FdObject for PipeObject {
         }
         let mut read_size = 0usize;
         while read_size < buf.len() {
-            let mut freed_frames = alloc::vec::Vec::new();
+            let mut pages_to_copy = alloc::vec::Vec::new();
+            let mut partial_copy = None;
             {
                 let mut zc = self.shared.zc_pages.lock();
-                while read_size < buf.len() {
+                let mut remaining = buf.len() - read_size;
+                while remaining > 0 {
                     let Some(page) = zc.front_mut() else {
                         break;
                     };
-                    let chunk_limit = core::cmp::min(page.len, buf.len() - read_size);
-                    let src_kvaddr = axhal::mem::phys_to_virt(page.paddr) + page.offset;
-                    unsafe {
-                        core::ptr::copy_nonoverlapping(
-                            src_kvaddr.as_ptr(),
-                            buf[read_size..].as_mut_ptr(),
-                            chunk_limit,
-                        );
-                    }
-                    page.offset += chunk_limit;
-                    page.len -= chunk_limit;
-                    read_size += chunk_limit;
-                    if page.len == 0 {
-                        let popped = zc.pop_front().unwrap();
-                        freed_frames.push(popped.paddr);
+                    if page.len <= remaining {
+                        let p = zc.pop_front().unwrap();
+                        remaining -= p.len;
+                        pages_to_copy.push(p);
                     } else {
+                        let chunk = remaining;
+                        let src_paddr = page.paddr;
+                        let src_offset = page.offset;
+                        page.offset += chunk;
+                        page.len -= chunk;
+                        partial_copy = Some((src_paddr, src_offset, chunk));
                         break;
                     }
                 }
             }
-            if !freed_frames.is_empty() {
-                dealloc_physical_frames(&freed_frames);
+
+            for page in &pages_to_copy {
+                let src_kvaddr = axhal::mem::phys_to_virt(page.paddr) + page.offset;
+                unsafe {
+                    core::ptr::copy_nonoverlapping(
+                        src_kvaddr.as_ptr(),
+                        buf[read_size..].as_mut_ptr(),
+                        page.len,
+                    );
+                }
+                read_size += page.len;
+            }
+
+            if let Some((paddr, offset, len)) = partial_copy {
+                let src_kvaddr = axhal::mem::phys_to_virt(paddr) + offset;
+                unsafe {
+                    core::ptr::copy_nonoverlapping(
+                        src_kvaddr.as_ptr(),
+                        buf[read_size..].as_mut_ptr(),
+                        len,
+                    );
+                }
+                read_size += len;
+            }
+
+            if !pages_to_copy.is_empty() {
+                let paddrs: alloc::vec::Vec<PhysAddr> =
+                    pages_to_copy.into_iter().map(|p| p.paddr).collect();
+                dealloc_physical_frames(&paddrs);
+                if !self.shared.write_wait_queue.is_empty() {
+                    self.shared.write_wait_queue.notify_all(false);
+                }
             }
 
             if read_size == buf.len() {

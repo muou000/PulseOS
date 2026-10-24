@@ -34,6 +34,10 @@ _Avoid_: child cleanup, process deletion
 
 ### IPC
 
+**管道容量**:
+同一匿名管道或命名 FIFO 的读写端共同使用的缓冲字节上限；统计普通缓冲与零拷贝页中尚未读取的数据。
+_Avoid_: pipe buffer length
+
 **信号量事务**:
 对同一 System V 信号量集的一组操作作为一个状态转换：只有全部操作可满足时才提交，否则保持状态并等待、超时或返回错误。
 _Avoid_: semaphore batch, semaphore helper
