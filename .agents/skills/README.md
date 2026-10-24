@@ -67,6 +67,8 @@
 | [to-spec](./to-spec/SKILL.md) | [mattpocock](./THIRD_PARTY/mattpocock/README.md) | engineering | 用户 |
 | [to-tickets](./to-tickets/SKILL.md) | [mattpocock](./THIRD_PARTY/mattpocock/README.md) | engineering | 用户 |
 | [triage](./triage/SKILL.md) | [mattpocock](./THIRD_PARTY/mattpocock/README.md) | engineering | 用户 |
+| [unsafe-rust-review](./unsafe-rust-review/SKILL.md) | [google](./THIRD_PARTY/google/README.md) | engineering | 模型 |
+| [unsafe-rust-review-experimental](./unsafe-rust-review-experimental/SKILL.md) | [google](./THIRD_PARTY/google/README.md) | engineering | 模型 |
 | [wayfinder](./wayfinder/SKILL.md) | [mattpocock](./THIRD_PARTY/mattpocock/README.md) | engineering | 用户 |
 | [wizard](./wizard/SKILL.md) | [mattpocock](./THIRD_PARTY/mattpocock/README.md) | engineering | 模型 |
 | [grill-me](./grill-me/SKILL.md) | [mattpocock](./THIRD_PARTY/mattpocock/README.md) | productivity | 用户 |
