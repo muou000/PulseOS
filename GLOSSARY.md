@@ -49,11 +49,11 @@ _Avoid_: shared memory handle, mapping helper
 ### Performance observation
 
 **BPF 性能采样器**:
-PulseOS 中独立于 qperf 的性能数据记录与分析入口。它通过受控的 BPF 程序观察内核性能事件，生成可供主机侧分析的采样数据，目标是最终替代 qperf。
+PulseOS 中的性能数据记录与分析入口。它通过受控的 BPF 程序观察内核性能事件，生成可供主机侧分析的采样数据，已完全替代旧版 qperf。
 _Avoid_: qperf plugin, generic tracing
 
-**qperf 基线**:
-现有基于 QEMU 插件的指令采样与内核事件记录链路，用于 BPF 性能采样器的结果校验、迁移参照和回归对照；它不是 BPF 性能采样器的运行时依赖。
+**qperf 基线（已退役）**:
+早期基于 QEMU 插件的指令采样与内核事件记录链路，已完全退役并由 BPF 性能采样体系替代。
 _Avoid_: BPF backend, permanent BPF ABI
 
 **Linux BPF 兼容层级**:

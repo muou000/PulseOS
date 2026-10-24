@@ -9,7 +9,7 @@ use core::{
 
 use kspin::SpinNoIrq;
 
-#[cfg(any(feature = "qperf-trace", feature = "bpf-trace"))]
+#[cfg(feature = "bpf-trace")]
 use crate::current_may_uninit;
 use crate::{AxTaskRef, AxTaskWeak, WaitContext, WaitReason, WakeContext, WakeSource, current};
 
@@ -98,16 +98,16 @@ impl alloc::task::Wake for AxWaker {
     }
 }
 
-/// Overrides the qperf reason for the next suspension of the current `block_on` poll.
+/// Overrides the trace wait reason for the next suspension of the current `block_on` poll.
 ///
 /// Nested futures should call this only when they are about to return `Pending`.
 /// The context is cleared before every poll, so a completed or cancelled future
 /// cannot leak its reason into a later suspension.
 #[inline(always)]
 pub fn set_current_wait_context(_context: WaitContext) {
-    #[cfg(any(feature = "qperf-trace", feature = "bpf-trace"))]
+    #[cfg(feature = "bpf-trace")]
     if let Some(task) = current_may_uninit() {
-        task.set_qperf_pending_wait_context(_context);
+        task.set_pending_wait_context(_context);
     }
 }
 
@@ -129,14 +129,14 @@ pub fn block_on<F: IntoFuture>(f: F) -> F::Output {
 
         loop {
             *waker_arc.woke.lock() = false;
-            #[cfg(any(feature = "qperf-trace", feature = "bpf-trace"))]
-            curr.clear_qperf_pending_wait_context();
+            #[cfg(feature = "bpf-trace")]
+            curr.clear_pending_wait_context();
             match fut.as_mut().poll(&mut cx) {
                 Poll::Pending => {
                     let context = {
-                        #[cfg(any(feature = "qperf-trace", feature = "bpf-trace"))]
+                        #[cfg(feature = "bpf-trace")]
                         {
-                            curr.take_qperf_pending_wait_context().unwrap_or_else(|| {
+                            curr.take_pending_wait_context().unwrap_or_else(|| {
                                 WaitContext::new(|| {
                                     (
                                         WaitReason::Future,
@@ -146,7 +146,7 @@ pub fn block_on<F: IntoFuture>(f: F) -> F::Output {
                                 })
                             })
                         }
-                        #[cfg(not(any(feature = "qperf-trace", feature = "bpf-trace")))]
+                        #[cfg(not(feature = "bpf-trace"))]
                         {
                             WaitContext::new(|| (WaitReason::Future, 0, 0))
                         }

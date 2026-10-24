@@ -45,8 +45,6 @@ cfg_if::cfg_if! {
         mod run_queue;
         mod task;
         mod task_ext;
-        #[cfg(feature = "qperf-trace")]
-        pub mod qperf_trace;
         #[cfg(feature = "bpf-trace")]
         pub mod bpf_trace;
         mod api;

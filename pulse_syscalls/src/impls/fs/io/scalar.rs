@@ -141,7 +141,7 @@ pub fn sys_write(fd: usize, buf: usize, count: usize) -> isize {
         .is_tty_output()
         .then(pulse_core::fd_table::lock_tty_write_transaction);
     let mut fallback_buf = None;
-    #[cfg(any(feature = "qperf-trace", feature = "bpf-trace"))]
+    #[cfg(feature = "bpf-trace")]
     let mut marker_scanner = OutputMarkerScanner::new(fd);
 
     execute_user_write(
@@ -151,7 +151,7 @@ pub fn sys_write(fd: usize, buf: usize, count: usize) -> isize {
         WriteOffset::Shared,
         &mut fallback_buf,
         |bytes| {
-            #[cfg(any(feature = "qperf-trace", feature = "bpf-trace"))]
+            #[cfg(feature = "bpf-trace")]
             marker_scanner.push(bytes);
         },
         |_| {},

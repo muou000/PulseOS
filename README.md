@@ -75,7 +75,7 @@ PulseOS 的整体软件栈包含用户空间、Trap 异常分发、内核服务�
 │   └── starry-vdso            # 用户态 vDSO 支持库
 ├── rootfs                     # 根文件系统底包缓存（脚本下载，不入库）
 ├── docs                       # 设计文档、ADR 架构决策与移植记录
-└── records                    # 开发日志、性能分析与 qperf 过程产物
+└── records                    # 开发日志、性能分析与采样过程产物
 ```
 
 ---
@@ -113,7 +113,7 @@ PulseOS 的整体软件栈包含用户空间、Trap 异常分发、内核服务�
 - **[StarryOS](https://github.com/os-module/StarryOS)**: 借鉴了部分模块设计。
 - **RocketOS**: 借鉴了其批量懒分配的多页映射机制。
 - **undefinedOS**: 前期参考了其共享内存多映射设计。
-- **[qperf](https://github.com/Starry-OS/qperf)**: 使用该qemu插件进行了性能热点分析与优化。
+- **[qperf](https://github.com/Starry-OS/qperf)**: 前期使用该 QEMU 插件进行了性能分析与优化（现已完全由内置 BPF 性能采样体系替代并退役）。
 
 ---
 

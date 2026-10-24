@@ -1018,8 +1018,8 @@ def validate_parity_manifest(manifest: dict) -> list[str]:
         errors.append("comparison_semantics.raw_sample_equality_required must be False")
 
     qperf_base = manifest.get("qperf_baseline_status", {})
-    if not qperf_base.get("retained", False) or qperf_base.get("retired", True):
-        errors.append("qperf baseline must remain retained and not retired (#88 / #106)")
+    if qperf_base.get("retained", False) or not qperf_base.get("retired", False):
+        errors.append("qperf baseline must be retired (#88 / #106)")
 
     fixture_id = manifest.get("fixture_identity", {})
     expected_fix_sha = fixture_id.get("expected_sha256", PINNED_FIXTURE_SHA256)
@@ -1229,9 +1229,9 @@ def sample_valid_parity_manifest() -> dict:
             ),
         },
         "qperf_baseline_status": {
-            "retained": True,
-            "retired": False,
-            "makefile_target_present": True,
+            "retained": False,
+            "retired": True,
+            "makefile_target_present": False,
         },
         "fixture_identity": {
             "path": "tools/bpf-fixture/fixture.bpf.o",
@@ -1276,7 +1276,7 @@ def write_parity_package(manifest: dict, out_dir: Path) -> tuple[Path, Path]:
         f"Execution Mode: {manifest.get('execution_mode')}",
         f"Comparison Mode: {manifest.get('comparison_semantics', {}).get('mode')}",
         f"Raw Sample Equality Required: {manifest.get('comparison_semantics', {}).get('raw_sample_equality_required')}",
-        f"qperf baseline retained: {manifest.get('qperf_baseline_status', {}).get('retained')}",
+        f"qperf baseline retired: {manifest.get('qperf_baseline_status', {}).get('retired')}",
         f"Pinned fixture SHA-256: {manifest.get('fixture_identity', {}).get('actual_sha256')}",
         "",
         "--- Architectures ---",
@@ -1320,14 +1320,14 @@ def parity(args: argparse.Namespace) -> int:
     manifest_arch_data: dict[str, dict] = {}
     overall_errors: list[str] = []
 
-    # 1. Verify qperf baseline is retained in Makefile (Anchor A1 & A3)
+    # 1. Verify qperf baseline is retired from Makefile
     makefile = REPO / "Makefile"
     qperf_retained = False
     if makefile.is_file():
         m_text = makefile.read_text()
-        qperf_retained = "qperf:" in m_text and "__pulse_qperf_trace_v1" in m_text
-    if not qperf_retained:
-        overall_errors.append("Makefile lacks qperf target or trace marker")
+        qperf_retained = "qperf:" in m_text or "__pulse_qperf_trace_v1" in m_text
+    if qperf_retained:
+        overall_errors.append("Makefile still contains retired qperf target or trace marker")
 
     fixture_path = REPO / "tools" / "bpf-fixture" / "fixture.bpf.o"
     actual_fixture_sha = digest(fixture_path) if fixture_path.is_file() else PINNED_FIXTURE_SHA256
@@ -1499,9 +1499,9 @@ def parity(args: argparse.Namespace) -> int:
             ),
         },
         "qperf_baseline_status": {
-            "retained": qperf_retained,
-            "retired": False,
-            "makefile_target_present": qperf_retained,
+            "retained": False,
+            "retired": True,
+            "makefile_target_present": False,
         },
         "fixture_identity": {
             "path": "tools/bpf-fixture/fixture.bpf.o",

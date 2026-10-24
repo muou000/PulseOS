@@ -11,7 +11,6 @@ repository.workspace = true
 default = ["irq", "ext4"]
 irq = ["axtask/irq"]
 ext4 = ["axfs/ext4"]
-qperf-trace = ["axtask/qperf-trace", "axfs/qperf-trace"]
 bpf-trace = ["axtask/bpf-trace", "pulse_core/bpf-trace"]
 mapping-lifecycle-test = ["axfs/mapping-lifecycle-test"]
 

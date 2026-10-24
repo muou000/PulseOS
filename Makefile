@@ -36,8 +36,6 @@ VHOST ?= n
 IP ?= 10.0.2.15
 GW ?= 10.0.2.2
 
-QPERF_RUSTFLAGS := -C debuginfo=2 -C force-frame-pointers=yes -C strip=none
-
 VF2_PLATFORM_CONFIG := $(A)/platforms/axplat-riscv64-visionfive2/axconfig.toml
 VF2_IP ?= 192.168.137.2
 VF2_GW ?= 192.168.137.1
@@ -186,25 +184,9 @@ ls2k1000:
 	@ARCH=loongarch64 MYPLAT=axplat-loongarch64-ls2k1000 SMP=2 APP_FEATURES=ls2k1000 LOG="$(LOG)" BUS=mmio PLAT_CONFIG="$(LS2K1000_PLATFORM_CONFIG)" OUT_DIR="$(A)" $(MAKE) build
 	@echo "Built elf for U-Boot go at cached load address 0x9000000098000000."
 
-qperf:
-	@$(MAKE) ARCH=riscv64 SMP="$(SMP)" APP_FEATURES="$(APP_FEATURES),qperf-trace" LOG=off BUS=mmio BLK="$(BLK)" PLAT_CONFIG="$(QEMU_RV_PLATFORM_CONFIG)" OUT_DIR="$(A)" defconfig
-	@$(MAKE) ARCH=riscv64 SMP="$(SMP)" APP_FEATURES="$(APP_FEATURES),qperf-trace" LOG=off BUS=mmio BLK="$(BLK)" PLAT_CONFIG="$(QEMU_RV_PLATFORM_CONFIG)" OUT_DIR="$(A)" build EXTRA_RUSTFLAGS="$(QPERF_RUSTFLAGS)"
-	@cp "$(A)/$(NAME)_riscv64-qemu-virt.bin" "$(A)/kernel-rv-qperf"
-	@cp "$(A)/$(NAME)_riscv64-qemu-virt.elf" "$(A)/$(NAME)_riscv64-qemu-virt-qperf.elf"
-	@$(MAKE) ARCH=loongarch64 SMP="$(SMP)" APP_FEATURES="$(APP_FEATURES),qperf-trace" LOG=off BUS=pci FEATURES=bus-pci BLK="$(BLK)" PLAT_CONFIG="$(QEMU_LA_PLATFORM_CONFIG)" OUT_DIR="$(A)" defconfig
-	@$(MAKE) ARCH=loongarch64 SMP="$(SMP)" APP_FEATURES="$(APP_FEATURES),qperf-trace" LOG=off BUS=pci FEATURES=bus-pci BLK="$(BLK)" PLAT_CONFIG="$(QEMU_LA_PLATFORM_CONFIG)" OUT_DIR="$(A)" build EXTRA_RUSTFLAGS="$(QPERF_RUSTFLAGS)"
-	@cp "$(A)/$(NAME)_loongarch64-qemu-virt.elf" "$(A)/kernel-la-qperf"
-	@cp "$(A)/$(NAME)_loongarch64-qemu-virt.elf" "$(A)/$(NAME)_loongarch64-qemu-virt-qperf.elf"
-	@for elf in "$(A)/$(NAME)_riscv64-qemu-virt-qperf.elf" "$(A)/$(NAME)_loongarch64-qemu-virt-qperf.elf"; do \
-		if ! nm -n "$$elf" | grep -q ' __pulse_qperf_trace_v1$$'; then \
-			echo "Error: qperf artifact lacks trace marker: $$elf"; \
-			exit 1; \
-		fi; \
-	done
-
 clean:
 	@rm -rf "$(A)/target"
 	@rm -f "$(A)"/*.bin "$(A)"/*.elf "$(A)"/*.uimg "$(A)"/kernel-*
 	@rm -f "$(A)/.axconfig.toml" "$(A)/.axconfig.old.toml"
 
-.PHONY: rv la run img vf2 ls2k1000 qperf test clean defconfig oldconfig build justrun
+.PHONY: rv la run img vf2 ls2k1000 test clean defconfig oldconfig build justrun

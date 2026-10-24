@@ -60,7 +60,7 @@ pub(crate) type WaitQueueGuard<'a> = SpinNoIrqGuard<'a, VecDeque<AxTaskRef>>;
 
 /// Semantic reason for a task entering an off-CPU wait interval.
 ///
-/// Values are part of the PulseOS qperf marker ABI. Append new variants instead
+/// Values are part of the PulseOS trace marker ABI. Append new variants instead
 /// of renumbering existing ones.
 #[repr(u64)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -87,18 +87,18 @@ pub enum WaitReason {
 /// Typed context retained with a blocked task interval.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct WaitContext {
-    #[cfg(any(feature = "qperf-trace", feature = "bpf-trace"))]
+    #[cfg(feature = "bpf-trace")]
     reason: WaitReason,
-    #[cfg(any(feature = "qperf-trace", feature = "bpf-trace"))]
+    #[cfg(feature = "bpf-trace")]
     resource_id: u64,
-    #[cfg(any(feature = "qperf-trace", feature = "bpf-trace"))]
+    #[cfg(feature = "bpf-trace")]
     resource_detail: u64,
 }
 
 impl WaitContext {
     #[inline(always)]
     pub fn new(context: impl FnOnce() -> (WaitReason, u64, u64)) -> Self {
-        #[cfg(any(feature = "qperf-trace", feature = "bpf-trace"))]
+        #[cfg(feature = "bpf-trace")]
         {
             let (reason, resource_id, resource_detail) = context();
             Self {
@@ -107,7 +107,7 @@ impl WaitContext {
                 resource_detail,
             }
         }
-        #[cfg(not(any(feature = "qperf-trace", feature = "bpf-trace")))]
+        #[cfg(not(feature = "bpf-trace"))]
         {
             let _ = context;
             Self {}
@@ -116,7 +116,7 @@ impl WaitContext {
 
     #[inline(always)]
     pub fn new_optional(context: impl FnOnce() -> Option<(WaitReason, u64, u64)>) -> Option<Self> {
-        #[cfg(any(feature = "qperf-trace", feature = "bpf-trace"))]
+        #[cfg(feature = "bpf-trace")]
         {
             context().map(|(reason, resource_id, resource_detail)| Self {
                 reason,
@@ -124,24 +124,24 @@ impl WaitContext {
                 resource_detail,
             })
         }
-        #[cfg(not(any(feature = "qperf-trace", feature = "bpf-trace")))]
+        #[cfg(not(feature = "bpf-trace"))]
         {
             let _ = context;
             None
         }
     }
 
-    #[cfg(any(feature = "qperf-trace", feature = "bpf-trace"))]
+    #[cfg(feature = "bpf-trace")]
     pub(crate) const fn reason(self) -> WaitReason {
         self.reason
     }
 
-    #[cfg(any(feature = "qperf-trace", feature = "bpf-trace"))]
+    #[cfg(feature = "bpf-trace")]
     pub(crate) const fn resource_id(self) -> u64 {
         self.resource_id
     }
 
-    #[cfg(any(feature = "qperf-trace", feature = "bpf-trace"))]
+    #[cfg(feature = "bpf-trace")]
     pub(crate) const fn resource_detail(self) -> u64 {
         self.resource_detail
     }
@@ -167,21 +167,21 @@ pub enum WakeSource {
 /// Typed context retained with a task wake event.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct WakeContext {
-    #[cfg(any(feature = "qperf-trace", feature = "bpf-trace"))]
+    #[cfg(feature = "bpf-trace")]
     source: WakeSource,
-    #[cfg(any(feature = "qperf-trace", feature = "bpf-trace"))]
+    #[cfg(feature = "bpf-trace")]
     source_id: u64,
 }
 
 impl WakeContext {
     #[inline(always)]
     pub fn new(context: impl FnOnce() -> (WakeSource, u64)) -> Self {
-        #[cfg(any(feature = "qperf-trace", feature = "bpf-trace"))]
+        #[cfg(feature = "bpf-trace")]
         {
             let (source, source_id) = context();
             Self { source, source_id }
         }
-        #[cfg(not(any(feature = "qperf-trace", feature = "bpf-trace")))]
+        #[cfg(not(feature = "bpf-trace"))]
         {
             let _ = context;
             Self {}
@@ -190,34 +190,34 @@ impl WakeContext {
 
     pub const fn unknown() -> Self {
         Self {
-            #[cfg(any(feature = "qperf-trace", feature = "bpf-trace"))]
+            #[cfg(feature = "bpf-trace")]
             source: WakeSource::Unknown,
-            #[cfg(any(feature = "qperf-trace", feature = "bpf-trace"))]
+            #[cfg(feature = "bpf-trace")]
             source_id: 0,
         }
     }
 
     pub const fn task() -> Self {
         Self {
-            #[cfg(any(feature = "qperf-trace", feature = "bpf-trace"))]
+            #[cfg(feature = "bpf-trace")]
             source: WakeSource::Task,
-            #[cfg(any(feature = "qperf-trace", feature = "bpf-trace"))]
+            #[cfg(feature = "bpf-trace")]
             source_id: 0,
         }
     }
 
-    #[cfg(any(feature = "qperf-trace", feature = "bpf-trace"))]
+    #[cfg(feature = "bpf-trace")]
     pub(crate) const fn source(self) -> WakeSource {
         self.source
     }
 
-    #[cfg(any(feature = "qperf-trace", feature = "bpf-trace"))]
+    #[cfg(feature = "bpf-trace")]
     pub(crate) const fn source_id(self) -> u64 {
         self.source_id
     }
 }
 
-#[cfg(not(any(feature = "qperf-trace", feature = "bpf-trace")))]
+#[cfg(not(feature = "bpf-trace"))]
 const _: () = {
     assert!(core::mem::size_of::<WaitContext>() == 0);
     assert!(core::mem::size_of::<WakeContext>() == 0);
@@ -497,8 +497,8 @@ impl WaitQueue {
             }
 
             let mut rq = crate::run_queue::current_run_queue::<NoPreemptIrqSave>();
-            #[cfg(any(feature = "qperf-trace", feature = "bpf-trace"))]
-            let qperf_sequence = curr.next_qperf_block_sequence();
+            #[cfg(feature = "bpf-trace")]
+            let trace_sequence = curr.next_block_sequence();
             curr.set_state(crate::task::TaskState::Blocked);
 
             // A notifier may have consumed an entry while the task was still
@@ -514,8 +514,8 @@ impl WaitQueue {
                 drop(rq);
             } else {
                 rq.resched_blocked(
-                    #[cfg(any(feature = "qperf-trace", feature = "bpf-trace"))]
-                    qperf_sequence,
+                    #[cfg(feature = "bpf-trace")]
+                    trace_sequence,
                     context,
                 );
             }

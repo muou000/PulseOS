@@ -1,30 +1,22 @@
-#[cfg(any(feature = "qperf-trace", feature = "bpf-trace"))]
+#[cfg(feature = "bpf-trace")]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum PhaseBoundary {
     Begin = 1,
     End   = 2,
 }
 
-#[cfg(any(feature = "qperf-trace", feature = "bpf-trace"))]
+#[cfg(feature = "bpf-trace")]
 fn phase_marker_from_line(line: &[u8]) -> Option<(PhaseBoundary, &[u8])> {
     let line = &line[line
         .iter()
         .position(|byte| !byte.is_ascii_whitespace())
         .unwrap_or(line.len())..];
-    let has_word_prefix = |prefix: &[u8]| {
-        line.strip_prefix(prefix)
-            .is_some_and(|rest| rest.first().is_none_or(u8::is_ascii_whitespace))
-    };
-    if has_word_prefix(b"BUILDSTORM_BEGIN") {
-        return Some((PhaseBoundary::Begin, b"buildstorm"));
-    }
-    if has_word_prefix(b"BUILDSTORM_COMPILE") {
-        return Some((PhaseBoundary::End, b"buildstorm"));
-    }
 
     for (prefix, boundary) in [
-        (b"QPERF_PHASE_BEGIN".as_slice(), PhaseBoundary::Begin),
-        (b"QPERF_PHASE_END".as_slice(), PhaseBoundary::End),
+        (b"BPF_PHASE_BEGIN".as_slice(), PhaseBoundary::Begin),
+        (b"BPF_PHASE_END".as_slice(), PhaseBoundary::End),
+        (b"PHASE_BEGIN".as_slice(), PhaseBoundary::Begin),
+        (b"PHASE_END".as_slice(), PhaseBoundary::End),
     ] {
         let Some(rest) = line.strip_prefix(prefix) else {
             continue;
@@ -53,7 +45,7 @@ fn phase_marker_from_line(line: &[u8]) -> Option<(PhaseBoundary, &[u8])> {
     None
 }
 
-#[cfg(any(feature = "qperf-trace", feature = "bpf-trace"))]
+#[cfg(feature = "bpf-trace")]
 pub(super) struct OutputMarkerScanner {
     fd: usize,
     line: [u8; 64],
@@ -61,7 +53,7 @@ pub(super) struct OutputMarkerScanner {
     emitted: bool,
 }
 
-#[cfg(any(feature = "qperf-trace", feature = "bpf-trace"))]
+#[cfg(feature = "bpf-trace")]
 impl OutputMarkerScanner {
     pub(super) fn new(fd: usize) -> Self {
         Self {
@@ -91,14 +83,6 @@ impl OutputMarkerScanner {
 
     fn emit_marker(&self) {
         if let Some((boundary, phase)) = phase_marker_from_line(&self.line[..self.line_len]) {
-            #[cfg(feature = "qperf-trace")]
-            {
-                let qperf_boundary = match boundary {
-                    PhaseBoundary::Begin => axtask::qperf_trace::PhaseBoundary::Begin,
-                    PhaseBoundary::End => axtask::qperf_trace::PhaseBoundary::End,
-                };
-                axtask::qperf_trace::phase_marker(qperf_boundary, phase);
-            }
             #[cfg(feature = "bpf-trace")]
             {
                 axtask::bpf_trace::phase_marker(boundary as u32, phase);
@@ -115,7 +99,7 @@ impl OutputMarkerScanner {
     }
 }
 
-#[cfg(any(feature = "qperf-trace", feature = "bpf-trace"))]
+#[cfg(feature = "bpf-trace")]
 impl Drop for OutputMarkerScanner {
     fn drop(&mut self) {
         if self.line_len != 0 && !self.emitted {
@@ -124,38 +108,36 @@ impl Drop for OutputMarkerScanner {
     }
 }
 
-#[cfg(all(test, any(feature = "qperf-trace", feature = "bpf-trace")))]
+#[cfg(all(test, feature = "bpf-trace"))]
 mod phase_marker_tests {
     use super::{PhaseBoundary, phase_marker_from_line};
 
     #[test]
-    fn recognizes_buildstorm_and_generic_phase_lines() {
+    fn recognizes_bpf_and_generic_phase_lines() {
         assert_eq!(
-            phase_marker_from_line(b"BUILDSTORM_BEGIN mode=multi"),
-            Some((PhaseBoundary::Begin, b"buildstorm".as_slice()))
-        );
-        assert_eq!(
-            phase_marker_from_line(b"BUILDSTORM_COMPILE mode=multi ok=true"),
-            Some((PhaseBoundary::End, b"buildstorm".as_slice()))
-        );
-        assert_eq!(phase_marker_from_line(b"BUILDSTORM_BEGINNING"), None);
-        assert_eq!(phase_marker_from_line(b"BUILDSTORM_COMPILE_EXTRA"), None);
-        assert_eq!(
-            phase_marker_from_line(b"QPERF_PHASE_BEGIN link-stage"),
+            phase_marker_from_line(b"BPF_PHASE_BEGIN link-stage"),
             Some((PhaseBoundary::Begin, b"link-stage".as_slice()))
         );
         assert_eq!(
-            phase_marker_from_line(b"QPERF_PHASE_END link-stage"),
+            phase_marker_from_line(b"BPF_PHASE_END link-stage"),
+            Some((PhaseBoundary::End, b"link-stage".as_slice()))
+        );
+        assert_eq!(
+            phase_marker_from_line(b"PHASE_BEGIN link-stage"),
+            Some((PhaseBoundary::Begin, b"link-stage".as_slice()))
+        );
+        assert_eq!(
+            phase_marker_from_line(b"PHASE_END link-stage"),
             Some((PhaseBoundary::End, b"link-stage".as_slice()))
         );
     }
 
     #[test]
     fn rejects_invalid_or_oversized_generic_phase_names() {
-        assert_eq!(phase_marker_from_line(b"QPERF_PHASE_BEGIN"), None);
-        assert_eq!(phase_marker_from_line(b"QPERF_PHASE_BEGIN bad/name"), None);
+        assert_eq!(phase_marker_from_line(b"BPF_PHASE_BEGIN"), None);
+        assert_eq!(phase_marker_from_line(b"BPF_PHASE_BEGIN bad/name"), None);
         assert_eq!(
-            phase_marker_from_line(b"QPERF_PHASE_BEGIN phase-name-too-long"),
+            phase_marker_from_line(b"BPF_PHASE_BEGIN phase-name-too-long"),
             None
         );
     }

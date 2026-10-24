@@ -494,14 +494,14 @@ class Seam6ParityOrchestrationTests(unittest.TestCase):
         self.assertEqual(args.command, "parity")
         self.assertEqual(args.arch, "riscv64")
 
-    def test_qperf_target_preserved_in_makefile(self):
+    def test_qperf_target_retired_from_makefile(self):
         makefile = run.REPO / "Makefile"
         self.assertTrue(makefile.is_file())
         text = makefile.read_text()
-        self.assertIn("qperf:", text)
-        self.assertIn("kernel-rv-qperf", text)
-        self.assertIn("kernel-la-qperf", text)
-        self.assertIn("__pulse_qperf_trace_v1", text)
+        self.assertNotIn("qperf:", text)
+        self.assertNotIn("kernel-rv-qperf", text)
+        self.assertNotIn("kernel-la-qperf", text)
+        self.assertNotIn("__pulse_qperf_trace_v1", text)
 
     def test_generate_parity_package_creates_retained_artifacts_and_manifest(self):
         with tempfile.TemporaryDirectory(prefix="parity-pkg-", dir=run.BASE) as tmp_dir:
@@ -515,7 +515,7 @@ class Seam6ParityOrchestrationTests(unittest.TestCase):
             report_text = report_path.read_text()
             self.assertIn("PARITY STATUS: parity_candidate", report_text)
             self.assertIn("mechanism_level_cross_check", report_text)
-            self.assertIn("qperf baseline retained: True", report_text)
+            self.assertIn("qperf baseline retired: True", report_text)
             self.assertNotIn("replacement", report_text)
 
 

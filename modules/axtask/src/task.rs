@@ -56,10 +56,10 @@ pub struct TaskInner {
 
     entry: SpinNoIrq<Option<Box<dyn FnOnce() + Send>>>,
     state: AtomicU8,
-    #[cfg(any(feature = "qperf-trace", feature = "bpf-trace"))]
-    qperf_block_sequence: AtomicU64,
-    #[cfg(any(feature = "qperf-trace", feature = "bpf-trace"))]
-    qperf_pending_wait_context: SpinNoIrq<Option<crate::wait_queue::WaitContext>>,
+    #[cfg(feature = "bpf-trace")]
+    bpf_block_sequence: AtomicU64,
+    #[cfg(feature = "bpf-trace")]
+    bpf_pending_wait_context: SpinNoIrq<Option<crate::wait_queue::WaitContext>>,
 
     /// CPU affinity mask.
     cpumask: SpinNoIrq<AxCpuMask>,
@@ -164,8 +164,6 @@ impl TaskInner {
         if *t.name.lock() == "idle" {
             t.is_idle = true;
         }
-        #[cfg(feature = "qperf-trace")]
-        crate::qperf_trace::task_metadata(t.id().as_u64(), 0, 0, t.name().as_bytes());
         #[cfg(feature = "bpf-trace")]
         crate::bpf_trace::task_metadata(t.id().as_u64(), 0, 0, t.name().as_bytes());
         Ok(t)
@@ -176,29 +174,29 @@ impl TaskInner {
         self.id
     }
 
-    #[cfg(any(feature = "qperf-trace", feature = "bpf-trace"))]
-    pub(crate) fn next_qperf_block_sequence(&self) -> u64 {
-        self.qperf_block_sequence.fetch_add(1, Ordering::Relaxed) + 1
+    #[cfg(feature = "bpf-trace")]
+    pub(crate) fn next_block_sequence(&self) -> u64 {
+        self.bpf_block_sequence.fetch_add(1, Ordering::Relaxed) + 1
     }
 
-    #[cfg(any(feature = "qperf-trace", feature = "bpf-trace"))]
-    pub(crate) fn qperf_block_sequence(&self) -> u64 {
-        self.qperf_block_sequence.load(Ordering::Relaxed)
+    #[cfg(feature = "bpf-trace")]
+    pub(crate) fn block_sequence(&self) -> u64 {
+        self.bpf_block_sequence.load(Ordering::Relaxed)
     }
 
-    #[cfg(any(feature = "qperf-trace", feature = "bpf-trace"))]
-    pub(crate) fn clear_qperf_pending_wait_context(&self) {
-        *self.qperf_pending_wait_context.lock() = None;
+    #[cfg(feature = "bpf-trace")]
+    pub(crate) fn clear_pending_wait_context(&self) {
+        *self.bpf_pending_wait_context.lock() = None;
     }
 
-    #[cfg(any(feature = "qperf-trace", feature = "bpf-trace"))]
-    pub(crate) fn set_qperf_pending_wait_context(&self, context: crate::wait_queue::WaitContext) {
-        *self.qperf_pending_wait_context.lock() = Some(context);
+    #[cfg(feature = "bpf-trace")]
+    pub(crate) fn set_pending_wait_context(&self, context: crate::wait_queue::WaitContext) {
+        *self.bpf_pending_wait_context.lock() = Some(context);
     }
 
-    #[cfg(any(feature = "qperf-trace", feature = "bpf-trace"))]
-    pub(crate) fn take_qperf_pending_wait_context(&self) -> Option<crate::wait_queue::WaitContext> {
-        self.qperf_pending_wait_context.lock().take()
+    #[cfg(feature = "bpf-trace")]
+    pub(crate) fn take_pending_wait_context(&self) -> Option<crate::wait_queue::WaitContext> {
+        self.bpf_pending_wait_context.lock().take()
     }
 
     pub(crate) fn take_block_on_waker(&self) -> Option<Arc<crate::future::AxWaker>> {
@@ -348,10 +346,10 @@ impl TaskInner {
             is_init: false,
             entry: SpinNoIrq::new(None),
             state: AtomicU8::new(TaskState::Ready as u8),
-            #[cfg(any(feature = "qperf-trace", feature = "bpf-trace"))]
-            qperf_block_sequence: AtomicU64::new(0),
-            #[cfg(any(feature = "qperf-trace", feature = "bpf-trace"))]
-            qperf_pending_wait_context: SpinNoIrq::new(None),
+            #[cfg(feature = "bpf-trace")]
+            bpf_block_sequence: AtomicU64::new(0),
+            #[cfg(feature = "bpf-trace")]
+            bpf_pending_wait_context: SpinNoIrq::new(None),
             // By default, the task is allowed to run on all CPUs.
             cpumask: SpinNoIrq::new(cpumask),
             in_wait_queue: AtomicBool::new(false),
@@ -396,8 +394,6 @@ impl TaskInner {
         if *t.name.lock() == "idle" {
             t.is_idle = true;
         }
-        #[cfg(feature = "qperf-trace")]
-        crate::qperf_trace::task_metadata(t.id().as_u64(), 0, 0, t.name().as_bytes());
         #[cfg(feature = "bpf-trace")]
         crate::bpf_trace::task_metadata(t.id().as_u64(), 0, 0, t.name().as_bytes());
         t

@@ -195,13 +195,13 @@ fn test_phase_marker_window_filtering() {
         )
         .unwrap();
 
-    // PhaseMarker Begin "BUILDSTORM" at t=100
+    // PhaseMarker Begin "BENCHMARK" at t=100
     let mut phase_name = [0u8; 16];
-    phase_name[..10].copy_from_slice(b"BUILDSTORM");
+    phase_name[..9].copy_from_slice(b"BENCHMARK");
     let p_begin = PhaseMarkerContext {
         common: ContextCommon::new(TracepointId::PhaseMarker, 100, 0, 1, 1, 1),
         phase_boundary: PhaseBoundary::Begin as u32,
-        phase_len: 10,
+        phase_len: 9,
         phase_name,
     };
     writer
@@ -232,11 +232,11 @@ fn test_phase_marker_window_filtering() {
         )
         .unwrap();
 
-    // PhaseMarker End "BUILDSTORM" at t=200
+    // PhaseMarker End "BENCHMARK" at t=200
     let p_end = PhaseMarkerContext {
         common: ContextCommon::new(TracepointId::PhaseMarker, 200, 0, 1, 1, 1),
         phase_boundary: PhaseBoundary::End as u32,
-        phase_len: 10,
+        phase_len: 9,
         phase_name,
     };
     writer
@@ -273,7 +273,7 @@ fn test_phase_marker_window_filtering() {
     let all_events = analyzer.ordered_events();
     assert_eq!(all_events.len(), 5);
 
-    let phase_events = analyzer.events_in_phase("BUILDSTORM");
+    let phase_events = analyzer.events_in_phase("BENCHMARK");
     // Should include the phase marker begin/end and events inside: t=100, t=150, t=200
     assert_eq!(phase_events.len(), 3);
     assert_eq!(phase_events[0].timestamp_ns, 100);

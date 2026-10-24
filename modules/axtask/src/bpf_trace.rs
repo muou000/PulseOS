@@ -139,13 +139,13 @@ pub fn task_block(task: &TaskInner, sequence: u64, context: WaitContext) {
     }
     let timestamp_ns = axhal::time::monotonic_time_nanos();
     let cpu_id = axhal::percpu::this_cpu_id() as u32;
-    #[cfg(any(feature = "qperf-trace", feature = "bpf-trace"))]
+    #[cfg(feature = "bpf-trace")]
     let (wait_reason, resource_id, resource_detail) = (
         context.reason() as u32,
         context.resource_id(),
         context.resource_detail(),
     );
-    #[cfg(not(any(feature = "qperf-trace", feature = "bpf-trace")))]
+    #[cfg(not(feature = "bpf-trace"))]
     let (wait_reason, resource_id, resource_detail) = {
         let _ = context;
         (0, 0, 0)
@@ -176,9 +176,9 @@ pub fn task_wake(task: &TaskInner, sequence: u64, waker_task_id: u64, context: W
     }
     let timestamp_ns = axhal::time::monotonic_time_nanos();
     let cpu_id = axhal::percpu::this_cpu_id() as u32;
-    #[cfg(any(feature = "qperf-trace", feature = "bpf-trace"))]
+    #[cfg(feature = "bpf-trace")]
     let (wake_source, source_id) = (context.source() as u32, context.source_id());
-    #[cfg(not(any(feature = "qperf-trace", feature = "bpf-trace")))]
+    #[cfg(not(feature = "bpf-trace"))]
     let (wake_source, source_id) = {
         let _ = context;
         (0, 0)

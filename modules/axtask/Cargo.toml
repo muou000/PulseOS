@@ -29,7 +29,6 @@ ipi = ["irq", "dep:axipi"]
 tls = ["axhal/tls"]
 preempt = ["irq", "percpu?/preempt", "kernel_guard/preempt"]
 smp = ["kspin/smp"]
-qperf-trace = ["multitask"]
 bpf-trace = ["multitask", "dep:pulse_bpf_schema"]
 
 sched-fifo = ["multitask"]

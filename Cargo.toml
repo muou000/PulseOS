@@ -230,11 +230,6 @@ smp = [
 sched-eevdf = ["axfeat/sched-eevdf"]
 sched-load-balance = ["axfeat/sched-load-balance"]
 mapping-lifecycle-test = ["pulse_core/mapping-lifecycle-test", "pulse_syscalls/mapping-lifecycle-test"]
-qperf-trace = [
-    "axtask/qperf-trace",
-    "pulse_core/qperf-trace",
-    "pulse_syscalls/qperf-trace",
-]
 bpf-trace = [
     "axfeat/bpf-trace",
     "axtask/bpf-trace",
