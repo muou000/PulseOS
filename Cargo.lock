@@ -6,6 +6,7 @@ version = 4
 name = "Pulse"
 version = "0.1.0"
 dependencies = [
+ "axalloc",
  "axfeat",
  "axfs",
  "axhal",

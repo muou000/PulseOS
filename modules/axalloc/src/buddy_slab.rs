@@ -2,6 +2,7 @@ use core::{
     alloc::{GlobalAlloc, Layout},
     ptr::NonNull,
     slice,
+    sync::atomic::{AtomicUsize, Ordering},
 };
 
 use allocator::{AllocError, AllocResult};
@@ -12,10 +13,19 @@ use buddy_slab_allocator::{
 use kernel_guard::NoPreemptIrqSave;
 use kspin::SpinRaw;
 
-use crate::{MIN_PAGE_RECLAIM_BATCH, PAGE_SIZE, try_page_reclaim};
+use crate::{
+    MIN_PAGE_RECLAIM_BATCH, PAGE_SIZE,
+    pcp::{PCP_BATCH_SIZE, PCP_CAPACITY, PerCpuPcp},
+    try_page_reclaim,
+};
 
 #[percpu::def_percpu]
 static PERCPU_SLAB: PerCpuSlab<PAGE_SIZE> = PerCpuSlab::new_uninit();
+
+#[percpu::def_percpu]
+static PERCPU_PCP: PerCpuPcp = PerCpuPcp::new_uninit();
+
+static ACTIVE_CPU_COUNT: AtomicUsize = AtomicUsize::new(0);
 
 static SLAB_POOL: SlabPool = SlabPool;
 
@@ -283,6 +293,7 @@ impl GlobalAllocator {
         let region = unsafe { slice::from_raw_parts_mut(start_vaddr as *mut u8, size) };
         let _guard = NoPreemptIrqSave::new();
         unsafe { self.inner.init(region) }.expect("initialize SLUB+Buddy allocator failed");
+        ACTIVE_CPU_COUNT.fetch_max(1, Ordering::Release);
     }
 
     /// Adds another, possibly discontiguous, physical-memory region.
@@ -301,15 +312,20 @@ impl GlobalAllocator {
     pub fn alloc(&self, layout: Layout) -> AllocResult<NonNull<u8>> {
         let mut result = self.alloc_once(layout);
         if matches!(result, Err(SlubAllocError::NoMemory)) {
-            let reclaim_pages = layout
-                .size()
-                .div_ceil(PAGE_SIZE)
-                .max(MIN_PAGE_RECLAIM_BATCH);
-            for _ in 0..4 {
-                let reclaimed = try_page_reclaim(reclaim_pages);
-                result = self.alloc_once(layout);
-                if result.is_ok() || reclaimed == 0 {
-                    break;
+            self.drain_all_pcp();
+            result = self.alloc_once(layout);
+            if matches!(result, Err(SlubAllocError::NoMemory)) {
+                let reclaim_pages = layout
+                    .size()
+                    .div_ceil(PAGE_SIZE)
+                    .max(MIN_PAGE_RECLAIM_BATCH);
+                for _ in 0..4 {
+                    let reclaimed = try_page_reclaim(reclaim_pages);
+                    self.drain_all_pcp();
+                    result = self.alloc_once(layout);
+                    if result.is_ok() || reclaimed == 0 {
+                        break;
+                    }
                 }
             }
         }
@@ -322,6 +338,118 @@ impl GlobalAllocator {
         unsafe { self.inner.dealloc(pos, layout) };
     }
 
+    fn dealloc_batch_pages(&self, pages: &[usize]) {
+        if pages.is_empty() {
+            return;
+        }
+        let mut runs = [(0usize, 1usize); PCP_CAPACITY];
+        for (i, &page) in pages.iter().enumerate() {
+            runs[i] = (page, 1);
+        }
+        let _guard = NoPreemptIrqSave::new();
+        self.inner.dealloc_pages_batch(&runs[..pages.len()]);
+    }
+
+    /// Drains all cached Order-0 pages across all initialized CPU PCP caches
+    /// back into Buddy using batched deallocation.
+    ///
+    /// Never holds a PCP lock while acquiring Buddy locks, ensuring no deadlocks.
+    pub fn drain_all_pcp(&self) -> usize {
+        let active_cpus = ACTIVE_CPU_COUNT.load(Ordering::Acquire).max(1);
+        let mut total_drained = 0;
+        for cpu in 0..active_cpus {
+            let mut drain_buf = [0usize; PCP_CAPACITY];
+            let n = {
+                let _guard = NoPreemptIrqSave::new();
+                let pcp = unsafe { PERCPU_PCP.remote_ref_raw(cpu) };
+                pcp.drain_all(&mut drain_buf)
+            };
+            if n > 0 {
+                total_drained += n;
+                self.dealloc_batch_pages(&drain_buf[..n]);
+            }
+        }
+        total_drained
+    }
+
+    /// Returns the total number of free Order-0 pages currently cached
+    /// across all initialized CPU PCP pools.
+    pub fn total_pcp_cached_pages(&self) -> usize {
+        let active_cpus = ACTIVE_CPU_COUNT.load(Ordering::Acquire).max(1);
+        let mut total = 0;
+        for cpu in 0..active_cpus {
+            let _guard = NoPreemptIrqSave::new();
+            let pcp = unsafe { PERCPU_PCP.remote_ref_raw(cpu) };
+            total += pcp.count();
+        }
+        total
+    }
+
+    fn cache_refill_pages(&self, extra_pages: &[usize]) {
+        if !extra_pages.is_empty() {
+            let _guard = NoPreemptIrqSave::new();
+            PERCPU_PCP.with_current(|pcp| {
+                pcp.push_batch(extra_pages);
+            });
+        }
+    }
+
+    fn alloc_order0_pcp(&self) -> AllocResult<usize> {
+        // 1. Fast path: try popping from current CPU's local PCP
+        {
+            let _guard = NoPreemptIrqSave::new();
+            let popped = PERCPU_PCP.with_current(|pcp| pcp.pop());
+            if let Some(page) = popped {
+                return Ok(page);
+            }
+        }
+
+        // 2. Cache miss: refill a batch under one Buddy lock acquisition
+        let mut batch = [0usize; PCP_BATCH_SIZE];
+        let mut allocated = {
+            let _guard = NoPreemptIrqSave::new();
+            self.inner.alloc_page_batch(&mut batch)
+        };
+
+        if allocated > 0 {
+            let first_page = batch[0];
+            self.cache_refill_pages(&batch[1..allocated]);
+            return Ok(first_page);
+        }
+
+        // 3. Buddy was empty: drain all CPU caches and retry batch refill
+        self.drain_all_pcp();
+        allocated = {
+            let _guard = NoPreemptIrqSave::new();
+            self.inner.alloc_page_batch(&mut batch)
+        };
+        if allocated > 0 {
+            let first_page = batch[0];
+            self.cache_refill_pages(&batch[1..allocated]);
+            return Ok(first_page);
+        }
+
+        // 4. Memory pressure: invoke reclaim callbacks and drain PCP before each retry
+        for _ in 0..4 {
+            let reclaimed = try_page_reclaim(MIN_PAGE_RECLAIM_BATCH);
+            self.drain_all_pcp();
+            allocated = {
+                let _guard = NoPreemptIrqSave::new();
+                self.inner.alloc_page_batch(&mut batch)
+            };
+            if allocated > 0 {
+                let first_page = batch[0];
+                self.cache_refill_pages(&batch[1..allocated]);
+                return Ok(first_page);
+            }
+            if reclaimed == 0 {
+                break;
+            }
+        }
+
+        Err(AllocError::NoMemory)
+    }
+
     fn alloc_pages_once(
         &self,
         num_pages: usize,
@@ -331,15 +459,31 @@ impl GlobalAllocator {
         self.inner.alloc_pages(num_pages, align_pow2)
     }
 
-    /// Allocates contiguous pages, invoking the registered reclaim hook on OOM.
+    /// Allocates contiguous pages, routing ordinary Order-0 requests through
+    /// the local PCP cache, and invoking global drain / registered reclaim on OOM.
     pub fn alloc_pages(&self, num_pages: usize, align_pow2: usize) -> AllocResult<usize> {
+        if num_pages == 0 {
+            return Err(AllocError::InvalidParam);
+        }
+
+        // Eligible single-page unconstrained allocation
+        if num_pages == 1 && align_pow2 <= PAGE_SIZE {
+            return self.alloc_order0_pcp();
+        }
+
+        // Higher-order or stricter alignment: bypass PCP directly to Buddy
         let mut result = self.alloc_pages_once(num_pages, align_pow2);
         if matches!(result, Err(SlubAllocError::NoMemory)) {
-            for _ in 0..4 {
-                let reclaimed = try_page_reclaim(num_pages.max(MIN_PAGE_RECLAIM_BATCH));
-                result = self.alloc_pages_once(num_pages, align_pow2);
-                if result.is_ok() || reclaimed == 0 {
-                    break;
+            self.drain_all_pcp();
+            result = self.alloc_pages_once(num_pages, align_pow2);
+            if matches!(result, Err(SlubAllocError::NoMemory)) {
+                for _ in 0..4 {
+                    let reclaimed = try_page_reclaim(num_pages.max(MIN_PAGE_RECLAIM_BATCH));
+                    self.drain_all_pcp();
+                    result = self.alloc_pages_once(num_pages, align_pow2);
+                    if result.is_ok() || reclaimed == 0 {
+                        break;
+                    }
                 }
             }
         }
@@ -354,14 +498,22 @@ impl GlobalAllocator {
             self.inner.alloc_pages_lowmem(num_pages, align_pow2)
         };
         if matches!(result, Err(SlubAllocError::NoMemory)) {
-            for _ in 0..4 {
-                let reclaimed = try_page_reclaim(num_pages.max(MIN_PAGE_RECLAIM_BATCH));
-                result = {
-                    let _guard = NoPreemptIrqSave::new();
-                    self.inner.alloc_pages_lowmem(num_pages, align_pow2)
-                };
-                if result.is_ok() || reclaimed == 0 {
-                    break;
+            self.drain_all_pcp();
+            result = {
+                let _guard = NoPreemptIrqSave::new();
+                self.inner.alloc_pages_lowmem(num_pages, align_pow2)
+            };
+            if matches!(result, Err(SlubAllocError::NoMemory)) {
+                for _ in 0..4 {
+                    let reclaimed = try_page_reclaim(num_pages.max(MIN_PAGE_RECLAIM_BATCH));
+                    self.drain_all_pcp();
+                    result = {
+                        let _guard = NoPreemptIrqSave::new();
+                        self.inner.alloc_pages_lowmem(num_pages, align_pow2)
+                    };
+                    if result.is_ok() || reclaimed == 0 {
+                        break;
+                    }
                 }
             }
         }
@@ -369,22 +521,33 @@ impl GlobalAllocator {
     }
 
     /// Allocates independent pages while acquiring the Buddy lock once.
+    ///
+    /// Preserves single-page Order-0 PCP caches for latency-critical paths.
     pub fn alloc_page_batch(&self, pages: &mut [usize]) -> usize {
         if pages.is_empty() {
             return 0;
         }
+
         let mut allocated = {
             let _guard = NoPreemptIrqSave::new();
             self.inner.alloc_page_batch(pages)
         };
         if allocated == 0 {
-            let Ok(first) = self.alloc_pages(1, PAGE_SIZE) else {
-                return 0;
-            };
-            pages[0] = first;
-            allocated = 1;
+            self.drain_all_pcp();
             let _guard = NoPreemptIrqSave::new();
-            allocated += self.inner.alloc_page_batch(&mut pages[1..]);
+            allocated = self.inner.alloc_page_batch(pages);
+        }
+        if allocated == 0 {
+            for _ in 0..4 {
+                let reclaimed =
+                    try_page_reclaim(pages.len().max(MIN_PAGE_RECLAIM_BATCH));
+                self.drain_all_pcp();
+                let _guard = NoPreemptIrqSave::new();
+                allocated = self.inner.alloc_page_batch(pages);
+                if allocated > 0 || reclaimed == 0 {
+                    break;
+                }
+            }
         }
         allocated
     }
@@ -408,11 +571,16 @@ impl GlobalAllocator {
     ) -> AllocResult<usize> {
         let mut result = self.alloc_pages_at_once(start, num_pages, align_pow2);
         if matches!(result, Err(SlubAllocError::NoMemory)) {
-            for _ in 0..4 {
-                let reclaimed = try_page_reclaim(num_pages.max(MIN_PAGE_RECLAIM_BATCH));
-                result = self.alloc_pages_at_once(start, num_pages, align_pow2);
-                if result.is_ok() || reclaimed == 0 {
-                    break;
+            self.drain_all_pcp();
+            result = self.alloc_pages_at_once(start, num_pages, align_pow2);
+            if matches!(result, Err(SlubAllocError::NoMemory)) {
+                for _ in 0..4 {
+                    let reclaimed = try_page_reclaim(num_pages.max(MIN_PAGE_RECLAIM_BATCH));
+                    self.drain_all_pcp();
+                    result = self.alloc_pages_at_once(start, num_pages, align_pow2);
+                    if result.is_ok() || reclaimed == 0 {
+                        break;
+                    }
                 }
             }
         }
@@ -421,6 +589,31 @@ impl GlobalAllocator {
 
     /// Returns pages to Buddy. Non-power-of-two ranges are freed exactly.
     pub fn dealloc_pages(&self, pos: usize, num_pages: usize) {
+        if num_pages == 0 {
+            return;
+        }
+
+        if num_pages == 1 && pos % PAGE_SIZE == 0 {
+            let mut drain_buf = [0usize; PCP_BATCH_SIZE];
+            let push_res = {
+                let _guard = NoPreemptIrqSave::new();
+                PERCPU_PCP.with_current(|pcp| pcp.push_or_drain(pos, &mut drain_buf))
+            };
+
+            match push_res {
+                Ok(Some(n)) => {
+                    self.dealloc_batch_pages(&drain_buf[..n]);
+                    return;
+                }
+                Ok(None) => return,
+                Err(unpushed) => {
+                    let _guard = NoPreemptIrqSave::new();
+                    self.inner.dealloc_pages(unpushed, 1);
+                    return;
+                }
+            }
+        }
+
         let _guard = NoPreemptIrqSave::new();
         self.inner.dealloc_pages(pos, num_pages);
     }
@@ -443,10 +636,14 @@ impl GlobalAllocator {
             .map_err(map_error)
     }
 
-    /// Returns backend page occupancy in bytes, including cached slab pages.
+    /// Returns backend page occupancy in bytes, excluding free pages cached in PCP.
     pub fn used_bytes(&self) -> usize {
-        let _guard = NoPreemptIrqSave::new();
-        self.inner.allocated_bytes()
+        let allocated = {
+            let _guard = NoPreemptIrqSave::new();
+            self.inner.allocated_bytes()
+        };
+        let pcp_cached = self.total_pcp_cached_pages() * PAGE_SIZE;
+        allocated.saturating_sub(pcp_cached)
     }
 
     /// Free memory is reported through [`available_pages`](Self::available_pages).
@@ -454,17 +651,19 @@ impl GlobalAllocator {
         0
     }
 
-    /// Returns backend page occupancy.
+    /// Returns backend page occupancy, excluding free frames held in CPU-local caches.
     pub fn used_pages(&self) -> usize {
         self.used_bytes() / PAGE_SIZE
     }
 
-    /// Returns free Buddy pages across all managed regions.
+    /// Returns free Buddy pages plus all free Order-0 pages held in CPU-local caches.
     pub fn available_pages(&self) -> usize {
-        let _guard = NoPreemptIrqSave::new();
-        let managed = self.inner.managed_bytes();
-        let allocated = self.inner.allocated_bytes();
-        managed.saturating_sub(allocated) / PAGE_SIZE
+        let (managed, allocated) = {
+            let _guard = NoPreemptIrqSave::new();
+            (self.inner.managed_bytes(), self.inner.allocated_bytes())
+        };
+        let buddy_free = managed.saturating_sub(allocated) / PAGE_SIZE;
+        buddy_free + self.total_pcp_cached_pages()
     }
 }
 
@@ -588,10 +787,12 @@ pub fn global_allocator() -> &'static GlobalAllocator {
     &GLOBAL_ALLOCATOR
 }
 
-/// Initializes the current CPU's SLUB during CPU bring-up.
+/// Initializes the current CPU's SLUB and Order-0 PCP cache during CPU bring-up.
 pub fn init_percpu_slab(cpu_id: usize) {
     let _guard = NoPreemptIrqSave::new();
     PERCPU_SLAB.with_current(|slab| slab.init_during_cpu_bringup(cpu_id));
+    PERCPU_PCP.with_current(|pcp| pcp.init_during_cpu_bringup());
+    ACTIVE_CPU_COUNT.fetch_max(cpu_id + 1, Ordering::Release);
 }
 
 /// Initializes the global allocator with the first memory region.
@@ -612,6 +813,127 @@ pub fn global_add_memory(start_vaddr: usize, size: usize) -> AllocResult {
         start_vaddr + size
     );
     GLOBAL_ALLOCATOR.add_memory(start_vaddr, size)
+}
+
+/// Runs in-kernel verification of the Per-CPU Order-0 page cache (PCP).
+pub fn run_pcp_guest_checks() -> Result<(), &'static str> {
+    info!("[PCP_GUEST] Starting Per-CPU Order-0 PCP cache & watermark checks...");
+
+    let alloc = global_allocator();
+
+    // 0. Initial baseline drain to start with a clean known PCP state
+    alloc.drain_all_pcp();
+    assert_eq!(alloc.total_pcp_cached_pages(), 0);
+
+    let avail_init = alloc.available_pages();
+    let used_init = alloc.used_pages();
+
+    // 1. Order-0 empty-cache refill:
+    // Allocating 1 page from an empty PCP should trigger a batch refill of PCP_BATCH_SIZE (16).
+    // 1 page is returned to caller, 15 remain cached in the current CPU's PCP.
+    let p1 = alloc.alloc_pages(1, PAGE_SIZE).map_err(|_| "alloc p1 failed")?;
+    assert_eq!(alloc.used_pages(), used_init + 1);
+    assert_eq!(alloc.available_pages(), avail_init - 1);
+    assert_eq!(alloc.total_pcp_cached_pages(), PCP_BATCH_SIZE - 1);
+    info!("[PCP_GUEST] Order-0 empty-cache refill & accounting: PASS");
+
+    // 2. Local PCP cache hits:
+    // The next 15 single-page allocations must come directly from local PCP without Buddy refill.
+    let mut pages = [0usize; PCP_BATCH_SIZE - 1];
+    for i in 0..pages.len() {
+        pages[i] = alloc.alloc_pages(1, PAGE_SIZE).map_err(|_| "alloc page failed")?;
+    }
+    assert_eq!(alloc.total_pcp_cached_pages(), 0);
+    assert_eq!(alloc.used_pages(), used_init + PCP_BATCH_SIZE);
+    assert_eq!(alloc.available_pages(), avail_init - PCP_BATCH_SIZE);
+    info!("[PCP_GUEST] Single-page cache hits: PASS");
+
+    // 3. Free back to local PCP:
+    // Freeing single pages pushes them onto the local PCP until the high watermark.
+    alloc.dealloc_pages(p1, 1);
+    assert_eq!(alloc.total_pcp_cached_pages(), 1);
+    assert_eq!(alloc.used_pages(), used_init + PCP_BATCH_SIZE - 1);
+    assert_eq!(alloc.available_pages(), avail_init - PCP_BATCH_SIZE + 1);
+
+    for &p in &pages {
+        alloc.dealloc_pages(p, 1);
+    }
+    assert_eq!(alloc.total_pcp_cached_pages(), PCP_BATCH_SIZE);
+    assert_eq!(alloc.used_pages(), used_init);
+    assert_eq!(alloc.available_pages(), avail_init);
+
+    // Now allocate up to 50 pages and free them to trigger the high watermark drain (48).
+    let mut fill_pages = [0usize; 50];
+    for i in 0..50 {
+        fill_pages[i] = alloc.alloc_pages(1, PAGE_SIZE).map_err(|_| "fill alloc failed")?;
+    }
+    assert_eq!(alloc.used_pages(), used_init + 50);
+
+    // Free 50 pages sequentially.
+    // When count reaches 48, freeing one more page drains a batch of 16 to Buddy.
+    for &p in &fill_pages {
+        alloc.dealloc_pages(p, 1);
+    }
+    assert_eq!(alloc.used_pages(), used_init);
+    assert_eq!(alloc.available_pages(), avail_init);
+    // 50 pages freed into PCP: at watermark 48, 16 was drained, leaving 32 + remaining 2 = 34 cached pages.
+    assert!(alloc.total_pcp_cached_pages() > 0 && alloc.total_pcp_cached_pages() < PCP_CAPACITY);
+    info!("[PCP_GUEST] Free to local PCP & high-watermark batch drain: PASS");
+
+    // 4. Higher-order and lowmem requests bypass PCP
+    let h1 = alloc.alloc_pages(2, PAGE_SIZE).map_err(|_| "higher order alloc failed")?;
+    assert_eq!(alloc.used_pages(), used_init + 2);
+    alloc.dealloc_pages(h1, 2);
+    assert_eq!(alloc.used_pages(), used_init);
+
+    let lm = alloc.alloc_pages_lowmem(1, PAGE_SIZE).map_err(|_| "lowmem alloc failed")?;
+    assert_eq!(alloc.used_pages(), used_init + 1);
+    // Physical address must be under 4 GiB
+    let paddr = axplat::mem::virt_to_phys(lm.into()).as_usize();
+    assert!(paddr < 0x1_0000_0000, "lowmem paddr must be below 4 GiB");
+    alloc.dealloc_pages(lm, 1);
+    assert_eq!(alloc.used_pages(), used_init);
+    info!("[PCP_GUEST] Higher-order and lowmem bypass: PASS");
+
+    // 5. Cross-CPU global drain
+    let active_cpus = ACTIVE_CPU_COUNT.load(Ordering::Acquire);
+    info!("[PCP_GUEST] Active CPU count: {}", active_cpus);
+    if active_cpus > 1 {
+        // Prime remote CPU cache (CPU 1) and verify remote drain
+        let test_page = alloc
+            .alloc_pages(1, PAGE_SIZE)
+            .map_err(|_| "alloc remote test page failed")?;
+        let _guard = NoPreemptIrqSave::new();
+        let remote_pcp = unsafe { PERCPU_PCP.remote_ref_raw(1) };
+        let pushed = remote_pcp.push_batch(&[test_page]);
+        assert_eq!(pushed, 1, "remote pcp push_batch must succeed");
+    }
+    let cached_before = alloc.total_pcp_cached_pages();
+    assert!(cached_before > 0);
+    let drained = alloc.drain_all_pcp();
+    assert_eq!(drained, cached_before);
+    assert_eq!(alloc.total_pcp_cached_pages(), 0);
+    assert_eq!(alloc.used_pages(), used_init);
+    assert_eq!(alloc.available_pages(), avail_init);
+    info!("[PCP_GUEST] Cross-CPU global drain: PASS");
+
+    // 6. Batch API: alloc_page_batch & dealloc_pages_batch
+    let mut batch = [0usize; 8];
+    let allocated = alloc.alloc_page_batch(&mut batch);
+    assert_eq!(allocated, 8);
+    assert_eq!(alloc.used_pages(), used_init + 8);
+
+    let mut runs = [(0usize, 1usize); 8];
+    for i in 0..8 {
+        runs[i] = (batch[i], 1);
+    }
+    alloc.dealloc_pages_batch(&runs);
+    assert_eq!(alloc.used_pages(), used_init);
+    assert_eq!(alloc.available_pages(), avail_init);
+    info!("[PCP_GUEST] Batch allocation & deallocation: PASS");
+
+    info!("[PCP_GUEST] All PCP cache & watermark checks PASSED!");
+    Ok(())
 }
 
 #[cfg(test)]

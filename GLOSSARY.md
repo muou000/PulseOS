@@ -28,6 +28,10 @@ _Avoid_: page-cache wrapper, mapping helper
 将延迟退休、页缓存淘汰与钉住缓冲析构中收集到的多个待释放物理页框（含物理不连续的页段），在释放上层业务锁后，通过单次分配器临界区批量归还给底层页分配器或每 CPU 页缓存池的过程。
 _Avoid_: per-page dealloc loop, locked frame free
 
+**每 CPU 物理页框热缓存池 (PCP)**:
+每个 CPU 维护的有界本地 Order-0 物理页框缓存池。无约束单页分配与单页释放优先在本地完成以避免全局 Buddy 自旋锁竞争；本地池空时单次持锁批量补水，达到高水位或全局内存紧缺时批量排水归还 Buddy。
+_Avoid_: per-cpu buddy, per-thread page cache
+
 **子进程退休**:
 终态 child 被 wait 消费后，完成 accounting、task 引用、资源缩减、描述符影响和全局注销的过程。
 _Avoid_: child cleanup, process deletion

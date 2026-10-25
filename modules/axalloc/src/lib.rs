@@ -15,6 +15,7 @@ extern crate alloc;
 mod buddy_slab;
 mod frameinfo;
 mod page;
+pub mod pcp;
 #[cfg(not(feature = "slab"))]
 pub mod percpu_cache;
 
@@ -29,7 +30,12 @@ use allocator::{AllocResult, BaseAllocator, BitmapPageAllocator, ByteAllocator, 
 #[cfg(feature = "slab")]
 pub use buddy_slab::{
     GlobalAllocator, global_add_memory, global_allocator, global_init, init_percpu_slab,
+    run_pcp_guest_checks,
 };
+#[cfg(not(feature = "slab"))]
+pub fn run_pcp_guest_checks() -> Result<(), &'static str> {
+    Ok(())
+}
 pub use frameinfo::{FrameTable, frame_table, init_frame_table};
 use kspin::SpinNoIrq;
 
