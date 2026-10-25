@@ -19,6 +19,7 @@ use kernel_guard::NoPreemptIrqSave;
 use kspin::SpinNoIrq;
 pub use process::{
     ChildWaitResult, CloneParams, ForkParams, MAX_POSIX_TIMER_COUNT, Process, WaitidStatusType,
+    run_futex_guest_checks,
 };
 pub use signal::{
     DefaultSignalAction, SIG_DFL, SIG_IGN, SIGRTMIN, SigAction, SignalAction, SignalAltStack,

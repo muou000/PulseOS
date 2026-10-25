@@ -384,6 +384,7 @@ impl Thread {
         if let Err(e) = self.clear_child_tid_on_exit() {
             axlog::warn!("failed to clear child tid on exit: {:?}", e);
         }
+        self.process().futex_prune_empty();
     }
 
     pub fn exit_current(&self, exit_code: i32) -> ! {
