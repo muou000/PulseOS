@@ -36,32 +36,21 @@ pub fn mark_file_cache_unlinked(fs_id: usize, inode: u64) {
 }
 
 fn detach_file_cache_state(key: FileCacheKey) -> Option<Arc<CachedFileShared>> {
-    let state = FILE_SHARED_STATES[file_state_registry_shard(key)]
-        .lock()
-        .remove(&key)?;
-    let removed = {
-        let mut caches = ACTIVE_DISK_FILE_CACHES.lock();
-        caches
-            .iter()
-            .position(|cached| Arc::ptr_eq(cached, &state))
-            .map(|index| caches.swap_remove(index))
-    };
-    drop(removed);
-    Some(state)
+    let shard_idx = file_state_registry_shard(key);
+    let mut shard = FILE_SHARED_STATES[shard_idx].lock();
+    shard.remove_all(&key)
 }
 
 fn restore_file_cache_state(key: FileCacheKey, state: &Arc<CachedFileShared>) {
     state.clear_unlinked();
 
     let registry_shard = file_state_registry_shard(key);
-    let registry_has_same_state = {
-        let mut registry = FILE_SHARED_STATES[registry_shard].lock();
-        match registry.get(&key) {
-            Some(existing) => Arc::ptr_eq(&existing, state),
-            None => {
-                registry.insert(key, state);
-                true
-            }
+    let mut shard = FILE_SHARED_STATES[registry_shard].lock();
+    let registry_has_same_state = match shard.get(&key) {
+        Some(existing) => Arc::ptr_eq(&existing, state),
+        None => {
+            shard.insert_weak(key, state);
+            true
         }
     };
     if !registry_has_same_state {
@@ -73,11 +62,7 @@ fn restore_file_cache_state(key: FileCacheKey, state: &Arc<CachedFileShared>) {
             key.inode
         );
     }
-
-    let mut caches = ACTIVE_DISK_FILE_CACHES.lock();
-    if !caches.iter().any(|cached| Arc::ptr_eq(cached, state)) {
-        caches.push(state.clone());
-    }
+    shard.insert_active_disk(key, state.clone());
 }
 
 /// Owns a detached unlinked cache while ext4 deletes its inode.
@@ -152,14 +137,6 @@ where
     result
 }
 
-static FILE_SHARED_STATES: Lazy<
-    [SpinNoPreempt<WeakStateRegistry<FileCacheKey, CachedFileShared>>; FILE_STATE_REGISTRY_SHARDS],
-> = Lazy::new(|| core::array::from_fn(|_| SpinNoPreempt::new(WeakStateRegistry::default())));
-
-// Disk caches survive descriptor close and are released after explicit global
-// writeback. Stage 2 adds bounded retention and memory-pressure reclaim.
-static ACTIVE_DISK_FILE_CACHES: Lazy<SpinNoPreempt<Vec<Arc<CachedFileShared>>>> =
-    Lazy::new(|| SpinNoPreempt::new(Vec::new()));
 const PAGE_SIZE: usize = 4096;
 const MAX_WRITEBACK_PAGES: usize = 256;
 const READ_AHEAD_PAGES: usize = 16;
@@ -192,8 +169,231 @@ const PAGE_ACCESS_LOCK_STRIPES: usize = 32;
 // demand faults. The per-file state below prevents duplicate task buildup.
 const MMAP_PREFETCH_CONCURRENCY: usize = 2;
 
-static BACKGROUND_WRITEBACK_CURSOR: AtomicUsize = AtomicUsize::new(0);
-static DISK_FILE_CACHE_RELEASE_CURSOR: AtomicUsize = AtomicUsize::new(0);
+#[derive(Default)]
+struct FileSharedShard {
+    weak_states: WeakStateRegistry<FileCacheKey, CachedFileShared>,
+    active_disk_caches: BTreeMap<FileCacheKey, Arc<CachedFileShared>>,
+    writeback_cursor: Option<FileCacheKey>,
+    reclaim_cursor: Option<FileCacheKey>,
+    release_cursor: Option<FileCacheKey>,
+    prune_cursor: Option<FileCacheKey>,
+}
+
+impl FileSharedShard {
+    fn get(&self, key: &FileCacheKey) -> Option<Arc<CachedFileShared>> {
+        if let Some(state) = self.active_disk_caches.get(key) {
+            return Some(state.clone());
+        }
+        self.weak_states.get(key)
+    }
+
+    fn insert_weak(&mut self, key: FileCacheKey, state: &Arc<CachedFileShared>) {
+        self.weak_states.insert(key, state);
+    }
+
+    fn insert_active_disk(&mut self, key: FileCacheKey, state: Arc<CachedFileShared>) {
+        self.active_disk_caches.insert(key, state);
+    }
+
+    fn remove_all(&mut self, key: &FileCacheKey) -> Option<Arc<CachedFileShared>> {
+        let active = self.active_disk_caches.remove(key);
+        let weak = self.weak_states.remove(key);
+        active.or(weak)
+    }
+
+    fn for_each_active_ring<F>(
+        &mut self,
+        cursor: &mut Option<FileCacheKey>,
+        max_scans: usize,
+        mut visitor: F,
+    ) -> usize
+    where
+        F: FnMut(&FileCacheKey, &Arc<CachedFileShared>) -> bool,
+    {
+        if self.active_disk_caches.is_empty() || max_scans == 0 {
+            return 0;
+        }
+
+        let total = self.active_disk_caches.len();
+        let scan_limit = max_scans.min(total);
+        let mut scanned = 0;
+
+        if let Some(start_key) = *cursor {
+            let mut stop = false;
+            for (key, state) in self
+                .active_disk_caches
+                .range((core::ops::Bound::Excluded(start_key), core::ops::Bound::Unbounded))
+            {
+                if scanned >= scan_limit {
+                    stop = true;
+                    break;
+                }
+                if !visitor(key, state) {
+                    stop = true;
+                    break;
+                }
+                scanned += 1;
+                *cursor = Some(*key);
+            }
+            if !stop && scanned < scan_limit {
+                for (key, state) in self.active_disk_caches.range(..=start_key) {
+                    if scanned >= scan_limit {
+                        break;
+                    }
+                    if !visitor(key, state) {
+                        break;
+                    }
+                    scanned += 1;
+                    *cursor = Some(*key);
+                }
+            }
+        } else {
+            for (key, state) in self.active_disk_caches.iter() {
+                if scanned >= scan_limit {
+                    break;
+                }
+                if !visitor(key, state) {
+                    break;
+                }
+                scanned += 1;
+                *cursor = Some(*key);
+            }
+        }
+
+        scanned
+    }
+
+    fn collect_pending_writeback(
+        &mut self,
+        states: &mut heapless::Vec<Arc<CachedFileShared>, BACKGROUND_WRITEBACK_BATCH_STATES>,
+        scans_remaining: &mut usize,
+    ) {
+        let max_scans = *scans_remaining;
+        let mut cursor = self.writeback_cursor;
+        let scanned = self.for_each_active_ring(&mut cursor, max_scans, |_, state| {
+            if states.is_full() {
+                return false;
+            }
+            if state.has_pending_background_writeback() {
+                if states.push(state.clone()).is_err() {
+                    return false;
+                }
+            }
+            true
+        });
+        self.writeback_cursor = cursor;
+        *scans_remaining = scans_remaining.saturating_sub(scanned);
+    }
+
+    fn collect_reclaim_candidates(
+        &mut self,
+        candidates: &mut heapless::Vec<Arc<CachedFileShared>, 16>,
+    ) {
+        let max_scans = candidates.capacity() - candidates.len();
+        let mut cursor = self.reclaim_cursor;
+        self.for_each_active_ring(&mut cursor, max_scans, |_, state| {
+            if candidates.is_full() {
+                return false;
+            }
+            let _ = candidates.push(state.clone());
+            !candidates.is_full()
+        });
+        self.reclaim_cursor = cursor;
+    }
+
+    fn collect_release_candidates(
+        &mut self,
+        candidates: &mut heapless::Vec<Arc<CachedFileShared>, 16>,
+        batch_budget: &mut usize,
+    ) {
+        let max_scans = (*batch_budget).min(candidates.capacity() - candidates.len());
+        let mut cursor = self.release_cursor;
+        let scanned = self.for_each_active_ring(&mut cursor, max_scans, |_, state| {
+            if candidates.is_full() {
+                return false;
+            }
+            let _ = candidates.push(state.clone());
+            !candidates.is_full()
+        });
+        self.release_cursor = cursor;
+        *batch_budget = batch_budget.saturating_sub(scanned);
+    }
+
+    fn prune_inactive_caches(
+        &mut self,
+        removed: &mut heapless::Vec<Arc<CachedFileShared>, 8>,
+    ) {
+        if self.active_disk_caches.is_empty() || removed.is_full() {
+            return;
+        }
+
+        const PRUNE_SCAN_BUDGET: usize = 32;
+        let mut to_remove = heapless::Vec::<FileCacheKey, 8>::new();
+        let mut cursor = self.prune_cursor;
+
+        self.for_each_active_ring(&mut cursor, PRUNE_SCAN_BUDGET, |&key, state| {
+            if to_remove.is_full() {
+                return false;
+            }
+            if Arc::strong_count(state) == 1
+                && state.try_is_releasable_without_writeback(true) == Some(true)
+            {
+                let _ = to_remove.push(key);
+            }
+            !to_remove.is_full()
+        });
+        self.prune_cursor = cursor;
+
+        for key in to_remove {
+            let removed_active = self.active_disk_caches.remove(&key);
+            let removed_weak = self.weak_states.remove(&key);
+            debug_assert!(
+                removed_weak.is_some(),
+                "inactive file cache was missing from its weak registry"
+            );
+            drop(removed_weak);
+            if let Some(active) = removed_active {
+                let _ = removed.push(active);
+            }
+        }
+    }
+
+    fn try_release_unreferenced(
+        &mut self,
+        candidate: &Arc<CachedFileShared>,
+    ) -> Option<Arc<CachedFileShared>> {
+        let key = candidate.key()?;
+        let cached = self.active_disk_caches.get(&key)?;
+        if !Arc::ptr_eq(cached, candidate) {
+            return None;
+        }
+        if Arc::strong_count(candidate) != 2
+            || candidate.is_unlinked()
+            || candidate.has_pending_background_writeback()
+        {
+            return None;
+        }
+        let removed_active = self.active_disk_caches.remove(&key);
+        let removed_weak = self.weak_states.remove(&key);
+        debug_assert!(
+            removed_weak
+                .as_ref()
+                .is_some_and(|w| Arc::ptr_eq(w, candidate)),
+            "active file cache was missing from its weak registry"
+        );
+        drop(removed_weak);
+        removed_active
+    }
+}
+
+static FILE_SHARED_STATES: Lazy<
+    [SpinNoPreempt<FileSharedShard>; FILE_STATE_REGISTRY_SHARDS],
+> = Lazy::new(|| core::array::from_fn(|_| SpinNoPreempt::new(FileSharedShard::default())));
+
+static BACKGROUND_WRITEBACK_SHARD_CURSOR: AtomicUsize = AtomicUsize::new(0);
+static DISK_FILE_CACHE_RELEASE_SHARD_CURSOR: AtomicUsize = AtomicUsize::new(0);
+static PAGE_CACHE_RECLAIM_SHARD_CURSOR: AtomicUsize = AtomicUsize::new(0);
+static PRUNE_INACTIVE_SHARD_CURSOR: AtomicUsize = AtomicUsize::new(0);
 
 type PageAccessLockIndices = heapless::Vec<usize, PAGE_ACCESS_LOCK_STRIPES>;
 
@@ -1028,6 +1228,13 @@ impl CachedFileShared {
         self.size.load(Ordering::Acquire)
     }
 
+    pub(super) fn key(&self) -> Option<FileCacheKey> {
+        self.backing.as_ref().map(|file| FileCacheKey {
+            fs_id: self.fs_id,
+            inode: file.inode(),
+        })
+    }
+
     #[inline]
     pub(super) fn set_size(&self, size: u64) {
         self.size.store(size, Ordering::Release);
@@ -1692,84 +1899,70 @@ where
 }
 
 fn release_unreferenced_disk_file_caches(scan_limit: usize) {
-    // Keep one candidate reference while inspecting every state. Taking the
-    // per-inode registry lock before the active-cache lock prevents a new open
-    // from resurrecting a state between the final reference-count check and
-    // removal. Background writeback takes an active-cache reference, so it is
-    // covered by that same check.  Unlike a full registry clone, this makes
-    // retention release bounded and allocation-free.
-    let scans = ACTIVE_DISK_FILE_CACHES.lock().len().min(scan_limit);
-    for _ in 0..scans {
-        let state = {
-            let caches = ACTIVE_DISK_FILE_CACHES.lock();
-            if caches.is_empty() {
-                return;
-            }
-            let index =
-                DISK_FILE_CACHE_RELEASE_CURSOR.fetch_add(1, Ordering::Relaxed) % caches.len();
-            caches[index].clone()
-        };
-        if !state.is_releasable_without_writeback() {
-            continue;
+    if scan_limit == 0 {
+        return;
+    }
+    let mut scans_remaining = scan_limit;
+    let start_shard = DISK_FILE_CACHE_RELEASE_SHARD_CURSOR
+        .fetch_add(1, Ordering::Relaxed) % FILE_STATE_REGISTRY_SHARDS;
+
+    for shard_offset in 0..FILE_STATE_REGISTRY_SHARDS {
+        if scans_remaining == 0 {
+            break;
         }
-        let Some(file) = state.backing.as_ref() else {
-            continue;
-        };
-        let key = FileCacheKey {
-            fs_id: state.fs_id,
-            inode: file.inode(),
-        };
-        let removed_state = {
-            let mut registry = FILE_SHARED_STATES[file_state_registry_shard(key)].lock();
-            let Some(registered) = registry.get(&key) else {
-                continue;
-            };
-            if !Arc::ptr_eq(&registered, &state) {
-                continue;
-            }
+        let shard_idx = (start_shard + shard_offset) % FILE_STATE_REGISTRY_SHARDS;
+        let initial_shard_len = FILE_SHARED_STATES[shard_idx].lock().active_disk_caches.len();
+        let target_shard_scans = initial_shard_len.min(scans_remaining);
+        let mut shard_scans_done = 0;
 
-            let mut caches = ACTIVE_DISK_FILE_CACHES.lock();
-            let Some(index) = caches.iter().position(|cached| Arc::ptr_eq(cached, &state)) else {
-                continue;
-            };
-
-            // `state` is the snapshot reference, `registered` is the
-            // registry probe, and `caches[index]` is the active registry
-            // reference. Any handle, mapping, or writeback in flight makes
-            // this count larger and leaves the cache retained.
-            if Arc::strong_count(&state) != 3
-                || state.is_unlinked()
-                || state.has_pending_background_writeback()
+        while shard_scans_done < target_shard_scans && scans_remaining > 0 {
+            let mut candidates = heapless::Vec::<Arc<CachedFileShared>, 16>::new();
             {
-                continue;
+                let mut shard = FILE_SHARED_STATES[shard_idx].lock();
+                if shard.active_disk_caches.is_empty() {
+                    break;
+                }
+                let mut batch_budget = (target_shard_scans - shard_scans_done).min(16);
+                shard.collect_release_candidates(&mut candidates, &mut batch_budget);
+                shard_scans_done += candidates.len();
+                scans_remaining = scans_remaining.saturating_sub(candidates.len());
+            }
+            if candidates.is_empty() {
+                break;
             }
 
-            let removed_state = caches.swap_remove(index);
-            let removed_registry_state = registry.remove(&key);
-            debug_assert!(
-                removed_registry_state
-                    .as_ref()
-                    .is_some_and(|cached| Arc::ptr_eq(cached, &state)),
-                "active file cache was missing from its weak registry"
-            );
-            drop(removed_registry_state);
-            removed_state
-        };
-        // Dropping a backing inode can invalidate filesystem registries, so
-        // release this state only after all cache and weak-registry locks have
-        // been released. `state` is the final candidate reference and falls
-        // out of scope at the end of this iteration for the same reason.
-        drop(removed_state);
+            for candidate in candidates {
+                if !candidate.is_releasable_without_writeback() {
+                    continue;
+                }
+                let Some(key) = candidate.key() else {
+                    continue;
+                };
+                let target_shard = file_state_registry_shard(key);
+                debug_assert_eq!(target_shard, shard_idx);
+
+                let removed_state = FILE_SHARED_STATES[target_shard]
+                    .lock()
+                    .try_release_unreferenced(&candidate);
+                drop(removed_state);
+            }
+        }
     }
 }
 
 fn active_disk_file_cache_snapshot() -> VfsResult<Vec<Arc<CachedFileShared>>> {
-    let caches = ACTIVE_DISK_FILE_CACHES.lock();
+    let mut total_len = 0;
+    for shard in FILE_SHARED_STATES.iter() {
+        total_len += shard.lock().active_disk_caches.len();
+    }
     let mut states = Vec::new();
     states
-        .try_reserve_exact(caches.len())
+        .try_reserve_exact(total_len)
         .map_err(|_| VfsError::NoMemory)?;
-    states.extend(caches.iter().cloned());
+    for shard in FILE_SHARED_STATES.iter() {
+        let guard = shard.lock();
+        states.extend(guard.active_disk_caches.values().cloned());
+    }
     Ok(states)
 }
 
@@ -1791,19 +1984,20 @@ pub(crate) async fn flush_all_file_caches_async() -> VfsResult<()> {
 pub(crate) async fn flush_pending_file_caches_async() -> VfsResult<bool> {
     let mut states =
         heapless::Vec::<Arc<CachedFileShared>, BACKGROUND_WRITEBACK_BATCH_STATES>::new();
-    {
-        let caches = ACTIVE_DISK_FILE_CACHES.lock();
-        if !caches.is_empty() {
-            let start = BACKGROUND_WRITEBACK_CURSOR
-                .fetch_add(BACKGROUND_WRITEBACK_SCAN_STATES, Ordering::Relaxed)
-                % caches.len();
-            for offset in 0..caches.len().min(BACKGROUND_WRITEBACK_SCAN_STATES) {
-                let state = &caches[(start + offset) % caches.len()];
-                if state.has_pending_background_writeback() && states.push(state.clone()).is_err() {
-                    break;
-                }
-            }
+    let mut scans_remaining = BACKGROUND_WRITEBACK_SCAN_STATES;
+    let start_shard = BACKGROUND_WRITEBACK_SHARD_CURSOR
+        .fetch_add(1, Ordering::Relaxed) % FILE_STATE_REGISTRY_SHARDS;
+
+    for shard_offset in 0..FILE_STATE_REGISTRY_SHARDS {
+        if states.is_full() || scans_remaining == 0 {
+            break;
         }
+        let shard_idx = (start_shard + shard_offset) % FILE_STATE_REGISTRY_SHARDS;
+        let mut shard = FILE_SHARED_STATES[shard_idx].lock();
+        if shard.active_disk_caches.is_empty() {
+            continue;
+        }
+        shard.collect_pending_writeback(&mut states, &mut scans_remaining);
     }
     let had_pending = !states.is_empty();
     let result = flush_file_cache_states(states).await;
@@ -1815,6 +2009,8 @@ pub(crate) async fn flush_pending_file_caches_async() -> VfsResult<bool> {
     result.map(|()| had_pending)
 }
 
+static FILESYSTEM_SYNC_SHARD_CURSOR: AtomicUsize = AtomicUsize::new(0);
+
 /// Checkpoints cached file data owned by a filesystem that is about to be
 /// unmounted.  Retention remains unchanged: tmpfs and disk file cache state
 /// may still be referenced by stable VFS entries, but no dirty page may reach
@@ -1823,15 +2019,20 @@ pub(crate) async fn flush_file_caches_for_filesystem_async(
     filesystem: &dyn axfs_ng_vfs::FilesystemOps,
 ) -> VfsResult<()> {
     let fs_id = filesystem_id(filesystem);
-    let states = {
-        let caches = ACTIVE_DISK_FILE_CACHES.lock();
-        let mut states = Vec::new();
-        states
-            .try_reserve_exact(caches.len())
-            .map_err(|_| VfsError::NoMemory)?;
-        states.extend(caches.iter().filter(|state| state.fs_id == fs_id).cloned());
-        states
-    };
+    let start_shard = FILESYSTEM_SYNC_SHARD_CURSOR
+        .fetch_add(1, Ordering::Relaxed) % FILE_STATE_REGISTRY_SHARDS;
+    let mut states = Vec::new();
+    for shard_offset in 0..FILE_STATE_REGISTRY_SHARDS {
+        let shard_idx = (start_shard + shard_offset) % FILE_STATE_REGISTRY_SHARDS;
+        let guard = FILE_SHARED_STATES[shard_idx].lock();
+        states.extend(
+            guard
+                .active_disk_caches
+                .values()
+                .filter(|state| state.fs_id == fs_id)
+                .cloned(),
+        );
+    }
     flush_file_cache_states(states).await
 }
 
@@ -1848,7 +2049,6 @@ impl Drop for ReclaimGuard {
 static PAGE_CACHE_RECLAIM_ACTIVE_CPUS: AtomicUsize = AtomicUsize::new(0);
 static PAGE_CACHE_RECLAIMED_TOTAL: AtomicUsize = AtomicUsize::new(0);
 static PAGE_CACHE_RECLAIM_ZERO_STREAK: AtomicUsize = AtomicUsize::new(0);
-static PAGE_CACHE_RECLAIM_CURSOR: AtomicUsize = AtomicUsize::new(0);
 
 fn page_cache_reclaim_inner(num_pages: usize) -> usize {
     if num_pages == 0 {
@@ -1857,30 +2057,32 @@ fn page_cache_reclaim_inner(num_pages: usize) -> usize {
 
     let mut reclaimed = 0;
     let mut file_count = 0;
+    let start_shard = PAGE_CACHE_RECLAIM_SHARD_CURSOR
+        .fetch_add(1, Ordering::Relaxed) % FILE_STATE_REGISTRY_SHARDS;
 
-    let cache_count = ACTIVE_DISK_FILE_CACHES
-        .try_lock()
-        .map(|caches| caches.len())
-        .unwrap_or(0);
-    if cache_count == 0 {
-        return 0;
-    }
-    let start = PAGE_CACHE_RECLAIM_CURSOR.fetch_add(1, Ordering::Relaxed) % cache_count;
-    for offset in 0..cache_count {
-        let file = {
-            let Some(caches) = ACTIVE_DISK_FILE_CACHES.try_lock() else {
-                break;
-            };
-            if caches.is_empty() {
-                break;
-            }
-            caches[(start + offset) % caches.len()].clone()
-        };
-        let freed = file.try_evict_clean_pages(num_pages.saturating_sub(reclaimed));
-        reclaimed += freed;
-        file_count += 1;
+    for shard_offset in 0..FILE_STATE_REGISTRY_SHARDS {
         if reclaimed >= num_pages {
             break;
+        }
+        let shard_idx = (start_shard + shard_offset) % FILE_STATE_REGISTRY_SHARDS;
+        let mut candidates = heapless::Vec::<Arc<CachedFileShared>, 16>::new();
+        {
+            let Some(mut shard) = FILE_SHARED_STATES[shard_idx].try_lock() else {
+                continue;
+            };
+            if shard.active_disk_caches.is_empty() {
+                continue;
+            }
+            shard.collect_reclaim_candidates(&mut candidates);
+        }
+
+        for file in candidates {
+            let freed = file.try_evict_clean_pages(num_pages.saturating_sub(reclaimed));
+            reclaimed += freed;
+            file_count += 1;
+            if reclaimed >= num_pages {
+                break;
+            }
         }
     }
 
@@ -1895,70 +2097,21 @@ fn page_cache_reclaim_inner(num_pages: usize) -> usize {
 }
 
 fn prune_inactive_disk_file_caches() {
-    loop {
-        let candidate = {
-            let Some(caches) = ACTIVE_DISK_FILE_CACHES.try_lock() else {
-                return;
-            };
-            caches.iter().find_map(|state| {
-                (state.try_is_releasable_without_writeback(true) == Some(true))
-                    .then(|| state.clone())
-            })
-        };
-        let Some(state) = candidate else {
-            return;
-        };
-        let Some(file) = state.backing.as_ref() else {
-            return;
-        };
-        let key = FileCacheKey {
-            fs_id: state.fs_id,
-            inode: file.inode(),
-        };
+    let start_shard = PRUNE_INACTIVE_SHARD_CURSOR
+        .fetch_add(1, Ordering::Relaxed) % FILE_STATE_REGISTRY_SHARDS;
 
-        // `try_lock` keeps allocator reclaim non-blocking, while taking the
-        // weak registry before the active list closes the race where a new
-        // open could otherwise obtain this state just as it is detached.
-        let removed = {
-            let Some(mut registry) = FILE_SHARED_STATES[file_state_registry_shard(key)].try_lock()
-            else {
-                return;
-            };
-            let Some(registered) = registry.get(&key) else {
+    for shard_offset in 0..FILE_STATE_REGISTRY_SHARDS {
+        let shard_idx = (start_shard + shard_offset) % FILE_STATE_REGISTRY_SHARDS;
+        let mut removed = heapless::Vec::<Arc<CachedFileShared>, 8>::new();
+        {
+            let Some(mut shard) = FILE_SHARED_STATES[shard_idx].try_lock() else {
                 continue;
             };
-            if !Arc::ptr_eq(&registered, &state) {
+            if shard.active_disk_caches.is_empty() {
                 continue;
             }
-            let Some(mut caches) = ACTIVE_DISK_FILE_CACHES.try_lock() else {
-                return;
-            };
-            let Some(index) = caches.iter().position(|cached| Arc::ptr_eq(cached, &state)) else {
-                continue;
-            };
-
-            if Arc::strong_count(&state) != 3
-                || state.try_is_releasable_without_writeback(true) != Some(true)
-            {
-                return;
-            }
-
-            let removed_state = caches.swap_remove(index);
-            let removed_registry_state = registry.remove(&key);
-            debug_assert!(
-                removed_registry_state
-                    .as_ref()
-                    .is_some_and(|cached| Arc::ptr_eq(cached, &state)),
-                "inactive file cache was missing from its weak registry"
-            );
-            drop(removed_registry_state);
-            Some(removed_state)
-        };
-        let Some(removed) = removed else {
-            return;
-        };
-        // Drop after releasing the registry lock: the backing inode teardown
-        // may re-enter filesystem registries.
+            shard.prune_inactive_caches(&mut removed);
+        }
         drop(removed);
     }
 }
@@ -1999,10 +2152,22 @@ pub fn page_cache_reclaim(num_pages: usize) -> usize {
     } else {
         let streak = PAGE_CACHE_RECLAIM_ZERO_STREAK.fetch_add(1, Ordering::Relaxed) + 1;
         if streak <= 4 || streak.is_power_of_two() {
-            let active_caches = ACTIVE_DISK_FILE_CACHES
-                .try_lock()
-                .map(|caches| caches.len())
-                .unwrap_or(usize::MAX);
+            let active_caches = {
+                let mut total = 0;
+                let mut all_locked = true;
+                for shard in FILE_SHARED_STATES.iter() {
+                    if let Some(guard) = shard.try_lock() {
+                        total += guard.active_disk_caches.len();
+                    } else {
+                        all_locked = false;
+                    }
+                }
+                if all_locked {
+                    total
+                } else {
+                    usize::MAX
+                }
+            };
             warn!(
                 "page_cache_reclaim_stalled: streak={} requested_pages={} active_caches={} \
                  available_pages={}",
@@ -2029,8 +2194,8 @@ pub(super) async fn shared_file_state_async(
     let in_memory = location.filesystem().name() == "tmpfs";
 
     {
-        let registry = FILE_SHARED_STATES[registry_shard].lock();
-        if let Some(state) = registry.get(&key) {
+        let shard = FILE_SHARED_STATES[registry_shard].lock();
+        if let Some(state) = shard.get(&key) {
             return Ok(state);
         }
     }
@@ -2043,18 +2208,18 @@ pub(super) async fn shared_file_state_async(
     };
     let state = Arc::new(CachedFileShared::new(key.fs_id, in_memory, size, backing));
 
-    let mut registry = FILE_SHARED_STATES[registry_shard].lock();
-    if let Some(existing_state) = registry.get(&key) {
-        drop(registry);
+    let mut shard = FILE_SHARED_STATES[registry_shard].lock();
+    if let Some(existing_state) = shard.get(&key) {
+        drop(shard);
         drop(state);
         return Ok(existing_state);
     }
-    registry.sweep_dead();
-    registry.insert(key, &state);
-    drop(registry);
+    shard.weak_states.sweep_dead();
+    shard.insert_weak(key, &state);
     if !in_memory {
-        ACTIVE_DISK_FILE_CACHES.lock().push(state.clone());
+        shard.insert_active_disk(key, state.clone());
     }
+    drop(shard);
     Ok(state)
 }
 
