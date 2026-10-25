@@ -7,3 +7,6 @@
 [submodule "tests/ltp"]
 	path = tests/ltp
 	url = https://github.com/linux-test-project/ltp.git
+[submodule "tests/sysbench"]
+	path = tests/sysbench
+	url = https://github.com/akopytov/sysbench
