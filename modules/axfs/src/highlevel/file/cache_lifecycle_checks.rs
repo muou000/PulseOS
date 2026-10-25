@@ -17,7 +17,13 @@ use axhal::mem::PhysAddr;
 use axpoll::{IoEvents, Pollable};
 use spin::Mutex;
 
-use super::{CachedFileShared, PAGE_SIZE, PageCache, WritebackPage, flush_file_cache_state};
+use super::{
+    CachedFileShared, FileCacheKey, PAGE_SIZE, PageCache, UnlinkedFileCacheLease, WritebackPage,
+    active_disk_file_cache_snapshot, detach_file_cache_state, discard_unlinked_file_cache_after,
+    file_state_registry_shard, flush_all_file_caches_async, flush_file_cache_state,
+    flush_pending_file_caches_async, page_cache_reclaim_inner,
+    release_unreferenced_disk_file_caches, FILE_SHARED_STATES,
+};
 
 macro_rules! check {
     ($condition:expr) => {
@@ -39,6 +45,7 @@ fn poll_once<F: Future>(future: Pin<&mut F>) -> Poll<F::Output> {
 }
 
 struct TestFile {
+    inode: u64,
     data: Mutex<Vec<u8>>,
     fail_write: AtomicBool,
     fail_sync: AtomicBool,
@@ -50,7 +57,7 @@ struct TestFile {
 
 #[async_trait::async_trait]
 impl NodeOps for TestFile {
-    fn inode(&self) -> u64 { 67 }
+    fn inode(&self) -> u64 { self.inode }
     async fn metadata(&self) -> VfsResult<Metadata> { Err(VfsError::Unsupported) }
     async fn update_metadata(&self, _update: MetadataUpdate) -> VfsResult<()> {
         Err(VfsError::Unsupported)
@@ -124,6 +131,7 @@ struct CacheCase {
 impl CacheCase {
     fn new() -> VfsResult<Self> {
         let backend = Arc::new(TestFile {
+            inode: 67,
             data: Mutex::new(alloc::vec![0; PAGE_SIZE]),
             fail_write: AtomicBool::new(false),
             fail_sync: AtomicBool::new(false),
@@ -322,5 +330,303 @@ pub(super) fn run() -> VfsResult<()> {
         }
         info!("MLC_KERNEL PASS {}", name);
     }
+    run_cache_shard_regression_checks()?;
+    Ok(())
+}
+
+fn create_test_file_cache(
+    fs_id: usize,
+    inode: u64,
+    page_count: usize,
+) -> (Arc<TestFile>, FileNode, Arc<CachedFileShared>, FileCacheKey, usize) {
+    let key = FileCacheKey { fs_id, inode };
+    let shard_idx = file_state_registry_shard(key);
+    let backend = Arc::new(TestFile {
+        inode,
+        data: Mutex::new(alloc::vec![0; PAGE_SIZE * page_count]),
+        fail_write: AtomicBool::new(false),
+        fail_sync: AtomicBool::new(false),
+        pause_write: AtomicBool::new(false),
+        pause_sync: AtomicBool::new(false),
+        writes: AtomicUsize::new(0),
+        syncs: AtomicUsize::new(0),
+    });
+    let file = FileNode::new(backend.clone());
+    let shared = Arc::new(CachedFileShared::new(
+        fs_id,
+        false,
+        (PAGE_SIZE * page_count) as u64,
+        Some(file.clone()),
+    ));
+    {
+        let mut shard = FILE_SHARED_STATES[shard_idx].lock();
+        shard.insert_weak(key, &shared);
+        shard.insert_active_disk(key, shared.clone());
+    }
+    (backend, file, shared, key, shard_idx)
+}
+
+fn test_dirty_retention_and_writebacks() -> VfsResult<()> {
+    // 1. Background writeback check
+    let (backend, _file, shared, key, shard_idx) = create_test_file_cache(1, 88881, 1);
+    let mut page = PageCache::new(false)?;
+    page.data().fill(0x42);
+    let paddr = page.paddr();
+    shared.page_cache.lock().put(0, page);
+    shared.mark_page_dirty_if_paddr(0, paddr, false)?;
+    drop(shared);
+
+    {
+        let shard = FILE_SHARED_STATES[shard_idx].lock();
+        let cached = shard.get(&key).ok_or(VfsError::BadState)?;
+        check!(cached.page_cache.lock().get(&0).unwrap().dirty);
+    }
+
+    let flushed = axtask::future::block_on(flush_pending_file_caches_async())?;
+    check!(flushed);
+    check!(backend.writes.load(Ordering::Acquire) > 0);
+    check!(backend.data.lock()[0] == 0x42);
+    {
+        let shard = FILE_SHARED_STATES[shard_idx].lock();
+        check!(!shard.active_disk_caches.contains_key(&key));
+        check!(shard.get(&key).is_none());
+    }
+
+    // 2. Explicit sync writeback check
+    let (backend2, _file2, shared2, key2, shard_idx2) = create_test_file_cache(1, 88889, 1);
+    let mut page2 = PageCache::new(false)?;
+    page2.data().fill(0x77);
+    let paddr2 = page2.paddr();
+    shared2.page_cache.lock().put(0, page2);
+    shared2.mark_page_dirty_if_paddr(0, paddr2, false)?;
+    drop(shared2);
+
+    axtask::future::block_on(flush_all_file_caches_async())?;
+    check!(backend2.writes.load(Ordering::Acquire) > 0);
+    check!(backend2.data.lock()[0] == 0x77);
+    {
+        let shard2 = FILE_SHARED_STATES[shard_idx2].lock();
+        check!(!shard2.active_disk_caches.contains_key(&key2));
+        check!(shard2.get(&key2).is_none());
+    }
+
+    Ok(())
+}
+
+fn test_unlink_discard_and_restore_recovery() -> VfsResult<()> {
+    let inode = 88882;
+    let fs_id = 1;
+    let (_backend, _file, shared, key, shard_idx) = create_test_file_cache(fs_id, inode, 1);
+
+    let mut page = PageCache::new(false)?;
+    page.data().fill(0x55);
+    let paddr = page.paddr();
+    shared.page_cache.lock().put(0, page);
+    shared.mark_page_dirty_if_paddr(0, paddr, false)?;
+
+    // Case 2A: Unlink deletion fails -> cache must be restored to shard with dirty page intact!
+    let op_err = axtask::future::block_on(discard_unlinked_file_cache_after(
+        fs_id,
+        inode,
+        async { Err::<(), VfsError>(VfsError::Io) },
+    ));
+    check!(op_err == Err(VfsError::Io));
+
+    // Verify restored
+    {
+        let shard = FILE_SHARED_STATES[shard_idx].lock();
+        let cached = shard.get(&key).ok_or(VfsError::BadState)?;
+        check!(cached.page_cache.lock().get(&0).unwrap().dirty);
+        check!(!cached.is_unlinked());
+    }
+
+    // Case 2B: Unlink lease dropped without commit (cancellation) -> restored!
+    {
+        let lease = UnlinkedFileCacheLease::new(key);
+        check!(lease.state.is_some());
+        drop(lease);
+    }
+    {
+        let shard = FILE_SHARED_STATES[shard_idx].lock();
+        check!(shard.get(&key).is_some());
+    }
+
+    // Case 2C: Unlink deletion succeeds -> cache discarded!
+    let op_ok = axtask::future::block_on(discard_unlinked_file_cache_after(
+        fs_id,
+        inode,
+        async { Ok::<(), VfsError>(()) },
+    ));
+    check!(op_ok.is_ok());
+
+    {
+        let shard = FILE_SHARED_STATES[shard_idx].lock();
+        check!(shard.get(&key).is_none());
+        check!(!shard.active_disk_caches.contains_key(&key));
+    }
+    check!(shared.page_cache.lock().is_empty());
+    Ok(())
+}
+
+fn test_unlink_interleaving_with_global_collections() -> VfsResult<()> {
+    let inode = 88885;
+    let fs_id = 1;
+    let (backend, _file, shared, key, shard_idx) = create_test_file_cache(fs_id, inode, 1);
+
+    let mut page = PageCache::new(false)?;
+    page.data().fill(0x33);
+    let paddr = page.paddr();
+    shared.page_cache.lock().put(0, page);
+    shared.mark_page_dirty_if_paddr(0, paddr, false)?;
+    drop(shared);
+
+    // 1. Start an unlink lease: cache is detached from shard and marked unlinked
+    let lease = UnlinkedFileCacheLease::new(key);
+    check!(lease.state.is_some());
+    let state = lease.state.as_ref().unwrap();
+    check!(state.is_unlinked());
+    {
+        let shard = FILE_SHARED_STATES[shard_idx].lock();
+        check!(!shard.active_disk_caches.contains_key(&key));
+    }
+
+    // 2. Global writeback runs while unlink lease is active:
+    // It must NOT select or write back the unlinked state
+    let _ = axtask::future::block_on(flush_pending_file_caches_async())?;
+    check!(backend.writes.load(Ordering::Acquire) == 0);
+
+    // 3. Allocator reclaim runs while unlink lease is active:
+    // It must not evict or disturb the unlinked state
+    let _ = page_cache_reclaim_inner(5);
+    check!(state.page_cache.lock().contains(&0));
+
+    // 4. Simulate unlink delete cancellation: lease dropped without commit
+    drop(lease);
+
+    // 5. Cache state restored to its shard
+    {
+        let shard = FILE_SHARED_STATES[shard_idx].lock();
+        check!(shard.active_disk_caches.contains_key(&key));
+        let restored = shard.get(&key).ok_or(VfsError::BadState)?;
+        check!(!restored.is_unlinked());
+        check!(restored.page_cache.lock().get(&0).unwrap().dirty);
+    }
+
+    // 6. Global writeback now flushes the restored cache!
+    let _ = axtask::future::block_on(flush_pending_file_caches_async())?;
+    check!(backend.writes.load(Ordering::Acquire) > 0);
+    check!(backend.data.lock()[0] == 0x33);
+
+    // 7. Clean cache released from shard
+    {
+        let shard = FILE_SHARED_STATES[shard_idx].lock();
+        check!(!shard.active_disk_caches.contains_key(&key));
+    }
+
+    Ok(())
+}
+
+fn test_reclaim_clean_unmapped_only() -> VfsResult<()> {
+    let inode = 88883;
+    let fs_id = 1;
+    let (_backend, _file, shared, key, _shard_idx) = create_test_file_cache(fs_id, inode, 3);
+
+    // Page 0: clean & unmapped
+    let page0 = PageCache::new(false)?;
+    shared.page_cache.lock().put(0, page0);
+
+    // Page 1: dirty
+    let mut page1 = PageCache::new(false)?;
+    let paddr1 = page1.paddr();
+    shared.page_cache.lock().put(1, page1);
+    shared.mark_page_dirty_if_paddr(1, paddr1, false)?;
+
+    // Page 2: clean but pinned for user mapping
+    let mut page2 = PageCache::new(false)?;
+    let paddr2 = page2.pin_for_mapping(false)?;
+    shared.page_cache.lock().put(2, page2);
+
+    let evicted = page_cache_reclaim_inner(5);
+    check!(evicted == 1);
+
+    {
+        let mut cache = shared.page_cache.lock();
+        check!(!cache.contains(&0));
+        check!(cache.contains(&1));
+        check!(cache.get(&1).unwrap().dirty);
+        check!(cache.contains(&2));
+    }
+
+    let remaining = axalloc::frame_table().dec_ref(paddr2);
+    check!(remaining > 0);
+
+    shared.page_cache.lock().clear();
+    detach_file_cache_state(key);
+    Ok(())
+}
+
+fn test_concurrent_open_and_release_interleaving() -> VfsResult<()> {
+    let inode = 88884;
+    let fs_id = 1;
+    let (_backend, _file, shared, key, shard_idx) = create_test_file_cache(fs_id, inode, 1);
+
+    // Simulate opening: external reference `shared` is held (strong count = 2).
+    // During release_unreferenced_disk_file_caches, candidate + shared + active = 3.
+    // So Arc::strong_count != 2, and it must NOT be released!
+    release_unreferenced_disk_file_caches(10);
+    {
+        let shard = FILE_SHARED_STATES[shard_idx].lock();
+        check!(shard.active_disk_caches.contains_key(&key));
+    }
+
+    // Drop external reference: now only shard holds it.
+    drop(shared);
+
+    // Next release pass releases it cleanly
+    release_unreferenced_disk_file_caches(10);
+    {
+        let shard = FILE_SHARED_STATES[shard_idx].lock();
+        check!(!shard.active_disk_caches.contains_key(&key));
+    }
+
+    Ok(())
+}
+
+fn test_multi_shard_round_robin_fairness() -> VfsResult<()> {
+    let fs_id = 99;
+    let mut keys = Vec::new();
+    for i in 0..64u64 {
+        let (_backend, _file, shared, key, _shard_idx) = create_test_file_cache(fs_id, 10000 + i, 1);
+        drop(shared);
+        keys.push(key);
+    }
+
+    let snapshot = active_disk_file_cache_snapshot()?;
+    check!(snapshot.len() >= 64);
+
+    for key in keys {
+        detach_file_cache_state(key);
+    }
+
+    Ok(())
+}
+
+pub(super) fn run_cache_shard_regression_checks() -> VfsResult<()> {
+    let checks: [(&str, fn() -> VfsResult<()>); 6] = [
+        ("dirty_retention_and_writebacks", test_dirty_retention_and_writebacks),
+        ("unlink_discard_and_restore_recovery", test_unlink_discard_and_restore_recovery),
+        ("unlink_interleaving_with_global_collections", test_unlink_interleaving_with_global_collections),
+        ("reclaim_clean_unmapped_only", test_reclaim_clean_unmapped_only),
+        ("concurrent_open_and_release_interleaving", test_concurrent_open_and_release_interleaving),
+        ("multi_shard_round_robin_fairness", test_multi_shard_round_robin_fairness),
+    ];
+    for (name, check) in checks {
+        if let Err(err) = check() {
+            error!("[CACHE_SHARD_GUEST] FAIL {} {:?}", name, err);
+            return Err(err);
+        }
+        info!("[CACHE_SHARD_GUEST] PASS {}", name);
+    }
+    info!("[CACHE_SHARD_GUEST] All cache shard regression checks PASSED!");
     Ok(())
 }
