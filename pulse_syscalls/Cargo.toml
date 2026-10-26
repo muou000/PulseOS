@@ -18,6 +18,7 @@ mapping-lifecycle-test = ["axfs/mapping-lifecycle-test"]
 axerrno.workspace = true
 linux-raw-sys = { workspace = true, features = ["system", "prctl", "mempolicy"] }
 pulse_bpf_schema = { workspace = true }
+pulse_user_abi.workspace = true
 spin.workspace = true
 
 [target.'cfg(target_os = "none")'.dependencies]

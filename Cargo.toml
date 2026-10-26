@@ -11,6 +11,7 @@ members = [
     "pulse_syscalls",
     "crates/starry-vdso",
     "crates/pulse_bpf_schema",
+    "crates/pulse_user_abi",
     "crates/bpf-capture",
     "crates/bpf-analyzer",
     "modules/axalloc",
@@ -56,6 +57,7 @@ categories = ["os", "no-std"]
 pulse_core = { path = "pulse_core" }
 pulse_syscalls = { path = "pulse_syscalls" }
 pulse_bpf_schema = { path = "crates/pulse_bpf_schema" }
+pulse_user_abi = { path = "crates/pulse_user_abi" }
 bpf-capture = { path = "crates/bpf-capture" }
 bpf-analyzer = { path = "crates/bpf-analyzer" }
 

@@ -3,18 +3,7 @@ use crate::task;
 
 impl Process {
     pub fn validate_user_range(&self, user_addr: usize, len: usize) -> AxResult<()> {
-        if len == 0 {
-            return Ok(());
-        }
-
-        let user_end = user_addr.checked_add(len).ok_or(AxError::BadAddress)?;
-        let user_space_end = USER_SPACE_BASE
-            .checked_add(USER_SPACE_SIZE)
-            .ok_or(AxError::BadAddress)?;
-        if user_addr < USER_SPACE_BASE || user_end > user_space_end {
-            return Err(AxError::BadAddress);
-        }
-        Ok(())
+        task::uaccess::validate_user_range(user_addr, len)
     }
 }
 
@@ -157,34 +146,40 @@ impl Process {
         self.aspace_handle().read().asid()
     }
 
+    pub fn read_user_value<T: task::uaccess::FromUserAbi>(&self, user_addr: usize) -> AxResult<T> {
+        task::uaccess::read_user_value(self, user_addr)
+    }
+
+    pub fn write_user_value<T: task::uaccess::IntoUserAbi>(
+        &self,
+        user_addr: usize,
+        value: &T,
+    ) -> AxResult<()> {
+        task::uaccess::write_user_value(self, user_addr, value)
+    }
+
     pub fn read_user_u32(&self, user_addr: usize) -> AxResult<u32> {
-        let mut bytes = [0u8; core::mem::size_of::<u32>()];
-        self.read_user_bytes(user_addr, &mut bytes)?;
-        Ok(u32::from_ne_bytes(bytes))
+        self.read_user_value(user_addr)
     }
 
     pub fn read_user_usize(&self, user_addr: usize) -> AxResult<usize> {
-        let mut bytes = [0u8; core::mem::size_of::<usize>()];
-        self.read_user_bytes(user_addr, &mut bytes)?;
-        Ok(usize::from_ne_bytes(bytes))
+        self.read_user_value(user_addr)
     }
 
     pub fn read_user_isize(&self, user_addr: usize) -> AxResult<isize> {
-        let mut bytes = [0u8; core::mem::size_of::<isize>()];
-        self.read_user_bytes(user_addr, &mut bytes)?;
-        Ok(isize::from_ne_bytes(bytes))
+        self.read_user_value(user_addr)
     }
 
     pub fn write_user_u32(&self, user_addr: usize, value: u32) -> AxResult<()> {
-        self.write_user_bytes(user_addr, &value.to_ne_bytes())
+        self.write_user_value(user_addr, &value)
     }
 
     pub fn write_user_i32(&self, user_addr: usize, value: i32) -> AxResult<()> {
-        self.write_user_bytes(user_addr, &value.to_ne_bytes())
+        self.write_user_value(user_addr, &value)
     }
 
     pub fn write_user_usize(&self, user_addr: usize, value: usize) -> AxResult<()> {
-        self.write_user_bytes(user_addr, &value.to_ne_bytes())
+        self.write_user_value(user_addr, &value)
     }
 }
 

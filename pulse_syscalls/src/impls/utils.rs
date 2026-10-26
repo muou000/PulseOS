@@ -8,7 +8,11 @@ use linux_raw_sys::general::{UTIME_NOW, UTIME_OMIT, iovec, timespec, timeval};
 use memory_addr::{MemoryAddr, PhysAddr, VirtAddr};
 use pulse_core::task::uaccess;
 
-const MAX_USER_IOVCNT: usize = 1024;
+use crate::validation::user_abi::{
+    read_user_array_from, read_user_iovec_array_from, read_user_value_from, write_user_slice_to,
+    write_user_value_to,
+};
+
 // Syscall I/O submits at most 64 KiB at once. An unaligned 64 KiB run spans
 // no more than 17 base pages, so frame ownership stays on the kernel stack.
 const PINNED_USER_IO_MAX_PAGES: usize = 17;
@@ -181,15 +185,58 @@ pub(crate) fn with_user_path_str<R>(
     f(path_str)
 }
 
+pub(crate) fn read_user_value<T: uaccess::FromUserAbi>(user_addr: usize) -> Result<T, LinuxError> {
+    with_process(|process| {
+        read_user_value_from(user_addr, |addr, dst| {
+            process.read_user_bytes_partial(addr, dst)
+        })
+    })?
+}
+
+pub(crate) fn write_user_value<T: uaccess::IntoUserAbi>(
+    user_addr: usize,
+    value: &T,
+) -> Result<(), LinuxError> {
+    with_process(|process| {
+        write_user_value_to(user_addr, value, |addr, src| {
+            process.write_user_bytes_partial(addr, src)
+        })
+    })?
+}
+
+#[allow(dead_code)]
+pub(crate) fn read_user_value_array<T: uaccess::FromUserAbi>(
+    user_addr: usize,
+    count: usize,
+) -> Result<Vec<T>, LinuxError> {
+    with_process(|process| {
+        read_user_array_from(uaccess::USER_MEMORY_RANGE, user_addr, count, |addr, dst| {
+            process.read_user_bytes_partial(addr, dst)
+        })
+    })?
+}
+
+#[allow(dead_code)]
+pub(crate) fn write_user_value_array<T: uaccess::IntoUserAbi>(
+    user_addr: usize,
+    values: &[T],
+) -> Result<(), LinuxError> {
+    with_process(|process| {
+        write_user_slice_to(user_addr, values, |addr, src| {
+            process.write_user_bytes_partial(addr, src)
+        })
+    })?
+}
+
 pub(crate) fn read_user_iovec_array(
     user_addr: usize,
     iovcnt: usize,
 ) -> Result<Vec<iovec>, LinuxError> {
-    if iovcnt > MAX_USER_IOVCNT {
-        return Err(LinuxError::EINVAL);
-    }
-    with_process(|process| uaccess::read_user_plain_array::<iovec>(process, user_addr, iovcnt))?
-        .map_err(|e| LinuxError::from(e.canonicalize()))
+    with_process(|process| {
+        read_user_iovec_array_from(uaccess::USER_MEMORY_RANGE, user_addr, iovcnt, |addr, dst| {
+            process.read_user_bytes_partial(addr, dst)
+        })
+    })?
 }
 
 pub(crate) enum ScratchBuffer {
@@ -313,23 +360,19 @@ pub(crate) fn alloc_uninit_bytes(
 }
 
 pub(crate) fn read_user_timespec(user_addr: usize) -> Result<timespec, LinuxError> {
-    with_process(|process| uaccess::read_user_plain(process, user_addr))?
-        .map_err(|e| LinuxError::from(e.canonicalize()))
+    read_user_value(user_addr)
 }
 
 pub(crate) fn read_user_timeval(user_addr: usize) -> Result<timeval, LinuxError> {
-    with_process(|process| uaccess::read_user_plain(process, user_addr))?
-        .map_err(|e| LinuxError::from(e.canonicalize()))
+    read_user_value(user_addr)
 }
 
 pub(crate) fn read_user_i64(user_addr: usize) -> Result<i64, LinuxError> {
-    with_process(|process| uaccess::read_user_plain(process, user_addr))?
-        .map_err(|e| LinuxError::from(e.canonicalize()))
+    read_user_value(user_addr)
 }
 
 pub(crate) fn write_user_i64(user_addr: usize, value: i64) -> Result<(), LinuxError> {
-    with_process(|process| uaccess::write_user_plain(process, user_addr, &value))?
-        .map_err(|e| LinuxError::from(e.canonicalize()))
+    write_user_value(user_addr, &value)
 }
 
 pub(crate) fn timespec_to_update_time(
