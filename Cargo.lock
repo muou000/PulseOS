@@ -11,6 +11,7 @@ dependencies = [
  "axfs",
  "axhal",
  "axlog",
+ "axnet",
  "axplat-loongarch64-ls2k1000",
  "axplat-loongarch64-qemu-virt",
  "axplat-riscv64-qemu-virt",

@@ -10,6 +10,7 @@ extern crate axplat_loongarch64_ls2k1000;
 #[cfg(all(target_arch = "riscv64", feature = "visionfive2"))]
 extern crate axplat_riscv64_visionfive2;
 extern crate axruntime;
+extern crate axnet;
 extern crate pulse_core;
 extern crate pulse_syscalls;
 extern crate starry_vdso;
@@ -74,6 +75,7 @@ fn main() {
             pulse_core::task::run_process_registry_guest_checks().expect("process registry guest checks failed");
             axalloc::run_pcp_guest_checks().expect("pcp guest checks failed");
             axfs::run_dma_and_writeback_guest_checks().expect("dma & writeback guest checks failed");
+            axnet::run_tcp_endpoint_concurrency_checks().expect("tcp endpoint concurrency checks failed");
 
             let shell_args_base: &[&str] = &["sh"];
             let shell_envs: &[&str] = &["PATH=/usr/sbin:/usr/bin:/sbin:/bin"];

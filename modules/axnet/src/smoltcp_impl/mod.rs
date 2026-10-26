@@ -36,7 +36,10 @@ use smoltcp::{
 };
 
 use self::listen_table::ListenTable;
-pub use self::{dns::dns_query, icmp::IcmpSocket, tcp::TcpSocket, udp::UdpSocket};
+pub use self::{
+    dns::dns_query, icmp::IcmpSocket, tcp::run_tcp_endpoint_concurrency_checks, tcp::TcpSocket,
+    udp::UdpSocket,
+};
 macro_rules! env_or_default {
     ($key:literal) => {
         match option_env!($key) {
