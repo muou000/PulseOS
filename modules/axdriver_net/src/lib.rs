@@ -102,6 +102,12 @@ pub struct NetBufPtr {
 impl NetBufPtr {
     /// Internal constructor for network drivers and buffer pools.
     ///
+    /// # Safety / Invariants
+    ///
+    /// Internal callers within this crate must guarantee that `buf_ptr` points to valid
+    /// memory of at least `len` bytes for the entire lifetime of this `NetBufPtr`, and that
+    /// `raw_ptr` uniquely represents the original backing object.
+    ///
     /// Validates pointer arithmetic and slice length invariants:
     /// - `len <= isize::MAX as usize`
     /// - `(buf_ptr as usize).checked_add(len)` does not overflow the address space.

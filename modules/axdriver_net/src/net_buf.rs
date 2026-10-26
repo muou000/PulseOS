@@ -94,28 +94,12 @@ impl NetBuf {
 
     /// Set the length of the header part.
     pub fn set_header_len(&mut self, header_len: usize) {
-        assert!(
-            header_len
-                .checked_add(self.packet_len)
-                .is_some_and(|sum| sum <= self.capacity),
-            "header_len ({header_len}) + packet_len ({}) exceeds capacity ({})",
-            self.packet_len,
-            self.capacity
-        );
-        self.header_len = header_len;
+        self.set_header_and_packet_len(header_len, self.packet_len);
     }
 
     /// Set the length of the packet part.
     pub fn set_packet_len(&mut self, packet_len: usize) {
-        assert!(
-            self.header_len
-                .checked_add(packet_len)
-                .is_some_and(|sum| sum <= self.capacity),
-            "header_len ({}) + packet_len ({packet_len}) exceeds capacity ({})",
-            self.header_len,
-            self.capacity
-        );
-        self.packet_len = packet_len;
+        self.set_header_and_packet_len(self.header_len, packet_len);
     }
 
     /// Sets both the header and packet lengths atomically, validating that their
@@ -192,6 +176,9 @@ impl NetBuf {
         );
         raw_buf.is_borrowed_as_ptr = false;
 
+        // SAFETY: `raw_buf.buf_ptr` points to the buffer start with allocated length
+        // `raw_buf.capacity`. By invariant, `raw_buf.header_len <= raw_buf.capacity`,
+        // so offsetting by `header_len` stays within the allocated buffer object.
         let expected_packet_ptr = unsafe { raw_buf.buf_ptr.as_ptr().add(raw_buf.header_len) };
         assert_eq!(
             ptr.buf_ptr().as_ptr(),
