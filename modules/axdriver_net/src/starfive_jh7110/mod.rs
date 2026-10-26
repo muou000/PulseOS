@@ -847,6 +847,8 @@ impl<H: DmaOps> NetDriverOps for Jh7110Dwmac<H> {
     }
 
     fn recycle_rx_buffer(&mut self, rx_buf: NetBufPtr) -> DevResult {
+        // SAFETY: `rx_buf` was produced by `into_buf_ptr()` in `Self::receive()`.
+        // It is transferred back here uniquely for deallocation back into `self.buffer_pool`.
         drop(unsafe { NetBuf::from_buf_ptr(rx_buf) });
         Ok(())
     }
@@ -858,10 +860,14 @@ impl<H: DmaOps> NetDriverOps for Jh7110Dwmac<H> {
     fn transmit(&mut self, tx_buf: NetBufPtr) -> DevResult {
         let packet_len = tx_buf.packet_len();
         if packet_len == 0 || packet_len > DMA_BUFFER_SIZE {
+            // SAFETY: `tx_buf` was allocated in `alloc_tx_buffer()` via `NetBuf::into_buf_ptr()`.
+            // Transferred here uniquely on error to release the buffer back into `self.buffer_pool`.
             drop(unsafe { NetBuf::from_buf_ptr(tx_buf) });
             return Err(DevError::InvalidParam);
         }
         if !self.can_transmit() {
+            // SAFETY: `tx_buf` was allocated in `alloc_tx_buffer()` via `NetBuf::into_buf_ptr()`.
+            // Transferred here uniquely on error to release the buffer back into `self.buffer_pool`.
             drop(unsafe { NetBuf::from_buf_ptr(tx_buf) });
             return Err(DevError::Again);
         }
@@ -876,6 +882,9 @@ impl<H: DmaOps> NetDriverOps for Jh7110Dwmac<H> {
                 packet_len,
             );
         }
+        // SAFETY: `tx_buf` was allocated in `alloc_tx_buffer()` via `NetBuf::into_buf_ptr()`.
+        // The packet payload has been copied to DMA memory, and ownership is surrendered here
+        // to return the buffer to `self.buffer_pool`.
         drop(unsafe { NetBuf::from_buf_ptr(tx_buf) });
         H::dma_sync(buffer_paddr, packet_len);
         unsafe { DmaDesc::tx(buffer_paddr, packet_len).write(self.tx_desc_ptr(index)) };
