@@ -238,6 +238,7 @@ bpf-trace = [
 ]
 
 [dependencies]
+axalloc.workspace = true
 axhal.workspace = true
 axlog.workspace = true
 axruntime.workspace = true
