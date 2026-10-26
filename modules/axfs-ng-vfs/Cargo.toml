@@ -62,9 +62,16 @@ default-features = false
 [dependencies.kspin]
 workspace = true
 
+[dependencies.kernel_guard]
+workspace = true
+
 [dependencies.async-trait]
 version = "0.1"
 
 [dependencies.async-lock]
 version = "3.4"
 default-features = false
+
+[dev-dependencies.kspin]
+workspace = true
+features = ["smp"]
