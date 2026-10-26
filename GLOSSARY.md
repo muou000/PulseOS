@@ -44,6 +44,10 @@ _Avoid_: per-cpu buddy, per-thread page cache
 终态 child 被 wait 消费后，完成 accounting、task 引用、资源缩减、描述符影响和全局注销的过程。
 _Avoid_: child cleanup, process deletion
 
+**进程分片注册表**:
+按 PID 分片（16 分片）管理的进程全局注册表。点查（`process_by_pid`）与单个进程生命周期变更（`register_process`/`unregister_process`）仅竞争单一分片的 IRQ 安全自旋读写锁；跨进程快照遍历（`processes_snapshot`）采用聚散（Scatter/Gather）模式顺序收集各分片后在锁外聚合排序与去重，消除高频跨进程查找与生命周期变更之间的集中式全局锁争用。
+_Avoid_: monolithic process map, global task table
+
 ### IPC
 
 **管道容量**:
