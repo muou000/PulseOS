@@ -72,6 +72,7 @@ fn main() {
             pulse_core::fd_table::run_pipe_guest_checks().expect("pipe guest checks failed");
             pulse_core::task::run_futex_guest_checks().expect("futex guest checks failed");
             axalloc::run_pcp_guest_checks().expect("pcp guest checks failed");
+            axfs::run_dma_and_writeback_guest_checks().expect("dma & writeback guest checks failed");
 
             let shell_args_base: &[&str] = &["sh"];
             let shell_envs: &[&str] = &["PATH=/usr/sbin:/usr/bin:/sbin:/bin"];

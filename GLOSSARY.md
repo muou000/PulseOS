@@ -18,6 +18,14 @@ _Avoid_: read/write helper, transport operation
 将一段或多段用户虚拟内存范围验证并钉住（持有物理页框生命周期引用）后形成的离散物理页段集合（Scatter-Gather 缓冲），在 I/O 期间保证底层页框不被回收，并在析构时批量归还零引用页框。
 _Avoid_: contiguous pinned slice, raw user pointer list
 
+**DMA 缓冲分片注册表**:
+按虚拟地址空间分片（2 MiB 颗粒度）管理的物理连续 DMA 缓冲区所有权与租约注册表。支持底层块设备驱动以单分片局部锁快速反查与申领（claim），跨分片锁获取严格升序以避免死锁，消除全局自旋锁争用。
+_Avoid_: global dma registry, monolithic buffer map
+
+**可复用写回连续页池**:
+用于 Page Cache 批量脏页写回的高阶连续物理页缓冲池。写回批次完成后将高阶连续页组归还池中供后续批次直接复用，避免每次写回批次重复向伙伴系统申请和释放高阶连续页。
+_Avoid_: static bounce buffer, buddy churn cache
+
 ### Memory and process lifecycle
 
 **映射页生命周期**:
