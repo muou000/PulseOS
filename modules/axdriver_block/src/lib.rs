@@ -17,7 +17,7 @@ pub mod starfive_jh7110;
 #[cfg(feature = "ls2k1000-ahci")]
 pub mod ls2k1000_ahci;
 
-use alloc::{boxed::Box, collections::BTreeMap, sync::Arc};
+use alloc::{boxed::Box, collections::BTreeMap, sync::Arc, vec::Vec};
 use core::{
     any::Any,
     ptr::NonNull,
@@ -51,14 +51,98 @@ struct OwnedBufferRange {
 
 // Both directions share one range registry so a source cannot accidentally be
 // registered for a device read and write at the same time.
-static OWNED_DMA_BUFFERS: Mutex<BTreeMap<usize, OwnedBufferEntry>> = Mutex::new(BTreeMap::new());
+// Sharded into 16 address-based partitions (2 MiB granularity) to eliminate
+// global lock contention between concurrent block device I/Os.
+const OWNED_DMA_SHARDS: usize = 16;
+const SHARD_SHIFT: usize = 21; // 2 MiB boundary
+
+struct OwnedDmaShard {
+    buffers: Mutex<BTreeMap<usize, OwnedBufferEntry>>,
+}
+
+impl OwnedDmaShard {
+    const fn new() -> Self {
+        Self {
+            buffers: Mutex::new(BTreeMap::new()),
+        }
+    }
+}
+
+static OWNED_DMA_SHARDS_TABLE: [OwnedDmaShard; OWNED_DMA_SHARDS] = [
+    OwnedDmaShard::new(),
+    OwnedDmaShard::new(),
+    OwnedDmaShard::new(),
+    OwnedDmaShard::new(),
+    OwnedDmaShard::new(),
+    OwnedDmaShard::new(),
+    OwnedDmaShard::new(),
+    OwnedDmaShard::new(),
+    OwnedDmaShard::new(),
+    OwnedDmaShard::new(),
+    OwnedDmaShard::new(),
+    OwnedDmaShard::new(),
+    OwnedDmaShard::new(),
+    OwnedDmaShard::new(),
+    OwnedDmaShard::new(),
+    OwnedDmaShard::new(),
+];
 static OWNED_DMA_BUFFER_COUNT: AtomicUsize = AtomicUsize::new(0);
 static NEXT_OWNED_DMA_BUFFER_ID: AtomicU64 = AtomicU64::new(1);
 
-fn unregister_owned_buffer(id: u64, start: usize) {
-    let mut buffers = OWNED_DMA_BUFFERS.lock();
-    if buffers.get(&start).is_some_and(|entry| entry.id == id) {
-        buffers.remove(&start);
+struct ShardList {
+    shards: [usize; OWNED_DMA_SHARDS],
+    len: usize,
+}
+
+impl ShardList {
+    fn for_range(start: usize, end: usize) -> Self {
+        let start_chunk = start >> SHARD_SHIFT;
+        let end_chunk = end.saturating_sub(1) >> SHARD_SHIFT;
+        let mut shards = [0usize; OWNED_DMA_SHARDS];
+        let mut len = 0;
+        for chunk in start_chunk..=end_chunk {
+            let shard = chunk % OWNED_DMA_SHARDS;
+            let mut found = false;
+            for i in 0..len {
+                if shards[i] == shard {
+                    found = true;
+                    break;
+                }
+            }
+            if !found && len < OWNED_DMA_SHARDS {
+                shards[len] = shard;
+                len += 1;
+            }
+        }
+        // Insertion sort to ensure ascending lock order and prevent deadlock
+        for i in 1..len {
+            let key = shards[i];
+            let mut j = i;
+            while j > 0 && shards[j - 1] > key {
+                shards[j] = shards[j - 1];
+                j -= 1;
+            }
+            shards[j] = key;
+        }
+        Self { shards, len }
+    }
+
+    fn as_slice(&self) -> &[usize] {
+        &self.shards[..self.len]
+    }
+}
+
+fn unregister_owned_buffer(id: u64, start: usize, end: usize) {
+    let shard_list = ShardList::for_range(start, end);
+    let mut removed = false;
+    for &shard in shard_list.as_slice() {
+        let mut buffers = OWNED_DMA_SHARDS_TABLE[shard].buffers.lock();
+        if buffers.get(&start).is_some_and(|entry| entry.id == id) {
+            buffers.remove(&start);
+            removed = true;
+        }
+    }
+    if removed {
         OWNED_DMA_BUFFER_COUNT.fetch_sub(1, Ordering::Release);
     }
 }
@@ -68,7 +152,7 @@ fn register_owned_buffer<T>(
     start: NonNull<u8>,
     len: usize,
     owner: Arc<T>,
-) -> DevResult<(u64, usize)>
+) -> DevResult<OwnedBufferRegistration>
 where
     T: Any + Send + Sync,
 {
@@ -77,39 +161,57 @@ where
     }
     let start = start.as_ptr() as usize;
     let end = start.checked_add(len).ok_or(DevError::InvalidParam)?;
-    let mut buffers = OWNED_DMA_BUFFERS.lock();
-    let overlaps_predecessor = buffers
-        .range(..=start)
-        .next_back()
-        .is_some_and(|(_, entry)| start < entry.range.end);
-    let overlaps_successor = buffers
-        .range(start..)
-        .next()
-        .is_some_and(|(_, entry)| entry.range.start < end);
-    if overlaps_predecessor || overlaps_successor {
-        return Err(DevError::ResourceBusy);
+    let shard_list = ShardList::for_range(start, end);
+
+    // Acquire locks in ascending shard order
+    let mut guards: Vec<spin::MutexGuard<'_, BTreeMap<usize, OwnedBufferEntry>>> =
+        Vec::with_capacity(shard_list.len);
+    for &shard in shard_list.as_slice() {
+        guards.push(OWNED_DMA_SHARDS_TABLE[shard].buffers.lock());
     }
+
+    // Check for overlaps in all intersected shards
+    for guard in &guards {
+        let overlaps_predecessor = guard
+            .range(..=start)
+            .next_back()
+            .is_some_and(|(_, entry)| start < entry.range.end);
+        let overlaps_successor = guard
+            .range(start..)
+            .next()
+            .is_some_and(|(_, entry)| entry.range.start < end);
+        if overlaps_predecessor || overlaps_successor {
+            return Err(DevError::ResourceBusy);
+        }
+    }
+
     let id = NEXT_OWNED_DMA_BUFFER_ID.fetch_add(1, Ordering::Relaxed);
     if id == 0 {
         return Err(DevError::BadState);
     }
-    buffers.insert(
+
+    let range = Arc::new(OwnedBufferRange {
         start,
-        OwnedBufferEntry {
-            id,
-            direction,
-            range: Arc::new(OwnedBufferRange {
-                start,
-                end,
-                claim_start: AtomicUsize::new(0),
-                claim_len: AtomicUsize::new(0),
-                claimed: AtomicBool::new(false),
-                _owner: owner,
-            }),
-        },
-    );
+        end,
+        claim_start: AtomicUsize::new(0),
+        claim_len: AtomicUsize::new(0),
+        claimed: AtomicBool::new(false),
+        _owner: owner,
+    });
+
+    for guard in guards.iter_mut() {
+        guard.insert(
+            start,
+            OwnedBufferEntry {
+                id,
+                direction,
+                range: range.clone(),
+            },
+        );
+    }
+
     OWNED_DMA_BUFFER_COUNT.fetch_add(1, Ordering::Release);
-    Ok((id, start))
+    Ok(OwnedBufferRegistration { id, start, end })
 }
 
 fn claim_owned_buffer(
@@ -125,7 +227,9 @@ fn claim_owned_buffer(
     }
     let start = buffer.as_ptr() as *mut u8 as usize;
     let end = start.checked_add(len)?;
-    let buffers = OWNED_DMA_BUFFERS.lock();
+
+    let shard = (start >> SHARD_SHIFT) % OWNED_DMA_SHARDS;
+    let buffers = OWNED_DMA_SHARDS_TABLE[shard].buffers.lock();
     let entry = buffers
         .range(..=start)
         .next_back()
@@ -144,6 +248,19 @@ fn claim_owned_buffer(
     Some(entry.range.clone())
 }
 
+/// Internal RAII handle managing cancellation-safe buffer deregistration.
+struct OwnedBufferRegistration {
+    id: u64,
+    start: usize,
+    end: usize,
+}
+
+impl Drop for OwnedBufferRegistration {
+    fn drop(&mut self) {
+        unregister_owned_buffer(self.id, self.start, self.end);
+    }
+}
+
 /// Keeps a registered DMA-readable destination alive until its registration is
 /// dropped.
 ///
@@ -152,14 +269,7 @@ fn claim_owned_buffer(
 /// so dropping this value while a request is in flight does not release the
 /// backing allocation early.
 pub struct OwnedReadBufferRegistration {
-    id: u64,
-    start: usize,
-}
-
-impl Drop for OwnedReadBufferRegistration {
-    fn drop(&mut self) {
-        unregister_owned_buffer(self.id, self.start);
-    }
+    _inner: OwnedBufferRegistration,
 }
 
 /// Keeps a registered DMA-readable source alive until its registration is
@@ -169,14 +279,7 @@ impl Drop for OwnedReadBufferRegistration {
 /// before it submits the descriptor chain. The lease owns a clone of the
 /// backing allocation through normal completion or cancellation.
 pub struct OwnedWriteBufferRegistration {
-    id: u64,
-    start: usize,
-}
-
-impl Drop for OwnedWriteBufferRegistration {
-    fn drop(&mut self) {
-        unregister_owned_buffer(self.id, self.start);
-    }
+    _inner: OwnedBufferRegistration,
 }
 
 /// A request-owned reference to a registered direct-read destination.
@@ -298,8 +401,8 @@ pub unsafe fn register_owned_read_buffer<T>(
 where
     T: Any + Send + Sync,
 {
-    let (id, start) = register_owned_buffer(OwnedBufferDirection::Read, start, len, owner)?;
-    Ok(OwnedReadBufferRegistration { id, start })
+    let reg = register_owned_buffer(OwnedBufferDirection::Read, start, len, owner)?;
+    Ok(OwnedReadBufferRegistration { _inner: reg })
 }
 
 /// Claims a registered range for one direct block read.
@@ -334,8 +437,8 @@ pub unsafe fn register_owned_write_buffer<T>(
 where
     T: Any + Send + Sync,
 {
-    let (id, start) = register_owned_buffer(OwnedBufferDirection::Write, start, len, owner)?;
-    Ok(OwnedWriteBufferRegistration { id, start })
+    let reg = register_owned_buffer(OwnedBufferDirection::Write, start, len, owner)?;
+    Ok(OwnedWriteBufferRegistration { _inner: reg })
 }
 
 /// Claims a registered range for one direct block write.
@@ -508,6 +611,62 @@ where
     }
 }
 
+/// Runs in-kernel verification of the sharded DMA buffer registry.
+pub fn run_owned_dma_guest_checks() -> Result<(), &'static str> {
+    log::info!("[DMA_GUEST] Starting sharded DMA buffer registry checks...");
+
+    struct GuestOwner {
+        data: Box<[u8]>,
+    }
+    let owner1 = Arc::new(GuestOwner {
+        data: alloc::vec![0x5a; 128].into_boxed_slice(),
+    });
+    let ptr1 = NonNull::new(owner1.data.as_ptr() as *mut u8).ok_or("null ptr")?;
+
+    // 1. Single registration and subrange claim
+    let reg1 = unsafe {
+        register_owned_read_buffer(ptr1, 128, owner1.clone()).map_err(|_| "reg1 failed")?
+    };
+    assert!(OWNED_DMA_BUFFER_COUNT.load(Ordering::Acquire) >= 1);
+
+    let subrange1 = NonNull::slice_from_raw_parts(
+        NonNull::new(unsafe { ptr1.as_ptr().add(16) }).ok_or("null subrange")?,
+        32,
+    );
+    let lease1 = claim_owned_read_buffer(subrange1).ok_or("lease1 claim failed")?;
+    assert_eq!(lease1.len(), 32);
+    // Double claim must fail
+    assert!(claim_owned_read_buffer(subrange1).is_none());
+
+    // Release lease
+    drop(lease1);
+    // Can claim again after release
+    let lease1_again = claim_owned_read_buffer(subrange1).ok_or("lease1 re-claim failed")?;
+    drop(lease1_again);
+
+    // Drop registration
+    drop(reg1);
+    // Claim after unregister must fail
+    assert!(claim_owned_read_buffer(subrange1).is_none());
+
+    // 2. Multi-shard independent registrations and concurrent claims
+    let owner2 = Arc::new(GuestOwner {
+        data: alloc::vec![0xa5; 128].into_boxed_slice(),
+    });
+    let ptr2 = NonNull::new(owner2.data.as_ptr() as *mut u8).ok_or("null ptr")?;
+    let reg_w = unsafe {
+        register_owned_write_buffer(ptr2, 128, owner2.clone()).map_err(|_| "reg_w failed")?
+    };
+    let w_sub = NonNull::slice_from_raw_parts(ptr2, 64);
+    let w_lease = claim_owned_write_buffer(w_sub).ok_or("w_lease claim failed")?;
+    assert_eq!(w_lease.len(), 64);
+    drop(w_lease);
+    drop(reg_w);
+
+    log::info!("[DMA_GUEST] All sharded DMA buffer checks PASSED!");
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     extern crate std;
@@ -650,5 +809,42 @@ mod tests {
             unsafe { register_owned_read_buffer(ptr, 0, owner) },
             Err(DevError::InvalidParam)
         ));
+    }
+
+    #[test]
+    fn sharded_registry_allows_independent_concurrent_claims() {
+        let (owner1, ptr1, _) = test_owner(128);
+        let (owner2, ptr2, _) = test_owner(128);
+
+        let reg1 = unsafe {
+            register_owned_read_buffer(ptr1, 128, owner1).expect("reg1 failed")
+        };
+        let reg2 = unsafe {
+            register_owned_write_buffer(ptr2, 128, owner2).expect("reg2 failed")
+        };
+
+        let lease1 = claim_owned_read_buffer(NonNull::slice_from_raw_parts(ptr1, 64))
+            .expect("lease1 claim failed");
+        let lease2 = claim_owned_write_buffer(NonNull::slice_from_raw_parts(ptr2, 64))
+            .expect("lease2 claim failed");
+
+        assert_eq!(lease1.len(), 64);
+        assert_eq!(lease2.len(), 64);
+
+        drop(lease1);
+        drop(lease2);
+        drop(reg1);
+        drop(reg2);
+    }
+
+    #[test]
+    fn cross_shard_boundary_buffer_registration() {
+        // Construct a buffer spanning across a 2MB chunk boundary:
+        // Chunk boundary at e.g. 2 * 1024 * 1024 = 0x200000.
+        // We test with ShardList directly to ensure chunk spanning logic.
+        let list = ShardList::for_range((1 << SHARD_SHIFT) - 64, (1 << SHARD_SHIFT) + 64);
+        assert_eq!(list.len, 2);
+        assert_eq!(list.as_slice()[0], 0);
+        assert_eq!(list.as_slice()[1], 1);
     }
 }

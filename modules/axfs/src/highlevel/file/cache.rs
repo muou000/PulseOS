@@ -863,6 +863,116 @@ impl ContiguousPageGroup {
     }
 }
 
+/// Capacity of the reusable continuous DMA page pool for writeback.
+const WRITEBACK_POOL_CAPACITY: usize = 4;
+
+struct WritebackBufferPool {
+    buffers: spin::Mutex<Vec<Arc<ContiguousPageGroup>>>,
+}
+
+impl WritebackBufferPool {
+    const fn new() -> Self {
+        Self {
+            buffers: spin::Mutex::new(Vec::new()),
+        }
+    }
+
+    fn acquire(&self, page_count: usize) -> Option<Arc<ContiguousPageGroup>> {
+        let mut pool = self.buffers.lock();
+        // Best-fit selection: pick the smallest buffer that satisfies page_count
+        let mut best_idx = None;
+        let mut best_pages = usize::MAX;
+        for (idx, group) in pool.iter().enumerate() {
+            if group.pages >= page_count && Arc::strong_count(group) == 1 && group.pages < best_pages {
+                best_pages = group.pages;
+                best_idx = Some(idx);
+            }
+        }
+        best_idx.map(|idx| pool.swap_remove(idx))
+    }
+
+    fn release(&self, group: Arc<ContiguousPageGroup>) {
+        if Arc::strong_count(&group) > 2 {
+            return;
+        }
+        let mut pool = self.buffers.lock();
+        if pool.len() < WRITEBACK_POOL_CAPACITY {
+            pool.push(group);
+        }
+    }
+
+    fn drain(&self) {
+        let mut pool = self.buffers.lock();
+        pool.clear();
+    }
+
+    fn len(&self) -> usize {
+        self.buffers.lock().len()
+    }
+}
+
+static WRITEBACK_BUFFER_POOL: WritebackBufferPool = WritebackBufferPool::new();
+
+/// Drains all pooled continuous writeback DMA buffers under memory pressure.
+pub fn drain_writeback_buffer_pool() {
+    WRITEBACK_BUFFER_POOL.drain();
+}
+
+/// A single segment in a physical scatter-gather list for zero-copy DMA writeback.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WritebackSgEntry {
+    /// Physical base address of the frame.
+    pub paddr: PhysAddr,
+    /// Length of valid dirty data within this frame (usually PAGE_SIZE, or smaller for EOF).
+    pub len: usize,
+    /// Logical page number within the cached file.
+    pub page_num: u32,
+}
+
+/// A collection of scatter-gather segments representing dirty frames that can be
+/// directly written out via DMA without intermediate snapshot copies.
+#[derive(Debug, Clone, Default)]
+pub struct WritebackSgList {
+    entries: Vec<WritebackSgEntry>,
+    total_len: usize,
+}
+
+impl WritebackSgList {
+    /// Creates an empty scatter-gather writeback descriptor list.
+    pub fn new() -> Self {
+        Self {
+            entries: Vec::new(),
+            total_len: 0,
+        }
+    }
+
+    /// Appends a physical segment to the scatter-gather list.
+    pub fn push(&mut self, entry: WritebackSgEntry) {
+        self.total_len += entry.len;
+        self.entries.push(entry);
+    }
+
+    /// Returns the number of scatter-gather segments in this list.
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    /// Returns whether this scatter-gather list is empty.
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
+    /// Returns the total bytes spanned by all segments.
+    pub fn total_len(&self) -> usize {
+        self.total_len
+    }
+
+    /// Returns a slice of the scatter-gather entries.
+    pub fn entries(&self) -> &[WritebackSgEntry] {
+        &self.entries
+    }
+}
+
 /// A writeback snapshot uses contiguous pages when possible so VirtIO can
 /// claim it as an owned DMA source. A normal `Vec` remains a safe fallback
 /// when the page allocator cannot provide one contiguous group.
@@ -875,9 +985,44 @@ enum WritebackData {
     Bounce(Vec<u8>),
 }
 
+impl Drop for WritebackData {
+    fn drop(&mut self) {
+        if let Self::Direct {
+            group,
+            _registration,
+            ..
+        } = self
+        {
+            drop(_registration.take());
+            if Arc::strong_count(group) == 1 {
+                WRITEBACK_BUFFER_POOL.release(group.clone());
+            }
+        }
+    }
+}
+
 impl WritebackData {
     fn new(page_count: usize, expected_len: usize) -> Self {
-        match ContiguousPageGroup::new(page_count) {
+        if let Some(group) = WRITEBACK_BUFFER_POOL.acquire(page_count) {
+            return Self::Direct {
+                group,
+                len: 0,
+                _registration: None,
+            };
+        }
+
+        // Tiered allocation: small batches allocate small buffers (e.g. 16 pages),
+        // larger batches allocate larger buffers up to MAX_WRITEBACK_PAGES (256 pages).
+        let alloc_pages = if page_count <= 16 {
+            16
+        } else if page_count <= 64 {
+            64
+        } else {
+            page_count.max(MAX_WRITEBACK_PAGES)
+        };
+        let group_res = ContiguousPageGroup::new(alloc_pages)
+            .or_else(|_| ContiguousPageGroup::new(page_count));
+        match group_res {
             Ok(group) => Self::Direct {
                 group,
                 len: 0,
@@ -935,6 +1080,10 @@ struct PageCacheFrame {
 }
 
 impl PageCacheFrame {
+    pub fn paddr(&self) -> PhysAddr {
+        virt_to_phys(self.addr)
+    }
+
     fn should_dealloc_paddr(paddr: PhysAddr) -> bool {
         if let Some(ref_count) = axalloc::frame_table().try_get_ref(paddr) {
             if ref_count == 0 {
@@ -1037,6 +1186,13 @@ impl PageCache {
 
     pub fn paddr(&self) -> PhysAddr {
         virt_to_phys(self.frame.addr)
+    }
+
+    /// Returns true if this dirty page has no active writable user-space mapping,
+    /// meaning its data cannot be modified concurrently during writeback without passing
+    /// through write() (which increments content_generation).
+    pub fn can_zero_copy_writeback(&self) -> bool {
+        !self.may_write_mapping || !self.has_user_mapping()
     }
 
     pub fn mark_dirty(&mut self) {
@@ -3553,6 +3709,75 @@ impl axmm::FileMappingSource for CachedFile {
     }
 }
 
+/// Returns whether all dirty pages in this batch are eligible for zero-copy
+/// scatter-gather writeback (i.e. none have active writable user mappings).
+pub fn can_zero_copy_batch(pages: &[WritebackPage]) -> bool {
+    !pages.is_empty() && pages.iter().all(|p| !p.compare_contents)
+}
+
+/// Collects scatter-gather physical frame entries for non-writable-mapped dirty pages.
+/// Returns `None` if any page in the batch has an active writable mapping (which
+/// requires whole-batch snapshot comparison for crash and concurrency consistency).
+pub fn collect_zero_copy_sg_entries(pages: &[WritebackPage]) -> Option<WritebackSgList> {
+    if !can_zero_copy_batch(pages) {
+        return None;
+    }
+    let mut sg = WritebackSgList::new();
+    for p in pages {
+        sg.push(WritebackSgEntry {
+            paddr: p.frame.paddr(),
+            len: p.len,
+            page_num: p.page_num,
+        });
+    }
+    Some(sg)
+}
+
+/// Runs in-kernel verification of sharded DMA buffer registration, writeback buffer pooling,
+/// and SG writeback structures.
+pub fn run_dma_and_writeback_guest_checks() -> Result<(), &'static str> {
+    // 1. Sharded DMA buffer registry checks
+    axdriver::prelude::run_owned_dma_guest_checks()?;
+
+    // 2. Writeback buffer pool & SG descriptor checks
+    log::info!("[WB_POOL_GUEST] Starting writeback buffer pool & SG descriptor checks...");
+
+    let mut data1 = WritebackData::new(16, 16 * PAGE_SIZE);
+    assert!(data1.is_empty());
+
+    let sample = [0x5cu8; 4096];
+    data1.push_from_slice(&sample).map_err(|_| "push failed")?;
+    assert!(!data1.is_empty());
+    data1.finish_snapshot();
+    let bytes = data1.bytes().map_err(|_| "bytes failed")?;
+    assert_eq!(&bytes[..4096], &sample);
+
+    drop(data1);
+    assert_eq!(WRITEBACK_BUFFER_POOL.len(), 1);
+
+    let data2 = WritebackData::new(8, 8 * PAGE_SIZE);
+    assert_eq!(WRITEBACK_BUFFER_POOL.len(), 0); // Reused pooled buffer
+    drop(data2);
+    assert_eq!(WRITEBACK_BUFFER_POOL.len(), 1);
+
+    let mut sg = WritebackSgList::new();
+    sg.push(WritebackSgEntry {
+        paddr: 0x8000_0000.into(),
+        len: 4096,
+        page_num: 0,
+    });
+    sg.push(WritebackSgEntry {
+        paddr: 0x8000_1000.into(),
+        len: 4096,
+        page_num: 1,
+    });
+    assert_eq!(sg.len(), 2);
+    assert_eq!(sg.total_len(), 8192);
+
+    log::info!("[WB_POOL_GUEST] All writeback pool & SG descriptor checks PASSED!");
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use alloc::{boxed::Box, sync::Arc, vec::Vec};
@@ -4145,5 +4370,52 @@ mod tests {
         assert_eq!(registry.states.len(), 2);
         registry.sweep_dead();
         assert!(registry.states.is_empty());
+    }
+
+    #[test]
+    fn writeback_buffer_pool_recycling() {
+        WRITEBACK_BUFFER_POOL.drain();
+        assert_eq!(WRITEBACK_BUFFER_POOL.len(), 0);
+
+        {
+            let mut data = WritebackData::new(8, 8 * PAGE_SIZE);
+            assert!(data.is_empty());
+            data.push_from_slice(&[1, 2, 3, 4]).unwrap();
+            assert!(!data.is_empty());
+            data.finish_snapshot();
+            assert_eq!(&data.bytes().unwrap()[..4], &[1, 2, 3, 4]);
+        }
+        assert_eq!(WRITEBACK_BUFFER_POOL.len(), 1);
+
+        {
+            let data = WritebackData::new(8, 8 * PAGE_SIZE);
+            assert_eq!(WRITEBACK_BUFFER_POOL.len(), 0);
+            drop(data);
+        }
+        assert_eq!(WRITEBACK_BUFFER_POOL.len(), 1);
+        WRITEBACK_BUFFER_POOL.drain();
+    }
+
+    #[test]
+    fn writeback_sg_list_operations() {
+        let mut sg = WritebackSgList::new();
+        assert!(sg.is_empty());
+        assert_eq!(sg.total_len(), 0);
+
+        sg.push(WritebackSgEntry {
+            paddr: 0x1000.into(),
+            len: 4096,
+            page_num: 0,
+        });
+        sg.push(WritebackSgEntry {
+            paddr: 0x2000.into(),
+            len: 2048,
+            page_num: 1,
+        });
+
+        assert_eq!(sg.len(), 2);
+        assert_eq!(sg.total_len(), 6144);
+        assert_eq!(sg.entries()[0].paddr, 0x1000.into());
+        assert_eq!(sg.entries()[1].len, 2048);
     }
 }
