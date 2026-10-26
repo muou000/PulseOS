@@ -2,6 +2,13 @@ use alloc::vec::Vec;
 
 use axerrno::{AxError, AxResult};
 use memory_addr::PAGE_SIZE_4K;
+pub use pulse_user_abi::{
+    AbiByteBuffer, AbiDecodeError, AbiReader, AbiWriter, FromUserAbi, IntoUserAbi, UserAbiType,
+    UserMemoryRange, abi_size_of, checked_abi_array_size, decode_from_bytes, encode_into_slice,
+    encode_to_buffer, impl_user_abi_enum, impl_user_abi_fixed_array, impl_user_abi_struct,
+    read_user_array_with, read_user_slice_with, read_user_value_with, write_user_slice_with,
+    write_user_value_partial_with, write_user_value_with,
+};
 
 use super::Process;
 use crate::config::{USER_SPACE_BASE, USER_SPACE_SIZE};
@@ -9,15 +16,14 @@ use crate::config::{USER_SPACE_BASE, USER_SPACE_SIZE};
 pub const DEFAULT_USER_CSTRING_MAX: usize = 4096;
 const USER_CSTRING_READ_CHUNK: usize = 256;
 const USER_SPACE_END: usize = USER_SPACE_BASE + USER_SPACE_SIZE;
+pub const USER_MEMORY_RANGE: UserMemoryRange =
+    match UserMemoryRange::new(USER_SPACE_BASE, USER_SPACE_SIZE) {
+        Some(range) => range,
+        None => panic!("USER_SPACE_BASE + USER_SPACE_SIZE overflowed"),
+    };
 
 const fn user_range_is_valid(user_addr: usize, len: usize) -> bool {
-    if len == 0 {
-        return true;
-    }
-    let Some(end) = user_addr.checked_add(len) else {
-        return false;
-    };
-    user_addr >= USER_SPACE_BASE && end <= USER_SPACE_END
+    USER_MEMORY_RANGE.contains(user_addr, len)
 }
 
 const _: () = {
@@ -30,11 +36,7 @@ const _: () = {
 };
 
 pub fn validate_user_range(user_addr: usize, len: usize) -> AxResult<()> {
-    if user_range_is_valid(user_addr, len) {
-        Ok(())
-    } else {
-        Err(AxError::BadAddress)
-    }
+    USER_MEMORY_RANGE.validate(user_addr, len)
 }
 
 #[cfg(target_arch = "riscv64")]
@@ -105,6 +107,21 @@ pub fn copy_to_user(dst_user_addr: usize, src: &[u8]) -> AxResult<()> {
     }
 }
 
+pub fn copy_from_user_value<T: FromUserAbi>(src_user_addr: usize) -> AxResult<T> {
+    read_user_value_with(src_user_addr, |addr, dst| copy_from_user_partial(dst, addr))
+}
+
+pub fn copy_to_user_value_partial<T: IntoUserAbi>(
+    dst_user_addr: usize,
+    value: &T,
+) -> AxResult<usize> {
+    write_user_value_partial_with(dst_user_addr, value, copy_to_user_partial)
+}
+
+pub fn copy_to_user_value<T: IntoUserAbi>(dst_user_addr: usize, value: &T) -> AxResult<()> {
+    write_user_value_with(dst_user_addr, value, copy_to_user_partial)
+}
+
 fn read_user_cstring_bytes_with(
     user_addr: usize,
     max_len: usize,
@@ -163,6 +180,78 @@ pub fn read_user_cstring_bytes(
     })
 }
 
+pub fn read_user_value<T: FromUserAbi>(process: &Process, user_addr: usize) -> AxResult<T> {
+    read_user_value_with(user_addr, |addr, dst| {
+        process.read_user_bytes_partial(addr, dst)
+    })
+}
+
+pub fn write_user_value_partial<T: IntoUserAbi>(
+    process: &Process,
+    user_addr: usize,
+    value: &T,
+) -> AxResult<usize> {
+    write_user_value_partial_with(user_addr, value, |addr, src| {
+        process.write_user_bytes_partial(addr, src)
+    })
+}
+
+pub fn write_user_value<T: IntoUserAbi>(
+    process: &Process,
+    user_addr: usize,
+    value: &T,
+) -> AxResult<()> {
+    write_user_value_with(user_addr, value, |addr, src| {
+        process.write_user_bytes_partial(addr, src)
+    })
+}
+
+fn validate_abi_array_range<T: UserAbiType>(
+    process: &Process,
+    user_addr: usize,
+    count: usize,
+) -> AxResult<()> {
+    let total_bytes = checked_abi_array_size::<T>(count)?;
+    if total_bytes > 0 {
+        process.validate_user_range(user_addr, total_bytes)?;
+    }
+    Ok(())
+}
+
+pub fn read_user_value_slice<T: FromUserAbi>(
+    process: &Process,
+    user_addr: usize,
+    dst: &mut [T],
+) -> AxResult<()> {
+    validate_abi_array_range::<T>(process, user_addr, dst.len())?;
+    read_user_slice_with(user_addr, dst, |addr, bytes| {
+        process.read_user_bytes_partial(addr, bytes)
+    })
+}
+
+pub fn read_user_value_array<T: FromUserAbi>(
+    process: &Process,
+    user_addr: usize,
+    count: usize,
+) -> AxResult<Vec<T>> {
+    validate_abi_array_range::<T>(process, user_addr, count)?;
+    read_user_array_with(user_addr, count, |addr, bytes| {
+        process.read_user_bytes_partial(addr, bytes)
+    })
+}
+
+pub fn write_user_value_array<T: IntoUserAbi>(
+    process: &Process,
+    user_addr: usize,
+    values: &[T],
+) -> AxResult<()> {
+    write_user_slice_with(user_addr, values, |addr, bytes| {
+        process.write_user_bytes_partial(addr, bytes)
+    })
+}
+
+/// Legacy unvalidated `Copy` reader retained while per-family syscalls migrate
+/// to [`read_user_value`] (`#157` / `#159`).
 pub fn read_user_plain<T: Copy>(process: &Process, user_addr: usize) -> AxResult<T> {
     let mut value = core::mem::MaybeUninit::<T>::uninit();
     let bytes = unsafe {
@@ -172,6 +261,8 @@ pub fn read_user_plain<T: Copy>(process: &Process, user_addr: usize) -> AxResult
     Ok(unsafe { value.assume_init() })
 }
 
+/// Legacy unvalidated `Copy` writer retained while per-family syscalls migrate
+/// to [`write_user_value`] (`#158` / `#159`).
 pub fn write_user_plain<T: Copy>(process: &Process, user_addr: usize, value: &T) -> AxResult<()> {
     let bytes = unsafe {
         core::slice::from_raw_parts((value as *const T).cast::<u8>(), core::mem::size_of::<T>())
@@ -183,6 +274,8 @@ pub fn write_user_bytes(process: &Process, user_addr: usize, bytes: &[u8]) -> Ax
     process.write_user_bytes(user_addr, bytes)
 }
 
+/// Legacy unvalidated `Copy` array reader retained while per-family syscalls
+/// migrate to [`read_user_value_array`] (`#157` / `#159`).
 pub fn read_user_plain_array<T: Copy>(
     process: &Process,
     user_addr: usize,
@@ -203,6 +296,8 @@ pub fn read_user_plain_array<T: Copy>(
     Ok(out)
 }
 
+/// Legacy unvalidated `Copy` array writer retained while per-family syscalls
+/// migrate to [`write_user_value_array`] (`#158` / `#159`).
 pub fn write_user_plain_array<T: Copy>(
     process: &Process,
     user_addr: usize,

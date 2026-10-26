@@ -2067,6 +2067,7 @@ dependencies = [
  "memory_addr",
  "percpu",
  "pulse_bpf_schema",
+ "pulse_user_abi",
  "spin 0.10.0",
  "starry-vdso",
  "xmas-elf",
@@ -2097,6 +2098,7 @@ dependencies = [
  "memory_addr",
  "pulse_bpf_schema",
  "pulse_core",
+ "pulse_user_abi",
  "rand_core 0.10.1",
  "rand_pcg",
  "sbi-rt",
@@ -2104,6 +2106,14 @@ dependencies = [
  "spin 0.10.0",
  "starry-vdso",
  "syscalls",
+]
+
+[[package]]
+name = "pulse_user_abi"
+version = "0.1.0"
+dependencies = [
+ "axerrno",
+ "linux-raw-sys",
 ]
 
 [[package]]

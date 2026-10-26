@@ -16,4 +16,5 @@ pub(crate) mod signal;
 pub(crate) mod system;
 pub(crate) mod time;
 pub(crate) mod timer;
+pub(crate) mod user_abi;
 pub(crate) mod wait;

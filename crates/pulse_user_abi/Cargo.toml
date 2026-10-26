@@ -1,0 +1,12 @@
+[package]
+name = "pulse_user_abi"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Validity-safe user-space ABI codec boundary for PulseOS scalars and structures"
+
+[dependencies]
+axerrno.workspace = true
+linux-raw-sys = { workspace = true, features = ["system", "prctl", "mempolicy", "elf_uapi"] }
