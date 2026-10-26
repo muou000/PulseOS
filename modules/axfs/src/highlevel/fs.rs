@@ -274,8 +274,8 @@ impl FsContext {
         self.check_traverse_permission(&dir).await?;
         if let Some(name) = name {
             Ok((dir, Cow::Borrowed(name)))
-        } else if let Some(parent) = dir.parent() {
-            Ok((parent, Cow::Owned(dir.name().to_owned())))
+        } else if let Some((parent, name)) = dir.parent_and_name() {
+            Ok((parent, Cow::Owned(name.into_owned())))
         } else {
             Err(VfsError::InvalidInput)
         }
@@ -349,17 +349,17 @@ impl FsContext {
     /// Removes a file from the filesystem.
     pub async fn remove_file(&self, path: impl AsRef<Path>) -> VfsResult<()> {
         let entry = self.resolve_no_follow(path.as_ref()).await?;
-        let parent = entry.parent().ok_or(VfsError::IsADirectory)?;
+        let (parent, name) = entry.parent_and_name().ok_or(VfsError::IsADirectory)?;
         self.check_write_permission(&parent).await?;
-        parent.unlink(entry.name(), false).await
+        parent.unlink(&name, false).await
     }
 
     /// Removes a directory from the filesystem.
     pub async fn remove_dir(&self, path: impl AsRef<Path>) -> VfsResult<()> {
         let entry = self.resolve_no_follow(path.as_ref()).await?;
-        let parent = entry.parent().ok_or(VfsError::IsADirectory)?;
+        let (parent, name) = entry.parent_and_name().ok_or(VfsError::IsADirectory)?;
         self.check_write_permission(&parent).await?;
-        parent.unlink(entry.name(), true).await
+        parent.unlink(&name, true).await
     }
 
     /// Renames a file or directory to a new name, replacing the original file

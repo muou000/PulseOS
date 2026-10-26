@@ -500,6 +500,7 @@ dependencies = [
  "cfg-if",
  "hashbrown 0.16.1",
  "inherit-methods-macro",
+ "kernel_guard",
  "kspin",
  "log",
  "smallvec",
