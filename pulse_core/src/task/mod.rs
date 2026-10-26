@@ -1,6 +1,7 @@
 mod aspace_lock;
 pub mod exec;
 mod process;
+mod process_registry;
 mod signal;
 mod thread;
 pub mod uaccess;
@@ -21,6 +22,10 @@ pub use process::{
     ChildWaitResult, CloneParams, ForkParams, MAX_POSIX_TIMER_COUNT, Process, WaitidStatusType,
     run_futex_guest_checks,
 };
+pub use process_registry::{
+    PROCESS_REGISTRY_SHARDS, ShardedProcessRegistry, process_shard_index,
+    run_process_registry_guest_checks,
+};
 pub use signal::{
     DefaultSignalAction, SIG_DFL, SIG_IGN, SIGRTMIN, SigAction, SignalAction, SignalAltStack,
     SignalDelivery, SignalQueueError, SignalShared, ThreadSignal,
@@ -32,55 +37,11 @@ pub use signal::{
     queue_signal_to_thread_with_info_strict, resolve_action, signal_info_for_child,
     signal_info_for_fault,
 };
-use spin::{Lazy, RwLock};
+use spin::Lazy;
 pub use thread::{SignalMaskGuard, Thread, ThreadHandle};
 
-/// An IRQ-safe map with concurrent readers and exclusive writers.
-///
-/// Disabling preemption and local interrupts prevents an IRQ reader from
-/// deadlocking on a writer interrupted on the same CPU.
-struct IrqSafeRwMap<K, V> {
-    inner: RwLock<HashMap<K, V>>,
-}
-
-impl<K, V> IrqSafeRwMap<K, V>
-where
-    K: Eq + core::hash::Hash,
-{
-    fn new() -> Self {
-        Self {
-            inner: RwLock::new(HashMap::new()),
-        }
-    }
-
-    fn get(&self, key: &K) -> Option<V>
-    where
-        V: Clone,
-    {
-        let _guard = NoPreemptIrqSave::new();
-        self.inner.read().get(key).cloned()
-    }
-
-    fn snapshot_values(&self) -> Vec<V>
-    where
-        V: Clone,
-    {
-        let _guard = NoPreemptIrqSave::new();
-        self.inner.read().values().cloned().collect()
-    }
-
-    fn insert(&self, key: K, value: V) {
-        let _guard = NoPreemptIrqSave::new();
-        self.inner.write().insert(key, value);
-    }
-
-    fn remove(&self, key: &K) -> Option<V> {
-        let _guard = NoPreemptIrqSave::new();
-        self.inner.write().remove(key)
-    }
-}
-
-static PROCESS_REGISTRY: Lazy<IrqSafeRwMap<u64, Arc<Process>>> = Lazy::new(IrqSafeRwMap::new);
+static PROCESS_REGISTRY: Lazy<ShardedProcessRegistry<Arc<Process>>> =
+    Lazy::new(ShardedProcessRegistry::new);
 
 /// Serializes job-control state that must agree across session/PGID mutations,
 /// process lifecycle transitions, and a child's transition through exec.
@@ -251,6 +212,7 @@ pub fn process_by_pid(pid: u64) -> Option<Arc<Process>> {
 pub fn processes_snapshot() -> Vec<Arc<Process>> {
     let mut procs = PROCESS_REGISTRY.snapshot_values();
     procs.sort_by_key(|p| p.pid());
+    procs.dedup_by_key(|p| p.pid());
     procs
 }
 
