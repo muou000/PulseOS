@@ -54,7 +54,11 @@ impl<H: Hal, T: Transport> DisplayDriverOps for VirtIoGpuDev<H, T> {
         self.info
     }
 
-    fn fb(&self) -> FrameBuffer<'_> {
+    fn fb(&mut self) -> FrameBuffer<'_> {
+        // SAFETY: `self.info.fb_base_vaddr` points to the device-mapped framebuffer of length
+        // `self.info.fb_size` initialized during device setup. The exclusive borrow (`&mut self`)
+        // guarantees that no other mutable reference or overlapping framebuffer slice can be
+        // created or accessed while this `FrameBuffer` is held.
         unsafe {
             FrameBuffer::from_raw_parts_mut(self.info.fb_base_vaddr as *mut u8, self.info.fb_size)
         }
