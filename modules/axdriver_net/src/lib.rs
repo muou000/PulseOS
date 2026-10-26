@@ -100,8 +100,26 @@ pub struct NetBufPtr {
 }
 
 impl NetBufPtr {
-    /// Create a new [`NetBufPtr`].
-    pub fn new(raw_ptr: NonNull<u8>, buf_ptr: NonNull<u8>, len: usize) -> Self {
+    /// Internal constructor for network drivers and buffer pools.
+    ///
+    /// # Safety / Invariants
+    ///
+    /// Internal callers within this crate must guarantee that `buf_ptr` points to valid
+    /// memory of at least `len` bytes for the entire lifetime of this `NetBufPtr`, and that
+    /// `raw_ptr` uniquely represents the original backing object.
+    ///
+    /// Validates pointer arithmetic and slice length invariants:
+    /// - `len <= isize::MAX as usize`
+    /// - `(buf_ptr as usize).checked_add(len)` does not overflow the address space.
+    pub(crate) fn new(raw_ptr: NonNull<u8>, buf_ptr: NonNull<u8>, len: usize) -> Self {
+        assert!(
+            len <= isize::MAX as usize,
+            "packet length {len} exceeds isize::MAX"
+        );
+        assert!(
+            (buf_ptr.as_ptr() as usize).checked_add(len).is_some(),
+            "packet buffer pointer + len overflows address space"
+        );
         Self {
             raw_ptr,
             buf_ptr,
@@ -110,8 +128,13 @@ impl NetBufPtr {
     }
 
     /// Return raw pointer of the original object.
-    pub fn raw_ptr<T>(&self) -> *mut T {
+    pub(crate) fn raw_ptr<T>(&self) -> *mut T {
         self.raw_ptr.as_ptr() as *mut T
+    }
+
+    /// Return the packet buffer pointer.
+    pub(crate) fn buf_ptr(&self) -> NonNull<u8> {
+        self.buf_ptr
     }
 
     /// Return [`NetBufPtr`] buffer len.
@@ -127,5 +150,11 @@ impl NetBufPtr {
     /// Return [`NetBufPtr`] buffer as &mut [u8].
     pub fn packet_mut(&mut self) -> &mut [u8] {
         unsafe { core::slice::from_raw_parts_mut(self.buf_ptr.as_ptr(), self.len) }
+    }
+}
+
+impl From<NetBufBox> for NetBufPtr {
+    fn from(buf: NetBufBox) -> Self {
+        buf.into_buf_ptr()
     }
 }

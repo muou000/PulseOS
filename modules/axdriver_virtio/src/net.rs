@@ -119,7 +119,10 @@ impl<H: Hal, T: Transport, const QS: usize> NetDriverOps for VirtIoNetDev<H, T, 
     }
 
     fn recycle_rx_buffer(&mut self, rx_buf: NetBufPtr) -> DevResult {
+        // SAFETY: `rx_buf` was produced by `into_buf_ptr()` in `Self::receive()` and has
+        // been returned by the network stack without duplication or metadata modification.
         let mut rx_buf = unsafe { NetBuf::from_buf_ptr(rx_buf) };
+        rx_buf.reset();
         // Safe because we take the ownership of `rx_buf` back to `rx_buffers`,
         // it lives as long as the queue.
         let new_token = unsafe {
@@ -154,6 +157,8 @@ impl<H: Hal, T: Transport, const QS: usize> NetDriverOps for VirtIoNetDev<H, T, 
 
     fn transmit(&mut self, tx_buf: NetBufPtr) -> DevResult {
         // 0. prepare tx buffer.
+        // SAFETY: `tx_buf` was allocated in `alloc_tx_buffer()` via `NetBuf::into_buf_ptr()`.
+        // Ownership is uniquely returned here for transmission, maintaining layout and matching pointers.
         let tx_buf = unsafe { NetBuf::from_buf_ptr(tx_buf) };
         // 1. transmit packet.
         let token = unsafe {
@@ -176,8 +181,7 @@ impl<H: Hal, T: Transport, const QS: usize> NetDriverOps for VirtIoNetDev<H, T, 
                     .receive_complete(token, rx_buf.raw_buf_mut())
                     .map_err(as_dev_err)?
             };
-            rx_buf.set_header_len(hdr_len);
-            rx_buf.set_packet_len(pkt_len);
+            rx_buf.set_header_and_packet_len(hdr_len, pkt_len);
 
             Ok(rx_buf.into_buf_ptr())
         } else {
