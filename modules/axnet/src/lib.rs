@@ -31,7 +31,7 @@ cfg_if::cfg_if! {
     }
 }
 
-pub use self::net_impl::TcpSocket;
+pub use self::net_impl::{run_tcp_endpoint_concurrency_checks, TcpSocket};
 pub use self::net_impl::UdpSocket;
 pub use self::net_impl::IcmpSocket;
 pub use self::net_impl::{
