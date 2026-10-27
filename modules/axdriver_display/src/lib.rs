@@ -35,7 +35,10 @@ impl<'a> FrameBuffer<'a> {
     ///
     /// # Safety
     ///
-    /// Caller must ensure that the given memory region is valid and accessible.
+    /// Caller must ensure that:
+    /// - `ptr` is valid and accessible for reads and writes for `len` bytes.
+    /// - `len <= isize::MAX as usize`.
+    /// - No other pointer or reference to this memory region is accessed or aliased for the duration of `'a`.
     pub unsafe fn from_raw_parts_mut(ptr: *mut u8, len: usize) -> Self {
         Self {
             raw: unsafe { core::slice::from_raw_parts_mut(ptr, len) },
@@ -78,7 +81,22 @@ pub trait DisplayDriverOps: BaseDriverOps {
     fn info(&self) -> DisplayInfo;
 
     /// Get the framebuffer.
-    fn fb(&self) -> FrameBuffer<'_>;
+    ///
+    /// # Safety and Exclusivity
+    ///
+    /// Obtaining mutable access to the framebuffer requires exclusive (`&mut self`)
+    /// access to the device driver. This ensures that callers cannot hold two
+    /// overlapping mutable framebuffer views simultaneously.
+    ///
+    /// ```compile_fail
+    /// use axdriver_display::DisplayDriverOps;
+    /// fn cannot_hold_overlapping_views<D: DisplayDriverOps>(dev: &mut D) {
+    ///     let fb1 = dev.fb();
+    ///     let fb2 = dev.fb();
+    ///     let _ = (fb1, fb2);
+    /// }
+    /// ```
+    fn fb(&mut self) -> FrameBuffer<'_>;
 
     /// Whether need to flush the framebuffer to the screen.
     fn need_flush(&self) -> bool;
@@ -127,11 +145,8 @@ mod tests {
             self.info
         }
 
-        fn fb(&self) -> FrameBuffer<'_> {
-            FrameBuffer::from_slice(unsafe {
-                let ptr = self.buffer.as_ptr() as *mut u8;
-                core::slice::from_raw_parts_mut(ptr, self.buffer.len())
-            })
+        fn fb(&mut self) -> FrameBuffer<'_> {
+            FrameBuffer::from_slice(&mut self.buffer)
         }
 
         fn need_flush(&self) -> bool {
@@ -180,11 +195,32 @@ mod tests {
 
         let mut fb = dev.fb();
         fb[0] = 42;
+        drop(fb);
         assert_eq!(dev.buffer[0], 42);
 
         assert_eq!(dev.flush_count, 0);
         assert!(dev.flush().is_ok());
         assert_eq!(dev.flush_count, 1);
+    }
+
+    #[test]
+    fn test_sequential_framebuffer_mutations() {
+        let mut dev = MockGpuDriver::new();
+
+        // Mutate first byte via initial exclusive borrow
+        let mut fb1 = dev.fb();
+        fb1[0] = 100;
+        drop(fb1);
+
+        // A second exclusive borrow is permitted only after dropping the first,
+        // observing prior mutations and applying new ones.
+        let mut fb2 = dev.fb();
+        assert_eq!(fb2[0], 100);
+        fb2[1] = 200;
+        drop(fb2);
+
+        assert_eq!(dev.buffer[0], 100);
+        assert_eq!(dev.buffer[1], 200);
     }
 }
 
