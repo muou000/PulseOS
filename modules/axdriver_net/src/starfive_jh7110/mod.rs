@@ -320,9 +320,16 @@ impl<H: DmaOps> DmaRegion<H> {
             .checked_add(DMA_REGION_SIZE as u64)
             .ok_or(DevError::InvalidParam)?;
         if end > DMA_ADDR_LIMIT {
+            // SAFETY:
+            // Contract from `DmaOps::dealloc_pages`: requires `vaddr` and `paddr` to match an earlier
+            // allocation of `num_pages`. Discharged because `(vaddr, paddr)` was just returned by
+            // `H::alloc_pages` with `DMA_REGION_PAGES` pages.
+            // Postcondition: the pages are returned to the system allocator and must not be accessed again.
             unsafe { H::dealloc_pages(vaddr, paddr, DMA_REGION_PAGES) };
             return Err(DevError::Unsupported);
         }
+        // SAFETY: `vaddr` is non-null and valid for writes of `DMA_REGION_PAGES * PAGE_SIZE`
+        // bytes as returned by `H::alloc_pages`.
         unsafe { core::ptr::write_bytes(vaddr.as_ptr(), 0, DMA_REGION_PAGES * PAGE_SIZE) };
         H::dma_sync(paddr, DMA_REGION_PAGES * PAGE_SIZE);
         Ok(Self {
@@ -333,17 +340,26 @@ impl<H: DmaOps> DmaRegion<H> {
     }
 
     fn vaddr_at(&self, offset: usize) -> *mut u8 {
-        debug_assert!(offset < DMA_REGION_SIZE);
+        assert!(offset < DMA_REGION_SIZE, "vaddr_at: offset out of bounds");
+        // SAFETY: `self.vaddr` points to an allocation of `DMA_REGION_PAGES * PAGE_SIZE >= DMA_REGION_SIZE`
+        // bytes. `offset < DMA_REGION_SIZE` ensures the resulting pointer is strictly within the allocated
+        // bounds without address-space wraparound.
         unsafe { self.vaddr.as_ptr().add(offset) }
     }
 
     const fn paddr_at(&self, offset: usize) -> u64 {
+        assert!(offset < DMA_REGION_SIZE, "paddr_at: offset out of bounds");
         self.paddr + offset as u64
     }
 }
 
 impl<H: DmaOps> Drop for DmaRegion<H> {
     fn drop(&mut self) {
+        // SAFETY:
+        // Contract from `DmaOps::dealloc_pages`: requires `vaddr` and `paddr` to match an earlier
+        // allocation of `num_pages`. Discharged because `self.vaddr` and `self.paddr` were allocated
+        // by `H::alloc_pages` with `DMA_REGION_PAGES` in `DmaRegion::allocate()`.
+        // Postcondition: `DmaRegion` is being dropped, relinquishing ownership; pages are deallocated.
         unsafe { H::dealloc_pages(self.vaddr, self.paddr, DMA_REGION_PAGES) };
     }
 }
@@ -361,7 +377,9 @@ pub struct Jh7110Dwmac<H: DmaOps> {
     force_threshold_dma_mode: bool,
     descriptor_cache_enable: bool,
     promiscuous_mode: bool,
+    // Safety invariant: `rx_index < RX_DESC_COUNT` at all times, ensuring valid ring bounds and slot indexing.
     rx_index: usize,
+    // Safety invariant: `tx_index < TX_DESC_COUNT` at all times, ensuring valid ring bounds and slot indexing.
     tx_index: usize,
     interrupt: Jh7110InterruptEndpoint,
 }
@@ -449,28 +467,50 @@ impl<H: DmaOps> Jh7110Dwmac<H> {
         Err(DevError::Io)
     }
 
+    /// Returns the virtual pointer to the RX descriptor at `index`.
+    ///
+    /// # Safety-usable invariant
+    ///
+    /// The returned pointer belongs to the fixed DMA RX descriptor ring within `self.dma`.
+    /// Runtime bounds checking guarantees `index < RX_DESC_COUNT`.
+    /// The pointer is non-null, aligned to 16 bytes (`RX_RING_OFFSET == 0`, `DESC_SIZE == 16`),
+    /// and points to valid writable memory of at least `DESC_SIZE` (16 bytes).
     fn rx_desc_ptr(&self, index: usize) -> *mut DmaDesc {
+        assert!(index < RX_DESC_COUNT, "rx_desc_ptr: index out of bounds");
         self.dma.vaddr_at(RX_RING_OFFSET + index * DESC_SIZE).cast()
     }
 
+    /// Returns the virtual pointer to the TX descriptor at `index`.
+    ///
+    /// # Safety-usable invariant
+    ///
+    /// The returned pointer belongs to the fixed DMA TX descriptor ring within `self.dma`.
+    /// Runtime bounds checking guarantees `index < TX_DESC_COUNT`.
+    /// The pointer is non-null, aligned to 16 bytes (`TX_RING_OFFSET` is 64-byte aligned, `DESC_SIZE == 16`),
+    /// and points to valid writable memory of at least `DESC_SIZE` (16 bytes).
     fn tx_desc_ptr(&self, index: usize) -> *mut DmaDesc {
+        assert!(index < TX_DESC_COUNT, "tx_desc_ptr: index out of bounds");
         self.dma.vaddr_at(TX_RING_OFFSET + index * DESC_SIZE).cast()
     }
 
     const fn rx_desc_paddr(&self, index: usize) -> u64 {
+        assert!(index < RX_DESC_COUNT, "rx_desc_paddr: index out of bounds");
         self.dma.paddr_at(RX_RING_OFFSET + index * DESC_SIZE)
     }
 
     const fn tx_desc_paddr(&self, index: usize) -> u64 {
+        assert!(index < TX_DESC_COUNT, "tx_desc_paddr: index out of bounds");
         self.dma.paddr_at(TX_RING_OFFSET + index * DESC_SIZE)
     }
 
     const fn rx_buffer_paddr(&self, index: usize) -> u64 {
+        assert!(index < RX_DESC_COUNT, "rx_buffer_paddr: index out of bounds");
         self.dma
             .paddr_at(RX_BUFFER_OFFSET + index * DMA_BUFFER_SIZE)
     }
 
     const fn tx_buffer_paddr(&self, index: usize) -> u64 {
+        assert!(index < TX_DESC_COUNT, "tx_buffer_paddr: index out of bounds");
         self.dma
             .paddr_at(TX_BUFFER_OFFSET + index * DMA_BUFFER_SIZE)
     }
@@ -482,9 +522,31 @@ impl<H: DmaOps> Jh7110Dwmac<H> {
             } else {
                 DmaDesc::empty()
             };
+            // SAFETY:
+            // Contract from `DmaDesc::write`:
+            // 1. Fixed ring & Range: `index < RX_DESC_COUNT`, so `self.rx_desc_ptr(index)` points to slot
+            //    `index` of the fixed RX ring in `self.dma`. The 16-byte slot is strictly within `self.dma`
+            //    without address wraparound.
+            // 2. Alignment: `RX_RING_OFFSET` is 0 and `self.dma.vaddr` is page-aligned (4096), so the pointer
+            //    is 16-byte aligned (`core::mem::align_of::<DmaDesc>() == 16`).
+            // 3. Initialization: The memory was zeroed upon `DmaRegion::allocate()`, and all 4 words are overwritten.
+            // 4. DMA ownership: The controller is currently stopped/in reset; CPU has exclusive ownership of all slots.
+            // 5. Cache synchronization: Flushed to physical memory via `H::dma_sync(self.dma.paddr, RX_BUFFER_OFFSET)`
+            //    after the release barrier below, prior to DMA engine start.
+            // 6. No-alias: Executed during driver initialization before the device is exposed or shared.
             unsafe { desc.write(self.rx_desc_ptr(index)) };
         }
         for index in 0..TX_DESC_COUNT {
+            // SAFETY:
+            // Contract from `DmaDesc::write`:
+            // 1. Fixed ring & Range: `index < TX_DESC_COUNT`, so `self.tx_desc_ptr(index)` points to slot
+            //    `index` of the fixed TX ring in `self.dma`. The 16-byte slot is strictly within `self.dma`
+            //    without address wraparound.
+            // 2. Alignment: `TX_RING_OFFSET` is 64-byte aligned (a multiple of 16), ensuring 16-byte alignment.
+            // 3. Initialization: Destination memory is writable in `self.dma`.
+            // 4. DMA ownership: Controller is stopped/in reset; CPU has exclusive ownership of all TX slots.
+            // 5. Cache synchronization: Synchronized via release fence and `H::dma_sync` below before DMA engine start.
+            // 6. No-alias: Executed during driver initialization with exclusive CPU access.
             unsafe { DmaDesc::empty().write(self.tx_desc_ptr(index)) };
         }
         fence(Ordering::Release);
@@ -746,8 +808,36 @@ impl<H: DmaOps> Jh7110Dwmac<H> {
         H::dma_sync(tx_desc_paddr, DESC_SIZE);
         H::dma_sync(last_tx_desc_paddr, DESC_SIZE);
         fence(Ordering::Acquire);
+        // SAFETY:
+        // Contract from `DmaDesc::read`:
+        // 1. Fixed ring & Range: `self.rx_index < RX_DESC_COUNT`. `self.rx_desc_ptr(self.rx_index)` points to
+        //    a slot in the fixed RX ring within `self.dma`, valid for reads of 16 bytes without wraparound.
+        // 2. Alignment: 16-byte aligned as guaranteed by `rx_desc_ptr()`.
+        // 3. Initialization: Initialized during `initialize_rings()` / frame receipt.
+        // 4. DMA ownership: Diagnostic sampling of current RX descriptor state. Read is an ownership-polling
+        //    inspection of volatile status bits; non-status fields are not relied upon if DMA-owned.
+        // 5. Cache synchronization: Preceded by `H::dma_sync(rx_desc_paddr, DESC_SIZE)` and `fence(Ordering::Acquire)`.
+        // 6. No-alias: Volatile read-only inspection; no concurrent CPU mutable borrow (`&mut`) aliases this memory.
         let rx_desc = unsafe { DmaDesc::read(self.rx_desc_ptr(self.rx_index)) };
+        // SAFETY:
+        // Contract from `DmaDesc::read`:
+        // 1. Fixed ring & Range: `self.tx_index < TX_DESC_COUNT`. `self.tx_desc_ptr(self.tx_index)` points to
+        //    a slot in the fixed TX ring within `self.dma`, valid for reads of 16 bytes without wraparound.
+        // 2. Alignment: 16-byte aligned as guaranteed by `tx_desc_ptr()`.
+        // 3. Initialization: Initialized during `initialize_rings()`.
+        // 4. DMA ownership: Diagnostic sampling of current TX slot; only status/control words are captured.
+        // 5. Cache synchronization: Preceded by `H::dma_sync(tx_desc_paddr, DESC_SIZE)` and `fence(Ordering::Acquire)`.
+        // 6. No-alias: Volatile read-only inspection; no concurrent CPU mutable borrow aliases this memory.
         let tx_desc = unsafe { DmaDesc::read(self.tx_desc_ptr(self.tx_index)) };
+        // SAFETY:
+        // Contract from `DmaDesc::read`:
+        // 1. Fixed ring & Range: `last_tx_index < TX_DESC_COUNT`. `self.tx_desc_ptr(last_tx_index)` points to
+        //    a slot in the fixed TX ring within `self.dma`, valid for reads of 16 bytes without wraparound.
+        // 2. Alignment: 16-byte aligned as guaranteed by `tx_desc_ptr()`.
+        // 3. Initialization: Initialized during `initialize_rings()` / `transmit()`.
+        // 4. DMA ownership: Diagnostic sampling of the last submitted TX descriptor to inspect completion state.
+        // 5. Cache synchronization: Preceded by `H::dma_sync(last_tx_desc_paddr, DESC_SIZE)` and `fence(Ordering::Acquire)`.
+        // 6. No-alias: Volatile read-only inspection; no concurrent CPU mutable borrow aliases this memory.
         let last_tx_desc = unsafe { DmaDesc::read(self.tx_desc_ptr(last_tx_index)) };
         Jh7110Diagnostics {
             dma_mode: self.read(DMA_MODE),
@@ -813,6 +903,18 @@ impl<H: DmaOps> NetDriverOps for Jh7110Dwmac<H> {
         let completed_index = (self.tx_index + TX_DESC_COUNT - 1) % TX_DESC_COUNT;
         H::dma_sync(self.tx_desc_paddr(completed_index), DESC_SIZE);
         fence(Ordering::Acquire);
+        // SAFETY:
+        // Contract from `DmaDesc::read`:
+        // 1. Fixed ring & Range: `completed_index < TX_DESC_COUNT` (modulo arithmetic).
+        //    `self.tx_desc_ptr(completed_index)` points to slot `completed_index` in the fixed TX ring
+        //    within `self.dma`, valid for 16 contiguous bytes without wraparound.
+        // 2. Alignment: 16-byte aligned as guaranteed by `tx_desc_ptr()`.
+        // 3. Initialization: Written by `initialize_rings()` or previous `transmit()`.
+        // 4. DMA ownership: Ownership-polling read inspecting `desc.owned_by_dma()` (the `OWN` bit).
+        //    If `owned_by_dma()` is false, hardware has finished the transmission and relinquished ownership to CPU.
+        // 5. Cache synchronization: Preceded by `H::dma_sync(tx_desc_paddr(completed_index), DESC_SIZE)`
+        //    and `fence(Ordering::Acquire)`.
+        // 6. No-alias: Volatile read; no concurrent CPU mutable borrow aliases this memory.
         let desc = unsafe { DmaDesc::read(self.tx_desc_ptr(completed_index)) };
         if desc.owned_by_dma() {
             false
@@ -829,6 +931,17 @@ impl<H: DmaOps> NetDriverOps for Jh7110Dwmac<H> {
 
         H::dma_sync(self.rx_desc_paddr(self.rx_index), DESC_SIZE);
         fence(Ordering::Acquire);
+        // SAFETY:
+        // Contract from `DmaDesc::read`:
+        // 1. Fixed ring & Range: `self.rx_index < RX_DESC_COUNT`. `self.rx_desc_ptr(self.rx_index)`
+        //    points to slot `self.rx_index` in the fixed RX ring within `self.dma`, valid for 16 bytes.
+        // 2. Alignment: 16-byte aligned as guaranteed by `rx_desc_ptr()`.
+        // 3. Initialization: Initialized during `initialize_rings()` or refilled by `receive()`.
+        // 4. DMA ownership: Ownership-polling read inspecting `desc.owned_by_dma()`. If `owned_by_dma()`
+        //    is false, hardware has completed frame reception and relinquished ownership to CPU.
+        // 5. Cache synchronization: Preceded by `H::dma_sync(rx_desc_paddr(self.rx_index), DESC_SIZE)`
+        //    and `fence(Ordering::Acquire)`.
+        // 6. No-alias: Volatile read; no concurrent CPU mutable borrow aliases this memory.
         let desc = unsafe { DmaDesc::read(self.rx_desc_ptr(self.rx_index)) };
         if desc.owned_by_dma() {
             false
@@ -874,6 +987,11 @@ impl<H: DmaOps> NetDriverOps for Jh7110Dwmac<H> {
 
         let index = self.tx_index;
         let buffer_paddr = self.tx_buffer_paddr(index);
+        // SAFETY:
+        // 1. `tx_buf.packet()` points to `packet_len` valid, initialized bytes.
+        // 2. `self.dma.vaddr_at(TX_BUFFER_OFFSET + index * DMA_BUFFER_SIZE)` points to a dedicated
+        //    TX buffer of size `DMA_BUFFER_SIZE >= packet_len` in `self.dma`.
+        // 3. The source and destination memory buffers are distinct and do not overlap.
         unsafe {
             core::ptr::copy_nonoverlapping(
                 tx_buf.packet().as_ptr(),
@@ -887,6 +1005,19 @@ impl<H: DmaOps> NetDriverOps for Jh7110Dwmac<H> {
         // to return the buffer to `self.buffer_pool`.
         drop(unsafe { NetBuf::from_buf_ptr(tx_buf) });
         H::dma_sync(buffer_paddr, packet_len);
+        // SAFETY:
+        // Contract from `DmaDesc::write`:
+        // 1. Fixed ring & Range: `index < TX_DESC_COUNT`. `self.tx_desc_ptr(index)` points to slot
+        //    `index` in the fixed TX descriptor ring within `self.dma`, valid for 16 bytes without wraparound.
+        // 2. Alignment: 16-byte aligned as guaranteed by `tx_desc_ptr()`.
+        // 3. Initialization: Slot is writable memory in `self.dma`.
+        // 4. DMA ownership: Calling `can_transmit()` verified above guarantees that either `tx_busy` is false
+        //    or the previous packet at `completed_index` has completed, meaning the CPU owns slot `index`.
+        //    Hardware is not reading or writing slot `index`. Writing `DmaDesc::tx` sets the `OWN` bit,
+        //    transferring ownership to hardware only after the write and subsequent fence/dma_sync complete.
+        // 5. Cache synchronization: Followed immediately by `fence(Ordering::Release)` and
+        //    `H::dma_sync(self.tx_desc_paddr(index), DESC_SIZE)` before updating `DMA_CH0_TX_TAIL`.
+        // 6. No-alias: `&mut self` guarantees exclusive single-thread access to the device and descriptor ring.
         unsafe { DmaDesc::tx(buffer_paddr, packet_len).write(self.tx_desc_ptr(index)) };
         fence(Ordering::Release);
         H::dma_sync(self.tx_desc_paddr(index), DESC_SIZE);
@@ -905,6 +1036,17 @@ impl<H: DmaOps> NetDriverOps for Jh7110Dwmac<H> {
         let desc_paddr = self.rx_desc_paddr(index);
         H::dma_sync(desc_paddr, DESC_SIZE);
         fence(Ordering::Acquire);
+        // SAFETY:
+        // Contract from `DmaDesc::read`:
+        // 1. Fixed ring & Range: `index < RX_DESC_COUNT`. `self.rx_desc_ptr(index)` points to slot
+        //    `index` in the fixed RX descriptor ring within `self.dma`, valid for 16 bytes without wraparound.
+        // 2. Alignment: 16-byte aligned as guaranteed by `rx_desc_ptr()`.
+        // 3. Initialization: Initialized during ring setup or prior refill.
+        // 4. DMA ownership: Checked via `desc.owned_by_dma()`. If `true`, ownership remains with DMA and
+        //    we return `Again`. If `false`, hardware completed reception, surrendered ownership to CPU,
+        //    and packet length/status fields are stable for CPU consumption.
+        // 5. Cache synchronization: Preceded by `H::dma_sync(desc_paddr, DESC_SIZE)` and `fence(Ordering::Acquire)`.
+        // 6. No-alias: `&mut self` guarantees exclusive single-thread access; no concurrent CPU borrows exist.
         let desc = unsafe { DmaDesc::read(self.rx_desc_ptr(index)) };
         if desc.owned_by_dma() {
             self.interrupt.0.rx_ready.store(false, Ordering::Release);
@@ -919,6 +1061,11 @@ impl<H: DmaOps> NetDriverOps for Jh7110Dwmac<H> {
                     H::dma_sync(buffer_paddr, packet_len);
                     fence(Ordering::Acquire);
                     net_buf.set_packet_len(packet_len);
+                    // SAFETY:
+                    // 1. DMA buffer at `RX_BUFFER_OFFSET + index * DMA_BUFFER_SIZE` contains `packet_len`
+                    //    bytes written by the device and synchronized above.
+                    // 2. `net_buf.packet_mut()` has capacity `>= packet_len`.
+                    // 3. Source and destination buffers reside in separate allocations and do not overlap.
                     unsafe {
                         core::ptr::copy_nonoverlapping(
                             self.dma
@@ -937,6 +1084,18 @@ impl<H: DmaOps> NetDriverOps for Jh7110Dwmac<H> {
         let next_index = (index + 1) % RX_DESC_COUNT;
         let next_buffer_paddr = self.rx_buffer_paddr(next_index);
         H::dma_sync(next_buffer_paddr, DMA_BUFFER_SIZE);
+        // SAFETY:
+        // Contract from `DmaDesc::write`:
+        // 1. Fixed ring & Range: `next_index < RX_DESC_COUNT`. `self.rx_desc_ptr(next_index)` points to slot
+        //    `next_index` in the fixed RX descriptor ring within `self.dma`, valid for 16 bytes without wraparound.
+        // 2. Alignment: 16-byte aligned as guaranteed by `rx_desc_ptr()`.
+        // 3. Initialization: Destination memory is writable in `self.dma`.
+        // 4. DMA ownership: Under the driver's single-packet RX queue model, `next_index` is idle and owned
+        //    by the CPU until this write arms it with `OWN | RX_IOC | RX_BUFFER1_VALID`. Hardware will only
+        //    begin receiving into this slot after the write and subsequent fence/dma_sync and tail update.
+        // 5. Cache synchronization: Followed by `fence(Ordering::Release)` and
+        //    `H::dma_sync(self.rx_desc_paddr(next_index), DESC_SIZE)` before updating `DMA_CH0_RX_TAIL`.
+        // 6. No-alias: `&mut self` guarantees exclusive single-thread access to the driver and descriptor ring.
         unsafe { DmaDesc::rx(next_buffer_paddr).write(self.rx_desc_ptr(next_index)) };
         fence(Ordering::Release);
         H::dma_sync(self.rx_desc_paddr(next_index), DESC_SIZE);
@@ -1299,9 +1458,13 @@ mod tests {
     #[test]
     fn polling_detects_rx_writeback_without_interrupt() {
         let test = test_device();
+        // SAFETY: Slot 0 belongs to the mock test device's fixed RX ring (`0 < RX_DESC_COUNT`),
+        // is 16-byte aligned, and is exclusively owned by this test thread without active DMA.
         unsafe { DmaDesc::rx(test.device.rx_buffer_paddr(0)).write(test.device.rx_desc_ptr(0)) };
         assert!(!test.device.can_receive());
 
+        // SAFETY: Slot 0 belongs to the fixed RX ring, is 16-byte aligned, and is exclusively
+        // owned by this test thread. Simulates CPU reclamation after frame receipt.
         unsafe { DmaDesc::empty().write(test.device.rx_desc_ptr(0)) };
         assert!(test.device.can_receive());
         assert!(test.device.interrupt.0.rx_ready.load(Ordering::Acquire));
@@ -1311,6 +1474,8 @@ mod tests {
     #[test]
     fn polling_reclaims_tx_without_interrupt() {
         let mut test = test_device();
+        // SAFETY: Slot 0 belongs to the fixed TX ring (`0 < TX_DESC_COUNT`), is 16-byte aligned,
+        // and is exclusively owned by this test thread.
         unsafe {
             DmaDesc::tx(test.device.tx_buffer_paddr(0), 64).write(test.device.tx_desc_ptr(0))
         };
@@ -1322,6 +1487,8 @@ mod tests {
             .store(true, Ordering::Release);
         assert!(!test.device.can_transmit());
 
+        // SAFETY: Slot 0 belongs to the fixed TX ring, is 16-byte aligned, and is exclusively
+        // owned by this test thread. Simulates DMA completion writeback.
         unsafe { DmaDesc::empty().write(test.device.tx_desc_ptr(0)) };
         assert!(test.device.can_transmit());
         assert!(!test.device.interrupt.0.tx_busy.load(Ordering::Acquire));
@@ -1332,6 +1499,11 @@ mod tests {
         let mut test = test_device();
         test.device.initialize_rings();
         let payload = [0xa5; 64];
+        // SAFETY:
+        // 1. `payload` contains 64 valid bytes.
+        // 2. `test.device.dma.vaddr_at(RX_BUFFER_OFFSET)` points to the first RX buffer in `self.dma`.
+        // 3. Slot 0 belongs to the fixed RX ring (`0 < RX_DESC_COUNT`), is 16-byte aligned, and
+        //    exclusively owned by the test thread to simulate DMA completion writeback.
         unsafe {
             core::ptr::copy_nonoverlapping(
                 payload.as_ptr(),
@@ -1345,6 +1517,8 @@ mod tests {
         assert_eq!(packet.packet(), &payload);
         assert_eq!(test.device.rx_index, 1);
         assert!(!test.device.interrupt.0.rx_ready.load(Ordering::Acquire));
+        // SAFETY: Slot 1 belongs to the fixed RX ring (`1 < RX_DESC_COUNT`), is 16-byte aligned,
+        // and is exclusively owned by the test thread.
         let next_desc = unsafe { DmaDesc::read(test.device.rx_desc_ptr(1)) };
         assert!(next_desc.owned_by_dma());
         assert_eq!(
@@ -1363,10 +1537,19 @@ mod tests {
 
         test.device.transmit(packet).unwrap();
 
+        // SAFETY:
+        // Contract from `core::slice::from_raw_parts`:
+        // 1. Pointer validity & range: `test.device.dma.vaddr_at(TX_BUFFER_OFFSET)` points to the TX buffer
+        //    allocated within `self.dma` of size `DMA_BUFFER_SIZE >= payload.len()`.
+        // 2. Alignment: `TX_BUFFER_OFFSET` is 64-byte aligned, satisfying `u8` alignment (1 byte).
+        // 3. Initialization: `payload.len()` bytes were initialized by `core::ptr::copy_nonoverlapping` during `transmit()`.
+        // 4. Aliasing & lifetime: The test thread has exclusive ownership of `test.device`; no concurrent mutation occurs.
         let dma_payload = unsafe {
             core::slice::from_raw_parts(test.device.dma.vaddr_at(TX_BUFFER_OFFSET), payload.len())
         };
         assert_eq!(dma_payload, &payload);
+        // SAFETY: Slot 0 belongs to the fixed TX ring (`0 < TX_DESC_COUNT`), is 16-byte aligned,
+        // and is exclusively owned by the test thread.
         let desc = unsafe { DmaDesc::read(test.device.tx_desc_ptr(0)) };
         assert!(desc.owned_by_dma());
         assert_eq!(desc.words()[2] & 0x3fff, payload.len() as u32);
@@ -1377,6 +1560,34 @@ mod tests {
             test.device.read(DMA_CH0_TX_TAIL),
             test.device.tx_desc_paddr(1) as u32
         );
+    }
+
+    #[test]
+    #[should_panic(expected = "index out of bounds")]
+    fn rx_desc_ptr_rejects_out_of_bounds_index() {
+        let test = test_device();
+        let _ = test.device.rx_desc_ptr(RX_DESC_COUNT);
+    }
+
+    #[test]
+    #[should_panic(expected = "index out of bounds")]
+    fn tx_desc_ptr_rejects_out_of_bounds_index() {
+        let test = test_device();
+        let _ = test.device.tx_desc_ptr(TX_DESC_COUNT);
+    }
+
+    #[test]
+    #[should_panic(expected = "index out of bounds")]
+    fn rx_desc_paddr_rejects_out_of_bounds_index() {
+        let test = test_device();
+        let _ = test.device.rx_desc_paddr(RX_DESC_COUNT);
+    }
+
+    #[test]
+    #[should_panic(expected = "index out of bounds")]
+    fn tx_desc_paddr_rejects_out_of_bounds_index() {
+        let test = test_device();
+        let _ = test.device.tx_desc_paddr(TX_DESC_COUNT);
     }
 
     #[test]

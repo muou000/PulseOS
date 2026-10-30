@@ -20,19 +20,93 @@ pub(crate) struct DmaDesc {
 }
 
 impl DmaDesc {
+    /// Reads a 16-byte DMA descriptor from the given raw pointer via volatile 32-bit word reads.
+    ///
+    /// # Safety
+    ///
+    /// The caller must ensure all of the following preconditions:
+    /// - **Alignment**: `ptr` must be properly aligned to at least a 16-byte boundary
+    ///   (`core::mem::align_of::<DmaDesc>() == 16`).
+    /// - **Range**: `ptr` must be non-null and valid for reads of [`DESC_SIZE`] (16 contiguous bytes,
+    ///   spanning four 32-bit words) within a single live allocation (e.g., the fixed DMA descriptor ring).
+    ///   The memory range `[ptr, ptr + DESC_SIZE)` must not wrap around the address space.
+    /// - **Initialization**: All four 32-bit words (16 bytes) at `ptr` must be fully initialized memory.
+    /// - **DMA ownership**: The caller must satisfy one of:
+    ///   1. The descriptor is owned by the CPU (`OWN` bit is 0), guaranteeing hardware will not mutate
+    ///      the descriptor during or after the read until ownership is surrendered; or
+    ///   2. The caller is performing an ownership-polling read to inspect the descriptor's status word (`words[3]`)
+    ///      to determine whether DMA has completed and cleared `OWN`. In this mode, non-status words must not be
+    ///      treated as stable until CPU ownership is established.
+    /// - **Cache synchronization**: If the memory region backing `ptr` is subject to CPU caching, the caller
+    ///   must have synchronized DMA cache state (e.g., via `DmaOps::dma_sync`) and established acquire
+    ///   ordering (e.g., `core::sync::atomic::fence(Ordering::Acquire)`) prior to reading, ensuring that writes
+    ///   completed by the DMA controller are visible to the CPU.
+    /// - **No-alias conditions**: No concurrent CPU writes and no active mutable Rust references (`&mut`)
+    ///   may alias `*ptr` for the duration of the read operation.
     pub(crate) unsafe fn read(ptr: *const Self) -> Self {
-        Self {
-            words: [
-                unsafe { read_volatile(core::ptr::addr_of!((*ptr).words[0])) },
-                unsafe { read_volatile(core::ptr::addr_of!((*ptr).words[1])) },
-                unsafe { read_volatile(core::ptr::addr_of!((*ptr).words[2])) },
-                unsafe { read_volatile(core::ptr::addr_of!((*ptr).words[3])) },
-            ],
+        debug_assert!(!ptr.is_null(), "DmaDesc::read: null pointer");
+        debug_assert_eq!(
+            ptr as usize % core::mem::align_of::<Self>(),
+            0,
+            "DmaDesc::read: misaligned pointer"
+        );
+        let mut words = [0u32; 4];
+        for (index, word) in words.iter_mut().enumerate() {
+            // SAFETY:
+            // Operation: `read_volatile` on word `index` (`ptr` offset `index * 4`).
+            // Contract: pointer must be valid for reads of `u32`, aligned to 4 bytes, initialized,
+            // and free from concurrent conflicting writes.
+            // 1. Alignment: `ptr` is 16-byte aligned by caller precondition. Offset `index * 4` (0, 4, 8, 12)
+            //    preserves 4-byte alignment required for `u32`.
+            // 2. Range: `ptr` is non-null and valid for 16 contiguous bytes in a single allocation by
+            //    caller precondition. Bytes `index * 4..(index + 1) * 4` are strictly within bounds without wraparound.
+            // 3. Initialization: Caller guarantees all 4 words are initialized memory.
+            // 4. Aliasing: Caller guarantees no concurrent CPU writes or `&mut` aliases exist.
+            *word = unsafe { read_volatile(core::ptr::addr_of!((*ptr).words[index])) };
         }
+        Self { words }
     }
 
+    /// Writes a 16-byte DMA descriptor to the given raw pointer via volatile 32-bit word writes.
+    ///
+    /// # Safety
+    ///
+    /// The caller must ensure all of the following preconditions:
+    /// - **Alignment**: `ptr` must be properly aligned to at least a 16-byte boundary
+    ///   (`core::mem::align_of::<DmaDesc>() == 16`).
+    /// - **Range**: `ptr` must be non-null and valid for writes of [`DESC_SIZE`] (16 contiguous bytes,
+    ///   spanning four 32-bit words) within a single live allocation (e.g., the fixed DMA descriptor ring).
+    ///   The memory range `[ptr, ptr + DESC_SIZE)` must not wrap around the address space.
+    /// - **Initialization**: The memory at `ptr` must be allocated and writable for at least 16 bytes.
+    ///   Pre-initialization is not required because all four words are completely overwritten.
+    /// - **DMA ownership**: The descriptor slot must be owned exclusively by the CPU (i.e. `OWN` bit is 0
+    ///   prior to this write, ensuring the DMA controller is not reading from or writing to this slot).
+    ///   If this write sets the `OWN` bit to hand ownership to hardware, the CPU surrenders ownership
+    ///   only after this function returns and following necessary release fences and cache synchronization.
+    /// - **Cache synchronization**: After writing the descriptor, the caller must issue release ordering
+    ///   (e.g., `core::sync::atomic::fence(Ordering::Release)`) and synchronize DMA caches (e.g., via
+    ///   `DmaOps::dma_sync`) before notifying the hardware controller (e.g., by updating ring tail registers).
+    /// - **No-alias conditions**: The caller must hold exclusive access to `*ptr`. No concurrent CPU reads
+    ///   or writes and no active Rust references (`&` or `&mut`) may alias the destination memory during
+    ///   the write operation.
     pub(crate) unsafe fn write(self, ptr: *mut Self) {
+        debug_assert!(!ptr.is_null(), "DmaDesc::write: null pointer");
+        debug_assert_eq!(
+            ptr as usize % core::mem::align_of::<Self>(),
+            0,
+            "DmaDesc::write: misaligned pointer"
+        );
         for (index, word) in self.words.into_iter().enumerate() {
+            // SAFETY:
+            // Operation: `write_volatile` on word `index` (`ptr` offset `index * 4`).
+            // Contract: pointer must be valid for writes of `u32`, aligned to 4 bytes, and
+            // exclusively accessed (no concurrent aliasing reads or writes).
+            // 1. Alignment: `ptr` is 16-byte aligned by caller precondition. Each word offset
+            //    `index * 4` (0, 4, 8, 12) preserves 4-byte alignment required for `u32`.
+            // 2. Range: `ptr` is non-null and valid for 16 contiguous writable bytes in a single allocation
+            //    by caller precondition. Bytes `index * 4..(index + 1) * 4` are strictly within bounds.
+            // 3. DMA ownership & aliasing: Caller guarantees exclusive CPU ownership; the DMA controller is
+            //    not accessing this slot, and no concurrent CPU threads or aliasing references exist.
             unsafe { write_volatile(core::ptr::addr_of_mut!((*ptr).words[index]), word) };
         }
     }
@@ -150,5 +224,31 @@ mod tests {
         assert_eq!(desc.received_len(), None);
         desc.words[3] = RX_FIRST | 128;
         assert_eq!(desc.received_len(), None);
+    }
+
+    #[test]
+    fn descriptor_read_write_roundtrip_preserves_words_and_ownership() {
+        let mut slot = DmaDesc::empty();
+        let slot_ptr = core::ptr::addr_of_mut!(slot);
+
+        let tx = DmaDesc::tx(0xdead_beef_0000, 1024);
+        // SAFETY: `slot_ptr` points to a 16-byte aligned, live stack allocation of `DmaDesc`,
+        // exclusively owned by this test thread without concurrency or aliasing references.
+        unsafe { tx.write(slot_ptr) };
+
+        // SAFETY: `slot_ptr` points to the same 16-byte aligned, initialized `DmaDesc` allocation,
+        // exclusively owned by this test thread.
+        let read_back = unsafe { DmaDesc::read(slot_ptr) };
+        assert_eq!(read_back.words(), tx.words());
+        assert!(read_back.owned_by_dma());
+
+        let rx = DmaDesc::rx(0x1234_5678);
+        // SAFETY: Same contract as above for write.
+        unsafe { rx.write(slot_ptr) };
+
+        // SAFETY: Same contract as above for read.
+        let read_back_rx = unsafe { DmaDesc::read(slot_ptr) };
+        assert_eq!(read_back_rx.words(), rx.words());
+        assert!(read_back_rx.owned_by_dma());
     }
 }
