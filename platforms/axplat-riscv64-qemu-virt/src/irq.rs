@@ -237,3 +237,14 @@ fn send_ipi_to_cpu(cpu_id: usize) -> Result<(), IpiError> {
         Err(IpiError::Firmware(result.error as isize))
     }
 }
+
+#[impl_plat_interface]
+impl axplat::msix::PciMsixIf for IrqIfImpl {
+    fn allocate_vector() -> Result<axplat::msix::MsixVectorAllocation, axplat::msix::PciMsixError> {
+        Err(axplat::msix::PciMsixError::Unsupported)
+    }
+
+    fn enable_irq(_irq: usize) -> Result<(), axplat::msix::PciMsixError> {
+        Err(axplat::msix::PciMsixError::Unsupported)
+    }
+}

@@ -10,6 +10,7 @@ pub mod init;
 #[cfg(feature = "irq")]
 pub mod irq;
 pub mod mem;
+pub mod msix;
 pub mod power;
 pub mod time;
 pub mod tlb;

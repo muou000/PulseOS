@@ -70,6 +70,11 @@ pub mod tls;
 #[cfg(feature = "irq")]
 pub mod irq;
 
+/// PCI MSI-X platform interface.
+pub mod msix {
+    pub use axplat::msix::*;
+}
+
 #[cfg(feature = "paging")]
 pub mod paging;
 

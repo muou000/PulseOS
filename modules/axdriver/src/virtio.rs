@@ -1601,76 +1601,20 @@ impl<D: VirtIoDevMeta> DriverProbe for VirtIoDriver<D> {
                 let mut irq = 0;
                 let mut msix_success = false;
 
-                #[cfg(target_arch = "loongarch64")]
-                {
-                    // 1. Find MSI-X capability
-                    let mut msix_cap_offset = None;
-                    for cap in root.capabilities(bdf) {
-                        if cap.id == 0x11 {
-                            // MSI-X capability ID is 0x11
-                            msix_cap_offset = Some(cap.offset);
-                            break;
-                        }
+                match crate::virtio_msix::configure_virtio_pci_msix(root, bdf, &mut transport) {
+                    Ok(msi_irq) => {
+                        irq = msi_irq;
+                        msix_success = true;
+                        debug!(
+                            "PCI device at {} configured to use MSI-X (irq {})",
+                            bdf, irq
+                        );
                     }
-
-                    if let Some(offset) = msix_cap_offset {
-                        // 2. Allocate an MSI-X vector in the PCH-MSI range (EIOINTC pins 64..255)
-                        // QEMU pch_msi computes: irq_num = (Msg Data & 0xff) - 64
-                        // so Msg Data must be in [64, 255].
-                        static NEXT_MSI_VECTOR: core::sync::atomic::AtomicUsize =
-                            core::sync::atomic::AtomicUsize::new(64);
-                        let msi_vector =
-                            NEXT_MSI_VECTOR.fetch_add(1, core::sync::atomic::Ordering::SeqCst);
-                        if msi_vector < 256 {
-                            // 3. Configure MSI-X Table
-                            let cap_word0 = root.config_read_word(bdf, offset);
-                            let msg_ctrl = (cap_word0 >> 16) as u16;
-                            let table_word = root.config_read_word(bdf, offset + 4);
-                            let table_bir = (table_word & 0x7) as u8;
-                            let table_offset = (table_word & !0x7) as usize;
-
-                            let bar_info = root.bar_info(bdf, table_bir).unwrap();
-                            if let BarInfo::Memory { address, .. } = bar_info {
-                                let table_paddr = address as usize + table_offset;
-                                let table_vaddr = phys_to_virt(table_paddr.into()).as_usize();
-
-                                // Write Vector 0 entry
-                                // Msg Addr = 0x2ff00000 (PCH-MSI base, correct for loongarch_virt)
-                                // Msg Data = msi_vector (absolute EIOINTC pin number >= 64)
-                                unsafe {
-                                    core::ptr::write_volatile(
-                                        (table_vaddr + 0) as *mut u32,
-                                        0x2ff00000,
-                                    ); // Msg Addr Low (PCH-MSI base)
-                                    core::ptr::write_volatile((table_vaddr + 4) as *mut u32, 0); // Msg Addr High
-                                    core::ptr::write_volatile(
-                                        (table_vaddr + 8) as *mut u32,
-                                        msi_vector as u32,
-                                    ); // Msg Data = EIOINTC pin
-                                    core::ptr::write_volatile((table_vaddr + 12) as *mut u32, 0); // Vector Control (0 = unmasked)
-                                }
-
-                                // 4. Enable MSI-X in device configuration space
-                                let new_msg_ctrl = msg_ctrl | (1 << 15); // Enable bit
-                                let new_cap_word0 =
-                                    (cap_word0 & 0xffff) | ((new_msg_ctrl as u32) << 16);
-                                root.config_write_word(bdf, offset, new_cap_word0);
-
-                                // 5. Bind VirtIO queue/config to MSI-X vector 0
-                                transport.set_config_msix_vector(0);
-                                transport.set_default_queue_msix_vector(0);
-                                transport.set_msix_enabled(true);
-
-                                // IRQ number = EIOINTC pin number directly (no offset)
-                                irq = msi_vector;
-                                msix_success = true;
-                                debug!(
-                                    "PCI device at {} configured to use MSI-X (eiointc_pin {}, \
-                                     irq {})",
-                                    bdf, msi_vector, irq
-                                );
-                            }
-                        }
+                    Err(e) => {
+                        debug!(
+                            "PCI device at {} cannot configure MSI-X ({:?}), falling back to INTx",
+                            bdf, e
+                        );
                     }
                 }
 
