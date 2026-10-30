@@ -1,6 +1,5 @@
 //! Dummy implementation of platform-related interfaces defined in [`axplat`].
 
-#[cfg(feature = "irq")]
 use axplat::impl_plat_interface;
 
 use axplat::console::ConsoleIf;
@@ -18,6 +17,7 @@ struct DummyMem;
 struct DummyTime;
 struct DummyPower;
 struct DummyTlb;
+struct DummyMsix;
 #[cfg(feature = "irq")]
 struct DummyIrq;
 
@@ -141,5 +141,16 @@ impl IrqIf for DummyIrq {
 
     fn send_ipi(_irq: usize, _target: IpiTarget) -> Result<(), IpiError> {
         Err(IpiError::NotSupported)
+    }
+}
+
+#[impl_plat_interface]
+impl axplat::msix::PciMsixIf for DummyMsix {
+    fn allocate_vector() -> Result<axplat::msix::MsixVectorAllocation, axplat::msix::PciMsixError> {
+        Err(axplat::msix::PciMsixError::Unsupported)
+    }
+
+    fn enable_irq(_irq: usize) -> Result<(), axplat::msix::PciMsixError> {
+        Err(axplat::msix::PciMsixError::Unsupported)
     }
 }

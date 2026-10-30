@@ -168,6 +168,17 @@ impl IrqIf for IrqIfImpl {
     }
 }
 
+#[impl_plat_interface]
+impl axplat::msix::PciMsixIf for IrqIfImpl {
+    fn allocate_vector() -> Result<axplat::msix::MsixVectorAllocation, axplat::msix::PciMsixError> {
+        Err(axplat::msix::PciMsixError::Unsupported)
+    }
+
+    fn enable_irq(_irq: usize) -> Result<(), axplat::msix::PciMsixError> {
+        Err(axplat::msix::PciMsixError::Unsupported)
+    }
+}
+
 fn register_local_handler(slot: &AtomicPtr<()>, handler: IrqHandler) -> bool {
     slot.compare_exchange(
         core::ptr::null_mut(),
