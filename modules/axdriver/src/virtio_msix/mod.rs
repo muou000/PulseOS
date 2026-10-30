@@ -4,7 +4,7 @@ pub mod compat;
 
 use axdriver_pci::{BarInfo, DeviceFunction, PciRoot};
 use axhal::msix::{
-    MsixMessage, MsixTableMapping, MsixVectorAllocation, PCI_CAP_ID_MSIX, PciMsixError,
+    MsixTableMapping, MsixVectorAllocation, PCI_CAP_ID_MSIX, PciMsixError,
 };
 use virtio_drivers::transport::pci::PciTransport;
 
@@ -61,7 +61,9 @@ pub fn configure_virtio_pci_msix_with<P: VirtioPciMsixPlatform>(
         }
     }
     let offset = msix_cap_offset.ok_or(PciMsixError::Unsupported)?;
-    if offset > 248 {
+    // In standard 256-byte PCI configuration space, a 12-byte MSI-X capability
+    // structure (3 DWORDs) must fit entirely within the configuration space (offset <= 244).
+    if offset > 244 {
         return Err(PciMsixError::InvalidCapability);
     }
 

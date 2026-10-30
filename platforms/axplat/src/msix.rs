@@ -47,8 +47,13 @@ pub struct MsixTableMapping {
 
 impl MsixTableMapping {
     /// Creates a mapping directly from a pre-mapped virtual address and size.
-    pub fn from_raw_parts(vaddr: usize, size: usize) -> Result<Self, PciMsixError> {
-        if vaddr == 0 || size == 0 {
+    ///
+    /// # Safety
+    ///
+    /// `vaddr` must point to a valid, mapped, readable and writable memory region
+    /// spanning at least `size` bytes. The memory must be aligned to at least 4 bytes.
+    pub unsafe fn from_raw_parts(vaddr: usize, size: usize) -> Result<Self, PciMsixError> {
+        if vaddr == 0 || size == 0 || vaddr % 4 != 0 {
             return Err(PciMsixError::InvalidBar);
         }
         Ok(Self { vaddr, size })
@@ -85,7 +90,25 @@ impl MsixTableMapping {
             .checked_add(table_offset)
             .ok_or(PciMsixError::InvalidBar)?;
         let table_vaddr = crate::mem::phys_to_virt(PhysAddr::from(table_paddr)).as_usize();
-        Self::from_raw_parts(table_vaddr, table_bytes)
+        // SAFETY: `table_vaddr` is translated from a valid non-zero `bar_base_paddr`
+        // and checked `table_offset` (which is 8-byte aligned, thus >= 4-byte aligned).
+        // The region covers `table_bytes` which is guaranteed not to exceed `bar_size`.
+        unsafe { Self::from_raw_parts(table_vaddr, table_bytes) }
+    }
+
+    fn entry_vaddr(&self, index: usize) -> Result<usize, PciMsixError> {
+        let entry_offset = index
+            .checked_mul(16)
+            .ok_or(PciMsixError::InvalidBar)?;
+        let end_offset = entry_offset
+            .checked_add(16)
+            .ok_or(PciMsixError::InvalidBar)?;
+        if end_offset > self.size {
+            return Err(PciMsixError::InvalidBar);
+        }
+        self.vaddr
+            .checked_add(entry_offset)
+            .ok_or(PciMsixError::InvalidBar)
     }
 
     /// Configures an MSI-X table entry with the given message and mask state.
@@ -95,16 +118,10 @@ impl MsixTableMapping {
         message: MsixMessage,
         masked: bool,
     ) -> Result<(), PciMsixError> {
-        let entry_offset = index
-            .checked_mul(16)
-            .ok_or(PciMsixError::InvalidBar)?;
-        if entry_offset + 16 > self.size {
-            return Err(PciMsixError::InvalidBar);
-        }
-        let entry_vaddr = self.vaddr + entry_offset;
-        // SAFETY: `entry_offset + 16 <= self.size` is verified above, guaranteeing that
-        // the 16-byte table entry lies completely within the valid memory-mapped BAR region.
-        // All accesses are aligned 32-bit volatile writes matching the PCI MSI-X specification.
+        let entry_vaddr = self.entry_vaddr(index)?;
+        // SAFETY: `entry_vaddr` is validated within `self.size` and checked for overflow.
+        // The mapped memory corresponds to a valid memory-mapped BAR region, and all accesses
+        // are aligned 32-bit volatile writes matching the PCI MSI-X specification.
         unsafe {
             core::ptr::write_volatile(
                 (entry_vaddr + 0) as *mut u32,
@@ -122,15 +139,9 @@ impl MsixTableMapping {
 
     /// Reads an MSI-X table entry.
     pub fn read_entry(&self, index: usize) -> Result<(MsixMessage, bool), PciMsixError> {
-        let entry_offset = index
-            .checked_mul(16)
-            .ok_or(PciMsixError::InvalidBar)?;
-        if entry_offset + 16 > self.size {
-            return Err(PciMsixError::InvalidBar);
-        }
-        let entry_vaddr = self.vaddr + entry_offset;
-        // SAFETY: `entry_offset + 16 <= self.size` is verified above, ensuring the 16-byte
-        // entry is within the mapped region. All accesses are aligned 32-bit volatile reads.
+        let entry_vaddr = self.entry_vaddr(index)?;
+        // SAFETY: `entry_vaddr` is validated within `self.size` and checked for overflow.
+        // Memory is an aligned 32-bit mapped BAR region.
         unsafe {
             let addr_lo = core::ptr::read_volatile((entry_vaddr + 0) as *const u32) as u64;
             let addr_hi = core::ptr::read_volatile((entry_vaddr + 4) as *const u32) as u64;
@@ -197,18 +208,23 @@ mod tests {
     fn test_msix_table_mapping_from_raw_parts() {
         let mut buffer = [0u32; 8]; // 32 bytes = 2 entries
         let vaddr = buffer.as_mut_ptr() as usize;
-        let mapping = MsixTableMapping::from_raw_parts(vaddr, 32).expect("valid mapping");
+        let mapping = unsafe { MsixTableMapping::from_raw_parts(vaddr, 32) }.expect("valid mapping");
         assert_eq!(mapping.vaddr(), vaddr);
         assert_eq!(mapping.size(), 32);
 
         // Zero address should fail
         assert_eq!(
-            MsixTableMapping::from_raw_parts(0, 32),
+            unsafe { MsixTableMapping::from_raw_parts(0, 32) },
             Err(PciMsixError::InvalidBar)
         );
         // Zero size should fail
         assert_eq!(
-            MsixTableMapping::from_raw_parts(vaddr, 0),
+            unsafe { MsixTableMapping::from_raw_parts(vaddr, 0) },
+            Err(PciMsixError::InvalidBar)
+        );
+        // Unaligned virtual address (not 4-byte aligned) should fail
+        assert_eq!(
+            unsafe { MsixTableMapping::from_raw_parts(vaddr + 1, 32) },
             Err(PciMsixError::InvalidBar)
         );
     }
@@ -217,7 +233,7 @@ mod tests {
     fn test_msix_table_mapping_configure_and_read_entry() {
         let mut buffer = [0u32; 8];
         let vaddr = buffer.as_mut_ptr() as usize;
-        let mapping = MsixTableMapping::from_raw_parts(vaddr, 32).expect("valid mapping");
+        let mapping = unsafe { MsixTableMapping::from_raw_parts(vaddr, 32) }.expect("valid mapping");
 
         let msg0 = MsixMessage {
             address: 0x1_2ff0_0000,
