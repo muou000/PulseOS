@@ -16,6 +16,13 @@ fn rand_pseudo() -> u32 {
     (prev ^ (prev >> 30)) as u32
 }
 
+/// Helper that yields the current task until the target completion count is reached.
+fn wait_until_count(counter: &AtomicU32, target: u32) {
+    while counter.load(Ordering::SeqCst) < target {
+        thread::yield_now();
+    }
+}
+
 /// Verifies basic Mutex acquisition, exclusive guard access, explicit drop paths,
 /// and reentrancy rejection.
 fn test_mutex_basic_and_reentrancy() -> Result<(), &'static str> {
@@ -57,7 +64,12 @@ fn test_mutex_basic_and_reentrancy() -> Result<(), &'static str> {
         !raw.try_lock(),
         "RawMutex::try_lock must reject re-entrant acquisition"
     );
-    // SAFETY: The raw lock was successfully acquired by this task and is held.
+    // SAFETY:
+    // - Precondition 1 (ownership): `raw.try_lock()` succeeded immediately above on this
+    //   same calling task, establishing exclusive ownership with `owner_id == current().id().as_u64()`.
+    // - Precondition 2 (no aliasing references): No guards or derived references were created from
+    //   `raw` (only primitive state checks were run), so no references remain active.
+    // Therefore, calling `unlock()` soundly releases the raw mutex.
     unsafe { raw.unlock() };
     assert!(!raw.is_locked());
 
@@ -94,9 +106,7 @@ fn test_mutex_concurrent_stress() -> Result<(), &'static str> {
         });
     }
 
-    while done_count.load(Ordering::SeqCst) < NUM_TASKS as u32 {
-        thread::yield_now();
-    }
+    wait_until_count(&done_count, NUM_TASKS as u32);
 
     let final_val = *counter.lock();
     assert_eq!(
@@ -236,15 +246,11 @@ fn test_rwlock_concurrent_readers_and_writers() -> Result<(), &'static str> {
     }
 
     // Await all writers
-    while writers_done.load(Ordering::SeqCst) < NUM_WRITERS as u32 {
-        thread::yield_now();
-    }
+    wait_until_count(&writers_done, NUM_WRITERS as u32);
     stop_readers.store(true, Ordering::Release);
 
     // Await all readers
-    while readers_done.load(Ordering::SeqCst) < NUM_READERS as u32 {
-        thread::yield_now();
-    }
+    wait_until_count(&readers_done, NUM_READERS as u32);
 
     let final_val = *data.read();
     assert_eq!(

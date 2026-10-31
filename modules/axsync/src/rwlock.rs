@@ -83,11 +83,17 @@ impl<T: ?Sized> RwLock<T> {
     }
 
     /// Returns `true` if the lock is currently held in write mode.
+    ///
+    /// Primarily intended for diagnostics and lock state assertions in tests.
+    #[doc(hidden)]
     pub fn is_write_locked(&self) -> bool {
         self.state.load(Ordering::Relaxed) == -1
     }
 
     /// Returns the number of active readers currently holding the lock.
+    ///
+    /// Primarily intended for diagnostics and concurrency assertions in tests.
+    #[doc(hidden)]
     pub fn reader_count(&self) -> usize {
         let s = self.state.load(Ordering::Relaxed);
         if s > 0 {
@@ -272,7 +278,7 @@ impl<'a, T: ?Sized> Deref for RwLockReadGuard<'a, T> {
 
 impl<'a, T: ?Sized> Drop for RwLockReadGuard<'a, T> {
     fn drop(&mut self) {
-        // SAFETY / State transition:
+        // Synchronization / State transition:
         // Atomically decrement the reader count with `SeqCst` ordering.
         // `SeqCst` ordering ensures that all reads performed through this guard happen-before
         // any subsequent writer acquires exclusive access.
@@ -304,10 +310,13 @@ unsafe impl<'a, T: ?Sized + Sync> Sync for RwLockWriteGuard<'a, T> {}
 
 // SAFETY:
 // Moving `RwLockWriteGuard` to another task transfers exclusive `&mut T` access.
-// - In Rust, transferring exclusive access to `T` across tasks requires `T: Send`.
+// - In Rust, transferring exclusive mutable access to `T` across tasks requires `T: Send`.
+// - The guard holds a borrowed reference `&'a RwLock<T>`. Sending `&'a RwLock<T>` across
+//   tasks requires `RwLock<T>: Sync`, which in turn requires `T: Send + Sync` (see the `Sync`
+//   impl for `RwLock<T>`).
 // - Dropping the guard on another task atomically clears `state` to 0 with `Release` ordering
 //   and notifies `wq`, which is thread-safe.
-unsafe impl<'a, T: ?Sized + Send> Send for RwLockWriteGuard<'a, T> {}
+unsafe impl<'a, T: ?Sized + Send + Sync> Send for RwLockWriteGuard<'a, T> {}
 
 impl<'a, T: ?Sized> Deref for RwLockWriteGuard<'a, T> {
     type Target = T;
@@ -368,7 +377,7 @@ impl<'a, T: ?Sized> DerefMut for RwLockWriteGuard<'a, T> {
 
 impl<'a, T: ?Sized> Drop for RwLockWriteGuard<'a, T> {
     fn drop(&mut self) {
-        // SAFETY / State transition:
+        // Synchronization / State transition:
         // Atomically release the exclusive write lock by storing 0 with `Release` ordering.
         // `Release` ordering ensures that all mutations performed through `&mut T` happen-before
         // subsequent readers or writers observe `state == 0` with `Acquire`/`SeqCst`.

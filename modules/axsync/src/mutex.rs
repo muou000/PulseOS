@@ -49,8 +49,8 @@ impl RawMutex {
 // 4. Sound Release Contract: `unlock` releases the lock and allows subsequent tasks to acquire it.
 //
 // Evidence:
-// - Atomic State Invariant: `owner_id` represents the current owner. 0 represents unlocked;
-//   non-zero `N` represents exclusive ownership by the task with `TaskId` `N`.
+// - Atomic State Invariant: `owner_id` represents the current owner state. 0 represents unlocked;
+//   non-zero `N` represents exclusive ownership initially acquired by the task with `TaskId` `N`.
 // - In `axtask`, `TaskId` values are generated sequentially starting from 1 (`AtomicU64::new(1)`),
 //   guaranteeing `TaskId != 0` for all live tasks and uniqueness across distinct tasks.
 // - Exclusive acquisition:
@@ -67,10 +67,14 @@ impl RawMutex {
 //     `owner_id != current_id`, preventing recursive deadlocks and aliasing mutable references.
 //     `try_lock()` fails and returns `false` because `owner_id` is already non-zero.
 // - Release and Wakeups:
-//   - `unlock` atomically transitions `owner_id` from `current_id` to 0 with `Ordering::Release`.
-//   - Only the task currently holding the lock may call `unlock` (enforced by the `# Safety`
-//     contract on `unlock()` and verified by atomic `compare_exchange`).
+//   - `unlock` atomically transitions `owner_id` from non-zero to 0 with `Ordering::Release`.
+//   - Only the holder of the unique `MutexGuard` (or legitimate caller satisfying `# Safety`)
+//     may call `unlock`.
 //   - Once `owner_id` becomes 0, `wq.notify_one_with_context` wakes one sleeping waiter.
+// - Guard Transfer:
+//   - `GuardMarker = lock_api::GuardSend` permits sending the `MutexGuard` across tasks (e.g.,
+//     in asynchronous execution across await points). Ownership of the unique guard token transfers
+//     exclusivity permission, and `unlock` soundly releases the lock upon drop.
 //
 // Therefore, `RawMutex` satisfies all safety requirements of `lock_api::RawMutex`.
 unsafe impl lock_api::RawMutex for RawMutex {
@@ -138,36 +142,25 @@ unsafe impl lock_api::RawMutex for RawMutex {
     /// # Safety
     ///
     /// The caller must ensure that:
-    /// 1. The lock is currently held by the calling task (the task whose `TaskId::as_u64()`
-    ///    matches the `owner_id` stored in this mutex).
+    /// 1. The lock is currently held by the caller (ownership was acquired via `lock` or
+    ///    `try_lock`, and the corresponding guard has not yet been unlocked).
     /// 2. No active references (`&T` or `&mut T`) derived from the guard associated with this
-    ///    lock remain in use by the calling task across or after this call.
+    ///    lock remain in use across or after this call.
     #[inline(always)]
     unsafe fn unlock(&self) {
-        let current_id = current().id().as_u64();
-        // SAFETY:
-        // Operation: Atomically release ownership by transitioning `owner_id` from `current_id` to 0.
-        // Contract: The lock must be currently held by `current_id`.
-        // Evidence:
-        // - By this function's `# Safety` precondition, the caller holds the lock.
-        // - We perform `compare_exchange` from `current_id` to 0 with `Ordering::Release`.
-        // - If the precondition holds, `owner_id` is atomically updated to 0, publishing all preceding writes
-        //   to the protected resource to any subsequent locker acquiring with `Ordering::Acquire`.
-        // - If the precondition is violated (caller did not hold the lock), `compare_exchange` fails
-        //   without modifying `owner_id`, preserving the true owner's state, and the assertion panics.
-        // - `self.wq.notify_one_with_context` wakes up one waiting task, ensuring progress.
-        let prev = self.owner_id.compare_exchange(
-            current_id,
-            0,
-            Ordering::Release,
-            Ordering::Relaxed,
-        );
-        assert_eq!(
+        // Synchronization / State transition:
+        // Transition `owner_id` from non-zero to 0 with `Release` ordering.
+        // - Precondition 1 guarantees the lock is held.
+        // - `swap(0)` atomically clears ownership and publishes all writes performed in the
+        //   critical section to any subsequent locker acquiring with `Ordering::Acquire`.
+        // - The assertion verifies that the lock was in fact locked prior to unlock.
+        // - `self.wq.notify_one_with_context` wakes up one waiting task.
+        let prev = self.owner_id.swap(0, Ordering::Release);
+        assert_ne!(
             prev,
-            Ok(current_id),
-            "{} tried to release mutex it doesn't own (actual owner: {:?})",
-            current().id_name(),
-            prev.err()
+            0,
+            "{} tried to release mutex that was not locked",
+            current().id_name()
         );
         self.wq.notify_one_with_context(true, WakeContext::task());
     }
@@ -178,9 +171,29 @@ unsafe impl lock_api::RawMutex for RawMutex {
     }
 }
 
-/// An alias of [`lock_api::Mutex`].
+/// A mutual exclusion primitive based on [`RawMutex`] and [`lock_api::Mutex`].
+///
+/// # Safety and Concurrency Guarantees
+///
+/// - **Interior Mutability**: Wraps protected data `T` inside an `UnsafeCell<T>`.
+/// - **Guard Exclusivity**: `Mutex::lock()` and `Mutex::try_lock()` return a [`MutexGuard`]
+///   which implements [`core::ops::Deref`] and [`core::ops::DerefMut`]. Because `RawMutex`
+///   guarantees mutual exclusion, at most one task can hold a `MutexGuard` at any time,
+///   guaranteeing exclusive, race-free `&mut T` reference access.
+/// - **Thread Safety (`Send` / `Sync`)**:
+///   - `Mutex<T>` implements `Send` when `T: Send`, because transferring ownership of the
+///     mutex moves the underlying `T`.
+///   - `Mutex<T>` implements `Sync` when `T: Send`, because a task with a shared reference
+///     `&Mutex<T>` can acquire exclusive `&mut T` access via `lock()`, allowing values of type
+///     `T` to be mutated or moved out across task boundaries.
+///   - `MutexGuard` is `Send` (`GuardSend`) when `T: Send`, allowing guards to be transferred
+///     across execution contexts (such as across `.await` points in asynchronous tasks).
 pub type Mutex<T> = lock_api::Mutex<RawMutex, T>;
-/// An alias of [`lock_api::MutexGuard`].
+
+/// An RAII implementation of a “scoped lock” of a mutex.
+///
+/// When this structure is dropped (falls out of scope), the lock will be
+/// released.
 pub type MutexGuard<'a, T> = lock_api::MutexGuard<'a, RawMutex, T>;
 
 #[cfg(test)]
