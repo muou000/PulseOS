@@ -27,6 +27,22 @@ const ELF_CACHE_MAX_ENTRIES: usize = 16;
 const AT_RANDOM_BYTES: usize = 16;
 const USER_STACK_ALIGNMENT: usize = 16;
 
+const HWCAP_LOONGARCH_CPUCFG: usize = 1 << 0;
+const HWCAP_LOONGARCH_LAM: usize = 1 << 1;
+const HWCAP_LOONGARCH_UAL: usize = 1 << 2;
+const HWCAP_LOONGARCH_FPU: usize = 1 << 3;
+
+const CPUCFG1_UAL: usize = 1 << 20;
+
+/// Computes the LoongArch ELF AT_HWCAP value given CPUCFG word 1.
+const fn loongarch_hwcap(cpucfg1: usize) -> usize {
+    let mut hwcap = HWCAP_LOONGARCH_CPUCFG | HWCAP_LOONGARCH_LAM | HWCAP_LOONGARCH_FPU;
+    if (cpucfg1 & CPUCFG1_UAL) != 0 {
+        hwcap |= HWCAP_LOONGARCH_UAL;
+    }
+    hwcap
+}
+
 #[cfg(target_arch = "riscv64")]
 const RISCV_HWCAP_ISA_IMAFDC: usize = (1 << 0) // A
     | (1 << 2) // C
@@ -587,10 +603,10 @@ fn build_auxv(
 
     let mut auxv: Vec<AuxEntry> = parser.aux_vector(PAGE_SIZE_4K, interp_base).collect();
     #[cfg(target_arch = "loongarch64")]
-    auxv.push(AuxEntry::new(
-        AuxType::HWCAP,
-        (1 << 0) | (1 << 1) | (1 << 2) | (1 << 3),
-    ));
+    {
+        let cpucfg1 = axcpu::asm::read_cpucfg(1);
+        auxv.push(AuxEntry::new(AuxType::HWCAP, loongarch_hwcap(cpucfg1)));
+    }
     #[cfg(target_arch = "riscv64")]
     auxv.push(AuxEntry::new(AuxType::HWCAP, RISCV_HWCAP_ISA_IMAFDC));
     append_process_auxv(&mut auxv, credentials);
@@ -1060,6 +1076,30 @@ mod tests {
     fn riscv_hardware_capabilities_match_the_rv64gc_kernel_contract() {
         assert_eq!(RISCV_HWCAP_ISA_IMAFDC, 0x112d);
         assert_eq!(RISCV_HWCAP_ISA_IMAFDC & (1 << 21), 0);
+    }
+
+    #[test]
+    fn loongarch_hardware_capabilities_reflect_cpucfg1_ual_and_mask_vector_extensions() {
+        let hwcap_with_ual = loongarch_hwcap(CPUCFG1_UAL);
+        assert_eq!(hwcap_with_ual, 0xf);
+        assert_eq!(hwcap_with_ual & HWCAP_LOONGARCH_UAL, HWCAP_LOONGARCH_UAL);
+        assert_eq!(hwcap_with_ual & !0xf, 0);
+
+        let hwcap_without_ual = loongarch_hwcap(0);
+        assert_eq!(hwcap_without_ual, 0xb);
+        assert_eq!(hwcap_without_ual & HWCAP_LOONGARCH_UAL, 0);
+        assert_eq!(hwcap_without_ual & !0xf, 0);
+
+        let hwcap_all_bits = loongarch_hwcap(!0);
+        assert_eq!(hwcap_all_bits, 0xf);
+        assert_eq!(hwcap_all_bits & !0xf, 0);
+        assert_eq!(hwcap_all_bits & (1 << 4), 0);
+        assert_eq!(hwcap_all_bits & (1 << 5), 0);
+
+        let hwcap_no_ual_extra = loongarch_hwcap(!CPUCFG1_UAL);
+        assert_eq!(hwcap_no_ual_extra, 0xb);
+        assert_eq!(hwcap_no_ual_extra & HWCAP_LOONGARCH_UAL, 0);
+        assert_eq!(hwcap_no_ual_extra & !0xf, 0);
     }
 
     fn read_word(bytes: &[u8], offset: &mut usize) -> usize {

@@ -225,6 +225,12 @@ pub fn enable_lsx() {
     loongArch64::register::euen::set_sxe(true);
 }
 
+/// Reads the CPU configuration register word (`CPUCFG`) at the given index.
+#[inline]
+pub fn read_cpucfg(index: usize) -> usize {
+    loongArch64::cpu::CPUCFG::read(index).get_bits(0, 31)
+}
+
 /// Writes the kernel stack pointer into the custom `KSAVE_KSP` CSR.
 #[cfg(feature = "uspace")]
 pub(crate) fn write_kernel_sp(kernel_sp: usize) {
