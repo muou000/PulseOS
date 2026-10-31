@@ -247,6 +247,7 @@ axruntime.workspace = true
 axfs.workspace = true
 axfeat.workspace = true
 axtask.workspace = true
+axsync.workspace = true
 axnet.workspace = true
 pulse_syscalls.workspace = true
 pulse_core.workspace = true

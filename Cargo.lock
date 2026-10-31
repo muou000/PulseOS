@@ -17,6 +17,7 @@ dependencies = [
  "axplat-riscv64-qemu-virt",
  "axplat-riscv64-visionfive2",
  "axruntime",
+ "axsync",
  "axtask",
  "pulse_core",
  "pulse_syscalls",
@@ -801,6 +802,7 @@ dependencies = [
  "axtask",
  "kspin",
  "lock_api",
+ "log",
  "rand 0.9.5",
  "spin 0.10.0",
 ]
