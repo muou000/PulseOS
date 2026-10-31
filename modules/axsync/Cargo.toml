@@ -16,8 +16,9 @@ default = []
 [dependencies]
 kspin.workspace = true
 lock_api.workspace = true
-axtask.workspace = true
+axtask = { workspace = true }
 spin.workspace = true
+log.workspace = true
 
 [dev-dependencies]
 rand.workspace = true

@@ -11,6 +11,7 @@ extern crate axplat_loongarch64_ls2k1000;
 extern crate axplat_riscv64_visionfive2;
 extern crate axruntime;
 extern crate axnet;
+extern crate axsync;
 extern crate pulse_core;
 extern crate pulse_syscalls;
 extern crate starry_vdso;
@@ -76,6 +77,7 @@ fn main() {
             axalloc::run_pcp_guest_checks().expect("pcp guest checks failed");
             axfs::run_dma_and_writeback_guest_checks().expect("dma & writeback guest checks failed");
             axnet::run_tcp_endpoint_concurrency_checks().expect("tcp endpoint concurrency checks failed");
+            axsync::run_lock_stress_checks().expect("axsync lock stress checks failed");
 
             let shell_args_base: &[&str] = &["sh"];
             let shell_envs: &[&str] = &["PATH=/usr/sbin:/usr/bin:/sbin:/bin"];
