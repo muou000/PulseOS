@@ -14,6 +14,17 @@ mod tests {
     }
 
     #[test]
+    fn perf_hardware_event_ids_match_linux_uapi() {
+        assert_eq!(PERF_COUNT_HW_CPU_CYCLES, 0);
+        assert_eq!(PERF_COUNT_HW_CYCLES, 0);
+        assert_eq!(PERF_COUNT_HW_INSTRUCTIONS, 1);
+        for config in [0, 1] {
+            let attr = sample_attr(PERF_TYPE_HARDWARE, config);
+            assert_eq!(validate_perf_event_attr(&attr, 64), Err(LinuxError::EOPNOTSUPP));
+        }
+    }
+
+    #[test]
     fn perf_event_attr_size_validation() {
         let mut attr = sample_attr(PERF_TYPE_SOFTWARE, PERF_COUNT_SW_CPU_CLOCK);
 

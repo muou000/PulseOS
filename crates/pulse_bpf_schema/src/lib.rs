@@ -540,20 +540,34 @@ pub struct BoundedTraceQueue<const CAP: usize> {
     head: core::sync::atomic::AtomicUsize,
     tail: core::sync::atomic::AtomicUsize,
     in_trace: core::sync::atomic::AtomicBool,
+    in_drain: core::sync::atomic::AtomicBool,
     dropped_full: core::sync::atomic::AtomicU64,
     dropped_recursive: core::sync::atomic::AtomicU64,
     total_enqueued: core::sync::atomic::AtomicU64,
     slots: [core::cell::UnsafeCell<EventRecord>; CAP],
 }
 
+// SAFETY: `in_trace` serializes producers and `in_drain` serializes consumers.
+// Release publication of head/tail and matching Acquire loads keep each slot's
+// initialized record and reuse ordered; callbacks receive a local copy.
 unsafe impl<const CAP: usize> Sync for BoundedTraceQueue<CAP> {}
+
+struct DrainGuard<'a>(&'a core::sync::atomic::AtomicBool);
+
+impl Drop for DrainGuard<'_> {
+    fn drop(&mut self) {
+        self.0.store(false, core::sync::atomic::Ordering::Release);
+    }
+}
 
 impl<const CAP: usize> BoundedTraceQueue<CAP> {
     pub const fn new() -> Self {
+        assert!(CAP.is_power_of_two(), "capacity must be a nonzero power of two");
         Self {
             head: core::sync::atomic::AtomicUsize::new(0),
             tail: core::sync::atomic::AtomicUsize::new(0),
             in_trace: core::sync::atomic::AtomicBool::new(false),
+            in_drain: core::sync::atomic::AtomicBool::new(false),
             dropped_full: core::sync::atomic::AtomicU64::new(0),
             dropped_recursive: core::sync::atomic::AtomicU64::new(0),
             total_enqueued: core::sync::atomic::AtomicU64::new(0),
@@ -609,22 +623,23 @@ impl<const CAP: usize> BoundedTraceQueue<CAP> {
 
     /// Drain up to `max_count` events, invoking `consumer` for each.
     pub fn drain<F: FnMut(TracepointId, &[u8])>(&self, max_count: usize, mut consumer: F) -> usize {
+        use core::sync::atomic::Ordering;
+        if self.in_drain.compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed).is_err() {
+            return 0;
+        }
+        let _guard = DrainGuard(&self.in_drain);
         let mut drained = 0;
-        let mut tail = self.tail.load(core::sync::atomic::Ordering::Relaxed);
-        let head = self.head.load(core::sync::atomic::Ordering::Acquire);
+        let mut tail = self.tail.load(Ordering::Relaxed);
+        let head = self.head.load(Ordering::Acquire);
         let mask = CAP - 1;
 
         while tail != head && drained < max_count {
             let slot = &self.slots[tail & mask];
-            let record = unsafe { &*slot.get() };
-            consumer(record.id, record.as_bytes());
+            let record = unsafe { *slot.get() };
             tail = tail.wrapping_add(1);
+            self.tail.store(tail, Ordering::Release);
             drained += 1;
-        }
-
-        if drained > 0 {
-            self.tail
-                .store(tail, core::sync::atomic::Ordering::Release);
+            consumer(record.id, record.as_bytes());
         }
         drained
     }
@@ -660,7 +675,7 @@ impl<const CAP: usize> BoundedTraceQueue<CAP> {
 
     /// Simulate setting the reentrancy flag (for testing).
     #[doc(hidden)]
-    pub fn set_in_trace_for_test(&self, val: bool) {
+    pub fn set_in_trace_for_test(&mut self, val: bool) {
         self.in_trace
             .store(val, core::sync::atomic::Ordering::Relaxed);
     }

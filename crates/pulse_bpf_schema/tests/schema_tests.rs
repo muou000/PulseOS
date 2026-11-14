@@ -288,7 +288,7 @@ fn test_bounded_queue_overflow_drop_accounting() {
 fn test_bounded_queue_reentrancy_rejection() {
     use pulse_bpf_schema::*;
 
-    let queue = BoundedTraceQueue::<8>::new();
+    let mut queue = BoundedTraceQueue::<8>::new();
     assert!(!queue.is_in_trace());
 
     // Simulate being inside critical section by setting in_trace
@@ -312,4 +312,83 @@ fn test_bounded_queue_reentrancy_rejection() {
     // Test stats reset
     queue.reset_drop_stats();
     assert_eq!(queue.drop_stats(), DropStats::default());
+}
+
+#[test]
+fn bounded_queue_reentrant_drain_does_not_consume_twice() {
+    use pulse_bpf_schema::*;
+    let queue = BoundedTraceQueue::<2>::new();
+    queue.enqueue_bytes(TracepointId::TaskWake, &[7]).unwrap();
+    let mut nested = None;
+    assert_eq!(queue.drain(1, |_, data| {
+        assert_eq!(data, &[7]);
+        nested = Some(queue.drain(1, |_, _| {}));
+    }), 1);
+    assert_eq!(nested, Some(0));
+    assert_eq!(queue.drain(1, |_, _| panic!("already consumed")), 0);
+}
+
+#[test]
+#[should_panic(expected = "capacity must be a nonzero power of two")]
+fn bounded_queue_rejects_non_power_of_two_capacity() {
+    let _ = pulse_bpf_schema::BoundedTraceQueue::<3>::new();
+}
+
+#[test]
+#[should_panic(expected = "capacity must be a nonzero power of two")]
+fn bounded_queue_rejects_zero_capacity() {
+    let _ = pulse_bpf_schema::BoundedTraceQueue::<0>::new();
+}
+
+#[test]
+fn bounded_queue_callback_can_publish_without_changing_borrowed_bytes() {
+    use pulse_bpf_schema::*;
+    let queue = BoundedTraceQueue::<1>::new();
+    queue.enqueue_bytes(TracepointId::TaskBlock, &[1, 2]).unwrap();
+    assert_eq!(queue.drain(1, |_, bytes| {
+        queue.enqueue_bytes(TracepointId::TaskWake, &[3, 4]).unwrap();
+        assert_eq!(bytes, &[1, 2]);
+    }), 1);
+    assert_eq!(queue.drain(1, |id, bytes| {
+        assert_eq!(id, TracepointId::TaskWake);
+        assert_eq!(bytes, &[3, 4]);
+    }), 1);
+}
+
+#[test]
+fn bounded_queue_callback_panic_releases_consumer_without_replay() {
+    use pulse_bpf_schema::*;
+    let queue = BoundedTraceQueue::<2>::new();
+    queue.enqueue_bytes(TracepointId::TaskBlock, &[1]).unwrap();
+    queue.enqueue_bytes(TracepointId::TaskWake, &[2]).unwrap();
+    let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        queue.drain(1, |_, _| panic!("consumer failed"));
+    }));
+    assert!(panic.is_err());
+    assert_eq!(queue.drain(2, |_, data| assert_eq!(data, &[2])), 1);
+}
+
+#[test]
+fn bounded_queue_concurrent_drain_is_nonblocking_and_delivers_once() {
+    use pulse_bpf_schema::*;
+    use std::sync::mpsc::channel;
+    let queue = BoundedTraceQueue::<2>::new();
+    queue.enqueue_bytes(TracepointId::TaskWake, &[1]).unwrap();
+    queue.enqueue_bytes(TracepointId::TaskWake, &[2]).unwrap();
+    let (entered_tx, entered_rx) = channel();
+    let (resume_tx, resume_rx) = channel();
+    std::thread::scope(|scope| {
+        let queue_ref = &queue;
+        let first = scope.spawn(move || queue_ref.drain(1, |_, bytes| {
+            entered_tx.send(()).unwrap();
+            resume_rx.recv().unwrap();
+            assert_eq!(bytes, &[1]);
+        }));
+        entered_rx.recv().unwrap();
+        let nested = queue.drain(1, |_, _| panic!("second consumer entered"));
+        resume_tx.send(()).unwrap();
+        assert_eq!(nested, 0);
+        assert_eq!(first.join().unwrap(), 1);
+    });
+    assert_eq!(queue.drain(2, |_, bytes| assert_eq!(bytes, &[2])), 1);
 }
