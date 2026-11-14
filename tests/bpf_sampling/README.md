@@ -1,8 +1,9 @@
-# Real software sampling regression (#190)
+# Real software sampling and capture (#190 / #191)
 
 This freestanding RV64/LA64 guest uses raw Linux-shaped syscalls and checks actual
-`PERF_SAMPLE_RAW` records produced by a loaded BPF program. It never constructs a
-capture file or synthesizes sample/loss counters.
+`PERF_SAMPLE_RAW` records produced by a loaded BPF program. It never synthesizes
+sample/loss counters. With `--archive`, the host converts its actual RAW frames
+through `bpf-capture` and then verifies the standalone file with `bpf-analyzer`.
 
 ```bash
 make test APP_FEATURES="qemu bpf-trace" 2>&1 | tail -30
@@ -87,7 +88,7 @@ two real records and one valid task subject, have their own BLOCK/WAKE markers,
 and repeat the same sink rejection, disable and detach checks.
 
 This test proves neither complete callchains nor exhaustive CPU-clock accounting
-across all tasks. It does not implement capture/archive semantics (#191). Unsupported
+across all tasks. Unsupported
 v2 context, zero samples, inconsistent identity, ring loss/corruption, timeout,
 or absent disable/detach evidence fail the test. The host validator checks the
 emitted counts and lifecycle markers, but their truth depends on this deployed
@@ -107,3 +108,122 @@ It successfully loads/attaches the 72-byte tracepoint program, then observes
 emitting PASS. Log: `runs/riscv64-trace-20261114-222203-zw_rfpkz/`. This demonstrates
 that the trace gate detects the absent production queue consumer independently
 of the new CPU-sample context ABI.
+
+
+## Runtime archive
+
+```bash
+python3 tests/bpf_sampling/run.py guest --arch riscv64 --mode task --archive
+python3 tests/bpf_sampling/run.py guest --arch loongarch64 --mode trace --archive
+# Both architectures, task and trace, with no static-fixture fallback:
+python3 tests/bpf_smoke/run.py gate
+```
+
+The consumer copies each complete ring frame **before** publishing the Release
+store to `data_tail`; `data_head` is loaded with Acquire. Its bounded private
+archive is exported after the source is disabled, accepted invocations finish,
+and the rings drain. A bounded proc polling loop confirms `inflight=0`
+for every disabled source before the final drain; a fixed sleep is not used as
+a substitute for that publication boundary. Per-frame sequence, source CPU, CRC32 and length plus a
+whole-stream checksum detect damaged/missing/reordered serial output. The
+host rejects an empty producer or empty consumer. It uses an explicit context
+format: a 64-byte software v2 sample cannot be guessed from length because the
+legacy TaskEnqueue trace context is also 64 bytes.
+
+A run directory includes `records.pbraw`, original `stats-before.txt` and
+`stats-after.txt`, `archive.json`, `inputs.json`, the saved kernel/ELF/rootfs,
+`capture.pbcapture`, and analyzer JSON/table/loss reports. `guest.log` is the raw
+QEMU output, not a fabricated normalized-record stream. `result.json` separates
+the gate result from the capture's partial status. A valid partial capture can
+pass this authenticity gate; it cannot claim complete attribution.
+
+The kernel build produces `<kernel.elf>.provenance.json`; retain this alongside
+the ELF. `--kernel-elf` and `--kernel-provenance` select explicit saved inputs.
+The harness checks that the boot bytes match the ELF (objcopy for RV raw boots),
+then checks the manifest's artifact hashes. Build-time commit, dirty input tree
+hash, effective configuration and compiler are saved inside capture diagnostics.
+A missing manifest leaves the source commit **unknown**, while a supplied but
+mismatching manifest fails. `workspace_commit` records only the harness workspace
+and must never substitute for kernel provenance. The injected boot rootfs hash
+is recorded separately from its original image hash.
+
+`PBRW0001` has a 64-byte LE header (magic, start/stop, frame count, stream bytes,
+IEEE CRC32, export-drop count, 16 reserved zero bytes). Each envelope has
+`sequence:u64, cpu:u32, frame_bytes:u32, crc32:u32, reserved:u32` followed by the
+unchanged aligned PERF_RECORD. The standalone capture uses format **2**, retains
+the normalized schema registry, and stores typed optional diagnostics plus the
+full runtime evidence. Format 2 uses IEEE CRC32; format 1 preserves its historical
+nonstandard checksum for compatibility. Unknown fields are `null`, not zero.
+
+`/proc/pulse_bpf_stats` is read-only and exposes the calling process's current
+PerfEvent FDs and referenced programs. Each open creates a stable, lazily captured
+snapshot, permitting fragmented reads; reopening refreshes it. A 64 KiB bound or
+unavailable provider fails explicitly. The guest deliberately reads an 8-byte
+prefix followed by 97-byte chunks and verifies stable EOF. FD-table entries are
+cloned before event locks/callbacks. Source snapshots must show disabled and
+inflight=0; event-level counters are read with the control lock held. GLOBAL
+counters are system-wide and their snapshot window can include activity outside
+the narrower capture interval. This is not a simultaneous whole-system snapshot.
+
+Counter meanings, without double counting:
+
+- source `observed`: source observations examined, not successful samples;
+  `delivered`: successful BPF VM executions; `skipped`: periods without a sampled
+  PC; `cancelled`: rejected old queued epochs;
+- PROGRAM `runs - errors`: successful VM executions, reconciled with source
+  delivery; it overlaps that source count;
+- output sink `delivered`: samples enqueued; `transport_lost`: rejected samples;
+  saved samples + export-dropped samples equal sink delivery;
+- source delivery equals sink delivery + sink transport loss for this fixed
+  copy-and-output program. Raw LOST records are notifications and can lag the
+  authoritative sink counter; neither value is added to the other;
+- export drops are samples/notices copied from the ring but omitted from the
+  bounded archive. Global queue drops, source skips, VM errors, transport loss
+  and export drops remain separately scoped. Consumer corruption/bounds and
+  all implemented event/program counters remain visible. The kernel
+  `consumer_corrupt/consumer_bounds` counters describe its parser API; the guest
+  mmap consumer instead fails explicitly on malformed records. They are not
+  presented as the same consumer.
+
+Unsupported verifier/load/attach totals, process RSS, kernel allocation cost and
+clock resolution are explicitly unknown. The three phases run the same 128
+workload iterations: baseline, loaded-but-detached and attached-with-capture.
+Each stores actual monotonic timestamps, wall time, derived iterations/second,
+and successfully mapped sampler-owned virtual bytes. These bytes are **not RSS**
+or total kernel memory; no unmeasured overhead threshold or parity is asserted.
+`capture.pbcapture` is useful independently of `guest.log`; both CPU folded and
+off-CPU output remain partial and do not imply available callchains or mappings.
+
+Fault probes use the same program and consumer, with one deliberate fault:
+
+```bash
+# Must fail: production disabled, no consumption, or exit before archive END.
+python3 tests/bpf_sampling/run.py guest --arch riscv64 --archive --fault zero-producer
+python3 tests/bpf_sampling/run.py guest --arch riscv64 --archive --fault zero-consumer
+python3 tests/bpf_sampling/run.py guest --arch riscv64 --archive --fault aborted
+# Must save nonzero actual records AND nonzero export loss, marked incomplete.
+python3 tests/bpf_sampling/run.py guest --arch riscv64 --archive --fault export-overflow
+# Fill real Perf Buffers without draining, then preserve their authoritative loss.
+python3 tests/bpf_sampling/run.py guest --arch riscv64 --mode trace --archive --fault ring-overflow
+```
+
+The export overflow probe reduces the private archive to one page. The separate
+ring-overflow probe uses one-page Perf Buffers and pauses consumption during the
+attached phase. It requires nonzero sink `transport_lost` and incomplete output;
+raw LOST notices may still be zero because sources are stopped before space is
+freed for a later producer notification. Host tests
+also exercise malformed RAW boundaries/checksums/counts, counter inconsistencies,
+corrupt/truncated capture trailers and unknown diagnostics. Existing
+`pulse_syscalls` tests cover Perf Buffer wraparound, overflow/LOST and ring
+corruption, plus Ring Buffer producer publication/ordering. These unit fixtures
+are isolated from QEMU's actual-record gate.
+
+
+Use `--ring-pages 1 --mode trace --archive` for real guest wrap evidence. Each
+CPU reports its actual final head/tail and number of frames crossing the ring
+end. The host recomputes byte positions and crossing counts from the RAW stream
+when no export frames were dropped; it rejects a mismatch. The concurrent host
+PerfBuffer regression separately sends 20,000 patterned records through one
+page, with head/tail publication as its only per-record synchronization, checking
+both header and payload crossings. Neither test replaces the Acquire/Release
+contract or proves arbitrary weak-memory executions.

@@ -3,6 +3,7 @@
 pub const CAPTURE_HEADER_MAGIC: [u8; 8] = *b"PBCAP001";
 pub const CAPTURE_TRAILER_MAGIC: [u8; 8] = *b"PBCAPTRL";
 pub const FORMAT_VERSION_V1: u32 = 1;
+pub const FORMAT_VERSION_V2: u32 = 2;
 pub const SCHEMA_VERSION_V1: u32 = 1;
 
 pub const CAPTURE_HEADER_SIZE: usize = 80;
@@ -72,6 +73,7 @@ impl SessionStatusCode {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum CaptureError {
     BadMagic,
+    InvalidRecord(&'static str),
     UnsupportedFormatVersion(u32),
     UnsupportedSchemaVersion(u32),
     TruncatedHeader,
@@ -153,7 +155,7 @@ impl CaptureHeader {
         }
 
         let format_version = u32::from_le_bytes(bytes[8..12].try_into().unwrap());
-        if format_version != FORMAT_VERSION_V1 {
+        if !matches!(format_version, FORMAT_VERSION_V1 | FORMAT_VERSION_V2) {
             return Err(CaptureError::UnsupportedFormatVersion(format_version));
         }
 
@@ -286,7 +288,10 @@ impl CaptureTrailer {
     }
 }
 
-/// Deterministic IEEE 802.3 CRC32 checksum over binary capture bytes.
+/// Legacy capture-v1 checksum, retained for existing PBCAP001 artifacts.
+/// Its historical feedback-bit convention is not IEEE CRC32 (for example,
+/// `123456789` yields 0xc6dd3518). A corrected algorithm needs a format version
+/// change; do not silently invalidate old captures by replacing this function.
 pub fn compute_checksum(data: &[u8]) -> u32 {
     let mut crc = 0xFFFF_FFFFu32;
     for &byte in data {
@@ -294,6 +299,18 @@ pub fn compute_checksum(data: &[u8]) -> u32 {
         for _ in 0..8 {
             let mask = (!((crc & 1).wrapping_sub(1))) ^ 0xFFFF_FFFF;
             crc = (crc >> 1) ^ (0xEDB8_8320 & mask);
+        }
+    }
+    !crc
+}
+
+/// IEEE CRC-32/ISO-HDLC used by capture format v2 and RAW archives.
+pub fn compute_checksum_ieee(data: &[u8]) -> u32 {
+    let mut crc = 0xffff_ffffu32;
+    for &byte in data {
+        crc ^= byte as u32;
+        for _ in 0..8 {
+            crc = (crc >> 1) ^ (0xedb8_8320 & 0u32.wrapping_sub(crc & 1));
         }
     }
     !crc

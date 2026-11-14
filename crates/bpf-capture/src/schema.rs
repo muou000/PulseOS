@@ -7,6 +7,7 @@ use crate::framing::CaptureError;
 use crate::record::NormalizedRecord;
 
 pub const PERF_EVENT_SOFTWARE_ID: u32 = 0x1000;
+pub const PERF_EVENT_SOFTWARE_V2_ID: u32 = 0x1001;
 
 /// Primitive field types for normalized BPF event schema.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -122,6 +123,20 @@ impl SchemaRegistry {
             });
         }
 
+        if record.event_id == PERF_EVENT_SOFTWARE_V2_ID {
+            if record.schema_version != 2 || record.payload.len() != 32 {
+                return Err(CaptureError::InvalidRecord("invalid software v2 schema"));
+            }
+            let mode = u32::from_le_bytes(record.payload[24..28].try_into().unwrap());
+            if !matches!(mode, 1 | 2) || record.payload[28..32] != [0; 4]
+                || u64::from_le_bytes(record.payload[..8].try_into().unwrap()) == 0
+                || u64::from_le_bytes(record.payload[16..24].try_into().unwrap()) == 0
+                || record.timestamp_ns == 0 || record.task_id == 0
+                || (mode == 2 && (record.pid == 0 || record.tid == 0))
+            {
+                return Err(CaptureError::InvalidRecord("invalid normalized software v2 sample"));
+            }
+        }
         Ok(())
     }
 
@@ -185,6 +200,16 @@ impl SchemaRegistry {
             ],
         });
 
+        reg.register(EventSchema {
+            event_id: PERF_EVENT_SOFTWARE_V2_ID, category: String::from("pulse"),
+            name: String::from("perf_event_v2"), version: 2, payload_size: 32,
+            fields: vec![
+                FieldSchema { name: String::from("sample_period"), offset: 0, size: 8, field_type: FieldTypeId::U64 },
+                FieldSchema { name: String::from("addr"), offset: 8, size: 8, field_type: FieldTypeId::U64 },
+                FieldSchema { name: String::from("ip"), offset: 16, size: 8, field_type: FieldTypeId::U64 },
+                FieldSchema { name: String::from("mode"), offset: 24, size: 4, field_type: FieldTypeId::U32 },
+            ],
+        });
         reg
     }
 
@@ -228,6 +253,9 @@ impl SchemaRegistry {
         let count = u32::from_le_bytes(slice[offset..offset + 4].try_into().unwrap()) as usize;
         offset += 4;
 
+        if count > slice.len().saturating_sub(offset) / 24 {
+            return Err(CaptureError::TruncatedMetadata);
+        }
         let mut reg = Self::new();
 
         for _ in 0..count {
@@ -248,6 +276,9 @@ impl SchemaRegistry {
             let field_count = u32::from_le_bytes(slice[offset..offset + 4].try_into().unwrap()) as usize;
             offset += 4;
 
+            if field_count > slice.len().saturating_sub(offset) / 20 {
+                return Err(CaptureError::TruncatedMetadata);
+            }
             let mut fields = Vec::with_capacity(field_count);
             for _ in 0..field_count {
                 let f_name = crate::codec::decode_string(slice, &mut offset)?;

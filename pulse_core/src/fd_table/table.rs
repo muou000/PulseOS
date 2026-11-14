@@ -159,6 +159,17 @@ impl FdTable {
         DrainedFdEntries { _storage: storage }
     }
 
+    /// Clone numbered entries for diagnostics; callers release the table lock
+    /// before invoking any descriptor-specific code.
+    pub fn numbered_entries_snapshot(&self) -> alloc::vec::Vec<(usize, FdEntry)> {
+        self.storage.chunks.iter().enumerate().filter_map(|(index, chunk)|
+            chunk.as_ref().map(|chunk| (index, chunk)))
+            .flat_map(|(chunk_index, chunk)| chunk.entries.iter().enumerate()
+                .filter_map(move |(slot, entry)| entry.as_ref()
+                    .map(|entry| (chunk_index * FD_CHUNK_SIZE + slot, entry.clone()))))
+            .collect()
+    }
+
     pub fn entries_snapshot(&self) -> alloc::vec::Vec<FdEntry> {
         self.storage
             .chunks

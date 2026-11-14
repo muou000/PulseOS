@@ -79,10 +79,12 @@ impl CaptureAnalyzer {
         self.status_code().is_complete()
     }
 
-    /// Anchor A3 (#88): Complete attribution claim is allowed only when
-    /// the capture has zero loss, zero errors, and clean integrity.
+    /// Runtime-v2 captures currently carry individual source streams and PCs,
+    /// not the full mapping/callchain/scheduler evidence for complete attribution.
+    /// Keep legacy fixture semantics, but never promote runtime transport integrity
+    /// to a complete CPU/off-CPU attribution claim.
     pub fn attribution_claim_allowed(&self) -> bool {
-        self.is_complete()
+        self.data.diagnostics.is_none() && self.is_complete()
     }
 
     /// Globally order all events across all CPUs by timestamp_ns ascending (Anchor A2).

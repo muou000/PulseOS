@@ -3,6 +3,7 @@
 extern crate alloc;
 
 pub mod codec;
+pub mod diagnostics;
 pub mod fixture;
 pub mod framing;
 pub mod reader;
@@ -18,3 +19,5 @@ pub use record::NormalizedRecord;
 pub use schema::{EventSchema, FieldSchema, FieldTypeId, SchemaRegistry};
 pub use session::{CaptureScope, LayeredLossCounters, SamplingSession, SessionConfig, SessionMetadata};
 pub use writer::CaptureWriter;
+
+pub use diagnostics::{CounterKind, DiagnosticCounter, DiagnosticIdentity, PhaseMeasurement, RuntimeDiagnostics};

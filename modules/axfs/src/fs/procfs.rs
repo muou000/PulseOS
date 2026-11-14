@@ -42,7 +42,8 @@ const CORE_PATTERN_INO: u64 = 10;
 const INIT_SYM_INO: u64 = 11;
 const CPUINFO_INO: u64 = 12;
 const UPTIME_INO: u64 = 13;
-const NEXT_DYNAMIC_INO: u64 = UPTIME_INO + 1;
+const BPF_STATS_INO: u64 = 14;
+const NEXT_DYNAMIC_INO: u64 = BPF_STATS_INO + 1;
 const PROCFS_INODE_SHARDS: usize = 32;
 const PROCFS_PID_MAP_SHARDS: usize = 32;
 
@@ -90,6 +91,9 @@ const SUB_TASK_STAT: u64 = 3;
 
 pub trait ProcfsProcessProvider: Send + Sync {
     fn current_pid(&self) -> Option<u64>;
+    /// PulseOS-specific snapshot of the caller's BPF descriptors and global
+    /// handoff totals. None means unavailable, never an all-zero snapshot.
+    fn bpf_stats(&self) -> Option<String> { None }
     fn process_exists(&self, pid: u64) -> bool;
     fn process_pids(&self) -> Vec<u64>;
     fn cmdline(&self, pid: u64) -> Option<String>;
@@ -161,6 +165,7 @@ enum ProcLiveFileKind {
     CorePattern,
     Cpuinfo,
     Uptime,
+    BpfStats,
     PidChildren(u64),
     ThreadStatus(u64, u64),
     ThreadComm(u64, u64),
@@ -424,6 +429,9 @@ impl ProcFilesystem {
             NodePermission::from_bits_truncate(0o444),
         );
 
+        let bpf_stats = new_live_file(BPF_STATS_INO, ProcLiveFileKind::BpfStats,
+            NodePermission::from_bits_truncate(0o444));
+
         root.metadata.lock().nlink = 3;
         sys_dir.metadata.lock().nlink = 3;
         kernel_dir.metadata.lock().nlink = 2;
@@ -441,6 +449,7 @@ impl ProcFilesystem {
         self.insert_inode(CORE_PATTERN_INO, core_pattern);
         self.insert_inode(CPUINFO_INO, cpuinfo);
         self.insert_inode(UPTIME_INO, uptime);
+        self.insert_inode(BPF_STATS_INO, bpf_stats);
 
         {
             let mut entries = inode_as_dir(&root)
@@ -455,6 +464,7 @@ impl ProcFilesystem {
             entries.insert("1".into(), INIT_SYM_INO);
             entries.insert("sys".into(), SYS_INO);
             entries.insert("uptime".into(), UPTIME_INO);
+            entries.insert("pulse_bpf_stats".into(), BPF_STATS_INO);
         }
 
         {
@@ -993,6 +1003,8 @@ fn render_proc_file(fs: &ProcFilesystem, kind: ProcLiveFileKind) -> String {
         ProcLiveFileKind::Cpuinfo => {
             "processor\t: 0\nmodel name\t: QEMU Virtual CPU version 2.5+\n".to_owned()
         }
+        ProcLiveFileKind::BpfStats => PROCESS_PROVIDER.get()
+            .and_then(|provider| provider.bpf_stats()).unwrap_or_default(),
         ProcLiveFileKind::Uptime => {
             let mono = axhal::time::monotonic_time();
             let secs = mono.as_secs();
@@ -1038,6 +1050,7 @@ struct ProcNode {
     // view for the lifetime of an opened node so a concurrent mount update
     // cannot move EOF while the reader advances its offset.
     mounts_snapshot: SpinNoPreempt<Option<Arc<[u8]>>>,
+    bpf_snapshot: SpinNoPreempt<Option<Arc<[u8]>>>,
 }
 
 impl ProcNode {
@@ -1047,6 +1060,7 @@ impl ProcNode {
             ino,
             this,
             mounts_snapshot: SpinNoPreempt::new(None),
+            bpf_snapshot: SpinNoPreempt::new(None),
         }))
     }
 
@@ -1056,6 +1070,7 @@ impl ProcNode {
             ino,
             this: None,
             mounts_snapshot: SpinNoPreempt::new(None),
+            bpf_snapshot: SpinNoPreempt::new(None),
         }))
     }
 
@@ -1071,6 +1086,20 @@ impl ProcNode {
         let rendered = Arc::<[u8]>::from(render_mounts().into_bytes());
         let mut snapshot = self.mounts_snapshot.lock();
         snapshot.get_or_insert_with(|| rendered.clone()).clone()
+    }
+
+    fn bpf_stats_snapshot(&self) -> VfsResult<Arc<[u8]>> {
+        if let Some(snapshot) = self.bpf_snapshot.lock().as_ref().cloned() {
+            return Ok(snapshot);
+        }
+        // Like /proc/mounts, this node is rebuilt on each path lookup. Freeze
+        // the first successful render; dup/read chunks then share one snapshot.
+        // Rendering can take FD/event locks and must happen outside our guard.
+        let content = PROCESS_PROVIDER.get().and_then(|p| p.bpf_stats())
+            .ok_or(VfsError::NotFound)?;
+        let rendered = Arc::<[u8]>::from(content.into_bytes());
+        let mut snapshot = self.bpf_snapshot.lock();
+        Ok(snapshot.get_or_insert_with(|| rendered.clone()).clone())
     }
 
     fn build_entry(&self, name: &str, target_ino: u64) -> VfsResult<DirEntry> {
@@ -1736,6 +1765,8 @@ impl FileNodeOps for ProcNode {
 
             let content = if matches!(kind, ProcLiveFileKind::Mounts) {
                 self.mounts_snapshot()
+            } else if matches!(kind, ProcLiveFileKind::BpfStats) {
+                self.bpf_stats_snapshot()?
             } else {
                 Arc::<[u8]>::from(render_proc_file(&self.fs, kind).into_bytes())
             };

@@ -128,7 +128,7 @@ fn test_ingest_raw_perf_frame_sample_and_lost() {
     writer.start(10_000_000).unwrap();
 
     // 1. Ingest raw PERF_RECORD_SAMPLE frame:
-    // Header (12 bytes: event_type=9, misc=0, size=12+72=84, raw_len=72)
+    // Header + 72-byte RAW payload + 4-byte padding: size=88, raw_len=72
     let sched_ctx = SchedSwitchContext {
         common: ContextCommon::new(TracepointId::SchedSwitch, 10_000_100, 2, 40, 40, 4),
         prev_task_id: 4,
@@ -142,13 +142,13 @@ fn test_ingest_raw_perf_frame_sample_and_lost() {
         core::slice::from_raw_parts(&sched_ctx as *const _ as *const u8, core::mem::size_of_val(&sched_ctx))
     };
 
-    let mut sample_frame = vec![0u8; 12 + sched_bytes.len()];
+    let mut sample_frame = vec![0u8; (12 + sched_bytes.len() + 7) & !7];
     sample_frame[0..4].copy_from_slice(&PERF_RECORD_SAMPLE.to_ne_bytes());
     sample_frame[4..6].copy_from_slice(&0u16.to_ne_bytes());
     let frame_len = sample_frame.len() as u16;
     sample_frame[6..8].copy_from_slice(&frame_len.to_ne_bytes());
     sample_frame[8..12].copy_from_slice(&(sched_bytes.len() as u32).to_ne_bytes());
-    sample_frame[12..].copy_from_slice(sched_bytes);
+    sample_frame[12..12 + sched_bytes.len()].copy_from_slice(sched_bytes);
 
     writer.ingest_raw_perf_frame(2, &sample_frame).expect("raw sample frame should ingest");
 

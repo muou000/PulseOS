@@ -79,6 +79,12 @@ fn main() {
             axnet::run_tcp_endpoint_concurrency_checks().expect("tcp endpoint concurrency checks failed");
             axsync::run_lock_stress_checks().expect("axsync lock stress checks failed");
 
+            // Start the sampling worker after isolated boot checks: its timer
+            // wakeups/allocations must not race allocator accounting assertions
+            // or the synthetic BPF model checks. It is ready before userspace.
+            #[cfg(feature = "bpf-trace")]
+            pulse_core::bpf::sampling::init();
+
             let shell_args_base: &[&str] = &["sh"];
             let shell_envs: &[&str] = &["PATH=/usr/sbin:/usr/bin:/sbin:/bin"];
 

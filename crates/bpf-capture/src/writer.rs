@@ -1,8 +1,10 @@
 //! Binary BPF capture writer with streaming record persistence and integrity trailer.
 
 use alloc::vec::Vec;
+use crate::diagnostics::RuntimeDiagnostics;
 use crate::framing::{
-    compute_checksum, CaptureError, CaptureHeader, CaptureTrailer,
+    compute_checksum, compute_checksum_ieee, CaptureError, CaptureHeader, CaptureTrailer,
+    FORMAT_VERSION_V2, SessionStatusCode,
     CAPTURE_HEADER_SIZE, CAPTURE_TRAILER_SIZE,
 };
 use crate::record::NormalizedRecord;
@@ -16,6 +18,15 @@ pub const BPF_RINGBUF_BUSY_BIT: u32 = 1 << 31;
 pub const BPF_RINGBUF_DISCARD_BIT: u32 = 1 << 30;
 pub const BPF_RINGBUF_HDR_MASK: u32 = BPF_RINGBUF_BUSY_BIT | BPF_RINGBUF_DISCARD_BIT;
 
+/// Format selected from the attached program/configuration, never guessed
+/// from a 64-byte payload (which also matches a legacy TaskEnqueue context).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SampleFormat {
+    PerfEventV1,
+    PerfEventV2,
+    Tracepoint,
+}
+
 /// Session capture writer producing independent versioned capture files.
 #[derive(Clone, Debug)]
 pub struct CaptureWriter {
@@ -24,6 +35,7 @@ pub struct CaptureWriter {
     session: SamplingSession,
     records_buf: Vec<u8>,
     records_count: u64,
+    diagnostics: Option<RuntimeDiagnostics>,
 }
 
 impl CaptureWriter {
@@ -35,7 +47,17 @@ impl CaptureWriter {
             session,
             records_buf: Vec::new(),
             records_count: 0,
+            diagnostics: None,
         }
+    }
+
+    /// Attach runtime evidence and select capture format v2. Values may be
+    /// updated until finish; diagnostic loss/unknown values can only reduce status.
+    pub fn set_diagnostics(&mut self, diagnostics: RuntimeDiagnostics) -> Result<(), CaptureError> {
+        if self.session.is_finished() { return Err(CaptureError::IoError("session already finished")); }
+        diagnostics.validate()?;
+        self.diagnostics = Some(diagnostics);
+        Ok(())
     }
 
     pub fn start(&mut self, now_ns: u64) -> Result<(), CaptureError> {
@@ -59,33 +81,42 @@ impl CaptureWriter {
         Ok(())
     }
 
-    /// Ingest a sample payload from a Linux Perf Buffer or software event context.
+    /// Backwards-compatible v1 ingestion. Native samplers must supply their
+    /// declared source format through ingest_perf_sample_as for v2 contexts.
     pub fn ingest_perf_sample(&mut self, cpu: u32, raw_sample: &[u8]) -> Result<(), CaptureError> {
+        let format = if raw_sample.len() == 48 { SampleFormat::PerfEventV1 } else { SampleFormat::Tracepoint };
+        self.ingest_perf_sample_as(cpu, raw_sample, format)
+    }
+
+    pub fn ingest_perf_sample_as(&mut self, cpu: u32, raw_sample: &[u8], format: SampleFormat) -> Result<(), CaptureError> {
         if !self.session.is_running() {
             return Err(CaptureError::IoError("session is not running"));
         }
-
-        // Software perf_event sample context (fixed 48 bytes)
-        if raw_sample.len() == 48 && self.registry.lookup(PERF_EVENT_SOFTWARE_ID).is_some() {
-            let mut rec = NormalizedRecord::from_perf_event_slice(PERF_EVENT_SOFTWARE_ID, raw_sample)?;
-            rec.cpu_id = cpu;
-            return self.write_record(rec);
-        }
-
-        // Tracepoint contexts: size >= 40, version == 1, event_id 1..=7
-        if raw_sample.len() >= 40 {
-            let event_id = u32::from_ne_bytes(raw_sample[0..4].try_into().unwrap());
-            let version = u32::from_ne_bytes(raw_sample[4..8].try_into().unwrap());
-            if version == 1 && (1..=7).contains(&event_id) && self.registry.lookup(event_id).is_some() {
-                let mut rec = NormalizedRecord::from_tracepoint_slice(event_id, raw_sample)?;
-                rec.cpu_id = cpu;
-                return self.write_record(rec);
+        let result = (|| {
+            let record = match format {
+                SampleFormat::PerfEventV1 => {
+                    if raw_sample.len() != 48 { return Err(CaptureError::TruncatedRecord); }
+                    NormalizedRecord::from_perf_event_slice(PERF_EVENT_SOFTWARE_ID, raw_sample)?
+                }
+                SampleFormat::PerfEventV2 => NormalizedRecord::from_perf_event_v2_slice(raw_sample)?,
+                SampleFormat::Tracepoint => {
+                    if raw_sample.len() < 40 { return Err(CaptureError::TruncatedRecord); }
+                    let id = u32::from_le_bytes(raw_sample[..4].try_into().unwrap());
+                    let metadata = pulse_bpf_schema::lookup_by_id(id)
+                        .map_err(|_| CaptureError::InvalidRecord("unknown tracepoint"))?;
+                    if raw_sample.len() != metadata.context_size || raw_sample[28..32] != [0; 4] {
+                        return Err(CaptureError::InvalidRecord("tracepoint context length/reserved"));
+                    }
+                    NormalizedRecord::from_tracepoint_slice(id, raw_sample)?
+                }
+            };
+            if record.cpu_id != cpu {
+                return Err(CaptureError::InvalidRecord("source CPU differs from transport CPU"));
             }
-        }
-
-        // Fallback: unparseable/corrupt sample format
-        self.session.record_consumer_corruption();
-        Err(CaptureError::TruncatedRecord)
+            self.write_record(record)
+        })();
+        if result.is_err() { self.session.record_consumer_corruption(); }
+        result
     }
 
     /// Ingest a PERF_RECORD_LOST notification with lost event count.
@@ -93,43 +124,51 @@ impl CaptureWriter {
         self.session.record_perf_lost(cpu, count);
     }
 
-    /// Ingest a raw ring buffer frame (PERF_RECORD_SAMPLE or PERF_RECORD_LOST) from Linux Perf Buffer.
+    /// Ingest one complete legacy raw frame, including its alignment padding.
     pub fn ingest_raw_perf_frame(&mut self, cpu: u32, raw_frame: &[u8]) -> Result<(), CaptureError> {
-        if raw_frame.len() < 8 {
-            self.session.record_consumer_corruption();
-            return Err(CaptureError::TruncatedRecord);
-        }
+        self.ingest_perf_frame_inner(cpu, raw_frame, None)
+    }
 
-        let event_type = u32::from_ne_bytes(raw_frame[0..4].try_into().unwrap());
-        let rec_size = u16::from_ne_bytes(raw_frame[6..8].try_into().unwrap()) as usize;
-        if raw_frame.len() < rec_size {
-            self.session.record_consumer_corruption();
-            return Err(CaptureError::TruncatedRecord);
-        }
+    pub fn ingest_raw_perf_frame_as(&mut self, cpu: u32, raw_frame: &[u8], format: SampleFormat) -> Result<(), CaptureError> {
+        self.ingest_perf_frame_inner(cpu, raw_frame, Some(format))
+    }
 
-        if event_type == PERF_RECORD_SAMPLE {
-            if rec_size < 12 {
-                self.session.record_consumer_corruption();
-                return Err(CaptureError::TruncatedRecord);
+    fn ingest_perf_frame_inner(&mut self, cpu: u32, raw_frame: &[u8], format: Option<SampleFormat>) -> Result<(), CaptureError> {
+        if !self.session.is_running() {
+            return Err(CaptureError::IoError("session is not running"));
+        }
+        let frame = (|| {
+            if raw_frame.len() < 8 { return Err(CaptureError::TruncatedRecord); }
+            let kind = u32::from_le_bytes(raw_frame[..4].try_into().unwrap());
+            let size = u16::from_le_bytes(raw_frame[6..8].try_into().unwrap()) as usize;
+            if size != raw_frame.len() || size % 8 != 0 {
+                return Err(CaptureError::InvalidRecord("invalid frame boundary"));
             }
-            let raw_len = u32::from_ne_bytes(raw_frame[8..12].try_into().unwrap()) as usize;
-            if rec_size < 12 + raw_len {
-                self.session.record_consumer_corruption();
-                return Err(CaptureError::TruncatedRecord);
+            match kind {
+                PERF_RECORD_SAMPLE => {
+                    if size < 12 { return Err(CaptureError::TruncatedRecord); }
+                    let len = u32::from_le_bytes(raw_frame[8..12].try_into().unwrap()) as usize;
+                    let end = 12usize.checked_add(len).ok_or(CaptureError::TruncatedRecord)?;
+                    if end > size || size - end > 7 {
+                        return Err(CaptureError::InvalidRecord("invalid RAW length or padding"));
+                    }
+                    Ok(Some(&raw_frame[12..end]))
+                }
+                PERF_RECORD_LOST if size == 24 => Ok(None),
+                _ => Err(CaptureError::InvalidRecord("unknown or malformed perf frame")),
             }
-            let payload = &raw_frame[12..12 + raw_len];
-            self.ingest_perf_sample(cpu, payload)
-        } else if event_type == PERF_RECORD_LOST {
-            if rec_size < 24 {
-                self.session.record_consumer_corruption();
-                return Err(CaptureError::TruncatedRecord);
+        })();
+        match frame {
+            Err(e) => { self.session.record_consumer_corruption(); Err(e) }
+            Ok(None) => {
+                let lost = u64::from_le_bytes(raw_frame[16..24].try_into().unwrap());
+                self.ingest_perf_lost(cpu, lost);
+                Ok(())
             }
-            let lost_count = u64::from_ne_bytes(raw_frame[16..24].try_into().unwrap());
-            self.ingest_perf_lost(cpu, lost_count);
-            Ok(())
-        } else {
-            self.session.record_consumer_corruption();
-            Err(CaptureError::TruncatedRecord)
+            Ok(Some(raw)) => match format {
+                Some(format) => self.ingest_perf_sample_as(cpu, raw, format),
+                None => self.ingest_perf_sample(cpu, raw),
+            }
         }
     }
 
@@ -176,11 +215,25 @@ impl CaptureWriter {
 
     /// Finalize capture, compute checksums, and emit the complete binary capture file.
     pub fn finish(&mut self, stop_ns: u64) -> Result<Vec<u8>, CaptureError> {
-        let metadata = self.session.stop(stop_ns)?;
+        // Serialize before stopping, so invalid evidence does not consume the session.
+        let diagnostics_bytes = self.diagnostics.as_ref().map(RuntimeDiagnostics::to_bytes).transpose()?;
+        let mut metadata = self.session.stop(stop_ns)?;
+        if self.diagnostics.is_some() && (metadata.start_ns == 0 || stop_ns <= metadata.start_ns) {
+            return Err(CaptureError::InvalidRecord("invalid runtime session window"));
+        }
+        if let Some(diagnostics) = &self.diagnostics {
+            let status = diagnostics.status();
+            if self.records_count == 0 || status == SessionStatusCode::IncompleteError {
+                metadata.status = SessionStatusCode::IncompleteError;
+            } else if metadata.status.is_complete() && !status.is_complete() {
+                metadata.status = status;
+            }
+        }
 
         let mut metadata_buf = Vec::new();
         metadata_buf.extend_from_slice(&self.registry.to_bytes());
         metadata_buf.extend_from_slice(&metadata.to_bytes());
+        if let Some(bytes) = diagnostics_bytes { metadata_buf.extend_from_slice(&bytes); }
 
         let metadata_offset = CAPTURE_HEADER_SIZE as u64;
         let metadata_size = metadata_buf.len() as u64;
@@ -190,6 +243,7 @@ impl CaptureWriter {
         let trailer_size = CAPTURE_TRAILER_SIZE as u64;
 
         let mut header = CaptureHeader::new(self.config.target_arch);
+        if self.diagnostics.is_some() { header.format_version = FORMAT_VERSION_V2; }
         header.metadata_offset = metadata_offset;
         header.metadata_size = metadata_size;
         header.records_offset = records_offset;
@@ -203,7 +257,7 @@ impl CaptureWriter {
         output.extend_from_slice(&metadata_buf);
         output.extend_from_slice(&self.records_buf);
 
-        let checksum = compute_checksum(&output);
+        let checksum = if self.diagnostics.is_some() { compute_checksum_ieee(&output) } else { compute_checksum(&output) };
         let trailer = CaptureTrailer::new(self.records_count, records_size, checksum, metadata.status);
         output.extend_from_slice(&trailer.to_bytes());
 

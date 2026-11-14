@@ -116,6 +116,10 @@ pub fn render_event_table(analyzer: &CaptureAnalyzer, events: &[NormalizedEvent]
             EventPayload::SoftwareSample { sample_period, pc } => {
                 format!("period={} pc=0x{:016x}", sample_period, pc)
             }
+            EventPayload::SoftwareSampleV2 { sample_period, addr, pc, mode } => {
+                let mode = match mode { 1 => "kernel", 2 => "user", _ => "unknown" };
+                format!("period={} pc=0x{:016x} mode={} addr=0x{:016x}", sample_period, pc, mode, addr)
+            }
             EventPayload::Raw { bytes } => {
                 format!("raw_bytes={}", bytes.len())
             }
@@ -162,6 +166,36 @@ pub fn render_loss_report(analyzer: &CaptureAnalyzer) -> String {
     )
     .unwrap();
     writeln!(&mut out).unwrap();
+
+    if let Some(diagnostics) = &analyzer.data().diagnostics {
+        writeln!(&mut out, "--- Runtime diagnostics (scopes overlap; do not sum) ---").unwrap();
+        for counter in &diagnostics.counters {
+            let value = counter.value.map(|v| v.to_string()).unwrap_or_else(|| "unknown".into());
+            writeln!(&mut out, "{} {} ({:?}): {}", counter.scope, counter.name, counter.kind, value).unwrap();
+        }
+        writeln!(&mut out, "--- Build and run identities ---").unwrap();
+        for identity in &diagnostics.identities {
+            writeln!(&mut out, "{}: {}", identity.name, identity.value.as_deref().unwrap_or("unknown")).unwrap();
+        }
+        writeln!(&mut out, "--- Measured workload phases ---").unwrap();
+        for phase in &diagnostics.phases {
+            let wall = phase.stop_ns - phase.start_ns;
+            let mapped = phase.mapped_bytes.map(|v| v.to_string()).unwrap_or_else(|| "unknown".into());
+            writeln!(&mut out, "{}: start_ns={} stop_ns={} wall_ns={} iterations={} iterations_per_second={:.3} sampler_mapped_bytes={}",
+                phase.name, phase.start_ns, phase.stop_ns, wall, phase.iterations,
+                phase.iterations as f64 * 1e9 / wall as f64, mapped).unwrap();
+        }
+        writeln!(&mut out, "Consumer projection: {} normalized records; {} observed PERF_RECORD_LOST notices (counts may overlap sink diagnostics).",
+            counters.delivered, counters.lost_records_total).unwrap();
+        writeln!(&mut out, "Other legacy counter fields are not runtime measurements; use the scoped diagnostics above.").unwrap();
+        writeln!(&mut out, "Complete CPU/off-CPU attribution: unavailable (individual source stream; mappings/callchains/full scheduler evidence absent).").unwrap();
+        if is_comp {
+            writeln!(&mut out, "Integrity verified; no loss reported by the recorded diagnostics. This is not proof of complete attribution.").unwrap();
+        } else {
+            writeln!(&mut out, "PARTIAL: loss, error, or unknown runtime evidence prevents a complete capture claim.").unwrap();
+        }
+        return out;
+    }
 
     writeln!(&mut out, "--- Layered Loss Counters ---").unwrap();
     writeln!(&mut out, "Attempted: {}", counters.attempted).unwrap();
@@ -222,38 +256,48 @@ pub fn render_json(
     )
     .unwrap();
     writeln!(&mut out, "  \"arch\": \"{}\",", analyzer.target_arch().as_str()).unwrap();
-    writeln!(&mut out, "  \"pulse_commit\": \"{}\",", meta.config.pulse_commit).unwrap();
-    writeln!(&mut out, "  \"kernel_elf_path\": \"{}\",", meta.config.kernel_elf_path).unwrap();
-    writeln!(&mut out, "  \"kernel_elf_hash\": \"{}\",", meta.config.kernel_elf_hash).unwrap();
-    writeln!(&mut out, "  \"image_path\": \"{}\",", meta.config.image_path).unwrap();
-    writeln!(&mut out, "  \"image_hash\": \"{}\",", meta.config.image_hash).unwrap();
-    writeln!(&mut out, "  \"clock_name\": \"{}\",", meta.config.clock_name).unwrap();
+    writeln!(&mut out, "  \"pulse_commit\": {},", json_string(&meta.config.pulse_commit)).unwrap();
+    writeln!(&mut out, "  \"kernel_elf_path\": {},", json_string(&meta.config.kernel_elf_path)).unwrap();
+    writeln!(&mut out, "  \"kernel_elf_hash\": {},", json_string(&meta.config.kernel_elf_hash)).unwrap();
+    writeln!(&mut out, "  \"image_path\": {},", json_string(&meta.config.image_path)).unwrap();
+    writeln!(&mut out, "  \"image_hash\": {},", json_string(&meta.config.image_hash)).unwrap();
+    writeln!(&mut out, "  \"clock_name\": {},", json_string(&meta.config.clock_name)).unwrap();
     writeln!(&mut out, "  \"sample_period\": {},", meta.config.sample_period).unwrap();
     writeln!(&mut out, "  \"buffer_pages\": {},", meta.config.buffer_pages).unwrap();
     writeln!(&mut out, "  \"records_count\": {},", hdr.records_count).unwrap();
 
-    // loss_counters object
-    writeln!(&mut out, "  \"loss_counters\": {{").unwrap();
-    writeln!(&mut out, "    \"attempted\": {},", counters.attempted).unwrap();
-    writeln!(&mut out, "    \"delivered\": {},", counters.delivered).unwrap();
-    writeln!(&mut out, "    \"lost_records_total\": {},", counters.lost_records_total).unwrap();
-    writeln!(&mut out, "    \"ringbuf_lost\": {},", counters.ringbuf_lost).unwrap();
-    writeln!(&mut out, "    \"discarded_records\": {},", counters.discarded_records).unwrap();
-    writeln!(&mut out, "    \"re_entry_drops\": {},", counters.re_entry_drops).unwrap();
-    writeln!(&mut out, "    \"helper_failures\": {},", counters.helper_failures).unwrap();
-    writeln!(&mut out, "    \"budget_failures\": {},", counters.budget_failures).unwrap();
-    writeln!(&mut out, "    \"verifier_failures\": {},", counters.verifier_failures).unwrap();
-    writeln!(&mut out, "    \"load_failures\": {},", counters.load_failures).unwrap();
-    writeln!(&mut out, "    \"attach_failures\": {},", counters.attach_failures).unwrap();
-    writeln!(&mut out, "    \"consumer_corrupt_records\": {},", counters.consumer_corrupt_records).unwrap();
-    writeln!(&mut out, "    \"consumer_out_of_bounds\": {},", counters.consumer_out_of_bounds).unwrap();
-    writeln!(&mut out, "    \"per_cpu_lost\": [").unwrap();
-    for (i, &(cpu, count)) in counters.per_cpu_lost.iter().enumerate() {
-        let comma = if i + 1 < counters.per_cpu_lost.len() { "," } else { "" };
-        writeln!(&mut out, "      {{\"cpu\": {}, \"lost\": {}}}{}", cpu, count, comma).unwrap();
+    if let Some(diagnostics) = &analyzer.data().diagnostics {
+        writeln!(&mut out, "  \"statistics_scope\": \"observed records only; per-CPU lost_records contains consumed PERF_RECORD_LOST counts\",").unwrap();
+        writeln!(&mut out, "  \"loss_counters\": null,").unwrap();
+        writeln!(&mut out, "  \"consumer_projection\": {{\"delivered\": {}, \"observed_perf_lost\": {}}},", counters.delivered, counters.lost_records_total).unwrap();
+        write!(&mut out, "  \"runtime_diagnostics\": ").unwrap();
+        render_diagnostics_json(&mut out, diagnostics);
+        writeln!(&mut out, ",").unwrap();
+    } else {
+        // loss_counters object
+        writeln!(&mut out, "  \"loss_counters\": {{").unwrap();
+        writeln!(&mut out, "    \"attempted\": {},", counters.attempted).unwrap();
+        writeln!(&mut out, "    \"delivered\": {},", counters.delivered).unwrap();
+        writeln!(&mut out, "    \"lost_records_total\": {},", counters.lost_records_total).unwrap();
+        writeln!(&mut out, "    \"ringbuf_lost\": {},", counters.ringbuf_lost).unwrap();
+        writeln!(&mut out, "    \"discarded_records\": {},", counters.discarded_records).unwrap();
+        writeln!(&mut out, "    \"re_entry_drops\": {},", counters.re_entry_drops).unwrap();
+        writeln!(&mut out, "    \"helper_failures\": {},", counters.helper_failures).unwrap();
+        writeln!(&mut out, "    \"budget_failures\": {},", counters.budget_failures).unwrap();
+        writeln!(&mut out, "    \"verifier_failures\": {},", counters.verifier_failures).unwrap();
+        writeln!(&mut out, "    \"load_failures\": {},", counters.load_failures).unwrap();
+        writeln!(&mut out, "    \"attach_failures\": {},", counters.attach_failures).unwrap();
+        writeln!(&mut out, "    \"consumer_corrupt_records\": {},", counters.consumer_corrupt_records).unwrap();
+        writeln!(&mut out, "    \"consumer_out_of_bounds\": {},", counters.consumer_out_of_bounds).unwrap();
+        writeln!(&mut out, "    \"per_cpu_lost\": [").unwrap();
+        for (i, &(cpu, count)) in counters.per_cpu_lost.iter().enumerate() {
+            let comma = if i + 1 < counters.per_cpu_lost.len() { "," } else { "" };
+            writeln!(&mut out, "      {{\"cpu\": {}, \"lost\": {}}}{}", cpu, count, comma).unwrap();
+        }
+        writeln!(&mut out, "    ]").unwrap();
+        writeln!(&mut out, "  }},").unwrap();
+
     }
-    writeln!(&mut out, "    ]").unwrap();
-    writeln!(&mut out, "  }},").unwrap();
 
     // cpu_stats array
     writeln!(&mut out, "  \"cpu_stats\": [").unwrap();
@@ -278,8 +322,8 @@ pub fn render_json(
         let comm_str = t.comm.as_deref().unwrap_or("");
         writeln!(
             &mut out,
-            "    {{\"task_id\": {}, \"comm\": \"{}\", \"pid\": {}, \"tid\": {}, \"on_cpu_time_ns\": {}, \"off_cpu_wait_ns\": {}, \"block_count\": {}, \"wake_count\": {}, \"sample_count\": {}}}{}",
-            t.task_id, comm_str, t.pid, t.tid, t.on_cpu_time_ns, t.off_cpu_wait_ns, t.block_count, t.wake_count, t.sample_count, comma
+            "    {{\"task_id\": {}, \"comm\": {}, \"pid\": {}, \"tid\": {}, \"on_cpu_time_ns\": {}, \"off_cpu_wait_ns\": {}, \"block_count\": {}, \"wake_count\": {}, \"sample_count\": {}}}{}",
+            t.task_id, json_string(comm_str), t.pid, t.tid, t.on_cpu_time_ns, t.off_cpu_wait_ns, t.block_count, t.wake_count, t.sample_count, comma
         ).unwrap();
     }
     writeln!(&mut out, "  ],").unwrap();
@@ -319,9 +363,12 @@ pub fn render_on_cpu_folded(
     // 1. If software samples exist, fold by comm;pc
     let mut has_software_samples = false;
     for ev in events {
-        if let EventPayload::SoftwareSample { pc, .. } = ev.payload {
+        if let EventPayload::SoftwareSample { pc, .. } | EventPayload::SoftwareSampleV2 { pc, .. } = ev.payload {
             has_software_samples = true;
-            let comm = ev.comm.as_deref().unwrap_or("[kernel]");
+            let fallback = if matches!(ev.payload, EventPayload::SoftwareSampleV2 { mode: 2, .. }) {
+                format!("pid:{}:tid:{}", ev.pid, ev.tid)
+            } else { "[kernel]".to_string() };
+            let comm = ev.comm.as_deref().unwrap_or(&fallback);
             let stack = format!("{}{};pc:0x{:x}", prefix, comm, pc);
             *collapsed_stacks.entry(stack).or_insert(0) += 1;
         }
@@ -371,7 +418,7 @@ pub fn render_off_cpu_folded(
     stats: &SessionStatistics,
 ) -> FoldedOutput {
     let mut out = String::new();
-    let mut is_comp = analyzer.is_complete();
+    let mut is_comp = analyzer.attribution_claim_allowed();
     let status = analyzer.status_code();
 
     let prefix = if is_comp { "" } else { "[INCOMPLETE_CAPTURE];" };
@@ -415,4 +462,46 @@ pub fn render_off_cpu_folded(
         is_complete: is_comp,
         status,
     }
+}
+
+
+// The capture stores arbitrary UTF-8 strings, including original JSON evidence;
+// quote them rather than inserting them into an emitted JSON document verbatim.
+fn json_string(value: &str) -> String {
+    let mut out = String::from("\"");
+    for ch in value.chars() {
+        match ch {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            ch if ch < '\u{20}' => { write!(&mut out, "\\u{:04x}", ch as u32).unwrap(); }
+            ch => out.push(ch),
+        }
+    }
+    out.push('"');
+    out
+}
+
+fn render_diagnostics_json(out: &mut String, diagnostics: &bpf_capture::RuntimeDiagnostics) {
+    write!(out, "{{\"counters\":[").unwrap();
+    for (i, counter) in diagnostics.counters.iter().enumerate() {
+        if i != 0 { out.push(','); }
+        let kind = match counter.kind { bpf_capture::CounterKind::Activity => "activity", bpf_capture::CounterKind::Loss => "loss", bpf_capture::CounterKind::Error => "error" };
+        write!(out, "{{\"name\":{},\"scope\":{},\"kind\":{},\"value\":{}}}", json_string(&counter.name), json_string(&counter.scope), json_string(kind),
+            counter.value.map(|v| v.to_string()).unwrap_or_else(|| "null".into())).unwrap();
+    }
+    write!(out, "],\"identities\":[").unwrap();
+    for (i, identity) in diagnostics.identities.iter().enumerate() {
+        if i != 0 { out.push(','); }
+        write!(out, "{{\"name\":{},\"value\":{}}}", json_string(&identity.name), identity.value.as_deref().map(json_string).unwrap_or_else(|| "null".into())).unwrap();
+    }
+    write!(out, "],\"phases\":[").unwrap();
+    for (i, phase) in diagnostics.phases.iter().enumerate() {
+        if i != 0 { out.push(','); }
+        write!(out, "{{\"name\":{},\"start_ns\":{},\"stop_ns\":{},\"iterations\":{},\"sampler_mapped_bytes\":{}}}", json_string(&phase.name), phase.start_ns, phase.stop_ns,
+            phase.iterations, phase.mapped_bytes.map(|v| v.to_string()).unwrap_or_else(|| "null".into())).unwrap();
+    }
+    write!(out, "],\"evidence_json\":{}}}", diagnostics.evidence_json.as_deref().map(json_string).unwrap_or_else(|| "null".into())).unwrap();
 }
