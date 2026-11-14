@@ -74,6 +74,7 @@ fn riscv_trap_handler(tf: &mut TrapFrame, from_user: bool) {
             }
             Trap::Exception(E::Breakpoint) => handle_breakpoint(&mut tf.sepc),
             Trap::Interrupt(_) => {
+                crate::trap::observe_irq(scause.bits(), tf, from_user);
                 handle_trap!(IRQ, scause.bits());
             }
             _ => {

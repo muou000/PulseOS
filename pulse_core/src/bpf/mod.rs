@@ -25,3 +25,6 @@ pub use program::*;
 pub use ring_buffer::*;
 
 
+
+#[cfg(feature = "bpf-trace")]
+pub mod sampling;

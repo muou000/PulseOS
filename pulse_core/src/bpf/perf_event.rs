@@ -8,18 +8,18 @@ use alloc::sync::{Arc, Weak};
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use axerrno::LinuxError;
-use pulse_bpf_schema::{PerfEventContext, TracepointId};
+use pulse_bpf_schema::{PerfEventContext, PerfSampleContext, TracepointId};
 
 #[cfg(target_os = "none")]
 use super::{
-    interpreter::BpfVmError,
+    interpreter::{BpfEnv, BpfVmError},
     map::PerfEventOutputSink,
     program::{BpfProgType, BpfProgram},
 };
 
 #[cfg(not(target_os = "none"))]
 use super::{
-    core_interpreter::BpfVmError,
+    core_interpreter::{BpfEnv, BpfVmError},
     core_map::PerfEventOutputSink,
     core_program::{BpfProgType, BpfProgram},
 };
@@ -69,6 +69,58 @@ static SESSION_SAMPLE_COUNTERS: SessionSampleCounters = SessionSampleCounters {
 static ACTIVE_PERF_EVENTS: spin::Mutex<Vec<Weak<PerfEvent>>> = spin::Mutex::new(Vec::new());
 static ACTIVE_PERF_EVENT_COUNT: AtomicUsize = AtomicUsize::new(0);
 
+/// Source snapshot captured before deferred execution.
+#[derive(Clone, Copy, Debug)]
+pub struct RuntimeSample {
+    pub timestamp_ns: u64,
+    pub cpu: usize,
+    pub pid: u64,
+    pub tid: u64,
+    pub task_id: u64,
+    pub ip: u64,
+    pub user_mode: bool,
+    pub task_clock_ns: u64,
+    pub generation: u64,
+}
+
+struct ObservationEnv {
+    timestamp_ns: u64,
+    cpu: u32,
+}
+
+impl BpfEnv for ObservationEnv {
+    fn ktime_get_ns(&self) -> u64 {
+        self.timestamp_ns
+    }
+
+    fn get_smp_processor_id(&self) -> u32 {
+        self.cpu
+    }
+}
+
+struct RuntimeSamplingGuard(usize);
+
+impl Drop for RuntimeSamplingGuard {
+    fn drop(&mut self) {
+        IN_SAMPLING_CPU[self.0].store(false, Ordering::Release);
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct RuntimeSampleCounters {
+    /// Source observations matching this event's scope, before validation.
+    pub observed: u64,
+    /// Elapsed sampling periods with no distinct observed PC. They are not
+    /// replayed as additional samples and are not transport-record losses.
+    pub skipped_periods: u64,
+    /// Observations rejected by disable, detach or an old generation.
+    pub cancelled: u64,
+    /// Invalid identities, PC, counter ordering or VM execution state.
+    pub invalid: u64,
+}
+
+pub use pulse_bpf_schema::{observation_generation, advance_observation_generation};
+
 pub fn total_perf_event_sample_counters() -> PerfEventSampleCounters {
     PerfEventSampleCounters {
         delivered_samples: SESSION_SAMPLE_COUNTERS.delivered_samples.load(Ordering::Relaxed),
@@ -88,7 +140,10 @@ pub fn reset_total_perf_event_sample_counters() {
 pub fn register_active_perf_event(event: &Arc<PerfEvent>) {
     let mut list = ACTIVE_PERF_EVENTS.lock();
     list.retain(|w| w.upgrade().is_some());
-    list.push(Arc::downgrade(event));
+    let weak = Arc::downgrade(event);
+    if !list.iter().any(|registered| registered.ptr_eq(&weak)) {
+        list.push(weak);
+    }
     ACTIVE_PERF_EVENT_COUNT.store(list.len(), Ordering::Release);
 }
 
@@ -102,6 +157,38 @@ pub fn unregister_active_perf_event(event: &Arc<PerfEvent>) {
         }
     });
     ACTIVE_PERF_EVENT_COUNT.store(list.len(), Ordering::Release);
+}
+
+/// IRQ-side hint only: no event state or registry lock is acquired.
+pub fn has_active_perf_events() -> bool {
+    ACTIVE_PERF_EVENT_COUNT.load(Ordering::Acquire) != 0
+}
+
+/// Dispatch a frozen source snapshot from worker context. No registry lock is
+/// held while executing programs, running helpers, or notifying consumers.
+pub fn dispatch_runtime_sample(sample: &RuntimeSample) -> usize {
+    active_perf_events().iter().filter(|event| event.dispatch_sample(sample) == Ok(true)).count()
+}
+
+/// Dispatch an already dequeued tracepoint without retaining queue/IRQ guards.
+pub fn dispatch_tracepoint(id: TracepointId, bytes: &[u8], generation: u64) -> usize {
+    active_perf_events().iter()
+        .filter(|event| event.dispatch_tracepoint(id, bytes, generation) == Ok(true)).count()
+}
+
+fn active_perf_events() -> Vec<Arc<PerfEvent>> {
+    let mut list = ACTIVE_PERF_EVENTS.lock();
+    let mut events = Vec::with_capacity(list.len());
+    list.retain(|weak| {
+        if let Some(event) = weak.upgrade() {
+            events.push(event);
+            true
+        } else {
+            false
+        }
+    });
+    ACTIVE_PERF_EVENT_COUNT.store(list.len(), Ordering::Release);
+    events
 }
 
 pub fn perf_event_tick(now_ns: u64, cpu: usize, pid: u64, tid: u64, task_id: u64) {
@@ -526,10 +613,13 @@ struct PerfEventState {
     period_accumulated_ns: u64,
     last_sample_ns: u64,
     attached_prog: Option<Arc<BpfProgram>>,
+    activation_generation: u64,
 }
 
 pub struct PerfEvent {
     spec: PerfEventSpec,
+    // Stable scheduler identity, unlike the numeric TID selected at open time.
+    bound_task_id: AtomicU64,
     state: spin::Mutex<PerfEventState>,
     buffer: spin::Mutex<Option<Arc<PerfBuffer>>>,
     delivered_samples: AtomicU64,
@@ -537,16 +627,24 @@ pub struct PerfEvent {
     helper_failures: AtomicU64,
     budget_failures: AtomicU64,
     readable_sequence: AtomicU64,
+    runtime_observed: AtomicU64,
+    runtime_skipped_periods: AtomicU64,
+    runtime_cancelled: AtomicU64,
+    runtime_invalid: AtomicU64,
     #[cfg(target_os = "none")]
     read_wait_queue: axtask::WaitQueue,
 }
 
 impl PerfEvent {
+    /// `now_ns` is the selected event clock: monotonic time for CPU clock,
+    /// accumulated thread CPU time for task clock. The same clock must be used
+    /// by enable/disable/reset/read `_at` operations, never worker wall time.
     pub fn new(spec: PerfEventSpec, now_ns: u64) -> Self {
         let enabled = !spec.disabled;
         let last_enabled_ns = if enabled { now_ns } else { 0 };
         Self {
             spec,
+            bound_task_id: AtomicU64::new(0),
             state: spin::Mutex::new(PerfEventState {
                 enabled,
                 accumulated_ns: 0,
@@ -555,6 +653,7 @@ impl PerfEvent {
                 period_accumulated_ns: 0,
                 last_sample_ns: now_ns,
                 attached_prog: None,
+                activation_generation: advance_observation_generation(),
             }),
             buffer: spin::Mutex::new(None),
             delivered_samples: AtomicU64::new(0),
@@ -562,9 +661,48 @@ impl PerfEvent {
             helper_failures: AtomicU64::new(0),
             budget_failures: AtomicU64::new(0),
             readable_sequence: AtomicU64::new(0),
+            runtime_observed: AtomicU64::new(0),
+            runtime_skipped_periods: AtomicU64::new(0),
+            runtime_cancelled: AtomicU64::new(0),
+            runtime_invalid: AtomicU64::new(0),
             #[cfg(target_os = "none")]
             read_wait_queue: axtask::WaitQueue::new(),
         }
+    }
+
+    /// Bind a task-scoped event to its selected thread's stable scheduler ID.
+    /// An exec TID rebind must not retarget an open event to a different thread.
+    /// Binding is one-time (or idempotent for the same ID) and invalidates any
+    /// observations queued before the binding was published.
+    pub fn bind_task_identity(&self, task_id: u64) -> Result<(), LinuxError> {
+        if task_id == 0 || !matches!(self.spec.scope, PerfEventScope::Task { .. }) {
+            return Err(LinuxError::EINVAL);
+        }
+        let mut state = self.state.lock();
+        match self.bound_task_id.compare_exchange(0, task_id, Ordering::AcqRel, Ordering::Acquire) {
+            Ok(_) => {
+                state.activation_generation = advance_observation_generation();
+                Ok(())
+            }
+            Err(bound) if bound == task_id => Ok(()),
+            Err(_) => Err(LinuxError::EBUSY),
+        }
+    }
+
+    fn matches_task_identity(&self, selected_tid: u64, observed_tid: u64, observed_task_id: u64) -> bool {
+        if observed_tid == 0 {
+            return false;
+        }
+        let bound = self.bound_task_id.load(Ordering::Acquire);
+        if bound != 0 {
+            return bound == observed_task_id;
+        }
+        // Legacy host state-model tests have no live Thread to bind. Production
+        // FDs must bind during construction; an unbound kernel event fails closed.
+        #[cfg(not(target_os = "none"))]
+        { selected_tid != 0 && selected_tid == observed_tid }
+        #[cfg(target_os = "none")]
+        { let _ = selected_tid; false }
     }
 
     pub fn spec(&self) -> &PerfEventSpec {
@@ -598,6 +736,7 @@ impl PerfEvent {
     pub fn enable_at(&self, now_ns: u64) {
         let mut state = self.state.lock();
         if !state.enabled {
+            state.activation_generation = advance_observation_generation();
             state.enabled = true;
             state.last_enabled_ns = now_ns;
             state.last_sample_ns = now_ns;
@@ -611,11 +750,13 @@ impl PerfEvent {
             let elapsed = now_ns.saturating_sub(state.last_enabled_ns);
             state.accumulated_ns = state.accumulated_ns.saturating_add(elapsed);
             state.enabled = false;
+            state.activation_generation = advance_observation_generation();
         }
     }
 
     pub fn reset_at(&self, now_ns: u64) {
         let mut state = self.state.lock();
+        state.activation_generation = advance_observation_generation();
         state.accumulated_ns = 0;
         state.last_enabled_ns = now_ns;
         state.last_sample_ns = now_ns;
@@ -624,8 +765,175 @@ impl PerfEvent {
 
     pub fn set_period(&self, period: u64) {
         let mut state = self.state.lock();
+        state.activation_generation = advance_observation_generation();
         state.sample_period = period;
         state.period_accumulated_ns = 0;
+    }
+
+    /// Change the period with a fresh reading of this event's selected clock.
+    /// Previously elapsed time must not be charged using the new period.
+    pub fn set_period_at(&self, period: u64, now_ns: u64) {
+        let mut state = self.state.lock();
+        state.activation_generation = advance_observation_generation();
+        state.sample_period = period;
+        state.period_accumulated_ns = 0;
+        state.last_sample_ns = now_ns;
+    }
+
+    pub fn runtime_counters(&self) -> RuntimeSampleCounters {
+        RuntimeSampleCounters {
+            observed: self.runtime_observed.load(Ordering::Relaxed),
+            skipped_periods: self.runtime_skipped_periods.load(Ordering::Relaxed),
+            cancelled: self.runtime_cancelled.load(Ordering::Relaxed),
+            invalid: self.runtime_invalid.load(Ordering::Relaxed),
+        }
+    }
+
+    /// Consume one source observation. A delayed observation may advance past
+    /// several periods, but can execute the attached program at most once.
+    ///
+    /// The attachment is accepted under the state lock and kept alive by Arc.
+    /// A control operation may cancel queued observations but cannot recall an
+    /// already accepted invocation; that invocation never switches to a newly
+    /// attached program. No state or registry lock is held across BPF execution.
+    pub fn dispatch_sample(&self, sample: &RuntimeSample) -> Result<bool, LinuxError> {
+        let clock_ns = match (self.spec.clock, self.spec.scope) {
+            (PerfEventClock::CpuClock, PerfEventScope::PerCpu { cpu }) if cpu == sample.cpu => sample.timestamp_ns,
+            (PerfEventClock::TaskClock, PerfEventScope::Task { pid })
+                if self.matches_task_identity(pid, sample.tid, sample.task_id) => sample.task_clock_ns,
+            _ => return Ok(false),
+        };
+        self.runtime_observed.fetch_add(1, Ordering::Relaxed);
+        if sample.cpu >= BPF_MAX_SAMPLING_CPUS || sample.pid > u32::MAX as u64
+            || sample.tid > u32::MAX as u64 || sample.ip == 0
+        {
+            self.runtime_invalid.fetch_add(1, Ordering::Relaxed);
+            return Ok(false);
+        }
+        let (prog, period, due) = {
+            let mut state = self.state.lock();
+            if !state.enabled || state.attached_prog.is_none()
+                || state.activation_generation == u64::MAX || sample.generation == u64::MAX
+                || sample.generation < state.activation_generation
+                || sample.generation > observation_generation()
+            {
+                self.runtime_cancelled.fetch_add(1, Ordering::Relaxed);
+                return Ok(false);
+            }
+            if state.sample_period == 0 {
+                return Ok(false);
+            }
+            let Some(elapsed) = clock_ns.checked_sub(state.last_sample_ns) else {
+                self.runtime_invalid.fetch_add(1, Ordering::Relaxed);
+                return Ok(false);
+            };
+            state.last_sample_ns = clock_ns;
+            state.period_accumulated_ns = state.period_accumulated_ns.saturating_add(elapsed);
+            let due = state.period_accumulated_ns / state.sample_period;
+            state.period_accumulated_ns %= state.sample_period;
+            if due == 0 {
+                return Ok(false);
+            }
+            (state.attached_prog.as_ref().unwrap().clone(), state.sample_period, due)
+        };
+        self.runtime_skipped_periods.fetch_add(due - 1, Ordering::Relaxed);
+        let context = PerfSampleContext {
+            base: PerfEventContext::new(period, 0, sample.timestamp_ns,
+                sample.cpu as u32, sample.pid as u32, sample.tid as u32, sample.task_id),
+            ip: sample.ip,
+            mode: if sample.user_mode { 2 } else { 1 },
+            version: 2,
+        };
+        self.run_observation(prog, &context.to_bytes(), sample.cpu, sample.timestamp_ns)
+    }
+
+    fn run_observation(&self, prog: Arc<BpfProgram>, context: &[u8], cpu: usize, timestamp_ns: u64) -> Result<bool, LinuxError> {
+        if IN_SAMPLING_CPU[cpu]
+            .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed).is_err()
+        {
+            self.re_entry_drops.fetch_add(1, Ordering::Relaxed);
+            prog.record_re_entry_drop();
+            SESSION_SAMPLE_COUNTERS.re_entry_drops.fetch_add(1, Ordering::Relaxed);
+            return Ok(false);
+        }
+        let _guard = RuntimeSamplingGuard(cpu);
+        match prog.run_with_env(context, &ObservationEnv { timestamp_ns, cpu: cpu as u32 }) {
+            Ok(_) => {
+                self.delivered_samples.fetch_add(1, Ordering::Relaxed);
+                prog.record_sample_delivered();
+                SESSION_SAMPLE_COUNTERS.delivered_samples.fetch_add(1, Ordering::Relaxed);
+                Ok(true)
+            }
+            Err(BpfVmError::StepLimitExceeded) => {
+                self.budget_failures.fetch_add(1, Ordering::Relaxed);
+                prog.record_budget_failure();
+                SESSION_SAMPLE_COUNTERS.budget_failures.fetch_add(1, Ordering::Relaxed);
+                Ok(false)
+            }
+            Err(BpfVmError::RecursionLimitExceeded) => {
+                self.re_entry_drops.fetch_add(1, Ordering::Relaxed);
+                prog.record_re_entry_drop();
+                SESSION_SAMPLE_COUNTERS.re_entry_drops.fetch_add(1, Ordering::Relaxed);
+                Ok(false)
+            }
+            Err(BpfVmError::HelperFailed(_)) | Err(BpfVmError::InvalidHelperCall(_)) => {
+                self.helper_failures.fetch_add(1, Ordering::Relaxed);
+                prog.record_helper_failure();
+                SESSION_SAMPLE_COUNTERS.helper_failures.fetch_add(1, Ordering::Relaxed);
+                Ok(false)
+            }
+            Err(_) => {
+                self.runtime_invalid.fetch_add(1, Ordering::Relaxed);
+                Ok(false)
+            }
+        }
+    }
+
+    /// Execute the original fixed-layout trace context. Task scope refers to
+    /// ContextCommon.tid (the event subject), not a guessed PID or wake target.
+    pub fn dispatch_tracepoint(&self, id: TracepointId, bytes: &[u8], generation: u64) -> Result<bool, LinuxError> {
+        if self.spec.clock != PerfEventClock::Tracepoint(id) {
+            return Ok(false);
+        }
+        let metadata = pulse_bpf_schema::lookup_by_id(id.as_u32()).map_err(|_| LinuxError::EINVAL)?;
+        if bytes.len() != metadata.context_size
+            || u32::from_le_bytes(bytes[0..4].try_into().unwrap()) != id.as_u32()
+            || u32::from_le_bytes(bytes[4..8].try_into().unwrap()) != metadata.version
+        {
+            self.runtime_invalid.fetch_add(1, Ordering::Relaxed);
+            return Ok(false);
+        }
+        let timestamp_ns = u64::from_le_bytes(bytes[8..16].try_into().unwrap());
+        let cpu = u32::from_le_bytes(bytes[16..20].try_into().unwrap()) as usize;
+        let tid = u32::from_le_bytes(bytes[24..28].try_into().unwrap()) as u64;
+        let task_id = u64::from_le_bytes(bytes[32..40].try_into().unwrap());
+        if cpu >= BPF_MAX_SAMPLING_CPUS
+            || matches!(self.spec.scope, PerfEventScope::Task { .. }) && tid == 0
+        {
+            self.runtime_invalid.fetch_add(1, Ordering::Relaxed);
+            return Ok(false);
+        }
+        let matches_scope = match self.spec.scope {
+            PerfEventScope::PerCpu { cpu: selected } => selected == cpu,
+            PerfEventScope::Task { pid: selected } => self.matches_task_identity(selected, tid, task_id),
+        };
+        if !matches_scope {
+            return Ok(false);
+        }
+        self.runtime_observed.fetch_add(1, Ordering::Relaxed);
+        let prog = {
+            let state = self.state.lock();
+            if !state.enabled || state.attached_prog.is_none()
+                || state.activation_generation == u64::MAX || generation == u64::MAX
+                || generation < state.activation_generation
+                || generation > observation_generation()
+            {
+                self.runtime_cancelled.fetch_add(1, Ordering::Relaxed);
+                return Ok(false);
+            }
+            state.attached_prog.as_ref().unwrap().clone()
+        };
+        self.run_observation(prog, bytes, cpu, timestamp_ns)
     }
 
     pub fn sample_at(
@@ -790,12 +1098,23 @@ impl PerfEvent {
                 Ok(0)
             }
             PERF_EVENT_IOC_PERIOD => {
-                self.set_period(arg as u64);
+                self.set_period_at(arg as u64, now_ns);
                 Ok(0)
             }
             _ => Err(LinuxError::ENOTTY),
         }
     }
+}
+
+// Serialize count transitions with the producer-mask update. Otherwise an old
+// last-detach could clear the mask after a new first-attach has set it. Producers
+// only read axtask's atomic mask and never acquire this control-plane lock.
+static TRACEPOINT_SUBSCRIBER_CONTROL: spin::Mutex<()> = spin::Mutex::new(());
+
+#[cfg(test)]
+pub fn tracepoint_subscriber_count_for_test(id: TracepointId) -> usize {
+    let _guard = TRACEPOINT_SUBSCRIBER_CONTROL.lock();
+    TRACEPOINT_SUBSCRIBER_COUNTS[id as usize].load(Ordering::Relaxed)
 }
 
 static TRACEPOINT_SUBSCRIBER_COUNTS: [AtomicUsize; 32] = [
@@ -834,6 +1153,7 @@ static TRACEPOINT_SUBSCRIBER_COUNTS: [AtomicUsize; 32] = [
 ];
 
 fn register_tracepoint_probe(tp_id: pulse_bpf_schema::TracepointId) {
+    let _guard = TRACEPOINT_SUBSCRIBER_CONTROL.lock();
     let idx = tp_id as usize;
     if idx < TRACEPOINT_SUBSCRIBER_COUNTS.len() {
         if TRACEPOINT_SUBSCRIBER_COUNTS[idx].fetch_add(1, Ordering::SeqCst) == 0 {
@@ -844,6 +1164,7 @@ fn register_tracepoint_probe(tp_id: pulse_bpf_schema::TracepointId) {
 }
 
 fn unregister_tracepoint_probe(tp_id: pulse_bpf_schema::TracepointId) {
+    let _guard = TRACEPOINT_SUBSCRIBER_CONTROL.lock();
     let idx = tp_id as usize;
     if idx < TRACEPOINT_SUBSCRIBER_COUNTS.len() {
         if TRACEPOINT_SUBSCRIBER_COUNTS[idx].fetch_sub(1, Ordering::SeqCst) == 1 {
@@ -874,6 +1195,7 @@ impl PerfEvent {
                 return Err(LinuxError::EINVAL);
             }
         }
+        state.activation_generation = advance_observation_generation();
         state.attached_prog = Some(prog);
         if let PerfEventClock::Tracepoint(tp_id) = self.spec.clock {
             register_tracepoint_probe(tp_id);
@@ -885,6 +1207,7 @@ impl PerfEvent {
         let mut state = self.state.lock();
         if let Some(ref attached) = state.attached_prog {
             if Arc::ptr_eq(attached, prog) {
+                state.activation_generation = advance_observation_generation();
                 state.attached_prog = None;
                 if let PerfEventClock::Tracepoint(tp_id) = self.spec.clock {
                     unregister_tracepoint_probe(tp_id);

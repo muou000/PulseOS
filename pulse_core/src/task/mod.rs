@@ -3,6 +3,7 @@ pub mod exec;
 mod process;
 mod process_registry;
 mod signal;
+mod sampling_clock;
 mod thread;
 pub mod uaccess;
 
@@ -163,6 +164,7 @@ pub fn current_thread() -> LinuxResult<Arc<Thread>> {
 
 #[cfg(feature = "bpf-trace")]
 pub fn emit_bpf_task_metadata(task: &axtask::TaskInner, pid: u64, tid: u64) {
+    task.set_bpf_identity(pid, tid);
     let name = task.name();
     axtask::bpf_trace::task_metadata(task.id().as_u64(), pid, tid, name.as_bytes());
 }
@@ -498,6 +500,8 @@ pub fn adjust_absolute_timers() {
 /// Register the itimer tick hook with axtask. Should be called once during
 /// pulse_core initialization.
 pub fn init_itimer_hook() {
+    #[cfg(feature = "bpf-trace")]
+    crate::bpf::sampling::init();
     start_timer_worker();
     axtask::register_timer_hook(itimer_tick_hook);
     axnet::register_have_signals_callback(current_have_signals);

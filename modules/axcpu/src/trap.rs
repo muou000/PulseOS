@@ -22,6 +22,24 @@ pub enum AddressError {
 #[def_trap_handler]
 pub static IRQ: [fn(usize) -> bool];
 
+/// Read-only IRQ observers invoked before the normal platform IRQ handler.
+///
+/// An observer receives the interrupted register state, not a later worker's
+/// registers. Observers run with local IRQs disabled and must remain bounded:
+/// copy scalar state to preallocated storage without sleeping, waiting on locks,
+/// enabling interrupts, or scheduling. No reference to `TrapFrame` may be kept
+/// after the callback returns. Registration does not consume the interrupt.
+#[def_trap_handler]
+pub static IRQ_OBSERVER: [fn(usize, &TrapFrame, bool)];
+
+/// Notify observers while the architecture trap frame is still current.
+#[inline]
+pub(crate) fn observe_irq(vector: usize, tf: &TrapFrame, from_user: bool) {
+    for observer in IRQ_OBSERVER.iter() {
+        observer(vector, tf, from_user);
+    }
+}
+
 /// A slice of page fault handler functions.
 #[def_trap_handler]
 pub static PAGE_FAULT: [fn(&mut TrapFrame, VirtAddr, PageFaultFlags, bool) -> bool];

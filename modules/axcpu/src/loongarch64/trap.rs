@@ -166,6 +166,7 @@ fn loongarch64_trap_handler(tf: &mut TrapFrame, from_user: bool) {
         Trap::Exception(Exception::Breakpoint) => handle_breakpoint(&mut tf.era),
         Trap::Interrupt(_) => {
             let irq_num: usize = estat.is().trailing_zeros() as usize;
+            crate::trap::observe_irq(irq_num, tf, from_user);
             handle_trap!(IRQ, irq_num);
         }
         _ => {

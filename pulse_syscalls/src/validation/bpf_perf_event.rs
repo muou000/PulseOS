@@ -25,6 +25,15 @@ mod tests {
     }
 
     #[test]
+    fn unimplemented_privilege_exclusions_are_not_silently_accepted() {
+        for bit in [4, 5, 6, 7] {
+            let mut attr = sample_attr(PERF_TYPE_SOFTWARE, PERF_COUNT_SW_CPU_CLOCK);
+            attr.flags = 1 << bit; // Linux exclude_user/kernel/hv/idle flags.
+            assert_eq!(validate_perf_event_attr(&attr, 64), Err(LinuxError::EOPNOTSUPP));
+        }
+    }
+
+    #[test]
     fn perf_event_attr_size_validation() {
         let mut attr = sample_attr(PERF_TYPE_SOFTWARE, PERF_COUNT_SW_CPU_CLOCK);
 

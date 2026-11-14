@@ -179,6 +179,14 @@ pub fn validate_perf_event_attr(
         _ => return Err(LinuxError::ENOENT),
     };
 
+    // The runtime currently samples both modes. Reject unsupported exclusions
+    // instead of returning success and reporting forbidden privilege domains.
+    let exclusions = PERF_ATTR_FLAG_EXCLUDE_USER | PERF_ATTR_FLAG_EXCLUDE_KERNEL
+        | PERF_ATTR_FLAG_EXCLUDE_HV | PERF_ATTR_FLAG_EXCLUDE_IDLE;
+    if attr.flags & exclusions != 0 {
+        return Err(LinuxError::EOPNOTSUPP);
+    }
+
     // Bitfield validations
     if (attr.flags & PERF_ATTR_FLAG_FREQ) != 0 {
         return Err(LinuxError::EOPNOTSUPP);
@@ -358,7 +366,10 @@ pub fn sys_perf_event_open(
     let is_root = process.is_root_user()
         || process.has_capability(CAP_SYS_ADMIN)
         || process.has_capability(CAP_PERFMON);
-    let current_pid = process.pid();
+    let current_pid = match pulse_core::task::current_thread() {
+        Ok(thread) => thread.tid(),
+        Err(e) => return -e.code() as isize,
+    };
     let max_cpus = axconfig::plat::MAX_CPU_NUM;
 
     let scope_params = ScopeValidationParams {
@@ -367,7 +378,7 @@ pub fn sys_perf_event_open(
         is_root,
         current_pid,
         max_cpus,
-        process_exists: &|target_pid| pulse_core::task::process_by_pid(target_pid).is_some(),
+        process_exists: &|target_tid| pulse_core::task::thread_by_tid_global(target_tid).is_some(),
     };
 
     let scope = match validate_perf_event_scope(scope_params) {
@@ -390,9 +401,15 @@ pub fn sys_perf_event_open(
         cloexec,
     };
 
-    let now_ns = pulse_core::bpf::PerfEventObject::current_time_ns_for_spec(&spec);
+    let now_ns = match pulse_core::bpf::PerfEventObject::current_time_ns_for_spec(&spec) {
+        Ok(now_ns) => now_ns,
+        Err(e) => return -e.code() as isize,
+    };
     let event = alloc::sync::Arc::new(pulse_core::bpf::PerfEvent::new(spec, now_ns));
-    let object = alloc::sync::Arc::new(pulse_core::bpf::PerfEventObject::new(event));
+    let object = match pulse_core::bpf::PerfEventObject::new(event) {
+        Ok(object) => alloc::sync::Arc::new(object),
+        Err(e) => return -e.code() as isize,
+    };
     let fd_flags = if cloexec {
         pulse_core::fd_table::FdFlags::CLOEXEC
     } else {

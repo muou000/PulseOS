@@ -100,6 +100,14 @@ pub fn sys_bpf(cmd: i32, attr: usize, size: usize) -> isize {
                 let Some(event_obj) = perf_obj.as_any().downcast_ref::<PerfEventObject>() else {
                     return Err(LinuxError::EINVAL);
                 };
+                // Output slots must never own sampling sources: source ->
+                // program -> map -> source would otherwise form an Arc cycle
+                // that keeps sampling after the last descriptor is closed.
+                if event_obj.event().spec().clock != pulse_core::bpf::PerfEventClock::BpfOutput
+                    || event_obj.event().cpu() != Some(cpu as usize)
+                {
+                    return Err(LinuxError::EINVAL);
+                }
                 Some((cpu, perf_fd, event_obj.event().clone()))
             } else {
                 None
@@ -513,9 +521,9 @@ pub fn run_bpf_guest_checks() -> Result<(), LinuxError> {
         disabled: true,
         cloexec: true,
     };
-    let cpu_now_ns = pulse_core::bpf::PerfEventObject::current_time_ns_for_spec(&cpu_spec);
+    let cpu_now_ns = pulse_core::bpf::PerfEventObject::current_time_ns_for_spec(&cpu_spec)?;
     let cpu_event = alloc::sync::Arc::new(pulse_core::bpf::PerfEvent::new(cpu_spec, cpu_now_ns));
-    let cpu_obj = pulse_core::bpf::PerfEventObject::new(cpu_event.clone());
+    let cpu_obj = pulse_core::bpf::PerfEventObject::new(cpu_event.clone())?;
 
     let mut count_buf = [0u8; 8];
     // Initial read is 0
@@ -559,17 +567,19 @@ pub fn run_bpf_guest_checks() -> Result<(), LinuxError> {
         return Err(LinuxError::EINVAL);
     }
 
-    // 2. Task clock event
+    // 2. Task clock is for this actual thread, not an assumed PID 1 or
+    // a nonexistent identity silently counted using the wall clock.
+    let sampling_tid = pulse_core::task::current_thread()?.tid();
     let task_spec = pulse_core::bpf::PerfEventSpec {
         clock: pulse_core::bpf::PerfEventClock::TaskClock,
-        scope: pulse_core::bpf::PerfEventScope::Task { pid: 1 },
+        scope: pulse_core::bpf::PerfEventScope::Task { pid: sampling_tid },
         sample_period: 0,
         disabled: true,
         cloexec: false,
     };
-    let task_now_ns = pulse_core::bpf::PerfEventObject::current_time_ns_for_spec(&task_spec);
+    let task_now_ns = pulse_core::bpf::PerfEventObject::current_time_ns_for_spec(&task_spec)?;
     let task_event = alloc::sync::Arc::new(pulse_core::bpf::PerfEvent::new(task_spec, task_now_ns));
-    let task_obj = pulse_core::bpf::PerfEventObject::new(task_event.clone());
+    let task_obj = pulse_core::bpf::PerfEventObject::new(task_event.clone())?;
 
     task_obj.ioctl(pulse_core::bpf::PERF_EVENT_IOC_RESET, 0)?;
     task_obj.ioctl(pulse_core::bpf::PERF_EVENT_IOC_ENABLE, 0)?;
@@ -637,7 +647,7 @@ pub fn run_bpf_guest_checks() -> Result<(), LinuxError> {
         disabled: false,
         cloexec: true,
     };
-    let tp_now_ns = pulse_core::bpf::PerfEventObject::current_time_ns_for_spec(&tp_spec);
+    let tp_now_ns = pulse_core::bpf::PerfEventObject::current_time_ns_for_spec(&tp_spec)?;
     let tp_event = alloc::sync::Arc::new(pulse_core::bpf::PerfEvent::new(tp_spec, tp_now_ns));
 
     // Invalid target/program combination: Tracepoint program cannot attach to CPU clock perf event

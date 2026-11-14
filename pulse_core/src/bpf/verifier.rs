@@ -14,7 +14,7 @@ pub const MAX_CONTEXT_SIZE: usize = 80;
 #[inline]
 pub fn max_context_size_for_prog_type(prog_type: BpfProgType) -> usize {
     match prog_type {
-        BpfProgType::PerfEvent => core::mem::size_of::<pulse_bpf_schema::PerfEventContext>(),
+        BpfProgType::PerfEvent => pulse_bpf_schema::PerfSampleContext::SIZE,
         _ => MAX_CONTEXT_SIZE,
     }
 }

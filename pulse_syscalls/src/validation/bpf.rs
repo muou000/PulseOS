@@ -70,7 +70,7 @@ mod tests {
         assert_eq!(size_of::<ContextCommon>(), 40);
 
         assert_eq!(align_of::<EventRecord>(), 8);
-        assert_eq!(size_of::<EventRecord>(), 88);
+        assert_eq!(size_of::<EventRecord>(), 96); // includes private handoff generation
 
         // Every supported context type must fit within MAX_CONTEXT_SIZE (80 bytes)
         assert!(size_of::<TaskMetadataContext>() <= MAX_CONTEXT_SIZE);

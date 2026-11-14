@@ -188,7 +188,7 @@ fn test_event_record_layout_and_bounds() {
     use pulse_bpf_schema::*;
 
     assert_eq!(align_of::<EventRecord>(), 8);
-    assert_eq!(size_of::<EventRecord>(), 88);
+    assert_eq!(size_of::<EventRecord>(), 96);
 
     // Verify all 7 context types strictly fit in MAX_CONTEXT_SIZE (80 bytes)
     assert!(size_of::<TaskMetadataContext>() <= MAX_CONTEXT_SIZE);
@@ -391,4 +391,20 @@ fn bounded_queue_concurrent_drain_is_nonblocking_and_delivers_once() {
         assert_eq!(first.join().unwrap(), 1);
     });
     assert_eq!(queue.drain(2, |_, bytes| assert_eq!(bytes, &[2])), 1);
+}
+
+
+#[test]
+fn trace_queue_preserves_the_epoch_taken_before_observation() {
+    use pulse_bpf_schema::*;
+    let queue = BoundedTraceQueue::<2>::new();
+    let before = observation_generation();
+    queue.enqueue_with_generation(TracepointId::TaskWake, &[3, 1, 4], before).unwrap();
+    let after = advance_observation_generation();
+    assert!(after > before);
+    let mut observed = None;
+    assert_eq!(queue.drain_with_generation(1, |id, bytes, generation| {
+        observed = Some((id, bytes.to_vec(), generation));
+    }), 1);
+    assert_eq!(observed, Some((TracepointId::TaskWake, vec![3, 1, 4], before)));
 }

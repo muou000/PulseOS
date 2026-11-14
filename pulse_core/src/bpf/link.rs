@@ -7,7 +7,7 @@ use axerrno::LinuxError;
 
 use super::{
     perf_event::{
-        register_active_perf_event, unregister_active_perf_event, PerfEvent, PerfEventClock,
+        register_active_perf_event, PerfEvent, PerfEventClock,
         PERF_COUNT_SW_CPU_CLOCK, PERF_COUNT_SW_TASK_CLOCK, PERF_COUNT_SW_BPF_OUTPUT,
         PERF_TYPE_SOFTWARE, PERF_TYPE_TRACEPOINT,
     },
@@ -111,7 +111,8 @@ impl BpfLink {
         if self.detached.swap(true, Ordering::AcqRel) {
             return Err(LinuxError::EINVAL);
         }
-        unregister_active_perf_event(&self.target);
+        // Registration follows the PerfEvent object's lifetime. Removing it
+        // here would hide a later ioctl attachment on the still-open event FD.
         self.target.detach_program(&self.prog)?;
         Ok(())
     }

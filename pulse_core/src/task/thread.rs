@@ -18,6 +18,9 @@ use super::{Process, SignalAltStack, ThreadSignal};
 pub struct Thread {
     tid: AtomicU64,
     process_weak: Weak<Process>,
+    sampling_pid: u64,
+    sampling_task_id: u64,
+    sampling_clock: Mutex<super::sampling_clock::OnCpuClock>,
     signal: Arc<ThreadSignal>,
     exec_exit_requested: AtomicBool,
     clear_child_tid: AtomicUsize,
@@ -94,6 +97,9 @@ impl Thread {
             tid: AtomicU64::new(tid),
             signal: ThreadSignal::new(process.signal_shared()),
             process_weak: Arc::downgrade(&process),
+            sampling_pid: process.pid(),
+            sampling_task_id: tid,
+            sampling_clock: Mutex::new(super::sampling_clock::OnCpuClock::new()),
             exec_exit_requested: AtomicBool::new(false),
             clear_child_tid: AtomicUsize::new(0),
             set_child_tid: AtomicUsize::new(0),
@@ -163,6 +169,10 @@ impl Thread {
 
     pub(crate) fn set_tid_for_exec(&self, tid: u64) {
         self.tid.store(tid, Ordering::Release);
+        #[cfg(feature = "bpf-trace")]
+        if let Some(task) = axtask::current_may_uninit() {
+            task.set_bpf_identity(self.sampling_pid, tid);
+        }
     }
 
     pub fn request_exec_exit(&self) {
@@ -405,12 +415,35 @@ impl Thread {
         axtask::exit(final_code);
     }
 
+    /// Immutable process identity, available without upgrading a Weak in IRQ.
+    pub fn sampling_pid(&self) -> u64 {
+        self.sampling_pid
+    }
+
+    /// Task identity is established at creation and survives exec TID rebinding.
+    pub fn sampling_task_id(&self) -> u64 {
+        self.sampling_task_id
+    }
+
+    /// Nonblocking observation: an interrupted writer must never be waited on.
+    pub fn sampling_clock_ns(&self, now_ns: u64) -> Option<u64> {
+        // An IRQ-enabled syscall reader must not be interrupted while holding
+        // the clock mutex: the scheduler's leave hook uses this same mutex.
+        // IrqSave restores only IRQ state, unlike NoPreemptIrqSave; dropping it
+        // from the pre-handler observer cannot reschedule before IRQ dispatch.
+        let _irq_guard = kernel_guard::IrqSave::new();
+        let value = self.sampling_clock.try_lock().map(|clock| clock.read(now_ns));
+        value // the mutex guard has already been dropped before IRQ restoration
+    }
+
     pub fn on_enter_cpu(self: &Arc<Self>) {
-        let _ = self;
+        let _irq_guard = kernel_guard::IrqSave::new();
+        self.sampling_clock.lock().enter(axhal::time::monotonic_time_nanos());
     }
 
     pub fn on_leave_cpu(&self) {
-        let _ = self;
+        let _irq_guard = kernel_guard::IrqSave::new();
+        self.sampling_clock.lock().leave(axhal::time::monotonic_time_nanos());
     }
 }
 

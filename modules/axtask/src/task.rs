@@ -59,6 +59,8 @@ pub struct TaskInner {
     #[cfg(feature = "bpf-trace")]
     bpf_block_sequence: AtomicU64,
     #[cfg(feature = "bpf-trace")]
+    bpf_identity: AtomicU64,
+    #[cfg(feature = "bpf-trace")]
     bpf_pending_wait_context: SpinNoIrq<Option<crate::wait_queue::WaitContext>>,
 
     /// CPU affinity mask.
@@ -172,6 +174,25 @@ impl TaskInner {
     /// Gets the ID of the task.
     pub const fn id(&self) -> TaskId {
         self.id
+    }
+
+    /// Publishes PID/TID together, without taking process locks in event hooks.
+    /// Out-of-range identities remain explicitly unknown instead of truncating.
+    #[cfg(feature = "bpf-trace")]
+    pub fn set_bpf_identity(&self, pid: u64, tid: u64) -> bool {
+        let value = if pid <= u32::MAX as u64 && tid <= u32::MAX as u64 {
+            (pid << 32) | tid
+        } else {
+            0
+        };
+        self.bpf_identity.store(value, Ordering::Release);
+        value != 0
+    }
+
+    #[cfg(feature = "bpf-trace")]
+    pub(crate) fn bpf_identity(&self) -> (u32, u32) {
+        let value = self.bpf_identity.load(Ordering::Acquire);
+        ((value >> 32) as u32, value as u32)
     }
 
     #[cfg(feature = "bpf-trace")]
@@ -348,6 +369,8 @@ impl TaskInner {
             state: AtomicU8::new(TaskState::Ready as u8),
             #[cfg(feature = "bpf-trace")]
             bpf_block_sequence: AtomicU64::new(0),
+            #[cfg(feature = "bpf-trace")]
+            bpf_identity: AtomicU64::new(0),
             #[cfg(feature = "bpf-trace")]
             bpf_pending_wait_context: SpinNoIrq::new(None),
             // By default, the task is allowed to run on all CPUs.

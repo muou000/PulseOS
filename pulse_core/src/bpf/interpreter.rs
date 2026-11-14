@@ -62,7 +62,7 @@ impl BpfEnv for DefaultBpfEnv {
     fn ktime_get_ns(&self) -> u64 {
         #[cfg(target_os = "none")]
         {
-            axhal::time::wall_time_nanos()
+            axhal::time::monotonic_time_nanos()
         }
         #[cfg(not(target_os = "none"))]
         {

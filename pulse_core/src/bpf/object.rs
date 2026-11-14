@@ -240,34 +240,54 @@ impl FdObject for BpfProgramObject {
 /// and `ioctl` (ENABLE, DISABLE, RESET, PERIOD, etc.).
 pub struct PerfEventObject {
     event: Arc<super::PerfEvent>,
+    // Keep the selected thread clock available after exit and PID/TID reuse.
+    clock_thread: Option<Arc<crate::task::Thread>>,
 }
 
 impl PerfEventObject {
-    pub fn new(event: Arc<super::PerfEvent>) -> Self {
-        Self { event }
+    /// Wrap a newly created event, fixing its thread identity before publishing
+    /// it to runtime dispatch. Rebase task-clock accounting on that same thread.
+    pub fn new(event: Arc<super::PerfEvent>) -> LinuxResult<Self> {
+        let clock_thread = match event.spec().scope {
+            super::PerfEventScope::Task { pid } => {
+                Some(crate::task::thread_by_tid_global(pid).ok_or(LinuxError::ESRCH)?)
+            }
+            _ => None,
+        };
+        if let Some(thread) = &clock_thread {
+            event.bind_task_identity(thread.sampling_task_id())?;
+            if event.spec().clock == super::PerfEventClock::TaskClock {
+                let clock = thread.sampling_clock_ns(axhal::time::monotonic_time_nanos())
+                    .ok_or(LinuxError::EAGAIN)?;
+                event.reset_at(clock);
+            }
+        }
+        // Register ioctl attachments too; the registry holds only Weak refs.
+        super::register_active_perf_event(&event);
+        Ok(Self { event, clock_thread })
     }
 
     pub fn event(&self) -> &Arc<super::PerfEvent> {
         &self.event
     }
 
-    pub fn current_time_ns_for_spec(spec: &super::PerfEventSpec) -> u64 {
+    pub fn current_time_ns_for_spec(spec: &super::PerfEventSpec) -> LinuxResult<u64> {
         let now_ns = axhal::time::monotonic_time_nanos() as u64;
         match (spec.clock, spec.scope) {
-            (super::PerfEventClock::CpuClock, super::PerfEventScope::PerCpu { .. }) => now_ns,
             (super::PerfEventClock::TaskClock, super::PerfEventScope::Task { pid }) => {
-                if let Some(proc) = crate::task::process_by_pid(pid) {
-                    let (u, s) = proc.snapshot_cpu_time_ns(now_ns);
-                    u.saturating_add(s)
-                } else {
-                    now_ns
-                }
+                let thread = crate::task::thread_by_tid_global(pid).ok_or(LinuxError::ESRCH)?;
+                thread.sampling_clock_ns(now_ns).ok_or(LinuxError::EAGAIN)
             }
-            _ => now_ns,
+            _ => Ok(now_ns),
         }
     }
 
-    pub fn current_time_ns(&self) -> u64 {
+    pub fn current_time_ns(&self) -> LinuxResult<u64> {
+        if self.event.spec().clock == super::PerfEventClock::TaskClock
+            && let Some(thread) = &self.clock_thread {
+            return thread.sampling_clock_ns(axhal::time::monotonic_time_nanos())
+                .ok_or(LinuxError::EAGAIN);
+        }
         Self::current_time_ns_for_spec(self.event.spec())
     }
 }
@@ -278,7 +298,7 @@ impl FdObject for PerfEventObject {
     }
 
     fn read(&self, buf: &mut [u8]) -> LinuxResult<usize> {
-        let now_ns = self.current_time_ns();
+        let now_ns = self.current_time_ns()?;
         self.event.read_into_at(buf, now_ns)
     }
 
@@ -296,7 +316,7 @@ impl FdObject for PerfEventObject {
             self.event.attach_program(prog_obj.program().clone())?;
             return Ok(0);
         }
-        let now_ns = self.current_time_ns();
+        let now_ns = self.current_time_ns()?;
         self.event.ioctl_at(cmd, arg, now_ns)
     }
 

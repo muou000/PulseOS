@@ -721,9 +721,9 @@ mod tests {
     fn perf_event_verifier_rejects_out_of_bounds_context_access() {
         use super::core_verifier::{verify_program, VerifierConfig, VerifierLog};
 
-        // Attempting to read beyond 48 bytes (e.g. at offset 48, size 8 bytes, which reaches byte 56)
+        // Runtime sample context v2 is 64 bytes; offset 64 begins past its end.
         let insns = [
-            BpfInsn::new(BPF_LDX | BPF_MEM | BPF_DW, BPF_REG_0, BPF_REG_1, 48, 0),
+            BpfInsn::new(BPF_LDX | BPF_MEM | BPF_DW, BPF_REG_0, BPF_REG_1, 64, 0),
             BpfInsn::new(BPF_ALU64 | BPF_MOV | BPF_K, BPF_REG_0, 0, 0, 0),
             BpfInsn::new(BPF_JMP | BPF_EXIT, 0, 0, 0, 0),
         ];
@@ -732,7 +732,628 @@ mod tests {
         let mut log = VerifierLog::new();
         let res = verify_program(&config, &insns, None, &mut log);
 
-        assert!(res.is_err(), "Access past PerfEventContext (48 bytes) must be rejected");
+        assert!(res.is_err(), "Access past PerfSampleContext (64 bytes) must be rejected");
         assert!(log.as_str().contains("invalid context access"));
     }
+
+    fn runtime_observation(timestamp_ns: u64, cpu: usize, tid: u64) -> RuntimeSample {
+        RuntimeSample {
+            timestamp_ns,
+            cpu,
+            pid: 123,
+            tid,
+            task_id: 789,
+            ip: 0x402010,
+            user_mode: true,
+            task_clock_ns: timestamp_ns,
+            generation: observation_generation(),
+        }
+    }
+
+    #[test]
+    fn runtime_sample_emits_once_when_several_periods_elapsed() {
+        let event = PerfEvent::new(PerfEventSpec {
+            clock: PerfEventClock::CpuClock,
+            scope: PerfEventScope::PerCpu { cpu: 9 },
+            sample_period: 10,
+            disabled: false,
+            cloexec: false,
+        }, 0);
+        let prog = dummy_prog(BpfProgType::PerfEvent);
+        event.attach_program(prog.clone()).unwrap();
+        assert_eq!(event.dispatch_sample(&runtime_observation(35, 9, 456)), Ok(true));
+        assert_eq!(prog.run_cnt(), 1, "one observed PC cannot represent three historic samples");
+        assert_eq!(event.runtime_counters().skipped_periods, 2);
+        assert_eq!(event.dispatch_sample(&runtime_observation(39, 9, 456)), Ok(false));
+        assert_eq!(event.dispatch_sample(&runtime_observation(40, 9, 456)), Ok(true));
+        assert_eq!(prog.run_cnt(), 2);
+    }
+
+
+    #[test]
+    fn runtime_task_clock_uses_thread_cpu_time_and_survives_migration() {
+        let event = PerfEvent::new(PerfEventSpec {
+            clock: PerfEventClock::TaskClock,
+            scope: PerfEventScope::Task { pid: 42 },
+            sample_period: 10,
+            disabled: false,
+            cloexec: false,
+        }, 100);
+        let prog = dummy_prog(BpfProgType::PerfEvent);
+        event.attach_program(prog.clone()).unwrap();
+        let mut sample = runtime_observation(1_000_000, 10, 99);
+        sample.pid = 42; // A process with this PID is not the selected TID.
+        sample.task_clock_ns = 105;
+        assert_eq!(event.dispatch_sample(&sample), Ok(false));
+        sample.tid = 42;
+        sample.pid = 123;
+        assert_eq!(event.dispatch_sample(&sample), Ok(false));
+        sample.timestamp_ns = 9_000_000; // The task was sleeping.
+        assert_eq!(event.dispatch_sample(&sample), Ok(false));
+        sample.cpu = 11; // Migration does not reset the thread's CPU clock.
+        sample.task_clock_ns = 110;
+        sample.timestamp_ns += 5;
+        assert_eq!(event.dispatch_sample(&sample), Ok(true));
+        assert_eq!(prog.run_cnt(), 1);
+        assert_eq!(event.runtime_counters().skipped_periods, 0);
+    }
+
+    #[test]
+    fn runtime_cpu_scope_and_zero_period_do_not_execute() {
+        let event = PerfEvent::new(PerfEventSpec {
+            clock: PerfEventClock::CpuClock,
+            scope: PerfEventScope::PerCpu { cpu: 0 },
+            sample_period: 10,
+            disabled: false,
+            cloexec: false,
+        }, 0);
+        let prog = dummy_prog(BpfProgType::PerfEvent);
+        event.attach_program(prog.clone()).unwrap();
+        assert_eq!(event.dispatch_sample(&runtime_observation(100, 12, 42)), Ok(false));
+        assert_eq!(event.dispatch_sample(&runtime_observation(10, 0, 42)), Ok(true));
+        event.set_period(0);
+        assert_eq!(event.dispatch_sample(&runtime_observation(20, 0, 42)), Ok(false));
+        assert_eq!(prog.run_cnt(), 1);
+    }
+
+
+    #[test]
+    fn runtime_lifecycle_rejects_queued_observations_from_old_attachments() {
+        let event = PerfEvent::new(PerfEventSpec {
+            clock: PerfEventClock::CpuClock,
+            scope: PerfEventScope::PerCpu { cpu: 8 },
+            sample_period: 10,
+            disabled: true,
+            cloexec: false,
+        }, 0);
+        let before_attach = runtime_observation(10, 8, 42);
+        let old_prog = dummy_prog(BpfProgType::PerfEvent);
+        event.attach_program(old_prog.clone()).unwrap();
+        event.enable_at(0);
+        assert_eq!(event.dispatch_sample(&before_attach), Ok(false));
+        let queued = runtime_observation(10, 8, 42);
+        event.disable_at(5);
+        assert_eq!(event.dispatch_sample(&queued), Ok(false));
+        event.enable_at(5);
+        assert_eq!(event.dispatch_sample(&queued), Ok(false));
+        let before_reattach = runtime_observation(20, 8, 42);
+        event.detach_program(&old_prog).unwrap();
+        let new_prog = dummy_prog(BpfProgType::PerfEvent);
+        event.attach_program(new_prog.clone()).unwrap();
+        assert_eq!(event.dispatch_sample(&before_reattach), Ok(false));
+        let before_reset = runtime_observation(20, 8, 42);
+        event.reset_at(5);
+        assert_eq!(event.dispatch_sample(&before_reset), Ok(false));
+        let before_period = runtime_observation(20, 8, 42);
+        event.set_period(10);
+        assert_eq!(event.dispatch_sample(&before_period), Ok(false));
+        assert_eq!(event.dispatch_sample(&runtime_observation(20, 8, 42)), Ok(true));
+        assert_eq!(old_prog.run_cnt(), 0);
+        assert_eq!(new_prog.run_cnt(), 1);
+        assert_eq!(event.runtime_counters().cancelled, 6);
+    }
+
+
+    #[test]
+    fn runtime_context_and_helpers_use_the_observed_task_not_the_worker() {
+        use super::core_verifier::{VerifierConfig, VerifierLog, verify_program, MapResolver};
+        let request = core_map::BpfMapCreateRequest {
+            map_type: core_map::BPF_MAP_TYPE_ARRAY,
+            key_size: 4,
+            value_size: 80,
+            max_entries: 1,
+            ..Default::default()
+        };
+        let map = Arc::new(core_map::BpfMap::create(core_map::BpfMapSpec::validate(&request).unwrap()).unwrap());
+        struct Resolver(Arc<core_map::BpfMap>);
+        impl MapResolver for Resolver {
+            fn resolve_map(&self, _fd: u32) -> Result<Arc<core_map::BpfMap>, LinuxError> {
+                Ok(self.0.clone())
+            }
+        }
+        let mut insns = alloc::vec![
+            BpfInsn::new(BPF_ALU64 | BPF_MOV | BPF_X, BPF_REG_6, BPF_REG_1, 0, 0),
+            BpfInsn::new(BPF_ST | BPF_MEM | BPF_W, BPF_REG_10, 0, -4, 0),
+            BpfInsn::new(BPF_ALU64 | BPF_MOV | BPF_X, BPF_REG_2, BPF_REG_10, 0, 0),
+            BpfInsn::new(BPF_ALU64 | BPF_ADD | BPF_K, BPF_REG_2, 0, 0, -4),
+            BpfInsn::new(BPF_LD | BPF_IMM | BPF_DW, BPF_REG_1, BPF_PSEUDO_MAP_FD, 0, 0),
+            BpfInsn::new(0, 0, 0, 0, 0),
+            BpfInsn::new(BPF_JMP | BPF_CALL, 0, 0, 0, BPF_FUNC_MAP_LOOKUP_ELEM),
+            BpfInsn::new(BPF_JMP | BPF_JEQ | BPF_K, BPF_REG_0, 0, 0, 0),
+            BpfInsn::new(BPF_ALU64 | BPF_MOV | BPF_X, BPF_REG_7, BPF_REG_0, 0, 0),
+        ];
+        for offset in (0..64).step_by(8) {
+            insns.push(BpfInsn::new(BPF_LDX | BPF_MEM | BPF_DW, BPF_REG_1, BPF_REG_6, offset, 0));
+            insns.push(BpfInsn::new(BPF_STX | BPF_MEM | BPF_DW, BPF_REG_7, BPF_REG_1, offset, 0));
+        }
+        insns.push(BpfInsn::new(BPF_JMP | BPF_CALL, 0, 0, 0, BPF_FUNC_KTIME_GET_NS));
+        insns.push(BpfInsn::new(BPF_STX | BPF_MEM | BPF_DW, BPF_REG_7, BPF_REG_0, 64, 0));
+        insns.push(BpfInsn::new(BPF_JMP | BPF_CALL, 0, 0, 0, BPF_FUNC_GET_SMP_PROCESSOR_ID));
+        insns.push(BpfInsn::new(BPF_STX | BPF_MEM | BPF_W, BPF_REG_7, BPF_REG_0, 72, 0));
+        insns[7].off = (insns.len() - 8) as i16;
+        insns.push(BpfInsn::new(BPF_ALU64 | BPF_MOV | BPF_K, BPF_REG_0, 0, 0, 0));
+        insns.push(BpfInsn::new(BPF_JMP | BPF_EXIT, 0, 0, 0, 0));
+        let verified = verify_program(&VerifierConfig::new(BpfProgType::PerfEvent, 1), &insns,
+            Some(&Resolver(map.clone())), &mut VerifierLog::new()).unwrap();
+        let prog = Arc::new(BpfProgram::new(verified.prog_type, [0; 16], verified.insns, verified.referenced_maps));
+        let event = PerfEvent::new(PerfEventSpec {
+            clock: PerfEventClock::CpuClock,
+            scope: PerfEventScope::PerCpu { cpu: 9 },
+            sample_period: 10,
+            disabled: false,
+            cloexec: false,
+        }, 0);
+        event.attach_program(prog).unwrap();
+        assert_eq!(event.dispatch_sample(&runtime_observation(123_456, 9, 456)), Ok(true));
+        let mut value = [0; 80];
+        map.lookup(&0u32.to_ne_bytes(), &mut value).unwrap();
+        let qword = |off| u64::from_le_bytes(value[off..off+8].try_into().unwrap());
+        let word = |off| u32::from_le_bytes(value[off..off+4].try_into().unwrap());
+        assert_eq!(qword(0), 10);
+        assert_eq!(qword(8), 0, "v1 addr is not repurposed as IP");
+        assert_eq!(qword(16), 123_456);
+        assert_eq!(word(24), 9);
+        assert_eq!(word(28), 123);
+        assert_eq!(word(32), 456);
+        assert_eq!(qword(40), 789);
+        assert_eq!(qword(48), 0x402010);
+        assert_eq!(word(56), 2);
+        assert_eq!(word(60), 2);
+        assert_eq!(qword(64), 123_456, "ktime comes from the frozen observation");
+        assert_eq!(word(72), 9, "helper CPU must not be the worker CPU");
+    }
+
+
+    #[test]
+    fn runtime_registry_registration_is_unique_and_survives_link_detach() {
+        let event = Arc::new(PerfEvent::new(PerfEventSpec {
+            clock: PerfEventClock::CpuClock,
+            scope: PerfEventScope::PerCpu { cpu: 12 },
+            sample_period: 10,
+            disabled: false,
+            cloexec: false,
+        }, 0));
+        register_active_perf_event(&event); // The FD owns this registration.
+        let old_prog = dummy_prog(BpfProgType::PerfEvent);
+        let link = BpfLink::new(old_prog.clone(), event.clone()).unwrap();
+        register_active_perf_event(&event); // Must not register a second instance.
+        assert!(has_active_perf_events());
+        assert_eq!(dispatch_runtime_sample(&runtime_observation(10, 12, 42)), 1);
+        assert_eq!(old_prog.run_cnt(), 1);
+        link.detach().unwrap();
+        let new_prog = dummy_prog(BpfProgType::PerfEvent);
+        event.attach_program(new_prog.clone()).unwrap(); // ioctl reattach path.
+        assert_eq!(dispatch_runtime_sample(&runtime_observation(20, 12, 42)), 1);
+        assert_eq!(new_prog.run_cnt(), 1);
+        event.detach_program(&new_prog).unwrap();
+        unregister_active_perf_event(&event);
+        assert_eq!(dispatch_runtime_sample(&runtime_observation(30, 12, 42)), 0);
+    }
+
+    #[test]
+    fn runtime_invalid_observation_does_not_move_period_baseline() {
+        let event = PerfEvent::new(PerfEventSpec {
+            clock: PerfEventClock::CpuClock,
+            scope: PerfEventScope::PerCpu { cpu: 13 },
+            sample_period: 10,
+            disabled: false,
+            cloexec: false,
+        }, 100);
+        let prog = dummy_prog(BpfProgType::PerfEvent);
+        event.attach_program(prog.clone()).unwrap();
+        assert_eq!(event.dispatch_sample(&runtime_observation(99, 13, 42)), Ok(false));
+        let mut bad_ip = runtime_observation(110, 13, 42);
+        bad_ip.ip = 0;
+        assert_eq!(event.dispatch_sample(&bad_ip), Ok(false));
+        let mut bad_identity = runtime_observation(110, 13, 42);
+        bad_identity.tid = u32::MAX as u64 + 1;
+        assert_eq!(event.dispatch_sample(&bad_identity), Ok(false));
+        assert_eq!(event.dispatch_sample(&runtime_observation(110, 13, 42)), Ok(true));
+        assert_eq!(event.runtime_counters().invalid, 3);
+        assert_eq!(prog.run_cnt(), 1);
+    }
+
+
+    fn switch_observation(cpu: u32, tid: u32, time: u64) -> [u8; 72] {
+        let mut bytes = [0; 72];
+        bytes[0..4].copy_from_slice(&2u32.to_le_bytes());
+        bytes[4..8].copy_from_slice(&1u32.to_le_bytes());
+        bytes[8..16].copy_from_slice(&time.to_le_bytes());
+        bytes[16..20].copy_from_slice(&cpu.to_le_bytes());
+        bytes[20..24].copy_from_slice(&123u32.to_le_bytes());
+        bytes[24..28].copy_from_slice(&tid.to_le_bytes());
+        bytes[32..40].copy_from_slice(&5u64.to_le_bytes());
+        bytes[40..48].copy_from_slice(&5u64.to_le_bytes());
+        bytes[48..56].copy_from_slice(&6u64.to_le_bytes());
+        bytes
+    }
+
+    #[test]
+    fn runtime_tracepoint_preserves_source_context_and_helper_environment() {
+        use super::core_verifier::{VerifierConfig, VerifierLog, verify_program, MapResolver};
+        let request = core_map::BpfMapCreateRequest {
+            map_type: core_map::BPF_MAP_TYPE_ARRAY, key_size: 4,
+            value_size: 40, max_entries: 1, ..Default::default()
+        };
+        let map = Arc::new(core_map::BpfMap::create(core_map::BpfMapSpec::validate(&request).unwrap()).unwrap());
+        struct Resolver(Arc<core_map::BpfMap>);
+        impl MapResolver for Resolver {
+            fn resolve_map(&self, _fd: u32) -> Result<Arc<core_map::BpfMap>, LinuxError> { Ok(self.0.clone()) }
+        }
+        let insns = [
+            BpfInsn::new(BPF_ALU64 | BPF_MOV | BPF_X, BPF_REG_6, BPF_REG_1, 0, 0),
+            BpfInsn::new(BPF_ST | BPF_MEM | BPF_W, BPF_REG_10, 0, -4, 0),
+            BpfInsn::new(BPF_ALU64 | BPF_MOV | BPF_X, BPF_REG_2, BPF_REG_10, 0, 0),
+            BpfInsn::new(BPF_ALU64 | BPF_ADD | BPF_K, BPF_REG_2, 0, 0, -4),
+            BpfInsn::new(BPF_LD | BPF_IMM | BPF_DW, BPF_REG_1, BPF_PSEUDO_MAP_FD, 0, 0),
+            BpfInsn::new(0, 0, 0, 0, 0),
+            BpfInsn::new(BPF_JMP | BPF_CALL, 0, 0, 0, BPF_FUNC_MAP_LOOKUP_ELEM),
+            BpfInsn::new(BPF_JMP | BPF_JEQ | BPF_K, BPF_REG_0, 0, 11, 0),
+            BpfInsn::new(BPF_ALU64 | BPF_MOV | BPF_X, BPF_REG_7, BPF_REG_0, 0, 0),
+            BpfInsn::new(BPF_LDX | BPF_MEM | BPF_DW, BPF_REG_1, BPF_REG_6, 8, 0),
+            BpfInsn::new(BPF_STX | BPF_MEM | BPF_DW, BPF_REG_7, BPF_REG_1, 0, 0),
+            BpfInsn::new(BPF_LDX | BPF_MEM | BPF_W, BPF_REG_1, BPF_REG_6, 16, 0),
+            BpfInsn::new(BPF_STX | BPF_MEM | BPF_W, BPF_REG_7, BPF_REG_1, 8, 0),
+            BpfInsn::new(BPF_LDX | BPF_MEM | BPF_DW, BPF_REG_1, BPF_REG_6, 48, 0),
+            BpfInsn::new(BPF_STX | BPF_MEM | BPF_DW, BPF_REG_7, BPF_REG_1, 16, 0),
+            BpfInsn::new(BPF_JMP | BPF_CALL, 0, 0, 0, BPF_FUNC_KTIME_GET_NS),
+            BpfInsn::new(BPF_STX | BPF_MEM | BPF_DW, BPF_REG_7, BPF_REG_0, 24, 0),
+            BpfInsn::new(BPF_JMP | BPF_CALL, 0, 0, 0, BPF_FUNC_GET_SMP_PROCESSOR_ID),
+            BpfInsn::new(BPF_STX | BPF_MEM | BPF_W, BPF_REG_7, BPF_REG_0, 32, 0),
+            BpfInsn::new(BPF_ALU64 | BPF_MOV | BPF_K, BPF_REG_0, 0, 0, 0),
+            BpfInsn::new(BPF_JMP | BPF_EXIT, 0, 0, 0, 0),
+        ];
+        let verified = verify_program(&VerifierConfig::new(BpfProgType::Tracepoint, 1), &insns,
+            Some(&Resolver(map.clone())), &mut VerifierLog::new()).unwrap();
+        let prog = Arc::new(BpfProgram::new(verified.prog_type, [0; 16], verified.insns, verified.referenced_maps));
+        let event = PerfEvent::new(PerfEventSpec {
+            clock: PerfEventClock::Tracepoint(pulse_bpf_schema::TracepointId::SchedSwitch),
+            scope: PerfEventScope::PerCpu { cpu: 9 }, sample_period: 0, disabled: false, cloexec: false,
+        }, 0);
+        event.attach_program(prog.clone()).unwrap();
+        let bytes = switch_observation(9, 456, 987_654);
+        assert_eq!(event.dispatch_sample(&runtime_observation(1_000_000, 9, 456)), Ok(false), "timer must not run a tracepoint program");
+        assert_eq!(event.dispatch_tracepoint(pulse_bpf_schema::TracepointId::SchedSwitch,
+            &bytes, observation_generation()), Ok(true));
+        let mut value = [0; 40]; map.lookup(&0u32.to_ne_bytes(), &mut value).unwrap();
+        assert_eq!(u64::from_le_bytes(value[0..8].try_into().unwrap()), 987_654);
+        assert_eq!(u32::from_le_bytes(value[8..12].try_into().unwrap()), 9);
+        assert_eq!(u64::from_le_bytes(value[16..24].try_into().unwrap()), 6);
+        assert_eq!(u64::from_le_bytes(value[24..32].try_into().unwrap()), 987_654);
+        assert_eq!(u32::from_le_bytes(value[32..36].try_into().unwrap()), 9);
+        assert_eq!(prog.run_cnt(), 1);
+    }
+
+
+    #[test]
+    fn runtime_tracepoint_dispatches_each_live_subscriber_and_cancels_old_epochs() {
+        use pulse_bpf_schema::TracepointId;
+        let make = || Arc::new(PerfEvent::new(PerfEventSpec {
+            clock: PerfEventClock::Tracepoint(TracepointId::SchedSwitch),
+            scope: PerfEventScope::PerCpu { cpu: 11 }, sample_period: 0, disabled: false, cloexec: false,
+        }, 0));
+        let a = make(); let b = make();
+        let pa = dummy_prog(BpfProgType::Tracepoint); let pb = dummy_prog(BpfProgType::Tracepoint);
+        let la = BpfLink::new(pa.clone(), a.clone()).unwrap();
+        let lb = BpfLink::new(pb.clone(), b.clone()).unwrap();
+        let bytes = switch_observation(11, 42, 50);
+        let generation = observation_generation();
+        assert_eq!(dispatch_tracepoint(TracepointId::SchedSwitch, &bytes, generation), 2);
+        a.disable_at(60);
+        // B's activation is unchanged. A's unrelated epoch must not cancel B.
+        assert_eq!(dispatch_tracepoint(TracepointId::SchedSwitch, &bytes, generation), 1);
+        lb.detach().unwrap();
+        assert_eq!(dispatch_tracepoint(TracepointId::SchedSwitch, &bytes, generation), 0);
+        a.enable_at(70);
+        assert_eq!(dispatch_tracepoint(TracepointId::SchedSwitch, &bytes, generation), 0);
+        assert_eq!(dispatch_tracepoint(TracepointId::SchedSwitch, &bytes, observation_generation()), 1);
+        la.detach().unwrap();
+        assert_eq!(dispatch_tracepoint(TracepointId::SchedSwitch, &bytes, observation_generation()), 0);
+        assert_eq!(pa.run_cnt(), 2);
+        assert_eq!(pb.run_cnt(), 2);
+        unregister_active_perf_event(&a); unregister_active_perf_event(&b);
+    }
+
+    #[test]
+    fn runtime_tracepoint_checks_context_shape_and_subject_tid_scope() {
+        use pulse_bpf_schema::TracepointId;
+        let event = PerfEvent::new(PerfEventSpec {
+            clock: PerfEventClock::Tracepoint(TracepointId::SchedSwitch),
+            scope: PerfEventScope::Task { pid: 42 }, sample_period: 0, disabled: false, cloexec: false,
+        }, 0);
+        let prog = dummy_prog(BpfProgType::Tracepoint);
+        event.attach_program(prog.clone()).unwrap();
+        let generation = observation_generation();
+        assert_eq!(event.dispatch_tracepoint(TracepointId::TaskWake, &[], generation), Ok(false));
+        assert_eq!(event.dispatch_tracepoint(TracepointId::SchedSwitch, &[], generation), Ok(false));
+        assert_eq!(event.dispatch_tracepoint(TracepointId::SchedSwitch, &switch_observation(9, 0, 50), generation), Ok(false));
+        assert_eq!(event.dispatch_tracepoint(TracepointId::SchedSwitch, &switch_observation(9, 43, 50), generation), Ok(false));
+        let mut malformed = switch_observation(9, 42, 50);
+        malformed[4..8].copy_from_slice(&2u32.to_le_bytes());
+        assert_eq!(event.dispatch_tracepoint(TracepointId::SchedSwitch, &malformed, generation), Ok(false));
+        assert_eq!(event.dispatch_tracepoint(TracepointId::SchedSwitch, &switch_observation(9, 42, 50), generation), Ok(true));
+        assert_eq!(event.runtime_counters().invalid, 3);
+        assert_eq!(prog.run_cnt(), 1);
+    }
+
+    #[test]
+    fn runtime_ioctl_period_restarts_at_the_control_clock() {
+        let event = PerfEvent::new(PerfEventSpec {
+            clock: PerfEventClock::CpuClock,
+            scope: PerfEventScope::PerCpu { cpu: 10 }, sample_period: 10, disabled: false, cloexec: false,
+        }, 0);
+        let prog = dummy_prog(BpfProgType::PerfEvent);
+        event.attach_program(prog.clone()).unwrap();
+        assert_eq!(event.dispatch_sample(&runtime_observation(10, 10, 42)), Ok(true));
+        event.ioctl_at(PERF_EVENT_IOC_PERIOD, 20, 100).unwrap();
+        assert_eq!(event.dispatch_sample(&runtime_observation(119, 10, 42)), Ok(false));
+        assert_eq!(event.dispatch_sample(&runtime_observation(120, 10, 42)), Ok(true));
+        assert_eq!(prog.run_cnt(), 2);
+        assert_eq!(event.runtime_counters().skipped_periods, 0);
+    }
+
+
+    #[test]
+    fn runtime_tracepoint_parallel_attachment_counts_preserve_live_subscribers() {
+        use pulse_bpf_schema::TracepointId;
+        use std::sync::Barrier;
+        let id = TracepointId::PhaseMarker;
+        let initial = tracepoint_subscriber_count_for_test(id);
+        let ready = Barrier::new(5);
+        let release = Barrier::new(5);
+        std::thread::scope(|scope| {
+            for _ in 0..4 {
+                let ready = &ready; let release = &release;
+                scope.spawn(move || {
+                    let event = dummy_perf_event(PerfEventClock::Tracepoint(id));
+                    let prog = dummy_prog(BpfProgType::Tracepoint);
+                    for _ in 0..100 {
+                        event.attach_program(prog.clone()).unwrap();
+                        event.detach_program(&prog).unwrap();
+                    }
+                    event.attach_program(prog).unwrap();
+                    ready.wait();
+                    release.wait();
+                    // Drop tears down the final attachment using the same path.
+                });
+            }
+            ready.wait();
+            assert_eq!(tracepoint_subscriber_count_for_test(id), initial + 4);
+            release.wait();
+        });
+        assert_eq!(tracepoint_subscriber_count_for_test(id), initial);
+    }
+
+
+    #[test]
+    fn runtime_task_identity_survives_exec_tid_rebinding_without_sampling_reused_tid() {
+        let event = PerfEvent::new(PerfEventSpec {
+            clock: PerfEventClock::TaskClock,
+            scope: PerfEventScope::Task { pid: 42 }, sample_period: 10, disabled: false, cloexec: false,
+        }, 100);
+        let prog = dummy_prog(BpfProgType::PerfEvent);
+        event.attach_program(prog.clone()).unwrap();
+        let mut before_bind = runtime_observation(1_000, 10, 42);
+        before_bind.task_id = 901;
+        before_bind.task_clock_ns = 110;
+        assert_eq!(event.bind_task_identity(0), Err(LinuxError::EINVAL));
+        event.bind_task_identity(901).unwrap();
+        assert_eq!(event.dispatch_sample(&before_bind), Ok(false), "binding invalidates old queued observations");
+        let mut replacement = runtime_observation(1_000, 10, 42);
+        replacement.task_id = 902; // A different thread now has the old numeric TID.
+        replacement.task_clock_ns = 9_000;
+        assert_eq!(event.dispatch_sample(&replacement), Ok(false));
+        let mut same_thread = runtime_observation(1_010, 11, 100); // exec changed this thread's TID.
+        same_thread.task_id = 901;
+        same_thread.task_clock_ns = 110;
+        assert_eq!(event.dispatch_sample(&same_thread), Ok(true));
+        let generation = observation_generation();
+        event.bind_task_identity(901).unwrap();
+        assert_eq!(observation_generation(), generation, "same binding is idempotent");
+        assert_eq!(event.bind_task_identity(902), Err(LinuxError::EBUSY));
+        assert_eq!(prog.run_cnt(), 1);
+        assert_eq!(event.runtime_counters().skipped_periods, 0);
+    }
+
+    #[test]
+    fn runtime_trace_task_scope_uses_bound_subject_identity_after_exec() {
+        use pulse_bpf_schema::TracepointId;
+        let event = PerfEvent::new(PerfEventSpec {
+            clock: PerfEventClock::Tracepoint(TracepointId::SchedSwitch),
+            scope: PerfEventScope::Task { pid: 42 }, sample_period: 0, disabled: false, cloexec: false,
+        }, 0);
+        let prog = dummy_prog(BpfProgType::Tracepoint);
+        event.attach_program(prog.clone()).unwrap();
+        event.bind_task_identity(901).unwrap();
+        let mut reused_tid = switch_observation(9, 42, 50);
+        reused_tid[32..40].copy_from_slice(&902u64.to_le_bytes());
+        assert_eq!(event.dispatch_tracepoint(TracepointId::SchedSwitch, &reused_tid, observation_generation()), Ok(false));
+        let mut rebound_tid = switch_observation(9, 100, 60);
+        rebound_tid[32..40].copy_from_slice(&901u64.to_le_bytes());
+        assert_eq!(event.dispatch_tracepoint(TracepointId::SchedSwitch, &rebound_tid, observation_generation()), Ok(true));
+        assert_eq!(prog.run_cnt(), 1);
+    }
+
+
+    fn runtime_failure_event(clock: PerfEventClock, cpu: usize, insns: &[BpfInsn]) -> (Arc<PerfEvent>, Arc<BpfProgram>) {
+        let prog_type = if matches!(clock, PerfEventClock::Tracepoint(_)) {
+            BpfProgType::Tracepoint
+        } else {
+            BpfProgType::PerfEvent
+        };
+        let prog = Arc::new(BpfProgram::new(prog_type, [0; 16], Arc::from(insns), alloc::vec![]));
+        let event = Arc::new(PerfEvent::new(PerfEventSpec {
+            clock, scope: PerfEventScope::PerCpu { cpu }, sample_period: 10, disabled: false, cloexec: false,
+        }, 0));
+        event.attach_program(prog.clone()).unwrap();
+        (event, prog)
+    }
+
+    fn dispatch_failure_observation(event: &PerfEvent, time: u64, cpu: usize) -> Result<bool, LinuxError> {
+        match event.spec().clock {
+            PerfEventClock::Tracepoint(id) => event.dispatch_tracepoint(id,
+                &switch_observation(cpu as u32, 42, time), observation_generation()),
+            _ => event.dispatch_sample(&runtime_observation(time, cpu, 42)),
+        }
+    }
+
+    #[test]
+    fn runtime_sample_and_tracepoint_budget_failures_are_not_delivered() {
+        for clock in [PerfEventClock::CpuClock, PerfEventClock::Tracepoint(pulse_bpf_schema::TracepointId::SchedSwitch)] {
+            // Direct VM model fixture: the production verifier rejects this
+            // loop, while runtime must still enforce its independent step cap.
+            let (event, prog) = runtime_failure_event(clock, 13, &[
+                BpfInsn::new(BPF_ALU64 | BPF_MOV | BPF_K, BPF_REG_0, 0, 0, 0),
+                BpfInsn::new(BPF_JMP | BPF_JA, 0, 0, -1, 0),
+            ]);
+            assert_eq!(dispatch_failure_observation(&event, 10, 13), Ok(false));
+            let expected = PerfEventSampleCounters {
+                delivered_samples: 0, re_entry_drops: 0, helper_failures: 0, budget_failures: 1,
+            };
+            assert_eq!(event.sample_counters(), expected);
+            assert_eq!(prog.sample_counters(), expected);
+            assert_eq!(prog.run_cnt(), 1);
+            assert_eq!(event.runtime_counters().observed, 1);
+            assert_eq!(event.runtime_counters().invalid, 0);
+            assert!(!is_in_sampling(13), "failed execution releases its sampling guard");
+        }
+    }
+
+    #[test]
+    fn runtime_sample_and_tracepoint_helper_failures_are_not_delivered() {
+        for clock in [PerfEventClock::CpuClock, PerfEventClock::Tracepoint(pulse_bpf_schema::TracepointId::SchedSwitch)] {
+            let (event, prog) = runtime_failure_event(clock, 13, &[
+                BpfInsn::new(BPF_JMP | BPF_CALL, 0, 0, 0, 9999),
+                BpfInsn::new(BPF_JMP | BPF_EXIT, 0, 0, 0, 0),
+            ]);
+            assert_eq!(dispatch_failure_observation(&event, 10, 13), Ok(false));
+            let expected = PerfEventSampleCounters {
+                delivered_samples: 0, re_entry_drops: 0, helper_failures: 1, budget_failures: 0,
+            };
+            assert_eq!(event.sample_counters(), expected);
+            assert_eq!(prog.sample_counters(), expected);
+            assert_eq!(prog.run_cnt(), 1);
+            assert_eq!(event.runtime_counters().invalid, 0);
+            assert!(!is_in_sampling(13));
+        }
+    }
+
+    #[test]
+    fn runtime_sample_and_tracepoint_reentry_is_counted_without_running_program() {
+        struct ResetSamplingCpu(usize);
+        impl Drop for ResetSamplingCpu {
+            fn drop(&mut self) { set_in_sampling_for_test(self.0, false); }
+        }
+        for clock in [PerfEventClock::CpuClock, PerfEventClock::Tracepoint(pulse_bpf_schema::TracepointId::SchedSwitch)] {
+            let (event, prog) = runtime_failure_event(clock, 13, &[
+                BpfInsn::new(BPF_ALU64 | BPF_MOV | BPF_K, BPF_REG_0, 0, 0, 0),
+                BpfInsn::new(BPF_JMP | BPF_EXIT, 0, 0, 0, 0),
+            ]);
+            assert!(!is_in_sampling(13));
+            set_in_sampling_for_test(13, true);
+            let reset = ResetSamplingCpu(13);
+            assert_eq!(dispatch_failure_observation(&event, 10, 13), Ok(false));
+            let expected = PerfEventSampleCounters {
+                delivered_samples: 0, re_entry_drops: 1, helper_failures: 0, budget_failures: 0,
+            };
+            assert_eq!(event.sample_counters(), expected);
+            assert_eq!(prog.sample_counters(), expected);
+            assert_eq!(prog.run_cnt(), 0);
+            drop(reset);
+            assert_eq!(dispatch_failure_observation(&event, 20, 13), Ok(true));
+            assert_eq!(event.sample_counters().delivered_samples, 1);
+            assert_eq!(prog.run_cnt(), 1);
+        }
+    }
+
+    #[test]
+    fn runtime_detach_allows_only_the_already_accepted_program_to_finish() {
+        use core_map::{BpfMap, BpfMapCreateRequest, BpfMapSpec, PerfEventOutputSink};
+        use std::sync::{Mutex, mpsc::{channel, Sender, Receiver}};
+        use std::time::Duration;
+
+        // Pause through the public output-sink interface, not an internal
+        // dispatcher hook: control changes happen while accepted BPF is running.
+        struct PausingSink {
+            entered: Sender<()>,
+            resume: Mutex<Receiver<()>>,
+        }
+        impl PerfEventOutputSink for PausingSink {
+            fn output_sample(&self, data: &[u8]) -> Result<(), LinuxError> {
+                assert_eq!(data.len(), 4);
+                self.entered.send(()).map_err(|_| LinuxError::EINVAL)?;
+                self.resume.lock().unwrap().recv_timeout(Duration::from_secs(5))
+                    .map_err(|_| LinuxError::EINVAL)?;
+                Ok(())
+            }
+            fn as_any(&self) -> &dyn core::any::Any { self }
+        }
+
+        for clock in [PerfEventClock::CpuClock, PerfEventClock::Tracepoint(pulse_bpf_schema::TracepointId::SchedSwitch)] {
+            let (entered_tx, entered_rx) = channel();
+            let (resume_tx, resume_rx) = channel();
+            let map = Arc::new(BpfMap::create(BpfMapSpec::validate(&BpfMapCreateRequest {
+                map_type: core_map::BPF_MAP_TYPE_PERF_EVENT_ARRAY,
+                key_size: 4, value_size: 4, max_entries: 16, ..Default::default()
+            }).unwrap()).unwrap());
+            map.set_slot(13, Some(1), Some(Arc::new(PausingSink {
+                entered: entered_tx, resume: Mutex::new(resume_rx),
+            }))).unwrap();
+            let prog_type = if matches!(clock, PerfEventClock::Tracepoint(_)) {
+                BpfProgType::Tracepoint
+            } else { BpfProgType::PerfEvent };
+            let old_prog = Arc::new(BpfProgram::new(prog_type, [0; 16], Arc::from([
+                BpfInsn::new(BPF_ALU64 | BPF_MOV | BPF_X, BPF_REG_6, BPF_REG_1, 0, 0),
+                BpfInsn::new(BPF_LD | BPF_IMM | BPF_DW, BPF_REG_2, BPF_PSEUDO_MAP_FD, 0, 0),
+                BpfInsn::new(0, 0, 0, 0, 0),
+                BpfInsn::new(BPF_ALU64 | BPF_MOV | BPF_K, BPF_REG_3, 0, 0, -1),
+                BpfInsn::new(BPF_ALU64 | BPF_MOV | BPF_X, BPF_REG_4, BPF_REG_6, 0, 0),
+                BpfInsn::new(BPF_ALU64 | BPF_MOV | BPF_K, BPF_REG_5, 0, 0, 4),
+                BpfInsn::new(BPF_JMP | BPF_CALL, 0, 0, 0, BPF_FUNC_PERF_EVENT_OUTPUT),
+                BpfInsn::new(BPF_JMP | BPF_EXIT, 0, 0, 0, 0),
+            ]), alloc::vec![map]));
+            let event = Arc::new(PerfEvent::new(PerfEventSpec {
+                clock, scope: PerfEventScope::PerCpu { cpu: 13 }, sample_period: 10, disabled: false, cloexec: false,
+            }, 0));
+            event.attach_program(old_prog.clone()).unwrap();
+            let new_prog = dummy_prog(prog_type);
+            std::thread::scope(|scope| {
+                let event_ref = &event;
+                let in_flight = scope.spawn(move || dispatch_failure_observation(event_ref, 10, 13));
+                entered_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+                event.detach_program(&old_prog).unwrap();
+                event.attach_program(new_prog.clone()).unwrap();
+                assert_eq!(new_prog.run_cnt(), 0);
+                resume_tx.send(()).unwrap();
+                assert_eq!(in_flight.join().unwrap(), Ok(true));
+            });
+            assert_eq!(old_prog.run_cnt(), 1);
+            assert_eq!(old_prog.sample_counters().delivered_samples, 1);
+            assert_eq!(new_prog.run_cnt(), 0, "reattach cannot steal an accepted invocation");
+            assert_eq!(dispatch_failure_observation(&event, 20, 13), Ok(true));
+            assert_eq!(new_prog.run_cnt(), 1);
+            assert_eq!(old_prog.run_cnt(), 1);
+        }
+    }
+
 }

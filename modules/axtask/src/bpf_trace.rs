@@ -2,7 +2,7 @@
 
 pub use pulse_bpf_schema::*;
 
-use core::sync::atomic::{AtomicPtr, AtomicU32, Ordering};
+use core::sync::atomic::{AtomicU32, Ordering};
 use crate::{TaskInner, WaitContext, WakeContext};
 
 pub const TRACE_QUEUE_CAPACITY: usize = 128;
@@ -66,18 +66,42 @@ pub fn reset_drop_stats() {
     }
 }
 
-/// Drain up to `max_count` events from the specified CPU's bounded buffer.
-/// Safe and nonblocking for event producers; only contends with other concurrent drainers of the same CPU.
-pub fn drain_cpu_events<F: FnMut(TracepointId, &[u8])>(
-    cpu_id: usize,
-    max_count: usize,
-    consumer: F,
-) -> usize {
+/// Copy a bounded batch out of one CPU queue. The returned records own their
+/// context bytes; callers execute consumers only after this IRQ guard is gone.
+pub fn drain_cpu_records(cpu_id: usize, records: &mut [EventRecord]) -> usize {
     if cpu_id >= MAX_CPUS {
         return 0;
     }
     let _guard = DRAIN_LOCKS[cpu_id].lock();
-    CPU_QUEUES[cpu_id].drain(max_count, consumer)
+    let mut copied = 0;
+    CPU_QUEUES[cpu_id].drain_with_generation(records.len().min(TRACE_QUEUE_CAPACITY), |id, bytes, generation| {
+        let record = &mut records[copied];
+        *record = EventRecord::empty();
+        record.id = id;
+        record.len = bytes.len() as u32;
+        record.generation = generation;
+        record.data[..bytes.len()].copy_from_slice(bytes);
+        copied += 1;
+    });
+    copied
+}
+
+/// Drain events without holding the queue/IRQ guard during callbacks.
+pub fn drain_cpu_events<F: FnMut(TracepointId, &[u8])>(
+    cpu_id: usize,
+    max_count: usize,
+    mut consumer: F,
+) -> usize {
+    let mut drained = 0;
+    let mut record = [EventRecord::empty(); 1];
+    for _ in 0..max_count.min(TRACE_QUEUE_CAPACITY) {
+        if drain_cpu_records(cpu_id, &mut record) == 0 {
+            break;
+        }
+        consumer(record[0].id, record[0].as_bytes());
+        drained += 1;
+    }
+    drained
 }
 
 /// Drain events from all CPUs' bounded buffers.
@@ -95,14 +119,14 @@ pub fn drain_all_events<F: FnMut(usize, TracepointId, &[u8])>(
 }
 
 #[inline(always)]
-fn enqueue_event<T: Copy>(id: TracepointId, ctx: &T) {
+fn enqueue_event<T: Copy>(id: TracepointId, ctx: &T, generation: u64) {
     let _guard = kernel_guard::NoPreemptIrqSave::new();
     let cpu_id = axhal::percpu::this_cpu_id();
     if cpu_id < MAX_CPUS {
         let slice = unsafe {
             core::slice::from_raw_parts(ctx as *const T as *const u8, core::mem::size_of::<T>())
         };
-        let _ = CPU_QUEUES[cpu_id].enqueue_bytes(id, slice);
+        let _ = CPU_QUEUES[cpu_id].enqueue_with_generation(id, slice, generation);
     }
 }
 
@@ -111,15 +135,18 @@ pub fn sched_switch(prev_task: &TaskInner, next_task: &TaskInner, prev_state: u8
     if !has_subscribers(TracepointId::SchedSwitch) {
         return;
     }
+    let _observation_guard = kernel_guard::NoPreemptIrqSave::new();
+    let generation = observation_generation();
     let timestamp_ns = axhal::time::monotonic_time_nanos();
     let cpu_id = axhal::percpu::this_cpu_id() as u32;
+    let identity = prev_task.bpf_identity();
     let ctx = SchedSwitchContext {
         common: ContextCommon::new(
             TracepointId::SchedSwitch,
             timestamp_ns,
             cpu_id,
-            0,
-            0,
+            identity.0,
+            identity.1,
             prev_task.id().as_u64(),
         ),
         prev_task_id: prev_task.id().as_u64(),
@@ -129,7 +156,7 @@ pub fn sched_switch(prev_task: &TaskInner, next_task: &TaskInner, prev_state: u8
         next_prio: 0,
         _pad: 0,
     };
-    enqueue_event(TracepointId::SchedSwitch, &ctx);
+    enqueue_event(TracepointId::SchedSwitch, &ctx, generation);
 }
 
 #[inline(always)]
@@ -137,6 +164,8 @@ pub fn task_block(task: &TaskInner, sequence: u64, context: WaitContext) {
     if !has_subscribers(TracepointId::TaskBlock) {
         return;
     }
+    let _observation_guard = kernel_guard::NoPreemptIrqSave::new();
+    let generation = observation_generation();
     let timestamp_ns = axhal::time::monotonic_time_nanos();
     let cpu_id = axhal::percpu::this_cpu_id() as u32;
     #[cfg(feature = "bpf-trace")]
@@ -151,13 +180,14 @@ pub fn task_block(task: &TaskInner, sequence: u64, context: WaitContext) {
         (0, 0, 0)
     };
 
+    let identity = task.bpf_identity();
     let ctx = TaskBlockContext {
         common: ContextCommon::new(
             TracepointId::TaskBlock,
             timestamp_ns,
             cpu_id,
-            0,
-            0,
+            identity.0,
+            identity.1,
             task.id().as_u64(),
         ),
         block_sequence: sequence,
@@ -166,7 +196,7 @@ pub fn task_block(task: &TaskInner, sequence: u64, context: WaitContext) {
         resource_id,
         resource_detail,
     };
-    enqueue_event(TracepointId::TaskBlock, &ctx);
+    enqueue_event(TracepointId::TaskBlock, &ctx, generation);
 }
 
 #[inline(always)]
@@ -174,6 +204,8 @@ pub fn task_wake(task: &TaskInner, sequence: u64, waker_task_id: u64, context: W
     if !has_subscribers(TracepointId::TaskWake) {
         return;
     }
+    let _observation_guard = kernel_guard::NoPreemptIrqSave::new();
+    let generation = observation_generation();
     let timestamp_ns = axhal::time::monotonic_time_nanos();
     let cpu_id = axhal::percpu::this_cpu_id() as u32;
     #[cfg(feature = "bpf-trace")]
@@ -184,13 +216,16 @@ pub fn task_wake(task: &TaskInner, sequence: u64, waker_task_id: u64, context: W
         (0, 0)
     };
 
+    let waker_identity = crate::current_may_uninit()
+        .filter(|current| current.id().as_u64() == waker_task_id)
+        .map(|current| current.bpf_identity()).unwrap_or((0, 0));
     let ctx = TaskWakeContext {
         common: ContextCommon::new(
             TracepointId::TaskWake,
             timestamp_ns,
             cpu_id,
-            0,
-            0,
+            waker_identity.0,
+            waker_identity.1,
             waker_task_id,
         ),
         target_task_id: task.id().as_u64(),
@@ -200,7 +235,7 @@ pub fn task_wake(task: &TaskInner, sequence: u64, waker_task_id: u64, context: W
         _pad: 0,
         source_id,
     };
-    enqueue_event(TracepointId::TaskWake, &ctx);
+    enqueue_event(TracepointId::TaskWake, &ctx, generation);
 }
 
 #[inline(always)]
@@ -208,22 +243,25 @@ pub fn task_exit(task: &TaskInner) {
     if !has_subscribers(TracepointId::TaskExit) {
         return;
     }
+    let _observation_guard = kernel_guard::NoPreemptIrqSave::new();
+    let generation = observation_generation();
     let timestamp_ns = axhal::time::monotonic_time_nanos();
     let cpu_id = axhal::percpu::this_cpu_id() as u32;
+    let identity = task.bpf_identity();
     let ctx = TaskExitContext {
         common: ContextCommon::new(
             TracepointId::TaskExit,
             timestamp_ns,
             cpu_id,
-            0,
-            0,
+            identity.0,
+            identity.1,
             task.id().as_u64(),
         ),
         exit_task_id: task.id().as_u64(),
         exit_code: 0,
         _pad: 0,
     };
-    enqueue_event(TracepointId::TaskExit, &ctx);
+    enqueue_event(TracepointId::TaskExit, &ctx, generation);
 }
 
 #[inline(always)]
@@ -237,15 +275,18 @@ pub fn task_enqueue(
     if !has_subscribers(TracepointId::TaskEnqueue) {
         return;
     }
+    let _observation_guard = kernel_guard::NoPreemptIrqSave::new();
+    let generation = observation_generation();
     let timestamp_ns = axhal::time::monotonic_time_nanos();
     let cpu_id = axhal::percpu::this_cpu_id() as u32;
+    let identity = task.bpf_identity();
     let ctx = TaskEnqueueContext {
         common: ContextCommon::new(
             TracepointId::TaskEnqueue,
             timestamp_ns,
             cpu_id,
-            0,
-            0,
+            identity.0,
+            identity.1,
             task.id().as_u64(),
         ),
         enqueue_task_id: task.id().as_u64(),
@@ -254,7 +295,7 @@ pub fn task_enqueue(
         queue_depth: queue_depth as u32,
         enqueue_reason: reason,
     };
-    enqueue_event(TracepointId::TaskEnqueue, &ctx);
+    enqueue_event(TracepointId::TaskEnqueue, &ctx, generation);
 }
 
 #[inline(always)]
@@ -262,6 +303,8 @@ pub fn task_metadata(task_id: u64, pid: u64, tid: u64, comm: &[u8]) {
     if !has_subscribers(TracepointId::TaskMetadata) {
         return;
     }
+    let _observation_guard = kernel_guard::NoPreemptIrqSave::new();
+    let generation = observation_generation();
     let timestamp_ns = axhal::time::monotonic_time_nanos();
     let cpu_id = axhal::percpu::this_cpu_id() as u32;
     let mut comm_fixed = [0u8; 16];
@@ -281,7 +324,7 @@ pub fn task_metadata(task_id: u64, pid: u64, tid: u64, comm: &[u8]) {
         target_tid: tid as u32,
         comm: comm_fixed,
     };
-    enqueue_event(TracepointId::TaskMetadata, &ctx);
+    enqueue_event(TracepointId::TaskMetadata, &ctx, generation);
 }
 
 #[inline(always)]
@@ -289,9 +332,12 @@ pub fn phase_marker(boundary: u32, phase: &[u8]) {
     if !has_subscribers(TracepointId::PhaseMarker) {
         return;
     }
+    let _observation_guard = kernel_guard::NoPreemptIrqSave::new();
+    let generation = observation_generation();
     let timestamp_ns = axhal::time::monotonic_time_nanos();
     let cpu_id = axhal::percpu::this_cpu_id() as u32;
     let task_id = crate::CurrentTask::try_get().map(|c| c.id().as_u64()).unwrap_or(0);
+    let identity = crate::current_may_uninit().map(|task| task.bpf_identity()).unwrap_or((0, 0));
     let mut phase_fixed = [0u8; 16];
     let len = phase.len().min(16);
     phase_fixed[..len].copy_from_slice(&phase[..len]);
@@ -300,15 +346,15 @@ pub fn phase_marker(boundary: u32, phase: &[u8]) {
             TracepointId::PhaseMarker,
             timestamp_ns,
             cpu_id,
-            0,
-            0,
+            identity.0,
+            identity.1,
             task_id,
         ),
         phase_boundary: boundary,
         phase_len: len as u32,
         phase_name: phase_fixed,
     };
-    enqueue_event(TracepointId::PhaseMarker, &ctx);
+    enqueue_event(TracepointId::PhaseMarker, &ctx, generation);
 }
 
 // -----------------------------------------------------------------------------

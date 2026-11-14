@@ -1,5 +1,21 @@
 #![no_std]
 
+/// Epoch shared by IRQ snapshots, tracepoint producers and event control.
+static OBSERVATION_GENERATION: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(1);
+
+pub fn observation_generation() -> u64 {
+    OBSERVATION_GENERATION.load(core::sync::atomic::Ordering::Acquire)
+}
+
+/// Epoch exhaustion fails closed: consumers must reject u64::MAX.
+pub fn advance_observation_generation() -> u64 {
+    use core::sync::atomic::Ordering;
+    match OBSERVATION_GENERATION.fetch_update(Ordering::AcqRel, Ordering::Acquire, |value| value.checked_add(1)) {
+        Ok(previous) => previous + 1,
+        Err(_) => u64::MAX,
+    }
+}
+
 /// Tracepoint identifier for BPF v1 semantic events.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[repr(u32)]
@@ -258,6 +274,37 @@ impl PerfEventContext {
     }
 }
 
+/// PulseOS software-sample v2; the first 48 bytes preserve the v1 context.
+/// IP and perf KERNEL=1/USER=2 mode are appended; version=2 is at byte 60.
+/// The data-address field in the v1 prefix is never repurposed as an IP.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PerfSampleContext {
+    pub base: PerfEventContext,
+    pub ip: u64,
+    pub mode: u32,
+    pub version: u32,
+}
+
+impl PerfSampleContext {
+    pub const SIZE: usize = 64;
+
+    /// Explicit little-endian encoding without Rust layout or padding bytes.
+    pub fn to_bytes(&self) -> [u8; Self::SIZE] {
+        let mut bytes = [0u8; Self::SIZE];
+        bytes[0..8].copy_from_slice(&self.base.sample_period.to_le_bytes());
+        bytes[8..16].copy_from_slice(&self.base.addr.to_le_bytes());
+        bytes[16..24].copy_from_slice(&self.base.timestamp_ns.to_le_bytes());
+        bytes[24..28].copy_from_slice(&self.base.cpu_id.to_le_bytes());
+        bytes[28..32].copy_from_slice(&self.base.pid.to_le_bytes());
+        bytes[32..36].copy_from_slice(&self.base.tid.to_le_bytes());
+        bytes[40..48].copy_from_slice(&self.base.task_id.to_le_bytes());
+        bytes[48..56].copy_from_slice(&self.ip.to_le_bytes());
+        bytes[56..60].copy_from_slice(&self.mode.to_le_bytes());
+        bytes[60..64].copy_from_slice(&self.version.to_le_bytes());
+        bytes
+    }
+}
+
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct PerfEventSampleCounters {
@@ -488,6 +535,8 @@ pub const MAX_CONTEXT_SIZE: usize = 80;
 pub struct EventRecord {
     pub id: TracepointId,
     pub len: u32,
+    /// Internal handoff metadata; not part of the BPF context byte slice.
+    pub generation: u64,
     pub data: [u8; MAX_CONTEXT_SIZE],
 }
 
@@ -496,6 +545,7 @@ impl EventRecord {
         Self {
             id: TracepointId::TaskMetadata,
             len: 0,
+            generation: 0,
             data: [0u8; MAX_CONTEXT_SIZE],
         }
     }
@@ -503,6 +553,7 @@ impl EventRecord {
     pub fn new(id: TracepointId, slice: &[u8]) -> Self {
         let mut rec = Self::empty();
         rec.id = id;
+        rec.generation = observation_generation();
         let copy_len = slice.len().min(MAX_CONTEXT_SIZE);
         rec.len = copy_len as u32;
         rec.data[..copy_len].copy_from_slice(&slice[..copy_len]);
@@ -578,6 +629,11 @@ impl<const CAP: usize> BoundedTraceQueue<CAP> {
     /// Enqueue an event in an allocation-free, nonblocking, non-recursive manner.
     #[inline]
     pub fn enqueue_bytes(&self, id: TracepointId, slice: &[u8]) -> Result<(), QueueDropReason> {
+        self.enqueue_with_generation(id, slice, observation_generation())
+    }
+
+    /// Enqueue with the epoch captured before source fields were observed.
+    pub fn enqueue_with_generation(&self, id: TracepointId, slice: &[u8], generation: u64) -> Result<(), QueueDropReason> {
         // Reentrancy guard: strictly bounded and non-recursive
         if self
             .in_trace
@@ -607,6 +663,7 @@ impl<const CAP: usize> BoundedTraceQueue<CAP> {
             let slot = &self.slots[head & mask];
             let record = unsafe { &mut *slot.get() };
             record.id = id;
+            record.generation = generation;
             record.len = copy_len as u32;
             record.data[..copy_len].copy_from_slice(&slice[..copy_len]);
             self.head
@@ -623,6 +680,11 @@ impl<const CAP: usize> BoundedTraceQueue<CAP> {
 
     /// Drain up to `max_count` events, invoking `consumer` for each.
     pub fn drain<F: FnMut(TracepointId, &[u8])>(&self, max_count: usize, mut consumer: F) -> usize {
+        self.drain_with_generation(max_count, |id, bytes, _generation| consumer(id, bytes))
+    }
+
+    /// Drain preserved context bytes together with their original epoch.
+    pub fn drain_with_generation<F: FnMut(TracepointId, &[u8], u64)>(&self, max_count: usize, mut consumer: F) -> usize {
         use core::sync::atomic::Ordering;
         if self.in_drain.compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed).is_err() {
             return 0;
@@ -639,7 +701,7 @@ impl<const CAP: usize> BoundedTraceQueue<CAP> {
             tail = tail.wrapping_add(1);
             self.tail.store(tail, Ordering::Release);
             drained += 1;
-            consumer(record.id, record.as_bytes());
+            consumer(record.id, record.as_bytes(), record.generation);
         }
         drained
     }
@@ -700,6 +762,6 @@ const _: () = {
     assert!(core::mem::align_of::<PerfEventContext>() == 8);
     assert!(core::mem::size_of::<PerfEventContext>() <= MAX_CONTEXT_SIZE);
 
-    assert!(core::mem::size_of::<EventRecord>() == 88);
+    assert!(core::mem::size_of::<EventRecord>() == 96);
     assert!(core::mem::align_of::<EventRecord>() == 8);
 };
