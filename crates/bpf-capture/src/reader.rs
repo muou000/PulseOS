@@ -1,7 +1,8 @@
 //! Binary BPF capture reader with full integrity and schema validation.
 
 use alloc::vec::Vec;
-use crate::framing::{compute_checksum, CaptureError, CaptureHeader, CaptureTrailer};
+use crate::diagnostics::RuntimeDiagnostics;
+use crate::framing::{compute_checksum, compute_checksum_ieee, CaptureError, CaptureHeader, CaptureTrailer, FORMAT_VERSION_V2};
 use crate::record::NormalizedRecord;
 use crate::schema::SchemaRegistry;
 use crate::session::SessionMetadata;
@@ -14,6 +15,7 @@ pub struct CaptureData {
     pub metadata: SessionMetadata,
     pub records: Vec<NormalizedRecord>,
     pub trailer: CaptureTrailer,
+    pub diagnostics: Option<RuntimeDiagnostics>,
 }
 
 /// Binary reader and validator for independent BPF captures.
@@ -23,37 +25,66 @@ impl CaptureReader {
     pub fn from_bytes(bytes: &[u8]) -> Result<CaptureData, CaptureError> {
         let header = CaptureHeader::from_bytes(bytes)?;
 
-        let trailer_offset = header.trailer_offset as usize;
-        let trailer_size = header.trailer_size as usize;
-
-        if bytes.len() < trailer_offset + trailer_size {
-            return Err(CaptureError::TruncatedTrailer);
+        let trailer_offset = usize::try_from(header.trailer_offset).map_err(|_| CaptureError::InvalidTrailerOffset)?;
+        let trailer_size = usize::try_from(header.trailer_size).map_err(|_| CaptureError::InvalidTrailerOffset)?;
+        let trailer_end = trailer_offset.checked_add(trailer_size).ok_or(CaptureError::InvalidTrailerOffset)?;
+        if trailer_offset < crate::framing::CAPTURE_HEADER_SIZE
+            || trailer_size != crate::framing::CAPTURE_TRAILER_SIZE
+        { return Err(CaptureError::InvalidTrailerOffset); }
+        if trailer_end > bytes.len() { return Err(CaptureError::TruncatedTrailer); }
+        if trailer_end != bytes.len() { return Err(CaptureError::InvalidTrailerOffset); }
+        let trailer = CaptureTrailer::from_bytes(&bytes[trailer_offset..trailer_end])?;
+        if trailer.trailer_size as usize != trailer_size {
+            return Err(CaptureError::InvalidTrailerOffset);
         }
-
-        let trailer = CaptureTrailer::from_bytes(&bytes[trailer_offset..trailer_offset + trailer_size])?;
-
-        let computed_checksum = compute_checksum(&bytes[..trailer_offset]);
+        let computed_checksum = if header.format_version == FORMAT_VERSION_V2 {
+            compute_checksum_ieee(&bytes[..trailer_offset])
+        } else { compute_checksum(&bytes[..trailer_offset]) };
         trailer.validate_integrity(header.records_count, header.records_size, computed_checksum)?;
 
-        let meta_offset = header.metadata_offset as usize;
-        let meta_size = header.metadata_size as usize;
-        if bytes.len() < meta_offset + meta_size {
-            return Err(CaptureError::TruncatedMetadata);
+        let meta_offset = usize::try_from(header.metadata_offset).map_err(|_| CaptureError::InvalidRecordOffset)?;
+        let meta_size = usize::try_from(header.metadata_size).map_err(|_| CaptureError::TruncatedMetadata)?;
+        let meta_end = meta_offset.checked_add(meta_size).ok_or(CaptureError::TruncatedMetadata)?;
+        let records_offset = usize::try_from(header.records_offset).map_err(|_| CaptureError::InvalidRecordOffset)?;
+        let records_size = usize::try_from(header.records_size).map_err(|_| CaptureError::TruncatedRecord)?;
+        let rec_end = records_offset.checked_add(records_size).ok_or(CaptureError::TruncatedRecord)?;
+        if header.header_size as usize != crate::framing::CAPTURE_HEADER_SIZE
+            || meta_offset != crate::framing::CAPTURE_HEADER_SIZE
+            || meta_end != records_offset || rec_end != trailer_offset
+        { return Err(CaptureError::InvalidRecordOffset); }
+        if header.schema_version != crate::framing::SCHEMA_VERSION_V1 {
+            return Err(CaptureError::UnsupportedSchemaVersion(header.schema_version));
         }
-
-        let meta_bytes = &bytes[meta_offset..meta_offset + meta_size];
+        // The validated ordering puts every section inside the bounded input.
+        let meta_bytes = &bytes[meta_offset..meta_end];
         let (registry, reg_consumed) = SchemaRegistry::from_bytes(meta_bytes)?;
-        let (metadata, _meta_consumed) = SessionMetadata::from_bytes(&meta_bytes[reg_consumed..])?;
-
-        let records_offset = header.records_offset as usize;
-        let records_size = header.records_size as usize;
-        if bytes.len() < records_offset + records_size {
-            return Err(CaptureError::TruncatedRecord);
+        let (metadata, meta_consumed) = SessionMetadata::from_bytes(&meta_bytes[reg_consumed..])?;
+        let used = reg_consumed.checked_add(meta_consumed).ok_or(CaptureError::TruncatedMetadata)?;
+        let (diagnostics, used) = if header.format_version == FORMAT_VERSION_V2 {
+            let (diagnostics, consumed) = RuntimeDiagnostics::from_bytes(meta_bytes.get(used..).ok_or(CaptureError::TruncatedMetadata)?)?;
+            (Some(diagnostics), used.checked_add(consumed).ok_or(CaptureError::TruncatedMetadata)?)
+        } else { (None, used) };
+        if used != meta_size || metadata.config.target_arch != header.target_arch {
+            return Err(CaptureError::InvalidRecord("inconsistent metadata"));
+        }
+        if header.format_version == FORMAT_VERSION_V2 {
+            // Reject a contradictory complete declaration rather than allowing
+            // malformed artifacts to upgrade unknown/loss diagnostics.
+            let complete_allowed = header.records_count > 0
+                && diagnostics.as_ref().is_some_and(|d| d.status().is_complete())
+                && !metadata.counters.has_loss_or_error();
+            if metadata.status != trailer.status_code
+                || (!complete_allowed && metadata.status.is_complete())
+                || metadata.start_ns == 0 || metadata.stop_ns <= metadata.start_ns {
+                return Err(CaptureError::InvalidRecord("inconsistent runtime status/window"));
+            }
+        }
+        if header.records_count > (records_size / crate::record::RECORD_HEADER_SIZE) as u64 {
+            return Err(CaptureError::InvalidRecord("record count cannot fit the data section"));
         }
 
         let mut records = Vec::with_capacity(header.records_count as usize);
         let mut rec_pos = records_offset;
-        let rec_end = records_offset + records_size;
         while rec_pos < rec_end {
             let (rec, consumed) = NormalizedRecord::from_bytes(&bytes[rec_pos..rec_end])?;
             registry.validate_record(&rec)?;
@@ -74,6 +105,7 @@ impl CaptureReader {
             metadata,
             records,
             trailer,
+            diagnostics,
         })
     }
 }

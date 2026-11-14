@@ -1,3 +1,5 @@
+# HISTORICAL ONLY: retired guest payload run list; run.py never executes this file.
+# Use tests/bpf_sampling for real capture evidence (#191).
 # DESCRIPTION: PulseOS BPF and perf_event subset guest integration run list (#105)
 # Format: <test_name> <command> <expected_class> [description]
 

@@ -1,5 +1,5 @@
 use bpf_capture::record::NormalizedRecord;
-use bpf_capture::schema::PERF_EVENT_SOFTWARE_ID;
+use bpf_capture::schema::{PERF_EVENT_SOFTWARE_ID, PERF_EVENT_SOFTWARE_V2_ID};
 use pulse_bpf_schema::{PhaseBoundary, TracepointId};
 use std::collections::HashMap;
 
@@ -51,6 +51,12 @@ pub enum EventPayload {
         sample_period: u64,
         pc: u64,
     },
+    SoftwareSampleV2 {
+        sample_period: u64,
+        addr: u64,
+        pc: u64,
+        mode: u32,
+    },
     Raw {
         bytes: Vec<u8>,
     },
@@ -82,6 +88,7 @@ impl NormalizedEvent {
             x if x == TracepointId::TaskEnqueue as u32 => "task_enqueue",
             x if x == TracepointId::PhaseMarker as u32 => "phase_marker",
             x if x == PERF_EVENT_SOFTWARE_ID => "perf_sample",
+            x if x == PERF_EVENT_SOFTWARE_V2_ID => "perf_sample_v2",
             _ => "unknown",
         }
     }
@@ -233,6 +240,14 @@ fn parse_payload(event_id: u32, payload: &[u8]) -> EventPayload {
             EventPayload::PhaseMarker {
                 phase_boundary,
                 phase_name,
+            }
+        }
+        x if x == PERF_EVENT_SOFTWARE_V2_ID && payload.len() == 32 => {
+            EventPayload::SoftwareSampleV2 {
+                sample_period: u64::from_le_bytes(payload[0..8].try_into().unwrap()),
+                addr: u64::from_le_bytes(payload[8..16].try_into().unwrap()),
+                pc: u64::from_le_bytes(payload[16..24].try_into().unwrap()),
+                mode: u32::from_le_bytes(payload[24..28].try_into().unwrap()),
             }
         }
         x if x == PERF_EVENT_SOFTWARE_ID && payload.len() >= 16 => {

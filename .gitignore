@@ -5,6 +5,7 @@
 *.bin
 *.img
 *.uimg
+*.elf.provenance.json*
 .axconfig.old.toml
 .axconfig.toml
 kernel-*

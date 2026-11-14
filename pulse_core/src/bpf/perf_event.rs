@@ -119,6 +119,32 @@ pub struct RuntimeSampleCounters {
     pub invalid: u64,
 }
 
+/// A read-only diagnostic snapshot. Individual counters are sampled, not a
+/// system-wide atomic transaction. disabled + inflight=0 bounds VM completion.
+#[derive(Clone, Copy, Debug)]
+pub struct PerfEventDiagnostics {
+    pub id: u64,
+    pub clock: PerfEventClock,
+    pub scope: PerfEventScope,
+    pub period: u64,
+    pub task_id: u64,
+    pub generation: u64,
+    pub enabled: bool,
+    pub inflight: u64,
+    pub program_id: u32,
+    pub samples: PerfEventSampleCounters,
+    pub runtime: RuntimeSampleCounters,
+    pub transport_lost: u64,
+    pub consumer: ConsumerErrorCounters,
+}
+
+static NEXT_PERF_EVENT_ID: AtomicU64 = AtomicU64::new(1);
+
+struct RuntimeInvocation<'a>(&'a AtomicU64);
+impl Drop for RuntimeInvocation<'_> {
+    fn drop(&mut self) { self.0.fetch_sub(1, Ordering::Release); }
+}
+
 pub use pulse_bpf_schema::{observation_generation, advance_observation_generation};
 
 pub fn total_perf_event_sample_counters() -> PerfEventSampleCounters {
@@ -617,6 +643,8 @@ struct PerfEventState {
 }
 
 pub struct PerfEvent {
+    id: u64,
+    runtime_inflight: AtomicU64,
     spec: PerfEventSpec,
     // Stable scheduler identity, unlike the numeric TID selected at open time.
     bound_task_id: AtomicU64,
@@ -643,6 +671,9 @@ impl PerfEvent {
         let enabled = !spec.disabled;
         let last_enabled_ns = if enabled { now_ns } else { 0 };
         Self {
+            id: NEXT_PERF_EVENT_ID.fetch_update(Ordering::Relaxed, Ordering::Relaxed,
+                |id| id.checked_add(1)).unwrap_or(0),
+            runtime_inflight: AtomicU64::new(0),
             spec,
             bound_task_id: AtomicU64::new(0),
             state: spin::Mutex::new(PerfEventState {
@@ -703,6 +734,24 @@ impl PerfEvent {
         { selected_tid != 0 && selected_tid == observed_tid }
         #[cfg(target_os = "none")]
         { let _ = selected_tid; false }
+    }
+
+    pub fn diagnostics(&self) -> PerfEventDiagnostics {
+        // Keep control state locked through counter reads. Once disabled and
+        // inflight=0 is acquired, no invocation can start until this lock is
+        // released; the final invocation's Release publishes its counters.
+        let state = self.state.lock();
+        let inflight = self.runtime_inflight.load(Ordering::Acquire);
+        let buffer = self.buffer();
+        PerfEventDiagnostics {
+            id: self.id, clock: self.spec.clock, scope: self.spec.scope,
+            period: state.sample_period, task_id: self.bound_task_id.load(Ordering::Acquire),
+            enabled: state.enabled, generation: state.activation_generation,
+            program_id: state.attached_prog.as_ref().map_or(0, |prog| prog.id()), inflight,
+            samples: self.sample_counters(), runtime: self.runtime_counters(),
+            transport_lost: buffer.as_ref().map_or(0, |buffer| buffer.total_lost()),
+            consumer: buffer.as_ref().map_or(ConsumerErrorCounters::default(), |buffer| buffer.consumer_error_counters()),
+        }
     }
 
     pub fn spec(&self) -> &PerfEventSpec {
@@ -803,23 +852,26 @@ impl PerfEvent {
                 if self.matches_task_identity(pid, sample.tid, sample.task_id) => sample.task_clock_ns,
             _ => return Ok(false),
         };
-        self.runtime_observed.fetch_add(1, Ordering::Relaxed);
         if sample.cpu >= BPF_MAX_SAMPLING_CPUS || sample.pid > u32::MAX as u64
             || sample.tid > u32::MAX as u64 || sample.ip == 0
         {
             self.runtime_invalid.fetch_add(1, Ordering::Relaxed);
             return Ok(false);
         }
-        let (prog, period, due) = {
+        let (prog, period, due, _invocation) = {
             let mut state = self.state.lock();
             if !state.enabled || state.attached_prog.is_none()
                 || state.activation_generation == u64::MAX || sample.generation == u64::MAX
                 || sample.generation < state.activation_generation
                 || sample.generation > observation_generation()
             {
-                self.runtime_cancelled.fetch_add(1, Ordering::Relaxed);
+                if sample.generation < state.activation_generation || sample.generation == u64::MAX
+                    || sample.generation > observation_generation() {
+                    self.runtime_cancelled.fetch_add(1, Ordering::Relaxed);
+                }
                 return Ok(false);
             }
+            self.runtime_observed.fetch_add(1, Ordering::Relaxed);
             if state.sample_period == 0 {
                 return Ok(false);
             }
@@ -834,7 +886,9 @@ impl PerfEvent {
             if due == 0 {
                 return Ok(false);
             }
-            (state.attached_prog.as_ref().unwrap().clone(), state.sample_period, due)
+            self.runtime_inflight.fetch_add(1, Ordering::Relaxed);
+            (state.attached_prog.as_ref().unwrap().clone(), state.sample_period, due,
+             RuntimeInvocation(&self.runtime_inflight))
         };
         self.runtime_skipped_periods.fetch_add(due - 1, Ordering::Relaxed);
         let context = PerfSampleContext {
@@ -920,18 +974,22 @@ impl PerfEvent {
         if !matches_scope {
             return Ok(false);
         }
-        self.runtime_observed.fetch_add(1, Ordering::Relaxed);
-        let prog = {
+        let (prog, _invocation) = {
             let state = self.state.lock();
             if !state.enabled || state.attached_prog.is_none()
                 || state.activation_generation == u64::MAX || generation == u64::MAX
                 || generation < state.activation_generation
                 || generation > observation_generation()
             {
-                self.runtime_cancelled.fetch_add(1, Ordering::Relaxed);
+                if generation < state.activation_generation || generation == u64::MAX
+                    || generation > observation_generation() {
+                    self.runtime_cancelled.fetch_add(1, Ordering::Relaxed);
+                }
                 return Ok(false);
             }
-            state.attached_prog.as_ref().unwrap().clone()
+            self.runtime_observed.fetch_add(1, Ordering::Relaxed);
+            self.runtime_inflight.fetch_add(1, Ordering::Relaxed);
+            (state.attached_prog.as_ref().unwrap().clone(), RuntimeInvocation(&self.runtime_inflight))
         };
         self.run_observation(prog, bytes, cpu, timestamp_ns)
     }

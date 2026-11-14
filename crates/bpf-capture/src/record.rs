@@ -73,7 +73,7 @@ impl NormalizedRecord {
         let task_id = u64::from_le_bytes(bytes[32..40].try_into().unwrap());
         let payload_len = u32::from_le_bytes(bytes[40..44].try_into().unwrap()) as usize;
 
-        let total_size = RECORD_HEADER_SIZE + payload_len;
+        let total_size = RECORD_HEADER_SIZE.checked_add(payload_len).ok_or(CaptureError::TruncatedRecord)?;
         if bytes.len() < total_size {
             return Err(CaptureError::TruncatedRecord);
         }
@@ -102,13 +102,13 @@ impl NormalizedRecord {
             return Err(CaptureError::TruncatedRecord);
         }
 
-        let _raw_event_id = u32::from_ne_bytes(slice[0..4].try_into().unwrap());
-        let version = u32::from_ne_bytes(slice[4..8].try_into().unwrap());
-        let timestamp_ns = u64::from_ne_bytes(slice[8..16].try_into().unwrap());
-        let cpu_id = u32::from_ne_bytes(slice[16..20].try_into().unwrap());
-        let pid = u32::from_ne_bytes(slice[20..24].try_into().unwrap());
-        let tid = u32::from_ne_bytes(slice[24..28].try_into().unwrap());
-        let task_id = u64::from_ne_bytes(slice[32..40].try_into().unwrap());
+        let _raw_event_id = u32::from_le_bytes(slice[0..4].try_into().unwrap());
+        let version = u32::from_le_bytes(slice[4..8].try_into().unwrap());
+        let timestamp_ns = u64::from_le_bytes(slice[8..16].try_into().unwrap());
+        let cpu_id = u32::from_le_bytes(slice[16..20].try_into().unwrap());
+        let pid = u32::from_le_bytes(slice[20..24].try_into().unwrap());
+        let tid = u32::from_le_bytes(slice[24..28].try_into().unwrap());
+        let task_id = u64::from_le_bytes(slice[32..40].try_into().unwrap());
 
         let payload = slice[COMMON_SIZE..].to_vec();
 
@@ -131,13 +131,13 @@ impl NormalizedRecord {
             return Err(CaptureError::TruncatedRecord);
         }
 
-        let sample_period = u64::from_ne_bytes(slice[0..8].try_into().unwrap());
-        let addr = u64::from_ne_bytes(slice[8..16].try_into().unwrap());
-        let timestamp_ns = u64::from_ne_bytes(slice[16..24].try_into().unwrap());
-        let cpu_id = u32::from_ne_bytes(slice[24..28].try_into().unwrap());
-        let pid = u32::from_ne_bytes(slice[28..32].try_into().unwrap());
-        let tid = u32::from_ne_bytes(slice[32..36].try_into().unwrap());
-        let task_id = u64::from_ne_bytes(slice[40..48].try_into().unwrap());
+        let sample_period = u64::from_le_bytes(slice[0..8].try_into().unwrap());
+        let addr = u64::from_le_bytes(slice[8..16].try_into().unwrap());
+        let timestamp_ns = u64::from_le_bytes(slice[16..24].try_into().unwrap());
+        let cpu_id = u32::from_le_bytes(slice[24..28].try_into().unwrap());
+        let pid = u32::from_le_bytes(slice[28..32].try_into().unwrap());
+        let tid = u32::from_le_bytes(slice[32..36].try_into().unwrap());
+        let task_id = u64::from_le_bytes(slice[40..48].try_into().unwrap());
 
         let mut payload = vec![0u8; 16];
         payload[0..8].copy_from_slice(&sample_period.to_le_bytes());
@@ -154,5 +154,36 @@ impl NormalizedRecord {
             payload,
         })
     }
+    /// Decode an explicitly identified PulseOS software-sample v2 context.
+    /// A 64-byte length alone is insufficient: TaskEnqueue also uses 64 bytes.
+    pub fn from_perf_event_v2_slice(slice: &[u8]) -> Result<Self, CaptureError> {
+        if slice.len() != 64 {
+            return Err(CaptureError::TruncatedRecord);
+        }
+        let version = u32::from_le_bytes(slice[60..64].try_into().unwrap());
+        let mode = u32::from_le_bytes(slice[56..60].try_into().unwrap());
+        let period = u64::from_le_bytes(slice[0..8].try_into().unwrap());
+        let timestamp_ns = u64::from_le_bytes(slice[16..24].try_into().unwrap());
+        let cpu_id = u32::from_le_bytes(slice[24..28].try_into().unwrap());
+        let pid = u32::from_le_bytes(slice[28..32].try_into().unwrap());
+        let tid = u32::from_le_bytes(slice[32..36].try_into().unwrap());
+        let task_id = u64::from_le_bytes(slice[40..48].try_into().unwrap());
+        let ip = u64::from_le_bytes(slice[48..56].try_into().unwrap());
+        if version != 2 || !matches!(mode, 1 | 2) || slice[36..40] != [0; 4]
+            || period == 0 || timestamp_ns == 0 || task_id == 0 || ip == 0
+            || (mode == 2 && (pid == 0 || tid == 0))
+        {
+            return Err(CaptureError::InvalidRecord("invalid software sample v2 context"));
+        }
+        let mut payload = vec![0; 32];
+        payload[..16].copy_from_slice(&slice[..16]); // period and data address
+        payload[16..24].copy_from_slice(&slice[48..56]);
+        payload[24..28].copy_from_slice(&slice[56..60]);
+        Ok(Self {
+            event_id: crate::schema::PERF_EVENT_SOFTWARE_V2_ID, schema_version: 2,
+            timestamp_ns, cpu_id, pid, tid, task_id, payload,
+        })
+    }
+
 }
 

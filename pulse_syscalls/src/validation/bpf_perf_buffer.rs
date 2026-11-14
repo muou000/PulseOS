@@ -354,6 +354,153 @@ mod tests {
     }
 
     #[test]
+    fn concurrent_perf_buffer_publication_preserves_wrapped_payloads() {
+        use core::sync::atomic::{AtomicBool, Ordering};
+        use std::thread;
+        use std::time::{Duration, Instant};
+
+        const RECORDS: u64 = 20_000;
+        const PAYLOAD_SIZE: usize = 7 * 8;
+        const RECORD_SIZE: usize = (12 + PAYLOAD_SIZE + 7) & !7;
+        const MASK: u64 = 0xa5c3_7e19_f042_68db;
+
+        let buffer = PerfBuffer::new(1).unwrap();
+        let capacity = buffer.data_size();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let abort = AtomicBool::new(false);
+
+        // Only the producer calls output_sample; only the consumer publishes
+        // tail. There is no per-record lock/channel/barrier beside the actual
+        // PerfBuffer head/tail protocol. The Relaxed flag only aborts failures;
+        // it cannot supply an alternate publication edge for payload bytes.
+        thread::scope(|scope| {
+            let producer = scope.spawn(|| {
+                let result = (|| -> Result<(), &'static str> {
+                    for sequence in 1..=RECORDS {
+                        loop {
+                            if abort.load(Ordering::Relaxed) {
+                                return Err("consumer aborted");
+                            }
+                            if Instant::now() >= deadline {
+                                return Err("producer timed out waiting for ring space");
+                            }
+                            let head = buffer.data_head();
+                            let tail = buffer.data_tail();
+                            let used = head.checked_sub(tail).ok_or("tail exceeded head")?;
+                            if used > capacity as u64 {
+                                return Err("producer observed overwritten ring capacity");
+                            }
+                            // With one producer and a consumer that only frees
+                            // bytes, available space cannot shrink before the
+                            // following output_sample. No intentional loss is
+                            // mixed into this publication/visibility regression.
+                            if capacity - used as usize >= RECORD_SIZE {
+                                break;
+                            }
+                            thread::yield_now();
+                        }
+                        let words = [
+                            sequence, !sequence, sequence ^ MASK, !(sequence ^ MASK),
+                            sequence, !sequence, sequence.rotate_left(17) ^ MASK,
+                        ];
+                        let mut payload = [0u8; PAYLOAD_SIZE];
+                        for (slot, word) in payload.chunks_exact_mut(8).zip(words) {
+                            slot.copy_from_slice(&word.to_le_bytes());
+                        }
+                        buffer.output_sample(&payload).map_err(|_| "unexpected sample output failure")?;
+                    }
+                    Ok(())
+                })();
+                if result.is_err() {
+                    abort.store(true, Ordering::Relaxed);
+                }
+                result
+            });
+
+            let consumed = (|| -> Result<(u64, u64), &'static str> {
+                let mut tail = 0u64;
+                let mut wrapped_records = 0;
+                let mut wrapped_headers = 0;
+                for sequence in 1..=RECORDS {
+                    loop {
+                        if abort.load(Ordering::Relaxed) {
+                            return Err("producer aborted");
+                        }
+                        if Instant::now() >= deadline {
+                            return Err("consumer timed out waiting for published record");
+                        }
+                        // data_head is an Acquire load. Every copied byte below
+                        // belongs to [tail, head); tail is retained until both
+                        // payload copies and all sequence checks finish.
+                        let head = buffer.data_head();
+                        let available = head.checked_sub(tail).ok_or("head regressed below tail")?;
+                        if available > capacity as u64 || available % RECORD_SIZE as u64 != 0 {
+                            return Err("invalid published record boundary");
+                        }
+                        if available >= RECORD_SIZE as u64 {
+                            break;
+                        }
+                        thread::yield_now();
+                    }
+                    let offset = (tail % capacity as u64) as usize;
+                    wrapped_records += u64::from(offset + RECORD_SIZE > capacity);
+                    wrapped_headers += u64::from(offset + 12 > capacity);
+                    let mut header = [0u8; 12];
+                    buffer.read_circular(offset, &mut header);
+                    if u32::from_ne_bytes(header[0..4].try_into().unwrap()) != PERF_RECORD_SAMPLE
+                        || u16::from_ne_bytes(header[4..6].try_into().unwrap()) != 0
+                        || u16::from_ne_bytes(header[6..8].try_into().unwrap()) as usize != RECORD_SIZE
+                        || u32::from_ne_bytes(header[8..12].try_into().unwrap()) as usize != PAYLOAD_SIZE
+                    {
+                        return Err("partially visible or corrupt sample header");
+                    }
+                    let payload_offset = (offset + 12) % capacity;
+                    let mut payload = [0u8; PAYLOAD_SIZE];
+                    buffer.read_circular(payload_offset, &mut payload);
+                    if sequence % 31 == 0 {
+                        // Let the producer fill other free slots while the
+                        // consumer still owns this record, including wrap cases.
+                        thread::yield_now();
+                    }
+                    let mut second_copy = [0u8; PAYLOAD_SIZE];
+                    buffer.read_circular(payload_offset, &mut second_copy);
+                    if payload != second_copy {
+                        return Err("producer overwrote an unconsumed payload");
+                    }
+                    let expected = [
+                        sequence, !sequence, sequence ^ MASK, !(sequence ^ MASK),
+                        sequence, !sequence, sequence.rotate_left(17) ^ MASK,
+                    ];
+                    for (bytes, expected) in payload.chunks_exact(8).zip(expected) {
+                        if u64::from_le_bytes(bytes.try_into().unwrap()) != expected {
+                            return Err("stale, reordered or partially published payload");
+                        }
+                    }
+                    tail += RECORD_SIZE as u64;
+                    // Release only after all reads, so the producer's Acquire
+                    // tail observation is the permission to reuse these bytes.
+                    buffer.set_data_tail(tail);
+                }
+                Ok((wrapped_records, wrapped_headers))
+            })();
+            if consumed.is_err() {
+                abort.store(true, Ordering::Relaxed);
+            }
+            // Both polling loops have the same bounded deadline, including peer
+            // failures. Joining occurs after consumption, not before any read.
+            let produced = producer.join().expect("producer panicked");
+            assert!(produced.is_ok() && consumed.is_ok(), "producer: {produced:?}; consumer: {consumed:?}");
+            let (wrapped_records, wrapped_headers) = consumed.unwrap();
+            assert!(wrapped_records >= 300, "must exercise repeated payload wraps");
+            assert!(wrapped_headers >= 30, "must exercise split headers too");
+        });
+        assert_eq!(buffer.data_head(), RECORDS * RECORD_SIZE as u64);
+        assert_eq!(buffer.data_tail(), buffer.data_head());
+        assert_eq!(buffer.total_lost(), 0);
+        assert_eq!(buffer.lost_count(), 0);
+    }
+
+    #[test]
     fn seam4_perf_buffer_lifecycle_and_shared_ownership() {
         // 1. Validate invalid buffer page counts
         assert_eq!(PerfBuffer::new(0).unwrap_err(), LinuxError::EINVAL);

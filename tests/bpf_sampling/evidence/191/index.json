@@ -1,0 +1,504 @@
+[
+  {
+    "label": "rv-task",
+    "run": "riscv64-task-20261115-004328-xkagr4j6",
+    "bundle": "rv-task.tar.gz",
+    "bundle_sha256": "bb4a4c4f153098995d016ef2a5610f9a132683ef8d477cca633c4e4f6fd9ca04",
+    "expected_gate_pass": true,
+    "kernel_elf_sha256": "6857e99342607cc9e6305ad15bfb465e240042800a8a62babc1ccdb28114f9b8",
+    "kernel_source_commit": "dd67ee7b6f0832ba19151a0ed060bf440a7826a8",
+    "members_sha256": {
+      "guest.log": "bc70a2ba6da8d7f1b63e47e96a98e5b3aa39e6420c605ff6a3ab73a7cf40895b",
+      "inputs.json": "d5395e3c5fb579c2d3371ac092846fecd6ebd36f94f9f49f0d804ca882dd6094",
+      "result.json": "b7da7b84a63df4d163c1937d5902313f50233f2a1dd1810aa29b910b742e32a2",
+      "kernel.provenance.json": "deb1aa1c975ae7ce147ec2971cd397d34914e35ed39667d0564bbedf4f881a7d",
+      "payload.elf": "52bb430e7541c99a6a40904ece54b6e39cb2818ab4a62e0958f0863b96dc28eb",
+      "records.pbraw": "95a6436a9e2d92e7b09e4e2e882bc2448728cff11420a1a38c801589e1db7e80",
+      "archive.json": "e24fb1a5c0ec625c16afd03bda7f5af8b5f0961997db4d00083e416a5f045f1c",
+      "stats-before.txt": "40d1c10b26f80bfab7d7d61a07a749b9a355d5f14757d268d0e40f391f8d6c06",
+      "stats-after.txt": "a96fabb7046ff722c1f4a3c1b0e085df6acb3d378b7fbbbaf0834c46a7e1787f",
+      "capture.pbcapture": "aca9be494563e577412468b8b14f651685978d34a2ee3bb2286f7923db7ca186",
+      "import.log": "c007ab677aef6d81dc8e9be6298f9b190c0e834026022dec716a9100ccfeaaea",
+      "analyzer.json": "6cf691c6ad3c5f9d68edf5116245493c6b7bd36867fbde4557c256bbb04c0e81",
+      "analyzer-loss.txt": "3bc1d634a7726fe166b4628c4f3996e148bf42047a54a4a3feb6847ded4aaec1",
+      "analyzer-table.txt": "c97a5782838cc97f1a452d9cbb8b9f4ff8cf0e35571e21f8ea604996be28494b"
+    },
+    "errors": [],
+    "records": 82,
+    "raw_lost_notices": 0,
+    "observed_issues": [
+      {
+        "scope": "global",
+        "counter": "timer_busy",
+        "delta": 2
+      },
+      {
+        "scope": "event",
+        "id": 13,
+        "counter": "skipped",
+        "delta": 1
+      }
+    ],
+    "export_dropped": 0,
+    "wraps": 0,
+    "measurements": {
+      "baseline": {
+        "start_ns": 1171465000,
+        "stop_ns": 1999127700,
+        "wall_ns": 827662700,
+        "iterations": 128,
+        "extra_mapped_bytes": 0
+      },
+      "loaded_detached": {
+        "start_ns": 2017029900,
+        "stop_ns": 2916859800,
+        "wall_ns": 899829900,
+        "iterations": 128,
+        "extra_mapped_bytes": 557056
+      },
+      "attached_capture": {
+        "start_ns": 3056621400,
+        "stop_ns": 3892572700,
+        "wall_ns": 835951300,
+        "iterations": 128,
+        "extra_mapped_bytes": 4751360
+      }
+    },
+    "capture_status": "IncompleteError"
+  },
+  {
+    "label": "la-task",
+    "run": "loongarch64-task-20261115-004517-aay5efcz",
+    "bundle": "la-task.tar.gz",
+    "bundle_sha256": "e818add8f8c59169817a76e0bc0a32113b5dc3391aad483368dd35e3b4cfba77",
+    "expected_gate_pass": true,
+    "kernel_elf_sha256": "c1e678dacd372130254d917192857e57d677a3ad6fa2d4fd5d8f141b82b1d80e",
+    "kernel_source_commit": "dd67ee7b6f0832ba19151a0ed060bf440a7826a8",
+    "members_sha256": {
+      "guest.log": "bdeb926f6aea1839e28e3419cc6037ff396b8c6ad9148fc7f3588df4caf6a8d5",
+      "inputs.json": "b6be13abf23ffb8d85b4314f0b7e650fde370d5360989da64eae0d19d4b3fe79",
+      "result.json": "29afbd177bcd9b8946090c1d17ff685a0865a232239411c6260fa80de3e82125",
+      "kernel.provenance.json": "b7bc30593e2e245fddf3f68f0acec1fa6207cc76fccafaf93972aeda0bc215e3",
+      "payload.elf": "1a5bcab42725ce20ae9fe2e2f2b9c03a6d0d22989bc532a45348def4f8c98604",
+      "records.pbraw": "05d77c542bafc3ad630268e1a14ab1b787fae13113c6cef9275e131a6f019713",
+      "archive.json": "67cd41d262568752ba71dda095dc7a854319c2628bae7379e907f3d261b747db",
+      "stats-before.txt": "84cd4ec2e6543fdc4c4de22fc0d6040112cdc3ceb97001c1387bd132555b0517",
+      "stats-after.txt": "80f3de6e4be2b745c4dba21bd5372988ca1f2f448ac9bd9a0a6553a5d783ceb7",
+      "capture.pbcapture": "6f46d68e637343c156191a82ade0ebfb4d7f38bb20a1ee3bda4b329c26c300b8",
+      "import.log": "5122b73bded39f71332fbc369a047f265391cfcb141bac468e75d048d93a26fe",
+      "analyzer.json": "f95bc8706c4c11e868ab32b42a990f81e53b2a5c60b3fed03b71291853c32a8f",
+      "analyzer-loss.txt": "0aa57930f3f4c1d1c2ddbbdf09bfeb6745e524bd9ee77c8785af5a01fc40584e",
+      "analyzer-table.txt": "694d10e5d7b12409b1bd4f361f868fea80e9180a7be94031fb55957632150b90"
+    },
+    "errors": [],
+    "records": 40,
+    "raw_lost_notices": 0,
+    "observed_issues": [
+      {
+        "scope": "global",
+        "counter": "timer_busy",
+        "delta": 1
+      }
+    ],
+    "export_dropped": 0,
+    "wraps": 0,
+    "measurements": {
+      "baseline": {
+        "start_ns": 1377571810,
+        "stop_ns": 1837704690,
+        "wall_ns": 460132880,
+        "iterations": 128,
+        "extra_mapped_bytes": 0
+      },
+      "loaded_detached": {
+        "start_ns": 1844809950,
+        "stop_ns": 2299408630,
+        "wall_ns": 454598680,
+        "iterations": 128,
+        "extra_mapped_bytes": 557056
+      },
+      "attached_capture": {
+        "start_ns": 2431892480,
+        "stop_ns": 2838114110,
+        "wall_ns": 406221630,
+        "iterations": 128,
+        "extra_mapped_bytes": 4751360
+      }
+    },
+    "capture_status": "IncompleteError"
+  },
+  {
+    "label": "rv-trace-wrap",
+    "run": "riscv64-trace-20261115-004517-uxmgars4",
+    "bundle": "rv-trace-wrap.tar.gz",
+    "bundle_sha256": "7b6506427e43683555762aa8a7bdf2d597c300d8d73d1e73dccdaeeeb5827c23",
+    "expected_gate_pass": true,
+    "kernel_elf_sha256": "6857e99342607cc9e6305ad15bfb465e240042800a8a62babc1ccdb28114f9b8",
+    "kernel_source_commit": "dd67ee7b6f0832ba19151a0ed060bf440a7826a8",
+    "members_sha256": {
+      "guest.log": "b03509f3eb8a762f34308fed83f100d4b38e0b1cf6f4243e26d1e10eec8d8aba",
+      "inputs.json": "383e302719645ec7f6a379a9bdeb9d89c4e63b7cd892b50f8d7531935c665c51",
+      "result.json": "d7e17ec25c8a05bafa5dbfcd7af61667b823a2bae9371a7111b2fdbbc974edfb",
+      "kernel.provenance.json": "deb1aa1c975ae7ce147ec2971cd397d34914e35ed39667d0564bbedf4f881a7d",
+      "payload.elf": "d931d26accdb0a5f0c3020992f2478e27dbe2d97ff069982b496da6f05ee1692",
+      "records.pbraw": "b165eff1fa607232c27c2d89d4c1de071966d769f0da1030aec1fe0a4da4a9cc",
+      "archive.json": "c2ea17dfb2893f90e7c8eb3debdb0922ee018c2dda2a0ec31e22911b3c31f8f1",
+      "stats-before.txt": "8b2fedff1d91d1ad76336020c81f741ac79f1e83959fce8edef7ee0af2d4d4f5",
+      "stats-after.txt": "e3c0291607b222a7803243dfc059f711cf56d35fa2ed5ef32083fb0299bb096a",
+      "capture.pbcapture": "739b50fe365453217c6b619b09099a01dcb7080b0076e999334768defe86abd6",
+      "import.log": "0576c90a8c4226b2f6d64fdf65acc13b2479a7f0a75e339c390a23cca97e3ccb",
+      "analyzer.json": "377024f8f7dd9b7065d6aa865c2da2b261e1cf4dee6f236b27e0e69f38d66cb9",
+      "analyzer-loss.txt": "3ce8a0e6d2885c23221b56ad649769157229479aba0c7a0f66156bd5b56c854a",
+      "analyzer-table.txt": "ac7e6c00cef0c47bc0b871ec8359fa56677456ddb3f3a01923710d0afa6be155"
+    },
+    "errors": [],
+    "records": 555,
+    "raw_lost_notices": 0,
+    "observed_issues": [
+      {
+        "scope": "global",
+        "counter": "timer_busy",
+        "delta": 3
+      },
+      {
+        "scope": "event",
+        "id": 13,
+        "counter": "cancelled",
+        "delta": 1
+      },
+      {
+        "scope": "event",
+        "id": 16,
+        "counter": "cancelled",
+        "delta": 1
+      },
+      {
+        "scope": "event",
+        "id": 19,
+        "counter": "cancelled",
+        "delta": 1
+      }
+    ],
+    "export_dropped": 0,
+    "wraps": 10,
+    "measurements": {
+      "baseline": {
+        "start_ns": 1203178100,
+        "stop_ns": 1375058500,
+        "wall_ns": 171880400,
+        "iterations": 128,
+        "extra_mapped_bytes": 0
+      },
+      "loaded_detached": {
+        "start_ns": 1383471400,
+        "stop_ns": 1541058800,
+        "wall_ns": 157587400,
+        "iterations": 128,
+        "extra_mapped_bytes": 65536
+      },
+      "attached_capture": {
+        "start_ns": 1602224200,
+        "stop_ns": 1768152900,
+        "wall_ns": 165928700,
+        "iterations": 128,
+        "extra_mapped_bytes": 4259840
+      }
+    },
+    "capture_status": "IncompleteError"
+  },
+  {
+    "label": "la-trace-wrap",
+    "run": "loongarch64-trace-20261115-004328-uqn8gjvj",
+    "bundle": "la-trace-wrap.tar.gz",
+    "bundle_sha256": "abb7ea4d1b1ba114cbc13bb9f8ddbde747c9f7dc8a2505353d9b2eed9b085274",
+    "expected_gate_pass": true,
+    "kernel_elf_sha256": "c1e678dacd372130254d917192857e57d677a3ad6fa2d4fd5d8f141b82b1d80e",
+    "kernel_source_commit": "dd67ee7b6f0832ba19151a0ed060bf440a7826a8",
+    "members_sha256": {
+      "guest.log": "11173b35a39b436a3817b981a58f5518fde87d1473e263d721862e3787e2f0a0",
+      "inputs.json": "d57f9a0102cafe13d2a1aec276e0b67f20fabfa8f13c3ba1406404839c0971af",
+      "result.json": "bcb91f5ef4b21bdfdac915d9a10929ac5da229943b3ba0fbec6249bf7662275e",
+      "kernel.provenance.json": "b7bc30593e2e245fddf3f68f0acec1fa6207cc76fccafaf93972aeda0bc215e3",
+      "payload.elf": "f37e664a1478763070afbb0f4dd6276c3ba198b886aa44aee02c92f40af8e0a7",
+      "records.pbraw": "1d48ecbf87a8966b6e5135ce20d1355590db703f69edb7c5d334e3e53714954f",
+      "archive.json": "ca186aef82dccefb626a94bf6ab8304595979444b49c3b374bb692dce8803f57",
+      "stats-before.txt": "ebb2d66c7b4ec128676423cb92764ebd398dd7a2ffaf9fca36bbfd597032f66b",
+      "stats-after.txt": "2be057d928ecc833b1b0d21da35a940bed19a24f81b61c89c9a97730aa27d60e",
+      "capture.pbcapture": "6dae5097bee8afbf29987c769901a0815aa49822cce54c23c8d55afc8d45f041",
+      "import.log": "61b03fc82c0483cdb74a931a0aa7ff7aba52cc363ee8447b26f5a7c7f0db0e19",
+      "analyzer.json": "716728d7590bcb09763b85fa38d1757158279d485eb971b788d65ebd4039700f",
+      "analyzer-loss.txt": "c1dcef58193cc1939625fc2f27c19854259f4c89283283f3bafe7fa7cb432b0a",
+      "analyzer-table.txt": "d2d7c32a520ce3ab9282a75d74624036895fb744bb116ccefdc92046644506b8"
+    },
+    "errors": [],
+    "records": 571,
+    "raw_lost_notices": 0,
+    "observed_issues": [
+      {
+        "scope": "global",
+        "counter": "timer_busy",
+        "delta": 2
+      },
+      {
+        "scope": "event",
+        "id": 15,
+        "counter": "cancelled",
+        "delta": 1
+      },
+      {
+        "scope": "event",
+        "id": 18,
+        "counter": "cancelled",
+        "delta": 1
+      }
+    ],
+    "export_dropped": 0,
+    "wraps": 8,
+    "measurements": {
+      "baseline": {
+        "start_ns": 1327986280,
+        "stop_ns": 1480479720,
+        "wall_ns": 152493440,
+        "iterations": 128,
+        "extra_mapped_bytes": 0
+      },
+      "loaded_detached": {
+        "start_ns": 1490986930,
+        "stop_ns": 1646882190,
+        "wall_ns": 155895260,
+        "iterations": 128,
+        "extra_mapped_bytes": 65536
+      },
+      "attached_capture": {
+        "start_ns": 1700460730,
+        "stop_ns": 1852875710,
+        "wall_ns": 152414980,
+        "iterations": 128,
+        "extra_mapped_bytes": 4259840
+      }
+    },
+    "capture_status": "IncompleteError"
+  },
+  {
+    "label": "export-overflow",
+    "run": "riscv64-task-20261115-004910-3dpz9bd_",
+    "bundle": "export-overflow.tar.gz",
+    "bundle_sha256": "9953b0844358ef758f8d919b60786090cef8fbd03eafdc681be3f94d93fc84cf",
+    "expected_gate_pass": true,
+    "kernel_elf_sha256": "6857e99342607cc9e6305ad15bfb465e240042800a8a62babc1ccdb28114f9b8",
+    "kernel_source_commit": "dd67ee7b6f0832ba19151a0ed060bf440a7826a8",
+    "members_sha256": {
+      "guest.log": "4e42c5c679234475c8c69bc64dd91097f4a00c970c3efbd938c377f3fa25097f",
+      "inputs.json": "e6966fbc28abad8a00fb8d0fc59d004346fb3627bc6889276fe5402dac98d8ee",
+      "result.json": "61c2dfe3b1b50808c258371ae93765fa981f0f18018f03afb32de41c3e5b6886",
+      "kernel.provenance.json": "deb1aa1c975ae7ce147ec2971cd397d34914e35ed39667d0564bbedf4f881a7d",
+      "payload.elf": "caebc536c80fdd4c97c1b0de72a59dfa207d9b1ca20dfb197261e0191f87a558",
+      "records.pbraw": "02bfa8be57c82bb23f0021d525def73f10f6386cff7e471ab928e28c18ec96e1",
+      "archive.json": "6408401f9fdbbb800100bf41398f3563a9b8f30b8dcb8651b128a79fd046cbda",
+      "stats-before.txt": "43595d5ca10f50374f33f5812066c683945b2646339428a4e70f03486c6a9363",
+      "stats-after.txt": "499ddef8bd878b6728afa8de767e73339a2c2772bef4e9a23781d9707adb929c",
+      "capture.pbcapture": "9e50b32be02446f0e681f6ec9b3dd9994d1c08b7d284eda8b78fb663d13e5e6e",
+      "import.log": "a8c41ebd41e2063c863799c1a3d9950ca58a36dee4b42f22457838263b4a0331",
+      "analyzer.json": "4121d288c58e8c792a50c39a5dd49d0e2bb7e85e2fbe3a724864a483f36195b9",
+      "analyzer-loss.txt": "cc0f8d887f75e64034ab8de250748ba85a6583e44f7627124f9051ff08d5a6a6",
+      "analyzer-table.txt": "516cceef2089717f6b12bb2f2a06edc5679c56e2f7f39d067e6644d1ba9849f5"
+    },
+    "errors": [],
+    "records": 39,
+    "raw_lost_notices": 0,
+    "observed_issues": [
+      {
+        "scope": "global",
+        "counter": "timer_busy",
+        "delta": 4
+      },
+      {
+        "scope": "event",
+        "id": 13,
+        "counter": "skipped",
+        "delta": 7
+      },
+      {
+        "scope": "consumer",
+        "counter": "export_overflow",
+        "delta": 38
+      }
+    ],
+    "export_dropped": 38,
+    "wraps": 0,
+    "measurements": {
+      "baseline": {
+        "start_ns": 1250394000,
+        "stop_ns": 2126207400,
+        "wall_ns": 875813400,
+        "iterations": 128,
+        "extra_mapped_bytes": 0
+      },
+      "loaded_detached": {
+        "start_ns": 2137479100,
+        "stop_ns": 3002309300,
+        "wall_ns": 864830200,
+        "iterations": 128,
+        "extra_mapped_bytes": 557056
+      },
+      "attached_capture": {
+        "start_ns": 3134624600,
+        "stop_ns": 3984775900,
+        "wall_ns": 850151300,
+        "iterations": 128,
+        "extra_mapped_bytes": 561152
+      }
+    },
+    "capture_status": "IncompleteError"
+  },
+  {
+    "label": "ring-overflow",
+    "run": "riscv64-trace-20261115-004452-0aicak_m",
+    "bundle": "ring-overflow.tar.gz",
+    "bundle_sha256": "cc5a024fc36e1c417db9eb28234f5c0ea36d7e2f6c09ced1d5992ed38ad29cf0",
+    "expected_gate_pass": true,
+    "kernel_elf_sha256": "6857e99342607cc9e6305ad15bfb465e240042800a8a62babc1ccdb28114f9b8",
+    "kernel_source_commit": "dd67ee7b6f0832ba19151a0ed060bf440a7826a8",
+    "members_sha256": {
+      "guest.log": "6897740700391cb973670f01ed9497d197ba0c0507bb56dda8f215ba5651f32c",
+      "inputs.json": "4fbb430079ebf8a84a456136473673e158c05312e18d6c8410811bbdd4bdcded",
+      "result.json": "2276020b96412bb244b27f278e94ede40a02d5fd4cb67678e64e4a15a3e58df5",
+      "kernel.provenance.json": "deb1aa1c975ae7ce147ec2971cd397d34914e35ed39667d0564bbedf4f881a7d",
+      "payload.elf": "455e6eb0fa7561cb75009ef6f4dfec3fc43db9f02840195b4924c627cf18368e",
+      "records.pbraw": "23549568ee70cc75660ee70526a6d724f616bc86f436bde267bb3f736cce40e7",
+      "archive.json": "49b02fac109723164cd3ad5803c33b84f7efc04987e744ede49bdc09b9523dc8",
+      "stats-before.txt": "4be9ff740af2fc27c9bc38fca25c13ae99772a44c65880fcc50cebe5fe4669db",
+      "stats-after.txt": "0d9f86923a90a1e9085af4699304b1e97fb626105e3caac5f0ba55938ba6e83f",
+      "capture.pbcapture": "4f02ad695883adf644efecdc538353840d9f653d052255cb4d1c48fae35811a3",
+      "import.log": "5e7ce1e0f1740fa2467d1daeb59db4f6ccd977bf2d36eef515668f276c9a8a32",
+      "analyzer.json": "ee6c39607289e8c154be422fee7aa776af6f450ef32d1acf5a5d0e4f237ec714",
+      "analyzer-loss.txt": "e006de1f9a1fe5d5bb74bfb8c19a66c959eca8d878a70565cec4252177244b7b",
+      "analyzer-table.txt": "aa5f055dfcf364c4f6355c9f5232e12a0168109e08bc619df5d604557c68e886"
+    },
+    "errors": [],
+    "records": 235,
+    "raw_lost_notices": 0,
+    "observed_issues": [
+      {
+        "scope": "event",
+        "id": 14,
+        "counter": "cancelled",
+        "delta": 2
+      },
+      {
+        "scope": "event",
+        "id": 17,
+        "counter": "cancelled",
+        "delta": 1
+      },
+      {
+        "scope": "event",
+        "id": 20,
+        "counter": "cancelled",
+        "delta": 1
+      },
+      {
+        "scope": "transport",
+        "counter": "lost",
+        "delta": 317
+      }
+    ],
+    "export_dropped": 0,
+    "wraps": 0,
+    "measurements": {
+      "baseline": {
+        "start_ns": 1136269500,
+        "stop_ns": 1288826200,
+        "wall_ns": 152556700,
+        "iterations": 128,
+        "extra_mapped_bytes": 0
+      },
+      "loaded_detached": {
+        "start_ns": 1294631500,
+        "stop_ns": 1444245000,
+        "wall_ns": 149613500,
+        "iterations": 128,
+        "extra_mapped_bytes": 65536
+      },
+      "attached_capture": {
+        "start_ns": 1487449600,
+        "stop_ns": 1641954500,
+        "wall_ns": 154504900,
+        "iterations": 128,
+        "extra_mapped_bytes": 4259840
+      }
+    },
+    "capture_status": "IncompleteError"
+  },
+  {
+    "label": "zero-producer",
+    "run": "riscv64-task-20261115-004959-8jz1bu1c",
+    "bundle": "zero-producer.tar.gz",
+    "bundle_sha256": "c4754622c8a5821e73005c58bee38c93198fcb8ac6e19c445413cd838883fb03",
+    "expected_gate_pass": false,
+    "kernel_elf_sha256": "6857e99342607cc9e6305ad15bfb465e240042800a8a62babc1ccdb28114f9b8",
+    "kernel_source_commit": "dd67ee7b6f0832ba19151a0ed060bf440a7826a8",
+    "members_sha256": {
+      "guest.log": "4f83f076c988e30f34847a799240974852f7e5095c15e44d723d228520e9a57b",
+      "inputs.json": "316ca91e6fea9b09baf54690edcc81b6a0bbec615eb15bd7d7e4c32ce949e732",
+      "result.json": "1a0c628b7a707864bf2deaade9ae9f157179b0c1b64a57d21752b95d3d079d76",
+      "kernel.provenance.json": "deb1aa1c975ae7ce147ec2971cd397d34914e35ed39667d0564bbedf4f881a7d",
+      "payload.elf": "8e35fad683fa040fb15f2129010a0aa72f198975fbb237d09dcae008d9a00e10"
+    },
+    "errors": [
+      "guest sampler emitted FAIL",
+      "expected exactly one same-mode OBSERVED and kernel_ring RESULT",
+      "missing or duplicate FD lifecycle evidence: link_target_close",
+      "missing or duplicate FD lifecycle evidence: ioctl_dup_final_close",
+      "missing, duplicate or unsuccessful guest exit",
+      "invalid RAW archive: empty capture or invalid time window"
+    ]
+  },
+  {
+    "label": "zero-consumer",
+    "run": "loongarch64-task-20261115-004910-op88v2mq",
+    "bundle": "zero-consumer.tar.gz",
+    "bundle_sha256": "3edcde629f647e3ab0502a0d3fc46c632a7252f2c2bcc82e3be31b9531c9bf02",
+    "expected_gate_pass": false,
+    "kernel_elf_sha256": "c1e678dacd372130254d917192857e57d677a3ad6fa2d4fd5d8f141b82b1d80e",
+    "kernel_source_commit": "dd67ee7b6f0832ba19151a0ed060bf440a7826a8",
+    "members_sha256": {
+      "guest.log": "449c70f1b0946217c197276bc9121c917fa005259874d07678b7a4c09473fdd0",
+      "inputs.json": "f18d18e1dc80c160656b9242131d9e26ff082c2eeba84c2bad2478d492e8eac7",
+      "result.json": "d3ad4f1b17865c9ac3b6c025d2793c18c1987442ec7a806d706786b4370d6e8e",
+      "kernel.provenance.json": "b7bc30593e2e245fddf3f68f0acec1fa6207cc76fccafaf93972aeda0bc215e3",
+      "payload.elf": "e19847a7b8716d10aed8e880ab013c6e5e8a3ccaf7d0ba1788aa4e9adc53bea2"
+    },
+    "errors": [
+      "guest sampler emitted FAIL",
+      "expected exactly one same-mode OBSERVED and kernel_ring RESULT",
+      "missing or duplicate FD lifecycle evidence: link_target_close",
+      "missing or duplicate FD lifecycle evidence: ioctl_dup_final_close",
+      "missing, duplicate or unsuccessful guest exit",
+      "invalid RAW archive: empty capture or invalid time window"
+    ]
+  },
+  {
+    "label": "aborted",
+    "run": "riscv64-task-20261115-004959-yvffm75w",
+    "bundle": "aborted.tar.gz",
+    "bundle_sha256": "6fa235a2365510dc0464f05d5f89a2b1bb51c3fae55bd8a7fc82ff8a44246c68",
+    "expected_gate_pass": false,
+    "kernel_elf_sha256": "6857e99342607cc9e6305ad15bfb465e240042800a8a62babc1ccdb28114f9b8",
+    "kernel_source_commit": "dd67ee7b6f0832ba19151a0ed060bf440a7826a8",
+    "members_sha256": {
+      "guest.log": "e9a821b2df6d2624b7f4827e262483fadd72edd614ac19c38baddb6f6e1c71bb",
+      "inputs.json": "f09c0ad8d3720f31af6298482fe9aaddc4a57ac7746de77f95954690e6b0b35f",
+      "result.json": "1dec9a1f41f19f7d8a7546f45a0647c99c7067dc1b6dbeae25553b343d085103",
+      "kernel.provenance.json": "deb1aa1c975ae7ce147ec2971cd397d34914e35ed39667d0564bbedf4f881a7d",
+      "payload.elf": "e55aa83a050c63a00fdd4ff96a7663aac42f26ea536dfed79b0ef822483ebbbe"
+    },
+    "errors": [
+      "expected exactly one same-mode OBSERVED and kernel_ring RESULT",
+      "missing or duplicate FD lifecycle evidence: link_target_close",
+      "missing or duplicate FD lifecycle evidence: ioctl_dup_final_close",
+      "missing, duplicate or unsuccessful guest exit",
+      "invalid RAW archive: missing or duplicate ARCHIVE END  None"
+    ]
+  }
+]

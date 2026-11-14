@@ -39,8 +39,20 @@ else ifneq ($(filter $(or $(MAKECMDGOALS), $(.DEFAULT_GOAL)), all build run just
   export RUSTFLAGS
 endif
 
+# Only the root Pulse Rust kernel has the source-root contract recorded below.
+ifeq ($(APP_TYPE), rust)
+  ifeq ($(abspath $(APP)),$(CURDIR))
+    kernel_provenance := $(OUT_ELF).provenance.json
+  endif
+endif
+
 _cargo_build: oldconfig
 	@printf "    $(GREEN_C)Building$(END_C) App: $(APP_NAME), Arch: $(ARCH), Platform: $(PLAT_NAME), App type: $(APP_TYPE)\n"
+ifneq ($(kernel_provenance),)
+	@python3 scripts/build_provenance.py start --repo "$(CURDIR)" --config "$(OUT_CONFIG)" \
+		--manifest "$(kernel_provenance)" --arch "$(ARCH)" --target "$(TARGET)" \
+		--mode "$(MODE)" --platform "$(PLAT_NAME)" --features "$(strip $(AX_FEAT) $(LIB_FEAT) $(APP_FEAT))"
+endif
 ifeq ($(APP_TYPE), rust)
 	$(call cargo_build,$(APP),$(AX_FEAT) $(LIB_FEAT) $(APP_FEAT))
 	@cp $(rust_elf) $(OUT_ELF)
@@ -57,6 +69,10 @@ $(OUT_BIN): _cargo_build $(OUT_ELF)
 		echo 'Empty kernel image "$(notdir $(FINAL_IMG))" is built, please check your build configuration'; \
 		exit 1; \
 	fi
+ifneq ($(kernel_provenance),)
+	@python3 scripts/build_provenance.py finish --repo "$(CURDIR)" --config "$(OUT_CONFIG)" \
+		--manifest "$(kernel_provenance)" --elf "$(OUT_ELF)" --binary "$(OUT_BIN)" --linker "$(LD_SCRIPT)"
+endif
 
 ifeq ($(ARCH), aarch64)
   uimg_arch := arm64

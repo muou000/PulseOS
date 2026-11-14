@@ -1341,6 +1341,11 @@ mod tests {
                 let event_ref = &event;
                 let in_flight = scope.spawn(move || dispatch_failure_observation(event_ref, 10, 13));
                 entered_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+                assert_eq!(event.diagnostics().inflight, 1);
+                event.disable_at(10);
+                let stopped = event.diagnostics();
+                assert!(!stopped.enabled);
+                assert_eq!(stopped.inflight, 1, "disable cannot hide an accepted invocation");
                 event.detach_program(&old_prog).unwrap();
                 event.attach_program(new_prog.clone()).unwrap();
                 assert_eq!(new_prog.run_cnt(), 0);
@@ -1350,10 +1355,34 @@ mod tests {
             assert_eq!(old_prog.run_cnt(), 1);
             assert_eq!(old_prog.sample_counters().delivered_samples, 1);
             assert_eq!(new_prog.run_cnt(), 0, "reattach cannot steal an accepted invocation");
+            assert_eq!(event.diagnostics().inflight, 0);
+            event.enable_at(10);
             assert_eq!(dispatch_failure_observation(&event, 20, 13), Ok(true));
             assert_eq!(new_prog.run_cnt(), 1);
             assert_eq!(old_prog.run_cnt(), 1);
         }
+    }
+
+    #[test]
+    fn runtime_stop_counts_old_queue_cancellation_but_not_new_disabled_observations() {
+        let event = PerfEvent::new(PerfEventSpec {
+            clock: PerfEventClock::CpuClock, scope: PerfEventScope::PerCpu { cpu: 10 },
+            sample_period: 10, disabled: false, cloexec: false,
+        }, 0);
+        event.attach_program(dummy_prog(BpfProgType::PerfEvent)).unwrap();
+        let queued = runtime_observation(10, 10, 1);
+        event.disable_at(11);
+        assert_eq!(event.dispatch_sample(&queued), Ok(false));
+        assert_eq!(event.runtime_counters().cancelled, 1);
+        for time in [20, 30, 40] {
+            assert_eq!(event.dispatch_sample(&runtime_observation(time, 10, 1)), Ok(false));
+        }
+        assert_eq!(event.runtime_counters().cancelled, 1);
+        let snapshot = event.diagnostics();
+        assert!(!snapshot.enabled);
+        assert_eq!(snapshot.inflight, 0);
+        assert_eq!(snapshot.samples.delivered_samples, 0);
+        assert_ne!(snapshot.id, 0);
     }
 
 }

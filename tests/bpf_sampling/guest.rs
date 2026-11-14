@@ -11,6 +11,9 @@ use core::sync::atomic::{AtomicU64, Ordering};
 
 const CPUS: usize = 8;
 const PAGE: usize = 4096;
+#[cfg(perf_ring_one_page)]
+const DATA_SIZE: usize = PAGE;
+#[cfg(not(perf_ring_one_page))]
 const DATA_SIZE: usize = 16 * PAGE;
 const MAPPING_SIZE: usize = PAGE + DATA_SIZE;
 const PERIOD_NS: u64 = 10_000_000;
@@ -105,6 +108,9 @@ macro_rules! check {
         if !$condition { say!("SAMPLING FAIL line={} {}", line!(), $message); exit(1); }
     };
 }
+#[cfg(capture_export)]
+mod archive;
+
 #[panic_handler]
 fn panic(info: &PanicInfo) -> ! { say!("SAMPLING FAIL panic {}", info); exit(1) }
 fn ok(name: &str, value: isize) -> usize {
@@ -282,12 +288,12 @@ fn detach(link: usize) {
     check!(bpf(34, &attr) == 0, "BPF_LINK_DETACH");
 }
 
-struct Ring { base: usize, cpu: usize, tail: u64 }
+struct Ring { base: usize, cpu: usize, tail: u64, wraps: u64 }
 impl Ring {
     fn map(fd: usize, cpu: usize) -> Self {
         let base = ok("mmap", syscall(222, 0, MAPPING_SIZE, 3, 1, fd, 0));
         check!(base != 0 && base % PAGE == 0, "ring mapping alignment");
-        Self { base, cpu, tail: 0 }
+        Self { base, cpu, tail: 0, wraps: 0 }
     }
     fn head(&self) -> u64 {
         // SAFETY: base owns a live page-aligned shared mapping until unmap().
@@ -312,6 +318,8 @@ impl Ring {
         }
     }
     fn drain(&mut self, stats: &mut Stats) {
+        #[cfg(fault_zero_consumer)]
+        if stats.archive.is_some() { return; }
         let head = self.head();
         check!(head.wrapping_sub(self.tail) <= DATA_SIZE as u64, "producer overran unread ring");
         while self.tail != head {
@@ -320,22 +328,32 @@ impl Ring {
             let mut header = [0u8; 8];
             self.copy(self.tail, &mut header);
             let size = u16::from_le_bytes([header[6], header[7]]) as usize;
-            check!(size >= 8 && size <= DATA_SIZE && size as u64 <= available, "bad perf record length");
+            check!(size >= 8 && size % 8 == 0 && size <= DATA_SIZE && size as u64 <= available, "bad perf record length");
             match u32_at(&header, 0) {
                 9 => {
-                    check!(size >= 12 + CONTEXT_SIZE, "short perf sample");
+                    check!(size == (12 + CONTEXT_SIZE + 7) & !7, "invalid perf sample boundary");
                     let mut raw = [0u8; 4 + CONTEXT_SIZE];
                     self.copy(self.tail + 8, &mut raw);
                     check!(u32_at(&raw, 0) == CONTEXT_SIZE as u32, "unexpected RAW context size");
                     stats.sample(&raw[4..], self.cpu);
                 }
                 2 => {
-                    check!(size >= 24, "short lost record");
+                    check!(size == 24, "invalid lost record boundary");
                     let mut lost = [0u8; 16];
                     self.copy(self.tail + 8, &mut lost);
                     stats.lost += u64_at(&lost, 8);
                 }
                 _ => check!(false, "unknown perf record type"),
+            }
+            #[cfg(capture_export)]
+            if let Some(archive) = &mut stats.archive {
+                let mut raw = [0u8; 96];
+                check!(size <= raw.len(), "archive frame exceeds supported context");
+                self.copy(self.tail, &mut raw[..size]);
+                archive.push(self.cpu, &raw[..size]);
+            }
+            if (self.tail as usize & (DATA_SIZE - 1)) + size > DATA_SIZE {
+                self.wraps += 1;
             }
             self.tail = self.tail.wrapping_add(size as u64);
             self.publish_tail();
@@ -345,8 +363,10 @@ impl Ring {
         check!(syscall(215, self.base, MAPPING_SIZE, 0, 0, 0, 0) == 0, "munmap");
     }
 }
-#[derive(Clone, Copy)]
+#[cfg_attr(not(capture_export), derive(Clone, Copy))]
 struct Stats {
+    #[cfg(capture_export)]
+    archive: Option<archive::Buffer>,
     pid: u32, tid: u32, samples: u64, foreign: u64, a: u64, b: u64, lost: u64, cpu_mask: u32,
     last_time: [u64; CPUS], a_start: u64, a_end: u64, b_start: u64, b_end: u64,
     #[cfg(tracepoint_test)]
@@ -461,6 +481,29 @@ fn workload(loop_b: bool, duration_ms: u64, rings: &mut [Ring; CPUS], stats: &mu
         drain_all(rings, stats);
     }
 }
+#[cfg(capture_export)]
+fn measure_archive_phase(phase: &str, mut rings: Option<&mut [Ring; CPUS]>, stats: &mut Stats, extra_mapped_bytes: usize) {
+    let start = monotonic_ns();
+    let mut iterations = 0u64;
+    for _ in 0..128 {
+        #[cfg(tracepoint_test)]
+        {
+            check!(syscall(124, 0, 0, 0, 0, 0, 0) == 0, "phase sched_yield");
+            sleep_ms(1);
+        }
+        #[cfg(not(tracepoint_test))]
+        // SAFETY: linked assembly loops preserve the C ABI and access no memory.
+        unsafe { sample_loop_a(2_000_000); sample_loop_b(2_000_000); }
+        if !(cfg!(fault_ring_overflow) && phase == "attached_capture") {
+        if let Some(rings) = rings.as_deref_mut() { drain_all(rings, stats); }
+        }
+        iterations += 1;
+    }
+    let stop = monotonic_ns();
+    say!("ARCHIVE MEASURE phase={} start_ns={} stop_ns={} wall_ns={} iterations={} extra_mapped_bytes={} memory_scope=sampler_mappings",
+         phase, start, stop, stop - start, iterations, extra_mapped_bytes);
+}
+
 fn settle(rings: &mut [Ring; CPUS], stats: &mut Stats) {
     // Bounded grace for records already queued at disable/detach. The later
     // workload still tests that the stopped event produces no further output.
@@ -473,6 +516,8 @@ fn check_fd_lifecycle(program: usize, rings: &mut [Ring; CPUS], template: &Stats
         // Independent observed counters for these extra sessions. Ring tails
         // remain shared with the original consumer, so no record is replayed.
         let mut stats = Stats {
+            #[cfg(capture_export)]
+            archive: None,
             samples: 0, foreign: 0, a: 0, b: 0, lost: 0, cpu_mask: 0,
             last_time: [0; CPUS], ..*template
         };
@@ -514,6 +559,8 @@ extern "C" fn guest_main() -> ! {
     let tid = ok("gettid", syscall(178, 0, 0, 0, 0, 0, 0)) as u32;
     say!("SAMPLING START version=2 mode={} cpus={} pid={} tid={}", MODE, CPUS, pid, tid);
     let mut stats = Stats {
+        #[cfg(capture_export)]
+        archive: None,
         pid, tid, samples: 0, foreign: 0, a: 0, b: 0, lost: 0, cpu_mask: 0, last_time: [0; CPUS],
         a_start: sample_loop_a as *const () as u64,
         a_end: core::ptr::addr_of!(sample_loop_a_end) as u64,
@@ -530,6 +577,8 @@ extern "C" fn guest_main() -> ! {
     };
     say!("SAMPLING RANGES a={:#x}..{:#x} b={:#x}..{:#x}", stats.a_start, stats.a_end, stats.b_start, stats.b_end);
     check!(stats.a_start < stats.a_end && stats.a_end <= stats.b_start && stats.b_start < stats.b_end, "bad assembly symbol ranges");
+    #[cfg(capture_export)]
+    measure_archive_phase("baseline", None, &mut stats, 0);
     let outputs = create_map(4, 4);
     let scratch = create_map(2, CONTEXT_SIZE as u32);
     let mut sinks = [0usize; CPUS];
@@ -549,14 +598,63 @@ extern "C" fn guest_main() -> ! {
     #[cfg(not(any(cpu_clock_test, tracepoint_test)))]
     let events = [perf_open(1, tid as isize, -1, PERIOD_NS, true)];
     reject_invalid_sinks(outputs, events[0], &sinks);
+    #[cfg(capture_export)]
+    measure_archive_phase("loaded_detached", Some(&mut rings), &mut stats, CPUS * MAPPING_SIZE);
     let links = events.map(|event| attach(program, event));
-    for event in events { ioctl(event, ENABLE); }
+    #[cfg(capture_export)]
+    let mut enable_times = [(0u64, 0u64); CPUS];
+    #[cfg(capture_export)]
+    let mut disable_times = [(0u64, 0u64); CPUS];
+    #[cfg(capture_export)]
+    {
+        archive::stats("before", &events);
+        stats.archive = Some(archive::Buffer::new(monotonic_ns()));
+    }
+    for (index, event) in events.iter().enumerate() {
+        #[cfg(capture_export)]
+        let before = monotonic_ns();
+        #[cfg(not(fault_zero_producer))]
+        ioctl(*event, ENABLE);
+        #[cfg(capture_export)]
+        { enable_times[index] = (before, monotonic_ns()); }
+    }
     #[cfg(not(any(cpu_clock_test, tracepoint_test)))]
     check_task_sleep(events[0]);
-    workload(false, 350, &mut rings, &mut stats);
-    workload(true, 350, &mut rings, &mut stats);
-    for event in events { ioctl(event, DISABLE); }
+    #[cfg(capture_export)]
+    measure_archive_phase("attached_capture", Some(&mut rings), &mut stats, CPUS * MAPPING_SIZE + archive::MAPPED_BYTES);
+    #[cfg(not(capture_export))]
+    {
+        workload(false, 350, &mut rings, &mut stats);
+        workload(true, 350, &mut rings, &mut stats);
+    }
+    for (index, event) in events.iter().enumerate() {
+        #[cfg(capture_export)]
+        let before = monotonic_ns();
+        ioctl(*event, DISABLE);
+        #[cfg(capture_export)]
+        { disable_times[index] = (before, monotonic_ns()); }
+    }
+    #[cfg(capture_export)]
+    let capture_stop_ns = monotonic_ns();
+    #[cfg(not(capture_export))]
     settle(&mut rings, &mut stats);
+    #[cfg(capture_export)]
+    {
+        archive::wait_quiescent(&events);
+        drain_all(&mut rings, &mut stats);
+        for ring in &rings {
+            say!("ARCHIVE RING cpu={} head={} tail={} wraps={}", ring.cpu, ring.head(), ring.tail, ring.wraps);
+        }
+        archive::stats("after", &events);
+        say!("ARCHIVE CONFIG program_id={} output_map_id={} scratch_map_id={} buffer_pages={} mode={} ring_diagnostics=1",
+            archive::object_id(program), archive::object_id(outputs), archive::object_id(scratch), DATA_SIZE/PAGE, MODE);
+        for (index, event) in events.iter().enumerate() {
+            say!("ARCHIVE SOURCE fd={} link_id={} enable_before={} enable_after={} disable_before={} disable_after={}",
+                event, archive::object_id(links[index]), enable_times[index].0, enable_times[index].1,
+                disable_times[index].0, disable_times[index].1);
+        }
+        stats.archive.take().unwrap().emit(capture_stop_ns);
+    }
     #[cfg(tracepoint_test)]
     {
         say!("SAMPLING {}_OBSERVED {}={} subjects={} subjects_capped={} target_contexts={} lost={} cpu_mask={:#x}",

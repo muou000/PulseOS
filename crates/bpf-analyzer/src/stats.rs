@@ -205,7 +205,7 @@ impl SessionStatistics {
                     });
                     entry.comm = Some(comm.clone());
                 }
-                EventPayload::SoftwareSample { .. } => {
+                EventPayload::SoftwareSample { .. } | EventPayload::SoftwareSampleV2 { .. } => {
                     cpu_stat.sample_count += 1;
                     task_stat.sample_count += 1;
                 }

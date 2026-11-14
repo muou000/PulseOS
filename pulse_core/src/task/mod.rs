@@ -500,8 +500,6 @@ pub fn adjust_absolute_timers() {
 /// Register the itimer tick hook with axtask. Should be called once during
 /// pulse_core initialization.
 pub fn init_itimer_hook() {
-    #[cfg(feature = "bpf-trace")]
-    crate::bpf::sampling::init();
     start_timer_worker();
     axtask::register_timer_hook(itimer_tick_hook);
     axnet::register_have_signals_callback(current_have_signals);
@@ -510,6 +508,65 @@ pub fn init_itimer_hook() {
 struct PulseProcessProvider;
 
 impl axfs::ProcfsProcessProvider for PulseProcessProvider {
+    fn bpf_stats(&self) -> Option<String> {
+        let process = current_process().ok()?;
+        #[cfg(not(feature = "bpf-trace"))]
+        return Some(alloc::format!("PULSE_BPF_STATS version=1 pid={} available=0\nEND events=0 programs=0\n", process.pid()));
+        #[cfg(feature = "bpf-trace")]
+        {
+            use crate::bpf::{PerfEventClock, PerfEventScope, PerfEventObject};
+            use alloc::collections::BTreeMap;
+            let entries = {
+                let table = process.fd_table();
+                let locked = table.read();
+                locked.numbered_entries_snapshot()
+            };
+            let timer = crate::bpf::sampling::stats_snapshot();
+            let trace = axtask::bpf_trace::total_drop_stats();
+            let mut text = alloc::format!("PULSE_BPF_STATS version=1 pid={} available=1\n", process.pid());
+            writeln!(&mut text, "GLOBAL timer_enqueued={} timer_dequeued={} timer_full={} timer_busy={} trace_enqueued={} trace_full={} trace_recursive={}",
+                timer.enqueued, timer.dequeued, timer.full, timer.busy,
+                trace.total_enqueued, trace.dropped_full, trace.dropped_recursive).ok()?;
+            let mut programs = BTreeMap::new();
+            let mut events = 0usize;
+            for (fd, entry) in entries {
+                let Some(object) = entry.object.as_any().downcast_ref::<PerfEventObject>() else { continue; };
+                let event = object.event();
+                let d = event.diagnostics();
+                let (clock, config) = match d.clock {
+                    PerfEventClock::CpuClock => (0, 0),
+                    PerfEventClock::TaskClock => (1, 1),
+                    PerfEventClock::BpfOutput => (10, 10),
+                    PerfEventClock::Tracepoint(id) => (2, id.as_u32()),
+                };
+                let (scope, target) = match d.scope {
+                    PerfEventScope::PerCpu { cpu } => ("cpu", cpu as u64),
+                    PerfEventScope::Task { pid } => ("task", pid),
+                };
+                writeln!(&mut text, "EVENT fd={} id={} clock={} config={} scope={} target={} task_id={} period={} generation={} enabled={} inflight={} observed={} delivered={} skipped={} cancelled={} invalid={} reentry={} helper={} budget={} transport_lost={} consumer_corrupt={} consumer_bounds={} program_id={}",
+                    fd, d.id, clock, config, scope, target, d.task_id, d.period, d.generation,
+                    u8::from(d.enabled), d.inflight, d.runtime.observed, d.samples.delivered_samples,
+                    d.runtime.skipped_periods, d.runtime.cancelled, d.runtime.invalid,
+                    d.samples.re_entry_drops, d.samples.helper_failures, d.samples.budget_failures,
+                    d.transport_lost, d.consumer.corrupt_records, d.consumer.out_of_bounds, d.program_id).ok()?;
+                let program = event.attached_prog();
+                // A concurrent detach/reattach must not pair an EVENT row for
+                // program A with PROGRAM counters from B. Fail this snapshot
+                // explicitly; a new open can retry with fresh state.
+                if program.as_ref().map_or(0, |p| p.id()) != d.program_id { return None; }
+                if let Some(program) = program { programs.insert(program.id(), program); }
+                events += 1;
+                if text.len() > 60 * 1024 { return None; }
+            }
+            let count = programs.len();
+            for (id, program) in programs {
+                writeln!(&mut text, "PROGRAM id={} runs={} errors={}", id, program.run_cnt(), program.runtime_errors()).ok()?;
+            }
+            writeln!(&mut text, "END events={} programs={}", events, count).ok()?;
+            (text.len() <= 64 * 1024).then_some(text)
+        }
+    }
+
     fn current_pid(&self) -> Option<u64> {
         current_process().ok().map(|p| p.pid())
     }

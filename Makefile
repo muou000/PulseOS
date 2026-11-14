@@ -187,6 +187,7 @@ ls2k1000:
 clean:
 	@rm -rf "$(A)/target"
 	@rm -f "$(A)"/*.bin "$(A)"/*.elf "$(A)"/*.uimg "$(A)"/kernel-*
+	@rm -f "$(A)"/*.elf.provenance.json*
 	@rm -f "$(A)/.axconfig.toml" "$(A)/.axconfig.old.toml"
 
 .PHONY: rv la run img vf2 ls2k1000 test clean defconfig oldconfig build justrun
