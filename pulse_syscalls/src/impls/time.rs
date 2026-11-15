@@ -8,7 +8,7 @@ use pulse_core::task::uaccess;
 
 use crate::{
     LinuxError,
-    impls::utils::{read_user_timespec, read_user_timeval, write_user_bytes},
+    impls::utils::{read_user_timespec, read_user_timeval, write_user_value},
     validation::{
         time::{
             ClockSource, duration_to_timespec, parse_clock, timespec_to_duration,
@@ -24,13 +24,7 @@ use crate::{
 const CLK_TCK: u64 = 100;
 
 fn write_user_timespec(user_addr: usize, value: timespec) -> Result<(), LinuxError> {
-    let bytes = unsafe {
-        core::slice::from_raw_parts(
-            (&value as *const timespec).cast::<u8>(),
-            core::mem::size_of::<timespec>(),
-        )
-    };
-    write_user_bytes(user_addr, bytes)
+    write_user_value(user_addr, &value)
 }
 
 fn write_zero_timespec(user_addr: usize) -> Result<(), LinuxError> {
@@ -155,6 +149,15 @@ struct Tms {
     tms_stime: c_long,
     tms_cutime: c_long,
     tms_cstime: c_long,
+}
+
+pulse_user_abi::impl_user_abi_struct! {
+    for Tms, size = 32 => {
+        tms_utime: c_long,
+        tms_stime: c_long,
+        tms_cutime: c_long,
+        tms_cstime: c_long,
+    }
 }
 
 pub fn sys_nanosleep(req: usize, rem: usize) -> isize {
@@ -349,14 +352,7 @@ pub fn sys_gettimeofday(tv: usize, tz: usize) -> isize {
         tv_sec: now.as_secs() as _,
         tv_usec: now.subsec_micros() as _,
     };
-    let bytes = unsafe {
-        core::slice::from_raw_parts(
-            (&timeval as *const timeval).cast::<u8>(),
-            core::mem::size_of::<timeval>(),
-        )
-    };
-
-    write_user_bytes(tv, bytes).map(|_| 0).unwrap_or_else(|e| {
+    write_user_value(tv, &timeval).map(|_| 0).unwrap_or_else(|e| {
         axlog::warn!("sys_gettimeofday: user write failed at {:#x}: {:?}", tv, e);
         -LinuxError::EFAULT.code() as isize
     })
@@ -454,14 +450,7 @@ pub fn sys_times(tbuf: usize) -> isize {
             tms_cutime: ns_to_clk_ticks(cutime_ns) as c_long,
             tms_cstime: ns_to_clk_ticks(cstime_ns) as c_long,
         };
-        let bytes = unsafe {
-            core::slice::from_raw_parts(
-                (&tms as *const Tms).cast::<u8>(),
-                core::mem::size_of::<Tms>(),
-            )
-        };
-
-        if let Err(e) = write_user_bytes(tbuf, bytes) {
+        if let Err(e) = write_user_value(tbuf, &tms) {
             axlog::warn!("sys_times: user write failed at {:#x}: {:?}", tbuf, e);
             return -LinuxError::EFAULT.code() as isize;
         }
@@ -514,7 +503,7 @@ fn write_user_itimerval(addr: usize, val: &Itimerval) -> Result<(), LinuxError> 
         return Ok(());
     }
     let proc = pulse_core::task::current_process()?;
-    uaccess::write_user_plain(proc.as_ref(), addr, val).map_err(|_| LinuxError::EFAULT)
+    uaccess::write_user_value(proc.as_ref(), addr, val).map_err(|_| LinuxError::EFAULT)
 }
 
 pub fn sys_setitimer(which: usize, new_value: usize, old_value: usize) -> isize {
@@ -849,7 +838,7 @@ pub fn sys_clock_adjtime(clockid: i32, buf: usize) -> isize {
     let tmx_to_write = *g;
     drop(g);
 
-    match uaccess::write_user_plain(proc.as_ref(), buf, &tmx_to_write) {
+    match uaccess::write_user_value(proc.as_ref(), buf, &tmx_to_write) {
         Ok(()) => 0,
         Err(_) => -LinuxError::EFAULT.code() as isize,
     }
@@ -893,7 +882,7 @@ pub fn sys_timer_create(clockid: i32, sevp: usize, timerid: usize) -> isize {
     };
 
     match proc.alloc_posix_timer(clockid, event) {
-        Ok(id) => match uaccess::write_user_plain(proc.as_ref(), timerid, &id) {
+        Ok(id) => match uaccess::write_user_value(proc.as_ref(), timerid, &id) {
             Ok(()) => 0,
             Err(_) => -LinuxError::EFAULT.code() as isize,
         },
@@ -916,7 +905,7 @@ fn write_user_itimerspec(addr: usize, val: &itimerspec) -> Result<(), LinuxError
         return Ok(());
     }
     let proc = pulse_core::task::current_process()?;
-    uaccess::write_user_plain(proc.as_ref(), addr, val).map_err(|_| LinuxError::EFAULT)
+    uaccess::write_user_value(proc.as_ref(), addr, val).map_err(|_| LinuxError::EFAULT)
 }
 
 pub fn sys_timer_settime(

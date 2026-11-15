@@ -9,7 +9,9 @@ use pulse_core::task::{
     Process, Thread, current_process, current_thread, processes_snapshot, thread_by_tid_global,
 };
 
-use crate::impls::utils::{alloc_zeroed_bytes, read_user_bytes, read_user_value, write_user_bytes};
+use crate::impls::utils::{
+    alloc_zeroed_bytes, read_user_bytes, read_user_value, write_user_bytes, write_user_value,
+};
 
 const RT_PRIORITY_MIN: isize = 1;
 const RT_PRIORITY_MAX: isize = 99;
@@ -65,13 +67,6 @@ fn check_pid(pid: usize) -> Result<(), LinuxError> {
         return Err(LinuxError::EPERM);
     }
     Ok(())
-}
-
-fn write_plain<T: Copy>(user_addr: usize, value: &T) -> Result<(), LinuxError> {
-    let bytes = unsafe {
-        core::slice::from_raw_parts(value as *const T as *const u8, core::mem::size_of::<T>())
-    };
-    write_user_bytes(user_addr, bytes)
 }
 
 fn selected_priority_threads(
@@ -396,7 +391,7 @@ pub fn sys_sched_getparam(pid: usize, param_ptr: usize) -> isize {
     } else {
         0
     };
-    write_plain(param_ptr, &rt_prio)
+    write_user_value(param_ptr, &rt_prio)
         .map(|_| 0)
         .unwrap_or_else(|e| -e.code() as isize)
 }
@@ -425,7 +420,7 @@ pub fn sys_sched_rr_get_interval(pid: usize, interval: usize) -> isize {
         tv_sec: (axtask::rt_time_slice_ns() / 1_000_000_000) as _,
         tv_nsec: (axtask::rt_time_slice_ns() % 1_000_000_000) as _,
     };
-    write_plain(interval, &ts)
+    write_user_value(interval, &ts)
         .map(|_| 0)
         .unwrap_or_else(|e| -e.code() as isize)
 }
@@ -576,7 +571,7 @@ pub fn sys_sched_getattr(pid: usize, attr: usize, size: usize, flags: usize) -> 
             .sched_period
             .load(core::sync::atomic::Ordering::Relaxed),
     };
-    write_plain(attr, &sched_attr)
+    write_user_value(attr, &sched_attr)
         .map(|_| 0)
         .unwrap_or_else(|e| -e.code() as isize)
 }
@@ -598,14 +593,14 @@ pub fn sys_getcpu(cpu_ptr: usize, node_ptr: usize, _tcache: usize) -> isize {
 
     if cpu_ptr != 0 {
         let cpu_id = axhal::percpu::this_cpu_id() as u32;
-        if let Err(e) = write_plain(cpu_ptr, &cpu_id) {
+        if let Err(e) = write_user_value(cpu_ptr, &cpu_id) {
             return -e.code() as isize;
         }
     }
 
     if node_ptr != 0 {
         let node_id = 0u32;
-        if let Err(e) = write_plain(node_ptr, &node_id) {
+        if let Err(e) = write_user_value(node_ptr, &node_id) {
             return -e.code() as isize;
         }
     }

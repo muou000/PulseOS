@@ -4,6 +4,80 @@ use linux_raw_sys::general::{siginfo, siginfo__bindgen_ty_1};
 
 use crate::{AbiDecodeError, AbiReader, FromUserAbi, UserAbiType};
 
+/// Initialized Linux siginfo bytes. Incoming union payloads remain opaque;
+/// kernel-generated records initialize all padding and unused fields to zero.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SignalInfo {
+    bytes: [u8; 128],
+}
+
+crate::impl_user_abi_struct! {
+    for SignalInfo, size = 128 => {
+        bytes: [u8; 128],
+    }
+}
+
+impl SignalInfo {
+    pub fn new(signo: i32, code: i32) -> Self {
+        let mut info = Self { bytes: [0; 128] };
+        info.set_signo(signo);
+        info.bytes[8..12].copy_from_slice(&code.to_ne_bytes());
+        info
+    }
+
+    pub fn for_kill(signo: i32, code: i32, pid: i32, uid: u32) -> Self {
+        let mut info = Self::new(signo, code);
+        info.bytes[16..20].copy_from_slice(&pid.to_ne_bytes());
+        info.bytes[20..24].copy_from_slice(&uid.to_ne_bytes());
+        info
+    }
+
+    pub fn for_child(signo: i32, code: i32, pid: i32, uid: u32, status: i32) -> Self {
+        let mut info = Self::for_kill(signo, code, pid, uid);
+        info.bytes[24..28].copy_from_slice(&status.to_ne_bytes());
+        info
+    }
+
+    pub fn for_fault(signo: i32, code: i32, address: u64) -> Self {
+        let mut info = Self::new(signo, code);
+        info.bytes[16..24].copy_from_slice(&address.to_ne_bytes());
+        info
+    }
+
+    pub fn signo(&self) -> i32 {
+        i32::from_ne_bytes(self.bytes[..4].try_into().unwrap())
+    }
+
+    pub fn code(&self) -> i32 {
+        i32::from_ne_bytes(self.bytes[8..12].try_into().unwrap())
+    }
+
+    pub fn set_signo(&mut self, signo: i32) {
+        self.bytes[..4].copy_from_slice(&signo.to_ne_bytes());
+    }
+}
+
+// These offsets describe both supported guest ABIs. Check the generated
+// Linux layouts without accessing any union value or its Rust padding.
+const _: () = {
+    use linux_raw_sys::general::{
+        __sifields__bindgen_ty_1 as Kill, __sifields__bindgen_ty_4 as Child,
+        __sifields__bindgen_ty_5 as Fault, siginfo__bindgen_ty_1__bindgen_ty_1 as Header,
+    };
+    assert!(core::mem::offset_of!(Header, si_signo) == 0);
+    assert!(core::mem::offset_of!(Header, si_errno) == 4);
+    assert!(core::mem::offset_of!(Header, si_code) == 8);
+    assert!(core::mem::offset_of!(Header, _sifields) == 16);
+    assert!(core::mem::offset_of!(Kill, _pid) == 0);
+    assert!(core::mem::offset_of!(Kill, _uid) == 4);
+    assert!(core::mem::offset_of!(Child, _pid) == 0);
+    assert!(core::mem::offset_of!(Child, _uid) == 4);
+    assert!(core::mem::offset_of!(Child, _status) == 8);
+    assert!(core::mem::offset_of!(Fault, _addr) == 0);
+    assert!(core::mem::size_of::<usize>() == 8);
+};
+
 /// The RISC-V 64 and LoongArch64 kernel signal-action ABI.
 ///
 /// A handler can be SIG_DFL (0), SIG_IGN (1), or a userspace instruction address.
@@ -50,6 +124,56 @@ mod tests {
 
     use super::*;
     use crate::{decode_from_bytes, read_user_value_with};
+
+    #[test]
+    fn signal_info_output_initializes_padding_and_unused_union_bytes() {
+        use crate::encode_to_buffer;
+
+        let info = SignalInfo::for_child(17, 1, 123, 456, 7);
+        let bytes = encode_to_buffer(&info);
+        assert_eq!(&bytes[0..4], &17i32.to_ne_bytes());
+        assert_eq!(&bytes[4..8], &[0; 4]);
+        assert_eq!(&bytes[8..12], &1i32.to_ne_bytes());
+        assert_eq!(&bytes[12..16], &[0; 4]);
+        assert_eq!(&bytes[16..20], &123i32.to_ne_bytes());
+        assert_eq!(&bytes[20..24], &456u32.to_ne_bytes());
+        assert_eq!(&bytes[24..28], &7i32.to_ne_bytes());
+        assert_eq!(&bytes[28..], &[0; 100]);
+    }
+
+    #[test]
+    fn signal_info_fault_output_preserves_address_and_zeroes_unused_fields() {
+        let info = SignalInfo::for_fault(11, 2, 0x1234_5678_9abc_def0);
+        let bytes = crate::encode_to_buffer(&info);
+        assert_eq!(&bytes[0..4], &11i32.to_ne_bytes());
+        assert_eq!(&bytes[4..8], &[0; 4]);
+        assert_eq!(&bytes[8..12], &2i32.to_ne_bytes());
+        assert_eq!(&bytes[12..16], &[0; 4]);
+        assert_eq!(&bytes[16..24], &0x1234_5678_9abc_def0u64.to_ne_bytes());
+        assert_eq!(&bytes[24..], &[0; 104]);
+    }
+
+    #[test]
+    fn signal_info_opaque_payload_survives_header_update_and_short_write() {
+        use crate::{encode_to_buffer, write_user_value_with};
+
+        let mut info = decode_from_bytes::<SignalInfo>(&[0xab; 128]).unwrap();
+        info.set_signo(42);
+        assert_eq!(info.signo(), 42);
+        assert_eq!(info.code(), i32::from_ne_bytes([0xab; 4]));
+        let bytes = encode_to_buffer(&info);
+        assert_eq!(&bytes[4..], &[0xab; 124]);
+        let mut prefix = [0; 13];
+        assert_eq!(
+            write_user_value_with(0x4ff3, &info, |_, bytes| {
+                prefix.copy_from_slice(&bytes[..13]);
+                Ok(13)
+            }),
+            Err(AxError::BadAddress),
+        );
+        assert_eq!(&prefix[..4], &42i32.to_ne_bytes());
+        assert_eq!(&prefix[4..], &[0xab; 9]);
+    }
 
     #[test]
     fn signal_action_preserves_sentinel_and_arbitrary_handler_addresses() {

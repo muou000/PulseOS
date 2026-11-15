@@ -1,15 +1,15 @@
 use alloc::vec::Vec;
-use core::ffi::c_void;
 
 use axerrno::LinuxError;
 use axlog::*;
 use pulse_core::net::{Socket, SocketInner};
+use pulse_user_abi::net::MessageHeader as MsgHdr;
 
 use super::{
     addr::{NetSocketAddr, read_unix_path},
     get_socket,
 };
-use crate::impls::utils::read_user_value;
+use crate::impls::utils::{read_user_value, write_user_value};
 
 const MMSGHDR_SIZE: usize = core::mem::size_of::<linux_raw_sys::net::mmsghdr>();
 const MMSGHDR_MSG_LEN_OFFSET: usize = core::mem::offset_of!(linux_raw_sys::net::mmsghdr, msg_len);
@@ -29,12 +29,6 @@ fn mmsghdr_addr(msgvec: usize, index: usize) -> Result<usize, LinuxError> {
     Ok(addr)
 }
 
-fn write_user_plain<T: Copy>(user_addr: usize, value: &T) -> Result<(), LinuxError> {
-    crate::impls::utils::with_process(|process| {
-        pulse_core::task::uaccess::write_user_plain(process, user_addr, value)
-    })?
-    .map_err(|e| LinuxError::from(e.canonicalize()))
-}
 fn read_family(addr: usize, addrlen: u32) -> Result<u16, LinuxError> {
     if addrlen > 128 {
         return Err(LinuxError::EINVAL);
@@ -339,7 +333,7 @@ pub fn sys_recvfrom(
                         if let Ok(current_len) = read_user_value::<u32>(addrlen) {
                             let mut alen = current_len;
                             if net_addr.write_to_raw(addr, &mut alen).is_ok() {
-                                let _ = write_user_plain(addrlen, &alen);
+                                let _ = write_user_value(addrlen, &alen);
                             }
                         }
                     }
@@ -352,7 +346,7 @@ pub fn sys_recvfrom(
                         let to_write = core::cmp::min(current_len as usize, 12);
                         if crate::impls::utils::write_user_bytes(addr, &nladdr[..to_write]).is_ok()
                         {
-                            let _ = write_user_plain(addrlen, &(to_write as u32));
+                            let _ = write_user_value(addrlen, &(to_write as u32));
                         }
                     }
                 }
@@ -360,31 +354,6 @@ pub fn sys_recvfrom(
             n as isize
         }
         Err(e) => -(e.code() as isize),
-    }
-}
-
-/// msghdr structure (simplified, for sendmsg/recvmsg).
-#[derive(Copy, Clone)]
-#[repr(C)]
-struct MsgHdr {
-    msg_name: *mut c_void,
-    msg_namelen: u32,
-    msg_iov: *mut c_void,
-    msg_iovlen: usize,
-    msg_control: *mut c_void,
-    msg_controllen: usize,
-    msg_flags: u32,
-}
-
-pulse_user_abi::impl_user_abi_struct! {
-    for MsgHdr, size = 56 => {
-        msg_name: *mut c_void,
-        msg_namelen: u32,
-        msg_iov: *mut c_void,
-        msg_iovlen: usize,
-        msg_control: *mut c_void,
-        msg_controllen: usize,
-        msg_flags: u32,
     }
 }
 
@@ -611,7 +580,7 @@ pub fn sys_sendmmsg(fd: usize, msgvec: usize, vlen: usize, flags: usize) -> isiz
             Ok(bytes_sent) => {
                 let msg_len_addr = msg_addr + MMSGHDR_MSG_LEN_OFFSET;
                 let bytes_u32 = bytes_sent as u32;
-                if let Err(e) = write_user_plain(msg_len_addr, &bytes_u32) {
+                if let Err(e) = write_user_value(msg_len_addr, &bytes_u32) {
                     if sent_count > 0 {
                         break;
                     } else {
@@ -743,7 +712,7 @@ fn do_recvmsg_core(socket: &Socket, msg: usize, flags: usize) -> Result<usize, L
             }
 
             // Write updated msg_hdr back to user space.
-            write_user_plain(msg, &msg_hdr)?;
+            write_user_value(msg, &msg_hdr)?;
 
             Ok(recv)
         }
@@ -874,7 +843,7 @@ pub fn sys_recvmmsg(fd: usize, msgvec: usize, vlen: usize, flags: usize, timeout
             Ok(bytes_received) => {
                 let msg_len_addr = msg_addr + MMSGHDR_MSG_LEN_OFFSET;
                 let bytes_u32 = bytes_received as u32;
-                if let Err(e) = write_user_plain(msg_len_addr, &bytes_u32) {
+                if let Err(e) = write_user_value(msg_len_addr, &bytes_u32) {
                     if received_count > 0 {
                         break;
                     } else {
@@ -936,7 +905,7 @@ pub fn sys_recvmmsg(fd: usize, msgvec: usize, vlen: usize, flags: usize, timeout
                 tv_sec: (remaining_ns / 1_000_000_000) as i64,
                 tv_nsec: (remaining_ns % 1_000_000_000) as i64,
             };
-            let _ = write_user_plain(timeout, &remaining_ts);
+            let _ = write_user_value(timeout, &remaining_ts);
         }
     }
 

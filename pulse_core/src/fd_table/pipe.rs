@@ -917,7 +917,7 @@ impl FdObject for PipeObject {
                     buffer.available_read().saturating_add(zero_copy_bytes(&zc)) as i32
                 };
                 let process = crate::task::current_process()?;
-                process.write_user_bytes(arg, &n.to_ne_bytes())?;
+                crate::task::uaccess::write_user_value(&process, arg, &n)?;
                 Ok(0)
             }
             FIONBIO => {

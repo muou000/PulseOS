@@ -216,6 +216,13 @@ struct UtsName {
     domainname: [u8; 65],
 }
 
+pulse_user_abi::impl_user_abi_struct! {
+    for UtsName, size = 390 => {
+        sysname: [u8; 65], nodename: [u8; 65], release: [u8; 65],
+        version: [u8; 65], machine: [u8; 65], domainname: [u8; 65],
+    }
+}
+
 const SYSLOG_ACTION_CLOSE: usize = 0;
 const SYSLOG_ACTION_OPEN: usize = 1;
 const SYSLOG_ACTION_READ: usize = 2;
@@ -273,7 +280,7 @@ pub fn sys_uname(buf: usize) -> isize {
     write_cstr_field(&mut uts.machine, "loongarch64");
     write_cstr_field(&mut uts.domainname, "(none)");
 
-    match uaccess::write_user_plain(process.as_ref(), buf, &uts) {
+    match uaccess::write_user_value(process.as_ref(), buf, &uts) {
         Ok(()) => 0,
         Err(_) => -LinuxError::EFAULT.code() as isize,
     }
@@ -321,6 +328,10 @@ struct Timeval {
     tv_usec: i64,
 }
 
+pulse_user_abi::impl_user_abi_struct! {
+    for Timeval, size = 16 => { tv_sec: i64, tv_usec: i64 }
+}
+
 #[repr(C)]
 #[derive(Default, Copy, Clone)]
 struct Rusage {
@@ -340,6 +351,15 @@ struct Rusage {
     ru_nsignals: i64,
     ru_nvcsw: i64,
     ru_nivcsw: i64,
+}
+
+pulse_user_abi::impl_user_abi_struct! {
+    for Rusage, size = 144 => {
+        ru_utime: Timeval, ru_stime: Timeval, ru_maxrss: i64, ru_ixrss: i64,
+        ru_idrss: i64, ru_isrss: i64, ru_minflt: i64, ru_majflt: i64,
+        ru_nswap: i64, ru_inblock: i64, ru_oublock: i64, ru_msgsnd: i64,
+        ru_msgrcv: i64, ru_nsignals: i64, ru_nvcsw: i64, ru_nivcsw: i64,
+    }
 }
 
 pub fn sys_getrusage(who: i32, addr: usize) -> isize {
@@ -380,7 +400,7 @@ pub fn sys_getrusage(who: i32, addr: usize) -> isize {
     rusage.ru_utime = ns_to_timeval(utime_ns);
     rusage.ru_stime = ns_to_timeval(stime_ns);
 
-    match uaccess::write_user_plain(process.as_ref(), addr, &rusage) {
+    match uaccess::write_user_value(process.as_ref(), addr, &rusage) {
         Ok(()) => 0,
         Err(_) => -LinuxError::EFAULT.code() as isize,
     }
@@ -430,7 +450,7 @@ pub fn sys_prlimit64(pid: i32, resource: usize, new_limit: usize, old_limit: usi
     }
 
     if old_limit != 0 {
-        match uaccess::write_user_plain(process.as_ref(), old_limit, &old_rlim) {
+        match uaccess::write_user_value(process.as_ref(), old_limit, &old_rlim) {
             Ok(()) => 0,
             Err(_) => -LinuxError::EFAULT.code() as isize,
         }
@@ -503,13 +523,7 @@ pub fn sys_sysinfo(info: usize) -> isize {
         _f: linux_raw_sys::system::__IncompleteArrayField::new(),
     };
     match pulse_core::task::with_current_process(|process| {
-        let bytes = unsafe {
-            core::slice::from_raw_parts(
-                (&sysinfo as *const linux_raw_sys::system::sysinfo).cast::<u8>(),
-                core::mem::size_of::<linux_raw_sys::system::sysinfo>(),
-            )
-        };
-        uaccess::write_user_bytes(process, info, bytes)
+        uaccess::write_user_value(process, info, &sysinfo)
     }) {
         Ok(Ok(())) => 0,
         Ok(Err(_)) => -LinuxError::EFAULT.code() as isize,
@@ -691,7 +705,7 @@ pub fn sys_riscv_hwprobe(
             }
         }
 
-        uaccess::write_user_plain_array(process, pairs_addr, &pairs)
+        uaccess::write_user_value_array(process, pairs_addr, &pairs)
     });
 
     match res {

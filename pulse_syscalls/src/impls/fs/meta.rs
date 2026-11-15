@@ -11,7 +11,7 @@ use crate::impls::{
     fs::common::{check_faccess_permission, get_fd_entry, get_fd_object, resolve_location_at_ptr},
     utils::{
         USER_PATH_MAX, read_user_bytes, read_user_timespec, timespec_to_update_time, with_process,
-        write_user_bytes,
+        write_user_bytes, write_user_value,
     },
 };
 
@@ -101,13 +101,7 @@ pub fn sys_statfs(pathname: usize, buf: usize) -> isize {
         Ok(stat) => stat,
         Err(e) => return -e.code() as isize,
     };
-    let bytes = unsafe {
-        core::slice::from_raw_parts(
-            (&fs_stat as *const statfs).cast::<u8>(),
-            core::mem::size_of::<statfs>(),
-        )
-    };
-    match write_user_bytes(buf, bytes) {
+    match write_user_value(buf, &fs_stat) {
         Ok(()) => 0,
         Err(e) => -e.code() as isize,
     }
@@ -132,13 +126,7 @@ pub fn sys_fstatfs(fd: usize, buf: usize) -> isize {
         Ok(stat) => stat,
         Err(e) => return -e.code() as isize,
     };
-    let bytes = unsafe {
-        core::slice::from_raw_parts(
-            (&fs_stat as *const statfs).cast::<u8>(),
-            core::mem::size_of::<statfs>(),
-        )
-    };
-    match write_user_bytes(buf, bytes) {
+    match write_user_value(buf, &fs_stat) {
         Ok(()) => 0,
         Err(e) => -e.code() as isize,
     }
@@ -153,13 +141,7 @@ pub fn sys_fstat(fd: usize, statbuf: usize) -> isize {
         Ok(stat) => stat,
         Err(e) => return -e.code() as isize,
     };
-    let bytes = unsafe {
-        core::slice::from_raw_parts(
-            core::ptr::from_ref(&stat).cast::<u8>(),
-            core::mem::size_of_val(&stat),
-        )
-    };
-    match write_user_bytes(statbuf, bytes) {
+    match write_user_value(statbuf, &stat) {
         Ok(()) => 0,
         Err(e) => -e.code() as isize,
     }
@@ -177,13 +159,7 @@ pub fn sys_fstatat(dirfd: i32, pathname: usize, statbuf: usize, flags: usize) ->
         Ok(stat) => stat,
         Err(e) => return -e.code() as isize,
     };
-    let bytes = unsafe {
-        core::slice::from_raw_parts(
-            core::ptr::from_ref(&stat).cast::<u8>(),
-            core::mem::size_of_val(&stat),
-        )
-    };
-    match write_user_bytes(statbuf, bytes) {
+    match write_user_value(statbuf, &stat) {
         Ok(()) => 0,
         Err(e) => -e.code() as isize,
     }
@@ -299,13 +275,7 @@ pub fn sys_statx(
     new_statx.stx_dio_read_offset_align = 0;
     new_statx.stx_atomic_write_unit_max_opt = 0;
 
-    let bytes = unsafe {
-        core::slice::from_raw_parts(
-            (&new_statx as *const statx).cast::<u8>(),
-            core::mem::size_of::<statx>(),
-        )
-    };
-    match write_user_bytes(statxbuf, bytes) {
+    match write_user_value(statxbuf, &new_statx) {
         Ok(()) => 0,
         Err(e) => -e.code() as isize,
     }

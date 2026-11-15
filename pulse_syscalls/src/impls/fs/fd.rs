@@ -252,7 +252,7 @@ fn sys_fcntl_record_lock(fd: usize, cmd: u32, arg: usize) -> Result<isize, Linux
         } else {
             lock.l_type = F_UNLCK as i16;
         }
-        with_process(|process| uaccess::write_user_plain(process, arg, &lock))?
+        with_process(|process| uaccess::write_user_value(process, arg, &lock))?
             .map_err(|e| LinuxError::from(e.canonicalize()))?;
         return Ok(0);
     }

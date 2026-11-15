@@ -21,7 +21,7 @@ use super::{
 };
 use crate::impls::{
     fs::common::{insert_fd_entry, remove_fd_entry},
-    utils::read_user_value,
+    utils::{read_user_value, write_user_value},
 };
 
 fn read_family(addr: usize, addrlen: u32) -> Result<u16, LinuxError> {
@@ -42,13 +42,6 @@ fn read_family(addr: usize, addrlen: u32) -> Result<u16, LinuxError> {
 fn insert_socket(socket: Socket, flags: FdFlags) -> Result<usize, LinuxError> {
     let entry = FdEntry::new(Arc::new(socket), flags);
     insert_fd_entry(entry)
-}
-
-fn write_user_plain<T: Copy>(user_addr: usize, value: &T) -> Result<(), LinuxError> {
-    crate::impls::utils::with_process(|process| {
-        pulse_core::task::uaccess::write_user_plain(process, user_addr, value)
-    })?
-    .map_err(|e| LinuxError::from(e.canonicalize()))
 }
 
 pub fn sys_socket(domain: usize, raw_ty: usize, proto: usize) -> isize {
@@ -544,7 +537,7 @@ pub fn sys_accept4(fd: usize, addr: usize, addrlen: usize, flags: usize) -> isiz
                 if let Ok(current_len) = read_user_value::<u32>(addrlen) {
                     let mut len = current_len;
                     if net_addr.write_to_raw(addr, &mut len).is_ok() {
-                        let _ = write_user_plain(addrlen, &len);
+                        let _ = write_user_value(addrlen, &len);
                     }
                 }
             }
@@ -706,7 +699,7 @@ pub fn sys_socketpair(domain: usize, raw_ty: usize, proto: usize, fds: usize) ->
         };
 
     // 6. Write fds back to user space
-    if let Err(e) = write_user_plain(fds, &new_fds) {
+    if let Err(e) = write_user_value(fds, &new_fds) {
         let _ = remove_fd_entry(new_fds[0] as usize);
         let _ = remove_fd_entry(new_fds[1] as usize);
         return -(e.code() as isize);

@@ -263,7 +263,7 @@ pub fn sys_shmctl(shmid: i32, cmd: i32, buf: usize) -> isize {
                 return -LinuxError::EFAULT.code() as isize;
             }
             let info = pulse_core::ipc::shm::IpcInfo::new();
-            return match pulse_core::task::uaccess::write_user_plain(proc.as_ref(), buf, &info) {
+            return match pulse_core::task::uaccess::write_user_value(proc.as_ref(), buf, &info) {
                 Ok(()) => {
                     let manager = SHM_MANAGER.lock();
                     manager.get_highest_index() as isize
@@ -290,7 +290,7 @@ pub fn sys_shmctl(shmid: i32, cmd: i32, buf: usize) -> isize {
                 swap_attempts: 0,
                 swap_successes: 0,
             };
-            return match pulse_core::task::uaccess::write_user_plain(proc.as_ref(), buf, &info) {
+            return match pulse_core::task::uaccess::write_user_value(proc.as_ref(), buf, &info) {
                 Ok(()) => {
                     let manager = SHM_MANAGER.lock();
                     manager.get_highest_index() as isize
@@ -314,7 +314,7 @@ pub fn sys_shmctl(shmid: i32, cmd: i32, buf: usize) -> isize {
                 return -LinuxError::EACCES.code() as isize;
             }
             let ds = inner.shmid_ds;
-            return match pulse_core::task::uaccess::write_user_plain(proc.as_ref(), buf, &ds) {
+            return match pulse_core::task::uaccess::write_user_value(proc.as_ref(), buf, &ds) {
                 Ok(()) => actual_shmid as isize,
                 Err(_) => -LinuxError::EFAULT.code() as isize,
             };
@@ -342,7 +342,7 @@ pub fn sys_shmctl(shmid: i32, cmd: i32, buf: usize) -> isize {
                 return -LinuxError::EFAULT.code() as isize;
             }
             let ds = inner.shmid_ds;
-            match pulse_core::task::uaccess::write_user_plain(proc.as_ref(), buf, &ds) {
+            match pulse_core::task::uaccess::write_user_value(proc.as_ref(), buf, &ds) {
                 Ok(()) => 0,
                 Err(_) => -LinuxError::EFAULT.code() as isize,
             }

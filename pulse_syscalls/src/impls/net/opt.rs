@@ -9,7 +9,7 @@ use axlog::*;
 use super::get_socket;
 use pulse_core::net::SocketInner;
 
-use crate::impls::utils::read_user_value;
+use crate::impls::utils::{read_user_value, write_user_value};
 
 #[derive(Copy, Clone, Default, Debug)]
 #[repr(C)]
@@ -67,13 +67,6 @@ pulse_user_abi::impl_user_abi_struct! {
     }
 }
 
-fn write_user_plain<T: Copy>(user_addr: usize, value: &T) -> Result<(), LinuxError> {
-    crate::impls::utils::with_process(|process| {
-        pulse_core::task::uaccess::write_user_plain(process, user_addr, value)
-    })?
-    .map_err(|e| LinuxError::from(e.canonicalize()))
-}
-
 pub fn sys_getsockopt(
     fd: usize,
     level: usize,
@@ -94,7 +87,7 @@ pub fn sys_getsockopt(
                 // IP_TOS, IP_MTU_DISCOVER, IP_RECVERR
                 debug!("sys_getsockopt: level IPPROTO_IP, optname {optname} (stub success)");
                 let val: i32 = 0;
-                if let Err(e) = write_user_plain(optval, &val) {
+                if let Err(e) = write_user_value(optval, &val) {
                     return -(e.code() as isize);
                 }
                 let mut len: u32 = match read_user_value(optlen) {
@@ -103,7 +96,7 @@ pub fn sys_getsockopt(
                 };
                 if len >= 4 {
                     len = 4;
-                    if let Err(e) = write_user_plain(optlen, &len) {
+                    if let Err(e) = write_user_value(optlen, &len) {
                         return -(e.code() as isize);
                     }
                 }
@@ -125,7 +118,7 @@ pub fn sys_getsockopt(
                     SocketInner::Netlink(_) => false,
                 };
                 let val: i32 = if reuse { 1 } else { 0 };
-                if let Err(e) = write_user_plain(optval, &val) {
+                if let Err(e) = write_user_value(optval, &val) {
                     return -(e.code() as isize);
                 }
                 let mut len: u32 = match read_user_value(optlen) {
@@ -134,7 +127,7 @@ pub fn sys_getsockopt(
                 };
                 if len >= 4 {
                     len = 4;
-                    if let Err(e) = write_user_plain(optlen, &len) {
+                    if let Err(e) = write_user_value(optlen, &len) {
                         return -(e.code() as isize);
                     }
                 }
@@ -143,7 +136,7 @@ pub fn sys_getsockopt(
             7 | 8 => {
                 // SO_SNDBUF, SO_RCVBUF
                 let val: i32 = 65536; // Sensible default buffer size
-                if let Err(e) = write_user_plain(optval, &val) {
+                if let Err(e) = write_user_value(optval, &val) {
                     return -(e.code() as isize);
                 }
                 let mut len: u32 = match read_user_value(optlen) {
@@ -152,7 +145,7 @@ pub fn sys_getsockopt(
                 };
                 if len >= 4 {
                     len = 4;
-                    if let Err(e) = write_user_plain(optlen, &len) {
+                    if let Err(e) = write_user_value(optlen, &len) {
                         return -(e.code() as isize);
                     }
                 }
@@ -161,7 +154,7 @@ pub fn sys_getsockopt(
             9 | 6 | 5 | 15 => {
                 // SO_KEEPALIVE, SO_BROADCAST, SO_DONTROUTE, SO_REUSEPORT
                 let val: i32 = 0; // Default disabled/false
-                if let Err(e) = write_user_plain(optval, &val) {
+                if let Err(e) = write_user_value(optval, &val) {
                     return -(e.code() as isize);
                 }
                 let mut len: u32 = match read_user_value(optlen) {
@@ -170,7 +163,7 @@ pub fn sys_getsockopt(
                 };
                 if len >= 4 {
                     len = 4;
-                    if let Err(e) = write_user_plain(optlen, &len) {
+                    if let Err(e) = write_user_value(optlen, &len) {
                         return -(e.code() as isize);
                     }
                 }
@@ -179,7 +172,7 @@ pub fn sys_getsockopt(
             4 => {
                 // SO_ERROR
                 let val: i32 = 0; // No error
-                if let Err(e) = write_user_plain(optval, &val) {
+                if let Err(e) = write_user_value(optval, &val) {
                     return -(e.code() as isize);
                 }
                 let mut len: u32 = match read_user_value(optlen) {
@@ -188,7 +181,7 @@ pub fn sys_getsockopt(
                 };
                 if len >= 4 {
                     len = 4;
-                    if let Err(e) = write_user_plain(optlen, &len) {
+                    if let Err(e) = write_user_value(optlen, &len) {
                         return -(e.code() as isize);
                     }
                 }
@@ -197,7 +190,7 @@ pub fn sys_getsockopt(
             20 | 21 => {
                 // SO_RCVTIMEO, SO_SNDTIMEO
                 let val = TimeVal { tv_sec: 0, tv_usec: 0 };
-                if let Err(e) = write_user_plain(optval, &val) {
+                if let Err(e) = write_user_value(optval, &val) {
                     return -(e.code() as isize);
                 }
                 let mut len: u32 = match read_user_value(optlen) {
@@ -207,7 +200,7 @@ pub fn sys_getsockopt(
                 let expected_len = core::mem::size_of::<TimeVal>() as u32;
                 if len >= expected_len {
                     len = expected_len;
-                    if let Err(e) = write_user_plain(optlen, &len) {
+                    if let Err(e) = write_user_value(optlen, &len) {
                         return -(e.code() as isize);
                     }
                 }
@@ -216,7 +209,7 @@ pub fn sys_getsockopt(
             10 => {
                 // SO_OOBINLINE
                 let val: i32 = 0; // Default disabled/false
-                if let Err(e) = write_user_plain(optval, &val) {
+                if let Err(e) = write_user_value(optval, &val) {
                     return -(e.code() as isize);
                 }
                 let mut len: u32 = match read_user_value(optlen) {
@@ -225,7 +218,7 @@ pub fn sys_getsockopt(
                 };
                 if len >= 4 {
                     len = 4;
-                    if let Err(e) = write_user_plain(optlen, &len) {
+                    if let Err(e) = write_user_value(optlen, &len) {
                         return -(e.code() as isize);
                     }
                 }
@@ -248,7 +241,7 @@ pub fn sys_getsockopt(
                     }
                     SocketInner::Udp(_) | SocketInner::Icmp(_) | SocketInner::Local(_) | SocketInner::Packet(_) | SocketInner::Netlink(_) => return -(LinuxError::EOPNOTSUPP.code() as isize),
                 };
-                if let Err(e) = write_user_plain(optval, &val) {
+                if let Err(e) = write_user_value(optval, &val) {
                     return -(e.code() as isize);
                 }
                 let mut len: u32 = match read_user_value(optlen) {
@@ -257,7 +250,7 @@ pub fn sys_getsockopt(
                 };
                 if len >= 4 {
                     len = 4;
-                    if let Err(e) = write_user_plain(optlen, &len) {
+                    if let Err(e) = write_user_value(optlen, &len) {
                         return -(e.code() as isize);
                     }
                 }
@@ -267,7 +260,7 @@ pub fn sys_getsockopt(
                 // TCP_MAXSEG
                 debug!("sys_getsockopt: level IPPROTO_TCP, optname TCP_MAXSEG (stub success)");
                 let val: i32 = 1460;
-                if let Err(e) = write_user_plain(optval, &val) {
+                if let Err(e) = write_user_value(optval, &val) {
                     return -(e.code() as isize);
                 }
                 let mut len: u32 = match read_user_value(optlen) {
@@ -276,7 +269,7 @@ pub fn sys_getsockopt(
                 };
                 if len >= 4 {
                     len = 4;
-                    if let Err(e) = write_user_plain(optlen, &len) {
+                    if let Err(e) = write_user_value(optlen, &len) {
                         return -(e.code() as isize);
                     }
                 }
@@ -298,7 +291,7 @@ pub fn sys_getsockopt(
                     return -LinuxError::EFAULT.code() as isize;
                 }
                 len = to_copy as u32;
-                if let Err(e) = write_user_plain(optlen, &len) {
+                if let Err(e) = write_user_value(optlen, &len) {
                     return -(e.code() as isize);
                 }
                 return 0;
@@ -323,7 +316,7 @@ pub fn sys_getsockopt(
                     return -LinuxError::EFAULT.code() as isize;
                 }
                 len = to_copy as u32;
-                if let Err(e) = write_user_plain(optlen, &len) {
+                if let Err(e) = write_user_value(optlen, &len) {
                     return -(e.code() as isize);
                 }
                 return 0;
@@ -359,7 +352,7 @@ pub fn sys_getsockopt(
                     tv_sec: (nanos / 1_000_000_000) as i64,
                     tv_usec: ((nanos % 1_000_000_000) / 1_000) as i64,
                 };
-                if let Err(e) = write_user_plain(optval, &tv) {
+                if let Err(e) = write_user_value(optval, &tv) {
                     return -(e.code() as isize);
                 }
                 let mut len: u32 = match read_user_value(optlen) {
@@ -369,7 +362,7 @@ pub fn sys_getsockopt(
                 let required_len = core::mem::size_of::<TimeVal>() as u32;
                 if len >= required_len {
                     len = required_len;
-                    if let Err(e) = write_user_plain(optlen, &len) {
+                    if let Err(e) = write_user_value(optlen, &len) {
                         return -(e.code() as isize);
                     }
                 }
@@ -383,7 +376,7 @@ pub fn sys_getsockopt(
             26 => {
                 // IPV6_V6ONLY
                 let val: i32 = 1; // Default to dual-stack off (IPv6 only)
-                if let Err(e) = write_user_plain(optval, &val) {
+                if let Err(e) = write_user_value(optval, &val) {
                     return -(e.code() as isize);
                 }
                 let mut len: u32 = match read_user_value(optlen) {
@@ -392,7 +385,7 @@ pub fn sys_getsockopt(
                 };
                 if len >= 4 {
                     len = 4;
-                    if let Err(e) = write_user_plain(optlen, &len) {
+                    if let Err(e) = write_user_value(optlen, &len) {
                         return -(e.code() as isize);
                     }
                 }
@@ -409,7 +402,7 @@ pub fn sys_getsockopt(
                     SocketInner::Packet(p) => p.version.load(Ordering::Acquire) as i32,
                     _ => return -(LinuxError::EOPNOTSUPP.code() as isize),
                 };
-                if let Err(e) = write_user_plain(optval, &val) {
+                if let Err(e) = write_user_value(optval, &val) {
                     return -(e.code() as isize);
                 }
                 let mut len: u32 = match read_user_value(optlen) {
@@ -418,7 +411,7 @@ pub fn sys_getsockopt(
                 };
                 if len >= 4 {
                     len = 4;
-                    if let Err(e) = write_user_plain(optlen, &len) {
+                    if let Err(e) = write_user_value(optlen, &len) {
                         return -(e.code() as isize);
                     }
                 }
@@ -430,7 +423,7 @@ pub fn sys_getsockopt(
                     SocketInner::Packet(p) => p.reserve.load(Ordering::Acquire) as i32,
                     _ => return -(LinuxError::EOPNOTSUPP.code() as isize),
                 };
-                if let Err(e) = write_user_plain(optval, &val) {
+                if let Err(e) = write_user_value(optval, &val) {
                     return -(e.code() as isize);
                 }
                 let mut len: u32 = match read_user_value(optlen) {
@@ -439,7 +432,7 @@ pub fn sys_getsockopt(
                 };
                 if len >= 4 {
                     len = 4;
-                    if let Err(e) = write_user_plain(optlen, &len) {
+                    if let Err(e) = write_user_value(optlen, &len) {
                         return -(e.code() as isize);
                     }
                 }
@@ -451,7 +444,7 @@ pub fn sys_getsockopt(
                     SocketInner::Packet(p) => if p.has_vnet_hdr.load(Ordering::Acquire) { 1i32 } else { 0i32 },
                     _ => return -(LinuxError::EOPNOTSUPP.code() as isize),
                 };
-                if let Err(e) = write_user_plain(optval, &val) {
+                if let Err(e) = write_user_value(optval, &val) {
                     return -(e.code() as isize);
                 }
                 let mut len: u32 = match read_user_value(optlen) {
@@ -460,7 +453,7 @@ pub fn sys_getsockopt(
                 };
                 if len >= 4 {
                     len = 4;
-                    if let Err(e) = write_user_plain(optlen, &len) {
+                    if let Err(e) = write_user_value(optlen, &len) {
                         return -(e.code() as isize);
                     }
                 }
