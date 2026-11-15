@@ -16,6 +16,10 @@ fn print_help() {
     println!("  --json, -j           Print JSON for the selected report");
     println!("  --mapping-report    Print time-valid mapping and ELF associations as JSON");
     println!("  --bundle <DIR>      Verify captured ELF identities in this artifact bundle");
+    println!(
+        "  --perf-data <FILE>  Export selected CPU samples and FILE.json provenance (requires \
+         --bundle)"
+    );
     println!("  --fault-report      Report fault outcomes and resolver wall-time");
     println!("  --sched-report      Report blocked and wake-to-switch intervals");
     println!("  --mode user|kernel   Filter explicit sample mode or fault origin");
@@ -67,10 +71,14 @@ fn opened_identity(file: &fs::File) -> Result<(u64, u64), String> {
     }
 }
 struct ReportFiles {
-    files: [Option<fs::File>; 3],
+    files: [Option<fs::File>; 5],
 }
 impl ReportFiles {
-    fn prepare(input: &fs::File, paths: [Option<&str>; 3]) -> Result<Self, String> {
+    fn prepare(
+        input: &fs::File,
+        artifacts: &[fs::File],
+        paths: [Option<&str>; 5],
+    ) -> Result<Self, String> {
         let mut result = Self {
             files: std::array::from_fn(|_| None),
         };
@@ -78,6 +86,10 @@ impl ReportFiles {
             return Ok(result);
         }
         let source = opened_identity(input)?;
+        let artifact_ids = artifacts
+            .iter()
+            .map(opened_identity)
+            .collect::<Result<std::collections::BTreeSet<_>, _>>()?;
         let mut identities = std::collections::BTreeSet::new();
         for (index, path) in paths.into_iter().enumerate() {
             let Some(path) = path else {
@@ -98,6 +110,9 @@ impl ReportFiles {
             let identity = opened_identity(&file)?;
             if identity == source {
                 return Err(format!("report output aliases its source capture: {path}"));
+            }
+            if artifact_ids.contains(&identity) {
+                return Err(format!("report output aliases a verified artifact: {path}"));
             }
             if !identities.insert(identity) {
                 return Err(format!("report outputs refer to the same file: {path}"));
@@ -124,6 +139,7 @@ fn run(args: &[String]) -> Result<(), String> {
     let (mut oncpu, mut offcpu, mut timeline) = (None, None, None);
     let mut mapping_report = false;
     let mut bundle = None;
+    let mut perf_data = None;
     let mut i = 2;
     while i < args.len() {
         match args[i].as_str() {
@@ -133,6 +149,7 @@ fn run(args: &[String]) -> Result<(), String> {
             "--sched-report" => scheduler = true,
             "--mapping-report" => mapping_report = true,
             "--bundle" => bundle = Some(value(args, &mut i, "--bundle")?.to_owned()),
+            "--perf-data" => perf_data = Some(value(args, &mut i, "--perf-data")?.to_owned()),
             "--fault-report" => faults = true,
             "--mode" => {
                 query.mode = Some(match value(args, &mut i, "--mode")? {
@@ -191,8 +208,11 @@ fn run(args: &[String]) -> Result<(), String> {
         }
         i += 1;
     }
-    if bundle.is_some() && !mapping_report {
-        return Err("--bundle requires --mapping-report".into());
+    if perf_data.is_some() && bundle.is_none() {
+        return Err("--perf-data requires --bundle".into());
+    }
+    if bundle.is_some() && !mapping_report && perf_data.is_none() {
+        return Err("--bundle requires --mapping-report or --perf-data".into());
     }
     if scheduler && query.mode.is_some() {
         return Err(
@@ -210,9 +230,41 @@ fn run(args: &[String]) -> Result<(), String> {
     let analyzer = CaptureAnalyzer::from_bytes(&capture_bytes)
         .map_err(|e| format!("failed to parse BPF capture: {e}"))?;
     let selected = analyzer.query(&query)?;
+    // Validate all selected identities and artifacts before opening any report
+    // destination. A failed export must leave existing outputs untouched.
+    let exported = if perf_data.is_some() {
+        Some(bpf_analyzer::perf::export(
+            &analyzer,
+            &selected,
+            std::path::Path::new(bundle.as_deref().unwrap()),
+            &capture_bytes,
+        )?)
+    } else {
+        None
+    };
+    let perf_manifest = perf_data.as_ref().map(|path| format!("{path}.json"));
+    let protected_artifacts = if let Some(exported) = &exported {
+        exported
+            .artifact_paths
+            .iter()
+            .map(|path| {
+                fs::File::open(std::path::Path::new(bundle.as_deref().unwrap()).join(path))
+                    .map_err(|e| format!("cannot protect verified artifact {path}: {e}"))
+            })
+            .collect::<Result<Vec<_>, _>>()?
+    } else {
+        Vec::new()
+    };
     let mut reports = ReportFiles::prepare(
         &input,
-        [oncpu.as_deref(), offcpu.as_deref(), timeline.as_deref()],
+        &protected_artifacts,
+        [
+            oncpu.as_deref(),
+            offcpu.as_deref(),
+            timeline.as_deref(),
+            perf_data.as_deref(),
+            perf_manifest.as_deref(),
+        ],
     )?;
     if !table
         && !loss
@@ -223,6 +275,7 @@ fn run(args: &[String]) -> Result<(), String> {
         && oncpu.is_none()
         && offcpu.is_none()
         && timeline.is_none()
+        && perf_data.is_none()
     {
         table = true;
         loss = true;
@@ -237,12 +290,21 @@ fn run(args: &[String]) -> Result<(), String> {
         );
     }
     if mapping_report {
-        let report = bpf_analyzer::mapping::render_report(&analyzer, &selected.events, bundle.as_deref().map(std::path::Path::new));
-        println!("{{\"query\":{},{}", emission::render_query_metadata(&selected), &report[1..]);
+        let report = bpf_analyzer::mapping::render_report(
+            &analyzer,
+            &selected.events,
+            bundle.as_deref().map(std::path::Path::new),
+        );
+        println!(
+            "{{\"query\":{},{}",
+            emission::render_query_metadata(&selected),
+            &report[1..]
+        );
     } else if scheduler {
         if json {
             println!(
-                "{{\"query\":{},\"selected_records_count\":{},\"context_records_count\":{},\"query_clipped_intervals\":{},\"diagnostics_scope\":\"capture\",\"scheduler\":{}}}",
+                "{{\"query\":{},\"selected_records_count\":{},\"context_records_count\":{},\"\
+                 query_clipped_intervals\":{},\"diagnostics_scope\":\"capture\",\"scheduler\":{}}}",
                 emission::render_query_metadata(&selected),
                 selected.events.len(),
                 selected.context_records_count,
@@ -300,6 +362,16 @@ fn run(args: &[String]) -> Result<(), String> {
         eprintln!(
             "Wrote timeline {} (observed records; no synthetic endpoints)",
             path
+        );
+    }
+    if let Some(exported) = exported {
+        reports.write(3, &exported.data)?;
+        reports.write(4, exported.manifest.as_bytes())?;
+        eprintln!(
+            "Wrote CPU perf.data {} and provenance {} (sample periods preserved; graph unit={})",
+            perf_data.unwrap(),
+            perf_manifest.unwrap(),
+            query.weight.unit()
         );
     }
     Ok(())

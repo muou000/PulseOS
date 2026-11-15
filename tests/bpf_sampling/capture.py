@@ -72,7 +72,8 @@ def convert(run: Path) -> dict:
                 phases = {}
                 for phase, expected in oracle['examples'].items():
                     rows = [row for row in negative['samples'] if row['timestamp_ns'] == expected['timestamp_ns']
-                            and row['task'] == expected['task_id'] and row['ip'] == expected['ip'] and row['cpu'] == expected['cpu']]
+                            and row['task'] == expected['task_id'] and row['ip'] == expected['ip'] and row['cpu'] == expected['cpu']
+                            and row.get('source_id') == expected.get('source_id')]
                     if len(rows) != 1 or rows[0]['elf'] is not None or not rows[0]['unknown_reason'] or not rows[0]['mapping']:
                         raise ValueError(f'{case} resolved wrong or missing ELF for actual {phase} sample')
                     phases[phase] = rows[0]['unknown_reason']
