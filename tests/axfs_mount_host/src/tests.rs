@@ -120,6 +120,7 @@ fn lazy_bind_subtree_rejection_restores_shadows_and_retry_cleans_records() {
     .unwrap();
     let shadow = block_on(bound.root_location().lookup_no_follow("nested")).unwrap();
     assert!(!Arc::ptr_eq(shadow.mountpoint(), &child));
+    assert!(mountpoint_is_bind(shadow.mountpoint()));
     assert!(shadow.mountpoint().is_readonly());
     assert_eq!(shadow.mountpoint().get_flags(), 1);
     assert_eq!(list_mounts().len(), 4);
@@ -129,7 +130,7 @@ fn lazy_bind_subtree_rejection_restores_shadows_and_retry_cleans_records() {
             .find(|row| row.target == "/bind/nested")
             .unwrap()
             .options,
-        "ro,relatime"
+        "ro,bind,relatime"
     );
     FAIL_NEXT_RECORD_UPDATE.store(true, std::sync::atomic::Ordering::Relaxed);
     assert_eq!(
@@ -201,7 +202,7 @@ fn ordinary_mount_publishes_peer_and_slave_shadow_records() {
         let row = rows.iter().find(|row| row.target == path).unwrap();
         assert_eq!(row.source, "child");
         assert_eq!(row.fs_type, "tmpfs");
-        assert_eq!(row.options, "ro,relatime");
+        assert_eq!(row.options, "ro,bind,relatime");
     }
     let peer_child = block_on(peer.root_location().lookup_no_follow("child")).unwrap();
     let slave_child = block_on(slave.root_location().lookup_no_follow("child")).unwrap();
