@@ -273,10 +273,10 @@ fn test_phase_marker_window_filtering() {
     let all_events = analyzer.ordered_events();
     assert_eq!(all_events.len(), 5);
 
-    let phase_events = analyzer.events_in_phase("BENCHMARK");
-    // Should include the phase marker begin/end and events inside: t=100, t=150, t=200
-    assert_eq!(phase_events.len(), 3);
+    let phase_events = analyzer.query(&bpf_analyzer::query::Query {phase:Some("BENCHMARK".into()),..Default::default()}).unwrap().events;
+    // Half-open phase selection includes t=100 and t=150, not end t=200.
+    assert_eq!(phase_events.len(), 2);
     assert_eq!(phase_events[0].timestamp_ns, 100);
     assert_eq!(phase_events[1].timestamp_ns, 150);
-    assert_eq!(phase_events[2].timestamp_ns, 200);
+
 }

@@ -224,8 +224,30 @@ pub fn rust_main(cpu_id: usize, arg: usize) -> ! {
 
     ctor_bare::call_ctors();
 
+    // Keep constructors' original IRQ-enabled environment. After they return,
+    // the primary CPU can validate global allocator accounting while secondary
+    // CPUs have initialized their caches/schedulers but still spin IRQ-off in
+    // rust_main_secondary(). None can enter its idle/GC loop until our release.
+    #[cfg(feature = "pcp-boot-checks")]
+    let pcp_boot_guard = {
+        let guard = kernel_guard::NoPreemptIrqSave::new();
+        assert!(!axhal::asm::irqs_enabled(), "PCP boot checks require local IRQ exclusion");
+        #[cfg(feature = "smp")]
+        while INITED_CPUS.load(Ordering::Acquire) + 1
+            != BOOTED_CPU_MASK.load(Ordering::Acquire).count_ones() as usize
+        {
+            core::hint::spin_loop();
+        }
+        axalloc::run_pcp_guest_checks().expect("pcp guest checks failed");
+        guard
+    };
+
     info!("Primary CPU {} init OK.", cpu_id);
     INITED_CPUS.fetch_add(1, Ordering::Release);
+    // Do not expose a primary-CPU preemption window between the checks and
+    // publishing the barrier that releases the initialized secondary CPUs.
+    #[cfg(feature = "pcp-boot-checks")]
+    drop(pcp_boot_guard);
 
     while !is_init_ok() {
         core::hint::spin_loop();

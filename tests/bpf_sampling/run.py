@@ -31,7 +31,7 @@ ARCHES = helpers.ARCHES
 
 
 def build(arch: str, mode: str = "task", archive: bool = False, fault: str = "none", ring_pages: int = 16) -> Path:
-    source_inputs = {str(path): helpers.digest(path) for path in (SOURCE, LINKER_SCRIPT, BASE / "archive.rs")}
+    source_inputs = {str(path): helpers.digest(path) for path in (SOURCE, LINKER_SCRIPT, BASE / "archive.rs", *([BASE / "fault_workload.rs"] if mode == "fault" else []))}
     sysroot = Path(helpers.command(["rustc", "+nightly", "--print", "sysroot"]).strip())
     version = helpers.command(["rustc", "+nightly", "-vV"])
     host = next(line.removeprefix("host: ") for line in version.splitlines() if line.startswith("host: "))
@@ -44,10 +44,14 @@ def build(arch: str, mode: str = "task", archive: bool = False, fault: str = "no
                "-C", "link-arg=--no-relax", "-o", str(output), str(SOURCE)]
     if mode == "cpu":
         command += ["--cfg", "cpu_clock_test"]
-    if mode in ("trace", "block", "wake"):
+    if mode in ("trace", "block", "wake", "sched", "fault"):
         command += ["--cfg", "tracepoint_test"]
     if mode in ("block", "wake"):
         command += ["--cfg", f"trace_{mode}"]
+    if mode == "sched":
+        command += ["--cfg", "sched_trace_test"]
+    if mode == "fault":
+        command += ["--cfg", "trace_fault"]
     if archive:
         command += ["--cfg", "capture_export"]
     if ring_pages == 1:
@@ -71,7 +75,7 @@ def validate_log(text: str, token: str, mode: str = "task") -> list[str]:
     lines = [re.sub(r"\x1b\[[0-9;]*[A-Za-z]", "", line).strip()
              for line in text.replace("\r", "").splitlines()]
     errors = []
-    if mode not in ("task", "cpu", "trace", "block", "wake"):
+    if mode not in ("task", "cpu", "trace", "block", "wake", "sched", "fault"):
         return ["invalid expected sampling mode"]
     if sum(line.startswith(f"SAMPLING START version=2 mode={mode} cpus=8 ") for line in lines) != 1:
         errors.append("missing, duplicate or wrong-mode real sampler START")
@@ -79,8 +83,8 @@ def validate_log(text: str, token: str, mode: str = "task") -> list[str]:
         errors.append("guest sampler emitted FAIL")
     if lines.count(f"SAMPLING SINK_REJECT mode={mode} source_errno=-22 cpu_errno=-22 preserved=1") != 1:
         errors.append("missing invalid output binding rejection or preserved sink evidence")
-    if mode in ("trace", "block", "wake"):
-        prefix, count_name = {"trace": ("TRACE", "sched"), "block": ("BLOCK", "blocks"), "wake": ("WAKE", "wakes")}[mode]
+    if mode in ("trace", "block", "wake", "sched", "fault"):
+        prefix, count_name = {"trace": ("TRACE", "sched"), "block": ("BLOCK", "blocks"), "wake": ("WAKE", "wakes"), "sched": ("SCHED", "events"), "fault": ("FAULT", "faults")}[mode]
         observed = [re.fullmatch(rf"SAMPLING {prefix}_OBSERVED {count_name}=(\d+) subjects=(\d+) subjects_capped=([01]) target_contexts=(\d+) lost=(\d+) cpu_mask=0x([0-9a-f]+)", line)
                     for line in lines]
         observed = [match for match in observed if match]
@@ -92,7 +96,7 @@ def validate_log(text: str, token: str, mode: str = "task") -> list[str]:
         else:
             values = tuple(map(int, final[0].groups()))
             sched, subjects, capped, target_contexts, lost = values
-            min_subjects = 2 if mode == "trace" else 1
+            min_subjects = 2 if mode in ("trace", "sched") else 1
             max_subjects_per_record = 1 if mode == "block" else 2
             if sched < 2 or not min_subjects <= subjects <= 64 or subjects > max_subjects_per_record * sched or target_contexts > sched or lost:
                 errors.append("missing real scheduler subjects/events or invalid trace counters")
@@ -129,6 +133,11 @@ def validate_log(text: str, token: str, mode: str = "task") -> list[str]:
                 expected = f"SAMPLING PASS {stage} mode={mode} records={samples + foreign}"
                 if lines.count(expected) != 1:
                     errors.append(f"missing or inconsistent {stage} lifecycle check")
+    if mode == "sched":
+        counts = [re.fullmatch(r"SAMPLING SCHED_EVENTS metadata=(\d+) switches=(\d+) blocks=(\d+) wakes=(\d+) exits=(\d+) enqueues=(\d+)", line) for line in lines]
+        counts = [match for match in counts if match]
+        if len(counts) != 1 or any(int(counts[0].group(i)) < 2 for i in (2,3,4)) or int(counts[0].group(6)) == 0:
+            errors.append("mixed scheduler session lacks wake/block/switch/enqueue evidence")
     if mode == "task":
         sleeps = [re.fullmatch(r"SAMPLING TASK_SLEEP before_ns=(\d+) after_ns=(\d+) wall_ns=(\d+)", line)
                   for line in lines]
@@ -281,7 +290,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("action", choices=("build", "guest"))
     parser.add_argument("--arch", required=True, choices=ARCHES)
-    parser.add_argument("--mode", choices=("task", "cpu", "trace", "block", "wake"), default="task")
+    parser.add_argument("--mode", choices=("task", "cpu", "trace", "block", "wake", "sched", "fault"), default="task")
     parser.add_argument("--archive", action="store_true")
     parser.add_argument("--kernel", type=Path)
     parser.add_argument("--image", type=Path)

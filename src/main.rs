@@ -74,7 +74,6 @@ fn main() {
             pulse_core::fd_table::run_pipe_guest_checks().expect("pipe guest checks failed");
             pulse_core::task::run_futex_guest_checks().expect("futex guest checks failed");
             pulse_core::task::run_process_registry_guest_checks().expect("process registry guest checks failed");
-            axalloc::run_pcp_guest_checks().expect("pcp guest checks failed");
             axfs::run_dma_and_writeback_guest_checks().expect("dma & writeback guest checks failed");
             axnet::run_tcp_endpoint_concurrency_checks().expect("tcp endpoint concurrency checks failed");
             axsync::run_lock_stress_checks().expect("axsync lock stress checks failed");

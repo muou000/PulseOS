@@ -2,7 +2,7 @@
 
 pub use pulse_bpf_schema::*;
 
-use core::sync::atomic::{AtomicU32, Ordering};
+use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use crate::{TaskInner, WaitContext, WakeContext};
 
 pub const TRACE_QUEUE_CAPACITY: usize = 128;
@@ -369,5 +369,110 @@ const _: () = {
     assert!(core::mem::size_of::<TaskEnqueueContext>() <= MAX_CONTEXT_SIZE);
     assert!(core::mem::size_of::<TaskMetadataContext>() <= MAX_CONTEXT_SIZE);
     assert!(core::mem::size_of::<PhaseMarkerContext>() <= MAX_CONTEXT_SIZE);
+    assert!(core::mem::size_of::<PageFaultContext>() <= MAX_CONTEXT_SIZE);
 };
 
+
+
+/// System-wide resolver observations, not per-process or per-subscriber totals.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct PageFaultStats {
+    pub started: u64,
+    pub completed: u64,
+    pub clock_errors: u64,
+}
+static PAGE_FAULT_STARTED: AtomicU64 = AtomicU64::new(0);
+static PAGE_FAULT_COMPLETED: AtomicU64 = AtomicU64::new(0);
+static PAGE_FAULT_CLOCK_ERRORS: AtomicU64 = AtomicU64::new(0);
+
+pub fn page_fault_stats() -> PageFaultStats {
+    PageFaultStats {
+        started: PAGE_FAULT_STARTED.load(Ordering::Relaxed),
+        completed: PAGE_FAULT_COMPLETED.load(Ordering::Relaxed),
+        clock_errors: PAGE_FAULT_CLOCK_ERRORS.load(Ordering::Relaxed),
+    }
+}
+
+/// Entry facts retained as scalars across a sleepable resolver. This token is
+/// consumed on return; it owns no task, address-space reference or held guard.
+pub struct PageFaultObservation {
+    generation: u64,
+    start_ns: u64,
+    fault_address: u64,
+    access: u32,
+    origin: PageFaultOrigin,
+    task_id: u64,
+    pid: u32,
+    tid: u32,
+}
+
+/// Called immediately before the resolver. The unsubscribed path reads no
+/// clock and creates no observation, allocation or queue entry.
+#[inline]
+pub fn page_fault_begin(
+    fault_address: u64,
+    access: u32,
+    origin: PageFaultOrigin,
+) -> Option<PageFaultObservation> {
+    if !has_subscribers(TracepointId::PageFault) {
+        return None;
+    }
+    let _guard = kernel_guard::NoPreemptIrqSave::new();
+    let current = crate::current_may_uninit()?;
+    let (pid, tid) = current.bpf_identity();
+    let generation = observation_generation();
+    PAGE_FAULT_STARTED.fetch_add(1, Ordering::Relaxed);
+    Some(PageFaultObservation {
+        generation,
+        start_ns: axhal::time::monotonic_time_nanos(),
+        fault_address,
+        access,
+        origin,
+        task_id: current.id().as_u64(),
+        pid,
+        tid,
+    })
+}
+
+/// Called after resolver return and after its address-space/TLB/page-cache
+/// guards have been released. Preserves entry identity/epoch while recording
+/// the current completion CPU; this path only publishes a bounded byte copy.
+#[inline]
+pub fn page_fault_complete(observation: Option<PageFaultObservation>, outcome: PageFaultOutcome) {
+    let Some(observation) = observation else {
+        return;
+    };
+    let _guard = kernel_guard::NoPreemptIrqSave::new();
+    let end_ns = axhal::time::monotonic_time_nanos();
+    let cpu = axhal::percpu::this_cpu_id();
+    PAGE_FAULT_COMPLETED.fetch_add(1, Ordering::Relaxed);
+    let common = ContextCommon::new(
+        TracepointId::PageFault,
+        end_ns,
+        cpu as u32,
+        observation.pid,
+        observation.tid,
+        observation.task_id,
+    );
+    let Some(context) = PageFaultContext::from_completion(
+        common,
+        observation.fault_address,
+        observation.start_ns,
+        observation.access,
+        observation.origin,
+        outcome,
+    ) else {
+        PAGE_FAULT_CLOCK_ERRORS.fetch_add(1, Ordering::Relaxed);
+        return;
+    };
+    // Stopping a subscription does not change the returned-resolver count. If
+    // another subscription started meanwhile, entry generation prevents the
+    // old resolver from being attributed to that new activation.
+    if has_subscribers(TracepointId::PageFault) && cpu < MAX_CPUS {
+        let _ = CPU_QUEUES[cpu].enqueue_with_generation(
+            TracepointId::PageFault,
+            &context.to_bytes(),
+            observation.generation,
+        );
+    }
+}

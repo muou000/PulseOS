@@ -523,10 +523,11 @@ impl axfs::ProcfsProcessProvider for PulseProcessProvider {
             };
             let timer = crate::bpf::sampling::stats_snapshot();
             let trace = axtask::bpf_trace::total_drop_stats();
+            let fault = axtask::bpf_trace::page_fault_stats();
             let mut text = alloc::format!("PULSE_BPF_STATS version=1 pid={} available=1\n", process.pid());
-            writeln!(&mut text, "GLOBAL timer_enqueued={} timer_dequeued={} timer_full={} timer_busy={} trace_enqueued={} trace_full={} trace_recursive={}",
+            writeln!(&mut text, "GLOBAL timer_enqueued={} timer_dequeued={} timer_full={} timer_busy={} trace_enqueued={} trace_full={} trace_recursive={} fault_started={} fault_completed={} fault_clock_errors={}",
                 timer.enqueued, timer.dequeued, timer.full, timer.busy,
-                trace.total_enqueued, trace.dropped_full, trace.dropped_recursive).ok()?;
+                trace.total_enqueued, trace.dropped_full, trace.dropped_recursive, fault.started, fault.completed, fault.clock_errors).ok()?;
             let mut programs = BTreeMap::new();
             let mut events = 0usize;
             for (fd, entry) in entries {

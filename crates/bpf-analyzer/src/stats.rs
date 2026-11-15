@@ -1,5 +1,5 @@
 use bpf_capture::session::LayeredLossCounters;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use crate::event::{EventPayload, NormalizedEvent};
 
@@ -11,8 +11,13 @@ pub struct CpuStatistics {
     pub sample_count: u64,
     pub context_switches: u64,
     pub lost_records: u64,
-    pub busy_time_ns: u64,
-    pub idle_time_ns: u64,
+    /// Sum of observed, closed scheduler switch intervals on this CPU.
+    /// This includes time spent in interrupts while a task remains selected.
+    pub scheduled_time_ns: u64,
+    /// Unsupported without producer execution/residency evidence. Task IDs,
+    /// PID zero, task names, and even an idle-task flag do not prove residency.
+    pub busy_time_ns: Option<u64>,
+    pub idle_time_ns: Option<u64>,
 }
 
 /// Task-level execution, blocking, and wake statistics.
@@ -22,6 +27,7 @@ pub struct TaskStatistics {
     pub comm: Option<String>,
     pub pid: u32,
     pub tid: u32,
+    /// Compatibility name for observed closed scheduled intervals, not hardware CPU utilization.
     pub on_cpu_time_ns: u64,
     pub off_cpu_wait_ns: u64,
     pub block_count: u64,
@@ -29,7 +35,7 @@ pub struct TaskStatistics {
     pub sample_count: u64,
 }
 
-/// A contiguous interval where a task ran on a specific CPU.
+/// An observed interval between matching scheduler switch endpoints on one CPU.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct OnCpuInterval {
     pub cpu_id: u32,
@@ -78,6 +84,33 @@ impl SessionStatistics {
     pub fn compute(events: &[NormalizedEvent], loss_counters: &LayeredLossCounters) -> Self {
         let mut stats = Self::default();
 
+        // Timestamp sorting must not turn a source clock regression into a
+        // positive scheduled interval. As in SchedulerReport, only records in
+        // the scheduler semantic queue establish its per-CPU publication order;
+        // independently drained samples/faults/markers are not clock evidence.
+        let mut publication_order: Vec<_> = events.iter().collect();
+        publication_order.sort_by_key(|event| event.sequence_index);
+        let mut clocks = BTreeMap::new();
+        let mut invalid_clock_cpus = BTreeSet::new();
+        for event in publication_order {
+            if !matches!(
+                event.payload,
+                EventPayload::TaskMetadata { .. }
+                    | EventPayload::TaskBlock { .. }
+                    | EventPayload::TaskWake { .. }
+                    | EventPayload::SchedSwitch { .. }
+                    | EventPayload::TaskExit { .. }
+                    | EventPayload::TaskEnqueue { .. }
+            ) {
+                continue;
+            }
+            if clocks.insert(event.cpu_id, event.timestamp_ns)
+                .is_some_and(|previous| previous > event.timestamp_ns)
+            {
+                invalid_clock_cpus.insert(event.cpu_id);
+            }
+        }
+
         // 1. CPU running task state: cpu_id -> (task_id, switch_in_ts)
         let mut running_on_cpu: HashMap<u32, (u64, u64)> = HashMap::new();
 
@@ -123,7 +156,7 @@ impl SessionStatistics {
 
                     if let Some(&(curr_task, start_ts)) = running_on_cpu.get(&ev.cpu_id) {
                         // Validate that the task switched out matches recorded running task
-                        if curr_task == prev_task_id {
+                        if curr_task == prev_task_id && !invalid_clock_cpus.contains(&ev.cpu_id) {
                             let duration = ev.timestamp_ns.saturating_sub(start_ts);
                             if duration > 0 {
                                 let prev_comm = stats.task_stats.get(&curr_task).and_then(|t| t.comm.clone());
@@ -138,11 +171,7 @@ impl SessionStatistics {
                                 if let Some(t_entry) = stats.task_stats.get_mut(&curr_task) {
                                     t_entry.on_cpu_time_ns = t_entry.on_cpu_time_ns.saturating_add(duration);
                                 }
-                                if curr_task == 0 {
-                                    cpu_stat.idle_time_ns = cpu_stat.idle_time_ns.saturating_add(duration);
-                                } else {
-                                    cpu_stat.busy_time_ns = cpu_stat.busy_time_ns.saturating_add(duration);
-                                }
+                                cpu_stat.scheduled_time_ns = cpu_stat.scheduled_time_ns.saturating_add(duration);
                             }
                         }
                     }
@@ -215,34 +244,8 @@ impl SessionStatistics {
 
         stats.unpaired_blocks = active_blocks.len() as u64;
 
-        // Close trailing on-CPU interval up to the last event timestamp
-        let last_ts = events.last().map(|e| e.timestamp_ns).unwrap_or(0);
-        for (cpu_id, (curr_task, start_ts)) in running_on_cpu {
-            let duration = last_ts.saturating_sub(start_ts);
-            if duration > 0 {
-                let curr_comm = stats.task_stats.get(&curr_task).and_then(|t| t.comm.clone());
-                stats.on_cpu_intervals.push(OnCpuInterval {
-                    cpu_id,
-                    task_id: curr_task,
-                    comm: curr_comm,
-                    start_ns: start_ts,
-                    end_ns: last_ts,
-                    duration_ns: duration,
-                });
-                if let Some(t_entry) = stats.task_stats.get_mut(&curr_task) {
-                    t_entry.on_cpu_time_ns = t_entry.on_cpu_time_ns.saturating_add(duration);
-                }
-                let cpu_stat = stats.cpu_stats.entry(cpu_id).or_insert_with(|| CpuStatistics {
-                    cpu_id,
-                    ..Default::default()
-                });
-                if curr_task == 0 {
-                    cpu_stat.idle_time_ns = cpu_stat.idle_time_ns.saturating_add(duration);
-                } else {
-                    cpu_stat.busy_time_ns = cpu_stat.busy_time_ns.saturating_add(duration);
-                }
-            }
-        }
+        // A final non-switch event or capture horizon is not an observed
+        // switch-out. Do not fabricate closed scheduled time for trailing tasks.
 
         // Populate per-CPU lost records from session loss counters
         for &(cpu, count) in &loss_counters.per_cpu_lost {

@@ -10,8 +10,8 @@ python3 tests/bpf_smoke/run.py guest --arch loongarch64 --mode trace
 python3 tests/bpf_smoke/run.py gate
 ```
 
-`gate` and `smoke` run task-clock samples and sched-switch events on both
-architectures by default. `--arch` and `--mode` narrow the requested runs. Kernel,
+`gate` and `smoke` run task-clock, sched-switch, mixed scheduler, and fault
+completion captures on both architectures by default. `--arch` and `--mode` narrow the requested runs. Kernel,
 ELF and image overrides require `--arch`; use `--kernel`, `--kernel-elf`, and
 `--image` (`--primary` is retained as an alias). `--kernel-provenance` forwards an
 explicit build manifest. Fault-injection runs accept `--fault` with `none`,

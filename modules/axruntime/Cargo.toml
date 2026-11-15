@@ -16,6 +16,8 @@ smp = ["axhal/smp", "axtask?/smp"]
 irq = ["axhal/irq", "axtask?/irq", "percpu"]
 tls = ["axhal/tls", "axtask?/tls"]
 alloc = ["axalloc"]
+# Opt-in boot validation while initialized secondary CPUs are still parked.
+pcp-boot-checks = ["alloc", "dep:kernel_guard"]
 paging = ["axhal/paging", "axmm"]
 ipi = ["dep:axipi", "axmm?/ipi"]
 
@@ -39,6 +41,7 @@ axtask = { workspace = true, optional = true }
 axipi = { workspace = true, optional = true }
 axplat.workspace = true
 
+kernel_guard = { workspace = true, optional = true }
 crate_interface.workspace = true
 percpu = { workspace = true, optional = true }
 ctor_bare.workspace = true

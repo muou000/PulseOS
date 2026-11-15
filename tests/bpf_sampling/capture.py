@@ -50,8 +50,20 @@ def convert(run: Path) -> dict:
     if inputs.get('fault') == 'ring-overflow' and (not any(
             issue['scope'] == 'transport' and issue['delta'] > 0 for issue in archive['observed_issues']) or result['is_complete']):
         raise ValueError('ring overflow injection did not produce an incomplete capture with real transport loss')
+    semantic = None
+    if inputs['mode'] in ('sched','fault'):
+        name = 'scheduler' if inputs['mode']=='sched' else 'faults'
+        flag = '--sched-report' if inputs['mode']=='sched' else '--fault-report'
+        raw_report = command([analyzer,str(path),flag,'--json'])
+        semantic_report = json.loads(raw_report)[name]
+        valid = semantic_report['summary']['count'] if name=='scheduler' else semantic_report['valid_events']
+        if valid == 0:
+            raise ValueError(f'capture has no valid {name} instances')
+        (run/f'{name}-report.json').write_text(raw_report+'\n')
+        (run/f'{name}-report.txt').write_text(command([analyzer,str(path),flag]))
+        semantic = {'report':name, 'valid_instances':valid}
     (run/'analyzer.json').write_text(summary + '\n')
     (run/'analyzer-loss.txt').write_text(report)
     (run/'analyzer-table.txt').write_text(table)
     return {'path': str(path), 'sha256': digest(path), 'records': result['records_count'],
-            'status': result['status'], 'attribution_claim_allowed': result['attribution_claim_allowed']}
+            'status': result['status'], 'attribution_claim_allowed': result['attribution_claim_allowed'], 'semantic_report': semantic}

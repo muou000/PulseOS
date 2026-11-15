@@ -1,0 +1,126 @@
+[
+  {
+    "arch": "riscv64",
+    "mode": "task",
+    "run": "riscv64-task-20261115-032249-ewxy2kjb",
+    "records": 64,
+    "capture": {
+      "path": "/home/muou/PulseOS/tests/bpf_sampling/runs/riscv64-task-20261115-032249-ewxy2kjb/capture.pbcapture",
+      "sha256": "51e60b07d454d1f1a43198b2041d75cba452abaff48835b1aac9a4c7b8fc5e28",
+      "records": 64,
+      "status": "IncompleteError",
+      "attribution_claim_allowed": false,
+      "semantic_report": null
+    }
+  },
+  {
+    "arch": "riscv64",
+    "mode": "trace",
+    "run": "riscv64-trace-20261115-032257-i595p9dv",
+    "records": 568,
+    "capture": {
+      "path": "/home/muou/PulseOS/tests/bpf_sampling/runs/riscv64-trace-20261115-032257-i595p9dv/capture.pbcapture",
+      "sha256": "9752f6a27ee161ebe5e7f95b70ab09dfd13c20b29315455033f84052868b82a5",
+      "records": 568,
+      "status": "IncompleteError",
+      "attribution_claim_allowed": false,
+      "semantic_report": null
+    }
+  },
+  {
+    "arch": "riscv64",
+    "mode": "sched",
+    "run": "riscv64-sched-20261115-032300-p2ixq3hb",
+    "records": 1436,
+    "capture": {
+      "path": "/home/muou/PulseOS/tests/bpf_sampling/runs/riscv64-sched-20261115-032300-p2ixq3hb/capture.pbcapture",
+      "sha256": "846daf6c695446221cd0770cb77e95ddb1cf3ad87394be51711f055067449b6c",
+      "records": 1436,
+      "status": "IncompleteError",
+      "attribution_claim_allowed": false,
+      "semantic_report": {
+        "report": "scheduler",
+        "valid_instances": 266
+      }
+    }
+  },
+  {
+    "arch": "riscv64",
+    "mode": "fault",
+    "run": "riscv64-fault-20261115-032305-4zypjw9d",
+    "records": 258,
+    "capture": {
+      "path": "/home/muou/PulseOS/tests/bpf_sampling/runs/riscv64-fault-20261115-032305-4zypjw9d/capture.pbcapture",
+      "sha256": "023e981f723a7a28b9332ea35092f67294563118cd0ffdd26ba7c32faf461390",
+      "records": 258,
+      "status": "IncompleteError",
+      "attribution_claim_allowed": false,
+      "semantic_report": {
+        "report": "faults",
+        "valid_instances": 258
+      }
+    }
+  },
+  {
+    "arch": "loongarch64",
+    "mode": "task",
+    "run": "loongarch64-task-20261115-032309-y6blsbas",
+    "records": 37,
+    "capture": {
+      "path": "/home/muou/PulseOS/tests/bpf_sampling/runs/loongarch64-task-20261115-032309-y6blsbas/capture.pbcapture",
+      "sha256": "1aa352f5cad71f1f43e9a26b0654029829e63eb1fc0b04f0309c0493056e761b",
+      "records": 37,
+      "status": "IncompleteError",
+      "attribution_claim_allowed": false,
+      "semantic_report": null
+    }
+  },
+  {
+    "arch": "loongarch64",
+    "mode": "trace",
+    "run": "loongarch64-trace-20261115-032317-xeaoa4mf",
+    "records": 576,
+    "capture": {
+      "path": "/home/muou/PulseOS/tests/bpf_sampling/runs/loongarch64-trace-20261115-032317-xeaoa4mf/capture.pbcapture",
+      "sha256": "203785ab552fd4e7462870e9ae60baf4287bfbc366d9e238795a69a0b3d4c690",
+      "records": 576,
+      "status": "IncompleteError",
+      "attribution_claim_allowed": false,
+      "semantic_report": null
+    }
+  },
+  {
+    "arch": "loongarch64",
+    "mode": "sched",
+    "run": "loongarch64-sched-20261115-032322-ujid_c4x",
+    "records": 1678,
+    "capture": {
+      "path": "/home/muou/PulseOS/tests/bpf_sampling/runs/loongarch64-sched-20261115-032322-ujid_c4x/capture.pbcapture",
+      "sha256": "223be4e2fda7c84fe535ac5829553dee3ac002bd4eee7c82180c2e5beaf152ee",
+      "records": 1678,
+      "status": "IncompleteError",
+      "attribution_claim_allowed": false,
+      "semantic_report": {
+        "report": "scheduler",
+        "valid_instances": 269
+      }
+    }
+  },
+  {
+    "arch": "loongarch64",
+    "mode": "fault",
+    "run": "loongarch64-fault-20261115-032328-pniuo3_9",
+    "records": 258,
+    "capture": {
+      "path": "/home/muou/PulseOS/tests/bpf_sampling/runs/loongarch64-fault-20261115-032328-pniuo3_9/capture.pbcapture",
+      "sha256": "9aa419f034ab303e9f30906160bcc615f2acdb6af1a9f8923f18e04a78e99a97",
+      "records": 258,
+      "status": "IncompleteError",
+      "attribution_claim_allowed": false,
+      "semantic_report": {
+        "report": "faults",
+        "valid_instances": 258
+      }
+    }
+  }
+]

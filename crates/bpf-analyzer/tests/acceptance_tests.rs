@@ -48,14 +48,14 @@ fn acceptance_test_deterministic_valid_fixtures_dual_arch() {
         let on_cpu1 = analyzer1.render_on_cpu_folded();
         let on_cpu2 = analyzer2.render_on_cpu_folded();
         assert_eq!(on_cpu1, on_cpu2, "on-cpu folded output must be deterministic");
-        assert!(on_cpu1.is_complete);
-        assert!(!on_cpu1.text.contains("[INCOMPLETE_CAPTURE]"));
+        assert!(!on_cpu1.is_complete, "the fixture has no CPU sample or completed blocked interval");
+        assert!(on_cpu1.text.is_empty(), "absence must not create a folded weight");
 
         let off_cpu1 = analyzer1.render_off_cpu_folded();
         let off_cpu2 = analyzer2.render_off_cpu_folded();
         assert_eq!(off_cpu1, off_cpu2, "off-cpu folded output must be deterministic");
-        assert!(off_cpu1.is_complete);
-        assert!(!off_cpu1.text.contains("[INCOMPLETE_CAPTURE]"));
+        assert!(!off_cpu1.is_complete, "the fixture has no CPU sample or completed blocked interval");
+        assert!(off_cpu1.text.is_empty(), "absence must not create a folded weight");
     }
 }
 
@@ -121,11 +121,13 @@ fn acceptance_test_explicit_reporting_on_corrupted_and_incomplete_captures() {
 
         let on_cpu = analyzer.render_on_cpu_folded();
         assert!(!on_cpu.is_complete);
-        assert!(on_cpu.text.contains("[INCOMPLETE_CAPTURE]"));
+        assert!(on_cpu.text.is_empty());
+        assert_eq!(on_cpu.status, SessionStatusCode::IncompleteLoss);
 
         let off_cpu = analyzer.render_off_cpu_folded();
         assert!(!off_cpu.is_complete);
-        assert!(off_cpu.text.contains("[INCOMPLETE_CAPTURE]"));
+        assert!(off_cpu.text.is_empty());
+        assert_eq!(off_cpu.status, SessionStatusCode::IncompleteLoss);
     }
 }
 
@@ -149,6 +151,6 @@ fn acceptance_test_no_qperf_dependency() {
     assert!(!table.is_empty());
     assert!(!json.is_empty());
     assert!(!loss.is_empty());
-    assert!(!on_cpu.text.is_empty());
-    assert!(!off_cpu.text.is_empty());
+    assert!(on_cpu.text.is_empty(), "no synthetic placeholder samples");
+    assert!(off_cpu.text.is_empty(), "no synthetic placeholder samples");
 }

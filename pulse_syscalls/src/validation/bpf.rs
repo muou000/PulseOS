@@ -10,8 +10,8 @@ mod tests {
     #[test]
     fn tracepoint_registry_enumerates_supported_ids() {
         let tps = all_tracepoints();
-        assert_eq!(tps.len(), 7);
-        for id in [1, 2, 3, 4, 5, 6, 7] {
+        assert_eq!(tps.len(), 8);
+        for id in [1, 2, 3, 4, 5, 6, 7, 8] {
             assert!(is_supported_id(id));
             let meta = lookup_by_id(id).expect("supported id must resolve");
             assert_eq!(meta.version, 1);
@@ -24,7 +24,7 @@ mod tests {
     #[test]
     fn tracepoint_registry_rejects_unknown_and_deferred_ids() {
         assert_eq!(lookup_by_id(0), Err(TracepointError::UnknownId(0)));
-        assert_eq!(lookup_by_id(8), Err(TracepointError::UnknownId(8)));
+        assert_eq!(lookup_by_id(9), Err(TracepointError::UnknownId(9)));
         assert_eq!(lookup_by_id(999), Err(TracepointError::UnknownId(999)));
 
         for deferred in 100..=105 {

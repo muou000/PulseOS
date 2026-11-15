@@ -19,26 +19,40 @@ const MAPPING_SIZE: usize = PAGE + DATA_SIZE;
 const PERIOD_NS: u64 = 10_000_000;
 #[cfg(not(tracepoint_test))]
 const CONTEXT_SIZE: usize = 64;
-#[cfg(all(tracepoint_test, not(trace_wake)))]
+#[cfg(all(tracepoint_test, not(any(trace_wake, sched_trace_test, trace_fault))))]
 const CONTEXT_SIZE: usize = 72;
-#[cfg(trace_wake)]
+#[cfg(any(trace_wake, sched_trace_test, trace_fault))]
 const CONTEXT_SIZE: usize = 80;
-#[cfg(all(tracepoint_test, not(any(trace_block, trace_wake))))]
+#[cfg(all(tracepoint_test, not(any(trace_block, trace_wake, sched_trace_test, trace_fault))))]
 const MODE: &str = "trace";
+#[cfg(trace_fault)]
+const MODE: &str = "fault";
+#[cfg(sched_trace_test)]
+const MODE: &str = "sched";
 #[cfg(trace_block)]
 const MODE: &str = "block";
 #[cfg(trace_wake)]
 const MODE: &str = "wake";
 #[cfg(tracepoint_test)]
-const TRACE_EVENT_ID: u32 = if cfg!(trace_block) { 3 } else if cfg!(trace_wake) { 4 } else { 2 };
+const TRACE_EVENT_ID: u32 = if cfg!(trace_fault) { 8 } else if cfg!(trace_block) { 3 } else if cfg!(trace_wake) { 4 } else { 2 };
 #[cfg(tracepoint_test)]
-const TRACE_MARKER: &str = if cfg!(trace_block) { "BLOCK" } else if cfg!(trace_wake) { "WAKE" } else { "TRACE" };
+const TRACE_MARKER: &str = if cfg!(trace_fault) { "FAULT" } else if cfg!(sched_trace_test) { "SCHED" } else if cfg!(trace_block) { "BLOCK" } else if cfg!(trace_wake) { "WAKE" } else { "TRACE" };
 #[cfg(tracepoint_test)]
-const TRACE_COUNT: &str = if cfg!(trace_block) { "blocks" } else if cfg!(trace_wake) { "wakes" } else { "sched" };
+const TRACE_COUNT: &str = if cfg!(trace_fault) { "faults" } else if cfg!(sched_trace_test) { "events" } else if cfg!(trace_block) { "blocks" } else if cfg!(trace_wake) { "wakes" } else { "sched" };
 #[cfg(cpu_clock_test)]
 const MODE: &str = "cpu";
 #[cfg(not(any(cpu_clock_test, tracepoint_test)))]
 const MODE: &str = "task";
+const PROGRAM_COUNT: usize = if cfg!(sched_trace_test) { 6 } else { 1 };
+const SOURCE_COUNT: usize = if cfg!(tracepoint_test) || cfg!(cpu_clock_test) { CPUS * PROGRAM_COUNT } else { 1 };
+#[cfg(tracepoint_test)]
+fn context_bytes(event: u32) -> usize {
+    match event { 1|2|3=>72, 4|8=>80, 5=>56, 6=>64, _=>0 }
+}
+#[cfg(tracepoint_test)]
+fn tracepoint_for_program(index: usize) -> u32 {
+    if cfg!(sched_trace_test) { index as u32 + 1 } else { TRACE_EVENT_ID }
+}
 const ENABLE: usize = 0x2400;
 const DISABLE: usize = 0x2401;
 
@@ -110,6 +124,8 @@ macro_rules! check {
 }
 #[cfg(capture_export)]
 mod archive;
+#[cfg(trace_fault)]
+mod fault_workload;
 
 #[panic_handler]
 fn panic(info: &PanicInfo) -> ! { say!("SAMPLING FAIL panic {}", info); exit(1) }
@@ -232,7 +248,7 @@ impl Program {
         self.emit(0, 0, 0, 0, 0);
     }
 }
-fn load_program(scratch: usize, outputs: usize) -> usize {
+fn load_program(scratch: usize, outputs: usize, context_size: usize) -> usize {
     let mut program = Program { insns: [Insn::new(0, 0, 0, 0, 0); 64], len: 0 };
     program.emit(0xbf, 6, 1, 0, 0); // save ctx
     program.emit(0x61, 2, 6, if cfg!(tracepoint_test) { 16 } else { 24 }, 0); // key = ctx.cpu
@@ -244,7 +260,7 @@ fn load_program(scratch: usize, outputs: usize) -> usize {
     let null_jump = program.len;
     program.emit(0x15, 0, 0, 0, 0); // null -> return 0
     program.emit(0xbf, 7, 0, 0, 0);
-    for offset in (0..CONTEXT_SIZE).step_by(8) {
+    for offset in (0..context_size).step_by(8) {
         program.emit(0x79, 8, 6, offset as i16, 0);
         program.emit(0x7b, 7, 8, offset as i16, 0);
     }
@@ -254,7 +270,7 @@ fn load_program(scratch: usize, outputs: usize) -> usize {
     program.emit(0x18, 3, 0, 0, -1);
     program.emit(0, 0, 0, 0, 0);
     program.emit(0xbf, 4, 7, 0, 0);
-    program.emit(0xb7, 5, 0, 0, CONTEXT_SIZE as i32);
+    program.emit(0xb7, 5, 0, 0, context_size as i32);
     program.emit(0x85, 0, 0, 0, 25); // perf_event_output
     let return_index = program.len;
     program.emit(0xb7, 0, 0, 0, 0);
@@ -331,11 +347,12 @@ impl Ring {
             check!(size >= 8 && size % 8 == 0 && size <= DATA_SIZE && size as u64 <= available, "bad perf record length");
             match u32_at(&header, 0) {
                 9 => {
-                    check!(size == (12 + CONTEXT_SIZE + 7) & !7, "invalid perf sample boundary");
                     let mut raw = [0u8; 4 + CONTEXT_SIZE];
-                    self.copy(self.tail + 8, &mut raw);
-                    check!(u32_at(&raw, 0) == CONTEXT_SIZE as u32, "unexpected RAW context size");
-                    stats.sample(&raw[4..], self.cpu);
+                    self.copy(self.tail + 8, &mut raw[..4]);
+                    let length = u32_at(&raw, 0) as usize;
+                    check!((40..=CONTEXT_SIZE).contains(&length) && size == ((12 + length + 7) & !7), "invalid perf sample boundary");
+                    self.copy(self.tail + 12, &mut raw[4..4+length]);
+                    stats.sample(&raw[4..4+length], self.cpu);
                 }
                 2 => {
                     check!(size == 24, "invalid lost record boundary");
@@ -377,6 +394,16 @@ struct Stats {
     subject_overflow: bool,
     #[cfg(tracepoint_test)]
     target_contexts: u64,
+    #[cfg(tracepoint_test)]
+    event_counts: [u64; 9],
+    #[cfg(trace_fault)]
+    fault_targets: [(usize,usize);128],
+    #[cfg(trace_fault)]
+    fault_target_count: usize,
+    #[cfg(trace_fault)]
+    fault_read_hits: u64,
+    #[cfg(trace_fault)]
+    fault_write_hits: u64,
 }
 impl Stats {
     #[cfg(tracepoint_test)]
@@ -391,41 +418,54 @@ impl Stats {
     }
     #[cfg(tracepoint_test)]
     fn sample(&mut self, bytes: &[u8], ring_cpu: usize) {
-        check!(u32_at(bytes, 0) == TRACE_EVENT_ID && u32_at(bytes, 4) == 1, "wrong trace event/version");
+        let event = u32_at(bytes, 0);
+        check!((if cfg!(sched_trace_test) {(1..=6).contains(&event)} else {event == TRACE_EVENT_ID}) && u32_at(bytes, 4) == 1, "wrong trace event/version");
+        check!(bytes.len() == context_bytes(event), "wrong trace context length");
         let timestamp = u64_at(bytes, 8);
         let cpu = u32_at(bytes, 16) as usize;
         check!(cpu == ring_cpu && cpu < CPUS, "trace CPU disagrees with output ring");
         check!(timestamp != 0 && timestamp >= self.last_time[cpu], "trace timestamp invalid");
         check!(u32_at(bytes, 28) == 0, "trace common reserved field nonzero");
-        #[cfg(trace_block)]
-        {
-            let task = u64_at(bytes, 32);
-            check!(task != 0 && u64_at(bytes, 40) != 0, "block lacks task identity or sequence");
-            check!(u32_at(bytes, 48) != 0, "block lacks wait reason");
-            check!(u32_at(bytes, 52) == 0, "block reserved field nonzero");
-            self.add_subject(task);
+        match event {
+            1 => { let task=u64_at(bytes,40); check!(task!=0,"metadata lacks target task"); self.add_subject(task); }
+            2 => {
+                let previous=u64_at(bytes,40); let next=u64_at(bytes,48);
+                check!(previous!=0 && next!=0 && previous!=next,"sched_switch lacks distinct task subjects");
+                check!(u64_at(bytes,32)==previous,"sched_switch origin differs from previous task");
+                check!(u32_at(bytes,68)==0,"sched_switch reserved field nonzero");
+                self.add_subject(previous);self.add_subject(next);
+            }
+            3 => {
+                let task=u64_at(bytes,32);
+                check!(task!=0 && u64_at(bytes,40)!=0,"block lacks task identity or sequence");
+                check!(u32_at(bytes,48)!=0 && u32_at(bytes,52)==0,"block reason/reserved invalid");
+                self.add_subject(task);
+            }
+            4 => {
+                let target=u64_at(bytes,40);let waker=u64_at(bytes,56);
+                check!(target!=0 && u64_at(bytes,48)!=0,"wake lacks target or sequence");
+                check!(u64_at(bytes,32)==waker,"wake origin differs from recorded waker");
+                check!(u32_at(bytes,64)<=7 && u32_at(bytes,68)==0,"wake source/reserved invalid");
+                self.add_subject(target);if waker!=0 {self.add_subject(waker);}
+            }
+            5|6 => {let task=u64_at(bytes,40);check!(task!=0,"lifecycle event lacks task");self.add_subject(task);}
+            8 => {
+                let start=u64_at(bytes,48);let elapsed=u64_at(bytes,56);
+                let access=u32_at(bytes,64);let origin=u32_at(bytes,68);let outcome=u32_at(bytes,72);
+                check!(timestamp.checked_sub(start)==Some(elapsed),"fault clock/duration mismatch");
+                check!(access & !7==0 && (origin==1 || origin==2),"fault access/origin invalid");
+                check!((1..=4).contains(&outcome) && u32_at(bytes,76)==0,"fault outcome/classification invalid");
+                let task=u64_at(bytes,32);check!(task!=0,"fault lacks originating task");self.add_subject(task);
+                #[cfg(trace_fault)]
+                if origin==2 && u32_at(bytes,20)==self.pid && u32_at(bytes,24)==self.tid {
+                    let addr=u64_at(bytes,40) as usize;
+                    if self.fault_targets[..self.fault_target_count].iter().any(|pair|pair.0==addr) && access&1!=0 {self.fault_read_hits+=1;check!(outcome==1,"fresh read resolver failed");}
+                    if self.fault_targets[..self.fault_target_count].iter().any(|pair|pair.1==addr) && access&2!=0 {self.fault_write_hits+=1;check!(outcome==1,"fresh write resolver failed");}
+                }
+            }
+            _ => check!(false,"unsupported tracepoint"),
         }
-        #[cfg(trace_wake)]
-        {
-            let target = u64_at(bytes, 40);
-            let waker = u64_at(bytes, 56);
-            check!(target != 0 && u64_at(bytes, 48) != 0, "wake lacks target or block sequence");
-            check!(u64_at(bytes, 32) == waker, "wake origin differs from recorded waker");
-            check!(u32_at(bytes, 64) <= 7, "unknown wake source ABI value");
-            check!(u32_at(bytes, 68) == 0, "wake reserved field nonzero");
-            self.add_subject(target);
-            if waker != 0 { self.add_subject(waker); }
-        }
-        #[cfg(not(any(trace_block, trace_wake)))]
-        {
-            let previous = u64_at(bytes, 40);
-            let next = u64_at(bytes, 48);
-            check!(previous != 0 && next != 0 && previous != next, "sched_switch lacks distinct task subjects");
-            check!(u64_at(bytes, 32) == previous, "sched_switch origin differs from previous task");
-            check!(u32_at(bytes, 68) == 0, "sched_switch reserved field nonzero");
-            self.add_subject(previous);
-            self.add_subject(next);
-        }
+        self.event_counts[event as usize] += 1;
         self.last_time[cpu] = timestamp;
         self.cpu_mask |= 1 << cpu;
         self.samples += 1;
@@ -435,6 +475,7 @@ impl Stats {
     }
     #[cfg(not(tracepoint_test))]
     fn sample(&mut self, bytes: &[u8], ring_cpu: usize) {
+        check!(bytes.len() == 64, "wrong software context length");
         let timestamp = u64_at(bytes, 16);
         let cpu = u32_at(bytes, 24) as usize;
         let ip = u64_at(bytes, 48);
@@ -467,11 +508,13 @@ fn drain_all(rings: &mut [Ring; CPUS], stats: &mut Stats) {
 fn workload(loop_b: bool, duration_ms: u64, rings: &mut [Ring; CPUS], stats: &mut Stats) {
     let deadline = monotonic_ns() + duration_ms * 1_000_000;
     while monotonic_ns() < deadline {
-        #[cfg(tracepoint_test)]
+        #[cfg(all(tracepoint_test, not(trace_fault)))]
         {
             check!(syscall(124, 0, 0, 0, 0, 0, 0) == 0, "sched_yield");
             sleep_ms(if loop_b { 2 } else { 1 });
         }
+        #[cfg(trace_fault)]
+        { let _ = fault_workload::iteration(); }
         #[cfg(not(tracepoint_test))]
         // SAFETY: both linked assembly functions follow the target C ABI, touch
         // only caller-saved argument register a0, and terminate for n>0.
@@ -486,10 +529,18 @@ fn measure_archive_phase(phase: &str, mut rings: Option<&mut [Ring; CPUS]>, stat
     let start = monotonic_ns();
     let mut iterations = 0u64;
     for _ in 0..128 {
-        #[cfg(tracepoint_test)]
+        #[cfg(all(tracepoint_test, not(trace_fault)))]
         {
             check!(syscall(124, 0, 0, 0, 0, 0, 0) == 0, "phase sched_yield");
             sleep_ms(1);
+        }
+        #[cfg(trace_fault)]
+        {
+            let targets=fault_workload::iteration();
+            if phase=="attached_capture" {
+                check!(stats.fault_target_count<stats.fault_targets.len(),"fault target bound");
+                stats.fault_targets[stats.fault_target_count]=targets;stats.fault_target_count+=1;
+            }
         }
         #[cfg(not(tracepoint_test))]
         // SAFETY: linked assembly loops preserve the C ABI and access no memory.
@@ -574,6 +625,16 @@ extern "C" fn guest_main() -> ! {
         subject_overflow: false,
         #[cfg(tracepoint_test)]
         target_contexts: 0,
+        #[cfg(tracepoint_test)]
+        event_counts: [0;9],
+        #[cfg(trace_fault)]
+        fault_targets: [(0,0);128],
+        #[cfg(trace_fault)]
+        fault_target_count: 0,
+        #[cfg(trace_fault)]
+        fault_read_hits: 0,
+        #[cfg(trace_fault)]
+        fault_write_hits: 0,
     };
     say!("SAMPLING RANGES a={:#x}..{:#x} b={:#x}..{:#x}", stats.a_start, stats.a_end, stats.b_start, stats.b_end);
     check!(stats.a_start < stats.a_end && stats.a_end <= stats.b_start && stats.b_start < stats.b_end, "bad assembly symbol ranges");
@@ -590,21 +651,30 @@ extern "C" fn guest_main() -> ! {
         ioctl(sink, ENABLE);
         ring
     });
-    let program = load_program(scratch, outputs);
-    #[cfg(tracepoint_test)]
-    let events: [usize; CPUS] = core::array::from_fn(|cpu| perf_open(TRACE_EVENT_ID as u64, -1, cpu as isize, 0, true));
-    #[cfg(cpu_clock_test)]
-    let events: [usize; CPUS] = core::array::from_fn(|cpu| perf_open(0, -1, cpu as isize, PERIOD_NS, true));
-    #[cfg(not(any(cpu_clock_test, tracepoint_test)))]
-    let events = [perf_open(1, tid as isize, -1, PERIOD_NS, true)];
+    let programs: [usize; PROGRAM_COUNT] = core::array::from_fn(|index| {
+        #[cfg(tracepoint_test)]
+        let size = context_bytes(tracepoint_for_program(index));
+        #[cfg(not(tracepoint_test))]
+        let size = { let _ = index; CONTEXT_SIZE };
+        load_program(scratch, outputs, size)
+    });
+    let program = programs[0];
+    let events: [usize; SOURCE_COUNT] = core::array::from_fn(|index| {
+        #[cfg(tracepoint_test)]
+        { perf_open(tracepoint_for_program(index / CPUS) as u64, -1, (index % CPUS) as isize, 0, true) }
+        #[cfg(cpu_clock_test)]
+        { perf_open(0, -1, index as isize, PERIOD_NS, true) }
+        #[cfg(not(any(cpu_clock_test,tracepoint_test)))]
+        { let _ = index; perf_open(1, tid as isize, -1, PERIOD_NS, true) }
+    });
     reject_invalid_sinks(outputs, events[0], &sinks);
     #[cfg(capture_export)]
     measure_archive_phase("loaded_detached", Some(&mut rings), &mut stats, CPUS * MAPPING_SIZE);
-    let links = events.map(|event| attach(program, event));
+    let links: [usize; SOURCE_COUNT] = core::array::from_fn(|index| attach(programs[index / CPUS], events[index]));
     #[cfg(capture_export)]
-    let mut enable_times = [(0u64, 0u64); CPUS];
+    let mut enable_times = [(0u64, 0u64); SOURCE_COUNT];
     #[cfg(capture_export)]
-    let mut disable_times = [(0u64, 0u64); CPUS];
+    let mut disable_times = [(0u64, 0u64); SOURCE_COUNT];
     #[cfg(capture_export)]
     {
         archive::stats("before", &events);
@@ -648,10 +718,23 @@ extern "C" fn guest_main() -> ! {
         archive::stats("after", &events);
         say!("ARCHIVE CONFIG program_id={} output_map_id={} scratch_map_id={} buffer_pages={} mode={} ring_diagnostics=1",
             archive::object_id(program), archive::object_id(outputs), archive::object_id(scratch), DATA_SIZE/PAGE, MODE);
+        #[cfg(sched_trace_test)]
+        for (index, program) in programs.iter().enumerate() {
+            let tracepoint=tracepoint_for_program(index);
+            say!("ARCHIVE PROGRAM tracepoint={} program_id={} context_bytes={}", tracepoint, archive::object_id(*program), context_bytes(tracepoint));
+        }
         for (index, event) in events.iter().enumerate() {
             say!("ARCHIVE SOURCE fd={} link_id={} enable_before={} enable_after={} disable_before={} disable_after={}",
                 event, archive::object_id(links[index]), enable_times[index].0, enable_times[index].1,
                 disable_times[index].0, disable_times[index].1);
+        }
+        #[cfg(trace_fault)]
+        {
+            say!("ARCHIVE FAULT_WORKLOAD pid={} tid={} iterations={} read_hits={} write_hits={}",pid,tid,stats.fault_target_count,stats.fault_read_hits,stats.fault_write_hits);
+            for (index,(read,write)) in stats.fault_targets[..stats.fault_target_count].iter().enumerate() {
+                say!("ARCHIVE FAULT_TARGET index={} read={} write={}",index,read,write);
+            }
+            check!(stats.fault_read_hits>0 && stats.fault_write_hits>0,"fresh pages produced no read/write fault evidence");
         }
         stats.archive.take().unwrap().emit(capture_stop_ns);
     }
@@ -659,6 +742,11 @@ extern "C" fn guest_main() -> ! {
     {
         say!("SAMPLING {}_OBSERVED {}={} subjects={} subjects_capped={} target_contexts={} lost={} cpu_mask={:#x}",
              TRACE_MARKER, TRACE_COUNT, stats.samples, stats.subject_count, u8::from(stats.subject_overflow), stats.target_contexts, stats.lost, stats.cpu_mask);
+        #[cfg(sched_trace_test)]
+        {
+            say!("SAMPLING SCHED_EVENTS metadata={} switches={} blocks={} wakes={} exits={} enqueues={}",stats.event_counts[1],stats.event_counts[2],stats.event_counts[3],stats.event_counts[4],stats.event_counts[5],stats.event_counts[6]);
+            check!(stats.event_counts[2]>1 && stats.event_counts[3]>1 && stats.event_counts[4]>1 && stats.event_counts[6]>0,"scheduler session lacks required event streams");
+        }
         let min_subjects = if TRACE_EVENT_ID == 2 { 2 } else { 1 };
         check!(stats.samples >= 2 && stats.subject_count >= min_subjects, "no real trace events with valid subjects");
     }
@@ -685,7 +773,7 @@ extern "C" fn guest_main() -> ! {
     for event in events { close(event); }
     #[cfg(not(any(cpu_clock_test, tracepoint_test)))]
     check_fd_lifecycle(program, &mut rings, &stats);
-    close(program); close(scratch); close(outputs);
+    for program in programs { close(program); } close(scratch); close(outputs);
     for (ring, sink) in rings.into_iter().zip(sinks) {
         ioctl(sink, DISABLE); ring.unmap(); close(sink);
     }

@@ -1,0 +1,37 @@
+[
+  {
+    "slug": "stack",
+    "number": 192,
+    "id": 6393665851,
+    "url": "https://github.com/muou000/PulseOS/issues/192",
+    "title": "实现真实采样调用栈和可诊断的有界展开"
+  },
+  {
+    "slug": "mappings",
+    "number": 193,
+    "id": 6393667446,
+    "url": "https://github.com/muou000/PulseOS/issues/193",
+    "title": "采集时间有效的映射与地址空间身份并绑定符号产物"
+  },
+  {
+    "slug": "export",
+    "number": 194,
+    "id": 6393668614,
+    "url": "https://github.com/muou000/PulseOS/issues/194",
+    "title": "将真实CPU capture导出为perf.data并验收函数火焰图"
+  },
+  {
+    "slug": "recorder",
+    "number": 195,
+    "id": 6393670384,
+    "url": "https://github.com/muou000/PulseOS/issues/195",
+    "title": "交付统一bpf-record多模式控制与可靠会话生命周期"
+  },
+  {
+    "slug": "fault-classification",
+    "number": 196,
+    "id": 6394204879,
+    "url": "https://github.com/muou000/PulseOS/issues/196",
+    "title": "传播真实缺页I/O来源并补齐major/minor分类"
+  }
+]

@@ -1,0 +1,912 @@
+[
+  {
+    "label": "riscv64-task",
+    "arch": "riscv64",
+    "mode": "task",
+    "run": "riscv64-task-20261115-032249-ewxy2kjb",
+    "bundle": "riscv64-task.tar.gz",
+    "bundle_sha256": "30dc89ca3e8b6fe41bcd8f3965367099e6f1a1a0a68c573ca21e997a1a74f1e7",
+    "expected_gate_pass": true,
+    "members_sha256": {
+      "inputs.json": "75f0de22980b553c9c71f8836bd2095f245550247c0245d731e9b1098f946910",
+      "result.json": "dedc65154d1278f23a5e65220a679c0da29298ffbaffc5b32b8836139d125635",
+      "kernel.provenance.json": "bfeb98ec788e53edd3901e1f44498a2c7d44e4e628be7f7d16150b56a62a724b",
+      "guest.log": "8ec4fe68e3bdacceb2c59084995e713761a3c03ea49ad5661d7272566e9a69cc",
+      "payload.elf": "b9ad8e70584ed7d32e5ac4a69cf28f912404b27673d09d86cf82aab4a2342690",
+      "payload-build.json": "2c249fa163e2263fb958d1342502e0b7040c33dab086e9c25377b83c7eb3b196",
+      "guest.rs": "bd9923742eb5324b754aef6c2e51be63f24068b5bfd1c3558130d1bf5d0817c9",
+      "guest.ld": "67944404a5fd324386e5c86b25415b1767adcbbb1f8dd756b9e0d0b931f641eb",
+      "archive.rs": "4adc9edc83908e85fd34475531d11e5207be3d357de2fae0fd186f3effdb5282",
+      "records.pbraw": "b7ce7e6ce8e41d7d3ea31ef67c63c586c9e28b9e748fd5e973ea370c5a58192c",
+      "archive.json": "154f4c8692a7e28e5fc7005e6310ff60c863451b1c75d1c465b47ffa0b1337be",
+      "stats-before.txt": "28e641aff9805a4ceed9dfc1631e33d8b6c3bdef5dba97b9925f90b3f1d105a2",
+      "stats-after.txt": "3aac664789f926dd6495507d9ed6e67ee43aca7470a99e4dc3df26047e550cd6",
+      "capture.pbcapture": "51e60b07d454d1f1a43198b2041d75cba452abaff48835b1aac9a4c7b8fc5e28",
+      "import.log": "0274d790db6e02aa33ca83788dc3b66a1ecd461824a550f03085c211e9605aef",
+      "analysis-replay.json": "4908240aa72c7a6ac72d3505848c97fb6f85810163a78839a9381aa6df97a3fe",
+      "analyzer.json": "2c37985b07d4c5c486b09257001ed09489a24be98ae5677babcf87f1e5461646",
+      "analyzer-loss.txt": "fb71b76a5d5d38f534a828d1cc154823b402be10b696e443b82c650ea0f38438",
+      "analyzer-table.txt": "b7bb751bff0297f4c406a19251d1a30d6e13a7a995b5a33b3ef66be6d6f0a8fd",
+      "timeline.json": "bc38d71fba027ef05acfa0a4004d4d64c7ae81d627c7bd2bed95c0664d07ebd7",
+      "oncpu.folded": "530b8c32120b863250e9ea17b99f6b9422aaf7a99443907868a278b685eea0a7",
+      "blocked.folded": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "phase-attached_capture.json": "03ae743370ce49d5341e78700efbb8520952a199ef6b2e200dbdc6c095db1916",
+      "phase-baseline.json": "a0db9db6ad673a2a727ebadcefebaa0da91b65114934d59bb0cfd5b06c186dac"
+    },
+    "kernel_elf_sha256": "9d0c90db51671f8489fa8be909e29ff7ece6aee2d1e8ada4613e9fb4e6e77304",
+    "kernel_source_commit": "96a73a176df502f38d652912cb6a3cc04a44c23c",
+    "errors": [],
+    "records": 64,
+    "quality": "partial",
+    "observed_issues": [
+      {
+        "scope": "global",
+        "counter": "timer_busy",
+        "delta": 5
+      },
+      {
+        "scope": "event",
+        "id": 13,
+        "counter": "skipped",
+        "delta": 2
+      }
+    ],
+    "measurements": {
+      "baseline": {
+        "start_ns": 1186695300,
+        "stop_ns": 1855923700,
+        "wall_ns": 669228400,
+        "iterations": 128,
+        "extra_mapped_bytes": 0
+      },
+      "loaded_detached": {
+        "start_ns": 1861621900,
+        "stop_ns": 2526024500,
+        "wall_ns": 664402600,
+        "iterations": 128,
+        "extra_mapped_bytes": 557056
+      },
+      "attached_capture": {
+        "start_ns": 2653420500,
+        "stop_ns": 3323770000,
+        "wall_ns": 670349500,
+        "iterations": 128,
+        "extra_mapped_bytes": 4751360
+      }
+    },
+    "capture_status": "IncompleteError"
+  },
+  {
+    "label": "riscv64-trace",
+    "arch": "riscv64",
+    "mode": "trace",
+    "run": "riscv64-trace-20261115-032257-i595p9dv",
+    "bundle": "riscv64-trace.tar.gz",
+    "bundle_sha256": "e54c4074a2aa6cfbf12e9156601d8becb4b2c813dfb2511117929d6d84455947",
+    "expected_gate_pass": true,
+    "members_sha256": {
+      "inputs.json": "d245708562eb4233eb25197bf0cca923ee3f6af9e4df9c1f51bc83166f728b5a",
+      "result.json": "6f94497cda0071ac31eeb28a1f32f83284809d7b4cf7aaccaf292d3d8eb35ab8",
+      "kernel.provenance.json": "bfeb98ec788e53edd3901e1f44498a2c7d44e4e628be7f7d16150b56a62a724b",
+      "guest.log": "225e99b67c903d0844eaabe65527ac335b1f717deadf0dfb9d781accf02c5542",
+      "payload.elf": "05f83960cb382aefd1897d7080417865ee07fc1f6e70ddc30c38e75675137caa",
+      "payload-build.json": "1fb49bb2b9d5d73199dab458ce58031abcb35c8497413696489ddca1a730036e",
+      "guest.rs": "bd9923742eb5324b754aef6c2e51be63f24068b5bfd1c3558130d1bf5d0817c9",
+      "guest.ld": "67944404a5fd324386e5c86b25415b1767adcbbb1f8dd756b9e0d0b931f641eb",
+      "archive.rs": "4adc9edc83908e85fd34475531d11e5207be3d357de2fae0fd186f3effdb5282",
+      "records.pbraw": "910491bbae2938d5edeab752e39d38fb82443fc02e600f6b3077e0559599d08a",
+      "archive.json": "0ba427a9b41c50cc09aa8c6ea2242ea0371081b236a5ec0df64ffef90d81da40",
+      "stats-before.txt": "12abb3281d2811369451ad491010d9efb4ec4389e24ba0210c4f9e66425a8b9e",
+      "stats-after.txt": "4f609c251369a3149167da86f6d6cfbbd1e8afd34a46918ff829c1530a3b7936",
+      "capture.pbcapture": "9752f6a27ee161ebe5e7f95b70ab09dfd13c20b29315455033f84052868b82a5",
+      "import.log": "71f5a84f336dec7e605fe76ddbeed7318163d1ccd385d0f7449f083ad801210b",
+      "analysis-replay.json": "9f08f1d2a847380f771719906e66b35188d9ccc877ceaaa830d8712547092a9d",
+      "analyzer.json": "6027a95c587848c07b580839b848a03ea7c68bac8ea5921b9e48bcf492599765",
+      "analyzer-loss.txt": "3dca220a208e1d22d9cec7e4c90c08f92b092c6ec2c61d0f4ad68368513fd613",
+      "analyzer-table.txt": "14f9525c4080869337f47673d13ed70860c9c7f12fefd7bff24ceaf651155644",
+      "timeline.json": "0348fd22c31f6bc85098c04cd7150750fc21c0910a71e9eb741c7d28d39e3134",
+      "oncpu.folded": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "blocked.folded": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "phase-attached_capture.json": "12bb1199daf8e4841f236bdf1a2ef068c9940e9deaf9163b103d30a1a1c4e7c3",
+      "phase-baseline.json": "e43b4a3da6e18e5c482d1c8357ff1ea4d73e63a78daaac7c223af781b3fbbf2d"
+    },
+    "kernel_elf_sha256": "9d0c90db51671f8489fa8be909e29ff7ece6aee2d1e8ada4613e9fb4e6e77304",
+    "kernel_source_commit": "96a73a176df502f38d652912cb6a3cc04a44c23c",
+    "errors": [],
+    "records": 568,
+    "quality": "partial",
+    "observed_issues": [
+      {
+        "scope": "global",
+        "counter": "timer_busy",
+        "delta": 2
+      },
+      {
+        "scope": "event",
+        "id": 16,
+        "counter": "cancelled",
+        "delta": 1
+      },
+      {
+        "scope": "event",
+        "id": 19,
+        "counter": "cancelled",
+        "delta": 1
+      }
+    ],
+    "measurements": {
+      "baseline": {
+        "start_ns": 1184723100,
+        "stop_ns": 1338750800,
+        "wall_ns": 154027700,
+        "iterations": 128,
+        "extra_mapped_bytes": 0
+      },
+      "loaded_detached": {
+        "start_ns": 1345528900,
+        "stop_ns": 1498310200,
+        "wall_ns": 152781300,
+        "iterations": 128,
+        "extra_mapped_bytes": 557056
+      },
+      "attached_capture": {
+        "start_ns": 1540789300,
+        "stop_ns": 1698928700,
+        "wall_ns": 158139400,
+        "iterations": 128,
+        "extra_mapped_bytes": 4751360
+      }
+    },
+    "capture_status": "IncompleteError"
+  },
+  {
+    "label": "riscv64-sched",
+    "arch": "riscv64",
+    "mode": "sched",
+    "run": "riscv64-sched-20261115-032300-p2ixq3hb",
+    "bundle": "riscv64-sched.tar.gz",
+    "bundle_sha256": "9e0bd6e8a7bd8f32cdf370c084169e489aee1d63dfa3c38b4ba8628fb60e6caa",
+    "expected_gate_pass": true,
+    "members_sha256": {
+      "inputs.json": "208e8707de9f6b441e1b2196186dabe7d282fa9de306760cbacdc7765f72427a",
+      "result.json": "f18576eba620a1a9f42b691faa5135e0058adba873cb365ca60915adbec1e12c",
+      "kernel.provenance.json": "bfeb98ec788e53edd3901e1f44498a2c7d44e4e628be7f7d16150b56a62a724b",
+      "guest.log": "ed68e5828e7352f633b1e682d75d46408d14d2a860cee20cabfb329d13308ec4",
+      "payload.elf": "210e619819be0cedde6512e87bb8d0dc9c41332cf1d1a4442fe377941101705b",
+      "payload-build.json": "3849e3a419807c01791787231d1745266198e59b0ab6fe80c31ce8076ae4a902",
+      "guest.rs": "bd9923742eb5324b754aef6c2e51be63f24068b5bfd1c3558130d1bf5d0817c9",
+      "guest.ld": "67944404a5fd324386e5c86b25415b1767adcbbb1f8dd756b9e0d0b931f641eb",
+      "archive.rs": "4adc9edc83908e85fd34475531d11e5207be3d357de2fae0fd186f3effdb5282",
+      "records.pbraw": "b7abac7c21700ddcb576909ae176d911061137a9659b977b182ee0b2ec340685",
+      "archive.json": "45af6bfc7f7aeb3d1bc5548294399ed01b5301b1bb5b8ad5e6b10a0071c5a699",
+      "stats-before.txt": "c2d945eaa89b14b779a1318864addab8a5eeb3b865e76725cc6dcd008421f5ca",
+      "stats-after.txt": "827e547deaa3d3607980f9c83504911b0222ed33bf1fdee5739b414754f09e18",
+      "capture.pbcapture": "846daf6c695446221cd0770cb77e95ddb1cf3ad87394be51711f055067449b6c",
+      "import.log": "113c150e0b0f4642c06dd88681bb1f2fc7914454e3d5fba023790e27706bb0d5",
+      "analysis-replay.json": "04655a8732820564a5e14ea7b7bb447e7cadddf1ea0f0b0b44445c55bf37d61c",
+      "analyzer.json": "a875a5cc6a0a079f530b48636755404a6d28fafc765e36012a3aae1f55fd5b22",
+      "analyzer-loss.txt": "d122d0ca4ca9232a9db982f97eaab5ae3f0f5ba57fcf990901031d5c10f7823a",
+      "analyzer-table.txt": "9a1fbc7dd1650aa87785df27c7654e193ba3c952d8081507644c4fdbd17109ec",
+      "timeline.json": "604bf7586cb0fee9d26a7c0f10dd69fb2204f50a260c914e3b888837d5efa871",
+      "oncpu.folded": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "blocked.folded": "ea2f9e1fbd8dd99bb7c056d4827de767ee7ce9d4448f9aa4db4f29d56be5d3c8",
+      "phase-attached_capture.json": "8d1e29fc4ff8d0f765d7d60c973be382f8c7001e181f718ea8272ce1b9d81c31",
+      "phase-baseline.json": "ab896e9e283c1b3775c749a49e4a96e040514158d58703dab85fd438671a9fd2",
+      "scheduler-report.json": "9fe5defc5f7ee9eaa6055384192cfdde16df96681fd958c87a9fd402d598a1d3",
+      "scheduler-report.txt": "1314896c42e39b9f4252c7976e728e836063cd88d967a2e3ab9a366efd71ca3f",
+      "scheduler-target.json": "5f13c7286f3d06d7c9bfc6f142083231a7bca3ef3c026c12bbe8d4f1af9a319c"
+    },
+    "kernel_elf_sha256": "9d0c90db51671f8489fa8be909e29ff7ece6aee2d1e8ada4613e9fb4e6e77304",
+    "kernel_source_commit": "96a73a176df502f38d652912cb6a3cc04a44c23c",
+    "errors": [],
+    "records": 1436,
+    "quality": "partial",
+    "observed_issues": [
+      {
+        "scope": "global",
+        "counter": "timer_busy",
+        "delta": 1
+      },
+      {
+        "scope": "event",
+        "id": 21,
+        "counter": "cancelled",
+        "delta": 1
+      },
+      {
+        "scope": "event",
+        "id": 22,
+        "counter": "cancelled",
+        "delta": 1
+      },
+      {
+        "scope": "event",
+        "id": 34,
+        "counter": "cancelled",
+        "delta": 1
+      }
+    ],
+    "measurements": {
+      "baseline": {
+        "start_ns": 1213160800,
+        "stop_ns": 1362284300,
+        "wall_ns": 149123500,
+        "iterations": 128,
+        "extra_mapped_bytes": 0
+      },
+      "loaded_detached": {
+        "start_ns": 1372390400,
+        "stop_ns": 1522291400,
+        "wall_ns": 149901000,
+        "iterations": 128,
+        "extra_mapped_bytes": 557056
+      },
+      "attached_capture": {
+        "start_ns": 1695797200,
+        "stop_ns": 1855637200,
+        "wall_ns": 159840000,
+        "iterations": 128,
+        "extra_mapped_bytes": 4751360
+      }
+    },
+    "capture_status": "IncompleteError",
+    "scheduler_summary": {
+      "count": 266,
+      "min_ns": 25900,
+      "max_ns": 327800,
+      "sum_ns": "18057100",
+      "mean_ns": 67883.83458646617,
+      "p50_ns": 42900,
+      "p95_ns": 205000,
+      "p99_ns": 290900,
+      "histogram": [
+        {
+          "upper_bound_ns": 1000,
+          "count": 0
+        },
+        {
+          "upper_bound_ns": 10000,
+          "count": 0
+        },
+        {
+          "upper_bound_ns": 100000,
+          "count": 224
+        },
+        {
+          "upper_bound_ns": 1000000,
+          "count": 42
+        },
+        {
+          "upper_bound_ns": 10000000,
+          "count": 0
+        },
+        {
+          "upper_bound_ns": 100000000,
+          "count": 0
+        },
+        {
+          "upper_bound_ns": 1000000000,
+          "count": 0
+        },
+        {
+          "upper_bound_ns": null,
+          "count": 0
+        }
+      ]
+    }
+  },
+  {
+    "label": "riscv64-fault",
+    "arch": "riscv64",
+    "mode": "fault",
+    "run": "riscv64-fault-20261115-032305-4zypjw9d",
+    "bundle": "riscv64-fault.tar.gz",
+    "bundle_sha256": "213a27b1602e0057fdb67527edc03eac00203eefc219be2d803daea6ecda959d",
+    "expected_gate_pass": true,
+    "members_sha256": {
+      "inputs.json": "5c041ad3b085394595a5a06add11e1120a150456c3657b66d59f58bbc80659c3",
+      "result.json": "066f3519a250d3ca90207cea88dd397bd10f84c1007fb3b56aca6ccfa36ad16c",
+      "kernel.provenance.json": "bfeb98ec788e53edd3901e1f44498a2c7d44e4e628be7f7d16150b56a62a724b",
+      "guest.log": "6e49bd0223b477faabf6809786155703d4136ead7d0741abcb9f04d2cdaa78c8",
+      "payload.elf": "095b092ed6972bf38ec32938dddc69ad23d662e7edfbf1108f33f99f3560c6c2",
+      "payload-build.json": "2729d8c8f3aa247f53594230e6bc30fc15c18780ee77c11e13db7da4b6a7f1e4",
+      "guest.rs": "bd9923742eb5324b754aef6c2e51be63f24068b5bfd1c3558130d1bf5d0817c9",
+      "guest.ld": "67944404a5fd324386e5c86b25415b1767adcbbb1f8dd756b9e0d0b931f641eb",
+      "archive.rs": "4adc9edc83908e85fd34475531d11e5207be3d357de2fae0fd186f3effdb5282",
+      "fault_workload.rs": "54e4e48d6bcc180430efa71f5cedd25cdc7e8e66eb9ac6529b6ed4d021887d92",
+      "records.pbraw": "c39d6d075a5510ac2b31a346ecdbca1a2f3d5c2df033d33ed16f360d7441049e",
+      "archive.json": "4f9bad989fae47e274324ed6076bfab143456419282cbac312ad8d95cb7d5a09",
+      "stats-before.txt": "b7e582196883619e9c866729f4194b6d9cc109e7fafe266fac65b0ce16654669",
+      "stats-after.txt": "46edb4a18c6e84b41a067543f6518eea061bea18c083eabff4012ec9db9c7807",
+      "capture.pbcapture": "023e981f723a7a28b9332ea35092f67294563118cd0ffdd26ba7c32faf461390",
+      "import.log": "c80fda38a7df8bb69b5e93b9c010098a12d3c5a5c2cc2cef61ce1b20c925d9da",
+      "analysis-replay.json": "8b6c3fc615716d0b6e64e8e75558a4a37c005677d7cde210b405c97469b59f69",
+      "analyzer.json": "e3d16a8dca6a76f6eed0c05b72f4ea19b6265f186d6bf2bc99e94553057de1bd",
+      "analyzer-loss.txt": "1ec78f5b788718abd6d6ee7e930e4fde526fab1e304d31c5c2eed02092750067",
+      "analyzer-table.txt": "76fb064dc13c4f18e250510290190594989779edc66ececc9123b3dc09c47ffc",
+      "timeline.json": "7bf1a5e06f2360f745d0b8e1d9dbe8eeea73857bc468626859697b316c1c6f84",
+      "oncpu.folded": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "blocked.folded": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "phase-attached_capture.json": "80858c77051d3e9f5ff53649ab614eb14cc1d536330f059ecb4f9875e3aeedfc",
+      "phase-baseline.json": "25bcccbef81a941bf13b6effab12edffe96edb2fecedd471af6110c75cc3192e",
+      "faults-report.json": "f5994dd6f318b3c9b6efbbf4669cdb4d72bd3d9a2656403f1a3f06d8f328bc2b",
+      "faults-report.txt": "0f53f789a53928fd087aac8438e3468d825fe9f986a18953a53296adc461c530",
+      "faults-target.json": "271909ae333936c9f9f6a3cc411beec32bebc6a1443c103cad41227901c065bc"
+    },
+    "kernel_elf_sha256": "9d0c90db51671f8489fa8be909e29ff7ece6aee2d1e8ada4613e9fb4e6e77304",
+    "kernel_source_commit": "96a73a176df502f38d652912cb6a3cc04a44c23c",
+    "errors": [],
+    "records": 258,
+    "quality": "no_observed_loss",
+    "observed_issues": [],
+    "measurements": {
+      "baseline": {
+        "start_ns": 1178783000,
+        "stop_ns": 1355541800,
+        "wall_ns": 176758800,
+        "iterations": 128,
+        "extra_mapped_bytes": 0
+      },
+      "loaded_detached": {
+        "start_ns": 1362164800,
+        "stop_ns": 1541487500,
+        "wall_ns": 179322700,
+        "iterations": 128,
+        "extra_mapped_bytes": 557056
+      },
+      "attached_capture": {
+        "start_ns": 1581973200,
+        "stop_ns": 1758033000,
+        "wall_ns": 176059800,
+        "iterations": 128,
+        "extra_mapped_bytes": 4751360
+      }
+    },
+    "capture_status": "IncompleteError",
+    "fault_workload": {
+      "pid": 46,
+      "tid": 46,
+      "iterations": 128,
+      "read_hits": 128,
+      "write_hits": 128
+    },
+    "fault_duration": {
+      "count": 258,
+      "sum_ns": 4681800,
+      "min_ns": 12900,
+      "max_ns": 239400,
+      "mean_ns": 18146.511627906977,
+      "histogram_ns": [
+        {
+          "upper_ns": 16384,
+          "count": 108
+        },
+        {
+          "upper_ns": 32768,
+          "count": 144
+        },
+        {
+          "upper_ns": 65536,
+          "count": 5
+        },
+        {
+          "upper_ns": 262144,
+          "count": 1
+        }
+      ]
+    }
+  },
+  {
+    "label": "loongarch64-task",
+    "arch": "loongarch64",
+    "mode": "task",
+    "run": "loongarch64-task-20261115-032309-y6blsbas",
+    "bundle": "loongarch64-task.tar.gz",
+    "bundle_sha256": "4b81d25aa85083438e26d7a951882eaf5b00426acb92e50b1471ae8102992dda",
+    "expected_gate_pass": true,
+    "members_sha256": {
+      "inputs.json": "3399d88466ebe9d511b0c4af8720cf4aabdb6719e17f24563845ddd7f98ce78d",
+      "result.json": "aef511653bc762e49327cf68544e987ce19f14989d275e4c1590485586bb134a",
+      "kernel.provenance.json": "3995803f2f131151c7a630cc849863ba8b822555dc3cc9efa7e971b246ab811a",
+      "guest.log": "f78fe53088f70687ea02f4c0857a79c70ac662f3fc37a64d15e4ccd68a8919a6",
+      "payload.elf": "b18beeed550107d942a4ac7a0f5a74323ca91ec876eac0a995b8a9d0f6e0f27a",
+      "payload-build.json": "fb1484a226353ce19ce2e1ccd7ad09b99bd115e88109fe1a429a3913b9fe46a9",
+      "guest.rs": "bd9923742eb5324b754aef6c2e51be63f24068b5bfd1c3558130d1bf5d0817c9",
+      "guest.ld": "67944404a5fd324386e5c86b25415b1767adcbbb1f8dd756b9e0d0b931f641eb",
+      "archive.rs": "4adc9edc83908e85fd34475531d11e5207be3d357de2fae0fd186f3effdb5282",
+      "records.pbraw": "25c0491c628ddfba8c5d204097179f7889265f957b331f58d176ef8aeb5e3adb",
+      "archive.json": "99eef8ea17d01632cde25b044df0f7a8f68847f4277046c35be9de157a2d28bb",
+      "stats-before.txt": "2430414d51e35b13839e0b6dba910acbeda76b294e5315897e2a024e9167eaf6",
+      "stats-after.txt": "f99cdcce657844b6e354520b964fc537c04d2a98d0dcc6e10ef8af6fd208b791",
+      "capture.pbcapture": "1aa352f5cad71f1f43e9a26b0654029829e63eb1fc0b04f0309c0493056e761b",
+      "import.log": "01253f8da02806e41b14b0184cb1b8000767e91e9fc3ba90d81bd4f782c85c29",
+      "analysis-replay.json": "733f9904117b25a0b8660365e9fd0706202ee80caa3495fcbf538e07dcf208a0",
+      "analyzer.json": "75e64592b3475736007d4f16cefbc5a92a5cc7cb0cb20734805c7195c2771461",
+      "analyzer-loss.txt": "12f36fea97e630f8cf802496135a7e8db78ebb564e2384d7c6d2e3d9cfa8c342",
+      "analyzer-table.txt": "0e97c336dddb27980aed7bd01abb23dd03fabd6740b190a080619b4ecc6227cc",
+      "timeline.json": "8f90f9680d930745e713e276b321b0036ccf97423ae47e4b7693ee68a8276346",
+      "oncpu.folded": "f09dc7024f75a8afe9c51a74f733aea49ef9aba4a29040d19ffc1a361b75d5d9",
+      "blocked.folded": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "phase-attached_capture.json": "5bde016e52a023a97648da1a96f92c5656b8abf46877a3e41fa9c9d445b5f78a",
+      "phase-baseline.json": "1fd8b5623d61e2592b4c3a5b4ca09868dcda7b42f85c476c5a3dad1bbd7b9856"
+    },
+    "kernel_elf_sha256": "119bb8b728a8386d43d164f07e7442627900189cf38432ade6134907b1989fbf",
+    "kernel_source_commit": "96a73a176df502f38d652912cb6a3cc04a44c23c",
+    "errors": [],
+    "records": 37,
+    "quality": "partial",
+    "observed_issues": [
+      {
+        "scope": "global",
+        "counter": "timer_busy",
+        "delta": 3
+      },
+      {
+        "scope": "event",
+        "id": 13,
+        "counter": "skipped",
+        "delta": 1
+      }
+    ],
+    "measurements": {
+      "baseline": {
+        "start_ns": 1185008970,
+        "stop_ns": 1590240330,
+        "wall_ns": 405231360,
+        "iterations": 128,
+        "extra_mapped_bytes": 0
+      },
+      "loaded_detached": {
+        "start_ns": 1596202070,
+        "stop_ns": 1988006620,
+        "wall_ns": 391804550,
+        "iterations": 128,
+        "extra_mapped_bytes": 557056
+      },
+      "attached_capture": {
+        "start_ns": 2117315650,
+        "stop_ns": 2501990360,
+        "wall_ns": 384674710,
+        "iterations": 128,
+        "extra_mapped_bytes": 4751360
+      }
+    },
+    "capture_status": "IncompleteError"
+  },
+  {
+    "label": "loongarch64-trace",
+    "arch": "loongarch64",
+    "mode": "trace",
+    "run": "loongarch64-trace-20261115-032317-xeaoa4mf",
+    "bundle": "loongarch64-trace.tar.gz",
+    "bundle_sha256": "bc3a7a19514425076871245f63af7c3ace1de1d23d2cadcbe618a515ad3dea86",
+    "expected_gate_pass": true,
+    "members_sha256": {
+      "inputs.json": "1dd4cb99735cd27608215a03c26723307b10f37abaafc3f44c8047810778a209",
+      "result.json": "2720c2a29d33133a143ff878c39fd79e0ac3116f76d34546043794e1426935b6",
+      "kernel.provenance.json": "3995803f2f131151c7a630cc849863ba8b822555dc3cc9efa7e971b246ab811a",
+      "guest.log": "0f23bbbedc548c1d3d4e1a52057212e8cde2369b5d8ed49e94dbb3bf99e4ba36",
+      "payload.elf": "9f309d575917873a46c66d6c47bfa37468603c15df9efeb69e9f5defe2d66eae",
+      "payload-build.json": "8a0bba7f722310258ac7593e8b03932da17bb694952b1b6f47d2554e39b070df",
+      "guest.rs": "bd9923742eb5324b754aef6c2e51be63f24068b5bfd1c3558130d1bf5d0817c9",
+      "guest.ld": "67944404a5fd324386e5c86b25415b1767adcbbb1f8dd756b9e0d0b931f641eb",
+      "archive.rs": "4adc9edc83908e85fd34475531d11e5207be3d357de2fae0fd186f3effdb5282",
+      "records.pbraw": "9e64908d1692ecad582e19a1d996b852d1da852838e903a9e9ce41d9fe2fd8cf",
+      "archive.json": "a39c42c378369ff9bdf2694d3137cadfefba7705d991c88e7ded459b041459b7",
+      "stats-before.txt": "00b700b3e22de208b1c1d97552743cc200e722154b9935f1646e327a6424b766",
+      "stats-after.txt": "e2baef849af82faec544c468b562d5ff8fe7512e5e7f918fbec79219bacfbecb",
+      "capture.pbcapture": "203785ab552fd4e7462870e9ae60baf4287bfbc366d9e238795a69a0b3d4c690",
+      "import.log": "244b5f04d22493fa030f77f538f6393b81d1d1c4035d5482b24ef83e26a11950",
+      "analysis-replay.json": "16b8617f4db32d7b682a082fec976c611b44395c09fcb9af8497cb61896c3820",
+      "analyzer.json": "8e8d43689be7b67a01f526afccacb2c601159b5ee4d36546eb9015800d0fbafc",
+      "analyzer-loss.txt": "71dfe97c89147d1122d65497fc8472e765a56f8cbf429d29441f15c4c5c0a4cd",
+      "analyzer-table.txt": "b3b90927b5c29f8494676d3d23338c6688cee03a8346b76b345395e38bbf2d75",
+      "timeline.json": "3c5063254a8862c63c910d87c2b1deeb0f7712320f7840d6aed7415a56054ae2",
+      "oncpu.folded": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "blocked.folded": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "phase-attached_capture.json": "62bc10ce78a7ae615b33cac0ba10837eff9fa8497fff941fd0d0e363fb75db86",
+      "phase-baseline.json": "857fdc8e45b47b1e3ef48091810b6bc09d52067bfd4a3115a614787ecf60e540"
+    },
+    "kernel_elf_sha256": "119bb8b728a8386d43d164f07e7442627900189cf38432ade6134907b1989fbf",
+    "kernel_source_commit": "96a73a176df502f38d652912cb6a3cc04a44c23c",
+    "errors": [],
+    "records": 576,
+    "quality": "partial",
+    "observed_issues": [
+      {
+        "scope": "event",
+        "id": 14,
+        "counter": "cancelled",
+        "delta": 1
+      },
+      {
+        "scope": "event",
+        "id": 15,
+        "counter": "cancelled",
+        "delta": 1
+      }
+    ],
+    "measurements": {
+      "baseline": {
+        "start_ns": 1236233630,
+        "stop_ns": 1382704790,
+        "wall_ns": 146471160,
+        "iterations": 128,
+        "extra_mapped_bytes": 0
+      },
+      "loaded_detached": {
+        "start_ns": 1388790510,
+        "stop_ns": 1534221800,
+        "wall_ns": 145431290,
+        "iterations": 128,
+        "extra_mapped_bytes": 557056
+      },
+      "attached_capture": {
+        "start_ns": 1580495600,
+        "stop_ns": 1731558540,
+        "wall_ns": 151062940,
+        "iterations": 128,
+        "extra_mapped_bytes": 4751360
+      }
+    },
+    "capture_status": "IncompleteError"
+  },
+  {
+    "label": "loongarch64-sched",
+    "arch": "loongarch64",
+    "mode": "sched",
+    "run": "loongarch64-sched-20261115-032322-ujid_c4x",
+    "bundle": "loongarch64-sched.tar.gz",
+    "bundle_sha256": "82877aa604578dd4f5aedb75267752bbc7296e62985bd7bbe4e3275ac4009eb2",
+    "expected_gate_pass": true,
+    "members_sha256": {
+      "inputs.json": "c3d7bd9fd70d6bcc326e92b467e38993eda3524277b2151cddce565bf8cd370a",
+      "result.json": "70e2917f04fd25d518b5c4e6e948f9777e0aa5f0cac4d1950e4b49fb1d8e6697",
+      "kernel.provenance.json": "3995803f2f131151c7a630cc849863ba8b822555dc3cc9efa7e971b246ab811a",
+      "guest.log": "1b2fddb80e53eebf7ee519acede4afbbb16c32df9cc2a244f8d119830826b18d",
+      "payload.elf": "d57e311f56d7c21dd400f608dde10dd29872a068f7ab69618bba34f0280e65b0",
+      "payload-build.json": "cef53c718ae987156ea45cd452eda8e392f48895d019b58c742ff4ee4473c31b",
+      "guest.rs": "bd9923742eb5324b754aef6c2e51be63f24068b5bfd1c3558130d1bf5d0817c9",
+      "guest.ld": "67944404a5fd324386e5c86b25415b1767adcbbb1f8dd756b9e0d0b931f641eb",
+      "archive.rs": "4adc9edc83908e85fd34475531d11e5207be3d357de2fae0fd186f3effdb5282",
+      "records.pbraw": "b3fd6b818f8f9489ac3600ebcfc8bb018d71fe1da793bbfabb8e1a4f05c93aeb",
+      "archive.json": "37eee9ffe964f3306200ef95880d99af733400f4d88bf9d6125afd74354bd096",
+      "stats-before.txt": "381d165f81890749ef357e6d5a5b16d307ecd5e3e28c3e2fa77c7ffcf5311e4b",
+      "stats-after.txt": "a9642fa3a6ab90d58dcbe75cbfe303c964b177aee5a47bb9a085d235d9ffad48",
+      "capture.pbcapture": "223be4e2fda7c84fe535ac5829553dee3ac002bd4eee7c82180c2e5beaf152ee",
+      "import.log": "ecc338685b8fd2bc5daea079ca285aeb5f1b7e577796357acb668b1f0851c06b",
+      "analysis-replay.json": "316a19cc6c83a3e2d8f195549d1f05a91ca7b2ae8f257b18ea6b43cfe3a6bd5a",
+      "analyzer.json": "93ccd4e3cb663fca26ca708b3e3a9bdbfdad2ff3b3a19270fd4250464200a852",
+      "analyzer-loss.txt": "2b605df9eaa7dde4afbbd1884a2c213ef88c00cc3d5ff116c9eea860cb9b828c",
+      "analyzer-table.txt": "8558a225c331df500bab72642a21a955c6e7be4a749d207984a7250894133297",
+      "timeline.json": "3072c5fe0d31ea2e403a3ee52a40c6566cf26d3161e44083573c525187563168",
+      "oncpu.folded": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "blocked.folded": "5831df766ae287310c45a218eea9472d67ae038491906a7816333de1e1526151",
+      "phase-attached_capture.json": "f8e5b2724443efb38148aeb7707d34c6a31a4c248662917f9475f39bbc5a2bca",
+      "phase-baseline.json": "de2e556083490c6ddc1a5bf5ced501e7f10c81532824313fd3c376bb61798b53",
+      "scheduler-report.json": "c49761f31fcb9a6315a4958122b90979b3b67b579f55685753270b59dfea6d10",
+      "scheduler-report.txt": "4b31266c9e88409ecad5f443a364c62eb51c834de3080272978895876f57ca8b",
+      "scheduler-target.json": "da7b91859f4f913cef5289b876c1260c9e471a74430643560f8322d78dd35387"
+    },
+    "kernel_elf_sha256": "119bb8b728a8386d43d164f07e7442627900189cf38432ade6134907b1989fbf",
+    "kernel_source_commit": "96a73a176df502f38d652912cb6a3cc04a44c23c",
+    "errors": [],
+    "records": 1678,
+    "quality": "partial",
+    "observed_issues": [
+      {
+        "scope": "global",
+        "counter": "timer_busy",
+        "delta": 2
+      },
+      {
+        "scope": "event",
+        "id": 21,
+        "counter": "cancelled",
+        "delta": 1
+      },
+      {
+        "scope": "event",
+        "id": 26,
+        "counter": "cancelled",
+        "delta": 2
+      },
+      {
+        "scope": "event",
+        "id": 27,
+        "counter": "cancelled",
+        "delta": 2
+      },
+      {
+        "scope": "event",
+        "id": 28,
+        "counter": "cancelled",
+        "delta": 1
+      },
+      {
+        "scope": "event",
+        "id": 29,
+        "counter": "cancelled",
+        "delta": 1
+      },
+      {
+        "scope": "event",
+        "id": 34,
+        "counter": "cancelled",
+        "delta": 2
+      },
+      {
+        "scope": "event",
+        "id": 35,
+        "counter": "cancelled",
+        "delta": 1
+      },
+      {
+        "scope": "event",
+        "id": 36,
+        "counter": "cancelled",
+        "delta": 1
+      },
+      {
+        "scope": "event",
+        "id": 43,
+        "counter": "cancelled",
+        "delta": 1
+      },
+      {
+        "scope": "event",
+        "id": 58,
+        "counter": "cancelled",
+        "delta": 1
+      },
+      {
+        "scope": "event",
+        "id": 59,
+        "counter": "cancelled",
+        "delta": 1
+      }
+    ],
+    "measurements": {
+      "baseline": {
+        "start_ns": 1198881800,
+        "stop_ns": 1347131810,
+        "wall_ns": 148250010,
+        "iterations": 128,
+        "extra_mapped_bytes": 0
+      },
+      "loaded_detached": {
+        "start_ns": 1356044900,
+        "stop_ns": 1500819390,
+        "wall_ns": 144774490,
+        "iterations": 128,
+        "extra_mapped_bytes": 557056
+      },
+      "attached_capture": {
+        "start_ns": 1650522810,
+        "stop_ns": 1801164740,
+        "wall_ns": 150641930,
+        "iterations": 128,
+        "extra_mapped_bytes": 4751360
+      }
+    },
+    "capture_status": "IncompleteError",
+    "scheduler_summary": {
+      "count": 269,
+      "min_ns": 8970,
+      "max_ns": 174160,
+      "sum_ns": "6464740",
+      "mean_ns": 24032.490706319702,
+      "p50_ns": 20740,
+      "p95_ns": 48620,
+      "p99_ns": 92210,
+      "histogram": [
+        {
+          "upper_bound_ns": 1000,
+          "count": 0
+        },
+        {
+          "upper_bound_ns": 10000,
+          "count": 2
+        },
+        {
+          "upper_bound_ns": 100000,
+          "count": 266
+        },
+        {
+          "upper_bound_ns": 1000000,
+          "count": 1
+        },
+        {
+          "upper_bound_ns": 10000000,
+          "count": 0
+        },
+        {
+          "upper_bound_ns": 100000000,
+          "count": 0
+        },
+        {
+          "upper_bound_ns": 1000000000,
+          "count": 0
+        },
+        {
+          "upper_bound_ns": null,
+          "count": 0
+        }
+      ]
+    }
+  },
+  {
+    "label": "loongarch64-fault",
+    "arch": "loongarch64",
+    "mode": "fault",
+    "run": "loongarch64-fault-20261115-032328-pniuo3_9",
+    "bundle": "loongarch64-fault.tar.gz",
+    "bundle_sha256": "b79ab5ee806d373dd176eda9a792c0bc3ad53ee38ab36e086acf60e9999e4970",
+    "expected_gate_pass": true,
+    "members_sha256": {
+      "inputs.json": "6579c03bb7cb447ad034a7309c92cdc89853e71de7294ca02aa51c87c3269add",
+      "result.json": "52cfaf32a6b3f9c5bccdf06355a6a3efaa880f372405f3013f2d30f9c6c8d3c6",
+      "kernel.provenance.json": "3995803f2f131151c7a630cc849863ba8b822555dc3cc9efa7e971b246ab811a",
+      "guest.log": "e53e13f873cab2a4f73612408d777c9077dc111b038969274be824c7efbd1d2b",
+      "payload.elf": "5825948b961852c38af948b8626fa5a38a34b673aad9d24a2f8a6c7e98087a2b",
+      "payload-build.json": "a2faca46a5288c2b7cc206b4c1bd9142bfbacca3e078ad83929ba59b880a526c",
+      "guest.rs": "bd9923742eb5324b754aef6c2e51be63f24068b5bfd1c3558130d1bf5d0817c9",
+      "guest.ld": "67944404a5fd324386e5c86b25415b1767adcbbb1f8dd756b9e0d0b931f641eb",
+      "archive.rs": "4adc9edc83908e85fd34475531d11e5207be3d357de2fae0fd186f3effdb5282",
+      "fault_workload.rs": "54e4e48d6bcc180430efa71f5cedd25cdc7e8e66eb9ac6529b6ed4d021887d92",
+      "records.pbraw": "f2af7e0c66f0e868665eab962ee7c7440cb41d6ad8448c1783921be05604d717",
+      "archive.json": "cfca7f4b0bdd773e9080da5da0892a3c06ad97054347a99e219bf8315a7765e9",
+      "stats-before.txt": "d5f954daa8a6d0f465b725e027f8e8030346a756250ed01c0817d98fbd258349",
+      "stats-after.txt": "76bbe7f820e832f261ad24c83865b3ad727e63ec6aa812c08fd7240c3df3be8e",
+      "capture.pbcapture": "9aa419f034ab303e9f30906160bcc615f2acdb6af1a9f8923f18e04a78e99a97",
+      "import.log": "30907d8d646ad81887f1f328bad94cef3408db438640307ae080c49a6dfab3e8",
+      "analysis-replay.json": "90caadfb6284410d0836e8a68c25c0d19c36d3cee1e791a08d185f147aafaffd",
+      "analyzer.json": "8c6d7e8f12f54584e14f7aa1f93155bb5f6803c52fd839307f53cecfd9a4b07b",
+      "analyzer-loss.txt": "9b0703d3a2168da7dc5d6125c840d9a3b4da5df9f4fc85c11a1de9e32907654f",
+      "analyzer-table.txt": "daf5462e75d5a6883db194eba96393a7b0a1453784a46a51eecbacb2fe1cfe92",
+      "timeline.json": "aac404857f0c43ae82cd1273df449b310dd1df5117056c8b926fb7fd7cc88558",
+      "oncpu.folded": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "blocked.folded": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "phase-attached_capture.json": "706ba12096707b4659335cb7117b1de15d6efe13f6c00a3386d24b647e86cb92",
+      "phase-baseline.json": "8f854f83264af0e56491a971a545ede569bc762be6ee6b4d0b8ed1fe91d40150",
+      "faults-report.json": "c2cdae8595f82608090f829df2a5c4122bef57b81555922cde15915f0124d612",
+      "faults-report.txt": "230ee82c894395112b9c6ad8fa1f7b610994c096f3da1258fbcbe1548ef1f0f2",
+      "faults-target.json": "740a7c072fdbaf8a0f3239b705af3ebaaac142bbd86bcceb081dbc210eabdc55"
+    },
+    "kernel_elf_sha256": "119bb8b728a8386d43d164f07e7442627900189cf38432ade6134907b1989fbf",
+    "kernel_source_commit": "96a73a176df502f38d652912cb6a3cc04a44c23c",
+    "errors": [],
+    "records": 258,
+    "quality": "partial",
+    "observed_issues": [
+      {
+        "scope": "event",
+        "id": 16,
+        "counter": "cancelled",
+        "delta": 1
+      }
+    ],
+    "measurements": {
+      "baseline": {
+        "start_ns": 1156481790,
+        "stop_ns": 1327460390,
+        "wall_ns": 170978600,
+        "iterations": 128,
+        "extra_mapped_bytes": 0
+      },
+      "loaded_detached": {
+        "start_ns": 1334884660,
+        "stop_ns": 1506596160,
+        "wall_ns": 171711500,
+        "iterations": 128,
+        "extra_mapped_bytes": 557056
+      },
+      "attached_capture": {
+        "start_ns": 1549957250,
+        "stop_ns": 1722705950,
+        "wall_ns": 172748700,
+        "iterations": 128,
+        "extra_mapped_bytes": 4751360
+      }
+    },
+    "capture_status": "IncompleteError",
+    "fault_workload": {
+      "pid": 52,
+      "tid": 52,
+      "iterations": 128,
+      "read_hits": 128,
+      "write_hits": 128
+    },
+    "fault_duration": {
+      "count": 258,
+      "sum_ns": 4267380,
+      "min_ns": 4370,
+      "max_ns": 144790,
+      "mean_ns": 16540.232558139534,
+      "histogram_ns": [
+        {
+          "upper_ns": 8192,
+          "count": 112
+        },
+        {
+          "upper_ns": 16384,
+          "count": 16
+        },
+        {
+          "upper_ns": 32768,
+          "count": 116
+        },
+        {
+          "upper_ns": 65536,
+          "count": 10
+        },
+        {
+          "upper_ns": 131072,
+          "count": 3
+        },
+        {
+          "upper_ns": 262144,
+          "count": 1
+        }
+      ]
+    }
+  },
+  {
+    "label": "riscv64-fault-initial-failure",
+    "arch": "riscv64",
+    "mode": "fault-initial-failure",
+    "run": "riscv64-fault-20261115-014602-zbliyfci",
+    "bundle": "riscv64-fault-initial-failure.tar.gz",
+    "bundle_sha256": "0f10596726a1603a77d816257da96175432c59385849200a76b499fd69097d2c",
+    "expected_gate_pass": false,
+    "members_sha256": {
+      "inputs.json": "3d9e595fe15c4e6317c07604b29f70ac657d98c37cb6f3466cd272618655589b",
+      "result.json": "a2a55a4da1f11e9f9543a2e2252c58df971bd81c504e1c65889a6e5151c5ab8a",
+      "kernel.provenance.json": "8f85e7a71923b370362ace9e2182a3955f20a371ab9b5c16016736b047e75c32",
+      "guest.log": "f4c73a72a254841fa9ec71eca5c352ab5551a5457e59208f3d14e7259ef2ac76",
+      "payload.elf": "c9292e9149d24112e441c9b095ff7817b03c93be2cf4783fc1a09b0a360250b7",
+      "payload-build.json": "1d2a365e9027d4de42bb3f33185687db6025e8862c28aede50e7929ddc246a74",
+      "guest.rs": "bd9923742eb5324b754aef6c2e51be63f24068b5bfd1c3558130d1bf5d0817c9",
+      "guest.ld": "67944404a5fd324386e5c86b25415b1767adcbbb1f8dd756b9e0d0b931f641eb",
+      "archive.rs": "4adc9edc83908e85fd34475531d11e5207be3d357de2fae0fd186f3effdb5282",
+      "fault_workload.rs": "6468f6f0f5f4a3d8e81adfb387277c4a940ebd510f7ec18c2857256f1a9f3a6b"
+    },
+    "kernel_elf_sha256": "5065d1079dbea45931c31b348b610262abe52bbc55525da5438671056acdf910",
+    "kernel_source_commit": "96a73a176df502f38d652912cb6a3cc04a44c23c",
+    "errors": [
+      "guest sampler emitted FAIL",
+      "expected exactly one trace OBSERVED and kernel_ring RESULT",
+      "missing, duplicate or unsuccessful guest exit",
+      "invalid RAW archive: missing or duplicate ARCHIVE BEGIN  None"
+    ]
+  },
+  {
+    "label": "loongarch64-fault-initial-failure",
+    "arch": "loongarch64",
+    "mode": "fault-initial-failure",
+    "run": "loongarch64-fault-20261115-014602-qinvbfyt",
+    "bundle": "loongarch64-fault-initial-failure.tar.gz",
+    "bundle_sha256": "20a9eed092fe6994389ffe408ae172f7dd92ae8baf7dd6c1885c4d78da1d3cc8",
+    "expected_gate_pass": false,
+    "members_sha256": {
+      "inputs.json": "909a0a2af0dc42bf8538ba4e01ea614b0cea63a204408321e482b385815eea30",
+      "result.json": "40a19c12533552fc910aea44bbad64e71906b8182448cd4e2d2b7035db85655a",
+      "kernel.provenance.json": "a154235242083329ae95c053664aab871c9d459a126e05bb1e8728741c87fa44",
+      "guest.log": "98f8fc21b1723d0b75163e5030afed67e7da12e6952a3e3062ee0fb25a16d48a",
+      "payload.elf": "99c0248324b7d34fc2dbedc39ddc2be2977a4fd63166bb414d4d2ef411a67f1a",
+      "payload-build.json": "c217325d620670b0d7baff0e23334bce7ca9188ca63920a57b7e091a5d588955",
+      "guest.rs": "bd9923742eb5324b754aef6c2e51be63f24068b5bfd1c3558130d1bf5d0817c9",
+      "guest.ld": "67944404a5fd324386e5c86b25415b1767adcbbb1f8dd756b9e0d0b931f641eb",
+      "archive.rs": "4adc9edc83908e85fd34475531d11e5207be3d357de2fae0fd186f3effdb5282",
+      "fault_workload.rs": "6468f6f0f5f4a3d8e81adfb387277c4a940ebd510f7ec18c2857256f1a9f3a6b"
+    },
+    "kernel_elf_sha256": "c0aea7f6d60e4f6ddafd199166ba7cd6c58a90fcea9151bb779a4411783d999a",
+    "kernel_source_commit": "96a73a176df502f38d652912cb6a3cc04a44c23c",
+    "errors": [
+      "guest sampler emitted FAIL",
+      "expected exactly one trace OBSERVED and kernel_ring RESULT",
+      "missing, duplicate or unsuccessful guest exit",
+      "invalid RAW archive: missing or duplicate ARCHIVE BEGIN  None"
+    ]
+  }
+]

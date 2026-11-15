@@ -71,6 +71,111 @@ class RuntimeImportTests(unittest.TestCase):
             "kernel_elf_matches_boot": True,
         }
 
+    def test_mixed_scheduler_capture_preserves_records_and_programs(self):
+        from test_sched_archive import fixture_sched
+        raw, self.metadata, _ = archive.extract(fixture_sched(), 'sched')
+        self.inputs['mode'] = 'sched'
+        (self.directory / 'records.pbraw').write_bytes(raw)
+        self.assert_imported()
+        result = self.analyzer('--json')
+        self.assertEqual(result.returncode, 0, result.stdout)
+        report = json.loads(result.stdout)
+        self.assertEqual(report['records_count'], 5)
+        self.assertEqual(report['event_counts']['sched_switch'], 2)
+        self.assertEqual(report['event_counts']['task_wake'], 1)
+        self.assertFalse(report['attribution_claim_allowed'])
+
+    def seed_fault(self):
+        from test_fault_archive import fixture_fault
+        raw, self.metadata, _ = archive.extract(fixture_fault(), "fault")
+        self.raw = raw
+        self.inputs["mode"] = "fault"
+        (self.directory / "records.pbraw").write_bytes(raw)
+
+    def test_fault_capture_keeps_workload_witness_and_unknown_classification(self):
+        self.seed_fault()
+        self.assert_imported()
+        summary=self.summary()
+        self.assertEqual(summary["records_count"],2)
+        self.assertEqual(summary["event_counts"]["page_fault"],2)
+        self.assertFalse(summary["is_complete"])
+        diagnostics=summary["runtime_diagnostics"]
+        counters={(row["scope"],row["name"]):row["value"] for row in diagnostics["counters"]}
+        self.assertEqual(counters[("system","fault_completed")],2)
+        self.assertEqual(counters[("fault_workload","read_hits")],1)
+        self.assertEqual(counters[("fault_workload","write_hits")],1)
+        identities={row["name"]:row["value"] for row in diagnostics["identities"]}
+        self.assertEqual(identities["fault_target/127/read_address"],"0x400000")
+        self.assertEqual(identities["fault_target/127/write_address"],"0x402000")
+        report=self.analyzer("--fault-report","--json")
+        self.assertEqual(report.returncode,0,report.stdout)
+        parsed=json.loads(report.stdout)["faults"]
+        self.assertEqual(parsed["valid_events"],2)
+        self.assertEqual(parsed["unknown_classification"],2)
+        self.assertEqual(parsed["duration"]["sum_ns"],20)
+        self.assertFalse(parsed["is_complete"])
+
+    def test_fault_import_independently_requires_observer_counters_and_complete_target_list(self):
+        self.seed_fault()
+        del self.metadata["snapshots"]["after"]["global"]["fault_completed"]
+        self.assert_rejected("mandatory fault diagnostics")
+        self.seed_fault()
+        self.metadata["fault_targets"].pop()
+        self.assert_rejected("fault targets")
+
+    def test_fault_unknown_access_round_trips_to_explicit_report_counter(self):
+        from test_fault_archive import fixture_fault
+        raw,self.metadata,_=archive.extract(fixture_fault(unknown_access=True),'fault')
+        self.inputs['mode']='fault'
+        (self.directory/'records.pbraw').write_bytes(raw)
+        self.assert_imported()
+        result=self.analyzer('--fault-report','--json')
+        self.assertEqual(result.returncode,0,result.stdout)
+        report=json.loads(result.stdout)['faults']
+        self.assertEqual(report['valid_events'],3)
+        self.assertEqual(report['unknown_access'],1)
+        self.assertEqual(report['unknown_classification'],3)
+        self.assertFalse(report['is_complete'])
+
+    def test_fault_archive_driver_saves_loss_and_semantic_reports(self):
+        import capture as driver
+        self.seed_fault()
+        (self.directory/'kernel').write_bytes((self.directory/'kernel.elf').read_bytes())
+        (self.directory/'disk.img').write_bytes((self.directory/'image').read_bytes())
+        (self.directory/'inputs.json').write_text(json.dumps(self.inputs))
+        (self.directory/'archive.json').write_text(json.dumps(self.metadata))
+        result=driver.convert(self.directory)
+        self.assertEqual(result['semantic_report']['valid_instances'],2)
+        self.assertIn('Status:',(self.directory/'analyzer-loss.txt').read_text())
+        report=json.loads((self.directory/'faults-report.json').read_text())
+        self.assertEqual(report['faults']['valid_events'],2)
+
+    def test_fault_import_rechecks_hit_counts_and_eight_cpu_sources(self):
+        self.seed_fault()
+        self.metadata["fault_workload"]["read_hits"]=0
+        self.assert_rejected("fault workload hits")
+        self.seed_fault()
+        for point in ("before","after"):
+            self.metadata["snapshots"][point]["events"][20]["config"]=2
+        self.assert_rejected("fault source")
+
+    def test_fault_import_rejects_timing_corruption_even_with_resealed_envelopes(self):
+        self.seed_fault()
+        raw=bytearray(self.raw)
+        frame_start=64+24
+        struct.pack_into("<Q",raw,frame_start+12+56,11)
+        struct.pack_into("<I",raw,64+16,zlib.crc32(raw[frame_start:frame_start+96]))
+        self.reseal_raw(raw)
+        (self.directory/"records.pbraw").write_bytes(raw)
+        self.assert_rejected("fault completion")
+
+    def test_fault_workload_does_not_guess_hits_after_export_overflow(self):
+        self.seed_fault()
+        raw=bytearray(self.raw);struct.pack_into("<I",raw,44,1)
+        (self.directory/"records.pbraw").write_bytes(raw)
+        self.metadata.update(export_dropped=1,export_dropped_samples=1)
+        self.assert_rejected("untruncated fault export")
+
     def import_capture(self):
         (self.directory / "inputs.json").write_text(json.dumps(self.inputs))
         (self.directory / "archive.json").write_text(json.dumps(self.metadata))
@@ -236,7 +341,7 @@ class RuntimeImportTests(unittest.TestCase):
                 bad.write_bytes(data[:-removed])
                 result = self.analyzer("--json", path=bad)
                 self.assertEqual(result.returncode, 1, result.stdout)
-                self.assertIn("Failed to parse BPF capture:", result.stdout)
+                self.assertIn("failed to parse bpf capture:", result.stdout.lower())
                 self.assertNotIn('"is_complete": true', result.stdout)
                 self.assertNotIn("panicked", result.stdout.lower())
 

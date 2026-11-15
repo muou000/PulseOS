@@ -816,7 +816,14 @@ pub fn global_add_memory(start_vaddr: usize, size: usize) -> AllocResult {
 }
 
 /// Runs in-kernel verification of the Per-CPU Order-0 page cache (PCP).
+///
+/// Invoke after per-CPU initialization while the runtime bring-up barrier
+/// still parks secondary CPUs. Its global accounting snapshots are not a
+/// concurrent allocator stress test.
 pub fn run_pcp_guest_checks() -> Result<(), &'static str> {
+    // Keep one CPU throughout the local refill/hit sequence. The global
+    // accounting assertions additionally require quiescent allocator clients.
+    let _check_guard = NoPreemptIrqSave::new();
     info!("[PCP_GUEST] Starting Per-CPU Order-0 PCP cache & watermark checks...");
 
     let alloc = global_allocator();

@@ -92,7 +92,7 @@ fn kind(name: &str) -> CounterKind {
         "timer_full" | "timer_busy" | "trace_full" | "trace_recursive" | "skipped"
         | "cancelled" | "transport_lost" => CounterKind::Loss,
         "invalid" | "reentry" | "helper" | "budget" | "consumer_corrupt" | "consumer_bounds"
-        | "errors" => CounterKind::Error,
+        | "errors" | "fault_clock_errors" => CounterKind::Error,
         _ => CounterKind::Activity,
     }
 }
@@ -128,6 +128,151 @@ fn snapshots(
     }
     Ok(())
 }
+/// Native fault probes retain exact first-touch target identities. The verifier
+/// consumes the original frames again, independently of the Python log parser.
+struct FaultWorkload {
+    pid: u32,
+    tid: u32,
+    reads: std::collections::BTreeSet<u64>,
+    writes: std::collections::BTreeSet<u64>,
+    expected_read_hits: u64,
+    expected_write_hits: u64,
+    read_hits: u64,
+    write_hits: u64,
+}
+impl FaultWorkload {
+    fn new(archive: &Value, dropped: u32, d: &mut RuntimeDiagnostics) -> Result<Self> {
+        if dropped != 0 {
+            return Err("native workload requires an untruncated fault export".into());
+        }
+        let workload = &archive["fault_workload"];
+        let pid = narrow(number(workload, "pid")?)?;
+        let tid = narrow(number(workload, "tid")?)?;
+        if pid == 0
+            || tid == 0
+            || number(workload, "iterations")? != 128
+            || number(&archive["measurements"]["attached_capture"], "iterations")? != 128
+        {
+            return Err("invalid fault workload identity/iterations".into());
+        }
+        for point in ["before", "after"] {
+            if number(&archive["snapshots"][point], "pid")? != u64::from(pid) {
+                return Err("fault workload differs from snapshot process".into());
+            }
+        }
+        let targets = archive["fault_targets"]
+            .as_array()
+            .ok_or("missing fault targets")?;
+        if targets.len() != 128 {
+            return Err("incomplete fault targets".into());
+        }
+        let (mut reads, mut writes) = (
+            std::collections::BTreeSet::new(),
+            std::collections::BTreeSet::new(),
+        );
+        for (index, target) in targets.iter().enumerate() {
+            let read = number(target, "read")?;
+            let write = number(target, "write")?;
+            if number(target, "index")? != index as u64
+                || read == 0
+                || read % 4096 != 0
+                || read.checked_add(8192) != Some(write)
+            {
+                return Err("invalid/reordered fault targets".into());
+            }
+            reads.insert(read);
+            writes.insert(write);
+            identity(
+                d,
+                &format!("fault_target/{index}/read_address"),
+                Some(format!("0x{read:x}")),
+            );
+            identity(
+                d,
+                &format!("fault_target/{index}/write_address"),
+                Some(format!("0x{write:x}")),
+            );
+        }
+        identity(d, "fault_workload/pid", Some(pid.to_string()));
+        identity(d, "fault_workload/tid", Some(tid.to_string()));
+        counter(
+            d,
+            "fault_workload",
+            "iterations",
+            Some(128),
+            CounterKind::Activity,
+        );
+        Ok(Self {
+            pid,
+            tid,
+            reads,
+            writes,
+            expected_read_hits: number(workload, "read_hits")?,
+            expected_write_hits: number(workload, "write_hits")?,
+            read_hits: 0,
+            write_hits: 0,
+        })
+    }
+    fn observe(&mut self, context: &[u8]) -> Result<()> {
+        if context.len() != 80 {
+            return Err("invalid native fault completion length".into());
+        }
+        let end = read64(context, 8);
+        let start = read64(context, 48);
+        let elapsed = read64(context, 56);
+        let address = read64(context, 40);
+        let access = read32(context, 64);
+        let origin = read32(context, 68);
+        let outcome = read32(context, 72);
+        if read32(context, 0) != 8
+            || read32(context, 4) != 1
+            || read32(context, 28) != 0
+            || read64(context, 32) == 0
+            || end.checked_sub(start) != Some(elapsed)
+            || access & !7 != 0
+            || !matches!(origin, 1 | 2)
+            || !(1..=4).contains(&outcome)
+            || read32(context, 76) != 0
+        {
+            return Err("invalid native fault completion".into());
+        }
+        if read32(context, 20) == self.pid && read32(context, 24) == self.tid && origin == 2 {
+            let read = self.reads.contains(&address) && access & 1 != 0;
+            let write = self.writes.contains(&address) && access & 2 != 0;
+            if (read || write) && outcome != 1 {
+                return Err("fresh fault workload resolver failed".into());
+            }
+            self.read_hits = add(self.read_hits, u64::from(read))?;
+            self.write_hits = add(self.write_hits, u64::from(write))?;
+        }
+        Ok(())
+    }
+    fn finish(self, d: &mut RuntimeDiagnostics) -> Result<()> {
+        if self.read_hits == 0
+            || self.write_hits == 0
+            || self.read_hits != self.expected_read_hits
+            || self.write_hits != self.expected_write_hits
+        {
+            return Err("fault workload hits do not match actual RAW records".into());
+        }
+        counter(
+            d,
+            "fault_workload",
+            "read_hits",
+            Some(self.read_hits),
+            CounterKind::Activity,
+        );
+        counter(
+            d,
+            "fault_workload",
+            "write_hits",
+            Some(self.write_hits),
+            CounterKind::Activity,
+        );
+        Ok(())
+    }
+}
+
 fn import(dir: &Path, output: &Path) -> Result<()> {
     let input = read_json(&dir.join("inputs.json"))?;
     let archive = read_json(&dir.join("archive.json"))?;
@@ -191,15 +336,56 @@ fn import(dir: &Path, output: &Path) -> Result<()> {
     let before = &archive["snapshots"]["before"];
     let after = &archive["snapshots"]["after"];
     let sources = archive["sources"].as_array().ok_or("missing sources")?;
-    if sources.len() != if mode == "task" { 1 } else { 8 } {
+    if sources.len()
+        != if mode == "task" {
+            1
+        } else if mode == "sched" {
+            48
+        } else {
+            8
+        }
+    {
         return Err("missing source configuration".into());
+    }
+    let mut bindings = std::collections::BTreeMap::new();
+    if mode == "sched" {
+        for row in archive["program_bindings"]
+            .as_array()
+            .ok_or("missing program bindings")?
+        {
+            let tracepoint = number(row, "tracepoint")?;
+            let size = match tracepoint {
+                1 | 2 | 3 => 72,
+                4 => 80,
+                5 => 56,
+                6 => 64,
+                _ => return Err("unknown scheduler tracepoint".into()),
+            };
+            if number(row, "context_bytes")? != size
+                || number(row, "program_id")? == 0
+                || bindings
+                    .insert(tracepoint, number(row, "program_id")?)
+                    .is_some()
+            {
+                return Err("invalid scheduler binding".into());
+            }
+        }
+        if bindings.len() != 6
+            || bindings
+                .values()
+                .collect::<std::collections::BTreeSet<_>>()
+                .len()
+                != 6
+        {
+            return Err("incomplete scheduler programs".into());
+        }
     }
     let first = &sources[0];
     let source = &before["events"][number(first, "fd")?.to_string()];
     let source_after = &after["events"][number(first, "fd")?.to_string()];
     let format = match mode {
         "task" | "cpu" => SampleFormat::PerfEventV2,
-        "trace" | "block" | "wake" => SampleFormat::Tracepoint,
+        "trace" | "block" | "wake" | "sched" | "fault" => SampleFormat::Tracepoint,
         _ => return Err("unknown mode".into()),
     };
     let mut d = RuntimeDiagnostics {
@@ -270,6 +456,27 @@ fn import(dir: &Path, output: &Path) -> Result<()> {
             "trace_recursive",
         ],
     )?;
+    for name in ["fault_started", "fault_completed", "fault_clock_errors"] {
+        if before["global"].get(name).is_some() && after["global"].get(name).is_some() {
+            snapshots(
+                &mut d,
+                &before["global"],
+                &after["global"],
+                "system",
+                &[name],
+            )?;
+        } else {
+            if mode == "fault" {
+                return Err("missing mandatory fault diagnostics".into());
+            }
+            counter(&mut d, "system", name, None, kind(name));
+        }
+    }
+    let mut fault_workload = if mode == "fault" {
+        Some(FaultWorkload::new(&archive, dropped, &mut d)?)
+    } else {
+        None
+    };
     let mut seen = std::collections::BTreeSet::new();
     let mut sink_delivered = 0u64;
     let mut sink_lost = 0u64;
@@ -336,6 +543,9 @@ fn import(dir: &Path, output: &Path) -> Result<()> {
         }
     }
     let mut source_delivered = 0u64;
+    let mut per_program = std::collections::BTreeMap::<u64, u64>::new();
+    let mut source_coverage = std::collections::BTreeSet::new();
+    let mut source_ids = std::collections::BTreeSet::new();
     for item in sources {
         let fd = number(item, "fd")?.to_string();
         let old = &before["events"][&fd];
@@ -347,7 +557,35 @@ fn import(dir: &Path, output: &Path) -> Result<()> {
         {
             return Err("capture sources not quiescent".into());
         }
-        source_delivered = add(source_delivered, delta(old, new, "delivered")?)?;
+        if !source_ids.insert(number(old, "id")?) {
+            return Err("source alias would double count".into());
+        }
+        let program_id = number(old, "program_id")?;
+        let expected = if mode == "sched" {
+            *bindings
+                .get(&number(old, "config")?)
+                .ok_or("undeclared source tracepoint")?
+        } else {
+            numeric_string(config, "program_id")?
+        };
+        if program_id != expected || number(new, "program_id")? != expected {
+            return Err("source program binding mismatch".into());
+        }
+        for key in ["clock", "config", "scope", "target", "task_id", "period"] {
+            if old[key] != new[key] {
+                return Err("source configuration changed".into());
+            }
+        }
+        if matches!(mode, "sched" | "fault") {
+            if number(old, "clock")? != 2 || string(old, "scope")? != "cpu" {
+                return Err(format!("wrong {mode} source kind"));
+            }
+            source_coverage.insert((number(old, "config")?, number(old, "target")?));
+        }
+        let delivered = delta(old, new, "delivered")?;
+        let total = per_program.entry(program_id).or_default();
+        *total = add(*total, delivered)?;
+        source_delivered = add(source_delivered, delivered)?;
         identity(&mut d, &format!("source/{fd}"), Some(item.to_string()));
     }
     for (id, program) in object(&before["programs"])? {
@@ -359,19 +597,24 @@ fn import(dir: &Path, output: &Path) -> Result<()> {
             &["runs", "errors"],
         )?;
     }
-    let program_id = numeric_string(config, "program_id")?.to_string();
-    let runs = delta(
-        &before["programs"][&program_id],
-        &after["programs"][&program_id],
-        "runs",
-    )?;
-    let errors = delta(
-        &before["programs"][&program_id],
-        &after["programs"][&program_id],
-        "errors",
-    )?;
-    if runs.checked_sub(errors) != Some(source_delivered) {
-        return Err("program counters do not reconcile with source delivery".into());
+    if mode == "sched"
+        && source_coverage
+            != (1u64..=6)
+                .flat_map(|event| (0u64..8).map(move |cpu| (event, cpu)))
+                .collect()
+    {
+        return Err("incomplete scheduler source coverage".into());
+    }
+    if mode == "fault" && source_coverage != (0u64..8).map(|cpu| (8, cpu)).collect() {
+        return Err("incomplete fault source coverage".into());
+    }
+    for (program_id, delivered) in per_program {
+        let id = program_id.to_string();
+        let runs = delta(&before["programs"][&id], &after["programs"][&id], "runs")?;
+        let errors = delta(&before["programs"][&id], &after["programs"][&id], "errors")?;
+        if runs.checked_sub(errors) != Some(delivered) {
+            return Err("program counters do not reconcile with source delivery".into());
+        }
     }
     for name in [
         "verifier_failures",
@@ -487,8 +730,15 @@ fn import(dir: &Path, output: &Path) -> Result<()> {
             let expected = match mode {
                 "task" | "cpu" => 64,
                 "trace" | "block" => 72,
-                "wake" => 80,
-                _ => unreachable!(),
+                "wake" | "fault" => 80,
+                "sched" if frame.len() >= 16 => match read32(frame, 12) {
+                    1 | 2 | 3 => 72,
+                    4 => 80,
+                    5 => 56,
+                    6 => 64,
+                    _ => return Err("unknown scheduler record".into()),
+                },
+                _ => return Err("short scheduler record".into()),
             };
             if read32(frame, 8) != expected || frame.len() < 12 + expected as usize {
                 return Err("wrong RAW sample length".into());
@@ -512,11 +762,17 @@ fn import(dir: &Path, output: &Path) -> Result<()> {
                 let expected_id = match mode {
                     "trace" => 2,
                     "block" => 3,
+                    "fault" => 8,
                     _ => 4,
                 };
-                if read32(context, 0) != expected_id {
+                if (mode != "sched" && read32(context, 0) != expected_id)
+                    || (mode == "sched" && !(1..=6).contains(&read32(context, 0)))
+                {
                     return Err("wrong tracepoint".into());
                 }
+            }
+            if let Some(workload) = &mut fault_workload {
+                workload.observe(context)?;
             }
             samples += 1;
         } else if read32(frame, 0) == 2 && frame.len() == 24 {
@@ -540,6 +796,9 @@ fn import(dir: &Path, output: &Path) -> Result<()> {
         || lost > sink_lost
     {
         return Err("producer/consumer counters do not reconcile".into());
+    }
+    if let Some(workload) = fault_workload {
+        workload.finish(&mut d)?;
     }
     if number(source, "id")? != number(source_after, "id")? {
         return Err("unstable source identity".into());

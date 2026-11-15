@@ -6,7 +6,7 @@ use pulse_bpf_schema::{
 #[test]
 fn test_all_tracepoints_enumerated() {
     let tracepoints = all_tracepoints();
-    assert_eq!(tracepoints.len(), 7, "Registry must enumerate all 7 supported tracepoints");
+    assert_eq!(tracepoints.len(), 8, "Registry must enumerate all 8 supported tracepoints");
 }
 
 #[test]
@@ -19,6 +19,7 @@ fn test_event_names_and_ids() {
         (TracepointId::TaskExit, 5, "task", "task_exit"),
         (TracepointId::TaskEnqueue, 6, "sched", "task_enqueue"),
         (TracepointId::PhaseMarker, 7, "pulse", "phase_marker"),
+        (TracepointId::PageFault, 8, "mm", "page_fault"),
     ];
 
     for (id, raw_id, category, name) in expected {
@@ -190,7 +191,7 @@ fn test_event_record_layout_and_bounds() {
     assert_eq!(align_of::<EventRecord>(), 8);
     assert_eq!(size_of::<EventRecord>(), 96);
 
-    // Verify all 7 context types strictly fit in MAX_CONTEXT_SIZE (80 bytes)
+    // Verify all context types strictly fit in MAX_CONTEXT_SIZE (80 bytes)
     assert!(size_of::<TaskMetadataContext>() <= MAX_CONTEXT_SIZE);
     assert!(size_of::<SchedSwitchContext>() <= MAX_CONTEXT_SIZE);
     assert!(size_of::<TaskBlockContext>() <= MAX_CONTEXT_SIZE);
@@ -198,6 +199,7 @@ fn test_event_record_layout_and_bounds() {
     assert!(size_of::<TaskExitContext>() <= MAX_CONTEXT_SIZE);
     assert!(size_of::<TaskEnqueueContext>() <= MAX_CONTEXT_SIZE);
     assert!(size_of::<PhaseMarkerContext>() <= MAX_CONTEXT_SIZE);
+    assert!(size_of::<PageFaultContext>() <= MAX_CONTEXT_SIZE);
     assert!(size_of::<PerfEventContext>() <= MAX_CONTEXT_SIZE);
 
     let dummy_data = [42u8; 16];
