@@ -426,9 +426,25 @@ fn source_instances_are_validated_and_v2_is_only_exported_when_unambiguous() {
     let selected = a.query(&Query::default()).unwrap();
     assert!(
         bpf_analyzer::perf::export(&a, &selected, &f.root, &f.bytes)
+            .unwrap_err()
+            .contains("ambiguous source"),
+        "distinct configured periods do not establish a v2 source identity"
+    );
+    rewrite(&mut f, |d| {
+        d.diagnostics
+            .as_mut()
+            .unwrap()
+            .identities
+            .retain(|i| !i.name.starts_with("event/124/"));
+        d.records.retain(|record| record.timestamp_ns == 200);
+    });
+    let a = CaptureAnalyzer::from_bytes(&f.bytes).unwrap();
+    let selected = a.query(&Query::default()).unwrap();
+    assert!(
+        bpf_analyzer::perf::export(&a, &selected, &f.root, &f.bytes)
             .unwrap()
             .manifest
-            .contains("\"ip_only_count\":2")
+            .contains("\"ip_only_count\":1")
     );
     rewrite(&mut f, |d| {
         let identities = &mut d.diagnostics.as_mut().unwrap().identities;

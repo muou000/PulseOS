@@ -199,6 +199,16 @@ def verify_exports(run: Path, perf: Path | None, flamegraph: Path | None) -> dic
         unit = case['weight_unit']
         if unit != manifest['weight_unit'] or unit != result['weight_unit']:
             raise ValueError('perf acceptance units disagree')
+        regenerated = run / f'reexported-{name}.data'
+        argv = [str(capture.REPO / 'target/debug/bpf-analyzer'), str(run / 'capture.pbcapture'),
+                '--bundle', str(run), '--perf-data', str(regenerated),
+                '--weight', 'samples' if unit == 'samples' else 'period']
+        for key, value in query.items():
+            argv += ['--' + key.replace('_', '-'), str(value)]
+        capture.command(argv)
+        if (regenerated.read_bytes() != data.read_bytes()
+                or Path(str(regenerated) + '.json').read_bytes() != manifest_path.read_bytes()):
+            raise ValueError('current exporter differs from archived data or query provenance')
         checked = perf_evidence.verify(raw, (saved / 'dump.stdout').read_text(), query,
                                        (saved / 'report.stdout').read_text())
         if checked != case['verification']:
@@ -207,11 +217,11 @@ def verify_exports(run: Path, perf: Path | None, flamegraph: Path | None) -> dic
             elf = run / ('kernel.elf' if query.get('mode') == 'kernel' else 'payload.elf')
             _, functions = stack_evidence.elf_symbols(elf)
             ranges = {}
-            for name in case['function_ranges']:
-                matches = [(start, end) for start, end, symbol in functions if symbol == name]
+            for function_name in case['function_ranges']:
+                matches = [(start, end) for start, end, symbol in functions if symbol == function_name]
                 if len(matches) != 1:
                     raise ValueError('expected function lacks unique verified ELF extent')
-                ranges[name] = list(matches[0])
+                ranges[function_name] = list(matches[0])
             if ranges != case['function_ranges']:
                 raise ValueError('function weight ranges differ from actual ELF symbols')
             weights = perf_evidence.verify_function_weights(perf_evidence.raw_samples(raw, query),
@@ -261,7 +271,7 @@ def verify_exports(run: Path, perf: Path | None, flamegraph: Path | None) -> dic
                 perf_evidence.verify_named_chain((fresh / 'script.stdout').read_text(),
                                                 (fresh / 'calltree.stdout').read_text(), case['expect_chain'])
         reports[name] = {'weight_unit': unit, 'weight': expected,
-                         'fresh_external_consumers': perf is not None,
+                         'fresh_external_consumers': perf is not None, 'reexport_identical': True,
                          'known_call_tree_verified': bool(case.get('expect_chain')), **checked}
     return reports
 

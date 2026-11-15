@@ -104,3 +104,19 @@ IP、PID/TID、时间、CPU、period、mode、context marker 和完整保存的�
 perf.data、manifest、未修改的 consumer 输出、符号视图和 SVG，逐成员 SHA 可重放。
 实际 consumer 为 `perf 6.8.12`，FlameGraph 为前述固定提交。原始 ELF 缺 GNU build-id
 时，buildid-list 的缺失也作为事实验证。
+
+最终验证：**443 项 Rust 测试**（440 项常规、3 项原生 perf）、**90 项 Python 测试**
+通过；默认和 BPF-enabled 的双架构 `make test` 通过。两个 117 成员证据包在新临时
+目录中完成全量 RAW/capture/reimport 与原生 perf/FlameGraph 重放，六组 Query 的
+函数链、条数、period 与 SVG 均通过。首次证据重放发现验证脚本把案例名变量覆盖为
+函数名，导致两个用户图目标目录冲突；修正变量名后重放成功，原始输入不变。
+
+## 双轴代码审查
+
+Standards：0 个需修改项。Spec：发现 1 个 P2，旧 v2 样本可能按 period 区分
+同 CPU 多个实例，与不猜来源的契约冲突。修复后先按 scope 确认唯一实例，再验证
+period；新增不同 period 仍拒绝的负例，保留唯一实例正例。14 项 exporter 测试
+（含 3 项原生 perf）重跑通过，Spec 审查者复核确认修复、无新增问题。
+
+审查修复后的最终门禁再次通过；当前 exporter 重新生成全部六组 perf.data 与
+manifest，逐字节等于归档内容，并在新临时目录再次运行原生 perf/FlameGraph。
