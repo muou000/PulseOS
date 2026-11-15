@@ -1,0 +1,243 @@
+{
+  "rv-baseline": {
+    "kind": "red_baseline",
+    "unknown_records": 263,
+    "expected_failure": [
+      "invalid RAW archive: target classification differs from device oracle"
+    ]
+  },
+  "rv-fault": {
+    "kind": "fault_classification_evidence",
+    "oracle": "qemu_virtio_completed_reads",
+    "cases": {
+      "anonymous": {
+        "classification": "minor",
+        "address": 10002432,
+        "pid": 49,
+        "tid": 49,
+        "target_faults": 1,
+        "target_read_sectors": 0,
+        "neighbor_read_sectors": 0,
+        "device_requests": []
+      },
+      "cold": {
+        "classification": "major",
+        "address": 10006528,
+        "pid": 49,
+        "tid": 49,
+        "target_faults": 1,
+        "target_read_sectors": 8,
+        "neighbor_read_sectors": 0,
+        "device_requests": [
+          {
+            "sector": 35400,
+            "sectors": 8,
+            "completed": true,
+            "result": 0
+          }
+        ]
+      },
+      "hot": {
+        "classification": "minor",
+        "address": 10010624,
+        "pid": 49,
+        "tid": 49,
+        "target_faults": 1,
+        "target_read_sectors": 0,
+        "neighbor_read_sectors": 0,
+        "device_requests": []
+      },
+      "cow": {
+        "classification": "minor",
+        "address": 10006528,
+        "pid": 49,
+        "tid": 49,
+        "target_faults": 1,
+        "target_read_sectors": 0,
+        "neighbor_read_sectors": 0,
+        "device_requests": []
+      },
+      "cached_target_cold_neighbor": {
+        "classification": "minor",
+        "address": 10014720,
+        "pid": 49,
+        "tid": 49,
+        "target_faults": 1,
+        "target_read_sectors": 0,
+        "neighbor_read_sectors": 0,
+        "device_requests": []
+      },
+      "cold_neighbor": {
+        "classification": "major",
+        "address": 10018816,
+        "pid": 49,
+        "tid": 49,
+        "target_faults": 1,
+        "target_read_sectors": 0,
+        "neighbor_read_sectors": 8,
+        "device_requests": [
+          {
+            "sector": 35408,
+            "sectors": 8,
+            "completed": true,
+            "result": 0
+          }
+        ]
+      }
+    },
+    "fault_report": {
+      "valid_instances": 264,
+      "unknown_classification": 0,
+      "unknown_access": 0,
+      "read_hits": 128,
+      "write_hits": 128,
+      "resolver_sum_ns": 30985900
+    },
+    "classification_counts": {
+      "resolved_minor": 262,
+      "resolved_major": 2,
+      "resolved_unknown": 0,
+      "unsuccessful": 0
+    },
+    "kernel_lifecycle_cases": [
+      "prepared_pin_drop",
+      "fault_io_unsupported_and_error",
+      "fault_io_retry_and_cancel",
+      "stale_file_replace",
+      "deferred_file_unmap",
+      "partial_file_unmap",
+      "partial_anonymous_unmap",
+      "unused_file_mapping_drop",
+      "file_fork_cow",
+      "fault_io_owner_waiter",
+      "fault_io_hot_target_cold_neighbor",
+      "fault_io_cancel_error_retry",
+      "fault_io_unsupported_generation_retry",
+      "cache_identity_publication",
+      "cache_write_failure_retry",
+      "cache_redirty_checkpoint",
+      "cache_durability_recovery",
+      "cache_snapshot_identity_generations",
+      "fault_io_block_cache_neighbor",
+      "sync_failure_refuses_reset"
+    ],
+    "arch": "riscv64"
+  },
+  "la-fault": {
+    "kind": "fault_classification_evidence",
+    "oracle": "qemu_virtio_completed_reads",
+    "cases": {
+      "anonymous": {
+        "classification": "minor",
+        "address": 10010624,
+        "pid": 54,
+        "tid": 54,
+        "target_faults": 1,
+        "target_read_sectors": 0,
+        "neighbor_read_sectors": 0,
+        "device_requests": []
+      },
+      "cold": {
+        "classification": "major",
+        "address": 10014720,
+        "pid": 54,
+        "tid": 54,
+        "target_faults": 1,
+        "target_read_sectors": 8,
+        "neighbor_read_sectors": 0,
+        "device_requests": [
+          {
+            "sector": 489584,
+            "sectors": 8,
+            "completed": true,
+            "result": 0
+          }
+        ]
+      },
+      "hot": {
+        "classification": "minor",
+        "address": 10018816,
+        "pid": 54,
+        "tid": 54,
+        "target_faults": 1,
+        "target_read_sectors": 0,
+        "neighbor_read_sectors": 0,
+        "device_requests": []
+      },
+      "cow": {
+        "classification": "minor",
+        "address": 10014720,
+        "pid": 54,
+        "tid": 54,
+        "target_faults": 1,
+        "target_read_sectors": 0,
+        "neighbor_read_sectors": 0,
+        "device_requests": []
+      },
+      "cached_target_cold_neighbor": {
+        "classification": "minor",
+        "address": 10022912,
+        "pid": 54,
+        "tid": 54,
+        "target_faults": 1,
+        "target_read_sectors": 0,
+        "neighbor_read_sectors": 0,
+        "device_requests": []
+      },
+      "cold_neighbor": {
+        "classification": "major",
+        "address": 10027008,
+        "pid": 54,
+        "tid": 54,
+        "target_faults": 1,
+        "target_read_sectors": 0,
+        "neighbor_read_sectors": 8,
+        "device_requests": [
+          {
+            "sector": 489592,
+            "sectors": 8,
+            "completed": true,
+            "result": 0
+          }
+        ]
+      }
+    },
+    "fault_report": {
+      "valid_instances": 264,
+      "unknown_classification": 0,
+      "unknown_access": 0,
+      "read_hits": 128,
+      "write_hits": 128,
+      "resolver_sum_ns": 8786580
+    },
+    "classification_counts": {
+      "resolved_minor": 262,
+      "resolved_major": 2,
+      "resolved_unknown": 0,
+      "unsuccessful": 0
+    },
+    "kernel_lifecycle_cases": [
+      "prepared_pin_drop",
+      "fault_io_unsupported_and_error",
+      "fault_io_retry_and_cancel",
+      "stale_file_replace",
+      "deferred_file_unmap",
+      "partial_file_unmap",
+      "partial_anonymous_unmap",
+      "unused_file_mapping_drop",
+      "file_fork_cow",
+      "fault_io_owner_waiter",
+      "fault_io_hot_target_cold_neighbor",
+      "fault_io_cancel_error_retry",
+      "fault_io_unsupported_generation_retry",
+      "cache_identity_publication",
+      "cache_write_failure_retry",
+      "cache_redirty_checkpoint",
+      "cache_durability_recovery",
+      "cache_snapshot_identity_generations",
+      "fault_io_block_cache_neighbor",
+      "sync_failure_refuses_reset"
+    ],
+    "arch": "loongarch64"
+  }
+}

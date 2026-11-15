@@ -1,6 +1,9 @@
 """Adversarial fixtures for the device-read/RAW classification oracle."""
 import struct
 import unittest
+import io
+from pathlib import Path
+import tempfile
 from verify_observation_evidence import Record
 import fault_class_evidence as evidence
 
@@ -24,6 +27,20 @@ def fixture():
 
 
 class FaultClassEvidenceTests(unittest.TestCase):
+    def test_boundary_waits_for_full_serial_line_before_acknowledging(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            run=Path(temporary)
+            (run/'device-reads.log').write_bytes(b'')
+            boundaries=evidence.Boundaries(run)
+            stdin=io.BytesIO()
+            prefix='FAULT_CLASS kind=anonymous point=begin address=4096 pid=2 tid=3 time_ns=364'
+            boundaries(prefix,stdin)
+            self.assertEqual(boundaries.rows,[])
+            self.assertEqual(stdin.getvalue(),b'')
+            boundaries(prefix+'4279560\n',stdin)
+            self.assertEqual(boundaries.rows[0]['time_ns'],3644279560)
+            self.assertEqual(stdin.getvalue(),b'g\n')
+
     def test_completed_device_reads_agree_with_target_classes(self):
         report=evidence.verify_cases(*fixture())
         self.assertEqual(report['cases']['cold']['classification'],'major')

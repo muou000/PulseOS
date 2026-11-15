@@ -26,7 +26,7 @@ LIFECYCLE_CASES={
     'cache_write_failure_retry','cache_redirty_checkpoint','cache_durability_recovery',
     'cache_snapshot_identity_generations','fault_io_block_cache_neighbor','sync_failure_refuses_reset',
 }
-MARKER=re.compile(r'^FAULT_CLASS kind=(\w+) point=(begin|end) address=(\d+) pid=(\d+) tid=(\d+) time_ns=(\d+)\s*$',re.M)
+MARKER=re.compile(r'^FAULT_CLASS kind=(\w+) point=(begin|end) address=(\d+) pid=(\d+) tid=(\d+) time_ns=(\d+)[ \t]*\n',re.M)
 READ=re.compile(r'virtio_blk_handle_read vdev (0x[0-9a-f]+) req (0x[0-9a-f]+) sector (\d+) nsectors (\d+)$')
 COMPLETE=re.compile(r'virtio_blk_rw_complete vdev (0x[0-9a-f]+) req (0x[0-9a-f]+) ret (-?\d+)$')
 
