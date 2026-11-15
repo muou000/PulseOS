@@ -84,6 +84,24 @@ adjtimex mode 互斥、UID/GID 的 32 位截断和 optional sentinel；这些没
 这些测试只保留能脱离真实 guest 资源执行的参数/ABI 断言。`sys_getrandom`、
 `sys_reboot`、`sys_membarrier`、`sys_wait4`、`sys_waitid` 和 `sys_prlimit64` 的实际
 资源、指针、能力和调度行为仍由裸机实现处理并需要 guest 测试。
+## Shell-init 关机通知
+
+首个用户进程及其主线程使用 PID/TID 1，调度器 Task ID 独立保留。
+当前启动的是交互式 Shell，因此内核为显式 `kill(1, sig)` 提供 init 关机通知：
+
+| 信号 | 动作 |
+| --- | --- |
+| `SIGUSR1` / `SIGPWR` | halt（平台下电） |
+| `SIGUSR2` | poweroff |
+| `SIGTERM` / `SIGINT` | restart |
+
+通知先经过普通 `kill(2)` 的存在性和信号权限检查，再复用 `reboot(2)` 的
+非中断式文件系统回写与平台操作；回写或重启失败会返回错误，不继续向 init
+投递该信号。`kill(1, 0)` 仅探测进程，进程组信号及其他 PID 保持普通信号语义。
+此协议由内核同步处理，不依赖 Shell 的信号掩码或 handler，也不运行用户态
+init 的服务停止脚本。直接调用 `reboot(2)` 仍要求 `CAP_SYS_BOOT`。
+双架构回归入口见 `tests/init_shutdown/README.md`。
+
 ## I/O 写入策略
 
 `sys_write`、`sys_writev`、`sys_pwrite64` 和 `sys_pwritev` 共享同一个用户段执行器。
