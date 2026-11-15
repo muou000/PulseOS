@@ -18,7 +18,13 @@ from zoneinfo import ZoneInfo
 BASE = Path(__file__).resolve().parent
 REPO = BASE.parents[1]
 SUITES = {"bench": 1, "append": 2, "semantics": 3, "mappings": 4, "counts": 5,
-          "small-bench": 6, "unmap-race": 7, "shared-position": 8}
+          "small-bench": 6, "unmap-race": 7, "shared-position": 8,
+          "backend": 9, "device-eof": 10}
+BACKEND_MARKERS = [
+    f"[FILE_IO_GUEST] {name} PASS"
+    for name in ("cached_read_prefix", "cached_write_prefix", "direct_short_zero",
+                 "direct_later_error", "legacy_nonregular_writeall")
+] + ["[FILE_IO_GUEST] All file I/O checks PASSED!"]
 spec = importlib.util.spec_from_file_location("shutdown_runner", REPO / "tests/init_shutdown/run.py")
 shutdown = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(shutdown)
@@ -60,6 +66,9 @@ def compile_guest(args, output):
     ]
     if args.arch == "riscv64":
         compile_cmd.append("-mno-relax")
+    if args.suite == "device-eof":
+        image = args.image or REPO / ("disk.img" if args.arch == "riscv64" else "disk-la.img")
+        compile_cmd.append(f"-DSG_DISK_BYTES={image.stat().st_size}UL")
     link_cmd = [str(linker), "-flavor", "gnu", "-static", "--no-relax",
                 "-T", str(BASE / "guest.ld"), str(obj), "-o", str(elf)]
     command(compile_cmd)
@@ -128,6 +137,16 @@ def summarize(rows):
     return summaries
 
 
+def diagnostic_rows(lines, prefix):
+    rows = []
+    for line in lines:
+        if line.startswith(prefix + " "):
+            row = dict(word.split("=", 1) for word in line.split()[1:])
+            rows.append({key: int(value) if re.fullmatch(r"-?\d+", value) else value
+                         for key, value in row.items()})
+    return rows
+
+
 def run(args, output, kernel, image, elf):
     source_hash, kernel_hash, guest_hash = sha256(image), sha256(kernel), sha256(elf)
     private_image = prepare_image(image, elf, output, args.suite)
@@ -166,7 +185,8 @@ def run(args, output, kernel, image, elf):
                 text += chunk.decode("utf-8", errors="replace")
                 check_permissions(text)
                 normalized = shutdown.ANSI.sub("", text).replace("\x08", "")
-                if not failed and (shutdown.FAULT.search(normalized) or "SG_FAIL " in normalized):
+                if not failed and (shutdown.FAULT.search(normalized) or "SG_FAIL " in normalized
+                                   or re.search(r"\[FILE_IO_GUEST\].*FAIL", normalized)):
                     errors.append("kernel fault or guest assertion failed")
                     failed = True
                     deadline = min(deadline, time.monotonic() + 1)
@@ -193,6 +213,11 @@ def run(args, output, kernel, image, elf):
     lines = shutdown.ANSI.sub("", text).replace("\r", "").splitlines()
     if "SG_PASS" not in lines:
         errors.append("missing final assertion marker")
+    backend_markers = [marker for marker in BACKEND_MARKERS
+                       if any(marker in line for line in lines)]
+    if args.suite == "backend":
+        errors.extend(f"missing kernel marker: {marker}" for marker in BACKEND_MARKERS
+                      if marker not in backend_markers)
     if not any("filesystem writeback complete; system power transition: PowerOff" in line
                for line in lines):
         errors.append("missing completed shutdown")
@@ -202,16 +227,20 @@ def run(args, output, kernel, image, elf):
     cases = {"bench": 16, "small-bench": 4}.get(args.suite)
     if cases and len(rows) != cases * args.samples:
         errors.append(f"benchmark matrix incomplete: {len(rows)} rows")
+    counts = diagnostic_rows(lines, "SG_COUNT")
+    if args.suite == "counts" and len(counts) != 88:
+        errors.append(f"operation-count matrix incomplete: {len(counts)} rows")
     result = {
         **manifest, "passed_assertions": sum(line.startswith("SG_OK ") for line in lines),
         "errors": errors, "measurements": rows, "summary": summarize(rows),
-        "counts": [dict(word.split("=", 1) for word in line.split()[1:])
-                   for line in lines if line.startswith("SG_COUNT ")],
+        "counts": counts, "races": diagnostic_rows(lines, "SG_RACE"),
+        "skips": [line for line in lines if line.startswith("SG_SKIP ")],
+        "backend_markers": backend_markers,
     }
     (output / "result.json").write_text(json.dumps(result, indent=2) + "\n")
     print(f"{'FAIL' if errors else 'PASS'} {args.arch} {args.suite}: {output / 'result.json'}")
     for line in lines:
-        if line.startswith(("SG_FAIL ", "SG_LAYOUT ", "SG_OK ")):
+        if line.startswith(("SG_FAIL ", "SG_LAYOUT ", "SG_OK ", "SG_SKIP ", "SG_DEVICE ")):
             print(line)
     for error in errors:
         print(error)

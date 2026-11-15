@@ -1,7 +1,7 @@
 use super::{
     cache::{
         FileWriteGuard, append_slice_source_async, append_source_async, shared_file_state_async,
-        write_slice_source_at_async, write_source_at_async,
+        write_slice_once_at_async, write_slice_source_at_async, write_source_at_async,
     },
     *,
 };
@@ -254,7 +254,11 @@ impl FileBackend {
                 shared
                     .flush_dirty_range_async(file, offset, requested)
                     .await?;
-                let result = write_slice_source_at_async(file, src, offset).await;
+                let result = if loc.node_type() == NodeType::RegularFile {
+                    write_slice_once_at_async(file, src, offset).await
+                } else {
+                    write_slice_source_at_async(file, src, offset).await
+                };
                 if let Ok(written) = result.as_ref() {
                     if *written != 0 {
                         let end = offset
@@ -455,7 +459,37 @@ pub struct FileIo<'a> {
     staging: Vec<u8>,
 }
 
-impl FileIo<'_> {
+impl<'a> FileIo<'a> {
+    fn new(
+        file: &'a File,
+        position: IoPosition<'a>,
+        write: bool,
+        write_operation: Option<FileWriteGuard>,
+    ) -> Self {
+        #[cfg(feature = "file-io-test")]
+        super::io_test::operation_started();
+        Self {
+            file,
+            position,
+            write,
+            _write_operation: write_operation,
+            staging: Vec::new(),
+        }
+    }
+
+    /// Exchanges initialized staging storage with a caller-owned bounded cache.
+    /// Oversized allocations are not retained by a file operation. Existing
+    /// bytes remain initialized, but only bytes filled by the current backend
+    /// or source transfer can be delivered to its destination.
+    pub fn replace_staging(&mut self, buffer: Vec<u8>) -> Vec<u8> {
+        let buffer = if buffer.capacity() <= DIRECT_IO_STAGING_SIZE {
+            buffer
+        } else {
+            Vec::new()
+        };
+        core::mem::replace(&mut self.staging, buffer)
+    }
+
     pub fn current_offset(&self) -> u64 {
         self.position.offset()
     }
@@ -500,6 +534,71 @@ impl FileIo<'_> {
         Ok(())
     }
 
+    /// Delivers bytes only after every page-cache reference and guard has been
+    /// released. The destination can map the source file or overlap it.
+    fn deliver_staged<W: Write + IoBufMut>(
+        &mut self,
+        dst: &mut W,
+        staged: usize,
+    ) -> VfsResult<usize> {
+        #[cfg(feature = "file-io-test")]
+        super::io_test::staged_bytes(staged);
+        let mut delivered = 0;
+        while delivered < staged {
+            let before = dst.remaining_mut();
+            let result = dst.write(&self.staging[delivered..staged]);
+            let copied = match before.checked_sub(dst.remaining_mut()) {
+                Some(copied) if copied <= staged - delivered => copied,
+                _ if delivered != 0 => return Ok(delivered),
+                _ => return Err(VfsError::Io),
+            };
+            self.completed(copied)?;
+            delivered += copied;
+            match result {
+                Ok(count) if count == copied && copied != 0 => {}
+                Ok(0) if copied == 0 => return Ok(delivered),
+                Err(error) if delivered == 0 => return Err(error.into()),
+                _ if delivered != 0 => return Ok(delivered),
+                _ => return Err(VfsError::Io),
+            }
+        }
+        Ok(delivered)
+    }
+
+    /// Tries one fully resident bounded window without constructing a future.
+    /// `None` leaves the destination and position unchanged; retain this same
+    /// operation and call `read` for cache misses, contention, or direct I/O.
+    pub fn try_read<W: Write + IoBufMut>(&mut self, dst: &mut W) -> Option<VfsResult<usize>> {
+        if self.write {
+            return Some(Err(VfsError::BadFileDescriptor));
+        }
+        if let Err(error) = self.file.access(FileFlags::READ) {
+            return Some(Err(error));
+        }
+        let requested = dst.remaining_mut();
+        if let Err(error) = self.check_length(requested) {
+            return Some(Err(error));
+        }
+        if requested == 0 {
+            return Some(Ok(0));
+        }
+        if requested > DIRECT_IO_STAGING_SIZE || matches!(self.file.inner, FileBackend::Direct(_)) {
+            return None;
+        }
+        if let Err(error) = self.prepare_staging(requested) {
+            return Some(Err(error));
+        }
+        let offset = self.current_offset();
+        let mut target = &mut self.staging[..requested];
+        let result = self.file.inner.try_read_at_resident(&mut target, offset)?;
+        let staged = requested - target.len();
+        match result {
+            Err(error) if staged == 0 => Some(Err(error)),
+            Ok(count) if count != staged => Some(Err(VfsError::Io)),
+            _ => Some(self.deliver_staged(dst, staged)),
+        }
+    }
+
     pub async fn read<W: Write + IoBufMut>(&mut self, dst: &mut W) -> VfsResult<usize> {
         if self.write {
             return Err(VfsError::BadFileDescriptor);
@@ -534,34 +633,15 @@ impl FileIo<'_> {
                 Ok(count) if count != staged => break,
                 _ => {}
             }
-            #[cfg(feature = "file-io-test")]
-            super::io_test::staged_bytes(staged);
-            // No page-cache slice or lock remains live while writing to user
-            // memory, which may itself map the source file and overlap it.
-            let mut delivered = 0;
-            while delivered < staged {
-                let before = dst.remaining_mut();
-                let result = dst.write(&self.staging[delivered..staged]);
-                let copied = before
-                    .checked_sub(dst.remaining_mut())
-                    .ok_or(VfsError::Io)?;
-                if copied > staged - delivered {
-                    return if completed == 0 {
-                        Err(VfsError::Io)
-                    } else {
-                        Ok(completed)
-                    };
+            match self.deliver_staged(dst, staged) {
+                Ok(delivered) => {
+                    completed += delivered;
+                    if delivered < staged {
+                        break;
+                    }
                 }
-                self.completed(copied)?;
-                completed += copied;
-                delivered += copied;
-                match result {
-                    Ok(count) if count == copied && copied != 0 => {}
-                    Ok(0) if copied == 0 => return Ok(completed),
-                    Err(error) if completed == 0 => return Err(error.into()),
-                    _ if completed != 0 => return Ok(completed),
-                    _ => return Err(VfsError::Io),
-                }
+                Err(error) if completed == 0 => return Err(error),
+                Err(_) => break,
             }
             if stop || staged == 0 {
                 break;
@@ -671,6 +751,16 @@ impl File {
         self.begin_io(offset, false).await
     }
 
+    /// Tries to retain the position transaction without waiting. A successful
+    /// acquisition is never discarded for a cache miss or a later waiter.
+    pub fn try_begin_read_io(&self, offset: Option<u64>) -> Option<VfsResult<FileIo<'_>>> {
+        if !self.supports_file_io() {
+            return Some(Err(VfsError::InvalidInput));
+        }
+        let position = IoPosition::try_begin(self.position.as_ref(), offset)?;
+        Some(Ok(FileIo::new(self, position, false, None)))
+    }
+
     /// Begins position/append ownership; write access is checked at transfer.
     pub async fn begin_write_io(&self, offset: Option<u64>) -> VfsResult<FileIo<'_>> {
         self.begin_io(offset, true).await
@@ -690,15 +780,7 @@ impl File {
         if append {
             position.select_append(self.inner.append_offset().await?);
         }
-        #[cfg(feature = "file-io-test")]
-        super::io_test::operation_started();
-        Ok(FileIo {
-            file: self,
-            position,
-            write,
-            _write_operation: write_operation,
-            staging: Vec::new(),
-        })
+        Ok(FileIo::new(self, position, write, write_operation))
     }
 
     fn new_with_position(
@@ -805,7 +887,10 @@ impl File {
     pub fn is_direct_regular_file(&self) -> bool {
         matches!(self.inner, FileBackend::Direct(_))
             && self.location().node_type() == NodeType::RegularFile
-            && !matches!(self.location().filesystem().name(), "proc" | "devfs" | "tmpfs")
+            && !matches!(
+                self.location().filesystem().name(),
+                "proc" | "devfs" | "tmpfs"
+            )
     }
 
     pub fn block_size(&self) -> u64 {

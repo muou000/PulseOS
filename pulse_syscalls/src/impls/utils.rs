@@ -313,9 +313,10 @@ pub(crate) fn alloc_zeroed_bytes(
                     return Err(LinuxError::ENOMEM);
                 }
                 buf.resize(len, 0);
-            } else {
-                buf[..len].fill(0);
             }
+            // A regular-file operation may return an initialized prefix to
+            // the shared thread cache. Growing it only initializes the suffix.
+            buf[..len].fill(0);
             Ok(ScratchBuffer::ThreadLocal {
                 thread,
                 buffer: Some(buf),

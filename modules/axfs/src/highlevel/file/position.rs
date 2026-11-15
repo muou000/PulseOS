@@ -40,6 +40,20 @@ impl FilePosition {
         Some(guard)
     }
 
+    /// Begins an operation without waiting behind a holder or an already
+    /// announced waiter. A waiter arriving after the initial check may follow
+    /// this operation: once acquired, the guard is retained through any later
+    /// cache miss rather than released and acquired a second time.
+    fn try_lock_for_operation(&self) -> Option<async_lock::MutexGuard<'_, u64>> {
+        if self.waiters.load(Ordering::Acquire) != 0 {
+            return None;
+        }
+        let guard = self.value.try_lock()?;
+        #[cfg(feature = "file-io-test")]
+        super::io_test::position_acquired();
+        Some(guard)
+    }
+
     pub(super) async fn lock(&self) -> async_lock::MutexGuard<'_, u64> {
         self.waiters.fetch_add(1, Ordering::AcqRel);
         // The RAII token also decrements the count if an enclosing file future
@@ -63,6 +77,21 @@ pub(super) struct IoPosition<'a> {
 }
 
 impl<'a> IoPosition<'a> {
+    pub(super) fn try_begin(
+        position: Option<&'a FilePosition>,
+        offset: Option<u64>,
+    ) -> Option<Self> {
+        let shared = if offset.is_none() {
+            match position {
+                Some(position) => Some(position.try_lock_for_operation()?),
+                None => None,
+            }
+        } else {
+            None
+        };
+        Some(Self::new(shared, offset))
+    }
+
     pub(super) async fn begin(position: Option<&'a FilePosition>, offset: Option<u64>) -> Self {
         let shared = if offset.is_none() {
             match position {
@@ -72,6 +101,10 @@ impl<'a> IoPosition<'a> {
         } else {
             None
         };
+        Self::new(shared, offset)
+    }
+
+    fn new(shared: Option<async_lock::MutexGuard<'a, u64>>, offset: Option<u64>) -> Self {
         let offset = offset.unwrap_or_else(|| shared.as_deref().copied().unwrap_or(0));
         Self {
             shared,

@@ -7,14 +7,20 @@ from pathlib import Path
 
 def normalized_qemu(command):
     result = []
-    skip = False
+    argument = None
     for word in command:
-        if skip:
-            skip = False
+        if argument == "-kernel":
+            result.append("<kernel>")
+            argument = None
+            continue
+        if argument == "-drive":
+            result.append(",".join(part for part in word.split(",")
+                                   if not part.startswith("file=")))
+            argument = None
             continue
         if word in ("-kernel", "-drive"):
             result.append(word)
-            skip = True
+            argument = word
         else:
             result.append(word)
     return result

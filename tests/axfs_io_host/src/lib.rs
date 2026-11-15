@@ -74,4 +74,45 @@ mod tests {
             assert_eq!(*position.try_lock().unwrap(), 0);
         });
     }
+
+    #[test]
+    fn synchronous_begin_retains_position_across_a_later_wait() {
+        block_on(async {
+            let position = FilePosition::new(7);
+            let mut operation = IoPosition::try_begin(Some(&position), None).unwrap();
+            assert!(IoPosition::try_begin(Some(&position), None).is_none());
+            futures_lite::future::yield_now().await;
+            operation.advance(5).unwrap();
+            drop(operation);
+            assert_eq!(*position.try_lock().unwrap(), 12);
+        });
+    }
+
+    #[test]
+    fn synchronous_begin_yields_to_an_already_queued_operation() {
+        block_on(async {
+            let position = FilePosition::new(7);
+            let held = position.lock().await;
+            let mut queued = Box::pin(IoPosition::begin(Some(&position), None));
+            assert!(futures_lite::future::poll_once(&mut queued).await.is_none());
+            drop(held);
+            assert!(IoPosition::try_begin(Some(&position), None).is_none());
+            let mut operation = queued.await;
+            operation.advance(3).unwrap();
+            drop(operation);
+            assert_eq!(*position.try_lock().unwrap(), 10);
+        });
+    }
+
+    #[test]
+    fn synchronous_positioned_begin_does_not_acquire_shared_position() {
+        block_on(async {
+            let position = FilePosition::new(7);
+            let held = position.lock().await;
+            let mut operation = IoPosition::try_begin(Some(&position), Some(90)).unwrap();
+            operation.advance(4).unwrap();
+            assert_eq!(operation.offset(), 94);
+            assert_eq!(*held, 7);
+        });
+    }
 }

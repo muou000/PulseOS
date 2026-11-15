@@ -6,6 +6,7 @@ enum {
     SYS_lseek = 62, SYS_read = 63, SYS_write = 64, SYS_readv = 65,
     SYS_writev = 66, SYS_pread64 = 67, SYS_pwrite64 = 68,
     SYS_preadv = 69, SYS_pwritev = 70, SYS_ftruncate = 46,
+    SYS_fstat = 80,
     SYS_exit = 93, SYS_exit_group = 94, SYS_clock_gettime = 113, SYS_reboot = 142,
     SYS_prctl = 167, SYS_getpid = 172, SYS_munmap = 215, SYS_clone = 220,
     SYS_mmap = 222, SYS_mprotect = 226, SYS_wait4 = 260,
@@ -23,6 +24,9 @@ enum {
 #endif
 #ifndef SG_ITERATIONS
 #define SG_ITERATIONS 16
+#endif
+#ifndef SG_DISK_BYTES
+#define SG_DISK_BYTES 0UL
 #endif
 
 struct Iovec { void *base; usize len; };
@@ -303,6 +307,9 @@ static void append_records(int independent)
               children[worker]);
         check("append-child-status", status, 0);
     }
+    if (independent != 1)
+        check("shared-write-final-position", CALL(SYS_lseek, fd, 0, 1),
+              WORKERS * RECORDS * RECORD_SIZE);
     check("append-file-size", CALL(SYS_lseek, fd, 0, 2),
           WORKERS * RECORDS * RECORD_SIZE);
     check("append-rewind", CALL(SYS_lseek, fd, 0, 0), 0);
@@ -314,7 +321,8 @@ static void append_records(int independent)
         if (tag < 'A' || tag >= 'A' + WORKERS) fail("append-record-tag", tag, 'A');
         for (usize byte = 0; byte < RECORD_SIZE; ++byte)
             if (record[byte] != tag)
-                fail(independent ? "append-independent-record-interleaved" :
+                fail(independent == 1 ? "append-independent-record-interleaved" :
+                     independent == 2 ? "shared-write-record-interleaved" :
                      "append-shared-record-interleaved", i * RECORD_SIZE + byte, -1);
         ++counts[tag - 'A'];
     }
@@ -393,6 +401,19 @@ static void partial_fault(long fd, int write, int vector, int positioned)
         for (usize i = 0; i < PAGE - 256; ++i)
             if (buf[i] != 0xcc) fail("partial-read-canary-or-skipped-fault", i, -1);
     }
+    long before_fault = CALL(SYS_lseek, fd, 0, 1);
+    struct Iovec bad = { buf + PAGE, 1 };
+    observed = observe_begin();
+    if (vector)
+        n = positioned ? vector_at(fd, &bad, 1, write, 0, 0) :
+            CALL(write ? SYS_writev : SYS_readv, fd, &bad, 1);
+    else
+        n = positioned ? CALL4(write ? SYS_pwrite64 : SYS_pread64,
+                                fd, buf + PAGE, 1, 0) :
+            CALL(write ? SYS_write : SYS_read, fd, buf + PAGE, 1);
+    observe_end(observed);
+    check("first-byte-fault", n, -EFAULT);
+    check("first-byte-fault-position", CALL(SYS_lseek, fd, 0, 1), before_fault);
     CALL(SYS_munmap, buf, PAGE * 2, 0); CALL(SYS_munmap, verify, PAGE * 2, 0);
     passed(write ? "partial-write-content-position" : "partial-read-content-position");
 }
@@ -410,6 +431,15 @@ static void semantic_io(void)
     check("preadv-unaligned-and-empty", vector_at(fd, iov, 4, 0, 0, 0), 65536);
     check("preadv-keeps-position", CALL(SYS_lseek, fd, 0, 1), 777);
     verify_pattern("preadv-data", out, 65536);
+    for (usize i = 0; i < 65536; ++i) out[i] = 0xa7;
+    int observed = observe_begin();
+    long short_read = CALL4(SYS_pread64, fd, out, 65536, 65500);
+    observe_end(observed);
+    check("pread-eof-short-read", short_read, 36);
+    check("pread-eof-position", CALL(SYS_lseek, fd, 0, 1), 777);
+    for (usize i = 0; i < 65536; ++i)
+        if (out[i] != (i < 36 ? pattern(65500 + i) : 0xa7))
+            fail("pread-eof-canary", i, -1);
     check("preadv2-explicit", vector_at(fd, iov, 4, 0, 0, 1), 65536);
     check("preadv2-keeps-position", CALL(SYS_lseek, fd, 0, 1), 777);
     check("v2-shared-rewind", CALL(SYS_lseek, fd, 0, 0), 0);
@@ -748,6 +778,53 @@ static void shared_read_records(void)
     passed("shared-read-records-once-and-position");
 }
 
+static void backend_checks(void)
+{
+    check("controlled-backend-guest-checks", CALL5(SYS_prctl, 0x50534749, 4, 0, 0, 0), 0);
+    passed("controlled-backend-progress-errors-and-zero");
+}
+
+static void device_eof(void)
+{
+    struct DeviceStat {
+        usize dev, ino;
+        unsigned mode, nlink, uid, gid;
+        usize rdev, pad1;
+        long size;
+        int blksize, pad2;
+        long blocks, atime;
+        usize atime_ns;
+        long mtime;
+        usize mtime_ns;
+        long ctime;
+        usize ctime_ns;
+        unsigned unused4, unused5;
+    };
+    _Static_assert(sizeof(struct DeviceStat) == 128, "RV64/LA64 stat ABI");
+    const char *paths[] = { "/dev/vda", "/dev/sda", "/dev/vdb", "/dev/hda", "/dev/blk0" };
+    for (usize i = 0; i < sizeof(paths) / sizeof(paths[0]); ++i) {
+        long fd = CALL4(SYS_openat, AT_FDCWD, paths[i], 1, 0);
+        if (fd < 0) continue;
+        struct DeviceStat info;
+        long stat_result = CALL(SYS_fstat, fd, &info, 0);
+        if (stat_result || (info.mode & 0170000) != 0060000 ||
+            !SG_DISK_BYTES || info.size != (long)SG_DISK_BYTES) {
+            CALL(SYS_close, fd, 0, 0);
+            continue;
+        }
+        text("SG_DEVICE path="); text(paths[i]);
+        text(" confirmed_eof="); number(info.size); text("\n");
+        /* Both fstat and the runner's exact raw-image size identify this as
+         * EOF. No write in this test can target a valid disk byte. */
+        const unsigned char byte = 0xa5;
+        check("nonfile-eof-write-is-eio", CALL4(SYS_pwrite64, fd, &byte, 1, info.size), -5);
+        CALL(SYS_close, fd, 0, 0);
+        passed("nonfile-device-eof");
+        return;
+    }
+    text("SG_SKIP nonfile-device-no-confirmed-block-size\n");
+}
+
 __attribute__((noreturn)) void _start(void)
 {
     if (SG_SUITE == 1) benchmark(0);
@@ -758,6 +835,8 @@ __attribute__((noreturn)) void _start(void)
     if (SG_SUITE == 6) benchmark(1);
     if (SG_SUITE == 7) unmap_race();
     if (SG_SUITE == 8) { append_records(2); shared_read_records(); }
+    if (SG_SUITE == 9) backend_checks();
+    if (SG_SUITE == 10) device_eof();
     text("SG_PASS\n");
     CALL(SYS_reboot, 0xfee1dead, 672274793, 0x4321fedc);
     fail("poweroff-returned", 0, 1);
