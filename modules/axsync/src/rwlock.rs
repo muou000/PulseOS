@@ -1,3 +1,5 @@
+// Proof premises, dependency boundaries and validation: records/axsync-154/README.md.
+
 use core::{
     cell::UnsafeCell,
     ops::{Deref, DerefMut},
@@ -7,53 +9,69 @@ use core::{
 use axtask::{WaitContext, WaitQueue, WaitReason, WakeContext};
 
 /// A reader-writer lock based on sleeping/yielding tasks.
+///
+/// Readers back off when they observe a waiting writer. Admission is not FIFO:
+/// a reader racing writer registration or another writer may acquire first.
+/// Recursive read acquisition can deadlock behind a waiting writer; recursive
+/// writes and read-to-write upgrades are not supported. Use the `try_*` methods
+/// to reject unavailable access without blocking.
 pub struct RwLock<T: ?Sized> {
-    // Safety invariant: `wq` coordinates blocking and wakeup of tasks waiting for read
-    // or write access. Tasks sleeping on `wq` are woken when the last active reader drops
-    // or when the active writer drops.
+    // Waiting grants no access to `value`: every wakeup retries the state CAS.
+    // WaitQueue checks the condition and enrolls the task under its queue lock;
+    // releases publish state before taking that same queue lock to notify. Thus
+    // a waiter either observes availability or is enrolled for the notification.
+    // This relies on axtask's wait/enqueue/unblock contract, not on fairness.
     wq: WaitQueue,
 
-    // Safety invariant:
-    // - `0`: Unlocked. No active readers or writers.
-    // - `> 0`: Shared read mode. The value is the exact count of active `RwLockReadGuard`s.
-    //   Writers cannot acquire the lock while `state > 0`.
-    // - `-1`: Exclusive write mode. Exactly one `RwLockWriteGuard` exists.
-    //   No readers or other writers can acquire the lock while `state == -1`.
-    // - `state < -1`: Invalid state, prohibited by synchronization invariants.
+    // STATE invariant (all fields and guard constructors are private here):
+    // - 0: no outstanding acquisition token.
+    // - n in 1..=i32::MAX: exactly n outstanding reader tokens, no writer token.
+    // - -1: exactly one outstanding writer token, no reader tokens.
+    // A successful CAS creates a token before constructing its guard; Drop
+    // consumes it before notifying. Moving a guard transfers its token, and
+    // forgetting a guard leaves its token reserved. Counts therefore need not
+    // equal the number of live Rust guard values. Values below -1 are excluded
+    // by checked increments and one decrement per non-Clone reader guard.
+    //
+    // ORDER invariant: each successful acquisition and reader release is a
+    // SeqCst RMW (hence both Acquire and Release). It reads the preceding state
+    // modification and republishes its happens-before history. Chaining these
+    // RMWs carries the last writer's Release swap to every subsequent reader,
+    // and every reader's accesses through the final decrement to the next
+    // writer's acquiring CAS. Failed CAS/diagnostic loads grant no permission.
+    // This uses core::sync::atomic::Ordering's Acquire/Release/SeqCst contracts;
+    // the individual transitions below preserve both STATE and ORDER.
     state: AtomicI32,
 
-    // Safety invariant:
-    // - `>= 0`: Count of writers currently waiting in `write()`.
-    // - When `waiting_writers > 0`, incoming readers in `read()` and `try_read()` back off
-    //   and wait to prevent writer starvation.
+    // Outstanding slow-path writer reservations, in 0..=i32::MAX. A bounded
+    // increment creates one reservation; that writer removes it after acquiring
+    // STATE's writer token. A panic while waiting can strand a reservation and
+    // obstruct readers, but cannot grant access or invalidate STATE/ORDER.
+    // The separate, relaxed reader check is only an admission preference.
     waiting_writers: AtomicI32,
 
-    // Safety invariant: `value` stores the protected data.
-    // - Shared references `&T` are exposed only when `state > 0`.
-    // - Exclusive reference `&mut T` is exposed only when `state == -1`.
+    // Initialized by new(T). Guard references require the corresponding STATE
+    // token and are bounded by a borrow of that guard. get_mut/into_inner instead
+    // use an exclusive borrow/ownership of the entire lock; they remain safe
+    // after forgotten guards, even when the stored state is nonzero.
     value: UnsafeCell<T>,
 }
 
-// SAFETY:
-// `RwLock<T>` owns `value: UnsafeCell<T>`, `wq: WaitQueue`, `state: AtomicI32`, and
-// `waiting_writers: AtomicI32`.
-// - Moving `RwLock<T>` to another execution context transfers ownership of `T`.
-// - `WaitQueue`, `AtomicI32`, and `UnsafeCell<T>` are safe to send across threads/tasks
-//   provided `T: Send`.
-// - Therefore, `RwLock<T>` is soundly `Send` whenever `T: Send`.
+// SAFETY: Moving the lock transfers its owned T, so T: Send is sufficient.
+// Any usable guard/reference borrows the lock and prevents this move. Forgotten
+// guards provide no usable references and require no cleanup for memory safety.
+// AtomicI32 and the selected axtask WaitQueue implementation are Send, and
+// UnsafeCell<T> is Send for T: Send; no task-affine state is added here.
 unsafe impl<T: ?Sized + Send> Send for RwLock<T> {}
 
-// SAFETY:
-// `RwLock<T>` provides synchronized access to `T` through shared references `&RwLock<T>`.
-// - Concurrent read guards (`RwLockReadGuard`) provide concurrent `&T` references to multiple
-//   tasks. For multiple tasks to hold `&T` concurrently, `T` must implement `Sync`.
-// - Exclusive write guards (`RwLockWriteGuard`) provide exclusive `&mut T` reference to a single
-//   task. An exclusive `&mut T` on another task allows mutating `T`, replacing values in `T`,
-//   or moving values out of `T` across thread boundaries. Therefore, `T` must implement `Send`.
-// - Synchronization invariants ensure that `&mut T` and `&T` never exist simultaneously, and
-//   `Acquire`/`Release`/`SeqCst` memory ordering ensures that all writes to `T` happen-before
-//   any subsequent reads or writes on another task.
-// - Therefore, `RwLock<T>` is soundly `Sync` whenever `T: Send + Sync`.
+// SAFETY: STATE permits either shared reader tokens or a single writer token;
+// ORDER publishes earlier accesses before conflicting later accesses. Only the
+// private guard implementations expose `value`: readers yield &T (T: Sync),
+// while a writer can replace/move T through &mut T on another task (T: Send).
+// Guard borrows exclude conflicting references through the same token, and
+// get_mut/into_inner require exclusive access to the entire lock. Metadata uses
+// atomics and axtask's synchronized WaitQueue. Thus sharing &RwLock<T> exposes
+// no unsynchronized access beyond what T: Send + Sync already permits.
 unsafe impl<T: ?Sized + Send + Sync> Sync for RwLock<T> {}
 
 impl<T> RwLock<T> {
@@ -68,6 +86,9 @@ impl<T> RwLock<T> {
     }
 
     /// Consumes the lock, returning the underlying data.
+    ///
+    /// Ownership excludes usable guards, including references derived from them.
+    /// Forgotten guards may leave a reservation but cannot access the moved value.
     pub fn into_inner(self) -> T {
         self.value.into_inner()
     }
@@ -76,8 +97,9 @@ impl<T> RwLock<T> {
 impl<T: ?Sized> RwLock<T> {
     /// Returns a mutable reference to the underlying data.
     ///
-    /// Since this call borrows `RwLock` mutably, no other references to `self`
-    /// exist, guaranteeing exclusive access statically without runtime locking.
+    /// The exclusive borrow prevents concurrent guard access without locking.
+    /// This also works after a guard was forgotten; it does not clear the
+    /// forgotten guard's reservation.
     pub fn get_mut(&mut self) -> &mut T {
         self.value.get_mut()
     }
@@ -90,26 +112,26 @@ impl<T: ?Sized> RwLock<T> {
         self.state.load(Ordering::Relaxed) == -1
     }
 
-    /// Returns the number of active readers currently holding the lock.
+    /// Returns a snapshot of the number of outstanding reader acquisitions.
     ///
-    /// Primarily intended for diagnostics and concurrency assertions in tests.
+    /// This includes forgotten guards. Primarily intended for diagnostics;
+    /// the snapshot grants no permission to access the value.
     #[doc(hidden)]
     pub fn reader_count(&self) -> usize {
         let s = self.state.load(Ordering::Relaxed);
-        if s > 0 {
-            s as usize
-        } else {
-            0
-        }
+        if s > 0 { s as usize } else { 0 }
     }
 
-    /// Acquires a shared read lock, blocking the current task if a writer is active
-    /// or if writers are waiting.
+    /// Acquires a shared read lock, waiting while a writer is active or observed
+    /// waiting. Panics if the reader count is exhausted.
     pub fn read(&self) -> RwLockReadGuard<'_, T> {
         loop {
             let current_state = self.state.load(Ordering::Acquire);
             let waiting = self.waiting_writers.load(Ordering::Relaxed);
             if current_state >= 0 && waiting == 0 {
+                // STATE: only nonnegative counts below MAX can increment, so
+                // no wrap can fabricate a writer token or an unlocked state.
+                // Success creates exactly one reader token and preserves ORDER.
                 assert!(current_state < i32::MAX, "RwLock reader count overflow");
                 if self
                     .state
@@ -143,7 +165,10 @@ impl<T: ?Sized> RwLock<T> {
     }
 
     /// Acquires an exclusive write lock, blocking the current task until unlocked.
+    /// Panics if the waiting-writer count is exhausted.
     pub fn write(&self) -> RwLockWriteGuard<'_, T> {
+        // STATE: 0 has no reader/writer token; only one CAS can consume it.
+        // ORDER: the acquiring half imports preceding releases before access.
         if self
             .state
             .compare_exchange(0, -1, Ordering::SeqCst, Ordering::Relaxed)
@@ -151,7 +176,24 @@ impl<T: ?Sized> RwLock<T> {
         {
             return RwLockWriteGuard { lock: self };
         }
-        self.waiting_writers.fetch_add(1, Ordering::SeqCst);
+        // Atomic arithmetic wraps even in debug builds. Refuse overflow before
+        // publication so reader admission never mistakes wrapped reservations
+        // for zero. Failure creates no reservation and changes no lock state.
+        let mut waiting = self.waiting_writers.load(Ordering::Relaxed);
+        loop {
+            let next = waiting
+                .checked_add(1)
+                .expect("RwLock waiting writer count overflow");
+            match self.waiting_writers.compare_exchange_weak(
+                waiting,
+                next,
+                Ordering::SeqCst,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => break,
+                Err(actual) => waiting = actual,
+            }
+        }
         loop {
             if self
                 .state
@@ -171,6 +213,9 @@ impl<T: ?Sized> RwLock<T> {
                 || self.state.load(Ordering::Relaxed) == 0,
             );
         }
+        // This path owns one reservation and now the unique writer token.
+        // Removing the reservation cannot underflow, nor admit readers while
+        // state == -1. No fallible operation occurs before the guard is returned.
         self.waiting_writers.fetch_sub(1, Ordering::SeqCst);
         RwLockWriteGuard { lock: self }
     }
@@ -178,13 +223,15 @@ impl<T: ?Sized> RwLock<T> {
     /// Attempts to acquire this lock with shared read access.
     ///
     /// Returns `Some(RwLockReadGuard)` if the lock was acquired, or `None` if
-    /// a writer is active or waiting.
+    /// a writer is observed active/waiting or the reader count is exhausted.
     pub fn try_read(&self) -> Option<RwLockReadGuard<'_, T>> {
         let mut current_state = self.state.load(Ordering::Acquire);
         while current_state >= 0 && self.waiting_writers.load(Ordering::Relaxed) == 0 {
             if current_state == i32::MAX {
                 return None;
             }
+            // As in read(), success adds one bounded reader token and is the
+            // acquiring event. Failure grants no access and retries actual state.
             match self.state.compare_exchange_weak(
                 current_state,
                 current_state + 1,
@@ -203,6 +250,7 @@ impl<T: ?Sized> RwLock<T> {
     /// Returns `Some(RwLockWriteGuard)` if the lock was acquired, or `None` if
     /// the lock is currently held by readers or another writer.
     pub fn try_write(&self) -> Option<RwLockWriteGuard<'_, T>> {
+        // The same 0 -> -1 transition as write(): unique token plus ORDER.
         if self
             .state
             .compare_exchange(0, -1, Ordering::SeqCst, Ordering::Relaxed)
@@ -226,62 +274,47 @@ pub struct RwLockReadGuard<'a, T: ?Sized> {
     lock: &'a RwLock<T>,
 }
 
-// SAFETY:
-// `RwLockReadGuard` grants shared access `&T` to the protected value.
-// - For multiple tasks to hold `&RwLockReadGuard<T>` concurrently, `&T` must be safe to share
-//   concurrently across threads, which requires `T: Sync`.
-// - Dropping or referencing `&RwLockReadGuard` performs only read-only dereferences or atomic
-//   decrement on `state`.
+// SAFETY: A shared guard exposes only &T through Deref, requiring T: Sync.
+// Its private lock field is never returned, so sharing a guard does not expose
+// RwLock's write methods (which would additionally require T: Send). &guard
+// cannot consume/drop the token. Its borrow keeps the token and allocation
+// alive; STATE excludes a writer throughout all these shared accesses.
 unsafe impl<'a, T: ?Sized + Sync> Sync for RwLockReadGuard<'a, T> {}
 
-// SAFETY:
-// Moving `RwLockReadGuard` to another task transfers one active reader token.
-// - The guard provides shared access `&T` in the destination task, which requires `T: Sync`.
-// - Additionally, `RwLock<T>` must be `Sync` so that the borrowed reference `&'a RwLock<T>`
-//   is `Send`, which requires `T: Send`.
-// - Dropping the guard on another task atomically decrements `state` and notifies `wq`, which
-//   is thread-safe.
+// SAFETY: A move transfers one reader token without duplicating it. The retained
+// bounds make &RwLock<T> Send (RwLock<T>: Sync), and T: Sync permits the &T
+// exposed at the destination. Drop consumes only that token by atomic RMW and
+// uses axtask's task-independent WaitQueue notification; it needs no original
+// task identity. The stored borrow preserves the lock's lifetime across the move.
 unsafe impl<'a, T: ?Sized + Send + Sync> Send for RwLockReadGuard<'a, T> {}
 
 impl<'a, T: ?Sized> Deref for RwLockReadGuard<'a, T> {
     type Target = T;
 
     fn deref(&self) -> &Self::Target {
-        // SAFETY:
-        // Operation: Creating shared reference `&T` from raw pointer `self.lock.value.get()`.
-        // Contract:
-        // 1. Pointer must be non-null, aligned for `T`, and point to valid, initialized memory
-        //    for the duration of the borrow.
-        // 2. No mutable reference (`&mut T`) to the pointee may exist for the duration of the borrow.
-        // 3. No concurrent writes to `*value.get()` may occur while `&T` is active.
-        //
-        // Evidence:
-        // - Validity and alignment: `self.lock.value` is an inline `UnsafeCell<T>` within `RwLock<T>`.
-        //   Since `self.lock` is a valid reference `&'a RwLock<T>`, `value.get()` produces a non-null,
-        //   properly aligned pointer to initialized memory that remains live for at least `'a`.
-        // - Atomic state invariant: The creation of `RwLockReadGuard` in `read()` or `try_read()`
-        //   successfully incremented `self.lock.state` to a value > 0 using `SeqCst` ordering.
-        // - Guard exclusivity: A writer can only acquire write access when `state == 0`. Since `state > 0`
-        //   for the lifetime of this guard (and is only decremented on drop), no `RwLockWriteGuard`
-        //   exists or can be created while this guard is alive.
-        // - Absence of mutable references: Only `RwLockWriteGuard` can create `&mut T`. Since no write
-        //   guard exists, no `&mut T` exists.
-        // - Lifetime bound: The returned reference is bound to `&self`, so it cannot outlive the
-        //   `RwLockReadGuard`, which in turn cannot outlive `'a`.
-        // - Concurrency: Concurrent readers may also obtain `&T`. Since `T: Sync` is required for
-        //   sharing `RwLock<T>` across tasks, concurrent read-only access does not cause data races.
-        //
-        // Therefore, dereferencing `self.lock.value.get()` to `&T` is sound.
+        // SAFETY: UnsafeCell::get returns a pointer to this initialized inline T,
+        // preserving its alignment, provenance and (for ?Sized T) metadata. The
+        // stored &'a RwLock keeps that allocation live; the returned &T is bound
+        // to &self, so it cannot outlive this guard or be used across its Drop.
+        // Only read/try_read construct this private-field guard, after adding
+        // one STATE token. While it is usable that token keeps state > 0 and
+        // excludes every writer token. get_mut/into_inner cannot coexist with
+        // the guard's borrow of the lock. ORDER imports the last writer's writes.
+        // Other readers expose only &T; any mutation within T's own UnsafeCells
+        // must obey T's safe API, with T: Sync required for cross-task sharing.
+        // These facts establish UnsafeCell's shared-reference aliasing contract.
         unsafe { &*self.lock.value.get() }
     }
 }
 
 impl<'a, T: ?Sized> Drop for RwLockReadGuard<'a, T> {
     fn drop(&mut self) {
-        // Synchronization / State transition:
-        // Atomically decrement the reader count with `SeqCst` ordering.
-        // `SeqCst` ordering ensures that all reads performed through this guard happen-before
-        // any subsequent writer acquires exclusive access.
+        // &mut self excludes any still-used reference returned by Deref. This
+        // non-Clone guard owns one STATE token, so prev >= 1 and consuming it
+        // cannot underflow. The SeqCst RMW releases this reader's accesses and
+        // acquires/republishes earlier readers' releases (ORDER); the eventual
+        // final decrement therefore carries every finished reader to a writer.
+        // Forgetting a guard skips this transition, conservatively retaining it.
         let prev = self.lock.state.fetch_sub(1, Ordering::SeqCst);
         assert!(
             prev > 0,
@@ -303,88 +336,62 @@ pub struct RwLockWriteGuard<'a, T: ?Sized> {
     lock: &'a RwLock<T>,
 }
 
-// SAFETY:
-// `RwLockWriteGuard` provides `&T` access via `Deref`.
-// - Sharing `&RwLockWriteGuard` across tasks allows concurrent `&T` reads, which requires `T: Sync`.
+// SAFETY: &guard exposes &T through Deref, requiring T: Sync. It cannot call
+// DerefMut, move/drop the guard, or reach the private &RwLock field. Its borrow
+// keeps the unique writer token alive and precludes mutable borrows of that
+// guard, so simultaneous shared access cannot overlap any &mut T.
 unsafe impl<'a, T: ?Sized + Sync> Sync for RwLockWriteGuard<'a, T> {}
 
-// SAFETY:
-// Moving `RwLockWriteGuard` to another task transfers exclusive `&mut T` access.
-// - In Rust, transferring exclusive mutable access to `T` across tasks requires `T: Send`.
-// - The guard holds a borrowed reference `&'a RwLock<T>`. Sending `&'a RwLock<T>` across
-//   tasks requires `RwLock<T>: Sync`, which in turn requires `T: Send + Sync` (see the `Sync`
-//   impl for `RwLock<T>`).
-// - Dropping the guard on another task atomically clears `state` to 0 with `Release` ordering
-//   and notifies `wq`, which is thread-safe.
+// SAFETY: Moving this non-Clone guard transfers the unique STATE writer token.
+// T: Send permits exclusive access/moving T at the destination; the retained
+// T: Sync bound additionally makes its borrowed &RwLock<T> Send. Existing guard
+// borrows prevent a move until their uses end. Neither the release RMW nor the
+// selected WaitQueue notification depends on which task acquired the token.
 unsafe impl<'a, T: ?Sized + Send + Sync> Send for RwLockWriteGuard<'a, T> {}
 
 impl<'a, T: ?Sized> Deref for RwLockWriteGuard<'a, T> {
     type Target = T;
 
     fn deref(&self) -> &Self::Target {
-        // SAFETY:
-        // Operation: Creating shared reference `&T` from raw pointer `self.lock.value.get()`.
-        // Contract:
-        // 1. Pointer must be non-null, aligned for `T`, and valid for reads of `T`.
-        // 2. No other active reference to `*value.get()` (neither `&T` nor `&mut T`) may exist
-        //    that conflicts with this shared borrow.
-        //
-        // Evidence:
-        // - Validity: `value` is an inline `UnsafeCell<T>` in `RwLock<T>`, so `value.get()` is non-null,
-        //   properly aligned, and valid for `size_of::<T>()` bytes.
-        // - Atomic state invariant: The creation of `RwLockWriteGuard` in `write()` or `try_write()`
-        //   atomically transitioned `state` from 0 to -1 via `SeqCst` compare-exchange.
-        // - Guard exclusivity: While `state == -1`, no readers can acquire the lock (readers require
-        //   `state >= 0`), and no other writer can acquire the lock (writers require `state == 0`).
-        // - Single owner: `RwLockWriteGuard` uniquely owns the lock token for `state == -1`.
-        // - Lifetime bound: The returned reference is bound to `&self`, ensuring it cannot outlive
-        //   this guard.
-        //
-        // Therefore, creating `&T` is sound.
+        // SAFETY: value.get() addresses the initialized inline T, with its
+        // alignment/provenance and any DST metadata preserved. The stored lock
+        // borrow keeps it live. Only write/try_write construct this guard,
+        // after the acquiring 0 -> -1 CAS: STATE excludes every other token,
+        // and ORDER imports prior accesses. Borrowing &self permits other &T
+        // from this guard but precludes DerefMut and Drop until those uses end.
+        // The lock borrow also excludes get_mut/into_inner. The result is tied
+        // to &self, satisfying UnsafeCell's shared-reference aliasing contract
+        // (while still allowing interior mutation through T's own safe API).
         unsafe { &*self.lock.value.get() }
     }
 }
 
 impl<'a, T: ?Sized> DerefMut for RwLockWriteGuard<'a, T> {
     fn deref_mut(&mut self) -> &mut Self::Target {
-        // SAFETY:
-        // Operation: Creating mutable reference `&mut T` from raw pointer `self.lock.value.get()`.
-        // Contract:
-        // 1. Pointer must be non-null, properly aligned, and valid for writes of `T`.
-        // 2. No other references (`&T` or `&mut T`) to the pointee may exist for the duration
-        //    of the mutable borrow (exclusivity guarantee of `&mut`).
-        //
-        // Evidence:
-        // - Validity and alignment: `self.lock.value` is an inline `UnsafeCell<T>` within `RwLock<T>`,
-        //   guaranteeing a non-null, properly aligned pointer to initialized memory for `'a`.
-        // - Atomic state invariant: `self.lock.state` is -1, established atomically by CAS from 0
-        //   with `SeqCst` ordering.
-        // - Mutual exclusivity: While `state == -1`, no `RwLockReadGuard` exists (readers require
-        //   `state > 0`) and no other `RwLockWriteGuard` exists (only one CAS from 0 to -1 can succeed).
-        // - Borrow exclusivity: `deref_mut` takes `&mut self`. By Rust's borrow checker rules, while
-        //   the returned `&mut Self::Target` is active, no other borrow of `self` (including `deref`)
-        //   can be called.
-        // - Memory ordering: The transition to `state = -1` used `SeqCst` ordering, synchronizing
-        //   with all prior reader releases (`SeqCst` `fetch_sub`) and writer releases (`Release` store/swap).
-        //   All prior operations on `T` happen-before this mutable access.
-        // - Lifetime: The returned `&mut Self::Target` is bound to the lifetime of `&mut self`, ensuring
-        //   it cannot outlive the guard.
-        //
-        // Therefore, constructing `&mut T` satisfies Rust's aliasing rules and is sound.
+        // SAFETY: UnsafeCell::get points to the initialized inline T and
+        // preserves its alignment, provenance and DST metadata. The stored
+        // lock borrow keeps it allocated. This private-field, non-Clone guard
+        // owns the sole writer token from write/try_write's acquiring 0 -> -1
+        // CAS; STATE excludes all other guards, and ORDER imports prior accesses.
+        // &mut self excludes still-used references from this same guard and
+        // prevents another Deref/DerefMut/Drop while the result is usable. The
+        // borrowed lock excludes get_mut/into_inner. Thus the returned &mut T
+        // is exclusive for its lifetime, bounded by this borrow of the guard,
+        // as required by UnsafeCell even when T itself contains UnsafeCells.
         unsafe { &mut *self.lock.value.get() }
     }
 }
 
 impl<'a, T: ?Sized> Drop for RwLockWriteGuard<'a, T> {
     fn drop(&mut self) {
-        // Synchronization / State transition:
-        // Atomically release the exclusive write lock by storing 0 with `Release` ordering.
-        // `Release` ordering ensures that all mutations performed through `&mut T` happen-before
-        // subsequent readers or writers observe `state == 0` with `Acquire`/`SeqCst`.
+        // &mut self excludes still-used references derived from this guard.
+        // Its unique writer token means state == -1; the Release swap consumes
+        // that token and publishes all accesses before the next acquiring CAS.
+        // Readers propagate that history through ORDER's SeqCst RMW chain.
+        // A forgotten guard never executes this release and prevents new tokens.
         let prev = self.lock.state.swap(0, Ordering::Release);
         assert_eq!(
-            prev,
-            -1,
+            prev, -1,
             "RwLockWriteGuard::drop: lock was not in write-locked state (corrupted state: {})",
             prev
         );

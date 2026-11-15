@@ -1,0 +1,16 @@
+[package]
+name = "axsync-154-host"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[[bin]]
+name = "axsync-154-host"
+path = "src/main.rs"
+test = false
+bench = false
+
+[workspace]
+
+[dependencies]
+lock_api = { version = "=0.4.14", default-features = false }
