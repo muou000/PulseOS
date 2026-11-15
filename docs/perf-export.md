@@ -44,6 +44,8 @@ perf.data 中的 `PERF_SAMPLE_PERIOD` 始终保留真实软件时钟增量，不
 导出不补造调用者。仅有 IP 的样本只能表示 IP；已捕获的栈前缀保留原始地址顺序和
 终止状态，partial/unavailable 不变为完整调用链。混合 user/kernel 链必须有可信的
 上下文分界，不能按地址大小猜测所属模式。当前单域 stack-v3 不包含这种分界。
+v2 单 IP 样本没有 source_id，仅在 scope 内来源唯一时允许导出；不能用不同
+period 区分多个实例。v3 使用实际捕获的 source_id，并另行核对 scope 和 period。
 
 缺失、内容不匹配的 ELF，以及不能证明采样时映射归属的样本，严格导出失败；可以
 使用明确的 Query 选择已有证据的范围，但不能把被排除范围的未知或丢失改写为零。

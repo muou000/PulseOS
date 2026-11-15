@@ -41,13 +41,12 @@ struct Source {
     task: u64,
 }
 impl Source {
-    fn accepts(&self, event: &NormalizedEvent, period: u64) -> bool {
-        self.period == period
-            && match self.scope.as_str() {
-                "cpu" => self.target == u64::from(event.cpu_id),
-                "task" => self.target == u64::from(event.tid) && self.task == event.task_id,
-                _ => false,
-            }
+    fn covers(&self, event: &NormalizedEvent) -> bool {
+        match self.scope.as_str() {
+            "cpu" => self.target == u64::from(event.cpu_id),
+            "task" => self.target == u64::from(event.tid) && self.task == event.task_id,
+            _ => false,
+        }
     }
     fn json(&self) -> String {
         format!(
@@ -281,13 +280,18 @@ pub fn export(
         };
         let candidates: Vec<_> = declared
             .iter()
-            .filter(|s| id.is_none_or(|i| s.id == i) && s.accepts(event, period))
+            .filter(|s| id.is_none_or(|i| s.id == i) && s.covers(event))
             .collect();
         if candidates.len() != 1 {
             return Err(format!(
                 "sample {} has missing or ambiguous source instance",
                 event.sequence_index
             ));
+        }
+        // Period is a measured increment, not an instance identifier. In v2,
+        // scope must establish a unique source before validating its period.
+        if candidates[0].period != period {
+            return Err("sample period differs from its declared source".into());
         }
         if !matches!(mode, 1 | 2) || pc == 0 || ips.is_empty() || ips[0] != pc {
             return Err("invalid captured CPU sample".into());
