@@ -11,6 +11,224 @@ use crate::{
 static TEST_LOCK: Mutex<()> = Mutex::new(());
 
 #[test]
+fn rejected_move_shadow_update_leaves_no_ghost_and_retry_can_publish() {
+    let _serial = TEST_LOCK.lock().unwrap();
+    let root = Mountpoint::new_root(&MemFs::create("root")).root_location();
+    let primary = mount_filesystem(&mkdir(&root, "primary"), "base", "tmpfs", 0, || {
+        Ok(MemFs::create("base"))
+    })
+    .unwrap();
+    primary.make_shared();
+    let peer = mount_bind(
+        &mkdir(&root, "peer"),
+        primary.root_location(),
+        "/primary",
+        4096,
+    )
+    .unwrap();
+    let moving = mount_filesystem(&mkdir(&root, "moving"), "moving", "tmpfs", 1, || {
+        Ok(MemFs::create("moving"))
+    })
+    .unwrap();
+    let destination = mkdir(&primary.root_location(), "child");
+    moving.root_location().move_mount(&destination).unwrap();
+    rename_mount_registry("/moving", "/primary/child");
+    FAIL_NEXT_RECORD_UPDATE.store(true, std::sync::atomic::Ordering::Relaxed);
+    propagate_mount(&moving);
+    assert!(lookup_mounted_mountpoint("/peer/child").is_none());
+    assert_eq!(list_mounts().len(), 3);
+    let unchanged = block_on(peer.root_location().lookup_no_follow("child")).unwrap();
+    assert!(Arc::ptr_eq(unchanged.mountpoint(), &peer));
+    assert!(Arc::ptr_eq(
+        &lookup_mounted_mountpoint("/primary/child").unwrap(),
+        &moving
+    ));
+    propagate_mount(&moving);
+    let shadow = block_on(peer.root_location().lookup_no_follow("child")).unwrap();
+    assert_eq!(shadow.filesystem().name(), "moving");
+    assert!(shadow.mountpoint().is_readonly());
+    assert!(Arc::ptr_eq(
+        &lookup_mounted_mountpoint("/peer/child").unwrap(),
+        shadow.mountpoint()
+    ));
+    assert_eq!(list_mounts().len(), 4);
+    unmount_filesystem(&shadow).unwrap();
+    unmount_filesystem(&moving.root_location()).unwrap();
+    unmount_filesystem(&peer.root_location()).unwrap();
+    unmount_filesystem(&primary.root_location()).unwrap();
+    assert!(list_mounts().is_empty());
+}
+
+#[test]
+fn rejected_bind_update_leaves_no_mount_and_retry_inherits_readonly() {
+    let _serial = TEST_LOCK.lock().unwrap();
+    let root = Mountpoint::new_root(&MemFs::create("root")).root_location();
+    let source = mount_filesystem(&mkdir(&root, "source"), "source", "tmpfs", 1, || {
+        Ok(MemFs::create("source"))
+    })
+    .unwrap();
+    let target = mkdir(&root, "bind");
+    FAIL_NEXT_RECORD_UPDATE.store(true, std::sync::atomic::Ordering::Relaxed);
+    assert_eq!(
+        mount_bind(&target, source.root_location(), "/source", 4096).unwrap_err(),
+        axfs_ng_vfs::VfsError::NoMemory
+    );
+    assert!(!target.is_mountpoint());
+    assert!(lookup_mounted_mountpoint("/bind").is_none());
+    assert_eq!(list_mounts().len(), 1);
+    let bound = mount_bind(&target, source.root_location(), "/source", 4096).unwrap();
+    assert!(bound.is_readonly());
+    assert_eq!(bound.get_flags(), 4096);
+    assert!(mountpoint_is_bind(&bound));
+    assert_eq!(
+        list_mounts()
+            .iter()
+            .find(|row| row.target == "/bind")
+            .unwrap()
+            .options,
+        "ro,bind,relatime"
+    );
+    let resolved = block_on(root.lookup_no_follow("bind")).unwrap();
+    assert!(Arc::ptr_eq(resolved.mountpoint(), &bound));
+    unmount_filesystem(&resolved).unwrap();
+    unmount_filesystem(&source.root_location()).unwrap();
+    assert!(list_mounts().is_empty());
+}
+
+#[test]
+fn lazy_bind_subtree_rejection_restores_shadows_and_retry_cleans_records() {
+    let _serial = TEST_LOCK.lock().unwrap();
+    let root = Mountpoint::new_root(&MemFs::create("root")).root_location();
+    let source = mount_filesystem(&mkdir(&root, "source"), "source", "tmpfs", 0, || {
+        Ok(MemFs::create("source"))
+    })
+    .unwrap();
+    let child = mount_filesystem(
+        &mkdir(&source.root_location(), "nested"),
+        "nested",
+        "tmpfs",
+        1,
+        || Ok(MemFs::create("nested")),
+    )
+    .unwrap();
+    let bound = mount_bind(
+        &mkdir(&root, "bind"),
+        source.root_location(),
+        "/source",
+        4096,
+    )
+    .unwrap();
+    let shadow = block_on(bound.root_location().lookup_no_follow("nested")).unwrap();
+    assert!(!Arc::ptr_eq(shadow.mountpoint(), &child));
+    assert!(shadow.mountpoint().is_readonly());
+    assert_eq!(shadow.mountpoint().get_flags(), 1);
+    assert_eq!(list_mounts().len(), 4);
+    assert_eq!(
+        list_mounts()
+            .iter()
+            .find(|row| row.target == "/bind/nested")
+            .unwrap()
+            .options,
+        "ro,relatime"
+    );
+    FAIL_NEXT_RECORD_UPDATE.store(true, std::sync::atomic::Ordering::Relaxed);
+    assert_eq!(
+        unmount_subtree(&bound.root_location()),
+        Err(axfs_ng_vfs::VfsError::NoMemory)
+    );
+    assert_eq!(list_mounts().len(), 4);
+    let resolved = block_on(root.lookup_no_follow("bind")).unwrap();
+    assert!(Arc::ptr_eq(resolved.mountpoint(), &bound));
+    let restored = block_on(resolved.lookup_no_follow("nested")).unwrap();
+    assert!(Arc::ptr_eq(restored.mountpoint(), shadow.mountpoint()));
+    unmount_subtree(&resolved).unwrap();
+    assert_eq!(list_mounts().len(), 2);
+    assert!(lookup_mounted_mountpoint("/bind").is_none());
+    assert!(lookup_mounted_mountpoint("/bind/nested").is_none());
+    assert!(bound.location().is_none());
+    assert!(shadow.mountpoint().location().is_none());
+    unmount_subtree(&source.root_location()).unwrap();
+    assert!(list_mounts().is_empty());
+}
+
+#[test]
+fn ordinary_mount_publishes_peer_and_slave_shadow_records() {
+    let _serial = TEST_LOCK.lock().unwrap();
+    let root = Mountpoint::new_root(&MemFs::create("root")).root_location();
+    let primary = mount_filesystem(&mkdir(&root, "primary"), "base", "tmpfs", 0, || {
+        Ok(MemFs::create("base"))
+    })
+    .unwrap();
+    primary.make_shared();
+    let peer = mount_bind(
+        &mkdir(&root, "peer"),
+        primary.root_location(),
+        "/primary",
+        4096,
+    )
+    .unwrap();
+    let slave = mount_bind(
+        &mkdir(&root, "slave"),
+        primary.root_location(),
+        "/primary",
+        4096,
+    )
+    .unwrap();
+    slave.make_slave();
+    let child = mount_filesystem(
+        &mkdir(&primary.root_location(), "child"),
+        "child",
+        "tmpfs",
+        1,
+        || Ok(MemFs::create("child")),
+    )
+    .unwrap();
+
+    for (parent, path) in [(&peer, "/peer/child"), (&slave, "/slave/child")] {
+        let resolved = block_on(parent.root_location().lookup_no_follow("child")).unwrap();
+        assert_eq!(
+            resolved.filesystem().name(),
+            "child",
+            "missing shadow at {path}"
+        );
+        assert!(resolved.mountpoint().is_readonly());
+        assert_eq!(resolved.mountpoint().get_flags(), 1);
+        assert!(Arc::ptr_eq(
+            &lookup_mounted_mountpoint(path).unwrap(),
+            resolved.mountpoint()
+        ));
+        let rows = list_mounts();
+        let row = rows.iter().find(|row| row.target == path).unwrap();
+        assert_eq!(row.source, "child");
+        assert_eq!(row.fs_type, "tmpfs");
+        assert_eq!(row.options, "ro,relatime");
+    }
+    let peer_child = block_on(peer.root_location().lookup_no_follow("child")).unwrap();
+    let slave_child = block_on(slave.root_location().lookup_no_follow("child")).unwrap();
+    assert_eq!(
+        peer_child.mountpoint().propagation().peer_group(),
+        child.propagation().peer_group()
+    );
+    assert_eq!(
+        slave_child.mountpoint().propagation().master_group(),
+        child.propagation().peer_group()
+    );
+    for shadow in axfs_ng_vfs::collect_propagate_unmount(&child) {
+        unmount_filesystem(&shadow.root_location()).unwrap();
+    }
+    unmount_filesystem(&child.root_location()).unwrap();
+    assert!(
+        !list_mounts()
+            .iter()
+            .any(|row| row.target.ends_with("/child"))
+    );
+    for mount in [slave, peer, primary] {
+        unmount_filesystem(&mount.root_location()).unwrap();
+    }
+    assert!(list_mounts().is_empty());
+}
+
+#[test]
 fn mount_and_unmount_keep_listing_and_resolution_in_agreement() {
     let _serial = TEST_LOCK.lock().unwrap();
     let root = Mountpoint::new_root(&MemFs::create("root")).root_location();
@@ -272,20 +490,20 @@ fn competing_probes_publish_exactly_one_mount_and_record() {
 }
 
 #[test]
-fn unmounting_a_legacy_stacked_mount_preserves_the_lower_record() {
+fn unmounting_a_stacked_bind_preserves_the_lower_record() {
     let _serial = TEST_LOCK.lock().unwrap();
     let root = Mountpoint::new_root(&MemFs::create("root")).root_location();
     let target = mkdir(&root, "stack");
     let lower =
         mount_filesystem(&target, "lower", "tmpfs", 0, || Ok(MemFs::create("lower"))).unwrap();
-    // Existing bind/move workflows retain their lower-level registration API.
     let source = Mountpoint::new_root(&MemFs::create("upper"));
-    let upper = lower
-        .root_location()
-        .mount_bind(source.root_location())
-        .unwrap();
-    register_mounted_mountpoint("/stack", upper.clone());
-    register_mount_for_mountpoint("upper", "/stack", "tmpfs", "rw,bind", upper.clone());
+    let upper = mount_bind(
+        &lower.root_location(),
+        source.root_location(),
+        "upper",
+        4096,
+    )
+    .unwrap();
     assert_eq!(list_mounts().len(), 2);
     let resolved = block_on(root.lookup_no_follow("stack")).unwrap();
     assert!(Arc::ptr_eq(resolved.mountpoint(), &upper));

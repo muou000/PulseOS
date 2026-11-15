@@ -1,11 +1,13 @@
-/* Ordinary mount/unmount consistency regression for #160 (RV64 and LA64). */
+/* Mount coordination regressions for #160 and #161 (RV64 and LA64). */
 typedef unsigned long usize;
 enum {
     SYS_mkdirat = 34, SYS_umount2 = 39, SYS_mount = 40, SYS_openat = 56,
     SYS_close = 57, SYS_read = 63, SYS_write = 64, SYS_exit_group = 94,
     SYS_reboot = 142,
-    ENOENT = 2, EBUSY = 16, EINVAL = 22,
+    ENOENT = 2, EBUSY = 16, EINVAL = 22, EROFS = 30,
     AT_FDCWD = -100, O_CREAT = 64, O_EXCL = 128, O_RDWR = 2,
+    MS_RDONLY = 1, MS_BIND = 4096, MS_SLAVE = 1 << 19, MS_SHARED = 1 << 20,
+    MNT_DETACH = 2,
 };
 
 static long syscall6(long nr, usize x0, usize x1, usize x2, usize x3, usize x4, usize x5)
@@ -82,7 +84,7 @@ static long read_byte(const char *path)
 }
 
 /* Open a fresh /proc/mounts snapshot after every transition. */
-static long mount_rows(const char *target)
+static long mount_rows_matching(const char *target, const char *option)
 {
     static char contents[16384];
     usize len = 0, target_len = 0;
@@ -101,9 +103,166 @@ static long mount_rows(const char *target)
         if (contents[i] != ' ') continue;
         usize j = 0;
         while (j < target_len && contents[i + 1 + j] == target[j]) ++j;
-        if (j == target_len && contents[i + 1 + j] == ' ') ++rows;
+        if (j != target_len || contents[i + 1 + j] != ' ') continue;
+        if (!option) {
+            ++rows;
+            continue;
+        }
+        /* Skip the filesystem type, then match a complete mount option. */
+        usize p = i + 2 + j;
+        while (p < len && contents[p] != ' ' && contents[p] != '\n') ++p;
+        if (p == len || contents[p] != ' ') continue;
+        ++p;
+        while (p < len && contents[p] != ' ' && contents[p] != '\n') {
+            usize k = 0;
+            while (p + k < len && option[k] && contents[p + k] == option[k]) ++k;
+            if (!option[k] && p + k < len &&
+                (contents[p + k] == ',' || contents[p + k] == ' ')) {
+                ++rows;
+                break;
+            }
+            while (p < len && contents[p] != ',' && contents[p] != ' ' && contents[p] != '\n') ++p;
+            if (p < len && contents[p] == ',') ++p;
+        }
     }
     return rows;
+}
+
+static long mount_rows(const char *target)
+{
+    return mount_rows_matching(target, 0);
+}
+
+static void readonly_bind(void)
+{
+    const char *source = "/tmp/pulse-mount161-ro-source";
+    const char *target = "/tmp/pulse-mount161-ro-bind";
+    expect("mkdir-ro-source", CALL(SYS_mkdirat, AT_FDCWD, source, 0755), 0);
+    expect("mkdir-ro-bind", CALL(SYS_mkdirat, AT_FDCWD, target, 0755), 0);
+    expect("readonly-source-mount", CALL5(SYS_mount, "readonly161", source, "tmpfs", MS_RDONLY, 0), 0);
+    expect("readonly-source-listed-ro", mount_rows_matching(source, "ro"), 1);
+    expect("readonly-source-bind", CALL5(SYS_mount, source, target, 0, MS_BIND, 0), 0);
+    expect("readonly-bind-inherited", CALL4(SYS_openat, AT_FDCWD,
+           "/tmp/pulse-mount161-ro-bind/denied", O_CREAT | O_RDWR, 0600), -EROFS);
+    expect("readonly-bind-listed-ro", mount_rows_matching(target, "ro"), 1);
+    expect("readonly-bind-listed-bind", mount_rows_matching(target, "bind"), 1);
+    expect("readonly-bind-unmount", CALL(SYS_umount2, target, 0, 0), 0);
+    expect("readonly-bind-record-removed", mount_rows(target), 0);
+    expect("readonly-source-unmount", CALL(SYS_umount2, source, 0, 0), 0);
+    expect("readonly-source-record-removed", mount_rows(source), 0);
+}
+
+static void propagated_mounts(void)
+{
+    const char *parents[] = {
+        "/tmp/pulse-mount161-a", "/tmp/pulse-mount161-b", "/tmp/pulse-mount161-c",
+    };
+    const char *slots[] = {
+        "/tmp/pulse-mount161-a/slot", "/tmp/pulse-mount161-b/slot", "/tmp/pulse-mount161-c/slot",
+    };
+    const char *payloads[] = {
+        "/tmp/pulse-mount161-a/slot/value", "/tmp/pulse-mount161-b/slot/value",
+        "/tmp/pulse-mount161-c/slot/value",
+    };
+    const char *nested[] = {
+        "/tmp/pulse-mount161-a/slot/child", "/tmp/pulse-mount161-b/slot/child",
+        "/tmp/pulse-mount161-c/slot/child",
+    };
+    const char *nested_payloads[] = {
+        "/tmp/pulse-mount161-a/slot/child/value", "/tmp/pulse-mount161-b/slot/child/value",
+        "/tmp/pulse-mount161-c/slot/child/value",
+    };
+    const char *ordinary[] = {
+        "/tmp/pulse-mount161-a/ordinary", "/tmp/pulse-mount161-b/ordinary",
+        "/tmp/pulse-mount161-c/ordinary",
+    };
+    const char *source = "/tmp/pulse-mount161-source";
+    const char *source_child = "/tmp/pulse-mount161-source/child";
+    for (usize i = 0; i < 3; ++i)
+        expect("mkdir-propagation-parent", CALL(SYS_mkdirat, AT_FDCWD, parents[i], 0755), 0);
+    expect("mkdir-bind-source", CALL(SYS_mkdirat, AT_FDCWD, source, 0755), 0);
+    expect("mount-shared-parent", CALL5(SYS_mount, "parent161", parents[0], "tmpfs", 0, 0), 0);
+    expect("mkdir-bind-slot", CALL(SYS_mkdirat, AT_FDCWD, slots[0], 0755), 0);
+    expect("mkdir-ordinary-slot", CALL(SYS_mkdirat, AT_FDCWD, ordinary[0], 0755), 0);
+    expect("mkdir-slave-local-slot", CALL(SYS_mkdirat, AT_FDCWD, "/tmp/pulse-mount161-a/local", 0755), 0);
+    expect("make-shared-parent", CALL5(SYS_mount, 0, parents[0], 0, MS_SHARED, 0), 0);
+    expect("bind-shared-peer", CALL5(SYS_mount, parents[0], parents[1], 0, MS_BIND, 0), 0);
+    expect("bind-slave-parent", CALL5(SYS_mount, parents[1], parents[2], 0, MS_BIND, 0), 0);
+    expect("make-slave-parent", CALL5(SYS_mount, 0, parents[2], 0, MS_SLAVE, 0), 0);
+    expect("mount-bind-source", CALL5(SYS_mount, "source161", source, "tmpfs", 0, 0), 0);
+    create_file("/tmp/pulse-mount161-source/value", 'P');
+    expect("mkdir-source-child", CALL(SYS_mkdirat, AT_FDCWD, source_child, 0755), 0);
+    expect("mount-source-child", CALL5(SYS_mount, "child161", source_child, "tmpfs", 0, 0), 0);
+    create_file("/tmp/pulse-mount161-source/child/value", 'N');
+
+    /* The primary, peer and slave expose the same content and effective flags. */
+    expect("bind-readonly-under-shared-parent", CALL5(SYS_mount, source, slots[0], 0, MS_BIND | MS_RDONLY, 0), 0);
+    for (usize i = 0; i < 3; ++i) {
+        expect("propagated-bind-record", mount_rows(slots[i]), 1);
+        expect("propagated-bind-listed-ro", mount_rows_matching(slots[i], "ro"), 1);
+        expect("propagated-bind-listed-bind", mount_rows_matching(slots[i], "bind"), 1);
+        expect("propagated-bind-content", read_byte(payloads[i]), 'P');
+        expect("propagated-bind-readonly", CALL4(SYS_openat, AT_FDCWD, payloads[i], O_RDWR, 0), -EROFS);
+        expect("nested-shadow-record", mount_rows(nested[i]), 1);
+        expect("nested-shadow-retains-rw", mount_rows_matching(nested[i], "rw"), 1);
+        expect("nested-shadow-content", read_byte(nested_payloads[i]), 'N');
+    }
+    create_file("/tmp/pulse-mount161-c/slot/child/writable", 'W');
+    expect("nested-shadow-writes-share-source", read_byte("/tmp/pulse-mount161-source/child/writable"), 'W');
+    expect("normal-unmount-nested-shadow", CALL(SYS_umount2, nested[0], 0, 0), 0);
+    for (usize i = 0; i < 3; ++i) {
+        expect("normal-nested-shadow-record-removed", mount_rows(nested[i]), 0);
+        expect("normal-nested-shadow-content-removed", CALL4(SYS_openat, AT_FDCWD, nested_payloads[i], 0, 0), -ENOENT);
+    }
+    expect("source-child-record-retained", mount_rows(source_child), 1);
+    expect("normal-unmount-propagated-bind", CALL(SYS_umount2, slots[0], 0, 0), 0);
+    for (usize i = 0; i < 3; ++i) {
+        expect("normal-shadow-record-removed", mount_rows(slots[i]), 0);
+        expect("normal-shadow-content-removed", CALL4(SYS_openat, AT_FDCWD, payloads[i], 0, 0), -ENOENT);
+    }
+
+    /* A slave receives events but does not publish them back to its master. */
+    expect("bind-under-slave", CALL5(SYS_mount, source, "/tmp/pulse-mount161-c/local", 0, MS_BIND, 0), 0);
+    expect("slave-local-record", mount_rows("/tmp/pulse-mount161-c/local"), 1);
+    expect("slave-local-content", read_byte("/tmp/pulse-mount161-c/local/value"), 'P');
+    expect("slave-no-master-record", mount_rows("/tmp/pulse-mount161-a/local"), 0);
+    expect("slave-no-peer-record", mount_rows("/tmp/pulse-mount161-b/local"), 0);
+    expect("slave-no-master-content", CALL4(SYS_openat, AT_FDCWD, "/tmp/pulse-mount161-a/local/value", 0, 0), -ENOENT);
+    expect("slave-no-peer-content", CALL4(SYS_openat, AT_FDCWD, "/tmp/pulse-mount161-b/local/value", 0, 0), -ENOENT);
+    expect("lazy-unmount-slave-local", CALL(SYS_umount2, "/tmp/pulse-mount161-c/local", MNT_DETACH, 0), 0);
+    expect("lazy-slave-record-removed", mount_rows("/tmp/pulse-mount161-c/local"), 0);
+    expect("lazy-slave-child-record-removed", mount_rows("/tmp/pulse-mount161-c/local/child"), 0);
+
+    /* Ordinary mounts use the same peer/slave lifecycle as binds. */
+    expect("ordinary-mount-under-shared-parent", CALL5(SYS_mount, "ordinary161", ordinary[0], "tmpfs", 0, 0), 0);
+    create_file("/tmp/pulse-mount161-a/ordinary/value", 'O');
+    expect("ordinary-peer-content", read_byte("/tmp/pulse-mount161-b/ordinary/value"), 'O');
+    expect("ordinary-slave-content", read_byte("/tmp/pulse-mount161-c/ordinary/value"), 'O');
+    for (usize i = 0; i < 3; ++i)
+        expect("ordinary-propagated-record", mount_rows(ordinary[i]), 1);
+    expect("unmount-ordinary-propagation", CALL(SYS_umount2, ordinary[0], 0, 0), 0);
+    for (usize i = 0; i < 3; ++i)
+        expect("ordinary-shadow-record-removed", mount_rows(ordinary[i]), 0);
+
+    /* Detaching a subtree must remove every primary and shadow listing row. */
+    expect("bind-subtree-for-lazy-detach", CALL5(SYS_mount, source, slots[0], 0, MS_BIND, 0), 0);
+    for (usize i = 0; i < 3; ++i) {
+        expect("lazy-fixture-shadow-record", mount_rows(slots[i]), 1);
+        expect("lazy-fixture-nested-record", mount_rows(nested[i]), 1);
+    }
+    expect("lazy-unmount-propagated-subtree", CALL(SYS_umount2, slots[0], MNT_DETACH, 0), 0);
+    for (usize i = 0; i < 3; ++i) {
+        expect("lazy-shadow-record-removed", mount_rows(slots[i]), 0);
+        expect("lazy-nested-shadow-record-removed", mount_rows(nested[i]), 0);
+        expect("lazy-shadow-content-removed", CALL4(SYS_openat, AT_FDCWD, payloads[i], 0, 0), -ENOENT);
+    }
+    expect("source-child-survives-shadow-cleanup", read_byte("/tmp/pulse-mount161-source/child/value"), 'N');
+    expect("cleanup-source-child", CALL(SYS_umount2, source_child, 0, 0), 0);
+    expect("cleanup-source", CALL(SYS_umount2, source, 0, 0), 0);
+    for (usize i = 3; i > 0; --i) {
+        expect("cleanup-propagation-parent", CALL(SYS_umount2, parents[i - 1], 0, 0), 0);
+        expect("cleanup-parent-record-removed", mount_rows(parents[i - 1]), 0);
+    }
 }
 
 __attribute__((noreturn)) void _start(void)
@@ -144,6 +303,9 @@ __attribute__((noreturn)) void _start(void)
     expect("underlying-file-restored", read_byte(underlying), 'B');
     expect("mounted-file-gone", CALL4(SYS_openat, AT_FDCWD, mounted, 0, 0), -ENOENT);
     expect("second-unmount-invalid", CALL(SYS_umount2, target, 0, 0), -EINVAL);
+
+    readonly_bind();
+    propagated_mounts();
 
     text("ABI_MOUNTS_PASS\n");
     CALL(SYS_reboot, 0xfee1dead, 672274793, 0x4321fedc);
