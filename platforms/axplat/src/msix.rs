@@ -1,6 +1,10 @@
 //! PCI MSI-X configuration interface.
 
 use memory_addr::PhysAddr;
+use virtio_drivers::transport::pci::{
+    PciTransport,
+    bus::{BarInfo, DeviceFunction, PciRoot},
+};
 
 /// PCI capability ID for MSI-X.
 pub const PCI_CAP_ID_MSIX: u8 = 0x11;
@@ -181,6 +185,59 @@ pub trait PciMsixIf {
 
     /// Enables the platform interrupt controller for the given allocated IRQ.
     fn enable_irq(irq: usize) -> Result<(), PciMsixError>;
+}
+
+/// Configures a VirtIO PCI device's MSI-X table and queue/config vectors.
+///
+/// The selected platform supplies the interrupt identity, message and routing
+/// through [`PciMsixIf`]. Callers receive a usable IRQ or a controlled error and
+/// need no knowledge of MSI-X table programming or platform interrupt hardware.
+/// The device's BARs must already be assigned, and `transport` must belong to
+/// `bdf` on `root`.
+pub fn configure_virtio_pci_msix(
+    root: &mut PciRoot,
+    bdf: DeviceFunction,
+    transport: &mut PciTransport,
+) -> Result<usize, PciMsixError> {
+    let offset = root
+        .capabilities(bdf)
+        .find(|cap| cap.id == PCI_CAP_ID_MSIX)
+        .ok_or(PciMsixError::Unsupported)?
+        .offset;
+    // All three DWORDs must fit in conventional 256-byte configuration space.
+    if offset > 244 {
+        return Err(PciMsixError::InvalidCapability);
+    }
+
+    let cap_word0 = root.config_read_word(bdf, offset);
+    let table_word = root.config_read_word(bdf, offset + 4);
+    let table_bir = (table_word & 0x7) as u8;
+    let table_offset = (table_word & !0x7) as usize;
+    if table_bir >= 6 {
+        return Err(PciMsixError::InvalidBar);
+    }
+    let bar_info = root
+        .bar_info(bdf, table_bir)
+        .map_err(|_| PciMsixError::InvalidBar)?;
+    let (bar_address, bar_size) = match bar_info {
+        BarInfo::Memory { address, size, .. } => (
+            usize::try_from(address).map_err(|_| PciMsixError::InvalidBar)?,
+            size as usize,
+        ),
+        _ => return Err(PciMsixError::InvalidBar),
+    };
+    let table = MsixTableMapping::from_bar_region(bar_address, bar_size, table_offset, 1)?;
+    let allocation = allocate_vector()?;
+    table.configure_entry(0, allocation.message, false)?;
+
+    const MSIX_CONTROL_ENABLE: u32 = 1 << 31;
+    root.config_write_word(bdf, offset, cap_word0 | MSIX_CONTROL_ENABLE);
+    enable_irq(allocation.irq)?;
+
+    transport.set_config_msix_vector(0);
+    transport.set_default_queue_msix_vector(0);
+    transport.set_msix_enabled(true);
+    Ok(allocation.irq)
 }
 
 #[cfg(test)]

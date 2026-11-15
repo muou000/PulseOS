@@ -78,9 +78,6 @@ mod structs;
 #[cfg(feature = "virtio")]
 mod virtio;
 
-#[cfg(all(bus = "pci", feature = "virtio"))]
-pub mod virtio_msix;
-
 #[cfg(feature = "ixgbe")]
 mod ixgbe;
 

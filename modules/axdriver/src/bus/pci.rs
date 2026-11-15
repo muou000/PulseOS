@@ -14,7 +14,7 @@ fn config_pci_device(
 ) -> DevResult {
     let mut bar = 0;
     while bar < PCI_BAR_NUM {
-        let info = root.bar_info(bdf, bar).unwrap();
+        let info = root.bar_info(bdf, bar).map_err(|_| DevError::InvalidParam)?;
         if let BarInfo::Memory {
             address_type,
             address,
@@ -26,7 +26,7 @@ fn config_pci_device(
             if size > 0 && address == 0 {
                 let new_addr = allocator
                     .as_mut()
-                    .expect("No memory ranges available for PCI BARs!")
+                    .ok_or(DevError::NoMemory)?
                     .alloc(size as _)
                     .ok_or(DevError::NoMemory)?;
                 if address_type == MemoryBarType::Width32 {
@@ -38,11 +38,12 @@ fn config_pci_device(
         }
 
         // read the BAR info again after assignment.
-        let info = root.bar_info(bdf, bar).unwrap();
+        let info = root.bar_info(bdf, bar).map_err(|_| DevError::InvalidParam)?;
         match info {
             BarInfo::IO { address, size } => {
                 if address > 0 && size > 0 {
-                    debug!("  BAR {}: IO  [{:#x}, {:#x})", bar, address, address + size);
+                    let end = address.checked_add(size).ok_or(DevError::InvalidParam)?;
+                    debug!("  BAR {}: IO  [{:#x}, {:#x})", bar, address, end);
                 }
             }
             BarInfo::Memory {
@@ -52,11 +53,14 @@ fn config_pci_device(
                 size,
             } => {
                 if address > 0 && size > 0 {
+                    let end = address
+                        .checked_add(size as u64)
+                        .ok_or(DevError::InvalidParam)?;
                     debug!(
                         "  BAR {}: MEM [{:#x}, {:#x}){}{}",
                         bar,
                         address,
-                        address + size as u64,
+                        end,
                         if address_type == MemoryBarType::Width64 {
                             " 64bit"
                         } else {

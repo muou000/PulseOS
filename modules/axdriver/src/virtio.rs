@@ -18,7 +18,7 @@ use crate::{AxDeviceEnum, drivers::DriverProbe};
 
 cfg_if! {
     if #[cfg(bus = "pci")] {
-        use axdriver_pci::{PciRoot, DeviceFunction, DeviceFunctionInfo, BarInfo};
+        use axdriver_pci::{PciRoot, DeviceFunction, DeviceFunctionInfo};
         type VirtIoTransport = axdriver_virtio::PciTransport;
     } else if #[cfg(bus =  "mmio")] {
         type VirtIoTransport = axdriver_virtio::MmioTransport;
@@ -1598,36 +1598,30 @@ impl<D: VirtIoDevMeta> DriverProbe for VirtIoDriver<D> {
             axdriver_virtio::probe_pci_device::<VirtIoHalImpl>(root, bdf, dev_info)
         {
             if ty == D::DEVICE_TYPE {
-                let mut irq = 0;
-                let mut msix_success = false;
-
-                match crate::virtio_msix::configure_virtio_pci_msix(root, bdf, &mut transport) {
-                    Ok(msi_irq) => {
-                        irq = msi_irq;
-                        msix_success = true;
+                let irq = match axhal::msix::configure_virtio_pci_msix(root, bdf, &mut transport) {
+                    Ok(irq) => {
                         debug!(
                             "PCI device at {} configured to use MSI-X (irq {})",
                             bdf, irq
                         );
+                        irq
                     }
                     Err(e) => {
-                        debug!(
-                            "PCI device at {} cannot configure MSI-X ({:?}), falling back to INTx",
-                            bdf, e
-                        );
-                    }
-                }
-
-                if !msix_success {
-                    let word = root.config_read_word(bdf, 0x3c);
-                    irq = (word & 0xff) as usize;
-                    #[cfg(target_arch = "loongarch64")]
-                    {
+                        let irq = (root.config_read_word(bdf, 0x3c) & 0xff) as usize;
                         if irq == 0 || irq == 255 {
-                            irq = 16 + (bdf.device as usize % 4);
+                            warn!(
+                                "PCI device at {} cannot configure MSI-X ({:?}) and has no usable INTx line ({})",
+                                bdf, e, irq
+                            );
+                            return None;
                         }
+                        debug!(
+                            "PCI device at {} cannot configure MSI-X ({:?}), falling back to INTx (irq {})",
+                            bdf, e, irq
+                        );
+                        irq
                     }
-                }
+                };
 
                 match D::try_new(transport, irq) {
                     Ok(dev) => return Some(dev),
