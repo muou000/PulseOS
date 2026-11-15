@@ -1072,41 +1072,57 @@ impl Location {
         let mut kept_entries: Vec<DirEntry> = Vec::new();
         {
             let guard = topology_sync::lock_topology_read();
-            let mut cur_mp: &Mountpoint = &self.mountpoint;
-            let mut cur_entry: &DirEntry = &self.entry;
-            let mut slow_mp: &Mountpoint = &self.mountpoint;
-            let mut advance_slow = false;
-            loop {
-                let mut entry: &DirEntry = cur_entry;
-                while !entry.ptr_eq(&cur_mp.root) {
-                    components.push(String::from(entry.name()));
-                    if let Some(parent) = entry.parent() {
-                        kept_entries.push(parent);
-                        entry = kept_entries.last().unwrap();
-                    } else {
-                        break;
-                    }
-                }
-                let Some(parent_link) = guard.get(&cur_mp.topology).parent_link() else {
-                    break;
-                };
-                cur_mp = &parent_link.location.mountpoint;
-                cur_entry = &parent_link.location.entry;
-                if advance_slow {
-                    if let Some(slow_link) = guard.get(&slow_mp.topology).parent_link() {
-                        slow_mp = &slow_link.location.mountpoint;
-                    }
-                    if core::ptr::eq(cur_mp, slow_mp) {
-                        break;
-                    }
-                }
-                advance_slow = !advance_slow;
-            }
+            self.collect_path_components(
+                |mp| guard.get(&mp.topology).parent_location(),
+                &mut components,
+                &mut kept_entries,
+            );
         }
         drop(kept_entries);
         Ok(iter::once("/")
             .chain(components.iter().map(String::as_str).rev())
             .collect())
+    }
+
+    /// Gather leaf-to-root path components under either topology guard. The
+    /// caller owns `kept_entries` outside its guard so inode owners are dropped
+    /// only after unlocking, including on unwind.
+    fn collect_path_components<'a>(
+        &'a self,
+        parent_location: impl Fn(&'a Mountpoint) -> Option<&'a Location>,
+        components: &mut Vec<String>,
+        kept_entries: &mut Vec<DirEntry>,
+    ) {
+        let mut cur_mp: &Mountpoint = &self.mountpoint;
+        let mut cur_entry: &DirEntry = &self.entry;
+        let mut slow_mp: &Mountpoint = &self.mountpoint;
+        let mut advance_slow = false;
+        loop {
+            let mut entry: &DirEntry = cur_entry;
+            while !entry.ptr_eq(&cur_mp.root) {
+                components.push(String::from(entry.name()));
+                if let Some(parent) = entry.parent() {
+                    kept_entries.push(parent);
+                    entry = kept_entries.last().unwrap();
+                } else {
+                    break;
+                }
+            }
+            let Some(parent) = parent_location(cur_mp) else {
+                break;
+            };
+            cur_mp = &parent.mountpoint;
+            cur_entry = &parent.entry;
+            if advance_slow {
+                if let Some(slow_parent) = parent_location(slow_mp) {
+                    slow_mp = &slow_parent.mountpoint;
+                }
+                if core::ptr::eq(cur_mp, slow_mp) {
+                    break;
+                }
+            }
+            advance_slow = !advance_slow;
+        }
     }
 
     pub(crate) fn entry_key(entry: &DirEntry) -> (u64, usize) {
@@ -1241,12 +1257,17 @@ impl Location {
     // -----------------------------------------------------------------------
 
     pub fn mount(&self, fs: &Filesystem) -> VfsResult<Arc<Mountpoint>> {
-        self.mount_with(fs, |_| Ok(()))
+        self.mount_with(fs, None, |_| Ok(()))
     }
 
     /// Attach a filesystem and commit its external bookkeeping as one topology
     /// transition. On callback failure (or unwind), restore the prior topology
     /// before a resolver can observe the candidate mount.
+    ///
+    /// If `expected_path` is supplied, reject with `ResourceBusy` when the
+    /// target's absolute path changed since that snapshot was taken. The
+    /// validation and attachment share the topology writer guard, so a moved
+    /// ancestor cannot publish a mount with a stale bookkeeping pathname.
     ///
     /// Acquire bookkeeping locks and prepare allocations before calling this
     /// method. `commit` runs with the topology write lock held: it must not
@@ -1259,6 +1280,7 @@ impl Location {
     pub fn mount_with(
         &self,
         fs: &Filesystem,
+        expected_path: Option<&str>,
         commit: impl FnOnce(&Arc<Mountpoint>) -> VfsResult<()>,
     ) -> VfsResult<Arc<Mountpoint>> {
         self.entry.as_dir()?;
@@ -1276,13 +1298,29 @@ impl Location {
         let mut stale_weak = None;
         let mut rejected_weak = None;
         let mut rejected_attachment = MountAttachment::Detached;
+        let mut path_components = Vec::new();
+        let mut kept_entries = Vec::new();
         let attach_result = {
             let mut guard = topology_sync::lock_topology_write();
+            let path_matches = expected_path.is_none_or(|expected| {
+                self.collect_path_components(
+                    |mp| guard.get(&mp.topology).parent_location(),
+                    &mut path_components,
+                    &mut kept_entries,
+                );
+                expected.starts_with('/')
+                    && path_components
+                        .iter()
+                        .map(String::as_str)
+                        .eq(expected.rsplit('/').filter(|part| !part.is_empty()))
+            });
             if matches!(
                 guard.get(&self.mountpoint.topology).attachment,
                 MountAttachment::Detached
             ) {
                 Err(VfsError::InvalidInput)
+            } else if !path_matches {
+                Err(VfsError::ResourceBusy)
             } else if guard
                 .get(&self.mountpoint.topology)
                 .children
@@ -1317,7 +1355,7 @@ impl Location {
                 result
             }
         };
-        drop((stale_weak, rejected_weak, rejected_attachment));
+        drop((stale_weak, rejected_weak, rejected_attachment, kept_entries));
         if let Err(err) = attach_result {
             drop(candidate);
             return Err(err);
@@ -2401,7 +2439,7 @@ mod tests {
         let target = mkdir(&root, "target");
         let mut rejected_mount = None;
 
-        let result = target.mount_with(&mounted_fs, |mountpoint| {
+        let result = target.mount_with(&mounted_fs, None, |mountpoint| {
             rejected_mount = Some(mountpoint.clone());
             Err(VfsError::Io)
         });
@@ -2420,6 +2458,37 @@ mod tests {
                 .ptr_eq(&mounted.root_location())
         );
         mounted.root_location().unmount().unwrap();
+    }
+
+    #[test]
+    fn mount_rejects_a_path_snapshot_invalidated_by_parent_move() {
+        let root_fs = MemFs::create("root");
+        let parent_fs = MemFs::create("parent");
+        let mounted_fs = MemFs::create("mounted");
+        let root = Mountpoint::new_root(&root_fs).root_location();
+        let old_dir = mkdir(&root, "old");
+        let new_dir = mkdir(&root, "new");
+        let parent = old_dir.mount(&parent_fs).unwrap();
+        let target = mkdir(&parent.root_location(), "target");
+        let old_path = target.absolute_path().unwrap();
+        parent.root_location().move_mount(&new_dir).unwrap();
+
+        let rejected = target.mount_with(&mounted_fs, Some(old_path.as_str()), |_| {
+            panic!("stale paths must be rejected before bookkeeping")
+        });
+        assert!(matches!(rejected, Err(VfsError::ResourceBusy)));
+        assert!(!target.is_mountpoint());
+        assert_eq!(target.absolute_path().unwrap().as_str(), "/new/target");
+        let mounted = target
+            .mount_with(&mounted_fs, Some("/new/target"), |_| Ok(()))
+            .unwrap();
+        assert!(
+            block_on(parent.root_location().lookup_no_follow("target"))
+                .unwrap()
+                .ptr_eq(&mounted.root_location())
+        );
+        mounted.root_location().unmount().unwrap();
+        parent.root_location().unmount().unwrap();
     }
 
     #[test]
@@ -2463,7 +2532,7 @@ mod tests {
 
         assert!(
             std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                let _ = target.mount_with(&mounted_fs, |_| panic!("reject mount"));
+                let _ = target.mount_with(&mounted_fs, None, |_| panic!("reject mount"));
             }))
             .is_err()
         );
