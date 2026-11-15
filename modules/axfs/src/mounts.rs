@@ -217,7 +217,9 @@ fn publish_shadow(
         &record.fs_type,
         template.is_readonly(),
         template.get_flags(),
-        record.options.split(',').any(|option| option == "bind"),
+        // A shadow aliases its template's filesystem even when that template
+        // is an ordinary mount. Preserve bind identity for remount/unmount.
+        true,
     )
 }
 

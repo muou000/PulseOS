@@ -204,6 +204,7 @@ static void propagated_mounts(void)
         expect("propagated-bind-content", read_byte(payloads[i]), 'P');
         expect("propagated-bind-readonly", CALL4(SYS_openat, AT_FDCWD, payloads[i], O_RDWR, 0), -EROFS);
         expect("nested-shadow-record", mount_rows(nested[i]), 1);
+        expect("nested-shadow-listed-bind", mount_rows_matching(nested[i], "bind"), 1);
         expect("nested-shadow-retains-rw", mount_rows_matching(nested[i], "rw"), 1);
         expect("nested-shadow-content", read_byte(nested_payloads[i]), 'N');
     }
