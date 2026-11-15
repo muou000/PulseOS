@@ -25,6 +25,15 @@ struct Futex2Waiter {
     reserved: u32,
 }
 
+pulse_user_abi::impl_user_abi_struct! {
+    for Futex2Waiter, size = 24 => {
+        val: u64,
+        uaddr: u64,
+        flags: u32,
+        reserved: u32,
+    }
+}
+
 struct ParsedFutex2Waiter {
     addr: usize,
     val: u32,
@@ -43,15 +52,7 @@ fn read_futex2_waiter(
     process: &pulse_core::task::Process,
     addr: usize,
 ) -> Result<ParsedFutex2Waiter, LinuxError> {
-    let mut waiter = Futex2Waiter::default();
-    let bytes = unsafe {
-        core::slice::from_raw_parts_mut(
-            &mut waiter as *mut Futex2Waiter as *mut u8,
-            core::mem::size_of::<Futex2Waiter>(),
-        )
-    };
-    process
-        .read_user_bytes(addr, bytes)
+    let waiter: Futex2Waiter = pulse_core::task::uaccess::read_user_value(process, addr)
         .map_err(|_| LinuxError::EFAULT)?;
     if waiter.reserved != 0 {
         return Err(LinuxError::EINVAL);

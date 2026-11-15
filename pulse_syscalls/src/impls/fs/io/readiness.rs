@@ -17,6 +17,13 @@ struct Pselect6Sigmask {
     sigsetsize: usize,
 }
 
+pulse_user_abi::impl_user_abi_struct! {
+    for Pselect6Sigmask, size = 16 => {
+        sigmask: usize,
+        sigsetsize: usize,
+    }
+}
+
 fn read_temporary_signal_mask(
     process: &pulse_core::task::Process,
     sigmask: usize,
@@ -41,7 +48,7 @@ fn read_pselect6_signal_mask(
     if sigmask_arg == 0 {
         return Ok(None);
     }
-    let arg = uaccess::read_user_plain::<Pselect6Sigmask>(process, sigmask_arg)
+    let arg = uaccess::read_user_value::<Pselect6Sigmask>(process, sigmask_arg)
         .map_err(|_| LinuxError::EFAULT)?;
     read_temporary_signal_mask(process, arg.sigmask, arg.sigsetsize)
 }
@@ -122,7 +129,7 @@ pub fn sys_ppoll(
     }
 
     let mut pollfds = match with_process(|process| {
-        uaccess::read_user_plain_array::<pollfd>(process, fds, nfds)
+        uaccess::read_user_value_array_sequential::<pollfd>(process, fds, nfds)
     }) {
         Ok(Ok(v)) => v,
         Ok(Err(e)) => match e {
@@ -171,6 +178,12 @@ pub fn sys_ppoll(
 #[derive(Clone, Copy)]
 struct FdSet {
     fds_bits: [u64; 16],
+}
+
+pulse_user_abi::impl_user_abi_struct! {
+    for FdSet, size = 128 => {
+        fds_bits: [u64; 16],
+    }
 }
 
 impl FdSet {
@@ -271,19 +284,19 @@ pub fn sys_pselect6(
     let has_except = exceptfds != 0;
 
     if has_read {
-        match uaccess::read_user_plain::<FdSet>(process.as_ref(), readfds) {
+        match uaccess::read_user_value::<FdSet>(process.as_ref(), readfds) {
             Ok(fds) => in_read = fds,
             Err(_) => return -LinuxError::EFAULT.code() as isize,
         }
     }
     if has_write {
-        match uaccess::read_user_plain::<FdSet>(process.as_ref(), writefds) {
+        match uaccess::read_user_value::<FdSet>(process.as_ref(), writefds) {
             Ok(fds) => in_write = fds,
             Err(_) => return -LinuxError::EFAULT.code() as isize,
         }
     }
     if has_except {
-        match uaccess::read_user_plain::<FdSet>(process.as_ref(), exceptfds) {
+        match uaccess::read_user_value::<FdSet>(process.as_ref(), exceptfds) {
             Ok(fds) => in_except = fds,
             Err(_) => return -LinuxError::EFAULT.code() as isize,
         }

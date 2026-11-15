@@ -1,6 +1,15 @@
 use super::*;
 use crate::task;
 
+task::uaccess::impl_user_abi_struct! {
+    for FutexWaitv, size = 24 => {
+        val: u64,
+        uaddr: u64,
+        flags: u32,
+        __reserved: u32,
+    }
+}
+
 impl Process {
     fn futex_key(&self, addr: usize, is_private: bool) -> (usize, bool) {
         if is_private {
@@ -29,16 +38,8 @@ impl Process {
     ) -> AxResult<isize> {
         let mut waiters = alloc::vec::Vec::with_capacity(nr_futexes as usize);
         for i in 0..nr_futexes {
-            let mut w = FutexWaitv::default();
-            let buf = unsafe {
-                core::slice::from_raw_parts_mut(
-                    &mut w as *mut _ as *mut u8,
-                    core::mem::size_of::<FutexWaitv>(),
-                )
-            };
-            self.read_user_bytes(
+            let w: FutexWaitv = self.read_user_value(
                 waiters_addr + i as usize * core::mem::size_of::<FutexWaitv>(),
-                buf,
             )?;
             waiters.push(w);
         }

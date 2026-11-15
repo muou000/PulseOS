@@ -355,7 +355,7 @@ pub fn sys_shmctl(shmid: i32, cmd: i32, buf: usize) -> isize {
                 return -LinuxError::EFAULT.code() as isize;
             }
             let new_ds: ShmidDs =
-                match pulse_core::task::uaccess::read_user_plain(proc.as_ref(), buf) {
+                match pulse_core::task::uaccess::read_user_value(proc.as_ref(), buf) {
                     Ok(v) => v,
                     Err(_) => return -LinuxError::EFAULT.code() as isize,
                 };

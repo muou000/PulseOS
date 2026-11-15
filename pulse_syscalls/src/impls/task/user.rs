@@ -307,8 +307,11 @@ pub fn sys_setgroups(size: usize, list: usize) -> isize {
         if list == 0 {
             return -LinuxError::EFAULT.code() as isize;
         }
-        match pulse_core::task::uaccess::read_user_plain_array::<u32>(process.as_ref(), list, size)
-        {
+        match pulse_core::task::uaccess::read_user_value_array_sequential::<u32>(
+            process.as_ref(),
+            list,
+            size,
+        ) {
             Ok(g) => g,
             Err(e) => {
                 let errno: LinuxError = e.into();
@@ -381,6 +384,21 @@ struct CapUserData {
     inheritable: u32,
 }
 
+pulse_user_abi::impl_user_abi_struct! {
+    for CapUserHeader, size = 8 => {
+        version: u32,
+        pid: i32,
+    }
+}
+
+pulse_user_abi::impl_user_abi_struct! {
+    for CapUserData, size = 12 => {
+        effective: u32,
+        permitted: u32,
+        inheritable: u32,
+    }
+}
+
 /// capget(2): 查询进程 capability
 pub fn sys_capget(hdrp: usize, datap: usize) -> isize {
     if hdrp == 0 {
@@ -392,7 +410,7 @@ pub fn sys_capget(hdrp: usize, datap: usize) -> isize {
     };
 
     let mut header: CapUserHeader =
-        match pulse_core::task::uaccess::read_user_plain(process.as_ref(), hdrp) {
+        match pulse_core::task::uaccess::read_user_value(process.as_ref(), hdrp) {
             Ok(h) => h,
             Err(e) => {
                 let errno: LinuxError = e.into();
@@ -469,7 +487,7 @@ pub fn sys_capset(hdrp: usize, datap: usize) -> isize {
     };
 
     let mut header: CapUserHeader =
-        match pulse_core::task::uaccess::read_user_plain(process.as_ref(), hdrp) {
+        match pulse_core::task::uaccess::read_user_value(process.as_ref(), hdrp) {
             Ok(h) => h,
             Err(e) => {
                 let errno: LinuxError = e.into();
@@ -499,7 +517,7 @@ pub fn sys_capset(hdrp: usize, datap: usize) -> isize {
     }
 
     let data0: CapUserData =
-        match pulse_core::task::uaccess::read_user_plain(process.as_ref(), datap) {
+        match pulse_core::task::uaccess::read_user_value(process.as_ref(), datap) {
             Ok(d) => d,
             Err(e) => {
                 let errno: LinuxError = e.into();
@@ -516,7 +534,7 @@ pub fn sys_capset(hdrp: usize, datap: usize) -> isize {
     if header.version == _LINUX_CAPABILITY_VERSION_2
         || header.version == _LINUX_CAPABILITY_VERSION_3
     {
-        let data1: CapUserData = match pulse_core::task::uaccess::read_user_plain(
+        let data1: CapUserData = match pulse_core::task::uaccess::read_user_value(
             process.as_ref(),
             datap + core::mem::size_of::<CapUserData>(),
         ) {

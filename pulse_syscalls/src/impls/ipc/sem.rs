@@ -118,7 +118,7 @@ pub fn sys_semctl(semid: i32, semnum: i32, cmd: i32, arg: usize) -> isize {
             if arg == 0 {
                 return -LinuxError::EFAULT.code() as isize;
             }
-            let new_ds: SemidDs = match pulse_core::task::uaccess::read_user_plain(process.as_ref(), arg) {
+            let new_ds: SemidDs = match pulse_core::task::uaccess::read_user_value(process.as_ref(), arg) {
                 Ok(v) => v,
                 Err(_) => return -LinuxError::EFAULT.code() as isize,
             };
@@ -180,7 +180,7 @@ pub fn sys_semctl(semid: i32, semnum: i32, cmd: i32, arg: usize) -> isize {
             if arg == 0 {
                 return -LinuxError::EFAULT.code() as isize;
             }
-            let vals: Vec<u16> = match pulse_core::task::uaccess::read_user_plain_array(process.as_ref(), arg, semset.nsems) {
+            let vals: Vec<u16> = match pulse_core::task::uaccess::read_user_value_array_sequential(process.as_ref(), arg, semset.nsems) {
                 Ok(v) => v,
                 Err(_) => return -LinuxError::EFAULT.code() as isize,
             };
@@ -256,7 +256,7 @@ pub fn sys_semtimedop(semid: i32, sops: usize, nsops: usize, timeout: usize) -> 
         Err(e) => return -e.code() as isize,
     };
 
-    let sops_vec = match pulse_core::task::uaccess::read_user_plain_array::<SemBuf>(process.as_ref(), sops, nsops) {
+    let sops_vec = match pulse_core::task::uaccess::read_user_value_array_sequential::<SemBuf>(process.as_ref(), sops, nsops) {
         Ok(v) => v,
         Err(_) => return -LinuxError::EFAULT.code() as isize,
     };
