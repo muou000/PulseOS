@@ -248,10 +248,13 @@ fn is_slave_of(peer_mp: &Arc<Mountpoint>, parent_pg: u64) -> bool {
 // 2. Readers acquire `TopologyReadGuard` via `topology_sync::lock_topology_read()`,
 //    allowing concurrent multi-CPU path resolution, root checks, parent/path
 //    traversals, and subtree snapshots to observe an atomic topology state.
-// 3. Writers (`mount`, `mount_bind`, `mount_bind_silent`, `unmount`,
+// 3. Writers (`mount_with`, `mount_bind`, `mount_bind_silent`, `unmount_with`,
 //    `unmount_all`, `move_mount`) acquire `TopologyWriteGuard` via
 //    `topology_sync::lock_topology_write()`, updating parent links and child
 //    registries together as a single indivisible topology transition.
+//    `mount` / `unmount` delegate to their `_with` variants. Bookkeeping
+//    callbacks run under this guard, with rollback before unlock on failure;
+//    caller-owned registry locks must already be held before entering VFS.
 // 4. Lock-ordering & non-reentrancy rule: `MOUNT_TOPOLOGY_LOCK` is a strict leaf
 //    lock. Callers must never acquire `MOUNT_TOPOLOGY_LOCK` reentrantly, must
 //    never acquire `Mountpoint::propagation`, `PEER_GROUPS`, or filesystem node
@@ -455,6 +458,25 @@ impl MountTopology {
 
     fn parent_location(&self) -> Option<&Location> {
         self.parent_link().map(|link| &link.location)
+    }
+}
+
+/// Undo a speculative topology transition before its write guard is released,
+/// including when the bookkeeping callback unwinds. The undo closures borrow
+/// their deferred-drop storage from outside the topology critical section.
+struct TopologyRollback<F: FnOnce()>(Option<F>);
+
+impl<F: FnOnce()> TopologyRollback<F> {
+    fn commit(mut self) {
+        self.0 = None;
+    }
+}
+
+impl<F: FnOnce()> Drop for TopologyRollback<F> {
+    fn drop(&mut self) {
+        if let Some(undo) = self.0.take() {
+            undo();
+        }
     }
 }
 
@@ -1219,6 +1241,26 @@ impl Location {
     // -----------------------------------------------------------------------
 
     pub fn mount(&self, fs: &Filesystem) -> VfsResult<Arc<Mountpoint>> {
+        self.mount_with(fs, |_| Ok(()))
+    }
+
+    /// Attach a filesystem and commit its external bookkeeping as one topology
+    /// transition. On callback failure (or unwind), restore the prior topology
+    /// before a resolver can observe the candidate mount.
+    ///
+    /// Acquire bookkeeping locks and prepare allocations before calling this
+    /// method. `commit` runs with the topology write lock held: it must not
+    /// acquire locks, call topology/propagation/node methods, perform I/O, or
+    /// drop the last owner of a topology object. Pure atomic operations such
+    /// as [`Mountpoint::set_readonly`] and [`Mountpoint::set_flags`] are allowed.
+    /// It must leave its own bookkeeping unchanged on error or unwind; keep
+    /// removed objects alive until this method returns. These are
+    /// progress/transaction requirements, not Rust safety preconditions.
+    pub fn mount_with(
+        &self,
+        fs: &Filesystem,
+        commit: impl FnOnce(&Arc<Mountpoint>) -> VfsResult<()>,
+    ) -> VfsResult<Arc<Mountpoint>> {
         self.entry.as_dir()?;
         let entry_key = Self::entry_key(&self.entry);
         let dst_parent_prop = *self.mountpoint().propagation.lock();
@@ -1232,6 +1274,8 @@ impl Location {
         let candidate = Mountpoint::new_with_propagation(fs, Some(self.clone()), initial_prop);
         let candidate_weak = Arc::downgrade(&candidate);
         let mut stale_weak = None;
+        let mut rejected_weak = None;
+        let mut rejected_attachment = MountAttachment::Detached;
         let attach_result = {
             let mut guard = topology_sync::lock_topology_write();
             if matches!(
@@ -1247,14 +1291,33 @@ impl Location {
             {
                 Err(VfsError::ResourceBusy)
             } else {
+                let had_children = self.mountpoint.has_children.load(Ordering::Acquire);
                 let children = &mut guard.get_mut(&self.mountpoint.topology).children;
                 children.reserve(1);
                 stale_weak = children.insert(entry_key, candidate_weak);
                 self.mountpoint.has_children.store(true, Ordering::Release);
-                Ok(())
+                let rollback = TopologyRollback(Some(|| {
+                    let children = &mut guard.get_mut(&self.mountpoint.topology).children;
+                    rejected_weak = children.remove(&entry_key);
+                    if let Some(stale) = stale_weak.take() {
+                        children.insert(entry_key, stale);
+                    }
+                    rejected_attachment = mem::replace(
+                        &mut guard.get_mut(&candidate.topology).attachment,
+                        MountAttachment::Detached,
+                    );
+                    self.mountpoint
+                        .has_children
+                        .store(had_children, Ordering::Release);
+                }));
+                let result = commit(&candidate);
+                if result.is_ok() {
+                    rollback.commit();
+                }
+                result
             }
         };
-        drop(stale_weak);
+        drop((stale_weak, rejected_weak, rejected_attachment));
         if let Err(err) = attach_result {
             drop(candidate);
             return Err(err);
@@ -1360,6 +1423,17 @@ impl Location {
     }
 
     pub fn unmount(&self) -> VfsResult<()> {
+        self.unmount_with(|| Ok(()))
+    }
+
+    /// Detach this mount and commit its external bookkeeping while retaining
+    /// the topology write lock. Callback failure (or unwind) restores the
+    /// original mount identity, parent link and child registry before unlock.
+    ///
+    /// The callback has the same lock, allocation, I/O and deferred-drop
+    /// requirements as [`Self::mount_with`], and must leave bookkeeping
+    /// unchanged when it fails.
+    pub fn unmount_with(&self, commit: impl FnOnce() -> VfsResult<()>) -> VfsResult<()> {
         if !self.is_root_of_mount() {
             return Err(VfsError::InvalidInput);
         }
@@ -1368,6 +1442,7 @@ impl Location {
         let mut old_attachment = MountAttachment::Detached;
         let mut removed_parent_weak = None;
         let mut busy_keys = Vec::new();
+        let mut commit_result = Ok(());
         {
             let mut guard = topology_sync::lock_topology_write();
             let has_live_child = guard
@@ -1379,7 +1454,6 @@ impl Location {
                 busy_keys.extend(guard.get(&mp.topology).children.keys().copied());
             } else {
                 stale_self_children = mem::take(&mut guard.get_mut(&mp.topology).children);
-                mp.has_children.store(false, Ordering::Release);
                 old_attachment = mem::replace(
                     &mut guard.get_mut(&mp.topology).attachment,
                     MountAttachment::Detached,
@@ -1395,8 +1469,39 @@ impl Location {
                     if should_remove {
                         removed_parent_weak = parent_children.remove(&entry_key);
                     }
-                    if !parent_children.values().any(|weak| weak.strong_count() > 0) {
-                        parent_mp.has_children.store(false, Ordering::Release);
+                }
+                let rollback = TopologyRollback(Some(|| {
+                    if let MountAttachment::Attached(ref parent_link) = old_attachment {
+                        let parent_mp = &parent_link.location.mountpoint;
+                        if let Some(removed) = removed_parent_weak.take() {
+                            guard
+                                .get_mut(&parent_mp.topology)
+                                .children
+                                .insert(parent_link.entry_key, removed);
+                        }
+                    }
+                    mem::swap(
+                        &mut guard.get_mut(&mp.topology).attachment,
+                        &mut old_attachment,
+                    );
+                    mem::swap(
+                        &mut guard.get_mut(&mp.topology).children,
+                        &mut stale_self_children,
+                    );
+                }));
+                commit_result = commit();
+                if commit_result.is_ok() {
+                    rollback.commit();
+                    // Do not clear either negative fast path during the
+                    // speculative detach: a lock-free reader could otherwise
+                    // observe a disappearance that is later rolled back.
+                    mp.has_children.store(false, Ordering::Release);
+                    if let MountAttachment::Attached(ref parent_link) = old_attachment {
+                        let parent_mp = &parent_link.location.mountpoint;
+                        let parent_children = &guard.get(&parent_mp.topology).children;
+                        if !parent_children.values().any(|weak| weak.strong_count() > 0) {
+                            parent_mp.has_children.store(false, Ordering::Release);
+                        }
                     }
                 }
             }
@@ -1411,6 +1516,7 @@ impl Location {
             return Err(VfsError::ResourceBusy);
         }
         drop((stale_self_children, old_attachment, removed_parent_weak));
+        commit_result?;
         let prop = *mp.propagation.lock();
         remove_from_registry(mp, prop);
         Ok(())
@@ -2285,6 +2391,138 @@ mod tests {
 
     fn mkdir(parent: &Location, name: &str) -> Location {
         block_on(parent.create(name, NodeType::Directory, NodePermission::default())).unwrap()
+    }
+
+    #[test]
+    fn rejected_mount_commit_restores_the_underlying_directory() {
+        let root_fs = MemFs::create("root");
+        let mounted_fs = MemFs::create("mounted");
+        let root = Mountpoint::new_root(&root_fs).root_location();
+        let target = mkdir(&root, "target");
+        let mut rejected_mount = None;
+
+        let result = target.mount_with(&mounted_fs, |mountpoint| {
+            rejected_mount = Some(mountpoint.clone());
+            Err(VfsError::Io)
+        });
+
+        assert!(matches!(result, Err(VfsError::Io)));
+        assert!(
+            block_on(root.lookup_no_follow("target"))
+                .unwrap()
+                .ptr_eq(&target)
+        );
+        assert!(rejected_mount.unwrap().location().is_none());
+        let mounted = target.mount(&mounted_fs).unwrap();
+        assert!(
+            block_on(root.lookup_no_follow("target"))
+                .unwrap()
+                .ptr_eq(&mounted.root_location())
+        );
+        mounted.root_location().unmount().unwrap();
+    }
+
+    #[test]
+    fn rejected_unmount_commit_preserves_mount_identity_and_path() {
+        let root_fs = MemFs::create("root");
+        let mounted_fs = MemFs::create("mounted");
+        let root = Mountpoint::new_root(&root_fs).root_location();
+        let target = mkdir(&root, "target");
+        let mounted = target.mount(&mounted_fs).unwrap();
+        let mounted_root = mounted.root_location();
+
+        assert_eq!(
+            mounted_root.unmount_with(|| Err(VfsError::Io)),
+            Err(VfsError::Io)
+        );
+        assert!(
+            block_on(root.lookup_no_follow("target"))
+                .unwrap()
+                .ptr_eq(&mounted_root)
+        );
+        assert_eq!(mounted_root.absolute_path().unwrap().as_str(), "/target");
+        assert!(mounted.location().unwrap().ptr_eq(&target));
+        assert!(matches!(
+            target.mount(&mounted_fs),
+            Err(VfsError::ResourceBusy)
+        ));
+        mounted_root.unmount().unwrap();
+        assert!(
+            block_on(root.lookup_no_follow("target"))
+                .unwrap()
+                .ptr_eq(&target)
+        );
+    }
+
+    #[test]
+    fn unwinding_bookkeeping_restores_topology_before_unlock() {
+        let root_fs = MemFs::create("root");
+        let mounted_fs = MemFs::create("mounted");
+        let root = Mountpoint::new_root(&root_fs).root_location();
+        let target = mkdir(&root, "target");
+
+        assert!(
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let _ = target.mount_with(&mounted_fs, |_| panic!("reject mount"));
+            }))
+            .is_err()
+        );
+        assert!(
+            block_on(root.lookup_no_follow("target"))
+                .unwrap()
+                .ptr_eq(&target)
+        );
+
+        let mounted = target.mount(&mounted_fs).unwrap();
+        let mounted_root = mounted.root_location();
+        assert!(
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let _ = mounted_root.unmount_with(|| panic!("reject unmount"));
+            }))
+            .is_err()
+        );
+        assert!(
+            block_on(root.lookup_no_follow("target"))
+                .unwrap()
+                .ptr_eq(&mounted_root)
+        );
+        mounted_root.unmount().unwrap();
+    }
+
+    #[test]
+    fn concurrent_resolver_never_observes_a_rejected_unmount() {
+        let root_fs = MemFs::create("root");
+        let mounted_fs = MemFs::create("mounted");
+        let root = Mountpoint::new_root(&root_fs).root_location();
+        let target = mkdir(&root, "target");
+        let mounted = target.mount(&mounted_fs).unwrap();
+        let mounted_root = mounted.root_location();
+        let iterations = if cfg!(miri) { 12 } else { 2_000 };
+        let barrier = Arc::new(Barrier::new(2));
+
+        let resolver = {
+            let mounted_root = mounted_root.clone();
+            let barrier = barrier.clone();
+            thread::spawn(move || {
+                barrier.wait();
+                for _ in 0..iterations {
+                    let resolved = block_on(root.lookup_no_follow("target")).unwrap();
+                    assert!(resolved.ptr_eq(&mounted_root));
+                }
+            })
+        };
+        barrier.wait();
+        for _ in 0..iterations {
+            assert_eq!(
+                mounted_root.unmount_with(|| {
+                    thread::yield_now();
+                    Err(VfsError::Io)
+                }),
+                Err(VfsError::Io)
+            );
+        }
+        resolver.join().unwrap();
+        mounted_root.unmount().unwrap();
     }
 
     #[test]
