@@ -41,3 +41,29 @@ fn architecture_unknown_access_is_preserved_without_guessing_an_operation() {
     let data=CaptureReader::from_bytes(&w.finish(400).unwrap()).unwrap();
     assert_eq!(&data.records[0].payload[24..28],&[0;4]);
 }
+
+#[test]
+fn classified_faults_round_trip_but_unsuccessful_minor_and_major_are_rejected() {
+    let mut w = writer();
+    for classification in [0u32, 1, 2] {
+        let mut raw = context();
+        raw[72..76].copy_from_slice(&1u32.to_le_bytes());
+        raw[76..80].copy_from_slice(&classification.to_le_bytes());
+        w.ingest_perf_sample_as(2, &raw, SampleFormat::Tracepoint).unwrap();
+    }
+    let data = CaptureReader::from_bytes(&w.finish(400).unwrap()).unwrap();
+    let classes: Vec<_> = data.records.iter().map(|r| {
+        u32::from_le_bytes(r.payload[36..40].try_into().unwrap())
+    }).collect();
+    assert_eq!(classes, vec![0, 1, 2]);
+
+    for outcome in [2u32, 3, 4] {
+        for classification in [1u32, 2] {
+            let mut raw = context();
+            raw[72..76].copy_from_slice(&outcome.to_le_bytes());
+            raw[76..80].copy_from_slice(&classification.to_le_bytes());
+            assert!(writer().ingest_perf_sample_as(2, &raw, SampleFormat::Tracepoint).is_err(),
+                "accepted outcome={outcome} classification={classification}");
+        }
+    }
+}

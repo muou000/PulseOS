@@ -232,8 +232,7 @@ impl FaultWorkload {
             || end.checked_sub(start) != Some(elapsed)
             || access & !7 != 0
             || !matches!(origin, 1 | 2)
-            || !(1..=4).contains(&outcome)
-            || read32(context, 76) != 0
+            || !pulse_bpf_schema::PageFaultClassification::is_valid_pair(outcome, read32(context, 76))
         {
             return Err("invalid native fault completion".into());
         }

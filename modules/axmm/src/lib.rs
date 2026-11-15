@@ -33,11 +33,12 @@ use memory_set::MappingError;
 pub use self::{
     aspace::{
         AddrSpace, AddrSpaceCloneResult, AddrSpaceMutation, AddrSpaceUnmapPreparation, PageFaultOutcome,
-        PageFaultResult, PageFaultWork, PageTableLockManager, TlbShootdown, drive_page_fault,
+        PageFaultResult, PageFaultResolution, PageFaultWork, PageTableLockManager, TlbShootdown,
+        drive_page_fault, drive_page_fault_with_io,
     },
     backend::{
         AnonPageLoad, AnonPagePrepared, Backend, FileMapping, FileMappingFlags, FileMappingPageBatch,
-        FileMappingSource, FileMappingWriteGuard, FilePageLoad, FilePagePrepared, FileWritebacks,
+        FileMappingSource, FileMappingWriteGuard, FilePageIo, FilePageLoad, FilePagePrepared, FileWritebacks,
         SharedFrame, FILE_MAPPING_PAGE_BATCH_CAPACITY,
     },
 };

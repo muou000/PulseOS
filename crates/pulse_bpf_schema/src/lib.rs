@@ -265,15 +265,29 @@ pub enum PageFaultOutcome {
     ResolverError = 4,
 }
 
-/// Linux-style minor/major classification requires actual I/O provenance.
-/// Current PulseOS producers always emit Unknown; the other tags reserve an
-/// explicit extension that cannot be inferred from latency or backing type.
+/// Classification of a successfully resolved fault from actual target-page I/O.
+/// Minor means the resolver needed no storage read for the fault target; Major
+/// means its target-page fill performed a storage read. Neither latency nor
+/// file-backed status is evidence. Unknown preserves legacy records and
+/// unverified backends. For unsuccessful outcomes only Unknown is applicable;
+/// the outcome identifies those records separately from successful faults.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u32)]
 pub enum PageFaultClassification {
     Unknown = 0,
     Minor   = 1,
     Major   = 2,
+}
+
+impl PageFaultClassification {
+    /// Validate raw v1 tags without treating failed resolutions as minor/major.
+    pub const fn is_valid_pair(outcome: u32, classification: u32) -> bool {
+        match outcome {
+            1 => classification <= 2,
+            2..=4 => classification == 0,
+            _ => false,
+        }
+    }
 }
 
 /// One returned resolver call. `common` identifies the faulting task and the
@@ -302,6 +316,26 @@ impl PageFaultContext {
         origin: PageFaultOrigin,
         outcome: PageFaultOutcome,
     ) -> Option<Self> {
+        Self::from_classified_completion(
+            common, fault_address, start_ns, access, origin, outcome,
+            PageFaultClassification::Unknown,
+        )
+    }
+
+    /// Preserve a resolver's measured I/O classification in the existing v1
+    /// wire layout. Reject contradictory failed minor/major completions.
+    pub fn from_classified_completion(
+        common: ContextCommon,
+        fault_address: u64,
+        start_ns: u64,
+        access: u32,
+        origin: PageFaultOrigin,
+        outcome: PageFaultOutcome,
+        classification: PageFaultClassification,
+    ) -> Option<Self> {
+        if !PageFaultClassification::is_valid_pair(outcome as u32, classification as u32) {
+            return None;
+        }
         let elapsed_ns = common.timestamp_ns.checked_sub(start_ns)?;
         Some(Self {
             common,
@@ -311,7 +345,7 @@ impl PageFaultContext {
             access,
             origin: origin as u32,
             outcome: outcome as u32,
-            classification: PageFaultClassification::Unknown as u32,
+            classification: classification as u32,
         })
     }
 

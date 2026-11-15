@@ -45,6 +45,19 @@ def fixture_fault(*, change_context=None, unknown_access=False):
 
 
 class FaultArchiveTests(unittest.TestCase):
+    def test_known_success_classification_survives_raw_archive(self):
+        for classification in (1, 2):
+            def classify(context):
+                struct.pack_into('<I', context, 76, classification)
+            _, metadata, _ = archive.extract(fixture_fault(change_context=classify), 'fault')
+            self.assertEqual(metadata['samples'], 2)
+
+    def test_failure_cannot_carry_a_success_classification(self):
+        def failed(context):
+            struct.pack_into('<II', context, 72, 2, 1)
+        with self.assertRaises(ValueError):
+            archive.extract(fixture_fault(change_context=failed), 'fault')
+
     def test_unknown_access_outside_known_targets_is_not_corrupt(self):
         _,metadata,_=archive.extract(fixture_fault(unknown_access=True),'fault')
         self.assertEqual(metadata['samples'],3)

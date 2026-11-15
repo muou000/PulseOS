@@ -298,19 +298,27 @@ fn handle_page_fault(
             page_fault_begin(vaddr.as_usize() as u64, access,
                 if is_user { PageFaultOrigin::User } else { PageFaultOrigin::Kernel })
         };
-        let result = proc.handle_page_fault(vaddr, access_flags);
+        let result = proc.handle_page_fault_with_io(vaddr, access_flags);
         #[cfg(feature = "bpf-trace")]
         {
-            use axtask::bpf_trace::{PageFaultOutcome, page_fault_complete};
+            use axtask::bpf_trace::{PageFaultClassification, PageFaultOutcome, page_fault_complete};
             let outcome = match &result {
-                Ok(true) => PageFaultOutcome::Resolved,
-                Ok(false) => PageFaultOutcome::NotHandled,
+                Ok(resolution) if resolution.handled => PageFaultOutcome::Resolved,
+                Ok(_) => PageFaultOutcome::NotHandled,
                 Err(AxError::NoMemory) => PageFaultOutcome::NoMemory,
                 Err(_) => PageFaultOutcome::ResolverError,
             };
-            page_fault_complete(observation, outcome);
+            let classification = match &result {
+                Ok(resolution) if resolution.handled => match resolution.io {
+                    axmm::FilePageIo::NoStorageRead => PageFaultClassification::Minor,
+                    axmm::FilePageIo::StorageRead => PageFaultClassification::Major,
+                    axmm::FilePageIo::Unknown => PageFaultClassification::Unknown,
+                },
+                _ => PageFaultClassification::Unknown,
+            };
+            page_fault_complete(observation, outcome, classification);
         }
-        result
+        result.map(|resolution| resolution.handled)
     };
     let fault_error = match fault_result {
         Ok(true) => {

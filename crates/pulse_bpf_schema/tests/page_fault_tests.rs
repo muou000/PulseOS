@@ -83,3 +83,36 @@ fn completion_uses_measured_wall_time_and_rejects_clock_regression() {
     assert_eq!(make(100).unwrap().elapsed_ns, 0); // same clock tick is observable
     assert!(make(99).is_none()); // never fabricate a zero duration for regression
 }
+
+#[test]
+fn measured_classification_preserves_the_v1_layout_and_rejects_failed_success_counts() {
+    let make = |outcome, classification| {
+        PageFaultContext::from_classified_completion(
+            ContextCommon::new(TracepointId::PageFault, 350, 7, 40, 41, 99),
+            0x400000,
+            100,
+            PageFaultAccess::READ,
+            PageFaultOrigin::User,
+            outcome,
+            classification,
+        )
+    };
+    for (classification, expected) in [
+        (PageFaultClassification::Unknown, [0, 0, 0, 0]),
+        (PageFaultClassification::Minor, [1, 0, 0, 0]),
+        (PageFaultClassification::Major, [2, 0, 0, 0]),
+    ] {
+        let bytes = make(PageFaultOutcome::Resolved, classification).unwrap().to_bytes();
+        assert_eq!(&bytes[..8], &[8, 0, 0, 0, 1, 0, 0, 0]);
+        assert_eq!(&bytes[76..80], &expected);
+    }
+    for outcome in [
+        PageFaultOutcome::NotHandled,
+        PageFaultOutcome::NoMemory,
+        PageFaultOutcome::ResolverError,
+    ] {
+        assert!(make(outcome, PageFaultClassification::Unknown).is_some());
+        assert!(make(outcome, PageFaultClassification::Minor).is_none());
+        assert!(make(outcome, PageFaultClassification::Major).is_none());
+    }
+}

@@ -78,6 +78,14 @@ impl Process {
         self.resolve_page_fault(&aspace_handle, vaddr, flags)
     }
 
+    pub fn handle_page_fault_with_io(
+        &self,
+        vaddr: VirtAddr,
+        flags: axhal::trap::PageFaultFlags,
+    ) -> AxResult<axmm::PageFaultResolution> {
+        self.aspace_handle().resolve_page_fault_with_io(vaddr, flags)
+    }
+
     pub(super) fn resolve_page_fault(
         &self,
         aspace_handle: &Arc<AddressSpaceLock>,

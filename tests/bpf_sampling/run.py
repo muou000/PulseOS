@@ -14,6 +14,7 @@ import capture as runtime_capture
 import stack_evidence
 import artifacts
 import mapping_evidence
+import fault_class_evidence
 from pathlib import Path
 import re
 import shlex
@@ -33,18 +34,20 @@ LINKER_SCRIPT = BASE / "guest.ld"
 ARCHES = helpers.ARCHES
 
 
-def build(arch: str, mode: str = "task", archive: bool = False, fault: str = "none", ring_pages: int = 16, stacks: bool = False, mappings: bool = False) -> Path:
+def build(arch: str, mode: str = "task", archive: bool = False, fault: str = "none", ring_pages: int = 16, stacks: bool = False, mappings: bool = False, fault_classes: bool = False) -> Path:
     if stacks and mode not in ("task", "cpu"):
         raise ValueError("--stacks requires task or cpu mode")
     if mappings and (mode != "cpu" or not archive):
         raise ValueError("--mappings requires --mode cpu --archive")
+    if fault_classes and (mode != "fault" or not archive):
+        raise ValueError("--fault-classes requires --mode fault --archive")
     linker_script = BASE / "mapping_guest.ld" if mappings else LINKER_SCRIPT
-    source_inputs = {str(path): helpers.digest(path) for path in (SOURCE, linker_script, BASE / "archive.rs", *([BASE / "mapping_workload.rs"] if mappings else []), *([BASE / "stack_workload.rs"] if stacks else []), *([BASE / "fault_workload.rs"] if mode == "fault" else []))}
+    source_inputs = {str(path): helpers.digest(path) for path in (SOURCE, linker_script, BASE / "archive.rs", *([BASE / "mapping_workload.rs"] if mappings else []), *([BASE / "stack_workload.rs"] if stacks else []), *([BASE / "fault_workload.rs"] if mode == "fault" else []), *([BASE / "fault_classes.rs"] if fault_classes else []))}
     sysroot = Path(helpers.command(["rustc", "+nightly", "--print", "sysroot"]).strip())
     version = helpers.command(["rustc", "+nightly", "-vV"])
     host = next(line.removeprefix("host: ") for line in version.splitlines() if line.startswith("host: "))
     linker = sysroot / "lib/rustlib" / host / "bin/rust-lld"
-    output = BASE / "build" / arch / (mode + ("-mappings" if mappings else "") + ("-stacks" if stacks else "") + ("-archive" if archive else "") + ("-" + fault if fault != "none" else "") + ("-ring1" if ring_pages == 1 else "")) / "sampling.elf"
+    output = BASE / "build" / arch / (mode + ("-classes" if fault_classes else "") + ("-mappings" if mappings else "") + ("-stacks" if stacks else "") + ("-archive" if archive else "") + ("-" + fault if fault != "none" else "") + ("-ring1" if ring_pages == 1 else "")) / "sampling.elf"
     output.parent.mkdir(parents=True, exist_ok=True)
     command = ["rustc", "+nightly", "--edition=2024", "--crate-type=bin", "--target", ARCHES[arch]["target"],
                "-C", "panic=abort", "-C", "opt-level=2", "-C", "relocation-model=static",
@@ -64,6 +67,8 @@ def build(arch: str, mode: str = "task", archive: bool = False, fault: str = "no
         command += ["--cfg", "sched_trace_test"]
     if mode == "fault":
         command += ["--cfg", "trace_fault"]
+    if fault_classes:
+        command += ["--cfg", "fault_classes"]
     if archive:
         command += ["--cfg", "capture_export"]
     if ring_pages == 1:
@@ -217,7 +222,7 @@ def qemu_command(arch: str, kernel: Path, image: Path) -> list[str]:
 def guest(args: argparse.Namespace) -> int:
     # Always rebuild from source, so stale payloads cannot turn a missing v2 ABI
     # into a legacy PASS. Kernels/images are copied before QEMU starts.
-    payload = build(args.arch, args.mode, args.archive, args.fault, args.ring_pages, args.stacks, args.mappings)
+    payload = build(args.arch, args.mode, args.archive, args.fault, args.ring_pages, args.stacks, args.mappings, args.fault_classes)
     kernel = (args.kernel or REPO / ARCHES[args.arch]["kernel"]).resolve(strict=True)
     image = helpers.check_image(args.image or REPO / ARCHES[args.arch]["primary"])
     run = helpers.new_run(f"{args.arch}-{args.mode}")
@@ -269,6 +274,8 @@ def guest(args: argparse.Namespace) -> int:
                                    "kernel_provenance_sha256": helpers.digest(run / "kernel.provenance.json")})
     image_copy = helpers.copy_image(image, run, "disk.img")
     binary, guest_dir = helpers.inject(image_copy, payload_copy, run)
+    if args.fault_classes:
+        fault_class_evidence.prepare(image_copy, guest_dir, run, helpers)
     if args.mappings:
         child_copy = run / "mapping-child.elf"
         shutil.copyfile(payload.parent / "mapping-child.elf", child_copy)
@@ -288,12 +295,17 @@ def guest(args: argparse.Namespace) -> int:
     shell = (f"ulimit -c 0; cd {shlex.quote(guest_dir)} && {binary}; "
              f"status=$?; printf '\\nBPF_HOST_EXIT {token} %s\\n' \"$status\"")
     command = qemu_command(args.arch, kernel_copy, image_copy)
+    if args.fault_classes:
+        trace_events = run / 'device-events.txt'
+        trace_events.write_text('virtio_blk_handle_read\nvirtio_blk_rw_complete\n')
+        command += ["-trace", f"events={trace_events},file={run / 'device-reads.log'}"]
     helpers.command(["git", "diff", "--binary", "HEAD", "--output", str(run / "worktree.patch")], cwd=REPO)
     metadata = {"kind": "real BPF timer and PC regression, no capture synthesis", "arch": args.arch, "mode": args.mode,
                 **({"context_format": "software-stack-v3"} if args.stacks else {}),
                 "command": command, "guest_command": shell, "kernel": str(kernel), "image": str(image),
                 "kernel_sha256": helpers.digest(kernel_copy), "image_sha256": helpers.digest(image),
                 "boot_image_sha256": helpers.digest(image_copy), "archive_requested": args.archive, "fault": args.fault, "ring_pages": args.ring_pages,
+                "fault_classes": args.fault_classes,
                 "archive_source_sha256": helpers.digest(BASE / "archive.rs") if args.archive else None,
                 "workspace_commit": helpers.command(["git", "rev-parse", "HEAD"], cwd=REPO).strip(),
                 "kernel_source_commit": None,
@@ -307,7 +319,8 @@ def guest(args: argparse.Namespace) -> int:
     print(shlex.join(command), flush=True)
     print(f"Logs: {run}", flush=True)
     text, qemu_exit, reason = helpers.drive_guest(command, shell, token, run / "guest.log",
-        r"(?:^|[\r\n])[^\r\n]*[#$] ?$", args.boot_timeout, args.timeout)
+        r"(?:^|[\r\n])[^\r\n]*[#$] ?$", args.boot_timeout, args.timeout,
+        on_output=fault_class_evidence.Boundaries(run) if args.fault_classes else None)
     errors = validate_log(text, token, args.mode, args.stacks)
     if reason:
         errors.append(reason)
@@ -325,6 +338,8 @@ def guest(args: argparse.Namespace) -> int:
             if args.stacks:
                 metadata["stacks"] = stack_evidence.verify(run)
             metadata["capture"] = runtime_capture.convert(run)
+            if args.fault_classes:
+                metadata["fault_classification"] = fault_class_evidence.verify(run)
             print(f"Verified RAW archive: {archive_metadata['samples']} samples, {len(binary)} bytes; quality={archive_metadata['quality']}", flush=True)
         except (ValueError, KeyError, OverflowError) as error:
             errors.append(f"invalid RAW archive: {error}")
@@ -355,6 +370,7 @@ def main() -> int:
     parser.add_argument("--kernel-provenance", type=Path)
     parser.add_argument("--ring-pages", type=int, choices=(1,16), default=16)
     parser.add_argument("--fault", choices=("none", "zero-producer", "zero-consumer", "export-overflow", "ring-overflow", "aborted"), default="none")
+    parser.add_argument("--fault-classes", action="store_true", help="Verify fault classes against independent QEMU storage reads")
     parser.add_argument("--boot-timeout", type=float, default=90)
     parser.add_argument("--timeout", type=float, default=120)
     args = parser.parse_args()
@@ -365,7 +381,7 @@ def main() -> int:
     if args.fault == "ring-overflow":
         args.ring_pages = 1
     if args.action == "build":
-        build(args.arch, args.mode, args.archive, args.fault, args.ring_pages, args.stacks, args.mappings)
+        build(args.arch, args.mode, args.archive, args.fault, args.ring_pages, args.stacks, args.mappings, args.fault_classes)
         return 0
     return guest(args)
 

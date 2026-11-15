@@ -230,7 +230,8 @@ def verify_faults(run, records, archive):
         check(start <= record.time and elapsed == record.time-start, 'fault elapsed differs from actual end-start')
         # Access 0 is unknown (e.g. LA privilege faults), not a corrupt record
         # and not evidence for either workload read/write target.
-        check(0 <= access <= 7 and origin in (1,2) and 1 <= outcome <= 4 and classification == 0, 'invalid native fault fields or fabricated known classification')
+        check(0 <= access <= 7 and origin in (1,2) and 1 <= outcome <= 4 and classification in (0,1,2)
+              and (outcome == 1 or classification == 0), 'invalid native fault fields/classification')
         key = (record.task,record.pid or None,record.tid or None,address & ~4095,access,origin,outcome,classification)
         groups[key].append(elapsed); values.append(elapsed)
         faults.append((record,address,access,origin,outcome,classification))
@@ -245,7 +246,7 @@ def verify_faults(run, records, archive):
         key = (uint(group['task_id']),optional_uint(group['pid']),optional_uint(group['tid']),uint(group['page_address']),
                uint(group['access_bits']),uint(group['origin_id']),uint(group['outcome_id']),uint(group['classification_id']))
         check(key in groups and key not in found, 'unsupported or duplicate fault report group'); found.add(key)
-        check(group['classification'] == 'unknown' and group['record_count'] == len(groups[key]) and group['query_censored'] == 0, 'fault group count/classification mismatch')
+        check(group['classification'] == {0:'unknown',1:'minor',2:'major'}[key[7]] and group['record_count'] == len(groups[key]) and group['query_censored'] == 0, 'fault group count/classification mismatch')
         check(group['origin'] == {1:'kernel',2:'user'}[key[5]] and group['outcome'] == {1:'resolved',2:'not_handled',3:'no_memory',4:'resolver_error'}[key[6]], 'fault group origin/outcome labels mismatch')
         check(group['access'] == {0:'unknown',1:'read',2:'write',3:'read|write',4:'execute',5:'read|execute',6:'write|execute',7:'read|write|execute'}[key[4]], 'fault access label mismatch')
         fault_duration(group['duration'],groups[key])

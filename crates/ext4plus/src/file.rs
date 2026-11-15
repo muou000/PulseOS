@@ -244,15 +244,28 @@ pub(crate) async fn read_at_inner(
     ext4: &Ext4,
     inode: &Inode,
     file_blocks: &FileBlocks,
-    mut buf: &mut [u8],
+    buf: &mut [u8],
     offset: u64,
 ) -> Result<usize, Ext4Error> {
+    read_at_inner_with_io(ext4, inode, file_blocks, buf, offset, 0..0)
+        .await.map(|(read, _)| read)
+}
+
+#[maybe_async::maybe_async]
+async fn read_at_inner_with_io(
+    ext4: &Ext4,
+    inode: &Inode,
+    file_blocks: &FileBlocks,
+    mut buf: &mut [u8],
+    offset: u64,
+    observed: core::ops::Range<usize>,
+) -> Result<(usize, Option<bool>), Ext4Error> {
     if buf.is_empty() {
-        return Ok(0);
+        return Ok((0, Some(false)));
     }
 
     if offset >= inode.size_in_bytes() {
-        return Ok(0);
+        return Ok((0, Some(false)));
     }
 
     let bytes_remaining = inode
@@ -270,6 +283,7 @@ pub(crate) async fn read_at_inner(
     let block_size_u64 = block_size.to_u64();
     let block_size_usize = block_size.to_usize();
     let mut bytes_read = 0usize;
+    let mut storage_read = Some(false);
 
     while bytes_read < buf.len() {
         let current_offset = offset + bytes_read as u64;
@@ -290,12 +304,18 @@ pub(crate) async fn read_at_inner(
         if start_pblock == 0 {
             dest.fill(0);
         } else {
-            ext4.read_from_block_range(start_pblock, offset_within_block, dest).await?;
+            let start = observed.start.max(bytes_read);
+            let end = observed.end.min(bytes_read + chunk_len);
+            let window = if start < end { start - bytes_read..end - bytes_read } else { 0..0 };
+            let read = ext4.read_from_block_range_with_io(
+                start_pblock, offset_within_block, dest, window,
+            ).await?;
+            storage_read = crate::merge_read_io(storage_read, read);
         }
         bytes_read += chunk_len;
     }
 
-    Ok(bytes_read)
+    Ok((bytes_read, storage_read))
 }
 
 
@@ -310,6 +330,21 @@ pub async fn read_at(
 ) -> Result<usize, Ext4Error> {
     let file_blocks = FileBlocks::from_inode(inode, ext4.clone())?;
     read_at_inner(ext4, inode, &file_blocks, buf, offset).await
+}
+
+/// Reads file data and reports storage reads only for `observed`, relative to
+/// `buf`. Hole zero-fills and metadata reads do not count. Unsupported readers
+/// retain `None`, never an inferred cache hit.
+#[maybe_async::maybe_async]
+pub async fn read_at_with_io(
+    ext4: &Ext4,
+    inode: &Inode,
+    buf: &mut [u8],
+    offset: u64,
+    observed: core::ops::Range<usize>,
+) -> Result<(usize, Option<bool>), Ext4Error> {
+    let file_blocks = FileBlocks::from_inode(inode, ext4.clone())?;
+    read_at_inner_with_io(ext4, inode, &file_blocks, buf, offset, observed).await
 }
 
 /// Write `buf` into `inode` starting at `offset`, returning how many bytes were written.
