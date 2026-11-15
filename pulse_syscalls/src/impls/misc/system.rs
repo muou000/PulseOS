@@ -88,14 +88,24 @@ pub fn sys_reboot(magic1: usize, magic2: usize, cmd: usize, arg: usize) -> isize
         return -error.code() as isize;
     }
 
+    perform_reboot_action(action)
+}
+
+/// Shared by reboot(2) and the shell-init shutdown signal protocol. Callers
+/// authorize the request before entering this non-interruptible checkpoint.
+pub(crate) fn perform_reboot_action(action: RebootAction) -> isize {
     if reboot_action_requires_filesystem_flush(action) {
         if let Err(error) = flush_before_power_transition() {
             axlog::error!(
-                "sys_reboot: refusing power transition because filesystem writeback failed: {}",
+                "refusing power transition because filesystem writeback failed: {}",
                 error
             );
             return error;
         }
+        axlog::info!(
+            "filesystem writeback complete; system power transition: {:?}",
+            action
+        );
     }
 
     match action {
