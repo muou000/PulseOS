@@ -1,0 +1,3178 @@
+{
+  "format": "pulse-perf-evidence-replay",
+  "version": 1,
+  "runs": {
+    "rv-cpu": {
+      "members_verified": 117,
+      "raw_samples": 4717,
+      "raw_normalized_equal": true,
+      "reimport_normalized_equal": true,
+      "capture_status_code": 3,
+      "boot_reconstructed_from_elf": true,
+      "stack_counts": {
+        "user_a": 24,
+        "user_b": 32,
+        "kernel": 557,
+        "kernel_mmap": 48
+      },
+      "mapping_counts": {
+        "mapped": 19,
+        "renamed": 22,
+        "fork": 23,
+        "exec": 23,
+        "remapped": 21,
+        "partial_remapped": 23
+      },
+      "original_guest_gate_passed": true,
+      "original_guest_gate_errors": [],
+      "verified_phases": [
+        "exec",
+        "fork",
+        "mapped",
+        "partial_remapped",
+        "remapped",
+        "renamed"
+      ],
+      "mapped_user_samples": 527,
+      "verified_elf_samples": 4717,
+      "perf": {
+        "user-period": {
+          "weight_unit": "period_ns",
+          "weight": 6470000000,
+          "fresh_external_consumers": true,
+          "reexport_identical": true,
+          "known_call_tree_verified": true,
+          "sample_count": 481,
+          "total_period_ns": 6470000000,
+          "sources": [
+            9,
+            10,
+            11,
+            12,
+            13,
+            14,
+            15,
+            16,
+            17,
+            18,
+            19,
+            20,
+            22,
+            23,
+            24
+          ],
+          "raw_fields_verified": [
+            "source_id",
+            "ip",
+            "pid",
+            "tid",
+            "timestamp_ns",
+            "cpu",
+            "period_ns",
+            "mode",
+            "context_markers",
+            "callchain"
+          ],
+          "query": {
+            "pid": 49,
+            "tid": 49,
+            "mode": "user"
+          },
+          "function_rows": [
+            {
+              "samples": 8,
+              "period_ns": 80000000,
+              "symbol": "sample_probe_deep_start"
+            },
+            {
+              "samples": 6,
+              "period_ns": 60000000,
+              "symbol": "sample_probe_unmapped_start"
+            },
+            {
+              "samples": 6,
+              "period_ns": 60000000,
+              "symbol": "sample_probe_zero_start"
+            },
+            {
+              "samples": 5,
+              "period_ns": 50000000,
+              "symbol": "sample_probe_cycle_start"
+            },
+            {
+              "samples": 4,
+              "period_ns": 40000000,
+              "symbol": "sample_loop_b"
+            },
+            {
+              "samples": 4,
+              "period_ns": 40000000,
+              "symbol": "sample_probe_badra_start"
+            },
+            {
+              "samples": 4,
+              "period_ns": 40000000,
+              "symbol": "sample_probe_misaligned_start"
+            },
+            {
+              "samples": 2,
+              "period_ns": 20000000,
+              "symbol": "sample_loop_a"
+            },
+            {
+              "samples": 1,
+              "period_ns": 10000000,
+              "symbol": "sample_probe_misaligned_start"
+            },
+            {
+              "samples": 1,
+              "period_ns": 10000000,
+              "symbol": "sample_loop_b"
+            },
+            {
+              "samples": 1,
+              "period_ns": 10000000,
+              "symbol": "sample_probe_badra_start"
+            },
+            {
+              "samples": 1,
+              "period_ns": 10000000,
+              "symbol": "sample_probe_cycle_start"
+            },
+            {
+              "samples": 1,
+              "period_ns": 10000000,
+              "symbol": "sample_probe_deep_start"
+            },
+            {
+              "samples": 15,
+              "period_ns": 150000000,
+              "symbol": "sample_probe_cycle_start"
+            },
+            {
+              "samples": 13,
+              "period_ns": 130000000,
+              "symbol": "sample_probe_zero_start"
+            },
+            {
+              "samples": 12,
+              "period_ns": 120000000,
+              "symbol": "sample_probe_deep_start"
+            },
+            {
+              "samples": 12,
+              "period_ns": 120000000,
+              "symbol": "sample_probe_misaligned_start"
+            },
+            {
+              "samples": 11,
+              "period_ns": 110000000,
+              "symbol": "sample_probe_badra_start"
+            },
+            {
+              "samples": 10,
+              "period_ns": 100000000,
+              "symbol": "sample_probe_unmapped_start"
+            },
+            {
+              "samples": 5,
+              "period_ns": 50000000,
+              "symbol": "sample_loop_a"
+            },
+            {
+              "samples": 4,
+              "period_ns": 40000000,
+              "symbol": "sample_loop_b"
+            },
+            {
+              "samples": 1,
+              "period_ns": 10000000,
+              "symbol": ".L0 "
+            },
+            {
+              "samples": 1,
+              "period_ns": 10000000,
+              "symbol": ".L0 "
+            },
+            {
+              "samples": 1,
+              "period_ns": 10000000,
+              "symbol": "sample_loop_a"
+            },
+            {
+              "samples": 29,
+              "period_ns": 290000000,
+              "symbol": "mapped_busy_loop"
+            },
+            {
+              "samples": 10,
+              "period_ns": 100000000,
+              "symbol": "sample_probe_misaligned_start"
+            },
+            {
+              "samples": 10,
+              "period_ns": 100000000,
+              "symbol": "sample_probe_unmapped_start"
+            },
+            {
+              "samples": 7,
+              "period_ns": 70000000,
+              "symbol": "sample_probe_cycle_start"
+            },
+            {
+              "samples": 7,
+              "period_ns": 70000000,
+              "symbol": "sample_probe_deep_start"
+            },
+            {
+              "samples": 7,
+              "period_ns": 70000000,
+              "symbol": "sample_probe_zero_start"
+            },
+            {
+              "samples": 6,
+              "period_ns": 60000000,
+              "symbol": "sample_loop_b"
+            },
+            {
+              "samples": 5,
+              "period_ns": 50000000,
+              "symbol": "sample_probe_badra_start"
+            },
+            {
+              "samples": 4,
+              "period_ns": 40000000,
+              "symbol": "sample_loop_a"
+            },
+            {
+              "samples": 2,
+              "period_ns": 20000000,
+              "symbol": "sample_probe_badra_start"
+            },
+            {
+              "samples": 2,
+              "period_ns": 20000000,
+              "symbol": "sample_probe_misaligned_start"
+            },
+            {
+              "samples": 2,
+              "period_ns": 20000000,
+              "symbol": "sample_probe_zero_start"
+            },
+            {
+              "samples": 1,
+              "period_ns": 10000000,
+              "symbol": "sample_probe_deep_start"
+            },
+            {
+              "samples": 1,
+              "period_ns": 10000000,
+              "symbol": "sample_probe_unmapped_start"
+            },
+            {
+              "samples": 14,
+              "period_ns": 140000000,
+              "symbol": "mapped_busy_loop"
+            },
+            {
+              "samples": 12,
+              "period_ns": 120000000,
+              "symbol": "mapped_busy_loop"
+            },
+            {
+              "samples": 12,
+              "period_ns": 120000000,
+              "symbol": "sample_probe_cycle_start"
+            },
+            {
+              "samples": 12,
+              "period_ns": 120000000,
+              "symbol": "sample_probe_zero_start"
+            },
+            {
+              "samples": 10,
+              "period_ns": 100000000,
+              "symbol": "sample_probe_misaligned_start"
+            },
+            {
+              "samples": 9,
+              "period_ns": 90000000,
+              "symbol": "sample_probe_badra_start"
+            },
+            {
+              "samples": 9,
+              "period_ns": 90000000,
+              "symbol": "sample_probe_unmapped_start"
+            },
+            {
+              "samples": 5,
+              "period_ns": 50000000,
+              "symbol": "sample_loop_b"
+            },
+            {
+              "samples": 5,
+              "period_ns": 50000000,
+              "symbol": "sample_probe_deep_start"
+            },
+            {
+              "samples": 4,
+              "period_ns": 40000000,
+              "symbol": "sample_loop_a"
+            },
+            {
+              "samples": 1,
+              "period_ns": 10000000,
+              "symbol": "_RNvCsi7GqhGQDgdK_5guest9drain_all"
+            },
+            {
+              "samples": 5,
+              "period_ns": 100000000,
+              "symbol": "sample_probe_zero_start"
+            },
+            {
+              "samples": 4,
+              "period_ns": 80000000,
+              "symbol": "sample_probe_cycle_start"
+            },
+            {
+              "samples": 3,
+              "period_ns": 60000000,
+              "symbol": "sample_probe_misaligned_start"
+            },
+            {
+              "samples": 2,
+              "period_ns": 40000000,
+              "symbol": "sample_loop_b"
+            },
+            {
+              "samples": 2,
+              "period_ns": 40000000,
+              "symbol": "sample_probe_deep_start"
+            },
+            {
+              "samples": 2,
+              "period_ns": 40000000,
+              "symbol": "sample_probe_unmapped_start"
+            },
+            {
+              "samples": 1,
+              "period_ns": 20000000,
+              "symbol": "sample_loop_a"
+            },
+            {
+              "samples": 1,
+              "period_ns": 20000000,
+              "symbol": "sample_probe_badra_start"
+            },
+            {
+              "samples": 1,
+              "period_ns": 20000000,
+              "symbol": "sample_probe_misaligned_start"
+            },
+            {
+              "samples": 1,
+              "period_ns": 20000000,
+              "symbol": "sample_loop_b"
+            },
+            {
+              "samples": 1,
+              "period_ns": 20000000,
+              "symbol": "sample_probe_deep_start"
+            },
+            {
+              "samples": 7,
+              "period_ns": 140000000,
+              "symbol": "sample_probe_cycle_start"
+            },
+            {
+              "samples": 7,
+              "period_ns": 140000000,
+              "symbol": "sample_probe_zero_start"
+            },
+            {
+              "samples": 6,
+              "period_ns": 120000000,
+              "symbol": "sample_probe_badra_start"
+            },
+            {
+              "samples": 6,
+              "period_ns": 120000000,
+              "symbol": "sample_probe_deep_start"
+            },
+            {
+              "samples": 5,
+              "period_ns": 100000000,
+              "symbol": "sample_probe_misaligned_start"
+            },
+            {
+              "samples": 5,
+              "period_ns": 100000000,
+              "symbol": "sample_probe_unmapped_start"
+            },
+            {
+              "samples": 4,
+              "period_ns": 80000000,
+              "symbol": "sample_loop_b"
+            },
+            {
+              "samples": 2,
+              "period_ns": 40000000,
+              "symbol": "sample_loop_a"
+            },
+            {
+              "samples": 1,
+              "period_ns": 20000000,
+              "symbol": ".L0 "
+            },
+            {
+              "samples": 15,
+              "period_ns": 300000000,
+              "symbol": "mapped_busy_loop"
+            },
+            {
+              "samples": 6,
+              "period_ns": 120000000,
+              "symbol": "sample_probe_misaligned_start"
+            },
+            {
+              "samples": 6,
+              "period_ns": 120000000,
+              "symbol": "sample_probe_unmapped_start"
+            },
+            {
+              "samples": 4,
+              "period_ns": 80000000,
+              "symbol": "sample_probe_cycle_start"
+            },
+            {
+              "samples": 4,
+              "period_ns": 80000000,
+              "symbol": "sample_probe_deep_start"
+            },
+            {
+              "samples": 3,
+              "period_ns": 60000000,
+              "symbol": "sample_loop_b"
+            },
+            {
+              "samples": 3,
+              "period_ns": 60000000,
+              "symbol": "sample_probe_zero_start"
+            },
+            {
+              "samples": 2,
+              "period_ns": 40000000,
+              "symbol": "sample_loop_a"
+            },
+            {
+              "samples": 2,
+              "period_ns": 40000000,
+              "symbol": "sample_probe_badra_start"
+            },
+            {
+              "samples": 2,
+              "period_ns": 40000000,
+              "symbol": "sample_probe_zero_start"
+            },
+            {
+              "samples": 1,
+              "period_ns": 20000000,
+              "symbol": "sample_probe_badra_start"
+            },
+            {
+              "samples": 1,
+              "period_ns": 20000000,
+              "symbol": "sample_probe_misaligned_start"
+            },
+            {
+              "samples": 1,
+              "period_ns": 20000000,
+              "symbol": "sample_probe_unmapped_start"
+            },
+            {
+              "samples": 8,
+              "period_ns": 160000000,
+              "symbol": "mapped_busy_loop"
+            },
+            {
+              "samples": 7,
+              "period_ns": 140000000,
+              "symbol": "mapped_busy_loop"
+            },
+            {
+              "samples": 7,
+              "period_ns": 140000000,
+              "symbol": "sample_probe_misaligned_start"
+            },
+            {
+              "samples": 5,
+              "period_ns": 100000000,
+              "symbol": "sample_probe_badra_start"
+            },
+            {
+              "samples": 5,
+              "period_ns": 100000000,
+              "symbol": "sample_probe_unmapped_start"
+            },
+            {
+              "samples": 5,
+              "period_ns": 100000000,
+              "symbol": "sample_probe_zero_start"
+            },
+            {
+              "samples": 4,
+              "period_ns": 80000000,
+              "symbol": "sample_probe_cycle_start"
+            },
+            {
+              "samples": 3,
+              "period_ns": 60000000,
+              "symbol": "sample_loop_a"
+            },
+            {
+              "samples": 3,
+              "period_ns": 60000000,
+              "symbol": "sample_probe_deep_start"
+            },
+            {
+              "samples": 2,
+              "period_ns": 40000000,
+              "symbol": "sample_loop_b"
+            },
+            {
+              "samples": 1,
+              "period_ns": 20000000,
+              "symbol": "_RNvCsi7GqhGQDgdK_5guest9drain_all"
+            }
+          ]
+        },
+        "user-samples": {
+          "weight_unit": "samples",
+          "weight": 481,
+          "fresh_external_consumers": true,
+          "reexport_identical": true,
+          "known_call_tree_verified": true,
+          "sample_count": 481,
+          "total_period_ns": 6470000000,
+          "sources": [
+            9,
+            10,
+            11,
+            12,
+            13,
+            14,
+            15,
+            16,
+            17,
+            18,
+            19,
+            20,
+            22,
+            23,
+            24
+          ],
+          "raw_fields_verified": [
+            "source_id",
+            "ip",
+            "pid",
+            "tid",
+            "timestamp_ns",
+            "cpu",
+            "period_ns",
+            "mode",
+            "context_markers",
+            "callchain"
+          ],
+          "query": {
+            "pid": 49,
+            "tid": 49,
+            "mode": "user"
+          },
+          "function_rows": [
+            {
+              "samples": 8,
+              "period_ns": 80000000,
+              "symbol": "sample_probe_deep_start"
+            },
+            {
+              "samples": 6,
+              "period_ns": 60000000,
+              "symbol": "sample_probe_unmapped_start"
+            },
+            {
+              "samples": 6,
+              "period_ns": 60000000,
+              "symbol": "sample_probe_zero_start"
+            },
+            {
+              "samples": 5,
+              "period_ns": 50000000,
+              "symbol": "sample_probe_cycle_start"
+            },
+            {
+              "samples": 4,
+              "period_ns": 40000000,
+              "symbol": "sample_loop_b"
+            },
+            {
+              "samples": 4,
+              "period_ns": 40000000,
+              "symbol": "sample_probe_badra_start"
+            },
+            {
+              "samples": 4,
+              "period_ns": 40000000,
+              "symbol": "sample_probe_misaligned_start"
+            },
+            {
+              "samples": 2,
+              "period_ns": 20000000,
+              "symbol": "sample_loop_a"
+            },
+            {
+              "samples": 1,
+              "period_ns": 10000000,
+              "symbol": "sample_probe_misaligned_start"
+            },
+            {
+              "samples": 1,
+              "period_ns": 10000000,
+              "symbol": "sample_loop_b"
+            },
+            {
+              "samples": 1,
+              "period_ns": 10000000,
+              "symbol": "sample_probe_badra_start"
+            },
+            {
+              "samples": 1,
+              "period_ns": 10000000,
+              "symbol": "sample_probe_cycle_start"
+            },
+            {
+              "samples": 1,
+              "period_ns": 10000000,
+              "symbol": "sample_probe_deep_start"
+            },
+            {
+              "samples": 15,
+              "period_ns": 150000000,
+              "symbol": "sample_probe_cycle_start"
+            },
+            {
+              "samples": 13,
+              "period_ns": 130000000,
+              "symbol": "sample_probe_zero_start"
+            },
+            {
+              "samples": 12,
+              "period_ns": 120000000,
+              "symbol": "sample_probe_deep_start"
+            },
+            {
+              "samples": 12,
+              "period_ns": 120000000,
+              "symbol": "sample_probe_misaligned_start"
+            },
+            {
+              "samples": 11,
+              "period_ns": 110000000,
+              "symbol": "sample_probe_badra_start"
+            },
+            {
+              "samples": 10,
+              "period_ns": 100000000,
+              "symbol": "sample_probe_unmapped_start"
+            },
+            {
+              "samples": 5,
+              "period_ns": 50000000,
+              "symbol": "sample_loop_a"
+            },
+            {
+              "samples": 4,
+              "period_ns": 40000000,
+              "symbol": "sample_loop_b"
+            },
+            {
+              "samples": 1,
+              "period_ns": 10000000,
+              "symbol": ".L0 "
+            },
+            {
+              "samples": 1,
+              "period_ns": 10000000,
+              "symbol": ".L0 "
+            },
+            {
+              "samples": 1,
+              "period_ns": 10000000,
+              "symbol": "sample_loop_a"
+            },
+            {
+              "samples": 29,
+              "period_ns": 290000000,
+              "symbol": "mapped_busy_loop"
+            },
+            {
+              "samples": 10,
+              "period_ns": 100000000,
+              "symbol": "sample_probe_misaligned_start"
+            },
+            {
+              "samples": 10,
+              "period_ns": 100000000,
+              "symbol": "sample_probe_unmapped_start"
+            },
+            {
+              "samples": 7,
+              "period_ns": 70000000,
+              "symbol": "sample_probe_cycle_start"
+            },
+            {
+              "samples": 7,
+              "period_ns": 70000000,
+              "symbol": "sample_probe_deep_start"
+            },
+            {
+              "samples": 7,
+              "period_ns": 70000000,
+              "symbol": "sample_probe_zero_start"
+            },
+            {
+              "samples": 6,
+              "period_ns": 60000000,
+              "symbol": "sample_loop_b"
+            },
+            {
+              "samples": 5,
+              "period_ns": 50000000,
+              "symbol": "sample_probe_badra_start"
+            },
+            {
+              "samples": 4,
+              "period_ns": 40000000,
+              "symbol": "sample_loop_a"
+            },
+            {
+              "samples": 2,
+              "period_ns": 20000000,
+              "symbol": "sample_probe_badra_start"
+            },
+            {
+              "samples": 2,
+              "period_ns": 20000000,
+              "symbol": "sample_probe_misaligned_start"
+            },
+            {
+              "samples": 2,
+              "period_ns": 20000000,
+              "symbol": "sample_probe_zero_start"
+            },
+            {
+              "samples": 1,
+              "period_ns": 10000000,
+              "symbol": "sample_probe_deep_start"
+            },
+            {
+              "samples": 1,
+              "period_ns": 10000000,
+              "symbol": "sample_probe_unmapped_start"
+            },
+            {
+              "samples": 14,
+              "period_ns": 140000000,
+              "symbol": "mapped_busy_loop"
+            },
+            {
+              "samples": 12,
+              "period_ns": 120000000,
+              "symbol": "mapped_busy_loop"
+            },
+            {
+              "samples": 12,
+              "period_ns": 120000000,
+              "symbol": "sample_probe_cycle_start"
+            },
+            {
+              "samples": 12,
+              "period_ns": 120000000,
+              "symbol": "sample_probe_zero_start"
+            },
+            {
+              "samples": 10,
+              "period_ns": 100000000,
+              "symbol": "sample_probe_misaligned_start"
+            },
+            {
+              "samples": 9,
+              "period_ns": 90000000,
+              "symbol": "sample_probe_badra_start"
+            },
+            {
+              "samples": 9,
+              "period_ns": 90000000,
+              "symbol": "sample_probe_unmapped_start"
+            },
+            {
+              "samples": 5,
+              "period_ns": 50000000,
+              "symbol": "sample_loop_b"
+            },
+            {
+              "samples": 5,
+              "period_ns": 50000000,
+              "symbol": "sample_probe_deep_start"
+            },
+            {
+              "samples": 4,
+              "period_ns": 40000000,
+              "symbol": "sample_loop_a"
+            },
+            {
+              "samples": 1,
+              "period_ns": 10000000,
+              "symbol": "_RNvCsi7GqhGQDgdK_5guest9drain_all"
+            },
+            {
+              "samples": 5,
+              "period_ns": 100000000,
+              "symbol": "sample_probe_zero_start"
+            },
+            {
+              "samples": 4,
+              "period_ns": 80000000,
+              "symbol": "sample_probe_cycle_start"
+            },
+            {
+              "samples": 3,
+              "period_ns": 60000000,
+              "symbol": "sample_probe_misaligned_start"
+            },
+            {
+              "samples": 2,
+              "period_ns": 40000000,
+              "symbol": "sample_loop_b"
+            },
+            {
+              "samples": 2,
+              "period_ns": 40000000,
+              "symbol": "sample_probe_deep_start"
+            },
+            {
+              "samples": 2,
+              "period_ns": 40000000,
+              "symbol": "sample_probe_unmapped_start"
+            },
+            {
+              "samples": 1,
+              "period_ns": 20000000,
+              "symbol": "sample_loop_a"
+            },
+            {
+              "samples": 1,
+              "period_ns": 20000000,
+              "symbol": "sample_probe_badra_start"
+            },
+            {
+              "samples": 1,
+              "period_ns": 20000000,
+              "symbol": "sample_probe_misaligned_start"
+            },
+            {
+              "samples": 1,
+              "period_ns": 20000000,
+              "symbol": "sample_loop_b"
+            },
+            {
+              "samples": 1,
+              "period_ns": 20000000,
+              "symbol": "sample_probe_deep_start"
+            },
+            {
+              "samples": 7,
+              "period_ns": 140000000,
+              "symbol": "sample_probe_cycle_start"
+            },
+            {
+              "samples": 7,
+              "period_ns": 140000000,
+              "symbol": "sample_probe_zero_start"
+            },
+            {
+              "samples": 6,
+              "period_ns": 120000000,
+              "symbol": "sample_probe_badra_start"
+            },
+            {
+              "samples": 6,
+              "period_ns": 120000000,
+              "symbol": "sample_probe_deep_start"
+            },
+            {
+              "samples": 5,
+              "period_ns": 100000000,
+              "symbol": "sample_probe_misaligned_start"
+            },
+            {
+              "samples": 5,
+              "period_ns": 100000000,
+              "symbol": "sample_probe_unmapped_start"
+            },
+            {
+              "samples": 4,
+              "period_ns": 80000000,
+              "symbol": "sample_loop_b"
+            },
+            {
+              "samples": 2,
+              "period_ns": 40000000,
+              "symbol": "sample_loop_a"
+            },
+            {
+              "samples": 1,
+              "period_ns": 20000000,
+              "symbol": ".L0 "
+            },
+            {
+              "samples": 15,
+              "period_ns": 300000000,
+              "symbol": "mapped_busy_loop"
+            },
+            {
+              "samples": 6,
+              "period_ns": 120000000,
+              "symbol": "sample_probe_misaligned_start"
+            },
+            {
+              "samples": 6,
+              "period_ns": 120000000,
+              "symbol": "sample_probe_unmapped_start"
+            },
+            {
+              "samples": 4,
+              "period_ns": 80000000,
+              "symbol": "sample_probe_cycle_start"
+            },
+            {
+              "samples": 4,
+              "period_ns": 80000000,
+              "symbol": "sample_probe_deep_start"
+            },
+            {
+              "samples": 3,
+              "period_ns": 60000000,
+              "symbol": "sample_loop_b"
+            },
+            {
+              "samples": 3,
+              "period_ns": 60000000,
+              "symbol": "sample_probe_zero_start"
+            },
+            {
+              "samples": 2,
+              "period_ns": 40000000,
+              "symbol": "sample_loop_a"
+            },
+            {
+              "samples": 2,
+              "period_ns": 40000000,
+              "symbol": "sample_probe_badra_start"
+            },
+            {
+              "samples": 2,
+              "period_ns": 40000000,
+              "symbol": "sample_probe_zero_start"
+            },
+            {
+              "samples": 1,
+              "period_ns": 20000000,
+              "symbol": "sample_probe_badra_start"
+            },
+            {
+              "samples": 1,
+              "period_ns": 20000000,
+              "symbol": "sample_probe_misaligned_start"
+            },
+            {
+              "samples": 1,
+              "period_ns": 20000000,
+              "symbol": "sample_probe_unmapped_start"
+            },
+            {
+              "samples": 8,
+              "period_ns": 160000000,
+              "symbol": "mapped_busy_loop"
+            },
+            {
+              "samples": 7,
+              "period_ns": 140000000,
+              "symbol": "mapped_busy_loop"
+            },
+            {
+              "samples": 7,
+              "period_ns": 140000000,
+              "symbol": "sample_probe_misaligned_start"
+            },
+            {
+              "samples": 5,
+              "period_ns": 100000000,
+              "symbol": "sample_probe_badra_start"
+            },
+            {
+              "samples": 5,
+              "period_ns": 100000000,
+              "symbol": "sample_probe_unmapped_start"
+            },
+            {
+              "samples": 5,
+              "period_ns": 100000000,
+              "symbol": "sample_probe_zero_start"
+            },
+            {
+              "samples": 4,
+              "period_ns": 80000000,
+              "symbol": "sample_probe_cycle_start"
+            },
+            {
+              "samples": 3,
+              "period_ns": 60000000,
+              "symbol": "sample_loop_a"
+            },
+            {
+              "samples": 3,
+              "period_ns": 60000000,
+              "symbol": "sample_probe_deep_start"
+            },
+            {
+              "samples": 2,
+              "period_ns": 40000000,
+              "symbol": "sample_loop_b"
+            },
+            {
+              "samples": 1,
+              "period_ns": 20000000,
+              "symbol": "_RNvCsi7GqhGQDgdK_5guest9drain_all"
+            }
+          ]
+        },
+        "kernel-period": {
+          "weight_unit": "period_ns",
+          "weight": 810000000,
+          "fresh_external_consumers": true,
+          "reexport_identical": true,
+          "known_call_tree_verified": true,
+          "sample_count": 65,
+          "total_period_ns": 810000000,
+          "sources": [
+            9,
+            12,
+            14,
+            15,
+            16,
+            17,
+            20,
+            22,
+            24
+          ],
+          "raw_fields_verified": [
+            "source_id",
+            "ip",
+            "pid",
+            "tid",
+            "timestamp_ns",
+            "cpu",
+            "period_ns",
+            "mode",
+            "context_markers",
+            "callchain"
+          ],
+          "query": {
+            "pid": 49,
+            "mode": "kernel"
+          },
+          "function_rows": [
+            {
+              "samples": 1,
+              "period_ns": 10000000,
+              "symbol": "_RNvMNtNtCs2dLt4669Yyg_4axmm7backend5allocNtB2_12AnonPageLoad7prepare"
+            },
+            {
+              "samples": 1,
+              "period_ns": 10000000,
+              "symbol": "_RNvMse_NtCs2dLt4669Yyg_4axmm6aspaceNtB5_20PageTableLockManager13lock_for_addr"
+            },
+            {
+              "samples": 1,
+              "period_ns": 10000000,
+              "symbol": "_RNvNtCsfn1bCox2JYk_14pulse_syscalls7handler15syscall_handler"
+            },
+            {
+              "samples": 1,
+              "period_ns": 10000000,
+              "symbol": "_RNvNtNtCsi6ntEUVRy5p_10pulse_core3bpf8mappings6append"
+            },
+            {
+              "samples": 2,
+              "period_ns": 20000000,
+              "symbol": "_RNvMNtNtCsi6ntEUVRy5p_10pulse_core4task11aspace_lockNtB2_16AddressSpaceLock18resolve_page_fault"
+            },
+            {
+              "samples": 2,
+              "period_ns": 20000000,
+              "symbol": "_RNvMs_NtNtNtCsi6ntEUVRy5p_10pulse_core4task7process6memoryNtB6_7Process23try_fault_in_user_range"
+            },
+            {
+              "samples": 1,
+              "period_ns": 10000000,
+              "symbol": "_RINvMsi_NtNtNtCsjERcYpRWfXh_5alloc11collections5btree3mapINtB6_8BTreeMapNtNtCsKldoIs8J5y_11memory_addr4addr8VirtAddrINtNtCsd5wzdCrJRJ0_10memory_set4area10MemoryAreaNtNtCs2dLt4669Yyg_4axmm7backend7BackendEE5rangeB18_INtNtNtCslp09szNzNxx_4core3ops5range9RangeFromB18_EEB2G_"
+            },
+            {
+              "samples": 1,
+              "period_ns": 10000000,
+              "symbol": "_RINvNtNtNtNtCslp09szNzNxx_4core5slice4sort8unstable9quicksort9quicksortNtNtCsKldoIs8J5y_11memory_addr4addr8PhysAddrNCINvMB8_SB17_20sort_unstable_by_keyjNCNvNtNtCs2dLt4669Yyg_4axmm7backend5alloc18dealloc_frame_runs0E0EB2y_"
+            },
+            {
+              "samples": 1,
+              "period_ns": 10000000,
+              "symbol": "_RNvMNtNtCsi6ntEUVRy5p_10pulse_core4task11aspace_lockNtB2_16AddressSpaceLock5unmap"
+            },
+            {
+              "samples": 1,
+              "period_ns": 10000000,
+              "symbol": "_RNvMs3_NtCs9wavQAkFGX8_7axalloc10buddy_slabNtB5_15GlobalAllocator5alloc"
+            },
+            {
+              "samples": 1,
+              "period_ns": 10000000,
+              "symbol": "_RNvMsf_NtCs2dLt4669Yyg_4axmm6aspaceNtB5_9AddrSpace25handle_prepared_anon_page"
+            },
+            {
+              "samples": 1,
+              "period_ns": 10000000,
+              "symbol": "_RNvNtCsjfIYfYfibIJ_17compiler_builtins3mem6memcpy"
+            },
+            {
+              "samples": 1,
+              "period_ns": 10000000,
+              "symbol": "_RNvNtCslp09szNzNxx_4core3fmt5write"
+            },
+            {
+              "samples": 1,
+              "period_ns": 10000000,
+              "symbol": "_RNvNtNtCsi6ntEUVRy5p_10pulse_core3bpf8mappings6append"
+            },
+            {
+              "samples": 1,
+              "period_ns": 10000000,
+              "symbol": "_RNvXsZ_NtCsjERcYpRWfXh_5alloc6stringNtB5_6StringNtNtCslp09szNzNxx_4core3fmt5Write9write_str.5087"
+            },
+            {
+              "samples": 1,
+              "period_ns": 10000000,
+              "symbol": "memcpy"
+            },
+            {
+              "samples": 1,
+              "period_ns": 10000000,
+              "symbol": "memset"
+            },
+            {
+              "samples": 3,
+              "period_ns": 30000000,
+              "symbol": "_RNvNtNtCsi6ntEUVRy5p_10pulse_core3bpf8mappings6append"
+            },
+            {
+              "samples": 1,
+              "period_ns": 10000000,
+              "symbol": "_RNvNtCsi6ntEUVRy5p_10pulse_core4trap17handle_page_fault"
+            },
+            {
+              "samples": 1,
+              "period_ns": 10000000,
+              "symbol": "memset"
+            },
+            {
+              "samples": 1,
+              "period_ns": 10000000,
+              "symbol": "_RNvMs0_NtNtNtCsi6ntEUVRy5p_10pulse_core4task7process6memoryNtB7_7Process15is_mapped_range"
+            },
+            {
+              "samples": 1,
+              "period_ns": 10000000,
+              "symbol": "_RNvMsa_NtCslp09szNzNxx_4core3fmtNtB5_9Formatter12pad_integral"
+            },
+            {
+              "samples": 1,
+              "period_ns": 10000000,
+              "symbol": "_RNvNtNtCsi6ntEUVRy5p_10pulse_core3bpf8mappings14space_snapshot"
+            },
+            {
+              "samples": 1,
+              "period_ns": 10000000,
+              "symbol": "_RNvXs4_NtCs9wavQAkFGX8_7axalloc10buddy_slabNtB5_15GlobalAllocatorNtNtNtCslp09szNzNxx_4core5alloc6global11GlobalAlloc7realloc"
+            },
+            {
+              "samples": 1,
+              "period_ns": 10000000,
+              "symbol": "_RNvNtCsi6ntEUVRy5p_10pulse_core4trap17handle_page_fault"
+            },
+            {
+              "samples": 1,
+              "period_ns": 10000000,
+              "symbol": "_RNvNtNtCsi6ntEUVRy5p_10pulse_core3bpf8mappings6append"
+            },
+            {
+              "samples": 2,
+              "period_ns": 20000000,
+              "symbol": "_RNvMs2_NtNtCs2dLt4669Yyg_4axmm7backend5allocNtB7_7Backend32handle_prepared_page_fault_alloc"
+            },
+            {
+              "samples": 2,
+              "period_ns": 20000000,
+              "symbol": "_RNvNtNtCsi6ntEUVRy5p_10pulse_core3bpf8mappings6append"
+            },
+            {
+              "samples": 1,
+              "period_ns": 10000000,
+              "symbol": "_RNCNvXsx_NtNtNtCsjw6hMyFDCgZ_4axfs2fs4ext45inodeNtB7_5InodeNtNtNtCs7s73TROrFwm_11axfs_ng_vfs4node3dir10DirNodeOps6rename0Bd_"
+            },
+            {
+              "samples": 1,
+              "period_ns": 10000000,
+              "symbol": "_RNvMs3_NtCs9wavQAkFGX8_7axalloc10buddy_slabNtB5_15GlobalAllocator5alloc"
+            },
+            {
+              "samples": 1,
+              "period_ns": 10000000,
+              "symbol": "_stext"
+            },
+            {
+              "samples": 1,
+              "period_ns": 10000000,
+              "symbol": "_RINvNtNtNtNtCslp09szNzNxx_4core5slice4sort8unstable9quicksort9quicksortNtNtCsKldoIs8J5y_11memory_addr4addr8PhysAddrNCINvMB8_SB17_20sort_unstable_by_keyjNCNvNtNtCs2dLt4669Yyg_4axmm7backend5alloc18dealloc_frame_runs0E0EB2y_"
+            },
+            {
+              "samples": 1,
+              "period_ns": 10000000,
+              "symbol": "_RNvMNtNtCsi6ntEUVRy5p_10pulse_core4task11aspace_lockNtB2_16AddressSpaceLock18resolve_page_fault"
+            },
+            {
+              "samples": 1,
+              "period_ns": 10000000,
+              "symbol": "_RNvMs0_NtCsd5wzdCrJRJ0_10memory_set3setINtB5_9MemorySetNtNtCs2dLt4669Yyg_4axmm7backend7BackendE4findBV_"
+            },
+            {
+              "samples": 1,
+              "period_ns": 10000000,
+              "symbol": "_RNvMs3_NtCs9wavQAkFGX8_7axalloc10buddy_slabNtB5_15GlobalAllocator16alloc_page_batch"
+            },
+            {
+              "samples": 1,
+              "period_ns": 10000000,
+              "symbol": "_RNvMs_NtNtNtCsi6ntEUVRy5p_10pulse_core4task7process6memoryNtB6_7Process24write_user_bytes_partial"
+            },
+            {
+              "samples": 1,
+              "period_ns": 10000000,
+              "symbol": "_RNvNtCsi6ntEUVRy5p_10pulse_core4trap17handle_page_fault"
+            },
+            {
+              "samples": 1,
+              "period_ns": 10000000,
+              "symbol": "_RNvNtCsjfIYfYfibIJ_17compiler_builtins3mem6memcpy"
+            },
+            {
+              "samples": 1,
+              "period_ns": 10000000,
+              "symbol": "_RNvNtCslp09szNzNxx_4core3fmt5write"
+            },
+            {
+              "samples": 1,
+              "period_ns": 10000000,
+              "symbol": "_RNvNvNtCsjERcYpRWfXh_5alloc3fmt6format12format_inner"
+            },
+            {
+              "samples": 1,
+              "period_ns": 10000000,
+              "symbol": "_RNvXs1_NtCs7s73TROrFwm_11axfs_ng_vfs4pathNtB5_10ComponentsNtNtNtNtCslp09szNzNxx_4core4iter6traits12double_ended19DoubleEndedIterator9next_back"
+            },
+            {
+              "samples": 1,
+              "period_ns": 10000000,
+              "symbol": "_RNvXsZ_NtCsjERcYpRWfXh_5alloc6stringNtB5_6StringNtNtCslp09szNzNxx_4core3fmt5Write9write_str"
+            },
+            {
+              "samples": 1,
+              "period_ns": 10000000,
+              "symbol": "_RNvXsd_NtNtNtCslp09szNzNxx_4core3fmt3num3impyNtB9_7Display3fmt"
+            },
+            {
+              "samples": 1,
+              "period_ns": 20000000,
+              "symbol": "_RNvNtCsfn1bCox2JYk_14pulse_syscalls7handler15syscall_handler"
+            },
+            {
+              "samples": 1,
+              "period_ns": 20000000,
+              "symbol": "_RINvMsi_NtNtNtCsjERcYpRWfXh_5alloc11collections5btree3mapINtB6_8BTreeMapNtNtCsKldoIs8J5y_11memory_addr4addr8VirtAddrINtNtCsd5wzdCrJRJ0_10memory_set4area10MemoryAreaNtNtCs2dLt4669Yyg_4axmm7backend7BackendEE5rangeB18_INtNtNtCslp09szNzNxx_4core3ops5range9RangeFromB18_EEB2G_"
+            },
+            {
+              "samples": 1,
+              "period_ns": 20000000,
+              "symbol": "_RNvMNtNtCsi6ntEUVRy5p_10pulse_core4task11aspace_lockNtB2_16AddressSpaceLock18resolve_page_fault"
+            },
+            {
+              "samples": 1,
+              "period_ns": 20000000,
+              "symbol": "_RNvMNtNtCsi6ntEUVRy5p_10pulse_core4task11aspace_lockNtB2_16AddressSpaceLock5unmap"
+            },
+            {
+              "samples": 1,
+              "period_ns": 20000000,
+              "symbol": "_RNvMs_NtNtNtCsi6ntEUVRy5p_10pulse_core4task7process6memoryNtB6_7Process23try_fault_in_user_range"
+            },
+            {
+              "samples": 1,
+              "period_ns": 20000000,
+              "symbol": "_RNvNtCsjfIYfYfibIJ_17compiler_builtins3mem6memcpy"
+            },
+            {
+              "samples": 1,
+              "period_ns": 20000000,
+              "symbol": "_RNvNtCslp09szNzNxx_4core3fmt5write"
+            },
+            {
+              "samples": 1,
+              "period_ns": 20000000,
+              "symbol": "memset"
+            },
+            {
+              "samples": 1,
+              "period_ns": 20000000,
+              "symbol": "_RNvNtNtCsi6ntEUVRy5p_10pulse_core3bpf8mappings6append"
+            },
+            {
+              "samples": 1,
+              "period_ns": 20000000,
+              "symbol": "_RNvXs4_NtCs9wavQAkFGX8_7axalloc10buddy_slabNtB5_15GlobalAllocatorNtNtNtCslp09szNzNxx_4core5alloc6global11GlobalAlloc7realloc"
+            },
+            {
+              "samples": 2,
+              "period_ns": 40000000,
+              "symbol": "_RNvNtNtCsi6ntEUVRy5p_10pulse_core3bpf8mappings6append"
+            },
+            {
+              "samples": 1,
+              "period_ns": 20000000,
+              "symbol": "_RINvNtNtNtNtCslp09szNzNxx_4core5slice4sort8unstable9quicksort9quicksortNtNtCsKldoIs8J5y_11memory_addr4addr8PhysAddrNCINvMB8_SB17_20sort_unstable_by_keyjNCNvNtNtCs2dLt4669Yyg_4axmm7backend5alloc18dealloc_frame_runs0E0EB2y_"
+            },
+            {
+              "samples": 1,
+              "period_ns": 20000000,
+              "symbol": "_RNvMs2_NtNtCs2dLt4669Yyg_4axmm7backend5allocNtB7_7Backend32handle_prepared_page_fault_alloc"
+            },
+            {
+              "samples": 1,
+              "period_ns": 20000000,
+              "symbol": "_RNvNtCslp09szNzNxx_4core3fmt5write"
+            },
+            {
+              "samples": 1,
+              "period_ns": 20000000,
+              "symbol": "_RNvXsZ_NtCsjERcYpRWfXh_5alloc6stringNtB5_6StringNtNtCslp09szNzNxx_4core3fmt5Write9write_str"
+            }
+          ]
+        }
+      }
+    },
+    "la-cpu": {
+      "members_verified": 117,
+      "raw_samples": 4233,
+      "raw_normalized_equal": true,
+      "reimport_normalized_equal": true,
+      "capture_status_code": 3,
+      "boot_reconstructed_from_elf": true,
+      "stack_counts": {
+        "user_a": 40,
+        "user_b": 33,
+        "kernel": 480,
+        "kernel_mmap": 48
+      },
+      "mapping_counts": {
+        "mapped": 18,
+        "renamed": 25,
+        "fork": 23,
+        "exec": 23,
+        "remapped": 22,
+        "partial_remapped": 21
+      },
+      "original_guest_gate_passed": true,
+      "original_guest_gate_errors": [],
+      "verified_phases": [
+        "exec",
+        "fork",
+        "mapped",
+        "partial_remapped",
+        "remapped",
+        "renamed"
+      ],
+      "mapped_user_samples": 479,
+      "verified_elf_samples": 4233,
+      "perf": {
+        "user-period": {
+          "weight_unit": "period_ns",
+          "weight": 5760000000,
+          "fresh_external_consumers": true,
+          "reexport_identical": true,
+          "known_call_tree_verified": true,
+          "sample_count": 432,
+          "total_period_ns": 5760000000,
+          "sources": [
+            9,
+            10,
+            11,
+            12,
+            13,
+            14,
+            15,
+            16,
+            17,
+            18,
+            19,
+            20,
+            21,
+            22,
+            23,
+            24
+          ],
+          "raw_fields_verified": [
+            "source_id",
+            "ip",
+            "pid",
+            "tid",
+            "timestamp_ns",
+            "cpu",
+            "period_ns",
+            "mode",
+            "context_markers",
+            "callchain"
+          ],
+          "query": {
+            "pid": 55,
+            "tid": 55,
+            "mode": "user"
+          },
+          "function_rows": [
+            {
+              "samples": 5,
+              "period_ns": 50000000,
+              "symbol": "sample_probe_misaligned_start"
+            },
+            {
+              "samples": 5,
+              "period_ns": 50000000,
+              "symbol": "sample_probe_unmapped_start"
+            },
+            {
+              "samples": 4,
+              "period_ns": 40000000,
+              "symbol": "sample_probe_badra_start"
+            },
+            {
+              "samples": 4,
+              "period_ns": 40000000,
+              "symbol": "sample_probe_zero_start"
+            },
+            {
+              "samples": 2,
+              "period_ns": 20000000,
+              "symbol": "sample_loop_b"
+            },
+            {
+              "samples": 2,
+              "period_ns": 20000000,
+              "symbol": "sample_probe_deep_start"
+            },
+            {
+              "samples": 1,
+              "period_ns": 10000000,
+              "symbol": ".L0 "
+            },
+            {
+              "samples": 1,
+              "period_ns": 10000000,
+              "symbol": "sample_loop_a"
+            },
+            {
+              "samples": 1,
+              "period_ns": 10000000,
+              "symbol": "sample_probe_cycle_start"
+            },
+            {
+              "samples": 8,
+              "period_ns": 80000000,
+              "symbol": "sample_probe_zero_start"
+            },
+            {
+              "samples": 5,
+              "period_ns": 50000000,
+              "symbol": "sample_probe_misaligned_start"
+            },
+            {
+              "samples": 4,
+              "period_ns": 40000000,
+              "symbol": "mapped_busy_loop"
+            },
+            {
+              "samples": 4,
+              "period_ns": 40000000,
+              "symbol": "sample_loop_a"
+            },
+            {
+              "samples": 4,
+              "period_ns": 40000000,
+              "symbol": "sample_probe_deep_start"
+            },
+            {
+              "samples": 4,
+              "period_ns": 40000000,
+              "symbol": "sample_probe_unmapped_start"
+            },
+            {
+              "samples": 3,
+              "period_ns": 30000000,
+              "symbol": "sample_probe_cycle_start"
+            },
+            {
+              "samples": 1,
+              "period_ns": 10000000,
+              "symbol": "sample_loop_b"
+            },
+            {
+              "samples": 1,
+              "period_ns": 10000000,
+              "symbol": "sample_probe_badra_start"
+            },
+            {
+              "samples": 7,
+              "period_ns": 70000000,
+              "symbol": "sample_probe_badra_start"
+            },
+            {
+              "samples": 7,
+              "period_ns": 70000000,
+              "symbol": "sample_probe_deep_start"
+            },
+            {
+              "samples": 7,
+              "period_ns": 70000000,
+              "symbol": "sample_probe_unmapped_start"
+            },
+            {
+              "samples": 5,
+              "period_ns": 50000000,
+              "symbol": "sample_loop_b"
+            },
+            {
+              "samples": 4,
+              "period_ns": 40000000,
+              "symbol": "sample_probe_cycle_start"
+            },
+            {
+              "samples": 4,
+              "period_ns": 40000000,
+              "symbol": "sample_probe_zero_start"
+            },
+            {
+              "samples": 3,
+              "period_ns": 30000000,
+              "symbol": "sample_loop_a"
+            },
+            {
+              "samples": 2,
+              "period_ns": 20000000,
+              "symbol": "mapped_busy_loop"
+            },
+            {
+              "samples": 2,
+              "period_ns": 20000000,
+              "symbol": "sample_probe_misaligned_start"
+            },
+            {
+              "samples": 1,
+              "period_ns": 10000000,
+              "symbol": ".L0 "
+            },
+            {
+              "samples": 1,
+              "period_ns": 10000000,
+              "symbol": ".L0 "
+            },
+            {
+              "samples": 1,
+              "period_ns": 10000000,
+              "symbol": "mapped_busy_loop"
+            },
+            {
+              "samples": 10,
+              "period_ns": 100000000,
+              "symbol": "sample_probe_badra_start"
+            },
+            {
+              "samples": 9,
+              "period_ns": 90000000,
+              "symbol": "sample_loop_b"
+            },
+            {
+              "samples": 6,
+              "period_ns": 60000000,
+              "symbol": "sample_loop_a"
+            },
+            {
+              "samples": 5,
+              "period_ns": 50000000,
+              "symbol": "sample_probe_unmapped_start"
+            },
+            {
+              "samples": 4,
+              "period_ns": 40000000,
+              "symbol": "sample_probe_cycle_start"
+            },
+            {
+              "samples": 4,
+              "period_ns": 40000000,
+              "symbol": "sample_probe_deep_start"
+            },
+            {
+              "samples": 3,
+              "period_ns": 30000000,
+              "symbol": "sample_probe_zero_start"
+            },
+            {
+              "samples": 1,
+              "period_ns": 10000000,
+              "symbol": ".L0 "
+            },
+            {
+              "samples": 1,
+              "period_ns": 10000000,
+              "symbol": "sample_probe_misaligned_start"
+            },
+            {
+              "samples": 16,
+              "period_ns": 160000000,
+              "symbol": "mapped_busy_loop"
+            },
+            {
+              "samples": 5,
+              "period_ns": 50000000,
+              "symbol": "sample_probe_deep_start"
+            },
+            {
+              "samples": 5,
+              "period_ns": 50000000,
+              "symbol": "sample_probe_misaligned_start"
+            },
+            {
+              "samples": 4,
+              "period_ns": 40000000,
+              "symbol": "sample_loop_a"
+            },
+            {
+              "samples": 4,
+              "period_ns": 40000000,
+              "symbol": "sample_probe_unmapped_start"
+            },
+            {
+              "samples": 3,
+              "period_ns": 30000000,
+              "symbol": "sample_probe_badra_start"
+            },
+            {
+              "samples": 3,
+              "period_ns": 30000000,
+              "symbol": "sample_probe_zero_start"
+            },
+            {
+              "samples": 2,
+              "period_ns": 20000000,
+              "symbol": "sample_loop_b"
+            },
+            {
+              "samples": 2,
+              "period_ns": 20000000,
+              "symbol": "sample_probe_cycle_start"
+            },
+            {
+              "samples": 1,
+              "period_ns": 10000000,
+              "symbol": ".L0 "
+            },
+            {
+              "samples": 12,
+              "period_ns": 120000000,
+              "symbol": "mapped_busy_loop"
+            },
+            {
+              "samples": 8,
+              "period_ns": 80000000,
+              "symbol": "sample_loop_a"
+            },
+            {
+              "samples": 6,
+              "period_ns": 60000000,
+              "symbol": "sample_probe_unmapped_start"
+            },
+            {
+              "samples": 5,
+              "period_ns": 50000000,
+              "symbol": "mapped_busy_loop"
+            },
+            {
+              "samples": 5,
+              "period_ns": 50000000,
+              "symbol": "sample_probe_cycle_start"
+            },
+            {
+              "samples": 5,
+              "period_ns": 50000000,
+              "symbol": "sample_probe_misaligned_start"
+            },
+            {
+              "samples": 3,
+              "period_ns": 30000000,
+              "symbol": "sample_probe_zero_start"
+            },
+            {
+              "samples": 2,
+              "period_ns": 20000000,
+              "symbol": "sample_probe_badra_start"
+            },
+            {
+              "samples": 2,
+              "period_ns": 20000000,
+              "symbol": "sample_probe_deep_start"
+            },
+            {
+              "samples": 1,
+              "period_ns": 10000000,
+              "symbol": ".L0 "
+            },
+            {
+              "samples": 1,
+              "period_ns": 10000000,
+              "symbol": ".L0 "
+            },
+            {
+              "samples": 1,
+              "period_ns": 10000000,
+              "symbol": "sample_loop_b"
+            },
+            {
+              "samples": 1,
+              "period_ns": 10000000,
+              "symbol": "sample_probe_deep"
+            },
+            {
+              "samples": 6,
+              "period_ns": 60000000,
+              "symbol": "mapped_busy_loop"
+            },
+            {
+              "samples": 4,
+              "period_ns": 40000000,
+              "symbol": "sample_probe_zero_start"
+            },
+            {
+              "samples": 3,
+              "period_ns": 30000000,
+              "symbol": "sample_probe_misaligned_start"
+            },
+            {
+              "samples": 3,
+              "period_ns": 30000000,
+              "symbol": "sample_probe_unmapped_start"
+            },
+            {
+              "samples": 2,
+              "period_ns": 20000000,
+              "symbol": ".L0 "
+            },
+            {
+              "samples": 2,
+              "period_ns": 20000000,
+              "symbol": "sample_loop_a"
+            },
+            {
+              "samples": 1,
+              "period_ns": 10000000,
+              "symbol": ".L0 "
+            },
+            {
+              "samples": 1,
+              "period_ns": 10000000,
+              "symbol": "sample_probe_cycle_start"
+            },
+            {
+              "samples": 1,
+              "period_ns": 10000000,
+              "symbol": "sample_probe_deep_start"
+            },
+            {
+              "samples": 9,
+              "period_ns": 90000000,
+              "symbol": "mapped_busy_loop"
+            },
+            {
+              "samples": 4,
+              "period_ns": 40000000,
+              "symbol": "sample_probe_cycle_start"
+            },
+            {
+              "samples": 2,
+              "period_ns": 20000000,
+              "symbol": "sample_probe_misaligned_start"
+            },
+            {
+              "samples": 2,
+              "period_ns": 20000000,
+              "symbol": "sample_probe_zero_start"
+            },
+            {
+              "samples": 1,
+              "period_ns": 10000000,
+              "symbol": ".L0 "
+            },
+            {
+              "samples": 1,
+              "period_ns": 10000000,
+              "symbol": "sample_loop_a"
+            },
+            {
+              "samples": 1,
+              "period_ns": 10000000,
+              "symbol": "sample_loop_b"
+            },
+            {
+              "samples": 1,
+              "period_ns": 10000000,
+              "symbol": "sample_probe_deep_start"
+            },
+            {
+              "samples": 1,
+              "period_ns": 10000000,
+              "symbol": "sample_probe_unmapped_start"
+            },
+            {
+              "samples": 4,
+              "period_ns": 80000000,
+              "symbol": "sample_probe_zero_start"
+            },
+            {
+              "samples": 2,
+              "period_ns": 40000000,
+              "symbol": "sample_loop_b"
+            },
+            {
+              "samples": 2,
+              "period_ns": 40000000,
+              "symbol": "sample_probe_unmapped_start"
+            },
+            {
+              "samples": 1,
+              "period_ns": 20000000,
+              "symbol": ".L0 "
+            },
+            {
+              "samples": 1,
+              "period_ns": 20000000,
+              "symbol": "sample_probe_deep_start"
+            },
+            {
+              "samples": 6,
+              "period_ns": 120000000,
+              "symbol": "sample_probe_zero_start"
+            },
+            {
+              "samples": 3,
+              "period_ns": 60000000,
+              "symbol": "sample_probe_cycle_start"
+            },
+            {
+              "samples": 3,
+              "period_ns": 60000000,
+              "symbol": "sample_probe_unmapped_start"
+            },
+            {
+              "samples": 2,
+              "period_ns": 40000000,
+              "symbol": "mapped_busy_loop"
+            },
+            {
+              "samples": 2,
+              "period_ns": 40000000,
+              "symbol": "sample_probe_deep_start"
+            },
+            {
+              "samples": 6,
+              "period_ns": 120000000,
+              "symbol": "sample_probe_badra_start"
+            },
+            {
+              "samples": 5,
+              "period_ns": 100000000,
+              "symbol": "sample_probe_unmapped_start"
+            },
+            {
+              "samples": 3,
+              "period_ns": 60000000,
+              "symbol": "sample_probe_cycle_start"
+            },
+            {
+              "samples": 3,
+              "period_ns": 60000000,
+              "symbol": "sample_probe_deep_start"
+            },
+            {
+              "samples": 3,
+              "period_ns": 60000000,
+              "symbol": "sample_probe_zero_start"
+            },
+            {
+              "samples": 1,
+              "period_ns": 20000000,
+              "symbol": "mapped_busy_loop"
+            },
+            {
+              "samples": 1,
+              "period_ns": 20000000,
+              "symbol": "mapped_busy_loop"
+            },
+            {
+              "samples": 1,
+              "period_ns": 20000000,
+              "symbol": "sample_loop_a"
+            },
+            {
+              "samples": 8,
+              "period_ns": 160000000,
+              "symbol": "sample_loop_b"
+            },
+            {
+              "samples": 3,
+              "period_ns": 60000000,
+              "symbol": "sample_loop_a"
+            },
+            {
+              "samples": 3,
+              "period_ns": 60000000,
+              "symbol": "sample_probe_badra_start"
+            },
+            {
+              "samples": 3,
+              "period_ns": 60000000,
+              "symbol": "sample_probe_zero_start"
+            },
+            {
+              "samples": 2,
+              "period_ns": 40000000,
+              "symbol": "sample_probe_unmapped_start"
+            },
+            {
+              "samples": 1,
+              "period_ns": 20000000,
+              "symbol": "sample_probe_cycle_start"
+            },
+            {
+              "samples": 9,
+              "period_ns": 180000000,
+              "symbol": "mapped_busy_loop"
+            },
+            {
+              "samples": 3,
+              "period_ns": 60000000,
+              "symbol": "sample_loop_a"
+            },
+            {
+              "samples": 3,
+              "period_ns": 60000000,
+              "symbol": "sample_probe_unmapped_start"
+            },
+            {
+              "samples": 2,
+              "period_ns": 40000000,
+              "symbol": "sample_loop_b"
+            },
+            {
+              "samples": 2,
+              "period_ns": 40000000,
+              "symbol": "sample_probe_zero_start"
+            },
+            {
+              "samples": 1,
+              "period_ns": 20000000,
+              "symbol": "sample_probe_badra_start"
+            },
+            {
+              "samples": 1,
+              "period_ns": 20000000,
+              "symbol": "sample_probe_cycle_start"
+            },
+            {
+              "samples": 1,
+              "period_ns": 20000000,
+              "symbol": "sample_probe_deep_start"
+            },
+            {
+              "samples": 1,
+              "period_ns": 20000000,
+              "symbol": "sample_probe_misaligned_start"
+            },
+            {
+              "samples": 7,
+              "period_ns": 140000000,
+              "symbol": "mapped_busy_loop"
+            },
+            {
+              "samples": 5,
+              "period_ns": 100000000,
+              "symbol": "sample_probe_cycle_start"
+            },
+            {
+              "samples": 4,
+              "period_ns": 80000000,
+              "symbol": "sample_probe_unmapped_start"
+            },
+            {
+              "samples": 3,
+              "period_ns": 60000000,
+              "symbol": "mapped_busy_loop"
+            },
+            {
+              "samples": 3,
+              "period_ns": 60000000,
+              "symbol": "sample_probe_misaligned_start"
+            },
+            {
+              "samples": 3,
+              "period_ns": 60000000,
+              "symbol": "sample_probe_zero_start"
+            },
+            {
+              "samples": 2,
+              "period_ns": 40000000,
+              "symbol": "sample_loop_a"
+            },
+            {
+              "samples": 2,
+              "period_ns": 40000000,
+              "symbol": "sample_probe_badra_start"
+            },
+            {
+              "samples": 3,
+              "period_ns": 60000000,
+              "symbol": "sample_probe_misaligned_start"
+            },
+            {
+              "samples": 2,
+              "period_ns": 40000000,
+              "symbol": ".L0 "
+            },
+            {
+              "samples": 2,
+              "period_ns": 40000000,
+              "symbol": "mapped_busy_loop"
+            },
+            {
+              "samples": 2,
+              "period_ns": 40000000,
+              "symbol": "sample_loop_a"
+            },
+            {
+              "samples": 1,
+              "period_ns": 20000000,
+              "symbol": ".L0 "
+            },
+            {
+              "samples": 1,
+              "period_ns": 20000000,
+              "symbol": "sample_probe_deep_start"
+            },
+            {
+              "samples": 6,
+              "period_ns": 120000000,
+              "symbol": "mapped_busy_loop"
+            },
+            {
+              "samples": 3,
+              "period_ns": 60000000,
+              "symbol": "sample_probe_cycle_start"
+            },
+            {
+              "samples": 2,
+              "period_ns": 40000000,
+              "symbol": "sample_probe_zero_start"
+            },
+            {
+              "samples": 1,
+              "period_ns": 20000000,
+              "symbol": "sample_probe_misaligned_start"
+            }
+          ]
+        },
+        "user-samples": {
+          "weight_unit": "samples",
+          "weight": 432,
+          "fresh_external_consumers": true,
+          "reexport_identical": true,
+          "known_call_tree_verified": true,
+          "sample_count": 432,
+          "total_period_ns": 5760000000,
+          "sources": [
+            9,
+            10,
+            11,
+            12,
+            13,
+            14,
+            15,
+            16,
+            17,
+            18,
+            19,
+            20,
+            21,
+            22,
+            23,
+            24
+          ],
+          "raw_fields_verified": [
+            "source_id",
+            "ip",
+            "pid",
+            "tid",
+            "timestamp_ns",
+            "cpu",
+            "period_ns",
+            "mode",
+            "context_markers",
+            "callchain"
+          ],
+          "query": {
+            "pid": 55,
+            "tid": 55,
+            "mode": "user"
+          },
+          "function_rows": [
+            {
+              "samples": 5,
+              "period_ns": 50000000,
+              "symbol": "sample_probe_misaligned_start"
+            },
+            {
+              "samples": 5,
+              "period_ns": 50000000,
+              "symbol": "sample_probe_unmapped_start"
+            },
+            {
+              "samples": 4,
+              "period_ns": 40000000,
+              "symbol": "sample_probe_badra_start"
+            },
+            {
+              "samples": 4,
+              "period_ns": 40000000,
+              "symbol": "sample_probe_zero_start"
+            },
+            {
+              "samples": 2,
+              "period_ns": 20000000,
+              "symbol": "sample_loop_b"
+            },
+            {
+              "samples": 2,
+              "period_ns": 20000000,
+              "symbol": "sample_probe_deep_start"
+            },
+            {
+              "samples": 1,
+              "period_ns": 10000000,
+              "symbol": ".L0 "
+            },
+            {
+              "samples": 1,
+              "period_ns": 10000000,
+              "symbol": "sample_loop_a"
+            },
+            {
+              "samples": 1,
+              "period_ns": 10000000,
+              "symbol": "sample_probe_cycle_start"
+            },
+            {
+              "samples": 8,
+              "period_ns": 80000000,
+              "symbol": "sample_probe_zero_start"
+            },
+            {
+              "samples": 5,
+              "period_ns": 50000000,
+              "symbol": "sample_probe_misaligned_start"
+            },
+            {
+              "samples": 4,
+              "period_ns": 40000000,
+              "symbol": "mapped_busy_loop"
+            },
+            {
+              "samples": 4,
+              "period_ns": 40000000,
+              "symbol": "sample_loop_a"
+            },
+            {
+              "samples": 4,
+              "period_ns": 40000000,
+              "symbol": "sample_probe_deep_start"
+            },
+            {
+              "samples": 4,
+              "period_ns": 40000000,
+              "symbol": "sample_probe_unmapped_start"
+            },
+            {
+              "samples": 3,
+              "period_ns": 30000000,
+              "symbol": "sample_probe_cycle_start"
+            },
+            {
+              "samples": 1,
+              "period_ns": 10000000,
+              "symbol": "sample_loop_b"
+            },
+            {
+              "samples": 1,
+              "period_ns": 10000000,
+              "symbol": "sample_probe_badra_start"
+            },
+            {
+              "samples": 7,
+              "period_ns": 70000000,
+              "symbol": "sample_probe_badra_start"
+            },
+            {
+              "samples": 7,
+              "period_ns": 70000000,
+              "symbol": "sample_probe_deep_start"
+            },
+            {
+              "samples": 7,
+              "period_ns": 70000000,
+              "symbol": "sample_probe_unmapped_start"
+            },
+            {
+              "samples": 5,
+              "period_ns": 50000000,
+              "symbol": "sample_loop_b"
+            },
+            {
+              "samples": 4,
+              "period_ns": 40000000,
+              "symbol": "sample_probe_cycle_start"
+            },
+            {
+              "samples": 4,
+              "period_ns": 40000000,
+              "symbol": "sample_probe_zero_start"
+            },
+            {
+              "samples": 3,
+              "period_ns": 30000000,
+              "symbol": "sample_loop_a"
+            },
+            {
+              "samples": 2,
+              "period_ns": 20000000,
+              "symbol": "mapped_busy_loop"
+            },
+            {
+              "samples": 2,
+              "period_ns": 20000000,
+              "symbol": "sample_probe_misaligned_start"
+            },
+            {
+              "samples": 1,
+              "period_ns": 10000000,
+              "symbol": ".L0 "
+            },
+            {
+              "samples": 1,
+              "period_ns": 10000000,
+              "symbol": ".L0 "
+            },
+            {
+              "samples": 1,
+              "period_ns": 10000000,
+              "symbol": "mapped_busy_loop"
+            },
+            {
+              "samples": 10,
+              "period_ns": 100000000,
+              "symbol": "sample_probe_badra_start"
+            },
+            {
+              "samples": 9,
+              "period_ns": 90000000,
+              "symbol": "sample_loop_b"
+            },
+            {
+              "samples": 6,
+              "period_ns": 60000000,
+              "symbol": "sample_loop_a"
+            },
+            {
+              "samples": 5,
+              "period_ns": 50000000,
+              "symbol": "sample_probe_unmapped_start"
+            },
+            {
+              "samples": 4,
+              "period_ns": 40000000,
+              "symbol": "sample_probe_cycle_start"
+            },
+            {
+              "samples": 4,
+              "period_ns": 40000000,
+              "symbol": "sample_probe_deep_start"
+            },
+            {
+              "samples": 3,
+              "period_ns": 30000000,
+              "symbol": "sample_probe_zero_start"
+            },
+            {
+              "samples": 1,
+              "period_ns": 10000000,
+              "symbol": ".L0 "
+            },
+            {
+              "samples": 1,
+              "period_ns": 10000000,
+              "symbol": "sample_probe_misaligned_start"
+            },
+            {
+              "samples": 16,
+              "period_ns": 160000000,
+              "symbol": "mapped_busy_loop"
+            },
+            {
+              "samples": 5,
+              "period_ns": 50000000,
+              "symbol": "sample_probe_deep_start"
+            },
+            {
+              "samples": 5,
+              "period_ns": 50000000,
+              "symbol": "sample_probe_misaligned_start"
+            },
+            {
+              "samples": 4,
+              "period_ns": 40000000,
+              "symbol": "sample_loop_a"
+            },
+            {
+              "samples": 4,
+              "period_ns": 40000000,
+              "symbol": "sample_probe_unmapped_start"
+            },
+            {
+              "samples": 3,
+              "period_ns": 30000000,
+              "symbol": "sample_probe_badra_start"
+            },
+            {
+              "samples": 3,
+              "period_ns": 30000000,
+              "symbol": "sample_probe_zero_start"
+            },
+            {
+              "samples": 2,
+              "period_ns": 20000000,
+              "symbol": "sample_loop_b"
+            },
+            {
+              "samples": 2,
+              "period_ns": 20000000,
+              "symbol": "sample_probe_cycle_start"
+            },
+            {
+              "samples": 1,
+              "period_ns": 10000000,
+              "symbol": ".L0 "
+            },
+            {
+              "samples": 12,
+              "period_ns": 120000000,
+              "symbol": "mapped_busy_loop"
+            },
+            {
+              "samples": 8,
+              "period_ns": 80000000,
+              "symbol": "sample_loop_a"
+            },
+            {
+              "samples": 6,
+              "period_ns": 60000000,
+              "symbol": "sample_probe_unmapped_start"
+            },
+            {
+              "samples": 5,
+              "period_ns": 50000000,
+              "symbol": "mapped_busy_loop"
+            },
+            {
+              "samples": 5,
+              "period_ns": 50000000,
+              "symbol": "sample_probe_cycle_start"
+            },
+            {
+              "samples": 5,
+              "period_ns": 50000000,
+              "symbol": "sample_probe_misaligned_start"
+            },
+            {
+              "samples": 3,
+              "period_ns": 30000000,
+              "symbol": "sample_probe_zero_start"
+            },
+            {
+              "samples": 2,
+              "period_ns": 20000000,
+              "symbol": "sample_probe_badra_start"
+            },
+            {
+              "samples": 2,
+              "period_ns": 20000000,
+              "symbol": "sample_probe_deep_start"
+            },
+            {
+              "samples": 1,
+              "period_ns": 10000000,
+              "symbol": ".L0 "
+            },
+            {
+              "samples": 1,
+              "period_ns": 10000000,
+              "symbol": ".L0 "
+            },
+            {
+              "samples": 1,
+              "period_ns": 10000000,
+              "symbol": "sample_loop_b"
+            },
+            {
+              "samples": 1,
+              "period_ns": 10000000,
+              "symbol": "sample_probe_deep"
+            },
+            {
+              "samples": 6,
+              "period_ns": 60000000,
+              "symbol": "mapped_busy_loop"
+            },
+            {
+              "samples": 4,
+              "period_ns": 40000000,
+              "symbol": "sample_probe_zero_start"
+            },
+            {
+              "samples": 3,
+              "period_ns": 30000000,
+              "symbol": "sample_probe_misaligned_start"
+            },
+            {
+              "samples": 3,
+              "period_ns": 30000000,
+              "symbol": "sample_probe_unmapped_start"
+            },
+            {
+              "samples": 2,
+              "period_ns": 20000000,
+              "symbol": ".L0 "
+            },
+            {
+              "samples": 2,
+              "period_ns": 20000000,
+              "symbol": "sample_loop_a"
+            },
+            {
+              "samples": 1,
+              "period_ns": 10000000,
+              "symbol": ".L0 "
+            },
+            {
+              "samples": 1,
+              "period_ns": 10000000,
+              "symbol": "sample_probe_cycle_start"
+            },
+            {
+              "samples": 1,
+              "period_ns": 10000000,
+              "symbol": "sample_probe_deep_start"
+            },
+            {
+              "samples": 9,
+              "period_ns": 90000000,
+              "symbol": "mapped_busy_loop"
+            },
+            {
+              "samples": 4,
+              "period_ns": 40000000,
+              "symbol": "sample_probe_cycle_start"
+            },
+            {
+              "samples": 2,
+              "period_ns": 20000000,
+              "symbol": "sample_probe_misaligned_start"
+            },
+            {
+              "samples": 2,
+              "period_ns": 20000000,
+              "symbol": "sample_probe_zero_start"
+            },
+            {
+              "samples": 1,
+              "period_ns": 10000000,
+              "symbol": ".L0 "
+            },
+            {
+              "samples": 1,
+              "period_ns": 10000000,
+              "symbol": "sample_loop_a"
+            },
+            {
+              "samples": 1,
+              "period_ns": 10000000,
+              "symbol": "sample_loop_b"
+            },
+            {
+              "samples": 1,
+              "period_ns": 10000000,
+              "symbol": "sample_probe_deep_start"
+            },
+            {
+              "samples": 1,
+              "period_ns": 10000000,
+              "symbol": "sample_probe_unmapped_start"
+            },
+            {
+              "samples": 4,
+              "period_ns": 80000000,
+              "symbol": "sample_probe_zero_start"
+            },
+            {
+              "samples": 2,
+              "period_ns": 40000000,
+              "symbol": "sample_loop_b"
+            },
+            {
+              "samples": 2,
+              "period_ns": 40000000,
+              "symbol": "sample_probe_unmapped_start"
+            },
+            {
+              "samples": 1,
+              "period_ns": 20000000,
+              "symbol": ".L0 "
+            },
+            {
+              "samples": 1,
+              "period_ns": 20000000,
+              "symbol": "sample_probe_deep_start"
+            },
+            {
+              "samples": 6,
+              "period_ns": 120000000,
+              "symbol": "sample_probe_zero_start"
+            },
+            {
+              "samples": 3,
+              "period_ns": 60000000,
+              "symbol": "sample_probe_cycle_start"
+            },
+            {
+              "samples": 3,
+              "period_ns": 60000000,
+              "symbol": "sample_probe_unmapped_start"
+            },
+            {
+              "samples": 2,
+              "period_ns": 40000000,
+              "symbol": "mapped_busy_loop"
+            },
+            {
+              "samples": 2,
+              "period_ns": 40000000,
+              "symbol": "sample_probe_deep_start"
+            },
+            {
+              "samples": 6,
+              "period_ns": 120000000,
+              "symbol": "sample_probe_badra_start"
+            },
+            {
+              "samples": 5,
+              "period_ns": 100000000,
+              "symbol": "sample_probe_unmapped_start"
+            },
+            {
+              "samples": 3,
+              "period_ns": 60000000,
+              "symbol": "sample_probe_cycle_start"
+            },
+            {
+              "samples": 3,
+              "period_ns": 60000000,
+              "symbol": "sample_probe_deep_start"
+            },
+            {
+              "samples": 3,
+              "period_ns": 60000000,
+              "symbol": "sample_probe_zero_start"
+            },
+            {
+              "samples": 1,
+              "period_ns": 20000000,
+              "symbol": "mapped_busy_loop"
+            },
+            {
+              "samples": 1,
+              "period_ns": 20000000,
+              "symbol": "mapped_busy_loop"
+            },
+            {
+              "samples": 1,
+              "period_ns": 20000000,
+              "symbol": "sample_loop_a"
+            },
+            {
+              "samples": 8,
+              "period_ns": 160000000,
+              "symbol": "sample_loop_b"
+            },
+            {
+              "samples": 3,
+              "period_ns": 60000000,
+              "symbol": "sample_loop_a"
+            },
+            {
+              "samples": 3,
+              "period_ns": 60000000,
+              "symbol": "sample_probe_badra_start"
+            },
+            {
+              "samples": 3,
+              "period_ns": 60000000,
+              "symbol": "sample_probe_zero_start"
+            },
+            {
+              "samples": 2,
+              "period_ns": 40000000,
+              "symbol": "sample_probe_unmapped_start"
+            },
+            {
+              "samples": 1,
+              "period_ns": 20000000,
+              "symbol": "sample_probe_cycle_start"
+            },
+            {
+              "samples": 9,
+              "period_ns": 180000000,
+              "symbol": "mapped_busy_loop"
+            },
+            {
+              "samples": 3,
+              "period_ns": 60000000,
+              "symbol": "sample_loop_a"
+            },
+            {
+              "samples": 3,
+              "period_ns": 60000000,
+              "symbol": "sample_probe_unmapped_start"
+            },
+            {
+              "samples": 2,
+              "period_ns": 40000000,
+              "symbol": "sample_loop_b"
+            },
+            {
+              "samples": 2,
+              "period_ns": 40000000,
+              "symbol": "sample_probe_zero_start"
+            },
+            {
+              "samples": 1,
+              "period_ns": 20000000,
+              "symbol": "sample_probe_badra_start"
+            },
+            {
+              "samples": 1,
+              "period_ns": 20000000,
+              "symbol": "sample_probe_cycle_start"
+            },
+            {
+              "samples": 1,
+              "period_ns": 20000000,
+              "symbol": "sample_probe_deep_start"
+            },
+            {
+              "samples": 1,
+              "period_ns": 20000000,
+              "symbol": "sample_probe_misaligned_start"
+            },
+            {
+              "samples": 7,
+              "period_ns": 140000000,
+              "symbol": "mapped_busy_loop"
+            },
+            {
+              "samples": 5,
+              "period_ns": 100000000,
+              "symbol": "sample_probe_cycle_start"
+            },
+            {
+              "samples": 4,
+              "period_ns": 80000000,
+              "symbol": "sample_probe_unmapped_start"
+            },
+            {
+              "samples": 3,
+              "period_ns": 60000000,
+              "symbol": "mapped_busy_loop"
+            },
+            {
+              "samples": 3,
+              "period_ns": 60000000,
+              "symbol": "sample_probe_misaligned_start"
+            },
+            {
+              "samples": 3,
+              "period_ns": 60000000,
+              "symbol": "sample_probe_zero_start"
+            },
+            {
+              "samples": 2,
+              "period_ns": 40000000,
+              "symbol": "sample_loop_a"
+            },
+            {
+              "samples": 2,
+              "period_ns": 40000000,
+              "symbol": "sample_probe_badra_start"
+            },
+            {
+              "samples": 3,
+              "period_ns": 60000000,
+              "symbol": "sample_probe_misaligned_start"
+            },
+            {
+              "samples": 2,
+              "period_ns": 40000000,
+              "symbol": ".L0 "
+            },
+            {
+              "samples": 2,
+              "period_ns": 40000000,
+              "symbol": "mapped_busy_loop"
+            },
+            {
+              "samples": 2,
+              "period_ns": 40000000,
+              "symbol": "sample_loop_a"
+            },
+            {
+              "samples": 1,
+              "period_ns": 20000000,
+              "symbol": ".L0 "
+            },
+            {
+              "samples": 1,
+              "period_ns": 20000000,
+              "symbol": "sample_probe_deep_start"
+            },
+            {
+              "samples": 6,
+              "period_ns": 120000000,
+              "symbol": "mapped_busy_loop"
+            },
+            {
+              "samples": 3,
+              "period_ns": 60000000,
+              "symbol": "sample_probe_cycle_start"
+            },
+            {
+              "samples": 2,
+              "period_ns": 40000000,
+              "symbol": "sample_probe_zero_start"
+            },
+            {
+              "samples": 1,
+              "period_ns": 20000000,
+              "symbol": "sample_probe_misaligned_start"
+            }
+          ]
+        },
+        "kernel-period": {
+          "weight_unit": "period_ns",
+          "weight": 960000000,
+          "fresh_external_consumers": true,
+          "reexport_identical": true,
+          "known_call_tree_verified": true,
+          "sample_count": 68,
+          "total_period_ns": 960000000,
+          "sources": [
+            9,
+            10,
+            11,
+            12,
+            13,
+            14,
+            15,
+            16,
+            17,
+            18,
+            19,
+            20,
+            21,
+            22,
+            23,
+            24
+          ],
+          "raw_fields_verified": [
+            "source_id",
+            "ip",
+            "pid",
+            "tid",
+            "timestamp_ns",
+            "cpu",
+            "period_ns",
+            "mode",
+            "context_markers",
+            "callchain"
+          ],
+          "query": {
+            "pid": 55,
+            "mode": "kernel"
+          },
+          "function_rows": [
+            {
+              "samples": 3,
+              "period_ns": 30000000,
+              "symbol": "_RNvNtNtCsbWed5Wd12Ke_10pulse_core3bpf8mappings6append"
+            },
+            {
+              "samples": 1,
+              "period_ns": 10000000,
+              "symbol": "_RNvXsZ_NtCsgRTEDITimMi_5alloc6stringNtB5_6StringNtNtCsgZQbPBtNQkr_4core3fmt5Write9write_str.5197"
+            },
+            {
+              "samples": 1,
+              "period_ns": 10000000,
+              "symbol": "memset"
+            },
+            {
+              "samples": 1,
+              "period_ns": 10000000,
+              "symbol": "_RNvNtNtCsbWed5Wd12Ke_10pulse_core3bpf8mappings6append"
+            },
+            {
+              "samples": 1,
+              "period_ns": 10000000,
+              "symbol": "memset"
+            },
+            {
+              "samples": 1,
+              "period_ns": 10000000,
+              "symbol": "_RNvMNtNtCsbWed5Wd12Ke_10pulse_core4task11aspace_lockNtB2_16AddressSpaceLock18resolve_page_fault"
+            },
+            {
+              "samples": 1,
+              "period_ns": 10000000,
+              "symbol": "_RNvMNtNtCsbWed5Wd12Ke_10pulse_core4task11aspace_lockNtB2_16AddressSpaceLock5unmap"
+            },
+            {
+              "samples": 1,
+              "period_ns": 10000000,
+              "symbol": "_RNvMs3_NtCsp6UR8dfMcg_7axalloc10buddy_slabNtB5_15GlobalAllocator5alloc"
+            },
+            {
+              "samples": 1,
+              "period_ns": 10000000,
+              "symbol": "_RNvMs_NtCs5BEVyeTxAnZ_5axhal6pagingNtB4_9PageTable5query"
+            },
+            {
+              "samples": 1,
+              "period_ns": 10000000,
+              "symbol": "_RNvMs_NtNtNtCsbWed5Wd12Ke_10pulse_core4task7process9resourcesNtB6_7Process20memlock_unlock_range"
+            },
+            {
+              "samples": 1,
+              "period_ns": 10000000,
+              "symbol": "_RNvNtCsgwDEsmk0VYP_17compiler_builtins3mem6memcpy"
+            },
+            {
+              "samples": 1,
+              "period_ns": 10000000,
+              "symbol": "_RNvNtNtCsbWed5Wd12Ke_10pulse_core3bpf8mappings14space_snapshot"
+            },
+            {
+              "samples": 1,
+              "period_ns": 10000000,
+              "symbol": "_RNvNtNtCsfKlkVe8PeSS_14pulse_syscalls5impls2mm8sys_mmap"
+            },
+            {
+              "samples": 1,
+              "period_ns": 10000000,
+              "symbol": "_RNvXsi_NtCsjCoaeoUUdft_4axmm7backendNtB5_7BackendNtNtCsgZQbPBtNQkr_4core5clone5Clone5clone"
+            },
+            {
+              "samples": 1,
+              "period_ns": 10000000,
+              "symbol": "_RINvMsi_NtNtNtCsgRTEDITimMi_5alloc11collections5btree3mapINtB6_8BTreeMapNtNtCsjSsM1a3sHvN_11memory_addr4addr8VirtAddrINtNtCsgkde5f2IWDN_10memory_set4area10MemoryAreaNtNtCsjCoaeoUUdft_4axmm7backend7BackendEE5rangeB18_INtNtNtCsgZQbPBtNQkr_4core3ops5range5RangeB18_EEB2H_"
+            },
+            {
+              "samples": 1,
+              "period_ns": 10000000,
+              "symbol": "_RINvXs7_NtCsjCoaeoUUdft_4axmm7backendNtB6_7BackendNtNtCsgkde5f2IWDN_10memory_set7backend14MappingBackend13unmap_trackedNtB6_22TlbInvalidationTrackerEB8_"
+            },
+            {
+              "samples": 1,
+              "period_ns": 10000000,
+              "symbol": "_RNvCs649HdJRfeDM_5axipi18flush_asid_request"
+            },
+            {
+              "samples": 1,
+              "period_ns": 10000000,
+              "symbol": "_RNvMNtNtCsbWed5Wd12Ke_10pulse_core4task11aspace_lockNtB2_16AddressSpaceLock5unmap"
+            },
+            {
+              "samples": 1,
+              "period_ns": 10000000,
+              "symbol": "_RNvMs3_NtCsp6UR8dfMcg_7axalloc10buddy_slabNtB5_15GlobalAllocator5alloc"
+            },
+            {
+              "samples": 1,
+              "period_ns": 10000000,
+              "symbol": "_RNvNtCsgwDEsmk0VYP_17compiler_builtins3mem6memcpy"
+            },
+            {
+              "samples": 1,
+              "period_ns": 10000000,
+              "symbol": "memset"
+            },
+            {
+              "samples": 1,
+              "period_ns": 10000000,
+              "symbol": "_RNvMs0_NtCsgkde5f2IWDN_10memory_set3setINtB5_9MemorySetNtNtCsjCoaeoUUdft_4axmm7backend7BackendE4findBV_"
+            },
+            {
+              "samples": 1,
+              "period_ns": 10000000,
+              "symbol": "_RNvNtCsfKlkVe8PeSS_14pulse_syscalls7handler15syscall_handler"
+            },
+            {
+              "samples": 1,
+              "period_ns": 10000000,
+              "symbol": "_RINvNtCsgZQbPBtNQkr_4core3ptr9drop_glueNtNtCsjCoaeoUUdft_4axmm7backend16DeferredReclaimsECsbWed5Wd12Ke_10pulse_core"
+            },
+            {
+              "samples": 1,
+              "period_ns": 10000000,
+              "symbol": "_RNvMs3_NtCsp6UR8dfMcg_7axalloc10buddy_slabNtB5_15GlobalAllocator5alloc"
+            },
+            {
+              "samples": 1,
+              "period_ns": 10000000,
+              "symbol": "_RNvXsd_NtNtNtCsgZQbPBtNQkr_4core3fmt3num3impyNtB9_7Display3fmt"
+            },
+            {
+              "samples": 2,
+              "period_ns": 20000000,
+              "symbol": "_RNvNtCsfKlkVe8PeSS_14pulse_syscalls7handler15syscall_handler"
+            },
+            {
+              "samples": 2,
+              "period_ns": 20000000,
+              "symbol": "_RNvNtNtCsbWed5Wd12Ke_10pulse_core3bpf8mappings6append"
+            },
+            {
+              "samples": 1,
+              "period_ns": 10000000,
+              "symbol": "_RINvNtCsgRTEDITimMi_5alloc3vec9from_elemhECs6mFtn1kCRcg_4axfs"
+            },
+            {
+              "samples": 1,
+              "period_ns": 10000000,
+              "symbol": "_RNvNtCsevS2UwKxEuB_6axtask3api11sleep_until"
+            },
+            {
+              "samples": 1,
+              "period_ns": 10000000,
+              "symbol": "_RNvXsZ_NtCsgRTEDITimMi_5alloc6stringNtB5_6StringNtNtCsgZQbPBtNQkr_4core3fmt5Write9write_str.5197"
+            },
+            {
+              "samples": 1,
+              "period_ns": 10000000,
+              "symbol": "_RNvNtCsgwDEsmk0VYP_17compiler_builtins3mem6memcpy"
+            },
+            {
+              "samples": 1,
+              "period_ns": 10000000,
+              "symbol": "_RNvMs3_NtCsp6UR8dfMcg_7axalloc10buddy_slabNtB5_15GlobalAllocator5alloc"
+            },
+            {
+              "samples": 1,
+              "period_ns": 10000000,
+              "symbol": "_RNvNtCsfKlkVe8PeSS_14pulse_syscalls7handler15syscall_handler"
+            },
+            {
+              "samples": 1,
+              "period_ns": 10000000,
+              "symbol": "_RNvMsf_NtCsjCoaeoUUdft_4axmm6aspaceNtB5_9AddrSpace20unmap_prepared_inner"
+            },
+            {
+              "samples": 1,
+              "period_ns": 10000000,
+              "symbol": "_RNvNtNtCsbWed5Wd12Ke_10pulse_core3bpf8mappings6append"
+            },
+            {
+              "samples": 3,
+              "period_ns": 60000000,
+              "symbol": "_RNvNtNtCsbWed5Wd12Ke_10pulse_core3bpf8mappings6append"
+            },
+            {
+              "samples": 1,
+              "period_ns": 20000000,
+              "symbol": "_RNvXsZ_NtCsgRTEDITimMi_5alloc6stringNtB5_6StringNtNtCsgZQbPBtNQkr_4core3fmt5Write9write_str.5197"
+            },
+            {
+              "samples": 1,
+              "period_ns": 20000000,
+              "symbol": "memset"
+            },
+            {
+              "samples": 1,
+              "period_ns": 20000000,
+              "symbol": "_RNvNtNtCsbWed5Wd12Ke_10pulse_core3bpf8mappings6append"
+            },
+            {
+              "samples": 1,
+              "period_ns": 20000000,
+              "symbol": "memset"
+            },
+            {
+              "samples": 1,
+              "period_ns": 20000000,
+              "symbol": "_RNvMNtNtCsbWed5Wd12Ke_10pulse_core4task11aspace_lockNtB2_16AddressSpaceLock18resolve_page_fault"
+            },
+            {
+              "samples": 1,
+              "period_ns": 20000000,
+              "symbol": "_RNvMs_NtCs5BEVyeTxAnZ_5axhal6pagingNtB4_9PageTable5query"
+            },
+            {
+              "samples": 1,
+              "period_ns": 20000000,
+              "symbol": "_RNvMs_NtNtNtCsbWed5Wd12Ke_10pulse_core4task7process9resourcesNtB6_7Process20memlock_unlock_range"
+            },
+            {
+              "samples": 1,
+              "period_ns": 20000000,
+              "symbol": "_RNvNtNtCsbWed5Wd12Ke_10pulse_core3bpf8mappings14space_snapshot"
+            },
+            {
+              "samples": 1,
+              "period_ns": 20000000,
+              "symbol": "_RNvXsi_NtCsjCoaeoUUdft_4axmm7backendNtB5_7BackendNtNtCsgZQbPBtNQkr_4core5clone5Clone5clone"
+            },
+            {
+              "samples": 1,
+              "period_ns": 20000000,
+              "symbol": "_RINvMsi_NtNtNtCsgRTEDITimMi_5alloc11collections5btree3mapINtB6_8BTreeMapNtNtCsjSsM1a3sHvN_11memory_addr4addr8VirtAddrINtNtCsgkde5f2IWDN_10memory_set4area10MemoryAreaNtNtCsjCoaeoUUdft_4axmm7backend7BackendEE5rangeB18_INtNtNtCsgZQbPBtNQkr_4core3ops5range5RangeB18_EEB2H_"
+            },
+            {
+              "samples": 1,
+              "period_ns": 20000000,
+              "symbol": "_RINvXs7_NtCsjCoaeoUUdft_4axmm7backendNtB6_7BackendNtNtCsgkde5f2IWDN_10memory_set7backend14MappingBackend13unmap_trackedNtB6_22TlbInvalidationTrackerEB8_"
+            },
+            {
+              "samples": 1,
+              "period_ns": 20000000,
+              "symbol": "_RNvCs649HdJRfeDM_5axipi18flush_asid_request"
+            },
+            {
+              "samples": 1,
+              "period_ns": 20000000,
+              "symbol": "_RNvNtCsgwDEsmk0VYP_17compiler_builtins3mem6memcpy"
+            },
+            {
+              "samples": 1,
+              "period_ns": 20000000,
+              "symbol": "memset"
+            },
+            {
+              "samples": 1,
+              "period_ns": 20000000,
+              "symbol": "_RNvMs0_NtCsgkde5f2IWDN_10memory_set3setINtB5_9MemorySetNtNtCsjCoaeoUUdft_4axmm7backend7BackendE4findBV_"
+            },
+            {
+              "samples": 1,
+              "period_ns": 20000000,
+              "symbol": "_RNvNtCsfKlkVe8PeSS_14pulse_syscalls7handler15syscall_handler"
+            },
+            {
+              "samples": 1,
+              "period_ns": 20000000,
+              "symbol": "_RINvNtCsgZQbPBtNQkr_4core3ptr9drop_glueNtNtCsjCoaeoUUdft_4axmm7backend16DeferredReclaimsECsbWed5Wd12Ke_10pulse_core"
+            },
+            {
+              "samples": 1,
+              "period_ns": 20000000,
+              "symbol": "_RNvMs3_NtCsp6UR8dfMcg_7axalloc10buddy_slabNtB5_15GlobalAllocator5alloc"
+            },
+            {
+              "samples": 2,
+              "period_ns": 40000000,
+              "symbol": "_RNvNtNtCsbWed5Wd12Ke_10pulse_core3bpf8mappings6append"
+            },
+            {
+              "samples": 1,
+              "period_ns": 20000000,
+              "symbol": "_RNvNtCsevS2UwKxEuB_6axtask3api11sleep_until"
+            },
+            {
+              "samples": 1,
+              "period_ns": 20000000,
+              "symbol": "_RNvNtCsfKlkVe8PeSS_14pulse_syscalls7handler15syscall_handler"
+            },
+            {
+              "samples": 1,
+              "period_ns": 20000000,
+              "symbol": "_RNvNtCsfKlkVe8PeSS_14pulse_syscalls7handler15syscall_handler"
+            },
+            {
+              "samples": 1,
+              "period_ns": 20000000,
+              "symbol": "_RNvMsf_NtCsjCoaeoUUdft_4axmm6aspaceNtB5_9AddrSpace20unmap_prepared_inner"
+            },
+            {
+              "samples": 1,
+              "period_ns": 20000000,
+              "symbol": "_RNvNtNtCsbWed5Wd12Ke_10pulse_core3bpf8mappings6append"
+            }
+          ]
+        }
+      }
+    }
+  }
+}

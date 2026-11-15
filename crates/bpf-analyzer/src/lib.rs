@@ -3,6 +3,7 @@
 pub mod analyzer;
 pub mod mapping;
 pub mod artifact;
+pub mod perf;
 pub mod emission;
 pub mod error;
 pub mod event;

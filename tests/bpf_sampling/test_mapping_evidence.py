@@ -102,6 +102,23 @@ class MappingEvidenceTests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     mapping_evidence.check_report(run, broken)
 
+    def test_same_irq_samples_are_distinguished_by_source_instance(self):
+        expected = dict(timestamp_ns=10, cpu=1, task_id=9, pid=2, tid=2, ip=8200,
+                        source_id=21, space=11, exec=1, object=7, sha256=SHA, pgoff=4096, file_offset=4104)
+        sample = dict(timestamp_ns=10, cpu=1, task=9, pid=2, tid=2, ip=8200, source_id=21,
+                      mapping=dict(space=11, exec=1, object=7, sha256=SHA, byte_pgoff=4096, file_offset=4104),
+                      elf=dict(sha256=SHA, name='mapped_busy_loop', elf_address=0x401008), unknown_reason=None)
+        second = {**sample, 'source_id': 22}
+        report = dict(mapping_metadata=True, journal_dropped=0, busy_time_ns=None, idle_time_ns=None,
+                      mapped_user_samples=2, verified_elf_samples=2, samples=[sample, second])
+        with tempfile.TemporaryDirectory() as directory:
+            run = Path(directory)
+            (run / 'mapping-evidence.json').write_text(json.dumps({'examples': {'fork': expected}}))
+            mapping_evidence.check_report(run, report)
+            report['samples'] = [second]
+            with self.assertRaises(ValueError):
+                mapping_evidence.check_report(run, report)
+
 
 if __name__ == '__main__':
     unittest.main()

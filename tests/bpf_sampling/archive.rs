@@ -4,7 +4,13 @@
 use super::*;
 
 #[cfg(not(fault_export_overflow))]
-pub const MAPPED_BYTES: usize = 4 * 1024 * 1024;
+// Combined mapping/stack workload emits sixteen sources at 640 bytes each.
+// Retain the later mapping phases without dropping the already consumed RAW.
+pub const MAPPED_BYTES: usize = if cfg!(all(stack_test, mapping_test)) {
+    8 * 1024 * 1024
+} else {
+    4 * 1024 * 1024
+};
 #[cfg(fault_export_overflow)]
 pub const MAPPED_BYTES: usize = 4096;
 const CAPACITY: usize = MAPPED_BYTES;
