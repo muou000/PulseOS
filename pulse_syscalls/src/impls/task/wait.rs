@@ -115,8 +115,8 @@ pub fn sys_waitid(idtype: usize, id: usize, infop: usize, options: i32) -> isize
         }
         Ok(None) => {
             if infop != 0 {
-                let raw: linux_raw_sys::general::siginfo = unsafe { core::mem::zeroed() };
-                if pulse_core::task::uaccess::write_user_plain(&process, infop, &raw).is_err() {
+                let raw = pulse_user_abi::task::SignalInfo::new(0, 0);
+                if pulse_core::task::uaccess::write_user_value(&process, infop, &raw).is_err() {
                     return -LinuxError::EFAULT.code() as isize;
                 }
             }

@@ -15,7 +15,9 @@ use linux_raw_sys::{
 };
 use pulse_core::fd_table::FdEntry;
 
-use crate::impls::utils::write_user_bytes;
+use pulse_user_abi::fs::{HdGeometry, RtcTime};
+
+use crate::impls::utils::write_user_value;
 
 static TTY_IOCTL_STUB_WARNED: AtomicBool = AtomicBool::new(false);
 
@@ -83,38 +85,38 @@ fn do_handle_loop_ioctl(fd: usize, cmd: u32, arg: usize) -> Result<isize, LinuxE
             }
             BLKGETSIZE64 => {
                 let size = axfs::get_loop_size(loop_id).unwrap_or(0);
-                write_user_bytes(arg, &size.to_ne_bytes())?;
+                write_user_value(arg, &size)?;
                 return Ok(0);
             }
             0x127a => {
                 // BLKGETSIZE (unsigned long)
                 let size = axfs::get_loop_size(loop_id).unwrap_or(0);
                 let sectors = (size / 512) as usize;
-                write_user_bytes(arg, &sectors.to_ne_bytes())?;
+                write_user_value(arg, &sectors)?;
                 return Ok(0);
             }
             0x1277 => {
                 // BLKPBSZGET (unsigned int)
                 let val = 512u32;
-                write_user_bytes(arg, &val.to_ne_bytes())?;
+                write_user_value(arg, &val)?;
                 return Ok(0);
             }
             0x1278 => {
                 // BLKDISCARDZEROES (unsigned int)
                 let val = 0u32;
-                write_user_bytes(arg, &val.to_ne_bytes())?;
+                write_user_value(arg, &val)?;
                 return Ok(0);
             }
             0x1279 => {
                 // BLKSECTGET (unsigned short)
                 let val = 255u16;
-                write_user_bytes(arg, &val.to_ne_bytes())?;
+                write_user_value(arg, &val)?;
                 return Ok(0);
             }
             0x127b => {
                 // BLKROTATIONAL (unsigned short)
                 let val = 0u16;
-                write_user_bytes(arg, &val.to_ne_bytes())?;
+                write_user_value(arg, &val)?;
                 return Ok(0);
             }
             0x125e => {
@@ -123,7 +125,7 @@ fn do_handle_loop_ioctl(fd: usize, cmd: u32, arg: usize) -> Result<isize, LinuxE
             }
             BLKSSZGET => {
                 let ssz = 512i32;
-                write_user_bytes(arg, &ssz.to_ne_bytes())?;
+                write_user_value(arg, &ssz)?;
                 return Ok(0);
             }
             0x301 => {
@@ -136,25 +138,13 @@ fn do_handle_loop_ioctl(fd: usize, cmd: u32, arg: usize) -> Result<isize, LinuxE
                 let sectors = 63u8;
                 let cylinders = (size / (heads as u64 * sectors as u64 * 512)) as u16;
 
-                #[repr(C)]
-                struct HdGeometry {
-                    heads: u8,
-                    sectors: u8,
-                    cylinders: u16,
-                    start: u64,
-                }
                 let geo = HdGeometry {
                     heads,
                     sectors,
                     cylinders,
                     start: 0,
                 };
-                write_user_bytes(arg, unsafe {
-                    core::slice::from_raw_parts(
-                        (&geo as *const HdGeometry).cast::<u8>(),
-                        core::mem::size_of::<HdGeometry>(),
-                    )
-                })?;
+                write_user_value(arg, &geo)?;
                 return Ok(0);
             }
             _ => {}
@@ -211,19 +201,6 @@ fn is_devfs_tty(entry: &FdEntry) -> bool {
         .unwrap_or(false)
 }
 
-#[repr(C)]
-struct RtcTime {
-    tm_sec: i32,
-    tm_min: i32,
-    tm_hour: i32,
-    tm_mday: i32,
-    tm_mon: i32,
-    tm_year: i32,
-    tm_wday: i32,
-    tm_yday: i32,
-    tm_isdst: i32,
-}
-
 fn write_rtc_time(arg: usize) -> Result<(), LinuxError> {
     if arg == 0 {
         return Err(LinuxError::EFAULT);
@@ -251,13 +228,7 @@ fn write_rtc_time(arg: usize) -> Result<(), LinuxError> {
         tm_isdst: 0,
     };
 
-    let bytes = unsafe {
-        core::slice::from_raw_parts(
-            (&rtc_time as *const RtcTime).cast::<u8>(),
-            core::mem::size_of::<RtcTime>(),
-        )
-    };
-    write_user_bytes(arg, bytes)?;
+    write_user_value(arg, &rtc_time)?;
     Ok(())
 }
 
@@ -369,8 +340,7 @@ pub fn sys_ioctl(fd: usize, cmd: usize, arg: usize) -> isize {
                 .unwrap_or("")
                 .trim_end_matches('\0');
             let ifindex = if name_str == "lo" { 1i32 } else { 2i32 };
-            let bytes = ifindex.to_ne_bytes();
-            if let Err(e) = crate::impls::utils::write_user_bytes(arg + 16, &bytes) {
+            if let Err(e) = write_user_value(arg + 16, &ifindex) {
                 return -e.code() as isize;
             }
             0
@@ -391,8 +361,7 @@ pub fn sys_ioctl(fd: usize, cmd: usize, arg: usize) -> isize {
             } else {
                 0x1 | 0x40 // IFF_UP | IFF_RUNNING
             };
-            let bytes = flags.to_ne_bytes();
-            if let Err(e) = crate::impls::utils::write_user_bytes(arg + 16, &bytes) {
+            if let Err(e) = write_user_value(arg + 16, &flags) {
                 return -e.code() as isize;
             }
             0

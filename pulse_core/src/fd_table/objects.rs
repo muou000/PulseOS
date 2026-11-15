@@ -252,7 +252,7 @@ impl FdObject for FileObject {
             let size = metadata.st_size as u64;
             let n = size.saturating_sub(pos) as i32;
             let process = crate::task::current_process()?;
-            process.write_user_bytes(arg, &n.to_ne_bytes())?;
+            crate::task::uaccess::write_user_value(&process, arg, &n)?;
             return Ok(0);
         }
         Err(LinuxError::ENOTTY)
@@ -505,14 +505,6 @@ impl FdObject for CpuDmaLatencyObject {
     }
 }
 
-#[repr(C, packed)]
-struct LinuxDirent64 {
-    d_ino: u64,
-    d_off: i64,
-    d_reclen: u16,
-    d_type: u8,
-}
-
 pub struct DirObject {
     inner: Location,
     // Directory enumeration can suspend while the VFS fetches entries.  A
@@ -604,17 +596,18 @@ impl FdObject for DirObject {
                 }
                 let name_bytes = name.as_bytes();
                 let name_len = name_bytes.len();
-                let unpadded_len = core::mem::size_of::<LinuxDirent64>() + name_len + 1;
+                let header_len = pulse_user_abi::abi_size_of::<pulse_user_abi::fs::Dirent64Header>();
+                let unpadded_len = header_len + name_len + 1;
                 let reclen = (unpadded_len + 7) & !7;
                 if written + reclen > dirp.len() {
                     break_out = true;
                     return false;
                 }
-                let dirent = LinuxDirent64 {
-                    d_ino: ino,
-                    d_off: next_off as i64,
-                    d_reclen: reclen as u16,
-                    d_type: node_type as u8,
+                let dirent = pulse_user_abi::fs::Dirent64Header {
+                    ino,
+                    offset: next_off as i64,
+                    record_len: reclen as u16,
+                    file_type: node_type as u8,
                 };
                 axlog::debug!(
                     "read_dirents64: emit name={}, ino={}, type={:?}, next_off={}, reclen={}",
@@ -624,17 +617,11 @@ impl FdObject for DirObject {
                     next_off,
                     reclen
                 );
-                unsafe {
-                    let dst = dirp.as_mut_ptr().add(written);
-                    core::ptr::write_unaligned(dst.cast::<LinuxDirent64>(), dirent);
-                    let name_dst = dst.add(core::mem::size_of::<LinuxDirent64>());
-                    core::ptr::copy_nonoverlapping(name_bytes.as_ptr(), name_dst, name_len);
-                    core::ptr::write_bytes(
-                        name_dst.add(name_len),
-                        0,
-                        reclen - core::mem::size_of::<LinuxDirent64>() - name_len,
-                    );
-                }
+                let record = &mut dirp[written..written + reclen];
+                let header = pulse_user_abi::encode_to_buffer(&dirent);
+                record[..header_len].copy_from_slice(&header);
+                record[header_len..header_len + name_len].copy_from_slice(name_bytes);
+                record[header_len + name_len..].fill(0);
                 written += reclen;
                 *offset = next_off;
                 true

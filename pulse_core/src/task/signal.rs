@@ -617,51 +617,36 @@ fn is_synchronous_fault_signal(sig: usize) -> bool {
 }
 
 fn default_siginfo(sig: usize) -> [u8; SIGINFO_FRAME_SIZE] {
-    let mut info: siginfo = unsafe { core::mem::zeroed() };
-    info.__bindgen_anon_1.__bindgen_anon_1.si_signo = sig as linux_raw_sys::ctypes::c_int;
-    unsafe { core::mem::transmute(info) }
+    pulse_user_abi::encode_to_buffer(&pulse_user_abi::task::SignalInfo::new(sig as i32, 0))
 }
 
 fn forced_siginfo(sig: usize) -> [u8; SIGINFO_FRAME_SIZE] {
-    let mut info: siginfo = unsafe { core::mem::zeroed() };
-    unsafe {
-        let header = &mut info.__bindgen_anon_1.__bindgen_anon_1;
-        header.si_signo = sig as linux_raw_sys::ctypes::c_int;
-        header.si_errno = 0;
-        header.si_code = SI_KERNEL as i32;
-    }
-    unsafe { core::mem::transmute::<siginfo, [u8; SIGINFO_FRAME_SIZE]>(info) }
+    pulse_user_abi::encode_to_buffer(&pulse_user_abi::task::SignalInfo::new(
+        sig as i32,
+        SI_KERNEL as i32,
+    ))
 }
 
 /// Constructs the `siginfo_t` payload for a synchronous instruction or
-/// memory fault.  The fault union is zeroed before selecting its `si_addr`
-/// member, matching the kernel ABI layout used by userspace signal handlers.
+/// memory fault. Unused union bytes and padding are initialized to zero;
+/// the fault address is encoded as integer data in the Linux ABI layout.
 pub fn signal_info_for_fault(sig: usize, code: i32, fault_addr: usize) -> [u8; 128] {
-    let mut info: siginfo = unsafe { core::mem::zeroed() };
-    unsafe {
-        let header = &mut info.__bindgen_anon_1.__bindgen_anon_1;
-        header.si_signo = sig as linux_raw_sys::ctypes::c_int;
-        header.si_errno = 0;
-        header.si_code = code;
-        header._sifields._sigfault._addr = fault_addr as *mut linux_raw_sys::ctypes::c_void;
-    }
-    unsafe { core::mem::transmute::<siginfo, [u8; SIGINFO_FRAME_SIZE]>(info) }
+    pulse_user_abi::encode_to_buffer(&pulse_user_abi::task::SignalInfo::for_fault(
+        sig as i32,
+        code,
+        fault_addr as u64,
+    ))
 }
 
 /// Constructs the `SIGCHLD` payload for a child state transition.
 pub fn signal_info_for_child(child_pid: u64, child_uid: u32, code: i32, status: i32) -> [u8; 128] {
-    let mut info: siginfo = unsafe { core::mem::zeroed() };
-    unsafe {
-        let header = &mut info.__bindgen_anon_1.__bindgen_anon_1;
-        header.si_signo = SIGCHLD as linux_raw_sys::ctypes::c_int;
-        header.si_errno = 0;
-        header.si_code = code;
-        let child = &mut header._sifields._sigchld;
-        child._pid = child_pid as _;
-        child._uid = child_uid as _;
-        child._status = status;
-    }
-    unsafe { core::mem::transmute::<siginfo, [u8; SIGINFO_FRAME_SIZE]>(info) }
+    pulse_user_abi::encode_to_buffer(&pulse_user_abi::task::SignalInfo::for_child(
+        SIGCHLD as i32,
+        code,
+        child_pid as i32,
+        child_uid,
+        status,
+    ))
 }
 
 pub struct SignalHandlers {

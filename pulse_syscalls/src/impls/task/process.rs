@@ -2,7 +2,7 @@ use axerrno::LinuxError;
 use linux_raw_sys::{
     general::{
         _NSIG, CAP_SYS_PTRACE, O_NONBLOCK, SIGINT, SIGPWR, SIGTERM, SIGUSR1, SIGUSR2,
-        SI_TKILL, SI_USER, siginfo,
+        SI_TKILL, SI_USER,
     },
     prctl::{
         PR_GET_DUMPABLE, PR_GET_NAME, PR_GET_PDEATHSIG, PR_SET_DUMPABLE, PR_SET_NAME,
@@ -15,38 +15,21 @@ use pulse_core::task::{
     queue_signal_to_thread_with_info, queue_signal_to_thread_with_info_strict, Process, SIGRTMIN,
 };
 use crate::validation::system::RebootAction;
+use pulse_user_abi::{encode_to_buffer, task::SignalInfo};
 
-const SIGINFO_SIZE: usize = 128;
-const _: [(); SIGINFO_SIZE] = [(); core::mem::size_of::<siginfo>()];
 const KCMP_FILE: i32 = 0;
 
 fn is_valid_signal(sig: isize) -> bool {
     sig == 0 || (1..=(_NSIG as isize)).contains(&sig)
 }
 
-fn read_user_siginfo(process: &Process, addr: usize) -> Result<siginfo, LinuxError> {
+fn read_user_siginfo(process: &Process, addr: usize) -> Result<SignalInfo, LinuxError> {
     if addr == 0 {
         return Err(LinuxError::EFAULT);
     }
 
     pulse_core::task::uaccess::read_user_value(process, addr)
         .map_err(|_| LinuxError::EFAULT)
-}
-
-fn siginfo_bytes(info: siginfo) -> [u8; SIGINFO_SIZE] {
-    unsafe { core::mem::transmute::<siginfo, [u8; SIGINFO_SIZE]>(info) }
-}
-
-fn siginfo_code(info: &siginfo) -> i32 {
-    unsafe { info.__bindgen_anon_1.__bindgen_anon_1.si_code }
-}
-
-fn set_siginfo_signo(info: &mut siginfo, sig: isize) {
-    info.__bindgen_anon_1.__bindgen_anon_1.si_signo = sig as linux_raw_sys::ctypes::c_int;
-}
-
-fn siginfo_signo(info: &siginfo) -> i32 {
-    unsafe { info.__bindgen_anon_1.__bindgen_anon_1.si_signo }
 }
 
 /// Linux reserves `EAGAIN` for real-time signals whose detailed sigqueue
@@ -59,9 +42,9 @@ fn needs_realtime_queue_slot(sig: isize, si_code: i32) -> bool {
 /// User space may supply arbitrary queued-signal data only when the ABI target
 /// is the calling thread. In particular, privileged callers must not fabricate
 /// kernel or kill-family signal origins for a different task.
-fn may_supply_siginfo_to_target(info: &siginfo, sender_tid: u64, target_id: u64) -> bool {
+fn may_supply_siginfo_to_target(info: &SignalInfo, sender_tid: u64, target_id: u64) -> bool {
     sender_tid == target_id || {
-        let code = siginfo_code(info);
+        let code = info.code();
         code < 0 && code != SI_TKILL
     }
 }
@@ -90,16 +73,7 @@ fn may_ptrace_attach_realcreds(caller: &Process, target: &Process) -> bool {
 }
 
 fn make_user_signal_info(sig: isize, code: i32, pid: u64, uid: u32) -> [u8; 128] {
-    let mut info: siginfo = unsafe { core::mem::zeroed() };
-    unsafe {
-        let header = &mut info.__bindgen_anon_1.__bindgen_anon_1;
-        header.si_signo = sig as linux_raw_sys::ctypes::c_int;
-        header.si_errno = 0;
-        header.si_code = code;
-        header._sifields._kill._pid = pid as _;
-        header._sifields._kill._uid = uid as _;
-    }
-    siginfo_bytes(info)
+    encode_to_buffer(&SignalInfo::for_kill(sig as i32, code, pid as i32, uid))
 }
 
 pub fn sys_getpid() -> isize {
@@ -349,10 +323,10 @@ pub fn sys_rt_sigqueueinfo(pid: isize, sig: isize, info_ptr: usize) -> isize {
 
     // Unlike pidfd_send_signal, the rt_sigqueueinfo ABI overwrites the user
     // supplied signo with the syscall argument before queueing it.
-    set_siginfo_signo(&mut info, sig);
+    info.set_signo(sig as i32);
     if sig != 0 {
-        let info_code = siginfo_code(&info);
-        let info = siginfo_bytes(info);
+        let info_code = info.code();
+        let info = encode_to_buffer(&info);
         if needs_realtime_queue_slot(sig, info_code) {
             if queue_signal_to_process_with_info_strict(
                 target.as_ref(),
@@ -403,10 +377,10 @@ pub fn sys_rt_tgsigqueueinfo(tgid: isize, tid: isize, sig: isize, info_ptr: usiz
         return -LinuxError::EPERM.code() as isize;
     }
 
-    set_siginfo_signo(&mut info, sig);
+    info.set_signo(sig as i32);
     if sig != 0 {
-        let info_code = siginfo_code(&info);
-        let info = siginfo_bytes(info);
+        let info_code = info.code();
+        let info = encode_to_buffer(&info);
         if needs_realtime_queue_slot(sig, info_code) {
             if queue_signal_to_thread_with_info_strict(
                 target_thread.as_ref(),
@@ -699,14 +673,14 @@ pub fn sys_pidfd_send_signal(pidfd: isize, sig: isize, info_ptr: usize, flags: u
             Ok(info) => info,
             Err(e) => return -e.code() as isize,
         };
-        if siginfo_signo(&info) != sig as linux_raw_sys::ctypes::c_int {
+        if info.signo() != sig as linux_raw_sys::ctypes::c_int {
             return -LinuxError::EINVAL.code() as isize;
         }
         if !may_supply_siginfo_to_target(&info, caller_tid, target_pid) {
             return -LinuxError::EPERM.code() as isize;
         }
-        let info_code = siginfo_code(&info);
-        (siginfo_bytes(info), info_code)
+        let info_code = info.code();
+        (encode_to_buffer(&info), info_code)
     } else {
         (
             make_user_signal_info(sig, SI_USER as i32, caller.pid(), caller.ruid()),
@@ -740,21 +714,15 @@ mod tests {
     use super::*;
     use linux_raw_sys::general::SI_QUEUE;
 
-    fn test_siginfo(signo: i32, code: i32) -> siginfo {
-        let mut info: siginfo = unsafe { core::mem::zeroed() };
-        unsafe {
-            let header = &mut info.__bindgen_anon_1.__bindgen_anon_1;
-            header.si_signo = signo;
-            header.si_code = code;
-        }
-        info
+    fn test_siginfo(signo: i32, code: i32) -> SignalInfo {
+        SignalInfo::new(signo, code)
     }
 
     #[test]
     fn rt_sigqueueinfo_rewrites_the_queued_signal_number() {
         let mut info = test_siginfo(1, SI_QUEUE);
-        set_siginfo_signo(&mut info, 42);
-        assert_eq!(siginfo_signo(&info), 42);
+        info.set_signo(42);
+        assert_eq!(info.signo(), 42);
     }
 
     #[test]

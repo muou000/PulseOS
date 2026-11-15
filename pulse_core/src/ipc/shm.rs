@@ -40,6 +40,16 @@ pub struct IpcInfo {
     pub shmall: usize,
 }
 
+pulse_user_abi::impl_user_abi_struct! {
+    for IpcInfo, size = 40 => {
+        shmmax: usize,
+        shmmin: usize,
+        shmmni: usize,
+        shmseg: usize,
+        shmall: usize,
+    }
+}
+
 impl IpcInfo {
     pub fn new() -> Self {
         Self {
@@ -62,6 +72,17 @@ pub struct ShmInfo {
     pub shm_swp: usize,
     pub swap_attempts: usize,
     pub swap_successes: usize,
+}
+
+pulse_user_abi::impl_user_abi_struct! {
+    for ShmInfo, size = 48 => {
+        used_ids: i32,
+        shm_tot: usize,
+        shm_rss: usize,
+        shm_swp: usize,
+        swap_attempts: usize,
+        swap_successes: usize,
+    }
 }
 
 
