@@ -281,66 +281,6 @@ pub fn write_user_value_array<T: IntoUserAbi>(
     })
 }
 
-/// Legacy unvalidated `Copy` reader retained while per-family syscalls migrate
-/// to [`read_user_value`] (`#157` / `#159`).
-pub fn read_user_plain<T: Copy>(process: &Process, user_addr: usize) -> AxResult<T> {
-    let mut value = core::mem::MaybeUninit::<T>::uninit();
-    let bytes = unsafe {
-        core::slice::from_raw_parts_mut(value.as_mut_ptr().cast::<u8>(), core::mem::size_of::<T>())
-    };
-    process.read_user_bytes(user_addr, bytes)?;
-    Ok(unsafe { value.assume_init() })
-}
-
-/// Legacy unvalidated `Copy` writer retained while per-family syscalls migrate
-/// to [`write_user_value`] (`#158` / `#159`).
-pub fn write_user_plain<T: Copy>(process: &Process, user_addr: usize, value: &T) -> AxResult<()> {
-    let bytes = unsafe {
-        core::slice::from_raw_parts((value as *const T).cast::<u8>(), core::mem::size_of::<T>())
-    };
-    process.write_user_bytes(user_addr, bytes)
-}
-
 pub fn write_user_bytes(process: &Process, user_addr: usize, bytes: &[u8]) -> AxResult<()> {
     process.write_user_bytes(user_addr, bytes)
-}
-
-/// Legacy unvalidated `Copy` array reader retained while per-family syscalls
-/// migrate to [`read_user_value_array`] (`#157` / `#159`).
-pub fn read_user_plain_array<T: Copy>(
-    process: &Process,
-    user_addr: usize,
-    count: usize,
-) -> AxResult<Vec<T>> {
-    let mut out = Vec::new();
-    if out.try_reserve_exact(count).is_err() {
-        return Err(AxError::NoMemory);
-    }
-    let elem_size = core::mem::size_of::<T>();
-    for i in 0..count {
-        let byte_off = i.checked_mul(elem_size).ok_or(AxError::InvalidInput)?;
-        let addr = user_addr
-            .checked_add(byte_off)
-            .ok_or(AxError::InvalidInput)?;
-        out.push(read_user_plain(process, addr)?);
-    }
-    Ok(out)
-}
-
-/// Legacy unvalidated `Copy` array writer retained while per-family syscalls
-/// migrate to [`write_user_value_array`] (`#158` / `#159`).
-pub fn write_user_plain_array<T: Copy>(
-    process: &Process,
-    user_addr: usize,
-    values: &[T],
-) -> AxResult<()> {
-    let elem_size = core::mem::size_of::<T>();
-    for (i, val) in values.iter().enumerate() {
-        let byte_off = i.checked_mul(elem_size).ok_or(AxError::InvalidInput)?;
-        let addr = user_addr
-            .checked_add(byte_off)
-            .ok_or(AxError::InvalidInput)?;
-        write_user_plain(process, addr, val)?;
-    }
-    Ok(())
 }
