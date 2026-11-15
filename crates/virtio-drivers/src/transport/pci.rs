@@ -127,7 +127,7 @@ impl PciTransport {
             }
             let cap_len = capability.private_header as u8;
             let cfg_type = (capability.private_header >> 8) as u8;
-            if cap_len < 16 {
+            if cap_len < 16 || usize::from(capability.offset) + usize::from(cap_len) > 256 {
                 continue;
             }
             let struct_info = VirtioCapabilityInfo {
@@ -453,9 +453,11 @@ fn get_bar_region<H: Hal, T>(
     if bar_address == 0 {
         return Err(VirtioPciError::BarNotAllocated(struct_info.bar));
     }
-    if struct_info.offset + struct_info.length > bar_size
-        || size_of::<T>() > struct_info.length as usize
-    {
+    let end = struct_info
+        .offset
+        .checked_add(struct_info.length)
+        .ok_or(VirtioPciError::BarOffsetOutOfRange)?;
+    if end > bar_size || size_of::<T>() > struct_info.length as usize {
         return Err(VirtioPciError::BarOffsetOutOfRange);
     }
     let paddr = bar_address as PhysAddr + struct_info.offset as PhysAddr;
