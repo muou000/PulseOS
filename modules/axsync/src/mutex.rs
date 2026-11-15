@@ -6,22 +6,26 @@ use axtask::{WaitContext, WaitQueue, WaitReason, WakeContext, current};
 
 /// A [`lock_api::RawMutex`] implementation.
 ///
-/// When the mutex is locked, the current task will block and be put into the
-/// wait queue. When the mutex is unlocked, tasks waiting on the queue
-/// will be woken up.
+/// Contenders sleep on a wait queue; unlocking notifies one waiter to retry.
+/// There is no FIFO or starvation-freedom guarantee.
+///
+/// Both acquisition methods panic for task ID zero (the unlocked sentinel).
+/// `lock` also panics when the recorded acquirer ID matches the current task.
+/// This detects ordinary recursive acquisition, but can also reject the original
+/// task after it sends its guard elsewhere; the recorded ID does not follow the
+/// guard. `try_lock` simply fails while any acquisition is outstanding.
 pub struct RawMutex {
-    // Safety invariant: `wq` coordinates task blocking and wakeups. Tasks sleeping on `wq`
-    // are guaranteed to be woken via `notify_one_with_context` when the lock owner releases
-    // the mutex in `unlock()`.
+    // Waiting affects progress only: notification never grants data access.
     wq: WaitQueue,
 
-    // Safety invariant:
-    // - `owner_id == 0`: the mutex is unlocked; no task holds exclusive access to the
-    //   protected data.
-    // - `owner_id != 0`: the mutex is held exclusively by the task whose `TaskId::as_u64()`
-    //   matches `owner_id`.
-    // Valid task IDs in `axtask` are strictly positive integers (>= 1). Therefore, 0
-    // unambiguously designates the unlocked state.
+    // M-TOKEN: 0 means no outstanding raw acquisition; nonzero means exactly
+    // one. The value records its original task ID for recursion diagnostics,
+    // not the present guard owner. Both acquisition paths reject ID zero before
+    // CAS, so exclusion does not assume the task ID allocator never wraps.
+    // A token exists between successful CAS and unlock, including guard
+    // construction/drop windows. Forgetting a guard leaves the token reserved.
+    // This concerns access through locking; lock_api's get_mut/into_inner may
+    // instead use an exclusive borrow/ownership even after a forgotten guard.
     owner_id: AtomicU64,
 }
 
@@ -36,47 +40,25 @@ impl RawMutex {
     }
 }
 
-// SAFETY:
-// Implementation of `lock_api::RawMutex` for `RawMutex`.
+// SAFETY: lock_api 0.4.14's RawMutex requires that a held lock cannot be acquired
+// again. M-TOKEN starts at zero (new/INIT); only a successful atomic 0 -> nonzero
+// CAS grants one token. Failed/spurious CAS, diagnostic panic, and wakeup grant
+// none. The sole release is unsafe unlock, whose caller must consume that token
+// exactly once. Thus no second acquisition succeeds until release, independently
+// of ID uniqueness. This supplies lock_api::Mutex's exclusive guard permission.
 //
-// Proof obligations:
-// 1. Mutual Exclusivity: Only one task can hold the lock at any given time.
-// 2. Memory Synchronization: Lock acquisition establishes `Acquire` ordering and release
-//    establishes `Release` ordering, forming a happens-before relationship that prevents
-//    data races on the protected data across task transitions.
-// 3. Exclusivity Permission for Guards: A successful `lock` or `try_lock` grants the caller
-//    exclusive permission to access the protected `T` via `lock_api::MutexGuard`.
-// 4. Sound Release Contract: `unlock` releases the lock and allows subsequent tasks to acquire it.
+// Each successful Acquire CAS reads either the initial zero or the zero written
+// by a prior Release unlock. In the latter case all prior critical-section
+// accesses happen-before subsequent guard access (core::sync::atomic::Ordering).
+// A preliminary relaxed is_locked load grants no permission and is never used
+// instead of the CAS. See records/axsync-154/README.md for exact authority/TCB.
 //
-// Evidence:
-// - Atomic State Invariant: `owner_id` represents the current owner state. 0 represents unlocked;
-//   non-zero `N` represents exclusive ownership initially acquired by the task with `TaskId` `N`.
-// - In `axtask`, `TaskId` values are generated sequentially starting from 1 (`AtomicU64::new(1)`),
-//   guaranteeing `TaskId != 0` for all live tasks and uniqueness across distinct tasks.
-// - Exclusive acquisition:
-//   - In `try_lock`, `owner_id.compare_exchange(0, current_id, Ordering::Acquire, Ordering::Relaxed)`
-//     atomically transitions `owner_id` from 0 to `current_id`. By hardware atomic guarantees,
-//     at most one task can succeed in transitioning `0 -> current_id`.
-//   - In `lock`, `compare_exchange_weak` atomically attempts the same transition in a loop, sleeping
-//     on `self.wq` between attempts when `owner_id != 0`.
-//   - Both acquisition paths use `Ordering::Acquire`, which synchronizes with the `Ordering::Release`
-//     transition in `unlock`. By the Rust memory model, all writes to the protected data performed
-//     by prior owners happen-before the current task reads or writes the protected data.
-// - Reentrancy Rejection:
-//   - If the current task attempts to re-acquire the lock it already owns, `lock()` asserts
-//     `owner_id != current_id`, preventing recursive deadlocks and aliasing mutable references.
-//     `try_lock()` fails and returns `false` because `owner_id` is already non-zero.
-// - Release and Wakeups:
-//   - `unlock` atomically transitions `owner_id` from non-zero to 0 with `Ordering::Release`.
-//   - Only the holder of the unique `MutexGuard` (or legitimate caller satisfying `# Safety`)
-//     may call `unlock`.
-//   - Once `owner_id` becomes 0, `wq.notify_one_with_context` wakes one sleeping waiter.
-// - Guard Transfer:
-//   - `GuardMarker = lock_api::GuardSend` permits sending the `MutexGuard` across tasks (e.g.,
-//     in asynchronous execution across await points). Ownership of the unique guard token transfers
-//     exclusivity permission, and `unlock` soundly releases the lock upon drop.
-//
-// Therefore, `RawMutex` satisfies all safety requirements of `lock_api::RawMutex`.
+// GuardSend transfers the one token, not another acquisition. unlock has no
+// thread-affine operation or owner-ID equality requirement; its atomic release
+// and WaitQueue notification may run on the destination task. lock_api supplies
+// the guard's T bounds, reference lifetimes, and exactly-once Drop contract.
+// Leaking a guard does not unlock. WaitQueue/axtask and lock_api are the explicit
+// dependency boundary, not an assertion that their internals are proved here.
 unsafe impl lock_api::RawMutex for RawMutex {
     /// Initial value for an unlocked mutex.
     ///
@@ -90,6 +72,7 @@ unsafe impl lock_api::RawMutex for RawMutex {
     #[inline(always)]
     fn lock(&self) {
         let current_id = current().id().as_u64();
+        assert_ne!(current_id, 0, "RawMutex cannot acquire with task ID zero");
         loop {
             // Can fail to lock even if the spinlock is not locked. May be more efficient than `try_lock`
             // when called in a loop.
@@ -111,7 +94,12 @@ unsafe impl lock_api::RawMutex for RawMutex {
                         "{} tried to acquire mutex it already owns.",
                         current().id_name()
                     );
-                    // Wait until the lock looks unlocked before retrying
+                    // WaitQueue checks the predicate while holding its queue
+                    // lock and enrolls the task before releasing that lock.
+                    // unlock publishes zero before taking the same queue lock
+                    // to notify: either the check sees release, or notification
+                    // sees the enrolled waiter. A competing acquisition may
+                    // make us wait again; only our successful CAS grants access.
                     self.wq.wait_until_with_context(
                         WaitContext::new(|| {
                             (
@@ -130,8 +118,8 @@ unsafe impl lock_api::RawMutex for RawMutex {
     #[inline(always)]
     fn try_lock(&self) -> bool {
         let current_id = current().id().as_u64();
-        // The reason for using a strong compare_exchange is explained here:
-        // https://github.com/Amanieu/parking_lot/pull/207#issuecomment-575869107
+        assert_ne!(current_id, 0, "RawMutex cannot acquire with task ID zero");
+        // Strong CAS does not spuriously reject an unlocked mutex.
         self.owner_id
             .compare_exchange(0, current_id, Ordering::Acquire, Ordering::Relaxed)
             .is_ok()
@@ -142,19 +130,19 @@ unsafe impl lock_api::RawMutex for RawMutex {
     /// # Safety
     ///
     /// The caller must ensure that:
-    /// 1. The lock is currently held by the caller (ownership was acquired via `lock` or
-    ///    `try_lock`, and the corresponding guard has not yet been unlocked).
+    /// 1. The caller holds the one outstanding acquisition from `lock` or a
+    ///    successful `try_lock`, possibly transferred with a `Send` guard. Release
+    ///    it exactly once; the current task need not match the recorded ID.
     /// 2. No active references (`&T` or `&mut T`) derived from the guard associated with this
     ///    lock remain in use across or after this call.
     #[inline(always)]
     unsafe fn unlock(&self) {
-        // Synchronization / State transition:
-        // Transition `owner_id` from non-zero to 0 with `Release` ordering.
-        // - Precondition 1 guarantees the lock is held.
-        // - `swap(0)` atomically clears ownership and publishes all writes performed in the
-        //   critical section to any subsequent locker acquiring with `Ordering::Acquire`.
-        // - The assertion verifies that the lock was in fact locked prior to unlock.
-        // - `self.wq.notify_one_with_context` wakes up one waiting task.
+        // The caller's token and ended data borrows permit the Release transition
+        // to zero (M-TOKEN). This publishes critical-section accesses before a
+        // later Acquire CAS. The assertion is diagnostic, not what authorizes
+        // release: an invalid unsafe caller may already have corrupted the state.
+        // Publish before notification so a waiter cannot miss the unlock between
+        // its condition check and queue enrollment (see lock's wait proof).
         let prev = self.owner_id.swap(0, Ordering::Release);
         assert_ne!(
             prev,
