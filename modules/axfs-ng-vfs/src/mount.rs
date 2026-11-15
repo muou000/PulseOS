@@ -248,11 +248,11 @@ fn is_slave_of(peer_mp: &Arc<Mountpoint>, parent_pg: u64) -> bool {
 // 2. Readers acquire `TopologyReadGuard` via `topology_sync::lock_topology_read()`,
 //    allowing concurrent multi-CPU path resolution, root checks, parent/path
 //    traversals, and subtree snapshots to observe an atomic topology state.
-// 3. Writers (`mount_with`, `mount_bind`, `mount_bind_silent`, `unmount_with`,
-//    `unmount_all`, `move_mount`) acquire `TopologyWriteGuard` via
+// 3. Writers (`attach_mount`, `unmount_with`,
+//    `unmount_all_with`, `move_mount`) acquire `TopologyWriteGuard` via
 //    `topology_sync::lock_topology_write()`, updating parent links and child
 //    registries together as a single indivisible topology transition.
-//    `mount` / `unmount` delegate to their `_with` variants. Bookkeeping
+//    Ordinary, bind and shadow mounts all use `attach_mount`. Bookkeeping
 //    callbacks run under this guard, with rollback before unlock on failure;
 //    caller-owned registry locks must already be held before entering VFS.
 // 4. Lock-ordering & non-reentrancy rule: `MOUNT_TOPOLOGY_LOCK` is a strict leaf
@@ -1284,7 +1284,6 @@ impl Location {
         commit: impl FnOnce(&Arc<Mountpoint>) -> VfsResult<()>,
     ) -> VfsResult<Arc<Mountpoint>> {
         self.entry.as_dir()?;
-        let entry_key = Self::entry_key(&self.entry);
         let dst_parent_prop = *self.mountpoint().propagation.lock();
         let initial_prop = if dst_parent_prop.is_shared() {
             let pg = PEER_GROUP_COUNTER.fetch_add(1, Ordering::Relaxed);
@@ -1294,6 +1293,18 @@ impl Location {
         };
 
         let candidate = Mountpoint::new_with_propagation(fs, Some(self.clone()), initial_prop);
+        self.attach_mount(candidate, expected_path, commit)
+    }
+
+    // All mount kinds publish through the same rollback-capable transition.
+    fn attach_mount(
+        &self,
+        candidate: Arc<Mountpoint>,
+        expected_path: Option<&str>,
+        commit: impl FnOnce(&Arc<Mountpoint>) -> VfsResult<()>,
+    ) -> VfsResult<Arc<Mountpoint>> {
+        let entry_key = Self::entry_key(&self.entry);
+        let initial_prop = candidate.propagation();
         let candidate_weak = Arc::downgrade(&candidate);
         let mut stale_weak = None;
         let mut rejected_weak = None;
@@ -1368,6 +1379,19 @@ impl Location {
     ///
     /// Returns `Err(VfsError::PermissionDenied)` if `source` is Unbindable.
     pub fn mount_bind(&self, source: Location) -> VfsResult<Arc<Mountpoint>> {
+        self.mount_bind_with(source, None, |_| Ok(()))
+    }
+
+    /// Bind-mount with external bookkeeping committed under the topology lock.
+    /// The expected-path check and callback requirements are the same as
+    /// [`Self::mount_with`]. Rejection restores the original topology and never
+    /// adds the rejected candidate to its peer group.
+    pub fn mount_bind_with(
+        &self,
+        source: Location,
+        expected_path: Option<&str>,
+        commit: impl FnOnce(&Arc<Mountpoint>) -> VfsResult<()>,
+    ) -> VfsResult<Arc<Mountpoint>> {
         // Check unbindable: walk up to the effective root of source's mountpoint.
         {
             let src_root_mp = source.mountpoint().clone();
@@ -1425,39 +1449,25 @@ impl Location {
             }
         };
 
-        let entry_key = Self::entry_key(&self.entry);
-        let candidate = Mountpoint::new_bind_with_propagation(source, Some(self.clone()), final_prop);
-        let candidate_weak = Arc::downgrade(&candidate);
-        let mut stale_weak = None;
-        let attach_result = {
-            let mut guard = topology_sync::lock_topology_write();
-            if matches!(
-                guard.get(&self.mountpoint.topology).attachment,
-                MountAttachment::Detached
-            ) {
-                Err(VfsError::InvalidInput)
-            } else if guard
-                .get(&self.mountpoint.topology)
-                .children
-                .get(&entry_key)
-                .is_some_and(|weak| weak.strong_count() > 0)
-            {
-                Err(VfsError::ResourceBusy)
-            } else {
-                let children = &mut guard.get_mut(&self.mountpoint.topology).children;
-                children.reserve(1);
-                stale_weak = children.insert(entry_key, candidate_weak);
-                self.mountpoint.has_children.store(true, Ordering::Release);
-                Ok(())
-            }
-        };
-        drop(stale_weak);
-        if let Err(err) = attach_result {
-            drop(candidate);
-            return Err(err);
-        }
-        add_to_registry(&candidate, final_prop);
-        Ok(candidate)
+        self.mount_shadow_with(source, final_prop, expected_path, commit)
+    }
+
+    /// Attach an internally propagated bind with its already-selected mode.
+    /// Unlike [`Self::mount_bind_with`], this skips the user-facing unbindable
+    /// check. A racing attachment is rejected instead of being returned as a
+    /// newly created shadow. Callback and path validation requirements match
+    /// [`Self::mount_with`].
+    pub fn mount_shadow_with(
+        &self,
+        source: Location,
+        propagation: PropagationMode,
+        expected_path: Option<&str>,
+        commit: impl FnOnce(&Arc<Mountpoint>) -> VfsResult<()>,
+    ) -> VfsResult<Arc<Mountpoint>> {
+        self.entry.as_dir()?;
+        let candidate =
+            Mountpoint::new_bind_with_propagation(source, Some(self.clone()), propagation);
+        self.attach_mount(candidate, expected_path, commit)
     }
 
     pub fn unmount(&self) -> VfsResult<()> {
@@ -1561,6 +1571,18 @@ impl Location {
     }
 
     pub fn unmount_all(&self) -> VfsResult<()> {
+        self.unmount_all_with(|_| Ok(()))
+    }
+
+    /// Detach this entire subtree and commit bookkeeping for exactly the
+    /// mountpoints removed by the transition. Rejection or unwind restores
+    /// every attachment and child map before releasing the topology lock.
+    /// The callback has the same requirements as [`Self::mount_with`]; it must
+    /// reserve removal storage beforehand and must not inspect topology.
+    pub fn unmount_all_with(
+        &self,
+        commit: impl FnOnce(&[Arc<Mountpoint>]) -> VfsResult<()>,
+    ) -> VfsResult<()> {
         if !self.is_root_of_mount() {
             return Err(VfsError::InvalidInput);
         }
@@ -1569,14 +1591,40 @@ impl Location {
         let mut detached_maps = Vec::new();
         let mut removed_root_weak = None;
         let mut duplicate_arcs = Vec::new();
+        let commit_result;
         {
             let mut guard = topology_sync::lock_topology_write();
             let root_mp = &self.mountpoint;
-            let root_attachment = mem::replace(
-                &mut guard.get_mut(&root_mp.topology).attachment,
-                MountAttachment::Detached,
-            );
-            if let MountAttachment::Attached(ref parent_link) = root_attachment {
+            // Gather the exact subtree before any mutation. All retained Arcs
+            // outlive the guard, including duplicates in a malformed graph.
+            let mut visited = HashSet::new();
+            visited.insert(root_mp.id);
+            detached_mps.push(root_mp.clone());
+            let mut index = 0;
+            while index < detached_mps.len() {
+                let node = detached_mps[index].clone();
+                for weak in guard.get(&node.topology).children.values() {
+                    if let Some(child_mp) = weak.upgrade() {
+                        if visited.insert(child_mp.id) {
+                            detached_mps.push(child_mp);
+                        } else {
+                            duplicate_arcs.push(child_mp);
+                        }
+                    }
+                }
+                duplicate_arcs.push(node);
+                index += 1;
+            }
+            detached_attachments.reserve(detached_mps.len());
+            detached_maps.reserve(detached_mps.len());
+            for mp in &detached_mps {
+                detached_attachments.push(mem::replace(
+                    &mut guard.get_mut(&mp.topology).attachment,
+                    MountAttachment::Detached,
+                ));
+                detached_maps.push(mem::take(&mut guard.get_mut(&mp.topology).children));
+            }
+            if let MountAttachment::Attached(ref parent_link) = detached_attachments[0] {
                 let parent_mp = &parent_link.location.mountpoint;
                 let entry_key = parent_link.entry_key;
                 let parent_children = &mut guard.get_mut(&parent_mp.topology).children;
@@ -1587,41 +1635,44 @@ impl Location {
                 if should_remove {
                     removed_root_weak = parent_children.remove(&entry_key);
                 }
-                if !parent_children.values().any(|weak| weak.strong_count() > 0) {
-                    parent_mp.has_children.store(false, Ordering::Release);
-                }
             }
-            detached_attachments.push(root_attachment);
-
-            let mut visited = HashSet::new();
-            visited.insert(root_mp.id);
-            detached_mps.push(root_mp.clone());
-            let mut stack = vec![0usize];
-            while let Some(idx) = stack.pop() {
-                let node_attachment = mem::replace(
-                    &mut guard.get_mut(&detached_mps[idx].topology).attachment,
-                    MountAttachment::Detached,
-                );
-                detached_attachments.push(node_attachment);
-                let node_children =
-                    mem::take(&mut guard.get_mut(&detached_mps[idx].topology).children);
-                detached_mps[idx]
-                    .has_children
-                    .store(false, Ordering::Release);
-
-                let start_len = detached_mps.len();
-                for weak in node_children.values() {
-                    if let Some(child_mp) = weak.upgrade() {
-                        if visited.insert(child_mp.id) {
-                            detached_mps.push(child_mp);
-                        } else {
-                            duplicate_arcs.push(child_mp);
-                        }
+            let rollback = TopologyRollback(Some(|| {
+                if let MountAttachment::Attached(ref parent_link) = detached_attachments[0] {
+                    if let Some(removed) = removed_root_weak.take() {
+                        guard
+                            .get_mut(&parent_link.location.mountpoint.topology)
+                            .children
+                            .insert(parent_link.entry_key, removed);
                     }
                 }
-                detached_maps.push(node_children);
-                for child_idx in start_len..detached_mps.len() {
-                    stack.push(child_idx);
+                for (index, mp) in detached_mps.iter().enumerate() {
+                    mem::swap(
+                        &mut guard.get_mut(&mp.topology).attachment,
+                        &mut detached_attachments[index],
+                    );
+                    mem::swap(
+                        &mut guard.get_mut(&mp.topology).children,
+                        &mut detached_maps[index],
+                    );
+                }
+            }));
+            commit_result = commit(&detached_mps);
+            if commit_result.is_ok() {
+                rollback.commit();
+                // Negative fast paths must not expose a speculative detach.
+                for mp in &detached_mps {
+                    mp.has_children.store(false, Ordering::Release);
+                }
+                if let MountAttachment::Attached(ref parent_link) = detached_attachments[0] {
+                    let parent_mp = &parent_link.location.mountpoint;
+                    if !guard
+                        .get(&parent_mp.topology)
+                        .children
+                        .values()
+                        .any(|weak| weak.strong_count() > 0)
+                    {
+                        parent_mp.has_children.store(false, Ordering::Release);
+                    }
                 }
             }
         }
@@ -1631,6 +1682,7 @@ impl Location {
             removed_root_weak,
             duplicate_arcs,
         ));
+        commit_result?;
         for node in &detached_mps {
             let prop = *node.propagation.lock();
             remove_from_registry(node, prop);
@@ -1890,6 +1942,12 @@ fn propagate_to_slaves(
     source: Option<Location>,
     new_mp: &Arc<Mountpoint>,
     created: &mut Vec<(Arc<Mountpoint>, Arc<Mountpoint>)>,
+    create: &mut impl FnMut(
+        &Location,
+        Location,
+        &Arc<Mountpoint>,
+        PropagationMode,
+    ) -> VfsResult<Arc<Mountpoint>>,
 ) {
     let prop = *parent_mp.propagation.lock();
     let Some(peer_group) = prop.peer_group() else {
@@ -1918,31 +1976,19 @@ fn propagate_to_slaves(
 
         let peer_loc = Location::new(slave_mp.clone(), mount_loc_entry.clone()).resolve_mounted_location();
 
-        let shadow_mp = match &source {
-            Some(src_loc) => {
-                match peer_loc.mount_bind_silent(src_loc.clone()) {
-                    Ok(mp) => mp,
-                    Err(_) => continue,
-                }
-            }
-            None => {
-                let root_loc = new_mp.root_location();
-                match peer_loc.mount_bind_silent(root_loc) {
-                    Ok(mp) => mp,
-                    Err(_) => continue,
-                }
-            }
+        let shadow_prop = propagated_propagation_mode(parent_mp, &slave_mp, new_mp);
+        let source_loc = source.clone().unwrap_or_else(|| new_mp.root_location());
+        let shadow_mp = match create(&peer_loc, source_loc, new_mp, shadow_prop) {
+            Ok(mp) => mp,
+            Err(_) => continue,
         };
 
         if Arc::ptr_eq(&shadow_mp, new_mp) {
             continue;
         }
 
-        let shadow_prop = propagated_propagation_mode(parent_mp, &slave_mp, new_mp);
-        shadow_mp.change_propagation(shadow_prop);
-
         let mut sub_created = Vec::new();
-        propagate_subtree(new_mp, &shadow_mp, &mut sub_created);
+        propagate_subtree_with(new_mp, &shadow_mp, &mut sub_created, create);
 
         created.push((slave_mp.clone(), shadow_mp.clone()));
         created.extend(sub_created);
@@ -1955,6 +2001,7 @@ fn propagate_to_slaves(
             Some(source_to_use),
             &shadow_mp,
             created,
+            create,
         );
     }
 }
@@ -1965,6 +2012,24 @@ pub fn propagate_subtree(
     src_mp: &Arc<Mountpoint>,
     dst_mp: &Arc<Mountpoint>,
     collected: &mut Vec<(Arc<Mountpoint>, Arc<Mountpoint>)>,
+) {
+    propagate_subtree_with(src_mp, dst_mp, collected, &mut create_shadow);
+}
+
+/// Clone a subtree through a caller-supplied shadow publisher. The publisher
+/// runs outside all topology locks, receives the source mount's flags via
+/// `template`, and must publish the shadow together with its bookkeeping.
+/// Failed shadow publications are skipped without cloning their descendants.
+pub fn propagate_subtree_with(
+    src_mp: &Arc<Mountpoint>,
+    dst_mp: &Arc<Mountpoint>,
+    collected: &mut Vec<(Arc<Mountpoint>, Arc<Mountpoint>)>,
+    create: &mut impl FnMut(
+        &Location,
+        Location,
+        &Arc<Mountpoint>,
+        PropagationMode,
+    ) -> VfsResult<Arc<Mountpoint>>,
 ) {
     let mut deferred_drops = Vec::new();
     let children: Vec<(Arc<Mountpoint>, Location)> = {
@@ -2002,7 +2067,13 @@ pub fn propagate_subtree(
         let dst_child_loc =
             Location::new(dst_mp.clone(), child_loc.entry.clone()).resolve_mounted_location();
 
-        let Ok(shadow_child_mp) = dst_child_loc.mount_bind_silent(child_mp.root_location()) else {
+        let shadow_prop = propagated_propagation_mode(src_mp, dst_mp, &child_mp);
+        let Ok(shadow_child_mp) = create(
+            &dst_child_loc,
+            child_mp.root_location(),
+            &child_mp,
+            shadow_prop,
+        ) else {
             continue;
         };
 
@@ -2010,13 +2081,9 @@ pub fn propagate_subtree(
             continue;
         }
 
-        // Calculate correct propagation mode
-        let shadow_prop = propagated_propagation_mode(src_mp, dst_mp, &child_mp);
-        shadow_child_mp.change_propagation(shadow_prop);
-
         collected.push((dst_mp.clone(), shadow_child_mp.clone()));
 
-        propagate_subtree(&child_mp, &shadow_child_mp, collected);
+        propagate_subtree_with(&child_mp, &shadow_child_mp, collected, create);
 
         // Propagate recursively to all slaves of dst_mp
         propagate_to_slaves(
@@ -2025,6 +2092,7 @@ pub fn propagate_subtree(
             Some(child_mp.root_location()),
             &shadow_child_mp,
             collected,
+            create,
         );
     }
 }
@@ -2034,6 +2102,24 @@ pub fn propagate_new_mount(
     _mount_entry_key: (u64, usize),
     source: Option<Location>,
     new_mp: &Arc<Mountpoint>,
+) -> Vec<(Arc<Mountpoint>, Arc<Mountpoint>)> {
+    propagate_new_mount_with(parent_mp, _mount_entry_key, source, new_mp, &mut create_shadow)
+}
+
+/// Propagate to peers and slaves using the same publisher for every shadow,
+/// including recursively cloned descendants. Like [`propagate_subtree_with`],
+/// this preserves best-effort selection: failure skips only that destination.
+pub fn propagate_new_mount_with(
+    parent_mp: &Arc<Mountpoint>,
+    _mount_entry_key: (u64, usize),
+    source: Option<Location>,
+    new_mp: &Arc<Mountpoint>,
+    create: &mut impl FnMut(
+        &Location,
+        Location,
+        &Arc<Mountpoint>,
+        PropagationMode,
+    ) -> VfsResult<Arc<Mountpoint>>,
 ) -> Vec<(Arc<Mountpoint>, Arc<Mountpoint>)> {
     // Peers / slaves to propagate to.
     let mut targets: Vec<Arc<Mountpoint>> = Vec::new();
@@ -2075,36 +2161,19 @@ pub fn propagate_new_mount(
 
         let peer_loc = Location::new(peer_mp.clone(), mount_loc.entry.clone()).resolve_mounted_location();
 
-        // Create a shadow mount at peer_loc.
-        let shadow_mp = match &source {
-            Some(src_loc) => {
-                // Bind: clone the source location.
-                match peer_loc.mount_bind_silent(src_loc.clone()) {
-                    Ok(mp) => mp,
-                    Err(_) => continue,
-                }
-            }
-            None => {
-                // Real FS: share the same filesystem.
-                // Create a new bind pointing to new_mp's root.
-                let root_loc = new_mp.root_location();
-                match peer_loc.mount_bind_silent(root_loc) {
-                    Ok(mp) => mp,
-                    Err(_) => continue,
-                }
-            }
+        let shadow_prop = propagated_propagation_mode(parent_mp, &peer_mp, new_mp);
+        let source_loc = source.clone().unwrap_or_else(|| new_mp.root_location());
+        let shadow_mp = match create(&peer_loc, source_loc, new_mp, shadow_prop) {
+            Ok(mp) => mp,
+            Err(_) => continue,
         };
 
         if Arc::ptr_eq(&shadow_mp, new_mp) {
             continue;
         }
 
-        // Calculate correct propagation mode
-        let shadow_prop = propagated_propagation_mode(parent_mp, &peer_mp, new_mp);
-        shadow_mp.change_propagation(shadow_prop);
-
         let mut sub_created = Vec::new();
-        propagate_subtree(new_mp, &shadow_mp, &mut sub_created);
+        propagate_subtree_with(new_mp, &shadow_mp, &mut sub_created, create);
 
         created.push((peer_mp.clone(), shadow_mp.clone()));
         created.extend(sub_created);
@@ -2117,116 +2186,25 @@ pub fn propagate_new_mount(
             Some(source_to_use),
             &shadow_mp,
             &mut created,
+            create,
         );
     }
 
     created
 }
 
-impl Location {
-    /// Like `mount_bind` but skips the unbindable check (for internal propagation).
-    fn mount_bind_silent(&self, source: Location) -> VfsResult<Arc<Mountpoint>> {
-        let entry_key = Self::entry_key(&self.entry);
-        {
-            let guard = topology_sync::lock_topology_read();
-            if let Some(existing) = guard
-                .get(&self.mountpoint.topology)
-                .children
-                .get(&entry_key)
-                .and_then(Weak::upgrade)
-            {
-                drop(guard);
-                return Ok(existing);
-            }
-        }
-        let src_prop = if source.is_root_of_mount() {
-            *source.mountpoint().propagation.lock()
-        } else if source.mountpoint().propagation().peer_group().is_some() {
-            let is_descendant = self.entry.ptr_eq(&source.entry)
-                || entry_key == Self::entry_key(&source.entry)
-                || self.entry.is_ancestor_of(&source.entry).unwrap_or(false)
-                || source.entry.is_ancestor_of(&self.entry).unwrap_or(false);
-            if is_descendant {
-                PropagationMode::Private
-            } else {
-                *source.mountpoint().propagation.lock()
-            }
-        } else {
-            PropagationMode::Private
-        };
-        let dst_parent_prop = *self.mountpoint().propagation.lock();
-        let final_prop = match src_prop {
-            PropagationMode::Shared { peer_group } => PropagationMode::Shared { peer_group },
-            PropagationMode::SharedAndSlave {
-                peer_group,
-                master_group,
-            } => PropagationMode::SharedAndSlave {
-                peer_group,
-                master_group,
-            },
-            PropagationMode::Slave { master_group } => {
-                if dst_parent_prop.is_shared() {
-                    let pg = PEER_GROUP_COUNTER.fetch_add(1, Ordering::Relaxed);
-                    PropagationMode::SharedAndSlave {
-                        peer_group: pg,
-                        master_group,
-                    }
-                } else {
-                    PropagationMode::Slave { master_group }
-                }
-            }
-            _ => {
-                if dst_parent_prop.is_shared() {
-                    let pg = PEER_GROUP_COUNTER.fetch_add(1, Ordering::Relaxed);
-                    PropagationMode::Shared { peer_group: pg }
-                } else {
-                    src_prop
-                }
-            }
-        };
-
-        let candidate =
-            Mountpoint::new_bind_with_propagation(source, Some(self.clone()), final_prop);
-        let candidate_weak = Arc::downgrade(&candidate);
-        let mut stale_weak = None;
-        let outcome = {
-            let mut guard = topology_sync::lock_topology_write();
-            if matches!(
-                guard.get(&self.mountpoint.topology).attachment,
-                MountAttachment::Detached
-            ) {
-                Err(VfsError::InvalidInput)
-            } else if let Some(existing) = guard
-                .get(&self.mountpoint.topology)
-                .children
-                .get(&entry_key)
-                .and_then(Weak::upgrade)
-            {
-                Ok(Some(existing))
-            } else {
-                let children = &mut guard.get_mut(&self.mountpoint.topology).children;
-                children.reserve(1);
-                stale_weak = children.insert(entry_key, candidate_weak);
-                self.mountpoint.has_children.store(true, Ordering::Release);
-                Ok(None)
-            }
-        };
-        drop(stale_weak);
-        match outcome {
-            Ok(Some(existing)) => {
-                drop(candidate);
-                Ok(existing)
-            }
-            Ok(None) => {
-                add_to_registry(&candidate, final_prop);
-                Ok(candidate)
-            }
-            Err(err) => {
-                drop(candidate);
-                Err(err)
-            }
-        }
-    }
+// Topology-only clients use the same transaction as the axfs coordinator.
+fn create_shadow(
+    target: &Location,
+    source: Location,
+    template: &Arc<Mountpoint>,
+    propagation: PropagationMode,
+) -> VfsResult<Arc<Mountpoint>> {
+    target.mount_shadow_with(source, propagation, None, |mountpoint| {
+        mountpoint.set_readonly(template.is_readonly());
+        mountpoint.set_flags(template.get_flags());
+        Ok(())
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -2461,6 +2439,142 @@ mod tests {
     }
 
     #[test]
+    fn rejected_bind_commit_restores_the_underlying_directory_and_peer_group() {
+        let root = Mountpoint::new_root(&MemFs::create("root")).root_location();
+        let source = Mountpoint::new_root(&MemFs::create("source"));
+        source.make_shared();
+        let group = source.propagation().peer_group().unwrap();
+        let target = mkdir(&root, "target");
+        let mut rejected = None;
+        assert!(matches!(
+            target.mount_bind_with(source.root_location(), Some("/target"), |mountpoint| {
+                rejected = Some(mountpoint.clone());
+                Err(VfsError::Io)
+            }),
+            Err(VfsError::Io)
+        ));
+        assert!(
+            block_on(root.lookup_no_follow("target"))
+                .unwrap()
+                .ptr_eq(&target)
+        );
+        assert!(rejected.as_ref().unwrap().location().is_none());
+        assert!(peer_group_members(group, &source).is_empty());
+
+        let mounted = target.mount_bind(source.root_location()).unwrap();
+        assert_eq!(mounted.propagation(), source.propagation());
+        assert!(
+            block_on(root.lookup_no_follow("target"))
+                .unwrap()
+                .ptr_eq(&mounted.root_location())
+        );
+        mounted.root_location().unmount().unwrap();
+    }
+
+    #[test]
+    fn bind_and_shadow_reject_stale_paths_before_bookkeeping() {
+        let root = Mountpoint::new_root(&MemFs::create("root")).root_location();
+        let source = Mountpoint::new_root(&MemFs::create("source"));
+        let old_dir = mkdir(&root, "old");
+        let new_dir = mkdir(&root, "new");
+        let parent = old_dir.mount(&MemFs::create("parent")).unwrap();
+        let target = mkdir(&parent.root_location(), "target");
+        parent.root_location().move_mount(&new_dir).unwrap();
+
+        assert!(matches!(
+            target.mount_bind_with(source.root_location(), Some("/old/target"), |_| {
+                panic!("stale bind path must fail before bookkeeping")
+            }),
+            Err(VfsError::ResourceBusy)
+        ));
+        assert!(matches!(
+            target.mount_shadow_with(
+                source.root_location(),
+                PropagationMode::Private,
+                Some("/old/target"),
+                |_| panic!("stale shadow path must fail before bookkeeping"),
+            ),
+            Err(VfsError::ResourceBusy)
+        ));
+        assert!(!target.is_mountpoint());
+        let mounted = target
+            .mount_bind_with(source.root_location(), Some("/new/target"), |_| Ok(()))
+            .unwrap();
+        assert_eq!(
+            mounted.root_location().absolute_path().unwrap().as_str(),
+            "/new/target"
+        );
+        mounted.root_location().unmount().unwrap();
+        parent.root_location().unmount().unwrap();
+    }
+
+    #[test]
+    fn shadow_commit_cannot_repurpose_an_existing_attachment() {
+        let root = Mountpoint::new_root(&MemFs::create("root")).root_location();
+        let source = Mountpoint::new_root(&MemFs::create("source"));
+        source.make_shared();
+        let target = mkdir(&root, "target");
+        let existing = target.mount_bind(source.root_location()).unwrap();
+        existing.set_readonly(true);
+        existing.set_flags(17);
+
+        assert!(matches!(
+            target.mount_shadow_with(
+                source.root_location(),
+                PropagationMode::Private,
+                Some("/target"),
+                |_| panic!("existing attachment must fail before bookkeeping"),
+            ),
+            Err(VfsError::ResourceBusy)
+        ));
+        assert!(
+            block_on(root.lookup_no_follow("target"))
+                .unwrap()
+                .ptr_eq(&existing.root_location())
+        );
+        assert!(existing.is_readonly());
+        assert_eq!(existing.get_flags(), 17);
+        assert_eq!(existing.propagation(), source.propagation());
+        existing.root_location().unmount().unwrap();
+    }
+
+    #[test]
+    fn unwinding_bind_and_shadow_commits_restore_topology() {
+        let root = Mountpoint::new_root(&MemFs::create("root")).root_location();
+        let source = Mountpoint::new_root(&MemFs::create("source"));
+        source.make_shared();
+        let target = mkdir(&root, "target");
+
+        assert!(
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let _ = target.mount_bind_with(source.root_location(), None, |_| {
+                    panic!("reject bind")
+                });
+            }))
+            .is_err()
+        );
+        assert!(
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let _ = target.mount_shadow_with(
+                    source.root_location(),
+                    source.propagation(),
+                    None,
+                    |_| panic!("reject shadow"),
+                );
+            }))
+            .is_err()
+        );
+        assert!(
+            block_on(root.lookup_no_follow("target"))
+                .unwrap()
+                .ptr_eq(&target)
+        );
+        assert!(peer_group_members(source.propagation().peer_group().unwrap(), &source).is_empty());
+        let mounted = target.mount_bind(source.root_location()).unwrap();
+        mounted.root_location().unmount().unwrap();
+    }
+
+    #[test]
     fn mount_rejects_a_path_snapshot_invalidated_by_parent_move() {
         let root_fs = MemFs::create("root");
         let parent_fs = MemFs::create("parent");
@@ -2521,6 +2635,48 @@ mod tests {
                 .unwrap()
                 .ptr_eq(&target)
         );
+    }
+
+    #[test]
+    fn rejected_lazy_unmount_restores_the_complete_subtree() {
+        let root = Mountpoint::new_root(&MemFs::create("root")).root_location();
+        let parent = mkdir(&root, "parent").mount(&MemFs::create("parent")).unwrap();
+        let child = mkdir(&parent.root_location(), "child")
+            .mount(&MemFs::create("child"))
+            .unwrap();
+        assert_eq!(
+            parent.root_location().unmount_all_with(|detached| {
+                assert_eq!(detached.len(), 2);
+                assert!(detached.iter().any(|mp| Arc::ptr_eq(mp, &parent)));
+                assert!(detached.iter().any(|mp| Arc::ptr_eq(mp, &child)));
+                Err(VfsError::Io)
+            }),
+            Err(VfsError::Io)
+        );
+        let resolved_parent = block_on(root.lookup_no_follow("parent")).unwrap();
+        assert!(resolved_parent.ptr_eq(&parent.root_location()));
+        let resolved_child = block_on(resolved_parent.lookup_no_follow("child")).unwrap();
+        assert!(resolved_child.ptr_eq(&child.root_location()));
+        assert_eq!(
+            resolved_child.absolute_path().unwrap().as_str(),
+            "/parent/child"
+        );
+        assert!(
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let _ = parent.root_location().unmount_all_with(|_| panic!("reject subtree"));
+            }))
+            .is_err()
+        );
+        let resolved_parent = block_on(root.lookup_no_follow("parent")).unwrap();
+        assert!(resolved_parent.ptr_eq(&parent.root_location()));
+        assert!(
+            block_on(resolved_parent.lookup_no_follow("child"))
+                .unwrap()
+                .ptr_eq(&child.root_location())
+        );
+        parent.root_location().unmount_all().unwrap();
+        assert!(parent.location().is_none());
+        assert!(child.location().is_none());
     }
 
     #[test]

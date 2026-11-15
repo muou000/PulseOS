@@ -16,7 +16,10 @@ and the same `list_mounts()` snapshot used by `/proc/mounts`.
 Coverage includes successful mount/unmount, duplicate targets, failed probes,
 late registry conflicts, rejected mount and unmount updates, busy child mounts,
 competing probes, ancestors moved during probing, stale mount handles, and
-existing bind mount stacks.
+bind mount stacks, read-only inheritance, peer/slave shadow attributes and
+records, rejected move-shadow publication with retry, and lazy subtree rollback
+and record cleanup. Ordinary, bind, and shadow publication all exercise the
+same production coordinator; tests do not replace its registry or VFS logic.
 
 Registry rejection is injected through the coordinator's `cfg(test)` hook.
 Tests serialize access to the production globals and remove their mounts after
