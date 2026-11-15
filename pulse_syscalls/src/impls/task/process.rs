@@ -29,11 +29,8 @@ fn read_user_siginfo(process: &Process, addr: usize) -> Result<siginfo, LinuxErr
         return Err(LinuxError::EFAULT);
     }
 
-    let mut bytes = [0u8; SIGINFO_SIZE];
-    process
-        .read_user_bytes(addr, &mut bytes)
-        .map_err(|_| LinuxError::EFAULT)?;
-    Ok(unsafe { core::mem::transmute::<[u8; SIGINFO_SIZE], siginfo>(bytes) })
+    pulse_core::task::uaccess::read_user_value(process, addr)
+        .map_err(|_| LinuxError::EFAULT)
 }
 
 fn siginfo_bytes(info: siginfo) -> [u8; SIGINFO_SIZE] {

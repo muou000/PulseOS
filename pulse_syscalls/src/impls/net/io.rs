@@ -1,14 +1,15 @@
 use alloc::vec::Vec;
+use core::ffi::c_void;
 
 use axerrno::LinuxError;
 use axlog::*;
-use linux_raw_sys::general::iovec;
 use pulse_core::net::{Socket, SocketInner};
 
 use super::{
     addr::{NetSocketAddr, read_unix_path},
     get_socket,
 };
+use crate::impls::utils::read_user_value;
 
 const MMSGHDR_SIZE: usize = core::mem::size_of::<linux_raw_sys::net::mmsghdr>();
 const MMSGHDR_MSG_LEN_OFFSET: usize = core::mem::offset_of!(linux_raw_sys::net::mmsghdr, msg_len);
@@ -28,13 +29,6 @@ fn mmsghdr_addr(msgvec: usize, index: usize) -> Result<usize, LinuxError> {
     Ok(addr)
 }
 
-fn read_user_plain<T: Copy>(user_addr: usize) -> Result<T, LinuxError> {
-    crate::impls::utils::with_process(|process| {
-        pulse_core::task::uaccess::read_user_plain(process, user_addr)
-    })?
-    .map_err(|e| LinuxError::from(e.canonicalize()))
-}
-
 fn write_user_plain<T: Copy>(user_addr: usize, value: &T) -> Result<(), LinuxError> {
     crate::impls::utils::with_process(|process| {
         pulse_core::task::uaccess::write_user_plain(process, user_addr, value)
@@ -51,7 +45,7 @@ fn read_family(addr: usize, addrlen: u32) -> Result<u16, LinuxError> {
     if addr == 0 {
         return Err(LinuxError::EFAULT);
     }
-    let family = read_user_plain::<u16>(addr)?;
+    let family = read_user_value::<u16>(addr)?;
     Ok(family)
 }
 
@@ -265,7 +259,7 @@ pub fn sys_recvfrom(
         if addrlen == 0 {
             return -(LinuxError::EINVAL.code() as isize);
         }
-        let current_len: i32 = match read_user_plain(addrlen) {
+        let current_len: i32 = match read_user_value(addrlen) {
             Ok(len) => len,
             Err(e) => return -(e.code() as isize),
         };
@@ -342,7 +336,7 @@ pub fn sys_recvfrom(
                 if addr != 0 {
                     let net_addr = NetSocketAddr::from(src_addr);
                     if addrlen != 0 {
-                        if let Ok(current_len) = read_user_plain::<u32>(addrlen) {
+                        if let Ok(current_len) = read_user_value::<u32>(addrlen) {
                             let mut alen = current_len;
                             if net_addr.write_to_raw(addr, &mut alen).is_ok() {
                                 let _ = write_user_plain(addrlen, &alen);
@@ -352,7 +346,7 @@ pub fn sys_recvfrom(
                 }
             } else if let SocketInner::Netlink(_) = &socket.inner {
                 if addr != 0 && addrlen != 0 {
-                    if let Ok(current_len) = read_user_plain::<u32>(addrlen) {
+                    if let Ok(current_len) = read_user_value::<u32>(addrlen) {
                         let mut nladdr = [0u8; 12];
                         nladdr[0..2].copy_from_slice(&16u16.to_ne_bytes()); // nl_family = 16 (AF_NETLINK)
                         let to_write = core::cmp::min(current_len as usize, 12);
@@ -373,20 +367,32 @@ pub fn sys_recvfrom(
 #[derive(Copy, Clone)]
 #[repr(C)]
 struct MsgHdr {
-    msg_name: *mut u8,
+    msg_name: *mut c_void,
     msg_namelen: u32,
-    msg_iov: *mut iovec,
+    msg_iov: *mut c_void,
     msg_iovlen: usize,
-    msg_control: *mut u8,
+    msg_control: *mut c_void,
     msg_controllen: usize,
     msg_flags: u32,
+}
+
+pulse_user_abi::impl_user_abi_struct! {
+    for MsgHdr, size = 56 => {
+        msg_name: *mut c_void,
+        msg_namelen: u32,
+        msg_iov: *mut c_void,
+        msg_iovlen: usize,
+        msg_control: *mut c_void,
+        msg_controllen: usize,
+        msg_flags: u32,
+    }
 }
 
 fn do_sendmsg_core(socket: &Socket, msg: usize, flags: usize) -> Result<usize, LinuxError> {
     if msg == 0 {
         return Err(LinuxError::EFAULT);
     }
-    let msg_hdr: MsgHdr = read_user_plain(msg)?;
+    let msg_hdr: MsgHdr = read_user_value(msg)?;
 
     if !msg_hdr.msg_name.is_null() && (msg_hdr.msg_namelen as i32) < 0 {
         return Err(LinuxError::EINVAL);
@@ -640,7 +646,7 @@ fn do_recvmsg_core(socket: &Socket, msg: usize, flags: usize) -> Result<usize, L
     if msg == 0 {
         return Err(LinuxError::EFAULT);
     }
-    let mut msg_hdr: MsgHdr = read_user_plain(msg)?;
+    let mut msg_hdr: MsgHdr = read_user_value(msg)?;
 
     if !msg_hdr.msg_name.is_null() && (msg_hdr.msg_namelen as i32) < 0 {
         return Err(LinuxError::EINVAL);
@@ -803,7 +809,7 @@ pub fn sys_recvmmsg(fd: usize, msgvec: usize, vlen: usize, flags: usize, timeout
     };
 
     let timeout_val = if timeout != 0 {
-        match read_user_plain::<linux_raw_sys::general::timespec>(timeout) {
+        match read_user_value::<linux_raw_sys::general::timespec>(timeout) {
             Ok(ts) => {
                 let nsec = ts.tv_nsec as i64;
                 if !(0..1_000_000_000).contains(&nsec) || ts.tv_sec < 0 {

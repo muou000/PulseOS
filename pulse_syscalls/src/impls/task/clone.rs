@@ -285,6 +285,22 @@ pub struct CloneArgs {
     pub cgroup: u64,
 }
 
+pulse_user_abi::impl_user_abi_struct! {
+    for CloneArgs, size = 88 => {
+        flags: u64,
+        pidfd: u64,
+        child_tid: u64,
+        parent_tid: u64,
+        exit_signal: u64,
+        stack: u64,
+        stack_size: u64,
+        tls: u64,
+        set_tid: u64,
+        set_tid_size: u64,
+        cgroup: u64,
+    }
+}
+
 pub fn sys_clone3(tf: &TrapFrame, args: [usize; 6]) -> isize {
     let cl_args_ptr = args[0];
     let size = args[1];
@@ -311,7 +327,6 @@ pub fn sys_clone3(tf: &TrapFrame, args: [usize; 6]) -> isize {
         }
     };
 
-    let mut clone_args = CloneArgs::default();
     let copy_size = core::cmp::min(size, core::mem::size_of::<CloneArgs>());
 
     let mut buf = [0u8; 88];
@@ -331,13 +346,11 @@ pub fn sys_clone3(tf: &TrapFrame, args: [usize; 6]) -> isize {
         return -errno.code() as isize;
     }
 
-    unsafe {
-        core::ptr::copy_nonoverlapping(
-            slice.as_ptr(),
-            (&mut clone_args as *mut CloneArgs).cast::<u8>(),
-            copy_size,
-        );
-    }
+    // Older clone3 versions supply only a prefix; absent fields stay zero.
+    let clone_args: CloneArgs = match pulse_user_abi::decode_from_bytes(&buf) {
+        Ok(args) => args,
+        Err(e) => return -LinuxError::from(e).code() as isize,
+    };
 
     if size > core::mem::size_of::<CloneArgs>() {
         let mut remaining = size - core::mem::size_of::<CloneArgs>();

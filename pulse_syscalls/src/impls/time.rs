@@ -477,6 +477,13 @@ struct Itimerval {
     it_value: timeval,
 }
 
+pulse_user_abi::impl_user_abi_struct! {
+    for Itimerval, size = 32 => {
+        it_interval: timeval,
+        it_value: timeval,
+    }
+}
+
 impl Default for Itimerval {
     fn default() -> Self {
         Self {
@@ -498,7 +505,7 @@ fn read_user_itimerval(addr: usize) -> Result<Itimerval, LinuxError> {
     }
     let proc = pulse_core::task::current_process()?;
     let val: Itimerval =
-        uaccess::read_user_plain(proc.as_ref(), addr).map_err(|_| LinuxError::EFAULT)?;
+        uaccess::read_user_value(proc.as_ref(), addr).map_err(|_| LinuxError::EFAULT)?;
     Ok(val)
 }
 
@@ -693,7 +700,36 @@ pub struct timex {
     pub errcnt: c_long,
     pub stbcnt: c_long,
     pub tai: i32,
-    _pad4: [i32; 11],
+    _pad4: [u8; 44],
+}
+
+pulse_user_abi::impl_user_abi_struct! {
+    for timex, size = 208 => {
+        modes: u32,
+        _pad1: u32,
+        offset: c_long,
+        freq: c_long,
+        maxerror: c_long,
+        esterror: c_long,
+        status: i32,
+        _pad2: u32,
+        constant: c_long,
+        precision: c_long,
+        tolerance: c_long,
+        time: timeval,
+        tick: c_long,
+        ppsfreq: c_long,
+        jitter: c_long,
+        shift: i32,
+        _pad3: u32,
+        stabil: c_long,
+        jitcnt: c_long,
+        calcnt: c_long,
+        errcnt: c_long,
+        stbcnt: c_long,
+        tai: i32,
+        _pad4: [u8; 44],
+    }
 }
 
 static GLOBAL_TIMEX: spin::Mutex<timex> = spin::Mutex::new(timex {
@@ -723,7 +759,7 @@ static GLOBAL_TIMEX: spin::Mutex<timex> = spin::Mutex::new(timex {
     errcnt: 0,
     stbcnt: 0,
     tai: 0,
-    _pad4: [0; 11],
+    _pad4: [0; 44],
 });
 
 pub fn sys_clock_adjtime(clockid: i32, buf: usize) -> isize {
@@ -742,7 +778,7 @@ pub fn sys_clock_adjtime(clockid: i32, buf: usize) -> isize {
         Err(e) => return -e.code() as isize,
     };
 
-    let tmx: timex = match uaccess::read_user_plain(proc.as_ref(), buf) {
+    let tmx: timex = match uaccess::read_user_value(proc.as_ref(), buf) {
         Ok(t) => t,
         Err(_) => return -LinuxError::EFAULT.code() as isize,
     };
@@ -840,16 +876,21 @@ pub fn sys_timer_create(clockid: i32, sevp: usize, timerid: usize) -> isize {
         Err(e) => return -e.code() as isize,
     };
 
-    let mut event: linux_raw_sys::general::sigevent = unsafe { core::mem::zeroed() };
-    if sevp != 0 {
-        match uaccess::read_user_plain(proc.as_ref(), sevp) {
-            Ok(ev) => event = ev,
+    let event = if sevp != 0 {
+        match uaccess::read_user_value(proc.as_ref(), sevp) {
+            Ok(ev) => ev,
             Err(_) => return -LinuxError::EFAULT.code() as isize,
         }
     } else {
-        event.sigev_notify = 0; // SIGEV_SIGNAL
-        event.sigev_signo = 14; // SIGALRM
-    }
+        linux_raw_sys::general::sigevent {
+            sigev_value: linux_raw_sys::general::sigval {
+                sival_ptr: core::ptr::null_mut(),
+            },
+            sigev_notify: 0, // SIGEV_SIGNAL
+            sigev_signo: 14, // SIGALRM
+            _sigev_un: linux_raw_sys::general::sigevent__bindgen_ty_1 { _pad: [0; 12] },
+        }
+    };
 
     match proc.alloc_posix_timer(clockid, event) {
         Ok(id) => match uaccess::write_user_plain(proc.as_ref(), timerid, &id) {
@@ -866,7 +907,7 @@ fn read_user_itimerspec(addr: usize) -> Result<itimerspec, LinuxError> {
     }
     let proc = pulse_core::task::current_process()?;
     let val: itimerspec =
-        uaccess::read_user_plain(proc.as_ref(), addr).map_err(|_| LinuxError::EFAULT)?;
+        uaccess::read_user_value(proc.as_ref(), addr).map_err(|_| LinuxError::EFAULT)?;
     Ok(val)
 }
 

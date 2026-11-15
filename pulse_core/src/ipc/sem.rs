@@ -41,6 +41,22 @@ pub struct IpcPerm {
     _pad4: u32,
 }
 
+pulse_user_abi::impl_user_abi_struct! {
+    for IpcPerm, size = 36 => {
+        key: i32,
+        uid: u32,
+        gid: u32,
+        cuid: u32,
+        cgid: u32,
+        mode: u16,
+        _pad: [u8; 2],
+        _seq: u16,
+        _pad2: u16,
+        _pad3: u32,
+        _pad4: u32,
+    }
+}
+
 impl IpcPerm {
     pub fn new(key: i32, mode: u16, pid: i32) -> Self {
         Self {
@@ -69,6 +85,17 @@ pub struct SemidDs {
     pub sem_nsems: usize,
     _reserved3: usize,
     _reserved4: usize,
+}
+
+pulse_user_abi::impl_user_abi_struct! {
+    for SemidDs, size = 80 => {
+        sem_perm: IpcPerm,
+        sem_otime: i64,
+        sem_ctime: i64,
+        sem_nsems: usize,
+        _reserved3: usize,
+        _reserved4: usize,
+    }
 }
 
 impl SemidDs {
@@ -136,6 +163,14 @@ pub struct SemBuf {
     pub sem_num: u16,
     pub sem_op: i16,
     pub sem_flg: i16,
+}
+
+pulse_user_abi::impl_user_abi_struct! {
+    for SemBuf, size = 6 => {
+        sem_num: u16,
+        sem_op: i16,
+        sem_flg: i16,
+    }
 }
 
 struct BiBTreeMap<K: Ord, V: Ord> {

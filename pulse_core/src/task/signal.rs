@@ -1279,12 +1279,7 @@ fn restore_user_signal_context(
     {
         let gregs_addr = user_ucontext.checked_add(176).ok_or(AxError::BadAddress)?;
         let mut gregs = [0u64; 32];
-        process.read_user_bytes(gregs_addr, unsafe {
-            core::slice::from_raw_parts_mut(
-                gregs.as_mut_ptr().cast::<u8>(),
-                core::mem::size_of_val(&gregs),
-            )
-        })?;
+        super::uaccess::read_user_value_slice(process, gregs_addr, &mut gregs)?;
         tf.regs.ra = gregs[1] as usize;
         tf.regs.sp = gregs[2] as usize;
         tf.regs.gp = gregs[3] as usize;
@@ -1321,12 +1316,7 @@ fn restore_user_signal_context(
     {
         let gregs_addr = user_ucontext.checked_add(184).ok_or(AxError::BadAddress)?;
         let mut gregs = [0u64; 32];
-        process.read_user_bytes(gregs_addr, unsafe {
-            core::slice::from_raw_parts_mut(
-                gregs.as_mut_ptr().cast::<u8>(),
-                core::mem::size_of_val(&gregs),
-            )
-        })?;
+        super::uaccess::read_user_value_slice(process, gregs_addr, &mut gregs)?;
         tf.regs.ra = gregs[1] as usize;
         tf.regs.tp = gregs[2] as usize;
         tf.regs.sp = gregs[3] as usize;
@@ -2315,13 +2305,12 @@ fn read_user_signal_altstack(
         .checked_add(UCONTEXT_STACK_SIZE_OFFSET)
         .ok_or(AxError::BadAddress)?;
     let sp = process.read_user_usize(stack_addr)?;
-    let mut flags = [0u8; core::mem::size_of::<i32>()];
-    process.read_user_bytes(flags_addr, &mut flags)?;
+    let flags: i32 = process.read_user_value(flags_addr)?;
     let size = process.read_user_usize(size_addr)?;
     Ok(SignalAltStack::from_user_parts(
         sp,
         size,
-        i32::from_ne_bytes(flags) as u32,
+        flags as u32,
     ))
 }
 
@@ -2330,9 +2319,7 @@ fn signal_context_addr(user_ucontext: usize, offset: usize) -> AxResult<usize> {
 }
 
 fn read_user_signal_u32(process: &Process, addr: usize) -> AxResult<u32> {
-    let mut bytes = [0u8; core::mem::size_of::<u32>()];
-    process.read_user_bytes(addr, &mut bytes)?;
-    Ok(u32::from_ne_bytes(bytes))
+    process.read_user_value(addr)
 }
 
 #[cfg(target_arch = "riscv64")]
@@ -2428,14 +2415,10 @@ fn restore_user_signal_fp_state(
     }
 
     let mut fp = saved.fp;
-    process.read_user_bytes(
+    super::uaccess::read_user_value_slice(
+        process,
         signal_context_addr(user_ucontext, RISCV_D_FPU_OFFSET)?,
-        unsafe {
-            core::slice::from_raw_parts_mut(
-                fp.fp.as_mut_ptr().cast::<u8>(),
-                core::mem::size_of_val(&fp.fp),
-            )
-        },
+        &mut fp.fp,
     )?;
     fp.fcsr = read_user_signal_u32(
         process,
@@ -2473,12 +2456,7 @@ fn restore_user_signal_fp_state(
 
     let mut fp = saved.fp;
     let lsx_context = signal_context_addr(user_ucontext, LOONGARCH_LSX_CONTEXT_OFFSET)?;
-    process.read_user_bytes(lsx_context, unsafe {
-        core::slice::from_raw_parts_mut(
-            fp.fp.as_mut_ptr().cast::<u8>(),
-            core::mem::size_of_val(&fp.fp),
-        )
-    })?;
+    super::uaccess::read_user_value_slice(process, lsx_context, &mut fp.fp)?;
     process.read_user_bytes(
         signal_context_addr(user_ucontext, LOONGARCH_LSX_FCC_OFFSET)?,
         &mut fp.fcc,

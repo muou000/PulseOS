@@ -19,7 +19,10 @@ use super::{
     addr::{NetSocketAddr, read_unix_path, write_unix_addr},
     get_socket,
 };
-use crate::impls::fs::common::{insert_fd_entry, remove_fd_entry};
+use crate::impls::{
+    fs::common::{insert_fd_entry, remove_fd_entry},
+    utils::read_user_value,
+};
 
 fn read_family(addr: usize, addrlen: u32) -> Result<u16, LinuxError> {
     if addrlen > 128 {
@@ -31,7 +34,7 @@ fn read_family(addr: usize, addrlen: u32) -> Result<u16, LinuxError> {
     if addr == 0 {
         return Err(LinuxError::EFAULT);
     }
-    let family = read_user_plain::<u16>(addr)?;
+    let family = read_user_value::<u16>(addr)?;
     Ok(family)
 }
 
@@ -39,13 +42,6 @@ fn read_family(addr: usize, addrlen: u32) -> Result<u16, LinuxError> {
 fn insert_socket(socket: Socket, flags: FdFlags) -> Result<usize, LinuxError> {
     let entry = FdEntry::new(Arc::new(socket), flags);
     insert_fd_entry(entry)
-}
-
-fn read_user_plain<T: Copy>(user_addr: usize) -> Result<T, LinuxError> {
-    crate::impls::utils::with_process(|process| {
-        pulse_core::task::uaccess::read_user_plain(process, user_addr)
-    })?
-    .map_err(|e| LinuxError::from(e.canonicalize()))
 }
 
 fn write_user_plain<T: Copy>(user_addr: usize, value: &T) -> Result<(), LinuxError> {
@@ -545,7 +541,7 @@ pub fn sys_accept4(fd: usize, addr: usize, addrlen: usize, flags: usize) -> isiz
         } else if let Some(remote) = remote_addr {
             let net_addr = NetSocketAddr::from(remote);
             if addrlen != 0 {
-                if let Ok(current_len) = read_user_plain::<u32>(addrlen) {
+                if let Ok(current_len) = read_user_value::<u32>(addrlen) {
                     let mut len = current_len;
                     if net_addr.write_to_raw(addr, &mut len).is_ok() {
                         let _ = write_user_plain(addrlen, &len);
