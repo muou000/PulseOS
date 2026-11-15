@@ -421,6 +421,7 @@ dependencies = [
  "axdriver_block",
  "axdriver_display",
  "axdriver_net",
+ "log",
  "virtio-drivers",
 ]
 
@@ -617,6 +618,7 @@ dependencies = [
  "handler_table",
  "kspin",
  "memory_addr",
+ "virtio-drivers",
 ]
 
 [[package]]
