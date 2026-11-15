@@ -888,6 +888,35 @@ fn is_mount_ancestor_of(mp1: &Arc<Mountpoint>, mp2: &Arc<Mountpoint>) -> bool {
     is_mount_ancestor_of_with(mp1, mp2, |mp| guard.get(&mp.topology))
 }
 
+/// Gather a subtree under the transition's existing writer. The caller supplies
+/// empty buffers that outlive the guard, retaining every upgraded owner until
+/// after unlock, including duplicate edges in a malformed graph.
+fn collect_subtree_for_transition(
+    root: &Arc<Mountpoint>,
+    guard: &topology_sync::TopologyWriteGuard,
+    mounts: &mut Vec<Arc<Mountpoint>>,
+    deferred_drops: &mut Vec<Arc<Mountpoint>>,
+) {
+    let mut visited = HashSet::new();
+    visited.insert(root.id);
+    mounts.push(root.clone());
+    let mut index = 0;
+    while index < mounts.len() {
+        let node = mounts[index].clone();
+        for weak in guard.get(&node.topology).children.values() {
+            if let Some(child) = weak.upgrade() {
+                if visited.insert(child.id) {
+                    mounts.push(child);
+                } else {
+                    deferred_drops.push(child);
+                }
+            }
+        }
+        deferred_drops.push(node);
+        index += 1;
+    }
+}
+
 /// Walk up through any mount-root stacking chain under `guard` until reaching
 /// the underlying non-root mountpoint [`Location`], or `None` if `mp` is a
 /// root or detached mount.
@@ -1595,26 +1624,7 @@ impl Location {
         {
             let mut guard = topology_sync::lock_topology_write();
             let root_mp = &self.mountpoint;
-            // Gather the exact subtree before any mutation. All retained Arcs
-            // outlive the guard, including duplicates in a malformed graph.
-            let mut visited = HashSet::new();
-            visited.insert(root_mp.id);
-            detached_mps.push(root_mp.clone());
-            let mut index = 0;
-            while index < detached_mps.len() {
-                let node = detached_mps[index].clone();
-                for weak in guard.get(&node.topology).children.values() {
-                    if let Some(child_mp) = weak.upgrade() {
-                        if visited.insert(child_mp.id) {
-                            detached_mps.push(child_mp);
-                        } else {
-                            duplicate_arcs.push(child_mp);
-                        }
-                    }
-                }
-                duplicate_arcs.push(node);
-                index += 1;
-            }
+            collect_subtree_for_transition(root_mp, &guard, &mut detached_mps, &mut duplicate_arcs);
             detached_attachments.reserve(detached_mps.len());
             detached_maps.reserve(detached_mps.len());
             for mp in &detached_mps {
@@ -1798,24 +1808,7 @@ impl Location {
                     // Gather identities while the same writer excludes child
                     // attachments and moves. A pathname can also belong to a
                     // lower stacked mount that is not part of this subtree.
-                    let mut visited = HashSet::new();
-                    visited.insert(mp.id);
-                    moved_mps.push(mp.clone());
-                    let mut index = 0;
-                    while index < moved_mps.len() {
-                        let node = moved_mps[index].clone();
-                        for weak in guard.get(&node.topology).children.values() {
-                            if let Some(child_mp) = weak.upgrade() {
-                                if visited.insert(child_mp.id) {
-                                    moved_mps.push(child_mp);
-                                } else {
-                                    duplicate_arcs.push(child_mp);
-                                }
-                            }
-                        }
-                        duplicate_arcs.push(node);
-                        index += 1;
-                    }
+                    collect_subtree_for_transition(mp, &guard, &mut moved_mps, &mut duplicate_arcs);
                     guard
                         .get_mut(&new_parent_mp.topology)
                         .children
