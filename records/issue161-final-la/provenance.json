@@ -1,0 +1,84 @@
+{
+  "artifacts": {
+    "binary": {
+      "bytes": 4114432,
+      "path": "/home/muou/PulseOS/PulseOS_loongarch64-qemu-virt.bin",
+      "sha256": "038208b7e6c94f3e7253336b45698c6deabf01dd75054d093440a1b16a1a3b1b"
+    },
+    "elf": {
+      "bytes": 5497024,
+      "path": "/home/muou/PulseOS/PulseOS_loongarch64-qemu-virt.elf",
+      "sha256": "82c95b6c5e08bed100351da67ff197909b21835d119626d34c5eb7643dac8c26"
+    }
+  },
+  "completed_unix_ns": 1794754425476999262,
+  "configuration": {
+    "axconfig_path": "/home/muou/PulseOS/.axconfig.toml",
+    "axconfig_sha256": "f0d2253ca0a0e11f950040dc439d986aedd86fcf7727348737947d1bd57e463a",
+    "axconfig_text": "# Architecture identifier.\narch = \"loongarch64\" # str\n# Platform package.\npackage = \"axplat-loongarch64-qemu-virt\" # str\n# Platform identifier.\nplatform = \"loongarch64-qemu-virt\" # str\n# Stack size of each task.\ntask-stack-size = 0x40000 # uint\n# Number of timer ticks per second (Hz). A timer tick may contain several timer\n# interrupts.\nticks-per-sec = 100 # uint\n\n#\n# Device specifications\n#\n[devices]\n# poweroff {\n#     value = <0x00000034>;\n#     offset = <0x00000000>;\n#     compatible = \"syscon-poweroff\";\n# };\n# ged@100e001c {\n#     reg-io-width = <0x00000001>;\n#     reg-shift = <0x00000000>;\n#     reg = <0x00000000 0x100e001c 0x00000000 0x00000003>;\n#     compatible = \"syscon\";\n# };\nged-paddr = 0x100E001C # uint\n# IPI interrupt number.\nipi-irq = \"0x8000_0000_0000_000c\" # uint\n# MMIO ranges with format (`base_paddr`, `size`).\nmmio-ranges = [\n    [0x1000_0000, 0x0000_1000],\n    [0x100D_0000, 0x0000_1000],\n    [0x100E_0000, 0x0000_1000],\n    [0x1FE0_0000, 0x0000_1000],\n    [0x2000_0000, 0x1000_0000],\n    [0x4000_0000, 0x0002_0000]\n] # [(uint, uint)]\n# PCH-MSI Address\npch-msi-paddr = 0x2ff0_0000 # uint\n# PCH-PIC Address\npch-pic-paddr = 0x1000_0000 # uint\n# End PCI bus number.\npci-bus-end = 0x7f # uint\n# Base physical address of the PCIe ECAM space.\npci-ecam-base = 0x2000_0000 # uint\n# PCI device memory ranges.\npci-ranges = [\n    [0, 0],\n    [0x4000_0000, 0x0002_0000]\n] # [(uint, uint)]\n# RTC (ls7a) Address\nrtc-paddr = 0x100d_0100 # uint\n# Timer interrupt frequency in Hz.\ntimer-frequency = 100_000_000 # uint\n# Timer interrupt number.\ntimer-irq = \"0x8000_0000_0000_000b\" # uint\n# serial@1fe001e0 {\n#     interrupt-parent = <0x00008003>;\n#     interrupts = <0x00000002 0x00000004>;\n#     clock-frequency = <0x05f5e100>;\n#     reg = <0x00000000 0x1fe001e0 0x00000000 0x00000100>;\n#     compatible = \"ns16550a\";\n# };\nuart-paddr = 0x1FE001E0 # uint\n# VirtIO MMIO ranges with format (`base_paddr`, `size`).\nvirtio-mmio-ranges = [] # [(uint, uint)]\n\n#\n# Platform configs\n#\n[plat]\n# Stack size on bootstrapping. (256K)\nboot-stack-size = 0x40000 # uint\n# Kernel address space base.\nkernel-aspace-base = \"0xffff_8000_0000_0000\" # uint\n# Kernel address space size.\nkernel-aspace-size = \"0x0000_7fff_ffff_f000\" # uint\n# Base physical address of the kernel image.\nkernel-base-paddr = 0x8000_0000 # uint\n# Base virtual address of the kernel image.\nkernel-base-vaddr = \"0xffff_8000_8000_0000\" # uint\n# Maximum number of CPUs. For platforms that do not support runtime CPU number\n# detection, it's also the number of CPUs to boot.\nmax-cpu-num = 8 # uint\n# Offset of bus address and phys address. some boards, the bus address is\n# different from the physical address.\nphys-bus-offset = 0 # uint\n# Base address of the whole physical memory.\nphys-memory-base = 0x8000_0000 # uint\n# Size of the whole physical memory. (8G)\nphys-memory-size = 0x2_0000_0000 # uint\n# Linear mapping offset, for quick conversions between physical and virtual\n# addresses.\nphys-virt-offset = \"0xffff_8000_0000_0000\" # uint\n",
+    "environment": {
+      "APP_FEATURES": "qemu",
+      "AX_ARCH": "loongarch64",
+      "AX_GW": "10.0.2.2",
+      "AX_IP": "10.0.2.15",
+      "AX_LOG": "info",
+      "AX_MODE": "release",
+      "AX_PLATFORM": "loongarch64-qemu-virt",
+      "AX_TARGET": "loongarch64-unknown-none-softfloat",
+      "CARGO_ENCODED_RUSTFLAGS": null,
+      "RUSTC": null,
+      "RUSTC_WORKSPACE_WRAPPER": null,
+      "RUSTC_WRAPPER": null,
+      "RUSTFLAGS": "-A unsafe_op_in_unsafe_fn -C link-arg=-T/home/muou/PulseOS/target/loongarch64-unknown-none-softfloat/release/linker_loongarch64-qemu-virt.lds -C link-arg=-no-pie -C link-arg=-znostart-stop-gc"
+    },
+    "linker_script": {
+      "path": "/home/muou/PulseOS/target/loongarch64-unknown-none-softfloat/release/linker_loongarch64-qemu-virt.lds",
+      "sha256": "784a1a834366c388136dfdc3db7d30da2b8069446e39215082931ca335c5ca3c"
+    },
+    "values": {
+      "arch": "loongarch64",
+      "features": "axfeat/defplat axfeat/log-level-info axfeat/bus-pci smp qemu",
+      "mode": "release",
+      "platform": "loongarch64-qemu-virt",
+      "target": "loongarch64-unknown-none-softfloat"
+    }
+  },
+  "format": "pulse-kernel-build-provenance",
+  "format_version": 1,
+  "source": {
+    "commit": "c4ae5d906069f50b8965df32044bf7ae8862a21d",
+    "excluded_directories": [
+      ".git",
+      ".pytest_cache",
+      "__pycache__",
+      "target"
+    ],
+    "external_dependencies": "Cargo.lock identities; cache content not attested",
+    "file_count": 960,
+    "git_worktree_dirty": false,
+    "roots": [
+      ".cargo",
+      "api",
+      "crates",
+      "modules",
+      "platforms",
+      "pulse_core",
+      "pulse_syscalls",
+      "src",
+      "configs",
+      "scripts/make",
+      "Cargo.toml",
+      "Cargo.lock",
+      "Makefile",
+      "rust-toolchain",
+      "rust-toolchain.toml",
+      "scripts/build_provenance.py"
+    ],
+    "tree_sha256": "92fcb82d93bee8fe539d4db1e6585f715536ea470e4765d7a995fe71251991e3"
+  },
+  "started_unix_ns": 1794754390499887969,
+  "toolchain": {
+    "cargo": "cargo 1.101.0-nightly (3d7cf6e93 2026-09-25)",
+    "rustc": "rustc 1.101.0-nightly (c1070d693 2026-09-28)\nbinary: rustc\ncommit-hash: c1070d69382b8d2f2eb65119c738a77d9e324c9e\ncommit-date: 2026-09-28\nhost: x86_64-unknown-linux-gnu\nrelease: 1.101.0-nightly\nLLVM version: 23.1.1"
+  }
+}

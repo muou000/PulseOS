@@ -1,0 +1,12 @@
+{
+  "arch": "riscv64",
+  "suite": "mounts",
+  "passed_assertions": 56,
+  "errors": [
+    "kernel fault or guest assertion failed",
+    "QEMU did not exit normally before deadline",
+    "missing final assertion marker",
+    "missing completed shutdown"
+  ],
+  "kernel_sha256": "9e20933a0b1ad194d90ff741d406f842f79a71a073b272cc7316ab9a8aa2d431"
+}

@@ -1,0 +1,27 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.02s
+     Running unittests src/lib.rs (tests/axfs_mount_host/target/debug/build/axfs-mount-host/fa9f2fa64aa7f37a/out/axfs_mount_host-fa9f2fa64aa7f37a)
+
+running 15 tests
+test tests::busy_parent_unmount_preserves_parent_and_child_records ... ok
+test tests::failed_probe_publishes_no_mount_or_record ... ok
+test tests::competing_probes_publish_exactly_one_mount_and_record ... ok
+test tests::parent_moved_during_probe_records_the_current_mount_path ... ok
+test tests::lazy_bind_subtree_rejection_restores_shadows_and_retry_cleans_records ... ok
+test tests::mount_and_unmount_keep_listing_and_resolution_in_agreement ... ok
+test tests::record_conflict_created_during_probe_rolls_back_the_new_attachment ... ok
+test tests::rejected_move_shadow_update_leaves_no_ghost_and_retry_can_publish ... ok
+test tests::unmounting_a_stacked_bind_preserves_the_lower_record ... ok
+test tests::ordinary_mount_publishes_peer_and_slave_shadow_records ... ok
+test tests::rejected_mount_record_update_restores_the_underlying_directory ... ok
+test tests::rejected_bind_update_leaves_no_mount_and_retry_inherits_readonly ... ok
+test tests::rejected_unmount_record_update_restores_the_same_mount_identity ... ok
+test tests::stale_unmount_cannot_remove_a_replacement_at_the_same_path ... ok
+test tests::duplicate_target_preserves_the_existing_mount ... ok
+
+test result: ok. 15 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests axfs_mount_host
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s

@@ -1,0 +1,22 @@
+   Compiling axfs-mount-host v0.0.0 (/home/muou/PulseOS/tests/axfs_mount_host)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.67s
+     Running unittests src/lib.rs (tests/axfs_mount_host/target/debug/build/axfs-mount-host/fa9f2fa64aa7f37a/out/axfs_mount_host-fa9f2fa64aa7f37a)
+
+running 1 test
+test tests::lazy_bind_subtree_rejection_restores_shadows_and_retry_cleans_records ... FAILED
+
+failures:
+
+---- tests::lazy_bind_subtree_rejection_restores_shadows_and_retry_cleans_records stdout ----
+
+thread 'tests::lazy_bind_subtree_rejection_restores_shadows_and_retry_cleans_records' (734510) panicked at src/tests.rs:123:5:
+assertion failed: mountpoint_is_bind(shadow.mountpoint())
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    tests::lazy_bind_subtree_rejection_restores_shadows_and_retry_cleans_records
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 14 filtered out; finished in 0.00s
+
+error: test failed, to rerun pass `--lib`
