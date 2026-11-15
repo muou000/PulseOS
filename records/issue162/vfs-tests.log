@@ -1,0 +1,85 @@
+warning: `package.homepage` is redundant with `package.repository`
+  --> modules/axcpu/Cargo.toml:34:12
+   |
+34 | homepage = "https://github.com/arceos-org/axcpu"
+   |            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+50 | repository = "https://github.com/arceos-org/axcpu"
+   |              -------------------------------------
+   |
+   = note: `cargo::redundant_homepage` is set to `warn` by default
+help: consider removing `package.homepage`
+warning: `axcpu` (manifest) generated 1 warning
+warning: `package.homepage` is redundant with `package.repository`
+   --> Cargo.toml:204:1
+    |
+204 | homepage.workspace = true
+    | ^^^^^^^^
+205 | repository.workspace = true
+    | ----------
+    |
+    = note: `cargo::redundant_homepage` is set to `warn` by default
+help: consider removing `package.homepage`
+warning: `Pulse` (manifest) generated 1 warning
+warning: `package.homepage` is redundant with `package.repository`
+ --> pulse_syscalls/Cargo.toml:7:1
+  |
+7 | homepage.workspace = true
+  | ^^^^^^^^
+8 | repository.workspace = true
+  | ----------
+  |
+  = note: `cargo::redundant_homepage` is set to `warn` by default
+help: consider removing `package.homepage`
+warning: `pulse_syscalls` (manifest) generated 1 warning
+warning: `package.homepage` is redundant with `package.repository`
+ --> crates/pulse_bpf_schema/Cargo.toml:7:1
+  |
+7 | homepage.workspace = true
+  | ^^^^^^^^
+8 | repository.workspace = true
+  | ----------
+  |
+  = note: `cargo::redundant_homepage` is set to `warn` by default
+help: consider removing `package.homepage`
+warning: `pulse_bpf_schema` (manifest) generated 1 warning
+warning: `package.homepage` is redundant with `package.repository`
+ --> pulse_core/Cargo.toml:7:1
+  |
+7 | homepage.workspace = true
+  | ^^^^^^^^
+8 | repository.workspace = true
+  | ----------
+  |
+  = note: `cargo::redundant_homepage` is set to `warn` by default
+help: consider removing `package.homepage`
+warning: `pulse_core` (manifest) generated 1 warning
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.10s
+     Running unittests src/lib.rs (target/debug/build/axfs-ng-vfs/e85d180e2d7c29ae/out/axfs_ng_vfs-e85d180e2d7c29ae)
+
+running 23 tests
+test mount::tests::bind_and_shadow_reject_stale_paths_before_bookkeeping ... ok
+test mount::tests::mount_rejects_a_path_snapshot_invalidated_by_parent_move ... ok
+test mount::tests::move_rejects_changed_source_and_destination_ancestors_before_commit ... ok
+test mount::tests::mount_bind_and_shared_slave_propagation_remain_intact ... ok
+test mount::tests::rejected_bind_commit_restores_the_underlying_directory_and_peer_group ... ok
+test mount::tests::rejected_lazy_unmount_restores_the_complete_subtree ... ok
+test mount::tests::stacked_mounts_and_unmount_all_preserve_consistent_topology ... ok
+test node::dir::tests::backend_lookup_does_not_hold_cache_lock_while_pending ... ok
+test node::dir::tests::cache_access_waits_for_contended_lock ... ok
+test mount::tests::move_mount_rejects_invalid_and_busy_transitions_without_partial_mutation ... ok
+test mount::tests::rejected_unmount_commit_preserves_mount_identity_and_path ... ok
+test node::tests::type_map_insert_replaces_existing_value ... ok
+test mount::tests::rejected_mount_commit_restores_the_underlying_directory ... ok
+test mount::tests::unwinding_bookkeeping_restores_topology_before_unlock ... ok
+test node::dir::tests::forget_waits_for_and_clears_contended_descendants ... ok
+test path::test::test_back_components ... ok
+test mount::tests::shadow_commit_cannot_repurpose_an_existing_attachment ... ok
+test mount::tests::unwinding_bind_and_shadow_commits_restore_topology ... ok
+test path::test::test_file_name ... ok
+test mount::tests::rejected_move_commit_preserves_stack_and_subtree_and_can_retry ... ok
+test mount::tests::concurrent_resolver_never_observes_a_rejected_unmount ... ok
+test mount::tests::rejected_and_unwinding_moves_never_disappear_from_concurrent_resolution ... ok
+test mount::tests::concurrent_move_mount_versus_resolve_preserves_topology_invariants ... ok
+
+test result: ok. 23 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.05s

@@ -1,0 +1,31 @@
+{
+  "qemu": [
+    "qemu-system-loongarch64",
+    "-machine",
+    "virt",
+    "-kernel",
+    "/home/muou/PulseOS/PulseOS_loongarch64-qemu-virt.elf",
+    "-m",
+    "8G",
+    "-nographic",
+    "-smp",
+    "8",
+    "-drive",
+    "file=/home/muou/PulseOS/records/issue162-final-la/rootfs.img,if=none,format=raw,id=x0,snapshot=on",
+    "-device",
+    "virtio-blk-pci,drive=x0",
+    "-no-reboot",
+    "-device",
+    "virtio-net-pci,netdev=net0",
+    "-netdev",
+    "user,id=net0",
+    "-rtc",
+    "base=utc",
+    "-monitor",
+    "none",
+    "-serial",
+    "stdio"
+  ],
+  "kernel_sha256": "32ba0ca671d5e30bd7141790a11375a4c031886fc0055a899b7475a2aafc4ad6",
+  "shell": "exec /user-abi-mounts-probe\n"
+}

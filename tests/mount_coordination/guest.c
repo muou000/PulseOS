@@ -1,4 +1,4 @@
-/* Mount coordination regressions for #160 and #161 (RV64 and LA64). */
+/* Mount coordination regressions for #160, #161 and #162 (RV64 and LA64). */
 typedef unsigned long usize;
 enum {
     SYS_mkdirat = 34, SYS_umount2 = 39, SYS_mount = 40, SYS_openat = 56,
@@ -6,7 +6,8 @@ enum {
     SYS_reboot = 142,
     ENOENT = 2, EBUSY = 16, EINVAL = 22, EROFS = 30,
     AT_FDCWD = -100, O_CREAT = 64, O_EXCL = 128, O_RDWR = 2,
-    MS_RDONLY = 1, MS_BIND = 4096, MS_SLAVE = 1 << 19, MS_SHARED = 1 << 20,
+    MS_RDONLY = 1, MS_BIND = 4096, MS_MOVE = 8192,
+    MS_SLAVE = 1 << 19, MS_SHARED = 1 << 20,
     MNT_DETACH = 2,
 };
 
@@ -152,6 +153,63 @@ static void readonly_bind(void)
     expect("readonly-source-record-removed", mount_rows(source), 0);
 }
 
+static void move_stacked_subtree(void)
+{
+    const char *source = "/tmp/pulse-mount162-source";
+    const char *stack = "/tmp/pulse-mount162-stack";
+    const char *destination = "/tmp/pulse-mount162-moved";
+    const char *source_child = "/tmp/pulse-mount162-source/child";
+    const char *stack_child = "/tmp/pulse-mount162-stack/child";
+    const char *moved_child = "/tmp/pulse-mount162-moved/child";
+    expect("mkdir-move-source", CALL(SYS_mkdirat, AT_FDCWD, source, 0755), 0);
+    expect("mkdir-move-stack", CALL(SYS_mkdirat, AT_FDCWD, stack, 0755), 0);
+    expect("mkdir-move-destination", CALL(SYS_mkdirat, AT_FDCWD, destination, 0755), 0);
+    expect("mount-move-source", CALL5(SYS_mount, "source162", source, "tmpfs", 0, 0), 0);
+    expect("mount-move-lower", CALL5(SYS_mount, "lower162", stack, "tmpfs", 0, 0), 0);
+    create_file("/tmp/pulse-mount162-source/value", 'U');
+    create_file("/tmp/pulse-mount162-stack/value", 'L');
+    expect("mkdir-move-source-child", CALL(SYS_mkdirat, AT_FDCWD, source_child, 0755), 0);
+    expect("mkdir-move-lower-child", CALL(SYS_mkdirat, AT_FDCWD, stack_child, 0755), 0);
+    expect("mount-move-source-child", CALL5(SYS_mount, "upper-child162", source_child, "tmpfs", 0, 0), 0);
+    expect("mount-move-lower-child", CALL5(SYS_mount, "lower-child162", stack_child, "tmpfs", 0, 0), 0);
+    create_file("/tmp/pulse-mount162-source/child/value", 'u');
+    create_file("/tmp/pulse-mount162-stack/child/value", 'l');
+    expect("stack-move-bind", CALL5(SYS_mount, source, stack, 0, MS_BIND, 0), 0);
+    expect("stack-has-two-root-rows", mount_rows(stack), 2);
+    expect("stack-has-two-child-rows", mount_rows(stack_child), 2);
+
+    /* Moving the upper subtree must leave the lower stack's records in place. */
+    expect("move-upper-subtree", CALL5(SYS_mount, stack, destination, 0, MS_MOVE, 0), 0);
+    expect("move-retains-lower-root-row", mount_rows(stack), 1);
+    expect("move-retains-lower-child-row", mount_rows(stack_child), 1);
+    expect("move-has-one-root-row", mount_rows(destination), 1);
+    expect("move-has-one-child-row", mount_rows(moved_child), 1);
+    expect("move-retains-bind-identity", mount_rows_matching(destination, "bind"), 1);
+    expect("move-exposes-lower-content", read_byte("/tmp/pulse-mount162-stack/value"), 'L');
+    expect("move-exposes-lower-child-content", read_byte("/tmp/pulse-mount162-stack/child/value"), 'l');
+    expect("move-preserves-upper-content", read_byte("/tmp/pulse-mount162-moved/value"), 'U');
+    expect("move-preserves-upper-child-content", read_byte("/tmp/pulse-mount162-moved/child/value"), 'u');
+    expect("move-source-child-record-retained", mount_rows(source_child), 1);
+
+    expect("moved-parent-with-child-busy", CALL(SYS_umount2, destination, 0, 0), -EBUSY);
+    expect("busy-moved-parent-row-retained", mount_rows(destination), 1);
+    expect("busy-moved-child-row-retained", mount_rows(moved_child), 1);
+    expect("unmount-moved-child", CALL(SYS_umount2, moved_child, 0, 0), 0);
+    expect("unmount-moved-child-row-removed", mount_rows(moved_child), 0);
+    expect("unmount-moved-child-again", CALL(SYS_umount2, moved_child, 0, 0), -EINVAL);
+    expect("unmount-moved-parent", CALL(SYS_umount2, destination, 0, 0), 0);
+    expect("unmount-moved-parent-row-removed", mount_rows(destination), 0);
+    expect("unmount-moved-parent-again", CALL(SYS_umount2, destination, 0, 0), -EINVAL);
+    expect("detach-lower-subtree", CALL(SYS_umount2, stack, MNT_DETACH, 0), 0);
+    expect("detach-lower-root-row-removed", mount_rows(stack), 0);
+    expect("detach-lower-child-row-removed", mount_rows(stack_child), 0);
+    expect("detach-lower-again", CALL(SYS_umount2, stack, MNT_DETACH, 0), -EINVAL);
+    expect("move-bind-source-still-readable", read_byte("/tmp/pulse-mount162-source/child/value"), 'u');
+    expect("detach-move-source", CALL(SYS_umount2, source, MNT_DETACH, 0), 0);
+    expect("detach-move-source-root-row-removed", mount_rows(source), 0);
+    expect("detach-move-source-child-row-removed", mount_rows(source_child), 0);
+}
+
 static void propagated_mounts(void)
 {
     const char *parents[] = {
@@ -214,12 +272,14 @@ static void propagated_mounts(void)
     for (usize i = 0; i < 3; ++i) {
         expect("normal-nested-shadow-record-removed", mount_rows(nested[i]), 0);
         expect("normal-nested-shadow-content-removed", CALL4(SYS_openat, AT_FDCWD, nested_payloads[i], 0, 0), -ENOENT);
+        expect("normal-nested-shadow-unmount-again", CALL(SYS_umount2, nested[i], 0, 0), -EINVAL);
     }
     expect("source-child-record-retained", mount_rows(source_child), 1);
     expect("normal-unmount-propagated-bind", CALL(SYS_umount2, slots[0], 0, 0), 0);
     for (usize i = 0; i < 3; ++i) {
         expect("normal-shadow-record-removed", mount_rows(slots[i]), 0);
         expect("normal-shadow-content-removed", CALL4(SYS_openat, AT_FDCWD, payloads[i], 0, 0), -ENOENT);
+        expect("normal-shadow-unmount-again", CALL(SYS_umount2, slots[i], 0, 0), -EINVAL);
     }
 
     /* A slave receives events but does not publish them back to its master. */
@@ -245,6 +305,34 @@ static void propagated_mounts(void)
     for (usize i = 0; i < 3; ++i)
         expect("ordinary-shadow-record-removed", mount_rows(ordinary[i]), 0);
 
+    /* A moved subtree also receives peer/slave shadows and coordinated cleanup. */
+    const char *moving = "/tmp/pulse-mount162-propagation";
+    const char *moving_child = "/tmp/pulse-mount162-propagation/child";
+    expect("mkdir-propagated-move-source", CALL(SYS_mkdirat, AT_FDCWD, moving, 0755), 0);
+    expect("mount-propagated-move-source", CALL5(SYS_mount, "moving162", moving, "tmpfs", 0, 0), 0);
+    create_file("/tmp/pulse-mount162-propagation/value", 'M');
+    expect("mkdir-propagated-move-child", CALL(SYS_mkdirat, AT_FDCWD, moving_child, 0755), 0);
+    expect("mount-propagated-move-child", CALL5(SYS_mount, "moving-child162", moving_child, "tmpfs", 0, 0), 0);
+    create_file("/tmp/pulse-mount162-propagation/child/value", 'C');
+    expect("move-subtree-under-shared-parent", CALL5(SYS_mount, moving, slots[0], 0, MS_MOVE, 0), 0);
+    expect("propagated-move-old-root-row-removed", mount_rows(moving), 0);
+    expect("propagated-move-old-child-row-removed", mount_rows(moving_child), 0);
+    expect("propagated-move-old-content-removed", CALL4(SYS_openat, AT_FDCWD,
+           "/tmp/pulse-mount162-propagation/value", 0, 0), -ENOENT);
+    for (usize i = 0; i < 3; ++i) {
+        expect("propagated-move-root-row", mount_rows(slots[i]), 1);
+        expect("propagated-move-child-row", mount_rows(nested[i]), 1);
+        expect("propagated-move-root-content", read_byte(payloads[i]), 'M');
+        expect("propagated-move-child-content", read_byte(nested_payloads[i]), 'C');
+    }
+    expect("lazy-detach-propagated-move", CALL(SYS_umount2, slots[0], MNT_DETACH, 0), 0);
+    for (usize i = 0; i < 3; ++i) {
+        expect("detached-move-root-row-removed", mount_rows(slots[i]), 0);
+        expect("detached-move-child-row-removed", mount_rows(nested[i]), 0);
+        expect("detached-move-content-removed", CALL4(SYS_openat, AT_FDCWD, payloads[i], 0, 0), -ENOENT);
+        expect("detached-move-unmount-again", CALL(SYS_umount2, slots[i], MNT_DETACH, 0), -EINVAL);
+    }
+
     /* Detaching a subtree must remove every primary and shadow listing row. */
     expect("bind-subtree-for-lazy-detach", CALL5(SYS_mount, source, slots[0], 0, MS_BIND, 0), 0);
     for (usize i = 0; i < 3; ++i) {
@@ -256,6 +344,7 @@ static void propagated_mounts(void)
         expect("lazy-shadow-record-removed", mount_rows(slots[i]), 0);
         expect("lazy-nested-shadow-record-removed", mount_rows(nested[i]), 0);
         expect("lazy-shadow-content-removed", CALL4(SYS_openat, AT_FDCWD, payloads[i], 0, 0), -ENOENT);
+        expect("lazy-shadow-unmount-again", CALL(SYS_umount2, slots[i], MNT_DETACH, 0), -EINVAL);
     }
     expect("source-child-survives-shadow-cleanup", read_byte("/tmp/pulse-mount161-source/child/value"), 'N');
     expect("cleanup-source-child", CALL(SYS_umount2, source_child, 0, 0), 0);
@@ -306,6 +395,7 @@ __attribute__((noreturn)) void _start(void)
     expect("second-unmount-invalid", CALL(SYS_umount2, target, 0, 0), -EINVAL);
 
     readonly_bind();
+    move_stacked_subtree();
     propagated_mounts();
 
     text("ABI_MOUNTS_PASS\n");
