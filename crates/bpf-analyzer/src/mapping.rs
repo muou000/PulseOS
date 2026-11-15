@@ -5,6 +5,13 @@ use bpf_capture::mapping::{
 };
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ResolvedTask {
+    pub space: u64,
+    pub exec: u64,
+    pub class: TaskClass,
+    pub comm: String,
+}
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ResolvedMapping {
     pub task: u64,
     pub space: u64,
@@ -73,14 +80,16 @@ impl MappingTimeline {
         }
         Ok(())
     }
-    pub fn lookup(
+    /// Resolve a stable task at the observation time without requiring a user IP.
+    /// Kernel-mode samples need the same lifetime and transition checks as user
+    /// samples before perf can safely attach a historical COMM to their PID/TID.
+    pub fn task_identity(
         &self,
         task: u64,
         pid: u32,
         tid: u32,
         time: u64,
-        ip: u64,
-    ) -> Result<ResolvedMapping, &'static str> {
+    ) -> Result<ResolvedTask, &'static str> {
         if self.journal.dropped != 0 {
             return Err("mapping journal loss");
         }
@@ -155,6 +164,27 @@ impl MappingTimeline {
         if pid != record_pid || tid != record_tid {
             return Err("sample task identity mismatch");
         }
+        Ok(ResolvedTask {
+            space,
+            exec,
+            class,
+            comm: comm.into(),
+        })
+    }
+    pub fn lookup(
+        &self,
+        task: u64,
+        pid: u32,
+        tid: u32,
+        time: u64,
+        ip: u64,
+    ) -> Result<ResolvedMapping, &'static str> {
+        let ResolvedTask {
+            space,
+            exec,
+            class,
+            comm,
+        } = self.task_identity(task, pid, tid, time)?;
         if class != TaskClass::User || space == 0 {
             return Err("user address space unavailable");
         }
@@ -252,7 +282,7 @@ impl MappingTimeline {
             space,
             exec,
             class,
-            comm: comm.into(),
+            comm,
             mapping: mapping.clone(),
             file_offset,
             sha256,
@@ -278,9 +308,14 @@ pub fn render_report(
     let mut mapped = 0;
     let mut resolved = 0;
     for event in events {
-        let (pc, mode) = match event.payload {
-            EventPayload::SoftwareSampleV2 { pc, mode, .. }
-            | EventPayload::SoftwareStackV3 { pc, mode, .. } => (pc, mode),
+        let (pc, mode, source_id) = match event.payload {
+            EventPayload::SoftwareSampleV2 { pc, mode, .. } => (pc, mode, None),
+            EventPayload::SoftwareStackV3 {
+                pc,
+                mode,
+                source_id,
+                ..
+            } => (pc, mode, Some(source_id)),
             _ => continue,
         };
         let mut association = None;
@@ -386,7 +421,7 @@ pub fn render_report(
         };
         rows.push(format!(
             "{{\"timestamp_ns\":{},\"cpu\":{},\"task\":{},\"pid\":{},\"tid\":{},\"ip\":{},\"mode\"\
-             :{},\"mapping\":{},\"elf\":{},\"unknown_reason\":{}}}",
+             :{},\"source_id\":{},\"mapping\":{},\"elf\":{},\"unknown_reason\":{}}}",
             event.timestamp_ns,
             event.cpu_id,
             event.task_id,
@@ -394,6 +429,9 @@ pub fn render_report(
             event.tid,
             pc,
             mode,
+            source_id
+                .map(|id| id.to_string())
+                .unwrap_or_else(|| "null".into()),
             identity,
             symbol,
             error
