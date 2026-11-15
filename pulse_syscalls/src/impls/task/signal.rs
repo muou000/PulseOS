@@ -180,7 +180,8 @@ pub fn sys_rt_sigpending(set: usize, sigsetsize: usize) -> isize {
     };
     let process = thread.process();
     let blocked_pending = thread.signal().pending_mask() & thread.signal_blocked_mask();
-    match process.write_user_bytes(set, &blocked_pending.to_ne_bytes()[..sigsetsize]) {
+    let bytes = pulse_user_abi::encode_to_buffer(&blocked_pending);
+    match process.write_user_bytes(set, &bytes[..sigsetsize]) {
         Ok(()) => 0,
         Err(_) => -LinuxError::EFAULT.code() as isize,
     }
