@@ -1,6 +1,9 @@
 use axerrno::LinuxError;
 use linux_raw_sys::{
-    general::{_NSIG, CAP_SYS_PTRACE, O_NONBLOCK, SI_TKILL, SI_USER, siginfo},
+    general::{
+        _NSIG, CAP_SYS_PTRACE, O_NONBLOCK, SIGINT, SIGPWR, SIGTERM, SIGUSR1, SIGUSR2,
+        SI_TKILL, SI_USER, siginfo,
+    },
     prctl::{
         PR_GET_DUMPABLE, PR_GET_NAME, PR_GET_PDEATHSIG, PR_SET_DUMPABLE, PR_SET_NAME,
         PR_SET_PDEATHSIG,
@@ -11,6 +14,7 @@ use pulse_core::task::{
     queue_signal_to_process_with_info, queue_signal_to_process_with_info_strict,
     queue_signal_to_thread_with_info, queue_signal_to_thread_with_info_strict, Process, SIGRTMIN,
 };
+use crate::validation::system::RebootAction;
 
 const SIGINFO_SIZE: usize = 128;
 const _: [(); SIGINFO_SIZE] = [(); core::mem::size_of::<siginfo>()];
@@ -219,6 +223,25 @@ pub fn sys_kill(pid: isize, sig: isize) -> isize {
 
     if sig == 0 {
         return 0;
+    }
+
+    // PulseOS boots a shell as init, so provide BusyBox's init notification
+    // protocol here. Only an explicit kill(1, sig) is a power request: group
+    // signals (including terminal Ctrl-C) retain ordinary signal semantics.
+    // can_signal above is the authorization boundary, as with a userspace
+    // init; reboot(2) independently requires CAP_SYS_BOOT.
+    if pid == 1 {
+        let action = match sig as u32 {
+            SIGUSR1 | SIGPWR => Some(RebootAction::Halt),
+            SIGUSR2 => Some(RebootAction::PowerOff),
+            SIGTERM | SIGINT => Some(RebootAction::Restart),
+            _ => None,
+        };
+        if let Some(action) = action {
+            // On writeback/reset failure, return the error without queuing a
+            // signal that could terminate the init shell.
+            return crate::impls::perform_reboot_action(action);
+        }
     }
 
     let info = make_user_signal_info(sig, SI_USER as i32, caller.pid(), caller.ruid());

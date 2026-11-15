@@ -92,13 +92,14 @@ impl Deref for ThreadHandle {
 }
 
 impl Thread {
-    pub fn new(process: Arc<Process>, tid: u64) -> Arc<Self> {
+    /// Creates a logical user thread bound to an immutable scheduler task ID.
+    pub fn new(process: Arc<Process>, tid: u64, task_id: u64) -> Arc<Self> {
         Arc::new(Self {
             tid: AtomicU64::new(tid),
             signal: ThreadSignal::new(process.signal_shared()),
             process_weak: Arc::downgrade(&process),
             sampling_pid: process.pid(),
-            sampling_task_id: tid,
+            sampling_task_id: task_id,
             sampling_clock: Mutex::new(super::sampling_clock::OnCpuClock::new()),
             exec_exit_requested: AtomicBool::new(false),
             clear_child_tid: AtomicUsize::new(0),
