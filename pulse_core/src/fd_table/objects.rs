@@ -27,6 +27,18 @@ impl FileObject {
         &self.inner
     }
 
+    pub fn supports_file_io(&self) -> bool {
+        self.inner.supports_file_io()
+    }
+
+    pub fn begin_read_io(&self, offset: Option<u64>) -> LinuxResult<axfs::FileIo<'_>> {
+        Ok(axtask::future::block_on(self.inner.begin_read_io(offset))?)
+    }
+
+    pub fn begin_write_io(&self, offset: Option<u64>) -> LinuxResult<axfs::FileIo<'_>> {
+        Ok(axtask::future::block_on(self.inner.begin_write_io(offset))?)
+    }
+
     /// Writes a slice whose backing storage remains valid until this method
     /// returns. Syscall callers use a user-frame pin guard before selecting
     /// this path.

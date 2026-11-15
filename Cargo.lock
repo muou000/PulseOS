@@ -2122,6 +2122,7 @@ version = "0.1.0"
 dependencies = [
  "axalloc",
  "axconfig",
+ "axcpu",
  "axerrno",
  "axfs",
  "axfs-ng-vfs",

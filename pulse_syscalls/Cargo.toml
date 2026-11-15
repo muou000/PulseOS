@@ -14,6 +14,7 @@ ext4 = ["axfs/ext4"]
 bpf-trace = ["axtask/bpf-trace", "pulse_core/bpf-trace"]
 mapping-lifecycle-test = ["axfs/mapping-lifecycle-test"]
 guest-checks = []
+file-io-test = ["axfs/file-io-test"]
 
 [dependencies]
 axerrno.workspace = true
@@ -23,6 +24,7 @@ pulse_user_abi.workspace = true
 spin.workspace = true
 
 [target.'cfg(target_os = "none")'.dependencies]
+axcpu.workspace = true
 axalloc.workspace = true
 axmm.workspace = true
 axhal.workspace = true

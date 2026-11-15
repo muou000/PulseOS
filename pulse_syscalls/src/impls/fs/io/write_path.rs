@@ -51,6 +51,11 @@ pub(crate) fn prepare_write(
         },
     )?;
 
+    // The ordinary-file path validates alignment against the position owned
+    // by its one I/O transaction, rather than a separate seek snapshot.
+    if file_obj.is_some_and(FileObject::supports_file_io) {
+        return Ok(total);
+    }
     let Some(file_obj) = file_obj.filter(|file| file.inner().is_direct_regular_file()) else {
         return Ok(total);
     };
@@ -96,6 +101,9 @@ pub(crate) fn execute_user_write(
     mut on_written: impl FnMut(&[u8]),
     mut on_transfer: impl FnMut(WriteTransfer),
 ) -> isize {
+    if let Some(file) = file_obj.filter(|file| file.supports_file_io()) {
+        return super::regular::write(file, segments, offset, &mut on_written);
+    }
     let sigpipe_writer = is_sigpipe_writer(object);
     let mut total = 0usize;
 

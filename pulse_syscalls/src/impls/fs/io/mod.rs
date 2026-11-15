@@ -29,6 +29,7 @@ use crate::{
 mod descriptor;
 mod markers;
 mod readiness;
+mod regular;
 mod scalar;
 mod support;
 mod transfer;

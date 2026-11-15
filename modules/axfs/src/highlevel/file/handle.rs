@@ -1,6 +1,6 @@
 use super::{
     cache::{
-        append_slice_source_async, append_source_async, shared_file_state_async,
+        FileWriteGuard, append_slice_source_async, append_source_async, shared_file_state_async,
         write_slice_source_at_async, write_source_at_async,
     },
     *,
@@ -17,57 +17,6 @@ const ACCESS_FLAG_MTIME: u8 = 2;
 #[inline]
 fn has_pending_timestamp_updates(flags: u8) -> bool {
     flags != 0
-}
-
-/// A file position lock that leaves queued async operations ahead of the
-/// resident-read fast path. The async mutex alone cannot expose its waiter
-/// state to `try_lock` callers.
-struct FilePosition {
-    value: async_lock::Mutex<u64>,
-    waiters: AtomicUsize,
-}
-
-struct PositionWaiter<'a>(&'a AtomicUsize);
-
-impl Drop for PositionWaiter<'_> {
-    fn drop(&mut self) {
-        self.0.fetch_sub(1, Ordering::AcqRel);
-    }
-}
-
-impl FilePosition {
-    fn new(value: u64) -> Self {
-        Self {
-            value: async_lock::Mutex::new(value),
-            waiters: AtomicUsize::new(0),
-        }
-    }
-
-    fn try_lock(&self) -> Option<async_lock::MutexGuard<'_, u64>> {
-        if self.waiters.load(Ordering::Acquire) != 0 {
-            return None;
-        }
-        let guard = self.value.try_lock()?;
-        if self.waiters.load(Ordering::Acquire) != 0 {
-            drop(guard);
-            return None;
-        }
-        Some(guard)
-    }
-
-    async fn lock(&self) -> async_lock::MutexGuard<'_, u64> {
-        if let Some(guard) = self.try_lock() {
-            return guard;
-        }
-
-        self.waiters.fetch_add(1, Ordering::AcqRel);
-        // The RAII token also decrements the count if an enclosing file future
-        // is cancelled while this mutex acquisition is pending.
-        let waiter = PositionWaiter(&self.waiters);
-        let guard = self.value.lock().await;
-        drop(waiter);
-        guard
-    }
 }
 
 async fn extend_backend_to_cached_size(file: &FileNode, cached_size: u64) -> VfsResult<()> {
@@ -98,6 +47,8 @@ async fn read_source_at_async<W: Write + IoBufMut>(
         if read > wanted {
             return Err(VfsError::Io);
         }
+        #[cfg(feature = "file-io-test")]
+        super::io_test::staged_bytes(read);
 
         let mut copied = 0usize;
         while copied < read {
@@ -123,6 +74,30 @@ pub enum FileBackend {
 }
 
 impl FileBackend {
+    async fn begin_write_operation(&self, exclusive: bool) -> VfsResult<Option<FileWriteGuard>> {
+        match self {
+            Self::Cached(cached) => Ok(Some(cached.begin_write_operation(exclusive).await)),
+            Self::Direct(loc) => {
+                if !node_allows_page_cache(loc.flags()) || loc.flags().contains(NodeFlags::STREAM) {
+                    return Ok(None);
+                }
+                let shared = shared_file_state_async(loc).await?;
+                Ok(Some(shared.begin_write_operation(exclusive).await))
+            }
+        }
+    }
+
+    async fn append_offset(&self) -> VfsResult<u64> {
+        match self {
+            Self::Cached(cached) => Ok(cached.append_offset()),
+            Self::Direct(loc) => {
+                let file = loc.entry().as_file()?;
+                let shared = shared_file_state_async(loc).await?;
+                Ok(shared.size().max(file.len().await?))
+            }
+        }
+    }
+
     pub(crate) fn new_direct(location: Location) -> Self {
         Self::Direct(location)
     }
@@ -157,6 +132,42 @@ impl FileBackend {
         }
     }
 
+    /// Fills a stable kernel slice, avoiding a second staging allocation in
+    /// direct I/O. Advancing the slice also retains cached-read partial progress
+    /// when a later page fill fails.
+    async fn read_at_slice_in_operation(
+        &self,
+        dst: &mut &mut [u8],
+        offset: u64,
+    ) -> VfsResult<usize> {
+        match self {
+            Self::Cached(cached) => cached.read_at_async(dst, offset).await,
+            Self::Direct(loc) => {
+                let file = loc.entry().as_file()?;
+                let requested = dst.len();
+                let read = if node_allows_page_cache(loc.flags())
+                    && !loc.flags().contains(NodeFlags::STREAM)
+                {
+                    let shared = shared_file_state_async(loc).await?;
+                    let _guard = shared.io_lock.write().await;
+                    extend_backend_to_cached_size(file, shared.size()).await?;
+                    shared
+                        .flush_dirty_range_async(file, offset, requested)
+                        .await?;
+                    file.read_at(dst, offset).await?
+                } else {
+                    file.read_at(dst, offset).await?
+                };
+                if read > requested {
+                    return Err(VfsError::Io);
+                }
+                let remaining = core::mem::take(dst);
+                *dst = &mut remaining[read..];
+                Ok(read)
+            }
+        }
+    }
+
     /// Tries to serve a read without suspending. `None` preserves the normal
     /// async path for direct I/O, cache misses, and contended cache state.
     pub fn try_read_at_resident(
@@ -170,9 +181,18 @@ impl FileBackend {
         }
     }
 
-    pub async fn write_at(&self, mut src: impl Read + IoBuf, offset: u64) -> VfsResult<usize> {
+    pub async fn write_at(&self, src: impl Read + IoBuf, offset: u64) -> VfsResult<usize> {
+        let _operation = self.begin_write_operation(false).await?;
+        self.write_at_in_operation(src, offset).await
+    }
+
+    async fn write_at_in_operation(
+        &self,
+        mut src: impl Read + IoBuf,
+        offset: u64,
+    ) -> VfsResult<usize> {
         match self {
-            Self::Cached(cached) => cached.write_at_async(src, offset).await,
+            Self::Cached(cached) => cached.write_at_in_operation(src, offset).await,
             Self::Direct(loc) => {
                 let file = loc.entry().as_file()?;
                 let node_flags = loc.flags();
@@ -203,6 +223,7 @@ impl FileBackend {
                     match (result, invalidate) {
                         (Ok(written), Ok(())) => Ok(written),
                         (Err(err), Ok(())) => Err(err),
+                        (Ok(written), Err(_)) if written != 0 => Ok(written),
                         (Ok(_), Err(err)) => Err(err),
                         (Err(err), Err(_)) => Err(err),
                     }
@@ -212,8 +233,13 @@ impl FileBackend {
     }
 
     pub async fn write_at_slice(&self, src: &[u8], offset: u64) -> VfsResult<usize> {
+        let _operation = self.begin_write_operation(false).await?;
+        self.write_at_slice_in_operation(src, offset).await
+    }
+
+    async fn write_at_slice_in_operation(&self, src: &[u8], offset: u64) -> VfsResult<usize> {
         match self {
-            Self::Cached(cached) => cached.write_at_slice_async(src, offset).await,
+            Self::Cached(cached) => cached.write_at_slice_in_operation(src, offset).await,
             Self::Direct(loc) => {
                 let file = loc.entry().as_file()?;
                 let node_flags = loc.flags();
@@ -245,6 +271,7 @@ impl FileBackend {
                 match (result, invalidate) {
                     (Ok(written), Ok(())) => Ok(written),
                     (Err(err), Ok(())) => Err(err),
+                    (Ok(written), Err(_)) if written != 0 => Ok(written),
                     (Ok(_), Err(err)) => Err(err),
                     (Err(err), Err(_)) => Err(err),
                 }
@@ -263,6 +290,7 @@ impl FileBackend {
 
                 let requested = src.remaining();
                 let shared = shared_file_state_async(loc).await?;
+                let _operation = shared.begin_write_operation(true).await;
                 let _guard = shared.io_lock.write().await;
                 let cached_size = shared.size();
                 let backend_size = file.len().await?;
@@ -306,6 +334,7 @@ impl FileBackend {
 
                 let requested = src.len();
                 let shared = shared_file_state_async(loc).await?;
+                let _operation = shared.begin_write_operation(true).await;
                 let _guard = shared.io_lock.write().await;
                 let cached_size = shared.size();
                 let backend_size = file.len().await?;
@@ -375,6 +404,7 @@ impl FileBackend {
                 }
 
                 let shared = shared_file_state_async(loc).await?;
+                let _operation = shared.begin_write_operation(true).await;
                 let _guard = shared.io_lock.write().await;
                 shared.flush_dirty_pages_async(file).await?;
                 file.set_len(len).await?;
@@ -411,7 +441,266 @@ pub struct File {
     access_flags: AtomicU8,
 }
 
+/// One regular-file I/O operation spanning bounded, separately prepared user
+/// buffer windows. The position and write-operation guards remain held until
+/// this value is dropped. Cache/page-access guards exist only inside each
+/// transfer, so preparing a subsequent window can fault from the same file.
+pub struct FileIo<'a> {
+    file: &'a File,
+    position: IoPosition<'a>,
+    write: bool,
+    _write_operation: Option<FileWriteGuard>,
+    // Reused across bounded user windows. SG sources cannot expose Rust slice
+    // references over memory that another user thread may concurrently change.
+    staging: Vec<u8>,
+}
+
+impl FileIo<'_> {
+    pub fn current_offset(&self) -> u64 {
+        self.position.offset()
+    }
+
+    /// Offset used by existing direct-I/O validation: the original shared or
+    /// explicit position, even when APPEND subsequently selects a different EOF.
+    pub fn validation_offset(&self) -> u64 {
+        self.position.validation_offset()
+    }
+
+    fn check_length(&self, requested: usize) -> VfsResult<()> {
+        self.current_offset()
+            .checked_add(requested as u64)
+            .ok_or(VfsError::InvalidInput)?;
+        Ok(())
+    }
+
+    fn completed(&mut self, count: usize) -> VfsResult<usize> {
+        self.position.advance(count).ok_or(VfsError::InvalidInput)?;
+        #[cfg(feature = "times")]
+        if count != 0 {
+            self.file.access_flags.fetch_or(
+                if self.write {
+                    ACCESS_FLAG_MTIME
+                } else {
+                    ACCESS_FLAG_ATIME
+                },
+                Ordering::AcqRel,
+            );
+        }
+        Ok(count)
+    }
+
+    fn prepare_staging(&mut self, requested: usize) -> VfsResult<()> {
+        let wanted = requested.min(DIRECT_IO_STAGING_SIZE);
+        if self.staging.len() < wanted {
+            self.staging
+                .try_reserve_exact(wanted - self.staging.len())
+                .map_err(|_| VfsError::NoMemory)?;
+            self.staging.resize(wanted, 0);
+        }
+        Ok(())
+    }
+
+    pub async fn read<W: Write + IoBufMut>(&mut self, dst: &mut W) -> VfsResult<usize> {
+        if self.write {
+            return Err(VfsError::BadFileDescriptor);
+        }
+        self.file.access(FileFlags::READ)?;
+        let requested = dst.remaining_mut();
+        self.check_length(requested)?;
+        if requested == 0 {
+            return Ok(0);
+        }
+        self.prepare_staging(requested)?;
+        let mut completed = 0;
+        while completed < requested {
+            let wanted = (requested - completed).min(self.staging.len());
+            let offset = self.current_offset();
+            let mut target = &mut self.staging[..wanted];
+            let backend = &self.file.inner;
+            let result = match backend.try_read_at_resident(&mut target, offset) {
+                Some(result) => result,
+                None => {
+                    backend
+                        .read_at_slice_in_operation(&mut target, offset)
+                        .await
+                }
+            };
+            let staged = wanted - target.len();
+            let stop = result.is_err() || staged < wanted;
+            match result {
+                Err(error) if staged == 0 && completed == 0 => return Err(error),
+                Err(_) if staged == 0 => break,
+                Ok(count) if count != staged && completed == 0 => return Err(VfsError::Io),
+                Ok(count) if count != staged => break,
+                _ => {}
+            }
+            #[cfg(feature = "file-io-test")]
+            super::io_test::staged_bytes(staged);
+            // No page-cache slice or lock remains live while writing to user
+            // memory, which may itself map the source file and overlap it.
+            let mut delivered = 0;
+            while delivered < staged {
+                let before = dst.remaining_mut();
+                let result = dst.write(&self.staging[delivered..staged]);
+                let copied = before
+                    .checked_sub(dst.remaining_mut())
+                    .ok_or(VfsError::Io)?;
+                if copied > staged - delivered {
+                    return if completed == 0 {
+                        Err(VfsError::Io)
+                    } else {
+                        Ok(completed)
+                    };
+                }
+                self.completed(copied)?;
+                completed += copied;
+                delivered += copied;
+                match result {
+                    Ok(count) if count == copied && copied != 0 => {}
+                    Ok(0) if copied == 0 => return Ok(completed),
+                    Err(error) if completed == 0 => return Err(error.into()),
+                    _ if completed != 0 => return Ok(completed),
+                    _ => return Err(VfsError::Io),
+                }
+            }
+            if stop || staged == 0 {
+                break;
+            }
+        }
+        Ok(completed)
+    }
+
+    pub async fn write<R: Read + IoBuf>(&mut self, src: &mut R) -> VfsResult<usize> {
+        self.write_observed(src, &mut |_| {}).await
+    }
+
+    /// Reports only committed bytes, from the same stable staging copy passed
+    /// to the backend. The observer runs after cache guards are released but
+    /// while the operation retains its position/write guard; it must not
+    /// synchronously reenter operations requiring those guards for this file.
+    pub async fn write_observed<R: Read + IoBuf>(
+        &mut self,
+        src: &mut R,
+        on_written: &mut impl FnMut(&[u8]),
+    ) -> VfsResult<usize> {
+        if !self.write {
+            return Err(VfsError::BadFileDescriptor);
+        }
+        self.file.access(FileFlags::WRITE)?;
+        let requested = src.remaining();
+        self.check_length(requested)?;
+        if requested == 0 {
+            return Ok(0);
+        }
+        self.prepare_staging(requested)?;
+        let mut completed = 0;
+        while completed < requested {
+            let wanted = (requested - completed).min(self.staging.len());
+            let read = match src.read(&mut self.staging[..wanted]) {
+                Ok(0) => break,
+                Ok(read) if read <= wanted => read,
+                Ok(_) if completed == 0 => return Err(VfsError::Io),
+                Err(error) if completed == 0 => return Err(error.into()),
+                _ => break,
+            };
+            #[cfg(feature = "file-io-test")]
+            super::io_test::staged_bytes(read);
+            // Only the stable kernel staging slice enters the backend. This
+            // preserves the slice fast path and avoids a second staging copy.
+            let result = self
+                .file
+                .inner
+                .write_at_slice_in_operation(&self.staging[..read], self.current_offset())
+                .await;
+            match result {
+                Ok(written) if written <= read => {
+                    self.completed(written)?;
+                    completed += written;
+                    if written != 0 {
+                        on_written(&self.staging[..written]);
+                    }
+                    if written < read {
+                        break;
+                    }
+                }
+                Ok(_) if completed == 0 => return Err(VfsError::Io),
+                Err(error) if completed == 0 => return Err(error),
+                _ => break,
+            }
+        }
+        Ok(completed)
+    }
+
+    /// Retains the existing stable contiguous-slice path without staging.
+    pub async fn write_slice(&mut self, src: &[u8]) -> VfsResult<usize> {
+        if !self.write {
+            return Err(VfsError::BadFileDescriptor);
+        }
+        self.file.access(FileFlags::WRITE)?;
+        self.check_length(src.len())?;
+        let written = self
+            .file
+            .inner
+            .write_at_slice_in_operation(src, self.current_offset())
+            .await?;
+        if written > src.len() {
+            return Err(VfsError::Io);
+        }
+        self.completed(written)
+    }
+}
+
 impl File {
+    /// Only regular cacheable filesystem nodes participate in user-buffer
+    /// streaming. proc/devfs and streams retain their descriptor semantics;
+    /// direct disk files and tmpfs are included.
+    pub fn supports_file_io(&self) -> bool {
+        let location = self.location();
+        let flags = location.flags();
+        !self.is_path()
+            && node_allows_page_cache(flags)
+            && !flags.contains(NodeFlags::STREAM)
+            && !matches!(location.filesystem().name(), "proc" | "devfs")
+            && location.node_type() == NodeType::RegularFile
+    }
+
+    /// Begins position ownership. Transfer methods check the access mode,
+    /// allowing syscall alignment and user-memory validation to retain their
+    /// existing precedence before the first actual transfer.
+    pub async fn begin_read_io(&self, offset: Option<u64>) -> VfsResult<FileIo<'_>> {
+        self.begin_io(offset, false).await
+    }
+
+    /// Begins position/append ownership; write access is checked at transfer.
+    pub async fn begin_write_io(&self, offset: Option<u64>) -> VfsResult<FileIo<'_>> {
+        self.begin_io(offset, true).await
+    }
+
+    async fn begin_io(&self, offset: Option<u64>, write: bool) -> VfsResult<FileIo<'_>> {
+        if !self.supports_file_io() {
+            return Err(VfsError::InvalidInput);
+        }
+        let mut position = IoPosition::begin(self.position.as_ref(), offset).await;
+        let append = write && self.flags.contains(FileFlags::APPEND);
+        let write_operation = if write {
+            self.inner.begin_write_operation(append).await?
+        } else {
+            None
+        };
+        if append {
+            position.select_append(self.inner.append_offset().await?);
+        }
+        #[cfg(feature = "file-io-test")]
+        super::io_test::operation_started();
+        Ok(FileIo {
+            file: self,
+            position,
+            write,
+            _write_operation: write_operation,
+            staging: Vec::new(),
+        })
+    }
+
     fn new_with_position(
         inner: FileBackend,
         flags: FileFlags,
@@ -514,15 +803,9 @@ impl File {
     }
 
     pub fn is_direct_regular_file(&self) -> bool {
-        if matches!(self.inner, FileBackend::Direct(_)) {
-            if let Ok(metadata) = axtask::future::block_on(self.inner.location().metadata()) {
-                if metadata.node_type == NodeType::RegularFile {
-                    let fs_name = self.inner.location().filesystem().name();
-                    return fs_name != "proc" && fs_name != "devfs" && fs_name != "tmpfs";
-                }
-            }
-        }
-        false
+        matches!(self.inner, FileBackend::Direct(_))
+            && self.location().node_type() == NodeType::RegularFile
+            && !matches!(self.location().filesystem().name(), "proc" | "devfs" | "tmpfs")
     }
 
     pub fn block_size(&self) -> u64 {
