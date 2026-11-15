@@ -45,10 +45,15 @@ pub(crate) fn read_user_array_from<T: FromUserAbi>(
 }
 
 pub(crate) fn write_user_slice_to<T: IntoUserAbi>(
+    range: UserMemoryRange,
     user_addr: usize,
     values: &[T],
     write_partial: impl FnMut(usize, &[u8]) -> AxResult<usize>,
 ) -> Result<(), LinuxError> {
+    // Bulk syscall outputs previously submitted one byte slice, whose entire
+    // canonical range was checked before copying even its first element.
+    let total_bytes = checked_abi_array_size::<T>(values.len()).map_err(map_uaccess_error)?;
+    range.validate(user_addr, total_bytes).map_err(map_uaccess_error)?;
     write_user_slice_with(user_addr, values, write_partial).map_err(map_uaccess_error)
 }
 
@@ -69,6 +74,17 @@ mod tests {
     use linux_raw_sys::general::{flock, timespec};
 
     use super::*;
+
+    #[test]
+    fn bulk_output_rejects_noncanonical_tail_before_writing_prefix() {
+        let mut space = TestUserSpace::new(16);
+        space.range = UserMemoryRange::new(0x4000, 16).unwrap();
+        assert_eq!(
+            write_user_slice_to(space.range, 0x4008, &[1u64, 2], |a, b| space.write_partial(a, b)),
+            Err(LinuxError::EFAULT),
+        );
+        assert_eq!(space.bytes, alloc::vec![0xAB; 16]);
+    }
 
     struct TestUserSpace {
         range: UserMemoryRange,
@@ -213,7 +229,7 @@ mod tests {
             },
         ];
         assert_eq!(
-            write_user_slice_to(0x4000, &iovecs, |a, b| space.write_partial(a, b)),
+            write_user_slice_to(space.range, 0x4000, &iovecs, |a, b| space.write_partial(a, b)),
             Ok(())
         );
         let read_back =

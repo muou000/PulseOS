@@ -12,17 +12,10 @@ use core::{
 use axerrno::LinuxError;
 use linux_raw_sys::net::*;
 
-use crate::impls::utils::read_user_value;
+use crate::impls::utils::{read_user_value, write_user_value};
 
 const UNIX_FAMILY_LEN: usize = size_of::<__kernel_sa_family_t>();
 const UNIX_ADDR_MAX: usize = UNIX_FAMILY_LEN + (UNIX_PATH_MAX as usize);
-
-fn write_user_plain<T: Copy>(user_addr: usize, value: &T) -> Result<(), LinuxError> {
-    crate::impls::utils::with_process(|process| {
-        pulse_core::task::uaccess::write_user_plain(process, user_addr, value)
-    })?
-    .map_err(|e| LinuxError::from(e.canonicalize()))
-}
 
 fn read_family(addr: usize, addrlen: u32) -> Result<u16, LinuxError> {
     if addrlen > 128 {
@@ -115,35 +108,20 @@ fn write_v4(v4: &SocketAddrV4, dst: usize, addrlen: &mut u32) -> Result<(), Linu
     if dst == 0 {
         return Err(LinuxError::EFAULT);
     }
-    let src_bytes = unsafe {
-        core::slice::from_raw_parts(&src as *const sockaddr_in as *const u8, copy_len)
-    };
-    crate::impls::utils::write_user_bytes(dst, src_bytes)?;
+    let src_bytes = pulse_user_abi::encode_to_buffer(&src);
+    crate::impls::utils::write_user_bytes(dst, &src_bytes[..copy_len])?;
     *addrlen = src_len as u32;
     Ok(())
 }
 
 fn write_v6(v6: &SocketAddrV6, dst: usize, addrlen: &mut u32) -> Result<(), LinuxError> {
-    let src = sockaddr_in6 {
-        sin6_family: AF_INET6 as _,
-        sin6_port: v6.port().to_be(),
-        sin6_flowinfo: v6.flowinfo().to_be(),
-        sin6_addr: in6_addr {
-            in6_u: linux_raw_sys::net::in6_addr__bindgen_ty_1 {
-                u6_addr8: v6.ip().octets(),
-            },
-        },
-        sin6_scope_id: v6.scope_id(),
-    };
     let src_len = size_of::<sockaddr_in6>();
     let copy_len = (*addrlen as usize).min(src_len);
     if dst == 0 {
         return Err(LinuxError::EFAULT);
     }
-    let src_bytes = unsafe {
-        core::slice::from_raw_parts(&src as *const sockaddr_in6 as *const u8, copy_len)
-    };
-    crate::impls::utils::write_user_bytes(dst, src_bytes)?;
+    let src_bytes = pulse_user_abi::encode_to_buffer(v6);
+    crate::impls::utils::write_user_bytes(dst, &src_bytes[..copy_len])?;
     *addrlen = src_len as u32;
     Ok(())
 }
@@ -229,6 +207,6 @@ pub fn write_unix_addr(
     crate::impls::utils::write_user_bytes(dst, &bytes[..copy_len])?;
     
     let out_len = len as u32;
-    write_user_plain(addrlen, &out_len)?;
+    write_user_value(addrlen, &out_len)?;
     Ok(())
 }

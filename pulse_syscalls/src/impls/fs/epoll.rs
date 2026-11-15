@@ -18,7 +18,7 @@ use pulse_core::fd_table::{
 use crate::{
     impls::{
         fs::common::{get_fd_entry, insert_fd_entry},
-        utils::{read_user_timespec, read_user_value, with_process, write_user_bytes},
+        utils::{read_user_timespec, read_user_value, with_process, write_user_value_array},
     },
     validation::epoll::validate_epoll_maxevents,
 };
@@ -410,13 +410,7 @@ fn sys_epoll_pwait_inner(
             if ready_list.is_empty() {
                 return 0;
             }
-            let bytes = unsafe {
-                core::slice::from_raw_parts(
-                    ready_list.as_ptr().cast::<u8>(),
-                    ready_list.len() * core::mem::size_of::<epoll_event>(),
-                )
-            };
-            if let Err(e) = write_user_bytes(events, bytes) {
+            if let Err(e) = write_user_value_array(events, &ready_list) {
                 return -e.code() as isize;
             }
             ready_list.len() as isize

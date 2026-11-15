@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run #157 malformed ABI reads on a private snapshot image (RV64 or LA64)."""
+"""Run user ABI read/write regressions on a private snapshot image (RV64 or LA64)."""
 import argparse
 from datetime import datetime
 import hashlib
@@ -32,14 +32,16 @@ def command(argv):
     return result.stdout
 
 
-def prepare(arch, image, output):
+def prepare(arch, image, output, suite="reads"):
+    source = BASE.parent / f"user_abi_{suite}"
+    probe = f"/user-abi-{suite}-probe"
     sysroot = Path(command(["rustc", "--print", "sysroot"]).strip())
     host = next(line[6:] for line in command(["rustc", "-vV"]).splitlines() if line.startswith("host: "))
     linker = sysroot / "lib/rustlib" / host / "bin/rust-lld"
     obj, elf = output / "guest.o", output / "guest.elf"
     compile_cmd = ["clang", f"--target={arch}-unknown-linux-gnu", "-O2", "-Wall", "-Wextra", "-Werror",
                    "-ffreestanding", "-fno-builtin", "-fno-stack-protector", "-fno-pic",
-                   "-c", str(BASE / "guest.c"), "-o", str(obj)]
+                   "-c", str(source / "guest.c"), "-o", str(obj)]
     if arch == "riscv64":
         compile_cmd.append("-mno-relax")
     command(compile_cmd)
@@ -47,7 +49,7 @@ def prepare(arch, image, output):
              str(obj), "-o", str(elf)])
     private_image = output / "rootfs.img"
     command(["cp", "--reflink=auto", "--sparse=always", "--", str(image), str(private_image)])
-    for request in (f'write "{elf}" /user-abi-reads-probe', "set_inode_field /user-abi-reads-probe mode 0100755"):
+    for request in (f'write "{elf}" {probe}', f"set_inode_field {probe} mode 0100755"):
         result = command(["debugfs", "-w", "-R", request, str(private_image)])
         if re.search(r"not found|error|already exists", result, re.I):
             raise RuntimeError(result)
@@ -55,9 +57,10 @@ def prepare(arch, image, output):
 
 
 def run(args, output, kernel, image):
-    private_image = prepare(args.arch, image, output)
+    private_image = prepare(args.arch, image, output, args.suite)
+    marker = f"ABI_{args.suite.upper()}"
     qemu = shutdown.qemu_command(args.arch, kernel, private_image)
-    payload = b"exec /user-abi-reads-probe\n"
+    payload = f"exec /user-abi-{args.suite}-probe\n".encode()
     with kernel.open("rb") as stream:
         digest = hashlib.file_digest(stream, "sha256").hexdigest()
     (output / "command.json").write_text(json.dumps({"qemu": qemu, "kernel_sha256": digest,
@@ -66,6 +69,7 @@ def run(args, output, kernel, image):
                             stderr=subprocess.STDOUT, bufsize=0)
     text, sent = "", False
     errors = []
+    failed = False
     deadline = time.monotonic() + args.timeout
     try:
         with selectors.DefaultSelector() as selector, (output / "guest.log").open("wb") as log:
@@ -83,9 +87,12 @@ def run(args, output, kernel, image):
                 text += chunk.decode("utf-8", errors="replace")
                 check_permissions(text)
                 normalized = shutdown.ANSI.sub("", text).replace("\x08", "")
-                if shutdown.FAULT.search(normalized) or "ABI_READS_FAIL" in normalized:
+                if not failed and (shutdown.FAULT.search(normalized) or marker + "_FAIL" in normalized):
                     errors.append("kernel fault or guest assertion failed")
-                    break
+                    failed = True
+                    # Panic output may span reads; retain its location/registers
+                    # before stopping QEMU without turning a panic into success.
+                    deadline = min(deadline, time.monotonic() + 1)
                 if not sent and shutdown.PROMPT.search(normalized):
                     proc.stdin.write(payload); proc.stdin.flush()
                     sent = True
@@ -103,16 +110,16 @@ def run(args, output, kernel, image):
         proc.stdin.close(); proc.stdout.close()
         private_image.unlink()
     lines = shutdown.ANSI.sub("", text).replace("\r", "").splitlines()
-    if "ABI_READS_PASS" not in lines:
+    if marker + "_PASS" not in lines:
         errors.append("missing final assertion marker")
     if not any("filesystem writeback complete; system power transition: PowerOff" in line for line in lines):
         errors.append("missing completed shutdown")
-    passed = sum(line.startswith("ABI_READS_OK ") for line in lines)
-    result = {"arch": args.arch, "passed_assertions": passed, "errors": errors, "kernel_sha256": digest}
+    passed = sum(line.startswith(marker + "_OK ") for line in lines)
+    result = {"arch": args.arch, "suite": args.suite, "passed_assertions": passed, "errors": errors, "kernel_sha256": digest}
     (output / "result.json").write_text(json.dumps(result, indent=2) + "\n")
     print(f"{'FAIL' if errors else 'PASS'} {args.arch}: {passed} assertions; {output / 'guest.log'}")
     for line in lines:
-        if "ABI_READS_FAIL" in line:
+        if marker + "_FAIL" in line:
             print(line)
     for error in errors:
         print(error)
@@ -121,6 +128,7 @@ def run(args, output, kernel, image):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--suite", choices=("reads", "writes"), default="reads")
     parser.add_argument("--arch", choices=("riscv64", "loongarch64"), default="riscv64")
     parser.add_argument("--kernel", type=Path)
     parser.add_argument("--image", type=Path)
@@ -129,7 +137,7 @@ def main():
     args = parser.parse_args()
     kernel = (args.kernel or REPO / ("kernel-rv" if args.arch == "riscv64" else "kernel-la")).resolve()
     image = (args.image or REPO / ("disk.img" if args.arch == "riscv64" else "disk-la.img")).resolve()
-    output = (args.log_dir or REPO / "records" / ("user-abi-157-" + args.arch + "-" +
+    output = (args.log_dir or REPO / "records" / ("user-abi-" + ("157" if args.suite == "reads" else "158") + "-" + args.arch + "-" +
               datetime.now().strftime("%Y%m%d-%H%M%S-%f"))).resolve()
     output.mkdir(parents=True, exist_ok=False)
     return run(args, output, kernel, image)

@@ -12,41 +12,12 @@ use linux_raw_sys::general::{
     SIGTRAP, S_IFREG, siginfo,
 };
 
+use pulse_user_abi::task::SignalFdSigInfo;
+
 use super::{FdObject, PollRegistration, empty_stat};
 
 const SIGNALFD_SIGINFO_SIZE: usize = 128;
 const _: [(); SIGNALFD_SIGINFO_SIZE] = [(); core::mem::size_of::<siginfo>()];
-
-/// The fixed-size userspace record returned by signalfd reads.
-///
-/// This intentionally is not `siginfo_t`: Linux exposes a stable 128-byte
-/// layout so a caller's ABI does not change with `siginfo_t` internals.
-#[repr(C)]
-#[derive(Clone, Copy)]
-struct SignalFdSigInfo {
-    ssi_signo: u32,
-    ssi_errno: i32,
-    ssi_code: i32,
-    ssi_pid: u32,
-    ssi_uid: u32,
-    ssi_fd: i32,
-    ssi_tid: u32,
-    ssi_band: u32,
-    ssi_overrun: u32,
-    ssi_trapno: u32,
-    ssi_status: i32,
-    ssi_int: i32,
-    ssi_ptr: u64,
-    ssi_utime: u64,
-    ssi_stime: u64,
-    ssi_addr: u64,
-    ssi_addr_lsb: u16,
-    __pad2: u16,
-    ssi_syscall: i32,
-    ssi_call_addr: u64,
-    ssi_arch: u32,
-    __pad: [u8; 28],
-}
 
 const _: [(); SIGNALFD_SIGINFO_SIZE] = [(); core::mem::size_of::<SignalFdSigInfo>()];
 
@@ -59,7 +30,7 @@ fn is_fault_signal(sig: i32) -> bool {
 
 fn signalfd_info_bytes(raw: [u8; SIGNALFD_SIGINFO_SIZE]) -> [u8; SIGNALFD_SIGINFO_SIZE] {
     let info: siginfo = unsafe { core::mem::transmute(raw) };
-    let mut out: SignalFdSigInfo = unsafe { core::mem::zeroed() };
+    let mut out = SignalFdSigInfo::default();
 
     unsafe {
         let header = info.__bindgen_anon_1.__bindgen_anon_1;
@@ -116,13 +87,11 @@ fn signalfd_info_bytes(raw: [u8; SIGNALFD_SIGINFO_SIZE]) -> [u8; SIGNALFD_SIGINF
         }
     }
 
-    unsafe { core::mem::transmute(out) }
+    pulse_user_abi::encode_to_buffer(&out)
 }
 
 fn minimal_siginfo(sig: usize) -> [u8; SIGNALFD_SIGINFO_SIZE] {
-    let mut raw = [0u8; SIGNALFD_SIGINFO_SIZE];
-    raw[..core::mem::size_of::<i32>()].copy_from_slice(&(sig as i32).to_ne_bytes());
-    raw
+    pulse_user_abi::encode_to_buffer(&pulse_user_abi::task::SignalInfo::new(sig as i32, 0))
 }
 
 /// A signalfd consumes pending signals from the thread that performs the

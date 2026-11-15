@@ -282,7 +282,7 @@ pub fn sys_getgroups(size: isize, list: usize) -> isize {
         return -LinuxError::EFAULT.code() as isize;
     }
     if let Err(e) =
-        pulse_core::task::uaccess::write_user_plain_array(process.as_ref(), list, &groups)
+        pulse_core::task::uaccess::write_user_value_array(process.as_ref(), list, &groups)
     {
         let errno: LinuxError = e.into();
         return -errno.code() as isize;
@@ -423,7 +423,7 @@ pub fn sys_capget(hdrp: usize, datap: usize) -> isize {
         && header.version != _LINUX_CAPABILITY_VERSION_3
     {
         header.version = _LINUX_CAPABILITY_VERSION_3;
-        let _ = pulse_core::task::uaccess::write_user_plain(process.as_ref(), hdrp, &header);
+        let _ = pulse_core::task::uaccess::write_user_value(process.as_ref(), hdrp, &header);
         return -LinuxError::EINVAL.code() as isize;
     }
 
@@ -450,7 +450,7 @@ pub fn sys_capget(hdrp: usize, datap: usize) -> isize {
         inheritable: cap_i as u32,
     };
 
-    if let Err(e) = pulse_core::task::uaccess::write_user_plain(process.as_ref(), datap, &data0) {
+    if let Err(e) = pulse_core::task::uaccess::write_user_value(process.as_ref(), datap, &data0) {
         let errno: LinuxError = e.into();
         return -errno.code() as isize;
     }
@@ -463,7 +463,7 @@ pub fn sys_capget(hdrp: usize, datap: usize) -> isize {
             permitted: (cap_p >> 32) as u32,
             inheritable: (cap_i >> 32) as u32,
         };
-        if let Err(e) = pulse_core::task::uaccess::write_user_plain(
+        if let Err(e) = pulse_core::task::uaccess::write_user_value(
             process.as_ref(),
             datap + core::mem::size_of::<CapUserData>(),
             &data1,
@@ -500,7 +500,7 @@ pub fn sys_capset(hdrp: usize, datap: usize) -> isize {
         && header.version != _LINUX_CAPABILITY_VERSION_3
     {
         header.version = _LINUX_CAPABILITY_VERSION_3;
-        let _ = pulse_core::task::uaccess::write_user_plain(process.as_ref(), hdrp, &header);
+        let _ = pulse_core::task::uaccess::write_user_value(process.as_ref(), hdrp, &header);
         return -LinuxError::EINVAL.code() as isize;
     }
 

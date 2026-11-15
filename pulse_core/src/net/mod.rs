@@ -665,7 +665,7 @@ impl FdObject for Socket {
         if cmd == 0x541B { // FIONREAD
             let n = self.recv_queue() as i32;
             let process = crate::task::current_process()?;
-            process.write_user_bytes(arg, &n.to_ne_bytes())?;
+            process.write_user_value(arg, &n)?;
             return Ok(0);
         }
         if cmd == SIOCATMARK {
@@ -676,7 +676,7 @@ impl FdObject for Socket {
                     }
                     let process = crate::task::current_process()?;
                     let val = 0i32;
-                    process.write_user_bytes(arg, &val.to_ne_bytes())?;
+                    process.write_user_value(arg, &val)?;
                     return Ok(0);
                 }
                 _ => return Err(LinuxError::ENOTTY),
@@ -709,7 +709,7 @@ impl FdObject for Socket {
             
             if ifc_buf == 0 {
                 let needed_len = 80i32;
-                process.write_user_bytes(arg, &needed_len.to_ne_bytes())?;
+                process.write_user_value(arg, &needed_len)?;
                 return Ok(0);
             }
             
@@ -727,7 +727,7 @@ impl FdObject for Socket {
             }
             
             let written_len = bytes_to_write.len() as i32;
-            process.write_user_bytes(arg, &written_len.to_ne_bytes())?;
+            process.write_user_value(arg, &written_len)?;
             return Ok(0);
         }
 
@@ -746,7 +746,7 @@ impl FdObject for Socket {
                 } else {
                     0x1 | 0x4 | 0x1000 // IFF_UP | IFF_RUNNING | IFF_MULTICAST
                 };
-                process.write_user_bytes(arg + 16, &flags.to_ne_bytes())?;
+                process.write_user_value(arg + 16, &flags)?;
                 return Ok(0);
             }
             0x8914 => { // SIOCSIFFLAGS
@@ -758,7 +758,7 @@ impl FdObject for Socket {
                 }
                 let process = crate::task::current_process()?;
                 let mtu = 1500i32;
-                process.write_user_bytes(arg + 16, &mtu.to_ne_bytes())?;
+                process.write_user_value(arg + 16, &mtu)?;
                 return Ok(0);
             }
             0x8922 => { // SIOCSIFMTU
@@ -791,7 +791,7 @@ impl FdObject for Socket {
                 }
                 let process = crate::task::current_process()?;
                 let txqlen = 1000i32;
-                process.write_user_bytes(arg + 16, &txqlen.to_ne_bytes())?;
+                process.write_user_value(arg + 16, &txqlen)?;
                 return Ok(0);
             }
             0x8943 => { // SIOCSIFTXQLEN
@@ -831,7 +831,7 @@ impl FdObject for Socket {
                 } else {
                     return Err(LinuxError::ENODEV);
                 };
-                process.write_user_bytes(arg + 16, &index.to_ne_bytes())?;
+                process.write_user_value(arg + 16, &index)?;
                 return Ok(0);
             }
             0x8915 => { // SIOCGIFADDR

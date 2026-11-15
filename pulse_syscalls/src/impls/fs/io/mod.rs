@@ -20,6 +20,7 @@ use crate::{
             ScratchBuffer, alloc_uninit_bytes, pin_user_read_slice, pin_user_write_slice,
             read_user_bytes_partial, read_user_i64, read_user_iovec_array, read_user_timespec,
             with_process, write_user_bytes, write_user_bytes_partial, write_user_i64,
+            write_user_value, write_user_value_array,
         },
     },
     validation::io::UserIoSegment,

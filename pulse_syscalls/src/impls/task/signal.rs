@@ -2,13 +2,13 @@ use core::time::Duration;
 
 use axhal::context::TrapFrame;
 use linux_raw_sys::general::{
-    MINSIGSTKSZ, O_CLOEXEC, O_NONBLOCK, SIGSEGV, SS_DISABLE, SS_ONSTACK, sigaction, siginfo,
+    MINSIGSTKSZ, O_CLOEXEC, O_NONBLOCK, SIGSEGV, SS_DISABLE, SS_ONSTACK, sigaction,
 };
 use pulse_core::{
     fd_table::{FdEntry, FdFlags, SignalFdObject},
     task::{SigAction, uaccess},
 };
-use pulse_user_abi::task::SignalAction;
+use pulse_user_abi::task::{SignalAction, SignalInfo};
 
 use crate::{
     LinuxError,
@@ -180,7 +180,8 @@ pub fn sys_rt_sigpending(set: usize, sigsetsize: usize) -> isize {
     };
     let process = thread.process();
     let blocked_pending = thread.signal().pending_mask() & thread.signal_blocked_mask();
-    match process.write_user_bytes(set, &blocked_pending.to_ne_bytes()[..sigsetsize]) {
+    let bytes = pulse_user_abi::encode_to_buffer(&blocked_pending);
+    match process.write_user_bytes(set, &bytes[..sigsetsize]) {
         Ok(()) => 0,
         Err(_) => -LinuxError::EFAULT.code() as isize,
     }
@@ -286,12 +287,8 @@ pub fn sys_rt_sigtimedwait(set: usize, info: usize, timeout: usize, sigsetsize: 
                 let write_result = if let Some(raw) = siginfo {
                     process.write_user_bytes(info, &raw)
                 } else {
-                    let mut raw: siginfo = unsafe { core::mem::zeroed() };
-                    raw.__bindgen_anon_1.__bindgen_anon_1.si_signo =
-                        sig as linux_raw_sys::ctypes::c_int;
-                    raw.__bindgen_anon_1.__bindgen_anon_1.si_errno = 0;
-                    raw.__bindgen_anon_1.__bindgen_anon_1.si_code = 0;
-                    uaccess::write_user_plain(&process, info, &raw)
+                    let raw = SignalInfo::new(sig as i32, 0);
+                    uaccess::write_user_value(&process, info, &raw)
                 };
                 if write_result.is_err() {
                     return -LinuxError::EFAULT.code() as isize;
@@ -414,7 +411,7 @@ pub fn sys_sigaltstack(ss: usize, oss: usize) -> isize {
             ss_flags: old_altstack.flags as i32,
             ss_size: old_altstack.size,
         };
-        if uaccess::write_user_plain(&process, oss, &raw_oss).is_err() {
+        if uaccess::write_user_value(&process, oss, &raw_oss).is_err() {
             return -LinuxError::EFAULT.code() as isize;
         }
     }

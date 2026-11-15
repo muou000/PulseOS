@@ -141,13 +141,7 @@ pub fn sys_ppoll(
 
     let deadline = timeout_dur.map(|timeout_dur| axhal::time::monotonic_time() + timeout_dur);
     let write_back = |pollfds: &[pollfd], ready: isize| -> isize {
-        let bytes = unsafe {
-            core::slice::from_raw_parts(
-                pollfds.as_ptr().cast::<u8>(),
-                pollfds.len() * core::mem::size_of::<pollfd>(),
-            )
-        };
-        write_user_bytes(fds, bytes)
+        write_user_value_array(fds, pollfds)
             .map(|_| ready)
             .unwrap_or_else(|_| -LinuxError::EFAULT.code() as isize)
     };
@@ -437,17 +431,17 @@ pub fn sys_pselect6(
     }
 
     if has_read {
-        if let Err(_) = uaccess::write_user_plain(process.as_ref(), readfds, &out_read) {
+        if let Err(_) = uaccess::write_user_value(process.as_ref(), readfds, &out_read) {
             return -LinuxError::EFAULT.code() as isize;
         }
     }
     if has_write {
-        if let Err(_) = uaccess::write_user_plain(process.as_ref(), writefds, &out_write) {
+        if let Err(_) = uaccess::write_user_value(process.as_ref(), writefds, &out_write) {
             return -LinuxError::EFAULT.code() as isize;
         }
     }
     if has_except {
-        if let Err(_) = uaccess::write_user_plain(process.as_ref(), exceptfds, &out_except) {
+        if let Err(_) = uaccess::write_user_value(process.as_ref(), exceptfds, &out_except) {
             return -LinuxError::EFAULT.code() as isize;
         }
     }
