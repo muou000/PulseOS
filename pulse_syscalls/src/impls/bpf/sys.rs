@@ -266,6 +266,7 @@ fn link_detach(process: &Process, attr: &BpfLinkDetachAttr) -> Result<isize, Lin
     Ok(0)
 }
 
+#[cfg(feature = "guest-checks")]
 pub fn run_bpf_guest_checks() -> Result<(), LinuxError> {
     axlog::ax_println!("[BPF_GUEST] Starting BPF Map element control plane checks...");
 

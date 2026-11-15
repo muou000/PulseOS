@@ -1410,6 +1410,7 @@ pub fn create_fifo_entry(
     Ok(FdEntry::new(object, flags))
 }
 
+#[cfg(feature = "guest-checks")]
 pub fn run_pipe_guest_checks() -> Result<(), LinuxError> {
     axlog::ax_println!("[PIPE_GUEST] Starting pipe zero-copy and batch dealloc checks...");
 
