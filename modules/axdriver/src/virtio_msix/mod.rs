@@ -119,7 +119,7 @@ pub fn configure_virtio_pci_msix_with<P: VirtioPciMsixPlatform>(
 /// Primary entry point for configuring MSI-X on VirtIO PCI devices.
 ///
 /// First tries the platform-owned seam; if unsupported, falls back to the
-/// LoongArch compatibility adapter during the migration phase (Issue #151).
+/// legacy forwarding adapter until its removal in Issue #164.
 pub fn configure_virtio_pci_msix(
     root: &mut PciRoot,
     bdf: DeviceFunction,
