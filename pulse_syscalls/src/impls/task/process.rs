@@ -462,7 +462,11 @@ pub fn sys_prctl(option: i32, arg2: usize, _arg3: usize, _arg4: usize, _arg5: us
         PR_SET_NAME => match super::common::read_user_cstring(&process, arg2) {
             Ok(name) => {
                 let name = if name.len() > 15 { &name[..15] } else { &name };
+                #[cfg(feature = "bpf-trace")]
+                let mapping_transition = pulse_core::bpf::mappings::MutationGuard::task(axtask::current().id().as_u64());
                 axtask::current().set_name(name);
+                #[cfg(feature = "bpf-trace")]
+                pulse_core::task::emit_current_mapping_metadata("rename", mapping_transition.begin_ns());
                 0
             }
             Err(e) => e,

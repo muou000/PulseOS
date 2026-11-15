@@ -43,7 +43,8 @@ const INIT_SYM_INO: u64 = 11;
 const CPUINFO_INO: u64 = 12;
 const UPTIME_INO: u64 = 13;
 const BPF_STATS_INO: u64 = 14;
-const NEXT_DYNAMIC_INO: u64 = BPF_STATS_INO + 1;
+const BPF_MAPPINGS_INO: u64 = 15;
+const NEXT_DYNAMIC_INO: u64 = BPF_MAPPINGS_INO + 1;
 const PROCFS_INODE_SHARDS: usize = 32;
 const PROCFS_PID_MAP_SHARDS: usize = 32;
 
@@ -94,6 +95,8 @@ pub trait ProcfsProcessProvider: Send + Sync {
     /// PulseOS-specific snapshot of the caller's BPF descriptors and global
     /// handoff totals. None means unavailable, never an all-zero snapshot.
     fn bpf_stats(&self) -> Option<String> { None }
+    /// Ordered boot mapping journal, frozen independently for each open.
+    fn bpf_mappings(&self) -> Option<String> { None }
     fn process_exists(&self, pid: u64) -> bool;
     fn process_pids(&self) -> Vec<u64>;
     fn cmdline(&self, pid: u64) -> Option<String>;
@@ -166,6 +169,7 @@ enum ProcLiveFileKind {
     Cpuinfo,
     Uptime,
     BpfStats,
+    BpfMappings,
     PidChildren(u64),
     ThreadStatus(u64, u64),
     ThreadComm(u64, u64),
@@ -431,6 +435,8 @@ impl ProcFilesystem {
 
         let bpf_stats = new_live_file(BPF_STATS_INO, ProcLiveFileKind::BpfStats,
             NodePermission::from_bits_truncate(0o444));
+        let bpf_mappings = new_live_file(BPF_MAPPINGS_INO, ProcLiveFileKind::BpfMappings,
+            NodePermission::from_bits_truncate(0o444));
 
         root.metadata.lock().nlink = 3;
         sys_dir.metadata.lock().nlink = 3;
@@ -450,6 +456,7 @@ impl ProcFilesystem {
         self.insert_inode(CPUINFO_INO, cpuinfo);
         self.insert_inode(UPTIME_INO, uptime);
         self.insert_inode(BPF_STATS_INO, bpf_stats);
+        self.insert_inode(BPF_MAPPINGS_INO, bpf_mappings);
 
         {
             let mut entries = inode_as_dir(&root)
@@ -465,6 +472,7 @@ impl ProcFilesystem {
             entries.insert("sys".into(), SYS_INO);
             entries.insert("uptime".into(), UPTIME_INO);
             entries.insert("pulse_bpf_stats".into(), BPF_STATS_INO);
+            entries.insert("pulse_bpf_mappings".into(), BPF_MAPPINGS_INO);
         }
 
         {
@@ -1005,6 +1013,8 @@ fn render_proc_file(fs: &ProcFilesystem, kind: ProcLiveFileKind) -> String {
         }
         ProcLiveFileKind::BpfStats => PROCESS_PROVIDER.get()
             .and_then(|provider| provider.bpf_stats()).unwrap_or_default(),
+        ProcLiveFileKind::BpfMappings => PROCESS_PROVIDER.get()
+            .and_then(|provider| provider.bpf_mappings()).unwrap_or_default(),
         ProcLiveFileKind::Uptime => {
             let mono = axhal::time::monotonic_time();
             let secs = mono.as_secs();
@@ -1088,14 +1098,14 @@ impl ProcNode {
         snapshot.get_or_insert_with(|| rendered.clone()).clone()
     }
 
-    fn bpf_stats_snapshot(&self) -> VfsResult<Arc<[u8]>> {
+    fn bpf_stats_snapshot(&self, mappings: bool) -> VfsResult<Arc<[u8]>> {
         if let Some(snapshot) = self.bpf_snapshot.lock().as_ref().cloned() {
             return Ok(snapshot);
         }
         // Like /proc/mounts, this node is rebuilt on each path lookup. Freeze
         // the first successful render; dup/read chunks then share one snapshot.
         // Rendering can take FD/event locks and must happen outside our guard.
-        let content = PROCESS_PROVIDER.get().and_then(|p| p.bpf_stats())
+        let content = PROCESS_PROVIDER.get().and_then(|p| if mappings { p.bpf_mappings() } else { p.bpf_stats() })
             .ok_or(VfsError::NotFound)?;
         let rendered = Arc::<[u8]>::from(content.into_bytes());
         let mut snapshot = self.bpf_snapshot.lock();
@@ -1765,8 +1775,8 @@ impl FileNodeOps for ProcNode {
 
             let content = if matches!(kind, ProcLiveFileKind::Mounts) {
                 self.mounts_snapshot()
-            } else if matches!(kind, ProcLiveFileKind::BpfStats) {
-                self.bpf_stats_snapshot()?
+            } else if matches!(kind, ProcLiveFileKind::BpfStats | ProcLiveFileKind::BpfMappings) {
+                self.bpf_stats_snapshot(matches!(kind, ProcLiveFileKind::BpfMappings))?
             } else {
                 Arc::<[u8]>::from(render_proc_file(&self.fs, kind).into_bytes())
             };

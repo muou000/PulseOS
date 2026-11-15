@@ -736,6 +736,14 @@ impl Backend {
         }
     }
 
+    pub(crate) fn rebase_for_remap(&mut self, old_start: VirtAddr, new_size: usize) -> axerrno::AxResult {
+        match self {
+            Self::File(mapping) => mapping.rebase_for_remap(old_start, new_size),
+            Self::Cow(cow) => cow.inner.rebase_for_remap(old_start, new_size),
+            _ => Ok(()),
+        }
+    }
+
     pub fn is_grows_down(&self) -> bool {
         match self {
             Self::Alloc { grows_down, .. } => *grows_down,

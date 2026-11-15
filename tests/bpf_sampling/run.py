@@ -12,6 +12,8 @@ import json
 import archive as raw_archive
 import capture as runtime_capture
 import stack_evidence
+import artifacts
+import mapping_evidence
 from pathlib import Path
 import re
 import shlex
@@ -31,22 +33,27 @@ LINKER_SCRIPT = BASE / "guest.ld"
 ARCHES = helpers.ARCHES
 
 
-def build(arch: str, mode: str = "task", archive: bool = False, fault: str = "none", ring_pages: int = 16, stacks: bool = False) -> Path:
+def build(arch: str, mode: str = "task", archive: bool = False, fault: str = "none", ring_pages: int = 16, stacks: bool = False, mappings: bool = False) -> Path:
     if stacks and mode not in ("task", "cpu"):
         raise ValueError("--stacks requires task or cpu mode")
-    source_inputs = {str(path): helpers.digest(path) for path in (SOURCE, LINKER_SCRIPT, BASE / "archive.rs", *([BASE / "stack_workload.rs"] if stacks else []), *([BASE / "fault_workload.rs"] if mode == "fault" else []))}
+    if mappings and (mode != "cpu" or not archive):
+        raise ValueError("--mappings requires --mode cpu --archive")
+    linker_script = BASE / "mapping_guest.ld" if mappings else LINKER_SCRIPT
+    source_inputs = {str(path): helpers.digest(path) for path in (SOURCE, linker_script, BASE / "archive.rs", *([BASE / "mapping_workload.rs"] if mappings else []), *([BASE / "stack_workload.rs"] if stacks else []), *([BASE / "fault_workload.rs"] if mode == "fault" else []))}
     sysroot = Path(helpers.command(["rustc", "+nightly", "--print", "sysroot"]).strip())
     version = helpers.command(["rustc", "+nightly", "-vV"])
     host = next(line.removeprefix("host: ") for line in version.splitlines() if line.startswith("host: "))
     linker = sysroot / "lib/rustlib" / host / "bin/rust-lld"
-    output = BASE / "build" / arch / (mode + ("-stacks" if stacks else "") + ("-archive" if archive else "") + ("-" + fault if fault != "none" else "") + ("-ring1" if ring_pages == 1 else "")) / "sampling.elf"
+    output = BASE / "build" / arch / (mode + ("-mappings" if mappings else "") + ("-stacks" if stacks else "") + ("-archive" if archive else "") + ("-" + fault if fault != "none" else "") + ("-ring1" if ring_pages == 1 else "")) / "sampling.elf"
     output.parent.mkdir(parents=True, exist_ok=True)
     command = ["rustc", "+nightly", "--edition=2024", "--crate-type=bin", "--target", ARCHES[arch]["target"],
                "-C", "panic=abort", "-C", "opt-level=2", "-C", "relocation-model=static",
-               "-C", f"linker={linker}", "-C", f"link-arg=-T{LINKER_SCRIPT}",
+               "-C", f"linker={linker}", "-C", f"link-arg=-T{linker_script}",
                "-C", "link-arg=--no-relax", "-o", str(output), str(SOURCE)]
     if stacks:
         command += ["--cfg", "stack_test", "-C", "force-frame-pointers=yes"]
+    if mappings:
+        command += ["--cfg", "mapping_test", "-C", "debuginfo=2"]
     if mode == "cpu":
         command += ["--cfg", "cpu_clock_test"]
     if mode in ("trace", "block", "wake", "sched", "fault"):
@@ -67,10 +74,19 @@ def build(arch: str, mode: str = "task", archive: bool = False, fault: str = "no
         command += ["--cfg", "fault_" + fault.replace("-", "_")]
     helpers.command(command, timeout=120)
     helpers.check_elf(output, arch)
+    child_command = None
+    if mappings:
+        child_command = command.copy()
+        child_command[child_command.index("-o") + 1] = str(output.parent / "mapping-child.elf")
+        child_command += ["--cfg", "mapping_exec_child", "-C", "link-arg=--build-id=sha1"]
+        helpers.command(child_command, timeout=120)
+        helpers.check_elf(output.parent / "mapping-child.elf", arch)
+        mapping_evidence.check_loop_artifact(output)
+        mapping_evidence.check_loop_artifact(output.parent / "mapping-child.elf")
     if any(helpers.digest(Path(path)) != expected for path, expected in source_inputs.items()):
         raise ValueError("payload source changed while compiling")
     (output.parent / "build.json").write_text(json.dumps({"command": command, "rustc": version, "mode": mode,
-        "source_sha256": helpers.digest(SOURCE), "linker_script_sha256": helpers.digest(LINKER_SCRIPT),
+        "source_sha256": helpers.digest(SOURCE), "linker_script_sha256": helpers.digest(linker_script), "child_command": child_command,
         "payload_sha256": helpers.digest(output), "source_inputs": source_inputs}, indent=2) + "\n")
     print(f"Built {output}", flush=True)
     return output
@@ -201,7 +217,7 @@ def qemu_command(arch: str, kernel: Path, image: Path) -> list[str]:
 def guest(args: argparse.Namespace) -> int:
     # Always rebuild from source, so stale payloads cannot turn a missing v2 ABI
     # into a legacy PASS. Kernels/images are copied before QEMU starts.
-    payload = build(args.arch, args.mode, args.archive, args.fault, args.ring_pages, args.stacks)
+    payload = build(args.arch, args.mode, args.archive, args.fault, args.ring_pages, args.stacks, args.mappings)
     kernel = (args.kernel or REPO / ARCHES[args.arch]["kernel"]).resolve(strict=True)
     image = helpers.check_image(args.image or REPO / ARCHES[args.arch]["primary"])
     run = helpers.new_run(f"{args.arch}-{args.mode}")
@@ -253,6 +269,21 @@ def guest(args: argparse.Namespace) -> int:
                                    "kernel_provenance_sha256": helpers.digest(run / "kernel.provenance.json")})
     image_copy = helpers.copy_image(image, run, "disk.img")
     binary, guest_dir = helpers.inject(image_copy, payload_copy, run)
+    if args.mappings:
+        child_copy = run / "mapping-child.elf"
+        shutil.copyfile(payload.parent / "mapping-child.elf", child_copy)
+        for source, name in [(child_copy, "mapping-child.elf")]:
+            if any(c in str(source) for c in '\\"\n\r'):
+                raise ValueError("mapping artifact path contains unsupported characters")
+            target = guest_dir + "/" + name
+            helpers.debugfs(image_copy, f'write "{source}" {target}', write=True)
+            helpers.debugfs(image_copy, f"set_inode_field {target} mode 0100755", write=True)
+            dumped = run / ("injected-" + name)
+            helpers.debugfs(image_copy, f'dump {target} "{dumped}"')
+            if helpers.digest(dumped) != helpers.digest(source):
+                raise ValueError("injected mapping artifact differs from bundled bytes")
+            dumped.unlink()
+        artifacts.bundle(run, [run / "kernel.elf", payload_copy, child_copy])
     token = run.name.rsplit("-", 1)[-1]
     shell = (f"ulimit -c 0; cd {shlex.quote(guest_dir)} && {binary}; "
              f"status=$?; printf '\\nBPF_HOST_EXIT {token} %s\\n' \"$status\"")
@@ -269,6 +300,9 @@ def guest(args: argparse.Namespace) -> int:
                 "worktree_diff_sha256": helpers.digest(run / "worktree.patch"),
                 "payload_sha256": helpers.digest(payload_copy), "source_sha256": helpers.digest(SOURCE)}
     metadata.update(symbol_identity)
+    if args.mappings:
+        metadata.update(mapping_journal="mappings.txt", artifact_bundle="artifacts.json",
+                        artifact_bundle_sha256=helpers.digest(run / "artifacts.json"))
     (run / "inputs.json").write_text(json.dumps(metadata, indent=2) + "\n")
     print(shlex.join(command), flush=True)
     print(f"Logs: {run}", flush=True)
@@ -284,6 +318,10 @@ def guest(args: argparse.Namespace) -> int:
             (run / "archive.json").write_text(json.dumps(archive_metadata, indent=2) + "\n")
             for point, raw in snapshots.items():
                 (run / f"stats-{point}.txt").write_bytes(raw)
+            if args.mappings:
+                metadata["mappings"] = mapping_evidence.extract_and_verify(run, text)
+                metadata["mapping_journal_sha256"] = helpers.digest(run / "mappings.txt")
+                (run / "inputs.json").write_text(json.dumps(metadata, indent=2) + "\n")
             if args.stacks:
                 metadata["stacks"] = stack_evidence.verify(run)
             metadata["capture"] = runtime_capture.convert(run)
@@ -310,6 +348,7 @@ def main() -> int:
     parser.add_argument("--mode", choices=("task", "cpu", "trace", "block", "wake", "sched", "fault"), default="task")
     parser.add_argument("--archive", action="store_true")
     parser.add_argument("--stacks", action="store_true", help="verify frozen v3 user/kernel callchains; task/cpu only")
+    parser.add_argument("--mappings", action="store_true", help="verify dynamic mapping journal and content-addressed ELF artifacts; cpu/archive only")
     parser.add_argument("--kernel", type=Path)
     parser.add_argument("--image", type=Path)
     parser.add_argument("--kernel-elf", type=Path)
@@ -321,10 +360,12 @@ def main() -> int:
     args = parser.parse_args()
     if args.stacks and (args.mode not in ("task", "cpu") or not args.archive):
         parser.error("--stacks requires --mode task|cpu --archive to verify RAW bytes against ELF")
+    if args.mappings and (args.mode != "cpu" or not args.archive):
+        parser.error("--mappings requires --mode cpu --archive")
     if args.fault == "ring-overflow":
         args.ring_pages = 1
     if args.action == "build":
-        build(args.arch, args.mode, args.archive, args.fault, args.ring_pages, args.stacks)
+        build(args.arch, args.mode, args.archive, args.fault, args.ring_pages, args.stacks, args.mappings)
         return 0
     return guest(args)
 

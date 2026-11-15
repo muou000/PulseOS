@@ -13,6 +13,8 @@ use alloc::{
     vec::Vec,
 };
 use core::fmt::Write;
+#[cfg(feature = "bpf-trace")]
+use core::sync::atomic::Ordering;
 
 pub use aspace_lock::AddressSpaceLock;
 use axerrno::{LinuxError, LinuxResult};
@@ -177,6 +179,17 @@ pub fn emit_current_bpf_task_metadata() {
     }
 }
 
+#[cfg(feature = "bpf-trace")]
+pub fn emit_current_mapping_metadata(kind: &str, begin_ns: u64) {
+    let task = axtask::current();
+    if let Ok(thread) = current_thread() {
+        let process = thread.process();
+        let space = process.aspace_handle().read().observation_identity().0;
+        crate::bpf::mappings::task(task.id().as_u64(), process.pid(), thread.tid(), space,
+            process.exec_generation.load(Ordering::Acquire), kind, 0, &task.name(), begin_ns);
+    }
+}
+
 /// Binds hardware/software context (`page_table_root`, `TaskExt`, `PROCESS_REGISTRY`)
 /// to a `TaskInner` before publishing it to the scheduler queue.
 pub fn spawn_task_with_thread(
@@ -195,6 +208,14 @@ pub fn spawn_task_with_thread(
 
     #[cfg(feature = "bpf-trace")]
     emit_bpf_task_metadata(&inner, proc.pid(), thread.tid());
+    #[cfg(feature = "bpf-trace")]
+    {
+        let parent = if proc.parent_pid() != 0 { axtask::current().id().as_u64() } else { 0 };
+        let space = proc.aspace_handle().read().observation_identity().0;
+        crate::bpf::mappings::task(inner.id().as_u64(), proc.pid(), thread.tid(), space,
+            proc.exec_generation.load(Ordering::Acquire), if parent == 0 { "bind" } else { "fork" },
+            parent, &inner.name(), axhal::time::monotonic_time_nanos());
+    }
 
     inner.init_task_ext(ThreadHandle::new(thread));
 
@@ -508,6 +529,13 @@ pub fn init_itimer_hook() {
 struct PulseProcessProvider;
 
 impl axfs::ProcfsProcessProvider for PulseProcessProvider {
+    fn bpf_mappings(&self) -> Option<String> {
+        #[cfg(feature = "bpf-trace")]
+        { Some(crate::bpf::mappings::render()) }
+        #[cfg(not(feature = "bpf-trace"))]
+        { None }
+    }
+
     fn bpf_stats(&self) -> Option<String> {
         let process = current_process().ok()?;
         #[cfg(not(feature = "bpf-trace"))]
@@ -821,7 +849,11 @@ impl axfs::ProcfsProcessProvider for PulseProcessProvider {
                 axmm::Backend::File(mapping) => {
                     is_shared = mapping.is_shared();
                     offset = mapping.file_offset();
-                    if let Some(cached_file) = mapping.file().as_any().downcast_ref::<axfs::CachedFile>() {
+                    #[cfg(feature = "bpf-trace")]
+                    let cached_file = crate::bpf::mappings::cached_file(mapping.file().as_ref());
+                    #[cfg(not(feature = "bpf-trace"))]
+                    let cached_file = mapping.file().as_any().downcast_ref::<axfs::CachedFile>();
+                    if let Some(cached_file) = cached_file {
                         let loc = cached_file.location();
                         if let Ok(meta) = axtask::future::block_on(loc.metadata()) {
                             inode = meta.inode;

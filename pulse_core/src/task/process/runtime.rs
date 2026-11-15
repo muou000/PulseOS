@@ -581,6 +581,13 @@ impl Process {
         task::unregister_thread_global(tid);
         let (task, remaining) = self.take_exiting_thread(tid);
         if let Some(task) = task {
+            #[cfg(feature = "bpf-trace")]
+            {
+                let space = self.aspace_handle().read().observation_identity().0;
+                crate::bpf::mappings::task(task.id().as_u64(), self.pid(), tid, space,
+                    self.exec_generation.load(Ordering::Acquire), "exit", 0, &task.name(),
+                    axhal::time::monotonic_time_nanos());
+            }
             if let Some(handle) = task::thread_handle_from_task(&task) {
                 let now_ns = axhal::time::monotonic_time_nanos() as u64;
                 let (u, s) = handle.snapshot_cpu_time_ns(now_ns);

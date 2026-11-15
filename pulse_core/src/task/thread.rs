@@ -399,6 +399,8 @@ impl Thread {
     }
 
     pub fn exit_current(&self, exit_code: i32) -> ! {
+        #[cfg(feature = "bpf-trace")]
+        let mapping_transition = crate::bpf::mappings::MutationGuard::task(self.sampling_task_id());
         axlog::debug!(
             "exit_current: tid={}, group_exiting={}, exit_code={}",
             self.tid(),
@@ -413,6 +415,8 @@ impl Thread {
         };
         let tid = self.tid();
         self.process().finish_thread_exit(tid, final_code);
+        #[cfg(feature = "bpf-trace")]
+        drop(mapping_transition);
         axtask::exit(final_code);
     }
 
