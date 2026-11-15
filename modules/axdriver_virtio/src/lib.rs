@@ -64,7 +64,13 @@ pub fn probe_pci_device<H: VirtIoHal>(
     use virtio_drivers::transport::pci::virtio_device_type;
 
     let dev_type = virtio_device_type(dev_info).and_then(as_dev_type)?;
-    let transport = PciTransport::new::<H>(root, bdf).ok()?;
+    let transport = match PciTransport::new::<H>(root, bdf) {
+        Ok(transport) => transport,
+        Err(err) => {
+            log::warn!("failed to probe VirtIO PCI device at {}: {}", bdf, err);
+            return None;
+        }
+    };
     Some((dev_type, transport))
 }
 
