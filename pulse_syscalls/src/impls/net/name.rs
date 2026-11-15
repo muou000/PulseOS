@@ -5,14 +5,7 @@ use axlog::*;
 use super::{addr::{NetSocketAddr, write_unix_addr}, get_socket};
 use pulse_core::net::SocketInner;
 
-use crate::impls::utils::read_user_value;
-
-fn write_user_plain<T: Copy>(user_addr: usize, value: &T) -> Result<(), LinuxError> {
-    crate::impls::utils::with_process(|process| {
-        pulse_core::task::uaccess::write_user_plain(process, user_addr, value)
-    })?
-    .map_err(|e| LinuxError::from(e.canonicalize()))
-}
+use crate::impls::utils::{read_user_value, write_user_value};
 
 pub fn sys_getsockname(fd: usize, addr: usize, addrlen: usize) -> isize {
     let socket = match get_socket(fd) {
@@ -60,7 +53,7 @@ pub fn sys_getsockname(fd: usize, addr: usize, addrlen: usize) -> isize {
         if let Err(e) = crate::impls::utils::write_user_bytes(addr, &nladdr[..to_write]) {
             return -(e.code() as isize);
         }
-        if let Err(e) = write_user_plain(addrlen, &(to_write as u32)) {
+        if let Err(e) = write_user_value(addrlen, &(to_write as u32)) {
             return -(e.code() as isize);
         }
         return 0;
@@ -93,7 +86,7 @@ pub fn sys_getsockname(fd: usize, addr: usize, addrlen: usize) -> isize {
     };
     match net_addr.write_to_raw(addr, &mut alen) {
         Ok(()) => {
-            if let Err(e) = write_user_plain(addrlen, &alen) {
+            if let Err(e) = write_user_value(addrlen, &alen) {
                 -(e.code() as isize)
             } else {
                 0
@@ -150,7 +143,7 @@ pub fn sys_getpeername(fd: usize, addr: usize, addrlen: usize) -> isize {
         if let Err(e) = crate::impls::utils::write_user_bytes(addr, &nladdr[..to_write]) {
             return -(e.code() as isize);
         }
-        if let Err(e) = write_user_plain(addrlen, &(to_write as u32)) {
+        if let Err(e) = write_user_value(addrlen, &(to_write as u32)) {
             return -(e.code() as isize);
         }
         return 0;
@@ -172,7 +165,7 @@ pub fn sys_getpeername(fd: usize, addr: usize, addrlen: usize) -> isize {
     };
     match net_addr.write_to_raw(addr, &mut alen) {
         Ok(()) => {
-            if let Err(e) = write_user_plain(addrlen, &alen) {
+            if let Err(e) = write_user_value(addrlen, &alen) {
                 -(e.code() as isize)
             } else {
                 0

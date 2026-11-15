@@ -76,13 +76,7 @@ pub fn sys_pipe2(fds: usize, flags: usize) -> isize {
         Ok(Ok(new_fds)) => new_fds,
         Ok(Err(e)) | Err(e) => return -e.code() as isize,
     };
-    let bytes = unsafe {
-        core::slice::from_raw_parts(
-            new_fds.as_ptr().cast::<u8>(),
-            core::mem::size_of_val(&new_fds),
-        )
-    };
-    if let Err(e) = write_user_bytes(fds, bytes) {
+    if let Err(e) = write_user_value(fds, &new_fds) {
         if let Err(remove_e) = remove_fd_entry(new_fds[0] as usize) {
             axlog::warn!(
                 "sys_pipe2: rollback failed to remove read fd {}: {:?}",

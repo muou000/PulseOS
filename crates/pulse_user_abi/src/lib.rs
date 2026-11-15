@@ -9,13 +9,15 @@ use alloc::vec::Vec;
 
 use axerrno::{AxError, AxResult, LinuxError};
 
-mod net;
+pub mod fs;
+pub mod net;
 mod readiness;
 mod sequential;
+mod system;
 pub mod task;
 mod time;
 
-pub use sequential::read_user_array_sequential_with;
+pub use sequential::{read_user_array_sequential_with, write_user_array_sequential_with};
 
 mod sealed {
     pub trait Sealed {}

@@ -222,7 +222,7 @@ pub(crate) fn write_user_value_array<T: uaccess::IntoUserAbi>(
     values: &[T],
 ) -> Result<(), LinuxError> {
     with_process(|process| {
-        write_user_slice_to(user_addr, values, |addr, src| {
+        write_user_slice_to(uaccess::USER_MEMORY_RANGE, user_addr, values, |addr, src| {
             process.write_user_bytes_partial(addr, src)
         })
     })?

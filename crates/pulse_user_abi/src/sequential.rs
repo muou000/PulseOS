@@ -2,7 +2,25 @@ use alloc::vec::Vec;
 
 use axerrno::{AxError, AxResult};
 
-use crate::{FromUserAbi, abi_size_of, read_user_value_with};
+use crate::{FromUserAbi, IntoUserAbi, abi_size_of, read_user_value_with, write_user_value_with};
+
+/// Writes one ABI value at a time, retaining earlier writes if a later element
+/// fails its address check. Used by syscalls whose legacy array output was
+/// sequential; bulk outputs must validate the entire user range first.
+pub fn write_user_array_sequential_with<T: IntoUserAbi>(
+    user_addr: usize,
+    values: &[T],
+    mut write_partial: impl FnMut(usize, &[u8]) -> AxResult<usize>,
+) -> AxResult<()> {
+    for (index, value) in values.iter().enumerate() {
+        let offset = index
+            .checked_mul(abi_size_of::<T>())
+            .ok_or(AxError::InvalidInput)?;
+        let addr = user_addr.checked_add(offset).ok_or(AxError::InvalidInput)?;
+        write_user_value_with(addr, value, &mut write_partial)?;
+    }
+    Ok(())
+}
 
 /// Reads an array one ABI value at a time, reserving its result before touching
 /// user memory. This preserves the legacy syscall allocation/fault order and
@@ -31,7 +49,26 @@ pub fn read_user_array_sequential_with<T: FromUserAbi>(
 mod tests {
     use axerrno::AxError;
 
-    use super::read_user_array_sequential_with;
+    use super::*;
+
+    #[test]
+    fn sequential_output_keeps_prefix_when_next_element_is_noncanonical() {
+        let range = crate::UserMemoryRange::new(0x4000, 8).unwrap();
+        let mut bytes = [0xAB; 8];
+        assert_eq!(
+            write_user_array_sequential_with(0x4000, &[17u64, 23], |addr, src| {
+                range.validate(addr, src.len())?;
+                bytes.copy_from_slice(src);
+                Ok(src.len())
+            }),
+            Err(AxError::BadAddress),
+        );
+        assert_eq!(bytes, 17u64.to_ne_bytes());
+        assert_eq!(
+            write_user_array_sequential_with(usize::MAX, &[1u8, 2], |_, _| Ok(1)),
+            Err(AxError::InvalidInput),
+        );
+    }
 
     #[test]
     fn sequential_array_keeps_allocation_and_element_fault_order() {

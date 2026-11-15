@@ -172,7 +172,7 @@ pub fn tty_pgrp_ioctl(cmd: u32, arg: usize) -> Option<LinuxResult<isize>> {
             }
             let process = crate::task::current_process()?;
             let pgid = tty_foreground_pgid(process.as_ref())?;
-            process.write_user_bytes(arg, &(pgid as i32).to_ne_bytes())?;
+            crate::task::uaccess::write_user_value(&process, arg, &(pgid as i32))?;
             Ok(0)
         })(),
         TIOCSPGRP => (|| {
@@ -398,13 +398,7 @@ pub fn read_tty_termios(user_addr: usize) -> LinuxResult {
         c_cc: t.c_cc,
     };
     let process = crate::task::current_process()?;
-    let bytes = unsafe {
-        core::slice::from_raw_parts(
-            (&term as *const termios).cast::<u8>(),
-            core::mem::size_of::<termios>(),
-        )
-    };
-    process.write_user_bytes(user_addr, bytes)?;
+    crate::task::uaccess::write_user_value(&process, user_addr, &term)?;
     Ok(())
 }
 
@@ -440,13 +434,7 @@ pub fn write_tty_termios(user_addr: usize) -> LinuxResult {
 pub fn read_tty_termios2(user_addr: usize) -> LinuxResult {
     let termios_data = *TTY_TERMIOS.lock();
     let process = crate::task::current_process()?;
-    let bytes = unsafe {
-        core::slice::from_raw_parts(
-            (&termios_data as *const termios2).cast::<u8>(),
-            core::mem::size_of::<termios2>(),
-        )
-    };
-    process.write_user_bytes(user_addr, bytes)?;
+    crate::task::uaccess::write_user_value(&process, user_addr, &termios_data)?;
     Ok(())
 }
 
@@ -482,6 +470,15 @@ struct WinSize {
     ws_ypixel: u16,
 }
 
+pulse_user_abi::impl_user_abi_struct! {
+    for WinSize, size = 8 => {
+        ws_row: u16,
+        ws_col: u16,
+        ws_xpixel: u16,
+        ws_ypixel: u16,
+    }
+}
+
 static TTY_WINSIZE: Lazy<SpinNoIrq<WinSize>> = Lazy::new(|| {
     SpinNoIrq::new(WinSize {
         ws_row: 24,
@@ -512,13 +509,7 @@ pub fn read_tty_winsize(user_addr: usize) -> LinuxResult {
         return Err(LinuxError::EFAULT);
     }
     let winsize = *TTY_WINSIZE.lock();
-    let bytes = unsafe {
-        core::slice::from_raw_parts(
-            (&winsize as *const WinSize).cast::<u8>(),
-            core::mem::size_of::<WinSize>(),
-        )
-    };
-    crate::task::current_process()?.write_user_bytes(user_addr, bytes)?;
+    crate::task::uaccess::write_user_value(crate::task::current_process()?.as_ref(), user_addr, &winsize)?;
     Ok(())
 }
 
@@ -736,7 +727,7 @@ impl FdObject for StdinObject {
             }
             FIONREAD => {
                 let n = STDIN_BUFFER.lock().readable_len() as i32;
-                crate::task::current_process()?.write_user_bytes(arg, &n.to_ne_bytes())?;
+                crate::task::uaccess::write_user_value(crate::task::current_process()?.as_ref(), arg, &n)?;
                 Ok(0)
             }
             _ => Err(LinuxError::ENOTTY),
@@ -846,7 +837,7 @@ impl FdObject for StdoutObject {
             }
             FIONREAD => {
                 let n = 0i32;
-                crate::task::current_process()?.write_user_bytes(arg, &n.to_ne_bytes())?;
+                crate::task::uaccess::write_user_value(crate::task::current_process()?.as_ref(), arg, &n)?;
                 Ok(0)
             }
             _ => Err(LinuxError::ENOTTY),

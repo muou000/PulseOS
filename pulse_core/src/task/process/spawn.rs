@@ -62,7 +62,7 @@ impl Process {
 
         if let Some(addr) = params.parent_set_tid {
             let child_tid = child_tid as u32;
-            self.write_user_bytes(addr, &child_tid.to_ne_bytes())?;
+            self.write_user_u32(addr, child_tid)?;
         }
         let child_thread = Thread::new(child_proc.clone(), child_tid, inner.id());
         task::register_thread_global(child_tid, child_thread.clone());

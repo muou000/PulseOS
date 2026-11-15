@@ -109,7 +109,7 @@ pub fn sys_semctl(semid: i32, semnum: i32, cmd: i32, arg: usize) -> isize {
                 return -LinuxError::EFAULT.code() as isize;
             }
             let ds = semset.semid_ds;
-            match pulse_core::task::uaccess::write_user_plain(process.as_ref(), arg, &ds) {
+            match pulse_core::task::uaccess::write_user_value(process.as_ref(), arg, &ds) {
                 Ok(()) => 0,
                 Err(_) => -LinuxError::EFAULT.code() as isize,
             }
@@ -171,7 +171,7 @@ pub fn sys_semctl(semid: i32, semnum: i32, cmd: i32, arg: usize) -> isize {
                 return -LinuxError::EFAULT.code() as isize;
             }
             let vals: Vec<u16> = semset.sems.iter().map(|s| s.semval).collect();
-            match pulse_core::task::uaccess::write_user_plain_array(process.as_ref(), arg, &vals) {
+            match pulse_core::task::uaccess::write_user_value_array(process.as_ref(), arg, &vals) {
                 Ok(()) => 0,
                 Err(_) => -LinuxError::EFAULT.code() as isize,
             }

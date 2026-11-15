@@ -276,7 +276,7 @@ pub fn write_user_value_array<T: IntoUserAbi>(
     user_addr: usize,
     values: &[T],
 ) -> AxResult<()> {
-    write_user_slice_with(user_addr, values, |addr, bytes| {
+    pulse_user_abi::write_user_array_sequential_with(user_addr, values, |addr, bytes| {
         process.write_user_bytes_partial(addr, bytes)
     })
 }
