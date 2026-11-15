@@ -260,6 +260,17 @@ pub fn read_user_value_array<T: FromUserAbi>(
     })
 }
 
+/// Reads each element separately, preserving legacy allocation and fault order.
+pub fn read_user_value_array_sequential<T: FromUserAbi>(
+    process: &Process,
+    user_addr: usize,
+    count: usize,
+) -> AxResult<Vec<T>> {
+    pulse_user_abi::read_user_array_sequential_with(user_addr, count, |addr, bytes| {
+        process.read_user_bytes_partial(addr, bytes)
+    })
+}
+
 pub fn write_user_value_array<T: IntoUserAbi>(
     process: &Process,
     user_addr: usize,

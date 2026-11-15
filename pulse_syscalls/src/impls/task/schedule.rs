@@ -9,7 +9,7 @@ use pulse_core::task::{
     Process, Thread, current_process, current_thread, processes_snapshot, thread_by_tid_global,
 };
 
-use crate::impls::utils::{alloc_zeroed_bytes, read_user_bytes, write_user_bytes};
+use crate::impls::utils::{alloc_zeroed_bytes, read_user_bytes, read_user_value, write_user_bytes};
 
 const RT_PRIORITY_MIN: isize = 1;
 const RT_PRIORITY_MAX: isize = 99;
@@ -35,6 +35,19 @@ struct SchedAttr {
     sched_runtime: u64,
     sched_deadline: u64,
     sched_period: u64,
+}
+
+pulse_user_abi::impl_user_abi_struct! {
+    for SchedAttr, size = 48 => {
+        size: u32,
+        sched_policy: u32,
+        sched_flags: u64,
+        sched_nice: i32,
+        sched_priority: u32,
+        sched_runtime: u64,
+        sched_deadline: u64,
+        sched_period: u64,
+    }
 }
 
 fn kernel_cpumask_bytes() -> usize {
@@ -311,17 +324,10 @@ pub fn sys_sched_setparam(pid: usize, param_ptr: usize) -> isize {
         return -LinuxError::EFAULT.code() as isize;
     }
 
-    let mut sched_priority: i32 = 0;
-    if read_user_bytes(param_ptr, unsafe {
-        core::slice::from_raw_parts_mut(
-            &mut sched_priority as *mut i32 as *mut u8,
-            core::mem::size_of::<i32>(),
-        )
-    })
-    .is_err()
-    {
-        return -LinuxError::EFAULT.code() as isize;
-    }
+    let sched_priority: i32 = match read_user_value(param_ptr) {
+        Ok(priority) => priority,
+        Err(_) => return -LinuxError::EFAULT.code() as isize,
+    };
 
     if sched_priority < 0 || sched_priority > 99 {
         return -LinuxError::EINVAL.code() as isize;
@@ -349,17 +355,10 @@ pub fn sys_sched_setscheduler(pid: usize, policy: usize, param_ptr: usize) -> is
         return -LinuxError::EINVAL.code() as isize;
     }
 
-    let mut sched_priority: i32 = 0;
-    if read_user_bytes(param_ptr, unsafe {
-        core::slice::from_raw_parts_mut(
-            &mut sched_priority as *mut i32 as *mut u8,
-            core::mem::size_of::<i32>(),
-        )
-    })
-    .is_err()
-    {
-        return -LinuxError::EFAULT.code() as isize;
-    }
+    let sched_priority: i32 = match read_user_value(param_ptr) {
+        Ok(priority) => priority,
+        Err(_) => return -LinuxError::EFAULT.code() as isize,
+    };
 
     if policy as u32 == SCHED_FIFO || policy as u32 == SCHED_RR {
         if sched_priority < 1 || sched_priority > 99 {
@@ -448,26 +447,10 @@ pub fn sys_sched_setattr(pid: usize, attr: usize, flags: usize) -> isize {
         return -LinuxError::EFAULT.code() as isize;
     }
 
-    let mut user_attr = SchedAttr {
-        size: 0,
-        sched_policy: 0,
-        sched_flags: 0,
-        sched_nice: 0,
-        sched_priority: 0,
-        sched_runtime: 0,
-        sched_deadline: 0,
-        sched_period: 0,
+    let user_attr: SchedAttr = match read_user_value(attr) {
+        Ok(attr) => attr,
+        Err(_) => return -LinuxError::EFAULT.code() as isize,
     };
-    if read_user_bytes(attr, unsafe {
-        core::slice::from_raw_parts_mut(
-            &mut user_attr as *mut SchedAttr as *mut u8,
-            core::mem::size_of::<SchedAttr>(),
-        )
-    })
-    .is_err()
-    {
-        return -LinuxError::EFAULT.code() as isize;
-    }
 
     if user_attr.size < SCHED_ATTR_SIZE {
         return -LinuxError::EINVAL.code() as isize;

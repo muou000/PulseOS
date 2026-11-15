@@ -404,7 +404,7 @@ pub fn sys_prlimit64(pid: i32, resource: usize, new_limit: usize, old_limit: usi
     };
 
     if new_limit != 0 {
-        let new_rlim: rlimit64 = match uaccess::read_user_plain(process.as_ref(), new_limit) {
+        let new_rlim: rlimit64 = match uaccess::read_user_value(process.as_ref(), new_limit) {
             Ok(v) => v,
             Err(_) => return -LinuxError::EFAULT.code() as isize,
         };
@@ -571,6 +571,14 @@ struct RiscvHwprobe {
 }
 
 #[cfg(target_arch = "riscv64")]
+pulse_user_abi::impl_user_abi_struct! {
+    for RiscvHwprobe, size = 16 => {
+        key: i64,
+        value: u64,
+    }
+}
+
+#[cfg(target_arch = "riscv64")]
 pub fn sys_riscv_hwprobe(
     pairs_addr: usize,
     pair_count: usize,
@@ -610,7 +618,7 @@ pub fn sys_riscv_hwprobe(
         }
 
         let mut pairs =
-            match uaccess::read_user_plain_array::<RiscvHwprobe>(process, pairs_addr, pair_count) {
+            match uaccess::read_user_value_array_sequential::<RiscvHwprobe>(process, pairs_addr, pair_count) {
                 Ok(p) => p,
                 Err(e) => return Err(e),
             };

@@ -5,12 +5,7 @@ use axlog::*;
 use super::{addr::{NetSocketAddr, write_unix_addr}, get_socket};
 use pulse_core::net::SocketInner;
 
-fn read_user_plain<T: Copy>(user_addr: usize) -> Result<T, LinuxError> {
-    crate::impls::utils::with_process(|process| {
-        pulse_core::task::uaccess::read_user_plain(process, user_addr)
-    })?
-    .map_err(|e| LinuxError::from(e.canonicalize()))
-}
+use crate::impls::utils::read_user_value;
 
 fn write_user_plain<T: Copy>(user_addr: usize, value: &T) -> Result<(), LinuxError> {
     crate::impls::utils::with_process(|process| {
@@ -52,7 +47,7 @@ pub fn sys_getsockname(fd: usize, addr: usize, addrlen: usize) -> isize {
         if addrlen == 0 {
             return -(LinuxError::EFAULT.code() as isize);
         }
-        let alen: u32 = match read_user_plain(addrlen) {
+        let alen: u32 = match read_user_value(addrlen) {
             Ok(l) => l,
             Err(e) => return -(e.code() as isize),
         };
@@ -92,7 +87,7 @@ pub fn sys_getsockname(fd: usize, addr: usize, addrlen: usize) -> isize {
     if addrlen == 0 {
         return -(LinuxError::EFAULT.code() as isize);
     }
-    let mut alen: u32 = match read_user_plain(addrlen) {
+    let mut alen: u32 = match read_user_value(addrlen) {
         Ok(l) => l,
         Err(e) => return -(e.code() as isize),
     };
@@ -144,7 +139,7 @@ pub fn sys_getpeername(fd: usize, addr: usize, addrlen: usize) -> isize {
         if addrlen == 0 {
             return -(LinuxError::EFAULT.code() as isize);
         }
-        let alen: u32 = match read_user_plain(addrlen) {
+        let alen: u32 = match read_user_value(addrlen) {
             Ok(l) => l,
             Err(e) => return -(e.code() as isize),
         };
@@ -171,7 +166,7 @@ pub fn sys_getpeername(fd: usize, addr: usize, addrlen: usize) -> isize {
     if addrlen == 0 {
         return -(LinuxError::EFAULT.code() as isize);
     }
-    let mut alen: u32 = match read_user_plain(addrlen) {
+    let mut alen: u32 = match read_user_value(addrlen) {
         Ok(l) => l,
         Err(e) => return -(e.code() as isize),
     };
