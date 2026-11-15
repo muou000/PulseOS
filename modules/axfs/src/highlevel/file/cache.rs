@@ -624,8 +624,11 @@ pub(super) async fn write_slice_source_at_async(
     if data.is_empty() {
         return Ok(0);
     }
-    write_all_at_async(file, data, offset).await?;
-    Ok(data.len())
+    let written = file.write_at(data, offset).await?;
+    if written > data.len() {
+        return Err(VfsError::Io);
+    }
+    Ok(written)
 }
 
 pub(super) async fn append_slice_source_async(
@@ -709,15 +712,30 @@ pub(super) async fn write_source_at_async<R: Read + IoBuf>(
     let mut written = 0usize;
     while written < total {
         let wanted = (total - written).min(staging.len());
-        let read = source.read(&mut staging[..wanted])?;
-        if read == 0 || read > wanted {
-            return Err(VfsError::Io);
+        let read = match source.read(&mut staging[..wanted]) {
+            Ok(read) if read <= wanted => read,
+            Ok(_) if written == 0 => return Err(VfsError::Io),
+            Err(error) if written == 0 => return Err(error.into()),
+            _ => break,
+        };
+        if read == 0 {
+            break;
         }
+        #[cfg(feature = "file-io-test")]
+        super::io_test::staged_bytes(read);
         let current_offset = offset
             .checked_add(written as u64)
             .ok_or(VfsError::InvalidInput)?;
-        write_all_at_async(file, &staging[..read], current_offset).await?;
-        written += read;
+        match write_slice_source_at_async(file, &staging[..read], current_offset).await {
+            Ok(count) => {
+                written += count;
+                if count < read {
+                    break;
+                }
+            }
+            Err(error) if written == 0 => return Err(error),
+            Err(_) => break,
+        }
     }
     Ok(written)
 }
@@ -1294,6 +1312,11 @@ pub(super) struct CachedFileShared {
     evict_listeners: Mutex<Vec<Arc<EvictListener>>>,
     backing: Option<FileNode>,
     pub(super) io_lock: async_lock::RwLock<()>,
+    // Whole write operations coordinate here; fault preparation and writeback
+    // deliberately use only io_lock/page_access. In particular an append may
+    // fault its next user-buffer window from this same file while retaining
+    // this guard. Ordinary writes share it; append and truncate are exclusive.
+    write_operation: Arc<async_lock::RwLock<()>>,
     size: AtomicU64,
     cache_generation: AtomicU64,
     // A per-file generation keeps the background task from taking every
@@ -1353,6 +1376,15 @@ enum CachedWriteAccess {
     ExclusiveFileHeld,
 }
 
+pub(super) struct FileWriteGuard {
+    _shared: Option<async_lock::RwLockReadGuardArc<()>>,
+    _exclusive: Option<async_lock::RwLockWriteGuardArc<()>>,
+    // A direct handle does not otherwise retain CachedFileShared. Keeping only
+    // the lock Arc would let cache reclamation replace the weak registry entry
+    // and create a second coordination lock for the same file mid-operation.
+    _state: Arc<CachedFileShared>,
+}
+
 impl CachedFileShared {
     fn new(fs_id: usize, in_memory: bool, size: u64, backing: Option<FileNode>) -> Self {
         Self {
@@ -1369,6 +1401,7 @@ impl CachedFileShared {
             evict_listeners: Mutex::new(Vec::new()),
             backing,
             io_lock: async_lock::RwLock::new(()),
+            write_operation: Arc::new(async_lock::RwLock::new(())),
             size: AtomicU64::new(size),
             cache_generation: AtomicU64::new(0),
             writeback_generation: AtomicU64::new(0),
@@ -1376,6 +1409,22 @@ impl CachedFileShared {
             writable_mapping_watch: AtomicBool::new(false),
             unlinked: AtomicBool::new(false),
             mmap_prefetch: MmapPrefetchState::new(),
+        }
+    }
+
+    pub(super) async fn begin_write_operation(self: &Arc<Self>, exclusive: bool) -> FileWriteGuard {
+        if exclusive {
+            FileWriteGuard {
+                _shared: None,
+                _exclusive: Some(self.write_operation.write_arc().await),
+                _state: self.clone(),
+            }
+        } else {
+            FileWriteGuard {
+                _shared: Some(self.write_operation.read_arc().await),
+                _exclusive: None,
+                _state: self.clone(),
+            }
         }
     }
 
@@ -2457,6 +2506,14 @@ pub struct CachedFile {
 }
 
 impl CachedFile {
+    pub(super) async fn begin_write_operation(&self, exclusive: bool) -> FileWriteGuard {
+        self.shared.begin_write_operation(exclusive).await
+    }
+
+    pub(super) fn append_offset(&self) -> u64 {
+        self.shared.size()
+    }
+
     pub async fn get_or_create_async(location: Location) -> VfsResult<Self> {
         if !node_allows_page_cache(location.flags()) {
             return Err(VfsError::OperationNotSupported);
@@ -3248,11 +3305,21 @@ impl CachedFile {
             let page_offset = (current % PAGE_SIZE as u64) as usize;
             let len = (data.len() - copied).min(PAGE_SIZE - page_offset);
             let skip_read = page_offset == 0 && len == PAGE_SIZE;
-            self.ensure_write_page_async(file, pn, skip_read, original_len)
-                .await?;
+            if let Err(error) = self
+                .ensure_write_page_async(file, pn, skip_read, original_len)
+                .await
+            {
+                return if copied == 0 { Err(error) } else { Ok(copied) };
+            }
 
             let mut cache = self.shared.page_cache.lock();
-            let page = cache.get_mut(&pn).ok_or(VfsError::Io)?;
+            let Some(page) = cache.get_mut(&pn) else {
+                return if copied == 0 {
+                    Err(VfsError::Io)
+                } else {
+                    Ok(copied)
+                };
+            };
             page.data()[page_offset..page_offset + len]
                 .copy_from_slice(&data[copied..copied + len]);
             if !self.in_memory {
@@ -3340,7 +3407,12 @@ impl CachedFile {
                 )
                 .await;
             match result {
-                Ok(count) => written += count,
+                Ok(count) => {
+                    written += count;
+                    if count < chunk_len {
+                        break;
+                    }
+                }
                 Err(err) if written == 0 => return Err(err),
                 Err(_) => break,
             }
@@ -3374,6 +3446,8 @@ impl CachedFile {
                 Err(err) if written == 0 => return Err(err.into()),
                 Err(_) => break,
             };
+            #[cfg(feature = "file-io-test")]
+            super::io_test::staged_bytes(read);
             let current_offset = offset
                 .checked_add(written as u64)
                 .ok_or(VfsError::InvalidInput)?;
@@ -3381,7 +3455,12 @@ impl CachedFile {
                 .write_slice_chunk_with_access_async(file, &staging[..read], current_offset, access)
                 .await;
             match result {
-                Ok(count) => written += count,
+                Ok(count) => {
+                    written += count;
+                    if count < read {
+                        break;
+                    }
+                }
                 Err(err) if written == 0 => return Err(err),
                 Err(_) => break,
             }
@@ -3390,16 +3469,35 @@ impl CachedFile {
     }
 
     pub async fn write_at_async(&self, buf: impl Read + IoBuf, offset: u64) -> VfsResult<usize> {
+        let _operation = self.begin_write_operation(false).await;
+        self.write_at_in_operation(buf, offset).await
+    }
+
+    pub(super) async fn write_at_in_operation(
+        &self,
+        buf: impl Read + IoBuf,
+        offset: u64,
+    ) -> VfsResult<usize> {
         self.write_at_locked_async(buf, offset, CachedWriteAccess::PageRange)
             .await
     }
 
     pub async fn write_at_slice_async(&self, data: &[u8], offset: u64) -> VfsResult<usize> {
+        let _operation = self.begin_write_operation(false).await;
+        self.write_at_slice_in_operation(data, offset).await
+    }
+
+    pub(super) async fn write_at_slice_in_operation(
+        &self,
+        data: &[u8],
+        offset: u64,
+    ) -> VfsResult<usize> {
         self.write_slice_locked_async(data, offset, CachedWriteAccess::PageRange)
             .await
     }
 
     pub async fn append_async(&self, buf: impl Read + IoBuf) -> VfsResult<(usize, u64)> {
+        let _operation = self.begin_write_operation(true).await;
         let _guard = self.shared.io_lock.write().await;
         let len = self.shared.size();
         let written = self
@@ -3412,6 +3510,7 @@ impl CachedFile {
     }
 
     pub async fn append_slice_async(&self, data: &[u8]) -> VfsResult<(usize, u64)> {
+        let _operation = self.begin_write_operation(true).await;
         let _guard = self.shared.io_lock.write().await;
         let len = self.shared.size();
         let written = self
@@ -3424,6 +3523,7 @@ impl CachedFile {
     }
 
     pub async fn set_len_async(&self, len: u64) -> VfsResult<()> {
+        let _operation = self.begin_write_operation(true).await;
         let _guard = self.shared.io_lock.write().await;
         let file = self.inner.entry().as_file()?;
         let old_len = self.shared.size();

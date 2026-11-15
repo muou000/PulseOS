@@ -10,6 +10,10 @@ mod net;
 mod task;
 mod time;
 mod utils;
+#[cfg(feature = "file-io-test")]
+mod file_io_test;
+#[cfg(feature = "file-io-test")]
+mod file_io_layout;
 
 pub(crate) use bpf::*;
 #[cfg(feature = "guest-checks")]

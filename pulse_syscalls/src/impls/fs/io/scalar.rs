@@ -38,6 +38,9 @@ pub fn sys_read(fd: usize, buf: usize, count: usize) -> isize {
         }
     }
     let file_obj = object.as_any().downcast_ref::<FileObject>();
+    if let Some(file) = file_obj.filter(|file| file.supports_file_io()) {
+        return super::regular::read(file, &[UserIoSegment { addr: buf, len: count }], None);
+    }
     if let Some(file_obj) = file_obj {
         if file_obj.inner().is_direct_regular_file() {
             let block_size = file_obj.inner().block_size() as usize;
@@ -184,6 +187,13 @@ pub fn sys_pread64(fd: usize, buf: usize, count: usize, offset: usize) -> isize 
     }
     let object = entry.object;
     let file_obj = object.as_any().downcast_ref::<FileObject>();
+    if let Some(file) = file_obj.filter(|file| file.supports_file_io()) {
+        return super::regular::read(
+            file,
+            &[UserIoSegment { addr: buf, len: count }],
+            Some(offset as u64),
+        );
+    }
     if let Some(file_obj) = file_obj {
         if file_obj.inner().is_direct_regular_file() {
             let block_size = file_obj.inner().block_size() as usize;

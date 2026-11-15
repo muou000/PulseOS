@@ -1,0 +1,14 @@
+[package]
+name = "axfs-io-host"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[workspace]
+
+[dev-dependencies]
+async-lock = { version = "3.4", default-features = false }
+futures-lite = "2"
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(feature, values("file-io-test"))'] }

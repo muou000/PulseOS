@@ -235,6 +235,7 @@ sched-eevdf = ["axfeat/sched-eevdf"]
 sched-load-balance = ["axfeat/sched-load-balance"]
 mapping-lifecycle-test = ["pulse_core/mapping-lifecycle-test", "pulse_syscalls/mapping-lifecycle-test"]
 guest-checks = ["pulse_core/guest-checks", "pulse_syscalls/guest-checks"]
+file-io-test = ["pulse_syscalls/file-io-test"]
 bpf-trace = [
     "axfeat/bpf-trace",
     "axtask/bpf-trace",
