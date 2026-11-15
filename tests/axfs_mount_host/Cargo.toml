@@ -1,0 +1,16 @@
+[package]
+name = "axfs-mount-host"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[workspace]
+
+[dev-dependencies]
+axfs-ng-vfs = { path = "../../modules/axfs-ng-vfs" }
+async-trait = "0.1"
+kspin = { version = "0.1", features = ["smp"] }
+spin = "0.10"
+
+[patch.crates-io]
+axpoll = { path = "../../modules/axpoll" }
