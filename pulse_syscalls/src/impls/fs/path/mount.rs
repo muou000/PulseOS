@@ -474,10 +474,6 @@ pub fn sys_mount(
         }
     }
 
-    if axfs::lookup_mounted_mountpoint(&target_path).is_some() {
-        return -LinuxError::EBUSY.code() as isize;
-    }
-
     let source_path = match read_user_optional_path(source) {
         Ok(Some(path)) => path,
         Ok(None) => "none".to_string(),
@@ -496,84 +492,35 @@ pub fn sys_mount(
         fstype_name
     );
 
-    let fs_res = match mount_source_candidates(&ctx, &source_path) {
-        Ok(candidates) => {
-            let mut res = Err(LinuxError::ENOENT);
-            for cand in candidates {
+    let result = axfs::mount_filesystem(
+        &target_loc,
+        &source_path,
+        &fstype_name,
+        _flags,
+        || {
+            let candidates = mount_source_candidates(&ctx, &source_path)
+                .map_err(axfs_ng_vfs::VfsError::from)?;
+            for candidate in candidates {
                 axlog::debug!(
                     "sys_mount: probing candidate '{}' with fstype '{}'",
-                    cand,
+                    candidate,
                     fstype_name
                 );
-                match lookup_or_probe_fs(&ctx, &cand, &fstype_name) {
-                    Ok(fs) => {
-                        res = Ok(fs);
-                        break;
-                    }
-                    Err(e) => {
-                        axlog::debug!("sys_mount: probing candidate '{}' failed: {:?}", cand, e);
-                        res = Err(e);
-                    }
+                match lookup_or_probe_fs(&ctx, &candidate, &fstype_name) {
+                    Ok(fs) => return Ok(fs),
+                    Err(e) => axlog::debug!(
+                        "sys_mount: probing candidate '{}' failed: {:?}",
+                        candidate,
+                        e
+                    ),
                 }
             }
-            if res.is_err() {
-                axlog::debug!(
-                    "sys_mount: falling back to source '{}' with fstype '{}'",
-                    source_path,
-                    fstype_name
-                );
-                match lookup_or_probe_fs(&ctx, &source_path, &fstype_name) {
-                    Ok(fs) => res = Ok(fs),
-                    Err(e) => res = Err(e),
-                }
-            }
-            res
-        }
-        Err(e) => return -e.code() as isize,
-    };
-
-    let fs = match fs_res {
-        Ok(fs) => fs,
-        Err(e) => {
-            axlog::debug!(
-                "sys_mount: failed to find filesystem for source '{}', fstype '{}': {:?}",
-                source_path,
-                fstype_name,
-                e
-            );
-            return -e.code() as isize;
-        }
-    };
-    axlog::debug!(
-        "sys_mount: found filesystem, proceeding to mount on '{}'",
-        target_path
+            lookup_or_probe_fs(&ctx, &source_path, &fstype_name)
+                .map_err(axfs_ng_vfs::VfsError::from)
+        },
     );
-    let mount_dir = target_loc;
-
-    axlog::debug!("sys_mount: target directory resolved, performing mount operation");
-    match mount_dir.mount(&fs) {
-        Ok(mountpoint) => {
-            axlog::debug!("sys_mount: mount successful on '{}'", target_path);
-
-            // Set readonly status
-            mountpoint.set_readonly(is_rdonly);
-            mountpoint.set_flags(_flags);
-
-            axfs::register_mounted_mountpoint(&target_path, mountpoint.clone());
-            let options = if is_rdonly {
-                "ro,relatime"
-            } else {
-                "rw,relatime"
-            };
-            axfs::register_mount_for_mountpoint(
-                &source_path,
-                &target_path,
-                &fstype_name,
-                options,
-                mountpoint.clone(),
-            );
-            0
-        }
+    match result {
+        Ok(_) => 0,
         Err(e) => {
             axlog::debug!("sys_mount: mount operation failed: {:?}", e);
             -LinuxError::from(e.canonicalize()).code() as isize
@@ -659,7 +606,7 @@ pub fn sys_umount2(target: usize, flags: usize) -> isize {
             let res = if is_detach {
                 root_loc.unmount_all()
             } else {
-                root_loc.unmount()
+                axfs::unmount_filesystem(&root_loc)
             };
             match res {
                 Ok(()) => {
@@ -667,8 +614,6 @@ pub fn sys_umount2(target: usize, flags: usize) -> isize {
                         for detached_mp in detached_subtree {
                             axfs::unregister_mountpoint_records(&detached_mp);
                         }
-                    } else {
-                        axfs::unregister_mountpoint_records(&peer_mp);
                     }
                 }
                 Err(e) => {
@@ -690,7 +635,7 @@ pub fn sys_umount2(target: usize, flags: usize) -> isize {
     let result = if is_detach {
         target_loc.unmount_all()
     } else {
-        target_loc.unmount()
+        axfs::unmount_filesystem(&target_loc)
     };
 
     match result {
@@ -699,8 +644,6 @@ pub fn sys_umount2(target: usize, flags: usize) -> isize {
                 for detached_mp in detached_subtree {
                     axfs::unregister_mountpoint_records(&detached_mp);
                 }
-            } else {
-                axfs::unregister_mountpoint_records(&target_mp);
             }
             0
         }
