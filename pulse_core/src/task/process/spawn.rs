@@ -64,7 +64,7 @@ impl Process {
             let child_tid = child_tid as u32;
             self.write_user_bytes(addr, &child_tid.to_ne_bytes())?;
         }
-        let child_thread = Thread::new(child_proc.clone(), child_tid, inner.id().as_u64());
+        let child_thread = Thread::new(child_proc.clone(), child_tid, inner.id());
         task::register_thread_global(child_tid, child_thread.clone());
         if let Ok(parent_thread) = current_thread() {
             child_thread.set_signal_blocked_mask(parent_thread.signal_blocked_mask());
@@ -142,7 +142,7 @@ impl Process {
             }
         }
 
-        let child_thread = Thread::new(child_proc.clone(), child_tid, inner.id().as_u64());
+        let child_thread = Thread::new(child_proc.clone(), child_tid, inner.id());
         task::register_thread_global(child_tid, child_thread.clone());
         if let Ok(parent_thread) = current_thread() {
             child_thread.set_signal_blocked_mask(parent_thread.signal_blocked_mask());

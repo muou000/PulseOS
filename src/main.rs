@@ -124,8 +124,7 @@ fn main() {
     let init_tid = 1;
     match pulse_core::task::Process::new_uspace(init_tid) {
         Ok(proc) => {
-            let init_thread =
-                pulse_core::task::Thread::new(proc.clone(), init_tid, inner.id().as_u64());
+            let init_thread = pulse_core::task::Thread::new(proc.clone(), init_tid, inner.id());
             pulse_core::task::register_thread_global(init_tid, init_thread.clone());
             info!("Created initial user process");
 

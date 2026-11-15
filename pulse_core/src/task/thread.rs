@@ -7,7 +7,7 @@ use core::{
 use axerrno::{AxError, AxResult};
 use axhal::context::TrapFrame;
 use axtask::{
-    AxTaskRef, AxTaskWeak, TaskExtSwitch, WaitQueue, WakeContext, WakeSource, def_task_ext,
+    AxTaskRef, AxTaskWeak, TaskExtSwitch, TaskId, WaitQueue, WakeContext, WakeSource, def_task_ext,
 };
 use kspin::SpinNoIrq;
 use linux_raw_sys::general::SCHED_NORMAL;
@@ -93,13 +93,13 @@ impl Deref for ThreadHandle {
 
 impl Thread {
     /// Creates a logical user thread bound to an immutable scheduler task ID.
-    pub fn new(process: Arc<Process>, tid: u64, task_id: u64) -> Arc<Self> {
+    pub fn new(process: Arc<Process>, tid: u64, task_id: TaskId) -> Arc<Self> {
         Arc::new(Self {
             tid: AtomicU64::new(tid),
             signal: ThreadSignal::new(process.signal_shared()),
             process_weak: Arc::downgrade(&process),
             sampling_pid: process.pid(),
-            sampling_task_id: task_id,
+            sampling_task_id: task_id.as_u64(),
             sampling_clock: Mutex::new(super::sampling_clock::OnCpuClock::new()),
             exec_exit_requested: AtomicBool::new(false),
             clear_child_tid: AtomicUsize::new(0),
