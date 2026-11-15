@@ -27,7 +27,10 @@ use spin::Lazy;
 
 mod disk;
 pub mod fs;
+mod mounts;
 
+pub use mounts::*;
+use mounts::{reset_mount_records, reset_mounted_mountpoints};
 
 pub use disk::{flush_all_disks, flush_all_disks_async};
 pub use fs::{
@@ -119,10 +122,7 @@ async fn flush_registered_filesystems_and_disks(
         let root = cx.root_dir().clone();
         roots.insert(filesystem_id(root.filesystem()), root);
     }
-    let mps: Vec<Arc<axfs_ng_vfs::Mountpoint>> = {
-        let guard = MOUNTED_MOUNTPOINTS.lock();
-        guard.iter().map(|(_, mp)| mp.clone()).collect()
-    };
+    let mps = mounts::mounted_mountpoints();
     for mp in mps {
         let root = mp.root_location();
         roots
@@ -193,52 +193,17 @@ pub use fs::ext4;
 mod highlevel;
 pub use highlevel::*;
 
-#[derive(Clone, Debug)]
-pub struct MountRecord {
-    pub source: String,
-    pub target: String,
-    pub fs_type: String,
-    pub options: String,
-    mountpoint: Option<Arc<axfs_ng_vfs::Mountpoint>>,
-}
-
 // These registries are inspected from syscall/task context.  A preemptible
 // raw spin lock can strand its owner on a single CPU while a cleanup task
 // spins, so keep the short bookkeeping sections preemption-safe.
-static MOUNT_RECORDS: Lazy<SpinNoPreempt<Vec<MountRecord>>> =
-    Lazy::new(|| SpinNoPreempt::new(Vec::new()));
 static MOUNTABLE_FILESYSTEMS: Lazy<SpinNoPreempt<BTreeMap<String, axfs_ng_vfs::Filesystem>>> =
     Lazy::new(|| SpinNoPreempt::new(BTreeMap::new()));
-static MOUNTED_MOUNTPOINTS: Lazy<SpinNoPreempt<Vec<(String, Arc<axfs_ng_vfs::Mountpoint>)>>> =
-    Lazy::new(|| SpinNoPreempt::new(Vec::new()));
 static PINNED_MOUNTPOINTS: Lazy<SpinNoPreempt<Vec<Arc<axfs_ng_vfs::Mountpoint>>>> =
     Lazy::new(|| SpinNoPreempt::new(Vec::new()));
-
-fn normalize_target(target: &str) -> String {
-    if target.is_empty() || target == "/" {
-        "/".to_string()
-    } else if target.starts_with('/') {
-        target.to_string()
-    } else {
-        format!("/{}", target)
-    }
-}
-
-fn reset_mount_records() {
-    MOUNT_RECORDS.lock().clear();
-}
 
 fn reset_mountable_filesystems() {
     let cleared = {
         let mut guard = MOUNTABLE_FILESYSTEMS.lock();
-        core::mem::take(&mut *guard)
-    };
-    drop(cleared);
-}
-
-fn reset_mounted_mountpoints() {
-    let cleared = {
-        let mut guard = MOUNTED_MOUNTPOINTS.lock();
         core::mem::take(&mut *guard)
     };
     drop(cleared);
@@ -256,97 +221,6 @@ fn pin_mountpoint(mountpoint: Arc<axfs_ng_vfs::Mountpoint>) {
     PINNED_MOUNTPOINTS.lock().push(mountpoint);
 }
 
-pub fn register_mount(source: &str, target: &str, fs_type: &str, options: &str) {
-    register_mount_record(source, target, fs_type, options, None);
-}
-
-fn register_mount_record(
-    source: &str,
-    target: &str,
-    fs_type: &str,
-    options: &str,
-    mountpoint: Option<Arc<axfs_ng_vfs::Mountpoint>>,
-) {
-    let target = normalize_target(target);
-    let mut mounts = MOUNT_RECORDS.lock();
-    mounts.push(MountRecord {
-        source: source.to_string(),
-        target,
-        fs_type: fs_type.to_string(),
-        options: options.to_string(),
-        mountpoint,
-    });
-}
-
-/// Register a mount record owned by a concrete VFS mountpoint.
-///
-/// Remounts update the existing record for that mountpoint. This keeps the
-/// mount-record stack aligned with the VFS mount stack while still allowing
-/// legitimate stacked mounts at the same pathname.
-pub fn register_mount_for_mountpoint(
-    source: &str,
-    target: &str,
-    fs_type: &str,
-    options: &str,
-    mountpoint: Arc<axfs_ng_vfs::Mountpoint>,
-) {
-    let target = normalize_target(target);
-    let mut mounts = MOUNT_RECORDS.lock();
-    if let Some(record) = mounts.iter_mut().rfind(|record| {
-        record.target == target
-            && record
-                .mountpoint
-                .as_ref()
-                .is_some_and(|existing| Arc::ptr_eq(existing, &mountpoint))
-    }) {
-        record.source = source.to_string();
-        record.fs_type = fs_type.to_string();
-        record.options = options.to_string();
-        return;
-    }
-    mounts.push(MountRecord {
-        source: source.to_string(),
-        target,
-        fs_type: fs_type.to_string(),
-        options: options.to_string(),
-        mountpoint: Some(mountpoint),
-    });
-}
-
-pub fn unregister_mount(target: &str) -> bool {
-    let target = normalize_target(target);
-    if target == "/" {
-        return false;
-    }
-    let mut mounts = MOUNT_RECORDS.lock();
-    if let Some(index) = mounts.iter().rposition(|m| m.target == target) {
-        mounts.remove(index);
-        true
-    } else {
-        false
-    }
-}
-
-pub fn is_mount_registered(target: &str) -> bool {
-    let target = normalize_target(target);
-    MOUNT_RECORDS.lock().iter().any(|m| m.target == target)
-}
-
-pub fn list_mounts() -> Vec<MountRecord> {
-    MOUNT_RECORDS.lock().clone()
-}
-
-/// Returns whether this mountpoint was created as a bind mount.
-pub fn mountpoint_is_bind(mountpoint: &Arc<axfs_ng_vfs::Mountpoint>) -> bool {
-    MOUNT_RECORDS.lock().iter().any(|record| {
-        record
-            .mountpoint
-            .as_ref()
-            .is_some_and(|existing| Arc::ptr_eq(existing, mountpoint))
-            && record.options.split(',').any(|option| option == "bind")
-    })
-}
-
 pub fn register_mountable_filesystem(source: &str, fs: &axfs_ng_vfs::Filesystem) {
     MOUNTABLE_FILESYSTEMS
         .lock()
@@ -355,26 +229,6 @@ pub fn register_mountable_filesystem(source: &str, fs: &axfs_ng_vfs::Filesystem)
 
 pub fn lookup_mountable_filesystem(source: &str) -> Option<axfs_ng_vfs::Filesystem> {
     MOUNTABLE_FILESYSTEMS.lock().get(source).cloned()
-}
-
-pub fn register_mounted_mountpoint(target: &str, mountpoint: Arc<axfs_ng_vfs::Mountpoint>) {
-    let target = normalize_target(target);
-    let mut mps = MOUNTED_MOUNTPOINTS.lock();
-    if mps.iter().any(|(existing_target, existing)| {
-        existing_target == &target && Arc::ptr_eq(existing, &mountpoint)
-    }) {
-        return;
-    }
-    mps.push((target, mountpoint));
-}
-
-pub fn lookup_mounted_mountpoint(target: &str) -> Option<Arc<axfs_ng_vfs::Mountpoint>> {
-    let target = normalize_target(target);
-    MOUNTED_MOUNTPOINTS
-        .lock()
-        .iter()
-        .rfind(|(t, _)| t == &target)
-        .map(|(_, m)| m.clone())
 }
 
 pub fn find_free_loop_device() -> Option<usize> {
@@ -471,139 +325,6 @@ pub fn probe_block_device(
     let fs = axtask::future::block_on(fs::new_default(disk.clone()))?;
     register_mountable_device(path, path, &fs);
     Ok(fs)
-}
-
-pub fn unregister_mounted_mountpoint(target: &str) -> bool {
-    let target = normalize_target(target);
-    let mut mps = MOUNTED_MOUNTPOINTS.lock();
-    if let Some(index) = mps.iter().rposition(|(t, _)| t == &target) {
-        let removed = mps.remove(index);
-        drop(mps);
-        drop(removed);
-        true
-    } else {
-        false
-    }
-}
-
-/// Remove the registry entry for the exact VFS mountpoint that was unmounted.
-///
-/// A propagated bind mount can share its pathname with another stacked mount.
-/// Removing by pathname alone can therefore pop the wrong registry entry and
-/// leave `/proc/mounts` pointing at a mount that no longer exists.
-pub fn unregister_mounted_mountpoint_exact(
-    target: &str,
-    mountpoint: &Arc<axfs_ng_vfs::Mountpoint>,
-) -> bool {
-    let target = normalize_target(target);
-    let mut mps = MOUNTED_MOUNTPOINTS.lock();
-    let removed_mountpoint = if let Some(index) = mps
-        .iter()
-        .rposition(|(t, mp)| t == &target && Arc::ptr_eq(mp, mountpoint))
-    {
-        mps.remove(index);
-        true
-    } else {
-        false
-    };
-    drop(mps);
-
-    let mut mounts = MOUNT_RECORDS.lock();
-    let removed_record = if let Some(index) = mounts.iter().rposition(|record| {
-        record.target == target
-            && record
-                .mountpoint
-                .as_ref()
-                .is_some_and(|existing| Arc::ptr_eq(existing, mountpoint))
-    }) {
-        mounts.remove(index);
-        true
-    } else {
-        false
-    };
-
-    removed_mountpoint || removed_record
-}
-
-/// Remove every bookkeeping entry owned by a VFS mountpoint.
-///
-/// A propagated bind mount can be registered under more than one visible
-/// path, and a lazy unmount removes a whole subtree at once.  Cleaning by one
-/// `(path, Arc)` pair leaves stale `/proc/mounts` rows in either case; the LTP
-/// cleanup loop then keeps retrying those rows forever.  The vectors are
-/// detached before filtering so dropping mount records never happens while a
-/// registry spin lock is held.
-pub fn unregister_mountpoint_records(mountpoint: &Arc<axfs_ng_vfs::Mountpoint>) -> usize {
-    let mut removed_mps = Vec::new();
-    {
-        let mut guard = MOUNTED_MOUNTPOINTS.lock();
-        let entries = core::mem::take(&mut *guard);
-        let mut kept = Vec::with_capacity(entries.len());
-        for entry in entries {
-            if Arc::ptr_eq(&entry.1, mountpoint) {
-                removed_mps.push(entry);
-            } else {
-                kept.push(entry);
-            }
-        }
-        *guard = kept;
-    }
-
-    let mut removed_records = Vec::new();
-    {
-        let mut guard = MOUNT_RECORDS.lock();
-        let records = core::mem::take(&mut *guard);
-        let mut kept = Vec::with_capacity(records.len());
-        for record in records {
-            let owned = record
-                .mountpoint
-                .as_ref()
-                .is_some_and(|existing| Arc::ptr_eq(existing, mountpoint));
-            if owned {
-                removed_records.push(record);
-            } else {
-                kept.push(record);
-            }
-        }
-        *guard = kept;
-    }
-
-    let removed = removed_mps.len() + removed_records.len();
-    drop(removed_mps);
-    drop(removed_records);
-    removed
-}
-
-pub fn rename_mount_registry(old_prefix: &str, new_prefix: &str) {
-    let old_prefix = normalize_target(old_prefix);
-    let new_prefix = normalize_target(new_prefix);
-
-    // 1. Update MOUNT_RECORDS
-    {
-        let mut records = MOUNT_RECORDS.lock();
-        for record in records.iter_mut() {
-            if record.target == old_prefix {
-                record.target = new_prefix.clone();
-            } else if record.target.starts_with(&old_prefix)
-                && record.target[old_prefix.len()..].starts_with('/')
-            {
-                record.target.replace_range(..old_prefix.len(), &new_prefix);
-            }
-        }
-    }
-
-    // 2. Update MOUNTED_MOUNTPOINTS
-    {
-        let mut mps = MOUNTED_MOUNTPOINTS.lock();
-        for (target, _mp) in mps.iter_mut() {
-            if target == &old_prefix {
-                *target = new_prefix.clone();
-            } else if target.starts_with(&old_prefix) && target[old_prefix.len()..].starts_with('/')
-            {
-                target.replace_range(..old_prefix.len(), &new_prefix);
-            }
-        }
-    }
 }
 
 fn disk_node_name(index: usize) -> String {
