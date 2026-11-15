@@ -10,7 +10,7 @@ use crate::framing::{
 };
 use crate::record::NormalizedRecord;
 use crate::schema::{SchemaRegistry, PERF_EVENT_SOFTWARE_ID};
-use crate::session::{SamplingSession, SessionConfig};
+use crate::session::{SamplingSession, SessionConfig, SessionMetadata};
 
 pub const PERF_RECORD_LOST: u32 = 2;
 pub const PERF_RECORD_SAMPLE: u32 = 9;
@@ -128,7 +128,7 @@ impl CaptureWriter {
         {
             return Err(CaptureError::InvalidRecord("invalid recorder configuration or budget"));
         }
-        let metadata = crate::recorder::RecorderMetadata { sources, record_sources: Vec::new() };
+        let metadata = crate::recorder::RecorderMetadata { source_schema_version: 2, sources, record_sources: Vec::new() };
         metadata.validate_sources()?;
         self.recorder = Some(metadata);
         self.recorder_record_budget = record_budget;
@@ -341,6 +341,34 @@ impl CaptureWriter {
         self.ingest_ringbuf_sample(cpu, payload)
     }
 
+    /// Preserve an interrupted recorder's observed data when a final clock or
+    /// quiescence observation is unavailable. Consumes the writer so recording
+    /// cannot resume. Known source windows and diagnostic rows are unchanged;
+    /// stop_ns=0 is explicitly unknown. The absent integrity trailer makes this
+    /// artifact unconditionally truncated to CaptureReader, never complete.
+    /// This also works after a failed finish, even if it advanced session state.
+    pub fn abort_partial_bytes(self) -> Result<Vec<u8>, CaptureError> {
+        let recorder = self.recorder.as_ref()
+            .ok_or(CaptureError::InvalidRecord("abort requires a recorder capture"))?;
+        recorder.validate_sources()?;
+        if recorder.record_sources.len() as u64 != self.records_count {
+            return Err(CaptureError::InvalidRecord("recorder source binding count differs from record count"));
+        }
+        let metadata = SessionMetadata {
+            config: self.config.clone(), start_ns: self.start_ns, stop_ns: 0,
+            status: SessionStatusCode::IncompleteTruncated,
+            counters: self.session.counters().clone(),
+        };
+        let diagnostics = self.diagnostics.as_ref().cloned().unwrap_or_default().to_bytes()?;
+        let mut metadata_buf = self.registry.to_bytes();
+        metadata_buf.extend_from_slice(&metadata.to_bytes());
+        metadata_buf.extend_from_slice(&(diagnostics.len() as u32).to_le_bytes());
+        metadata_buf.extend_from_slice(&diagnostics);
+        metadata_buf.extend_from_slice(&recorder.to_bytes());
+        metadata_buf.extend_from_slice(&REQUIRED_RECORDER_V5.to_le_bytes());
+        Ok(self.frame_capture(&metadata_buf, FORMAT_VERSION_V5, None))
+    }
+
     /// Finalize capture, compute checksums, and emit the complete binary capture file.
     pub fn finish(&mut self, stop_ns: u64) -> Result<Vec<u8>, CaptureError> {
         // A required stack extension always has the diagnostics section defined
@@ -410,6 +438,15 @@ impl CaptureWriter {
             metadata_buf.extend_from_slice(&required.to_le_bytes());
         }
 
+        let mut version = crate::framing::FORMAT_VERSION_V1;
+        if self.diagnostics.is_some() { version = FORMAT_VERSION_V2; }
+        if self.requires_stack_v3 { version = FORMAT_VERSION_V3; }
+        if self.mappings.is_some() { version = FORMAT_VERSION_V4; }
+        if self.recorder.is_some() { version = FORMAT_VERSION_V5; }
+        Ok(self.frame_capture(&metadata_buf, version, Some(metadata.status)))
+    }
+
+    fn frame_capture(&self, metadata_buf: &[u8], version: u32, status: Option<SessionStatusCode>) -> Vec<u8> {
         let metadata_offset = CAPTURE_HEADER_SIZE as u64;
         let metadata_size = metadata_buf.len() as u64;
         let records_offset = metadata_offset + metadata_size;
@@ -418,10 +455,7 @@ impl CaptureWriter {
         let trailer_size = CAPTURE_TRAILER_SIZE as u64;
 
         let mut header = CaptureHeader::new(self.config.target_arch);
-        if self.diagnostics.is_some() { header.format_version = FORMAT_VERSION_V2; }
-        if self.requires_stack_v3 { header.format_version = FORMAT_VERSION_V3; }
-        if self.mappings.is_some() { header.format_version = FORMAT_VERSION_V4; }
-        if self.recorder.is_some() { header.format_version = FORMAT_VERSION_V5; }
+        header.format_version = version;
         header.metadata_offset = metadata_offset;
         header.metadata_size = metadata_size;
         header.records_offset = records_offset;
@@ -430,15 +464,16 @@ impl CaptureWriter {
         header.trailer_offset = trailer_offset;
         header.trailer_size = trailer_size;
 
-        let mut output = Vec::with_capacity((trailer_offset + trailer_size) as usize);
+        let mut output = Vec::with_capacity((trailer_offset + if status.is_some() { trailer_size } else { 0 }) as usize);
         output.extend_from_slice(&header.to_bytes());
-        output.extend_from_slice(&metadata_buf);
+        output.extend_from_slice(metadata_buf);
         output.extend_from_slice(&self.records_buf);
 
-        let checksum = if self.diagnostics.is_some() { compute_checksum_ieee(&output) } else { compute_checksum(&output) };
-        let trailer = CaptureTrailer::new(self.records_count, records_size, checksum, metadata.status);
-        output.extend_from_slice(&trailer.to_bytes());
-
-        Ok(output)
+        if let Some(status) = status {
+            let checksum = if version >= FORMAT_VERSION_V2 { compute_checksum_ieee(&output) } else { compute_checksum(&output) };
+            let trailer = CaptureTrailer::new(self.records_count, records_size, checksum, status);
+            output.extend_from_slice(&trailer.to_bytes());
+        }
+        output
     }
 }

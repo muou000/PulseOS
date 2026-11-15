@@ -151,6 +151,11 @@ impl Fd {
         // SAFETY: dup takes only an owned descriptor and returns a new ownership.
         Self::own(unsafe { raw(23, self.0, 0, 0, 0, 0, 0) }, "dup")
     }
+    pub fn detach_link(&self) -> Result<()> {
+        let mut attr = (self.0 as u32).to_le_bytes();
+        // SAFETY: LINK_DETACH reads only this initialized scalar link FD attr.
+        unsafe { bpf_call(34, &mut attr) }
+    }
     pub fn perf(attr: &[u8; 64], pid: isize, cpu: isize) -> Result<Self> {
         // SAFETY: the entire fixed attr is readable for the synchronous syscall.
         Self::own(
@@ -385,20 +390,36 @@ impl Drop for Signals {
 /// Privately owns exactly one shared mmap. No borrowed reference to its bytes
 /// escapes; users must observe the perf publication protocol before reads.
 pub struct Mapping {
+    // Safety invariant: base is nonzero and page-aligned, and [base,base+size)
+    // is one live shared perf mmap uniquely owned by this value until Drop.
+    // The mapping starts with initialized ABI metadata, including aligned atomic
+    // head/tail fields. No constructor or method exposes the address for unmap.
     base: usize,
+    // Safety invariant: 8192 <= size <= isize::MAX, page-multiple, and
+    // base+size does not wrap. Bytes after the first page are perf ring storage;
+    // only acquired published unread bytes may be copied by Session::drain.
     size: usize,
 }
 impl Mapping {
     pub fn ring(fd: &Fd, size: usize) -> Result<Self> {
-        if size < 8192 || size > isize::MAX as usize {
+        if size < 8192 || size > isize::MAX as usize || size % 4096 != 0 {
             return Err("invalid mmap size".into());
         }
         // SAFETY: null hint, shared owned file mapping; no fixed mappings replace Rust data.
         let base = checked("mmap ring", unsafe { raw(222, 0, size, 3, 1, fd.0, 0) })?;
-        if base == 0 || base % 4096 != 0 {
+        if base == 0 || base % 4096 != 0 || base.checked_add(size).is_none() {
+            // SAFETY: mmap succeeded; this unpublished mapping is still uniquely
+            // owned here and no pointer/reference into it has been constructed.
+            unsafe {
+                raw(215, base, size, 0, 0, 0, 0);
+            }
             return Err("invalid mmap alignment".into());
         }
         MAPPINGS.fetch_add(size, Ordering::Relaxed);
+        // Construction proof: the checked extent is aligned and nonwrapping.
+        // The only caller supplies an owned BPF_OUTPUT FD; successful perf mmap
+        // creates initialized metadata and storage (kernel PerfBuffer contract).
+        // No mapping address escapes, so Self assumes sole unmap ownership.
         Ok(Self { base, size })
     }
     pub fn head(&self) -> u64 {

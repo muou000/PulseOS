@@ -96,10 +96,11 @@ impl Event {
     }
     pub fn context_size(self) -> usize {
         match self {
-            Self::Cpu | Self::Task | Self::Sched(6) => 64,
-            Self::Sched(5) => 56,
-            Self::Sched(4) | Self::Fault => 80,
-            Self::Sched(_) => 72,
+            Self::Cpu | Self::Task => 64,
+            // Invalid public Event::Sched values cannot generate a program:
+            // only the supported registry's exact context geometry is accepted.
+            _ => pulse_bpf_schema::lookup_by_id(self.config() as u32)
+                .map_or(0, |schema| schema.context_size),
         }
     }
 }

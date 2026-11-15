@@ -294,6 +294,16 @@ impl Process {
         }
     }
 
+    /// Resolve the current numeric TID under the same lock used by nonleader
+    /// exec rebinding and thread retirement. A reused TID cannot match another
+    /// scheduler task's immutable identity.
+    pub(crate) fn sampling_thread_tid(&self, task_id: u64) -> Option<u64> {
+        self.threads.lock().iter().find_map(|(&tid, state)| match state {
+            ThreadState::Active(task) if task.id().as_u64() == task_id => Some(tid),
+            _ => None,
+        })
+    }
+
     pub fn take_task_ref_by_tid(&self, tid: u64) -> Option<AxTaskRef> {
         let mut registry = self.threads.lock();
         match registry.remove(&tid) {

@@ -430,6 +430,13 @@ impl Thread {
         self.sampling_task_id
     }
 
+    /// Current TID of this exact live task, including exec rebinding. Holding a
+    /// perf FD may keep Thread alive after retirement; it must not keep this
+    /// result live or redirect it to a recycled numeric TID.
+    pub(crate) fn sampling_live_tid(&self) -> Option<u64> {
+        self.process_weak.upgrade()?.sampling_thread_tid(self.sampling_task_id)
+    }
+
     /// Nonblocking observation: an interrupted writer must never be waited on.
     pub fn sampling_clock_ns(&self, now_ns: u64) -> Option<u64> {
         // An IRQ-enabled syscall reader must not be interrupted while holding
