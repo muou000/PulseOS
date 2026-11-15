@@ -9,7 +9,7 @@ fn recorder_json_preserves_each_identical_source_and_transport_order() {
     let mut writer = CaptureWriter::new(config, SchemaRegistry::default_pulse_registry());
     let sources = [7, 9].map(|id| RecorderSource {
         id, kind: RecorderKind::SoftwareV2, event_id: 0x1001, schema_version: 2,
-        scope: CaptureScope::PerCpu(3), sample_period: 100, kernel_event_id: id as u64,
+        scope: CaptureScope::PerCpu(3), bound_task_id: 0, sample_period: 100, kernel_event_id: id as u64,
         program_id: id, link_id: id, enable_before_ns: 110, enable_after_ns: 120,
         disable_before_ns: 250, disable_after_ns: 260,
     });
@@ -40,8 +40,19 @@ fn recorder_json_preserves_each_identical_source_and_transport_order() {
     assert_eq!(rows[1]["kind"], "software-v2");
     assert_eq!(rows[1]["cpu"], 3);
     assert!(rows[1]["tid"].is_null());
+    assert!(rows[1]["bound_task_id"].is_null());
     assert_eq!(rows[1]["period"], 100);
     assert_eq!(report["is_complete"], false);
     assert_eq!(report["attribution_claim_allowed"], false);
     assert!(CaptureAnalyzer::from_bytes(&bytes[..bytes.len() - 40]).is_err());
+    let query = analyzer.query(&bpf_analyzer::query::Query { from_ns: Some(250), ..Default::default() }).unwrap();
+    let filtered: serde_json::Value = serde_json::from_str(
+        &bpf_analyzer::emission::render_query_json(&analyzer, &query),
+    ).unwrap();
+    assert_eq!(filtered["records_count"], 0);
+    assert_eq!(filtered["recorder"]["scope"], "capture");
+    assert_eq!(filtered["recorder"]["order"], "transport");
+    assert_eq!(filtered["recorder"]["records_count"], 3);
+    assert_eq!(filtered["recorder"]["source_schema_version"], 2);
+    assert_eq!(filtered["recorder"]["record_sources"], serde_json::json!([9, 7, 9]));
 }

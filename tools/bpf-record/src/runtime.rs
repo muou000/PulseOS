@@ -67,6 +67,7 @@ struct Hooks {
     detached_ms: u64,
     write_fail_after: Option<usize>,
     dup_close: bool,
+    stop_failure: bool,
 }
 fn parse(args: &[&str]) -> Result<(Options, Hooks)> {
     #[allow(unused_mut)]
@@ -76,6 +77,11 @@ fn parse(args: &[&str]) -> Result<(Options, Hooks)> {
     while i < args.len() {
         #[cfg(feature = "acceptance")]
         if args[i].starts_with("--test-") {
+            if args[i] == "--test-stop-failure" {
+                hooks.stop_failure = true;
+                i += 1;
+                continue;
+            }
             if args[i] == "--test-dup-close" {
                 hooks.dup_close = true;
                 i += 1;
@@ -100,6 +106,29 @@ fn parse(args: &[&str]) -> Result<(Options, Hooks)> {
         i += 1;
     }
     Ok((Options::parse(&clean)?, hooks))
+}
+
+#[derive(Default)]
+struct ControlErrors {
+    count: u64,
+    first: Option<String>,
+}
+impl ControlErrors {
+    fn record(&mut self, error: String) {
+        self.count = self.count.saturating_add(1);
+        if self.first.is_none() {
+            self.first = Some(error);
+        }
+    }
+    fn observe<T>(&mut self, result: Result<T>) -> Option<T> {
+        match result {
+            Ok(value) => Some(value),
+            Err(error) => {
+                self.record(error);
+                None
+            }
+        }
+    }
 }
 
 fn create_map(kind: u32, value_size: u32, entries: u32) -> Result<Fd> {
@@ -248,6 +277,7 @@ struct Ring {
 }
 struct Source {
     fd: usize,
+    link: Option<usize>,
     scratch_map_id: u32,
     binding: RecorderSource,
     raw_samples: u64,
@@ -332,6 +362,7 @@ impl Session {
             };
             self.sources.push(Source {
                 fd: event,
+                link,
                 scratch_map_id: self.fd(scratch).object_id()?,
                 raw_samples: 0,
                 retained_samples: 0,
@@ -354,6 +385,7 @@ impl Session {
                     ),
                     sample_period: source.period_ns,
                     kernel_event_id: 0,
+                    bound_task_id: 0,
                     program_id: self.fd(program).object_id()?,
                     link_id: link
                         .map(|link| self.fd(link).object_id())
@@ -374,6 +406,8 @@ impl Session {
             }
             self.sources[i].binding.kernel_event_id =
                 number(row, "id").ok_or("missing kernel event identity")?;
+            self.sources[i].binding.bound_task_id =
+                number(row, "task_id").ok_or("missing stable task identity")?;
         }
         for ring in &self.rings {
             let row = event_row(&stats, self.fd(ring.fd).number())?;
@@ -412,38 +446,59 @@ impl Session {
         }
         Ok(())
     }
-    fn disable(&mut self) -> Result<()> {
-        for i in (0..self.sources.len()).rev() {
-            let before = sys::now()?;
-            self.fd(self.sources[i].fd).enable(false)?;
-            let after = sys::now()?;
-            self.sources[i].binding.disable_before_ns = before;
-            self.sources[i].binding.disable_after_ns = after;
-            log(&format!(
-                "DISABLE source={} before={before} after={after}",
-                self.sources[i].binding.id
-            ));
-        }
-        let start = sys::now()?;
-        loop {
-            let stats = snapshot()?;
-            let mut ready = true;
-            for source in &self.sources {
-                let row = event_row(&stats, self.fd(source.fd).number())?;
-                if number(row, "enabled") != Some(0) {
-                    return Err("source re-enabled while stopping".into());
+    fn disable(&mut self, errors: &mut ControlErrors) -> bool {
+        // Every source receives a disable attempt even when another control
+        // operation fails. Retry sources whose complete observed control window
+        // is still unknown; never synthesize a timestamp for a failed clock read.
+        for _ in 0..2 {
+            for i in (0..self.sources.len()).rev() {
+                if self.sources[i].binding.disable_after_ns != 0 {
+                    continue;
                 }
-                ready &= number(row, "inflight") == Some(0);
+                let before = errors.observe(sys::now());
+                let disabled = errors.observe(self.fd(self.sources[i].fd).enable(false));
+                let after = errors.observe(sys::now());
+                if let (Some(before), Some(()), Some(after)) = (before, disabled, after) {
+                    self.sources[i].binding.disable_before_ns = before;
+                    self.sources[i].binding.disable_after_ns = after;
+                    log(&format!(
+                        "DISABLE source={} before={before} after={after}",
+                        self.sources[i].binding.id
+                    ));
+                }
             }
-            if ready {
-                log("QUIESCENT inflight=0");
-                return Ok(());
-            }
-            if sys::now()?.saturating_sub(start) > 2_000_000_000 {
-                return Err("VM quiescence timeout".into());
-            }
-            sys::sleep_ms(1)?;
         }
+        let start = errors.observe(sys::now());
+        // The poll bound also prevents an unbounded retry if the clock itself
+        // is broken. It is not presented as measured elapsed time.
+        for _ in 0..2000 {
+            if let Some(stats) = errors.observe(snapshot()) {
+                let mut ready = true;
+                for source in &self.sources {
+                    match errors.observe(event_row(&stats, self.fd(source.fd).number())) {
+                        Some(row) => {
+                            ready &= number(row, "enabled") == Some(0)
+                                && number(row, "inflight") == Some(0)
+                        }
+                        None => ready = false,
+                    }
+                }
+                if ready {
+                    log("QUIESCENT inflight=0");
+                    return true;
+                }
+            }
+            if let Some((start, now)) = start.zip(errors.observe(sys::now())) {
+                if now.saturating_sub(start) > 2_000_000_000 {
+                    break;
+                }
+            }
+            if errors.observe(sys::sleep_ms(1)).is_none() {
+                break;
+            }
+        }
+        errors.record("VM quiescence was not established".into());
+        false
     }
     fn drain(
         &mut self,
@@ -511,6 +566,38 @@ impl Session {
         log("DUP_CLOSE originals_closed=1 retained=1");
         Ok(())
     }
+    fn target_alive(&self) -> Result<bool> {
+        if !self
+            .sources
+            .iter()
+            .any(|s| matches!(s.binding.scope, CaptureScope::Task(_)))
+        {
+            return Ok(true);
+        }
+        let stats = snapshot()?;
+        for source in &self.sources {
+            if !matches!(source.binding.scope, CaptureScope::Task(_)) {
+                continue;
+            }
+            let row = event_row(&stats, self.fd(source.fd).number())?;
+            if number(row, "task_id") != Some(source.binding.bound_task_id) {
+                return Err("bound task identity changed".into());
+            }
+            match number(row, "target_alive") {
+                Some(0) => return Ok(false),
+                Some(1) => {}
+                _ => return Err("task liveness unavailable".into()),
+            }
+        }
+        Ok(true)
+    }
+    fn detach_sources(&self, errors: &mut ControlErrors) {
+        for source in self.sources.iter().rev() {
+            if let Some(link) = source.link {
+                errors.observe(self.fd(link).detach_link());
+            }
+        }
+    }
 }
 impl Drop for Session {
     fn drop(&mut self) {
@@ -567,7 +654,11 @@ fn diagnostics(
     ] {
         d.identities.push(DiagnosticIdentity {
             name: name.into(),
-            value: Some(text.into()),
+            value: if text.is_empty() {
+                None
+            } else {
+                Some(text.into())
+            },
         });
     }
     let before_global = before.lines().find(|line| line.starts_with("GLOBAL "));
@@ -770,6 +861,16 @@ fn cleanup(session: Session, initial: &str, resources: (usize, usize), marker: &
     ));
     Ok(())
 }
+fn phase_stats(phase: &str, point: &str) -> Result<()> {
+    let stats = snapshot()?;
+    sys::print(&format!(
+        "RECORD_STATS BEGIN phase={phase} point={point} bytes={}\n",
+        stats.len()
+    ));
+    sys::print(&stats);
+    sys::print(&format!("RECORD_STATS END phase={phase} point={point}\n"));
+    Ok(())
+}
 fn record(plan: &SessionPlan, hooks: &Hooks) -> Result<()> {
     let _signals = Signals::new()?;
     let output = Fd::open(&plan.options.output, true)?;
@@ -782,6 +883,7 @@ fn record(plan: &SessionPlan, hooks: &Hooks) -> Result<()> {
         return Err(error);
     }
     if hooks.detached_ms != 0 {
+        phase_stats("loaded_detached", "before")?;
         log(&format!(
             "DETACHED start_ns={} duration_ms={}",
             sys::now()?,
@@ -789,6 +891,7 @@ fn record(plan: &SessionPlan, hooks: &Hooks) -> Result<()> {
         ));
         sys::sleep_ms(hooks.detached_ms)?;
         log(&format!("DETACHED_END stop_ns={}", sys::now()?));
+        phase_stats("loaded_detached", "after")?;
         cleanup(session, &initial, resources, "CLEANUP")?;
         return Ok(());
     }
@@ -833,39 +936,72 @@ fn record(plan: &SessionPlan, hooks: &Hooks) -> Result<()> {
     writer
         .start(start)
         .map_err(|e| format!("capture start: {e:?}"))?;
-    session.enable()?;
     let mut records = 0;
     let mut lost = 0;
     let mut capture_error = None;
+    let mut control_errors = ControlErrors::default();
+    let enabled = control_errors.observe(session.enable()).is_some();
+    let mut last_target_probe = start;
     let reason = loop {
+        if !enabled {
+            break "control-error".into();
+        }
         if let Err(error) = session.drain(&mut writer, &mut records, &mut lost, 8) {
             capture_error = Some(error);
             break "consumer-error".into();
         }
-        if let Some(signal) = _signals.poll()? {
-            break format!("signal:{signal}");
+        match control_errors.observe(_signals.poll()) {
+            Some(Some(signal)) => break format!("signal:{signal}"),
+            Some(None) => {}
+            None => break "control-error".into(),
         }
-        if let Some(tid) = plan.options.tid {
-            if !sys::target_exists(tid)? {
-                break "target-exit".into();
+        let Some(now) = control_errors.observe(sys::now()) else {
+            break "control-error".into();
+        };
+        if plan.options.tid.is_some() && now.saturating_sub(last_target_probe) >= 10_000_000 {
+            last_target_probe = now;
+            match control_errors.observe(session.target_alive()) {
+                Some(false) => break "target-exit".into(),
+                Some(true) => {}
+                None => break "control-error".into(),
             }
         }
-        let now = sys::now()?;
         if plan
             .duration_ns
             .is_some_and(|duration| now.saturating_sub(start) >= duration)
         {
             break "duration".into();
         }
-        sys::sleep_ms(1)?;
+        if control_errors.observe(sys::sleep_ms(1)).is_none() {
+            break "control-error".into();
+        }
     };
-    session.disable()?;
-    if let Err(error) = session.drain(&mut writer, &mut records, &mut lost, usize::MAX) {
-        capture_error = Some(error);
+    if hooks.stop_failure {
+        // Exercise an actual failing control syscall. The regular output FD is
+        // not a perf source; recovery still disables every real source.
+        match output.enable(false) {
+            Err(error) => {
+                log(&format!("STOP_FAILURE actual_error={error}"));
+                control_errors.record(error);
+            }
+            Ok(()) => control_errors.record("stop-failure injection unexpectedly succeeded".into()),
+        }
     }
-    if capture_error.is_none() {
+    let quiescent = session.disable(&mut control_errors);
+    if !quiescent {
+        // A failed disable must not leave an attached producer running during
+        // potentially slow file serialization. Detach blocks new invocations;
+        // already accepted VM work remains explicitly unproven, so do not drain.
+        session.detach_sources(&mut control_errors);
+    }
+    if quiescent {
+        if let Err(error) = session.drain(&mut writer, &mut records, &mut lost, usize::MAX) {
+            capture_error = Some(error);
+        }
+    }
+    if quiescent && capture_error.is_none() {
         let stopped = session.sources.iter().map(|s| s.raw_samples).sum::<u64>();
-        sys::sleep_ms(10)?;
+        control_errors.observe(sys::sleep_ms(10));
         if let Err(error) = session.drain(&mut writer, &mut records, &mut lost, usize::MAX) {
             capture_error = Some(error);
         }
@@ -875,14 +1011,36 @@ fn record(plan: &SessionPlan, hooks: &Hooks) -> Result<()> {
             capture_error = Some("source emitted after quiescence".into());
         }
     }
-    let stop = sys::now()?;
-    let after = snapshot()?;
+    let stop = control_errors.observe(sys::now());
+    let after = control_errors.observe(snapshot()).unwrap_or_default();
     for source in &session.sources {
         writer
             .update_recorder_source(source.binding.clone())
             .map_err(|e| format!("capture window: {e:?}"))?;
     }
     let mut diagnostic = diagnostics(plan, &session, &before, &after, &reason, records);
+    diagnostic.counters.push(DiagnosticCounter {
+        name: "control_errors".into(),
+        scope: "session".into(),
+        value: Some(control_errors.count),
+        kind: CounterKind::Error,
+    });
+    diagnostic.counters.push(DiagnosticCounter {
+        name: "quiescent_sources".into(),
+        scope: "session".into(),
+        value: if quiescent {
+            Some(session.sources.len() as u64)
+        } else {
+            None
+        },
+        kind: CounterKind::Activity,
+    });
+    if let Some(error) = &control_errors.first {
+        diagnostic.identities.push(DiagnosticIdentity {
+            name: "control_error".into(),
+            value: Some(error.clone()),
+        });
+    }
     diagnostic.counters.push(DiagnosticCounter {
         name: "consumer_errors".into(),
         scope: "consumer".into(),
@@ -898,9 +1056,27 @@ fn record(plan: &SessionPlan, hooks: &Hooks) -> Result<()> {
     writer
         .set_diagnostics(diagnostic)
         .map_err(|e| format!("capture diagnostics: {e:?}"))?;
-    let bytes = writer
-        .finish(stop)
-        .map_err(|e| format!("capture finish: {e:?}"))?;
+    let boundary_known = quiescent
+        && stop.is_some()
+        && session.sources.iter().all(|source| {
+            source.binding.enable_after_ns != 0 && source.binding.disable_after_ns != 0
+        });
+    let bytes = if boundary_known {
+        match writer.finish(stop.unwrap()) {
+            Ok(bytes) => bytes,
+            Err(error) => {
+                control_errors.record(format!("capture finish: {error:?}"));
+                writer
+                    .abort_partial_bytes()
+                    .map_err(|e| format!("partial capture: {e:?}"))?
+            }
+        }
+    } else {
+        log("PARTIAL boundary=unknown trailer=absent");
+        writer
+            .abort_partial_bytes()
+            .map_err(|e| format!("partial capture: {e:?}"))?
+    };
     log(&format!(
         "STOP reason={reason} records={records} lost={lost} bytes={} partial=1",
         bytes.len()
@@ -922,6 +1098,9 @@ fn record(plan: &SessionPlan, hooks: &Hooks) -> Result<()> {
         bytes.len()
     ));
     if let Some(error) = capture_error {
+        return Err(error);
+    }
+    if let Some(error) = control_errors.first {
         return Err(error);
     }
     Ok(())

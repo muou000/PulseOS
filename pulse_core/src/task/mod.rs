@@ -576,12 +576,14 @@ impl axfs::ProcfsProcessProvider for PulseProcessProvider {
                     PerfEventScope::PerCpu { cpu } => ("cpu", cpu as u64),
                     PerfEventScope::Task { pid } => ("task", pid),
                 };
-                writeln!(&mut text, "EVENT fd={} id={} clock={} config={} scope={} target={} task_id={} period={} generation={} enabled={} inflight={} observed={} delivered={} skipped={} cancelled={} invalid={} reentry={} helper={} budget={} transport_lost={} consumer_corrupt={} consumer_bounds={} program_id={}",
+                let live_target = object.live_target_tid();
+                writeln!(&mut text, "EVENT fd={} id={} clock={} config={} scope={} target={} task_id={} period={} generation={} enabled={} inflight={} observed={} delivered={} skipped={} cancelled={} invalid={} reentry={} helper={} budget={} transport_lost={} consumer_corrupt={} consumer_bounds={} program_id={} target_alive={} current_tid={}",
                     fd, d.id, clock, config, scope, target, d.task_id, d.period, d.generation,
                     u8::from(d.enabled), d.inflight, d.runtime.observed, d.samples.delivered_samples,
                     d.runtime.skipped_periods, d.runtime.cancelled, d.runtime.invalid,
                     d.samples.re_entry_drops, d.samples.helper_failures, d.samples.budget_failures,
-                    d.transport_lost, d.consumer.corrupt_records, d.consumer.out_of_bounds, d.program_id).ok()?;
+                    d.transport_lost, d.consumer.corrupt_records, d.consumer.out_of_bounds, d.program_id,
+                    u8::from(live_target.is_some()), live_target.unwrap_or(0)).ok()?;
                 let program = event.attached_prog();
                 // A concurrent detach/reattach must not pair an EVENT row for
                 // program A with PROGRAM counters from B. Fail this snapshot

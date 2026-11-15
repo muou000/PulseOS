@@ -400,7 +400,8 @@ fn render_recorder_json(out: &mut String, recorder: Option<&bpf_capture::Recorde
     let Some(recorder) = recorder else { out.push_str("null"); return; };
     let mut counts = BTreeMap::<u32, u64>::new();
     for id in &recorder.record_sources { *counts.entry(*id).or_default() += 1; }
-    out.push_str("{\"scope\":\"whole_capture_transport_order\",\"sources\":[");
+    write!(out, "{{\"scope\":\"capture\",\"order\":\"transport\",\"records_count\":{},\"source_schema_version\":{},\"sources\":[",
+        recorder.record_sources.len(), recorder.source_schema_version).unwrap();
     for (index, source) in recorder.sources.iter().enumerate() {
         if index != 0 { out.push(','); }
         let kind = match source.kind {
@@ -413,10 +414,11 @@ fn render_recorder_json(out: &mut String, recorder: Option<&bpf_capture::Recorde
             bpf_capture::CaptureScope::AllCpus => (None, None),
         };
         write!(out, concat!("{{\"logical_source\":{},\"kind\":{},\"event_id\":{},\"schema_version\":{},",
-            "\"cpu\":{},\"tid\":{},\"period\":{},\"kernel_event_id\":{},\"program_id\":{},\"link_id\":{},",
+            "\"cpu\":{},\"tid\":{},\"bound_task_id\":{},\"period\":{},\"kernel_event_id\":{},\"program_id\":{},\"link_id\":{},",
             "\"enable_before_ns\":{},\"enable_after_ns\":{},\"disable_before_ns\":{},\"disable_after_ns\":{},\"records_count\":{}}}"),
             source.id, json_string(kind), source.event_id, source.schema_version,
-            optional_number(cpu), optional_number(tid), source.sample_period,
+            optional_number(cpu), optional_number(tid),
+            optional_number((source.bound_task_id != 0).then_some(source.bound_task_id)), source.sample_period,
             source.kernel_event_id, source.program_id, source.link_id,
             source.enable_before_ns, source.enable_after_ns, source.disable_before_ns, source.disable_after_ns,
             counts.get(&source.id).copied().unwrap_or(0)).unwrap();
