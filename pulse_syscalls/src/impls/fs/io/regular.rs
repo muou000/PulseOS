@@ -97,7 +97,9 @@ fn execute(
         let result = if write {
             axtask::future::block_on(operation.write_observed(&mut window, on_written))
         } else {
-            axtask::future::block_on(operation.read(&mut window))
+            operation
+                .try_read(&mut window)
+                .unwrap_or_else(|| axtask::future::block_on(operation.read(&mut window)))
         };
         let transferred = match result {
             Ok(count) if count <= submitted => count,

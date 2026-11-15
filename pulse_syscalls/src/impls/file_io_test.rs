@@ -47,6 +47,9 @@ pub(super) fn prctl(command: usize, address: usize, size: usize, reserved: usize
                 axfs::file_io_test_disable();
                 Ok(())
             }
+            4 if address == 0 && size == 0 => {
+                axfs::run_file_io_checks().map_err(Into::into)
+            }
             _ => Err(LinuxError::EINVAL),
         }
     })();

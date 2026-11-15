@@ -624,6 +624,24 @@ pub(super) async fn write_slice_source_at_async(
     if data.is_empty() {
         return Ok(0);
     }
+    // Descriptor backends retain their existing write-all contract, including
+    // EIO for a zero-progress backend. Regular-file transactions use the
+    // single-transfer helper below and own their partial-progress accounting.
+    write_all_at_async(file, data, offset).await?;
+    Ok(data.len())
+}
+
+pub(super) async fn write_slice_once_at_async(
+    file: &FileNode,
+    data: &[u8],
+    offset: u64,
+) -> VfsResult<usize> {
+    offset
+        .checked_add(data.len() as u64)
+        .ok_or(VfsError::InvalidInput)?;
+    if data.is_empty() {
+        return Ok(0);
+    }
     let written = file.write_at(data, offset).await?;
     if written > data.len() {
         return Err(VfsError::Io);
@@ -712,30 +730,17 @@ pub(super) async fn write_source_at_async<R: Read + IoBuf>(
     let mut written = 0usize;
     while written < total {
         let wanted = (total - written).min(staging.len());
-        let read = match source.read(&mut staging[..wanted]) {
-            Ok(read) if read <= wanted => read,
-            Ok(_) if written == 0 => return Err(VfsError::Io),
-            Err(error) if written == 0 => return Err(error.into()),
-            _ => break,
-        };
-        if read == 0 {
-            break;
+        let read = source.read(&mut staging[..wanted])?;
+        if read == 0 || read > wanted {
+            return Err(VfsError::Io);
         }
         #[cfg(feature = "file-io-test")]
         super::io_test::staged_bytes(read);
         let current_offset = offset
             .checked_add(written as u64)
             .ok_or(VfsError::InvalidInput)?;
-        match write_slice_source_at_async(file, &staging[..read], current_offset).await {
-            Ok(count) => {
-                written += count;
-                if count < read {
-                    break;
-                }
-            }
-            Err(error) if written == 0 => return Err(error),
-            Err(_) => break,
-        }
+        write_all_at_async(file, &staging[..read], current_offset).await?;
+        written += read;
     }
     Ok(written)
 }

@@ -186,6 +186,11 @@ mod handle;
 mod position;
 #[cfg(feature = "file-io-test")]
 mod io_test;
+#[cfg(feature = "file-io-test")]
+mod io_checks;
+
+#[cfg(feature = "file-io-test")]
+pub use io_checks::run_file_io_checks;
 
 #[cfg(feature = "file-io-test")]
 pub use io_test::{
