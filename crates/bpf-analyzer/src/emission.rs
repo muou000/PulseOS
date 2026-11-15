@@ -126,10 +126,11 @@ pub fn render_event_table(analyzer: &CaptureAnalyzer, events: &[NormalizedEvent]
                     stack.status.classification(), stack.status.as_str(), stack.len, stack.capture_ns)
             }
             EventPayload::PageFault {address,start_ns,elapsed_ns,access,origin,outcome,classification} => {
+                let applicability = crate::fault::classification_applicability(*outcome);
                 let origin=match origin {1=>"kernel",2=>"user",_=>"invalid"};
                 let outcome=match outcome {1=>"resolved",2=>"not_handled",3=>"no_memory",4=>"resolver_error",_=>"invalid"};
                 let class=match classification {0=>"unknown",1=>"minor",2=>"major",_=>"invalid"};
-                format!("address=0x{address:x} start_ns={start_ns} resolver_wall_ns={elapsed_ns} access=0x{access:x} origin={origin} outcome={outcome} classification={class}")
+                format!("address=0x{address:x} start_ns={start_ns} resolver_wall_ns={elapsed_ns} access=0x{access:x} origin={origin} outcome={outcome} classification={class} classification_applicability={applicability}")
             }
             EventPayload::Raw { bytes } => {
                 format!("raw_bytes={}", bytes.len())
@@ -779,9 +780,10 @@ fn semantic_json(event: &NormalizedEvent) -> String {
         } => format!(
             concat!(
                 "{{\"address\":{},\"start_ns\":{},\"elapsed_ns\":{},\"access\":{},",
-                "\"origin\":{},\"outcome\":{},\"classification\":{}}}"
+                "\"origin\":{},\"outcome\":{},\"classification\":{},\"classification_applicability\":\"{}\"}}"
             ),
-            address, start_ns, elapsed_ns, access, origin, outcome, classification
+            address, start_ns, elapsed_ns, access, origin, outcome, classification,
+            crate::fault::classification_applicability(*outcome)
         ),
         EventPayload::Raw { .. } => "null".into(),
     }

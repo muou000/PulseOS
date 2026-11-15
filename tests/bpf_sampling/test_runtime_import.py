@@ -224,6 +224,45 @@ class RuntimeImportTests(unittest.TestCase):
         self.assertEqual(parsed["duration"]["sum_ns"],20)
         self.assertFalse(parsed["is_complete"])
 
+    def test_fault_import_preserves_known_classes_without_recounting_system_totals(self):
+        from test_fault_archive import fixture_fault
+
+        def classify(context):
+            # Synthetic protocol evidence: one known minor and one known major.
+            access = struct.unpack_from("<I", context, 64)[0]
+            struct.pack_into("<I", context, 76, 1 if access == 1 else 2)
+
+        raw, self.metadata, _ = archive.extract(fixture_fault(change_context=classify), "fault")
+        self.inputs["mode"] = "fault"
+        (self.directory / "records.pbraw").write_bytes(raw)
+        self.assert_imported()
+        result = self.analyzer("--fault-report", "--json")
+        self.assertEqual(result.returncode, 0, result.stdout)
+        report = json.loads(result.stdout)["faults"]
+        self.assertEqual(report["valid_events"], 2)
+        self.assertEqual(report["resolved_minor"], 1)
+        self.assertEqual(report["resolved_major"], 1)
+        self.assertEqual(report["resolved_unknown"], 0)
+        self.assertEqual(report["unsuccessful"], 0)
+        counters = {(row["scope"], row["name"]): row["value"]
+                    for row in self.summary()["runtime_diagnostics"]["counters"]}
+        self.assertEqual(counters[("system", "fault_completed")], 2)
+        self.assertEqual(counters[("fault_workload", "read_hits")], 1)
+        self.assertEqual(counters[("fault_workload", "write_hits")], 1)
+
+    def test_fault_import_rejects_invalid_class_pairs_after_resealed_envelopes(self):
+        for outcome, classification in [(1, 3), (1, 0xffffffff), (2, 1), (3, 2), (4, 1)]:
+            with self.subTest(outcome=outcome, classification=classification):
+                self.seed_fault()
+                raw = bytearray(self.raw)
+                frame_start = 64 + 24
+                struct.pack_into("<II", raw, frame_start + 12 + 72, outcome, classification)
+                struct.pack_into("<I", raw, 64 + 16,
+                                 zlib.crc32(raw[frame_start:frame_start + 96]))
+                self.reseal_raw(raw)
+                (self.directory / "records.pbraw").write_bytes(raw)
+                self.assert_rejected("fault completion")
+
     def test_fault_import_independently_requires_observer_counters_and_complete_target_list(self):
         self.seed_fault()
         del self.metadata["snapshots"]["after"]["global"]["fault_completed"]

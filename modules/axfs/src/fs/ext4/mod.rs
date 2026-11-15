@@ -2,6 +2,14 @@ mod fs;
 mod inode;
 mod util;
 
+#[cfg(feature = "mapping-lifecycle-test")]
+mod fault_io_checks;
+
+#[cfg(feature = "mapping-lifecycle-test")]
+pub(crate) fn run_fault_io_checks() -> axfs_ng_vfs::VfsResult<()> {
+    fault_io_checks::run()
+}
+
 use alloc::{
     boxed::Box,
     collections::{BTreeMap, BTreeSet},
@@ -1043,9 +1051,33 @@ impl<D: AsyncBlockDriverOps + Clone + 'static> Ext4Disk<D> {
     where
         D: AsyncBlockDriverOps + Clone,
     {
+        self.read_offset_with_io(offset, buf, 0..0).await.map(|_| ())
+    }
+
+    pub async fn read_offset_with_io(
+        &self,
+        offset: usize,
+        buf: &mut [u8],
+        observed: core::ops::Range<usize>,
+    ) -> axdriver::prelude::DevResult<bool>
+    where
+        D: AsyncBlockDriverOps + Clone,
+    {
         if buf.is_empty() {
-            return Ok(());
+            return Ok(false);
         }
+        if observed.start > observed.end || observed.end > buf.len() {
+            return Err(axdriver::prelude::DevError::InvalidParam);
+        }
+        let observed_start = offset.checked_add(observed.start)
+            .ok_or(axdriver::prelude::DevError::InvalidParam)?;
+        let observed_end = offset.checked_add(observed.end)
+            .ok_or(axdriver::prelude::DevError::InvalidParam)?;
+        let overlaps = |start: usize, len: usize| {
+            observed_start < observed_end && start < observed_end
+                && observed_start.saturating_sub(start) < len
+        };
+        let mut storage_read = false;
         let io_guard = self.lock_read_range(offset, buf.len()).await?;
         let mut deferred_writes = Vec::new();
         log::debug!("ext4 read_offset: offset={}, len={}", offset, buf.len());
@@ -1086,7 +1118,7 @@ impl<D: AsyncBlockDriverOps + Clone + 'static> Ext4Disk<D> {
             if !has_any_cache {
                 return self
                     .read_blocks_from_disk_async(offset, buf.len() / block_size, buf)
-                    .await;
+                    .await.map(|()| !observed.is_empty());
             }
         }
 
@@ -1169,6 +1201,7 @@ impl<D: AsyncBlockDriverOps + Clone + 'static> Ext4Disk<D> {
                         &mut buf[buf_start..buf_start + run_len],
                     )
                     .await?;
+                    storage_read |= overlaps(current_block_offset, run_len);
                     current_block_offset += run_len;
                     continue;
                 }
@@ -1184,6 +1217,7 @@ impl<D: AsyncBlockDriverOps + Clone + 'static> Ext4Disk<D> {
                     &mut run_data,
                 )
                 .await?;
+                storage_read |= overlaps(current_block_offset, run_len);
 
                 if consecutive_misses == 1 {
                     let start = core::cmp::max(offset, current_block_offset);
@@ -1267,7 +1301,7 @@ impl<D: AsyncBlockDriverOps + Clone + 'static> Ext4Disk<D> {
         drop(io_guard);
         self.flush_evicted_blocks(deferred_writes).await?;
         log::debug!("ext4 read_offset done: offset={}", offset);
-        Ok(())
+        Ok(storage_read)
     }
 
     pub async fn write_offset(&self, offset: usize, data: &[u8]) -> axdriver::prelude::DevResult<()>
@@ -1563,6 +1597,18 @@ impl<D: AsyncBlockDriverOps + Clone + 'static> ext4plus::Ext4Read for Ext4DiskWr
             .map_err(|err| alloc::boxed::Box::new(Ext4DevError(err)) as _);
         result
     }
+
+    async fn read_with_io(
+        &self,
+        start_byte: u64,
+        dst: &mut [u8],
+        observed: core::ops::Range<usize>,
+    ) -> Result<Option<bool>, alloc::boxed::Box<dyn core::error::Error + Send + Sync + 'static>> {
+        self.0.read_offset_with_io(start_byte as usize, dst, observed).await
+            .map(Some)
+            .map_err(|err| alloc::boxed::Box::new(Ext4DevError(err)) as _)
+    }
+
 }
 
 #[async_trait]

@@ -132,6 +132,8 @@ use stack_workload::*;
 mod archive;
 #[cfg(trace_fault)]
 mod fault_workload;
+#[cfg(fault_classes)]
+mod fault_classes;
 #[cfg(mapping_test)]
 mod mapping_workload;
 
@@ -464,7 +466,8 @@ impl Stats {
                 let access=u32_at(bytes,64);let origin=u32_at(bytes,68);let outcome=u32_at(bytes,72);
                 check!(timestamp.checked_sub(start)==Some(elapsed),"fault clock/duration mismatch");
                 check!(access & !7==0 && (origin==1 || origin==2),"fault access/origin invalid");
-                check!((1..=4).contains(&outcome) && u32_at(bytes,76)==0,"fault outcome/classification invalid");
+                let classification=u32_at(bytes,76);
+                check!((1..=4).contains(&outcome) && classification<=2 && (outcome==1 || classification==0),"fault outcome/classification invalid");
                 let task=u64_at(bytes,32);check!(task!=0,"fault lacks originating task");self.add_subject(task);
                 #[cfg(trace_fault)]
                 if origin==2 && u32_at(bytes,20)==self.pid && u32_at(bytes,24)==self.tid {
@@ -723,6 +726,8 @@ extern "C" fn guest_main() -> ! {
     check_task_sleep(events[0]);
     #[cfg(capture_export)]
     measure_archive_phase("attached_capture", Some(&mut rings), &mut stats, CPUS * MAPPING_SIZE + archive::MAPPED_BYTES);
+    #[cfg(fault_classes)]
+    fault_classes::run(&mut rings, &mut stats);
     #[cfg(all(mapping_test, not(mapping_exec_child)))]
     mapping_workload::run(&mut rings, &mut stats);
     #[cfg(not(capture_export))]

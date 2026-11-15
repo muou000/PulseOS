@@ -102,6 +102,9 @@ impl FileMappingSource for ObservedSource {
     fn get_shared_page_paddrs(&self, n: u32, count: usize, write: bool) -> AxResult<axmm::FileMappingPageBatch> {
         self.inner.get_shared_page_paddrs(n, count, write)
     }
+    fn get_shared_page_paddrs_with_io(&self, n: u32, count: usize, write: bool) -> AxResult<(axmm::FileMappingPageBatch, axmm::FilePageIo)> {
+        self.inner.get_shared_page_paddrs_with_io(n, count, write)
+    }
     fn prefetch_pages(&self, n: u32, count: usize) { self.inner.prefetch_pages(n, count); }
     fn size(&self) -> u64 { self.inner.size() }
     fn shared_page_paddr(&self, n: u32) -> AxResult<PhysAddr> { self.inner.shared_page_paddr(n) }

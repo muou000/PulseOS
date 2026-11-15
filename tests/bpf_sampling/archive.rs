@@ -116,7 +116,9 @@ fn read_stats() -> Memory {
            "diagnostics exceed bound or re-rendered instead of stable EOF");
     close(fd);
     let text = core::str::from_utf8(memory.bytes()).unwrap();
-    check!(text.starts_with("PULSE_BPF_STATS version=1 ") && text.contains(" available=1\n"), "diagnostics unavailable");
+    check!(text.starts_with("PULSE_BPF_STATS version=1 ")
+        && text.lines().next().is_some_and(|header| header.split_whitespace().any(|field| field == "available=1")),
+        "diagnostics unavailable");
     check!(text.lines().last().is_some_and(|line| line.starts_with("END events=")), "missing diagnostics terminator");
     memory
 }

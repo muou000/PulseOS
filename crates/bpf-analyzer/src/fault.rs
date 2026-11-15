@@ -45,6 +45,13 @@ pub struct FaultReport {
     pub valid_events: u64,
     pub invalid_events: u64,
     pub query_censored: u64,
+    /// Disjoint counts of successful resolver completions by measured class.
+    pub resolved_minor: u64,
+    pub resolved_major: u64,
+    pub resolved_unknown: u64,
+    /// NotHandled, NoMemory and ResolverError; classification is not applicable.
+    pub unsuccessful: u64,
+    /// Raw Unknown tags, including unsuccessful legacy completions.
     pub unknown_classification: u64,
     pub unknown_access: u64,
     pub unknown_identity: u64,
@@ -91,13 +98,22 @@ impl FaultReport {
                 || event.timestamp_ns.checked_sub(*start_ns) != Some(*elapsed_ns)
                 || access & !7 != 0
                 || !matches!(*origin, 1 | 2)
-                || !(1..=4).contains(outcome)
-                || *classification > 2
+                || !pulse_bpf_schema::PageFaultClassification::is_valid_pair(*outcome, *classification)
             {
                 report.invalid_events += 1;
                 continue;
             }
             report.valid_events += 1;
+            if *outcome == 1 {
+                match classification {
+                    0 => report.resolved_unknown += 1,
+                    1 => report.resolved_minor += 1,
+                    2 => report.resolved_major += 1,
+                    _ => unreachable!("validated page-fault classification"),
+                }
+            } else {
+                report.unsuccessful += 1;
+            }
             report.unknown_classification += u64::from(*classification == 0);
             report.unknown_access += u64::from(*access == 0);
             report.unknown_identity += u64::from(event.pid == 0 || event.tid == 0);
@@ -132,7 +148,7 @@ impl FaultReport {
         report.groups = groups.into_values().collect();
         report.is_complete = capture_complete
             && report.valid_events > 0
-            && report.unknown_classification == 0
+            && report.resolved_unknown == 0
             && report.unknown_access == 0
             && report.unknown_identity == 0
             && report.invalid_events == 0
@@ -150,6 +166,12 @@ impl FaultReport {
             } else {
                 "[PARTIAL]"
             }
+        )
+        .unwrap();
+        writeln!(
+            &mut text,
+            "resolved_minor={} resolved_major={} resolved_unknown={} unsuccessful={}",
+            self.resolved_minor, self.resolved_major, self.resolved_unknown, self.unsuccessful
         )
         .unwrap();
         writeln!(
@@ -176,7 +198,7 @@ impl FaultReport {
         .unwrap();
         writeln!(
             &mut text,
-            "task pid tid address_bin access origin resolver_outcome classification records timed \
+            "task pid tid address_bin access origin resolver_outcome classification classification_applicability records timed \
              min_ns max_ns sum_ns"
         )
         .unwrap();
@@ -184,7 +206,7 @@ impl FaultReport {
             let key = &group.key;
             writeln!(
                 &mut text,
-                "{} {} {} 0x{:x} {} {} {} {} {} {} {} {} {}",
+                "{} {} {} 0x{:x} {} {} {} {} {} {} {} {} {} {}",
                 key.task_id,
                 key.pid.map_or_else(|| "unknown".into(), |v| v.to_string()),
                 key.tid.map_or_else(|| "unknown".into(), |v| v.to_string()),
@@ -193,6 +215,7 @@ impl FaultReport {
                 origin_name(key.origin),
                 outcome_name(key.outcome),
                 classification_name(key.classification),
+                classification_applicability(key.outcome),
                 group.record_count,
                 group.duration.count,
                 optional_number(group.duration.min_ns),
@@ -211,6 +234,7 @@ impl FaultReport {
              resolver_wall_time\",\"histogram_bounds\":\"inclusive_upper\",\"address_bin_bytes\":\
              {},\"capture_complete\":{},\"is_complete\":{},\"invalid_window\":{},\"\
              captured_events\":{},\"valid_events\":{},\"invalid_events\":{},\"query_censored\":{},\
+             \"resolved_minor\":{},\"resolved_major\":{},\"resolved_unknown\":{},\"unsuccessful\":{},\
              \"unknown_classification\":{},\"unknown_access\":{},\"unknown_identity\":{},\"\
              duration\":",
             ADDRESS_BIN_BYTES,
@@ -221,6 +245,10 @@ impl FaultReport {
             self.valid_events,
             self.invalid_events,
             self.query_censored,
+            self.resolved_minor,
+            self.resolved_major,
+            self.resolved_unknown,
+            self.unsuccessful,
             self.unknown_classification,
             self.unknown_access,
             self.unknown_identity
@@ -237,7 +265,7 @@ impl FaultReport {
                 &mut json,
                 "{{\"task_id\":{},\"pid\":{},\"tid\":{},\"page_address\":{},\"access_bits\":{},\"\
                  access\":\"{}\",\"origin_id\":{},\"origin\":\"{}\",\"outcome_id\":{},\"outcome\":\
-                 \"{}\",\"classification_id\":{},\"classification\":\"{}\",\"record_count\":{},\"\
+                 \"{}\",\"classification_id\":{},\"classification\":\"{}\",\"classification_applicability\":\"{}\",\"record_count\":{},\"\
                  query_censored\":{},\"duration\":",
                 key.task_id,
                 optional_number(key.pid),
@@ -251,6 +279,7 @@ impl FaultReport {
                 outcome_name(key.outcome),
                 key.classification,
                 classification_name(key.classification),
+                classification_applicability(key.outcome),
                 group.record_count,
                 group.query_censored
             )
@@ -313,6 +342,9 @@ fn classification_name(value: u32) -> &'static str {
         2 => "major",
         _ => "unsupported",
     }
+}
+pub(crate) fn classification_applicability(outcome: u32) -> &'static str {
+    if outcome == 1 { "applicable" } else { "not_applicable" }
 }
 fn origin_name(value: u32) -> &'static str {
     match value {

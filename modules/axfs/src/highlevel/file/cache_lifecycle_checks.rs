@@ -47,6 +47,10 @@ fn poll_once<F: Future>(future: Pin<&mut F>) -> Poll<F::Output> {
 struct TestFile {
     inode: u64,
     data: Mutex<Vec<u8>>,
+    fail_read: AtomicBool,
+    pause_read: AtomicBool,
+    read_io: AtomicUsize,
+    reads: AtomicUsize,
     fail_write: AtomicBool,
     fail_sync: AtomicBool,
     pause_write: AtomicBool,
@@ -90,11 +94,35 @@ impl Pollable for TestFile {
 #[async_trait::async_trait]
 impl FileNodeOps for TestFile {
     async fn read_at(&self, buf: &mut [u8], offset: u64) -> VfsResult<usize> {
+        self.reads.fetch_add(1, Ordering::Relaxed);
+        core::future::poll_fn(|cx| {
+            if self.pause_read.load(Ordering::Acquire) {
+                cx.waker().wake_by_ref();
+                Poll::Pending
+            } else {
+                Poll::Ready(())
+            }
+        }).await;
+        if self.fail_read.load(Ordering::Acquire) { return Err(VfsError::Io); }
         let data = self.data.lock();
         let offset = usize::try_from(offset).map_err(|_| VfsError::InvalidInput)?;
         let count = buf.len().min(data.len().saturating_sub(offset));
         if count != 0 { buf[..count].copy_from_slice(&data[offset..offset + count]); }
         Ok(count)
+    }
+    async fn read_at_with_io(
+        &self,
+        buf: &mut [u8],
+        offset: u64,
+        _observed: core::ops::Range<usize>,
+    ) -> VfsResult<(usize, Option<bool>)> {
+        let read = self.read_at(buf, offset).await?;
+        let io = match self.read_io.load(Ordering::Acquire) {
+            1 => Some(false),
+            2 => Some(true),
+            _ => None,
+        };
+        Ok((read, io))
     }
     async fn write_at(&self, buf: &[u8], offset: u64) -> VfsResult<usize> {
         self.writes.fetch_add(1, Ordering::Relaxed);
@@ -133,6 +161,10 @@ impl CacheCase {
         let backend = Arc::new(TestFile {
             inode: 67,
             data: Mutex::new(alloc::vec![0; PAGE_SIZE]),
+            fail_read: AtomicBool::new(false),
+            pause_read: AtomicBool::new(false),
+            read_io: AtomicUsize::new(0),
+            reads: AtomicUsize::new(0),
             fail_write: AtomicBool::new(false),
             fail_sync: AtomicBool::new(false),
             pause_write: AtomicBool::new(false),
@@ -316,7 +348,11 @@ fn snapshot_identity_generations() -> VfsResult<()> {
 }
 
 pub(super) fn run() -> VfsResult<()> {
-    let checks: [(&str, fn() -> VfsResult<()>); 5] = [
+    let checks: [(&str, fn() -> VfsResult<()>); 9] = [
+        ("fault_io_owner_waiter", fault_io_owner_waiter),
+        ("fault_io_hot_target_cold_neighbor", fault_io_hot_target_cold_neighbor),
+        ("fault_io_cancel_error_retry", fault_io_cancel_error_retry),
+        ("fault_io_unsupported_generation_retry", fault_io_unsupported_generation_retry),
         ("cache_identity_publication", identity_publication),
         ("cache_write_failure_retry", write_failure_retry),
         ("cache_redirty_checkpoint", redirty_checkpoint),
@@ -331,6 +367,8 @@ pub(super) fn run() -> VfsResult<()> {
         info!("MLC_KERNEL PASS {}", name);
     }
     run_cache_shard_regression_checks()?;
+    #[cfg(feature = "ext4")]
+    crate::fs::ext4::run_fault_io_checks()?;
     Ok(())
 }
 
@@ -344,6 +382,10 @@ fn create_test_file_cache(
     let backend = Arc::new(TestFile {
         inode,
         data: Mutex::new(alloc::vec![0; PAGE_SIZE * page_count]),
+        fail_read: AtomicBool::new(false),
+        pause_read: AtomicBool::new(false),
+        read_io: AtomicUsize::new(0),
+        reads: AtomicUsize::new(0),
         fail_write: AtomicBool::new(false),
         fail_sync: AtomicBool::new(false),
         pause_write: AtomicBool::new(false),
@@ -628,5 +670,110 @@ pub(super) fn run_cache_shard_regression_checks() -> VfsResult<()> {
         info!("[CACHE_SHARD_GUEST] PASS {}", name);
     }
     info!("[CACHE_SHARD_GUEST] All cache shard regression checks PASSED!");
+    Ok(())
+}
+
+/// Controlled external FileNode boundary: injected I/O tests propagation and
+/// lifetime behavior; these cases do not claim physical storage coverage.
+fn fault_fixture() -> VfsResult<(super::CachedFile, Arc<TestFile>)> {
+    let case = CacheCase::new()?;
+    case.shared.page_cache.lock().clear();
+    case.backend.data.lock().resize(2 * PAGE_SIZE, 0x73);
+    case.shared.size.store((2 * PAGE_SIZE) as u64, Ordering::Release);
+    let fs = crate::fs::new_tmpfs();
+    let mount = axfs_ng_vfs::Mountpoint::new_root(&fs);
+    let entry = axfs_ng_vfs::DirEntry::new_file(
+        case.file, axfs_ng_vfs::NodeType::RegularFile, axfs_ng_vfs::Reference::root(),
+    );
+    let file = super::CachedFile {
+        inner: axfs_ng_vfs::Location::new(mount, entry),
+        shared: case.shared,
+        in_memory: false,
+        read_hint: Arc::new(core::sync::atomic::AtomicU64::new(u64::MAX)),
+    };
+    Ok((file, case.backend))
+}
+
+fn release_fault_pins(pages: super::SharedPagePaddrs) {
+    for (_, frame) in pages { drop(MappingPin(frame)); }
+}
+
+fn fault_io_owner_waiter() -> VfsResult<()> {
+    let (file, backend) = fault_fixture()?;
+    backend.pause_read.store(true, Ordering::Release);
+    backend.read_io.store(2, Ordering::Release);
+    let mut owner = Box::pin(file.get_shared_page_paddrs_with_io_async(0, 1, false));
+    check!(poll_once(owner.as_mut()).is_pending());
+    let mut waiter = Box::pin(file.get_shared_page_paddrs_with_io_async(0, 1, false));
+    check!(poll_once(waiter.as_mut()).is_pending());
+    check!(backend.reads.load(Ordering::Acquire) == 1);
+    backend.pause_read.store(false, Ordering::Release);
+    let Poll::Ready(Ok((owner_pages, owner_io))) = poll_once(owner.as_mut()) else {
+        return Err(VfsError::BadState);
+    };
+    release_fault_pins(owner_pages);
+    check!(owner_io == axmm::FilePageIo::StorageRead);
+    let Poll::Ready(Ok((waiter_pages, waiter_io))) = poll_once(waiter.as_mut()) else {
+        return Err(VfsError::BadState);
+    };
+    release_fault_pins(waiter_pages);
+    check!(waiter_io == axmm::FilePageIo::NoStorageRead);
+    check!(backend.reads.load(Ordering::Acquire) == 1);
+    Ok(())
+}
+
+fn fault_io_hot_target_cold_neighbor() -> VfsResult<()> {
+    let (file, backend) = fault_fixture()?;
+    backend.read_io.store(2, Ordering::Release);
+    let (pages, io) = file.get_shared_page_paddrs_with_io(0, 1, false)?;
+    release_fault_pins(pages);
+    check!(io == axmm::FilePageIo::StorageRead);
+    let (pages, io) = file.get_shared_page_paddrs_with_io(0, 2, false)?;
+    let count = pages.len();
+    release_fault_pins(pages);
+    check!(io == axmm::FilePageIo::NoStorageRead && count == 1);
+    check!(backend.reads.load(Ordering::Acquire) == 1);
+    check!(file.shared_page_paddr(1).is_err());
+    Ok(())
+}
+
+fn fault_io_cancel_error_retry() -> VfsResult<()> {
+    let (file, backend) = fault_fixture()?;
+    backend.pause_read.store(true, Ordering::Release);
+    let mut canceled = Box::pin(file.get_shared_page_paddrs_with_io_async(0, 1, false));
+    check!(poll_once(canceled.as_mut()).is_pending());
+    drop(canceled);
+    check!(file.shared_page_paddr(0).is_err());
+    backend.pause_read.store(false, Ordering::Release);
+    backend.fail_read.store(true, Ordering::Release);
+    check!(matches!(file.get_shared_page_paddrs_with_io(0, 1, false), Err(VfsError::Io)));
+    check!(file.shared_page_paddr(0).is_err());
+    backend.fail_read.store(false, Ordering::Release);
+    backend.read_io.store(2, Ordering::Release);
+    let (pages, io) = file.get_shared_page_paddrs_with_io(0, 1, false)?;
+    release_fault_pins(pages);
+    check!(io == axmm::FilePageIo::StorageRead);
+    check!(backend.reads.load(Ordering::Acquire) == 3);
+    Ok(())
+}
+
+fn fault_io_unsupported_generation_retry() -> VfsResult<()> {
+    let (file, backend) = fault_fixture()?;
+    let (pages, io) = file.get_shared_page_paddrs_with_io(0, 1, false)?;
+    release_fault_pins(pages);
+    check!(io == axmm::FilePageIo::Unknown);
+    file.shared.page_cache.lock().clear();
+    backend.pause_read.store(true, Ordering::Release);
+    backend.read_io.store(2, Ordering::Release);
+    let mut owner = Box::pin(file.get_shared_page_paddrs_with_io_async(0, 1, false));
+    check!(poll_once(owner.as_mut()).is_pending());
+    file.shared.cache_generation.fetch_add(1, Ordering::AcqRel);
+    backend.pause_read.store(false, Ordering::Release);
+    let Poll::Ready(Ok((pages, io))) = poll_once(owner.as_mut()) else {
+        return Err(VfsError::BadState);
+    };
+    release_fault_pins(pages);
+    check!(io == axmm::FilePageIo::StorageRead);
+    check!(backend.reads.load(Ordering::Acquire) == 3);
     Ok(())
 }
