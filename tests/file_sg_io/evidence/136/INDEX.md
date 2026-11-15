@@ -50,3 +50,30 @@ Values below 1 are regressions and are retained. In particular, the refreshed ba
 | Negative RV64 | 7cb23b9410b27d766b0b9c001edfc6a3c51549904b0249ad5cd749276218bd14 |
 
 Extract the bundle and inspect manifest.json to verify raw files. Archived command paths describe the original workspace; use the saved guest ELF with run.py --guest-elf and an explicitly selected rebuilt kernel when reproducing. The runner checks guest shutdown and source-image integrity. SHA256SUMS covers the files in this evidence directory.
+
+
+**Feature-disabled gates supplement** (source commit 81429b48bf0e32a0c2c4121c18c96a36c2e22843):
+
+The ordinary dual-architecture make test and the separate RV64 qemu+bpf-trace
+compilation passed. Runtime tests used the ordinary qemu kernels on both architectures,
+without bpf-trace or file-io-test. Each archived kernel provenance file's selected
+artifact SHA-256 matches both the tested kernel hash and a fresh checksum of the
+current kernel. Configuration is identified from that artifact-bound provenance,
+not inferred from the presence or order of other build logs.
+
+The same semantics/append guest ELFs as the feature-enabled runs passed on these
+normal kernels (four additional runs). Both semantics logs show PSGI RESET rejected
+as unsupported, confirming the test gate was off.
+
+| Runtime | semantics | append | Kernel SHA-256 |
+| --- | --- | --- | --- |
+| RV64 qemu | PASS | PASS | b97f7a91a673c5a8838108ef9738ed6c9993edb129653eaa742685f4d0e0ec62 |
+| LA64 qemu | PASS | PASS | 3f7e932151100dde79245221c06929cb7d71b46a1312d062d7e0ca61c401a092 |
+
+[gate-summary.json](gate-summary.json) records the separate build/runtime results
+and the exact provenance feature strings. [gates.tar.gz](gates.tar.gz) contains
+the four runs' commands, results, logs, small guest ELFs, the two build logs,
+both kernel provenance JSON files and an independent SHA-256 manifest.
+No kernel or disk images are included. The original validation.tar.gz,
+final-result.json and all performance tables remain byte-for-byte unchanged;
+this supplement does not rerun or reinterpret timing.
