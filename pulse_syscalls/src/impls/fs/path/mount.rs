@@ -203,9 +203,6 @@ fn sys_mount_move(ctx: &axfs::FsContext, source_uptr: usize, target_path: &str) 
         Err(e) => return -LinuxError::from(e.canonicalize()).code() as isize,
     };
 
-    let parent_mp = target_loc.mountpoint().clone();
-    let entry_key = axfs_ng_vfs::Location::pub_entry_key(target_loc.entry());
-
     // Detach source from its current parent and re-attach at target.
     let new_mp = match source_loc.move_mount(&target_loc) {
         Ok(mp) => mp,
@@ -217,30 +214,8 @@ fn sys_mount_move(ctx: &axfs::FsContext, source_uptr: usize, target_path: &str) 
     // Rename records in MOUNT_RECORDS and MOUNTED_MOUNTPOINTS for this path and all descendants.
     axfs::rename_mount_registry(&source_path, target_path);
 
-    // Propagate the move to shared peers and slaves.
-    let shadows = axfs_ng_vfs::propagate_new_mount(
-        &parent_mp,
-        entry_key,
-        Some(new_mp.root_location()),
-        &new_mp,
-    );
-    for (_peer_mp, shadow_mp) in shadows {
-        if let Some(loc) = shadow_mp.location() {
-            if let Ok(abs) = loc.absolute_path() {
-                let p = abs.to_string();
-                axlog::debug!("sys_mount_move: propagated shadow mount at '{}'", p);
-                // MOUNTED_TARGETS insert removed
-                axfs::register_mounted_mountpoint(&p, shadow_mp.clone());
-                axfs::register_mount_for_mountpoint(
-                    &source_path,
-                    &p,
-                    "none",
-                    "rw,bind,relatime",
-                    shadow_mp,
-                );
-            }
-        }
-    }
+    // Publish each propagated shadow through the same coordinator as bind.
+    axfs::propagate_mount(&new_mp);
 
     0
 }
@@ -386,92 +361,10 @@ pub fn sys_mount(
             Ok(loc) => loc,
             Err(e) => return -LinuxError::from(e.canonicalize()).code() as isize,
         };
-        let mount_dir = target_loc;
-
-        let parent_mp = mount_dir.mountpoint().clone();
-        let entry_key = axfs_ng_vfs::Location::pub_entry_key(mount_dir.entry());
-
-        match mount_dir.mount_bind(source_loc.clone()) {
-            Ok(mountpoint) => {
-                axlog::debug!("sys_mount: bind mount successful on '{}'", target_path);
-
-                // Set readonly status
-                if is_rdonly {
-                    mountpoint.set_readonly(true);
-                } else {
-                    mountpoint.set_readonly(source_loc.mountpoint().is_readonly());
-                }
-                mountpoint.set_flags(_flags);
-
-                axfs::register_mounted_mountpoint(&target_path, mountpoint.clone());
-                let options = if is_rdonly {
-                    "ro,bind,relatime"
-                } else {
-                    "rw,bind,relatime"
-                };
-                axfs::register_mount_for_mountpoint(
-                    &source_path,
-                    &target_path,
-                    "none",
-                    options,
-                    mountpoint.clone(),
-                );
-
-                // Clone the existing subtree from source_loc to the new mountpoint
-                let mut self_shadows = Vec::new();
-                axfs_ng_vfs::propagate_subtree(
-                    &source_loc.mountpoint(),
-                    &mountpoint,
-                    &mut self_shadows,
-                );
-                for (_peer_mp, shadow_mp) in self_shadows {
-                    if let Some(loc) = shadow_mp.location() {
-                        if let Ok(abs) = loc.absolute_path() {
-                            let p = abs.to_string();
-                            axlog::debug!("sys_mount: propagated local shadow mount at '{}'", p);
-                            axfs::register_mounted_mountpoint(&p, shadow_mp.clone());
-                            axfs::register_mount_for_mountpoint(
-                                &source_path,
-                                &p,
-                                "none",
-                                options,
-                                shadow_mp.clone(),
-                            );
-                        }
-                    }
-                }
-
-                // Propagate to shared peers and slaves.
-                let shadows = axfs_ng_vfs::propagate_new_mount(
-                    &parent_mp,
-                    entry_key,
-                    Some(source_loc),
-                    &mountpoint,
-                );
-                for (_peer_mp, shadow_mp) in shadows {
-                    if let Some(loc) = shadow_mp.location() {
-                        if let Ok(abs) = loc.absolute_path() {
-                            let p = abs.to_string();
-                            axlog::debug!("sys_mount: propagated shadow mount at '{}'", p);
-                            axfs::register_mounted_mountpoint(&p, shadow_mp.clone());
-                            axfs::register_mount_for_mountpoint(
-                                &source_path,
-                                &p,
-                                "none",
-                                options,
-                                shadow_mp.clone(),
-                            );
-                        }
-                    }
-                }
-
-                return 0;
-            }
-            Err(e) => {
-                axlog::debug!("sys_mount: bind mount failed: {:?}", e);
-                return -LinuxError::from(e.canonicalize()).code() as isize;
-            }
-        }
+        return match axfs::mount_bind(&target_loc, source_loc, &source_path, _flags) {
+            Ok(_) => 0,
+            Err(e) => -LinuxError::from(e.canonicalize()).code() as isize,
+        };
     }
 
     let source_path = match read_user_optional_path(source) {
@@ -595,27 +488,16 @@ pub fn sys_umount2(target: usize, flags: usize) -> isize {
     // Unmount all propagated peer mountpoints
     for peer_mp in peer_mps {
         let root_loc = peer_mp.root_location();
-        let detached_subtree = if is_detach {
-            peer_mp.collect_subtree()
-        } else {
-            Vec::new()
-        };
         if let Ok(abs_path) = root_loc.absolute_path() {
             let peer_path = abs_path.to_string();
             axlog::debug!("sys_umount2: propagating unmount to peer '{}'", peer_path);
             let res = if is_detach {
-                root_loc.unmount_all()
+                axfs::unmount_subtree(&root_loc)
             } else {
                 axfs::unmount_filesystem(&root_loc)
             };
             match res {
-                Ok(()) => {
-                    if is_detach {
-                        for detached_mp in detached_subtree {
-                            axfs::unregister_mountpoint_records(&detached_mp);
-                        }
-                    }
-                }
+                Ok(()) => {}
                 Err(e) => {
                     axlog::warn!(
                         "sys_umount2: failed to unmount propagated peer '{}': {:?}",
@@ -627,26 +509,14 @@ pub fn sys_umount2(target: usize, flags: usize) -> isize {
         }
     }
 
-    let detached_subtree = if is_detach {
-        target_mp.collect_subtree()
-    } else {
-        Vec::new()
-    };
     let result = if is_detach {
-        target_loc.unmount_all()
+        axfs::unmount_subtree(&target_loc)
     } else {
         axfs::unmount_filesystem(&target_loc)
     };
 
     match result {
-        Ok(()) => {
-            if is_detach {
-                for detached_mp in detached_subtree {
-                    axfs::unregister_mountpoint_records(&detached_mp);
-                }
-            }
-            0
-        }
+        Ok(()) => 0,
         Err(e) => -LinuxError::from(e.canonicalize()).code() as isize,
     }
 }
