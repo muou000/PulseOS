@@ -3,12 +3,6 @@
 #![no_std]
 #![cfg_attr(doc, feature(doc_auto_cfg))]
 
-#[cfg(feature = "fxmac")]
-/// fxmac driver for PhytiumPi
-pub mod fxmac;
-#[cfg(feature = "ixgbe")]
-/// ixgbe NIC device driver.
-pub mod ixgbe;
 mod net_buf;
 #[cfg(feature = "starfive-jh7110-dwmac")]
 /// Synopsys DWMAC 5.20 controller used by the StarFive JH7110.
