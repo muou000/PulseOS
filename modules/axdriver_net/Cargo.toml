@@ -42,8 +42,6 @@ repository = "https://github.com/arceos-org/axdriver_crates"
 
 [features]
 default = []
-fxmac = ["dep:fxmac_rs"]
-ixgbe = ["dep:ixgbe-driver"]
 starfive-jh7110-dwmac = []
 
 [lib]
@@ -58,13 +56,3 @@ axpoll = "0.3"
 [dependencies.axdriver_base]
 version = "0.1"
 path = "../axdriver_base"
-
-[dependencies.fxmac_rs]
-git = "https://github.com/elliott10/fxmac_rs.git"
-rev = "0dbc3916"
-optional = true
-
-[dependencies.ixgbe-driver]
-git = "https://github.com/KuangjuX/ixgbe-driver.git"
-rev = "8e5eb74"
-optional = true
