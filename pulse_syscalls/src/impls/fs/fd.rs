@@ -195,7 +195,7 @@ fn sys_fcntl_record_lock(fd: usize, cmd: u32, arg: usize) -> Result<isize, Linux
         return Err(LinuxError::EBADF);
     }
 
-    let mut lock: flock = with_process(|process| uaccess::read_user_plain(process, arg))?
+    let mut lock: flock = with_process(|process| uaccess::read_user_value(process, arg))?
         .map_err(|e| LinuxError::from(e.canonicalize()))?;
     let base = match lock.l_whence as u32 {
         SEEK_SET => 0,

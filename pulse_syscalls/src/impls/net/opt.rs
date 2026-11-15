@@ -9,11 +9,20 @@ use axlog::*;
 use super::get_socket;
 use pulse_core::net::SocketInner;
 
+use crate::impls::utils::read_user_value;
+
 #[derive(Copy, Clone, Default, Debug)]
 #[repr(C)]
 struct TimeVal {
     tv_sec: i64,
     tv_usec: i64,
+}
+
+pulse_user_abi::impl_user_abi_struct! {
+    for TimeVal, size = 16 => {
+        tv_sec: i64,
+        tv_usec: i64,
+    }
 }
 
 #[derive(Copy, Clone, Default, Debug)]
@@ -23,6 +32,15 @@ struct TpacketReq {
     tp_block_nr: u32,
     tp_frame_size: u32,
     tp_frame_nr: u32,
+}
+
+pulse_user_abi::impl_user_abi_struct! {
+    for TpacketReq, size = 16 => {
+        tp_block_size: u32,
+        tp_block_nr: u32,
+        tp_frame_size: u32,
+        tp_frame_nr: u32,
+    }
 }
 
 #[derive(Copy, Clone, Default, Debug)]
@@ -37,12 +55,16 @@ struct TpacketReq3 {
     tp_feature_req_word: u32,
 }
 
-
-fn read_user_plain<T: Copy>(user_addr: usize) -> Result<T, LinuxError> {
-    crate::impls::utils::with_process(|process| {
-        pulse_core::task::uaccess::read_user_plain(process, user_addr)
-    })?
-    .map_err(|e| LinuxError::from(e.canonicalize()))
+pulse_user_abi::impl_user_abi_struct! {
+    for TpacketReq3, size = 28 => {
+        tp_block_size: u32,
+        tp_block_nr: u32,
+        tp_frame_size: u32,
+        tp_frame_nr: u32,
+        tp_retire_blk_tov: u32,
+        tp_sizeof_priv: u32,
+        tp_feature_req_word: u32,
+    }
 }
 
 fn write_user_plain<T: Copy>(user_addr: usize, value: &T) -> Result<(), LinuxError> {
@@ -75,7 +97,7 @@ pub fn sys_getsockopt(
                 if let Err(e) = write_user_plain(optval, &val) {
                     return -(e.code() as isize);
                 }
-                let mut len: u32 = match read_user_plain(optlen) {
+                let mut len: u32 = match read_user_value(optlen) {
                     Ok(l) => l,
                     Err(e) => return -(e.code() as isize),
                 };
@@ -106,7 +128,7 @@ pub fn sys_getsockopt(
                 if let Err(e) = write_user_plain(optval, &val) {
                     return -(e.code() as isize);
                 }
-                let mut len: u32 = match read_user_plain(optlen) {
+                let mut len: u32 = match read_user_value(optlen) {
                     Ok(l) => l,
                     Err(e) => return -(e.code() as isize),
                 };
@@ -124,7 +146,7 @@ pub fn sys_getsockopt(
                 if let Err(e) = write_user_plain(optval, &val) {
                     return -(e.code() as isize);
                 }
-                let mut len: u32 = match read_user_plain(optlen) {
+                let mut len: u32 = match read_user_value(optlen) {
                     Ok(l) => l,
                     Err(e) => return -(e.code() as isize),
                 };
@@ -142,7 +164,7 @@ pub fn sys_getsockopt(
                 if let Err(e) = write_user_plain(optval, &val) {
                     return -(e.code() as isize);
                 }
-                let mut len: u32 = match read_user_plain(optlen) {
+                let mut len: u32 = match read_user_value(optlen) {
                     Ok(l) => l,
                     Err(e) => return -(e.code() as isize),
                 };
@@ -160,7 +182,7 @@ pub fn sys_getsockopt(
                 if let Err(e) = write_user_plain(optval, &val) {
                     return -(e.code() as isize);
                 }
-                let mut len: u32 = match read_user_plain(optlen) {
+                let mut len: u32 = match read_user_value(optlen) {
                     Ok(l) => l,
                     Err(e) => return -(e.code() as isize),
                 };
@@ -178,7 +200,7 @@ pub fn sys_getsockopt(
                 if let Err(e) = write_user_plain(optval, &val) {
                     return -(e.code() as isize);
                 }
-                let mut len: u32 = match read_user_plain(optlen) {
+                let mut len: u32 = match read_user_value(optlen) {
                     Ok(l) => l,
                     Err(e) => return -(e.code() as isize),
                 };
@@ -197,7 +219,7 @@ pub fn sys_getsockopt(
                 if let Err(e) = write_user_plain(optval, &val) {
                     return -(e.code() as isize);
                 }
-                let mut len: u32 = match read_user_plain(optlen) {
+                let mut len: u32 = match read_user_value(optlen) {
                     Ok(l) => l,
                     Err(e) => return -(e.code() as isize),
                 };
@@ -229,7 +251,7 @@ pub fn sys_getsockopt(
                 if let Err(e) = write_user_plain(optval, &val) {
                     return -(e.code() as isize);
                 }
-                let mut len: u32 = match read_user_plain(optlen) {
+                let mut len: u32 = match read_user_value(optlen) {
                     Ok(l) => l,
                     Err(e) => return -(e.code() as isize),
                 };
@@ -248,7 +270,7 @@ pub fn sys_getsockopt(
                 if let Err(e) = write_user_plain(optval, &val) {
                     return -(e.code() as isize);
                 }
-                let mut len: u32 = match read_user_plain(optlen) {
+                let mut len: u32 = match read_user_value(optlen) {
                     Ok(l) => l,
                     Err(e) => return -(e.code() as isize),
                 };
@@ -263,7 +285,7 @@ pub fn sys_getsockopt(
             11 => {
                 // TCP_INFO
                 debug!("sys_getsockopt: level IPPROTO_TCP, optname TCP_INFO (stub success)");
-                let mut len: u32 = match read_user_plain(optlen) {
+                let mut len: u32 = match read_user_value(optlen) {
                     Ok(l) => l,
                     Err(e) => return -(e.code() as isize),
                 };
@@ -285,7 +307,7 @@ pub fn sys_getsockopt(
                 // TCP_CONGESTION
                 debug!("sys_getsockopt: level IPPROTO_TCP, optname TCP_CONGESTION (stub success)");
                 let val = "cubic\0";
-                let mut len: u32 = match read_user_plain(optlen) {
+                let mut len: u32 = match read_user_value(optlen) {
                     Ok(l) => l,
                     Err(e) => return -(e.code() as isize),
                 };
@@ -340,7 +362,7 @@ pub fn sys_getsockopt(
                 if let Err(e) = write_user_plain(optval, &tv) {
                     return -(e.code() as isize);
                 }
-                let mut len: u32 = match read_user_plain(optlen) {
+                let mut len: u32 = match read_user_value(optlen) {
                     Ok(l) => l,
                     Err(e) => return -(e.code() as isize),
                 };
@@ -364,7 +386,7 @@ pub fn sys_getsockopt(
                 if let Err(e) = write_user_plain(optval, &val) {
                     return -(e.code() as isize);
                 }
-                let mut len: u32 = match read_user_plain(optlen) {
+                let mut len: u32 = match read_user_value(optlen) {
                     Ok(l) => l,
                     Err(e) => return -(e.code() as isize),
                 };
@@ -390,7 +412,7 @@ pub fn sys_getsockopt(
                 if let Err(e) = write_user_plain(optval, &val) {
                     return -(e.code() as isize);
                 }
-                let mut len: u32 = match read_user_plain(optlen) {
+                let mut len: u32 = match read_user_value(optlen) {
                     Ok(l) => l,
                     Err(e) => return -(e.code() as isize),
                 };
@@ -411,7 +433,7 @@ pub fn sys_getsockopt(
                 if let Err(e) = write_user_plain(optval, &val) {
                     return -(e.code() as isize);
                 }
-                let mut len: u32 = match read_user_plain(optlen) {
+                let mut len: u32 = match read_user_value(optlen) {
                     Ok(l) => l,
                     Err(e) => return -(e.code() as isize),
                 };
@@ -432,7 +454,7 @@ pub fn sys_getsockopt(
                 if let Err(e) = write_user_plain(optval, &val) {
                     return -(e.code() as isize);
                 }
-                let mut len: u32 = match read_user_plain(optlen) {
+                let mut len: u32 = match read_user_value(optlen) {
                     Ok(l) => l,
                     Err(e) => return -(e.code() as isize),
                 };
@@ -477,7 +499,7 @@ pub fn sys_setsockopt(
                 if optlen < 4 {
                     return -(LinuxError::EINVAL.code() as isize);
                 }
-                let val: i32 = match read_user_plain(optval) {
+                let val: i32 = match read_user_value(optval) {
                     Ok(v) => v,
                     Err(e) => return -(e.code() as isize),
                 };
@@ -502,7 +524,7 @@ pub fn sys_setsockopt(
                 if optlen < core::mem::size_of::<TimeVal>() {
                     return -(LinuxError::EINVAL.code() as isize);
                 }
-                let tv: TimeVal = match read_user_plain(optval) {
+                let tv: TimeVal = match read_user_value(optval) {
                     Ok(v) => v,
                     Err(e) => return -(e.code() as isize),
                 };
@@ -539,7 +561,7 @@ pub fn sys_setsockopt(
                 if optlen < 4 {
                     return -(LinuxError::EINVAL.code() as isize);
                 }
-                let _val: i32 = match read_user_plain(optval) {
+                let _val: i32 = match read_user_value(optval) {
                     Ok(v) => v,
                     Err(e) => return -(e.code() as isize),
                 };
@@ -555,7 +577,7 @@ pub fn sys_setsockopt(
                 if optlen < 4 {
                     return -(LinuxError::EINVAL.code() as isize);
                 }
-                let val: i32 = match read_user_plain(optval) {
+                let val: i32 = match read_user_value(optval) {
                     Ok(v) => v,
                     Err(e) => return -(e.code() as isize),
                 };
@@ -575,7 +597,7 @@ pub fn sys_setsockopt(
                 if optlen < 4 {
                     return -(LinuxError::EINVAL.code() as isize);
                 }
-                let _val: i32 = match read_user_plain(optval) {
+                let _val: i32 = match read_user_value(optval) {
                     Ok(v) => v,
                     Err(e) => return -(e.code() as isize),
                 };
@@ -637,7 +659,7 @@ pub fn sys_setsockopt(
                 if optlen < 4 {
                     return -(LinuxError::EINVAL.code() as isize);
                 }
-                let ttl: i32 = match read_user_plain(optval) {
+                let ttl: i32 = match read_user_value(optval) {
                     Ok(value) => value,
                     Err(e) => return -(e.code() as isize),
                 };
@@ -658,7 +680,7 @@ pub fn sys_setsockopt(
                 if optlen < 4 {
                     return -(LinuxError::EINVAL.code() as isize);
                 }
-                let _val: i32 = match read_user_plain(optval) {
+                let _val: i32 = match read_user_value(optval) {
                     Ok(v) => v,
                     Err(e) => return -(e.code() as isize),
                 };
@@ -674,7 +696,7 @@ pub fn sys_setsockopt(
                 if optlen < 4 {
                     return -(LinuxError::EINVAL.code() as isize);
                 }
-                let val: i32 = match read_user_plain(optval) {
+                let val: i32 = match read_user_value(optval) {
                     Ok(v) => v,
                     Err(e) => return -(e.code() as isize),
                 };
@@ -691,7 +713,7 @@ pub fn sys_setsockopt(
                 if optlen < 4 {
                     return -(LinuxError::EINVAL.code() as isize);
                 }
-                let val: i32 = match read_user_plain(optval) {
+                let val: i32 = match read_user_value(optval) {
                     Ok(v) => v,
                     Err(e) => return -(e.code() as isize),
                 };
@@ -708,7 +730,7 @@ pub fn sys_setsockopt(
                 if optlen < 4 {
                     return -(LinuxError::EINVAL.code() as isize);
                 }
-                let val: i32 = match read_user_plain(optval) {
+                let val: i32 = match read_user_value(optval) {
                     Ok(v) => v,
                     Err(e) => return -(e.code() as isize),
                 };
@@ -731,7 +753,7 @@ pub fn sys_setsockopt(
                 if optlen < 4 {
                     return -(LinuxError::EINVAL.code() as isize);
                 }
-                let val: u32 = match read_user_plain(optval) {
+                let val: u32 = match read_user_value(optval) {
                     Ok(v) => v,
                     Err(e) => return -(e.code() as isize),
                 };
@@ -754,7 +776,7 @@ pub fn sys_setsockopt(
                 if optlen < 4 {
                     return -(LinuxError::EINVAL.code() as isize);
                 }
-                let val: i32 = match read_user_plain(optval) {
+                let val: i32 = match read_user_value(optval) {
                     Ok(v) => v,
                     Err(e) => return -(e.code() as isize),
                 };
@@ -788,7 +810,7 @@ pub fn sys_setsockopt(
                             if optlen < core::mem::size_of::<TpacketReq3>() {
                                 return -(LinuxError::EINVAL.code() as isize);
                             }
-                            let req: TpacketReq3 = match read_user_plain(optval) {
+                            let req: TpacketReq3 = match read_user_value(optval) {
                                 Ok(r) => r,
                                 Err(e) => return -(e.code() as isize),
                             };
@@ -819,7 +841,7 @@ pub fn sys_setsockopt(
                             if optlen < core::mem::size_of::<TpacketReq>() {
                                 return -(LinuxError::EINVAL.code() as isize);
                             }
-                            let req: TpacketReq = match read_user_plain(optval) {
+                            let req: TpacketReq = match read_user_value(optval) {
                                 Ok(r) => r,
                                 Err(e) => return -(e.code() as isize),
                             };

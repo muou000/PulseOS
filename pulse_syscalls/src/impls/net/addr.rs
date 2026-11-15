@@ -12,15 +12,10 @@ use core::{
 use axerrno::LinuxError;
 use linux_raw_sys::net::*;
 
+use crate::impls::utils::read_user_value;
+
 const UNIX_FAMILY_LEN: usize = size_of::<__kernel_sa_family_t>();
 const UNIX_ADDR_MAX: usize = UNIX_FAMILY_LEN + (UNIX_PATH_MAX as usize);
-
-fn read_user_plain<T: Copy>(user_addr: usize) -> Result<T, LinuxError> {
-    crate::impls::utils::with_process(|process| {
-        pulse_core::task::uaccess::read_user_plain(process, user_addr)
-    })?
-    .map_err(|e| LinuxError::from(e.canonicalize()))
-}
 
 fn write_user_plain<T: Copy>(user_addr: usize, value: &T) -> Result<(), LinuxError> {
     crate::impls::utils::with_process(|process| {
@@ -39,7 +34,7 @@ fn read_family(addr: usize, addrlen: u32) -> Result<u16, LinuxError> {
     if addr == 0 {
         return Err(LinuxError::EFAULT);
     }
-    let family = read_user_plain::<__kernel_sa_family_t>(addr)?;
+    let family = read_user_value::<__kernel_sa_family_t>(addr)?;
     Ok(family)
 }
 
@@ -50,7 +45,7 @@ pub(super) fn read_unix_path(addr: usize, addrlen: usize) -> Result<String, Linu
     if addr == 0 {
         return Err(LinuxError::EFAULT);
     }
-    if read_user_plain::<__kernel_sa_family_t>(addr)? as u32 != AF_UNIX {
+    if read_user_value::<__kernel_sa_family_t>(addr)? as u32 != AF_UNIX {
         return Err(LinuxError::EINVAL);
     }
 
@@ -77,7 +72,7 @@ fn read_v4(addr: usize, addrlen: u32) -> Result<SocketAddrV4, LinuxError> {
     if addr == 0 {
         return Err(LinuxError::EFAULT);
     }
-    let addr_in = read_user_plain::<sockaddr_in>(addr)?;
+    let addr_in = read_user_value::<sockaddr_in>(addr)?;
     if addr_in.sin_family as u32 != AF_INET {
         return Err(LinuxError::EAFNOSUPPORT);
     }
@@ -94,7 +89,7 @@ fn read_v6(addr: usize, addrlen: u32) -> Result<SocketAddrV6, LinuxError> {
     if addr == 0 {
         return Err(LinuxError::EFAULT);
     }
-    let addr_in6 = read_user_plain::<sockaddr_in6>(addr)?;
+    let addr_in6 = read_user_value::<sockaddr_in6>(addr)?;
     if addr_in6.sin6_family as u32 != AF_INET6 {
         return Err(LinuxError::EAFNOSUPPORT);
     }
@@ -207,7 +202,7 @@ pub fn write_unix_addr(
     if addrlen == 0 {
         return Err(LinuxError::EFAULT);
     }
-    let alen = read_user_plain::<u32>(addrlen)?;
+    let alen = read_user_value::<u32>(addrlen)?;
     
     let family = AF_UNIX as u16;
     let mut bytes = [0u8; UNIX_ADDR_MAX];

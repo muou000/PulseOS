@@ -8,6 +8,7 @@ use pulse_core::{
     fd_table::{FdEntry, FdFlags, SignalFdObject},
     task::{SigAction, uaccess},
 };
+use pulse_user_abi::task::SignalAction;
 
 use crate::{
     LinuxError,
@@ -19,6 +20,14 @@ use crate::{
         },
         time::{duration_to_nanos_saturating, timespec_to_duration},
     },
+};
+
+// Both supported targets have the three-word kernel signal-action ABI.
+const _: () = {
+    assert!(core::mem::size_of::<sigaction>() == 24);
+    assert!(core::mem::offset_of!(sigaction, sa_handler) == 0);
+    assert!(core::mem::offset_of!(sigaction, sa_flags) == 8);
+    assert!(core::mem::offset_of!(sigaction, sa_mask) == 16);
 };
 
 pub fn sys_rt_sigprocmask(_how: usize, _set: usize, _oldset: usize, _sigsetsize: usize) -> isize {
@@ -92,7 +101,7 @@ pub fn sys_rt_sigaction(_signum: usize, _act: usize, _oldact: usize, _sigsetsize
     // matching EFAULT precedence, this leaves the disposition untouched when
     // userspace supplied an invalid action pointer.
     let new_action = if act != 0 {
-        let raw: sigaction = match uaccess::read_user_plain(&process, act) {
+        let raw: SignalAction = match uaccess::read_user_value(&process, act) {
             Ok(v) => v,
             Err(e) => {
                 axlog::warn!(
@@ -107,12 +116,12 @@ pub fn sys_rt_sigaction(_signum: usize, _act: usize, _oldact: usize, _sigsetsize
                 return -LinuxError::EFAULT.code() as isize;
             }
         };
-        let handler = unsafe { core::mem::transmute::<_, usize>(raw.sa_handler) };
+        let handler = raw.handler as usize;
         // Linux does not let an action mask block SIGKILL or SIGSTOP, and it
         // clears unknown action bits so userspace can detect unsupported
         // extensions through a subsequent rt_sigaction call.
-        let flags = raw.sa_flags as usize & SUPPORTED_SIGACTION_FLAGS;
-        let mask = sanitize_signal_mask(raw.sa_mask.sig[0] as u64);
+        let flags = raw.flags as usize & SUPPORTED_SIGACTION_FLAGS;
+        let mask = sanitize_signal_mask(raw.mask);
         Some(SigAction::from_parts(handler, flags, mask))
     } else {
         None
@@ -131,16 +140,12 @@ pub fn sys_rt_sigaction(_signum: usize, _act: usize, _oldact: usize, _sigsetsize
     }
 
     if oldact != 0 {
-        let mut raw: sigaction = unsafe { core::mem::zeroed() };
-        raw.sa_handler = unsafe { core::mem::transmute(old.handler) };
-        raw.sa_flags = old.flags as _;
-        raw.sa_mask.sig = [old.mask as _];
-        if let Err(e) = process.write_user_bytes(oldact, unsafe {
-            core::slice::from_raw_parts(
-                (&raw as *const sigaction).cast::<u8>(),
-                core::mem::size_of::<sigaction>(),
-            )
-        }) {
+        let raw = SignalAction {
+            handler: old.handler as u64,
+            flags: old.flags as u64,
+            mask: old.mask,
+        };
+        if let Err(e) = uaccess::write_user_value(&process, oldact, &raw) {
             axlog::warn!(
                 "sys_rt_sigaction: failed to write old action: pid={}, tid={}, signum={}, \
                  oldact={:#x}, err={:?}",
@@ -352,6 +357,14 @@ struct stack_t {
     ss_size: usize,
 }
 
+pulse_user_abi::impl_user_abi_struct! {
+    for stack_t, size = 24 => {
+        ss_sp: usize,
+        ss_flags: i32,
+        ss_size: usize,
+    }
+}
+
 pub fn sys_sigaltstack(ss: usize, oss: usize) -> isize {
     axlog::debug!("sys_sigaltstack: ss={:#x}, oss={:#x}", ss, oss);
 
@@ -363,7 +376,7 @@ pub fn sys_sigaltstack(ss: usize, oss: usize) -> isize {
 
     let old_altstack = thread.signal_altstack();
     let new_altstack = if ss != 0 {
-        let raw_ss: stack_t = match uaccess::read_user_plain(&process, ss) {
+        let raw_ss: stack_t = match uaccess::read_user_value(&process, ss) {
             Ok(v) => v,
             Err(_) => return -LinuxError::EFAULT.code() as isize,
         };
