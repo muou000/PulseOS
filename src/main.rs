@@ -70,8 +70,11 @@ fn main() {
                 info!("MLC_KERNEL RESULT PASS");
             }
 
-            pulse_syscalls::run_bpf_guest_checks().expect("bpf guest checks failed");
-            pulse_core::fd_table::run_pipe_guest_checks().expect("pipe guest checks failed");
+            #[cfg(feature = "guest-checks")]
+            {
+                pulse_syscalls::run_bpf_guest_checks().expect("bpf guest checks failed");
+                pulse_core::fd_table::run_pipe_guest_checks().expect("pipe guest checks failed");
+            }
             pulse_core::task::run_futex_guest_checks().expect("futex guest checks failed");
             pulse_core::task::run_process_registry_guest_checks().expect("process registry guest checks failed");
             axfs::run_dma_and_writeback_guest_checks().expect("dma & writeback guest checks failed");

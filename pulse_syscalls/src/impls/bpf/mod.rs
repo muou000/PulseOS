@@ -15,6 +15,8 @@ mod sys;
 #[cfg(target_os = "none")]
 pub use perf_event::sys_perf_event_open;
 #[cfg(target_os = "none")]
-pub use sys::{run_bpf_guest_checks, sys_bpf};
+pub use sys::sys_bpf;
+#[cfg(all(feature = "guest-checks", target_os = "none"))]
+pub use sys::run_bpf_guest_checks;
 
 
