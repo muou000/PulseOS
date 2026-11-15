@@ -26,8 +26,12 @@ impl AddressSpaceLock {
     }
 
     pub fn resolve_page_fault(&self, address: VirtAddr, flags: PageFaultFlags) -> AxResult<bool> {
+        self.resolve_page_fault_with_io(address, flags).map(|resolution| resolution.handled)
+    }
+
+    pub fn resolve_page_fault_with_io(&self, address: VirtAddr, flags: PageFaultFlags) -> AxResult<axmm::PageFaultResolution> {
         let initial = self.read().handle_page_fault(address, flags);
-        axmm::drive_page_fault(initial, |work| match work {
+        axmm::drive_page_fault_with_io(initial, |work| match work {
             axmm::PageFaultWork::Retry => self.write().handle_page_fault_write(address, flags),
             axmm::PageFaultWork::Completion(wait) => {
                 Self::wait_for_mapping(wait.clone());

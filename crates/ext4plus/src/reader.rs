@@ -31,6 +31,21 @@ pub trait Ext4Read {
         start_byte: u64,
         dst: &mut [u8],
     ) -> Result<(), BoxedError>;
+
+    /// Reads bytes and reports whether this operation issued a storage read
+    /// overlapping `observed`, a half-open window relative to `dst`.
+    /// `None` means the backend cannot establish this fact. Metadata reads and
+    /// reads outside the window do not count. A completed storage read counts
+    /// even when a concurrent cache publication makes its data redundant.
+    async fn read_with_io(
+        &self,
+        start_byte: u64,
+        dst: &mut [u8],
+        _observed: core::ops::Range<usize>,
+    ) -> Result<Option<bool>, BoxedError> {
+        self.read(start_byte, dst).await?;
+        Ok(None)
+    }
 }
 
 /// Interface used by [`Ext4`] to read the filesystem data from a storage
@@ -45,6 +60,21 @@ pub trait Ext4Read {
     /// returned if there is not enough data to fill `dst`, or if the
     /// data cannot be read for any reason.
     fn read(&self, start_byte: u64, dst: &mut [u8]) -> Result<(), BoxedError>;
+
+    /// Reads bytes and reports whether this operation issued a storage read
+    /// overlapping `observed`, a half-open window relative to `dst`.
+    /// `None` means the backend cannot establish this fact. Metadata reads and
+    /// reads outside the window do not count. A completed storage read counts
+    /// even when a concurrent cache publication makes its data redundant.
+    fn read_with_io(
+        &self,
+        start_byte: u64,
+        dst: &mut [u8],
+        _observed: core::ops::Range<usize>,
+    ) -> Result<Option<bool>, BoxedError> {
+        self.read(start_byte, dst)?;
+        Ok(None)
+    }
 }
 
 /// Interface used by [`Ext4`] to read the filesystem data from a storage
@@ -64,6 +94,21 @@ pub trait Ext4Read: Send + Sync {
         start_byte: u64,
         dst: &mut [u8],
     ) -> Result<(), BoxedError>;
+
+    /// Reads bytes and reports whether this operation issued a storage read
+    /// overlapping `observed`, a half-open window relative to `dst`.
+    /// `None` means the backend cannot establish this fact. Metadata reads and
+    /// reads outside the window do not count. A completed storage read counts
+    /// even when a concurrent cache publication makes its data redundant.
+    async fn read_with_io(
+        &self,
+        start_byte: u64,
+        dst: &mut [u8],
+        _observed: core::ops::Range<usize>,
+    ) -> Result<Option<bool>, BoxedError> {
+        self.read(start_byte, dst).await?;
+        Ok(None)
+    }
 }
 
 /// Interface used by [`Ext4`] to read the filesystem data from a storage
@@ -78,6 +123,21 @@ pub trait Ext4Read: Send + Sync {
     /// returned if there is not enough data to fill `dst`, or if the
     /// data cannot be read for any reason.
     fn read(&self, start_byte: u64, dst: &mut [u8]) -> Result<(), BoxedError>;
+
+    /// Reads bytes and reports whether this operation issued a storage read
+    /// overlapping `observed`, a half-open window relative to `dst`.
+    /// `None` means the backend cannot establish this fact. Metadata reads and
+    /// reads outside the window do not count. A completed storage read counts
+    /// even when a concurrent cache publication makes its data redundant.
+    fn read_with_io(
+        &self,
+        start_byte: u64,
+        dst: &mut [u8],
+        _observed: core::ops::Range<usize>,
+    ) -> Result<Option<bool>, BoxedError> {
+        self.read(start_byte, dst)?;
+        Ok(None)
+    }
 }
 
 #[cfg(all(not(feature = "multi-threaded"), not(feature = "sync")))]
@@ -93,6 +153,15 @@ where
     ) -> Result<(), BoxedError> {
         (**self).read(start_byte, dst).await
     }
+
+    async fn read_with_io(
+        &self,
+        start_byte: u64,
+        dst: &mut [u8],
+        observed: core::ops::Range<usize>,
+    ) -> Result<Option<bool>, BoxedError> {
+        (**self).read_with_io(start_byte, dst, observed).await
+    }
 }
 
 #[cfg(all(not(feature = "multi-threaded"), feature = "sync"))]
@@ -102,6 +171,15 @@ where
 {
     fn read(&self, start_byte: u64, dst: &mut [u8]) -> Result<(), BoxedError> {
         (**self).read(start_byte, dst)
+    }
+
+    fn read_with_io(
+        &self,
+        start_byte: u64,
+        dst: &mut [u8],
+        observed: core::ops::Range<usize>,
+    ) -> Result<Option<bool>, BoxedError> {
+        (**self).read_with_io(start_byte, dst, observed)
     }
 }
 
@@ -118,6 +196,15 @@ where
     ) -> Result<(), BoxedError> {
         (**self).read(start_byte, dst).await
     }
+
+    async fn read_with_io(
+        &self,
+        start_byte: u64,
+        dst: &mut [u8],
+        observed: core::ops::Range<usize>,
+    ) -> Result<Option<bool>, BoxedError> {
+        (**self).read_with_io(start_byte, dst, observed).await
+    }
 }
 
 #[cfg(all(feature = "multi-threaded", feature = "sync"))]
@@ -127,6 +214,15 @@ where
 {
     fn read(&self, start_byte: u64, dst: &mut [u8]) -> Result<(), BoxedError> {
         (**self).read(start_byte, dst)
+    }
+
+    fn read_with_io(
+        &self,
+        start_byte: u64,
+        dst: &mut [u8],
+        observed: core::ops::Range<usize>,
+    ) -> Result<Option<bool>, BoxedError> {
+        (**self).read_with_io(start_byte, dst, observed)
     }
 }
 
@@ -324,6 +420,17 @@ mod tests {
                 "failed to read 2 bytes at offset 4 from a slice of length 3"
             )
         );
+    }
+
+    #[maybe_async::test(
+        feature = "sync",
+        async(not(feature = "sync"), tokio::test)
+    )]
+    async fn uninstrumented_reader_keeps_io_unknown() {
+        let src = vec![1, 2, 3];
+        let mut dst = [0; 2];
+        assert_eq!(src.read_with_io(1, &mut dst, 0..2).await.unwrap(), None);
+        assert_eq!(dst, [2, 3]);
     }
 
     #[cfg(feature = "multi-threaded")]

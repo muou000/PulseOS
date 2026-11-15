@@ -438,7 +438,11 @@ pub fn page_fault_begin(
 /// guards have been released. Preserves entry identity/epoch while recording
 /// the current completion CPU; this path only publishes a bounded byte copy.
 #[inline]
-pub fn page_fault_complete(observation: Option<PageFaultObservation>, outcome: PageFaultOutcome) {
+pub fn page_fault_complete(
+    observation: Option<PageFaultObservation>,
+    outcome: PageFaultOutcome,
+    classification: PageFaultClassification,
+) {
     let Some(observation) = observation else {
         return;
     };
@@ -454,13 +458,14 @@ pub fn page_fault_complete(observation: Option<PageFaultObservation>, outcome: P
         observation.tid,
         observation.task_id,
     );
-    let Some(context) = PageFaultContext::from_completion(
+    let Some(context) = PageFaultContext::from_classified_completion(
         common,
         observation.fault_address,
         observation.start_ns,
         observation.access,
         observation.origin,
         outcome,
+        classification,
     ) else {
         PAGE_FAULT_CLOCK_ERRORS.fetch_add(1, Ordering::Relaxed);
         return;

@@ -5,6 +5,50 @@ This freestanding RV64/LA64 guest uses raw Linux-shaped syscalls and checks actu
 sample/loss counters. With `--archive`, the host converts its actual RAW frames
 through `bpf-capture` and then verifies the standalone file with `bpf-analyzer`.
 
+## Target-page fault classification (#196)
+
+```bash
+make test APP_FEATURES="qemu bpf-trace" 2>&1 | tail -30
+python3 tests/bpf_sampling/run.py guest --arch riscv64 --mode fault --archive --fault-classes --timeout 240
+python3 tests/bpf_sampling/run.py guest --arch loongarch64 --mode fault --archive --fault-classes --timeout 240
+python3 tests/bpf_sampling/fault_class_evidence.py RUN_DIRECTORY
+```
+
+The optional classification gate injects a content-checked, non-sparse two-page
+file into a copied rootfs. `debugfs bmap` binds each file page to device sectors.
+QEMU's `virtio_blk_handle_read` and `virtio_blk_rw_complete` events independently
+record storage requests and successful completions. At each guest begin/end
+marker the workload blocks on stdin; the host saves the device-trace byte cursor
+before acknowledging the boundary. No elapsed-time threshold is an I/O oracle.
+
+| Target operation | Expected classification | Required device evidence |
+| --- | --- | --- |
+| First anonymous read | Minor | No fixture data read |
+| First cold file read | Major | Completed target-page read |
+| Cached file read through another mapping | Minor | No target-page read |
+| Private file COW write | Minor | No target-page read; other mapping unchanged |
+| Cached target with a cold neighbor in its mapping | Minor | No target or neighbor data read |
+| Subsequent first touch of that cold neighbor | Major | Completed neighbor-page read |
+
+Each case requires exactly one successful user fault for its precise address,
+PID/TID and guest time interval. RAW records must equal normalized capture
+records byte for byte. `fault-classification-evidence.json` retains device reads
+and classification witnesses; `device-reads.log`, `fault-boundaries.json`,
+`fault-file-layout.json` and `fault-file-bmap.txt` make the check replayable.
+The gate rejects a fixture read before its cold phase, missing/failed device
+completion, Unknown target classification, and misattributed neighbor I/O.
+The resident-target path returns a shorter optional batch; the neighbor's read
+is independently attributed to the subsequent fault that actually requests it.
+The existing 128 isolated anonymous read/write iterations and source shutdown
+checks still run. Generic fault captures remain able to read old Unknown data.
+
+The runtime red baseline at
+`runs/riscv64-fault-20261115-205350-unuhvqom` produced 263 real completed faults
+and a valid capture using an archived BPF-enabled kernel, but failed this new
+gate because its target classifications were Unknown. Its independent device
+trace recorded eight target sectors for the cold phase, eight neighbor sectors
+for the mixed batch, and zero fixture sectors for anonymous/hot/COW phases.
+
 ## Time-valid mappings and ELF artifacts (#193)
 
 ```bash

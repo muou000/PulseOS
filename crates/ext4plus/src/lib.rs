@@ -371,6 +371,18 @@ impl Ext4 {
         offset_within_block: u32,
         dst: &mut [u8],
     ) -> Result<(), Ext4Error> {
+        self.read_from_block_with_io(original_block_index, offset_within_block, dst, 0..0)
+            .await.map(|_| ())
+    }
+
+    #[maybe_async::maybe_async]
+    async fn read_from_block_with_io(
+        &self,
+        original_block_index: FsBlockIndex,
+        offset_within_block: u32,
+        dst: &mut [u8],
+        observed: core::ops::Range<usize>,
+    ) -> Result<Option<bool>, Ext4Error> {
         let block_index = self.0.journal.map_block_index(original_block_index);
 
         let err = || {
@@ -409,28 +421,31 @@ impl Ext4 {
         }
 
         // Read the block
-        self.0
+        let storage_read = self.0
             .reader
-            .read(
+            .read_with_io(
                 block_index
                     .checked_mul(self.0.superblock.block_size().to_u64())
                     .ok_or(CorruptKind::InvalidBlockSize)?
                     .checked_add(u64::from(offset_within_block))
                     .ok_or(CorruptKind::InvalidBlockSize)?,
                 dst,
+                observed.clone(),
             )
             .await
             .map_err(Ext4Error::Io)?;
-        Ok(())
+        Ok(if observed.is_empty() { Some(false) } else { storage_read })
     }
 
     #[maybe_async::maybe_async]
-    pub(crate) async fn read_from_block_range(
+    pub(crate) async fn read_from_block_range_with_io(
         &self,
         original_block_index: FsBlockIndex,
         offset_within_block: u32,
         dst: &mut [u8],
-    ) -> Result<(), Ext4Error> {
+        observed: core::ops::Range<usize>,
+    ) -> Result<Option<bool>, Ext4Error> {
+        let mut storage_read = Some(false);
         let block_size = self.0.superblock.block_size().to_u64();
         let bytes_touched = usize_from_u32(offset_within_block)
             .checked_add(dst.len())
@@ -461,15 +476,16 @@ impl Ext4 {
                 return Err(err());
             }
 
-            self.0
+            storage_read = self.0
                 .reader
-                .read(
+                .read_with_io(
                     start_mapped
                         .checked_mul(block_size)
                         .ok_or(CorruptKind::InvalidBlockSize)?
                         .checked_add(u64::from(offset_within_block))
                         .ok_or(CorruptKind::InvalidBlockSize)?,
                     dst,
+                    observed.clone(),
                 )
                 .await
                 .map_err(Ext4Error::Io)?;
@@ -481,18 +497,30 @@ impl Ext4 {
                 let remaining = dst.len() - read_bytes;
                 let available = (block_size - u64::from(current_offset)) as usize;
                 let take = core::cmp::min(remaining, available);
-                self.read_from_block(
-                    current_block_index,
-                    current_offset,
-                    &mut dst[read_bytes..read_bytes + take],
-                )
-                .await?;
+                let start = observed.start.max(read_bytes);
+                let end = observed.end.min(read_bytes + take);
+                if start < end {
+                    let read = self.read_from_block_with_io(
+                        current_block_index,
+                        current_offset,
+                        &mut dst[read_bytes..read_bytes + take],
+                        start - read_bytes..end - read_bytes,
+                    ).await?;
+                    storage_read = merge_read_io(storage_read, read);
+                } else {
+                    self.read_from_block(
+                        current_block_index,
+                        current_offset,
+                        &mut dst[read_bytes..read_bytes + take],
+                    )
+                    .await?;
+                }
                 read_bytes += take;
                 current_block_index += 1;
                 current_offset = 0;
             }
         }
-        Ok(())
+        Ok(if observed.is_empty() { Some(false) } else { storage_read })
     }
 
     /// Read a whole block
@@ -1927,5 +1955,14 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(data, [5; 4]);
+    }
+}
+
+/// Combines actual target reads across retries/runs; one observed read is enough.
+pub(crate) fn merge_read_io(left: Option<bool>, right: Option<bool>) -> Option<bool> {
+    match (left, right) {
+        (Some(true), _) | (_, Some(true)) => Some(true),
+        (Some(false), Some(false)) => Some(false),
+        _ => None,
     }
 }

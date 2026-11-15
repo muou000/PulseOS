@@ -1,5 +1,8 @@
 # 缺页 resolver 完成事件契约（#185）
 
+#196 的后续实现与当前分类语义见 [target-page I/O 分类契约](page-fault-io-classification.md)。
+本文的全部 Unknown 描述保留为 #185 历史基线，不再描述支持 I/O provenance 的新 producer。
+
 状态：依据继续推进 #180 的授权选定的实现契约。2026-11-15，调查基线 `96a73a176df502f38d652912cb6a3cc04a44c23c`。此文明确 #185 的六个决定；schema、生产钩子和 host dispatch 回归随实现交付，真实 RV64/LA64 workload/capture 已集成验证：两架构各258条完成记录、已登记目标READ/WRITE各128。完整范围与失败反例见[本轮验收](../../records/bpf-observation-tools-184-188.md)；major/minor 的真实I/O分类仍由 #196 实施，不能用构造事件测试代替。
 
 ## 决定

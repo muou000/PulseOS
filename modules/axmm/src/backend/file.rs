@@ -18,6 +18,28 @@ use super::{
 pub const FILE_MAPPING_PAGE_BATCH_CAPACITY: usize = 16;
 pub type FileMappingPageBatch = heapless::Vec<(u32, PhysAddr), FILE_MAPPING_PAGE_BATCH_CAPACITY>;
 
+/// Actual storage-read evidence for the requested page, excluding read-ahead
+/// and other pages in the returned batch. A backend must opt in to reporting
+/// NoStorageRead; a successful uninstrumented read is still Unknown.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum FilePageIo {
+    Unknown,
+    NoStorageRead,
+    StorageRead,
+}
+
+impl FilePageIo {
+    /// Preserve facts across attempts in one resolver invocation. In particular,
+    /// a cache-generation retry cannot erase an already completed target read.
+    pub fn combine(self, other: Self) -> Self {
+        match (self, other) {
+            (Self::StorageRead, _) | (_, Self::StorageRead) => Self::StorageRead,
+            (Self::Unknown, _) | (_, Self::Unknown) => Self::Unknown,
+            _ => Self::NoStorageRead,
+        }
+    }
+}
+
 bitflags::bitflags! {
     /// Permissions granted by the underlying file for memory mapping.
     #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -56,6 +78,20 @@ pub trait FileMappingSource: Send + Sync + 'static {
         page_count: usize,
         may_write: bool,
     ) -> AxResult<FileMappingPageBatch>;
+
+    /// Same pins and ownership as `get_shared_page_paddrs`, plus facts about
+    /// storage reads supplying `page_number` during this operation. Waiting for
+    /// another fill is not a read issued by this operation. Implementations must
+    /// obtain facts from the fill itself, never an unlocked preflight lookup.
+    fn get_shared_page_paddrs_with_io(
+        &self,
+        page_number: u32,
+        page_count: usize,
+        may_write: bool,
+    ) -> AxResult<(FileMappingPageBatch, FilePageIo)> {
+        self.get_shared_page_paddrs(page_number, page_count, may_write)
+            .map(|pages| (pages, FilePageIo::Unknown))
+    }
 
     /// Starts a best-effort prefetch for pages after a sequential fault.
     fn prefetch_pages(&self, page_number: u32, page_count: usize);
@@ -287,6 +323,7 @@ pub struct FilePagePrepared {
     pages: FileMappingPageBatch,
     private_frame: Option<OwnedFramePin>,
     mapped_mask: u16,
+    io: FilePageIo,
 }
 
 /// An owned physical-frame reference, released unless transferred to a PTE.
@@ -370,9 +407,9 @@ impl FilePageLoad {
     pub fn prepare(self) -> AxResult<FilePagePrepared> {
         let cache_generation = self.file.mapping_generation();
         let requested_pages = self.page_count;
-        let frames = self
+        let (frames, io) = self
             .file
-            .get_shared_page_paddrs(self.page_number, requested_pages, self.may_write)
+            .get_shared_page_paddrs_with_io(self.page_number, requested_pages, self.may_write)
             .inspect_err(|error| {
                 error!(
                     "file-backed page load failed: page_number={}, page_count={}, may_write={}, \
@@ -398,6 +435,7 @@ impl FilePageLoad {
             pages: frames,
             private_frame: None,
             mapped_mask: 0,
+            io,
         };
         if self.private_write {
             // Construct the owning prepared record before any fallible work so
@@ -445,6 +483,12 @@ impl Drop for FilePagePrepared {
 }
 
 impl FilePagePrepared {
+    /// Evidence carried by the completed preparation, regardless of whether a
+    /// concurrent mapping change subsequently makes these pins obsolete.
+    pub fn io(&self) -> FilePageIo {
+        self.io
+    }
+
     pub(crate) fn matches_generation(
         &self,
         generation: crate::lifecycle::MappingGeneration,

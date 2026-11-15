@@ -1046,6 +1046,23 @@ impl FileNodeOps for Inode {
             .map_err(into_vfs_err)
     }
 
+    async fn read_at_with_io(
+        &self,
+        buf: &mut [u8],
+        offset: u64,
+        observed: core::ops::Range<usize>,
+    ) -> VfsResult<(usize, Option<bool>)> {
+        let fs = &self.fs.inner;
+        let (_, inode) = self.read_inode_cached(fs, self.ino).await?;
+        if inode.file_type().is_symlink() && inode.blocks() == 0 {
+            // Inline symlinks have no file data blocks; inode metadata reads
+            // are outside the target-page data-I/O classification contract.
+            return self.read_at(buf, offset).await.map(|read| (read, Some(false)));
+        }
+        ext4plus::file::read_at_with_io(fs, inode.as_ref(), buf, offset, observed)
+            .await.map_err(into_vfs_err)
+    }
+
     async fn write_at(&self, buf: &[u8], offset: u64) -> VfsResult<usize> {
         log::debug!("ext4 inode::write_at: offset={}, len={}", offset, buf.len());
         let fs = &self.fs.inner;

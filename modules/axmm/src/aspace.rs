@@ -385,26 +385,55 @@ pub enum PageFaultWork<'a> {
     WriteLock,
 }
 
+/// Returned resolver facts. `io` is Unknown when the fault was not handled;
+/// errors return through AxResult and never contribute to successful classes.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct PageFaultResolution {
+    pub handled: bool,
+    pub io: crate::FilePageIo,
+}
+
 /// Drives the common prepare, commit, completion, and retry protocol for a
 /// page fault. The callback only acquires address-space locks and attempts the
 /// lock-aware commit; prepared resources remain owned by this function until
 /// the callback publishes them or its prepared-resource guard drops them.
 pub fn drive_page_fault<Commit>(
     initial: PageFaultResult,
-    mut commit: Commit,
+    commit: Commit,
 ) -> AxResult<bool>
 where
     Commit: for<'a> FnMut(PageFaultWork<'a>) -> PageFaultResult,
 {
+    drive_page_fault_with_io(initial, commit).map(|resolution| resolution.handled)
+}
+
+/// The ordinary resolver protocol with target-page read evidence retained over
+/// preparation and retries. The lock-aware callback has the same contract as
+/// `drive_page_fault`: storage fills occur only in FilePageLoad::prepare, outside
+/// address-space guards. Anonymous allocation, COW, PTE/TLB work and mapping
+/// completion waits do not issue target data reads. A stale preparation's reads
+/// remain work done by this invocation, not a claim about the final mapped inode.
+pub fn drive_page_fault_with_io<Commit>(
+    initial: PageFaultResult,
+    mut commit: Commit,
+) -> AxResult<PageFaultResolution>
+where
+    Commit: for<'a> FnMut(PageFaultWork<'a>) -> PageFaultResult,
+{
+    let mut io = crate::FilePageIo::NoStorageRead;
     let mut outcome = initial.complete_after_unlock()?;
     loop {
         outcome = match outcome {
-            PageFaultOutcome::Handled(handled) => return Ok(handled),
+            PageFaultOutcome::Handled(handled) => return Ok(PageFaultResolution {
+                handled,
+                io: if handled { io } else { crate::FilePageIo::Unknown },
+            }),
             PageFaultOutcome::WaitForCompletion(wait) => {
                 commit(PageFaultWork::Completion(wait)).complete_after_unlock()?
             }
             PageFaultOutcome::LoadFilePage(load) => {
                 let mut prepared = load.prepare()?;
+                io = io.combine(prepared.io());
                 commit(PageFaultWork::File(&mut prepared)).complete_after_unlock()?
             }
             PageFaultOutcome::PrepareAnonPage(load) => {

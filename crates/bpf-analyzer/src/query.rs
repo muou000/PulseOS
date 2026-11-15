@@ -799,6 +799,7 @@ impl Query {
             if let EventPayload::PageFault {
                 start_ns,
                 classification,
+                outcome,
                 ..
             } = event.payload
             {
@@ -828,7 +829,9 @@ impl Query {
                     event.timestamp_ns,
                     None,
                     Some(event.cpu_id),
-                    if classification == 0 {
+                    if outcome != 1 {
+                        "observed_closed_not_applicable"
+                    } else if classification == 0 {
                         "observed_closed_unknown_classification"
                     } else {
                         "observed_closed"
