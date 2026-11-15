@@ -1,0 +1,423 @@
+
+       d8888                            .d88888b.   .d8888b.
+      d88888                           d88P" "Y88b d88P  Y88b
+     d88P888                           888     888 Y88b.
+    d88P 888 888d888  .d8888b  .d88b.  888     888  "Y888b.
+   d88P  888 888P"   d88P"    d8P  Y8b 888     888     "Y88b.
+  d88P   888 888     888      88888888 888     888       "888
+ d8888888888 888     Y88b.    Y8b.     Y88b. .d88P Y88b  d88P
+d88P     888 888      "Y8888P  "Y8888   "Y88888P"   "Y8888P"
+
+arch = loongarch64
+platform = loongarch64-qemu-virt
+target = loongarch64-unknown-none-softfloat
+build_mode = release
+log_level = info
+
+Boot at 2026-11-15 14:54:05.001601900 UTC
+
+[  0.014435 axruntime:157] Logging is enabled.
+[  0.014917 axruntime:158] Primary CPU 0 started, arg = 0x100000.
+[  0.015700 axruntime:161] Found physcial memory regions:
+[  0.015930 axruntime:163]   [PA:0x0, PA:0x200000) reserved (READ | WRITE | RESERVED)
+[  0.016240 axruntime:163]   [PA:0x200000, PA:0x10000000) free memory (READ | WRITE | FREE)
+[  0.016495 axruntime:163]   [PA:0x10000000, PA:0x10001000) mmio (READ | WRITE | DEVICE | RESERVED)
+[  0.016720 axruntime:163]   [PA:0x100d0000, PA:0x100d1000) mmio (READ | WRITE | DEVICE | RESERVED)
+[  0.016916 axruntime:163]   [PA:0x100e0000, PA:0x100e1000) mmio (READ | WRITE | DEVICE | RESERVED)
+[  0.017165 axruntime:163]   [PA:0x1fe00000, PA:0x1fe01000) mmio (READ | WRITE | DEVICE | RESERVED)
+[  0.017420 axruntime:163]   [PA:0x20000000, PA:0x30000000) mmio (READ | WRITE | DEVICE | RESERVED)
+[  0.017662 axruntime:163]   [PA:0x40000000, PA:0x40020000) mmio (READ | WRITE | DEVICE | RESERVED)
+[  0.017859 axruntime:163]   [PA:0x80000000, PA:0x80001000) free memory (READ | WRITE | FREE)
+[  0.018077 axruntime:163]   [PA:0x80001000, PA:0x80397000) .text (READ | EXECUTE | RESERVED)
+[  0.018333 axruntime:163]   [PA:0x80397000, PA:0x803da000) .rodata (READ | RESERVED)
+[  0.018507 axruntime:163]   [PA:0x803da000, PA:0x803ed000) .data .tdata .tbss .percpu (READ | WRITE | RESERVED)
+[  0.018726 axruntime:163]   [PA:0x803ed000, PA:0x805ed000) boot stack (READ | WRITE | RESERVED)
+[  0.018936 axruntime:163]   [PA:0x805ed000, PA:0x80643000) .bss (READ | WRITE | RESERVED)
+[  0.019119 axruntime:163]   [PA:0x80643000, PA:0x270000000) free memory (READ | WRITE | FREE)
+[  0.019451 axruntime:282] Initialize global memory allocator...
+[  0.019631 axruntime:283]   use SLUB+Buddy allocator.
+[  0.037082 buddy_slab_allocator::global:143] GlobalAllocator: skip region 0xffff800080000000+0x1000, no allocator-visible memory after 2097152 alignment
+[  0.037569 axmm:163] Initialize virtual memory management...
+[  0.037850 axmm:172] FrameTable: range [PA:0x200000, PA:0x270000000), size 0x26fe00000
+[  0.169755 axruntime:178] Initialize platform devices...
+[  0.170121 axhal:268] CPU number: max = 8, platform = 8, use = 8
+smp = 8
+[  0.170342 axtask::api:109] Initialize scheduling...
+[  0.172719 axtask::api:119]   use EEVDF with RT priority scheduler.
+[  0.173070 axruntime:192] Initialize interrupt handlers...
+[  0.173542 axdriver:158] Initialize device drivers...
+[  0.173827 axdriver:159]   device model: dyn
+[  0.180992 virtio_drivers::device::blk:61] config: 0xffff800040006000
+[  0.182059 virtio_drivers::device::blk:66] found a block device of size 520192KB
+[  0.184117 axdriver::bus::pci:109] registered a new Block device at 00:01.0: "virtio-blk"
+[  0.189189 virtio_drivers::device::net::dev_raw:30] negotiated_features Features(MAC | STATUS | RING_INDIRECT_DESC | RING_EVENT_IDX)
+[  0.192588 axdriver::bus::pci:109] registered a new Net device at 00:02.0: "virtio-net"
+[  0.219936 axfs:389] Initialize filesystem subsystem...
+[  0.221412 axfs:410]   probing block device 0: virtio-blk
+[  0.222083 axfs::fs::ext4::fs:46] Ext4Filesystem::new: opening block device
+[  0.237742 axfs::fs::ext4::fs:96] Ext4Filesystem::new: block device opened successfully
+[  0.240015 axfs:424]   filesystem on device 0: ext4 (size=520192 KiB)
+[  0.240453 axfs:451]   select block device 0 (virtio-blk, 520192 KiB) as root filesystem
+[  0.251899 axfs:378]   mounted proc at /proc
+[  0.255416 axfs:378]   mounted devtmpfs at /dev
+[  0.258445 axfs:378]   mounted tmpfs at /dev/shm
+[  0.259342 axfs:378]   mounted tmpfs at /tmp
+[  0.266945 axnet:49] Initialize network subsystem...
+[  0.267192 axnet:52]   use NIC 0: "virtio-net"
+[  0.268037 axnet::smoltcp_impl:642] created net interface "eth0":
+[  0.268262 axnet::smoltcp_impl:643]   ether:    52-54-00-12-34-56
+[  0.268515 axnet::smoltcp_impl:644]   ip:       10.0.2.15/24
+[  0.268755 axnet::smoltcp_impl:645]   gateway:  10.0.2.2
+[  0.279229 axruntime::mp:63] Secondary CPU 1 started.
+[  0.279414 axruntime::mp:63] Secondary CPU 2 started.
+[  0.279770 axruntime::mp:63] Secondary CPU 4 started.
+[  0.280412 axruntime::mp:63] Secondary CPU 7 started.
+[  0.280264 axruntime::mp:63] Secondary CPU 6 started.
+[  0.281240 axruntime::mp:84] Secondary CPU 7 init OK.
+[  0.279522 axruntime::mp:63] Secondary CPU 3 started.
+[  0.281049 axruntime::mp:84] Secondary CPU 4 init OK.
+[  0.280091 axruntime::mp:63] Secondary CPU 5 started.
+[  0.281511 axruntime::mp:84] Secondary CPU 6 init OK.
+[  0.281014 axruntime::mp:84] Secondary CPU 1 init OK.
+[  0.282003 axruntime::mp:84] Secondary CPU 3 init OK.
+[  0.282683 axruntime::mp:84] Secondary CPU 5 init OK.
+[  0.281143 axruntime::mp:84] Secondary CPU 2 init OK.
+[  0.283370 axalloc::buddy_slab:827] [PCP_GUEST] Starting Per-CPU Order-0 PCP cache & watermark checks...
+[  0.284570 axalloc::buddy_slab:845] [PCP_GUEST] Order-0 empty-cache refill & accounting: PASS
+[  0.285086 axalloc::buddy_slab:856] [PCP_GUEST] Single-page cache hits: PASS
+[  0.286874 axalloc::buddy_slab:888] [PCP_GUEST] Free to local PCP & high-watermark batch drain: PASS
+[  0.287740 axalloc::buddy_slab:903] [PCP_GUEST] Higher-order and lowmem bypass: PASS
+[  0.288074 axalloc::buddy_slab:907] [PCP_GUEST] Active CPU count: 8
+[  0.288650 axalloc::buddy_slab:925] [PCP_GUEST] Cross-CPU global drain: PASS
+[  0.289183 axalloc::buddy_slab:940] [PCP_GUEST] Batch allocation & deallocation: PASS
+[  0.289468 axalloc::buddy_slab:942] [PCP_GUEST] All PCP cache & watermark checks PASSED!
+[  0.289932 axruntime:245] Primary CPU 0 init OK.
+[  0.291009 0:2 starry_vdso::vdso:22] vDSO data initialized at 0xffff8000803de000
+[  0.293296 0:2 Pulse:45] itimer hook registered
+[  0.293849 0:2 Pulse:48] procfs provider registered
+[  0.294133 0:2 Pulse:51] TTY callbacks registered
+[  0.294395 0:2 pulse_core::trap:456] page cache reclaim function registered
+[  0.298111 0:2 Pulse:132] Created initial user process
+[FUTEX_GUEST] Starting FutexTable sharding & scatter/gather checks...
+[FUTEX_GUEST] Shard isolation and scatter: PASS
+[FUTEX_GUEST] Bitset queues per shard: PASS
+[FUTEX_GUEST] Active bitset wait and wake_mask: PASS
+[FUTEX_GUEST] Active cross-shard requeue waiter migration: PASS
+[FUTEX_GUEST] Cross-shard requeue traversal: PASS
+[FUTEX_GUEST] Gather wake_all and clear: PASS
+[FUTEX_GUEST] Arc ownership retention and pruning: PASS
+[FUTEX_GUEST] All FutexTable sharding checks PASSED!
+[PROC_REG_GUEST] Starting sharded process registry checks...
+[PROC_REG_GUEST] Shard isolation and collision: PASS
+[PROC_REG_GUEST] Cross-shard independence: PASS
+[PROC_REG_GUEST] Scatter/Gather snapshot sorting & dedup: PASS
+[PROC_REG_GUEST] Weak consistency boundary: PASS
+[PROC_REG_GUEST] Comparative Benchmark (20000 mixed ops, 80% read / 20% write):
+  - Monolithic Baseline: elapsed=8362 us, avg_lat=418 ns, throughput=2391 kops/s (chk=15762)
+  - 16-Shard Registry:   elapsed=7553 us, avg_lat=377 ns, throughput=2647 kops/s (chk=15762)
+  - Performance Delta:   latency reduction = 9%, throughput delta = +10%
+[PROC_REG_GUEST] All sharded process registry checks PASSED!
+[  0.332889 2:21 axdriver_block:616] [DMA_GUEST] Starting sharded DMA buffer registry checks...
+[  0.334170 2:21 axdriver_block:666] [DMA_GUEST] All sharded DMA buffer checks PASSED!
+[  0.334505 2:21 axfs::highlevel::file::cache:3824] [WB_POOL_GUEST] Starting writeback buffer pool & SG descriptor checks...
+[  0.335792 2:21 axfs::highlevel::file::cache:3858] [WB_POOL_GUEST] All writeback pool & SG descriptor checks PASSED!
+[  0.336222 2:21 axnet::smoltcp_impl::tcp:900] [TCP_CONCURRENCY] Starting TcpSocket endpoint concurrency regression checks...
+[  0.342824 5:5 axnet::smoltcp_impl::listen_table:192] incoming_tcp_packet: no listening socket on port 65534
+[  0.345382 2:21 axnet::smoltcp_impl::tcp:305] [AxErrorKind::ConnectionRefused] socket connect() failed
+[  0.400646 0:5 axnet::smoltcp_impl::listen_table:192] incoming_tcp_packet: no listening socket on port 65534
+[  0.402494 6:21 axnet::smoltcp_impl::tcp:305] [AxErrorKind::ConnectionRefused] socket connect() failed
+[  0.453803 7:5 axnet::smoltcp_impl::listen_table:192] incoming_tcp_packet: no listening socket on port 65534
+[  0.454876 0:21 axnet::smoltcp_impl::tcp:305] [AxErrorKind::ConnectionRefused] socket connect() failed
+[  0.505883 7:5 axnet::smoltcp_impl::listen_table:192] incoming_tcp_packet: no listening socket on port 65534
+[  0.507112 2:21 axnet::smoltcp_impl::tcp:305] [AxErrorKind::ConnectionRefused] socket connect() failed
+[  0.558599 6:5 axnet::smoltcp_impl::listen_table:192] incoming_tcp_packet: no listening socket on port 65534
+[  0.559337 0:21 axnet::smoltcp_impl::tcp:305] [AxErrorKind::ConnectionRefused] socket connect() failed
+[  0.611450 1:5 axnet::smoltcp_impl::listen_table:192] incoming_tcp_packet: no listening socket on port 65534
+[  0.612848 4:21 axnet::smoltcp_impl::tcp:305] [AxErrorKind::ConnectionRefused] socket connect() failed
+[  0.663659 1:5 axnet::smoltcp_impl::listen_table:192] incoming_tcp_packet: no listening socket on port 65534
+[  0.664558 0:21 axnet::smoltcp_impl::tcp:305] [AxErrorKind::ConnectionRefused] socket connect() failed
+[  0.715397 7:5 axnet::smoltcp_impl::listen_table:192] incoming_tcp_packet: no listening socket on port 65534
+[  0.716257 3:21 axnet::smoltcp_impl::tcp:305] [AxErrorKind::ConnectionRefused] socket connect() failed
+[  0.766998 6:21 axnet::smoltcp_impl::listen_table:192] incoming_tcp_packet: no listening socket on port 65534
+[  0.767584 0:21 axnet::smoltcp_impl::tcp:305] [AxErrorKind::ConnectionRefused] socket connect() failed
+[  0.818419 6:21 axnet::smoltcp_impl::listen_table:192] incoming_tcp_packet: no listening socket on port 65534
+[  0.818963 6:21 axnet::smoltcp_impl::tcp:305] [AxErrorKind::ConnectionRefused] socket connect() failed
+[  0.869835 0:5 axnet::smoltcp_impl::listen_table:192] incoming_tcp_packet: no listening socket on port 65534
+[  0.870453 2:21 axnet::smoltcp_impl::tcp:305] [AxErrorKind::ConnectionRefused] socket connect() failed
+[  0.871213 2:21 axnet::smoltcp_impl::tcp:993] [TCP_CONCURRENCY] All TcpSocket endpoint concurrency regression checks PASSED!
+[  0.871850 2:21 axsync::checks:418] [AXSYNC_GUEST] Starting axsync lock stress & concurrency checks...
+[  0.872110 2:21 axsync::checks:29] [AXSYNC_GUEST] Mutex basic, guard drop, and reentrancy checks...
+[  0.872707 2:21 axsync::checks:82] [AXSYNC_GUEST] Mutex basic, guard drop, and reentrancy: PASS
+[  0.873575 2:21 axsync::checks:88] [AXSYNC_GUEST] Mutex concurrent stress test...
+[  0.879464 2:21 axsync::checks:126] [AXSYNC_GUEST] Mutex concurrent stress: PASS
+[  0.880709 2:21 axsync::checks:133] [AXSYNC_GUEST] RwLock basic, reader count, and guard drop checks...
+[  0.881698 2:21 axsync::checks:187] [AXSYNC_GUEST] RwLock basic, reader count, and guard drop: PASS
+[  0.882138 2:21 axsync::checks:193] [AXSYNC_GUEST] Cross-task guard transfer and drop checks...
+[  0.884684 2:21 axsync::checks:244] [AXSYNC_GUEST] Cross-task guard transfer and drop: PASS
+[  0.885080 2:21 axsync::checks:250] [AXSYNC_GUEST] Forgotten guards and owned access checks...
+[  0.885674 2:21 axsync::checks:271] [AXSYNC_GUEST] Forgotten guards and owned access: PASS
+[  0.885972 2:21 axsync::checks:277] [AXSYNC_GUEST] RwLock concurrent readers & writers stress test...
+[  0.890674 2:21 axsync::checks:357] [AXSYNC_GUEST] RwLock concurrent readers & writers: PASS
+[  0.891355 2:21 axsync::checks:363] [AXSYNC_GUEST] RwLock writer admission and wakeup checks...
+[  0.893144 2:21 axsync::checks:412] [AXSYNC_GUEST] RwLock writer admission and wakeup: PASS
+[  0.893524 2:21 axsync::checks:428] [AXSYNC_GUEST] All axsync lock stress & concurrency checks PASSED!
+[  0.912178 2:21 Pulse:97] Preparing to load shell: path=/usr/bin/bash, args=["sh"]
+[  0.942987 6:21 Pulse:104] User process loaded successfully, activating address space...
+[  0.943462 6:21 Pulse:106] User space activated, entering uspace...
+sh-4.4# exec /user-abi-mounts-probe
+[  1.772051 1:21 pulse_syscalls::impls::task::exec:28] sys_execve: path="/user-abi-mounts-probe"
+ABI_MOUNTS_OK mkdir-target
+ABI_MOUNTS_OK mkdir-failed-probe-target
+ABI_MOUNTS_OK create-file-write
+ABI_MOUNTS_OK create-file-close
+ABI_MOUNTS_OK mounts-close
+ABI_MOUNTS_OK initial-mount-list
+ABI_MOUNTS_OK tmpfs-mount
+ABI_MOUNTS_OK mounts-close
+ABI_MOUNTS_OK mounted-list
+ABI_MOUNTS_OK underlying-file-hidden
+ABI_MOUNTS_OK create-file-write
+ABI_MOUNTS_OK create-file-close
+ABI_MOUNTS_OK read-file-size
+ABI_MOUNTS_OK read-file-close
+ABI_MOUNTS_OK mounted-file-readable
+ABI_MOUNTS_OK duplicate-target-busy
+ABI_MOUNTS_OK mounts-close
+ABI_MOUNTS_OK duplicate-kept-one-row
+ABI_MOUNTS_OK read-file-size
+ABI_MOUNTS_OK read-file-close
+ABI_MOUNTS_OK duplicate-kept-filesystem
+ABI_MOUNTS_OK failed-probe
+ABI_MOUNTS_OK mounts-close
+ABI_MOUNTS_OK failed-probe-no-row
+ABI_MOUNTS_OK create-file-write
+ABI_MOUNTS_OK create-file-close
+ABI_MOUNTS_OK read-file-size
+ABI_MOUNTS_OK read-file-close
+ABI_MOUNTS_OK failed-probe-kept-directory
+ABI_MOUNTS_OK mkdir-child
+ABI_MOUNTS_OK mount-child
+[  1.810284 0:21 axfs_ng_vfs::mount:1558] unmount: mount ID 6 at DirEntry(Inner { node: DirNode(1), node_type: Directory, reference: Reference { parent: None, name: "" } }) is busy. Children keys: [(3, 18446603346597136400)]
+ABI_MOUNTS_OK parent-with-child-busy
+ABI_MOUNTS_OK mounts-close
+ABI_MOUNTS_OK busy-parent-kept-row
+ABI_MOUNTS_OK read-file-size
+ABI_MOUNTS_OK read-file-close
+ABI_MOUNTS_OK busy-parent-kept-filesystem
+ABI_MOUNTS_OK unmount-child
+ABI_MOUNTS_OK mounts-close
+ABI_MOUNTS_OK unmounted-child-no-row
+ABI_MOUNTS_OK unmount-parent
+ABI_MOUNTS_OK mounts-close
+ABI_MOUNTS_OK unmounted-parent-no-row
+ABI_MOUNTS_OK read-file-size
+ABI_MOUNTS_OK read-file-close
+ABI_MOUNTS_OK underlying-file-restored
+ABI_MOUNTS_OK mounted-file-gone
+ABI_MOUNTS_OK second-unmount-invalid
+ABI_MOUNTS_OK mkdir-ro-source
+ABI_MOUNTS_OK mkdir-ro-bind
+ABI_MOUNTS_OK readonly-source-mount
+ABI_MOUNTS_OK mounts-close
+ABI_MOUNTS_OK readonly-source-listed-ro
+ABI_MOUNTS_OK readonly-source-bind
+ABI_MOUNTS_OK readonly-bind-inherited
+ABI_MOUNTS_OK mounts-close
+ABI_MOUNTS_OK readonly-bind-listed-ro
+ABI_MOUNTS_OK mounts-close
+ABI_MOUNTS_OK readonly-bind-listed-bind
+ABI_MOUNTS_OK readonly-bind-unmount
+ABI_MOUNTS_OK mounts-close
+ABI_MOUNTS_OK readonly-bind-record-removed
+ABI_MOUNTS_OK readonly-source-unmount
+ABI_MOUNTS_OK mounts-close
+ABI_MOUNTS_OK readonly-source-record-removed
+ABI_MOUNTS_OK mkdir-propagation-parent
+ABI_MOUNTS_OK mkdir-propagation-parent
+ABI_MOUNTS_OK mkdir-propagation-parent
+ABI_MOUNTS_OK mkdir-bind-source
+ABI_MOUNTS_OK mount-shared-parent
+ABI_MOUNTS_OK mkdir-bind-slot
+ABI_MOUNTS_OK mkdir-ordinary-slot
+ABI_MOUNTS_OK mkdir-slave-local-slot
+ABI_MOUNTS_OK make-shared-parent
+ABI_MOUNTS_OK bind-shared-peer
+ABI_MOUNTS_OK bind-slave-parent
+ABI_MOUNTS_OK make-slave-parent
+ABI_MOUNTS_OK mount-bind-source
+ABI_MOUNTS_OK create-file-write
+ABI_MOUNTS_OK create-file-close
+ABI_MOUNTS_OK mkdir-source-child
+ABI_MOUNTS_OK mount-source-child
+ABI_MOUNTS_OK create-file-write
+ABI_MOUNTS_OK create-file-close
+ABI_MOUNTS_OK bind-readonly-under-shared-parent
+ABI_MOUNTS_OK mounts-close
+ABI_MOUNTS_OK propagated-bind-record
+ABI_MOUNTS_OK mounts-close
+ABI_MOUNTS_OK propagated-bind-listed-ro
+ABI_MOUNTS_OK mounts-close
+ABI_MOUNTS_OK propagated-bind-listed-bind
+ABI_MOUNTS_OK read-file-size
+ABI_MOUNTS_OK read-file-close
+ABI_MOUNTS_OK propagated-bind-content
+ABI_MOUNTS_OK propagated-bind-readonly
+ABI_MOUNTS_OK mounts-close
+ABI_MOUNTS_OK nested-shadow-record
+ABI_MOUNTS_OK mounts-close
+ABI_MOUNTS_OK nested-shadow-listed-bind
+ABI_MOUNTS_OK mounts-close
+ABI_MOUNTS_OK nested-shadow-retains-rw
+ABI_MOUNTS_OK read-file-size
+ABI_MOUNTS_OK read-file-close
+ABI_MOUNTS_OK nested-shadow-content
+ABI_MOUNTS_OK mounts-close
+ABI_MOUNTS_OK propagated-bind-record
+ABI_MOUNTS_OK mounts-close
+ABI_MOUNTS_OK propagated-bind-listed-ro
+ABI_MOUNTS_OK mounts-close
+ABI_MOUNTS_OK propagated-bind-listed-bind
+ABI_MOUNTS_OK read-file-size
+ABI_MOUNTS_OK read-file-close
+ABI_MOUNTS_OK propagated-bind-content
+ABI_MOUNTS_OK propagated-bind-readonly
+ABI_MOUNTS_OK mounts-close
+ABI_MOUNTS_OK nested-shadow-record
+ABI_MOUNTS_OK mounts-close
+ABI_MOUNTS_OK nested-shadow-listed-bind
+ABI_MOUNTS_OK mounts-close
+ABI_MOUNTS_OK nested-shadow-retains-rw
+ABI_MOUNTS_OK read-file-size
+ABI_MOUNTS_OK read-file-close
+ABI_MOUNTS_OK nested-shadow-content
+ABI_MOUNTS_OK mounts-close
+ABI_MOUNTS_OK propagated-bind-record
+ABI_MOUNTS_OK mounts-close
+ABI_MOUNTS_OK propagated-bind-listed-ro
+ABI_MOUNTS_OK mounts-close
+ABI_MOUNTS_OK propagated-bind-listed-bind
+ABI_MOUNTS_OK read-file-size
+ABI_MOUNTS_OK read-file-close
+ABI_MOUNTS_OK propagated-bind-content
+ABI_MOUNTS_OK propagated-bind-readonly
+ABI_MOUNTS_OK mounts-close
+ABI_MOUNTS_OK nested-shadow-record
+ABI_MOUNTS_OK mounts-close
+ABI_MOUNTS_OK nested-shadow-listed-bind
+ABI_MOUNTS_OK mounts-close
+ABI_MOUNTS_OK nested-shadow-retains-rw
+ABI_MOUNTS_OK read-file-size
+ABI_MOUNTS_OK read-file-close
+ABI_MOUNTS_OK nested-shadow-content
+ABI_MOUNTS_OK create-file-write
+ABI_MOUNTS_OK create-file-close
+ABI_MOUNTS_OK read-file-size
+ABI_MOUNTS_OK read-file-close
+ABI_MOUNTS_OK nested-shadow-writes-share-source
+ABI_MOUNTS_OK normal-unmount-nested-shadow
+ABI_MOUNTS_OK mounts-close
+ABI_MOUNTS_OK normal-nested-shadow-record-removed
+ABI_MOUNTS_OK normal-nested-shadow-content-removed
+ABI_MOUNTS_OK mounts-close
+ABI_MOUNTS_OK normal-nested-shadow-record-removed
+ABI_MOUNTS_OK normal-nested-shadow-content-removed
+ABI_MOUNTS_OK mounts-close
+ABI_MOUNTS_OK normal-nested-shadow-record-removed
+ABI_MOUNTS_OK normal-nested-shadow-content-removed
+ABI_MOUNTS_OK mounts-close
+ABI_MOUNTS_OK source-child-record-retained
+ABI_MOUNTS_OK normal-unmount-propagated-bind
+ABI_MOUNTS_OK mounts-close
+ABI_MOUNTS_OK normal-shadow-record-removed
+ABI_MOUNTS_OK normal-shadow-content-removed
+ABI_MOUNTS_OK mounts-close
+ABI_MOUNTS_OK normal-shadow-record-removed
+ABI_MOUNTS_OK normal-shadow-content-removed
+ABI_MOUNTS_OK mounts-close
+ABI_MOUNTS_OK normal-shadow-record-removed
+ABI_MOUNTS_OK normal-shadow-content-removed
+ABI_MOUNTS_OK bind-under-slave
+ABI_MOUNTS_OK mounts-close
+ABI_MOUNTS_OK slave-local-record
+ABI_MOUNTS_OK read-file-size
+ABI_MOUNTS_OK read-file-close
+ABI_MOUNTS_OK slave-local-content
+ABI_MOUNTS_OK mounts-close
+ABI_MOUNTS_OK slave-no-master-record
+ABI_MOUNTS_OK mounts-close
+ABI_MOUNTS_OK slave-no-peer-record
+ABI_MOUNTS_OK slave-no-master-content
+ABI_MOUNTS_OK slave-no-peer-content
+ABI_MOUNTS_OK lazy-unmount-slave-local
+ABI_MOUNTS_OK mounts-close
+ABI_MOUNTS_OK lazy-slave-record-removed
+ABI_MOUNTS_OK mounts-close
+ABI_MOUNTS_OK lazy-slave-child-record-removed
+ABI_MOUNTS_OK ordinary-mount-under-shared-parent
+ABI_MOUNTS_OK create-file-write
+ABI_MOUNTS_OK create-file-close
+ABI_MOUNTS_OK read-file-size
+ABI_MOUNTS_OK read-file-close
+ABI_MOUNTS_OK ordinary-peer-content
+ABI_MOUNTS_OK read-file-size
+ABI_MOUNTS_OK read-file-close
+ABI_MOUNTS_OK ordinary-slave-content
+ABI_MOUNTS_OK mounts-close
+ABI_MOUNTS_OK ordinary-propagated-record
+ABI_MOUNTS_OK mounts-close
+ABI_MOUNTS_OK ordinary-propagated-record
+ABI_MOUNTS_OK mounts-close
+ABI_MOUNTS_OK ordinary-propagated-record
+ABI_MOUNTS_OK unmount-ordinary-propagation
+ABI_MOUNTS_OK mounts-close
+ABI_MOUNTS_OK ordinary-shadow-record-removed
+ABI_MOUNTS_OK mounts-close
+ABI_MOUNTS_OK ordinary-shadow-record-removed
+ABI_MOUNTS_OK mounts-close
+ABI_MOUNTS_OK ordinary-shadow-record-removed
+ABI_MOUNTS_OK bind-subtree-for-lazy-detach
+ABI_MOUNTS_OK mounts-close
+ABI_MOUNTS_OK lazy-fixture-shadow-record
+ABI_MOUNTS_OK mounts-close
+ABI_MOUNTS_OK lazy-fixture-nested-record
+ABI_MOUNTS_OK mounts-close
+ABI_MOUNTS_OK lazy-fixture-shadow-record
+ABI_MOUNTS_OK mounts-close
+ABI_MOUNTS_OK lazy-fixture-nested-record
+ABI_MOUNTS_OK mounts-close
+ABI_MOUNTS_OK lazy-fixture-shadow-record
+ABI_MOUNTS_OK mounts-close
+ABI_MOUNTS_OK lazy-fixture-nested-record
+ABI_MOUNTS_OK lazy-unmount-propagated-subtree
+ABI_MOUNTS_OK mounts-close
+ABI_MOUNTS_OK lazy-shadow-record-removed
+ABI_MOUNTS_OK mounts-close
+ABI_MOUNTS_OK lazy-nested-shadow-record-removed
+ABI_MOUNTS_OK lazy-shadow-content-removed
+ABI_MOUNTS_OK mounts-close
+ABI_MOUNTS_OK lazy-shadow-record-removed
+ABI_MOUNTS_OK mounts-close
+ABI_MOUNTS_OK lazy-nested-shadow-record-removed
+ABI_MOUNTS_OK lazy-shadow-content-removed
+ABI_MOUNTS_OK mounts-close
+ABI_MOUNTS_OK lazy-shadow-record-removed
+ABI_MOUNTS_OK mounts-close
+ABI_MOUNTS_OK lazy-nested-shadow-record-removed
+ABI_MOUNTS_OK lazy-shadow-content-removed
+ABI_MOUNTS_OK read-file-size
+ABI_MOUNTS_OK read-file-close
+ABI_MOUNTS_OK source-child-survives-shadow-cleanup
+ABI_MOUNTS_OK cleanup-source-child
+ABI_MOUNTS_OK cleanup-source
+ABI_MOUNTS_OK cleanup-propagation-parent
+ABI_MOUNTS_OK mounts-close
+ABI_MOUNTS_OK cleanup-parent-record-removed
+ABI_MOUNTS_OK cleanup-propagation-parent
+ABI_MOUNTS_OK mounts-close
+ABI_MOUNTS_OK cleanup-parent-record-removed
+ABI_MOUNTS_OK cleanup-propagation-parent
+ABI_MOUNTS_OK mounts-close
+ABI_MOUNTS_OK cleanup-parent-record-removed
+ABI_MOUNTS_PASS
+[  1.919550 6:21 pulse_syscalls::impls::misc::system:105] filesystem writeback complete; system power transition: PowerOff
+[  1.919950 6:21 axplat_loongarch64_qemu_virt::power:27] Shutting down...

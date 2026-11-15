@@ -1,0 +1,1738 @@
+make[1]: Entering directory '/home/muou/PulseOS'
+axconfig-gen configs/defconfig.toml /home/muou/PulseOS/platforms/axplat-riscv64-qemu-virt/axconfig.toml  -w arch=riscv64 -w platform=riscv64-qemu-virt -o "/home/muou/PulseOS/.axconfig.toml" -w plat.max-cpu-num=8
+make[1]: Leaving directory '/home/muou/PulseOS'
+make[1]: Entering directory '/home/muou/PulseOS'
+axconfig-gen configs/defconfig.toml /home/muou/PulseOS/platforms/axplat-riscv64-qemu-virt/axconfig.toml  -w arch=riscv64 -w platform=riscv64-qemu-virt -o "/home/muou/PulseOS/.axconfig.toml" -w plat.max-cpu-num=8 -c "/home/muou/PulseOS/.axconfig.toml"
+    Building App: PulseOS, Arch: riscv64, Platform: riscv64-qemu-virt, App type: rust
+cargo -C /home/muou/PulseOS build -Z unstable-options --target riscv64gc-unknown-none-elf --target-dir /home/muou/PulseOS/target --release  --features "axfeat/defplat axfeat/log-level-info axfeat/bus-mmio smp qemu"
+warning: `package.homepage` is redundant with `package.repository`
+  --> modules/axcpu/Cargo.toml:34:12
+   |
+34 | homepage = "https://github.com/arceos-org/axcpu"
+   |            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+50 | repository = "https://github.com/arceos-org/axcpu"
+   |              -------------------------------------
+   |
+   = note: `cargo::redundant_homepage` is set to `warn` by default
+help: consider removing `package.homepage`
+warning: `axcpu` (manifest) generated 1 warning
+warning: `package.homepage` is redundant with `package.repository`
+   --> Cargo.toml:204:1
+    |
+204 | homepage.workspace = true
+    | ^^^^^^^^
+205 | repository.workspace = true
+    | ----------
+    |
+    = note: `cargo::redundant_homepage` is set to `warn` by default
+help: consider removing `package.homepage`
+warning: `Pulse` (manifest) generated 1 warning
+warning: `package.homepage` is redundant with `package.repository`
+ --> pulse_syscalls/Cargo.toml:7:1
+  |
+7 | homepage.workspace = true
+  | ^^^^^^^^
+8 | repository.workspace = true
+  | ----------
+  |
+  = note: `cargo::redundant_homepage` is set to `warn` by default
+help: consider removing `package.homepage`
+warning: `pulse_syscalls` (manifest) generated 1 warning
+warning: `package.homepage` is redundant with `package.repository`
+ --> crates/pulse_bpf_schema/Cargo.toml:7:1
+  |
+7 | homepage.workspace = true
+  | ^^^^^^^^
+8 | repository.workspace = true
+  | ----------
+  |
+  = note: `cargo::redundant_homepage` is set to `warn` by default
+help: consider removing `package.homepage`
+warning: `pulse_bpf_schema` (manifest) generated 1 warning
+warning: `package.homepage` is redundant with `package.repository`
+ --> pulse_core/Cargo.toml:7:1
+  |
+7 | homepage.workspace = true
+  | ^^^^^^^^
+8 | repository.workspace = true
+  | ----------
+  |
+  = note: `cargo::redundant_homepage` is set to `warn` by default
+help: consider removing `package.homepage`
+warning: `pulse_core` (manifest) generated 1 warning
+warning: hiding a lifetime that's elided elsewhere is confusing
+   --> crates/virtio-drivers/src/transport/pci/bus.rs:241:25
+    |
+241 |     pub fn capabilities(&self, device_function: DeviceFunction) -> CapabilityIterator {
+    |                         ^^^^^ the lifetime is elided here          ^^^^^^^^^^^^^^^^^^ the same lifetime is hidden here
+    |
+    = help: the same lifetime is referred to in inconsistent ways, making the signature confusing
+    = note: `#[warn(mismatched_lifetime_syntaxes)]` on by default
+help: use `'_` for type paths
+    |
+241 |     pub fn capabilities(&self, device_function: DeviceFunction) -> CapabilityIterator<'_> {
+    |                                                                                      ++++
+
+   Compiling axconfig v0.1.0 (/home/muou/PulseOS/modules/axconfig)
+warning: `virtio-drivers` (lib) generated 1 warning (run `cargo fix --lib -p virtio-drivers` to apply 1 suggestion)
+   Compiling axplat-riscv64-qemu-virt v0.3.0 (/home/muou/PulseOS/platforms/axplat-riscv64-qemu-virt)
+warning: unused import: `__kernel_ulong_t`
+ --> crates/pulse_user_abi/src/fs.rs:8:43
+  |
+8 |         __kernel_fsid_t, __kernel_long_t, __kernel_ulong_t, __s32, __s64, __u16, __u32, __u64,
+  |                                           ^^^^^^^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: use of deprecated method `core::sync::atomic::Atomic::<u64>::fetch_update`: renamed to `try_update` for consistency
+  --> crates/pulse_bpf_schema/src/lib.rs:20:34
+   |
+20 |     match OBSERVATION_GENERATION.fetch_update(Ordering::AcqRel, Ordering::Acquire, |value| value.checked_add(1)) {
+   |                                  ^^^^^^^^^^^^
+   |
+   = note: `#[warn(deprecated)]` on by default
+help: replace the use of the deprecated method
+   |
+20 -     match OBSERVATION_GENERATION.fetch_update(Ordering::AcqRel, Ordering::Acquire, |value| value.checked_add(1)) {
+20 +     match OBSERVATION_GENERATION.try_update(Ordering::AcqRel, Ordering::Acquire, |value| value.checked_add(1)) {
+   |
+
+warning: `pulse_user_abi` (lib) generated 1 warning (run `cargo fix --lib -p pulse_user_abi` to apply 1 suggestion)
+warning: `pulse_bpf_schema` (lib) generated 1 warning (run `cargo fix --lib -p pulse_bpf_schema` to apply 1 suggestion)
+   Compiling axhal v0.1.0 (/home/muou/PulseOS/modules/axhal)
+   Compiling axipi v0.1.0 (/home/muou/PulseOS/modules/axipi)
+   Compiling axtask v0.1.0 (/home/muou/PulseOS/modules/axtask)
+   Compiling axmm v0.1.0 (/home/muou/PulseOS/modules/axmm)
+warning: use of deprecated method `core::sync::atomic::Atomic::<usize>::fetch_update`: renamed to `try_update` for consistency
+    --> modules/axtask/src/run_queue.rs:1284:22
+     |
+1284 |                     .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |depth| {
+     |                      ^^^^^^^^^^^^
+     |
+     = note: `#[warn(deprecated)]` on by default
+help: replace the use of the deprecated method
+     |
+1284 -                     .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |depth| {
+1284 +                     .try_update(Ordering::Relaxed, Ordering::Relaxed, |depth| {
+     |
+
+warning: use of deprecated method `core::sync::atomic::Atomic::<usize>::fetch_update`: renamed to `try_update` for consistency
+  --> modules/axmm/src/lifecycle.rs:27:46
+   |
+27 |         let identity = NEXT_ADDRESS_SPACE_ID.fetch_update(Ordering::Relaxed, Ordering::Relaxed,
+   |                                              ^^^^^^^^^^^^
+   |
+   = note: `#[warn(deprecated)]` on by default
+help: replace the use of the deprecated method
+   |
+27 -         let identity = NEXT_ADDRESS_SPACE_ID.fetch_update(Ordering::Relaxed, Ordering::Relaxed,
+27 +         let identity = NEXT_ADDRESS_SPACE_ID.try_update(Ordering::Relaxed, Ordering::Relaxed,
+   |
+
+warning: unused import: `MemoryAddr`
+ --> modules/axmm/src/lifecycle.rs:6:19
+  |
+6 | use memory_addr::{MemoryAddr, VirtAddr, VirtAddrRange, PAGE_SIZE_4K};
+  |                   ^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: hiding a lifetime that's elided elsewhere is confusing
+   --> modules/axtask/src/wait_queue.rs:812:23
+    |
+812 |     pub fn wait_async(&self) -> crate::future::WaitFuture {
+    |                       ^^^^^     ^^^^^^^^^^^^^^^^^^^^^^^^^ the same lifetime is hidden here
+    |                       |
+    |                       the lifetime is elided here
+    |
+    = help: the same lifetime is referred to in inconsistent ways, making the signature confusing
+    = note: `#[warn(mismatched_lifetime_syntaxes)]` on by default
+help: use `'_` for type paths
+    |
+812 |     pub fn wait_async(&self) -> crate::future::WaitFuture<'_> {
+    |                                                          ++++
+
+warning: field `0` is never read
+  --> modules/axmm/src/backend/file.rs:55:34
+   |
+55 | pub struct FileMappingWriteGuard(Arc<dyn core::any::Any + Send + Sync>);
+   |            --------------------- ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |            |
+   |            field in this struct
+   |
+   = help: consider removing this field
+   = note: `FileMappingWriteGuard` has a derived impl for the trait `Clone`, but this is intentionally ignored during dead code analysis
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: hiding a lifetime that's elided elsewhere is confusing
+   --> modules/axmm/src/aspace.rs:648:17
+    |
+648 |     pub fn lock(&self) -> PageTableReadGuard {
+    |                 ^^^^^     ^^^^^^^^^^^^^^^^^^ the same lifetime is hidden here
+    |                 |
+    |                 the lifetime is elided here
+    |
+    = help: the same lifetime is referred to in inconsistent ways, making the signature confusing
+    = note: `#[warn(mismatched_lifetime_syntaxes)]` on by default
+help: use `'_` for type paths
+    |
+648 |     pub fn lock(&self) -> PageTableReadGuard<'_> {
+    |                                             ++++
+
+warning: hiding a lifetime that's elided elsewhere is confusing
+   --> modules/axmm/src/aspace.rs:652:26
+    |
+652 |     pub fn read_for_addr(&self, vaddr: VirtAddr) -> PageTableReadGuard {
+    |                          ^^^^^                      ^^^^^^^^^^^^^^^^^^ the same lifetime is hidden here
+    |                          |
+    |                          the lifetime is elided here
+    |
+    = help: the same lifetime is referred to in inconsistent ways, making the signature confusing
+help: use `'_` for type paths
+    |
+652 |     pub fn read_for_addr(&self, vaddr: VirtAddr) -> PageTableReadGuard<'_> {
+    |                                                                       ++++
+
+warning: hiding a lifetime that's elided elsewhere is confusing
+   --> modules/axmm/src/aspace.rs:662:26
+    |
+662 |     pub fn lock_for_addr(&self, vaddr: VirtAddr) -> PageTableGuard {
+    |                          ^^^^^                      ^^^^^^^^^^^^^^ the same lifetime is hidden here
+    |                          |
+    |                          the lifetime is elided here
+    |
+    = help: the same lifetime is referred to in inconsistent ways, making the signature confusing
+help: use `'_` for type paths
+    |
+662 |     pub fn lock_for_addr(&self, vaddr: VirtAddr) -> PageTableGuard<'_> {
+    |                                                                   ++++
+
+   Compiling axsync v0.1.0 (/home/muou/PulseOS/modules/axsync)
+   Compiling axdriver v0.1.0 (/home/muou/PulseOS/modules/axdriver)
+warning: `axtask` (lib) generated 2 warnings (run `cargo fix --lib -p axtask` to apply 2 suggestions)
+   Compiling axnet v0.1.0 (/home/muou/PulseOS/modules/axnet)
+   Compiling axfs v0.1.0 (/home/muou/PulseOS/modules/axfs)
+warning: `axmm` (lib) generated 6 warnings (run `cargo fix --lib -p axmm` to apply 4 suggestions)
+warning: feature `impl_trait_in_assoc_type` is declared but not used
+  --> modules/axdriver/src/lib.rs:61:40
+   |
+61 | #![cfg_attr(feature = "async", feature(impl_trait_in_assoc_type))]
+   |                                        ^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(unused_features)]` (part of `#[warn(unused)]`) on by default
+
+warning: `axdriver` (lib) generated 1 warning
+warning: use of deprecated method `core::sync::atomic::Atomic::<usize>::fetch_update`: renamed to `try_update` for consistency
+   --> modules/axfs/src/fs/ext4/inode.rs:340:14
+    |
+340 |             .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |count| {
+    |              ^^^^^^^^^^^^
+    |
+    = note: `#[warn(deprecated)]` on by default
+help: replace the use of the deprecated method
+    |
+340 -             .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |count| {
+340 +             .try_update(Ordering::Relaxed, Ordering::Relaxed, |count| {
+    |
+
+warning: use of deprecated method `core::sync::atomic::Atomic::<u64>::fetch_update`: renamed to `try_update` for consistency
+   --> modules/axfs/src/fs/ext4/mod.rs:532:14
+    |
+532 |             .fetch_update(Ordering::AcqRel, Ordering::Acquire, |id| id.checked_add(1))
+    |              ^^^^^^^^^^^^
+    |
+help: replace the use of the deprecated method
+    |
+532 -             .fetch_update(Ordering::AcqRel, Ordering::Acquire, |id| id.checked_add(1))
+532 +             .try_update(Ordering::AcqRel, Ordering::Acquire, |id| id.checked_add(1))
+    |
+
+warning: use of deprecated method `core::sync::atomic::Atomic::<u64>::fetch_update`: renamed to `try_update` for consistency
+   --> modules/axfs/src/fs/devfs.rs:430:14
+    |
+430 |             .fetch_update(Ordering::AcqRel, Ordering::Acquire, |ino| {
+    |              ^^^^^^^^^^^^
+    |
+help: replace the use of the deprecated method
+    |
+430 -             .fetch_update(Ordering::AcqRel, Ordering::Acquire, |ino| {
+430 +             .try_update(Ordering::AcqRel, Ordering::Acquire, |ino| {
+    |
+
+warning: use of deprecated method `core::sync::atomic::Atomic::<u64>::fetch_update`: renamed to `try_update` for consistency
+   --> modules/axfs/src/fs/procfs.rs:499:14
+    |
+499 |             .fetch_update(Ordering::AcqRel, Ordering::Acquire, |ino| {
+    |              ^^^^^^^^^^^^
+    |
+help: replace the use of the deprecated method
+    |
+499 -             .fetch_update(Ordering::AcqRel, Ordering::Acquire, |ino| {
+499 +             .try_update(Ordering::AcqRel, Ordering::Acquire, |ino| {
+    |
+
+warning: use of deprecated method `core::sync::atomic::Atomic::<u64>::fetch_update`: renamed to `try_update` for consistency
+   --> modules/axfs/src/fs/tmpfs.rs:140:10
+    |
+140 |         .fetch_update(Ordering::AcqRel, Ordering::Acquire, |ino| {
+    |          ^^^^^^^^^^^^
+    |
+help: replace the use of the deprecated method
+    |
+140 -         .fetch_update(Ordering::AcqRel, Ordering::Acquire, |ino| {
+140 +         .try_update(Ordering::AcqRel, Ordering::Acquire, |ino| {
+    |
+
+warning: variable does not need to be mutable
+    --> modules/axfs/src/highlevel/file/cache.rs:1258:13
+     |
+1258 |         let mut this = core::mem::ManuallyDrop::new(self);
+     |             ----^^^^
+     |             |
+     |             help: remove this `mut`
+     |
+     = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+warning: type `WritebackPage` is more private than the item `can_zero_copy_batch`
+    --> modules/axfs/src/highlevel/file/cache.rs:3795:1
+     |
+3795 | pub fn can_zero_copy_batch(pages: &[WritebackPage]) -> bool {
+     | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ function `can_zero_copy_batch` is reachable at visibility `pub`
+     |
+note: but type `WritebackPage` is only usable at visibility `pub(self)`
+    --> modules/axfs/src/highlevel/file/cache.rs:652:1
+     |
+ 652 | struct WritebackPage {
+     | ^^^^^^^^^^^^^^^^^^^^
+     = note: `#[warn(private_interfaces)]` on by default
+
+warning: type `WritebackPage` is more private than the item `collect_zero_copy_sg_entries`
+    --> modules/axfs/src/highlevel/file/cache.rs:3802:1
+     |
+3802 | pub fn collect_zero_copy_sg_entries(pages: &[WritebackPage]) -> Option<WritebackSgList> {
+     | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ function `collect_zero_copy_sg_entries` is reachable at visibility `pub`
+     |
+note: but type `WritebackPage` is only usable at visibility `pub(self)`
+    --> modules/axfs/src/highlevel/file/cache.rs:652:1
+     |
+ 652 | struct WritebackPage {
+     | ^^^^^^^^^^^^^^^^^^^^
+
+   Compiling pulse_core v0.1.0 (/home/muou/PulseOS/pulse_core)
+   Compiling axruntime v0.1.0 (/home/muou/PulseOS/modules/axruntime)
+   Compiling axfeat v0.1.0 (/home/muou/PulseOS/api/axfeat)
+warning: ambiguous glob re-exports
+  --> pulse_core/src/bpf/mod.rs:18:9
+   |
+18 | pub use insn::*;
+   |         ^^^^^^^ the name `BPF_RB_NO_WAKEUP` in the value namespace is first re-exported here
+...
+25 | pub use ring_buffer::*;
+   |         -------------- but the name `BPF_RB_NO_WAKEUP` in the value namespace is also re-exported here
+   |
+   = note: `#[warn(ambiguous_glob_reexports)]` on by default
+
+warning: ambiguous glob re-exports
+  --> pulse_core/src/bpf/mod.rs:18:9
+   |
+18 | pub use insn::*;
+   |         ^^^^^^^ the name `BPF_RB_FORCE_WAKEUP` in the value namespace is first re-exported here
+...
+25 | pub use ring_buffer::*;
+   |         -------------- but the name `BPF_RB_FORCE_WAKEUP` in the value namespace is also re-exported here
+
+warning: unused import: `PAGE_SIZE_4K`
+ --> pulse_core/src/task/aspace_lock.rs:7:19
+  |
+7 | use memory_addr::{PAGE_SIZE_4K, VirtAddr};
+  |                   ^^^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused imports: `FUTEX_SHARDS`, `GLOBAL_FUTEX_TABLE`, and `futex_shard_index`
+  --> pulse_core/src/task/process/mod.rs:77:5
+   |
+77 |     FUTEX_SHARDS, FutexTable, GLOBAL_FUTEX_TABLE, futex_shard_index, run_futex_guest_checks,
+   |     ^^^^^^^^^^^^              ^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^
+
+warning: unused import: `sync::Arc`
+ --> pulse_core/src/task/process_registry.rs:1:13
+  |
+1 | use alloc::{sync::Arc, vec::Vec};
+  |             ^^^^^^^^^
+
+warning: unused import: `kernel_guard::NoPreemptIrqSave`
+  --> pulse_core/src/task/mod.rs:22:5
+   |
+22 | use kernel_guard::NoPreemptIrqSave;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: use of deprecated method `core::sync::atomic::Atomic::<u64>::fetch_update`: renamed to `try_update` for consistency
+   --> pulse_core/src/bpf/perf_event.rs:681:36
+    |
+681 |             id: NEXT_PERF_EVENT_ID.fetch_update(Ordering::Relaxed, Ordering::Relaxed,
+    |                                    ^^^^^^^^^^^^
+    |
+    = note: `#[warn(deprecated)]` on by default
+help: replace the use of the deprecated method
+    |
+681 -             id: NEXT_PERF_EVENT_ID.fetch_update(Ordering::Relaxed, Ordering::Relaxed,
+681 +             id: NEXT_PERF_EVENT_ID.try_update(Ordering::Relaxed, Ordering::Relaxed,
+    |
+
+warning: `axfs` (lib) generated 8 warnings (run `cargo fix --lib -p axfs` to apply 6 suggestions)
+warning: field `map_idx` is never read
+   --> pulse_core/src/bpf/interpreter.rs:122:5
+    |
+121 | struct ActiveLookup {
+    |        ------------ field in this struct
+122 |     map_idx: usize,
+    |     ^^^^^^^
+    |
+    = note: `ActiveLookup` has a derived impl for the trait `Clone`, but this is intentionally ignored during dead code analysis
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: constant `HWCAP_LOONGARCH_CPUCFG` is never used
+  --> pulse_core/src/mm/loader.rs:30:7
+   |
+30 | const HWCAP_LOONGARCH_CPUCFG: usize = 1 << 0;
+   |       ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `HWCAP_LOONGARCH_LAM` is never used
+  --> pulse_core/src/mm/loader.rs:31:7
+   |
+31 | const HWCAP_LOONGARCH_LAM: usize = 1 << 1;
+   |       ^^^^^^^^^^^^^^^^^^^
+
+warning: constant `HWCAP_LOONGARCH_UAL` is never used
+  --> pulse_core/src/mm/loader.rs:32:7
+   |
+32 | const HWCAP_LOONGARCH_UAL: usize = 1 << 2;
+   |       ^^^^^^^^^^^^^^^^^^^
+
+warning: constant `HWCAP_LOONGARCH_FPU` is never used
+  --> pulse_core/src/mm/loader.rs:33:7
+   |
+33 | const HWCAP_LOONGARCH_FPU: usize = 1 << 3;
+   |       ^^^^^^^^^^^^^^^^^^^
+
+warning: constant `CPUCFG1_UAL` is never used
+  --> pulse_core/src/mm/loader.rs:35:7
+   |
+35 | const CPUCFG1_UAL: usize = 1 << 20;
+   |       ^^^^^^^^^^^
+
+warning: function `loongarch_hwcap` is never used
+  --> pulse_core/src/mm/loader.rs:38:10
+   |
+38 | const fn loongarch_hwcap(cpucfg1: usize) -> usize {
+   |          ^^^^^^^^^^^^^^^
+
+   Compiling pulse_syscalls v0.1.0 (/home/muou/PulseOS/pulse_syscalls)
+warning: unused imports: `PERF_EVENT_IOC_DISABLE`, `PERF_EVENT_IOC_ENABLE`, `PERF_EVENT_IOC_PERIOD`, `PERF_EVENT_IOC_REFRESH`, `PERF_EVENT_IOC_RESET`, `PERF_EVENT_IOC_SET_BPF`, and `PerfEvent`
+  --> pulse_syscalls/src/impls/bpf/perf_event.rs:74:5
+   |
+74 |     PerfEvent, PerfEventClock, PerfEventScope, PerfEventSpec,
+   |     ^^^^^^^^^
+75 |     PERF_EVENT_IOC_ENABLE, PERF_EVENT_IOC_DISABLE, PERF_EVENT_IOC_REFRESH,
+   |     ^^^^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^^^^^
+76 |     PERF_EVENT_IOC_RESET, PERF_EVENT_IOC_PERIOD, PERF_EVENT_IOC_SET_BPF,
+   |     ^^^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused import: `with_process`
+  --> pulse_syscalls/src/impls/fs/epoll.rs:21:54
+   |
+21 |         utils::{read_user_timespec, read_user_value, with_process, write_user_value_array},
+   |                                                      ^^^^^^^^^^^^
+
+warning: unused import: `vec::Vec`
+ --> pulse_syscalls/src/impls/fs/path/mod.rs:3:5
+  |
+3 |     vec::Vec,
+  |     ^^^^^^^^
+
+warning: unused imports: `GRND_INSECURE`, `GRND_NONBLOCK`, `RLIMIT_AS`, `RLIMIT_CORE`, `RLIMIT_DATA`, `RLIMIT_FSIZE`, `RLIMIT_MEMLOCK`, `RLIMIT_NOFILE`, `RLIMIT_SIGPENDING`, and `RLIMIT_STACK`
+ --> pulse_syscalls/src/impls/misc/mod.rs:7:5
+  |
+7 |     GRND_INSECURE, GRND_NONBLOCK, GRND_RANDOM, RLIMIT_AS, RLIMIT_CORE, RLIMIT_DATA, RLIMIT_FSIZE,
+  |     ^^^^^^^^^^^^^  ^^^^^^^^^^^^^               ^^^^^^^^^  ^^^^^^^^^^^  ^^^^^^^^^^^  ^^^^^^^^^^^^
+8 |     RLIMIT_MEMLOCK, RLIMIT_NOFILE, RLIMIT_SIGPENDING, RLIMIT_STACK, rlimit64,
+  |     ^^^^^^^^^^^^^^  ^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^
+
+warning: unused imports: `LINUX_REBOOT_CMD_CAD_OFF`, `LINUX_REBOOT_CMD_CAD_ON`, `LINUX_REBOOT_CMD_HALT`, `LINUX_REBOOT_CMD_POWER_OFF`, `LINUX_REBOOT_CMD_RESTART2`, `LINUX_REBOOT_CMD_RESTART`, `LINUX_REBOOT_MAGIC1`, `LINUX_REBOOT_MAGIC2A`, `LINUX_REBOOT_MAGIC2B`, `LINUX_REBOOT_MAGIC2C`, and `LINUX_REBOOT_MAGIC2`
+ --> pulse_syscalls/src/impls/misc/system.rs:5:33
+  |
+5 |         AT_FDCWD, CAP_SYS_BOOT, LINUX_REBOOT_CMD_CAD_OFF, LINUX_REBOOT_CMD_CAD_ON,
+  |                                 ^^^^^^^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^^^^^^
+6 |         LINUX_REBOOT_CMD_HALT, LINUX_REBOOT_CMD_POWER_OFF, LINUX_REBOOT_CMD_RESTART,
+  |         ^^^^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^^^^^^^
+7 |         LINUX_REBOOT_CMD_RESTART2, LINUX_REBOOT_MAGIC1, LINUX_REBOOT_MAGIC2, LINUX_REBOOT_MAGIC2A,
+  |         ^^^^^^^^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^^^
+8 |         LINUX_REBOOT_MAGIC2B, LINUX_REBOOT_MAGIC2C,
+  |         ^^^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `validate_limit_order`
+  --> pulse_syscalls/src/impls/misc/system.rs:18:13
+   |
+18 |             validate_limit_order, validate_limit_raise, validate_nofile_ceiling,
+   |             ^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `linux_raw_sys::general::membarrier_cmd::*`
+   --> pulse_syscalls/src/impls/misc/system.rs:717:5
+    |
+717 | use linux_raw_sys::general::membarrier_cmd::*;
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused imports: `P_ALL`, `P_PGID`, and `P_PID`
+ --> pulse_syscalls/src/impls/task/wait.rs:3:33
+  |
+3 |     CLD_CONTINUED, CLD_STOPPED, P_ALL, P_PGID, P_PID, SIGCONT, WCONTINUED, WEXITED, WNOHANG,
+  |                                 ^^^^^  ^^^^^^  ^^^^^
+
+warning: `pulse_core` (lib) generated 14 warnings (run `cargo fix --lib -p pulse_core` to apply 5 suggestions)
+warning: unused variable: `bytes`
+   --> pulse_syscalls/src/impls/fs/io/scalar.rs:153:10
+    |
+153 |         |bytes| {
+    |          ^^^^^ help: if this is intentional, prefix it with an underscore: `_bytes`
+    |
+    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `bytes`
+  --> pulse_syscalls/src/impls/fs/io/vectored.rs:37:10
+   |
+37 |         |bytes| {
+   |          ^^^^^ help: if this is intentional, prefix it with an underscore: `_bytes`
+
+warning: unreachable pattern
+   --> pulse_syscalls/src/impls/misc/system.rs:779:9
+    |
+779 |         _ => -LinuxError::EINVAL.code() as isize,
+    |         ^ no value can reach this
+    |
+note: multiple earlier patterns match some of the same values
+   --> pulse_syscalls/src/impls/misc/system.rs:779:9
+    |
+734 |         MembarrierCommand::Query => -LinuxError::EINVAL.code() as isize,
+    |         ------------------------ matches some of the same values
+735 |         MembarrierCommand::Global => {
+    |         ------------------------- matches some of the same values
+...
+740 |         MembarrierCommand::PrivateExpedited => {
+    |         ----------------------------------- matches some of the same values
+...
+749 |         MembarrierCommand::RegisterPrivateExpedited => {
+    |         ------------------------------------------- matches some of the same values
+...
+779 |         _ => -LinuxError::EINVAL.code() as isize,
+    |         ^ ...and 4 other patterns collectively make this unreachable
+    = note: `#[warn(unreachable_patterns)]` (part of `#[warn(unused)]`) on by default
+
+warning: constant `PAGE_SIZE` is never used
+ --> pulse_syscalls/src/validation/mm.rs:8:18
+  |
+8 | pub(crate) const PAGE_SIZE: usize = 0x1000;
+  |                  ^^^^^^^^^
+  |
+  = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: function `page_align_up` is never used
+  --> pulse_syscalls/src/validation/mm.rs:10:15
+   |
+10 | pub(crate) fn page_align_up(addr: usize) -> Option<usize> {
+   |               ^^^^^^^^^^^^^
+
+warning: function `is_page_aligned` is never used
+  --> pulse_syscalls/src/validation/mm.rs:15:15
+   |
+15 | pub(crate) fn is_page_aligned(addr: usize) -> bool {
+   |               ^^^^^^^^^^^^^^^
+
+warning: function `mmap_offset_is_valid` is never used
+  --> pulse_syscalls/src/validation/mm.rs:19:15
+   |
+19 | pub(crate) fn mmap_offset_is_valid(file_backed: bool, offset: usize) -> bool {
+   |               ^^^^^^^^^^^^^^^^^^^^
+
+warning: function `parse_mmap_flags` is never used
+  --> pulse_syscalls/src/validation/mm.rs:23:15
+   |
+23 | pub(crate) fn parse_mmap_flags(flags: usize) -> Result<bool, LinuxError> {
+   |               ^^^^^^^^^^^^^^^^
+
+warning: function `validate_mmap_fd_offset` is never used
+  --> pulse_syscalls/src/validation/mm.rs:53:15
+   |
+53 | pub(crate) fn validate_mmap_fd_offset(
+   |               ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `validate_mmap_length` is never used
+  --> pulse_syscalls/src/validation/mm.rs:67:15
+   |
+67 | pub(crate) fn validate_mmap_length(length: usize) -> Result<(), LinuxError> {
+   |               ^^^^^^^^^^^^^^^^^^^^
+
+warning: function `mprotect_aligned_length` is never used
+  --> pulse_syscalls/src/validation/mm.rs:74:15
+   |
+74 | pub(crate) fn mprotect_aligned_length(
+   |               ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `BPF_ANY` is never used
+ --> pulse_syscalls/src/impls/bpf/abi.rs:6:11
+  |
+6 | pub const BPF_ANY: u64 = 0;
+  |           ^^^^^^^
+
+warning: constant `BPF_NOEXIST` is never used
+ --> pulse_syscalls/src/impls/bpf/abi.rs:7:11
+  |
+7 | pub const BPF_NOEXIST: u64 = 1;
+  |           ^^^^^^^^^^^
+
+warning: associated constant `ALL` is never used
+  --> pulse_syscalls/src/impls/bpf/abi.rs:54:15
+   |
+53 | impl BpfCmd {
+   | ----------- associated constant in this implementation
+54 |     pub const ALL: [BpfCmd; 36] = [
+   |               ^^^
+
+warning: function `check_attr_unused_tail` is never used
+   --> pulse_syscalls/src/impls/bpf/abi.rs:205:8
+    |
+205 | pub fn check_attr_unused_tail(cmd: BpfCmd, attr: &BpfAttr) -> Result<(), LinuxError> {
+    |        ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `validate_user_attr_range` is never used
+   --> pulse_syscalls/src/impls/bpf/abi.rs:457:8
+    |
+457 | pub fn validate_user_attr_range(attr: usize, size: usize) -> Result<(), LinuxError> {
+    |        ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `check_bpf_permission` is never used
+   --> pulse_syscalls/src/impls/bpf/abi.rs:479:8
+    |
+479 | pub fn check_bpf_permission(
+    |        ^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `PERF_COUNT_SW_PAGE_FAULTS` is never used
+  --> pulse_syscalls/src/impls/bpf/perf_event.rs:12:11
+   |
+12 | pub const PERF_COUNT_SW_PAGE_FAULTS: u64 = 2;
+   |           ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `PERF_COUNT_SW_CONTEXT_SWITCHES` is never used
+  --> pulse_syscalls/src/impls/bpf/perf_event.rs:13:11
+   |
+13 | pub const PERF_COUNT_SW_CONTEXT_SWITCHES: u64 = 3;
+   |           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `PERF_COUNT_SW_CPU_MIGRATIONS` is never used
+  --> pulse_syscalls/src/impls/bpf/perf_event.rs:14:11
+   |
+14 | pub const PERF_COUNT_SW_CPU_MIGRATIONS: u64 = 4;
+   |           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `PERF_COUNT_SW_PAGE_FAULTS_MIN` is never used
+  --> pulse_syscalls/src/impls/bpf/perf_event.rs:15:11
+   |
+15 | pub const PERF_COUNT_SW_PAGE_FAULTS_MIN: u64 = 5;
+   |           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `PERF_COUNT_SW_PAGE_FAULTS_MAJ` is never used
+  --> pulse_syscalls/src/impls/bpf/perf_event.rs:16:11
+   |
+16 | pub const PERF_COUNT_SW_PAGE_FAULTS_MAJ: u64 = 6;
+   |           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `PERF_COUNT_SW_ALIGNMENT_FAULTS` is never used
+  --> pulse_syscalls/src/impls/bpf/perf_event.rs:17:11
+   |
+17 | pub const PERF_COUNT_SW_ALIGNMENT_FAULTS: u64 = 7;
+   |           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `PERF_COUNT_SW_EMULATION_FAULTS` is never used
+  --> pulse_syscalls/src/impls/bpf/perf_event.rs:18:11
+   |
+18 | pub const PERF_COUNT_SW_EMULATION_FAULTS: u64 = 8;
+   |           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `PERF_COUNT_SW_DUMMY` is never used
+  --> pulse_syscalls/src/impls/bpf/perf_event.rs:19:11
+   |
+19 | pub const PERF_COUNT_SW_DUMMY: u64 = 9;
+   |           ^^^^^^^^^^^^^^^^^^^
+
+warning: constant `PERF_COUNT_SW_CGROUP_SWITCHES` is never used
+  --> pulse_syscalls/src/impls/bpf/perf_event.rs:21:11
+   |
+21 | pub const PERF_COUNT_SW_CGROUP_SWITCHES: u64 = 11;
+   |           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `PERF_COUNT_HW_CPU_CYCLES` is never used
+  --> pulse_syscalls/src/impls/bpf/perf_event.rs:23:11
+   |
+23 | pub const PERF_COUNT_HW_CPU_CYCLES: u64 = 0;
+   |           ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `PERF_COUNT_HW_INSTRUCTIONS` is never used
+  --> pulse_syscalls/src/impls/bpf/perf_event.rs:24:11
+   |
+24 | pub const PERF_COUNT_HW_INSTRUCTIONS: u64 = 1;
+   |           ^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `PERF_COUNT_HW_CYCLES` is never used
+  --> pulse_syscalls/src/impls/bpf/perf_event.rs:25:11
+   |
+25 | pub const PERF_COUNT_HW_CYCLES: u64 = PERF_COUNT_HW_CPU_CYCLES;
+   |           ^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `PERF_COUNT_HW_CACHE_REFERENCES` is never used
+  --> pulse_syscalls/src/impls/bpf/perf_event.rs:26:11
+   |
+26 | pub const PERF_COUNT_HW_CACHE_REFERENCES: u64 = 2;
+   |           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `PERF_COUNT_HW_CACHE_MISSES` is never used
+  --> pulse_syscalls/src/impls/bpf/perf_event.rs:27:11
+   |
+27 | pub const PERF_COUNT_HW_CACHE_MISSES: u64 = 3;
+   |           ^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `PERF_COUNT_HW_BRANCH_INSTRUCTIONS` is never used
+  --> pulse_syscalls/src/impls/bpf/perf_event.rs:28:11
+   |
+28 | pub const PERF_COUNT_HW_BRANCH_INSTRUCTIONS: u64 = 4;
+   |           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `PERF_COUNT_HW_BRANCH_MISSES` is never used
+  --> pulse_syscalls/src/impls/bpf/perf_event.rs:29:11
+   |
+29 | pub const PERF_COUNT_HW_BRANCH_MISSES: u64 = 5;
+   |           ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `PERF_COUNT_HW_BUS_CYCLES` is never used
+  --> pulse_syscalls/src/impls/bpf/perf_event.rs:30:11
+   |
+30 | pub const PERF_COUNT_HW_BUS_CYCLES: u64 = 6;
+   |           ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `PERF_COUNT_HW_STALLED_CYCLES_FRONTEND` is never used
+  --> pulse_syscalls/src/impls/bpf/perf_event.rs:31:11
+   |
+31 | pub const PERF_COUNT_HW_STALLED_CYCLES_FRONTEND: u64 = 7;
+   |           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `PERF_COUNT_HW_STALLED_CYCLES_BACKEND` is never used
+  --> pulse_syscalls/src/impls/bpf/perf_event.rs:32:11
+   |
+32 | pub const PERF_COUNT_HW_STALLED_CYCLES_BACKEND: u64 = 8;
+   |           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `PERF_COUNT_HW_REF_CPU_CYCLES` is never used
+  --> pulse_syscalls/src/impls/bpf/perf_event.rs:33:11
+   |
+33 | pub const PERF_COUNT_HW_REF_CPU_CYCLES: u64 = 9;
+   |           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `PERF_ATTR_SIZE_VER1` is never used
+  --> pulse_syscalls/src/impls/bpf/perf_event.rs:36:11
+   |
+36 | pub const PERF_ATTR_SIZE_VER1: usize = 72;
+   |           ^^^^^^^^^^^^^^^^^^^
+
+warning: constant `PERF_ATTR_SIZE_VER2` is never used
+  --> pulse_syscalls/src/impls/bpf/perf_event.rs:37:11
+   |
+37 | pub const PERF_ATTR_SIZE_VER2: usize = 80;
+   |           ^^^^^^^^^^^^^^^^^^^
+
+warning: constant `PERF_ATTR_SIZE_VER3` is never used
+  --> pulse_syscalls/src/impls/bpf/perf_event.rs:38:11
+   |
+38 | pub const PERF_ATTR_SIZE_VER3: usize = 96;
+   |           ^^^^^^^^^^^^^^^^^^^
+
+warning: constant `PERF_ATTR_SIZE_VER4` is never used
+  --> pulse_syscalls/src/impls/bpf/perf_event.rs:39:11
+   |
+39 | pub const PERF_ATTR_SIZE_VER4: usize = 104;
+   |           ^^^^^^^^^^^^^^^^^^^
+
+warning: constant `PERF_ATTR_SIZE_VER5` is never used
+  --> pulse_syscalls/src/impls/bpf/perf_event.rs:40:11
+   |
+40 | pub const PERF_ATTR_SIZE_VER5: usize = 112;
+   |           ^^^^^^^^^^^^^^^^^^^
+
+warning: constant `PERF_ATTR_SIZE_VER6` is never used
+  --> pulse_syscalls/src/impls/bpf/perf_event.rs:41:11
+   |
+41 | pub const PERF_ATTR_SIZE_VER6: usize = 120;
+   |           ^^^^^^^^^^^^^^^^^^^
+
+warning: constant `PERF_ATTR_SIZE_VER7` is never used
+  --> pulse_syscalls/src/impls/bpf/perf_event.rs:42:11
+   |
+42 | pub const PERF_ATTR_SIZE_VER7: usize = 128;
+   |           ^^^^^^^^^^^^^^^^^^^
+
+warning: constant `PERF_FLAG_FD_OUTPUT` is never used
+  --> pulse_syscalls/src/impls/bpf/perf_event.rs:46:11
+   |
+46 | pub const PERF_FLAG_FD_OUTPUT: usize = 1 << 1;
+   |           ^^^^^^^^^^^^^^^^^^^
+
+warning: constant `PERF_ATTR_FLAG_PINNED` is never used
+  --> pulse_syscalls/src/impls/bpf/perf_event.rs:52:11
+   |
+52 | pub const PERF_ATTR_FLAG_PINNED: u64 = 1 << 2;
+   |           ^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `PERF_ATTR_FLAG_EXCLUSIVE` is never used
+  --> pulse_syscalls/src/impls/bpf/perf_event.rs:53:11
+   |
+53 | pub const PERF_ATTR_FLAG_EXCLUSIVE: u64 = 1 << 3;
+   |           ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `PERF_ATTR_FLAG_MMAP` is never used
+  --> pulse_syscalls/src/impls/bpf/perf_event.rs:58:11
+   |
+58 | pub const PERF_ATTR_FLAG_MMAP: u64 = 1 << 8;
+   |           ^^^^^^^^^^^^^^^^^^^
+
+warning: constant `PERF_ATTR_FLAG_COMM` is never used
+  --> pulse_syscalls/src/impls/bpf/perf_event.rs:59:11
+   |
+59 | pub const PERF_ATTR_FLAG_COMM: u64 = 1 << 9;
+   |           ^^^^^^^^^^^^^^^^^^^
+
+warning: constant `PERF_ATTR_FLAG_INHERIT_STAT` is never used
+  --> pulse_syscalls/src/impls/bpf/perf_event.rs:61:11
+   |
+61 | pub const PERF_ATTR_FLAG_INHERIT_STAT: u64 = 1 << 11;
+   |           ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `PERF_ATTR_FLAG_ENABLE_ON_EXEC` is never used
+  --> pulse_syscalls/src/impls/bpf/perf_event.rs:62:11
+   |
+62 | pub const PERF_ATTR_FLAG_ENABLE_ON_EXEC: u64 = 1 << 12;
+   |           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `PERF_ATTR_FLAG_TASK` is never used
+  --> pulse_syscalls/src/impls/bpf/perf_event.rs:63:11
+   |
+63 | pub const PERF_ATTR_FLAG_TASK: u64 = 1 << 13;
+   |           ^^^^^^^^^^^^^^^^^^^
+
+warning: constant `PERF_ATTR_FLAG_WATERMARK` is never used
+  --> pulse_syscalls/src/impls/bpf/perf_event.rs:64:11
+   |
+64 | pub const PERF_ATTR_FLAG_WATERMARK: u64 = 1 << 14;
+   |           ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `CLK_TCK` is never used
+  --> pulse_syscalls/src/impls/time.rs:24:7
+   |
+24 | const CLK_TCK: u64 = 100;
+   |       ^^^^^^^
+
+warning: function `after_shutdown_checkpoint` is never used
+ --> pulse_syscalls/src/shutdown.rs:1:15
+  |
+1 | pub(crate) fn after_shutdown_checkpoint<T, E>(
+  |               ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: `pulse_syscalls` (lib) generated 63 warnings (run `cargo fix --lib -p pulse_syscalls` to apply 10 suggestions)
+   Compiling Pulse v0.1.0 (/home/muou/PulseOS)
+warning: unused variable: `init_task`
+   --> src/main.rs:134:17
+    |
+134 |             let init_task = pulse_core::task::spawn_task_with_thread(inner, init_thread.clone(), true);
+    |                 ^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_init_task`
+    |
+    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: function `power_off_after_writeback` is never used
+  --> src/main.rs:25:4
+   |
+25 | fn power_off_after_writeback() -> ! {
+   |    ^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: `Pulse` (bin "Pulse") generated 2 warnings (run `cargo fix --bin "Pulse" -p Pulse` to apply 1 suggestion)
+warning: unused dependency `axfeat`
+   --> Cargo.toml:250:1
+    |
+250 | axfeat.workspace = true
+    | ^^^^^^
+    |
+    = note: `cargo::unused_dependencies` is set to `warn` by default
+help: consider removing the dependency on `axfeat`
+warning: `Pulse` (manifest) generated 1 warning
+    Finished `release` profile [optimized] target(s) in 41.42s
+rust-objcopy --binary-architecture=riscv64 /home/muou/PulseOS/PulseOS_riscv64-qemu-virt.elf --strip-all -O binary /home/muou/PulseOS/PulseOS_riscv64-qemu-virt.bin
+make[1]: Leaving directory '/home/muou/PulseOS'
+make[1]: Entering directory '/home/muou/PulseOS'
+axconfig-gen configs/defconfig.toml /home/muou/PulseOS/platforms/axplat-loongarch64-qemu-virt/axconfig.toml  -w arch=loongarch64 -w platform=loongarch64-qemu-virt -o "/home/muou/PulseOS/.axconfig.toml" -w plat.max-cpu-num=8
+make[1]: Leaving directory '/home/muou/PulseOS'
+make[1]: Entering directory '/home/muou/PulseOS'
+axconfig-gen configs/defconfig.toml /home/muou/PulseOS/platforms/axplat-loongarch64-qemu-virt/axconfig.toml  -w arch=loongarch64 -w platform=loongarch64-qemu-virt -o "/home/muou/PulseOS/.axconfig.toml" -w plat.max-cpu-num=8 -c "/home/muou/PulseOS/.axconfig.toml"
+    Building App: PulseOS, Arch: loongarch64, Platform: loongarch64-qemu-virt, App type: rust
+cargo -C /home/muou/PulseOS build -Z unstable-options --target loongarch64-unknown-none-softfloat --target-dir /home/muou/PulseOS/target --release  --features "axfeat/defplat axfeat/log-level-info axfeat/bus-pci smp qemu"
+warning: `package.homepage` is redundant with `package.repository`
+  --> modules/axcpu/Cargo.toml:34:12
+   |
+34 | homepage = "https://github.com/arceos-org/axcpu"
+   |            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+50 | repository = "https://github.com/arceos-org/axcpu"
+   |              -------------------------------------
+   |
+   = note: `cargo::redundant_homepage` is set to `warn` by default
+help: consider removing `package.homepage`
+warning: `axcpu` (manifest) generated 1 warning
+warning: `package.homepage` is redundant with `package.repository`
+   --> Cargo.toml:204:1
+    |
+204 | homepage.workspace = true
+    | ^^^^^^^^
+205 | repository.workspace = true
+    | ----------
+    |
+    = note: `cargo::redundant_homepage` is set to `warn` by default
+help: consider removing `package.homepage`
+warning: `Pulse` (manifest) generated 1 warning
+warning: `package.homepage` is redundant with `package.repository`
+ --> pulse_syscalls/Cargo.toml:7:1
+  |
+7 | homepage.workspace = true
+  | ^^^^^^^^
+8 | repository.workspace = true
+  | ----------
+  |
+  = note: `cargo::redundant_homepage` is set to `warn` by default
+help: consider removing `package.homepage`
+warning: `pulse_syscalls` (manifest) generated 1 warning
+warning: `package.homepage` is redundant with `package.repository`
+ --> crates/pulse_bpf_schema/Cargo.toml:7:1
+  |
+7 | homepage.workspace = true
+  | ^^^^^^^^
+8 | repository.workspace = true
+  | ----------
+  |
+  = note: `cargo::redundant_homepage` is set to `warn` by default
+help: consider removing `package.homepage`
+warning: `pulse_bpf_schema` (manifest) generated 1 warning
+warning: `package.homepage` is redundant with `package.repository`
+ --> pulse_core/Cargo.toml:7:1
+  |
+7 | homepage.workspace = true
+  | ^^^^^^^^
+8 | repository.workspace = true
+  | ----------
+  |
+  = note: `cargo::redundant_homepage` is set to `warn` by default
+help: consider removing `package.homepage`
+warning: `pulse_core` (manifest) generated 1 warning
+   Compiling axconfig v0.1.0 (/home/muou/PulseOS/modules/axconfig)
+warning: hiding a lifetime that's elided elsewhere is confusing
+   --> crates/virtio-drivers/src/transport/pci/bus.rs:241:25
+    |
+241 |     pub fn capabilities(&self, device_function: DeviceFunction) -> CapabilityIterator {
+    |                         ^^^^^ the lifetime is elided here          ^^^^^^^^^^^^^^^^^^ the same lifetime is hidden here
+    |
+    = help: the same lifetime is referred to in inconsistent ways, making the signature confusing
+    = note: `#[warn(mismatched_lifetime_syntaxes)]` on by default
+help: use `'_` for type paths
+    |
+241 |     pub fn capabilities(&self, device_function: DeviceFunction) -> CapabilityIterator<'_> {
+    |                                                                                      ++++
+
+warning: `virtio-drivers` (lib) generated 1 warning (run `cargo fix --lib -p virtio-drivers` to apply 1 suggestion)
+   Compiling axplat-loongarch64-qemu-virt v0.3.0 (/home/muou/PulseOS/platforms/axplat-loongarch64-qemu-virt)
+warning: unused import: `__kernel_ulong_t`
+ --> crates/pulse_user_abi/src/fs.rs:8:43
+  |
+8 |         __kernel_fsid_t, __kernel_long_t, __kernel_ulong_t, __s32, __s64, __u16, __u32, __u64,
+  |                                           ^^^^^^^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: use of deprecated method `core::sync::atomic::Atomic::<u64>::fetch_update`: renamed to `try_update` for consistency
+  --> crates/pulse_bpf_schema/src/lib.rs:20:34
+   |
+20 |     match OBSERVATION_GENERATION.fetch_update(Ordering::AcqRel, Ordering::Acquire, |value| value.checked_add(1)) {
+   |                                  ^^^^^^^^^^^^
+   |
+   = note: `#[warn(deprecated)]` on by default
+help: replace the use of the deprecated method
+   |
+20 -     match OBSERVATION_GENERATION.fetch_update(Ordering::AcqRel, Ordering::Acquire, |value| value.checked_add(1)) {
+20 +     match OBSERVATION_GENERATION.try_update(Ordering::AcqRel, Ordering::Acquire, |value| value.checked_add(1)) {
+   |
+
+warning: `pulse_user_abi` (lib) generated 1 warning (run `cargo fix --lib -p pulse_user_abi` to apply 1 suggestion)
+warning: `pulse_bpf_schema` (lib) generated 1 warning (run `cargo fix --lib -p pulse_bpf_schema` to apply 1 suggestion)
+   Compiling axhal v0.1.0 (/home/muou/PulseOS/modules/axhal)
+warning: use of deprecated method `core::sync::atomic::Atomic::<usize>::fetch_update`: renamed to `try_update` for consistency
+  --> platforms/axplat-loongarch64-qemu-virt/src/msix.rs:20:14
+   |
+20 |             .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |next| {
+   |              ^^^^^^^^^^^^
+   |
+   = note: `#[warn(deprecated)]` on by default
+help: replace the use of the deprecated method
+   |
+20 -             .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |next| {
+20 +             .try_update(Ordering::SeqCst, Ordering::SeqCst, |next| {
+   |
+
+warning: `axplat-loongarch64-qemu-virt` (lib) generated 1 warning (run `cargo fix --lib -p axplat-loongarch64-qemu-virt` to apply 1 suggestion)
+   Compiling axipi v0.1.0 (/home/muou/PulseOS/modules/axipi)
+   Compiling axtask v0.1.0 (/home/muou/PulseOS/modules/axtask)
+   Compiling axmm v0.1.0 (/home/muou/PulseOS/modules/axmm)
+warning: use of deprecated method `core::sync::atomic::Atomic::<usize>::fetch_update`: renamed to `try_update` for consistency
+    --> modules/axtask/src/run_queue.rs:1284:22
+     |
+1284 |                     .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |depth| {
+     |                      ^^^^^^^^^^^^
+     |
+     = note: `#[warn(deprecated)]` on by default
+help: replace the use of the deprecated method
+     |
+1284 -                     .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |depth| {
+1284 +                     .try_update(Ordering::Relaxed, Ordering::Relaxed, |depth| {
+     |
+
+warning: use of deprecated method `core::sync::atomic::Atomic::<usize>::fetch_update`: renamed to `try_update` for consistency
+  --> modules/axmm/src/lifecycle.rs:27:46
+   |
+27 |         let identity = NEXT_ADDRESS_SPACE_ID.fetch_update(Ordering::Relaxed, Ordering::Relaxed,
+   |                                              ^^^^^^^^^^^^
+   |
+   = note: `#[warn(deprecated)]` on by default
+help: replace the use of the deprecated method
+   |
+27 -         let identity = NEXT_ADDRESS_SPACE_ID.fetch_update(Ordering::Relaxed, Ordering::Relaxed,
+27 +         let identity = NEXT_ADDRESS_SPACE_ID.try_update(Ordering::Relaxed, Ordering::Relaxed,
+   |
+
+warning: unused import: `MemoryAddr`
+ --> modules/axmm/src/lifecycle.rs:6:19
+  |
+6 | use memory_addr::{MemoryAddr, VirtAddr, VirtAddrRange, PAGE_SIZE_4K};
+  |                   ^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: hiding a lifetime that's elided elsewhere is confusing
+   --> modules/axtask/src/wait_queue.rs:812:23
+    |
+812 |     pub fn wait_async(&self) -> crate::future::WaitFuture {
+    |                       ^^^^^     ^^^^^^^^^^^^^^^^^^^^^^^^^ the same lifetime is hidden here
+    |                       |
+    |                       the lifetime is elided here
+    |
+    = help: the same lifetime is referred to in inconsistent ways, making the signature confusing
+    = note: `#[warn(mismatched_lifetime_syntaxes)]` on by default
+help: use `'_` for type paths
+    |
+812 |     pub fn wait_async(&self) -> crate::future::WaitFuture<'_> {
+    |                                                          ++++
+
+warning: field `0` is never read
+  --> modules/axmm/src/backend/file.rs:55:34
+   |
+55 | pub struct FileMappingWriteGuard(Arc<dyn core::any::Any + Send + Sync>);
+   |            --------------------- ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |            |
+   |            field in this struct
+   |
+   = help: consider removing this field
+   = note: `FileMappingWriteGuard` has a derived impl for the trait `Clone`, but this is intentionally ignored during dead code analysis
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: hiding a lifetime that's elided elsewhere is confusing
+   --> modules/axmm/src/aspace.rs:648:17
+    |
+648 |     pub fn lock(&self) -> PageTableReadGuard {
+    |                 ^^^^^     ^^^^^^^^^^^^^^^^^^ the same lifetime is hidden here
+    |                 |
+    |                 the lifetime is elided here
+    |
+    = help: the same lifetime is referred to in inconsistent ways, making the signature confusing
+    = note: `#[warn(mismatched_lifetime_syntaxes)]` on by default
+help: use `'_` for type paths
+    |
+648 |     pub fn lock(&self) -> PageTableReadGuard<'_> {
+    |                                             ++++
+
+warning: hiding a lifetime that's elided elsewhere is confusing
+   --> modules/axmm/src/aspace.rs:652:26
+    |
+652 |     pub fn read_for_addr(&self, vaddr: VirtAddr) -> PageTableReadGuard {
+    |                          ^^^^^                      ^^^^^^^^^^^^^^^^^^ the same lifetime is hidden here
+    |                          |
+    |                          the lifetime is elided here
+    |
+    = help: the same lifetime is referred to in inconsistent ways, making the signature confusing
+help: use `'_` for type paths
+    |
+652 |     pub fn read_for_addr(&self, vaddr: VirtAddr) -> PageTableReadGuard<'_> {
+    |                                                                       ++++
+
+warning: hiding a lifetime that's elided elsewhere is confusing
+   --> modules/axmm/src/aspace.rs:662:26
+    |
+662 |     pub fn lock_for_addr(&self, vaddr: VirtAddr) -> PageTableGuard {
+    |                          ^^^^^                      ^^^^^^^^^^^^^^ the same lifetime is hidden here
+    |                          |
+    |                          the lifetime is elided here
+    |
+    = help: the same lifetime is referred to in inconsistent ways, making the signature confusing
+help: use `'_` for type paths
+    |
+662 |     pub fn lock_for_addr(&self, vaddr: VirtAddr) -> PageTableGuard<'_> {
+    |                                                                   ++++
+
+   Compiling axdriver v0.1.0 (/home/muou/PulseOS/modules/axdriver)
+   Compiling axsync v0.1.0 (/home/muou/PulseOS/modules/axsync)
+warning: `axtask` (lib) generated 2 warnings (run `cargo fix --lib -p axtask` to apply 2 suggestions)
+warning: `axmm` (lib) generated 6 warnings (run `cargo fix --lib -p axmm` to apply 4 suggestions)
+   Compiling axfs v0.1.0 (/home/muou/PulseOS/modules/axfs)
+   Compiling axnet v0.1.0 (/home/muou/PulseOS/modules/axnet)
+warning: feature `impl_trait_in_assoc_type` is declared but not used
+  --> modules/axdriver/src/lib.rs:61:40
+   |
+61 | #![cfg_attr(feature = "async", feature(impl_trait_in_assoc_type))]
+   |                                        ^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(unused_features)]` (part of `#[warn(unused)]`) on by default
+
+warning: `axdriver` (lib) generated 1 warning
+warning: use of deprecated method `core::sync::atomic::Atomic::<usize>::fetch_update`: renamed to `try_update` for consistency
+   --> modules/axfs/src/fs/ext4/inode.rs:340:14
+    |
+340 |             .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |count| {
+    |              ^^^^^^^^^^^^
+    |
+    = note: `#[warn(deprecated)]` on by default
+help: replace the use of the deprecated method
+    |
+340 -             .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |count| {
+340 +             .try_update(Ordering::Relaxed, Ordering::Relaxed, |count| {
+    |
+
+warning: use of deprecated method `core::sync::atomic::Atomic::<u64>::fetch_update`: renamed to `try_update` for consistency
+   --> modules/axfs/src/fs/ext4/mod.rs:532:14
+    |
+532 |             .fetch_update(Ordering::AcqRel, Ordering::Acquire, |id| id.checked_add(1))
+    |              ^^^^^^^^^^^^
+    |
+help: replace the use of the deprecated method
+    |
+532 -             .fetch_update(Ordering::AcqRel, Ordering::Acquire, |id| id.checked_add(1))
+532 +             .try_update(Ordering::AcqRel, Ordering::Acquire, |id| id.checked_add(1))
+    |
+
+warning: use of deprecated method `core::sync::atomic::Atomic::<u64>::fetch_update`: renamed to `try_update` for consistency
+   --> modules/axfs/src/fs/devfs.rs:430:14
+    |
+430 |             .fetch_update(Ordering::AcqRel, Ordering::Acquire, |ino| {
+    |              ^^^^^^^^^^^^
+    |
+help: replace the use of the deprecated method
+    |
+430 -             .fetch_update(Ordering::AcqRel, Ordering::Acquire, |ino| {
+430 +             .try_update(Ordering::AcqRel, Ordering::Acquire, |ino| {
+    |
+
+warning: use of deprecated method `core::sync::atomic::Atomic::<u64>::fetch_update`: renamed to `try_update` for consistency
+   --> modules/axfs/src/fs/procfs.rs:499:14
+    |
+499 |             .fetch_update(Ordering::AcqRel, Ordering::Acquire, |ino| {
+    |              ^^^^^^^^^^^^
+    |
+help: replace the use of the deprecated method
+    |
+499 -             .fetch_update(Ordering::AcqRel, Ordering::Acquire, |ino| {
+499 +             .try_update(Ordering::AcqRel, Ordering::Acquire, |ino| {
+    |
+
+warning: use of deprecated method `core::sync::atomic::Atomic::<u64>::fetch_update`: renamed to `try_update` for consistency
+   --> modules/axfs/src/fs/tmpfs.rs:140:10
+    |
+140 |         .fetch_update(Ordering::AcqRel, Ordering::Acquire, |ino| {
+    |          ^^^^^^^^^^^^
+    |
+help: replace the use of the deprecated method
+    |
+140 -         .fetch_update(Ordering::AcqRel, Ordering::Acquire, |ino| {
+140 +         .try_update(Ordering::AcqRel, Ordering::Acquire, |ino| {
+    |
+
+warning: variable does not need to be mutable
+    --> modules/axfs/src/highlevel/file/cache.rs:1258:13
+     |
+1258 |         let mut this = core::mem::ManuallyDrop::new(self);
+     |             ----^^^^
+     |             |
+     |             help: remove this `mut`
+     |
+     = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+warning: type `WritebackPage` is more private than the item `can_zero_copy_batch`
+    --> modules/axfs/src/highlevel/file/cache.rs:3795:1
+     |
+3795 | pub fn can_zero_copy_batch(pages: &[WritebackPage]) -> bool {
+     | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ function `can_zero_copy_batch` is reachable at visibility `pub`
+     |
+note: but type `WritebackPage` is only usable at visibility `pub(self)`
+    --> modules/axfs/src/highlevel/file/cache.rs:652:1
+     |
+ 652 | struct WritebackPage {
+     | ^^^^^^^^^^^^^^^^^^^^
+     = note: `#[warn(private_interfaces)]` on by default
+
+warning: type `WritebackPage` is more private than the item `collect_zero_copy_sg_entries`
+    --> modules/axfs/src/highlevel/file/cache.rs:3802:1
+     |
+3802 | pub fn collect_zero_copy_sg_entries(pages: &[WritebackPage]) -> Option<WritebackSgList> {
+     | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ function `collect_zero_copy_sg_entries` is reachable at visibility `pub`
+     |
+note: but type `WritebackPage` is only usable at visibility `pub(self)`
+    --> modules/axfs/src/highlevel/file/cache.rs:652:1
+     |
+ 652 | struct WritebackPage {
+     | ^^^^^^^^^^^^^^^^^^^^
+
+   Compiling pulse_core v0.1.0 (/home/muou/PulseOS/pulse_core)
+   Compiling axruntime v0.1.0 (/home/muou/PulseOS/modules/axruntime)
+   Compiling axfeat v0.1.0 (/home/muou/PulseOS/api/axfeat)
+warning: ambiguous glob re-exports
+  --> pulse_core/src/bpf/mod.rs:18:9
+   |
+18 | pub use insn::*;
+   |         ^^^^^^^ the name `BPF_RB_NO_WAKEUP` in the value namespace is first re-exported here
+...
+25 | pub use ring_buffer::*;
+   |         -------------- but the name `BPF_RB_NO_WAKEUP` in the value namespace is also re-exported here
+   |
+   = note: `#[warn(ambiguous_glob_reexports)]` on by default
+
+warning: ambiguous glob re-exports
+  --> pulse_core/src/bpf/mod.rs:18:9
+   |
+18 | pub use insn::*;
+   |         ^^^^^^^ the name `BPF_RB_FORCE_WAKEUP` in the value namespace is first re-exported here
+...
+25 | pub use ring_buffer::*;
+   |         -------------- but the name `BPF_RB_FORCE_WAKEUP` in the value namespace is also re-exported here
+
+warning: unused import: `PAGE_SIZE_4K`
+ --> pulse_core/src/task/aspace_lock.rs:7:19
+  |
+7 | use memory_addr::{PAGE_SIZE_4K, VirtAddr};
+  |                   ^^^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused imports: `FUTEX_SHARDS`, `GLOBAL_FUTEX_TABLE`, and `futex_shard_index`
+  --> pulse_core/src/task/process/mod.rs:77:5
+   |
+77 |     FUTEX_SHARDS, FutexTable, GLOBAL_FUTEX_TABLE, futex_shard_index, run_futex_guest_checks,
+   |     ^^^^^^^^^^^^              ^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^
+
+warning: unused import: `sync::Arc`
+ --> pulse_core/src/task/process_registry.rs:1:13
+  |
+1 | use alloc::{sync::Arc, vec::Vec};
+  |             ^^^^^^^^^
+
+warning: unused import: `kernel_guard::NoPreemptIrqSave`
+  --> pulse_core/src/task/mod.rs:22:5
+   |
+22 | use kernel_guard::NoPreemptIrqSave;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: use of deprecated method `core::sync::atomic::Atomic::<u64>::fetch_update`: renamed to `try_update` for consistency
+   --> pulse_core/src/bpf/perf_event.rs:681:36
+    |
+681 |             id: NEXT_PERF_EVENT_ID.fetch_update(Ordering::Relaxed, Ordering::Relaxed,
+    |                                    ^^^^^^^^^^^^
+    |
+    = note: `#[warn(deprecated)]` on by default
+help: replace the use of the deprecated method
+    |
+681 -             id: NEXT_PERF_EVENT_ID.fetch_update(Ordering::Relaxed, Ordering::Relaxed,
+681 +             id: NEXT_PERF_EVENT_ID.try_update(Ordering::Relaxed, Ordering::Relaxed,
+    |
+
+warning: `axfs` (lib) generated 8 warnings (run `cargo fix --lib -p axfs` to apply 6 suggestions)
+warning: field `map_idx` is never read
+   --> pulse_core/src/bpf/interpreter.rs:122:5
+    |
+121 | struct ActiveLookup {
+    |        ------------ field in this struct
+122 |     map_idx: usize,
+    |     ^^^^^^^
+    |
+    = note: `ActiveLookup` has a derived impl for the trait `Clone`, but this is intentionally ignored during dead code analysis
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+   Compiling pulse_syscalls v0.1.0 (/home/muou/PulseOS/pulse_syscalls)
+warning: unused imports: `PERF_EVENT_IOC_DISABLE`, `PERF_EVENT_IOC_ENABLE`, `PERF_EVENT_IOC_PERIOD`, `PERF_EVENT_IOC_REFRESH`, `PERF_EVENT_IOC_RESET`, `PERF_EVENT_IOC_SET_BPF`, and `PerfEvent`
+  --> pulse_syscalls/src/impls/bpf/perf_event.rs:74:5
+   |
+74 |     PerfEvent, PerfEventClock, PerfEventScope, PerfEventSpec,
+   |     ^^^^^^^^^
+75 |     PERF_EVENT_IOC_ENABLE, PERF_EVENT_IOC_DISABLE, PERF_EVENT_IOC_REFRESH,
+   |     ^^^^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^^^^^
+76 |     PERF_EVENT_IOC_RESET, PERF_EVENT_IOC_PERIOD, PERF_EVENT_IOC_SET_BPF,
+   |     ^^^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused import: `with_process`
+  --> pulse_syscalls/src/impls/fs/epoll.rs:21:54
+   |
+21 |         utils::{read_user_timespec, read_user_value, with_process, write_user_value_array},
+   |                                                      ^^^^^^^^^^^^
+
+warning: unused import: `vec::Vec`
+ --> pulse_syscalls/src/impls/fs/path/mod.rs:3:5
+  |
+3 |     vec::Vec,
+  |     ^^^^^^^^
+
+warning: unused imports: `GRND_INSECURE`, `GRND_NONBLOCK`, `RLIMIT_AS`, `RLIMIT_CORE`, `RLIMIT_DATA`, `RLIMIT_FSIZE`, `RLIMIT_MEMLOCK`, `RLIMIT_NOFILE`, `RLIMIT_SIGPENDING`, and `RLIMIT_STACK`
+ --> pulse_syscalls/src/impls/misc/mod.rs:7:5
+  |
+7 |     GRND_INSECURE, GRND_NONBLOCK, GRND_RANDOM, RLIMIT_AS, RLIMIT_CORE, RLIMIT_DATA, RLIMIT_FSIZE,
+  |     ^^^^^^^^^^^^^  ^^^^^^^^^^^^^               ^^^^^^^^^  ^^^^^^^^^^^  ^^^^^^^^^^^  ^^^^^^^^^^^^
+8 |     RLIMIT_MEMLOCK, RLIMIT_NOFILE, RLIMIT_SIGPENDING, RLIMIT_STACK, rlimit64,
+  |     ^^^^^^^^^^^^^^  ^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^
+
+warning: unused imports: `LINUX_REBOOT_CMD_CAD_OFF`, `LINUX_REBOOT_CMD_CAD_ON`, `LINUX_REBOOT_CMD_HALT`, `LINUX_REBOOT_CMD_POWER_OFF`, `LINUX_REBOOT_CMD_RESTART2`, `LINUX_REBOOT_CMD_RESTART`, `LINUX_REBOOT_MAGIC1`, `LINUX_REBOOT_MAGIC2A`, `LINUX_REBOOT_MAGIC2B`, `LINUX_REBOOT_MAGIC2C`, and `LINUX_REBOOT_MAGIC2`
+ --> pulse_syscalls/src/impls/misc/system.rs:5:33
+  |
+5 |         AT_FDCWD, CAP_SYS_BOOT, LINUX_REBOOT_CMD_CAD_OFF, LINUX_REBOOT_CMD_CAD_ON,
+  |                                 ^^^^^^^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^^^^^^
+6 |         LINUX_REBOOT_CMD_HALT, LINUX_REBOOT_CMD_POWER_OFF, LINUX_REBOOT_CMD_RESTART,
+  |         ^^^^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^^^^^^^
+7 |         LINUX_REBOOT_CMD_RESTART2, LINUX_REBOOT_MAGIC1, LINUX_REBOOT_MAGIC2, LINUX_REBOOT_MAGIC2A,
+  |         ^^^^^^^^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^^^
+8 |         LINUX_REBOOT_MAGIC2B, LINUX_REBOOT_MAGIC2C,
+  |         ^^^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `validate_limit_order`
+  --> pulse_syscalls/src/impls/misc/system.rs:18:13
+   |
+18 |             validate_limit_order, validate_limit_raise, validate_nofile_ceiling,
+   |             ^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `linux_raw_sys::general::membarrier_cmd::*`
+   --> pulse_syscalls/src/impls/misc/system.rs:717:5
+    |
+717 | use linux_raw_sys::general::membarrier_cmd::*;
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused imports: `P_ALL`, `P_PGID`, and `P_PID`
+ --> pulse_syscalls/src/impls/task/wait.rs:3:33
+  |
+3 |     CLD_CONTINUED, CLD_STOPPED, P_ALL, P_PGID, P_PID, SIGCONT, WCONTINUED, WEXITED, WNOHANG,
+  |                                 ^^^^^  ^^^^^^  ^^^^^
+
+warning: `pulse_core` (lib) generated 8 warnings (run `cargo fix --lib -p pulse_core` to apply 5 suggestions)
+warning: unused variable: `bytes`
+   --> pulse_syscalls/src/impls/fs/io/scalar.rs:153:10
+    |
+153 |         |bytes| {
+    |          ^^^^^ help: if this is intentional, prefix it with an underscore: `_bytes`
+    |
+    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `bytes`
+  --> pulse_syscalls/src/impls/fs/io/vectored.rs:37:10
+   |
+37 |         |bytes| {
+   |          ^^^^^ help: if this is intentional, prefix it with an underscore: `_bytes`
+
+warning: unreachable pattern
+   --> pulse_syscalls/src/impls/misc/system.rs:779:9
+    |
+779 |         _ => -LinuxError::EINVAL.code() as isize,
+    |         ^ no value can reach this
+    |
+note: multiple earlier patterns match some of the same values
+   --> pulse_syscalls/src/impls/misc/system.rs:779:9
+    |
+734 |         MembarrierCommand::Query => -LinuxError::EINVAL.code() as isize,
+    |         ------------------------ matches some of the same values
+735 |         MembarrierCommand::Global => {
+    |         ------------------------- matches some of the same values
+...
+740 |         MembarrierCommand::PrivateExpedited => {
+    |         ----------------------------------- matches some of the same values
+...
+749 |         MembarrierCommand::RegisterPrivateExpedited => {
+    |         ------------------------------------------- matches some of the same values
+...
+779 |         _ => -LinuxError::EINVAL.code() as isize,
+    |         ^ ...and 4 other patterns collectively make this unreachable
+    = note: `#[warn(unreachable_patterns)]` (part of `#[warn(unused)]`) on by default
+
+warning: constant `PAGE_SIZE` is never used
+ --> pulse_syscalls/src/validation/mm.rs:8:18
+  |
+8 | pub(crate) const PAGE_SIZE: usize = 0x1000;
+  |                  ^^^^^^^^^
+  |
+  = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: function `page_align_up` is never used
+  --> pulse_syscalls/src/validation/mm.rs:10:15
+   |
+10 | pub(crate) fn page_align_up(addr: usize) -> Option<usize> {
+   |               ^^^^^^^^^^^^^
+
+warning: function `is_page_aligned` is never used
+  --> pulse_syscalls/src/validation/mm.rs:15:15
+   |
+15 | pub(crate) fn is_page_aligned(addr: usize) -> bool {
+   |               ^^^^^^^^^^^^^^^
+
+warning: function `mmap_offset_is_valid` is never used
+  --> pulse_syscalls/src/validation/mm.rs:19:15
+   |
+19 | pub(crate) fn mmap_offset_is_valid(file_backed: bool, offset: usize) -> bool {
+   |               ^^^^^^^^^^^^^^^^^^^^
+
+warning: function `parse_mmap_flags` is never used
+  --> pulse_syscalls/src/validation/mm.rs:23:15
+   |
+23 | pub(crate) fn parse_mmap_flags(flags: usize) -> Result<bool, LinuxError> {
+   |               ^^^^^^^^^^^^^^^^
+
+warning: function `validate_mmap_fd_offset` is never used
+  --> pulse_syscalls/src/validation/mm.rs:53:15
+   |
+53 | pub(crate) fn validate_mmap_fd_offset(
+   |               ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `validate_mmap_length` is never used
+  --> pulse_syscalls/src/validation/mm.rs:67:15
+   |
+67 | pub(crate) fn validate_mmap_length(length: usize) -> Result<(), LinuxError> {
+   |               ^^^^^^^^^^^^^^^^^^^^
+
+warning: function `mprotect_aligned_length` is never used
+  --> pulse_syscalls/src/validation/mm.rs:74:15
+   |
+74 | pub(crate) fn mprotect_aligned_length(
+   |               ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `BPF_ANY` is never used
+ --> pulse_syscalls/src/impls/bpf/abi.rs:6:11
+  |
+6 | pub const BPF_ANY: u64 = 0;
+  |           ^^^^^^^
+
+warning: constant `BPF_NOEXIST` is never used
+ --> pulse_syscalls/src/impls/bpf/abi.rs:7:11
+  |
+7 | pub const BPF_NOEXIST: u64 = 1;
+  |           ^^^^^^^^^^^
+
+warning: associated constant `ALL` is never used
+  --> pulse_syscalls/src/impls/bpf/abi.rs:54:15
+   |
+53 | impl BpfCmd {
+   | ----------- associated constant in this implementation
+54 |     pub const ALL: [BpfCmd; 36] = [
+   |               ^^^
+
+warning: function `check_attr_unused_tail` is never used
+   --> pulse_syscalls/src/impls/bpf/abi.rs:205:8
+    |
+205 | pub fn check_attr_unused_tail(cmd: BpfCmd, attr: &BpfAttr) -> Result<(), LinuxError> {
+    |        ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `validate_user_attr_range` is never used
+   --> pulse_syscalls/src/impls/bpf/abi.rs:457:8
+    |
+457 | pub fn validate_user_attr_range(attr: usize, size: usize) -> Result<(), LinuxError> {
+    |        ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `check_bpf_permission` is never used
+   --> pulse_syscalls/src/impls/bpf/abi.rs:479:8
+    |
+479 | pub fn check_bpf_permission(
+    |        ^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `PERF_COUNT_SW_PAGE_FAULTS` is never used
+  --> pulse_syscalls/src/impls/bpf/perf_event.rs:12:11
+   |
+12 | pub const PERF_COUNT_SW_PAGE_FAULTS: u64 = 2;
+   |           ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `PERF_COUNT_SW_CONTEXT_SWITCHES` is never used
+  --> pulse_syscalls/src/impls/bpf/perf_event.rs:13:11
+   |
+13 | pub const PERF_COUNT_SW_CONTEXT_SWITCHES: u64 = 3;
+   |           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `PERF_COUNT_SW_CPU_MIGRATIONS` is never used
+  --> pulse_syscalls/src/impls/bpf/perf_event.rs:14:11
+   |
+14 | pub const PERF_COUNT_SW_CPU_MIGRATIONS: u64 = 4;
+   |           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `PERF_COUNT_SW_PAGE_FAULTS_MIN` is never used
+  --> pulse_syscalls/src/impls/bpf/perf_event.rs:15:11
+   |
+15 | pub const PERF_COUNT_SW_PAGE_FAULTS_MIN: u64 = 5;
+   |           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `PERF_COUNT_SW_PAGE_FAULTS_MAJ` is never used
+  --> pulse_syscalls/src/impls/bpf/perf_event.rs:16:11
+   |
+16 | pub const PERF_COUNT_SW_PAGE_FAULTS_MAJ: u64 = 6;
+   |           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `PERF_COUNT_SW_ALIGNMENT_FAULTS` is never used
+  --> pulse_syscalls/src/impls/bpf/perf_event.rs:17:11
+   |
+17 | pub const PERF_COUNT_SW_ALIGNMENT_FAULTS: u64 = 7;
+   |           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `PERF_COUNT_SW_EMULATION_FAULTS` is never used
+  --> pulse_syscalls/src/impls/bpf/perf_event.rs:18:11
+   |
+18 | pub const PERF_COUNT_SW_EMULATION_FAULTS: u64 = 8;
+   |           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `PERF_COUNT_SW_DUMMY` is never used
+  --> pulse_syscalls/src/impls/bpf/perf_event.rs:19:11
+   |
+19 | pub const PERF_COUNT_SW_DUMMY: u64 = 9;
+   |           ^^^^^^^^^^^^^^^^^^^
+
+warning: constant `PERF_COUNT_SW_CGROUP_SWITCHES` is never used
+  --> pulse_syscalls/src/impls/bpf/perf_event.rs:21:11
+   |
+21 | pub const PERF_COUNT_SW_CGROUP_SWITCHES: u64 = 11;
+   |           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `PERF_COUNT_HW_CPU_CYCLES` is never used
+  --> pulse_syscalls/src/impls/bpf/perf_event.rs:23:11
+   |
+23 | pub const PERF_COUNT_HW_CPU_CYCLES: u64 = 0;
+   |           ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `PERF_COUNT_HW_INSTRUCTIONS` is never used
+  --> pulse_syscalls/src/impls/bpf/perf_event.rs:24:11
+   |
+24 | pub const PERF_COUNT_HW_INSTRUCTIONS: u64 = 1;
+   |           ^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `PERF_COUNT_HW_CYCLES` is never used
+  --> pulse_syscalls/src/impls/bpf/perf_event.rs:25:11
+   |
+25 | pub const PERF_COUNT_HW_CYCLES: u64 = PERF_COUNT_HW_CPU_CYCLES;
+   |           ^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `PERF_COUNT_HW_CACHE_REFERENCES` is never used
+  --> pulse_syscalls/src/impls/bpf/perf_event.rs:26:11
+   |
+26 | pub const PERF_COUNT_HW_CACHE_REFERENCES: u64 = 2;
+   |           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `PERF_COUNT_HW_CACHE_MISSES` is never used
+  --> pulse_syscalls/src/impls/bpf/perf_event.rs:27:11
+   |
+27 | pub const PERF_COUNT_HW_CACHE_MISSES: u64 = 3;
+   |           ^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `PERF_COUNT_HW_BRANCH_INSTRUCTIONS` is never used
+  --> pulse_syscalls/src/impls/bpf/perf_event.rs:28:11
+   |
+28 | pub const PERF_COUNT_HW_BRANCH_INSTRUCTIONS: u64 = 4;
+   |           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `PERF_COUNT_HW_BRANCH_MISSES` is never used
+  --> pulse_syscalls/src/impls/bpf/perf_event.rs:29:11
+   |
+29 | pub const PERF_COUNT_HW_BRANCH_MISSES: u64 = 5;
+   |           ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `PERF_COUNT_HW_BUS_CYCLES` is never used
+  --> pulse_syscalls/src/impls/bpf/perf_event.rs:30:11
+   |
+30 | pub const PERF_COUNT_HW_BUS_CYCLES: u64 = 6;
+   |           ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `PERF_COUNT_HW_STALLED_CYCLES_FRONTEND` is never used
+  --> pulse_syscalls/src/impls/bpf/perf_event.rs:31:11
+   |
+31 | pub const PERF_COUNT_HW_STALLED_CYCLES_FRONTEND: u64 = 7;
+   |           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `PERF_COUNT_HW_STALLED_CYCLES_BACKEND` is never used
+  --> pulse_syscalls/src/impls/bpf/perf_event.rs:32:11
+   |
+32 | pub const PERF_COUNT_HW_STALLED_CYCLES_BACKEND: u64 = 8;
+   |           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `PERF_COUNT_HW_REF_CPU_CYCLES` is never used
+  --> pulse_syscalls/src/impls/bpf/perf_event.rs:33:11
+   |
+33 | pub const PERF_COUNT_HW_REF_CPU_CYCLES: u64 = 9;
+   |           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `PERF_ATTR_SIZE_VER1` is never used
+  --> pulse_syscalls/src/impls/bpf/perf_event.rs:36:11
+   |
+36 | pub const PERF_ATTR_SIZE_VER1: usize = 72;
+   |           ^^^^^^^^^^^^^^^^^^^
+
+warning: constant `PERF_ATTR_SIZE_VER2` is never used
+  --> pulse_syscalls/src/impls/bpf/perf_event.rs:37:11
+   |
+37 | pub const PERF_ATTR_SIZE_VER2: usize = 80;
+   |           ^^^^^^^^^^^^^^^^^^^
+
+warning: constant `PERF_ATTR_SIZE_VER3` is never used
+  --> pulse_syscalls/src/impls/bpf/perf_event.rs:38:11
+   |
+38 | pub const PERF_ATTR_SIZE_VER3: usize = 96;
+   |           ^^^^^^^^^^^^^^^^^^^
+
+warning: constant `PERF_ATTR_SIZE_VER4` is never used
+  --> pulse_syscalls/src/impls/bpf/perf_event.rs:39:11
+   |
+39 | pub const PERF_ATTR_SIZE_VER4: usize = 104;
+   |           ^^^^^^^^^^^^^^^^^^^
+
+warning: constant `PERF_ATTR_SIZE_VER5` is never used
+  --> pulse_syscalls/src/impls/bpf/perf_event.rs:40:11
+   |
+40 | pub const PERF_ATTR_SIZE_VER5: usize = 112;
+   |           ^^^^^^^^^^^^^^^^^^^
+
+warning: constant `PERF_ATTR_SIZE_VER6` is never used
+  --> pulse_syscalls/src/impls/bpf/perf_event.rs:41:11
+   |
+41 | pub const PERF_ATTR_SIZE_VER6: usize = 120;
+   |           ^^^^^^^^^^^^^^^^^^^
+
+warning: constant `PERF_ATTR_SIZE_VER7` is never used
+  --> pulse_syscalls/src/impls/bpf/perf_event.rs:42:11
+   |
+42 | pub const PERF_ATTR_SIZE_VER7: usize = 128;
+   |           ^^^^^^^^^^^^^^^^^^^
+
+warning: constant `PERF_FLAG_FD_OUTPUT` is never used
+  --> pulse_syscalls/src/impls/bpf/perf_event.rs:46:11
+   |
+46 | pub const PERF_FLAG_FD_OUTPUT: usize = 1 << 1;
+   |           ^^^^^^^^^^^^^^^^^^^
+
+warning: constant `PERF_ATTR_FLAG_PINNED` is never used
+  --> pulse_syscalls/src/impls/bpf/perf_event.rs:52:11
+   |
+52 | pub const PERF_ATTR_FLAG_PINNED: u64 = 1 << 2;
+   |           ^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `PERF_ATTR_FLAG_EXCLUSIVE` is never used
+  --> pulse_syscalls/src/impls/bpf/perf_event.rs:53:11
+   |
+53 | pub const PERF_ATTR_FLAG_EXCLUSIVE: u64 = 1 << 3;
+   |           ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `PERF_ATTR_FLAG_MMAP` is never used
+  --> pulse_syscalls/src/impls/bpf/perf_event.rs:58:11
+   |
+58 | pub const PERF_ATTR_FLAG_MMAP: u64 = 1 << 8;
+   |           ^^^^^^^^^^^^^^^^^^^
+
+warning: constant `PERF_ATTR_FLAG_COMM` is never used
+  --> pulse_syscalls/src/impls/bpf/perf_event.rs:59:11
+   |
+59 | pub const PERF_ATTR_FLAG_COMM: u64 = 1 << 9;
+   |           ^^^^^^^^^^^^^^^^^^^
+
+warning: constant `PERF_ATTR_FLAG_INHERIT_STAT` is never used
+  --> pulse_syscalls/src/impls/bpf/perf_event.rs:61:11
+   |
+61 | pub const PERF_ATTR_FLAG_INHERIT_STAT: u64 = 1 << 11;
+   |           ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `PERF_ATTR_FLAG_ENABLE_ON_EXEC` is never used
+  --> pulse_syscalls/src/impls/bpf/perf_event.rs:62:11
+   |
+62 | pub const PERF_ATTR_FLAG_ENABLE_ON_EXEC: u64 = 1 << 12;
+   |           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `PERF_ATTR_FLAG_TASK` is never used
+  --> pulse_syscalls/src/impls/bpf/perf_event.rs:63:11
+   |
+63 | pub const PERF_ATTR_FLAG_TASK: u64 = 1 << 13;
+   |           ^^^^^^^^^^^^^^^^^^^
+
+warning: constant `PERF_ATTR_FLAG_WATERMARK` is never used
+  --> pulse_syscalls/src/impls/bpf/perf_event.rs:64:11
+   |
+64 | pub const PERF_ATTR_FLAG_WATERMARK: u64 = 1 << 14;
+   |           ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `CLK_TCK` is never used
+  --> pulse_syscalls/src/impls/time.rs:24:7
+   |
+24 | const CLK_TCK: u64 = 100;
+   |       ^^^^^^^
+
+warning: function `after_shutdown_checkpoint` is never used
+ --> pulse_syscalls/src/shutdown.rs:1:15
+  |
+1 | pub(crate) fn after_shutdown_checkpoint<T, E>(
+  |               ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: `pulse_syscalls` (lib) generated 63 warnings (run `cargo fix --lib -p pulse_syscalls` to apply 10 suggestions)
+   Compiling Pulse v0.1.0 (/home/muou/PulseOS)
+warning: unused variable: `init_task`
+   --> src/main.rs:134:17
+    |
+134 |             let init_task = pulse_core::task::spawn_task_with_thread(inner, init_thread.clone(), true);
+    |                 ^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_init_task`
+    |
+    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: function `power_off_after_writeback` is never used
+  --> src/main.rs:25:4
+   |
+25 | fn power_off_after_writeback() -> ! {
+   |    ^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: `Pulse` (bin "Pulse") generated 2 warnings (run `cargo fix --bin "Pulse" -p Pulse` to apply 1 suggestion)
+warning: unused dependency `axfeat`
+   --> Cargo.toml:250:1
+    |
+250 | axfeat.workspace = true
+    | ^^^^^^
+    |
+    = note: `cargo::unused_dependencies` is set to `warn` by default
+help: consider removing the dependency on `axfeat`
+warning: `Pulse` (manifest) generated 1 warning
+    Finished `release` profile [optimized] target(s) in 34.69s
+rust-objcopy --binary-architecture=loongarch64 /home/muou/PulseOS/PulseOS_loongarch64-qemu-virt.elf --strip-all -O binary /home/muou/PulseOS/PulseOS_loongarch64-qemu-virt.bin
+make[1]: Leaving directory '/home/muou/PulseOS'
