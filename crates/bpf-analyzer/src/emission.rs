@@ -199,7 +199,7 @@ pub fn render_loss_report(analyzer: &CaptureAnalyzer) -> String {
         writeln!(&mut out, "Consumer projection: {} normalized records; {} observed PERF_RECORD_LOST notices (counts may overlap sink diagnostics).",
             counters.delivered, counters.lost_records_total).unwrap();
         writeln!(&mut out, "Other legacy counter fields are not runtime measurements; use the scoped diagnostics above.").unwrap();
-        writeln!(&mut out, "Complete CPU/off-CPU attribution: unavailable (mapping/full scheduler evidence absent; stack availability is reported per sample).").unwrap();
+        writeln!(&mut out, "Complete CPU/off-CPU attribution: unavailable (full scheduler and IRQ residency evidence absent; mapping and stack availability are reported separately per sample).").unwrap();
         if is_comp {
             writeln!(&mut out, "Integrity verified; no loss reported by the recorded diagnostics. This is not proof of complete attribution.").unwrap();
         } else {
@@ -501,7 +501,7 @@ pub fn render_off_cpu_folded(
 
 // The capture stores arbitrary UTF-8 strings, including original JSON evidence;
 // quote them rather than inserting them into an emitted JSON document verbatim.
-fn json_string(value: &str) -> String {
+pub(crate) fn json_string(value: &str) -> String {
     let mut out = String::from("\"");
     for ch in value.chars() {
         match ch {

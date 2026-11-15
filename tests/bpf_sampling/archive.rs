@@ -163,6 +163,28 @@ pub fn stats(point: &str, sources: &[usize]) {
     hex_lines("STATS_DATA", point, memory.bytes());
     say!("ARCHIVE STATS_END point={}", point);
 }
+#[cfg(mapping_test)]
+pub fn mappings(point: &str) {
+    let path = c"/proc/pulse_bpf_mappings";
+    let fd = ok("open mapping journal", syscall(56, (-100isize) as usize, path.as_ptr() as usize, 0, 0, 0, 0));
+    let mut memory = Memory::new(4 * 1024 * 1024);
+    while memory.len < memory.capacity {
+        let length = (memory.capacity - memory.len).min(4093);
+        let n = ok("read mapping journal", syscall(63, fd, memory.base + memory.len, length, 0, 0, 0));
+        check!(n <= length, "invalid mapping journal length");
+        if n == 0 { break; }
+        memory.len += n;
+    }
+    let mut tail = [0u8; 8];
+    check!(syscall(63, fd, tail.as_mut_ptr() as usize, tail.len(), 0, 0, 0) == 0,
+           "mapping journal exceeds bound or lacks stable EOF");
+    close(fd);
+    check!(memory.len > 0, "empty mapping journal");
+    say!("ARCHIVE MAPPINGS_BEGIN point={} bytes={} crc={}", point, memory.len, crc32(memory.bytes()));
+    hex_lines("MAPPINGS_DATA", point, memory.bytes());
+    say!("ARCHIVE MAPPINGS_END point={}", point);
+}
+
 fn field(line: &str, name: &str) -> Option<u64> {
     line.split_whitespace().filter_map(|token| token.split_once('='))
         .find(|(key, _)| *key == name).and_then(|(_, value)| value.parse().ok())

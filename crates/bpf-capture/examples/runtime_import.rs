@@ -13,6 +13,7 @@ use bpf_capture::{
     framing::compute_checksum_ieee, writer::SampleFormat,
 };
 use serde_json::{Map, Value};
+use sha2::{Digest, Sha256};
 
 type Result<T> = std::result::Result<T, String>;
 fn number(v: &Value, key: &str) -> Result<u64> {
@@ -273,6 +274,107 @@ impl FaultWorkload {
     }
 }
 
+fn mapping_evidence(
+    dir: &Path,
+    input: &Value,
+) -> Result<Option<bpf_capture::mapping::MappingMetadata>> {
+    use bpf_capture::mapping::{Artifact, KernelArtifact, MappingMetadata};
+    if input.get("mapping_journal").is_none() {
+        return Ok(None);
+    }
+    if string(input, "mapping_journal")? != "mappings.txt"
+        || string(input, "artifact_bundle")? != "artifacts.json"
+    {
+        return Err("invalid mapping evidence file names".into());
+    }
+    let mut journal_bytes = Vec::new();
+    fs::File::open(dir.join("mappings.txt"))
+        .map_err(|e| e.to_string())?
+        .take(16 * 1024 * 1024 + 1)
+        .read_to_end(&mut journal_bytes)
+        .map_err(|e| e.to_string())?;
+    if journal_bytes.len() > 16 * 1024 * 1024
+        || format!("{:x}", Sha256::digest(&journal_bytes))
+            != string(input, "mapping_journal_sha256")?
+    {
+        return Err("mapping journal SHA mismatch/bound".into());
+    }
+    let manifest_bytes = read_bounded(&dir.join("artifacts.json"))?;
+    if format!("{:x}", Sha256::digest(&manifest_bytes)) != string(input, "artifact_bundle_sha256")?
+    {
+        return Err("artifact manifest SHA mismatch".into());
+    }
+    let manifest: Value = serde_json::from_slice(&manifest_bytes).map_err(|e| e.to_string())?;
+    if number(&manifest, "version")? != 1 {
+        return Err("unsupported artifact manifest".into());
+    }
+    let optional = |v: &Value, name: &str| -> Result<Option<String>> {
+        match v.get(name) {
+            Some(Value::Null) => Ok(None),
+            Some(Value::String(s)) => Ok(Some(s.clone())),
+            _ => Err(format!("invalid optional artifact {name}")),
+        }
+    };
+    let mut artifacts = Vec::new();
+    for row in manifest["artifacts"]
+        .as_array()
+        .ok_or("missing artifacts")?
+    {
+        artifacts.push(Artifact {
+            sha256: string(row, "sha256")?.into(),
+            gnu_build_id: optional(row, "gnu_build_id")?,
+            path: string(row, "path")?.into(),
+            debug_sha256: optional(row, "debug_sha256")?,
+            debug_build_id: optional(row, "debug_build_id")?,
+        });
+    }
+    let kernel = if manifest["kernel"].is_null() {
+        None
+    } else {
+        let row = &manifest["kernel"];
+        if string(row, "sha256")? != string(input, "kernel_elf_sha256")? {
+            return Err("kernel artifact differs from boot ELF".into());
+        }
+        Some(KernelArtifact {
+            sha256: string(row, "sha256")?.into(),
+            reference_symbol: string(row, "reference_symbol")?.into(),
+            reference_address: number(row, "reference_address")?,
+            text_start: number(row, "text_start")?,
+            text_end: number(row, "text_end")?,
+        })
+    };
+    let result = MappingMetadata {
+        journal: String::from_utf8(journal_bytes).map_err(|_| "non-UTF8 mapping journal")?,
+        artifacts,
+        kernel,
+    };
+    result
+        .validate()
+        .map_err(|e| format!("mapping evidence: {e:?}"))?;
+    // Verify every bundled identity against the actual stored bytes. The analyzer
+    // independently inspects ELF headers/build-id when it opens a symbol object.
+    for a in &result.artifacts {
+        let file = fs::File::open(dir.join(&a.path)).map_err(|e| e.to_string())?;
+        if file.metadata().map_err(|e| e.to_string())?.len() > 256 * 1024 * 1024 {
+            return Err("artifact exceeds bound".into());
+        }
+        let mut hash = Sha256::new();
+        let mut reader = file;
+        let mut block = [0u8; 65536];
+        loop {
+            let len = reader.read(&mut block).map_err(|e| e.to_string())?;
+            if len == 0 {
+                break;
+            }
+            hash.update(&block[..len]);
+        }
+        if format!("{:x}", hash.finalize()) != a.sha256 {
+            return Err("artifact ELF SHA mismatch".into());
+        }
+    }
+    Ok(Some(result))
+}
+
 fn import(dir: &Path, output: &Path) -> Result<()> {
     let input = read_json(&dir.join("inputs.json"))?;
     let archive = read_json(&dir.join("archive.json"))?;
@@ -449,10 +551,11 @@ fn import(dir: &Path, output: &Path) -> Result<()> {
     identity(
         &mut d,
         "attribution_scope",
-        Some(if stacks {
-            "observed bounded frame-pointer prefixes; termination is per sample; mapping/complete scheduler attribution unavailable"
-        } else {
-            "observed records only; callchain/mapping/complete scheduler attribution unavailable"
+        Some(match (stacks, input.get("mapping_journal").is_some()) {
+            (true, true) => "observed bounded frame-pointer prefixes and temporal mapping evidence; validity is per sample; complete scheduler attribution unavailable",
+            (false, true) => "observed records and temporal mapping evidence; validity is per sample; callchain/complete scheduler attribution unavailable",
+            (true, false) => "observed bounded frame-pointer prefixes; termination is per sample; mapping/complete scheduler attribution unavailable",
+            (false, false) => "observed records only; callchain/mapping/complete scheduler attribution unavailable",
         }.into()),
     );
     snapshots(
@@ -883,6 +986,9 @@ fn import(dir: &Path, output: &Path) -> Result<()> {
     writer
         .set_diagnostics(d)
         .map_err(|e| format!("diagnostics: {e:?}"))?;
+    if let Some(mappings) = mapping_evidence(dir, &input)? {
+        writer.set_mappings(mappings).map_err(|e| format!("mappings: {e:?}"))?;
+    }
     let bytes = writer.finish(stop).map_err(|e| format!("capture: {e:?}"))?;
     let mut out = fs::OpenOptions::new()
         .write(true)

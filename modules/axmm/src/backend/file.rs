@@ -528,6 +528,24 @@ impl FileMapping {
         self.file_offset
     }
 
+    /// Byte offset corresponding to a surviving (possibly split) VMA start.
+    pub fn byte_offset_at(&self, address: VirtAddr) -> Option<usize> {
+        address.as_usize().checked_sub(self.start.as_usize())?.checked_add(self.file_offset)
+    }
+
+    /// Rebase a cloned backend onto the subrange selected for mremap before
+    /// removing any original VMA or moving any resident page. A split VMA can
+    /// still carry the original file window, so moving only its start would
+    /// otherwise reset the file offset for future faults and provenance.
+    pub(crate) fn rebase_for_remap(&mut self, old_start: VirtAddr, new_size: usize) -> AxResult {
+        let offset = self.byte_offset_at(old_start).ok_or(AxError::InvalidInput)?;
+        offset.checked_add(new_size).ok_or(AxError::InvalidInput)?;
+        let relative = old_start.as_usize() - self.start.as_usize();
+        self.file_offset = offset;
+        self.update_address(old_start, self.file_bytes.saturating_sub(relative));
+        Ok(())
+    }
+
     pub fn file(&self) -> &Arc<dyn FileMappingSource> {
         &self.file
     }
@@ -1339,6 +1357,37 @@ mod tests {
         assert!(src1.shares_page_cache_with(src2.as_ref()));
         assert!(!src1.shares_page_cache_with(src3.as_ref()));
         assert_eq!(src1.as_any().downcast_ref::<MockSource>().unwrap().size, 4096);
+    }
+
+    #[test]
+    fn observed_offsets_follow_surviving_vma_starts_in_bytes() {
+        let mut mapping = super::FileMapping {
+            id: super::FileMappingId(1),
+            start: VirtAddr::from(0x20_0000),
+            file: alloc::sync::Arc::new(MockSource { identity: 1, size: 0x10000, generation: 1 }),
+            file_flags: super::FileMappingFlags::READ,
+            file_offset: 0x3000,
+            file_bytes: 0x5000,
+            shared: false,
+            read_ahead: alloc::sync::Arc::new(spin::Mutex::new(FileReadAheadState::default())),
+            _write_access: None,
+        };
+        assert_eq!(mapping.byte_offset_at(VirtAddr::from(0x20_0000)), Some(0x3000));
+        // A prefix unmap or mprotect split keeps the backend's original start.
+        assert_eq!(mapping.byte_offset_at(VirtAddr::from(0x20_2000)), Some(0x5000));
+        assert_eq!(mapping.byte_offset_at(VirtAddr::from(0x1f_f000)), None);
+        let mut moved = mapping.clone();
+        moved.rebase_for_remap(VirtAddr::from(0x20_2000), 0x2000).unwrap();
+        moved.update_address(VirtAddr::from(0x50_0000), 0x2000);
+        assert_eq!(moved.byte_offset_at(VirtAddr::from(0x50_0000)), Some(0x5000));
+        assert_eq!(moved.page_read_window(VirtAddr::from(0x50_0000)), Some((0x5000, PAGE_SIZE_4K)));
+        assert_eq!(mapping.byte_offset_at(VirtAddr::from(0x20_0000)), Some(0x3000));
+        assert_ne!(moved.id, mapping.id);
+        let original_offset = mapping.file_offset;
+        assert!(mapping.rebase_for_remap(VirtAddr::from(0x20_2000), usize::MAX).is_err());
+        assert_eq!(mapping.file_offset, original_offset);
+        mapping.file_offset = usize::MAX;
+        assert_eq!(mapping.byte_offset_at(VirtAddr::from(0x20_0001)), None);
     }
 
     #[test]

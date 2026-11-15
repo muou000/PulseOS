@@ -37,9 +37,10 @@ percpu.workspace = true
 starry-vdso.workspace = true
 kspin.workspace = true
 hashbrown.workspace = true
+sha2 = { version = "0.10", default-features = false, optional = true }
 
 [features]
 ls2k1000 = ["axcpu/ls2k1000"]
-bpf-trace = ["axtask/bpf-trace"]
+bpf-trace = ["axtask/bpf-trace", "axmm/mapping-observer", "dep:sha2"]
 mapping-lifecycle-test = ["axfs/mapping-lifecycle-test"]
 guest-checks = []

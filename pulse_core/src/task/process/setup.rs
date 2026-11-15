@@ -47,6 +47,8 @@ impl Process {
             exec_lock: Mutex::new(()),
             exec_teardown_owner: AtomicU64::new(0),
             has_execed: AtomicBool::new(false),
+            #[cfg(feature = "bpf-trace")]
+            exec_generation: AtomicU64::new(0),
             thread_exit_event: WaitQueue::new(),
             children: SpinNoIrq::new(Vec::new()),
             child_state_epoch: AtomicU64::new(0),
@@ -222,6 +224,8 @@ impl Process {
             exec_lock: Mutex::new(()),
             exec_teardown_owner: AtomicU64::new(0),
             has_execed: AtomicBool::new(false),
+            #[cfg(feature = "bpf-trace")]
+            exec_generation: AtomicU64::new(parent.exec_generation.load(Ordering::Acquire)),
             thread_exit_event: WaitQueue::new(),
             children: SpinNoIrq::new(Vec::new()),
             child_state_epoch: AtomicU64::new(0),

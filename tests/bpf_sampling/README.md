@@ -5,6 +5,55 @@ This freestanding RV64/LA64 guest uses raw Linux-shaped syscalls and checks actu
 sample/loss counters. With `--archive`, the host converts its actual RAW frames
 through `bpf-capture` and then verifies the standalone file with `bpf-analyzer`.
 
+## Time-valid mappings and ELF artifacts (#193)
+
+```bash
+make test APP_FEATURES="qemu bpf-trace" 2>&1 | tail -30
+python3 tests/bpf_sampling/run.py guest --arch riscv64 --mode cpu --archive --mappings --timeout 300
+python3 tests/bpf_sampling/run.py guest --arch loongarch64 --mode cpu --archive --mappings --timeout 300
+target/debug/bpf-analyzer RUN/capture.pbcapture --mapping-report --bundle RUN
+```
+
+`--mappings` reads the producer's bounded boot journal before source enable and
+after disable/quiescence. Both original proc snapshots have serial byte counts
+and CRC32; `mappings.txt` is the exact final stream retained inside capture.
+The initial stream must be a prefix of the final stream and its cut must precede
+every enable boundary. This is historical evidence, not a terminal `/proc/maps`
+snapshot. Stable task IDs, address-space IDs, exec generations, full VMA
+revisions, mutation windows, TLB completion tokens and object SHA identities are
+checked independently against actual RAW samples. Metadata loss remains partial;
+the positive gate requires no metadata loss. Samples inside transitions remain
+unknown, including intervals before a pending TLB token completes.
+
+The workload maps the current executable at byte offset 4096, calls a checked
+relocation-free loop at its new address, renames the executing file, forks and
+calls the inherited mapping, then execs a separately built ELF in the child.
+It also changes permissions, moves/expands the parent mapping with `mremap`,
+moves just the second page of a separate two-page mapping (retaining its
+nonzero file offset), unmaps the ranges and waits for the child to exit. Every workload phase requires actual
+user IP samples and content-verified symbol resolution. `mapping-evidence.json`
+is the independent RAW/journal oracle; `mapping-report.json` must agree with its
+task, generation, mapping, byte offset and `mapped_busy_loop` symbol examples.
+The original sample IP is retained when translating via the ELF PT_LOAD table.
+
+`artifacts.json` binds copied kernel, parent and child ELFs to their SHA-256 and
+actual GNU build-id notes. No note is recorded as `null`; a truncated SHA is
+never substituted. The parent fixture deliberately has no build-id and the
+child requests one from the linker. Embedded debug sections are recorded and
+bound to the same ELF SHA. External debuglink files, if unavailable, remain
+explicitly unavailable. Artifact filenames are content-addressed; paths in the
+mapping journal are labels only. The runtime kernel text bounds and `_stext`
+reference must match the exact boot ELF after the measured relocation delta.
+
+After each real capture, the host reruns the standalone analyzer with an empty
+bundle and with the parent/child bytes swapped under their expected filenames.
+Both must retain mapping facts while refusing ELF resolution for all six real
+mutation examples. Results are saved in `mapping-negative-report.json`.
+The report leaves busy/idle residence unknown: scheduler selection and user
+task classification do not supply IRQ/idle accounting. Mutable ordinary mmap
+objects without a protected executable identity may have an unknown SHA, and
+neither the host nor the analyzer fills this gap from a same-named local file.
+
 ```bash
 make test APP_FEATURES="qemu bpf-trace" 2>&1 | tail -30
 python3 -m unittest discover -s tests/bpf_sampling -p 'test_*.py'

@@ -14,6 +14,8 @@ fn print_help() {
     println!("  --table, -t          Print selected normalized events");
     println!("  --loss, -l           Print capture-wide loss/integrity diagnostics");
     println!("  --json, -j           Print JSON for the selected report");
+    println!("  --mapping-report    Print time-valid mapping and ELF associations as JSON");
+    println!("  --bundle <DIR>      Verify captured ELF identities in this artifact bundle");
     println!("  --fault-report      Report fault outcomes and resolver wall-time");
     println!("  --sched-report      Report blocked and wake-to-switch intervals");
     println!("  --mode user|kernel   Filter explicit sample mode or fault origin");
@@ -120,6 +122,8 @@ fn run(args: &[String]) -> Result<(), String> {
     let (mut table, mut loss, mut json, mut scheduler, mut faults) =
         (false, false, false, false, false);
     let (mut oncpu, mut offcpu, mut timeline) = (None, None, None);
+    let mut mapping_report = false;
+    let mut bundle = None;
     let mut i = 2;
     while i < args.len() {
         match args[i].as_str() {
@@ -127,6 +131,8 @@ fn run(args: &[String]) -> Result<(), String> {
             "--loss" | "-l" => loss = true,
             "--json" | "-j" => json = true,
             "--sched-report" => scheduler = true,
+            "--mapping-report" => mapping_report = true,
+            "--bundle" => bundle = Some(value(args, &mut i, "--bundle")?.to_owned()),
             "--fault-report" => faults = true,
             "--mode" => {
                 query.mode = Some(match value(args, &mut i, "--mode")? {
@@ -185,13 +191,16 @@ fn run(args: &[String]) -> Result<(), String> {
         }
         i += 1;
     }
+    if bundle.is_some() && !mapping_report {
+        return Err("--bundle requires --mapping-report".into());
+    }
     if scheduler && query.mode.is_some() {
         return Err(
             "--sched-report cannot use --mode: scheduling events do not carry privilege".into(),
         );
     }
-    if scheduler && faults {
-        return Err("select one of --sched-report and --fault-report per report".into());
+    if (scheduler as u8 + faults as u8 + mapping_report as u8) > 1 {
+        return Err("select one semantic report per invocation".into());
     }
     let mut input = fs::File::open(&args[1]).map_err(|e| format!("cannot open capture: {e}"))?;
     let mut capture_bytes = Vec::new();
@@ -210,6 +219,7 @@ fn run(args: &[String]) -> Result<(), String> {
         && !json
         && !scheduler
         && !faults
+        && !mapping_report
         && oncpu.is_none()
         && offcpu.is_none()
         && timeline.is_none()
@@ -226,7 +236,10 @@ fn run(args: &[String]) -> Result<(), String> {
             emission::render_event_table(&analyzer, &selected.events)
         );
     }
-    if scheduler {
+    if mapping_report {
+        let report = bpf_analyzer::mapping::render_report(&analyzer, &selected.events, bundle.as_deref().map(std::path::Path::new));
+        println!("{{\"query\":{},{}", emission::render_query_metadata(&selected), &report[1..]);
+    } else if scheduler {
         if json {
             println!(
                 "{{\"query\":{},\"selected_records_count\":{},\"context_records_count\":{},\"query_clipped_intervals\":{},\"diagnostics_scope\":\"capture\",\"scheduler\":{}}}",

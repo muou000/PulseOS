@@ -34,6 +34,11 @@ pub fn memory_regions() -> impl Iterator<Item = PhysMemRegion> {
     ALL_MEM_REGIONS.iter().cloned()
 }
 
+/// Runtime text bounds from the same linker symbols used by memory setup.
+pub fn kernel_text_range() -> (usize, usize) {
+    (_stext as *const () as usize, _etext as *const () as usize)
+}
+
 /// Fills the `.bss` section with zeros.
 ///
 /// It requires the symbols `_sbss` and `_ebss` to be defined in the linker script.

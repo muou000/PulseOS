@@ -18,6 +18,8 @@ pub struct AddressSpaceLock {
 
 impl AddressSpaceLock {
     pub fn new(aspace: AddrSpace) -> Self {
+        #[cfg(feature = "bpf-trace")]
+        crate::bpf::mappings::register_space(&aspace);
         Self {
             inner: RwLock::new(aspace),
         }
@@ -141,9 +143,14 @@ impl AddressSpaceLock {
     pub fn write(&self) -> AddressSpaceWriteGuard<'_> {
         let preempt = NoPreempt::new();
         let guard = self.inner.write();
+        #[cfg(feature = "bpf-trace")]
+        let observation = (guard.observation_identity().1,
+            crate::bpf::mappings::MutationGuard::space(guard.observation_identity().0));
         AddressSpaceWriteGuard {
             guard,
             _preempt: preempt,
+            #[cfg(feature = "bpf-trace")]
+            observation,
         }
     }
 }
@@ -166,6 +173,18 @@ pub struct AddressSpaceWriteGuard<'a> {
     // Fields drop in declaration order, releasing the lock before preemption.
     guard: RwLockWriteGuard<'a, AddrSpace>,
     _preempt: NoPreempt,
+    #[cfg(feature = "bpf-trace")]
+    observation: (usize, crate::bpf::mappings::MutationGuard),
+}
+
+#[cfg(feature = "bpf-trace")]
+impl Drop for AddressSpaceWriteGuard<'_> {
+    fn drop(&mut self) {
+        if self.observation.0 != self.guard.observation_identity().1 {
+            crate::bpf::mappings::space_snapshot(&self.guard, self.observation.1.begin_ns());
+        }
+        self.observation.1.finish();
+    }
 }
 
 impl Deref for AddressSpaceWriteGuard<'_> {
