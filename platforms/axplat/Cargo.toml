@@ -57,6 +57,14 @@ smp = ["kspin/smp"]
 name = "axplat"
 path = "src/lib.rs"
 
+[[test]]
+name = "loongarch_msix"
+path = "../axplat-loongarch64-qemu-virt/tests/msix.rs"
+required-features = ["irq"]
+
+[dev-dependencies.axconfig-macros]
+version = "0.2"
+
 [dependencies.axplat-macros]
 version = "0.1.0"
 
