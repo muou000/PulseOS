@@ -140,6 +140,26 @@ _Avoid_: BuildStorm window, qperf phase marker
 由内核软件计数器产生的可采样事件，例如每 CPU CPU clock 或线程 task clock；它通过 perf event 控制面产生周期样本，不要求业务代码在每个路径手工插入 BPF 调用。
 _Avoid_: semantic tracepoint, hardware PMU event
 
+**硬件 PMU event**:
+由处理器性能监控单元（PMU）的硬件计数器度量的性能事件，例如 CPU 周期、指令数或缓存未命中。计数能力与采样能力不同，能否采样还取决于目标平台的溢出通知和内核支持。
+_Avoid_: software perf event, arbitrary hardware counter
+
+**采样调用栈**:
+从被采样执行现场获取、按调用关系排列的地址链，携带内核态或用户态标识及展开状态。它可以是受深度和可读性限制的部分链；单个指令地址不等于已完成调用栈展开。
+_Avoid_: single function sample, instruction pointer only
+
+**perf.data 兼容记录**:
+由 BPF capture 派生、在已声明的兼容范围内供 Linux perf 工具消费的记录文件。文件可解析、符号匹配与真实调用链是不同能力，不能替代原始 capture 的完整性和诊断信息。
+_Avoid_: proprietary sampling format, BPF capture only
+
+**采样能力探测**:
+对目标平台和采集范围内可用采样能力及限制的发现，包括事件类型、计数与采样能力、调用栈支持和频率范围。未探测、不支持和已就绪须区分；硬件宣称存在不等于内核已能采样。
+_Avoid_: static capability assumption, runtime feature check bypass
+
+**采样模式降级**:
+在用户显式允许的策略下，首选能力不可用时选择已确认可用的替代采样模式，并保留请求模式、实际模式、单位和降级原因。降级不保证所有平台都有可用替代，也不将权限、参数或资源错误视为能力缺失。
+_Avoid_: silent fallback, implicit event substitution
+
 **Perf Buffer**:
 以 `BPF_MAP_TYPE_PERF_EVENT_ARRAY` 和每 CPU perf-event mmap 环传输 BPF 记录的 Linux 兼容输出路径；它提供 `PERF_RECORD_SAMPLE` 与 `PERF_RECORD_LOST` 语义，但不保证跨 CPU 全局顺序。
 _Avoid_: generic ring buffer, qperf capture
