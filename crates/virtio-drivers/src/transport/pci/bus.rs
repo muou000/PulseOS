@@ -83,7 +83,7 @@ bitflags! {
 /// Errors accessing a PCI device.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum PciError {
-    /// The device reported an invalid BAR type.
+    /// The requested BAR index or the device's reported BAR type is invalid.
     InvalidBarType,
 }
 
@@ -243,6 +243,7 @@ impl PciRoot {
             root: self,
             device_function,
             next_capability_offset: self.capabilities_offset(device_function),
+            visited_offsets: 0,
         }
     }
 
@@ -252,6 +253,9 @@ impl PciRoot {
         device_function: DeviceFunction,
         bar_index: u8,
     ) -> Result<BarInfo, PciError> {
+        if bar_index >= 6 {
+            return Err(PciError::InvalidBarType);
+        }
         let bar_orig = self.config_read_word(device_function, BAR0_OFFSET + 4 * bar_index);
 
         // Get the size of the BAR.
@@ -431,13 +435,25 @@ pub struct CapabilityIterator<'a> {
     root: &'a PciRoot,
     device_function: DeviceFunction,
     next_capability_offset: Option<u8>,
+    // One bit per DWORD in the 256-byte conventional configuration space.
+    visited_offsets: u64,
 }
 
 impl<'a> Iterator for CapabilityIterator<'a> {
     type Item = CapabilityInfo;
 
     fn next(&mut self) -> Option<Self::Item> {
-        let offset = self.next_capability_offset?;
+        let offset = self.next_capability_offset.take()?;
+        if offset < 0x40 || offset & 0x3 != 0 {
+            warn!("Invalid capability offset {:#04x}", offset);
+            return None;
+        }
+        let visited_bit = 1u64 << (offset / 4);
+        if self.visited_offsets & visited_bit != 0 {
+            warn!("Repeated capability offset {:#04x}", offset);
+            return None;
+        }
+        self.visited_offsets |= visited_bit;
 
         // Read the first 4 bytes of the capability.
         let capability_header = self.root.config_read_word(self.device_function, offset);
@@ -606,5 +622,136 @@ impl From<u8> for HeaderType {
             0x02 => Self::PciCardbusBridge,
             _ => Self::Unrecognised(value),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const DEVICE: DeviceFunction = DeviceFunction {
+        bus: 0,
+        device: 0,
+        function: 0,
+    };
+
+    fn test_pci_root() -> PciRoot {
+        let registers = vec![0u32; Cam::MmioCam.size() as usize / core::mem::size_of::<u32>()];
+        let base = Box::into_raw(registers.into_boxed_slice()).cast::<u8>();
+        // SAFETY: PciRoot::new requires an aligned, mapped 16 MiB CAM region
+        // that remains accessible without Rust reference aliases for the program's
+        // lifetime. The initialized u32 slice supplies one readable/writable
+        // 16 MiB allocation aligned to four bytes. Box::into_raw consumes its
+        // owner and preserves the allocation's pointer; we intentionally never
+        // reconstruct or free it. No references to the allocation remain or are
+        // formed afterward. Only this test's PciRoot accesses it, through serial
+        // volatile register operations, so there are no conflicting accesses.
+        unsafe { PciRoot::new(base, Cam::MmioCam) }
+    }
+
+    #[test]
+    fn capability_walk_stops_at_repeated_headers() {
+        let mut root = test_pci_root();
+        root.config_write_word(
+            DEVICE,
+            0x04,
+            u32::from(Status::CAPABILITIES_LIST.bits()) << 16,
+        );
+        root.config_write_word(DEVICE, 0x34, 0x40);
+        root.config_write_word(DEVICE, 0x40, 0x4009); // Vendor capability points to itself.
+                                                      // At most 48 distinct aligned headers fit in conventional configuration
+                                                      // space. The limit makes regressions fail instead of hanging the test.
+        let offsets: Vec<_> = root
+            .capabilities(DEVICE)
+            .take(49)
+            .map(|cap| cap.offset)
+            .collect();
+        assert_eq!(offsets, [0x40]);
+
+        root.config_write_word(DEVICE, 0x40, 0x8009);
+        root.config_write_word(DEVICE, 0x80, 0x6009);
+        root.config_write_word(DEVICE, 0x60, 0x8011); // A two-node cycle after the first header.
+        let offsets: Vec<_> = root
+            .capabilities(DEVICE)
+            .take(49)
+            .map(|cap| cap.offset)
+            .collect();
+        assert_eq!(offsets, [0x40, 0x80, 0x60]);
+
+        // A backward link is legal when it does not revisit a header.
+        root.config_write_word(DEVICE, 0x60, 0x0011);
+        let offsets: Vec<_> = root
+            .capabilities(DEVICE)
+            .take(49)
+            .map(|cap| cap.offset)
+            .collect();
+        assert_eq!(offsets, [0x40, 0x80, 0x60]);
+    }
+
+    #[test]
+    fn capability_walk_rejects_headers_inside_the_pci_header() {
+        let mut root = test_pci_root();
+        root.config_write_word(
+            DEVICE,
+            0x04,
+            u32::from(Status::CAPABILITIES_LIST.bits()) << 16,
+        );
+        for first in [0, 4, 0x3c] {
+            root.config_write_word(DEVICE, 0x34, first);
+            assert!(root.capabilities(DEVICE).next().is_none());
+        }
+    }
+
+    #[test]
+    fn transport_rejects_truncated_vendor_capability() {
+        use crate::hal::fake::FakeHal;
+        use crate::transport::pci::{PciTransport, VirtioPciError};
+
+        let mut root = test_pci_root();
+        root.config_write_word(DEVICE, 0, 0x1042_1af4);
+        root.config_write_word(
+            DEVICE,
+            0x04,
+            u32::from(Status::CAPABILITIES_LIST.bits()) << 16,
+        );
+        root.config_write_word(DEVICE, 0x34, 0xfc);
+        // A common-config capability advertises 16 bytes, but only four remain.
+        root.config_write_word(DEVICE, 0xfc, 0x0110_0009);
+        assert!(matches!(
+            PciTransport::new::<FakeHal>(&mut root, DEVICE),
+            Err(VirtioPciError::MissingCommonConfig)
+        ));
+    }
+
+    #[test]
+    fn bar_query_rejects_indices_outside_the_six_bars() {
+        let mut root = test_pci_root();
+        for index in [255, 6] {
+            assert_eq!(root.bar_info(DEVICE, index), Err(PciError::InvalidBarType));
+        }
+    }
+
+    #[test]
+    fn transport_rejects_overflowing_bar_region() {
+        use crate::hal::fake::FakeHal;
+        use crate::transport::pci::{PciTransport, VirtioPciError};
+
+        let mut root = test_pci_root();
+        root.config_write_word(DEVICE, 0, 0x1042_1af4);
+        root.config_write_word(
+            DEVICE,
+            0x04,
+            u32::from(Status::CAPABILITIES_LIST.bits()) << 16,
+        );
+        root.config_write_word(DEVICE, 0x10, 0x1000); // Allocated memory BAR0.
+        root.config_write_word(DEVICE, 0x34, 0x40);
+        root.config_write_word(DEVICE, 0x40, 0x0110_0009); // Common-config capability.
+        root.config_write_word(DEVICE, 0x44, 0); // BAR0.
+        root.config_write_word(DEVICE, 0x48, 0xffff_fff0); // Offset.
+        root.config_write_word(DEVICE, 0x4c, 56); // Common-config length wraps the end.
+        assert!(matches!(
+            PciTransport::new::<FakeHal>(&mut root, DEVICE),
+            Err(VirtioPciError::BarOffsetOutOfRange)
+        ));
     }
 }

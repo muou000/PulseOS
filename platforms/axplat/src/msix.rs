@@ -65,6 +65,7 @@ impl MsixTableMapping {
     /// - `bar_base_paddr` must not be 0.
     /// - `table_offset` must be 8-byte aligned according to the PCI specification.
     /// - `table_offset + entry_count * 16 <= bar_size` without overflowing.
+    /// - The table's physical end address must not overflow.
     pub fn from_bar_region(
         bar_base_paddr: usize,
         bar_size: usize,
@@ -86,6 +87,9 @@ impl MsixTableMapping {
         if end_offset > bar_size {
             return Err(PciMsixError::InvalidBar);
         }
+        bar_base_paddr
+            .checked_add(end_offset)
+            .ok_or(PciMsixError::InvalidBar)?;
         let table_paddr = bar_base_paddr
             .checked_add(table_offset)
             .ok_or(PciMsixError::InvalidBar)?;
@@ -285,6 +289,11 @@ mod tests {
         // Table offset + entry bytes exceeds BAR size
         assert_eq!(
             MsixTableMapping::from_bar_region(0x1000, 32, 24, 1),
+            Err(PciMsixError::InvalidBar)
+        );
+        // The table's entire physical extent must fit, not just its first byte.
+        assert_eq!(
+            MsixTableMapping::from_bar_region(usize::MAX - 7, 16, 0, 1),
             Err(PciMsixError::InvalidBar)
         );
     }
