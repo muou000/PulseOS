@@ -208,6 +208,8 @@ impl Process {
         let new_aspace_handle = Arc::new(AddressSpaceLock::new(new_aspace));
         let new_pt_root = new_aspace_handle.read().page_table_root();
         let new_asid = new_aspace_handle.read().asid();
+        #[cfg(feature = "bpf-trace")]
+        let mapping_transition = crate::bpf::mappings::MutationGuard::task(axtask::current().id().as_u64());
         let old_aspace = self.replace_aspace_handle(new_aspace_handle);
         axtask::set_current_page_table_root(new_pt_root, new_asid);
         self.reset_brk_state(
@@ -230,6 +232,12 @@ impl Process {
         axtask::current().set_name(&self.name());
         #[cfg(feature = "bpf-trace")]
         super::emit_current_bpf_task_metadata();
+        #[cfg(feature = "bpf-trace")]
+        {
+            self.exec_generation.fetch_update(Ordering::AcqRel, Ordering::Acquire,
+                |generation| generation.checked_add(1)).expect("exec generation exhausted");
+            super::emit_current_mapping_metadata("exec", mapping_transition.begin_ns());
+        }
         Ok(())
     }
 
@@ -343,6 +351,8 @@ impl Process {
             return Err(AxError::Interrupted);
         }
 
+        #[cfg(feature = "bpf-trace")]
+        let mapping_transition = crate::bpf::mappings::MutationGuard::task(caller.sampling_task_id());
         let caller_tid = caller.tid();
         self.begin_exec_teardown(caller_tid);
         self.terminate_exec_siblings(caller_tid);
@@ -410,6 +420,12 @@ impl Process {
         axtask::current().set_name(&self.name());
         #[cfg(feature = "bpf-trace")]
         super::emit_current_bpf_task_metadata();
+        #[cfg(feature = "bpf-trace")]
+        {
+            self.exec_generation.fetch_update(Ordering::AcqRel, Ordering::Acquire,
+                |generation| generation.checked_add(1)).expect("exec generation exhausted");
+            super::emit_current_mapping_metadata("exec", mapping_transition.begin_ns());
+        }
         Ok(())
     }
 }

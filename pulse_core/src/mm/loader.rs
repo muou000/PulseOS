@@ -426,6 +426,8 @@ fn load_segments(
     elf_file: &CachedFile,
     bias: usize,
 ) -> AxResult<ElfLoadLayout> {
+    #[cfg(feature = "bpf-trace")]
+    let observed_file = crate::bpf::mappings::file_source(elf_file.clone(), true);
     let mut layout = ElfLoadLayout::default();
     let load_count = elf
         .program_iter()
@@ -499,7 +501,12 @@ fn load_segments(
                 seg_start_page,
                 map_len,
                 load_flags,
-                Arc::new(elf_file.clone()),
+                {
+                    #[cfg(feature = "bpf-trace")]
+                    { observed_file.clone() }
+                    #[cfg(not(feature = "bpf-trace"))]
+                    { Arc::new(elf_file.clone()) }
+                },
                 file_flags_for_segment(&ph).into(),
                 file_start_page,
                 file_bytes,

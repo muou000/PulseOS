@@ -10,6 +10,7 @@ description = "Independent host capture analyzer for PulseOS BPF captures"
 [dependencies]
 bpf-capture = { workspace = true }
 pulse_bpf_schema = { workspace = true }
+sha2 = "0.10"
 
 [[bin]]
 name = "bpf-analyzer"

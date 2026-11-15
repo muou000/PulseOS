@@ -3,6 +3,8 @@ from pathlib import Path
 import hashlib
 import json
 import subprocess
+import tempfile
+import mapping_evidence
 
 REPO = Path(__file__).resolve().parents[2]
 
@@ -51,6 +53,32 @@ def convert(run: Path) -> dict:
             issue['scope'] == 'transport' and issue['delta'] > 0 for issue in archive['observed_issues']) or result['is_complete']):
         raise ValueError('ring overflow injection did not produce an incomplete capture with real transport loss')
     semantic = None
+    mapping_report = None
+    if inputs.get('mapping_journal'):
+        raw_mapping_report = command([analyzer, str(path), '--mapping-report', '--bundle', str(run)])
+        (run / 'mapping-report.json').write_text(raw_mapping_report + '\n')
+        mapping_report = mapping_evidence.check_report(run, json.loads(raw_mapping_report))
+        negatives = {}
+        oracle = json.loads((run / 'mapping-evidence.json').read_text())
+        for case in ('missing-elf', 'same-name-wrong-elf'):
+            with tempfile.TemporaryDirectory(prefix='mapping-negative-', dir=run) as temporary:
+                bundle = Path(temporary)
+                if case == 'same-name-wrong-elf':
+                    (bundle / 'artifacts').mkdir()
+                    parent, child = run / 'payload.elf', run / 'mapping-child.elf'
+                    (bundle / 'artifacts' / f'{digest(parent)}.elf').write_bytes(child.read_bytes())
+                    (bundle / 'artifacts' / f'{digest(child)}.elf').write_bytes(parent.read_bytes())
+                negative = json.loads(command([analyzer, str(path), '--mapping-report', '--bundle', str(bundle)]))
+                phases = {}
+                for phase, expected in oracle['examples'].items():
+                    rows = [row for row in negative['samples'] if row['timestamp_ns'] == expected['timestamp_ns']
+                            and row['task'] == expected['task_id'] and row['ip'] == expected['ip'] and row['cpu'] == expected['cpu']]
+                    if len(rows) != 1 or rows[0]['elf'] is not None or not rows[0]['unknown_reason'] or not rows[0]['mapping']:
+                        raise ValueError(f'{case} resolved wrong or missing ELF for actual {phase} sample')
+                    phases[phase] = rows[0]['unknown_reason']
+                negatives[case] = phases
+        (run / 'mapping-negative-report.json').write_text(json.dumps(negatives, indent=2) + '\n')
+        mapping_report['negative_cases'] = sorted(negatives)
     if inputs['mode'] in ('sched','fault'):
         name = 'scheduler' if inputs['mode']=='sched' else 'faults'
         flag = '--sched-report' if inputs['mode']=='sched' else '--fault-report'
@@ -66,4 +94,5 @@ def convert(run: Path) -> dict:
     (run/'analyzer-loss.txt').write_text(report)
     (run/'analyzer-table.txt').write_text(table)
     return {'path': str(path), 'sha256': digest(path), 'records': result['records_count'],
-            'status': result['status'], 'attribution_claim_allowed': result['attribution_claim_allowed'], 'semantic_report': semantic}
+            'status': result['status'], 'attribution_claim_allowed': result['attribution_claim_allowed'], 'semantic_report': semantic,
+            'mapping_report': mapping_report}

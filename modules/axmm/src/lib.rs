@@ -10,6 +10,10 @@ mod aspace;
 mod backend;
 mod lifecycle;
 mod cow_fault;
+#[cfg(feature = "mapping-observer")]
+mod observation;
+#[cfg(feature = "mapping-observer")]
+pub use observation::register_tlb_observer;
 
 pub use cow_fault::{CowPageLoad, CowPagePrepared};
 

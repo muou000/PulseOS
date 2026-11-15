@@ -1,6 +1,8 @@
 //! Independent host capture analyzer for PulseOS BPF captures.
 
 pub mod analyzer;
+pub mod mapping;
+pub mod artifact;
 pub mod emission;
 pub mod error;
 pub mod event;
