@@ -5,7 +5,8 @@ enum {
     SYS_fcntl = 25, SYS_unlinkat = 35, SYS_openat = 56, SYS_close = 57, SYS_write = 64,
     SYS_exit_group = 94, SYS_getitimer = 102, SYS_clock_gettime = 113,
     SYS_sched_getparam = 121, SYS_sigaltstack = 132, SYS_reboot = 142, SYS_sysinfo = 179,
-    SYS_semget = 190, SYS_semctl = 191, SYS_socket = 198, SYS_socketpair = 199,
+    SYS_semget = 190, SYS_semctl = 191, SYS_socket = 198, SYS_bind = 200,
+    SYS_getsockname = 204, SYS_sendto = 206,
     SYS_getsockopt = 209, SYS_recvmsg = 212,
     SYS_munmap = 215, SYS_mmap = 222, SYS_mprotect = 226,
     EFAULT = 14,
@@ -153,21 +154,26 @@ __attribute__((noreturn)) void _start(void)
     expect("getsockopt-output-fault", CALL5(SYS_getsockopt, socket, 1, 7, page + 4094, &len), -EFAULT);
     expect_fill("getsockopt-fault-prefix", page + 4094, 2, 0);
     CALL(SYS_close, socket, 0, 0);
-    int pair[2];
-    expect("socketpair", CALL4(SYS_socketpair, 1, 1, 0, pair), 0);
+    long receiver = descriptor("udp-receiver", CALL(SYS_socket, 2, 2, 0));
+    long sender = descriptor("udp-sender", CALL(SYS_socket, 2, 2, 0));
+    unsigned char address[16] __attribute__((aligned(4))) = { 2, 0, 0, 0, 127, 0, 0, 1 };
+    expect("udp-bind", CALL(SYS_bind, receiver, address, sizeof(address)), 0);
+    len = sizeof(address);
+    expect("udp-name", CALL(SYS_getsockname, receiver, address, &len), 0);
+    expect("udp-name-length", len, sizeof(address));
     unsigned char sent = 0x6b, received = 0;
     struct Iovec iov = { &received, 1 };
     struct MessageHeader *message = (struct MessageHeader *)output;
     fill(output, sizeof(output), 0xa5);
     message->name = 0; message->namelen = 0; message->iov = &iov; message->iovlen = 1;
     message->control = 0; message->controllen = 0; message->flags = 0;
-    expect("socketpair-send", CALL(SYS_write, pair[0], &sent, 1), 1);
-    expect("recvmsg", CALL(SYS_recvmsg, pair[1], message, 0), 1);
+    expect("udp-send", syscall6(SYS_sendto, sender, (usize)&sent, 1, 0, (usize)address, sizeof(address)), 1);
+    expect("recvmsg", CALL(SYS_recvmsg, receiver, message, 0), 1);
     expect("recvmsg-payload", received, sent);
     expect_fill("recvmsg-inner-padding", output + 12, 4, 0);
     expect_fill("recvmsg-tail-padding", output + 52, 4, 0);
     expect_fill("recvmsg-output-length", output + 56, 8, 0xa5);
-    CALL(SYS_close, pair[0], 0, 0); CALL(SYS_close, pair[1], 0, 0);
+    CALL(SYS_close, receiver, 0, 0); CALL(SYS_close, sender, 0, 0);
 
     /* Time output: inactive timer is a deterministic all-zero record. */
     fill(output, sizeof(output), 0xa5);

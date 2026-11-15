@@ -19,6 +19,14 @@ array element and must retain all three bytes already written. These tests lock
 in PulseOS's current ABI sizes and errno behavior, without extending syscall
 support or changing the IPC layouts.
 
+`recvmsg` uses a loopback UDP datagram. A socketpair fixture exposed an existing
+kernel fault: creating `socketpair(AF_UNIX, SOCK_STREAM)` alone triggers a kernel
+page fault at address zero on pristine commit `976121e0` as well as the migrated
+kernel. The UDP fixture retains the same message-header output assertions while
+leaving that separate LocalSocket problem outside this ABI migration. On the
+pristine RV64 kernel, the complete probe fails at `sysinfo-inner-padding` (a
+nonzero byte is returned); both migrated architectures pass all 81 assertions.
+
 The runner reuses `tests/user_abi_reads/guest.ld` and the existing private-image
 QEMU infrastructure. Its default suite remains `reads`. Clang, Rust's `rust-lld`,
 `debugfs`, and the selected QEMU are required. Source images are unchanged; logs,
