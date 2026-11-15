@@ -96,7 +96,7 @@ fn test_schema_registry_default_tracepoints() {
     assert!(registry.lookup(TracepointId::TaskEnqueue as u32).is_some());
     assert!(registry.lookup(TracepointId::PhaseMarker as u32).is_some());
     assert!(registry.lookup_by_name("sched", "sched_switch").is_some());
-    assert!(registry.lookup_by_name("pulse", "perf_event").is_some());
+    assert!(registry.lookup_by_name("pulse", "perf_event_v2").is_some());
 }
 
 #[test]

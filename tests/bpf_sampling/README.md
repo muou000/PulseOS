@@ -40,7 +40,8 @@ completion, Unknown target classification, and misattributed neighbor I/O.
 The resident-target path returns a shorter optional batch; the neighbor's read
 is independently attributed to the subsequent fault that actually requests it.
 The existing 128 isolated anonymous read/write iterations and source shutdown
-checks still run. Generic fault captures remain able to read old Unknown data.
+checks still run. Generic fault captures preserve Unknown for unverified
+provenance; that is a current classification, not a historical format fallback.
 
 The runtime red baseline at
 `runs/riscv64-fault-20261115-205350-unuhvqom` produced 263 real completed faults
@@ -134,7 +135,7 @@ Acquire/Release head/tail synchronization and handles wraparound/length bounds.
 Two separately labelled assembly busy loops supply exact expected IP ranges.
 Both require at least two real user-mode samples attributed to the current
 PID/TID in each loop. Every record must contain the correct source CPU/ring,
-nonzero task/IP/time, unchanged legacy addr, and context version 2. Task mode
+nonzero task/IP/time, zero data address, and context version 2. Task mode
 rejects foreign PID/TID; CPU mode counts other tasks separately. Disable/detach
 checks use the sum of target and foreign records, so continuing output from any
 CPU cannot hide behind the target filter.
@@ -208,7 +209,7 @@ of the new CPU-sample context ABI.
 ```bash
 python3 tests/bpf_sampling/run.py guest --arch riscv64 --mode task --archive
 python3 tests/bpf_sampling/run.py guest --arch loongarch64 --mode trace --archive
-# Both architectures, task and trace, with no static-fixture fallback:
+# Both architectures, task/trace/sched/fault, with actual RAW capture:
 python3 tests/bpf_smoke/run.py gate
 ```
 
@@ -221,7 +222,8 @@ a substitute for that publication boundary. Per-frame sequence, source CPU, CRC3
 whole-stream checksum detect damaged/missing/reordered serial output. The
 host rejects an empty producer or empty consumer. It uses an explicit context
 format: a 64-byte software v2 sample cannot be guessed from length because the
-legacy TaskEnqueue trace context is also 64 bytes.
+TaskEnqueue trace context is also 64 bytes. Raw import requires the declared
+context kind; it does not fall back to the removed v1 software layout.
 
 A run directory includes `records.pbraw`, original `stats-before.txt` and
 `stats-after.txt`, `archive.json`, `inputs.json`, the saved kernel/ELF/rootfs,
@@ -245,8 +247,10 @@ IEEE CRC32, export-drop count, 16 reserved zero bytes). Each envelope has
 `sequence:u64, cpu:u32, frame_bytes:u32, crc32:u32, reserved:u32` followed by the
 unchanged aligned PERF_RECORD. The standalone capture uses format **2**, retains
 the normalized schema registry, and stores typed optional diagnostics plus the
-full runtime evidence. Format 2 uses IEEE CRC32; format 1 preserves its historical
-nonstandard checksum for compatibility. Unknown fields are `null`, not zero.
+full runtime evidence. Active formats use IEEE CRC32. Historical format 1 and
+its nonstandard checksum are rejected. Formats 3 and 4 add stack and mapping
+evidence respectively; source-bound recorder format 5 has its own metadata
+requirements. Unknown fields are `null`, not zero.
 
 `/proc/pulse_bpf_stats` is read-only and exposes the calling process's current
 PerfEvent FDs and referenced programs. Each open creates a stable, lazily captured
@@ -343,7 +347,10 @@ and `wake_to_switch_ns` are separate; neither measures the switch function.
 
 `fault` uses ID 8, an 80-byte completion record. It preserves the entry task,
 access, privilege origin, resolver start/result and completion CPU/time. Wall
-latency includes descheduling; current major/minor classification is Unknown.
+latency includes descheduling. Successful resolutions use actual target-page
+I/O provenance for major/minor classification; unverified provenance stays
+Unknown. The dedicated #196 gate above checks the classification against
+independent storage-read evidence.
 The known workload separates first-read and first-write pages with an inaccessible
 middle page, so anonymous batch fault preparation cannot make the second target
 resident before its intended access. Each iteration verifies zeros and stored
@@ -361,11 +368,12 @@ The analyzer's Query intersects phase/time/task/PID/TID/CPU/address filters;
 relationships are reconstructed before selection. The same Query applies to
 text, JSON and folded outputs. Missing/ambiguous phase boundaries are errors.
 CPU folded uses explicit samples or period-ns weights and is empty without CPU
-samples. The compatibility `--offcpu` output is specifically observed blocked
+samples. The `--offcpu` output is specifically observed blocked
 interval duration-ns, with no fallback to event counts or a fabricated weight 1.
 New `scheduler-report.json` / `faults-report.json` are saved by the archive driver;
 valid semantic instances must be nonzero for those two modes. This is a fixed
-regression workload, not yet the general-purpose recorder tracked by #195.
+regression workload. The general-purpose recorder is documented in
+[`docs/bpf-record.md`](../../docs/bpf-record.md).
 
 ## Frozen frame-pointer stack gate (#192)
 
@@ -407,5 +415,5 @@ CPU stack mode opens **two** CPU_CLOCK events on each CPU (10 ms and 20 ms).
 The archive checks stable `source_id`, scope, and period against per-event
 proc diagnostics, then reconciles the actual record count for each source when
 transport/export loss is zero. Task stack mode preserves the task-clock sleep
-and FD-lifetime checks. Old task/cpu runs continue using 64-byte v2 contexts;
+and FD-lifetime checks. Task/cpu runs without `--stacks` use 64-byte v2 contexts;
 unknown required context versions are rejected.

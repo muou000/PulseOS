@@ -1,4 +1,4 @@
-# Real BPF capture compatibility entrypoint
+# Real BPF capture gate
 
 `run.py` delegates runtime work to `../bpf_sampling/run.py --archive`. Each run
 rebuilds the real consumer, exports the records actually read from Perf Buffer,
@@ -10,10 +10,10 @@ python3 tests/bpf_smoke/run.py guest --arch loongarch64 --mode trace
 python3 tests/bpf_smoke/run.py gate
 ```
 
-`gate` and `smoke` run task-clock, sched-switch, mixed scheduler, and fault
+`gate` runs task-clock, sched-switch, mixed scheduler, and fault
 completion captures on both architectures by default. `--arch` and `--mode` narrow the requested runs. Kernel,
 ELF and image overrides require `--arch`; use `--kernel`, `--kernel-elf`, and
-`--image` (`--primary` is retained as an alias). `--kernel-provenance` forwards an
+`--image`. `--kernel-provenance` forwards an
 explicit build manifest. Fault-injection runs accept `--fault` with `none`,
 `zero-producer`, `zero-consumer`, `export-overflow`, `ring-overflow`, or `aborted`; the real sampler
 defines their validation and failure behavior. `--ring-pages` accepts 1 or 16
@@ -21,23 +21,20 @@ defines their validation and failure behavior. `--ring-pages` accepts 1 or 16
 specified in the repository's `AGENTS.md` with snapshot images and eight CPUs.
 Build enabled kernels with `make test APP_FEATURES="qemu bpf-trace"` first.
 
-`build` and the compatibility name `build-raw` build the current sampler with
-archive export. Custom `--payload`, a second image, custom QEMU commands and the
-old `BPF RESULT PASS`/LTP-style markers are no longer accepted by this entrypoint.
-The old guest source now fails compilation with migration guidance. Missing
+`build` builds the current sampler with archive export. Missing
 tools, guest failures, zero actual records, or rejected archives fail the gate.
+The supported commands are `probe`, `build`, `guest`, and `gate`.
 
-The old `parity` command exits unsuccessfully. Its fabricated records and
-unmeasured/defaulted counters do not prove complete off-CPU attribution or
-cross-architecture parity. A successful real capture gate also does not make
-that broader claim.
+## Rejected-input regression tests
 
-`fixtures/format-v1.bin` is retained only as a **static format fixture**. It
-contains deterministic event data and metadata, not measured performance or
-current build identities. The fixture cannot enter the runtime command path:
+The removed `build-raw`, `smoke`, `parity`, and `fixture-check` commands and
+`--primary` alias are rejected by argument parsing. The v1 artifact at
+`fixtures/format-v1.bin` is retained only to test explicit format rejection by
+the current analyzer and rejection of fabricated guest success markers. It is
+not accepted capture input. The retired synthetic guest source also remains a
+negative compilation fixture.
 
 ```sh
-python3 tests/bpf_smoke/run.py fixture-check
 python3 tests/bpf_smoke/test_runner.py
 ```
 

@@ -15,7 +15,7 @@ fn test_valid_capture_ingestion_and_integrity_check() {
     assert_eq!(analyzer.records().len(), 2);
     assert!(!analyzer.loss_counters().has_loss_or_error());
     assert_eq!(analyzer.loss_counters().lost_records_total, 0);
-    assert!(analyzer.attribution_claim_allowed(), "clean capture allows attribution claim");
+    assert!(!analyzer.attribution_claim_allowed(), "capture integrity does not prove complete attribution");
 }
 
 #[test]
@@ -54,7 +54,7 @@ fn test_schema_mismatch_rejected() {
     tampered[rec_start + 4] = 99; // mutate schema_version to 99
 
     let trailer_offset = hdr.trailer_offset as usize;
-    let new_crc = bpf_capture::framing::compute_checksum(&tampered[..trailer_offset]);
+    let new_crc = bpf_capture::framing::compute_checksum_ieee(&tampered[..trailer_offset]);
     tampered[trailer_offset + 24..trailer_offset + 28].copy_from_slice(&new_crc.to_le_bytes());
 
     let err = CaptureAnalyzer::from_bytes(&tampered).expect_err("schema mismatch must be rejected");
@@ -110,7 +110,7 @@ fn test_incomplete_error_flagged_incomplete() {
 }
 
 #[test]
-fn test_nonzero_ringbuf_loss_capture_flagged_incomplete() {
+fn observed_consumer_loss_and_errors_survive_default_runtime_diagnostics() {
     use bpf_capture::schema::SchemaRegistry;
     use bpf_capture::session::{CaptureScope, SessionConfig};
     use bpf_capture::writer::CaptureWriter;
@@ -152,20 +152,39 @@ fn test_nonzero_ringbuf_loss_capture_flagged_incomplete() {
     let sched_bytes = unsafe {
         core::slice::from_raw_parts(&sched as *const _ as *const u8, core::mem::size_of_val(&sched))
     };
-    writer.ingest_ringbuf_sample(0, sched_bytes).unwrap();
+    writer.ingest_ringbuf_sample(0, sched_bytes, bpf_capture::writer::NativeContextFormat::Tracepoint).unwrap();
     writer.ingest_ringbuf_lost(5);
+    let mut discarded = [0; 8];
+    discarded[..4].copy_from_slice(&bpf_capture::writer::BPF_RINGBUF_DISCARD_BIT.to_ne_bytes());
+    writer.ingest_raw_ringbuf_frame(0, &discarded, bpf_capture::writer::NativeContextFormat::Tracepoint).unwrap();
+    assert!(writer.ingest_raw_ringbuf_frame(0, &[], bpf_capture::writer::NativeContextFormat::Tracepoint).is_err());
 
     let bytes = writer.finish(2_000_000_000).unwrap();
     let analyzer = CaptureAnalyzer::from_bytes(&bytes)
         .expect("analyzer should parse ringbuf lossy capture without panic");
 
     assert!(!analyzer.is_complete(), "ringbuf loss capture must NOT be marked complete");
-    assert_eq!(analyzer.status_code(), SessionStatusCode::IncompleteLoss);
+    // Missing producer diagnostics remain unknown even when consumer loss is known.
+    assert_eq!(analyzer.status_code(), SessionStatusCode::IncompleteError);
     assert!(analyzer.loss_counters().has_loss());
     assert_eq!(analyzer.loss_counters().ringbuf_lost, 5);
     assert_eq!(analyzer.loss_counters().delivered, 1);
     assert_eq!(analyzer.loss_counters().attempted, 6);
     assert!(!analyzer.attribution_claim_allowed(), "ringbuf loss capture cannot make complete attribution claim");
+
+    let report = analyzer.render_loss_report();
+    for observation in ["ringbuf_lost=5", "discarded_records=1", "consumer_corrupt_records=1", "consumer_out_of_bounds=0"] {
+        assert!(report.contains(observation), "missing {observation}: {report}");
+    }
+    assert!(report.contains("do not sum"));
+    assert!(!report.contains("Verifier Failures: 0"));
+    let report: serde_json::Value = serde_json::from_str(&analyzer.render_json()).unwrap();
+    assert_eq!(report["consumer_projection"], serde_json::json!({
+        "delivered": 1, "observed_perf_lost": 0, "ringbuf_lost": 5,
+        "discarded_records": 1, "consumer_corrupt_records": 1, "consumer_out_of_bounds": 0,
+    }));
+    assert_eq!(report["is_complete"], false);
+    assert!(report["loss_counters"].is_null());
 
     // Events are still parsed and accessible with transport neutrality
     let events = analyzer.ordered_events();

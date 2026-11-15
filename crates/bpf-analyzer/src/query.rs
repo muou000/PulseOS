@@ -426,7 +426,7 @@ impl Query {
             }
             if matches!(
                 event.payload,
-                EventPayload::SoftwareSample { .. } | EventPayload::SoftwareSampleV2 { .. } | EventPayload::SoftwareStackV3 { .. }
+                EventPayload::SoftwareSampleV2 { .. } | EventPayload::SoftwareStackV3 { .. }
             ) {
                 cpu.sample_count += 1;
             }
@@ -448,7 +448,7 @@ impl Query {
                 match event.payload {
                     EventPayload::TaskBlock { .. } => row.block_count += 1,
                     EventPayload::TaskWake { .. } => row.wake_count += 1,
-                    EventPayload::SoftwareSample { .. } | EventPayload::SoftwareSampleV2 { .. } | EventPayload::SoftwareStackV3 { .. } => {
+                    EventPayload::SoftwareSampleV2 { .. } | EventPayload::SoftwareStackV3 { .. } => {
                         row.sample_count += 1
                     }
                     _ => {}

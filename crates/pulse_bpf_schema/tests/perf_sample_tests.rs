@@ -1,7 +1,7 @@
 use pulse_bpf_schema::{PerfEventContext, PerfSampleContext};
 
 #[test]
-fn v2_sample_keeps_v1_prefix_and_has_explicit_instruction_mode_version() {
+fn software_sample_encodes_event_fields_and_explicit_instruction_mode_version() {
     let base = PerfEventContext::new(123, 0, 456, 2, 7, 8, 9);
     let sample = PerfSampleContext { base, ip: 0x400100, mode: 2, version: 2 };
     let bytes = sample.to_bytes();

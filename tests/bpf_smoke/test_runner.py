@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Tests for the legacy CLI's real-capture routing and static fixture isolation."""
+"""Tests for real-capture routing and rejection of obsolete input formats."""
 from __future__ import annotations
 
 import argparse
@@ -15,6 +15,7 @@ import unittest
 from unittest import mock
 
 BASE = Path(__file__).resolve().parent
+REJECTED_V1_FIXTURE = BASE / "fixtures" / "format-v1.bin"
 sys.path.insert(0, str(BASE))
 import run
 
@@ -24,7 +25,7 @@ class RuntimeRoutingTests(unittest.TestCase):
         args = run.build_parser().parse_args([
             "guest", "--arch", "riscv64", "--mode", "trace", "--kernel", "kernel",
             "--kernel-elf", "symbols", "--kernel-provenance", "manifest.json",
-            "--fault", "export-overflow", "--ring-pages", "1", "--primary", "image", "--timeout", "73",
+            "--fault", "export-overflow", "--ring-pages", "1", "--image", "image", "--timeout", "73",
         ])
         argv = run.sampling_command("guest", args.arch, args.mode, args)
         self.assertEqual(argv[:3], [sys.executable, str(run.SAMPLING_DRIVER), "guest"])
@@ -37,9 +38,9 @@ class RuntimeRoutingTests(unittest.TestCase):
         self.assertNotIn("guest_sampler", " ".join(argv))
         self.assertNotIn("fixture", " ".join(argv))
 
-    def test_build_raw_compatibility_name_builds_real_archive_payload(self):
+    def test_build_creates_real_archive_payload(self):
         with mock.patch.object(run, "run_sampling", return_value=0) as launch:
-            self.assertEqual(run.main(["build-raw", "--arch", "loongarch64"]), 0)
+            self.assertEqual(run.main(["build", "--arch", "loongarch64"]), 0)
         args = launch.call_args.args
         self.assertEqual(args[:3], ("build", "loongarch64", "task"))
         self.assertIn("--archive", run.sampling_command(*args))
@@ -74,19 +75,15 @@ class RuntimeRoutingTests(unittest.TestCase):
             run.main(["guest", "--arch", "riscv64", "--payload", "static-five-records.elf"])
         self.assertNotEqual(raised.exception.code, 0)
 
-    def test_legacy_parity_command_cannot_make_a_parity_claim(self):
-        with mock.patch.object(run, "run_sampling") as launch:
-            self.assertNotEqual(run.main(["parity"]), 0)
+    def test_removed_commands_and_options_are_rejected_before_launch(self):
+        for argv in (["build-raw", "--arch", "loongarch64"], ["smoke"],
+                     ["parity"], ["fixture-check"],
+                     ["guest", "--arch", "riscv64", "--primary", "image"]):
+            with self.subTest(argv=argv), mock.patch.object(run, "run_sampling") as launch, \
+                    contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit) as raised:
+                run.main(argv)
+            self.assertNotEqual(raised.exception.code, 0)
             launch.assert_not_called()
-
-    def test_static_fixture_check_is_explicit_and_never_launches_a_guest(self):
-        with mock.patch.object(run, "feed_analyzer", return_value=(True, "format valid")) as feed, \
-                mock.patch.object(run, "run_sampling") as launch, contextlib.redirect_stdout(io.StringIO()) as out:
-            self.assertEqual(run.main(["fixture-check"]), 0)
-        launch.assert_not_called()
-        self.assertEqual(feed.call_args.args, (run.FORMAT_FIXTURE,))
-        self.assertIn("STATIC FORMAT FIXTURE", out.getvalue())
-        self.assertIn("no runtime evidence", out.getvalue())
 
 
 class RejectedLegacyEvidenceTests(unittest.TestCase):
@@ -107,7 +104,7 @@ class RejectedLegacyEvidenceTests(unittest.TestCase):
             "BPF PASS fixture_detach_close",
             "BPF_STATE_REPORT state=attached_capture status=PASS wall_time_ns=1200000 workload_iters=400 memory_bytes=45056 samples=1 events=5 lost=0",
             "BPF_SESSION_STOP status=CompleteOk records=5 delivered=5 lost=0",
-            "BPF_CAPTURE_DATA " + run.FORMAT_FIXTURE.read_bytes().hex(),
+            "BPF_CAPTURE_DATA " + REJECTED_V1_FIXTURE.read_bytes().hex(),
             "BPF RESULT PASS functional_only=1", "BPF_HOST_EXIT old 0",
         ])
         for mode in ("task", "trace"):
@@ -150,20 +147,21 @@ class ImageAndElfTests(unittest.TestCase):
             run.scoped(BASE.parent / "not-in-smoke")
 
 
-class StaticFormatFixtureTests(unittest.TestCase):
-    def test_fixture_is_only_a_format_artifact(self):
-        self.assertTrue(run.FORMAT_FIXTURE.is_file())
-        ok, report = run.feed_analyzer(run.FORMAT_FIXTURE)
-        self.assertTrue(ok, report)
-        self.assertIn("INTEGRITY CHECK PASSED", report)
+class RejectedCaptureTests(unittest.TestCase):
+    def analyzer(self, capture):
+        return run.command(["cargo", "run", "--quiet", "-p", "bpf-analyzer", "--",
+                            str(capture), "--loss", "--table"], cwd=run.REPO, timeout=120)
+
+    def test_obsolete_v1_fixture_is_rejected_by_current_analyzer(self):
+        with self.assertRaisesRegex(RuntimeError, r"UnsupportedFormatVersion\(1\)"):
+            self.analyzer(REJECTED_V1_FIXTURE)
 
     def test_corrupt_capture_fails_the_analyzer(self):
         with tempfile.TemporaryDirectory(prefix="analyzer-corrupt-", dir=BASE) as tmp:
             path = Path(tmp) / "bad.bin"
             path.write_bytes(b"NOT_A_CAPTURE")
-            ok, report = run.feed_analyzer(path)
-            self.assertFalse(ok)
-            self.assertIn("failed to parse bpf capture", report.lower())
+            with self.assertRaisesRegex(RuntimeError, "failed to parse BPF capture"):
+                self.analyzer(path)
 
 
 if __name__ == "__main__":

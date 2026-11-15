@@ -36,7 +36,11 @@ The actual online mask comes from a versioned kernel capability snapshot.
 
 The scheduler group expands to event IDs 1–6. Repeating an event creates
 independent sources, even with identical CPU and period. `fault` is the returned
-resolver event (ID 8); Linux major/minor classification remains unknown.
+resolver event (ID 8). Successful faults are classified from actual target-page
+storage reads: verified reads are major, verified resolution without a read is
+minor, and unverified backends remain unknown. Error outcomes are counted
+separately. See [classification semantics and coverage](research/page-fault-io-classification.md)
+for the ext4/Ext4Disk boundary and differences from Linux retry accounting.
 
 `--frequency` and `--period-ns` are exclusive. Frequency converts to the nominal
 period with `ceil(1_000_000_000 / Hz)`; this does not promise an achieved rate.
@@ -72,8 +76,9 @@ envelope containing kind, context length and logical source ID. The consumer
 checks it against the prepared source, including scope and period. It never
 infers a source from a 64-byte context, CPU, or period. Source declarations
 include kernel event/program/link IDs and individual enable/disable windows.
-Source metadata revision 2 also stores the stable task identity; earlier
-revision 1 records remain readable with that identity explicitly unknown.
+Source metadata must use revision 2 (`PBSRC002`), which stores the stable task
+identity. Revision 1 (`PBSRC001`) is rejected; task sources cannot fall back to
+numeric-TID matching.
 Preparing multiple sources does not create an atomic shared start time.
 
 ```sh
@@ -89,8 +94,10 @@ control-flow exit can produce a partial capture; unknown build/mapping facts,
 missing counters, zero observations or real loss do not become complete data.
 This recorder uses software v2 contexts without stack capture or a mapping
 journal; downstream symbolization/export must enforce its own prerequisites.
-Older v1–v4 files remain readable. The existing standalone demonstrations and
-fixed-load regression harness keep their original metrics and scope.
+Capture formats v2–v4 remain active for diagnostics, stacks and temporal
+mappings respectively; v5 adds recorder source attribution and does not replace
+those capabilities. Historical v1 captures are rejected. The standalone
+demonstrations and fixed-load regression harness retain their own scope.
 
 ## Acceptance
 

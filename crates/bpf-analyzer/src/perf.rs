@@ -273,9 +273,6 @@ pub fn export(
                 stack.ips[..stack.len as usize].to_vec(),
                 stack.status.as_str(),
             ),
-            EventPayload::SoftwareSample { .. } => {
-                return Err("legacy sample has no captured instruction pointer/source".into());
-            }
             _ => continue,
         };
         let candidates: Vec<_> = declared
@@ -588,8 +585,7 @@ pub fn export(
         .filter(|event| {
             matches!(
                 event.payload,
-                EventPayload::SoftwareSample { .. }
-                    | EventPayload::SoftwareSampleV2 { .. }
+                EventPayload::SoftwareSampleV2 { .. }
                     | EventPayload::SoftwareStackV3 { .. }
             )
         })

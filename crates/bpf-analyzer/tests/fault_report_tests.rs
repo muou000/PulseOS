@@ -258,7 +258,7 @@ fn contradictory_failed_minor_or_major_records_never_enter_success_counts() {
 fn raw_classification_reaches_capture_report_table_and_timeline_without_inference() {
     use bpf_analyzer::CaptureAnalyzer;
     use bpf_capture::{CaptureArch, CaptureReader, CaptureWriter, SchemaRegistry, SessionStatusCode};
-    use bpf_capture::writer::SampleFormat;
+    use bpf_capture::writer::NativeContextFormat;
     use pulse_bpf_schema::{ContextCommon, PageFaultClassification as Class, PageFaultContext,
         PageFaultOrigin, PageFaultOutcome as Outcome, TracepointId};
 
@@ -276,7 +276,7 @@ fn raw_classification_reaches_capture_report_table_and_timeline_without_inferenc
         let raw = PageFaultContext::from_classified_completion(
             ContextCommon::new(TracepointId::PageFault, end, 2, 40, 41, 99),
             address, 100, 1, PageFaultOrigin::User, outcome, classification).unwrap().to_bytes();
-        writer.ingest_perf_sample_as(2, &raw, SampleFormat::Tracepoint).unwrap();
+        writer.ingest_perf_sample_as(2, &raw, NativeContextFormat::Tracepoint).unwrap();
     }
     let analyzer = CaptureAnalyzer::from_bytes(&writer.finish(1000).unwrap()).unwrap();
     let report = analyzer.fault_report();

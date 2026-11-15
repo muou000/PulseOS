@@ -113,9 +113,6 @@ pub fn render_event_table(analyzer: &CaptureAnalyzer, events: &[NormalizedEvent]
             } => {
                 format!("{:?} \"{}\"", phase_boundary, phase_name)
             }
-            EventPayload::SoftwareSample { sample_period, addr } => {
-                format!("period={} addr=0x{:016x} ip=unavailable mode=unavailable", sample_period, addr)
-            }
             EventPayload::SoftwareSampleV2 { sample_period, addr, pc, mode } => {
                 let mode = match mode { 1 => "kernel", 2 => "user", _ => "unknown" };
                 format!("period={} pc=0x{:016x} mode={} addr=0x{:016x}", sample_period, pc, mode, addr)
@@ -199,43 +196,15 @@ pub fn render_loss_report(analyzer: &CaptureAnalyzer) -> String {
         }
         writeln!(&mut out, "Consumer projection: {} normalized records; {} observed PERF_RECORD_LOST notices (counts may overlap sink diagnostics).",
             counters.delivered, counters.lost_records_total).unwrap();
-        writeln!(&mut out, "Other legacy counter fields are not runtime measurements; use the scoped diagnostics above.").unwrap();
+        writeln!(&mut out, "Observed consumer counters (separate observations; do not sum): ringbuf_lost={} discarded_records={} consumer_corrupt_records={} consumer_out_of_bounds={}",
+            counters.ringbuf_lost, counters.discarded_records,
+            counters.consumer_corrupt_records, counters.consumer_out_of_bounds).unwrap();
         writeln!(&mut out, "Complete CPU/off-CPU attribution: unavailable (full scheduler and IRQ residency evidence absent; mapping and stack availability are reported separately per sample).").unwrap();
         if is_comp {
             writeln!(&mut out, "Integrity verified; no loss reported by the recorded diagnostics. This is not proof of complete attribution.").unwrap();
         } else {
             writeln!(&mut out, "PARTIAL: loss, error, or unknown runtime evidence prevents a complete capture claim.").unwrap();
         }
-        return out;
-    }
-
-    writeln!(&mut out, "--- Layered Loss Counters ---").unwrap();
-    writeln!(&mut out, "Attempted: {}", counters.attempted).unwrap();
-    writeln!(&mut out, "Delivered: {}", counters.delivered).unwrap();
-    writeln!(&mut out, "Lost Records: {}", counters.lost_records_total).unwrap();
-
-    if !counters.per_cpu_lost.is_empty() {
-        for &(cpu, count) in &counters.per_cpu_lost {
-            writeln!(&mut out, "  CPU {}: {} lost", cpu, count).unwrap();
-        }
-    }
-
-    writeln!(&mut out, "Ringbuf Lost: {}", counters.ringbuf_lost).unwrap();
-    writeln!(&mut out, "Discarded Records: {}", counters.discarded_records).unwrap();
-    writeln!(&mut out, "Re-entry Drops: {}", counters.re_entry_drops).unwrap();
-    writeln!(&mut out, "Helper Failures: {}", counters.helper_failures).unwrap();
-    writeln!(&mut out, "Budget Failures: {}", counters.budget_failures).unwrap();
-    writeln!(&mut out, "Verifier Failures: {}", counters.verifier_failures).unwrap();
-    writeln!(&mut out, "Load Failures: {}", counters.load_failures).unwrap();
-    writeln!(&mut out, "Attach Failures: {}", counters.attach_failures).unwrap();
-    writeln!(&mut out, "Consumer Corrupt Records: {}", counters.consumer_corrupt_records).unwrap();
-    writeln!(&mut out, "Consumer Out-of-Bounds: {}", counters.consumer_out_of_bounds).unwrap();
-    writeln!(&mut out).unwrap();
-
-    if !is_comp {
-        writeln!(&mut out, "WARNING: Capture is incomplete. Attribution claims cannot be treated as complete or final (Anchor A3 / #88).").unwrap();
-    } else {
-        writeln!(&mut out, "INTEGRITY CHECK PASSED: Capture is fully complete with zero data loss.").unwrap();
     }
 
     out
@@ -301,40 +270,17 @@ fn render_json_inner(
     if let Some(diagnostics) = &analyzer.data().diagnostics {
         writeln!(&mut out, "  \"statistics_scope\": \"observed records only; per-CPU lost_records contains consumed PERF_RECORD_LOST counts\",").unwrap();
         writeln!(&mut out, "  \"loss_counters\": null,").unwrap();
-        writeln!(&mut out, "  \"consumer_projection\": {{\"delivered\": {}, \"observed_perf_lost\": {}}},", counters.delivered, counters.lost_records_total).unwrap();
+        writeln!(&mut out, concat!("  \"consumer_projection\": {{\"delivered\": {}, \"observed_perf_lost\": {}, ",
+            "\"ringbuf_lost\": {}, \"discarded_records\": {}, \"consumer_corrupt_records\": {}, \"consumer_out_of_bounds\": {}}},"),
+            counters.delivered, counters.lost_records_total, counters.ringbuf_lost,
+            counters.discarded_records, counters.consumer_corrupt_records, counters.consumer_out_of_bounds).unwrap();
         write!(&mut out, "  \"runtime_diagnostics\": ").unwrap();
         render_diagnostics_json(&mut out, diagnostics);
         writeln!(&mut out, ",").unwrap();
-    } else {
-        // loss_counters object
-        writeln!(&mut out, "  \"loss_counters\": {{").unwrap();
-        writeln!(&mut out, "    \"attempted\": {},", counters.attempted).unwrap();
-        writeln!(&mut out, "    \"delivered\": {},", counters.delivered).unwrap();
-        writeln!(&mut out, "    \"lost_records_total\": {},", counters.lost_records_total).unwrap();
-        writeln!(&mut out, "    \"ringbuf_lost\": {},", counters.ringbuf_lost).unwrap();
-        writeln!(&mut out, "    \"discarded_records\": {},", counters.discarded_records).unwrap();
-        writeln!(&mut out, "    \"re_entry_drops\": {},", counters.re_entry_drops).unwrap();
-        writeln!(&mut out, "    \"helper_failures\": {},", counters.helper_failures).unwrap();
-        writeln!(&mut out, "    \"budget_failures\": {},", counters.budget_failures).unwrap();
-        writeln!(&mut out, "    \"verifier_failures\": {},", counters.verifier_failures).unwrap();
-        writeln!(&mut out, "    \"load_failures\": {},", counters.load_failures).unwrap();
-        writeln!(&mut out, "    \"attach_failures\": {},", counters.attach_failures).unwrap();
-        writeln!(&mut out, "    \"consumer_corrupt_records\": {},", counters.consumer_corrupt_records).unwrap();
-        writeln!(&mut out, "    \"consumer_out_of_bounds\": {},", counters.consumer_out_of_bounds).unwrap();
-        writeln!(&mut out, "    \"per_cpu_lost\": [").unwrap();
-        for (i, &(cpu, count)) in counters.per_cpu_lost.iter().enumerate() {
-            let comma = if i + 1 < counters.per_cpu_lost.len() { "," } else { "" };
-            writeln!(&mut out, "      {{\"cpu\": {}, \"lost\": {}}}{}", cpu, count, comma).unwrap();
-        }
-        writeln!(&mut out, "    ]").unwrap();
-        writeln!(&mut out, "  }},").unwrap();
-
     }
 
-    // Preserve legacy observations without pretending their data addresses
-    // supply usable IPs. Profile weights consume explicit sampled IPs/chains.
+    // Profile weights consume explicit sampled IPs or captured chains.
     writeln!(&mut out, "  \"software_samples_with_ip\": {},", stats.event_counts.get("perf_sample_v2").copied().unwrap_or(0) + stats.event_counts.get("software_stack_v3").copied().unwrap_or(0)).unwrap();
-    writeln!(&mut out, "  \"software_samples_without_ip\": {},", stats.event_counts.get("perf_sample").copied().unwrap_or(0)).unwrap();
     let all_events;
     let events = if let Some(query) = selected { query.events.as_slice() } else {
         all_events = analyzer.ordered_events();
@@ -746,10 +692,6 @@ fn semantic_json(event: &NormalizedEvent) -> String {
             *phase_boundary as u32,
             json_string(phase_name)
         ),
-        EventPayload::SoftwareSample { sample_period, addr } => format!(
-            "{{\"sample_period\":{},\"addr\":{},\"ip\":null,\"mode\":null}}",
-            sample_period, addr
-        ),
         EventPayload::SoftwareSampleV2 {
             sample_period,
             addr,
@@ -860,11 +802,7 @@ pub fn render_timeline(
         meta.start_ns,
         meta.stop_ns,
         analyzer.data().trailer.checksum,
-        json_string(if header.format_version >= 2 {
-            "IEEE-CRC32"
-        } else {
-            "legacy-v1"
-        }),
+        json_string("IEEE-CRC32"),
         analyzer.is_complete(),
         result.events.len(),
         result.timeline.context_events.len(),

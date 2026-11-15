@@ -1,14 +1,14 @@
 use bpf_capture::framing::{
-    compute_checksum, CaptureArch, CaptureError, CaptureHeader, CaptureTrailer, SessionStatusCode,
+    compute_checksum_ieee, CaptureArch, CaptureError, CaptureHeader, CaptureTrailer, SessionStatusCode,
     CAPTURE_HEADER_MAGIC, CAPTURE_HEADER_SIZE, CAPTURE_TRAILER_MAGIC, CAPTURE_TRAILER_SIZE,
-    FORMAT_VERSION_V1, SCHEMA_VERSION_V1,
+    FORMAT_VERSION_V2, SCHEMA_VERSION_V1,
 };
 
 #[test]
 fn test_header_round_trip() {
     let header = CaptureHeader {
         magic: CAPTURE_HEADER_MAGIC,
-        format_version: FORMAT_VERSION_V1,
+        format_version: FORMAT_VERSION_V2,
         schema_version: SCHEMA_VERSION_V1,
         header_size: CAPTURE_HEADER_SIZE as u32,
         target_arch: CaptureArch::Riscv64,
@@ -94,23 +94,23 @@ fn test_trailer_rejects_truncated_input() {
 #[test]
 fn test_checksum_computation_and_mismatch() {
     let data = b"PulseOS BPF deterministic sample payload 2026";
-    let crc = compute_checksum(data);
+    let crc = compute_checksum_ieee(data);
     assert_ne!(crc, 0);
 
     // Same data gives same checksum
-    assert_eq!(compute_checksum(data), crc);
+    assert_eq!(compute_checksum_ieee(data), crc);
 
     // Corrupted byte produces different checksum
     let mut corrupted = data.to_vec();
     corrupted[0] ^= 0xFF;
-    let corrupted_crc = compute_checksum(&corrupted);
+    let corrupted_crc = compute_checksum_ieee(&corrupted);
     assert_ne!(corrupted_crc, crc);
 }
 
 #[test]
 fn test_trailer_integrity_validation() {
     let data = b"some capture body payload";
-    let crc = compute_checksum(data);
+    let crc = compute_checksum_ieee(data);
     let trailer = CaptureTrailer::new(5, data.len() as u64, crc, SessionStatusCode::Complete);
 
     assert!(trailer.validate_integrity(5, data.len() as u64, crc).is_ok());

@@ -78,8 +78,8 @@ fn acceptance_test_deterministic_fixture_round_trip() {
     assert_eq!(capture.records.len(), 2);
     assert_eq!(capture.records[0], rec1);
     assert_eq!(capture.records[1], rec2);
-    assert_eq!(capture.trailer.status_code, SessionStatusCode::Complete);
-    assert_eq!(capture.metadata.status, SessionStatusCode::Complete);
+    assert_eq!(capture.trailer.status_code, SessionStatusCode::IncompleteError);
+    assert_eq!(capture.metadata.status, SessionStatusCode::IncompleteError);
     assert_eq!(capture.metadata.config.image_path, "sdcard-rv.img");
     assert_eq!(capture.metadata.counters.attempted, 2);
     assert_eq!(capture.metadata.counters.delivered, 2);
@@ -92,7 +92,7 @@ fn acceptance_test_deterministic_fixture_round_trip() {
 fn acceptance_test_truncated_mismatched_and_lossy_inputs() {
     let registry = SchemaRegistry::default_pulse_registry();
 
-    // Case A: Lossy input preserves IncompleteLoss status rather than producing a complete-looking artifact
+    // Case A: Missing diagnostics and samples stay incomplete while observed loss is retained
     {
         let mut writer = CaptureWriter::new(deterministic_session_config(), registry.clone());
         writer.start(1_000_000).unwrap();
@@ -101,8 +101,8 @@ fn acceptance_test_truncated_mismatched_and_lossy_inputs() {
         let bytes = writer.finish(2_000_000).unwrap();
 
         let capture = CaptureReader::from_bytes(&bytes).unwrap();
-        assert_eq!(capture.metadata.status, SessionStatusCode::IncompleteLoss);
-        assert_eq!(capture.trailer.status_code, SessionStatusCode::IncompleteLoss);
+        assert_eq!(capture.metadata.status, SessionStatusCode::IncompleteError);
+        assert_eq!(capture.trailer.status_code, SessionStatusCode::IncompleteError);
         assert_eq!(capture.metadata.counters.lost_records_total, 10);
         assert_eq!(capture.metadata.counters.get_cpu_lost(0), 7);
         assert_eq!(capture.metadata.counters.get_cpu_lost(1), 3);
@@ -182,7 +182,7 @@ fn acceptance_test_truncated_mismatched_and_lossy_inputs() {
 
         // Recompute trailer checksum so it bypasses checksum validation and exercises schema validation
         let trailer_offset = hdr.trailer_offset as usize;
-        let new_crc = bpf_capture::framing::compute_checksum(&tampered[..trailer_offset]);
+        let new_crc = bpf_capture::framing::compute_checksum_ieee(&tampered[..trailer_offset]);
         tampered[trailer_offset + 24..trailer_offset + 28].copy_from_slice(&new_crc.to_le_bytes());
 
         let err = CaptureReader::from_bytes(&tampered).unwrap_err();

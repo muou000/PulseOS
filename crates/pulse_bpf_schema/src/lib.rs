@@ -268,8 +268,8 @@ pub enum PageFaultOutcome {
 /// Classification of a successfully resolved fault from actual target-page I/O.
 /// Minor means the resolver needed no storage read for the fault target; Major
 /// means its target-page fill performed a storage read. Neither latency nor
-/// file-backed status is evidence. Unknown preserves legacy records and
-/// unverified backends. For unsuccessful outcomes only Unknown is applicable;
+/// file-backed status is evidence. Unknown represents unverified backends.
+/// For unsuccessful outcomes only Unknown is applicable;
 /// the outcome identifies those records separately from successful faults.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u32)]
@@ -417,9 +417,9 @@ impl PerfEventContext {
     }
 }
 
-/// PulseOS software-sample v2; the first 48 bytes preserve the v1 context.
-/// IP and perf KERNEL=1/USER=2 mode are appended; version=2 is at byte 60.
-/// The data-address field in the v1 prefix is never repurposed as an IP.
+/// PulseOS software-sample v2: 48 bytes of event fields followed by IP and
+/// perf KERNEL=1/USER=2 mode; version=2 is at byte 60.
+/// The data-address field and sampled instruction pointer have distinct meanings.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PerfSampleContext {
     pub base: PerfEventContext,

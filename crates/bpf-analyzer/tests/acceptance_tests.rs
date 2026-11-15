@@ -19,7 +19,7 @@ fn acceptance_test_deterministic_valid_fixtures_dual_arch() {
         assert!(analyzer1.is_complete());
         assert_eq!(analyzer1.status_code(), SessionStatusCode::Complete);
         assert_eq!(analyzer1.target_arch(), arch);
-        assert!(analyzer1.attribution_claim_allowed());
+        assert!(!analyzer1.attribution_claim_allowed());
         assert_eq!(analyzer1.records().len(), 2);
 
         // 1. Table output determinism
@@ -34,7 +34,7 @@ fn acceptance_test_deterministic_valid_fixtures_dual_arch() {
         let loss2 = analyzer2.render_loss_report();
         assert_eq!(loss1, loss2, "loss report must be deterministic");
         assert!(loss1.contains("Status: Complete"));
-        assert!(loss1.contains("Attribution Claim: Allowed"));
+        assert!(loss1.contains("Attribution Claim: Disallowed"));
         assert!(loss1.contains(arch.as_str()));
 
         // 3. JSON output determinism
@@ -88,7 +88,7 @@ fn acceptance_test_explicit_reporting_on_corrupted_and_incomplete_captures() {
         let rec_start = hdr.records_offset as usize;
         tampered[rec_start + 4] = 42; // tamper schema_version
         let trailer_offset = hdr.trailer_offset as usize;
-        let new_crc = bpf_capture::framing::compute_checksum(&tampered[..trailer_offset]);
+        let new_crc = bpf_capture::framing::compute_checksum_ieee(&tampered[..trailer_offset]);
         tampered[trailer_offset + 24..trailer_offset + 28].copy_from_slice(&new_crc.to_le_bytes());
 
         let err = CaptureAnalyzer::from_bytes(&tampered).unwrap_err();
@@ -111,9 +111,9 @@ fn acceptance_test_explicit_reporting_on_corrupted_and_incomplete_captures() {
         assert!(!analyzer.attribution_claim_allowed(), "No complete attribution claim allowed (Anchor A3 / #88)");
 
         let loss_rep = analyzer.render_loss_report();
-        assert!(loss_rep.contains("WARNING: Capture is incomplete"));
+        assert!(loss_rep.contains("PARTIAL: loss, error, or unknown runtime evidence"));
         assert!(loss_rep.contains("Attribution Claim: Disallowed"));
-        assert!(loss_rep.contains("Lost Records: 7"));
+        assert!(loss_rep.contains("7 observed PERF_RECORD_LOST notices"));
 
         let json = analyzer.render_json();
         assert!(json.contains("\"is_complete\": false"));

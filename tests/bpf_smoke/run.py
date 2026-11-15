@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
-"""Compatibility CLI for real PulseOS BPF capture (#191).
+"""Run the real PulseOS BPF capture gate.
 
 Runtime commands delegate to bpf_sampling/run.py --archive. The helpers below are
 shared image/process transport, not a separate sampling or evidence implementation.
-Only fixture-check consumes the retained, explicitly static format fixture.
 """
 from __future__ import annotations
 
@@ -26,7 +25,6 @@ import time
 BASE = Path(__file__).resolve().parent
 REPO = BASE.parent.parent
 SAMPLING_DRIVER = BASE.parent / "bpf_sampling" / "run.py"
-FORMAT_FIXTURE = BASE / "fixtures" / "format-v1.bin"
 MODES = ("task", "cpu", "trace", "block", "wake", "sched", "fault")
 
 ARCHES = {
@@ -309,17 +307,6 @@ def probe_toolchain(arch: str | None = None) -> dict[str, bool | str]:
 
 
 
-def feed_analyzer(capture_path: Path) -> tuple[bool, str]:
-    """Check format fixtures using the current analyzer, never a stale binary."""
-    argv = ["cargo", "run", "--quiet", "-p", "bpf-analyzer", "--", str(capture_path), "--loss", "--table"]
-    try:
-        return True, command(argv, cwd=REPO, timeout=120)
-    except PermissionError:
-        raise
-    except (OSError, RuntimeError, subprocess.TimeoutExpired) as error:
-        return False, str(error)
-
-
 def sampling_command(action: str, arch: str, mode: str, args: argparse.Namespace) -> list[str]:
     """Route every runtime invocation through the actual consumer and exporter."""
     argv = [sys.executable, str(SAMPLING_DRIVER), action, "--arch", arch, "--mode", mode, "--archive"]
@@ -358,12 +345,11 @@ def build_parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(dest="command", required=True)
     probe = sub.add_parser("probe", help="Probe host tools and guest compiler targets")
     probe.add_argument("--arch", choices=ARCHES)
-    for name in ("build", "build-raw"):
-        build = sub.add_parser(name, help="Build the real sampler with RAW archive export")
-        build.add_argument("--arch", choices=ARCHES, required=True)
-        build.add_argument("--mode", choices=MODES, default="task")
-    for name in ("guest", "smoke", "gate"):
-        runtime = sub.add_parser(name, help="Run real capture; gate/smoke default to task+trace+sched+fault on both architectures")
+    build = sub.add_parser("build", help="Build the real sampler with RAW archive export")
+    build.add_argument("--arch", choices=ARCHES, required=True)
+    build.add_argument("--mode", choices=MODES, default="task")
+    for name in ("guest", "gate"):
+        runtime = sub.add_parser(name, help="Run real capture; gate defaults to task+trace+sched+fault on both architectures")
         runtime.add_argument("--arch", choices=ARCHES, required=name == "guest")
         runtime.add_argument("--mode", choices=MODES, default="task" if name == "guest" else None)
         runtime.add_argument("--kernel", type=Path)
@@ -371,11 +357,9 @@ def build_parser() -> argparse.ArgumentParser:
         runtime.add_argument("--kernel-provenance", type=Path)
         runtime.add_argument("--ring-pages", type=int, choices=(1, 16), default=16)
         runtime.add_argument("--fault", choices=("none", "zero-producer", "zero-consumer", "export-overflow", "ring-overflow", "aborted"), default="none")
-        runtime.add_argument("--image", "--primary", dest="image", type=Path)
+        runtime.add_argument("--image", type=Path)
         runtime.add_argument("--boot-timeout", type=float, default=90)
         runtime.add_argument("--timeout", type=float, default=120)
-    sub.add_parser("fixture-check", help="Validate the static v1 format fixture offline, with no runtime claim")
-    sub.add_parser("parity", help="Retired legacy gate; exits unsuccessfully with migration guidance")
     return parser
 
 
@@ -385,21 +369,12 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "probe":
             print(json.dumps(probe_toolchain(args.arch), indent=2))
             return 0
-        if args.command in ("build", "build-raw"):
+        if args.command == "build":
             return run_sampling("build", args.arch, args.mode, args)
         if args.command == "guest":
             return run_sampling("guest", args.arch, args.mode, args)
-        if args.command in ("smoke", "gate"):
+        if args.command == "gate":
             return gate(args)
-        if args.command == "fixture-check":
-            print("STATIC FORMAT FIXTURE: parser validation only; no runtime evidence")
-            ok, report = feed_analyzer(FORMAT_FIXTURE)
-            print(report)
-            return int(not ok)
-        if args.command == "parity":
-            print("Legacy parity gate retired: its fixed records and default-zero counters were not runtime evidence. "
-                  "Use 'gate' for real captures; complete off-CPU attribution/parity remains a separate gate.", file=sys.stderr)
-            return 2
     except (OSError, ValueError, RuntimeError) as error:
         print(f"BPF capture command failed: {error}", file=sys.stderr)
         return 1

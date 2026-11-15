@@ -2,7 +2,7 @@
 
 pub const CAPTURE_HEADER_MAGIC: [u8; 8] = *b"PBCAP001";
 pub const CAPTURE_TRAILER_MAGIC: [u8; 8] = *b"PBCAPTRL";
-pub const FORMAT_VERSION_V1: u32 = 1;
+// Active capability profiles: diagnostics, stacks, mappings, and recorder.
 pub const FORMAT_VERSION_V2: u32 = 2;
 /// Requires native software-stack-v3 decoding; old readers reject this container.
 pub const FORMAT_VERSION_V3: u32 = 3;
@@ -120,7 +120,7 @@ impl CaptureHeader {
     pub const fn new(arch: CaptureArch) -> Self {
         Self {
             magic: CAPTURE_HEADER_MAGIC,
-            format_version: FORMAT_VERSION_V1,
+            format_version: FORMAT_VERSION_V2,
             schema_version: SCHEMA_VERSION_V1,
             header_size: CAPTURE_HEADER_SIZE as u32,
             target_arch: arch,
@@ -163,7 +163,7 @@ impl CaptureHeader {
         }
 
         let format_version = u32::from_le_bytes(bytes[8..12].try_into().unwrap());
-        if !matches!(format_version, FORMAT_VERSION_V1 | FORMAT_VERSION_V2 | FORMAT_VERSION_V3 | FORMAT_VERSION_V4 | FORMAT_VERSION_V5) {
+        if !matches!(format_version, FORMAT_VERSION_V2 | FORMAT_VERSION_V3 | FORMAT_VERSION_V4 | FORMAT_VERSION_V5) {
             return Err(CaptureError::UnsupportedFormatVersion(format_version));
         }
 
@@ -296,23 +296,7 @@ impl CaptureTrailer {
     }
 }
 
-/// Legacy capture-v1 checksum, retained for existing PBCAP001 artifacts.
-/// Its historical feedback-bit convention is not IEEE CRC32 (for example,
-/// `123456789` yields 0xc6dd3518). A corrected algorithm needs a format version
-/// change; do not silently invalidate old captures by replacing this function.
-pub fn compute_checksum(data: &[u8]) -> u32 {
-    let mut crc = 0xFFFF_FFFFu32;
-    for &byte in data {
-        crc ^= byte as u32;
-        for _ in 0..8 {
-            let mask = (!((crc & 1).wrapping_sub(1))) ^ 0xFFFF_FFFF;
-            crc = (crc >> 1) ^ (0xEDB8_8320 & mask);
-        }
-    }
-    !crc
-}
-
-/// IEEE CRC-32/ISO-HDLC used by capture format v2 and RAW archives.
+/// IEEE CRC-32/ISO-HDLC used by all supported captures and RAW archives.
 pub fn compute_checksum_ieee(data: &[u8]) -> u32 {
     let mut crc = 0xffff_ffffu32;
     for &byte in data {

@@ -252,7 +252,7 @@ fn task_source_follows_stable_identity_through_exec_tid_rebinding() {
 }
 
 #[test]
-fn old_v5_task_bindings_remain_readable_without_claiming_stable_identity() {
+fn old_numeric_tid_source_schema_is_rejected() {
     let mut binding = source(1, RecorderKind::SoftwareV2);
     binding.scope = CaptureScope::Task(41);
     let mut w = writer();
@@ -272,16 +272,10 @@ fn old_v5_task_bindings_remain_readable_without_claiming_stable_identity() {
         bytes[offset..offset + 8].copy_from_slice(&(value - 8).to_le_bytes());
     }
     repair_checksum(&mut bytes);
-    let capture = CaptureReader::from_bytes(&bytes).unwrap();
-    let legacy = capture.recorder.unwrap();
-    assert_eq!(legacy.source_schema_version, 1);
-    assert_eq!(legacy.sources[0].bound_task_id, 0);
-    assert_eq!(capture.records[0].tid, 41);
-    assert!(!capture.metadata.status.is_complete());
-    let records = capture.header.records_offset as usize;
-    bytes[records + 24..records + 28].copy_from_slice(&40u32.to_le_bytes());
-    repair_checksum(&mut bytes);
-    assert!(CaptureReader::from_bytes(&bytes).is_err(), "old bindings cannot certify a changed numeric TID");
+    assert_eq!(
+        CaptureReader::from_bytes(&bytes).unwrap_err(),
+        bpf_capture::CaptureError::InvalidRecord("unknown recorder source schema"),
+    );
 }
 
 #[test]

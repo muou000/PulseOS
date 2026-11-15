@@ -10,7 +10,7 @@ use std::{
 use bpf_capture::{
     CaptureArch, CaptureScope, CaptureWriter, CounterKind, DiagnosticCounter, DiagnosticIdentity,
     PhaseMeasurement, RuntimeDiagnostics, SchemaRegistry, SessionConfig,
-    framing::compute_checksum_ieee, writer::SampleFormat,
+    framing::compute_checksum_ieee, writer::NativeContextFormat,
 };
 use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
@@ -35,7 +35,7 @@ fn numeric_string(v: &Value, key: &str) -> Result<u64> {
         .map_err(|_| format!("invalid numeric config {key}"))
 }
 fn narrow(value: u64) -> Result<u32> {
-    u32::try_from(value).map_err(|_| "ID exceeds legacy u32 field".into())
+    u32::try_from(value).map_err(|_| "ID exceeds session u32 field".into())
 }
 fn read_bounded(path: &Path) -> Result<Vec<u8>> {
     const LIMIT: u64 = 8 * 1024 * 1024;
@@ -497,9 +497,9 @@ fn import(dir: &Path, output: &Path) -> Result<()> {
     let source = &before["events"][number(first, "fd")?.to_string()];
     let source_after = &after["events"][number(first, "fd")?.to_string()];
     let format = match mode {
-        "task" | "cpu" if stacks => SampleFormat::SoftwareStackV3,
-        "task" | "cpu" => SampleFormat::PerfEventV2,
-        "trace" | "block" | "wake" | "sched" | "fault" => SampleFormat::Tracepoint,
+        "task" | "cpu" if stacks => NativeContextFormat::SoftwareStackV3,
+        "task" | "cpu" => NativeContextFormat::PerfEventV2,
+        "trace" | "block" | "wake" | "sched" | "fault" => NativeContextFormat::Tracepoint,
         _ => return Err("unknown mode".into()),
     };
     let mut d = RuntimeDiagnostics {
@@ -916,7 +916,7 @@ fn import(dir: &Path, output: &Path) -> Result<()> {
                 let count = stack_source_counts.entry(sample.source_id).or_default();
                 *count = add(*count, 1)?;
             }
-            if let SampleFormat::Tracepoint = format {
+            if let NativeContextFormat::Tracepoint = format {
                 let expected_id = match mode {
                     "trace" => 2,
                     "block" => 3,
@@ -936,7 +936,7 @@ fn import(dir: &Path, output: &Path) -> Result<()> {
         } else if read32(frame, 0) == 2 && frame.len() == 24 {
             lost = add(lost, read64(frame, 16))?;
         }
-        add(samples, lost)?; // legacy attempted count includes both sample and LOST records
+        add(samples, lost)?; // consumer attempted count includes both sample and LOST records
         writer
             .ingest_raw_perf_frame_as(cpu, frame, format)
             .map_err(|e| format!("RAW normalization: {e:?}"))?;
