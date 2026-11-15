@@ -1,0 +1,19 @@
+diff --git a/modules/axfs/src/highlevel/file/cache.rs b/modules/axfs/src/highlevel/file/cache.rs
+index e72ba411..2b99fd27 100644
+--- a/modules/axfs/src/highlevel/file/cache.rs
++++ b/modules/axfs/src/highlevel/file/cache.rs
+@@ -3310,12 +3310,8 @@ impl CachedFile {
+             let page_offset = (current % PAGE_SIZE as u64) as usize;
+             let len = (data.len() - copied).min(PAGE_SIZE - page_offset);
+             let skip_read = page_offset == 0 && len == PAGE_SIZE;
+-            if let Err(error) = self
+-                .ensure_write_page_async(file, pn, skip_read, original_len)
+-                .await
+-            {
+-                return if copied == 0 { Err(error) } else { Ok(copied) };
+-            }
++            self.ensure_write_page_async(file, pn, skip_read, original_len)
++                .await?;
+ 
+             let mut cache = self.shared.page_cache.lock();
+             let Some(page) = cache.get_mut(&pn) else {
