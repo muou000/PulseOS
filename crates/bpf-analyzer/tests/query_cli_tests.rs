@@ -34,14 +34,14 @@ impl Fixture {
             SessionStatusCode::Complete,
         )
         .unwrap();
-        let config = CaptureReader::from_bytes(&original)
-            .unwrap()
-            .metadata
-            .config;
-        let mut writer = CaptureWriter::new(config, SchemaRegistry::default_pulse_registry());
-        if let Some(diagnostics) = diagnostics {
-            writer.set_diagnostics(diagnostics).unwrap();
-        }
+        let original = CaptureReader::from_bytes(&original).unwrap();
+        let mut registry = SchemaRegistry::default_pulse_registry();
+        registry.register(bpf_capture::schema::EventSchema {
+            event_id: 0x2000, category: "test".into(), name: "opaque".into(),
+            version: 1, payload_size: 16, fields: vec![],
+        });
+        let mut writer = CaptureWriter::new(original.metadata.config, registry);
+        writer.set_diagnostics(diagnostics.unwrap_or_else(|| original.diagnostics.unwrap())).unwrap();
         writer.start(1).unwrap();
         for record in records {
             writer.write_record(record).unwrap();
@@ -418,13 +418,12 @@ fn completed_blocked_interval_has_duration_without_count_fallback() {
     stdout(&f.cli(&["--tid", "101", "--offcpu", path.to_str().unwrap()]));
     assert_eq!(
         fs::read_to_string(path).unwrap(),
-        "worker;wait_reason_1;res_85 20\n"
+        "[INCOMPLETE_CAPTURE];worker;wait_reason_1;res_85 20\n"
     );
 }
 
 #[test]
-#[allow(deprecated)]
-fn compatibility_phase_helpers_use_half_open_window_and_preserve_prior_pairing() {
+fn phase_query_uses_half_open_window_and_preserves_prior_pairing() {
     let f = Fixture::new(vec![
         metadata(5, 7, 101, "worker"),
         block(10),
@@ -435,10 +434,13 @@ fn compatibility_phase_helpers_use_half_open_window_and_preserve_prior_pairing()
         phase(50, true),
     ]);
     let analyzer = bpf_analyzer::CaptureAnalyzer::from_file(&f.capture).unwrap();
-    let rows = analyzer.events_in_phase("active");
+    let result = analyzer.query(&bpf_analyzer::query::Query {
+        phase: Some("active".into()), ..Default::default()
+    }).unwrap();
+    let rows = result.events;
     assert_eq!(rows.len(), 3);
     assert!(rows.iter().all(|r| r.timestamp_ns < 50));
-    let stats = analyzer.aggregate_statistics_in_phase("active");
+    let stats = result.stats;
     assert_eq!(
         stats.unpaired_wakes, 0,
         "an observed block before the window remains context"
@@ -691,11 +693,11 @@ fn on_cpu_start_uses_last_actual_switch_in_when_timestamps_repeat() {
     assert_eq!(selected.stats.on_cpu_intervals[0].duration_ns, 10);
 }
 
-fn legacy_sample(time: u64) -> NormalizedRecord {
+fn opaque_record(time: u64) -> NormalizedRecord {
     let mut p = vec![0; 16];
     p[..8].copy_from_slice(&10u64.to_le_bytes());
     p[8..16].copy_from_slice(&0x1000u64.to_le_bytes());
-    record(0x1000, 1, time, 0, 7, 100, 101, p)
+    record(0x2000, 1, time, 0, 7, 100, 101, p)
 }
 #[test]
 fn privilege_query_selects_explicit_sample_mode_and_fault_origin() {
@@ -709,7 +711,7 @@ fn privilege_query_selects_explicit_sample_mode_and_fault_origin() {
         kernel,
         fault(20, 12, 0x8000),
         kernel_fault,
-        legacy_sample(35),
+        opaque_record(35),
         block(40),
     ]);
     for (mode, weight) in [("user", 10), ("kernel", 30)] {
@@ -732,7 +734,7 @@ fn privilege_query_selects_explicit_sample_mode_and_fault_origin() {
             format!("worker;[{mode}];pc:0x1000 {weight}\n")
         );
     }
-    let unknown = Fixture::new(vec![legacy_sample(10), block(20)]);
+    let unknown = Fixture::new(vec![opaque_record(10), block(20)]);
     let out = unknown.dir.join("empty.folded");
     let json =
         stdout(&unknown.cli(&["--mode", "user", "--json", "--oncpu", out.to_str().unwrap()]));
@@ -839,7 +841,7 @@ assert x['scheduler']['summary']['count']==0
 
 #[test]
 fn timeline_mode_empty_and_unknown_records_are_explicit() {
-    let f = Fixture::new(vec![legacy_sample(10), block(20)]);
+    let f = Fixture::new(vec![opaque_record(10), block(20)]);
     let empty = f.dir.join("empty.json");
     stdout(&f.cli(&["--mode", "user", "--timeline", empty.to_str().unwrap()]));
     check_json_file(
@@ -857,7 +859,7 @@ assert x['events']==[] and x['intervals']==[] and x['unfinished']==[] and x['con
         r#"
 import json,sys
 x=json.load(open(sys.argv[1]));assert all(e['privilege'] is None for e in x['events'])
-assert x['events'][0]['semantic']['mode'] is None
+assert x['events'][0]['semantic'] is None
 "#,
     );
     let before = fs::read(&f.capture).unwrap();
@@ -1240,33 +1242,33 @@ pathlib.Path(sys.argv[2]).write_bytes(raw)
 }
 
 #[test]
-fn legacy_data_address_remains_readable_but_never_becomes_an_ip_frame() {
+fn current_sample_data_address_never_becomes_an_ip_frame() {
     let mut actual = sample(20, 7, 101, 0x9000, 10);
     actual.payload[8..16].copy_from_slice(&0x1000u64.to_le_bytes());
-    let f = Fixture::new(vec![legacy_sample(10), actual]);
+    let f = Fixture::new(vec![opaque_record(10), actual]);
     let output = f.dir.join("ip.folded");
     let json = stdout(&f.cli(&["--json", "--oncpu", output.to_str().unwrap()]));
     let folded = fs::read_to_string(output).unwrap();
     assert!(
         !folded.contains("pc:0x1000"),
-        "legacy addr was reinterpreted as an instruction pointer: {folded}"
+        "data addr was reinterpreted as an instruction pointer: {folded}"
     );
     assert!(folded.contains("pc:0x9000 1"));
     assert_eq!(number(&json, "records_count"), 2);
     assert_eq!(number(&json, "software_samples_with_ip"), 1);
-    assert_eq!(number(&json, "software_samples_without_ip"), 1);
+    assert!(!json.contains("software_samples_without_ip"));
     let table = stdout(&f.cli(&["--table"]));
-    assert!(table.contains("addr=0x0000000000001000 ip=unavailable mode=unavailable"));
-    let timeline = f.dir.join("legacy.json");
+    assert!(table.contains("pc=0x0000000000009000 mode=user addr=0x0000000000001000"));
+    let timeline = f.dir.join("addresses.json");
     stdout(&f.cli(&["--timeline", timeline.to_str().unwrap()]));
     check_json_file(
         &timeline,
         r#"
 import json,sys
-x=json.load(open(sys.argv[1]));legacy=x['events'][0]
-assert legacy['semantic']['addr']==4096 and legacy['semantic']['ip'] is None and legacy['privilege'] is None
-assert int.from_bytes(bytes.fromhex(legacy['payload_hex'])[8:16],'little')==4096
-assert x['events'][1]['semantic']['ip']==36864
+x=json.load(open(sys.argv[1]));opaque=x['events'][0];sample=x['events'][1]
+assert opaque['semantic'] is None and opaque['privilege'] is None
+assert int.from_bytes(bytes.fromhex(opaque['payload_hex'])[8:16],'little')==4096
+assert sample['semantic']['addr']==4096 and sample['semantic']['ip']==36864
 "#,
     );
 }

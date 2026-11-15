@@ -3,10 +3,11 @@
 use alloc::string::String;
 use alloc::vec::Vec;
 use crate::framing::{CaptureArch, CaptureError, SessionStatusCode};
+use crate::diagnostics::{CounterKind, DiagnosticCounter, DiagnosticIdentity, PhaseMeasurement, RuntimeDiagnostics};
 use crate::record::NormalizedRecord;
 use crate::schema::SchemaRegistry;
 use crate::session::{CaptureScope, SessionConfig};
-use crate::writer::CaptureWriter;
+use crate::writer::{CaptureWriter, NativeContextFormat};
 use pulse_bpf_schema::{ContextCommon, SchedSwitchContext, TaskBlockContext, TracepointId};
 
 /// Generate a deterministic, reproducible BPF capture binary for testing and analyzer validation.
@@ -44,6 +45,22 @@ pub fn generate_deterministic_fixture(
 
     let registry = SchemaRegistry::default_pulse_registry();
     let mut writer = CaptureWriter::new(config, registry);
+    // Synthetic evidence is explicitly labelled and never stands in for a
+    // measured guest run. Production writers without evidence remain partial.
+    writer.set_diagnostics(RuntimeDiagnostics {
+        counters: alloc::vec![DiagnosticCounter {
+            name: "lost".into(), scope: "synthetic-fixture".into(),
+            value: Some(0), kind: CounterKind::Loss,
+        }],
+        identities: alloc::vec![DiagnosticIdentity {
+            name: "provenance".into(), value: Some("synthetic-fixture".into()),
+        }],
+        phases: alloc::vec![PhaseMeasurement {
+            name: "fixture".into(), start_ns: 1_000_000_000, stop_ns: 2_000_000_000,
+            iterations: 2, mapped_bytes: Some(0),
+        }],
+        evidence_json: Some("{\"synthetic_fixture\":true}".into()),
+    })?;
     writer.start(1_000_000_000)?;
 
     // 1. Sched switch sample on CPU 0
@@ -84,7 +101,7 @@ pub fn generate_deterministic_fixture(
         SessionStatusCode::IncompleteError => {
             writer.ingest_perf_lost(0, 1);
             // Trigger consumer corruption error
-            let _ = writer.ingest_perf_sample(0, &[]);
+            let _ = writer.ingest_perf_sample_as(0, &[], NativeContextFormat::Tracepoint);
         }
         _ => {}
     }

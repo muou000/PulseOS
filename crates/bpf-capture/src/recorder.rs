@@ -15,9 +15,7 @@ pub const RECORDER_ENVELOPE_SIZE: usize = 24;
 pub const MAX_RECORDER_SOURCES: usize = 512;
 /// Maximum retained normalized bytes plus their four-byte source bindings.
 pub const MAX_RECORDER_RECORD_BYTES: usize = 64 * 1024 * 1024;
-const LEGACY_METADATA_MAGIC: &[u8; 8] = b"PBSRC001";
 const METADATA_MAGIC: &[u8; 8] = b"PBSRC002";
-const LEGACY_SOURCE_BYTES: usize = 88;
 const SOURCE_BYTES: usize = 96;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -47,8 +45,7 @@ pub struct RecorderSource {
     pub schema_version: u32,
     pub scope: CaptureScope,
     /// Stable kernel task identity retained by a task-scoped source. A task's
-    /// numeric TID may change during exec. Zero is required for CPU sources;
-    /// older PBSRC001 task declarations decode as unknown (zero) as well.
+    /// numeric TID may change during exec. Zero is required for CPU sources.
     pub bound_task_id: u64,
     pub sample_period: u64,
     pub kernel_event_id: u64,
@@ -71,13 +68,13 @@ fn u64_at(bytes: &[u8], offset: usize) -> u64 {
 }
 
 impl RecorderSource {
-    pub(crate) fn validate_declaration(&self, legacy: bool) -> Result<(), CaptureError> {
+    pub(crate) fn validate_declaration(&self) -> Result<(), CaptureError> {
         if self.id == 0 || self.kernel_event_id == 0 || self.program_id == 0
             || self.link_id == 0 || self.sample_period == 0
             || matches!(self.scope, CaptureScope::AllCpus | CaptureScope::Task(0))
             || matches!(self.scope, CaptureScope::Task(tid) if tid > u32::MAX as u64)
             || matches!(self.scope, CaptureScope::PerCpu(_) if self.bound_task_id != 0)
-            || matches!(self.scope, CaptureScope::Task(_) if self.bound_task_id == 0 && !legacy)
+            || matches!(self.scope, CaptureScope::Task(_) if self.bound_task_id == 0)
         {
             return Err(invalid("invalid recorder source identity or scope"));
         }
@@ -120,9 +117,7 @@ impl RecorderSource {
         if record.event_id != self.event_id || record.schema_version != self.schema_version
             || record.timestamp_ns == 0
             || matches!(self.scope, CaptureScope::PerCpu(cpu) if cpu != record.cpu_id)
-            || matches!(self.scope, CaptureScope::Task(tid) if
-                if self.bound_task_id == 0 { tid != record.tid as u64 }
-                else { self.bound_task_id != record.task_id })
+            || matches!(self.scope, CaptureScope::Task(_) if self.bound_task_id != record.task_id)
         {
             return Err(invalid("recorder record differs from source binding"));
         }
@@ -141,7 +136,7 @@ impl RecorderSource {
 /// Required source attribution for capture v5, independent of event layout.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RecorderMetadata {
-    /// 1 preserves legacy numeric-TID bindings; 2 binds stable kernel task IDs.
+    /// Must be 2: task-scoped sources bind stable kernel task IDs.
     pub source_schema_version: u32,
     pub sources: Vec<RecorderSource>,
     /// One logical source ID for every normalized record, in transport order.
@@ -150,15 +145,17 @@ pub struct RecorderMetadata {
 
 impl RecorderMetadata {
     pub(crate) fn validate_sources(&self) -> Result<(), CaptureError> {
-        if !matches!(self.source_schema_version, 1 | 2)
-            || self.sources.is_empty() || self.sources.len() > MAX_RECORDER_SOURCES {
+        if self.source_schema_version != 2 {
+            return Err(invalid("unknown recorder source schema"));
+        }
+        if self.sources.is_empty() || self.sources.len() > MAX_RECORDER_SOURCES {
             return Err(invalid("invalid recorder source count"));
         }
         let mut ids = BTreeSet::new();
         let mut events = BTreeSet::new();
         let mut links = BTreeSet::new();
         for source in &self.sources {
-            source.validate_declaration(self.source_schema_version == 1)?;
+            source.validate_declaration()?;
             if !ids.insert(source.id) || !events.insert(source.kernel_event_id) || !links.insert(source.link_id) {
                 return Err(invalid("duplicate recorder source identity"));
             }
@@ -216,9 +213,8 @@ impl RecorderMetadata {
     }
 
     pub(crate) fn to_bytes(&self) -> Vec<u8> {
-        let source_bytes = if self.source_schema_version == 1 { LEGACY_SOURCE_BYTES } else { SOURCE_BYTES };
-        let mut bytes = Vec::with_capacity(24 + self.sources.len() * source_bytes + self.record_sources.len() * 4);
-        bytes.extend_from_slice(if self.source_schema_version == 1 { LEGACY_METADATA_MAGIC } else { METADATA_MAGIC });
+        let mut bytes = Vec::with_capacity(24 + self.sources.len() * SOURCE_BYTES + self.record_sources.len() * 4);
+        bytes.extend_from_slice(METADATA_MAGIC);
         bytes.extend_from_slice(&(self.sources.len() as u32).to_le_bytes());
         bytes.extend_from_slice(&0u32.to_le_bytes());
         bytes.extend_from_slice(&(self.record_sources.len() as u64).to_le_bytes());
@@ -235,9 +231,7 @@ impl RecorderMetadata {
             for value in [source.enable_before_ns, source.enable_after_ns, source.disable_before_ns, source.disable_after_ns] {
                 bytes.extend_from_slice(&value.to_le_bytes());
             }
-            if self.source_schema_version >= 2 {
-                bytes.extend_from_slice(&source.bound_task_id.to_le_bytes());
-            }
+            bytes.extend_from_slice(&source.bound_task_id.to_le_bytes());
         }
         for id in &self.record_sources { bytes.extend_from_slice(&id.to_le_bytes()); }
         bytes
@@ -247,24 +241,22 @@ impl RecorderMetadata {
         if bytes.len() < 24 || u32_at(bytes, 12) != 0 {
             return Err(invalid("invalid recorder metadata header"));
         }
-        let (source_schema_version, source_bytes) = match &bytes[..8] {
-            magic if magic == LEGACY_METADATA_MAGIC => (1, LEGACY_SOURCE_BYTES),
-            magic if magic == METADATA_MAGIC => (2, SOURCE_BYTES),
-            _ => return Err(invalid("unknown recorder source schema")),
-        };
+        if &bytes[..8] != METADATA_MAGIC {
+            return Err(invalid("unknown recorder source schema"));
+        }
         let source_count = u32_at(bytes, 8) as usize;
         let binding_count = usize::try_from(u64_at(bytes, 16)).map_err(|_| invalid("recorder binding count overflow"))?;
         if source_count == 0 || source_count > MAX_RECORDER_SOURCES {
             return Err(invalid("invalid recorder source count"));
         }
-        let source_end = 24 + source_count * source_bytes;
+        let source_end = 24 + source_count * SOURCE_BYTES;
         let end = binding_count.checked_mul(4).and_then(|n| n.checked_add(source_end))
             .ok_or_else(|| invalid("recorder binding count overflow"))?;
         if end != bytes.len() || binding_count > MAX_RECORDER_RECORD_BYTES / (crate::record::RECORD_HEADER_SIZE + 4) {
             return Err(invalid("invalid recorder metadata length"));
         }
         let mut sources = Vec::with_capacity(source_count);
-        for raw in bytes[24..source_end].chunks_exact(source_bytes) {
+        for raw in bytes[24..source_end].chunks_exact(SOURCE_BYTES) {
             let scope = match u32_at(raw, 16) {
                 1 => CaptureScope::PerCpu(u32::try_from(u64_at(raw, 24)).map_err(|_| invalid("recorder CPU overflow"))?),
                 2 => CaptureScope::Task(u64_at(raw, 24)),
@@ -274,7 +266,7 @@ impl RecorderMetadata {
             sources.push(RecorderSource {
                 id: u32_at(raw, 0), kind: RecorderKind::from_raw(u32_at(raw, 4))?,
                 event_id: u32_at(raw, 8), schema_version: u32_at(raw, 12), scope,
-                bound_task_id: if source_schema_version >= 2 { u64_at(raw, 88) } else { 0 },
+                bound_task_id: u64_at(raw, 88),
                 sample_period: u64_at(raw, 32), kernel_event_id: u64_at(raw, 40),
                 program_id: u32_at(raw, 48), link_id: u32_at(raw, 52),
                 enable_before_ns: u64_at(raw, 56), enable_after_ns: u64_at(raw, 64),
@@ -283,7 +275,7 @@ impl RecorderMetadata {
         }
         let record_sources = bytes[source_end..].chunks_exact(4)
             .map(|raw| u32_at(raw, 0)).collect();
-        let metadata = Self { source_schema_version, sources, record_sources };
+        let metadata = Self { source_schema_version: 2, sources, record_sources };
         metadata.validate_sources()?;
         Ok(metadata)
     }

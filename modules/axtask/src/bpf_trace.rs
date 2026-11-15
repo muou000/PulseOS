@@ -16,12 +16,6 @@ static CPU_QUEUES: [BoundedTraceQueue<TRACE_QUEUE_CAPACITY>; MAX_CPUS] =
 static DRAIN_LOCKS: [kspin::SpinNoIrq<()>; MAX_CPUS] =
     [const { kspin::SpinNoIrq::new(()) }; MAX_CPUS];
 
-#[deprecated(note = "Direct synchronous probes in critical paths are removed for safety; use bounded drain")]
-pub type TracepointProbe = fn(id: TracepointId, context_ptr: *const u8, context_len: usize);
-
-#[deprecated(note = "Direct synchronous probes in critical paths are removed for safety; use bounded drain")]
-pub fn set_probe_handler(_handler: Option<TracepointProbe>) {}
-
 #[inline(always)]
 pub fn has_subscribers(id: TracepointId) -> bool {
     (SUBSCRIBER_MASK.load(Ordering::Relaxed) & (1 << (id as u32))) != 0

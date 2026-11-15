@@ -24,8 +24,8 @@ fn test_render_loss_report_complete_vs_incomplete() {
     let comp_analyzer = CaptureAnalyzer::from_bytes(&complete_bytes).unwrap();
     let comp_report = comp_analyzer.render_loss_report();
     assert!(comp_report.contains("Status: Complete"));
-    assert!(comp_report.contains("Lost Records: 0"));
-    assert!(comp_report.contains("Attribution Claim: Allowed"));
+    assert!(comp_report.contains("0 observed PERF_RECORD_LOST notices"));
+    assert!(comp_report.contains("Attribution Claim: Disallowed"));
 
     // 2. Incomplete lossy capture
     let lossy_bytes = generate_deterministic_fixture(CaptureArch::Riscv64, SessionStatusCode::IncompleteLoss)
@@ -33,10 +33,10 @@ fn test_render_loss_report_complete_vs_incomplete() {
     let loss_analyzer = CaptureAnalyzer::from_bytes(&lossy_bytes).unwrap();
     let loss_report = loss_analyzer.render_loss_report();
     assert!(loss_report.contains("Status: IncompleteLoss"));
-    assert!(loss_report.contains("Lost Records: 7"));
-    assert!(loss_report.contains("CPU 0: 5 lost"));
-    assert!(loss_report.contains("CPU 1: 2 lost"));
-    assert!(loss_report.contains("WARNING: Capture is incomplete"));
+    assert!(loss_report.contains("7 observed PERF_RECORD_LOST notices"));
+    assert_eq!(loss_analyzer.loss_counters().get_cpu_lost(0), 5);
+    assert_eq!(loss_analyzer.loss_counters().get_cpu_lost(1), 2);
+    assert!(loss_report.contains("PARTIAL: loss, error, or unknown runtime evidence"));
     assert!(loss_report.contains("Attribution Claim: Disallowed"));
 }
 

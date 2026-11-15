@@ -79,12 +79,10 @@ impl CaptureAnalyzer {
         self.status_code().is_complete()
     }
 
-    /// Runtime captures carry observed source streams and, for v3, bounded
-    /// stack prefixes; complete mapping/scheduler attribution remains separate.
-    /// Keep legacy fixture semantics, but never promote runtime transport integrity
-    /// to a complete CPU/off-CPU attribution claim.
+    /// Capture integrity does not certify complete CPU/off-CPU attribution.
+    /// Full scheduler and IRQ residency evidence is not available.
     pub fn attribution_claim_allowed(&self) -> bool {
-        self.data.diagnostics.is_none() && self.is_complete()
+        false
     }
 
     /// Globally order all events across all CPUs by timestamp_ns ascending (Anchor A2).
@@ -98,26 +96,10 @@ impl CaptureAnalyzer {
         query.apply(self)
     }
 
-    /// Compatibility wrapper using the same half-open Query semantics.
-    /// Invalid/missing phases return no rows; use `query` to observe the error.
-    #[deprecated(note = "use CaptureAnalyzer::query to handle invalid or ambiguous phases")]
-    pub fn events_in_phase(&self, phase_name: &str) -> Vec<crate::event::NormalizedEvent> {
-        self.query(&crate::query::Query {phase: Some(phase_name.into()), ..Default::default()})
-            .map(|result| result.events).unwrap_or_default()
-    }
-
     /// Compute aggregated semantic statistics for all events in the capture.
     pub fn aggregate_statistics(&self) -> crate::stats::SessionStatistics {
         let events = self.ordered_events();
         crate::stats::SessionStatistics::compute(&events, self.loss_counters())
-    }
-
-    /// Compatibility wrapper; pairing precedes phase selection. Invalid phases
-    /// return empty statistics, so new callers should use the fallible query.
-    #[deprecated(note = "use CaptureAnalyzer::query to handle invalid or ambiguous phases")]
-    pub fn aggregate_statistics_in_phase(&self, phase_name: &str) -> crate::stats::SessionStatistics {
-        self.query(&crate::query::Query {phase: Some(phase_name.into()), ..Default::default()})
-            .map(|result| result.stats).unwrap_or_default()
     }
 
     /// Reconstruct scheduler intervals from the complete observed event stream,

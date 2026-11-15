@@ -41,7 +41,7 @@ fn analyzer(unknown: bool) -> CaptureAnalyzer {
     CaptureAnalyzer::from_bytes(&writer.finish(300).unwrap()).unwrap()
 }
 #[test]
-fn unknown_is_preserved_and_legacy_zeros_are_not_reported_as_runtime_measurements() {
+fn unknown_is_preserved_and_unmeasured_counters_are_not_reported_as_zero() {
     let analyzer = analyzer(true);
     assert!(!analyzer.is_complete());
     let report = analyzer.render_loss_report();

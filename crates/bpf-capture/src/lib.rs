@@ -21,6 +21,6 @@ pub use record::NormalizedRecord;
 pub use recorder::{RecorderKind, RecorderMetadata, RecorderSource};
 pub use schema::{EventSchema, FieldSchema, FieldTypeId, SchemaRegistry};
 pub use session::{CaptureScope, LayeredLossCounters, SamplingSession, SessionConfig, SessionMetadata};
-pub use writer::{CaptureWriter, NativeContextFormat, SampleFormat};
+pub use writer::{CaptureWriter, NativeContextFormat};
 
 pub use diagnostics::{CounterKind, DiagnosticCounter, DiagnosticIdentity, PhaseMeasurement, RuntimeDiagnostics};

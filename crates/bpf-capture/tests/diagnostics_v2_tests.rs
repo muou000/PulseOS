@@ -49,14 +49,10 @@ fn capture(diag: RuntimeDiagnostics, include_record: bool) -> Vec<u8> {
     writer.finish(300).unwrap()
 }
 #[test]
-fn diagnostics_round_trip_uses_versioned_ieee_crc_and_keeps_legacy_readable() {
+fn diagnostics_round_trip_uses_ieee_crc() {
     assert_eq!(
         bpf_capture::framing::compute_checksum_ieee(b"123456789"),
         0xcbf43926
-    );
-    assert_eq!(
-        bpf_capture::framing::compute_checksum(b"123456789"),
-        0xc6dd3518
     );
     let bytes = capture(diagnostics(), true);
     let data = CaptureReader::from_bytes(&bytes).unwrap();
@@ -67,17 +63,28 @@ fn diagnostics_round_trip_uses_versioned_ieee_crc_and_keeps_legacy_readable() {
         data.trailer.checksum,
         bpf_capture::framing::compute_checksum_ieee(&bytes[..data.header.trailer_offset as usize])
     );
-    let old = bpf_capture::generate_deterministic_fixture(
-        CaptureArch::Riscv64,
-        SessionStatusCode::Complete,
-    )
-    .unwrap();
-    assert!(
-        CaptureReader::from_bytes(&old)
-            .unwrap()
-            .diagnostics
-            .is_none()
-    );
+}
+
+#[test]
+fn retired_container_is_rejected_even_with_a_valid_current_checksum() {
+    let mut bytes = capture(diagnostics(), true);
+    let trailer = CaptureReader::from_bytes(&bytes).unwrap().header.trailer_offset as usize;
+    bytes[8..12].copy_from_slice(&1u32.to_le_bytes());
+    let checksum = bpf_capture::framing::compute_checksum_ieee(&bytes[..trailer]);
+    bytes[trailer + 24..trailer + 28].copy_from_slice(&checksum.to_le_bytes());
+    assert_eq!(CaptureReader::from_bytes(&bytes).unwrap_err(), bpf_capture::CaptureError::UnsupportedFormatVersion(1));
+}
+
+#[test]
+fn writer_without_runtime_evidence_emits_current_partial_capture() {
+    let input = CaptureReader::from_bytes(&capture(diagnostics(), true)).unwrap();
+    let mut writer = CaptureWriter::new(input.metadata.config, input.registry);
+    writer.start(100).unwrap();
+    writer.write_record(input.records[0].clone()).unwrap();
+    let data = CaptureReader::from_bytes(&writer.finish(300).unwrap()).unwrap();
+    assert_eq!(data.header.format_version, 2);
+    assert_eq!(data.diagnostics, Some(RuntimeDiagnostics::default()));
+    assert_eq!(data.metadata.status, SessionStatusCode::IncompleteError);
 }
 #[test]
 fn loss_unknown_and_empty_records_cannot_report_complete() {

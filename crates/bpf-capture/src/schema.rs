@@ -6,7 +6,6 @@ use alloc::vec::Vec;
 use crate::framing::CaptureError;
 use crate::record::NormalizedRecord;
 
-pub const PERF_EVENT_SOFTWARE_ID: u32 = 0x1000;
 pub const PERF_EVENT_SOFTWARE_V2_ID: u32 = 0x1001;
 pub const PERF_EVENT_SOFTWARE_STACK_V3_ID: u32 = 0x1002;
 
@@ -103,6 +102,9 @@ impl SchemaRegistry {
     }
 
     pub fn validate_record(&self, record: &NormalizedRecord) -> Result<(), CaptureError> {
+        if record.event_id == 0x1000 {
+            return Err(CaptureError::InvalidRecord("retired software sample schema"));
+        }
         let Some(schema) = self.lookup(record.event_id) else {
             return Err(CaptureError::SchemaMismatch {
                 expected: 0,
@@ -129,8 +131,6 @@ impl SchemaRegistry {
         // version as today's layout. Unrelated custom IDs remain opaque.
         let native = if let Ok(metadata) = pulse_bpf_schema::lookup_by_id(record.event_id) {
             Some((metadata.version, metadata.context_size - 40))
-        } else if record.event_id == PERF_EVENT_SOFTWARE_ID {
-            Some((1, 16))
         } else if record.event_id == PERF_EVENT_SOFTWARE_V2_ID {
             Some((2, 32))
         } else if record.event_id == PERF_EVENT_SOFTWARE_STACK_V3_ID {
@@ -221,29 +221,7 @@ impl SchemaRegistry {
             });
         }
 
-        // 2. Software perf_event sampling schema
-        reg.register(EventSchema {
-            event_id: PERF_EVENT_SOFTWARE_ID,
-            category: String::from("pulse"),
-            name: String::from("perf_event"),
-            version: 1,
-            payload_size: 16,
-            fields: vec![
-                FieldSchema {
-                    name: String::from("sample_period"),
-                    offset: 0,
-                    size: 8,
-                    field_type: FieldTypeId::U64,
-                },
-                FieldSchema {
-                    name: String::from("addr"),
-                    offset: 8,
-                    size: 8,
-                    field_type: FieldTypeId::U64,
-                },
-            ],
-        });
-
+        // Software sampling schemas emitted by current producers.
         reg.register(EventSchema {
             event_id: PERF_EVENT_SOFTWARE_V2_ID, category: String::from("pulse"),
             name: String::from("perf_event_v2"), version: 2, payload_size: 32,

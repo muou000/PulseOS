@@ -124,36 +124,6 @@ impl NormalizedRecord {
         })
     }
 
-    /// Extract a normalized record from a software perf_event sample context.
-    pub fn from_perf_event_slice(event_id: u32, slice: &[u8]) -> Result<Self, CaptureError> {
-        const PERF_CTX_SIZE: usize = 48;
-        if slice.len() < PERF_CTX_SIZE {
-            return Err(CaptureError::TruncatedRecord);
-        }
-
-        let sample_period = u64::from_le_bytes(slice[0..8].try_into().unwrap());
-        let addr = u64::from_le_bytes(slice[8..16].try_into().unwrap());
-        let timestamp_ns = u64::from_le_bytes(slice[16..24].try_into().unwrap());
-        let cpu_id = u32::from_le_bytes(slice[24..28].try_into().unwrap());
-        let pid = u32::from_le_bytes(slice[28..32].try_into().unwrap());
-        let tid = u32::from_le_bytes(slice[32..36].try_into().unwrap());
-        let task_id = u64::from_le_bytes(slice[40..48].try_into().unwrap());
-
-        let mut payload = vec![0u8; 16];
-        payload[0..8].copy_from_slice(&sample_period.to_le_bytes());
-        payload[8..16].copy_from_slice(&addr.to_le_bytes());
-
-        Ok(Self {
-            event_id,
-            schema_version: 1,
-            timestamp_ns,
-            cpu_id,
-            pid,
-            tid,
-            task_id,
-            payload,
-        })
-    }
     /// Decode an explicitly identified PulseOS software-sample v2 context.
     /// A 64-byte length alone is insufficient: TaskEnqueue also uses 64 bytes.
     pub fn from_perf_event_v2_slice(slice: &[u8]) -> Result<Self, CaptureError> {

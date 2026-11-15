@@ -1,6 +1,6 @@
 use bpf_analyzer::CaptureAnalyzer;
 use bpf_capture::{CaptureArch, CaptureReader, CaptureWriter, SchemaRegistry, SessionStatusCode};
-use bpf_capture::writer::SampleFormat;
+use bpf_capture::writer::NativeContextFormat;
 use pulse_bpf_schema::{PerfEventContext, PerfSampleContext};
 
 #[test]
@@ -13,7 +13,7 @@ fn v2_hotspot_uses_instruction_pointer_and_keeps_privilege_mode() {
         base: PerfEventContext::new(10_000_000, 0xdead, 200, 3, 40, 41, 99),
         ip: 0x400110, mode: 2, version: 2,
     };
-    writer.ingest_perf_sample_as(3, &sample.to_bytes(), SampleFormat::PerfEventV2).unwrap();
+    writer.ingest_perf_sample_as(3, &sample.to_bytes(), NativeContextFormat::PerfEventV2).unwrap();
     let analyzer = CaptureAnalyzer::from_bytes(&writer.finish(300).unwrap()).unwrap();
     let table = analyzer.render_event_table();
     assert!(table.contains("pc=0x0000000000400110"), "{table}");

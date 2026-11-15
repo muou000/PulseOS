@@ -51,7 +51,7 @@ pub struct FaultReport {
     pub resolved_unknown: u64,
     /// NotHandled, NoMemory and ResolverError; classification is not applicable.
     pub unsuccessful: u64,
-    /// Raw Unknown tags, including unsuccessful legacy completions.
+    /// Raw Unknown tags, including unsuccessful completions.
     pub unknown_classification: u64,
     pub unknown_access: u64,
     pub unknown_identity: u64,
