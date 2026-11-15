@@ -552,7 +552,11 @@ impl axfs::ProcfsProcessProvider for PulseProcessProvider {
             let timer = crate::bpf::sampling::stats_snapshot();
             let trace = axtask::bpf_trace::total_drop_stats();
             let fault = axtask::bpf_trace::page_fault_stats();
-            let mut text = alloc::format!("PULSE_BPF_STATS version=1 pid={} available=1\n", process.pid());
+            // Capability version is independent of the diagnostics row format.
+            // Freeze the actual online set rather than the configured maximum.
+            let mut text = alloc::format!("PULSE_BPF_STATS version=1 pid={} available=1 capabilities_version=1 online_mask={} cpu_clock=1 task_clock=1 sched=1 fault=1 min_period_ns=1 registered_events={} trace_subscriptions={}\n",
+                process.pid(), axhal::online_cpu_mask(), crate::bpf::registered_perf_event_count(),
+                crate::bpf::tracepoint_subscription_count());
             writeln!(&mut text, "GLOBAL timer_enqueued={} timer_dequeued={} timer_full={} timer_busy={} trace_enqueued={} trace_full={} trace_recursive={} fault_started={} fault_completed={} fault_clock_errors={}",
                 timer.enqueued, timer.dequeued, timer.full, timer.busy,
                 trace.total_enqueued, trace.dropped_full, trace.dropped_recursive, fault.started, fault.completed, fault.clock_errors).ok()?;
@@ -572,12 +576,14 @@ impl axfs::ProcfsProcessProvider for PulseProcessProvider {
                     PerfEventScope::PerCpu { cpu } => ("cpu", cpu as u64),
                     PerfEventScope::Task { pid } => ("task", pid),
                 };
-                writeln!(&mut text, "EVENT fd={} id={} clock={} config={} scope={} target={} task_id={} period={} generation={} enabled={} inflight={} observed={} delivered={} skipped={} cancelled={} invalid={} reentry={} helper={} budget={} transport_lost={} consumer_corrupt={} consumer_bounds={} program_id={}",
+                let live_target = object.live_target_tid();
+                writeln!(&mut text, "EVENT fd={} id={} clock={} config={} scope={} target={} task_id={} period={} generation={} enabled={} inflight={} observed={} delivered={} skipped={} cancelled={} invalid={} reentry={} helper={} budget={} transport_lost={} consumer_corrupt={} consumer_bounds={} program_id={} target_alive={} current_tid={}",
                     fd, d.id, clock, config, scope, target, d.task_id, d.period, d.generation,
                     u8::from(d.enabled), d.inflight, d.runtime.observed, d.samples.delivered_samples,
                     d.runtime.skipped_periods, d.runtime.cancelled, d.runtime.invalid,
                     d.samples.re_entry_drops, d.samples.helper_failures, d.samples.budget_failures,
-                    d.transport_lost, d.consumer.corrupt_records, d.consumer.out_of_bounds, d.program_id).ok()?;
+                    d.transport_lost, d.consumer.corrupt_records, d.consumer.out_of_bounds, d.program_id,
+                    u8::from(live_target.is_some()), live_target.unwrap_or(0)).ok()?;
                 let program = event.attached_prog();
                 // A concurrent detach/reattach must not pair an EVENT row for
                 // program A with PROGRAM counters from B. Fail this snapshot

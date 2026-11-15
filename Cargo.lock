@@ -914,6 +914,7 @@ version = "0.1.0"
 dependencies = [
  "bpf-capture",
  "pulse_bpf_schema",
+ "serde_json",
  "sha2",
 ]
 
@@ -924,6 +925,14 @@ dependencies = [
  "pulse_bpf_schema",
  "serde_json",
  "sha2",
+]
+
+[[package]]
+name = "bpf-record"
+version = "0.1.0"
+dependencies = [
+ "bpf-capture",
+ "pulse_bpf_schema",
 ]
 
 [[package]]

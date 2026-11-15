@@ -1465,4 +1465,35 @@ mod tests {
         assert_ne!(snapshot.id, 0);
     }
 
+    #[test]
+    fn recorder_stop_rejects_pending_fault_completion_across_new_activation() {
+        use pulse_bpf_schema::{ContextCommon, PageFaultAccess, PageFaultContext,
+            PageFaultOrigin, PageFaultOutcome, TracepointId};
+        let event = PerfEvent::new(PerfEventSpec {
+            clock: PerfEventClock::Tracepoint(TracepointId::PageFault),
+            scope: PerfEventScope::PerCpu { cpu: 12 }, sample_period: 1,
+            disabled: true, cloexec: false,
+        }, 0);
+        let program = dummy_prog(BpfProgType::Tracepoint);
+        event.attach_program(program.clone()).unwrap();
+        event.enable_at(100);
+        // A resolver entered this activation but has not submitted a VM yet.
+        let entry_generation = observation_generation();
+        event.disable_at(200);
+        assert_eq!(event.diagnostics().inflight, 0);
+        let completion = PageFaultContext::from_completion(
+            ContextCommon::new(TracepointId::PageFault, 400, 12, 42, 42, 420),
+            0x400000, 150, PageFaultAccess::READ, PageFaultOrigin::User,
+            PageFaultOutcome::Resolved,
+        ).unwrap().to_bytes();
+        assert_eq!(event.dispatch_tracepoint(TracepointId::PageFault, &completion, entry_generation), Ok(false));
+        event.enable_at(300);
+        assert_eq!(event.dispatch_tracepoint(TracepointId::PageFault, &completion, entry_generation), Ok(false));
+        assert_eq!(program.run_cnt(), 0, "VM quiescence must not admit an old resolver into the next session");
+        assert!(event.runtime_counters().cancelled >= 1);
+        assert_eq!(event.dispatch_tracepoint(TracepointId::PageFault, &completion, observation_generation()), Ok(true));
+        assert_eq!(program.run_cnt(), 1);
+        event.disable_at(500);
+    }
+
 }
