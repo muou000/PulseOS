@@ -358,7 +358,6 @@ dependencies = [
  "axpoll",
  "axtask",
  "cfg-if",
- "crate_interface",
  "fdt-raw",
  "kspin",
  "log",
@@ -400,8 +399,6 @@ version = "0.1.2"
 dependencies = [
  "axdriver_base",
  "axpoll",
- "fxmac_rs",
- "ixgbe-driver",
  "log",
  "spin 0.9.8",
 ]
@@ -1098,12 +1095,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "773648b94d0e5d620f64f280777445740e61fe701025087ec8b57f45c791888b"
 
 [[package]]
-name = "core_detect"
-version = "1.0.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7f8f80099a98041a3d1622845c271458a2d73e688351bf3cb999266764b81d48"
-
-[[package]]
 name = "cpufeatures"
 version = "0.2.17"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1571,16 +1562,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "fxmac_rs"
-version = "0.2.0"
-source = "git+https://github.com/elliott10/fxmac_rs.git?rev=0dbc3916#0dbc3916d5d5a0086916deda0c4c2dd8651c69ce"
-dependencies = [
- "aarch64-cpu 10.0.0",
- "crate_interface",
- "log",
-]
-
-[[package]]
 name = "generic-array"
 version = "0.14.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1736,18 +1717,6 @@ name = "itoa"
 version = "1.0.19"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3bd1574e617a9a6c1f8f8181bd7e841e1f20e4277607ef28945765188d6284d4"
-
-[[package]]
-name = "ixgbe-driver"
-version = "0.1.0"
-source = "git+https://github.com/KuangjuX/ixgbe-driver.git?rev=8e5eb74#8e5eb741299d7d95c373ec745e39a1473fe84563"
-dependencies = [
- "bit_field",
- "core_detect",
- "log",
- "smoltcp",
- "volatile 0.3.0",
-]
 
 [[package]]
 name = "jiff"
@@ -2853,12 +2822,6 @@ name = "volatile"
 version = "0.2.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f6b06ad3ed06fef1713569d547cdbdb439eafed76341820fb0e0344f29a41945"
-
-[[package]]
-name = "volatile"
-version = "0.3.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f8e76fae08f03f96e166d2dfda232190638c10e0383841252416f9cfe2ae60e6"
 
 [[package]]
 name = "volatile"

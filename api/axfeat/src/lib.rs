@@ -30,7 +30,6 @@
 //!     - `bus-mmio`: Use device tree to probe all MMIO devices.
 //!     - `bus-pci`: Use PCI bus to probe all PCI devices.
 //!     - `driver-ramdisk`: Use the RAM disk to emulate the block device.
-//!     - `driver-ixgbe`: Enable the Intel 82599 10Gbit NIC driver.
 //!     - `driver-bcm2835-sdhci`: Enable the BCM2835 SDHCI driver (Raspberry Pi SD card).
 //! - Logging
 //!     - `log-level-off`: Disable all logging.
