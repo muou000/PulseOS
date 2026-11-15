@@ -26,6 +26,8 @@ bpf-record --events cpu,cpu,task,sched,fault --tid 123 --duration-ms 1000 --outp
 
 `task` requires an explicit existing TID. A numeric TID is resolved to the
 kernel's bound task identity; it does not mean every thread of a process.
+The source retains that identity when a nonleader exec changes its numeric
+TID, and lifetime checks query that bound task rather than a recycled TID.
 `cpu`, `sched`, and `fault` collect on the selected online CPUs. In a mixed
 session `--tid` applies only to `task`; it does not filter scheduler subjects
 or fault events. A task may migrate, so task sessions require all online CPU
@@ -56,6 +58,11 @@ VM completion does not imply all fault resolvers have returned: old entry
 generations cannot enter a new activation, and unresolved provenance remains
 explicitly unknown. Output errors return failure; an absent or truncated
 trailer is not a complete capture.
+Control errors go through best-effort disable of every source. Recoverable
+errors retain a valid partial capture and return failure. If the final boundary
+cannot be established, the recorder detaches links and preserves a nonempty
+capture prefix with observed records and unknown stop time, without a trailer;
+the analyzer rejects that unfinished file instead of asserting completeness.
 
 ## Capture and analysis
 
@@ -65,6 +72,8 @@ envelope containing kind, context length and logical source ID. The consumer
 checks it against the prepared source, including scope and period. It never
 infers a source from a 64-byte context, CPU, or period. Source declarations
 include kernel event/program/link IDs and individual enable/disable windows.
+Source metadata revision 2 also stores the stable task identity; earlier
+revision 1 records remain readable with that identity explicitly unknown.
 Preparing multiple sources does not create an atomic shared start time.
 
 ```sh
