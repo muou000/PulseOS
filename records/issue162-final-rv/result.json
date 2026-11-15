@@ -1,0 +1,7 @@
+{
+  "arch": "riscv64",
+  "suite": "mounts",
+  "passed_assertions": 397,
+  "errors": [],
+  "kernel_sha256": "ead986f338350c0bd52d6c6337322da652708adcf6b6fceb86dd03ef23e7a826"
+}
