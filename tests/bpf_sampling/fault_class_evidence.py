@@ -12,9 +12,20 @@ import json
 from pathlib import Path
 import re
 import struct
+import tarfile
+import tempfile
 from verify_observation_evidence import check, compare_records, decode_capture, decode_raw, verify_faults
 
 CASES=('anonymous','cold','hot','cow','cached_target_cold_neighbor','cold_neighbor')
+LIFECYCLE_CASES={
+    'prepared_pin_drop','fault_io_unsupported_and_error','fault_io_retry_and_cancel',
+    'stale_file_replace','deferred_file_unmap','partial_file_unmap','partial_anonymous_unmap',
+    'unused_file_mapping_drop','file_fork_cow','fault_io_owner_waiter',
+    'fault_io_hot_target_cold_neighbor','fault_io_cancel_error_retry',
+    'fault_io_unsupported_generation_retry','cache_identity_publication',
+    'cache_write_failure_retry','cache_redirty_checkpoint','cache_durability_recovery',
+    'cache_snapshot_identity_generations','fault_io_block_cache_neighbor','sync_failure_refuses_reset',
+}
 MARKER=re.compile(r'^FAULT_CLASS kind=(\w+) point=(begin|end) address=(\d+) pid=(\d+) tid=(\d+) time_ns=(\d+)\s*$',re.M)
 READ=re.compile(r'virtio_blk_handle_read vdev (0x[0-9a-f]+) req (0x[0-9a-f]+) sector (\d+) nsectors (\d+)$')
 COMPLETE=re.compile(r'virtio_blk_rw_complete vdev (0x[0-9a-f]+) req (0x[0-9a-f]+) ret (-?\d+)$')
@@ -172,11 +183,68 @@ def verify(run):
     check(all(summary.get(key)==value for key,value in counts.items()),
           'host success/error totals differ from RAW records')
     report['classification_counts']=counts
+    lifecycle=re.findall(r'MLC_KERNEL PASS (\w+)',text)
+    features=inputs.get('kernel_build_provenance',{}).get('configuration',{}).get('values',{}).get('features','')
+    if 'mapping-lifecycle-test' in features.split():
+        check(set(lifecycle)==LIFECYCLE_CASES and len(lifecycle)==len(LIFECYCLE_CASES)
+              and 'MLC_KERNEL RESULT FAIL' not in text,'kernel lifecycle checks missing/failed')
+    report['kernel_lifecycle_cases']=lifecycle
     report['arch']=inputs['arch']
     (run/'fault-classification-evidence.json').write_text(json.dumps(report,indent=2)+'\n')
     return report
 
 
+def verify_index(directory):
+    directory=Path(directory)
+    index=json.loads((directory/'index.json').read_text())
+    check(index['format']=='pulse-fault-classification-evidence' and index['version']==1,
+          'unsupported classification evidence index')
+    reports={}
+    for name,entry in index['runs'].items():
+        bundle=directory/entry['bundle']
+        check(bundle.parent==directory and hashlib.sha256(bundle.read_bytes()).hexdigest()==entry['bundle_sha256'],
+              'bundle path/hash mismatch')
+        with tempfile.TemporaryDirectory(prefix='fault-evidence-') as temporary:
+            root=Path(temporary)
+            found=set()
+            with tarfile.open(bundle,'r:gz') as archive:
+                for member in archive:
+                    check(member.isfile() and '/' not in member.name and member.name not in ('.','..')
+                          and member.name not in found and member.name in entry['members_sha256']
+                          and member.size<=64*1024*1024,'unsafe/unindexed evidence member')
+                    found.add(member.name)
+                    stream=archive.extractfile(member)
+                    check(stream is not None,'missing evidence member body')
+                    data=stream.read()
+                    check(hashlib.sha256(data).hexdigest()==entry['members_sha256'][member.name],
+                          'evidence member SHA mismatch')
+                    (root/member.name).write_bytes(data)
+            check(found==set(entry['members_sha256']),'evidence archive omitted indexed members')
+            inputs=json.loads((root/'inputs.json').read_text())
+            check(hashlib.sha256((root/'kernel.elf').read_bytes()).hexdigest()==inputs['kernel_elf_sha256'],
+                  'kernel ELF identity mismatch')
+            check(hashlib.sha256((root/'payload.elf').read_bytes()).hexdigest()==inputs['payload_sha256'],
+                  'guest payload identity mismatch')
+            layout=json.loads((root/'fault-file-layout.json').read_text())
+            check(hashlib.sha256((root/'fault-data').read_bytes()).hexdigest()==layout['sha256'],
+                  'fixture data identity mismatch')
+            if entry['kind']=='red_baseline':
+                records,_=decode_raw((root/'records.pbraw').read_bytes(),'fault')
+                normalized,_=decode_capture((root/'capture.pbcapture').read_bytes(),inputs['arch'])
+                compare_records(records,normalized)
+                check(all(struct.unpack_from('<I',record.payload,36)[0]==0 for record in records),
+                      'red baseline is not the original Unknown-classification capture')
+                result=json.loads((root/'result.json').read_text())
+                check(result['passed'] is False and any('target classification differs from device oracle' in e
+                      for e in result['errors']),'baseline original failure is missing')
+                reports[name]=dict(kind='red_baseline',unknown_records=len(records),expected_failure=result['errors'])
+            else:
+                check(entry['kind']=='acceptance','unknown bundle kind')
+                reports[name]=verify(root)
+    return reports
+
+
 if __name__=='__main__':
     import sys
-    print(json.dumps(verify(sys.argv[1]),indent=2))
+    path=Path(sys.argv[1])
+    print(json.dumps(verify_index(path) if (path/'index.json').exists() else verify(path),indent=2))

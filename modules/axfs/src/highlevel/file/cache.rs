@@ -2849,8 +2849,8 @@ impl CachedFile {
         pin: Option<bool>,
         demand_pages: usize,
         observe_target: bool,
-    ) -> VfsResult<(usize, Option<SharedPagePaddrs>, Option<bool>)> {
-        let mut storage_read = Some(false);
+    ) -> VfsResult<(usize, Option<SharedPagePaddrs>, axmm::FilePageIo)> {
+        let mut storage_read = axmm::FilePageIo::NoStorageRead;
         let requested_pages = requested_pages.max(1);
         debug_assert!(pin.is_some() || demand_pages <= requested_pages);
         let page_locks = self
@@ -2943,11 +2943,12 @@ impl CachedFile {
             let (mut new_pages, io) = self
                 .load_pages_async(file, fill_page, fill_count, file_len, observe_target)
                 .await?;
-            storage_read = match (storage_read, io) {
-                (Some(true), _) | (_, Some(true)) => Some(true),
-                (Some(false), Some(false)) => Some(false),
-                _ => None,
+            let io = match io {
+                Some(true) => axmm::FilePageIo::StorageRead,
+                Some(false) => axmm::FilePageIo::NoStorageRead,
+                None => axmm::FilePageIo::Unknown,
             };
+            storage_read = storage_read.combine(io);
 
             // Direct writes hold the exclusive side while changing the backend
             // and invalidating the cache. Validate and publish under the shared
@@ -3651,11 +3652,6 @@ impl CachedFile {
             let (_, pages, io) = self.ensure_pages_loaded_async(
                 file, pn, requested_pages, Some(may_write), 0, true,
             ).await?;
-            let io = match io {
-                Some(true) => axmm::FilePageIo::StorageRead,
-                Some(false) => axmm::FilePageIo::NoStorageRead,
-                None => axmm::FilePageIo::Unknown,
-            };
             Ok((pages.ok_or(VfsError::BadState)?, io))
         }.await;
         if may_write && result.is_ok() {
