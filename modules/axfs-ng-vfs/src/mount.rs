@@ -249,7 +249,7 @@ fn is_slave_of(peer_mp: &Arc<Mountpoint>, parent_pg: u64) -> bool {
 //    allowing concurrent multi-CPU path resolution, root checks, parent/path
 //    traversals, and subtree snapshots to observe an atomic topology state.
 // 3. Writers (`attach_mount`, `unmount_with`,
-//    `unmount_all_with`, `move_mount`) acquire `TopologyWriteGuard` via
+//    `unmount_all_with`, `move_mount_with`) acquire `TopologyWriteGuard` via
 //    `topology_sync::lock_topology_write()`, updating parent links and child
 //    registries together as a single indivisible topology transition.
 //    Ordinary, bind and shadow mounts all use `attach_mount`. Bookkeeping
@@ -1697,6 +1697,24 @@ impl Location {
     /// Move this mount (which must be an attached mountpoint root) to `new_parent`.
     /// The directory `new_parent` must not already host a mount or lie inside `self`.
     pub fn move_mount(&self, new_parent: &Location) -> VfsResult<Arc<Mountpoint>> {
+        self.move_mount_with(new_parent, None, |_| Ok(()))
+    }
+
+    /// Move this mount and commit bookkeeping for its exact subtree under the
+    /// topology writer. Rejection or unwind restores both parent registries and
+    /// the original attachment before unlock, preserving the mount identity.
+    ///
+    /// When supplied, `expected_paths` contains the source and destination
+    /// absolute paths captured while preparing bookkeeping. A changed ancestor
+    /// rejects the move with `ResourceBusy` before invoking `commit`.
+    /// The callback has the same requirements as [`Self::mount_with`]; it must
+    /// prepare allocations beforehand and must not inspect topology.
+    pub fn move_mount_with(
+        &self,
+        new_parent: &Location,
+        expected_paths: Option<(&str, &str)>,
+        commit: impl FnOnce(&[Arc<Mountpoint>]) -> VfsResult<()>,
+    ) -> VfsResult<Arc<Mountpoint>> {
         if !self.is_root_of_mount() {
             return Err(VfsError::InvalidInput);
         }
@@ -1710,9 +1728,37 @@ impl Location {
         let mut old_parent_keep = None;
         let mut removed_old_weak = None;
         let mut stale_target_weak = None;
+        let mut rejected_target_weak = None;
         let mut old_attachment = MountAttachment::Detached;
+        let mut source_components = Vec::new();
+        let mut target_components = Vec::new();
+        let mut kept_entries = Vec::new();
+        let mut moved_mps = Vec::new();
+        let mut duplicate_arcs = Vec::new();
         let move_result = {
             let mut guard = topology_sync::lock_topology_write();
+            let paths_match = expected_paths.is_none_or(|(source_path, target_path)| {
+                self.collect_path_components(
+                    |mp| guard.get(&mp.topology).parent_location(),
+                    &mut source_components,
+                    &mut kept_entries,
+                );
+                new_parent.collect_path_components(
+                    |mp| guard.get(&mp.topology).parent_location(),
+                    &mut target_components,
+                    &mut kept_entries,
+                );
+                source_path.starts_with('/')
+                    && source_components
+                        .iter()
+                        .map(String::as_str)
+                        .eq(source_path.rsplit('/').filter(|part| !part.is_empty()))
+                    && target_path.starts_with('/')
+                    && target_components
+                        .iter()
+                        .map(String::as_str)
+                        .eq(target_path.rsplit('/').filter(|part| !part.is_empty()))
+            });
             let old_info = guard
                 .get(&mp.topology)
                 .parent_link()
@@ -1729,6 +1775,8 @@ impl Location {
                     .is_some_and(|weak| core::ptr::eq(Weak::as_ptr(weak), Arc::as_ptr(mp)));
                 if !is_registered {
                     Err(VfsError::InvalidInput)
+                } else if !paths_match {
+                    Err(VfsError::ResourceBusy)
                 } else if matches!(
                     guard.get(&new_parent_mp.topology).attachment,
                     MountAttachment::Detached
@@ -1747,6 +1795,27 @@ impl Location {
                 {
                     Err(VfsError::ResourceBusy)
                 } else {
+                    // Gather identities while the same writer excludes child
+                    // attachments and moves. A pathname can also belong to a
+                    // lower stacked mount that is not part of this subtree.
+                    let mut visited = HashSet::new();
+                    visited.insert(mp.id);
+                    moved_mps.push(mp.clone());
+                    let mut index = 0;
+                    while index < moved_mps.len() {
+                        let node = moved_mps[index].clone();
+                        for weak in guard.get(&node.topology).children.values() {
+                            if let Some(child_mp) = weak.upgrade() {
+                                if visited.insert(child_mp.id) {
+                                    moved_mps.push(child_mp);
+                                } else {
+                                    duplicate_arcs.push(child_mp);
+                                }
+                            }
+                        }
+                        duplicate_arcs.push(node);
+                        index += 1;
+                    }
                     guard
                         .get_mut(&new_parent_mp.topology)
                         .children
@@ -1766,20 +1835,41 @@ impl Location {
                             entry_key: new_entry_key,
                         }),
                     );
-                    // Publish `true` on `new_parent_mp` before potentially clearing
-                    // `old_parent_mp` so lock-free negative fast-path probes never
-                    // observe both parents empty across the move boundary.
-                    new_parent_mp.has_children.store(true, Ordering::Release);
-                    if !Arc::ptr_eq(old_parent_mp, new_parent_mp)
-                        && !guard
-                            .get(&old_parent_mp.topology)
-                            .children
-                            .values()
-                            .any(|weak| weak.strong_count() > 0)
-                    {
-                        old_parent_mp.has_children.store(false, Ordering::Release);
+                    let rollback = TopologyRollback(Some(|| {
+                        let target_children = &mut guard.get_mut(&new_parent_mp.topology).children;
+                        rejected_target_weak = target_children.remove(&new_entry_key);
+                        if let Some(stale) = stale_target_weak.take() {
+                            target_children.insert(new_entry_key, stale);
+                        }
+                        if let Some(removed) = removed_old_weak.take() {
+                            guard
+                                .get_mut(&old_parent_mp.topology)
+                                .children
+                                .insert(old_entry_key, removed);
+                        }
+                        mem::swap(
+                            &mut guard.get_mut(&mp.topology).attachment,
+                            &mut old_attachment,
+                        );
+                    }));
+                    let result = commit(&moved_mps);
+                    if result.is_ok() {
+                        rollback.commit();
+                        // Publish the new parent's positive fast path before
+                        // clearing the old parent's. A rejected transition must
+                        // never publish a speculative negative fast path.
+                        new_parent_mp.has_children.store(true, Ordering::Release);
+                        if !Arc::ptr_eq(old_parent_mp, new_parent_mp)
+                            && !guard
+                                .get(&old_parent_mp.topology)
+                                .children
+                                .values()
+                                .any(|weak| weak.strong_count() > 0)
+                        {
+                            old_parent_mp.has_children.store(false, Ordering::Release);
+                        }
                     }
-                    Ok(())
+                    result
                 }
             } else {
                 // Reject moving root mounts and already-unmounted mounts.
@@ -1790,7 +1880,11 @@ impl Location {
             old_parent_keep,
             removed_old_weak,
             stale_target_weak,
+            rejected_target_weak,
             old_attachment,
+            kept_entries,
+            moved_mps,
+            duplicate_arcs,
         ));
         move_result?;
 
@@ -2748,6 +2842,189 @@ mod tests {
         }
         resolver.join().unwrap();
         mounted_root.unmount().unwrap();
+    }
+
+    #[test]
+    fn rejected_move_commit_preserves_stack_and_subtree_and_can_retry() {
+        let root = Mountpoint::new_root(&MemFs::create("root")).root_location();
+        let original = mkdir(&root, "original");
+        let destination = mkdir(&root, "destination");
+        let lower = original.mount(&MemFs::create("lower")).unwrap();
+        let upper = lower.root_location().mount(&MemFs::create("upper")).unwrap();
+        let child = mkdir(&upper.root_location(), "child")
+            .mount(&MemFs::create("child"))
+            .unwrap();
+        let upper_root = upper.root_location();
+        assert!(matches!(
+            upper_root.move_mount_with(
+                &destination,
+                Some(("/original", "/destination")),
+                |moved| {
+                    assert_eq!(moved.len(), 2);
+                    assert!(moved.iter().any(|mp| Arc::ptr_eq(mp, &upper)));
+                    assert!(moved.iter().any(|mp| Arc::ptr_eq(mp, &child)));
+                    assert!(!moved.iter().any(|mp| Arc::ptr_eq(mp, &lower)));
+                    Err(VfsError::Io)
+                },
+            ),
+            Err(VfsError::Io)
+        ));
+        assert!(
+            block_on(root.lookup_no_follow("original"))
+                .unwrap()
+                .ptr_eq(&upper_root)
+        );
+        assert!(!destination.is_mountpoint());
+        assert_eq!(
+            child.root_location().absolute_path().unwrap().as_str(),
+            "/original/child"
+        );
+        upper_root
+            .move_mount_with(&destination, Some(("/original", "/destination")), |_| Ok(()))
+            .unwrap();
+        assert!(
+            block_on(root.lookup_no_follow("original"))
+                .unwrap()
+                .ptr_eq(&lower.root_location())
+        );
+        assert!(
+            block_on(root.lookup_no_follow("destination"))
+                .unwrap()
+                .ptr_eq(&upper_root)
+        );
+        assert_eq!(
+            child.root_location().absolute_path().unwrap().as_str(),
+            "/destination/child"
+        );
+        upper_root.unmount_all().unwrap();
+        lower.root_location().unmount().unwrap();
+    }
+
+    #[test]
+    fn move_rejects_changed_source_and_destination_ancestors_before_commit() {
+        let root = Mountpoint::new_root(&MemFs::create("root")).root_location();
+        let source_parent = mkdir(&root, "source_old")
+            .mount(&MemFs::create("source_parent"))
+            .unwrap();
+        let destination_parent = mkdir(&root, "destination_old")
+            .mount(&MemFs::create("destination_parent"))
+            .unwrap();
+        let moving = mkdir(&source_parent.root_location(), "moving")
+            .mount(&MemFs::create("moving"))
+            .unwrap();
+        let destination = mkdir(&destination_parent.root_location(), "slot");
+        source_parent
+            .root_location()
+            .move_mount(&mkdir(&root, "source_new"))
+            .unwrap();
+        assert!(matches!(
+            moving.root_location().move_mount_with(
+                &destination,
+                Some(("/source_old/moving", "/destination_old/slot")),
+                |_| panic!("stale source must fail before bookkeeping"),
+            ),
+            Err(VfsError::ResourceBusy)
+        ));
+        destination_parent
+            .root_location()
+            .move_mount(&mkdir(&root, "destination_new"))
+            .unwrap();
+        assert!(matches!(
+            moving.root_location().move_mount_with(
+                &destination,
+                Some(("/source_new/moving", "/destination_old/slot")),
+                |_| panic!("stale destination must fail before bookkeeping"),
+            ),
+            Err(VfsError::ResourceBusy)
+        ));
+        assert_eq!(
+            moving.root_location().absolute_path().unwrap().as_str(),
+            "/source_new/moving"
+        );
+        assert!(!destination.is_mountpoint());
+        moving
+            .root_location()
+            .move_mount_with(
+                &destination,
+                Some(("/source_new/moving", "/destination_new/slot")),
+                |_| Ok(()),
+            )
+            .unwrap();
+        assert_eq!(
+            moving.root_location().absolute_path().unwrap().as_str(),
+            "/destination_new/slot"
+        );
+        moving.root_location().unmount().unwrap();
+        source_parent.root_location().unmount().unwrap();
+        destination_parent.root_location().unmount().unwrap();
+    }
+
+    #[test]
+    fn rejected_and_unwinding_moves_never_disappear_from_concurrent_resolution() {
+        let root = Mountpoint::new_root(&MemFs::create("root")).root_location();
+        let source_parent = mkdir(&root, "from")
+            .mount(&MemFs::create("source_parent"))
+            .unwrap();
+        let destination_parent = mkdir(&root, "to")
+            .mount(&MemFs::create("destination_parent"))
+            .unwrap();
+        let moving = mkdir(&source_parent.root_location(), "slot")
+            .mount(&MemFs::create("moving"))
+            .unwrap();
+        let destination = mkdir(&destination_parent.root_location(), "slot");
+        assert!(
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let _ = moving.root_location().move_mount_with(&destination, None, |_| {
+                    panic!("reject move")
+                });
+            }))
+            .is_err()
+        );
+        assert!(
+            block_on(source_parent.root_location().lookup_no_follow("slot"))
+                .unwrap()
+                .ptr_eq(&moving.root_location())
+        );
+        assert!(!destination.is_mountpoint());
+
+        let iterations = if cfg!(miri) { 12 } else { 2_000 };
+        let barrier = Arc::new(Barrier::new(2));
+        let resolver = {
+            let barrier = barrier.clone();
+            let source_parent = source_parent.clone();
+            let destination_parent = destination_parent.clone();
+            let moving = moving.clone();
+            let destination = destination.clone();
+            thread::spawn(move || {
+                barrier.wait();
+                for _ in 0..iterations {
+                    assert!(
+                        block_on(source_parent.root_location().lookup_no_follow("slot"))
+                            .unwrap()
+                            .ptr_eq(&moving.root_location())
+                    );
+                    assert!(
+                        block_on(destination_parent.root_location().lookup_no_follow("slot"))
+                            .unwrap()
+                            .ptr_eq(&destination)
+                    );
+                }
+            })
+        };
+        barrier.wait();
+        for _ in 0..iterations {
+            assert!(matches!(
+                moving.root_location().move_mount_with(&destination, None, |_| {
+                    thread::yield_now();
+                    Err(VfsError::Io)
+                }),
+                Err(VfsError::Io)
+            ));
+        }
+        resolver.join().unwrap();
+        moving.root_location().unmount().unwrap();
+        source_parent.root_location().unmount().unwrap();
+        destination_parent.root_location().unmount().unwrap();
     }
 
     #[test]
