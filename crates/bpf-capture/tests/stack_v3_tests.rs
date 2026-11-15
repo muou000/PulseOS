@@ -70,8 +70,8 @@ fn unknown_required_extensions_and_future_native_versions_fail_closed() {
         assert!(CaptureReader::from_bytes(&bad).is_err());
     }
     let mut future = bytes.clone();
-    future[8..12].copy_from_slice(&5u32.to_le_bytes());
-    assert_eq!(CaptureReader::from_bytes(&future).unwrap_err(),CaptureError::UnsupportedFormatVersion(5));
+    future[8..12].copy_from_slice(&6u32.to_le_bytes());
+    assert_eq!(CaptureReader::from_bytes(&future).unwrap_err(),CaptureError::UnsupportedFormatVersion(6));
     for offset in [104,120] {
         let mut raw=context(123); raw[offset]=7;
         assert!(NormalizedRecord::from_software_stack_v3_slice(&raw).is_err());

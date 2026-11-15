@@ -267,6 +267,7 @@ fn render_json_inner(
     };
 
     writeln!(&mut out, "{{").unwrap();
+    writeln!(&mut out, "  \"format_version\": {},", hdr.format_version).unwrap();
     writeln!(&mut out, "  \"is_complete\": {},", is_comp).unwrap();
     writeln!(&mut out, "  \"status\": \"{}\",", status_str).unwrap();
     writeln!(
@@ -285,6 +286,9 @@ fn render_json_inner(
     writeln!(&mut out, "  \"sample_period\": {},", meta.config.sample_period).unwrap();
     writeln!(&mut out, "  \"buffer_pages\": {},", meta.config.buffer_pages).unwrap();
     writeln!(&mut out, "  \"records_count\": {},", selected.map_or(hdr.records_count, |q|q.events.len() as u64)).unwrap();
+    write!(&mut out, "  \"recorder\": ").unwrap();
+    render_recorder_json(&mut out, analyzer.data().recorder.as_ref());
+    writeln!(&mut out, ",").unwrap();
     if let Some(result) = selected {
         writeln!(&mut out, "  \"capture_records_count\": {},", hdr.records_count).unwrap();
         writeln!(&mut out, "  \"context_records_count\": {},", result.context_records_count).unwrap();
@@ -388,6 +392,41 @@ fn render_json_inner(
     write!(&mut out, "}}").unwrap();
 
     out
+}
+
+/// Bindings describe the complete transport stream even when the surrounding
+/// report contains a filtered query. Their order is never timestamp sorting.
+fn render_recorder_json(out: &mut String, recorder: Option<&bpf_capture::RecorderMetadata>) {
+    let Some(recorder) = recorder else { out.push_str("null"); return; };
+    let mut counts = BTreeMap::<u32, u64>::new();
+    for id in &recorder.record_sources { *counts.entry(*id).or_default() += 1; }
+    out.push_str("{\"scope\":\"whole_capture_transport_order\",\"sources\":[");
+    for (index, source) in recorder.sources.iter().enumerate() {
+        if index != 0 { out.push(','); }
+        let kind = match source.kind {
+            bpf_capture::RecorderKind::SoftwareV2 => "software-v2",
+            bpf_capture::RecorderKind::Tracepoint => "tracepoint",
+        };
+        let (cpu, tid) = match source.scope {
+            bpf_capture::CaptureScope::PerCpu(cpu) => (Some(cpu as u64), None),
+            bpf_capture::CaptureScope::Task(tid) => (None, Some(tid)),
+            bpf_capture::CaptureScope::AllCpus => (None, None),
+        };
+        write!(out, concat!("{{\"logical_source\":{},\"kind\":{},\"event_id\":{},\"schema_version\":{},",
+            "\"cpu\":{},\"tid\":{},\"period\":{},\"kernel_event_id\":{},\"program_id\":{},\"link_id\":{},",
+            "\"enable_before_ns\":{},\"enable_after_ns\":{},\"disable_before_ns\":{},\"disable_after_ns\":{},\"records_count\":{}}}"),
+            source.id, json_string(kind), source.event_id, source.schema_version,
+            optional_number(cpu), optional_number(tid), source.sample_period,
+            source.kernel_event_id, source.program_id, source.link_id,
+            source.enable_before_ns, source.enable_after_ns, source.disable_before_ns, source.disable_after_ns,
+            counts.get(&source.id).copied().unwrap_or(0)).unwrap();
+    }
+    out.push_str("],\"record_sources\":[");
+    for (index, id) in recorder.record_sources.iter().enumerate() {
+        if index != 0 { out.push(','); }
+        write!(out, "{id}").unwrap();
+    }
+    out.push_str("]}");
 }
 
 /// Render on-CPU folded stack frames compatible with FlameGraph.

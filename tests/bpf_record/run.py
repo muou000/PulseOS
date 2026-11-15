@@ -1,0 +1,444 @@
+#!/usr/bin/env python3
+"""Run the real bpf-record CLI against separately launched guest workloads.
+
+The existing bpf_smoke helpers supply image/process transport only. Captures are
+the exact files written by the recorder; the host never generates their samples.
+"""
+from __future__ import annotations
+
+import argparse
+from collections import Counter
+import importlib.util
+import json
+from pathlib import Path
+import re
+import shlex
+import shutil
+import sys
+
+from capture import clean_console, extract
+
+BASE = Path(__file__).resolve().parent
+REPO = BASE.parent.parent
+spec = importlib.util.spec_from_file_location("recorder_transport", BASE.parent / "bpf_smoke/run.py")
+assert spec and spec.loader
+helpers = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(helpers)
+helpers.BASE = BASE
+ARCHES = helpers.ARCHES
+
+
+def build_fixture(arch: str) -> Path:
+    source = BASE / "fixture.rs"
+    linker_script = BASE.parent / "bpf_sampling/guest.ld"
+    sysroot = Path(helpers.command(["rustc", "+nightly", "--print", "sysroot"]).strip())
+    version = helpers.command(["rustc", "+nightly", "-vV"])
+    host = next(row.removeprefix("host: ") for row in version.splitlines() if row.startswith("host: "))
+    linker = sysroot / "lib/rustlib" / host / "bin/rust-lld"
+    output = BASE / "build" / arch / "record-fixture.elf"
+    output.parent.mkdir(parents=True, exist_ok=True)
+    command = ["rustc", "+nightly", "--edition=2024", "--crate-type=bin", "--target", ARCHES[arch]["target"],
+               "-C", "panic=abort", "-C", "opt-level=2", "-C", "relocation-model=static",
+               "-C", f"linker={linker}", "-C", f"link-arg=-T{linker_script}", "-C", "link-arg=--no-relax",
+               "-o", str(output), str(source)]
+    helpers.command(command, timeout=120)
+    helpers.check_elf(output, arch)
+    (output.parent / "fixture-build.json").write_text(json.dumps({
+        "command": command, "rustc": version, "source_sha256": helpers.digest(source),
+        "linker_sha256": helpers.digest(linker_script), "elf_sha256": helpers.digest(output),
+    }, indent=2) + "\n")
+    return output
+
+
+def qemu_command(arch: str, kernel: Path, image: Path) -> list[str]:
+    qemu = shutil.which(ARCHES[arch]["qemu"])
+    if not qemu:
+        raise ValueError(f"missing {ARCHES[arch]['qemu']}")
+    command = [qemu, "-machine", "virt", "-kernel", str(kernel), "-m", "8G", "-nographic", "-smp", "8"]
+    if arch == "riscv64":
+        command += ["-bios", "default"]
+    command += ["-drive", f"file={image},if=none,format=raw,id=x0,snapshot=on"]
+    if arch == "riscv64":
+        command += ["-device", "virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0", "-no-reboot",
+                    "-device", "virtio-net-device,netdev=net", "-netdev", "user,id=net"]
+    else:
+        command += ["-device", "virtio-blk-pci,drive=x0", "-no-reboot",
+                    "-device", "virtio-net-pci,netdev=net0", "-netdev", "user,id=net0"]
+    return command + ["-rtc", "base=utc"]
+
+
+def cases_script(directory: str, suite: str, duration: int) -> tuple[str, list[str], list[str]]:
+    """Return a reproducible script plus expected successful/failed CLI calls."""
+    recorder = shlex.quote(directory + "/bpf-record")
+    fixture = shlex.quote(directory + "/record-fixture")
+    rows = ["#!/bin/sh", "set -u", "ulimit -c 0", f"cd {shlex.quote(directory)} || exit 1"]
+    captures: list[str] = []
+    failures: list[str] = []
+
+    def call(label: str, arguments: str, *, failure: bool = False, capture: bool = True) -> None:
+        rows.extend([f"echo RECORD_CASE BEGIN name={label}", f"{recorder} {arguments}", "rc=$?",
+                     f'echo RECORD_CASE END name={label} rc="$rc"'])
+        if failure:
+            failures.append(label)
+        elif capture:
+            captures.append(label)
+            rows.append(f"{fixture} dump {label}.pbcapture {label} || exit 1")
+
+    def record(label: str, events: str, workload: str, *, extra: str = "", task: bool = False,
+               signal: int | None = None, target_exit: bool = False, cpus: str = "all",
+               period: int = 10_000_000, buffer_pages: int = 16) -> None:
+        work_ms = max(300, duration // 2) if target_exit else duration + (10_000 if label == "mixed" else 1500)
+        rows.extend([f"{fixture} {workload} {work_ms} {label} &", "target=$!", f"{fixture} sleep 100"])
+        record_ms = max(3000, duration * 4) if signal is not None else duration
+        options = f"--events {events} --duration-ms {record_ms} --buffer-pages {buffer_pages} --output {label}.pbcapture"
+        if task:
+            options += ' --tid "$target"'
+        if events != "task":
+            options += f" --cpus {cpus}"
+        if "cpu" in events or "task" in events:
+            options += f" --period-ns {period}"
+        if extra:
+            options += " " + extra
+        if signal is None:
+            call(label, options)
+        else:
+            # A separate process sends an actual signal after the recorder has
+            # had time to prepare; the recorder owns its normal shutdown path.
+            rows.extend([f"echo RECORD_CASE BEGIN name={label}", f"{recorder} {options} >{label}.log 2>&1 &", "record_pid=$!",
+                         "ready_waits=0", f"while ! grep -q '^RECORD ENABLE ' {label}.log; do",
+                         f"  {fixture} sleep 10", "  ready_waits=$((ready_waits+1))",
+                         f"  if [ \"$ready_waits\" -ge 500 ]; then cat {label}.log; exit 1; fi", "done",
+                         f"{fixture} sleep {max(100, duration // 2)}", f'kill -{signal} "$record_pid"',
+                         'wait "$record_pid"', "rc=$?", f"cat {label}.log", f'echo RECORD_CASE END name={label} rc="$rc"',
+                         f"{fixture} dump {label}.pbcapture {label} || exit 1"])
+            captures.append(label)
+        rows.append('wait "$target" || exit 1')
+
+    if suite in ("smoke", "full"):
+        for mode in ("cpu", "sched", "fault"):
+            record(mode, mode, mode)
+    if suite in ("lifecycle", "full"):
+        record("task", "task", "cpu", task=True)
+        record("dup-close", "task", "cpu", task=True, extra="--test-dup-close")
+        record("bounded-export", "cpu", "cpu", cpus="0,1", period=1_000_000,
+               buffer_pages=1, extra="--record-bytes 4096")
+        record("mixed", "cpu,cpu,task,sched,fault", "mixed", task=True)
+        # An installed shell is an existing guest program, distinct from the
+        # independent regression fixture and from the recorder itself.
+        rows.extend(["sh -c 'i=0; while :; do i=$((i+1)); done' &", "target=$!", f"{fixture} sleep 100"])
+        call("existing-shell", f'--events task --tid "$target" --duration-ms {duration} --frequency 99 --output existing-shell.pbcapture')
+        rows.extend(['kill "$target"', 'wait "$target" || true'])
+        record("sigint", "cpu", "cpu", signal=2)
+        record("sigterm", "fault", "fault", signal=15)
+        record("target-exit", "task", "cpu", task=True, target_exit=True)
+    if suite in ("negative", "full"):
+        base = f"--events cpu --duration-ms {duration} --output rejected.pbcapture"
+        for label, options in (
+            ("no-args", ""), ("offline-cpu", base + " --cpus 4095"),
+            ("duplicate-cpu", base + " --cpus 0,0"),
+            ("zero-frequency", base + " --frequency 0"),
+            ("conflicting-rate", base + " --frequency 99 --period-ns 10000000"),
+            ("unsupported-scope", base + " --children"),
+            ("bad-buffer", base + " --buffer-pages 3"),
+            ("task-without-tid", f"--events task --duration-ms {duration} --output rejected.pbcapture"),
+            ("load2", f"--events sched --cpus 0 --duration-ms {duration} --output rejected.pbcapture --test-fail-load 2"),
+            ("attach2", f"--events sched --cpus 0 --duration-ms {duration} --output rejected.pbcapture --test-fail-attach 2"),
+        ):
+            call(label, options, failure=True)
+        rows.extend([f"{fixture} cpu {duration + 1500} write-failure &", "target=$!", f"{fixture} sleep 100"])
+        call("write-failure", f"--events cpu --cpus all --duration-ms {duration} --output write-failure.pbcapture --test-write-fail-after 1024", failure=True)
+        rows.extend([f"{fixture} dump write-failure.pbcapture write-failure || exit 1", 'wait "$target" || exit 1'])
+    if suite in ("benchmark", "full"):
+        rows.append(f"{fixture} cpu {duration + 1500} baseline || exit 1")
+        rows.extend([f"{fixture} cpu {duration + 1500} loaded_detached &", "target=$!", f"{fixture} sleep 100"])
+        call("loaded-detached", f"--events cpu --cpus all --duration-ms {duration} --test-detached {duration} --output detached.pbcapture", capture=False)
+        rows.append('wait "$target" || exit 1')
+        record("attached", "cpu", "cpu")
+    rows.append("exit 0")
+    return "\n".join(rows) + "\n", captures, failures
+
+
+def parse_cases(text: str) -> dict[str, dict]:
+    cases: dict[str, dict] = {}
+    current: str | None = None
+    rows: list[str] = []
+    for row in clean_console(text).splitlines():
+        start = re.fullmatch(r"RECORD_CASE BEGIN name=([\w-]+)", row)
+        end = re.fullmatch(r"RECORD_CASE END name=([\w-]+) rc=(\d+)", row)
+        if start:
+            if current or start[1] in cases:
+                raise ValueError("overlapping or repeated CLI case")
+            current, rows = start[1], []
+        elif end:
+            if end[1] != current:
+                raise ValueError("CLI case end has no matching start")
+            cases[current] = {"rc": int(end[2]), "log": "\n".join(rows)}
+            current = None
+        elif current:
+            rows.append(row)
+    if current:
+        raise ValueError(f"unterminated CLI case: {current}")
+    return cases
+
+
+def validate_case(label: str, case: dict, expected_failure: bool) -> list[str]:
+    errors = []
+    text = case["log"]
+    if expected_failure:
+        if case["rc"] == 0:
+            errors.append(f"{label}: invalid request succeeded")
+        if label != "write-failure" and re.search(r"(?m)^RECORD ENABLE ", text):
+            errors.append(f"{label}: rejected request enabled a source")
+    elif case["rc"]:
+        errors.append(f"{label}: recorder exited {case['rc']}")
+    else:
+        if "RECORD PREPARED " not in text:
+            errors.append(f"{label}: missing attached-disabled preparation evidence")
+        if label != "loaded-detached" and "RECORD STOP " not in text:
+            errors.append(f"{label}: missing stop evidence")
+    if label in ("load2", "attach2", "write-failure") or not expected_failure:
+        cleanup = re.search(r"(?m)^RECORD (?:CLEANUP|ROLLBACK) (.*)$", text)
+        if not cleanup:
+            errors.append(f"{label}: missing cleanup evidence")
+        else:
+            fields = dict(item.split("=", 1) for item in cleanup[1].split() if "=" in item)
+            for resource in ("fds", "mapped", "events", "programs", "registered", "subscriptions"):
+                before, after = fields.get(resource + "_before"), fields.get(resource + "_after")
+                if before is None or before != after:
+                    errors.append(f"{label}: missing or unequal {resource} before/after cleanup")
+                if resource in ("registered", "subscriptions") and fields.get(resource + "_settled") != before:
+                    errors.append(f"{label}: {resource} changed after cleanup settled")
+    if label == "loaded-detached" and re.search(r"(?m)^RECORD ENABLE ", text):
+        errors.append("loaded-detached: benchmark phase enabled a source")
+    if label == "dup-close" and "RECORD DUP_CLOSE originals_closed=1 retained=1" not in text:
+        errors.append("dup-close: missing original-FD close evidence")
+    if label == "write-failure" and ("RECORD STOP " not in text or "RECORD SAVED " in text):
+        errors.append("write-failure: did not stop sampling or claimed successful persistence")
+    if not expected_failure and label != "loaded-detached":
+        stable = re.search(r"(?m)^RECORD NO_GROWTH before=(\d+) after=(\d+)", text)
+        if not stable or stable[1] != stable[2]:
+            errors.append(f"{label}: continued output after disable/quiescence")
+    reasons = {"sigint": "signal:2", "sigterm": "signal:15", "target-exit": "target-exit"}
+    if label in reasons and f"reason={reasons[label]}" not in text:
+        errors.append(f"{label}: stop reason was not {reasons[label]}")
+    return errors
+
+
+def validate_report(label: str, report: dict) -> list[str]:
+    """Require source-resolved actual samples, independently of success text."""
+    errors = []
+    if report.get("records_count", 0) <= 0:
+        errors.append(f"{label}: no real records consumed by analyzer")
+    recorder = report.get("recorder")
+    if not recorder or not recorder.get("sources"):
+        return errors + [f"{label}: missing explicit source metadata"]
+    sources = recorder["sources"]
+    ids = [source["logical_source"] for source in sources]
+    bindings = recorder.get("record_sources", [])
+    counts = Counter(bindings)
+    if (len(ids) != len(set(ids)) or len(bindings) != report["records_count"]
+            or set(counts) - set(ids)
+            or any(counts[source["logical_source"]] != source["records_count"] for source in sources)):
+        errors.append(f"{label}: source counts do not explain consumed records")
+    observed = [source for source in sources if source["records_count"] > 0]
+    if label == "mixed":
+        software = Counter((source["cpu"], source["event_id"]) for source in observed
+                           if source["kind"] == "software-v2" and source["cpu"] is not None)
+        trace_ids = {source["event_id"] for source in observed if source["kind"] == "tracepoint"}
+        if not software or max(software.values()) < 2 or not {6, 8} <= trace_ids:
+            errors.append("mixed: missing repeated software sources or equal-length trace/fault contexts")
+    elif label in ("fault", "sigterm"):
+        if not any(source["kind"] == "tracepoint" and source["event_id"] == 8 for source in observed):
+            errors.append(f"{label}: no actual fault records")
+    elif label == "sched":
+        if not {2, 3, 4, 6} <= {source["event_id"] for source in observed if source["kind"] == "tracepoint"}:
+            errors.append("sched: missing switch/block/wake/enqueue records")
+    elif not any(source["kind"] == "software-v2" for source in observed):
+        errors.append(f"{label}: no actual software samples")
+    if label == "bounded-export":
+        counters = report.get("runtime_diagnostics", {}).get("counters", [])
+        dropped = [counter for counter in counters if counter["name"] == "export_discarded"
+                   and counter["kind"] == "loss" and (counter["value"] or 0) > 0]
+        if not dropped or report.get("is_complete") is not False:
+            errors.append("bounded-export: missing actual retained-budget loss or false completeness")
+    return errors
+
+
+def benchmark(text: str, cases: dict, reports: dict) -> dict:
+    rows = {}
+    pattern = re.compile(r"(?m)^WORKLOAD RESULT label=(\S+) mode=(\S+) pid=(\d+) start_ns=(\d+) stop_ns=(\d+) wall_ns=(\d+) iterations=(\d+)$")
+    for match in pattern.finditer(clean_console(text)):
+        name, mode, pid, start, stop, wall, iterations = match.groups()
+        if name not in ("baseline", "loaded_detached", "attached"):
+            continue
+        if name in rows or int(stop) - int(start) != int(wall) or int(wall) <= 0 or int(iterations) <= 0:
+            raise ValueError("invalid benchmark measurement")
+        rows[name] = {"mode": mode, "pid": int(pid), "start_ns": int(start), "stop_ns": int(stop),
+                      "wall_ns": int(wall), "iterations": int(iterations),
+                      "iterations_per_second": int(iterations) * 1e9 / int(wall)}
+    if rows:
+        if set(rows) != {"baseline", "loaded_detached", "attached"}:
+            raise ValueError("three-stage benchmark is incomplete")
+        baseline = rows["baseline"]["iterations_per_second"]
+        for name, row in rows.items():
+            row["throughput_ratio_to_baseline"] = row["iterations_per_second"] / baseline
+            row["throughput_delta_percent"] = 100 * (row["throughput_ratio_to_baseline"] - 1)
+            label = "loaded-detached" if name == "loaded_detached" else name
+            row["resource_evidence"] = [r for r in cases.get(label, {}).get("log", "").splitlines()
+                                        if r.startswith(("RECORD PREPARED ", "RECORD RESOURCES ", "RECORD CLEANUP "))]
+            row["runtime_diagnostics"] = reports.get(label, {}).get("runtime_diagnostics")
+            row["measurement_scope"] = "whole external workload, including preparation/teardown margins; not steady-state overhead"
+            if name == "attached":
+                windows = []
+                for source in reports.get(label, {}).get("recorder", {}).get("sources", []):
+                    begin, end = source["enable_after_ns"], source["disable_before_ns"]
+                    overlap = max(0, min(row["stop_ns"], end) - max(row["start_ns"], begin))
+                    windows.append({"logical_source": source["logical_source"], "enabled_after_ns": begin,
+                                    "disabled_before_ns": end, "overlap_ns": overlap,
+                                    "workload_wall_fraction": overlap / row["wall_ns"]})
+                row["source_window_overlap"] = windows
+                if not windows or any(window["overlap_ns"] <= 0 for window in windows):
+                    raise ValueError("attached benchmark has no measured overlap with a source")
+            if name == "loaded_detached":
+                phase_log = cases.get(label, {}).get("log", "")
+                start = re.search(r"(?m)^RECORD DETACHED start_ns=(\d+) ", phase_log)
+                end = re.search(r"(?m)^RECORD DETACHED_END stop_ns=(\d+)", phase_log)
+                if not start or not end:
+                    raise ValueError("loaded-detached benchmark lacks measured boundaries")
+                overlap = max(0, min(row["stop_ns"], int(end[1])) - max(row["start_ns"], int(start[1])))
+                row["detached_overlap_ns"] = overlap
+                row["workload_wall_fraction"] = overlap / row["wall_ns"]
+                if not overlap:
+                    raise ValueError("loaded-detached benchmark did not overlap workload")
+    return rows
+
+
+def install(image: Path, source: Path, destination: str, run: Path) -> None:
+    helpers.debugfs(image, f'write "{source}" {destination}', write=True)
+    helpers.debugfs(image, f"set_inode_field {destination} mode 0100755", write=True)
+    check = run / ("injected-" + Path(destination).name)
+    helpers.debugfs(image, f'dump {destination} "{check}"')
+    if helpers.digest(check) != helpers.digest(source):
+        raise ValueError("injected artifact bytes differ")
+    check.unlink()
+
+
+def guest(args: argparse.Namespace) -> int:
+    fixture = build_fixture(args.arch)
+    if args.recorder:
+        recorder = args.recorder.resolve(strict=True)
+    else:
+        helpers.command([sys.executable, str(REPO / "tools/bpf-record/build.py"), "--arch", args.arch, "--acceptance"], cwd=REPO, timeout=180)
+        recorder = REPO / "tools/bpf-record/build" / args.arch / "acceptance/bpf-record"
+    helpers.check_elf(recorder, args.arch)
+    kernel = (args.kernel or REPO / ARCHES[args.arch]["kernel"]).resolve(strict=True)
+    image = helpers.check_image(args.image or REPO / ARCHES[args.arch]["primary"])
+    run = helpers.new_run(f"{args.arch}-{args.suite}")
+    for source, name in ((recorder, "bpf-record.elf"), (fixture, "record-fixture.elf"), (kernel, "kernel")):
+        shutil.copyfile(source, run / name)
+    for source, name in ((recorder.parent / "build.json", "recorder-build.json"),
+                         (fixture.parent / "fixture-build.json", "fixture-build.json"),
+                         (BASE / "fixture.rs", "fixture.rs")):
+        if source.exists():
+            shutil.copyfile(source, run / name)
+    image_hash = helpers.digest(image)
+    image_copy = helpers.copy_image(image, run, "disk.img")
+    token = run.name.rsplit("-", 1)[-1]
+    directory = "/bpf-record-" + token
+    helpers.debugfs(image_copy, f"mkdir {directory}", write=True)
+    helpers.debugfs(image_copy, f"set_inode_field {directory} mode 040755", write=True)
+    script, expected, failures = cases_script(directory, args.suite, args.duration_ms)
+    (run / "cases.sh").write_text(script)
+    for source, name in ((run / "bpf-record.elf", "bpf-record"), (run / "record-fixture.elf", "record-fixture"), (run / "cases.sh", "cases.sh")):
+        install(image_copy, source, directory + "/" + name, run)
+    command = qemu_command(args.arch, run / "kernel", image_copy)
+    shell = f"sh {directory}/cases.sh; status=$?; printf '\\nBPF_HOST_EXIT {token} %s\\n' \"$status\""
+    inputs = {"kind": "generic recorder with independently launched external workload", "arch": args.arch,
+              "suite": args.suite, "duration_ms": args.duration_ms, "command": command, "guest_command": shell,
+              "image_sha256": image_hash, "boot_image_sha256": helpers.digest(image_copy),
+              "kernel_sha256": helpers.digest(run / "kernel"), "recorder_sha256": helpers.digest(run / "bpf-record.elf"),
+              "fixture_sha256": helpers.digest(run / "record-fixture.elf"), "script_sha256": helpers.digest(run / "cases.sh"),
+              "workspace_commit": helpers.command(["git", "rev-parse", "HEAD"], cwd=REPO).strip()}
+    (run / "inputs.json").write_text(json.dumps(inputs, indent=2) + "\n")
+    print(f"Logs: {run}", flush=True)
+    print(shlex.join(command), flush=True)
+    text, qemu_exit, reason = helpers.drive_guest(command, shell, token, run / "guest.log",
+        r"(?:^|[\r\n])[^\r\n]*[#$] ?$", args.boot_timeout, args.timeout)
+    errors = [reason] if reason else []
+    if not re.search(rf"(?m)^BPF_HOST_EXIT {re.escape(token)} 0\s*$", text.replace("\r", "")):
+        errors.append("missing successful harness exit")
+    cases, reports, measurements = {}, {}, {}
+    try:
+        cases = parse_cases(text)
+        for label in expected + failures + (["loaded-detached"] if args.suite in ("benchmark", "full") else []):
+            if label not in cases:
+                errors.append(f"missing case: {label}")
+            else:
+                errors += validate_case(label, cases[label], label in failures)
+        helpers.command(["cargo", "build", "-p", "bpf-analyzer"], cwd=REPO, timeout=180)
+        for label in expected:
+            raw = extract(text, label)
+            path = run / f"{label}.pbcapture"
+            path.write_bytes(raw)
+            report = helpers.command([str(REPO / "target/debug/bpf-analyzer"), str(path), "--json"], cwd=REPO, timeout=120)
+            reports[label] = json.loads(report)
+            (run / f"{label}-report.json").write_text(report)
+            errors += validate_report(label, reports[label])
+        if "write-failure" in failures:
+            raw = extract(text, "write-failure")
+            path = run / "write-failure.pbcapture"
+            path.write_bytes(raw)
+            if len(raw) != 1024:
+                errors.append("write-failure: original truncated file bytes were not retained")
+            try:
+                helpers.command([str(REPO / "target/debug/bpf-analyzer"), str(path), "--json"], cwd=REPO)
+            except RuntimeError as error:
+                (run / "write-failure-analyzer.txt").write_text(str(error) + "\n")
+            else:
+                errors.append("write-failure: missing-trailer capture was accepted")
+        measurements = benchmark(text, cases, reports)
+    except (ValueError, KeyError, RuntimeError) as error:
+        errors.append(str(error))
+    if helpers.digest(image) != image_hash:
+        errors.append("source rootfs changed during snapshot run")
+    result = {**inputs, "qemu_exit": qemu_exit, "errors": errors, "passed": not errors,
+              "cases": cases, "benchmark": measurements,
+              "captures": {name: {"sha256": helpers.digest(run / f"{name}.pbcapture"),
+                                  "records_count": report["records_count"], "status": report["status"]}
+                           for name, report in reports.items()}}
+    (run / "result.json").write_text(json.dumps(result, indent=2) + "\n")
+    for row in text.replace("\r", "").splitlines():
+        if row.startswith(("RECORD ", "RECORD_CASE ", "WORKLOAD ", "BPF_HOST_EXIT ")):
+            print(row)
+    for error in errors:
+        print("FAIL: " + error, file=sys.stderr)
+    print(f"Result: {'FAIL' if errors else 'PASS'}; {run}", flush=True)
+    return int(bool(errors))
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("action", choices=("build-fixture", "guest"))
+    parser.add_argument("--arch", choices=tuple(ARCHES), required=True)
+    parser.add_argument("--suite", choices=("smoke", "lifecycle", "negative", "benchmark", "full"), default="smoke")
+    parser.add_argument("--duration-ms", type=int, default=1000)
+    parser.add_argument("--recorder", type=Path)
+    parser.add_argument("--kernel", type=Path)
+    parser.add_argument("--image", type=Path)
+    parser.add_argument("--boot-timeout", type=float, default=120)
+    parser.add_argument("--timeout", type=float, default=300)
+    args = parser.parse_args()
+    if not 100 <= args.duration_ms <= 30_000:
+        parser.error("--duration-ms must be 100..30000")
+    if args.action == "build-fixture":
+        print(build_fixture(args.arch))
+        return 0
+    return guest(args)
+
+
+if __name__ == "__main__":
+    try:
+        raise SystemExit(main())
+    except (OSError, RuntimeError, ValueError) as error:
+        print(f"FAIL: {error}", file=sys.stderr)
+        raise SystemExit(1)

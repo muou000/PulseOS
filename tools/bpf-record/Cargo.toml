@@ -1,0 +1,22 @@
+[package]
+name = "bpf-record"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Guest recorder for PulseOS software BPF sampling sessions"
+
+[features]
+default = []
+guest = []
+acceptance = ["guest"]
+
+[dependencies]
+bpf-capture = { workspace = true, default-features = false, features = ["alloc"] }
+pulse_bpf_schema = { workspace = true }
+
+[[bin]]
+name = "bpf-record"
+path = "src/guest.rs"
+required-features = ["guest"]
+test = false
+bench = false
