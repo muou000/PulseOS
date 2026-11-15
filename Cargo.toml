@@ -14,6 +14,7 @@ members = [
     "crates/pulse_user_abi",
     "crates/bpf-capture",
     "crates/bpf-analyzer",
+    "crates/virtio-drivers",
     "modules/axalloc",
     "modules/axconfig",
     "modules/axcpu",

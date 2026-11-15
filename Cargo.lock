@@ -609,6 +609,7 @@ dependencies = [
 name = "axplat"
 version = "0.3.0"
 dependencies = [
+ "axconfig-macros",
  "axplat-macros",
  "bitflags 2.11.1",
  "const-str",

@@ -32,6 +32,8 @@ mod mem;
 #[cfg(feature = "smp")]
 mod mp;
 mod mp_common;
+#[cfg(feature = "irq")]
+mod msix;
 mod power;
 mod time;
 mod topology;
