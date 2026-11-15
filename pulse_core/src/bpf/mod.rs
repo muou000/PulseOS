@@ -28,3 +28,6 @@ pub use ring_buffer::*;
 
 #[cfg(feature = "bpf-trace")]
 pub mod sampling;
+
+#[cfg(all(feature = "bpf-trace", target_os = "none", any(target_arch = "riscv64", target_arch = "loongarch64")))]
+mod stack_capture;

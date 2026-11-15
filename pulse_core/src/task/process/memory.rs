@@ -126,6 +126,19 @@ impl Process {
             .map_err(AxError::from)
     }
 
+    /// Freeze the current user stack while holding nonblocking leases on both
+    /// the process address-space slot (exec) and its VMAs (unmap/mprotect).
+    /// The observer is the current task with IRQs disabled throughout `capture`.
+    #[cfg(feature = "bpf-trace")]
+    pub(crate) fn with_sampling_aspace<R>(&self, capture: impl FnOnce(&axmm::AddrSpace) -> R) -> Option<R> {
+        if axhal::asm::irqs_enabled() {
+            return None;
+        }
+        let slot = self.aspace.try_read()?;
+        let aspace = slot.try_read_for_sampling()?;
+        Some(capture(&aspace))
+    }
+
     pub fn aspace_handle(&self) -> Arc<AddressSpaceLock> {
         self.aspace.read().clone()
     }

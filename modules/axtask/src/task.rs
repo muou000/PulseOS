@@ -96,6 +96,9 @@ pub struct TaskInner {
     wait_for_exit: WaitQueue,
 
     kstack: SpinNoIrq<Option<TaskStack>>,
+    // Published with the task; never changed after construction. The owned
+    // TaskStack remains alive until TaskInner drops. Init/boot stacks are None.
+    kstack_range: Option<(usize, usize)>,
     ctx: UnsafeCell<TaskContext>,
     task_ext: AxTaskExt,
 
@@ -162,6 +165,7 @@ impl TaskInner {
         *t.entry.lock() = Some(Box::new(entry));
         t.ctx_mut()
             .init(task_entry as *const () as usize, kstack.top(), tls);
+        t.kstack_range = Some((kstack.start.as_usize(), kstack.top().as_usize()));
         *t.kstack.lock() = Some(kstack);
         if *t.name.lock() == "idle" {
             t.is_idle = true;
@@ -308,6 +312,13 @@ impl TaskInner {
         self.kstack.lock().as_ref().map(TaskStack::top)
     }
 
+    /// Allocation bounds of this task's owned kernel stack, without taking a
+    /// lock or changing preemption state. The allocation lives as long as self.
+    /// This does not grant access to another task's concurrently running stack.
+    pub fn kernel_stack_range(&self) -> Option<core::ops::Range<usize>> {
+        self.kstack_range.map(|(start, end)| start..end)
+    }
+
     /// Returns the CPU ID where the task is running or will run.
     ///
     /// Note: the task may not be running on the CPU, it just exists in the run queue.
@@ -394,6 +405,7 @@ impl TaskInner {
             exit_code: AtomicI32::new(0),
             wait_for_exit: WaitQueue::new(),
             kstack: SpinNoIrq::new(None),
+            kstack_range: None,
             ctx: UnsafeCell::new(TaskContext::new()),
             task_ext: AxTaskExt::empty(),
             #[cfg(feature = "tls")]

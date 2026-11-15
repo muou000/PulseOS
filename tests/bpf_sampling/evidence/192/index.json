@@ -1,0 +1,509 @@
+{
+  "format": "pulse-real-stack-capture-evidence",
+  "format_version": 1,
+  "date": "2026-11-15",
+  "runs": {
+    "rv-task": {
+      "run": "tests/bpf_sampling/runs/riscv64-task-20261115-123142-zn4awbhs",
+      "bundle": "rv-task.tar.gz",
+      "bundle_sha256": "620d9a65ba35ae07496284ff53ac4b0f7b27f75df53e3a53195bda60713b864a",
+      "members_sha256": {
+        "guest.log": "d5a882dfddf86684c553db084796464b55adde0c385ffff830e02caedb19ee8b",
+        "records.pbraw": "9a7b8f58407c7f7f3bba90fdd902aa90224a1e6e2773c6229138cbfa7db18bc1",
+        "capture.pbcapture": "1ff91dd43918963e4b7859230b219dcfbedfbba558af8ebfec2d663abc2ed4e1",
+        "archive.json": "9bb9b540c136c779e211a7159b21fd1a123d0f446125d96c374074c6046c19ed",
+        "inputs.json": "874064c8a73c5d2bbc331524289f6b223a05b30a93758aaaa16c030cd079fd40",
+        "result.json": "e5eb99eb7b084e711da8d3f0c4912c8aaaf5211c1e3ab8c97e9c96b47f395d5e",
+        "stack-evidence.json": "fa6702d41a1eff76bb17695d37846922f542423da0abd5b03eca7aafdb6dfba9",
+        "stats-before.txt": "4220ff35e7cb03bcdf02794a0b14eb9301dba7e4432207f70ccca3ba327793f4",
+        "stats-after.txt": "74d3432d8f3e8079cff4781f603af226ac9b7d6fdfe65d1ce451eb3b00cccc24",
+        "analyzer.json": "20f2977973e438917cdecbc17f33a9c68c0a211415c7a6c2beeb1b2494a0a01e",
+        "analyzer-table.txt": "0f3d68a172d854fec328e2ebf4a72f4911162dc69ad3ae86b62840ad0dec93b9",
+        "analyzer-loss.txt": "334c4e7b68a9734cfe23430866bb4433a74c1314af03390e35494c0b25eff265",
+        "import.log": "d5a0b872a2c9d5cb0fec3535662b8a9a76b12fc76420d51b030c698a28220736",
+        "kernel.elf": "5a2f77ed404e62a5a6208c5631732799bdd10a46ac4cb99da6270d1c0c57c361",
+        "kernel.provenance.json": "920c8cec792d065ad89255e443c7966f3f756b11691319b04b974cdfeb396601",
+        "payload.elf": "0e618e5ed80e6382ee9f6707afda912df0f2e950e6c756a0c6481e755c01b519",
+        "payload-build.json": "ab837ac245029b32d8af3ffd3f684e5bae0535687ec79daf009536e6a075163d",
+        "guest.rs": "16a553329c8c63c1a9011ebad5fe623d333224b4d617a4cee488457841ff59e7",
+        "guest.ld": "67944404a5fd324386e5c86b25415b1767adcbbb1f8dd756b9e0d0b931f641eb",
+        "archive.rs": "4adc9edc83908e85fd34475531d11e5207be3d357de2fae0fd186f3effdb5282",
+        "stack_workload.rs": "62c9024264c925cec68c08ce8463e7492ca1e28535b227aea15dcc01c84e1f97"
+      },
+      "passed": true,
+      "samples": 351,
+      "quality": "partial",
+      "transport_lost": 0,
+      "export_dropped": 0,
+      "counts": {
+        "user_a": 30,
+        "user_b": 15,
+        "kernel": 29,
+        "kernel_mmap": 29
+      },
+      "source_counts": {
+        "13": 351
+      },
+      "status_counts": {
+        "1": 48,
+        "5": 55,
+        "0": 46,
+        "4": 41,
+        "2": 33,
+        "3": 78,
+        "6": 50
+      },
+      "negative_probes": {
+        "zero": 48,
+        "unmapped": 41,
+        "cycle": 45,
+        "badra": 55,
+        "misaligned": 33,
+        "deep": 50
+      },
+      "kernel_build_source": {
+        "commit": "49e062956c5cc8dd903fb6c7a9b47f69bfbea2a7",
+        "excluded_directories": [
+          ".git",
+          ".pytest_cache",
+          "__pycache__",
+          "target"
+        ],
+        "external_dependencies": "Cargo.lock identities; cache content not attested",
+        "file_count": 935,
+        "git_worktree_dirty": true,
+        "roots": [
+          ".cargo",
+          "api",
+          "crates",
+          "modules",
+          "platforms",
+          "pulse_core",
+          "pulse_syscalls",
+          "src",
+          "configs",
+          "scripts/make",
+          "Cargo.toml",
+          "Cargo.lock",
+          "Makefile",
+          "rust-toolchain",
+          "rust-toolchain.toml",
+          "scripts/build_provenance.py"
+        ],
+        "tree_sha256": "7f124a8d8f1b60a5fc8e9bec3520f790b331582213b99a9418d27288f5fabe55"
+      },
+      "kernel_elf_sha256": "5a2f77ed404e62a5a6208c5631732799bdd10a46ac4cb99da6270d1c0c57c361",
+      "measurements": {
+        "baseline": {
+          "start_ns": 1197856600,
+          "stop_ns": 4478060300,
+          "wall_ns": 3280203700,
+          "iterations": 128,
+          "extra_mapped_bytes": 0
+        },
+        "loaded_detached": {
+          "start_ns": 4491503200,
+          "stop_ns": 7987635000,
+          "wall_ns": 3496131800,
+          "iterations": 128,
+          "extra_mapped_bytes": 557056
+        },
+        "attached_capture": {
+          "start_ns": 8131687200,
+          "stop_ns": 11730889900,
+          "wall_ns": 3599202700,
+          "iterations": 128,
+          "extra_mapped_bytes": 4751360
+        }
+      }
+    },
+    "la-task": {
+      "run": "tests/bpf_sampling/runs/loongarch64-task-20261115-123225-nix9pd6w",
+      "bundle": "la-task.tar.gz",
+      "bundle_sha256": "d67fcb4d9cc2a781ffd9e3659d9e88f3ad8fbd578954234de038013d8305be17",
+      "members_sha256": {
+        "guest.log": "40ec037cb2348deb717224bfbbc4d55a634e5bde63387735260f4bd3ba94afaf",
+        "records.pbraw": "484a3cafa310204f221c11ddc2cf870cc704f54ae42e3c83acc7b111664cb0c9",
+        "capture.pbcapture": "50ca9af1c947157d26d6da58d2f4c887d4ca5f27dfba12627127884a95c5be98",
+        "archive.json": "fe6bd9005bf3cfb92fcd13627c36b3b638c8196c49b635bfe5a102f2af7148b6",
+        "inputs.json": "615b998932436eae19c1be5237d66c220150f855af7cd38546d4f12f988e196e",
+        "result.json": "f13ea49a3d7830a5d06635a3a6dd877e0a26b2414e8dd9e4c503b6fbeb00c5f1",
+        "stack-evidence.json": "f50189b0055c412e8ad63ddf46740250f774b9328fbe0a6e60b1f6b7caf2137e",
+        "stats-before.txt": "7e496bcbed8ea3b00e9726bd88fc76e9a22ecc928ab9fb14f3e5cf69754a9000",
+        "stats-after.txt": "56b47225f274ed03c31a78ac15c6a4a1eba2afe4cf0a87802232858b97fbc227",
+        "analyzer.json": "0024397e469ef1042d12bf905ef33e04735e60a8c548b4ba28371dd3840a8e57",
+        "analyzer-table.txt": "6d9bfabfe607a2d031bd49bf89b46dbc2c4722b8631ddd6c3b893a7e89aeee91",
+        "analyzer-loss.txt": "846c5b77821e3bd0170783cb1c4bcde395ceabf4d6721eedff07d3805b69e78a",
+        "import.log": "4f711cebd6e7895a199b6f893cc6edbaac34ea97b6153e3c1831d33ecc744b4f",
+        "kernel.elf": "92ea703ac71a5506dfae1da94e2ccd4377a0e8980d60cee3c2253e326f8af425",
+        "kernel.provenance.json": "243d60d6413ed497ee5cab76837df91266b2e6dcd4df3379d1c4987d2b8d3f2b",
+        "payload.elf": "e76a798c1bab1501f6eaecf623d9c866ec5707d61c7068248b97bc877a94a8b9",
+        "payload-build.json": "fbf5d5fff25434d2b28bc48729b9a95a2adf7bd1df681ea02a8b99b871fe4bff",
+        "guest.rs": "16a553329c8c63c1a9011ebad5fe623d333224b4d617a4cee488457841ff59e7",
+        "guest.ld": "67944404a5fd324386e5c86b25415b1767adcbbb1f8dd756b9e0d0b931f641eb",
+        "archive.rs": "4adc9edc83908e85fd34475531d11e5207be3d357de2fae0fd186f3effdb5282",
+        "stack_workload.rs": "62c9024264c925cec68c08ce8463e7492ca1e28535b227aea15dcc01c84e1f97"
+      },
+      "passed": true,
+      "samples": 211,
+      "quality": "partial",
+      "transport_lost": 0,
+      "export_dropped": 0,
+      "counts": {
+        "user_a": 28,
+        "user_b": 24,
+        "kernel": 17,
+        "kernel_mmap": 15
+      },
+      "source_counts": {
+        "13": 211
+      },
+      "status_counts": {
+        "1": 21,
+        "0": 54,
+        "3": 46,
+        "2": 19,
+        "6": 19,
+        "4": 29,
+        "5": 23
+      },
+      "negative_probes": {
+        "zero": 21,
+        "unmapped": 29,
+        "cycle": 28,
+        "badra": 23,
+        "misaligned": 19,
+        "deep": 18
+      },
+      "kernel_build_source": {
+        "commit": "49e062956c5cc8dd903fb6c7a9b47f69bfbea2a7",
+        "excluded_directories": [
+          ".git",
+          ".pytest_cache",
+          "__pycache__",
+          "target"
+        ],
+        "external_dependencies": "Cargo.lock identities; cache content not attested",
+        "file_count": 935,
+        "git_worktree_dirty": true,
+        "roots": [
+          ".cargo",
+          "api",
+          "crates",
+          "modules",
+          "platforms",
+          "pulse_core",
+          "pulse_syscalls",
+          "src",
+          "configs",
+          "scripts/make",
+          "Cargo.toml",
+          "Cargo.lock",
+          "Makefile",
+          "rust-toolchain",
+          "rust-toolchain.toml",
+          "scripts/build_provenance.py"
+        ],
+        "tree_sha256": "7f124a8d8f1b60a5fc8e9bec3520f790b331582213b99a9418d27288f5fabe55"
+      },
+      "kernel_elf_sha256": "92ea703ac71a5506dfae1da94e2ccd4377a0e8980d60cee3c2253e326f8af425",
+      "measurements": {
+        "baseline": {
+          "start_ns": 1419684520,
+          "stop_ns": 3571154630,
+          "wall_ns": 2151470110,
+          "iterations": 128,
+          "extra_mapped_bytes": 0
+        },
+        "loaded_detached": {
+          "start_ns": 3579144220,
+          "stop_ns": 5863810650,
+          "wall_ns": 2284666430,
+          "iterations": 128,
+          "extra_mapped_bytes": 557056
+        },
+        "attached_capture": {
+          "start_ns": 6001207120,
+          "stop_ns": 8184188970,
+          "wall_ns": 2182981850,
+          "iterations": 128,
+          "extra_mapped_bytes": 4751360
+        }
+      }
+    },
+    "rv-cpu": {
+      "run": "tests/bpf_sampling/runs/riscv64-cpu-20261115-123225-exih9225",
+      "bundle": "rv-cpu.tar.gz",
+      "bundle_sha256": "03b253824ed5c0f07301f127c6e2d40a5368cc8d6426f26c38c0f63d8042026a",
+      "members_sha256": {
+        "guest.log": "dd44545cdce9ea1267e13fe60db62d8c397cfd0d4c7742d82955a4d9731a111d",
+        "records.pbraw": "2f272c435b7436c9f76ab071d9b4cea6e3b5388862bf2f95dc25a19843521593",
+        "capture.pbcapture": "e5ed9783984c9afbc5d3ef978a2b5077a3bb9bbf53a21b0f66a55365bff02c59",
+        "archive.json": "0bd66351e077c333cfc13f4b35fb1eb758bdd99f1eaa1edcfb3d15171b6be80f",
+        "inputs.json": "0b6ff7db8cf09b57dba3d4c710b086c2ceed406724fe1e1059eb9985379a3359",
+        "result.json": "62cd1a5f321c3a3bd86d68c6a74bfdf49f2d2d494ae5d97eb4098761b5da2304",
+        "stack-evidence.json": "4bfdeab92a6de4e6723cc77eb1bfbe3f25525025bb77b676d918f97dc822ccdc",
+        "stats-before.txt": "d7da59a11887b48dcf3d57c6048b35d06373f978722467ce3890833b3141bf3f",
+        "stats-after.txt": "8bce29d8db9e37c5d8425cb296a445ef0d8f76ed240ab3ea12d1f06b242ef4d7",
+        "analyzer.json": "37248f17ebbec7245a8f6e70c5aa4ee9a8749b43303797370a7a530dad418491",
+        "analyzer-table.txt": "313d51b1583bbb967cc1f139ebf213211c28bd681b1367d2b75a69dda2c781df",
+        "analyzer-loss.txt": "251e98f666f3f969824e44d6bc11ef6b39e18350f80a7444880eb78d3083f186",
+        "import.log": "1ceba61e5b24dccef4c93b5f16a9574ceec329658911d0015c6367f475c2951e",
+        "kernel.elf": "5a2f77ed404e62a5a6208c5631732799bdd10a46ac4cb99da6270d1c0c57c361",
+        "kernel.provenance.json": "920c8cec792d065ad89255e443c7966f3f756b11691319b04b974cdfeb396601",
+        "payload.elf": "126b05d5330087ce0c6b90d84a84b5beaeb8c9ae04d1de0f9c20e46ce8eda526",
+        "payload-build.json": "53f997ff1aa6ae644e87e80f716b10a1ea2fdbaccbd255f723ffa2a16c1dccc3",
+        "guest.rs": "16a553329c8c63c1a9011ebad5fe623d333224b4d617a4cee488457841ff59e7",
+        "guest.ld": "67944404a5fd324386e5c86b25415b1767adcbbb1f8dd756b9e0d0b931f641eb",
+        "archive.rs": "4adc9edc83908e85fd34475531d11e5207be3d357de2fae0fd186f3effdb5282",
+        "stack_workload.rs": "62c9024264c925cec68c08ce8463e7492ca1e28535b227aea15dcc01c84e1f97"
+      },
+      "passed": true,
+      "samples": 4151,
+      "quality": "partial",
+      "transport_lost": 0,
+      "export_dropped": 0,
+      "counts": {
+        "user_a": 44,
+        "user_b": 40,
+        "kernel": 427,
+        "kernel_mmap": 29
+      },
+      "source_counts": {
+        "13": 352,
+        "21": 177,
+        "14": 348,
+        "22": 176,
+        "15": 344,
+        "23": 177,
+        "16": 335,
+        "17": 331,
+        "25": 175,
+        "18": 340,
+        "26": 177,
+        "19": 345,
+        "27": 177,
+        "20": 343,
+        "28": 177,
+        "24": 177
+      },
+      "status_counts": {
+        "0": 491,
+        "3": 90,
+        "6": 49,
+        "10": 3236,
+        "1": 61,
+        "4": 79,
+        "2": 81,
+        "5": 64
+      },
+      "negative_probes": {
+        "zero": 61,
+        "unmapped": 79,
+        "cycle": 54,
+        "badra": 64,
+        "misaligned": 81,
+        "deep": 49
+      },
+      "kernel_build_source": {
+        "commit": "49e062956c5cc8dd903fb6c7a9b47f69bfbea2a7",
+        "excluded_directories": [
+          ".git",
+          ".pytest_cache",
+          "__pycache__",
+          "target"
+        ],
+        "external_dependencies": "Cargo.lock identities; cache content not attested",
+        "file_count": 935,
+        "git_worktree_dirty": true,
+        "roots": [
+          ".cargo",
+          "api",
+          "crates",
+          "modules",
+          "platforms",
+          "pulse_core",
+          "pulse_syscalls",
+          "src",
+          "configs",
+          "scripts/make",
+          "Cargo.toml",
+          "Cargo.lock",
+          "Makefile",
+          "rust-toolchain",
+          "rust-toolchain.toml",
+          "scripts/build_provenance.py"
+        ],
+        "tree_sha256": "7f124a8d8f1b60a5fc8e9bec3520f790b331582213b99a9418d27288f5fabe55"
+      },
+      "kernel_elf_sha256": "5a2f77ed404e62a5a6208c5631732799bdd10a46ac4cb99da6270d1c0c57c361",
+      "measurements": {
+        "baseline": {
+          "start_ns": 1492265700,
+          "stop_ns": 4944425500,
+          "wall_ns": 3452159800,
+          "iterations": 128,
+          "extra_mapped_bytes": 0
+        },
+        "loaded_detached": {
+          "start_ns": 4956825300,
+          "stop_ns": 8708113600,
+          "wall_ns": 3751288300,
+          "iterations": 128,
+          "extra_mapped_bytes": 557056
+        },
+        "attached_capture": {
+          "start_ns": 8807078500,
+          "stop_ns": 12364570500,
+          "wall_ns": 3557492000,
+          "iterations": 128,
+          "extra_mapped_bytes": 4751360
+        }
+      }
+    },
+    "la-cpu": {
+      "run": "tests/bpf_sampling/runs/loongarch64-cpu-20261115-123142-8v4r0l0s",
+      "bundle": "la-cpu.tar.gz",
+      "bundle_sha256": "a679f70a5b81933507a6b93c14f7119b6d32fa2fa3c9769d6b02d30aaaa71184",
+      "members_sha256": {
+        "guest.log": "ac05d96ad13470ca819962668e7e29dfa6b3133fd63e05f6d691f025ec539942",
+        "records.pbraw": "b909136d9bc0e0f3b33569f412bdf28ee928a9a82dabc8f73e84d1a2d90368df",
+        "capture.pbcapture": "0be06ec316ac4ead6e551b3365f52bfdab967036cbcd1f2d7be89765ca47d0b4",
+        "archive.json": "07a4eceee01a116b36d16d70ceb76be4d976db8315826d9d89f4ad4a1c8ad2da",
+        "inputs.json": "29e76cfdc21ad0daaa512fe6475dbdf1312c3377efcfa7a7ed97ee82adbd6e18",
+        "result.json": "573748ea89d4d32186860ebdb46fcd70edc67b3d6b123f2555eecfcba819e994",
+        "stack-evidence.json": "5ff42ec79de030e0dc9cb9264f243ae8e7a5686c5840cd24326a32cbc7a77c7b",
+        "stats-before.txt": "7daf30f574d9721b4e3e51780ce2e3b2d36fbc106cf64c84f898808f0a83e843",
+        "stats-after.txt": "a6cd1486ebd422bf573ba41a57f3207aca420b89f4c692c5495aabc5dbf5b996",
+        "analyzer.json": "2010ce4f61a9282e7fe949adb7f4e155cc1c96511e1020cf737f9a0eeef9145e",
+        "analyzer-table.txt": "d2acfe1823a699b530c17acb6ccc357603d36066580b605f99211f37e8282182",
+        "analyzer-loss.txt": "dde090eab3eeb471df7246049299afb6924b84ae28668a6dc4f36cdd8474aa8d",
+        "import.log": "68cf52b67207d7f8811f1f5058e08d8fe239d3c03b6392214d5ec8b1c4e96f26",
+        "kernel.elf": "92ea703ac71a5506dfae1da94e2ccd4377a0e8980d60cee3c2253e326f8af425",
+        "kernel.provenance.json": "243d60d6413ed497ee5cab76837df91266b2e6dcd4df3379d1c4987d2b8d3f2b",
+        "payload.elf": "b54fe76638842f6f321f82c392540c43c9733a1ec7cb6e23036060f95a9578c3",
+        "payload-build.json": "55edeab089b4927b623f59b4d26a2ae31557a7a0c0f5a83a823b23fe7d55a43f",
+        "guest.rs": "16a553329c8c63c1a9011ebad5fe623d333224b4d617a4cee488457841ff59e7",
+        "guest.ld": "67944404a5fd324386e5c86b25415b1767adcbbb1f8dd756b9e0d0b931f641eb",
+        "archive.rs": "4adc9edc83908e85fd34475531d11e5207be3d357de2fae0fd186f3effdb5282",
+        "stack_workload.rs": "62c9024264c925cec68c08ce8463e7492ca1e28535b227aea15dcc01c84e1f97"
+      },
+      "passed": true,
+      "samples": 2557,
+      "quality": "partial",
+      "transport_lost": 0,
+      "export_dropped": 0,
+      "counts": {
+        "user_a": 28,
+        "user_b": 43,
+        "kernel": 320,
+        "kernel_mmap": 31
+      },
+      "source_counts": {
+        "14": 209,
+        "15": 212,
+        "16": 209,
+        "17": 213,
+        "18": 215,
+        "19": 213,
+        "20": 215,
+        "13": 215,
+        "21": 107,
+        "22": 107,
+        "23": 107,
+        "24": 107,
+        "25": 107,
+        "26": 107,
+        "27": 107,
+        "28": 107
+      },
+      "status_counts": {
+        "10": 1950,
+        "6": 36,
+        "0": 358,
+        "3": 80,
+        "1": 29,
+        "4": 34,
+        "5": 39,
+        "2": 31
+      },
+      "negative_probes": {
+        "zero": 29,
+        "unmapped": 34,
+        "cycle": 39,
+        "badra": 39,
+        "misaligned": 31,
+        "deep": 36
+      },
+      "kernel_build_source": {
+        "commit": "49e062956c5cc8dd903fb6c7a9b47f69bfbea2a7",
+        "excluded_directories": [
+          ".git",
+          ".pytest_cache",
+          "__pycache__",
+          "target"
+        ],
+        "external_dependencies": "Cargo.lock identities; cache content not attested",
+        "file_count": 935,
+        "git_worktree_dirty": true,
+        "roots": [
+          ".cargo",
+          "api",
+          "crates",
+          "modules",
+          "platforms",
+          "pulse_core",
+          "pulse_syscalls",
+          "src",
+          "configs",
+          "scripts/make",
+          "Cargo.toml",
+          "Cargo.lock",
+          "Makefile",
+          "rust-toolchain",
+          "rust-toolchain.toml",
+          "scripts/build_provenance.py"
+        ],
+        "tree_sha256": "7f124a8d8f1b60a5fc8e9bec3520f790b331582213b99a9418d27288f5fabe55"
+      },
+      "kernel_elf_sha256": "92ea703ac71a5506dfae1da94e2ccd4377a0e8980d60cee3c2253e326f8af425",
+      "measurements": {
+        "baseline": {
+          "start_ns": 1369072650,
+          "stop_ns": 3484269540,
+          "wall_ns": 2115196890,
+          "iterations": 128,
+          "extra_mapped_bytes": 0
+        },
+        "loaded_detached": {
+          "start_ns": 3493688090,
+          "stop_ns": 5624709280,
+          "wall_ns": 2131021190,
+          "iterations": 128,
+          "extra_mapped_bytes": 557056
+        },
+        "attached_capture": {
+          "start_ns": 5699896280,
+          "stop_ns": 7858931630,
+          "wall_ns": 2159035350,
+          "iterations": 128,
+          "extra_mapped_bytes": 4751360
+        }
+      }
+    }
+  },
+  "validation": {
+    "bundle": "validation.tar.gz",
+    "bundle_sha256": "673d7fc7f8d7974463631ccf9f2a21b1d678e01d8f2940ab1435997b8dab764f",
+    "members_sha256": {
+      "build-bpf.log": "3fa31254d38127511d17353b68db837e7a2f8d0083ac46dd37f20c79b248df97",
+      "build-default.log": "1e38354a13ec057cb3a603eba455f1c482a6ebe5851388b30d59911aa04b40df",
+      "syscalls.log": "7e99ded069396edb5b4b81a2936121fbeda94d9ec9f5349885da2c464d8b5765",
+      "capture-analyzer.log": "89835b2d29fdffb562ff0fa341242742e9420e6f72f2314ac3c87fd94504ecbb"
+    }
+  },
+  "independent_replay": {
+    "file": "replay-report.json",
+    "sha256": "efa1daf4b0db98dc0fc787f020153e6552e22d85eb60771f0b1d5998366a1046"
+  }
+}

@@ -185,5 +185,41 @@ impl NormalizedRecord {
         })
     }
 
+    /// Decode the declared 640-byte native software stack context. The legacy
+    /// 64-byte prefix keeps version 2; the extension itself declares version 3.
+    pub fn from_software_stack_v3_slice(slice: &[u8]) -> Result<Self, CaptureError> {
+        pulse_bpf_schema::PerfStackSampleContext::from_bytes(slice)
+            .map_err(|_| CaptureError::InvalidRecord("invalid software stack v3 context"))?;
+        let mut record = Self::from_perf_event_v2_slice(&slice[..64])?;
+        record.event_id = crate::schema::PERF_EVENT_SOFTWARE_STACK_V3_ID;
+        record.schema_version = 3;
+        record.payload.extend_from_slice(&slice[64..]);
+        Ok(record)
+    }
+
+    /// Restore the native context from the normalized common header and payload.
+    /// Decoding applies the same validation used at the raw ingestion seam.
+    pub fn software_stack_v3(&self) -> Result<pulse_bpf_schema::PerfStackSampleContext, CaptureError> {
+        if self.event_id != crate::schema::PERF_EVENT_SOFTWARE_STACK_V3_ID
+            || self.schema_version != 3 || self.payload.len() != 608 {
+            return Err(CaptureError::InvalidRecord("invalid normalized software stack v3 schema"));
+        }
+        let mut raw = [0u8; 640];
+        raw[..16].copy_from_slice(&self.payload[..16]);
+        raw[16..24].copy_from_slice(&self.timestamp_ns.to_le_bytes());
+        raw[24..28].copy_from_slice(&self.cpu_id.to_le_bytes());
+        raw[28..32].copy_from_slice(&self.pid.to_le_bytes());
+        raw[32..36].copy_from_slice(&self.tid.to_le_bytes());
+        raw[40..48].copy_from_slice(&self.task_id.to_le_bytes());
+        raw[48..60].copy_from_slice(&self.payload[16..28]);
+        raw[60..64].copy_from_slice(&2u32.to_le_bytes());
+        raw[64..].copy_from_slice(&self.payload[32..]);
+        if self.payload[28..32] != [0; 4] {
+            return Err(CaptureError::InvalidRecord("nonzero software stack reserved field"));
+        }
+        pulse_bpf_schema::PerfStackSampleContext::from_bytes(&raw)
+            .map_err(|_| CaptureError::InvalidRecord("invalid normalized software stack v3 context"))
+    }
+
 }
 

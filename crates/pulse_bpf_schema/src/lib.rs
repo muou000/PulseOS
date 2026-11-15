@@ -1,5 +1,12 @@
 #![no_std]
 
+pub mod stack;
+pub use stack::{
+    DEFAULT_STACK_BYTE_LIMIT, DEFAULT_STACK_DEPTH, FrozenStack, MAX_STACK_DEPTH,
+    PerfStackSampleContext, StackDecodeError, StackLimits, StackRegisters, StackStatus,
+    walk_frame_pointers,
+};
+
 /// Epoch shared by IRQ snapshots, tracepoint producers and event control.
 static OBSERVATION_GENERATION: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(1);
 

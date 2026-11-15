@@ -4,7 +4,7 @@ use alloc::vec::Vec;
 use crate::diagnostics::RuntimeDiagnostics;
 use crate::framing::{
     compute_checksum, compute_checksum_ieee, CaptureError, CaptureHeader, CaptureTrailer,
-    FORMAT_VERSION_V2, SessionStatusCode,
+    FORMAT_VERSION_V2, FORMAT_VERSION_V3, REQUIRED_SOFTWARE_STACK_V3, SessionStatusCode,
     CAPTURE_HEADER_SIZE, CAPTURE_TRAILER_SIZE,
 };
 use crate::record::NormalizedRecord;
@@ -21,11 +21,15 @@ pub const BPF_RINGBUF_HDR_MASK: u32 = BPF_RINGBUF_BUSY_BIT | BPF_RINGBUF_DISCARD
 /// Format selected from the attached program/configuration, never guessed
 /// from a 64-byte payload (which also matches a legacy TaskEnqueue context).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum SampleFormat {
+pub enum NativeContextFormat {
     PerfEventV1,
     PerfEventV2,
+    SoftwareStackV3,
     Tracepoint,
 }
+
+/// Backwards-compatible name for explicitly declared native context formats.
+pub type SampleFormat = NativeContextFormat;
 
 /// Session capture writer producing independent versioned capture files.
 #[derive(Clone, Debug)]
@@ -36,6 +40,7 @@ pub struct CaptureWriter {
     records_buf: Vec<u8>,
     records_count: u64,
     diagnostics: Option<RuntimeDiagnostics>,
+    requires_stack_v3: bool,
 }
 
 impl CaptureWriter {
@@ -48,6 +53,7 @@ impl CaptureWriter {
             records_buf: Vec::new(),
             records_count: 0,
             diagnostics: None,
+            requires_stack_v3: false,
         }
     }
 
@@ -74,6 +80,9 @@ impl CaptureWriter {
         }
 
         self.registry.validate_record(&record)?;
+        if record.event_id == crate::schema::PERF_EVENT_SOFTWARE_STACK_V3_ID {
+            self.requires_stack_v3 = true;
+        }
         let bytes = record.to_bytes();
         self.records_buf.extend_from_slice(&bytes);
         self.records_count += 1;
@@ -82,7 +91,7 @@ impl CaptureWriter {
     }
 
     /// Backwards-compatible v1 ingestion. Native samplers must supply their
-    /// declared source format through ingest_perf_sample_as for v2 contexts.
+    /// declared source format through ingest_perf_sample_as for v2/v3 contexts.
     pub fn ingest_perf_sample(&mut self, cpu: u32, raw_sample: &[u8]) -> Result<(), CaptureError> {
         let format = if raw_sample.len() == 48 { SampleFormat::PerfEventV1 } else { SampleFormat::Tracepoint };
         self.ingest_perf_sample_as(cpu, raw_sample, format)
@@ -99,6 +108,7 @@ impl CaptureWriter {
                     NormalizedRecord::from_perf_event_slice(PERF_EVENT_SOFTWARE_ID, raw_sample)?
                 }
                 SampleFormat::PerfEventV2 => NormalizedRecord::from_perf_event_v2_slice(raw_sample)?,
+                SampleFormat::SoftwareStackV3 => NormalizedRecord::from_software_stack_v3_slice(raw_sample)?,
                 SampleFormat::Tracepoint => {
                     if raw_sample.len() < 40 { return Err(CaptureError::TruncatedRecord); }
                     let id = u32::from_le_bytes(raw_sample[..4].try_into().unwrap());
@@ -215,6 +225,11 @@ impl CaptureWriter {
 
     /// Finalize capture, compute checksums, and emit the complete binary capture file.
     pub fn finish(&mut self, stop_ns: u64) -> Result<Vec<u8>, CaptureError> {
+        // A required stack extension always has the diagnostics section defined
+        // by v2. Missing runtime evidence stays explicitly unknown.
+        if self.requires_stack_v3 && self.diagnostics.is_none() {
+            self.diagnostics = Some(RuntimeDiagnostics::default());
+        }
         // Serialize before stopping, so invalid evidence does not consume the session.
         let diagnostics_bytes = self.diagnostics.as_ref().map(RuntimeDiagnostics::to_bytes).transpose()?;
         let mut metadata = self.session.stop(stop_ns)?;
@@ -234,6 +249,9 @@ impl CaptureWriter {
         metadata_buf.extend_from_slice(&self.registry.to_bytes());
         metadata_buf.extend_from_slice(&metadata.to_bytes());
         if let Some(bytes) = diagnostics_bytes { metadata_buf.extend_from_slice(&bytes); }
+        if self.requires_stack_v3 {
+            metadata_buf.extend_from_slice(&REQUIRED_SOFTWARE_STACK_V3.to_le_bytes());
+        }
 
         let metadata_offset = CAPTURE_HEADER_SIZE as u64;
         let metadata_size = metadata_buf.len() as u64;
@@ -244,6 +262,7 @@ impl CaptureWriter {
 
         let mut header = CaptureHeader::new(self.config.target_arch);
         if self.diagnostics.is_some() { header.format_version = FORMAT_VERSION_V2; }
+        if self.requires_stack_v3 { header.format_version = FORMAT_VERSION_V3; }
         header.metadata_offset = metadata_offset;
         header.metadata_size = metadata_size;
         header.records_offset = records_offset;

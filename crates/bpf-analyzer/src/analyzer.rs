@@ -79,8 +79,8 @@ impl CaptureAnalyzer {
         self.status_code().is_complete()
     }
 
-    /// Runtime-v2 captures currently carry individual source streams and PCs,
-    /// not the full mapping/callchain/scheduler evidence for complete attribution.
+    /// Runtime captures carry observed source streams and, for v3, bounded
+    /// stack prefixes; complete mapping/scheduler attribution remains separate.
     /// Keep legacy fixture semantics, but never promote runtime transport integrity
     /// to a complete CPU/off-CPU attribution claim.
     pub fn attribution_claim_allowed(&self) -> bool {

@@ -1,5 +1,5 @@
 use bpf_capture::record::NormalizedRecord;
-use bpf_capture::schema::{PERF_EVENT_SOFTWARE_ID, PERF_EVENT_SOFTWARE_V2_ID};
+use bpf_capture::schema::{PERF_EVENT_SOFTWARE_ID, PERF_EVENT_SOFTWARE_V2_ID, PERF_EVENT_SOFTWARE_STACK_V3_ID};
 use pulse_bpf_schema::{PhaseBoundary, TracepointId};
 use std::collections::HashMap;
 
@@ -58,6 +58,14 @@ pub enum EventPayload {
         pc: u64,
         mode: u32,
     },
+    SoftwareStackV3 {
+        sample_period: u64,
+        addr: u64,
+        pc: u64,
+        mode: u32,
+        source_id: u64,
+        stack: pulse_bpf_schema::FrozenStack,
+    },
     PageFault {
         address: u64,
         start_ns: u64,
@@ -100,6 +108,7 @@ impl NormalizedEvent {
             x if x == TracepointId::PageFault as u32 => "page_fault",
             x if x == PERF_EVENT_SOFTWARE_ID => "perf_sample",
             x if x == PERF_EVENT_SOFTWARE_V2_ID => "perf_sample_v2",
+            x if x == PERF_EVENT_SOFTWARE_STACK_V3_ID => "software_stack_v3",
             _ => "unknown",
         }
     }
@@ -124,7 +133,19 @@ pub fn parse_records(records: &[NormalizedRecord]) -> Vec<NormalizedEvent> {
             tid: rec.tid,
             task_id: rec.task_id,
             comm: None,
-            payload: parse_payload(rec.event_id, &rec.payload),
+            payload: if rec.event_id == PERF_EVENT_SOFTWARE_STACK_V3_ID {
+                match rec.software_stack_v3() {
+                    Ok(context) => EventPayload::SoftwareStackV3 {
+                        sample_period: context.base.base.sample_period,
+                        addr: context.base.base.addr,
+                        pc: context.base.ip,
+                        mode: context.base.mode,
+                        source_id: context.source_id,
+                        stack: context.stack,
+                    },
+                    Err(_) => EventPayload::Raw { bytes: rec.payload.clone() },
+                }
+            } else { parse_payload(rec.event_id, &rec.payload) },
         })
         .collect();
     parsed.sort_by_key(|event| (event.timestamp_ns, event.sequence_index));
