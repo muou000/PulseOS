@@ -191,6 +191,12 @@ pub fn has_active_perf_events() -> bool {
     ACTIVE_PERF_EVENT_COUNT.load(Ordering::Acquire) != 0
 }
 
+/// Diagnostic live registry size, pruning retired weak entries. This is a
+/// system-wide observation, not a count of enabled sources in one process.
+pub fn registered_perf_event_count() -> usize {
+    active_perf_events().len()
+}
+
 /// Dispatch a frozen source snapshot from worker context. No registry lock is
 /// held while executing programs, running helpers, or notifying consumers.
 pub fn dispatch_runtime_sample(sample: &RuntimeSample) -> usize {
@@ -1174,6 +1180,13 @@ impl PerfEvent {
 // last-detach could clear the mask after a new first-attach has set it. Producers
 // only read axtask's atomic mask and never acquire this control-plane lock.
 static TRACEPOINT_SUBSCRIBER_CONTROL: spin::Mutex<()> = spin::Mutex::new(());
+
+/// System-wide attached tracepoint subscriptions, including disabled sources.
+/// The control lock makes the sum coherent with attach/detach updates.
+pub fn tracepoint_subscription_count() -> usize {
+    let _guard = TRACEPOINT_SUBSCRIBER_CONTROL.lock();
+    TRACEPOINT_SUBSCRIBER_COUNTS.iter().map(|count| count.load(Ordering::Relaxed)).sum()
+}
 
 #[cfg(test)]
 pub fn tracepoint_subscriber_count_for_test(id: TracepointId) -> usize {

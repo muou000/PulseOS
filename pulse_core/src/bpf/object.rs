@@ -271,6 +271,12 @@ impl PerfEventObject {
         &self.event
     }
 
+    /// Identity-aware liveness of the task retained when this source opened.
+    /// Per-CPU events have no target and return None.
+    pub fn live_target_tid(&self) -> Option<u64> {
+        self.clock_thread.as_ref()?.sampling_live_tid()
+    }
+
     pub fn current_time_ns_for_spec(spec: &super::PerfEventSpec) -> LinuxResult<u64> {
         let now_ns = axhal::time::monotonic_time_nanos() as u64;
         match (spec.clock, spec.scope) {
