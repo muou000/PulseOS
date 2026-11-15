@@ -41,7 +41,10 @@ fn test_mutex_basic_and_reentrancy() -> Result<(), &'static str> {
             lock.try_lock().is_none(),
             "try_lock must fail when lock is already held by calling task"
         );
-        assert!(lock.is_locked(), "lock must report is_locked while guard is held");
+        assert!(
+            lock.is_locked(),
+            "lock must report is_locked while guard is held"
+        );
 
         // Guard drops at end of scope
     }
@@ -58,7 +61,10 @@ fn test_mutex_basic_and_reentrancy() -> Result<(), &'static str> {
     use lock_api::RawMutex as _;
     let raw = crate::RawMutex::new();
     assert!(!raw.is_locked());
-    assert!(raw.try_lock(), "RawMutex::try_lock failed on unlocked mutex");
+    assert!(
+        raw.try_lock(),
+        "RawMutex::try_lock failed on unlocked mutex"
+    );
     assert!(raw.is_locked());
     assert!(
         !raw.try_lock(),
@@ -182,6 +188,90 @@ fn test_rwlock_basic_and_guard_drop() -> Result<(), &'static str> {
     Ok(())
 }
 
+/// Transfers each kind of guard to another task and checks that its drop releases the lock.
+fn test_guard_transfer_and_drop() -> Result<(), &'static str> {
+    log::info!("[AXSYNC_GUEST] Cross-task guard transfer and drop checks...");
+
+    // Static borrows satisfy spawn's 'static bound without extending a guard's lifetime.
+    static MUTEX: Mutex<u32> = Mutex::new(0);
+    static RWLOCK: RwLock<u32> = RwLock::new(0);
+    let completed = Arc::new(AtomicU32::new(0));
+
+    let mut mutex_guard = MUTEX.lock();
+    *mutex_guard = 40;
+    let done = completed.clone();
+    thread::spawn(move || {
+        *mutex_guard += 2;
+        drop(mutex_guard);
+        done.fetch_add(1, Ordering::SeqCst);
+    });
+    wait_until_count(&completed, 1);
+    assert_eq!(
+        *MUTEX
+            .try_lock()
+            .ok_or("transferred mutex guard did not unlock on drop")?,
+        42
+    );
+
+    let mut writer = RWLOCK.write();
+    *writer = 100;
+    let done = completed.clone();
+    thread::spawn(move || {
+        *writer += 7;
+        drop(writer);
+        done.fetch_add(1, Ordering::SeqCst);
+    });
+    wait_until_count(&completed, 2);
+    let reader = RWLOCK
+        .try_read()
+        .ok_or("transferred write guard did not unlock on drop")?;
+    assert_eq!(*reader, 107);
+
+    let done = completed.clone();
+    thread::spawn(move || {
+        assert_eq!(*reader, 107);
+        drop(reader);
+        done.fetch_add(1, Ordering::SeqCst);
+    });
+    wait_until_count(&completed, 3);
+    assert_eq!(
+        *RWLOCK
+            .try_write()
+            .ok_or("transferred last read guard did not unlock on drop")?,
+        107
+    );
+
+    log::info!("[AXSYNC_GUEST] Cross-task guard transfer and drop: PASS");
+    Ok(())
+}
+
+/// Forgotten guards leave acquisition state behind, but cannot prevent exclusive owner access.
+fn test_forgotten_guards_and_owned_access() -> Result<(), &'static str> {
+    log::info!("[AXSYNC_GUEST] Forgotten guards and owned access checks...");
+
+    let mut mutex = Mutex::new(10);
+    core::mem::forget(mutex.lock());
+    assert!(mutex.try_lock().is_none());
+    *mutex.get_mut() = 11;
+    assert_eq!(mutex.into_inner(), 11);
+
+    let mut read_locked = RwLock::new(20);
+    core::mem::forget(read_locked.read());
+    assert!(read_locked.try_write().is_none());
+    *read_locked.get_mut() = 21;
+    assert_eq!(read_locked.into_inner(), 21);
+
+    let mut write_locked = RwLock::new(30);
+    core::mem::forget(write_locked.write());
+    assert!(write_locked.try_read().is_none());
+    assert!(write_locked.try_write().is_none());
+    *write_locked.get_mut() = 31;
+    assert_eq!(write_locked.into_inner(), 31);
+
+    log::info!("[AXSYNC_GUEST] Forgotten guards and owned access: PASS");
+    Ok(())
+}
+
 /// Tests high-concurrency reader-writer contention, verifying mutual exclusivity and absence of torn reads.
 fn test_rwlock_concurrent_readers_and_writers() -> Result<(), &'static str> {
     log::info!("[AXSYNC_GUEST] RwLock concurrent readers & writers stress test...");
@@ -268,56 +358,58 @@ fn test_rwlock_concurrent_readers_and_writers() -> Result<(), &'static str> {
     Ok(())
 }
 
-/// Tests RwLock wakeups across writers and readers, and anti-starvation backing off for waiting writers.
-fn test_rwlock_wakeups_and_starvation() -> Result<(), &'static str> {
-    log::info!("[AXSYNC_GUEST] RwLock wakeup and writer anti-starvation checks...");
+/// Checks writer admission ahead of a new reader and progress after the held reader drops.
+fn test_rwlock_writer_admission_and_wakeups() -> Result<(), &'static str> {
+    log::info!("[AXSYNC_GUEST] RwLock writer admission and wakeup checks...");
 
     let lock = Arc::new(RwLock::new(0u32));
-    let reader_held = Arc::new(AtomicBool::new(false));
-    let writer_waiting = Arc::new(AtomicBool::new(false));
-    let writer_finished = Arc::new(AtomicBool::new(false));
+    let completed = Arc::new(AtomicU32::new(0));
+    let reader_attempted = Arc::new(AtomicBool::new(false));
+    let initial_reader = lock.read();
 
-    // Task 1: acquires read lock, signals reader_held, waits for writer to queue, then drops read lock.
-    let lock_clone1 = lock.clone();
-    let reader_held_clone = reader_held.clone();
-    let writer_waiting_clone = writer_waiting.clone();
+    let writer_lock = lock.clone();
+    let done = completed.clone();
     thread::spawn(move || {
-        let r = lock_clone1.read();
-        reader_held_clone.store(true, Ordering::Release);
-        while !writer_waiting_clone.load(Ordering::Acquire) {
-            thread::yield_now();
-        }
-        // Yield to allow writer to block on wq
-        for _ in 0..5 {
-            thread::yield_now();
-        }
-        drop(r);
+        let mut writer = writer_lock.write();
+        *writer = 999;
+        drop(writer);
+        done.fetch_add(1, Ordering::SeqCst);
     });
 
-    // Wait until reader holds lock
-    while !reader_held.load(Ordering::Acquire) {
+    // Our reader excludes an active writer. A refused read therefore observes a registered
+    // waiting writer, rather than assuming that a fixed number of yields let it run.
+    while lock.try_read().is_some() {
         thread::yield_now();
     }
 
-    // Task 2: writer tries to acquire write lock, blocking on wq until reader drops.
-    let lock_clone2 = lock.clone();
-    let writer_waiting_clone2 = writer_waiting.clone();
-    let writer_finished_clone = writer_finished.clone();
+    let reader_lock = lock.clone();
+    let attempted = reader_attempted.clone();
+    let done = completed.clone();
     thread::spawn(move || {
-        writer_waiting_clone2.store(true, Ordering::Release);
-        let mut w = lock_clone2.write();
-        *w = 999;
-        drop(w);
-        writer_finished_clone.store(true, Ordering::Release);
+        assert!(
+            reader_lock.try_read().is_none(),
+            "new reader bypassed the registered waiting writer"
+        );
+        attempted.store(true, Ordering::Release);
+        let reader = reader_lock.read();
+        assert_eq!(
+            *reader, 999,
+            "new reader acquired before the waiting writer"
+        );
+        drop(reader);
+        done.fetch_add(1, Ordering::SeqCst);
     });
 
-    // Await writer completion
-    while !writer_finished.load(Ordering::Acquire) {
+    while !reader_attempted.load(Ordering::Acquire) {
         thread::yield_now();
     }
+    // The public API establishes writer registration and failed reader admission, not the
+    // precise instant either task sleeps. Both must complete across this release boundary.
+    drop(initial_reader);
+    wait_until_count(&completed, 2);
 
     assert_eq!(*lock.read(), 999);
-    log::info!("[AXSYNC_GUEST] RwLock wakeup and writer anti-starvation: PASS");
+    log::info!("[AXSYNC_GUEST] RwLock writer admission and wakeup: PASS");
     Ok(())
 }
 
@@ -328,10 +420,11 @@ pub fn run_lock_stress_checks() -> Result<(), &'static str> {
     test_mutex_basic_and_reentrancy()?;
     test_mutex_concurrent_stress()?;
     test_rwlock_basic_and_guard_drop()?;
+    test_guard_transfer_and_drop()?;
+    test_forgotten_guards_and_owned_access()?;
     test_rwlock_concurrent_readers_and_writers()?;
-    test_rwlock_wakeups_and_starvation()?;
+    test_rwlock_writer_admission_and_wakeups()?;
 
     log::info!("[AXSYNC_GUEST] All axsync lock stress & concurrency checks PASSED!");
     Ok(())
 }
-
