@@ -15,7 +15,7 @@ import time
 
 
 ANSI = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
-PROMPT = re.compile(r"(?:^|[\r\n])(?:[^\r\n\x1b]{0,80})?(?:sh|bash)-\d[^\r\n]*[#$] ?")
+PROMPT = re.compile(r"(?:ba)?sh-\d+(?:\.\d+)*[#$] ?")
 FAULT = re.compile(r"panicked at|Unhandled EIOINTC IRQ|common_virtio_irq_handler: no handlers found|Illegal instruction!|Failed to (?:load shell ELF|resolve shell path)")
 BLOCK_MARKER = "MSIX_BLOCK_root:x:0:0:root:/root:/bin/bash"
 NET_MARKER = "MSIX_NET_PULSE_MSIX_RESPONSE"
@@ -140,18 +140,20 @@ def main():
                 line_buffer = lines.pop()
                 for raw_line in lines:
                     line = ANSI.sub("", raw_line).replace("\r", "").replace("\x08", "")
-                    fault = FAULT.search(line)
+                    fault = FAULT.search(raw_line) or FAULT.search(line)
                     if fault:
                         faults.append(line)
                     for name, pattern in patterns.items():
-                        matches = pattern.findall(line)
+                        matches = pattern.findall(raw_line)
                         if matches:
                             counts[name] += len(matches)
-                            excerpts.setdefault(name, line)
+                            excerpts.setdefault(name, raw_line.rstrip("\r"))
                 if faults:
                     reason = "guest fault or unhandled interrupt"
                     break
-                if not sent and PROMPT.search(ANSI.sub("", console_tail).replace("\x08", "")):
+                # SMP trace output may insert the prompt inside an ANSI sequence;
+                # stripping ANSI first can consume its first letter as an escape code.
+                if not sent and PROMPT.search(console_tail):
                     proc.stdin.write(payload.encode())
                     proc.stdin.flush()
                     sent = True
