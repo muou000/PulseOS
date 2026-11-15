@@ -2,9 +2,7 @@
 
 #[cfg(any(
     net_dev = "virtio-net",
-    net_dev = "ixgbe",
     net_dev = "starfive-jh7110-dwmac",
-    net_dev = "fxmac",
     net_dev = "dummy",
 ))]
 macro_rules! register_net_driver {
@@ -83,19 +81,9 @@ macro_rules! for_each_drivers {
             type $drv_type = crate::drivers::Ls2k1000AhciDriver;
             $code
         }
-        #[cfg(net_dev = "ixgbe")]
-        {
-            type $drv_type = crate::drivers::IxgbeDriver;
-            $code
-        }
         #[cfg(net_dev = "starfive-jh7110-dwmac")]
         {
             type $drv_type = crate::drivers::StarfiveJh7110DwmacDriver;
-            $code
-        }
-        #[cfg(net_dev = "fxmac")]
-        {
-            type $drv_type = crate::drivers::FXmacDriver;
             $code
         }
     }};

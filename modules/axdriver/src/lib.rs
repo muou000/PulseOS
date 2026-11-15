@@ -78,9 +78,6 @@ mod structs;
 #[cfg(feature = "virtio")]
 mod virtio;
 
-#[cfg(feature = "ixgbe")]
-mod ixgbe;
-
 #[cfg(feature = "starfive-jh7110-dwmac")]
 mod starfive_jh7110;
 
