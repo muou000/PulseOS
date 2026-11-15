@@ -18,8 +18,12 @@ late registry conflicts, rejected mount and unmount updates, busy child mounts,
 competing probes, ancestors moved during probing, stale mount handles, and
 bind mount stacks, read-only inheritance, peer/slave shadow attributes and
 records, rejected move-shadow publication with retry, and lazy subtree rollback
-and record cleanup. Ordinary, bind, and shadow publication all exercise the
-same production coordinator; tests do not replace its registry or VFS logic.
+and record cleanup. Move rejection preserves parent/child identities and rows;
+retry moves each row once. Normal unmount removes peer/slave records through
+the coordinator; rejected primary updates preserve them, and repeated normal
+or lazy attempts cannot remove replacement mounts. Ordinary, bind, move,
+shadow publication, and propagated unmount all exercise the same production
+coordinator; tests do not replace its registry or VFS logic.
 
 Registry rejection is injected through the coordinator's `cfg(test)` hook.
 Tests serialize access to the production globals and remove their mounts after

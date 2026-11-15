@@ -10,6 +10,7 @@ publish = false
 axfs-ng-vfs = { path = "../../modules/axfs-ng-vfs" }
 async-trait = "0.1"
 kspin = { version = "0.1", features = ["smp"] }
+log = "0.4"
 spin = "0.10"
 
 [patch.crates-io]

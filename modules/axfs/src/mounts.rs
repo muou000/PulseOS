@@ -1,9 +1,9 @@
 //! Mount records and mount/unmount coordination.
 //!
-//! Callers use `mount_filesystem`, `mount_bind`, and `unmount_filesystem` (or
-//! `unmount_subtree` for lazy detach). Each primary and propagated shadow uses
-//! the same publication workflow. The individual registry helpers remain for
-//! boot, move bookkeeping, and remount.
+//! Callers use `mount_filesystem`, `mount_bind`, `move_filesystem`, and
+//! `unmount_filesystem` (or `unmount_subtree` for lazy detach). Each primary and
+//! propagated shadow uses the same publication workflow. Individual registry
+//! helpers remain only for boot and remount.
 //! Coordination takes the mountpoint index, then the listing lock, then the VFS
 //! topology writer lock. Readers of either registry cannot observe an unfinished
 //! update. The VFS rolls back a rejected update before releasing its topology
@@ -228,7 +228,7 @@ fn publish_shadow(
 /// or rejected shadow update is skipped. Every successful shadow has both
 /// topology and records; a rejected one has neither. The whole fan-out is not
 /// an atomic transaction, and a failed shadow does not undo the primary.
-pub fn propagate_mount(mountpoint: &Arc<Mountpoint>) {
+pub(crate) fn propagate_mount(mountpoint: &Arc<Mountpoint>) {
     if let Some(location) = mountpoint.location() {
         axfs_ng_vfs::propagate_new_mount_with(
             location.mountpoint(),
@@ -240,14 +240,98 @@ pub fn propagate_mount(mountpoint: &Arc<Mountpoint>) {
     }
 }
 
+/// Move a mount and its subtree, updating only records owned by the moved
+/// identities. Covered mounts at the old pathname retain their records.
+/// Rejection preserves both paths and mount identity; propagation begins only
+/// after the primary topology and both registries have committed.
+pub fn move_filesystem(source: &Location, target: &Location) -> VfsResult<Arc<Mountpoint>> {
+    if !source.is_root_of_mount() {
+        return Err(VfsError::InvalidInput);
+    }
+    target.check_is_dir()?;
+    let mut mountpoints = MOUNTED_MOUNTPOINTS.lock();
+    let mut records = MOUNT_RECORDS.lock();
+    let old_path = source.absolute_path()?;
+    let new_path = target.absolute_path()?;
+    let moving = source.mountpoint().collect_subtree();
+    let owns = |mp: &Arc<Mountpoint>| moving.iter().any(|other| Arc::ptr_eq(mp, other));
+    if !mountpoints
+        .iter()
+        .any(|(_, mp)| Arc::ptr_eq(mp, source.mountpoint()))
+        || !records.iter().any(|row| {
+            row.mountpoint
+                .as_ref()
+                .is_some_and(|mp| Arc::ptr_eq(mp, source.mountpoint()))
+        })
+    {
+        return Err(VfsError::InvalidInput);
+    }
+    // Prepare strings before the topology transition, selecting by identity
+    // first: pathname prefixes alone also match covered mounts in a stack.
+    let rewrite = |path: &str| -> VfsResult<String> {
+        let suffix = path
+            .strip_prefix(old_path.as_str())
+            .ok_or(VfsError::InvalidInput)?;
+        if !suffix.is_empty() && !suffix.starts_with('/') {
+            return Err(VfsError::InvalidInput);
+        }
+        Ok(format!("{}{suffix}", new_path.as_str()))
+    };
+    let mut index_paths = Vec::new();
+    let mut record_paths = Vec::new();
+    index_paths
+        .try_reserve(mountpoints.len())
+        .map_err(|_| VfsError::NoMemory)?;
+    record_paths
+        .try_reserve(records.len())
+        .map_err(|_| VfsError::NoMemory)?;
+    for (index, (path, mp)) in mountpoints.iter().enumerate() {
+        if owns(mp) {
+            index_paths.push((index, rewrite(path)?));
+        }
+    }
+    for (index, row) in records.iter().enumerate() {
+        if row.mountpoint.as_ref().is_some_and(owns) {
+            record_paths.push((index, rewrite(&row.target)?));
+        }
+    }
+    let result = source.move_mount_with(
+        target,
+        Some((old_path.as_str(), new_path.as_str())),
+        |moved| {
+            // A raw VFS mutation between preparation and publication must not
+            // commit an incomplete set of registry updates.
+            if moved.len() != moving.len() || !moved.iter().all(owns) {
+                return Err(VfsError::ResourceBusy);
+            }
+            #[cfg(test)]
+            check_record_update()?;
+            for (index, path) in &mut index_paths {
+                core::mem::swap(&mut mountpoints[*index].0, path);
+            }
+            for (index, path) in &mut record_paths {
+                core::mem::swap(&mut records[*index].target, path);
+            }
+            Ok(())
+        },
+    );
+    drop(records);
+    drop(mountpoints);
+    drop((index_paths, record_paths));
+    let mountpoint = result?;
+    propagate_mount(&mountpoint);
+    Ok(mountpoint)
+}
+
 /// Detach one mount and remove every index/listing entry owned by that exact
 /// mountpoint. A busy mount or rejected record update preserves both registries
 /// and the original VFS attachment, including its mount identity.
 ///
 /// The caller must drain filesystem writeback before this synchronous topology
 /// operation when unmounting a real filesystem. No I/O runs under these locks.
-/// Propagation selection remains a separate workflow; each selected peer or
-/// slave detach uses this same entry point.
+/// Peer and slave selection happens before detachment; after the primary
+/// succeeds, each selected shadow is detached through the same transaction.
+/// Propagation is best effort: a busy shadow retains both topology and records.
 pub fn unmount_filesystem(target: &Location) -> VfsResult<()> {
     unmount(target, false)
 }
@@ -260,6 +344,19 @@ pub fn unmount_subtree(target: &Location) -> VfsResult<()> {
 }
 
 fn unmount(target: &Location, subtree: bool) -> VfsResult<()> {
+    let peers = axfs_ng_vfs::collect_propagate_unmount(target.mountpoint());
+    // A rejected primary must not remove its propagated peers. Keep the
+    // selection alive across primary detachment, which removes peer links.
+    unmount_one(target, subtree)?;
+    for peer in peers {
+        if let Err(error) = unmount_one(&peer.root_location(), subtree) {
+            log::warn!("failed to unmount propagated mount: {:?}", error);
+        }
+    }
+    Ok(())
+}
+
+fn unmount_one(target: &Location, subtree: bool) -> VfsResult<()> {
     if !target.is_root_of_mount() {
         return Err(VfsError::InvalidInput);
     }
@@ -352,7 +449,7 @@ pub(crate) fn reset_mounted_mountpoints() {
     drop(cleared);
 }
 
-pub fn register_mount(source: &str, target: &str, fs_type: &str, options: &str) {
+pub(crate) fn register_mount(source: &str, target: &str, fs_type: &str, options: &str) {
     register_mount_record(source, target, fs_type, options, None);
 }
 
@@ -409,25 +506,6 @@ pub fn register_mount_for_mountpoint(
     });
 }
 
-pub fn unregister_mount(target: &str) -> bool {
-    let target = normalize_target(target);
-    if target == "/" {
-        return false;
-    }
-    let mut mounts = MOUNT_RECORDS.lock();
-    if let Some(index) = mounts.iter().rposition(|m| m.target == target) {
-        mounts.remove(index);
-        true
-    } else {
-        false
-    }
-}
-
-pub fn is_mount_registered(target: &str) -> bool {
-    let target = normalize_target(target);
-    MOUNT_RECORDS.lock().iter().any(|m| m.target == target)
-}
-
 pub fn list_mounts() -> Vec<MountRecord> {
     MOUNT_RECORDS.lock().clone()
 }
@@ -443,7 +521,7 @@ pub fn mountpoint_is_bind(mountpoint: &Arc<axfs_ng_vfs::Mountpoint>) -> bool {
     })
 }
 
-pub fn register_mounted_mountpoint(target: &str, mountpoint: Arc<axfs_ng_vfs::Mountpoint>) {
+pub(crate) fn register_mounted_mountpoint(target: &str, mountpoint: Arc<axfs_ng_vfs::Mountpoint>) {
     let target = normalize_target(target);
     let mut mps = MOUNTED_MOUNTPOINTS.lock();
     if mps.iter().any(|(existing_target, existing)| {
@@ -461,137 +539,4 @@ pub fn lookup_mounted_mountpoint(target: &str) -> Option<Arc<axfs_ng_vfs::Mountp
         .iter()
         .rfind(|(t, _)| t == &target)
         .map(|(_, m)| m.clone())
-}
-
-pub fn unregister_mounted_mountpoint(target: &str) -> bool {
-    let target = normalize_target(target);
-    let mut mps = MOUNTED_MOUNTPOINTS.lock();
-    if let Some(index) = mps.iter().rposition(|(t, _)| t == &target) {
-        let removed = mps.remove(index);
-        drop(mps);
-        drop(removed);
-        true
-    } else {
-        false
-    }
-}
-
-/// Remove the registry entry for the exact VFS mountpoint that was unmounted.
-///
-/// A propagated bind mount can share its pathname with another stacked mount.
-/// Removing by pathname alone can therefore pop the wrong registry entry and
-/// leave `/proc/mounts` pointing at a mount that no longer exists.
-pub fn unregister_mounted_mountpoint_exact(
-    target: &str,
-    mountpoint: &Arc<axfs_ng_vfs::Mountpoint>,
-) -> bool {
-    let target = normalize_target(target);
-    let mut mps = MOUNTED_MOUNTPOINTS.lock();
-    let removed_mountpoint = if let Some(index) = mps
-        .iter()
-        .rposition(|(t, mp)| t == &target && Arc::ptr_eq(mp, mountpoint))
-    {
-        mps.remove(index);
-        true
-    } else {
-        false
-    };
-    drop(mps);
-
-    let mut mounts = MOUNT_RECORDS.lock();
-    let removed_record = if let Some(index) = mounts.iter().rposition(|record| {
-        record.target == target
-            && record
-                .mountpoint
-                .as_ref()
-                .is_some_and(|existing| Arc::ptr_eq(existing, mountpoint))
-    }) {
-        mounts.remove(index);
-        true
-    } else {
-        false
-    };
-
-    removed_mountpoint || removed_record
-}
-
-/// Remove every bookkeeping entry owned by a VFS mountpoint.
-///
-/// A propagated bind mount can be registered under more than one visible
-/// path, and a lazy unmount removes a whole subtree at once.  Cleaning by one
-/// `(path, Arc)` pair leaves stale `/proc/mounts` rows in either case; the LTP
-/// cleanup loop then keeps retrying those rows forever.  The vectors are
-/// detached before filtering so dropping mount records never happens while a
-/// registry spin lock is held.
-pub fn unregister_mountpoint_records(mountpoint: &Arc<axfs_ng_vfs::Mountpoint>) -> usize {
-    let mut removed_mps = Vec::new();
-    {
-        let mut guard = MOUNTED_MOUNTPOINTS.lock();
-        let entries = core::mem::take(&mut *guard);
-        let mut kept = Vec::with_capacity(entries.len());
-        for entry in entries {
-            if Arc::ptr_eq(&entry.1, mountpoint) {
-                removed_mps.push(entry);
-            } else {
-                kept.push(entry);
-            }
-        }
-        *guard = kept;
-    }
-
-    let mut removed_records = Vec::new();
-    {
-        let mut guard = MOUNT_RECORDS.lock();
-        let records = core::mem::take(&mut *guard);
-        let mut kept = Vec::with_capacity(records.len());
-        for record in records {
-            let owned = record
-                .mountpoint
-                .as_ref()
-                .is_some_and(|existing| Arc::ptr_eq(existing, mountpoint));
-            if owned {
-                removed_records.push(record);
-            } else {
-                kept.push(record);
-            }
-        }
-        *guard = kept;
-    }
-
-    let removed = removed_mps.len() + removed_records.len();
-    drop(removed_mps);
-    drop(removed_records);
-    removed
-}
-
-pub fn rename_mount_registry(old_prefix: &str, new_prefix: &str) {
-    let old_prefix = normalize_target(old_prefix);
-    let new_prefix = normalize_target(new_prefix);
-
-    // 1. Update MOUNT_RECORDS
-    {
-        let mut records = MOUNT_RECORDS.lock();
-        for record in records.iter_mut() {
-            if record.target == old_prefix {
-                record.target = new_prefix.clone();
-            } else if record.target.starts_with(&old_prefix)
-                && record.target[old_prefix.len()..].starts_with('/')
-            {
-                record.target.replace_range(..old_prefix.len(), &new_prefix);
-            }
-        }
-    }
-
-    // 2. Update MOUNTED_MOUNTPOINTS
-    {
-        let mut mps = MOUNTED_MOUNTPOINTS.lock();
-        for (target, _mp) in mps.iter_mut() {
-            if target == &old_prefix {
-                *target = new_prefix.clone();
-            } else if target.starts_with(&old_prefix) && target[old_prefix.len()..].starts_with('/')
-            {
-                target.replace_range(..old_prefix.len(), &new_prefix);
-            }
-        }
-    }
 }

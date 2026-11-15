@@ -78,6 +78,7 @@ dependencies = [
  "async-trait",
  "axfs-ng-vfs",
  "kspin",
+ "log",
  "spin",
 ]
 

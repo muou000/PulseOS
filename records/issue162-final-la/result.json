@@ -1,0 +1,7 @@
+{
+  "arch": "loongarch64",
+  "suite": "mounts",
+  "passed_assertions": 397,
+  "errors": [],
+  "kernel_sha256": "32ba0ca671d5e30bd7141790a11375a4c031886fc0055a899b7475a2aafc4ad6"
+}

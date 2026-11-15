@@ -1,0 +1,84 @@
+{
+  "artifacts": {
+    "binary": {
+      "bytes": 3385344,
+      "path": "/home/muou/PulseOS/PulseOS_riscv64-qemu-virt.bin",
+      "sha256": "a1a46c12e44e174837ed88d482f19c77d94b1d80720c59f5f00346da58661568"
+    },
+    "elf": {
+      "bytes": 6528928,
+      "path": "/home/muou/PulseOS/PulseOS_riscv64-qemu-virt.elf",
+      "sha256": "5fb68b1592e55254f0410020e829b7b104bc624314c11adf168f0e190b0bc401"
+    }
+  },
+  "completed_unix_ns": 1794754390300103708,
+  "configuration": {
+    "axconfig_path": "/home/muou/PulseOS/.axconfig.toml",
+    "axconfig_sha256": "d5152f5420ce784891bc05d40361a310ff2018b186e6fcd2013f897794bb9b12",
+    "axconfig_text": "# Architecture identifier.\narch = \"riscv64\" # str\n# Platform package.\npackage = \"axplat-riscv64-qemu-virt\" # str\n# Platform identifier.\nplatform = \"riscv64-qemu-virt\" # str\n# Stack size of each task.\ntask-stack-size = 0x40000 # uint\n# Number of timer ticks per second (Hz). A timer tick may contain several timer\n# interrupts.\nticks-per-sec = 100 # uint\n\n#\n# Device specifications\n#\n[devices]\n# IPI interrupt num\nipi-irq = \"0x8000_0000_0000_0001\" # uint\n# MMIO ranges with format (`base_paddr`, `size`).\nmmio-ranges = [\n    [0x0010_1000, 0x1000],\n    [0x0c00_0000, 0x21_0000],\n    [0x1000_0000, 0x1000],\n    [0x1000_1000, 0x8000],\n    [0x3000_0000, 0x1000_0000],\n    [0x4000_0000, 0x4000_0000]\n] # [(uint, uint)]\n# End PCI bus number (`bus-range` property in device tree).\npci-bus-end = 0xff # uint\n# Base physical address of the PCIe ECAM space.\npci-ecam-base = 0x3000_0000 # uint\n# PCI device memory ranges (`ranges` property in device tree).\npci-ranges = [\n    [0x0300_0000, 0x1_0000],\n    [0x4000_0000, 0x4000_0000],\n    [0x4_0000_0000, 0x4_0000_0000]\n] # [(uint, uint)]\n# rtc@101000 {\n#     interrupts = <0x0b>;\n#     interrupt-parent = <0x03>;\n#     reg = <0x00 0x101000 0x00 0x1000>;\n#     compatible = \"google,goldfish-rtc\";\n# };\n# RTC (goldfish) Address\nrtc-paddr = 0x10_1000 # uint\n# Timer interrupt frequency in Hz.\ntimer-frequency = 10_000_000 # uint\n# Timer interrupt num.\ntimer-irq = \"0x8000_0000_0000_0005\" # uint\n# VirtIO MMIO ranges with format (`base_paddr`, `size`).\nvirtio-mmio-ranges = [\n    [0x1000_1000, 0x1000],\n    [0x1000_2000, 0x1000],\n    [0x1000_3000, 0x1000],\n    [0x1000_4000, 0x1000],\n    [0x1000_5000, 0x1000],\n    [0x1000_6000, 0x1000],\n    [0x1000_7000, 0x1000],\n    [0x1000_8000, 0x1000]\n] # [(uint, uint)]\n\n#\n# Platform configs\n#\n[plat]\n# Stack size on bootstrapping. (256K)\nboot-stack-size = 0x40000 # uint\n# Kernel address space base.\nkernel-aspace-base = \"0xffff_ffc0_0000_0000\" # uint\n# Kernel address space size.\nkernel-aspace-size = \"0x0000_003f_ffff_f000\" # uint\n# Base physical address of the kernel image.\nkernel-base-paddr = 0x8020_0000 # uint\n# Base virtual address of the kernel image.\nkernel-base-vaddr = \"0xffff_ffc0_8020_0000\" # uint\n# Maximum number of CPUs. For platforms that do not support runtime CPU number\n# detection, it's also the number of CPUs to boot.\nmax-cpu-num = 8 # uint\n# Offset of bus address and phys address. some boards, the bus address is\n# different from the physical address.\nphys-bus-offset = 0 # uint\n# Base address of the whole physical memory.\nphys-memory-base = 0x8000_0000 # uint\n# Size of the whole physical memory. (16G)\nphys-memory-size = 0x4_0000_0000 # uint\n# Linear mapping offset, for quick conversions between physical and virtual\n# addresses.\nphys-virt-offset = \"0xffff_ffc0_0000_0000\" # uint\n",
+    "environment": {
+      "APP_FEATURES": "qemu",
+      "AX_ARCH": "riscv64",
+      "AX_GW": "10.0.2.2",
+      "AX_IP": "10.0.2.15",
+      "AX_LOG": "info",
+      "AX_MODE": "release",
+      "AX_PLATFORM": "riscv64-qemu-virt",
+      "AX_TARGET": "riscv64gc-unknown-none-elf",
+      "CARGO_ENCODED_RUSTFLAGS": null,
+      "RUSTC": null,
+      "RUSTC_WORKSPACE_WRAPPER": null,
+      "RUSTC_WRAPPER": null,
+      "RUSTFLAGS": "-A unsafe_op_in_unsafe_fn -C link-arg=-T/home/muou/PulseOS/target/riscv64gc-unknown-none-elf/release/linker_riscv64-qemu-virt.lds -C link-arg=-no-pie -C link-arg=-znostart-stop-gc"
+    },
+    "linker_script": {
+      "path": "/home/muou/PulseOS/target/riscv64gc-unknown-none-elf/release/linker_riscv64-qemu-virt.lds",
+      "sha256": "b4a5cf7a9f349d27fc4f6168218afdb37468e7a6d2b6ac83a0f2e4167ae31481"
+    },
+    "values": {
+      "arch": "riscv64",
+      "features": "axfeat/defplat axfeat/log-level-info axfeat/bus-mmio smp qemu",
+      "mode": "release",
+      "platform": "riscv64-qemu-virt",
+      "target": "riscv64gc-unknown-none-elf"
+    }
+  },
+  "format": "pulse-kernel-build-provenance",
+  "format_version": 1,
+  "source": {
+    "commit": "c4ae5d906069f50b8965df32044bf7ae8862a21d",
+    "excluded_directories": [
+      ".git",
+      ".pytest_cache",
+      "__pycache__",
+      "target"
+    ],
+    "external_dependencies": "Cargo.lock identities; cache content not attested",
+    "file_count": 960,
+    "git_worktree_dirty": false,
+    "roots": [
+      ".cargo",
+      "api",
+      "crates",
+      "modules",
+      "platforms",
+      "pulse_core",
+      "pulse_syscalls",
+      "src",
+      "configs",
+      "scripts/make",
+      "Cargo.toml",
+      "Cargo.lock",
+      "Makefile",
+      "rust-toolchain",
+      "rust-toolchain.toml",
+      "scripts/build_provenance.py"
+    ],
+    "tree_sha256": "92fcb82d93bee8fe539d4db1e6585f715536ea470e4765d7a995fe71251991e3"
+  },
+  "started_unix_ns": 1794754348573076940,
+  "toolchain": {
+    "cargo": "cargo 1.101.0-nightly (3d7cf6e93 2026-09-25)",
+    "rustc": "rustc 1.101.0-nightly (c1070d693 2026-09-28)\nbinary: rustc\ncommit-hash: c1070d69382b8d2f2eb65119c738a77d9e324c9e\ncommit-date: 2026-09-28\nhost: x86_64-unknown-linux-gnu\nrelease: 1.101.0-nightly\nLLVM version: 23.1.1"
+  }
+}
