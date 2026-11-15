@@ -69,6 +69,7 @@ def run(args, output, kernel, image):
                             stderr=subprocess.STDOUT, bufsize=0)
     text, sent = "", False
     errors = []
+    failed = False
     deadline = time.monotonic() + args.timeout
     try:
         with selectors.DefaultSelector() as selector, (output / "guest.log").open("wb") as log:
@@ -86,9 +87,12 @@ def run(args, output, kernel, image):
                 text += chunk.decode("utf-8", errors="replace")
                 check_permissions(text)
                 normalized = shutdown.ANSI.sub("", text).replace("\x08", "")
-                if shutdown.FAULT.search(normalized) or marker + "_FAIL" in normalized:
+                if not failed and (shutdown.FAULT.search(normalized) or marker + "_FAIL" in normalized):
                     errors.append("kernel fault or guest assertion failed")
-                    break
+                    failed = True
+                    # Panic output may span reads; retain its location/registers
+                    # before stopping QEMU without turning a panic into success.
+                    deadline = min(deadline, time.monotonic() + 1)
                 if not sent and shutdown.PROMPT.search(normalized):
                     proc.stdin.write(payload); proc.stdin.flush()
                     sent = True
