@@ -11,6 +11,87 @@ use crate::{
 static TEST_LOCK: Mutex<()> = Mutex::new(());
 
 #[test]
+fn rejected_move_preserves_subtree_records_and_retry_moves_each_once() {
+    let _serial = TEST_LOCK.lock().unwrap();
+    let root = Mountpoint::new_root(&MemFs::create("root")).root_location();
+    let old_target = mkdir(&root, "old");
+    let destination = mkdir(&root, "new");
+    let parent = mount_filesystem(&old_target, "parent", "tmpfs", 0, || {
+        Ok(MemFs::create("parent"))
+    })
+    .unwrap();
+    let child = mount_filesystem(
+        &mkdir(&parent.root_location(), "child"),
+        "child",
+        "tmpfs",
+        1,
+        || Ok(MemFs::create("child")),
+    )
+    .unwrap();
+    FAIL_NEXT_RECORD_UPDATE.store(true, std::sync::atomic::Ordering::Relaxed);
+    assert_eq!(
+        move_filesystem(&parent.root_location(), &destination).unwrap_err(),
+        axfs_ng_vfs::VfsError::NoMemory
+    );
+    assert_eq!(list_mounts().len(), 2);
+    for (path, mp) in [("/old", &parent), ("/old/child", &child)] {
+        assert_eq!(
+            list_mounts()
+                .iter()
+                .filter(|row| row.target == path)
+                .count(),
+            1
+        );
+        assert!(Arc::ptr_eq(&lookup_mounted_mountpoint(path).unwrap(), mp));
+        assert_eq!(mp.root_location().absolute_path().unwrap().as_str(), path);
+    }
+    assert!(lookup_mounted_mountpoint("/new").is_none());
+    assert!(!destination.is_mountpoint());
+    move_filesystem(&parent.root_location(), &destination).unwrap();
+    assert_eq!(list_mounts().len(), 2);
+    for (path, mp) in [("/new", &parent), ("/new/child", &child)] {
+        assert_eq!(
+            list_mounts()
+                .iter()
+                .filter(|row| row.target == path)
+                .count(),
+            1
+        );
+        assert!(Arc::ptr_eq(&lookup_mounted_mountpoint(path).unwrap(), mp));
+        assert_eq!(mp.root_location().absolute_path().unwrap().as_str(), path);
+    }
+    assert!(lookup_mounted_mountpoint("/old").is_none());
+    assert!(lookup_mounted_mountpoint("/old/child").is_none());
+    assert!(!old_target.is_mountpoint());
+    assert!(child.is_readonly());
+    assert_eq!(child.get_flags(), 1);
+    unmount_subtree(&parent.root_location()).unwrap();
+    let replacement = mount_filesystem(&destination, "replacement", "tmpfs", 0, || {
+        Ok(MemFs::create("replacement"))
+    })
+    .unwrap();
+    assert_eq!(
+        unmount_subtree(&parent.root_location()),
+        Err(axfs_ng_vfs::VfsError::InvalidInput)
+    );
+    assert_eq!(
+        unmount_subtree(&child.root_location()),
+        Err(axfs_ng_vfs::VfsError::InvalidInput)
+    );
+    assert_eq!(
+        move_filesystem(&parent.root_location(), &old_target).unwrap_err(),
+        axfs_ng_vfs::VfsError::InvalidInput
+    );
+    assert_eq!(list_mounts().len(), 1);
+    assert!(Arc::ptr_eq(
+        &lookup_mounted_mountpoint("/new").unwrap(),
+        &replacement
+    ));
+    unmount_filesystem(&replacement.root_location()).unwrap();
+    assert!(list_mounts().is_empty());
+}
+
+#[test]
 fn rejected_move_shadow_update_leaves_no_ghost_and_retry_can_publish() {
     let _serial = TEST_LOCK.lock().unwrap();
     let root = Mountpoint::new_root(&MemFs::create("root")).root_location();
@@ -31,8 +112,11 @@ fn rejected_move_shadow_update_leaves_no_ghost_and_retry_can_publish() {
     })
     .unwrap();
     let destination = mkdir(&primary.root_location(), "child");
-    moving.root_location().move_mount(&destination).unwrap();
-    rename_mount_registry("/moving", "/primary/child");
+    // First publish under a private destination, then exercise a rejected
+    // propagated shadow and retry using the coordinator's own propagation.
+    primary.make_private();
+    move_filesystem(&moving.root_location(), &destination).unwrap();
+    primary.change_propagation(peer.propagation());
     FAIL_NEXT_RECORD_UPDATE.store(true, std::sync::atomic::Ordering::Relaxed);
     propagate_mount(&moving);
     assert!(lookup_mounted_mountpoint("/peer/child").is_none());
@@ -52,7 +136,6 @@ fn rejected_move_shadow_update_leaves_no_ghost_and_retry_can_publish() {
         shadow.mountpoint()
     ));
     assert_eq!(list_mounts().len(), 4);
-    unmount_filesystem(&shadow).unwrap();
     unmount_filesystem(&moving.root_location()).unwrap();
     unmount_filesystem(&peer.root_location()).unwrap();
     unmount_filesystem(&primary.root_location()).unwrap();
@@ -214,8 +297,19 @@ fn ordinary_mount_publishes_peer_and_slave_shadow_records() {
         slave_child.mountpoint().propagation().master_group(),
         child.propagation().peer_group()
     );
-    for shadow in axfs_ng_vfs::collect_propagate_unmount(&child) {
-        unmount_filesystem(&shadow.root_location()).unwrap();
+    FAIL_NEXT_RECORD_UPDATE.store(true, std::sync::atomic::Ordering::Relaxed);
+    assert_eq!(
+        unmount_filesystem(&child.root_location()),
+        Err(axfs_ng_vfs::VfsError::NoMemory)
+    );
+    assert_eq!(list_mounts().len(), 6);
+    for (path, mp) in [
+        ("/primary/child", &child),
+        ("/peer/child", peer_child.mountpoint()),
+        ("/slave/child", slave_child.mountpoint()),
+    ] {
+        assert!(Arc::ptr_eq(&lookup_mounted_mountpoint(path).unwrap(), mp));
+        assert_eq!(mp.root_location().absolute_path().unwrap().as_str(), path);
     }
     unmount_filesystem(&child.root_location()).unwrap();
     assert!(
@@ -223,6 +317,16 @@ fn ordinary_mount_publishes_peer_and_slave_shadow_records() {
             .iter()
             .any(|row| row.target.ends_with("/child"))
     );
+    for removed in [&child, peer_child.mountpoint(), slave_child.mountpoint()] {
+        assert_eq!(
+            unmount_filesystem(&removed.root_location()),
+            Err(axfs_ng_vfs::VfsError::InvalidInput)
+        );
+        assert_eq!(
+            unmount_subtree(&removed.root_location()),
+            Err(axfs_ng_vfs::VfsError::InvalidInput)
+        );
+    }
     for mount in [slave, peer, primary] {
         unmount_filesystem(&mount.root_location()).unwrap();
     }
@@ -414,7 +518,7 @@ fn record_conflict_created_during_probe_rolls_back_the_new_attachment() {
     let resolved = block_on(root.lookup_no_follow("late_conflict")).unwrap();
     assert!(Arc::ptr_eq(resolved.mountpoint(), root.mountpoint()));
     assert!(!target.is_mountpoint());
-    assert!(unregister_mount("/late_conflict"));
+    reset_mount_records();
     assert!(list_mounts().is_empty());
 }
 
@@ -535,8 +639,7 @@ fn parent_moved_during_probe_records_the_current_mount_path() {
     let child_target = mkdir(&parent.root_location(), "child");
     let child = mount_filesystem(&child_target, "child", "tmpfs", 0, || {
         // Model another task's complete MS_MOVE while the probe waits for I/O.
-        parent.root_location().move_mount(&new_target)?;
-        rename_mount_registry("/old", "/new");
+        move_filesystem(&parent.root_location(), &new_target)?;
         Ok(MemFs::create("child"))
     })
     .unwrap();

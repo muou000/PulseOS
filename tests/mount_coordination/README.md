@@ -1,4 +1,4 @@
-# Mount coordination regressions (#160, #161)
+# Mount coordination regressions (#160, #161, #162)
 
 Run against freshly built kernels:
 
@@ -25,6 +25,13 @@ child/parent unmount. It also checks:
 - Slave-local mounts do not propagate back to the master or its peer.
 - Normal and lazy unmount remove primary and nested shadow records while
   preserving the original bind source.
+- Moving an upper stacked bind and its nested mount updates exactly their
+  records, leaving the lower root and child at the original path. Normal
+  unmount and lazy detach then remove the correct identities, and repeated
+  unmount attempts fail without changing the remaining records.
+- Moving a subtree under a shared parent publishes peer and slave shadows;
+  lazy detach removes all moved and propagated root/child rows. Repeated normal
+  and lazy unmount attempts on the old peer paths return `EINVAL`.
 
 Host tests exercise injected registry failures and topology rollback
 separately; this guest validates the actual syscall wiring. The existing LTP

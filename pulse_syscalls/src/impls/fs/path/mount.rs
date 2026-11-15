@@ -203,21 +203,10 @@ fn sys_mount_move(ctx: &axfs::FsContext, source_uptr: usize, target_path: &str) 
         Err(e) => return -LinuxError::from(e.canonicalize()).code() as isize,
     };
 
-    // Detach source from its current parent and re-attach at target.
-    let new_mp = match source_loc.move_mount(&target_loc) {
-        Ok(mp) => mp,
-        Err(e) => return -LinuxError::from(e.canonicalize()).code() as isize,
-    };
-
-    // MOUNTED_TARGETS registry removed
-
-    // Rename records in MOUNT_RECORDS and MOUNTED_MOUNTPOINTS for this path and all descendants.
-    axfs::rename_mount_registry(&source_path, target_path);
-
-    // Publish each propagated shadow through the same coordinator as bind.
-    axfs::propagate_mount(&new_mp);
-
-    0
+    match axfs::move_filesystem(&source_loc, &target_loc) {
+        Ok(_) => 0,
+        Err(e) => -LinuxError::from(e.canonicalize()).code() as isize,
+    }
 }
 
 pub fn sys_mount(
@@ -483,32 +472,6 @@ pub fn sys_umount2(target: usize, flags: usize) -> isize {
     {
         return -LinuxError::from(error.canonicalize()).code() as isize;
     }
-    let peer_mps = axfs_ng_vfs::collect_propagate_unmount(&target_mp);
-
-    // Unmount all propagated peer mountpoints
-    for peer_mp in peer_mps {
-        let root_loc = peer_mp.root_location();
-        if let Ok(abs_path) = root_loc.absolute_path() {
-            let peer_path = abs_path.to_string();
-            axlog::debug!("sys_umount2: propagating unmount to peer '{}'", peer_path);
-            let res = if is_detach {
-                axfs::unmount_subtree(&root_loc)
-            } else {
-                axfs::unmount_filesystem(&root_loc)
-            };
-            match res {
-                Ok(()) => {}
-                Err(e) => {
-                    axlog::warn!(
-                        "sys_umount2: failed to unmount propagated peer '{}': {:?}",
-                        peer_path,
-                        e
-                    );
-                }
-            }
-        }
-    }
-
     let result = if is_detach {
         axfs::unmount_subtree(&target_loc)
     } else {
