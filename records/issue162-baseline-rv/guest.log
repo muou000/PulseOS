@@ -1,0 +1,325 @@
+
+OpenSBI v1.8.1
+   ____                    _____ ____ _____
+  / __ \                  / ____|  _ \_   _|
+ | |  | |_ __   ___ _ __ | (___ | |_) || |
+ | |  | | '_ \ / _ \ '_ \ \___ \|  _ < | |
+ | |__| | |_) |  __/ | | |____) | |_) || |_
+  \____/| .__/ \___|_| |_|_____/|____/_____|
+        | |
+        |_|
+
+Platform Name               : riscv-virtio,qemu
+Platform Features           : medeleg
+Platform HART Count         : 8
+Platform HART Protection    : pmp
+Platform IPI Device         : aclint-mswi
+Platform Timer Device       : aclint-mtimer @ 10000000Hz
+Platform Console Device     : uart8250
+Platform HSM Device         : ---
+Platform PMU Device         : ---
+Platform Reboot Device      : syscon-reboot
+Platform Shutdown Device    : syscon-poweroff
+Platform Suspend Device     : ---
+Platform CPPC Device        : ---
+Firmware Base               : 0x80000000
+Firmware Size               : 407 KB
+Firmware RW Offset          : 0x40000
+Firmware RW Size            : 151 KB
+Firmware Heap Offset        : 0x55000
+Firmware Heap Size          : 67 KB (total), 1 KB (reserved), 13 KB (used), 52 KB (free)
+Firmware Scratch Size       : 4096 B (total), 1464 B (used), 2632 B (free)
+Runtime SBI Version         : 3.0
+Standard SBI Extensions     : time,rfnc,ipi,base,hsm,srst,pmu,dbcn,fwft,legacy,dbtr,sse
+Experimental SBI Extensions : none
+
+Domain0 Name                : root
+Domain0 Boot HART           : 4
+Domain0 HARTs               : 0*,1*,2*,3*,4*,5*,6*,7*
+Domain0 Region00            : 0x0000000080000000-0x000000008003ffff M: (F,R,X) S/U: ()
+Domain0 Region01            : 0x0000000080040000-0x000000008007ffff M: (F,R,W) S/U: ()
+Domain0 Region02            : 0x0000000000100000-0x0000000000100fff M: (I,R,W) S/U: (R,W)
+Domain0 Region03            : 0x0000000010000000-0x0000000010000fff M: (I,R,W) S/U: (R,W)
+Domain0 Region04            : 0x0000000002000000-0x000000000200ffff M: (I,R,W) S/U: ()
+Domain0 Region05            : 0x000000000c400000-0x000000000c5fffff M: (I,R,W) S/U: (R,W)
+Domain0 Region06            : 0x000000000c000000-0x000000000c3fffff M: (I,R,W) S/U: (R,W)
+Domain0 Region07            : 0x0000000000000000-0xffffffffffffffff M: () S/U: (R,W,X)
+Domain0 Next Address        : 0x0000000080200000
+Domain0 Next Arg1           : 0x000000027fe00000
+Domain0 Next Mode           : S-mode
+Domain0 SysReset            : yes
+Domain0 SysSuspend          : yes
+
+Boot HART ID                : 4
+Boot HART Domain            : root
+Boot HART Priv Version      : v1.12
+Boot HART Base ISA          : rv64imafdch
+Boot HART ISA Extensions    : sstc,zicntr,zihpm,zicboz,zicbom,sdtrig,svadu
+Boot HART PMP Count         : 16
+Boot HART PMP Granularity   : 2 bits
+Boot HART PMP Address Bits  : 54
+Boot HART MHPM Info         : 16 (0x0007fff8)
+Boot HART Debug Triggers    : 2 triggers
+Boot HART MIDELEG           : 0x0000000000001666
+Boot HART MEDELEG           : 0x0000000000f4b509
+
+       d8888                            .d88888b.   .d8888b.
+      d88888                           d88P" "Y88b d88P  Y88b
+     d88P888                           888     888 Y88b.
+    d88P 888 888d888  .d8888b  .d88b.  888     888  "Y888b.
+   d88P  888 888P"   d88P"    d8P  Y8b 888     888     "Y88b.
+  d88P   888 888     888      88888888 888     888       "888
+ d8888888888 888     Y88b.    Y8b.     Y88b. .d88P Y88b  d88P
+d88P     888 888      "Y8888P  "Y8888   "Y88888P"   "Y8888P"
+
+arch = riscv64
+platform = riscv64-qemu-virt
+target = riscv64gc-unknown-none-elf
+build_mode = release
+log_level = info
+
+Boot at 2026-11-15 14:59:32.002267400 UTC
+
+[  0.063846 axruntime:157] Logging is enabled.
+[  0.064740 axruntime:158] Primary CPU 0 started, arg = 0x27fe00000.
+[  0.065679 axruntime:161] Found physcial memory regions:
+[  0.065992 axruntime:163]   [PA:0x101000, PA:0x102000) mmio (READ | WRITE | DEVICE | RESERVED)
+[  0.066507 axruntime:163]   [PA:0xc000000, PA:0xc210000) mmio (READ | WRITE | DEVICE | RESERVED)
+[  0.066803 axruntime:163]   [PA:0x10000000, PA:0x10001000) mmio (READ | WRITE | DEVICE | RESERVED)
+[  0.067104 axruntime:163]   [PA:0x10001000, PA:0x10009000) mmio (READ | WRITE | DEVICE | RESERVED)
+[  0.067402 axruntime:163]   [PA:0x30000000, PA:0x40000000) mmio (READ | WRITE | DEVICE | RESERVED)
+[  0.067699 axruntime:163]   [PA:0x40000000, PA:0x80000000) mmio (READ | WRITE | DEVICE | RESERVED)
+[  0.068039 axruntime:163]   [PA:0x80200000, PA:0x80201000) free memory (READ | WRITE | FREE)
+[  0.068618 axruntime:163]   [PA:0x80201000, PA:0x804e8000) .text (READ | EXECUTE | RESERVED)
+[  0.069002 axruntime:163]   [PA:0x804e8000, PA:0x80529000) .rodata (READ | RESERVED)
+[  0.069288 axruntime:163]   [PA:0x80529000, PA:0x8053b000) .data .tdata .tbss .percpu (READ | WRITE | RESERVED)
+[  0.069619 axruntime:163]   [PA:0x8053b000, PA:0x8073b000) boot stack (READ | WRITE | RESERVED)
+[  0.069922 axruntime:163]   [PA:0x8073b000, PA:0x80793000) .bss (READ | WRITE | RESERVED)
+[  0.070249 axruntime:163]   [PA:0x80793000, PA:0x27fe00000) free memory (READ | WRITE | FREE)
+[  0.070542 axruntime:163]   [PA:0x27fe00000, PA:0x27fe05000) reserved (READ | WRITE | RESERVED)
+[  0.070842 axruntime:163]   [PA:0x27fe05000, PA:0x280000000) free memory (READ | WRITE | FREE)
+[  0.071276 axruntime:282] Initialize global memory allocator...
+[  0.071515 axruntime:283]   use SLUB+Buddy allocator.
+[  0.088493 buddy_slab_allocator::global:143] GlobalAllocator: skip region 0xffffffc080200000+0x1000, no allocator-visible memory after 2097152 alignment
+[  0.089082 buddy_slab_allocator::global:143] GlobalAllocator: skip region 0xffffffc27fe05000+0x1fb000, no allocator-visible memory after 2097152 alignment
+[  0.089543 axmm:163] Initialize virtual memory management...
+[  0.089821 axmm:172] FrameTable: range [PA:0x80200000, PA:0x280000000), size 0x1ffe00000
+[  0.265189 axruntime:178] Initialize platform devices...
+[  0.268072 axhal:268] CPU number: max = 8, platform = 8, use = 8
+smp = 8
+[  0.268560 axtask::api:109] Initialize scheduling...
+[  0.271803 axtask::api:119]   use EEVDF with RT priority scheduler.
+[  0.272367 axruntime:192] Initialize interrupt handlers...
+[  0.273376 axdriver:158] Initialize device drivers...
+[  0.273649 axdriver:159]   device model: dyn
+[  0.274589 virtio_drivers::device::blk:61] config: 0xffffffc010001100
+[  0.275282 virtio_drivers::device::blk:66] found a block device of size 146432KB
+[  0.277510 axdriver::bus::mmio:10] registered a new Block device at [PA:0x10001000, PA:0x10002000): "virtio-blk"
+[  0.278560 virtio_drivers::device::net::dev_raw:30] negotiated_features Features(MAC | STATUS | RING_INDIRECT_DESC | RING_EVENT_IDX)
+[  0.283067 axdriver::bus::mmio:10] registered a new Net device at [PA:0x10008000, PA:0x10009000): "virtio-net"
+[  0.283792 axfs:389] Initialize filesystem subsystem...
+[  0.285247 axfs:410]   probing block device 0: virtio-blk
+[  0.285977 axfs::fs::ext4::fs:46] Ext4Filesystem::new: opening block device
+[  0.304694 axfs::fs::ext4::fs:96] Ext4Filesystem::new: block device opened successfully
+[  0.308513 axfs:424]   filesystem on device 0: ext4 (size=146432 KiB)
+[  0.309060 axfs:451]   select block device 0 (virtio-blk, 146432 KiB) as root filesystem
+[  0.325619 axfs:378]   mounted proc at /proc
+[  0.331174 axfs:378]   mounted devtmpfs at /dev
+[  0.333622 axfs:378]   mounted tmpfs at /dev/shm
+[  0.334978 axfs:378]   mounted tmpfs at /tmp
+[  0.346842 axnet:49] Initialize network subsystem...
+[  0.348411 axnet:52]   use NIC 0: "virtio-net"
+[  0.349937 axnet::smoltcp_impl:642] created net interface "eth0":
+[  0.350360 axnet::smoltcp_impl:643]   ether:    52-54-00-12-34-56
+[  0.350839 axnet::smoltcp_impl:644]   ip:       10.0.2.15/24
+[  0.351284 axnet::smoltcp_impl:645]   gateway:  10.0.2.2
+[  0.367245 axruntime::mp:63] Secondary CPU 1 started.
+[  0.368196 axruntime::mp:63] Secondary CPU 2 started.
+[  0.369340 axruntime::mp:63] Secondary CPU 3 started.
+[  0.369672 axruntime::mp:84] Secondary CPU 2 init OK.
+[  0.370261 axruntime::mp:84] Secondary CPU 3 init OK.
+[  0.369687 axruntime::mp:84] Secondary CPU 1 init OK.
+[  0.372093 axruntime::mp:63] Secondary CPU 4 started.
+[  0.374344 axruntime::mp:63] Secondary CPU 5 started.
+[  0.376891 axruntime::mp:63] Secondary CPU 6 started.
+[  0.377717 axruntime::mp:84] Secondary CPU 4 init OK.
+[  0.380767 axruntime::mp:84] Secondary CPU 6 init OK.
+[  0.378458 axruntime::mp:84] Secondary CPU 5 init OK.
+[  0.380390 axruntime::mp:63] Secondary CPU 7 started.
+[  0.387271 axruntime::mp:84] Secondary CPU 7 init OK.
+[  0.389939 axalloc::buddy_slab:827] [PCP_GUEST] Starting Per-CPU Order-0 PCP cache & watermark checks...
+[  0.393830 axalloc::buddy_slab:845] [PCP_GUEST] Order-0 empty-cache refill & accounting: PASS
+[  0.397361 axalloc::buddy_slab:856] [PCP_GUEST] Single-page cache hits: PASS
+[  0.403051 axalloc::buddy_slab:888] [PCP_GUEST] Free to local PCP & high-watermark batch drain: PASS
+[  0.406562 axalloc::buddy_slab:903] [PCP_GUEST] Higher-order and lowmem bypass: PASS
+[  0.407908 axalloc::buddy_slab:907] [PCP_GUEST] Active CPU count: 8
+[  0.410128 axalloc::buddy_slab:925] [PCP_GUEST] Cross-CPU global drain: PASS
+[  0.412166 axalloc::buddy_slab:940] [PCP_GUEST] Batch allocation & deallocation: PASS
+[  0.414337 axalloc::buddy_slab:942] [PCP_GUEST] All PCP cache & watermark checks PASSED!
+[  0.416410 axruntime:245] Primary CPU 0 init OK.
+[  0.423076 0:2 starry_vdso::vdso:22] vDSO data initialized at 0xffffffc08052c000
+[  0.427367 0:2 Pulse:45] itimer hook registered
+[  0.428501 0:2 Pulse:48] procfs provider registered
+[  0.428959 0:2 Pulse:51] TTY callbacks registered
+[  0.429206 0:2 pulse_core::trap:456] page cache reclaim function registered
+[  0.433814 0:2 Pulse:132] Created initial user process
+[FUTEX_GUEST] Starting FutexTable sharding & scatter/gather checks...
+[FUTEX_GUEST] Shard isolation and scatter: PASS
+[FUTEX_GUEST] Bitset queues per shard: PASS
+[FUTEX_GUEST] Active bitset wait and wake_mask: PASS
+[FUTEX_GUEST] Active cross-shard requeue waiter migration: PASS
+[FUTEX_GUEST] Cross-shard requeue traversal: PASS
+[FUTEX_GUEST] Gather wake_all and clear: PASS
+[FUTEX_GUEST] Arc ownership retention and pruning: PASS
+[FUTEX_GUEST] All FutexTable sharding checks PASSED!
+[PROC_REG_GUEST] Starting sharded process registry checks...
+[PROC_REG_GUEST] Shard isolation and collision: PASS
+[PROC_REG_GUEST] Cross-shard independence: PASS
+[PROC_REG_GUEST] Scatter/Gather snapshot sorting & dedup: PASS
+[PROC_REG_GUEST] Weak consistency boundary: PASS
+[PROC_REG_GUEST] Comparative Benchmark (20000 mixed ops, 80% read / 20% write):
+  - Monolithic Baseline: elapsed=10520 us, avg_lat=526 ns, throughput=1901 kops/s (chk=15762)
+  - 16-Shard Registry:   elapsed=10258 us, avg_lat=512 ns, throughput=1949 kops/s (chk=15762)
+  - Performance Delta:   latency reduction = 2%, throughput delta = +2%
+[PROC_REG_GUEST] All sharded process registry checks PASSED!
+[  0.476652 3:21 axdriver_block:616] [DMA_GUEST] Starting sharded DMA buffer registry checks...
+[  0.478965 3:21 axdriver_block:666] [DMA_GUEST] All sharded DMA buffer checks PASSED!
+[  0.480866 3:21 axfs::highlevel::file::cache:3824] [WB_POOL_GUEST] Starting writeback buffer pool & SG descriptor checks...
+[  0.482570 3:21 axfs::highlevel::file::cache:3858] [WB_POOL_GUEST] All writeback pool & SG descriptor checks PASSED!
+[  0.483095 3:21 axnet::smoltcp_impl::tcp:900] [TCP_CONCURRENCY] Starting TcpSocket endpoint concurrency regression checks...
+[  0.490774 0:5 axnet::smoltcp_impl::listen_table:192] incoming_tcp_packet: no listening socket on port 65534
+[  0.495218 3:21 axnet::smoltcp_impl::tcp:305] [AxErrorKind::ConnectionRefused] socket connect() failed
+[  0.546630 0:5 axnet::smoltcp_impl::listen_table:192] incoming_tcp_packet: no listening socket on port 65534
+[  0.547286 3:21 axnet::smoltcp_impl::tcp:305] [AxErrorKind::ConnectionRefused] socket connect() failed
+[  0.598466 3:21 axnet::smoltcp_impl::listen_table:192] incoming_tcp_packet: no listening socket on port 65534
+[  0.598989 3:21 axnet::smoltcp_impl::tcp:305] [AxErrorKind::ConnectionRefused] socket connect() failed
+[  0.649997 3:21 axnet::smoltcp_impl::listen_table:192] incoming_tcp_packet: no listening socket on port 65534
+[  0.650673 3:21 axnet::smoltcp_impl::tcp:305] [AxErrorKind::ConnectionRefused] socket connect() failed
+[  0.701577 3:21 axnet::smoltcp_impl::listen_table:192] incoming_tcp_packet: no listening socket on port 65534
+[  0.702451 3:21 axnet::smoltcp_impl::tcp:305] [AxErrorKind::ConnectionRefused] socket connect() failed
+[  0.753200 3:21 axnet::smoltcp_impl::listen_table:192] incoming_tcp_packet: no listening socket on port 65534
+[  0.753833 3:21 axnet::smoltcp_impl::tcp:305] [AxErrorKind::ConnectionRefused] socket connect() failed
+[  0.804781 3:21 axnet::smoltcp_impl::listen_table:192] incoming_tcp_packet: no listening socket on port 65534
+[  0.805420 3:21 axnet::smoltcp_impl::tcp:305] [AxErrorKind::ConnectionRefused] socket connect() failed
+[  0.856358 3:21 axnet::smoltcp_impl::listen_table:192] incoming_tcp_packet: no listening socket on port 65534
+[  0.856901 3:21 axnet::smoltcp_impl::tcp:305] [AxErrorKind::ConnectionRefused] socket connect() failed
+[  0.907979 3:21 axnet::smoltcp_impl::listen_table:192] incoming_tcp_packet: no listening socket on port 65534
+[  0.908535 3:21 axnet::smoltcp_impl::tcp:305] [AxErrorKind::ConnectionRefused] socket connect() failed
+[  0.959820 3:21 axnet::smoltcp_impl::listen_table:192] incoming_tcp_packet: no listening socket on port 65534
+[  0.960489 3:21 axnet::smoltcp_impl::tcp:305] [AxErrorKind::ConnectionRefused] socket connect() failed
+[  1.011424 6:21 axnet::smoltcp_impl::listen_table:192] incoming_tcp_packet: no listening socket on port 65534
+[  1.012097 6:21 axnet::smoltcp_impl::tcp:305] [AxErrorKind::ConnectionRefused] socket connect() failed
+[  1.012610 6:21 axnet::smoltcp_impl::tcp:993] [TCP_CONCURRENCY] All TcpSocket endpoint concurrency regression checks PASSED!
+[  1.014543 6:21 axsync::checks:418] [AXSYNC_GUEST] Starting axsync lock stress & concurrency checks...
+[  1.014904 6:21 axsync::checks:29] [AXSYNC_GUEST] Mutex basic, guard drop, and reentrancy checks...
+[  1.015519 6:21 axsync::checks:82] [AXSYNC_GUEST] Mutex basic, guard drop, and reentrancy: PASS
+[  1.016571 6:21 axsync::checks:88] [AXSYNC_GUEST] Mutex concurrent stress test...
+[  1.024453 4:21 axsync::checks:126] [AXSYNC_GUEST] Mutex concurrent stress: PASS
+[  1.025235 4:21 axsync::checks:133] [AXSYNC_GUEST] RwLock basic, reader count, and guard drop checks...
+[  1.025989 4:21 axsync::checks:187] [AXSYNC_GUEST] RwLock basic, reader count, and guard drop: PASS
+[  1.026408 4:21 axsync::checks:193] [AXSYNC_GUEST] Cross-task guard transfer and drop checks...
+[  1.029626 4:21 axsync::checks:244] [AXSYNC_GUEST] Cross-task guard transfer and drop: PASS
+[  1.029988 4:21 axsync::checks:250] [AXSYNC_GUEST] Forgotten guards and owned access checks...
+[  1.030950 4:21 axsync::checks:271] [AXSYNC_GUEST] Forgotten guards and owned access: PASS
+[  1.031316 4:21 axsync::checks:277] [AXSYNC_GUEST] RwLock concurrent readers & writers stress test...
+[  1.040427 4:21 axsync::checks:357] [AXSYNC_GUEST] RwLock concurrent readers & writers: PASS
+[  1.041011 4:21 axsync::checks:363] [AXSYNC_GUEST] RwLock writer admission and wakeup checks...
+[  1.042589 4:21 axsync::checks:412] [AXSYNC_GUEST] RwLock writer admission and wakeup: PASS
+[  1.042938 4:21 axsync::checks:428] [AXSYNC_GUEST] All axsync lock stress & concurrency checks PASSED!
+[  1.076738 0:21 Pulse:97] Preparing to load shell: path=/bin/busybox, args=["sh"]
+[  1.114828 0:21 Pulse:104] User process loaded successfully, activating address space...
+[  1.115514 0:21 Pulse:106] User space activated, entering uspace...
+[  1.199834 0:21 pulse_syscalls::impls::fs::control:166] sys_ioctl: tty compatibility stub is active (fd=10, cmd=0x540f); semantics are simplified
+/ # exec /user-abi-mounts-probe
+[  1.748188 6:21 pulse_syscalls::impls::task::exec:28] sys_execve: path="/user-abi-mounts-probe"
+ABI_MOUNTS_OK mkdir-target
+ABI_MOUNTS_OK mkdir-failed-probe-target
+ABI_MOUNTS_OK create-file-write
+ABI_MOUNTS_OK create-file-close
+ABI_MOUNTS_OK mounts-close
+ABI_MOUNTS_OK initial-mount-list
+ABI_MOUNTS_OK tmpfs-mount
+ABI_MOUNTS_OK mounts-close
+ABI_MOUNTS_OK mounted-list
+ABI_MOUNTS_OK underlying-file-hidden
+ABI_MOUNTS_OK create-file-write
+ABI_MOUNTS_OK create-file-close
+ABI_MOUNTS_OK read-file-size
+ABI_MOUNTS_OK read-file-close
+ABI_MOUNTS_OK mounted-file-readable
+ABI_MOUNTS_OK duplicate-target-busy
+ABI_MOUNTS_OK mounts-close
+ABI_MOUNTS_OK duplicate-kept-one-row
+ABI_MOUNTS_OK read-file-size
+ABI_MOUNTS_OK read-file-close
+ABI_MOUNTS_OK duplicate-kept-filesystem
+ABI_MOUNTS_OK failed-probe
+ABI_MOUNTS_OK mounts-close
+ABI_MOUNTS_OK failed-probe-no-row
+ABI_MOUNTS_OK create-file-write
+ABI_MOUNTS_OK create-file-close
+ABI_MOUNTS_OK read-file-size
+ABI_MOUNTS_OK read-file-close
+ABI_MOUNTS_OK failed-probe-kept-directory
+ABI_MOUNTS_OK mkdir-child
+ABI_MOUNTS_OK mount-child
+[  1.788739 0:21 axfs_ng_vfs::mount:1558] unmount: mount ID 6 at DirEntry(Inner { node: DirNode(1), node_type: Directory, reference: Reference { parent: None, name: "" } }) is busy. Children keys: [(3, 18446743809550241808)]
+ABI_MOUNTS_OK parent-with-child-busy
+ABI_MOUNTS_OK mounts-close
+ABI_MOUNTS_OK busy-parent-kept-row
+ABI_MOUNTS_OK read-file-size
+ABI_MOUNTS_OK read-file-close
+ABI_MOUNTS_OK busy-parent-kept-filesystem
+ABI_MOUNTS_OK unmount-child
+ABI_MOUNTS_OK mounts-close
+ABI_MOUNTS_OK unmounted-child-no-row
+ABI_MOUNTS_OK unmount-parent
+ABI_MOUNTS_OK mounts-close
+ABI_MOUNTS_OK unmounted-parent-no-row
+ABI_MOUNTS_OK read-file-size
+ABI_MOUNTS_OK read-file-close
+ABI_MOUNTS_OK underlying-file-restored
+ABI_MOUNTS_OK mounted-file-gone
+ABI_MOUNTS_OK second-unmount-invalid
+ABI_MOUNTS_OK mkdir-ro-source
+ABI_MOUNTS_OK mkdir-ro-bind
+ABI_MOUNTS_OK readonly-source-mount
+ABI_MOUNTS_OK mounts-close
+ABI_MOUNTS_OK readonly-source-listed-ro
+ABI_MOUNTS_OK readonly-source-bind
+ABI_MOUNTS_OK readonly-bind-inherited
+ABI_MOUNTS_OK mounts-close
+ABI_MOUNTS_OK readonly-bind-listed-ro
+ABI_MOUNTS_OK mounts-close
+ABI_MOUNTS_OK readonly-bind-listed-bind
+ABI_MOUNTS_OK readonly-bind-unmount
+ABI_MOUNTS_OK mounts-close
+ABI_MOUNTS_OK readonly-bind-record-removed
+ABI_MOUNTS_OK readonly-source-unmount
+ABI_MOUNTS_OK mounts-close
+ABI_MOUNTS_OK readonly-source-record-removed
+ABI_MOUNTS_OK mkdir-move-source
+ABI_MOUNTS_OK mkdir-move-stack
+ABI_MOUNTS_OK mkdir-move-destination
+ABI_MOUNTS_OK mount-move-source
+ABI_MOUNTS_OK mount-move-lower
+ABI_MOUNTS_OK create-file-write
+ABI_MOUNTS_OK create-file-close
+ABI_MOUNTS_OK create-file-write
+ABI_MOUNTS_OK create-file-close
+ABI_MOUNTS_OK mkdir-move-source-child
+ABI_MOUNTS_OK mkdir-move-lower-child
+ABI_MOUNTS_OK mount-move-source-child
+ABI_MOUNTS_OK mount-move-lower-child
+ABI_MOUNTS_OK create-file-write
+ABI_MOUNTS_OK create-file-close
+ABI_MOUNTS_OK create-file-write
+ABI_MOUNTS_OK create-file-close
+ABI_MOUNTS_OK stack-move-bind
+ABI_MOUNTS_OK mounts-close
+ABI_MOUNTS_OK stack-has-two-root-rows
+ABI_MOUNTS_OK mounts-close
+ABI_MOUNTS_OK stack-has-two-child-rows
+ABI_MOUNTS_OK move-upper-subtree
+ABI_MOUNTS_OK mounts-close
+ABI_MOUNTS_FAIL move-retains-lower-root-row got=0 want=1

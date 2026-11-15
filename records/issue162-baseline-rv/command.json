@@ -1,0 +1,33 @@
+{
+  "qemu": [
+    "qemu-system-riscv64",
+    "-machine",
+    "virt",
+    "-kernel",
+    "/home/muou/PulseOS/PulseOS_riscv64-qemu-virt.bin",
+    "-m",
+    "8G",
+    "-nographic",
+    "-smp",
+    "8",
+    "-bios",
+    "default",
+    "-drive",
+    "file=/home/muou/PulseOS/records/issue162-baseline-rv/rootfs.img,if=none,format=raw,id=x0,snapshot=on",
+    "-device",
+    "virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0",
+    "-no-reboot",
+    "-device",
+    "virtio-net-device,netdev=net",
+    "-netdev",
+    "user,id=net",
+    "-rtc",
+    "base=utc",
+    "-monitor",
+    "none",
+    "-serial",
+    "stdio"
+  ],
+  "kernel_sha256": "a1a46c12e44e174837ed88d482f19c77d94b1d80720c59f5f00346da58661568",
+  "shell": "exec /user-abi-mounts-probe\n"
+}
