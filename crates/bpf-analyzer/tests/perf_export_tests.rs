@@ -1,0 +1,687 @@
+use std::{
+    fs,
+    path::PathBuf,
+    sync::atomic::{AtomicU64, Ordering},
+};
+
+use bpf_analyzer::{
+    CaptureAnalyzer,
+    artifact::sha256,
+    query::{Query, SampleWeight},
+};
+use bpf_capture::{
+    CaptureArch, CaptureReader, CaptureWriter, NativeContextFormat, SchemaRegistry,
+    SessionStatusCode,
+    diagnostics::{DiagnosticIdentity, RuntimeDiagnostics},
+    mapping::{Artifact, MappingMetadata},
+};
+use pulse_bpf_schema::{PerfEventContext, PerfSampleContext};
+
+static NEXT: AtomicU64 = AtomicU64::new(0);
+struct Fixture {
+    root: PathBuf,
+    bytes: Vec<u8>,
+    artifact: Artifact,
+}
+impl Drop for Fixture {
+    fn drop(&mut self) {
+        fs::remove_dir_all(&self.root).unwrap();
+    }
+}
+fn put16(b: &mut [u8], at: usize, n: u16) {
+    b[at..at + 2].copy_from_slice(&n.to_le_bytes());
+}
+fn put32(b: &mut [u8], at: usize, n: u32) {
+    b[at..at + 4].copy_from_slice(&n.to_le_bytes());
+}
+fn put64(b: &mut [u8], at: usize, n: u64) {
+    b[at..at + 8].copy_from_slice(&n.to_le_bytes());
+}
+fn image() -> Vec<u8> {
+    let mut b = vec![0; 0x3300];
+    b[..7].copy_from_slice(b"\x7fELF\x02\x01\x01");
+    put16(&mut b, 16, 3);
+    put16(&mut b, 18, 243);
+    put32(&mut b, 20, 1);
+    put64(&mut b, 32, 64);
+    put64(&mut b, 40, 0x3000);
+    put16(&mut b, 52, 64);
+    put16(&mut b, 54, 56);
+    put16(&mut b, 56, 1);
+    put16(&mut b, 58, 64);
+    put16(&mut b, 60, 5);
+    put16(&mut b, 62, 4);
+    put32(&mut b, 64, 1);
+    put32(&mut b, 68, 5);
+    put64(&mut b, 72, 0x1000);
+    put64(&mut b, 80, 0x2000);
+    put64(&mut b, 96, 0x1000);
+    put64(&mut b, 104, 0x1000);
+    put64(&mut b, 112, 0x1000);
+    let names = b"\0leaf\0parent\0outer\0";
+    b[0x2900..0x2900 + names.len()].copy_from_slice(names);
+    let sections = b"\0.text\0.symtab\0.strtab\0.shstrtab\0";
+    b[0x2980..0x2980 + sections.len()].copy_from_slice(sections);
+    for (i, name, address) in [(1, 1, 0x2100), (2, 6, 0x2200), (3, 13, 0x2300)] {
+        let at = 0x2800 + i * 24;
+        put32(&mut b, at, name);
+        b[at + 4] = 0x12;
+        put16(&mut b, at + 6, 1);
+        put64(&mut b, at + 8, address);
+        put64(&mut b, at + 16, 0x80);
+    }
+    for (i, name, kind, flags, addr, off, size, link, align, entsize) in [
+        (1, 1, 1, 6, 0x2000, 0x1000, 0x1000, 0, 16, 0),
+        (2, 7, 2, 0, 0, 0x2800, 96, 3, 8, 24),
+        (3, 15, 3, 0, 0, 0x2900, names.len() as u64, 0, 1, 0),
+        (4, 23, 3, 0, 0, 0x2980, sections.len() as u64, 0, 1, 0),
+    ] {
+        let at = 0x3000 + i * 64;
+        put32(&mut b, at, name);
+        put32(&mut b, at + 4, kind);
+        put64(&mut b, at + 8, flags);
+        put64(&mut b, at + 16, addr);
+        put64(&mut b, at + 24, off);
+        put64(&mut b, at + 32, size);
+        put32(&mut b, at + 40, link);
+        put64(&mut b, at + 48, align);
+        put64(&mut b, at + 56, entsize);
+    }
+    b
+}
+fn fixture(change: impl FnOnce(&mut MappingMetadata), loss: u64) -> Fixture {
+    let root = std::env::temp_dir().join(format!(
+        "pulse-perf-{}-{}",
+        std::process::id(),
+        NEXT.fetch_add(1, Ordering::Relaxed)
+    ));
+    fs::create_dir_all(root.join("artifacts")).unwrap();
+    let elf = image();
+    let hash = sha256(&elf);
+    let artifact = Artifact {
+        sha256: hash.clone(),
+        path: format!("artifacts/{hash}.elf"),
+        gnu_build_id: None,
+        debug_sha256: None,
+        debug_build_id: None,
+    };
+    fs::write(root.join(&artifact.path), elf).unwrap();
+    let mut mappings = MappingMetadata {
+        journal: format!(
+            "PULSE_BPF_MAPPINGS version=2 available=1 started_ns=0 snapshot_ns=1000 dropped=0 \
+             records=3\nOBJECT seq=1 ts=1 object=9 sha256={hash} path_hex=2f73616d65\nSPACE seq=2 \
+             ts=10 begin_ns=2 space=100 revision=1 count=1\nMAP start=4194304 len=4096 pgoff=4096 \
+             perms=5 object=9\nENDSPACE\nTASK seq=3 ts=20 task=99 pid=40 tid=41 space=100 exec=0 \
+             kind=bind parent=0 class=user comm_hex=776f726b\nEND records=3 dropped=0 \
+             snapshot_ns=1000\n"
+        ),
+        artifacts: vec![artifact.clone()],
+        kernel: None,
+    };
+    change(&mut mappings);
+    let old = CaptureReader::from_bytes(
+        &bpf_capture::generate_deterministic_fixture(
+            CaptureArch::Riscv64,
+            SessionStatusCode::Complete,
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let mut writer = CaptureWriter::new(
+        old.metadata.config,
+        SchemaRegistry::default_pulse_registry(),
+    );
+    let mut diagnostics = RuntimeDiagnostics::default();
+    for (source, period) in [(123, 10), (124, 30)] {
+        for (key, value) in [
+            ("id", source.to_string()),
+            ("clock", "0".into()),
+            ("config", "0".into()),
+            ("scope", "\"cpu\"".into()),
+            ("target", "3".into()),
+            ("task_id", "0".into()),
+            ("period", period.to_string()),
+        ] {
+            diagnostics.identities.push(DiagnosticIdentity {
+                name: format!("event/{source}/{key}"),
+                value: Some(value),
+            });
+        }
+    }
+    writer.set_diagnostics(diagnostics).unwrap();
+    writer.set_mappings(mappings).unwrap();
+    writer.start(100).unwrap();
+    for (source, period, time) in [(123u64, 10u64, 200u64), (124, 30, 300)] {
+        let mut raw = [0u8; 640];
+        raw[..64].copy_from_slice(
+            &PerfSampleContext {
+                base: PerfEventContext::new(period, 0, time, 3, 40, 41, 99),
+                ip: 0x400100,
+                mode: 2,
+                version: 2,
+            }
+            .to_bytes(),
+        );
+        for (offset, value) in [
+            (64, source),
+            (72, 0x8000),
+            (80, 0x8020),
+            (88, 0x400220),
+            (96, 19),
+        ] {
+            put64(&mut raw, offset, value);
+        }
+        for (offset, value) in [(104, 3), (106, 32), (108, 3), (110, 4)] {
+            put16(&mut raw, offset, value);
+        }
+        put32(&mut raw, 112, 32);
+        put32(&mut raw, 116, 512);
+        for (i, ip) in [0x400100, 0x400220, 0x400330].into_iter().enumerate() {
+            put64(&mut raw, 128 + i * 8, ip);
+        }
+        writer
+            .ingest_perf_sample_as(3, &raw, NativeContextFormat::SoftwareStackV3)
+            .unwrap();
+    }
+    if loss > 0 {
+        writer.ingest_perf_lost(3, loss);
+    }
+    Fixture {
+        root,
+        bytes: writer.finish(500).unwrap(),
+        artifact,
+    }
+}
+#[test]
+fn exported_cpu_samples_preserve_source_and_period_after_query() {
+    let f = fixture(|_| {}, 0);
+    let a = CaptureAnalyzer::from_bytes(&f.bytes).unwrap();
+    let selected = a
+        .query(&Query {
+            from_ns: Some(250),
+            weight: SampleWeight::Samples,
+            ..Default::default()
+        })
+        .unwrap();
+    let exported = bpf_analyzer::perf::export(&a, &selected, &f.root, &f.bytes).unwrap();
+    assert_eq!(&exported.data[..8], b"PERFILE2");
+    assert!(
+        exported.manifest.contains("\"sample_count\":1"),
+        "{}",
+        exported.manifest
+    );
+    assert!(exported.manifest.contains("\"total_period_ns\":30"));
+    assert!(exported.manifest.contains("\"selected_weight\":1"));
+    assert!(exported.manifest.contains("\"partial_chain_count\":1"));
+    assert!(exported.manifest.contains(&sha256(&f.bytes)));
+}
+
+#[test]
+fn missing_or_wrong_same_name_artifact_never_exports_symbols() {
+    let f = fixture(|_| {}, 0);
+    let a = CaptureAnalyzer::from_bytes(&f.bytes).unwrap();
+    let selected = a.query(&Query::default()).unwrap();
+    fs::remove_file(f.root.join(&f.artifact.path)).unwrap();
+    assert!(
+        bpf_analyzer::perf::export(&a, &selected, &f.root, &f.bytes)
+            .unwrap_err()
+            .contains("unavailable")
+    );
+    fs::write(f.root.join(&f.artifact.path), b"same name but wrong bytes").unwrap();
+    assert!(
+        bpf_analyzer::perf::export(&a, &selected, &f.root, &f.bytes)
+            .unwrap_err()
+            .contains("SHA256")
+    );
+}
+#[test]
+fn mapping_loss_and_pid_reuse_do_not_inherit_stale_mappings() {
+    let f = fixture(
+        |m| m.journal = m.journal.replace("dropped=0", "dropped=1"),
+        0,
+    );
+    let a = CaptureAnalyzer::from_bytes(&f.bytes).unwrap();
+    let selected = a.query(&Query::default()).unwrap();
+    assert!(
+        bpf_analyzer::perf::export(&a, &selected, &f.root, &f.bytes)
+            .unwrap_err()
+            .contains("journal loss")
+    );
+    let f = fixture(
+        |m| {
+            m.journal = m.journal.replace("records=3", "records=5").replace(
+                "END records=5",
+                "TASK seq=4 ts=250 task=99 pid=40 tid=41 space=100 exec=0 kind=exit parent=0 \
+                 class=user comm_hex=776f726b\nTASK seq=5 ts=260 task=100 pid=40 tid=41 space=200 \
+                 exec=0 kind=bind parent=0 class=user comm_hex=6e6577\nEND records=5",
+            );
+        },
+        0,
+    );
+    let a = CaptureAnalyzer::from_bytes(&f.bytes).unwrap();
+    let selected = a.query(&Query::default()).unwrap();
+    assert!(
+        bpf_analyzer::perf::export(&a, &selected, &f.root, &f.bytes)
+            .unwrap_err()
+            .contains("identity unavailable")
+    );
+}
+#[test]
+fn transport_loss_and_partial_chain_are_retained_without_inventing_timestamps() {
+    let f = fixture(|_| {}, 7);
+    let a = CaptureAnalyzer::from_bytes(&f.bytes).unwrap();
+    let selected = a
+        .query(&Query {
+            weight: SampleWeight::Period,
+            ..Default::default()
+        })
+        .unwrap();
+    let exported = bpf_analyzer::perf::export(&a, &selected, &f.root, &f.bytes).unwrap();
+    assert!(exported.manifest.contains("\"lost_records_total\":7"));
+    assert!(exported.manifest.contains("\"capture_complete\":false"));
+    assert!(exported.manifest.contains("\"attribution_complete\":false"));
+    assert!(exported.manifest.contains("\"selected_weight\":40"));
+    assert!(exported.manifest.contains("\"partial_chain_count\":2"));
+}
+
+fn perf(f: &Fixture, arguments: &[&str]) -> String {
+    let out = std::process::Command::new(std::env::var("PULSE_PERF").unwrap_or("perf".into()))
+        .arg("--buildid-dir")
+        .arg(f.root.join("buildid-cache"))
+        .args(arguments)
+        .arg("-i")
+        .arg(f.root.join("perf.data"))
+        .env("LC_ALL", "C")
+        .env("DEBUGINFOD_URLS", "")
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "native perf failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    String::from_utf8(out.stdout).unwrap()
+}
+#[test]
+#[ignore = "requires an installed native Linux perf consumer"]
+fn native_perf_resolves_pie_nonzero_pgoff_and_preserves_counts_and_periods() {
+    let f = fixture(|_| {}, 0);
+    let a = CaptureAnalyzer::from_bytes(&f.bytes).unwrap();
+    let selected = a.query(&Query::default()).unwrap();
+    let exported = bpf_analyzer::perf::export(&a, &selected, &f.root, &f.bytes).unwrap();
+    fs::write(f.root.join("perf.data"), exported.data).unwrap();
+    let script = perf(&f, &["script", "--ns", "--symfs", f.root.to_str().unwrap()]);
+    assert!(
+        script.contains("leaf") && script.contains("parent") && script.contains("outer"),
+        "{script}"
+    );
+    assert_eq!(script.matches("cpu-clock:").count(), 2, "{script}");
+    assert!(
+        script.contains("10 cpu-clock:") && script.contains("30 cpu-clock:"),
+        "{script}"
+    );
+    let dump = perf(&f, &["script", "-D", "--symfs", f.root.to_str().unwrap()]);
+    assert!(dump.contains("PERF_RECORD_SAMPLE"), "{dump}");
+    assert!(
+        dump.contains("400100") && dump.contains("400220") && dump.contains("400330"),
+        "{dump}"
+    );
+    let report = perf(
+        &f,
+        &[
+            "report",
+            "--stdio",
+            "--no-children",
+            "--show-nr-samples",
+            "--show-total-period",
+            "--percent-limit",
+            "0",
+            "--symfs",
+            f.root.to_str().unwrap(),
+        ],
+    );
+    assert!(report.contains("leaf"), "{report}");
+    let ids = perf(&f, &["buildid-list"]);
+    assert!(
+        ids.trim() == format!("/{}", f.artifact.path),
+        "absence of GNU build-id must remain absent: {ids}"
+    );
+}
+
+#[test]
+fn cli_output_cannot_overwrite_a_verified_artifact_through_hardlink() {
+    let f = fixture(|_| {}, 0);
+    let capture = f.root.join("capture.pbcapture");
+    fs::write(&capture, &f.bytes).unwrap();
+    let original = fs::read(f.root.join(&f.artifact.path)).unwrap();
+    let alias = f.root.join("perf.data");
+    fs::hard_link(f.root.join(&f.artifact.path), &alias).unwrap();
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_bpf-analyzer"))
+        .arg(&capture)
+        .arg("--perf-data")
+        .arg(&alias)
+        .arg("--bundle")
+        .arg(&f.root)
+        .output()
+        .unwrap();
+    assert!(
+        !output.status.success(),
+        "CLI overwrote a verified artifact"
+    );
+    assert_eq!(fs::read(f.root.join(&f.artifact.path)).unwrap(), original);
+}
+
+fn rewrite(f: &mut Fixture, edit: impl FnOnce(&mut bpf_capture::reader::CaptureData)) {
+    let mut data = CaptureReader::from_bytes(&f.bytes).unwrap();
+    edit(&mut data);
+    let mut writer = CaptureWriter::new(data.metadata.config, data.registry);
+    if let Some(d) = data.diagnostics {
+        writer.set_diagnostics(d).unwrap();
+    }
+    if let Some(m) = data.mappings {
+        writer.set_mappings(m).unwrap();
+    }
+    writer.start(data.metadata.start_ns).unwrap();
+    for record in data.records {
+        writer.write_record(record).unwrap();
+    }
+    f.bytes = writer.finish(data.metadata.stop_ns).unwrap();
+}
+#[test]
+fn mixed_domain_chain_and_wrong_pgoff_are_rejected_without_guessing() {
+    let mut f = fixture(|_| {}, 0);
+    rewrite(&mut f, |d| {
+        put64(&mut d.records[0].payload, 96 + 8, 0xffff_ffff_8020_0100)
+    });
+    let a = CaptureAnalyzer::from_bytes(&f.bytes).unwrap();
+    let selected = a.query(&Query::default()).unwrap();
+    assert!(
+        bpf_analyzer::perf::export(&a, &selected, &f.root, &f.bytes)
+            .unwrap_err()
+            .contains("unmapped")
+    );
+    let f = fixture(
+        |m| m.journal = m.journal.replace("pgoff=4096", "pgoff=8192"),
+        0,
+    );
+    let a = CaptureAnalyzer::from_bytes(&f.bytes).unwrap();
+    let selected = a.query(&Query::default()).unwrap();
+    assert!(
+        bpf_analyzer::perf::export(&a, &selected, &f.root, &f.bytes)
+            .unwrap_err()
+            .contains("PT_LOAD")
+    );
+}
+#[test]
+fn source_instances_are_validated_and_v2_is_only_exported_when_unambiguous() {
+    let mut f = fixture(|_| {}, 0);
+    rewrite(&mut f, |d| {
+        for record in &mut d.records {
+            record.event_id = bpf_capture::schema::PERF_EVENT_SOFTWARE_V2_ID;
+            record.schema_version = 2;
+            record.payload.truncate(32);
+        }
+    });
+    let a = CaptureAnalyzer::from_bytes(&f.bytes).unwrap();
+    let selected = a.query(&Query::default()).unwrap();
+    assert!(
+        bpf_analyzer::perf::export(&a, &selected, &f.root, &f.bytes)
+            .unwrap_err()
+            .contains("ambiguous source"),
+        "distinct configured periods do not establish a v2 source identity"
+    );
+    rewrite(&mut f, |d| {
+        d.diagnostics
+            .as_mut()
+            .unwrap()
+            .identities
+            .retain(|i| !i.name.starts_with("event/124/"));
+        d.records.retain(|record| record.timestamp_ns == 200);
+    });
+    let a = CaptureAnalyzer::from_bytes(&f.bytes).unwrap();
+    let selected = a.query(&Query::default()).unwrap();
+    assert!(
+        bpf_analyzer::perf::export(&a, &selected, &f.root, &f.bytes)
+            .unwrap()
+            .manifest
+            .contains("\"ip_only_count\":1")
+    );
+    rewrite(&mut f, |d| {
+        let identities = &mut d.diagnostics.as_mut().unwrap().identities;
+        let mut duplicates: Vec<_> = identities
+            .iter()
+            .filter(|i| i.name.starts_with("event/123/"))
+            .cloned()
+            .collect();
+        for i in &mut duplicates {
+            i.name = i.name.replace("event/123/", "event/125/");
+            if i.name.ends_with("/id") {
+                i.value = Some("125".into());
+            }
+        }
+        identities.extend(duplicates);
+    });
+    let a = CaptureAnalyzer::from_bytes(&f.bytes).unwrap();
+    let selected = a.query(&Query::default()).unwrap();
+    assert!(
+        bpf_analyzer::perf::export(&a, &selected, &f.root, &f.bytes)
+            .unwrap_err()
+            .contains("ambiguous source")
+    );
+}
+#[test]
+#[ignore = "requires an installed native Linux perf consumer"]
+fn native_perf_does_not_reuse_symbols_after_pid_and_address_reuse() {
+    let mut f = fixture(|_| {}, 0);
+    let mut next = image();
+    next[0x2901..0x2905].copy_from_slice(b"newl");
+    let hash = sha256(&next);
+    let artifact = Artifact {
+        sha256: hash.clone(),
+        path: format!("artifacts/{hash}.elf"),
+        gnu_build_id: None,
+        debug_sha256: None,
+        debug_build_id: None,
+    };
+    fs::write(f.root.join(&artifact.path), next).unwrap();
+    rewrite(&mut f, |d| {
+        let m = d.mappings.as_mut().unwrap();
+        m.artifacts.push(artifact);
+        m.journal = m.journal.replace("records=3", "records=7").replace(
+            "END records=7",
+            &format!(
+                "OBJECT seq=4 ts=210 object=10 sha256={hash} path_hex=2f73616d65\nSPACE seq=5 \
+                 ts=230 begin_ns=220 space=200 revision=1 count=1\nMAP start=4194304 len=4096 \
+                 pgoff=4096 perms=5 object=10\nENDSPACE\nTASK seq=6 ts=250 task=99 pid=40 tid=41 \
+                 space=100 exec=0 kind=exit parent=0 class=user comm_hex=776f726b\nTASK seq=7 \
+                 ts=260 task=100 pid=40 tid=41 space=200 exec=0 kind=bind parent=0 class=user \
+                 comm_hex=6e6577\nEND records=7"
+            ),
+        );
+        d.records[1].task_id = 100;
+    });
+    let a = CaptureAnalyzer::from_bytes(&f.bytes).unwrap();
+    let selected = a.query(&Query::default()).unwrap();
+    let exported = bpf_analyzer::perf::export(&a, &selected, &f.root, &f.bytes).unwrap();
+    fs::write(f.root.join("perf.data"), exported.data).unwrap();
+    let script = perf(&f, &["script", "--ns", "--symfs", f.root.to_str().unwrap()]);
+    let samples: Vec<_> = script
+        .split("\n\n")
+        .filter(|part| part.contains("cpu-clock:"))
+        .collect();
+    assert_eq!(samples.len(), 2, "{script}");
+    assert!(
+        samples[0].contains("work")
+            && samples[0].contains(" leaf+")
+            && !samples[0].contains("newl"),
+        "{script}"
+    );
+    assert!(
+        samples[1].contains("new") && samples[1].contains("newl") && !samples[1].contains(" leaf+"),
+        "{script}"
+    );
+}
+
+#[test]
+fn conflicting_software_source_config_is_rejected() {
+    let mut f = fixture(|_| {}, 0);
+    rewrite(&mut f, |d| {
+        d.diagnostics
+            .as_mut()
+            .unwrap()
+            .identities
+            .iter_mut()
+            .find(|i| i.name == "event/123/config")
+            .unwrap()
+            .value = Some("1".into())
+    });
+    let a = CaptureAnalyzer::from_bytes(&f.bytes).unwrap();
+    let selected = a.query(&Query::default()).unwrap();
+    assert!(bpf_analyzer::perf::export(&a, &selected, &f.root, &f.bytes).is_err());
+}
+
+#[test]
+fn modified_query_results_cannot_duplicate_omit_or_mislabel_samples() {
+    let f = fixture(|_| {}, 0);
+    let a = CaptureAnalyzer::from_bytes(&f.bytes).unwrap();
+    for case in 0..6 {
+        let mut selected = a.query(&Query::default()).unwrap();
+        match case {
+            0 => selected.events.push(selected.events[0].clone()),
+            1 => {
+                selected.events.pop();
+            }
+            2 => selected.query.cpu = Some(7),
+            3 => selected.from_ns = Some(299),
+            4 => selected.to_ns = Some(301),
+            _ => selected.phase_source = Some(bpf_analyzer::query::PhaseSource::StreamMarkers),
+        }
+        assert!(
+            bpf_analyzer::perf::export(&a, &selected, &f.root, &f.bytes).is_err(),
+            "accepted inconsistent query case {case}"
+        );
+    }
+}
+
+fn kernel_fixture() -> Fixture {
+    let mut f = fixture(|_| {}, 0);
+    let sha = f.artifact.sha256.clone();
+    rewrite(&mut f, |d| {
+        let m = d.mappings.as_mut().unwrap();
+        m.kernel = Some(bpf_capture::mapping::KernelArtifact {
+            sha256: sha,
+            reference_symbol: "leaf".into(),
+            reference_address: 0x2100,
+            text_start: 0x2000,
+            text_end: 0x3000,
+        });
+        m.journal = m.journal.replace("records=3", "records=4").replace(
+            "END records=4",
+            "KERNEL seq=4 ts=30 start=18446744071564165120 len=4096 \
+             reference=18446744071564165376 symbol_hex=6c656166\nEND records=4",
+        );
+        for record in &mut d.records {
+            let base = 0xffff_ffff_8020_0000u64;
+            put64(&mut record.payload, 16, base + 0x100);
+            put32(&mut record.payload, 24, 1);
+            put64(&mut record.payload, 56, base + 0x220);
+            for (i, offset) in [0x100, 0x220, 0x330].into_iter().enumerate() {
+                put64(&mut record.payload, 96 + i * 8, base + offset);
+            }
+        }
+    });
+    f
+}
+#[test]
+fn kernel_samples_validate_task_lifetime_mutations_and_timestamp_ties() {
+    let f = kernel_fixture();
+    let a = CaptureAnalyzer::from_bytes(&f.bytes).unwrap();
+    assert!(
+        bpf_analyzer::perf::export(&a, &a.query(&Query::default()).unwrap(), &f.root, &f.bytes)
+            .is_ok()
+    );
+    for case in 0..5 {
+        let mut f = kernel_fixture();
+        rewrite(&mut f, |d| {
+            if case == 0 {
+                d.records[1].task_id = 100;
+                return;
+            }
+            if case == 1 {
+                d.records[1].pid = 42;
+                return;
+            }
+            let row = match case {
+                2 => {
+                    "TASK seq=5 ts=250 task=99 pid=40 tid=41 space=100 exec=0 kind=exit parent=0 \
+                     class=user comm_hex=776f726b\n"
+                }
+                3 => "MUTATION seq=5 ts=250 target=task id=99 token=1 complete=0\n",
+                _ => {
+                    "TASK seq=5 ts=300 task=99 pid=40 tid=41 space=100 exec=0 kind=rename parent=0 \
+                     class=user comm_hex=6e6577\n"
+                }
+            };
+            let m = d.mappings.as_mut().unwrap();
+            m.journal = m
+                .journal
+                .replace("records=4", "records=5")
+                .replace("END records=5", &format!("{row}END records=5"));
+        });
+        let a = CaptureAnalyzer::from_bytes(&f.bytes).unwrap();
+        assert!(
+            bpf_analyzer::perf::export(&a, &a.query(&Query::default()).unwrap(), &f.root, &f.bytes)
+                .is_err(),
+            "kernel sample accepted uncertain task identity case {case}"
+        );
+    }
+}
+
+#[test]
+fn kernel_idle_with_no_linux_identity_remains_explicitly_unknown() {
+    let mut f = kernel_fixture();
+    rewrite(&mut f, |d| {
+        for r in &mut d.records {
+            r.pid = 0;
+            r.tid = 0;
+            r.task_id = 100;
+        }
+    });
+    let a = CaptureAnalyzer::from_bytes(&f.bytes).unwrap();
+    let export =
+        bpf_analyzer::perf::export(&a, &a.query(&Query::default()).unwrap(), &f.root, &f.bytes)
+            .unwrap();
+    assert_eq!(
+        export
+            .manifest
+            .matches("\"task_identity_quality\":\"unknown_kernel_or_idle\"")
+            .count(),
+        2
+    );
+}
+#[test]
+#[ignore = "requires an installed native Linux perf consumer"]
+fn native_perf_keeps_kernel_symbols_for_every_sample_in_the_stream() {
+    let f = kernel_fixture();
+    let a = CaptureAnalyzer::from_bytes(&f.bytes).unwrap();
+    let export =
+        bpf_analyzer::perf::export(&a, &a.query(&Query::default()).unwrap(), &f.root, &f.bytes)
+            .unwrap();
+    fs::write(f.root.join("perf.data"), export.data).unwrap();
+    let kernel = f.root.join(&f.artifact.path);
+    let script = perf(
+        &f,
+        &[
+            "script",
+            "--ns",
+            "--symfs",
+            f.root.to_str().unwrap(),
+            "--vmlinux",
+            kernel.to_str().unwrap(),
+        ],
+    );
+    assert_eq!(script.matches("cpu-clock:").count(), 2, "{script}");
+    assert_eq!(script.matches(" leaf+").count(), 2, "{script}");
+    assert_eq!(script.matches(" parent+").count(), 2, "{script}");
+    assert!(!script.contains("[unknown]"), "{script}");
+}

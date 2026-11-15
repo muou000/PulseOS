@@ -202,6 +202,8 @@ def extract_and_verify(run: Path, text: str) -> dict:
         timestamp, = struct.unpack_from('<Q', payload, 16)
         pid, tid = struct.unpack_from('<II', payload, 28)
         task, ip, mode = struct.unpack_from('<QQI', payload, 40)
+        raw_length, = struct.unpack_from('<I', frame, 8)
+        source_id = struct.unpack_from('<Q', payload, 64)[0] if raw_length == 640 else None
         if mode != 2:
             continue
         for row in markers:
@@ -217,7 +219,7 @@ def extract_and_verify(run: Path, text: str) -> dict:
                     if len(loads) != 1 or loads[0]['vaddr'] + resolved['file_offset'] - loads[0]['offset'] != 0x401000 + ip - int(row['start']):
                         raise ValueError('nonzero pgoff failed exact ELF PT_LOAD translation')
                     resolved_counts[row['phase']] += 1
-                    examples.setdefault(row['phase'], dict(sequence=sequence, cpu=cpu, timestamp_ns=timestamp, tid=tid, task_id=task, ip=ip, **resolved))
+                    examples.setdefault(row['phase'], dict(sequence=sequence, cpu=cpu, timestamp_ns=timestamp, tid=tid, task_id=task, ip=ip, source_id=source_id, **resolved))
     if min(counts.values()) == 0:
         raise ValueError(f'no real user samples for mapping mutation phase: {counts}')
     if min(resolved_counts.values()) == 0:
@@ -242,7 +244,8 @@ def check_report(run: Path, report: dict) -> dict:
         raise ValueError('mapping report invented precise CPU utilization')
     for phase, expected in evidence['examples'].items():
         matches = [row for row in report['samples'] if all(row[key] == expected[source] for key, source in
-                   [('timestamp_ns', 'timestamp_ns'), ('cpu', 'cpu'), ('task', 'task_id'), ('pid', 'pid'), ('tid', 'tid'), ('ip', 'ip')])]
+                   [('timestamp_ns', 'timestamp_ns'), ('cpu', 'cpu'), ('task', 'task_id'), ('pid', 'pid'), ('tid', 'tid'), ('ip', 'ip')])
+                   and row.get('source_id') == expected.get('source_id')]
         if len(matches) != 1:
             raise ValueError(f'standalone analyzer missing original RAW sample: {phase}')
         row = matches[0]
