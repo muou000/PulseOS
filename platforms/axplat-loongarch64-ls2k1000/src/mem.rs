@@ -1,7 +1,7 @@
-use core::{
-    cell::UnsafeCell,
-    sync::atomic::{AtomicBool, AtomicUsize, Ordering},
-};
+use core::sync::atomic::{AtomicBool, Ordering};
+
+mod ranges;
+use ranges::{RangeList, RangeStorage};
 
 use axplat::mem::{MemIf, PAGE_SIZE_4K, PhysAddr, RawRange, VirtAddr, pa, va};
 use fdt_raw::Fdt;
@@ -17,7 +17,10 @@ use crate::{
 const MAX_RAM_RANGES: usize = 8;
 const MAX_RESERVED_RANGES: usize = 32;
 
-static MEMORY_INITIALIZED: AtomicBool = AtomicBool::new(false);
+// Select one complete layout, so repeated initialization cannot mix RAM from
+// one invocation with reserved ranges from another. This is a writer claim,
+// not a readiness flag; each RangeStorage publishes its own count afterward.
+static MEMORY_PUBLICATION_CLAIMED: AtomicBool = AtomicBool::new(false);
 static RAM_RANGES: RangeStorage<MAX_RAM_RANGES> = RangeStorage::new();
 static RESERVED_RANGES: RangeStorage<MAX_RESERVED_RANGES> = RangeStorage::new();
 
@@ -143,7 +146,10 @@ fn publish_memory_layout(
     mut ram: RangeList<MAX_RAM_RANGES>,
     mut reserved: RangeList<MAX_RESERVED_RANGES>,
 ) {
-    if MEMORY_INITIALIZED.swap(true, Ordering::AcqRel) {
+    // The BSP reaches this via init_early -> init_platform_from_dtb ->
+    // init_from_fdt, before starting secondary CPUs. Keep repeated calls
+    // harmless too; RangeStorage enforces one-time writes for its safe API.
+    if MEMORY_PUBLICATION_CLAIMED.swap(true, Ordering::Relaxed) {
         return;
     }
     ram.normalize();
@@ -177,115 +183,9 @@ fn intersect((a_start, a_size): RawRange, (b_start, b_size): RawRange) -> Option
     (start < end).then_some((start, end - start))
 }
 
-struct RangeStorage<const N: usize> {
-    ranges: UnsafeCell<[RawRange; N]>,
-    count: AtomicUsize,
-}
-
-unsafe impl<const N: usize> Sync for RangeStorage<N> {}
-
-impl<const N: usize> RangeStorage<N> {
-    const fn new() -> Self {
-        Self {
-            ranges: UnsafeCell::new([(0, 0); N]),
-            count: AtomicUsize::new(0),
-        }
-    }
-
-    fn publish(&self, ranges: &RangeList<N>) {
-        unsafe {
-            core::ptr::copy_nonoverlapping(
-                ranges.as_slice().as_ptr(),
-                self.ranges.get().cast::<RawRange>(),
-                ranges.len(),
-            )
-        };
-        self.count.store(ranges.len(), Ordering::Release);
-    }
-
-    fn get(&'static self) -> &'static [RawRange] {
-        let count = self.count.load(Ordering::Acquire);
-        unsafe { core::slice::from_raw_parts((*self.ranges.get()).as_ptr(), count) }
-    }
-}
-
-#[derive(Clone, Copy)]
-struct RangeList<const N: usize> {
-    ranges: [RawRange; N],
-    count: usize,
-}
-
-impl<const N: usize> RangeList<N> {
-    const fn new() -> Self {
-        Self {
-            ranges: [(0, 0); N],
-            count: 0,
-        }
-    }
-
-    fn push(&mut self, range: RawRange) -> bool {
-        if range.1 == 0 {
-            return true;
-        }
-        if self.count < N {
-            self.ranges[self.count] = range;
-            self.count += 1;
-            true
-        } else {
-            false
-        }
-    }
-
-    fn normalize(&mut self) {
-        self.ranges[..self.count].sort_unstable_by_key(|range| range.0);
-        let mut output = 0usize;
-        for input in 0..self.count {
-            let (start, size) = self.ranges[input];
-            let Some(end) = start.checked_add(size) else {
-                continue;
-            };
-            if output > 0 {
-                let (previous_start, previous_size) = self.ranges[output - 1];
-                let previous_end = previous_start.saturating_add(previous_size);
-                if start <= previous_end {
-                    self.ranges[output - 1].1 = previous_end.max(end) - previous_start;
-                    continue;
-                }
-            }
-            self.ranges[output] = (start, end - start);
-            output += 1;
-        }
-        self.count = output;
-    }
-
-    const fn is_empty(&self) -> bool {
-        self.count == 0
-    }
-
-    const fn len(&self) -> usize {
-        self.count
-    }
-
-    fn as_slice(&self) -> &[RawRange] {
-        &self.ranges[..self.count]
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn preserves_discontiguous_ls2k1000_ranges() {
-        let mut ranges = RangeList::<4>::new();
-        assert!(ranges.push((0x0020_0000, 0x0fe0_0000)));
-        assert!(ranges.push((0x9000_0000, 0x3000_0000)));
-        ranges.normalize();
-        assert_eq!(
-            ranges.as_slice(),
-            &[(0x0020_0000, 0x0fe0_0000), (0x9000_0000, 0x3000_0000)]
-        );
-    }
 
     #[test]
     fn aligns_and_intersects_reserved_ranges() {

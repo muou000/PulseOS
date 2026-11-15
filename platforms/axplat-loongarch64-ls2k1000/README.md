@@ -23,3 +23,23 @@ make ls2k1000
 See `docs/ls2k1000-porting-record.md` for the exact U-Boot handoff and the
 validation boundary between a successful cross-build and a physical-board
 boot.
+
+The range container has host tests that compile the production leaf module
+without board or assembly dependencies. From the repository root:
+
+```bash
+rustc --edition=2024 --test -D warnings platforms/axplat-loongarch64-ls2k1000/tests/mem_ranges.rs -o /tmp/ls2k1000-ranges
+/tmp/ls2k1000-ranges
+```
+
+To check these same tests with Miri (with the nightly Miri component installed):
+
+```bash
+range_miri_sysroot="$(cargo miri setup --print-sysroot)"
+rustup run nightly miri --sysroot "$range_miri_sysroot" --edition=2024 --test platforms/axplat-loongarch64-ls2k1000/tests/mem_ranges.rs
+```
+
+The tests cover first-publication ownership (including empty lists), zero and
+maximum capacities, ordering, normalization, and concurrent publication/readers.
+The local `Sync`, copy and slice safety arguments live in `src/mem/ranges.rs`;
+test executions supplement those arguments and do not prove all interleavings.
