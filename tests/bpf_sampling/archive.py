@@ -166,7 +166,7 @@ def extract(text: str, mode: str) -> tuple[bytes, dict, dict[str, bytes]]:
             if mode == "fault":
                 address, fault_start, elapsed, access, origin, outcome, classification = struct.unpack_from("<QQQIIII",payload,40)
                 pid,tid,reserved,task=struct.unpack_from("<IIIQ",payload,20)
-                if reserved or task == 0 or fault_start > timestamp or elapsed != timestamp-fault_start or access & ~7 or origin not in (1,2) or outcome not in (1,2,3,4) or classification != 0:
+                if reserved or task == 0 or fault_start > timestamp or elapsed != timestamp-fault_start or access & ~7 or origin not in (1,2) or outcome not in (1,2,3,4) or classification not in (0,1,2) or (outcome != 1 and classification != 0):
                     raise ValueError("invalid native fault completion")
                 fault_records.append((pid,tid,address,access,origin,outcome))
             samples += 1

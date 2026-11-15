@@ -13,6 +13,18 @@ pub trait FileNodeOps: NodeOps + Pollable {
     /// Reads a number of bytes starting from a given offset.
     async fn read_at(&self, buf: &mut [u8], offset: u64) -> VfsResult<usize>;
 
+    /// Reads data with storage provenance for `observed`, relative to `buf`.
+    /// Only successful data reads overlapping that window count; metadata and
+    /// other batch pages are excluded. `None` is explicitly unsupported.
+    async fn read_at_with_io(
+        &self,
+        buf: &mut [u8],
+        offset: u64,
+        _observed: core::ops::Range<usize>,
+    ) -> VfsResult<(usize, Option<bool>)> {
+        self.read_at(buf, offset).await.map(|read| (read, None))
+    }
+
     /// Writes a number of bytes starting from a given offset.
     async fn write_at(&self, buf: &[u8], offset: u64) -> VfsResult<usize>;
 

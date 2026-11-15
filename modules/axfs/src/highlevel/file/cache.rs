@@ -2672,7 +2672,9 @@ impl CachedFile {
         pn: u32,
         page_count: usize,
         file_len: u64,
-    ) -> VfsResult<Vec<(u32, PageCache)>> {
+        observe_target: bool,
+    ) -> VfsResult<(Vec<(u32, PageCache)>, Option<bool>)> {
+        let mut storage_read = Some(false);
         let page_start = pn as u64 * PAGE_SIZE as u64;
         let bytes_available = file_len.saturating_sub(page_start);
 
@@ -2684,9 +2686,15 @@ impl CachedFile {
             if will_read {
                 let wanted = bytes_available.min(PAGE_SIZE as u64) as usize;
                 let registration = page.register_direct_read(wanted)?;
-                let read_result = file.read_at(&mut page.data()[..wanted], page_start).await;
+                let read_result = if observe_target {
+                    file.read_at_with_io(&mut page.data()[..wanted], page_start, 0..wanted).await
+                } else {
+                    file.read_at(&mut page.data()[..wanted], page_start).await
+                        .map(|read| (read, Some(false)))
+                };
                 drop(registration);
-                let read = read_result?;
+                let (read, io) = read_result?;
+                storage_read = io;
                 if read > wanted {
                     return Err(VfsError::Io);
                 }
@@ -2694,7 +2702,7 @@ impl CachedFile {
             }
             let mut pages = Vec::with_capacity(1);
             pages.push((pn, page));
-            return Ok(pages);
+            return Ok((pages, storage_read));
         }
 
         let buffer_len = page_count
@@ -2710,10 +2718,15 @@ impl CachedFile {
                 // until the direct read completes and its registration is
                 // dropped below.
                 let data = unsafe { group.bytes_mut(wanted)? };
-                file.read_at(data, page_start).await
+                if observe_target {
+                    file.read_at_with_io(data, page_start, 0..wanted.min(PAGE_SIZE)).await
+                } else {
+                    file.read_at(data, page_start).await.map(|read| (read, Some(false)))
+                }
             };
             drop(registration);
-            let read = read_result?;
+            let (read, io) = read_result?;
+            storage_read = io;
             if read > wanted {
                 return Err(VfsError::Io);
             }
@@ -2745,7 +2758,7 @@ impl CachedFile {
                 PageCache::from_independent_frame(group.page_addr(page_offset)?),
             ));
         }
-        Ok(pages)
+        Ok((pages, storage_read))
     }
 
     async fn ensure_write_page_async(
@@ -2835,7 +2848,9 @@ impl CachedFile {
         requested_pages: usize,
         pin: Option<bool>,
         demand_pages: usize,
-    ) -> VfsResult<(usize, Option<SharedPagePaddrs>)> {
+        observe_target: bool,
+    ) -> VfsResult<(usize, Option<SharedPagePaddrs>, Option<bool>)> {
+        let mut storage_read = Some(false);
         let requested_pages = requested_pages.max(1);
         debug_assert!(pin.is_some() || demand_pages <= requested_pages);
         let page_locks = self
@@ -2854,7 +2869,7 @@ impl CachedFile {
                 else {
                     // Prefetch is best effort. A busy stripe is a signal to
                     // let the demand path win and let a later fault retry.
-                    return Ok((0, None));
+                    return Ok((0, None, storage_read));
                 };
                 guard
             } else {
@@ -2870,6 +2885,16 @@ impl CachedFile {
             let (generation, file_len, page_count, first_missing, resident_pins) = {
                 let _io_guard = self.shared.io_lock.read().await;
                 let mut cache = self.shared.page_cache.lock();
+                // The fault target alone can satisfy this request. If another
+                // fill won while this task waited, pin that actual resident page
+                // under the cache lock; optional cold neighbors cause no I/O.
+                if observe_target {
+                    if let Some(may_write) = pin {
+                        if let Some(pages) = Self::pin_cached_pages(&mut cache, pn, 1, may_write)? {
+                            return Ok((1, Some(pages), storage_read));
+                        }
+                    }
+                }
                 let file_len = self.shared.size();
                 let page_start = pn as u64 * PAGE_SIZE as u64;
                 let bytes_available = file_len.saturating_sub(page_start);
@@ -2903,7 +2928,7 @@ impl CachedFile {
             };
 
             let Some((first_missing_offset, first_missing_page)) = first_missing else {
-                return Ok((page_count, resident_pins));
+                return Ok((page_count, resident_pins, storage_read));
             };
             // A mapping pin must publish the whole requested run atomically.
             // While the backing I/O is pending, reclaim may evict a prefix
@@ -2915,9 +2940,14 @@ impl CachedFile {
             } else {
                 (first_missing_page, page_count - first_missing_offset)
             };
-            let mut new_pages = self
-                .load_pages_async(file, fill_page, fill_count, file_len)
+            let (mut new_pages, io) = self
+                .load_pages_async(file, fill_page, fill_count, file_len, observe_target)
                 .await?;
+            storage_read = match (storage_read, io) {
+                (Some(true), _) | (_, Some(true)) => Some(true),
+                (Some(false), Some(false)) => Some(false),
+                _ => None,
+            };
 
             // Direct writes hold the exclusive side while changing the backend
             // and invalidating the cache. Validate and publish under the shared
@@ -2978,7 +3008,7 @@ impl CachedFile {
             if pin.is_some() && pinned_pages.is_none() {
                 continue;
             }
-            return Ok((page_count, pinned_pages));
+            return Ok((page_count, pinned_pages, storage_read));
         }
     }
 
@@ -2996,7 +3026,7 @@ impl CachedFile {
         {
             return Ok(pages);
         }
-        self.ensure_pages_loaded_async(file, pn, requested_pages, Some(may_write), 0)
+        self.ensure_pages_loaded_async(file, pn, requested_pages, Some(may_write), 0, false)
             .await?
             .1
             .ok_or(VfsError::BadState)
@@ -3019,7 +3049,7 @@ impl CachedFile {
                 .ok_or(VfsError::BadState)
                 .map(Some);
         }
-        self.ensure_pages_loaded_async(file, pn, requested_pages, None, 1)
+        self.ensure_pages_loaded_async(file, pn, requested_pages, None, 1, false)
             .await
             .map(|_| None)
     }
@@ -3041,7 +3071,7 @@ impl CachedFile {
         pn: u32,
         page_count: usize,
     ) -> VfsResult<()> {
-        self.ensure_pages_loaded_async(file, pn, page_count, None, 0)
+        self.ensure_pages_loaded_async(file, pn, page_count, None, 0, false)
             .await
             .map(drop)
     }
@@ -3588,6 +3618,52 @@ impl CachedFile {
         result
     }
 
+    /// Pins the fault target and a bounded optional batch, returning actual
+    /// target data-read provenance from this operation, including cache retries.
+    /// A resident target may return a one-page batch to avoid attributing work
+    /// for optional neighbors to the fault. Waiters which issue no data read
+    /// return `NoStorageRead` regardless of the fill owner's I/O.
+    pub fn get_shared_page_paddrs_with_io(
+        &self,
+        pn: u32,
+        page_count: usize,
+        may_write: bool,
+    ) -> VfsResult<(SharedPagePaddrs, axmm::FilePageIo)> {
+        axtask::future::block_on(self.get_shared_page_paddrs_with_io_async(pn, page_count, may_write))
+    }
+
+    /// Async form of [`Self::get_shared_page_paddrs_with_io`].
+    pub async fn get_shared_page_paddrs_with_io_async(
+        &self,
+        pn: u32,
+        page_count: usize,
+        may_write: bool,
+    ) -> VfsResult<(SharedPagePaddrs, axmm::FilePageIo)> {
+        let requested_pages = checked_shared_page_count(page_count)?;
+        let file = self.inner.entry().as_file()?;
+        let result = async {
+            if let Some(pages) = self.pin_resident_pages(pn, requested_pages, may_write).await? {
+                return Ok((pages, axmm::FilePageIo::NoStorageRead));
+            }
+            if let Some(pages) = self.pin_resident_pages(pn, 1, may_write).await? {
+                return Ok((pages, axmm::FilePageIo::NoStorageRead));
+            }
+            let (_, pages, io) = self.ensure_pages_loaded_async(
+                file, pn, requested_pages, Some(may_write), 0, true,
+            ).await?;
+            let io = match io {
+                Some(true) => axmm::FilePageIo::StorageRead,
+                Some(false) => axmm::FilePageIo::NoStorageRead,
+                None => axmm::FilePageIo::Unknown,
+            };
+            Ok((pages.ok_or(VfsError::BadState)?, io))
+        }.await;
+        if may_write && result.is_ok() {
+            self.shared.watch_writable_mapping();
+        }
+        result
+    }
+
     /// Returns the lock-free invalidation epoch for prepared mapped-page fills.
     ///
     /// Snapshot before `get_shared_page_paddrs` and compare immediately before
@@ -3678,6 +3754,15 @@ impl axmm::FileMappingSource for CachedFile {
         may_write: bool,
     ) -> axerrno::AxResult<axmm::FileMappingPageBatch> {
         self.get_shared_page_paddrs(page_number, page_count, may_write)
+    }
+
+    fn get_shared_page_paddrs_with_io(
+        &self,
+        page_number: u32,
+        page_count: usize,
+        may_write: bool,
+    ) -> axerrno::AxResult<(axmm::FileMappingPageBatch, axmm::FilePageIo)> {
+        self.get_shared_page_paddrs_with_io(page_number, page_count, may_write)
     }
 
     fn prefetch_pages(&self, page_number: u32, page_count: usize) {

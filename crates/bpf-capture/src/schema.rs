@@ -176,7 +176,7 @@ impl SchemaRegistry {
             let classification = u32::from_le_bytes(record.payload[36..40].try_into().unwrap());
             if record.timestamp_ns.checked_sub(start) != Some(elapsed)
                 || access & !7 != 0 || !matches!(origin, 1 | 2)
-                || !(1..=4).contains(&outcome) || classification > 2
+                || !pulse_bpf_schema::PageFaultClassification::is_valid_pair(outcome, classification)
             {
                 return Err(CaptureError::InvalidRecord("invalid page fault completion"));
             }

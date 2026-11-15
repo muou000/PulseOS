@@ -23,7 +23,7 @@ pub use self::{
     cow::CowMapping,
     file::{
         FILE_MAPPING_PAGE_BATCH_CAPACITY, FileMapping, FileMappingFlags, FileMappingPageBatch,
-        FileMappingSource, FileMappingWriteGuard, FilePageLoad, FilePagePrepared,
+        FileMappingSource, FileMappingWriteGuard, FilePageIo, FilePageLoad, FilePagePrepared,
     },
     shared::SharedFrame,
 };

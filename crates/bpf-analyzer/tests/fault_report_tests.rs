@@ -198,3 +198,97 @@ fn unsupported_fields_and_invalid_windows_cannot_claim_complete() {
     );
     assert!(!report.is_complete);
 }
+
+#[test]
+fn successful_classes_and_unsuccessful_resolvers_have_disjoint_counts() {
+    let mut events = vec![
+        fault(99, 0x400000, 100, 101, 1, 2),
+        fault(99, 0x401000, 100, 900, 800, 1),
+        fault(99, 0x402000, 100, 200, 100, 0),
+    ];
+    for outcome_tag in [2, 3, 4] {
+        let mut event = fault(99, 0x403000, 100, 200, 100, 0);
+        if let EventPayload::PageFault { outcome, .. } = &mut event.payload {
+            *outcome = outcome_tag;
+        }
+        events.push(event);
+    }
+    let report = FaultReport::compute(&events, true);
+    assert_eq!((report.resolved_minor, report.resolved_major, report.resolved_unknown,
+        report.unsuccessful), (1, 1, 1, 3));
+    assert_eq!(report.valid_events, 6);
+    assert_eq!(report.unknown_classification, 4);
+    assert!(!report.is_complete);
+    let json: serde_json::Value = serde_json::from_str(&report.render_json()).unwrap();
+    assert_eq!(json["resolved_minor"], 1);
+    assert_eq!(json["resolved_major"], 1);
+    assert_eq!(json["resolved_unknown"], 1);
+    assert_eq!(json["unsuccessful"], 3);
+    let not_applicable: Vec<_> = json["groups"].as_array().unwrap().iter()
+        .filter(|g| g["classification_applicability"] == "not_applicable").collect();
+    assert_eq!(not_applicable.len(), 3);
+    assert!(not_applicable.iter().all(|g| g["classification_id"] == 0));
+    assert!(report.render_text().contains("resolved_minor=1 resolved_major=1 resolved_unknown=1 unsuccessful=3"));
+
+    events.remove(2);
+    assert!(FaultReport::compute(&events, true).is_complete,
+        "fully observed failed outcomes are separate from unknown successful classification");
+}
+
+#[test]
+fn contradictory_failed_minor_or_major_records_never_enter_success_counts() {
+    let mut events = Vec::new();
+    for outcome_tag in [2, 3, 4] {
+        for class in [1, 2] {
+            let mut event = fault(99, 0x400000, 100, 200, 100, class);
+            if let EventPayload::PageFault { outcome, .. } = &mut event.payload {
+                *outcome = outcome_tag;
+            }
+            events.push(event);
+        }
+    }
+    let report = FaultReport::compute(&events, true);
+    assert_eq!((report.captured_events, report.invalid_events, report.valid_events), (6, 6, 0));
+    assert_eq!((report.resolved_minor, report.resolved_major, report.resolved_unknown,
+        report.unsuccessful), (0, 0, 0, 0));
+    assert_eq!(report.duration.count, 0);
+}
+
+#[test]
+fn raw_classification_reaches_capture_report_table_and_timeline_without_inference() {
+    use bpf_analyzer::CaptureAnalyzer;
+    use bpf_capture::{CaptureArch, CaptureReader, CaptureWriter, SchemaRegistry, SessionStatusCode};
+    use bpf_capture::writer::SampleFormat;
+    use pulse_bpf_schema::{ContextCommon, PageFaultClassification as Class, PageFaultContext,
+        PageFaultOrigin, PageFaultOutcome as Outcome, TracepointId};
+
+    let fixture = bpf_capture::generate_deterministic_fixture(CaptureArch::Riscv64,
+        SessionStatusCode::Complete).unwrap();
+    let config = CaptureReader::from_bytes(&fixture).unwrap().metadata.config;
+    let mut writer = CaptureWriter::new(config, SchemaRegistry::default_pulse_registry());
+    writer.start(90).unwrap();
+    for (outcome, classification, address, end) in [
+        (Outcome::Resolved, Class::Major, 0x400000, 101),
+        (Outcome::Resolved, Class::Minor, 0x401000, 900),
+        (Outcome::Resolved, Class::Unknown, 0x402000, 200),
+        (Outcome::ResolverError, Class::Unknown, 0x403000, 300),
+    ] {
+        let raw = PageFaultContext::from_classified_completion(
+            ContextCommon::new(TracepointId::PageFault, end, 2, 40, 41, 99),
+            address, 100, 1, PageFaultOrigin::User, outcome, classification).unwrap().to_bytes();
+        writer.ingest_perf_sample_as(2, &raw, SampleFormat::Tracepoint).unwrap();
+    }
+    let analyzer = CaptureAnalyzer::from_bytes(&writer.finish(1000).unwrap()).unwrap();
+    let report = analyzer.fault_report();
+    assert_eq!((report.resolved_minor, report.resolved_major, report.resolved_unknown,
+        report.unsuccessful), (1, 1, 1, 1));
+    let table = analyzer.render_event_table();
+    assert!(table.contains("resolver_wall_ns=1 access=0x1 origin=user outcome=resolved classification=major"));
+    assert!(table.contains("resolver_wall_ns=800 access=0x1 origin=user outcome=resolved classification=minor"));
+    assert!(table.contains("classification=unknown classification_applicability=not_applicable"));
+    let query = analyzer.query(&Default::default()).unwrap();
+    let qualities: Vec<_> = query.timeline.intervals.iter().map(|i| (i.end_ns, i.quality)).collect();
+    assert!(qualities.contains(&(101, "observed_closed")));
+    assert!(qualities.contains(&(200, "observed_closed_unknown_classification")));
+    assert!(qualities.contains(&(300, "observed_closed_not_applicable")));
+}

@@ -5,7 +5,10 @@ use alloc::sync::Arc;
 use axerrno::{AxError, AxResult};
 use axfs::{CachedFile, File, OpenOptions, ROOT_FS_CONTEXT};
 use axhal::{paging::MappingFlags, trap::PageFaultFlags};
-use axmm::{FilePageLoad, MappingPlacement, PageFaultOutcome, PageFaultResult, PreparedMapping};
+use axmm::{
+    FileMappingPageBatch, FileMappingSource, FilePageIo, FilePageLoad, MappingPlacement,
+    PageFaultOutcome, PageFaultResult, PageFaultWork, PreparedMapping,
+};
 use axtask::future::block_on;
 use memory_addr::{PhysAddr, VirtAddr, PAGE_SIZE_4K};
 
@@ -97,8 +100,12 @@ fn read_equals(
 }
 
 fn resolve(aspace: &AddressSpaceLock, address: VirtAddr, flags: PageFaultFlags, case: &str) -> AxResult<()> {
-    let handled = checked(case, "resolve guest page fault", aspace.resolve_page_fault(address, flags))?;
-    check(case, "page fault handled", handled)
+    let resolution = checked(case, "resolve guest page fault", aspace.resolve_page_fault_with_io(address, flags))?;
+    check(case, "page fault handled", resolution.handled)?;
+    // Every file fixture is populated through the cache before these cases;
+    // anonymous allocation and private COW also issue no target storage read.
+    check(case, "cached/anonymous/COW fault has no storage read",
+        resolution.io == axmm::FilePageIo::NoStorageRead)
 }
 
 fn file_request(case: &str, result: PageFaultResult) -> AxResult<FilePageLoad> {
@@ -193,6 +200,160 @@ impl Fixture {
             ),
         )
     }
+}
+
+/// An older backend at the public FileMappingSource boundary. Its pages and
+/// pins are real CachedFile resources, but it deliberately does not implement
+/// get_shared_page_paddrs_with_io. This is a protocol fixture, not evidence of
+/// storage reads. The error case fails before acquiring any page pins.
+struct LegacyFileSource {
+    cached: CachedFile,
+    fail_reads: bool,
+}
+
+impl FileMappingSource for LegacyFileSource {
+    fn mapping_generation(&self) -> u64 { self.cached.mapping_generation() }
+    fn get_shared_page_paddrs(
+        &self, page_number: u32, page_count: usize, may_write: bool,
+    ) -> AxResult<FileMappingPageBatch> {
+        if self.fail_reads {
+            Err(AxError::Io)
+        } else {
+            self.cached.get_shared_page_paddrs(page_number, page_count, may_write)
+        }
+    }
+    fn prefetch_pages(&self, page_number: u32, page_count: usize) {
+        self.cached.prefetch_pages(page_number, page_count);
+    }
+    fn size(&self) -> u64 { self.cached.size() }
+    fn shared_page_paddr(&self, page_number: u32) -> AxResult<PhysAddr> {
+        self.cached.shared_page_paddr(page_number)
+    }
+    fn mark_page_dirty_if_paddr(&self, page_number: u32, paddr: PhysAddr) -> AxResult {
+        self.cached.mark_page_dirty_if_paddr(page_number, paddr)
+    }
+    fn sync(&self, data_only: bool) -> AxResult { self.cached.sync(data_only) }
+    fn page_cache_identity(&self) -> usize {
+        FileMappingSource::page_cache_identity(&self.cached)
+    }
+    fn as_any(&self) -> &dyn core::any::Any { self }
+}
+
+fn legacy_mapping(fixture: &Fixture, fail_reads: bool, case: &str) -> AxResult<PreparedMapping> {
+    checked(case, "prepare legacy file mapping", PreparedMapping::file(
+        PAGE_SIZE_4K,
+        MappingFlags::READ | MappingFlags::USER,
+        Arc::new(LegacyFileSource { cached: fixture.cached.clone(), fail_reads }),
+        fixture.file.flags().into(),
+        0,
+        PAGE_SIZE_4K,
+        true,
+        None,
+    ))
+}
+
+fn fault_io_unsupported_and_error(fixture: &Fixture) -> AxResult<()> {
+    const CASE: &str = "fault_io_unsupported_and_error";
+    let aspace = new_aspace(CASE)?;
+    let address = VirtAddr::from(TEST_VA);
+    let frame = cache_frame(fixture, 0, CASE)?;
+    let baseline = frame_refs(CASE, frame)?;
+    publish(&aspace, legacy_mapping(fixture, false, CASE)?, address, false, CASE)?;
+    let resolution = checked(CASE, "resolve legacy backend",
+        aspace.resolve_page_fault_with_io(address, PageFaultFlags::READ))?;
+    check(CASE, "unverified successful backend remains unknown",
+        resolution.handled && resolution.io == FilePageIo::Unknown)?;
+    check(CASE, "legacy mapping publishes actual cache frame",
+        mapped_frame(&aspace, address, CASE)? == frame)?;
+    expect_refs(CASE, frame, baseline + 1)?;
+    checked(CASE, "unmap legacy backend", aspace.unmap(address, PAGE_SIZE_4K))?;
+    expect_refs(CASE, frame, baseline)?;
+
+    publish(&aspace, legacy_mapping(fixture, true, CASE)?, address, false, CASE)?;
+    let error = aspace.resolve_page_fault_with_io(address, PageFaultFlags::READ);
+    check(CASE, "read error stays an error, without successful classification",
+        matches!(error, Err(AxError::Io)))?;
+    absent(&aspace, address, CASE)?;
+    expect_refs(CASE, frame, baseline)?;
+    checked(CASE, "unmap failed backend", aspace.unmap(address, PAGE_SIZE_4K))?;
+    let missing = checked(CASE, "resolve absent mapping",
+        aspace.resolve_page_fault_with_io(address, PageFaultFlags::READ))?;
+    check(CASE, "unhandled fault has no successful I/O class",
+        !missing.handled && missing.io == FilePageIo::Unknown)
+}
+
+fn fault_io_retry_and_cancel(fixture: &Fixture) -> AxResult<()> {
+    const CASE: &str = "fault_io_retry_and_cancel";
+    for cancel in [false, true] {
+        let aspace = new_aspace(CASE)?;
+        let address = VirtAddr::from(TEST_VA);
+        let old_frame = cache_frame(fixture, 0, CASE)?;
+        let new_frame = cache_frame(fixture, 1, CASE)?;
+        let old_baseline = frame_refs(CASE, old_frame)?;
+        let new_baseline = frame_refs(CASE, new_frame)?;
+        publish(&aspace, legacy_mapping(fixture, false, CASE)?, address, false, CASE)?;
+        let initial = aspace.read().handle_page_fault(address, PageFaultFlags::READ);
+        let mut attempts = 0;
+        let mut callback_error = None;
+        let resolution = axmm::drive_page_fault_with_io(initial, |work| {
+            let attempt = (|| -> AxResult<PageFaultResult> {
+                let PageFaultWork::File(prepared) = work else {
+                    return Err(failure(CASE, "file-only mapping needs only file preparation"));
+                };
+                attempts += 1;
+                if attempts == 1 {
+                    check(CASE, "first legacy preparation carries unknown",
+                        prepared.io() == FilePageIo::Unknown)?;
+                    expect_refs(CASE, old_frame, old_baseline + 1)?;
+                    if cancel {
+                        checked(CASE, "remove mapping before prepared commit",
+                            aspace.unmap(address, PAGE_SIZE_4K))?;
+                    } else {
+                        // A same-VA replacement changes file offset and mapping
+                        // generation while the old preparation remains pinned.
+                        publish(&aspace,
+                            fixture.mapping(CASE, PAGE_SIZE_4K, PAGE_SIZE_4K, true, false)?,
+                            address, true, CASE)?;
+                    }
+                    absent(&aspace, address, CASE)?;
+                } else {
+                    check(CASE, "exactly one retry prepares the verified cached replacement",
+                        attempts == 2 && !cancel && prepared.io() == FilePageIo::NoStorageRead)?;
+                    expect_refs(CASE, old_frame, old_baseline)?;
+                    expect_refs(CASE, new_frame, new_baseline + 1)?;
+                }
+                Ok(aspace.read().handle_prepared_file_page(address, PageFaultFlags::READ, prepared))
+            })();
+            match attempt {
+                Ok(result) => result,
+                Err(error) => {
+                    callback_error = Some(error);
+                    PageFaultResult::Handled(false)
+                }
+            }
+        });
+        if let Some(error) = callback_error { return Err(error); }
+        let resolution = checked(CASE, "complete resolver retry/discard", resolution)?;
+        check(CASE, "unknown preparation is not erased by verified retry or cancellation",
+            resolution.io == FilePageIo::Unknown)?;
+        expect_refs(CASE, old_frame, old_baseline)?;
+        if cancel {
+            check(CASE, "removed mapping is not a successful fault",
+                !resolution.handled && attempts == 1)?;
+            absent(&aspace, address, CASE)?;
+            expect_refs(CASE, new_frame, new_baseline)?;
+        } else {
+            check(CASE, "stale preparation retries and replacement commits",
+                resolution.handled && attempts == 2)?;
+            check(CASE, "final PTE belongs to replacement file offset",
+                mapped_frame(&aspace, address, CASE)? == new_frame)?;
+            read_equals(&aspace, address, &CONTENTS[1], CASE, "replacement bytes survive retry")?;
+            expect_refs(CASE, new_frame, new_baseline + 1)?;
+            checked(CASE, "unmap replacement after retry", aspace.unmap(address, PAGE_SIZE_4K))?;
+            expect_refs(CASE, new_frame, new_baseline)?;
+        }
+    }
+    Ok(())
 }
 
 fn prepared_pin_drop(fixture: &Fixture) -> AxResult<()> {
@@ -417,8 +578,10 @@ pub fn run() -> AxResult<()> {
             return Err(error);
         }
     };
-    let cases: [(&str, fn(&Fixture) -> AxResult<()>); 7] = [
+    let cases: [(&str, fn(&Fixture) -> AxResult<()>); 9] = [
         ("prepared_pin_drop", prepared_pin_drop),
+        ("fault_io_unsupported_and_error", fault_io_unsupported_and_error),
+        ("fault_io_retry_and_cancel", fault_io_retry_and_cancel),
         ("stale_file_replace", stale_file_replace),
         ("deferred_file_unmap", deferred_file_unmap),
         ("partial_file_unmap", partial_file_unmap),

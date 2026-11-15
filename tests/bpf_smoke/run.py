@@ -218,6 +218,7 @@ def drive_guest(
     ready: str,
     boot_timeout: float,
     timeout: float,
+    on_output=None,
 ) -> tuple[str, int, str]:
     ready_re = re.compile(ready.encode())
     output = bytearray()
@@ -262,6 +263,8 @@ def drive_guest(
                         sent = True
                         deadline = time.monotonic() + timeout
                     text = output.decode(errors="replace").replace("\r", "")
+                    if on_output is not None:
+                        on_output(text, process.stdin)
                     if re.search(
                         rf"(?m)^BPF_HOST_EXIT {re.escape(token)} [0-9]+\s*$", text
                     ):
