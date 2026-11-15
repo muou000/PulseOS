@@ -119,10 +119,13 @@ fn main() {
         0x8000,
     );
 
-    let init_tid = inner.id().as_u64();
+    // Linux reserves PID/TID 1 for init. Kernel tasks have already consumed
+    // scheduler IDs, which remain independent of this userspace identity.
+    let init_tid = 1;
     match pulse_core::task::Process::new_uspace(init_tid) {
         Ok(proc) => {
-            let init_thread = pulse_core::task::Thread::new(proc.clone(), init_tid);
+            let init_thread =
+                pulse_core::task::Thread::new(proc.clone(), init_tid, inner.id().as_u64());
             pulse_core::task::register_thread_global(init_tid, init_thread.clone());
             info!("Created initial user process");
 
