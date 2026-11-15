@@ -11,6 +11,7 @@ documentation = "https://arceos-org.github.io/arceos/axmm/index.html"
 
 [features]
 ipi = ["dep:axipi"]
+mapping-observer = []
 
 [dependencies]
 axhal = { workspace = true, features = ["paging"] }

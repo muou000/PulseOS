@@ -389,6 +389,8 @@ pub struct Process {
     /// Set after this process has successfully installed a new executable image.
     /// Parents use it to enforce setpgid(2)'s post-exec EACCES rule.
     has_execed: AtomicBool,
+    #[cfg(feature = "bpf-trace")]
+    pub(crate) exec_generation: AtomicU64,
     thread_exit_event: WaitQueue,
     /// 子进程列表，使用自旋锁保护
     children: SpinNoIrq<Vec<Arc<Process>>>,

@@ -321,7 +321,12 @@ pub fn sys_mmap(
                 match axmm::PreparedMapping::file(
                     aligned_length,
                     map_flags,
-                    alloc::sync::Arc::new(cached),
+                    {
+                        #[cfg(feature = "bpf-trace")]
+                        { pulse_core::bpf::mappings::file_source(cached, false) }
+                        #[cfg(not(feature = "bpf-trace"))]
+                        { alloc::sync::Arc::new(cached) }
+                    },
                     file_flags.into(),
                     offset,
                     length,

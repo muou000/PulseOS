@@ -1,0 +1,102 @@
+{
+  "format": "pulse-mapping-evidence-replay",
+  "version": 1,
+  "runs": {
+    "rv-cpu": {
+      "members_verified": 32,
+      "bundle_sha256": "edc031211b975c0d734fa64ce49efeb59aea72a516162b04e53e66caed24c46f",
+      "capture_status": "IncompleteError",
+      "raw_normalized_equal": true,
+      "reimport_report_equal": true,
+      "phase_counts": {
+        "mapped": 15,
+        "renamed": 16,
+        "fork": 14,
+        "exec": 15,
+        "remapped": 12,
+        "partial_remapped": 14
+      },
+      "resolved_counts": {
+        "mapped": 15,
+        "renamed": 16,
+        "fork": 14,
+        "exec": 15,
+        "remapped": 12,
+        "partial_remapped": 14
+      },
+      "completed_tlb_tokens": 39,
+      "kernel_relocation": 0,
+      "negative_cases": [
+        "missing-elf",
+        "same-name-wrong-elf"
+      ],
+      "boot_reconstructed_from_elf": true,
+      "verified_phases": [
+        "exec",
+        "fork",
+        "mapped",
+        "partial_remapped",
+        "remapped",
+        "renamed"
+      ],
+      "mapped_user_samples": 168,
+      "verified_elf_samples": 1442,
+      "start_ns": 3179169700,
+      "stop_ns": 5284693600,
+      "frames": 1442,
+      "samples": 1442,
+      "transport_lost": 0,
+      "export_dropped": 0
+    },
+    "la-cpu": {
+      "members_verified": 32,
+      "bundle_sha256": "228c30266f7d3e5dd9fad3327d0983c756e580656cb9eb3d840d6cfc13920378",
+      "capture_status": "IncompleteError",
+      "raw_normalized_equal": true,
+      "reimport_report_equal": true,
+      "phase_counts": {
+        "mapped": 15,
+        "renamed": 17,
+        "fork": 13,
+        "exec": 14,
+        "remapped": 15,
+        "partial_remapped": 15
+      },
+      "resolved_counts": {
+        "mapped": 15,
+        "renamed": 17,
+        "fork": 13,
+        "exec": 14,
+        "remapped": 15,
+        "partial_remapped": 15
+      },
+      "completed_tlb_tokens": 85,
+      "kernel_relocation": 0,
+      "negative_cases": [
+        "missing-elf",
+        "same-name-wrong-elf"
+      ],
+      "boot_reconstructed_from_elf": true,
+      "verified_phases": [
+        "exec",
+        "fork",
+        "mapped",
+        "partial_remapped",
+        "remapped",
+        "renamed"
+      ],
+      "mapped_user_samples": 136,
+      "verified_elf_samples": 1133,
+      "start_ns": 2450039360,
+      "stop_ns": 4396176820,
+      "frames": 1133,
+      "samples": 1133,
+      "transport_lost": 0,
+      "export_dropped": 0
+    }
+  },
+  "validation": {
+    "members_verified": 11,
+    "bundle_sha256": "201deae61d87718d33b91eae4b08db713834147c13e018a5caf925bfc1db1204"
+  }
+}

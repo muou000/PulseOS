@@ -29,6 +29,8 @@ pub struct TlbShootdown {
     primary: Option<(usize, TlbInvalidation)>,
     additional: alloc::vec::Vec<(usize, TlbInvalidation)>,
     reclaims: DeferredReclaims,
+    #[cfg(feature = "mapping-observer")]
+    observations: alloc::vec::Vec<crate::observation::Observation>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -76,32 +78,39 @@ impl TlbInvalidation {
 }
 
 impl TlbShootdown {
-    fn new(asid: usize, reclaims: DeferredReclaims) -> Self {
+    fn new(asid: usize, _space_id: usize, reclaims: DeferredReclaims) -> Self {
         Self {
             primary: Some((asid, TlbInvalidation::FullAsid)),
             additional: alloc::vec::Vec::new(),
             reclaims,
+            #[cfg(feature = "mapping-observer")]
+            observations: crate::observation::Observation::begin(_space_id).into_iter().collect(),
         }
     }
 
     fn from_tracker(
         asid: usize,
+        _space_id: usize,
         tracker: TlbInvalidationTracker,
         reclaims: DeferredReclaims,
     ) -> Self {
+        let primary = TlbInvalidation::from_tracker(tracker).map(|invalidation| (asid, invalidation));
         Self {
-            primary: TlbInvalidation::from_tracker(tracker).map(|invalidation| (asid, invalidation)),
+            primary,
             additional: alloc::vec::Vec::new(),
             reclaims,
+            #[cfg(feature = "mapping-observer")]
+            observations: primary.and_then(|_| crate::observation::Observation::begin(_space_id)).into_iter().collect(),
         }
     }
 
-    fn without_reclaims(asid: usize) -> Self {
-        Self::new(asid, DeferredReclaims::default())
+    fn without_reclaims(asid: usize, space_id: usize) -> Self {
+        Self::new(asid, space_id, DeferredReclaims::default())
     }
 
     fn for_range(
         asid: usize,
+        _space_id: usize,
         start: VirtAddr,
         size: usize,
         reclaims: DeferredReclaims,
@@ -120,6 +129,8 @@ impl TlbShootdown {
             )),
             additional: alloc::vec::Vec::new(),
             reclaims,
+            #[cfg(feature = "mapping-observer")]
+            observations: crate::observation::Observation::begin(_space_id).into_iter().collect(),
         }
     }
 
@@ -129,7 +140,11 @@ impl TlbShootdown {
             primary,
             additional,
             reclaims,
+            #[cfg(feature = "mapping-observer")]
+            mut observations,
         } = other;
+        #[cfg(feature = "mapping-observer")]
+        self.observations.append(&mut observations);
         for (asid, invalidation) in primary.into_iter().chain(additional) {
             self.merge_invalidation(asid, invalidation);
         }
@@ -163,6 +178,8 @@ impl TlbShootdown {
             primary,
             additional,
             reclaims,
+            #[cfg(feature = "mapping-observer")]
+            observations,
         } = self;
 
         #[cfg(feature = "ipi")]
@@ -171,6 +188,8 @@ impl TlbShootdown {
                 primary: None,
                 additional: alloc::vec::Vec::new(),
                 reclaims: DeferredReclaims::default(),
+                #[cfg(feature = "mapping-observer")]
+                observations: alloc::vec::Vec::new(),
             };
             for (asid, invalidation) in primary.into_iter().chain(additional) {
                 merged_shootdown.merge_invalidation(asid, invalidation);
@@ -209,6 +228,10 @@ impl TlbShootdown {
                     }
                 }
             }
+            #[cfg(feature = "mapping-observer")]
+            for observation in observations {
+                observation.complete();
+            }
             reclaims.reclaim()?;
             Ok(())
         }
@@ -217,6 +240,10 @@ impl TlbShootdown {
         {
             for (asid, invalidation) in primary.into_iter().chain(additional) {
                 unsafe { flush_tlb_invalidation(asid, invalidation) };
+            }
+            #[cfg(feature = "mapping-observer")]
+            for observation in observations {
+                observation.complete();
             }
             reclaims.reclaim()?;
             Ok(())
@@ -646,6 +673,11 @@ pub struct AddrSpace {
 }
 
 impl AddrSpace {
+    /// Never-reused identity and VMA revision; hardware ASIDs may be recycled.
+    pub fn observation_identity(&self) -> (usize, usize) {
+        self.generation.observation()
+    }
+
     fn map_area(&mut self, area: MemoryArea<Backend>) -> memory_set::MappingResult {
         if self.pending_mappings.iter().any(|pending| pending.range.overlaps(area.va_range())) {
             return Err(memory_set::MappingError::AlreadyExists);
@@ -1179,7 +1211,7 @@ impl AddrSpace {
 
         let needs_completion = !invalidation.is_empty() || !reclaim.is_empty();
         let shootdown = if needs_completion {
-            Some(TlbShootdown::from_tracker(self.asid, invalidation, reclaim))
+            Some(TlbShootdown::from_tracker(self.asid, self.generation.observation().0, invalidation, reclaim))
         } else {
             let _ = reclaim.reclaim();
             None
@@ -1228,7 +1260,7 @@ impl AddrSpace {
         })();
         let needs_completion = !invalidation.is_empty() || !reclaim.is_empty();
         let shootdown = if needs_completion {
-            Some(TlbShootdown::from_tracker(self.asid, invalidation, reclaim))
+            Some(TlbShootdown::from_tracker(self.asid, self.generation.observation().0, invalidation, reclaim))
         } else {
             let _ = reclaim.reclaim();
             None
@@ -1368,7 +1400,7 @@ impl AddrSpace {
                 .map_err(mapping_err_to_ax_err)
         })();
         let shootdown = (!invalidation.is_empty()).then(|| {
-            TlbShootdown::from_tracker(self.asid, invalidation, DeferredReclaims::default())
+            TlbShootdown::from_tracker(self.asid, self.generation.observation().0, invalidation, DeferredReclaims::default())
         });
         AddrSpaceMutation::new(result, shootdown)
     }
@@ -1412,7 +1444,7 @@ impl AddrSpace {
             .ok_or(AxError::BadState)
         })();
         let shootdown = (!invalidation.is_empty()).then(|| {
-            TlbShootdown::from_tracker(self.asid, invalidation, DeferredReclaims::default())
+            TlbShootdown::from_tracker(self.asid, self.generation.observation().0, invalidation, DeferredReclaims::default())
         });
         AddrSpaceMutation::new(result, shootdown)
     }
@@ -1461,6 +1493,7 @@ impl AddrSpace {
         let shootdown = if needs_shootdown {
             Some(TlbShootdown::for_range(
                 self.asid,
+                self.generation.observation().0,
                 vaddr,
                 PAGE_SIZE_4K,
                 reclaim,
@@ -1486,7 +1519,7 @@ impl AddrSpace {
             .map_err(mapping_err_to_ax_err);
         let needs_completion = !invalidation.is_empty() || !reclaim.is_empty();
         let shootdown = if needs_completion {
-            Some(TlbShootdown::from_tracker(self.asid, invalidation, reclaim))
+            Some(TlbShootdown::from_tracker(self.asid, self.generation.observation().0, invalidation, reclaim))
         } else {
             let _ = reclaim.reclaim();
             None
@@ -1615,6 +1648,8 @@ impl AddrSpace {
                     .ok_or(AxError::BadAddress)?;
                 (area.start(), area.end(), area.flags(), area.backend().clone())
             };
+            let mut middle_backend = old_backend.clone();
+            middle_backend.rebase_for_remap(old_addr, new_size)?;
 
             // Remove the old area to perform splitting and modifications
             self.areas.remove(old_area_start_val).unwrap();
@@ -1635,7 +1670,7 @@ impl AddrSpace {
             }
 
             // The target area for remapping
-            let mut middle_area = MemoryArea::new(old_addr, old_size, old_flags, old_backend);
+            let mut middle_area = MemoryArea::new(old_addr, old_size, old_flags, middle_backend);
 
             // Check if we need to move
             let mut should_move = false;
@@ -1781,7 +1816,7 @@ impl AddrSpace {
 
         let local_needs_completion = !invalidation.is_empty() || !reclaim.is_empty();
         if local_needs_completion {
-            let local = TlbShootdown::from_tracker(self.asid, invalidation, reclaim);
+            let local = TlbShootdown::from_tracker(self.asid, self.generation.observation().0, invalidation, reclaim);
             if let Some(existing) = &mut tlb_shootdown {
                 existing.merge(local);
             } else {
@@ -1934,6 +1969,7 @@ impl AddrSpace {
                         handled,
                         shootdown: TlbShootdown::for_range(
                             self.asid,
+                            self.generation.observation().0,
                             page,
                             PAGE_SIZE_4K,
                             reclaim,
@@ -2008,7 +2044,7 @@ impl AddrSpace {
             reclaim.defer_frame(prepared.source.original);
             PageFaultResult::HandledWithShootdown {
                 handled: true,
-                shootdown: TlbShootdown::for_range(self.asid, prepared.source.page, PAGE_SIZE_4K, reclaim),
+                shootdown: TlbShootdown::for_range(self.asid, self.generation.observation().0, prepared.source.page, PAGE_SIZE_4K, reclaim),
             }
         } else {
             PageFaultResult::Handled(false)
@@ -2154,7 +2190,7 @@ impl AddrSpace {
         let mut invalidation = TlbInvalidationTracker::default();
         let result = self.try_clone_inner(&mut invalidation);
         let shootdown = (!invalidation.is_empty()).then(|| {
-            TlbShootdown::from_tracker(self.asid, invalidation, DeferredReclaims::default())
+            TlbShootdown::from_tracker(self.asid, self.generation.observation().0, invalidation, DeferredReclaims::default())
         });
         AddrSpaceCloneResult { result, shootdown }
     }
@@ -2356,7 +2392,7 @@ impl Drop for AddrSpace {
         // taking a CPU-local reclaim buffer so its lease is never held while
         // waiting for a remote TLB IPI.
         let mut retirement_completed = self.pending_mappings.is_empty() && (self.areas.is_empty()
-            || TlbShootdown::without_reclaims(asid)
+            || TlbShootdown::without_reclaims(asid, self.generation.observation().0)
                 .complete_after_unlock()
                 .is_ok());
 

@@ -19,9 +19,13 @@ pub(crate) struct MappingGeneration {
 }
 
 impl MappingGeneration {
+    pub(crate) fn observation(&self) -> (usize, usize) {
+        (self.identity, self.revision)
+    }
+
     pub(crate) fn new() -> Self {
-        let identity = NEXT_ADDRESS_SPACE_ID.fetch_add(1, Ordering::Relaxed);
-        assert_ne!(identity, 0, "address-space identity exhausted");
+        let identity = NEXT_ADDRESS_SPACE_ID.fetch_update(Ordering::Relaxed, Ordering::Relaxed,
+            |identity| identity.checked_add(1)).expect("address-space identity exhausted");
         Self { identity, revision: 0 }
     }
 

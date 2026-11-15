@@ -2,7 +2,7 @@
 
 use alloc::vec::Vec;
 use crate::diagnostics::RuntimeDiagnostics;
-use crate::framing::{compute_checksum, compute_checksum_ieee, CaptureError, CaptureHeader, CaptureTrailer, FORMAT_VERSION_V2, FORMAT_VERSION_V3, REQUIRED_SOFTWARE_STACK_V3};
+use crate::framing::{compute_checksum, compute_checksum_ieee, CaptureError, CaptureHeader, CaptureTrailer, FORMAT_VERSION_V2, FORMAT_VERSION_V3, FORMAT_VERSION_V4, REQUIRED_SOFTWARE_STACK_V3, REQUIRED_MAPPINGS_V4};
 use crate::record::NormalizedRecord;
 use crate::schema::SchemaRegistry;
 use crate::session::SessionMetadata;
@@ -16,6 +16,7 @@ pub struct CaptureData {
     pub records: Vec<NormalizedRecord>,
     pub trailer: CaptureTrailer,
     pub diagnostics: Option<RuntimeDiagnostics>,
+    pub mappings: Option<crate::mapping::MappingMetadata>,
 }
 
 /// Binary reader and validator for independent BPF captures.
@@ -60,17 +61,30 @@ impl CaptureReader {
         let (registry, reg_consumed) = SchemaRegistry::from_bytes(meta_bytes)?;
         let (metadata, meta_consumed) = SessionMetadata::from_bytes(&meta_bytes[reg_consumed..])?;
         let used = reg_consumed.checked_add(meta_consumed).ok_or(CaptureError::TruncatedMetadata)?;
-        let diagnostics_end = if header.format_version == FORMAT_VERSION_V3 {
+        let mut required = 0;
+        let diagnostics_end = if header.format_version >= FORMAT_VERSION_V3 {
             let end = meta_size.checked_sub(8).ok_or(CaptureError::TruncatedMetadata)?;
-            let required = u64::from_le_bytes(meta_bytes[end..].try_into().unwrap());
-            if required != REQUIRED_SOFTWARE_STACK_V3 {
+            required = u64::from_le_bytes(meta_bytes[end..].try_into().unwrap());
+            if (header.format_version == FORMAT_VERSION_V3 && required != REQUIRED_SOFTWARE_STACK_V3)
+                || (header.format_version == FORMAT_VERSION_V4 && (required & REQUIRED_MAPPINGS_V4 == 0 || required & !(REQUIRED_SOFTWARE_STACK_V3 | REQUIRED_MAPPINGS_V4) != 0)) {
                 return Err(CaptureError::InvalidRecord("unknown or missing required capture extension"));
             }
             end
         } else { meta_size };
         let (diagnostics, used) = if header.format_version >= FORMAT_VERSION_V2 {
-            let (diagnostics, consumed) = RuntimeDiagnostics::from_bytes(meta_bytes.get(used..diagnostics_end).ok_or(CaptureError::TruncatedMetadata)?)?;
-            (Some(diagnostics), used.checked_add(consumed).ok_or(CaptureError::TruncatedMetadata)?)
+            let (start, end) = if header.format_version == FORMAT_VERSION_V4 {
+                let prefix_end = used.checked_add(4).ok_or(CaptureError::TruncatedMetadata)?;
+                let size = u32::from_le_bytes(meta_bytes.get(used..prefix_end).ok_or(CaptureError::TruncatedMetadata)?.try_into().unwrap()) as usize;
+                let end = prefix_end.checked_add(size).filter(|end| *end <= diagnostics_end).ok_or(CaptureError::TruncatedMetadata)?;
+                (prefix_end, end)
+            } else { (used, diagnostics_end) };
+            let (diagnostics, consumed) = RuntimeDiagnostics::from_bytes(meta_bytes.get(start..end).ok_or(CaptureError::TruncatedMetadata)?)?;
+            if header.format_version == FORMAT_VERSION_V4 && consumed != end - start { return Err(CaptureError::InvalidRecord("invalid diagnostics length")); }
+            (Some(diagnostics), start.checked_add(consumed).ok_or(CaptureError::TruncatedMetadata)?)
+        } else { (None, used) };
+        let (mappings, used) = if header.format_version == FORMAT_VERSION_V4 {
+            let (mappings, consumed) = crate::mapping::MappingMetadata::from_bytes(meta_bytes.get(used..diagnostics_end).ok_or(CaptureError::TruncatedMetadata)?)?;
+            (Some(mappings), used.checked_add(consumed).ok_or(CaptureError::TruncatedMetadata)?)
         } else { (None, used) };
         if used != diagnostics_end || metadata.config.target_arch != header.target_arch {
             return Err(CaptureError::InvalidRecord("inconsistent metadata"));
@@ -80,7 +94,8 @@ impl CaptureReader {
             // malformed artifacts to upgrade unknown/loss diagnostics.
             let complete_allowed = header.records_count > 0
                 && diagnostics.as_ref().is_some_and(|d| d.status().is_complete())
-                && !metadata.counters.has_loss_or_error();
+                && !metadata.counters.has_loss_or_error()
+                && mappings.as_ref().is_none_or(|m| crate::mapping::MappingJournal::parse(&m.journal).is_ok_and(|j| j.dropped == 0));
             if metadata.status != trailer.status_code
                 || (!complete_allowed && metadata.status.is_complete())
                 || metadata.start_ns == 0 || metadata.stop_ns <= metadata.start_ns {
@@ -97,14 +112,14 @@ impl CaptureReader {
             let (rec, consumed) = NormalizedRecord::from_bytes(&bytes[rec_pos..rec_end])?;
             registry.validate_record(&rec)?;
             if rec.event_id == crate::schema::PERF_EVENT_SOFTWARE_STACK_V3_ID
-                && header.format_version != FORMAT_VERSION_V3 {
-                return Err(CaptureError::InvalidRecord("stack record requires capture format 3"));
+                && required & REQUIRED_SOFTWARE_STACK_V3 == 0 {
+                return Err(CaptureError::InvalidRecord("stack record requires the stack extension"));
             }
             records.push(rec);
             rec_pos += consumed;
         }
 
-        if header.format_version == FORMAT_VERSION_V3
+        if required & REQUIRED_SOFTWARE_STACK_V3 != 0
             && !records.iter().any(|r| r.event_id == crate::schema::PERF_EVENT_SOFTWARE_STACK_V3_ID) {
             return Err(CaptureError::InvalidRecord("required stack extension has no stack records"));
         }
@@ -122,6 +137,7 @@ impl CaptureReader {
             records,
             trailer,
             diagnostics,
+            mappings,
         })
     }
 }

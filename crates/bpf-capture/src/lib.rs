@@ -3,6 +3,7 @@
 extern crate alloc;
 
 pub mod codec;
+pub mod mapping;
 pub mod diagnostics;
 pub mod fixture;
 pub mod framing;

@@ -132,6 +132,8 @@ use stack_workload::*;
 mod archive;
 #[cfg(trace_fault)]
 mod fault_workload;
+#[cfg(mapping_test)]
+mod mapping_workload;
 
 #[panic_handler]
 fn panic(info: &PanicInfo) -> ! { say!("SAMPLING FAIL panic {}", info); exit(1) }
@@ -630,6 +632,7 @@ fn check_fd_lifecycle(program: usize, rings: &mut [Ring; CPUS], template: &Stats
 extern "C" fn guest_main() -> ! {
     let pid = ok("getpid", syscall(172, 0, 0, 0, 0, 0, 0)) as u32;
     let tid = ok("gettid", syscall(178, 0, 0, 0, 0, 0, 0)) as u32;
+    #[cfg(not(mapping_exec_child))]
     say!("SAMPLING START version=2 mode={} cpus={} pid={} tid={}", MODE, CPUS, pid, tid);
     let mut stats = Stats {
         #[cfg(capture_export)]
@@ -660,6 +663,8 @@ extern "C" fn guest_main() -> ! {
         #[cfg(trace_fault)]
         fault_write_hits: 0,
     };
+    #[cfg(mapping_exec_child)]
+    mapping_workload::child(&mut stats);
     say!("SAMPLING RANGES a={:#x}..{:#x} b={:#x}..{:#x}", stats.a_start, stats.a_end, stats.b_start, stats.b_end);
     check!(stats.a_start < stats.a_end && stats.a_end <= stats.b_start && stats.b_start < stats.b_end, "bad assembly symbol ranges");
     #[cfg(capture_export)]
@@ -704,6 +709,8 @@ extern "C" fn guest_main() -> ! {
         archive::stats("before", &events);
         stats.archive = Some(archive::Buffer::new(monotonic_ns()));
     }
+    #[cfg(all(mapping_test, not(mapping_exec_child)))]
+    archive::mappings("before");
     for (index, event) in events.iter().enumerate() {
         #[cfg(capture_export)]
         let before = monotonic_ns();
@@ -716,6 +723,8 @@ extern "C" fn guest_main() -> ! {
     check_task_sleep(events[0]);
     #[cfg(capture_export)]
     measure_archive_phase("attached_capture", Some(&mut rings), &mut stats, CPUS * MAPPING_SIZE + archive::MAPPED_BYTES);
+    #[cfg(all(mapping_test, not(mapping_exec_child)))]
+    mapping_workload::run(&mut rings, &mut stats);
     #[cfg(not(capture_export))]
     {
         workload(false, 350, &mut rings, &mut stats);
@@ -736,6 +745,8 @@ extern "C" fn guest_main() -> ! {
     {
         archive::wait_quiescent(&events);
         drain_all(&mut rings, &mut stats);
+        #[cfg(all(mapping_test, not(mapping_exec_child)))]
+        archive::mappings("after");
         for ring in &rings {
             say!("ARCHIVE RING cpu={} head={} tail={} wraps={}", ring.cpu, ring.head(), ring.tail, ring.wraps);
         }

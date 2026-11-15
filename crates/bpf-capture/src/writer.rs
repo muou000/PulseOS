@@ -4,7 +4,7 @@ use alloc::vec::Vec;
 use crate::diagnostics::RuntimeDiagnostics;
 use crate::framing::{
     compute_checksum, compute_checksum_ieee, CaptureError, CaptureHeader, CaptureTrailer,
-    FORMAT_VERSION_V2, FORMAT_VERSION_V3, REQUIRED_SOFTWARE_STACK_V3, SessionStatusCode,
+    FORMAT_VERSION_V2, FORMAT_VERSION_V3, FORMAT_VERSION_V4, REQUIRED_SOFTWARE_STACK_V3, REQUIRED_MAPPINGS_V4, SessionStatusCode,
     CAPTURE_HEADER_SIZE, CAPTURE_TRAILER_SIZE,
 };
 use crate::record::NormalizedRecord;
@@ -41,6 +41,7 @@ pub struct CaptureWriter {
     records_count: u64,
     diagnostics: Option<RuntimeDiagnostics>,
     requires_stack_v3: bool,
+    mappings: Option<crate::mapping::MappingMetadata>,
 }
 
 impl CaptureWriter {
@@ -54,6 +55,7 @@ impl CaptureWriter {
             records_count: 0,
             diagnostics: None,
             requires_stack_v3: false,
+            mappings: None,
         }
     }
 
@@ -63,6 +65,14 @@ impl CaptureWriter {
         if self.session.is_finished() { return Err(CaptureError::IoError("session already finished")); }
         diagnostics.validate()?;
         self.diagnostics = Some(diagnostics);
+        Ok(())
+    }
+
+    /// Attach original temporal mapping evidence and verified artifact identities.
+    pub fn set_mappings(&mut self, mappings: crate::mapping::MappingMetadata) -> Result<(), CaptureError> {
+        if self.session.is_finished() { return Err(CaptureError::IoError("session already finished")); }
+        mappings.validate()?;
+        self.mappings = Some(mappings);
         Ok(())
     }
 
@@ -227,11 +237,12 @@ impl CaptureWriter {
     pub fn finish(&mut self, stop_ns: u64) -> Result<Vec<u8>, CaptureError> {
         // A required stack extension always has the diagnostics section defined
         // by v2. Missing runtime evidence stays explicitly unknown.
-        if self.requires_stack_v3 && self.diagnostics.is_none() {
+        if (self.requires_stack_v3 || self.mappings.is_some()) && self.diagnostics.is_none() {
             self.diagnostics = Some(RuntimeDiagnostics::default());
         }
         // Serialize before stopping, so invalid evidence does not consume the session.
         let diagnostics_bytes = self.diagnostics.as_ref().map(RuntimeDiagnostics::to_bytes).transpose()?;
+        let mappings_bytes = self.mappings.as_ref().map(crate::mapping::MappingMetadata::to_bytes).transpose()?;
         let mut metadata = self.session.stop(stop_ns)?;
         if self.diagnostics.is_some() && (metadata.start_ns == 0 || stop_ns <= metadata.start_ns) {
             return Err(CaptureError::InvalidRecord("invalid runtime session window"));
@@ -245,12 +256,25 @@ impl CaptureWriter {
             }
         }
 
+        if let Some(mappings) = &self.mappings {
+            let journal = crate::mapping::MappingJournal::parse(&mappings.journal)?;
+            if journal.dropped > 0 && metadata.status.is_complete() {
+                metadata.status = SessionStatusCode::IncompleteLoss;
+            }
+        }
         let mut metadata_buf = Vec::new();
         metadata_buf.extend_from_slice(&self.registry.to_bytes());
         metadata_buf.extend_from_slice(&metadata.to_bytes());
-        if let Some(bytes) = diagnostics_bytes { metadata_buf.extend_from_slice(&bytes); }
-        if self.requires_stack_v3 {
-            metadata_buf.extend_from_slice(&REQUIRED_SOFTWARE_STACK_V3.to_le_bytes());
+        if let Some(bytes) = diagnostics_bytes {
+            // v4 delimits diagnostics before the independently bounded journal.
+            if self.mappings.is_some() { metadata_buf.extend_from_slice(&(bytes.len() as u32).to_le_bytes()); }
+            metadata_buf.extend_from_slice(&bytes);
+        }
+        if let Some(bytes) = mappings_bytes { metadata_buf.extend_from_slice(&bytes); }
+        if self.requires_stack_v3 || self.mappings.is_some() {
+            let required = if self.requires_stack_v3 { REQUIRED_SOFTWARE_STACK_V3 } else { 0 }
+                | if self.mappings.is_some() { REQUIRED_MAPPINGS_V4 } else { 0 };
+            metadata_buf.extend_from_slice(&required.to_le_bytes());
         }
 
         let metadata_offset = CAPTURE_HEADER_SIZE as u64;
@@ -263,6 +287,7 @@ impl CaptureWriter {
         let mut header = CaptureHeader::new(self.config.target_arch);
         if self.diagnostics.is_some() { header.format_version = FORMAT_VERSION_V2; }
         if self.requires_stack_v3 { header.format_version = FORMAT_VERSION_V3; }
+        if self.mappings.is_some() { header.format_version = FORMAT_VERSION_V4; }
         header.metadata_offset = metadata_offset;
         header.metadata_size = metadata_size;
         header.records_offset = records_offset;
