@@ -11,6 +11,7 @@ import importlib.util
 import json
 import archive as raw_archive
 import capture as runtime_capture
+import stack_evidence
 from pathlib import Path
 import re
 import shlex
@@ -30,18 +31,22 @@ LINKER_SCRIPT = BASE / "guest.ld"
 ARCHES = helpers.ARCHES
 
 
-def build(arch: str, mode: str = "task", archive: bool = False, fault: str = "none", ring_pages: int = 16) -> Path:
-    source_inputs = {str(path): helpers.digest(path) for path in (SOURCE, LINKER_SCRIPT, BASE / "archive.rs", *([BASE / "fault_workload.rs"] if mode == "fault" else []))}
+def build(arch: str, mode: str = "task", archive: bool = False, fault: str = "none", ring_pages: int = 16, stacks: bool = False) -> Path:
+    if stacks and mode not in ("task", "cpu"):
+        raise ValueError("--stacks requires task or cpu mode")
+    source_inputs = {str(path): helpers.digest(path) for path in (SOURCE, LINKER_SCRIPT, BASE / "archive.rs", *([BASE / "stack_workload.rs"] if stacks else []), *([BASE / "fault_workload.rs"] if mode == "fault" else []))}
     sysroot = Path(helpers.command(["rustc", "+nightly", "--print", "sysroot"]).strip())
     version = helpers.command(["rustc", "+nightly", "-vV"])
     host = next(line.removeprefix("host: ") for line in version.splitlines() if line.startswith("host: "))
     linker = sysroot / "lib/rustlib" / host / "bin/rust-lld"
-    output = BASE / "build" / arch / (mode + ("-archive" if archive else "") + ("-" + fault if fault != "none" else "") + ("-ring1" if ring_pages == 1 else "")) / "sampling.elf"
+    output = BASE / "build" / arch / (mode + ("-stacks" if stacks else "") + ("-archive" if archive else "") + ("-" + fault if fault != "none" else "") + ("-ring1" if ring_pages == 1 else "")) / "sampling.elf"
     output.parent.mkdir(parents=True, exist_ok=True)
     command = ["rustc", "+nightly", "--edition=2024", "--crate-type=bin", "--target", ARCHES[arch]["target"],
                "-C", "panic=abort", "-C", "opt-level=2", "-C", "relocation-model=static",
                "-C", f"linker={linker}", "-C", f"link-arg=-T{LINKER_SCRIPT}",
                "-C", "link-arg=--no-relax", "-o", str(output), str(SOURCE)]
+    if stacks:
+        command += ["--cfg", "stack_test", "-C", "force-frame-pointers=yes"]
     if mode == "cpu":
         command += ["--cfg", "cpu_clock_test"]
     if mode in ("trace", "block", "wake", "sched", "fault"):
@@ -71,7 +76,7 @@ def build(arch: str, mode: str = "task", archive: bool = False, fault: str = "no
     return output
 
 
-def validate_log(text: str, token: str, mode: str = "task") -> list[str]:
+def validate_log(text: str, token: str, mode: str = "task", stacks: bool = False) -> list[str]:
     lines = [re.sub(r"\x1b\[[0-9;]*[A-Za-z]", "", line).strip()
              for line in text.replace("\r", "").splitlines()]
     errors = []
@@ -159,6 +164,15 @@ def validate_log(text: str, token: str, mode: str = "task") -> list[str]:
             alive, loop_a, settled, after_stop, lost = map(int, lifecycle[0].groups())
             if loop_a < 2 or alive < loop_a or settled < alive or after_stop != settled or lost:
                 errors.append(f"FD retention or final-close sampling failed: {kind}")
+    if stacks:
+        evidence = [re.fullmatch(r"SAMPLING STACKS user_a=(\d+) user_b=(\d+) kernel=(\d+) partial=(\d+) sources=(\d+) context=software-stack-v3", line) for line in lines]
+        evidence = [match for match in evidence if match]
+        if len(evidence) != 1 or min(map(int, evidence[0].groups()[:3])) < 2 or int(evidence[0].group(5)) != (16 if mode == "cpu" else 1):
+            errors.append("missing real three-frame user/kernel chains or source instances")
+        probes = [re.fullmatch(r"SAMPLING STACK_PROBES no_fp=(\d+) read_fault=(\d+) cycle=(\d+) bad_ra=(\d+) misaligned=(\d+) depth_limit=(\d+)", line) for line in lines]
+        probes = [match for match in probes if match]
+        if len(probes) != 1 or min(map(int, probes[0].groups())) == 0:
+            errors.append("missing actual negative stack probe diagnostics")
     exits = [line for line in lines if line.startswith(f"BPF_HOST_EXIT {token} ")]
     if exits != [f"BPF_HOST_EXIT {token} 0"]:
         errors.append("missing, duplicate or unsuccessful guest exit")
@@ -187,7 +201,7 @@ def qemu_command(arch: str, kernel: Path, image: Path) -> list[str]:
 def guest(args: argparse.Namespace) -> int:
     # Always rebuild from source, so stale payloads cannot turn a missing v2 ABI
     # into a legacy PASS. Kernels/images are copied before QEMU starts.
-    payload = build(args.arch, args.mode, args.archive, args.fault, args.ring_pages)
+    payload = build(args.arch, args.mode, args.archive, args.fault, args.ring_pages, args.stacks)
     kernel = (args.kernel or REPO / ARCHES[args.arch]["kernel"]).resolve(strict=True)
     image = helpers.check_image(args.image or REPO / ARCHES[args.arch]["primary"])
     run = helpers.new_run(f"{args.arch}-{args.mode}")
@@ -245,6 +259,7 @@ def guest(args: argparse.Namespace) -> int:
     command = qemu_command(args.arch, kernel_copy, image_copy)
     helpers.command(["git", "diff", "--binary", "HEAD", "--output", str(run / "worktree.patch")], cwd=REPO)
     metadata = {"kind": "real BPF timer and PC regression, no capture synthesis", "arch": args.arch, "mode": args.mode,
+                **({"context_format": "software-stack-v3"} if args.stacks else {}),
                 "command": command, "guest_command": shell, "kernel": str(kernel), "image": str(image),
                 "kernel_sha256": helpers.digest(kernel_copy), "image_sha256": helpers.digest(image),
                 "boot_image_sha256": helpers.digest(image_copy), "archive_requested": args.archive, "fault": args.fault, "ring_pages": args.ring_pages,
@@ -259,7 +274,7 @@ def guest(args: argparse.Namespace) -> int:
     print(f"Logs: {run}", flush=True)
     text, qemu_exit, reason = helpers.drive_guest(command, shell, token, run / "guest.log",
         r"(?:^|[\r\n])[^\r\n]*[#$] ?$", args.boot_timeout, args.timeout)
-    errors = validate_log(text, token, args.mode)
+    errors = validate_log(text, token, args.mode, args.stacks)
     if reason:
         errors.append(reason)
     if args.archive:
@@ -269,6 +284,8 @@ def guest(args: argparse.Namespace) -> int:
             (run / "archive.json").write_text(json.dumps(archive_metadata, indent=2) + "\n")
             for point, raw in snapshots.items():
                 (run / f"stats-{point}.txt").write_bytes(raw)
+            if args.stacks:
+                metadata["stacks"] = stack_evidence.verify(run)
             metadata["capture"] = runtime_capture.convert(run)
             print(f"Verified RAW archive: {archive_metadata['samples']} samples, {len(binary)} bytes; quality={archive_metadata['quality']}", flush=True)
         except (ValueError, KeyError, OverflowError) as error:
@@ -292,6 +309,7 @@ def main() -> int:
     parser.add_argument("--arch", required=True, choices=ARCHES)
     parser.add_argument("--mode", choices=("task", "cpu", "trace", "block", "wake", "sched", "fault"), default="task")
     parser.add_argument("--archive", action="store_true")
+    parser.add_argument("--stacks", action="store_true", help="verify frozen v3 user/kernel callchains; task/cpu only")
     parser.add_argument("--kernel", type=Path)
     parser.add_argument("--image", type=Path)
     parser.add_argument("--kernel-elf", type=Path)
@@ -301,10 +319,12 @@ def main() -> int:
     parser.add_argument("--boot-timeout", type=float, default=90)
     parser.add_argument("--timeout", type=float, default=120)
     args = parser.parse_args()
+    if args.stacks and (args.mode not in ("task", "cpu") or not args.archive):
+        parser.error("--stacks requires --mode task|cpu --archive to verify RAW bytes against ELF")
     if args.fault == "ring-overflow":
         args.ring_pages = 1
     if args.action == "build":
-        build(args.arch, args.mode, args.archive, args.fault, args.ring_pages)
+        build(args.arch, args.mode, args.archive, args.fault, args.ring_pages, args.stacks)
         return 0
     return guest(args)
 

@@ -1,6 +1,6 @@
 //! Bounded timer-IRQ snapshots and deferred BPF execution.
 //!
-//! The IRQ observer copies scalar state into a preallocated queue. It never
+//! The IRQ observer freezes bounded FP addresses into a preallocated queue. It never
 //! invokes a BPF program, retains a trap-frame/task reference, allocates, or
 //! waits for a lock. The worker removes a snapshot before executing its program.
 
@@ -136,7 +136,8 @@ mod runtime {
         // path neither enables IRQs nor calls anything that schedules. Avoid a
         // NoPreempt guard here: its Drop could reschedule before the normal IRQ
         // handler has acknowledged/reprogrammed the timer. Only scalar copies
-        // and nonblocking atomics/try_lock calls occur before all borrows end.
+        // bounded no-fault frame reads and nonblocking atomics/try_lock calls
+        // occur before all borrows end.
         let generation = observation_generation();
         let timestamp_ns = axhal::time::monotonic_time_nanos();
         let cpu = axhal::percpu::this_cpu_id();
@@ -165,6 +166,12 @@ mod runtime {
             tid,
             task_id: task.id().as_u64(),
             ip: tf.ip() as u64,
+            // SAFETY: IRQ_OBSERVER supplies the live architecture trap frame
+            // and privilege bit. `task` was borrowed from this CPU's current
+            // task above. IRQs remain disabled, no scheduling path is invoked,
+            // and the user page-table root still belongs to that task. The
+            // scheduler never runs one task concurrently on multiple CPUs.
+            stack: unsafe { crate::bpf::stack_capture::freeze(tf, from_user, &task) },
             user_mode: from_user,
             task_clock_ns,
             generation,
@@ -267,6 +274,9 @@ mod tests {
             tid: 101,
             task_id: 200,
             ip,
+            stack: pulse_bpf_schema::FrozenStack::unavailable(
+                pulse_bpf_schema::StackRegisters { ip, sp: 0, fp: 0, ra: 0 },
+                pulse_bpf_schema::StackStatus::Unavailable),
             user_mode: true,
             task_clock_ns: 9,
             generation: 4,

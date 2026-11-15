@@ -384,7 +384,7 @@ impl Query {
         };
         let mode_matches = |event: &NormalizedEvent| {
             self.mode.is_none_or(|selected| match event.payload {
-                EventPayload::SoftwareSampleV2 { mode, .. } => mode == selected.tag(),
+                EventPayload::SoftwareSampleV2 { mode, .. } | EventPayload::SoftwareStackV3 { mode, .. } => mode == selected.tag(),
                 EventPayload::PageFault { origin, .. } => origin == selected.tag(),
                 _ => false,
             })
@@ -426,7 +426,7 @@ impl Query {
             }
             if matches!(
                 event.payload,
-                EventPayload::SoftwareSample { .. } | EventPayload::SoftwareSampleV2 { .. }
+                EventPayload::SoftwareSample { .. } | EventPayload::SoftwareSampleV2 { .. } | EventPayload::SoftwareStackV3 { .. }
             ) {
                 cpu.sample_count += 1;
             }
@@ -448,7 +448,7 @@ impl Query {
                 match event.payload {
                     EventPayload::TaskBlock { .. } => row.block_count += 1,
                     EventPayload::TaskWake { .. } => row.wake_count += 1,
-                    EventPayload::SoftwareSample { .. } | EventPayload::SoftwareSampleV2 { .. } => {
+                    EventPayload::SoftwareSample { .. } | EventPayload::SoftwareSampleV2 { .. } | EventPayload::SoftwareStackV3 { .. } => {
                         row.sample_count += 1
                     }
                     _ => {}

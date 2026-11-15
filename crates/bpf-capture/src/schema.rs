@@ -8,6 +8,7 @@ use crate::record::NormalizedRecord;
 
 pub const PERF_EVENT_SOFTWARE_ID: u32 = 0x1000;
 pub const PERF_EVENT_SOFTWARE_V2_ID: u32 = 0x1001;
+pub const PERF_EVENT_SOFTWARE_STACK_V3_ID: u32 = 0x1002;
 
 /// Primitive field types for normalized BPF event schema.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -132,6 +133,8 @@ impl SchemaRegistry {
             Some((1, 16))
         } else if record.event_id == PERF_EVENT_SOFTWARE_V2_ID {
             Some((2, 32))
+        } else if record.event_id == PERF_EVENT_SOFTWARE_STACK_V3_ID {
+            Some((3, 608))
         } else { None };
         if let Some((version, size)) = native {
             if record.schema_version != version {
@@ -144,6 +147,9 @@ impl SchemaRegistry {
             }
         }
 
+        if record.event_id == PERF_EVENT_SOFTWARE_STACK_V3_ID {
+            record.software_stack_v3()?;
+        }
         if record.event_id == PERF_EVENT_SOFTWARE_V2_ID {
             if record.schema_version != 2 || record.payload.len() != 32 {
                 return Err(CaptureError::InvalidRecord("invalid software v2 schema"));
@@ -246,6 +252,29 @@ impl SchemaRegistry {
                 FieldSchema { name: String::from("addr"), offset: 8, size: 8, field_type: FieldTypeId::U64 },
                 FieldSchema { name: String::from("ip"), offset: 16, size: 8, field_type: FieldTypeId::U64 },
                 FieldSchema { name: String::from("mode"), offset: 24, size: 4, field_type: FieldTypeId::U32 },
+            ],
+        });
+        reg.register(EventSchema {
+            event_id: PERF_EVENT_SOFTWARE_STACK_V3_ID, category: String::from("pulse"),
+            name: String::from("software_stack_v3"), version: 3, payload_size: 608,
+            fields: vec![
+                FieldSchema { name: String::from("sample_period"), offset: 0, size: 8, field_type: FieldTypeId::U64 },
+                FieldSchema { name: String::from("addr"), offset: 8, size: 8, field_type: FieldTypeId::U64 },
+                FieldSchema { name: String::from("ip"), offset: 16, size: 8, field_type: FieldTypeId::U64 },
+                FieldSchema { name: String::from("mode"), offset: 24, size: 4, field_type: FieldTypeId::U32 },
+                FieldSchema { name: String::from("source_id"), offset: 32, size: 8, field_type: FieldTypeId::U64 },
+                FieldSchema { name: String::from("sp"), offset: 40, size: 8, field_type: FieldTypeId::U64 },
+                FieldSchema { name: String::from("fp"), offset: 48, size: 8, field_type: FieldTypeId::U64 },
+                FieldSchema { name: String::from("ra"), offset: 56, size: 8, field_type: FieldTypeId::U64 },
+                FieldSchema { name: String::from("capture_ns"), offset: 64, size: 8, field_type: FieldTypeId::U64 },
+                FieldSchema { name: String::from("extension_version"), offset: 72, size: 2, field_type: FieldTypeId::U16 },
+                FieldSchema { name: String::from("depth_limit"), offset: 74, size: 2, field_type: FieldTypeId::U16 },
+                FieldSchema { name: String::from("chain_len"), offset: 76, size: 2, field_type: FieldTypeId::U16 },
+                FieldSchema { name: String::from("termination"), offset: 78, size: 2, field_type: FieldTypeId::U16 },
+                FieldSchema { name: String::from("bytes_read"), offset: 80, size: 4, field_type: FieldTypeId::U32 },
+                FieldSchema { name: String::from("byte_limit"), offset: 84, size: 4, field_type: FieldTypeId::U32 },
+                FieldSchema { name: String::from("required_flags"), offset: 88, size: 8, field_type: FieldTypeId::U64 },
+                FieldSchema { name: String::from("ips"), offset: 96, size: 512, field_type: FieldTypeId::ByteArray(512) },
             ],
         });
         reg

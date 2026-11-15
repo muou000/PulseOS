@@ -118,6 +118,17 @@ impl AddressSpaceLock {
         }
     }
 
+    /// IRQ-only, nonblocking VMA read lease. No NoPreempt destructor may run
+    /// before the timer is acknowledged. The sampling observer keeps IRQs
+    /// disabled, never schedules, and drops this lease before returning.
+    #[cfg(feature = "bpf-trace")]
+    pub(crate) fn try_read_for_sampling(&self) -> Option<RwLockReadGuard<'_, AddrSpace>> {
+        if axhal::asm::irqs_enabled() {
+            return None;
+        }
+        self.inner.try_read()
+    }
+
     pub fn read(&self) -> AddressSpaceReadGuard<'_> {
         let preempt = NoPreempt::new();
         let guard = self.inner.read();

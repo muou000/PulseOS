@@ -1,0 +1,59 @@
+{
+  "scratch": "/tmp/pulse-192-independent-replay-tfyhb0_z",
+  "bundles": {
+    "rv-task": {
+      "members_verified": 21,
+      "sha256": "620d9a65ba35ae07496284ff53ac4b0f7b27f75df53e3a53195bda60713b864a",
+      "samples": 351
+    },
+    "la-task": {
+      "members_verified": 21,
+      "sha256": "d67fcb4d9cc2a781ffd9e3659d9e88f3ad8fbd578954234de038013d8305be17",
+      "samples": 211
+    },
+    "rv-cpu": {
+      "members_verified": 21,
+      "sha256": "03b253824ed5c0f07301f127c6e2d40a5368cc8d6426f26c38c0f63d8042026a",
+      "samples": 4151
+    },
+    "la-cpu": {
+      "members_verified": 21,
+      "sha256": "a679f70a5b81933507a6b93c14f7119b6d32fa2fa3c9769d6b02d30aaaa71184",
+      "samples": 2557
+    }
+  },
+  "rv_task": {
+    "importer": "PASS",
+    "records": 351,
+    "status": "IncompleteError",
+    "saved_replayed_json_equal_fields": [
+      "records_count",
+      "status",
+      "is_complete",
+      "event_counts",
+      "stack_samples",
+      "runtime_diagnostics"
+    ],
+    "normalized_records_identical": true,
+    "stack_evidence_identical": true,
+    "folded_rows": 40,
+    "folded_weight": 351,
+    "counts": {
+      "user_a": 30,
+      "user_b": 15,
+      "kernel": 29,
+      "kernel_mmap": 29
+    },
+    "negative_probes": {
+      "zero": 48,
+      "unmapped": 41,
+      "cycle": 45,
+      "badra": 55,
+      "misaligned": 33,
+      "deep": 50
+    },
+    "source_counts": {
+      "13": 351
+    }
+  }
+}

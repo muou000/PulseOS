@@ -78,6 +78,7 @@ pub struct RuntimeSample {
     pub tid: u64,
     pub task_id: u64,
     pub ip: u64,
+    pub stack: pulse_bpf_schema::FrozenStack,
     pub user_mode: bool,
     pub task_clock_ns: u64,
     pub generation: u64,
@@ -897,6 +898,11 @@ impl PerfEvent {
             ip: sample.ip,
             mode: if sample.user_mode { 2 } else { 1 },
             version: 2,
+        };
+        let context = pulse_bpf_schema::PerfStackSampleContext {
+            base: context,
+            source_id: self.id,
+            stack: sample.stack,
         };
         self.run_observation(prog, &context.to_bytes(), sample.cpu, sample.timestamp_ns)
     }

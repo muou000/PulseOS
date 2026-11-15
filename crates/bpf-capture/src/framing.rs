@@ -4,6 +4,9 @@ pub const CAPTURE_HEADER_MAGIC: [u8; 8] = *b"PBCAP001";
 pub const CAPTURE_TRAILER_MAGIC: [u8; 8] = *b"PBCAPTRL";
 pub const FORMAT_VERSION_V1: u32 = 1;
 pub const FORMAT_VERSION_V2: u32 = 2;
+/// Requires native software-stack-v3 decoding; old readers reject this container.
+pub const FORMAT_VERSION_V3: u32 = 3;
+pub const REQUIRED_SOFTWARE_STACK_V3: u64 = 1;
 pub const SCHEMA_VERSION_V1: u32 = 1;
 
 pub const CAPTURE_HEADER_SIZE: usize = 80;
@@ -155,7 +158,7 @@ impl CaptureHeader {
         }
 
         let format_version = u32::from_le_bytes(bytes[8..12].try_into().unwrap());
-        if !matches!(format_version, FORMAT_VERSION_V1 | FORMAT_VERSION_V2) {
+        if !matches!(format_version, FORMAT_VERSION_V1 | FORMAT_VERSION_V2 | FORMAT_VERSION_V3) {
             return Err(CaptureError::UnsupportedFormatVersion(format_version));
         }
 

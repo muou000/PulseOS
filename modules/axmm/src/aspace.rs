@@ -1509,6 +1509,33 @@ impl AddrSpace {
         }
     }
 
+    /// Check one aligned FP record without touching or locking the page table.
+    /// The caller keeps the address-space read lease for the subsequent no-fault
+    /// copy. Linear mappings are excluded because they may represent MMIO; the
+    /// other backends source their pages from owned RAM. COW wrapping is bounded
+    /// conservatively so an adversarial history cannot lengthen the IRQ walk.
+    pub fn sampling_frame_readable(&self, start: VirtAddr) -> bool {
+        if start.as_usize() & 15 != 0 {
+            return false;
+        }
+        let Some(end) = start.as_usize().checked_add(16) else { return false; };
+        let Some(area) = self.areas.find(start) else { return false; };
+        if end > area.end().as_usize()
+            || !area.flags().contains(MappingFlags::USER | MappingFlags::READ)
+        {
+            return false;
+        }
+        let mut backend = area.backend();
+        for _ in 0..16 {
+            match backend {
+                Backend::Linear { .. } => return false,
+                Backend::Cow(mapping) => backend = mapping.inner(),
+                Backend::Alloc { .. } | Backend::Shared { .. } | Backend::File(_) => return true,
+            }
+        }
+        false
+    }
+
     /// Checks whether an access to the specified memory region is valid.
     ///
     /// Returns `true` if the memory region given by `range` is all mapped and

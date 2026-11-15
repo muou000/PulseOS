@@ -721,9 +721,9 @@ mod tests {
     fn perf_event_verifier_rejects_out_of_bounds_context_access() {
         use super::core_verifier::{verify_program, VerifierConfig, VerifierLog};
 
-        // Runtime sample context v2 is 64 bytes; offset 64 begins past its end.
+        // The read-only stack extension ends at byte 640.
         let insns = [
-            BpfInsn::new(BPF_LDX | BPF_MEM | BPF_DW, BPF_REG_0, BPF_REG_1, 64, 0),
+            BpfInsn::new(BPF_LDX | BPF_MEM | BPF_DW, BPF_REG_0, BPF_REG_1, 640, 0),
             BpfInsn::new(BPF_ALU64 | BPF_MOV | BPF_K, BPF_REG_0, 0, 0, 0),
             BpfInsn::new(BPF_JMP | BPF_EXIT, 0, 0, 0, 0),
         ];
@@ -732,7 +732,7 @@ mod tests {
         let mut log = VerifierLog::new();
         let res = verify_program(&config, &insns, None, &mut log);
 
-        assert!(res.is_err(), "Access past PerfSampleContext (64 bytes) must be rejected");
+        assert!(res.is_err(), "Access past PerfStackSampleContext (640 bytes) must be rejected");
         assert!(log.as_str().contains("invalid context access"));
     }
 
@@ -744,6 +744,9 @@ mod tests {
             tid,
             task_id: 789,
             ip: 0x402010,
+            stack: pulse_bpf_schema::FrozenStack::unavailable(
+                pulse_bpf_schema::StackRegisters { ip: 0x402010, sp: 0, fp: 0, ra: 0 },
+                pulse_bpf_schema::StackStatus::Unavailable),
             user_mode: true,
             task_clock_ns: timestamp_ns,
             generation: observation_generation(),
@@ -921,6 +924,83 @@ mod tests {
         assert_eq!(word(60), 2);
         assert_eq!(qword(64), 123_456, "ktime comes from the frozen observation");
         assert_eq!(word(72), 9, "helper CPU must not be the worker CPU");
+    }
+
+
+    #[test]
+    fn runtime_stack_snapshot_is_frozen_and_same_cpu_sources_keep_distinct_ids() {
+        use super::core_verifier::{VerifierConfig, VerifierLog, verify_program, MapResolver};
+        let request = core_map::BpfMapCreateRequest {
+            map_type: core_map::BPF_MAP_TYPE_ARRAY,
+            key_size: 4,
+            value_size: 640,
+            max_entries: 1,
+            ..Default::default()
+        };
+        let map = Arc::new(core_map::BpfMap::create(core_map::BpfMapSpec::validate(&request).unwrap()).unwrap());
+        struct Resolver(Arc<core_map::BpfMap>);
+        impl MapResolver for Resolver {
+            fn resolve_map(&self, _fd: u32) -> Result<Arc<core_map::BpfMap>, LinuxError> {
+                Ok(self.0.clone())
+            }
+        }
+        let mut insns = alloc::vec![
+            BpfInsn::new(BPF_ALU64 | BPF_MOV | BPF_X, BPF_REG_6, BPF_REG_1, 0, 0),
+            BpfInsn::new(BPF_ST | BPF_MEM | BPF_W, BPF_REG_10, 0, -4, 0),
+            BpfInsn::new(BPF_ALU64 | BPF_MOV | BPF_X, BPF_REG_2, BPF_REG_10, 0, 0),
+            BpfInsn::new(BPF_ALU64 | BPF_ADD | BPF_K, BPF_REG_2, 0, 0, -4),
+            BpfInsn::new(BPF_LD | BPF_IMM | BPF_DW, BPF_REG_1, BPF_PSEUDO_MAP_FD, 0, 0),
+            BpfInsn::new(0, 0, 0, 0, 0),
+            BpfInsn::new(BPF_JMP | BPF_CALL, 0, 0, 0, BPF_FUNC_MAP_LOOKUP_ELEM),
+            BpfInsn::new(BPF_JMP | BPF_JEQ | BPF_K, BPF_REG_0, 0, 0, 0),
+            BpfInsn::new(BPF_ALU64 | BPF_MOV | BPF_X, BPF_REG_7, BPF_REG_0, 0, 0),
+        ];
+        for offset in (0..640).step_by(8) {
+            insns.push(BpfInsn::new(BPF_LDX | BPF_MEM | BPF_DW, BPF_REG_1, BPF_REG_6, offset, 0));
+            insns.push(BpfInsn::new(BPF_STX | BPF_MEM | BPF_DW, BPF_REG_7, BPF_REG_1, offset, 0));
+        }
+        insns[7].off = (insns.len() - 8) as i16;
+        insns.push(BpfInsn::new(BPF_ALU64 | BPF_MOV | BPF_K, BPF_REG_0, 0, 0, 0));
+        insns.push(BpfInsn::new(BPF_JMP | BPF_EXIT, 0, 0, 0, 0));
+        let verified = verify_program(&VerifierConfig::new(BpfProgType::PerfEvent, 1), &insns,
+            Some(&Resolver(map.clone())), &mut VerifierLog::new()).unwrap();
+        let prog = Arc::new(BpfProgram::new(verified.prog_type, [0; 16], verified.insns, verified.referenced_maps));
+        let make_event = |period| {
+            let event = PerfEvent::new(PerfEventSpec {
+                clock: PerfEventClock::CpuClock,
+                scope: PerfEventScope::PerCpu { cpu: 9 },
+                sample_period: period, disabled: false, cloexec: false,
+            }, 0);
+            event.attach_program(prog.clone()).unwrap();
+            event
+        };
+        let first = make_event(10);
+        let second = make_event(20);
+        let mut sample = runtime_observation(40, 9, 456);
+        sample.stack = pulse_bpf_schema::walk_frame_pointers(
+            pulse_bpf_schema::StackRegisters { ip: sample.ip, sp: 0x8000, fp: 0x8010, ra: 0x404000 },
+            pulse_bpf_schema::StackLimits::default(),
+            |_| {
+                let mut bytes = [0;16];
+                bytes[8..].copy_from_slice(&0x404000u64.to_le_bytes());
+                Ok(bytes)
+            }, |_| true);
+        let frozen = sample.stack;
+        for (event, period) in [(&first, 10), (&second, 20)] {
+            assert_eq!(event.dispatch_sample(&sample), Ok(true));
+            let mut value = [0; 640];
+            map.lookup(&0u32.to_ne_bytes(), &mut value).unwrap();
+            let decoded = pulse_bpf_schema::PerfStackSampleContext::from_bytes(&value).unwrap();
+            assert_eq!(decoded.source_id, event.diagnostics().id);
+            assert_eq!(decoded.base.base.sample_period, period);
+            assert_eq!(decoded.base.ip, sample.ip);
+            assert_eq!(decoded.stack, frozen);
+        }
+        assert_ne!(first.diagnostics().id, second.diagnostics().id);
+        assert_eq!(first.sample_counters().delivered_samples, 1);
+        assert_eq!(second.sample_counters().delivered_samples, 1);
+        assert_eq!(first.runtime_counters().skipped_periods, 3);
+        assert_eq!(second.runtime_counters().skipped_periods, 1);
     }
 
 

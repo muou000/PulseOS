@@ -18,6 +18,6 @@ pub use reader::{CaptureData, CaptureReader};
 pub use record::NormalizedRecord;
 pub use schema::{EventSchema, FieldSchema, FieldTypeId, SchemaRegistry};
 pub use session::{CaptureScope, LayeredLossCounters, SamplingSession, SessionConfig, SessionMetadata};
-pub use writer::CaptureWriter;
+pub use writer::{CaptureWriter, NativeContextFormat, SampleFormat};
 
 pub use diagnostics::{CounterKind, DiagnosticCounter, DiagnosticIdentity, PhaseMeasurement, RuntimeDiagnostics};

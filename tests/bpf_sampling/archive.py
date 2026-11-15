@@ -99,6 +99,10 @@ def extract(text: str, mode: str) -> tuple[bytes, dict, dict[str, bytes]]:
     if mode not in ("task", "cpu", "trace", "block", "wake", "sched", "fault"):
         raise ValueError("unknown requested archive mode")
     trace_sizes = {1:72, 2:72, 3:72, 4:80, 5:56, 6:64}
+    context_rows = [fields(line) for line in lines if line.startswith("ARCHIVE CONTEXT ")]
+    if len(context_rows) > 1 or (context_rows and (mode not in ("task", "cpu") or context_rows[0] != {"format": "software-stack-v3"})):
+        raise ValueError("unknown or duplicate required context format")
+    stacks = bool(context_rows)
     begin, end = one("ARCHIVE BEGIN "), one("ARCHIVE END ")
     if begin.get("version") != "1" or begin.get("mode") != mode:
         raise ValueError("unknown archive format or mode")
@@ -114,6 +118,7 @@ def extract(text: str, mode: str) -> tuple[bytes, dict, dict[str, bytes]]:
     position, frames, samples, lost = 0, 0, 0, 0
     frame_sizes = [[] for _ in range(8)]
     fault_records = []
+    stack_records = []
     while position < len(raw):
         if len(raw) - position < 24:
             raise ValueError("truncated frame envelope")
@@ -134,7 +139,7 @@ def extract(text: str, mode: str) -> tuple[bytes, dict, dict[str, bytes]]:
                 event = struct.unpack_from("<I", frame, 12)[0] if size >= 16 else 0
                 expected = trace_sizes.get(event)
             else:
-                expected = {"task":64,"cpu":64,"trace":72,"block":72,"wake":80,"fault":80}[mode]
+                expected = 640 if stacks else {"task":64,"cpu":64,"trace":72,"block":72,"wake":80,"fault":80}[mode]
             if n != expected or not 12+n <= size <= 12+n+7:
                 raise ValueError("RAW sample length differs from declared program")
             payload = frame[12:12+n]
@@ -144,6 +149,14 @@ def extract(text: str, mode: str) -> tuple[bytes, dict, dict[str, bytes]]:
                 version, = struct.unpack_from("<I", payload, 60)
                 if version != 2:
                     raise ValueError("not a v2 software sample")
+                if stacks:
+                    source_id, sp, fp, ra, capture_ns, extension, depth, length, status, read_bytes, byte_limit, flags = struct.unpack_from("<QQQQQHHHHIIQ", payload, 64)
+                    chain = struct.unpack_from("<64Q", payload, 128)
+                    if source_id == 0 or extension != 3 or not 1 <= depth <= 64 or length > depth or status > 13 or flags or read_bytes > byte_limit or read_bytes % 16 or any(chain[length:]) or (length == 0 and (status not in (9, 13) or read_bytes != 0)) or (length != 0 and chain[0] != struct.unpack_from("<Q", payload, 48)[0]) or any(ip == 0 for ip in chain[:length]):
+                        raise ValueError("invalid software stack extension")
+                    period, = struct.unpack_from("<Q", payload, 0)
+                    task_id, = struct.unpack_from("<Q", payload, 40)
+                    stack_records.append((source_id, source_cpu, task_id, period))
             else:
                 event, version, timestamp, source_cpu = struct.unpack_from("<IIQI", payload)
                 if (mode != "sched" and event != {"trace":2,"block":3,"wake":4,"fault":8}[mode]) or version != 1:
@@ -176,6 +189,14 @@ def extract(text: str, mode: str) -> tuple[bytes, dict, dict[str, bytes]]:
         snapshots[point] = parse_stats(data)
         if mode == "fault" and not {"fault_started","fault_completed","fault_clock_errors"} <= snapshots[point]["global"].keys():
             raise ValueError("missing mandatory fault diagnostics")
+    stack_target = None
+    if stacks:
+        target = one("SAMPLING START ")
+        if target.get("version") != "2" or target.get("mode") != mode or target.get("cpus") != "8":
+            raise ValueError("invalid stack workload identity declaration")
+        stack_target = {key: int(target[key]) for key in ("pid", "tid")}
+        if any(not 0 < value < (1 << 32) for value in stack_target.values()) or any(snapshots[point]["pid"] != stack_target["pid"] for point in ("before", "after")):
+            raise ValueError("stack workload identity differs from proc snapshots")
     config = one("ARCHIVE CONFIG ")
     if config.get("mode") != mode or any(int(config[key]) == 0 for key in ("program_id", "output_map_id", "scratch_map_id", "buffer_pages")):
         raise ValueError("invalid program/map identity or mode")
@@ -215,11 +236,23 @@ def extract(text: str, mode: str) -> tuple[bytes, dict, dict[str, bytes]]:
             raise ValueError("invalid per-source control window")
         source["event_id"] = before["id"]
         sources.append(source)
-    if len(sources) != (1 if mode == "task" else 48 if mode == "sched" else 8) or len({s["fd"] for s in sources}) != len(sources):
+    if len(sources) != (1 if mode == "task" else 48 if mode == "sched" else 16 if stacks else 8) or len({s["fd"] for s in sources}) != len(sources):
         raise ValueError("missing or duplicate source configuration")
     if len({source["event_id"] for source in sources}) != len(sources):
         raise ValueError("source aliases would double-count one event")
     source_rows = [snapshots["before"]["events"][item["fd"]] for item in sources]
+    stack_source_counts = {}
+    if stacks:
+        by_id = {row["id"]: row for row in source_rows}
+        for source_id, cpu, task_id, period in stack_records:
+            row = by_id.get(source_id)
+            if row is None or row["period"] != period or (row["scope"] == "cpu" and row["target"] != cpu) or (row["scope"] == "task" and row["task_id"] != task_id):
+                raise ValueError("stack record source/period/scope differs from authoritative event")
+            stack_source_counts[source_id] = stack_source_counts.get(source_id, 0) + 1
+        if mode == "cpu":
+            coverage = {(row["target"], row["period"]) for row in source_rows if row["clock"] == 0 and row["scope"] == "cpu"}
+            if coverage != {(cpu, period) for cpu in range(8) for period in (10_000_000, 20_000_000)}:
+                raise ValueError("missing same-CPU software source instances")
     if mode == "sched":
         coverage = {(row["config"], row["target"]) for row in source_rows if row["clock"] == 2 and row["scope"] == "cpu"}
         if coverage != {(event,cpu) for event in trace_sizes for cpu in range(8)}:
@@ -267,6 +300,10 @@ def extract(text: str, mode: str) -> tuple[bytes, dict, dict[str, bytes]]:
         raise ValueError("inconsistent export overflow counters")
     if vm_delivered != samples + sink_lost + dropped_samples or sink_delivered != samples + dropped_samples or lost > sink_lost:
         raise ValueError("actual ring frames do not reconcile with producer/sink counters")
+    if stacks and sink_lost == 0 and dropped_samples == 0:
+        for row in source_rows:
+            if stack_source_counts.get(row["id"], 0) != delta(row, after["events"][row["fd"]], "delivered"):
+                raise ValueError("stack source records do not reconcile individually")
     fault_workload = None
     fault_targets = []
     if mode == "fault":
@@ -375,7 +412,7 @@ def extract(text: str, mode: str) -> tuple[bytes, dict, dict[str, bytes]]:
         if (dropped == 0 and (position != ring["tail"] or wraps != ring["wraps"])) or position > ring["tail"]:
             raise ValueError("RAW frames do not match ring positions/wraps")
     binary = struct.pack("<8sQQQQII16x", b"PBRW0001", start, stop, frames, len(raw), zlib.crc32(raw), int(begin["dropped"])) + raw
-    return binary, {"version":1, "mode":mode, "start_ns":start, "stop_ns":stop,
+    return binary, {**({"context_format":"software-stack-v3", "stack_source_counts":stack_source_counts, "stack_target":stack_target} if stacks else {}), "version":1, "mode":mode, "start_ns":start, "stop_ns":stop,
         "frames":frames,"samples":samples,"transport_lost":lost,"export_dropped":int(begin["dropped"]),
         "known_archive_mapped_bytes":int(begin["mapped_bytes"]),"snapshots":snapshots,
         "config":config,"sources":sources,"measurements":measurements,"rings":rings,"program_bindings":program_bindings,

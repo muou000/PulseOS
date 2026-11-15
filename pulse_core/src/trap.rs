@@ -245,6 +245,15 @@ fn handle_page_fault(
     access_flags: MappingFlags,
     is_user: bool,
 ) -> bool {
+    // The two sampling loads are the only reads allowed to bypass fault-in.
+    // This precedes logging, task/process access, IRQ enabling and the resolver;
+    // a failed stack read must not allocate, block, or perturb fault accounting.
+    #[cfg(all(feature = "bpf-trace", any(target_arch = "riscv64", target_arch = "loongarch64")))]
+    if !is_user && access_flags.contains(MappingFlags::READ)
+        && axcpu::sampling::fixup_read_fault(tf)
+    {
+        return true;
+    }
     axlog::debug!(
         "Page fault @ VA:{:#x}, flags:{:?}, user={}",
         vaddr,

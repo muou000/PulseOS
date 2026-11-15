@@ -120,6 +120,11 @@ pub fn render_event_table(analyzer: &CaptureAnalyzer, events: &[NormalizedEvent]
                 let mode = match mode { 1 => "kernel", 2 => "user", _ => "unknown" };
                 format!("period={} pc=0x{:016x} mode={} addr=0x{:016x}", sample_period, pc, mode, addr)
             }
+            EventPayload::SoftwareStackV3 { sample_period, pc, mode, source_id, stack, .. } => {
+                let ips = stack.ips[..stack.len as usize].iter().map(|ip| format!("0x{ip:x}")).collect::<Vec<_>>().join(";");
+                format!("period={sample_period} pc=0x{pc:016x} mode={mode} source_id={source_id} stack={} termination={} depth={} capture_ns={} ips=[{ips}]",
+                    stack.status.classification(), stack.status.as_str(), stack.len, stack.capture_ns)
+            }
             EventPayload::PageFault {address,start_ns,elapsed_ns,access,origin,outcome,classification} => {
                 let origin=match origin {1=>"kernel",2=>"user",_=>"invalid"};
                 let outcome=match outcome {1=>"resolved",2=>"not_handled",3=>"no_memory",4=>"resolver_error",_=>"invalid"};
@@ -194,7 +199,7 @@ pub fn render_loss_report(analyzer: &CaptureAnalyzer) -> String {
         writeln!(&mut out, "Consumer projection: {} normalized records; {} observed PERF_RECORD_LOST notices (counts may overlap sink diagnostics).",
             counters.delivered, counters.lost_records_total).unwrap();
         writeln!(&mut out, "Other legacy counter fields are not runtime measurements; use the scoped diagnostics above.").unwrap();
-        writeln!(&mut out, "Complete CPU/off-CPU attribution: unavailable (individual source stream; mappings/callchains/full scheduler evidence absent).").unwrap();
+        writeln!(&mut out, "Complete CPU/off-CPU attribution: unavailable (mapping/full scheduler evidence absent; stack availability is reported per sample).").unwrap();
         if is_comp {
             writeln!(&mut out, "Integrity verified; no loss reported by the recorded diagnostics. This is not proof of complete attribution.").unwrap();
         } else {
@@ -322,9 +327,19 @@ fn render_json_inner(
     }
 
     // Preserve legacy observations without pretending their data addresses
-    // supply usable IPs. Profile weights only consume the explicit v2 IP field.
-    writeln!(&mut out, "  \"software_samples_with_ip\": {},", stats.event_counts.get("perf_sample_v2").copied().unwrap_or(0)).unwrap();
+    // supply usable IPs. Profile weights consume explicit sampled IPs/chains.
+    writeln!(&mut out, "  \"software_samples_with_ip\": {},", stats.event_counts.get("perf_sample_v2").copied().unwrap_or(0) + stats.event_counts.get("software_stack_v3").copied().unwrap_or(0)).unwrap();
     writeln!(&mut out, "  \"software_samples_without_ip\": {},", stats.event_counts.get("perf_sample").copied().unwrap_or(0)).unwrap();
+    let all_events;
+    let events = if let Some(query) = selected { query.events.as_slice() } else {
+        all_events = analyzer.ordered_events();
+        all_events.as_slice()
+    };
+    let stack_samples = events.iter().filter(|event| matches!(event.payload, EventPayload::SoftwareStackV3 { .. }))
+        .map(|event| format!("{{\"timestamp_ns\":{},\"cpu_id\":{},\"pid\":{},\"tid\":{},\"task_id\":{},\"sample\":{}}}",
+            event.timestamp_ns, event.cpu_id, event.pid, event.tid, event.task_id, semantic_json(event)))
+        .collect::<Vec<_>>().join(",");
+    writeln!(&mut out, "  \"stack_samples\": [{stack_samples}],").unwrap();
     // cpu_stats array
     writeln!(&mut out, "  \"cpu_stats\": [").unwrap();
     let cpu_keys: Vec<_> = stats.cpu_stats.keys().cloned().collect();
@@ -398,29 +413,35 @@ pub fn render_on_cpu_folded_weighted(
     };
     let mut stacks: BTreeMap<String, u128> = BTreeMap::new();
     for event in events {
-        if let EventPayload::SoftwareSampleV2 {
-            pc, sample_period, ..
-        } = event.payload
-        {
-            let mode = match event.payload {
-                EventPayload::SoftwareSampleV2 { mode: 1, .. } => "kernel",
-                EventPayload::SoftwareSampleV2 { mode: 2, .. } => "user",
-                _ => "unknown-mode",
-            };
-            let fallback = if mode == "user" {
-                format!("pid:{}:tid:{}", event.pid, event.tid)
-            } else {
-                format!("task:{}", event.task_id)
-            };
-            let name = folded_label(event.comm.as_deref().unwrap_or(&fallback));
-            let amount = match weight {
-                crate::query::SampleWeight::Samples => 1,
-                crate::query::SampleWeight::Period => sample_period as u128,
-            };
-            *stacks
-                .entry(format!("{}{};[{}];pc:0x{:x}", prefix, name, mode, pc))
-                .or_default() += amount;
+        let (pc, sample_period, mode, stack) = match &event.payload {
+            EventPayload::SoftwareSampleV2 { pc, sample_period, mode, .. } => (*pc, *sample_period, *mode, None),
+            EventPayload::SoftwareStackV3 { pc, sample_period, mode, stack, .. } => (*pc, *sample_period, *mode, Some(stack)),
+            _ => continue,
+        };
+        let mode = match mode { 1 => "kernel", 2 => "user", _ => "unknown-mode" };
+        let fallback = if mode == "user" {
+            format!("pid:{}:tid:{}", event.pid, event.tid)
+        } else { format!("task:{}", event.task_id) };
+        let name = folded_label(event.comm.as_deref().unwrap_or(&fallback));
+        let amount = match weight {
+            crate::query::SampleWeight::Samples => 1,
+            crate::query::SampleWeight::Period => sample_period as u128,
+        };
+        let mut key = format!("{}{};[{}]", prefix, name, mode);
+        if let Some(stack) = stack {
+            if stack.status != pulse_bpf_schema::StackStatus::Complete {
+                write!(&mut key, ";[{}:{}]", stack.status.classification(), stack.status.as_str()).unwrap();
+            }
+            // Native frames are leaf first. Folded data is root first, while
+            // the status marker preserves the fact that this may be a prefix.
+            for ip in stack.ips[..stack.len as usize].iter().rev() {
+                write!(&mut key, ";pc:0x{ip:x}").unwrap();
+            }
+            if stack.len == 0 { continue; }
+        } else {
+            write!(&mut key, ";pc:0x{pc:x}").unwrap();
         }
+        *stacks.entry(key).or_default() += amount;
     }
     let has_data = !stacks.is_empty();
     for (stack, value) in stacks {
@@ -428,7 +449,10 @@ pub fn render_on_cpu_folded_weighted(
     }
     FoldedOutput {
         text: out,
-        is_complete: has_data && analyzer.is_complete(),
+        is_complete: has_data && analyzer.is_complete() && events.iter().all(|event| {
+            !matches!(&event.payload, EventPayload::SoftwareStackV3 { stack, .. }
+                if stack.status != pulse_bpf_schema::StackStatus::Complete)
+        }),
         status: analyzer.status_code(),
     }
 }
@@ -693,6 +717,16 @@ fn semantic_json(event: &NormalizedEvent) -> String {
             "{{\"sample_period\":{},\"addr\":{},\"ip\":{},\"mode\":{}}}",
             sample_period, addr, pc, mode
         ),
+        EventPayload::SoftwareStackV3 { sample_period, addr, pc, mode, source_id, stack } => {
+            let ips = stack.ips[..stack.len as usize].iter().map(u64::to_string).collect::<Vec<_>>().join(",");
+            format!(concat!("{{\"sample_period\":{},\"addr\":{},\"ip\":{},\"mode\":{},\"source_id\":{},",
+                "\"sp\":{},\"fp\":{},\"ra\":{},\"capture_ns\":{},\"depth_limit\":{},\"chain_len\":{},",
+                "\"stack_status\":{},\"termination\":{},\"bytes_read\":{},\"byte_limit\":{},\"ips\":[{}]}}"),
+                sample_period, addr, pc, mode, source_id, stack.registers.sp, stack.registers.fp,
+                stack.registers.ra, stack.capture_ns, stack.depth_limit, stack.len,
+                json_string(stack.status.classification()), json_string(stack.status.as_str()),
+                stack.bytes_read, stack.byte_limit, ips)
+        },
         EventPayload::PageFault {
             address,
             start_ns,
@@ -715,8 +749,10 @@ fn timeline_event_json(analyzer: &CaptureAnalyzer, event: &NormalizedEvent) -> S
     let original = &analyzer.records()[event.sequence_index];
     let privilege = match event.payload {
         EventPayload::SoftwareSampleV2 { mode: 1, .. }
+        | EventPayload::SoftwareStackV3 { mode: 1, .. }
         | EventPayload::PageFault { origin: 1, .. } => Some("kernel"),
         EventPayload::SoftwareSampleV2 { mode: 2, .. }
+        | EventPayload::SoftwareStackV3 { mode: 2, .. }
         | EventPayload::PageFault { origin: 2, .. } => Some("user"),
         _ => None,
     };
@@ -781,7 +817,7 @@ pub fn render_timeline(
         meta.start_ns,
         meta.stop_ns,
         analyzer.data().trailer.checksum,
-        json_string(if header.format_version == 2 {
+        json_string(if header.format_version >= 2 {
             "IEEE-CRC32"
         } else {
             "legacy-v1"

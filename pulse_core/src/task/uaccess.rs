@@ -66,6 +66,26 @@ impl Drop for UserAccessGuard {
     }
 }
 
+/// Sampling-only reader. The caller holds the current process's VMA and exec
+/// leases and has validated a readable ordinary user mapping covering 16 bytes.
+///
+/// # Safety
+/// The calling task must own the active user page table; IRQs stay disabled and
+/// the caller retains both address-space leases until the read returns. The
+/// dedicated no-fault trap continuation must be installed.
+#[cfg(all(feature = "bpf-trace", any(target_arch = "riscv64", target_arch = "loongarch64")))]
+pub(crate) unsafe fn read_sampling_frame(address: usize) -> Option<[u8; 16]> {
+    if address & 7 != 0 || !user_range_is_valid(address, 16) || axhal::asm::irqs_enabled() {
+        return None;
+    }
+    #[cfg(target_arch = "riscv64")]
+    let _access = UserAccessGuard::new();
+    // SAFETY: the checked range/alignment above, caller's mapping/lifetime
+    // leases and IRQ contract establish the assembly reader's prerequisites.
+    // UserAccessGuard restores the entry SUM state on every return.
+    unsafe { axcpu::sampling::read_frame_nofault(address) }
+}
+
 /// Copies as many bytes as possible and returns the number copied.
 pub fn copy_from_user_partial(dst: &mut [u8], src_user_addr: usize) -> AxResult<usize> {
     if dst.is_empty() {

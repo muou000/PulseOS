@@ -332,6 +332,16 @@ fn import(dir: &Path, output: &Path) -> Result<()> {
             return Err(format!("invalid actual artifact hash: {name}"));
         }
     }
+    let stacks = match archive.get("context_format").and_then(Value::as_str) {
+        Some("software-stack-v3") if matches!(mode, "task" | "cpu") => true,
+        Some("software-v2") | Some("tracepoint") | None => false,
+        _ => return Err("unknown required context format".into()),
+    };
+    if let Some(declared) = input.get("context_format") {
+        if archive.get("context_format") != Some(declared) {
+            return Err("input/archive context format mismatch".into());
+        }
+    }
     let config = &archive["config"];
     let before = &archive["snapshots"]["before"];
     let after = &archive["snapshots"]["after"];
@@ -339,6 +349,8 @@ fn import(dir: &Path, output: &Path) -> Result<()> {
     if sources.len()
         != if mode == "task" {
             1
+        } else if mode == "cpu" && stacks {
+            16
         } else if mode == "sched" {
             48
         } else {
@@ -384,6 +396,7 @@ fn import(dir: &Path, output: &Path) -> Result<()> {
     let source = &before["events"][number(first, "fd")?.to_string()];
     let source_after = &after["events"][number(first, "fd")?.to_string()];
     let format = match mode {
+        "task" | "cpu" if stacks => SampleFormat::SoftwareStackV3,
         "task" | "cpu" => SampleFormat::PerfEventV2,
         "trace" | "block" | "wake" | "sched" | "fault" => SampleFormat::Tracepoint,
         _ => return Err("unknown mode".into()),
@@ -436,10 +449,11 @@ fn import(dir: &Path, output: &Path) -> Result<()> {
     identity(
         &mut d,
         "attribution_scope",
-        Some(
+        Some(if stacks {
+            "observed bounded frame-pointer prefixes; termination is per sample; mapping/complete scheduler attribution unavailable"
+        } else {
             "observed records only; callchain/mapping/complete scheduler attribution unavailable"
-                .into(),
-        ),
+        }.into()),
     );
     snapshots(
         &mut d,
@@ -546,6 +560,8 @@ fn import(dir: &Path, output: &Path) -> Result<()> {
     let mut per_program = std::collections::BTreeMap::<u64, u64>::new();
     let mut source_coverage = std::collections::BTreeSet::new();
     let mut source_ids = std::collections::BTreeSet::new();
+    let mut stack_sources = std::collections::BTreeMap::new();
+    let mut stack_source_counts = std::collections::BTreeMap::<u64, u64>::new();
     for item in sources {
         let fd = number(item, "fd")?.to_string();
         let old = &before["events"][&fd];
@@ -556,6 +572,9 @@ fn import(dir: &Path, output: &Path) -> Result<()> {
             || number(new, "inflight")? != 0
         {
             return Err("capture sources not quiescent".into());
+        }
+        if number(old, "id")? != number(new, "id")? {
+            return Err("source instance changed across capture".into());
         }
         if !source_ids.insert(number(old, "id")?) {
             return Err("source alias would double count".into());
@@ -583,10 +602,32 @@ fn import(dir: &Path, output: &Path) -> Result<()> {
             source_coverage.insert((number(old, "config")?, number(old, "target")?));
         }
         let delivered = delta(old, new, "delivered")?;
+        if stacks {
+            if number(item, "event_id")? != number(old, "id")? {
+                return Err("declared source instance differs from diagnostics".into());
+            }
+            let clock = number(old, "clock")?;
+            let scope = string(old, "scope")?;
+            if !((mode == "cpu" && clock == 0 && scope == "cpu")
+                || (mode == "task" && clock == 1 && scope == "task")) {
+                return Err("software stack source kind differs from declared mode".into());
+            }
+            stack_sources.insert(number(old, "id")?, (scope, number(old, "target")?,
+                number(old, "task_id")?, number(old, "period")?, delivered));
+        }
         let total = per_program.entry(program_id).or_default();
         *total = add(*total, delivered)?;
         source_delivered = add(source_delivered, delivered)?;
         identity(&mut d, &format!("source/{fd}"), Some(item.to_string()));
+    }
+    if stacks && mode == "cpu" {
+        let mut coverage = std::collections::BTreeMap::<u64, usize>::new();
+        for (_, target, _, _, _) in stack_sources.values() {
+            *coverage.entry(*target).or_default() += 1;
+        }
+        if coverage != (0..8).map(|cpu| (cpu, 2)).collect() {
+            return Err("software stack CPU coverage requires two instances on every CPU".into());
+        }
     }
     for (id, program) in object(&before["programs"])? {
         snapshots(
@@ -679,7 +720,7 @@ fn import(dir: &Path, output: &Path) -> Result<()> {
         kernel_elf_hash: string(&input, "kernel_elf_sha256")?.into(),
         image_path: string(&input, "image")?.into(),
         image_hash: string(&input, "boot_image_sha256")?.into(),
-        libbpf_fixture_version: "native-runtime-v2; no libbpf fixture".into(),
+        libbpf_fixture_version: if stacks { "native-stack-v3; no libbpf fixture" } else { "native-runtime-v2; no libbpf fixture" }.into(),
         prog_id: narrow(numeric_string(config, "program_id")?)?,
         map_id: narrow(numeric_string(config, "output_map_id")?)?,
         link_id: narrow(number(first, "link_id")?)?,
@@ -713,7 +754,7 @@ fn import(dir: &Path, output: &Path) -> Result<()> {
         if seq != sequence
             || cpu >= 8
             || read32(envelope, 20) != 0
-            || !(8..=96).contains(&length)
+            || !(8..=if stacks { 656 } else { 96 }).contains(&length)
             || length > raw.len() - offset
         {
             return Err("invalid envelope".into());
@@ -728,6 +769,7 @@ fn import(dir: &Path, output: &Path) -> Result<()> {
                 return Err("truncated sample".into());
             }
             let expected = match mode {
+                "task" | "cpu" if stacks => 640,
                 "task" | "cpu" => 64,
                 "trace" | "block" => 72,
                 "wake" | "fault" => 80,
@@ -757,6 +799,20 @@ fn import(dir: &Path, output: &Path) -> Result<()> {
             }
             if mode == "task" && read64(context, 40) != number(source, "task_id")? {
                 return Err("sample belongs to another task".into());
+            }
+            if stacks {
+                let sample = pulse_bpf_schema::PerfStackSampleContext::from_bytes(context)
+                    .map_err(|_| "invalid software stack native context")?;
+                let (scope, target, task, period, _) = stack_sources.get(&sample.source_id)
+                    .ok_or("software stack source instance not declared")?;
+                if sample.base.base.sample_period != *period
+                    || (*scope == "cpu" && u64::from(cpu) != *target)
+                    || (*scope == "task" && (sample.base.base.task_id != *task
+                        || u64::from(sample.base.base.tid) != *target)) {
+                    return Err("software stack source scope/period mismatch".into());
+                }
+                let count = stack_source_counts.entry(sample.source_id).or_default();
+                *count = add(*count, 1)?;
             }
             if let SampleFormat::Tracepoint = format {
                 let expected_id = match mode {
@@ -790,6 +846,13 @@ fn import(dir: &Path, output: &Path) -> Result<()> {
         || lost != number(&archive, "transport_lost")?
     {
         return Err("RAW record counts do not match evidence".into());
+    }
+    for (source_id, (_, _, _, _, delivered)) in &stack_sources {
+        let recorded = stack_source_counts.get(source_id).copied().unwrap_or(0);
+        if recorded > *delivered || (dropped_samples == 0 && sink_lost == 0 && recorded != *delivered) {
+            return Err("per-source stack sample count does not reconcile".into());
+        }
+        counter(&mut d, &format!("source/{source_id}"), "recorded_stack_samples", Some(recorded), CounterKind::Activity);
     }
     if sink_delivered != add(samples, dropped_samples)?
         || source_delivered != add(add(samples, dropped_samples)?, sink_lost)?

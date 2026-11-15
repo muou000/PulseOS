@@ -273,3 +273,46 @@ interval duration-ns, with no fallback to event counts or a fabricated weight 1.
 New `scheduler-report.json` / `faults-report.json` are saved by the archive driver;
 valid semantic instances must be nonzero for those two modes. This is a fixed
 regression workload, not yet the general-purpose recorder tracked by #195.
+
+## Frozen frame-pointer stack gate (#192)
+
+```bash
+make test APP_FEATURES="qemu bpf-trace" 2>&1 | tail -30
+python3 tests/bpf_sampling/run.py guest --arch riscv64 --mode task --stacks --archive --timeout 300
+python3 tests/bpf_sampling/run.py guest --arch loongarch64 --mode task --stacks --archive --timeout 300
+python3 tests/bpf_sampling/run.py guest --arch riscv64 --mode cpu --stacks --archive --timeout 300
+python3 tests/bpf_sampling/run.py guest --arch loongarch64 --mode cpu --stacks --archive --timeout 300
+```
+
+`--stacks` copies the 640-byte `software-stack-v3` context through the real BPF
+program and output rings. It requires an archive and matching kernel ELF. The
+original 64-byte version-2 prefix remains unchanged. Kernel `bpf-trace` builds
+and this guest request compiler frame pointers. Explicit assembly supplies two
+three-level user call trees with separately labeled return sites; captured IPs
+must equal those labels, not merely fall inside an executable mapping.
+
+The guest also issues populated anonymous mmap/munmap calls. The host checks
+actual RAW kernel chains against the exact boot ELF, requires at least three
+resolved distinct functions, and requires observed mmap/munmap or prefault
+ancestry. It writes `stack-evidence.json` with hashes, representative original
+IPs, ELF symbol names, source counts, and termination-reason counts. Unavailable
+or partial chains remain recorded and cannot pass as complete unwinds. A kernel
+sample never receives an invented user caller, and the guest's synthetic
+negative frame records never count as the real positive call-tree evidence.
+
+Negative assembly probes exercise zero FP, a frame whose page is nonresident, a
+frame cycle, bad return address, misaligned FP, and a real 41-level recursive
+call stack. The unreadable-frame probe points into a readable, lazy anonymous
+VMA above the ordinary user stack: its PTE is absent, so the sampler's dedicated
+load must fault and return without populating it. `mincore` before and after
+requires that page to remain nonresident. Every probe needs an actual timer
+sample with the expected reason; a lock-contention `busy` result can be retained
+but cannot satisfy that probe. The host independently compares raw records with
+the probe PC ranges in the payload ELF.
+
+CPU stack mode opens **two** CPU_CLOCK events on each CPU (10 ms and 20 ms).
+The archive checks stable `source_id`, scope, and period against per-event
+proc diagnostics, then reconciles the actual record count for each source when
+transport/export loss is zero. Task stack mode preserves the task-clock sleep
+and FD-lifetime checks. Old task/cpu runs continue using 64-byte v2 contexts;
+unknown required context versions are rejected.

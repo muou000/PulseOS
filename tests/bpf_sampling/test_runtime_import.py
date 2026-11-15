@@ -6,6 +6,7 @@ Run: python3 tests/bpf_sampling/test_runtime_import.py
 """
 from __future__ import annotations
 
+import copy
 import hashlib
 import json
 from pathlib import Path
@@ -84,6 +85,114 @@ class RuntimeImportTests(unittest.TestCase):
         self.assertEqual(report['event_counts']['sched_switch'], 2)
         self.assertEqual(report['event_counts']['task_wake'], 1)
         self.assertFalse(report['attribution_claim_allowed'])
+
+    def seed_stack(self):
+        from test_stack_archive import stack_fixture
+        self.raw, self.metadata, _ = archive.extract(stack_fixture(), "task")
+        self.inputs["context_format"] = "software-stack-v3"
+        (self.directory / "records.pbraw").write_bytes(self.raw)
+
+    def alter_stack(self, offset, format, value):
+        # Reseal transport CRCs to exercise the Rust importer's independent
+        # native/source validation, bypassing the Python extraction checks.
+        raw = bytearray(self.raw)
+        frame = 64 + 24
+        struct.pack_into(format, raw, frame + 12 + offset, value)
+        struct.pack_into("<I", raw, 64 + 16, zlib.crc32(raw[frame:frame + 656]))
+        self.reseal_raw(raw)
+        (self.directory / "records.pbraw").write_bytes(raw)
+
+    def test_stack_v3_preserves_chain_source_and_explicit_partial_reason(self):
+        self.seed_stack()
+        self.assert_imported()
+        data = self.output.read_bytes()
+        self.assertEqual(struct.unpack_from("<I", data, 8)[0], 3)
+        summary = self.summary()
+        sample = summary["stack_samples"][0]["sample"]
+        self.assertEqual(sample["source_id"], 13)
+        self.assertEqual(sample["ips"], [0x400110, 0x400100, 0x400080])
+        self.assertEqual(sample["termination"], "read_fault")
+        self.assertEqual(sample["stack_status"], "partial")
+        self.assertEqual(sample["sample_period"], 10)
+        counters = {(c["scope"], c["name"]): c["value"]
+                    for c in summary["runtime_diagnostics"]["counters"]}
+        self.assertEqual(counters[("source/13", "recorded_stack_samples")], 1)
+        folded = self.directory / "stack.folded"
+        result = self.analyzer("--oncpu", str(folded))
+        self.assertEqual(result.returncode, 0, result.stdout)
+        self.assertIn("[partial:read_fault];pc:0x400080;pc:0x400100;pc:0x400110 1", folded.read_text())
+
+    def test_stack_importer_independently_rejects_source_period_and_required_extension(self):
+        for offset, format, value, error in [
+            (64, "<Q", 999, "source instance not declared"),
+            (0, "<Q", 99, "scope/period mismatch"),
+            (104, "<H", 4, "invalid software stack native context"),
+            (120, "<Q", 1, "invalid software stack native context"),
+        ]:
+            with self.subTest(offset=offset):
+                self.seed_stack()
+                self.alter_stack(offset, format, value)
+                self.assert_rejected(error)
+
+    def seed_stack_cpu_instances(self, duplicate=False):
+        self.seed_stack()
+        self.inputs["mode"] = "cpu"
+        self.metadata["mode"] = "cpu"
+        self.metadata["config"]["mode"] = "cpu"
+        prototype = copy.deepcopy(self.metadata["sources"][0])
+        self.metadata["sources"] = []
+        for point in ("before", "after"):
+            snapshot = self.metadata["snapshots"][point]
+            source = snapshot["events"].pop(14)
+            for index in range(16):
+                event = copy.deepcopy(source)
+                count = int(point == "after" and index < 2)
+                event.update(fd=100+index, id=100+index, clock=0, config=0,
+                             scope="cpu", target=index//2, task_id=0,
+                             observed=count, delivered=count)
+                snapshot["events"][100+index] = event
+                if point == "before":
+                    row = copy.deepcopy(prototype)
+                    row.update(fd=100+index, event_id=100+index)
+                    self.metadata["sources"].append(row)
+            snapshot["programs"][5]["runs"] = 2 if point == "after" else 0
+            for cpu in range(8):
+                snapshot["events"][5+cpu]["delivered"] = 2 if point == "after" and cpu == 0 else 0
+            snapshot["global"].update(timer_enqueued=2 if point == "after" else 0,
+                                      timer_dequeued=2 if point == "after" else 0)
+        stream = bytearray()
+        for index in range(2):
+            context = bytearray(self.raw[100:740])
+            struct.pack_into("<I", context, 24, 0)
+            struct.pack_into("<Q", context, 64, 100 if duplicate else 100+index)
+            frame = struct.pack("<IHHI", 9, 0, 656, 640) + context + bytes(4)
+            stream.extend(struct.pack("<QIIII", index, 0, len(frame), zlib.crc32(frame), 0) + frame)
+        raw = bytearray(self.raw[:64]) + stream
+        struct.pack_into("<Q", raw, 24, 2)
+        self.reseal_raw(raw)
+        self.metadata.update(frames=2, samples=2)
+        (self.directory / "records.pbraw").write_bytes(raw)
+
+    def test_same_cpu_same_period_instances_reconcile_independently(self):
+        self.seed_stack_cpu_instances()
+        self.assert_imported()
+        report = self.summary()
+        self.assertEqual([row["sample"]["source_id"] for row in report["stack_samples"]], [100, 101])
+        counters = {(c["scope"], c["name"]): c["value"]
+                    for c in report["runtime_diagnostics"]["counters"]}
+        for source in (100, 101):
+            self.assertEqual(counters[(f"source/{source}", "recorded_stack_samples")], 1)
+        self.output.unlink()
+        self.seed_stack_cpu_instances(duplicate=True)
+        self.assert_rejected("per-source stack sample count does not reconcile")
+
+    def test_stack_source_snapshot_identity_and_declaration_cannot_drift(self):
+        self.seed_stack()
+        self.metadata["sources"][0]["event_id"] = 999
+        self.assert_rejected("declared source instance")
+        self.seed_stack()
+        self.metadata["snapshots"]["after"]["events"][14]["id"] = 999
+        self.assert_rejected("event identity changed")
 
     def seed_fault(self):
         from test_fault_archive import fixture_fault

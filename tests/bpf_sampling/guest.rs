@@ -17,8 +17,10 @@ const DATA_SIZE: usize = PAGE;
 const DATA_SIZE: usize = 16 * PAGE;
 const MAPPING_SIZE: usize = PAGE + DATA_SIZE;
 const PERIOD_NS: u64 = 10_000_000;
-#[cfg(not(tracepoint_test))]
+#[cfg(all(not(tracepoint_test), not(stack_test)))]
 const CONTEXT_SIZE: usize = 64;
+#[cfg(stack_test)]
+const CONTEXT_SIZE: usize = 640;
 #[cfg(all(tracepoint_test, not(any(trace_wake, sched_trace_test, trace_fault))))]
 const CONTEXT_SIZE: usize = 72;
 #[cfg(any(trace_wake, sched_trace_test, trace_fault))]
@@ -44,7 +46,7 @@ const MODE: &str = "cpu";
 #[cfg(not(any(cpu_clock_test, tracepoint_test)))]
 const MODE: &str = "task";
 const PROGRAM_COUNT: usize = if cfg!(sched_trace_test) { 6 } else { 1 };
-const SOURCE_COUNT: usize = if cfg!(tracepoint_test) || cfg!(cpu_clock_test) { CPUS * PROGRAM_COUNT } else { 1 };
+const SOURCE_COUNT: usize = if cfg!(cpu_clock_test) && cfg!(stack_test) { CPUS * 2 } else if cfg!(tracepoint_test) || cfg!(cpu_clock_test) { CPUS * PROGRAM_COUNT } else { 1 };
 #[cfg(tracepoint_test)]
 fn context_bytes(event: u32) -> usize {
     match event { 1|2|3=>72, 4|8=>80, 5=>56, 6=>64, _=>0 }
@@ -56,7 +58,7 @@ fn tracepoint_for_program(index: usize) -> u32 {
 const ENABLE: usize = 0x2400;
 const DISABLE: usize = 0x2401;
 
-#[cfg(target_arch = "riscv64")]
+#[cfg(all(target_arch = "riscv64", not(stack_test)))]
 global_asm!(
     ".section .text._start,\"ax\"", ".global _start", "_start:",
     ".option push", ".option norelax", "la gp, __global_pointer$", ".option pop",
@@ -67,7 +69,7 @@ global_asm!(
     ".balign 16", ".global sample_loop_b", ".global sample_loop_b_end", "sample_loop_b:",
     "addi a0, a0, -1", "nop", "bnez a0, sample_loop_b", "ret", "sample_loop_b_end:",
 );
-#[cfg(target_arch = "loongarch64")]
+#[cfg(all(target_arch = "loongarch64", not(stack_test)))]
 global_asm!(
     ".section .text._start,\"ax\"", ".global _start", "_start:", "bl guest_main", "break 0",
     ".section .text.sample_loops,\"ax\"", ".balign 16",
@@ -122,6 +124,10 @@ macro_rules! check {
         if !$condition { say!("SAMPLING FAIL line={} {}", line!(), $message); exit(1); }
     };
 }
+#[cfg(stack_test)]
+mod stack_workload;
+#[cfg(stack_test)]
+use stack_workload::*;
 #[cfg(capture_export)]
 mod archive;
 #[cfg(trace_fault)]
@@ -237,7 +243,7 @@ impl Insn {
         Self { code, regs: dst | src << 4, off, imm }
     }
 }
-struct Program { insns: [Insn; 64], len: usize }
+struct Program { insns: [Insn; 192], len: usize }
 impl Program {
     fn emit(&mut self, code: u8, dst: u8, src: u8, off: i16, imm: i32) {
         self.insns[self.len] = Insn::new(code, dst, src, off, imm);
@@ -249,7 +255,7 @@ impl Program {
     }
 }
 fn load_program(scratch: usize, outputs: usize, context_size: usize) -> usize {
-    let mut program = Program { insns: [Insn::new(0, 0, 0, 0, 0); 64], len: 0 };
+    let mut program = Program { insns: [Insn::new(0, 0, 0, 0, 0); 192], len: 0 };
     program.emit(0xbf, 6, 1, 0, 0); // save ctx
     program.emit(0x61, 2, 6, if cfg!(tracepoint_test) { 16 } else { 24 }, 0); // key = ctx.cpu
     program.emit(0x63, 10, 2, -4, 0);
@@ -364,7 +370,7 @@ impl Ring {
             }
             #[cfg(capture_export)]
             if let Some(archive) = &mut stats.archive {
-                let mut raw = [0u8; 96];
+                let mut raw = [0u8; (12 + CONTEXT_SIZE + 7) & !7];
                 check!(size <= raw.len(), "archive frame exceeds supported context");
                 self.copy(self.tail, &mut raw[..size]);
                 archive.push(self.cpu, &raw[..size]);
@@ -385,6 +391,8 @@ struct Stats {
     #[cfg(capture_export)]
     archive: Option<archive::Buffer>,
     pid: u32, tid: u32, samples: u64, foreign: u64, a: u64, b: u64, lost: u64, cpu_mask: u32,
+    #[cfg(stack_test)]
+    stacks: stack_workload::StackStats,
     last_time: [u64; CPUS], a_start: u64, a_end: u64, b_start: u64, b_end: u64,
     #[cfg(tracepoint_test)]
     subjects: [u64; 64],
@@ -475,7 +483,7 @@ impl Stats {
     }
     #[cfg(not(tracepoint_test))]
     fn sample(&mut self, bytes: &[u8], ring_cpu: usize) {
-        check!(bytes.len() == 64, "wrong software context length");
+        check!(bytes.len() == CONTEXT_SIZE, "wrong software context length");
         let timestamp = u64_at(bytes, 16);
         let cpu = u32_at(bytes, 24) as usize;
         let ip = u64_at(bytes, 48);
@@ -483,9 +491,11 @@ impl Stats {
         check!(u32_at(bytes, 60) == 2, "sample context version must be 2");
         check!(cpu == ring_cpu && cpu < CPUS, "sample CPU disagrees with output ring");
         check!(u64_at(bytes, 40) != 0, "sample lacks task identity");
-        check!(u64_at(bytes, 0) == PERIOD_NS && u64_at(bytes, 8) == 0, "period or legacy addr changed");
+        check!((u64_at(bytes, 0) == PERIOD_NS || (cfg!(stack_test) && cfg!(cpu_clock_test) && u64_at(bytes, 0) == 2 * PERIOD_NS)) && u64_at(bytes, 8) == 0, "period or legacy addr changed");
         check!(timestamp != 0 && timestamp >= self.last_time[cpu], "sample timestamp invalid");
         check!(ip != 0 && (mode == 1 || mode == 2), "missing PC or privilege mode");
+        #[cfg(stack_test)]
+        self.stacks.observe(bytes);
         self.last_time[cpu] = timestamp;
         self.cpu_mask |= 1 << cpu;
         if u32_at(bytes, 28) != self.pid || u32_at(bytes, 32) != self.tid {
@@ -516,10 +526,14 @@ fn workload(loop_b: bool, duration_ms: u64, rings: &mut [Ring; CPUS], stats: &mu
         #[cfg(trace_fault)]
         { let _ = fault_workload::iteration(); }
         #[cfg(not(tracepoint_test))]
-        // SAFETY: both linked assembly functions follow the target C ABI, touch
-        // only caller-saved argument register a0, and terminate for n>0.
+        // SAFETY: the linked loops and chain entries preserve the target C ABI
+        // and terminate for n>0. Stack entries save and restore FP/RA within
+        // their own frames; the ordinary loops only modify argument a0.
         unsafe {
+            #[cfg(not(stack_test))]
             if loop_b { sample_loop_b(2_000_000); } else { sample_loop_a(2_000_000); }
+            #[cfg(stack_test)]
+            { if loop_b { sample_chain_b(2_000_000); } else { sample_chain_a(2_000_000); } }
         }
         drain_all(rings, stats);
     }
@@ -543,8 +557,14 @@ fn measure_archive_phase(phase: &str, mut rings: Option<&mut [Ring; CPUS]>, stat
             }
         }
         #[cfg(not(tracepoint_test))]
-        // SAFETY: linked assembly loops preserve the C ABI and access no memory.
-        unsafe { sample_loop_a(2_000_000); sample_loop_b(2_000_000); }
+        // SAFETY: linked loops/chains preserve the C ABI; chain entries only
+        // access their own initialized frame records and restore SP/FP/RA.
+        unsafe {
+            #[cfg(not(stack_test))]
+            { sample_loop_a(2_000_000); sample_loop_b(2_000_000); }
+            #[cfg(stack_test)]
+            { sample_chain_a(2_000_000); sample_chain_b(2_000_000); stack_workload::kernel_work(); stack_workload::probes(); }
+        }
         if !(cfg!(fault_ring_overflow) && phase == "attached_capture") {
         if let Some(rings) = rings.as_deref_mut() { drain_all(rings, stats); }
         }
@@ -587,6 +607,8 @@ fn check_fd_lifecycle(program: usize, rings: &mut [Ring; CPUS], template: &Stats
         drain_all(rings, &mut stats);
         let alive = stats.samples;
         let loop_a = stats.a;
+        say!("SAMPLING FD_LIFECYCLE_ALIVE kind={} alive={} loop_a={}",
+             if ioctl_owned { "ioctl_dup_final_close" } else { "link_target_close" }, alive, loop_a);
         check!(loop_a >= 2 && alive >= loop_a, "closing original source FD stopped retained sampling");
         if !ioctl_owned { detach(owner); }
         // Last ioctl-attached event FD closes here without DISABLE. The source
@@ -612,6 +634,8 @@ extern "C" fn guest_main() -> ! {
     let mut stats = Stats {
         #[cfg(capture_export)]
         archive: None,
+        #[cfg(stack_test)]
+        stacks: stack_workload::StackStats::new(),
         pid, tid, samples: 0, foreign: 0, a: 0, b: 0, lost: 0, cpu_mask: 0, last_time: [0; CPUS],
         a_start: sample_loop_a as *const () as u64,
         a_end: core::ptr::addr_of!(sample_loop_a_end) as u64,
@@ -663,14 +687,14 @@ extern "C" fn guest_main() -> ! {
         #[cfg(tracepoint_test)]
         { perf_open(tracepoint_for_program(index / CPUS) as u64, -1, (index % CPUS) as isize, 0, true) }
         #[cfg(cpu_clock_test)]
-        { perf_open(0, -1, index as isize, PERIOD_NS, true) }
+        { perf_open(0, -1, (index % CPUS) as isize, PERIOD_NS * (1 + (index / CPUS) as u64), true) }
         #[cfg(not(any(cpu_clock_test,tracepoint_test)))]
         { let _ = index; perf_open(1, tid as isize, -1, PERIOD_NS, true) }
     });
     reject_invalid_sinks(outputs, events[0], &sinks);
     #[cfg(capture_export)]
     measure_archive_phase("loaded_detached", Some(&mut rings), &mut stats, CPUS * MAPPING_SIZE);
-    let links: [usize; SOURCE_COUNT] = core::array::from_fn(|index| attach(programs[index / CPUS], events[index]));
+    let links: [usize; SOURCE_COUNT] = core::array::from_fn(|index| attach(programs[if cfg!(tracepoint_test) { index / CPUS } else { 0 }], events[index]));
     #[cfg(capture_export)]
     let mut enable_times = [(0u64, 0u64); SOURCE_COUNT];
     #[cfg(capture_export)]
@@ -736,6 +760,8 @@ extern "C" fn guest_main() -> ! {
             }
             check!(stats.fault_read_hits>0 && stats.fault_write_hits>0,"fresh pages produced no read/write fault evidence");
         }
+        #[cfg(stack_test)]
+        say!("ARCHIVE CONTEXT format=software-stack-v3");
         stats.archive.take().unwrap().emit(capture_stop_ns);
     }
     #[cfg(tracepoint_test)]
@@ -756,6 +782,8 @@ extern "C" fn guest_main() -> ! {
              MODE, stats.samples, stats.foreign, stats.a, stats.b, stats.lost, stats.cpu_mask);
         check!(stats.a >= 2 && stats.b >= 2, "no real timer samples in both user loop ranges");
     }
+    #[cfg(stack_test)]
+    stats.stacks.finish();
     check!(stats.lost == 0, "unexpected output loss");
     let disabled_count = stats.samples + stats.foreign;
     workload(false, 150, &mut rings, &mut stats);
