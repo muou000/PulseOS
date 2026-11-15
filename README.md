@@ -130,6 +130,10 @@ make test      # 编译双架构门禁
 make clean     # 清理编译产物
 ```
 
+BPF 和 pipe 的启动自检默认关闭。测试内核使用
+`make test APP_FEATURES="qemu guest-checks"` 显式开启两项检查；
+配置组合回归与结果标记见 [guest 自检说明](tests/guest_checks/README.md)。
+
 ### 运行测试 (QEMU)
 
 #### RISC-V 64

@@ -42,3 +42,4 @@ hashbrown.workspace = true
 ls2k1000 = ["axcpu/ls2k1000"]
 bpf-trace = ["axtask/bpf-trace"]
 mapping-lifecycle-test = ["axfs/mapping-lifecycle-test"]
+guest-checks = []

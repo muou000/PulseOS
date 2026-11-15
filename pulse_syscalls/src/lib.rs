@@ -29,6 +29,8 @@ mod shutdown;
 #[cfg(target_os = "none")]
 pub use handler::syscall_handler;
 #[cfg(target_os = "none")]
-pub use impls::{run_bpf_guest_checks, sys_sync};
+pub use impls::sys_sync;
+#[cfg(all(feature = "guest-checks", target_os = "none"))]
+pub use impls::run_bpf_guest_checks;
 #[cfg(all(feature = "mapping-lifecycle-test", target_os = "none"))]
 pub use shutdown::run_mapping_shutdown_checks;
