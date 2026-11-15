@@ -15,7 +15,8 @@ and the same `list_mounts()` snapshot used by `/proc/mounts`.
 
 Coverage includes successful mount/unmount, duplicate targets, failed probes,
 late registry conflicts, rejected mount and unmount updates, busy child mounts,
-competing probes, stale mount handles, and existing bind mount stacks.
+competing probes, ancestors moved during probing, stale mount handles, and
+existing bind mount stacks.
 
 Registry rejection is injected through the coordinator's `cfg(test)` hook.
 Tests serialize access to the production globals and remove their mounts after

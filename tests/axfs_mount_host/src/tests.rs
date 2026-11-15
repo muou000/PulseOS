@@ -302,3 +302,49 @@ fn unmounting_a_legacy_stacked_mount_preserves_the_lower_record() {
     unmount_filesystem(&resolved).unwrap();
     assert!(list_mounts().is_empty());
 }
+
+#[test]
+fn parent_moved_during_probe_records_the_current_mount_path() {
+    let _serial = TEST_LOCK.lock().unwrap();
+    let root = Mountpoint::new_root(&MemFs::create("root")).root_location();
+    let old_target = mkdir(&root, "old");
+    let new_target = mkdir(&root, "new");
+    let parent = mount_filesystem(&old_target, "parent", "tmpfs", 0, || {
+        Ok(MemFs::create("parent"))
+    })
+    .unwrap();
+    let child_target = mkdir(&parent.root_location(), "child");
+    let child = mount_filesystem(&child_target, "child", "tmpfs", 0, || {
+        // Model another task's complete MS_MOVE while the probe waits for I/O.
+        parent.root_location().move_mount(&new_target)?;
+        rename_mount_registry("/old", "/new");
+        Ok(MemFs::create("child"))
+    })
+    .unwrap();
+
+    let rows = list_mounts();
+    assert_eq!(rows.len(), 2);
+    assert_eq!(
+        rows.iter()
+            .find(|row| row.source == "child")
+            .unwrap()
+            .target,
+        "/new/child"
+    );
+    assert!(lookup_mounted_mountpoint("/old/child").is_none());
+    assert!(Arc::ptr_eq(
+        &lookup_mounted_mountpoint("/new/child").unwrap(),
+        &child
+    ));
+    let resolved_parent = block_on(root.lookup_no_follow("new")).unwrap();
+    assert!(Arc::ptr_eq(resolved_parent.mountpoint(), &parent));
+    let resolved_child = block_on(resolved_parent.lookup_no_follow("child")).unwrap();
+    assert!(Arc::ptr_eq(resolved_child.mountpoint(), &child));
+    assert_eq!(
+        resolved_child.absolute_path().unwrap().as_str(),
+        "/new/child"
+    );
+    unmount_filesystem(&resolved_child).unwrap();
+    unmount_filesystem(&resolved_parent).unwrap();
+    assert!(list_mounts().is_empty());
+}

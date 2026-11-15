@@ -65,11 +65,18 @@ pub fn mount_filesystem(
     probe: impl FnOnce() -> VfsResult<Filesystem>,
 ) -> VfsResult<Arc<Mountpoint>> {
     target.check_is_dir()?;
-    let mut target_path = target.absolute_path()?.to_string();
-    if target_path == "/" || lookup_mounted_mountpoint(&target_path).is_some() {
+    let initial_path = target.absolute_path()?;
+    if initial_path.as_str() == "/" || lookup_mounted_mountpoint(initial_path.as_str()).is_some() {
         return Err(VfsError::ResourceBusy);
     }
     let filesystem = probe()?;
+    // A probe may block while an ancestor is moved. Refresh the pathname and
+    // ask VFS to validate this snapshot under the topology writer at attach.
+    let expected_path = target.absolute_path()?;
+    let mut target_path = expected_path.to_string();
+    if target_path == "/" {
+        return Err(VfsError::ResourceBusy);
+    }
     let readonly = flags & 1 != 0;
     let mut record = Some(MountRecord {
         source: source.to_string(),
@@ -88,7 +95,7 @@ pub fn mount_filesystem(
     let mut records = MOUNT_RECORDS.lock();
     mountpoints.try_reserve(1).map_err(|_| VfsError::NoMemory)?;
     records.try_reserve(1).map_err(|_| VfsError::NoMemory)?;
-    target.mount_with(&filesystem, |mountpoint| {
+    target.mount_with(&filesystem, Some(expected_path.as_str()), |mountpoint| {
         // Recheck after probing: another mount may have won the target while
         // the probe was doing I/O. A pathname conflict also rejects stacking
         // through an already-resolved mount root in the ordinary workflow.

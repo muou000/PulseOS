@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run user ABI read/write regressions on a private snapshot image (RV64 or LA64)."""
+"""Run syscall regressions on a private snapshot image (RV64 or LA64)."""
 import argparse
 from datetime import datetime
 import hashlib
@@ -33,7 +33,7 @@ def command(argv):
 
 
 def prepare(arch, image, output, suite="reads"):
-    source = BASE.parent / f"user_abi_{suite}"
+    source = BASE.parent / ("mount_coordination" if suite == "mounts" else f"user_abi_{suite}")
     probe = f"/user-abi-{suite}-probe"
     sysroot = Path(command(["rustc", "--print", "sysroot"]).strip())
     host = next(line[6:] for line in command(["rustc", "-vV"]).splitlines() if line.startswith("host: "))
@@ -128,7 +128,7 @@ def run(args, output, kernel, image):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--suite", choices=("reads", "writes"), default="reads")
+    parser.add_argument("--suite", choices=("reads", "writes", "mounts"), default="reads")
     parser.add_argument("--arch", choices=("riscv64", "loongarch64"), default="riscv64")
     parser.add_argument("--kernel", type=Path)
     parser.add_argument("--image", type=Path)
@@ -137,7 +137,8 @@ def main():
     args = parser.parse_args()
     kernel = (args.kernel or REPO / ("kernel-rv" if args.arch == "riscv64" else "kernel-la")).resolve()
     image = (args.image or REPO / ("disk.img" if args.arch == "riscv64" else "disk-la.img")).resolve()
-    output = (args.log_dir or REPO / "records" / ("user-abi-" + ("157" if args.suite == "reads" else "158") + "-" + args.arch + "-" +
+    issue = {"reads": "157", "writes": "158", "mounts": "160"}[args.suite]
+    output = (args.log_dir or REPO / "records" / ("user-abi-" + issue + "-" + args.arch + "-" +
               datetime.now().strftime("%Y%m%d-%H%M%S-%f"))).resolve()
     output.mkdir(parents=True, exist_ok=False)
     return run(args, output, kernel, image)
