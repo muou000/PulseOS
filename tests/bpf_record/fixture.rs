@@ -32,6 +32,66 @@ global_asm!(
     "break 0"
 );
 
+// A raw clone changes the child's stack before returning. Keep that transition
+// in assembly: the child never returns through a Rust frame on the old stack.
+#[cfg(target_arch = "riscv64")]
+global_asm!(
+    ".section .text.fixture_clone,\"ax\"",
+    ".global fixture_clone",
+    "fixture_clone:",
+    "addi a0, a0, -16",
+    "sd a1, 0(a0)",
+    "mv a1, a0",
+    "li a0, 0x50f00",
+    "li a2, 0",
+    "li a3, 0",
+    "li a4, 0",
+    "li a7, 220",
+    "ecall",
+    "bnez a0, 2f",
+    "ld a0, 0(sp)",
+    "addi sp, sp, 16",
+    "call fixture_child",
+    "unimp",
+    "2:",
+    "ret"
+);
+#[cfg(target_arch = "loongarch64")]
+global_asm!(
+    ".section .text.fixture_clone,\"ax\"",
+    ".global fixture_clone",
+    "fixture_clone:",
+    "addi.d $a0, $a0, -16",
+    "st.d $a1, $a0, 0",
+    "move $a1, $a0",
+    "li.w $a0, 0x50f00",
+    "move $a2, $zero",
+    "move $a3, $zero",
+    "move $a4, $zero",
+    "li.w $a7, 220",
+    "syscall 0",
+    "bnez $a0, 2f",
+    "ld.d $a0, $sp, 0",
+    "addi.d $sp, $sp, 16",
+    "bl fixture_child",
+    "break 0",
+    "2:",
+    "jr $ra"
+);
+
+struct ChildArgs<'a> {
+    binary: &'a str,
+    duration: &'a str,
+}
+unsafe extern "C" {
+    /// # Safety
+    /// stack_top ends a private live RW mapping of at least 256KiB, aligned to
+    /// 16 bytes. args is initialized, aligned and immutable while the child
+    /// runs; both strings refer to NUL-terminated immutable initial argv bytes.
+    /// Parent must not unmap the stack or return while child can access args.
+    fn fixture_clone(stack_top: usize, args: *const core::ffi::c_void) -> isize;
+}
+
 fn call(n: usize, a: usize, b: usize, c: usize, d: usize, e: usize, f: usize) -> isize {
     let result;
     // SAFETY: only the two configured guest architectures reach this code.
@@ -136,6 +196,121 @@ fn fault_iteration() {
     }
     assert_eq!(call(215, address, 12288, 0, 0, 0, 0), 0);
     sleep_ms(1);
+}
+
+fn exec_thread(binary: &str, duration: &str) -> ! {
+    const STACK_SIZE: usize = 256 * 1024;
+    let base = checked(call(222, 0, STACK_SIZE, 3, 0x22, usize::MAX, 0));
+    assert!(base != 0 && base % 4096 == 0);
+    let top = base.checked_add(STACK_SIZE).unwrap();
+    let args = ChildArgs { binary, duration };
+    // SAFETY: mmap owns the checked nonnull aligned 256KiB writable range.
+    // args and its initial-argv strings remain immutable and alive: this parent
+    // never returns or unmaps and is terminated by child's successful exec.
+    // The assembly initializes the child's argument slot before clone, and the
+    // kernel publishes those writes when creating the shared-VM thread. Only
+    // the child accesses its new stack; no Rust reference aliases that range.
+    let tid = checked(unsafe { fixture_clone(top, core::ptr::from_ref(&args).cast()) });
+    assert!(tid != 0);
+    let fd = checked(call(
+        56,
+        (-100isize) as usize,
+        c"exec-thread.tid".as_ptr() as usize,
+        0x241,
+        0o600,
+        0,
+        0,
+    ));
+    let mut digits = [0u8; 32];
+    let mut offset = digits.len();
+    let mut value = tid;
+    while value != 0 {
+        offset -= 1;
+        digits[offset] = b'0' + (value % 10) as u8;
+        value /= 10;
+    }
+    assert_eq!(
+        call(
+            64,
+            fd,
+            digits[offset..].as_ptr() as usize,
+            digits.len() - offset,
+            0,
+            0,
+            0
+        ),
+        (digits.len() - offset) as isize
+    );
+    assert_eq!(call(57, fd, 0, 0, 0, 0, 0), 0);
+    say!(
+        "EXEC_THREAD READY parent_tid={} initial_tid={tid}",
+        checked(call(178, 0, 0, 0, 0, 0, 0))
+    );
+    let start = now();
+    while now() - start < 30_000_000_000 {
+        core::hint::black_box(&args);
+        sleep_ms(10);
+    }
+    say!("FIXTURE FAIL nonleader exec did not replace process");
+    call(94, 1, 0, 0, 0, 0, 0);
+    exit(1)
+}
+
+/// # Safety
+/// Called only by fixture_clone's child trampoline, on its private aligned
+/// stack. args satisfies fixture_clone's lifetime and initialization contract.
+// SAFETY: this is the sole fixture_child symbol and the assembly stub invokes
+// it with the C ABI; successful exec replaces the process and never returns.
+#[unsafe(no_mangle)]
+unsafe extern "C" fn fixture_child(args: *const core::ffi::c_void) -> ! {
+    // SAFETY: the trampoline's entry contract provides a live aligned immutable
+    // ChildArgs; parent remains in its no-return wait until exec terminates it.
+    let args = unsafe { &*args.cast::<ChildArgs<'_>>() };
+    let initial_tid = checked(call(178, 0, 0, 0, 0, 0, 0));
+    let start = now();
+    loop {
+        for value in 0..1_000_000u64 {
+            core::hint::black_box(value.wrapping_mul(17));
+        }
+        let ready = call(
+            56,
+            (-100isize) as usize,
+            c"exec-thread.go".as_ptr() as usize,
+            0,
+            0,
+            0,
+            0,
+        );
+        if ready >= 0 {
+            checked(call(57, ready as usize, 0, 0, 0, 0, 0));
+            break;
+        }
+        assert_eq!(ready, -2);
+        assert!(now() - start < 30_000_000_000, "exec go timeout");
+    }
+    say!("EXEC_THREAD EXEC initial_tid={initial_tid} at_ns={}", now());
+    let argv = [
+        args.binary.as_ptr() as usize,
+        c"cpu".as_ptr() as usize,
+        args.duration.as_ptr() as usize,
+        c"exec-after".as_ptr() as usize,
+        0,
+    ];
+    let env = [0usize];
+    // Pointer arguments name initialized NUL-terminated initial argv or
+    // literals; arrays stay live until synchronous exec succeeds or fails.
+    let rc = call(
+        221,
+        args.binary.as_ptr() as usize,
+        argv.as_ptr() as usize,
+        env.as_ptr() as usize,
+        0,
+        0,
+        0,
+    );
+    say!("FIXTURE FAIL nonleader exec errno={rc}");
+    call(94, 1, 0, 0, 0, 0, 0);
+    exit(1)
 }
 
 fn work(mode: &str, millis: u64, label: &str) {
@@ -257,6 +432,10 @@ unsafe extern "C" fn fixture_main(stack: *const usize) -> ! {
         *arg = core::str::from_utf8(unsafe { core::slice::from_raw_parts(ptr, length) }).unwrap();
     }
     match args[1] {
+        "exec-thread" => {
+            assert_eq!(count, 3);
+            exec_thread(args[0], args[2]);
+        }
         "dump" => {
             assert_eq!(count, 4);
             dump(args[2], args[3]);
