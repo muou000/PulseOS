@@ -27,10 +27,11 @@ pub enum TracepointId {
     TaskExit     = 5,
     TaskEnqueue  = 6,
     PhaseMarker  = 7,
+    PageFault    = 8,
 }
 
 impl TracepointId {
-    pub const ALL: [TracepointId; 7] = [
+    pub const ALL: [TracepointId; 8] = [
         TracepointId::TaskMetadata,
         TracepointId::SchedSwitch,
         TracepointId::TaskBlock,
@@ -38,6 +39,7 @@ impl TracepointId {
         TracepointId::TaskExit,
         TracepointId::TaskEnqueue,
         TracepointId::PhaseMarker,
+        TracepointId::PageFault,
     ];
 
     #[inline]
@@ -54,6 +56,7 @@ impl TracepointId {
             5 => Ok(Self::TaskExit),
             6 => Ok(Self::TaskEnqueue),
             7 => Ok(Self::PhaseMarker),
+            8 => Ok(Self::PageFault),
             100..=105 => Err(TracepointError::DeferredId(raw)),
             _ => Err(TracepointError::UnknownId(raw)),
         }
@@ -226,6 +229,105 @@ pub struct PhaseMarkerContext {
     pub phase_boundary: u32,
     pub phase_len: u32,
     pub phase_name: [u8; 16],
+}
+
+/// Access bits are an independent observation ABI, not raw MappingFlags bits.
+pub struct PageFaultAccess;
+impl PageFaultAccess {
+    /// Architecture did not identify READ/WRITE/EXECUTE (e.g. LA privilege fault).
+    pub const UNKNOWN: u32 = 0;
+    pub const READ: u32 = 1;
+    pub const WRITE: u32 = 2;
+    pub const EXECUTE: u32 = 4;
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u32)]
+pub enum PageFaultOrigin {
+    Kernel = 1,
+    User   = 2,
+}
+
+/// Result of the address-space resolver, before trap signal/fixup handling.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u32)]
+pub enum PageFaultOutcome {
+    Resolved      = 1,
+    NotHandled    = 2,
+    NoMemory      = 3,
+    ResolverError = 4,
+}
+
+/// Linux-style minor/major classification requires actual I/O provenance.
+/// Current PulseOS producers always emit Unknown; the other tags reserve an
+/// explicit extension that cannot be inferred from latency or backing type.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u32)]
+pub enum PageFaultClassification {
+    Unknown = 0,
+    Minor   = 1,
+    Major   = 2,
+}
+
+/// One returned resolver call. `common` identifies the faulting task and the
+/// completion CPU/time. Wall duration includes any waits or descheduling.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PageFaultContext {
+    pub common: ContextCommon,
+    pub fault_address: u64,
+    pub start_ns: u64,
+    pub elapsed_ns: u64,
+    pub access: u32,
+    pub origin: u32,
+    pub outcome: u32,
+    pub classification: u32,
+}
+
+impl PageFaultContext {
+    /// Construct an unknown-I/O-classification completion from measured times.
+    /// A regressed clock cannot be represented as a zero-duration success.
+    pub fn from_completion(
+        common: ContextCommon,
+        fault_address: u64,
+        start_ns: u64,
+        access: u32,
+        origin: PageFaultOrigin,
+        outcome: PageFaultOutcome,
+    ) -> Option<Self> {
+        let elapsed_ns = common.timestamp_ns.checked_sub(start_ns)?;
+        Some(Self {
+            common,
+            fault_address,
+            start_ns,
+            elapsed_ns,
+            access,
+            origin: origin as u32,
+            outcome: outcome as u32,
+            classification: PageFaultClassification::Unknown as u32,
+        })
+    }
+
+    /// Explicit little-endian encoding; does not inspect struct padding.
+    pub fn to_bytes(&self) -> [u8; 80] {
+        let mut bytes = [0u8; 80];
+        bytes[0..4].copy_from_slice(&self.common.event_id.to_le_bytes());
+        bytes[4..8].copy_from_slice(&self.common.version.to_le_bytes());
+        bytes[8..16].copy_from_slice(&self.common.timestamp_ns.to_le_bytes());
+        bytes[16..20].copy_from_slice(&self.common.cpu_id.to_le_bytes());
+        bytes[20..24].copy_from_slice(&self.common.pid.to_le_bytes());
+        bytes[24..28].copy_from_slice(&self.common.tid.to_le_bytes());
+        bytes[28..32].copy_from_slice(&self.common._reserved.to_le_bytes());
+        bytes[32..40].copy_from_slice(&self.common.task_id.to_le_bytes());
+        bytes[40..48].copy_from_slice(&self.fault_address.to_le_bytes());
+        bytes[48..56].copy_from_slice(&self.start_ns.to_le_bytes());
+        bytes[56..64].copy_from_slice(&self.elapsed_ns.to_le_bytes());
+        bytes[64..68].copy_from_slice(&self.access.to_le_bytes());
+        bytes[68..72].copy_from_slice(&self.origin.to_le_bytes());
+        bytes[72..76].copy_from_slice(&self.outcome.to_le_bytes());
+        bytes[76..80].copy_from_slice(&self.classification.to_le_bytes());
+        bytes
+    }
 }
 
 #[repr(C, align(8))]
@@ -416,11 +518,25 @@ define_tp_fields!(
     ]
 );
 
+define_tp_fields!(
+    PAGE_FAULT_FIELDS,
+    15,
+    [
+        FieldMetadata { name: "fault_address", offset: 40, size: 8, field_type: FieldType::U64 },
+        FieldMetadata { name: "start_ns", offset: 48, size: 8, field_type: FieldType::U64 },
+        FieldMetadata { name: "elapsed_ns", offset: 56, size: 8, field_type: FieldType::U64 },
+        FieldMetadata { name: "access", offset: 64, size: 4, field_type: FieldType::U32 },
+        FieldMetadata { name: "origin", offset: 68, size: 4, field_type: FieldType::U32 },
+        FieldMetadata { name: "outcome", offset: 72, size: 4, field_type: FieldType::U32 },
+        FieldMetadata { name: "classification", offset: 76, size: 4, field_type: FieldType::U32 },
+    ]
+);
+
 // -----------------------------------------------------------------------------
 // Tracepoint Registry
 // -----------------------------------------------------------------------------
 
-static TRACEPOINTS: [TracepointMetadata; 7] = [
+static TRACEPOINTS: [TracepointMetadata; 8] = [
     TracepointMetadata {
         id: TracepointId::TaskMetadata,
         category: "task",
@@ -483,6 +599,15 @@ static TRACEPOINTS: [TracepointMetadata; 7] = [
         endianness: Endianness::Little,
         context_size: core::mem::size_of::<PhaseMarkerContext>(),
         fields: &PHASE_MARKER_FIELDS,
+    },
+    TracepointMetadata {
+        id: TracepointId::PageFault,
+        category: "mm",
+        name: "page_fault",
+        version: 1,
+        endianness: Endianness::Little,
+        context_size: core::mem::size_of::<PageFaultContext>(),
+        fields: &PAGE_FAULT_FIELDS,
     },
 ];
 
@@ -758,6 +883,8 @@ const _: () = {
     assert!(core::mem::size_of::<TaskExitContext>() <= MAX_CONTEXT_SIZE);
     assert!(core::mem::size_of::<TaskEnqueueContext>() <= MAX_CONTEXT_SIZE);
     assert!(core::mem::size_of::<PhaseMarkerContext>() <= MAX_CONTEXT_SIZE);
+    assert!(core::mem::size_of::<PageFaultContext>() == 80);
+    assert!(core::mem::size_of::<PageFaultContext>() <= MAX_CONTEXT_SIZE);
     assert!(core::mem::size_of::<PerfEventContext>() == 48);
     assert!(core::mem::align_of::<PerfEventContext>() == 8);
     assert!(core::mem::size_of::<PerfEventContext>() <= MAX_CONTEXT_SIZE);

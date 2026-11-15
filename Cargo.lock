@@ -6,7 +6,6 @@ version = 4
 name = "Pulse"
 version = "0.1.0"
 dependencies = [
- "axalloc",
  "axfeat",
  "axfs",
  "axhal",
@@ -782,6 +781,7 @@ dependencies = [
  "chrono",
  "crate_interface",
  "ctor_bare",
+ "kernel_guard",
  "percpu",
 ]
 

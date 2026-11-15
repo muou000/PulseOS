@@ -44,12 +44,14 @@ class RuntimeRoutingTests(unittest.TestCase):
         self.assertEqual(args[:3], ("build", "loongarch64", "task"))
         self.assertIn("--archive", run.sampling_command(*args))
 
-    def test_gate_requires_both_software_and_scheduler_on_both_architectures(self):
+    def test_gate_requires_software_scheduler_and_fault_on_both_architectures(self):
         with mock.patch.object(run, "run_sampling", return_value=0) as launch:
             self.assertEqual(run.main(["gate"]), 0)
         self.assertEqual([call.args[:3] for call in launch.call_args_list], [
             ("guest", "riscv64", "task"), ("guest", "riscv64", "trace"),
+            ("guest", "riscv64", "sched"), ("guest", "riscv64", "fault"),
             ("guest", "loongarch64", "task"), ("guest", "loongarch64", "trace"),
+            ("guest", "loongarch64", "sched"), ("guest", "loongarch64", "fault"),
         ])
 
     def test_missing_tools_or_runtime_failures_cannot_pass_gate(self):
@@ -161,7 +163,7 @@ class StaticFormatFixtureTests(unittest.TestCase):
             path.write_bytes(b"NOT_A_CAPTURE")
             ok, report = run.feed_analyzer(path)
             self.assertFalse(ok)
-            self.assertIn("Failed to parse BPF capture", report)
+            self.assertIn("failed to parse bpf capture", report.lower())
 
 
 if __name__ == "__main__":

@@ -280,7 +280,28 @@ fn handle_page_fault(
 
     let fault_result = {
         let _irq_guard = is_user.then(TrapIrqEnableGuard::new);
-        proc.handle_page_fault(vaddr, access_flags)
+        #[cfg(feature = "bpf-trace")]
+        let observation = {
+            use axtask::bpf_trace::{PageFaultAccess, PageFaultOrigin, page_fault_begin};
+            let access = u32::from(access_flags.contains(MappingFlags::READ)) * PageFaultAccess::READ
+                | u32::from(access_flags.contains(MappingFlags::WRITE)) * PageFaultAccess::WRITE
+                | u32::from(access_flags.contains(MappingFlags::EXECUTE)) * PageFaultAccess::EXECUTE;
+            page_fault_begin(vaddr.as_usize() as u64, access,
+                if is_user { PageFaultOrigin::User } else { PageFaultOrigin::Kernel })
+        };
+        let result = proc.handle_page_fault(vaddr, access_flags);
+        #[cfg(feature = "bpf-trace")]
+        {
+            use axtask::bpf_trace::{PageFaultOutcome, page_fault_complete};
+            let outcome = match &result {
+                Ok(true) => PageFaultOutcome::Resolved,
+                Ok(false) => PageFaultOutcome::NotHandled,
+                Err(AxError::NoMemory) => PageFaultOutcome::NoMemory,
+                Err(_) => PageFaultOutcome::ResolverError,
+            };
+            page_fault_complete(observation, outcome);
+        }
+        result
     };
     let fault_error = match fault_result {
         Ok(true) => {

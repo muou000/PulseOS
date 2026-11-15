@@ -70,27 +70,29 @@ fn test_render_json_valid_schema_and_completeness_flag() {
 
 #[test]
 fn test_render_folded_on_and_off_cpu_complete_vs_incomplete() {
-    // 1. Complete capture folded output
+    // 1. Container completeness does not supply missing CPU/blocked samples
     let comp_bytes = generate_deterministic_fixture(CaptureArch::Riscv64, SessionStatusCode::Complete)
         .expect("fixture");
     let comp_analyzer = CaptureAnalyzer::from_bytes(&comp_bytes).unwrap();
     let on_cpu = comp_analyzer.render_on_cpu_folded();
-    assert!(on_cpu.is_complete);
-    assert!(!on_cpu.text.contains("[INCOMPLETE_CAPTURE]"));
+    assert!(!on_cpu.is_complete, "the fixture has no CPU sample or completed blocked interval");
+    assert!(on_cpu.text.is_empty(), "absence must not create a folded weight");
 
     let off_cpu = comp_analyzer.render_off_cpu_folded();
-    assert!(off_cpu.is_complete);
-    assert!(!off_cpu.text.contains("[INCOMPLETE_CAPTURE]"));
+    assert!(!off_cpu.is_complete, "the fixture has no CPU sample or completed blocked interval");
+    assert!(off_cpu.text.is_empty(), "absence must not create a folded weight");
 
-    // 2. Incomplete lossy capture folded output must be marked incomplete
+    // 2. Empty folded outputs still retain the original lossy capture status
     let loss_bytes = generate_deterministic_fixture(CaptureArch::Riscv64, SessionStatusCode::IncompleteLoss)
         .expect("fixture");
     let loss_analyzer = CaptureAnalyzer::from_bytes(&loss_bytes).unwrap();
     let loss_on_cpu = loss_analyzer.render_on_cpu_folded();
     assert!(!loss_on_cpu.is_complete);
-    assert!(loss_on_cpu.text.contains("[INCOMPLETE_CAPTURE]"));
+    assert!(loss_on_cpu.text.is_empty());
+    assert_eq!(loss_on_cpu.status, SessionStatusCode::IncompleteLoss);
 
     let loss_off_cpu = loss_analyzer.render_off_cpu_folded();
     assert!(!loss_off_cpu.is_complete);
-    assert!(loss_off_cpu.text.contains("[INCOMPLETE_CAPTURE]"));
+    assert!(loss_off_cpu.text.is_empty());
+    assert_eq!(loss_off_cpu.status, SessionStatusCode::IncompleteLoss);
 }

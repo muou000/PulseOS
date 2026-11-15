@@ -76,6 +76,11 @@ pub fn rust_main_secondary(cpu_id: usize) -> ! {
         axipi::mark_current_cpu_ready();
     }
 
+    // With boot accounting checks enabled, publishing readiness promises that
+    // this CPU will stay quiescent until the primary releases is_init_ok().
+    // Its PCP was initialized at entry; no task/GC loop may run in this window.
+    #[cfg(feature = "pcp-boot-checks")]
+    assert!(!axhal::asm::irqs_enabled(), "secondary CPU enabled IRQs before PCP boot barrier");
     info!("Secondary CPU {:x} init OK.", cpu_id);
     super::INITED_CPUS.fetch_add(1, Ordering::Release);
 

@@ -47,15 +47,25 @@ pub enum EventPayload {
         phase_boundary: PhaseBoundary,
         phase_name: String,
     },
+    /// Legacy v1 carries a data address, not an instruction pointer or mode.
     SoftwareSample {
         sample_period: u64,
-        pc: u64,
+        addr: u64,
     },
     SoftwareSampleV2 {
         sample_period: u64,
         addr: u64,
         pc: u64,
         mode: u32,
+    },
+    PageFault {
+        address: u64,
+        start_ns: u64,
+        elapsed_ns: u64,
+        access: u32,
+        origin: u32,
+        outcome: u32,
+        classification: u32,
     },
     Raw {
         bytes: Vec<u8>,
@@ -87,6 +97,7 @@ impl NormalizedEvent {
             x if x == TracepointId::TaskExit as u32 => "task_exit",
             x if x == TracepointId::TaskEnqueue as u32 => "task_enqueue",
             x if x == TracepointId::PhaseMarker as u32 => "phase_marker",
+            x if x == TracepointId::PageFault as u32 => "page_fault",
             x if x == PERF_EVENT_SOFTWARE_ID => "perf_sample",
             x if x == PERF_EVENT_SOFTWARE_V2_ID => "perf_sample_v2",
             _ => "unknown",
@@ -100,56 +111,87 @@ fn parse_string(bytes: &[u8]) -> String {
 }
 
 pub fn parse_records(records: &[NormalizedRecord]) -> Vec<NormalizedEvent> {
-    // 1. Build initial task comm mapping
-    let mut comm_map: HashMap<u64, String> = HashMap::new();
-    for rec in records {
-        if rec.event_id == TracepointId::TaskMetadata as u32 && rec.payload.len() >= 32 {
-            let target_task_id = u64::from_le_bytes(rec.payload[0..8].try_into().unwrap());
-            let comm = parse_string(&rec.payload[16..32]);
-            if !comm.is_empty() {
-                comm_map.insert(target_task_id, comm);
-            }
-        }
-    }
-
-    // 2. Parse records into NormalizedEvent
-    let mut parsed: Vec<NormalizedEvent> = records
+    let mut parsed: Vec<_> = records
         .iter()
         .enumerate()
-        .map(|(idx, rec)| {
-            let payload = parse_payload(rec.event_id, &rec.payload);
-            let comm = comm_map.get(&rec.task_id).cloned().or_else(|| {
-                if let EventPayload::TaskMetadata { ref comm, .. } = payload {
-                    Some(comm.clone())
-                } else {
-                    None
-                }
-            });
-
-            NormalizedEvent {
-                sequence_index: idx,
-                event_id: rec.event_id,
-                schema_version: rec.schema_version,
-                timestamp_ns: rec.timestamp_ns,
-                cpu_id: rec.cpu_id,
-                pid: rec.pid,
-                tid: rec.tid,
-                task_id: rec.task_id,
-                comm,
-                payload,
-            }
+        .map(|(idx, rec)| NormalizedEvent {
+            sequence_index: idx,
+            event_id: rec.event_id,
+            schema_version: rec.schema_version,
+            timestamp_ns: rec.timestamp_ns,
+            cpu_id: rec.cpu_id,
+            pid: rec.pid,
+            tid: rec.tid,
+            task_id: rec.task_id,
+            comm: None,
+            payload: parse_payload(rec.event_id, &rec.payload),
         })
         .collect();
-
-    // 3. Anchor A2: Sort globally by timestamp_ns ascending, with stable tie-breaker
-    parsed.sort_by(|a, b| {
-        a.timestamp_ns
-            .cmp(&b.timestamp_ns)
-            .then_with(|| a.sequence_index.cmp(&b.sequence_index))
-    });
-
+    parsed.sort_by_key(|event| (event.timestamp_ns, event.sequence_index));
+    let mut names: HashMap<u64, String> = HashMap::new();
+    let mut offset = 0;
+    while offset < parsed.len() {
+        let time = parsed[offset].timestamp_ns;
+        let end = parsed[offset..]
+            .iter()
+            .position(|e| e.timestamp_ns != time)
+            .map_or(parsed.len(), |n| offset + n);
+        let mut updates: HashMap<u64, Vec<(u32, usize, String)>> = HashMap::new();
+        for event in &parsed[offset..end] {
+            if let EventPayload::TaskMetadata {
+                target_task_id,
+                comm,
+                ..
+            } = &event.payload
+            {
+                updates.entry(*target_task_id).or_default().push((
+                    event.cpu_id,
+                    event.sequence_index,
+                    comm.clone(),
+                ));
+            }
+        }
+        for event in &mut parsed[offset..end] {
+            event.comm = names.get(&event.task_id).cloned();
+            if let Some(values) = updates.get(&event.task_id) {
+                for (cpu, sequence, name) in values {
+                    if *cpu == event.cpu_id && *sequence <= event.sequence_index {
+                        event.comm = (!name.is_empty()).then(|| name.clone());
+                    }
+                }
+                if values
+                    .iter()
+                    .any(|(cpu, _, name)| *cpu != event.cpu_id && event.comm.as_ref() != Some(name))
+                {
+                    // Equal timestamps from different CPUs do not establish
+                    // whether a rename occurred before this observation.
+                    event.comm = None;
+                }
+            }
+        }
+        for (task, values) in updates {
+            if values.iter().any(|(cpu, ..)| *cpu != values[0].0)
+                && values.iter().any(|(_, _, name)| *name != values[0].2)
+            {
+                names.remove(&task);
+            } else if let Some((_, _, name)) = values.last() {
+                if name.is_empty() {
+                    names.remove(&task);
+                } else {
+                    names.insert(task, name.clone());
+                }
+            }
+        }
+        for event in &parsed[offset..end] {
+            if let EventPayload::TaskExit { exit_task_id, .. } = &event.payload {
+                names.remove(exit_task_id);
+            }
+        }
+        offset = end;
+    }
     parsed
 }
+
 
 fn parse_payload(event_id: u32, payload: &[u8]) -> EventPayload {
     match event_id {
@@ -229,10 +271,10 @@ fn parse_payload(event_id: u32, payload: &[u8]) -> EventPayload {
         }
         x if x == TracepointId::PhaseMarker as u32 && payload.len() >= 24 => {
             let raw_boundary = u32::from_le_bytes(payload[0..4].try_into().unwrap());
-            let phase_boundary = if raw_boundary == PhaseBoundary::End as u32 {
-                PhaseBoundary::End
-            } else {
-                PhaseBoundary::Begin
+            let phase_boundary = match raw_boundary {
+                value if value == PhaseBoundary::Begin as u32 => PhaseBoundary::Begin,
+                value if value == PhaseBoundary::End as u32 => PhaseBoundary::End,
+                _ => return EventPayload::Raw { bytes: payload.to_vec() },
             };
             let phase_len = u32::from_le_bytes(payload[4..8].try_into().unwrap()) as usize;
             let end_idx = 8 + phase_len.min(16);
@@ -240,6 +282,17 @@ fn parse_payload(event_id: u32, payload: &[u8]) -> EventPayload {
             EventPayload::PhaseMarker {
                 phase_boundary,
                 phase_name,
+            }
+        }
+        x if x == TracepointId::PageFault as u32 && payload.len() == 40 => {
+            EventPayload::PageFault {
+                address:u64::from_le_bytes(payload[0..8].try_into().unwrap()),
+                start_ns:u64::from_le_bytes(payload[8..16].try_into().unwrap()),
+                elapsed_ns:u64::from_le_bytes(payload[16..24].try_into().unwrap()),
+                access:u32::from_le_bytes(payload[24..28].try_into().unwrap()),
+                origin:u32::from_le_bytes(payload[28..32].try_into().unwrap()),
+                outcome:u32::from_le_bytes(payload[32..36].try_into().unwrap()),
+                classification:u32::from_le_bytes(payload[36..40].try_into().unwrap()),
             }
         }
         x if x == PERF_EVENT_SOFTWARE_V2_ID && payload.len() == 32 => {
@@ -252,8 +305,8 @@ fn parse_payload(event_id: u32, payload: &[u8]) -> EventPayload {
         }
         x if x == PERF_EVENT_SOFTWARE_ID && payload.len() >= 16 => {
             let sample_period = u64::from_le_bytes(payload[0..8].try_into().unwrap());
-            let pc = u64::from_le_bytes(payload[8..16].try_into().unwrap());
-            EventPayload::SoftwareSample { sample_period, pc }
+            let addr = u64::from_le_bytes(payload[8..16].try_into().unwrap());
+            EventPayload::SoftwareSample { sample_period, addr }
         }
         _ => EventPayload::Raw {
             bytes: payload.to_vec(),

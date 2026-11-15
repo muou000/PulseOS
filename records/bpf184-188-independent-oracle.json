@@ -1,0 +1,118 @@
+{
+  "oracle": "independent offline record and semantic-witness checks; not guest production proof",
+  "verified": true,
+  "run_count": 8,
+  "matched_records": 4875,
+  "runs": [
+    {
+      "run": "riscv64-task-20261115-032249-ewxy2kjb",
+      "arch": "riscv64",
+      "mode": "task",
+      "verified": true,
+      "raw_frames": 64,
+      "matched_records": 64,
+      "capture_sha256": "51e60b07d454d1f1a43198b2041d75cba452abaff48835b1aac9a4c7b8fc5e28",
+      "capture_status": "IncompleteError",
+      "semantic": null
+    },
+    {
+      "run": "riscv64-trace-20261115-032257-i595p9dv",
+      "arch": "riscv64",
+      "mode": "trace",
+      "verified": true,
+      "raw_frames": 568,
+      "matched_records": 568,
+      "capture_sha256": "9752f6a27ee161ebe5e7f95b70ab09dfd13c20b29315455033f84052868b82a5",
+      "capture_status": "IncompleteError",
+      "semantic": null
+    },
+    {
+      "run": "riscv64-sched-20261115-032300-p2ixq3hb",
+      "arch": "riscv64",
+      "mode": "sched",
+      "verified": true,
+      "raw_frames": 1436,
+      "matched_records": 1436,
+      "capture_sha256": "846daf6c695446221cd0770cb77e95ddb1cf3ad87394be51711f055067449b6c",
+      "capture_status": "IncompleteError",
+      "semantic": {
+        "valid_instances": 266,
+        "blocked_pairs": 268,
+        "wake_to_switch_sum_ns": 18057100
+      }
+    },
+    {
+      "run": "riscv64-fault-20261115-032305-4zypjw9d",
+      "arch": "riscv64",
+      "mode": "fault",
+      "verified": true,
+      "raw_frames": 258,
+      "matched_records": 258,
+      "capture_sha256": "023e981f723a7a28b9332ea35092f67294563118cd0ffdd26ba7c32faf461390",
+      "capture_status": "IncompleteError",
+      "semantic": {
+        "valid_instances": 258,
+        "unknown_classification": 258,
+        "unknown_access": 0,
+        "read_hits": 128,
+        "write_hits": 128,
+        "resolver_sum_ns": 4681800
+      }
+    },
+    {
+      "run": "loongarch64-task-20261115-032309-y6blsbas",
+      "arch": "loongarch64",
+      "mode": "task",
+      "verified": true,
+      "raw_frames": 37,
+      "matched_records": 37,
+      "capture_sha256": "1aa352f5cad71f1f43e9a26b0654029829e63eb1fc0b04f0309c0493056e761b",
+      "capture_status": "IncompleteError",
+      "semantic": null
+    },
+    {
+      "run": "loongarch64-trace-20261115-032317-xeaoa4mf",
+      "arch": "loongarch64",
+      "mode": "trace",
+      "verified": true,
+      "raw_frames": 576,
+      "matched_records": 576,
+      "capture_sha256": "203785ab552fd4e7462870e9ae60baf4287bfbc366d9e238795a69a0b3d4c690",
+      "capture_status": "IncompleteError",
+      "semantic": null
+    },
+    {
+      "run": "loongarch64-sched-20261115-032322-ujid_c4x",
+      "arch": "loongarch64",
+      "mode": "sched",
+      "verified": true,
+      "raw_frames": 1678,
+      "matched_records": 1678,
+      "capture_sha256": "223be4e2fda7c84fe535ac5829553dee3ac002bd4eee7c82180c2e5beaf152ee",
+      "capture_status": "IncompleteError",
+      "semantic": {
+        "valid_instances": 269,
+        "blocked_pairs": 269,
+        "wake_to_switch_sum_ns": 6464740
+      }
+    },
+    {
+      "run": "loongarch64-fault-20261115-032328-pniuo3_9",
+      "arch": "loongarch64",
+      "mode": "fault",
+      "verified": true,
+      "raw_frames": 258,
+      "matched_records": 258,
+      "capture_sha256": "9aa419f034ab303e9f30906160bcc615f2acdb6af1a9f8923f18e04a78e99a97",
+      "capture_status": "IncompleteError",
+      "semantic": {
+        "valid_instances": 258,
+        "unknown_classification": 258,
+        "unknown_access": 0,
+        "read_hits": 128,
+        "write_hits": 128,
+        "resolver_sum_ns": 4267380
+      }
+    }
+  ]
+}

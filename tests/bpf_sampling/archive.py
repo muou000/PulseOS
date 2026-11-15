@@ -96,6 +96,9 @@ def extract(text: str, mode: str) -> tuple[bytes, dict, dict[str, bytes]]:
         if len(matches) != 1:
             raise ValueError(f"missing or duplicate {prefix} {point}")
         return matches[0]
+    if mode not in ("task", "cpu", "trace", "block", "wake", "sched", "fault"):
+        raise ValueError("unknown requested archive mode")
+    trace_sizes = {1:72, 2:72, 3:72, 4:80, 5:56, 6:64}
     begin, end = one("ARCHIVE BEGIN "), one("ARCHIVE END ")
     if begin.get("version") != "1" or begin.get("mode") != mode:
         raise ValueError("unknown archive format or mode")
@@ -110,6 +113,7 @@ def extract(text: str, mode: str) -> tuple[bytes, dict, dict[str, bytes]]:
         raise ValueError("empty capture or invalid time window")
     position, frames, samples, lost = 0, 0, 0, 0
     frame_sizes = [[] for _ in range(8)]
+    fault_records = []
     while position < len(raw):
         if len(raw) - position < 24:
             raise ValueError("truncated frame envelope")
@@ -126,7 +130,11 @@ def extract(text: str, mode: str) -> tuple[bytes, dict, dict[str, bytes]]:
             if size < 12:
                 raise ValueError("short RAW sample")
             n, = struct.unpack_from("<I", frame, 8)
-            expected = {"task":64,"cpu":64,"trace":72,"block":72,"wake":80}[mode]
+            if mode == "sched":
+                event = struct.unpack_from("<I", frame, 12)[0] if size >= 16 else 0
+                expected = trace_sizes.get(event)
+            else:
+                expected = {"task":64,"cpu":64,"trace":72,"block":72,"wake":80,"fault":80}[mode]
             if n != expected or not 12+n <= size <= 12+n+7:
                 raise ValueError("RAW sample length differs from declared program")
             payload = frame[12:12+n]
@@ -138,10 +146,16 @@ def extract(text: str, mode: str) -> tuple[bytes, dict, dict[str, bytes]]:
                     raise ValueError("not a v2 software sample")
             else:
                 event, version, timestamp, source_cpu = struct.unpack_from("<IIQI", payload)
-                if event != {"trace":2,"block":3,"wake":4}[mode] or version != 1:
+                if (mode != "sched" and event != {"trace":2,"block":3,"wake":4,"fault":8}[mode]) or version != 1:
                     raise ValueError("not the declared tracepoint")
             if source_cpu != cpu or not start <= timestamp <= stop:
                 raise ValueError("sample source CPU/time outside capture")
+            if mode == "fault":
+                address, fault_start, elapsed, access, origin, outcome, classification = struct.unpack_from("<QQQIIII",payload,40)
+                pid,tid,reserved,task=struct.unpack_from("<IIIQ",payload,20)
+                if reserved or task == 0 or fault_start > timestamp or elapsed != timestamp-fault_start or access & ~7 or origin not in (1,2) or outcome not in (1,2,3,4) or classification != 0:
+                    raise ValueError("invalid native fault completion")
+                fault_records.append((pid,tid,address,access,origin,outcome))
             samples += 1
         elif kind == 2 and size == 24:
             lost += struct.unpack_from("<Q", frame, 16)[0]
@@ -160,9 +174,26 @@ def extract(text: str, mode: str) -> tuple[bytes, dict, dict[str, bytes]]:
             raise ValueError("diagnostics truncated or corrupt")
         stats_raw[point] = data
         snapshots[point] = parse_stats(data)
+        if mode == "fault" and not {"fault_started","fault_completed","fault_clock_errors"} <= snapshots[point]["global"].keys():
+            raise ValueError("missing mandatory fault diagnostics")
     config = one("ARCHIVE CONFIG ")
     if config.get("mode") != mode or any(int(config[key]) == 0 for key in ("program_id", "output_map_id", "scratch_map_id", "buffer_pages")):
         raise ValueError("invalid program/map identity or mode")
+    program_bindings = []
+    for line in lines:
+        if line.startswith("ARCHIVE PROGRAM "):
+            program_bindings.append({key: int(value) for key, value in fields(line).items()})
+    if mode == "sched":
+        if len(program_bindings) != 6 or {row["tracepoint"] for row in program_bindings} != set(trace_sizes):
+            raise ValueError("missing or duplicate scheduler program binding")
+        if len({row["program_id"] for row in program_bindings}) != 6:
+            raise ValueError("scheduler sources require distinct declared programs")
+        for row in program_bindings:
+            if row["program_id"] <= 0 or row["context_bytes"] != trace_sizes[row["tracepoint"]]:
+                raise ValueError("incorrect scheduler program context")
+    elif program_bindings:
+        raise ValueError("unexpected multiple program configuration")
+    bound_program = {row["tracepoint"]:row["program_id"] for row in program_bindings}
     sources = []
     for line in lines:
         if not line.startswith("ARCHIVE SOURCE "):
@@ -173,7 +204,10 @@ def extract(text: str, mode: str) -> tuple[bytes, dict, dict[str, bytes]]:
         after = snapshots["after"]["events"].get(fd)
         if before is None or after is None or before["id"] != after["id"] or source["link_id"] == 0:
             raise ValueError("source event or link identity changed")
-        if before["program_id"] != int(config["program_id"]) or after["program_id"] != int(config["program_id"]):
+        expected_program = bound_program.get(before["config"]) if mode == "sched" else int(config["program_id"])
+        if any(before[key] != after[key] for key in ("clock","config","scope","target","task_id","period")):
+            raise ValueError("source configuration changed during capture")
+        if before["program_id"] != expected_program or after["program_id"] != expected_program:
             raise ValueError("source attached to a different program")
         if before["enabled"] or after["enabled"] or before["inflight"] or after["inflight"]:
             raise ValueError("non-quiescent capture boundary")
@@ -181,10 +215,19 @@ def extract(text: str, mode: str) -> tuple[bytes, dict, dict[str, bytes]]:
             raise ValueError("invalid per-source control window")
         source["event_id"] = before["id"]
         sources.append(source)
-    if len(sources) != (1 if mode == "task" else 8) or len({s["fd"] for s in sources}) != len(sources):
+    if len(sources) != (1 if mode == "task" else 48 if mode == "sched" else 8) or len({s["fd"] for s in sources}) != len(sources):
         raise ValueError("missing or duplicate source configuration")
     if len({source["event_id"] for source in sources}) != len(sources):
         raise ValueError("source aliases would double-count one event")
+    source_rows = [snapshots["before"]["events"][item["fd"]] for item in sources]
+    if mode == "sched":
+        coverage = {(row["config"], row["target"]) for row in source_rows if row["clock"] == 2 and row["scope"] == "cpu"}
+        if coverage != {(event,cpu) for event in trace_sizes for cpu in range(8)}:
+            raise ValueError("scheduler source CPU/event coverage incomplete")
+    if mode == "fault":
+        coverage = {(row["config"], row["target"]) for row in source_rows if row["clock"] == 2 and row["scope"] == "cpu"}
+        if coverage != {(8,cpu) for cpu in range(8)}:
+            raise ValueError("fault source CPU/event coverage incomplete")
     before, after = snapshots["before"], snapshots["after"]
     def delta(old: dict, new: dict, key: str) -> int:
         difference = new[key] - old[key]
@@ -192,11 +235,15 @@ def extract(text: str, mode: str) -> tuple[bytes, dict, dict[str, bytes]]:
             raise ValueError(f"counter regressed: {key}")
         return difference
     vm_delivered = sum(delta(before["events"][s["fd"]], after["events"][s["fd"]], "delivered") for s in sources)
-    program_id = int(config["program_id"])
-    program_runs = delta(before["programs"][program_id], after["programs"][program_id], "runs")
-    program_errors = delta(before["programs"][program_id], after["programs"][program_id], "errors")
-    if program_runs < program_errors or program_runs - program_errors != vm_delivered:
-        raise ValueError("program execution counters do not reconcile with source delivery")
+    program_errors = {}
+    for program_id in {row["program_id"] for row in source_rows}:
+        runs = delta(before["programs"][program_id], after["programs"][program_id], "runs")
+        errors = delta(before["programs"][program_id], after["programs"][program_id], "errors")
+        delivered = sum(delta(before["events"][row["fd"]], after["events"][row["fd"]], "delivered")
+                        for row in source_rows if row["program_id"] == program_id)
+        if runs < errors or runs - errors != delivered:
+            raise ValueError("program execution counters do not reconcile with source delivery")
+        program_errors[program_id] = errors
     sink_delivered = sink_lost = 0
     seen_sinks = set()
     for fd, old in before["events"].items():
@@ -220,11 +267,56 @@ def extract(text: str, mode: str) -> tuple[bytes, dict, dict[str, bytes]]:
         raise ValueError("inconsistent export overflow counters")
     if vm_delivered != samples + sink_lost + dropped_samples or sink_delivered != samples + dropped_samples or lost > sink_lost:
         raise ValueError("actual ring frames do not reconcile with producer/sink counters")
+    fault_workload = None
+    fault_targets = []
+    if mode == "fault":
+        if dropped:
+            raise ValueError("fault workload reconciliation requires an untruncated export")
+        def unsigned_fields(values):
+            if any(not value.isdecimal() or int(value) > (1 << 64)-1 for value in values.values()):
+                raise ValueError("invalid unsigned fault workload field")
+            return {key:int(value) for key,value in values.items()}
+        fault_workload = unsigned_fields(one("ARCHIVE FAULT_WORKLOAD "))
+        if not {"pid","tid","iterations","read_hits","write_hits"} <= fault_workload.keys() or not 0 < fault_workload["pid"] < (1 << 32) or not 0 < fault_workload["tid"] < (1 << 32) or fault_workload["iterations"] != 128:
+            raise ValueError("invalid fault workload identity/iterations")
+        if before["pid"] != fault_workload["pid"] or after["pid"] != fault_workload["pid"]:
+            raise ValueError("fault workload differs from snapshot process")
+        for line in lines:
+            if not line.startswith("ARCHIVE FAULT_TARGET "):
+                continue
+            target=unsigned_fields(fields(line))
+            if not {"index","read","write"} <= target.keys() or target["index"] != len(fault_targets) or target["read"] == 0 or target["read"] % 4096 or target["write"] != target["read"] + 8192:
+                raise ValueError("missing/reordered/invalid fault target")
+            fault_targets.append(target)
+        if len(fault_targets) != 128:
+            raise ValueError("fault workload does not preserve all iteration targets")
+        reads={target["read"] for target in fault_targets}
+        writes={target["write"] for target in fault_targets}
+        actual_read_hits=actual_write_hits=0
+        for pid,tid,address,access,origin,outcome in fault_records:
+            if (pid,tid,origin) != (fault_workload["pid"],fault_workload["tid"],2):
+                continue
+            read_match=address in reads and bool(access & 1)
+            write_match=address in writes and bool(access & 2)
+            if (read_match or write_match) and outcome != 1:
+                raise ValueError("fresh fault workload resolver failed")
+            actual_read_hits+=int(read_match)
+            actual_write_hits+=int(write_match)
+        if min(actual_read_hits,actual_write_hits) == 0 or (actual_read_hits,actual_write_hits) != (fault_workload["read_hits"],fault_workload["write_hits"]):
+            raise ValueError("fault workload hits do not match actual RAW records")
+        # System observer counters can include unrelated/in-flight resolver
+        # calls; preserve monotonic deltas without equating them to FD delivery.
+        for name in ("fault_started","fault_completed","fault_clock_errors"):
+            delta(before["global"],after["global"],name)
     observed_issues = []
     for name in ("timer_full", "timer_busy", "trace_full", "trace_recursive"):
         value = delta(before["global"], after["global"], name)
         if value:
             observed_issues.append({"scope":"global", "counter":name, "delta":value})
+    if "fault_clock_errors" in before["global"] and "fault_clock_errors" in after["global"]:
+        value = delta(before["global"], after["global"], "fault_clock_errors")
+        if value:
+            observed_issues.append({"scope":"global", "counter":"fault_clock_errors", "delta":value})
     for source in sources:
         old, new = before["events"][source["fd"]], after["events"][source["fd"]]
         for name in ("skipped", "cancelled", "invalid", "reentry", "helper", "budget"):
@@ -236,8 +328,9 @@ def extract(text: str, mode: str) -> tuple[bytes, dict, dict[str, bytes]]:
             value = delta(old, after["events"][fd], name)
             if value:
                 observed_issues.append({"scope":"event", "id":old["id"], "counter":name, "delta":value})
-    if program_errors:
-        observed_issues.append({"scope":"program", "id":program_id, "counter":"errors", "delta":program_errors})
+    for program_id, errors in program_errors.items():
+        if errors:
+            observed_issues.append({"scope":"program", "id":program_id, "counter":"errors", "delta":errors})
     if sink_lost:
         observed_issues.append({"scope":"transport", "counter":"lost", "delta":sink_lost})
     if dropped:
@@ -285,6 +378,7 @@ def extract(text: str, mode: str) -> tuple[bytes, dict, dict[str, bytes]]:
     return binary, {"version":1, "mode":mode, "start_ns":start, "stop_ns":stop,
         "frames":frames,"samples":samples,"transport_lost":lost,"export_dropped":int(begin["dropped"]),
         "known_archive_mapped_bytes":int(begin["mapped_bytes"]),"snapshots":snapshots,
-        "config":config,"sources":sources,"measurements":measurements,"rings":rings,
+        "config":config,"sources":sources,"measurements":measurements,"rings":rings,"program_bindings":program_bindings,
+        **({"fault_workload":fault_workload,"fault_targets":fault_targets} if mode == "fault" else {}),
         "export_dropped_samples":dropped_samples,"export_dropped_notices":dropped_notices,
         "observed_issues":observed_issues,"quality":"partial" if observed_issues else "no_observed_loss"}, stats_raw

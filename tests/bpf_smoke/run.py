@@ -27,7 +27,7 @@ BASE = Path(__file__).resolve().parent
 REPO = BASE.parent.parent
 SAMPLING_DRIVER = BASE.parent / "bpf_sampling" / "run.py"
 FORMAT_FIXTURE = BASE / "fixtures" / "format-v1.bin"
-MODES = ("task", "cpu", "trace", "block", "wake")
+MODES = ("task", "cpu", "trace", "block", "wake", "sched", "fault")
 
 ARCHES = {
     "riscv64": {
@@ -340,7 +340,7 @@ def gate(args: argparse.Namespace) -> int:
     if args.arch is None and any(getattr(args, key, None) is not None for key in ("kernel", "kernel_elf", "kernel_provenance", "image")):
         raise ValueError("--arch is required when overriding a kernel, symbols or image")
     arches = [args.arch] if args.arch else list(ARCHES)
-    modes = [args.mode] if args.mode else ["task", "trace"]
+    modes = [args.mode] if args.mode else ["task", "trace", "sched", "fault"]
     for arch in arches:
         for mode in modes:
             if run_sampling("guest", arch, mode, args) != 0:
@@ -360,7 +360,7 @@ def build_parser() -> argparse.ArgumentParser:
         build.add_argument("--arch", choices=ARCHES, required=True)
         build.add_argument("--mode", choices=MODES, default="task")
     for name in ("guest", "smoke", "gate"):
-        runtime = sub.add_parser(name, help="Run real capture; gate/smoke default to task+trace on both architectures")
+        runtime = sub.add_parser(name, help="Run real capture; gate/smoke default to task+trace+sched+fault on both architectures")
         runtime.add_argument("--arch", choices=ARCHES, required=name == "guest")
         runtime.add_argument("--mode", choices=MODES, default="task" if name == "guest" else None)
         runtime.add_argument("--kernel", type=Path)

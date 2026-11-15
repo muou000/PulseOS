@@ -123,6 +123,27 @@ impl SchemaRegistry {
             });
         }
 
+        // File metadata describes the transport; it cannot redefine a native
+        // event's semantics and cause the current decoder to interpret a future
+        // version as today's layout. Unrelated custom IDs remain opaque.
+        let native = if let Ok(metadata) = pulse_bpf_schema::lookup_by_id(record.event_id) {
+            Some((metadata.version, metadata.context_size - 40))
+        } else if record.event_id == PERF_EVENT_SOFTWARE_ID {
+            Some((1, 16))
+        } else if record.event_id == PERF_EVENT_SOFTWARE_V2_ID {
+            Some((2, 32))
+        } else { None };
+        if let Some((version, size)) = native {
+            if record.schema_version != version {
+                return Err(CaptureError::UnsupportedSchemaVersion(record.schema_version));
+            }
+            if record.payload.len() != size {
+                return Err(CaptureError::ByteCountMismatch {
+                    expected: size as u64, actual: record.payload.len() as u64,
+                });
+            }
+        }
+
         if record.event_id == PERF_EVENT_SOFTWARE_V2_ID {
             if record.schema_version != 2 || record.payload.len() != 32 {
                 return Err(CaptureError::InvalidRecord("invalid software v2 schema"));
@@ -135,6 +156,23 @@ impl SchemaRegistry {
                 || (mode == 2 && (record.pid == 0 || record.tid == 0))
             {
                 return Err(CaptureError::InvalidRecord("invalid normalized software v2 sample"));
+            }
+        }
+        if record.event_id == pulse_bpf_schema::TracepointId::PageFault as u32 {
+            if record.schema_version != 1 || record.payload.len() != 40 {
+                return Err(CaptureError::InvalidRecord("invalid page fault schema"));
+            }
+            let start = u64::from_le_bytes(record.payload[8..16].try_into().unwrap());
+            let elapsed = u64::from_le_bytes(record.payload[16..24].try_into().unwrap());
+            let access = u32::from_le_bytes(record.payload[24..28].try_into().unwrap());
+            let origin = u32::from_le_bytes(record.payload[28..32].try_into().unwrap());
+            let outcome = u32::from_le_bytes(record.payload[32..36].try_into().unwrap());
+            let classification = u32::from_le_bytes(record.payload[36..40].try_into().unwrap());
+            if record.timestamp_ns.checked_sub(start) != Some(elapsed)
+                || access & !7 != 0 || !matches!(origin, 1 | 2)
+                || !(1..=4).contains(&outcome) || classification > 2
+            {
+                return Err(CaptureError::InvalidRecord("invalid page fault completion"));
             }
         }
         Ok(())

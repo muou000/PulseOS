@@ -92,41 +92,18 @@ impl CaptureAnalyzer {
         crate::event::parse_records(&self.data.records)
     }
 
-    /// Filter events to those falling within the named PhaseMarker window [Begin, End].
+    /// Apply one fallible query after whole-capture association. All CLI
+    /// renderers share this result and its explicit effective window.
+    pub fn query(&self, query: &crate::query::Query) -> Result<crate::query::AnalysisResult, String> {
+        query.apply(self)
+    }
+
+    /// Compatibility wrapper using the same half-open Query semantics.
+    /// Invalid/missing phases return no rows; use `query` to observe the error.
+    #[deprecated(note = "use CaptureAnalyzer::query to handle invalid or ambiguous phases")]
     pub fn events_in_phase(&self, phase_name: &str) -> Vec<crate::event::NormalizedEvent> {
-        let all = self.ordered_events();
-        let mut start_ts = None;
-        let mut end_ts = None;
-
-        for ev in &all {
-            if let crate::event::EventPayload::PhaseMarker {
-                phase_boundary,
-                phase_name: ref p_name,
-            } = ev.payload
-            {
-                if p_name == phase_name {
-                    match phase_boundary {
-                        pulse_bpf_schema::PhaseBoundary::Begin => {
-                            if start_ts.is_none() {
-                                start_ts = Some(ev.timestamp_ns);
-                            }
-                        }
-                        pulse_bpf_schema::PhaseBoundary::End => {
-                            end_ts = Some(ev.timestamp_ns);
-                        }
-                    }
-                }
-            }
-        }
-
-        let Some(start) = start_ts else {
-            return Vec::new();
-        };
-        let end = end_ts.unwrap_or(u64::MAX);
-
-        all.into_iter()
-            .filter(|ev| ev.timestamp_ns >= start && ev.timestamp_ns <= end)
-            .collect()
+        self.query(&crate::query::Query {phase: Some(phase_name.into()), ..Default::default()})
+            .map(|result| result.events).unwrap_or_default()
     }
 
     /// Compute aggregated semantic statistics for all events in the capture.
@@ -135,10 +112,24 @@ impl CaptureAnalyzer {
         crate::stats::SessionStatistics::compute(&events, self.loss_counters())
     }
 
-    /// Compute aggregated semantic statistics restricted to a specific phase.
+    /// Compatibility wrapper; pairing precedes phase selection. Invalid phases
+    /// return empty statistics, so new callers should use the fallible query.
+    #[deprecated(note = "use CaptureAnalyzer::query to handle invalid or ambiguous phases")]
     pub fn aggregate_statistics_in_phase(&self, phase_name: &str) -> crate::stats::SessionStatistics {
-        let events = self.events_in_phase(phase_name);
-        crate::stats::SessionStatistics::compute(&events, self.loss_counters())
+        self.query(&crate::query::Query {phase: Some(phase_name.into()), ..Default::default()})
+            .map(|result| result.stats).unwrap_or_default()
+    }
+
+    /// Reconstruct scheduler intervals from the complete observed event stream,
+    /// before any display filter discards cross-CPU wake or switch history.
+    pub fn scheduler_report(&self) -> crate::scheduler::SchedulerReport {
+        crate::scheduler::SchedulerReport::compute(&self.ordered_events(), !self.is_complete())
+    }
+
+    /// Analyze observed fault completion records without promoting unknown
+    /// capture coverage into complete attribution.
+    pub fn fault_report(&self) -> crate::fault::FaultReport {
+        crate::fault::FaultReport::compute(&self.ordered_events(), self.attribution_claim_allowed())
     }
 
     /// Render a human-readable table of normalized events.

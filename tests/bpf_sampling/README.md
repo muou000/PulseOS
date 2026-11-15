@@ -227,3 +227,49 @@ PerfBuffer regression separately sends 20,000 patterned records through one
 page, with head/tail publication as its only per-record synchronization, checking
 both header and payload crossings. Neither test replaces the Acquire/Release
 contract or proves arbitrary weak-memory executions.
+
+
+## Scheduler and fault reports (#184 / #185)
+
+```bash
+python3 tests/bpf_sampling/run.py guest --arch riscv64 --mode sched --archive
+python3 tests/bpf_sampling/run.py guest --arch loongarch64 --mode fault --archive
+bpf-analyzer session.pbcapture --sched-report --json --pid 123
+bpf-analyzer session.pbcapture --fault-report --json --address-start 0x400000 --address-end 0x800000
+```
+
+`sched` loads six programs for IDs 1–6 and 48 per-CPU sources sharing eight
+output sinks. Each program copies its declared context size; every source's
+CPU/event/program binding and every program's execution counters are checked.
+It requires real block, wake, switch and enqueue streams. Metadata or exit counts
+can legitimately be zero when no task is created/exits during the window.
+The independent scheduler report requires an observed Blocked switch-out before
+wake and switch-in. Wake-before-switch, missing history, repeated events,
+ambiguous timestamp order and unclosed episodes stay explicit. `blocked_wait_ns`
+and `wake_to_switch_ns` are separate; neither measures the switch function.
+
+`fault` uses ID 8, an 80-byte completion record. It preserves the entry task,
+access, privilege origin, resolver start/result and completion CPU/time. Wall
+latency includes descheduling; current major/minor classification is Unknown.
+The known workload separates first-read and first-write pages with an inaccessible
+middle page, so anonymous batch fault preparation cannot make the second target
+resident before its intended access. Each iteration verifies zeros and stored
+bytes, removes its mappings and uses the same pacing in all three phases.
+The host matches actual RAW records to the reported PID/TID, exact target address
+sets and READ/WRITE bits. The fault probe rejects export overflow because it
+cannot independently reconstruct the missing target hits.
+
+GLOBAL fault_started/fault_completed/fault_clock_errors are system observations,
+not per-FD VM counts. A resolver may outlive stop, so neither started-completed
+nor VM inflight=0 is called a global aborted/completed-resolver total. The capture
+retains these counters without adding overlapping queue/program/transport losses.
+
+The analyzer's Query intersects phase/time/task/PID/TID/CPU/address filters;
+relationships are reconstructed before selection. The same Query applies to
+text, JSON and folded outputs. Missing/ambiguous phase boundaries are errors.
+CPU folded uses explicit samples or period-ns weights and is empty without CPU
+samples. The compatibility `--offcpu` output is specifically observed blocked
+interval duration-ns, with no fallback to event counts or a fabricated weight 1.
+New `scheduler-report.json` / `faults-report.json` are saved by the archive driver;
+valid semantic instances must be nonzero for those two modes. This is a fixed
+regression workload, not yet the general-purpose recorder tracked by #195.
