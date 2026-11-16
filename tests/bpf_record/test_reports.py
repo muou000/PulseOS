@@ -36,17 +36,29 @@ MAPPING COMPLETE pid=5 child=6 old=4096 moved=32768 at_ns=61
         self.assertEqual(result["byte_pgoff"], 4096)
 
     def test_same_type_instances_need_actual_records_for_both(self):
-        report = {"records_count": 6, "recorder": {"sources": [
-            {"logical_source": 1, "kind": "software-v2", "event_id": 65537, "cpu": 0, "tid": None, "records_count": 2},
-            {"logical_source": 2, "kind": "software-v2", "event_id": 65537, "cpu": 0, "tid": None, "records_count": 2},
+        report = {"records_count": 7, "recorder": {"sources": [
+            {"logical_source": 1, "kind": "software-v2", "event_id": 65537, "cpu": 0, "tid": None, "period": 10000000, "records_count": 2},
+            {"logical_source": 2, "kind": "software-v2", "event_id": 65537, "cpu": 0, "tid": None, "period": 10000000, "records_count": 2},
             {"logical_source": 3, "kind": "tracepoint", "event_id": 6, "cpu": 0, "tid": None, "records_count": 1},
             {"logical_source": 4, "kind": "tracepoint", "event_id": 8, "cpu": 0, "tid": None, "records_count": 1},
-        ], "record_sources": [1, 1, 2, 2, 3, 4]}}
+            {"logical_source": 5, "kind": "software-stack-v3", "event_id": 65537, "cpu": None, "tid": 42, "records_count": 1},
+        ], "record_sources": [1, 1, 2, 2, 3, 4, 5]}}
         self.assertEqual(validate_report("mixed", report), [])
         for source in report["recorder"]["sources"][:2]:
             source["kind"] = "software-stack-v3"
         self.assertEqual(validate_report("mixed", report), [])
         report["recorder"]["sources"][1]["records_count"] = 0
+        self.assertTrue(validate_report("mixed", report))
+
+    def test_mixed_gate_requires_real_task_samples_and_same_period_cpu_sources(self):
+        report = {"records_count": 4, "recorder": {"sources": [
+            {"logical_source": 1, "kind": "software-stack-v3", "event_id": 4098, "cpu": 0, "tid": None, "period": 10000000, "records_count": 1},
+            {"logical_source": 2, "kind": "software-stack-v3", "event_id": 4098, "cpu": 0, "tid": None, "period": 20000000, "records_count": 1},
+            {"logical_source": 3, "kind": "tracepoint", "event_id": 6, "cpu": 0, "tid": None, "records_count": 1},
+            {"logical_source": 4, "kind": "tracepoint", "event_id": 8, "cpu": 0, "tid": None, "records_count": 1},
+        ], "record_sources": [1, 2, 3, 4]}}
+        self.assertTrue(validate_report("mixed", report))
+        report["recorder"]["sources"][1]["period"] = 10000000
         self.assertTrue(validate_report("mixed", report))
 
     def test_missing_bindings_or_zero_records_are_not_runtime_evidence(self):

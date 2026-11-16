@@ -233,17 +233,36 @@ def run_pipeline(args: argparse.Namespace) -> dict:
         result["empty"] = True
     else:
         prefix = [perf, "--buildid-dir", cache]
-        common = ["-i", data, "--symfs", bundle]
+        # Stage a separate consumer view for every selected user ELF as well as
+        # the kernel. RV mapping labels also shadow real functions in fixtures
+        # and existing applications; the verified bundle remains untouched.
+        spec = importlib.util.spec_from_file_location("perf_symbols", Path(__file__).with_name("perf_symbols.py"))
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        symbol_root = output / "symfs"
+        symbol_root.mkdir()
+        common = ["-i", data, "--symfs", symbol_root]
         kernel = manifest.get("kernel_artifact_path")
+        result["symbol_view_tool_sha256"] = digest(Path(__file__).with_name("perf_symbols.py"))
+        result["user_symbol_views"] = []
+        for artifact in manifest["artifacts"]:
+            if artifact["path"] == kernel:
+                continue
+            destination = (symbol_root / artifact["path"]).resolve()
+            if not destination.is_relative_to(symbol_root):
+                raise ValueError("consumer symbol path escapes its output root")
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            view = module.prepare_symbol_view(bundle_file(bundle, artifact["path"]), destination)
+            if view["original_sha256"] != artifact["sha256"]:
+                raise ValueError("user ELF changed after captured artifact verification")
+            result["user_symbol_views"].append({"artifact_path": artifact["path"],
+                "consumer_path": str(destination.relative_to(output)), **view})
         if kernel is not None:
             # A deterministic auxiliary ELF view hides only local assembler
             # labels that perf otherwise prefers over enclosing STT_FUNC names.
             # Full executed ELF identity and all load bytes remain authoritative.
-            spec = importlib.util.spec_from_file_location("perf_symbols", Path(__file__).with_name("perf_symbols.py"))
-            module = importlib.util.module_from_spec(spec)
-            spec.loader.exec_module(module)
             symbols_path = output / "kernel-symbols.elf"
-            result["kernel_symbol_view"] = module.prepare_kernel_symbols(bundle_file(bundle, kernel), symbols_path)
+            result["kernel_symbol_view"] = module.prepare_symbol_view(bundle_file(bundle, kernel), symbols_path)
             expected_kernel = next(entry["sha256"] for entry in manifest["artifacts"] if entry["path"] == kernel)
             if result["kernel_symbol_view"]["original_sha256"] != expected_kernel:
                 raise ValueError("kernel ELF changed after captured artifact verification")

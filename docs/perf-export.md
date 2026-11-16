@@ -77,14 +77,21 @@ source skipped、栈截断、全局队列损失和输出 transport loss 有不�
 原生 `buildid-list` 可以省略没有 GNU note 的 ELF；所有实际 build-id 仍必须逐一匹配，
 也不允许缺 note 的 ELF 获得伪造 ID。
 
-## 内核符号视图
+## 消费端 ELF 符号视图
 
-部分实际 kernel ELF 包含大量本地 `STT_NOTYPE` 的 `.L` 调试标签和 RV64 ISA 映射标记；perf 6.8.12
-会把它们展示为函数名。流水线从已经通过 capture SHA 校验的原 ELF 生成一个
-单独的符号视图，只把这些已识别的本地非函数标签的 visibility 改为 hidden。所有 PT_LOAD 文件
-字节、真正函数的地址/大小/名称保持一致；原始 ELF 不修改。输出记录原始与派生
-ELF 的 SHA、修改数和转换规则，显式将该文件作为 perf 的 `--vmlinux` 输入。
-这是一项已声明的 consumer 适配，不把派生文件的 SHA 当作采集时 kernel 身份。
+实际 kernel 和用户 ELF 都可能包含本地 `STT_NOTYPE` 的 `.L` 调试标签及 RV64 ISA
+映射标记；perf 6.8.12 会优先把它们展示为函数名。流水线从已经通过 capture SHA
+校验的原 ELF 生成单独的符号视图，只把这些已识别的本地非函数标签的 visibility
+改为 hidden。所有 PT_LOAD 文件字节、真正函数的地址/大小/名称保持一致；原始
+ELF 不修改。kernel 视图作为 `--vmlinux`，用户视图位于新报告目录的 `symfs/`
+并作为 `--symfs`；不得借助 artifact 路径逃出该目录。输出记录原始与派生 ELF
+SHA、修改数、转换规则和视图工具 SHA，用户条目还记录原 artifact 路径与派生路径。
+这是一项已声明的 consumer 适配，不把派生文件的 SHA 当作采集时身份。
+
+当前安装的 perf 6.8.12 对这批 Rust v0 符号保留原始修饰名，例如已保存的
+`sample_leaf` 函数在报告中带有 `_RNv…` 前缀。流水线保留原样 perf 输出和真实
+`STT_FUNC` 名称，验收从匹配 ELF 的函数符号确定期望链，再核对 script、calltree
+和 SVG；不会重命名函数或把汇编标签猜作函数。
 
 ## 兼容边界与验收
 
@@ -98,3 +105,4 @@ ELF 的 SHA、修改数和转换规则，显式将该文件作为 perf 的 `--vm
 负责确定的负例和 wire 格式；RV64/LA64 的原始 RAW、capture 和匹配 ELF 负责真实采样
 链路。命令和结果见 [#194 验收记录](../records/bpf-perf-export-194.md)。
 当前通用 recorder 的回归与原 capture 重放见 [#212 验收记录](../records/bpf-recorder-perf-212.md)。
+生产构建的双架构完整流程见 [#213 验收记录](../records/bpf-recorder-e2e-213.md)。

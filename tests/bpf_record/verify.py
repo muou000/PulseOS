@@ -11,7 +11,7 @@ import sys
 from capture import clean_console, extract
 from run import (REPO, benchmark, cases_script, helpers, parse_cases, collection,
                  validate_case, validate_report, verify_exec_identity, verify_existing_workload,
-                 verify_saved_hash, stack_proof, mapping_lifecycle_proof)
+                 verify_saved_hash, stack_proof, mapping_lifecycle_proof, verify_installed_io)
 
 
 def verify(run: Path, analyzer: Path, *, functional_only: bool = False) -> dict:
@@ -47,11 +47,15 @@ def verify(run: Path, analyzer: Path, *, functional_only: bool = False) -> dict:
         report = json.loads(helpers.command([str(analyzer), str(path), "--json"], cwd=REPO))
         reports[label] = report
         errors += validate_report(label, report)
+        if label == "installed-io":
+            timeline = run / "installed-io-replay-timeline.json"
+            helpers.command([str(analyzer), str(path), "--timeline", str(timeline)], cwd=REPO)
+            proofs[label] = verify_installed_io(log, report, json.loads(timeline.read_text()))
         if inputs["suite"].startswith("stacks-") and label != "journal-failure":
             timeline = run / f"{label}-replay-timeline.json"
             helpers.command([str(analyzer), str(path), "--timeline", str(timeline)], cwd=REPO)
             proofs[label] = stack_proof(json.loads(timeline.read_text()), report, collected,
-                                       require_depth=label == "stack-task", require_kernel=label == "mixed")
+                                       require_depth=label in ("stack-task", "stack-cpu"), require_kernel=label == "mixed")
         if label == "mapping-lifecycle":
             proofs[label] = mapping_lifecycle_proof(log, collected["captured_manifest"])
         if label == "nonleader-exec":

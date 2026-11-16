@@ -1,8 +1,15 @@
 """Independent external-consumer checks for the explicit perf pipeline."""
 from pathlib import Path
 import importlib.util
+import json
+import os
+import subprocess
+import sys
+import tarfile
 import tempfile
 import unittest
+
+from stack_evidence import elf_symbols
 
 spec = importlib.util.spec_from_file_location("perf_pipeline", Path(__file__).parents[2] / "scripts/perf_pipeline.py")
 pipeline = importlib.util.module_from_spec(spec)
@@ -10,6 +17,60 @@ spec.loader.exec_module(pipeline)
 
 
 class PerfPipelineTests(unittest.TestCase):
+    @unittest.skipUnless(os.environ.get("PULSE_PERF") and os.environ.get("FLAMEGRAPH_DIR"),
+                         "requires explicitly installed native perf and pinned FlameGraph")
+    def test_native_user_functions_survive_riscv_mapping_labels(self):
+        # Historical bytes are a regression fixture, not fresh production proof.
+        repo = Path(__file__).parents[2]
+        analyzer = Path(os.environ.get("PULSE_ANALYZER", repo / "target/debug/bpf-analyzer"))
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            prefix = "riscv64/stacks-task/"
+            with tarfile.open(repo / "tests/bpf_record/evidence/211/riscv64.tar.gz") as archive:
+                for member in archive.getmembers():
+                    if (member.name.startswith(prefix)
+                            and ("/artifacts/" in member.name or member.name.endswith("stack-task.pbcapture"))
+                            and (member.isfile() or member.islnk())):
+                        target = root / member.name.removeprefix(prefix)
+                        target.parent.mkdir(parents=True, exist_ok=True)
+                        target.write_bytes(archive.extractfile(member).read())
+            before = {path.name: pipeline.digest(path) for path in (root / "artifacts").iterdir()}
+            capture = root / "stack-task.pbcapture"
+            original = pipeline.digest(capture)
+            data = root / "perf.data"
+            exported = subprocess.run([str(analyzer), str(capture), "--mode", "user",
+                                       "--bundle", str(root), "--perf-data", str(data)],
+                                      text=True, capture_output=True)
+            self.assertEqual(exported.returncode, 0, exported.stderr)
+            command = [sys.executable, str(repo / "scripts/perf_pipeline.py"), str(data),
+                       "--bundle", str(root), "--perf", os.environ["PULSE_PERF"],
+                       "--flamegraph", os.environ["FLAMEGRAPH_DIR"], "--output", str(root / "native")]
+            manifest = json.loads(Path(str(data) + ".json").read_text())
+            functions = [function for artifact in manifest["artifacts"]
+                         for function in elf_symbols(root / artifact["path"])[1]]
+            for suffix in ("11sample_leaf", "13sample_middle", "12sample_outer"):
+                names = [name for _, _, name in functions if name.endswith(suffix)]
+                self.assertEqual(len(names), 1, names)
+                command += ["--expect-symbol", names[0]]
+            consumed = subprocess.run(command, text=True, capture_output=True)
+            self.assertEqual(consumed.returncode, 0, consumed.stderr)
+            result = json.loads(consumed.stdout)
+            self.assertTrue(any(view["hidden_local_labels"] > 0 for view in result["user_symbol_views"]))
+            self.assertEqual(original, pipeline.digest(capture))
+            self.assertEqual(before, {path.name: pipeline.digest(path) for path in (root / "artifacts").iterdir()})
+
+            # This resolves into the original bundle but must never escape the
+            # distinct consumer root when the artifact is staged.
+            manifest["artifacts"][0]["path"] = "../" + root.name + "/" + manifest["artifacts"][0]["path"]
+            hostile = root / "hostile.json"
+            hostile.write_text(json.dumps(manifest))
+            command[command.index(str(root / "native"))] = str(root / "hostile-native")
+            rejected = subprocess.run(command + ["--manifest", str(hostile)], text=True, capture_output=True)
+            self.assertEqual(rejected.returncode, 1)
+            self.assertIn("consumer symbol path escapes", rejected.stderr)
+            self.assertEqual(original, pipeline.digest(capture))
+            self.assertEqual(before, {path.name: pipeline.digest(path) for path in (root / "artifacts").iterdir()})
+
     def test_perf_script_preserves_counts_periods_and_chain_names(self):
         text = """worker 7/8 [002] 1.000000000: 10 cpu-clock:
         401020 leaf (/artifacts/a.elf)
