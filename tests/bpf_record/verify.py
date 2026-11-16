@@ -40,10 +40,6 @@ def verify(run: Path, analyzer: Path, *, functional_only: bool = False) -> dict:
         path = run / f"{label}.pbcapture"
         if path.read_bytes() != extract(log, label):
             errors.append(f"{label}: saved capture differs from original guest file transfer")
-        if label == "installed-io":
-            timeline = run / "installed-io-replay-timeline.json"
-            helpers.command([str(analyzer), str(path), "--timeline", str(timeline)], cwd=REPO)
-            proofs[label] = verify_installed_io(log, report, json.loads(timeline.read_text()))
         if inputs.get("guest_capture_sha_witness"):
             verify_saved_hash(cases[label], path.read_bytes())
             candidates = list((run / "artifacts").glob("*.elf"))
@@ -51,6 +47,10 @@ def verify(run: Path, analyzer: Path, *, functional_only: bool = False) -> dict:
         report = json.loads(helpers.command([str(analyzer), str(path), "--json"], cwd=REPO))
         reports[label] = report
         errors += validate_report(label, report)
+        if label == "installed-io":
+            timeline = run / "installed-io-replay-timeline.json"
+            helpers.command([str(analyzer), str(path), "--timeline", str(timeline)], cwd=REPO)
+            proofs[label] = verify_installed_io(log, report, json.loads(timeline.read_text()))
         if inputs["suite"].startswith("stacks-") and label != "journal-failure":
             timeline = run / f"{label}-replay-timeline.json"
             helpers.command([str(analyzer), str(path), "--timeline", str(timeline)], cwd=REPO)
