@@ -1,0 +1,77 @@
+{
+  "date": "2026-11-16",
+  "code_commit": "4938fc41cbb0ec2f25e53a16bb4fc79fc35baf1b",
+  "passed": {
+    "rust_regular": 490,
+    "rust_native_perf": 7,
+    "python_sampling": 109,
+    "python_recorder": 17,
+    "real_capture_queries": 12,
+    "cargo_check": true,
+    "make_test_rv_la": true,
+    "make_test_bpf_rv_la": true
+  },
+  "reviews": {
+    "standards_remaining": 0,
+    "spec_remaining": 0,
+    "fixed": "pinned collapser zero-TID labels for unavailable chains"
+  },
+  "rejected_initial_build": "Git identity changed during first build; cleanly rerun after final source commit",
+  "members": {
+    "check.log": {
+      "sha256": "e629e4a76322786fe0ebeceec1196d872c392165418b9c14f34921a99f2b6fc6",
+      "bytes": 2845
+    },
+    "rust-tests.log": {
+      "sha256": "28a006ec1efbd41c8e8393693eb89ea0404e18b9ee75ed3a353a74af5a3b5f5f",
+      "bytes": 55870
+    },
+    "final-perf-tests.log": {
+      "sha256": "ae8274ca54bc4e4b74cbc893762ee92f73010ef3c61d1b21dd36ecb3b966cf02",
+      "bytes": 5333
+    },
+    "sampling-tests.log": {
+      "sha256": "74bb565472e74604b07fa6471ee47f17fd8240eb7afbc2f988140764211d06d5",
+      "bytes": 209
+    },
+    "record-tests.log": {
+      "sha256": "c4f36e7b5d93037327ba04deff8f75c83df4c5c8fdf604ddecb2e501abb90060",
+      "bytes": 116
+    },
+    "make-test.log": {
+      "sha256": "437712a44872c0ddc8c1a74056d4e179017793b9245d09f5d907693fefd6e54f",
+      "bytes": 74035
+    },
+    "make-test-bpf.log": {
+      "sha256": "61684bbec198f5dccb65738899a93ef4bddf17d006c94698afd251c6d2dabf2f",
+      "bytes": 78984
+    },
+    "make-test-first.log": {
+      "sha256": "de9a77bb2b548d228f8584ec13ade37c9e017de6ee77635d2910b9e241e1126a",
+      "bytes": 37893
+    },
+    "pipeline-red.log": {
+      "sha256": "47f9abe4f14858c7e37a794aa250e67787599167f5aa16f39f84674706d081ec",
+      "bytes": 701
+    },
+    "buildids-red.log": {
+      "sha256": "a0257ea61868decca6286ef017c5f462ed3c7925c86eb2580d193e0417eb4eeb",
+      "bytes": 912
+    },
+    "empty-chain-pipeline-red.log": {
+      "sha256": "a90fccf52b4a87d5b4bb15fe20d491667adf8aa1d6fa450cc9a87686053f1192",
+      "bytes": 863
+    },
+    "review-red.log": {
+      "sha256": "6a795ba6b8b2c54e0a14b3d8836c541b03b27b69d45b43786436f5b1551a3a30",
+      "bytes": 933
+    },
+    "review-green.log": {
+      "sha256": "5684d13977a1f6829bcd5f644c72b35ab6f8d42951d571a5f230c4cc35a359f3",
+      "bytes": 107
+    }
+  },
+  "archive": "validation.tar.gz",
+  "sha256": "2d686252decee311802418cb9fda469e2e20b1d80e0547421fb26c1bf03c3598",
+  "bytes": 45666
+}

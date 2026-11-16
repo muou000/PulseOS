@@ -232,12 +232,21 @@ fn all_cli_renderers_share_phase_tid_time_and_weight() {
     assert_eq!(number(&json, "capture_records_count"), 10);
     assert_eq!(number(&json, "context_records_count"), 7);
     assert_eq!(number(&json, "perf_sample_v2"), 2);
+    let report: serde_json::Value = serde_json::from_str(&json).unwrap();
+    assert_eq!(report["sample_weight"], serde_json::json!({
+        "unit": "period_ns", "total": 40, "samples": 2,
+    }));
+    let samples = report["cpu_samples"].as_array().unwrap();
+    assert_eq!(samples.len(), 2);
+    assert_eq!((samples[0]["sequence_index"].as_u64(), samples[0]["logical_source"].as_u64(), samples[0]["weight"].as_u64()), (Some(3), Some(4), Some(10)));
+    assert_eq!((samples[1]["sequence_index"].as_u64(), samples[1]["logical_source"].as_u64(), samples[1]["weight"].as_u64()), (Some(5), Some(6), Some(30)));
     let folded = fs::read_to_string(on).unwrap();
     assert_eq!(folded, "[INCOMPLETE_CAPTURE];new;[user];pc:0x3000 30\n[INCOMPLETE_CAPTURE];old;[user];pc:0x2000 10\n");
     assert_eq!(fs::read_to_string(off).unwrap(), "");
     let mut args = filter.to_vec();
-    args.push("--table");
+    args.extend(["--weight", "period", "--table"]);
     let table = stdout(&f.cli(&args));
+    assert!(table.contains("CPU samples: 2; weight: 40 period_ns"));
     assert!(table.contains("pc=0x0000000000002000") && table.contains("pc=0x0000000000003000"));
     assert!(!table.contains("pc=0x0000000000004000") && !table.contains("pc=0x0000000000005000"));
 }
@@ -1270,6 +1279,109 @@ assert int.from_bytes(bytes.fromhex(opaque['payload_hex'])[8:16],'little')==4096
 assert sample['semantic']['addr']==4096 and sample['semantic']['ip']==36864
 "#,
     );
+}
+
+#[test]
+fn query_binds_cpu_samples_after_transport_sort_filter_migration_and_tid_change() {
+    use bpf_capture::{CaptureScope, RecorderKind, SourceConfig};
+    let f = Fixture::new(Vec::new());
+    let original = CaptureReader::from_bytes(&fs::read(&f.capture).unwrap()).unwrap();
+    let mut writer = bpf_capture::CaptureWriter::new(original.metadata.config, SchemaRegistry::default_pulse_registry());
+    let mut task = support::source(31, RecorderKind::SoftwareV2, 0x1001, 2, 0, 20, 131, 1, 1000);
+    task.scope = CaptureScope::Task(101);
+    task.bound_task_id = 7;
+    task.config = SourceConfig::TaskClock;
+    task.requested_config = SourceConfig::TaskClock;
+    writer.configure_recorder(vec![
+        support::source(7, RecorderKind::SoftwareV2, 0x1001, 2, 0, 10, 107, 1, 1000),
+        support::source(9, RecorderKind::SoftwareV2, 0x1001, 2, 0, 10, 109, 1, 1000),
+        task,
+        support::source(80, RecorderKind::Tracepoint, 1, 1, 0, 1, 180, 1, 1000),
+        support::source(81, RecorderKind::Tracepoint, 8, 1, 0, 1, 181, 1, 1000),
+        support::source(82, RecorderKind::Tracepoint, 2, 1, 0, 1, 182, 1, 1000),
+    ], 8192).unwrap();
+    writer.start(1).unwrap();
+    let mut migrated = sample(40, 7, 100, 0x4000, 20);
+    migrated.cpu_id = 1;
+    let mut before = sample(10, 7, 101, 0x1000, 20);
+    before.cpu_id = 2;
+    let mut fault = vec![0u8; 40];
+    fault[..8].copy_from_slice(&0x8000u64.to_le_bytes());
+    fault[8..16].copy_from_slice(&24u64.to_le_bytes());
+    fault[16..24].copy_from_slice(&1u64.to_le_bytes());
+    fault[24..28].copy_from_slice(&1u32.to_le_bytes());
+    fault[28..32].copy_from_slice(&2u32.to_le_bytes());
+    fault[32..36].copy_from_slice(&1u32.to_le_bytes());
+    for (source, record) in [
+        (31, migrated),
+        (9, sample(30, 7, 101, 0x3000, 10)),
+        (7, sample(20, 7, 101, 0x2000, 10)),
+        (31, sample(20, 7, 101, 0x2100, 20)),
+        (9, sample(20, 8, 102, 0x2200, 10)),
+        (80, metadata(35, 7, 100, "exec")),
+        (81, record(8, 1, 25, 0, 7, 100, 101, fault)),
+        (82, switch(25, 0, 7, 8, 2)),
+        (31, before),
+    ] {
+        assert!(writer.write_record_from(source, record).unwrap());
+    }
+    let capture = writer.finish(1000).unwrap();
+    fs::write(&f.capture, &capture).unwrap();
+    let folded = f.dir.join("mixed.folded");
+    let report: serde_json::Value = serde_json::from_str(&stdout(&f.cli(&[
+        "--task", "7", "--from-ns", "20", "--to-ns", "50", "--weight", "period",
+        "--json", "--oncpu", folded.to_str().unwrap(),
+    ]))).unwrap();
+    let rows = report["cpu_samples"].as_array().unwrap();
+    assert_eq!(rows.iter().map(|row| row["sequence_index"].as_u64().unwrap()).collect::<Vec<_>>(), [2, 3, 1, 0]);
+    assert_eq!(rows.iter().map(|row| row["logical_source"].as_u64().unwrap()).collect::<Vec<_>>(), [7, 31, 9, 31]);
+    assert_eq!(rows.iter().map(|row| row["weight"].as_u64().unwrap()).collect::<Vec<_>>(), [10, 20, 10, 20]);
+    assert_eq!(rows[3]["cpu_id"], 1);
+    assert_eq!(rows[3]["tid"], 100);
+    assert_eq!(report["sample_weight"], serde_json::json!({"unit":"period_ns", "total":60, "samples":4}));
+    assert_eq!(report["recorder"]["record_sources"], serde_json::json!([31,9,7,31,9,80,81,82,31]));
+    let text = fs::read_to_string(&folded).unwrap();
+    assert_eq!(text.lines().map(|line| line.rsplit_once(' ').unwrap().1.parse::<u64>().unwrap()).sum::<u64>(), 60);
+    assert_eq!(text.lines().count(), 4);
+    assert!(!text.contains("0x2200") && !text.contains("0x8000") && !text.contains("0x1000"));
+    assert_eq!(fs::read(&f.capture).unwrap(), capture);
+    let empty = f.dir.join("empty.folded");
+    let empty_report: serde_json::Value = serde_json::from_str(&stdout(&f.cli(&[
+        "--from-ns", "500", "--json", "--oncpu", empty.to_str().unwrap(),
+    ]))).unwrap();
+    assert_eq!(empty_report["sample_weight"], serde_json::json!({"unit":"samples", "total":0, "samples":0}));
+    assert_eq!(empty_report["cpu_samples"], serde_json::json!([]));
+    assert!(fs::read(empty).unwrap().is_empty());
+}
+
+#[test]
+fn unavailable_stack_keeps_sample_weight_without_inventing_an_address_frame() {
+    use pulse_bpf_schema::{FrozenStack, PerfEventContext, PerfSampleContext, PerfStackSampleContext, StackRegisters, StackStatus};
+    let mut stack = FrozenStack::unavailable(StackRegisters {
+        ip: 0x4000, ..Default::default()
+    }, StackStatus::InvalidInstructionPointer);
+    stack.len = 0;
+    stack.ips.fill(0);
+    let sample = PerfStackSampleContext {
+        base: PerfSampleContext {
+            base: PerfEventContext::new(25, 0, 20, 0, 100, 101, 7),
+            ip: 0x4000, mode: 2, version: 2,
+        },
+        source_id: 1,
+        stack,
+    };
+    let f = Fixture::new(vec![NormalizedRecord::from_software_stack_v3_slice(&sample.to_bytes()).unwrap()]);
+    for (weight, total) in [("samples", 1), ("period", 25)] {
+        let output = f.dir.join(format!("{weight}.folded"));
+        let report: serde_json::Value = serde_json::from_str(&stdout(&f.cli(&[
+            "--json", "--weight", weight, "--oncpu", output.to_str().unwrap(),
+        ]))).unwrap();
+        assert_eq!(report["sample_weight"]["samples"], 1);
+        assert_eq!(report["sample_weight"]["total"], total);
+        assert_eq!(fs::read_to_string(output).unwrap(), format!(
+            "[INCOMPLETE_CAPTURE];pid:100:tid:101;[user];[unavailable:invalid_instruction_pointer] {total}\n",
+        ));
+    }
 }
 
 use support::SemanticFixture as CaptureWriter;
