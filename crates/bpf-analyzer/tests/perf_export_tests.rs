@@ -818,6 +818,30 @@ fn native_perf_keeps_unavailable_callchain_as_a_real_ip_sample() {
     assert_eq!(script.matches("outer").count(), 1, "{script}");
     let ips = perf(&f, &["script", "-G", "--ns", "--symfs", f.root.to_str().unwrap()]);
     assert_eq!(ips.matches("leaf").count(), 2, "{ips}");
+    assert_unavailable_pipeline(&f);
+}
+
+#[test]
+#[ignore = "requires native Linux perf and the pinned FlameGraph scripts"]
+fn native_flamegraph_keeps_unavailable_kernel_identity_and_weights() {
+    let mut f = kernel_fixture();
+    rewrite(&mut f, |data| {
+        for record in &mut data.records {
+            record.pid = 0;
+            record.tid = 0;
+            record.task_id = 100;
+        }
+        let payload = &mut data.records[0].payload;
+        put16(payload, 76, 0);
+        put16(payload, 78, 9);
+        put32(payload, 80, 0);
+        payload[96..].fill(0);
+    });
+    assert_unavailable_pipeline(&f);
+}
+
+fn assert_unavailable_pipeline(f: &Fixture) {
+    let analyzer = CaptureAnalyzer::from_bytes(&f.bytes).unwrap();
     let perf_path = std::env::var_os("PULSE_PERF").map(PathBuf::from).unwrap_or_else(|| {
         std::env::split_paths(&std::env::var_os("PATH").unwrap())
             .map(|directory| directory.join("perf"))

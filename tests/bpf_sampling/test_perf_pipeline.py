@@ -72,6 +72,15 @@ worker 7/8 [002] 1.010000000: 10 cpu-clock:HG:
             with self.assertRaisesRegex(ValueError, "zero-length callchains"):
                 pipeline.verify_empty_chains(result, changed)
 
+    def test_empty_kernel_identity_uses_pinned_collapser_zero_tid_label(self):
+        # The unmodified pinned --tid collapser emits ?/0 for a 0/0 header,
+        # and ?/40 for a 40/0 header. These labels do not supply a known PID.
+        samples = [{"comm": "[unknown]", "pid": 0, "tid": 0, "period_ns": 10},
+                   {"comm": "worker", "pid": 40, "tid": 0, "period_ns": 20}]
+        self.assertEqual(pipeline.mark_empty_chains(
+            "[unknown]-?/0 10\nworker-?/40 20\n", samples, "period_ns"),
+            "[unknown]-?/0;[unavailable_callchain] 10\nworker-?/40;[unavailable_callchain] 20\n")
+
     def test_svg_total_and_unit_are_independent_checks(self):
         svg = '<svg xmlns="http://www.w3.org/2000/svg"><g><title>all (30 nanoseconds, 100%)</title></g><g><title>leaf (10 nanoseconds, 33.33%)</title></g></svg>'
         pipeline.inspect_svg(svg, 30, "period_ns", ["leaf"])
