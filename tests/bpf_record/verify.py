@@ -47,7 +47,7 @@ def verify(run: Path, analyzer: Path, *, functional_only: bool = False) -> dict:
         report = json.loads(helpers.command([str(analyzer), str(path), "--json"], cwd=REPO))
         reports[label] = report
         errors += validate_report(label, report)
-        if inputs["suite"] == "stacks" and label != "journal-failure":
+        if inputs["suite"].startswith("stacks-") and label != "journal-failure":
             timeline = run / f"{label}-replay-timeline.json"
             helpers.command([str(analyzer), str(path), "--timeline", str(timeline)], cwd=REPO)
             proofs[label] = stack_proof(json.loads(timeline.read_text()), report, collected,

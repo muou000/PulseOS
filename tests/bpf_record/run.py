@@ -26,6 +26,8 @@ helpers = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(helpers)
 helpers.BASE = BASE
 ARCHES = helpers.ARCHES
+STACK_SUITES = ("stacks-task", "stacks-mixed", "stacks-existing", "stacks-sigint",
+                "stacks-exit", "stacks-overflow", "stacks-observation")
 spec = importlib.util.spec_from_file_location("recorder_collection", REPO / "tools/bpf-record/collect.py")
 assert spec and spec.loader
 collection = importlib.util.module_from_spec(spec)
@@ -98,7 +100,10 @@ def cases_script(directory: str, suite: str, duration: int, *, kernel_elf: bool 
     def record(label: str, events: str, workload: str, *, extra: str = "", task: bool = False,
                signal: int | None = None, target_exit: bool = False, cpus: str = "all",
                period: int = 10_000_000, buffer_pages: int = 16) -> None:
-        work_ms = duration + (10_000 if label == "mixed" else 1500)
+        # Keep the same bounded preparation margin for every independent
+        # workload. Long post-disable mmap loops consume the global journal
+        # while serial transport runs, outside the requested sampling window.
+        work_ms = duration + 1500
         rows.extend([f"{fixture} {workload} {work_ms} {label} &", "target=$!", f"{fixture} sleep 100"])
         record_ms = max(3000, duration * 4) if signal is not None else (work_ms + 3000 if target_exit else duration)
         options = f"--events {events} --duration-ms {record_ms} --buffer-pages {buffer_pages} --output {label}.pbcapture"
@@ -189,16 +194,22 @@ def cases_script(directory: str, suite: str, duration: int, *, kernel_elf: bool 
         record("target-exit", "task", "cpu", task=True, target_exit=True)
     if suite in ("mixed", "lifecycle", "full"):
         record("mixed", "cpu,cpu,task,sched,fault", "mixed", task=True)
-    if suite == "stacks":
+    if suite == "stacks-task":
         record("stack-task", "task", "cpu", task=True, extra="--callchain fp --stack-depth 32")
+    if suite == "stacks-mixed":
         record("mixed", "cpu,cpu,task,sched,fault", "mixed", task=True, extra="--callchain fp")
+    if suite == "stacks-existing":
         rows.extend(["sh -c 'i=0; while :; do i=$((i+1)); done' &", "target=$!", f"{fixture} sleep 100"])
         call("existing-shell", f'--events task --tid "$target" --duration-ms {duration} --frequency 99 --callchain fp --output existing-shell.pbcapture')
         rows.extend(['kill "$target"', 'wait "$target" || true'])
+    if suite == "stacks-sigint":
         record("sigint", "cpu", "cpu", signal=2, extra="--callchain fp")
+    if suite == "stacks-exit":
         record("target-exit", "task", "cpu", task=True, target_exit=True, extra="--callchain fp")
+    if suite == "stacks-overflow":
         record("bounded-export", "cpu", "cpu", cpus="0,1", period=1_000_000,
                buffer_pages=1, extra="--record-bytes 4096 --callchain fp")
+    if suite == "stacks-observation":
         call("snapshot-failure", f"--events cpu --duration-ms {duration} --output rejected.pbcapture --test-fail-snapshot", failure=True)
         rows.extend([f"{fixture} cpu {duration + 1500} journal-failure &", "target=$!", f"{fixture} sleep 100"])
         call("journal-failure", f"--events cpu --duration-ms {duration} --output journal-failure.pbcapture --test-fail-journal", failure=True)
@@ -681,6 +692,14 @@ def mapping_lifecycle_proof(text: str, manifest: dict) -> dict:
 
 
 def guest(args: argparse.Namespace) -> int:
+    if args.suite == "stacks":
+        # The producer journal is bounded for the whole boot. Independent
+        # positive cases must not inherit unrelated prior workload history.
+        failed = False
+        for suite in STACK_SUITES:
+            child = argparse.Namespace(**{**vars(args), "suite": suite})
+            failed |= bool(guest(child))
+        return int(failed)
     fixture = build_fixture(args.arch)
     if args.recorder:
         recorder = args.recorder.resolve(strict=True)
@@ -759,7 +778,7 @@ def guest(args: argparse.Namespace) -> int:
     print(f"Logs: {run}", flush=True)
     print(shlex.join(command), flush=True)
     text, qemu_exit, reason = helpers.drive_guest(command, shell, token, run / "guest.log",
-        r"(?:^|[\r\n])[^\r\n]*[#$] ?$", args.boot_timeout, args.timeout)
+        r"(?:^|[\r\n])[^\r\n]*[#$] ?(?:\x1b\[[0-9;?]*[A-Za-z])*$", args.boot_timeout, args.timeout)
     errors = [reason] if reason else []
     if not re.search(rf"(?m)^BPF_HOST_EXIT {re.escape(token)} 0\s*$", text.replace("\r", "")):
         errors.append("missing successful harness exit")
@@ -781,7 +800,7 @@ def guest(args: argparse.Namespace) -> int:
             reports[label] = json.loads(report)
             (run / f"{label}-report.json").write_text(report)
             errors += validate_report(label, reports[label])
-            if args.suite == "stacks" and label != "journal-failure":
+            if args.suite.startswith("stacks-") and label != "journal-failure":
                 timeline_path = run / f"{label}-timeline.json"
                 helpers.command([str(run / "bpf-analyzer"), str(path), "--timeline", str(timeline_path)], cwd=REPO)
                 proof = stack_proof(json.loads(timeline_path.read_text()), reports[label], collected,
@@ -840,7 +859,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("action", choices=("build-fixture", "guest"))
     parser.add_argument("--arch", choices=tuple(ARCHES), required=True)
-    parser.add_argument("--suite", choices=("smoke", "mixed", "stacks", "mapping", "lifecycle", "negative", "benchmark", "existing", "recovery", "full"), default="smoke")
+    parser.add_argument("--suite", choices=("smoke", "mixed", "stacks", "mapping", "lifecycle", "negative", "benchmark", "existing", "recovery", "full") + STACK_SUITES, default="smoke")
     parser.add_argument("--duration-ms", type=int, default=1000)
     parser.add_argument("--recorder", type=Path)
     parser.add_argument("--kernel", type=Path)
