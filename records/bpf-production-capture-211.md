@@ -59,9 +59,24 @@ samples followed by quiescence and no growth. The attempts were interrupted and
 are failed evidence, not successful captures.
 
 The public mapping validation seam reproduced 22,017 allocations for the same
-803,707-byte journal plus one artifact (two host baseline timings: 52.33 ms and
-43.52 ms). The guest allocator maps each allocation separately, making these
-discarded parsing objects observable VMA work. Validation must use the common
-decoder without materializing rows; the original guest scenarios are rerun to
-check that this also resolves finalization rather than inferring it from the
-host allocation test alone.
+803,707-byte journal plus one artifact. Validation now uses the common decoder
+without materializing rows. The host debug microbenchmark measured:
+
+| Same input | Allocations | Elapsed observations |
+|---|---:|---|
+| Materializing validation | 22,017 | 52.33 ms, 43.52 ms |
+| Validation-only shared scan | 0 | 30.19 ms, 27.40 ms |
+
+These are two development measurements, not a statistical speedup claim. The
+original guest rerun restored actual STOP/SAVED and byte-identical collection,
+but revealed that ordinary recorder allocations still saturated the journal:
+
+| Guest rerun before reusable heap | Samples | Journal records | Journal dropped | Capture SHA-256 |
+|---|---:|---:|---:|---|
+| LA task | 96 | 10,501 | 3,436 | `ab4f1bf77ee012e675ff0ee18d39a201341a4c92b325bcdd7b56f6874b8374cd` |
+| RV mapping lifecycle | 1,020 | 12,681 | 45,456 | `a6d4535ba8775d34b4a5914019f9d724d5602be45f3855267c4bf2d87b4e784c` |
+
+The RV mapping gate failed because required lifecycle rows were absent. These
+files prove the failure; they are not positive mapping-coverage evidence. The
+recorder's allocation model therefore also needs bounded reuse of mapped
+backing, instead of one VMA creation and removal per temporary object.

@@ -5,7 +5,7 @@ mod runtime;
 mod sys;
 use core::arch::global_asm;
 #[global_allocator]
-static ALLOCATOR: sys::MmapAllocator = sys::MmapAllocator;
+static ALLOCATOR: sys::ProcessAllocator = sys::ProcessAllocator;
 
 #[cfg(target_arch = "riscv64")]
 global_asm!(

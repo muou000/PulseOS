@@ -597,6 +597,8 @@ def stack_proof(timeline: dict, report: dict, collection_report: dict, *, requir
     if not manifest["mapping_metadata"] or manifest["coverage"] is None:
         raise ValueError("original guest capture has no temporal mapping coverage")
     coverage = manifest["coverage"]
+    if coverage["dropped"] != 0:
+        raise ValueError("journal loss prevents claiming time-valid mapping coverage")
     if any(source["enable_before_ns"] < coverage["started_ns"] or source["disable_after_ns"] >= coverage["snapshot_ns"]
            for source in report["recorder"]["sources"]):
         raise ValueError("mapping journal does not cover every source enable/disable boundary")
@@ -617,6 +619,8 @@ def stack_proof(timeline: dict, report: dict, collection_report: dict, *, requir
 
 def mapping_lifecycle_proof(text: str, manifest: dict) -> dict:
     """Match actual syscall markers to the original, analyzer-validated journal."""
+    if manifest["coverage"]["dropped"] != 0:
+        raise ValueError("journal loss prevents qualifying mapping lifecycle coverage")
     complete = re.search(r"(?m)^MAPPING COMPLETE pid=(\d+) child=(\d+) old=(\d+) moved=(\d+) at_ns=(\d+)$", clean_console(text))
     if complete is None:
         raise ValueError("mapping lifecycle workload did not complete")
@@ -648,11 +652,13 @@ def mapping_lifecycle_proof(text: str, manifest: dict) -> dict:
     for match in re.finditer(r"(?m)^MAPPING STEP (.*)$", clean_console(text)):
         row = dict(word.split("=", 1) for word in match[1].split())
         markers[row["phase"]] = row
-    parent_space = parent_rows[0]["space"]
-
     def mappings(phase):
         time = int(markers[phase]["at_ns"])
-        observed = [row for row in spaces if row["space"] == parent_space and int(row["ts"]) < time]
+        bindings = [row for row in parent_rows if int(row["ts"]) < time]
+        if not bindings or bindings[-1]["kind"] == "exit" or bindings[-1]["task"] not in parent_tasks:
+            raise ValueError("mapping marker has no live stable task binding")
+        space = bindings[-1]["space"]
+        observed = [row for row in spaces if row["space"] == space and int(row["ts"]) < time]
         if not observed:
             raise ValueError("mapping phase has no time-valid snapshot")
         return observed[-1]["maps"]

@@ -16,6 +16,14 @@ use crate::sys::{self, Fd, Mapping, Result, Signals};
 fn log(message: &str) {
     sys::print(&format!("RECORD {message}\n"));
 }
+fn log_heap(stage: &str) {
+    let heap = sys::heap_resources();
+    log(&format!(
+        "HEAP stage={stage} reserved_bytes={} used_bytes={} allocated_bytes={} \
+         peak_allocated_bytes={}",
+        heap.reserved_bytes, heap.used_bytes, heap.allocated_bytes, heap.peak_allocated_bytes
+    ));
+}
 fn put32(bytes: &mut [u8], offset: usize, value: u32) {
     bytes[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
 }
@@ -461,6 +469,7 @@ impl Session {
              trace_subscriptions={}",
             resources.0, resources.1, plan.options.record_bytes, system.0, system.1
         ));
+        log_heap("prepared");
         Ok(())
     }
     fn enable(&mut self) -> Result<()> {
@@ -1098,6 +1107,22 @@ fn record(plan: &SessionPlan, hooks: &Hooks) -> Result<()> {
         .identities
         .extend(observation.diagnostics.identities);
     diagnostic.counters.extend(observation.diagnostics.counters);
+    let heap = sys::heap_resources();
+    for (name, value) in [
+        ("heap_reserved_bytes", heap.reserved_bytes),
+        ("heap_used_before_serialization_bytes", heap.used_bytes),
+        (
+            "heap_peak_before_serialization_bytes",
+            heap.peak_allocated_bytes,
+        ),
+    ] {
+        diagnostic.counters.push(DiagnosticCounter {
+            name: name.into(),
+            scope: "recorder_process".into(),
+            value: Some(value as u64),
+            kind: CounterKind::Activity,
+        });
+    }
     diagnostic.counters.push(DiagnosticCounter {
         name: "control_errors".into(),
         scope: "session".into(),
@@ -1171,6 +1196,7 @@ fn record(plan: &SessionPlan, hooks: &Hooks) -> Result<()> {
     };
     cleanup(session, &initial, resources, "CLEANUP")?;
     write_result?;
+    log_heap("saved");
     log(&format!(
         "SAVED output={} bytes={} sha256={:x}",
         plan.options.output,
