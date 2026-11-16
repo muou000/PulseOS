@@ -16,7 +16,9 @@ const DATA_SIZE: usize = PAGE;
 #[cfg(not(perf_ring_one_page))]
 const DATA_SIZE: usize = 16 * PAGE;
 const MAPPING_SIZE: usize = PAGE + DATA_SIZE;
-const PERIOD_NS: u64 = 10_000_000;
+// Combined stack/mapping evidence keeps sixteen sources inside the same
+// bounded archive, including the late fork/exec/remap phases.
+const PERIOD_NS: u64 = if cfg!(all(stack_test, mapping_test)) { 50_000_000 } else { 10_000_000 };
 #[cfg(all(not(tracepoint_test), not(stack_test)))]
 const CONTEXT_SIZE: usize = 64;
 #[cfg(stack_test)]
