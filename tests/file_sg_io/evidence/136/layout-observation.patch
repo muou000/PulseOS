@@ -1,0 +1,94 @@
+diff --git a/Cargo.toml b/Cargo.toml
+index b60aac65..1417d919 100644
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -235,6 +235,7 @@ sched-eevdf = ["axfeat/sched-eevdf"]
+ sched-load-balance = ["axfeat/sched-load-balance"]
+ mapping-lifecycle-test = ["pulse_core/mapping-lifecycle-test", "pulse_syscalls/mapping-lifecycle-test"]
+ guest-checks = ["pulse_core/guest-checks", "pulse_syscalls/guest-checks"]
++file-io-test = ["pulse_syscalls/file-io-test"]
+ bpf-trace = [
+     "axfeat/bpf-trace",
+     "axtask/bpf-trace",
+diff --git a/pulse_syscalls/Cargo.toml b/pulse_syscalls/Cargo.toml
+index 3b5b295c..d6434aba 100644
+--- a/pulse_syscalls/Cargo.toml
++++ b/pulse_syscalls/Cargo.toml
+@@ -14,6 +14,7 @@ ext4 = ["axfs/ext4"]
+ bpf-trace = ["axtask/bpf-trace", "pulse_core/bpf-trace"]
+ mapping-lifecycle-test = ["axfs/mapping-lifecycle-test"]
+ guest-checks = []
++file-io-test = []
+ 
+ [dependencies]
+ axerrno.workspace = true
+diff --git a/pulse_syscalls/src/impls/file_io_layout.rs b/pulse_syscalls/src/impls/file_io_layout.rs
+new file mode 100644
+index 00000000..e5395371
+--- /dev/null
++++ b/pulse_syscalls/src/impls/file_io_layout.rs
+@@ -0,0 +1,35 @@
++//! Read-only physical-layout observation for the file I/O guest fixture.
++//! The probe faults its own pages before calling this test-build-only hook.
++
++use axerrno::LinuxError;
++use axhal::paging::MappingFlags;
++use memory_addr::{MemoryAddr, PAGE_SIZE_4K, VirtAddr};
++
++pub(super) fn query_layout(address: usize, size: usize) -> Result<usize, LinuxError> {
++    if !address.is_multiple_of(PAGE_SIZE_4K)
++        || !size.is_multiple_of(PAGE_SIZE_4K)
++        || size == 0
++        || size > 16 * 1024 * 1024
++    {
++        return Err(LinuxError::EINVAL);
++    }
++    let end = address.checked_add(size).ok_or(LinuxError::EINVAL)?;
++    let process = pulse_core::task::current_process()?;
++    process.validate_user_range(address, size).map_err(|_| LinuxError::EFAULT)?;
++    let handle = process.aspace_handle();
++    let aspace = handle.read();
++    let mut previous = None;
++    let mut discontinuities = 0;
++    for address in (address..end).step_by(PAGE_SIZE_4K) {
++        let (physical, flags, _) = aspace.query_vaddr(VirtAddr::from(address))
++            .map_err(|_| LinuxError::EFAULT)?;
++        if physical.as_usize() == 0 || !flags.contains(MappingFlags::USER) {
++            return Err(LinuxError::EFAULT);
++        }
++        if previous.is_some_and(|prior: usize| prior.checked_add(PAGE_SIZE_4K) != Some(physical.as_usize())) {
++            discontinuities += 1;
++        }
++        previous = Some(physical.as_usize());
++    }
++    Ok(discontinuities)
++}
+diff --git a/pulse_syscalls/src/impls/mod.rs b/pulse_syscalls/src/impls/mod.rs
+index c6711682..8bcdec85 100644
+--- a/pulse_syscalls/src/impls/mod.rs
++++ b/pulse_syscalls/src/impls/mod.rs
+@@ -10,6 +10,8 @@ mod net;
+ mod task;
+ mod time;
+ mod utils;
++#[cfg(feature = "file-io-test")]
++mod file_io_layout;
+ 
+ pub(crate) use bpf::*;
+ #[cfg(feature = "guest-checks")]
+diff --git a/pulse_syscalls/src/impls/task/process.rs b/pulse_syscalls/src/impls/task/process.rs
+index 975717d8..448011e5 100644
+--- a/pulse_syscalls/src/impls/task/process.rs
++++ b/pulse_syscalls/src/impls/task/process.rs
+@@ -453,6 +453,11 @@ pub fn sys_getresgid(rgid_ptr: usize, egid_ptr: usize, sgid_ptr: usize) -> isize
+ }
+ 
+ pub fn sys_prctl(option: i32, arg2: usize, _arg3: usize, _arg4: usize, _arg5: usize) -> isize {
++    #[cfg(feature = "file-io-test")]
++    if option as u32 == 0x5053_4749 && arg2 == 3 && _arg5 == 0 {
++        return crate::impls::file_io_layout::query_layout(_arg3, _arg4)
++            .map_or_else(|error| -(error.code() as isize), |count| count as isize);
++    }
+     let process = match current_process() {
+         Ok(p) => p,
+         Err(e) => return -e.code() as isize,
