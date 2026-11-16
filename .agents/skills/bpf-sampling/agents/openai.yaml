@@ -1,0 +1,4 @@
+interface:
+  display_name: "PulseOS BPF 采样分析"
+  short_description: "使用 PulseOS BPF 采样、分析性能并整理精简证据与提交报告"
+  default_prompt: "使用 $bpf-sampling 完成采样分析并整理可审查的精简报告。"

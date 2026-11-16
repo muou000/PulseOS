@@ -9,6 +9,7 @@ Aya, libbpf, or ADR-0005 upstream-tool compatibility.
 ## Build and record
 
 ```sh
+set -o pipefail
 make test APP_FEATURES="qemu bpf-trace" 2>&1 | tail -30
 python3 tools/bpf-record/build.py --arch riscv64
 python3 tools/bpf-record/build.py --arch loongarch64
@@ -22,6 +23,16 @@ bpf-record --events cpu --cpus all --period-ns 10000000 --duration-ms 1000 --out
 bpf-record --events task --tid 123 --frequency 99 --duration-ms 1000 --output /tmp/task.pbcap
 bpf-record --events sched,fault --cpus 0,1 --duration-ms 1000 --output /tmp/events.pbcap
 bpf-record --events cpu,cpu,task,sched,fault --tid 123 --duration-ms 1000 --output /tmp/mixed.pbcap
+```
+
+For function profiling, deploy the ELF matching the actual boot kernel as
+`/boot/kernel.elf` and record its identity with `--kernel-elf /boot/kernel.elf`.
+Software sources default to `--callchain fp`; `--callchain none` selects single-IP
+records. Current FP limits accept depth 32 and 512 bytes. For example:
+
+```sh
+bpf-record --events task --tid 123 --period-ns 10000000 --duration-ms 1000 \
+  --callchain fp --kernel-elf /boot/kernel.elf --output /tmp/profile.pbcapture
 ```
 
 `task` requires an explicit existing TID. A numeric TID is resolved to the
@@ -97,9 +108,11 @@ Source, program, sink and consumer counters retain their individual scopes.
 They overlap and must not be summed into an invented loss total. A normal
 control-flow exit can produce a partial capture; unknown build/mapping facts,
 missing counters, zero observations or real loss do not become complete data.
-This recorder uses software v2 contexts without stack capture or a mapping
-journal; downstream symbolization/export must enforce its own prerequisites.
-Software single-IP and stack contexts remain distinct capabilities within v6.
+The production recorder captures bounded live FP stacks when enabled and stores
+an initial mapping snapshot plus the final temporal mapping journal. It binds
+guest-observed artifact identities to that history; missing identities remain
+unknown. Software single-IP and stack contexts remain distinct capabilities
+within v6; downstream symbolization/export enforces their actual prerequisites.
 Containers v1–v5 and source tables `PBSRC001`/`PBSRC002` are rejected. Historical
 archives retain their original format and producer/analyzer baseline; do not
 rewrite them as evidence for the current format. The standalone demonstrations

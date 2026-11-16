@@ -50,6 +50,7 @@
 | Skill | 来源 | 分类 | 调用方式 |
 | --- | --- | --- | --- |
 | [ask-matt](./ask-matt/SKILL.md) | [mattpocock](./THIRD_PARTY/mattpocock/README.md) | engineering | 用户 |
+| [bpf-sampling](./bpf-sampling/SKILL.md) | PulseOS | performance | 模型 |
 | [code-review](./code-review/SKILL.md) | [mattpocock](./THIRD_PARTY/mattpocock/README.md) | engineering | 模型 |
 | [codebase-design](./codebase-design/SKILL.md) | [mattpocock](./THIRD_PARTY/mattpocock/README.md) | engineering | 模型 |
 | [diagnosing-bugs](./diagnosing-bugs/SKILL.md) | [mattpocock](./THIRD_PARTY/mattpocock/README.md) | engineering | 模型 |
