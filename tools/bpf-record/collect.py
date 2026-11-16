@@ -5,78 +5,41 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 from pathlib import Path
-import struct
+import stat
 import subprocess
 
 MAX_ARTIFACT_BYTES = 512 * 1024 * 1024
+DEFAULT_ANALYZER = Path(__file__).resolve().parents[2] / "target/debug/bpf-analyzer"
 
 
 def sha256(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
-def elf_build_id(data: bytes, arch: str) -> str | None:
-    """Read actual bounded LE ELF64 notes; never substitute a truncated SHA."""
-    if len(data) < 64 or data[:7] != b"\x7fELF\x02\x01\x01":
-        raise ValueError("artifact is not LE ELF64")
-    kind, machine, version = struct.unpack_from("<HHI", data, 16)
-    if kind not in (2, 3) or machine != {"riscv64": 243, "loongarch64": 258}.get(arch) or version != 1:
-        raise ValueError("ELF architecture/type mismatch")
-    phoff, shoff = struct.unpack_from("<QQ", data, 32)
-    ehsize, phsize, phnum, shsize, shnum = struct.unpack_from("<HHHHH", data, 52)
-    if (ehsize != 64 or phnum > 4096 or shnum > 32768 or (phnum and phsize != 56)
-            or (shnum and shsize != 64) or (shoff != 0 and shnum == 0)):
-        raise ValueError("invalid ELF table geometry")
-
-    def span(offset, size):
-        if offset > len(data) or size > len(data) - offset:
-            raise ValueError("truncated ELF table or note")
-        return data[offset:offset + size]
-
-    note_ranges = set()
-    programs, sections = span(phoff, phsize * phnum), span(shoff, shsize * shnum)
-    for index in range(phnum):
-        row = programs[index * phsize:(index + 1) * phsize]
-        if struct.unpack_from("<I", row)[0] == 4:
-            note_ranges.add((struct.unpack_from("<Q", row, 8)[0], struct.unpack_from("<Q", row, 32)[0]))
-    for index in range(shnum):
-        row = sections[index * shsize:(index + 1) * shsize]
-        if struct.unpack_from("<I", row, 4)[0] == 7:
-            note_ranges.add(struct.unpack_from("<QQ", row, 24))
-    ids = set()
-    if sum(size for _, size in note_ranges) > 1024 * 1024:
-        raise ValueError("ELF note bytes exceed bound")
-    for offset, size in note_ranges:
-        note, cursor = span(offset, size), 0
-        while cursor < len(note):
-            if len(note) - cursor < 12:
-                if any(note[cursor:]):
-                    raise ValueError("truncated ELF note header")
-                break
-            namesz, descsz, tag = struct.unpack_from("<III", note, cursor)
-            name = cursor + 12
-            desc = (name + namesz + 3) & ~3
-            end = (desc + descsz + 3) & ~3
-            if end > len(note):
-                raise ValueError("truncated ELF note payload")
-            if tag == 3 and note[name:name + namesz] == b"GNU\0":
-                if not 1 <= descsz <= 128:
-                    raise ValueError("invalid GNU build-id size")
-                ids.add(note[desc:desc + descsz].hex())
-            cursor = end
-    if len(ids) > 1:
-        raise ValueError("conflicting GNU build-id notes")
-    return next(iter(ids), None)
+def elf_build_id(data: bytes, arch: str, analyzer: Path = DEFAULT_ANALYZER) -> str | None:
+    """Inspect these exact bytes with the guest/analyzer's shared note decoder."""
+    process = subprocess.run([str(analyzer), "--elf-identity", arch], input=data, capture_output=True)
+    if process.returncode:
+        raise ValueError(process.stderr.decode("utf-8", errors="replace").strip())
+    identity = json.loads(process.stdout)
+    if identity["sha256"] != sha256(data):
+        raise ValueError("ELF identity inspection differs from candidate bytes")
+    return identity["gnu_build_id"]
 
 
-def collect_artifacts(manifest: dict, bundle: Path, candidates: list[Path]) -> dict:
+def collect_artifacts(manifest: dict, bundle: Path, candidates: list[Path],
+                      analyzer: Path = DEFAULT_ANALYZER) -> dict:
     """Verify supplied bytes before publishing; missing identities stay missing."""
     available = {}
     for path in candidates:
         if path.stat().st_size > MAX_ARTIFACT_BYTES:
             raise ValueError(f"artifact exceeds collection bound: {path}")
-        data = path.read_bytes()
+        with path.open("rb") as source:
+            data = source.read(MAX_ARTIFACT_BYTES + 1)
+        if len(data) > MAX_ARTIFACT_BYTES:
+            raise ValueError(f"artifact exceeds collection bound: {path}")
         available[sha256(data)] = data
     rows, outputs = [], {}
     for artifact in manifest["artifacts"]:
@@ -95,7 +58,7 @@ def collect_artifacts(manifest: dict, bundle: Path, candidates: list[Path]) -> d
             if data is None:
                 row[status_key] = "missing"
                 continue
-            actual = elf_build_id(data, manifest["arch"])
+            actual = elf_build_id(data, manifest["arch"], analyzer)
             if actual != artifact.get(id_key):
                 raise ValueError("artifact GNU build-id differs from the guest capture")
             if key == "debug_sha256" and expected != digest and (actual is None or actual != artifact["gnu_build_id"]):
@@ -118,19 +81,46 @@ def collect_artifacts(manifest: dict, bundle: Path, candidates: list[Path]) -> d
 
 
 def collect(capture: Path, bundle: Path, candidates: list[Path], analyzer: Path) -> dict:
-    original = capture.read_bytes()
-    process = subprocess.run([str(analyzer), str(capture), "--artifact-manifest"], check=True, capture_output=True, text=True)
-    manifest = json.loads(process.stdout)
-    if manifest["capture_sha256"] != sha256(original):
-        raise ValueError("capture changed before identity inspection")
-    result = collect_artifacts(manifest, bundle, candidates)
-    if capture.read_bytes() != original:
-        raise ValueError("collection changed the original guest capture")
-    result.update(capture_sha256=sha256(original), capture_bytes=len(original), capture_unchanged=True,
-                  captured_manifest=manifest)
-    bundle.mkdir(parents=True, exist_ok=True)
-    (bundle / f"{capture.stem}-collection.json").write_text(json.dumps(result, indent=2) + "\n")
-    return result
+    with capture.open("rb") as source:
+        original = source.read()
+        source_stat = os.fstat(source.fileno())
+        protected = {(source_stat.st_dev, source_stat.st_ino)}
+        for candidate in candidates:
+            info = candidate.stat()
+            protected.add((info.st_dev, info.st_ino))
+        process = subprocess.run([str(analyzer), str(capture), "--artifact-manifest"], check=True, capture_output=True, text=True)
+        manifest = json.loads(process.stdout)
+        if manifest["capture_sha256"] != sha256(original):
+            raise ValueError("capture changed before identity inspection")
+        result = collect_artifacts(manifest, bundle, candidates, analyzer)
+        for artifact in result["artifacts"]:
+            for key, status in (("sha256", "status"), ("debug_sha256", "debug_status")):
+                if artifact[status] == "verified":
+                    info = (bundle / f"artifacts/{artifact[key]}.elf").stat()
+                    protected.add((info.st_dev, info.st_ino))
+        if capture.read_bytes() != original:
+            raise ValueError("collection changed the original guest capture")
+        result.update(capture_sha256=sha256(original), capture_bytes=len(original), capture_unchanged=True,
+                      captured_manifest=manifest)
+        encoded = json.dumps(result, indent=2) + "\n"
+        bundle.mkdir(parents=True, exist_ok=True)
+        report = bundle / f"{capture.stem}-collection.json"
+        # Open without truncation and retain this exact descriptor through the
+        # identity check and write; hardlinks, symlinks and path replacement
+        # cannot redirect the checked write onto the original capture.
+        descriptor = os.open(report, os.O_WRONLY | os.O_CREAT | os.O_NONBLOCK, 0o666)
+        with os.fdopen(descriptor, "w", encoding="utf-8") as output:
+            info = os.fstat(output.fileno())
+            if not stat.S_ISREG(info.st_mode):
+                raise ValueError("collection report must be a regular file")
+            if (info.st_dev, info.st_ino) in protected:
+                raise ValueError("collection report aliases its capture or an ELF artifact")
+            output.truncate(0)
+            output.write(encoded)
+        source.seek(0)
+        if source.read() != original or capture.read_bytes() != original:
+            raise ValueError("collection changed the original guest capture")
+        return result
 
 
 if __name__ == "__main__":

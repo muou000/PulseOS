@@ -211,9 +211,13 @@ def cases_script(directory: str, suite: str, duration: int, *, kernel_elf: bool 
                      "record_pid=$!", "ready_waits=0", "while ! grep -q '^RECORD ENABLE ' mapping-record.log; do",
                      f"  {fixture} sleep 10", "  ready_waits=$((ready_waits+1))",
                      '  if [ "$ready_waits" -ge 500 ]; then cat mapping-record.log; exit 1; fi', "done",
-                     ": > mapping.go", 'wait "$record_pid"', "rc=$?", "cat mapping-record.log",
-                     'echo RECORD_CASE END name=mapping-lifecycle rc="$rc"', 'wait "$target" || exit 1',
-                     "cat mapping-workload.log", f"{fixture} dump mapping-lifecycle.pbcapture mapping-lifecycle || exit 1"])
+                     "grep -E '^RECORD (CONFIG|OBSERVATION|ENABLE)' mapping-record.log", ": > mapping.go",
+                     'wait "$target"', "target_rc=$?", "cat mapping-workload.log",
+                     "grep -E '^RECORD (DISABLE|QUIESCENT|NO_GROWTH|STOP|ERROR)' mapping-record.log || true",
+                     'if [ "$target_rc" -ne 0 ]; then cat mapping-record.log; exit 1; fi',
+                     'wait "$record_pid"', "rc=$?", "cat mapping-record.log",
+                     'echo RECORD_CASE END name=mapping-lifecycle rc="$rc"',
+                     f"{fixture} dump mapping-lifecycle.pbcapture mapping-lifecycle || exit 1"])
         captures.append("mapping-lifecycle")
     if suite in ("negative", "full"):
         base = f"--events cpu --duration-ms {duration} --output rejected.pbcapture"
@@ -578,7 +582,8 @@ def verify_saved_hash(case: dict, raw: bytes) -> str:
     return digest
 
 
-def stack_proof(timeline: dict, report: dict, collection_report: dict, *, require_depth: bool) -> dict:
+def stack_proof(timeline: dict, report: dict, collection_report: dict, *, require_depth: bool,
+                require_kernel: bool = False) -> dict:
     events = [event for event in timeline["events"] if event.get("event_id") == 0x1002]
     depths = {mode: [event["semantic"]["chain_len"] for event in events if event["semantic"]["mode"] == mode]
               for mode in (1, 2)}
@@ -586,6 +591,8 @@ def stack_proof(timeline: dict, report: dict, collection_report: dict, *, requir
         raise ValueError("missing real bounded stack payloads")
     if require_depth and max(depths[2], default=0) < 3:
         raise ValueError("external target has no observed user chain of at least three frames")
+    if require_kernel and max(depths[1], default=0) < 3:
+        raise ValueError("mixed workload has no observed kernel chain of at least three frames")
     manifest = collection_report["captured_manifest"]
     if not manifest["mapping_metadata"] or manifest["coverage"] is None:
         raise ValueError("original guest capture has no temporal mapping coverage")
@@ -602,7 +609,8 @@ def stack_proof(timeline: dict, report: dict, collection_report: dict, *, requir
     kernel_sha = manifest["kernel"]["sha256"]
     if not any(item["sha256"] == kernel_sha and item["status"] == "verified" for item in collection_report["artifacts"]):
         raise ValueError("host did not collect the matching kernel ELF")
-    return {"stack_samples": len(events), "max_user_depth": max(depths[2], default=0),
+    return {"stack_samples": len(events), "user_samples": len(depths[2]), "kernel_samples": len(depths[1]),
+            "max_user_depth": max(depths[2], default=0),
             "max_kernel_depth": max(depths[1], default=0), "initial_snapshot_ns": int(initial),
             "coverage": coverage, "termination_counts": dict(Counter(event["semantic"]["termination"] for event in events))}
 
@@ -717,8 +725,20 @@ def guest(args: argparse.Namespace) -> int:
     else:
         helpers.debugfs(image_copy, "rm /boot/kernel.elf", write=True)
     install(image_copy, kernel_elf, "/boot/kernel.elf", run)
-    helpers.debugfs(image_copy, f'dump /bin/busybox "{run / "busybox.elf"}"')
-    candidates = [run / name for name in ("bpf-record.elf", "record-fixture.elf", "kernel.elf", "busybox.elf") if (run / name).exists()]
+    candidates = [run / name for name in ("bpf-record.elf", "record-fixture.elf", "kernel.elf")]
+    for guest_path in ("/bin/busybox", "/usr/bin/busybox", "/usr/bin/bash", "/usr/bin/dd",
+                       "/usr/lib64/libc-2.28.so", "/usr/lib64/ld-2.28.so"):
+        candidate = run / (guest_path.strip("/").replace("/", "-") + ".elf")
+        try:
+            identity = helpers.debugfs(image_copy, f"stat {guest_path}")
+            if "Type: regular" not in identity:
+                continue
+            helpers.debugfs(image_copy, f'dump {guest_path} "{candidate}"')
+        except ValueError as error:
+            if "File not found" not in str(error):
+                raise
+        else:
+            candidates.append(candidate)
     command = qemu_command(args.arch, run / "kernel", image_copy)
     shell = f"sh {directory}/cases.sh; status=$?; printf '\\nBPF_HOST_EXIT {token} %s\\n' \"$status\""
     inputs = {"kind": "generic recorder with independently launched external workload", "arch": args.arch,
@@ -758,7 +778,8 @@ def guest(args: argparse.Namespace) -> int:
             if args.suite == "stacks" and label != "journal-failure":
                 timeline_path = run / f"{label}-timeline.json"
                 helpers.command([str(run / "bpf-analyzer"), str(path), "--timeline", str(timeline_path)], cwd=REPO)
-                proof = stack_proof(json.loads(timeline_path.read_text()), reports[label], collected, require_depth=label == "stack-task")
+                proof = stack_proof(json.loads(timeline_path.read_text()), reports[label], collected,
+                                    require_depth=label == "stack-task", require_kernel=label == "mixed")
                 (run / f"{label}-stack-proof.json").write_text(json.dumps(proof, indent=2) + "\n")
             if label == "mapping-lifecycle":
                 proof = mapping_lifecycle_proof(text, collected["captured_manifest"])

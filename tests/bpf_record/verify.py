@@ -50,7 +50,8 @@ def verify(run: Path, analyzer: Path, *, functional_only: bool = False) -> dict:
         if inputs["suite"] == "stacks" and label != "journal-failure":
             timeline = run / f"{label}-replay-timeline.json"
             helpers.command([str(analyzer), str(path), "--timeline", str(timeline)], cwd=REPO)
-            proofs[label] = stack_proof(json.loads(timeline.read_text()), report, collected, require_depth=label == "stack-task")
+            proofs[label] = stack_proof(json.loads(timeline.read_text()), report, collected,
+                                       require_depth=label == "stack-task", require_kernel=label == "mixed")
         if label == "mapping-lifecycle":
             proofs[label] = mapping_lifecycle_proof(log, collected["captured_manifest"])
         if label == "nonleader-exec":

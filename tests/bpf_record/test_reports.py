@@ -57,6 +57,12 @@ class RecorderEvidenceTests(unittest.TestCase):
             stack_proof({"events": [event]}, report, collection, require_depth=True)
         event["semantic"].update(chain_len=3, ips=[4096, 8192, 12288])
         self.assertEqual(stack_proof({"events": [event]}, report, collection, require_depth=True)["max_user_depth"], 3)
+        with self.assertRaisesRegex(ValueError, "kernel chain"):
+            stack_proof({"events": [event]}, report, collection, require_depth=True, require_kernel=True)
+        kernel = {"event_id": 0x1002, "semantic": {"mode": 1, "chain_len": 3,
+                  "ips": [0xffff0000, 0xffff1000, 0xffff2000], "termination": "complete"}}
+        self.assertEqual(stack_proof({"events": [event, kernel]}, report, collection,
+                                    require_depth=True, require_kernel=True)["max_kernel_depth"], 3)
         report["runtime_diagnostics"]["counters"][0]["value"] = 101
         with self.assertRaisesRegex(ValueError, "before enable"):
             stack_proof({"events": [event]}, report, collection, require_depth=True)

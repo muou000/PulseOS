@@ -43,7 +43,8 @@ CPU/task/scheduler/fault sources, and an existing installed shell. It also check
 SIGINT, target exit, retained-record overflow, a rejected initial snapshot, and a
 failed final journal. The fixture is built with frame pointers and contains
 three non-inlined nested functions; the gate requires an observed user chain of
-at least three frames, records actual kernel depth and every termination reason,
+at least three frames and an observed kernel chain of at least three frames in
+the mixed workload, records user/kernel counts and every termination reason,
 and never synthesizes a chain. `mapping` waits for the production recorder to
 enable before performing actual file mappings at byte offset 4096, mapped-file
 and task rename, fork, exec, remap, unmap, address reuse and exit. Its oracle

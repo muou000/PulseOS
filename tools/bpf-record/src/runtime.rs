@@ -1080,6 +1080,11 @@ fn record(plan: &SessionPlan, hooks: &Hooks) -> Result<()> {
     for error in observation.errors {
         control_errors.record(error);
     }
+    log(&format!(
+        "MAPPINGS bytes={} artifacts={}",
+        observation.mappings.journal.len(),
+        observation.mappings.artifacts.len()
+    ));
     if let Err(error) = writer.set_mappings(observation.mappings) {
         control_errors.record(format!("capture mappings: {error:?}"));
     }

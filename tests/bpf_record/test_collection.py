@@ -31,6 +31,20 @@ def manifest(data, build_id):
 
 
 class CollectionTests(unittest.TestCase):
+    def test_over_budget_identity_cannot_be_collected_as_known_absent(self):
+        data = bytearray(elf())
+        struct.pack_into("<Q", data, 40, len(data))
+        struct.pack_into("<H", data, 60, 4097)
+        data.extend(bytes(4097 * 64))
+        with tempfile.TemporaryDirectory() as root:
+            root = Path(root)
+            source = root / "large-section-table"
+            source.write_bytes(data)
+            bundle = root / "bundle"
+            with self.assertRaisesRegex(ValueError, "table"):
+                collector.collect_artifacts(manifest(data, None), bundle, [source])
+            self.assertFalse(bundle.exists())
+
     def test_extended_section_numbering_does_not_become_a_missing_build_id(self):
         data = bytearray(elf())
         struct.pack_into("<Q", data, 40, 64)

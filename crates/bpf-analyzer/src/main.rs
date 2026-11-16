@@ -11,6 +11,7 @@ use bpf_analyzer::{
 
 fn print_help() {
     println!("Usage: bpf-analyzer <capture-file> [OPTIONS]");
+    println!("       bpf-analyzer --elf-identity riscv64|loongarch64 < ELF");
     println!("  --table, -t          Print selected normalized events");
     println!("  --loss, -l           Print capture-wide loss/integrity diagnostics");
     println!("  --json, -j           Print JSON for the selected report");
@@ -134,6 +135,37 @@ impl ReportFiles {
 }
 
 fn run(args: &[String]) -> Result<(), String> {
+    if args[1] == "--elf-identity" {
+        if args.len() != 3 {
+            return Err(
+                "--elf-identity requires exactly one target architecture and ELF stdin".into(),
+            );
+        }
+        let arch = match args[2].as_str() {
+            "riscv64" => bpf_capture::CaptureArch::Riscv64,
+            "loongarch64" => bpf_capture::CaptureArch::LoongArch64,
+            _ => return Err("unsupported ELF target architecture".into()),
+        };
+        let limit = 512 * 1024 * 1024u64;
+        let mut bytes = Vec::new();
+        std::io::stdin()
+            .lock()
+            .take(limit + 1)
+            .read_to_end(&mut bytes)
+            .map_err(|error| format!("cannot read ELF stdin: {error}"))?;
+        if bytes.len() as u64 > limit {
+            return Err("ELF exceeds identity read bound".into());
+        }
+        let id = bpf_analyzer::artifact::elf_build_id(&bytes, arch)?;
+        // Both identities are generated lowercase hexadecimal, never input text.
+        println!(
+            "{{\"sha256\":\"{}\",\"gnu_build_id\":{}}}",
+            bpf_analyzer::artifact::sha256(&bytes),
+            id.map(|id| format!("\"{id}\""))
+                .unwrap_or_else(|| "null".into())
+        );
+        return Ok(());
+    }
     let mut query = Query::default();
     let (mut table, mut loss, mut json, mut scheduler, mut faults) =
         (false, false, false, false, false);
@@ -236,7 +268,10 @@ fn run(args: &[String]) -> Result<(), String> {
         if args.len() != 3 {
             return Err("--artifact-manifest is a capture-wide standalone report".into());
         }
-        println!("{}", bpf_analyzer::artifact_manifest::render(&analyzer, &capture_bytes));
+        println!(
+            "{}",
+            bpf_analyzer::artifact_manifest::render(&analyzer, &capture_bytes)
+        );
         return Ok(());
     }
     let selected = analyzer.query(&query)?;
