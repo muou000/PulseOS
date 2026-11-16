@@ -16,6 +16,24 @@ pub struct FoldedOutput {
 
 /// Render a tabular textual overview of all normalized events.
 pub fn render_event_table(analyzer: &CaptureAnalyzer, events: &[NormalizedEvent]) -> String {
+    render_event_table_weighted(analyzer, events, crate::query::SampleWeight::Samples)
+}
+
+pub fn render_query_table(analyzer: &CaptureAnalyzer, result: &crate::query::AnalysisResult) -> String {
+    render_event_table_weighted(analyzer, &result.events, result.query.weight)
+}
+
+fn sample_weight_totals(events: &[NormalizedEvent], weight: crate::query::SampleWeight) -> (u64, u128) {
+    events.iter().filter_map(|event| weight.value(event)).fold(
+        (0, 0), |(count, total), value| (count + 1, total + u128::from(value)),
+    )
+}
+
+fn render_event_table_weighted(
+    analyzer: &CaptureAnalyzer,
+    events: &[NormalizedEvent],
+    weight: crate::query::SampleWeight,
+) -> String {
     let mut out = String::new();
 
     if !analyzer.is_complete() {
@@ -27,16 +45,18 @@ pub fn render_event_table(analyzer: &CaptureAnalyzer, events: &[NormalizedEvent]
         writeln!(&mut out).unwrap();
     }
 
+    let (samples, total) = sample_weight_totals(events, weight);
+    writeln!(&mut out, "CPU samples: {samples}; weight: {total} {}", weight.unit()).unwrap();
     writeln!(
         &mut out,
-        "{:<16} {:<4} {:<6} {:<6} {:<8} {:<16} {:<14} {}",
-        "TIMESTAMP (ns)", "CPU", "PID", "TID", "TASK_ID", "COMM", "EVENT", "DETAILS"
+        "{:<8} {:<8} {:<16} {:<4} {:<6} {:<6} {:<8} {:<16} {:<14} {}",
+        "RECORD", "SOURCE", "TIMESTAMP (ns)", "CPU", "PID", "TID", "TASK_ID", "COMM", "EVENT", "DETAILS"
     )
     .unwrap();
     writeln!(
         &mut out,
-        "{:-<16} {:-<4} {:-<6} {:-<6} {:-<8} {:-<16} {:-<14} {:-<30}",
-        "", "", "", "", "", "", "", ""
+        "{:-<8} {:-<8} {:-<16} {:-<4} {:-<6} {:-<6} {:-<8} {:-<16} {:-<14} {:-<30}",
+        "", "", "", "", "", "", "", "", "", ""
     )
     .unwrap();
 
@@ -136,7 +156,9 @@ pub fn render_event_table(analyzer: &CaptureAnalyzer, events: &[NormalizedEvent]
 
         writeln!(
             &mut out,
-            "{:<16} {:<4} {:<6} {:<6} {:<8} {:<16} {:<14} {}",
+            "{:<8} {:<8} {:<16} {:<4} {:<6} {:<6} {:<8} {:<16} {:<14} {}",
+            ev.sequence_index,
+            analyzer.data().recorder.as_ref().expect("reader requires source declarations").record_sources[ev.sequence_index],
             ev.timestamp_ns,
             ev.cpu_id,
             ev.pid,
@@ -287,6 +309,26 @@ fn render_json_inner(
         all_events = analyzer.ordered_events();
         all_events.as_slice()
     };
+    let weight = selected.map_or(crate::query::SampleWeight::Samples, |result| result.query.weight);
+    let (samples, total) = sample_weight_totals(events, weight);
+    writeln!(&mut out, "  \"sample_weight\": {{\"unit\":{},\"total\":{total},\"samples\":{samples}}},", json_string(weight.unit())).unwrap();
+    // Common per-record envelope for both CPU sample kinds; frozen-stack
+    // diagnostics remain in stack_samples below.
+    let cpu_samples = events.iter().filter_map(|event| {
+        let amount = weight.value(event)?;
+        let (period, pc, mode) = match event.payload {
+            EventPayload::SoftwareSampleV2 { sample_period, pc, mode, .. }
+            | EventPayload::SoftwareStackV3 { sample_period, pc, mode, .. } => (sample_period, pc, mode),
+            _ => unreachable!("only CPU samples carry profile weight"),
+        };
+        Some(format!(concat!("{{\"sequence_index\":{},\"logical_source\":{},\"weight\":{},",
+            "\"timestamp_ns\":{},\"cpu_id\":{},\"pid\":{},\"tid\":{},\"task_id\":{},",
+            "\"sample_period\":{},\"ip\":{},\"mode\":{}}}"),
+            event.sequence_index,
+            analyzer.data().recorder.as_ref().expect("reader requires source declarations").record_sources[event.sequence_index],
+            amount, event.timestamp_ns, event.cpu_id, event.pid, event.tid, event.task_id, period, pc, mode))
+    }).collect::<Vec<_>>().join(",");
+    writeln!(&mut out, "  \"cpu_samples\": [{cpu_samples}],").unwrap();
     let stack_samples = events.iter().filter(|event| matches!(event.payload, EventPayload::SoftwareStackV3 { .. }))
         .map(|event| format!("{{\"logical_source\":{},\"timestamp_ns\":{},\"cpu_id\":{},\"pid\":{},\"tid\":{},\"task_id\":{},\"sample\":{}}}",
             analyzer.data().recorder.as_ref().expect("reader requires source declarations").record_sources[event.sequence_index], event.timestamp_ns, event.cpu_id, event.pid, event.tid, event.task_id, semantic_json(event)))
@@ -419,9 +461,10 @@ pub fn render_on_cpu_folded_weighted(
     };
     let mut stacks: BTreeMap<String, u128> = BTreeMap::new();
     for event in events {
-        let (pc, sample_period, mode, stack) = match &event.payload {
-            EventPayload::SoftwareSampleV2 { pc, sample_period, mode, .. } => (*pc, *sample_period, *mode, None),
-            EventPayload::SoftwareStackV3 { pc, sample_period, mode, stack, .. } => (*pc, *sample_period, *mode, Some(stack)),
+        let Some(amount) = weight.value(event) else { continue; };
+        let (pc, mode, stack) = match &event.payload {
+            EventPayload::SoftwareSampleV2 { pc, mode, .. } => (*pc, *mode, None),
+            EventPayload::SoftwareStackV3 { pc, mode, stack, .. } => (*pc, *mode, Some(stack)),
             _ => continue,
         };
         let mode = match mode { 1 => "kernel", 2 => "user", _ => "unknown-mode" };
@@ -429,10 +472,6 @@ pub fn render_on_cpu_folded_weighted(
             format!("pid:{}:tid:{}", event.pid, event.tid)
         } else { format!("task:{}", event.task_id) };
         let name = folded_label(event.comm.as_deref().unwrap_or(&fallback));
-        let amount = match weight {
-            crate::query::SampleWeight::Samples => 1,
-            crate::query::SampleWeight::Period => sample_period as u128,
-        };
         let mut key = format!("{}{};[{}]", prefix, name, mode);
         if let Some(stack) = stack {
             if stack.status != pulse_bpf_schema::StackStatus::Complete {
@@ -443,11 +482,12 @@ pub fn render_on_cpu_folded_weighted(
             for ip in stack.ips[..stack.len as usize].iter().rev() {
                 write!(&mut key, ";pc:0x{ip:x}").unwrap();
             }
-            if stack.len == 0 { continue; }
+            // A zero-depth unavailable chain still represents a real sample.
+            // Its reason marker retains the weight without inventing a frame.
         } else {
             write!(&mut key, ";pc:0x{pc:x}").unwrap();
         }
-        *stacks.entry(key).or_default() += amount;
+        *stacks.entry(key).or_default() += u128::from(amount);
     }
     let has_data = !stacks.is_empty();
     for (stack, value) in stacks {

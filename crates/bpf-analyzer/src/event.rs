@@ -91,6 +91,16 @@ pub struct NormalizedEvent {
 }
 
 impl NormalizedEvent {
+    /// Captured CPU sample period. Tracepoints and opaque records carry no
+    /// profile weight, even when they share the same query window.
+    pub fn sample_period(&self) -> Option<u64> {
+        match self.payload {
+            EventPayload::SoftwareSampleV2 { sample_period, .. }
+            | EventPayload::SoftwareStackV3 { sample_period, .. } => Some(sample_period),
+            _ => None,
+        }
+    }
+
     pub fn event_name(&self) -> &'static str {
         match self.event_id {
             x if x == TracepointId::TaskMetadata as u32 => "task_metadata",
