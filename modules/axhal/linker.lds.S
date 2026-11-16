@@ -23,6 +23,11 @@ SECTIONS
     }
 
     _srodata = .;
+    .note.gnu.build-id ALIGN(4) : AT(ADDR(.note.gnu.build-id) - PHYS_VIRT_OFFSET) {
+        _sbuild_id = .;
+        KEEP(*(.note.gnu.build-id))
+        _ebuild_id = .;
+    }
     .rodata ALIGN(4K) : AT(ADDR(.rodata) - PHYS_VIRT_OFFSET) {
         *(.rodata .rodata.*)
         *(.srodata .srodata.*)

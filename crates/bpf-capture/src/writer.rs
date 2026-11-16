@@ -377,7 +377,7 @@ impl CaptureWriter {
             metadata.status = status;
         }
         if let Some(mappings) = &self.mappings {
-            if crate::mapping::MappingJournal::parse(&mappings.journal)?.dropped > 0 && metadata.status.is_complete() {
+            if crate::mapping::MappingJournal::validate(&mappings.journal)?.dropped > 0 && metadata.status.is_complete() {
                 metadata.status = SessionStatusCode::IncompleteLoss;
             }
         }

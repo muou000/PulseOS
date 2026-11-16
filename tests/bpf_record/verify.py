@@ -9,8 +9,9 @@ import re
 import sys
 
 from capture import clean_console, extract
-from run import (REPO, benchmark, cases_script, helpers, parse_cases,
-                 validate_case, validate_report, verify_exec_identity, verify_existing_workload)
+from run import (REPO, benchmark, cases_script, helpers, parse_cases, collection,
+                 validate_case, validate_report, verify_exec_identity, verify_existing_workload,
+                 verify_saved_hash, stack_proof, mapping_lifecycle_proof)
 
 
 def verify(run: Path, analyzer: Path, *, functional_only: bool = False) -> dict:
@@ -39,9 +40,20 @@ def verify(run: Path, analyzer: Path, *, functional_only: bool = False) -> dict:
         path = run / f"{label}.pbcapture"
         if path.read_bytes() != extract(log, label):
             errors.append(f"{label}: saved capture differs from original guest file transfer")
+        if inputs.get("guest_capture_sha_witness"):
+            verify_saved_hash(cases[label], path.read_bytes())
+            candidates = list((run / "artifacts").glob("*.elf"))
+            collected = collection.collect(path, run, candidates, analyzer)
         report = json.loads(helpers.command([str(analyzer), str(path), "--json"], cwd=REPO))
         reports[label] = report
         errors += validate_report(label, report)
+        if inputs["suite"].startswith("stacks-") and label != "journal-failure":
+            timeline = run / f"{label}-replay-timeline.json"
+            helpers.command([str(analyzer), str(path), "--timeline", str(timeline)], cwd=REPO)
+            proofs[label] = stack_proof(json.loads(timeline.read_text()), report, collected,
+                                       require_depth=label == "stack-task", require_kernel=label == "mixed")
+        if label == "mapping-lifecycle":
+            proofs[label] = mapping_lifecycle_proof(log, collected["captured_manifest"])
         if label == "nonleader-exec":
             # Regenerate the timeline through the same authoritative input.
             timeline = run / "nonleader-exec-replay-timeline.json"
@@ -51,6 +63,8 @@ def verify(run: Path, analyzer: Path, *, functional_only: bool = False) -> dict:
             timeline = run / f"{label}-replay-timeline.json"
             helpers.command([str(analyzer), str(path), "--timeline", str(timeline)], cwd=REPO)
             proofs[label] = verify_existing_workload(log, json.loads(timeline.read_text()), label)
+        if inputs.get("guest_capture_sha_witness"):
+            verify_saved_hash(cases[label], path.read_bytes())
     if "write-failure" in failures:
         path = run / "write-failure.pbcapture"
         if path.read_bytes() != extract(log, "write-failure") or path.stat().st_size != 1024:

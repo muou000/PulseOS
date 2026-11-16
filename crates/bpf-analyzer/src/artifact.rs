@@ -55,43 +55,34 @@ fn u32at(b: &[u8], n: usize) -> u32 {
 fn u64at(b: &[u8], n: usize) -> u64 {
     u64::from_le_bytes(b[n..n + 8].try_into().unwrap())
 }
-fn notes(data: &[u8], build_id: &mut Option<String>) -> Result<(), String> {
-    let mut pos = 0usize;
-    while pos < data.len() {
-        if data.len() - pos < 12 {
-            if data[pos..].iter().all(|b| *b == 0) {
-                break;
-            }
-            return Err("truncated ELF note".into());
-        }
-        let namesz = u32at(data, pos) as usize;
-        let descsz = u32at(data, pos + 4) as usize;
-        let kind = u32at(data, pos + 8);
-        pos += 12;
-        let name_end = pos.checked_add(namesz).ok_or("ELF note overflow")?;
-        let desc_start = name_end.checked_add(3).ok_or("ELF note overflow")? & !3;
-        let desc_end = desc_start.checked_add(descsz).ok_or("ELF note overflow")?;
-        let next = desc_end.checked_add(3).ok_or("ELF note overflow")? & !3;
-        let name = data.get(pos..name_end).ok_or("truncated ELF note name")?;
-        let desc = data
-            .get(desc_start..desc_end)
-            .ok_or("truncated ELF note descriptor")?;
-        if next > data.len() {
-            return Err("truncated ELF note padding".into());
-        }
-        if name == b"GNU\0" && kind == 3 {
-            if desc.is_empty() || desc.len() > 128 {
-                return Err("invalid GNU build-id size".into());
-            }
-            let value = desc.iter().map(|b| format!("{b:02x}")).collect::<String>();
-            if build_id.as_ref().is_some_and(|old| old != &value) {
-                return Err("conflicting GNU build-id notes".into());
-            }
-            *build_id = Some(value);
-        }
-        pos = next;
+/// Inspect the actual GNU note using the same bounded decoder as the guest.
+/// An unreadable, malformed or over-budget identity is an error, never absence.
+pub fn elf_build_id(bytes: &[u8], arch: CaptureArch) -> Result<Option<String>, String> {
+    let h = slice(bytes, 0, 64)?;
+    let expected = match arch {
+        CaptureArch::Riscv64 => 243,
+        CaptureArch::LoongArch64 => 258,
+        CaptureArch::Unknown => return Err("unknown ELF target architecture".into()),
+    };
+    if u16at(h, 18) != expected || !matches!(u16at(h, 16), 2 | 3) {
+        return Err("ELF architecture/type mismatch".into());
     }
-    Ok(())
+    pulse_bpf_schema::elf::elf_build_id(bytes.len() as u64, |offset, out| {
+        let Ok(input) = slice(bytes, offset, out.len() as u64) else {
+            return false;
+        };
+        out.copy_from_slice(input);
+        true
+    })
+    .map(|id| {
+        id.map(|id| {
+            id.as_bytes()
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect()
+        })
+    })
+    .map_err(|_| "ELF identity unreadable: malformed or over-budget table/note".into())
 }
 impl VerifiedElf {
     pub fn from_bytes(
@@ -102,38 +93,23 @@ impl VerifiedElf {
         if sha256(bytes) != artifact.sha256 {
             return Err("ELF SHA256 mismatch".into());
         }
-        let h = slice(bytes, 0, 64)?;
-        if &h[..4] != b"\x7fELF"
-            || h[4] != 2
-            || h[5] != 1
-            || h[6] != 1
-            || u32at(h, 20) != 1
-            || u16at(h, 52) != 64
-        {
-            return Err("unsupported ELF header".into());
+        let gnu_build_id = elf_build_id(bytes, arch)?;
+        if gnu_build_id != artifact.gnu_build_id {
+            return Err("ELF GNU build-id/absence mismatch".into());
         }
+        let h = slice(bytes, 0, 64)?;
         let machine = u16at(h, 18);
         let elf_type = u16at(h, 16);
-        let expected = match arch {
-            CaptureArch::Riscv64 => 243,
-            CaptureArch::LoongArch64 => 258,
-            CaptureArch::Unknown => return Err("unknown ELF target architecture".into()),
-        };
-        if machine != expected || !matches!(elf_type, 2 | 3) {
-            return Err("ELF architecture/type mismatch".into());
-        }
         let phoff = u64at(h, 32);
         let shoff = u64at(h, 40);
         let phsize = u16at(h, 54) as u64;
         let phnum = u16at(h, 56) as u64;
         let shsize = u16at(h, 58) as u64;
         let shnum = u16at(h, 60) as u64;
-        if phnum == 0 || phnum > 4096 || phsize != 56 || shnum > 32768 || shnum != 0 && shsize != 64
-        {
+        if phnum == 0 {
             return Err("unsupported ELF table shape".into());
         }
         let mut segments = Vec::new();
-        let mut gnu_build_id = None;
         for i in 0..phnum {
             let p = slice(
                 bytes,
@@ -164,8 +140,6 @@ impl VerifiedElf {
                     memsz,
                     flags: u32at(p, 4),
                 });
-            } else if kind == 4 {
-                notes(slice(bytes, offset, filesz)?, &mut gnu_build_id)?;
             }
         }
         let mut sections = Vec::new();
@@ -178,12 +152,6 @@ impl VerifiedElf {
                 shsize,
             )?;
             sections.push(s);
-            if u32at(s, 4) == 7 {
-                notes(slice(bytes, u64at(s, 24), u64at(s, 32))?, &mut gnu_build_id)?;
-            }
-        }
-        if gnu_build_id != artifact.gnu_build_id {
-            return Err("ELF GNU build-id/absence mismatch".into());
         }
         let mut symbols = Vec::new();
         for s in &sections {

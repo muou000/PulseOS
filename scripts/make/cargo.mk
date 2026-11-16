@@ -22,7 +22,7 @@ RUSTFLAGS := -A unsafe_op_in_unsafe_fn
 ifneq ($(findstring bpf-trace,$(APP_FEATURES)),)
   RUSTFLAGS += -C force-frame-pointers=yes
 endif
-RUSTFLAGS_LINK_ARGS := -C link-arg=-T$(LD_SCRIPT) -C link-arg=-no-pie -C link-arg=-znostart-stop-gc
+RUSTFLAGS_LINK_ARGS := -C link-arg=-T$(LD_SCRIPT) -C link-arg=-no-pie -C link-arg=-znostart-stop-gc -C link-arg=--build-id=sha1
 RUSTDOCFLAGS := -Z unstable-options --enable-index-page -D rustdoc::broken_intra_doc_links
 
 # The Rust bare-metal LoongArch target enables `ual` by default. LS2K1000

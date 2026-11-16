@@ -2,15 +2,27 @@ use alloc::{format, string::String, vec::Vec};
 
 use bpf_capture::{
     CaptureArch, CaptureScope, CaptureWriter, CounterKind, DiagnosticCounter, DiagnosticIdentity,
-    RecorderKind, RecorderSource, RuntimeDiagnostics, SchemaRegistry, SessionConfig,
+    RecorderSource, RuntimeDiagnostics, SchemaRegistry, SessionConfig,
     recorder::{SourceClock, SourceConfig, SourceFallback, SourceUnit},
 };
-use bpf_record::{Capabilities, Event, Options, SessionPlan, SourcePlan};
+use bpf_record::{
+    Capabilities, Event, Options, SessionPlan, SourcePlan,
+    observation::{JOURNAL_READ_LIMIT, KERNEL_ELF_READ_LIMIT, Observation},
+};
+use sha2::{Digest, Sha256};
 
 use crate::sys::{self, Fd, Mapping, Result, Signals};
 
 fn log(message: &str) {
     sys::print(&format!("RECORD {message}\n"));
+}
+fn log_heap(stage: &str) {
+    let heap = sys::heap_resources();
+    log(&format!(
+        "HEAP stage={stage} reserved_bytes={} used_bytes={} allocated_bytes={} \
+         peak_allocated_bytes={}",
+        heap.reserved_bytes, heap.used_bytes, heap.allocated_bytes, heap.peak_allocated_bytes
+    ));
 }
 fn put32(bytes: &mut [u8], offset: usize, value: u32) {
     bytes[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
@@ -34,6 +46,16 @@ fn snapshot() -> Result<String> {
         return Err("incomplete BPF diagnostics".into());
     }
     Ok(text)
+}
+fn mapping_snapshot(fail: bool) -> Result<String> {
+    // Opening proc freezes a complete ordered cut. The acceptance hook uses an
+    // actually absent path so descriptor cleanup exercises the syscall failure.
+    let path = if fail {
+        "/proc/pulse_bpf_mappings_missing"
+    } else {
+        "/proc/pulse_bpf_mappings"
+    };
+    sys::read_file(path, JOURNAL_READ_LIMIT)
 }
 fn event_row(text: &str, fd: usize) -> Result<&str> {
     text.lines()
@@ -69,6 +91,8 @@ struct Hooks {
     write_fail_after: Option<usize>,
     dup_close: bool,
     stop_failure: bool,
+    fail_snapshot: bool,
+    fail_journal: bool,
 }
 fn parse(args: &[&str]) -> Result<(Options, Hooks)> {
     #[allow(unused_mut)]
@@ -78,6 +102,15 @@ fn parse(args: &[&str]) -> Result<(Options, Hooks)> {
     while i < args.len() {
         #[cfg(feature = "acceptance")]
         if args[i].starts_with("--test-") {
+            if args[i] == "--test-fail-snapshot" || args[i] == "--test-fail-journal" {
+                if args[i] == "--test-fail-snapshot" {
+                    hooks.fail_snapshot = true;
+                } else {
+                    hooks.fail_journal = true;
+                }
+                i += 1;
+                continue;
+            }
             if args[i] == "--test-stop-failure" {
                 hooks.stop_failure = true;
                 i += 1;
@@ -202,21 +235,11 @@ fn load(source: &SourcePlan, scratch: &Fd, outputs: &Fd, fail: bool) -> Result<F
     p.emit(0x15, 0, 0, 0, 0);
     p.emit(0xbf, 7, 0, 0, 0);
     p.emit(0x62, 7, 0, 0, 0x31524250);
-    p.emit(
-        0x62,
-        7,
-        0,
-        4,
-        1 | if source.event.is_software() {
-            1 << 16
-        } else {
-            2 << 16
-        },
-    );
-    p.emit(0x62, 7, 0, 8, source.event.context_size() as i32);
+    p.emit(0x62, 7, 0, 4, 1 | ((source.kind as i32) << 16));
+    p.emit(0x62, 7, 0, 8, source.context_size() as i32);
     p.emit(0x62, 7, 0, 12, source.id as i32);
     p.emit(0x7a, 7, 0, 16, 0);
-    for offset in (0..source.event.context_size()).step_by(8) {
+    for offset in (0..source.context_size()).step_by(8) {
         p.emit(0x79, 8, 6, offset as i16, 0);
         p.emit(0x7b, 7, 8, (24 + offset) as i16, 0);
     }
@@ -225,7 +248,7 @@ fn load(source: &SourcePlan, scratch: &Fd, outputs: &Fd, fail: bool) -> Result<F
     p.emit(0x18, 3, 0, 0, -1);
     p.emit(0, 0, 0, 0, 0);
     p.emit(0xbf, 4, 7, 0, 0);
-    p.emit(0xb7, 5, 0, 0, (24 + source.event.context_size()) as i32);
+    p.emit(0xb7, 5, 0, 0, (24 + source.context_size()) as i32);
     p.emit(0x85, 0, 0, 0, 25);
     let ret = p.0.len();
     p.emit(0xb7, 0, 0, 0, 0);
@@ -334,11 +357,7 @@ impl Session {
             });
         }
         for (index, source) in plan.sources.iter().enumerate() {
-            let scratch = self.add_fd(create_map(
-                2,
-                (24 + source.event.context_size()) as u32,
-                entries,
-            )?);
+            let scratch = self.add_fd(create_map(2, (24 + source.context_size()) as u32, entries)?);
             let program = self.add_fd(load(
                 source,
                 self.fd(scratch),
@@ -369,17 +388,9 @@ impl Session {
                 retained_samples: 0,
                 binding: RecorderSource {
                     id: source.id,
-                    kind: if source.event.is_software() {
-                        RecorderKind::SoftwareV2
-                    } else {
-                        RecorderKind::Tracepoint
-                    },
-                    event_id: if source.event.is_software() {
-                        0x1001
-                    } else {
-                        source.event.config() as u32
-                    },
-                    schema_version: if source.event.is_software() { 2 } else { 1 },
+                    kind: source.kind,
+                    event_id: source.event_id(),
+                    schema_version: source.schema_version(),
                     scope: source.cpu.map_or_else(
                         || CaptureScope::Task(source.tid.unwrap() as u64),
                         |c| CaptureScope::PerCpu(c),
@@ -458,6 +469,7 @@ impl Session {
              trace_subscriptions={}",
             resources.0, resources.1, plan.options.record_bytes, system.0, system.1
         ));
+        log_heap("prepared");
         Ok(())
     }
     fn enable(&mut self) -> Result<()> {
@@ -551,10 +563,12 @@ impl Session {
                 let mut header = [0u8; 8];
                 mapping.copy_published(ring.tail, head, ring.tail, &mut header)?;
                 let size = u16::from_le_bytes([header[6], header[7]]) as usize;
-                if size < 8 || size > 128 || size % 8 != 0 {
+                // PERF_SAMPLE_RAW framing (12) + source envelope (24) + the
+                // current stack context (640), padded to eight bytes.
+                if size < 8 || size > 680 || size % 8 != 0 {
                     return Err("invalid record extent".into());
                 }
-                let mut frame = [0u8; 128];
+                let mut frame = [0u8; 680];
                 mapping.copy_published(ring.tail, head, ring.tail, &mut frame[..size])?;
                 let kind = u32::from_le_bytes(header[..4].try_into().unwrap());
                 let accepted = writer
@@ -674,10 +688,6 @@ fn diagnostics(
     d.identities.push(DiagnosticIdentity {
         name: "output_map_id".into(),
         value: Some(format!("{}", session.output_map_id)),
-    });
-    d.identities.push(DiagnosticIdentity {
-        name: "kernel_build_identity".into(),
-        value: None,
     });
     for (name, text) in [
         ("kernel_stats_before", before),
@@ -904,6 +914,14 @@ fn phase_stats(phase: &str, point: &str) -> Result<()> {
 }
 fn record(plan: &SessionPlan, hooks: &Hooks) -> Result<()> {
     let _signals = Signals::new()?;
+    // Read the explicit input before opening/truncating the output. The guest
+    // later compares its GNU note to the actual boot note, never its filename.
+    let kernel_elf = plan
+        .options
+        .kernel_elf
+        .as_deref()
+        .map(|path| sys::read_bytes(path, KERNEL_ELF_READ_LIMIT))
+        .transpose()?;
     let output = Fd::open(&plan.options.output, true)?;
     let initial = snapshot()?;
     system_counts(&initial)?;
@@ -913,6 +931,22 @@ fn record(plan: &SessionPlan, hooks: &Hooks) -> Result<()> {
         cleanup(session, &initial, resources, "ROLLBACK")?;
         return Err(error);
     }
+    let observation = match mapping_snapshot(hooks.fail_snapshot)
+        .and_then(|journal| Observation::begin(journal, kernel_elf.as_deref()))
+    {
+        Ok(observation) => observation,
+        Err(error) => {
+            cleanup(session, &initial, resources, "ROLLBACK")?;
+            return Err(error);
+        }
+    };
+    drop(kernel_elf);
+    log(&format!(
+        "OBSERVATION initial_snapshot_ns={} kernel_build_id={} kernel_sha256={}",
+        observation.initial_snapshot_ns(),
+        observation.kernel_build_id().unwrap_or("unknown"),
+        observation.kernel_sha256().unwrap_or("unknown")
+    ));
     if hooks.detached_ms != 0 {
         phase_stats("loaded_detached", "before")?;
         log(&format!(
@@ -939,8 +973,12 @@ fn record(plan: &SessionPlan, hooks: &Hooks) -> Result<()> {
             } else {
                 CaptureArch::LoongArch64
             },
-            kernel_elf_path: "unknown".into(),
-            kernel_elf_hash: "unknown".into(),
+            kernel_elf_path: plan
+                .options
+                .kernel_elf
+                .clone()
+                .unwrap_or_else(|| "unknown".into()),
+            kernel_elf_hash: observation.kernel_sha256().unwrap_or("unknown").into(),
             image_path: "unknown".into(),
             image_hash: "unknown".into(),
             libbpf_fixture_version: "pulse-native-recorder-v1".into(),
@@ -1044,12 +1082,47 @@ fn record(plan: &SessionPlan, hooks: &Hooks) -> Result<()> {
     }
     let stop = control_errors.observe(sys::now());
     let after = control_errors.observe(snapshot()).unwrap_or_default();
+    // All source disable attempts and the final drain precede this proc-open
+    // cut. On read failure Observation keeps the original pre-enable journal
+    // and an explicitly unknown final mapping boundary.
+    let observation = observation.finish(mapping_snapshot(hooks.fail_journal));
+    for error in observation.errors {
+        control_errors.record(error);
+    }
+    log(&format!(
+        "MAPPINGS bytes={} artifacts={}",
+        observation.mappings.journal.len(),
+        observation.mappings.artifacts.len()
+    ));
+    if let Err(error) = writer.set_mappings(observation.mappings) {
+        control_errors.record(format!("capture mappings: {error:?}"));
+    }
     for source in &session.sources {
         writer
             .update_recorder_source(source.binding.clone())
             .map_err(|e| format!("capture window: {e:?}"))?;
     }
     let mut diagnostic = diagnostics(plan, &session, &before, &after, &reason, records);
+    diagnostic
+        .identities
+        .extend(observation.diagnostics.identities);
+    diagnostic.counters.extend(observation.diagnostics.counters);
+    let heap = sys::heap_resources();
+    for (name, value) in [
+        ("heap_reserved_bytes", heap.reserved_bytes),
+        ("heap_used_before_serialization_bytes", heap.used_bytes),
+        (
+            "heap_peak_before_serialization_bytes",
+            heap.peak_allocated_bytes,
+        ),
+    ] {
+        diagnostic.counters.push(DiagnosticCounter {
+            name: name.into(),
+            scope: "recorder_process".into(),
+            value: Some(value as u64),
+            kind: CounterKind::Activity,
+        });
+    }
     diagnostic.counters.push(DiagnosticCounter {
         name: "control_errors".into(),
         scope: "session".into(),
@@ -1123,10 +1196,12 @@ fn record(plan: &SessionPlan, hooks: &Hooks) -> Result<()> {
     };
     cleanup(session, &initial, resources, "CLEANUP")?;
     write_result?;
+    log_heap("saved");
     log(&format!(
-        "SAVED output={} bytes={}",
+        "SAVED output={} bytes={} sha256={:x}",
         plan.options.output,
-        bytes.len()
+        bytes.len(),
+        Sha256::digest(&bytes),
     ));
     if let Some(error) = capture_error {
         return Err(error);
@@ -1141,7 +1216,8 @@ pub fn run(args: &[&str]) -> Result<()> {
         sys::print(
             "bpf-record --events cpu|task|sched|fault[,..] --output FILE [--tid TID] [--cpus \
              all|LIST] [--duration-ms N] [--period-ns N|--frequency HZ] [--buffer-pages N] \
-             [--record-bytes N] [--allow-fallback]\nSIGINT/SIGTERM stop, quiesce and save. \
+             [--record-bytes N] [--callchain fp|none] [--stack-depth 32] [--stack-bytes 512] \
+             [--kernel-elf FILE] [--allow-fallback]\nSIGINT/SIGTERM stop, quiesce and save. \
              Targets are existing tasks; recorder never launches a workload.\n",
         );
         return Ok(());

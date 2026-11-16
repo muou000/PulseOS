@@ -7,12 +7,15 @@ description = "Guest recorder for PulseOS software BPF sampling sessions"
 
 [features]
 default = []
-guest = []
+guest = ["dep:spin"]
 acceptance = ["guest"]
 
 [dependencies]
 bpf-capture = { workspace = true, default-features = false, features = ["alloc"] }
 pulse_bpf_schema = { workspace = true }
+sha2 = { version = "0.10", default-features = false }
+buddy_system_allocator = { version = "=0.10.0", default-features = false }
+spin = { workspace = true, optional = true }
 
 [[bin]]
 name = "bpf-record"
