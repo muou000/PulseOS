@@ -24,6 +24,10 @@ comparisons, native function rows and incomplete-attribution reasons.
 report/script/buildid-list output, command arguments, folded data and SVGs.
 `index.json` hashes the archive and its files. Original captures and matching
 ELFs remain in [#211](../211/README.md); they are not duplicated here.
+`validation.tar.gz` and `validation.json` retain the host test/build logs and
+their hashes: 497 Rust tests, 126 Python tests, default and BPF-enabled RV/LA
+build gates passed on code commit `4938fc41`. The rejected first provenance
+attempt and failing-before/passing-after regression logs are identified separately.
 
 The oracle is the hash-checked original #211 timeline, including raw
 `payload_hex` and transport-order source bindings. `replay.py` decodes those

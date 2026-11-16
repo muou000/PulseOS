@@ -93,3 +93,7 @@ Linux v6.12 是格式子集基线，实际 consumer 为 perf 6.8.12；FlameGraph
 一次初始默认构建在编译期间提交证据，改变了 provenance 中的 Git identity，
 因此被 `source inputs changed during build` 门禁拒绝；不计为通过。
 最终门禁在源文件和提交固定后重新运行。
+默认和 BPF-enabled 的 RV64/LA64 `make test` 均通过，构建代码提交为
+`4938fc41cbb0ec2f25e53a16bb4fc79fc35baf1b`。完整验证日志及哈希见
+[`validation.json`](../tests/bpf_record/evidence/212/validation.json) 和同目录归档；
+后续证据提交仅增补记录，未改变受测源码。
