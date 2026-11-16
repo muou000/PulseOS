@@ -13,6 +13,7 @@ acceptance = ["guest"]
 [dependencies]
 bpf-capture = { workspace = true, default-features = false, features = ["alloc"] }
 pulse_bpf_schema = { workspace = true }
+sha2 = { version = "0.10", default-features = false }
 
 [[bin]]
 name = "bpf-record"

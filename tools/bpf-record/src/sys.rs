@@ -224,6 +224,11 @@ pub unsafe fn bpf_call(command: usize, attr: &mut [u8]) -> Result<()> {
     .map(|_| ())
 }
 pub fn read_file(path: &str, limit: usize) -> Result<String> {
+    String::from_utf8(read_bytes(path, limit)?).map_err(|_| "invalid UTF-8 in proc snapshot".into())
+}
+/// Read an existing file through the owned descriptor boundary, with a hard
+/// allocation bound. Binary ELF bytes must never pass through UTF-8 decoding.
+pub fn read_bytes(path: &str, limit: usize) -> Result<Vec<u8>> {
     let fd = Fd::open(path, false)?;
     let mut result = Vec::new();
     let mut chunk = [0u8; 4096];
@@ -237,7 +242,7 @@ pub fn read_file(path: &str, limit: usize) -> Result<String> {
         }
         result.extend_from_slice(&chunk[..n]);
     }
-    String::from_utf8(result).map_err(|_| "invalid UTF-8 in proc snapshot".into())
+    Ok(result)
 }
 pub fn now() -> Result<u64> {
     let mut time = [0i64; 2];

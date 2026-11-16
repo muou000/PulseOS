@@ -3,7 +3,8 @@ use bpf_record::{Capabilities, Event, Options, SessionPlan};
 fn capabilities() -> Capabilities {
     Capabilities::from_stats(
         "PULSE_BPF_STATS version=1 pid=2 available=1 capabilities_version=1 online_mask=5 \
-         cpu_clock=1 task_clock=1 sched=1 fault=1 min_period_ns=1\nEND events=0 programs=0\n",
+         cpu_clock=1 task_clock=1 sched=1 fault=1 min_period_ns=1 stack_context_version=3 \
+         stack_depth=32 stack_bytes=512\nEND events=0 programs=0\n",
     )
     .unwrap()
 }
@@ -141,5 +142,232 @@ fn task_scope_cannot_silently_restrict_migration_or_substitute_a_workload() {
 fn plan_constructor_revalidates_public_options_and_capabilities() {
     let mut options = Options::parse(&["--events", "cpu", "--output", "/tmp/session"]).unwrap();
     options.events.clear();
+    assert!(SessionPlan::new(options, capabilities()).is_err());
+}
+
+#[test]
+fn real_stack_request_preserves_mixed_and_duplicate_source_plans() {
+    let options = Options::parse(&[
+        "--events",
+        "cpu,cpu,task,sched,fault",
+        "--tid",
+        "123",
+        "--callchain",
+        "fp",
+        "--stack-depth",
+        "32",
+        "--stack-bytes",
+        "512",
+        "--output",
+        "/tmp/stacks.pbcap",
+    ])
+    .unwrap();
+    let plan = SessionPlan::new(options, capabilities()).unwrap();
+    assert_eq!(plan.sources.len(), 19);
+    assert!(
+        plan.evidence()
+            .contains("requested_callchain=fp effective_callchain=fp")
+    );
+    assert!(
+        plan.evidence()
+            .contains("effective_stack_depth=32 effective_stack_bytes=512")
+    );
+    assert!(plan.sources[..5].iter().all(|source| {
+        source.kind == bpf_capture::RecorderKind::SoftwareStackV3
+            && source.context_size() == 640
+            && source.schema_version() == 3
+            && source.event_id() == 0x1002
+    }));
+    assert!(plan.sources[5..].iter().all(|source| {
+        source.kind == bpf_capture::RecorderKind::Tracepoint
+            && source.schema_version() == 1
+            && source.event_id() == source.event.config() as u32
+    }));
+    assert_eq!(plan.sources[0].id, 1);
+    assert_eq!(plan.sources[2].id, 3);
+}
+
+#[test]
+fn malformed_stack_capability_cannot_trigger_a_fallback() {
+    let options = Options::parse(&[
+        "--events",
+        "cpu",
+        "--allow-fallback",
+        "--output",
+        "/tmp/session",
+    ])
+    .unwrap();
+    let mut caps = capabilities();
+    caps.stack_depth = 0;
+    assert!(SessionPlan::new(options, caps).is_err());
+}
+
+#[test]
+fn default_stack_plan_accounts_for_per_cpu_map_slots_with_cpu_holes() {
+    let plan = SessionPlan::new(
+        Options::parse(&["--events", "cpu", "--output", "/tmp/session"]).unwrap(),
+        capabilities(),
+    )
+    .unwrap();
+    assert!(
+        plan.sources
+            .iter()
+            .all(|source| source.kind == bpf_capture::RecorderKind::SoftwareStackV3)
+    );
+    assert!(plan.evidence().contains("scratch_map_bytes=3984"));
+}
+
+#[test]
+fn capture_output_cannot_replace_requested_kernel_artifact() {
+    let options = Options::parse(&[
+        "--events",
+        "cpu",
+        "--kernel-elf",
+        "/tmp/kernel",
+        "--output",
+        "/tmp/kernel",
+    ])
+    .unwrap();
+    assert!(SessionPlan::new(options, capabilities()).is_err());
+}
+
+#[test]
+fn unavailable_stack_capability_requires_explicit_fallback_and_preserves_request() {
+    let mut caps = capabilities();
+    caps.stack_context_version = 0;
+    caps.stack_depth = 0;
+    caps.stack_bytes = 0;
+    let mut args = vec!["--events", "cpu", "--output", "/tmp/session"];
+    assert!(SessionPlan::new(Options::parse(&args).unwrap(), caps.clone()).is_err());
+    args.push("--allow-fallback");
+    let plan = SessionPlan::new(Options::parse(&args).unwrap(), caps.clone()).unwrap();
+    assert!(
+        plan.evidence()
+            .contains("requested_callchain=fp effective_callchain=none")
+    );
+    assert!(
+        plan.fallback
+            .as_ref()
+            .unwrap()
+            .contains("frame-pointer unavailable")
+    );
+    assert_eq!(plan.stack_depth, 0);
+    assert_eq!(plan.stack_bytes, 0);
+    assert!(
+        plan.sources
+            .iter()
+            .all(|source| source.kind == bpf_capture::RecorderKind::SoftwareV2)
+    );
+
+    let options = Options::parse(&[
+        "--events",
+        "cycles",
+        "--allow-fallback",
+        "--output",
+        "/tmp/session",
+    ])
+    .unwrap();
+    let plan = SessionPlan::new(options, caps).unwrap();
+    let reason = plan.fallback.unwrap();
+    assert!(reason.contains("hardware-cycles unavailable"));
+    assert!(reason.contains("frame-pointer unavailable"));
+}
+
+#[test]
+fn unsupported_stack_requests_are_not_silently_adjusted_even_with_fallback() {
+    for extra in [
+        vec!["--callchain", "dwarf"],
+        vec!["--stack-depth", "0"],
+        vec!["--stack-depth", "1"],
+        vec!["--stack-depth", "33"],
+        vec!["--stack-depth", "18446744073709551615"],
+        vec!["--stack-bytes", "0"],
+        vec!["--stack-bytes", "256"],
+        vec!["--callchain", "none", "--stack-depth", "32"],
+        vec!["--callchain", "none", "--stack-bytes", "512"],
+        vec!["--callchain", "fp", "--callchain", "none"],
+        vec!["--kernel-elf", ""],
+        vec!["--kernel-elf", "/kernel\0alias"],
+    ] {
+        let mut args = vec![
+            "--events",
+            "cpu",
+            "--allow-fallback",
+            "--output",
+            "/tmp/session",
+        ];
+        args.extend(extra);
+        assert!(
+            Options::parse(&args)
+                .and_then(|options| SessionPlan::new(options, capabilities()))
+                .is_err(),
+            "{args:?}"
+        );
+    }
+}
+
+#[test]
+fn trace_only_and_explicit_no_chain_sessions_preserve_their_contexts() {
+    let args = ["--events", "sched,fault", "--output", "/tmp/session"];
+    let plan = SessionPlan::new(Options::parse(&args).unwrap(), capabilities()).unwrap();
+    assert_eq!(plan.effective_callchain, bpf_record::Callchain::None);
+    assert!(
+        plan.sources
+            .iter()
+            .all(|source| source.kind == bpf_capture::RecorderKind::Tracepoint)
+    );
+    let mut explicit = args.to_vec();
+    explicit.extend(["--callchain", "fp", "--allow-fallback"]);
+    assert!(SessionPlan::new(Options::parse(&explicit).unwrap(), capabilities()).is_err());
+
+    let plan = SessionPlan::new(
+        Options::parse(&[
+            "--events",
+            "cpu",
+            "--callchain",
+            "none",
+            "--output",
+            "/tmp/session",
+        ])
+        .unwrap(),
+        capabilities(),
+    )
+    .unwrap();
+    assert!(plan.sources.iter().all(|source| source.context_size() == 64
+        && source.schema_version() == 2
+        && source.event_id() == 0x1001));
+    assert!(plan.fallback.is_none());
+}
+
+#[test]
+fn capability_snapshot_must_declare_current_stack_geometry() {
+    let header = "PULSE_BPF_STATS version=1 available=1 capabilities_version=1 online_mask=5 \
+                  cpu_clock=1 task_clock=1 sched=1 fault=1 min_period_ns=1";
+    for geometry in [
+        "",
+        "stack_context_version=3 stack_depth=0 stack_bytes=512",
+        "stack_context_version=3 stack_depth=32 stack_bytes=513",
+        "stack_context_version=0 stack_depth=32 stack_bytes=512",
+        "stack_context_version=4 stack_depth=32 stack_bytes=512",
+        "stack_context_version=3 stack_depth=32 stack_bytes=512 stack_depth=32",
+    ] {
+        assert!(
+            Capabilities::from_stats(&format!("{header} {geometry}\nEND events=0 programs=0\n"))
+                .is_err()
+        );
+    }
+    assert!(
+        Capabilities::from_stats(&format!(
+            "{header} stack_context_version=0 stack_depth=0 stack_bytes=0\nEND events=0 \
+             programs=0\n"
+        ))
+        .is_ok()
+    );
+}
+
+#[test]
+fn stack_source_budget_is_bounded_before_resources_are_prepared() {
+    let mut options = Options::parse(&["--events", "cpu", "--output", "/tmp/session"]).unwrap();
+    options.events = vec!["cpu".into(); 65];
     assert!(SessionPlan::new(options, capabilities()).is_err());
 }

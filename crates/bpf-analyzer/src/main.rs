@@ -15,6 +15,7 @@ fn print_help() {
     println!("  --loss, -l           Print capture-wide loss/integrity diagnostics");
     println!("  --json, -j           Print JSON for the selected report");
     println!("  --mapping-report    Print time-valid mapping and ELF associations as JSON");
+    println!("  --artifact-manifest Print original capture identities for artifact collection");
     println!("  --bundle <DIR>      Verify captured ELF identities in this artifact bundle");
     println!(
         "  --perf-data <FILE>  Export selected CPU samples and FILE.json provenance (requires \
@@ -138,6 +139,7 @@ fn run(args: &[String]) -> Result<(), String> {
         (false, false, false, false, false);
     let (mut oncpu, mut offcpu, mut timeline) = (None, None, None);
     let mut mapping_report = false;
+    let mut artifact_manifest = false;
     let mut bundle = None;
     let mut perf_data = None;
     let mut i = 2;
@@ -148,6 +150,7 @@ fn run(args: &[String]) -> Result<(), String> {
             "--json" | "-j" => json = true,
             "--sched-report" => scheduler = true,
             "--mapping-report" => mapping_report = true,
+            "--artifact-manifest" => artifact_manifest = true,
             "--bundle" => bundle = Some(value(args, &mut i, "--bundle")?.to_owned()),
             "--perf-data" => perf_data = Some(value(args, &mut i, "--perf-data")?.to_owned()),
             "--fault-report" => faults = true,
@@ -229,6 +232,13 @@ fn run(args: &[String]) -> Result<(), String> {
         .map_err(|e| format!("cannot read capture: {e}"))?;
     let analyzer = CaptureAnalyzer::from_bytes(&capture_bytes)
         .map_err(|e| format!("failed to parse BPF capture: {e}"))?;
+    if artifact_manifest {
+        if args.len() != 3 {
+            return Err("--artifact-manifest is a capture-wide standalone report".into());
+        }
+        println!("{}", bpf_analyzer::artifact_manifest::render(&analyzer, &capture_bytes));
+        return Ok(());
+    }
     let selected = analyzer.query(&query)?;
     // Validate all selected identities and artifacts before opening any report
     // destination. A failed export must leave existing outputs untouched.

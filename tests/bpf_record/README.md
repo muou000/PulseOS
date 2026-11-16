@@ -1,4 +1,4 @@
-# Generic guest recorder acceptance (#195)
+# Generic guest recorder acceptance (#195, #211)
 
 Build the enabled kernels with the repository gate, then run the recorder
 against separate guest processes:
@@ -14,6 +14,10 @@ python3 tests/bpf_record/run.py guest --arch riscv64 --suite recovery
 python3 tests/bpf_record/run.py guest --arch loongarch64 --suite recovery
 python3 tests/bpf_record/run.py guest --arch riscv64 --suite benchmark
 python3 tests/bpf_record/run.py guest --arch loongarch64 --suite benchmark
+python3 tests/bpf_record/run.py guest --arch riscv64 --suite stacks
+python3 tests/bpf_record/run.py guest --arch loongarch64 --suite stacks
+python3 tests/bpf_record/run.py guest --arch riscv64 --suite mapping
+python3 tests/bpf_record/run.py guest --arch loongarch64 --suite mapping
 ```
 
 `--suite smoke` records CPU, the complete scheduler group, and faults.
@@ -27,6 +31,32 @@ phases. `full` combines smoke, lifecycle, negative and benchmark in one boot.
 The existing-program and recovery suites run separately. `--duration-ms` changes the actual
 recording duration, and `--kernel`, `--image`, and `--recorder` select explicit
 artifacts.
+
+The default software sources now request frame-pointer callchains. `--callchain
+none` selects explicit single-IP recording; `--callchain fp --stack-depth 32`
+requests the current bounded kernel stack contract. Unsupported depths and
+unavailable combinations fail before enable. Tracepoint contexts stay unchanged
+when mixed with repeated software sources.
+
+`stacks` records real nested functions in the separate fixture, mixed repeated
+CPU/task/scheduler/fault sources, and an existing installed shell. It also checks
+SIGINT, target exit, retained-record overflow, a rejected initial snapshot, and a
+failed final journal. The fixture is built with frame pointers and contains
+three non-inlined nested functions; the gate requires an observed user chain of
+at least three frames, records actual kernel depth and every termination reason,
+and never synthesizes a chain. `mapping` waits for the production recorder to
+enable before performing actual file mappings at byte offset 4096, mapped-file
+and task rename, fork, exec, remap, unmap, address reuse and exit. Its oracle
+checks those transitions against the unchanged raw journal. `recovery` remains
+the real nonleader-exec gate. Numeric PID/TID reuse is not forced by these QEMU
+workloads; adversarial analyzer tests exercise reused numbers with distinct
+stable task and address-space identities.
+
+All new runs deploy `/boot/kernel.elf` and pass `--kernel-elf` to the guest CLI.
+For a raw RV boot binary the host first verifies both binary and matching ELF
+hashes from the build provenance. The guest independently matches the supplied
+ELF's actual GNU build-id to the running kernel note before recording its full
+SHA256. The collector never treats that deployment path as identity.
 
 `existing` separately captures all three CPU/scheduler/fault modes while the
 installed `sh` repeatedly runs installed `dd` and `sleep`. Missing commands,
@@ -48,6 +78,29 @@ existing sampling regression. The shell target is the rootfs's installed
 numeric TID. The fixture's file-dump command reads the recorder's file and
 transports its exact bytes over serial with ordered offsets, byte count, and
 CRC32. It never constructs capture records or fills missing fields.
+
+After syncing its output, the recorder emits `RECORD SAVED ... sha256=...`.
+The runner compares that witness to the bytes read back from the actual guest
+file, then checks the same SHA after collection and analysis. Each capture's
+`*-collection.json` records the immutable original identity manifest, verified
+content-addressed ELF files, missing files, and unknown mapped-object identities.
+No missing fact is added to the original capture. Collect a production file
+with explicitly supplied candidate artifacts using:
+
+```bash
+python3 tools/bpf-record/collect.py sample.pbcapture --bundle bundle \
+  --candidate boot-kernel.elf --candidate target.elf \
+  --analyzer target/debug/bpf-analyzer
+target/debug/bpf-analyzer sample.pbcapture --mapping-report --bundle bundle
+```
+
+`--artifact-manifest` on the analyzer exposes only identities from a fully
+validated original capture. The collector verifies complete SHA256 and actual
+GNU notes, preserves known no-build-id as `null`, and reports missing files.
+Paths in the journal are labels and never trigger implicit host file lookup.
+Optional debug objects must match their recorded SHA and GNU ID; separate debug
+objects also require the executable's recorded GNU ID. Additional symbol files
+do not upgrade partial capture status or change mapping coverage.
 
 Each run copies the rootfs, kernel, recorder and fixture into `runs/`, verifies
 injected bytes, and uses the AGENTS.md QEMU command with `snapshot=on`. The

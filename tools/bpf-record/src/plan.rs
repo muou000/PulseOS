@@ -4,10 +4,12 @@ use alloc::{
     vec::Vec,
 };
 
-use bpf_capture::recorder::SourceConfig;
+use bpf_capture::recorder::{RecorderKind, SourceConfig};
+use pulse_bpf_schema::{DEFAULT_STACK_BYTE_LIMIT, DEFAULT_STACK_DEPTH, PerfStackSampleContext};
 
 const MAX_SOURCES: usize = 128;
 const MAX_MAPPED_BYTES: u64 = 64 * 1024 * 1024;
+const MAX_SCRATCH_BYTES: u64 = 8 * 1024 * 1024;
 
 /// Capabilities observed from the kernel's stable per-open diagnostics snapshot.
 #[derive(Clone, Debug)]
@@ -18,6 +20,9 @@ pub struct Capabilities {
     pub sched: bool,
     pub fault: bool,
     pub min_period_ns: u64,
+    pub stack_context_version: u64,
+    pub stack_depth: u64,
+    pub stack_bytes: u64,
 }
 
 impl Capabilities {
@@ -60,16 +65,51 @@ impl Capabilities {
             sched: flag("sched")?,
             fault: flag("fault")?,
             min_period_ns: field("min_period_ns")?,
+            stack_context_version: field("stack_context_version")?,
+            stack_depth: field("stack_depth")?,
+            stack_bytes: field("stack_bytes")?,
         };
-        if caps.online_mask == 0 || caps.min_period_ns == 0 {
+        caps.validate()?;
+        Ok(caps)
+    }
+    fn validate(&self) -> Result<(), String> {
+        if self.online_mask == 0 || self.min_period_ns == 0 {
             return Err("empty sampling capabilities".into());
         }
-        Ok(caps)
+        match (
+            self.stack_context_version,
+            self.stack_depth,
+            self.stack_bytes,
+        ) {
+            (0, 0, 0) => Ok(()),
+            (3, depth, bytes)
+                if depth == u64::from(DEFAULT_STACK_DEPTH)
+                    && bytes == u64::from(DEFAULT_STACK_BYTE_LIMIT) =>
+            {
+                Ok(())
+            }
+            _ => Err("invalid or unsupported stack capability geometry".into()),
+        }
     }
     pub fn online_cpus(&self) -> Vec<u32> {
         (0..64)
             .filter(|cpu| self.online_mask & (1u64 << cpu) != 0)
             .collect()
+    }
+}
+
+/// The requested privilege domain is always that of the interrupted sample.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Callchain {
+    None,
+    FramePointer,
+}
+impl Callchain {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::FramePointer => "fp",
+        }
     }
 }
 
@@ -126,6 +166,11 @@ pub struct Options {
     pub record_bytes: usize,
     pub output: String,
     pub allow_fallback: bool,
+    /// None selects frame pointers for software sources, no chain for traces.
+    pub callchain: Option<Callchain>,
+    pub stack_depth: Option<u64>,
+    pub stack_bytes: Option<u64>,
+    pub kernel_elf: Option<String>,
 }
 
 impl Options {
@@ -142,6 +187,10 @@ impl Options {
             record_bytes: 8 * 1024 * 1024,
             output: String::new(),
             allow_fallback: false,
+            callchain: None,
+            stack_depth: None,
+            stack_bytes: None,
+            kernel_elf: None,
         };
         let mut seen = Vec::new();
         let mut i = 0;
@@ -184,12 +233,29 @@ impl Options {
                         usize::try_from(number()?).map_err(|_| "record size overflow")?
                 }
                 "--output" => result.output = value.to_string(),
+                "--callchain" => {
+                    result.callchain = Some(match *value {
+                        "none" => Callchain::None,
+                        "fp" => Callchain::FramePointer,
+                        _ => return Err("callchain must be none or fp".into()),
+                    })
+                }
+                "--stack-depth" => result.stack_depth = Some(number()?),
+                "--stack-bytes" => result.stack_bytes = Some(number()?),
+                "--kernel-elf" => result.kernel_elf = Some(value.to_string()),
                 _ => return Err(format!("unsupported option {key}")),
             }
             i += 2;
         }
         if result.events.is_empty() || result.output.is_empty() || result.output.contains('\0') {
             return Err("--events and --output are required".into());
+        }
+        if result
+            .kernel_elf
+            .as_ref()
+            .is_some_and(|path| path.is_empty() || path.contains('\0'))
+        {
+            return Err("kernel-elf requires a nonempty path without NUL".into());
         }
         Ok(result)
     }
@@ -204,6 +270,31 @@ pub struct SourcePlan {
     pub cpu: Option<u32>,
     pub tid: Option<u32>,
     pub period_ns: u64,
+    pub kind: RecorderKind,
+}
+impl SourcePlan {
+    pub fn event_id(&self) -> u32 {
+        match self.kind {
+            RecorderKind::SoftwareStackV3 => bpf_capture::schema::PERF_EVENT_SOFTWARE_STACK_V3_ID,
+            RecorderKind::SoftwareV2 => bpf_capture::schema::PERF_EVENT_SOFTWARE_V2_ID,
+            _ => self.event.config() as u32,
+        }
+    }
+    pub fn context_size(&self) -> usize {
+        match self.kind {
+            RecorderKind::SoftwareStackV3 => PerfStackSampleContext::SIZE,
+            RecorderKind::SoftwareV2 => 64,
+            RecorderKind::Tracepoint => self.event.context_size(),
+            RecorderKind::Normalized => 0,
+        }
+    }
+    pub fn schema_version(&self) -> u32 {
+        match self.kind {
+            RecorderKind::SoftwareStackV3 => 3,
+            RecorderKind::SoftwareV2 => 2,
+            _ => 1,
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -216,15 +307,29 @@ pub struct SessionPlan {
     pub duration_ns: Option<u64>,
     /// Ring mappings only; excludes bounded capture storage and kernel objects.
     pub mapped_bytes: u64,
+    /// Initialized source-map values, excluding allocator/map bookkeeping.
+    pub scratch_bytes: u64,
     pub fallback: Option<String>,
+    pub requested_callchain: Callchain,
+    pub effective_callchain: Callchain,
+    pub stack_depth: u64,
+    pub stack_bytes: u64,
 }
 
 impl SessionPlan {
     pub fn new(options: Options, caps: Capabilities) -> Result<Self, String> {
+        caps.validate()?;
+        if options.kernel_elf.as_ref() == Some(&options.output) {
+            return Err("output must differ from kernel-elf".into());
+        }
         if options.events.is_empty()
             || options.output.is_empty()
             || options.output.contains('\0')
             || caps.min_period_ns == 0
+            || options
+                .kernel_elf
+                .as_ref()
+                .is_some_and(|path| path.is_empty() || path.contains('\0'))
         {
             return Err("empty event plan, invalid output, or invalid capabilities".into());
         }
@@ -300,6 +405,56 @@ impl SessionPlan {
             }
         }
         let task = events.iter().any(|(event, _)| *event == Event::Task);
+        let software = events.iter().any(|(event, _)| event.is_software());
+        let requested_callchain = options.callchain.unwrap_or(if software {
+            Callchain::FramePointer
+        } else {
+            Callchain::None
+        });
+        if requested_callchain == Callchain::FramePointer && !software {
+            return Err(
+                "frame-pointer callchains require a software source; tracepoint stacks unsupported"
+                    .into(),
+            );
+        }
+        if requested_callchain == Callchain::None
+            && (options.stack_depth.is_some() || options.stack_bytes.is_some())
+        {
+            return Err("stack limits require frame-pointer callchains".into());
+        }
+        let requested_depth = options
+            .stack_depth
+            .unwrap_or(u64::from(DEFAULT_STACK_DEPTH));
+        let requested_bytes = options
+            .stack_bytes
+            .unwrap_or(u64::from(DEFAULT_STACK_BYTE_LIMIT));
+        if requested_callchain == Callchain::FramePointer
+            && (requested_depth != u64::from(DEFAULT_STACK_DEPTH)
+                || requested_bytes != u64::from(DEFAULT_STACK_BYTE_LIMIT))
+        {
+            return Err("kernel frame-pointer capture supports only depth=32 and bytes=512".into());
+        }
+        let supported = caps.stack_context_version == 3
+            && caps.stack_depth == requested_depth
+            && caps.stack_bytes == requested_bytes;
+        let effective_callchain = if requested_callchain == Callchain::FramePointer && !supported {
+            if !options.allow_fallback {
+                return Err("requested frame-pointer capability unavailable".into());
+            }
+            let reason = "frame-pointer unavailable; explicit fallback to no callchain";
+            fallback = Some(match fallback {
+                Some(previous) => format!("{previous}; {reason}"),
+                None => reason.into(),
+            });
+            Callchain::None
+        } else {
+            requested_callchain
+        };
+        let (stack_depth, stack_bytes) = if effective_callchain == Callchain::FramePointer {
+            (requested_depth, requested_bytes)
+        } else {
+            (0, 0)
+        };
         if task
             && (options.tid.is_none()
                 || options.tid == Some(0)
@@ -348,8 +503,23 @@ impl SessionPlan {
                         None
                     },
                     period_ns: if event.is_software() { period_ns } else { 1 },
+                    kind: if !event.is_software() {
+                        RecorderKind::Tracepoint
+                    } else if effective_callchain == Callchain::FramePointer {
+                        RecorderKind::SoftwareStackV3
+                    } else {
+                        RecorderKind::SoftwareV2
+                    },
                 });
             }
+        }
+        let slots = u64::from(sink_cpus.iter().copied().max().ok_or("no output CPUs")?) + 1;
+        let scratch_bytes: u64 = sources
+            .iter()
+            .map(|source| (24 + source.context_size()) as u64 * slots)
+            .sum();
+        if scratch_bytes > MAX_SCRATCH_BYTES {
+            return Err("session source-map values exceed 8 MiB".into());
         }
         Ok(Self {
             options,
@@ -359,7 +529,12 @@ impl SessionPlan {
             period_ns,
             duration_ns,
             mapped_bytes,
+            scratch_bytes,
             fallback,
+            requested_callchain,
+            effective_callchain,
+            stack_depth,
+            stack_bytes,
         })
     }
 
@@ -368,7 +543,9 @@ impl SessionPlan {
             "plan_version=1 requested_events={} requested_cpus={} expanded_cpus={:?} \
              requested_tid={} requested_period_ns={} requested_frequency={} \
              effective_period_ns={} frequency_conversion=ceil_ns effective_events={:?} \
-             fallback={} duration_ms={} buffer_pages={} record_bytes={}",
+             fallback={} duration_ms={} buffer_pages={} record_bytes={} requested_callchain={} \
+             effective_callchain={} requested_stack_depth={} requested_stack_bytes={} \
+             effective_stack_depth={} effective_stack_bytes={} scratch_map_bytes={}",
             self.options.events.join(","),
             self.options.cpus.as_deref().unwrap_or("all"),
             self.cpus,
@@ -388,7 +565,18 @@ impl SessionPlan {
                 .duration_ms
                 .map_or_else(|| "signal_or_target_exit".into(), |n| n.to_string()),
             self.options.buffer_pages,
-            self.options.record_bytes
+            self.options.record_bytes,
+            self.requested_callchain.as_str(),
+            self.effective_callchain.as_str(),
+            self.options
+                .stack_depth
+                .map_or_else(|| "default".into(), |n| n.to_string()),
+            self.options
+                .stack_bytes
+                .map_or_else(|| "default".into(), |n| n.to_string()),
+            self.stack_depth,
+            self.stack_bytes,
+            self.scratch_bytes,
         )
     }
 }
