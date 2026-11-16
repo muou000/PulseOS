@@ -1,8 +1,11 @@
 """The public acceptance plan must exercise the production guest executable."""
+import hashlib
 import json
 from pathlib import Path
+import struct
 import subprocess
 import sys
+import tempfile
 import unittest
 
 from run import cases_script
@@ -35,6 +38,29 @@ class AcceptancePlanTests(unittest.TestCase):
         self.assertEqual(failures, [])
         self.assertIn('--tid "$initial_tid"', script)
         self.assertNotIn("--test-", script)
+
+    def test_production_suite_rejects_a_byte_matched_acceptance_executable(self):
+        # Structurally valid input for preflight only; never sampling evidence.
+        header = bytearray(64)
+        header[:6] = b"\x7fELF\x02\x01"
+        struct.pack_into("<H", header, 18, 243)
+        struct.pack_into("<Q", header, 32, 64)
+        struct.pack_into("<HH", header, 54, 56, 1)
+        elf = bytes(header) + struct.pack("<IIQQQQQQ", 1, 5, 0, 0, 0, 120, 120, 4096)
+        with tempfile.TemporaryDirectory() as directory:
+            binary = Path(directory) / "bpf-record"
+            binary.write_bytes(elf)
+            (binary.parent / "build.json").write_text(json.dumps({
+                "arch": "riscv64", "variant": "acceptance",
+                "sha256": hashlib.sha256(elf).hexdigest(),
+            }))
+            result = subprocess.run([
+                sys.executable, str(BASE / "run.py"), "guest", "--arch", "riscv64",
+                "--suite", "stacks-task", "--recorder", str(binary),
+            ], text=True, capture_output=True)
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("must match riscv64 guest executable bytes", result.stderr)
+        self.assertNotIn("Logs:", result.stdout)
 
 
 if __name__ == "__main__":

@@ -1,11 +1,28 @@
-# Generic guest recorder acceptance (#195, #211)
+# Generic guest recorder acceptance (#195, #211, #213)
 
 Build the enabled kernels with the repository gate, then run the recorder
 against separate guest processes:
 
 ```bash
+set -o pipefail
 make test APP_FEATURES="qemu bpf-trace" 2>&1 | tail -30
 python3 -m unittest discover -s tests/bpf_record -p 'test_*.py'
+python3 tests/bpf_record/acceptance.py --plan
+python3 tests/bpf_record/acceptance.py \
+  --output tests/bpf_record/runs/213-fresh --analyzer target/debug/bpf-analyzer
+```
+
+The #213 matrix runs 17 independent boots per architecture, serially, with
+benchmarks last. The output directory must be new and under `tests/bpf_record/`.
+Repeated `--arch` and `--suite` select a smaller matrix. Each run retains its
+original files under `ARCH/SUITE`; `index.json` records hashes and fails closed
+if any guest case or recorder build identity fails. This is the guest stage;
+the independent `e2e.py` stage must also qualify the production capture through
+perf and FlameGraph before claiming the full workflow passed.
+
+Individual suites remain available:
+
+```bash
 python3 tests/bpf_record/run.py guest --arch riscv64 --suite full
 python3 tests/bpf_record/run.py guest --arch loongarch64 --suite full
 python3 tests/bpf_record/run.py guest --arch riscv64 --suite existing
@@ -18,7 +35,20 @@ python3 tests/bpf_record/run.py guest --arch riscv64 --suite stacks
 python3 tests/bpf_record/run.py guest --arch loongarch64 --suite stacks
 python3 tests/bpf_record/run.py guest --arch riscv64 --suite mapping
 python3 tests/bpf_record/run.py guest --arch loongarch64 --suite mapping
+python3 tests/bpf_record/run.py guest --arch riscv64 --suite nonleader-exec
+python3 tests/bpf_record/run.py guest --arch loongarch64 --suite nonleader-exec
 ```
+
+Positive suites build the normal `guest` recorder. Only `lifecycle`, `negative`,
+`stacks-observation`, `recovery`, `benchmark`, and `full` build the `acceptance`
+variant, whose extra flags drive control/ownership failure probes. `stacks`
+selects the appropriate variant for each child boot. An explicit `--recorder`
+must have an adjacent `build.json` matching its SHA, architecture and required
+variant; an acceptance executable cannot satisfy a production suite.
+`inputs.json` retains this build witness, the deployed ELF hashes and QEMU
+version/binary SHA. Earlier #211 archives used acceptance builds, including
+positive cases; those remain historical evidence for that variant and are not
+relabeled as #213 production runs.
 
 `--suite smoke` records CPU, the complete scheduler group, and faults.
 `mixed` isolates the repeated CPU/task/scheduler/fault session in one boot.
@@ -30,7 +60,8 @@ after 1024 file bytes. `benchmark` runs baseline, loaded-detached, and attached
 phases. `full` combines smoke, lifecycle, negative and benchmark in one boot.
 The existing-program and recovery suites run separately. `--duration-ms` changes the actual
 recording duration, and `--kernel`, `--image`, and `--recorder` select explicit
-artifacts.
+artifacts. `--analyzer` freezes an already-built host analyzer, and `--run-dir`
+selects a new individual run directory under `tests/bpf_record/`.
 
 The default software sources now request frame-pointer callchains. `--callchain
 none` selects explicit single-IP recording; `--callchain fp --stack-depth 32`
@@ -48,10 +79,10 @@ the journal read by 9 MiB, and the explicit kernel ELF input by 128 MiB.
 
 `stacks` records real nested functions in the separate fixture, mixed repeated
 CPU/task/scheduler/fault sources, and an existing installed shell. It also checks
-SIGINT, target exit, retained-record overflow, a rejected initial snapshot, and a
+SIGINT/SIGTERM, target exit, retained-record overflow, a rejected initial snapshot, and a
 failed final journal. The fixture is built with frame pointers and contains
-three non-inlined nested functions. The suite executes `stacks-task`,
-`stacks-mixed`, `stacks-existing`, `stacks-sigint`, `stacks-exit`,
+three non-inlined nested functions. The suite executes `stacks-cpu`, `stacks-task`,
+`stacks-mixed`, `stacks-existing`, `stacks-sigint`, `stacks-sigterm`, `stacks-exit`,
 `stacks-overflow`, and `stacks-observation` in separate boots, each with its own
 inputs, original files and replayable results. These names can also be selected
 directly. Fresh boots keep unrelated earlier workloads from exhausting the
@@ -63,8 +94,10 @@ and never synthesizes a chain. Positive mapping-coverage gates reject any journa
 loss; overflow captures remain diagnostic partial files. `mapping` waits for the production recorder to
 enable before performing actual file mappings at byte offset 4096, mapped-file
 and task rename, fork, exec, remap, unmap, address reuse and exit. Its oracle
-checks those transitions against the unchanged raw journal. `recovery` remains
-the real nonleader-exec gate. Numeric PID/TID reuse is not forced by these QEMU
+checks those transitions against the unchanged raw journal. `nonleader-exec`
+runs the stable task-binding case with the production executable. `recovery`
+retains the same case alongside an injected stop failure in the acceptance build.
+Numeric PID/TID reuse is not forced by these QEMU
 workloads; adversarial analyzer tests exercise reused numbers with distinct
 stable task and address-space identities.
 

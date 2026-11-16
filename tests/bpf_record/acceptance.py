@@ -44,7 +44,7 @@ def inventory(directory: Path) -> dict:
 
 
 def execute(args: argparse.Namespace, matrix: dict) -> int:
-    output = args.output.resolve()
+    output = helpers.scoped(args.output)
     output.mkdir(parents=True, exist_ok=False)
     (output / "plan.json").write_text(json.dumps(matrix, indent=2) + "\n")
     index = {"format": 1, "scope": matrix["scope"], "guest_passed": False,
@@ -90,7 +90,7 @@ def main() -> int:
     parser.add_argument("--plan", action="store_true", help="print the matrix without building or running guests")
     parser.add_argument("--arch", choices=tuple(ARCHES), action="append")
     parser.add_argument("--suite", choices=PRODUCTION_SUITES + CONTROL_SUITES, action="append")
-    parser.add_argument("--output", type=Path, help="new evidence directory (must not already exist)")
+    parser.add_argument("--output", type=Path, help="new evidence directory under tests/bpf_record")
     parser.add_argument("--analyzer", type=Path)
     parser.add_argument("--image-riscv64", type=Path)
     parser.add_argument("--image-loongarch64", type=Path)
