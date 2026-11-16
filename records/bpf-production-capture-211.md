@@ -77,6 +77,12 @@ but revealed that ordinary recorder allocations still saturated the journal:
 | RV mapping lifecycle | 1,020 | 12,681 | 45,456 | `a6d4535ba8775d34b4a5914019f9d724d5602be45f3855267c4bf2d87b4e784c` |
 
 The RV mapping gate failed because required lifecycle rows were absent. These
-files prove the failure; they are not positive mapping-coverage evidence. The
-recorder's allocation model therefore also needs bounded reuse of mapped
-backing, instead of one VMA creation and removal per temporary object.
+files prove the failure; they are not positive mapping-coverage evidence.
+
+The recorder now reserves a single reusable 512 MiB process heap, with no
+per-object mmap/munmap. Reservation is not resident memory: preparation and
+post-serialization logs report live and peak buddy allocation separately from
+session FD/ring ownership. Exhaustion does not create another arena. Two public
+allocator tests cover 8,000 reuse cycles, alignment, disjointness, coalescing,
+exhaustion and unsupported layouts, and an independent unsafe review found no
+blocking ownership or arithmetic issue.

@@ -38,11 +38,25 @@ requests the current bounded kernel stack contract. Unsupported depths and
 unavailable combinations fail before enable. Tracepoint contexts stay unchanged
 when mixed with repeated software sources.
 
+The recorder reserves one reusable 512 MiB process heap. This is a virtual
+address-space bound, not an RSS claim; allocation/free cycles reuse it instead
+of generating per-object mmap/munmap journal traffic. `RECORD HEAP` reports the
+reservation, live requested/rounded allocations and observed peak. The arena
+is reclaimed on process exit; session FD/ring cleanup remains separately
+reported. Retained records remain capped by `--record-bytes` (at most 64 MiB),
+the journal read by 9 MiB, and the explicit kernel ELF input by 128 MiB.
+
 `stacks` records real nested functions in the separate fixture, mixed repeated
 CPU/task/scheduler/fault sources, and an existing installed shell. It also checks
 SIGINT, target exit, retained-record overflow, a rejected initial snapshot, and a
 failed final journal. The fixture is built with frame pointers and contains
-three non-inlined nested functions; the gate requires an observed user chain of
+three non-inlined nested functions. The suite executes `stacks-task`,
+`stacks-mixed`, `stacks-existing`, `stacks-sigint`, `stacks-exit`,
+`stacks-overflow`, and `stacks-observation` in separate boots, each with its own
+inputs, original files and replayable results. These names can also be selected
+directly. Fresh boots keep unrelated earlier workloads from exhausting the
+bounded boot journal; they do not enlarge that journal or hide drops.
+The gate requires an observed user chain of
 at least three frames and an observed kernel chain of at least three frames in
 the mixed workload, records user/kernel counts and every termination reason,
 and never synthesizes a chain. Positive mapping-coverage gates reject any journal
