@@ -1,0 +1,145 @@
+{
+  "runs": [
+    {
+      "arch": "riscv64",
+      "suite": "benchmark",
+      "passed": true
+    },
+    {
+      "arch": "riscv64",
+      "suite": "existing",
+      "passed": true
+    },
+    {
+      "arch": "riscv64",
+      "suite": "lifecycle",
+      "passed": true
+    },
+    {
+      "arch": "riscv64",
+      "suite": "mapping",
+      "passed": true
+    },
+    {
+      "arch": "riscv64",
+      "suite": "negative",
+      "passed": true
+    },
+    {
+      "arch": "riscv64",
+      "suite": "recovery",
+      "passed": true
+    },
+    {
+      "arch": "riscv64",
+      "suite": "smoke",
+      "passed": true
+    },
+    {
+      "arch": "riscv64",
+      "suite": "stacks-existing",
+      "passed": true
+    },
+    {
+      "arch": "riscv64",
+      "suite": "stacks-exit",
+      "passed": true
+    },
+    {
+      "arch": "riscv64",
+      "suite": "stacks-mixed",
+      "passed": true
+    },
+    {
+      "arch": "riscv64",
+      "suite": "stacks-observation",
+      "passed": true
+    },
+    {
+      "arch": "riscv64",
+      "suite": "stacks-overflow",
+      "passed": true
+    },
+    {
+      "arch": "riscv64",
+      "suite": "stacks-sigint",
+      "passed": true
+    },
+    {
+      "arch": "riscv64",
+      "suite": "stacks-task",
+      "passed": true
+    },
+    {
+      "arch": "loongarch64",
+      "suite": "benchmark",
+      "passed": true
+    },
+    {
+      "arch": "loongarch64",
+      "suite": "existing",
+      "passed": true
+    },
+    {
+      "arch": "loongarch64",
+      "suite": "lifecycle",
+      "passed": true
+    },
+    {
+      "arch": "loongarch64",
+      "suite": "mapping",
+      "passed": true
+    },
+    {
+      "arch": "loongarch64",
+      "suite": "negative",
+      "passed": true
+    },
+    {
+      "arch": "loongarch64",
+      "suite": "recovery",
+      "passed": true
+    },
+    {
+      "arch": "loongarch64",
+      "suite": "smoke",
+      "passed": true
+    },
+    {
+      "arch": "loongarch64",
+      "suite": "stacks-existing",
+      "passed": true
+    },
+    {
+      "arch": "loongarch64",
+      "suite": "stacks-exit",
+      "passed": true
+    },
+    {
+      "arch": "loongarch64",
+      "suite": "stacks-mixed",
+      "passed": true
+    },
+    {
+      "arch": "loongarch64",
+      "suite": "stacks-observation",
+      "passed": true
+    },
+    {
+      "arch": "loongarch64",
+      "suite": "stacks-overflow",
+      "passed": true
+    },
+    {
+      "arch": "loongarch64",
+      "suite": "stacks-sigint",
+      "passed": true
+    },
+    {
+      "arch": "loongarch64",
+      "suite": "stacks-task",
+      "passed": true
+    }
+  ],
+  "analyzer_sha256": "221f5fb35fef5ee4ff5b4a80c411bd5bdddd57613b645a02ee71968ffd17b65d"
+}
