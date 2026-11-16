@@ -3,7 +3,7 @@ import struct
 import unittest
 import zlib
 import archive
-from test_archive import fixture, replace_snapshot
+from test_archive import fixture, replace_snapshot, source_declaration, sample_frame
 
 
 def fixture_fault(*, change_context=None, unknown_access=False):
@@ -15,7 +15,7 @@ def fixture_fault(*, change_context=None, unknown_access=False):
         struct.pack_into('<IIQIIIIQ',context,0,8,1,end,cpu,40,41,0,99)
         struct.pack_into('<QQQIIII',context,40,address,start,end-start,access,2,outcome,0)
         if change_context:change_context(context)
-        frame=struct.pack('<IHHI',9,0,96,80)+context+bytes(4)
+        frame=sample_frame(cpu+1, 2, context)
         records.append((cpu,frame))
     rows=[]
     for point in ['before','after']:
@@ -32,7 +32,8 @@ def fixture_fault(*, change_context=None, unknown_access=False):
         rows.extend(f'ARCHIVE STATS_DATA point={point} offset={n} hex={raw[n:n+256].hex()}' for n in range(0,len(raw),256))
         rows.append(f'ARCHIVE STATS_END point={point}')
     rows.append('ARCHIVE CONFIG program_id=5 output_map_id=2 scratch_map_id=3 buffer_pages=16 mode=fault')
-    rows.extend(f'ARCHIVE SOURCE fd={20+cpu} link_id={1000+cpu} enable_before=110 enable_after=120 disable_before=290 disable_after=295' for cpu in range(8))
+    rows.extend(source_declaration(fd=20+cpu, logical_id=cpu+1, event_id=120+cpu, kind=2, schema_event_id=8, target=cpu, link_id=1000+cpu, disable_before=290, disable_after=295) for cpu in range(8))
+    rows.append('ARCHIVE CONTEXT format=tracepoint')
     rows.extend(line for line in fixture().splitlines() if line.startswith('ARCHIVE MEASURE '))
     # Reuse of the same virtual addresses in distinct iterations is allowed.
     rows.append('ARCHIVE FAULT_WORKLOAD pid=40 tid=41 iterations=128 read_hits=1 write_hits=1')

@@ -7,7 +7,7 @@ use std::{
 };
 
 use bpf_capture::{
-    CaptureArch,
+    CaptureArch, CaptureScope, RecorderKind, RecorderSource, SourceConfig, SourceUnit,
     mapping::{MappingEvent, MappingMetadata, TaskClass},
 };
 
@@ -36,90 +36,46 @@ struct Source {
     id: u64,
     config: u64,
     period: u64,
-    scope: String,
-    target: u64,
-    task: u64,
+    declaration: RecorderSource,
 }
 impl Source {
-    fn covers(&self, event: &NormalizedEvent) -> bool {
-        match self.scope.as_str() {
-            "cpu" => self.target == u64::from(event.cpu_id),
-            "task" => self.target == u64::from(event.tid) && self.task == event.task_id,
-            _ => false,
-        }
-    }
     fn json(&self) -> String {
-        format!(
-            "{{\"id\":{},\"config\":{},\"period\":{},\"scope\":{},\"target\":{},\"task_id\":{}}}",
-            self.id,
-            self.config,
-            self.period,
-            quote(&self.scope),
-            self.target,
-            self.task
+        let s = &self.declaration;
+        let (scope, target) = match s.scope {
+            CaptureScope::PerCpu(cpu) => ("cpu", u64::from(cpu)),
+            CaptureScope::Task(tid) => ("task", tid),
+            CaptureScope::AllCpus => unreachable!("reader validates source scope"),
+        };
+        format!(concat!(
+            "{{\"id\":{},\"kernel_event_id\":{},\"program_id\":{},\"link_id\":{},",
+            "\"config\":{},\"period\":{},\"scope\":{},\"target\":{},\"task_id\":{},",
+            "\"clock\":{},\"requested_config\":{},\"effective_config\":{},",
+            "\"requested_sample_period\":{},\"requested_frequency_hz\":{},\"effective_frequency_hz\":{},",
+            "\"requested_buffer_pages\":{},\"effective_buffer_pages\":{},\"unit\":{},\"fallback\":{},",
+            "\"enable_before_ns\":{},\"enable_after_ns\":{},\"disable_before_ns\":{},\"disable_after_ns\":{}}}"),
+            self.id, s.kernel_event_id, s.program_id, s.link_id,
+            self.config, self.period, quote(scope), target, s.bound_task_id,
+            quote(s.clock.as_str()), quote(s.requested_config.as_str()), quote(s.config.as_str()),
+            s.requested_sample_period, s.requested_frequency_hz, s.effective_frequency_hz,
+            s.requested_buffer_pages, s.effective_buffer_pages, quote(s.unit.as_str()), quote(s.fallback.as_str()),
+            s.enable_before_ns, s.enable_after_ns, s.disable_before_ns, s.disable_after_ns,
         )
     }
 }
 fn sources(analyzer: &CaptureAnalyzer) -> Result<Vec<Source>, String> {
-    let Some(d) = analyzer.data().diagnostics.as_ref() else {
-        return Ok(Vec::new());
-    };
-    let fields: BTreeMap<_, _> = d
-        .identities
-        .iter()
-        .filter_map(|i| i.value.as_deref().map(|v| (i.name.as_str(), v)))
-        .collect();
-    let mut result = Vec::new();
-    for (name, value) in &fields {
-        let Some(rest) = name.strip_prefix("event/") else {
-            continue;
-        };
-        let Some(id) = rest.strip_suffix("/clock") else {
-            continue;
-        };
-        let clock: u64 = value.parse().map_err(|_| "invalid source clock identity")?;
-        if !matches!(clock, 0 | 1) {
-            continue;
-        }
-        let id: u64 = id.parse().map_err(|_| "invalid source instance identity")?;
-        let get = |key: &str| -> Result<&str, String> {
-            fields
-                .get(format!("event/{id}/{key}").as_str())
-                .copied()
-                .ok_or_else(|| format!("source {id} lacks {key}"))
-        };
-        let num = |key| -> Result<u64, String> {
-            get(key)?
-                .parse()
-                .map_err(|_| format!("source {id} has invalid {key}"))
-        };
-        if num("id")? != id || id == 0 {
-            return Err("inconsistent source instance identity".into());
-        }
-        let scope = match get("scope")? {
-            "\"cpu\"" => "cpu",
-            "\"task\"" => "task",
-            _ => return Err("unsupported source scope".into()),
-        };
-        let source = Source {
-            id,
-            config: clock,
-            period: num("period")?,
-            scope: scope.into(),
-            target: num("target")?,
-            task: num("task_id")?,
-        };
-        if num("config")? != clock
-            || source.period == 0
-            || (clock == 0 && scope != "cpu")
-            || (clock == 1 && scope != "task")
-        {
-            return Err("inconsistent source clock/scope/period".into());
-        }
-        result.push(source);
-    }
-    result.sort_by_key(|s| s.id);
-    Ok(result)
+    let metadata = analyzer.data().recorder.as_ref().ok_or("capture source declarations missing")?;
+    metadata.sources.iter().filter(|s| matches!(s.kind, RecorderKind::SoftwareV2 | RecorderKind::SoftwareStackV3))
+        .map(|s| {
+            let config = match s.config {
+                SourceConfig::CpuClock => 0,
+                SourceConfig::TaskClock => 1,
+                _ => return Err("CPU export requires an explicit software clock config".into()),
+            };
+            if s.unit != SourceUnit::Nanoseconds {
+                return Err("CPU export requires nanosecond periods".into());
+            }
+            Ok(Source { id: u64::from(s.id), config, period: s.sample_period, declaration: s.clone() })
+        }).collect()
 }
 fn u16le(out: &mut Vec<u8>, n: u16) {
     out.extend_from_slice(&n.to_le_bytes());
@@ -275,19 +231,15 @@ pub fn export(
             ),
             _ => continue,
         };
-        let candidates: Vec<_> = declared
-            .iter()
-            .filter(|s| id.is_none_or(|i| s.id == i) && s.covers(event))
-            .collect();
-        if candidates.len() != 1 {
-            return Err(format!(
-                "sample {} has missing or ambiguous source instance",
-                event.sequence_index
-            ));
+        let logical_id = analyzer.data().recorder.as_ref()
+            .and_then(|metadata| metadata.record_sources.get(event.sequence_index))
+            .ok_or("sample lacks explicit logical source binding")?;
+        let source = declared.iter().find(|source| source.id == u64::from(*logical_id))
+            .ok_or("sample references an undeclared CPU source")?;
+        if id.is_some_and(|kernel_id| source.declaration.kernel_event_id != kernel_id) {
+            return Err("stack kernel source differs from logical source declaration".into());
         }
-        // Period is a measured increment, not an instance identifier. In v2,
-        // scope must establish a unique source before validating its period.
-        if candidates[0].period != period {
+        if source.period != period {
             return Err("sample period differs from its declared source".into());
         }
         if !matches!(mode, 1 | 2) || pc == 0 || ips.is_empty() || ips[0] != pc {
@@ -295,7 +247,7 @@ pub fn export(
         }
         samples.push(Sample {
             event,
-            source: candidates[0],
+            source,
             period,
             pc,
             mode: mode as u16,
@@ -320,7 +272,7 @@ pub fn export(
             .data()
             .mappings
             .as_ref()
-            .ok_or("CPU export requires capture-v4 mapping metadata")?;
+            .ok_or("CPU export requires mapping metadata")?;
         let timeline = MappingTimeline::new(metadata)?;
         if timeline.journal().dropped != 0 {
             return Err("mapping journal loss prevents safe perf symbolization".into());

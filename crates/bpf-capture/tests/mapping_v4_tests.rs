@@ -1,3 +1,4 @@
+mod support;
 use bpf_capture::{
     CaptureArch, CaptureReader, CaptureWriter, SessionStatusCode,
     mapping::{Artifact, MappingJournal, MappingMetadata},
@@ -24,7 +25,7 @@ fn metadata() -> MappingMetadata {
     }
 }
 #[test]
-fn v4_retains_verbatim_journal_and_explicit_absent_gnu_id() {
+fn current_capture_retains_verbatim_journal_and_explicit_absent_gnu_id() {
     let fixture = bpf_capture::generate_deterministic_fixture(
         CaptureArch::Riscv64,
         SessionStatusCode::Complete,
@@ -33,11 +34,14 @@ fn v4_retains_verbatim_journal_and_explicit_absent_gnu_id() {
     let old = CaptureReader::from_bytes(&fixture).unwrap();
     let mut writer = CaptureWriter::new(old.metadata.config, old.registry);
     writer.set_mappings(metadata()).unwrap();
+    writer.configure_recorder(vec![support::trace(1, 2, 0, 100, 300)], 4096).unwrap();
     writer.start(100).unwrap();
-    writer.write_record(old.records[0].clone()).unwrap();
+    let mut record = old.records[0].clone();
+    record.timestamp_ns = 200;
+    writer.write_record_from(1, record).unwrap();
     let bytes = writer.finish(300).unwrap();
     let parsed = CaptureReader::from_bytes(&bytes).unwrap();
-    assert_eq!(parsed.header.format_version, 4);
+    assert_eq!(parsed.header.format_version, 6);
     assert_eq!(parsed.mappings, Some(metadata()));
     assert_eq!(parsed.mappings.unwrap().artifacts[0].gnu_build_id, None);
 }
@@ -78,7 +82,7 @@ fn bundle_paths_and_fake_build_ids_are_rejected() {
     assert!(m.validate().is_err());
 }
 #[test]
-fn v4_unknown_required_feature_is_rejected() {
+fn current_capture_unknown_required_feature_is_rejected() {
     let fixture = bpf_capture::generate_deterministic_fixture(
         CaptureArch::Riscv64,
         SessionStatusCode::Complete,
@@ -87,8 +91,11 @@ fn v4_unknown_required_feature_is_rejected() {
     let old = CaptureReader::from_bytes(&fixture).unwrap();
     let mut writer = CaptureWriter::new(old.metadata.config, old.registry);
     writer.set_mappings(metadata()).unwrap();
+    writer.configure_recorder(vec![support::trace(1, 2, 0, 100, 300)], 4096).unwrap();
     writer.start(100).unwrap();
-    writer.write_record(old.records[0].clone()).unwrap();
+    let mut record = old.records[0].clone();
+    record.timestamp_ns = 200;
+    writer.write_record_from(1, record).unwrap();
     let mut bytes = writer.finish(300).unwrap();
     let h = bpf_capture::CaptureHeader::from_bytes(&bytes).unwrap();
     let pos = h.records_offset as usize - 8;
@@ -122,8 +129,11 @@ fn mapping_journal_has_an_independent_bound_from_diagnostics() {
     let data = CaptureReader::from_bytes(&original).unwrap();
     let mut writer = CaptureWriter::new(data.metadata.config, data.registry);
     writer.set_mappings(mappings.clone()).unwrap();
+    writer.configure_recorder(vec![support::trace(1, 2, 0, 100, 300)], 4096).unwrap();
     writer.start(100).unwrap();
-    writer.write_record(data.records[0].clone()).unwrap();
+    let mut record = data.records[0].clone();
+    record.timestamp_ns = 200;
+    writer.write_record_from(1, record).unwrap();
     assert_eq!(
         CaptureReader::from_bytes(&writer.finish(300).unwrap())
             .unwrap()

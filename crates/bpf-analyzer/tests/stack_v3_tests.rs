@@ -5,8 +5,12 @@ use pulse_bpf_schema::{PerfEventContext, PerfSampleContext};
 fn analyzer() -> CaptureAnalyzer {
     let fixture=bpf_capture::generate_deterministic_fixture(CaptureArch::Riscv64,SessionStatusCode::Complete).unwrap();
     let mut writer=CaptureWriter::new(CaptureReader::from_bytes(&fixture).unwrap().metadata.config,SchemaRegistry::default_pulse_registry());
+    writer.configure_recorder(vec![
+        support::source(7, bpf_capture::RecorderKind::SoftwareStackV3, 0x1002, 3, 3, 10, 123, 100, 300),
+        support::source(9, bpf_capture::RecorderKind::SoftwareStackV3, 0x1002, 3, 3, 20, 124, 100, 300),
+    ], 4096).unwrap();
     writer.start(100).unwrap();
-    for (source,period) in [(123u64,10u64),(124,20)] {
+    for (logical,source,period) in [(7,123u64,10u64),(9,124,20)] {
         let mut raw=[0u8;640];
         raw[..64].copy_from_slice(&PerfSampleContext {
             base:PerfEventContext::new(period,0,200,3,40,41,99),ip:0x400110,mode:2,version:2,
@@ -22,7 +26,7 @@ fn analyzer() -> CaptureAnalyzer {
         for (index,ip) in [0x400110u64,0x400220,0x400330].iter().enumerate() {
             raw[128+index*8..136+index*8].copy_from_slice(&ip.to_le_bytes());
         }
-        writer.ingest_perf_sample_as(3,&raw,NativeContextFormat::SoftwareStackV3).unwrap();
+        writer.ingest_perf_sample_as(logical,3,&raw,NativeContextFormat::SoftwareStackV3).unwrap();
     }
     CaptureAnalyzer::from_bytes(&writer.finish(300).unwrap()).unwrap()
 }
@@ -34,6 +38,9 @@ fn table_json_and_folded_preserve_real_chain_and_termination() {
     assert!(table.contains("source_id=123") && table.contains("source_id=124"),"{table}");
     assert!(table.contains("termination=read_fault") && table.contains("stack=partial"),"{table}");
     let json=a.render_json();
+    let report: serde_json::Value = serde_json::from_str(&json).unwrap();
+    assert_eq!(report["stack_samples"][0]["logical_source"], 7);
+    assert_eq!(report["stack_samples"][0]["sample"]["source_id"], 123);
     assert!(json.contains("\"source_id\":123") && json.contains("\"source_id\":124"),"{json}");
     assert!(json.contains("\"ips\":[4194576,4194848,4195120]"),"{json}");
     assert!(json.contains("\"termination\":\"read_fault\""),"{json}");
@@ -56,3 +63,5 @@ fn period_weight_and_query_filter_apply_to_stack_samples() {
     assert!(result.events.is_empty());
     assert!(bpf_analyzer::emission::render_query_json(&a,&result).contains("\"stack_samples\": []"));
 }
+
+mod support;

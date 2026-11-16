@@ -16,8 +16,8 @@ fn acceptance_test_deterministic_valid_fixtures_dual_arch() {
         let analyzer2 = CaptureAnalyzer::from_bytes(&fixture_bytes).expect("parse analyzer second time");
 
         // Completeness and status verification
-        assert!(analyzer1.is_complete());
-        assert_eq!(analyzer1.status_code(), SessionStatusCode::Complete);
+        assert!(!analyzer1.is_complete());
+        assert_eq!(analyzer1.status_code(), SessionStatusCode::IncompleteError);
         assert_eq!(analyzer1.target_arch(), arch);
         assert!(!analyzer1.attribution_claim_allowed());
         assert_eq!(analyzer1.records().len(), 2);
@@ -33,7 +33,7 @@ fn acceptance_test_deterministic_valid_fixtures_dual_arch() {
         let loss1 = analyzer1.render_loss_report();
         let loss2 = analyzer2.render_loss_report();
         assert_eq!(loss1, loss2, "loss report must be deterministic");
-        assert!(loss1.contains("Status: Complete"));
+        assert!(loss1.contains("Status: IncompleteError"));
         assert!(loss1.contains("Attribution Claim: Disallowed"));
         assert!(loss1.contains(arch.as_str()));
 
@@ -41,7 +41,7 @@ fn acceptance_test_deterministic_valid_fixtures_dual_arch() {
         let json1 = analyzer1.render_json();
         let json2 = analyzer2.render_json();
         assert_eq!(json1, json2, "json output must be deterministic");
-        assert!(json1.contains("\"is_complete\": true"));
+        assert!(json1.contains("\"is_complete\": false"));
         assert!(json1.contains(&format!("\"arch\": \"{}\"", arch.as_str())));
 
         // 4. Folded outputs determinism
@@ -139,7 +139,7 @@ fn acceptance_test_no_qperf_dependency() {
     // without requiring any qperf files, QEMU plugins, or qperf binaries.
     let bytes = generate_deterministic_fixture(CaptureArch::Riscv64, SessionStatusCode::Complete).unwrap();
     let analyzer = CaptureAnalyzer::from_bytes(&bytes).unwrap();
-    assert!(analyzer.is_complete());
+    assert!(!analyzer.is_complete());
 
     // Verify all outputs are produced without external commands
     let table = analyzer.render_event_table();

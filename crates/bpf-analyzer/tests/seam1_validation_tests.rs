@@ -8,8 +8,8 @@ fn test_valid_capture_ingestion_and_integrity_check() {
         .expect("generate fixture");
 
     let analyzer = CaptureAnalyzer::from_bytes(&bytes).expect("analyzer should parse valid capture");
-    assert!(analyzer.is_complete(), "clean capture must be marked complete");
-    assert_eq!(analyzer.status_code(), SessionStatusCode::Complete);
+    assert!(!analyzer.is_complete(), "clean transport without coverage proof remains partial");
+    assert_eq!(analyzer.status_code(), SessionStatusCode::IncompleteError);
     assert_eq!(analyzer.target_arch(), CaptureArch::Riscv64);
     assert_eq!(analyzer.header().records_count, 2);
     assert_eq!(analyzer.records().len(), 2);
@@ -138,6 +138,8 @@ fn observed_consumer_loss_and_errors_survive_default_runtime_diagnostics() {
 
     let registry = SchemaRegistry::default_pulse_registry();
     let mut writer = CaptureWriter::new(config, registry);
+    writer.configure_recorder(vec![support::source(7, bpf_capture::RecorderKind::Tracepoint,
+        TracepointId::SchedSwitch as u32, 1, 0, 1, 123, 1_000_000_000, 2_000_000_000)], 4096).unwrap();
     writer.start(1_000_000_000).unwrap();
 
     let sched = SchedSwitchContext {
@@ -152,12 +154,12 @@ fn observed_consumer_loss_and_errors_survive_default_runtime_diagnostics() {
     let sched_bytes = unsafe {
         core::slice::from_raw_parts(&sched as *const _ as *const u8, core::mem::size_of_val(&sched))
     };
-    writer.ingest_ringbuf_sample(0, sched_bytes, bpf_capture::writer::NativeContextFormat::Tracepoint).unwrap();
+    writer.ingest_ringbuf_sample(7, 0, sched_bytes, bpf_capture::writer::NativeContextFormat::Tracepoint).unwrap();
     writer.ingest_ringbuf_lost(5);
     let mut discarded = [0; 8];
     discarded[..4].copy_from_slice(&bpf_capture::writer::BPF_RINGBUF_DISCARD_BIT.to_ne_bytes());
-    writer.ingest_raw_ringbuf_frame(0, &discarded, bpf_capture::writer::NativeContextFormat::Tracepoint).unwrap();
-    assert!(writer.ingest_raw_ringbuf_frame(0, &[], bpf_capture::writer::NativeContextFormat::Tracepoint).is_err());
+    writer.ingest_raw_ringbuf_frame(7, 0, &discarded, bpf_capture::writer::NativeContextFormat::Tracepoint).unwrap();
+    assert!(writer.ingest_raw_ringbuf_frame(7, 0, &[], bpf_capture::writer::NativeContextFormat::Tracepoint).is_err());
 
     let bytes = writer.finish(2_000_000_000).unwrap();
     let analyzer = CaptureAnalyzer::from_bytes(&bytes)
@@ -191,3 +193,5 @@ fn observed_consumer_loss_and_errors_survive_default_runtime_diagnostics() {
     assert_eq!(events.len(), 1);
     assert_eq!(events[0].cpu_id, 0);
 }
+
+mod support;

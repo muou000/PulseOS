@@ -319,10 +319,16 @@ def validate_report(label: str, report: dict) -> list[str]:
         if not dropped or report.get("is_complete") is not False:
             errors.append("bounded-export: missing actual retained-budget loss or false completeness")
     if label == "existing-shell":
-        identities = report.get("runtime_diagnostics", {}).get("identities", [])
-        config = next((item["value"] for item in identities if item["name"] == "recorder_config"), "") or ""
-        if not all(field in config for field in ("requested_frequency=99", "effective_period_ns=10101011",
-                                                  "frequency_conversion=ceil_ns", "fallback=none")):
+        if not sources or any(
+            source.get("requested_frequency_hz") != 99
+            or source.get("requested_sample_period") != 0
+            or source.get("period") != 10101011
+            or source.get("requested_config") != "task-clock"
+            or source.get("config") != "task-clock"
+            or source.get("unit") != "nanoseconds"
+            or source.get("fallback") != "none"
+            for source in sources
+        ):
             errors.append("existing-shell: requested frequency/effective period/fallback were not preserved")
     if label == "stop-failure":
         counters = report.get("runtime_diagnostics", {}).get("counters", [])

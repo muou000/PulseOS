@@ -4,7 +4,7 @@ import unittest
 import zlib
 import archive
 import run
-from test_archive import fixture
+from test_archive import fixture, sample_frame
 from test_runner import VALID, CPU_VALID, TOKEN
 
 
@@ -13,14 +13,15 @@ def stack_fixture(change=None):
     lines = log.splitlines()
     raw = archive.chunks(lines, 'ARCHIVE DATA ', 'frames')
     context = bytearray(640)
-    context[:64] = raw[24 + 12:24 + 12 + 64]
+    context[:64] = raw[24 + 36:24 + 36 + 64]
     struct.pack_into('<QQQQQHHHHIIQ', context,64,13,0x10000,0x10010,0,5,3,32,3,4,32,512,0)
     struct.pack_into('<QQQ',context,128,0x400110,0x400100,0x400080)
     if change:
         change(context)
-    frame = struct.pack('<IHHI',9,0,656,640) + context + bytes(4)
+    frame = sample_frame(1, 3, context)
     raw = struct.pack('<QIIII',0,3,len(frame),zlib.crc32(frame),0) + frame
-    lines = [line for line in lines if not line.startswith(('ARCHIVE BEGIN ', 'ARCHIVE DATA ', 'ARCHIVE END '))]
+    lines = [line for line in lines if not line.startswith(('ARCHIVE BEGIN ', 'ARCHIVE DATA ', 'ARCHIVE END ', 'ARCHIVE CONTEXT '))]
+    lines = [line.replace("kind=1 schema_event_id=4097 schema_version=2", "kind=3 schema_event_id=4098 schema_version=3") for line in lines]
     lines += [
         'SAMPLING START version=2 mode=task cpus=8 pid=40 tid=41',
         'ARCHIVE CONTEXT format=software-stack-v3',
@@ -36,7 +37,7 @@ class StackArchiveTests(unittest.TestCase):
         binary, metadata, _ = archive.extract(stack_fixture(),'task')
         self.assertEqual(metadata['context_format'],'software-stack-v3')
         self.assertEqual(metadata['stack_source_counts'],{13:1})
-        self.assertEqual(struct.unpack_from('<Q',binary,64+24+12+64)[0],13)
+        self.assertEqual(struct.unpack_from('<Q',binary,64+24+36+64)[0],13)
 
     def test_empty_unavailable_chain_preserves_observed_ip(self):
         def empty(context, status=9, read_bytes=0):
@@ -45,8 +46,8 @@ class StackArchiveTests(unittest.TestCase):
         for status in (9,13):
             binary,metadata,_=archive.extract(stack_fixture(lambda c:empty(c,status)),'task')
             self.assertEqual(metadata['samples'],1)
-            self.assertEqual(struct.unpack_from('<Q',binary,64+24+12+48)[0],0x400110)
-            self.assertEqual(struct.unpack_from('<H',binary,64+24+12+108)[0],0)
+            self.assertEqual(struct.unpack_from('<Q',binary,64+24+36+48)[0],0x400110)
+            self.assertEqual(struct.unpack_from('<H',binary,64+24+36+108)[0],0)
         for status,read_bytes in [(4,0),(9,16),(13,16)]:
             with self.subTest(status=status,read_bytes=read_bytes), self.assertRaises(ValueError):
                 archive.extract(stack_fixture(lambda c:empty(c,status,read_bytes)),'task')

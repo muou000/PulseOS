@@ -1,3 +1,4 @@
+mod support;
 use bpf_capture::fixture::generate_deterministic_fixture;
 use bpf_capture::framing::{
     CaptureArch, CaptureError, SessionStatusCode, CAPTURE_HEADER_SIZE,
@@ -37,6 +38,7 @@ fn deterministic_session_config() -> SessionConfig {
 fn acceptance_test_deterministic_fixture_round_trip() {
     let registry = SchemaRegistry::default_pulse_registry();
     let mut writer = CaptureWriter::new(deterministic_session_config(), registry.clone());
+    writer.configure_recorder(vec![support::trace(1, 2, 0, 1_000_000, 2_000_000), support::trace(2, 3, 1, 1_000_000, 2_000_000)], 4096).unwrap();
     writer.start(1_000_000).expect("start session");
 
     // 1. SchedSwitch record
@@ -53,7 +55,7 @@ fn acceptance_test_deterministic_fixture_round_trip() {
         core::slice::from_raw_parts(&sched as *const _ as *const u8, core::mem::size_of_val(&sched))
     })
     .unwrap();
-    writer.write_record(rec1.clone()).unwrap();
+    writer.write_record_from(1, rec1.clone()).unwrap();
 
     // 2. TaskBlock record
     let block = TaskBlockContext {
@@ -68,7 +70,7 @@ fn acceptance_test_deterministic_fixture_round_trip() {
         core::slice::from_raw_parts(&block as *const _ as *const u8, core::mem::size_of_val(&block))
     })
     .unwrap();
-    writer.write_record(rec2.clone()).unwrap();
+    writer.write_record_from(2, rec2.clone()).unwrap();
 
     let bytes = writer.finish(2_000_000).expect("finish capture");
 
@@ -95,7 +97,8 @@ fn acceptance_test_truncated_mismatched_and_lossy_inputs() {
     // Case A: Missing diagnostics and samples stay incomplete while observed loss is retained
     {
         let mut writer = CaptureWriter::new(deterministic_session_config(), registry.clone());
-        writer.start(1_000_000).unwrap();
+        writer.configure_recorder(vec![support::trace(1, 2, 0, 1_000_000, 2_000_000), support::trace(2, 3, 1, 1_000_000, 2_000_000)], 4096).unwrap();
+    writer.start(1_000_000).unwrap();
         writer.ingest_perf_lost(0, 7);
         writer.ingest_perf_lost(1, 3);
         let bytes = writer.finish(2_000_000).unwrap();
@@ -111,7 +114,8 @@ fn acceptance_test_truncated_mismatched_and_lossy_inputs() {
     // Case B: Truncated header
     {
         let mut writer = CaptureWriter::new(deterministic_session_config(), registry.clone());
-        writer.start(1_000).unwrap();
+        writer.configure_recorder(vec![support::trace(1, 2, 0, 1_000, 2_000)], 4096).unwrap();
+    writer.start(1_000).unwrap();
         let bytes = writer.finish(2_000).unwrap();
         let err = CaptureReader::from_bytes(&bytes[..CAPTURE_HEADER_SIZE - 8]).unwrap_err();
         assert_eq!(err, CaptureError::TruncatedHeader);
@@ -120,7 +124,8 @@ fn acceptance_test_truncated_mismatched_and_lossy_inputs() {
     // Case C: Checksum mismatch (corrupted byte in metadata stream)
     {
         let mut writer = CaptureWriter::new(deterministic_session_config(), registry.clone());
-        writer.start(1_000).unwrap();
+        writer.configure_recorder(vec![support::trace(1, 2, 0, 1_000, 2_000)], 4096).unwrap();
+    writer.start(1_000).unwrap();
         let mut bytes = writer.finish(2_000).unwrap();
         bytes[CAPTURE_HEADER_SIZE + 10] ^= 0xAA;
         let err = CaptureReader::from_bytes(&bytes).unwrap_err();
@@ -130,7 +135,8 @@ fn acceptance_test_truncated_mismatched_and_lossy_inputs() {
     // Case D: Record-count mismatch
     {
         let mut writer = CaptureWriter::new(deterministic_session_config(), registry.clone());
-        writer.start(1_000).unwrap();
+        writer.configure_recorder(vec![support::trace(1, 2, 0, 1_000, 2_000)], 4096).unwrap();
+    writer.start(1_000).unwrap();
         let sched = SchedSwitchContext {
             common: ContextCommon::new(TracepointId::SchedSwitch, 1_100, 0, 10, 10, 1),
             prev_task_id: 1,
@@ -144,7 +150,7 @@ fn acceptance_test_truncated_mismatched_and_lossy_inputs() {
             core::slice::from_raw_parts(&sched as *const _ as *const u8, core::mem::size_of_val(&sched))
         })
         .unwrap();
-        writer.write_record(rec).unwrap();
+        writer.write_record_from(1, rec).unwrap();
         let mut bytes = writer.finish(2_000).unwrap();
 
         // Tamper with records_count in header (bytes 48..56)
@@ -156,7 +162,8 @@ fn acceptance_test_truncated_mismatched_and_lossy_inputs() {
     // Case E: Schema mismatch in capture file
     {
         let mut writer = CaptureWriter::new(deterministic_session_config(), registry.clone());
-        writer.start(1_000).unwrap();
+        writer.configure_recorder(vec![support::trace(1, 2, 0, 1_000, 2_000)], 4096).unwrap();
+    writer.start(1_000).unwrap();
         let sched = SchedSwitchContext {
             common: ContextCommon::new(TracepointId::SchedSwitch, 1_100, 0, 10, 10, 1),
             prev_task_id: 1,
@@ -170,7 +177,7 @@ fn acceptance_test_truncated_mismatched_and_lossy_inputs() {
             core::slice::from_raw_parts(&sched as *const _ as *const u8, core::mem::size_of_val(&sched))
         })
         .unwrap();
-        writer.write_record(rec.clone()).unwrap();
+        writer.write_record_from(1, rec.clone()).unwrap();
 
         // Deliberately tamper with record schema version in stream
         let file_bytes = writer.finish(2_000).unwrap();
@@ -199,7 +206,7 @@ fn acceptance_test_deterministic_fixture_generator_dual_arch() {
         .expect("RV64 fixture generation");
     let rv_cap = CaptureReader::from_bytes(&rv_complete).expect("RV64 capture read");
     assert_eq!(rv_cap.header.target_arch, CaptureArch::Riscv64);
-    assert_eq!(rv_cap.metadata.status, SessionStatusCode::Complete);
+    assert_eq!(rv_cap.metadata.status, SessionStatusCode::IncompleteError);
     assert_eq!(rv_cap.records.len(), 2);
     assert_eq!(rv_cap.metadata.config.image_path, "sdcard-rv.img");
 
@@ -208,7 +215,7 @@ fn acceptance_test_deterministic_fixture_generator_dual_arch() {
         .expect("LA64 fixture generation");
     let la_cap = CaptureReader::from_bytes(&la_complete).expect("LA64 capture read");
     assert_eq!(la_cap.header.target_arch, CaptureArch::LoongArch64);
-    assert_eq!(la_cap.metadata.status, SessionStatusCode::Complete);
+    assert_eq!(la_cap.metadata.status, SessionStatusCode::IncompleteError);
     assert_eq!(la_cap.records.len(), 2);
     assert_eq!(la_cap.metadata.config.image_path, "sdcard-la.img");
 

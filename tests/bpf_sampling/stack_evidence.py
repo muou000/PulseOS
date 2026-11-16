@@ -4,6 +4,7 @@ import bisect
 import hashlib
 import json
 import struct
+import archive as raw_archive
 
 
 def elf_symbols(path: Path) -> tuple[dict[str, int], list[tuple[int, int, str]]]:
@@ -78,10 +79,9 @@ def verify(run: Path) -> dict:
             raise ValueError('truncated stack evidence')
         if struct.unpack_from('<I', frame)[0] != 9:
             continue
-        length, = struct.unpack_from('<I', frame, 8)
-        if length != 640:
+        logical_id, kind, payload = raw_archive.source_context(frame)
+        if kind != 3 or len(payload) != 640:
             raise ValueError('nonstack record in native stack evidence')
-        payload = frame[12:652]
         ip, mode = struct.unpack_from('<QI', payload, 48)
         pid, tid = struct.unpack_from("<II", payload, 28)
         is_target = (pid, tid) == (target["pid"], target["tid"])

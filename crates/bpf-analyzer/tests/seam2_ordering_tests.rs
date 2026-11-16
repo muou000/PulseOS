@@ -3,7 +3,7 @@ use bpf_capture::framing::CaptureArch;
 use bpf_capture::record::NormalizedRecord;
 use bpf_capture::schema::SchemaRegistry;
 use bpf_capture::session::{CaptureScope, SessionConfig};
-use bpf_capture::writer::CaptureWriter;
+use support::SemanticFixture as CaptureWriter;
 use pulse_bpf_schema::{
     ContextCommon, PhaseBoundary, PhaseMarkerContext, SchedSwitchContext, TaskMetadataContext,
     TracepointId,
@@ -35,7 +35,7 @@ fn create_test_config() -> SessionConfig {
 fn test_cross_cpu_out_of_order_records_merged_monotonically() {
     let registry = SchemaRegistry::default_pulse_registry();
     let mut writer = CaptureWriter::new(create_test_config(), registry);
-    writer.start(1_000_000).unwrap();
+    writer.start(1).unwrap();
 
     // Ingest out-of-order records simulating separate CPU Perf Buffers:
     // CPU 0 delivers at t=100 and t=300
@@ -128,7 +128,7 @@ fn test_cross_cpu_out_of_order_records_merged_monotonically() {
 fn test_task_comm_mapping_from_metadata() {
     let registry = SchemaRegistry::default_pulse_registry();
     let mut writer = CaptureWriter::new(create_test_config(), registry);
-    writer.start(1_000_000).unwrap();
+    writer.start(1).unwrap();
 
     // 1. TaskMetadata registering comm "worker_thread" for task 42
     let mut comm = [0u8; 16];
@@ -174,7 +174,7 @@ fn test_task_comm_mapping_from_metadata() {
 fn test_phase_marker_window_filtering() {
     let registry = SchemaRegistry::default_pulse_registry();
     let mut writer = CaptureWriter::new(create_test_config(), registry);
-    writer.start(1_000_000).unwrap();
+    writer.start(1).unwrap();
 
     // Event before phase at t=50
     let sched0 = SchedSwitchContext {
@@ -280,3 +280,5 @@ fn test_phase_marker_window_filtering() {
     assert_eq!(phase_events[1].timestamp_ns, 150);
 
 }
+
+mod support;

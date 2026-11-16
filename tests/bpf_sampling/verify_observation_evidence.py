@@ -73,7 +73,7 @@ def decode_raw(data, mode):
     while position < len(data):
         seq,cpu,length,crc,reserved = unpack('<QIIII', data, position); position += 24
         check(seq == frames and cpu < 8 and reserved == 0, 'RAW sequence/CPU/reserved mismatch')
-        check(8 <= length <= 96 and length <= len(data)-position, 'RAW frame length invalid')
+        check(8 <= length <= 120 and length <= len(data)-position, 'RAW frame length invalid')
         frame = data[position:position+length]; position += length
         kind,_misc,declared = unpack('<IHH',frame)
         check(declared == length and length % 8 == 0 and zlib.crc32(frame) == crc, 'perf frame boundary/CRC mismatch')
@@ -84,7 +84,12 @@ def decode_raw(data, mode):
             check(kind == 9 and length >= 12, 'unknown perf record')
             n = unpack('<I',frame,8)[0]
             check(12+n <= length <= 19+n, 'RAW context size/padding mismatch')
-            context = frame[12:12+n]
+            magic, version, source_kind, context_size, logical_id, reserved = unpack('<IHHIIQ', frame, 12)
+            check(magic == 0x31524250 and version == 1 and logical_id > 0 and reserved == 0
+                  and context_size + 24 == n, 'missing or invalid explicit logical source envelope')
+            check(source_kind == (1 if mode in ('task', 'cpu') else 2), 'source kind mismatch')
+            context = frame[36:12+n]
+            n = context_size
             if mode in ('task','cpu'):
                 check(n == 64, 'software v2 context must be 64 bytes')
                 period,address,time,source_cpu,pid,tid,reserved,task,ip,privilege,version = unpack('<QQQIIIIQQII',context)
@@ -104,7 +109,7 @@ def decode_raw(data, mode):
 
 def decode_capture(data, arch):
     magic,version,schema,header_size,target,meta_start,meta_len,record_start,count,record_len,tail_start,tail_len = unpack('<8sIIIIQQQQQQQ',data)
-    check(magic == b'PBCAP001' and version == 2 and schema == 1, 'oracle requires capture format 2/schema 1')
+    check(magic == b'PBCAP001' and version == 6 and schema == 1, 'oracle requires capture format 6/schema 1')
     check(target == {'riscv64':1,'loongarch64':2}[arch], 'capture architecture mismatch')
     check(header_size == meta_start == 80 and meta_len > 0 and record_start == meta_start+meta_len, 'capture metadata ordering invalid')
     check(tail_start == record_start+record_len and tail_len == 40 and tail_start+40 == len(data), 'capture boundaries/trailer invalid')

@@ -1,8 +1,8 @@
 //! Versioned, scoped runtime evidence. Unknown values stay unknown and counters
 //! from overlapping producer/VM/transport scopes are never added together.
 //!
-//! Capture format v2 appends this block after the existing registry and session
-//! metadata: `PBDIAG01`, u32 counter count and entries, u32 identity count and
+//! The current container carries this independently delimited evidence block:
+//! `PBDIAG01`, u32 counter count and entries, u32 identity count and
 //! entries, u32 phase count and entries, then optional evidence text. All integer
 //! fields are little-endian. Strings use a u32 byte length and UTF-8; options use
 //! a 0/1 byte followed by a value only for 1. Counter entries contain name, scope,
