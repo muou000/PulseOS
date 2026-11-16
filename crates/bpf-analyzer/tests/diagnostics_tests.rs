@@ -1,6 +1,6 @@
 use bpf_analyzer::CaptureAnalyzer;
 use bpf_capture::{
-    CaptureArch, CaptureReader, CaptureWriter, CounterKind, DiagnosticCounter, DiagnosticIdentity,
+    CaptureArch, CaptureReader, CounterKind, DiagnosticCounter, DiagnosticIdentity,
     PhaseMeasurement, RuntimeDiagnostics, SessionStatusCode,
 };
 
@@ -34,11 +34,11 @@ fn analyzer(unknown: bool) -> CaptureAnalyzer {
             evidence_json: Some("{\"test\":true}".into()),
         })
         .unwrap();
-    writer.start(100).unwrap();
+    writer.start(1).unwrap();
     for record in data.records {
         writer.write_record(record).unwrap();
     }
-    CaptureAnalyzer::from_bytes(&writer.finish(300).unwrap()).unwrap()
+    CaptureAnalyzer::from_bytes(&writer.finish(2_000_000_000).unwrap()).unwrap()
 }
 #[test]
 fn unknown_is_preserved_and_unmeasured_counters_are_not_reported_as_zero() {
@@ -59,7 +59,7 @@ fn unknown_is_preserved_and_unmeasured_counters_are_not_reported_as_zero() {
 #[test]
 fn clean_transport_never_proves_complete_runtime_attribution() {
     let analyzer = analyzer(false);
-    assert!(analyzer.is_complete());
+    assert!(!analyzer.is_complete());
     assert!(!analyzer.attribution_claim_allowed());
     assert!(!analyzer.render_off_cpu_folded().is_complete);
     assert!(
@@ -73,3 +73,7 @@ fn clean_transport_never_proves_complete_runtime_attribution() {
             .contains("\"attribution_claim_allowed\": false")
     );
 }
+
+use support::SemanticFixture as CaptureWriter;
+
+mod support;

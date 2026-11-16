@@ -31,14 +31,14 @@ def normalized_records(data: bytes, arch: str) -> tuple[list[Record], int]:
         raise ValueError('capture truncated')
     fields = struct.unpack_from('<8sIIIIQQQQQQQ', data)
     magic, version, schema, hsize, target, mstart, mlen, rstart, count, rlen, tstart, tlen = fields
-    if (magic != b'PBCAP001' or version != 4 or schema != 1 or hsize != 80 or mstart != 80
+    if (magic != b'PBCAP001' or version != 6 or schema != 1 or hsize != 80 or mstart != 80
             or target != {'riscv64': 1, 'loongarch64': 2}[arch] or mlen == 0
             or rstart != mstart + mlen or tstart != rstart + rlen or tlen != 40 or tstart + tlen != len(data)):
-        raise ValueError('invalid capture-v4 framing')
+        raise ValueError('invalid capture-v6 framing')
     magic, tail_count, tail_bytes, crc, status, tail_size, reserved = struct.unpack_from('<8sQQIIII', data, tstart)
     if (magic != b'PBCAPTRL' or tail_count != count or tail_bytes != rlen or tail_size != 40
             or reserved or status not in range(4) or zlib.crc32(data[:tstart]) != crc):
-        raise ValueError('capture-v4 checksum/trailer mismatch')
+        raise ValueError('capture-v6 checksum/trailer mismatch')
     rows, cursor = [], rstart
     while cursor < tstart:
         if tstart - cursor < 48:

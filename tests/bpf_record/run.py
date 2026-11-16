@@ -173,7 +173,6 @@ def cases_script(directory: str, suite: str, duration: int) -> tuple[str, list[s
         record("dup-close", "task", "cpu", task=True, extra="--test-dup-close")
         record("bounded-export", "cpu", "cpu", cpus="0,1", period=1_000_000,
                buffer_pages=1, extra="--record-bytes 4096")
-        record("mixed", "cpu,cpu,task,sched,fault", "mixed", task=True)
         # An installed shell is an existing guest program, distinct from the
         # independent regression fixture and from the recorder itself.
         rows.extend(["sh -c 'i=0; while :; do i=$((i+1)); done' &", "target=$!", f"{fixture} sleep 100"])
@@ -182,6 +181,8 @@ def cases_script(directory: str, suite: str, duration: int) -> tuple[str, list[s
         record("sigint", "cpu", "cpu", signal=2)
         record("sigterm", "fault", "fault", signal=15)
         record("target-exit", "task", "cpu", task=True, target_exit=True)
+    if suite in ("mixed", "lifecycle", "full"):
+        record("mixed", "cpu,cpu,task,sched,fault", "mixed", task=True)
     if suite in ("negative", "full"):
         base = f"--events cpu --duration-ms {duration} --output rejected.pbcapture"
         for label, options in (
@@ -319,10 +320,16 @@ def validate_report(label: str, report: dict) -> list[str]:
         if not dropped or report.get("is_complete") is not False:
             errors.append("bounded-export: missing actual retained-budget loss or false completeness")
     if label == "existing-shell":
-        identities = report.get("runtime_diagnostics", {}).get("identities", [])
-        config = next((item["value"] for item in identities if item["name"] == "recorder_config"), "") or ""
-        if not all(field in config for field in ("requested_frequency=99", "effective_period_ns=10101011",
-                                                  "frequency_conversion=ceil_ns", "fallback=none")):
+        if not sources or any(
+            source.get("requested_frequency_hz") != 99
+            or source.get("requested_sample_period") != 0
+            or source.get("period") != 10101011
+            or source.get("requested_config") != "task-clock"
+            or source.get("config") != "task-clock"
+            or source.get("unit") != "nanoseconds"
+            or source.get("fallback") != "none"
+            for source in sources
+        ):
             errors.append("existing-shell: requested frequency/effective period/fallback were not preserved")
     if label == "stop-failure":
         counters = report.get("runtime_diagnostics", {}).get("counters", [])
@@ -625,7 +632,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("action", choices=("build-fixture", "guest"))
     parser.add_argument("--arch", choices=tuple(ARCHES), required=True)
-    parser.add_argument("--suite", choices=("smoke", "lifecycle", "negative", "benchmark", "existing", "recovery", "full"), default="smoke")
+    parser.add_argument("--suite", choices=("smoke", "mixed", "lifecycle", "negative", "benchmark", "existing", "recovery", "full"), default="smoke")
     parser.add_argument("--duration-ms", type=int, default=1000)
     parser.add_argument("--recorder", type=Path)
     parser.add_argument("--kernel", type=Path)

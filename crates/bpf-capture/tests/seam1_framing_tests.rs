@@ -1,14 +1,14 @@
 use bpf_capture::framing::{
     compute_checksum_ieee, CaptureArch, CaptureError, CaptureHeader, CaptureTrailer, SessionStatusCode,
     CAPTURE_HEADER_MAGIC, CAPTURE_HEADER_SIZE, CAPTURE_TRAILER_MAGIC, CAPTURE_TRAILER_SIZE,
-    FORMAT_VERSION_V2, SCHEMA_VERSION_V1,
+    FORMAT_VERSION, SCHEMA_VERSION_V1,
 };
 
 #[test]
 fn test_header_round_trip() {
     let header = CaptureHeader {
         magic: CAPTURE_HEADER_MAGIC,
-        format_version: FORMAT_VERSION_V2,
+        format_version: FORMAT_VERSION,
         schema_version: SCHEMA_VERSION_V1,
         header_size: CAPTURE_HEADER_SIZE as u32,
         target_arch: CaptureArch::Riscv64,

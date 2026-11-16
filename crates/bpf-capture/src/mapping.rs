@@ -1,4 +1,4 @@
-//! Capture-v4 mapping evidence. The original producer journal is retained verbatim;
+//! Current capture mapping evidence. The original producer journal is retained verbatim;
 //! paths are labels, never object identities or implicit host lookup instructions.
 use alloc::{
     collections::BTreeMap,

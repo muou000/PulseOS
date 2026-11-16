@@ -5,6 +5,7 @@ frames. Diagnostic snapshots remain separate original evidence files. This
 archive alone does not assert a complete sampling session.
 """
 from __future__ import annotations
+from collections import Counter
 import re
 import struct
 import zlib
@@ -87,6 +88,19 @@ def parse_stats(raw: bytes) -> dict:
     return {"pid": int(header["pid"]), "global": global_counters, "events": events, "programs": programs}
 
 
+def source_context(frame: bytes) -> tuple[int, int, bytes]:
+    """Read the current stamped RAW envelope; no source/layout inference."""
+    if len(frame) < 36:
+        raise ValueError("missing logical source envelope")
+    record_type, _, declared, raw_size = struct.unpack_from('<IHHI', frame)
+    magic, version, kind, length, logical_id, reserved = struct.unpack_from('<IHHIIQ', frame, 12)
+    if (record_type != 9 or declared != len(frame) or raw_size != length + 24
+        or len(frame) != (12 + raw_size + 7) & ~7 or magic != 0x31524250
+        or version != 1 or kind not in (1, 2, 3) or not logical_id or reserved):
+        raise ValueError("invalid logical source envelope")
+    return logical_id, kind, frame[36:36 + length]
+
+
 def extract(text: str, mode: str) -> tuple[bytes, dict, dict[str, bytes]]:
     lines = [re.sub(r"\x1b\[[0-9;]*[A-Za-z]", "", line).strip() for line in text.replace("\r", "").splitlines()]
     def one(prefix: str, point: str | None = None) -> dict[str, str]:
@@ -100,9 +114,9 @@ def extract(text: str, mode: str) -> tuple[bytes, dict, dict[str, bytes]]:
         raise ValueError("unknown requested archive mode")
     trace_sizes = {1:72, 2:72, 3:72, 4:80, 5:56, 6:64}
     context_rows = [fields(line) for line in lines if line.startswith("ARCHIVE CONTEXT ")]
-    if len(context_rows) > 1 or (context_rows and (mode not in ("task", "cpu") or context_rows[0] != {"format": "software-stack-v3"})):
+    if len(context_rows) != 1 or context_rows[0].get("format") not in (("software-v2", "software-stack-v3") if mode in ("task", "cpu") else ("tracepoint",)):
         raise ValueError("unknown or duplicate required context format")
-    stacks = bool(context_rows)
+    stacks = context_rows[0]["format"] == "software-stack-v3"
     begin, end = one("ARCHIVE BEGIN "), one("ARCHIVE END ")
     if begin.get("version") != "1" or begin.get("mode") != mode:
         raise ValueError("unknown archive format or mode")
@@ -119,6 +133,7 @@ def extract(text: str, mode: str) -> tuple[bytes, dict, dict[str, bytes]]:
     frame_sizes = [[] for _ in range(8)]
     fault_records = []
     stack_records = []
+    bound_records = []
     while position < len(raw):
         if len(raw) - position < 24:
             raise ValueError("truncated frame envelope")
@@ -132,17 +147,16 @@ def extract(text: str, mode: str) -> tuple[bytes, dict, dict[str, bytes]]:
         if declared != size or size % 8 or zlib.crc32(frame) != crc:
             raise ValueError("frame CRC or boundary mismatch")
         if kind == 9:
-            if size < 12:
-                raise ValueError("short RAW sample")
-            n, = struct.unpack_from("<I", frame, 8)
+            logical_id, source_kind, payload = source_context(frame)
+            if source_kind != (3 if stacks else 1 if mode in ("task", "cpu") else 2):
+                raise ValueError("source kind differs from declared context")
             if mode == "sched":
-                event = struct.unpack_from("<I", frame, 12)[0] if size >= 16 else 0
+                event = struct.unpack_from("<I", payload)[0] if len(payload) >= 4 else 0
                 expected = trace_sizes.get(event)
             else:
                 expected = 640 if stacks else {"task":64,"cpu":64,"trace":72,"block":72,"wake":80,"fault":80}[mode]
-            if n != expected or not 12+n <= size <= 12+n+7:
+            if len(payload) != expected:
                 raise ValueError("RAW sample length differs from declared program")
-            payload = frame[12:12+n]
             if mode in ("task", "cpu"):
                 timestamp, = struct.unpack_from("<Q", payload, 16)
                 source_cpu, = struct.unpack_from("<I", payload, 24)
@@ -169,6 +183,7 @@ def extract(text: str, mode: str) -> tuple[bytes, dict, dict[str, bytes]]:
                 if reserved or task == 0 or fault_start > timestamp or elapsed != timestamp-fault_start or access & ~7 or origin not in (1,2) or outcome not in (1,2,3,4) or classification not in (0,1,2) or (outcome != 1 and classification != 0):
                     raise ValueError("invalid native fault completion")
                 fault_records.append((pid,tid,address,access,origin,outcome))
+            bound_records.append((logical_id, source_kind, payload))
             samples += 1
         elif kind == 2 and size == 24:
             lost += struct.unpack_from("<Q", frame, 16)[0]
@@ -201,20 +216,6 @@ def extract(text: str, mode: str) -> tuple[bytes, dict, dict[str, bytes]]:
     if config.get("mode") != mode or any(int(config[key]) == 0 for key in ("program_id", "output_map_id", "scratch_map_id", "buffer_pages")):
         raise ValueError("invalid program/map identity or mode")
     program_bindings = []
-    for line in lines:
-        if line.startswith("ARCHIVE PROGRAM "):
-            program_bindings.append({key: int(value) for key, value in fields(line).items()})
-    if mode == "sched":
-        if len(program_bindings) != 6 or {row["tracepoint"] for row in program_bindings} != set(trace_sizes):
-            raise ValueError("missing or duplicate scheduler program binding")
-        if len({row["program_id"] for row in program_bindings}) != 6:
-            raise ValueError("scheduler sources require distinct declared programs")
-        for row in program_bindings:
-            if row["program_id"] <= 0 or row["context_bytes"] != trace_sizes[row["tracepoint"]]:
-                raise ValueError("incorrect scheduler program context")
-    elif program_bindings:
-        raise ValueError("unexpected multiple program configuration")
-    bound_program = {row["tracepoint"]:row["program_id"] for row in program_bindings}
     sources = []
     for line in lines:
         if not line.startswith("ARCHIVE SOURCE "):
@@ -225,7 +226,21 @@ def extract(text: str, mode: str) -> tuple[bytes, dict, dict[str, bytes]]:
         after = snapshots["after"]["events"].get(fd)
         if before is None or after is None or before["id"] != after["id"] or source["link_id"] == 0:
             raise ValueError("source event or link identity changed")
-        expected_program = bound_program.get(before["config"]) if mode == "sched" else int(config["program_id"])
+        required = {"logical_id", "event_id", "schema_event_id", "schema_version", "kind", "clock", "config", "requested_config", "scope", "target", "bound_task_id", "period", "requested_period", "requested_frequency", "effective_frequency", "requested_buffer_pages", "effective_buffer_pages", "unit", "fallback", "program_id"}
+        if not required <= source.keys():
+            raise ValueError("missing typed source declaration")
+        expected_program = source["program_id"]
+        expected_clock = {1:0, 2:1, 3:2}.get(source["config"])
+        if (source["event_id"] != before["id"] or source["bound_task_id"] != before["task_id"]
+            or source["scope"] != {"cpu":1,"task":2}[before["scope"]] or source["target"] != before["target"]
+            or expected_clock != before["clock"] or source["clock"] != 1
+            or source["schema_event_id"] != (before["config"] if source["kind"] == 2 else 0x1002 if source["kind"] == 3 else 0x1001)
+            or (source["kind"] != 2 and source["period"] != before["period"])):
+            raise ValueError("typed source declaration differs from kernel facts")
+        if mode == "sched":
+            binding = {"tracepoint": source["schema_event_id"], "program_id": expected_program, "context_bytes": trace_sizes[source["schema_event_id"]]}
+            if binding not in program_bindings:
+                program_bindings.append(binding)
         if any(before[key] != after[key] for key in ("clock","config","scope","target","task_id","period")):
             raise ValueError("source configuration changed during capture")
         if before["program_id"] != expected_program or after["program_id"] != expected_program:
@@ -234,12 +249,27 @@ def extract(text: str, mode: str) -> tuple[bytes, dict, dict[str, bytes]]:
             raise ValueError("non-quiescent capture boundary")
         if not start <= source["enable_before"] <= source["enable_after"] <= source["disable_before"] <= source["disable_after"] <= stop:
             raise ValueError("invalid per-source control window")
-        source["event_id"] = before["id"]
         sources.append(source)
     if len(sources) != (1 if mode == "task" else 48 if mode == "sched" else 16 if stacks else 8) or len({s["fd"] for s in sources}) != len(sources):
         raise ValueError("missing or duplicate source configuration")
     if len({source["event_id"] for source in sources}) != len(sources):
         raise ValueError("source aliases would double-count one event")
+    by_logical = {row["logical_id"]: row for row in sources}
+    if len(by_logical) != len(sources) or 0 in by_logical:
+        raise ValueError("duplicate or zero logical source ID")
+    for logical_id, kind, payload in bound_records:
+        row = by_logical.get(logical_id)
+        if row is None or row["kind"] != kind:
+            raise ValueError("unknown or mismatched logical source binding")
+        cpu = struct.unpack_from("<I", payload, 16 if kind == 2 else 24)[0]
+        task = struct.unpack_from("<Q", payload, 32 if kind == 2 else 40)[0]
+        timestamp = struct.unpack_from("<Q", payload, 8 if kind == 2 else 16)[0]
+        if ((row["scope"] == 1 and row["target"] != cpu) or (row["scope"] == 2 and row["bound_task_id"] != task)
+            or not row["enable_before"] <= timestamp <= row["disable_after"]
+            or (kind != 2 and row["period"] != struct.unpack_from("<Q", payload)[0])
+            or (kind == 2 and row["schema_event_id"] != struct.unpack_from("<I", payload)[0])
+            or (kind == 3 and row["event_id"] != struct.unpack_from("<Q", payload, 64)[0])):
+            raise ValueError("record differs from logical source declaration")
     source_rows = [snapshots["before"]["events"][item["fd"]] for item in sources]
     stack_source_counts = {}
     if stacks:
@@ -250,8 +280,9 @@ def extract(text: str, mode: str) -> tuple[bytes, dict, dict[str, bytes]]:
                 raise ValueError("stack record source/period/scope differs from authoritative event")
             stack_source_counts[source_id] = stack_source_counts.get(source_id, 0) + 1
         if mode == "cpu":
-            coverage = {(row["target"], row["period"]) for row in source_rows if row["clock"] == 0 and row["scope"] == "cpu"}
-            if coverage != {(cpu, period) for cpu in range(8) for period in (10_000_000, 20_000_000)}:
+            coverage = Counter(row["target"] for row in source_rows
+                               if row["clock"] == 0 and row["scope"] == "cpu")
+            if coverage != {cpu: 2 for cpu in range(8)}:
                 raise ValueError("missing same-CPU software source instances")
     if mode == "sched":
         coverage = {(row["config"], row["target"]) for row in source_rows if row["clock"] == 2 and row["scope"] == "cpu"}
@@ -412,7 +443,7 @@ def extract(text: str, mode: str) -> tuple[bytes, dict, dict[str, bytes]]:
         if (dropped == 0 and (position != ring["tail"] or wraps != ring["wraps"])) or position > ring["tail"]:
             raise ValueError("RAW frames do not match ring positions/wraps")
     binary = struct.pack("<8sQQQQII16x", b"PBRW0001", start, stop, frames, len(raw), zlib.crc32(raw), int(begin["dropped"])) + raw
-    return binary, {**({"context_format":"software-stack-v3", "stack_source_counts":stack_source_counts, "stack_target":stack_target} if stacks else {}), "version":1, "mode":mode, "start_ns":start, "stop_ns":stop,
+    return binary, {"context_format":context_rows[0]["format"], **({"stack_source_counts":stack_source_counts, "stack_target":stack_target} if stacks else {}), "version":1, "mode":mode, "start_ns":start, "stop_ns":stop,
         "frames":frames,"samples":samples,"transport_lost":lost,"export_dropped":int(begin["dropped"]),
         "known_archive_mapped_bytes":int(begin["mapped_bytes"]),"snapshots":snapshots,
         "config":config,"sources":sources,"measurements":measurements,"rings":rings,"program_bindings":program_bindings,

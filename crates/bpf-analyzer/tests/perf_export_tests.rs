@@ -11,7 +11,7 @@ use bpf_analyzer::{
 };
 use bpf_capture::{
     CaptureArch, CaptureReader, CaptureWriter, NativeContextFormat, SchemaRegistry,
-    SessionStatusCode,
+    SessionStatusCode, RecorderKind,
     diagnostics::{DiagnosticIdentity, RuntimeDiagnostics},
     mapping::{Artifact, MappingMetadata},
 };
@@ -131,27 +131,14 @@ fn fixture(change: impl FnOnce(&mut MappingMetadata), loss: u64) -> Fixture {
         old.metadata.config,
         SchemaRegistry::default_pulse_registry(),
     );
-    let mut diagnostics = RuntimeDiagnostics::default();
-    for (source, period) in [(123, 10), (124, 30)] {
-        for (key, value) in [
-            ("id", source.to_string()),
-            ("clock", "0".into()),
-            ("config", "0".into()),
-            ("scope", "\"cpu\"".into()),
-            ("target", "3".into()),
-            ("task_id", "0".into()),
-            ("period", period.to_string()),
-        ] {
-            diagnostics.identities.push(DiagnosticIdentity {
-                name: format!("event/{source}/{key}"),
-                value: Some(value),
-            });
-        }
-    }
-    writer.set_diagnostics(diagnostics).unwrap();
+    writer.set_diagnostics(RuntimeDiagnostics::default()).unwrap();
+    writer.configure_recorder(vec![
+        support::source(7, RecorderKind::SoftwareStackV3, 0x1002, 3, 3, 10, 123, 100, 500),
+        support::source(9, RecorderKind::SoftwareStackV3, 0x1002, 3, 3, 30, 124, 100, 500),
+    ], 4096).unwrap();
     writer.set_mappings(mappings).unwrap();
     writer.start(100).unwrap();
-    for (source, period, time) in [(123u64, 10u64, 200u64), (124, 30, 300)] {
+    for (logical, source, period, time) in [(7, 123u64, 10u64, 200u64), (9, 124, 30, 300)] {
         let mut raw = [0u8; 640];
         raw[..64].copy_from_slice(
             &PerfSampleContext {
@@ -180,7 +167,7 @@ fn fixture(change: impl FnOnce(&mut MappingMetadata), loss: u64) -> Fixture {
             put64(&mut raw, 128 + i * 8, ip);
         }
         writer
-            .ingest_perf_sample_as(3, &raw, NativeContextFormat::SoftwareStackV3)
+            .ingest_perf_sample_as(logical, 3, &raw, NativeContextFormat::SoftwareStackV3)
             .unwrap();
     }
     if loss > 0 {
@@ -211,9 +198,33 @@ fn exported_cpu_samples_preserve_source_and_period_after_query() {
         exported.manifest
     );
     assert!(exported.manifest.contains("\"total_period_ns\":30"));
+    let manifest: serde_json::Value = serde_json::from_str(&exported.manifest).unwrap();
+    assert_eq!(manifest["samples"][0]["source_id"], 9);
+    assert_eq!(manifest["sources"][0]["kernel_event_id"], 124);
     assert!(exported.manifest.contains("\"selected_weight\":1"));
     assert!(exported.manifest.contains("\"partial_chain_count\":1"));
     assert!(exported.manifest.contains(&sha256(&f.bytes)));
+}
+
+#[test]
+fn task_source_uses_stable_identity_after_numeric_tid_changes() {
+    let mut f = fixture(|_| {}, 0);
+    rewrite(&mut f, |data| {
+        for source in &mut data.recorder.as_mut().unwrap().sources {
+            source.scope = bpf_capture::CaptureScope::Task(777);
+            source.bound_task_id = 99;
+            source.config = bpf_capture::SourceConfig::TaskClock;
+            source.requested_config = bpf_capture::SourceConfig::TaskClock;
+        }
+    });
+    let analyzer = CaptureAnalyzer::from_bytes(&f.bytes).unwrap();
+    let selected = analyzer.query(&Query::default()).unwrap();
+    let exported = bpf_analyzer::perf::export(&analyzer, &selected, &f.root, &f.bytes).unwrap();
+    let manifest: serde_json::Value = serde_json::from_str(&exported.manifest).unwrap();
+    assert_eq!(manifest["sources"][0]["target"], 777);
+    assert_eq!(manifest["sources"][0]["task_id"], 99);
+    assert_eq!(manifest["sources"][0]["config"], 1);
+    assert_eq!(manifest["samples"][0]["tid"], 41);
 }
 
 #[test]
@@ -242,6 +253,11 @@ fn mapping_loss_and_pid_reuse_do_not_inherit_stale_mappings() {
     );
     let a = CaptureAnalyzer::from_bytes(&f.bytes).unwrap();
     let selected = a.query(&Query::default()).unwrap();
+    let report: serde_json::Value = serde_json::from_str(&a.render_json()).unwrap();
+    assert_eq!(report["mapping_evidence"]["present"], true);
+    assert_eq!(report["mapping_evidence"]["dropped"], 1);
+    assert_eq!(report["mapping_evidence"]["artifacts_count"], 1);
+    assert!(!a.is_complete());
     assert!(
         bpf_analyzer::perf::export(&a, &selected, &f.root, &f.bytes)
             .unwrap_err()
@@ -381,9 +397,11 @@ fn rewrite(f: &mut Fixture, edit: impl FnOnce(&mut bpf_capture::reader::CaptureD
     if let Some(m) = data.mappings {
         writer.set_mappings(m).unwrap();
     }
+    let recorder = data.recorder.unwrap();
+    writer.configure_recorder(recorder.sources, 4096).unwrap();
     writer.start(data.metadata.start_ns).unwrap();
-    for record in data.records {
-        writer.write_record(record).unwrap();
+    for (record, source) in data.records.into_iter().zip(recorder.record_sources) {
+        assert!(writer.write_record_from(source, record).unwrap());
     }
     f.bytes = writer.finish(data.metadata.stop_ns).unwrap();
 }
@@ -413,61 +431,34 @@ fn mixed_domain_chain_and_wrong_pgoff_are_rejected_without_guessing() {
     );
 }
 #[test]
-fn source_instances_are_validated_and_v2_is_only_exported_when_unambiguous() {
+fn duplicate_single_ip_sources_use_logical_bindings_without_diagnostics_inference() {
     let mut f = fixture(|_| {}, 0);
     rewrite(&mut f, |d| {
         for record in &mut d.records {
             record.event_id = bpf_capture::schema::PERF_EVENT_SOFTWARE_V2_ID;
             record.schema_version = 2;
             record.payload.truncate(32);
+            put64(&mut record.payload, 0, 10);
         }
-    });
-    let a = CaptureAnalyzer::from_bytes(&f.bytes).unwrap();
-    let selected = a.query(&Query::default()).unwrap();
-    assert!(
-        bpf_analyzer::perf::export(&a, &selected, &f.root, &f.bytes)
-            .unwrap_err()
-            .contains("ambiguous source"),
-        "distinct configured periods do not establish a v2 source identity"
-    );
-    rewrite(&mut f, |d| {
-        d.diagnostics
-            .as_mut()
-            .unwrap()
-            .identities
-            .retain(|i| !i.name.starts_with("event/124/"));
-        d.records.retain(|record| record.timestamp_ns == 200);
-    });
-    let a = CaptureAnalyzer::from_bytes(&f.bytes).unwrap();
-    let selected = a.query(&Query::default()).unwrap();
-    assert!(
-        bpf_analyzer::perf::export(&a, &selected, &f.root, &f.bytes)
-            .unwrap()
-            .manifest
-            .contains("\"ip_only_count\":1")
-    );
-    rewrite(&mut f, |d| {
-        let identities = &mut d.diagnostics.as_mut().unwrap().identities;
-        let mut duplicates: Vec<_> = identities
-            .iter()
-            .filter(|i| i.name.starts_with("event/123/"))
-            .cloned()
-            .collect();
-        for i in &mut duplicates {
-            i.name = i.name.replace("event/123/", "event/125/");
-            if i.name.ends_with("/id") {
-                i.value = Some("125".into());
-            }
+        for source in &mut d.recorder.as_mut().unwrap().sources {
+            source.kind = RecorderKind::SoftwareV2;
+            source.event_id = 0x1001;
+            source.schema_version = 2;
+            source.sample_period = 10;
+            source.requested_sample_period = 10;
         }
-        identities.extend(duplicates);
+        d.diagnostics.as_mut().unwrap().identities.clear();
     });
     let a = CaptureAnalyzer::from_bytes(&f.bytes).unwrap();
     let selected = a.query(&Query::default()).unwrap();
-    assert!(
-        bpf_analyzer::perf::export(&a, &selected, &f.root, &f.bytes)
-            .unwrap_err()
-            .contains("ambiguous source")
-    );
+    let exported = bpf_analyzer::perf::export(&a, &selected, &f.root, &f.bytes).unwrap();
+    let report: serde_json::Value = serde_json::from_str(&exported.manifest).unwrap();
+    assert_eq!(report["ip_only_count"], 2);
+    assert_eq!(report["total_period_ns"], 20);
+    assert_eq!(report["samples"][0]["source_id"], 7);
+    assert_eq!(report["samples"][1]["source_id"], 9);
+    assert_eq!(report["sources"][0]["kernel_event_id"], 123);
+    assert_eq!(report["sources"][1]["kernel_event_id"], 124);
 }
 #[test]
 #[ignore = "requires an installed native Linux perf consumer"]
@@ -523,21 +514,20 @@ fn native_perf_does_not_reuse_symbols_after_pid_and_address_reuse() {
 }
 
 #[test]
-fn conflicting_software_source_config_is_rejected() {
+fn diagnostic_identity_strings_cannot_override_typed_source_config() {
     let mut f = fixture(|_| {}, 0);
     rewrite(&mut f, |d| {
-        d.diagnostics
-            .as_mut()
-            .unwrap()
-            .identities
-            .iter_mut()
-            .find(|i| i.name == "event/123/config")
-            .unwrap()
-            .value = Some("1".into())
+        d.diagnostics.as_mut().unwrap().identities.push(DiagnosticIdentity {
+            name: "event/123/config".into(), value: Some("1".into()),
+        });
     });
     let a = CaptureAnalyzer::from_bytes(&f.bytes).unwrap();
     let selected = a.query(&Query::default()).unwrap();
-    assert!(bpf_analyzer::perf::export(&a, &selected, &f.root, &f.bytes).is_err());
+    let exported = bpf_analyzer::perf::export(&a, &selected, &f.root, &f.bytes).unwrap();
+    let report: serde_json::Value = serde_json::from_str(&exported.manifest).unwrap();
+    assert_eq!(report["sources"][0]["config"], 0);
+    assert_eq!(report["sources"][0]["effective_config"], "cpu-clock");
+    assert_eq!(report["sources"][0]["id"], 7);
 }
 
 #[test]
@@ -685,3 +675,5 @@ fn native_perf_keeps_kernel_symbols_for_every_sample_in_the_stream() {
     assert_eq!(script.matches(" parent+").count(), 2, "{script}");
     assert!(!script.contains("[unknown]"), "{script}");
 }
+
+mod support;

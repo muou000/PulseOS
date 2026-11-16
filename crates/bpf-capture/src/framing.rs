@@ -2,16 +2,12 @@
 
 pub const CAPTURE_HEADER_MAGIC: [u8; 8] = *b"PBCAP001";
 pub const CAPTURE_TRAILER_MAGIC: [u8; 8] = *b"PBCAPTRL";
-// Active capability profiles: diagnostics, stacks, mappings, and recorder.
-pub const FORMAT_VERSION_V2: u32 = 2;
-/// Requires native software-stack-v3 decoding; old readers reject this container.
-pub const FORMAT_VERSION_V3: u32 = 3;
-pub const REQUIRED_SOFTWARE_STACK_V3: u64 = 1;
-pub const FORMAT_VERSION_V4: u32 = 4;
-pub const REQUIRED_MAPPINGS_V4: u64 = 2;
-/// Requires explicit per-record source bindings, independent of native layout.
-pub const FORMAT_VERSION_V5: u32 = 5;
-pub const REQUIRED_RECORDER_V5: u64 = 4;
+/// The only supported container. Capabilities are independent required bits.
+pub const FORMAT_VERSION: u32 = 6;
+pub const REQUIRED_STACK: u64 = 1;
+pub const REQUIRED_MAPPINGS: u64 = 2;
+pub const REQUIRED_SOURCES: u64 = 4;
+pub const KNOWN_EXTENSIONS: u64 = REQUIRED_STACK | REQUIRED_MAPPINGS | REQUIRED_SOURCES;
 pub const SCHEMA_VERSION_V1: u32 = 1;
 
 pub const CAPTURE_HEADER_SIZE: usize = 80;
@@ -120,7 +116,7 @@ impl CaptureHeader {
     pub const fn new(arch: CaptureArch) -> Self {
         Self {
             magic: CAPTURE_HEADER_MAGIC,
-            format_version: FORMAT_VERSION_V2,
+            format_version: FORMAT_VERSION,
             schema_version: SCHEMA_VERSION_V1,
             header_size: CAPTURE_HEADER_SIZE as u32,
             target_arch: arch,
@@ -163,7 +159,7 @@ impl CaptureHeader {
         }
 
         let format_version = u32::from_le_bytes(bytes[8..12].try_into().unwrap());
-        if !matches!(format_version, FORMAT_VERSION_V2 | FORMAT_VERSION_V3 | FORMAT_VERSION_V4 | FORMAT_VERSION_V5) {
+        if format_version != FORMAT_VERSION {
             return Err(CaptureError::UnsupportedFormatVersion(format_version));
         }
 

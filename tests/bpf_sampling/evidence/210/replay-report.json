@@ -1,0 +1,32 @@
+{
+  "sha256_members": 89,
+  "checks": [
+    {
+      "bundle": "rv-task-stacks.tar.gz",
+      "bundle_sha256": "f8205f403d289780328a527e3e400b11a78144134f37cf02af55ccbe0f7cc71b",
+      "members": 32,
+      "all_sha256_match": true,
+      "outcome": "pass",
+      "records": 2706,
+      "independent_raw_capture_equal": true,
+      "analyzer_exit": 0
+    },
+    {
+      "bundle": "rv-cpu-stacks-mappings.tar.gz",
+      "bundle_sha256": "1b5a546403ab7d6ba1e07cdd734ac69680a3829ce933c732023639c749e099ff",
+      "members": 47,
+      "all_sha256_match": true,
+      "outcome": "revalidated-pass",
+      "records": 3267,
+      "independent_raw_capture_equal": true,
+      "analyzer_exit": 0
+    },
+    {
+      "bundle": "rv-budget-negative.tar.gz",
+      "bundle_sha256": "6eac44f1fb159b9578fa2a74353a60c2f70ed887df7f2919f113e442b937befd",
+      "members": 10,
+      "all_sha256_match": true,
+      "outcome": "expected-partial-budget-rejection"
+    }
+  ]
+}

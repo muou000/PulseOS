@@ -18,6 +18,7 @@ import zlib
 
 import archive
 import artifacts
+import archive
 import capture
 import mapping_evidence
 import stack_evidence
@@ -63,9 +64,11 @@ def decode_stack_raw(data: bytes) -> list[Record]:
             if length != 24:
                 raise ValueError('invalid RAW loss record')
             continue
-        if kind != 9 or length != 656 or struct.unpack_from('<I', frame, 8)[0] != 640:
+        if kind != 9:
             raise ValueError('expected native software-stack-v3 RAW sample')
-        raw = frame[12:652]
+        logical_id, source_kind, raw = archive.source_context(frame)
+        if source_kind != 3 or len(raw) != 640:
+            raise ValueError('expected native software-stack-v3 RAW sample')
         period, address, time, source_cpu, pid, tid, reserved, task, ip, mode, version = struct.unpack_from('<QQQIIIIQQII', raw)
         if (source_cpu != cpu or not start <= time <= stop or reserved or version != 2
                 or not period or not task or not ip or mode not in (1, 2)):

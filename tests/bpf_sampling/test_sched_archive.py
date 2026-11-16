@@ -3,7 +3,7 @@ import struct
 import unittest
 import zlib
 import archive
-from test_archive import fixture, replace_snapshot
+from test_archive import fixture, replace_snapshot, source_declaration, sample_frame
 
 SIZES = {1:72, 2:72, 3:72, 4:80, 5:56, 6:64}
 
@@ -21,7 +21,7 @@ def fixture_sched():
         struct.pack_into('<IIQIIIIQ',context,0,event,1,timestamp,cpu,40,41,0,task)
         for i,value in enumerate(words):struct.pack_into('<Q',context,40+8*i,value)
         size=(12+len(context)+7)&~7
-        records.append((event,cpu,struct.pack('<IHHI',9,0,size,len(context))+context+bytes(size-12-len(context))))
+        records.append((event,cpu,sample_frame((event-1)*8+cpu+1, 2, context)))
     rows=[]
     for point in ['before','after']:
         active=point=='after'
@@ -45,10 +45,10 @@ def fixture_sched():
         rows.append(f'ARCHIVE STATS_END point={point}')
     rows.append('ARCHIVE CONFIG program_id=11 output_map_id=2 scratch_map_id=3 buffer_pages=16 mode=sched')
     for event,size in SIZES.items():
-        rows.append(f'ARCHIVE PROGRAM tracepoint={event} program_id={10+event} context_bytes={size}')
         for cpu in range(8):
             fd=20+(event-1)*8+cpu
-            rows.append(f'ARCHIVE SOURCE fd={fd} link_id={fd+1000} enable_before=110 enable_after=120 disable_before=290 disable_after=295')
+            rows.append(source_declaration(fd=fd, logical_id=(event-1)*8+cpu+1, event_id=fd+100, kind=2, schema_event_id=event, target=cpu, program_id=10+event, link_id=fd+1000, disable_before=290, disable_after=295))
+    rows.append('ARCHIVE CONTEXT format=tracepoint')
     rows.extend(line for line in fixture().splitlines() if line.startswith('ARCHIVE MEASURE '))
     raw=b''.join(struct.pack('<QIIII',i,cpu,len(frame),zlib.crc32(frame),0)+frame for i,(_,cpu,frame) in enumerate(records))
     rows.append(f'ARCHIVE BEGIN version=1 mode=sched start_ns=100 stop_ns=300 frames=5 bytes={len(raw)} crc={zlib.crc32(raw)} dropped=0 mapped_bytes=4194304')
@@ -66,7 +66,7 @@ class MixedSchedulerArchiveTests(unittest.TestCase):
         self.assertEqual(raw[:8],b'PBRW0001')
 
     def test_missing_program_or_one_cpu_source_fails(self):
-        for prefix in ['ARCHIVE PROGRAM tracepoint=4 ', 'ARCHIVE SOURCE fd=51 ']:
+        for prefix in ['ARCHIVE SOURCE fd=44 ', 'ARCHIVE SOURCE fd=51 ']:
             bad='\n'.join(line for line in fixture_sched().splitlines() if not line.startswith(prefix))
             with self.assertRaises(ValueError):archive.extract(bad,'sched')
 

@@ -1,0 +1,72 @@
+{
+  "archive": "loongarch64-mixed.tar.gz",
+  "sha256": "45d1b80a650db90db5559961cf9a2072e0d3a25c03ef56f7bc2d5aaaada335dc",
+  "bytes": 2690701,
+  "members": [
+    {
+      "path": "bpf-record.elf",
+      "sha256": "1efbc921d031d43ba5b2af5e32a384b14348dfd23d47681fc3cb2225159535c8",
+      "bytes": 302680
+    },
+    {
+      "path": "cases.sh",
+      "sha256": "27526d796bf4e4bff44671ea23e68a21dd3690d0153108be6e5e99757908b08e",
+      "bytes": 537
+    },
+    {
+      "path": "final-replay.json",
+      "sha256": "ff5ab71a8883ccf9f94f60925e4ba20d6c74bd4ac910d8ce4123331180df5303",
+      "bytes": 359
+    },
+    {
+      "path": "fixture-build.json",
+      "sha256": "be771e439d4d6cb0571fe816c97663cfca0e9cb58f99f77784a779aeec2cc55b",
+      "bytes": 1141
+    },
+    {
+      "path": "fixture.rs",
+      "sha256": "870875aa0470afdc2174c55026b56c60cc6e238e26cc5eec84803080a3924937",
+      "bytes": 14983
+    },
+    {
+      "path": "guest.log",
+      "sha256": "9d00bac1cc770164e2164c2f62753e3c211bebc3b5d20ec9e5455c757ce89c37",
+      "bytes": 1246846
+    },
+    {
+      "path": "inputs.json",
+      "sha256": "89fdaa7ae308b4f8e9b3c56e0aeaeb0f2cab06bab8d84c41c17f3a5a02a6416e",
+      "bytes": 1547
+    },
+    {
+      "path": "kernel",
+      "sha256": "4469e47d572b98af547206c2263876f54f1eae832c160c18baacaff5d2b74001",
+      "bytes": 6072992
+    },
+    {
+      "path": "mixed-report.json",
+      "sha256": "aac5ec2d0deb918a236b93590bf9e065373765f09ca6ea10b3abf245082cde0d",
+      "bytes": 218436
+    },
+    {
+      "path": "mixed.pbcapture",
+      "sha256": "7466eca1cc7f453560b489febcb654e1cbad3dd047a8cb536d9eda6d46cd6cf2",
+      "bytes": 558147
+    },
+    {
+      "path": "record-fixture.elf",
+      "sha256": "57c0308bf22ebca20fd2958e8eb48bb72feddb90b0d6d19df262f3a9a81cd195",
+      "bytes": 801648
+    },
+    {
+      "path": "recorder-build.json",
+      "sha256": "0d92846386c419ade41ad5f28f950decef55559a3a3110dfad3203f823beda0f",
+      "bytes": 958
+    },
+    {
+      "path": "result.json",
+      "sha256": "4d77c021c070f4934abd4dd68ddcdffad9041e3bba5fe53d791ab61ff45f187a",
+      "bytes": 12526
+    }
+  ]
+}

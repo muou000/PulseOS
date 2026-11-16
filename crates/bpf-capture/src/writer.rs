@@ -4,8 +4,7 @@ use alloc::vec::Vec;
 use crate::diagnostics::RuntimeDiagnostics;
 use crate::framing::{
     compute_checksum_ieee, CaptureError, CaptureHeader, CaptureTrailer,
-    FORMAT_VERSION_V2, FORMAT_VERSION_V3, FORMAT_VERSION_V4, FORMAT_VERSION_V5,
-    REQUIRED_SOFTWARE_STACK_V3, REQUIRED_MAPPINGS_V4, REQUIRED_RECORDER_V5, SessionStatusCode,
+    FORMAT_VERSION, REQUIRED_STACK, REQUIRED_MAPPINGS, REQUIRED_SOURCES, SessionStatusCode,
     CAPTURE_HEADER_SIZE, CAPTURE_TRAILER_SIZE,
 };
 use crate::record::NormalizedRecord;
@@ -62,7 +61,7 @@ impl CaptureWriter {
         }
     }
 
-    /// Attach runtime evidence and select capture format v2. Values may be
+    /// Attach runtime evidence. Values may be
     /// updated until finish; diagnostic loss/unknown values can only reduce status.
     pub fn set_diagnostics(&mut self, diagnostics: RuntimeDiagnostics) -> Result<(), CaptureError> {
         if self.session.is_finished() { return Err(CaptureError::IoError("session already finished")); }
@@ -74,7 +73,6 @@ impl CaptureWriter {
     /// Attach original temporal mapping evidence and verified artifact identities.
     pub fn set_mappings(&mut self, mappings: crate::mapping::MappingMetadata) -> Result<(), CaptureError> {
         if self.session.is_finished() { return Err(CaptureError::IoError("session already finished")); }
-        if self.recorder.is_some() { return Err(CaptureError::InvalidRecord("recorder mappings are unsupported")); }
         mappings.validate()?;
         self.mappings = Some(mappings);
         Ok(())
@@ -90,11 +88,26 @@ impl CaptureWriter {
         self.session.is_running()
     }
 
-    pub fn write_record(&mut self, record: NormalizedRecord) -> Result<(), CaptureError> {
-        if self.recorder.is_some() {
-            return Err(CaptureError::InvalidRecord("recorder requires a source-bound envelope"));
+    /// Append a normalized record with an explicit logical source ID. A false
+    /// result records consumer discard when the retention budget is exhausted.
+    pub fn write_record_from(&mut self, source_id: u32, record: NormalizedRecord) -> Result<bool, CaptureError> {
+        if !self.session.is_running() { return Err(CaptureError::IoError("session is not running")); }
+        let result = (|| {
+            self.registry.validate_record(&record)?;
+            let sources = self.recorder.as_ref().ok_or(CaptureError::InvalidRecord("recorder is not configured"))?;
+            sources.source(source_id)?.validate_record(&record, false)?;
+            Ok(())
+        })();
+        if let Err(error) = result { self.session.record_consumer_corruption(); return Err(error); }
+        let retained = self.records_buf.len() + self.recorder.as_ref().unwrap().record_sources.len() * 4;
+        let required = crate::record::RECORD_HEADER_SIZE + record.payload.len() + 4;
+        if required > self.recorder_record_budget.saturating_sub(retained) {
+            self.session.record_discarded_record();
+            return Ok(false);
         }
-        self.write_record_inner(record)
+        self.write_record_inner(record)?;
+        self.recorder.as_mut().unwrap().record_sources.push(source_id);
+        Ok(true)
     }
 
     fn write_record_inner(&mut self, record: NormalizedRecord) -> Result<(), CaptureError> {
@@ -113,19 +126,20 @@ impl CaptureWriter {
         Ok(())
     }
 
-    /// Select source-bound capture v5 before accepting any records. Control
+    /// Declare all sources before accepting any records. Control
     /// windows may initially be zero; fill them with update_recorder_source
     /// before finish. The budget bounds retained normalized bytes plus source
     /// bindings; exhausted capacity is explicit consumer loss, never silent.
     pub fn configure_recorder(&mut self, sources: Vec<crate::recorder::RecorderSource>, record_budget: usize) -> Result<(), CaptureError> {
         if self.session.is_finished() || self.records_count != 0 || self.recorder.is_some()
-            || self.mappings.is_some() || record_budget == 0
+            || record_budget == 0
             || record_budget > crate::recorder::MAX_RECORDER_RECORD_BYTES
         {
             return Err(CaptureError::InvalidRecord("invalid recorder configuration or budget"));
         }
-        let metadata = crate::recorder::RecorderMetadata { source_schema_version: 2, sources, record_sources: Vec::new() };
+        let metadata = crate::recorder::RecorderMetadata { source_schema_version: crate::recorder::SOURCE_SCHEMA_VERSION, sources, record_sources: Vec::new() };
         metadata.validate_sources()?;
+        metadata.validate_registry(&self.registry)?;
         self.recorder = Some(metadata);
         self.recorder_record_budget = record_budget;
         Ok(())
@@ -158,15 +172,7 @@ impl CaptureWriter {
             Ok(value) => value,
             Err(error) => { self.session.record_consumer_corruption(); return Err(error); }
         };
-        let retained = self.records_buf.len() + self.recorder.as_ref().unwrap().record_sources.len() * 4;
-        let required = crate::record::RECORD_HEADER_SIZE + record.payload.len() + 4;
-        if required > self.recorder_record_budget - retained {
-            self.session.record_discarded_record();
-            return Ok(false);
-        }
-        self.write_record_inner(record)?;
-        self.recorder.as_mut().unwrap().record_sources.push(source);
-        Ok(true)
+        self.write_record_from(source, record)
     }
 
     /// Consume an unchanged aligned PERF_RECORD_SAMPLE/LOST frame from a ring.
@@ -205,7 +211,7 @@ impl CaptureWriter {
     }
 
     /// Decode only the format explicitly selected by the attached program.
-    pub fn ingest_perf_sample_as(&mut self, cpu: u32, raw_sample: &[u8], format: NativeContextFormat) -> Result<(), CaptureError> {
+    pub fn ingest_perf_sample_as(&mut self, source_id: u32, cpu: u32, raw_sample: &[u8], format: NativeContextFormat) -> Result<(), CaptureError> {
         if !self.session.is_running() {
             return Err(CaptureError::IoError("session is not running"));
         }
@@ -227,10 +233,12 @@ impl CaptureWriter {
             if record.cpu_id != cpu {
                 return Err(CaptureError::InvalidRecord("source CPU differs from transport CPU"));
             }
-            self.write_record(record)
+            Ok(record)
         })();
-        if result.is_err() { self.session.record_consumer_corruption(); }
-        result
+        match result {
+            Ok(record) => self.write_record_from(source_id, record).map(|_| ()),
+            Err(error) => { self.session.record_consumer_corruption(); Err(error) }
+        }
     }
 
     /// Ingest a PERF_RECORD_LOST notification with lost event count.
@@ -239,7 +247,7 @@ impl CaptureWriter {
     }
 
     /// Ingest one complete raw frame using its declared native context format.
-    pub fn ingest_raw_perf_frame_as(&mut self, cpu: u32, raw_frame: &[u8], format: NativeContextFormat) -> Result<(), CaptureError> {
+    pub fn ingest_raw_perf_frame_as(&mut self, source_id: u32, cpu: u32, raw_frame: &[u8], format: NativeContextFormat) -> Result<(), CaptureError> {
         if !self.session.is_running() {
             return Err(CaptureError::IoError("session is not running"));
         }
@@ -271,7 +279,7 @@ impl CaptureWriter {
                 self.ingest_perf_lost(cpu, lost);
                 Ok(())
             }
-            Ok(Some(raw)) => self.ingest_perf_sample_as(cpu, raw, format),
+            Ok(Some(raw)) => self.ingest_perf_sample_as(source_id, cpu, raw, format),
         }
     }
 
@@ -283,12 +291,12 @@ impl CaptureWriter {
     /// Ingest a normalized raw sample payload originating from Ring Buffer (`bpf_ringbuf_output`).
     ///
     /// The payload has the same normalized format (`pulse_bpf_schema`) as Perf Buffer samples.
-    pub fn ingest_ringbuf_sample(&mut self, cpu: u32, raw_sample: &[u8], format: NativeContextFormat) -> Result<(), CaptureError> {
-        self.ingest_perf_sample_as(cpu, raw_sample, format)
+    pub fn ingest_ringbuf_sample(&mut self, source_id: u32, cpu: u32, raw_sample: &[u8], format: NativeContextFormat) -> Result<(), CaptureError> {
+        self.ingest_perf_sample_as(source_id, cpu, raw_sample, format)
     }
 
     /// Ingest a raw Linux Ring Buffer record frame (8-byte header + payload).
-    pub fn ingest_raw_ringbuf_frame(&mut self, cpu: u32, raw_frame: &[u8], format: NativeContextFormat) -> Result<(), CaptureError> {
+    pub fn ingest_raw_ringbuf_frame(&mut self, source_id: u32, cpu: u32, raw_frame: &[u8], format: NativeContextFormat) -> Result<(), CaptureError> {
         if raw_frame.len() < 8 {
             self.session.record_consumer_corruption();
             return Err(CaptureError::TruncatedRecord);
@@ -313,7 +321,7 @@ impl CaptureWriter {
         }
 
         let payload = &raw_frame[8..8 + data_len];
-        self.ingest_ringbuf_sample(cpu, payload, format)
+        self.ingest_ringbuf_sample(source_id, cpu, payload, format)
     }
 
     /// Preserve an interrupted recorder's observed data when a final clock or
@@ -334,93 +342,72 @@ impl CaptureWriter {
             status: SessionStatusCode::IncompleteTruncated,
             counters: self.session.counters().clone(),
         };
-        let diagnostics = self.diagnostics.as_ref().cloned().unwrap_or_default().to_bytes()?;
-        let mut metadata_buf = self.registry.to_bytes();
-        metadata_buf.extend_from_slice(&metadata.to_bytes());
-        metadata_buf.extend_from_slice(&(diagnostics.len() as u32).to_le_bytes());
-        metadata_buf.extend_from_slice(&diagnostics);
-        metadata_buf.extend_from_slice(&recorder.to_bytes());
-        metadata_buf.extend_from_slice(&REQUIRED_RECORDER_V5.to_le_bytes());
-        Ok(self.frame_capture(&metadata_buf, FORMAT_VERSION_V5, None))
+        let metadata_buf = self.encode_metadata(&metadata)?;
+        Ok(self.frame_capture(&metadata_buf, None))
     }
 
-    /// Finalize capture, compute checksums, and emit the complete binary capture file.
+    /// Finalize only after sources, windows and records agree. Missing evidence
+    /// remains explicit unknown; source binding alone never certifies coverage.
     pub fn finish(&mut self, stop_ns: u64) -> Result<Vec<u8>, CaptureError> {
-        // Every supported capture carries diagnostics. Missing evidence stays
-        // explicitly unknown rather than producing a complete-looking v1 file.
-        if self.diagnostics.is_none() {
-            self.diagnostics = Some(RuntimeDiagnostics::default());
-        }
-        let recorder_bytes = if let Some(recorder) = &self.recorder {
-            recorder.validate_sources()?;
-            if recorder.record_sources.len() as u64 != self.records_count {
-                return Err(CaptureError::InvalidRecord("recorder source binding count differs from record count"));
-            }
-            // Validate final windows before consuming the session. Decode one
-            // record at a time so validation does not duplicate the retained file.
-            let start = self.start_ns;
-            for source in &recorder.sources { source.validate_window(start, stop_ns)?; }
-            let mut offset = 0;
-            for id in &recorder.record_sources {
-                let (record, size) = NormalizedRecord::from_bytes(&self.records_buf[offset..])?;
-                recorder.source(*id)?.validate_record(&record, true)?;
-                offset += size;
-            }
-            Some(recorder.to_bytes())
-        } else { None };
-        // Serialize before stopping, so invalid evidence does not consume the session.
-        let diagnostics_bytes = self.diagnostics.as_ref().map(RuntimeDiagnostics::to_bytes).transpose()?;
-        let mappings_bytes = self.mappings.as_ref().map(crate::mapping::MappingMetadata::to_bytes).transpose()?;
-        let mut metadata = self.session.stop(stop_ns)?;
-        if self.diagnostics.is_some() && (metadata.start_ns == 0 || stop_ns <= metadata.start_ns) {
+        if self.start_ns == 0 || stop_ns <= self.start_ns {
             return Err(CaptureError::InvalidRecord("invalid runtime session window"));
         }
-        if let Some(diagnostics) = &self.diagnostics {
-            let status = diagnostics.status();
-            if self.records_count == 0 || status == SessionStatusCode::IncompleteError {
-                metadata.status = SessionStatusCode::IncompleteError;
-            } else if metadata.status.is_complete() && !status.is_complete() {
-                metadata.status = status;
-            }
+        let recorder = self.recorder.as_ref().ok_or(CaptureError::InvalidRecord("capture requires source declarations"))?;
+        recorder.validate_sources()?;
+        if recorder.record_sources.len() as u64 != self.records_count {
+            return Err(CaptureError::InvalidRecord("recorder source binding count differs from record count"));
         }
-        // v5 certifies record/source binding, not exhaustive producer and
-        // pending-fault coverage. Generic diagnostic rows cannot serve as a
-        // completeness certificate by merely containing unrelated known zeros.
-        if self.recorder.is_some() && metadata.status.is_complete() {
+        for source in &recorder.sources { source.validate_window(self.start_ns, stop_ns)?; }
+        let mut offset = 0;
+        for id in &recorder.record_sources {
+            let (record, size) = NormalizedRecord::from_bytes(&self.records_buf[offset..])?;
+            recorder.source(*id)?.validate_record(&record, true)?;
+            offset += size;
+        }
+        // Validate evidence before changing session state.
+        if let Some(diagnostics) = &self.diagnostics { diagnostics.validate()?; }
+        if let Some(mappings) = &self.mappings { mappings.validate()?; }
+        let mut metadata = self.session.stop(stop_ns)?;
+        let unknown_diagnostics = RuntimeDiagnostics::default();
+        let diagnostics = self.diagnostics.as_ref().unwrap_or(&unknown_diagnostics);
+        let status = diagnostics.status();
+        if self.records_count == 0 || status == SessionStatusCode::IncompleteError {
             metadata.status = SessionStatusCode::IncompleteError;
+        } else if metadata.status.is_complete() && !status.is_complete() {
+            metadata.status = status;
         }
-
         if let Some(mappings) = &self.mappings {
-            let journal = crate::mapping::MappingJournal::parse(&mappings.journal)?;
-            if journal.dropped > 0 && metadata.status.is_complete() {
+            if crate::mapping::MappingJournal::parse(&mappings.journal)?.dropped > 0 && metadata.status.is_complete() {
                 metadata.status = SessionStatusCode::IncompleteLoss;
             }
         }
-        let mut metadata_buf = Vec::new();
-        metadata_buf.extend_from_slice(&self.registry.to_bytes());
-        metadata_buf.extend_from_slice(&metadata.to_bytes());
-        if let Some(bytes) = diagnostics_bytes {
-            // v4 delimits diagnostics before the independently bounded journal.
-            if self.mappings.is_some() || self.recorder.is_some() { metadata_buf.extend_from_slice(&(bytes.len() as u32).to_le_bytes()); }
-            metadata_buf.extend_from_slice(&bytes);
-        }
-        if let Some(bytes) = mappings_bytes { metadata_buf.extend_from_slice(&bytes); }
-        if let Some(bytes) = recorder_bytes { metadata_buf.extend_from_slice(&bytes); }
-        if self.requires_stack_v3 || self.mappings.is_some() || self.recorder.is_some() {
-            let required = if self.requires_stack_v3 { REQUIRED_SOFTWARE_STACK_V3 } else { 0 }
-                | if self.mappings.is_some() { REQUIRED_MAPPINGS_V4 } else { 0 }
-                | if self.recorder.is_some() { REQUIRED_RECORDER_V5 } else { 0 };
-            metadata_buf.extend_from_slice(&required.to_le_bytes());
-        }
-
-        let mut version = FORMAT_VERSION_V2;
-        if self.requires_stack_v3 { version = FORMAT_VERSION_V3; }
-        if self.mappings.is_some() { version = FORMAT_VERSION_V4; }
-        if self.recorder.is_some() { version = FORMAT_VERSION_V5; }
-        Ok(self.frame_capture(&metadata_buf, version, Some(metadata.status)))
+        // This contract preserves evidence, but has no exhaustive producer,
+        // journal or unwind coverage certificate. Never upgrade unknown coverage.
+        if metadata.status.is_complete() { metadata.status = SessionStatusCode::IncompleteError; }
+        let metadata_buf = self.encode_metadata(&metadata)?;
+        Ok(self.frame_capture(&metadata_buf, Some(metadata.status)))
     }
 
-    fn frame_capture(&self, metadata_buf: &[u8], version: u32, status: Option<SessionStatusCode>) -> Vec<u8> {
+    fn encode_metadata(&self, metadata: &SessionMetadata) -> Result<Vec<u8>, CaptureError> {
+        let recorder = self.recorder.as_ref().ok_or(CaptureError::InvalidRecord("capture requires source declarations"))?;
+        let unknown_diagnostics = RuntimeDiagnostics::default();
+        let diagnostics = self.diagnostics.as_ref().unwrap_or(&unknown_diagnostics).to_bytes()?;
+        let mappings = self.mappings.as_ref().map(crate::mapping::MappingMetadata::to_bytes).transpose()?.unwrap_or_default();
+        let sources = recorder.to_bytes();
+        let mut bytes = self.registry.to_bytes();
+        bytes.extend_from_slice(&metadata.to_bytes());
+        for section in [&diagnostics, &mappings, &sources] {
+            bytes.extend_from_slice(&(section.len() as u32).to_le_bytes());
+            bytes.extend_from_slice(section);
+        }
+        let required = REQUIRED_SOURCES
+            | if self.requires_stack_v3 { REQUIRED_STACK } else { 0 }
+            | if self.mappings.is_some() { REQUIRED_MAPPINGS } else { 0 };
+        bytes.extend_from_slice(&required.to_le_bytes());
+        Ok(bytes)
+    }
+
+    fn frame_capture(&self, metadata_buf: &[u8], status: Option<SessionStatusCode>) -> Vec<u8> {
         let metadata_offset = CAPTURE_HEADER_SIZE as u64;
         let metadata_size = metadata_buf.len() as u64;
         let records_offset = metadata_offset + metadata_size;
@@ -429,7 +416,7 @@ impl CaptureWriter {
         let trailer_size = CAPTURE_TRAILER_SIZE as u64;
 
         let mut header = CaptureHeader::new(self.config.target_arch);
-        header.format_version = version;
+        header.format_version = FORMAT_VERSION;
         header.metadata_offset = metadata_offset;
         header.metadata_size = metadata_size;
         header.records_offset = records_offset;

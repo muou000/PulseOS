@@ -17,6 +17,7 @@ python3 tests/bpf_record/run.py guest --arch loongarch64 --suite benchmark
 ```
 
 `--suite smoke` records CPU, the complete scheduler group, and faults.
+`mixed` isolates the repeated CPU/task/scheduler/fault session in one boot.
 `lifecycle` covers an existing numeric TID, duplicate same-type sources mixed
 with task/scheduler/fault sources, source FD dup/close, SIGINT, SIGTERM, target
 exit, and a pre-existing BusyBox shell process. `negative` checks invalid CLI

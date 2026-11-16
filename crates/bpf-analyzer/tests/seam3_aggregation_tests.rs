@@ -3,7 +3,7 @@ use bpf_capture::framing::CaptureArch;
 use bpf_capture::record::NormalizedRecord;
 use bpf_capture::schema::SchemaRegistry;
 use bpf_capture::session::{CaptureScope, SessionConfig};
-use bpf_capture::writer::CaptureWriter;
+use support::SemanticFixture as CaptureWriter;
 use pulse_bpf_schema::{
     ContextCommon, SchedSwitchContext, TaskBlockContext, TaskMetadataContext, TaskWakeContext,
     TracepointId,
@@ -35,7 +35,7 @@ fn create_test_config() -> SessionConfig {
 fn test_sched_switch_on_cpu_duration_tracking() {
     let registry = SchemaRegistry::default_pulse_registry();
     let mut writer = CaptureWriter::new(create_test_config(), registry);
-    writer.start(1_000_000).unwrap();
+    writer.start(1).unwrap();
 
     // Task 1 metadata: "task_one"
     let mut comm1 = [0u8; 16];
@@ -132,7 +132,7 @@ fn test_sched_switch_on_cpu_duration_tracking() {
 fn test_task_block_and_wake_off_cpu_pairing() {
     let registry = SchemaRegistry::default_pulse_registry();
     let mut writer = CaptureWriter::new(create_test_config(), registry);
-    writer.start(1_000_000).unwrap();
+    writer.start(1).unwrap();
 
     // Task 50 blocks at t=100_000 with block_sequence = 1, wait_reason = 3
     let block = TaskBlockContext {
@@ -213,7 +213,7 @@ fn test_task_block_and_wake_off_cpu_pairing() {
 fn test_unpaired_events_handled_gracefully() {
     let registry = SchemaRegistry::default_pulse_registry();
     let mut writer = CaptureWriter::new(create_test_config(), registry);
-    writer.start(1_000_000).unwrap();
+    writer.start(1).unwrap();
 
     // 1. Orphan wake without prior block (e.g. task blocked before sampling began)
     let wake = TaskWakeContext {
@@ -262,3 +262,5 @@ fn test_unpaired_events_handled_gracefully() {
     // No completed paired off-cpu intervals for these orphaned events
     assert_eq!(stats.off_cpu_intervals.len(), 0);
 }
+
+mod support;
