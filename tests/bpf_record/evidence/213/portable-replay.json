@@ -1,0 +1,160 @@
+{
+  "passed": true,
+  "scope": "final portable extraction and independent current consumer replay; not another guest run",
+  "indexed_members": 4220,
+  "guest_runs": 36,
+  "native_queries": 21,
+  "svg_outputs": 42,
+  "strict_negatives": 1,
+  "queries": [
+    {
+      "arch": "riscv64",
+      "query": "cpu-user",
+      "samples": 96,
+      "capture_sha256": "485b21105e06c47c4ffb19de1b7c9f9443421b9214ea9d508145bce11b454d26",
+      "perf_data_both_weights_identical": true
+    },
+    {
+      "arch": "riscv64",
+      "query": "cpu-kernel",
+      "samples": 681,
+      "capture_sha256": "485b21105e06c47c4ffb19de1b7c9f9443421b9214ea9d508145bce11b454d26",
+      "perf_data_both_weights_identical": true
+    },
+    {
+      "arch": "riscv64",
+      "query": "task-user",
+      "samples": 98,
+      "capture_sha256": "a094c513a446ea9f9ad21d30a1309d9904b29447f10d42f625287a43f63dfd77",
+      "perf_data_both_weights_identical": true
+    },
+    {
+      "arch": "riscv64",
+      "query": "mixed-user",
+      "samples": 26,
+      "capture_sha256": "884caf970e547c5bcbae251040d93d3b55bad982a25f2f89621d1463cff2a77b",
+      "perf_data_both_weights_identical": true
+    },
+    {
+      "arch": "riscv64",
+      "query": "mixed-kernel",
+      "samples": 1608,
+      "capture_sha256": "884caf970e547c5bcbae251040d93d3b55bad982a25f2f89621d1463cff2a77b",
+      "perf_data_both_weights_identical": true
+    },
+    {
+      "arch": "riscv64",
+      "query": "installed-program-user",
+      "samples": 98,
+      "capture_sha256": "4744f6f4587c9b228abcb681a72915792abd10a6bab82ef9ce68705ff5869a60",
+      "perf_data_both_weights_identical": true
+    },
+    {
+      "arch": "riscv64",
+      "query": "mapping-user",
+      "samples": 160,
+      "capture_sha256": "4f227249b88d372d8da305d693b2e0f44603998b0ee05aa078953651849443f3",
+      "perf_data_both_weights_identical": true
+    },
+    {
+      "arch": "riscv64",
+      "query": "installed-program-kernel",
+      "samples": 101,
+      "capture_sha256": "b4550b9f98a9e6a5d9155e4cf660528ab6fbfb41f8be7b2c0ec5c0326ab9363d",
+      "perf_data_both_weights_identical": true
+    },
+    {
+      "arch": "riscv64",
+      "query": "nonleader-exec-user",
+      "samples": 128,
+      "capture_sha256": "eae1d58893f3e8eb4cac0ea2ae58b02e50214d43149165c89a82766d70e412c8",
+      "perf_data_both_weights_identical": true
+    },
+    {
+      "arch": "riscv64",
+      "query": "nonleader-exec-tid-53",
+      "samples": 95,
+      "capture_sha256": "eae1d58893f3e8eb4cac0ea2ae58b02e50214d43149165c89a82766d70e412c8",
+      "perf_data_both_weights_identical": true
+    },
+    {
+      "arch": "riscv64",
+      "query": "nonleader-exec-tid-55",
+      "samples": 33,
+      "capture_sha256": "eae1d58893f3e8eb4cac0ea2ae58b02e50214d43149165c89a82766d70e412c8",
+      "perf_data_both_weights_identical": true
+    },
+    {
+      "arch": "loongarch64",
+      "query": "cpu-user",
+      "samples": 101,
+      "capture_sha256": "5e16c62395af87521272c56d8407150e0a457a458b62cc4819eaa4cfe2987474",
+      "perf_data_both_weights_identical": true
+    },
+    {
+      "arch": "loongarch64",
+      "query": "cpu-kernel",
+      "samples": 686,
+      "capture_sha256": "5e16c62395af87521272c56d8407150e0a457a458b62cc4819eaa4cfe2987474",
+      "perf_data_both_weights_identical": true
+    },
+    {
+      "arch": "loongarch64",
+      "query": "task-user",
+      "samples": 94,
+      "capture_sha256": "5032425233cd40769e0d27dd7ba3f88353f360cd88693d3670bd2d5a9265b3cc",
+      "perf_data_both_weights_identical": true
+    },
+    {
+      "arch": "loongarch64",
+      "query": "mixed-user",
+      "samples": 54,
+      "capture_sha256": "fbe2d17b33096348e5c9166fc5ab82e9e584d945d711f4196845997b4b69cf7b",
+      "perf_data_both_weights_identical": true
+    },
+    {
+      "arch": "loongarch64",
+      "query": "mixed-kernel",
+      "samples": 1588,
+      "capture_sha256": "fbe2d17b33096348e5c9166fc5ab82e9e584d945d711f4196845997b4b69cf7b",
+      "perf_data_both_weights_identical": true
+    },
+    {
+      "arch": "loongarch64",
+      "query": "mapping-user",
+      "samples": 159,
+      "capture_sha256": "070a57a74de29bed98da9dc62496241ee38dd3caa417a17251a0b15b6ebf4da9",
+      "perf_data_both_weights_identical": true
+    },
+    {
+      "arch": "loongarch64",
+      "query": "installed-program-kernel",
+      "samples": 119,
+      "capture_sha256": "62ff0bfe0f20a33b4c0207af8bd38502098401fdb2f7f8ae0c55f6c217232462",
+      "perf_data_both_weights_identical": true
+    },
+    {
+      "arch": "loongarch64",
+      "query": "nonleader-exec-user",
+      "samples": 128,
+      "capture_sha256": "93f02cae44e7e87e7e55e618d958abffb8e605a8df4953c61e7d2624f2684562",
+      "perf_data_both_weights_identical": true
+    },
+    {
+      "arch": "loongarch64",
+      "query": "nonleader-exec-tid-65",
+      "samples": 98,
+      "capture_sha256": "93f02cae44e7e87e7e55e618d958abffb8e605a8df4953c61e7d2624f2684562",
+      "perf_data_both_weights_identical": true
+    },
+    {
+      "arch": "loongarch64",
+      "query": "nonleader-exec-tid-67",
+      "samples": 30,
+      "capture_sha256": "93f02cae44e7e87e7e55e618d958abffb8e605a8df4953c61e7d2624f2684562",
+      "perf_data_both_weights_identical": true
+    }
+  ],
+  "original_qualification_sha256": "afacf160a286f7a827ccc8b97ff9d6db0a4b0190e94553fea7cf95f7da07a610",
+  "portable_qualification_sha256": "dccf4d9e920ff897babccdc58e955a7df6a89271a96f0da1893223da09e46750"
+}
