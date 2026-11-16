@@ -20,6 +20,8 @@ period and frequency mode, requested/effective buffer pages, effective units,
 typed fallback reason, scope, stable task identity, kernel event/program/link
 IDs and per-source enable/disable windows. Numeric TIDs are target selectors;
 task records must match the stable task identity, including across exec.
+Effective CPU-clock sources require per-CPU scope; effective task-clock sources
+require task scope, matching the current kernel's supported combinations.
 
 Stack context `source_id` means **kernel event ID**. It must equal the declared
 `kernel_event_id`, while the separate record binding selects the logical ID.

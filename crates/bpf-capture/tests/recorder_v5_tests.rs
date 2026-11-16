@@ -1,7 +1,7 @@
 mod support;
 use bpf_capture::{
     CaptureArch, CaptureReader, CaptureScope, CaptureWriter, RecorderKind, RecorderSource,
-    SchemaRegistry, SessionConfig, SessionStatusCode,
+    SchemaRegistry, SessionConfig, SessionStatusCode, SourceConfig,
 };
 use pulse_bpf_schema::{PerfEventContext, PerfSampleContext};
 
@@ -131,6 +131,8 @@ fn task_identity_period_and_transport_cpu_must_match_the_declared_source() {
     ] {
         let mut declaration = source(1, RecorderKind::SoftwareV2);
         declaration.scope = scope;
+        declaration.config = if matches!(scope, CaptureScope::Task(_)) { SourceConfig::TaskClock } else { SourceConfig::CpuClock };
+        declaration.requested_config = declaration.config;
         declaration.bound_task_id = if matches!(scope, CaptureScope::Task(_)) { 100 } else { 0 };
         declaration.sample_period = period;
         declaration.requested_sample_period = period;
@@ -235,6 +237,8 @@ fn unrelated_known_counters_cannot_certify_recorder_loss_coverage() {
 fn task_source_follows_stable_identity_through_exec_tid_rebinding() {
     let mut binding = source(1, RecorderKind::SoftwareV2);
     binding.scope = CaptureScope::Task(41);
+    binding.config = SourceConfig::TaskClock;
+    binding.requested_config = SourceConfig::TaskClock;
     binding.bound_task_id = 99;
     let mut w = writer();
     w.configure_recorder(vec![binding], 4096).unwrap();
@@ -259,6 +263,8 @@ fn task_source_follows_stable_identity_through_exec_tid_rebinding() {
 fn old_numeric_tid_source_schema_is_rejected() {
     let mut binding = source(1, RecorderKind::SoftwareV2);
     binding.scope = CaptureScope::Task(41);
+    binding.config = SourceConfig::TaskClock;
+    binding.requested_config = SourceConfig::TaskClock;
     let mut w = writer();
     assert!(w.configure_recorder(vec![binding.clone()], 4096).is_err());
     binding.bound_task_id = 99;
@@ -280,6 +286,8 @@ fn old_numeric_tid_source_schema_is_rejected() {
 fn reader_rechecks_stable_task_identity_instead_of_numeric_tid() {
     let mut binding = source(1, RecorderKind::SoftwareV2);
     binding.scope = CaptureScope::Task(41);
+    binding.config = SourceConfig::TaskClock;
+    binding.requested_config = SourceConfig::TaskClock;
     binding.bound_task_id = 99;
     let mut w = writer();
     w.configure_recorder(vec![binding], 4096).unwrap();

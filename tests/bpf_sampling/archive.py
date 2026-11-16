@@ -146,24 +146,16 @@ def extract(text: str, mode: str) -> tuple[bytes, dict, dict[str, bytes]]:
         if declared != size or size % 8 or zlib.crc32(frame) != crc:
             raise ValueError("frame CRC or boundary mismatch")
         if kind == 9:
-            if size < 12:
-                raise ValueError("short RAW sample")
-            n, = struct.unpack_from("<I", frame, 8)
-            if size < 36:
-                raise ValueError("missing logical source envelope")
-            magic, version, source_kind, context_len, logical_id, reserved = struct.unpack_from("<IHHIIQ", frame, 12)
-            if magic != 0x31524250 or version != 1 or not logical_id or reserved or n != 24 + context_len:
-                raise ValueError("invalid logical source envelope")
+            logical_id, source_kind, payload = source_context(frame)
             if source_kind != (3 if stacks else 1 if mode in ("task", "cpu") else 2):
                 raise ValueError("source kind differs from declared context")
             if mode == "sched":
-                event = struct.unpack_from("<I", frame, 36)[0] if size >= 40 else 0
+                event = struct.unpack_from("<I", payload)[0] if len(payload) >= 4 else 0
                 expected = trace_sizes.get(event)
             else:
                 expected = 640 if stacks else {"task":64,"cpu":64,"trace":72,"block":72,"wake":80,"fault":80}[mode]
-            if context_len != expected or not 12+n <= size <= 12+n+7:
+            if len(payload) != expected:
                 raise ValueError("RAW sample length differs from declared program")
-            payload = frame[36:12+n]
             if mode in ("task", "cpu"):
                 timestamp, = struct.unpack_from("<Q", payload, 16)
                 source_cpu, = struct.unpack_from("<I", payload, 24)

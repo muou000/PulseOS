@@ -136,6 +136,10 @@ impl RecorderSource {
             || (self.kind == RecorderKind::Tracepoint && (self.config != SourceConfig::Tracepoint || self.unit != SourceUnit::Events))
             || (self.kind == RecorderKind::Normalized && (self.config != SourceConfig::Custom || self.unit != SourceUnit::Events))
         { return Err(invalid("source configuration and payload kind disagree")); }
+        if software && !matches!((self.config, self.scope),
+            (SourceConfig::CpuClock, CaptureScope::PerCpu(_))
+            | (SourceConfig::TaskClock, CaptureScope::Task(_)))
+        { return Err(invalid("source clock and scope disagree")); }
         if !software && (self.requested_frequency_hz != 0 || self.effective_frequency_hz != 0) {
             return Err(invalid("frequency mode requires a software clock source"));
         }

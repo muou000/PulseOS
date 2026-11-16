@@ -230,3 +230,30 @@ fn zero_sample_declarations_still_require_registered_matching_schema() {
     let mut w=CaptureWriter::new(config,registry);
     assert!(w.configure_recorder(vec![source(7)],4096).is_err());
 }
+
+#[test]
+fn software_clock_and_scope_coupling_is_checked_at_declaration_and_read_boundaries() {
+    let mut cpu_clock_on_task = source(7);
+    cpu_clock_on_task.scope = CaptureScope::Task(41);
+    cpu_clock_on_task.bound_task_id = 99;
+    let mut task_clock_on_cpu = source(7);
+    task_clock_on_cpu.config = SourceConfig::TaskClock;
+    task_clock_on_cpu.requested_config = SourceConfig::TaskClock;
+    for invalid_source in [cpu_clock_on_task, task_clock_on_cpu] {
+        assert!(writer().configure_recorder(vec![invalid_source], 4096).is_err());
+    }
+
+    let good = capture_bytes();
+    let source_row = good.windows(8).position(|bytes| bytes == b"PBSRC003").unwrap() + 24;
+    let mut cpu_clock_on_task = good.clone();
+    cpu_clock_on_task[source_row + 16..source_row + 20].copy_from_slice(&2u32.to_le_bytes());
+    cpu_clock_on_task[source_row + 24..source_row + 32].copy_from_slice(&41u64.to_le_bytes());
+    cpu_clock_on_task[source_row + 88..source_row + 96].copy_from_slice(&99u64.to_le_bytes());
+    let mut task_clock_on_cpu = good;
+    task_clock_on_cpu[source_row + 100..source_row + 104].copy_from_slice(&2u32.to_le_bytes());
+    task_clock_on_cpu[source_row + 104..source_row + 108].copy_from_slice(&2u32.to_le_bytes());
+    for mut invalid_capture in [cpu_clock_on_task, task_clock_on_cpu] {
+        repair_crc(&mut invalid_capture);
+        assert!(CaptureReader::from_bytes(&invalid_capture).is_err());
+    }
+}
