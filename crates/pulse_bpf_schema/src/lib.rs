@@ -1,5 +1,6 @@
 #![no_std]
 
+pub mod elf;
 pub mod stack;
 pub use stack::{
     DEFAULT_STACK_BYTE_LIMIT, DEFAULT_STACK_DEPTH, FrozenStack, MAX_STACK_DEPTH,

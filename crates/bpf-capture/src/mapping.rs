@@ -1,10 +1,6 @@
 //! Current capture mapping evidence. The original producer journal is retained verbatim;
 //! paths are labels, never object identities or implicit host lookup instructions.
-use alloc::{
-    collections::BTreeMap,
-    string::{String, ToString},
-    vec::Vec,
-};
+use alloc::{string::String, vec::Vec};
 
 use crate::{
     CaptureError,
@@ -129,29 +125,64 @@ pub struct MappingJournal {
     pub dropped: u64,
     pub entries: Vec<MappingEntry>,
 }
-fn fields(line: &str) -> Result<(&str, BTreeMap<&str, &str>), CaptureError> {
+/// Validated temporal bounds of an original journal, without materializing rows.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct MappingCoverage {
+    pub started_ns: u64,
+    pub snapshot_ns: u64,
+    pub dropped: u64,
+    pub records: u64,
+}
+
+// Current rows contain at most fourteen fields. Keep parsing bounded and on
+// the stack; guest allocators can turn each heap allocation into journal work.
+struct Fields<'a> {
+    pairs: [(&'a str, &'a str); 32],
+    len: usize,
+}
+impl<'a> Fields<'a> {
+    fn get(&self, key: &str) -> Option<&&'a str> {
+        self.pairs[..self.len]
+            .iter()
+            .find(|(name, _)| *name == key)
+            .map(|(_, value)| value)
+    }
+    fn contains_key(&self, key: &str) -> bool {
+        self.get(key).is_some()
+    }
+}
+fn fields(line: &str) -> Result<(&str, Fields<'_>), CaptureError> {
     let mut words = line.split_ascii_whitespace();
     let kind = words.next().ok_or_else(invalid)?;
-    let mut result = BTreeMap::new();
+    let mut result = Fields {
+        pairs: [("", ""); 32],
+        len: 0,
+    };
     for word in words {
         let (key, value) = word.split_once('=').ok_or_else(invalid)?;
-        if key.is_empty() || value.is_empty() || result.insert(key, value).is_some() {
+        if key.is_empty()
+            || value.is_empty()
+            || result.contains_key(key)
+            || result.len == result.pairs.len()
+        {
             return Err(invalid());
         }
+        result.pairs[result.len] = (key, value);
+        result.len += 1;
     }
     Ok((kind, result))
 }
-fn num(f: &BTreeMap<&str, &str>, key: &str) -> Result<u64, CaptureError> {
+fn num(f: &Fields<'_>, key: &str) -> Result<u64, CaptureError> {
     let s = f.get(key).ok_or_else(invalid)?;
     if !s.bytes().all(|b| b.is_ascii_digit()) {
         return Err(invalid());
     }
     s.parse().map_err(|_| invalid())
 }
-fn narrow(f: &BTreeMap<&str, &str>, key: &str) -> Result<u32, CaptureError> {
+fn narrow(f: &Fields<'_>, key: &str) -> Result<u32, CaptureError> {
     u32::try_from(num(f, key)?).map_err(|_| invalid())
 }
-fn txt(f: &BTreeMap<&str, &str>, key: &str) -> Result<String, CaptureError> {
+fn txt<const RETAIN: bool>(f: &Fields<'_>, key: &str) -> Result<String, CaptureError> {
     let value = *f.get(key).ok_or_else(invalid)?;
     if value == "-" {
         return Ok(String::new());
@@ -159,15 +190,37 @@ fn txt(f: &BTreeMap<&str, &str>, key: &str) -> Result<String, CaptureError> {
     if value.len() > 8192 || value.len() % 2 != 0 {
         return Err(invalid());
     }
-    let mut bytes = Vec::new();
-    for pair in value.as_bytes().chunks_exact(2) {
+    let mut bytes = [0u8; 4096];
+    for (byte, pair) in bytes.iter_mut().zip(value.as_bytes().chunks_exact(2)) {
         let hex = core::str::from_utf8(pair).map_err(|_| invalid())?;
-        bytes.push(u8::from_str_radix(hex, 16).map_err(|_| invalid())?);
+        *byte = u8::from_str_radix(hex, 16).map_err(|_| invalid())?;
     }
-    String::from_utf8(bytes).map_err(|_| invalid())
+    let decoded = core::str::from_utf8(&bytes[..value.len() / 2]).map_err(|_| invalid())?;
+    Ok(if RETAIN {
+        decoded.into()
+    } else {
+        String::new()
+    })
 }
 impl MappingJournal {
+    /// Materialize validated rows for host temporal analysis.
     pub fn parse(text: &str) -> Result<Self, CaptureError> {
+        Self::scan::<true>(text).map(|(journal, _)| journal)
+    }
+
+    /// Apply exactly the same full semantic validation as `parse`, without
+    /// allocating journal entries, maps, strings or field tables.
+    pub fn validate(text: &str) -> Result<MappingCoverage, CaptureError> {
+        let (journal, records) = Self::scan::<false>(text)?;
+        Ok(MappingCoverage {
+            started_ns: journal.started_ns,
+            snapshot_ns: journal.snapshot_ns,
+            dropped: journal.dropped,
+            records,
+        })
+    }
+
+    fn scan<const RETAIN: bool>(text: &str) -> Result<(Self, u64), CaptureError> {
         if text.len() > MAX_BYTES {
             return Err(invalid());
         }
@@ -192,6 +245,7 @@ impl MappingJournal {
         let mut previous = 0;
         let mut previous_time = out.started_ns;
         let mut ended = false;
+        let mut records = 0;
         while let Some(line) = lines.next() {
             let (tag, f) = fields(line)?;
             if tag == "END" {
@@ -245,7 +299,9 @@ impl MappingJournal {
                         }
                         end = map.start.checked_add(map.len).ok_or_else(invalid)?;
                         map.pgoff.checked_add(map.len).ok_or_else(invalid)?;
-                        maps.push(map);
+                        if RETAIN {
+                            maps.push(map);
+                        }
                     }
                     if lines.next() != Some("ENDSPACE") {
                         return Err(invalid());
@@ -258,8 +314,8 @@ impl MappingJournal {
                     }
                 }
                 "TASK" => {
-                    let kind = f.get("kind").ok_or_else(invalid)?.to_string();
-                    if !matches!(kind.as_str(), "bind" | "fork" | "exec" | "rename" | "exit")
+                    let kind = *f.get("kind").ok_or_else(invalid)?;
+                    if !matches!(kind, "bind" | "fork" | "exec" | "rename" | "exit")
                         || num(&f, "task")? == 0
                     {
                         return Err(invalid());
@@ -280,7 +336,7 @@ impl MappingJournal {
                         tid: narrow(&f, "tid")?,
                         space: num(&f, "space")?,
                         exec: num(&f, "exec")?,
-                        kind,
+                        kind: if RETAIN { kind.into() } else { String::new() },
                         begin_ns: if f.contains_key("begin_ns") {
                             num(&f, "begin_ns")?
                         } else {
@@ -288,7 +344,7 @@ impl MappingJournal {
                         },
                         parent: num(&f, "parent")?,
                         class,
-                        comm: txt(&f, "comm_hex")?,
+                        comm: txt::<RETAIN>(&f, "comm_hex")?,
                     }
                 }
                 "OBJECT" => {
@@ -298,12 +354,12 @@ impl MappingJournal {
                     }
                     MappingEvent::Object {
                         object: num(&f, "object")?,
-                        sha256: if sha == "unknown" {
+                        sha256: if sha == "unknown" || !RETAIN {
                             None
                         } else {
                             Some(sha.into())
                         },
-                        path: txt(&f, "path_hex")?,
+                        path: txt::<RETAIN>(&f, "path_hex")?,
                     }
                 }
                 "MUTATION" => {
@@ -348,36 +404,41 @@ impl MappingJournal {
                         start,
                         len,
                         reference,
-                        symbol: txt(&f, "symbol_hex")?,
+                        symbol: txt::<RETAIN>(&f, "symbol_hex")?,
                     }
                 }
                 _ => return Err(invalid()),
             };
-            out.entries.push(MappingEntry {
-                sequence,
-                timestamp_ns,
-                event,
-            });
-            if out.entries.len() > MAX_ENTRIES {
+            if RETAIN {
+                out.entries.push(MappingEntry {
+                    sequence,
+                    timestamp_ns,
+                    event,
+                });
+            }
+            records += 1;
+            if records > MAX_ENTRIES as u64 {
                 return Err(invalid());
             }
         }
-        if !ended || out.entries.len() as u64 != count {
+        if !ended || records != count {
             return Err(invalid());
         }
-        Ok(out)
+        Ok((out, records))
     }
 }
 impl MappingMetadata {
     pub fn validate(&self) -> Result<(), CaptureError> {
-        MappingJournal::parse(&self.journal)?;
+        MappingJournal::validate(&self.journal)?;
         if self.artifacts.len() > 4096 {
             return Err(invalid());
         }
-        let mut seen = BTreeMap::new();
-        for a in &self.artifacts {
+        for (index, a) in self.artifacts.iter().enumerate() {
             if !valid_sha(&a.sha256)
-                || a.path != alloc::format!("artifacts/{}.elf", a.sha256)
+                || a.path
+                    .strip_prefix("artifacts/")
+                    .and_then(|path| path.strip_suffix(".elf"))
+                    != Some(a.sha256.as_str())
                 || a.gnu_build_id
                     .as_deref()
                     .is_some_and(|id| !valid_build_id(id))
@@ -386,14 +447,19 @@ impl MappingMetadata {
                     .as_deref()
                     .is_some_and(|id| !valid_build_id(id))
                 || a.debug_build_id.is_some() && a.debug_sha256.is_none()
-                || seen.insert(&a.sha256, ()).is_some()
+                || self.artifacts[..index]
+                    .iter()
+                    .any(|previous| previous.sha256 == a.sha256)
             {
                 return Err(invalid());
             }
         }
         if let Some(k) = &self.kernel {
             if !valid_sha(&k.sha256)
-                || !seen.contains_key(&k.sha256)
+                || !self
+                    .artifacts
+                    .iter()
+                    .any(|artifact| artifact.sha256 == k.sha256)
                 || k.reference_symbol.is_empty()
                 || k.reference_symbol.len() > 4096
                 || k.text_end <= k.text_start

@@ -34,7 +34,9 @@ fn current_capture_retains_verbatim_journal_and_explicit_absent_gnu_id() {
     let old = CaptureReader::from_bytes(&fixture).unwrap();
     let mut writer = CaptureWriter::new(old.metadata.config, old.registry);
     writer.set_mappings(metadata()).unwrap();
-    writer.configure_recorder(vec![support::trace(1, 2, 0, 100, 300)], 4096).unwrap();
+    writer
+        .configure_recorder(vec![support::trace(1, 2, 0, 100, 300)], 4096)
+        .unwrap();
     writer.start(100).unwrap();
     let mut record = old.records[0].clone();
     record.timestamp_ns = 200;
@@ -91,7 +93,9 @@ fn current_capture_unknown_required_feature_is_rejected() {
     let old = CaptureReader::from_bytes(&fixture).unwrap();
     let mut writer = CaptureWriter::new(old.metadata.config, old.registry);
     writer.set_mappings(metadata()).unwrap();
-    writer.configure_recorder(vec![support::trace(1, 2, 0, 100, 300)], 4096).unwrap();
+    writer
+        .configure_recorder(vec![support::trace(1, 2, 0, 100, 300)], 4096)
+        .unwrap();
     writer.start(100).unwrap();
     let mut record = old.records[0].clone();
     record.timestamp_ns = 200;
@@ -129,7 +133,9 @@ fn mapping_journal_has_an_independent_bound_from_diagnostics() {
     let data = CaptureReader::from_bytes(&original).unwrap();
     let mut writer = CaptureWriter::new(data.metadata.config, data.registry);
     writer.set_mappings(mappings.clone()).unwrap();
-    writer.configure_recorder(vec![support::trace(1, 2, 0, 100, 300)], 4096).unwrap();
+    writer
+        .configure_recorder(vec![support::trace(1, 2, 0, 100, 300)], 4096)
+        .unwrap();
     writer.start(100).unwrap();
     let mut record = data.records[0].clone();
     record.timestamp_ns = 200;
@@ -146,4 +152,51 @@ fn mapping_journal_has_an_independent_bound_from_diagnostics() {
 fn retrospective_only_journal_cannot_claim_live_mutation_coverage() {
     assert!(MappingJournal::parse(&journal().replace("version=2", "version=1")).is_err());
     assert!(MappingJournal::parse(&journal().replace("version=2", "version=3")).is_err());
+}
+
+#[test]
+fn materialized_rows_and_allocation_free_coverage_enforce_identical_semantics() {
+    let text = "PULSE_BPF_MAPPINGS version=2 available=1 started_ns=0 snapshot_ns=50 dropped=0 \
+                records=7\nKERNEL seq=1 ts=1 start=4096 len=4096 reference=4096 \
+                symbol_hex=5f7374657874\nOBJECT seq=2 ts=2 object=1 sha256=unknown \
+                path_hex=e4b8ad\nMUTATION seq=3 ts=3 target=space id=1 token=1 complete=0\nSPACE \
+                seq=4 ts=4 space=1 revision=1 begin_ns=3 count=2\nMAP start=4096 len=4096 pgoff=0 \
+                perms=5 object=1\nMAP start=8192 len=4096 pgoff=4096 perms=3 \
+                object=1\nENDSPACE\nTASK seq=5 ts=5 task=1 pid=2 tid=3 space=1 exec=1 kind=exec \
+                begin_ns=5 parent=0 class=user comm_hex=e4b8ad\nTLB seq=6 ts=6 space=1 token=1 \
+                complete=1\nMUTATION seq=7 ts=7 target=space id=1 token=1 complete=1\nEND \
+                records=7 dropped=0 snapshot_ns=50\n";
+    let parsed = MappingJournal::parse(text).unwrap();
+    let coverage = MappingJournal::validate(text).unwrap();
+    assert_eq!(coverage.records, 7);
+    assert_eq!(coverage.snapshot_ns, 50);
+    assert_eq!(coverage.dropped, 0);
+    assert_eq!(parsed.entries.len(), 7);
+    for malformed in [
+        text.replace("version=2", "version=2 version=2"),
+        text.replace("perms=5", "perms=5 perms=3"),
+        text.replace("perms=5", "perms=16"),
+        text.replace("perms=5", "perms=4294967296"),
+        text.replace("start=8192", "start=4096"),
+        text.replace("pgoff=4096", "pgoff=18446744073709551615"),
+        text.replace("begin_ns=3", "begin_ns=5"),
+        text.replace("path_hex=e4b8ad", "path_hex=e4b8"),
+        text.replace("comm_hex=e4b8ad", "comm_hex=ff"),
+        text.replace("comm_hex=e4b8ad", "comm_hex=xyz"),
+        text.replace("class=user", "class=other"),
+        text.replace("kind=exec", "kind=other"),
+        text.replace("pid=2", "pid=4294967296"),
+        text.replace("object=1", "object=0"),
+        text.replace("sha256=unknown", "sha256=abc"),
+        text.replace("target=space", "target=other"),
+        text.replace("token=1", "token=0"),
+        text.replace("complete=1", "complete=2"),
+        text.replace("reference=4096", "reference=8192"),
+        text.replace("END records=7", "END records=8"),
+        text.replace("END records=7 dropped=0 snapshot_ns=50", ""),
+        format!("{text}TASK seq=8 ts=8\n"),
+    ] {
+        assert!(MappingJournal::parse(&malformed).is_err(), "{malformed}");
+        assert!(MappingJournal::validate(&malformed).is_err(), "{malformed}");
+    }
 }

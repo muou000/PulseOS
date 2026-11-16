@@ -260,7 +260,14 @@ def drive_guest(
                         process.stdin.flush()
                         sent = True
                         deadline = time.monotonic() + timeout
-                    text = output.decode(errors="replace").replace("\r", "")
+                    # Recorder captures can contain multi-megabyte journals.
+                    # Scan bounded recent output for short control markers;
+                    # re-decoding the whole accumulated capture per serial
+                    # chunk makes transfer quadratic. Two maximum read chunks
+                    # preserve markers split across a read boundary. Callbacks
+                    # retain their existing complete-output contract.
+                    recent = output if on_output is not None else output[-131072:]
+                    text = recent.decode(errors="replace").replace("\r", "")
                     if on_output is not None:
                         on_output(text, process.stdin)
                     if re.search(

@@ -39,6 +39,29 @@ pub fn kernel_text_range() -> (usize, usize) {
     (_stext as *const () as usize, _etext as *const () as usize)
 }
 
+/// GNU build-id bytes embedded in the actual running image by its linker.
+/// A missing or malformed note remains unknown; this is never a truncated SHA.
+pub fn kernel_build_id() -> Option<&'static [u8]> {
+    let start = _sbuild_id as *const () as *const u8;
+    let len = (_ebuild_id as *const () as usize).checked_sub(start as usize)?;
+    if !(16..=144).contains(&len) { return None; }
+    // SAFETY: linker.lds.S brackets the retained .note.gnu.build-id output
+    // section with these symbols inside reserved read-only kernel memory. Its
+    // linker-initialized bytes form one contiguous live image allocation for
+    // the kernel's lifetime, never mutated after load; u8 requires alignment 1.
+    // The checked 16..=144 extent is nonempty, nonwrapping and below isize::MAX.
+    let note = unsafe { core::slice::from_raw_parts(start, len) };
+    let namesz = u32::from_le_bytes(note[..4].try_into().ok()?) as usize;
+    let descsz = u32::from_le_bytes(note[4..8].try_into().ok()?) as usize;
+    let kind = u32::from_le_bytes(note[8..12].try_into().ok()?);
+    if namesz != 4 || kind != 3 || &note[12..16] != b"GNU\0" || !(1..=128).contains(&descsz)
+        || len != 16 + descsz.div_ceil(4) * 4
+    {
+        return None;
+    }
+    note.get(16..16 + descsz)
+}
+
 /// Fills the `.bss` section with zeros.
 ///
 /// It requires the symbols `_sbss` and `_ebss` to be defined in the linker script.
@@ -132,6 +155,8 @@ pub fn init() {
 }
 
 unsafe extern "C" {
+    fn _sbuild_id();
+    fn _ebuild_id();
     fn _stext();
     fn _etext();
     fn _srodata();
