@@ -18,7 +18,7 @@ from run import ACCEPTANCE_SUITES, ARCHES, BASE, REPO, helpers
 PRODUCTION_SUITES = (
     "smoke", "stacks-cpu", "stacks-task", "stacks-mixed", "stacks-existing",
     "mapping", "nonleader-exec", "stacks-sigint", "stacks-sigterm",
-    "stacks-exit", "stacks-overflow", "existing",
+    "stacks-exit", "stacks-overflow", "existing", "installed-io",
 )
 CONTROL_SUITES = ("lifecycle", "negative", "stacks-observation", "recovery", "benchmark")
 

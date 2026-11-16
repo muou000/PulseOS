@@ -6,19 +6,21 @@ against separate guest processes:
 ```bash
 set -o pipefail
 make test APP_FEATURES="qemu bpf-trace" 2>&1 | tail -30
+cargo build -p bpf-analyzer
 python3 -m unittest discover -s tests/bpf_record -p 'test_*.py'
 python3 tests/bpf_record/acceptance.py --plan
 python3 tests/bpf_record/acceptance.py \
   --output tests/bpf_record/runs/213-fresh --analyzer target/debug/bpf-analyzer
 ```
 
-The #213 matrix runs 17 independent boots per architecture, serially, with
+The #213 matrix runs 18 independent boots per architecture, serially, with
 benchmarks last. The output directory must be new and under `tests/bpf_record/`.
 Repeated `--arch` and `--suite` select a smaller matrix. Each run retains its
 original files under `ARCH/SUITE`; `index.json` records hashes and fails closed
 if any guest case or recorder build identity fails. This is the guest stage;
-the independent `e2e.py` stage must also qualify the production capture through
-perf and FlameGraph before claiming the full workflow passed.
+the independent [`qualify.py` stage](QUALIFICATION.md) must also check the fixed
+production Queries through perf and FlameGraph before claiming the full
+workflow passed. It invokes `e2e.py` for each Query and rejects missing cases.
 
 Individual suites remain available:
 
@@ -37,6 +39,8 @@ python3 tests/bpf_record/run.py guest --arch riscv64 --suite mapping
 python3 tests/bpf_record/run.py guest --arch loongarch64 --suite mapping
 python3 tests/bpf_record/run.py guest --arch riscv64 --suite nonleader-exec
 python3 tests/bpf_record/run.py guest --arch loongarch64 --suite nonleader-exec
+python3 tests/bpf_record/run.py guest --arch riscv64 --suite installed-io
+python3 tests/bpf_record/run.py guest --arch loongarch64 --suite installed-io
 ```
 
 Positive suites build the normal `guest` recorder. Only `lifecycle`, `negative`,
@@ -111,6 +115,12 @@ SHA256. The collector never treats that deployment path as identity.
 installed `sh` repeatedly runs installed `dd` and `sleep`. Missing commands,
 failed `dd`, or an exited workload fail this gate; the runner never substitutes
 the test fixture for an unavailable real program.
+
+`installed-io` starts one installed `dd` process before the production recorder,
+binds its existing TID to a task source, and checks real kernel samples with the
+same stable identity. The target must still be alive after recording; it is
+then stopped and reaped. Its fixed kernel Query supplies the native function
+proof without discarding mapping-mutation samples from the churning suite.
 
 `recovery` records a task, then a real nonleader thread that execs the fixture
 after the recorder has enabled. The source must retain its stable task identity

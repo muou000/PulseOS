@@ -71,12 +71,12 @@ class PerfSymbolsTests(unittest.TestCase):
             directory = Path(temporary)
             original, derived = directory / 'original.elf', directory / 'view.elf'
             original.write_bytes(elf_fixture())
-            report = symbols.prepare_kernel_symbols(original, derived)
+            report = symbols.prepare_symbol_view(original, derived)
             self.assertEqual(original.read_bytes(), elf_fixture())
             self.assertNotEqual(report['original_sha256'], report['derived_sha256'])
             self.assertTrue(report['load_bytes_unchanged'])
             with self.assertRaises(FileExistsError):
-                symbols.prepare_kernel_symbols(original, original)
+                symbols.prepare_symbol_view(original, original)
             self.assertEqual(original.read_bytes(), elf_fixture())
 
 

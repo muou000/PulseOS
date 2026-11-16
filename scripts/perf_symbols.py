@@ -1,4 +1,4 @@
-"""Derive a kernel symbol view for perf while preserving its entire load image.
+"""Derive an ELF symbol view for perf while preserving its entire load image.
 
 Linux perf treats visible STT_NOTYPE labels as symbols. Rust's local `.L*`
 assembler labels and RISC-V ISA/data mapping symbols can consequently shadow real
@@ -35,11 +35,11 @@ def hide_local_labels(original: bytes) -> tuple[bytes, int]:
 
     header = span(0, 64)
     if header[:7] != b'\x7fELF\x02\x01\x01':
-        raise ValueError('kernel symbol view requires ELF64 little-endian')
+        raise ValueError('symbol view requires ELF64 little-endian')
     kind, machine, version, _, phoff, shoff, _, ehsize, phsize, phcount, shsize, shcount, _ = read('<HHIQQQIHHHHHH', 16)
     if (kind not in (2, 3) or machine not in (243, 258) or version != 1 or ehsize != 64
             or phsize != 56 or not 0 < phcount <= 4096 or shsize != 64 or not 0 < shcount <= 32768):
-        raise ValueError('unsupported kernel ELF table shape')
+        raise ValueError('unsupported ELF table shape')
     loads = []
     for index in range(phcount):
         ptype, _, offset, _, _, filesz, memsz, _ = read('<IIQQQQQQ', phoff + index * phsize)
@@ -49,7 +49,7 @@ def hide_local_labels(original: bytes) -> tuple[bytes, int]:
                 raise ValueError('invalid PT_LOAD sizes')
             loads.append((offset, offset + filesz))
     if not loads:
-        raise ValueError('kernel ELF has no PT_LOAD segment')
+        raise ValueError('ELF has no PT_LOAD segment')
     sections = [read('<IIQQQQIIQQ', shoff + index * shsize) for index in range(shcount)]
     edits = set()
     for section in sections:
@@ -57,7 +57,7 @@ def hide_local_labels(original: bytes) -> tuple[bytes, int]:
             continue
         _, _, _, _, offset, size, string_index, _, _, entry_size = section
         if entry_size != 24 or size % entry_size or size // entry_size > 4_000_000 or string_index >= shcount:
-            raise ValueError('invalid kernel ELF symbol table')
+            raise ValueError('invalid ELF symbol table')
         span(offset, size)
         strings_section = sections[string_index]
         if strings_section[1] != 3:
@@ -88,7 +88,7 @@ def hide_local_labels(original: bytes) -> tuple[bytes, int]:
     return bytes(derived), len(edits)
 
 
-def prepare_kernel_symbols(source: Path, destination: Path) -> dict:
+def prepare_symbol_view(source: Path, destination: Path) -> dict:
     original = source.read_bytes()
     derived, count = hide_local_labels(original)
     with destination.open('xb') as output:

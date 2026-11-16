@@ -160,6 +160,21 @@ def cases_script(directory: str, suite: str, duration: int, *, kernel_elf: bool 
                          f"if grep -q EXISTING_WORKLOAD_FAIL {label}-workload.log; then exit 1; fi",
                          f"{fixture} dump {label}.pbcapture {label} || exit 1"])
             captures.append(label)
+    if suite == "installed-io":
+        rows.extend(["command -v dd >/dev/null || exit 1",
+                     "dd if=/dev/zero of=/dev/null bs=65536 >installed-io-target.log 2>&1 &",
+                     "target=$!", f"{fixture} sleep 100",
+                     'kill -0 "$target" || { cat installed-io-target.log; exit 1; }',
+                     'echo INSTALLED_IO READY pid="$target" command=dd if=/dev/zero of=/dev/null bs=65536'])
+        call("installed-io", f'--events task --tid "$target" --period-ns 1000000 --duration-ms {duration} '
+             '--buffer-pages 16 --callchain fp --stack-depth 32 --output installed-io.pbcapture', capture=False)
+        rows.extend(['kill -0 "$target" || { cat installed-io-target.log; exit 1; }',
+                     'echo INSTALLED_IO ALIVE_AFTER_RECORD pid="$target"',
+                     'kill "$target" || exit 1', 'wait "$target"', "target_rc=$?",
+                     'echo INSTALLED_IO STOPPED pid="$target" wait_rc="$target_rc"',
+                     "cat installed-io-target.log",
+                     f"{fixture} dump installed-io.pbcapture installed-io || exit 1"])
+        captures.append("installed-io")
     if suite in ("recovery", "nonleader-exec"):
         if suite == "recovery":
             record("task", "task", "cpu", task=True)
@@ -445,6 +460,33 @@ def verify_existing_workload(text: str, timeline: dict, label: str) -> dict:
         raise ValueError(f"{label}: capture has no events attributed to the actual shell/dd workload")
     return {"shell_tid": int(ready[1]), "dd_exec_tids": sorted(dd_tids),
             "attributed_records": len(observed), "observed_workload_tids": sorted({e["tid"] for e in observed})}
+
+
+def verify_installed_io(text: str, report: dict, timeline: dict) -> dict:
+    """Require kernel samples from the existing installed dd's stable task."""
+    text = clean_console(text)
+    ready = re.search(r"(?m)^INSTALLED_IO READY pid=(\d+) command=dd if=/dev/zero of=/dev/null bs=65536$", text)
+    alive = re.search(r"(?m)^INSTALLED_IO ALIVE_AFTER_RECORD pid=(\d+)$", text)
+    stopped = re.search(r"(?m)^INSTALLED_IO STOPPED pid=(\d+) wait_rc=(\d+)$", text)
+    sources = report.get("recorder", {}).get("sources", [])
+    if not ready or not alive or not stopped or ready[1] != alive[1] or ready[1] != stopped[1] or len(sources) != 1:
+        raise ValueError("installed dd lacks its launch/alive/reaped and single-source witnesses")
+    target, source = int(ready[1]), sources[0]
+    if (source.get("tid") != target or not source.get("bound_task_id")
+            or source.get("kind") != "software-stack-v3" or source.get("config") != "task-clock"
+            or source.get("period") != 1_000_000 or source.get("requested_sample_period") != 1_000_000):
+        raise ValueError("installed dd source does not retain the requested task/rate/stack binding")
+    samples = timeline["events"]
+    if not samples or any(event["tid"] != target or event["task_id"] != source["bound_task_id"]
+                          or event["event_id"] != 0x1002 for event in samples):
+        raise ValueError("installed dd samples differ from its stable task source")
+    kernel = [event for event in samples if event["semantic"]["mode"] == 1]
+    if not kernel:
+        raise ValueError("installed dd has no actual kernel-mode samples")
+    return {"command": "dd if=/dev/zero of=/dev/null bs=65536", "target_tid": target,
+            "bound_task_id": source["bound_task_id"], "samples": len(samples),
+            "kernel_samples": len(kernel), "max_kernel_depth": max(event["semantic"]["chain_len"] for event in kernel),
+            "alive_after_record": True, "reaped_wait_status": int(stopped[2])}
 
 
 def benchmark_stats(text: str) -> dict:
@@ -788,7 +830,7 @@ def guest(args: argparse.Namespace) -> int:
     install(image_copy, kernel_elf, "/boot/kernel.elf", run)
     candidates = [run / name for name in ("bpf-record.elf", "record-fixture.elf", "kernel.elf")]
     for guest_path in ("/bin/busybox", "/usr/bin/busybox", "/usr/bin/bash", "/usr/bin/dd",
-                       "/usr/lib64/libc-2.28.so", "/usr/lib64/ld-2.28.so"):
+                       "/lib/ld-musl-riscv64.so.1", "/usr/lib64/libc-2.28.so", "/usr/lib64/ld-2.28.so"):
         candidate = run / (guest_path.strip("/").replace("/", "-") + ".elf")
         try:
             identity = helpers.debugfs(image_copy, f"stat {guest_path}")
@@ -862,6 +904,11 @@ def guest(args: argparse.Namespace) -> int:
                 helpers.command([str(run / "bpf-analyzer"), str(path), "--timeline", str(timeline_path)], cwd=REPO)
                 proof = verify_existing_workload(text, json.loads(timeline_path.read_text()), label)
                 (run / f"{label}-proof.json").write_text(json.dumps(proof, indent=2) + "\n")
+            if label == "installed-io":
+                timeline_path = run / "installed-io-timeline.json"
+                helpers.command([str(run / "bpf-analyzer"), str(path), "--timeline", str(timeline_path)], cwd=REPO)
+                proof = verify_installed_io(text, reports[label], json.loads(timeline_path.read_text()))
+                (run / "installed-io-proof.json").write_text(json.dumps(proof, indent=2) + "\n")
         if "write-failure" in failures:
             raw = extract(text, "write-failure")
             path = run / "write-failure.pbcapture"
@@ -898,7 +945,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("action", choices=("build-fixture", "guest"))
     parser.add_argument("--arch", choices=tuple(ARCHES), required=True)
-    parser.add_argument("--suite", choices=("smoke", "mixed", "stacks", "mapping", "lifecycle", "negative", "benchmark", "existing", "recovery", "nonleader-exec", "full") + STACK_SUITES, default="smoke")
+    parser.add_argument("--suite", choices=("smoke", "mixed", "stacks", "mapping", "lifecycle", "negative", "benchmark", "existing", "installed-io", "recovery", "nonleader-exec", "full") + STACK_SUITES, default="smoke")
     parser.add_argument("--duration-ms", type=int, default=1000)
     parser.add_argument("--recorder", type=Path)
     parser.add_argument("--analyzer", type=Path, help="freeze this already-built host analyzer")

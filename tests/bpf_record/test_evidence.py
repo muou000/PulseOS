@@ -49,7 +49,7 @@ class EvidenceArchiveTests(unittest.TestCase):
                 members = stream.getmembers()
                 self.assertTrue(any(member.islnk() for member in members))
                 self.assertFalse(any(member.name.endswith("/disk.img") for member in members))
-                self.assertFalse(any(member.name.endswith("/kernel") for member in members))
+                self.assertTrue(any(member.name.endswith("/kernel") for member in members))
                 self.assertFalse(any(member.name.endswith("/bpf-analyzer") for member in members))
             omitted = index["runs"]["riscv64/positive"]["omitted"]
             self.assertEqual(omitted["disk.img"]["sha256"], hashlib.sha256(b"disk bytes").hexdigest())
@@ -58,6 +58,8 @@ class EvidenceArchiveTests(unittest.TestCase):
             self.assertEqual(verified.returncode, 0, verified.stderr)
             self.assertEqual((root / "extracted/riscv64/positive/capture.pbcapture").read_bytes(),
                              (runs[0] / "capture.pbcapture").read_bytes())
+            self.assertEqual((root / "extracted/riscv64/positive/kernel").read_bytes(),
+                             b"raw boot bytes")
             repeated = root / "repeated"
             again = self.command("pack", "--run", f"riscv64/rejected={runs[1]}",
                                  "--run", f"riscv64/positive={runs[0]}", "--output", repeated)

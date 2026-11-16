@@ -3,6 +3,8 @@
 
 Run names such as riscv64/stacks-task share riscv64.tar.gz. Verification checks
 archive integrity, not whether a recorded experiment passed its runtime oracle.
+Only disk.img and the rebuildable bpf-analyzer executable are omitted; boot
+images remain available to the matrix inventory's portable replay checks.
 """
 from __future__ import annotations
 
@@ -60,12 +62,6 @@ def omission(path: Path) -> str | None:
         return "rootfs omitted; SHA identifies the actual input bytes"
     if path.name == "bpf-analyzer":
         return "rebuildable host analyzer omitted; SHA identifies the actual consumer"
-    if path.name in ("kernel", "kernel-from-elf.bin"):
-        parent = path.parent
-        if (parent / "kernel.elf").is_file() and (parent / "kernel.provenance.json").is_file():
-            with path.open("rb") as stream:
-                if stream.read(4) != b"\x7fELF":
-                    return "raw boot image omitted; matching ELF and provenance retained"
     return None
 
 
