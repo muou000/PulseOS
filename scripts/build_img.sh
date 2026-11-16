@@ -30,6 +30,7 @@ if they are missing.
 
 Env:
   OUTPUT_DIR          image output directory (default: repo root)
+  ROOTFS_VARIANT      tarball variant: auto (default, prefers tests), tests, or base
   IMG_SIZE            fixed image size (e.g. 128M, 1G); overrides auto-size
   MIN_IMG_MIB         minimum auto-sized image size in MiB (default: 128)
   EXTRA_MARGIN_MIB    free-space margin in MiB when auto-sized (default: 128)
@@ -59,38 +60,79 @@ parse_size_to_mib() {
 
 find_base_tar() {
     local arch="$1"
-    if [[ "${arch}" == "riscv64" ]]; then
-        for f in \
-            "${BASE_DIR}/alpine-minirootfs-riscv64.tar.gz" \
-            "${BASE_DIR}/alpine-minirootfs-riscv64.tar.xz"
-        do
-            [[ -f "${f}" ]] && { echo "${f}"; return 0; }
-        done
-        return 1
-    fi
+    local variant="${ROOTFS_VARIANT:-auto}"
+    local candidates=()
 
-    for f in \
-        "${BASE_DIR}/base-rootfs-${arch}.tar.xz" \
-        "${BASE_DIR}/base-rootfs-${arch}.tar.gz"
-    do
+    case "${variant}" in
+        auto)
+            candidates+=(
+                "${BASE_DIR}/rootfs-tests-${arch}.tar.xz"
+                "${BASE_DIR}/rootfs-tests-${arch}.tar.gz"
+            )
+            if [[ "${arch}" == "riscv64" ]]; then
+                candidates+=(
+                    "${BASE_DIR}/ubuntu-base-24.04.5-base-riscv64.tar.gz"
+                    "${BASE_DIR}/alpine-minirootfs-riscv64.tar.gz"
+                    "${BASE_DIR}/alpine-minirootfs-riscv64.tar.xz"
+                )
+            else
+                candidates+=(
+                    "${BASE_DIR}/base-rootfs-${arch}.tar.xz"
+                    "${BASE_DIR}/base-rootfs-${arch}.tar.gz"
+                )
+            fi
+            ;;
+        tests)
+            candidates+=(
+                "${BASE_DIR}/rootfs-tests-${arch}.tar.xz"
+                "${BASE_DIR}/rootfs-tests-${arch}.tar.gz"
+            )
+            ;;
+        base)
+            if [[ "${arch}" == "riscv64" ]]; then
+                candidates+=(
+                    "${BASE_DIR}/alpine-minirootfs-riscv64.tar.gz"
+                    "${BASE_DIR}/alpine-minirootfs-riscv64.tar.xz"
+                    "${BASE_DIR}/ubuntu-base-24.04.5-base-riscv64.tar.gz"
+                )
+            else
+                candidates+=(
+                    "${BASE_DIR}/base-rootfs-${arch}.tar.xz"
+                    "${BASE_DIR}/base-rootfs-${arch}.tar.gz"
+                )
+            fi
+            ;;
+        *)
+            die "Invalid ROOTFS_VARIANT='${variant}' (expected: auto, tests, or base)"
+            ;;
+    esac
+
+    local f
+    for f in "${candidates[@]}"; do
         [[ -f "${f}" ]] && { echo "${f}"; return 0; }
     done
     return 1
 }
 
 validate_riscv_elf_isa() {
-    local stage_dir="$1" elf attributes
+    local stage_dir="$1" jobs hit
     command -v readelf >/dev/null 2>&1 || die "Missing command: readelf (required for RISC-V ISA validation)"
-    while IFS= read -r -d '' elf; do
-        if ! attributes="$(readelf -A "${elf}" 2>/dev/null)"; then
-            continue
-        fi
-        if printf '%s\n' "${attributes}" \
-            | awk -F'"' '/Tag_RISCV_arch:/ { print $2 }' \
-            | grep -Eq '(^|_)(v[0-9]|zv)'; then
-            die "RISC-V rootfs ELF requires vector state unsupported by PulseOS: ${elf}"
-        fi
-    done < <(find "${stage_dir}" -type f -print0)
+    jobs="$(nproc 2>/dev/null || echo 4)"
+    hit="$(find "${stage_dir}" -type f -print0 \
+        | xargs -0 -r -n 128 -P "${jobs}" sh -c 'readelf -A "$@" 2>/dev/null || true' _ \
+        | awk '
+            /^File: / { cur = substr($0, 7) }
+            /Tag_RISCV_arch:/ {
+                split($0, a, "\"")
+                if (a[2] ~ /(^|_)(v[0-9]|zv)/) {
+                    print cur ? cur : "<elf>"
+                    exit 0
+                }
+            }
+        ')"
+    if [[ -n "${hit}" ]]; then
+        die "RISC-V rootfs ELF requires vector state unsupported by PulseOS: ${hit}"
+    fi
 }
 
 patch_loongarch64_musl_sched_stubs() {

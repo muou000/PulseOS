@@ -152,11 +152,15 @@ img:
 	@set -e; \
 	case "$(ARCH)" in \
 		riscv64) \
+			tests_a="$(A)/rootfs/base/rootfs-tests-riscv64.tar.xz"; \
+			tests_b="$(A)/rootfs/base/rootfs-tests-riscv64.tar.gz"; \
 			base_a="$(A)/rootfs/base/alpine-minirootfs-riscv64.tar.gz"; \
 			base_b="$(A)/rootfs/base/alpine-minirootfs-riscv64.tar.xz"; \
 			disk="$(A)/disk.img"; \
 			;; \
 		loongarch64) \
+			tests_a="$(A)/rootfs/base/rootfs-tests-loongarch64.tar.xz"; \
+			tests_b="$(A)/rootfs/base/rootfs-tests-loongarch64.tar.gz"; \
 			base_a="$(A)/rootfs/base/base-rootfs-loongarch64.tar.xz"; \
 			base_b="$(A)/rootfs/base/base-rootfs-loongarch64.tar.gz"; \
 			disk="$(A)/disk-la.img"; \
@@ -166,10 +170,17 @@ img:
 			exit 1; \
 			;; \
 	esac; \
-	if [ ! -f "$$base_a" ] && [ ! -f "$$base_b" ]; then \
-		"$(A)/scripts/fetch-rootfs.sh"; \
+	variant="$${ROOTFS_VARIANT:-tests}"; \
+	if [ "$$variant" = "base" ]; then \
+		if [ ! -f "$$base_a" ] && [ ! -f "$$base_b" ]; then \
+			"$(A)/scripts/fetch-rootfs.sh" --base --arch "$(ARCH)"; \
+		fi; \
+	else \
+		if [ ! -f "$$tests_a" ] && [ ! -f "$$tests_b" ]; then \
+			"$(A)/scripts/fetch-rootfs.sh" --tests --arch "$(ARCH)"; \
+		fi; \
 	fi; \
-	"$(A)/scripts/build_img.sh" "$(ARCH)"; \
+	ROOTFS_VARIANT="$$variant" "$(A)/scripts/build_img.sh" "$(ARCH)"; \
 	cp "$(A)/rootfs-$(ARCH).img" "$$disk"
 
 vf2:
