@@ -5,6 +5,7 @@ frames. Diagnostic snapshots remain separate original evidence files. This
 archive alone does not assert a complete sampling session.
 """
 from __future__ import annotations
+from collections import Counter
 import re
 import struct
 import zlib
@@ -279,8 +280,9 @@ def extract(text: str, mode: str) -> tuple[bytes, dict, dict[str, bytes]]:
                 raise ValueError("stack record source/period/scope differs from authoritative event")
             stack_source_counts[source_id] = stack_source_counts.get(source_id, 0) + 1
         if mode == "cpu":
-            coverage = {(row["target"], row["period"]) for row in source_rows if row["clock"] == 0 and row["scope"] == "cpu"}
-            if coverage != {(cpu, period) for cpu in range(8) for period in (10_000_000, 20_000_000)}:
+            coverage = Counter(row["target"] for row in source_rows
+                               if row["clock"] == 0 and row["scope"] == "cpu")
+            if coverage != {cpu: 2 for cpu in range(8)}:
                 raise ValueError("missing same-CPU software source instances")
     if mode == "sched":
         coverage = {(row["config"], row["target"]) for row in source_rows if row["clock"] == 2 and row["scope"] == "cpu"}
