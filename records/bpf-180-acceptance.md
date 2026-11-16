@@ -59,4 +59,6 @@ loaded-detached：RV -0.093%、LA +5.372%。这些是 QEMU 八 CPU / 8 GiB、
 三个依赖归档的自动测试已迁移且未削弱断言。
 见[保留策略](../docs/sampling-evidence-retention.md)和
 [删除清单及原 SHA](sampling-evidence-retention.json)。
-原包已退出当前树，摘要不具备完整回放能力；Git 历史未重写。
+原包已退出当前树，摘要不具备完整回放能力。初次清理未重写历史；维护者随后
+明确授权，现已完成[历史重写及远端同步](sampling-history-rewrite.json)。
+原构建身份仍按当时 SHA 记录，另有[旧新提交映射](sampling-history-commit-map.json)。

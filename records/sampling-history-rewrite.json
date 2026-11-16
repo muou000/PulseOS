@@ -1,0 +1,107 @@
+{
+  "date": "2026-11-16",
+  "scope": "remove only the 63 paths in sampling-evidence-retention.json from all affected branch history",
+  "path_count": 63,
+  "historical_blob_versions": 64,
+  "historical_blob_uncompressed_bytes": 219524220,
+  "commits_rewritten": 92,
+  "cleanup_commit": "44f95d7186f4d820ddef7144c237e976c2925ff1",
+  "original_cleanup_commit": "97083d136951627ebfcaf950bec77a2d4428d2b9",
+  "filter": {
+    "tool": "git-filter-repo 2.38.0",
+    "options": [
+      "--partial",
+      "--replace-refs delete-no-add",
+      "--prune-empty never",
+      "--prune-degenerate never",
+      "--preserve-commit-hashes",
+      "--invert-paths"
+    ],
+    "range": "all affected refs, excluding the unchanged common boundary before the first target archive",
+    "paths_manifest_sha256": "0dc5a6109a88a51f1f1a7177442e6e5a72308d7771d8c0e84df17f5a4706c359"
+  },
+  "remote_update": {
+    "method": "atomic force-with-lease with exact original SHA for each changed branch",
+    "refs": [
+      {
+        "ref": "refs/heads/fix/161-bind-propagation-coordination",
+        "old": "e107293e8a1f0e45bb31a62e29a3c225d275f9a5",
+        "new": "41861f37ea2d28ff31ca44fbaa7fb089b943c5bf",
+        "changed": true
+      },
+      {
+        "ref": "refs/heads/main",
+        "old": "a1a7e016bf135127172d564add38bdad51ff48f9",
+        "new": "44f95d7186f4d820ddef7144c237e976c2925ff1",
+        "changed": true
+      },
+      {
+        "ref": "refs/tags/rootfs-base-20260929",
+        "old": "399a381419278545ea599176353ad338e18bb696",
+        "new": "399a381419278545ea599176353ad338e18bb696",
+        "changed": false
+      }
+    ]
+  },
+  "verification": {
+    "refs_compared": 57,
+    "non_target_ref_trees_unchanged": true,
+    "cleanup_tree_byte_identical": true,
+    "old_blobs_absent_from_all_reachable_history": true,
+    "old_blobs_physically_absent_after_local_gc": true,
+    "fresh_remote_clone_contains_old_blobs": false,
+    "stash_entries_preserved": 3,
+    "stash_reflog_byte_identical": true,
+    "linked_worktrees": [
+      {
+        "path": "/tmp/pulse-156-baseline",
+        "old_head": "d93c66465bd362c70b3bb8de604b9f3326caf67d",
+        "new_head": "9230a8f36ef26bfd019d841c72979172282a96ac",
+        "removed_archives": 24,
+        "source_and_index_changes_preserved": true
+      },
+      {
+        "path": "/tmp/pulseos-136-base",
+        "old_head": "061efff6f7144002d12625fb93663e7295aaf4eb",
+        "new_head": "856f245eddce540bc098475ab7eeab72743713b2",
+        "removed_archives": 46,
+        "source_and_index_changes_preserved": true
+      },
+      {
+        "path": "/tmp/pulseos-136-negative",
+        "old_head": "5d298bf30ed2f3bb534050d2bf8d4a3519f2d9a9",
+        "new_head": "b70852f6c5bf6d2e0a3fe56f055728c44a11cdba",
+        "removed_archives": 46,
+        "source_and_index_changes_preserved": true
+      }
+    ],
+    "git_fsck_full": "passed",
+    "fresh_checkout_tests": {
+      "analyzer_build": "cargo build -p bpf-analyzer passed",
+      "python_recorder": 38,
+      "python_sampling": 110,
+      "optional_native_test_skipped_in_default_suite": 1,
+      "native_perf_pipeline_run_separately": 10,
+      "native_tools": "perf 6.8.12; pinned FlameGraph 41fee1f99f9276008b7cd112fca19dc3ea84ac32"
+    }
+  },
+  "size_measurement": {
+    "unit": "bytes",
+    "method": "sum logical byte lengths of regular files under each Git objects directory; before/after fresh bare clones use the same command and no shallow or partial clone filters",
+    "local_objects_before_bytes": 474383272,
+    "local_objects_after_bytes": 190184617,
+    "fresh_remote_clone_before_bytes": 404718517,
+    "fresh_remote_clone_after_bytes": 190856918,
+    "fresh_clone_reduction_percent": 52.84205936146974,
+    "scope": "after history rewrite and before this small documentation follow-up commit; excludes external recovery backup"
+  },
+  "recovery_backup": {
+    "path": "/home/muou/PulseOS-history-backup-20261116/git-metadata-before.tar",
+    "scope": "complete original Git metadata and objects outside the active repository; per-worktree index/diff/source snapshots and stash reflog are alongside it"
+  },
+  "limits": [
+    "GitHub hidden PR refs and caches may retain old objects until service-side collection.",
+    "Original build provenance IDs are intentionally retained; use sampling-history-commit-map.json to find rewritten commits.",
+    "Other clones must avoid merging or pushing the removed history back."
+  ]
+}

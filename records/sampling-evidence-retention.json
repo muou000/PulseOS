@@ -1,7 +1,7 @@
 {
   "date": "2026-11-16",
   "source_commit": "9169652f2c2f9118301832161c581d9d22f26906",
-  "scope": "historical sampling archives removed from the current tree; published Git history not rewritten",
+  "scope": "historical sampling archive removal manifest; subsequent branch history rewrite is recorded in sampling-history-rewrite.json",
   "removed_archives": [
     {
       "path": "records/issue210-validation.tar.gz",
