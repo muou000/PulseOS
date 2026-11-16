@@ -45,7 +45,8 @@ failed final journal. The fixture is built with frame pointers and contains
 three non-inlined nested functions; the gate requires an observed user chain of
 at least three frames and an observed kernel chain of at least three frames in
 the mixed workload, records user/kernel counts and every termination reason,
-and never synthesizes a chain. `mapping` waits for the production recorder to
+and never synthesizes a chain. Positive mapping-coverage gates reject any journal
+loss; overflow captures remain diagnostic partial files. `mapping` waits for the production recorder to
 enable before performing actual file mappings at byte offset 4096, mapped-file
 and task rename, fork, exec, remap, unmap, address reuse and exit. Its oracle
 checks those transitions against the unchanged raw journal. `recovery` remains
@@ -97,7 +98,8 @@ target/debug/bpf-analyzer sample.pbcapture --mapping-report --bundle bundle
 
 `--artifact-manifest` on the analyzer exposes only identities from a fully
 validated original capture. The collector verifies complete SHA256 and actual
-GNU notes, preserves known no-build-id as `null`, and reports missing files.
+GNU notes through the analyzer's `--elf-identity ARCH` stdin interface and shared
+guest/host decoder, preserves known no-build-id as `null`, and reports missing files.
 Paths in the journal are labels and never trigger implicit host file lookup.
 Optional debug objects must match their recorded SHA and GNU ID; separate debug
 objects also require the executable's recorded GNU ID. Additional symbol files

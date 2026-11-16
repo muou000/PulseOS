@@ -477,38 +477,77 @@ impl Drop for Mapping {
     }
 }
 
-pub struct MmapAllocator;
-// SAFETY: each successful allocation is a fresh page-aligned private mapping.
-// Unsupported alignment returns null, as GlobalAlloc permits; no metadata is
-// stored inside caller-owned memory. dealloc receives the identical Layout and
-// the uniquely owned original pointer under its GlobalAlloc caller contract.
-// No allocator method allocates, panics, unwinds, or invokes user callbacks.
-unsafe impl GlobalAlloc for MmapAllocator {
+// One process-lifetime reservation prevents allocator activity from generating
+// thousands of VMA revisions in the very mapping journal being observed.
+static HEAP: spin::Mutex<Option<bpf_record::arena::ArenaHeap>> = spin::Mutex::new(None);
+
+pub fn heap_resources() -> bpf_record::arena::HeapStats {
+    HEAP.lock()
+        .as_ref()
+        .map_or_else(Default::default, |heap| heap.stats())
+}
+
+pub struct ProcessAllocator;
+// SAFETY: the private mutex serializes lazy initialization and all buddy state.
+// Only one successfully initialized anonymous mapping enters HEAP, remains live
+// until process exit, and is never exposed except through disjoint allocator
+// blocks. ArenaHeap checks initialization/layout arithmetic and the opted-in
+// buddy heap preserves free-list ownership; caller-owned allocated bytes are
+// untouched until the matching dealloc. Failure returns null without a second
+// backing region. The lock, raw scalar syscalls and bounded buddy operations
+// allocate nothing, invoke no callbacks and have no reachable panic under these
+// invariants. This binary installs no userspace signal handlers that could
+// reenter the allocator; its signal handling uses blocked signals/signalfd.
+unsafe impl GlobalAlloc for ProcessAllocator {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        let size = layout.size();
-        if layout.align() > 4096 || size > isize::MAX as usize {
+        use bpf_record::arena::{ArenaHeap, MAX_ARENA_BYTES};
+        if layout.size() == 0
+            || layout
+                .size()
+                .checked_next_power_of_two()
+                .is_none_or(|size| size.max(layout.align()) > MAX_ARENA_BYTES)
+        {
             return core::ptr::null_mut();
         }
-        // SAFETY: private anonymous mapping, null hint, no user buffers.
-        let base = unsafe { raw(222, 0, size, 3, 0x22, usize::MAX, 0) };
-        if base <= 0 {
-            return core::ptr::null_mut();
-        }
-        if base as usize % 4096 != 0 {
-            // SAFETY: release the just-created exclusively owned mapping.
-            unsafe {
-                raw(215, base as usize, size, 0, 0, 0, 0);
+        let mut guard = HEAP.lock();
+        if guard.is_none() {
+            // SAFETY: mmap uses a null hint, anonymous private RW storage, no
+            // MAP_FIXED replacement and no input/output user-memory pointers.
+            let address = unsafe { raw(222, 0, MAX_ARENA_BYTES, 3, 0x22, usize::MAX, 0) };
+            if address < 0 {
+                return core::ptr::null_mut();
             }
-            return core::ptr::null_mut();
+            // SAFETY: successful anonymous mmap exclusively owns one writable
+            // MAX_ARENA_BYTES region. No pointer/reference to its bytes escaped.
+            // Once installed in static HEAP it is never unmapped until kernel
+            // process teardown, outliving every allocation on every thread.
+            let arena = unsafe { ArenaHeap::from_region(address as *mut u8, MAX_ARENA_BYTES) };
+            let Some(arena) = arena else {
+                // SAFETY: the failed constructor retained no region or block;
+                // this is precisely the still-exclusive successful mmap span.
+                unsafe {
+                    raw(215, address as usize, MAX_ARENA_BYTES, 0, 0, 0, 0);
+                }
+                return core::ptr::null_mut();
+            };
+            *guard = Some(arena);
         }
-        base as *mut u8
+        guard
+            .as_mut()
+            .and_then(|heap| heap.allocate(layout))
+            .map_or(core::ptr::null_mut(), |pointer| pointer.as_ptr())
     }
+
     unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
-        // SAFETY: GlobalAlloc caller promises ptr is a live block from alloc;
-        // the supplied layout is identical, so this unmaps exactly its original
-        // mapping (munmap rounds the byte extent to pages in the kernel ABI).
-        unsafe {
-            raw(215, ptr as usize, layout.size(), 0, 0, 0, 0);
+        let Some(pointer) = core::ptr::NonNull::new(ptr) else {
+            return;
+        };
+        if let Some(heap) = HEAP.lock().as_mut() {
+            // SAFETY: GlobalAlloc's caller supplies a currently live block from
+            // this allocator and its exact original Layout, with all accesses
+            // ended. The private arena is its unique owner and the mutex grants
+            // exclusive free-list access; this call retires that block once.
+            unsafe { heap.deallocate(pointer, layout) };
         }
     }
 }

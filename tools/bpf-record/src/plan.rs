@@ -560,7 +560,8 @@ impl SessionPlan {
              effective_period_ns={} frequency_conversion=ceil_ns effective_events={:?} \
              fallback={} duration_ms={} buffer_pages={} record_bytes={} requested_callchain={} \
              effective_callchain={} requested_stack_depth={} requested_stack_bytes={} \
-             effective_stack_depth={} effective_stack_bytes={} scratch_map_bytes={}",
+             effective_stack_depth={} effective_stack_bytes={} scratch_map_bytes={} \
+             process_heap_budget_bytes={}",
             self.options.events.join(","),
             self.options.cpus.as_deref().unwrap_or("all"),
             self.cpus,
@@ -592,6 +593,7 @@ impl SessionPlan {
             self.stack_depth,
             self.stack_bytes,
             self.scratch_bytes,
+            crate::arena::MAX_ARENA_BYTES,
         )
     }
 }
