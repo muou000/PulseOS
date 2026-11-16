@@ -70,6 +70,11 @@ checked independently against actual RAW samples. Metadata loss remains partial;
 the positive gate requires no metadata loss. Samples inside transitions remain
 unknown, including intervals before a pending TLB token completes.
 
+Combined `--stacks --mappings` runs request 50 ms and 100 ms periods for the two
+instances on each CPU. This keeps all mutation phases inside the existing 8 MiB
+archive budget; the manifest records those actual requested/effective periods.
+Other software sampling modes retain their 10 ms base period.
+
 The workload maps the current executable at byte offset 4096, calls a checked
 relocation-free loop at its new address, renames the executing file, forks and
 calls the inherited mapping, then execs a separately built ELF in the child.

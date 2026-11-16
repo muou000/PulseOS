@@ -173,7 +173,6 @@ def cases_script(directory: str, suite: str, duration: int) -> tuple[str, list[s
         record("dup-close", "task", "cpu", task=True, extra="--test-dup-close")
         record("bounded-export", "cpu", "cpu", cpus="0,1", period=1_000_000,
                buffer_pages=1, extra="--record-bytes 4096")
-        record("mixed", "cpu,cpu,task,sched,fault", "mixed", task=True)
         # An installed shell is an existing guest program, distinct from the
         # independent regression fixture and from the recorder itself.
         rows.extend(["sh -c 'i=0; while :; do i=$((i+1)); done' &", "target=$!", f"{fixture} sleep 100"])
@@ -182,6 +181,8 @@ def cases_script(directory: str, suite: str, duration: int) -> tuple[str, list[s
         record("sigint", "cpu", "cpu", signal=2)
         record("sigterm", "fault", "fault", signal=15)
         record("target-exit", "task", "cpu", task=True, target_exit=True)
+    if suite in ("mixed", "lifecycle", "full"):
+        record("mixed", "cpu,cpu,task,sched,fault", "mixed", task=True)
     if suite in ("negative", "full"):
         base = f"--events cpu --duration-ms {duration} --output rejected.pbcapture"
         for label, options in (
@@ -631,7 +632,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("action", choices=("build-fixture", "guest"))
     parser.add_argument("--arch", choices=tuple(ARCHES), required=True)
-    parser.add_argument("--suite", choices=("smoke", "lifecycle", "negative", "benchmark", "existing", "recovery", "full"), default="smoke")
+    parser.add_argument("--suite", choices=("smoke", "mixed", "lifecycle", "negative", "benchmark", "existing", "recovery", "full"), default="smoke")
     parser.add_argument("--duration-ms", type=int, default=1000)
     parser.add_argument("--recorder", type=Path)
     parser.add_argument("--kernel", type=Path)

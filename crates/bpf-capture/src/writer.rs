@@ -368,7 +368,8 @@ impl CaptureWriter {
         if let Some(diagnostics) = &self.diagnostics { diagnostics.validate()?; }
         if let Some(mappings) = &self.mappings { mappings.validate()?; }
         let mut metadata = self.session.stop(stop_ns)?;
-        let diagnostics = self.diagnostics.as_ref().cloned().unwrap_or_default();
+        let unknown_diagnostics = RuntimeDiagnostics::default();
+        let diagnostics = self.diagnostics.as_ref().unwrap_or(&unknown_diagnostics);
         let status = diagnostics.status();
         if self.records_count == 0 || status == SessionStatusCode::IncompleteError {
             metadata.status = SessionStatusCode::IncompleteError;
@@ -389,7 +390,8 @@ impl CaptureWriter {
 
     fn encode_metadata(&self, metadata: &SessionMetadata) -> Result<Vec<u8>, CaptureError> {
         let recorder = self.recorder.as_ref().ok_or(CaptureError::InvalidRecord("capture requires source declarations"))?;
-        let diagnostics = self.diagnostics.as_ref().cloned().unwrap_or_default().to_bytes()?;
+        let unknown_diagnostics = RuntimeDiagnostics::default();
+        let diagnostics = self.diagnostics.as_ref().unwrap_or(&unknown_diagnostics).to_bytes()?;
         let mappings = self.mappings.as_ref().map(crate::mapping::MappingMetadata::to_bytes).transpose()?.unwrap_or_default();
         let sources = recorder.to_bytes();
         let mut bytes = self.registry.to_bytes();
