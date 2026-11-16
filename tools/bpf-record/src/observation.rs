@@ -7,7 +7,9 @@ use alloc::{format, string::String, vec::Vec};
 
 use bpf_capture::{
     CounterKind, DiagnosticCounter, DiagnosticIdentity, RuntimeDiagnostics,
-    mapping::{Artifact, KernelArtifact, MappingMetadata, valid_sha},
+    mapping::{
+        Artifact, KernelArtifact, MappingCoverage, MappingJournal, MappingMetadata, valid_sha,
+    },
 };
 use sha2::{Digest, Sha256};
 
@@ -16,7 +18,7 @@ pub const KERNEL_ELF_READ_LIMIT: usize = 128 * 1024 * 1024;
 
 pub struct Observation {
     initial: String,
-    initial_cut: u64,
+    initial_coverage: MappingCoverage,
     initial_hash: String,
     kernel_id: Option<String>,
     kernel: Option<KernelArtifact>,
@@ -69,7 +71,10 @@ fn build_id(value: &str) -> bool {
 
 fn add_artifacts(journal: &str, artifacts: &mut Vec<Artifact>) -> Result<u64, String> {
     let mut unknown = 0;
-    for line in journal.lines().filter(|line| line.starts_with("OBJECT ")) {
+    for line in journal
+        .lines()
+        .filter(|line| line.split_ascii_whitespace().next() == Some("OBJECT"))
+    {
         let sha = field(line, "sha256").ok_or("missing object SHA identity")?;
         let id = field(line, "build_id").unwrap_or("unknown");
         if sha == "unknown" || id == "unknown" {
@@ -100,97 +105,39 @@ fn add_artifacts(journal: &str, artifacts: &mut Vec<Artifact>) -> Result<u64, St
     Ok(unknown)
 }
 
-struct JournalSummary<'a> {
-    cut: u64,
-    dropped: u64,
-    body: &'a str,
-}
-impl<'a> JournalSummary<'a> {
-    /// Framing and immutable ordering validation without per-field allocation.
-    /// Full mapping semantics are also checked by CaptureWriter before output.
-    fn parse(text: &'a str) -> Result<Self, String> {
-        if text.len() > JOURNAL_READ_LIMIT || !text.ends_with('\n') {
-            return Err("mapping journal exceeds bound or lacks terminator".into());
-        }
-        let (header, rest) = text.split_once('\n').ok_or("missing mapping header")?;
-        let (body, trailer) = rest.rsplit_once("END ").ok_or("missing mapping trailer")?;
-        if !header.starts_with("PULSE_BPF_MAPPINGS ")
-            || number(header, "version")? != 2
-            || number(header, "available")? != 1
-            || trailer.trim_end().contains('\n')
-        {
-            return Err("invalid mapping snapshot".into());
-        }
-        let cut = number(header, "snapshot_ns")?;
-        let dropped = number(header, "dropped")?;
-        let count = number(header, "records")?;
-        let footer = &text[text.len() - trailer.len() - 4..];
-        if number(header, "started_ns")? != 0
-            || count > 262144
-            || number(footer, "snapshot_ns")? != cut
-            || number(footer, "dropped")? != dropped
-            || number(footer, "records")? != count
-        {
-            return Err("mapping snapshot boundary mismatch".into());
-        }
-        let mut lines = body.lines();
-        let mut records = 0;
-        let mut sequence = 0;
-        let mut timestamp = 0;
-        while let Some(line) = lines.next() {
-            let kind = line
-                .split_ascii_whitespace()
-                .next()
-                .ok_or("empty mapping row")?;
-            if !matches!(
-                kind,
-                "OBJECT" | "KERNEL" | "SPACE" | "TASK" | "MUTATION" | "TLB"
-            ) {
-                return Err("invalid mapping row kind".into());
-            }
-            let next = number(line, "seq")?;
-            let time = number(line, "ts")?;
-            if next <= sequence
-                || dropped == 0 && next != sequence + 1
-                || time < timestamp
-                || time > cut
-            {
-                return Err("unordered mapping journal".into());
-            }
-            sequence = next;
-            timestamp = time;
-            records += 1;
-            if kind == "SPACE" {
-                let maps = number(line, "count")?;
-                if maps > 262144 {
-                    return Err("mapping count exceeds bound".into());
-                }
-                for _ in 0..maps {
-                    if !lines.next().is_some_and(|line| line.starts_with("MAP ")) {
-                        return Err("truncated mapping snapshot".into());
-                    }
-                }
-                if lines.next() != Some("ENDSPACE") {
-                    return Err("missing mapping snapshot boundary".into());
-                }
-            }
-        }
-        if records != count {
-            return Err("mapping journal record count mismatch".into());
-        }
-        Ok(Self { cut, dropped, body })
+fn journal_body(text: &str) -> Result<&str, String> {
+    // Use the actual first/last line extents, preserving original record bytes
+    // and line endings. The shared parser allows tabs and CRLF as whitespace,
+    // and does not require a newline after the footer.
+    let mut lines = text.split_inclusive('\n');
+    let header = lines.next().ok_or("missing mapping header line")?;
+    let footer = lines.next_back().ok_or("missing mapping footer line")?;
+    if header.split_ascii_whitespace().next() != Some("PULSE_BPF_MAPPINGS")
+        || footer.split_ascii_whitespace().next() != Some("END")
+    {
+        return Err("invalid mapping boundary lines".into());
     }
+    let end = text
+        .len()
+        .checked_sub(footer.len())
+        .ok_or("invalid mapping footer extent")?;
+    text.get(header.len()..end)
+        .ok_or("invalid mapping body extent".into())
 }
 
 impl Observation {
     /// Freeze mapping facts before enabling any source. An explicitly supplied
     /// kernel candidate is accepted only after matching the running GNU note.
     pub fn begin(initial: String, kernel_elf: Option<&[u8]>) -> Result<Self, String> {
-        let cut = JournalSummary::parse(&initial)?.cut;
+        if initial.len() > JOURNAL_READ_LIMIT {
+            return Err("mapping journal exceeds read limit".into());
+        }
+        let initial_coverage = MappingJournal::validate(&initial)
+            .map_err(|error| format!("invalid initial mapping journal: {error:?}"))?;
         let mut result = Self {
             initial_hash: hex(&Sha256::digest(initial.as_bytes())),
             initial,
-            initial_cut: cut,
+            initial_coverage,
             kernel_id: None,
             kernel: None,
             kernel_artifact: None,
@@ -198,7 +145,7 @@ impl Observation {
         let mut kernels = result
             .initial
             .lines()
-            .filter(|line| line.starts_with("KERNEL "));
+            .filter(|line| line.split_ascii_whitespace().next() == Some("KERNEL"));
         let kernel = kernels.next();
         if kernels.next().is_some() {
             return Err("duplicate kernel mapping identity".into());
@@ -260,7 +207,7 @@ impl Observation {
     }
 
     pub fn initial_snapshot_ns(&self) -> u64 {
-        self.initial_cut
+        self.initial_coverage.snapshot_ns
     }
     pub fn kernel_sha256(&self) -> Option<&str> {
         self.kernel.as_ref().map(|kernel| kernel.sha256.as_str())
@@ -272,27 +219,27 @@ impl Observation {
     pub fn finish(self, final_journal: Result<String, String>) -> ObservationResult {
         let mut errors = Vec::new();
         let final_journal = final_journal.and_then(|text| {
-            let last = JournalSummary::parse(&text)?;
-            let first = JournalSummary::parse(&self.initial)?;
-            if last.cut < first.cut
-                || last.dropped < first.dropped
-                || !last.body.starts_with(first.body)
+            if text.len() > JOURNAL_READ_LIMIT {
+                return Err("mapping journal exceeds read limit".into());
+            }
+            let last = MappingJournal::validate(&text)
+                .map_err(|error| format!("invalid final mapping journal: {error:?}"))?;
+            if last.started_ns != self.initial_coverage.started_ns
+                || last.snapshot_ns < self.initial_coverage.snapshot_ns
+                || last.dropped < self.initial_coverage.dropped
+                || !journal_body(&text)?.starts_with(journal_body(&self.initial)?)
             {
                 return Err("mapping final journal changed initial facts".into());
             }
-            Ok(text)
+            Ok((text, last))
         });
-        let (journal, final_cut) = match final_journal {
-            Ok(text) => {
-                let cut = JournalSummary::parse(&text).unwrap().cut;
-                (text, Some(cut))
-            }
+        let (journal, final_cut, dropped) = match final_journal {
+            Ok((text, coverage)) => (text, Some(coverage.snapshot_ns), coverage.dropped),
             Err(error) => {
                 errors.push(error);
-                (self.initial, None)
+                (self.initial, None, self.initial_coverage.dropped)
             }
         };
-        let dropped = JournalSummary::parse(&journal).unwrap().dropped;
         let mut artifacts = Vec::new();
         if let Some(artifact) = self.kernel_artifact {
             artifacts.push(artifact);
@@ -317,7 +264,7 @@ impl Observation {
         for (name, value, kind) in [
             (
                 "mapping_initial_snapshot_ns",
-                Some(self.initial_cut),
+                Some(self.initial_coverage.snapshot_ns),
                 CounterKind::Activity,
             ),
             (

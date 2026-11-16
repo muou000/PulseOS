@@ -272,28 +272,43 @@ pub struct SourcePlan {
     pub period_ns: u64,
     pub kind: RecorderKind,
 }
+struct ContextLayout {
+    event_id: u32,
+    bytes: usize,
+    schema_version: u32,
+}
 impl SourcePlan {
-    pub fn event_id(&self) -> u32 {
+    fn context_layout(&self) -> ContextLayout {
         match self.kind {
-            RecorderKind::SoftwareStackV3 => bpf_capture::schema::PERF_EVENT_SOFTWARE_STACK_V3_ID,
-            RecorderKind::SoftwareV2 => bpf_capture::schema::PERF_EVENT_SOFTWARE_V2_ID,
-            _ => self.event.config() as u32,
+            RecorderKind::SoftwareStackV3 => ContextLayout {
+                event_id: bpf_capture::schema::PERF_EVENT_SOFTWARE_STACK_V3_ID,
+                bytes: PerfStackSampleContext::SIZE,
+                schema_version: 3,
+            },
+            RecorderKind::SoftwareV2 => ContextLayout {
+                event_id: bpf_capture::schema::PERF_EVENT_SOFTWARE_V2_ID,
+                bytes: 64,
+                schema_version: 2,
+            },
+            RecorderKind::Tracepoint | RecorderKind::Normalized => ContextLayout {
+                event_id: self.event.config() as u32,
+                bytes: if self.kind == RecorderKind::Tracepoint {
+                    self.event.context_size()
+                } else {
+                    0
+                },
+                schema_version: 1,
+            },
         }
+    }
+    pub fn event_id(&self) -> u32 {
+        self.context_layout().event_id
     }
     pub fn context_size(&self) -> usize {
-        match self.kind {
-            RecorderKind::SoftwareStackV3 => PerfStackSampleContext::SIZE,
-            RecorderKind::SoftwareV2 => 64,
-            RecorderKind::Tracepoint => self.event.context_size(),
-            RecorderKind::Normalized => 0,
-        }
+        self.context_layout().bytes
     }
     pub fn schema_version(&self) -> u32 {
-        match self.kind {
-            RecorderKind::SoftwareStackV3 => 3,
-            RecorderKind::SoftwareV2 => 2,
-            _ => 1,
-        }
+        self.context_layout().schema_version
     }
 }
 

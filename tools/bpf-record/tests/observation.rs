@@ -138,3 +138,56 @@ fn journal_exhaustion_stays_loss_even_when_a_final_cut_exists() {
     assert!(result.diagnostics.counters.iter().any(|counter|
         counter.name == "mapping_final_snapshot_ns" && counter.value == Some(20)));
 }
+
+#[test]
+fn invalid_mapping_semantics_are_rejected_before_sources_can_enable() {
+    let invalid = "PULSE_BPF_MAPPINGS version=2 available=1 started_ns=0 snapshot_ns=10 dropped=0 \
+                   records=1\nSPACE seq=1 ts=1 begin_ns=1 space=1 revision=1 count=1\nMAP \
+                   start=4096 len=4096 pgoff=0 perms=16 object=0\nENDSPACE\nEND records=1 \
+                   dropped=0 snapshot_ns=10\n";
+    assert!(Observation::begin(invalid.into(), None).is_err());
+    let initial = journal(10, "");
+    let result = Observation::begin(initial.clone(), None)
+        .unwrap()
+        .finish(Ok(invalid.into()));
+    assert_eq!(result.mappings.journal, initial);
+    assert_eq!(result.errors.len(), 1);
+}
+
+#[test]
+fn accepted_journal_whitespace_keeps_raw_boundaries_and_artifact_identity() {
+    let sha = "ab".repeat(32);
+    for newline in ["\n", "\r\n"] {
+        for terminated in [false, true] {
+            let style = |text: String| {
+                let mut text = text.replace(' ', "\t").replace('\n', newline);
+                if !terminated {
+                    text.truncate(text.len() - newline.len());
+                }
+                text
+            };
+            let initial = style(journal(10, ""));
+            let final_journal = style(journal(
+                20,
+                &format!(
+                    "OBJECT seq=2 ts=12 object=1 sha256={sha} build_id=none \
+                     path_hex=2f746172676574\n"
+                ),
+            ));
+            let result = Observation::begin(initial, None)
+                .unwrap()
+                .finish(Ok(final_journal.clone()));
+            assert!(result.errors.is_empty(), "{:?}", result.errors);
+            assert_eq!(result.mappings.journal, final_journal);
+            assert_eq!(result.mappings.artifacts[0].sha256, sha);
+
+            let initial = style(journal(10, "").replace("build_id=unknown", "build_id=01020304"));
+            assert_eq!(
+                Observation::begin(initial, Some(&kernel_elf()))
+                    .unwrap()
+                    .kernel_build_id(),
+                Some("01020304")
+            );
+        }
+    }
+}
