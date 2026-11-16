@@ -22,6 +22,14 @@ impl SampleWeight {
             Self::Period => "period_ns",
         }
     }
+
+    /// Weight only real CPU samples; an empty selection has no synthetic row.
+    pub fn value(self, event: &NormalizedEvent) -> Option<u64> {
+        event.sample_period().map(|period| match self {
+            Self::Samples => 1,
+            Self::Period => period,
+        })
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
