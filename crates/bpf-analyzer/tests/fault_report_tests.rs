@@ -266,6 +266,8 @@ fn raw_classification_reaches_capture_report_table_and_timeline_without_inferenc
         SessionStatusCode::Complete).unwrap();
     let config = CaptureReader::from_bytes(&fixture).unwrap().metadata.config;
     let mut writer = CaptureWriter::new(config, SchemaRegistry::default_pulse_registry());
+    writer.configure_recorder(vec![support::source(7, bpf_capture::RecorderKind::Tracepoint,
+        TracepointId::PageFault as u32, 1, 2, 1, 123, 90, 1000)], 4096).unwrap();
     writer.start(90).unwrap();
     for (outcome, classification, address, end) in [
         (Outcome::Resolved, Class::Major, 0x400000, 101),
@@ -276,7 +278,7 @@ fn raw_classification_reaches_capture_report_table_and_timeline_without_inferenc
         let raw = PageFaultContext::from_classified_completion(
             ContextCommon::new(TracepointId::PageFault, end, 2, 40, 41, 99),
             address, 100, 1, PageFaultOrigin::User, outcome, classification).unwrap().to_bytes();
-        writer.ingest_perf_sample_as(2, &raw, NativeContextFormat::Tracepoint).unwrap();
+        writer.ingest_perf_sample_as(7, 2, &raw, NativeContextFormat::Tracepoint).unwrap();
     }
     let analyzer = CaptureAnalyzer::from_bytes(&writer.finish(1000).unwrap()).unwrap();
     let report = analyzer.fault_report();
@@ -292,3 +294,5 @@ fn raw_classification_reaches_capture_report_table_and_timeline_without_inferenc
     assert!(qualities.contains(&(200, "observed_closed_unknown_classification")));
     assert!(qualities.contains(&(300, "observed_closed_not_applicable")));
 }
+
+mod support;

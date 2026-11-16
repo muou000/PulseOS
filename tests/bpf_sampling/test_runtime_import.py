@@ -17,7 +17,7 @@ import unittest
 import zlib
 
 import archive
-from test_archive import fixture
+from test_archive import fixture, sample_frame
 
 REPO = Path(__file__).resolve().parents[2]
 IMPORTER = REPO / "target/debug/examples/runtime_import"
@@ -72,6 +72,27 @@ class RuntimeImportTests(unittest.TestCase):
             "kernel_elf_matches_boot": True,
         }
 
+    def test_importer_requires_explicit_record_source_binding(self):
+        # Missing typed logical provenance must never be recovered from the
+        # single task, CPU, sample period or diagnostic identity strings.
+        for source in self.metadata["sources"]:
+            source.pop("logical_id", None)
+        self.assert_rejected("logical_id")
+
+    def test_unknown_stamped_id_is_not_recovered_from_matching_task_and_period(self):
+        raw = bytearray(self.raw)
+        frame = 64 + 24
+        struct.pack_into("<I", raw, frame + 24, 99)
+        size = struct.unpack_from("<H", raw, frame + 6)[0]
+        struct.pack_into("<I", raw, 64 + 16, zlib.crc32(raw[frame:frame + size]))
+        self.reseal_raw(raw)
+        (self.directory / "records.pbraw").write_bytes(raw)
+        self.assert_rejected("undeclared recorder source")
+
+    def test_typed_source_control_window_cannot_exclude_retained_samples(self):
+        self.metadata["sources"][0].update(disable_before=150, disable_after=160)
+        self.assert_rejected("outside source control window")
+
     def test_mixed_scheduler_capture_preserves_records_and_programs(self):
         from test_sched_archive import fixture_sched
         raw, self.metadata, _ = archive.extract(fixture_sched(), 'sched')
@@ -97,8 +118,8 @@ class RuntimeImportTests(unittest.TestCase):
         # native/source validation, bypassing the Python extraction checks.
         raw = bytearray(self.raw)
         frame = 64 + 24
-        struct.pack_into(format, raw, frame + 12 + offset, value)
-        struct.pack_into("<I", raw, 64 + 16, zlib.crc32(raw[frame:frame + 656]))
+        struct.pack_into(format, raw, frame + 36 + offset, value)
+        struct.pack_into("<I", raw, 64 + 16, zlib.crc32(raw[frame:frame + 680]))
         self.reseal_raw(raw)
         (self.directory / "records.pbraw").write_bytes(raw)
 
@@ -106,7 +127,7 @@ class RuntimeImportTests(unittest.TestCase):
         self.seed_stack()
         self.assert_imported()
         data = self.output.read_bytes()
-        self.assertEqual(struct.unpack_from("<I", data, 8)[0], 3)
+        self.assertEqual(struct.unpack_from("<I", data, 8)[0], 6)
         summary = self.summary()
         sample = summary["stack_samples"][0]["sample"]
         self.assertEqual(sample["source_id"], 13)
@@ -153,7 +174,7 @@ class RuntimeImportTests(unittest.TestCase):
                 snapshot["events"][100+index] = event
                 if point == "before":
                     row = copy.deepcopy(prototype)
-                    row.update(fd=100+index, event_id=100+index)
+                    row.update(fd=100+index, event_id=100+index, logical_id=index+1, scope=1, target=index//2, bound_task_id=0, config=1, requested_config=1, link_id=200+index)
                     self.metadata["sources"].append(row)
             snapshot["programs"][5]["runs"] = 2 if point == "after" else 0
             for cpu in range(8):
@@ -162,10 +183,10 @@ class RuntimeImportTests(unittest.TestCase):
                                       timer_dequeued=2 if point == "after" else 0)
         stream = bytearray()
         for index in range(2):
-            context = bytearray(self.raw[100:740])
+            context = bytearray(self.raw[124:764])
             struct.pack_into("<I", context, 24, 0)
             struct.pack_into("<Q", context, 64, 100 if duplicate else 100+index)
-            frame = struct.pack("<IHHI", 9, 0, 656, 640) + context + bytes(4)
+            frame = sample_frame(1 if duplicate else index+1, 3, context)
             stream.extend(struct.pack("<QIIII", index, 0, len(frame), zlib.crc32(frame), 0) + frame)
         raw = bytearray(self.raw[:64]) + stream
         struct.pack_into("<Q", raw, 24, 2)
@@ -256,9 +277,9 @@ class RuntimeImportTests(unittest.TestCase):
                 self.seed_fault()
                 raw = bytearray(self.raw)
                 frame_start = 64 + 24
-                struct.pack_into("<II", raw, frame_start + 12 + 72, outcome, classification)
+                struct.pack_into("<II", raw, frame_start + 36 + 72, outcome, classification)
                 struct.pack_into("<I", raw, 64 + 16,
-                                 zlib.crc32(raw[frame_start:frame_start + 96]))
+                                 zlib.crc32(raw[frame_start:frame_start + 120]))
                 self.reseal_raw(raw)
                 (self.directory / "records.pbraw").write_bytes(raw)
                 self.assert_rejected("fault completion")
@@ -305,14 +326,14 @@ class RuntimeImportTests(unittest.TestCase):
         self.seed_fault()
         for point in ("before","after"):
             self.metadata["snapshots"][point]["events"][20]["config"]=2
-        self.assert_rejected("fault source")
+        self.assert_rejected("typed source differs")
 
     def test_fault_import_rejects_timing_corruption_even_with_resealed_envelopes(self):
         self.seed_fault()
         raw=bytearray(self.raw)
         frame_start=64+24
-        struct.pack_into("<Q",raw,frame_start+12+56,11)
-        struct.pack_into("<I",raw,64+16,zlib.crc32(raw[frame_start:frame_start+96]))
+        struct.pack_into("<Q",raw,frame_start+36+56,11)
+        struct.pack_into("<I",raw,64+16,zlib.crc32(raw[frame_start:frame_start+120]))
         self.reseal_raw(raw)
         (self.directory/"records.pbraw").write_bytes(raw)
         self.assert_rejected("fault completion")
@@ -370,7 +391,7 @@ class RuntimeImportTests(unittest.TestCase):
         self.assertEqual(summary["consumer_projection"]["delivered"], 3)
         data = self.output.read_bytes()
         self.assertEqual(data[:8], b"PBCAP001")
-        self.assertEqual(struct.unpack_from("<I", data, 8)[0], 2)
+        self.assertEqual(struct.unpack_from("<I", data, 8)[0], 6)
         position, count = struct.unpack_from("<QQ", data, 40)
         self.assertEqual(count, 3)
         for index in range(3):

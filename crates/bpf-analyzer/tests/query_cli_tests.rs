@@ -7,7 +7,7 @@ use std::{
 };
 
 use bpf_capture::{
-    CaptureArch, CaptureReader, CaptureWriter, NormalizedRecord, SchemaRegistry, SessionStatusCode,
+    CaptureArch, CaptureReader, NormalizedRecord, SchemaRegistry, SessionStatusCode,
 };
 
 static NEXT: AtomicU64 = AtomicU64::new(0);
@@ -233,7 +233,7 @@ fn all_cli_renderers_share_phase_tid_time_and_weight() {
     assert_eq!(number(&json, "context_records_count"), 7);
     assert_eq!(number(&json, "perf_sample_v2"), 2);
     let folded = fs::read_to_string(on).unwrap();
-    assert_eq!(folded, "new;[user];pc:0x3000 30\nold;[user];pc:0x2000 10\n");
+    assert_eq!(folded, "[INCOMPLETE_CAPTURE];new;[user];pc:0x3000 30\n[INCOMPLETE_CAPTURE];old;[user];pc:0x2000 10\n");
     assert_eq!(fs::read_to_string(off).unwrap(), "");
     let mut args = filter.to_vec();
     args.push("--table");
@@ -468,7 +468,7 @@ fn task_names_cannot_inject_extra_folded_stacks_or_weights() {
     let path = f.dir.join("on.folded");
     stdout(&f.cli(&["--oncpu", path.to_str().unwrap()]));
     let folded = fs::read_to_string(path).unwrap();
-    assert_eq!(folded, "bad%3Bx%0Afake 9;[user];pc:0x1000 1\n");
+    assert_eq!(folded, "[INCOMPLETE_CAPTURE];bad%3Bx%0Afake 9;[user];pc:0x1000 1\n");
 }
 
 #[test]
@@ -731,7 +731,7 @@ fn privilege_query_selects_explicit_sample_mode_and_fault_origin() {
         assert!(!json.contains("\"task_block\""));
         assert_eq!(
             fs::read_to_string(file).unwrap(),
-            format!("worker;[{mode}];pc:0x1000 {weight}\n")
+            format!("[INCOMPLETE_CAPTURE];worker;[{mode}];pc:0x1000 {weight}\n")
         );
     }
     let unknown = Fixture::new(vec![opaque_record(10), block(20)]);
@@ -1211,7 +1211,7 @@ fn typed_phase_and_stream_markers_must_agree_without_ambiguous_precedence() {
 }
 
 #[test]
-fn published_runtime_capture_phase_is_usable_without_injected_markers() {
+fn historical_archive_retains_its_identity_and_is_not_accepted_as_current_capture() {
     let f = Fixture::new(Vec::new());
     let evidence =
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tests/bpf_sampling/evidence/191");
@@ -1234,11 +1234,10 @@ pathlib.Path(sys.argv[2]).write_bytes(raw)
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
-    let json = stdout(&f.cli(&["--phase", "attached_capture", "--json"]));
-    assert_eq!(number(&json, "records_count"), 82);
-    assert!(json.contains("\"phase_source\":\"runtime_diagnostics\""));
-    let baseline = stdout(&f.cli(&["--phase", "baseline", "--json"]));
-    assert_eq!(number(&baseline, "records_count"), 0);
+    let result = f.cli(&["--phase", "attached_capture", "--json"]);
+    assert!(!result.status.success());
+    assert!(String::from_utf8_lossy(&result.stderr).contains("UnsupportedFormatVersion(2)"));
+
 }
 
 #[test]
@@ -1272,3 +1271,7 @@ assert sample['semantic']['addr']==4096 and sample['semantic']['ip']==36864
 "#,
     );
 }
+
+use support::SemanticFixture as CaptureWriter;
+
+mod support;

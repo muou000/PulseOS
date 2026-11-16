@@ -8,6 +8,7 @@ import unittest
 from unittest.mock import patch
 import zlib
 import stack_evidence
+from test_archive import sample_frame
 
 
 class StackEvidenceIdentityTests(unittest.TestCase):
@@ -31,7 +32,7 @@ class StackEvidenceIdentityTests(unittest.TestCase):
             struct.pack_into('<QQQIIIIQQII',context,0,10_000_000,0,200+sequence,0,41 if foreign else 40,42 if foreign else 41,0,99,ip,mode,2)
             struct.pack_into('<QQQQQHHHHIIQ',context,64,sequence+1,0x10000,0x10010,0,5,3,32,len(ips),status,16*(len(ips)-1),512,0)
             struct.pack_into(f'<{len(ips)}Q',context,128,*ips)
-            frame=struct.pack('<IHHI',9,0,656,640)+context+bytes(4)
+            frame=sample_frame(sequence+1, 3, context)
             raw.extend(struct.pack('<QIIII',sequence,0,len(frame),zlib.crc32(frame),0)+frame)
         (directory/'records.pbraw').write_bytes(struct.pack('<8sQQQQII16x',b'PBRW0001',100,300,len(records),len(raw),zlib.crc32(raw),0)+raw)
         # ELF parsing itself is independently performed against deployed files;

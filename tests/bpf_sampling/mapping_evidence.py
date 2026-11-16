@@ -198,12 +198,13 @@ def extract_and_verify(run: Path, text: str) -> dict:
         offset += size
         if struct.unpack_from('<I', frame)[0] != 9:
             continue
-        payload = frame[12:]
+        logical_id, kind, payload = archive.source_context(frame)
+        if kind not in (1, 3):
+            raise ValueError("mapping evidence requires declared software records")
         timestamp, = struct.unpack_from('<Q', payload, 16)
         pid, tid = struct.unpack_from('<II', payload, 28)
         task, ip, mode = struct.unpack_from('<QQI', payload, 40)
-        raw_length, = struct.unpack_from('<I', frame, 8)
-        source_id = struct.unpack_from('<Q', payload, 64)[0] if raw_length == 640 else None
+        source_id = struct.unpack_from('<Q', payload, 64)[0] if kind == 3 else None
         if mode != 2:
             continue
         for row in markers:

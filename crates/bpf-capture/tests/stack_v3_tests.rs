@@ -1,3 +1,4 @@
+mod support;
 use bpf_capture::{CaptureArch, CaptureReader, CaptureWriter, NativeContextFormat, NormalizedRecord,
     SchemaRegistry, SessionStatusCode};
 use bpf_capture::framing::{compute_checksum_ieee, CaptureError, CaptureHeader};
@@ -26,13 +27,18 @@ fn writer() -> CaptureWriter {
     let fixture = bpf_capture::generate_deterministic_fixture(CaptureArch::Riscv64, SessionStatusCode::Complete).unwrap();
     let config = CaptureReader::from_bytes(&fixture).unwrap().metadata.config;
     let mut writer = CaptureWriter::new(config, SchemaRegistry::default_pulse_registry());
+    let sources = [(7, 123), (8, 124)].map(|(id, kernel_event_id)| bpf_capture::RecorderSource {
+        kind: bpf_capture::RecorderKind::SoftwareStackV3, event_id: 0x1002,
+        schema_version: 3, kernel_event_id, ..support::software(id, 3, 10, 100, 300)
+    });
+    writer.configure_recorder(sources.to_vec(), 4096).unwrap();
     writer.start(100).unwrap();
     writer
 }
 fn capture() -> Vec<u8> {
     let mut writer = writer();
-    writer.ingest_perf_sample_as(3, &context(123), NativeContextFormat::SoftwareStackV3).unwrap();
-    writer.ingest_perf_sample_as(3, &context(124), NativeContextFormat::SoftwareStackV3).unwrap();
+    writer.ingest_perf_sample_as(7, 3, &context(123), NativeContextFormat::SoftwareStackV3).unwrap();
+    writer.ingest_perf_sample_as(8, 3, &context(124), NativeContextFormat::SoftwareStackV3).unwrap();
     writer.finish(300).unwrap()
 }
 fn checksum(bytes: &mut [u8]) {
@@ -45,7 +51,7 @@ fn checksum(bytes: &mut [u8]) {
 fn stack_capture_preserves_frozen_prefix_and_same_cpu_source_instances() {
     let bytes = capture();
     let data = CaptureReader::from_bytes(&bytes).unwrap();
-    assert_eq!(data.header.format_version, 3);
+    assert_eq!(data.header.format_version, 6);
     assert_eq!(data.records.len(), 2);
     for (record, id) in data.records.iter().zip([123,124]) {
         assert_eq!((record.event_id,record.schema_version,record.payload.len()),(0x1002,3,608));
@@ -70,8 +76,8 @@ fn unknown_required_extensions_and_future_native_versions_fail_closed() {
         assert!(CaptureReader::from_bytes(&bad).is_err());
     }
     let mut future = bytes.clone();
-    future[8..12].copy_from_slice(&6u32.to_le_bytes());
-    assert_eq!(CaptureReader::from_bytes(&future).unwrap_err(),CaptureError::UnsupportedFormatVersion(6));
+    future[8..12].copy_from_slice(&7u32.to_le_bytes());
+    assert_eq!(CaptureReader::from_bytes(&future).unwrap_err(),CaptureError::UnsupportedFormatVersion(7));
     for offset in [104,120] {
         let mut raw=context(123); raw[offset]=7;
         assert!(NormalizedRecord::from_software_stack_v3_slice(&raw).is_err());
@@ -88,8 +94,8 @@ fn malformed_chain_fields_and_wrong_declared_context_are_rejected() {
         assert!(NormalizedRecord::from_software_stack_v3_slice(&raw).is_err(),"offset={offset}");
     }
     let mut writer=writer();
-    assert!(writer.ingest_perf_sample_as(3,&context(123),NativeContextFormat::PerfEventV2).is_err());
-    assert!(writer.ingest_perf_sample_as(2,&context(123),NativeContextFormat::SoftwareStackV3).is_err());
+    assert!(writer.ingest_perf_sample_as(7, 3,&context(123),NativeContextFormat::PerfEventV2).is_err());
+    assert!(writer.ingest_perf_sample_as(7, 2,&context(123),NativeContextFormat::SoftwareStackV3).is_err());
 }
 
 #[test]
@@ -103,20 +109,20 @@ fn stack_record_cannot_be_downgraded_into_legacy_container() {
     bytes[40..48].copy_from_slice(&(h.records_offset-8).to_le_bytes());
     bytes[64..72].copy_from_slice(&(h.trailer_offset-8).to_le_bytes());
     checksum(&mut bytes);
-    assert!(matches!(CaptureReader::from_bytes(&bytes),Err(CaptureError::InvalidRecord("stack record requires the stack extension"))));
+    assert!(matches!(CaptureReader::from_bytes(&bytes),Err(CaptureError::UnsupportedFormatVersion(2))));
 }
 
 #[test]
-fn v4_mapping_extension_coexists_with_required_software_stack() {
+fn mapping_extension_coexists_with_required_software_stack() {
     let mut writer = writer();
     writer.set_mappings(bpf_capture::mapping::MappingMetadata {
         journal: "PULSE_BPF_MAPPINGS version=2 available=1 started_ns=0 snapshot_ns=500 dropped=0 records=0\nEND records=0 dropped=0 snapshot_ns=500\n".into(),
         artifacts: vec![], kernel: None,
     }).unwrap();
-    writer.ingest_perf_sample_as(3, &context(123), NativeContextFormat::SoftwareStackV3).unwrap();
+    writer.ingest_perf_sample_as(7, 3, &context(123), NativeContextFormat::SoftwareStackV3).unwrap();
     let bytes = writer.finish(300).unwrap();
     let data = CaptureReader::from_bytes(&bytes).unwrap();
-    assert_eq!(data.header.format_version, 4);
+    assert_eq!(data.header.format_version, 6);
     assert_eq!(data.records[0].software_stack_v3().unwrap().source_id, 123);
     assert!(data.mappings.is_some());
 }

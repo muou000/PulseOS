@@ -212,3 +212,12 @@ pub fn object_id(fd: usize) -> u32 {
     check!(id != 0, "unknown BPF object identity");
     id
 }
+
+/// Export immutable source facts separately from diagnostic counter snapshots.
+/// The kernel exposes stable event/task identities through its numeric proc ABI.
+pub fn source_identity(fd: usize) -> (u64, u64) {
+    let snapshot = read_stats();
+    let text = core::str::from_utf8(snapshot.bytes()).unwrap();
+    let row = text.lines().find(|row| row.starts_with("EVENT ") && field(row, "fd") == Some(fd as u64)).unwrap();
+    (field(row, "id").unwrap(), field(row, "task_id").unwrap())
+}

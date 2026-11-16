@@ -2,7 +2,7 @@
 //! these are semantic oracles, not guest performance evidence.
 use bpf_analyzer::CaptureAnalyzer;
 use bpf_capture::{
-    CaptureArch, CaptureReader, CaptureWriter, NormalizedRecord, SchemaRegistry, SessionStatusCode,
+    CaptureArch, CaptureReader, NormalizedRecord, SchemaRegistry, SessionStatusCode,
 };
 
 fn record(id: u32, timestamp: u64, cpu: u32, task: u64, payload: Vec<u8>) -> NormalizedRecord {
@@ -476,3 +476,7 @@ fn conflicting_same_time_metadata_remains_unknown_for_a_later_wake() {
     assert_eq!(report.wake_latencies[0].identity.tid, Some(41));
     assert_eq!(report.wake_latencies[0].identity.comm, None);
 }
+
+use support::SemanticFixture as CaptureWriter;
+
+mod support;

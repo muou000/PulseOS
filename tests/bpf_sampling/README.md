@@ -123,12 +123,13 @@ QEMU command, raw output and result JSON are retained under `runs/`.
 
 All modes open eight per-CPU BPF_OUTPUT events (config 10, RAW output). The
 default `--mode task` opens one TASK_CLOCK event for the current TID; `--mode cpu`
-opens eight per-CPU CPU_CLOCK events and attaches the same program to each.
+opens eight per-CPU CPU_CLOCK events. Every source has its own program that
+stamps a logical source ID into a 24-byte RAW envelope before the native context.
 `--mode trace` opens eight TRACEPOINT events for PulseOS SchedSwitch ID 2,
 program type 5, and copies its existing 72-byte version-1 context. The two
 small variants `--mode block` and `--mode wake` use the same tracepoint program
 and control flow for TaskBlock ID 3 (72 bytes) and TaskWake ID 4 (80 bytes). A PERF_EVENT program copies its full 64-byte
-v2 context into one of eight ARRAY scratch values and submits it through helper
+v2 context after the envelope in one of eight ARRAY scratch values and submits it through helper
 25 to the source CPU's output sink. The guest consumes real rings with
 Acquire/Release head/tail synchronization and handles wraparound/length bounds.
 
@@ -245,12 +246,30 @@ is recorded separately from its original image hash.
 `PBRW0001` has a 64-byte LE header (magic, start/stop, frame count, stream bytes,
 IEEE CRC32, export-drop count, 16 reserved zero bytes). Each envelope has
 `sequence:u64, cpu:u32, frame_bytes:u32, crc32:u32, reserved:u32` followed by the
-unchanged aligned PERF_RECORD. The standalone capture uses format **2**, retains
-the normalized schema registry, and stores typed optional diagnostics plus the
-full runtime evidence. Active formats use IEEE CRC32. Historical format 1 and
-its nonstandard checksum are rejected. Formats 3 and 4 add stack and mapping
-evidence respectively; source-bound recorder format 5 has its own metadata
-requirements. Unknown fields are `null`, not zero.
+unchanged aligned PERF_RECORD. Each sample's RAW payload starts with
+`magic:u32=0x31524250, version:u16=1, kind:u16, context_bytes:u32,
+logical_source:u32, reserved:u64=0`, then the declared native context. Kinds 1,
+2 and 3 mean software single IP, tracepoint and software stack respectively.
+The program stamps this logical ID; CPU, period, payload length and diagnostics
+never select a source. Stack contexts additionally retain the independent kernel
+event ID, which must agree with the explicit source declaration.
+
+The standalone capture uses only format **6** with IEEE CRC32, required
+`PBSRC003` typed sources and per-record bindings, required diagnostics, and
+explicit stack/mapping extension bits. `ARCHIVE SOURCE` exports numeric source
+facts: logical/kernel/program/link identity, context kind/schema, monotonic
+clock, requested/effective config, stable task identity or CPU scope, requested
+period/frequency and buffer pages, effective parameters, units/fallback and
+per-source enable/disable windows. Original proc snapshots independently check
+these declarations and retain layered counters. Missing provenance is rejected;
+missing measurement evidence stays unknown and partial. Source, stack and
+mapping/artifact evidence can coexist in the same session.
+
+Historical capture formats 1–5 and unstamped native RAW samples are rejected by
+current importers/readers. Files under `evidence/191` through `evidence/196`
+retain their original baseline identity and hashes; use their archived tools to
+reproduce historical results. They are not rewritten into format 6 or counted as
+new-format runtime evidence. Unknown fields are `null`, not zero.
 
 `/proc/pulse_bpf_stats` is read-only and exposes the calling process's current
 PerfEvent FDs and referenced programs. Each open creates a stable, lazily captured
@@ -335,7 +354,8 @@ bpf-analyzer session.pbcapture --sched-report --json --pid 123
 bpf-analyzer session.pbcapture --fault-report --json --address-start 0x400000 --address-end 0x800000
 ```
 
-`sched` loads six programs for IDs 1–6 and 48 per-CPU sources sharing eight
+`sched` loads one explicitly stamped program per source for IDs 1–6: 48 programs
+and 48 per-CPU sources sharing eight
 output sinks. Each program copies its declared context size; every source's
 CPU/event/program binding and every program's execution counters are checked.
 It requires real block, wake, switch and enqueue streams. Metadata or exit counts

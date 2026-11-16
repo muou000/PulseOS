@@ -4,6 +4,8 @@ use alloc::{
     vec::Vec,
 };
 
+use bpf_capture::recorder::SourceConfig;
+
 const MAX_SOURCES: usize = 128;
 const MAX_MAPPED_BYTES: u64 = 64 * 1024 * 1024;
 
@@ -80,6 +82,13 @@ pub enum Event {
     Fault,
 }
 impl Event {
+    pub fn source_config(self) -> SourceConfig {
+        match self {
+            Self::Cpu => SourceConfig::CpuClock,
+            Self::Task => SourceConfig::TaskClock,
+            Self::Sched(_) | Self::Fault => SourceConfig::Tracepoint,
+        }
+    }
     pub fn is_software(self) -> bool {
         matches!(self, Self::Cpu | Self::Task)
     }
@@ -190,6 +199,8 @@ impl Options {
 pub struct SourcePlan {
     pub id: u32,
     pub event: Event,
+    /// Requested mode before an explicitly permitted capability fallback.
+    pub requested_config: SourceConfig,
     pub cpu: Option<u32>,
     pub tid: Option<u32>,
     pub period_ns: u64,
@@ -272,12 +283,14 @@ impl SessionPlan {
         let mut fallback = None;
         for name in &options.events {
             match name.as_str() {
-                "cpu" if caps.cpu_clock => events.push(Event::Cpu),
-                "task" if caps.task_clock => events.push(Event::Task),
-                "sched" if caps.sched => events.extend((1..=6).map(Event::Sched)),
-                "fault" if caps.fault => events.push(Event::Fault),
+                "cpu" if caps.cpu_clock => events.push((Event::Cpu, SourceConfig::CpuClock)),
+                "task" if caps.task_clock => events.push((Event::Task, SourceConfig::TaskClock)),
+                "sched" if caps.sched => {
+                    events.extend((1..=6).map(|id| (Event::Sched(id), SourceConfig::Tracepoint)))
+                }
+                "fault" if caps.fault => events.push((Event::Fault, SourceConfig::Tracepoint)),
                 "cycles" if options.allow_fallback && caps.cpu_clock => {
-                    events.push(Event::Cpu);
+                    events.push((Event::Cpu, SourceConfig::HardwareCycles));
                     fallback = Some(
                         "hardware-cycles unavailable; explicit fallback to cpu-clock nanoseconds"
                             .into(),
@@ -286,7 +299,7 @@ impl SessionPlan {
                 _ => return Err(format!("unsupported or unavailable event {name}")),
             }
         }
-        let task = events.contains(&Event::Task);
+        let task = events.iter().any(|(event, _)| *event == Event::Task);
         if task
             && (options.tid.is_none()
                 || options.tid == Some(0)
@@ -303,7 +316,7 @@ impl SessionPlan {
                     .into(),
             );
         }
-        if !events.iter().any(|e| e.is_software())
+        if !events.iter().any(|(event, _)| event.is_software())
             && (options.period_ns.is_some() || options.frequency.is_some())
         {
             return Err("tracepoints are event-driven and do not accept period/frequency".into());
@@ -314,7 +327,7 @@ impl SessionPlan {
             return Err("session ring budget exceeds 64 MiB".into());
         }
         let mut sources = Vec::new();
-        for event in events {
+        for (event, requested_config) in events {
             let targets: Vec<Option<u32>> = if event == Event::Task {
                 alloc::vec![None]
             } else {
@@ -327,6 +340,7 @@ impl SessionPlan {
                 sources.push(SourcePlan {
                     id: sources.len() as u32 + 1,
                     event,
+                    requested_config,
                     cpu,
                     tid: if event == Event::Task {
                         options.tid

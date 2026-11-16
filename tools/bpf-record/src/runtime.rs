@@ -3,6 +3,7 @@ use alloc::{format, string::String, vec::Vec};
 use bpf_capture::{
     CaptureArch, CaptureScope, CaptureWriter, CounterKind, DiagnosticCounter, DiagnosticIdentity,
     RecorderKind, RecorderSource, RuntimeDiagnostics, SchemaRegistry, SessionConfig,
+    recorder::{SourceClock, SourceConfig, SourceFallback, SourceUnit},
 };
 use bpf_record::{Capabilities, Event, Options, SessionPlan, SourcePlan};
 
@@ -384,6 +385,36 @@ impl Session {
                         |c| CaptureScope::PerCpu(c),
                     ),
                     sample_period: source.period_ns,
+                    clock: SourceClock::Monotonic,
+                    config: source.event.source_config(),
+                    requested_config: source.requested_config,
+                    requested_sample_period: if source.event.is_software()
+                        && plan.options.frequency.is_some()
+                    {
+                        0
+                    } else {
+                        source.period_ns
+                    },
+                    requested_frequency_hz: if source.event.is_software() {
+                        plan.options.frequency.unwrap_or(0)
+                    } else {
+                        0
+                    },
+                    // The actual perf request uses period mode. This is not an
+                    // assertion that the requested frequency was achieved.
+                    effective_frequency_hz: 0,
+                    requested_buffer_pages: plan.options.buffer_pages as u64,
+                    effective_buffer_pages: plan.options.buffer_pages as u64,
+                    unit: if source.event.is_software() {
+                        SourceUnit::Nanoseconds
+                    } else {
+                        SourceUnit::Events
+                    },
+                    fallback: if source.requested_config == SourceConfig::HardwareCycles {
+                        SourceFallback::HardwareUnavailable
+                    } else {
+                        SourceFallback::None
+                    },
                     kernel_event_id: 0,
                     bound_task_id: 0,
                     program_id: self.fd(program).object_id()?,

@@ -90,6 +90,35 @@ fn fallback_is_explicit_and_changes_recorded_units() {
 }
 
 #[test]
+fn mixed_fallback_preserves_each_sources_requested_mode() {
+    use bpf_capture::recorder::SourceConfig;
+
+    let options = Options::parse(&[
+        "--events",
+        "cpu,cycles,task,sched,fault",
+        "--tid",
+        "123",
+        "--allow-fallback",
+        "--output",
+        "/tmp/session",
+    ])
+    .unwrap();
+    let plan = SessionPlan::new(options, capabilities()).unwrap();
+    assert_eq!(plan.sources[0].requested_config, SourceConfig::CpuClock);
+    assert_eq!(
+        plan.sources[2].requested_config,
+        SourceConfig::HardwareCycles
+    );
+    assert_eq!(plan.sources[2].event, Event::Cpu);
+    assert_eq!(plan.sources[4].requested_config, SourceConfig::TaskClock);
+    assert!(
+        plan.sources[5..]
+            .iter()
+            .all(|s| s.requested_config == SourceConfig::Tracepoint)
+    );
+}
+
+#[test]
 fn task_scope_cannot_silently_restrict_migration_or_substitute_a_workload() {
     let args = [
         "--events",

@@ -3,6 +3,7 @@ from collections import Counter
 import re
 import struct
 import zlib
+import archive
 
 SUMMARY = re.compile(r"^(\d+) (\d+) 0x[0-9a-f]+ \[0x[0-9a-f]+\]: PERF_RECORD_SAMPLE\(IP, (0x[0-9a-f]+)\): (\d+)/(\d+): (0x[0-9a-f]+) period: (\d+) addr: \d+$", re.M)
 
@@ -60,12 +61,11 @@ def raw_samples(raw: bytes, query: dict) -> list[tuple]:
             raise ValueError("RAW record length differs from envelope")
         if kind != 9:
             continue
-        context_size, = struct.unpack_from('<I', frame, 8)
-        if context_size != 640:
+        logical_id, source_kind, context = archive.source_context(frame)
+        if source_kind != 3 or len(context) != 640:
             raise ValueError("real perf evidence requires native stack-v3 contexts")
-        context = frame[12:652]
         period, _, timestamp, cpu, pid, tid, _, task, ip, mode = struct.unpack_from('<QQQIIIIQQI', context)
-        source, = struct.unpack_from('<Q', context, 64)
+        source = logical_id
         count, = struct.unpack_from('<H', context, 108)
         if count > 64 or cpu != ring_cpu:
             raise ValueError("RAW stack count or CPU invalid")
