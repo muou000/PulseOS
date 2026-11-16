@@ -54,7 +54,13 @@ symbolization or exact busy/idle attribution.
 Every supported Query independently decodes capture v6 bytes, checks guest-file
 transfer and SHA witnesses, and compares typed sources, saved stack fields,
 mapping journal, artifact identities, table/JSON/folded weights, and native perf
-record fields. Known user functions come from the executed fixture's actual
+record fields. Own folded output must match the complete multiset of original
+task identities, privilege modes, completeness/termination markers, reversed
+saved PC chains and per-stack weights; matching only the grand total is
+insufficient. A zero-length unavailable chain retains its reason and weight
+without adding an IP. Negative cases require the intended semantic error and
+ordinary error exit; crashes, unrelated I/O failures and permission diagnostics
+cannot count as expected rejection. Known user functions come from the executed fixture's actual
 `STT_FUNC` symbols and recorded PC ranges, including raw Rust symbol spelling
 when the host perf lacks Rust-v0 demangling. Original ELF/capture files stay
 unchanged; declared consumer symbol views retain separate hashes.
