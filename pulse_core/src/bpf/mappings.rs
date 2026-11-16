@@ -156,7 +156,17 @@ pub fn file_source(file: axfs::CachedFile, exec_protected: bool) -> Arc<dyn File
         |identity| identity.checked_add(1)).expect("mapping object identity exhausted");
     let path = file.location().absolute_path().map(|p| p.to_string()).unwrap_or_default();
     let sha = if exec_protected { hash_file(&file) } else { None };
-    append("OBJECT", format!("object={object} sha256={} path_hex={}",
+    let build_id = if exec_protected {
+        match pulse_bpf_schema::elf::elf_build_id(file.size(), |offset, bytes| {
+            let expected = bytes.len();
+            file.read_at(bytes, offset).is_ok_and(|read| read == expected)
+        }) {
+            Ok(Some(id)) => hex(id.as_bytes()),
+            Ok(None) => "none".into(),
+            Err(()) => "unknown".into(),
+        }
+    } else { "unknown".into() };
+    append("OBJECT", format!("object={object} sha256={} build_id={build_id} path_hex={}",
         sha.as_deref().unwrap_or("unknown"), hex(path.as_bytes())));
     Arc::new(ObservedSource { inner: file, object })
 }
@@ -205,7 +215,8 @@ pub fn register_space(aspace: &axmm::AddrSpace) {
     static KERNEL: spin::Once<()> = spin::Once::new();
     KERNEL.call_once(|| {
         let (start, end) = axhal::mem::kernel_text_range();
-        append("KERNEL", format!("start={start} len={} reference={start} symbol_hex={}", end - start, hex(b"_stext")));
+        let build_id = axhal::mem::kernel_build_id().map(hex).unwrap_or_else(|| "unknown".into());
+        append("KERNEL", format!("start={start} len={} reference={start} symbol_hex={} build_id={build_id}", end - start, hex(b"_stext")));
     });
     axmm::register_tlb_observer(tlb);
     space_snapshot(aspace, axhal::time::monotonic_time_nanos());

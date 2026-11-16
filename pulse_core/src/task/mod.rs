@@ -554,8 +554,9 @@ impl axfs::ProcfsProcessProvider for PulseProcessProvider {
             let fault = axtask::bpf_trace::page_fault_stats();
             // Capability version is independent of the diagnostics row format.
             // Freeze the actual online set rather than the configured maximum.
-            let mut text = alloc::format!("PULSE_BPF_STATS version=1 pid={} available=1 capabilities_version=1 online_mask={} cpu_clock=1 task_clock=1 sched=1 fault=1 min_period_ns=1 registered_events={} trace_subscriptions={}\n",
-                process.pid(), axhal::online_cpu_mask(), crate::bpf::registered_perf_event_count(),
+            let mut text = alloc::format!("PULSE_BPF_STATS version=1 pid={} available=1 capabilities_version=1 online_mask={} cpu_clock=1 task_clock=1 sched=1 fault=1 min_period_ns=1 stack_context_version=3 stack_depth={} stack_bytes={} registered_events={} trace_subscriptions={}\n",
+                process.pid(), axhal::online_cpu_mask(), pulse_bpf_schema::DEFAULT_STACK_DEPTH,
+                pulse_bpf_schema::DEFAULT_STACK_BYTE_LIMIT, crate::bpf::registered_perf_event_count(),
                 crate::bpf::tracepoint_subscription_count());
             writeln!(&mut text, "GLOBAL timer_enqueued={} timer_dequeued={} timer_full={} timer_busy={} trace_enqueued={} trace_full={} trace_recursive={} fault_started={} fault_completed={} fault_clock_errors={}",
                 timer.enqueued, timer.dequeued, timer.full, timer.busy,

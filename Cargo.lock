@@ -930,6 +930,7 @@ version = "0.1.0"
 dependencies = [
  "bpf-capture",
  "pulse_bpf_schema",
+ "sha2",
 ]
 
 [[package]]

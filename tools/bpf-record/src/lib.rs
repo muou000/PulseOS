@@ -3,4 +3,5 @@
 extern crate alloc;
 
 mod plan;
-pub use plan::{Capabilities, Event, Options, SessionPlan, SourcePlan};
+pub mod observation;
+pub use plan::{Callchain, Capabilities, Event, Options, SessionPlan, SourcePlan};

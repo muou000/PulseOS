@@ -26,6 +26,10 @@ helpers = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(helpers)
 helpers.BASE = BASE
 ARCHES = helpers.ARCHES
+spec = importlib.util.spec_from_file_location("recorder_collection", REPO / "tools/bpf-record/collect.py")
+assert spec and spec.loader
+collection = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(collection)
 
 
 def build_fixture(arch: str) -> Path:
@@ -38,9 +42,9 @@ def build_fixture(arch: str) -> Path:
     output = BASE / "build" / arch / "record-fixture.elf"
     output.parent.mkdir(parents=True, exist_ok=True)
     command = ["rustc", "+nightly", "--edition=2024", "--crate-type=bin", "--target", ARCHES[arch]["target"],
-               "-C", "panic=abort", "-C", "opt-level=2", "-C", "relocation-model=static",
+               "-C", "panic=abort", "-C", "opt-level=2", "-C", "relocation-model=static", "-C", "force-frame-pointers=yes",
                "-C", f"linker={linker}", "-C", f"link-arg=-T{linker_script}", "-C", "link-arg=--no-relax",
-               "-o", str(output), str(source)]
+               "-C", "link-arg=--build-id=sha1", "-o", str(output), str(source)]
     helpers.command(command, timeout=120)
     helpers.check_elf(output, arch)
     (output.parent / "fixture-build.json").write_text(json.dumps({
@@ -56,7 +60,7 @@ def qemu_command(arch: str, kernel: Path, image: Path) -> list[str]:
         raise ValueError(f"missing {ARCHES[arch]['qemu']}")
     command = [qemu, "-machine", "virt", "-kernel", str(kernel), "-m", "8G", "-nographic", "-smp", "8"]
     if arch == "riscv64":
-        command += ["-bios", "default"]
+        command += ["-cpu", "max", "-bios", "default"]
     command += ["-drive", f"file={image},if=none,format=raw,id=x0,snapshot=on"]
     if arch == "riscv64":
         command += ["-device", "virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0", "-no-reboot",
@@ -67,9 +71,11 @@ def qemu_command(arch: str, kernel: Path, image: Path) -> list[str]:
     return command + ["-rtc", "base=utc"]
 
 
-def cases_script(directory: str, suite: str, duration: int) -> tuple[str, list[str], list[str]]:
+def cases_script(directory: str, suite: str, duration: int, *, kernel_elf: bool = True) -> tuple[str, list[str], list[str]]:
     """Return a reproducible script plus expected successful/failed CLI calls."""
     recorder = shlex.quote(directory + "/bpf-record")
+    if kernel_elf:
+        recorder += " --kernel-elf /boot/kernel.elf"
     fixture = shlex.quote(directory + "/record-fixture")
     rows = ["#!/bin/sh", "set -u", "ulimit -c 0", f"cd {shlex.quote(directory)} || exit 1"]
     captures: list[str] = []
@@ -92,9 +98,9 @@ def cases_script(directory: str, suite: str, duration: int) -> tuple[str, list[s
     def record(label: str, events: str, workload: str, *, extra: str = "", task: bool = False,
                signal: int | None = None, target_exit: bool = False, cpus: str = "all",
                period: int = 10_000_000, buffer_pages: int = 16) -> None:
-        work_ms = max(300, duration // 2) if target_exit else duration + (10_000 if label == "mixed" else 1500)
+        work_ms = duration + (10_000 if label == "mixed" else 1500)
         rows.extend([f"{fixture} {workload} {work_ms} {label} &", "target=$!", f"{fixture} sleep 100"])
-        record_ms = max(3000, duration * 4) if signal is not None else duration
+        record_ms = max(3000, duration * 4) if signal is not None else (work_ms + 3000 if target_exit else duration)
         options = f"--events {events} --duration-ms {record_ms} --buffer-pages {buffer_pages} --output {label}.pbcapture"
         if task:
             options += ' --tid "$target"'
@@ -183,6 +189,32 @@ def cases_script(directory: str, suite: str, duration: int) -> tuple[str, list[s
         record("target-exit", "task", "cpu", task=True, target_exit=True)
     if suite in ("mixed", "lifecycle", "full"):
         record("mixed", "cpu,cpu,task,sched,fault", "mixed", task=True)
+    if suite == "stacks":
+        record("stack-task", "task", "cpu", task=True, extra="--callchain fp --stack-depth 32")
+        record("mixed", "cpu,cpu,task,sched,fault", "mixed", task=True, extra="--callchain fp")
+        rows.extend(["sh -c 'i=0; while :; do i=$((i+1)); done' &", "target=$!", f"{fixture} sleep 100"])
+        call("existing-shell", f'--events task --tid "$target" --duration-ms {duration} --frequency 99 --callchain fp --output existing-shell.pbcapture')
+        rows.extend(['kill "$target"', 'wait "$target" || true'])
+        record("sigint", "cpu", "cpu", signal=2, extra="--callchain fp")
+        record("target-exit", "task", "cpu", task=True, target_exit=True, extra="--callchain fp")
+        record("bounded-export", "cpu", "cpu", cpus="0,1", period=1_000_000,
+               buffer_pages=1, extra="--record-bytes 4096 --callchain fp")
+        call("snapshot-failure", f"--events cpu --duration-ms {duration} --output rejected.pbcapture --test-fail-snapshot", failure=True)
+        rows.extend([f"{fixture} cpu {duration + 1500} journal-failure &", "target=$!", f"{fixture} sleep 100"])
+        call("journal-failure", f"--events cpu --duration-ms {duration} --output journal-failure.pbcapture --test-fail-journal", failure=True)
+        captures.append("journal-failure")
+        rows.extend([f"{fixture} dump journal-failure.pbcapture journal-failure || exit 1", 'wait "$target" || exit 1'])
+    if suite == "mapping":
+        rows.extend(["rm -f mapping.go", f"./mapping-fixture mapping >mapping-workload.log 2>&1 &", "target=$!",
+                     "echo RECORD_CASE BEGIN name=mapping-lifecycle",
+                     f'{recorder} --events cpu,task --tid "$target" --duration-ms 10000 --callchain fp --output mapping-lifecycle.pbcapture >mapping-record.log 2>&1 &',
+                     "record_pid=$!", "ready_waits=0", "while ! grep -q '^RECORD ENABLE ' mapping-record.log; do",
+                     f"  {fixture} sleep 10", "  ready_waits=$((ready_waits+1))",
+                     '  if [ "$ready_waits" -ge 500 ]; then cat mapping-record.log; exit 1; fi', "done",
+                     ": > mapping.go", 'wait "$record_pid"', "rc=$?", "cat mapping-record.log",
+                     'echo RECORD_CASE END name=mapping-lifecycle rc="$rc"', 'wait "$target" || exit 1',
+                     "cat mapping-workload.log", f"{fixture} dump mapping-lifecycle.pbcapture mapping-lifecycle || exit 1"])
+        captures.append("mapping-lifecycle")
     if suite in ("negative", "full"):
         base = f"--events cpu --duration-ms {duration} --output rejected.pbcapture"
         for label, options in (
@@ -192,6 +224,8 @@ def cases_script(directory: str, suite: str, duration: int) -> tuple[str, list[s
             ("conflicting-rate", base + " --frequency 99 --period-ns 10000000"),
             ("unsupported-scope", base + " --children"),
             ("bad-buffer", base + " --buffer-pages 3"),
+            ("unsupported-callchain", base + " --callchain dwarf"),
+            ("unsupported-stack-depth", base + " --callchain fp --stack-depth 31"),
             ("task-without-tid", f"--events task --duration-ms {duration} --output rejected.pbcapture"),
             ("load2", f"--events sched --cpus 0 --duration-ms {duration} --output rejected.pbcapture --test-fail-load 2"),
             ("attach2", f"--events sched --cpus 0 --duration-ms {duration} --output rejected.pbcapture --test-fail-attach 2"),
@@ -243,7 +277,7 @@ def validate_case(label: str, case: dict, expected_failure: bool) -> list[str]:
     if expected_failure:
         if case["rc"] == 0:
             errors.append(f"{label}: invalid request succeeded")
-        if label not in ("write-failure", "stop-failure") and re.search(r"(?m)^RECORD ENABLE ", text):
+        if label not in ("write-failure", "stop-failure", "journal-failure") and re.search(r"(?m)^RECORD ENABLE ", text):
             errors.append(f"{label}: rejected request enabled a source")
     elif case["rc"]:
         errors.append(f"{label}: recorder exited {case['rc']}")
@@ -252,7 +286,7 @@ def validate_case(label: str, case: dict, expected_failure: bool) -> list[str]:
             errors.append(f"{label}: missing attached-disabled preparation evidence")
         if label != "loaded-detached" and "RECORD STOP " not in text:
             errors.append(f"{label}: missing stop evidence")
-    if label in ("load2", "attach2", "write-failure", "stop-failure") or not expected_failure:
+    if label in ("load2", "attach2", "write-failure", "stop-failure", "snapshot-failure", "journal-failure") or not expected_failure:
         cleanup = re.search(r"(?m)^RECORD (?:CLEANUP|ROLLBACK) (.*)$", text)
         if not cleanup:
             errors.append(f"{label}: missing cleanup evidence")
@@ -270,7 +304,7 @@ def validate_case(label: str, case: dict, expected_failure: bool) -> list[str]:
         errors.append("dup-close: missing original-FD close evidence")
     if label == "write-failure" and ("RECORD STOP " not in text or "RECORD SAVED " in text):
         errors.append("write-failure: did not stop sampling or claimed successful persistence")
-    if (not expected_failure and label != "loaded-detached") or label == "stop-failure":
+    if (not expected_failure and label != "loaded-detached") or label in ("stop-failure", "journal-failure"):
         stable = re.search(r"(?m)^RECORD NO_GROWTH before=(\d+) after=(\d+)", text)
         if not stable or stable[1] != stable[2]:
             errors.append(f"{label}: continued output after disable/quiescence")
@@ -301,7 +335,7 @@ def validate_report(label: str, report: dict) -> list[str]:
     observed = [source for source in sources if source["records_count"] > 0]
     if label == "mixed":
         software = Counter((source["cpu"], source["event_id"]) for source in observed
-                           if source["kind"] == "software-v2" and source["cpu"] is not None)
+                           if source["kind"] in ("software-v2", "software-stack-v3") and source["cpu"] is not None)
         trace_ids = {source["event_id"] for source in observed if source["kind"] == "tracepoint"}
         if not software or max(software.values()) < 2 or not {6, 8} <= trace_ids:
             errors.append("mixed: missing repeated software sources or equal-length trace/fault contexts")
@@ -311,7 +345,7 @@ def validate_report(label: str, report: dict) -> list[str]:
     elif label in ("sched", "existing-sched"):
         if not {2, 3, 4, 6} <= {source["event_id"] for source in observed if source["kind"] == "tracepoint"}:
             errors.append("sched: missing switch/block/wake/enqueue records")
-    elif not any(source["kind"] == "software-v2" for source in observed):
+    elif not any(source["kind"] in ("software-v2", "software-stack-v3") for source in observed):
         errors.append(f"{label}: no actual software samples")
     if label == "bounded-export":
         counters = report.get("runtime_diagnostics", {}).get("counters", [])
@@ -331,12 +365,12 @@ def validate_report(label: str, report: dict) -> list[str]:
             for source in sources
         ):
             errors.append("existing-shell: requested frequency/effective period/fallback were not preserved")
-    if label == "stop-failure":
+    if label in ("stop-failure", "journal-failure"):
         counters = report.get("runtime_diagnostics", {}).get("counters", [])
         if (report.get("is_complete") is not False
                 or not any(counter["name"] == "control_errors" and counter["kind"] == "error"
                            and (counter["value"] or 0) > 0 for counter in counters)):
-            errors.append("stop-failure: failed control operation was not recorded as partial/error")
+            errors.append(f"{label}: failed control operation was not recorded as partial/error")
     return errors
 
 
@@ -379,7 +413,7 @@ def verify_existing_workload(text: str, timeline: dict, label: str) -> dict:
     if not ready or not dd_tids or "EXISTING_WORKLOAD_FAIL" in text:
         raise ValueError(f"{label}: missing actual installed shell/dd execution evidence")
     subjects = dd_tids | {int(ready[1])}
-    ids = {0x1001} if mode == "cpu" else ({8} if mode == "fault" else {1, 2, 3, 4, 5, 6})
+    ids = {0x1001, 0x1002} if mode == "cpu" else ({8} if mode == "fault" else {1, 2, 3, 4, 5, 6})
     observed = [event for event in timeline["events"] if event["event_id"] in ids and event["tid"] in subjects]
     if not observed:
         raise ValueError(f"{label}: capture has no events attributed to the actual shell/dd workload")
@@ -519,6 +553,119 @@ def install(image: Path, source: Path, destination: str, run: Path) -> None:
     check.unlink()
 
 
+def kernel_identity(kernel: Path, run: Path) -> Path:
+    """For a raw RV boot image, require its matching build-provenance ELF."""
+    if kernel.read_bytes()[:4] == b"\x7fELF":
+        elf = kernel
+    else:
+        elf = kernel.with_suffix(".elf")
+        provenance = elf.with_suffix(elf.suffix + ".provenance.json")
+        facts = json.loads(provenance.read_text())["artifacts"]
+        if (facts["binary"]["sha256"] != helpers.digest(kernel)
+                or facts["elf"]["sha256"] != helpers.digest(elf)):
+            raise ValueError("kernel ELF differs from boot binary provenance")
+        shutil.copyfile(provenance, run / "kernel.provenance.json")
+    output = run / "kernel.elf"
+    shutil.copyfile(elf, output)
+    return output
+
+
+def verify_saved_hash(case: dict, raw: bytes) -> str:
+    matches = re.findall(r"(?m)^RECORD SAVED .*\bsha256=([0-9a-f]{64})(?:\s|$)", case["log"])
+    digest = collection.sha256(raw)
+    if matches != [digest]:
+        raise ValueError("host capture SHA differs from the synced guest file witness")
+    return digest
+
+
+def stack_proof(timeline: dict, report: dict, collection_report: dict, *, require_depth: bool) -> dict:
+    events = [event for event in timeline["events"] if event.get("event_id") == 0x1002]
+    depths = {mode: [event["semantic"]["chain_len"] for event in events if event["semantic"]["mode"] == mode]
+              for mode in (1, 2)}
+    if not events or any(event["semantic"]["chain_len"] != len(event["semantic"]["ips"]) for event in events):
+        raise ValueError("missing real bounded stack payloads")
+    if require_depth and max(depths[2], default=0) < 3:
+        raise ValueError("external target has no observed user chain of at least three frames")
+    manifest = collection_report["captured_manifest"]
+    if not manifest["mapping_metadata"] or manifest["coverage"] is None:
+        raise ValueError("original guest capture has no temporal mapping coverage")
+    coverage = manifest["coverage"]
+    if any(source["enable_before_ns"] < coverage["started_ns"] or source["disable_after_ns"] >= coverage["snapshot_ns"]
+           for source in report["recorder"]["sources"]):
+        raise ValueError("mapping journal does not cover every source enable/disable boundary")
+    counters = {item["name"]: item["value"] for item in report["runtime_diagnostics"]["counters"]}
+    initial = counters.get("mapping_initial_snapshot_ns")
+    if initial is None or any(int(initial) > source["enable_before_ns"] for source in report["recorder"]["sources"]):
+        raise ValueError("initial mapping snapshot was not established before enable")
+    if manifest["kernel"] is None:
+        raise ValueError("guest did not verify the deployed kernel ELF identity")
+    kernel_sha = manifest["kernel"]["sha256"]
+    if not any(item["sha256"] == kernel_sha and item["status"] == "verified" for item in collection_report["artifacts"]):
+        raise ValueError("host did not collect the matching kernel ELF")
+    return {"stack_samples": len(events), "max_user_depth": max(depths[2], default=0),
+            "max_kernel_depth": max(depths[1], default=0), "initial_snapshot_ns": int(initial),
+            "coverage": coverage, "termination_counts": dict(Counter(event["semantic"]["termination"] for event in events))}
+
+
+def mapping_lifecycle_proof(text: str, manifest: dict) -> dict:
+    """Match actual syscall markers to the original, analyzer-validated journal."""
+    complete = re.search(r"(?m)^MAPPING COMPLETE pid=(\d+) child=(\d+) old=(\d+) moved=(\d+) at_ns=(\d+)$", clean_console(text))
+    if complete is None:
+        raise ValueError("mapping lifecycle workload did not complete")
+    parent, child, old, moved, _ = map(int, complete.groups())
+    entries, spaces = [], []
+    lines = iter(manifest["journal"].splitlines()[1:-1])
+    for line in lines:
+        tag, *words = line.split()
+        row = dict(word.split("=", 1) for word in words)
+        row["kind_tag"] = tag
+        if tag == "SPACE":
+            row["maps"] = [dict(word.split("=", 1) for word in next(lines).split()[1:]) for _ in range(int(row["count"]))]
+            if next(lines) != "ENDSPACE":
+                raise ValueError("mapping journal snapshot boundary missing")
+            spaces.append(row)
+        entries.append(row)
+    tasks = [row for row in entries if row["kind_tag"] == "TASK"]
+    parent_rows = [row for row in tasks if int(row["pid"]) == parent]
+    child_rows = [row for row in tasks if int(row["pid"]) == child]
+    if not {"rename", "exit"} <= {row["kind"] for row in parent_rows} or not {"fork", "exec", "exit"} <= {row["kind"] for row in child_rows}:
+        raise ValueError("original journal lacks actual fork/exec/rename/exit lifecycle")
+    parent_tasks, child_tasks = {row["task"] for row in parent_rows}, {row["task"] for row in child_rows}
+    if len(parent_tasks) != 1 or len(child_tasks) != 1 or parent_tasks == child_tasks:
+        raise ValueError("parent and fork child did not retain distinct stable task identities")
+    fork, executed = next(row for row in child_rows if row["kind"] == "fork"), next(row for row in child_rows if row["kind"] == "exec")
+    if fork["space"] == executed["space"] or int(fork["exec"]) >= int(executed["exec"]):
+        raise ValueError("real exec did not replace address space/generation")
+    markers = {}
+    for match in re.finditer(r"(?m)^MAPPING STEP (.*)$", clean_console(text)):
+        row = dict(word.split("=", 1) for word in match[1].split())
+        markers[row["phase"]] = row
+    parent_space = parent_rows[0]["space"]
+
+    def mappings(phase):
+        time = int(markers[phase]["at_ns"])
+        observed = [row for row in spaces if row["space"] == parent_space and int(row["ts"]) < time]
+        if not observed:
+            raise ValueError("mapping phase has no time-valid snapshot")
+        return observed[-1]["maps"]
+
+    def at(rows, address):
+        return next((row for row in rows if int(row["start"]) <= address < int(row["start"]) + int(row["len"])), None)
+
+    initial, renamed = at(mappings("mapped"), old), at(mappings("renamed"), old)
+    remapped, reused = at(mappings("remapped"), moved), at(mappings("reused_address"), old)
+    if not initial or not renamed or not remapped or not reused:
+        raise ValueError("actual mapping transitions lack snapshots")
+    if (int(initial["object"]) == 0 or {initial["object"], renamed["object"], remapped["object"]} != {initial["object"]}
+            or int(initial["pgoff"]) != 4096 or int(remapped["pgoff"]) != 4096
+            or int(reused["object"]) != 0 or at(mappings("remapped"), old) is not None):
+        raise ValueError("rename/remap/address reuse borrowed stale object or file offset")
+    return {"parent_pid": parent, "child_pid": child, "parent_task": next(iter(parent_tasks)),
+            "child_task": next(iter(child_tasks)), "fork_space": fork["space"], "exec_space": executed["space"],
+            "mapped_object": initial["object"], "byte_pgoff": 4096, "address_reused": old,
+            "numeric_pid_reuse": "not observed; allocator reuse covered by adversarial analyzer tests"}
+
+
 def guest(args: argparse.Namespace) -> int:
     fixture = build_fixture(args.arch)
     if args.recorder:
@@ -532,6 +679,7 @@ def guest(args: argparse.Namespace) -> int:
     run = helpers.new_run(f"{args.arch}-{args.suite}")
     for source, name in ((recorder, "bpf-record.elf"), (fixture, "record-fixture.elf"), (kernel, "kernel")):
         shutil.copyfile(source, run / name)
+    kernel_elf = kernel_identity(kernel, run)
     # Freeze the host consumer alongside the guest producer. Development runs
     # can outlive source edits, so rebuilding only after QEMU exits could pair
     # a new unpublished wire layout with an older copied producer.
@@ -553,12 +701,31 @@ def guest(args: argparse.Namespace) -> int:
     (run / "cases.sh").write_text(script)
     for source, name in ((run / "bpf-record.elf", "bpf-record"), (run / "record-fixture.elf", "record-fixture"), (run / "cases.sh", "cases.sh")):
         install(image_copy, source, directory + "/" + name, run)
+    if args.suite == "mapping":
+        install(image_copy, run / "record-fixture.elf", directory + "/mapping-fixture", run)
+    try:
+        helpers.debugfs(image_copy, "stat /boot")
+    except ValueError as error:
+        if "File not found" not in str(error):
+            raise
+        helpers.debugfs(image_copy, "mkdir /boot", write=True)
+    try:
+        helpers.debugfs(image_copy, "stat /boot/kernel.elf")
+    except ValueError as error:
+        if "File not found" not in str(error):
+            raise
+    else:
+        helpers.debugfs(image_copy, "rm /boot/kernel.elf", write=True)
+    install(image_copy, kernel_elf, "/boot/kernel.elf", run)
+    helpers.debugfs(image_copy, f'dump /bin/busybox "{run / "busybox.elf"}"')
+    candidates = [run / name for name in ("bpf-record.elf", "record-fixture.elf", "kernel.elf", "busybox.elf") if (run / name).exists()]
     command = qemu_command(args.arch, run / "kernel", image_copy)
     shell = f"sh {directory}/cases.sh; status=$?; printf '\\nBPF_HOST_EXIT {token} %s\\n' \"$status\""
     inputs = {"kind": "generic recorder with independently launched external workload", "arch": args.arch,
               "suite": args.suite, "duration_ms": args.duration_ms, "command": command, "guest_command": shell,
               "image_sha256": image_hash, "boot_image_sha256": helpers.digest(image_copy),
               "kernel_sha256": helpers.digest(run / "kernel"), "recorder_sha256": helpers.digest(run / "bpf-record.elf"),
+              "kernel_elf_sha256": helpers.digest(kernel_elf), "guest_capture_sha_witness": True,
               "fixture_sha256": helpers.digest(run / "record-fixture.elf"), "script_sha256": helpers.digest(run / "cases.sh"),
               "analyzer_sha256": helpers.digest(run / "bpf-analyzer"),
               "workspace_commit": helpers.command(["git", "rev-parse", "HEAD"], cwd=REPO).strip()}
@@ -582,10 +749,24 @@ def guest(args: argparse.Namespace) -> int:
             raw = extract(text, label)
             path = run / f"{label}.pbcapture"
             path.write_bytes(raw)
+            verify_saved_hash(cases[label], raw)
+            collected = collection.collect(path, run, candidates, run / "bpf-analyzer")
             report = helpers.command([str(run / "bpf-analyzer"), str(path), "--json"], cwd=REPO, timeout=120)
             reports[label] = json.loads(report)
             (run / f"{label}-report.json").write_text(report)
             errors += validate_report(label, reports[label])
+            if args.suite == "stacks" and label != "journal-failure":
+                timeline_path = run / f"{label}-timeline.json"
+                helpers.command([str(run / "bpf-analyzer"), str(path), "--timeline", str(timeline_path)], cwd=REPO)
+                proof = stack_proof(json.loads(timeline_path.read_text()), reports[label], collected, require_depth=label == "stack-task")
+                (run / f"{label}-stack-proof.json").write_text(json.dumps(proof, indent=2) + "\n")
+            if label == "mapping-lifecycle":
+                proof = mapping_lifecycle_proof(text, collected["captured_manifest"])
+                (run / f"{label}-proof.json").write_text(json.dumps(proof, indent=2) + "\n")
+            mapping = helpers.command([str(run / "bpf-analyzer"), str(path), "--mapping-report", "--bundle", str(run)], cwd=REPO)
+            (run / f"{label}-mapping-report.json").write_text(mapping)
+            if collection.sha256(path.read_bytes()) != verify_saved_hash(cases[label], raw):
+                raise ValueError("analysis changed the original guest capture")
             if label == "nonleader-exec":
                 timeline_path = run / "nonleader-exec-timeline.json"
                 helpers.command([str(run / "bpf-analyzer"), str(path), "--timeline", str(timeline_path)], cwd=REPO)
@@ -632,7 +813,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("action", choices=("build-fixture", "guest"))
     parser.add_argument("--arch", choices=tuple(ARCHES), required=True)
-    parser.add_argument("--suite", choices=("smoke", "mixed", "lifecycle", "negative", "benchmark", "existing", "recovery", "full"), default="smoke")
+    parser.add_argument("--suite", choices=("smoke", "mixed", "stacks", "mapping", "lifecycle", "negative", "benchmark", "existing", "recovery", "full"), default="smoke")
     parser.add_argument("--duration-ms", type=int, default=1000)
     parser.add_argument("--recorder", type=Path)
     parser.add_argument("--kernel", type=Path)

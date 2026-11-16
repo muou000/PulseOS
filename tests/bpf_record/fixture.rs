@@ -313,6 +313,25 @@ unsafe extern "C" fn fixture_child(args: *const core::ffi::c_void) -> ! {
     exit(1)
 }
 
+#[inline(never)]
+fn sample_leaf() -> u64 {
+    let mut value = 0u64;
+    for index in 0..100_000u64 {
+        value = core::hint::black_box(value.wrapping_add(index.wrapping_mul(17)));
+    }
+    core::hint::black_box(value)
+}
+#[inline(never)]
+fn sample_middle() -> u64 {
+    let value = sample_leaf();
+    core::hint::black_box(value.wrapping_add(1))
+}
+#[inline(never)]
+fn sample_outer() -> u64 {
+    let value = sample_middle();
+    core::hint::black_box(value.wrapping_add(2))
+}
+
 fn work(mode: &str, millis: u64, label: &str) {
     assert!((1..=120_000).contains(&millis));
     assert!(matches!(mode, "cpu" | "sched" | "fault" | "mixed"));
@@ -323,9 +342,7 @@ fn work(mode: &str, millis: u64, label: &str) {
     while now() - start < millis * 1_000_000 {
         match mode {
             "cpu" => {
-                for value in 0..100_000u64 {
-                    core::hint::black_box(value.wrapping_mul(17));
-                }
+                core::hint::black_box(sample_outer());
             }
             "sched" => {
                 checked(call(124, 0, 0, 0, 0, 0, 0));
@@ -333,9 +350,7 @@ fn work(mode: &str, millis: u64, label: &str) {
             }
             "fault" => fault_iteration(),
             "mixed" => {
-                for value in 0..100_000u64 {
-                    core::hint::black_box(value.wrapping_mul(17));
-                }
+                core::hint::black_box(sample_outer());
                 fault_iteration();
                 checked(call(124, 0, 0, 0, 0, 0, 0));
             }
@@ -349,6 +364,61 @@ fn work(mode: &str, millis: u64, label: &str) {
          wall_ns={} iterations={iterations}",
         stop - start
     );
+}
+
+fn mapping_lifecycle() {
+    let started = now();
+    loop {
+        let ready = call(56, (-100isize) as usize, c"mapping.go".as_ptr() as usize, 0, 0, 0, 0);
+        if ready >= 0 {
+            checked(call(57, ready as usize, 0, 0, 0, 0, 0));
+            break;
+        }
+        assert!(now() - started < 30_000_000_000, "mapping recorder did not enable");
+        sleep_ms(10);
+    }
+    let pid = checked(call(172, 0, 0, 0, 0, 0, 0));
+    let fd = checked(call(56, (-100isize) as usize, c"mapping-fixture".as_ptr() as usize, 0, 0, 0, 0));
+    // These mappings are only syscall operands. No reference or function
+    // pointer is formed, so file contents cannot become Rust values or code.
+    let base = checked(call(222, 0, 8192, 5, 2, fd, 4096));
+    assert_ne!(base, 0);
+    say!("MAPPING STEP phase=mapped pid={pid} base={base} len=8192 pgoff=4096 at_ns={}", now());
+    work("cpu", 200, "mapping-mapped");
+    checked(call(167, 15, c"mapping-renamed".as_ptr() as usize, 0, 0, 0, 0));
+    checked(call(276, (-100isize) as usize, c"mapping-fixture".as_ptr() as usize,
+        (-100isize) as usize, c"mapping-renamed.elf".as_ptr() as usize, 0, 0));
+    say!("MAPPING STEP phase=renamed pid={pid} base={base} at_ns={}", now());
+    work("cpu", 200, "mapping-renamed");
+    // fork creates a separate address space with no shared Rust allocation;
+    // both branches resume the initialized stack, and the child then execs.
+    let child = checked(call(220, 17, 0, 0, 0, 0, 0));
+    if child == 0 {
+        checked(call(167, 15, c"mapping-fork".as_ptr() as usize, 0, 0, 0, 0));
+        work("cpu", 200, "mapping-fork");
+        let argv = [c"record-fixture".as_ptr() as usize, c"cpu".as_ptr() as usize,
+            c"200".as_ptr() as usize, c"mapping-exec".as_ptr() as usize, 0];
+        let env = [0usize];
+        call(221, argv[0], argv.as_ptr() as usize, env.as_ptr() as usize, 0, 0, 0);
+        panic!("mapping child exec returned");
+    }
+    let mut status = 0u32;
+    checked(call(260, child, core::ptr::from_mut(&mut status) as usize, 0, 0, 0, 0));
+    assert_eq!(status, 0);
+    let destination = checked(call(222, 0, 8192, 0, 0x22, usize::MAX, 0));
+    let moved = checked(call(216, base, 8192, 8192, 3, destination, 0));
+    assert_eq!(moved, destination);
+    assert_ne!(moved, base);
+    say!("MAPPING STEP phase=remapped pid={pid} old={base} base={moved} len=8192 pgoff=4096 at_ns={}", now());
+    work("cpu", 200, "mapping-remapped");
+    checked(call(215, moved, 8192, 0, 0, 0, 0));
+    let reused = checked(call(222, base, 8192, 3, 0x32, usize::MAX, 0));
+    assert_eq!(reused, base);
+    say!("MAPPING STEP phase=reused_address pid={pid} base={base} len=8192 at_ns={}", now());
+    work("cpu", 200, "mapping-reused");
+    checked(call(215, reused, 8192, 0, 0, 0, 0));
+    checked(call(57, fd, 0, 0, 0, 0, 0));
+    say!("MAPPING COMPLETE pid={pid} child={child} old={base} moved={moved} at_ns={}", now());
 }
 
 fn dump(path: &str, name: &str) {
@@ -432,6 +502,10 @@ unsafe extern "C" fn fixture_main(stack: *const usize) -> ! {
         *arg = core::str::from_utf8(unsafe { core::slice::from_raw_parts(ptr, length) }).unwrap();
     }
     match args[1] {
+        "mapping" => {
+            assert_eq!(count, 2);
+            mapping_lifecycle();
+        }
         "exec-thread" => {
             assert_eq!(count, 3);
             exec_thread(args[0], args[2]);
