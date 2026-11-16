@@ -1,0 +1,557 @@
+{
+  "passed": true,
+  "scope": "all original guest files/lifecycle logs replayed in disposable extraction after independent native qualification; not a new guest run",
+  "verifier_commit": "d89c79d3",
+  "runs": [
+    {
+      "arch": "loongarch64",
+      "suite": "benchmark",
+      "passed": true,
+      "captures": {
+        "attached": {
+          "records_count": 791,
+          "status": "IncompleteError",
+          "sources": 8
+        }
+      }
+    },
+    {
+      "arch": "loongarch64",
+      "suite": "existing",
+      "passed": true,
+      "captures": {
+        "existing-cpu": {
+          "records_count": 198,
+          "status": "IncompleteError",
+          "sources": 8
+        },
+        "existing-sched": {
+          "records_count": 1590,
+          "status": "IncompleteError",
+          "sources": 48
+        },
+        "existing-fault": {
+          "records_count": 1424,
+          "status": "IncompleteError",
+          "sources": 8
+        }
+      }
+    },
+    {
+      "arch": "loongarch64",
+      "suite": "lifecycle",
+      "passed": true,
+      "captures": {
+        "task": {
+          "records_count": 97,
+          "status": "IncompleteError",
+          "sources": 1
+        },
+        "dup-close": {
+          "records_count": 99,
+          "status": "IncompleteError",
+          "sources": 1
+        },
+        "bounded-export": {
+          "records_count": 6,
+          "status": "IncompleteError",
+          "sources": 2
+        },
+        "existing-shell": {
+          "records_count": 97,
+          "status": "IncompleteError",
+          "sources": 1
+        },
+        "sigint": {
+          "records_count": 434,
+          "status": "IncompleteError",
+          "sources": 8
+        },
+        "sigterm": {
+          "records_count": 815,
+          "status": "IncompleteError",
+          "sources": 8
+        },
+        "target-exit": {
+          "records_count": 158,
+          "status": "IncompleteError",
+          "sources": 1
+        },
+        "mixed": {
+          "records_count": 12209,
+          "status": "IncompleteError",
+          "sources": 73
+        }
+      }
+    },
+    {
+      "arch": "loongarch64",
+      "suite": "mapping",
+      "passed": true,
+      "captures": {
+        "mapping-lifecycle": {
+          "records_count": 1122,
+          "status": "IncompleteError",
+          "sources": 9
+        }
+      }
+    },
+    {
+      "arch": "loongarch64",
+      "suite": "negative",
+      "passed": true,
+      "captures": {}
+    },
+    {
+      "arch": "loongarch64",
+      "suite": "nonleader-exec",
+      "passed": true,
+      "captures": {
+        "nonleader-exec": {
+          "records_count": 133,
+          "status": "IncompleteError",
+          "sources": 1
+        }
+      }
+    },
+    {
+      "arch": "loongarch64",
+      "suite": "recovery",
+      "passed": true,
+      "captures": {
+        "task": {
+          "records_count": 97,
+          "status": "IncompleteError",
+          "sources": 1
+        },
+        "nonleader-exec": {
+          "records_count": 134,
+          "status": "IncompleteError",
+          "sources": 1
+        },
+        "stop-failure": {
+          "records_count": 791,
+          "status": "IncompleteError",
+          "sources": 8
+        }
+      }
+    },
+    {
+      "arch": "loongarch64",
+      "suite": "smoke",
+      "passed": true,
+      "captures": {
+        "cpu": {
+          "records_count": 794,
+          "status": "IncompleteError",
+          "sources": 8
+        },
+        "sched": {
+          "records_count": 15009,
+          "status": "IncompleteError",
+          "sources": 48
+        },
+        "fault": {
+          "records_count": 1103,
+          "status": "IncompleteError",
+          "sources": 8
+        }
+      }
+    },
+    {
+      "arch": "loongarch64",
+      "suite": "stacks-cpu",
+      "passed": true,
+      "captures": {
+        "stack-cpu": {
+          "records_count": 787,
+          "status": "IncompleteError",
+          "sources": 8
+        }
+      }
+    },
+    {
+      "arch": "loongarch64",
+      "suite": "stacks-existing",
+      "passed": true,
+      "captures": {
+        "existing-shell": {
+          "records_count": 96,
+          "status": "IncompleteError",
+          "sources": 1
+        }
+      }
+    },
+    {
+      "arch": "loongarch64",
+      "suite": "stacks-exit",
+      "passed": true,
+      "captures": {
+        "target-exit": {
+          "records_count": 204,
+          "status": "IncompleteError",
+          "sources": 1
+        }
+      }
+    },
+    {
+      "arch": "loongarch64",
+      "suite": "stacks-mixed",
+      "passed": true,
+      "captures": {
+        "mixed": {
+          "records_count": 13108,
+          "status": "IncompleteError",
+          "sources": 73
+        }
+      }
+    },
+    {
+      "arch": "loongarch64",
+      "suite": "stacks-observation",
+      "passed": true,
+      "captures": {
+        "journal-failure": {
+          "records_count": 787,
+          "status": "IncompleteError",
+          "sources": 8
+        }
+      }
+    },
+    {
+      "arch": "loongarch64",
+      "suite": "stacks-overflow",
+      "passed": true,
+      "captures": {
+        "bounded-export": {
+          "records_count": 6,
+          "status": "IncompleteError",
+          "sources": 2
+        }
+      }
+    },
+    {
+      "arch": "loongarch64",
+      "suite": "stacks-sigint",
+      "passed": true,
+      "captures": {
+        "sigint": {
+          "records_count": 435,
+          "status": "IncompleteError",
+          "sources": 8
+        }
+      }
+    },
+    {
+      "arch": "loongarch64",
+      "suite": "stacks-sigterm",
+      "passed": true,
+      "captures": {
+        "sigterm-cpu": {
+          "records_count": 410,
+          "status": "IncompleteError",
+          "sources": 8
+        }
+      }
+    },
+    {
+      "arch": "loongarch64",
+      "suite": "stacks-task",
+      "passed": true,
+      "captures": {
+        "stack-task": {
+          "records_count": 97,
+          "status": "IncompleteError",
+          "sources": 1
+        }
+      }
+    },
+    {
+      "arch": "riscv64",
+      "suite": "benchmark",
+      "passed": true,
+      "captures": {
+        "attached": {
+          "records_count": 787,
+          "status": "IncompleteError",
+          "sources": 8
+        }
+      }
+    },
+    {
+      "arch": "riscv64",
+      "suite": "existing",
+      "passed": true,
+      "captures": {
+        "existing-cpu": {
+          "records_count": 198,
+          "status": "IncompleteError",
+          "sources": 8
+        },
+        "existing-sched": {
+          "records_count": 1567,
+          "status": "IncompleteError",
+          "sources": 48
+        },
+        "existing-fault": {
+          "records_count": 964,
+          "status": "IncompleteError",
+          "sources": 8
+        }
+      }
+    },
+    {
+      "arch": "riscv64",
+      "suite": "lifecycle",
+      "passed": true,
+      "captures": {
+        "task": {
+          "records_count": 97,
+          "status": "IncompleteError",
+          "sources": 1
+        },
+        "dup-close": {
+          "records_count": 99,
+          "status": "IncompleteError",
+          "sources": 1
+        },
+        "bounded-export": {
+          "records_count": 6,
+          "status": "IncompleteError",
+          "sources": 2
+        },
+        "existing-shell": {
+          "records_count": 98,
+          "status": "IncompleteError",
+          "sources": 1
+        },
+        "sigint": {
+          "records_count": 477,
+          "status": "IncompleteError",
+          "sources": 8
+        },
+        "sigterm": {
+          "records_count": 570,
+          "status": "IncompleteError",
+          "sources": 8
+        },
+        "target-exit": {
+          "records_count": 138,
+          "status": "IncompleteError",
+          "sources": 1
+        },
+        "mixed": {
+          "records_count": 8855,
+          "status": "IncompleteError",
+          "sources": 73
+        }
+      }
+    },
+    {
+      "arch": "riscv64",
+      "suite": "mapping",
+      "passed": true,
+      "captures": {
+        "mapping-lifecycle": {
+          "records_count": 1175,
+          "status": "IncompleteError",
+          "sources": 9
+        }
+      }
+    },
+    {
+      "arch": "riscv64",
+      "suite": "negative",
+      "passed": true,
+      "captures": {}
+    },
+    {
+      "arch": "riscv64",
+      "suite": "nonleader-exec",
+      "passed": true,
+      "captures": {
+        "nonleader-exec": {
+          "records_count": 130,
+          "status": "IncompleteError",
+          "sources": 1
+        }
+      }
+    },
+    {
+      "arch": "riscv64",
+      "suite": "recovery",
+      "passed": true,
+      "captures": {
+        "task": {
+          "records_count": 97,
+          "status": "IncompleteError",
+          "sources": 1
+        },
+        "nonleader-exec": {
+          "records_count": 119,
+          "status": "IncompleteError",
+          "sources": 1
+        },
+        "stop-failure": {
+          "records_count": 776,
+          "status": "IncompleteError",
+          "sources": 8
+        }
+      }
+    },
+    {
+      "arch": "riscv64",
+      "suite": "smoke",
+      "passed": true,
+      "captures": {
+        "cpu": {
+          "records_count": 768,
+          "status": "IncompleteError",
+          "sources": 8
+        },
+        "sched": {
+          "records_count": 11866,
+          "status": "IncompleteError",
+          "sources": 48
+        },
+        "fault": {
+          "records_count": 934,
+          "status": "IncompleteError",
+          "sources": 8
+        }
+      }
+    },
+    {
+      "arch": "riscv64",
+      "suite": "stacks-cpu",
+      "passed": true,
+      "captures": {
+        "stack-cpu": {
+          "records_count": 777,
+          "status": "IncompleteError",
+          "sources": 8
+        }
+      }
+    },
+    {
+      "arch": "riscv64",
+      "suite": "stacks-existing",
+      "passed": true,
+      "captures": {
+        "existing-shell": {
+          "records_count": 98,
+          "status": "IncompleteError",
+          "sources": 1
+        }
+      }
+    },
+    {
+      "arch": "riscv64",
+      "suite": "stacks-exit",
+      "passed": true,
+      "captures": {
+        "target-exit": {
+          "records_count": 172,
+          "status": "IncompleteError",
+          "sources": 1
+        }
+      }
+    },
+    {
+      "arch": "riscv64",
+      "suite": "stacks-mixed",
+      "passed": true,
+      "captures": {
+        "mixed": {
+          "records_count": 9039,
+          "status": "IncompleteError",
+          "sources": 73
+        }
+      }
+    },
+    {
+      "arch": "riscv64",
+      "suite": "stacks-observation",
+      "passed": true,
+      "captures": {
+        "journal-failure": {
+          "records_count": 783,
+          "status": "IncompleteError",
+          "sources": 8
+        }
+      }
+    },
+    {
+      "arch": "riscv64",
+      "suite": "stacks-overflow",
+      "passed": true,
+      "captures": {
+        "bounded-export": {
+          "records_count": 6,
+          "status": "IncompleteError",
+          "sources": 2
+        }
+      }
+    },
+    {
+      "arch": "riscv64",
+      "suite": "stacks-sigint",
+      "passed": true,
+      "captures": {
+        "sigint": {
+          "records_count": 440,
+          "status": "IncompleteError",
+          "sources": 8
+        }
+      }
+    },
+    {
+      "arch": "riscv64",
+      "suite": "stacks-sigterm",
+      "passed": true,
+      "captures": {
+        "sigterm-cpu": {
+          "records_count": 456,
+          "status": "IncompleteError",
+          "sources": 8
+        }
+      }
+    },
+    {
+      "arch": "riscv64",
+      "suite": "stacks-task",
+      "passed": true,
+      "captures": {
+        "stack-task": {
+          "records_count": 99,
+          "status": "IncompleteError",
+          "sources": 1
+        }
+      }
+    },
+    {
+      "arch": "loongarch64",
+      "suite": "installed-io",
+      "passed": true,
+      "captures": {
+        "installed-io": {
+          "records_count": 119,
+          "status": "IncompleteError",
+          "sources": 1
+        }
+      }
+    },
+    {
+      "arch": "riscv64",
+      "suite": "installed-io",
+      "passed": true,
+      "captures": {
+        "installed-io": {
+          "records_count": 101,
+          "status": "IncompleteError",
+          "sources": 1
+        }
+      }
+    }
+  ]
+}

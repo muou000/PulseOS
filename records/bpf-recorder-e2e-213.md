@@ -106,3 +106,57 @@ LA 动态库缺 guest 身份、mutation interval 中的样本仍不可严格符�
 显式 Query 不抹去被排除上下文的未知或丢失。物理 PMU/板卡、x86/aarch64 guest、
 未验证 fault backend、分配追踪、精确 busy/idle 不属于本次软件采样验收。
 这也不是 ADR-0005 的具名上游 libbpf-bootstrap profile 兼容声明。
+
+## 本轮结果与审查
+
+36 组 guest 运行全部通过，保存 **60 份原始 finalized capture、94842 条记录**，
+以及两份实际写失败的 1024-byte 前缀。60 份 capture 均为 `IncompleteError`。
+最终 qualification 完成 **21 组正向 Query、42 份原生 perf / SVG**，另有一组
+LA 用户态严格拒绝；每组正向 Query 的六种派生负例均按正常错误退出及预期诊断核对。
+
+| 显式 Query | RV64 samples | LA64 samples |
+| --- | ---: | ---: |
+| 独立 CPU user / kernel | 96 / 681 | 101 / 686 |
+| 独立 task user | 98 | 94 |
+| 混合源 user / kernel | 26 / 1608 | 54 / 1588 |
+| 已安装 shell user | 98 | 严格拒绝，缺 guest SHA |
+| mapping 目标 stable task user | 160 | 159 |
+| 已启动 dd 的 task kernel | 101 | 119 |
+| nonleader exec user | 128（两 TID：95 / 33） | 128（两 TID：98 / 30） |
+
+user fixture 实际最大栈深两架构均为 6；mixed 内核栈最大深度 RV 15 / LA 13，
+dd 内核栈两者均为 10。未知和截断链仍逐条保留。所有 period 原值、逐源条数和
+权重可在归档的 `native/qualification.json` 和各 Query 的 `e2e.json` 中重放。
+
+新的 scheduler 回归逐字段核对 RV 1386 / LA 1675 条 RAW，分别得到 259 / 267
+个有效 blocked/wake 实例。两架构 fault 回归各 265 条记录，冷目标/冷邻页各有
+8 个真实完成扇区，匿名/热页/COW/缓存目标无对应数据页读取。零生产的 source
+observed/delivered 均为 0；零消费时两者分别为 RV 372/337、LA 54/41，但保留帧
+均为 0，门禁拒绝成功归档。最初回归汇总脚本只匹配 `no real samples`，未匹配
+正确的 `empty capture` 错误而停止；原日志保留，随后按原始零计数/CRC 和明确的
+空 capture 诊断验证，没有重跑或冒充已通过的正向运行。
+
+主机常规 Rust 515、原生 perf Rust 7、sampling Python 110、recorder Python 38
+项通过。默认/BPF-enabled 双架构门禁在源码固定后复验；完整日志、实际输入和
+文件索引见 [归档说明](../tests/bpf_record/evidence/213/README.md)。
+
+### Standards
+
+初审发现两个 P2 和一个代码异味：任意非零退出可误算成负例通过；硬编码 partial
+会拒绝真实 Complete；匿名位置元组降低来源/period/调用链核对可读性。已改为
+权限错误立即停止、正常错误码与语义诊断精确匹配、与原 status 比较，并使用
+`CPUFields`。复审 **0 项剩余发现**。
+
+### Spec
+
+初审发现一个 P2：自有 folded 仅核对总权重，同权重假调用链可通过。现从原字节
+独立构造每栈身份、mode、termination、反向 PC 顺序及权重的 multiset，精确比较。
+复审另独立验证 42 份实际 folded 通过、42 份同总权重伪栈被拒绝；**0 项剩余发现**。
+
+两轴发现均已处理，最终 Query 门禁在修复后重新运行。Spec 复审确认动态库身份
+边界和原矩阵加独立扩展的方式没有将拒绝伪装为成功，也没有删掉必需覆盖。
+
+解包后的全量 `verify.py` 回放还发现 installed-I/O 分支在 JSON report 初始化前
+使用它；同一原 capture 重现 `UnboundLocalError` 后，将检查移到当前 report
+解码/校验之后。36 组可移植功能回放随后全部通过，两轴再次确认无剩余问题。
+该检查顺序修复不改变原 guest 或 native 导出数据，红绿输出保存在 validation 归档。
