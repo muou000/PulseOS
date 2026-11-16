@@ -1,3 +1,4 @@
+mod support;
 use bpf_capture::{
     CaptureArch, CaptureReader, CaptureWriter, CounterKind, DiagnosticCounter, DiagnosticIdentity,
     PhaseMeasurement, RuntimeDiagnostics, SessionStatusCode,
@@ -42,9 +43,12 @@ fn capture(diag: RuntimeDiagnostics, include_record: bool) -> Vec<u8> {
     let data = CaptureReader::from_bytes(&original).unwrap();
     let mut writer = CaptureWriter::new(data.metadata.config, data.registry);
     writer.set_diagnostics(diag).unwrap();
+    writer.configure_recorder(vec![support::trace(1, 2, 0, 100, 300)], 4096).unwrap();
     writer.start(100).unwrap();
     if include_record {
-        writer.write_record(data.records[0].clone()).unwrap();
+        let mut record = data.records[0].clone();
+    record.timestamp_ns = 200;
+    writer.write_record_from(1, record).unwrap();
     }
     writer.finish(300).unwrap()
 }
@@ -56,9 +60,9 @@ fn diagnostics_round_trip_uses_ieee_crc() {
     );
     let bytes = capture(diagnostics(), true);
     let data = CaptureReader::from_bytes(&bytes).unwrap();
-    assert_eq!(data.header.format_version, 2);
+    assert_eq!(data.header.format_version, 6);
     assert_eq!(data.diagnostics, Some(diagnostics()));
-    assert_eq!(data.metadata.status, SessionStatusCode::Complete);
+    assert_eq!(data.metadata.status, SessionStatusCode::IncompleteError);
     assert_eq!(
         data.trailer.checksum,
         bpf_capture::framing::compute_checksum_ieee(&bytes[..data.header.trailer_offset as usize])
@@ -79,10 +83,13 @@ fn retired_container_is_rejected_even_with_a_valid_current_checksum() {
 fn writer_without_runtime_evidence_emits_current_partial_capture() {
     let input = CaptureReader::from_bytes(&capture(diagnostics(), true)).unwrap();
     let mut writer = CaptureWriter::new(input.metadata.config, input.registry);
+    writer.configure_recorder(vec![support::trace(1, 2, 0, 100, 300)], 4096).unwrap();
     writer.start(100).unwrap();
-    writer.write_record(input.records[0].clone()).unwrap();
+    let mut record = input.records[0].clone();
+    record.timestamp_ns = 200;
+    writer.write_record_from(1, record).unwrap();
     let data = CaptureReader::from_bytes(&writer.finish(300).unwrap()).unwrap();
-    assert_eq!(data.header.format_version, 2);
+    assert_eq!(data.header.format_version, 6);
     assert_eq!(data.diagnostics, Some(RuntimeDiagnostics::default()));
     assert_eq!(data.metadata.status, SessionStatusCode::IncompleteError);
 }

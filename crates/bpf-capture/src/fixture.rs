@@ -5,6 +5,7 @@ use alloc::vec::Vec;
 use crate::framing::{CaptureArch, CaptureError, SessionStatusCode};
 use crate::diagnostics::{CounterKind, DiagnosticCounter, DiagnosticIdentity, PhaseMeasurement, RuntimeDiagnostics};
 use crate::record::NormalizedRecord;
+use crate::recorder::{RecorderSource, RecorderKind, SourceClock, SourceConfig, SourceUnit, SourceFallback};
 use crate::schema::SchemaRegistry;
 use crate::session::{CaptureScope, SessionConfig};
 use crate::writer::{CaptureWriter, NativeContextFormat};
@@ -61,6 +62,18 @@ pub fn generate_deterministic_fixture(
         }],
         evidence_json: Some("{\"synthetic_fixture\":true}".into()),
     })?;
+    writer.configure_recorder([(1, 0, TracepointId::SchedSwitch as u32), (2, 1, TracepointId::TaskBlock as u32)].into_iter().map(|(id, cpu, event_id)| RecorderSource {
+        id, kind: RecorderKind::Tracepoint, event_id, schema_version: 1,
+        scope: CaptureScope::PerCpu(cpu), bound_task_id: 0,
+        sample_period: 1, clock: SourceClock::Monotonic,
+        requested_config: SourceConfig::Tracepoint, config: SourceConfig::Tracepoint,
+        requested_sample_period: 1, requested_frequency_hz: 0, effective_frequency_hz: 0,
+        requested_buffer_pages: 4, effective_buffer_pages: 4,
+        unit: SourceUnit::Events, fallback: SourceFallback::None,
+        kernel_event_id: 40 + u64::from(id), program_id: 10 + id, link_id: 30 + id,
+        enable_before_ns: 1_000_000_000, enable_after_ns: 1_000_000_000,
+        disable_before_ns: 2_000_000_000, disable_after_ns: 2_000_000_000,
+    }).collect(), 4096)?;
     writer.start(1_000_000_000)?;
 
     // 1. Sched switch sample on CPU 0
@@ -76,7 +89,7 @@ pub fn generate_deterministic_fixture(
     let rec1 = NormalizedRecord::from_tracepoint_slice(TracepointId::SchedSwitch as u32, unsafe {
         core::slice::from_raw_parts(&sched as *const _ as *const u8, core::mem::size_of_val(&sched))
     })?;
-    writer.write_record(rec1)?;
+    writer.write_record_from(1, rec1)?;
 
     // 2. Task block sample on CPU 1
     let block = TaskBlockContext {
@@ -90,7 +103,7 @@ pub fn generate_deterministic_fixture(
     let rec2 = NormalizedRecord::from_tracepoint_slice(TracepointId::TaskBlock as u32, unsafe {
         core::slice::from_raw_parts(&block as *const _ as *const u8, core::mem::size_of_val(&block))
     })?;
-    writer.write_record(rec2)?;
+    writer.write_record_from(2, rec2)?;
 
     // Apply loss or error if requested
     match status {
@@ -101,7 +114,7 @@ pub fn generate_deterministic_fixture(
         SessionStatusCode::IncompleteError => {
             writer.ingest_perf_lost(0, 1);
             // Trigger consumer corruption error
-            let _ = writer.ingest_perf_sample_as(0, &[], NativeContextFormat::Tracepoint);
+            let _ = writer.ingest_perf_sample_as(1, 0, &[], NativeContextFormat::Tracepoint);
         }
         _ => {}
     }

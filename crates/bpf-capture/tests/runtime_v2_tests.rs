@@ -1,3 +1,4 @@
+mod support;
 use bpf_capture::writer::NativeContextFormat;
 use bpf_capture::{CaptureArch, CaptureReader, CaptureScope, CaptureWriter, SchemaRegistry, SessionConfig, SessionStatusCode};
 use pulse_bpf_schema::{PerfEventContext, PerfSampleContext};
@@ -13,6 +14,7 @@ fn writer() -> CaptureWriter {
         clock_name: "monotonic".into(), clock_res_ns: 1,
     };
     let mut writer = CaptureWriter::new(config, SchemaRegistry::default_pulse_registry());
+    writer.configure_recorder(vec![support::software(1, 3, 10_000_000, 100, 300), support::trace(2, 6, 3, 100, 300)], 4096).unwrap();
     writer.start(100).unwrap();
     writer
 }
@@ -35,7 +37,7 @@ fn frame(raw: &[u8]) -> Vec<u8> {
 #[test]
 fn runtime_context_preserves_distinct_data_address_and_instruction_pointer() {
     let mut w = writer();
-    w.ingest_raw_perf_frame_as(3, &frame(&context()), NativeContextFormat::PerfEventV2).unwrap();
+    w.ingest_raw_perf_frame_as(1, 3, &frame(&context()), NativeContextFormat::PerfEventV2).unwrap();
     let captured = CaptureReader::from_bytes(&w.finish(300).unwrap()).unwrap();
     let r = &captured.records[0];
     assert_eq!((r.event_id, r.schema_version), (0x1001, 2));
@@ -51,7 +53,7 @@ fn runtime_context_preserves_distinct_data_address_and_instruction_pointer() {
 #[test]
 fn source_cpu_mismatch_is_corruption_not_a_relabelled_record() {
     let mut w = writer();
-    assert!(w.ingest_raw_perf_frame_as(2, &frame(&context()), NativeContextFormat::PerfEventV2).is_err());
+    assert!(w.ingest_raw_perf_frame_as(1, 2, &frame(&context()), NativeContextFormat::PerfEventV2).is_err());
     let c = CaptureReader::from_bytes(&w.finish(300).unwrap()).unwrap();
     assert!(c.records.is_empty());
     assert_eq!(c.metadata.counters.consumer_corrupt_records, 1);
@@ -64,7 +66,7 @@ fn bad_context_version_mode_and_truncated_perf_header_are_rejected() {
     let mut bad_mode = context(); bad_mode[56..60].copy_from_slice(&9u32.to_le_bytes());
     for input in [frame(&bad_version), frame(&bad_mode), vec![9,0,0,0,0,0,0,0]] {
         let mut w = writer();
-        assert!(w.ingest_raw_perf_frame_as(3, &input, NativeContextFormat::PerfEventV2).is_err());
+        assert!(w.ingest_raw_perf_frame_as(1, 3, &input, NativeContextFormat::PerfEventV2).is_err());
         let c = CaptureReader::from_bytes(&w.finish(300).unwrap()).unwrap();
         assert_eq!(c.metadata.status, SessionStatusCode::IncompleteError);
     }
@@ -76,7 +78,7 @@ fn exact_frame_boundary_rejects_extra_bytes_and_oversized_payload() {
     let mut oversized = frame(&context()); oversized[8..12].copy_from_slice(&u32::MAX.to_le_bytes());
     for input in [extra, oversized] {
         let mut w = writer();
-        assert!(w.ingest_raw_perf_frame_as(3, &input, NativeContextFormat::PerfEventV2).is_err());
+        assert!(w.ingest_raw_perf_frame_as(1, 3, &input, NativeContextFormat::PerfEventV2).is_err());
     }
 }
 
@@ -94,7 +96,7 @@ fn same_size_task_enqueue_requires_explicit_context_format() {
     raw[56..60].copy_from_slice(&8u32.to_le_bytes());
     raw[60..64].copy_from_slice(&2u32.to_le_bytes()); // enqueue reason, NOT a version
     let mut w = writer();
-    w.ingest_raw_perf_frame_as(3, &frame(&raw), NativeContextFormat::Tracepoint).unwrap();
+    w.ingest_raw_perf_frame_as(2, 3, &frame(&raw), NativeContextFormat::Tracepoint).unwrap();
     let c = CaptureReader::from_bytes(&w.finish(300).unwrap()).unwrap();
     assert_eq!((c.records[0].event_id, c.records[0].schema_version), (6,1));
     assert_eq!(c.records[0].payload.len(), 24);
@@ -103,7 +105,7 @@ fn same_size_task_enqueue_requires_explicit_context_format() {
 #[test]
 fn capture_offsets_and_counts_cannot_panic_or_force_unbounded_allocation() {
     let mut w = writer();
-    w.ingest_perf_sample_as(3, &context(), NativeContextFormat::PerfEventV2).unwrap();
+    w.ingest_perf_sample_as(1, 3, &context(), NativeContextFormat::PerfEventV2).unwrap();
     let bytes = w.finish(300).unwrap();
     let header = bpf_capture::CaptureHeader::from_bytes(&bytes).unwrap();
     let trailer = header.trailer_offset as usize;

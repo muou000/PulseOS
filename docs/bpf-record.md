@@ -70,15 +70,20 @@ the analyzer rejects that unfinished file instead of asserting completeness.
 
 ## Capture and analysis
 
-Capture v5 retains the existing normalized schemas and adds required source
-metadata with one source ID per record. Each BPF program emits a versioned
-envelope containing kind, context length and logical source ID. The consumer
-checks it against the prepared source, including scope and period. It never
-infers a source from a 64-byte context, CPU, or period. Source declarations
-include kernel event/program/link IDs and individual enable/disable windows.
-Source metadata must use revision 2 (`PBSRC002`), which stores the stable task
-identity. Revision 1 (`PBSRC001`) is rejected; task sources cannot fall back to
-numeric-TID matching.
+Capture v6 is the only current container. It combines mandatory diagnostics and
+source declarations with independent stack and temporal mapping extensions.
+Every record has one logical source ID; the source table uses revision 3
+(`PBSRC003`). Each BPF program emits an envelope containing kind, context length
+and logical source ID. The consumer validates schema, scope, period and control
+windows against the declaration. It never infers a source from context length,
+CPU, period or diagnostic text.
+
+Each declaration retains the timestamp clock, requested and effective event
+configuration, period/frequency and buffer sizes, units, fallback reason, stable
+task identity, kernel event/program/link identities and individual control
+windows. A logical source ID is distinct from the kernel event ID embedded in a
+stack context; both must agree through the declaration. The full
+[current capture contract](bpf-capture.md) specifies the invariants and bounds.
 Preparing multiple sources does not create an atomic shared start time.
 
 ```sh
@@ -94,10 +99,11 @@ control-flow exit can produce a partial capture; unknown build/mapping facts,
 missing counters, zero observations or real loss do not become complete data.
 This recorder uses software v2 contexts without stack capture or a mapping
 journal; downstream symbolization/export must enforce its own prerequisites.
-Capture formats v2–v4 remain active for diagnostics, stacks and temporal
-mappings respectively; v5 adds recorder source attribution and does not replace
-those capabilities. Historical v1 captures are rejected. The standalone
-demonstrations and fixed-load regression harness retain their own scope.
+Software single-IP and stack contexts remain distinct capabilities within v6.
+Containers v1–v5 and source tables `PBSRC001`/`PBSRC002` are rejected. Historical
+archives retain their original format and producer/analyzer baseline; do not
+rewrite them as evidence for the current format. The standalone demonstrations
+and fixed-load regression harness retain their own scope.
 
 ## Acceptance
 

@@ -1,6 +1,7 @@
+mod support;
 use bpf_capture::{
     CaptureArch, CaptureReader, CaptureScope, CaptureWriter, RecorderKind, RecorderSource,
-    SchemaRegistry, SessionConfig, SessionStatusCode,
+    SchemaRegistry, SessionConfig, SessionStatusCode, SourceConfig,
 };
 use pulse_bpf_schema::{PerfEventContext, PerfSampleContext};
 
@@ -23,6 +24,8 @@ fn source(id: u32, kind: RecorderKind) -> RecorderSource {
         scope: CaptureScope::PerCpu(3), bound_task_id: 0, sample_period: if kind == RecorderKind::SoftwareV2 { 100 } else { 1 },
         kernel_event_id: 1000 + id as u64, program_id: 2000 + id, link_id: 3000 + id,
         enable_before_ns: 110, enable_after_ns: 120, disable_before_ns: 250, disable_after_ns: 260,
+        ..if kind == RecorderKind::SoftwareV2 { support::software(id, 3, 100, 110, 260) }
+          else { support::trace(id, 6, 3, 110, 260) }
     }
 }
 
@@ -67,7 +70,7 @@ fn mixed_equal_length_contexts_and_identical_sources_keep_explicit_bindings() {
     }
     let bytes = w.finish(300).unwrap();
     let capture = CaptureReader::from_bytes(&bytes).unwrap();
-    assert_eq!(capture.header.format_version, 5);
+    assert_eq!(capture.header.format_version, 6);
     assert_eq!(capture.records.iter().map(|r| r.event_id).collect::<Vec<_>>(), [0x1001, 6, 0x1001]);
     assert_eq!(capture.recorder.as_ref().unwrap().record_sources, [1, 3, 2]);
     assert_eq!(capture.recorder.unwrap().sources.len(), 3);
@@ -128,8 +131,11 @@ fn task_identity_period_and_transport_cpu_must_match_the_declared_source() {
     ] {
         let mut declaration = source(1, RecorderKind::SoftwareV2);
         declaration.scope = scope;
+        declaration.config = if matches!(scope, CaptureScope::Task(_)) { SourceConfig::TaskClock } else { SourceConfig::CpuClock };
+        declaration.requested_config = declaration.config;
         declaration.bound_task_id = if matches!(scope, CaptureScope::Task(_)) { 100 } else { 0 };
         declaration.sample_period = period;
+        declaration.requested_sample_period = period;
         let mut w = writer();
         w.configure_recorder(vec![declaration], 4096).unwrap();
         w.start(100).unwrap();
@@ -174,11 +180,11 @@ fn repair_checksum(bytes: &mut [u8]) {
 #[test]
 fn independent_reader_rejects_rebound_records_bad_windows_and_missing_required_extension() {
     let original = bound_capture();
-    let metadata = original.windows(8).position(|s| s == b"PBSRC002").unwrap();
+    let metadata = original.windows(8).position(|s| s == b"PBSRC003").unwrap();
     let records = u64::from_le_bytes(original[40..48].try_into().unwrap()) as usize;
     for (offset, bytes) in [
         (metadata + 16, 2u64.to_le_bytes().to_vec()),
-        (metadata + 24 + 96, 99u32.to_le_bytes().to_vec()),
+        (metadata + 24 + 160, 99u32.to_le_bytes().to_vec()),
         (metadata + 24 + 72, 100u64.to_le_bytes().to_vec()),
         (metadata + 24 + 80, 160u64.to_le_bytes().to_vec()),
         (records - 8, 0u64.to_le_bytes().to_vec()),
@@ -231,6 +237,8 @@ fn unrelated_known_counters_cannot_certify_recorder_loss_coverage() {
 fn task_source_follows_stable_identity_through_exec_tid_rebinding() {
     let mut binding = source(1, RecorderKind::SoftwareV2);
     binding.scope = CaptureScope::Task(41);
+    binding.config = SourceConfig::TaskClock;
+    binding.requested_config = SourceConfig::TaskClock;
     binding.bound_task_id = 99;
     let mut w = writer();
     w.configure_recorder(vec![binding], 4096).unwrap();
@@ -255,6 +263,8 @@ fn task_source_follows_stable_identity_through_exec_tid_rebinding() {
 fn old_numeric_tid_source_schema_is_rejected() {
     let mut binding = source(1, RecorderKind::SoftwareV2);
     binding.scope = CaptureScope::Task(41);
+    binding.config = SourceConfig::TaskClock;
+    binding.requested_config = SourceConfig::TaskClock;
     let mut w = writer();
     assert!(w.configure_recorder(vec![binding.clone()], 4096).is_err());
     binding.bound_task_id = 99;
@@ -262,15 +272,9 @@ fn old_numeric_tid_source_schema_is_rejected() {
     w.start(100).unwrap();
     w.ingest_recorder_sample(3, &envelope(1, 1, &software())).unwrap();
     let mut bytes = w.finish(300).unwrap();
-    // Reconstruct the first published v5 source-table encoding: 88-byte rows,
-    // no stable task field, with all container extents/checksum updated.
-    let table = bytes.windows(8).position(|s| s == b"PBSRC002").unwrap();
+    // A retired source-table marker is not accepted by the current container.
+    let table = bytes.windows(8).position(|s| s == b"PBSRC003").unwrap();
     bytes[table..table + 8].copy_from_slice(b"PBSRC001");
-    bytes.drain(table + 24 + 88..table + 24 + 96);
-    for offset in [32, 40, 64] {
-        let value = u64::from_le_bytes(bytes[offset..offset + 8].try_into().unwrap());
-        bytes[offset..offset + 8].copy_from_slice(&(value - 8).to_le_bytes());
-    }
     repair_checksum(&mut bytes);
     assert_eq!(
         CaptureReader::from_bytes(&bytes).unwrap_err(),
@@ -282,6 +286,8 @@ fn old_numeric_tid_source_schema_is_rejected() {
 fn reader_rechecks_stable_task_identity_instead_of_numeric_tid() {
     let mut binding = source(1, RecorderKind::SoftwareV2);
     binding.scope = CaptureScope::Task(41);
+    binding.config = SourceConfig::TaskClock;
+    binding.requested_config = SourceConfig::TaskClock;
     binding.bound_task_id = 99;
     let mut w = writer();
     w.configure_recorder(vec![binding], 4096).unwrap();
@@ -326,7 +332,7 @@ fn abort_retains_observed_data_without_fabricating_stop_or_quiescence() {
     let (diagnostics, _) = bpf_capture::RuntimeDiagnostics::from_bytes(&metadata[diagnostic_start..]).unwrap();
     assert!(diagnostics.identities.iter().any(|i| i.name == "stop_error"
         && i.value.as_deref() == Some("clock unavailable after disable")));
-    let binding = metadata.windows(8).position(|s| s == b"PBSRC002").unwrap() + 24;
+    let binding = metadata.windows(8).position(|s| s == b"PBSRC003").unwrap() + 24;
     assert_eq!(&metadata[binding + 56..binding + 64], &110u64.to_le_bytes());
     assert_eq!(&metadata[binding + 72..binding + 88], &[0; 16]);
     let (record, _) = bpf_capture::NormalizedRecord::from_bytes(&bytes[header.records_offset as usize..]).unwrap();

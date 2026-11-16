@@ -19,6 +19,19 @@ class RecorderEvidenceTests(unittest.TestCase):
         self.assertTrue(validate_report("cpu", {"records_count": 10, "recorder": None}))
         self.assertTrue(validate_report("cpu", {"records_count": 0, "recorder": {"sources": [], "record_sources": []}}))
 
+    def test_requested_rate_comes_from_typed_source_not_diagnostic_prose(self):
+        report = {"records_count": 1, "recorder": {"record_sources": [1], "sources": [
+            {"logical_source": 1, "kind": "software-v2", "event_id": 4097,
+             "cpu": None, "tid": 42, "records_count": 1},
+        ]}, "runtime_diagnostics": {"identities": [{"name": "recorder_config", "value":
+            "requested_frequency=99 effective_period_ns=10101011 frequency_conversion=ceil_ns fallback=none"}]}}
+        self.assertTrue(validate_report("existing-shell", report))
+        report["recorder"]["sources"][0].update(
+            requested_frequency_hz=99, requested_sample_period=0, period=10101011,
+            config="task-clock", requested_config="task-clock", unit="nanoseconds", fallback="none")
+        report["runtime_diagnostics"]["identities"] = []
+        self.assertEqual(validate_report("existing-shell", report), [])
+
 
 if __name__ == "__main__":
     unittest.main()

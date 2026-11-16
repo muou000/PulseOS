@@ -18,12 +18,12 @@ fn test_render_event_table_contains_aligned_headers_and_rows() {
 
 #[test]
 fn test_render_loss_report_complete_vs_incomplete() {
-    // 1. Complete capture
+    // 1. Clean transport does not establish complete runtime coverage
     let complete_bytes = generate_deterministic_fixture(CaptureArch::Riscv64, SessionStatusCode::Complete)
         .expect("complete fixture");
     let comp_analyzer = CaptureAnalyzer::from_bytes(&complete_bytes).unwrap();
     let comp_report = comp_analyzer.render_loss_report();
-    assert!(comp_report.contains("Status: Complete"));
+    assert!(comp_report.contains("Status: IncompleteError"));
     assert!(comp_report.contains("0 observed PERF_RECORD_LOST notices"));
     assert!(comp_report.contains("Attribution Claim: Disallowed"));
 
@@ -48,8 +48,8 @@ fn test_render_json_valid_schema_and_completeness_flag() {
 
     let json_str = analyzer.render_json();
     assert!(json_str.starts_with('{') && json_str.ends_with('}'));
-    assert!(json_str.contains("\"is_complete\": true"));
-    assert!(json_str.contains("\"status\": \"Complete\""));
+    assert!(json_str.contains("\"is_complete\": false"));
+    assert!(json_str.contains("\"status\": \"IncompleteError\""));
     assert!(json_str.contains("\"arch\": \"riscv64\""));
     assert!(json_str.contains("\"pulse_commit\": \"49ad1424deadbeef0123456789abcdef01234567\""));
     assert!(json_str.contains("\"kernel_elf_path\": \"PulseOS_riscv64-qemu-virt.elf\""));

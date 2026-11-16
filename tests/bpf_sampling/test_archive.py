@@ -4,13 +4,33 @@ import zlib
 import archive
 
 
+def source_declaration(*, fd, logical_id, event_id, kind, schema_event_id, target,
+                       task_id=0, period=1, program_id=5, link_id=7,
+                       disable_before=280, disable_after=290):
+    scope = 2 if task_id else 1
+    config = 3 if kind == 2 else 2 if task_id else 1
+    return (f'ARCHIVE SOURCE fd={fd} logical_id={logical_id} event_id={event_id} '
+            f'kind={kind} schema_event_id={schema_event_id} schema_version={3 if kind == 3 else 2 if kind == 1 else 1} '
+            f'clock=1 config={config} requested_config={config} scope={scope} target={target} bound_task_id={task_id} '
+            f'period={period} requested_period={period} requested_frequency=0 effective_frequency=0 '
+            f'requested_buffer_pages=16 effective_buffer_pages=16 unit={2 if kind == 2 else 1} fallback=0 '
+            f'program_id={program_id} link_id={link_id} enable_before=110 enable_after=120 '
+            f'disable_before={disable_before} disable_after={disable_after}')
+
+
+def sample_frame(logical_id, kind, context):
+    payload = struct.pack('<IHHIIQ', 0x31524250, 1, kind, len(context), logical_id, 0) + context
+    size = (12 + len(payload) + 7) & ~7
+    return struct.pack('<IHHI', 9, 0, size, len(payload)) + payload + bytes(size - 12 - len(payload))
+
+
 def fixture(sample_count=1):
     """Synthetic format test data; never a guest or performance measurement."""
     raw = bytearray()
     for sequence in range(sample_count):
         context = bytearray(64)
         struct.pack_into('<QQQIIIIQQII', context, 0, 10, 0, 200+sequence, 3, 40, 41, 0, 99, 0x400110+sequence*4, 2, 2)
-        frame = struct.pack('<IHHI', 9, 0, 80, 64) + context + bytes(4)
+        frame = sample_frame(1, 1, context)
         raw.extend(struct.pack('<QIIII', sequence, 3, len(frame), zlib.crc32(frame), 0) + frame)
     rows = []
     for point, delivered in [('before', 0), ('after', sample_count)]:
@@ -30,7 +50,8 @@ END events=1 programs=1
         rows.append(f'ARCHIVE STATS_END point={point}')
     rows += [
         'ARCHIVE CONFIG program_id=5 output_map_id=2 scratch_map_id=3 buffer_pages=16 mode=task',
-        'ARCHIVE SOURCE fd=14 link_id=7 enable_before=110 enable_after=120 disable_before=280 disable_after=290',
+        source_declaration(fd=14, logical_id=1, event_id=13, kind=1, schema_event_id=0x1001, target=41, task_id=99, period=10),
+        'ARCHIVE CONTEXT format=software-v2',
         'ARCHIVE MEASURE phase=baseline start_ns=10 stop_ns=20 wall_ns=10 iterations=128 extra_mapped_bytes=0 memory_scope=sampler_mappings',
         'ARCHIVE MEASURE phase=loaded_detached start_ns=30 stop_ns=40 wall_ns=10 iterations=128 extra_mapped_bytes=557056 memory_scope=sampler_mappings',
         'ARCHIVE MEASURE phase=attached_capture start_ns=125 stop_ns=275 wall_ns=150 iterations=128 extra_mapped_bytes=4751360 memory_scope=sampler_mappings',
@@ -59,11 +80,11 @@ class RawArchiveTests(unittest.TestCase):
         log = fixture(60).replace('buffer_pages=16 mode=task', 'buffer_pages=1 mode=task ring_diagnostics=1')
         log += 'ARCHIVE QUIESCENT polls=1 waited_ns=0\n'
         for cpu in range(8):
-            head = 4800 if cpu == 3 else 0
+            head = 6240 if cpu == 3 else 0
             log += f'ARCHIVE RING cpu={cpu} head={head} tail={head} wraps={1 if cpu == 3 else 0}\n'
         _, metadata, _ = archive.extract(log, 'task')
         self.assertEqual(metadata['rings'][3]['wraps'], 1)
-        for bad in [log.replace('wraps=1', 'wraps=0'), log.replace('tail=4800', 'tail=0'),
+        for bad in [log.replace('wraps=1', 'wraps=0'), log.replace('tail=6240', 'tail=0'),
                     log.replace('ARCHIVE QUIESCENT', 'MISSING QUIESCENT')]:
             with self.assertRaises(ValueError): archive.extract(bad, 'task')
 
@@ -74,7 +95,7 @@ class RawArchiveTests(unittest.TestCase):
         self.assertEqual(metadata['snapshots']['after']['events'][14]['delivered'],1)
         self.assertEqual(metadata['sources'][0]['event_id'],13)
         self.assertIn(b'PROGRAM id=5 runs=1', stats['after'])
-        self.assertEqual(struct.unpack_from('<Q',binary,64+24+12+48)[0],0x400110)
+        self.assertEqual(struct.unpack_from('<Q',binary,64+24+36+48)[0],0x400110)
 
     def test_missing_reordered_or_corrupted_chunks_fail(self):
         log = fixture()

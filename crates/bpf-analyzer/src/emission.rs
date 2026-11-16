@@ -259,6 +259,7 @@ fn render_json_inner(
     write!(&mut out, "  \"recorder\": ").unwrap();
     render_recorder_json(&mut out, analyzer.data().recorder.as_ref());
     writeln!(&mut out, ",").unwrap();
+    writeln!(&mut out, "  \"mapping_evidence\": {},", mapping_evidence_json(analyzer)).unwrap();
     if let Some(result) = selected {
         writeln!(&mut out, "  \"capture_records_count\": {},", hdr.records_count).unwrap();
         writeln!(&mut out, "  \"context_records_count\": {},", result.context_records_count).unwrap();
@@ -287,8 +288,8 @@ fn render_json_inner(
         all_events.as_slice()
     };
     let stack_samples = events.iter().filter(|event| matches!(event.payload, EventPayload::SoftwareStackV3 { .. }))
-        .map(|event| format!("{{\"timestamp_ns\":{},\"cpu_id\":{},\"pid\":{},\"tid\":{},\"task_id\":{},\"sample\":{}}}",
-            event.timestamp_ns, event.cpu_id, event.pid, event.tid, event.task_id, semantic_json(event)))
+        .map(|event| format!("{{\"logical_source\":{},\"timestamp_ns\":{},\"cpu_id\":{},\"pid\":{},\"tid\":{},\"task_id\":{},\"sample\":{}}}",
+            analyzer.data().recorder.as_ref().expect("reader requires source declarations").record_sources[event.sequence_index], event.timestamp_ns, event.cpu_id, event.pid, event.tid, event.task_id, semantic_json(event)))
         .collect::<Vec<_>>().join(",");
     writeln!(&mut out, "  \"stack_samples\": [{stack_samples}],").unwrap();
     // cpu_stats array
@@ -341,6 +342,18 @@ fn render_json_inner(
     out
 }
 
+/// Missing evidence is unknown, never a zero-loss mapping measurement.
+fn mapping_evidence_json(analyzer: &CaptureAnalyzer) -> String {
+    let Some(metadata) = &analyzer.data().mappings else {
+        return "{\"present\":false,\"started_ns\":null,\"snapshot_ns\":null,\"dropped\":null,\"artifacts_count\":null,\"kernel_identity_present\":false}".into();
+    };
+    let journal = bpf_capture::mapping::MappingJournal::parse(&metadata.journal)
+        .expect("reader validates mapping evidence");
+    format!(concat!("{{\"present\":true,\"started_ns\":{},\"snapshot_ns\":{},\"dropped\":{},",
+        "\"artifacts_count\":{},\"kernel_identity_present\":{}}}"),
+        journal.started_ns, journal.snapshot_ns, journal.dropped, metadata.artifacts.len(), metadata.kernel.is_some())
+}
+
 /// Bindings describe the complete transport stream even when the surrounding
 /// report contains a filtered query. Their order is never timestamp sorting.
 fn render_recorder_json(out: &mut String, recorder: Option<&bpf_capture::RecorderMetadata>) {
@@ -351,10 +364,7 @@ fn render_recorder_json(out: &mut String, recorder: Option<&bpf_capture::Recorde
         recorder.record_sources.len(), recorder.source_schema_version).unwrap();
     for (index, source) in recorder.sources.iter().enumerate() {
         if index != 0 { out.push(','); }
-        let kind = match source.kind {
-            bpf_capture::RecorderKind::SoftwareV2 => "software-v2",
-            bpf_capture::RecorderKind::Tracepoint => "tracepoint",
-        };
+        let kind = source.kind.as_str();
         let (cpu, tid) = match source.scope {
             bpf_capture::CaptureScope::PerCpu(cpu) => (Some(cpu as u64), None),
             bpf_capture::CaptureScope::Task(tid) => (None, Some(tid)),
@@ -362,13 +372,21 @@ fn render_recorder_json(out: &mut String, recorder: Option<&bpf_capture::Recorde
         };
         write!(out, concat!("{{\"logical_source\":{},\"kind\":{},\"event_id\":{},\"schema_version\":{},",
             "\"cpu\":{},\"tid\":{},\"bound_task_id\":{},\"period\":{},\"kernel_event_id\":{},\"program_id\":{},\"link_id\":{},",
-            "\"enable_before_ns\":{},\"enable_after_ns\":{},\"disable_before_ns\":{},\"disable_after_ns\":{},\"records_count\":{}}}"),
+            "\"enable_before_ns\":{},\"enable_after_ns\":{},\"disable_before_ns\":{},\"disable_after_ns\":{},\"records_count\":{},",
+            "\"clock\":{},\"requested_config\":{},\"config\":{},\"requested_sample_period\":{},",
+            "\"requested_frequency_hz\":{},\"effective_frequency_hz\":{},\"requested_buffer_pages\":{},",
+            "\"effective_buffer_pages\":{},\"unit\":{},\"fallback\":{}}}"),
             source.id, json_string(kind), source.event_id, source.schema_version,
             optional_number(cpu), optional_number(tid),
             optional_number((source.bound_task_id != 0).then_some(source.bound_task_id)), source.sample_period,
             source.kernel_event_id, source.program_id, source.link_id,
             source.enable_before_ns, source.enable_after_ns, source.disable_before_ns, source.disable_after_ns,
-            counts.get(&source.id).copied().unwrap_or(0)).unwrap();
+            counts.get(&source.id).copied().unwrap_or(0),
+            json_string(source.clock.as_str()), json_string(source.requested_config.as_str()),
+            json_string(source.config.as_str()), source.requested_sample_period,
+            source.requested_frequency_hz, source.effective_frequency_hz,
+            source.requested_buffer_pages, source.effective_buffer_pages,
+            json_string(source.unit.as_str()), json_string(source.fallback.as_str())).unwrap();
     }
     out.push_str("],\"record_sources\":[");
     for (index, id) in recorder.record_sources.iter().enumerate() {
@@ -743,12 +761,13 @@ fn timeline_event_json(analyzer: &CaptureAnalyzer, event: &NormalizedEvent) -> S
     };
     format!(
         concat!(
-            "{{\"sequence_index\":{},\"event_id\":{},\"event_name\":{},",
+            "{{\"sequence_index\":{},\"logical_source\":{},\"event_id\":{},\"event_name\":{},",
             "\"schema_version\":{},\"timestamp_ns\":{},\"cpu_id\":{},\"pid\":{},",
             "\"tid\":{},\"task_id\":{},\"subjects\":[{}],\"privilege\":{},",
             "\"resolved_comm\":{},\"payload_hex\":{},\"semantic\":{}}}"
         ),
         event.sequence_index,
+        analyzer.data().recorder.as_ref().expect("reader requires source declarations").record_sources[event.sequence_index],
         event.event_id,
         json_string(event.event_name()),
         event.schema_version,
@@ -823,7 +842,10 @@ pub fn render_timeline(
         }
         out.push_str(&timeline_event_json(analyzer, event));
     }
-    out.push_str("],\"schemas\":[");
+    out.push_str("],\"recorder\":");
+    render_recorder_json(&mut out, analyzer.data().recorder.as_ref());
+    write!(&mut out, ",\"mapping_evidence\":{}", mapping_evidence_json(analyzer)).unwrap();
+    out.push_str(",\"schemas\":[");
     let ids: std::collections::BTreeSet<_> = result
         .events
         .iter()

@@ -16,7 +16,9 @@ const DATA_SIZE: usize = PAGE;
 #[cfg(not(perf_ring_one_page))]
 const DATA_SIZE: usize = 16 * PAGE;
 const MAPPING_SIZE: usize = PAGE + DATA_SIZE;
-const PERIOD_NS: u64 = 10_000_000;
+// Combined stack/mapping evidence keeps sixteen sources inside the same
+// bounded archive, including the late fork/exec/remap phases.
+const PERIOD_NS: u64 = if cfg!(all(stack_test, mapping_test)) { 50_000_000 } else { 10_000_000 };
 #[cfg(all(not(tracepoint_test), not(stack_test)))]
 const CONTEXT_SIZE: usize = 64;
 #[cfg(stack_test)]
@@ -45,8 +47,8 @@ const TRACE_COUNT: &str = if cfg!(trace_fault) { "faults" } else if cfg!(sched_t
 const MODE: &str = "cpu";
 #[cfg(not(any(cpu_clock_test, tracepoint_test)))]
 const MODE: &str = "task";
-const PROGRAM_COUNT: usize = if cfg!(sched_trace_test) { 6 } else { 1 };
-const SOURCE_COUNT: usize = if cfg!(cpu_clock_test) && cfg!(stack_test) { CPUS * 2 } else if cfg!(tracepoint_test) || cfg!(cpu_clock_test) { CPUS * PROGRAM_COUNT } else { 1 };
+const TRACE_PROGRAM_COUNT: usize = if cfg!(sched_trace_test) { 6 } else { 1 };
+const SOURCE_COUNT: usize = if cfg!(cpu_clock_test) && cfg!(stack_test) { CPUS * 2 } else if cfg!(tracepoint_test) || cfg!(cpu_clock_test) { CPUS * TRACE_PROGRAM_COUNT } else { 1 };
 #[cfg(tracepoint_test)]
 fn context_bytes(event: u32) -> usize {
     match event { 1|2|3=>72, 4|8=>80, 5=>56, 6=>64, _=>0 }
@@ -55,6 +57,8 @@ fn context_bytes(event: u32) -> usize {
 fn tracepoint_for_program(index: usize) -> u32 {
     if cfg!(sched_trace_test) { index as u32 + 1 } else { TRACE_EVENT_ID }
 }
+const PROGRAM_COUNT: usize = SOURCE_COUNT;
+const RAW_SIZE: usize = CONTEXT_SIZE + 24;
 const ENABLE: usize = 0x2400;
 const DISABLE: usize = 0x2401;
 
@@ -258,7 +262,7 @@ impl Program {
         self.emit(0, 0, 0, 0, 0);
     }
 }
-fn load_program(scratch: usize, outputs: usize, context_size: usize) -> usize {
+fn load_program(scratch: usize, outputs: usize, context_size: usize, logical_id: u32) -> usize {
     let mut program = Program { insns: [Insn::new(0, 0, 0, 0, 0); 192], len: 0 };
     program.emit(0xbf, 6, 1, 0, 0); // save ctx
     program.emit(0x61, 2, 6, if cfg!(tracepoint_test) { 16 } else { 24 }, 0); // key = ctx.cpu
@@ -270,9 +274,16 @@ fn load_program(scratch: usize, outputs: usize, context_size: usize) -> usize {
     let null_jump = program.len;
     program.emit(0x15, 0, 0, 0, 0); // null -> return 0
     program.emit(0xbf, 7, 0, 0, 0);
+    // The attached program stamps the logical ID before the native context.
+    // The source table explicitly maps it to the independent kernel event ID.
+    let kind = if cfg!(stack_test) { 3 } else if cfg!(tracepoint_test) { 2 } else { 1 };
+    for (offset, value) in [(0, 0x31524250u32), (4, 1 | (kind << 16)),
+                           (8, context_size as u32), (12, logical_id), (16, 0), (20, 0)] {
+        program.emit(0x62, 7, 0, offset, value as i32);
+    }
     for offset in (0..context_size).step_by(8) {
         program.emit(0x79, 8, 6, offset as i16, 0);
-        program.emit(0x7b, 7, 8, offset as i16, 0);
+        program.emit(0x7b, 7, 8, (offset + 24) as i16, 0);
     }
     program.emit(0xbf, 1, 6, 0, 0);
     program.map(2, outputs);
@@ -280,7 +291,7 @@ fn load_program(scratch: usize, outputs: usize, context_size: usize) -> usize {
     program.emit(0x18, 3, 0, 0, -1);
     program.emit(0, 0, 0, 0, 0);
     program.emit(0xbf, 4, 7, 0, 0);
-    program.emit(0xb7, 5, 0, 0, context_size as i32);
+    program.emit(0xb7, 5, 0, 0, (context_size + 24) as i32);
     program.emit(0x85, 0, 0, 0, 25); // perf_event_output
     let return_index = program.len;
     program.emit(0xb7, 0, 0, 0, 0);
@@ -357,12 +368,14 @@ impl Ring {
             check!(size >= 8 && size % 8 == 0 && size <= DATA_SIZE && size as u64 <= available, "bad perf record length");
             match u32_at(&header, 0) {
                 9 => {
-                    let mut raw = [0u8; 4 + CONTEXT_SIZE];
+                    let mut raw = [0u8; 4 + RAW_SIZE];
                     self.copy(self.tail + 8, &mut raw[..4]);
                     let length = u32_at(&raw, 0) as usize;
-                    check!((40..=CONTEXT_SIZE).contains(&length) && size == ((12 + length + 7) & !7), "invalid perf sample boundary");
+                    check!((64..=RAW_SIZE).contains(&length) && size == ((12 + length + 7) & !7), "invalid perf sample boundary");
                     self.copy(self.tail + 12, &mut raw[4..4+length]);
-                    stats.sample(&raw[4..4+length], self.cpu);
+                    check!(u32_at(&raw, 4) == 0x31524250 && u32_at(&raw, 12) as usize == length - 24
+                        && u32_at(&raw, 16) != 0 && u64_at(&raw, 20) == 0, "invalid source envelope");
+                    stats.sample(&raw[28..4+length], self.cpu);
                 }
                 2 => {
                     check!(size == 24, "invalid lost record boundary");
@@ -374,7 +387,7 @@ impl Ring {
             }
             #[cfg(capture_export)]
             if let Some(archive) = &mut stats.archive {
-                let mut raw = [0u8; (12 + CONTEXT_SIZE + 7) & !7];
+                let mut raw = [0u8; (12 + RAW_SIZE + 7) & !7];
                 check!(size <= raw.len(), "archive frame exceeds supported context");
                 self.copy(self.tail, &mut raw[..size]);
                 archive.push(self.cpu, &raw[..size]);
@@ -673,7 +686,7 @@ extern "C" fn guest_main() -> ! {
     #[cfg(capture_export)]
     measure_archive_phase("baseline", None, &mut stats, 0);
     let outputs = create_map(4, 4);
-    let scratch = create_map(2, CONTEXT_SIZE as u32);
+    let scratch = create_map(2, RAW_SIZE as u32);
     let mut sinks = [0usize; CPUS];
     let mut rings = core::array::from_fn(|cpu| {
         let sink = perf_open(10, -1, cpu as isize, 0, true);
@@ -685,10 +698,10 @@ extern "C" fn guest_main() -> ! {
     });
     let programs: [usize; PROGRAM_COUNT] = core::array::from_fn(|index| {
         #[cfg(tracepoint_test)]
-        let size = context_bytes(tracepoint_for_program(index));
+        let size = context_bytes(tracepoint_for_program(index / CPUS));
         #[cfg(not(tracepoint_test))]
         let size = { let _ = index; CONTEXT_SIZE };
-        load_program(scratch, outputs, size)
+        load_program(scratch, outputs, size, index as u32 + 1)
     });
     let program = programs[0];
     let events: [usize; SOURCE_COUNT] = core::array::from_fn(|index| {
@@ -702,7 +715,7 @@ extern "C" fn guest_main() -> ! {
     reject_invalid_sinks(outputs, events[0], &sinks);
     #[cfg(capture_export)]
     measure_archive_phase("loaded_detached", Some(&mut rings), &mut stats, CPUS * MAPPING_SIZE);
-    let links: [usize; SOURCE_COUNT] = core::array::from_fn(|index| attach(programs[if cfg!(tracepoint_test) { index / CPUS } else { 0 }], events[index]));
+    let links: [usize; SOURCE_COUNT] = core::array::from_fn(|index| attach(programs[index], events[index]));
     #[cfg(capture_export)]
     let mut enable_times = [(0u64, 0u64); SOURCE_COUNT];
     #[cfg(capture_export)]
@@ -758,15 +771,22 @@ extern "C" fn guest_main() -> ! {
         archive::stats("after", &events);
         say!("ARCHIVE CONFIG program_id={} output_map_id={} scratch_map_id={} buffer_pages={} mode={} ring_diagnostics=1",
             archive::object_id(program), archive::object_id(outputs), archive::object_id(scratch), DATA_SIZE/PAGE, MODE);
-        #[cfg(sched_trace_test)]
-        for (index, program) in programs.iter().enumerate() {
-            let tracepoint=tracepoint_for_program(index);
-            say!("ARCHIVE PROGRAM tracepoint={} program_id={} context_bytes={}", tracepoint, archive::object_id(*program), context_bytes(tracepoint));
-        }
         for (index, event) in events.iter().enumerate() {
-            say!("ARCHIVE SOURCE fd={} link_id={} enable_before={} enable_after={} disable_before={} disable_after={}",
-                event, archive::object_id(links[index]), enable_times[index].0, enable_times[index].1,
-                disable_times[index].0, disable_times[index].1);
+            let (kernel_event_id, bound_task_id) = archive::source_identity(*event);
+            let schema_event_id = if cfg!(tracepoint_test) {
+                #[cfg(tracepoint_test)] { tracepoint_for_program(index / CPUS) }
+                #[cfg(not(tracepoint_test))] { 0 }
+            } else if cfg!(stack_test) { 0x1002 } else { 0x1001 };
+            let source_kind = if cfg!(stack_test) { 3 } else if cfg!(tracepoint_test) { 2 } else { 1 };
+            let source_config = if cfg!(tracepoint_test) { 3 } else if cfg!(cpu_clock_test) { 1 } else { 2 };
+            let period = if cfg!(tracepoint_test) { 1 } else { PERIOD_NS * (1 + (index / CPUS) as u64) };
+            let (scope, target) = if cfg!(tracepoint_test) || cfg!(cpu_clock_test) { (1, (index % CPUS) as u64) } else { (2, tid as u64) };
+            say!("ARCHIVE SOURCE fd={} logical_id={} event_id={} schema_event_id={} schema_version={} kind={} clock=1 config={} requested_config={} scope={} target={} bound_task_id={} period={} requested_period={} requested_frequency=0 effective_frequency=0 requested_buffer_pages={} effective_buffer_pages={} unit={} fallback=0 program_id={} link_id={} enable_before={} enable_after={} disable_before={} disable_after={}",
+                event, index + 1, kernel_event_id, schema_event_id, if cfg!(stack_test) { 3 } else if cfg!(tracepoint_test) { 1 } else { 2 },
+                source_kind, source_config, source_config, scope, target, bound_task_id, period, period,
+                DATA_SIZE/PAGE, DATA_SIZE/PAGE, if cfg!(tracepoint_test) { 2 } else { 1 },
+                archive::object_id(programs[index]), archive::object_id(links[index]),
+                enable_times[index].0, enable_times[index].1, disable_times[index].0, disable_times[index].1);
         }
         #[cfg(trace_fault)]
         {
@@ -776,8 +796,7 @@ extern "C" fn guest_main() -> ! {
             }
             check!(stats.fault_read_hits>0 && stats.fault_write_hits>0,"fresh pages produced no read/write fault evidence");
         }
-        #[cfg(stack_test)]
-        say!("ARCHIVE CONTEXT format=software-stack-v3");
+        say!("ARCHIVE CONTEXT format={}", if cfg!(stack_test) { "software-stack-v3" } else if cfg!(tracepoint_test) { "tracepoint" } else { "software-v2" });
         stats.archive.take().unwrap().emit(capture_stop_ns);
     }
     #[cfg(tracepoint_test)]

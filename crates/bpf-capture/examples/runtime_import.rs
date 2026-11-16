@@ -9,7 +9,8 @@ use std::{
 
 use bpf_capture::{
     CaptureArch, CaptureScope, CaptureWriter, CounterKind, DiagnosticCounter, DiagnosticIdentity,
-    PhaseMeasurement, RuntimeDiagnostics, SchemaRegistry, SessionConfig,
+    PhaseMeasurement, RuntimeDiagnostics, SchemaRegistry, SessionConfig, RecorderSource, RecorderKind,
+    recorder::{SourceClock, SourceConfig, SourceUnit, SourceFallback},
     framing::compute_checksum_ieee, writer::NativeContextFormat,
 };
 use serde_json::{Map, Value};
@@ -435,7 +436,8 @@ fn import(dir: &Path, output: &Path) -> Result<()> {
     }
     let stacks = match archive.get("context_format").and_then(Value::as_str) {
         Some("software-stack-v3") if matches!(mode, "task" | "cpu") => true,
-        Some("software-v2") | Some("tracepoint") | None => false,
+        Some("software-v2") if matches!(mode, "task" | "cpu") => false,
+        Some("tracepoint") if !matches!(mode, "task" | "cpu") => false,
         _ => return Err("unknown required context format".into()),
     };
     if let Some(declared) = input.get("context_format") {
@@ -459,39 +461,6 @@ fn import(dir: &Path, output: &Path) -> Result<()> {
         }
     {
         return Err("missing source configuration".into());
-    }
-    let mut bindings = std::collections::BTreeMap::new();
-    if mode == "sched" {
-        for row in archive["program_bindings"]
-            .as_array()
-            .ok_or("missing program bindings")?
-        {
-            let tracepoint = number(row, "tracepoint")?;
-            let size = match tracepoint {
-                1 | 2 | 3 => 72,
-                4 => 80,
-                5 => 56,
-                6 => 64,
-                _ => return Err("unknown scheduler tracepoint".into()),
-            };
-            if number(row, "context_bytes")? != size
-                || number(row, "program_id")? == 0
-                || bindings
-                    .insert(tracepoint, number(row, "program_id")?)
-                    .is_some()
-            {
-                return Err("invalid scheduler binding".into());
-            }
-        }
-        if bindings.len() != 6
-            || bindings
-                .values()
-                .collect::<std::collections::BTreeSet<_>>()
-                .len()
-                != 6
-        {
-            return Err("incomplete scheduler programs".into());
-        }
     }
     let first = &sources[0];
     let source = &before["events"][number(first, "fd")?.to_string()];
@@ -664,6 +633,7 @@ fn import(dir: &Path, output: &Path) -> Result<()> {
     let mut source_ids = std::collections::BTreeSet::new();
     let mut stack_sources = std::collections::BTreeMap::new();
     let mut stack_source_counts = std::collections::BTreeMap::<u64, u64>::new();
+    let mut typed_sources = Vec::new();
     for item in sources {
         let fd = number(item, "fd")?.to_string();
         let old = &before["events"][&fd];
@@ -682,13 +652,7 @@ fn import(dir: &Path, output: &Path) -> Result<()> {
             return Err("source alias would double count".into());
         }
         let program_id = number(old, "program_id")?;
-        let expected = if mode == "sched" {
-            *bindings
-                .get(&number(old, "config")?)
-                .ok_or("undeclared source tracepoint")?
-        } else {
-            numeric_string(config, "program_id")?
-        };
+        let expected = number(item, "program_id")?;
         if program_id != expected || number(new, "program_id")? != expected {
             return Err("source program binding mismatch".into());
         }
@@ -717,6 +681,57 @@ fn import(dir: &Path, output: &Path) -> Result<()> {
             stack_sources.insert(number(old, "id")?, (scope, number(old, "target")?,
                 number(old, "task_id")?, number(old, "period")?, delivered));
         }
+        let source_config = |key| match number(item, key)? {
+            1 => Ok(SourceConfig::CpuClock), 2 => Ok(SourceConfig::TaskClock),
+            3 => Ok(SourceConfig::Tracepoint), 4 => Ok(SourceConfig::HardwareCycles),
+            _ => Err(format!("unknown typed source {key}")),
+        };
+        let declared = RecorderSource {
+            id: narrow(number(item, "logical_id")?)?,
+            kind: match number(item, "kind")? {
+                1 => RecorderKind::SoftwareV2, 2 => RecorderKind::Tracepoint,
+                3 => RecorderKind::SoftwareStackV3, _ => return Err("unknown source kind".into()),
+            },
+            event_id: narrow(number(item, "schema_event_id")?)?,
+            schema_version: narrow(number(item, "schema_version")?)?,
+            scope: match number(item, "scope")? {
+                1 => CaptureScope::PerCpu(narrow(number(item, "target")?)?),
+                2 => CaptureScope::Task(number(item, "target")?),
+                _ => return Err("unknown typed source scope".into()),
+            },
+            bound_task_id: number(item, "bound_task_id")?,
+            kernel_event_id: number(item, "event_id")?,
+            program_id: narrow(program_id)?, link_id: narrow(number(item, "link_id")?)?,
+            clock: match number(item, "clock")? { 1 => SourceClock::Monotonic, _ => return Err("unknown source clock".into()) },
+            config: source_config("config")?, requested_config: source_config("requested_config")?,
+            sample_period: number(item, "period")?,
+            requested_sample_period: number(item, "requested_period")?,
+            requested_frequency_hz: number(item, "requested_frequency")?,
+            effective_frequency_hz: number(item, "effective_frequency")?,
+            requested_buffer_pages: number(item, "requested_buffer_pages")?,
+            effective_buffer_pages: number(item, "effective_buffer_pages")?,
+            unit: match number(item, "unit")? { 1 => SourceUnit::Nanoseconds, 2 => SourceUnit::Events, _ => return Err("unknown source unit".into()) },
+            fallback: match number(item, "fallback")? { 0 => SourceFallback::None, 1 => SourceFallback::HardwareUnavailable, _ => return Err("unknown source fallback".into()) },
+            enable_before_ns: number(item, "enable_before")?, enable_after_ns: number(item, "enable_after")?,
+            disable_before_ns: number(item, "disable_before")?, disable_after_ns: number(item, "disable_after")?,
+        };
+        // Diagnostic snapshots cross-check facts. They never select a source
+        // for a record: the BPF-stamped logical ID is the sole binding.
+        let (scope_name, target) = match declared.scope {
+            CaptureScope::PerCpu(cpu) => ("cpu", u64::from(cpu)),
+            CaptureScope::Task(tid) => ("task", tid), _ => return Err("invalid source scope".into()),
+        };
+        let expected_clock = match declared.config {
+            SourceConfig::CpuClock => 0, SourceConfig::TaskClock => 1,
+            SourceConfig::Tracepoint => 2, _ => return Err("unsupported effective config".into()),
+        };
+        if declared.kernel_event_id != number(old, "id")? || declared.bound_task_id != number(old, "task_id")?
+            || scope_name != string(old, "scope")? || target != number(old, "target")?
+            || expected_clock != number(old, "clock")?
+            || (declared.config == SourceConfig::Tracepoint && u64::from(declared.event_id) != number(old, "config")?)
+            || (declared.config != SourceConfig::Tracepoint && declared.sample_period != number(old, "period")?)
+        { return Err("typed source differs from kernel snapshot".into()); }
+        typed_sources.push(declared);
         let total = per_program.entry(program_id).or_default();
         *total = add(*total, delivered)?;
         source_delivered = add(source_delivered, delivered)?;
@@ -839,6 +854,7 @@ fn import(dir: &Path, output: &Path) -> Result<()> {
         clock_res_ns: 0,
     };
     let mut writer = CaptureWriter::new(cfg, SchemaRegistry::default_pulse_registry());
+    writer.configure_recorder(typed_sources, 8 * 1024 * 1024).map_err(|e| format!("sources: {e:?}"))?;
     writer.start(start).map_err(|e| format!("{e:?}"))?;
     let (mut offset, mut sequence, mut samples, mut lost) = (64usize, 0u64, 0u64, 0u64);
     while offset < raw.len() {
@@ -856,7 +872,7 @@ fn import(dir: &Path, output: &Path) -> Result<()> {
         if seq != sequence
             || cpu >= 8
             || read32(envelope, 20) != 0
-            || !(8..=if stacks { 656 } else { 96 }).contains(&length)
+            || !(8..=if stacks { 680 } else { 120 }).contains(&length)
             || length > raw.len() - offset
         {
             return Err("invalid envelope".into());
@@ -870,12 +886,16 @@ fn import(dir: &Path, output: &Path) -> Result<()> {
             if frame.len() < 12 {
                 return Err("truncated sample".into());
             }
+            if frame.len() < 36 || read32(frame, 12) != 0x31524250
+                || frame[16..18] != 1u16.to_le_bytes() || frame[28..36] != [0; 8]
+                || read32(frame, 8) != 24 + read32(frame, 20)
+            { return Err("missing or invalid logical source envelope".into()); }
             let expected = match mode {
                 "task" | "cpu" if stacks => 640,
                 "task" | "cpu" => 64,
                 "trace" | "block" => 72,
                 "wake" | "fault" => 80,
-                "sched" if frame.len() >= 16 => match read32(frame, 12) {
+                "sched" if frame.len() >= 40 => match read32(frame, 36) {
                     1 | 2 | 3 => 72,
                     4 => 80,
                     5 => 56,
@@ -884,10 +904,10 @@ fn import(dir: &Path, output: &Path) -> Result<()> {
                 },
                 _ => return Err("short scheduler record".into()),
             };
-            if read32(frame, 8) != expected || frame.len() < 12 + expected as usize {
+            if read32(frame, 20) != expected || frame.len() < 36 + expected as usize {
                 return Err("wrong RAW sample length".into());
             }
-            let context = &frame[12..12 + expected as usize];
+            let context = &frame[36..36 + expected as usize];
             let timestamp = read64(
                 context,
                 if mode == "task" || mode == "cpu" {
@@ -909,8 +929,7 @@ fn import(dir: &Path, output: &Path) -> Result<()> {
                     .ok_or("software stack source instance not declared")?;
                 if sample.base.base.sample_period != *period
                     || (*scope == "cpu" && u64::from(cpu) != *target)
-                    || (*scope == "task" && (sample.base.base.task_id != *task
-                        || u64::from(sample.base.base.tid) != *target)) {
+                    || (*scope == "task" && (sample.base.base.task_id != *task)) {
                     return Err("software stack source scope/period mismatch".into());
                 }
                 let count = stack_source_counts.entry(sample.source_id).or_default();
@@ -938,7 +957,7 @@ fn import(dir: &Path, output: &Path) -> Result<()> {
         }
         add(samples, lost)?; // consumer attempted count includes both sample and LOST records
         writer
-            .ingest_raw_perf_frame_as(cpu, frame, format)
+            .ingest_recorder_frame(cpu, frame)
             .map_err(|e| format!("RAW normalization: {e:?}"))?;
         sequence += 1;
     }
