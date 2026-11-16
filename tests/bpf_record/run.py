@@ -723,7 +723,6 @@ def guest(args: argparse.Namespace) -> int:
                 child.run_dir = args.run_dir / suite
             failed |= bool(guest(child))
         return int(failed)
-    fixture = build_fixture(args.arch)
     if args.recorder:
         recorder = args.recorder.resolve(strict=True)
     else:
@@ -735,10 +734,11 @@ def guest(args: argparse.Namespace) -> int:
         recorder = REPO / "tools/bpf-record/build" / args.arch / variant / "bpf-record"
     helpers.check_elf(recorder, args.arch)
     recorder_build = recorder_identity(recorder, args.arch, args.suite)
+    fixture = build_fixture(args.arch)
     kernel = (args.kernel or REPO / ARCHES[args.arch]["kernel"]).resolve(strict=True)
     image = helpers.check_image(args.image or REPO / ARCHES[args.arch]["primary"])
     if getattr(args, "run_dir", None):
-        run = args.run_dir.resolve()
+        run = helpers.scoped(args.run_dir)
         run.mkdir(parents=True, exist_ok=False)
     else:
         run = helpers.new_run(f"{args.arch}-{args.suite}")
@@ -902,7 +902,7 @@ def main() -> int:
     parser.add_argument("--duration-ms", type=int, default=1000)
     parser.add_argument("--recorder", type=Path)
     parser.add_argument("--analyzer", type=Path, help="freeze this already-built host analyzer")
-    parser.add_argument("--run-dir", type=Path, help="new directory for this run; existing paths are rejected")
+    parser.add_argument("--run-dir", type=Path, help="new directory under tests/bpf_record; existing paths are rejected")
     parser.add_argument("--kernel", type=Path)
     parser.add_argument("--image", type=Path)
     parser.add_argument("--boot-timeout", type=float, default=120)
