@@ -30,7 +30,7 @@ fn print_help() {
     println!("  --task <ID> --pid <PID> --tid <TID> --cpu <CPU>  Intersect subject filters");
     println!("  --address-start <N> --address-end <N>  Fault address range (decimal/hex)");
     println!("  --timeline <FILE>    Write observed events and qualified intervals as JSON");
-    println!("  --weight samples|period   CPU folded weight (default samples)");
+    println!("  --weight samples|period   CPU report weight (default samples)");
     println!("  --oncpu <FILE>      Write CPU sample folded data; empty when no samples");
     println!("  --offcpu <FILE>     Write observed blocked intervals in nanoseconds");
     println!("  --help, -h          Show help");
@@ -331,7 +331,7 @@ fn run(args: &[String]) -> Result<(), String> {
     if table {
         println!(
             "{}",
-            emission::render_event_table(&analyzer, &selected.events)
+            emission::render_query_table(&analyzer, &selected)
         );
     }
     if mapping_report {

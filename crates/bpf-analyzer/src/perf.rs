@@ -7,7 +7,7 @@ use std::{
 };
 
 use bpf_capture::{
-    CaptureArch, CaptureScope, RecorderKind, RecorderSource, SourceConfig, SourceUnit,
+    CaptureArch, CaptureScope, RecorderKind, RecorderSource, SourceClock, SourceConfig, SourceUnit,
     mapping::{MappingEvent, MappingMetadata, TaskClass},
 };
 
@@ -242,7 +242,7 @@ pub fn export(
         if source.period != period {
             return Err("sample period differs from its declared source".into());
         }
-        if !matches!(mode, 1 | 2) || pc == 0 || ips.is_empty() || ips[0] != pc {
+        if !matches!(mode, 1 | 2) || pc == 0 || ips.first().is_some_and(|ip| *ip != pc) {
             return Err("invalid captured CPU sample".into());
         }
         samples.push(Sample {
@@ -291,7 +291,11 @@ pub fn export(
                     .map_err(|why| format!("sample {} task identity: {why}", e.sequence_index))?;
             }
             let mut seen = BTreeSet::new();
-            for (index, &ip) in s.ips.iter().enumerate() {
+            // Even when the unwinder saved no frames, the separately captured
+            // SAMPLE_IP still needs artifact and mapping validation. This does
+            // not add that IP to the captured callchain below.
+            let addresses = if s.ips.is_empty() { std::slice::from_ref(&s.pc) } else { &s.ips };
+            for (index, &ip) in addresses.iter().enumerate() {
                 // Resolve a return address at its preceding instruction, as perf
                 // does, without changing the serialized captured address.
                 let address = ip
@@ -396,15 +400,17 @@ pub fn export(
             u32le(&mut b, e.cpu_id);
             u32le(&mut b, 0);
             u64le(&mut b, s.period);
-            u64le(&mut b, s.ips.len() as u64 + 1);
-            u64le(
-                &mut b,
-                if s.mode == USER {
-                    CONTEXT_USER
-                } else {
-                    CONTEXT_KERNEL
-                },
-            );
+            u64le(&mut b, if s.ips.is_empty() { 0 } else { s.ips.len() as u64 + 1 });
+            if !s.ips.is_empty() {
+                u64le(
+                    &mut b,
+                    if s.mode == USER {
+                        CONTEXT_USER
+                    } else {
+                        CONTEXT_KERNEL
+                    },
+                );
+            }
             for &ip in &s.ips {
                 u64le(&mut b, ip);
             }
@@ -474,9 +480,26 @@ pub fn export(
     };
     let partial = samples
         .iter()
-        .filter(|s| s.status != "ip_only" && s.status != "complete_at_terminator")
+        .filter(|s| !s.ips.is_empty() && s.status != "ip_only" && s.status != "complete_at_terminator")
         .count();
+    let unavailable = samples.iter().filter(|s| s.ips.is_empty()).count();
     let ip_only = samples.iter().filter(|s| s.status == "ip_only").count();
+    let mut attribution_reasons = vec!["scheduler_and_irq_residency_unavailable"];
+    if !analyzer.is_complete() {
+        attribution_reasons.push("capture_incomplete");
+    }
+    if partial != 0 {
+        attribution_reasons.push("partial_callchain");
+    }
+    if unavailable != 0 {
+        attribution_reasons.push("unavailable_callchain");
+    }
+    if ip_only != 0 {
+        attribution_reasons.push("ip_only");
+    }
+    if samples.iter().any(|s| s.mode == KERNEL && s.event.pid == 0 && s.event.tid == 0) {
+        attribution_reasons.push("unknown_kernel_or_idle_identity");
+    }
     let artifact_json = verified
         .keys()
         .map(|sha| {
@@ -508,7 +531,7 @@ pub fn export(
             format!(
                 "{{\"sequence_index\":{},\"source_id\":{},\"timestamp_ns\":{},\"cpu\":{},\"pid\":\
                  {},\"tid\":{},\"task_id\":{},\"ip\":{},\"mode\":{},\"period_ns\":{},\"\
-                 chain_status\":{},\"task_identity_quality\":{}}}",
+                 chain_status\":{},\"saved_chain_len\":{},\"task_identity_quality\":{}}}",
                 s.event.sequence_index,
                 s.source.id,
                 s.event.timestamp_ns,
@@ -520,6 +543,7 @@ pub fn export(
                 s.mode,
                 s.period,
                 quote(s.status),
+                if s.status == "ip_only" { "null".into() } else { s.ips.len().to_string() },
                 quote(
                     if s.mode == KERNEL && s.event.pid == 0 && s.event.tid == 0 {
                         "unknown_kernel_or_idle"
@@ -553,8 +577,10 @@ pub fn export(
 "capture_sha256":{},"perf_data_sha256":{},"architecture":{},
 "sample_count":{},"total_period_ns":{},"selected_weight":{},"weight_unit":{},
 "perf_period_unit":"period_ns","capture_complete":{},"attribution_complete":false,
-"partial_chain_count":{},"ip_only_count":{},"query":{},"artifacts":[{}],
+"attribution_incomplete_reasons":[{}],
+"partial_chain_count":{},"unavailable_chain_count":{},"ip_only_count":{},"query":{},"artifacts":[{}],
 "kernel_artifact_path":{},"sources":[{}],"samples":[{}],
+"source_identifier_domain":"recorder_logical_source_id",
 "capture_loss":{{"scope":"whole_capture","lost_records_total":{},
 "ringbuf_lost":{},"discarded_records":{},"diagnostics":{}}},
 "notes":[
@@ -575,7 +601,9 @@ pub fn export(
         selected_weight,
         quote(selected.query.weight.unit()),
         analyzer.is_complete(),
+        attribution_reasons.iter().map(|reason| quote(reason)).collect::<Vec<_>>().join(","),
         partial,
+        unavailable,
         ip_only,
         render_query_metadata(selected),
         artifact_json,
@@ -694,14 +722,18 @@ fn load<'a>(
     Ok(&cache[sha])
 }
 fn container(sources: &[&Source], body: &[u8], features: &[(u32, Vec<u8>)]) -> Vec<u8> {
+    // PERF_ATTR_SIZE_VER3 includes clockid. A perf_file_attr appends the
+    // 16-byte ID section after these 96 bytes (Linux v6.12 perf_event.h).
+    const ATTR_SIZE: u64 = 96;
+    const FILE_ATTR_SIZE: u64 = ATTR_SIZE + 16;
     let ids_offset = 104u64;
     let attrs_offset = ids_offset + sources.len() as u64 * 8;
-    let attrs_size = sources.len() as u64 * 80;
+    let attrs_size = sources.len() as u64 * FILE_ATTR_SIZE;
     let data_offset = attrs_offset + attrs_size;
     let mut out = b"PERFILE2".to_vec();
     for value in [
         104,
-        80,
+        FILE_ATTR_SIZE,
         attrs_offset,
         attrs_size,
         data_offset,
@@ -722,15 +754,24 @@ fn container(sources: &[&Source], body: &[u8], features: &[(u32, Vec<u8>)]) -> V
     }
     for (index, source) in sources.iter().enumerate() {
         u32le(&mut out, 1);
-        u32le(&mut out, 64);
+        u32le(&mut out, ATTR_SIZE as u32);
         u64le(&mut out, source.config);
-        u64le(&mut out, source.period);
+        let frequency = source.declaration.effective_frequency_hz;
+        u64le(&mut out, if frequency == 0 { source.period } else { frequency });
         u64le(&mut out, SAMPLE_TYPE);
         u64le(&mut out, 0);
-        u64le(&mut out, 1 << 18);
+        // sample_id_all and use_clockid; freq selects sample_freq in the union.
+        u64le(&mut out, (1 << 18) | (1 << 25) | if frequency == 0 { 0 } else { 1 << 10 });
         u32le(&mut out, 0);
         u32le(&mut out, 0);
         u64le(&mut out, 0);
+        u64le(&mut out, 0); // config2
+        u64le(&mut out, 0); // branch_sample_type
+        u64le(&mut out, 0); // sample_regs_user
+        u32le(&mut out, 0); // sample_stack_user
+        u32le(&mut out, match source.declaration.clock {
+            SourceClock::Monotonic => 1, // Linux CLOCK_MONOTONIC
+        });
         u64le(&mut out, ids_offset + index as u64 * 8);
         u64le(&mut out, 8);
     }

@@ -7,6 +7,7 @@ paths select artifacts, and the source capture remains the diagnostic authority.
 from __future__ import annotations
 
 import argparse
+from collections import Counter
 import hashlib
 import json
 import os
@@ -25,13 +26,16 @@ HEADER = re.compile(r"^(.+?)\s+(\d+)/(\d+)\s+\[(\d+)\]\s+(\d+\.\d+):\s+(\d+)\s+(
 FRAME = re.compile(r"^\s+([0-9a-fA-F]+)\s+(.+)\s+\((.*)\)\s*$")
 
 
-def inspect_perf_script(text: str) -> dict:
+def inspect_perf_script(text: str, *, allow_empty_chains: bool = False) -> dict:
     """Read unmodified explicit-field perf output, rejecting missing payloads."""
-    samples, periods, symbols, events, in_sample, frames = 0, 0, set(), set(), False, 0
+    samples, periods, symbols, events, in_sample, frames = 0, 0, set(), {}, False, 0
+    empty_chains, current = [], None
     for line in text.splitlines() + [""]:
         if not line.strip():
             if in_sample and not frames:
-                raise ValueError("perf script sample has no decoded IP/callchain")
+                if not allow_empty_chains:
+                    raise ValueError("perf script sample has no decoded IP/callchain")
+                empty_chains.append(current)
             in_sample, frames = False, 0
             continue
         header = HEADER.fullmatch(line)
@@ -43,7 +47,16 @@ def inspect_perf_script(text: str) -> dict:
                 raise ValueError("perf script has zero period; cannot invent weight one")
             samples += 1
             periods += period
-            events.add(header[7])
+            weights = events.setdefault(header[7], {"samples": 0, "period_ns": 0})
+            weights["samples"] += 1
+            weights["period_ns"] += period
+            seconds, fraction = header[5].split(".")
+            if len(fraction) > 9:
+                raise ValueError("perf timestamp exceeds nanosecond precision")
+            current = {"comm": header[1], "pid": int(header[2]), "tid": int(header[3]),
+                       "cpu": int(header[4]),
+                       "timestamp_ns": int(seconds) * 1_000_000_000 + int(fraction.ljust(9, "0")),
+                       "period_ns": period, "event": header[7]}
             in_sample = True
             continue
         frame = FRAME.fullmatch(line)
@@ -52,7 +65,41 @@ def inspect_perf_script(text: str) -> dict:
         frames += 1
         symbols.add(frame[2])
     return {"sample_count": samples, "total_period_ns": periods,
-            "symbols": sorted(symbols), "event_names": sorted(events)}
+            "symbols": sorted(symbols), "event_names": sorted(events),
+            "event_weights": events, "empty_chain_samples": empty_chains}
+
+
+def verify_empty_chains(observed: dict, manifest: dict) -> None:
+    """Only saved zero-length chains authorize header-only native samples."""
+    sources = {source["id"]: source for source in manifest["sources"]}
+    fields = ("pid", "tid", "cpu", "timestamp_ns", "period_ns")
+    expected = Counter((*[sample[field] for field in fields],
+                        sources[sample["source_id"]]["effective_config"])
+                       for sample in manifest["samples"] if sample.get("saved_chain_len") == 0)
+    actual = Counter((*[sample[field] for field in fields], sample["event"].split(":", 1)[0])
+                     for sample in observed["empty_chain_samples"])
+    if actual != expected:
+        raise ValueError("native perf empty chains differ from saved zero-length callchains")
+
+
+def mark_empty_chains(folded: str, samples: list[dict], unit: str) -> str:
+    """Label the pinned collapser's process-only rows without adding weight."""
+    weights = Counter()
+    for sample in samples:
+        label = sample["comm"].replace(" ", "_")  # pinned --tid name transformation
+        weights[f"{label}-{sample['pid']}/{sample['tid']}"] += (
+            1 if unit == "samples" else sample["period_ns"])
+    rows = []
+    for line in folded.splitlines():
+        stack, _, weight = line.rpartition(" ")
+        if stack in weights:
+            if int(weight) != weights.pop(stack):
+                raise ValueError("FlameGraph empty-chain weight differs from native perf")
+            stack += ";[unavailable_callchain]"
+        rows.append(f"{stack} {weight}\n")
+    if weights:
+        raise ValueError("FlameGraph omitted an observed empty callchain")
+    return "".join(rows)
 
 
 def inspect_folded(text: str) -> int:
@@ -117,7 +164,13 @@ def inspect_buildids(text: str, manifest: dict) -> None:
         if name in actual:
             raise ValueError("duplicate native perf buildid-list artifact")
         actual[name] = identifier
-    if actual != expected:
+    # perf can list only HEADER_BUILD_ID entries when that feature is present;
+    # a DSO without a GNU note need not have an explicit empty row. Every real
+    # ID is still required, and an absent note must never acquire an ID.
+    if (any(name not in expected or expected[name] != identifier
+            for name, identifier in actual.items())
+            or any(identifier is not None and actual.get(name) != identifier
+                   for name, identifier in expected.items())):
         raise ValueError("native perf buildid-list differs from actual bundled GNU notes")
 
 
@@ -196,11 +249,10 @@ def run_pipeline(args: argparse.Namespace) -> dict:
         script = command("script", prefix + ["script", *common, "--ns", "-F", "comm,pid,tid,cpu,time,period,event,ip,sym,dso"])
         command("dump", prefix + ["script", *common, "-D"])
         buildids = command("buildid-list", prefix + ["buildid-list", "-i", data])
-        observed = inspect_perf_script(script)
+        observed = inspect_perf_script(script, allow_empty_chains=True)
+        verify_empty_chains(observed, manifest)
         if observed["sample_count"] != sample_count or observed["total_period_ns"] != period:
             raise ValueError("native perf script sample count/period differs from capture export")
-        if len(observed["event_names"]) != 1:
-            raise ValueError("select one CPU event kind before combining FlameGraph weights")
         inspect_buildids(buildids, manifest)
         for symbol in args.expect_symbol:
             if symbol not in observed["symbols"]:
@@ -211,7 +263,25 @@ def run_pipeline(args: argparse.Namespace) -> dict:
             # assigns one to each actual decoded sample, without rewriting it.
             command("script-samples", prefix + ["script", *common, "--ns", "-F", "comm,pid,tid,cpu,time,event,ip,sym,dso"])
             script_name = "script-samples"
-        folded = command("stackcollapse", ["perl", args.flamegraph / "stackcollapse-perf.pl", "--tid", output / f"{script_name}.stdout"])
+        # The pinned collapser defaults to the first event kind. Select each
+        # observed kind explicitly, preserving its name when a Query includes
+        # both software clocks. Each selected record contributes exactly once.
+        pieces = []
+        multiple = len(observed["event_names"]) > 1
+        for index, event in enumerate(observed["event_names"]):
+            name = f"stackcollapse-{index}" if multiple else "stackcollapse"
+            piece = command(name, ["perl", args.flamegraph / "stackcollapse-perf.pl",
+                "--tid", "--event-filter", event, output / f"{script_name}.stdout"])
+            # nr=0 has no frame: label its process-only collapsed row as
+            # unavailable without adding any address or changing its weight.
+            piece = mark_empty_chains(piece, [sample for sample in observed["empty_chain_samples"]
+                                            if sample["event"] == event], unit)
+            if inspect_folded(piece) != observed["event_weights"][event][unit]:
+                raise ValueError("FlameGraph event weights differ from native perf samples")
+            if multiple:
+                piece = "".join(f"{event};{line}\n" for line in piece.splitlines())
+            pieces.append(piece)
+        folded = "".join(pieces)
         if inspect_folded(folded) != expected_weight:
             raise ValueError("FlameGraph folded weights differ from selected capture weight")
         (output / "flamegraph.folded").write_text(folded)
